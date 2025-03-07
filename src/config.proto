@@ -1,0 +1,265 @@
+/*
+ *     The Xilinx Vitis AI Vaip in this distribution are provided under the
+ * following free and permissive binary-only license, but are not provided in
+ * source code form.  While the following free and permissive license is similar
+ * to the BSD open source license, it is NOT the BSD open source license nor
+ * other OSI-approved open source license.
+ *
+ *      Copyright (C) 2022 Xilinx, Inc.
+ *      Copyright (C) 2023 – 2024 Advanced Micro Devices, Inc. All rights reserved.
+ *
+ *      Redistribution and use in binary form only, without modification, is
+ * permitted provided that the following conditions are met:
+ *
+ *      1. Redistributions must reproduce the above copyright notice, this list
+ * of conditions and the following disclaimer in the documentation and/or other
+ * materials provided with the distribution.
+ *
+ *      2. The name of Xilinx, Inc. may not be used to endorse or promote
+ * products redistributed with this software without specific prior written
+ * permission.
+ *
+ *      THIS SOFTWARE IS PROVIDED BY XILINX, INC. "AS IS" AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO
+ * EVENT SHALL XILINX, INC. BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+ *      PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
+ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
+ */
+syntax = "proto3";
+package vaip_core;
+import "version.proto";
+
+message ConfigProto {
+  repeated PassProto passes = 1;
+  string cache_dir = 2;
+  string cache_key = 3;
+  AllVersionInfoProto version = 4;
+  string onnx_path = 5;
+  string encryption_key = 6;
+  // to maintain forward compatibility, this field is still named
+  // sessionOptions in context.json
+  map<string, string> provider_options = 8 [json_name = "sessionOptions"];
+  optional bool ai_analyzer_visualization = 9;
+  optional bool ai_analyzer_profiling = 10;
+  repeated TargetProto targets = 11; // if this is empty, run all passes
+  string target = 12; // default proto, comma seperated
+  map<string, string> session_configs = 13 [json_name = "ort_session_config"];
+  optional string priority = 14;
+  optional bool no_failsafe = 16;
+
+  // static table for whitelist for xclbin, vaip_config
+  repeated MepConfigTable mep_table = 100;
+  
+  optional bool enable_cache_file_io_in_mem = 1024;
+}
+
+message MepConfigTable {
+  string model_name = 1;
+  string md5sum_on_disk = 2; //
+  string md5sum_in_memory = 3; //
+  string target = 4; //
+  optional string xclbin = 5;
+  string md5sum_in_memory_with_io = 6;
+  optional string model_category = 7;
+  optional bool share_hw_context = 8; // whether share xrt hw enabled or not
+  optional string qos_priority = 9;
+  optional string model_variant = 10;
+  optional int32 node_count = 11;
+  optional int64 model_clone_threshold = 12;
+  optional bool is_preemptible = 13;
+}
+
+message TargetProto {
+  string name = 1;
+  repeated string pass = 2; // which passes are used
+  // put optional so you can check if it is set, like has_nols()
+  optional string xclbin = 3;
+  TargetAttrProto target_opts = 4;
+  optional bool share_hw_context = 5; // whether share xrt hw enabled or not
+  optional int32 graph_engine_qos_priority = 6; // GraphEngine::qos_priority
+}
+
+message TargetAttrProto {
+  map<string, XirAttrValue> xcompiler_attrs = 1;
+}
+
+message PassProto {
+  string name = 1;
+  string plugin = 2;
+  repeated string args = 3;
+  bool enable_log = 4;
+  int32 log_verbosity = 5;
+  bool enable_gc = 6;
+  bool disabled = 7;
+  oneof pass_specific_param {
+    PassPyExt py_ext = 100; // for PyExe Pass
+    PassDpuParamProto pass_dpu_param = 101; //
+    PassFuseDeviceSubgraphProto pass_fuse_device_subgraph = 102; // for AIE plugin
+    PassManualPartitionProto manual_partition = 103; //
+    PassGraphLabelParamProto graph_label_param = 104; // for graph label and compiler
+    PassAsrConfigProto pass_asr_config = 105; // config for gemm asr pass
+    PassDDParamProto pass_dd_param = 106;
+    PassVaimlConfigProto vaiml_config = 107; // config for vaiml_partition pass
+    PassVaimlParamProto pass_vaiml_param = 108; // config for vaiml pass
+    PassFusionParamProto pass_fusion_param = 109;
+    
+  }
+}
+
+message PassPyExt {
+  string module_name = 1;
+  string method_name = 2;
+}
+
+message PassDpuParamProto {
+  repeated PassProto sub_pass = 1;
+  bool skip_compile_xmodel = 2; // obsolete field
+  map<string, XirAttrValue> xcompiler_attrs = 3;
+  int32 minimum_num_of_conv = 4;
+  repeated string supported_op = 5;
+  string xclbin = 6;
+  optional bool debug = 7;
+}
+message PassDDParamProto{
+  repeated PassProto sub_pass = 1;
+  string xclbin = 2;
+}
+
+message PassFusionParamProto {
+    PatternPlusProto pattern = 1;
+    string op_name = 2;
+    ExtractorProto extractor = 3;
+    string predicate = 4;
+}
+
+message PatternPlusProto {
+    string pattern_name = 1;
+    //Cutpoints
+    repeated string input_names = 2;
+    string output_names = 3;
+}
+
+message ExtractorProto{
+    map<string, AccessorProto> extractor_map = 1;
+}
+
+message AccessorProto{
+    oneof accessor_field{
+        AttributeAccessorProto attribute_accessor = 1;
+        InitializerAccessorProto initializer_accessor = 2;
+        ExplicitAttributeAccessorProto explicit_attribute_accessor = 3;
+    }
+}
+
+message AttributeAccessorProto{
+    string node_binder_name = 1;
+    string attribute_name = 2;
+    string dtype = 3;
+}
+
+message InitializerAccessorProto{
+    string node_binder_name = 1;
+    optional uint32 initializer_position = 2;
+}
+
+message ExplicitAttributeAccessorProto{
+    string attribute_name = 1;
+    string attribute_value = 2;
+}
+
+message PassFuseDeviceSubgraphProto {
+  string pattern = 1; // in python code
+  repeated string input = 2;
+  repeated string output = 3;
+  string device = 4;
+}
+
+message PassManualPartitionProto {
+  repeated string from_ops = 1;
+  repeated string to_ops = 2;
+}
+
+message XirAttrValue  {
+  optional bool bool_value = 1;
+  optional int32 int_value = 2;
+  optional string string_value = 3;
+  optional uint32 uint_value = 4;
+  repeated int32 int_values = 5;
+  repeated string string_values = 6;
+}
+
+message PassGraphLabelParamProto {
+  repeated PassPyExt py_ext = 1;
+}
+
+message PassAsrConfigProto {
+  string target = 1;
+  string target_host = 2;
+  int32 opt_level = 3;
+  string build_version = 4;
+  string aie_target = 5;
+  string aiectrl_cfg = 6;
+  string xclbin = 7;
+  map<string, AsrTensorShapeProto> input_shapes = 8;
+  bool output_zero_copy = 9;
+}
+
+message AsrTensorShapeProto {
+  repeated int32 shapes = 1;
+}
+
+message PassVaimlConfigProto {
+  // Add options that can be configued in vitisai_config.json here
+  optional string device = 1;
+  optional string vaiml_model_path =2 ;
+  optional string user_subgraph_config = 3;
+  optional bool override_batch_size = 4;
+  optional string device_name = 5;
+  optional string model_type = 6;
+  optional bool debug = 7;
+  optional int32 max_num_inputs = 8;
+  optional int32 max_num_outputs = 9;
+  optional int32 max_num_partitions = 10;
+  optional string output_type = 11;
+  optional bool force = 12;
+  optional string init_m_values = 13;
+  optional string aie_unsupported_ops_override = 14;
+  optional string custom_op_repo = 15;
+  optional string overlay_json = 16;
+  optional string vaiml_unarchive_path = 18;
+  optional string vaiml_archive_file = 19;
+  optional bool run_archive = 20;
+  optional bool single_archive = 21;
+
+  optional float removable_cluster_node_ratio = 22; 
+  optional int32 min_subgraph_size = 23;
+  repeated string supported_custom_ops = 24;
+  repeated string experiment_features = 25;
+  optional string partition_strategy = 26;
+  optional bool enable_f16_to_bf16_conversion = 27;
+  optional bool enable_f32_to_bf16_conversion = 28;
+  repeated string exclude_subgraphs = 29;
+  repeated string include_subgraphs = 30;
+  optional int32 threshold_gops_percent = 31;
+  optional bool fast_partition_swap = 32;
+  optional bool enable_batch = 33;
+  optional bool keep_outputs = 34;
+  optional bool enable_update_initializer = 35;
+  optional bool fatal_error_on_exception = 36;
+  optional string compile_flow = 37;
+  optional string runner_type = 38;
+  optional int32 device_batch_size = 39;
+  optional bool enable_local_context = 40;
+  optional bool no_failsafe = 41;
+  optional string llm_ops_config = 42;
+}
+
+message PassVaimlParamProto {
+  repeated PassProto sub_pass = 1;
+  string xclbin = 2;
+}

@@ -1,0 +1,19 @@
+{
+ "passes": [
+  {
+   "name": "init",
+   "plugin": "vaip-pass_init"
+  },
+  {
+   "_comment" : "test case resnet18_float",
+   "name": "graph_label_example",
+   "plugin": "vaip-pass_graph_label_example",
+   "graphLabelParam":{
+    "pyExt": {
+     "moduleName": "voe.passes.graph_label_example",
+     "methodName": "rules"
+    }
+   }
+  }
+ ]
+}

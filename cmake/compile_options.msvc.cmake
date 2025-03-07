@@ -1,0 +1,82 @@
+# `/Zc:__cplusplus`: This option ensures that the `__cplusplus`
+# macro reflects the correct version of the C++ standard used by the
+# compiler. By default, MSVC might not update this macro correctly
+# to reflect the C++ standard version. This option forces the
+# compiler to update the macro appropriately, which can be crucial
+# for conditional compilation depending on the C++ standard version.
+
+# `/Zi`: This option enables the generation of complete debugging
+# information. It allows for the creation of a PDB (Program
+# Database) file, which stores debugging and project state
+# information. The PDB file is used by debuggers to provide
+# source-level debugging, including setting breakpoints, stepping
+# through code, and inspecting variables.
+
+# `/Qspectre`: This option enables mitigations against the Spectre
+# vulnerability, a hardware vulnerability that affects modern
+# microprocessors that perform branch prediction. By enabling this
+# option, the compiler will generate code that is protected against
+# this class of vulnerabilities, at the potential cost of some
+# performance overhead.
+
+# `/ZH:SHA_256`: This option specifies the hash algorithm used for
+# generating content hashes in the PDB file. Setting it to `SHA_256`
+# uses the SHA-256 algorithm, which is more secure than the default
+# MD5, providing better protection against hash collision attacks.
+
+# `/guard:cf`: This option enables Control Flow Guard (CFG), a
+# security feature that checks that the target of a call or jump is
+# valid at runtime. This can help protect against attacks that
+# attempt to hijack the control flow of the program. It adds a
+# runtime check but can significantly increase the security of the
+# application.
+
+# `/sdl`: Stands for "Security Development Lifecycle". This option
+# enables additional security checks and makes warnings more
+# stringent. It's part of a broader approach to developing software
+# that reduces vulnerabilities and security issues.
+
+# Microsoft requested
+add_compile_options(
+  /Zc:__cplusplus
+  /Zi
+  /Qspectre
+  /ZH:SHA_256
+  /guard:cf
+  /sdl
+  /MP
+)
+
+
+add_link_options(
+  # `/DEBUG`: This option instructs the linker to generate debug
+  # information for the compiled binaries. This debug information is
+  # crucial for debugging the application, as it maps the binary code
+  # back to the source code, allowing developers to step through the
+  # code, set breakpoints, and inspect variables during a debugging
+  # session. The generated debug information is typically stored in a
+  # PDB (Program Database) file.
+
+  # `/guard:cf`: This option enables Control Flow Guard (CFG) in the
+  # linked binary. CFG is a security feature that helps protect
+  # against attacks that attempt to hijack the control flow of the
+  # program. It works by inserting runtime checks that validate the
+  # target of indirect function calls, making it harder for an
+  # attacker to execute arbitrary code through techniques like
+  # return-oriented programming (ROP). Enabling CFG can significantly
+  # enhance the security of the application by mitigating a class of
+  # common exploits.
+
+  # `/CETCOMPAT`: This option enables compatibility with Control-flow
+  # Enforcement Technology (CET), a hardware-based security feature
+  # designed to prevent certain types of attacks by enforcing
+  # stricter control flow integrity. CET works by introducing new CPU
+  # instructions that mark legitimate targets for indirect calls and
+  # returns, effectively creating a shadow stack. This helps protect
+  # against return-oriented programming (ROP) and call-oriented
+  # programming (COP) attacks. Enabling `/CETCOMPAT` ensures that the
+  # generated binary can take advantage of CET if it's supported by
+  # the hardware, further enhancing the security of the application.
+  /DEBUG
+  /CETCOMPAT
+)

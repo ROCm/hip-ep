@@ -1,0 +1,44 @@
+{
+  "passes": [
+    {
+      "name": "init",
+      "plugin": "vaip-pass_init"
+    },
+    {
+      "name": "fuse_dynamic_dispatch_psq1",
+      "plugin": "vaip-pass_level1_dd_cxx",
+      "passDpuParam": {
+        "subPass": [          
+          {
+            "name": "vaip_pass_dd_merge_top_fuse",
+            "plugin": "vaip-pass_dd_merge_top_fuse",
+            "enable_gc": true          
+        }
+        ]  
+         
+        }      
+    }
+  ],
+  "mepTable": [
+    {
+      "modelName": "PSQ1",
+      "md5sumOnDisk": "4e17c61308b9170dda55586dee6c0751",
+      "md5sumInMemory": "58eb51eccd44a084b185159b67e2c1b6",
+      "md5sumInMemoryWithIo":"50c2fb23e40a0617f58ebcedbbfac359",
+      "xclbin": "2x4x2_pss_pst_4x2_psq_model_qdq.xclbin",
+      "target": "RyzenAI_transformer_cxx_psq1",
+      "modelCategory": "PSQ1"
+    }
+  ],
+  "targets": [
+   {
+      "name": "RyzenAI_transformer_cxx_psq1",
+      "xclbin": "2x4x2_pss_pst_4x2_psq_model_qdq.xclbin",
+      "share_hw_context": true,
+      "pass": [
+        "init",
+        "fuse_dynamic_dispatch_psq1"
+      ]
+    }  
+  ]
+}
