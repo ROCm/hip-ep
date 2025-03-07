@@ -38,13 +38,13 @@ if(NOT TARGET Microsoft.GSL::GSL)
   find_package(Microsoft.GSL REQUIRED)
 endif()
 
+set(WITH_GFLAGS OFF CACHE BOOL "disable WITH_GFLAGS for glog")
 find_package(glog QUIET)
 if(glog_FOUND)
   get_target_property(TMP glog::glog LOCATION)
   message(STATUS "found glog at ${TMP}")
 else()
   message(STATUS "cannot find_package(glog), fetch it from ${DEP_URL_glog}")
-  set(WITH_GFLAGS OFF CACHE BOOL "disable WITH_GFLAGS for glog")
   FetchContent_Declare(
     glog
     URL ${DEP_URL_glog}
@@ -70,15 +70,15 @@ else()
 endif()
 
 
+set(Protobuf_USE_STATIC_LIBS ON CACHE BOOL "use static protobuf")
+set(protobuf_BUILD_TESTS OFF CACHE BOOL "disable protobuf tests")
+set(protobuf_WITH_ZLIB OFF CACHE BOOL "disable zlib for protobuf")
 find_package(Protobuf QUIET)
 if(TARGET protobuf::libprotobuf)
   get_target_property(TMP protobuf::libprotobuf LOCATION)
   message(STATUS "found protobuf at ${TMP}")
 else()
   message(STATUS "cannot find_package(Protobuf), fetch it from ${DEP_URL_protobuf}")
-  set(Protobuf_USE_STATIC_LIBS ON CACHE BOOL "use static protobuf")
-  set(protobuf_BUILD_TESTS OFF CACHE BOOL "disable protobuf tests")
-  set(protobuf_WITH_ZLIB OFF CACHE BOOL "disable zlib for protobuf")
   FetchContent_Declare(
     Protobuf
     URL ${DEP_URL_protobuf}
