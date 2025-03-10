@@ -9,7 +9,7 @@ find_path(VAIP_ORT_API_H
 if(NOT VAIP_ORT_API_H)
   message(FATAL_ERROR "cannot find vaip_ort_api.h in ${ONNXRUNTIME_SOURCE_TREE_DIR}/onnxruntime/core/providers/vitisai/include")
 else()
-  message(STATUS "VAIP_ORT_API_H: ${VAIP_ORT_API_H}")
+  message(STATUS "VAIP_ORT_API_DIR: ${VAIP_ORT_API_H}")
 endif()
 # get directory of vaip_ort_api.h
 get_filename_component(VAIP_ORT_API_DIR "${VAIP_ORT_API_H}/.." DIRECTORY)

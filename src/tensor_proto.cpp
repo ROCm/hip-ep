@@ -32,7 +32,6 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
-#include "./xir_ops/xir_ops_defs.hpp"
 //
 #include <exception>
 #include <glog/logging.h>
@@ -52,11 +51,16 @@
 #include <vaip/my_ort.h>
 #include <vaip/vaip_core.hpp>
 
-// #include "core/common/status.h"
 #include <memory>
-#include <xir/graph/graph.hpp>
 
 namespace vaip_core {
+VAIP_DLL_SPEC std::vector<int64_t>
+tensor_proto_get_shape(const TensorProto& tensor_proto) {
+  auto shape = VAIP_ORT_API(tensor_proto_get_shape_unsafe)(tensor_proto);
+  CHECK(shape.get() != nullptr)
+      << "tensor_proto_get_shape_unsafe should not return null shape";
+  return *shape;
+}
 
 VAIP_DLL_SPEC TensorProtoPtr tensor_proto_new_floats(
     const std::string& name, const std::vector<int64_t>& shape,

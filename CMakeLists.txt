@@ -41,13 +41,20 @@ add_library(vaip_core_objects OBJECT
 target_sources(vaip_core_objects PRIVATE
   include/vaip/vaip_plugin.hpp
   src/vaip_plugin.cpp
+  src/vaip_ort_api.cpp
+  include/vaip/tensor_proto.hpp
+  src/tensor_proto.cpp
 )
 if(MSVC)
   target_sources(vaip_core_objects PRIVATE src/vaip_plugin_win.cpp)
 else(MSVC)
   target_sources(vaip_core_objects PRIVATE src/vaip_plugin_lnx.cpp)
 endif(MSVC)
-target_include_directories(vaip_core_objects PRIVATE include ${VAIP_ORT_API_DIR})
+
+target_include_directories(vaip_core_objects PRIVATE
+  include
+  ${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime
+  ${VAIP_ORT_API_DIR} ${CMAKE_CURRENT_BINARY_DIR})
 add_library(vaip_core_static STATIC $<TARGET_OBJECTS:vaip_core_objects>)
 add_library(vaip_core_dynamic SHARED $<TARGET_OBJECTS:vaip_core_objects>)
 if(BUILD_SHARED_LIBS)

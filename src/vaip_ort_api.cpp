@@ -1,5 +1,5 @@
 /*
- *      The Xilinx Vitis AI Vaip in this distribution are provided under the
+ *     The Xilinx Vitis AI Vaip in this distribution are provided under the
  * following free and permissive binary-only license, but are not provided in
  * source code form.  While the following free and permissive license is similar
  * to the BSD open source license, it is NOT the BSD open source license nor
@@ -31,15 +31,16 @@
  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
-#pragma once
-#ifdef __GNUC__
-#  pragma GCC diagnostic ignored "-Wpedantic"
-#  pragma GCC diagnostic ignored "-Wconversion"
-#  pragma GCC diagnostic ignored "-Wsign-compare"
-#  pragma GCC diagnostic ignored "-Wunused-variable"
-#  pragma GCC diagnostic ignored "-Wunused-but-set-variable"
-#endif
-#define ORT_API_MANUAL_INIT
-#include <core/session/onnxruntime_c_api.h>
-#include <core/session/onnxruntime_cxx_api.h>
-#include <core/session/onnxruntime_lite_custom_op.h>
+//
+#include <vaip/vaip_ort_api.h>
+#include <glog/logging.h>
+#include <memory>
+namespace vaip_core {
+OrtApiForVaip* the_global_api = nullptr;
+const OrtApiForVaip& __api() {
+  DCHECK(the_global_api != nullptr)
+      << "please set_the_global_api() before invoking this function";
+  return *the_global_api;
+}
+VAIP_DLL_SPEC const OrtApiForVaip* api() { return &__api(); }
+} // namespace vaip_core
