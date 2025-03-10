@@ -39,6 +39,12 @@
 #include "vitis/ai/weak.hpp"
 
 namespace vaip_core {
+struct Tag_Plugin_Func_Set {
+  plugin_t (*open_plugin)(const std::string& name, scope_t scope);
+  void* (*plugin_sym)(plugin_t plugin, const std::string& name);
+  void (*close_plugin)(plugin_t plugin);
+};
+
 std::string Plugin::guess_name(const char* name) {
 #ifdef _WIN32
   return std::string("") + name + ".dll";
@@ -46,32 +52,17 @@ std::string Plugin::guess_name(const char* name) {
   return std::string("lib") + name + ".so";
 #endif
 }
-struct Tag_Plugin_Func_Set {
-  vitis::ai::plugin_t (*open_plugin)(const std::string& name,
-                                     vitis::ai::scope_t scope);
-  void* (*plugin_sym)(vitis::ai::plugin_t plugin, const std::string& name);
-  void (*close_plugin)(vitis::ai::plugin_t plugin);
-};
-
-Plugin_Func_Set g_static_plugin_func_set = {
-    vitis::ai::open_plugin, vitis::ai::plugin_sym, vitis::ai::close_plugin};
-
-Plugin_Func_Set g_dynamic_plugin_func_set = {
-    vaip_core::open_plugin, vaip_core::plugin_sym, vaip_core::close_plugin};
-
-Plugin_Func_Set* g_static_plugin_func_set_ptr = &g_static_plugin_func_set;
-Plugin_Func_Set* g_dynamic_plugin_func_set_ptr = &g_dynamic_plugin_func_set;
 
 Plugin::Plugin(const char* name, Plugin_Func_Set* func_set)
     : name_{name}, so_name_{guess_name(name)}, func_set_{func_set},
-      plugin_{func_set->open_plugin(so_name_, vitis::ai::scope_t::PUBLIC)} {
+      plugin_{func_set->open_plugin(so_name_, scope_t::PUBLIC)} {
   CHECK(plugin_ != nullptr) << "cannot open plugin: "
                             << "name_ " << name_ << " "       //
                             << "so_name_ " << so_name_ << " " //
       ;
 }
 
-Plugin::~Plugin() { func_set_->close_plugin((vitis::ai::plugin_t)plugin_); }
+Plugin::~Plugin() { func_set_->close_plugin((plugin_t)plugin_); }
 
 std::unordered_map<std::string, std::shared_ptr<Plugin>> Plugin::store_;
 
@@ -87,6 +78,79 @@ Plugin* Plugin::get(const std::string& plugin_name, Plugin_Func_Set* func_set) {
   return it->second.get();
 }
 void* Plugin::my_plugin_sym(void* handle, const char* name) {
-  return func_set_->plugin_sym((vitis::ai::plugin_t)handle, name);
+  return func_set_->plugin_sym((plugin_t)handle, name);
 }
+
+static std::unordered_map<std::string, std::unordered_map<std::string, void*>>&
+get_store() {
+  static std::unordered_map<std::string, std::unordered_map<std::string, void*>>
+      store_;
+  return store_;
+}
+plugin_t open_plugin_static(const std::string& name, scope_t scope) {
+  return reinterpret_cast<plugin_t>(new std::string(name));
+}
+
+void* plugin_sym_static(plugin_t plugin, const std::string& symbol) {
+  auto& name = *reinterpret_cast<std::string*>(plugin);
+  auto& store = get_store();
+  auto it_lib = store.find(name);
+  if (it_lib == store.end()) {
+    std::cerr << "cannot find lib:" << name << std::endl;
+    std::cerr << "valid libs are: " << std::endl;
+    for (auto& x : store) {
+      std::cerr << "  libs=" << x.first;
+    }
+    return nullptr;
+  }
+  auto it_sym = it_lib->second.find(symbol);
+  if (it_sym == it_lib->second.end()) {
+    std::cerr << "cannot find symbol " << symbol << " in " << name << std::endl;
+    std::cerr << "valid symbols are: " << std::endl;
+    for (auto& x : it_lib->second) {
+      std::cerr << "  symbols=" << x.first;
+    }
+    return nullptr;
+  }
+  return it_sym->second;
+}
+void close_plugin_static(plugin_t plugin) {
+  delete reinterpret_cast<std::string*>(plugin);
+}
+
+std::string plugin_error_static(plugin_t plugin) { return "N/A"; }
+
+void register_plugin_static(const std::string& name, const std::string& symbol,
+                            void* addr) {
+#ifndef NDEBUG
+  std::cerr << "register: " << name << " " << symbol << " " << addr
+            << std::endl;
+#endif
+  get_store()[name][symbol] = addr;
+}
+
+StaticPluginRegister::StaticPluginRegister(const char* name, const char* symbol,
+                                           void* addr) {
+#if _WIN32
+  std::string lib_name = std::string(name) + ".dll";
+#else
+  std::string lib_name = std::string("lib") + name + ".so";
+#endif
+  register_plugin_static(lib_name, symbol, addr);
+}
+
+Plugin_Func_Set g_static_plugin_func_set = {
+    open_plugin_static, plugin_sym_static, close_plugin_static};
+
+Plugin_Func_Set g_dynamic_plugin_func_set = {vaip_core::open_plugin_dyn,
+                                             vaip_core::plugin_sym_dyn,
+                                             vaip_core::close_plugin_dyn};
+
+Plugin_Func_Set* g_static_plugin_func_set_ptr = &g_static_plugin_func_set;
+Plugin_Func_Set* g_dynamic_plugin_func_set_ptr = &g_dynamic_plugin_func_set;
+#if _WIN32
+
+#else
+
+#endif
 } // namespace vaip_core

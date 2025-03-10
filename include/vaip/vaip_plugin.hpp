@@ -39,6 +39,19 @@
 #include <unordered_map>
 #include <vaip/export.h>
 namespace vaip_core {
+using plugin_t = void*;
+enum class scope_t { PUBLIC, PRIVATE };
+plugin_t open_plugin_dyn(const std::string& name, scope_t scope);
+void* plugin_sym_dyn(plugin_t plugin, const std::string& name);
+std::string plugin_error_dyn(plugin_t plugin);
+void close_plugin_dyn(plugin_t plugin);
+void register_plugin_static(const std::string& name, const std::string& symbol,
+                            void* addr);
+class StaticPluginRegister {
+public:
+  StaticPluginRegister(const char* name, const char* symbol, void* addr);
+};
+
 struct Tag_Plugin_Func_Set;
 typedef Tag_Plugin_Func_Set Plugin_Func_Set;
 extern Plugin_Func_Set* g_static_plugin_func_set_ptr;

@@ -18,19 +18,5 @@
 #include <string>
 
 namespace vitis {
-namespace ai {
-using plugin_t = void*;
-
-enum class scope_t { PUBLIC, PRIVATE };
-plugin_t open_plugin(const std::string& name, scope_t scope);
-void* plugin_sym(plugin_t plugin, const std::string& name);
-std::string plugin_error(plugin_t plugin);
-void close_plugin(plugin_t plugin);
-void register_plugin(const std::string& name, const std::string& symbol,
-                     void* addr);
-class StaticPluginRegister {
- public:
-  StaticPluginRegister(const char* name, const char* symbol, void* addr);
-};
-}  // namespace ai
-}  // namespace vitis
+namespace ai {} // namespace ai
+} // namespace vitis
