@@ -1,0 +1,75 @@
+merge_base_with = 'origin/main'
+
+[[linter]]
+code = 'BLACK'
+include_patterns = [
+    '**/*.py',
+]
+command = [
+    'python',
+    '-m',
+    'lintrunner_adapters',
+    'run',
+    'black_linter',
+    '--',
+    '@{{PATHSFILE}}'
+]
+init_command = [
+    'python',
+    '-m',
+    'lintrunner_adapters',
+    'run',
+    'pip_init',
+    '--dry-run={{DRYRUN}}',
+    '--requirement=requirements-lintrunner.txt',
+]
+is_formatter = true
+
+
+[[linter]]
+code = 'RUSTFMT'
+include_patterns = ['**/*.rs']
+command = [
+    'python',
+    '-m',
+    'lintrunner_adapters',
+    'run',
+    'rustfmt_linter',
+    '--binary=rustfmt',
+    '--config-path=rustfmt.toml',
+    '--',
+    '@{{PATHSFILE}}'
+]
+is_formatter = true
+
+[[linter]]
+code = 'CLANGFORMAT'
+include_patterns = [
+    '**/*.h',
+    '**/*.cc',
+    '**/*.hpp',
+    '**/*.cpp',
+    '**/*.m',
+    '**/*.mm',
+]
+command = [
+    'python',
+    '-m',
+    'lintrunner_adapters',
+    'run',
+    'clangformat_linter',
+    '--binary=clang-format',
+    '--fallback',
+    '--',
+    '@{{PATHSFILE}}'
+]
+init_command = [
+    'python',
+    '-m',
+    'lintrunner_adapters',
+    'run',
+    'pip_init',
+    '--dry-run={{DRYRUN}}',
+    '--requirement=requirements-lintrunner.txt',
+]
+is_formatter = true
