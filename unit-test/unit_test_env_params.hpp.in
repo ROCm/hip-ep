@@ -1,0 +1,50 @@
+/*
+ *      The Xilinx Vitis AI Vaip in this distribution are provided under the
+ * following free and permissive binary-only license, but are not provided in
+ * source code form.  While the following free and permissive license is similar
+ * to the BSD open source license, it is NOT the BSD open source license nor
+ * other OSI-approved open source license.
+ *
+ *      Copyright (C) 2022 Xilinx, Inc. All rights reserved.
+ *      Copyright (C) 2023 – 2024 Advanced Micro Devices, Inc.
+ *
+ *      Redistribution and use in binary form only, without modification, is
+ * permitted provided that the following conditions are met:
+ *
+ *      1. Redistributions must reproduce the above copyright notice, this list
+ * of conditions and the following disclaimer in the documentation and/or other
+ * materials provided with the distribution.
+ *
+ *      2. The name of Xilinx, Inc. may not be used to endorse or promote
+ * products redistributed with this software without specific prior written
+ * permission.
+ *
+ *      THIS SOFTWARE IS PROVIDED BY XILINX, INC. "AS IS" AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO
+ * EVENT SHALL XILINX, INC. BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+ *      PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
+ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
+ */
+#pragma once
+// clang-format off
+#include "vitis/ai/env_config.hpp"
+DEF_ENV_PARAM_2(VITISAI_EP_JSON_CONFIG,"@VAIP_CONFIG_JSON_PATH@", std::string)
+DEF_ENV_PARAM_2(INPUT_MODEL,"@RESNET_50_ONNX_PATH@", std::string)
+DEF_ENV_PARAM(XLNX_ENABLE_DUMP, "0")
+DEF_ENV_PARAM(XLNX_ENABLE_BATCH, "0")
+DEF_ENV_PARAM(ENABLE_SAVE_ONNX_MODEL, "1")
+DEF_ENV_PARAM(XLNX_USE_MEMORY_MODEL, "0")
+DEF_ENV_PARAM_2(XLNX_USE_CACHE_KEY, "", std::string)
+DEF_ENV_PARAM_2(XLNX_USE_CACHE_DIR, "", std::string)
+DEF_ENV_PARAM_2(TEST_CONSTANT_INITIALIZER_ONNX,
+                "@CMAKE_CURRENT_BINARY_DIR@/test_constant_initializer.onnx", std::string)
+DEF_ENV_PARAM_2(SAMPLE_ONNX,
+                "@CMAKE_CURRENT_BINARY_DIR@/sample.onnx", std::string)
+DEF_ENV_PARAM_2(CMAKE_CURRENT_BINARY_DIR, "@CMAKE_CURRENT_BINARY_DIR@", std::string)
+DEF_ENV_PARAM_2(CACHE_CONTEXT_EMBEDED_MODE, "1", std::string)
+DEF_ENV_PARAM_2(CACHE_CONTEXT_FILE_PATH, "@CMAKE_CURRENT_BINARY_DIR@/pt_resnet50.onnx_ctx.onnx", std::string)

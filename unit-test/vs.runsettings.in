@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RunSettings>
+    <RunConfiguration>
+        <EnvironmentVariables>
+            <!-- List of environment variables we want to set-->
+            <DEBUG_CONST_FOLDING>0</DEBUG_CONST_FOLDING>
+            <DEBUG_VAIP_PY_EXT>0</DEBUG_VAIP_PY_EXT>
+            <DEBUG_MERGE_ADD_INTO_CONV_BIAS>0</DEBUG_MERGE_ADD_INTO_CONV_BIAS>
+            <DEBUG_ADD_TRANSPOSE>0</DEBUG_ADD_TRANSPOSE>
+            <DEBUG_NODE_BUILDER>0</DEBUG_NODE_BUILDER>
+            <DEBUG_REMOVE_IDENTITY>0</DEBUG_REMOVE_IDENTITY>
+            <ENABLE_SAVE_ONNX_MODEL>1</ENABLE_SAVE_ONNX_MODEL>
+            <ENABLE_SAVE_GRAPH_TXT>1</ENABLE_SAVE_GRAPH_TXT>
+            <DEBUG_VAIP_PASS>1</DEBUG_VAIP_PASS>
+            <DEBUG_VAIP_CONFIG>0</DEBUG_VAIP_CONFIG>
+            <XLNX_ENABLE_DUMP_CONSTANT>0</XLNX_ENABLE_DUMP_CONSTANT>
+            <XLNX_ENABLE_CACHE>0</XLNX_ENABLE_CACHE>
+            <XLNX_ENABLE_DUMP_XIR_MODEL>1</XLNX_ENABLE_DUMP_XIR_MODEL>
+            <XLNX_ENABLE_DUMP_ONNX_MODEL>0</XLNX_ENABLE_DUMP_ONNX_MODEL>
+            <XLNX_ENABLE_DUMP_COMPILED_SUBGRAPH_MODEL>1</XLNX_ENABLE_DUMP_COMPILED_SUBGRAPH_MODEL>
+            <XLNX_TARGET_NAME>AMD_AIE2_Nx4_Overlay</XLNX_TARGET_NAME>
+            <XLNX_VART_FIRMWARE>AMD_AIE2P_4x4_Overlay_CFG2.xclbin</XLNX_VART_FIRMWARE>
+            <DEBUG_SKIP_COMPILE_XMODEL>0</DEBUG_SKIP_COMPILE_XMODEL>
+            <DEBUG_VITIS_AI_EP>0</DEBUG_VITIS_AI_EP>
+            <DEBUG_DPU_CUSTOM_OP>1</DEBUG_DPU_CUSTOM_OP>
+            <DEBUG_EXPORT_TO_XIR>0</DEBUG_EXPORT_TO_XIR>
+            <DEBUG_LEVEL1_DPU>1</DEBUG_LEVEL1_DPU>
+            <DEBUG_LEVEL1_SHELL_1>1</DEBUG_LEVEL1_SHELL_1>
+            <XLNX_ENABLE_SKIP_FATAL>0</XLNX_ENABLE_SKIP_FATAL>
+            <DEBUG_FUSE_DEVICE_SUBGRAPH>1</DEBUG_FUSE_DEVICE_SUBGRAPH>
+            <DEBUG_MERGE_DUPLICATED_FIX>1</DEBUG_MERGE_DUPLICATED_FIX>
+            <XLNX_ONNX_EP_VERBOSE>2</XLNX_ONNX_EP_VERBOSE>
+            <USE_CPU_RUNNER>1</USE_CPU_RUNNER>
+            <VAIP_COMPILE_RESERVE_CONST_DATA>1</VAIP_COMPILE_RESERVE_CONST_DATA>
+            <DEBUG_RUNNER>1</DEBUG_RUNNER>
+            <DEBUG_LOG_LEVEL>info</DEBUG_LOG_LEVEL>
+            <VITISAI_EP_JSON_CONFIG>@VAIP_CONFIG_JSON_PATH@</VITISAI_EP_JSON_CONFIG>
+            <@PATH_ENV_VAR_NAME@>@DEBUG_PATH@</@PATH_ENV_VAR_NAME@>
+            <INPUT_MODEL>@RESNET_50_ONNX_PATH@</INPUT_MODEL>
+            <TEST_CONSTANT_INITIALIZER_ONNX>@CMAKE_CURRENT_BINARY_DIR@/test_constant_initializer.onnx</TEST_CONSTANT_INITIALIZER_ONNX>
+            <INPUT_MODEL>@RESNET_50_ONNX_PATH@</INPUT_MODEL>
+        </EnvironmentVariables>
+    </RunConfiguration>
+    <LoggerRunSettings>
+        <Loggers>
+            <Logger friendlyName="console" enabled="True">
+                <Configuration>
+                    <Verbosity>Detailed</Verbosity>
+                </Configuration>
+            </Logger>
+            <Logger friendlyName="trx" enabled="True">
+                <Configuration>
+                    <LogFileName>vaip_unit_test.trx</LogFileName>
+                </Configuration>
+            </Logger>
+            <Logger friendlyName="html" enabled="True">
+                <Configuration>
+                    <LogFileName>vaip_unit_test.html</LogFileName>
+                </Configuration>
+            </Logger>
+        </Loggers>
+    </LoggerRunSettings>
+</RunSettings>

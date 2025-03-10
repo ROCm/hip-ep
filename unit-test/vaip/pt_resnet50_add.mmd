@@ -1,0 +1,50 @@
+flowchart TB
+    classDef constant fill:#90ee90,stroke:#006400,stroke-width:2px;;
+    class constant_0 constant;
+    class constant_1 constant;
+    class constant_2 constant;
+    QuantizeLinear_0["QuantizeLinear_0<br>[256], ty=3<br>276"]
+    class constant_3 constant;
+    class constant_4 constant;
+    DequantizeLinear_0["DequantizeLinear_0<br>[256], ty=1<br>279"]
+    QuantizeLinear_0 -.-> DequantizeLinear_0
+    class constant_5 constant;
+    class constant_6 constant;
+    class constant_7 constant;
+    QuantizeLinear_1["QuantizeLinear_1<br>[256,64,1,1], ty=3<br>270"]
+    class constant_8 constant;
+    class constant_9 constant;
+    DequantizeLinear_1["DequantizeLinear_1<br>[256,64,1,1], ty=1<br>273"]
+    QuantizeLinear_1 -.-> DequantizeLinear_1
+    input_0[\"input_0<br>[1,64,56,56], ty=1<br>267"/]
+    classDef input fill:#add8e6,stroke:#00008b,stroke-width:2px;;
+    class input_0 input;
+    Conv_0["Conv_0<br>[1,256,56,56], ty=1<br>280"]
+    input_0 -.-> Conv_0
+    DequantizeLinear_1 -.-> Conv_0
+    DequantizeLinear_0 -.-> Conv_0
+    class constant_10 constant;
+    class constant_11 constant;
+    QuantizeLinear_2["QuantizeLinear_2<br>[1,256,56,56], ty=3<br>283"]
+    Conv_0 -.-> QuantizeLinear_2
+    class constant_12 constant;
+    class constant_13 constant;
+    DequantizeLinear_2["DequantizeLinear_2<br>[1,256,56,56], ty=1<br>286"]
+    QuantizeLinear_2 -.-> DequantizeLinear_2
+    input_1[\"input_1<br>[1,256,56,56], ty=1<br>220"/]
+    class input_1 input;
+    Relu_0["Relu_0<br>[1,256,56,56], ty=1<br>221"]
+    input_1 -.-> Relu_0
+    class constant_14 constant;
+    class constant_15 constant;
+    QuantizeLinear_3["QuantizeLinear_3<br>[1,256,56,56], ty=3<br>224"]
+    Relu_0 -.-> QuantizeLinear_3
+    class constant_16 constant;
+    class constant_17 constant;
+    DequantizeLinear_3["DequantizeLinear_3<br>[1,256,56,56], ty=1<br>227"]
+    QuantizeLinear_3 -.-> DequantizeLinear_3
+    Add_0[["Add_0<br>[1,256,56,56], ty=1<br>287"]]
+    DequantizeLinear_2 --o Add_0
+    DequantizeLinear_3 --o Add_0
+    classDef Add fill:#f5f5dc,stroke:#8b4513,stroke-width:2px;;
+    class Add_0 Add;
