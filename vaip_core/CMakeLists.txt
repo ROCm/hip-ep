@@ -136,20 +136,20 @@ target_sources(vaip_core_objects PRIVATE
   src/transpose.cpp
   include/vaip/guess_reshape.hpp
   src/guess_reshape.cpp
-  include/hash-library/crc32.cpp
-  include/hash-library/crc32.h
-  include/hash-library/hash.h
-  include/hash-library/hmac.h
-  include/hash-library/keccak.cpp
-  include/hash-library/keccak.h
-  include/hash-library/md5.cpp
-  include/hash-library/md5.h
-  include/hash-library/sha1.cpp
-  include/hash-library/sha1.h
-  include/hash-library/sha256.cpp
-  include/hash-library/sha256.h
-  include/hash-library/sha3.cpp
-  include/hash-library/sha3.h
+  ../3rd-party/hash-library/crc32.cpp
+  ../3rd-party/hash-library/crc32.h
+  ../3rd-party/hash-library/hash.h
+  ../3rd-party/hash-library/hmac.h
+  ../3rd-party/hash-library/keccak.cpp
+  ../3rd-party/hash-library/keccak.h
+  ../3rd-party/hash-library/md5.cpp
+  ../3rd-party/hash-library/md5.h
+  ../3rd-party/hash-library/sha1.cpp
+  ../3rd-party/hash-library/sha1.h
+  ../3rd-party/hash-library/sha256.cpp
+  ../3rd-party/hash-library/sha256.h
+  ../3rd-party/hash-library/sha3.cpp
+  ../3rd-party/hash-library/sha3.h
   include/vaip/config_reader.hpp
   src/xclbin/config_reader.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/config_json_binary.hpp
@@ -165,6 +165,7 @@ endif(MSVC)
 target_include_directories(vaip_core_objects PRIVATE
   include
   ${CMAKE_CURRENT_BINARY_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/../3rd-party
   ${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime
   ${VAIP_ORT_API_DIR}
 )
