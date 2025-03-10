@@ -81,7 +81,6 @@ private:
   std::vector<NodeAttr> attrs_;
 };
 std::string attr_proto_as_string(const AttributeProto& attr);
-std::vector<int64_t> tensor_proto_get_shape(const TensorProto& tensor_proto);
 std::string data_type_to_string(int elem_type);
 VAIP_DLL_SPEC AttributeProtoPtr attr_proto_clone(const AttributeProto& attr);
 VAIP_DLL_SPEC AttributeProtoPtr

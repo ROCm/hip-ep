@@ -464,5 +464,4 @@ gsl::span<const char> NodeArgConstRef::const_data_as_raw() const {
   return vaip_core::tensor_proto_as_raw(
       graph_, vaip_core::node_arg_get_const_data_as_tensor(graph_, self_));
 }
-
 } // namespace vaip_cxx

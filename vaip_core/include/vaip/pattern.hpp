@@ -412,11 +412,11 @@ private:
   std::shared_ptr<std::unordered_map<std::string, int>>
       name_to_ids_;             // A shared pointer to a map of names to IDs.
   friend struct PatternBuilder; // Friend struct for pattern building.
-  friend struct PatternNode;
+  friend class PatternNode;
   friend class PatternSequence;
-  friend struct PatternCommutableNode;
-  friend struct PatternOr;
-  friend struct PatternWhere;
+  friend class PatternCommutableNode;
+  friend class PatternOr;
+  friend class PatternWhere;
 };
 
 /**

@@ -45,6 +45,8 @@ add_compile_options(
   /guard:cf
   /sdl
   /MP
+  /WX
+  /W3
 )
 
 
@@ -80,3 +82,7 @@ add_link_options(
   /DEBUG
   /CETCOMPAT
 )
+
+# put all executables and dll files into a shared libary, make
+# debugging easy.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

@@ -32,14 +32,20 @@ def compress(filename):
     return compressed_str, len(compressed_data), origin_size
 
 
-def generate_map(path):
+def generate_map(xclbin_root_path):
     data_str = ""
     map_str = "static std::unordered_map<std::string, CompressionInfo> xclbin_map = {"
     file_list = []
-    if path != "":
-        file_list = glob.glob(str(Path(path) / "**" / "*.xclbin"), recursive=True)
+    # probably bundleing xclbin is disabled.
+    if xclbin_root_path != "":
+        print(f"-- search xclbin in {xclbin_root_path}")
+        file_list = glob.glob(str(Path(xclbin_root_path) / "**" / "*.xclbin"), recursive=True)
+    else:
+        print("-- no xclbin path is not specified, please set -DVAIP_XCLBIN_PATH=<>")
+        
     for file in file_list:
         if file:
+            print(f"-- add xclbin file {file}")
             compressed_str, compressed_size, origin_size = compress(file)
             variable_name = "_" + os.path.basename(file).split(".xclbin")[0].replace(
                 ".", "_"
@@ -65,11 +71,12 @@ def generate_map(path):
 
 
 def main():
-    file_list = ""
-    if len(sys.argv) > 1:
-        file_list = sys.argv[1]
-    print(generate_map(file_list))
-
+    h_inc = sys.argv[1]
+    xclbin_root_path = ""
+    if len(sys.argv) > 2:
+        xclbin_root_path = sys.argv[2]
+    with open(h_inc, "w") as f:
+        f.write(generate_map(xclbin_root_path))
 
 if __name__ == "__main__":
     main()

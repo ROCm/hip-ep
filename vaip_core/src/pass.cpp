@@ -315,8 +315,8 @@ get_combined_inputs(const std::vector<std::string>& inputs,
                     const std::vector<std::string>& return_values) {
   std::vector<std::string> ret;
 
-  std::map<int, std::string> idx_input;
-  std::unordered_map<std::string, int> input_idx;
+  std::map<size_t, std::string> idx_input;
+  std::unordered_map<std::string, size_t> input_idx;
 
   for (size_t i = 0; i < return_values.size(); ++i) {
     idx_input.insert({i, return_values[i]});

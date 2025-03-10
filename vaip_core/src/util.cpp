@@ -468,7 +468,7 @@ void compress(const IStreamReader& src, IStreamWriter& dst,
       return;
     }
     flush = (bytes_read == 0) ? Z_FINISH : Z_NO_FLUSH;
-    strm.avail_in = bytes_read;
+    strm.avail_in = (uInt)bytes_read;
     strm.next_in = reinterpret_cast<Bytef*>(in->data());
     do {
       strm.avail_out = CHUNK;
@@ -504,7 +504,6 @@ void uncompress(const IStreamReader& src, IStreamWriter& dst) {
 
   int ret = inflateInit(&strm);
   CHECK(ret == Z_OK) << "Failed to initialize deflate.";
-  char in[CHUNK];
   char out[CHUNK];
   size_t bytes_read;
   do {
@@ -515,7 +514,7 @@ void uncompress(const IStreamReader& src, IStreamWriter& dst) {
       return;
     }
     bytes_read = in->size();
-    strm.avail_in = bytes_read;
+    strm.avail_in = (uInt)bytes_read;
     if (strm.avail_in == 0) {
       break;
     }

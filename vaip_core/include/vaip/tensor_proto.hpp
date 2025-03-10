@@ -46,6 +46,9 @@
 #include <vaip/vaip_gsl.h>
 namespace vaip_core {
 
+VAIP_DLL_SPEC std::vector<int64_t>
+tensor_proto_get_shape(const TensorProto& tensor_proto);
+
 /**
  * @brief Creates a new TensorProto with float data type.
  * @param name The name of the tensor.

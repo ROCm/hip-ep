@@ -127,25 +127,4 @@ VAIP_DLL_SPEC void set_the_global_api(OrtApiForVaip* api) {
 
 VAIP_DLL_SPEC const OrtApiForVaip* api() { return &__api(); }
 
-VAIP_DLL_SPEC AttributeProtoPtr attr_proto_clone(const AttributeProto& attr) {
-  return AttributeProtoPtr(VAIP_ORT_API(attr_proto_clone)(attr));
-}
-
-VAIP_DLL_SPEC AttributeProtoPtr attr_proto_new_ints(
-    const std::string& name, const std::vector<int64_t>& value) {
-  return AttributeProtoPtr(VAIP_ORT_API(attr_proto_new_ints)(name, value));
-}
-
-VAIP_DLL_SPEC NodeAttributesPtr node_attributes_new() {
-  return NodeAttributesPtr(VAIP_ORT_API(node_attributes_new)());
-}
-
-VAIP_DLL_SPEC NodeAttributesPtr node_clone_attributes(const Node& node) {
-  auto ret = node_attributes_new();
-  for (auto& attr : node_get_attributes(node)) {
-    auto cloned_attr = attr_proto_clone(*attr);
-    VAIP_ORT_API(node_attributes_add)(*ret, std::move(*cloned_attr));
-  }
-  return ret;
-}
 } // namespace vaip_core

@@ -279,6 +279,18 @@ VAIP_DLL_SPEC const std::string& node_op_domain(const Node& node) {
   return VAIP_ORT_API(node_op_domain)(node);
 }
 
+VAIP_DLL_SPEC NodeAttributesPtr node_attributes_new() {
+  return NodeAttributesPtr(VAIP_ORT_API(node_attributes_new)());
+}
+
+VAIP_DLL_SPEC NodeAttributesPtr node_clone_attributes(const Node& node) {
+  auto ret = node_attributes_new();
+  for (auto& attr : node_get_attributes(node)) {
+    auto cloned_attr = attr_proto_clone(*attr);
+    VAIP_ORT_API(node_attributes_add)(*ret, std::move(*cloned_attr));
+  }
+  return ret;
+}
 } // namespace vaip_core
 
 namespace vaip_cxx {

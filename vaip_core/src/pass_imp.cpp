@@ -41,13 +41,12 @@
 #include "./cache_dir.hpp"
 #include "./config.hpp"
 #include "./profile_utils.hpp"
-#include "mem_xclbin.hpp"
+//#include "mem_xclbin.hpp"
 #include "pass_imp.hpp"
 #include "vaip/graph.hpp"
 #include "vaip/util.hpp"
 #include "vaip/vaip_plugin.hpp"
 #include "vitis/ai/env_config.hpp"
-#include "vitis/ai/profiling.hpp"
 #include <fstream>
 #include <glog/logging.h>
 #include <google/protobuf/util/json_util.h>
@@ -169,7 +168,7 @@ const std::string& Pass::name() const { return get_pass_proto().name(); }
 void Pass::run_all_passes(std::vector<std::shared_ptr<IPass>>& all_pass,
                           Graph& graph) {
   MY_LOG(1) << "start to run passes, " << all_pass.size() << " in total";
-  auto __all_pass_start_time = vitis::ai::Clock::now();
+  auto __all_pass_start_time = std::chrono::steady_clock::now();
   PassContextImp* ctx = nullptr;
   for (auto& pass_interface : all_pass) {
     auto pass = dynamic_cast<Pass*>(pass_interface.get());
@@ -186,7 +185,7 @@ void Pass::run_all_passes(std::vector<std::shared_ptr<IPass>>& all_pass,
     auto current_graph = (Graph*)pass->get_context()
                              ->get_context_resource("__current_graph")
                              .get();
-    auto __pass1_start_time = vitis::ai::Clock::now();
+    auto __pass1_start_time = std::chrono::steady_clock::now();
     MY_LOG(1) << "begin pass :"
               << "run pass [" << pass->seq_num_as_string()
               << "]: " << pass->name()                                       //
@@ -201,7 +200,7 @@ void Pass::run_all_passes(std::vector<std::shared_ptr<IPass>>& all_pass,
           *pass); // save and restore current pass.
       pass->apply(*current_graph);
     }
-    auto __pass2_start_time = vitis::ai::Clock::now();
+    auto __pass2_start_time = std::chrono::steady_clock::now();
     auto time_us = std::chrono::duration_cast<std::chrono::microseconds>(
                        __pass2_start_time - __pass1_start_time)
                        .count();
@@ -209,7 +208,7 @@ void Pass::run_all_passes(std::vector<std::shared_ptr<IPass>>& all_pass,
               << "]: " << pass->name() << " " << ((float)time_us) / 1000.0f
               << " ms elapse. ";
   }
-  auto __all_pass_end_time = vitis::ai::Clock::now();
+  auto __all_pass_end_time = std::chrono::steady_clock::now();
   auto all_time_us = std::chrono::duration_cast<std::chrono::microseconds>(
                          __all_pass_end_time - __all_pass_start_time)
                          .count();

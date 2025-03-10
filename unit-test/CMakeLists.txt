@@ -20,7 +20,7 @@ project(unit-test VERSION 1.0.0 LANGUAGES C CXX)
 include(CTest)
 enable_testing()
 find_package(PythonInterp REQUIRED)
-message("PYTHON_EXECUTABLE is ${PYTHON_EXECUTABLE}")
+message(STATUS "find PYTHON_EXECUTABLE: ${PYTHON_EXECUTABLE}")
 cmake_policy(SET CMP0135 NEW)
 find_package(GTest REQUIRED)
 

@@ -9,7 +9,7 @@
 #else
 struct stat {};
 #endif
-#include "../../3rd-party/tar/src/tar.h"
+#include "tar.h"
 // clang-format on
 #include <chrono>
 #include <cstdint>
@@ -237,7 +237,7 @@ int TarReader::read(IStreamWriterBuilder& dst_builder) {
   if (size_ == 0) {
     return 1;
   }
-  for (int i = 0; i < size_; i += BUFFER_SIZE) {
+  for (auto i = 0u; i < size_; i += BUFFER_SIZE) {
     ret = tarball_.read(BUFFER_SIZE);
     CHECK(ret.has_value() && ret->size() == BUFFER_SIZE)
         << "buffer overflow. name = " << filename << " size_ =" << size_

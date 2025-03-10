@@ -73,8 +73,6 @@ std::string slurp(const char* filename);
 VAIP_DLL_SPEC std::string slurp(const std::filesystem::path& path);
 std::string slurp_if_exists(const std::filesystem::path& path);
 
-VAIP_DLL_SPEC NodeAttributesPtr node_clone_attributes(const Node& node);
-
 VAIP_DLL_SPEC std::unique_ptr<int> scale_to_fix_point(float scale);
 #ifdef ENABLE_PYTHON
 VAIP_DLL_SPEC std::shared_ptr<void> init_interpreter();

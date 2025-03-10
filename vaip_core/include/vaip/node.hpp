@@ -92,6 +92,7 @@ node_attributes_get(const NodeAttributes& attributes, const std::string& name);
 
 VAIP_DLL_SPEC const std::string& node_op_type(const Node& node);
 VAIP_DLL_SPEC const std::string& node_op_domain(const Node& node);
+VAIP_DLL_SPEC NodeAttributesPtr node_clone_attributes(const Node& node);
 } // namespace vaip_core
 
 namespace vaip_cxx {

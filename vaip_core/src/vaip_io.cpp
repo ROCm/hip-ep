@@ -71,7 +71,7 @@ private:
 private:
   const char* bytes_;
   size_t size_;
-  mutable int pos = 0;
+  mutable size_t pos = 0;
 };
 
 class OwnedStreamReader : public IStreamReader {
