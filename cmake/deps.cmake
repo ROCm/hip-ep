@@ -24,6 +24,21 @@ foreach(VAIP_DEP IN LISTS VAIP_DEPS_LIST)
 endforeach()
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/vaip_deps.inc.h" "${VAIP_DEP_H_INC}")
 
+find_package(Eigen3 QUIET)
+if(TARGET Eigen3::Eigen)
+  get_target_property(TMP Eigen3::Eigen INTERFACE_INCLUDE_DIRECTORIES)
+  message(STATUS "found Eigen3 at ${TMP}")
+else()
+  message(STATUS "cannot find_package(Eigen3), fetch it from ${DEP_URL_eigen}")
+  FetchContent_Declare(
+    Eigen3
+    URL ${DEP_URL_eigen}
+    URL_HASH SHA1=${DEP_SHA1_eigen}
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    OVERRIDE_FIND_PACKAGE)
+  find_package(Eigen3 REQUIRED)
+endif()
+
 find_package(Microsoft.GSL QUIET)
 if(NOT TARGET Microsoft.GSL::GSL)
   message(STATUS "cannot find_package(Microsoft.GSL), fetch it from ${DEP_URL_microsoft_gsl}")

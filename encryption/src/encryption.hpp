@@ -32,15 +32,14 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
-#pragma once
-#ifdef _WIN32
-#  pragma warning(push)
-#  pragma warning(disable : 4251)
-#endif
-#include <xir/graph/graph.hpp>
-#include <xir/graph/subgraph.hpp>
-#include <xir/op/op_def.hpp>
-#include <xir/util/data_type.hpp>
-#ifdef _WIN32
-#  pragma warning(pop)
-#endif
+#include <string>
+namespace vaip_core {
+class IStreamReader;
+class IStreamWriter;
+} // namespace vaip_core
+namespace vaip_encryption {
+void aes_encryption(const vaip_core::IStreamReader& src,
+                    vaip_core::IStreamWriter& dst, const std::string& key);
+void aes_decryption(const vaip_core::IStreamReader& src,
+                    vaip_core::IStreamWriter& dst, const std::string& key);
+} // namespace vaip_encryption

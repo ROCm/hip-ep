@@ -32,9 +32,9 @@
  */
 
 #include "./xir_ops_defs.hpp"
-#include "./xir_ops.hpp"
+#include "./ort_custom_ops.hpp"
 #include "./xir_ops_genereted_names.inc"
-#include "onnxruntime_c_api.h"
+#include "core/session/onnxruntime_c_api.h"
 
 #include <map>
 #include <memory>

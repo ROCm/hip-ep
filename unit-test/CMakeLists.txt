@@ -19,31 +19,16 @@ cmake_minimum_required(VERSION 3.5)
 project(unit-test VERSION 1.0.0 LANGUAGES C CXX)
 include(CTest)
 enable_testing()
-find_package(PythonInterp REQUIRED)
-message(STATUS "find PYTHON_EXECUTABLE: ${PYTHON_EXECUTABLE}")
 cmake_policy(SET CMP0135 NEW)
 find_package(GTest REQUIRED)
 
-file(DOWNLOAD https://xcoartifactory.xilinx.com/artifactory/PHX_test_case_package/vaip_model/pt_resnet50.onnx
-  ${CMAKE_CURRENT_BINARY_DIR}/pt_resnet50.onnx
+set(RESNET_50_ONNX_PATH "${CMAKE_CURRENT_BINARY_DIR}/pt_resnet50.onnx")
+vaip_add_remote_target(
+  TARGET pt_resnet50.onnx
+  FILE ${RESNET_50_ONNX_PATH}
+  URL https://xcoartifactory.xilinx.com/artifactory/PHX_test_case_package/vaip_model/pt_resnet50.onnx
   EXPECTED_MD5 3f97582a85b8ae1be41127f326bbf9b2
-  STATUS RESNET_50_ONNX_PATH_STATUS)
-
-find_file(RESNET_50_ONNX_PATH "pt_resnet50.onnx" HINTS  ${CMAKE_CURRENT_BINARY_DIR}
- "${CMAKE_SOURCE_DIR}/../test_onnx_runner/data"
-  NO_CACHE
-  REQUIRED
-  ENV VAIP_DATA_PATH)
-message(STATUS "Found test model ${RESNET_50_ONNX_PATH}")
-file(TO_NATIVE_PATH "${RESNET_50_ONNX_PATH}" RESNET_50_ONNX_PATH)
-
-if(NOT RESNET_50_ONNX_PATH)
-  message(WARNING "cannot find model pt_resnet50.onnx for testing. RESNET_50_ONNX_PATH=${RESNET_50_ONNX_PATH}")
-else(NOT RESNET_50_ONNX_PATH)
-  message(STATUS "Found model pt_resnet50.onnx for testing. ${RESNET_50_ONNX_PATH}")
-endif(NOT RESNET_50_ONNX_PATH)
-string(REPLACE "\\" "\\\\" RESNET_50_ONNX_PATH "${RESNET_50_ONNX_PATH}")
-add_compile_definitions(RESNET_50_PATH="${RESNET_50_ONNX_PATH}")
+)
 
 configure_file(debug_logger.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/debug_logger.hpp @ONLY)
 configure_file(unit_test_env_params.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/unit_test_env_params.hpp @ONLY)
@@ -71,6 +56,7 @@ add_executable(${TEST_EXE_NAME}
   ${CMAKE_CURRENT_BINARY_DIR}/unit_test_env_params.hpp
 )
 find_package(onnxruntime REQUIRED)
+add_dependencies(${TEST_EXE_NAME} pt_resnet50.onnx)
 target_link_libraries(${TEST_EXE_NAME} PRIVATE vaip_core_dynamic GTest::gtest onnxruntime::onnxruntime glog::glog)
 
 add_custom_command(
@@ -78,15 +64,15 @@ add_custom_command(
         POST_BUILD
         COMMAND
          ${CMAKE_COMMAND} -E echo
-          ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/vaip/test_constant_initializer.py ${CMAKE_CURRENT_BINARY_DIR}/test_constant_initializer.onnx
+         Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/vaip/test_constant_initializer.py ${CMAKE_CURRENT_BINARY_DIR}/test_constant_initializer.onnx
         COMMAND
-          ${PYTHON_EXECUTABLE} -m pip install onnx==1.16.0
+          Python3::Interpreter -m pip install onnx==1.16.0
         COMMAND
-          ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/vaip/test_constant_initializer.py ${CMAKE_CURRENT_BINARY_DIR}/test_constant_initializer.onnx
+          Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/vaip/test_constant_initializer.py ${CMAKE_CURRENT_BINARY_DIR}/test_constant_initializer.onnx
         COMMAND
-        ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/vaip/create_sample_onnx_model.py ${CMAKE_CURRENT_BINARY_DIR}/sample.onnx
+        Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/vaip/create_sample_onnx_model.py ${CMAKE_CURRENT_BINARY_DIR}/sample.onnx
         COMMAND
-        ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/vaip/test_custom_op.py ${CMAKE_CURRENT_BINARY_DIR}/test_costom_op.onnx
+        Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/vaip/test_custom_op.py ${CMAKE_CURRENT_BINARY_DIR}/test_costom_op.onnx
           )
 if(WIN32)
   set(PATH_ENV_VAR_NAME "PATH")

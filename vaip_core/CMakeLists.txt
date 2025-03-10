@@ -23,6 +23,8 @@
 #    OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
 #
 set(VAIP_XCLBIN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../vaip_xclbin CACHE PATH "Path to the directory containing xclbin files")
+set(VAIP_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/etc/vaip_config.json" CACHE PATH "Path to the file containing vaip_config.json files")
+
 message(STATUS "VAIP_XCLBIN_DIR : ${VAIP_XCLBIN_DIR}")
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/dynamic_vaip_config.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/proto.cmake)
@@ -43,6 +45,15 @@ add_custom_command (
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/mem_xclbin_file.hpp.inc
   COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/src/xclbin/compress_xclbin.py ${CMAKE_CURRENT_BINARY_DIR}/mem_xclbin_file.hpp.inc
   "${VAIP_XCLBIN_DIR}"
+)
+add_custom_command (
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/vaip_version_info.hpp.inc
+  COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/src/vaip_version_info.hpp.inc.py "${CMAKE_CURRENT_SOURCE_DIR}/../.."
+)
+add_custom_command (
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/config_json_binary.hpp
+  COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/src/xclbin/config_json_binary.hpp.py
+  "${VAIP_JSON_CONFIG_FILE}" ON "${VAIP_XCLBIN_DIR}"
 )
 
 target_sources(vaip_core_objects PRIVATE
@@ -90,6 +101,59 @@ target_sources(vaip_core_objects PRIVATE
   src/util.cpp
   src/cache_dir.cpp
   src/cache_dir.hpp
+  ${CMAKE_CURRENT_BINARY_DIR}/vaip_version_info.hpp.inc
+  src/config.hpp
+  src/config.cpp
+  src/custom_op.cpp
+  include/vaip/pattern.hpp
+  src/pattern/pattern.cpp
+  src/pattern/pattern_node.cpp
+  src/pattern/pattern_node.hpp
+  src/pattern/pattern_commutable_node.cpp
+  src/pattern/pattern_commutable_node.hpp
+  src/pattern/pattern_or.cpp
+  src/pattern/pattern_or.hpp
+  src/pattern/pattern_wildcard.cpp
+  src/pattern/pattern_wildcard.hpp
+  src/pattern/pattern_sequence.cpp
+  src/pattern/pattern_sequence.hpp
+  src/pattern/pattern_constant.cpp
+  src/pattern/pattern_constant.hpp
+  src/pattern/pattern_graph_input.cpp
+  src/pattern/pattern_graph_input.hpp
+  src/pattern/pattern_where.cpp
+  src/pattern/pattern_where.hpp
+  include/vaip/rewrite_rule.hpp
+  src/rewrite_rule.cpp
+  src/xir_ops/xir_ops_defs.hpp
+  src/xir_ops/xir_ops_defs.cpp
+  src/xir_ops/ort_custom_ops.hpp
+  src/stat.cpp
+  src/stat.hpp
+  src/file_lock.hpp
+  src/file_lock.cpp
+  include/vaip/transpose.hpp
+  src/transpose.cpp
+  include/vaip/guess_reshape.hpp
+  src/guess_reshape.cpp
+  include/hash-library/crc32.cpp
+  include/hash-library/crc32.h
+  include/hash-library/hash.h
+  include/hash-library/hmac.h
+  include/hash-library/keccak.cpp
+  include/hash-library/keccak.h
+  include/hash-library/md5.cpp
+  include/hash-library/md5.h
+  include/hash-library/sha1.cpp
+  include/hash-library/sha1.h
+  include/hash-library/sha256.cpp
+  include/hash-library/sha256.h
+  include/hash-library/sha3.cpp
+  include/hash-library/sha3.h
+  include/vaip/config_reader.hpp
+  src/xclbin/config_reader.cpp
+  ${CMAKE_CURRENT_BINARY_DIR}/config_json_binary.hpp
+  src/vitisai_compile_model.cpp
 )
 if(MSVC)
   target_sources(vaip_core_objects PRIVATE
@@ -111,7 +175,7 @@ if(BUILD_SHARED_LIBS)
 else(BUILD_SHARED_LIBS)
   add_library (vaip::core ALIAS vaip_core_static)
 endif(BUILD_SHARED_LIBS)
-set(MorphiZen_DEPS  protobuf::libprotobuf glog::glog ZLIB::ZLIB)
+set(MorphiZen_DEPS  protobuf::libprotobuf glog::glog ZLIB::ZLIB Eigen3::Eigen encryption)
 target_link_libraries(vaip_core_objects PUBLIC ${MorphiZen_DEPS})
 target_compile_definitions(vaip_core_objects PUBLIC "-DVAIP_EXPORT_DLL=1")
 target_compile_definitions(vaip_core_objects PUBLIC "-DONNX_NAMESPACE=onnx")

@@ -37,7 +37,7 @@
 #include <glog/logging.h>
 
 #include "./pattern_constant.hpp"
-#include "node_arg.hpp"
+#include "vaip/node_arg.hpp"
 #include "vaip/node.hpp"
 #include "vaip/util.hpp"
 #include <vaip/vaip_ort_api.h>

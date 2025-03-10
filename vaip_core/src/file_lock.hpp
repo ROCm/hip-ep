@@ -51,6 +51,7 @@ namespace vaip_core {
 class WithFileLock {
 public:
   WithFileLock(std::filesystem::path filename);
+  ~WithFileLock();
 
 private:
   std::lock_guard<std::mutex> lock_;

@@ -43,7 +43,7 @@
 #include "./file_lock.hpp"
 #include "./pass_imp.hpp"
 #include "./stat.hpp"
-#include "node.hpp"
+#include "vaip/node.hpp"
 #include "profile_utils.hpp"
 #include "vaip/config_reader.hpp"
 #include "vaip/custom_op_imp.hpp"
@@ -54,7 +54,6 @@
 #include "vaip/vaip_io.hpp"
 #include "vaip/vaip_plugin.hpp"
 #include "vitis/ai/env_config.hpp"
-#include "vitis/ai/profiling.hpp"
 #include "vitis/ai/weak.hpp"
 #include <codecvt>
 #include <google/protobuf/util/json_util.h>
@@ -66,7 +65,6 @@
 #include <stdexcept>
 #include <stdlib.h>
 #include <string>
-#include <xir/graph/graph.hpp>
 #include "../../encryption/src/encryption.hpp"
 // clang-format on
 
@@ -1276,7 +1274,7 @@ initialize_context_for_graph_optimizer(const std::string& model_path,
         *VAIP_ORT_API(model_get_meta_data)(model, "vaip_model_md5sum");
   } else if (!model_path.empty()) {
     *context->context_proto.mutable_config()->mutable_cache_key() =
-        xir::get_md5_of_file(model_path);
+          get_md5_of_file(model_path);
   }
   // update cache key
   auto& cache_key = context->context_proto.config().cache_key();
@@ -1300,7 +1298,7 @@ int optimize_onnx_model(const std::filesystem::path& model_path_in,
   auto& graph = VAIP_ORT_API(model_main_graph)(*model_in);
   graph_resolve(graph);
   model_set_meta_data(*model_in, "vaip_model_md5sum",
-                      xir::get_md5_of_file(model_path_in.u8string()));
+                      get_md5_of_file(model_path_in.u8string()));
   auto context = initialize_context_for_graph_optimizer(
       model_path_in.u8string(), graph, json_config);
 

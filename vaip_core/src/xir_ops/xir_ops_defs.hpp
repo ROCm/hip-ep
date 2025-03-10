@@ -33,7 +33,7 @@
  */
 
 #pragma once
-#include "onnxruntime_api.hpp"
+#include "vaip/onnxruntime_api.hpp"
 namespace vaip_core {
 OrtCustomOpDomain* register_xir_ops();
 } // namespace vaip_core

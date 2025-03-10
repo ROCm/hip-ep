@@ -64,15 +64,12 @@
 #include <vitis/ai/weak.hpp>
 // version info
 #include "version_info.hpp"
-#include "vitis/ai/target_factory.hpp"
 #include <vaip/vaip_ort_api.h>
 #if WITH_XCOMPILER
 #  include <xcompiler/xcompiler.hpp>
 #endif
 #include <nlohmann/json.hpp>
-#include <xir/util/tool_function.hpp>
 
-extern "C" const char* xilinx_vart_version();
 DEF_ENV_PARAM(DEBUG_VAIP_CONFIG, "0")
 DEF_ENV_PARAM(XLNX_ONNX_EP_VERBOSE, "0")
 DEF_ENV_PARAM_2(XLNX_VART_FIRMWARE, "", std::string)
@@ -110,56 +107,13 @@ void Config::add_version_info(ConfigProto& proto,
 }
 
 void Config::add_version_info(ConfigProto& proto) {
-  const char* vart_lib_id = xilinx_vart_version();
-  std::string vart_hash = std::string(vart_lib_id).substr(5);
   using version_vec_tuple =
-      std::vector<std::tuple<std::string, std::function<const std::string()>,
-                             std::function<const std::string()>>>;
+      std::vector<std::tuple<std::string, std::string, std::string>>;
   for (auto& info : version_vec_tuple{
-           {"vaip", vaip_core::get_lib_id, vaip_core::get_lib_name},
-           {"target_factory", vitis::ai::TargetFactory::get_lib_id,
-            vitis::ai::TargetFactory::get_lib_name},
-           {"vart", [vart_hash]() -> const std::string { return vart_hash; },
-            []() -> const std::string { return "vart"; }},
-           {"xcompiler",
-#if WITH_XCOMPILER
-            xcompiler::get_lib_id,
-#else
-            []() -> const std::string { return "WITH_XCOMPILER=0"; },
-#endif
-
-#if WITH_XCOMPILER
-            xcompiler::get_lib_name
-#else
-            []() -> const std::string { return "WITH_XCOMPILER=0"; }
-#endif
-           },
-           {"onnxrutnime",
-            []() -> const std::string { return *(VAIP_ORT_API(get_lib_id)()); },
-            []() -> const std::string {
-              return *(VAIP_ORT_API(get_lib_name)());
-            }},
-           {"xir", xir::get_lib_id, xir::get_lib_name},
-#ifdef ENABLE_XRT
-           {"xrt", []() -> const std::string { return xrt_build_version_hash; },
-            []() -> const std::string {
-              return std::string("xrt.") + std::string(xrt_build_version);
-            }},
-#else
-           {"xrt", []() -> const std::string { return "N/A"; },
-            []() -> const std::string { return "xrt"; }},
-#endif
-#ifdef GRAPH_ENGINE_VERSION
-           {"graph_engine",
-            []() -> const std::string { return GRAPH_ENGINE_VERSION; },
-            []() -> const std::string { return "graph_engine"; }}
-#else
-           {"graph_engine", []() -> const std::string { return "N/A"; },
-            []() -> const std::string { return "graph_engine"; }}
-#endif
+#include "vaip_version_info.hpp.inc"
        }) {
-    add_version_info(proto, std::get<0>(info), std::get<1>(info)(),
-                     std::get<2>(info)());
+    add_version_info(proto, std::get<0>(info), std::get<1>(info),
+                     std::get<2>(info));
   }
 }
 
