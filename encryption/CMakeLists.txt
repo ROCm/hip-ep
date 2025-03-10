@@ -42,7 +42,7 @@ add_library(
   src/encryption.hpp
   )
 
-target_include_directories(encryption PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../vaip_core/include
+target_include_directories(encryption PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../vaip-core/include
 )
 if(WITH_OPENSSL)
   target_compile_definitions(encryption PUBLIC -DWITH_OPENSSL)
