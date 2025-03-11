@@ -1,0 +1,13 @@
+LIBRARY onnxruntime_vitisai_ep
+EXPORTS
+?DebugString@Message@protobuf@google@@QEBA?AV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@XZ @1
+??$make_unique@VPassProto@vaip_core@@$$V$0A@@std@@YA?AV?$unique_ptr@VPassProto@vaip_core@@U?$default_delete@VPassProto@vaip_core@@@std@@@0@XZ @2
+??RAttributeProtoDeleter@vaip_core@@QEBAXPEAUAttributeProto@ONNX_NAMESPACE@@@Z @3
+??_7PassProto@vaip_core@@6B@ @4
+?Set@ArenaStringPtr@internal@protobuf@google@@QEAAXAEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@PEAVArena@34@@Z @5
+?Set@ArenaStringPtr@internal@protobuf@google@@QEAAXPEBDPEAVArena@34@@Z @6
+?TestBody@GraphTest_Fuse_Test@@EEAAXXZ @7
+?TestBody@ModelTest_ModelCreationTest_Test@@EEAAXXZ @8
+?TestBody@TarBallTest_Encrypt_Test_Test@@EEAAXXZ @9
+?create@@YA?AV?$unique_ptr@VAnchorPoint@vaip_core@@U?$default_delete@VAnchorPoint@vaip_core@@@std@@@std@@AEBVpath@filesystem@2@@Z @10
+??$make_unique@VPassProto@vaip_core@@$$V$0A@@std@@YA?AV?$unique_ptr@VPassProto@vaip_core@@U @11

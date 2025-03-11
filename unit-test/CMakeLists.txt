@@ -39,18 +39,18 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 set(TEST_EXE_NAME vaip_unit_tests)
 add_executable(${TEST_EXE_NAME}
   main.cpp
-  # vaip/test_config.cpp
-  # vaip/test_model.cpp
-  # vaip/test_graph.cpp
-  # vaip/test_const_data.cpp
-  # vaip/test_anchor_point.cpp
-  # vaip/test_immutable_map.cpp
-  # vaip/test_pattern.cpp
-  # vaip/test_pass_context.cpp
-  # vaip/test_node_builder.cpp
-  # vaip/test_tarball.cpp
-  # getenv.cpp
-  # getenv.c
+  vaip/test_config.cpp
+  vaip/test_model.cpp
+  vaip/test_graph.cpp
+  vaip/test_const_data.cpp
+  vaip/test_anchor_point.cpp
+  vaip/test_immutable_map.cpp
+  vaip/test_pattern.cpp
+  vaip/test_pass_context.cpp
+  vaip/test_node_builder.cpp
+  vaip/test_tarball.cpp
+  getenv.cpp
+  getenv.c
   # test_onnx_runner/test_onnx_runner.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/debug_logger.hpp
   ${CMAKE_CURRENT_BINARY_DIR}/unit_test_env_params.hpp
@@ -58,7 +58,7 @@ add_executable(${TEST_EXE_NAME}
 find_package(onnxruntime REQUIRED)
 add_dependencies(${TEST_EXE_NAME} pt_resnet50.onnx)
 target_link_libraries(${TEST_EXE_NAME} PRIVATE vaip_core_dynamic GTest::gtest onnxruntime::onnxruntime glog::glog)
-
+target_compile_definitions(${TEST_EXE_NAME} PRIVATE -DONNX_NAMESPACE=onnx)
 add_custom_command(
         TARGET ${TEST_EXE_NAME}
         POST_BUILD

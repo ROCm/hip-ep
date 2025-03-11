@@ -4,10 +4,10 @@
  */
 #define _CRT_SECURE_NO_WARNINGS
 // clang-format off
-#include "../vaip/include/vaip/vaip.hpp"
+#include "../vaip-core/include/vaip/vaip.hpp"
 #include "../encryption/src/encryption.hpp"
-#include "../vaip/src/pass_context_imp.hpp"
-#include "../vaip/src/tar_ball.hpp"
+#include "../vaip-core/src/pass_context_imp.hpp"
+#include "../vaip-core/src/tar_ball.hpp"
 #include "debug_logger.hpp"
 #include <ctime>
 #include <gtest/gtest.h>
@@ -118,7 +118,7 @@ static std::string generateRandomString(size_t length) {
                                  "0123456789";
   std::random_device rd;
   std::mt19937 generator(rd());
-  std::uniform_int_distribution<> distribution(0, characters.size() - 1);
+  std::uniform_int_distribution<size_t> distribution(0u, characters.size() - 1);
   std::string randomString;
   for (size_t i = 0; i < length; ++i) {
     randomString += characters[distribution(generator)];

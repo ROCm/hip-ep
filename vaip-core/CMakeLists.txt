@@ -173,9 +173,33 @@ target_include_directories(vaip_core_objects PUBLIC
   ${VAIP_ORT_API_DIR}
 )
 add_library(vaip_core_static STATIC $<TARGET_OBJECTS:vaip_core_objects>)
+
+
 add_library(vaip_core_dynamic SHARED $<TARGET_OBJECTS:vaip_core_objects>)
 # set output name of vaip_core_dynamic
 set_target_properties(vaip_core_dynamic PROPERTIES OUTPUT_NAME onnxruntime_vitisai_ep)
+
+if(MSVC)
+  find_program(DUMPBIN_EXECUTABLE dumpbin REQUIRED)
+  add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/vaip_core_symbol.txt"
+    # TARGET onnxruntime_vitisai_ep
+    # PRE_BUILD
+    COMMAND "${DUMPBIN_EXECUTABLE}" "/symbols" "$<TARGET_FILE:vaip::core>" > "${CMAKE_CURRENT_BINARY_DIR}/vaip_core_symbol.txt")
+
+  add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime_vitisai_ep.def
+    COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/dump_symbol.py
+      ${CMAKE_CURRENT_BINARY_DIR}/vaip_core_symbol.txt
+      ${CMAKE_CURRENT_SOURCE_DIR}/onnxruntime_vitisai_ep.def.in
+      ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime_vitisai_ep.def
+    DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/vaip_core_symbol.txt"
+    # TARGET onnxruntime_vitisai_ep
+    # PRE_BUILD
+    #BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime_vitisai_ep.def
+  )
+  target_sources(vaip_core_dynamic PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime_vitisai_ep.def)
+endif(MSVC)
 if(BUILD_SHARED_LIBS)
   add_library (vaip::core ALIAS vaip_core_dynamic)
 else(BUILD_SHARED_LIBS)
@@ -183,7 +207,13 @@ else(BUILD_SHARED_LIBS)
 endif(BUILD_SHARED_LIBS)
 set(MorphiZen_DEPS  protobuf::libprotobuf glog::glog ZLIB::ZLIB Eigen3::Eigen encryption)
 target_link_libraries(vaip_core_objects PUBLIC ${MorphiZen_DEPS})
-# target_compile_definitions(vaip_core_dynamic PUBLIC "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1" "-DONNX_NAMESPACE=onnx")
 target_compile_definitions(vaip_core_objects PUBLIC "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1" "-DONNX_NAMESPACE=onnx")
 target_link_libraries(vaip_core_dynamic PRIVATE  ${MorphiZen_DEPS})
 target_link_libraries(vaip_core_static PUBLIC  ${MorphiZen_DEPS})
+target_include_directories(vaip_core_dynamic PUBLIC
+  include
+  ${CMAKE_CURRENT_BINARY_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/../3rd-party
+  ${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime
+  ${VAIP_ORT_API_DIR}
+)

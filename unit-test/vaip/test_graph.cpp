@@ -39,6 +39,7 @@
 #include <limits>
 //
 #include "vaip/vaip.hpp"
+static const std::string RESNET_50_PATH = "pt_resnet50.onnx";
 class GraphTest : public DebugLogger {};
 
 TEST_F(GraphTest, LoadAndSave) {

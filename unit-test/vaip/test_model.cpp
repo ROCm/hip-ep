@@ -39,8 +39,8 @@
 #include <limits>
 //
 #include "vaip/vaip.hpp"
+static const std::string RESNET_50_PATH = "pt_resnet50.onnx";
 class ModelTest : public DebugLogger {};
-
 TEST_F(ModelTest, Load) {
   open_logger_file("ModelTest.Load.log");
   logger() << "LOADING " << std::string(RESNET_50_PATH);

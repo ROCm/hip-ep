@@ -1,0 +1,9 @@
+LIBRARY onnxruntime_vitisai_ep
+EXPORTS
+?ParseFromString@TextFormat@protobuf@google@@SA_NAEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@PEAVMessage@23@@Z
+?aes_decryption@vaip_encryption@@YAXAEBVIStreamReader@vaip_core@@AEAVIStreamWriter@3@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@Z
+?aes_encryption@vaip_encryption@@YAXAEBVIStreamReader@vaip_core@@AEAVIStreamWriter@3@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@Z
+??_7MetaDefProto@vaip_core@@6B@
+??_7PassProto@vaip_core@@6B@
+??_7AnchorPointProto@vaip_core@@6B@
+@ALL_DUMPED_SYMBOLS@

@@ -39,7 +39,7 @@
 //
 #include "debug_logger.hpp"
 //
-#include "../vaip/src/pattern/immutable_map.hpp"
+#include "../vaip-core/src/pattern/immutable_map.hpp"
 
 using namespace vaip_core::immutable_map;
 class ImmutableMapTest : public DebugLogger {

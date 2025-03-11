@@ -30,7 +30,7 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
-#include "../vaip/src/config.hpp"
+#include "../vaip-core/src/config.hpp"
 #include "debug_logger.hpp"
 #include "unit_test_env_params.hpp"
 #include "vaip/vaip.hpp"
