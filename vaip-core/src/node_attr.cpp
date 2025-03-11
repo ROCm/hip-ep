@@ -38,10 +38,10 @@
 #include <vaip/vaip_ort_api.h>
 
 namespace vaip_core {
-void AttributeProtoDeleter::operator()(AttributeProto* p) const {
+VAIP_DLL_SPEC void AttributeProtoDeleter::operator()(AttributeProto* p) const {
   VAIP_ORT_API(attr_proto_delete)(p);
 }
-void NodeAttributesDeleter::operator()(NodeAttributes* p) const {
+VAIP_DLL_SPEC void NodeAttributesDeleter::operator()(NodeAttributes* p) const {
   VAIP_ORT_API(node_attributes_delete)(p);
 }
 std::string attr_proto_as_string(const AttributeProto& attr) { return "TODO"; }

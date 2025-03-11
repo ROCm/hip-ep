@@ -154,6 +154,9 @@ target_sources(vaip_core_objects PRIVATE
   src/xclbin/config_reader.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/config_json_binary.hpp
   src/vitisai_compile_model.cpp
+  src/vaip_profile.cpp
+  src/vaip.cpp
+  src/onnxruntime_vitisai_ep.cpp
 )
 if(MSVC)
   target_sources(vaip_core_objects PRIVATE
@@ -162,7 +165,7 @@ if(MSVC)
 else(MSVC)
   target_sources(vaip_core_objects PRIVATE src/vaip_plugin_lnx.cpp src/util_linux.cpp)
 endif(MSVC)
-target_include_directories(vaip_core_objects PRIVATE
+target_include_directories(vaip_core_objects PUBLIC
   include
   ${CMAKE_CURRENT_BINARY_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/../3rd-party
@@ -171,6 +174,8 @@ target_include_directories(vaip_core_objects PRIVATE
 )
 add_library(vaip_core_static STATIC $<TARGET_OBJECTS:vaip_core_objects>)
 add_library(vaip_core_dynamic SHARED $<TARGET_OBJECTS:vaip_core_objects>)
+# set output name of vaip_core_dynamic
+set_target_properties(vaip_core_dynamic PROPERTIES OUTPUT_NAME onnxruntime_vitisai_ep)
 if(BUILD_SHARED_LIBS)
   add_library (vaip::core ALIAS vaip_core_dynamic)
 else(BUILD_SHARED_LIBS)
@@ -178,7 +183,7 @@ else(BUILD_SHARED_LIBS)
 endif(BUILD_SHARED_LIBS)
 set(MorphiZen_DEPS  protobuf::libprotobuf glog::glog ZLIB::ZLIB Eigen3::Eigen encryption)
 target_link_libraries(vaip_core_objects PUBLIC ${MorphiZen_DEPS})
-target_compile_definitions(vaip_core_objects PUBLIC "-DVAIP_EXPORT_DLL=1")
-target_compile_definitions(vaip_core_objects PUBLIC "-DONNX_NAMESPACE=onnx")
+# target_compile_definitions(vaip_core_dynamic PUBLIC "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1" "-DONNX_NAMESPACE=onnx")
+target_compile_definitions(vaip_core_objects PUBLIC "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1" "-DONNX_NAMESPACE=onnx")
 target_link_libraries(vaip_core_dynamic PRIVATE  ${MorphiZen_DEPS})
 target_link_libraries(vaip_core_static PUBLIC  ${MorphiZen_DEPS})

@@ -38,15 +38,18 @@
 
 # Microsoft requested
 add_compile_options(
-  /Zc:__cplusplus
-  /Zi
-  /Qspectre
-  /ZH:SHA_256
-  /guard:cf
-  /sdl
-  /MP
-  /WX
-  /W3
+  /Zc:__cplusplus #
+  /Zi # generate complete debugging information
+  /Qspectre # enable Spectre mitigations, required by MS
+  /ZH:SHA_256 # use SHA-256 for PDB content hashes
+  /guard:cf # Control Flow Guard
+  /sdl # Security Development Lifecycle
+  /MP # build with multiple processes
+  /WX # warning as error
+  /W3 # default warning level
+  # TODO: fix the following warning
+  /wd4251 #warning C4251: needs to have dll-interface to be used by clients of
+  /wd4275 #warning C4275: non dll-interface class
 )
 
 

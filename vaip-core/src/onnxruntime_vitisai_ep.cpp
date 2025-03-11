@@ -1,0 +1,153 @@
+/*
+ *  Copyright (C) 2022 Xilinx, Inc. All rights reserved.
+ *  Copyright (C) 2023 – 2024 Advanced Micro Devices, Inc. All rights reserved.
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ **/
+// #include "symbols.hpp"
+
+// typedef void* void_ptr_t;
+// #define DECLARE_SYMBOL(sym) extern "C" void_ptr_t sym;
+// SYMBOLS(DECLARE_SYMBOL)
+// #if defined(_WIN32)
+// SYMBOLS_WIN(DECLARE_SYMBOL)
+// #endif
+
+// #define DEFINE_SYMBOL(sym) sym,
+
+// static void_ptr_t reserved_symbols[] = {SYMBOLS(DEFINE_SYMBOL)};
+#include "onnxruntime_vitisai_ep/onnxruntime_vitisai_ep.hpp"
+#include "vaip/op_def.hpp"
+#include "vaip/vaip.hpp"
+#include "vaip/vaip_plugin.hpp"
+#include <fstream>
+#include <glog/logging.h>
+
+// for fix graph_engine not define hook when use BUILD_SHARED_LIBS
+#if GRAPH_ENGINE_USE_DLL == 1
+extern "C" {
+void* graph_engine__hook = nullptr;
+}
+#endif
+#ifdef FOUND_GRAPH_ENGINE
+extern "C" void* graph_engine__hook;
+void* graph_engine_reserved_symbols[] = {graph_engine__hook};
+#endif
+#ifdef FOUND_CPU_RUNNER
+extern void* vart_cpu_runner_reg_hooks[];
+void** vart_cpu_runner_reg_hooks_ptr = vart_cpu_runner_reg_hooks;
+extern "C" void* vart_cpu_runner_hook;
+void* vart_cpu_runner_reserved_symbols[] = {vart_cpu_runner_hook};
+#endif
+#ifdef FOUND_XCOMPILER
+extern void* xcompiler_hooks[];
+void** xcompiler_hooks_ptr = xcompiler_hooks;
+#endif
+namespace onnxruntime_vitisai_ep {
+using namespace vaip_core;
+int optimize_onnx_model(const std::filesystem::path& model_path_in,
+                        const std::filesystem::path& model_path_out,
+                        const char* json_config) {
+  return vaip_core::optimize_onnx_model(model_path_in, model_path_out,
+                                        json_config);
+}
+void initialize_graph_optimizer(const std::string& json_path) {
+  vaip_core::initialize_graph_optimizer(json_path);
+}
+} // namespace onnxruntime_vitisai_ep
+
+extern "C" {
+VAIP_DLL_SPEC
+const vaip_core::OrtApiForVaip* get_the_global_api() {
+  // The test program is using this interface
+  return vaip_core::api();
+}
+
+VAIP_DLL_SPEC
+uint32_t vaip_get_version() { return 0; }
+// The interface exported below is used by onnxruntime_providers_vitisai.so
+VAIP_DLL_SPEC
+void initialize_onnxruntime_vitisai_ep(
+    vaip_core::OrtApiForVaip* api,
+    std::vector<OrtCustomOpDomain*>& ret_domain) {
+  vaip_core::initialize_onnxruntime_vitisai_ep(api, ret_domain);
+  static std::vector<OrtCustomOpDomain*> contrib_domains;
+  std::vector<std::string> op_defs{
+      // TODO: Add the op_def.cpp.inc file
+      // #include "op_def.cpp.inc"
+  };
+  for (auto& op_def : op_defs) {
+    auto plugin_holder = vaip_core::Plugin::get(op_def);
+    auto op_def_info =
+        plugin_holder->invoke<vaip_core::OpDefInfo*>("vaip_op_def_info");
+    std::vector<Ort::CustomOpDomain> domains;
+    op_def_info->get_domains(domains);
+    for (auto& domain : domains) {
+      // Memory leak, passing data across dlls
+      contrib_domains.push_back(domain.release());
+      ret_domain.push_back(*contrib_domains.rbegin());
+      CHECK_LE(ret_domain.size(), 100)
+          << "ret_domain applied for 100 in onnxruntime";
+    }
+  }
+}
+VAIP_DLL_SPEC
+void deinitialize_onnxruntime_vitisai_ep() {
+  vaip_core::deinitialize_onnxruntime_vitisai_ep();
+}
+
+VAIP_DLL_SPEC
+std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>*
+compile_onnx_model_vitisai_ep_with_options(
+    const std::string& model_path, const onnxruntime::Graph& graph,
+    const onnxruntime::ProviderOptions& options) {
+  return new std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>(
+      vaip_core::compile_onnx_model_5(std::filesystem::u8path(model_path),
+                                      graph, options, nullptr, nullptr));
+}
+
+VAIP_DLL_SPEC
+std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>*
+compile_onnx_model_vitisai_ep_with_error_handling(
+    const std::string& model_path, const onnxruntime::Graph& graph,
+    const onnxruntime::ProviderOptions& options, void* status,
+    void (*func)(void*, int, const char*)) {
+  return new std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>(
+      vaip_core::compile_onnx_model_5(std::filesystem::u8path(model_path),
+                                      graph, options, status, func));
+}
+
+VAIP_DLL_SPEC void
+get_compilation_cache(const std::string& model_path,
+                      const onnxruntime::Graph& graph, const char* json_config,
+                      uint8_t compiler_codes, std::string& cache_dir,
+                      std::string& cache_key, std::string& cache_data) {
+  vaip_core::get_compilation_cache(model_path, graph, json_config,
+                                   compiler_codes, cache_dir, cache_key,
+                                   cache_data);
+}
+
+VAIP_DLL_SPEC void restore_compilation_cache(const std::string& cache_dir,
+                                             const std::string& cache_key,
+                                             const std::string& cache_data,
+                                             const std::string& model_path) {
+  vaip_core::restore_compilation_cache(cache_dir, cache_key, cache_data,
+                                       model_path);
+}
+
+VAIP_DLL_SPEC
+void profiler_collect(std::vector<EventInfo>& api_events,
+                      std::vector<EventInfo>& kernel_events) {
+  vaip_core::profiler_collect(api_events, kernel_events);
+}
+}

@@ -70,6 +70,7 @@ else()
   find_package(glog REQUIRED)
 endif()
 
+set(ZLIB_USE_STATIC_LIBS ON CACHE BOOL "use static zip")
 find_package(ZLIB QUIET)
 if(ZLIB_FOUND)
   message(STATUS "found find_package(ZLIB)")
