@@ -57,7 +57,12 @@ add_executable(${TEST_EXE_NAME}
 )
 find_package(onnxruntime REQUIRED)
 add_dependencies(${TEST_EXE_NAME} pt_resnet50.onnx)
-target_link_libraries(${TEST_EXE_NAME} PRIVATE vaip_core_dynamic GTest::gtest onnxruntime::onnxruntime glog::glog)
+target_link_libraries(${TEST_EXE_NAME} 
+    PRIVATE 
+    vaip_core_dynamic 
+    GTest::gtest
+    onnxruntime::onnxruntime 
+    glog::glog)
 target_compile_definitions(${TEST_EXE_NAME} PRIVATE -DONNX_NAMESPACE=onnx)
 file(TO_NATIVE_PATH "${RESNET_50_ONNX_PATH}" RESNET_50_ONNX_PATH)
 string(REPLACE "\\" "\\\\" RESNET_50_ONNX_PATH "${RESNET_50_ONNX_PATH}")

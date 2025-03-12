@@ -32,3 +32,6 @@
 *.out
 *.app
 /build/
+/.cache/
+/build.ninja/
+/compile_commands.json

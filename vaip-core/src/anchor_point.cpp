@@ -46,6 +46,10 @@ DEF_ENV_PARAM(DEBUG_ANCHOR_POINT, "0")
 
 namespace vaip_core {
 using namespace vaip_core_imp;
+std::unique_ptr<AnchorPointProto> AnchorPoint::create_proto() {
+  return std::make_unique<AnchorPointProto>();
+}
+
 
 static AnchorPointProto new_anchor_point_proto(const IPass& pass,
                                                const std::string& name,

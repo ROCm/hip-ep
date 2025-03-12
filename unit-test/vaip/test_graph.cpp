@@ -486,7 +486,7 @@ TEST_F(GraphTest, NewConstantInitializer) {
   // try to use these constant intializers;
   std::shared_ptr<vaip_core::PassContext> context =
       vaip_core::PassContext::create();
-  if (0) {
+  if (1) {
     auto pass_proto = std::make_unique<vaip_core::PassProto>();
     pass_proto->set_plugin("vaip-pass_init");
     pass_proto->set_name("GraphTest.NewConstantInitializer");

@@ -50,7 +50,14 @@ static std::string slurp_txt(const std::filesystem::path& filename) {
   std::ifstream in;
   in.open(filename, std::ifstream::in);
   std::stringstream sstr;
-  sstr << in.rdbuf();
+  auto buf = std::string();
+  while (getline(in, buf).good()) {
+    // exclude line starts with '#'
+    if (buf[0] == '#') {
+      continue;
+    }
+    sstr << buf << "\n";
+  }
   in.close();
   return sstr.str();
 }
@@ -59,10 +66,21 @@ static std::unique_ptr<AnchorPoint>
 create(const std::filesystem::path& filename) {
 
   auto text = slurp_txt(filename);
-  auto anchor_point = AnchorPointProto();
-  CHECK(google::protobuf::TextFormat::ParseFromString(text, &anchor_point))
+  // it is not safe to use AnchorPointProto directly across DLL boundary
+  // it is a strange error if
+  //
+  //    auto anchor_point = std::make_unique<AnchorPointProto>();
+  //
+  // AnchorPointProto::AnchorPointProto() is an inline function so that it is
+  // created inside vaip_unit_test.exe,
+  // google::protobuf::TextFormat::ParseFromString() is defined in
+  // onnxruntime_vitisai_ep.dll, and output->Clear() would throw an exception.
+  // 
+  // 
+  auto anchor_point = vaip_core::AnchorPoint::create_proto();
+  CHECK(google::protobuf::TextFormat::ParseFromString(text, anchor_point.get()))
       << "parse error: " << text;
-  return AnchorPoint::create(anchor_point);
+  return AnchorPoint::create(*anchor_point);
 }
 
 static void test_optimize1(const IPass& pass,
@@ -83,7 +101,7 @@ static void test_append(const IPass& pass, const std::string& f1,
   LOG(INFO) << "input:\n"                            //
             << i1->get_proto().DebugString() << "\n" //
             << i2->get_proto().DebugString() << "\n";
-  LOG(INFO) << "output\n"                            //
+  LOG(INFO) << "output\n" //
             << i1->append(pass, *i2)->get_proto().DebugString() << "\n";
 }
 

@@ -160,31 +160,32 @@ target_sources(vaip_core_objects PRIVATE
 )
 if(MSVC)
   target_sources(vaip_core_objects PRIVATE
-  src/vaip_plugin_win.cpp
-  src/util_mswin.cpp)
+    src/vaip_plugin_win.cpp
+    src/util_mswin.cpp)
 else(MSVC)
-  target_sources(vaip_core_objects PRIVATE src/vaip_plugin_lnx.cpp src/util_linux.cpp)
+  target_sources(vaip_core_objects PRIVATE
+    src/vaip_plugin_lnx.cpp
+    src/util_linux.cpp)
 endif(MSVC)
-target_include_directories(vaip_core_objects PUBLIC
-  include
-  ${CMAKE_CURRENT_BINARY_DIR}
+target_include_directories(vaip_core_objects
+  PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+  $<BUILD_INTERFACE:${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
+  $<BUILD_INTERFACE:${VAIP_ORT_API_DIR}>
+  PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../3rd-party
-  ${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime
-  ${VAIP_ORT_API_DIR}
 )
 add_library(vaip_core_static STATIC $<TARGET_OBJECTS:vaip_core_objects>)
-
-
 add_library(vaip_core_dynamic SHARED $<TARGET_OBJECTS:vaip_core_objects>)
-# set output name of vaip_core_dynamic
+# set output name of vaip_core_dynamic, it is required by VitisAI EP.
 set_target_properties(vaip_core_dynamic PROPERTIES OUTPUT_NAME onnxruntime_vitisai_ep)
 
 if(MSVC)
   find_program(DUMPBIN_EXECUTABLE dumpbin REQUIRED)
   add_custom_command(
     OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/vaip_core_symbol.txt"
-    # TARGET onnxruntime_vitisai_ep
-    # PRE_BUILD
     COMMAND "${DUMPBIN_EXECUTABLE}" "/symbols" "$<TARGET_FILE:vaip::core>" > "${CMAKE_CURRENT_BINARY_DIR}/vaip_core_symbol.txt")
 
   add_custom_command(
@@ -193,10 +194,8 @@ if(MSVC)
       ${CMAKE_CURRENT_BINARY_DIR}/vaip_core_symbol.txt
       ${CMAKE_CURRENT_SOURCE_DIR}/onnxruntime_vitisai_ep.def.in
       ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime_vitisai_ep.def
-    DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/vaip_core_symbol.txt"
-    # TARGET onnxruntime_vitisai_ep
-    # PRE_BUILD
-    #BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime_vitisai_ep.def
+      $<TARGET_LINKER_LIBRARY_FILE:vaip_core_dynamic>
+    DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/vaip_core_symbol.txt" ${CMAKE_CURRENT_SOURCE_DIR}/onnxruntime_vitisai_ep.def.in
   )
   target_sources(vaip_core_dynamic PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime_vitisai_ep.def)
 endif(MSVC)
@@ -205,15 +204,22 @@ if(BUILD_SHARED_LIBS)
 else(BUILD_SHARED_LIBS)
   add_library (vaip::core ALIAS vaip_core_static)
 endif(BUILD_SHARED_LIBS)
-set(MorphiZen_DEPS  protobuf::libprotobuf glog::glog ZLIB::ZLIB Eigen3::Eigen encryption)
+set(MorphiZen_DEPS protobuf::libprotobuf glog::glog ZLIB::ZLIB Eigen3::Eigen encryption)
 target_link_libraries(vaip_core_objects PUBLIC ${MorphiZen_DEPS})
 target_compile_definitions(vaip_core_objects PUBLIC "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1" "-DONNX_NAMESPACE=onnx")
 target_link_libraries(vaip_core_dynamic PRIVATE  ${MorphiZen_DEPS})
 target_link_libraries(vaip_core_static PUBLIC  ${MorphiZen_DEPS})
-target_include_directories(vaip_core_dynamic PUBLIC
-  include
-  ${CMAKE_CURRENT_BINARY_DIR}
-  ${CMAKE_CURRENT_SOURCE_DIR}/../3rd-party
-  ${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime
-  ${VAIP_ORT_API_DIR}
-)
+target_include_directories(vaip_core_dynamic PUBLIC $<TARGET_PROPERTY:vaip_core_objects,INTERFACE_INCLUDE_DIRECTORIES>)
+target_include_directories(vaip_core_static PUBLIC $<TARGET_PROPERTY:vaip_core_objects,INTERFACE_INCLUDE_DIRECTORIES>)
+
+install(
+  TARGETS vaip_core_static vaip_core_objects
+  EXPORT vaip-core-targets
+  RUNTIME DESTINATION bin
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib)
+install(
+  EXPORT vaip-core-targets
+  NAMESPACE ${PROJECT_NAME}::
+  COMPONENT base
+  DESTINATION share/cmake/${PROJECT_NAME})

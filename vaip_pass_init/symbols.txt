@@ -1,0 +1,1 @@
+vaip_pass_init__hook

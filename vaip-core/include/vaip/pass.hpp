@@ -519,11 +519,11 @@ IPass::action_t create_xmodel_process_graph(IPass::action_t action);
 #else
 #  include <vitis/ai/plugin.hpp>
 #  define DEFINE_VAIP_PASS(cls, id)                                            \
-    static vaip_core::PassInfo* vaip_pass_info() {                             \
+    static ::vaip_core::PassInfo* vaip_pass_info() {                             \
       return ProcessorPassInfo<cls>::pass_info();                              \
     }                                                                          \
     namespace {                                                                \
-    static vitis::ai::StaticPluginRegister                                     \
+    static ::vaip_core::StaticPluginRegister                                     \
         __register(OUTPUT_NAME, "vaip_pass_info", (void*)&vaip_pass_info);     \
     }                                                                          \
     extern "C" {                                                               \

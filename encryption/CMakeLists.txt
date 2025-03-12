@@ -53,3 +53,17 @@ if(WITH_OPENSSL)
 else()
 target_link_libraries(encryption PRIVATE glog::glog)
 endif(WITH_OPENSSL)
+
+
+
+install(
+  TARGETS encryption
+  EXPORT vaip-encryption-targets
+  RUNTIME DESTINATION bin
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib)
+install(
+  EXPORT vaip-encryption-targets
+  NAMESPACE ${PROJECT_NAME}::
+  COMPONENT base
+  DESTINATION share/cmake/${PROJECT_NAME})

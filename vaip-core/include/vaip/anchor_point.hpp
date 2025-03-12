@@ -130,6 +130,8 @@ public:
   VAIP_DLL_SPEC static std::unique_ptr<AnchorPoint>
   create_from_siso_path(const IPass& pass, const Graph& graph,
                         const std::vector<const Node*>& path);
+  // for debugging purpose and testing.
+  VAIP_DLL_SPEC static std::unique_ptr<AnchorPointProto> create_proto();
 
 private: // TODO: expose this API?
   VAIP_DLL_SPEC static std::unique_ptr<AnchorPoint>
