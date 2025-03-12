@@ -8,7 +8,7 @@
 #include <vaip/vaip_ort_api.h>
 namespace vaip_core {
 struct VaipOrtApi2 {
-#define DECL_VAIP_ORT_OPTIONAL_API(ret_type, field)                            \
+#define DECL_VAIP_ORT_OPTIONAL_API_1(ret_type, field)                          \
   template <typename T, class = void>                                          \
   struct field##_t : public std::false_type {                                  \
     template <typename... Args> static ret_type field(Args&&...) {             \
@@ -32,13 +32,29 @@ struct VaipOrtApi2 {
     }                                                                          \
   };                                                                           \
   static constexpr auto has_##field =                                          \
-      field##_t<::vaip_core::OrtApiForVaip>::value;                            \
+      field##_t<::vaip_core::OrtApiForVaip>::value;
+
+#define DECL_VAIP_ORT_OPTIONAL_API(ret_type, field)                            \
+  DECL_VAIP_ORT_OPTIONAL_API_1(ret_type, field)                                \
   template <typename... Args> static ret_type field(Args&&... args) {          \
     return field##_t<::vaip_core::OrtApiForVaip>::field(                       \
         std::forward<Args>(args)...);                                          \
   }
 
-  DECL_VAIP_ORT_OPTIONAL_API(void, graph_set_name)
+#define DECL_VAIP_ORT_OPTIONAL_API_with_fallback(ret_type, field)              \
+  DECL_VAIP_ORT_OPTIONAL_API_1(ret_type, field)                                \
+  template <typename... Args> static ret_type field
+
+  DECL_VAIP_ORT_OPTIONAL_API_with_fallback(void, graph_set_name)(
+      Graph& graph, const std::string& name) {
+    if (has_graph_set_name) {
+      return graph_set_name_t<::vaip_core::OrtApiForVaip>::graph_set_name(graph,
+                                                                          name);
+    }
+    std::cerr << "VaipOrtApi::graph_set_name is not implemented, fallback to "
+                 "graph_set_name_with_default, graph name might not be set.";
+    return;
+  }
   DECL_VAIP_ORT_OPTIONAL_API(vaip_core::DllSafe<std::string>,
                              attr_proto_release_string)
   DECL_VAIP_ORT_OPTIONAL_API(TensorProto*, tensor_proto_new_u4)

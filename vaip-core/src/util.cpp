@@ -469,7 +469,7 @@ void compress(const IStreamReader& src, IStreamWriter& dst,
     }
     flush = (bytes_read == 0) ? Z_FINISH : Z_NO_FLUSH;
     strm.avail_in = (uInt)bytes_read;
-    strm.next_in = reinterpret_cast<Bytef*>(in->data());
+    strm.next_in = (bytes_read == 0) ? nullptr: reinterpret_cast<Bytef*>(in->data());
     do {
       strm.avail_out = CHUNK;
       strm.next_out = reinterpret_cast<Bytef*>(out);

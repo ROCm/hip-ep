@@ -15,7 +15,7 @@ def create_sample_onnx():
         domain="com.xilinx",  # Domain
     )
     node.attribute.append(helper.make_attribute("data_type", "float"))
-    node.attribute.append(helper.make_attribute("shape", [1]))
+    node.attribute.append(helper.make_attribute("shape", [2]))
     # Create the graph (model)
     graph = helper.make_graph(
         nodes=[node],  # nodes
