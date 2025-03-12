@@ -20,7 +20,7 @@ import os
 import json
 import glob
 from pathlib import Path
-
+import xxd
 
 def get_trimmed_config(config):
     default_target = config["target"]
@@ -125,10 +125,8 @@ def main():
     with open("vaip_config.json", "w") as f:
         json.dump(config, f, indent=4)
     FINGERPRINT_CONFIG = get_escape_json_str("vaip_config.json")
-    with open("config_json_binary.hpp", "w") as f:
-        f.write(f"""
-                static const unsigned char config[] = {FINGERPRINT_CONFIG};
-                """)
+    xxd.main(["--output", "config_json_binary.hpp", "--column", "16", "--var" , "config", "vaip_config.json"])
+   
 
 
 if __name__ == "__main__":

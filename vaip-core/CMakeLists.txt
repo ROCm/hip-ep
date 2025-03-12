@@ -43,7 +43,9 @@ if(NOT TARGET Python3::Interpreter)
 endif(NOT TARGET Python3::Interpreter)
 add_custom_command (
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/mem_xclbin_file.hpp.inc
-  COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/src/xclbin/compress_xclbin.py ${CMAKE_CURRENT_BINARY_DIR}/mem_xclbin_file.hpp.inc
+  COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../tools"
+  $<TARGET_FILE:Python3::Interpreter> ${CMAKE_CURRENT_SOURCE_DIR}/src/xclbin/compress_xclbin.py
+  ${CMAKE_CURRENT_BINARY_DIR}/mem_xclbin_file.hpp.inc
   "${VAIP_XCLBIN_DIR}"
 )
 add_custom_command (
@@ -52,7 +54,8 @@ add_custom_command (
 )
 add_custom_command (
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/config_json_binary.hpp
-  COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/src/xclbin/config_json_binary.hpp.py
+  COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../tools"
+  $<TARGET_FILE:Python3::Interpreter> ${CMAKE_CURRENT_SOURCE_DIR}/src/xclbin/config_json_binary.hpp.py
   "${VAIP_JSON_CONFIG_FILE}" ON "${VAIP_XCLBIN_DIR}"
 )
 

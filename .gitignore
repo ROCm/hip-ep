@@ -35,3 +35,4 @@
 /.cache/
 /build.ninja/
 /compile_commands.json
+/tools/__pycache__/
