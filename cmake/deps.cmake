@@ -53,6 +53,23 @@ if(NOT TARGET Microsoft.GSL::GSL)
   find_package(Microsoft.GSL REQUIRED)
 endif()
 
+find_package(GTest QUIET)
+if(GTest_FOUND)
+  message(STATUS "found find_package(GTest)")
+else()
+  message(STATUS "fetch GTest from ${DEP_URL_GTest}")
+   FetchContent_Declare(
+    GTest
+    GIT_REPOSITORY ${DEP_URL_GTest}
+    GIT_TAG ${DEP_SHA1_GTest}
+    GIT_SHALLOW TRUE
+    CMAKE_ARGS -Dgtest_force_shared_crt=ON
+    EXCLUDE_FROM_ALL
+    OVERRIDE_FIND_PACKAGE
+  )
+  find_package(GTest REQUIRED)
+endif()
+
 set(WITH_GFLAGS OFF CACHE BOOL "disable WITH_GFLAGS for glog")
 find_package(glog QUIET)
 if(glog_FOUND)
@@ -65,6 +82,7 @@ else()
     URL ${DEP_URL_glog}
     URL_HASH SHA1=${DEP_SHA1_glog}
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    EXCLUDE_FROM_ALL
     OVERRIDE_FIND_PACKAGE
   )
   find_package(glog REQUIRED)
@@ -81,14 +99,22 @@ else()
     GIT_REPOSITORY ${DEP_URL_zlib}
     GIT_TAG ${DEP_SHA1_zlib}
     GIT_SHALLOW TRUE
+    EXCLUDE_FROM_ALL
     OVERRIDE_FIND_PACKAGE)
   find_package(ZLIB REQUIRED)
+  if(NOT TARGET zlibstatic)
+    message(STATUS "----- not find target zlibstatic")
+  else()
+    add_library(ZLIB::ZLIB ALIAS zlibstatic)
+  endif()
 endif()
 
 
 set(Protobuf_USE_STATIC_LIBS ON CACHE BOOL "use static protobuf")
 set(protobuf_BUILD_TESTS OFF CACHE BOOL "disable protobuf tests")
 set(protobuf_WITH_ZLIB OFF CACHE BOOL "disable zlib for protobuf")
+set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "disable protobuf build shared libs")
+set(protobuf_BUILD_EXAMPLES OFF CACHE BOOL "disable protobuf examples")
 find_package(Protobuf QUIET)
 if(TARGET protobuf::libprotobuf)
   get_target_property(TMP protobuf::libprotobuf LOCATION)
@@ -101,6 +127,7 @@ else()
     URL_HASH SHA1=${DEP_SHA1_protobuf}
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     CMAKE_ARGS
+    EXCLUDE_FROM_ALL
     OVERRIDE_FIND_PACKAGE)
   find_package(Protobuf REQUIRED)
 endif()
@@ -116,6 +143,7 @@ else()
     URL ${DEP_URL_json}
     URL_HASH SHA1=${DEP_SHA1_json}
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    EXCLUDE_FROM_ALL
     OVERRIDE_FIND_PACKAGE)
   find_package(nlohmann_json REQUIRED)
 endif()

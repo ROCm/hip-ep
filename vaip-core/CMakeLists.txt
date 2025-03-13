@@ -61,6 +61,9 @@ add_custom_command (
   "${VAIP_JSON_CONFIG_FILE}" ON "${VAIP_XCLBIN_DIR}"
 )
 
+if(MSVC)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+endif()
 target_sources(vaip_core_objects PRIVATE
   src/getenv.cpp
   src/getenv.c
@@ -181,6 +184,10 @@ target_include_directories(vaip_core_objects
   $<BUILD_INTERFACE:${VAIP_ORT_API_DIR}>
   PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../3rd-party
+  ${GSL_SOURCE_DIR}/include
+  ${zlib_BINARY_DIR} 
+  ${zlib_SOURCE_DIR}
+  ${nlohmann_json_SOURCE_DIR}/include
 )
 add_library(vaip_core_static STATIC $<TARGET_OBJECTS:vaip_core_objects>)
 set_target_properties(vaip_core_static PROPERTIES FOLDER vaip)
@@ -191,9 +198,11 @@ set_target_properties(vaip_core_dynamic PROPERTIES OUTPUT_NAME onnxruntime_vitis
 
 if(MSVC)
   find_program(DUMPBIN_EXECUTABLE dumpbin REQUIRED)
+  message(STATUS "--- target_file : ${TARGET_FILE}")
   add_custom_command(
     OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/vaip_core_symbol.txt"
-    COMMAND "${DUMPBIN_EXECUTABLE}" "/symbols" "$<TARGET_FILE:vaip::core>" > "${CMAKE_CURRENT_BINARY_DIR}/vaip_core_symbol.txt")
+    COMMAND "${DUMPBIN_EXECUTABLE}" "/symbols" "$<TARGET_FILE:vaip::core>" > "${CMAKE_CURRENT_BINARY_DIR}/vaip_core_symbol.txt"
+    )
 
   add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime_vitisai_ep.def
@@ -211,11 +220,12 @@ if(BUILD_SHARED_LIBS)
 else(BUILD_SHARED_LIBS)
   add_library (vaip::core ALIAS vaip_core_static)
 endif(BUILD_SHARED_LIBS)
-set(MorphiZen_DEPS protobuf::libprotobuf glog::glog ZLIB::ZLIB Eigen3::Eigen encryption)
+find_package(ZLIB REQUIRED)
+set(MorphiZen_DEPS protobuf::libprotobuf glog::glog Eigen3::Eigen encryption)
 target_link_libraries(vaip_core_objects PUBLIC ${MorphiZen_DEPS})
 target_compile_definitions(vaip_core_objects PUBLIC "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1" "-DONNX_NAMESPACE=onnx")
-target_link_libraries(vaip_core_dynamic PRIVATE  ${MorphiZen_DEPS})
-target_link_libraries(vaip_core_static PUBLIC  ${MorphiZen_DEPS})
+target_link_libraries(vaip_core_dynamic PRIVATE  ${MorphiZen_DEPS} ZLIB::ZLIB nlohmann_json::nlohmann_json)
+target_link_libraries(vaip_core_static PUBLIC ${MorphiZen_DEPS})
 target_include_directories(vaip_core_dynamic PUBLIC $<TARGET_PROPERTY:vaip_core_objects,INTERFACE_INCLUDE_DIRECTORIES>)
 target_include_directories(vaip_core_static PUBLIC $<TARGET_PROPERTY:vaip_core_objects,INTERFACE_INCLUDE_DIRECTORIES>)
 
