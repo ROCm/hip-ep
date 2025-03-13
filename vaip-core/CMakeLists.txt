@@ -198,7 +198,6 @@ set_target_properties(vaip_core_dynamic PROPERTIES OUTPUT_NAME onnxruntime_vitis
 
 if(MSVC)
   find_program(DUMPBIN_EXECUTABLE dumpbin REQUIRED)
-  message(STATUS "--- target_file : ${TARGET_FILE}")
   add_custom_command(
     OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/vaip_core_symbol.txt"
     COMMAND "${DUMPBIN_EXECUTABLE}" "/symbols" "$<TARGET_FILE:vaip::core>" > "${CMAKE_CURRENT_BINARY_DIR}/vaip_core_symbol.txt"
@@ -220,7 +219,6 @@ if(BUILD_SHARED_LIBS)
 else(BUILD_SHARED_LIBS)
   add_library (vaip::core ALIAS vaip_core_static)
 endif(BUILD_SHARED_LIBS)
-find_package(ZLIB REQUIRED)
 set(MorphiZen_DEPS protobuf::libprotobuf glog::glog Eigen3::Eigen encryption)
 target_link_libraries(vaip_core_objects PUBLIC ${MorphiZen_DEPS})
 target_compile_definitions(vaip_core_objects PUBLIC "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1" "-DONNX_NAMESPACE=onnx")
