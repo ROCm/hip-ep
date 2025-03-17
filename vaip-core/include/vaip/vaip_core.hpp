@@ -49,7 +49,7 @@ struct VaipOrtApi2 {
       Graph& graph, const std::string& name) {
     if (has_graph_set_name) {
       return graph_set_name_t<::vaip_core::OrtApiForVaip>::graph_set_name(graph,
-                                                                          name);
+                                                                          name.c_str());
     }
     std::cerr << "VaipOrtApi::graph_set_name is not implemented, fallback to "
                  "graph_set_name_with_default, graph name might not be set.";

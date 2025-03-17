@@ -99,19 +99,21 @@ else()
     GIT_REPOSITORY ${DEP_URL_zlib}
     GIT_TAG ${DEP_SHA1_zlib}
     GIT_SHALLOW TRUE
-    EXCLUDE_FROM_ALL
-    OVERRIDE_FIND_PACKAGE)
-  find_package(ZLIB REQUIRED)
-  if(NOT TARGET zlibstatic)
-    message(STATUS "----- not find target zlibstatic")
-  else()
-    add_library(ZLIB::ZLIB ALIAS zlibstatic)
-  endif()
+    )
+  FetchContent_MakeAvailable(ZLIB)
+  add_library(ZLIB::ZLIB ALIAS zlibstatic)
+  target_link_directories(zlibstatic PUBLIC ${zlib_BINARY_DIR} ${zlib_SOURCE_DIR})
 endif()
 
-
-set(Protobuf_USE_STATIC_LIBS ON CACHE BOOL "use static protobuf")
+if(NOT MSVC_RUNTIME_LIBRARY)
+  set(protobuf_MSVC_STATIC_RUNTIME OFF CACHE BOOL "use dynamic msvc runtime for protobuf by default, /MD")
+elseif(${MSVC_RUNTIME_LIBRARY} MATCHES "*DLL*")
+  set(protobuf_MSVC_STATIC_RUNTIME OFF CACHE BOOL "use dynamic msvc runtime for protobuf, /MD")
+else()
+  set(protobuf_MSVC_STATIC_RUNTIME OFF CACHE BOOL "use static msvc runtime for protobuf, /MT")
+endif()
 set(protobuf_BUILD_TESTS OFF CACHE BOOL "disable protobuf tests")
+# TODO: enable ZLIB
 set(protobuf_WITH_ZLIB OFF CACHE BOOL "disable zlib for protobuf")
 set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "disable protobuf build shared libs")
 set(protobuf_BUILD_EXAMPLES OFF CACHE BOOL "disable protobuf examples")

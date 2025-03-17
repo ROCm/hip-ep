@@ -30,7 +30,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/dynamic_vaip_config.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/proto.cmake)
 # MorphiZen must be build along with onnxruntime source tree
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/find_onnxruntime.cmake)
-add_library(vaip_core_objects OBJECT
+add_library(vaip_core_static STATIC
   ${PROTO_SRCS} ${PROTO_HDRS})
 set_target_properties(vaip_core_objects PROPERTIES FOLDER vaip)
 
@@ -61,10 +61,7 @@ add_custom_command (
   "${VAIP_JSON_CONFIG_FILE}" ON "${VAIP_XCLBIN_DIR}"
 )
 
-if(MSVC)
-  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
-endif()
-target_sources(vaip_core_objects PRIVATE
+target_sources(vaip_core_static PRIVATE
   src/getenv.cpp
   src/getenv.c
   include/vaip/vaip_plugin.hpp
@@ -167,15 +164,15 @@ target_sources(vaip_core_objects PRIVATE
   src/onnxruntime_vitisai_ep.cpp
 )
 if(MSVC)
-  target_sources(vaip_core_objects PRIVATE
+  target_sources(vaip_core_static PRIVATE
     src/vaip_plugin_win.cpp
     src/util_mswin.cpp)
 else(MSVC)
-  target_sources(vaip_core_objects PRIVATE
+  target_sources(vaip_core_static PRIVATE
     src/vaip_plugin_lnx.cpp
     src/util_linux.cpp)
 endif(MSVC)
-target_include_directories(vaip_core_objects
+target_include_directories(vaip_core_static
   PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
@@ -184,33 +181,27 @@ target_include_directories(vaip_core_objects
   $<BUILD_INTERFACE:${VAIP_ORT_API_DIR}>
   PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../3rd-party
-  ${GSL_SOURCE_DIR}/include
-  ${zlib_BINARY_DIR} 
   ${zlib_SOURCE_DIR}
-  ${nlohmann_json_SOURCE_DIR}/include
+  ${zlib_BINARY_DIR}
 )
-add_library(vaip_core_static STATIC $<TARGET_OBJECTS:vaip_core_objects>)
+
 set_target_properties(vaip_core_static PROPERTIES FOLDER vaip)
-add_library(vaip_core_dynamic SHARED $<TARGET_OBJECTS:vaip_core_objects>)
 set_target_properties(vaip_core_dynamic PROPERTIES FOLDER vaip)
+add_library(vaip_core_dynamic SHARED src/main.cpp)
+
 # set output name of vaip_core_dynamic, it is required by VitisAI EP.
 set_target_properties(vaip_core_dynamic PROPERTIES OUTPUT_NAME onnxruntime_vitisai_ep)
 
 if(MSVC)
   find_program(DUMPBIN_EXECUTABLE dumpbin REQUIRED)
   add_custom_command(
-    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/vaip_core_symbol.txt"
-    COMMAND "${DUMPBIN_EXECUTABLE}" "/symbols" "$<TARGET_FILE:vaip::core>" > "${CMAKE_CURRENT_BINARY_DIR}/vaip_core_symbol.txt"
-    )
-
-  add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime_vitisai_ep.def
+    COMMAND "${DUMPBIN_EXECUTABLE}" "/symbols" "$<TARGET_FILE:vaip_core_static>" > "${CMAKE_CURRENT_BINARY_DIR}/vaip_core_symbol.txt"
     COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/dump_symbol.py
       ${CMAKE_CURRENT_BINARY_DIR}/vaip_core_symbol.txt
       ${CMAKE_CURRENT_SOURCE_DIR}/onnxruntime_vitisai_ep.def.in
       ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime_vitisai_ep.def
-      $<TARGET_LINKER_LIBRARY_FILE:vaip_core_dynamic>
-    DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/vaip_core_symbol.txt" ${CMAKE_CURRENT_SOURCE_DIR}/onnxruntime_vitisai_ep.def.in
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/dump_symbol.py ${CMAKE_CURRENT_SOURCE_DIR}/onnxruntime_vitisai_ep.def.in $<TARGET_LINKER_LIBRARY_FILE:vaip_core_static>
   )
   target_sources(vaip_core_dynamic PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime_vitisai_ep.def)
 endif(MSVC)
@@ -219,22 +210,26 @@ if(BUILD_SHARED_LIBS)
 else(BUILD_SHARED_LIBS)
   add_library (vaip::core ALIAS vaip_core_static)
 endif(BUILD_SHARED_LIBS)
-set(MorphiZen_DEPS protobuf::libprotobuf glog::glog Eigen3::Eigen encryption)
-target_link_libraries(vaip_core_objects PUBLIC ${MorphiZen_DEPS})
-target_compile_definitions(vaip_core_objects PUBLIC "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1" "-DONNX_NAMESPACE=onnx")
-target_link_libraries(vaip_core_dynamic PRIVATE  ${MorphiZen_DEPS} ZLIB::ZLIB nlohmann_json::nlohmann_json)
+set(MorphiZen_DEPS protobuf::libprotobuf
+  glog::glog Eigen3::Eigen encryption ZLIB::ZLIB nlohmann_json::nlohmann_json Microsoft.GSL::GSL)
+if(TARGET ZLIB::ZLIB)
+  message(STATUS "XXX found ZLIB::ZLIB")
+else()
+  message(STATUS "XXX cannot find ZLIB::ZLIB, fetch it from ${DEP_URL_zlib}")
+endif()
 target_link_libraries(vaip_core_static PUBLIC ${MorphiZen_DEPS})
-target_include_directories(vaip_core_dynamic PUBLIC $<TARGET_PROPERTY:vaip_core_objects,INTERFACE_INCLUDE_DIRECTORIES>)
-target_include_directories(vaip_core_static PUBLIC $<TARGET_PROPERTY:vaip_core_objects,INTERFACE_INCLUDE_DIRECTORIES>)
+target_compile_definitions(vaip_core_static PUBLIC "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1" "-DONNX_NAMESPACE=onnx")
+target_link_libraries(vaip_core_dynamic PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vaip_core_static>")
+target_include_directories(vaip_core_dynamic PUBLIC $<TARGET_PROPERTY:vaip_core_static,INTERFACE_INCLUDE_DIRECTORIES>)
 
-install(
-  TARGETS vaip_core_static vaip_core_objects
-  EXPORT vaip-core-targets
-  RUNTIME DESTINATION bin
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib)
-install(
-  EXPORT vaip-core-targets
-  NAMESPACE ${PROJECT_NAME}::
-  COMPONENT base
-  DESTINATION share/cmake/${PROJECT_NAME})
+# install(
+#   TARGETS vaip_core_dynamic
+#   EXPORT vaip-core-targets
+#   RUNTIME DESTINATION bin
+#   ARCHIVE DESTINATION lib
+#   LIBRARY DESTINATION lib)
+# install(
+#   EXPORT vaip-core-targets
+#   NAMESPACE ${PROJECT_NAME}::
+#   COMPONENT base
+#   DESTINATION share/cmake/${PROJECT_NAME})
