@@ -32,7 +32,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/proto.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/find_onnxruntime.cmake)
 add_library(vaip_core_static STATIC
   ${PROTO_SRCS} ${PROTO_HDRS})
-set_target_properties(vaip_core_objects PROPERTIES FOLDER vaip)
+set_target_properties(vaip_core_static PROPERTIES FOLDER vaip)
 
 vaip_add_remote_target(
   FILE ${CMAKE_CURRENT_BINARY_DIR}/tar.h
@@ -185,9 +185,8 @@ target_include_directories(vaip_core_static
   ${zlib_BINARY_DIR}
 )
 
-set_target_properties(vaip_core_static PROPERTIES FOLDER vaip)
-set_target_properties(vaip_core_dynamic PROPERTIES FOLDER vaip)
 add_library(vaip_core_dynamic SHARED src/main.cpp)
+set_target_properties(vaip_core_dynamic PROPERTIES FOLDER vaip)
 
 # set output name of vaip_core_dynamic, it is required by VitisAI EP.
 set_target_properties(vaip_core_dynamic PROPERTIES OUTPUT_NAME onnxruntime_vitisai_ep)
