@@ -32,6 +32,8 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/proto.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/find_onnxruntime.cmake)
 add_library(vaip_core_objects OBJECT
   ${PROTO_SRCS} ${PROTO_HDRS})
+set_target_properties(vaip_core_objects PROPERTIES FOLDER vaip)
+
 vaip_add_remote_target(
   FILE ${CMAKE_CURRENT_BINARY_DIR}/tar.h
   URL https://raw.githubusercontent.com/freebsd/freebsd-src/refs/heads/stable/12/bin/pax/tar.h
@@ -181,7 +183,9 @@ target_include_directories(vaip_core_objects
   ${CMAKE_CURRENT_SOURCE_DIR}/../3rd-party
 )
 add_library(vaip_core_static STATIC $<TARGET_OBJECTS:vaip_core_objects>)
+set_target_properties(vaip_core_static PROPERTIES FOLDER vaip)
 add_library(vaip_core_dynamic SHARED $<TARGET_OBJECTS:vaip_core_objects>)
+set_target_properties(vaip_core_dynamic PROPERTIES FOLDER vaip)
 # set output name of vaip_core_dynamic, it is required by VitisAI EP.
 set_target_properties(vaip_core_dynamic PROPERTIES OUTPUT_NAME onnxruntime_vitisai_ep)
 

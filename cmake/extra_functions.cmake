@@ -31,7 +31,7 @@ endfunction()
 
 function(vai_add_library)
   set(options)
-  set(oneValueArgs NAME INCLUDE_DIR SRC_DIR TEST_DIR SKIP_INSTALL)
+  set(oneValueArgs NAME VS_FOLDER INCLUDE_DIR SRC_DIR TEST_DIR SKIP_INSTALL)
   set(multiValueArgs SRCS DEPENDS)
   cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}"
                         ${ARGN})
@@ -54,6 +54,12 @@ function(vai_add_library)
   endif(NOT ARG_TEST_DIR)
   # end check test dir
 
+  # start to check IDE folder
+  if(NOT ARG_VS_FOLDER)
+    set(ARG_VS_FOLDER "vaip")
+  endif(NOT ARG_VS_FOLDER)
+  # end check IDE folder
+
   # start check target name
   if(NOT ARG_NAME)
     get_filename_component(ARG_NAME "${CMAKE_CURRENT_SOURCE_DIR}" NAME)
@@ -68,6 +74,7 @@ function(vai_add_library)
   add_library(${ARG_NAME} ${ARG_SRCS})
   # create alias
   add_library(${PROJECT_NAME}::${ARG_NAME} ALIAS ${ARG_NAME})
+  set_target_properties(${ARG_NAME} PROPERTIES FOLDER ${ARG_VS_FOLDER})
 
   target_link_libraries(${ARG_NAME} PUBLIC ${ARG_DEPENDS})
   # target_link_libraries(${ARG_NAME} PUBLIC -ltvm)

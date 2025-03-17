@@ -29,6 +29,7 @@ vaip_add_remote_target(
   URL https://xcoartifactory.xilinx.com/artifactory/PHX_test_case_package/vaip_model/pt_resnet50.onnx
   EXPECTED_MD5 3f97582a85b8ae1be41127f326bbf9b2
 )
+set_target_properties(pt_resnet50.onnx PROPERTIES FOLDER unit_test)
 
 configure_file(debug_logger.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/debug_logger.hpp @ONLY)
 configure_file(unit_test_env_params.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/unit_test_env_params.hpp @ONLY)
@@ -63,6 +64,7 @@ target_link_libraries(${TEST_EXE_NAME}
     GTest::gtest
     onnxruntime::onnxruntime 
     glog::glog)
+set_target_properties(${TEST_EXE_NAME} PROPERTIES FOLDER unit_test)
 target_compile_definitions(${TEST_EXE_NAME} PRIVATE -DONNX_NAMESPACE=onnx)
 file(TO_NATIVE_PATH "${RESNET_50_ONNX_PATH}" RESNET_50_ONNX_PATH)
 string(REPLACE "\\" "\\\\" RESNET_50_ONNX_PATH "${RESNET_50_ONNX_PATH}")
@@ -102,3 +104,15 @@ gtest_discover_tests(${TEST_EXE_NAME} DISCOVERY_MODE "POST_BUILD" PROPERTIES
   ${TEST_ENV}
   DISCOVERY_MODE "PRE_TEST"
 )
+if(MSVC)
+  add_custom_command(
+    TARGET ${TEST_EXE_NAME}
+    POST_BUILD
+    COMMAND
+      ${CMAKE_COMMAND} -E copy
+      ${CMAKE_INSTALL_PREFIX}/bin/onnxruntime.dll
+      ${CMAKE_INSTALL_PREFIX}/bin/onnxruntime_providers_shared.dll
+      ${CMAKE_INSTALL_PREFIX}/bin/onnxruntime_providers_vitisai.dll
+      $<TARGET_FILE_DIR:${TEST_EXE_NAME}>
+  )
+endif(MSVC)

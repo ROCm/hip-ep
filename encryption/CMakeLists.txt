@@ -41,6 +41,7 @@ add_library(
   src/encryption.cpp
   src/encryption.hpp
   )
+set_target_properties(encryption PROPERTIES FOLDER vaip)
 
 target_include_directories(encryption PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../vaip-core/include
 )
@@ -53,8 +54,6 @@ if(WITH_OPENSSL)
 else()
 target_link_libraries(encryption PRIVATE glog::glog)
 endif(WITH_OPENSSL)
-
-
 
 install(
   TARGETS encryption
