@@ -102,7 +102,10 @@ else()
     )
   FetchContent_MakeAvailable(ZLIB)
   add_library(ZLIB::ZLIB ALIAS zlibstatic)
-  target_link_directories(zlibstatic PUBLIC ${zlib_BINARY_DIR} ${zlib_SOURCE_DIR})
+  # TODO: I don't know why, the following line does not work we have
+  # to set the include path explicitly in vaip_core_static
+
+  # target_link_directories(zlibstatic PUBLIC ${zlib_BINARY_DIR} ${zlib_SOURCE_DIR})
 endif()
 
 if(NOT MSVC_RUNTIME_LIBRARY)
@@ -110,7 +113,7 @@ if(NOT MSVC_RUNTIME_LIBRARY)
 elseif(${MSVC_RUNTIME_LIBRARY} MATCHES "*DLL*")
   set(protobuf_MSVC_STATIC_RUNTIME OFF CACHE BOOL "use dynamic msvc runtime for protobuf, /MD")
 else()
-  set(protobuf_MSVC_STATIC_RUNTIME OFF CACHE BOOL "use static msvc runtime for protobuf, /MT")
+  set(protobuf_MSVC_STATIC_RUNTIME ON CACHE BOOL "use static msvc runtime for protobuf, /MT")
 endif()
 set(protobuf_BUILD_TESTS OFF CACHE BOOL "disable protobuf tests")
 # TODO: enable ZLIB
