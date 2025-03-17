@@ -115,7 +115,7 @@ if(MSVC)
       $<TARGET_FILE_DIR:onnxruntime::onnxruntime>/onnxruntime_providers_vitisai.dll
       $<TARGET_FILE_DIR:${TEST_EXE_NAME}>
     COMMAND
-      ${CMAKE_COMMAND} -E copy
+      ${CMAKE_COMMAND} -E copy_if_different
       $<TARGET_FILE:onnxruntime::onnxruntime>
       $<TARGET_FILE_DIR:onnxruntime::onnxruntime>/onnxruntime_providers_shared.dll
       $<TARGET_FILE_DIR:onnxruntime::onnxruntime>/onnxruntime_providers_vitisai.dll
