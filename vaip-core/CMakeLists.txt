@@ -215,16 +215,18 @@ set(MorphiZen_DEPS protobuf::libprotobuf
 target_link_libraries(vaip_core_static PUBLIC ${MorphiZen_DEPS})
 target_compile_definitions(vaip_core_static PUBLIC "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1" "-DONNX_NAMESPACE=onnx")
 target_link_libraries(vaip_core_dynamic PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vaip_core_static>")
-target_include_directories(vaip_core_dynamic PUBLIC $<TARGET_PROPERTY:vaip_core_static,INTERFACE_INCLUDE_DIRECTORIES>)
+target_include_directories(vaip_core_dynamic PUBLIC
+  $<BUILD_INTERFACE:$<TARGET_PROPERTY:vaip_core_static,INTERFACE_INCLUDE_DIRECTORIES>>
+)
 
-# install(
-#   TARGETS vaip_core_dynamic
-#   EXPORT vaip-core-targets
-#   RUNTIME DESTINATION bin
-#   ARCHIVE DESTINATION lib
-#   LIBRARY DESTINATION lib)
-# install(
-#   EXPORT vaip-core-targets
-#   NAMESPACE ${PROJECT_NAME}::
-#   COMPONENT base
-#   DESTINATION share/cmake/${PROJECT_NAME})
+install(
+  TARGETS vaip_core_dynamic
+  EXPORT vaip-core-targets
+  RUNTIME DESTINATION bin
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib)
+install(
+  EXPORT vaip-core-targets
+  NAMESPACE ${PROJECT_NAME}::
+  COMPONENT base
+  DESTINATION share/cmake/${PROJECT_NAME})
