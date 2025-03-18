@@ -51,6 +51,7 @@ def replace_template(template_file, output_file, symbol):
 
 
 def main():
+    print(f"args = {sys.argv}")
     dumped_symbol = sys.argv[1]
     symbol = get_symbol(dumped_symbol)
     template = sys.argv[2]

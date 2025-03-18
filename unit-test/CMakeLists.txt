@@ -58,11 +58,11 @@ add_executable(${TEST_EXE_NAME}
 )
 find_package(onnxruntime REQUIRED)
 add_dependencies(${TEST_EXE_NAME} pt_resnet50.onnx)
-target_link_libraries(${TEST_EXE_NAME} 
-    PRIVATE 
-    vaip_core_dynamic 
+target_link_libraries(${TEST_EXE_NAME}
+    PRIVATE
+    vaip_core_dynamic
     GTest::gtest
-    onnxruntime::onnxruntime 
+    onnxruntime::onnxruntime
     glog::glog)
 set_target_properties(${TEST_EXE_NAME} PROPERTIES FOLDER unit_test)
 target_compile_definitions(${TEST_EXE_NAME} PRIVATE -DONNX_NAMESPACE=onnx)
@@ -109,10 +109,16 @@ if(MSVC)
     TARGET ${TEST_EXE_NAME}
     POST_BUILD
     COMMAND
-      ${CMAKE_COMMAND} -E copy
-      ${CMAKE_INSTALL_PREFIX}/bin/onnxruntime.dll
-      ${CMAKE_INSTALL_PREFIX}/bin/onnxruntime_providers_shared.dll
-      ${CMAKE_INSTALL_PREFIX}/bin/onnxruntime_providers_vitisai.dll
+      ${CMAKE_COMMAND} -E echo "COPYING ..."
+      $<TARGET_FILE:onnxruntime::onnxruntime>
+      $<TARGET_FILE_DIR:onnxruntime::onnxruntime>/onnxruntime_providers_shared.dll
+      $<TARGET_FILE_DIR:onnxruntime::onnxruntime>/onnxruntime_providers_vitisai.dll
+      $<TARGET_FILE_DIR:${TEST_EXE_NAME}>
+    COMMAND
+      ${CMAKE_COMMAND} -E copy_if_different
+      $<TARGET_FILE:onnxruntime::onnxruntime>
+      $<TARGET_FILE_DIR:onnxruntime::onnxruntime>/onnxruntime_providers_shared.dll
+      $<TARGET_FILE_DIR:onnxruntime::onnxruntime>/onnxruntime_providers_vitisai.dll
       $<TARGET_FILE_DIR:${TEST_EXE_NAME}>
   )
 endif(MSVC)

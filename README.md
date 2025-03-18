@@ -17,6 +17,7 @@ Clone the repository:
 ```bash
 git clone git@gitenterprise.xilinx.com:aisw/MorphiZen.git
 cd MorphiZen
+git submodule upgrade --init
 mkdir build
 cd build
 cmake ..
