@@ -31,15 +31,15 @@
  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
-#include "vaip/util.hpp"
+#include "morphizen/util.hpp"
 #include <cstdio>
 
 #include <glog/logging.h>
 
-#include "vaip/graph.hpp"
+#include "morphizen/graph.hpp"
 #include <vaip/vaip_ort_api.h>
 
-#include "vitis/ai/env_config.hpp"
+#include "morphizen/env_config.hpp"
 #include <cmath>
 #include <filesystem>
 #include <fstream>

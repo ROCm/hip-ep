@@ -35,9 +35,12 @@ def get_symbol(file):
             continue
         symbol_set.add(symbol)
     ret = ""
+    symbol_set = sorted(symbol_set)
+    counter = 100
     for symbol in symbol_set:
-        ret += symbol
+        ret += symbol + f" @{counter}"
         ret += "\n"
+        counter += 1
     return ret
 
 

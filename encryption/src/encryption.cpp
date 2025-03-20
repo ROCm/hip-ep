@@ -31,7 +31,7 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
-#include "encryption.hpp"
+#include "vaip/encryption.hpp"
 #include <memory>
 #ifdef WITH_OPENSSL
 #  include <openssl/aes.h>
@@ -39,7 +39,7 @@
 #  include <openssl/err.h>
 #  include <openssl/evp.h>
 #endif
-#include "vaip/vaip_io.hpp"
+#include "morphizen/vaip_io.hpp"
 #include <algorithm>
 #include <array>
 #include <glog/logging.h>

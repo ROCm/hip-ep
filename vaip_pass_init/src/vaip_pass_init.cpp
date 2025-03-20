@@ -34,8 +34,8 @@
 
 #include <glog/logging.h>
 
-#include "vaip/vaip.hpp"
-#include "vitis/ai/env_config.hpp"
+#include "morphizen/env_config.hpp"
+#include "morphizen/vaip.hpp"
 using namespace vaip_core;
 DEF_ENV_PARAM(XLNX_ENABLE_DUMP_ONNX_MODEL, "0")
 

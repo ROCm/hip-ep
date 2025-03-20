@@ -37,13 +37,13 @@
 #include <glog/logging.h>
 
 #include "./pattern_constant.hpp"
-#include "vaip/node_arg.hpp"
-#include "vaip/node.hpp"
-#include "vaip/util.hpp"
+#include "morphizen/node_arg.hpp"
+#include "morphizen/node.hpp"
+#include "morphizen/util.hpp"
 #include <vaip/vaip_ort_api.h>
 
 #include "./pattern_log.hpp"
-#include "vaip/pattern.pb.h"
+#include "morphizen/pattern.pb.h"
 
 namespace vaip_core {
 

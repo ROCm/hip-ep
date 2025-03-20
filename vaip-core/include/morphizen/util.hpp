@@ -35,10 +35,10 @@
 #pragma once
 #include "./_sanity_check.hpp"
 #include <filesystem>
+#include <morphizen/vaip_io.hpp>
 #include <sstream>
 #include <vaip/my_ort.h>
 #include <vaip/vaip_gsl.h>
-#include <vaip/vaip_io.hpp>
 #ifdef _WIN32
 #  define fseek64 _fseeki64
 #  define ftell64 _ftelli64
@@ -157,4 +157,8 @@ uncompress(const IStreamReader& src);
 
 VAIP_DLL_SPEC std::unique_ptr<IStreamReader>
 context_cache_files_to_tar_stream(class PassContext& context);
+
+// TODO: defined vitisai_compile_model.cpp
+VAIP_DLL_SPEC std::string get_md5_of_file(const std::filesystem::path& path);
+VAIP_DLL_SPEC std::string get_md5_of_buffer(const char* buffer, size_t size);
 } // namespace vaip_core

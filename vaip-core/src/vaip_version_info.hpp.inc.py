@@ -16,7 +16,7 @@ PROJECTS = [
     "vart",
     "dod",
 ]
-def main(workspace_directory):
+def main2(workspace_directory):
     output_file ="vaip_version_info.hpp.inc"
     with open(output_file, "w") as f:
         for project in PROJECTS:
@@ -32,6 +32,22 @@ def main(workspace_directory):
                 {{"{project_name}", "{git_commit_id}", "{project_version_id}"}},
             """
             f.write(output)
+
+def main(release_file):
+    output_file ="vaip_version_info.hpp.inc"
+    with open(output_file, "w") as f_out:
+        with open(release_file, "r") as f_in:
+            for line in f_in.readlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith("#"):
+                    continue
+                project_name, git_commit_id, project_version_id = line.split(";")
+                output = f"""
+                {{"{project_name}", "{git_commit_id}", "{project_version_id}"}},
+                """
+                f_out.write(output)
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:

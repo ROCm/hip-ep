@@ -32,20 +32,20 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
-#include "vaip/pass.hpp"
+#include "morphizen/pass.hpp"
 #define VAIP_USE_DEPRECATED_API 1
-#include "vaip/anchor_point.hpp"
-#include "vaip/graph.hpp"
-#include "vaip/node.hpp"
-#include "vaip/node_arg.hpp"
-#include "vaip/node_attr.hpp"
-#include "vaip/tensor_proto.hpp"
-#include "vaip/util.hpp"
+#include "morphizen/anchor_point.hpp"
+#include "morphizen/graph.hpp"
+#include "morphizen/node.hpp"
+#include "morphizen/node_arg.hpp"
+#include "morphizen/node_attr.hpp"
+#include "morphizen/tensor_proto.hpp"
+#include "morphizen/util.hpp"
+#include "morphizen/vaip.hpp"
 #include <cstdint>
 #include <glog/logging.h>
 #include <vaip/my_ort.h>
-#include <vaip/vaip_core.hpp>
-#include <vitis/ai/env_config.hpp>
+
 DEF_ENV_PARAM(DEBUG_NODE_BUILDER, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_NODE_BUILDER) >= n)
 namespace vaip_core {

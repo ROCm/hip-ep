@@ -35,7 +35,7 @@
 #pragma once
 #include <regex>
 
-#include "vaip/pattern.hpp"
+#include "morphizen/pattern.hpp"
 namespace vaip_core {
 
 class PatternOr : public Pattern {

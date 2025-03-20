@@ -38,12 +38,15 @@ endif(WITH_OPENSSL)
 add_library(
   encryption
   STATIC
+  include/vaip/encryption.hpp
   src/encryption.cpp
-  src/encryption.hpp
   )
+add_library(vaip::encryption ALIAS encryption)
 set_target_properties(encryption PROPERTIES FOLDER vaip)
 
 target_include_directories(encryption PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../vaip-core/include
+  PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 if(WITH_OPENSSL)
   target_compile_definitions(encryption PUBLIC -DWITH_OPENSSL)

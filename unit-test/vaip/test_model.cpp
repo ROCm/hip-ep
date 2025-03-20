@@ -38,7 +38,7 @@
 #include <gtest/gtest.h>
 #include <limits>
 //
-#include "vaip/vaip.hpp"
+#include "morphizen/vaip.hpp"
 
 class ModelTest : public DebugLogger {};
 TEST_F(ModelTest, Load) {

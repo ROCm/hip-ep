@@ -1,8 +1,7 @@
 #include <cstdlib>
 #include <string>
 extern "C" const char* vitis_ai_getenv_s(const char* name);
-namespace vitis {
-namespace ai {
+namespace morphizen {
 std::string my_getenv_s(const char* name,
                         const std::string& default_value = "") {
   auto ret = std::string();
@@ -17,5 +16,4 @@ std::string my_getenv_s(const char* name,
   }
   return ret;
 }
-}  // namespace ai
-}  // namespace vitis
+} // namespace morphizen

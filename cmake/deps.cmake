@@ -7,7 +7,7 @@ file(STRINGS ${CMAKE_CURRENT_LIST_DIR}/deps.txt VAIP_DEPS_LIST)
 file(READ "${CMAKE_CURRENT_LIST_DIR}/dep.h.inc.in" VAIP_DEP_H_INC_IN)
 set(VAIP_DEP_H_INC "")
 foreach(VAIP_DEP IN LISTS VAIP_DEPS_LIST)
-  message("VAIP_DEP = ${VAIP_DEP}")
+  message(STATUS "VAIP_DEP = ${VAIP_DEP}")
   # Lines start with "#" are comments
   if(NOT VAIP_DEP MATCHES "^#")
     # The first column is name
@@ -120,7 +120,9 @@ set(protobuf_BUILD_TESTS OFF CACHE BOOL "disable protobuf tests")
 set(protobuf_WITH_ZLIB OFF CACHE BOOL "disable zlib for protobuf")
 set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "disable protobuf build shared libs")
 set(protobuf_BUILD_EXAMPLES OFF CACHE BOOL "disable protobuf examples")
-find_package(Protobuf QUIET)
+## it is error-prone to use MODULE mode to find protobuf,
+## Protobuf_USE_STATIC_LIBS must be defined.
+find_package(Protobuf CONFIG QUIET)
 if(TARGET protobuf::libprotobuf)
   get_target_property(TMP protobuf::libprotobuf LOCATION)
   message(STATUS "found protobuf at ${TMP}")
@@ -156,3 +158,6 @@ endif()
 ## in order to build it, we need to run some python scripts to
 ## generate some source code.
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+if(NOT TARGET Python3::Interpreter)
+  message(FATAL_ERROR "Python3::Interpreter not found")
+endif(NOT TARGET Python3::Interpreter)

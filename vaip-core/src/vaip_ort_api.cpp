@@ -32,10 +32,10 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 //
-#include <vaip/vaip_ort_api.h>
+#include "morphizen/onnxruntime_api.hpp"
 #include <glog/logging.h>
 #include <memory>
-#include <vaip/onnxruntime_api.hpp>
+#include <vaip/vaip_ort_api.h>
 namespace vaip_core {
 
 unsigned int get_vaip_version_major() {

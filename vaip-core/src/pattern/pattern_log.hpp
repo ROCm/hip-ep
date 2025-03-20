@@ -31,9 +31,9 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 #pragma once
-#include "vaip/node.hpp"
-#include "vaip/node_arg.hpp"
-#include "vitis/ai/env_config.hpp"
+#include "morphizen/node.hpp"
+#include "morphizen/node_arg.hpp"
+#include "morphizen/env_config.hpp"
 #include <glog/logging.h>
 DEF_ENV_PARAM(DEBUG_VAIP_PATTERN, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_VAIP_PATTERN) >= n)

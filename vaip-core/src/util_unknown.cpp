@@ -31,7 +31,7 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
-#include "vaip/util.hpp"
+#include "morphizen/util.hpp"
 namespace vaip_core {
 VAIP_DLL_SPEC std::filesystem::path get_vaip_path() { return {}; }
 } // namespace vaip_core

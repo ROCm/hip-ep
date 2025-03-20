@@ -34,10 +34,10 @@
 
 #pragma once
 #include "./_sanity_check.hpp"
-#include "vaip/graph.hpp"
-#include "vaip/my_ort.h"
+#include "morphizen/graph.hpp"
 #include <memory>
 #include <string>
+#include <vaip/my_ort.h>
 
 namespace vaip_core {
 VAIP_DLL_SPEC ModelPtr model_load(const std::string& filename);

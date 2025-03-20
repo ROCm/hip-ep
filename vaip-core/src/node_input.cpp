@@ -32,7 +32,7 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
-#include "vaip/node_input.hpp"
+#include "morphizen/node_input.hpp"
 
 namespace vaip_cxx {
 NodeInput::NodeInput(const GraphConstRef graph,

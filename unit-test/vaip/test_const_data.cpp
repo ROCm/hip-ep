@@ -38,7 +38,7 @@
 #include <limits>
 //
 #include "unit_test_env_params.hpp"
-#include "vaip/vaip.hpp"
+#include "morphizen/vaip.hpp"
 
 class ConstDataTest : public DebugLogger {
 public:

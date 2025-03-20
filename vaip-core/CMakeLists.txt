@@ -22,11 +22,8 @@
 #    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 #    OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
 #
-set(VAIP_XCLBIN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../vaip_xclbin CACHE PATH "Path to the directory containing xclbin files")
-set(VAIP_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/etc/vaip_config.json" CACHE PATH "Path to the file containing vaip_config.json files")
 
 message(STATUS "VAIP_XCLBIN_DIR : ${VAIP_XCLBIN_DIR}")
-include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/dynamic_vaip_config.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/proto.cmake)
 # MorphiZen must be build along with onnxruntime source tree
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/find_onnxruntime.cmake)
@@ -40,9 +37,12 @@ vaip_add_remote_target(
   EXPECTED_MD5 eab89f86c63edb8e9dec2ea8faf5ebe2
   PATCH_FILES ${CMAKE_CURRENT_SOURCE_DIR}/patches/tar.h.force_align_1.patch
 )
-if(NOT TARGET Python3::Interpreter)
-  message(FATAL_ERROR "Python3::Interpreter not found")
-endif(NOT TARGET Python3::Interpreter)
+
+vaip_add_remote_target(
+  FILE ${CMAKE_CURRENT_BINARY_DIR}/xclbin.h
+  URL https://raw.githubusercontent.com/Xilinx/XRT/347acbd5e2b2d658ecd21d024547703fccc5572c/src/runtime_src/core/include/xclbin.h
+  EXPECTED_MD5 a3eb400c4836d01a59b7c5bb3ddd83e3
+)
 add_custom_command (
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/mem_xclbin_file.hpp.inc
   COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../tools"
@@ -52,7 +52,7 @@ add_custom_command (
 )
 add_custom_command (
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/vaip_version_info.hpp.inc
-  COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/src/vaip_version_info.hpp.inc.py "${CMAKE_CURRENT_SOURCE_DIR}/../.."
+  COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/src/vaip_version_info.hpp.inc.py "${VAIP_VERSEION_INFO_FILE}"
 )
 add_custom_command (
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/config_json_binary.hpp
@@ -64,45 +64,48 @@ add_custom_command (
 target_sources(vaip_core_static PRIVATE
   src/getenv.cpp
   src/getenv.c
-  include/vaip/vaip_plugin.hpp
+  include/morphizen/vaip_plugin.hpp
   src/vaip_plugin.cpp
-  include/vaip/vaip.hpp
-  include/vaip/_sanity_check.hpp
-  include/vaip/vaip_io.hpp
+  include/morphizen/vaip.hpp
+  include/morphizen/_sanity_check.hpp
+  include/morphizen/vaip_io.hpp
   src/vaip_io.cpp
   src/vaip_ort_api.cpp
-  include/vaip/pass_context.hpp
+  include/morphizen/pass_context.hpp
   src/pass_context_imp.hpp
   src/pass_context_imp.cpp
   src/anchor_point.cpp
   src/anchor_point_imp.cpp
   src/anchor_point_imp.hpp
-  include/vaip/anchor_point.hpp
+  include/morphizen/anchor_point.hpp
   src/pass_imp.hpp
   src/pass_imp.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/tar.h
   src/tar_ball.cpp
-  include/vaip/pass.hpp
+  include/morphizen/pass.hpp
   src/pass.cpp
-  include/vaip/model.hpp
+  include/morphizen/model.hpp
   src/model.cpp
-  include/vaip/graph.hpp
+  include/morphizen/graph.hpp
   src/graph.cpp
-  include/vaip/node_attr.hpp
+  include/morphizen/node_attr.hpp
   src/node_attr.cpp
-  include/vaip/node_arg.hpp
+  include/morphizen/node_arg.hpp
   src/node_arg.cpp
-  include/vaip/tensor_proto.hpp
+  include/morphizen/tensor_proto.hpp
   src/tensor_proto.cpp
-  include/vaip/node_input.hpp
+  include/morphizen/node_input.hpp
   src/node_input.cpp
-  include/vaip/node.hpp
+  include/morphizen/node.hpp
   src/node.cpp
   src/profile_utils.hpp
   src/profile_utils.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/mem_xclbin_file.hpp.inc
-  include/vaip/mem_xclbin.hpp
+  include/morphizen/mem_xclbin.hpp
   src/xclbin/mem_xclbin.cpp
+  ${CMAKE_CURRENT_BINARY_DIR}/xclbin.h
+  include/morphizen/xclbin_file.hpp
+  src/xclbin/xclbin_file.cpp
   src/util.cpp
   src/cache_dir.cpp
   src/cache_dir.hpp
@@ -110,7 +113,7 @@ target_sources(vaip_core_static PRIVATE
   src/config.hpp
   src/config.cpp
   src/custom_op.cpp
-  include/vaip/pattern.hpp
+  include/morphizen/pattern.hpp
   src/pattern/pattern.cpp
   src/pattern/pattern_node.cpp
   src/pattern/pattern_node.hpp
@@ -128,7 +131,7 @@ target_sources(vaip_core_static PRIVATE
   src/pattern/pattern_graph_input.hpp
   src/pattern/pattern_where.cpp
   src/pattern/pattern_where.hpp
-  include/vaip/rewrite_rule.hpp
+  include/morphizen/rewrite_rule.hpp
   src/rewrite_rule.cpp
   src/xir_ops/xir_ops_defs.hpp
   src/xir_ops/xir_ops_defs.cpp
@@ -137,9 +140,9 @@ target_sources(vaip_core_static PRIVATE
   src/stat.hpp
   src/file_lock.hpp
   src/file_lock.cpp
-  include/vaip/transpose.hpp
+  include/morphizen/transpose.hpp
   src/transpose.cpp
-  include/vaip/guess_reshape.hpp
+  include/morphizen/guess_reshape.hpp
   src/guess_reshape.cpp
   ../3rd-party/hash-library/crc32.cpp
   ../3rd-party/hash-library/crc32.h
@@ -155,7 +158,7 @@ target_sources(vaip_core_static PRIVATE
   ../3rd-party/hash-library/sha256.h
   ../3rd-party/hash-library/sha3.cpp
   ../3rd-party/hash-library/sha3.h
-  include/vaip/config_reader.hpp
+  include/morphizen/config_reader.hpp
   src/xclbin/config_reader.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/config_json_binary.hpp
   src/vitisai_compile_model.cpp
@@ -192,6 +195,7 @@ set_target_properties(vaip_core_dynamic PROPERTIES FOLDER vaip)
 set_target_properties(vaip_core_dynamic PROPERTIES OUTPUT_NAME onnxruntime_vitisai_ep)
 
 if(MSVC)
+  # TODO: dumpbin is optional
   find_program(DUMPBIN_EXECUTABLE dumpbin REQUIRED)
   add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime_vitisai_ep.def
@@ -202,24 +206,25 @@ if(MSVC)
       ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime_vitisai_ep.def
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/dump_symbol.py ${CMAKE_CURRENT_SOURCE_DIR}/onnxruntime_vitisai_ep.def.in $<TARGET_LINKER_LIBRARY_FILE:vaip_core_static>
   )
-  target_sources(vaip_core_dynamic PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime_vitisai_ep.def)
+  add_custom_target(vaip_core_dynamic_def DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime_vitisai_ep.def)
+  target_sources(vaip_core_dynamic PRIVATE onnxruntime_vitisai_ep.def)
+  set_target_properties(vaip_core_dynamic_def PROPERTIES FOLDER vaip)
+  add_dependencies(vaip_core_dynamic  vaip_core_dynamic_def)
 endif(MSVC)
-if(BUILD_SHARED_LIBS)
-  add_library (vaip::core ALIAS vaip_core_dynamic)
-else(BUILD_SHARED_LIBS)
-  add_library (vaip::core ALIAS vaip_core_static)
-endif(BUILD_SHARED_LIBS)
+
 set(MorphiZen_DEPS protobuf::libprotobuf
   glog::glog Eigen3::Eigen encryption ZLIB::ZLIB nlohmann_json::nlohmann_json Microsoft.GSL::GSL)
 target_link_libraries(vaip_core_static PUBLIC ${MorphiZen_DEPS})
-target_compile_definitions(vaip_core_static PUBLIC "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1" "-DONNX_NAMESPACE=onnx")
+target_compile_definitions(vaip_core_static
+  PRIVATE "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1"
+  PUBLIC "-DONNX_NAMESPACE=onnx")
 target_link_libraries(vaip_core_dynamic PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,vaip_core_static>")
 target_include_directories(vaip_core_dynamic PUBLIC
   $<BUILD_INTERFACE:$<TARGET_PROPERTY:vaip_core_static,INTERFACE_INCLUDE_DIRECTORIES>>
 )
 
 install(
-  TARGETS vaip_core_dynamic
+  TARGETS vaip_core_dynamic vaip_core_static
   EXPORT vaip-core-targets
   RUNTIME DESTINATION bin
   ARCHIVE DESTINATION lib
@@ -229,3 +234,17 @@ install(
   NAMESPACE ${PROJECT_NAME}::
   COMPONENT base
   DESTINATION share/cmake/${PROJECT_NAME})
+
+# install(
+#   FILES ${CMAKE_CURRENT_BINARY_DIR}/config.pb.h
+#         ${CMAKE_CURRENT_BINARY_DIR}/anchor_point.pb.h
+#         ${CMAKE_CURRENT_BINARY_DIR}/capability.pb.h
+#         ${CMAKE_CURRENT_BINARY_DIR}/pass_context.pb.h
+#         ${CMAKE_CURRENT_BINARY_DIR}/version.pb.h
+#   DESTINATION include/vaip)
+
+
+# foreach(CONFIG_FILE IN LISTS CONFIG_FILE_LIST)
+#   install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${CONFIG_FILE} DESTINATION bin)
+# endforeach()
+# #

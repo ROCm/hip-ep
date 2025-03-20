@@ -30,5 +30,5 @@ project(
   VERSION 1.0.0
   LANGUAGES C CXX)
 
-vai_add_library(NAME pass_init INCLUDE_DIR include SRCS src/vaip_pass_init.cpp)
-target_link_libraries(pass_init PRIVATE vaip::core glog::glog)
+morphi_zen_add_library(NAME pass_init INCLUDE_DIR include SRCS src/vaip_pass_init.cpp)
+target_link_libraries(pass_init PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,vaip_core_static>)

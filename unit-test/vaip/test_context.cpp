@@ -39,5 +39,5 @@
 #include <gtest/gtest.h>
 #include <limits>
 //
-#include "vaip/vaip.hpp"
+#include "morphizen/vaip.hpp"
 class ContextTest : public DebugLogger {};

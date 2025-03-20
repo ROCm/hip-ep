@@ -33,7 +33,7 @@
 #include "../vaip-core/src/config.hpp"
 #include "debug_logger.hpp"
 #include "unit_test_env_params.hpp"
-#include "vaip/vaip.hpp"
+#include "morphizen/vaip.hpp"
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>

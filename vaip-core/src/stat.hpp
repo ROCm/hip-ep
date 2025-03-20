@@ -31,7 +31,7 @@
  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
-#include "vaip/vaip.hpp"
+#include "morphizen/vaip.hpp"
 
 namespace vaip_core {
 StatProto& get_stat_proto();

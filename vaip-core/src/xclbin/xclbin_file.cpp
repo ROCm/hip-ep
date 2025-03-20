@@ -30,17 +30,14 @@
  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
-#include "xclbin_file.hpp"
-#include "vitis/ai/target_factory.hpp"
+#include "morphizen/xclbin_file.hpp"
 #include <fstream>
 #include <glog/logging.h>
 #include <vector>
-#ifdef ENABLE_XRT
-#  include <xclbin.h>
-#endif
+#define _KERNEL_MODE
+#  include "xclbin.h"
 
 namespace vaip_core {
-#ifdef ENABLE_XRT
 uint64_t get_fingerprint(std::istream& file,
                          const axlf_section_header& section_hdr) {
   file.seekg(section_hdr.m_sectionOffset);
@@ -113,11 +110,5 @@ get_xclbin_fingerprint(const vaip_core::PassContext& pass_context,
   auto fingerprint = get_fingerprint(*stream, section_hdr);
   return fingerprint;
 }
-#else
-std::optional<uint64_t>
-get_xclbin_fingerprint(const std::filesystem::path& filename) {
-  LOG(ERROR) << "Package built without XRT";
-  return std::nullopt;
-}
-#endif
+
 } // namespace vaip_core

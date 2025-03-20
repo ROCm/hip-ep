@@ -32,8 +32,8 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
-#include "vaip/pattern.hpp"
-#include "vaip/pattern.pb.h"
+#include "morphizen/pattern.hpp"
+#include "morphizen/pattern.pb.h"
 #include <algorithm>
 #include <bitset>
 #include <glog/logging.h>
@@ -51,9 +51,9 @@
 #include "./pattern_sequence.hpp"
 #include "./pattern_where.hpp"
 #include "./pattern_wildcard.hpp"
-#include "vaip/node.hpp"
-#include "vaip/node_arg.hpp"
-#include "vaip/util.hpp"
+#include "morphizen/node.hpp"
+#include "morphizen/node_arg.hpp"
+#include "morphizen/util.hpp"
 #ifdef ENABLE_PYTHON
 #  include <pybind11/embed.h>
 #  include <pybind11/pybind11.h>

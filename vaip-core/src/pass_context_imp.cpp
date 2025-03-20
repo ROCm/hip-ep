@@ -37,9 +37,9 @@
 #include "pass_context_imp.hpp"
 #include "profile_utils.hpp"
 #include "tar_ball.hpp"
-#include "vaip/mem_xclbin.hpp"
-#include "vaip/util.hpp"
-#include "vaip/vaip_io.hpp"
+#include "morphizen/mem_xclbin.hpp"
+#include "morphizen/util.hpp"
+#include "morphizen/vaip_io.hpp"
 
 DEF_ENV_PARAM(DEBUG_TAR_CACHE, "0")
 
@@ -564,7 +564,10 @@ PassContextImp::read_xclbin(const std::filesystem::path& path) const {
 const ConfigProto& PassContextImp::get_config_proto() const {
   return context_proto.config();
 }
-
+const ContextProto& PassContextImp::get_context_proto() const {
+  return context_proto;
+}
+ContextProto& PassContextImp::get_context_proto() { return context_proto; }
 void PassContextImp::save_context_json() const {
   ContextProto proto;
   proto.CopyFrom(this->context_proto);

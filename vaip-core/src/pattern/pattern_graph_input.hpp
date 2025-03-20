@@ -34,7 +34,7 @@
 
 #pragma once
 
-#include "vaip/pattern.hpp"
+#include "morphizen/pattern.hpp"
 namespace vaip_core {
 
 class PatternGraphInput : public Pattern {

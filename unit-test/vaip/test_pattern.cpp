@@ -39,7 +39,7 @@
 
 //
 #include "debug_logger.hpp"
-#include "vaip/vaip.hpp"
+#include "morphizen/vaip.hpp"
 
 class PatternTest : public DebugLogger {};
 

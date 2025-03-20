@@ -38,7 +38,7 @@
 #include <gtest/gtest.h>
 #include <limits>
 //
-#include "vaip/vaip.hpp"
+#include "morphizen/vaip.hpp"
 class NodeBuilderTest : public DebugLogger {};
 
 TEST_F(NodeBuilderTest, SkipSimplifiedLayerNormalization) {

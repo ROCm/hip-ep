@@ -57,7 +57,6 @@ template <typename T> OpDefInfo ProcessorOpDefInfo<T>::info = {T::process};
     void* /* a hook var*/ id##__hook = nullptr;                                \
     }
 #else
-#  include <vitis/ai/plugin.hpp>
 #  define DEFINE_VAIP_OPDEF(cls, id)                                           \
     static vaip_core::OpDefInfo* vaip_op_def_info() {                          \
       return ProcessorOpDefInfo<cls>::op_fef_info();                           \

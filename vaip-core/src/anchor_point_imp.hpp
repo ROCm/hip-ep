@@ -32,7 +32,7 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
-#include "vaip/anchor_point.hpp"
+#include "morphizen/anchor_point.hpp"
 
 namespace vaip_core_imp {
 using namespace vaip_core;

@@ -33,8 +33,8 @@
  */
 
 #define EIGEN_USE_THREADS
-#include "vaip/transpose.hpp"
-#include "vitis/ai/env_config.hpp"
+#include "morphizen/transpose.hpp"
+#include "morphizen/env_config.hpp"
 #include <glog/logging.h>
 #include <unsupported/Eigen/CXX11/Tensor>
 #include <unsupported/Eigen/CXX11/ThreadPool>
@@ -187,14 +187,12 @@ void transpose_u16(const uint16_t* src, uint16_t* dst,
   transpose0<uint16_t, std::vector<int64_t>, std::vector<int64_t>>(src, dst,
                                                                    shape, perm);
 }
-namespace xir {
-using bfloat16_t = uint16_t;
-}
+
 void transpose_bf16(const xir::bfloat16_t* src, xir::bfloat16_t* dst,
                     const std::vector<int64_t>& shape,
                     const std::vector<int64_t>& perm) {
-  transpose0<xir::bfloat16_t, std::vector<int64_t>, std::vector<int64_t>>(
-      src, dst, shape, perm);
+  transpose0<uint16_t, std::vector<int64_t>, std::vector<int64_t>>(
+      (const uint16_t*)src, (uint16_t*)dst, shape, perm);
 }
 
 void deinitialize_transpose() { tp().Clear(); }

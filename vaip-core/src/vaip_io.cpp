@@ -10,7 +10,7 @@
 #  define fseek64 fseeko
 #  define ftell64 ftello
 #endif
-#include "vaip/vaip_io.hpp"
+#include "morphizen/vaip_io.hpp"
 #include <cstdio>
 #include <cstring>
 #include <fstream>

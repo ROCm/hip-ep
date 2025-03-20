@@ -33,13 +33,13 @@
  */
 // clang-format off
 // must include graph.hpp first, because `main_graph` return vaip_cxx::Graph object by value.
-#include "vaip/graph.hpp"
+#include "morphizen/graph.hpp"
 // clang-format on
-#include "vaip/model.hpp"
+#include "morphizen/model.hpp"
 #include "glog/logging.h"
 
-#include "vaip/vaip_ort_api.h"
-#include <vitis/ai/env_config.hpp>
+#include "morphizen/env_config.hpp"
+#include <vaip/vaip_ort_api.h>
 DEF_ENV_PARAM(DEBUG_VAIP_MODEL, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_VAIP_MODEL) >= n)
 namespace vaip_core {

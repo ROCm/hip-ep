@@ -34,9 +34,9 @@
 
 #include "./pattern_wildcard.hpp"
 #include "./pattern_log.hpp"
-#include "vaip/node.hpp"
-#include "vaip/node_arg.hpp"
-#include "vaip/pattern.pb.h"
+#include "morphizen/node.hpp"
+#include "morphizen/node_arg.hpp"
+#include "morphizen/pattern.pb.h"
 namespace vaip_core {
 PatternWildcard::PatternWildcard(int id) : Pattern(id) {}
 PatternWildcard::~PatternWildcard() {}

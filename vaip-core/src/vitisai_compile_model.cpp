@@ -43,18 +43,18 @@
 #include "./file_lock.hpp"
 #include "./pass_imp.hpp"
 #include "./stat.hpp"
-#include "vaip/node.hpp"
+#include "morphizen/node.hpp"
 #include "profile_utils.hpp"
-#include "vaip/config_reader.hpp"
-#include "vaip/custom_op_imp.hpp"
-#include "vaip/graph.hpp"
-#include "vaip/model.hpp"
-#include "vaip/util.hpp"
-#include "vaip/vaip.hpp"
-#include "vaip/vaip_io.hpp"
-#include "vaip/vaip_plugin.hpp"
-#include "vitis/ai/env_config.hpp"
-#include "vitis/ai/weak.hpp"
+#include "morphizen/config_reader.hpp"
+#include "morphizen/custom_op_imp.hpp"
+#include "morphizen/graph.hpp"
+#include "morphizen/model.hpp"
+#include "morphizen/util.hpp"
+#include "morphizen/vaip.hpp"
+#include "morphizen/vaip_io.hpp"
+#include "morphizen/vaip_plugin.hpp"
+#include "morphizen/env_config.hpp"
+#include "morphizen/weak.hpp"
 #include <codecvt>
 #include <google/protobuf/util/json_util.h>
 #include <ios>
@@ -65,7 +65,7 @@
 #include <stdexcept>
 #include <stdlib.h>
 #include <string>
-#include "../../encryption/src/encryption.hpp"
+#include "vaip/encryption.hpp"
 // clang-format on
 
 #if WITH_XCOMPILER
@@ -461,7 +461,12 @@ find_signature_in_meptabel(const ConfigProto& proto,
             << md5_in_memory_a;
   return std::make_pair(md5_in_memory_a, nullptr);
 }
-static std::string get_md5_of_file(const std::filesystem::path& path) {
+std::string get_md5_of_buffer(const char* buffer, size_t size) {
+  auto MD5_computer = MD5();
+  MD5_computer.add(buffer, size);
+  return MD5_computer.getHash();
+}
+std::string get_md5_of_file(const std::filesystem::path& path) {
   if (!std::filesystem::exists(path))
     return "";
   std::ifstream file(path, std::ios::binary);
@@ -1274,7 +1279,7 @@ initialize_context_for_graph_optimizer(const std::string& model_path,
         *VAIP_ORT_API(model_get_meta_data)(model, "vaip_model_md5sum");
   } else if (!model_path.empty()) {
     *context->context_proto.mutable_config()->mutable_cache_key() =
-          get_md5_of_file(model_path);
+        get_md5_of_file(model_path);
   }
   // update cache key
   auto& cache_key = context->context_proto.config().cache_key();

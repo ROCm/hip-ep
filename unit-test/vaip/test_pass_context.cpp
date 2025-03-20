@@ -32,7 +32,7 @@
  */
 #include "debug_logger.hpp"
 #include "unit_test_env_params.hpp"
-#include "vaip/vaip.hpp" // NOLINT
+#include "morphizen/vaip.hpp" // NOLINT
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
@@ -40,7 +40,7 @@
 #include <limits>
 // clang-format off
 // NOLINTBEGIN
-#include "vaip/vaip.hpp"
+#include "morphizen/vaip.hpp"
 #include "../src/pass_context_imp.hpp"
 // NOLINTEND
 // clang-format on

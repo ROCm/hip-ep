@@ -34,9 +34,8 @@
 
 #include <glog/logging.h>
 // include glog/logging.h to define CHECK before include vaip_plugin.hpp
-#include "vaip/plugin.hpp"
-#include "vaip/vaip_plugin.hpp"
-#include "vitis/ai/weak.hpp"
+#include "morphizen/vaip_plugin.hpp"
+#include "morphizen/weak.hpp"
 
 namespace vaip_core {
 struct Tag_Plugin_Func_Set {
@@ -69,7 +68,7 @@ std::unordered_map<std::string, std::shared_ptr<Plugin>> Plugin::store_;
 Plugin* Plugin::get(const std::string& plugin_name, Plugin_Func_Set* func_set) {
   auto it = store_.find(plugin_name);
   if (it == store_.end()) {
-    store_[plugin_name] = vitis::ai::WeakStore<std::string, Plugin>::create(
+    store_[plugin_name] = morphizen::WeakStore<std::string, Plugin>::create(
         plugin_name, plugin_name.c_str(), func_set);
   }
   it = store_.find(plugin_name);

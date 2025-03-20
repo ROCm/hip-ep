@@ -35,11 +35,11 @@
 #include "./pattern_graph_input.hpp"
 #include <sstream>
 
-#include "vaip/graph.hpp"
+#include "morphizen/graph.hpp"
 #include <vaip/vaip_ort_api.h>
 
 #include "./pattern_log.hpp"
-#include "vaip/pattern.pb.h"
+#include "morphizen/pattern.pb.h"
 
 namespace vaip_core {
 PatternGraphInput::PatternGraphInput(int id) : Pattern(id) {}

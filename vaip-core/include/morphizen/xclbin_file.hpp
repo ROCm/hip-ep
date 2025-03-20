@@ -5,7 +5,6 @@
  * to the BSD open source license, it is NOT the BSD open source license nor
  * other OSI-approved open source license.
  *
- *      Copyright (C) 2022 Xilinx, Inc. All rights reserved.
  *      Copyright (C) 2023 – 2024 Advanced Micro Devices, Inc. All rights
  * reserved.
  *
@@ -31,7 +30,15 @@
  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
-
 #pragma once
-
+#include "morphizen/vaip.hpp"
+#include <cstdint>
+#include <filesystem>
+#include <optional>
 #include <string>
+namespace vaip_core {
+class PassContext;
+VAIP_DLL_SPEC std::optional<uint64_t>
+get_xclbin_fingerprint(const PassContext& pass_context,
+                       const std::filesystem::path& filename);
+} // namespace vaip_core

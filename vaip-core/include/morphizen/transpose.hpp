@@ -5,6 +5,7 @@
  * to the BSD open source license, it is NOT the BSD open source license nor
  * other OSI-approved open source license.
  *
+ *      Copyright (C) 2022 Xilinx, Inc. All rights reserved.
  *      Copyright (C) 2023 – 2024 Advanced Micro Devices, Inc. All rights
  * reserved.
  *
@@ -30,15 +31,43 @@
  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
+
 #pragma once
-#include "vaip/vaip.hpp"
-#include <cstdint>
-#include <filesystem>
-#include <optional>
-#include <string>
+#include "./_sanity_check.hpp"
+namespace xir {
+struct bfloat16_t;
+}
+#include <cstdlib>
+#include <stdint.h>
+#include <vaip/export.h>
+#include <vector>
 namespace vaip_core {
-class PassContext;
-std::optional<uint64_t>
-get_xclbin_fingerprint(const PassContext& pass_context,
-                       const std::filesystem::path& filename);
+VAIP_DLL_SPEC
+void transpose_f(const float* src, float* dst,
+                 const std::vector<int64_t>& shape,
+                 const std::vector<int64_t>& perm);
+VAIP_DLL_SPEC
+void transpose_i8(const int8_t* src, int8_t* dst,
+                  const std::vector<int64_t>& shape,
+                  const std::vector<int64_t>& perm);
+
+VAIP_DLL_SPEC
+void transpose_ui8(const uint8_t* src, uint8_t* dst,
+                   const std::vector<int64_t>& shape,
+                   const std::vector<int64_t>& perm);
+VAIP_DLL_SPEC
+void transpose_i16(const int16_t* src, int16_t* dst,
+                   const std::vector<int64_t>& shape,
+                   const std::vector<int64_t>& perm);
+VAIP_DLL_SPEC
+void transpose_u16(const uint16_t* src, uint16_t* dst,
+                   const std::vector<int64_t>& shape,
+                   const std::vector<int64_t>& perm);
+VAIP_DLL_SPEC
+void transpose_bf16(const xir::bfloat16_t* src, xir::bfloat16_t* dst,
+                    const std::vector<int64_t>& shape,
+                    const std::vector<int64_t>& perm);
+
+VAIP_DLL_SPEC
+void deinitialize_transpose();
 } // namespace vaip_core

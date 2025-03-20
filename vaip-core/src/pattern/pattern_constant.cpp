@@ -37,9 +37,9 @@
 #include <vaip/vaip_ort_api.h>
 
 #include "./pattern_log.hpp"
-#include "vaip/node.hpp"
-#include "vaip/node_arg.hpp"
-#include "vaip/pattern.pb.h"
+#include "morphizen/node.hpp"
+#include "morphizen/node_arg.hpp"
+#include "morphizen/pattern.pb.h"
 
 namespace vaip_core {
 PatternConstant::PatternConstant(int id) : Pattern(id) {}

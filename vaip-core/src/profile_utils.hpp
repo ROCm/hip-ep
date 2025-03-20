@@ -33,7 +33,7 @@
  */
 
 #pragma once
-#include "vaip/vaip.hpp"
+#include "morphizen/vaip.hpp"
 #include <memory>
 namespace vaip_core {
 /**

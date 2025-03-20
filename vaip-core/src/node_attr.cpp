@@ -34,7 +34,7 @@
 
 #include <glog/logging.h>
 
-#include "vaip/node_attr.hpp"
+#include "morphizen/node_attr.hpp"
 #include <vaip/vaip_ort_api.h>
 
 namespace vaip_core {

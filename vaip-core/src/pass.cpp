@@ -32,8 +32,8 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
-#include "vaip/pass.hpp"
-#include "vaip/graph.hpp"
+#include "morphizen/pass.hpp"
+#include "morphizen/graph.hpp"
 #include <algorithm>
 #include <glog/logging.h>
 #include <unordered_set>

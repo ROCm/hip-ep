@@ -35,8 +35,8 @@
 #pragma once
 #include "./_sanity_check.hpp"
 #include "./node_attr.hpp"
-#include "vaip/node.hpp"
-#include "vaip/node_arg.hpp"
+#include "morphizen/node.hpp"
+#include "morphizen/node_arg.hpp"
 #include <glog/logging.h>
 #include <type_traits>
 #include <vaip/my_ort.h>
@@ -517,7 +517,6 @@ IPass::action_t create_xmodel_process_graph(IPass::action_t action);
     void* /* a hook var*/ id##__hook = nullptr;                                \
     }
 #else
-#  include <vitis/ai/plugin.hpp>
 #  define DEFINE_VAIP_PASS(cls, id)                                            \
     static ::vaip_core::PassInfo* vaip_pass_info() {                             \
       return ProcessorPassInfo<cls>::pass_info();                              \

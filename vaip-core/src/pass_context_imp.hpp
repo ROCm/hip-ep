@@ -37,10 +37,10 @@
 #include <vaip/custom_op.h>
 #include <vaip/dll_safe.h>
 
-#include "vaip/model.hpp"
-#include "vaip/pass.hpp"
-#include "vaip/pass_context.hpp"
-#include "vaip/vaip_io.hpp"
+#include "morphizen/model.hpp"
+#include "morphizen/pass.hpp"
+#include "morphizen/pass_context.hpp"
+#include "morphizen/vaip_io.hpp"
 
 namespace vaip_core {
 class CacheFileReaderImp : public CacheFileReader {
@@ -152,7 +152,8 @@ public:
                  const std::string& default_value) const override final;
 
   virtual const ConfigProto& get_config_proto() const override final;
-
+  virtual const ContextProto& get_context_proto() const override final;
+  virtual ContextProto& get_context_proto() override final;
 private:
   template <typename T>
   std::optional<std::vector<T>>

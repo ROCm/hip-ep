@@ -29,7 +29,7 @@ endfunction()
 
 
 
-function(vai_add_library)
+function(morphi_zen_add_library)
   set(options)
   set(oneValueArgs NAME VS_FOLDER INCLUDE_DIR SRC_DIR TEST_DIR SKIP_INSTALL)
   set(multiValueArgs SRCS DEPENDS)
@@ -112,4 +112,4 @@ function(vai_add_library)
     COMPONENT base
     DESTINATION share/cmake/${PROJECT_NAME})
 
-endfunction(vai_add_library)
+endfunction(morphi_zen_add_library)

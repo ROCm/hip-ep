@@ -32,7 +32,7 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 #include "config.hpp"
-#include "vaip/config.pb.h"
+#include "morphizen/config.pb.h"
 #include <algorithm>
 #include <set>
 
@@ -50,9 +50,10 @@
 #ifdef _WIN32
 #  pragma warning(pop)
 #endif
-#include "vaip/util.hpp"
-#include "vaip/xclbin_file.hpp"
-#include "vitis/ai/env_config.hpp"
+#include "morphizen/env_config.hpp"
+#include "morphizen/util.hpp"
+#include "morphizen/weak.hpp"
+#include "morphizen/xclbin_file.hpp"
 #include <algorithm>
 #include <exception>
 #include <filesystem>
@@ -60,8 +61,6 @@
 #include <memory>
 #include <type_traits>
 #include <unordered_map>
-#include <vitis/ai/env_config.hpp>
-#include <vitis/ai/weak.hpp>
 // version info
 #include "version_info.hpp"
 #include <vaip/vaip_ort_api.h>
@@ -404,7 +403,7 @@ void add_custom_field(ConfigProto& proto, const std::string& str) {
         break;
       case google::protobuf::FieldDescriptor::TYPE_INT32: {
         long x;
-        vitis::ai::parse_value(value, x);
+        morphizen::parse_value(value, x);
         reflection->SetInt32(&proto, field, (int32_t)x);
         to_be_delete.insert(field_name);
         break;

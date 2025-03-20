@@ -39,7 +39,7 @@
 #ifdef _WIN32
 #  pragma warning(push, 0)
 #endif
-#include "vaip/anchor_point.pb.h"
+#include "morphizen/anchor_point.pb.h"
 #ifdef _WIN32
 #  pragma warning(pop)
 #endif

@@ -24,12 +24,12 @@ find_package(GTest REQUIRED)
 
 set(RESNET_50_ONNX_PATH "${CMAKE_CURRENT_BINARY_DIR}/pt_resnet50.onnx")
 vaip_add_remote_target(
-  TARGET pt_resnet50.onnx
+  TARGET pt_resnet50_onnx_target
   FILE ${RESNET_50_ONNX_PATH}
   URL https://xcoartifactory.xilinx.com/artifactory/PHX_test_case_package/vaip_model/pt_resnet50.onnx
   EXPECTED_MD5 3f97582a85b8ae1be41127f326bbf9b2
 )
-set_target_properties(pt_resnet50.onnx PROPERTIES FOLDER unit_test)
+set_target_properties(pt_resnet50_onnx_target PROPERTIES FOLDER unit_test)
 
 configure_file(debug_logger.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/debug_logger.hpp @ONLY)
 configure_file(unit_test_env_params.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/unit_test_env_params.hpp @ONLY)
@@ -37,7 +37,7 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 ## add a new test for class vaip_cxx::Model
-set(TEST_EXE_NAME vaip_unit_tests)
+set(TEST_EXE_NAME morphi_zen_unit_tests)
 add_executable(${TEST_EXE_NAME}
   main.cpp
   vaip/test_config.cpp
@@ -57,7 +57,7 @@ add_executable(${TEST_EXE_NAME}
   ${CMAKE_CURRENT_BINARY_DIR}/unit_test_env_params.hpp
 )
 find_package(onnxruntime REQUIRED)
-add_dependencies(${TEST_EXE_NAME} pt_resnet50.onnx)
+add_dependencies(${TEST_EXE_NAME} pt_resnet50_onnx_target)
 target_link_libraries(${TEST_EXE_NAME}
     PRIVATE
     vaip_core_dynamic

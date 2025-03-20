@@ -33,7 +33,7 @@
  */
 
 #include "./anchor_point_imp.hpp"
-#include "vaip/anchor_point.hpp"
+#include "morphizen/anchor_point.hpp"
 #include <glog/logging.h>
 #include <initializer_list>
 #include <ios>
@@ -49,7 +49,7 @@
 #endif
 
 #include "./pass_imp.hpp"
-#include "vitis/ai/env_config.hpp"
+#include "morphizen/env_config.hpp"
 DEF_ENV_PARAM(DEBUG_ANCHOR_POINT, "0")
 
 namespace vaip_core_imp {

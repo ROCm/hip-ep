@@ -32,15 +32,15 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
-#include "vaip/anchor_point.hpp"
+#include "morphizen/anchor_point.hpp"
 #include "./anchor_point_imp.hpp"
 #include "./pass_imp.hpp"
-#include "vaip/node.hpp"
-#include "vaip/util.hpp"
+#include "morphizen/env_config.hpp"
+#include "morphizen/node.hpp"
+#include "morphizen/util.hpp"
 #include <glog/logging.h>
 #include <google/protobuf/util/json_util.h>
 #include <iterator>
-#include <vitis/ai/env_config.hpp>
 DEF_ENV_PARAM(DEBUG_ANCHOR_POINT, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_ANCHOR_POINT) >= n)
 
@@ -49,7 +49,6 @@ using namespace vaip_core_imp;
 std::unique_ptr<AnchorPointProto> AnchorPoint::create_proto() {
   return std::make_unique<AnchorPointProto>();
 }
-
 
 static AnchorPointProto new_anchor_point_proto(const IPass& pass,
                                                const std::string& name,

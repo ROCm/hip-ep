@@ -40,12 +40,12 @@
 
 #include "./config.hpp"
 #include "./pass_imp.hpp"
-#include "vaip/transpose.hpp"
-#include "vaip/util.hpp"
-#include "vaip/vaip_ort.hpp"
-#include "vaip/vaip_plugin.hpp"
+#include "morphizen/transpose.hpp"
+#include "morphizen/util.hpp"
+#include "morphizen/vaip_ort.hpp"
+#include "morphizen/vaip_plugin.hpp"
 #include "version_info.hpp"
-#include "vitis/ai/env_config.hpp"
+#include "morphizen/env_config.hpp"
 #include <vaip/custom_op.h>
 #include <vaip/my_ort.h>
 #include <vaip/vaip_ort_api.h>

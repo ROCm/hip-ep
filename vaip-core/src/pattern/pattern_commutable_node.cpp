@@ -33,7 +33,7 @@
 
 #include "./pattern_commutable_node.hpp"
 #include "./pattern_log.hpp"
-#include "vaip/graph.hpp"
+#include "morphizen/graph.hpp"
 
 namespace vaip_core {
 static std::string get_op_type(const std::string& op_type) {

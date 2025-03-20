@@ -34,9 +34,9 @@
 
 #include "./cache_dir.hpp"
 
+#include "morphizen/env_config.hpp"
 #include <filesystem>
 #include <glog/logging.h>
-#include <vitis/ai/env_config.hpp>
 DEF_ENV_PARAM_2(USERNAME, "", std::string)
 DEF_ENV_PARAM_2(USER, "", std::string)
 DEF_ENV_PARAM_2(XLNX_CACHE_DIR, "", std::string)

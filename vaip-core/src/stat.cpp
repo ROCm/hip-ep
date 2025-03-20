@@ -31,7 +31,7 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 #include "stat.hpp"
-#include "vitis/ai/env_config.hpp"
+#include "morphizen/env_config.hpp"
 #include <iomanip>
 #include <iostream>
 #include <set>

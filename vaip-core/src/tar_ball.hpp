@@ -31,7 +31,7 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 #pragma once
-#include "vaip/vaip_io.hpp"
+#include "morphizen/vaip_io.hpp"
 #include <string>
 
 #ifndef VAIP_DLL_SPEC

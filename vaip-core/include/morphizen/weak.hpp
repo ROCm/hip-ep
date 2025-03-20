@@ -19,13 +19,11 @@
 #include <iostream>
 #include <memory>
 #include <unordered_map>
-namespace vitis {
-namespace ai {
-template <typename T>
-struct WeakSingleton {
+namespace morphizen {
+
+template <typename T> struct WeakSingleton {
   static std::weak_ptr<T> the_instance_;
-  template <typename... Args>
-  static std::shared_ptr<T> create(Args&&... args) {
+  template <typename... Args> static std::shared_ptr<T> create(Args&&... args) {
     std::shared_ptr<T> ret;
     if (the_instance_.expired()) {
       ret = std::make_shared<T>(std::forward<Args>(args)...);
@@ -36,18 +34,14 @@ struct WeakSingleton {
     return ret;
   }
 };
-template <typename T>
-std::weak_ptr<T> WeakSingleton<T>::the_instance_;
+template <typename T> std::weak_ptr<T> WeakSingleton<T>::the_instance_;
 
 // we don't support c++17 yet.
-template <class...>
-using my_void_t = void;
-template <typename T, class = void>
-struct invoke_initialize_if_possible {
+template <class...> using my_void_t = void;
+template <typename T, class = void> struct invoke_initialize_if_possible {
   static void initialize(T* t) {}
 };
-template <typename T>
-struct WithInjection;
+template <typename T> struct WithInjection;
 template <typename T>
 using is_derived_from_with_injection =
     typename std::enable_if<std::is_base_of<WithInjection<T>, T>::value>::type;
@@ -72,8 +66,7 @@ struct invoke_initialize_if_possible<
   static void initialize(T* t) { t->initialize(); }
 };
 
-template <typename K, typename T>
-struct WeakStore {
+template <typename K, typename T> struct WeakStore {
   static std::unordered_map<K, std::weak_ptr<T>> the_store_;
   template <typename... Args>
   static std::shared_ptr<T> create(const K& key, Args&&... args) {
@@ -88,7 +81,7 @@ struct WeakStore {
     return ret;
   }
 
- private:
+private:
   template <typename... Args>
   static typename std::enable_if<!std::is_constructible<T, Args...>::value,
                                  std::shared_ptr<T>>::type
@@ -105,5 +98,4 @@ struct WeakStore {
 template <typename K, typename T>
 std::unordered_map<K, std::weak_ptr<T>> WeakStore<K, T>::the_store_;
 
-}  // namespace ai
-}  // namespace vitis
+} // namespace morphizen

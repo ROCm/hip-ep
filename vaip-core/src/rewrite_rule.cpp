@@ -32,15 +32,15 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
-#include "vaip/rewrite_rule.hpp"
+#include "morphizen/rewrite_rule.hpp"
 
 #include <glog/logging.h>
 
 #include <memory>
 
-#include "vaip/pass.hpp"
-#include "vaip/util.hpp"
-#include "vitis/ai/env_config.hpp"
+#include "morphizen/pass.hpp"
+#include "morphizen/util.hpp"
+#include "morphizen/env_config.hpp"
 DEF_ENV_PARAM(DEBUG_REWRITE_RULE, "0")
 namespace vaip_core {
 using namespace onnxruntime;

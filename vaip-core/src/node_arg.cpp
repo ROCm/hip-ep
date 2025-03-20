@@ -34,10 +34,10 @@
 
 #include <glog/logging.h>
 //
-#include "vaip/graph.hpp"
-#include "vaip/node_arg.hpp"
-#include "vaip/tensor_proto.hpp"
-#include "vaip/util.hpp"
+#include "morphizen/graph.hpp"
+#include "morphizen/node_arg.hpp"
+#include "morphizen/tensor_proto.hpp"
+#include "morphizen/util.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <sstream>

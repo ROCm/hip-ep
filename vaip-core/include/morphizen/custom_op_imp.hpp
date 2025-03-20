@@ -36,7 +36,7 @@
 #include "./pass_context.hpp"
 #include "./vaip_plugin.hpp"
 #include "onnxruntime_api.hpp"
-#include "vaip/capability.pb.h"
+#include "morphizen/capability.pb.h"
 #include <filesystem>
 #include <vaip/custom_op.h>
 struct OrtSession;

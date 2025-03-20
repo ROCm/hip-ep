@@ -34,8 +34,8 @@
 
 #include "./pattern_sequence.hpp"
 #include "./pattern_log.hpp"
-#include "vaip/node.hpp"
-#include "vaip/node_arg.hpp"
+#include "morphizen/node.hpp"
+#include "morphizen/node_arg.hpp"
 namespace vaip_core {
 PatternSequence::PatternSequence(
     int id, gsl::span<const std::shared_ptr<Pattern>> patterns)

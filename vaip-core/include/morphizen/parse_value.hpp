@@ -16,10 +16,9 @@
 #pragma once
 #include <cassert>
 #include <sstream>
-namespace vitis {
-namespace ai {
-template <typename T>
-void parse_value(const std::string& text, T& value) {
+namespace morphizen {
+
+template <typename T> void parse_value(const std::string& text, T& value) {
   std::istringstream is(text);
   if (!(is >> value)) {
     assert(false);
@@ -69,5 +68,4 @@ inline void parse_value(const std::string& text, bool& value) {
     value = false;
   }
 }
-}  // namespace ai
-}  // namespace vitis
+} // namespace morphizen

@@ -34,8 +34,8 @@
 // clang-format off
 #include <glog/logging.h>
 // include glog/logging.h to define CHECK before include vaip_plugin.hpp
-#include "vaip/vaip.hpp"
-#include "vaip/custom_op_imp.hpp"
+#include "morphizen/vaip.hpp"
+#include "morphizen/custom_op_imp.hpp"
 // clang-format on
 
 namespace vaip_core {

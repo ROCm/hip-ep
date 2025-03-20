@@ -34,9 +34,9 @@
 
 #pragma once
 
+#include "./env_config.hpp"
 #include "./vaip_io.hpp"
-#include "vaip/pass_context.pb.h"
-#include "vitis/ai/env_config.hpp"
+#include "morphizen/pass_context.pb.h"
 #include <filesystem>
 #include <gsl/span>
 #include <memory>
@@ -185,7 +185,7 @@ public:
     const char* name = env_name::get_name();
     const char* defvalue = env_name::get_default_value();
     auto p = get_provider_option(std::string(name), std::string(defvalue));
-    return vitis::ai::env_config_helper<decltype(env_name::value)>::from_string(
+    return morphizen::env_config_helper<decltype(env_name::value)>::from_string(
         p);
   }
 
@@ -221,6 +221,17 @@ public:
    * please use `get_log_dir` or `get_provider_options` if possible.
    */
   virtual const ConfigProto& get_config_proto() const = 0;
+
+  /**
+   * @brief Pure virtual function to retrieve the context protobuf object.
+   *
+   * This function must be overridden by derived classes to provide
+   * access to the context protocol object.
+   *
+   * @return A constant reference to the ContextProto object.
+   */
+  virtual const ContextProto& get_context_proto() const = 0;
+  virtual  ContextProto& get_context_proto()  = 0;
   // @brief DO NOT USE THIS FUNCTION
   virtual std::shared_ptr<void>
   get_context_resource(const std::string& name) const = 0;

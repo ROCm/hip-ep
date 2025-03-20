@@ -37,7 +37,7 @@
 // must include glog/logging before vaip.hpp
 #include <glog/logging.h>
 //
-#include "vaip/vaip.hpp"
+#include "morphizen/vaip.hpp"
 
 #include <filesystem>
 #include <fstream>

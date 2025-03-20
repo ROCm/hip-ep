@@ -32,13 +32,13 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
-#include "vaip/node.hpp"
-#include "vaip/graph.hpp"
-#include "vaip/node_arg.hpp"
+#include "morphizen/node.hpp"
+#include "morphizen/graph.hpp"
+#include "morphizen/node_arg.hpp"
+#include "morphizen/vaip_core.hpp"
 #include <glog/logging.h>
 #include <limits>
 #include <vaip/my_ort.h>
-#include <vaip/vaip_core.hpp>
 
 namespace vaip_core {
 

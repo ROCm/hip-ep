@@ -36,7 +36,7 @@
 #include "./pattern_node.hpp"
 #include "./pattern_or.hpp"
 #include "./pattern_wildcard.hpp"
-#include "vaip/pattern.hpp"
+#include "morphizen/pattern.hpp"
 #include <cassert>
 #include <iostream>
 #include <optional>

@@ -40,16 +40,16 @@
 #include "./config.hpp"
 #include "./pass_imp.hpp"
 
-#include "vaip/util.hpp"
+#include "morphizen/util.hpp"
 
-#include "vaip/tensor_proto.hpp"
-#include "vaip/vaip_ort.hpp"
-#include "vaip/vaip_plugin.hpp"
+#include "morphizen/env_config.hpp"
+#include "morphizen/tensor_proto.hpp"
+#include "morphizen/vaip_core.hpp"
+#include "morphizen/vaip_ort.hpp"
+#include "morphizen/vaip_plugin.hpp"
 #include "version_info.hpp"
-#include "vitis/ai/env_config.hpp"
 #include <vaip/custom_op.h>
 #include <vaip/my_ort.h>
-#include <vaip/vaip_core.hpp>
 
 #include <memory>
 

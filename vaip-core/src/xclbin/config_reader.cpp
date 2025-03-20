@@ -30,11 +30,11 @@
  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
-#include "vaip/config_reader.hpp"
+#include "morphizen/config_reader.hpp"
 #include "nlohmann/json.hpp"
 #include "core/session/onnxruntime_cxx_api.h"
-#include "vitis/ai/env_config.hpp"
-#include "vaip/xclbin_file.hpp"
+#include "morphizen/env_config.hpp"
+#include "morphizen/xclbin_file.hpp"
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>

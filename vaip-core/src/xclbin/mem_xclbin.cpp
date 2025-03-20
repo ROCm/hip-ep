@@ -32,11 +32,11 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
+#include "morphizen/mem_xclbin.hpp"
 #include <fstream>
 #include <glog/logging.h>
 #include <iostream>
 #include <unordered_map>
-#include <vaip/mem_xclbin.hpp>
 #include <zlib.h>
 namespace vaip_core {
 

@@ -32,12 +32,12 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 #include "file_lock.hpp"
+#include "morphizen/env_config.hpp"
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
 #include <iostream>
-#include <vitis/ai/env_config.hpp>
 DEF_ENV_PARAM(DEBUG_FILE_LOCK, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_FILE_LOCK) >= n)
 

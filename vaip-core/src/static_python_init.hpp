@@ -32,7 +32,7 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
-#include "vaip/util.hpp"
+#include "morphizen/util.hpp"
 #include <Python.h>
 #include <cwchar>
 #include <memory>

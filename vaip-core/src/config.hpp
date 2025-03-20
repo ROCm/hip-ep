@@ -42,7 +42,7 @@
 #  pragma warning(disable : 4251)
 #  pragma warning(disable : 4275)
 #endif
-#include "vaip/config.pb.h"
+#include "morphizen/config.pb.h"
 #ifdef _WIN32
 #  pragma warning(pop)
 #endif

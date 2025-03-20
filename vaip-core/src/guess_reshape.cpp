@@ -32,8 +32,8 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
-#include "vaip/guess_reshape.hpp"
-#include "vitis/ai/env_config.hpp"
+#include "morphizen/guess_reshape.hpp"
+#include "morphizen/env_config.hpp"
 #include <algorithm>
 #include <cassert>
 #include <cstdlib>

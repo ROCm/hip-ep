@@ -33,7 +33,7 @@
 
 #pragma once
 
-#include "vaip/onnxruntime_api.hpp"
+#include "morphizen/onnxruntime_api.hpp"
 
 #include "glog/logging.h"
 namespace vaip_core {

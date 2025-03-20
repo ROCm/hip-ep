@@ -26,33 +26,12 @@
 // #define DEFINE_SYMBOL(sym) sym,
 
 // static void_ptr_t reserved_symbols[] = {SYMBOLS(DEFINE_SYMBOL)};
-#include "onnxruntime_vitisai_ep/onnxruntime_vitisai_ep.hpp"
-#include "vaip/op_def.hpp"
-#include "vaip/vaip.hpp"
-#include "vaip/vaip_plugin.hpp"
+#include "morphizen/onnxruntime_vitisai_ep.hpp"
+#include "morphizen/op_def.hpp"
+#include "morphizen/vaip.hpp"
 #include <fstream>
 #include <glog/logging.h>
 
-// for fix graph_engine not define hook when use BUILD_SHARED_LIBS
-#if GRAPH_ENGINE_USE_DLL == 1
-extern "C" {
-void* graph_engine__hook = nullptr;
-}
-#endif
-#ifdef FOUND_GRAPH_ENGINE
-extern "C" void* graph_engine__hook;
-void* graph_engine_reserved_symbols[] = {graph_engine__hook};
-#endif
-#ifdef FOUND_CPU_RUNNER
-extern void* vart_cpu_runner_reg_hooks[];
-void** vart_cpu_runner_reg_hooks_ptr = vart_cpu_runner_reg_hooks;
-extern "C" void* vart_cpu_runner_hook;
-void* vart_cpu_runner_reserved_symbols[] = {vart_cpu_runner_hook};
-#endif
-#ifdef FOUND_XCOMPILER
-extern void* xcompiler_hooks[];
-void** xcompiler_hooks_ptr = xcompiler_hooks;
-#endif
 namespace onnxruntime_vitisai_ep {
 using namespace vaip_core;
 int optimize_onnx_model(const std::filesystem::path& model_path_in,

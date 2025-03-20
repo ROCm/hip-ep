@@ -38,7 +38,7 @@
 #  include <vart/trace/trace.hpp>
 #  include <vitis/ai/profiling.hpp>
 #endif
-#include "vaip/vaip_ort.hpp"
+#include "morphizen/vaip_ort.hpp"
 
 namespace vaip_core {
 

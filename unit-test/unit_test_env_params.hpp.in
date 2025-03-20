@@ -32,7 +32,7 @@
  */
 #pragma once
 // clang-format off
-#include "vitis/ai/env_config.hpp"
+#include "morphizen/env_config.hpp"
 DEF_ENV_PARAM_2(VITISAI_EP_JSON_CONFIG,"@VAIP_CONFIG_JSON_PATH@", std::string)
 DEF_ENV_PARAM_2(INPUT_MODEL,"@RESNET_50_ONNX_PATH@", std::string)
 DEF_ENV_PARAM(XLNX_ENABLE_DUMP, "0")

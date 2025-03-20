@@ -43,10 +43,10 @@
 #include "./profile_utils.hpp"
 //#include "mem_xclbin.hpp"
 #include "pass_imp.hpp"
-#include "vaip/graph.hpp"
-#include "vaip/util.hpp"
-#include "vaip/vaip_plugin.hpp"
-#include "vitis/ai/env_config.hpp"
+#include "morphizen/graph.hpp"
+#include "morphizen/util.hpp"
+#include "morphizen/vaip_plugin.hpp"
+#include "morphizen/env_config.hpp"
 #include <fstream>
 #include <glog/logging.h>
 #include <google/protobuf/util/json_util.h>

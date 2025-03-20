@@ -38,12 +38,12 @@
 #include <filesystem>
 #include <map>
 
-#include "vaip/graph.hpp"
-#include "vaip/model.hpp"
-#include "vaip/pass.hpp"
+#include "morphizen/graph.hpp"
+#include "morphizen/model.hpp"
+#include "morphizen/pass.hpp"
 // clang-format off
 // TODO include order matters
-#include "vaip/custom_op_imp.hpp"
+#include "morphizen/custom_op_imp.hpp"
 // clang-format on
 #include "pass_context_imp.hpp"
 

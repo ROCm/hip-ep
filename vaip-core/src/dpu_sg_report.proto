@@ -5,9 +5,8 @@
  * to the BSD open source license, it is NOT the BSD open source license nor
  * other OSI-approved open source license.
  *
- *      Copyright (C) 2022 Xilinx, Inc. All rights reserved.
- *      Copyright (C) 2023 – 2024 Advanced Micro Devices, Inc. All rights
- * reserved.
+ *Copyright (C) 2022 Xilinx, Inc. All rights reserved.
+ *Copyright (C) 2022 – 2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  *      Redistribution and use in binary form only, without modification, is
  * permitted provided that the following conditions are met:
@@ -32,58 +31,36 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
-#pragma once
-/// basically there are 3 types client if VAIP.
-///
-/// 1. ORT VITISAI Execution Provider.
-///     USE_VITISAI is defined.
-/// 2. VAIP pass
-/// 3. Vaip Custom OP
-///
-/// different user see different part of vaip.
-#define VAIP_USER__ORT_VITIS_AI_EP 1
-#define VAIP_USER__PASS 2
-#define VAIP_USER__CUSTOM_OP 3
-#define VAIP_USER__INTERNAL 4
+syntax = "proto3";
+package vaip_core;
+import "anchor_point.proto";
 
-#ifndef VAIP_USER
-#  if defined(USE_VITISAI)
-#    define VAIP_USER VAIP_USER__ORT_VITIS_AI_EP
-#  elif defined(VAIP_CUSTOM_OP)
-#    define VAIP_USER VAIP_USER__CUSTOM_OP
-#  else
-#    define VAIP_USER VAIP_USER__PASS
-#  endif
-#endif
+message DpuSubgraphReportProto {
+  repeated DpuSubgraphEntryProto subgraphs = 1;
+}
 
-#if VAIP_USER == VAIP_USER__PASS
-#  include "./graph.hpp"
-#  include "./guess_reshape.hpp"
-#  include "./model.hpp"
-#  include "./node_arg.hpp"
-#  include "./pass.hpp"
-#  include "./rewrite_rule.hpp"
-#  include "./tensor_proto.hpp"
-#  include "./util.hpp"
-#  include "./vaip_plugin.hpp"
-#endif
+message XirTensorProto {
+  string name = 1;
+  repeated int64 shape = 2;
+}
 
-#include <vaip/vaip_core.hpp>
-#include <vaip/vaip_ort_api.h>
+message TryFuseProto {
+  repeated string inputs = 1;
+  repeated string outputs = 2;
+  repeated string arguments = 3;
+  repeated string return_values = 4;
+  repeated string body = 5;
+}
 
-#if VAIP_USER == VAIP_USER__ORT_VITIS_AI_EP
-#  include "./vaip_ort.hpp"
-#endif
-
-#if VAIP_USER == VAIP_USER__CUSTOM_OP
-#  include "./anchor_point.hpp"
-#  include "./pass_context.hpp"
-#endif
-
-#if VAIP_USER == VAIP_USER__CUSTOM_OP || VAIP_USER == VAIP_USER__ORT_VITIS_AI_EP
-#  include "./custom_op_imp.hpp"
-#endif
-
-#if VAIP_USER == VAIP_USER__CUSTOM_OP || VAIP_USER == VAIP_USER__PASS
-#  include "./transpose.hpp"
-#endif
+message DpuSubgraphEntryProto {
+  string status = 1; // "OK"
+  string subgrpah_name = 2;
+  repeated XirTensorProto xir_subgraph_inputs  = 3;
+  repeated XirTensorProto xir_subgraph_outputs  = 4;
+  repeated AnchorPointProto xir_input_anchor_points = 5;
+  repeated AnchorPointProto xir_output_anchor_points = 6;
+  TryFuseProto try_fuse = 7;
+  repeated AnchorPointProto onnx_output_anchor_points = 8;
+  string comments = 100;
+  repeated string try_fuse_loop_path = 101;
+}
