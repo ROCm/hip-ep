@@ -50,9 +50,6 @@ add_executable(${TEST_EXE_NAME}
   vaip/test_pass_context.cpp
   vaip/test_node_builder.cpp
   vaip/test_tarball.cpp
-  getenv.cpp
-  getenv.c
-  # test_onnx_runner/test_onnx_runner.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/debug_logger.hpp
   ${CMAKE_CURRENT_BINARY_DIR}/unit_test_env_params.hpp
 )
