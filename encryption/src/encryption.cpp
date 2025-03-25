@@ -31,7 +31,7 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
-#include "vaip/encryption.hpp"
+#include "morphizen/encryption.hpp"
 #include <memory>
 #ifdef WITH_OPENSSL
 #  include <openssl/aes.h>

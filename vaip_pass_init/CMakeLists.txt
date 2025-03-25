@@ -26,9 +26,22 @@
 
 cmake_minimum_required(VERSION 3.17)
 project(
-  vaip-pass_init
+  morphizen-pass_init
   VERSION 1.0.0
   LANGUAGES C CXX)
 
-morphi_zen_add_library(NAME pass_init INCLUDE_DIR include SRCS src/vaip_pass_init.cpp)
-target_link_libraries(pass_init PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,vaip_core_static>)
+morphizen_add_library(
+  NAME
+    morphizen-pass-init
+  INCLUDE_DIR
+    include
+  SRCS
+    src/vaip_pass_init.cpp
+  OUTPUT_NAME
+    vaip-pass_init
+)
+add_library (morphizen::pass-init ALIAS morphizen-pass-init)
+target_link_libraries(morphizen-pass-init PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,morphizen-core-static>)
+# TODO: vaip pass naming convention: vaip-<pass_a_b_c>
+# overwrite the default OUTPUT_NAME in morphizen_add_library
+target_compile_definitions(morphizen-pass-init PRIVATE -DOUTPUT_NAME="vaip-pass_init")

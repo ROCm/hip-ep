@@ -43,13 +43,13 @@
 class ModelTest : public DebugLogger {};
 TEST_F(ModelTest, Load) {
   open_logger_file("ModelTest.Load.log");
-  logger() << "LOADING " << std::string(RESNET_50_PATH);
+  logger() << "LOADING " << RESNET_50_PATH;
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);
   LOG(INFO) << "model: " << model->name() << " is loaded";
 }
 TEST_F(ModelTest, Clone) {
   open_logger_file("ModelTest.Load.log");
-  logger() << "LOADING " << std::string(RESNET_50_PATH);
+  logger() << "LOADING " << RESNET_50_PATH;
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);
   auto cloned_model = model->clone();
   LOG(INFO) << "cloned model: " << cloned_model->name() << " is cloned";
@@ -58,15 +58,14 @@ TEST_F(ModelTest, Clone) {
 }
 TEST_F(ModelTest, MainGraph) {
   open_logger_file("ModelTest.Load.log");
-  logger() << "LOADING " << std::string(RESNET_50_PATH);
+  logger() << "LOADING " << RESNET_50_PATH;
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   LOG(INFO) << "main graph: " << graph.name() << " is loaded";
 }
 TEST_F(ModelTest, SetAndGetMetadata) {
   open_logger_file("ModelTest.SetAndGetMetadata.log");
-  std::string modelPath = RESNET_50_PATH;
-  auto model = vaip_cxx::Model::load(modelPath);
+  auto model = vaip_cxx::Model::load(RESNET_50_PATH);
 
   // Set metadata
   std::string key = "author";
@@ -84,8 +83,7 @@ TEST_F(ModelTest, SetAndGetMetadata) {
 
 TEST_F(ModelTest, ImplicitConversion) {
   open_logger_file("ModelTest.ImplicitConversion.log");
-  std::string modelPath = RESNET_50_PATH;
-  auto model = vaip_cxx::Model::load(modelPath);
+  auto model = vaip_cxx::Model::load(RESNET_50_PATH);
 
   // Implicit conversion to onnxruntime::Model reference
   onnxruntime::Model& ortModel = *model;
@@ -127,5 +125,6 @@ TEST_F(ModelTest, ModelCreationTest) {
   EXPECT_EQ(path, graph.model_path());
   graph.save(path, data_path, 999999);
   ASSERT_TRUE(std::filesystem::exists(path));
-  // ASSERT_TRUE(std::filesystem::exists(CMAKE_CURRENT_BINARY_PATH / data_path));
+  // ASSERT_TRUE(std::filesystem::exists(CMAKE_CURRENT_BINARY_PATH /
+  // data_path));
 }

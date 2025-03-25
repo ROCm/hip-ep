@@ -28,44 +28,50 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE
 #
-
-
-option(WITH_OPENSSL "include openssl or not" OFF)
-if(WITH_OPENSSL)
-  find_package(OpenSSL REQUIRED)
-endif(WITH_OPENSSL)
-
+find_package(OpenSSL QUIET)
+if(TARGET OpenSSL::SSL)
+  message(STATUS "found OpenSSL at ${OpenSSL_DIR} build morephizen-encryption with OpenSSL")
+else()
+  message(STATUS "cannot find_package(OpenSSL), build morephizen-encryption without OpenSSL")
+endif()
+set(LIB_NAME morphizen-encryption)
 add_library(
-  encryption
+  ${LIB_NAME}
   STATIC
-  include/vaip/encryption.hpp
+  include/morphizen/encryption.hpp
   src/encryption.cpp
   )
-add_library(vaip::encryption ALIAS encryption)
-set_target_properties(encryption PROPERTIES FOLDER vaip)
-
-target_include_directories(encryption PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../vaip-core/include
+add_library(morphizen::encryption ALIAS ${LIB_NAME})
+## add an alias to keep it compatible with VAIP
+add_library(vaip::encryption ALIAS ${LIB_NAME})
+set_target_properties(${LIB_NAME} PROPERTIES FOLDER morphizen/encryption)
+target_include_directories(${LIB_NAME}
+  PRIVATE
+    # compile time dependency on vaip_io.hpp
+    # todo: use std::ostream and std::istream instead of vaip_io.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../vaip-core/include
   PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
-if(WITH_OPENSSL)
-  target_compile_definitions(encryption PUBLIC -DWITH_OPENSSL)
-  target_link_libraries(encryption PRIVATE OpenSSL::SSL OpenSSL::Crypto ${CMAKE_DL_LIBS} glog::glog)
+if(TARGET OpenSSL::SSL)
+  target_compile_definitions(${LIB_NAME} PUBLIC -DWITH_OPENSSL)
+  target_link_libraries(${LIB_NAME} PRIVATE OpenSSL::SSL OpenSSL::Crypto ${CMAKE_DL_LIBS} glog::glog)
   if (MSVC)
-    target_link_libraries(encryption PRIVATE WS2_32.LIB GDI32.LIB ADVAPI32.LIB CRYPT32.LIB USER32.LIB)
+    # TODO: why we need these windows specific libraries
+    target_link_libraries(${LIB_NAME} PRIVATE WS2_32.LIB GDI32.LIB ADVAPI32.LIB CRYPT32.LIB USER32.LIB)
   endif()
 else()
-target_link_libraries(encryption PRIVATE glog::glog)
-endif(WITH_OPENSSL)
+  target_link_libraries(${LIB_NAME} PRIVATE glog::glog)
+endif()
 
 install(
-  TARGETS encryption
-  EXPORT vaip-encryption-targets
+  TARGETS ${LIB_NAME}
+  EXPORT ${LIB_NAME}-targets
   RUNTIME DESTINATION bin
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib)
 install(
-  EXPORT vaip-encryption-targets
+  EXPORT ${LIB_NAME}-targets
   NAMESPACE ${PROJECT_NAME}::
   COMPONENT base
   DESTINATION share/cmake/${PROJECT_NAME})

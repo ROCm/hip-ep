@@ -1,11 +1,15 @@
 cmake_minimum_required(VERSION 3.5)
 project(morphizen-graph-opt VERSION 1.0.0 LANGUAGES C CXX)
 find_package(glog REQUIRED)
-
-add_executable(morphizen-graph-opt graph-opt.cpp)
-target_include_directories(morphizen-graph-opt PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../common
-  )
-target_link_libraries(morphizen-graph-opt PRIVATE vaip_core_dynamic glog::glog)
-set_target_properties(morphizen-graph-opt PROPERTIES FOLDER vaip-tools)
-install(TARGETS morphizen-graph-opt DESTINATION bin)
+set(EXEC_NAME morphizen-graph-opt)
+add_executable(${EXEC_NAME} graph-opt.cpp)
+target_include_directories(${EXEC_NAME}
+  PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../common
+)
+target_link_libraries(${EXEC_NAME} PRIVATE morphizen-core-dynamic glog::glog)
+set_target_properties(${EXEC_NAME} PROPERTIES FOLDER morphizen/tools)
+install(TARGETS ${EXEC_NAME} DESTINATION bin)
+# originally morphizen-graph-opt is callled `voe_py_pass`, to minimize
+# changes at vaip side we add an alias here.
+add_executable (voe_py_pass ALIAS ${EXEC_NAME})

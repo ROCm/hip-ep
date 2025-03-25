@@ -65,12 +65,8 @@
 #include <stdexcept>
 #include <stdlib.h>
 #include <string>
-#include "vaip/encryption.hpp"
+#include "morphizen/encryption.hpp"
 // clang-format on
-
-#if WITH_XCOMPILER
-#  include <xcompiler/xcompiler.hpp>
-#endif
 DEF_ENV_PARAM_2(XLNX_ONNX_EP_REPORT_FILE, "vitisai_ep_report.json", std::string)
 DEF_ENV_PARAM(XLNX_ENABLE_CACHE, "1")
 DEF_ENV_PARAM(ENABLE_TAR_CACHE, "0")

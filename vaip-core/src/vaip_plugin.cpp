@@ -31,12 +31,15 @@
  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
-
+// clang-format off
+// we must include glog before morphizen headers
 #include <glog/logging.h>
-// include glog/logging.h to define CHECK before include vaip_plugin.hpp
+// clang-format on
 #include "morphizen/vaip_plugin.hpp"
+#include "morphizen/env_config.hpp"
 #include "morphizen/weak.hpp"
-
+DEF_ENV_PARAM(MORPHIZEN_DEBUG_PLUGIN, "0")
+#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_PLUGIN) >= n)
 namespace vaip_core {
 struct Tag_Plugin_Func_Set {
   plugin_t (*open_plugin)(const std::string& name, scope_t scope);
@@ -98,7 +101,7 @@ void* plugin_sym_static(plugin_t plugin, const std::string& symbol) {
     std::cerr << "cannot find lib:" << name << std::endl;
     std::cerr << "valid libs are: " << std::endl;
     for (auto& x : store) {
-      std::cerr << "  libs=" << x.first;
+      std::cerr << "  libs=" << x.first << "\n";
     }
     return nullptr;
   }
@@ -107,7 +110,7 @@ void* plugin_sym_static(plugin_t plugin, const std::string& symbol) {
     std::cerr << "cannot find symbol " << symbol << " in " << name << std::endl;
     std::cerr << "valid symbols are: " << std::endl;
     for (auto& x : it_lib->second) {
-      std::cerr << "  symbols=" << x.first;
+      std::cerr << "  symbols=" << x.first << "\n";
     }
     return nullptr;
   }
@@ -121,10 +124,7 @@ std::string plugin_error_static(plugin_t plugin) { return "N/A"; }
 
 void register_plugin_static(const std::string& name, const std::string& symbol,
                             void* addr) {
-#ifndef NDEBUG
-  std::cerr << "register: " << name << " " << symbol << " " << addr
-            << std::endl;
-#endif
+  MY_LOG(1) << "register: " << name << " " << symbol << " " << addr;
   get_store()[name][symbol] = addr;
 }
 

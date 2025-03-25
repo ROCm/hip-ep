@@ -1,4 +1,5 @@
 ﻿
+option(morphizen_ENABLE_UNIT_TEST "enable vaip unit test or not" ON)
 #
 # to build MorphiZen, we need to download source code of onnxruntime
 # and build it along with MorphiZen
@@ -22,9 +23,14 @@ set(VAIP_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/vaip-core/etc/vaip_config
 # see etc/version_info.txt as an example
 set(VAIP_VERSEION_INFO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/vaip-core/etc/version_info.txt" CACHE FILEPATH "Path to the file containing version_info.txt files")
 
+#
+set(morphizen_OUTPUT_NAME "onnxruntime_vitisai_ep" CACHE STRING "Output name of MorphiZen library")
+
 # print all options
 message(STATUS "MorphiZen OPTIONS:")
 message(STATUS "  VAIP_XCLBIN_DIR : ${VAIP_XCLBIN_DIR}")
 message(STATUS "  ONNX_RUNTIME_SOURCE_TREE_DIR : ${ONNXRUNTIME_SOURCE_TREE_DIR}")
 message(STATUS "  VAIP_JSON_CONFIG_FILE : ${VAIP_JSON_CONFIG_FILE}")
 message(STATUS "  VAIP_VERSEION_INFO_FILE : ${VAIP_VERSEION_INFO_FILE}")
+message(STATUS "  morphizen_OUTPUT_NAME : ${morphizen_OUTPUT_NAME}")
+message(STATUS "  morphizen_ENABLE_UNIT_TEST : ${morphizen_ENABLE_UNIT_TEST}")

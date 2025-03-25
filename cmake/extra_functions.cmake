@@ -27,11 +27,41 @@ function(vaip_add_remote_target)
   endif()
 endfunction()
 
-
-
-function(morphi_zen_add_library)
+function(morphizen_add_python_target)
   set(options)
-  set(oneValueArgs NAME VS_FOLDER INCLUDE_DIR SRC_DIR TEST_DIR SKIP_INSTALL)
+  set(oneValueArgs TARGET SCRIPT FOLDER)
+  set(multiValueArgs ARGS DEPENDS OUTPUT)
+  cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+  if(NOT ARG_TARGET)
+    message(FATAL_ERROR "morphizen_add_python_target: TARGET not specified")
+  endif()
+  if(NOT ARG_SCRIPT)
+    message(FATAL_ERROR "morphizen_add_python_target: SCRIPT not specified")
+  endif()
+  add_custom_command (
+    OUTPUT ${ARG_OUTPUT}
+    COMMAND
+      ${CMAKE_COMMAND} -E echo " -- Generating ${ARG_OUTPUT}"
+    COMMAND
+      ${CMAKE_COMMAND} -E echo " -- Running $<TARGET_FILE:Python3::Interpreter> ${ARG_SCRIPT} ${ARG_ARGS}"
+    COMMAND
+      ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../tools"
+      $<TARGET_FILE:Python3::Interpreter> ${ARG_SCRIPT} ${ARG_ARGS}
+    DEPENDS ${ARG_SCRIPT} ${ARG_DEPENDS}
+  )
+  add_custom_target(${ARG_TARGET}
+    DEPENDS ${ARG_OUTPUT}
+    COMMENT "Generating ${ARG_OUTPUT} by runnning $<TARGET_FILE:Python3::Interpreter> ${ARG_SCRIPT} ${ARG_ARGS}"
+  )
+  if(ARG_FOLDER)
+    set_target_properties(${ARG_TARGET} PROPERTIES FOLDER "${ARG_FOLDER}")
+  endif()
+endfunction(morphizen_add_python_target)
+
+
+function(morphizen_add_library)
+  set(options)
+  set(oneValueArgs NAME VS_FOLDER INCLUDE_DIR SRC_DIR TEST_DIR SKIP_INSTALL OUTPUT_NAME)
   set(multiValueArgs SRCS DEPENDS)
   cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}"
                         ${ARGN})
@@ -67,6 +97,9 @@ function(morphi_zen_add_library)
         ${ARG_NAME}
         PARENT_SCOPE)
   endif(NOT ARG_NAME)
+  if(NOT ARG_OUTPUT_NAME)
+    set (ARG_OUTPUT_NAME "vaip-${ARG_NAME}")
+  endif()
   # end check target name
 
   # create the target
@@ -86,14 +119,14 @@ function(morphi_zen_add_library)
 
   # set all properties
   set_target_properties(${ARG_NAME} PROPERTIES OUTPUT_NAME
-    vaip-${ARG_NAME})
+    ${ARG_OUTPUT_NAME})
   target_compile_definitions(
     ${ARG_NAME} PRIVATE -DOUTPUT_NAME="vaip-${ARG_NAME}")
   file(APPEND ${CMAKE_BINARY_DIR}/components.txt "${ARG_NAME}\n")
-  if(TARGET vaip_core_dynamic)
-	  target_link_libraries(vaip_core_dynamic PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${ARG_NAME}>")
-    message(STATUS "add WHOLE_ARCHIVE to vaip_core_dynamic")
-  endif(TARGET vaip_core_dynamic)
+  if(TARGET morphizen-core-dynamic)
+	  target_link_libraries(morphizen-core-dynamic PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${ARG_NAME}>")
+    message(STATUS "add WHOLE_ARCHIVE to morphizen-core-dynamic")
+  endif(TARGET morphizen-core-dynamic)
 
   if(TARGET onnxruntime_vitisai_ep)
 	  target_link_libraries(onnxruntime_vitisai_ep PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${ARG_NAME}>")
@@ -112,4 +145,4 @@ function(morphi_zen_add_library)
     COMPONENT base
     DESTINATION share/cmake/${PROJECT_NAME})
 
-endfunction(morphi_zen_add_library)
+endfunction(morphizen_add_library)

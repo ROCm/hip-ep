@@ -5,7 +5,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 // clang-format off
 #include "morphizen/vaip.hpp"
-#include "vaip/encryption.hpp"
+#include "morphizen/encryption.hpp"
 #include "../vaip-core/src/pass_context_imp.hpp"
 #include "../vaip-core/src/tar_ball.hpp"
 #include "debug_logger.hpp"

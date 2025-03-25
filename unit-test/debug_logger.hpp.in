@@ -38,7 +38,10 @@
 #include <mutex>
 #include <string>
 // clang-format off
-#define CMAKE_CURRENT_BINARY_PATH std::filesystem::path(std::string("@CMAKE_CURRENT_BINARY_DIR@"))
+namespace {
+ const auto CMAKE_CURRENT_BINARY_PATH = std::filesystem::path(std::string("@CMAKE_CURRENT_BINARY_DIR@"));
+ const auto RESNET_50_PATH= CMAKE_CURRENT_BINARY_PATH / "pt_resnet50.onnx";
+}
 #define MY_LOG() logger() << __FILE__ << ":" << __LINE__ << " "
 // clang-format on
 class DebugLogger : public ::testing::Test {
