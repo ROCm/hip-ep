@@ -32,6 +32,7 @@
  */
 #include "stat.hpp"
 #include "morphizen/env_config.hpp"
+#include <glog/logging.h>
 #include <iomanip>
 #include <iostream>
 #include <set>

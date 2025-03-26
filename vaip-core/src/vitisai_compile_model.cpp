@@ -610,6 +610,8 @@ initialize_context(const std::filesystem::path& model_path,
 
   // log version of binary
   print_version_verbose("EXEC VERISON: ", context->context_proto.config());
+  // load plugins
+  context->load_plugins();
   return context;
 }
 static std::string get_provider_option(const PassContextImp& context,

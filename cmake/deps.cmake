@@ -72,7 +72,7 @@ endif()
 
 set(WITH_GFLAGS OFF CACHE BOOL "disable WITH_GFLAGS for glog")
 find_package(glog QUIET)
-if(glog_FOUND)
+if()
   get_target_property(TMP glog::glog LOCATION)
   message(STATUS "found glog at ${TMP}")
 else()

@@ -31,13 +31,16 @@
  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
+#include <sstream>
 // clang-format off
 // we must include glog before morphizen headers
 #include <glog/logging.h>
 // clang-format on
-#include "morphizen/vaip_plugin.hpp"
 #include "morphizen/env_config.hpp"
+#include "morphizen/vaip_plugin.hpp"
 #include "morphizen/weak.hpp"
+// include local headers
+#include "./cleanup.hpp"
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_PLUGIN, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_PLUGIN) >= n)
 namespace vaip_core {
@@ -62,13 +65,32 @@ Plugin::Plugin(const char* name, Plugin_Func_Set* func_set)
                             << "name_ " << name_ << " "       //
                             << "so_name_ " << so_name_ << " " //
       ;
+  MY_LOG(1) << "  -- open plugin: " << name_ << " " << so_name_
+            << " this=" << (void*)this;
 }
 
-Plugin::~Plugin() { func_set_->close_plugin((plugin_t)plugin_); }
-
-std::unordered_map<std::string, std::shared_ptr<Plugin>> Plugin::store_;
+Plugin::~Plugin() {
+  func_set_->close_plugin((plugin_t)plugin_);
+  MY_LOG(1) << "  -- close plugin: " << name_ << " " << so_name_
+            << " this=" << (void*)this;
+}
+// TODO: for now all Plugin::get store loaded plugin in a global
+// store. it is not a good solution, it is possible to put all plugin
+// into pass_context?
+static std::unordered_map<std::string, std::shared_ptr<Plugin>>&
+get_global_plugin_store() {
+  static std::unordered_map<std::string, std::shared_ptr<Plugin>> store_;
+  static bool init = false;
+  if (init == false) {
+    init = true;
+    add_cleanup_function("cleanup global plugin store",
+                         []() { store_.clear(); });
+  }
+  return store_;
+}
 
 Plugin* Plugin::get(const std::string& plugin_name, Plugin_Func_Set* func_set) {
+  auto& store_ = get_global_plugin_store();
   auto it = store_.find(plugin_name);
   if (it == store_.end()) {
     store_[plugin_name] = morphizen::WeakStore<std::string, Plugin>::create(
@@ -128,15 +150,39 @@ void register_plugin_static(const std::string& name, const std::string& symbol,
   get_store()[name][symbol] = addr;
 }
 
+void unregister_plugin_static(const std::string& name,
+                              const std::string& symbol, void* addr) {
+  MY_LOG(1) << "unregister: " << name << " " << symbol << " " << addr;
+  auto it = get_store().find(name);
+  if (it == get_store().end()) {
+    MY_LOG(1) << "cannot find lib: " << name;
+    return;
+  }
+  auto it_sym = it->second.find(symbol);
+  if (it_sym == it->second.end()) {
+    MY_LOG(1) << "cannot find symbol: " << symbol;
+    return;
+  }
+  it->second.erase(it_sym);
+  return;
+}
+
 StaticPluginRegister::StaticPluginRegister(const char* name, const char* symbol,
-                                           void* addr) {
+                                           void* addr)
+    : name_(name), symbol_(symbol), addr_(addr) {
 #if _WIN32
   std::string lib_name = std::string(name) + ".dll";
 #else
   std::string lib_name = std::string("lib") + name + ".so";
 #endif
   register_plugin_static(lib_name, symbol, addr);
+  std::ostringstream str;
+  str << "unload " << symbol << " @ " << name;
+  add_cleanup_function(str.str(), [lib_name, symbol, addr]() {
+    register_plugin_static(lib_name, symbol, addr);
+  });
 }
+StaticPluginRegister::~StaticPluginRegister() {}
 
 Plugin_Func_Set g_static_plugin_func_set = {
     open_plugin_static, plugin_sym_static, close_plugin_static};

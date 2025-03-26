@@ -165,3 +165,7 @@ target_link_libraries(${LIB_NAME} PUBLIC ${MorphiZen_DEPS})
 target_compile_definitions(${LIB_NAME}
   PRIVATE "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1"
   PUBLIC "-DONNX_NAMESPACE=onnx")
+target_compile_features(morphizen-core-static PUBLIC cxx_std_17)
+if(MSVC)
+  target_compile_options(morphizen-core-static PUBLIC "/Zc:__cplusplus")
+endif(MSVC)

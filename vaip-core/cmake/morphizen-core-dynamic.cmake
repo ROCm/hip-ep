@@ -19,13 +19,22 @@ if(MSVC)
       ${CMAKE_CURRENT_SOURCE_DIR}/onnxruntime_vitisai_ep.def.in
       $<TARGET_LINKER_LIBRARY_FILE:morphizen-core-static>
   )
+# add_dependencies(morphizen-core-dynamic  morphizen-core-dynamic_def)
 add_custom_target(morphizen-core-dynamic_def DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/onnxruntime_vitisai_ep.def)
 target_sources(morphizen-core-dynamic PRIVATE onnxruntime_vitisai_ep.def)
-set_target_properties(morphizen-core-dynamic_def PROPERTIES FOLDER vaip)
-add_dependencies(morphizen-core-dynamic  morphizen-core-dynamic_def)
+set_target_properties(morphizen-core-dynamic_def PROPERTIES FOLDER morphizen)
 endif(MSVC)
-target_link_libraries(morphizen-core-dynamic PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,morphizen-core-static>")
+target_link_libraries(morphizen-core-dynamic
+  PRIVATE
+    "$<LINK_LIBRARY:WHOLE_ARCHIVE,morphizen-core-static>")
 
-target_include_directories(morphizen-core-dynamic PUBLIC
+target_include_directories(morphizen-core-dynamic
+  PUBLIC
   $<BUILD_INTERFACE:$<TARGET_PROPERTY:morphizen-core-static,INTERFACE_INCLUDE_DIRECTORIES>>
+  $<INSTALL_INTERFACE:include>
 )
+target_compile_features(morphizen-core-dynamic PUBLIC cxx_std_17)
+target_compile_definitions(morphizen-core-dynamic PUBLIC "-DONNX_NAMESPACE=onnx")
+if(MSVC)
+  target_compile_options(morphizen-core-dynamic PUBLIC "/Zc:__cplusplus")
+endif(MSVC)

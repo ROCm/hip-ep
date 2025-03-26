@@ -41,6 +41,7 @@
 #include "morphizen/pass.hpp"
 #include "morphizen/pass_context.hpp"
 #include "morphizen/vaip_io.hpp"
+#include "morphizen/vaip_plugin.hpp"
 
 namespace vaip_core {
 class CacheFileReaderImp : public CacheFileReader {
@@ -154,6 +155,10 @@ public:
   virtual const ConfigProto& get_config_proto() const override final;
   virtual const ContextProto& get_context_proto() const override final;
   virtual ContextProto& get_context_proto() override final;
+  void load_plugins();
+  std::shared_ptr<Plugin>
+  load_plugin(const std::string& plugin_name);
+
 private:
   template <typename T>
   std::optional<std::vector<T>>

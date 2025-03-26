@@ -32,14 +32,16 @@
  */
 #define _CRT_SECURE_NO_WARNINGS
 #include <fstream>
+#include <glog/logging.h>
 #include <google/protobuf/util/json_util.h>
 
-#include "pass_context_imp.hpp"
-#include "profile_utils.hpp"
-#include "tar_ball.hpp"
 #include "morphizen/mem_xclbin.hpp"
 #include "morphizen/util.hpp"
 #include "morphizen/vaip_io.hpp"
+#include "morphizen/weak.hpp"
+#include "pass_context_imp.hpp"
+#include "profile_utils.hpp"
+#include "tar_ball.hpp"
 
 DEF_ENV_PARAM(DEBUG_TAR_CACHE, "0")
 
@@ -660,6 +662,36 @@ std::unique_ptr<PassContext> PassContext::create() {
   return std::make_unique<PassContextImp>();
 }
 
+void PassContextImp::load_plugins() {
+  auto str_backends = get_provider_option("backends", "");
+
+  auto split = [](const std::string& str,
+                  char delimiter) -> std::vector<std::string> {
+    std::vector<std::string> tokens;
+    std::stringstream ss(str);
+    std::string token;
+    while (std::getline(ss, token, delimiter)) {
+      tokens.push_back(token);
+    }
+    return tokens;
+  };
+  auto backends = split(str_backends, ';');
+  auto plugins = new std::vector<std::shared_ptr<Plugin>>();
+  for (const auto& backend : backends) {
+    auto plugin = load_plugin(backend);
+    plugins->push_back(plugin);
+  }
+  this->add_context_resource("__all_plugins__",
+    std::shared_ptr<void>((void*) plugins, [](void* p) {
+      delete (std::vector<std::shared_ptr<Plugin>>*) p;
+    }));
+}
+std::shared_ptr<Plugin>
+ PassContextImp::load_plugin(const std::string& plugin_name) {
+  auto plugin = morphizen::WeakStore<std::string, Plugin>::create(
+      plugin_name, plugin_name.c_str(), g_dynamic_plugin_func_set_ptr);
+  return plugin;
+}
 CacheFileReaderImp::CacheFileReaderImp(bool in_mem, const std::string& filename,
                                        FILE* fp)
     : CacheFileReader(), in_mem_(in_mem), name_{filename}, fp_{fp} {

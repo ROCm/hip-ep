@@ -1,7 +1,7 @@
 
 cmake_minimum_required(VERSION 3.27)
 project(
-  MorphiZen
+  morphizen
   VERSION 1.0.0
   LANGUAGES C CXX)
 cmake_policy(SET CMP0115 NEW)
@@ -18,3 +18,4 @@ if(morphizen_ENABLE_UNIT_TEST)
   enable_testing()
   add_subdirectory (unit-test)
 endif()
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/install_and_pack.cmake)

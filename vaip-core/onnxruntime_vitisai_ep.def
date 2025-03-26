@@ -21,3 +21,7 @@ EXPORTS
 ?CheckTypeAndMergeFrom@Message@protobuf@google@@UEAAXAEBVMessageLite@23@@Z
 ?GetTypeName@Message@protobuf@google@@UEBA?AV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@XZ
 ?SpaceUsedLong@Message@protobuf@google@@UEBA_KXZ
+?begin@?$RepeatedPtrField@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@protobuf@google@@QEBA?AV?$RepeatedPtrIterator@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@internal@23@XZ
+?end@?$RepeatedPtrField@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@protobuf@google@@QEBA?AV?$RepeatedPtrIterator@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@internal@23@XZ
+?_DpuParam_default_instance_@vaip_core@@3UDpuParamDefaultTypeInternal@1@A
+??1ExecutionProviderConcrete@vaip_core@@UEAA@XZ

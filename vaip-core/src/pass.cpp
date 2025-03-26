@@ -40,6 +40,53 @@
 #include <utility>
 namespace vaip_core {
 
+void IPass::create_const(const Node& node, gsl::span<const char> data) {
+  auto name = node_get_output_name(node);
+  auto& arg = node_get_output_node_arg(node);
+  auto shape = node_arg_get_shape_i64(arg);
+  CHECK(shape != nullptr) << node_arg_as_string(arg) << " shape absent";
+  auto type = VAIP_ORT_API(node_arg_get_element_type)(arg);
+  create_const(name.c_str(), data, *shape, type);
+}
+
+void IPass::create_empty_const(const Node& node, size_t size) {
+  auto name = node_get_output_name(node);
+  auto& arg = node_get_output_node_arg(node);
+  auto shape = node_arg_get_shape_i64(arg);
+  CHECK(shape != nullptr) << node_arg_as_string(arg) << " shape absent";
+  auto type = VAIP_ORT_API(node_arg_get_element_type)(arg);
+  create_empty_const(name.c_str(), size, *shape, type);
+}
+void IPass::create_lazy_const(
+    const Node& node, size_t size,
+    const std::function<void(gsl::span<char>)>& lazy) {
+  auto& arg = node_get_output_node_arg(node);
+  auto shape = node_arg_get_shape_i64(arg);
+  CHECK(shape != nullptr) << node_arg_as_string(arg) << " shape absent";
+  auto type = VAIP_ORT_API(node_arg_get_element_type)(arg);
+  create_lazy_const(node_get_output_name(node).c_str(), size, *shape, type,
+                    lazy);
+}
+template <>
+std::vector<int64_t> IPass::const_data_into<int64_t>(const NodeArg& node_arg) {
+  auto name = node_arg_get_name(node_arg);
+  auto info = get_const_info(name.c_str());
+  auto ret = std::vector<int64_t>();
+  if (info.type() == ONNX_NAMESPACE::TensorProto_DataType_INT32) {
+    auto v1 = get_const_data<int32_t>(name.c_str());
+    ret.resize(v1.size());
+    std::transform(v1.begin(), v1.end(), ret.begin(),
+                   [](int32_t val) { return static_cast<int64_t>(val); });
+  } else if (info.type() == ONNX_NAMESPACE::TensorProto_DataType_INT64) {
+    auto v1 = get_const_data<int64_t>(name.c_str());
+    ret.resize(v1.size());
+    std::transform(v1.begin(), v1.end(), ret.begin(),
+                   [](int64_t val) { return static_cast<int64_t>(val); });
+  } else {
+    LOG(FATAL) << "unknown type " << info.DebugString();
+  }
+  return ret;
+}
 void IPass::copy_fix_info(const std::string& from, const std::string& to) {
   copy_fix_info(from.c_str(), to.c_str());
 }

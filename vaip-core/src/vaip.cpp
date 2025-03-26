@@ -40,17 +40,19 @@
 
 #include "./config.hpp"
 #include "./pass_imp.hpp"
+#include "morphizen/env_config.hpp"
 #include "morphizen/transpose.hpp"
 #include "morphizen/util.hpp"
 #include "morphizen/vaip_ort.hpp"
 #include "morphizen/vaip_plugin.hpp"
 #include "version_info.hpp"
-#include "morphizen/env_config.hpp"
 #include <vaip/custom_op.h>
 #include <vaip/my_ort.h>
 #include <vaip/vaip_ort_api.h>
 
-// #include "core/common/status.h"
+DEF_ENV_PARAM(MORPHIZEN_DEBUG_DEINITIALIZE, "0")
+#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_DEINITIALIZE) >= n)
+
 #include <memory>
 
 namespace vaip_core {
@@ -66,9 +68,22 @@ initialize_onnxruntime_vitisai_ep(OrtApiForVaip* api,
 
   return;
 }
+namespace {
+std::vector<std::pair<std::string, std::function<void()>>> g_at_exits;
+}
 
-VAIP_DLL_SPEC void deinitialize_onnxruntime_vitisai_ep() {
-  LOG(INFO) << "deinitialize_onnxruntime_vitisai_ep";
+void add_cleanup_function(const std::string& name,
+                          std::function<void()> cleanup_function) {
+  g_at_exits.emplace_back(name, cleanup_function);
+}
+
+VAIP_DLL_SPEC
+void deinitialize_onnxruntime_vitisai_ep() {
+  MY_LOG(1) << "deinitialize_onnxruntime_vitisai_ep";
   deinitialize_transpose();
+  for (auto& item : g_at_exits) {
+    MY_LOG(1) << " deinitialize " << item.first;
+  }
+  g_at_exits.clear();
 }
 } // namespace vaip_core

@@ -34,6 +34,8 @@
 
 #pragma once
 #include "./_sanity_check.hpp"
+#include <cstdlib>
+#include <iostream>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -49,7 +51,13 @@ void register_plugin_static(const std::string& name, const std::string& symbol,
                             void* addr);
 class StaticPluginRegister {
 public:
-  StaticPluginRegister(const char* name, const char* symbol, void* addr);
+  VAIP_DLL_SPEC StaticPluginRegister(const char* name, const char* symbol,
+                                     void* addr);
+  VAIP_DLL_SPEC ~StaticPluginRegister();
+private:
+  const char* name_;
+  const char* symbol_;
+  void* addr_;
 };
 
 struct Tag_Plugin_Func_Set;
@@ -64,16 +72,13 @@ struct Plugin {
   template <typename R, typename... Args>
   R invoke(const char* name, Args... args) {
     auto sym = my_plugin_sym(plugin_, name);
-#if defined(CHECK)
-    CHECK(sym != nullptr) << "no such function: " << name << "; " //
-                          << "libname " << name_ << " "           //
-                          << "so_name " << so_name_ << " "        //
-        ;
-#else
-#  ifndef USE_VITISAI
-#    warning "it would be better to include <glog/logging.h>"
-#  endif
-#endif
+    if (sym == nullptr) {
+      std::cerr << "no such function: " << name << "; " //
+                << "libname " << name_ << " "           //
+                << "so_name " << so_name_ << " "        //
+                << std::endl;
+      std::abort();
+    }
     typedef R (*fun_type_t)(Args...);
     fun_type_t f = reinterpret_cast<fun_type_t>(sym);
     return f(std::forward<Args>(args)...);
