@@ -58,7 +58,7 @@ VAIP_DLL_SPEC float node_arg_get_const_data_as_float(const Graph& graph,
 VAIP_DLL_SPEC uint8_t node_arg_get_const_data_as_u8(const Graph& graph,
                                                     const NodeArg& node_arg);
 VAIP_DLL_SPEC int8_t node_arg_get_const_data_as_i8(const Graph& graph,
-                                                   const NodeArg& node_arg);
+                                                    const NodeArg& node_arg);
 VAIP_DLL_SPEC int32_t node_arg_get_const_data_as_i32(const Graph& graph,
                                                      const NodeArg& node_arg);
 VAIP_DLL_SPEC uint16_t node_arg_get_const_data_as_u16(const Graph& graph,

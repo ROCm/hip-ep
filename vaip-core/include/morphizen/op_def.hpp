@@ -32,6 +32,7 @@
 
 #pragma once
 #include "onnxruntime_api.hpp"
+#include <set>
 #include <vector>
 
 namespace vaip_core {
@@ -45,6 +46,7 @@ template <typename T> struct ProcessorOpDefInfo {
 };
 
 template <typename T> OpDefInfo ProcessorOpDefInfo<T>::info = {T::process};
+void set_vitis_ep_custom_ops(const std::set<std::string>&);
 } // namespace vaip_core
 
 #ifndef _WIN32

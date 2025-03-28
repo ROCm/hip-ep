@@ -35,6 +35,7 @@
 #include "morphizen/pass.hpp"
 #define VAIP_USE_DEPRECATED_API 1
 #include "morphizen/anchor_point.hpp"
+#include "morphizen/env_config.hpp"
 #include "morphizen/graph.hpp"
 #include "morphizen/node.hpp"
 #include "morphizen/node_arg.hpp"
@@ -45,7 +46,6 @@
 #include <cstdint>
 #include <glog/logging.h>
 #include <vaip/my_ort.h>
-
 DEF_ENV_PARAM(DEBUG_NODE_BUILDER, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_NODE_BUILDER) >= n)
 namespace vaip_core {

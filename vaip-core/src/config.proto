@@ -5,8 +5,8 @@
  * to the BSD open source license, it is NOT the BSD open source license nor
  * other OSI-approved open source license.
  *
- *      Copyright (C) 2022 Xilinx, Inc.
- *      Copyright (C) 2023 – 2024 Advanced Micro Devices, Inc. All rights reserved.
+ *Copyright (C) 2022 Xilinx, Inc. All rights reserved.
+ *Copyright (C) 2022 – 2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  *      Redistribution and use in binary form only, without modification, is
  * permitted provided that the following conditions are met:
@@ -51,10 +51,13 @@ message ConfigProto {
   map<string, string> session_configs = 13 [json_name = "ort_session_config"];
   optional string priority = 14;
   optional bool no_failsafe = 16;
-
+  string onnx_md5_file = 17;
+  string onnx_md5_a = 18;
+  string onnx_md5_b = 19;
+  map<string, string> qos_provider_options = 20;
   // static table for whitelist for xclbin, vaip_config
   repeated MepConfigTable mep_table = 100;
-  
+
   optional bool enable_cache_file_io_in_mem = 1024;
 }
 
@@ -72,6 +75,12 @@ message MepConfigTable {
   optional int32 node_count = 11;
   optional int64 model_clone_threshold = 12;
   optional bool is_preemptible = 13;
+  optional bool dd_use_lazy_scratch_bo = 14;
+  optional string constbo_sharing_key = 15;
+  optional bool dd_use_lazy_const_bo = 16;
+  optional bool dd_dealloc_scratch_bo = 17;
+  optional string perf_pref = 18;
+  map<string, string> qos_generic_params = 19;
 }
 
 message TargetProto {
@@ -82,6 +91,8 @@ message TargetProto {
   TargetAttrProto target_opts = 4;
   optional bool share_hw_context = 5; // whether share xrt hw enabled or not
   optional int32 graph_engine_qos_priority = 6; // GraphEngine::qos_priority
+  optional bool old_qdq = 7;
+  optional bool py3_round = 8;
 }
 
 message TargetAttrProto {
@@ -107,7 +118,6 @@ message PassProto {
     PassVaimlConfigProto vaiml_config = 107; // config for vaiml_partition pass
     PassVaimlParamProto pass_vaiml_param = 108; // config for vaiml pass
     PassFusionParamProto pass_fusion_param = 109;
-    
   }
 }
 
@@ -123,7 +133,7 @@ message PassDpuParamProto {
   int32 minimum_num_of_conv = 4;
   repeated string supported_op = 5;
   string xclbin = 6;
-  optional bool debug = 7;
+
 }
 message PassDDParamProto{
   repeated PassProto sub_pass = 1;
@@ -145,7 +155,12 @@ message PatternPlusProto {
 }
 
 message ExtractorProto{
-    map<string, AccessorProto> extractor_map = 1;
+    repeated string initializers = 1;
+    repeated string input_q_params = 2;
+    repeated string output_q_params = 3;
+    repeated AttributeAccessorProto accessor_attributes = 4;
+    repeated ExplicitAttributeAccessorProto explicit_attributes = 5;
+    repeated string modifiers = 6;
 }
 
 message AccessorProto{
@@ -170,7 +185,9 @@ message InitializerAccessorProto{
 message ExplicitAttributeAccessorProto{
     string attribute_name = 1;
     string attribute_value = 2;
+    optional string attribute_dtype = 3;
 }
+
 
 message PassFuseDeviceSubgraphProto {
   string pattern = 1; // in python code
@@ -219,7 +236,7 @@ message PassVaimlConfigProto {
   optional string vaiml_model_path =2 ;
   optional string user_subgraph_config = 3;
   optional bool override_batch_size = 4;
-  optional string device_name = 5;
+  // 5 open
   optional string model_type = 6;
   optional bool debug = 7;
   optional int32 max_num_inputs = 8;
@@ -231,12 +248,12 @@ message PassVaimlConfigProto {
   optional string aie_unsupported_ops_override = 14;
   optional string custom_op_repo = 15;
   optional string overlay_json = 16;
+  // 17 open
   optional string vaiml_unarchive_path = 18;
   optional string vaiml_archive_file = 19;
   optional bool run_archive = 20;
   optional bool single_archive = 21;
-
-  optional float removable_cluster_node_ratio = 22; 
+  optional float removable_cluster_node_ratio = 22;
   optional int32 min_subgraph_size = 23;
   repeated string supported_custom_ops = 24;
   repeated string experiment_features = 25;
@@ -257,6 +274,11 @@ message PassVaimlConfigProto {
   optional bool enable_local_context = 40;
   optional bool no_failsafe = 41;
   optional string llm_ops_config = 42;
+
+  optional bool supported_node_mode = 101;
+  optional bool binary_module = 102;
+  optional bool run_vaiml_compile = 103;
+  optional string device_name = 104;
 }
 
 message PassVaimlParamProto {

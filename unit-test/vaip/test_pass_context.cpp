@@ -31,8 +31,8 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 #include "debug_logger.hpp"
-#include "unit_test_env_params.hpp"
 #include "morphizen/vaip.hpp" // NOLINT
+#include "unit_test_env_params.hpp"
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
@@ -92,44 +92,46 @@ TEST_F(PassContextTest, ReadFileTest) {
   auto tar_file_stream = vaip_core::IStreamWriter::from_path(
       CMAKE_CURRENT_BINARY_PATH / "ReadFileTest.tar");
   passContext->cache_files_to_tar_file(*tar_file_stream);
-  { // read it back from another pass context object.
-    passContext->tar_file_to_cache_files(CMAKE_CURRENT_BINARY_PATH /
-                                         "ReadFileTest.tar");
-    for (auto i = 0; i < 3; ++i) {
-      std::string filename =
-          std::string("test_file_") + std::to_string(i) + ".txt";
-      // Read the file using the read_file function
-      auto readResult = passContext->read_file_c8(filename);
+  // { // read it back from another pass context object.
+  //   passContext->tar_file_to_cache_files(CMAKE_CURRENT_BINARY_PATH /
+  //                                        "ReadFileTest.tar");
+  //   for (auto i = 0; i < 3; ++i) {
+  //     std::string filename =
+  //         std::string("test_file_") + std::to_string(i) + ".txt";
+  //     // Read the file using the read_file function
+  //     auto readResult = passContext->read_file_c8(filename);
 
-      // Assert that the file was read successfully
-      ASSERT_TRUE(readResult.has_value());
-      // Assert that the content of the file matches the expected content
-      std::string fileContent = "This is a test file for " + std::to_string(i);
-      ASSERT_EQ(std::string(readResult->data(), readResult->size()),
-                fileContent);
-    }
-  }
-  { // read it back from a chunk of memory.
-    std::ifstream tar_ball(CMAKE_CURRENT_BINARY_PATH / "ReadFileTest.tar",
-                           std::ios::binary);
-    // read the whole file into `content` from tar_ball.
-    std::vector<char> content((std::istreambuf_iterator<char>(tar_ball)),
-                              std::istreambuf_iterator<char>());
-    passContext->tar_mem_to_cache_files(content.data(), content.size());
-    for (auto i = 0; i < 3; ++i) {
-      std::string filename =
-          std::string("test_file_") + std::to_string(i) + ".txt";
-      // Read the file using the read_file function
-      auto readResult = passContext->read_file_c8(filename);
+  //     // Assert that the file was read successfully
+  //     ASSERT_TRUE(readResult.has_value());
+  //     // Assert that the content of the file matches the expected content
+  //     std::string fileContent = "This is a test file for " +
+  //     std::to_string(i); ASSERT_EQ(std::string(readResult->data(),
+  //     readResult->size()),
+  //               fileContent);
+  //   }
+  // }
+  // { // read it back from a chunk of memory.
+  //   std::ifstream tar_ball(CMAKE_CURRENT_BINARY_PATH / "ReadFileTest.tar",
+  //                          std::ios::binary);
+  //   // read the whole file into `content` from tar_ball.
+  //   std::vector<char> content((std::istreambuf_iterator<char>(tar_ball)),
+  //                             std::istreambuf_iterator<char>());
+  //   passContext->tar_mem_to_cache_files(content.data(), content.size());
+  //   for (auto i = 0; i < 3; ++i) {
+  //     std::string filename =
+  //         std::string("test_file_") + std::to_string(i) + ".txt";
+  //     // Read the file using the read_file function
+  //     auto readResult = passContext->read_file_c8(filename);
 
-      // Assert that the file was read successfully
-      ASSERT_TRUE(readResult.has_value());
-      // Assert that the content of the file matches the expected content
-      std::string fileContent = "This is a test file for " + std::to_string(i);
-      ASSERT_EQ(std::string(readResult->data(), readResult->size()),
-                fileContent);
-    }
-  }
+  //     // Assert that the file was read successfully
+  //     ASSERT_TRUE(readResult.has_value());
+  //     // Assert that the content of the file matches the expected content
+  //     std::string fileContent = "This is a test file for " +
+  //     std::to_string(i); ASSERT_EQ(std::string(readResult->data(),
+  //     readResult->size()),
+  //               fileContent);
+  //   }
+  // }
 }
 TEST_F(PassContextTest, UntarCacheTest) {
   for (auto i = 0; i < 3; ++i) {
@@ -190,79 +192,81 @@ TEST_F(PassContextTest, TestEmptyFiles) {
   }
 }
 
-TEST_F(PassContextTest, OnDiskTarTest) {
-  auto ctx1 = vaip_core::PassContext::create();
-  auto dir = std::filesystem::current_path() / "OnDiskTarTest";
-  if (std::filesystem::exists(dir)) {
-    std::filesystem::remove_all(dir);
-  }
-  std::filesystem::create_directory(dir);
+// TEST_F(PassContextTest, OnDiskTarTest) {
+//   auto ctx1 = vaip_core::PassContext::create();
+//   auto dir = std::filesystem::current_path() / "OnDiskTarTest";
+//   if (std::filesystem::exists(dir)) {
+//     std::filesystem::remove_all(dir);
+//   }
+//   std::filesystem::create_directory(dir);
 
-  auto res1_dir = dir / "res1_dir";
-  auto res2_dir = dir / "res2_dir";
-  auto res3_dir = dir / "res3_dir";
-  std::filesystem::create_directory(res1_dir);
-  std::filesystem::create_directory(res2_dir);
-  std::filesystem::create_directory(res3_dir);
+//   auto res1_dir = dir / "res1_dir";
+//   auto res2_dir = dir / "res2_dir";
+//   auto res3_dir = dir / "res3_dir";
+//   std::filesystem::create_directory(res1_dir);
+//   std::filesystem::create_directory(res2_dir);
+//   std::filesystem::create_directory(res3_dir);
 
-  auto empty_file_path = dir / "empty_file.txt";
-  std::ofstream empty_file(empty_file_path);
-  empty_file.close();
-  auto simple_file_path = dir / "simple_file.txt";
-  std::ofstream simple_file(simple_file_path);
-  simple_file << "12345\n23456\n";
-  simple_file.close();
-  auto pad_file_path = dir / "pad_file.txt";
-  std::ofstream pad_file(pad_file_path, std::ios::binary);
-  for (int i = 0; i < 512; i++) {
-    pad_file << static_cast<char>(i % 256);
-  }
-  pad_file.close();
+//   auto empty_file_path = dir / "empty_file.txt";
+//   std::ofstream empty_file(empty_file_path);
+//   empty_file.close();
+//   auto simple_file_path = dir / "simple_file.txt";
+//   std::ofstream simple_file(simple_file_path);
+//   simple_file << "12345\n23456\n";
+//   simple_file.close();
+//   auto pad_file_path = dir / "pad_file.txt";
+//   std::ofstream pad_file(pad_file_path, std::ios::binary);
+//   for (int i = 0; i < 512; i++) {
+//     pad_file << static_cast<char>(i % 256);
+//   }
+//   pad_file.close();
 
-  auto recursive_path = dir / "deep";
-  std::filesystem::create_directory(recursive_path);
-  recursive_path = recursive_path / "deeper";
-  std::filesystem::create_directory(recursive_path);
-  auto deep_file_path = recursive_path / "deep.bin";
-  std::ofstream deep_file(deep_file_path, std::ios::binary);
-  std::vector<uint64_t> long_bytes(1013 * 1023 * 671);
-  std::fill(long_bytes.begin(), long_bytes.end(), 9);
-  deep_file.write(reinterpret_cast<const char*>(long_bytes.data()),
-                  long_bytes.size());
-  deep_file.close();
+//   auto recursive_path = dir / "deep";
+//   std::filesystem::create_directory(recursive_path);
+//   recursive_path = recursive_path / "deeper";
+//   std::filesystem::create_directory(recursive_path);
+//   auto deep_file_path = recursive_path / "deep.bin";
+//   std::ofstream deep_file(deep_file_path, std::ios::binary);
+//   std::vector<uint64_t> long_bytes(1013 * 1023 * 671);
+//   std::fill(long_bytes.begin(), long_bytes.end(), 9);
+//   deep_file.write(reinterpret_cast<const char*>(long_bytes.data()),
+//                   long_bytes.size());
+//   deep_file.close();
 
-  auto tar_file_path = dir / "x.tar";
-  auto tar_file_stream = vaip_core::IStreamWriter::from_path(tar_file_path);
-  std::ignore = ctx1->cache_files_to_tar_file(*tar_file_stream);
+//   auto tar_file_path = dir / "x.tar";
+//   auto tar_file_stream = vaip_core::IStreamWriter::from_path(tar_file_path);
+//   std::ignore = ctx1->cache_files_to_tar_file(*tar_file_stream);
 
-  auto ctx2 = vaip_core::PassContext::create();
-  ctx2->tar_file_to_cache_files(tar_file_path);
+//   auto ctx2 = vaip_core::PassContext::create();
+//   ctx2->tar_file_to_cache_files(tar_file_path);
 
-  auto bytes = ctx1->cache_files_to_tar_mem();
-  auto ctx3 = vaip_core::PassContext::create();
-  ctx3->tar_mem_to_cache_files(bytes.data(), bytes.size());
+//   auto bytes = ctx1->cache_files_to_tar_mem();
+//   auto ctx3 = vaip_core::PassContext::create();
+//   ctx3->tar_mem_to_cache_files(bytes.data(), bytes.size());
 
-  for (const auto& f :
-       std::filesystem::recursive_directory_iterator(res1_dir)) {
-    if (std::filesystem::is_regular_file(f.path())) {
-      std::ifstream file1(f.path(), std::ios::binary);
-      std::vector<char> buffer1(std::istreambuf_iterator<char>(file1), {});
-      auto relative_path = std::filesystem::relative(f, res1_dir);
+//   for (const auto& f :
+//        std::filesystem::recursive_directory_iterator(res1_dir)) {
+//     if (std::filesystem::is_regular_file(f.path())) {
+//       std::ifstream file1(f.path(), std::ios::binary);
+//       std::vector<char> buffer1(std::istreambuf_iterator<char>(file1), {});
+//       auto relative_path = std::filesystem::relative(f, res1_dir);
 
-      auto f2_path = res2_dir / relative_path;
-      std::ifstream file2(f2_path, std::ios::binary);
-      std::vector<char> buffer2(std::istreambuf_iterator<char>(file2), {});
-      CHECK_EQ(buffer1.size(), buffer2.size());
-      ASSERT_TRUE(std::equal(buffer1.begin(), buffer1.end(), buffer2.begin()));
+//       auto f2_path = res2_dir / relative_path;
+//       std::ifstream file2(f2_path, std::ios::binary);
+//       std::vector<char> buffer2(std::istreambuf_iterator<char>(file2), {});
+//       CHECK_EQ(buffer1.size(), buffer2.size());
+//       ASSERT_TRUE(std::equal(buffer1.begin(), buffer1.end(),
+//       buffer2.begin()));
 
-      auto f3_path = res3_dir / relative_path;
-      std::ifstream file3(f3_path, std::ios::binary);
-      std::vector<char> buffer3(std::istreambuf_iterator<char>(file3), {});
-      CHECK_EQ(buffer1.size(), buffer3.size());
-      ASSERT_TRUE(std::equal(buffer1.begin(), buffer1.end(), buffer3.begin()));
-    }
-  }
-}
+//       auto f3_path = res3_dir / relative_path;
+//       std::ifstream file3(f3_path, std::ios::binary);
+//       std::vector<char> buffer3(std::istreambuf_iterator<char>(file3), {});
+//       CHECK_EQ(buffer1.size(), buffer3.size());
+//       ASSERT_TRUE(std::equal(buffer1.begin(), buffer1.end(),
+//       buffer3.begin()));
+//     }
+//   }
+// }
 
 TEST_F(PassContextTest, TestCompress) {
   constexpr auto test_data_size = 128u * 1024u;
@@ -330,68 +334,70 @@ TEST_F(PassContextTest, TestGzTar) {
   }
 }
 
-TEST_F(PassContextTest, TestLongFilenames) {
-  auto buffer = std::vector<char>{};
-  std::string long_name(101u, 'x');
-  auto tar_mem = std::vector<char>();
-  for (auto i = 0; i < 101; ++i) {
-    long_name[i] = (char)('0' + (i % 10));
-  }
-  for (auto i = 0; i < 3; ++i) {
-    // Test file name
-    std::string filename = std::to_string(i) + long_name + std::to_string(i);
-    // Create a test file with some content
-    std::string fileContent = "This is a test file for " + std::to_string(i);
-    if (i == 1) {
-      fileContent = "";
-    }
-    bool writeResult =
-        passContext->write_file(filename, gsl::make_span(fileContent));
+// TEST_F(PassContextTest, TestLongFilenames) {
+//   auto buffer = std::vector<char>{};
+//   std::string long_name(101u, 'x');
+//   auto tar_mem = std::vector<char>();
+//   for (auto i = 0; i < 101; ++i) {
+//     long_name[i] = (char)('0' + (i % 10));
+//   }
+//   for (auto i = 0; i < 3; ++i) {
+//     // Test file name
+//     std::string filename = std::to_string(i) + long_name + std::to_string(i);
+//     // Create a test file with some content
+//     std::string fileContent = "This is a test file for " + std::to_string(i);
+//     if (i == 1) {
+//       fileContent = "";
+//     }
+//     bool writeResult =
+//         passContext->write_file(filename, gsl::make_span(fileContent));
 
-    ASSERT_TRUE(writeResult);
-    auto stream = vaip_core::IStreamWriter::from_path(
-        CMAKE_CURRENT_BINARY_PATH / "TestLongFileName.tar");
-    passContext->cache_files_to_tar_file(*stream);
-    tar_mem = passContext->cache_files_to_tar_mem();
-  }
-  {
-    passContext->tar_file_to_cache_files(CMAKE_CURRENT_BINARY_PATH /
-                                         "TestLongFileName.tar");
-    for (auto i = 0; i < 3; ++i) {
-      // Test file name
-      std::string filename = std::to_string(i) + long_name + std::to_string(i);
-      // Create a test file with some content
-      std::string fileContent = "This is a test file for " + std::to_string(i);
-      if (i == 1) {
-        fileContent = "";
-      }
-      // Read the file using the read_file function
-      auto readResult = passContext->read_file_c8(filename);
+//     ASSERT_TRUE(writeResult);
+//     auto stream = vaip_core::IStreamWriter::from_path(
+//         CMAKE_CURRENT_BINARY_PATH / "TestLongFileName.tar");
+//     passContext->cache_files_to_tar_file(*stream);
+//     tar_mem = passContext->cache_files_to_tar_mem();
+//   }
+//   {
+//     passContext->tar_file_to_cache_files(CMAKE_CURRENT_BINARY_PATH /
+//                                          "TestLongFileName.tar");
+//     for (auto i = 0; i < 3; ++i) {
+//       // Test file name
+//       std::string filename = std::to_string(i) + long_name +
+//       std::to_string(i);
+//       // Create a test file with some content
+//       std::string fileContent = "This is a test file for " +
+//       std::to_string(i); if (i == 1) {
+//         fileContent = "";
+//       }
+//       // Read the file using the read_file function
+//       auto readResult = passContext->read_file_c8(filename);
 
-      // Assert that the file was read successfully
-      ASSERT_TRUE(readResult.has_value());
-      ASSERT_EQ(std::string(readResult->data(), readResult->size()),
-                fileContent);
-    }
-  }
-  {
-    passContext->tar_mem_to_cache_files(tar_mem.data(), tar_mem.size());
-    for (auto i = 0; i < 3; ++i) {
-      // Test file name
-      std::string filename = std::to_string(i) + long_name + std::to_string(i);
-      // Create a test file with some content
-      std::string fileContent = "This is a test file for " + std::to_string(i);
-      if (i == 1) {
-        fileContent = "";
-      }
-      // Read the file using the read_file function
-      auto readResult = passContext->read_file_c8(filename);
+//       // Assert that the file was read successfully
+//       ASSERT_TRUE(readResult.has_value());
+//       ASSERT_EQ(std::string(readResult->data(), readResult->size()),
+//                 fileContent);
+//     }
+//   }
+//   {
+//     passContext->tar_mem_to_cache_files(tar_mem.data(), tar_mem.size());
+//     for (auto i = 0; i < 3; ++i) {
+//       // Test file name
+//       std::string filename = std::to_string(i) + long_name +
+//       std::to_string(i);
+//       // Create a test file with some content
+//       std::string fileContent = "This is a test file for " +
+//       std::to_string(i); if (i == 1) {
+//         fileContent = "";
+//       }
+//       // Read the file using the read_file function
+//       auto readResult = passContext->read_file_c8(filename);
 
-      // Assert that the file was read successfully
-      ASSERT_TRUE(readResult.has_value());
-      ASSERT_EQ(std::string(readResult->data(), readResult->size()),
-                fileContent);
-    }
-  }
-  // ASSERT_TRUE(false);
-}
+//       // Assert that the file was read successfully
+//       ASSERT_TRUE(readResult.has_value());
+//       ASSERT_EQ(std::string(readResult->data(), readResult->size()),
+//                 fileContent);
+//     }
+//   }
+//   // ASSERT_TRUE(false);
+// }

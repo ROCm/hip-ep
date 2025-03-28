@@ -151,6 +151,22 @@ target_include_directories(${LIB_NAME}
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   $<BUILD_INTERFACE:${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime>
+  # TODO: it is not a good pratice, we should use
+  #      #include <core/session/onnxruntime_c_api.h>
+  # instead of
+  #      #include <onnxruntime_c_api.h>
+  #
+  # however, too many source code use the later, so we add it to search path
+  #
+  # if morphizen users need to use pre-installed version of morphizen,
+  # it should use the following in their CMakeLists.txt
+  #
+  #    find_package(onnxruntime CONFIG REQUIRED)
+  #    target_link_libraries (<YOUR-TARGET> PRIVATE morphizen::morphizen-core-static)
+  #
+  # then use #include <morphizen/onnxruntime_api.h> instread.
+  #
+  $<BUILD_INTERFACE:${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime/core/session>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
   $<BUILD_INTERFACE:${VAIP_ORT_API_DIR}>
   PRIVATE

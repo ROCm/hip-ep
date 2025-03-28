@@ -101,7 +101,7 @@ Plugin* Plugin::get(const std::string& plugin_name, Plugin_Func_Set* func_set) {
       << "cannot load plugin. plugin_name=" << plugin_name;
   return it->second.get();
 }
-void* Plugin::my_plugin_sym(void* handle, const char* name) {
+void* Plugin::my_plugin_sym(void* handle, const char* name) const {
   return func_set_->plugin_sym((plugin_t)handle, name);
 }
 

@@ -35,6 +35,7 @@
 #include <glog/logging.h>
 #include <google/protobuf/util/json_util.h>
 
+#include "morphizen/env_config.hpp"
 #include "morphizen/mem_xclbin.hpp"
 #include "morphizen/util.hpp"
 #include "morphizen/vaip_io.hpp"
@@ -42,7 +43,6 @@
 #include "pass_context_imp.hpp"
 #include "profile_utils.hpp"
 #include "tar_ball.hpp"
-
 DEF_ENV_PARAM(DEBUG_TAR_CACHE, "0")
 
 namespace vaip_core {
@@ -179,6 +179,14 @@ bool PassContextImp::get_is_ep_context_model() {
   return this->is_ep_context_model;
 }
 
+void PassContextImp::set_cache_file_md5_map(
+    const std::map<std::string, std::string>& cache_file_md5) {
+  cache_file_md5s_ = cache_file_md5;
+}
+std::map<std::string, std::string> PassContextImp::get_cache_file_md5_map() {
+  return cache_file_md5s_;
+}
+
 int64_t PassContextImp::get_provider_option_i64(const std::string& option_name,
                                                 int64_t default_value) const {
   auto config_value = get_provider_option(option_name);
@@ -217,6 +225,35 @@ PassContextImp::get_run_option(const std::string& option_name,
   }
   return ret;
 }
+std::string
+PassContextImp::get_ep_dynamic_option(const std::string& option_name,
+                                      const std::string& default_value) const {
+  std::lock_guard<std::mutex> lock(this->ep_dynamic_options_lock);
+  auto it = ep_dynamic_options.find(option_name);
+  if (it == ep_dynamic_options.end()) {
+    return default_value;
+  } else {
+    return it->second;
+  }
+}
+
+void PassContextImp::add_QosUpdater(
+    const std::shared_ptr<QoSUpdateInterface>& updater) const {
+  CHECK(updater) << "Null QoS updater cannot be added to PassContext";
+  qos_updaters_.push_back(updater);
+}
+
+void PassContextImp::update_all_qos(const std::string& workload_type) const {
+  if (workload_type == "Efficient" || workload_type == "Default") {
+    for (const auto& updater : qos_updaters_) {
+      CHECK(updater) << "Found null QoS updater in qos_updaters_";
+      updater->update_qos(workload_type);
+    }
+  } else {
+    throw std::runtime_error("Invalid workload type: " + workload_type);
+  }
+}
+
 template <typename char_type> struct binary_io {
   static std::vector<char_type> slurp_binary(FILE* file) {
     CHECK(fseek64(file, 0, SEEK_SET) == 0);
@@ -465,12 +502,7 @@ bool PassContextImp::cache_files_to_tar_file(IStreamWriter& writer) const {
   }
   return true;
 }
-bool PassContextImp::tar_file_to_cache_files(
-    const std::filesystem::path& tar_file) {
-  auto tar_mem = vaip_core::slurp_binary_c8(tar_file);
-  tar_mem_to_cache_files(tar_mem.data(), tar_mem.size());
-  return true;
-}
+
 bool PassContextImp::tar_mem_to_cache_files(const char* buffer, size_t size) {
   // todo: is this function can be delete
   // auto p = buffer;
@@ -523,9 +555,6 @@ bool PassContextImp::tar_file_to_cache_files(IStreamReader& src) {
     }
   }
   return true;
-}
-bool PassContextImp::tar_file_to_cache_files(FILE* file) {
-  return tar_file_to_cache_files(*IStreamReader::from_FILE(file));
 }
 
 std::filesystem::path PassContextImp::xclbin_path_to_cache_files(
@@ -608,6 +637,15 @@ PassContextImp::measure(const std::string& label) {
       new PassContextTimerImp(label, *this));
 }
 
+void PassContextImp::on_custom_op_create_end() {
+  created_customop_count++;
+  if (created_customop_count == this->context_proto.meta_def_size()) {
+    for (auto iter : cache_files_) {
+      fclose(iter.second);
+    }
+    cache_files_.clear();
+  }
+}
 /// struct PassContextTimerImp
 PassContextTimerImp::PassContextTimerImp(const std::string& label,
                                          PassContextImp& context)
@@ -682,12 +720,12 @@ void PassContextImp::load_plugins() {
     plugins->push_back(plugin);
   }
   this->add_context_resource("__all_plugins__",
-    std::shared_ptr<void>((void*) plugins, [](void* p) {
-      delete (std::vector<std::shared_ptr<Plugin>>*) p;
-    }));
+                             std::shared_ptr<void>((void*)plugins, [](void* p) {
+                               delete (std::vector<std::shared_ptr<Plugin>>*)p;
+                             }));
 }
 std::shared_ptr<Plugin>
- PassContextImp::load_plugin(const std::string& plugin_name) {
+PassContextImp::load_plugin(const std::string& plugin_name) {
   auto plugin = morphizen::WeakStore<std::string, Plugin>::create(
       plugin_name, plugin_name.c_str(), g_dynamic_plugin_func_set_ptr);
   return plugin;
@@ -715,6 +753,8 @@ std::size_t CacheFileReaderImp::fread(void* buffer, std::size_t size) const {
 }
 
 size_t CacheFileReaderImp::size() const { return size_; }
+
+void CacheFileReaderImp::rewind() const { std::rewind(fp_); }
 
 CacheFileWriterImp::CacheFileWriterImp(bool in_mem, const std::string& filename,
                                        FILE* fp)

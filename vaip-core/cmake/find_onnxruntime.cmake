@@ -1,6 +1,7 @@
 find_path(ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR
   NAMES vaip/vaip_ort_api.h
   PATHS "${ONNXRUNTIME_SOURCE_TREE_DIR}/onnxruntime/core/providers/vitisai/include"
+  PATHS "${onnxruntime_SOURCE_DIR}/../onnxruntime/core/providers/vitisai/include"
   NO_DEFAULT_PATH
   NO_CMAKE_FIND_ROOT_PATH
 )

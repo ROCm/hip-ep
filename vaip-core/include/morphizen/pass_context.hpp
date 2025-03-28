@@ -34,9 +34,9 @@
 
 #pragma once
 
-#include "./env_config.hpp"
-#include "./vaip_io.hpp"
 #include "morphizen/pass_context.pb.h"
+#include "morphizen/vaip_io.hpp"
+
 #include <filesystem>
 #include <gsl/span>
 #include <memory>
@@ -81,6 +81,7 @@ public:
   CacheFileReader(const CacheFileReader&) = delete;
   virtual ~CacheFileReader() = default;
   virtual size_t size() const = 0;
+  virtual void rewind() const = 0;
   virtual std::size_t fread(void* buffer, std::size_t size) const = 0;
 };
 class CacheFileWriter {
@@ -90,6 +91,13 @@ public:
   virtual ~CacheFileWriter() = default;
   virtual std::size_t fwrite(const void* buffer, std::size_t size) const = 0;
 };
+
+class QoSUpdateInterface {
+public:
+  virtual ~QoSUpdateInterface() = default;
+  virtual void update_qos(const std::string& perf_pref_value) = 0;
+};
+
 class PassContext {
 public:
 public:
@@ -207,6 +215,14 @@ public:
   virtual std::string
   get_run_option(const std::string& option_name,
                  const std::string& default_value) const = 0;
+
+  virtual std::string
+  get_ep_dynamic_option(const std::string& option_name,
+                        const std::string& default_value) const = 0;
+
+  virtual void
+  add_QosUpdater(const std::shared_ptr<QoSUpdateInterface>& updater) const = 0;
+  virtual void update_all_qos(const std::string& workload_type) const = 0;
   /**
    * @brief Retrieves the configuration protobuf object.
    *
@@ -231,7 +247,7 @@ public:
    * @return A constant reference to the ContextProto object.
    */
   virtual const ContextProto& get_context_proto() const = 0;
-  virtual  ContextProto& get_context_proto()  = 0;
+  virtual ContextProto& get_context_proto() = 0;
   // @brief DO NOT USE THIS FUNCTION
   virtual std::shared_ptr<void>
   get_context_resource(const std::string& name) const = 0;
@@ -288,6 +304,7 @@ public:
    * @return A vector of strings containing the names of cache files.
    */
   virtual std::vector<std::string> get_cache_file_names() const = 0;
+
   /**
    * @brief Creates a tar file from in-memory cache files
    *
@@ -296,17 +313,6 @@ public:
    *
    */
   virtual bool cache_files_to_tar_file(IStreamWriter& writer) const = 0;
-
-  /**
-   * @brief Loads a tar file and save its content into in-memory cache files
-   *
-   * @param tar_file The path to the tar file.
-   * @return True if the tar ball was successfully loaded, false otherwise.
-   *
-   */
-  virtual bool
-  tar_file_to_cache_files(const std::filesystem::path& tar_file) = 0;
-
   /**
    * @brief Creates a in-memory tar file from in-memory cache files
    *
@@ -326,9 +332,7 @@ public:
    *
    */
   virtual bool tar_mem_to_cache_files(const char* data, size_t size) = 0;
-  virtual bool tar_file_to_cache_files(FILE*) = 0;
   virtual bool tar_file_to_cache_files(class IStreamReader& src) = 0;
-
   /**
    * @brief Creates a new instance of PassContext.
    *
@@ -365,5 +369,12 @@ public:
   virtual void set_is_ep_context_model(bool is_ep_context_model) = 0;
 
   virtual bool get_is_ep_context_model() = 0;
+
+  virtual void on_custom_op_create_end() = 0;
+
+  // for support combined shared context models
+  virtual void set_cache_file_md5_map(
+      const std::map<std::string, std::string>& cache_file_md5) = 0;
+  virtual std::map<std::string, std::string> get_cache_file_md5_map() = 0;
 };
 } // namespace vaip_core

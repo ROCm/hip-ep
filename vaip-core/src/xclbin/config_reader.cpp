@@ -1,40 +1,12 @@
 /*
- *     The Xilinx Vitis AI Vaip in this distribution are provided under the
- * following free and permissive binary-only license, but are not provided in
- * source code form.  While the following free and permissive license is similar
- * to the BSD open source license, it is NOT the BSD open source license nor
- * other OSI-approved open source license.
- *
- *      Copyright (C) 2023 – 2024 Advanced Micro Devices, Inc. All rights
- * reserved.
- *
- *      Redistribution and use in binary form only, without modification, is
- * permitted provided that the following conditions are met:
- *
- *      1. Redistributions must reproduce the above copyright notice, this list
- * of conditions and the following disclaimer in the documentation and/or other
- * materials provided with the distribution.
- *
- *      2. The name of Xilinx, Inc. may not be used to endorse or promote
- * products redistributed with this software without specific prior written
- * permission.
- *
- *      THIS SOFTWARE IS PROVIDED BY XILINX, INC. "AS IS" AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO
- * EVENT SHALL XILINX, INC. BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
- *      PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
- * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
- * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
- * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
- * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
+ *  Copyright (C) 2023 – 2024 Advanced Micro Devices, Inc. All rights reserved.
+ *  Licensed under the MIT License.
  */
 #include "morphizen/config_reader.hpp"
-#include "nlohmann/json.hpp"
-#include "core/session/onnxruntime_cxx_api.h"
 #include "morphizen/env_config.hpp"
-#include "morphizen/xclbin_file.hpp"
+#include "morphizen/vaip_plugin.hpp"
+#include "nlohmann/json.hpp"
+#include "vaip/vaip_ort_api.h"
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
@@ -42,17 +14,19 @@
 #include <string>
 #include <unordered_map>
 
+DEF_ENV_PARAM(MORPHIZEN_DEBUG_CONFIG_READER, "1")
+#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_CONFIG_READER) >= n)
 DEF_ENV_PARAM_2(XLNX_VART_FIRMWARE, "", std::string)
 DEF_ENV_PARAM_2(DEBUG_LOG_LEVEL, "error", std::string)
-DEF_ENV_PARAM(XLNX_ENABLE_OLD_QDQ, "1")
 DEF_ENV_PARAM(XLNX_ENABLE_BATCH, "0")
-DEF_ENV_PARAM(XLNX_ENABLE_PY3_ROUND, "0")
+DEF_ENV_PARAM(NUM_OF_DPU_RUNNERS, "1")
+DEF_ENV_PARAM_2(VAIP_CONFIG_PROVIDER_BACKEND, "onnxruntime_vitisai_ep",
+                std::string)
 
 namespace vaip_core {
-static const std::string get_default_config() {
+static const char* get_default_config() {
 #include "config_json_binary.hpp"
-  std::string ret(reinterpret_cast<const char*>(config), sizeof(config));
-  return ret;
+  return (const char*)&config[0];
 }
 
 // FIXME: The name of this function is misleading.
@@ -82,38 +56,19 @@ update_enable_batch(const onnxruntime::ProviderOptions& session_option) {
 }
 
 static void
-update_enable_old_qdq(const onnxruntime::ProviderOptions& session_option) {
-  if (session_option.find("xlnx_enable_old_qdq") != session_option.end()) {
-    std::string enable_old_qdq = session_option.at("xlnx_enable_old_qdq");
-    if (enable_old_qdq == "1") {
-      ENV_PARAM(XLNX_ENABLE_OLD_QDQ) = 1;
-    } else if (enable_old_qdq == "0") {
-      ENV_PARAM(XLNX_ENABLE_OLD_QDQ) = 0;
-    } else {
-      ENV_PARAM(XLNX_ENABLE_OLD_QDQ) = 1;
+update_num_dpu_runners(const onnxruntime::ProviderOptions& session_option) {
+  int num_of_dpu_runners = 1;
+  if (session_option.find("num_of_dpu_runners") != session_option.end()) {
+    std::string str_of_dpu_runners = session_option.at("num_of_dpu_runners");
+    num_of_dpu_runners = atoi(str_of_dpu_runners.c_str());
+    if (num_of_dpu_runners <= 0 || num_of_dpu_runners > 8) {
+      return;
     }
+    ENV_PARAM(NUM_OF_DPU_RUNNERS) = num_of_dpu_runners;
 #ifdef _WIN32
-    _putenv_s("XLNX_ENABLE_OLD_QDQ", enable_old_qdq.c_str());
+    _putenv_s("NUM_OF_DPU_RUNNERS", std::to_string(num_of_dpu_runners).c_str());
 #else
-    setenv("XLNX_ENABLE_OLD_QDQ", enable_old_qdq.c_str(), 1);
-#endif
-  }
-}
-
-static void
-update_py3_round(const onnxruntime::ProviderOptions& session_option) {
-  if (session_option.find("xlnx_enable_py3_round") != session_option.end()) {
-    std::string py3_round = session_option.at("xlnx_enable_py3_round");
-    if (py3_round == "1") {
-      ENV_PARAM(XLNX_ENABLE_PY3_ROUND) = 1;
-    } else {
-      py3_round = std::string("0");
-      ENV_PARAM(XLNX_ENABLE_PY3_ROUND) = 0;
-    }
-#ifdef _WIN32
-    _putenv_s("XLNX_ENABLE_PY3_ROUND", py3_round.c_str());
-#else
-    setenv("XLNX_ENABLE_PY3_ROUND", py3_round.c_str(), 1);
+    setenv("NUM_OF_DPU_RUNNERS", std::to_string(num_of_dpu_runners).c_str(), 1);
 #endif
   }
 }
@@ -167,13 +122,54 @@ get_config_json(const onnxruntime::ProviderOptions& options) {
   nlohmann::json ret;
   update_log_level(options);
   update_enable_batch(options);
-  update_enable_old_qdq(options);
-  update_py3_round(options);
+  update_num_dpu_runners(options);
+  auto vaip_get_default_config_plugin =
+      ::vaip_core::Plugin::get(ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND),
+                               ::vaip_core::g_dynamic_plugin_func_set_ptr);
+  auto loaded_from_plugin = false;
+  const char* default_config = nullptr;
+  if (vaip_get_default_config_plugin) {
+    MY_LOG(1) << "found plugin: " << ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND);
+    auto vaip_get_default_config =
+        vaip_get_default_config_plugin->get_method<const char*>(
+            "vaip_get_default_config");
+    if (vaip_get_default_config) {
+      MY_LOG(1) << "found symbol: vaip_get_default_config from "
+                << ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND);
+      auto default_config = vaip_get_default_config();
+
+      loaded_from_plugin = true;
+
+    } else {
+      MY_LOG(1) << "cannot found symbol: vaip_get_default_config from "
+                << ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND);
+    }
+  } else {
+    MY_LOG(1) << "cannot found plugin: "
+              << ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND)
+              << " fall back to builtin default";
+  }
+  if (!loaded_from_plugin) {
+    MY_LOG(1) << "fall back to builtin default";
+    default_config = get_default_config();
+  }
+  
   bool config_set = options.find("config_file") != options.end();
   if (config_set) {
-    ret = get_config_json_str_from_config_file(options.at("config_file"));
+    std::string config_file = options.at("config_file");
+    MY_LOG(1) << " overwrite default config, read if from " << config_file;
+    ret = get_config_json_str_from_config_file(config_file);
   } else {
-    ret = nlohmann::json::parse(get_default_config());
+    MY_LOG(1) << "use default config";
+    if (ENV_PARAM(MORPHIZEN_DEBUG_CONFIG_READER)) {
+      auto stream = std::istringstream(default_config);
+      while (stream.good()) {
+        std::string line;
+        std::getline(stream, line);
+        MY_LOG(1) << line;
+      }
+    }
+    ret = nlohmann::json::parse(default_config);
   }
   bool xclbin_in_config_file = ret.count("xclbin") > 0;
   const std::string session_prefix = "ort_session_config.";
@@ -204,15 +200,5 @@ std::string get_config_json_str(const onnxruntime::ProviderOptions& options) {
     LOG(FATAL) << "Error: " << e.what() << std::endl;
     return "";
   }
-}
-
-Ort::SessionOptions*
-get_session_option(const onnxruntime::ProviderOptions& options) {
-  auto iter = options.find("session_options");
-  if (iter == options.end()) {
-    return nullptr;
-  }
-  return reinterpret_cast<Ort::SessionOptions*>(
-      (uintptr_t)std::stoull(iter->second));
 }
 } // namespace vaip_core

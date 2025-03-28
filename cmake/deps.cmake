@@ -53,28 +53,32 @@ if(NOT TARGET Microsoft.GSL::GSL)
   find_package(Microsoft.GSL REQUIRED)
 endif()
 
-find_package(GTest QUIET)
-if(GTest_FOUND)
-  message(STATUS "found find_package(GTest)")
-else()
-  message(STATUS "fetch GTest from ${DEP_URL_GTest}")
-   FetchContent_Declare(
-    GTest
-    GIT_REPOSITORY ${DEP_URL_GTest}
-    GIT_TAG ${DEP_SHA1_GTest}
-    GIT_SHALLOW TRUE
-    CMAKE_ARGS -Dgtest_force_shared_crt=ON
-    EXCLUDE_FROM_ALL
-    OVERRIDE_FIND_PACKAGE
-  )
-  find_package(GTest REQUIRED)
+if(morphizen_ENABLE_UNIT_TEST)
+  find_package(GTest CONFIG QUIET)
+  if(TARGET GTest::gtest)
+    get_target_property(TMP GTest::gtest INTERFACE_INCLUDE_DIRECTORIES)
+    message(STATUS "found find_package(googletest) at ${TMP}")
+  else()
+    message(STATUS "fetch GTest from ${DEP_URL_GTest}")
+    FetchContent_Declare(
+      GTest
+      GIT_REPOSITORY ${DEP_URL_GTest}
+      GIT_TAG ${DEP_SHA1_GTest}
+      GIT_SHALLOW TRUE
+      CMAKE_ARGS -Dgtest_force_shared_crt=ON
+      EXCLUDE_FROM_ALL
+      FIND_PACKAGE_ARGS NAMES GTest
+      OVERRIDE_FIND_PACKAGE
+    )
+    find_package(googletest REQUIRED)
+  endif()
 endif()
 
 set(WITH_GFLAGS OFF CACHE BOOL "disable WITH_GFLAGS for glog")
-find_package(glog QUIET)
-if()
-  get_target_property(TMP glog::glog LOCATION)
-  message(STATUS "found glog at ${TMP}")
+find_package(glog CONFIG QUIET)
+if(TARGET glog::glog)
+  get_target_property(TMP glog::glog INTERFACE_INCLUDE_DIRECTORIES)
+  message(STATUS "found glog at ${TMP} ")
 else()
   message(STATUS "cannot find_package(glog), fetch it from ${DEP_URL_glog}")
   FetchContent_Declare(
@@ -90,8 +94,9 @@ endif()
 
 set(ZLIB_USE_STATIC_LIBS ON CACHE BOOL "use static zip")
 find_package(ZLIB QUIET)
-if(ZLIB_FOUND)
-  message(STATUS "found find_package(ZLIB)")
+if(TARGET ZLIB::ZLIB)
+  get_target_property(TMP ZLIB::ZLIB INTERFACE_INCLUDE_DIRECTORIES)
+  message(STATUS "found ZLIB at ${TMP}")
 else()
   message(STATUS "cannot find_package(ZLIB), fetch it from ${DEP_URL_zlib}")
   FetchContent_Declare(
@@ -99,8 +104,9 @@ else()
     GIT_REPOSITORY ${DEP_URL_zlib}
     GIT_TAG ${DEP_SHA1_zlib}
     GIT_SHALLOW TRUE
-    )
-  FetchContent_MakeAvailable(ZLIB)
+    OVERRIDE_FIND_PACKAGE
+  )
+  find_package(ZLIB REQUIRED)
   add_library(ZLIB::ZLIB ALIAS zlibstatic)
   # TODO: I don't know why, the following line does not work we have
   # to set the include path explicitly in vaip_core_static
@@ -124,7 +130,7 @@ set(protobuf_BUILD_EXAMPLES OFF CACHE BOOL "disable protobuf examples")
 ## Protobuf_USE_STATIC_LIBS must be defined.
 find_package(Protobuf CONFIG QUIET)
 if(TARGET protobuf::libprotobuf)
-  get_target_property(TMP protobuf::libprotobuf LOCATION)
+  get_target_property(TMP protobuf::libprotobuf INTERFACE_INCLUDE_DIRECTORIES)
   message(STATUS "found protobuf at ${TMP}")
 else()
   message(STATUS "cannot find_package(Protobuf), fetch it from ${DEP_URL_protobuf}")

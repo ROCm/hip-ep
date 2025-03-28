@@ -54,6 +54,7 @@ public:
   VAIP_DLL_SPEC StaticPluginRegister(const char* name, const char* symbol,
                                      void* addr);
   VAIP_DLL_SPEC ~StaticPluginRegister();
+
 private:
   const char* name_;
   const char* symbol_;
@@ -71,20 +72,33 @@ struct Plugin {
   VAIP_DLL_SPEC ~Plugin();
   template <typename R, typename... Args>
   R invoke(const char* name, Args... args) {
-    auto sym = my_plugin_sym(plugin_, name);
-    if (sym == nullptr) {
+    auto method = get_method<R, Args...>(name);
+    if (method == nullptr) {
       std::cerr << "no such function: " << name << "; " //
                 << "libname " << name_ << " "           //
                 << "so_name " << so_name_ << " "        //
                 << std::endl;
       std::abort();
     }
-    typedef R (*fun_type_t)(Args...);
-    fun_type_t f = reinterpret_cast<fun_type_t>(sym);
-    return f(std::forward<Args>(args)...);
+    return method(std::forward<Args>(args)...);
   }
   static Plugin* get(const std::string& name,
                      Plugin_Func_Set* func_set = g_static_plugin_func_set_ptr);
+  bool has_method(const char* name) const {
+    return my_plugin_sym(plugin_, name) != nullptr;
+  };
+  template <typename R, typename... Args> using method_t = R (*)(Args...);
+
+  template <typename R, typename... Args>
+  method_t<R, Args...> get_method(const char* name) const {
+    auto sym = my_plugin_sym(plugin_, name);
+    if (sym == nullptr) {
+      return nullptr;
+    }
+    typedef R (*fun_type_t)(Args...);
+    fun_type_t f = reinterpret_cast<fun_type_t>(sym);
+    return f;
+  }
 
 private:
   std::string name_;
@@ -95,7 +109,7 @@ private:
 private:
   static std::string guess_name(const char* name);
   static std::unordered_map<std::string, std::shared_ptr<Plugin>> store_;
-  void* my_plugin_sym(void*, const char*);
+  void* my_plugin_sym(void*, const char*) const;
 };
 
 template <typename T, typename... Args> class WithPlugin {

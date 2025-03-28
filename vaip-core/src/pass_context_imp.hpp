@@ -51,6 +51,7 @@ public:
 
 private:
   size_t size() const override final;
+  void rewind() const override final;
   virtual std::size_t fread(void* buffer,
                             std::size_t size) const override final;
 
@@ -152,12 +153,19 @@ public:
   get_run_option(const std::string& option_name,
                  const std::string& default_value) const override final;
 
+  virtual std::string
+  get_ep_dynamic_option(const std::string& option_name,
+                        const std::string& default_value) const override final;
+
+  virtual void add_QosUpdater(
+      const std::shared_ptr<QoSUpdateInterface>& updater) const override final;
+  virtual void
+  update_all_qos(const std::string& workload_type) const override final;
   virtual const ConfigProto& get_config_proto() const override final;
   virtual const ContextProto& get_context_proto() const override final;
   virtual ContextProto& get_context_proto() override final;
   void load_plugins();
-  std::shared_ptr<Plugin>
-  load_plugin(const std::string& plugin_name);
+  std::shared_ptr<Plugin> load_plugin(const std::string& plugin_name);
 
 private:
   template <typename T>
@@ -183,11 +191,8 @@ public:
 
   virtual bool
   cache_files_to_tar_file(IStreamWriter& writer) const override final;
-  virtual bool
-  tar_file_to_cache_files(const std::filesystem::path& tar_file) override final;
   virtual bool tar_mem_to_cache_files(const char* data,
                                       size_t size) override final;
-  virtual bool tar_file_to_cache_files(FILE* file) override final;
   virtual bool tar_file_to_cache_files(class IStreamReader& src) override final;
 
   virtual std::shared_ptr<void>
@@ -198,7 +203,11 @@ public:
   read_xclbin(const std::filesystem::path& path) const override final;
   virtual std::unique_ptr<PassContextTimer>
   measure(const std::string& label) override final;
-
+  virtual void on_custom_op_create_end() override final;
+  virtual void set_cache_file_md5_map(
+      const std::map<std::string, std::string>& cache_file_md5) override final;
+  virtual std::map<std::string, std::string>
+  get_cache_file_md5_map() override final;
   // helper class
   struct WithPass {
     WithPass(PassContextImp& context, IPass& pass);
@@ -214,6 +223,7 @@ public:
 private:
   // use std::map to keep filename ordered.
   std::map<std::string, FILE*> cache_files_;
+  std::map<std::string, std::string> cache_file_md5s_;
   std::function<std::optional<std::string>(std::string)> get_run_options_;
   std::shared_mutex rw_mutex_;
   friend int vitisai_ep_on_run_start(
@@ -221,6 +231,15 @@ private:
       const void* state,
       vaip_core::DllSafe<std::string> (*get_config_entry)(
           const void* state, const char* entry_name));
+  friend int vitisai_ep_set_ep_dynamic_options(
+      const std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>& eps,
+      const char* const* keys, const char* const* values, size_t kv_len);
+  std::map<std::string, std::string> ep_dynamic_options;
+  mutable std::mutex ep_dynamic_options_lock;
+  // for share context, many context may be same. may need to change container
+  // to set.
+  mutable std::vector<std::shared_ptr<QoSUpdateInterface>> qos_updaters_;
+  int created_customop_count = 0;
 };
 
 struct PassContextTimerImp : public PassContextTimer {
