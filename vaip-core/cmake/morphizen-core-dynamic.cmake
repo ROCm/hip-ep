@@ -26,7 +26,7 @@ set_target_properties(morphizen-core-dynamic_def PROPERTIES FOLDER morphizen)
 endif(MSVC)
 target_link_libraries(morphizen-core-dynamic
   PRIVATE
-    "$<LINK_LIBRARY:WHOLE_ARCHIVE,morphizen-core-static>")
+  morphizen-core-static)
 
 target_include_directories(morphizen-core-dynamic
   PUBLIC
