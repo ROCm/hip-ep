@@ -22,10 +22,16 @@ static std::wstring s2ws(const std::string& s) {
   return r;
 }
 
-plugin_t open_plugin_dyn(const std::string& name, scope_t scope) {
+std::pair<plugin_t, bool> open_plugin_dyn(const std::string& name,
+                                          scope_t scope) {
   static_assert(sizeof(plugin_t) == sizeof(HMODULE));
-  return LoadLibraryW(s2ws(name).c_str());
+  auto handle = reinterpret_cast<HMODULE>(GetModuleHandleW(s2ws(name).c_str()));
+  if (handle) {
+    return {handle, false};
+  }
+  return {LoadLibraryW(s2ws(name).c_str()), true};
 }
+
 void* plugin_sym_dyn(plugin_t plugin, const std::string& name) {
   return GetProcAddress((HMODULE)plugin, name.c_str());
 }

@@ -80,3 +80,9 @@ if(MSVC)
       $<TARGET_FILE_DIR:${TEST_EXE_NAME}>
   )
 endif(MSVC)
+set_target_properties(${TEST_EXE_NAME} PROPERTIES
+      VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
+      VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
+      VS_DEBUGGER_COMMAND_ARGUMENTS " --gtest_list_tests"
+      #VS_DEBUGGER_ENVIRONMENT "${DEBUG_ENV}"
+)

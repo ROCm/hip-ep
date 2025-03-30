@@ -727,7 +727,7 @@ void PassContextImp::load_plugins() {
 std::shared_ptr<Plugin>
 PassContextImp::load_plugin(const std::string& plugin_name) {
   auto plugin = morphizen::WeakStore<std::string, Plugin>::create(
-      plugin_name, plugin_name.c_str(), g_dynamic_plugin_func_set_ptr);
+      plugin_name, plugin_name.c_str());
   return plugin;
 }
 CacheFileReaderImp::CacheFileReaderImp(bool in_mem, const std::string& filename,

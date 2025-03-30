@@ -43,7 +43,8 @@
 namespace vaip_core {
 using plugin_t = void*;
 enum class scope_t { PUBLIC, PRIVATE };
-plugin_t open_plugin_dyn(const std::string& name, scope_t scope);
+std::pair<plugin_t, bool> open_plugin_dyn(const std::string& name,
+                                          scope_t scope);
 void* plugin_sym_dyn(plugin_t plugin, const std::string& name);
 std::string plugin_error_dyn(plugin_t plugin);
 void close_plugin_dyn(plugin_t plugin);
@@ -61,14 +62,9 @@ private:
   void* addr_;
 };
 
-struct Tag_Plugin_Func_Set;
-typedef Tag_Plugin_Func_Set Plugin_Func_Set;
-extern Plugin_Func_Set* g_static_plugin_func_set_ptr;
-extern Plugin_Func_Set* g_dynamic_plugin_func_set_ptr;
 struct Plugin {
   VAIP_DLL_SPEC
-  Plugin(const char* name,
-         Plugin_Func_Set* func_set = g_static_plugin_func_set_ptr);
+  Plugin(const char* name);
   VAIP_DLL_SPEC ~Plugin();
   template <typename R, typename... Args>
   R invoke(const char* name, Args... args) {
@@ -82,11 +78,12 @@ struct Plugin {
     }
     return method(std::forward<Args>(args)...);
   }
-  static Plugin* get(const std::string& name,
-                     Plugin_Func_Set* func_set = g_static_plugin_func_set_ptr);
+  static Plugin* get(const std::string& name);
+
   bool has_method(const char* name) const {
     return my_plugin_sym(plugin_, name) != nullptr;
   };
+
   template <typename R, typename... Args> using method_t = R (*)(Args...);
 
   template <typename R, typename... Args>
@@ -103,8 +100,9 @@ struct Plugin {
 private:
   std::string name_;
   std::string so_name_;
-  Plugin_Func_Set* func_set_;
+  struct Plugin_Func_Set* func_set_;
   void* plugin_;
+  bool owned_;
 
 private:
   static std::string guess_name(const char* name);
@@ -115,8 +113,12 @@ private:
 template <typename T, typename... Args> class WithPlugin {
 public:
   static std::unique_ptr<T> create(const std::string& plugin_name,
-                                   Plugin_Func_Set* func_set, Args... args) {
-    auto plugin = Plugin::get(plugin_name, func_set);
+                                   Args... args) {
+    auto plugin = Plugin::get(plugin_name);
+    if (plugin == nullptr) {
+      std::cerr << "no such plugin: " << plugin_name << std::endl;
+      std::abort();
+    }
     auto ret = plugin->invoke<T*>(T::entry_point, args...);
     return std::unique_ptr<T>(ret);
   }

@@ -1,9 +1,12 @@
 #include <dlfcn.h>
-plugin_t open_plugin_dyn(const std::string& name, scope_t scope) {
+#include <utility>
+std::pair<plugin_t, bool> open_plugin_dyn(const std::string& name,
+                                          scope_t scope) {
   auto flag_public = (RTLD_LAZY | RTLD_GLOBAL);
   auto flag_private = (RTLD_LAZY | RTLD_LOCAL);
-  return dlopen(name.c_str(),
-                scope == scope_t::PUBLIC ? flag_public : flag_private);
+  return {dlopen(name.c_str(),
+                 scope == scope_t::PUBLIC ? flag_public : flag_private),
+          true};
 }
 void* plugin_sym_dyn(plugin_t plugin, const std::string& name) {
   dlerror(); // clean up error;

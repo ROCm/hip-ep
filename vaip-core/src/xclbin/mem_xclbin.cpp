@@ -49,87 +49,94 @@ std::vector<char> get_mem_xclbin_builtin(const std::string& filename) {
 
 std::vector<char> get_mem_xclbin(const std::string& filename) {
   std::vector<char> mem_xclbin;
-  auto vaip_get_mem_xclbin_plugin = Plugin::get(ENV_PARAM(VAIP_XCLBIN_BACKEND),
-                                                g_dynamic_plugin_func_set_ptr);
+  auto vaip_get_mem_xclbin_plugin = Plugin::get(ENV_PARAM(VAIP_XCLBIN_BACKEND));
   auto loaded_from_backend = false;
-  if (vaip_get_mem_xclbin_plugin) {
-    auto vaip_has_mem_xclbin =
-        vaip_get_mem_xclbin_plugin->get_method<bool, const char*>(
-            "vaip_has_mem_xclbin");
-    if (vaip_has_mem_xclbin) {
-      if (vaip_has_mem_xclbin(filename.c_str())) {
-        auto vaip_get_mem_xclbin = vaip_get_mem_xclbin_plugin->get_method<
-            void, const char*, void*, void (*)(void*, void*, size_t)>(
-            "vaip_get_mem_xclbin");
-        if (vaip_get_mem_xclbin) {
-          vaip_get_mem_xclbin(
-              filename.data(), reinterpret_cast<void*>(&mem_xclbin),
-              [](void* env, void* data, size_t size) {
-                auto* ret = static_cast<std::vector<char>*>(env);
-                std::swap(*ret,
-                          std::vector<char>(static_cast<char*>(data),
-                                            static_cast<char*>(data) + size));
-              });
-          loaded_from_backend = true;
-          MY_LOG(1) << "  -- found mem_xclbin: " << filename << " from backend "
-                    << ENV_PARAM(VAIP_XCLBIN_BACKEND);
+  auto has_mem_xclbin = xclbin_map.find(filename) != xclbin_map.end();
+  if (has_mem_xclbin) {
+    MY_LOG(1) << "  -- found mem_xclbin: " << filename
+              << " from builtin inside morphizen";
+    mem_xclbin = get_mem_xclbin_builtin(filename);
+  } else {
+    if (vaip_get_mem_xclbin_plugin) {
+      auto vaip_has_mem_xclbin =
+          vaip_get_mem_xclbin_plugin->get_method<bool, const char*>(
+              "vaip_has_mem_xclbin");
+      if (vaip_has_mem_xclbin) {
+        if (vaip_has_mem_xclbin(filename.c_str())) {
+          auto vaip_get_mem_xclbin = vaip_get_mem_xclbin_plugin->get_method<
+              void, const char*, void*, void (*)(void*, void*, size_t)>(
+              "vaip_get_mem_xclbin");
+          if (vaip_get_mem_xclbin) {
+            vaip_get_mem_xclbin(
+                filename.data(), reinterpret_cast<void*>(&mem_xclbin),
+                [](void* env, void* data, size_t size) {
+                  auto* ret = static_cast<std::vector<char>*>(env);
+                  std::swap(*ret,
+                            std::vector<char>(static_cast<char*>(data),
+                                              static_cast<char*>(data) + size));
+                });
+            loaded_from_backend = true;
+            MY_LOG(1) << "  -- found mem_xclbin: " << filename
+                      << " from backend " << ENV_PARAM(VAIP_XCLBIN_BACKEND);
+          } else {
+            MY_LOG(1) << "  -- cannot found symbol: vaip_get_mem_xclbin "
+                      << " from backend " << ENV_PARAM(VAIP_XCLBIN_BACKEND);
+          }
         } else {
-          MY_LOG(1) << "  -- cannot found symbol: vaip_get_mem_xclbin "
+          MY_LOG(1) << "  -- not found mem_xclbin: " << filename
                     << " from backend " << ENV_PARAM(VAIP_XCLBIN_BACKEND);
         }
       } else {
-        MY_LOG(1) << "  -- not found mem_xclbin: " << filename
+        MY_LOG(1) << "  -- cannot found symbol: vaip_has_mem_xclbin "
                   << " from backend " << ENV_PARAM(VAIP_XCLBIN_BACKEND);
       }
     } else {
-      MY_LOG(1) << "  -- cannot found symbol: vaip_has_mem_xclbin "
-                << " from backend " << ENV_PARAM(VAIP_XCLBIN_BACKEND);
+      MY_LOG(1) << "  -- cannot found plugin: "
+                << ENV_PARAM(VAIP_XCLBIN_BACKEND);
     }
-  } else {
-    MY_LOG(1) << "  -- cannot found plugin: " << ENV_PARAM(VAIP_XCLBIN_BACKEND);
-  }
-  if (loaded_from_backend == false) {
-    MY_LOG(1) << "  -- not found mem_xclbin: " << filename
-              << " from backend, trying builtin inside morphizen";
-    mem_xclbin = get_mem_xclbin_builtin(filename);
   }
   return mem_xclbin;
 }
 
 bool has_mem_xclbin(const std::string& filename) {
-  auto vaip_get_mem_xclbin_plugin = Plugin::get(ENV_PARAM(VAIP_XCLBIN_BACKEND),
-                                                g_dynamic_plugin_func_set_ptr);
-  auto ret = false;
-  if (vaip_get_mem_xclbin_plugin) {
-    auto vaip_has_mem_xclbin =
-        vaip_get_mem_xclbin_plugin->get_method<bool, const char*>(
-            "vaip_get_mem_xclbin");
-    if (vaip_has_mem_xclbin) {
-      if (vaip_has_mem_xclbin(filename.c_str())) {
-        MY_LOG(1) << "  -- found mem_xclbin: " << filename << " from backend "
-                  << ENV_PARAM(VAIP_XCLBIN_BACKEND);
-        ret = true;
+  auto vaip_get_mem_xclbin_plugin = Plugin::get(ENV_PARAM(VAIP_XCLBIN_BACKEND));
+  auto ret = xclbin_map.find(filename) != xclbin_map.end();
+  if (ret) {
+    MY_LOG(1) << "  -- found mem_xclbin: " << filename
+              << " from builtin inside morphizen";
+  } else {
+    if (vaip_get_mem_xclbin_plugin) {
+      auto vaip_has_mem_xclbin =
+          vaip_get_mem_xclbin_plugin->get_method<bool, const char*>(
+              "vaip_get_mem_xclbin");
+      if (vaip_has_mem_xclbin) {
+        if (vaip_has_mem_xclbin(filename.c_str())) {
+          MY_LOG(1) << "  -- found mem_xclbin: " << filename << " from backend "
+                    << ENV_PARAM(VAIP_XCLBIN_BACKEND);
+          ret = true;
+        } else {
+          MY_LOG(1) << "  -- not found mem_xclbin: " << filename
+                    << " from backend " << ENV_PARAM(VAIP_XCLBIN_BACKEND);
+        }
       } else {
-        MY_LOG(1) << "  -- not found mem_xclbin: " << filename
-                  << " from backend " << ENV_PARAM(VAIP_XCLBIN_BACKEND);
+        MY_LOG(1) << "  -- cannot found symbol: vaip_get_mem_xclbin "
+                  << " from backend ";
       }
     } else {
-      MY_LOG(1) << "  -- cannot found symbol: vaip_get_mem_xclbin "
-                << " from backend ";
+      MY_LOG(1) << "  -- cannot found plugin: "
+                << ENV_PARAM(VAIP_XCLBIN_BACKEND);
     }
-  } else {
-    MY_LOG(1) << "  -- cannot found plugin: " << ENV_PARAM(VAIP_XCLBIN_BACKEND);
-  }
-  if (ret == false) {
-    MY_LOG(1) << "  -- not found mem_xclbin: " << filename
-              << " from backend, trying builtin inside morphizen";
-    ret = xclbin_map.find(filename) != xclbin_map.end();
-    if (ret) {
-      MY_LOG(1) << "  -- found mem_xclbin: " << filename
-                << " from builtin inside morphizen";
-    } else {
+    if (ret == false) {
       MY_LOG(1) << "  -- not found mem_xclbin: " << filename
-                << " from builtin inside morphizen";
+                << " from backend, trying builtin inside morphizen";
+      ret = xclbin_map.find(filename) != xclbin_map.end();
+      if (ret) {
+        MY_LOG(1) << "  -- found mem_xclbin: " << filename
+                  << " from builtin inside morphizen";
+      } else {
+        MY_LOG(1) << "  -- not found mem_xclbin: " << filename
+                  << " from builtin inside morphizen";
+      }
     }
   }
   return ret;

@@ -60,7 +60,7 @@ VAIP_DLL_SPEC ModelPtr model_clone(const Model& model,
   return ModelPtr(VAIP_ORT_API(model_clone)(model));
 #endif
 }
-void ModelDeleter::operator()(Model* model) const {
+VAIP_DLL_SPEC void ModelDeleter::operator()(Model* model) const {
   MY_LOG(1) << "destroy model(" << ((void*)model) << ") "
             << VAIP_ORT_API(graph_get_name)(
                    VAIP_ORT_API(model_main_graph)(*model));

@@ -42,4 +42,6 @@ const std::string get_lib_id();
 uint32_t get_vaip_version_major();
 uint32_t get_vaip_version_minor();
 uint32_t get_vaip_version_patch();
+extern "C" uint32_t vaip_get_version();
+
 } // namespace vaip_core

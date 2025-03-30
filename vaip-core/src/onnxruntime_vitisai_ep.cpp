@@ -52,8 +52,6 @@ const vaip_core::OrtApiForVaip* get_the_global_api() {
   return vaip_core::api();
 }
 
-VAIP_DLL_SPEC
-uint32_t vaip_get_version() { return 0; }
 // The interface exported below is used by onnxruntime_providers_vitisai.so
 VAIP_DLL_SPEC
 void initialize_onnxruntime_vitisai_ep(

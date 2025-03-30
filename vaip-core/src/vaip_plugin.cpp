@@ -44,11 +44,30 @@
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_PLUGIN, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_PLUGIN) >= n)
 namespace vaip_core {
-struct Tag_Plugin_Func_Set {
-  plugin_t (*open_plugin)(const std::string& name, scope_t scope);
+
+struct Plugin_Func_Set {
+  std::pair<plugin_t, bool> (*open_plugin)(const std::string& name,
+                                           scope_t scope);
   void* (*plugin_sym)(plugin_t plugin, const std::string& name);
   void (*close_plugin)(plugin_t plugin);
 };
+
+static std::pair<plugin_t, bool> open_plugin_static(const std::string& name,
+                                                    scope_t scope);
+static void* plugin_sym_static(plugin_t plugin, const std::string& symbol);
+static void close_plugin_static(plugin_t plugin);
+
+Plugin_Func_Set g_static_plugin_func_set = {
+    open_plugin_static, plugin_sym_static, close_plugin_static};
+
+Plugin_Func_Set g_dynamic_plugin_func_set = {vaip_core::open_plugin_dyn,
+                                             vaip_core::plugin_sym_dyn,
+                                             vaip_core::close_plugin_dyn};
+
+static Plugin_Func_Set* g_static_plugin_func_set_ptr =
+    &g_static_plugin_func_set;
+static Plugin_Func_Set* g_dynamic_plugin_func_set_ptr =
+    &g_dynamic_plugin_func_set;
 
 std::string Plugin::guess_name(const char* name) {
 #ifdef _WIN32
@@ -58,21 +77,35 @@ std::string Plugin::guess_name(const char* name) {
 #endif
 }
 
-Plugin::Plugin(const char* name, Plugin_Func_Set* func_set)
-    : name_{name}, so_name_{guess_name(name)}, func_set_{func_set},
-      plugin_{func_set->open_plugin(so_name_, scope_t::PUBLIC)} {
-  CHECK(plugin_ != nullptr) << "cannot open plugin: "
-                            << "name_ " << name_ << " "       //
-                            << "so_name_ " << so_name_ << " " //
-      ;
-  MY_LOG(1) << "  -- open plugin: " << name_ << " " << so_name_
-            << " this=" << (void*)this;
+Plugin::Plugin(const char* name)
+    : name_{name}, so_name_{guess_name(name)}, func_set_{nullptr},
+      plugin_{nullptr}, owned_{false} {
+
+  auto load = [this](const std::string& tag, Plugin_Func_Set* func_set) {
+    MY_LOG(1) << "trying load from " << tag;
+    std::tie(plugin_, owned_) =
+        func_set->open_plugin(so_name_, scope_t::PUBLIC);
+    if (plugin_) {
+      func_set_ = func_set;
+      MY_LOG(1) << " load plugin from " << tag << " name=" << name_
+                << " so_name=" << so_name_;
+    }
+  };
+  load("static", g_static_plugin_func_set_ptr);
+  if (!plugin_) {
+    load("dynamic", g_dynamic_plugin_func_set_ptr);
+  }
 }
 
 Plugin::~Plugin() {
-  func_set_->close_plugin((plugin_t)plugin_);
-  MY_LOG(1) << "  -- close plugin: " << name_ << " " << so_name_
-            << " this=" << (void*)this;
+  if (owned_) {
+    MY_LOG(1) << "  -- close plugin: " << name_ << " " << so_name_
+              << " this=" << (void*)this;
+    func_set_->close_plugin((plugin_t)plugin_);
+  } else {
+    MY_LOG(1) << "  -- do not close plugin because it is owned handled: "
+              << name_ << " " << so_name_ << " this=" << (void*)this;
+  }
 }
 // TODO: for now all Plugin::get store loaded plugin in a global
 // store. it is not a good solution, it is possible to put all plugin
@@ -89,12 +122,12 @@ get_global_plugin_store() {
   return store_;
 }
 
-Plugin* Plugin::get(const std::string& plugin_name, Plugin_Func_Set* func_set) {
+Plugin* Plugin::get(const std::string& plugin_name) {
   auto& store_ = get_global_plugin_store();
   auto it = store_.find(plugin_name);
   if (it == store_.end()) {
     store_[plugin_name] = morphizen::WeakStore<std::string, Plugin>::create(
-        plugin_name, plugin_name.c_str(), func_set);
+        plugin_name, plugin_name.c_str());
   }
   it = store_.find(plugin_name);
   CHECK(it != store_.end())
@@ -111,34 +144,50 @@ get_store() {
       store_;
   return store_;
 }
-plugin_t open_plugin_static(const std::string& name, scope_t scope) {
-  return reinterpret_cast<plugin_t>(new std::string(name));
+static std::pair<plugin_t, bool> open_plugin_static(const std::string& name,
+                                                    scope_t scope) {
+  auto& store = get_store();
+  auto it = store.find(name);
+  if (it == store.end()) {
+    MY_LOG(1) << " open_plugin_static cannot find plugin: " << name;
+    MY_LOG(1) << " valid plugins are: ";
+    for (auto& x : store) {
+      MY_LOG(1) << "  plugin=" << x.first << " " << x.second.size()
+                << " symbols";
+    }
+    return {nullptr, false};
+  }
+  MY_LOG(1) << " found plugin: " << name;
+  return {reinterpret_cast<plugin_t>(new std::string(name)), true};
 }
 
-void* plugin_sym_static(plugin_t plugin, const std::string& symbol) {
+static void* plugin_sym_static(plugin_t plugin, const std::string& symbol) {
   auto& name = *reinterpret_cast<std::string*>(plugin);
   auto& store = get_store();
   auto it_lib = store.find(name);
   if (it_lib == store.end()) {
-    std::cerr << "cannot find lib:" << name << std::endl;
-    std::cerr << "valid libs are: " << std::endl;
+    MY_LOG(1) << "cannot find lib:" << name;
+    MY_LOG(1) << "usually this should not happened, did you forget to register "
+                 "the plugin?";
+    MY_LOG(1) << "valid libs are: ";
     for (auto& x : store) {
-      std::cerr << "  libs=" << x.first << "\n";
+      MY_LOG(1) << "  libs=" << x.first << "\n";
     }
     return nullptr;
   }
   auto it_sym = it_lib->second.find(symbol);
   if (it_sym == it_lib->second.end()) {
-    std::cerr << "cannot find symbol " << symbol << " in " << name << std::endl;
-    std::cerr << "valid symbols are: " << std::endl;
+    MY_LOG(1) << "cannot find symbol " << symbol << " in " << name;
+    MY_LOG(1) << "valid symbols are: ";
     for (auto& x : it_lib->second) {
-      std::cerr << "  symbols=" << x.first << "\n";
+      MY_LOG(1) << "  symbols=" << x.first << "\n";
     }
     return nullptr;
   }
   return it_sym->second;
 }
-void close_plugin_static(plugin_t plugin) {
+
+static void close_plugin_static(plugin_t plugin) {
   delete reinterpret_cast<std::string*>(plugin);
 }
 
@@ -184,18 +233,4 @@ StaticPluginRegister::StaticPluginRegister(const char* name, const char* symbol,
 }
 StaticPluginRegister::~StaticPluginRegister() {}
 
-Plugin_Func_Set g_static_plugin_func_set = {
-    open_plugin_static, plugin_sym_static, close_plugin_static};
-
-Plugin_Func_Set g_dynamic_plugin_func_set = {vaip_core::open_plugin_dyn,
-                                             vaip_core::plugin_sym_dyn,
-                                             vaip_core::close_plugin_dyn};
-
-Plugin_Func_Set* g_static_plugin_func_set_ptr = &g_static_plugin_func_set;
-Plugin_Func_Set* g_dynamic_plugin_func_set_ptr = &g_dynamic_plugin_func_set;
-#if _WIN32
-
-#else
-
-#endif
 } // namespace vaip_core

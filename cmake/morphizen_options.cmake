@@ -9,6 +9,12 @@ set(ONNXRUNTIME_SOURCE_TREE_DIR "${CMAKE_SOURCE_DIR}/../onnxruntime" CACHE PATH 
 # it is possible to emebed xclbin files in the binary, assume the xclbin files are in the directory
 #
 set(VAIP_XCLBIN_DIR ${CMAKE_SOURCE_DIR}/../vaip_xclbin CACHE PATH "Path to the directory containing xclbin files")
+
+# morphizen_WITH_VAIP_CONFIG_FILE = ON if build with default vaip
+# config in morphizen-core-dynamic, i.e. onnxruntime_vitisai_ep.dll
+# morphizen_WITH_VAIP_CONFIG_FILE = OFF if morphizen is build as part
+# of onnxruntime, the default config is read from a plugin.
+option(morphizen_WITH_VAIP_CONFIG_FILE "build with default vaip config in morphizen-core-dynamic, i.e. onnxruntime_vitisai_ep.dll" ON)
 #
 # it is possible to embed json files in the binary, assume the json files are in the directory
 set(VAIP_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/vaip-core/etc/vaip_config.json" CACHE FILEPATH "Path to the file containing vaip_config.json files")
@@ -30,6 +36,7 @@ set(morphizen_OUTPUT_NAME "onnxruntime_vitisai_ep" CACHE STRING "Output name of 
 message(STATUS "MorphiZen OPTIONS:")
 message(STATUS "  VAIP_XCLBIN_DIR : ${VAIP_XCLBIN_DIR}")
 message(STATUS "  ONNX_RUNTIME_SOURCE_TREE_DIR : ${ONNXRUNTIME_SOURCE_TREE_DIR}")
+message(STATUS "  morphizen_WITH_VAIP_CONFIG_FILE : ${morphizen_WITH_VAIP_CONFIG_FILE}")
 message(STATUS "  VAIP_JSON_CONFIG_FILE : ${VAIP_JSON_CONFIG_FILE}")
 message(STATUS "  VAIP_VERSEION_INFO_FILE : ${VAIP_VERSEION_INFO_FILE}")
 message(STATUS "  morphizen_OUTPUT_NAME : ${morphizen_OUTPUT_NAME}")

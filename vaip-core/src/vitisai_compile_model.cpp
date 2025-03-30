@@ -996,8 +996,8 @@ create_execution_providers_from_ep_context_nodes(
     update_meta_def_from_ep_node(node, meta_def);
     auto device = meta_def.device();
     auto plugin_name = std::string("vaip_custom_op_") + device;
-    ret.emplace_back(ExecutionProviderConcrete::create(
-        plugin_name, g_static_plugin_func_set_ptr, context, meta_def));
+    ret.emplace_back(
+        ExecutionProviderConcrete::create(plugin_name, context, meta_def));
   }
   return ret;
 }
@@ -1052,8 +1052,8 @@ compile_onnx_model_internal(
     for (auto& meta_def : context->context_proto.meta_def()) {
       auto& device = meta_def.device();
       auto plugin_name = std::string("vaip_custom_op_") + device;
-      ret.emplace_back(ExecutionProviderConcrete::create(
-          plugin_name, g_static_plugin_func_set_ptr, context, meta_def));
+      ret.emplace_back(
+          ExecutionProviderConcrete::create(plugin_name, context, meta_def));
     }
   }
   return ret;

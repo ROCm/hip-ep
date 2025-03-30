@@ -26,11 +26,13 @@ add_custom_command (
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/config_json_binary.hpp
   COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../tools"
   $<TARGET_FILE:Python3::Interpreter> ${CMAKE_CURRENT_SOURCE_DIR}/src/xclbin/config_json_binary.hpp.py
-  "${VAIP_JSON_CONFIG_FILE}" ON "${VAIP_XCLBIN_DIR}"
+  "${VAIP_JSON_CONFIG_FILE}" ON "${VAIP_XCLBIN_DIR}" "${morphizen_WITH_VAIP_CONFIG_FILE}"
 )
 set(LIB_NAME morphizen-core-static)
 add_library(${LIB_NAME} STATIC
   ${PROTO_SRCS} ${PROTO_HDRS}
+  src/version_info.hpp
+  src/version_info.cpp
   src/getenv.cpp
   src/getenv.c
   include/morphizen/vaip_plugin.hpp
@@ -92,6 +94,7 @@ add_library(${LIB_NAME} STATIC
   src/pattern/pattern_or.hpp
   src/pattern/pattern_wildcard.cpp
   src/pattern/pattern_wildcard.hpp
+  src/pattern/pattern_commutable_node.hpp
   src/pattern/pattern_sequence.cpp
   src/pattern/pattern_sequence.hpp
   src/pattern/pattern_constant.cpp

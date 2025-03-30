@@ -113,6 +113,7 @@ def main():
     path = sys.argv[1]
     is_trim_config = sys.argv[2] == "ON"
     xclbin_path = sys.argv[3]
+    enable_default_config = sys.argv[4].upper() in ["ON", "TRUE", "YES"]
     # open file
     f = open(path, "r", encoding="utf-8")
     config = json.load(f)
@@ -123,11 +124,14 @@ def main():
         replace_xclbin(config, xclbin_path)
     # output file
     with open("vaip_config.json", "w") as f:
-        json.dump(config, f, indent=4)
-    FINGERPRINT_CONFIG = get_escape_json_str("vaip_config.json")
-    xxd.main(["--output", "config_json_binary.hpp", "--column", "16", "--var" , "config", "vaip_config.json"])
-   
+        if enable_default_config:
+            json.dump(config, f, indent=4)
+        else:
+            json.dump({}, f, indent=4)
 
+    xxd.main(["--output", "config_json_binary.hpp", "--column", "16", "--var" , "config", "vaip_config.json"])
+    with open("config_json_binary.hpp", "a") as f:
+        f.write(f"static bool with_default_vaip_config = {1 if enable_default_config else 0};\n")
 
 if __name__ == "__main__":
     main()

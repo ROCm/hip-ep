@@ -24,6 +24,16 @@ add_custom_target(morphizen-core-dynamic_def DEPENDS ${CMAKE_CURRENT_BINARY_DIR}
 target_sources(morphizen-core-dynamic PRIVATE onnxruntime_vitisai_ep.def)
 set_target_properties(morphizen-core-dynamic_def PROPERTIES FOLDER morphizen)
 endif(MSVC)
+
+# NOTE: do not use $<LINK_LIBRARY:WHOLE_ARCHIVE, morphizen-core-static
+#
+# WHY, it seems that WHOLE_ARCHIVE can be only marked once. It means
+# if we add the mark here, then, all targets dependes on
+# morphizen-core-static directly or indirectly, must be marked with
+# WHOLE_ARCHIVE. In stead, we manually maintain
+# onnxruntime_vitisai_ep.def file. tools/parse_cl_link_error.py is
+# used to parse the link error and update onnxruntime_vitisai_ep.def
+# automatically, see tools/parse_cl_link_error.py for more details.
 target_link_libraries(morphizen-core-dynamic
   PRIVATE
   morphizen-core-static)

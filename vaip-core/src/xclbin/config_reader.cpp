@@ -26,7 +26,13 @@ DEF_ENV_PARAM_2(VAIP_CONFIG_PROVIDER_BACKEND, "onnxruntime_vitisai_ep",
 namespace vaip_core {
 static const char* get_default_config() {
 #include "config_json_binary.hpp"
-  return (const char*)&config[0];
+  // `with_default_vaip_config` and `config` are generated
+  // automatically by
+  // ${CMAKE_CURRENT_SOURCE_DIR}/src/xclbin/config_json_binary.hpp.py
+  if (with_default_vaip_config) {
+    return (const char*)&config[0];
+  }
+  return nullptr;
 }
 
 // FIXME: The name of this function is misleading.
@@ -124,36 +130,28 @@ get_config_json(const onnxruntime::ProviderOptions& options) {
   update_enable_batch(options);
   update_num_dpu_runners(options);
   auto vaip_get_default_config_plugin =
-      ::vaip_core::Plugin::get(ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND),
-                               ::vaip_core::g_dynamic_plugin_func_set_ptr);
-  auto loaded_from_plugin = false;
-  const char* default_config = nullptr;
-  if (vaip_get_default_config_plugin) {
-    MY_LOG(1) << "found plugin: " << ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND);
-    auto vaip_get_default_config =
-        vaip_get_default_config_plugin->get_method<const char*>(
-            "vaip_get_default_config");
-    if (vaip_get_default_config) {
-      MY_LOG(1) << "found symbol: vaip_get_default_config from "
-                << ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND);
-      auto default_config = vaip_get_default_config();
-
-      loaded_from_plugin = true;
-
+      ::vaip_core::Plugin::get(ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND));
+  const char* default_config = get_default_config();
+  if (default_config == nullptr) {
+    if (vaip_get_default_config_plugin) {
+      MY_LOG(1) << "found plugin: " << ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND);
+      auto vaip_get_default_config =
+          vaip_get_default_config_plugin->get_method<const char*>(
+              "vaip_get_default_config");
+      if (vaip_get_default_config) {
+        MY_LOG(1) << "found symbol: vaip_get_default_config from "
+                  << ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND);
+        auto default_config = vaip_get_default_config();
+      } else {
+        MY_LOG(1) << "cannot found symbol: vaip_get_default_config from "
+                  << ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND);
+      }
     } else {
-      MY_LOG(1) << "cannot found symbol: vaip_get_default_config from "
-                << ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND);
+      MY_LOG(1) << "cannot found plugin: "
+                << ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND)
+                << " fall back to builtin default";
     }
-  } else {
-    MY_LOG(1) << "cannot found plugin: "
-              << ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND)
-              << " fall back to builtin default";
   }
-  if (!loaded_from_plugin) {
-    MY_LOG(1) << "fall back to builtin default";
-    default_config = get_default_config();
-  }
-  
   bool config_set = options.find("config_file") != options.end();
   if (config_set) {
     std::string config_file = options.at("config_file");
@@ -161,6 +159,10 @@ get_config_json(const onnxruntime::ProviderOptions& options) {
     ret = get_config_json_str_from_config_file(config_file);
   } else {
     MY_LOG(1) << "use default config";
+    if (default_config == nullptr) {
+      LOG(FATAL) << "no default vaip_config.json, "
+                    "provider_options[\"config_file\"] is required";
+    }
     if (ENV_PARAM(MORPHIZEN_DEBUG_CONFIG_READER)) {
       auto stream = std::istringstream(default_config);
       while (stream.good()) {
@@ -200,5 +202,14 @@ std::string get_config_json_str(const onnxruntime::ProviderOptions& options) {
     LOG(FATAL) << "Error: " << e.what() << std::endl;
     return "";
   }
+}
+Ort::SessionOptions*
+get_session_option(const onnxruntime::ProviderOptions& options) {
+  auto iter = options.find("session_options");
+  if (iter == options.end()) {
+    return nullptr;
+  }
+  return reinterpret_cast<Ort::SessionOptions*>(
+      (uintptr_t)std::stoull(iter->second));
 }
 } // namespace vaip_core

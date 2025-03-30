@@ -40,3 +40,10 @@ target_link_libraries(morphizen-pass-init PRIVATE morphizen-core-static)
 # overwrite the default OUTPUT_NAME in morphizen_add_library
 target_compile_definitions(morphizen-pass-init
   PRIVATE -DOUTPUT_NAME="vaip-pass_init")
+if(TARGET morphizen-core-dynamic)
+  target_link_libraries(morphizen-core-dynamic PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,morphizen-pass-init>)
+endif(TARGET morphizen-core-dynamic)
+
+if(TARGET onnxruntime_providers_vitisai)
+  target_link_libraries(onnxruntime_providers_vitisai PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,morphizen-pass-init>)
+endif(TARGET onnxruntime_providers_vitisai)

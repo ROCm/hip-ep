@@ -32,35 +32,13 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 //
+#include "./version_info.hpp"
 #include "morphizen/onnxruntime_api.hpp"
 #include <glog/logging.h>
 #include <memory>
 #include <vaip/vaip_ort_api.h>
 namespace vaip_core {
 
-unsigned int get_vaip_version_major() {
-#ifdef VAIP_ORT_API_MAJOR
-  return VAIP_ORT_API_MAJOR;
-#else
-  return 1;
-#endif
-}
-
-unsigned int get_vaip_version_minor() {
-#ifdef VAIP_ORT_API_MINOR
-  return VAIP_ORT_API_MINOR;
-#else
-  return 0;
-#endif
-}
-
-unsigned int get_vaip_version_patch() {
-#ifdef VAIP_ORT_API_PATCH
-  return VAIP_ORT_API_PATCH;
-#else
-  return 0;
-#endif
-}
 OrtApiForVaip* the_global_api = nullptr;
 const OrtApiForVaip& __api() {
   DCHECK(the_global_api != nullptr)
