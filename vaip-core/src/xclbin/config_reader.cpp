@@ -141,7 +141,7 @@ get_config_json(const onnxruntime::ProviderOptions& options) {
       if (vaip_get_default_config) {
         MY_LOG(1) << "found symbol: vaip_get_default_config from "
                   << ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND);
-        auto default_config = vaip_get_default_config();
+        default_config = vaip_get_default_config();
       } else {
         MY_LOG(1) << "cannot found symbol: vaip_get_default_config from "
                   << ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND);
