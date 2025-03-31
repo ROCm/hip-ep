@@ -1,5 +1,24 @@
 ﻿
-option(morphizen_ENABLE_UNIT_TEST "enable vaip unit test or not" ON)
+# This file is used to set options for MorphiZen
+
+# MorphiZen options
+
+# enable morphizen-core-dynamic or not. when VAIP is built as a standalone library, this option should be ON
+# when VAIP is built as part of onnxruntime, this option should be OFF
+if (TARGET onnxruntime_providers_vitisai)
+  set(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC_DEFAULT OFF)
+  set(morphizen_ENABLE_UNIT_TEST_DEFAULT ON)
+  set(morphizen_ONNXRUNTIME_VITISAI_EP_TARGET_DEFAULT "onnxruntime_providers_vitisai")
+else()
+  set(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC_DEFAULT ON)
+  set(morphizen_ENABLE_UNIT_TEST_DEFAULT ON)
+  set(morphizen_ONNXRUNTIME_VITISAI_EP_TARGET_DEFAULT "morphizen-core-dynamic")
+endif()
+option(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC "enable morphizen-core-dynamic or not" ${morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC_DEFAULT})
+
+set(morphizen_ONNXRUNTIME_VITISAI_EP_TARGET ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET_DEFAULT} CACHE STRING "the name of target whose output name is onnxruntime_vitisai_ep")
+# enable morphizen unit test or not
+option(morphizen_ENABLE_UNIT_TEST "enable vaip unit test or not" ${morphizen_ENABLE_UNIT_TEST_DEFAULT})
 #
 # to build MorphiZen, we need to download source code of onnxruntime
 # and build it along with MorphiZen
@@ -34,10 +53,12 @@ set(morphizen_OUTPUT_NAME "onnxruntime_vitisai_ep" CACHE STRING "Output name of 
 
 # print all options
 message(STATUS "MorphiZen OPTIONS:")
+message(STATUS "  morphizen_ONNXRUNTIME_VITISAI_EP_TARGET : ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET}")
+message(STATUS "  morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC : ${morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC}")
 message(STATUS "  VAIP_XCLBIN_DIR : ${VAIP_XCLBIN_DIR}")
 message(STATUS "  ONNX_RUNTIME_SOURCE_TREE_DIR : ${ONNXRUNTIME_SOURCE_TREE_DIR}")
 message(STATUS "  morphizen_WITH_VAIP_CONFIG_FILE : ${morphizen_WITH_VAIP_CONFIG_FILE}")
 message(STATUS "  VAIP_JSON_CONFIG_FILE : ${VAIP_JSON_CONFIG_FILE}")
 message(STATUS "  VAIP_VERSEION_INFO_FILE : ${VAIP_VERSEION_INFO_FILE}")
 message(STATUS "  morphizen_OUTPUT_NAME : ${morphizen_OUTPUT_NAME}")
-message(STATUS "  morphizen_ENABLE_UNIT_TEST : ${morphizen_ENABLE_UNIT_TEST}")
+
