@@ -6,6 +6,7 @@
 #CMake Error: install(EXPORT "morphizen-core-targets" ...) includes target "morphizen-core-static" which requires tar#get "GSL" that is not in any export set.
 #-- Generating done (32.8s)
 #
+if(TARGET morphizen-core-dynamic)
 install(
  TARGETS morphizen-core-dynamic
 #  EXPORT morphizen-core-targets
@@ -18,6 +19,7 @@ install(
 #  COMPONENT base
 #  DESTINATION share/cmake/${PROJECT_NAME}
 #  EXCLUDE_FROM_ALL)
+endif()
 
 install(
   FILES ${PROTO_HDRS}
