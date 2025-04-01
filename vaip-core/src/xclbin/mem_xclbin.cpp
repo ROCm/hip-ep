@@ -108,7 +108,7 @@ bool has_mem_xclbin(const std::string& filename) {
     if (vaip_get_mem_xclbin_plugin) {
       auto vaip_has_mem_xclbin =
           vaip_get_mem_xclbin_plugin->get_method<bool, const char*>(
-              "vaip_get_mem_xclbin");
+              "vaip_has_mem_xclbin");
       if (vaip_has_mem_xclbin) {
         if (vaip_has_mem_xclbin(filename.c_str())) {
           MY_LOG(1) << "  -- found mem_xclbin: " << filename << " from backend "
