@@ -6,12 +6,12 @@
 #CMake Error: install(EXPORT "morphizen-core-targets" ...) includes target "morphizen-core-static" which requires tar#get "GSL" that is not in any export set.
 #-- Generating done (32.8s)
 #
-# install(
-#  TARGETS morphizen-core-dynamic morphizen-core-static
+install(
+ TARGETS morphizen-core-dynamic
 #  EXPORT morphizen-core-targets
-#  RUNTIME DESTINATION bin
-#  ARCHIVE DESTINATION lib
-#  LIBRARY DESTINATION lib)
+ RUNTIME DESTINATION bin
+ ARCHIVE DESTINATION lib
+ LIBRARY DESTINATION lib)
 # install(
 #  EXPORT morphizen-core-targets
 #  NAMESPACE ${PROJECT_NAME}::
