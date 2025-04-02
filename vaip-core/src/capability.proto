@@ -161,6 +161,7 @@ message VaimlParam {
   bool no_failsafe = 25;
   repeated string input_names = 26;
   repeated string output_names = 27;
+  bool enable_update_initializer = 28;
 }
 
 
