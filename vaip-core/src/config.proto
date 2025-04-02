@@ -274,6 +274,7 @@ message PassVaimlConfigProto {
   optional bool enable_local_context = 40;
   optional bool no_failsafe = 41;
   optional string llm_ops_config = 42;
+  optional bool use_vaiml_c_api = 43;
 
   optional bool supported_node_mode = 101;
   optional bool binary_module = 102;
