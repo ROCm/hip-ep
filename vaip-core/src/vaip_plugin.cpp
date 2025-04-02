@@ -122,6 +122,7 @@ get_global_plugin_store() {
   return store_;
 }
 
+VAIP_DLL_SPEC
 Plugin* Plugin::get(const std::string& plugin_name) {
   auto& store_ = get_global_plugin_store();
   auto it = store_.find(plugin_name);

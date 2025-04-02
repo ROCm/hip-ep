@@ -78,6 +78,7 @@ struct Plugin {
     }
     return method(std::forward<Args>(args)...);
   }
+  VAIP_DLL_SPEC
   static Plugin* get(const std::string& name);
 
   bool has_method(const char* name) const {
@@ -107,6 +108,7 @@ private:
 private:
   static std::string guess_name(const char* name);
   static std::unordered_map<std::string, std::shared_ptr<Plugin>> store_;
+  VAIP_DLL_SPEC
   void* my_plugin_sym(void*, const char*) const;
 };
 

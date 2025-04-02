@@ -39,6 +39,7 @@ add_executable(${TEST_EXE_NAME}
   vaip/test_pass_context.cpp
   vaip/test_node_builder.cpp
   vaip/test_tarball.cpp
+  vaip/test_plugin.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/debug_logger.hpp
   ${CMAKE_CURRENT_BINARY_DIR}/unit_test_env_params.hpp
 )
@@ -86,3 +87,7 @@ set_target_properties(${TEST_EXE_NAME} PROPERTIES
       VS_DEBUGGER_COMMAND_ARGUMENTS " --gtest_list_tests"
       #VS_DEBUGGER_ENVIRONMENT "${DEBUG_ENV}"
 )
+
+## for test hello_plugin test
+add_library(hello_plugin_dll SHARED vaip/hello_plugin.cpp)
+set_target_properties(hello_plugin_dll PROPERTIES FOLDER morphizen/unit-tests)
