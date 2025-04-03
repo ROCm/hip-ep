@@ -23,6 +23,8 @@ from pathlib import Path
 import xxd
 
 def get_trimmed_config(config):
+    if "target" not in config:
+        return
     default_target = config["target"]
     new_targets = []
     default_target_passes = {}

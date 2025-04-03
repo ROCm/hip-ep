@@ -3,7 +3,7 @@
         {
             "name": "init",
             "plugin": "vaip-pass_init"
-        },
-        "enable_cache_file_io_in_mem" : true
-    }
+        }
+    ],
+    "enable_cache_file_io_in_mem" : true
 }
