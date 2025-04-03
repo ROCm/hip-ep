@@ -1,13 +1,7 @@
 LIBRARY onnxruntime_vitisai_ep
 EXPORTS
-    vaip_get_version
-    initialize_onnxruntime_vitisai_ep
-    compile_onnx_model_vitisai_ep_with_options
-    profiler_collect
-    create_ep_context_nodes
-    vitisai_ep_on_run_start
-    vitisai_ep_set_ep_dynamic_options
-    deinitialize_onnxruntime_vitisai_ep
+    ??0FileBuf@vaip_core@@QEAA@PEAU_iobuf@@_K@Z
+    ??0FileStream@vaip_core@@QEAA@PEAU_iobuf@@_K@Z
     ??0LogMessage@internal@protobuf@google@@QEAA@W4LogLevel@23@PEBDH@Z
     ??0MetaDefProto@vaip_core@@IEAA@PEAVArena@protobuf@google@@_N@Z
     ??0NodeAttributesBuilder@vaip_core@@QEAA@_K@Z
@@ -16,6 +10,7 @@ EXPORTS
     ??1AnchorPointProto@vaip_core@@UEAA@XZ
     ??1ConfigProto@vaip_core@@UEAA@XZ
     ??1ExecutionProviderConcrete@vaip_core@@UEAA@XZ
+    ??1FileBuf@vaip_core@@UEAA@XZ
     ??1GraphConstRef@vaip_cxx@@QEAA@XZ
     ??1GraphRef@vaip_cxx@@QEAA@XZ
     ??1LogMessage@internal@protobuf@google@@QEAA@XZ
@@ -106,6 +101,7 @@ EXPORTS
     ?find_node@GraphConstRef@vaip_cxx@@QEBA?AV?$optional@VNodeConstRef@vaip_cxx@@@std@@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@4@@Z
     ?find_node_arg@GraphConstRef@vaip_cxx@@QEBA?AV?$optional@VNodeArgConstRef@vaip_cxx@@@std@@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@4@@Z
     ?find_producer@NodeArgConstRef@vaip_cxx@@QEBA?AV?$optional@VNodeConstRef@vaip_cxx@@@std@@XZ
+    ?flushBuffer@FileBuf@vaip_core@@AEAA_NXZ
     ?from_path@IStreamWriter@vaip_core@@SA?AV?$unique_ptr@VIStreamWriter@vaip_core@@U?$default_delete@VIStreamWriter@vaip_core@@@std@@@std@@AEBVpath@filesystem@4@@Z
     ?fuse@GraphRef@vaip_cxx@@QEAA?AVNodeRef@2@AEBVMetaDefProto@vaip_core@@@Z
     ?get_metadata@Model@vaip_cxx@@QEBA?AV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AEBV34@@Z
@@ -193,3 +189,11 @@ EXPORTS
     ?virtual_fuse@GraphConstRef@vaip_cxx@@QEBA?AVSubgraph@2@AEBVMetaDefProto@vaip_core@@@Z
     ?wildcard@PatternBuilder@vaip_core@@QEAA?AV?$shared_ptr@VPattern@vaip_core@@@std@@XZ
     ?write@TarWriter@vaip_core@@QEAAHAEBVIStreamReader@2@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@Z
+    compile_onnx_model_vitisai_ep_with_options
+    create_ep_context_nodes
+    deinitialize_onnxruntime_vitisai_ep
+    initialize_onnxruntime_vitisai_ep
+    profiler_collect
+    vaip_get_version
+    vitisai_ep_on_run_start
+    vitisai_ep_set_ep_dynamic_options

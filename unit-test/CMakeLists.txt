@@ -40,6 +40,7 @@ add_executable(${TEST_EXE_NAME}
   vaip/test_node_builder.cpp
   vaip/test_tarball.cpp
   vaip/test_plugin.cpp
+  vaip/test_file_stream.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/debug_logger.hpp
   ${CMAKE_CURRENT_BINARY_DIR}/unit_test_env_params.hpp
 )

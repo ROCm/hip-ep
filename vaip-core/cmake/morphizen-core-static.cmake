@@ -137,6 +137,8 @@ add_library(${LIB_NAME} STATIC
   src/vaip_profile.cpp
   src/vaip.cpp
   src/onnxruntime_vitisai_ep.cpp
+  src/file_stream.hpp
+  src/file_stream.cpp
 )
 add_library (morphizen::morphizen-core-static ALIAS morphizen-core-static)
 set_target_properties(${LIB_NAME} PROPERTIES FOLDER morphizen)
