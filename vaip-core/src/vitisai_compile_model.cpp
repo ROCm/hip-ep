@@ -164,7 +164,7 @@ static void save_config_json(PassContextImp& context) {
 }
 
 static void print_device_subgraph(const PassContextImp& context) {
-  LOG_VERBOSE(2) << "dpu subgraph: " << context.context_proto.meta_def_size();
+  LOG_VERBOSE(2) << "meta_def count: " << context.context_proto.meta_def_size();
 }
 
 static void print_version_verbose(const char* prefix,
