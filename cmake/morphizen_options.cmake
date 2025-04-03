@@ -7,10 +7,12 @@
 # when VAIP is built as part of onnxruntime, this option should be OFF
 if (TARGET onnxruntime_providers_vitisai)
   set(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC_DEFAULT OFF)
+  set(morphizen_WITH_VAIP_CONFIG_FILE_DEFAULT OFF)
   set(morphizen_ENABLE_UNIT_TEST_DEFAULT ON)
   set(morphizen_ONNXRUNTIME_VITISAI_EP_TARGET_DEFAULT "onnxruntime_providers_vitisai")
 else()
   set(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC_DEFAULT ON)
+  set(morphizen_WITH_VAIP_CONFIG_FILE_DEFAULT ON)
   set(morphizen_ENABLE_UNIT_TEST_DEFAULT ON)
   set(morphizen_ONNXRUNTIME_VITISAI_EP_TARGET_DEFAULT "morphizen-core-dynamic")
 endif()
@@ -33,7 +35,7 @@ set(VAIP_XCLBIN_DIR ${CMAKE_SOURCE_DIR}/../vaip_xclbin CACHE PATH "Path to the d
 # config in morphizen-core-dynamic, i.e. onnxruntime_vitisai_ep.dll
 # morphizen_WITH_VAIP_CONFIG_FILE = OFF if morphizen is build as part
 # of onnxruntime, the default config is read from a plugin.
-option(morphizen_WITH_VAIP_CONFIG_FILE "build with default vaip config in morphizen-core-dynamic, i.e. onnxruntime_vitisai_ep.dll" ON)
+option(morphizen_WITH_VAIP_CONFIG_FILE "build with default vaip config in morphizen-core-dynamic, i.e. onnxruntime_vitisai_ep.dll" ${morphizen_WITH_VAIP_CONFIG_FILE_DEFAULT})
 #
 # it is possible to embed json files in the binary, assume the json files are in the directory
 set(VAIP_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/vaip-core/etc/vaip_config.json" CACHE FILEPATH "Path to the file containing vaip_config.json files")
@@ -61,4 +63,3 @@ message(STATUS "  morphizen_WITH_VAIP_CONFIG_FILE : ${morphizen_WITH_VAIP_CONFIG
 message(STATUS "  VAIP_JSON_CONFIG_FILE : ${VAIP_JSON_CONFIG_FILE}")
 message(STATUS "  VAIP_VERSEION_INFO_FILE : ${VAIP_VERSEION_INFO_FILE}")
 message(STATUS "  morphizen_OUTPUT_NAME : ${morphizen_OUTPUT_NAME}")
-
