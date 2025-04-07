@@ -139,7 +139,10 @@ add_library(${LIB_NAME} STATIC
   src/onnxruntime_vitisai_ep.cpp
   src/file_stream.hpp
   src/file_stream.cpp
+  include/morphizen/vaip_dd_io.hpp
+  src/vaip_dd_io.cpp
 )
+
 add_library (morphizen::morphizen-core-static ALIAS morphizen-core-static)
 set_target_properties(${LIB_NAME} PROPERTIES FOLDER morphizen)
 if(MSVC)
