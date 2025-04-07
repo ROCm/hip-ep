@@ -32,6 +32,7 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 #include "morphizen/util.hpp"
+#include "hash-library/md5.h"
 #include <cstdio>
 
 #include <glog/logging.h>
@@ -469,7 +470,8 @@ void compress(const IStreamReader& src, IStreamWriter& dst,
     }
     flush = (bytes_read == 0) ? Z_FINISH : Z_NO_FLUSH;
     strm.avail_in = (uInt)bytes_read;
-    strm.next_in = (bytes_read == 0) ? nullptr: reinterpret_cast<Bytef*>(in->data());
+    strm.next_in =
+        (bytes_read == 0) ? nullptr : reinterpret_cast<Bytef*>(in->data());
     do {
       strm.avail_out = CHUNK;
       strm.next_out = reinterpret_cast<Bytef*>(out);
@@ -550,5 +552,27 @@ context_cache_files_to_tar_stream(PassContext& context) {
   context.cache_files_to_tar_file(*writer);
   auto reader_and_size = temp_file->build_reader();
   return std::move(reader_and_size.first);
+}
+std::string get_md5_of_buffer(const char* buffer, size_t size) {
+  auto MD5_computer = MD5();
+  MD5_computer.add(buffer, size);
+  return MD5_computer.getHash();
+}
+std::string get_md5_of_file(const std::filesystem::path& path) {
+  if (!std::filesystem::exists(path))
+    return "";
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
+    return "";
+  }
+  char buffer[1024] = {0};
+  auto sz = file.read(buffer, 1024).gcount();
+  auto MD5_computer = MD5();
+  while (sz != 0) {
+    MD5_computer.add(buffer, sz);
+    sz = file.read(buffer, 1024).gcount();
+  }
+  file.close();
+  return MD5_computer.getHash();
 }
 } // namespace vaip_core

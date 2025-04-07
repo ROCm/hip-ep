@@ -5,9 +5,8 @@
  * to the BSD open source license, it is NOT the BSD open source license nor
  * other OSI-approved open source license.
  *
- *      Copyright (C) 2022 Xilinx, Inc. All rights reserved.
- *      Copyright (C) 2023 – 2024 Advanced Micro Devices, Inc. All rights
- * reserved.
+ *Copyright (C) 2022 Xilinx, Inc. All rights reserved.
+ *Copyright (C) 2022 – 2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  *      Redistribution and use in binary form only, without modification, is
  * permitted provided that the following conditions are met:
@@ -43,19 +42,12 @@
 #include "./file_lock.hpp"
 #include "./pass_imp.hpp"
 #include "./stat.hpp"
-#include "morphizen/node.hpp"
 #include "profile_utils.hpp"
-#include "morphizen/config_reader.hpp"
-#include "morphizen/custom_op_imp.hpp"
-#include "morphizen/graph.hpp"
-#include "morphizen/model.hpp"
-#include "morphizen/util.hpp"
 #include "morphizen/vaip.hpp"
-#include "morphizen/vaip_io.hpp"
-#include "morphizen/vaip_plugin.hpp"
+#include "morphizen/util.hpp"
 #include "morphizen/env_config.hpp"
-#include "morphizen/weak.hpp"
 #include <codecvt>
+#include <errno.h>
 #include <google/protobuf/util/json_util.h>
 #include <ios>
 #include <limits>
@@ -63,11 +55,16 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string>
 #include "morphizen/encryption.hpp"
 // clang-format on
-DEF_ENV_PARAM_2(XLNX_ONNX_EP_REPORT_FILE, "vitisai_ep_report.json", std::string)
+
+#if WITH_XCOMPILER
+#  include <xcompiler/xcompiler.hpp>
+#endif
+DEF_ENV_PARAM_2(XLNX_ONNX_EP_REPORT_FILE, "", std::string)
 DEF_ENV_PARAM(XLNX_ENABLE_CACHE, "1")
 DEF_ENV_PARAM(ENABLE_TAR_CACHE, "0")
 DEF_ENV_PARAM(XLNX_ENABLE_SKIP_FATAL, "1")
@@ -78,8 +75,8 @@ DEF_ENV_PARAM(DEBUG_VITIS_AI_EP, "1")
 DEF_ENV_PARAM(DEBUG_FILE_LOCK, "0")
 DEF_ENV_PARAM(DEBUG_EP_CONTEXT, "0")
 DEF_ENV_PARAM(XLNX_EP_CONTEXT_ENABLE_COMPRESSION, "0")
-DEF_ENV_PARAM(EXTRACT_SUBGRAPHS, "0")
-
+DEF_ENV_PARAM(XLNX_ONNX_EP_DL_ANALYZER_PROFILING, "0")
+DEF_ENV_PARAM(XLNX_ONNX_EP_DL_ANALYZER_VISUALIZATION, "0")
 #ifdef _WIN32
 #  ifdef ENABLE_PYTHON
 // Python is only enabled for VAIML compilation on Windows, which requires
@@ -98,7 +95,6 @@ DEF_ENV_PARAM_2(XLNX_model_clone_external_data_threshold, "128", int64_t)
 DEF_ENV_PARAM_2(XLNX_model_clone_external_data_threshold, "17179869184",
                 int64_t)
 #endif
-
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_VITIS_AI_EP) >= n)
 
 DEF_ENV_PARAM_2(XLNX_MD5_SIG_SKIP_OPS, "QuantizeLinear,DequantizeLinear",
@@ -164,7 +160,7 @@ static void save_config_json(PassContextImp& context) {
 }
 
 static void print_device_subgraph(const PassContextImp& context) {
-  LOG_VERBOSE(2) << "meta_def count: " << context.context_proto.meta_def_size();
+  LOG_VERBOSE(2) << "dpu subgraph: " << context.context_proto.meta_def_size();
 }
 
 static void print_version_verbose(const char* prefix,
@@ -186,25 +182,11 @@ static void print_version_verbose(const char* prefix,
 static void pass_context_update_context_json(PassContextImp& context,
                                              gsl::span<char> json_str) {
   auto session_options_saved = context.context_proto.config().session_configs();
-  // Some options are only relevant at runtime and do not require caching.
-  auto provider_options_saved =
-      context.context_proto.config().provider_options();
-  bool enable_cache_in_mem = false;
-  if (context.context_proto.config().has_enable_cache_file_io_in_mem()) {
-    enable_cache_in_mem =
-        context.context_proto.config().enable_cache_file_io_in_mem();
-  }
-
   context.context_proto.Clear();
   auto status = google::protobuf::util::JsonStringToMessage(
       &json_str[0], &context.context_proto);
   context.context_proto.mutable_config()->mutable_session_configs()->swap(
       session_options_saved);
-  // all provider options no cache
-  context.context_proto.mutable_config()->mutable_provider_options()->swap(
-      provider_options_saved);
-  context.context_proto.mutable_config()->set_enable_cache_file_io_in_mem(
-      enable_cache_in_mem);
   CHECK(status.ok()) << "cannot parse json string:" << &json_str[0];
   print_version_verbose("CACHE VERSION: ", context.get_config_proto());
 }
@@ -310,8 +292,8 @@ static bool check_cache_exist(const PassContextImp& context) {
 
 static bool check_cache_hit(PassContextImp& context) {
   auto measure_check_cache_hit = context.measure("check_cache_hit");
-  if (context.get_config_proto().ai_analyzer_profiling() ||
-      context.get_config_proto().ai_analyzer_visualization())
+  if (ENV_PARAM(XLNX_ONNX_EP_DL_ANALYZER_PROFILING) ||
+      ENV_PARAM(XLNX_ONNX_EP_DL_ANALYZER_VISUALIZATION))
     return false;
   if (ENV_PARAM(XLNX_ENABLE_CACHE)) {
     return check_cache_exist(context) && cache_valid(context);
@@ -331,6 +313,9 @@ void compile_onnx_model_2(std::shared_ptr<PassContextImp> context,
   auto session_configs = context->context_proto.config().session_configs();
   read_cache(context);
   context->context_proto.mutable_config()->set_encryption_key(encryption_key);
+  auto session_configs_in_cache =
+      context->context_proto.mutable_config()->mutable_session_configs();
+  session_configs_in_cache->swap(session_configs);
 }
 
 static std::string get_dump_md5_file(const std::string& suffix) {
@@ -434,7 +419,10 @@ find_signature_in_meptabel(const ConfigProto& proto,
                 << "model_name :  " << mep.model_name() << " " //
                 << "md5sum_in_memory : " << mep.md5sum_in_memory();
       return std::make_pair(md5_in_memory_a, &mep);
-    } else if (md5_in_memory_b == mep.md5sum_in_memory_with_io()) {
+    }
+  }
+  for (auto& mep : proto.mep_table()) {
+    if (md5_in_memory_b == mep.md5sum_in_memory_with_io()) {
       MY_LOG(1) << "find signature in meptable : "             //
                 << "model_name :  " << mep.model_name() << " " //
                 << "md5sum_in_memory_with_io : "
@@ -445,8 +433,10 @@ find_signature_in_meptabel(const ConfigProto& proto,
       if ((!mep.has_node_count()) || (node_count == mep.node_count())) {
         return std::make_pair(md5_in_memory_b, &mep);
       }
-    } else if (!md5_file_base.empty() &&
-               md5_file_base == mep.md5sum_on_disk()) {
+    }
+  }
+  for (auto& mep : proto.mep_table()) {
+    if (!md5_file_base.empty() && md5_file_base == mep.md5sum_on_disk()) {
       MY_LOG(1) << "find signature in meptable : "             //
                 << "model_name :  " << mep.model_name() << " " //
                 << "md5sum_on_disk : " << mep.md5sum_on_disk();
@@ -457,32 +447,11 @@ find_signature_in_meptabel(const ConfigProto& proto,
             << md5_in_memory_a;
   return std::make_pair(md5_in_memory_a, nullptr);
 }
-std::string get_md5_of_buffer(const char* buffer, size_t size) {
-  auto MD5_computer = MD5();
-  MD5_computer.add(buffer, size);
-  return MD5_computer.getHash();
-}
-std::string get_md5_of_file(const std::filesystem::path& path) {
-  if (!std::filesystem::exists(path))
-    return "";
-  std::ifstream file(path, std::ios::binary);
-  if (!file) {
-    return "";
-  }
-  char buffer[1024] = {0};
-  auto sz = file.read(buffer, 1024).gcount();
-  auto MD5_computer = MD5();
-  while (sz != 0) {
-    MD5_computer.add(buffer, sz);
-    sz = file.read(buffer, 1024).gcount();
-  }
-  file.close();
-  return MD5_computer.getHash();
-}
 static std::pair<const std::string, const MepConfigTable*>
-get_signature_with_meptable(const std::filesystem::path& model_path,
+get_signature_with_meptable(const std::string& model_path,
                             const Graph& onnx_graph, const ConfigProto& proto) {
-  auto md5_file_base = model_path.empty() ? "" : get_md5_of_file(model_path);
+  auto md5_file_base =
+      model_path.empty() ? "" : vaip_core::get_md5_of_file(model_path);
   auto md5_in_memory_a = get_model_signature(onnx_graph);
   auto md5_in_memory_b =
       get_model_signature_with_graph_inputs_and_outputs(onnx_graph);
@@ -505,34 +474,41 @@ get_signature_with_meptable(const std::filesystem::path& model_path,
 // inside the tar file instead, we should not assume that any files exists
 // inside the cache directory.
 std::shared_ptr<PassContextImp>
-initialize_context(const std::filesystem::path& model_path,
-                   const Graph& onnx_graph,
+initialize_context(const std::string& model_path, const Graph& onnx_graph,
                    const std::vector<vaip_cxx::NodeConstRef>& ep_context_nodes,
-                   const onnxruntime::ProviderOptions& options) {
-  auto json_config = vaip_core::get_config_json_str(options);
+                   const char* json_config) {
   std::shared_ptr<PassContextImp> context = std::make_shared<PassContextImp>();
-  context->model_path = model_path;
+  // "session.model_external_initializers_file_folder_path/virtual_model.onnx
+  // would be passed for in-mem model when this happen, a invalid path is
+  // passed, we use the model_path == empty to differentiate if the model is
+  // in-mem
+  if (std::filesystem::is_regular_file(model_path)) {
+    context->model_path = model_path;
+  }
   auto config_proto = ConfigProto();
-  if (!json_config.empty()) {
+  if (json_config != nullptr && !std::string(json_config).empty()) {
     Config::merge_config_proto(config_proto, json_config);
   }
   context->cache_dir_set = (config_proto.cache_dir().size() > 0);
   context->is_ep_context_model = !ep_context_nodes.empty();
   // DL Analyzer dumping partition.json and fused.viz.json, or not.
-
-  bool profile_enabled =
-      VaipOrtApi2::has_is_profiling_enabled &&
-      VaipOrtApi2::is_profiling_enabled(get_session_option(options));
-  if (profile_enabled) {
-    config_proto.set_ai_analyzer_profiling(true);
-  }
+  bool analyzer_visualization_enabled =
+      config_proto.has_ai_analyzer_visualization() &&
+      config_proto.ai_analyzer_visualization();
+  ENV_PARAM(XLNX_ONNX_EP_DL_ANALYZER_VISUALIZATION) =
+      analyzer_visualization_enabled;
+  // DL Analyzer creating dpu_timestamp_info.json, or not.
+  bool analyzer_profiling_enabled = config_proto.has_ai_analyzer_profiling() &&
+                                    config_proto.ai_analyzer_profiling();
+  ENV_PARAM(XLNX_ONNX_EP_DL_ANALYZER_PROFILING) = analyzer_profiling_enabled;
 
   Config::add_version_info(config_proto);
   *context->context_proto.mutable_config() = std::move(config_proto);
   auto& model = graph_get_model(onnx_graph);
 
-  auto [md5, mep_table] = get_signature_with_meptable(
-      model_path, onnx_graph, context->context_proto.config());
+  auto [md5, mep_table] =
+      get_signature_with_meptable(context->model_path.string(), onnx_graph,
+                                  context->context_proto.config());
 
   if (!context->context_proto.config().cache_key().empty()) {
     MY_LOG(1) << "use cache key specified by user "
@@ -544,8 +520,8 @@ initialize_context(const std::filesystem::path& model_path,
     *context->context_proto.mutable_config()->mutable_cache_key() =
         new_cache_key;
   } else if (ENV_PARAM(XLNX_ENABLE_FILE_BASED_CACHE_KEY) &&
-             (!model_path.empty())) {
-    auto new_cache_key = get_md5_of_file(model_path);
+             (!context->model_path.empty())) {
+    auto new_cache_key = vaip_core::get_md5_of_file(context->model_path.string());
     MY_LOG(1) << "use cache key on-disk " << new_cache_key;
     *context->context_proto.mutable_config()->mutable_cache_key() =
         new_cache_key;
@@ -577,14 +553,22 @@ initialize_context(const std::filesystem::path& model_path,
     context->context_proto.mutable_config()->mutable_provider_options()->insert(
         {"model_variant", model_variant});
 
-    std::string is_preemptible = "false";
+    std::string is_preemptible = "0";
     if (mep_table->has_is_preemptible()) {
-      is_preemptible = mep_table->is_preemptible() ? "true" : "false";
+      is_preemptible = mep_table->is_preemptible() ? "1" : "0";
 
       context->context_proto.mutable_config()
           ->mutable_provider_options()
           ->insert({"is_preemptible", is_preemptible});
     }
+
+    std::string dd_use_lazy_scratch_bo = "1";
+    if (mep_table->has_dd_use_lazy_scratch_bo()) {
+      dd_use_lazy_scratch_bo = mep_table->dd_use_lazy_scratch_bo() ? "1" : "0";
+    }
+
+    context->context_proto.mutable_config()->mutable_provider_options()->insert(
+        {"dd_use_lazy_scratch_bo", dd_use_lazy_scratch_bo});
 
     std::string qos_priority = "";
     if (mep_table->has_qos_priority()) {
@@ -594,12 +578,51 @@ initialize_context(const std::filesystem::path& model_path,
           ->mutable_provider_options()
           ->insert({"qos_priority", qos_priority});
     }
+
+    std::string perf_pref = "";
+    if (mep_table->has_perf_pref()) {
+      perf_pref = mep_table->perf_pref();
+
+      context->context_proto.mutable_config()
+          ->mutable_provider_options()
+          ->insert({"perf_pref", perf_pref});
+    }
+
+    auto qos_gen_params = mep_table->qos_generic_params();
+    for (const auto& pair : qos_gen_params) {
+      context->context_proto.mutable_config()
+          ->mutable_qos_provider_options()
+          ->insert({pair.first, pair.second});
+    }
+
+    std::string dd_use_lazy_const_bo = "0";
+    if (mep_table->has_dd_use_lazy_const_bo()) {
+      dd_use_lazy_const_bo = mep_table->dd_use_lazy_const_bo() ? "1" : "0";
+      context->context_proto.mutable_config()
+          ->mutable_provider_options()
+          ->insert({"dd_use_lazy_const_bo", dd_use_lazy_const_bo});
+    }
+
+    std::string dealloc_scratch_bo = "0";
+    if (mep_table->has_dd_dealloc_scratch_bo()) {
+      dealloc_scratch_bo = mep_table->dd_dealloc_scratch_bo() ? "1" : "0";
+      context->context_proto.mutable_config()
+          ->mutable_provider_options()
+          ->insert({"dd_dealloc_scratch_bo", dealloc_scratch_bo});
+    }
+
+    std::string constbo_sharing_key = "";
+    if (mep_table->has_constbo_sharing_key()) {
+      constbo_sharing_key = mep_table->constbo_sharing_key();
+      context->context_proto.mutable_config()
+          ->mutable_provider_options()
+          ->insert({"constbo_sharing_key", constbo_sharing_key});
+    }
   }
   vaip_core::update_config_by_target(*context->context_proto.mutable_config(),
                                      mep_table);
 
-  auto onnx_path =
-      model_path.empty() ? std::string("N/A") : model_path.u8string();
+  auto onnx_path = model_path.empty() ? std::string("N/A") : model_path;
   *context->context_proto.mutable_config()->mutable_onnx_path() = onnx_path;
 
   if (VAIP_ORT_API(model_has_meta_data)(model, "suffix_counter")) {
@@ -607,11 +630,13 @@ initialize_context(const std::filesystem::path& model_path,
         std::stoi(*VAIP_ORT_API(model_get_meta_data)(model, "suffix_counter"));
   }
   update_cache_dir(*context);
+  // DANGER!
+  Model& mutable_model = const_cast<Model&>(model);
+  model_set_meta_data(mutable_model, "vaip_log_dir",
+                      context->get_log_dir().u8string());
 
   // log version of binary
   print_version_verbose("EXEC VERISON: ", context->context_proto.config());
-  // load plugins
-  context->load_plugins();
   return context;
 }
 static std::string get_provider_option(const PassContextImp& context,
@@ -681,7 +706,7 @@ static std::string get_ep_cache_context_nonembed_mode(PassContextImp& context) {
   auto measure_get_ep_cache_context_embed_mode =
       context.measure("get_ep_cache_context_nonembed_mode");
   auto model_path = context.model_path;
-  auto OrtSessionOptionEpContextFilePath = std::filesystem::u8path(
+  auto OrtSessionOptionEpContextFilePath = std::filesystem::path(
       get_session_config_option(context, "ep.context_file_path", ""));
   if (OrtSessionOptionEpContextFilePath.empty()) {
     OrtSessionOptionEpContextFilePath = model_path;
@@ -689,12 +714,12 @@ static std::string get_ep_cache_context_nonembed_mode(PassContextImp& context) {
   }
   LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
       << "embed mode = 0, save ep context file to "
-      << OrtSessionOptionEpContextFilePath.filename().u8string();
+      << OrtSessionOptionEpContextFilePath.filename();
   auto OrtSessionOptionEpContextFilePath_binay =
       OrtSessionOptionEpContextFilePath.replace_extension(".bin");
   LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
       << "embed mode = 0, save cache directory to tar file "
-      << OrtSessionOptionEpContextFilePath_binay.filename().u8string();
+      << OrtSessionOptionEpContextFilePath_binay.filename();
   auto dst = IStreamWriter::from_path(OrtSessionOptionEpContextFilePath_binay);
   get_ep_cache_context_common(context, *dst);
   return OrtSessionOptionEpContextFilePath.filename().u8string();
@@ -924,11 +949,16 @@ store_cache_directory_from_main_node(PassContextImp& context,
         << "embed mode = 1, load ep context " << ep_context_size << " bytes";
   } else {
     auto ep_context_binary_file = std::filesystem::path();
-    if (context.model_path.empty()) {
-      ep_context_binary_file = std::filesystem::u8path(*ep_cache_context);
+    auto session_ep_context_path = std::filesystem::path(
+        get_session_config_option(context, "ep.context_file_path", ""));
+    if (session_ep_context_path != "") {
+      ep_context_binary_file =
+          session_ep_context_path.parent_path() / *ep_cache_context;
+    } else if (context.model_path.empty()) {
+      ep_context_binary_file = *ep_cache_context;
     } else {
-      ep_context_binary_file = context.model_path.parent_path() /
-                               std::filesystem::u8path(*ep_cache_context);
+      ep_context_binary_file =
+          context.model_path.parent_path() / *ep_cache_context;
     }
     ep_context_file = IStreamReader::from_path(ep_context_binary_file);
   }
@@ -960,9 +990,24 @@ store_cache_directory_from_main_node(PassContextImp& context,
     ep_context_file = uncompress(*ep_context_file);
   }
 
+  // get attr "ep_cache_md5s" map from main node
+  if (main_node.has_attr("ep_cache_md5s")) {
+    auto md5_map_str = main_node.get_attr_string("ep_cache_md5s");
+    MY_LOG(2) << "get 'ep_cache_md5s' attr form shared ep context model : "
+              << md5_map_str;
+    // string to jsonObject
+    auto md5_map = std::map<std::string, std::string>();
+    auto md5_map_json_obj = nlohmann::json::parse(md5_map_str);
+    for (auto it = md5_map_json_obj.begin(); it != md5_map_json_obj.end();
+         ++it) {
+      md5_map[it.key()] = it.value();
+    }
+    context.set_cache_file_md5_map(md5_map);
+  }
+
   context.tar_file_to_cache_files(*ep_context_file);
   LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
-      << " extract memory cache files to  " << context.get_log_dir().u8string();
+      << " extract memory cache files to  " << context.get_log_dir();
 }
 
 static int64_t get_ep_context_index(const vaip_cxx::NodeConstRef& node) {
@@ -996,8 +1041,8 @@ create_execution_providers_from_ep_context_nodes(
     update_meta_def_from_ep_node(node, meta_def);
     auto device = meta_def.device();
     auto plugin_name = std::string("vaip_custom_op_") + device;
-    ret.emplace_back(
-        ExecutionProviderConcrete::create(plugin_name, context, meta_def));
+    ret.emplace_back(ExecutionProviderConcrete::create(
+        plugin_name, context, meta_def));
   }
   return ret;
 }
@@ -1052,8 +1097,8 @@ compile_onnx_model_internal(
     for (auto& meta_def : context->context_proto.meta_def()) {
       auto& device = meta_def.device();
       auto plugin_name = std::string("vaip_custom_op_") + device;
-      ret.emplace_back(
-          ExecutionProviderConcrete::create(plugin_name, context, meta_def));
+      ret.emplace_back(ExecutionProviderConcrete::create(
+          plugin_name, context, meta_def));
     }
   }
   return ret;
@@ -1117,10 +1162,11 @@ static bool is_cpu_only_inference(const PassContextImp& context) {
   return ret;
 }
 std::vector<std::unique_ptr<ExecutionProvider>>
-compile_onnx_model_5(const std::filesystem::path& model_path,
-                     const Graph& onnx_graph,
-                     const onnxruntime::ProviderOptions& options, void* status,
-                     void (*func)(void*, int, const char*)) {
+compile_onnx_model_3(const std::string& model_path, const Graph& onnx_graph,
+                     const char* json_config) {
+#ifdef _WIN32
+  _setmaxstdio(8192);
+#endif
   if (ENV_PARAM(XLNX_ENABLE_SKIP_FATAL)) {
     // clang warning: cannot initialize a parameter of type
     // 'google::logging_fail_func_t' (aka 'void (*)()
@@ -1158,17 +1204,13 @@ compile_onnx_model_5(const std::filesystem::path& model_path,
   std::lock_guard<std::mutex> t_lock(mtx);
   auto ep_context_nodes = get_ep_context_nodes(onnx_graph);
   auto context =
-      initialize_context(model_path, onnx_graph, ep_context_nodes, options);
-
-  if (ENV_PARAM(EXTRACT_SUBGRAPHS) == 1) {
-    const auto& model = graph_get_model(onnx_graph);
-    auto cloned_model = model_clone(model, std::numeric_limits<int>::max());
-    auto& cloned_graph = VAIP_ORT_API(model_main_graph)(*cloned_model);
-    context->add_context_resource(
-        "__level_0_graph",
-        std::shared_ptr<void>((void*)&cloned_graph, [](void*) {}));
-  }
-
+      initialize_context(model_path, onnx_graph, ep_context_nodes, json_config);
+  const auto& model = graph_get_model(onnx_graph);
+  auto cloned_model = model_clone(model, std::numeric_limits<int>::max());
+  auto& cloned_graph = VAIP_ORT_API(model_main_graph)(*cloned_model);
+  context->add_context_resource(
+      "__level_0_graph",
+      std::shared_ptr<void>((void*)&cloned_graph, [](void*) {}));
   auto deferred_write = std::shared_ptr<void>(
       nullptr, [context](void* p) { context->save_context_json(); });
   auto measture_compile_onnx_model_3 = context->measure("compile_onnx_model_3");
@@ -1177,23 +1219,15 @@ compile_onnx_model_5(const std::filesystem::path& model_path,
   bool in_mem = context->cache_in_mem();
   std::unique_ptr<WithFileLock> lock;
   if (!in_mem) {
-    lock = std::make_unique<WithFileLock>((context->log_dir / ".lock"));
+    lock = std::make_unique<WithFileLock>(
+        (context->log_dir / ".lock").u8string().c_str());
   }
   (void)lock;
   auto p_cpu_usage = CreateICPUUsage();
   std::vector<std::unique_ptr<ExecutionProvider>> ret{};
   try {
     ret = compile_onnx_model_internal(onnx_graph, ep_context_nodes, context);
-  } catch (VaipOnnxError& e) {
-    if (func) {
-      func(status, e.err_code, e.err_msg.c_str());
-    } else {
-      LOG(INFO) << "hawrdware error:" << e.err_msg;
-      abort();
-    }
-  }
-
-  catch (const GlogFatalException& e) {
+  } catch (const GlogFatalException& e) {
     for (auto&& s : e.stacks) {
       context->context_proto.add_stacks(s);
     }
@@ -1277,7 +1311,7 @@ initialize_context_for_graph_optimizer(const std::string& model_path,
         *VAIP_ORT_API(model_get_meta_data)(model, "vaip_model_md5sum");
   } else if (!model_path.empty()) {
     *context->context_proto.mutable_config()->mutable_cache_key() =
-        get_md5_of_file(model_path);
+        vaip_core::get_md5_of_file(model_path);
   }
   // update cache key
   auto& cache_key = context->context_proto.config().cache_key();
@@ -1301,7 +1335,7 @@ int optimize_onnx_model(const std::filesystem::path& model_path_in,
   auto& graph = VAIP_ORT_API(model_main_graph)(*model_in);
   graph_resolve(graph);
   model_set_meta_data(*model_in, "vaip_model_md5sum",
-                      get_md5_of_file(model_path_in.u8string()));
+                      vaip_core::get_md5_of_file(model_path_in.u8string()));
   auto context = initialize_context_for_graph_optimizer(
       model_path_in.u8string(), graph, json_config);
 
@@ -1426,7 +1460,7 @@ find_pass_config_by_name(const std::shared_ptr<PassContextImp>& p_pass_context,
 get_vaiml_model_path(const std::shared_ptr<PassContextImp>& p_pass_context) {
   std::string vaiml_model_path{""};
   const auto* p_pass_proto =
-      find_pass_config_by_name(p_pass_context, "vaiml_partition");
+      find_pass_config_by_name(p_pass_context, "vaiml_lt");
   if (p_pass_proto != nullptr) {
     const auto& vaiml_proto = p_pass_proto->vaiml_config();
     if (vaiml_proto.has_vaiml_model_path()) {
@@ -1442,29 +1476,86 @@ get_vaiml_model_path(const std::shared_ptr<PassContextImp>& p_pass_context) {
     }
   }
   if (vaiml_model_path.empty()) {
+#if 0
+#  ifdef _WIN32
+    return "C:\\amd\\voe\\binary-modules\\ResNet.flexml";
+#  else
+    return "./vaiml_partition.flexml";
+#  endif
+#endif
     // https://gitenterprise.xilinx.com/VitisAI/vaip/blob/a96f9e3d07527ee27de69f2b56cc5161cff50486/vaip_custom_op_vaiml/src/custom_op.hpp#L126
     vaiml_model_path = "./vaiml_par_0/";
   }
   return vaiml_model_path;
 }
 
-void get_compilation_cache(const std::string& model_path, const Graph& graph,
-                           const char* json_config, uint8_t compiler_codes,
-                           std::string& cache_dir, std::string& cache_key,
-                           std::string& cache_data) {}
+#if 0
+[[maybe_unused]] static std::string get_vaiml_unarchive_path(IPass* p_pass) {
+  const auto& vaiml_proto = p_pass->get_pass_proto().vaiml_config();
+  const auto& config_proto = p_pass->get_context()->get_config_proto();
+  const auto& onnx_model_path = config_proto.onnx_path();
+  std::string onnx_model_name = fs::path(onnx_model_path).stem().string();
+  if (vaiml_proto.has_vaiml_unarchive_path()) {
+    return vaiml_proto.vaiml_unarchive_path() + '/' + onnx_model_name;
+  } else {
+    bool is_single_archive =
+        vaiml_proto.has_single_archive() && vaiml_proto.single_archive();
+    if (is_single_archive) {
+      return "./" + onnx_model_name;
+    }
+    std::string temp_path = fs::temp_directory_path().string() + '/';
+#  ifdef _WIN32
+    temp_path += std::string(getenv("USERNAME"));
+#  else
+    temp_path += std::string(getlogin());
+#  endif
+    return temp_path + '/' + onnx_model_name;
+  }
+}
 
-void restore_compilation_cache(const std::string& cache_dir,
-                               const std::string& cache_key,
-                               const std::string& cache_data,
-                               const std::string& model_path) {}
+[[maybe_unused]] static std::string get_vaiml_unarchive_path(
+    const std::shared_ptr<PassContextImp>& p_pass_context) {
+  const auto* p_pass_proto =
+      find_pass_config_by_name(p_pass_context, "vaiml_lt");
+  if (p_pass_proto == nullptr) {
+    return "";
+  }
+  const auto& vaiml_proto = p_pass_proto->vaiml_config();
+  const auto& config_proto = p_pass_context->get_config_proto();
+  const auto& onnx_model_path = config_proto.onnx_path();
+  std::string onnx_model_name = fs::path(onnx_model_path).stem().string();
+  if (vaiml_proto.has_vaiml_unarchive_path()) {
+    return vaiml_proto.vaiml_unarchive_path() + '/' + onnx_model_name;
+  } else {
+    bool is_single_archive =
+        vaiml_proto.has_single_archive() && vaiml_proto.single_archive();
+    if (is_single_archive) {
+      return "./" + onnx_model_name;
+    }
+#  if 0
+    std::string temp_path = fs::temp_directory_path().string() + '/';
+#    ifdef _WIN32
+    temp_path += std::string(getenv("USERNAME"));
+#    else
+    temp_path += std::string(getlogin());
+#    endif
+#  endif
+    return "./" + onnx_model_name;
+  }
+}
+#endif
+
 thread_local const void* g_state = nullptr;
+thread_local vaip_core::DllSafe<std::string> (*g_get_config_entry)(
+    const void* state, const char* entry_name) = nullptr;
+
 int vitisai_ep_on_run_start(
     const std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>& eps,
     const void* state,
     vaip_core::DllSafe<std::string> (*get_config_entry)(
         const void* state, const char* entry_name)) {
   if (eps.empty()) {
-    return 0;
+    return 1;
   }
   auto ep =
       dynamic_cast<vaip_core::ExecutionProviderConcrete*>(eps.front().get());
@@ -1472,17 +1563,28 @@ int vitisai_ep_on_run_start(
       dynamic_cast<vaip_core::PassContextImp*>(ep->get_context().get());
   CHECK(p_context != nullptr);
   g_state = state;
-  std::unique_lock<std::shared_mutex> lock(p_context->rw_mutex_);
-  p_context->get_run_options_ =
-      [get_config_entry](
-          const std::string& name) -> std::optional<std::string> {
-    auto dll_string = get_config_entry(g_state, name.data());
-    auto ret = std::optional<std::string>();
-    if (dll_string.get() != nullptr) {
-      ret = std::string(*dll_string);
-    }
-    return ret;
-  };
+  g_get_config_entry = get_config_entry;
+  return 0;
+}
+
+int vitisai_ep_set_ep_dynamic_options(
+    const std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>& eps,
+    const char* const* keys, const char* const* values, size_t kv_len) {
+  if (eps.empty()) {
+    return 1;
+  }
+  auto ep =
+      dynamic_cast<vaip_core::ExecutionProviderConcrete*>(eps.front().get());
+  auto p_context =
+      dynamic_cast<vaip_core::PassContextImp*>(ep->get_context().get());
+  CHECK(p_context != nullptr);
+  std::lock_guard<std::mutex> lock(p_context->ep_dynamic_options_lock);
+  for (auto i = 0; i < kv_len; i++) {
+    auto key = std::string(keys[i]);
+    auto value = std::string(values[i]);
+    if (key == "ep.dynamic.workload_type")
+      p_context->update_all_qos(value);
+  }
   return 0;
 }
 } // namespace vaip_core
@@ -1498,6 +1600,6 @@ extern "C" VAIP_DLL_SPEC int vitisai_ep_on_run_start(
 extern "C" VAIP_DLL_SPEC int vitisai_ep_set_ep_dynamic_options(
     const std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>& eps,
     const char* const* keys, const char* const* values, size_t kv_len) {
-  MY_LOG(1) << "vitisai_ep_set_ep_dynamic_options not implemented";
-  return 0;
+  return vaip_core::vitisai_ep_set_ep_dynamic_options(eps, keys, values,
+                                                      kv_len);
 }

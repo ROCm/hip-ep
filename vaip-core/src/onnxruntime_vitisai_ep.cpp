@@ -27,6 +27,7 @@
 
 // static void_ptr_t reserved_symbols[] = {SYMBOLS(DEFINE_SYMBOL)};
 #include "morphizen/onnxruntime_vitisai_ep.hpp"
+#include "morphizen/config_reader.hpp"
 #include "morphizen/op_def.hpp"
 #include "morphizen/vaip.hpp"
 #include <fstream>
@@ -88,9 +89,9 @@ std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>*
 compile_onnx_model_vitisai_ep_with_options(
     const std::string& model_path, const onnxruntime::Graph& graph,
     const onnxruntime::ProviderOptions& options) {
+  auto json_config = vaip_core::get_config_json_str(options);
   return new std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>(
-      vaip_core::compile_onnx_model_5(std::filesystem::u8path(model_path),
-                                      graph, options, nullptr, nullptr));
+      vaip_core::compile_onnx_model_3(model_path, graph, json_config.c_str()));
 }
 
 VAIP_DLL_SPEC
@@ -99,27 +100,9 @@ compile_onnx_model_vitisai_ep_with_error_handling(
     const std::string& model_path, const onnxruntime::Graph& graph,
     const onnxruntime::ProviderOptions& options, void* status,
     void (*func)(void*, int, const char*)) {
+  auto json_config = vaip_core::get_config_json_str(options);
   return new std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>(
-      vaip_core::compile_onnx_model_5(std::filesystem::u8path(model_path),
-                                      graph, options, status, func));
-}
-
-VAIP_DLL_SPEC void
-get_compilation_cache(const std::string& model_path,
-                      const onnxruntime::Graph& graph, const char* json_config,
-                      uint8_t compiler_codes, std::string& cache_dir,
-                      std::string& cache_key, std::string& cache_data) {
-  vaip_core::get_compilation_cache(model_path, graph, json_config,
-                                   compiler_codes, cache_dir, cache_key,
-                                   cache_data);
-}
-
-VAIP_DLL_SPEC void restore_compilation_cache(const std::string& cache_dir,
-                                             const std::string& cache_key,
-                                             const std::string& cache_data,
-                                             const std::string& model_path) {
-  vaip_core::restore_compilation_cache(cache_dir, cache_key, cache_data,
-                                       model_path);
+      vaip_core::compile_onnx_model_3(model_path, graph, json_config.c_str()));
 }
 
 VAIP_DLL_SPEC

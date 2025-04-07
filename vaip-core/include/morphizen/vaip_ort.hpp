@@ -77,6 +77,10 @@ compile_onnx_model_5(const std::filesystem::path& model_path,
                      const onnxruntime::ProviderOptions& options, void* status,
                      vaip_error_report_func func);
 
+VAIP_DLL_SPEC std::vector<std::unique_ptr<ExecutionProvider>>
+compile_onnx_model_3(const std::string& model_path, const Graph& graph,
+                     const char* json_config);
+
 VAIP_DLL_SPEC void profiler_collect(std::vector<EventInfo>& api_events,
                                     std::vector<EventInfo>& kernel_events);
 
@@ -90,14 +94,4 @@ std::shared_ptr<PassContextImp>
 initialize_context(const std::string& model_path, const Graph& onnx_graph,
                    const char* json_config);
 
-VAIP_DLL_SPEC void
-get_compilation_cache(const std::string& model_path, const Graph& graph,
-                      const char* json_config, uint8_t compiler_codes,
-                      std::string& cache_dir, std::string& cache_key,
-                      std::string& cache_data);
-
-VAIP_DLL_SPEC void restore_compilation_cache(const std::string& cache_dir,
-                                             const std::string& cache_key,
-                                             const std::string& cache_data,
-                                             const std::string& model_path);
 } // namespace vaip_core
