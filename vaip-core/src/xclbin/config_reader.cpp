@@ -14,7 +14,7 @@
 #include <string>
 #include <unordered_map>
 
-DEF_ENV_PARAM(MORPHIZEN_DEBUG_CONFIG_READER, "1")
+DEF_ENV_PARAM(MORPHIZEN_DEBUG_CONFIG_READER, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_CONFIG_READER) >= n)
 DEF_ENV_PARAM_2(XLNX_VART_FIRMWARE, "", std::string)
 DEF_ENV_PARAM_2(DEBUG_LOG_LEVEL, "error", std::string)
@@ -168,7 +168,7 @@ get_config_json(const onnxruntime::ProviderOptions& options) {
       while (stream.good()) {
         std::string line;
         std::getline(stream, line);
-        MY_LOG(1) << line;
+        MY_LOG(2) << line;
       }
     }
     ret = nlohmann::json::parse(default_config);
