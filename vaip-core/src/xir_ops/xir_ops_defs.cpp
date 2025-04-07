@@ -5,8 +5,7 @@
  * to the BSD open source license, it is NOT the BSD open source license nor
  * other OSI-approved open source license.
  *
- *      Copyright (C) 2023 – 2024 Advanced Micro Devices, Inc. All rights
- * reserved.
+ *Copyright (C) 2023 – 2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  *      Redistribution and use in binary form only, without modification, is
  * permitted provided that the following conditions are met:
@@ -32,9 +31,9 @@
  */
 
 #include "./xir_ops_defs.hpp"
-#include "./ort_custom_ops.hpp"
+#include "./xir_ops.hpp"
 #include "./xir_ops_genereted_names.inc"
-#include "core/session/onnxruntime_c_api.h"
+#include "morphizen/onnxruntime_api.hpp"
 
 #include <map>
 #include <memory>
@@ -85,6 +84,7 @@ Ort::CustomOpDomain get_xir_domain() {
     XIR_OP_NAMES.push_back("QBatchMatMul");
     XIR_OP_NAMES.push_back("QMatMulAdd");
     XIR_OP_NAMES.push_back("QMatMulAddGelu");
+    XIR_OP_NAMES.push_back("QMatMulAddSilu");
     XIR_OP_NAMES.push_back("QGemmvGelu");
     XIR_OP_NAMES.push_back("mzdk5MHA");
     XIR_OP_NAMES.push_back("QMatMulDynamic");
@@ -104,6 +104,10 @@ Ort::CustomOpDomain get_xir_domain() {
     XIR_OP_NAMES.push_back("QConcateOPs");
     XIR_OP_NAMES.push_back("QLstm");
     XIR_OP_NAMES.push_back("QL2norm");
+    XIR_OP_NAMES.push_back("L2_Norm");
+    XIR_OP_NAMES.push_back("QConv2MatMulSilu");
+    XIR_OP_NAMES.push_back("QRopeConst");
+    XIR_OP_NAMES.push_back("QRopeInput");
     XIR_OP_NAMES.push_back("QGroupNorm");
     XIR_OP_NAMES.push_back("QConv2MatMul");
     XIR_OP_NAMES.push_back("QELWEMUL_qdq");
@@ -114,11 +118,13 @@ Ort::CustomOpDomain get_xir_domain() {
     XIR_OP_NAMES.push_back("QSilu");
     XIR_OP_NAMES.push_back("SILU");
     XIR_OP_NAMES.push_back("AttentionMaskPrePro");
+    XIR_OP_NAMES.push_back("AttentionMaskPrePro_win25");
     XIR_OP_NAMES.push_back("QResize");
     XIR_OP_NAMES.push_back("QuantOP");
     XIR_OP_NAMES.push_back("DeQuantOP");
     XIR_OP_NAMES.push_back("QGelu");
     XIR_OP_NAMES.push_back("QBroadcastAdd");
+    XIR_OP_NAMES.push_back("QBroadcastBiasAdd");
     XIR_OP_NAMES.push_back("Mladfelwmul");
     XIR_OP_NAMES.push_back("ELWMUL");
     XIR_OP_NAMES.push_back("MLADFMATMULA16A16");
@@ -134,6 +140,12 @@ Ort::CustomOpDomain get_xir_domain() {
     XIR_OP_NAMES.push_back("equal");
     XIR_OP_NAMES.push_back("reciprocal");
     XIR_OP_NAMES.push_back("QDeMHA");
+    XIR_OP_NAMES.push_back("QGatherDivAdd");
+    XIR_OP_NAMES.push_back("QIntEltwiseAdd");
+    XIR_OP_NAMES.push_back("QIntEltwiseMul");
+    XIR_OP_NAMES.push_back("QLinear_CPU");
+    XIR_OP_NAMES.push_back("DQLinear_CPU");
+    XIR_OP_NAMES.push_back("DQSoftmax_CPU");
 
     for (auto& name : XIR_OP_NAMES) {
       xir_custom_ops.emplace_back(XilinxCustomOp(name));
@@ -142,6 +154,7 @@ Ort::CustomOpDomain get_xir_domain() {
     // multi-output ops
     // (op_name , num_outputs)
     xir_custom_ops.emplace_back("sample_multi_outputs_op", 3);
+    xir_custom_ops.emplace_back("FlatRMSAdd", 2);
   }
   for (auto& op : xir_custom_ops) {
     domain.Add(&op);

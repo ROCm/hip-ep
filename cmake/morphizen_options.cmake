@@ -10,11 +10,13 @@ if (TARGET onnxruntime_providers_vitisai)
   set(morphizen_WITH_VAIP_CONFIG_FILE_DEFAULT OFF)
   set(morphizen_ENABLE_UNIT_TEST_DEFAULT ON)
   set(morphizen_ONNXRUNTIME_VITISAI_EP_TARGET_DEFAULT "onnxruntime_providers_vitisai")
+  set(TRIM_CONFIG_DEFAULT ON)
 else()
   set(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC_DEFAULT ON)
   set(morphizen_WITH_VAIP_CONFIG_FILE_DEFAULT ON)
   set(morphizen_ENABLE_UNIT_TEST_DEFAULT ON)
   set(morphizen_ONNXRUNTIME_VITISAI_EP_TARGET_DEFAULT "morphizen-core-dynamic")
+  set(TRIM_CONFIG_DEFAULT OFF)
 endif()
 option(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC "enable morphizen-core-dynamic or not" ${morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC_DEFAULT})
 
@@ -53,6 +55,8 @@ set(VAIP_VERSEION_INFO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/vaip-core/etc/version_i
 #
 set(morphizen_OUTPUT_NAME "onnxruntime_vitisai_ep" CACHE STRING "Output name of MorphiZen library")
 
+## this optio is used to trim vaip_config.json, we choose the original name for backward compatibility.
+option(TRIM_CONFIG "trim default vaip_config.json" "${TRIM_CONFIG_DEFAULT}")
 # print all options
 message(STATUS "MorphiZen OPTIONS:")
 message(STATUS "  morphizen_ONNXRUNTIME_VITISAI_EP_TARGET : ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET}")
@@ -63,3 +67,4 @@ message(STATUS "  morphizen_WITH_VAIP_CONFIG_FILE : ${morphizen_WITH_VAIP_CONFIG
 message(STATUS "  VAIP_JSON_CONFIG_FILE : ${VAIP_JSON_CONFIG_FILE}")
 message(STATUS "  VAIP_VERSEION_INFO_FILE : ${VAIP_VERSEION_INFO_FILE}")
 message(STATUS "  morphizen_OUTPUT_NAME : ${morphizen_OUTPUT_NAME}")
+message(STATUS "  TRIM_CONFIG : ${TRIM_CONFIG}")
