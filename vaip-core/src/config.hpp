@@ -54,7 +54,7 @@ public:
   VAIP_DLL_SPEC
   static ConfigProto parse_from_string(const char* string);
   static void merge_config_proto(ConfigProto& config_proto,
-                                 const std::string& json_config);
+                                 const char* json_config);
   static void add_version_info(ConfigProto& config_proto);
   static void add_version_info(ConfigProto& config_proto,
                                const std::string& package_name,

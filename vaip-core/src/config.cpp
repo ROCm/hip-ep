@@ -310,25 +310,13 @@ void update_config_by_target(ConfigProto& proto, const MepConfigTable* mep) {
   auto target = std::string();
   auto xclbin = std::string();
 
-  if (mep != nullptr) {
+  if (proto.provider_options().contains("xlnx_target")) {
+    target = proto.provider_options().at("xlnx_target");
+  } else if (mep != nullptr) {
     target = mep->target();
     if (mep->has_xclbin()) {
       xclbin = mep->xclbin();
     }
-    // Hack for shell model , if find by md5 , use qdq flow and disable check
-    // batch
-    {
-      ENV_PARAM(XLNX_ENABLE_OLD_QDQ) = 0;
-#ifdef _WIN32
-      _putenv_s("XLNX_ENABLE_OLD_QDQ", "0");
-#else
-      setenv("XLNX_ENABLE_OLD_QDQ", "0", 1);
-#endif
-    }
-  }
-
-  if (target.empty()) {
-    target = proto.target();
   }
   if (target.empty()) {
     LOG_VERBOSE(1)
@@ -355,7 +343,30 @@ void update_config_by_target(ConfigProto& proto, const MepConfigTable* mep) {
         ["XLNX_model_clone_external_data_threshold"] =
             std::to_string(mep->model_clone_threshold());
   }
+  // For non-shell models, the default for use_old_qdq is true
+  // For shell models, the default for use_old_qdq is false
+  bool use_old_qdq = true;
+  bool use_py3_round = false;
+  if (mep) {
+    use_old_qdq = false;
+    if (target_proto->has_old_qdq()) {
+      use_old_qdq = target_proto->old_qdq();
+    }
+  }
+  if (target_proto->has_py3_round()) {
+    bool use_py3_round = target_proto->py3_round();
+    auto iter = proto.provider_options().find("xlnx_enable_py3_round");
+    if (iter == proto.provider_options().end()) {
+      (*proto.mutable_provider_options())["xlnx_enable_py3_round"] =
+          std::to_string(use_py3_round);
+    }
+  }
 
+  auto iter = proto.provider_options().find("xlnx_enable_old_qdq");
+  if (iter == proto.provider_options().end()) {
+    (*proto.mutable_provider_options())["xlnx_enable_old_qdq"] =
+        std::to_string(use_old_qdq);
+  }
   std::unordered_map<std::string, PassProto> pass_map;
   remove_pass(proto, pass_map);
   add_target_pass(proto, pass_map, target_proto);
@@ -435,7 +446,8 @@ void add_custom_field(ConfigProto& proto, const std::string& str) {
 }
 
 void Config::merge_config_proto(ConfigProto& config_proto,
-                                const std::string& json_config) {
+                                const char* json_config) {
+  std::string json_str(json_config);
   // FIXME: This var name "cache_dir_msg" is misleading.
   ConfigProto cache_dir_msg;
   auto options = google::protobuf::util::JsonParseOptions();
@@ -443,17 +455,17 @@ void Config::merge_config_proto(ConfigProto& config_proto,
   //  is conveluted.
   options.ignore_unknown_fields = true;
   auto status = google::protobuf::util::JsonStringToMessage(
-      json_config, &cache_dir_msg, options);
-  CHECK(status.ok()) << "cannot parse json string:" << json_config;
-  add_custom_field(cache_dir_msg, json_config);
+
+      json_str, &cache_dir_msg, options);
+  CHECK(status.ok()) << "cannot parse json string:" << json_str;
+  add_custom_field(cache_dir_msg, json_str);
   config_proto.MergeFrom(cache_dir_msg);
 }
 
 ConfigProto Config::parse_from_string(const char* json_config) {
   auto config_proto = ConfigProto();
-  auto cpp_json_config = std::string(json_config);
-  if (json_config != nullptr && !cpp_json_config.empty()) {
-    Config::merge_config_proto(config_proto, cpp_json_config);
+  if (json_config != nullptr && !std::string(json_config).empty()) {
+    Config::merge_config_proto(config_proto, json_config);
   }
   return config_proto;
 }
