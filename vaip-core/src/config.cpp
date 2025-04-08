@@ -72,7 +72,6 @@
 DEF_ENV_PARAM(DEBUG_VAIP_CONFIG, "0")
 DEF_ENV_PARAM(XLNX_ONNX_EP_VERBOSE, "0")
 DEF_ENV_PARAM_2(XLNX_VART_FIRMWARE, "", std::string)
-DEF_ENV_PARAM(XLNX_ENABLE_OLD_QDQ, "1")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_VAIP_CONFIG) >= n)
 #define LOG_VERBOSE(n)                                                         \
   LOG_IF(INFO, ENV_PARAM(XLNX_ONNX_EP_VERBOSE) >= n)                           \
