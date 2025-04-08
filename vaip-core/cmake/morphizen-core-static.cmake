@@ -31,6 +31,9 @@ add_custom_command (
   "${VAIP_XCLBIN_DIR}"
   "${morphizen_WITH_VAIP_CONFIG_FILE}"
 )
+if(morphizen_WITH_VAIP_CONFIG_FILE)
+  install(FILES ${CMAKE_CURRENT_BINARY_DIR}/vaip_config.json DESTINATION bin)
+endif()
 set(LIB_NAME morphizen-core-static)
 add_library(${LIB_NAME} STATIC
   ${PROTO_SRCS} ${PROTO_HDRS}
