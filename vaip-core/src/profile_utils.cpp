@@ -61,7 +61,6 @@ size_t GetPeakWorkingSetSize() {
 }
 MemUsageProto GetMemUsage() {
   auto ret = MemUsageProto();
-  constexpr auto kbytes = 1024;
   PROCESS_MEMORY_COUNTERS pmc;
   if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
     ret.set_peak_memory_in_bytes((int64_t)pmc.PeakWorkingSetSize);

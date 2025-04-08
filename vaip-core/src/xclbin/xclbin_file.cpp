@@ -61,7 +61,7 @@ axlf_section_header get_section_hdr(std::istream& file, const axlf& file_hdr,
       std::string error = "xclbin section header too small";
       throw std::runtime_error(error);
     }
-    if (hdr.m_sectionKind == kind) {
+    if (hdr.m_sectionKind == static_cast<decltype(hdr.m_sectionKind)>(kind)) {
       return hdr;
     }
   }

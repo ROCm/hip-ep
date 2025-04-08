@@ -353,7 +353,7 @@ void update_config_by_target(ConfigProto& proto, const MepConfigTable* mep) {
     }
   }
   if (target_proto->has_py3_round()) {
-    bool use_py3_round = target_proto->py3_round();
+    use_py3_round = target_proto->py3_round();
     auto iter = proto.provider_options().find("xlnx_enable_py3_round");
     if (iter == proto.provider_options().end()) {
       (*proto.mutable_provider_options())["xlnx_enable_py3_round"] =

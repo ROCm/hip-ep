@@ -107,7 +107,6 @@ private:
 
 private:
   static std::string guess_name(const char* name);
-  static std::unordered_map<std::string, std::shared_ptr<Plugin>> store_;
   VAIP_DLL_SPEC
   void* my_plugin_sym(void*, const char*) const;
 };

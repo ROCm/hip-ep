@@ -95,7 +95,6 @@ int TarWriter::write(const IStreamReader& src, const std::string& name) {
 int TarWriter::write_internal(const IStreamReader& src, const std::string& name,
                               size_t size) {
   const size_t BUFFER_SIZE = 512u;
-  char buffer[512] = {0};
   auto now = std::chrono::system_clock::now();
   std::time_t now_sec = std::chrono::system_clock::to_time_t(now);
   uint64_t mtime = static_cast<uint64_t>(now_sec);
