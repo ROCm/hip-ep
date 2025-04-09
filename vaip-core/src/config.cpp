@@ -318,11 +318,13 @@ void update_config_by_target(ConfigProto& proto, const MepConfigTable* mep) {
     }
   }
   if (target.empty()) {
+    target = proto.target();
+  }
+  if (target.empty()) {
     LOG_VERBOSE(1)
         << "Target is empty, run all passes."; // old version, compatible
     return;
   }
-
   auto target_proto = get_target_proto(proto, target);
   CHECK(target_proto != nullptr)
       << "No valid target found: " << target
