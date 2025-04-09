@@ -129,6 +129,7 @@ Ort::CustomOpDomain get_xir_domain() {
     XIR_OP_NAMES.push_back("ELWMUL");
     XIR_OP_NAMES.push_back("MLADFMATMULA16A16");
     XIR_OP_NAMES.push_back("MladfMatMul");
+    XIR_OP_NAMES.push_back("VAIMLQMatmul");
     XIR_OP_NAMES.push_back("FlatMLP");
     XIR_OP_NAMES.push_back("Qtanh_lpnorm");
     XIR_OP_NAMES.push_back("MLADFRMSNORM");
