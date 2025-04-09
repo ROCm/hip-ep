@@ -189,6 +189,7 @@ TarWriter::~TarWriter() {
   CHECK(tarball_.write(padding_data, 512) == 512) << "dtor tarWriter failed.";
   CHECK(tarball_.write(padding_data, 512) == 512) << "dtor tarWriter failed.";
 }
+
 int TarReader::read(IStreamWriterBuilder& dst_builder) {
   const size_t BUFFER_SIZE = 512u;
   std::vector<char> buffer(BUFFER_SIZE, 0);
@@ -250,3 +251,254 @@ int TarReader::read(IStreamWriterBuilder& dst_builder) {
   return 1;
 }
 } // namespace vaip_core
+
+#include <array>
+constexpr bool DEBUG_TAR = false;
+#define MY_LOG(...)                                                            \
+  do {                                                                         \
+    if constexpr (DEBUG_TAR) {                                                 \
+      std::cout << "[debug] " << __FILE__ << ":" << __LINE__ << " | ";         \
+      (std::cout << __VA_ARGS__) << std::endl;                                 \
+    }                                                                          \
+  } while (0)
+
+namespace vaip_tar {
+int getNextMultiple(int num, int size) {
+  if (size <= 0)
+    return num;
+  int n = num / size;
+  return (num % size == 0) ? (num) : ((n + 1) * size);
+}
+int tar_checksum(block* header) {
+  int unsigned_sum = 0; /* the POSIX one :-) */
+  int signed_sum = 0;   /* the Sun one :-( */
+  int recorded_sum;
+  char* p = header->buffer;
+
+  for (auto i = sizeof *header; i-- != 0;) {
+    unsigned_sum += (unsigned char)*p;
+    signed_sum += (signed char)(*p++);
+  }
+
+  if (unsigned_sum == 0)
+    return 0;
+
+  /* Adjust checksum to count the "chksum" field as blanks.  */
+
+  for (auto i = sizeof header->header.chksum; i-- != 0;) {
+    unsigned_sum -= (unsigned char)header->header.chksum[i];
+    signed_sum -= (signed char)(header->header.chksum[i]);
+  }
+  unsigned_sum += (int)(' ' * sizeof header->header.chksum);
+  signed_sum += (int)(' ' * sizeof header->header.chksum);
+
+  auto parsed_sum = std::stoll(header->header.chksum, nullptr, 8);
+  if (parsed_sum < 0)
+    return -1;
+
+  recorded_sum = (int)parsed_sum;
+
+  if (unsigned_sum != recorded_sum && signed_sum != recorded_sum)
+    return -1;
+
+  return 1;
+}
+
+// TarFile
+TarFile::TarFile(const std::filesystem::path& file_path)
+    : file_path(file_path) {
+  if (!std::filesystem::exists(file_path)) {
+    MY_LOG("file not exists, create empty tar" << file_path);
+    return;
+  }
+  std::ifstream file(file_path);
+  if (!file) {
+    MY_LOG(std::string("can't open file") + file_path.string());
+    return;
+  }
+  std::vector<char> bytes;
+  std::array<char, 512> block_buffer;
+  while (!file.eof()) {
+    auto readed_size = file.read(block_buffer.data(), sizeof(block)).gcount();
+    if (readed_size != sizeof(block)) {
+      MY_LOG("attemp read header fail");
+      file.close();
+      return;
+    }
+    bytes.insert(bytes.end(), block_buffer.begin(), block_buffer.end());
+    block* block = (union block*)(block_buffer.data());
+    auto check_ok = tar_checksum(block);
+    if (check_ok != 1) {
+      MY_LOG(std::string("checksum = ") + std::to_string(check_ok));
+      file.close();
+      return;
+    }
+    auto* header = &block->header;
+    std::string filename(header->name);
+    unsigned long size_ = 0u;
+    if (header->typeflag == 'L') {
+      size_ = std::stoul(header->size, nullptr, 8);
+      filename.resize(size_);
+      readed_size = file.read(filename.data(), size_).gcount();
+      if (readed_size != size_) {
+        MY_LOG("attemp read filename fail");
+        return;
+      }
+      bytes.insert(bytes.end(), filename.begin(), filename.end());
+      auto const padding_size{512u - static_cast<unsigned int>(size_ % 512)};
+      if (padding_size != 512) {
+        auto tmp_buffer = std::vector<char>(padding_size);
+        readed_size = file.read(tmp_buffer.data(), padding_size).gcount();
+        if (readed_size != padding_size) {
+          MY_LOG("attemp read padding fail");
+          return;
+        }
+        bytes.insert(bytes.end(), tmp_buffer.begin(), tmp_buffer.end());
+      }
+      auto readed_size = file.read(block_buffer.data(), sizeof(block)).gcount();
+      if (readed_size != sizeof(block)) {
+        MY_LOG("attemp read header 2 fail");
+        return;
+      }
+      bytes.insert(bytes.end(), block_buffer.begin(), block_buffer.end());
+
+      block = (union block*)(block_buffer.data());
+      auto check_ok = tar_checksum(block);
+      if (check_ok != 1) {
+        MY_LOG(std::string("checksum = ") + std::to_string(check_ok));
+        return;
+      }
+      header = &block->header;
+    }
+
+    size_ = std::stoul(header->size, nullptr, 8);
+    if (size_ == 0) {
+      MY_LOG("size_ == 0,empty file.");
+      this->append(TarEntry::create_from_mem(std::move(bytes)));
+      bytes = std::vector<char>();
+      MY_LOG(filename + " readed");
+      MY_LOG("currently position = " << file.tellg());
+      continue;
+    }
+    size_t need_read_size = getNextMultiple(size_, 512);
+    std::vector<char> temp(need_read_size);
+    MY_LOG(std::to_string(file.tellg()));
+    readed_size = file.read(temp.data(), need_read_size).gcount();
+    if (readed_size != need_read_size) {
+      MY_LOG(std::string("read data fail,need read ") +
+             std::to_string(need_read_size) + ", but only read " +
+             std::to_string(readed_size));
+      file.close();
+      return;
+    }
+    bytes.insert(bytes.end(), std::make_move_iterator(temp.begin()),
+                 std::make_move_iterator(temp.end()));
+    this->append(TarEntry::create_from_mem(std::move(bytes)));
+    bytes = std::vector<char>();
+    MY_LOG(filename + " readed");
+    MY_LOG(std::string("currently position = ") + std::to_string(file.tellg()));
+  }
+  file.close();
+}
+
+int TarFile::save(bool overwrite) {
+  if (std::filesystem::exists(this->file_path) && !overwrite) {
+    MY_LOG(this->file_path.string() + " already exists. skip save");
+    return 0;
+  }
+  std::ofstream file(this->file_path, std::ios::out);
+  if (!file) {
+    MY_LOG(this->file_path.string() + " can't create file. save failed");
+    return 1;
+  }
+  for (auto entry : this->entries) {
+    file.write(entry->entry_data(), entry->entry_size());
+  }
+  const char padding_data[512] = {0};
+
+  file.write(padding_data, 512);
+  file.write(padding_data, 512);
+  file.close();
+  return 0;
+}
+
+int TarFile::append(std::shared_ptr<TarEntry> entry) {
+  this->entries.push_back(entry);
+  return 0;
+}
+
+// tarentry
+
+std::shared_ptr<TarEntry> TarEntry::create_from_mem(std::vector<char>&& data) {
+  return std::shared_ptr<TarEntry>(new TarEntry(std::move(data)));
+}
+
+std::string TarEntry::get_name() {
+  const block* block = (union block*)(this->datas.data());
+  bool is_long_name = block->header.typeflag == 'L';
+  if (is_long_name) {
+    auto name_size = std::stoul(block->header.size, nullptr, 8);
+    std::string fn;
+    fn.resize(name_size);
+    std::memcpy(fn.data(), datas.data() + sizeof(block), name_size);
+    return fn;
+  } else {
+    return block->header.name;
+  }
+}
+
+const char* TarEntry::entry_data() { return this->datas.data(); }
+
+size_t TarEntry::entry_size() { return this->datas.size(); }
+
+const char* TarEntry::data() {
+  const block* block = (union block*)(this->datas.data());
+  bool is_long_name = block->header.typeflag == 'L';
+  if (is_long_name) {
+    auto name_size = std::stoul(block->header.size, nullptr, 8);
+    auto name_context_size = getNextMultiple(name_size, 512);
+    return this->datas.data() + BLOCKSIZE + name_context_size + BLOCKSIZE;
+  } else {
+    return this->datas.data() + BLOCKSIZE;
+  }
+}
+
+size_t TarEntry::size() {
+  const block* block = (union block*)(this->datas.data());
+  bool is_long_name = block->header.typeflag == 'L';
+  if (is_long_name) {
+    auto name_size = std::stoul(block->header.size, nullptr, 8);
+    auto name_context_size = getNextMultiple(name_size, 512);
+    block = (union block*)(this->datas.data() + BLOCKSIZE + name_context_size);
+  }
+  auto size_ = std::stoul(block->header.size, nullptr, 8);
+  return size_;
+}
+
+int TarEntry::rename(const std::string& name) {
+  block* block = (union block*)(this->datas.data());
+  bool is_long_name = block->header.typeflag == 'L';
+  bool new_name_is_long_name = name.size() >= sizeof(block->header.name);
+  if (!is_long_name && !new_name_is_long_name) {
+    // short -> short
+    std::memset(block->header.name, 0, sizeof(block->header.name));
+    std::memcpy(block->header.name, name.c_str(), name.size());
+    // update checksum
+    std::memset(block->header.chksum, ' ', 8);
+    unsigned int checksum_value = 0;
+    for (unsigned int i = 0; i != sizeof(block->buffer); ++i) {
+      checksum_value += (uint8_t)block->buffer[i];
+    }
+    safe_sprintf(block->header.chksum, "%06o", checksum_value);
+    return 0;
+  } else if (is_long_name && !new_name_is_long_name) {
+    // long -> short
+    throw "convert long filename to short filename is developing";
+  } else {
+    throw "long filename not support now";
+  }
+}
+
+TarEntry::TarEntry(std::vector<char>&& datas) { this->datas = datas; }
+
+} // namespace vaip_tar

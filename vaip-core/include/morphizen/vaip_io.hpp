@@ -28,6 +28,10 @@ public:
   read(size_t size_hint = 1024u * 8u) const = 0;
 
 public:
+  static std::unique_ptr<IStreamReader>
+  from_stream(std::unique_ptr<std::istream> stream);
+  static std::unique_ptr<IStreamReader>
+  from_shared_stream(std::shared_ptr<std::istream> stream);
   static std::unique_ptr<IStreamReader> from_bytes(const void* data,
                                                    size_t size);
   static std::unique_ptr<IStreamReader> from_bytes(const std::vector<char>&);

@@ -1,0 +1,445 @@
+#define _CRT_SECURE_NO_WARNINGS 1
+#include "./tar_entry.hpp"
+#include "./hash-library/md5.h"
+#include "./tar_file.hpp"
+#include "morphizen/env_config.hpp"
+#include "morphizen/vaip.hpp"
+#include "tar_header.hpp"
+#include <glog/logging.h>
+DEF_ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE, "0")
+#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE) >= n)
+
+namespace vaip_core {
+static constexpr auto BLOCKSIZE = 512;
+
+TarEntryInputStreamBuffer::TarEntryInputStreamBuffer(
+    const std::string& name,                     //
+    const std::optional<std::string>& real_path, //
+    std::streambuf::pos_type data_begin_pos,     // beginning of the data.
+    std::streambuf::pos_type data_end_pos,       // end of the data.
+    std::streambuf::pos_type block_begin_pos,    // beginning of the tar entry.
+    std::streambuf::pos_type block_end_pos,      // end of the tar entry.
+    std::shared_ptr<std::istream> stream,        //
+    std::size_t bufferSize)
+    : path_{name},                               //
+      real_path_{real_path},                     //
+      data_begin_pos_{data_begin_pos},           //
+      data_end_pos_{data_end_pos},               //
+      block_begin_pos_{block_begin_pos},         //
+      block_end_pos_{block_end_pos},             //
+      buffer_pos_{block_begin_pos},              //
+      stream_{stream},                           //
+      buffer_(bufferSize) {
+  setg(buffer_.data(), buffer_.data(), buffer_.data());
+  // does not support writing.
+  setp(nullptr, nullptr, nullptr); // Set write buffer
+  // Set read buffer
+  // set the end_pos_ according to the TAR header
+}
+
+TarEntryInputStreamBuffer::~TarEntryInputStreamBuffer() {}
+
+const std::string& TarEntryInputStreamBuffer::path() const { return path_; }
+const std::optional<std::string>& TarEntryInputStreamBuffer::real_path() const {
+  return real_path_;
+}
+std::streambuf::pos_type TarEntryInputStreamBuffer::data_begin_pos() const {
+  return data_begin_pos_;
+}
+std::streambuf::pos_type TarEntryInputStreamBuffer::data_end_pos() const {
+  return data_end_pos_;
+}
+std::streambuf::pos_type TarEntryInputStreamBuffer::block_begin_pos() const {
+  return block_begin_pos_;
+}
+std::streambuf::pos_type TarEntryInputStreamBuffer::block_end_pos() const {
+  return block_end_pos_;
+}
+bool TarEntryInputStreamBuffer::is_symlink() const {
+  return real_path_.has_value();
+}
+std::string TarEntryInputStreamBuffer::to_string() const {
+  std::ostringstream ret;
+  ret << "TarEntryInputStreamBuffer{"
+      << "\"" << path_ << "\"" //
+      ;
+  if (real_path_) {
+    ret << " -> \"" << real_path_.value() << "\"";
+  }
+  ret << " size=" << size()                                                 //
+      << " block_pos=(" << block_begin_pos_ << "," << block_end_pos_ << ")" //
+      << " data_pos=(" << data_begin_pos_ << "," << data_end_pos_ << ")"    //
+      << " buffer_size=" << buffer_.size()                                  //
+      << " buffer_pos=" << buffer_pos_                                      //
+      << " stream_pos=" << stream_->tellg()                                 //
+      << "} ";
+
+  return ret.str();
+}
+size_t TarEntryInputStreamBuffer::size() const {
+  auto size = data_end_pos_ - data_begin_pos_;
+  CHECK(size >= 0) << "size=" << size << " data_begin_pos_=" << data_begin_pos_
+                   << " data_end_pos_=" << data_end_pos_;
+  return (size_t)size;
+}
+std::streambuf::int_type TarEntryInputStreamBuffer::underflow() {
+  if (buffer_pos_ >= data_end_pos_) {
+    MY_LOG(1) << " EOF: buffer_pos_ " << buffer_pos_ << " " //
+              << "data_end_pos_ " << data_end_pos_ << " "   //
+        ;
+    return traits_type::eof();
+  }
+  CHECK(stream_->seekg(buffer_pos_).good())
+      << "seekg failed. buffer_pos_=" << buffer_pos_;
+  auto leftSize = data_end_pos_ - buffer_pos_;
+  CHECK(leftSize >= 0) << "leftSize=" << leftSize
+                       << " buffer_pos_=" << buffer_pos_
+                       << " end_pos_=" << data_end_pos_;
+  auto bufferSize = buffer_.size();
+  auto readSize = std::min(bufferSize, (size_t)leftSize);
+  CHECK(stream_->read(buffer_.data(), readSize).good())
+      << "read failed. buffer_pos_=" << buffer_pos_;
+  auto bytesRead = stream_->gcount();
+  if (bytesRead == 0) {
+    MY_LOG(1) << " EOF: buffer_pos_ " << buffer_pos_ << " " //
+              << "data_end_pos_ " << data_end_pos_ << " "   //
+              << "stream_pos " << stream_->tellg() << " "   //
+              << "bytesRead " << bytesRead << " "           //
+        ;
+    return traits_type::eof();
+  }
+  buffer_pos_ += std::streampos(bytesRead);
+  setg(buffer_.data(), buffer_.data(), buffer_.data() + bytesRead);
+  MY_LOG(3) << " read more data from tar file. etry=" << to_string();
+  return traits_type::to_int_type(*gptr());
+}
+std::streambuf::int_type TarEntryInputStreamBuffer::overflow(int_type ch) {
+  CHECK(false) << " do not support writing"
+               << " ch=" << ch;
+  return traits_type::eof();
+}
+std::streampos
+TarEntryInputStreamBuffer::seekoff(std::streamoff offset,
+                                   std::ios_base::seekdir way,
+                                   std::ios_base::openmode which) {
+  if (which & std::ios_base::in) {
+    if (way == std::ios_base::beg) {
+      buffer_pos_ = data_begin_pos_ + offset;
+    } else if (way == std::ios_base::cur) {
+      buffer_pos_ += gptr() - eback() + offset;
+    } else if (way == std::ios_base::end) {
+      buffer_pos_ = data_end_pos_ + offset;
+    }
+    setg(buffer_.data(), buffer_.data(), buffer_.data());
+  } else if (which & std::ios_base::out) {
+    CHECK(false) << " do not support writing";
+  }
+  return buffer_pos_ - data_begin_pos_;
+}
+
+TarEntryInputStream::TarEntryInputStream(
+    std::unique_ptr<TarEntryInputStreamBuffer> buf)
+    : std::istream(buf.get()), buf_{nullptr} {
+  buf_ = std::move(buf);
+}
+
+const std::string& TarEntryInputStream::path() const { return buf_->path(); }
+const std::optional<std::string>& TarEntryInputStream::real_path() const {
+  return buf_->real_path();
+}
+size_t TarEntryInputStream::size() const { return buf_->size(); }
+
+std::streambuf::pos_type TarEntryInputStream::data_begin_pos() const {
+  return buf_->data_begin_pos();
+}
+std::streambuf::pos_type TarEntryInputStream::data_end_pos() const {
+  return buf_->data_end_pos();
+}
+std::streambuf::pos_type TarEntryInputStream::block_begin_pos() const {
+  return buf_->block_begin_pos();
+}
+std::streambuf::pos_type TarEntryInputStream::block_end_pos() const {
+  return buf_->block_end_pos();
+}
+bool TarEntryInputStream::is_symlink() const { return buf_->is_symlink(); }
+std::string TarEntryInputStream::to_string() const {
+  return std::string("TarEntryInputStream{buf=") + buf_->to_string() + "}";
+}
+TarEntryOutputStream::TarEntryOutputStream(
+    const std::string& name,            // name of the entry
+    std::streambuf::pos_type begin_pos, // beginning of the
+    class TarFile& tar_file)
+    : std::ostream(tar_file.stream_->rdbuf()), name_{name},
+      begin_pos_{begin_pos}, tar_file_{tar_file} {
+  MY_LOG(2)
+      << " assume the write position is set by TarEntryOutputStream::create." //
+      << " begin_pos " << begin_pos_ << " "                                   //
+      << " stream_pos: " << tellp() << " ";
+}
+static std::string calculate_md5(std::istream& str, std::streampos begin_pos,
+                                 std::streamsize size) {
+  // calculate md5 sum of the stream
+  str.seekg(begin_pos);
+  CHECK(str.good()) << "seekg failed. begin_pos=" << begin_pos
+                    << "size=" << size                     //
+                    << " stream " << str.tellg() << "stream.fail() "
+                    << str.fail() << " "                   //
+                    << "stream.bad() " << str.bad() << " " //
+      ;
+  auto md5 = MD5();
+  auto buffer = std::vector<char>(4096);
+  while (size > 0) {
+    auto read_size = std::min(size, (std::streamsize)buffer.size());
+    str.read(buffer.data(), read_size);
+    if (!str.good()) {
+      MY_LOG(3) << "read failed. size=" << size;
+      return "";
+    }
+    md5.add(buffer.data(), read_size);
+    size -= read_size;
+  }
+  return md5.getHash();
+}
+
+TarEntryOutputStream::~TarEntryOutputStream() {
+  tar_file_.is_writing_ = false;
+  auto current_pos = this->tellp();
+  auto end_pos = current_pos;
+  this->seekp(begin_pos_);
+  if (!this->good()) {
+    MY_LOG(1) << "cannot rewind to the origina position."
+              << "begin_pos_ " << begin_pos_ << " "   //
+              << "current_pos " << current_pos << " " //
+              << " stream_pos: " << tellp() << " "    //
+        ;
+    return;
+  }
+  auto size = current_pos - begin_pos_;
+  MY_LOG(1) << " " << size << " bytes were written to file"
+            << " \"" << name_ << "\""
+            << " from " << begin_pos_   //
+            << " to " << end_pos << "." //
+            << " start to submit a new tar entry.";
+  // write padding
+  // tar file is block aligned, so we need to pad the file to the next block
+  auto padding_size = round_up_to_block_size(size) - size;
+  if (padding_size > 0) {
+    std::string padding(padding_size, '\0');
+    this->seekp(current_pos);
+    this->write(padding.data(), padding.size());
+    end_pos = this->tellp();
+    if (!this->good()) {
+      CHECK(false) << "write padding failed. size=" << size
+                   << " current_pos=" << current_pos
+                   << " begin_pos_=" << begin_pos_;
+    } else {
+      MY_LOG(2) << " write " << padding.size() << " bytes for padding" //
+                << " from " << current_pos                             //
+                << " to " << end_pos                                   //
+                << ", stream pos=" << tellp()                          //
+          ;
+    }
+  }
+  // calculate md5 sum of written data.
+  auto md5 = calculate_md5(*this->tar_file_.stream_.get(), begin_pos_, size);
+  this->seekp(end_pos);
+  MY_LOG(1) << " md5 of file"                                      //
+            << " \"" << name_ << "\" (" << size << " bytes)"       //
+            << " is " << md5                                       //
+            << " from " << begin_pos_                              //
+            << " to " << current_pos << ", padding to " << end_pos //
+            << " stream_pos=" << tellp()                           //
+      ;
+  auto data_file_name = std::string("_data/") + md5;
+  auto same_data_exists = false;
+  for (auto& entry : tar_file_.entries_) {
+    if (entry->path() == data_file_name) {
+      MY_LOG(1) << " duplicated data found for file"             //
+                << " \"" << name_ << "\" (" << size << " bytes)" //
+                << " data_file_name=" << data_file_name          //
+          ;
+      same_data_exists = true;
+      break;
+    }
+  }
+  if (!same_data_exists) {
+    MY_LOG(1) << " " << data_file_name
+              << " does not exists, create a new entry";
+    // write the data file name
+    seekp(begin_pos_ - static_cast<std::streamoff>(512));
+    if (!good()) {
+      MY_LOG(1) << "seek to write header failed. " //
+                << "begin_pos_=" << begin_pos_     //
+                << " current_pos=" << current_pos  //
+                << " stream pos=" << tellp()       //
+          ;
+      return;
+    }
+    auto header = TarHeader(data_file_name, size);
+    header.write_header(*this);
+    if (!this->good()) {
+      MY_LOG(1) << "write header failed. name=" << name_;
+    } else {
+      MY_LOG(1) << " write header for " << data_file_name << " size=" << size
+                << " OK. header=" << header.to_string();
+    }
+    tar_file_.add_entry(data_file_name,           //
+                        header.data_begin_pos(),  //
+                        header.data_end_pos(),    //
+                        header.block_begin_pos(), //
+                        header.block_end_pos()    //
+    );
+    // go back to the original position
+    this->seekp(end_pos);
+    auto sym_header = TarHeader(name_, 0);
+    sym_header.set_link_name(data_file_name);
+    sym_header.write_header(*this);
+    if (!this->good()) {
+      MY_LOG(1) << "write symbol header failed. name=" << name_;
+    } else {
+      MY_LOG(1) << " write header for symlink."         //
+                << " header=" << sym_header.to_string() //
+                << " stream_pos=" << tellp();
+    }
+    tar_file_.add_symlink_entry(name_, data_file_name,
+                                sym_header.block_begin_pos(),
+                                sym_header.block_end_pos());
+  } else {
+    // ignore the written data, probably garbage after 1024 bytes
+    seekp(begin_pos_ - static_cast<std::streampos>(512));
+    if (!good()) {
+      MY_LOG(1) << "seek to write header failed. " //
+                << "begin_pos_=" << begin_pos_     //
+                << " current_pos=" << current_pos  //
+                << " stream pos=" << tellp()       //
+          ;
+      return;
+    }
+    auto sym_header = TarHeader(name_, 0);
+    sym_header.set_link_name(data_file_name);
+    sym_header.write_header(*this);
+    if (!this->good()) {
+      MY_LOG(1) << "write symbol header failed. name=" << name_;
+    } else {
+      MY_LOG(1) << " write header for symlink " << name_
+                << ", to=" << data_file_name << " OK." //
+                << "begin_pos_=" << begin_pos_         //
+                << " data_end_pos=" << current_pos     //
+                << " block_end_pos=" << end_pos        //
+                << " stream_pos=" << tellp();
+    }
+    tar_file_.add_symlink_entry(name_, data_file_name,
+                                sym_header.block_begin_pos(),
+                                sym_header.block_end_pos());
+  }
+  // write 1024 zeros at the end, probably leave some garbage after 1024
+  // bytes, which is written by users.
+  std::string zeros(1024, '\0');
+  this->write(zeros.data(), zeros.size());
+  if (!this->good()) {
+    MY_LOG(1) << "write zeros failed. name=" << name_;
+  }
+  this->flush();
+
+  MY_LOG(2) << " ~TarEntryOutputStream: write tar end mark OK. " //
+            << " name=" << name_ << " size=" << size             //
+            << " begin_pos_=" << begin_pos_                      //
+            << " current_pos=" << current_pos                    //
+            << " padding_size=" << padding_size                  //
+            << " end_pos=" << end_pos                            //
+            << " stream pos=" << tellp()                         //
+      ;
+}
+
+std::streampos TarEntryOutputStream::calculate_tar_append_pos(
+    const TarEntryInputStream& last_entry) {
+  // calculate the tar append position
+  // the tar file end is 1024 bytes, so we need to add 512 bytes for the header
+  // and padding
+
+  // when the last entry is a symlink, we need to use the block_end_pos, because
+  // data_end_pos is for the real data, and symbolic link does not have real
+  // data. the block_end_pos is the end of the tar entry, which is the end of
+  // the block.
+  auto end_pos = last_entry.is_symlink() ? last_entry.block_end_pos()
+                                         : last_entry.data_end_pos();
+  std::streampos padding_size = 0;
+  if (end_pos % BLOCKSIZE != 0) {
+    padding_size = BLOCKSIZE - (end_pos % BLOCKSIZE);
+  }
+  auto append_pos =
+      end_pos + std::streampos(padding_size) + std::streampos(BLOCKSIZE);
+  MY_LOG(1) << " caculate the writing position for a new file. the last "
+            << " entry=" << last_entry.to_string()
+            << ". reserve 512 bytes for header, start to write at " //
+            << append_pos                                           //
+      ;
+  return append_pos;
+}
+std::unique_ptr<TarEntryOutputStream>
+TarEntryOutputStream::create(class TarFile& tar_file, const std::string& name) {
+  if (tar_file.is_writing_) {
+    MY_LOG(1) << "TarFile is already in writing mode";
+    return nullptr;
+  }
+  tar_file.is_writing_ = true;
+  // we assume that the tar file stream always has a valid position, and a
+  // valid 1024 zeros at end, so that seekp is usually good.
+
+  // begin_pos is the start to data, so that begin_pos - 512 is reverved for
+  // the tar block. we always use md5 checksum as a unique file name so that
+  // it won't be larger than 100 bytes. it is safe to only reserve 1 block,
+  // because it won't need extra block for long file names.
+  std::streampos begin_pos = 0;
+  if (tar_file.entries_.empty()) {
+    // write 1024 zeros at the end of the file
+    std::string zeros(1024, '\0');
+    tar_file.stream_->write(zeros.data(), zeros.size());
+    if (tar_file.stream_->fail()) {
+      MY_LOG(1) << "write zeros failed."                              //
+                << "begin_pos " << begin_pos << " "                   //
+                << "stream ppos " << tar_file.stream_->tellp() << " " //
+                << "stream gpos " << tar_file.stream_->tellg() << " " //
+                << "good " << tar_file.stream_->good() << " "         //
+                << "bad " << tar_file.stream_->bad() << " "           //
+                << "fail " << tar_file.stream_->fail() << " "         //
+          ;
+      return nullptr;
+    }
+    begin_pos = std::streampos(BLOCKSIZE);
+  } else {
+    begin_pos = calculate_tar_append_pos(*tar_file.entries_.back());
+  }
+  tar_file.stream_->seekp(begin_pos);
+  if (!tar_file.stream_->good()) {
+    MY_LOG(1) << "seek to append position failed."                 //
+              << "begin_pos " << begin_pos << " "                  //
+              << "stream pos " << tar_file.stream_->tellp() << " " //
+        ;
+    return nullptr;
+  }
+  // write 1024 zeros at the end of the file
+  std::string zeros(1024, '\0');
+  tar_file.stream_->write(zeros.data(), zeros.size());
+  if (!tar_file.stream_->good()) {
+    MY_LOG(1) << "write zeros failed."                             //
+              << "begin_pos " << begin_pos << " "                  //
+              << "stream pos " << tar_file.stream_->tellp() << " " //
+        ;
+    return nullptr;
+  }
+  tar_file.stream_->seekp(begin_pos);
+  if (!tar_file.stream_->good()) {
+    MY_LOG(1) << "seek to append position failed."                 //
+              << "begin_pos " << begin_pos << " "                  //
+              << "stream pos " << tar_file.stream_->tellp() << " " //
+        ;
+    return nullptr;
+  }
+  MY_LOG(1) << " TarEntryOutputStream::create: start to writing to file \""
+            << name << "\" from " << tar_file.stream_->tellp()
+            << " begin_pos=" << begin_pos;
+  return std::make_unique<TarEntryOutputStream>(name, begin_pos, tar_file);
+}
+
+} // namespace vaip_core

@@ -1,0 +1,153 @@
+﻿#include "./tar_file.hpp"
+#include "./tar_header.hpp"
+#include "morphizen/env_config.hpp"
+#include <glog/logging.h>
+
+DEF_ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE, "0")
+#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE) >= n)
+#include <iostream>
+namespace vaip_core {
+
+std::unique_ptr<TarFile>
+TarFile::create(std::unique_ptr<std::iostream> stream) {
+  return std::make_unique<TarFile>(std::move(stream));
+}
+
+TarFile::TarFile(std::unique_ptr<std::iostream> stream)
+    : stream_(std::move(stream)) {
+  CHECK(stream_->seekg(0, std::ios::beg).good())
+      << "Failed to seek to the beginning of the stream";
+  // Read the tar header to get the number of entries
+  do {
+  } while (read_tar_entry(stream_));
+}
+std::vector<std::unique_ptr<TarEntryInputStream>>& TarFile::entries() {
+  return entries_;
+}
+const std::vector<std::unique_ptr<TarEntryInputStream>>&
+TarFile::entries() const {
+  return entries_;
+}
+TarEntryInputStream* TarFile::open_for_read(const std::string& filename) {
+  MY_LOG(1) << " open_for_read: search for file \"" << filename << "\"";
+  for (auto& entry : entries_) {
+    if (entry->path() == filename) {
+      if (!entry->seekg(0, std::ios::beg).good()) {
+        MY_LOG(1) << "Failed to seek to the beginning of the entry stream"
+                  << " entry name=" << entry->path()
+                  << " entry size=" << entry->size();
+        return nullptr;
+      }
+      MY_LOG(1) << " open_for_read: Found entry=" << entry->to_string() //
+                << " stream_pos=" << entry->tellg()                     //
+          ;
+      return entry.get();
+    }
+  }
+  return nullptr;
+}
+
+std::unique_ptr<std::ostream>
+TarFile::open_for_write(const std::string& filename) {
+  return TarEntryOutputStream::create(*this, filename);
+}
+TarEntryInputStream&
+TarFile::add_entry(const std::string& path, // name of the entry
+                   std::streambuf::pos_type data_begin_pos,
+                   std::streambuf::pos_type data_end_pos,
+                   std::streambuf::pos_type block_begin_pos,
+                   std::streambuf::pos_type block_end_pos) {
+  entries_.emplace_back(std::make_unique<TarEntryInputStream>(
+      std::make_unique<TarEntryInputStreamBuffer>(
+          path, std::nullopt,             //
+          data_begin_pos, data_end_pos,   //
+          block_begin_pos, block_end_pos, //
+          stream_)));
+  auto ret = entries_.back().get();
+  MY_LOG(1) << " add entry: \"" << ret->to_string() << " " << entries_.size()
+            << " in total";
+  return *ret;
+}
+
+TarEntryInputStream*
+TarFile::find_real_entry(const std::string& real_path // link name of the entry
+) {
+  auto it = std::find_if(
+      entries_.rbegin(), entries_.rend(),
+      [&real_path](const auto& entry) { return entry->path() == real_path; });
+  MY_LOG(1) << " find_real_entry: search for symlink \"" << real_path << "\"";
+  if (it != entries_.rend()) {
+    if ((*it)->real_path()) {
+      MY_LOG(1) << " find_real_entry: Found entry \"" << (*it)->path()
+                << "\", but it is a symlink to \""
+                << " link_name=" << (*it)->real_path().value()
+                << " search recursively for the real entry" //
+          ;
+      return find_real_entry((*it)->real_path().value());
+    } else {
+      MY_LOG(1) << " find_real_entry: Found entry \"" << (*it)->path()
+                << "\""                                     //
+                << " size=" << (*it)->size()                //
+                << " begin_pos=" << (*it)->data_begin_pos() //
+                << " end_pos=" << (*it)->data_end_pos()     //
+          ;                                                 //
+      return (*it).get();
+    }
+  } else {
+    MY_LOG(1) << " find_real_entry: entry \"" << real_path << "\" not found";
+  }
+  return nullptr;
+}
+
+TarEntryInputStream*
+TarFile::add_symlink_entry(const std::string& symlink_name,
+                           const std::string& real_path_name,
+                           std::streambuf::pos_type block_begin_pos,
+                           std::streambuf::pos_type block_end_pos) {
+  auto real_entry = find_real_entry(real_path_name);
+  if (real_entry) {
+    entries_.emplace_back(std::make_unique<TarEntryInputStream>(
+        std::make_unique<TarEntryInputStreamBuffer>(
+            symlink_name, real_path_name, //
+            real_entry->data_begin_pos(), //
+            real_entry->data_end_pos(),   //
+            block_begin_pos,              //
+            block_end_pos,                //
+            stream_)));
+    auto ret = entries_.back().get();
+    MY_LOG(1) << " add_symlink_entry: found real entry:"
+              << real_entry->to_string()
+              << " symlink entry:" << ret->to_string();
+    return ret;
+  }
+  return nullptr;
+}
+TarEntryInputStream*
+TarFile::read_tar_entry(std::shared_ptr<std::istream> stream) {
+  auto tar_header = TarHeader::read_header(*stream);
+  if (!tar_header) {
+    MY_LOG(1) << " might read end of file";
+    stream_->clear(); // clear the eof flag
+    return nullptr;
+  }
+  TarEntryInputStream* ret = nullptr;
+  if (tar_header->real_path()) {
+    MY_LOG(1) << " read symlink entry: " << tar_header->to_string();
+    ret = add_symlink_entry(tar_header->name(),              //
+                            tar_header->real_path().value(), //
+                            tar_header->block_begin_pos(),   //
+                            tar_header->block_end_pos()      //
+    );
+  } else {
+    MY_LOG(1) << " read entry \"" << tar_header->to_string();
+    ;
+    ret = &add_entry(tar_header->name(),            //
+                     tar_header->data_begin_pos(),  //
+                     tar_header->data_end_pos(),    //
+                     tar_header->block_begin_pos(), //
+                     tar_header->block_end_pos()    //
+    );
+  }
+  return ret;
+}
+} // namespace vaip_core

@@ -20,7 +20,7 @@ project(morphi-unit-test VERSION 1.0.0 LANGUAGES C CXX)
 include(CTest)
 cmake_policy(SET CMP0135 NEW)
 find_package(GTest REQUIRED)
-include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/models.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_data.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/env.cmake)
 
 configure_file(debug_logger.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/debug_logger.hpp @ONLY)
@@ -40,6 +40,8 @@ add_executable(${TEST_EXE_NAME}
   vaip/test_node_builder.cpp
   vaip/test_tarball.cpp
   vaip/test_plugin.cpp
+  vaip/test_tar_entry.cpp
+  vaip/test_tar_file.cpp
   vaip/test_file_stream.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/debug_logger.hpp
   ${CMAKE_CURRENT_BINARY_DIR}/unit_test_env_params.hpp
@@ -64,6 +66,7 @@ add_custom_command(
   TARGET ${TEST_EXE_NAME}
   POST_BUILD
   DEPENDS tgt_test_constant_initializer.onnx tgt_sample.onnx tgt_test_custom_op.onnx
+  tgt_sample_src_tar
 )
 include(GoogleTest)
 gtest_discover_tests(${TEST_EXE_NAME} DISCOVERY_MODE "POST_BUILD" PROPERTIES

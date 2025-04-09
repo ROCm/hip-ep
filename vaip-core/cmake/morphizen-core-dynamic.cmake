@@ -48,3 +48,15 @@ target_compile_definitions(morphizen-core-dynamic PUBLIC "-DONNX_NAMESPACE=onnx"
 if(MSVC)
   target_compile_options(morphizen-core-dynamic PUBLIC "/Zc:__cplusplus")
 endif(MSVC)
+
+set_target_properties(morphizen-core-dynamic PROPERTIES
+  VS_DEBUGGER_COMMAND "${CMAKE_INSTALL_PREFIX}\\bin\\test_onnx_runner.exe"
+  VS_DEBUGGER_COMMAND_ARGUMENTS "${CMAKE_CURRENT_SOURCE_DIR}\\..\\..\\test_onnx_runner\\data\\pt_resnet50.onnx"
+  VS_DEBUGGER_ENVIRONMENT "XLNX_ONNX_EP_VERBOSE=2
+DEBUG_LOG_LEVEL=info
+DEBUG_VAIP_PASS=1
+MORPHIZEN_DEBUG_TAR_ENTRY=1
+MORPHIZEN_DEBUG_TAR_FILE=1
+DEBUG_TAR_CACHE=1
+"
+)

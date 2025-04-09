@@ -1,0 +1,126 @@
+#pragma once
+#include <iostream>
+#include <memory>
+#include <optional>
+#include <streambuf>
+#include <vaip/export.h>
+#include <vector>
+namespace vaip_core {
+class TarEntryInputStreamBuffer : public std::streambuf {
+
+public:
+  virtual ~TarEntryInputStreamBuffer();
+
+public:
+  VAIP_DLL_SPEC const std::string& path() const;
+  VAIP_DLL_SPEC const std::optional<std::string>& real_path() const;
+  VAIP_DLL_SPEC std::streambuf::pos_type data_begin_pos() const;
+  VAIP_DLL_SPEC std::streambuf::pos_type data_end_pos() const;
+  VAIP_DLL_SPEC std::streambuf::pos_type block_begin_pos() const;
+  VAIP_DLL_SPEC std::streambuf::pos_type block_end_pos() const;
+  VAIP_DLL_SPEC bool is_symlink() const;
+  // starting point of real data
+  // size of real data
+  VAIP_DLL_SPEC size_t size() const;
+
+public: // make std::unique_ptr happy
+  // Assuming `stream` is a valid pointer to a std::istream object,
+  // and current read position is at the beginning of a tar header.
+  VAIP_DLL_SPEC explicit TarEntryInputStreamBuffer(
+      const std::string& name,                     // name of the entry
+      const std::optional<std::string>& real_path, // link name of the entry
+      std::streambuf::pos_type data_begin_pos,     // beginning of the data.
+      std::streambuf::pos_type data_end_pos,       // end of the data.
+      std::streambuf::pos_type block_begin_pos, // beginning of the tar entry.
+      std::streambuf::pos_type block_end_pos,   // end of the tar entry.
+      std::shared_ptr<std::istream> stream,     //
+      std::size_t bufferSize = 1024);
+  // Handles reading from FILE*
+  virtual int_type underflow() override final;
+  // Handles writing to FILE*
+  virtual int_type overflow(int_type ch) override;
+  // Flushes the output buffer
+  // Seek support using fseek
+  std::streampos seekoff(std::streamoff offset, std::ios_base::seekdir way,
+                         std::ios_base::openmode which) override;
+
+  // for logging
+  std::string to_string() const;
+
+private:
+  const std::string path_;                     // name of the entry
+  const std::optional<std::string> real_path_; //
+
+  const pos_type data_begin_pos_;              // beginning of the data
+  const pos_type data_end_pos_; // end of the data, not including the padding.
+  const pos_type
+      block_begin_pos_; // beginning of the tar entry, point to the data.
+  const pos_type block_end_pos_; // end of the tar entry
+  pos_type buffer_pos_; // current read position where the buffer_ is read from
+
+  std::shared_ptr<std::istream> stream_;
+  std::vector<char> buffer_;
+  // other meta info read from the tar header
+};
+
+class TarEntryInputStream : public std::istream {
+
+public:
+  TarEntryInputStream() = delete;
+  // Assuming `stream` is a valid pointer to a std::istream object,
+  // and current read position is at the beginning of a tar header.
+  VAIP_DLL_SPEC const std::string& path() const;
+  /** @brief  */
+  /**
+   * @brief Retrieves the real path associated with the tar entry, if available.
+   *
+   * This function returns an optional string containing the real path. If the
+   * real path is not available, the optional will not contain a value, it means
+   * that this is a not a symbolic link, but rather a regular file.
+   *
+   * @return A constant reference to an `std::optional<std::string>`
+   * representing the real path of the tar entry.
+   */
+  VAIP_DLL_SPEC const std::optional<std::string>& real_path() const;
+  // starting point of real data
+  // size of real data
+  VAIP_DLL_SPEC size_t size() const;
+  VAIP_DLL_SPEC std::streambuf::pos_type data_begin_pos() const;
+  VAIP_DLL_SPEC std::streambuf::pos_type data_end_pos() const;
+  VAIP_DLL_SPEC std::streambuf::pos_type block_begin_pos() const;
+  VAIP_DLL_SPEC std::streambuf::pos_type block_end_pos() const;
+  VAIP_DLL_SPEC bool is_symlink() const;
+  // for logging
+  std::string to_string() const;
+
+public: // only for uniqute_ptr
+  explicit TarEntryInputStream(std::unique_ptr<TarEntryInputStreamBuffer> buf);
+
+private:
+  std::unique_ptr<TarEntryInputStreamBuffer> buf_;
+};
+// TarEntryOutputStream is used to write a tar entry to a tar file.
+class TarEntryOutputStream : public std::ostream {
+public:
+  VAIP_DLL_SPEC static std::unique_ptr<TarEntryOutputStream>
+  create(class TarFile& tar_file, const std::string& name);
+
+public:
+  TarEntryOutputStream(const std::string& name,            // name of the entry
+                       std::streambuf::pos_type begin_pos, // beginning of the
+                       class TarFile& tar_file);
+  virtual ~TarEntryOutputStream();
+
+private:
+  TarEntryOutputStream() = delete;
+  static std::streampos TarEntryOutputStream::calculate_tar_append_pos(
+      const TarEntryInputStream& last_entry);
+
+private:
+  const std::string name_; // name of the entry
+  const std::streampos
+      begin_pos_;          // beginning of the tar entry, point to the data.
+  class TarFile&
+      tar_file_; // tar file to write to, use to reset TarFile::is_writing_
+};
+} // namespace vaip_core

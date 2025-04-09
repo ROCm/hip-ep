@@ -98,7 +98,7 @@ Plugin::Plugin(const char* name)
 }
 
 Plugin::~Plugin() {
-  if (owned_) {
+  if (func_set_ && owned_) {
     MY_LOG(1) << "  -- close plugin: " << name_ << " " << so_name_
               << " this=" << (void*)this;
     func_set_->close_plugin((plugin_t)plugin_);
@@ -133,6 +133,10 @@ Plugin* Plugin::get(const std::string& plugin_name) {
   it = store_.find(plugin_name);
   CHECK(it != store_.end())
       << "cannot load plugin. plugin_name=" << plugin_name;
+  if (it->second && it->second->plugin_ == nullptr) {
+    MY_LOG(1) << "cannot load plugin: " << plugin_name;
+    return nullptr;
+  }
   return it->second.get();
 }
 void* Plugin::my_plugin_sym(void* handle, const char* name) const {

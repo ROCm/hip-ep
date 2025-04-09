@@ -73,18 +73,16 @@ private:
   size_t size_;
   mutable size_t pos = 0;
 };
-
-class OwnedStreamReader : public IStreamReader {
+template <typename T> class StdStreamReader : public IStreamReader {
 public:
-  OwnedStreamReader(std::unique_ptr<std::istream>&& stream)
-      : stream_(std::move(stream)) {}
-  virtual ~OwnedStreamReader();
+  StdStreamReader(T&& stream) : stream_(std::move(stream)) {}
+  virtual ~StdStreamReader();
 
 private:
   std::optional<std::vector<char>> read(size_t size_hint) const override final;
 
 private:
-  std::unique_ptr<std::istream> stream_;
+  T stream_;
 };
 
 class OwnedStreamWriter : public IStreamWriter {
@@ -100,11 +98,22 @@ private:
   std::unique_ptr<std::ostream> stream_;
 };
 
+std::unique_ptr<IStreamReader>
+IStreamReader ::from_stream(std::unique_ptr<std::istream> stream) {
+  return std::make_unique<StdStreamReader<std::unique_ptr<std::istream>>>(
+      std::move(stream));
+}
+std::unique_ptr<IStreamReader>
+IStreamReader ::from_shared_stream(std::shared_ptr<std::istream> stream) {
+  return std::make_unique<StdStreamReader<std::shared_ptr<std::istream>>>(
+      std::move(stream));
+}
 //
 std::unique_ptr<IStreamReader> IStreamReader::from_bytes(const void* data,
                                                          size_t size) {
   return std::make_unique<ByteStreamReader>(data, size);
 }
+
 std::unique_ptr<IStreamReader>
 IStreamReader::from_bytes(const std::vector<char>& bytes) {
   return std::make_unique<ByteStreamReader>(bytes.data(), bytes.size());
@@ -112,7 +121,7 @@ IStreamReader::from_bytes(const std::vector<char>& bytes) {
 
 std::unique_ptr<IStreamReader>
 IStreamReader::from_path(const std::filesystem::path& path) {
-  return std::make_unique<OwnedStreamReader>(
+  return std::make_unique<StdStreamReader<std::unique_ptr<std::istream>>>(
       std::make_unique<std::ifstream>(path, std::ios::binary));
 }
 std::unique_ptr<IStreamReader> IStreamReader::from_FILE(FILE* file) {
@@ -164,9 +173,10 @@ size_t ByteStreamWriter::write(const char* data, size_t size) {
   bytes_.insert(bytes_.end(), data, data + size);
   return size;
 }
-OwnedStreamReader::~OwnedStreamReader() {}
+template <typename T> StdStreamReader<T>::~StdStreamReader() {}
+template <typename T>
 std::optional<std::vector<char>>
-OwnedStreamReader::read(size_t size_hint) const {
+StdStreamReader<T>::read(size_t size_hint) const {
   auto ret = std::vector<char>(size_hint);
   auto read_size = stream_->read(ret.data(), size_hint).gcount();
   ret.resize(read_size);

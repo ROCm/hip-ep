@@ -65,3 +65,47 @@ private:
   const IStreamReader& tarball_;
 };
 } // namespace vaip_core
+
+#include <filesystem>
+#include <iostream>
+#include <memory>
+#include <vector>
+namespace vaip_tar {
+class TarEntry : public std::enable_shared_from_this<TarEntry> {
+public:
+  static std::shared_ptr<TarEntry> create_from_mem(std::vector<char>&&);
+  std::string get_name();
+  // not support long filename
+  int rename(const std::string& name);
+  // Return to the starting point of the entire entry(header included)
+  const char* entry_data();
+  // Return to the size of the entire entry(header included)
+  size_t entry_size();
+  // starting point of real data
+  const char* data();
+  // size of real data
+  size_t size();
+
+private:
+  TarEntry(std::vector<char>&&);
+  std::vector<char> datas;
+};
+
+class TarFile {
+public:
+  TarFile(const std::filesystem::path& file);
+  int save(bool overwrite = true);
+  int append(std::shared_ptr<TarEntry>);
+
+  auto begin() { return entries.begin(); }
+  auto end() { return entries.end(); }
+  auto begin() const { return entries.cbegin(); }
+  auto end() const { return entries.cend(); }
+
+private:
+  TarFile(const TarFile&) = delete;
+  TarFile& operator=(const TarFile&) = delete;
+  std::filesystem::path file_path;
+  std::vector<std::shared_ptr<TarEntry>> entries;
+};
+} // namespace vaip_tar

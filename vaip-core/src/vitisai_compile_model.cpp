@@ -61,9 +61,17 @@
 #include "morphizen/encryption.hpp"
 // clang-format on
 
-#if WITH_XCOMPILER
-#  include <xcompiler/xcompiler.hpp>
-#endif
+// this is an experimental feature. When this feature is enabled, the
+// `PassContextImp::cache_files_` is not used. Instead, the
+// `PassContextImp::tar_file_` is used.  The
+// `PassContextImp::cache_files_` is used to store the cache files. It
+// creates too many tmp files in disk, per VAI-10873 request, we need
+// to reduce the tmp files.  The `PassContextImp::tar_file_` is used
+// to store the cache files. It creates only one tmp file in disk or
+// open the ep context binary file directly.  limitation: it does not
+// when compression or encryption is enabled.
+DEF_ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE, "1")
+
 DEF_ENV_PARAM_2(XLNX_ONNX_EP_REPORT_FILE, "", std::string)
 DEF_ENV_PARAM(XLNX_ENABLE_CACHE, "1")
 DEF_ENV_PARAM(ENABLE_TAR_CACHE, "0")
@@ -182,12 +190,28 @@ static void print_version_verbose(const char* prefix,
 static void pass_context_update_context_json(PassContextImp& context,
                                              gsl::span<char> json_str) {
   auto session_options_saved = context.context_proto.config().session_configs();
+  // Some options are only relevant at runtime and do not require caching.
+  auto provider_options_saved =
+      context.context_proto.config().provider_options();
+  // TODO: this is a bad solution, how about cache_key, cache_dir etc.
+  bool enable_cache_in_mem = false;
+  if (context.context_proto.config().has_enable_cache_file_io_in_mem()) {
+    enable_cache_in_mem =
+        context.context_proto.config().enable_cache_file_io_in_mem();
+  }
+
   context.context_proto.Clear();
   auto status = google::protobuf::util::JsonStringToMessage(
       &json_str[0], &context.context_proto);
   context.context_proto.mutable_config()->mutable_session_configs()->swap(
       session_options_saved);
-  CHECK(status.ok()) << "cannot parse json string:" << &json_str[0];
+  // all provider options no cache
+  context.context_proto.mutable_config()->mutable_provider_options()->swap(
+      provider_options_saved);
+  context.context_proto.mutable_config()->set_enable_cache_file_io_in_mem(
+      enable_cache_in_mem);
+  CHECK(status.ok()) << "cannot parse json string:" << status.message()
+                     << &json_str[0];
   print_version_verbose("CACHE VERSION: ", context.get_config_proto());
 }
 static void update_pass_context_from_context_json_in_cache(
@@ -933,6 +957,9 @@ static std::optional<vaip_cxx::NodeConstRef> get_main_ep_context_node(
 static void
 store_cache_directory_from_main_node(PassContextImp& context,
                                      vaip_cxx::NodeConstRef main_node) {
+  int64_t enable_encryption = main_node.get_attr_int("enable_encryption", 0);
+  int64_t enable_compression = main_node.get_attr_int("enable_compression", 0);
+  int64_t ep_embed_mode = main_node.get_attr_int("embed_mode", 1);
   CHECK(main_node.has_attr("ep_cache_context"))
       << " main EPContext has not ep_cache_context attr";
 #if VAIP_ORT_API_MAJOR >= 12
@@ -944,78 +971,72 @@ store_cache_directory_from_main_node(PassContextImp& context,
 #endif
   auto ep_context_size = ep_cache_context->size();
 
-  int64_t ep_embed_mode = main_node.get_attr_int("embed_mode", 1);
-  std::unique_ptr<IStreamReader> ep_context_file;
-  auto context_holder = std::make_shared<TempFile>();
-  if (ep_embed_mode) {
-    std::unique_ptr<IStreamReader> src =
-        IStreamReader::from_bytes(ep_cache_context->data(), ep_context_size);
-    auto dst = context_holder->build_writer();
-    stream_copy(*src, *dst);
-    std::tie(ep_context_file, ep_context_size) = context_holder->build_reader();
-    LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
-        << "embed mode = 1, load ep context " << ep_context_size << " bytes";
-  } else {
+  if (ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE) //
+      && !enable_compression && !enable_encryption && ep_embed_mode == 0) {
+    // special optimization for PSU cases.
     auto ep_context_binary_file = std::filesystem::path();
-    auto session_ep_context_path = std::filesystem::path(
-        get_session_config_option(context, "ep.context_file_path", ""));
-    if (session_ep_context_path != "") {
-      ep_context_binary_file =
-          session_ep_context_path.parent_path() / *ep_cache_context;
-    } else if (context.model_path.empty()) {
-      ep_context_binary_file = *ep_cache_context;
+    if (context.model_path.empty()) {
+      ep_context_binary_file = std::filesystem::u8path(*ep_cache_context);
     } else {
-      ep_context_binary_file =
-          context.model_path.parent_path() / *ep_cache_context;
+      ep_context_binary_file = context.model_path.parent_path() /
+                               std::filesystem::u8path(*ep_cache_context);
     }
-    ep_context_file = IStreamReader::from_path(ep_context_binary_file);
-  }
+    context.tar_file_ = TarFile::create(std::make_unique<std::fstream>(
+        ep_context_binary_file,
+        std::ios::binary | std::ios::in | std::ios::out));
+  } else {
+    std::unique_ptr<IStreamReader> ep_context_file;
+    auto context_holder = std::make_shared<TempFile>();
+    if (ep_embed_mode) {
+      std::unique_ptr<IStreamReader> src =
+          IStreamReader::from_bytes(ep_cache_context->data(), ep_context_size);
+      auto dst = context_holder->build_writer();
+      stream_copy(*src, *dst);
+      std::tie(ep_context_file, ep_context_size) =
+          context_holder->build_reader();
+      LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
+          << "embed mode = 1, load ep context " << ep_context_size << " bytes";
+    } else {
+      auto ep_context_binary_file = std::filesystem::path();
+      if (context.model_path.empty()) {
+        ep_context_binary_file = std::filesystem::u8path(*ep_cache_context);
+      } else {
+        ep_context_binary_file = context.model_path.parent_path() /
+                                 std::filesystem::u8path(*ep_cache_context);
+      }
+      ep_context_file = IStreamReader::from_path(ep_context_binary_file);
+    }
 #if VAIP_ORT_API_MAJOR >= 12
-  ep_cache_context.reset();
+    ep_cache_context.reset();
 #endif
-  int64_t enable_encryption = main_node.get_attr_int("enable_encryption", 0);
-  if (enable_encryption) {
-    auto encryption_key = context.context_proto.config().encryption_key();
-    if (encryption_key.empty()) {
-      LOG(ERROR) << "enable_encryption is set, but encryption_key is empty";
-      std::abort();
+    if (enable_encryption) {
+      auto encryption_key = context.context_proto.config().encryption_key();
+      if (encryption_key.empty()) {
+        LOG(ERROR) << "enable_encryption is set, but encryption_key is empty";
+        std::abort();
+      }
+      try {
+        ep_context_file = stream_filter(
+            *ep_context_file,
+            [](const IStreamReader& src, IStreamWriter& dst,
+               const std::string& encryption_key) {
+              vaip_encryption::aes_decryption(src, dst, encryption_key);
+            },
+            encryption_key);
+      } catch (std::runtime_error& e) {
+        LOG(ERROR) << "exception occurs when decryption: " << e.what();
+        std::abort();
+      }
     }
-    try {
-      ep_context_file = stream_filter(
-          *ep_context_file,
-          [](const IStreamReader& src, IStreamWriter& dst,
-             const std::string& encryption_key) {
-            vaip_encryption::aes_decryption(src, dst, encryption_key);
-          },
-          encryption_key);
-    } catch (std::runtime_error& e) {
-      LOG(ERROR) << "exception occurs when decryption: " << e.what();
-      std::abort();
+    if (enable_compression) {
+      ep_context_file = uncompress(*ep_context_file);
     }
-  }
-  int64_t enable_compression = main_node.get_attr_int("enable_compression", 0);
-  if (enable_compression) {
-    ep_context_file = uncompress(*ep_context_file);
-  }
 
-  // get attr "ep_cache_md5s" map from main node
-  if (main_node.has_attr("ep_cache_md5s")) {
-    auto md5_map_str = main_node.get_attr_string("ep_cache_md5s");
-    MY_LOG(2) << "get 'ep_cache_md5s' attr form shared ep context model : "
-              << md5_map_str;
-    // string to jsonObject
-    auto md5_map = std::map<std::string, std::string>();
-    auto md5_map_json_obj = nlohmann::json::parse(md5_map_str);
-    for (auto it = md5_map_json_obj.begin(); it != md5_map_json_obj.end();
-         ++it) {
-      md5_map[it.key()] = it.value();
-    }
-    context.set_cache_file_md5_map(md5_map);
+    context.tar_file_to_cache_files(*ep_context_file);
+    LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
+        << " extract memory cache files to  "
+        << context.get_log_dir().u8string();
   }
-
-  context.tar_file_to_cache_files(*ep_context_file);
-  LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
-      << " extract memory cache files to  " << context.get_log_dir();
 }
 
 static int64_t get_ep_context_index(const vaip_cxx::NodeConstRef& node) {

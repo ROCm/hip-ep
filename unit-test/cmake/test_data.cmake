@@ -28,3 +28,15 @@ morphizen_add_python_target (
   ARGS $${CMAKE_CURRENT_BINARY_DIR}/test_costom_op.onnx
   FOLDER "morphizen/unit-tests"
 )
+
+add_custom_target(tgt_sample_src_tar
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/sample_src_tar
+  COMMAND ${CMAKE_COMMAND} -E copy
+  ${CMAKE_CURRENT_SOURCE_DIR}/vaip/test_config.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/vaip/test_tarball.cpp
+  ${CMAKE_CURRENT_BINARY_DIR}/sample_src_tar
+  COMMAND ${CMAKE_COMMAND} -E tar cvf ${CMAKE_CURRENT_BINARY_DIR}/sample.src.tar
+  sample_src_tar/test_config.cpp
+  sample_src_tar/test_tarball.cpp
+)
+set_target_properties(tgt_sample_src_tar PROPERTIES FOLDER morphizen/unit-tests)

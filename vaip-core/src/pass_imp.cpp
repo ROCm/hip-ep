@@ -41,12 +41,12 @@
 #include "./cache_dir.hpp"
 #include "./config.hpp"
 #include "./profile_utils.hpp"
-//#include "mem_xclbin.hpp"
-#include "pass_imp.hpp"
+// #include "mem_xclbin.hpp"
+#include "morphizen/env_config.hpp"
 #include "morphizen/graph.hpp"
 #include "morphizen/util.hpp"
 #include "morphizen/vaip_plugin.hpp"
-#include "morphizen/env_config.hpp"
+#include "pass_imp.hpp"
 #include <fstream>
 #include <glog/logging.h>
 #include <google/protobuf/util/json_util.h>
@@ -57,7 +57,6 @@ static int g_sequence_no = 0;
 DEF_ENV_PARAM(ENABLE_SAVE_GRAPH_TXT, "0")
 DEF_ENV_PARAM(ENABLE_SAVE_ONNX_MODEL, "0")
 DEF_ENV_PARAM(DEBUG_VAIP_PASS, "0")
-DEF_ENV_PARAM(ENABLE_TAR_CACHE, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_VAIP_PASS) >= n)
 
 namespace vaip_core {

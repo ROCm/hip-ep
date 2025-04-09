@@ -43,7 +43,7 @@
 #include "pass_context_imp.hpp"
 #include "profile_utils.hpp"
 #include "tar_ball.hpp"
-DEF_ENV_PARAM(DEBUG_TAR_CACHE, "0")
+DEF_ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE, "0")
 
 namespace vaip_core {
 /// struct WithPass
@@ -276,7 +276,7 @@ PassContextImp::read_file_generic(const std::string& filename) const {
   if (stream == nullptr) {
     return std::nullopt;
   }
-  constexpr size_t buffer_size = 8196;
+  constexpr size_t buffer_size = 8192;
   char tmp[buffer_size];
   ret = std::vector<T>();
   ret.value().reserve(buffer_size);
@@ -306,6 +306,9 @@ PassContextImp::read_file_u8(const std::string& filename) const {
 
 std::unique_ptr<CacheFileReader>
 PassContextImp::open_file_for_read(const std::string& filename) const {
+  if (tar_file_) {
+    return open_file_for_read_with_tar_file(filename);
+  }
   std::unique_ptr<CacheFileReader> ret = nullptr;
   auto in_mem = cache_in_mem();
   auto& cace_files =
@@ -313,7 +316,7 @@ PassContextImp::open_file_for_read(const std::string& filename) const {
   auto it = cace_files.find(filename);
   if (it != cace_files.end()) {
     if (in_mem) {
-      LOG_IF(INFO, ENV_PARAM(DEBUG_TAR_CACHE))
+      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
           << "tmp file opened: " << filename;
       ret = std::unique_ptr<CacheFileReader>(
           new CacheFileReaderImp(in_mem, filename, it->second));
@@ -326,7 +329,7 @@ PassContextImp::open_file_for_read(const std::string& filename) const {
           std::freopen((get_log_dir() / filename).c_str(), "rb+", it->second);
 #endif //  _WIN32
       if (fp == nullptr) {
-        LOG_IF(INFO, ENV_PARAM(DEBUG_TAR_CACHE))
+        LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
             << " cannot freopen " << filename;
       } else {
         it->second = fp;
@@ -342,7 +345,7 @@ PassContextImp::open_file_for_read(const std::string& filename) const {
       FILE* fp = std::fopen((get_log_dir() / filename).c_str(), "rb+");
 #endif //  _WIN32
       if (fp == nullptr) {
-        LOG_IF(INFO, ENV_PARAM(DEBUG_TAR_CACHE))
+        LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
             << " cannot freopen " << filename;
       } else {
         cace_files[filename] = fp;
@@ -350,13 +353,29 @@ PassContextImp::open_file_for_read(const std::string& filename) const {
             new CacheFileReaderImp(in_mem, filename, fp));
       }
     } else {
-      LOG_IF(INFO, ENV_PARAM(DEBUG_TAR_CACHE))
+      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
           << "tmp file open failed: cannot found " << filename
           << ". try to use write_file_for_write before reading.";
       ret = nullptr;
     }
   }
   return ret;
+}
+
+std::unique_ptr<CacheFileReader>
+PassContextImp::open_file_for_read_with_tar_file(
+    const std::string& filename) const {
+  CHECK(tar_file_ != nullptr) << "tar_file_ is nullptr";
+  auto stream = tar_file_->open_for_read(filename);
+  if (stream == nullptr) {
+    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+        << "cannot open " << filename << " in the tar file";
+    return nullptr;
+  }
+  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+      << "open " << filename << " in the tar file";
+  return std::make_unique<CacheFileReaderStreamImp>(filename, stream->size(),
+                                                    *stream);
 }
 
 std::unique_ptr<CacheFileWriter>
@@ -368,11 +387,11 @@ PassContextImp::open_file_for_write(const std::string& filename) {
   if (it != cache_files_.end()) {
     if (in_mem) {
       fclose(it->second);
-      LOG_IF(INFO, ENV_PARAM(DEBUG_TAR_CACHE))
+      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
           << "tmp file write: " << filename;
       tmp_file = tmpfile();
       if (tmp_file == nullptr) {
-        LOG_IF(INFO, ENV_PARAM(DEBUG_TAR_CACHE))
+        LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
             << " cannot create tmp file " << filename;
       } else {
         it->second = tmp_file;
@@ -388,7 +407,7 @@ PassContextImp::open_file_for_write(const std::string& filename) {
           std::freopen((get_log_dir() / filename).c_str(), "wb+", it->second);
 #endif //  _WIN32
       if (fp == nullptr) {
-        LOG_IF(INFO, ENV_PARAM(DEBUG_TAR_CACHE))
+        LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
             << " cannot freopen " << filename;
       } else {
         it->second = fp;
@@ -398,11 +417,11 @@ PassContextImp::open_file_for_write(const std::string& filename) {
     }
   } else {
     if (in_mem) {
-      LOG_IF(INFO, ENV_PARAM(DEBUG_TAR_CACHE))
+      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
           << "tmp file write: " << filename;
       tmp_file = tmpfile();
       if (tmp_file == nullptr) {
-        LOG_IF(INFO, ENV_PARAM(DEBUG_TAR_CACHE))
+        LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
             << "cannot create tmp file" << filename;
       } else {
         cache_files_[filename] = tmp_file;
@@ -421,7 +440,7 @@ PassContextImp::open_file_for_write(const std::string& filename) {
       tmp_file = std::fopen((get_log_dir() / filename).c_str(), "wb+");
 #endif //  _WIN32
       if (tmp_file == nullptr) {
-        LOG_IF(INFO, ENV_PARAM(DEBUG_TAR_CACHE))
+        LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
             << " fopen failed. " << filename;
       } else {
         cache_files_[filename] = tmp_file;
@@ -437,10 +456,11 @@ PassContextImp::open_file_for_write(const std::string& filename) {
 FILE* PassContextImp::open_file(const std::string& filename) const {
   auto it = cache_files_.find(filename);
   if (it != cache_files_.end()) {
-    LOG_IF(INFO, ENV_PARAM(DEBUG_TAR_CACHE)) << "tmp file opened: " << filename;
+    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+        << "tmp file opened: " << filename;
     return it->second;
   }
-  LOG_IF(INFO, ENV_PARAM(DEBUG_TAR_CACHE))
+  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
       << "tmp file open failed: " << filename;
   return nullptr;
 }
@@ -465,15 +485,20 @@ bool PassContextImp::write_file(const std::string& filename,
         << "failed to write " << filename;
   }
   stream = nullptr; // close file
-  LOG_IF(INFO, ENV_PARAM(DEBUG_TAR_CACHE))
+  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
       << "write " << filename << " " << data.size()
       << " bytes to the cache files";
   return ret;
 }
 
 void PassContextImp::restore_cache_files() {
-  for (const auto& str : this->context_proto.cache_files()) {
-    open_file_for_read(str);
+  if (tar_file_) {
+    // special optimization
+    // TODO replace;
+  } else {
+    for (const auto& str : this->context_proto.cache_files()) {
+      open_file_for_read(str);
+    }
   }
 }
 
@@ -516,7 +541,7 @@ bool PassContextImp::tar_mem_to_cache_files(const char* buffer, size_t size) {
   //   if (filename.empty()) {
   //     break;
   //   }
-  //   LOG_IF(INFO, ENV_PARAM(DEBUG_TAR_CACHE))
+  //   LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
   //       << "load " << filename << " " << data.size() << " bytes";
   //   gsl::span<char> data_span = gsl::span<char>(data);
   //   write_file(filename, data_span);
@@ -593,8 +618,16 @@ std::filesystem::path PassContextImp::xclbin_path_to_cache_files(
 
 std::optional<std::vector<char>>
 PassContextImp::read_xclbin(const std::filesystem::path& path) const {
-  auto filename = path.filename().u8string();
-  return read_file_c8(filename);
+
+  std::optional<std::vector<char>> ret;
+  auto reader = open_file_for_read(path.filename().u8string());
+  if (!reader) {
+    return ret;
+  }
+
+  ret = std::vector<char>(reader->size());
+  reader->fread(ret->data(), reader->size());
+  return ret;
 }
 
 const ConfigProto& PassContextImp::get_config_proto() const {
@@ -744,12 +777,13 @@ CacheFileReaderImp::CacheFileReaderImp(bool in_mem, const std::string& filename,
   CHECK(fseek64(fp, 0, SEEK_END) == 0);
   size_ = ftell64(fp);
   CHECK(fseek64(fp, 0, SEEK_SET) == 0);
-  LOG_IF(INFO, ENV_PARAM(DEBUG_TAR_CACHE))
+  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
       << "open " << filename << " for read";
 }
 
 CacheFileReaderImp::~CacheFileReaderImp() {
-  LOG_IF(INFO, ENV_PARAM(DEBUG_TAR_CACHE)) << "close " << name_ << " for read";
+  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+      << "close " << name_ << " for read";
 }
 
 std::size_t CacheFileReaderImp::fread(void* buffer, std::size_t size) const {
@@ -761,15 +795,47 @@ size_t CacheFileReaderImp::size() const { return size_; }
 
 void CacheFileReaderImp::rewind() const { std::rewind(fp_); }
 
+CacheFileReaderStreamImp::CacheFileReaderStreamImp(const std::string& name,
+                                                   size_t size,
+                                                   std::istream& stream)
+    : name_{name}, size_{size}, stream_{stream} {
+  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+      << "open " << name << " for read";
+}
+
+CacheFileReaderStreamImp::~CacheFileReaderStreamImp() {
+  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+      << "close " << name_ << " for read";
+}
+
+std::size_t CacheFileReaderStreamImp::fread(void* buffer,
+                                            std::size_t size) const {
+  CHECK(!stream_.read(static_cast<char*>(buffer), size).bad())
+      << "failed to read " << name_;
+  auto ret = stream_.gcount();
+  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE) >= 2)
+      << "read " << name_ << " " << ret << " bytes "
+      << " size_ =" << size_;
+  return ret;
+}
+
+size_t CacheFileReaderStreamImp::size() const { return size_; }
+
+void CacheFileReaderStreamImp::rewind() const {
+  CHECK(!stream_.seekg(0, std::ios::beg).fail())
+      << "failed to seek to the beginning of the stream";
+}
+
 CacheFileWriterImp::CacheFileWriterImp(bool in_mem, const std::string& filename,
                                        FILE* fp)
     : CacheFileWriter(), in_mem_(in_mem), name_{filename}, fp_{fp} {
-  LOG_IF(INFO, ENV_PARAM(DEBUG_TAR_CACHE))
+  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
       << "open " << filename << " for write";
 }
 
 CacheFileWriterImp::~CacheFileWriterImp() {
-  LOG_IF(INFO, ENV_PARAM(DEBUG_TAR_CACHE)) << "close " << name_ << " for write";
+  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+      << "close " << name_ << " for write";
   std::fflush(fp_);
 }
 

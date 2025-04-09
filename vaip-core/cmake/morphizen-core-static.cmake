@@ -59,6 +59,13 @@ add_library(${LIB_NAME} STATIC
   src/pass_imp.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/tar.h
   src/tar_ball.cpp
+  src/tar_ball.hpp
+  src/tar_file.cpp
+  src/tar_file.hpp
+  src/tar_header.hpp
+  src/tar_header.cpp
+  src/tar_entry.cpp
+  src/tar_entry.hpp
   include/morphizen/pass.hpp
   src/pass.cpp
   include/morphizen/model.hpp
@@ -145,8 +152,6 @@ add_library(${LIB_NAME} STATIC
   src/onnxruntime_vitisai_ep.cpp
   src/file_stream.hpp
   src/file_stream.cpp
-  include/morphizen/vaip_dd_io.hpp
-  src/vaip_dd_io.cpp
 )
 
 add_library (morphizen::morphizen-core-static ALIAS morphizen-core-static)

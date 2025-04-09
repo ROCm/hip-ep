@@ -37,12 +37,12 @@
 #include <vaip/custom_op.h>
 #include <vaip/dll_safe.h>
 
+#include "./tar_file.hpp"
 #include "morphizen/model.hpp"
 #include "morphizen/pass.hpp"
 #include "morphizen/pass_context.hpp"
 #include "morphizen/vaip_io.hpp"
 #include "morphizen/vaip_plugin.hpp"
-
 namespace vaip_core {
 class CacheFileReaderImp : public CacheFileReader {
 public:
@@ -60,6 +60,23 @@ private:
   const std::string name_;
   size_t size_;
   FILE* fp_;
+};
+class CacheFileReaderStreamImp : public CacheFileReader {
+public:
+  CacheFileReaderStreamImp(const std::string& name, size_t size,
+                           std::istream& stream);
+  virtual ~CacheFileReaderStreamImp();
+
+private:
+  size_t size() const override final;
+  void rewind() const override final;
+  virtual std::size_t fread(void* buffer,
+                            std::size_t size) const override final;
+
+private:
+  const std::string name_; // for debugging purpuse
+  const size_t size_;
+  std::istream& stream_;
 };
 class CacheFileWriterImp : public CacheFileWriter {
 public:
@@ -112,6 +129,9 @@ private:
   std::unique_ptr<CacheFileReader> reader_;
 };
 
+static void
+store_cache_directory_from_main_node(class PassContextImp& context,
+                                     vaip_cxx::NodeConstRef main_node);
 class PassContextImp : public PassContext {
 public:
   std::vector<char> const_data_;
@@ -180,6 +200,8 @@ public:
   read_file_u8(const std::string& filename) const override final;
   virtual std::unique_ptr<CacheFileReader>
   open_file_for_read(const std::string& filename) const override final;
+  std::unique_ptr<CacheFileReader>
+  open_file_for_read_with_tar_file(const std::string& filename) const;
   virtual std::unique_ptr<CacheFileWriter>
   open_file_for_write(const std::string& filename) override final;
   virtual FILE* open_file(const std::string& filename) const override final;
@@ -241,6 +263,12 @@ private:
   // to set.
   mutable std::vector<std::shared_ptr<QoSUpdateInterface>> qos_updaters_;
   int created_customop_count = 0;
+  std::unique_ptr<TarFile> tar_file_ = nullptr;
+
+private:
+  friend void
+  store_cache_directory_from_main_node(PassContextImp& context,
+                                       vaip_cxx::NodeConstRef main_node);
 };
 
 struct PassContextTimerImp : public PassContextTimer {

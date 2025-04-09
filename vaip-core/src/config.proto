@@ -133,7 +133,7 @@ message PassDpuParamProto {
   int32 minimum_num_of_conv = 4;
   repeated string supported_op = 5;
   string xclbin = 6;
-
+  optional bool debug = 7;
 }
 message PassDDParamProto{
   repeated PassProto sub_pass = 1;
