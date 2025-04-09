@@ -252,6 +252,7 @@ public:
   virtual std::shared_ptr<void>
   get_context_resource(const std::string& name) const = 0;
 
+  virtual std::filesystem::path get_model_path() const = 0;
   /**
    * @brief Reads in-memory cache files into bytes
    *

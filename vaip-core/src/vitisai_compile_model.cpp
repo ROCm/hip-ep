@@ -292,8 +292,12 @@ static bool check_cache_exist(const PassContextImp& context) {
 
 static bool check_cache_hit(PassContextImp& context) {
   auto measure_check_cache_hit = context.measure("check_cache_hit");
-  if (ENV_PARAM(XLNX_ONNX_EP_DL_ANALYZER_PROFILING) ||
-      ENV_PARAM(XLNX_ONNX_EP_DL_ANALYZER_VISUALIZATION))
+  auto no_recompile_option = context.get_provider_option("xlnx_no_recompile");
+  bool no_recompile =
+      no_recompile_option.has_value() && no_recompile_option == "1";
+  bool can_recompile = !no_recompile;
+  if (can_recompile && (context.get_config_proto().ai_analyzer_profiling() ||
+                        context.get_config_proto().ai_analyzer_visualization()))
     return false;
   if (ENV_PARAM(XLNX_ENABLE_CACHE)) {
     return check_cache_exist(context) && cache_valid(context);
@@ -449,13 +453,16 @@ find_signature_in_meptabel(const ConfigProto& proto,
 }
 static std::pair<const std::string, const MepConfigTable*>
 get_signature_with_meptable(const std::string& model_path,
-                            const Graph& onnx_graph, const ConfigProto& proto) {
+                            const Graph& onnx_graph, ConfigProto& proto) {
   auto md5_file_base =
       model_path.empty() ? "" : vaip_core::get_md5_of_file(model_path);
   auto md5_in_memory_a = get_model_signature(onnx_graph);
   auto md5_in_memory_b =
       get_model_signature_with_graph_inputs_and_outputs(onnx_graph);
 
+  *proto.mutable_onnx_md5_file() = md5_file_base;
+  *proto.mutable_onnx_md5_a() = md5_in_memory_a;
+  *proto.mutable_onnx_md5_b() = md5_in_memory_b;
   const auto& node_indices = graph_get_node_in_topoligical_order(onnx_graph);
   int32_t node_count = (int32_t)node_indices.size();
 
@@ -508,7 +515,7 @@ initialize_context(const std::string& model_path, const Graph& onnx_graph,
 
   auto [md5, mep_table] =
       get_signature_with_meptable(context->model_path.string(), onnx_graph,
-                                  context->context_proto.config());
+                                  *context->context_proto.mutable_config());
 
   if (!context->context_proto.config().cache_key().empty()) {
     MY_LOG(1) << "use cache key specified by user "
@@ -521,7 +528,8 @@ initialize_context(const std::string& model_path, const Graph& onnx_graph,
         new_cache_key;
   } else if (ENV_PARAM(XLNX_ENABLE_FILE_BASED_CACHE_KEY) &&
              (!context->model_path.empty())) {
-    auto new_cache_key = vaip_core::get_md5_of_file(context->model_path.string());
+    auto new_cache_key =
+        vaip_core::get_md5_of_file(context->model_path.string());
     MY_LOG(1) << "use cache key on-disk " << new_cache_key;
     *context->context_proto.mutable_config()->mutable_cache_key() =
         new_cache_key;
@@ -1041,8 +1049,8 @@ create_execution_providers_from_ep_context_nodes(
     update_meta_def_from_ep_node(node, meta_def);
     auto device = meta_def.device();
     auto plugin_name = std::string("vaip_custom_op_") + device;
-    ret.emplace_back(ExecutionProviderConcrete::create(
-        plugin_name, context, meta_def));
+    ret.emplace_back(
+        ExecutionProviderConcrete::create(plugin_name, context, meta_def));
   }
   return ret;
 }
@@ -1097,8 +1105,8 @@ compile_onnx_model_internal(
     for (auto& meta_def : context->context_proto.meta_def()) {
       auto& device = meta_def.device();
       auto plugin_name = std::string("vaip_custom_op_") + device;
-      ret.emplace_back(ExecutionProviderConcrete::create(
-          plugin_name, context, meta_def));
+      ret.emplace_back(
+          ExecutionProviderConcrete::create(plugin_name, context, meta_def));
     }
   }
   return ret;

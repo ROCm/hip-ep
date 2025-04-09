@@ -173,6 +173,7 @@ private:
   read_file_generic(const std::string& filename) const;
 
 public:
+  virtual std::filesystem::path get_model_path() const override final;
   virtual std::optional<std::vector<char>>
   read_file_c8(const std::string& filename) const override final;
   std::optional<std::vector<uint8_t>>

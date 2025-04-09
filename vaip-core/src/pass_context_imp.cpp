@@ -289,6 +289,11 @@ PassContextImp::read_file_generic(const std::string& filename) const {
       << "can't read " << filename << " in the cache object.";
   return ret;
 }
+
+std::filesystem::path PassContextImp::get_model_path() const {
+  return model_path;
+}
+
 std::optional<std::vector<char>>
 PassContextImp::read_file_c8(const std::string& filename) const {
   return read_file_generic<char>(filename);
