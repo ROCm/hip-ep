@@ -204,3 +204,8 @@ target_compile_features(morphizen-core-static PUBLIC cxx_std_17)
 if(MSVC)
   target_compile_options(morphizen-core-static PUBLIC "/Zc:__cplusplus")
 endif(MSVC)
+
+if(BUILD_PYTHON)
+  target_link_libraries(${LIB_NAME} PRIVATE Python3::Python)
+  target_compile_definitions(${LIB_NAME} PRIVATE "ENABLE_PYTHON=1")
+endif(BUILD_PYTHON)

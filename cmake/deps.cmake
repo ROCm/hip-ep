@@ -163,7 +163,28 @@ endif()
 
 ## in order to build it, we need to run some python scripts to
 ## generate some source code.
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
+if(BUILD_PYTHON)
+  message(STATUS "find_package(Python3) both for  python scripts and for python embedding")
+  find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+  find_package(pybind11 REQUIRED CONFIG)
+  if(TARGET pybind11::embed)
+    get_target_property(TMP pybind11::embed INTERFACE_INCLUDE_DIRECTORIES)
+    message(STATUS "found pybind11 at ${TMP}")
+  else()
+    message(STATUS "cannot find_package(pybind11), fetch it from ${DEP_URL_pybind11}")
+    FetchContent_Declare(
+      pybind11
+      URL ${DEP_URL_pybind11}
+      URL_HASH SHA1=${DEP_SHA1_pybind11}
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+      OVERRIDE_FIND_PACKAGE)
+    find_package(pybind11 REQUIRED)
+  endif()
+else()
+  message(STATUS "find_package(Python3) for python scripts")
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+endif()
+
 if(NOT TARGET Python3::Interpreter)
   message(FATAL_ERROR "Python3::Interpreter not found")
 endif(NOT TARGET Python3::Interpreter)
