@@ -148,6 +148,10 @@ Ort::CustomOpDomain get_xir_domain() {
     XIR_OP_NAMES.push_back("DQLinear_CPU");
     XIR_OP_NAMES.push_back("DQSoftmax_CPU");
     XIR_OP_NAMES.push_back("einsum");
+    XIR_OP_NAMES.push_back("VAIMLQMatmul");
+    XIR_OP_NAMES.push_back("VAIMLQSilu");
+    XIR_OP_NAMES.push_back("VAIMLQRMSNorm");
+    XIR_OP_NAMES.push_back("VAIMLQElwise");
     for (auto& name : XIR_OP_NAMES) {
       xir_custom_ops.emplace_back(XilinxCustomOp(name));
     }
