@@ -53,21 +53,16 @@ const vaip_core::OrtApiForVaip* get_the_global_api() {
   return vaip_core::api();
 }
 
-// The interface exported below is used by onnxruntime_providers_vitisai.so
-VAIP_DLL_SPEC
-void initialize_onnxruntime_vitisai_ep(
-    vaip_core::OrtApiForVaip* api,
-    std::vector<OrtCustomOpDomain*>& ret_domain) {
-  vaip_core::initialize_onnxruntime_vitisai_ep(api, ret_domain);
-  static std::vector<OrtCustomOpDomain*> contrib_domains;
-  std::vector<std::string> op_defs{
-      // TODO: Add the op_def.cpp.inc file
-      // #include "op_def.cpp.inc"
-  };
-  for (auto& op_def : op_defs) {
-    auto plugin_holder = vaip_core::Plugin::get(op_def);
-    auto op_def_info =
-        plugin_holder->invoke<vaip_core::OpDefInfo*>("vaip_op_def_info");
+static void intialize_op_defs(std::vector<OrtCustomOpDomain*>& contrib_domains,
+                              std::vector<OrtCustomOpDomain*>& ret_domain) {
+  // This function is used to initialize the op_def_map
+  typedef vaip_core::OpDefInfo* (*vaip_op_def_info_t)();
+  auto op_def_info_ptrs =
+      vaip_core::Plugin::get_all_symbols("vaip_op_def_info");
+  for (auto op_def_into_ptr : op_def_info_ptrs) {
+    auto op_def_info_func =
+        reinterpret_cast<vaip_op_def_info_t>(op_def_into_ptr);
+    auto op_def_info = op_def_info_func();
     std::vector<Ort::CustomOpDomain> domains;
     op_def_info->get_domains(domains);
     for (auto& domain : domains) {
@@ -78,6 +73,29 @@ void initialize_onnxruntime_vitisai_ep(
           << "ret_domain applied for 100 in onnxruntime";
     }
   }
+    std::set<std::string> vitis_ep_custom_ops;
+  // todo
+  // for (const auto& domain : contrib_domains) {
+  //  for (const auto* op : domain->custom_ops_) {
+  //    vitis_ep_custom_ops.insert(domain->domain_ + "::" + op->GetName(op));
+  //  }
+  //}
+  vitis_ep_custom_ops.insert("::DequantizeLinear");
+  vitis_ep_custom_ops.insert("::QuantizeLinear");
+  vitis_ep_custom_ops.insert("com.microsoft::DequantizeLinear");
+  vitis_ep_custom_ops.insert("com.microsoft::QuantizeLinear");
+  vaip_core::set_vitis_ep_custom_ops(vitis_ep_custom_ops);
+
+}
+
+// The interface exported below is used by onnxruntime_providers_vitisai.so
+VAIP_DLL_SPEC
+void initialize_onnxruntime_vitisai_ep(
+    vaip_core::OrtApiForVaip* api,
+    std::vector<OrtCustomOpDomain*>& ret_domain) {
+  vaip_core::initialize_onnxruntime_vitisai_ep(api, ret_domain);
+  static std::vector<OrtCustomOpDomain*> contrib_domains;
+  intialize_op_defs(contrib_domains, ret_domain);
 }
 VAIP_DLL_SPEC
 void deinitialize_onnxruntime_vitisai_ep() {

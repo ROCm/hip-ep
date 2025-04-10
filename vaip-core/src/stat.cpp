@@ -5,8 +5,7 @@
  * to the BSD open source license, it is NOT the BSD open source license nor
  * other OSI-approved open source license.
  *
- *      Copyright (C) 2023 – 2024 Advanced Micro Devices, Inc. All rights
- * reserved.
+ *Copyright (C) 2023 – 2025 Advanced Micro Devices, Inc. All rights reserved.
  *
  *      Redistribution and use in binary form only, without modification, is
  * permitted provided that the following conditions are met:

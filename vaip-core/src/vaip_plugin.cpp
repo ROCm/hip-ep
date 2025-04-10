@@ -149,6 +149,21 @@ get_store() {
       store_;
   return store_;
 }
+
+std::vector<void*> Plugin::get_all_symbols(const char* name) {
+  auto& store = get_store();
+  auto ret = std::vector<void*>();
+  for (auto it = store.begin(); it != store.end(); ++it) {
+    for (auto it_sym = it->second.begin(); it_sym != it->second.end();
+         ++it_sym) {
+      if (it_sym->first == name) {
+        ret.push_back(it_sym->second);
+      }
+    }
+  }
+  return ret;
+}
+
 static std::pair<plugin_t, bool> open_plugin_static(const std::string& name,
                                                     scope_t scope) {
   auto& store = get_store();

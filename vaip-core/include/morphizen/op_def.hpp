@@ -60,11 +60,11 @@ void set_vitis_ep_custom_ops(const std::set<std::string>&);
     }
 #else
 #  define DEFINE_VAIP_OPDEF(cls, id)                                           \
-    static vaip_core::OpDefInfo* vaip_op_def_info() {                          \
+    static ::vaip_core::OpDefInfo* vaip_op_def_info() {                        \
       return ProcessorOpDefInfo<cls>::op_fef_info();                           \
     }                                                                          \
     namespace {                                                                \
-    static vitis::ai::StaticPluginRegister                                     \
+    static ::vaip_core::StaticPluginRegister                                   \
         __register(OUTPUT_NAME, "vaip_op_def_info", (void*)&vaip_op_def_info); \
     }                                                                          \
     extern "C" {                                                               \
