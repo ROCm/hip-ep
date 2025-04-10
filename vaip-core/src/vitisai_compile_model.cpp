@@ -85,6 +85,8 @@ DEF_ENV_PARAM(DEBUG_EP_CONTEXT, "0")
 DEF_ENV_PARAM(XLNX_EP_CONTEXT_ENABLE_COMPRESSION, "0")
 DEF_ENV_PARAM(XLNX_ONNX_EP_DL_ANALYZER_PROFILING, "0")
 DEF_ENV_PARAM(XLNX_ONNX_EP_DL_ANALYZER_VISUALIZATION, "0")
+DEF_ENV_PARAM_2(XLNX_VAIML_LEVEL_1_NAME, "vaip-pass_vaiml_partition", std::string)
+
 #ifdef _WIN32
 #  ifdef ENABLE_PYTHON
 // Python is only enabled for VAIML compilation on Windows, which requires
@@ -1092,7 +1094,18 @@ restore_execution_providers_from_ep_context_model(
   return create_execution_providers_from_ep_context_nodes(context,
                                                           ep_context_nodes);
 }
-
+static void
+dirty_hack_for_model_clone_external_data_threshold(ConfigProto& config_proto) {
+  //  check each pass in passes, if vaiml plugin is eanbled , disable the
+  //  optimization for model clone.
+  for(auto& pass : config_proto.passes()) {
+    if (pass.has_plugin() && pass.plugin() == ENV_PARAM(ENV_PARAM_XLNX_VAIML_LEVEL_1_NAME)) {
+      // effective disable the optimization for model clone.
+      ENV_PARAM(XLNX_model_clone_external_data_threshold) = 17179869184;
+      break;
+    }
+  }
+}
 static std::vector<std::unique_ptr<ExecutionProvider>>
 compile_onnx_model_internal(
     const Graph& onnx_graph,
@@ -1107,6 +1120,8 @@ compile_onnx_model_internal(
     ret = restore_execution_providers_from_ep_context_model(onnx_graph, context,
                                                             ep_context_nodes);
   } else {
+    dirty_hack_for_model_clone_external_data_threshold(
+        context->context_proto().config());
     auto measure_before_compile_onnx_model_2 =
         context->measure("before_compile_onnx_model_internal");
     auto& model = graph_get_model(onnx_graph);
