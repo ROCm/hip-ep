@@ -978,12 +978,18 @@ store_cache_directory_from_main_node(PassContextImp& context,
       && !enable_compression && !enable_encryption && ep_embed_mode == 0) {
     // special optimization for PSU cases.
     auto ep_context_binary_file = std::filesystem::path();
-    if (context.model_path.empty()) {
+    auto session_ep_context_path = std::filesystem::path(
+        get_session_config_option(context, "ep.context_file_path", ""));
+    if (session_ep_context_path != "") {
+      ep_context_binary_file =
+          session_ep_context_path.parent_path() / *ep_cache_context;
+    } else if (context.model_path.empty()) {
       ep_context_binary_file = std::filesystem::u8path(*ep_cache_context);
     } else {
       ep_context_binary_file = context.model_path.parent_path() /
                                std::filesystem::u8path(*ep_cache_context);
     }
+    MY_LOG(1) << "open tar file: " << ep_context_binary_file;
     context.tar_file_ = TarFile::create(std::make_unique<std::fstream>(
         ep_context_binary_file,
         std::ios::binary | std::ios::in | std::ios::out));
@@ -1001,7 +1007,12 @@ store_cache_directory_from_main_node(PassContextImp& context,
           << "embed mode = 1, load ep context " << ep_context_size << " bytes";
     } else {
       auto ep_context_binary_file = std::filesystem::path();
-      if (context.model_path.empty()) {
+      auto session_ep_context_path = std::filesystem::path(
+          get_session_config_option(context, "ep.context_file_path", ""));
+      if (session_ep_context_path != "") {
+        ep_context_binary_file =
+            session_ep_context_path.parent_path() / *ep_cache_context;
+      } else if (context.model_path.empty()) {
         ep_context_binary_file = std::filesystem::u8path(*ep_cache_context);
       } else {
         ep_context_binary_file = context.model_path.parent_path() /

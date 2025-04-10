@@ -70,7 +70,7 @@ def main(release_file):
                 f_out.write(output)
             morphizen_branch,morphizen_git_hash = get_morphizen_version_info()
             morphizen_output = f"""
-                {{"morphizen", "{morphizen_branch}", "{morphizen_git_hash}"}},
+                {{"morphizen", "{morphizen_git_hash}", "{morphizen_branch}"}},
             """
             f_out.write(morphizen_output)
 
