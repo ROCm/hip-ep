@@ -3,6 +3,7 @@ import os
 import re
 import datetime
 import pathlib
+import subprocess
 PROJECTS = [
     "glog",
     "gsl",
@@ -16,6 +17,25 @@ PROJECTS = [
     "vart",
     "dod",
 ]
+
+def get_morphizen_version_info():
+    file_path = os.path.abspath(__file__)
+    cur_file_basedir = os.path.dirname(os.path.dirname(os.path.dirname(file_path)))
+    try:
+        git_hash = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=cur_file_basedir, text=True
+        ).strip()
+    except subprocess.CalledProcessError as e:
+        raise ValueError("Error while getting morphizen git hash")
+    
+    try:
+        git_branch = subprocess.check_output(
+            ["git", "branch", "--show-current"], cwd=cur_file_basedir, text=True
+        ).strip()
+    except subprocess.CalledProcessError as e:
+        git_branch = git_hash[0:6]
+    return git_branch,git_hash
+
 def main2(workspace_directory):
     output_file ="vaip_version_info.hpp.inc"
     with open(output_file, "w") as f:
@@ -48,6 +68,11 @@ def main(release_file):
                 {{"{project_name}", "{git_commit_id}", "{project_version_id}"}},
                 """
                 f_out.write(output)
+            morphizen_branch,morphizen_git_hash = get_morphizen_version_info()
+            morphizen_output = f"""
+                {{"morphizen", "{morphizen_branch}", "{morphizen_git_hash}"}},
+            """
+            f_out.write(morphizen_output)
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:

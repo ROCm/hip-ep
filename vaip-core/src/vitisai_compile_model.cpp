@@ -177,8 +177,8 @@ static void print_device_subgraph(const PassContextImp& context) {
 static void print_version_verbose(const char* prefix,
                                   const ConfigProto& config) {
   for (auto version_info : config.version().version_infos()) {
-    LOG_VERBOSE(1) << prefix << version_info.version()
-                   << " :" + version_info.commit();
+    LOG_VERBOSE(1) << prefix << version_info.package_name() << " ("
+                   << version_info.version() << ") :" + version_info.commit();
   }
   LOG_VERBOSE(1) << prefix << "cache_dir: " << config.cache_dir();
   LOG_VERBOSE(1) << prefix << "cache_key: " << config.cache_key();
