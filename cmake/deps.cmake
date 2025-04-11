@@ -57,7 +57,7 @@ if(morphizen_ENABLE_UNIT_TEST)
   find_package(GTest CONFIG QUIET)
   if(TARGET GTest::gtest)
     get_target_property(TMP GTest::gtest INTERFACE_INCLUDE_DIRECTORIES)
-    message(STATUS "found find_package(googletest) at ${TMP}")
+    message(STATUS "found find_package(GTest) at ${TMP}")
   else()
     message(STATUS "fetch GTest from ${DEP_URL_GTest}")
     FetchContent_Declare(
@@ -67,10 +67,9 @@ if(morphizen_ENABLE_UNIT_TEST)
       GIT_SHALLOW TRUE
       CMAKE_ARGS -Dgtest_force_shared_crt=ON
       EXCLUDE_FROM_ALL
-      FIND_PACKAGE_ARGS NAMES GTest
       OVERRIDE_FIND_PACKAGE
     )
-    find_package(googletest REQUIRED)
+    find_package(GTest REQUIRED)
   endif()
 endif()
 
