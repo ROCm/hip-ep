@@ -1185,6 +1185,7 @@ static void dirty_hack_for_model_clone_external_data_threshold(
     }
   }
 }
+
 static std::vector<std::unique_ptr<ExecutionProvider>>
 compile_onnx_model_internal(
     const Graph& onnx_graph,
@@ -1204,9 +1205,13 @@ compile_onnx_model_internal(
     auto measure_before_compile_onnx_model_2 =
         context->measure("before_compile_onnx_model_internal");
     auto& model = graph_get_model(onnx_graph);
-    auto cloned_model = model_clone(
-        model, VAIP_PROVIDER_OPTION(*context,
-                                    XLNX_model_clone_external_data_threshold));
+    int64_t threshold = ENV_PARAM(XLNX_model_clone_external_data_threshold);
+    auto po_threshold =
+        context->get_provider_option("XLNX_model_clone_external_data_threshold");
+    if (po_threshold) {
+      threshold = std::stoll(po_threshold.value());
+    }
+    auto cloned_model = model_clone(model, threshold);
     auto& cloned_graph = VAIP_ORT_API(model_main_graph)(*cloned_model);
     auto deferred_collect =
         std::shared_ptr<void>(nullptr, [context, &onnx_graph](void* p) {
