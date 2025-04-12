@@ -60,6 +60,7 @@ TarEntryInputStream* TarFile::open_for_read(const std::string& filename) {
             real_entry->data_begin_pos(); // set the data begin pos
         return entry.get();
       }
+      entry->clear();
       if (!entry->seekg(0, std::ios::beg).good()) {
         MY_LOG(1) << "Failed to seek to the beginning of the entry stream"
                   << " entry name=" << entry->path()

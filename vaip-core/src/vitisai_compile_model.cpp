@@ -944,7 +944,7 @@ extern "C" VAIP_DLL_SPEC int create_ep_context_nodes(
   CHECK(p_context != nullptr);
   auto& context = *p_context;
   auto deferred_write = std::shared_ptr<void>(
-      nullptr, [&context](void* p) { context.save_context_json(); });
+      nullptr, [&context](void* p) { if(0) context.save_context_json(); });
   auto measure_create_ep_context_nodes =
       context.measure("create_ep_context_nodes");
   ret.reserve(eps.size());
@@ -1335,7 +1335,7 @@ compile_onnx_model_3(const std::string& model_path, const Graph& onnx_graph,
       "__level_0_graph",
       std::shared_ptr<void>((void*)&cloned_graph, [](void*) {}));
   auto deferred_write = std::shared_ptr<void>(
-      nullptr, [context](void* p) { context->save_context_json(); });
+      nullptr, [context](void* p) { if(0) context->save_context_json(); });
   auto measture_compile_onnx_model_3 = context->measure("compile_onnx_model_3");
   // we cannot use get_cache_filename because cache might be a tar file in
   // memory instead of a physical directory.
