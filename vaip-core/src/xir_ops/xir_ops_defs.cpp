@@ -147,6 +147,7 @@ Ort::CustomOpDomain get_xir_domain() {
     XIR_OP_NAMES.push_back("QLinear_CPU");
     XIR_OP_NAMES.push_back("DQLinear_CPU");
     XIR_OP_NAMES.push_back("DQSoftmax_CPU");
+    XIR_OP_NAMES.push_back("Transpose_CPU");
     XIR_OP_NAMES.push_back("einsum");
     XIR_OP_NAMES.push_back("VAIMLQMatmul");
     XIR_OP_NAMES.push_back("VAIMLQSilu");
