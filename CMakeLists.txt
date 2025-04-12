@@ -14,6 +14,7 @@ add_subdirectory (vaip-core)
 if(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC)
   # when morphzen-core-dyanmic is enabled, we can build graph-opt, otherwise we will get link errors.
   add_subdirectory (graph-opt)
+  add_subdirectory (tar)
 endif(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC)
   add_subdirectory (vaip_pass_init)
 if(morphizen_ENABLE_UNIT_TEST AND morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC)
