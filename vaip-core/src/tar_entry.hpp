@@ -19,6 +19,8 @@ public:
   VAIP_DLL_SPEC std::streambuf::pos_type block_begin_pos() const;
   VAIP_DLL_SPEC std::streambuf::pos_type block_end_pos() const;
   VAIP_DLL_SPEC bool is_symlink() const;
+  bool rename_symlink(const std::string& new_name, pos_type data_begin_pos,
+                      pos_type data_end_pos);
   // starting point of real data
   // size of real data
   VAIP_DLL_SPEC size_t size() const;
@@ -60,6 +62,8 @@ private:
 
   std::shared_ptr<std::istream> stream_;
   std::vector<char> buffer_;
+  friend class TarFile;
+
   // other meta info read from the tar header
 };
 
@@ -90,6 +94,8 @@ public:
   VAIP_DLL_SPEC std::streambuf::pos_type block_begin_pos() const;
   VAIP_DLL_SPEC std::streambuf::pos_type block_end_pos() const;
   VAIP_DLL_SPEC bool is_symlink() const;
+  bool rename_symlink(const std::string& new_name, pos_type data_begin_pos,
+                      pos_type data_end_pos);
   // for logging
   std::string to_string() const;
 
@@ -98,6 +104,8 @@ public: // only for uniqute_ptr
 
 private:
   std::unique_ptr<TarEntryInputStreamBuffer> buf_;
+  friend class TarFile;
+  friend class TarFile;
 };
 // TarEntryOutputStream is used to write a tar entry to a tar file.
 class TarEntryOutputStream : public std::ostream {
@@ -115,11 +123,22 @@ private:
   TarEntryOutputStream() = delete;
   static std::streampos TarEntryOutputStream::calculate_tar_append_pos(
       const TarEntryInputStream& last_entry);
+  std::optional<std::string> get_content_check_sum();
+  TarEntryInputStream* find_prev_entry_for_md5(const std::string& md5);
+  TarEntryInputStream* find_prev_entry_for_path(const std::string& name);
+  TarEntryInputStream& add_entry_for_new_data(const std::string& md5,
+                                              bool add_symbol_link);
+  void add_symlink_for_existing_entry(const std::string& md5);
+  void add_1024_padding();
+  void rename_existing_entry(TarEntryInputStream& data_entry,
+                             TarEntryInputStream& prev_entry);
 
 private:
   const std::string name_; // name of the entry
   const std::streampos
       begin_pos_;          // beginning of the tar entry, point to the data.
+  std::streampos end_pos_; // point to  end of the data.
+  std::streampos size_;    // size of data
   class TarFile&
       tar_file_; // tar file to write to, use to reset TarFile::is_writing_
 };

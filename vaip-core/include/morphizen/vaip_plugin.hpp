@@ -84,7 +84,7 @@ struct Plugin {
   bool has_method(const char* name) const {
     return my_plugin_sym(plugin_, name) != nullptr;
   };
-  static std::vector<void*> get_all_symbols(const char * name);
+  static std::vector<void*> get_all_symbols(const char* name);
   template <typename R, typename... Args> using method_t = R (*)(Args...);
 
   template <typename R, typename... Args>

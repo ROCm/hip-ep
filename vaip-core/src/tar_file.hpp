@@ -13,6 +13,8 @@ public:
 public:
   TarFile(std::unique_ptr<std::iostream> stream);
   VAIP_DLL_SPEC
+  bool has_file(const std::string& filename) const;
+  VAIP_DLL_SPEC
   std::vector<std::unique_ptr<TarEntryInputStream>>& entries();
   VAIP_DLL_SPEC
   const std::vector<std::unique_ptr<TarEntryInputStream>>& entries() const;

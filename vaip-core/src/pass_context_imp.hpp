@@ -92,7 +92,20 @@ private:
   const std::string name_;
   FILE* fp_;
 };
+class CacheFileWriterStreamImp : public CacheFileWriter {
+public:
+  CacheFileWriterStreamImp(const std::string& name,
+                           std::unique_ptr<std::ostream> stream);
+  virtual ~CacheFileWriterStreamImp();
 
+private:
+  virtual std::size_t fwrite(const void* buffer,
+                             std::size_t size) const override final;
+
+private:
+  std::string name_;
+  std::unique_ptr<std::ostream> stream_;
+};
 class CacheFileStreamWriter : public IStreamWriter {
 public:
   CacheFileStreamWriter(std::unique_ptr<CacheFileWriter>&& writer)
@@ -104,6 +117,7 @@ private:
 private:
   std::unique_ptr<CacheFileWriter> writer_;
 };
+
 class CacheFileStreamWriterBuilder : public IStreamWriterBuilder {
 public:
   CacheFileStreamWriterBuilder(PassContext* ctx) : context(ctx) {}
@@ -132,6 +146,8 @@ private:
 static void
 store_cache_directory_from_main_node(class PassContextImp& context,
                                      vaip_cxx::NodeConstRef main_node);
+class ExecutionProviderConcrete;
+static onnxruntime::Node* create_ep_context_node(ExecutionProviderConcrete* ep);
 class PassContextImp : public PassContext {
 public:
   std::vector<char> const_data_;
@@ -204,6 +220,8 @@ public:
   open_file_for_read_with_tar_file(const std::string& filename) const;
   virtual std::unique_ptr<CacheFileWriter>
   open_file_for_write(const std::string& filename) override final;
+  std::unique_ptr<CacheFileWriter>
+  open_file_for_write_with_tar_file(const std::string& filename);
   virtual FILE* open_file(const std::string& filename) const override final;
   virtual bool write_file(const std::string& filename,
                           gsl::span<const char> data) override final;
@@ -264,11 +282,25 @@ private:
   mutable std::vector<std::shared_ptr<QoSUpdateInterface>> qos_updaters_;
   int created_customop_count = 0;
   std::unique_ptr<TarFile> tar_file_ = nullptr;
+  // cache_file_use_cache_key_prefix_ is only enabled for shared ep context is
+  // enabled.
+  // when this feature is enabled, open_file_for_read and
+  // open_file_for_write, the file name will be prefixed with cache_key_prefix_.
+  // this feature only tested when tar_file_ is not null.
+  bool cache_file_use_cache_key_prefix_ = false;
 
 private:
   friend void
   store_cache_directory_from_main_node(PassContextImp& context,
                                        vaip_cxx::NodeConstRef main_node);
+  friend std::shared_ptr<PassContextImp> initialize_context(
+      const std::string& model_path, const Graph& onnx_graph,
+      const std::vector<vaip_cxx::NodeConstRef>& ep_context_nodes,
+      const char* json_config);
+  friend onnxruntime::Node*
+  create_ep_context_node(vaip_core::ExecutionProviderConcrete* ep);
+  friend std::string
+  get_ep_cache_context_nonembed_mode(PassContextImp& context);
 };
 
 struct PassContextTimerImp : public PassContextTimer {

@@ -22,6 +22,7 @@ import glob
 from pathlib import Path
 import xxd
 
+
 def get_trimmed_config(config):
     if "target" not in config:
         return
@@ -111,6 +112,7 @@ def get_escape_json_str(path):
         ret += "}"
         return ret
 
+
 def main():
     path = sys.argv[1]
     is_trim_config = sys.argv[2] == "ON"
@@ -131,9 +133,22 @@ def main():
         else:
             json.dump({}, f, indent=4)
 
-    xxd.main(["--output", "config_json_binary.hpp", "--column", "16", "--var" , "config", "vaip_config.json"])
+    xxd.main(
+        [
+            "--output",
+            "config_json_binary.hpp",
+            "--column",
+            "16",
+            "--var",
+            "config",
+            "vaip_config.json",
+        ]
+    )
     with open("config_json_binary.hpp", "a") as f:
-        f.write(f"static bool with_default_vaip_config = {1 if enable_default_config else 0};\n")
+        f.write(
+            f"static bool with_default_vaip_config = {1 if enable_default_config else 0};\n"
+        )
+
 
 if __name__ == "__main__":
     main()

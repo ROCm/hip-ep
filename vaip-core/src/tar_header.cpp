@@ -82,6 +82,12 @@ bool TarHeader::write_header(std::ostream& os) {
   }
   data_end_pos_ = data_begin_pos_ + std::streampos(size());
   block_.clear();
+  if (ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE) >= 1) {
+    MY_LOG(1) << "write tar header: " << to_string()
+              << " block_begin_pos_=" << block_begin_pos_
+              << " streampos=" << os.tellp();
+    os.flush();
+  }
   return os.good();
 }
 HD_USTAR* TarHeader::get_header_for_long_name() {

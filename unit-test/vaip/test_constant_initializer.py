@@ -106,6 +106,4 @@ def create_sample_onnx_model_with_all_constant_initializers():
 
 
 create_sample_onnx_model_with_all_constant_initializers()
-print(
-    "Sample ONNX model with all types of constant initializers has been created."
-)
+print("Sample ONNX model with all types of constant initializers has been created.")

@@ -75,8 +75,8 @@ create(const std::filesystem::path& filename) {
   // created inside vaip_unit_test.exe,
   // google::protobuf::TextFormat::ParseFromString() is defined in
   // onnxruntime_vitisai_ep.dll, and output->Clear() would throw an exception.
-  // 
-  // 
+  //
+  //
   auto anchor_point = vaip_core::AnchorPoint::create_proto();
   CHECK(google::protobuf::TextFormat::ParseFromString(text, anchor_point.get()))
       << "parse error: " << text;

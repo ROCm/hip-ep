@@ -59,6 +59,7 @@
 #include <stdlib.h>
 #include <string>
 #include "morphizen/encryption.hpp"
+#include "core/session/onnxruntime_session_options_config_keys.h"
 // clang-format on
 
 // this is an experimental feature. When this feature is enabled, the
@@ -126,6 +127,9 @@ bool Symbolize(void* /*pc*/, char* /*out*/, size_t /*out_size*/);
 } // namespace google
 
 namespace vaip_core {
+static std::string get_session_config_option(const PassContextImp& context,
+                                             const std::string& key,
+                                             const std::string& default_value);
 
 static void save_protobuf_message(const fs::path& filename,
                                   const google::protobuf::Message& msg) {
@@ -503,10 +507,6 @@ get_signature_with_meptable(const std::string& model_path,
                                     md5_in_memory_b, node_count);
 }
 
-// NOTE: this function should not read any file in the cache directory, because
-// when ENV_PARAM(ENABLE_TAR_CACHE) is on, all files in the cache directory are
-// inside the tar file instead, we should not assume that any files exists
-// inside the cache directory.
 std::shared_ptr<PassContextImp>
 initialize_context(const std::string& model_path, const Graph& onnx_graph,
                    const std::vector<vaip_cxx::NodeConstRef>& ep_context_nodes,
@@ -669,7 +669,49 @@ initialize_context(const std::string& model_path, const Graph& onnx_graph,
   Model& mutable_model = const_cast<Model&>(model);
   model_set_meta_data(mutable_model, "vaip_log_dir",
                       context->get_log_dir().u8string());
+  //
+  auto is_shared_context_enabled =
+      get_session_config_option(*context, kOrtSessionOptionShareEpContexts,
+                                "0") == "1";
+  auto is_ep_context_enabled =
+      get_session_config_option(*context, kOrtSessionOptionEpContextEnable,
+                                "0") == "1";
+  auto is_ep_context_embed_mode =
+      get_session_config_option(*context, kOrtSessionOptionEpContextEmbedMode,
+                                "1") == "1";
 
+  if (ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE) && //
+      is_shared_context_enabled &&                 //
+      is_ep_context_enabled &&                     //
+      !is_ep_context_embed_mode) {
+    auto ep_binary_file_path = std::string("VITISAI.bin");
+    auto ep_context_binary_file = std::filesystem::path();
+    auto session_ep_context_path =
+        std::filesystem::path(get_session_config_option(
+            *context, kOrtSessionOptionEpContextFilePath, ""));
+    if (session_ep_context_path != "") {
+      ep_context_binary_file =
+          session_ep_context_path.parent_path() / ep_binary_file_path;
+    } else if (!context->model_path.empty()) {
+      ep_context_binary_file =
+          context->model_path.parent_path() / ep_binary_file_path;
+    } else {
+      ep_context_binary_file = ep_binary_file_path;
+    }
+    auto open_mode = std::ios::binary | std::ios::in | std::ios::out;
+    if (!std::filesystem::exists(ep_context_binary_file)) {
+      open_mode |= std::ios::trunc;
+    }
+    auto stream = std::unique_ptr<std::fstream>();
+    stream = std::make_unique<std::fstream>(ep_context_binary_file, open_mode);
+
+    CHECK(stream->is_open())
+        << "failed to open ep context file " << ep_context_binary_file;
+    CHECK(!context->get_config_proto().cache_key().empty())
+        << "cache_key should be empty when using tar file";
+    context->tar_file_ = TarFile::create(std::move(stream));
+    context->cache_file_use_cache_key_prefix_ = true;
+  }
   // log version of binary
   print_version_verbose("EXEC VERISON: ", context->context_proto.config());
   return context;
@@ -750,14 +792,27 @@ static std::string get_ep_cache_context_nonembed_mode(PassContextImp& context) {
   LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
       << "embed mode = 0, save ep context file to "
       << OrtSessionOptionEpContextFilePath.filename();
+
   auto OrtSessionOptionEpContextFilePath_binay =
       OrtSessionOptionEpContextFilePath.replace_extension(".bin");
+  if (get_session_config_option(context, kOrtSessionOptionShareEpContexts,
+                                "0") == "1") {
+    OrtSessionOptionEpContextFilePath_binay =
+        OrtSessionOptionEpContextFilePath.parent_path() / "VITISAI.bin";
+  }
   LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
       << "embed mode = 0, save cache directory to tar file "
       << OrtSessionOptionEpContextFilePath_binay.filename();
-  auto dst = IStreamWriter::from_path(OrtSessionOptionEpContextFilePath_binay);
-  get_ep_cache_context_common(context, *dst);
-  return OrtSessionOptionEpContextFilePath.filename().u8string();
+  auto binary_name =
+      OrtSessionOptionEpContextFilePath_binay.filename().u8string();
+  if (context.tar_file_) {
+    // do nothing
+  } else {
+    auto dst =
+        IStreamWriter::from_path(OrtSessionOptionEpContextFilePath_binay);
+    get_ep_cache_context_common(context, *dst);
+  }
+  return binary_name;
 }
 
 static std::string get_ep_cache_context(PassContextImp& context,
@@ -840,6 +895,9 @@ create_ep_context_node(vaip_core::ExecutionProviderConcrete* ep) {
   auto enable_encryption =
       context.context_proto.config().encryption_key().empty() ? 0 : 1;
   attrs.add("enable_encryption", (int64_t)enable_encryption);
+  attrs.add("cache_file_use_cache_key_prefix",
+            (int64_t)context.cache_file_use_cache_key_prefix_);
+  attrs.add("cache_file_prefix", context.get_config_proto().cache_key());
   auto& version_infos = context.get_config_proto().version();
   for (const auto& version_info : version_infos.version_infos()) {
     auto lib_name = "version_of_" + version_info.package_name();
@@ -963,8 +1021,17 @@ store_cache_directory_from_main_node(PassContextImp& context,
   int64_t enable_encryption = main_node.get_attr_int("enable_encryption", 0);
   int64_t enable_compression = main_node.get_attr_int("enable_compression", 0);
   int64_t ep_embed_mode = main_node.get_attr_int("embed_mode", 1);
-  CHECK(main_node.has_attr("ep_cache_context"))
-      << " main EPContext has not ep_cache_context attr";
+  context.cache_file_use_cache_key_prefix_ =
+      main_node.get_attr_int("cache_file_use_cache_key_prefix", 0) != 0;
+  *context.get_context_proto().mutable_config()->mutable_cache_key() =
+      main_node.get_attr_string("cache_file_prefix", "");
+  if (context.cache_file_use_cache_key_prefix_) {
+    CHECK_NE(context.get_context_proto().config().cache_key(), "")
+        << "cache_key "
+        << "should not be empty when cache_file_use_cache_key_prefix_ is set "
+           "to "
+           "true";
+  }
 #if VAIP_ORT_API_MAJOR >= 12
   auto ep_cache_context =
       main_node.release_attr_string("ep_cache_context").to_ptr();

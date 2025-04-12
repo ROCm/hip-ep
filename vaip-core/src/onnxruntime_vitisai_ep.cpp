@@ -73,7 +73,7 @@ static void intialize_op_defs(std::vector<OrtCustomOpDomain*>& contrib_domains,
           << "ret_domain applied for 100 in onnxruntime";
     }
   }
-    std::set<std::string> vitis_ep_custom_ops;
+  std::set<std::string> vitis_ep_custom_ops;
   // todo
   // for (const auto& domain : contrib_domains) {
   //  for (const auto* op : domain->custom_ops_) {
@@ -85,7 +85,6 @@ static void intialize_op_defs(std::vector<OrtCustomOpDomain*>& contrib_domains,
   vitis_ep_custom_ops.insert("com.microsoft::DequantizeLinear");
   vitis_ep_custom_ops.insert("com.microsoft::QuantizeLinear");
   vaip_core::set_vitis_ep_custom_ops(vitis_ep_custom_ops);
-
 }
 
 // The interface exported below is used by onnxruntime_providers_vitisai.so

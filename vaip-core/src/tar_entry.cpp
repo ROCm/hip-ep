@@ -58,6 +58,24 @@ std::streambuf::pos_type TarEntryInputStreamBuffer::block_end_pos() const {
 bool TarEntryInputStreamBuffer::is_symlink() const {
   return real_path_.has_value();
 }
+bool TarEntryInputStreamBuffer::rename_symlink(const std::string& new_name,
+                                               pos_type data_begin_pos,
+                                               pos_type data_end_pos) {
+  if (real_path_) {
+    const_cast<std::optional<std::string>&>(real_path_) = new_name;
+    const_cast<pos_type&>(data_begin_pos_) = data_begin_pos;
+    const_cast<pos_type&>(data_end_pos_) = data_end_pos;
+    const_cast<pos_type&>(buffer_pos_) = data_begin_pos;
+    setg(buffer_.data(), buffer_.data(), buffer_.data());
+    return true;
+  }
+  MY_LOG(1) << " rename_symlink failed. "            //
+            << " entry " << this->to_string() << " " //
+            << " is not a symblink."                 //
+            << " new_name=" << new_name;
+  return false;
+}
+
 std::string TarEntryInputStreamBuffer::to_string() const {
   std::ostringstream ret;
   ret << "TarEntryInputStreamBuffer{"
@@ -162,6 +180,11 @@ std::streambuf::pos_type TarEntryInputStream::block_end_pos() const {
   return buf_->block_end_pos();
 }
 bool TarEntryInputStream::is_symlink() const { return buf_->is_symlink(); }
+bool TarEntryInputStream::rename_symlink(
+    const std::string& new_name, pos_type data_begin_pos,
+    pos_type data_end_pos) { // rename the symlink
+  return buf_->rename_symlink(new_name, data_begin_pos, data_end_pos);
+}
 std::string TarEntryInputStream::to_string() const {
   return std::string("TarEntryInputStream{buf=") + buf_->to_string() + "}";
 }
@@ -201,8 +224,7 @@ static std::string calculate_md5(std::istream& str, std::streampos begin_pos,
   return md5.getHash();
 }
 
-TarEntryOutputStream::~TarEntryOutputStream() {
-  tar_file_.is_writing_ = false;
+std::optional<std::string> TarEntryOutputStream::get_content_check_sum() {
   auto current_pos = this->tellp();
   auto end_pos = current_pos;
   this->seekp(begin_pos_);
@@ -212,7 +234,7 @@ TarEntryOutputStream::~TarEntryOutputStream() {
               << "current_pos " << current_pos << " " //
               << " stream_pos: " << tellp() << " "    //
         ;
-    return;
+    return std::nullopt;
   }
   auto size = current_pos - begin_pos_;
   MY_LOG(1) << " " << size << " bytes were written to file"
@@ -241,56 +263,81 @@ TarEntryOutputStream::~TarEntryOutputStream() {
     }
   }
   // calculate md5 sum of written data.
-  auto md5 = calculate_md5(*this->tar_file_.stream_.get(), begin_pos_, size);
+  auto ret = calculate_md5(*this->tar_file_.stream_.get(), begin_pos_, size);
   this->seekp(end_pos);
   MY_LOG(1) << " md5 of file"                                      //
             << " \"" << name_ << "\" (" << size << " bytes)"       //
-            << " is " << md5                                       //
+            << " is " << ret                                       //
             << " from " << begin_pos_                              //
             << " to " << current_pos << ", padding to " << end_pos //
             << " stream_pos=" << tellp()                           //
       ;
+  end_pos_ = end_pos;
+  size_ = size;
+  return ret;
+}
+
+TarEntryInputStream*
+TarEntryOutputStream::find_prev_entry_for_md5(const std::string& md5) {
   auto data_file_name = std::string("_data/") + md5;
-  auto same_data_exists = false;
+
   for (auto& entry : tar_file_.entries_) {
     if (entry->path() == data_file_name) {
-      MY_LOG(1) << " duplicated data found for file"             //
-                << " \"" << name_ << "\" (" << size << " bytes)" //
-                << " data_file_name=" << data_file_name          //
+      MY_LOG(1) << " duplicated data found for entry "  //
+                << entry->to_string()                   //
+                << " data_file_name=" << data_file_name //
           ;
-      same_data_exists = true;
-      break;
+      return entry.get();
     }
   }
-  if (!same_data_exists) {
-    MY_LOG(1) << " " << data_file_name
-              << " does not exists, create a new entry";
-    // write the data file name
-    seekp(begin_pos_ - static_cast<std::streamoff>(512));
-    if (!good()) {
-      MY_LOG(1) << "seek to write header failed. " //
-                << "begin_pos_=" << begin_pos_     //
-                << " current_pos=" << current_pos  //
-                << " stream pos=" << tellp()       //
+  return nullptr;
+}
+
+TarEntryInputStream*
+TarEntryOutputStream::find_prev_entry_for_path(const std::string& name) {
+  for (auto& entry : tar_file_.entries_) {
+    if (entry->path() == name_) {
+      MY_LOG(1) << " duplicated file found for entry " //
+                << entry->to_string()                  //
           ;
-      return;
+      return entry.get();
     }
-    auto header = TarHeader(data_file_name, size);
-    header.write_header(*this);
-    if (!this->good()) {
-      MY_LOG(1) << "write header failed. name=" << name_;
-    } else {
-      MY_LOG(1) << " write header for " << data_file_name << " size=" << size
-                << " OK. header=" << header.to_string();
-    }
-    tar_file_.add_entry(data_file_name,           //
-                        header.data_begin_pos(),  //
-                        header.data_end_pos(),    //
-                        header.block_begin_pos(), //
-                        header.block_end_pos()    //
-    );
-    // go back to the original position
-    this->seekp(end_pos);
+  }
+  return nullptr;
+}
+TarEntryInputStream&
+TarEntryOutputStream::add_entry_for_new_data(const std::string& md5,
+                                             bool add_symbol_link) {
+  auto data_file_name = std::string("_data/") + md5;
+  MY_LOG(1) << " " << data_file_name << " does not exists, create a new entry";
+  seekp(begin_pos_ - static_cast<std::streamoff>(512));
+  if (!good()) {
+    CHECK(false) << "seek to write header failed. " //
+                 << "begin_pos_=" << begin_pos_     //
+                 << " size=" << size_               //
+                 << " end_pos=" << end_pos_         //
+                 << " stream pos=" << tellp()       //
+        ;
+  }
+  auto header = TarHeader(data_file_name, size_);
+  header.write_header(*this);
+  if (!this->good()) {
+    MY_LOG(1) << "write header failed. name=" << name_;
+  } else {
+    MY_LOG(1) << " write header for " << data_file_name << " size=" << size_
+              << " OK. header=" << header.to_string();
+  }
+  auto& ret = tar_file_.add_entry(data_file_name,           //
+                                  header.data_begin_pos(),  //
+                                  header.data_end_pos(),    //
+                                  header.block_begin_pos(), //
+                                  header.block_end_pos()    //
+  );
+  // go back to the original position
+  this->seekp(end_pos_);
+  if (!add_symbol_link) {
+    return ret;
+  } else {
     auto sym_header = TarHeader(name_, 0);
     sym_header.set_link_name(data_file_name);
     sym_header.write_header(*this);
@@ -304,63 +351,124 @@ TarEntryOutputStream::~TarEntryOutputStream() {
     tar_file_.add_symlink_entry(name_, data_file_name,
                                 sym_header.block_begin_pos(),
                                 sym_header.block_end_pos());
-  } else {
-    // ignore the written data, probably garbage after 1024 bytes
-    seekp(begin_pos_ - static_cast<std::streampos>(512));
-    if (!good()) {
-      MY_LOG(1) << "seek to write header failed. " //
-                << "begin_pos_=" << begin_pos_     //
-                << " current_pos=" << current_pos  //
-                << " stream pos=" << tellp()       //
-          ;
-      return;
-    }
-    auto sym_header = TarHeader(name_, 0);
-    sym_header.set_link_name(data_file_name);
-    sym_header.write_header(*this);
-    if (!this->good()) {
-      MY_LOG(1) << "write symbol header failed. name=" << name_;
-    } else {
-      MY_LOG(1) << " write header for symlink " << name_
-                << ", to=" << data_file_name << " OK." //
-                << "begin_pos_=" << begin_pos_         //
-                << " data_end_pos=" << current_pos     //
-                << " block_end_pos=" << end_pos        //
-                << " stream_pos=" << tellp();
-    }
-    tar_file_.add_symlink_entry(name_, data_file_name,
-                                sym_header.block_begin_pos(),
-                                sym_header.block_end_pos());
   }
-  // write 1024 zeros at the end, probably leave some garbage after 1024
-  // bytes, which is written by users.
+  return ret;
+}
+
+void TarEntryOutputStream::add_symlink_for_existing_entry(
+    const std::string& md5) {
+  auto data_file_name = std::string("_data/") + md5;
+  // ignore the written data, probably garbage after 1024 bytes
+  seekp(begin_pos_ - static_cast<std::streampos>(512));
+  if (!good()) {
+    MY_LOG(1) << "seek to write header failed. " //
+              << "begin_pos_=" << begin_pos_     //
+              << " size=" << size_               //
+              << " end_pos=" << end_pos_         //
+              << " stream pos=" << tellp()       //
+        ;
+    return;
+  }
+  auto sym_header = TarHeader(name_, 0);
+  sym_header.set_link_name(data_file_name);
+  sym_header.write_header(*this);
+  if (!this->good()) {
+    MY_LOG(1) << "write symbol header failed. name=" << name_;
+  } else {
+    MY_LOG(1) << " write header for symlink " << name_
+              << ", to=" << data_file_name << " OK." //
+              << "begin_pos_=" << begin_pos_         //
+              << " size=" << size_                   //
+              << " end_pos=" << end_pos_             //
+              << " stream_pos=" << tellp();
+  }
+  tar_file_.add_symlink_entry(name_, data_file_name,
+                              sym_header.block_begin_pos(),
+                              sym_header.block_end_pos());
+}
+void TarEntryOutputStream::add_1024_padding() {
+  // write 1024 bytes of zeros at the end of the file
   std::string zeros(1024, '\0');
   this->write(zeros.data(), zeros.size());
   if (!this->good()) {
     MY_LOG(1) << "write zeros failed. name=" << name_;
   }
   this->flush();
-
-  MY_LOG(2) << " ~TarEntryOutputStream: write tar end mark OK. " //
-            << " name=" << name_ << " size=" << size             //
-            << " begin_pos_=" << begin_pos_                      //
-            << " current_pos=" << current_pos                    //
-            << " padding_size=" << padding_size                  //
-            << " end_pos=" << end_pos                            //
-            << " stream pos=" << tellp()                         //
-      ;
+}
+void TarEntryOutputStream::rename_existing_entry(
+    TarEntryInputStream& data_entry, TarEntryInputStream& prev_entry) {
+  MY_LOG(1) << " rename existing entry " << prev_entry.to_string() << " to "
+            << data_entry.to_string();
+  auto old_entry = prev_entry.to_string();
+  prev_entry.rename_symlink(data_entry.path(), data_entry.data_begin_pos(),
+                            data_entry.data_end_pos());
+  auto header = TarHeader(prev_entry.path(), 0);
+  header.set_link_name(data_entry.path());
+  auto original_pos = tellp();
+  CHECK(seekp(prev_entry.block_begin_pos()).good());
+  header.write_header(*this);
+  CHECK(seekp(original_pos).good())
+      << "seekp failed. original_pos=" << original_pos
+      << " prev_entry.block_begin_pos()=" << prev_entry.block_begin_pos();
+  if (!this->good()) {
+    MY_LOG(1) << "write symbol header failed. name=" << name_;
+  } else {
+    MY_LOG(1) << " old entry " << old_entry << " renamed to "
+              << prev_entry.to_string() << " stream_pos=" << tellp();
+  }
+}
+TarEntryOutputStream::~TarEntryOutputStream() {
+  tar_file_.is_writing_ = false;
+  auto md5 = get_content_check_sum();
+  if (!md5) {
+    MY_LOG(1) << "cannot calculate md5 for file \"" << name_ << "\"";
+    return;
+  }
+  auto prev_entry_for_md5 = find_prev_entry_for_md5(*md5);
+  auto prev_entry_for_path = find_prev_entry_for_path(name_);
+  auto same_data_exists = prev_entry_for_md5 != nullptr;
+  auto same_path_exists = prev_entry_for_path != nullptr;
+  if (!same_data_exists && !same_path_exists) {
+    // this is the very first case for a new file and new data.
+    add_entry_for_new_data(md5.value(), true);
+    add_1024_padding();
+  } else if (same_data_exists && !same_path_exists) {
+    // this is the second case for shared data, but different file name.
+    add_symlink_for_existing_entry(md5.value());
+    add_1024_padding();
+  } else if (same_data_exists && same_path_exists) {
+    // this is the third case for shared data and same file name.
+    // we do nothing more than write 1024 bytes of zeros at the end.
+    MY_LOG(1) << " same data and same file name exists. do nothing more."
+              << " name=" << name_ << " md5=" << md5.value() //
+              << " prev_entry_for_md5=" << prev_entry_for_md5->to_string()
+              << " prev_entry_for_path=" << prev_entry_for_path->to_string();
+    CHECK(seekp(begin_pos_ - std::streampos(512)).good());
+    add_1024_padding();
+  } else if (!same_data_exists && same_path_exists) {
+    // this is the fourth case for different data and same file name.
+    // we need to rename the old entry to a new name.
+    auto& new_data_entry = add_entry_for_new_data(md5.value(), false);
+    add_1024_padding();
+    rename_existing_entry(new_data_entry, *prev_entry_for_path);
+  } else {
+    CHECK(false) << "never goes here. this is a bug. "       //
+                 << " same_data_exists=" << same_data_exists //
+                 << " same_path_exists=" << same_path_exists //
+        ;
+  }
 }
 
 std::streampos TarEntryOutputStream::calculate_tar_append_pos(
     const TarEntryInputStream& last_entry) {
   // calculate the tar append position
-  // the tar file end is 1024 bytes, so we need to add 512 bytes for the header
-  // and padding
+  // the tar file end is 1024 bytes, so we need to add 512 bytes for the
+  // header and padding
 
-  // when the last entry is a symlink, we need to use the block_end_pos, because
-  // data_end_pos is for the real data, and symbolic link does not have real
-  // data. the block_end_pos is the end of the tar entry, which is the end of
-  // the block.
+  // when the last entry is a symlink, we need to use the block_end_pos,
+  // because data_end_pos is for the real data, and symbolic link does not
+  // have real data. the block_end_pos is the end of the tar entry, which is
+  // the end of the block.
   auto end_pos = last_entry.is_symlink() ? last_entry.block_end_pos()
                                          : last_entry.data_end_pos();
   std::streampos padding_size = 0;

@@ -35,7 +35,7 @@
 #include <glog/logging.h>
 #include <vector>
 #define _KERNEL_MODE
-#  include "xclbin.h"
+#include "xclbin.h"
 
 namespace vaip_core {
 uint64_t get_fingerprint(std::istream& file,

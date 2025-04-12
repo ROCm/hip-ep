@@ -38,9 +38,9 @@
 
 #include <memory>
 
+#include "morphizen/env_config.hpp"
 #include "morphizen/pass.hpp"
 #include "morphizen/util.hpp"
-#include "morphizen/env_config.hpp"
 DEF_ENV_PARAM(DEBUG_REWRITE_RULE, "0")
 namespace vaip_core {
 using namespace onnxruntime;

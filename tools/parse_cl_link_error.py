@@ -4,10 +4,10 @@
 # extract the unresolved symbols.  The unresolved symbols are then
 # added to the def file to resolve the symbols.  The script takes 2
 # arguments:
-# 
+#
 #   1. The error log message from the linker
 #   2. The def file to be used to resolve the symbols
-#   
+#
 # The script reads the def file and extracts the symbols and then reads the error log message and extracts the unresolved symbols.
 # The script then writes the symbols to the def file.
 # The script is used to automate the process of resolving the linker errors.
@@ -21,14 +21,20 @@
 #
 import re
 import argparse
+
 # Regular expression to extract the fields
-pattern = r'^(.+)\s*:\s*error\s*(LNK\d+):\s*unresolved\s*external\s*symbol\s*\"(.*?)\"\s*\((.+?)\)(\s*referenced\s*in\s* function.*)?'
+pattern = r"^(.+)\s*:\s*error\s*(LNK\d+):\s*unresolved\s*external\s*symbol\s*\"(.*?)\"\s*\((.+?)\)(\s*referenced\s*in\s* function.*)?"
+
 
 def main():
     # parse command line arguments
-    parser = argparse.ArgumentParser(description="Parse the error message from the linker")
+    parser = argparse.ArgumentParser(
+        description="Parse the error message from the linker"
+    )
     parser.add_argument("file", help="The error log message from the linker")
-    parser.add_argument("def_file", help="The def file to be used to resolve the symbols")
+    parser.add_argument(
+        "def_file", help="The def file to be used to resolve the symbols"
+    )
     args = parser.parse_args()
     print(f"error log file = {args.file}")
     print(f"def_file = {args.def_file}")
@@ -51,7 +57,7 @@ def main():
         for line in f:
             match = re.match(pattern, line)
             if match:
-                group= match.groups()
+                group = match.groups()
                 print(f"debug grpah= {group}")
                 file_name, error_code, cxx_symbol, unresolved_symbol, referenced = group
                 print("unresolved_symbol:", unresolved_symbol)
@@ -64,6 +70,7 @@ def main():
         f.write(headers)
         for s in symbols:
             f.write(f"    {s}\n")
+
 
 if __name__ == "__main__":
     main()

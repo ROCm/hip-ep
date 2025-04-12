@@ -37,8 +37,8 @@
 #include <glog/logging.h>
 
 #include "./pattern_constant.hpp"
-#include "morphizen/node_arg.hpp"
 #include "morphizen/node.hpp"
+#include "morphizen/node_arg.hpp"
 #include "morphizen/util.hpp"
 #include <vaip/vaip_ort_api.h>
 

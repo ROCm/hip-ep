@@ -9,7 +9,7 @@
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 TEST(FileStreamTest, HelloWorld) {
-  {// Test the FileBuf class
+  { // Test the FileBuf class
     FILE* file = std::fopen("test.txt", "w+");
     ASSERT_NE(file, nullptr);
     vaip_core::FileBuf fileBuf(file, 1024);

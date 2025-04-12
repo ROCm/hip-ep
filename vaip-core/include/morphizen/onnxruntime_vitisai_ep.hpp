@@ -16,8 +16,8 @@
  **/
 #pragma once
 #include <filesystem>
-#include <vector>
 #include <vaip/export.h>
+#include <vector>
 namespace vaip_core {
 struct OrtApiForVaip;
 } // namespace vaip_core

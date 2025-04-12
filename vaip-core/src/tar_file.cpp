@@ -21,6 +21,19 @@ TarFile::TarFile(std::unique_ptr<std::iostream> stream)
   do {
   } while (read_tar_entry(stream_));
 }
+
+bool TarFile::has_file(const std::string& filename) const {
+  for (auto& entry : entries()) {
+    if (entry->path() == filename) {
+      MY_LOG(1) << " has_file: Found entry=" << entry->to_string() //
+                << " stream_pos=" << entry->tellg()                //
+          ;
+      return true;
+    }
+  }
+  return false;
+}
+
 std::vector<std::unique_ptr<TarEntryInputStream>>& TarFile::entries() {
   return entries_;
 }
@@ -32,6 +45,21 @@ TarEntryInputStream* TarFile::open_for_read(const std::string& filename) {
   MY_LOG(1) << " open_for_read: search for file \"" << filename << "\"";
   for (auto& entry : entries_) {
     if (entry->path() == filename) {
+      if (entry->data_begin_pos() == std::streampos(-1)) {
+        auto real_entry = find_real_entry(filename);
+        if (!real_entry) {
+          MY_LOG(1) << " open_for_read: entry \"" << entry->to_string()
+                    << "\" not found in the tar file";
+          return nullptr;
+        }
+        const_cast<std::streampos&>(entry->buf_->data_begin_pos_) =
+            real_entry->data_begin_pos(); // set the data begin pos
+        const_cast<std::streampos&>(entry->buf_->data_end_pos_) =
+            real_entry->data_end_pos();   // set the data begin pos
+        const_cast<std::streampos&>(entry->buf_->buffer_pos_) =
+            real_entry->data_begin_pos(); // set the data begin pos
+        return entry.get();
+      }
       if (!entry->seekg(0, std::ios::beg).good()) {
         MY_LOG(1) << "Failed to seek to the beginning of the entry stream"
                   << " entry name=" << entry->path()
@@ -104,6 +132,7 @@ TarFile::add_symlink_entry(const std::string& symlink_name,
                            const std::string& real_path_name,
                            std::streambuf::pos_type block_begin_pos,
                            std::streambuf::pos_type block_end_pos) {
+  TarEntryInputStream* ret = nullptr;
   auto real_entry = find_real_entry(real_path_name);
   if (real_entry) {
     entries_.emplace_back(std::make_unique<TarEntryInputStream>(
@@ -114,14 +143,26 @@ TarFile::add_symlink_entry(const std::string& symlink_name,
             block_begin_pos,              //
             block_end_pos,                //
             stream_)));
-    auto ret = entries_.back().get();
+    ret = entries_.back().get();
     MY_LOG(1) << " add_symlink_entry: found real entry:"
               << real_entry->to_string()
               << " symlink entry:" << ret->to_string();
-    return ret;
+  } else {
+    entries_.emplace_back(std::make_unique<TarEntryInputStream>(
+        std::make_unique<TarEntryInputStreamBuffer>(symlink_name,
+                                                    real_path_name,     //
+                                                    std::streampos(-1), //
+                                                    std::streampos(-1), //
+                                                    block_begin_pos,    //
+                                                    block_end_pos,      //
+                                                    stream_)));
+    ret = entries_.back().get();
+    MY_LOG(1) << " add_symlink_entry: cannot find real entry:"
+              << " symlink entry:" << ret->to_string();
   }
-  return nullptr;
+  return ret;
 }
+
 TarEntryInputStream*
 TarFile::read_tar_entry(std::shared_ptr<std::istream> stream) {
   auto tar_header = TarHeader::read_header(*stream);
