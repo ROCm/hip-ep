@@ -23,3 +23,8 @@ cd build
 cmake ..
 cmake --build
 ```
+
+```
+ cmake -DCMAKE_CONFIGURATION_TYPES=Release -B$BUILD/morphizen -S $W/MorphiZen/ -DCMAKE_INSTALL_PREFIX=$PREFIX --fresh '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>'
+ 
+ ```
