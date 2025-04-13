@@ -845,7 +845,7 @@ std::size_t CacheFileReaderStreamImp::fread(void* buffer,
   CHECK(!stream_.read(static_cast<char*>(buffer), size).bad())
       << "failed to read " << name_;
   auto ret = stream_.gcount();
-  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE) >= 2)
+  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE) >= 9)
       << "read " << name_ << " " << ret << " bytes "
       << " size_ =" << size_;
   return ret;

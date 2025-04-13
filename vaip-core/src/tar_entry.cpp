@@ -155,6 +155,13 @@ TarEntryInputStreamBuffer::seekoff(std::streamoff offset,
   return buffer_pos_ - data_begin_pos_;
 }
 
+std::streampos
+TarEntryInputStreamBuffer::seekpos(std::streampos sp,
+                                   std::ios_base::openmode which) {
+  // optionally call seekoff() here to centralize logic
+  return seekoff(sp, std::ios_base::beg, which);
+}
+
 TarEntryInputStream::TarEntryInputStream(
     std::unique_ptr<TarEntryInputStreamBuffer> buf)
     : std::istream(buf.get()), buf_{nullptr} {
@@ -180,6 +187,35 @@ std::streambuf::pos_type TarEntryInputStream::block_end_pos() const {
   return buf_->block_end_pos();
 }
 bool TarEntryInputStream::is_symlink() const { return buf_->is_symlink(); }
+std::string TarEntryInputStream::md5() {
+  // calculate md5 sum of the stream
+  clear();
+  this->seekg(0);
+  if (!this->good()) {
+    MY_LOG(1) << "seekg failed. begin_pos=" << 0 << "size=" << size() //
+              << " stream " << this->tellg() << "stream.fail() " << this->fail()
+              << " "                                                  //
+              << "stream.bad() " << this->bad() << " "                //
+        ;
+    return "";
+  }
+  auto ret = MD5();
+  auto buffer = std::vector<char>(4096);
+  auto total_size = size();
+  while (total_size > 0) {
+    auto read_size = std::min(total_size, buffer.size());
+    this->read(buffer.data(), read_size);
+    if (!this->good()) {
+      MY_LOG(3) << "read failed. size=" << size();
+      return "";
+    }
+    ret.add(buffer.data(), read_size);
+    total_size -= read_size;
+  }
+  this->clear();
+  return ret.getHash();
+}
+
 bool TarEntryInputStream::rename_symlink(
     const std::string& new_name, pos_type data_begin_pos,
     pos_type data_end_pos) { // rename the symlink
@@ -194,10 +230,10 @@ TarEntryOutputStream::TarEntryOutputStream(
     class TarFile& tar_file)
     : std::ostream(tar_file.stream_->rdbuf()), name_{name},
       begin_pos_{begin_pos}, tar_file_{tar_file} {
-  MY_LOG(2)
-      << " assume the write position is set by TarEntryOutputStream::create." //
-      << " begin_pos " << begin_pos_ << " "                                   //
-      << " stream_pos: " << tellp() << " ";
+  MY_LOG(2) << " assume the write position is set by "
+               "TarEntryOutputStream::create."    //
+            << " begin_pos " << begin_pos_ << " " //
+            << " stream_pos: " << tellp() << " ";
 }
 static std::string calculate_md5(std::istream& str, std::streampos begin_pos,
                                  std::streamsize size) {

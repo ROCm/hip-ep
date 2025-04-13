@@ -41,28 +41,37 @@ int main(int argc, char* argv[]) {
       return 1;
     }
     auto tar_file_obj = vaip_core::TarFile(std::move(tar_stream));
-    auto& entries = tar_file_obj.entries();
-    std::cout << std::left                      // Align fields to the left
-              << std::setw(15) << "Size"        // Set width for "Size"
-              << std::setw(15) << "Block Begin" // Set width for "Block Begin"
-              << std::setw(15) << "Block End"   // Set width for "Block End"
-              << std::setw(15) << "Data Begin"  // Set width for "Data Begin"
-              << std::setw(15) << "Data End"    // Set width for "Data End"
-              << std::setw(30) << "Path"        // Set width for "Path"
+    auto width = 12;
+    std::cout << std::left                       // Align fields to the left
+              << std::setw(33) << "md5"          // Set width for "MD5 checksum"
+              << std::right                      // Align fields to the right
+              << std::setw(width) << "size"      // Set width for "Size"
+              << std::setw(width) << "blk-begin" // Set width for "Block Begin"
+              << std::setw(width) << "blk-end"   // Set width for " Block End "
+              << std::setw(width) << "data-begin" // Set width for "Data Begin"
+              << std::setw(width) << "data-end"   // Set width for " Data End "
+              << std::left                        //
+              << std::setw(30) << " path"         // Set width for "Path"
               << std::endl;
-
+    auto& entries = tar_file_obj.entries();
     for (const auto& entry : entries) {
+      auto md5 = entry->md5();
       auto name = get_readable_path(*entry);
-      std::cout << std::left                      // Align fields to the left
-                << std::setw(15) << entry->size() // File size
-                << std::setw(15)
-                << entry->block_begin_pos()       // Block begin position
-                << std::setw(15) << entry->block_end_pos() // Block end position
-                << std::setw(15)
-                << entry->data_begin_pos()                // Data begin position
-                << std::setw(15) << entry->data_end_pos() // Data end position
-                << std::setw(30)                          // File path
-                << name                                   // Symlink info
+      std::cout << std::left            // Align fields to the left
+                << std::setw(33) << md5 // MD5 checksum
+                << std::right           // Align fields to the right
+                << std::setw(width) << entry->size() // File size
+                << std::setw(width)
+                << entry->block_begin_pos()          // Block begin position
+                << std::setw(width)
+                << entry->block_end_pos()            // Block end position
+                << std::setw(width)
+                << entry->data_begin_pos()           // Data begin position
+                << std::setw(width)
+                << entry->data_end_pos()             // Data end position
+                << std::left                         // Align fields to the left
+                << std::setw(0)                      // File path
+                << (" " + name)                      // path info
                 << std::endl;
     }
   } else {

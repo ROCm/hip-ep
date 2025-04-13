@@ -45,7 +45,8 @@ public: // make std::unique_ptr happy
   // Seek support using fseek
   std::streampos seekoff(std::streamoff offset, std::ios_base::seekdir way,
                          std::ios_base::openmode which) override;
-
+  std::streampos TarEntryInputStreamBuffer::seekpos(
+      std::streampos sp, std::ios_base::openmode which) override final;
   // for logging
   std::string to_string() const;
 
@@ -96,10 +97,18 @@ public:
   VAIP_DLL_SPEC bool is_symlink() const;
   bool rename_symlink(const std::string& new_name, pos_type data_begin_pos,
                       pos_type data_end_pos);
-  // for logging
-  std::string to_string() const;
+  /**
+   * @brief Computes the MD5 checksum of the content.
+   *
+   * This function returns the MD5 hash as a string, which can be used
+   * to verify the integrity of the content.
+   *
+   * @return A string representing the MD5 checksum of the content.
+   */
+  VAIP_DLL_SPEC std::string md5(); // MD5 checksum of the content
+  std::string to_string() const;   // for logging
 
-public: // only for uniqute_ptr
+public:                            // only for uniqute_ptr
   explicit TarEntryInputStream(std::unique_ptr<TarEntryInputStreamBuffer> buf);
 
 private:
