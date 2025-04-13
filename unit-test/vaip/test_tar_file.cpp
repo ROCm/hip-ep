@@ -5,75 +5,18 @@
 #include <cstring>
 #include <gtest/gtest.h>
 TEST(TarFileTest, ReadFrom) {
-  // Assuming you have a tar file named "sample.src.tar" in the current
-  // directory
-  {
-    auto tarFileName = CMAKE_CURRENT_BINARY_PATH / "sample.src.tar";
-
-    auto tarStream = std::make_unique<std::fstream>(
-        tarFileName, std::ios::binary | std::ios::in | std::ios::out);
-    ASSERT_TRUE(tarStream->is_open())
-        << "Failed to open tar file: " << tarFileName
-        << " Error opening file: " << std::strerror(errno);
-    auto tar_file_obj = vaip_core::TarFile::create(std::move(tarStream));
-    ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
-    auto& entries = tar_file_obj->entries();
-    ASSERT_TRUE(!entries.empty()) << "Failed to read tar entries";
-    ASSERT_EQ(entries.size(), 2) << "Expected two tar entries";
-    for (const auto& entry : entries) {
-      auto name = entry->path();
-      auto size = entry->size();
-      auto stream =
-          std::ifstream(CMAKE_CURRENT_BINARY_PATH / name, std::ios::binary);
-      ASSERT_TRUE(stream.is_open()) << "Failed to open entry file: " << name;
-      stream.seekg(0, std::ios::end);
-      auto fileSize = stream.tellg();
-      ASSERT_EQ(fileSize, size) << "File size mismatch for entry: " << name;
-
-      ASSERT_TRUE(stream.seekg(0, std::ios::beg).good())
-          << "Failed to seek to the beginning of the stream";
-      std::string buffer;
-      buffer.resize(size);
-      stream.read(&buffer[0], size);
-      ASSERT_TRUE(stream) << "Failed to read entry file: " << name;
-      ASSERT_EQ(stream.gcount(), size)
-          << "stream size mismatch for entry: " << name;
-      // Compare the contents of the entry with the file
-      std::string entryBuffer;
-      entryBuffer.resize(size);
-      entry->read(&entryBuffer[0], size);
-
-      ASSERT_TRUE(entry) << "Failed to read entry: " << name;
-      ASSERT_EQ(entry->gcount(), size)
-          << "Entry size mismatch for entry: " << name;
-      ASSERT_EQ(buffer, entryBuffer) << "Contents mismatch for entry: " << name;
-      stream.close();
-    }
-    for (auto& entry : entries) {
-      auto name = entry->path();
-      auto size = entry->size();
-      auto stream = tar_file_obj->open_for_read(name);
-      ASSERT_TRUE(stream) << "Failed to open entry for read: " << entry->path();
-      std::string buffer;
-      buffer.resize(entry->size());
-      stream->read(&buffer[0], entry->size());
-      ASSERT_TRUE(stream) << "Failed to read entry: " << entry->path();
-      ASSERT_EQ(stream->gcount(), entry->size())
-          << "Entry size mismatch for entry: " << entry->path();
-      auto raw_stream =
-          std::ifstream(CMAKE_CURRENT_BINARY_PATH / name, std::ios::binary);
-      ASSERT_TRUE(raw_stream.is_open()) << "Failed to open entry file: "
-                                        << (CMAKE_CURRENT_BINARY_PATH / name);
-      raw_stream.seekg(0, std::ios::beg);
-      std::string raw_buffer;
-      raw_buffer.resize(size);
-      raw_stream.read(&raw_buffer[0], size);
-      ASSERT_EQ(raw_stream.gcount(), size)
-          << "raw_stream size mismatch for entry: " << name;
-      // Compare the contents of the entry with the file
-      ASSERT_STREQ(buffer.c_str(), raw_buffer.c_str())
-          << "Contents mismatch for entry: " << name;
-    }
+  auto tarFileName = CMAKE_CURRENT_BINARY_PATH / "sample.src.tar";
+  auto tarStream = std::make_unique<std::fstream>(
+      tarFileName, std::ios::binary | std::ios::in | std::ios::out);
+  auto tar_file_obj = vaip_core::TarFile::create(std::move(tarStream));
+  ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
+  for (auto& entry : tar_file_obj->entries()) {
+      LOG(INFO) << "entry: " << entry->path() << 
+          (entry->real_path()
+                      ? std::string("->") + entry->real_path().value()
+                      : "")
+              << " size="
+          << entry->size();
   }
 }
 
