@@ -18,7 +18,7 @@ def main(argv):
             hex_chunk = ','.join(f'0x{byte:02x}' for byte in chunk)
             ascii_chunk = ''.join(chr(byte) if 32 <= byte < 127 else '.' for byte in chunk)
             print(f'/*{i:08x} */  {hex_chunk:<{args.column * 3}}, /* {ascii_chunk} */',file = output_fh)
-        print(f'}};',file = output_fh)
+        print(f'0x00}};',file = output_fh)
 
 if __name__ == '__main__':
     main(sys.argv[1:])
