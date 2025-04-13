@@ -349,6 +349,7 @@ void update_config_by_target(ConfigProto& proto, const MepConfigTable* mep) {
   bool use_old_qdq = true;
   bool use_py3_round = false;
   if (mep) {
+    use_old_qdq = false;
     if (target_proto->has_old_qdq()) {
       use_old_qdq = target_proto->old_qdq();
     }
