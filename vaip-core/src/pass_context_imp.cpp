@@ -234,7 +234,6 @@ PassContextImp::get_meta_def_param(const MetaDefProto& meta_def) const {
   if (!status.ok()) {
     LOG(FATAL) << "failed to get meta_def param: " << status.ToString();
   }
-  MY_LOG(1) << "meta_def param: " << json_str;
   return json_str;
 }
 std::string
