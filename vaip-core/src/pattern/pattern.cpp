@@ -140,7 +140,21 @@ std::string Pattern::to_binary() const {
       << "cannot serialized to string";
   return ret;
 }
-
+std::string Pattern::to_json() const {
+  RootPatternProto root_pattern_proto;
+  auto patter_proto = dump_to_proto(root_pattern_proto);
+  patter_proto->set_is_root(true);
+  std::reverse(root_pattern_proto.mutable_patterns()->begin(),
+               root_pattern_proto.mutable_patterns()->end());
+  std::string ret;
+  google::protobuf::util::JsonPrintOptions options;
+  options.add_whitespace = true;
+  options.always_print_primitive_fields = true;
+  auto status = google::protobuf::util::MessageToJsonString(root_pattern_proto,
+                                                            &ret, options);
+  CHECK(status.ok()) << "cannot serialized to json";
+  return ret;
+}
 std::vector<std::string> Pattern::get_ops_list_name() const {
   std::vector<std::string> ret;
   fill_ops_name(ret);

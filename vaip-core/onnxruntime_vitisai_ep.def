@@ -105,6 +105,7 @@ EXPORTS
     ?from_path@IStreamWriter@vaip_core@@SA?AV?$unique_ptr@VIStreamWriter@vaip_core@@U?$default_delete@VIStreamWriter@vaip_core@@@std@@@std@@AEBVpath@filesystem@4@@Z
     ?fuse@GraphRef@vaip_cxx@@QEAA?AVNodeRef@2@AEBVMetaDefProto@vaip_core@@@Z
     ?get_metadata@Model@vaip_cxx@@QEBA?AV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@AEBV34@@Z
+    ?get_pattern@PatternBuilder@vaip_core@@QEBA?AV?$shared_ptr@VPattern@vaip_core@@@std@@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@4@@Z
     ?graph_resolve@vaip_core@@YAXAEAUGraph@onnxruntime@@_N@Z
     ?has_metadata@Model@vaip_cxx@@QEBA_NAEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@Z
     ?index@NodeConstRef@vaip_cxx@@QEBA_KXZ
@@ -115,6 +116,7 @@ EXPORTS
     ?load@Model@vaip_cxx@@SA?AV?$unique_ptr@VModel@vaip_cxx@@U?$default_delete@VModel@vaip_cxx@@@std@@@std@@AEBVpath@filesystem@4@@Z
     ?load_context@vaip_core@@YA?AV?$shared_ptr@VPassContext@vaip_core@@@std@@AEBVpath@filesystem@3@@Z
     ?main_graph@Model@vaip_cxx@@QEAA?AVGraphRef@2@XZ
+    ?match@Pattern@vaip_core@@QEBA?AV?$unique_ptr@VBinder@vaip_core@@U?$default_delete@VBinder@vaip_core@@@std@@@std@@AEBUGraph@onnxruntime@@AEBUNode@6@@Z
     ?match@Pattern@vaip_core@@QEBA?AV?$unique_ptr@VBinder@vaip_core@@U?$default_delete@VBinder@vaip_core@@@std@@@std@@VNodeConstRef@vaip_cxx@@@Z
     ?model_load@vaip_core@@YA?AV?$unique_ptr@UModel@onnxruntime@@UModelDeleter@vaip_core@@@std@@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@3@@Z
     ?model_path@GraphConstRef@vaip_cxx@@QEBAAEBVpath@filesystem@std@@XZ
@@ -168,6 +170,7 @@ EXPORTS
     ?run_passes@IPass@vaip_core@@SAXV?$vector@V?$shared_ptr@VIPass@vaip_core@@@std@@V?$allocator@V?$shared_ptr@VIPass@vaip_core@@@std@@@2@@std@@AEAUGraph@onnxruntime@@@Z
     ?save@GraphConstRef@vaip_cxx@@QEBAXAEBVpath@filesystem@std@@0_K@Z
     ?save@GraphConstRef@vaip_cxx@@QEBAXAEBVpath@filesystem@std@@@Z
+    ?sequence@PatternBuilder@vaip_core@@QEAA?AV?$shared_ptr@VPattern@vaip_core@@@std@@V?$span@$$CBV?$shared_ptr@VPattern@vaip_core@@@std@@$0?0@gsl@@@Z
     ?set_anchor_point1@NodeBuilder@vaip_core@@QEAAAEAU12@AEBUNode@onnxruntime@@@Z
     ?set_anchor_point1@NodeBuilder@vaip_core@@QEAAAEAU12@AEBUNodeArg@onnxruntime@@@Z
     ?set_data_type@NodeBuilder@vaip_core@@QEAAAEAU12@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@Z
@@ -178,9 +181,11 @@ EXPORTS
     ?set_op_type@NodeBuilder@vaip_core@@QEAAAEAU12@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@0@Z
     ?set_outputs@GraphRef@vaip_cxx@@QEAAXAEBV?$vector@VNodeArgConstRef@vaip_cxx@@V?$allocator@VNodeArgConstRef@vaip_cxx@@@std@@@std@@@Z
     ?set_shape@NodeBuilder@vaip_core@@QEAAAEAU12@AEBV?$span@$$CB_J$0?0@gsl@@@Z
+    ?size@?$RepeatedPtrField@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@protobuf@google@@QEBAHXZ
     ?skip_optional_output@NodeBuilder@vaip_core@@QEAAAEAU12@XZ
     ?slurp_binary_c8@vaip_core@@YA?AV?$vector@DV?$allocator@D@std@@@std@@AEBVpath@filesystem@3@@Z
     ?to_binary@Pattern@vaip_core@@QEBA?AV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@XZ
+    ?to_json@Pattern@vaip_core@@QEBA?AV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@XZ
     ?to_string@NodeInput@vaip_cxx@@QEBA?AV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@XZ
     ?try_fuse@GraphConstRef@vaip_cxx@@QEBA?AU?$pair@V?$unique_ptr@VMetaDefProto@vaip_core@@U?$default_delete@VMetaDefProto@vaip_core@@@std@@@std@@UTryFuseError@vaip_core@@@std@@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@4@AEBV?$vector@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V?$allocator@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@2@@4@110@Z
     ?uncompress@vaip_core@@YA?AV?$vector@DV?$allocator@D@std@@@std@@V?$span@$$CBD$0?0@gsl@@@Z

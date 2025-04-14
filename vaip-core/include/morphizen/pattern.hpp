@@ -317,6 +317,12 @@ public:
    * @return A vector of characters representing the binary data.
    */
   VAIP_DLL_SPEC std::string to_binary() const;
+  /**
+   * Converts the object to a JSON representation.
+   *
+   * @return A string representing the JSON data.
+   */
+  VAIP_DLL_SPEC std::string to_json() const;
 
   /**
    * Extarct all the ops name present in pattern using recursion
