@@ -135,8 +135,7 @@ private:
   std::optional<std::string> get_content_check_sum();
   TarEntryInputStream* find_prev_entry_for_md5(const std::string& md5);
   TarEntryInputStream* find_prev_entry_for_path(const std::string& name);
-  TarEntryInputStream& add_entry_for_new_data(const std::string& md5,
-                                              bool add_symbol_link);
+  TarEntryInputStream& add_entry_for_new_data(const std::string& md5);
   void add_symlink_for_existing_entry(const std::string& md5);
   void add_1024_padding();
   void rename_existing_entry(TarEntryInputStream& data_entry,

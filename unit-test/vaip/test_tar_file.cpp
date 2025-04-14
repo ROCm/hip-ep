@@ -20,6 +20,126 @@ TEST(TarFileTest, ReadFrom) {
   }
 }
 
+TEST(TarFileTest, DoubleRead) {
+  auto tarFileName = CMAKE_CURRENT_BINARY_PATH / "sample.src.tar";
+
+  auto tarStream = std::make_unique<std::fstream>(
+      tarFileName, std::ios::binary | std::ios::in | std::ios::out);
+  ASSERT_TRUE(tarStream->is_open())
+      << "Failed to open tar file: " << tarFileName
+      << " Error opening file: " << std::strerror(errno);
+  auto tar_file_obj = vaip_core::TarFile::create(std::move(tarStream));
+  ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
+  auto& entries = tar_file_obj->entries();
+  ASSERT_TRUE(!entries.empty()) << "Failed to read tar entries";
+  ASSERT_EQ(entries.size(), 2) << "Expected two tar entries";
+  // read first entry twice
+  auto& entry = entries[0];
+  auto name = entry->path();
+  auto size = entry->size();
+  // 1
+  auto stream = tar_file_obj->open_for_read(name);
+  ASSERT_TRUE(stream) << "Failed to open entry for read: " << entry->path();
+  std::string buffer1;
+  buffer1.resize(entry->size());
+  stream->read(&buffer1[0], entry->size());
+  ASSERT_TRUE(stream) << "Failed to read entry: " << entry->path();
+  ASSERT_EQ(stream->gcount(), entry->size())
+      << "Entry size mismatch for entry: " << entry->path();
+  // 2
+  auto stream2 = tar_file_obj->open_for_read(name);
+  ASSERT_TRUE(stream) << "Failed to open entry for read: " << entry->path();
+  std::string buffer2;
+  buffer2.resize(entry->size());
+  stream2->read(&buffer2[0], entry->size());
+  ASSERT_TRUE(stream) << "Failed to read entry: " << entry->path();
+  ASSERT_EQ(stream->gcount(), entry->size())
+      << "Entry size mismatch for entry: " << entry->path();
+  ASSERT_EQ(buffer1, buffer2) << "double read got different result";
+}
+
+TEST(TarFileTest, WriteOverride) {
+  auto const_test_content = std::string("1234567890");
+  auto srcFileName = CMAKE_CURRENT_BINARY_PATH / "sample.src.tar";
+  auto destFileName =
+      CMAKE_CURRENT_BINARY_PATH / "sample.src.tar.copy_for_test";
+
+  {
+    // copy the sample.src.tar to a new file
+    auto copy_is_ok = std::filesystem::copy_file(
+        srcFileName, destFileName,
+        std::filesystem::copy_options::overwrite_existing);
+    // check if the copy is ok
+    ASSERT_TRUE(copy_is_ok)
+        << "Failed to copy file: " << srcFileName << " to " << destFileName;
+    auto tarStream = std::make_unique<std::fstream>(
+        destFileName, std::ios::binary | std::ios::in | std::ios::out);
+    ASSERT_TRUE(tarStream->is_open())
+        << "Failed to open tar file: " << srcFileName
+        << " Error opening file: " << std::strerror(errno);
+    auto tar_file_obj = vaip_core::TarFile::create(std::move(tarStream));
+    ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
+    auto& entries = tar_file_obj->entries();
+    ASSERT_TRUE(!entries.empty()) << "Failed to read tar entries";
+    ASSERT_EQ(entries.size(), 2) << "Expected two tar entries";
+    // read first entry twice
+    auto& entry = entries[0];
+    auto name = entry->path();
+    auto size = entry->size();
+    // write
+    std::string buffer = const_test_content;
+    auto stream = tar_file_obj->open_for_write(name);
+    stream->write(buffer.data(), buffer.size());
+    stream->flush();
+    stream.reset();
+    // show
+    for (auto& entry : entries) {
+      auto name = entry->path();
+      auto size = entry->size();
+      // use LOG(INFO) print all entry name and size
+      LOG(INFO) << "Entry name: " << name << ", size: " << size;
+    }
+    ASSERT_TRUE(true);
+    LOG(INFO) << " ======== overwrite " << name << " ========";
+  }
+  // after the overwriting, the original file is corrupted.
+  auto first_entry_name = "sample_src_tar/test_config.cpp";
+  {
+    LOG(INFO) << " ======== read " << first_entry_name << " and check ========";
+
+    auto tarStream = std::make_unique<std::fstream>(
+        destFileName, std::ios::binary | std::ios::in | std::ios::out);
+    ASSERT_TRUE(tarStream->is_open())
+        << "Failed to open tar file: " << destFileName
+        << " Error opening file: " << std::strerror(errno);
+    auto tar_file_obj = vaip_core::TarFile::create(std::move(tarStream));
+    ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
+    auto& entries = tar_file_obj->entries();
+    ASSERT_TRUE(!entries.empty()) << "Failed to read tar entries";
+    ASSERT_EQ(entries.size(), 3) << "Expected two tar entries";
+    // clang-format off
+    // the content after overwriting
+    /*
+md5                                      size   blk-begin     blk-end  data-begin    data-end path
+618eac9918e0638aaa8b4d931a6ba357         2512           0         512         512        3024 sample_src_tar/test_config.cpp
+8558330fe7b37b216f838296deb75257         6077        3072        3584        3584        9661 sample_src_tar/test_tarball.cpp
+e807f1fcf82d132f9bb018ca6738a19f           10        9728       10240       10240       10250 _data/e807f1fcf82d132f9bb018ca6738a19f
+e807f1fcf82d132f9bb018ca6738a19f           10       10752       11264       10240       10250 sample_src_tar/test_config.cpp -> _data/e807f1fcf82d132f9bb018ca6738a19f
+    */
+    // clang-format on
+    auto stream = tar_file_obj->open_for_read(first_entry_name);
+    ASSERT_TRUE(stream) << "Failed to open entry for read: "
+                        << first_entry_name;
+    std::string buffer;
+    buffer.resize(const_test_content.size());
+    stream->read(&buffer[0], const_test_content.size());
+    ASSERT_TRUE(stream) << "Failed to read entry: " << first_entry_name;
+    ASSERT_EQ(stream->gcount(), const_test_content.size())
+        << "Entry size mismatch for entry: " << first_entry_name;
+    ASSERT_STREQ(buffer.c_str(), const_test_content.c_str())
+        << "Contents mismatch for entry: " << first_entry_name;
+  }
+}
 static void write_to_stream(const std::string& file, vaip_core::TarFile& tar,
                             const std::string& data) {
   LOG(INFO) << " start to write to stream. file=" << file;

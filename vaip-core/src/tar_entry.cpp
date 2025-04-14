@@ -342,8 +342,7 @@ TarEntryOutputStream::find_prev_entry_for_path(const std::string& name) {
   return nullptr;
 }
 TarEntryInputStream&
-TarEntryOutputStream::add_entry_for_new_data(const std::string& md5,
-                                             bool add_symbol_link) {
+TarEntryOutputStream::add_entry_for_new_data(const std::string& md5) {
   auto data_file_name = std::string("_data/") + md5;
   MY_LOG(1) << " " << data_file_name << " does not exists, create a new entry";
   seekp(begin_pos_ - static_cast<std::streamoff>(512));
@@ -371,23 +370,20 @@ TarEntryOutputStream::add_entry_for_new_data(const std::string& md5,
   );
   // go back to the original position
   this->seekp(end_pos_);
-  if (!add_symbol_link) {
-    return ret;
+  auto sym_header = TarHeader(name_, 0);
+  sym_header.set_link_name(data_file_name);
+  sym_header.write_header(*this);
+  if (!this->good()) {
+    MY_LOG(1) << "write symbol header failed. name=" << name_;
   } else {
-    auto sym_header = TarHeader(name_, 0);
-    sym_header.set_link_name(data_file_name);
-    sym_header.write_header(*this);
-    if (!this->good()) {
-      MY_LOG(1) << "write symbol header failed. name=" << name_;
-    } else {
-      MY_LOG(1) << " write header for symlink."         //
-                << " header=" << sym_header.to_string() //
-                << " stream_pos=" << tellp();
-    }
-    tar_file_.add_symlink_entry(name_, data_file_name,
-                                sym_header.block_begin_pos(),
-                                sym_header.block_end_pos());
+    MY_LOG(1) << " write header for symlink."         //
+              << " header=" << sym_header.to_string() //
+              << " stream_pos=" << tellp();
   }
+  tar_file_.add_symlink_entry(name_, data_file_name,
+                              sym_header.block_begin_pos(),
+                              sym_header.block_end_pos());
+
   return ret;
 }
 
@@ -464,11 +460,13 @@ TarEntryOutputStream::~TarEntryOutputStream() {
   auto prev_entry_for_path = find_prev_entry_for_path(name_);
   auto same_data_exists = prev_entry_for_md5 != nullptr;
   auto same_path_exists = prev_entry_for_path != nullptr;
-  if (!same_data_exists && !same_path_exists) {
-    // this is the very first case for a new file and new data.
-    add_entry_for_new_data(md5.value(), true);
-    add_1024_padding();
-  } else if (same_data_exists && !same_path_exists) {
+  // if (!same_data_exists && !same_path_exists) {
+  // this is the very first case for a new file and new data.
+  // TAR file is designed to be append only, so we need to add a new entry for
+  // the later entry wins if the file name is the same.
+  add_entry_for_new_data(md5.value());
+  add_1024_padding();
+  /*} else if (same_data_exists && !same_path_exists) {
     // this is the second case for shared data, but different file name.
     add_symlink_for_existing_entry(md5.value());
     add_1024_padding();
@@ -492,7 +490,7 @@ TarEntryOutputStream::~TarEntryOutputStream() {
                  << " same_data_exists=" << same_data_exists //
                  << " same_path_exists=" << same_path_exists //
         ;
-  }
+  }*/
 }
 
 std::streampos TarEntryOutputStream::calculate_tar_append_pos(
