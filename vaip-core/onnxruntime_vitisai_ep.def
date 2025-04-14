@@ -90,6 +90,7 @@ EXPORTS
     ?create@AnchorPoint@vaip_core@@SA?AV?$unique_ptr@VAnchorPoint@vaip_core@@U?$default_delete@VAnchorPoint@vaip_core@@@std@@@std@@AEBVAnchorPointProto@2@@Z
     ?create@Model@vaip_cxx@@SA?AV?$unique_ptr@VModel@vaip_cxx@@U?$default_delete@VModel@vaip_cxx@@@std@@@std@@AEBVpath@filesystem@4@AEBV?$vector@U?$pair@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@_J@std@@V?$allocator@U?$pair@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@_J@std@@@2@@4@@Z
     ?create@PassContext@vaip_core@@SA?AV?$unique_ptr@VPassContext@vaip_core@@U?$default_delete@VPassContext@vaip_core@@@std@@@std@@XZ
+    ?create_by_json@PatternBuilder@vaip_core@@QEAA?AV?$shared_ptr@VPattern@vaip_core@@@std@@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@4@@Z
     ?create_from_binary@PatternBuilder@vaip_core@@QEAA?AV?$shared_ptr@VPattern@vaip_core@@@std@@PEBD_K@Z
     ?create_pass@IPass@vaip_core@@SA?AV?$unique_ptr@VIPass@vaip_core@@U?$default_delete@VIPass@vaip_core@@@std@@@std@@V?$shared_ptr@VPassContext@vaip_core@@@4@AEBVPassProto@2@@Z
     ?create_proto@AnchorPoint@vaip_core@@SA?AV?$unique_ptr@VAnchorPointProto@vaip_core@@U?$default_delete@VAnchorPointProto@vaip_core@@@std@@@std@@XZ
