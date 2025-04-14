@@ -23,13 +23,16 @@ add_custom_command (
   DEPENDS ${VAIP_VERSEION_INFO_FILE}
 )
 add_custom_command (
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/config_json_binary.hpp
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/config_json_binary.hpp ${CMAKE_CURRENT_BINARY_DIR}/vaip_config.json
   COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../tools"
   $<TARGET_FILE:Python3::Interpreter> ${CMAKE_CURRENT_SOURCE_DIR}/src/xclbin/config_json_binary.hpp.py
   "${VAIP_JSON_CONFIG_FILE}"
   "${TRIM_CONFIG}"
   "${VAIP_XCLBIN_DIR}"
   "${morphizen_WITH_VAIP_CONFIG_FILE}"
+)
+add_custom_target(generate_vaip_config
+    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/vaip_config.json
 )
 if(morphizen_WITH_VAIP_CONFIG_FILE)
   install(FILES ${CMAKE_CURRENT_BINARY_DIR}/vaip_config.json DESTINATION bin)

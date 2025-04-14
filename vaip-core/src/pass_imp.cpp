@@ -542,6 +542,10 @@ IPass::create_pass(std::shared_ptr<PassContext> context,
                    const PassProto& pass_proto) {
   auto& plugin = pass_proto.plugin();
   auto plugin_holder = Plugin::get(plugin);
+  if (plugin_holder == nullptr) {
+    LOG(FATAL) << "cannot find plugin: " << plugin
+               << " enable env MORPHIZEN_DEBUG_PLUGIN=1 to see more details";
+  }
   auto& pass_info = *plugin_holder->invoke<PassInfo*>("vaip_pass_info");
   auto context_ptr =
       std::dynamic_pointer_cast<vaip_core::PassContextImp>(context);

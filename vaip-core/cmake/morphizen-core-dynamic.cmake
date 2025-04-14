@@ -60,3 +60,5 @@ MORPHIZEN_DEBUG_TAR_FILE=1
 DEBUG_TAR_CACHE=1
 "
 )
+
+add_dependencies(morphizen-core-dynamic generate_vaip_config)
