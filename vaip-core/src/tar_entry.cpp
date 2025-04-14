@@ -460,13 +460,13 @@ TarEntryOutputStream::~TarEntryOutputStream() {
   auto prev_entry_for_path = find_prev_entry_for_path(name_);
   auto same_data_exists = prev_entry_for_md5 != nullptr;
   auto same_path_exists = prev_entry_for_path != nullptr;
-  // if (!same_data_exists && !same_path_exists) {
-  // this is the very first case for a new file and new data.
-  // TAR file is designed to be append only, so we need to add a new entry for
-  // the later entry wins if the file name is the same.
-  add_entry_for_new_data(md5.value());
-  add_1024_padding();
-  /*} else if (same_data_exists && !same_path_exists) {
+  if (!same_data_exists && !same_path_exists) {
+    // this is the very first case for a new file and new data.
+    // TAR file is designed to be append only, so we need to add a new entry for
+    // the later entry wins if the file name is the same.
+    add_entry_for_new_data(md5.value());
+    add_1024_padding();
+  } else if (same_data_exists && !same_path_exists) {
     // this is the second case for shared data, but different file name.
     add_symlink_for_existing_entry(md5.value());
     add_1024_padding();
@@ -482,15 +482,16 @@ TarEntryOutputStream::~TarEntryOutputStream() {
   } else if (!same_data_exists && same_path_exists) {
     // this is the fourth case for different data and same file name.
     // we need to rename the old entry to a new name.
-    auto& new_data_entry = add_entry_for_new_data(md5.value(), false);
+    // TAR is append only, append the new entry to the end of the file.
+    // this is as same as the first case.
+    add_entry_for_new_data(md5.value());
     add_1024_padding();
-    rename_existing_entry(new_data_entry, *prev_entry_for_path);
   } else {
     CHECK(false) << "never goes here. this is a bug. "       //
                  << " same_data_exists=" << same_data_exists //
                  << " same_path_exists=" << same_path_exists //
         ;
-  }*/
+  }
 }
 
 std::streampos TarEntryOutputStream::calculate_tar_append_pos(
