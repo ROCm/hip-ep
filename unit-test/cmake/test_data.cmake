@@ -25,7 +25,7 @@ morphizen_add_python_target (
   TARGET tgt_test_custom_op.onnx
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/test_costom_op.onnx
   SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/vaip/test_custom_op.py
-  ARGS $${CMAKE_CURRENT_BINARY_DIR}/test_costom_op.onnx
+  ARGS ${CMAKE_CURRENT_BINARY_DIR}/test_costom_op.onnx
   FOLDER "morphizen/unit-tests"
 )
 

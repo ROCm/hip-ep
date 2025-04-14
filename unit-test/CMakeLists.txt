@@ -95,3 +95,10 @@ set_target_properties(${TEST_EXE_NAME} PROPERTIES
 ## for test hello_plugin test
 add_library(hello_plugin_dll SHARED vaip/hello_plugin.cpp)
 set_target_properties(hello_plugin_dll PROPERTIES FOLDER morphizen/unit-tests)
+add_dependencies(${TEST_EXE_NAME}
+  tgt_pt_resnet50.onnx 
+  tgt_test_constant_initializer.onnx
+  tgt_sample.onnx
+  tgt_sample_src_tar
+  tgt_test_custom_op.onnx
+)
