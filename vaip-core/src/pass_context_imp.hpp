@@ -188,6 +188,9 @@ public:
   virtual std::string
   get_run_option(const std::string& option_name,
                  const std::string& default_value) const override final;
+  virtual std::string
+  get_meta_def_param(const MetaDefProto& meta_def) const override final;
+  ;
 
   virtual std::string
   get_ep_dynamic_option(const std::string& option_name,

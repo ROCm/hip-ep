@@ -60,6 +60,22 @@ DEF_ENV_PARAM(DEBUG_VAIP_PASS, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_VAIP_PASS) >= n)
 
 namespace vaip_core {
+
+void IPass::attach_meta_def_param(MetaDefProto& meta_def,
+                                  const char* json_param) const {
+  if (json_param == nullptr) {
+    return;
+  }
+  auto json_str = std::string(json_param);
+  auto struct_proto = google::protobuf::Struct();
+  auto status =
+      google::protobuf::util::JsonStringToMessage(json_str, &struct_proto);
+  if (!status.ok()) {
+    LOG(FATAL) << "failed to attach meta_def param: " << status.ToString();
+  }
+  meta_def.mutable_param()->CopyFrom(struct_proto);
+}
+
 static bool can_be_dumped(const std::shared_ptr<PassContext>& proto) {
   static bool warned = false;
   bool can_be_dumped = proto->get_config_proto().encryption_key() == "";

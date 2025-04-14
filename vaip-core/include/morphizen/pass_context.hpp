@@ -215,7 +215,16 @@ public:
   virtual std::string
   get_run_option(const std::string& option_name,
                  const std::string& default_value) const = 0;
-
+  /**
+   * @brief Retrieves the meta definition parameter from the given MetaDefProto
+   * object.
+   *
+   * @param meta_def A reference to a MetaDefProto object from which the meta
+   * definition parameter is extracted.
+   * @return A string representing the meta definition parameter.
+   */
+  virtual std::string
+  get_meta_def_param(const MetaDefProto& meta_def) const = 0;
   virtual std::string
   get_ep_dynamic_option(const std::string& option_name,
                         const std::string& default_value) const = 0;

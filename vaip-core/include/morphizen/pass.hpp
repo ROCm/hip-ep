@@ -138,6 +138,18 @@ public:
 
   IPass() = default;
   virtual ~IPass() = default;
+  /**
+   * @brief Attaches a JSON parameter to a MetaDefProto object.
+   *
+   * This function takes a MetaDefProto object and a JSON-formatted string,
+   * and associates the JSON parameter with the given MetaDefProto object.
+   *
+   * @param meta_def Reference to the MetaDefProto object to which the parameter
+   * will be attached.
+   * @param json_param A C-style string containing the JSON-formatted parameter.
+   */
+  VAIP_DLL_SPEC void attach_meta_def_param(MetaDefProto& meta_def,
+                                           const char* json_param) const;
 
 public:
   virtual const std::string& name() const = 0;

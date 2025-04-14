@@ -154,6 +154,10 @@ public:
     return std::const_pointer_cast<PassContext>(context_);
   }
 
+  std::string get_meta_def_param() const {
+    return context_->get_meta_def_param(*meta_def_);
+  }
+
 protected:
   std::shared_ptr<const PassContext> context_;
   std::shared_ptr<MetaDefProto> meta_def_;

@@ -46,6 +46,7 @@
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE, "0")
 
 namespace vaip_core {
+
 /// struct WithPass
 PassContextImp::WithPass::WithPass(PassContextImp& context, IPass& pass)
     : _context(&context) {
@@ -224,6 +225,17 @@ PassContextImp::get_run_option(const std::string& option_name,
     }
   }
   return ret;
+}
+std::string
+PassContextImp::get_meta_def_param(const MetaDefProto& meta_def) const {
+  auto json_str = std::string();
+  auto status =
+      google::protobuf::util::MessageToJsonString(meta_def.param(), &json_str);
+  if (!status.ok()) {
+    LOG(FATAL) << "failed to get meta_def param: " << status.ToString();
+  }
+  MY_LOG(1) << "meta_def param: " << json_str;
+  return json_str;
 }
 std::string
 PassContextImp::get_ep_dynamic_option(const std::string& option_name,

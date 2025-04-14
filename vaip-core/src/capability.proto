@@ -31,6 +31,8 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 syntax = "proto3";
+import "google/protobuf/struct.proto";
+
 package vaip_core;
 message DataOperator{
   bool is_pad = 1;
@@ -181,4 +183,5 @@ message MetaDefProto {
     VaimlParam vaiml_param = 11;
   }
   bool fallback_CPU = 12;
+  google.protobuf.Struct param = 13;
 }
