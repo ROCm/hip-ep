@@ -47,16 +47,7 @@
 #ifdef ENABLE_PYTHON
 #  include <pybind11/embed.h>
 #  include <pybind11/pybind11.h>
-#  ifdef Py_NO_ENABLE_SHARED
-#    include "import_python_module.h"
-#    include "py_zip.hpp"
-#    include "static_python_init.hpp"
-#  endif
 namespace py = pybind11;
-#  ifdef Py_NO_ENABLE_SHARED
-DEFINE_EXTERNAL_SYMBOL();
-EXTERN_PYTHON_MACRO(voe_cpp2py_export);
-#  endif
 #endif
 
 DEF_ENV_PARAM(DEBUG_VAIP_UTIL, "0")
@@ -195,20 +186,7 @@ std::shared_ptr<void> init_interpreter() {
   std::shared_ptr<void> ret;
   std::lock_guard<std::mutex> lock(mtx);
   if (!Py_IsInitialized()) {
-#  ifdef Py_NO_ENABLE_SHARED
-    PyImport_AppendInittab("voe.voe_cpp2py_export", PyInit_voe_cpp2py_export);
-    IMPORT_EXTERNAL_SYMBOL();
-    // basically same as the scoped_interpreter, excepts path
-    static static_scoped_interpreter inter{};
-    // fix imoporting submodule
-    std::string s(get_vaip_lib_in_mem(), get_vaip_lib_in_mem_size());
-    py::bytes py_bytes(s);
-    auto global = py::globals();
-    global["vaip_lib"] = py_bytes;
-    PyRun_SimpleString(get_importer_py_str());
-#  else
     static py::scoped_interpreter inter{};
-#  endif
     auto p = static_cast<void*>(&inter);
     ret = std::shared_ptr<void>(p, [](void* p) {});
     py_interpreter_holder = ret;

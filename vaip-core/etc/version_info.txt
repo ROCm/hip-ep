@@ -2,7 +2,6 @@
 glog;v0.6.0;v0.6.0
 gsl;v4.0.0;v4.0.0
 protobuf;v3.21.12;v3.21.12
-py_protobuf;v3.21.12;v3.21.12
 eigen;84282c42fc05d08216331203206de7ceb024a9c6;84282c42fc05d08216331203206de7ceb024a9c6
 pybind11;v2.10.0;v2.10.0
 opencv;4.6.0;4.6.0
@@ -12,10 +11,6 @@ spdlog;v1.x;v1.x
 json;v3.11.2;v3.11.2
 gtest;v1.15.0;v1.15.0
 vaitrace;main;main
-cpython;v3.9.17;v3.9.17
-static_cpython;v3.9.17;v3.9.17
-numpy;v1.26.4;v1.26.4
-static_python;c1a512c14c7c8380c105f044252dad0f4a4d21f2;c1a512c14c7c8380c105f044252dad0f4a4d21f2
 onnx;v1.16.0;v1.16.0
 transformers_header;0deb2733bf4019f349fcbbf033a61b6cc32bdcdc;0deb2733bf4019f349fcbbf033a61b6cc32bdcdc
 aie_controller;25d7775acb17e13dd6f9cbdcc6d78eeb9dcc3a4f;25d7775acb17e13dd6f9cbdcc6d78eeb9dcc3a4f
