@@ -1,79 +1,115 @@
-name: windows build with vai-rt branch
+name: BuildOnWindows
 
 on:
   pull_request:
-      paths:
-        - '.github/workflows/**'
-        - '**/*.py'
-        - '**/*.yml'
-    inputs:
-      repository:
-        description: 'vai-rt repository'
-        required: true
-        default: 'VitisAI'xs
-      branch:
-        description: 'build branch'
-        required: true
-        default: 'dev'
-      exclude_project:
-        description: 'build exclude-project'
-        required: true
-        default: 'gsl protobuf eigen pybind11 opencv vaitrace unilog onnxruntime'
+  merge_group:
+  workflow_dispatch:
 
 env:
-  VAI_RT_PREFIX: ${{ github.workspace }}/../gi
-  VAI_RT_WORKSPACE: ${{ github.workspace }}/../
-  VAI_RT_BUILD_DIR: ${{ github.workspace }}/../gb
-  WITH_XCOMPILER: "ON"
-  EN_VAIML: "ON"
-  ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+  VAI_RT_PREFIX: ${{ github.workspace }}/gi/
+  VAI_RT_WORKSPACE: ${{ github.workspace }}/src_dir
+  VAI_RT_BUILD_DIR: ${{ github.workspace }}/gb/
 
 jobs:
   windows-build:
-    runs-on: [ build-machine ]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ windows_vitisai ]
+
     steps:
-      - name: Download vaip Repository
-        uses: actions/checkout@v3
-
-      - name: Download vai-rt Repository
-        uses: actions/checkout@v3
-        with:
-          repository: ${{ github.event.inputs.repository }}/vai-rt
-          ref: ${{ github.event.inputs.branch }}
-          path: vai-rt
-
-      - name: install setuptools
-        run: python -m pip install setuptools requests
-
-      - name: Compile --exclude-project vaip test_onnx_runner, Rely on C:\j\a-r\_work\vaip\gi\xrt, if you update xrt, you need to synchronize to this directory #user path C:\Windows\ServiceProfiles\NetworkService
-        run: python vai-rt/main.py --type release --release_file vai-rt/release_file/latest_dev.txt --exclude-project glog ${{ github.event.inputs.exclude_project }} vaip test_onnx_runner
-
-      - name: download onnxruntime
-        run: python vai-rt/main.py --type release --release_file vai-rt/release_file/latest_dev.txt --project onnxruntime --download-only
-        env:
-          VAI_RT_WORKSPACE: ${{ github.workspace }}/../pvaip
-
-      - name: Compile vaip
-        run: python vai-rt/main.py --type release --release_file vai-rt/release_file/latest_dev.txt --project vaip --clean
-        env:
-          VAI_RT_WORKSPACE: ${{ github.workspace }}/../pvaip
-
-      - name: Compile test_onnx_runner
-        run: python vai-rt/main.py --type release --release_file vai-rt/release_file/latest_dev.txt --project test_onnx_runner
-
-      - name: package
-        run: python vai-rt/main.py --type release --dry-run --package --release_file vai-rt/release_file/latest_dev.txt
-
-      - name: upload to http://xcdl220229:8081
-        id: upload
-        run: python .github/workflows/mv-package.py ${{ github.event.inputs.repository }}${{ github.event.inputs.branch }}
-        env:
-          https_proxy:
-          http_proxy:
-
-      - name: remove voe*.zip
-        shell: python
+      - uses: actions/checkout@v3
+      - name: Download ONNXRuntime
         run: |
-          import os
-          os.remove(os.path.join("..", "gb", os.path.basename("${{ steps.upload.outputs.download_url }}")))
+          echo "Download ONNXRuntime on Windows..."
+          $ErrorActionPreference = "Stop"
+          $directoryPath = "../onnxruntime"
+          if (-Not (Test-Path -Path $directoryPath)) {
+              Write-Host "Directory does not exist. Cloning the repository..."
+              git clone https://github.com/Microsoft/onnxruntime.git --branch main --single-branch --depth 1 $directoryPath
+          } else {
+              # Directory exists, skip cloning
+              Write-Host "Directory already exists. Skipping clone."
+              # Restore the directory to its original state
+              # save the current dirctory
+              $currentDirectory = Get-Location
+              Set-Location -Path $directoryPath
+              git fetch origin main
+              git reset --hard origin/main
+              git clean -fdx
+              Write-Host "Directory restored to its original state."
+              # restore to old directory
+              Set-Location -Path $currentDirectory
+          }
 
+      - name: Get ONNXRuntime commit hash
+        id: ort-commit
+        run: |
+            cd ../onnxruntime
+            $hash = git rev-parse HEAD
+            echo "commit_hash=$hash" >> $env:GITHUB_OUTPUT
+
+      - name: Cache ONNXRuntime install
+        uses: actions/cache@v3
+        with:
+            path: ${{ env.VAI_RT_PREFIX }}
+            key: ort-install-${{ steps.ort-commit.outputs.commit_hash }}
+
+      - name: Build and install ONNXRuntime
+        run: |
+          echo " Build ONNXRuntime on Windows..."
+          $ErrorActionPreference = "Stop"
+          $file = "$Env:VAI_RT_PREFIX/lib/cmake/onnxruntime/onnxruntimeConfig.cmake"
+          if (Test-Path $file) {
+              Write-Host " $file  already exists. Skipping building onnxruntime."
+              exit 0
+          } else {
+              Write-Host " $file  does not exist. Proceeding with building onnxruntime."
+          }
+          $directoryPath = "../onnxruntime"
+          cmake     `
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DProtobuf_DEBUG=ON -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON -A x64 -T host=x64 -G 'Visual Studio 17 2022' -Donnxruntime_RUN_ONNX_TESTS=OFF -Donnxruntime_BUILD_UNIT_TESTS=OFF -Donnxruntime_GENERATE_TEST_REPORTS=OFF -Donnxruntime_USE_MIMALLOC=OFF -Donnxruntime_ENABLE_PYTHON=OFF -Donnxruntime_BUILD_CSHARP=OFF -Donnxruntime_BUILD_JAVA=OFF -Donnxruntime_BUILD_NODEJS=OFF -Donnxruntime_BUILD_OBJC=OFF -Donnxruntime_BUILD_SHARED_LIB=ON -Donnxruntime_BUILD_APPLE_FRAMEWORK=OFF -Donnxruntime_USE_DNNL=OFF -Donnxruntime_USE_NNAPI_BUILTIN=OFF -Donnxruntime_USE_RKNPU=OFF -Donnxruntime_USE_LLVM=OFF -Donnxruntime_ENABLE_MICROSOFT_INTERNAL=OFF -Donnxruntime_USE_VITISAI=ON -Donnxruntime_USE_TENSORRT=OFF -Donnxruntime_USE_TENSORRT_BUILTIN_PARSER=ON -Donnxruntime_USE_TVM=OFF -Donnxruntime_TVM_CUDA_RUNTIME=OFF -Donnxruntime_TVM_USE_HASH=OFF -Donnxruntime_USE_MIGRAPHX=OFF -Donnxruntime_DISABLE_CONTRIB_OPS=OFF -Donnxruntime_DISABLE_ML_OPS=OFF -Donnxruntime_DISABLE_RTTI=OFF -Donnxruntime_DISABLE_EXCEPTIONS=OFF -Donnxruntime_MINIMAL_BUILD=OFF -Donnxruntime_EXTENDED_MINIMAL_BUILD=OFF -Donnxruntime_MINIMAL_BUILD_CUSTOM_OPS=OFF -Donnxruntime_REDUCED_OPS_BUILD=OFF -Donnxruntime_ENABLE_LANGUAGE_INTEROP_OPS=OFF -Donnxruntime_USE_DML=OFF -Donnxruntime_USE_WINML=OFF -Donnxruntime_BUILD_MS_EXPERIMENTAL_OPS=OFF -Donnxruntime_USE_TELEMETRY=OFF -Donnxruntime_ENABLE_LTO=OFF -Donnxruntime_USE_ACL=OFF -Donnxruntime_USE_ACL_1902=OFF -Donnxruntime_USE_ACL_1905=OFF -Donnxruntime_USE_ACL_1908=OFF -Donnxruntime_USE_ACL_2002=OFF -Donnxruntime_USE_ACL_2308=OFF -Donnxruntime_USE_ARMNN=OFF -Donnxruntime_ARMNN_RELU_USE_CPU=ON -Donnxruntime_ARMNN_BN_USE_CPU=ON -Donnxruntime_USE_JSEP=OFF -Donnxruntime_ENABLE_NVTX_PROFILE=OFF -Donnxruntime_ENABLE_TRAINING=OFF -Donnxruntime_ENABLE_TRAINING_OPS=OFF -Donnxruntime_ENABLE_TRAINING_APIS=OFF -Donnxruntime_ENABLE_CPU_FP16_OPS=OFF -Donnxruntime_USE_NCCL=OFF -Donnxruntime_BUILD_BENCHMARKS=OFF -Donnxruntime_USE_ROCM=OFF -DOnnxruntime_GCOV_COVERAGE=OFF -Donnxruntime_USE_MPI=OFF -Donnxruntime_ENABLE_MEMORY_PROFILE=OFF -Donnxruntime_ENABLE_CUDA_LINE_NUMBER_INFO=OFF -Donnxruntime_USE_CUDA_NHWC_OPS=OFF -Donnxruntime_BUILD_WEBASSEMBLY_STATIC_LIB=OFF -Donnxruntime_ENABLE_WEBASSEMBLY_EXCEPTION_CATCHING=ON -Donnxruntime_ENABLE_WEBASSEMBLY_API_EXCEPTION_CATCHING=OFF -Donnxruntime_ENABLE_WEBASSEMBLY_EXCEPTION_THROWING=ON -Donnxruntime_WEBASSEMBLY_RUN_TESTS_IN_BROWSER=OFF -Donnxruntime_ENABLE_WEBASSEMBLY_THREADS=OFF -Donnxruntime_ENABLE_WEBASSEMBLY_DEBUG_INFO=OFF -Donnxruntime_ENABLE_WEBASSEMBLY_PROFILING=OFF -Donnxruntime_ENABLE_LAZY_TENSOR=OFF -Donnxruntime_ENABLE_EXTERNAL_CUSTOM_OP_SCHEMAS=OFF -Donnxruntime_ENABLE_CUDA_PROFILING=OFF -Donnxruntime_ENABLE_ROCM_PROFILING=OFF -Donnxruntime_USE_XNNPACK=OFF -Donnxruntime_USE_WEBNN=OFF -Donnxruntime_USE_CANN=OFF -Donnxruntime_USE_TRITON_KERNEL=OFF -Donnxruntime_DISABLE_FLOAT8_TYPES=OFF -Donnxruntime_DISABLE_SPARSE_TENSORS=OFF -Donnxruntime_DISABLE_OPTIONAL_TYPE=OFF -Donnxruntime_USE_FULL_PROTOBUF=ON -DProtobuf_USE_STATIC_LIBS=ON '-DCMAKE_VS_GLOBALS=UseMultiToolTask=true;EnforceProcessCountAcrossBuilds=true' -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_TLS_VERIFY=FALSE -DBUILD_ONNX_PYTHON=OFF -DFETCHCONTENT_QUIET=OFF -DONNX_USE_MSVC_STATIC_RUNTIME=ON -Dprotobuf_MSVC_STATIC_RUNTIME=ON -Dgtest_force_shared_crt=OFF -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=ProgramDatabase '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>' -DABSL_MSVC_STATIC_RUNTIME=ON `
+            -S ../onnxruntime/cmake -B "$Env:VAI_RT_BUILD_DIR/onnxruntime"  "-DCMAKE_INSTALL_PREFIX=$Env:VAI_RT_PREFIX"
+            $jobs = [Environment]::ProcessorCount
+            cmake --build "$Env:VAI_RT_BUILD_DIR/onnxruntime" -j $job --target install
+
+      - name: Cache morphizen build_deps
+        uses: actions/cache@v3
+        with:
+            path: ${{ env.VAI_RT_BUILD_DIR }}/morphizen_deps
+            key: morphizen-build-{{ hashFiles('./cmake/deps.txt' './cmake/deps.cmake') }}
+            restore-keys: |
+              morphizen-build-
+              morphizen-build-{{ hashFiles('./cmake/deps.txt' './cmake/deps.cmake') }}
+              morphizen-build-
+
+      - name: Configure morphizen
+        if: true
+        run: |
+          echo "Configure morphizen on Windows... using ${{ env.VAI_RT_BUILD_DIR }}/morphizen_deps"
+          $ErrorActionPreference = "Stop"
+          git submodule update --init --recursive
+          # prevent cmake from using the package registry
+          # -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF
+          # -DCMAKE_FIND_PACKAGE_NO_SYSTEM_PACKAGE_REGISTRY=ON `
+          cmake -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF `
+                -DCMAKE_FIND_PACKAGE_NO_SYSTEM_PACKAGE_REGISTRY=ON `
+              -S . -B "$Env:VAI_RT_BUILD_DIR/morphizen"  "-DCMAKE_INSTALL_PREFIX=$Env:VAI_RT_PREFIX" `
+              -DFETCHCONTENT_BASE_DIR=${{ env.VAI_RT_BUILD_DIR }}/morphizen_deps    `
+              --fresh
+
+      - name: Build morphizen
+        if: false
+        run: |
+          echo "Build morphizen on Windows..."
+          $ErrorActionPreference = "Stop"
+          $jobs = [Environment]::ProcessorCount
+          cmake --build  "$Env:VAI_RT_BUILD_DIR/morphizen" -j $jobs
+
+      - name: Install morphizen
+        if: false
+        run: |
+            echo "Install morphizen on Windows..."
+            $ErrorActionPreference = "Stop"
+            $jobs = [Environment]::ProcessorCount
+            cmake --install  "$Env:VAI_RT_BUILD_DIR/morphizen"

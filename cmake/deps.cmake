@@ -35,6 +35,7 @@ else()
     URL ${DEP_URL_eigen}
     URL_HASH SHA1=${DEP_SHA1_eigen}
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    EXCLUDE_FROM_ALL
     OVERRIDE_FIND_PACKAGE)
   find_package(Eigen3 REQUIRED)
 endif()
