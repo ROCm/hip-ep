@@ -1,0 +1,79 @@
+name: windows build with vai-rt branch
+
+on:
+  pull_request:
+      paths:
+        - '.github/workflows/**'
+        - '**/*.py'
+        - '**/*.yml'
+    inputs:
+      repository:
+        description: 'vai-rt repository'
+        required: true
+        default: 'VitisAI'xs
+      branch:
+        description: 'build branch'
+        required: true
+        default: 'dev'
+      exclude_project:
+        description: 'build exclude-project'
+        required: true
+        default: 'gsl protobuf eigen pybind11 opencv vaitrace unilog onnxruntime'
+
+env:
+  VAI_RT_PREFIX: ${{ github.workspace }}/../gi
+  VAI_RT_WORKSPACE: ${{ github.workspace }}/../
+  VAI_RT_BUILD_DIR: ${{ github.workspace }}/../gb
+  WITH_XCOMPILER: "ON"
+  EN_VAIML: "ON"
+  ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+
+jobs:
+  windows-build:
+    runs-on: [ build-machine ]
+    steps:
+      - name: Download vaip Repository
+        uses: actions/checkout@v3
+
+      - name: Download vai-rt Repository
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.event.inputs.repository }}/vai-rt
+          ref: ${{ github.event.inputs.branch }}
+          path: vai-rt
+
+      - name: install setuptools
+        run: python -m pip install setuptools requests
+
+      - name: Compile --exclude-project vaip test_onnx_runner, Rely on C:\j\a-r\_work\vaip\gi\xrt, if you update xrt, you need to synchronize to this directory #user path C:\Windows\ServiceProfiles\NetworkService
+        run: python vai-rt/main.py --type release --release_file vai-rt/release_file/latest_dev.txt --exclude-project glog ${{ github.event.inputs.exclude_project }} vaip test_onnx_runner
+
+      - name: download onnxruntime
+        run: python vai-rt/main.py --type release --release_file vai-rt/release_file/latest_dev.txt --project onnxruntime --download-only
+        env:
+          VAI_RT_WORKSPACE: ${{ github.workspace }}/../pvaip
+
+      - name: Compile vaip
+        run: python vai-rt/main.py --type release --release_file vai-rt/release_file/latest_dev.txt --project vaip --clean
+        env:
+          VAI_RT_WORKSPACE: ${{ github.workspace }}/../pvaip
+
+      - name: Compile test_onnx_runner
+        run: python vai-rt/main.py --type release --release_file vai-rt/release_file/latest_dev.txt --project test_onnx_runner
+
+      - name: package
+        run: python vai-rt/main.py --type release --dry-run --package --release_file vai-rt/release_file/latest_dev.txt
+
+      - name: upload to http://xcdl220229:8081
+        id: upload
+        run: python .github/workflows/mv-package.py ${{ github.event.inputs.repository }}${{ github.event.inputs.branch }}
+        env:
+          https_proxy:
+          http_proxy:
+
+      - name: remove voe*.zip
+        shell: python
+        run: |
+          import os
+          os.remove(os.path.join("..", "gb", os.path.basename("${{ steps.upload.outputs.download_url }}")))
+

@@ -39,10 +39,12 @@ def generate_map(xclbin_root_path):
     # probably bundleing xclbin is disabled.
     if xclbin_root_path != "":
         print(f"-- search xclbin in {xclbin_root_path}")
-        file_list = glob.glob(str(Path(xclbin_root_path) / "**" / "*.xclbin"), recursive=True)
+        file_list = glob.glob(
+            str(Path(xclbin_root_path) / "**" / "*.xclbin"), recursive=True
+        )
     else:
         print("-- no xclbin path is not specified, please set -DVAIP_XCLBIN_PATH=<>")
-        
+
     for file in file_list:
         if file:
             print(f"-- add xclbin file {file}")
@@ -77,6 +79,7 @@ def main():
         xclbin_root_path = sys.argv[2]
     with open(h_inc, "w") as f:
         f.write(generate_map(xclbin_root_path))
+
 
 if __name__ == "__main__":
     main()

@@ -943,8 +943,10 @@ extern "C" VAIP_DLL_SPEC int create_ep_context_nodes(
   auto p_context = dynamic_cast<PassContextImp*>(ep->get_context().get());
   CHECK(p_context != nullptr);
   auto& context = *p_context;
-  auto deferred_write = std::shared_ptr<void>(
-      nullptr, [&context](void* p) { if(0) context.save_context_json(); });
+  auto deferred_write = std::shared_ptr<void>(nullptr, [&context](void* p) {
+    if (0)
+      context.save_context_json();
+  });
   auto measure_create_ep_context_nodes =
       context.measure("create_ep_context_nodes");
   ret.reserve(eps.size());
@@ -1206,8 +1208,8 @@ compile_onnx_model_internal(
         context->measure("before_compile_onnx_model_internal");
     auto& model = graph_get_model(onnx_graph);
     int64_t threshold = ENV_PARAM(XLNX_model_clone_external_data_threshold);
-    auto po_threshold =
-        context->get_provider_option("XLNX_model_clone_external_data_threshold");
+    auto po_threshold = context->get_provider_option(
+        "XLNX_model_clone_external_data_threshold");
     if (po_threshold) {
       threshold = std::stoll(po_threshold.value());
     }
@@ -1339,8 +1341,10 @@ compile_onnx_model_3(const std::string& model_path, const Graph& onnx_graph,
   context->add_context_resource(
       "__level_0_graph",
       std::shared_ptr<void>((void*)&cloned_graph, [](void*) {}));
-  auto deferred_write = std::shared_ptr<void>(
-      nullptr, [context](void* p) { if(0) context->save_context_json(); });
+  auto deferred_write = std::shared_ptr<void>(nullptr, [context](void* p) {
+    if (0)
+      context->save_context_json();
+  });
   auto measture_compile_onnx_model_3 = context->measure("compile_onnx_model_3");
   // we cannot use get_cache_filename because cache might be a tar file in
   // memory instead of a physical directory.

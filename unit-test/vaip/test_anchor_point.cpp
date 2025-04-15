@@ -101,7 +101,7 @@ static void test_append(const IPass& pass, const std::string& f1,
   LOG(INFO) << "input:\n"                            //
             << i1->get_proto().DebugString() << "\n" //
             << i2->get_proto().DebugString() << "\n";
-  LOG(INFO) << "output\n" //
+  LOG(INFO) << "output\n"                            //
             << i1->append(pass, *i2)->get_proto().DebugString() << "\n";
 }
 
