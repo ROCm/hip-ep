@@ -208,6 +208,10 @@ if(MSVC)
   target_compile_options(morphizen-core-static PUBLIC "/Zc:__cplusplus")
 endif(MSVC)
 
+if(WIN24_BUILD)
+  target_compile_definitions(${LIB_NAME} PUBLIC "-DWIN24_BUILD=ON")
+endif()
+
 if(BUILD_PYTHON)
   target_link_libraries(${LIB_NAME} PRIVATE Python3::Python)
   target_compile_definitions(${LIB_NAME} PRIVATE "ENABLE_PYTHON=1")

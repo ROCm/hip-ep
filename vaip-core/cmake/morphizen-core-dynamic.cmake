@@ -33,6 +33,10 @@ if(MSVC)
   target_compile_options(morphizen-core-dynamic PUBLIC "/Zc:__cplusplus")
 endif(MSVC)
 
+if(WIN24_BUILD)
+  target_compile_definitions(${LIB_NAME} PUBLIC "-DWIN24_BUILD=ON")
+endif()
+
 set_target_properties(morphizen-core-dynamic PROPERTIES
   VS_DEBUGGER_COMMAND "${CMAKE_INSTALL_PREFIX}\\bin\\test_onnx_runner.exe"
   VS_DEBUGGER_COMMAND_ARGUMENTS "${CMAKE_CURRENT_SOURCE_DIR}\\..\\..\\test_onnx_runner\\data\\pt_resnet50.onnx"
