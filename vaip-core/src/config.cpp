@@ -320,9 +320,19 @@ void update_config_by_target(ConfigProto& proto, const MepConfigTable* mep) {
   if (target.empty()) {
     target = proto.target();
   }
+  // Target priority
+  // 1. provider option
+  // 2. meptable
+  // 3. default target in config file
+  auto target_it = proto.provider_options().find("target");
+  if (target_it != proto.provider_options().end()) {
+    target = target_it->second;
+  }
   if (target.empty()) {
     LOG_VERBOSE(1)
         << "Target is empty, run all passes."; // old version, compatible
+    // TODO: now is it a fatal error? because passes in vaip_config.jsson are
+    // all available passes, it makes not much sense to run all passes.
     return;
   }
   auto target_proto = get_target_proto(proto, target);
@@ -441,6 +451,11 @@ void add_custom_field(ConfigProto& proto, const std::string& str) {
   }
   auto po = proto.mutable_provider_options();
   for (auto key : to_be_delete) {
+    if (key == "target") {
+      // The target needs to be kept in the provider options , "target" has
+      // default value in config file.
+      continue;
+    }
     LOG_VERBOSE(1) << "picked_out_config: " << key << " = " << po->at(key);
     po->erase(key);
   }
