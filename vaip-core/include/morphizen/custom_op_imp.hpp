@@ -80,9 +80,71 @@ struct CustomOp_compile_t {
 template <typename T, typename CustomOpImp>
 struct CustomOp_compile_t<
     T, CustomOpImp, std::void_t<decltype(std::declval<T&>().get_model())>> {
+  // this code is activated when VAIP_ORT_API_MAJOR >= 10 see VitisAI/vaip#3504
+  // for more details. T is ExecutionProviderImp always.
+  // ExecutionProviderImp::get_mode() is added in VAIP_ORT_API_MAJOR >= 10
+  // see [VitisAI] Cache node subgraph when necessary (Onnxruntime#22073) for
+  // details.
+  //
+  // in VitisAIExecutionProvider::Compile(), we create the model object is fall
+  // back on CPU is enabled. as below.
+
+  // clang-format off
+  /*
+  if (ep->get_meta_def_fallback_CPU()) {
+      auto& subgraph = fused_node_graph.filtered_graph.get();
+      auto& logger = logging::LoggingManager::DefaultLogger();
+      auto model_proto = subgraph.CreateModel(logger)->ToProto();
+      subgraph.ToProto(*model_proto->mutable_graph(), true, true);
+      auto local_registries = IOnnxRuntimeOpSchemaRegistryList{subgraph.GetSchemaRegistry()};
+      auto model = Model::Create(std::move(*model_proto), subgraph.ModelPath(), &local_registries, logger);
+      ep->set_model(model.release());
+    }
+*/
+  // clang-format on
   static std::unique_ptr<CustomOp>
   CustomOp_compile(const T* self, std::shared_ptr<const PassContext> context,
                    std::shared_ptr<MetaDefProto> meta_def) {
+    // transfer the model from ExecutionProviderImp to CustomOpImp, so that
+    // CustomOpImp<XXX> can access the model
+    // then in CustomOpImp constructor, we create a session from the model
+
+    // clang-format off
+    /*
+     session_{CustomOp_InitSession_t<
+        vaip_core::OrtApiForVaip>::CustomOp_InitSession(vaip_core::api(),
+                                                     model, meta_def)} {}
+    */
+
+    // the next step is to create a ORT::Session from the model
+    // NOTE THAT: the model object is deleted after the session object is created
+    // so that there is no memory leak for the model object
+    /*
+    CustomOp_InitSession(const T* api, onnxruntime::Model* model,
+                     const std::shared_ptr<MetaDefProto>& meta_def) {
+    if (meta_def->fallback_cpu()) {
+      CHECK(model);
+      Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "VitisAI_VAIP_CustomOp");
+      auto model_proto = api->model_to_proto(*model);
+      auto mproto_string = api->model_proto_serialize_as_string(*model_proto);
+      auto session =
+          Ort::Session(env, mproto_string.get()->c_str(),
+                      mproto_string.get()->size(), Ort::SessionOptions());
+      api->model_proto_delete(model_proto);
+      api->model_delete(model);
+      return session;
+    }
+    return Ort::Session(nullptr);
+  }
+  */
+    // clang-format on
+
+    // the Ort::Session is very much like a unique_ptr, it transfer the
+    // ownership to CustomOpImp::session_. now CustomOpXXX is potentially fall
+    // back on CPU, by invoking CustomOpImp::ComputeCpu. it needs some resources
+    // to create the session object. So if CustomOp<XXX> don't need this
+    // feature, please turn it off by setting meta_def->set_fallback_cpu(false).
+
     auto ret =
         std::make_unique<CustomOpImp>(context, meta_def, self->get_model());
     const_cast<T*>(self)->set_model(nullptr);
