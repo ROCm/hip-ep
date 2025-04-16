@@ -33,7 +33,7 @@
 #include <glog/logging.h>
 #include <exception>
 #include <limits>
-#include "onnxruntime/onnxruntime_cxx_api.h"
+#include "onnxruntime_cxx_api.h"
 #include "morphizen/vaip.hpp"
 
 extern "C" {

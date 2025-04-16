@@ -27,20 +27,20 @@ jobs:
           if (-Not (Test-Path -Path $directoryPath)) {
               Write-Host "Directory does not exist. Cloning the repository..."
               git clone https://github.com/Microsoft/onnxruntime.git --branch main --single-branch --depth 1 $directoryPath
-          } else {
-              # Directory exists, skip cloning
-              Write-Host "Directory already exists. Skipping clone."
-              # Restore the directory to its original state
-              # save the current dirctory
-              $currentDirectory = Get-Location
-              Set-Location -Path $directoryPath
-              git fetch origin main
-              git reset --hard origin/main
-              git clean -fdx
-              Write-Host "Directory restored to its original state."
-              # restore to old directory
-              Set-Location -Path $currentDirectory
           }
+          # Directory exists, skip cloning
+          Write-Host "Directory already exists. Skipping clone."
+          # Restore the directory to its original state
+          # save the current dirctory
+          $currentDirectory = Get-Location
+          Set-Location -Path $directoryPath
+          git fetch origin main
+          git checkout "@{last wednesday}" --force
+          git clean -fdx
+          Write-Host ""
+          # restore to old directory
+          Set-Location -Path $currentDirectory
+
 
       - name: Get ONNXRuntime commit hash
         id: ort-commit
@@ -99,7 +99,7 @@ jobs:
               --fresh
 
       - name: Build morphizen
-        if: false
+        if: true
         run: |
           echo "Build morphizen on Windows..."
           $ErrorActionPreference = "Stop"
@@ -107,9 +107,17 @@ jobs:
           cmake --build  "$Env:VAI_RT_BUILD_DIR/morphizen" -j $jobs
 
       - name: Install morphizen
-        if: false
+        if: true
         run: |
             echo "Install morphizen on Windows..."
             $ErrorActionPreference = "Stop"
             $jobs = [Environment]::ProcessorCount
-            cmake --install  "$Env:VAI_RT_BUILD_DIR/morphizen"
+            cmake --install  "$Env:VAI_RT_BUILD_DIR/morphizen" --config Debug
+
+      - name: Run Unittests
+        if: true
+        run: |
+            echo "Run morphizen unittests on Windows..."
+            $ErrorActionPreference = "Stop"
+            $jobs = [Environment]::ProcessorCount
+            ${{ env.VAI_RT_BUILD_DIR }}morphizen\bin\Debug\morphizen-unit-tests.exe

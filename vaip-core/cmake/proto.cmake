@@ -18,6 +18,7 @@ foreach(PROTO_FILE ${PROTO_FILES})
       ${CMAKE_CURRENT_BINARY_DIR}/morphizen/${PROTO_FILE_NAME}.pb.h
     COMMAND protobuf::protoc
     ARGS
+      --proto_path=${protobuf_SOURCE_DIR}/src
       --cpp_out=dllexport_decl=VAIP_DLL_SPEC:${CMAKE_CURRENT_BINARY_DIR}/morphizen
       -I ${CMAKE_CURRENT_SOURCE_DIR}/src
       ${CMAKE_CURRENT_SOURCE_DIR}/${PROTO_FILE}

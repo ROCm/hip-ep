@@ -40,7 +40,7 @@
 #include <fstream>
 #include <unordered_map>
 #include <exception>
-#include "onnxruntime/onnxruntime_cxx_api.h"
+#include "onnxruntime_cxx_api.h"
 #include "morphizen/vaip.hpp"
 #include "morphizen/env_config.hpp"
 #ifdef ORT_API_MANUAL_INIT

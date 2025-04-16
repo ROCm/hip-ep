@@ -104,6 +104,7 @@ else()
     GIT_REPOSITORY ${DEP_URL_zlib}
     GIT_TAG ${DEP_SHA1_zlib}
     GIT_SHALLOW TRUE
+    EXCLUDE_FROM_ALL
     OVERRIDE_FIND_PACKAGE
   )
   find_package(ZLIB REQUIRED)
