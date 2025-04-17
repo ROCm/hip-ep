@@ -1687,7 +1687,7 @@ int vitisai_ep_on_run_start(
     vaip_core::DllSafe<std::string> (*get_config_entry)(
         const void* state, const char* entry_name)) {
   if (eps.empty()) {
-    return 1;
+    return 0;
   }
   auto ep =
       dynamic_cast<vaip_core::ExecutionProviderConcrete*>(eps.front().get());
