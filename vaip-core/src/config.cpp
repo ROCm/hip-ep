@@ -64,10 +64,6 @@
 // version info
 #include "version_info.hpp"
 #include <vaip/vaip_ort_api.h>
-#if WITH_XCOMPILER
-#  include <xcompiler/xcompiler.hpp>
-#endif
-#include <nlohmann/json.hpp>
 
 DEF_ENV_PARAM(DEBUG_VAIP_CONFIG, "0")
 DEF_ENV_PARAM(XLNX_ONNX_EP_VERBOSE, "0")
