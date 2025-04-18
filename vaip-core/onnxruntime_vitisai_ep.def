@@ -203,3 +203,4 @@ EXPORTS
     vaip_get_version
     vitisai_ep_on_run_start
     vitisai_ep_set_ep_dynamic_options
+    morphizen_get_build_info

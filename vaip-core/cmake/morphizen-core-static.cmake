@@ -19,7 +19,10 @@ add_custom_command (
 )
 add_custom_command (
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/vaip_version_info.hpp.inc
-  COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/src/vaip_version_info.hpp.inc.py "${VAIP_VERSEION_INFO_FILE}"
+  COMMAND ${CMAKE_COMMAND} -E env
+  "PROJECT_GIT_COMMIT_ID=${PROJECT_GIT_COMMIT_ID}"
+  "ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR=${ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR}"
+  $<TARGET_FILE:Python3::Interpreter>  ${CMAKE_CURRENT_SOURCE_DIR}/src/vaip_version_info.hpp.inc.py "${VAIP_VERSEION_INFO_FILE}"
   DEPENDS ${VAIP_VERSEION_INFO_FILE}
 )
 add_custom_command (
@@ -38,10 +41,14 @@ if(morphizen_WITH_VAIP_CONFIG_FILE)
   install(FILES ${CMAKE_CURRENT_BINARY_DIR}/vaip_config.json DESTINATION bin)
 endif()
 set(LIB_NAME morphizen-core-static)
+configure_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/version_info.cpp.in
+  ${CMAKE_CURRENT_BINARY_DIR}/src/version_info.cpp
+  @ONLY)
 add_library(${LIB_NAME} STATIC
   ${PROTO_SRCS} ${PROTO_HDRS}
   src/version_info.hpp
-  src/version_info.cpp
+  ${CMAKE_CURRENT_BINARY_DIR}/src/version_info.cpp
   src/getenv.cpp
   src/getenv.c
   include/morphizen/vaip_plugin.hpp
@@ -193,6 +200,7 @@ target_include_directories(${LIB_NAME}
   $<BUILD_INTERFACE:${VAIP_ORT_API_DIR}>
   PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../3rd-party
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
   ${zlib_SOURCE_DIR}
   ${zlib_BINARY_DIR}
 )

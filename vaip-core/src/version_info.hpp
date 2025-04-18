@@ -45,3 +45,4 @@ uint32_t get_vaip_version_patch();
 extern "C" uint32_t vaip_get_version();
 
 } // namespace vaip_core
+extern "C" const char* morphizen_get_build_info();
