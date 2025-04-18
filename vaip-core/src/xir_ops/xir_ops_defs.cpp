@@ -155,7 +155,7 @@ Ort::CustomOpDomain get_xir_domain() {
     XIR_OP_NAMES.push_back("VAIMLQElwise");
     XIR_OP_NAMES.push_back("QMatmulDynamicTranspose");
     XIR_OP_NAMES.push_back("QGemmTanh");
-    XIR_OP_NAMES.push_back("Identity");
+    XIR_OP_NAMES.push_back("Noop");
     for (auto& name : XIR_OP_NAMES) {
       xir_custom_ops.emplace_back(XilinxCustomOp(name));
     }
