@@ -225,7 +225,6 @@ public:
   open_file_for_write(const std::string& filename) override final;
   std::unique_ptr<CacheFileWriter>
   open_file_for_write_with_tar_file(const std::string& filename);
-  virtual FILE* open_file(const std::string& filename) const override final;
   virtual bool write_file(const std::string& filename,
                           gsl::span<const char> data) override final;
   virtual void restore_cache_files() override final;
@@ -235,8 +234,6 @@ public:
 
   virtual bool
   cache_files_to_tar_file(IStreamWriter& writer) const override final;
-  virtual bool tar_mem_to_cache_files(const char* data,
-                                      size_t size) override final;
   virtual bool tar_file_to_cache_files(class IStreamReader& src) override final;
 
   virtual std::shared_ptr<void>

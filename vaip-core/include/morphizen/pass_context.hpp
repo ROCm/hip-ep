@@ -281,8 +281,6 @@ public:
   virtual std::unique_ptr<CacheFileWriter>
   open_file_for_write(const std::string& filename) = 0;
 
-  virtual FILE* open_file(const std::string& filename) const = 0;
-
   /**
    * @brief Saves the filename and its data into in-memory cache files
    *
@@ -341,7 +339,6 @@ public:
    * otherwise.
    *
    */
-  virtual bool tar_mem_to_cache_files(const char* data, size_t size) = 0;
   virtual bool tar_file_to_cache_files(class IStreamReader& src) = 0;
   /**
    * @brief Creates a new instance of PassContext.

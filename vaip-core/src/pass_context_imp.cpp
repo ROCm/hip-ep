@@ -265,20 +265,6 @@ void PassContextImp::update_all_qos(const std::string& workload_type) const {
   }
 }
 
-template <typename char_type> struct binary_io {
-  static std::vector<char_type> slurp_binary(FILE* file) {
-    CHECK(fseek64(file, 0, SEEK_SET) == 0);
-    CHECK(fseek64(file, 0, SEEK_END) == 0);
-    auto size = ftell64(file);
-    CHECK(fseek64(file, 0, SEEK_SET) == 0);
-    auto buffer = std::vector<char_type>((size_t)size / sizeof(char_type));
-    if (size != 0) {
-      CHECK(fread(buffer.data(), 1, size, file) == static_cast<size_t>(size));
-    }
-    return buffer;
-  }
-};
-
 template <typename T>
 std::optional<std::vector<T>>
 PassContextImp::read_file_generic(const std::string& filename) const {
@@ -489,18 +475,6 @@ PassContextImp::open_file_for_write(const std::string& filename) {
   return ret;
 }
 
-FILE* PassContextImp::open_file(const std::string& filename) const {
-  auto it = cache_files_.find(filename);
-  if (it != cache_files_.end()) {
-    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-        << "tmp file opened: " << filename;
-    return it->second;
-  }
-  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-      << "tmp file open failed: " << filename;
-  return nullptr;
-}
-
 bool write_to_cache_files(std::map<std::string, FILE*>& cache_files,
                           const std::string& filename,
                           gsl::span<const char> data) {
@@ -573,22 +547,6 @@ bool PassContextImp::cache_files_to_tar_file(IStreamWriter& writer) const {
     tar_writer.write(CacheFileStreamReader(open_file_for_read(file_name)),
                      file_name);
   }
-  return true;
-}
-
-bool PassContextImp::tar_mem_to_cache_files(const char* buffer, size_t size) {
-  // todo: is this function can be delete
-  // auto p = buffer;
-  // for (;;) {
-  //   auto [filename, data] = tarball_read_file_from_memory(p, size);
-  //   if (filename.empty()) {
-  //     break;
-  //   }
-  //   LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-  //       << "load " << filename << " " << data.size() << " bytes";
-  //   gsl::span<char> data_span = gsl::span<char>(data);
-  //   write_file(filename, data_span);
-  // }
   return true;
 }
 
