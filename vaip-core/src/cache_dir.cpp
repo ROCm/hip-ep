@@ -50,7 +50,16 @@ static std::string get_user_name() {
   } else if (!ENV_PARAM(USER).empty()) {
     ret = ENV_PARAM(USER);
   }
-  return ret;
+  std::ostringstream str;
+  for (auto x : ret) {
+    if (std::isalnum(x)) {
+      str << x;
+    } else {
+      str << "_" << std::hex << ((unsigned int)(x & 0xF))
+          << (unsigned int)(x >> 4 & 0xF);
+    }
+  }
+  return str.str();
 }
 
 static fs::path default_cache_directory() {
