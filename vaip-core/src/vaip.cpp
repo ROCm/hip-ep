@@ -32,7 +32,6 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
-#include "./xir_ops/xir_ops_defs.hpp"
 //
 #include <exception>
 #include <glog/logging.h>
@@ -64,7 +63,6 @@ VAIP_DLL_SPEC void
 initialize_onnxruntime_vitisai_ep(OrtApiForVaip* api,
                                   std::vector<OrtCustomOpDomain*>& ret_domain) {
   vaip_core::set_the_global_api(api);
-  ret_domain.emplace_back(vaip_core::register_xir_ops());
 
   return;
 }

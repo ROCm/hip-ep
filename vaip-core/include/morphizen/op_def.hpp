@@ -32,6 +32,7 @@
 
 #pragma once
 #include "onnxruntime_api.hpp"
+#include <morphizen/vaip_plugin.hpp>
 #include <set>
 #include <vector>
 
@@ -45,7 +46,7 @@ template <typename T> struct ProcessorOpDefInfo {
   static OpDefInfo info;
 };
 
-template <typename T> OpDefInfo ProcessorOpDefInfo<T>::info = {T::process};
+template <typename T> OpDefInfo ProcessorOpDefInfo<T>::info = {&T::process};
 void set_vitis_ep_custom_ops(const std::set<std::string>&);
 } // namespace vaip_core
 
@@ -66,8 +67,24 @@ void set_vitis_ep_custom_ops(const std::set<std::string>&);
     namespace {                                                                \
     static ::vaip_core::StaticPluginRegister                                   \
         __register(OUTPUT_NAME, "vaip_op_def_info", (void*)&vaip_op_def_info); \
-    }                                                                          \
-    extern "C" {                                                               \
-    void* /* a hook var*/ id##__hook = &__register;                            \
     }
+
 #endif
+
+typedef void (*add_op_t)(void*, const char*, OrtCustomOp*,
+                         void (*)(OrtCustomOp*));
+struct OpRegister {
+public:
+  OpRegister(void* state, add_op_t add_op) : state_(state), add_op_(add_op) {}
+  virtual ~OpRegister() = default;
+  virtual int register_ops() = 0;
+
+protected:
+  template <typename T>
+  void AddOp(const std::string& domain, std::unique_ptr<T> op) {
+    add_op_(state_, domain.c_str(), op.release(),
+            [](OrtCustomOp* p) { delete static_cast<T*>(p); });
+  }
+  void* state_;
+  add_op_t add_op_;
+};

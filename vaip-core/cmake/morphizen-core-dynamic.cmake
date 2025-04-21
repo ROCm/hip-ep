@@ -28,7 +28,9 @@ target_include_directories(morphizen-core-dynamic
   $<INSTALL_INTERFACE:include>
 )
 target_compile_features(morphizen-core-dynamic PUBLIC cxx_std_17)
-target_compile_definitions(morphizen-core-dynamic PUBLIC "-DONNX_NAMESPACE=onnx")
+target_compile_definitions(morphizen-core-dynamic
+  PRIVATE "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1"
+  PUBLIC "-DONNX_NAMESPACE=onnx")
 if(MSVC)
   target_compile_options(morphizen-core-dynamic PUBLIC "/Zc:__cplusplus")
 endif(MSVC)

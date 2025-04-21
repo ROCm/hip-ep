@@ -27,12 +27,20 @@
 
 // static void_ptr_t reserved_symbols[] = {SYMBOLS(DEFINE_SYMBOL)};
 #include "morphizen/onnxruntime_vitisai_ep.hpp"
+#include "./cleanup.hpp"
+#include "./stat.hpp"
+#include "./xir_ops/xir_ops_defs.hpp"
 #include "morphizen/config_reader.hpp"
+#include "morphizen/env_config.hpp"
+#include "morphizen/onnxruntime_api.hpp"
 #include "morphizen/op_def.hpp"
 #include "morphizen/vaip.hpp"
 #include <fstream>
 #include <glog/logging.h>
+DEF_ENV_PARAM(MORPHIZEN_SUPRRESS_DEPRECATED_WARNG, "1")
+DEF_ENV_PARAM(DEBUG_OP_REGISTER, "0")
 
+extern void* BuildInOPs__hook; // prevent xir_opes_defs.obj symbol gc
 namespace onnxruntime_vitisai_ep {
 using namespace vaip_core;
 int optimize_onnx_model(const std::filesystem::path& model_path_in,
@@ -53,15 +61,100 @@ const vaip_core::OrtApiForVaip* get_the_global_api() {
   return vaip_core::api();
 }
 
-static void intialize_op_defs(std::vector<OrtCustomOpDomain*>& contrib_domains,
-                              std::vector<OrtCustomOpDomain*>& ret_domain) {
+class OpHolder {
+  struct Opdef {
+    std::string domain;
+    OrtCustomOp* op_ptr; // we want call deleter instead of release()
+    void (*deleter)(OrtCustomOp*);
+  };
+
+public:
+  ~OpHolder() {
+    // 1. all_ops_
+    for (auto& ops : all_ops_) {
+      ops.deleter(ops.op_ptr);
+    }
+    all_ops_.clear();
+  }
+
+  // caller code: add_op("com.xilinx", op.release(), ...);
+  void add_op(const char* domain1, OrtCustomOp* op,
+              void (*deleter)(OrtCustomOp*)) {
+    std::string custom_op_name = op->GetName(op);
+    std::string domain = domain1;
+    LOG_IF(INFO, ENV_PARAM(DEBUG_OP_REGISTER))
+        << " register op(domain: " << domain << ", op_name: " << custom_op_name
+        << ") ";
+    if (all_ops_.end() !=
+        std::find_if(all_ops_.begin(), all_ops_.end(),
+                     [domain, custom_op_name](const Opdef& op) {
+                       return op.domain == domain &&
+                              op.op_ptr->GetName(op.op_ptr) == custom_op_name;
+                     })) {
+      // Do we allow duplicates? -> Yes, see opdef_main.cpp
+      // do nothing
+    }
+    vaip_core::get_vitis_ep_custom_ops().insert(domain + ":" + custom_op_name);
+
+    all_ops_.push_back({domain, op, deleter});
+
+    if (domains.count(domain) == 0) {
+      domains.emplace(domain, Ort::CustomOpDomain(domain1));
+    }
+    domains[domain].Add(
+        op); // This does not take ownership of the op, simply registers it.
+    // it is owned by all_ops_.
+  }
+  OrtCustomOp* get_op(const std::string& domain,
+                      const std::string& custom_op_name) const {
+    auto it =
+        std::find_if(all_ops_.begin(), all_ops_.end(),
+                     [domain, custom_op_name](const Opdef& op) {
+                       return op.domain == domain &&
+                              op.op_ptr->GetName(op.op_ptr) == custom_op_name;
+                     });
+    if (all_ops_.end() != it) {
+      return it->op_ptr;
+    }
+    return nullptr;
+  }
+  std::vector<OrtCustomOpDomain*> get_domains() const {
+    std::vector<OrtCustomOpDomain*> ret;
+    for (auto it = domains.begin(); it != domains.end(); it++) {
+      OrtCustomOpDomain* ptr = it->second;
+      ret.push_back(ptr);
+    }
+    return ret;
+  }
+
+private:
+  std::map<std::string, Ort::CustomOpDomain> domains;
+  std::vector<Opdef> all_ops_;
+};
+static OpHolder& get_global_op_holder() {
+  static auto instance = std::make_unique<OpHolder>();
+  static bool init = false;
+  if (init == false) {
+    init = true;
+    vaip_core::add_cleanup_function("cleanup global plugin store",
+                                    []() { instance.reset(); });
+  }
+  return *instance;
+}
+
+static void
+intialize_op_defs_old(std::vector<OrtCustomOpDomain*>& contrib_domains,
+                      std::vector<OrtCustomOpDomain*>& ret_domain) {
   // This function is used to initialize the op_def_map
   typedef vaip_core::OpDefInfo* (*vaip_op_def_info_t)();
   auto op_def_info_ptrs =
       vaip_core::Plugin::get_all_symbols("vaip_op_def_info");
-  for (auto op_def_into_ptr : op_def_info_ptrs) {
+  for (const auto& op_def_into_ptr : op_def_info_ptrs) {
+    LOG_IF(ERROR, ENV_PARAM(MORPHIZEN_SUPRRESS_DEPRECATED_WARNG))
+        << " vaip_op_def_info() is depreated, please update plugin \""
+        << op_def_into_ptr.first << "\", there is potential memory leak";
     auto op_def_info_func =
-        reinterpret_cast<vaip_op_def_info_t>(op_def_into_ptr);
+        reinterpret_cast<vaip_op_def_info_t>(op_def_into_ptr.second);
     auto op_def_info = op_def_info_func();
     std::vector<Ort::CustomOpDomain> domains;
     op_def_info->get_domains(domains);
@@ -80,21 +173,60 @@ static void intialize_op_defs(std::vector<OrtCustomOpDomain*>& contrib_domains,
   //    vitis_ep_custom_ops.insert(domain->domain_ + "::" + op->GetName(op));
   //  }
   //}
-  vitis_ep_custom_ops.insert("::DequantizeLinear");
-  vitis_ep_custom_ops.insert("::QuantizeLinear");
-  vitis_ep_custom_ops.insert("com.microsoft::DequantizeLinear");
-  vitis_ep_custom_ops.insert("com.microsoft::QuantizeLinear");
-  vaip_core::set_vitis_ep_custom_ops(vitis_ep_custom_ops);
+  vaip_core::get_vitis_ep_custom_ops().insert("::DequantizeLinear");
+  vaip_core::get_vitis_ep_custom_ops().insert("::QuantizeLinear");
+  vaip_core::get_vitis_ep_custom_ops().insert(
+      "com.microsoft::DequantizeLinear");
+  vaip_core::get_vitis_ep_custom_ops().insert("com.microsoft::QuantizeLinear");
 }
+static void intialize_op_defs(std::vector<OrtCustomOpDomain*>& ret_domain) {
+  LOG_IF(INFO, BuildInOPs__hook == nullptr)
+      << " built in ops empty"; // don't modify it
+  // ret_domain.emplace_back(vaip_core::register_xir_ops());
 
+  // This function is used to initialize the op_def_map
+  typedef void (*register_ops_t)(void*, add_op_t);
+  auto& op_holder = get_global_op_holder();
+  auto add_op = [](void* state, const char* domain, OrtCustomOp* op,
+                   void (*deleter)(OrtCustomOp*)) {
+    auto op_holder = static_cast<OpHolder*>(state);
+    op_holder->add_op(domain, op,
+                      deleter); // op ownership has been transfer to op_holder.
+  };
+  auto register_ops_all =
+      vaip_core::Plugin::get_all_symbols("morphizen_register_ops");
+  LOG_IF(INFO, ENV_PARAM(DEBUG_OP_REGISTER))
+      << " register op find " << register_ops_all.size() << " symbols";
+  for (const auto& register_ops : register_ops_all) {
+    auto register_ops_func =
+        reinterpret_cast<register_ops_t>(register_ops.second);
+    register_ops_func(&op_holder, add_op);
+    LOG_IF(INFO, ENV_PARAM(DEBUG_OP_REGISTER))
+        << " ------------------------------------------------- ";
+  }
+  auto tmp = op_holder.get_domains();
+  ret_domain.insert(ret_domain.end(), tmp.begin(), tmp.end());
+}
+// The interface exported below is used by onnxruntime_providers_vitisai.so
+VAIP_DLL_SPEC
+const ::OrtCustomOp*
+morphizen_get_registered_custom_op(const std::string& domain,
+                                   const std::string& op_name) {
+  return get_global_op_holder().get_op(domain, op_name);
+}
 // The interface exported below is used by onnxruntime_providers_vitisai.so
 VAIP_DLL_SPEC
 void initialize_onnxruntime_vitisai_ep(
     vaip_core::OrtApiForVaip* api,
     std::vector<OrtCustomOpDomain*>& ret_domain) {
   vaip_core::initialize_onnxruntime_vitisai_ep(api, ret_domain);
-  static std::vector<OrtCustomOpDomain*> contrib_domains;
-  intialize_op_defs(contrib_domains, ret_domain);
+  {
+    static std::vector<OrtCustomOpDomain*> contrib_domains;
+    // contrib_domains is used to hold the raw pointers, however,there is no way
+    // to to delete deconstruct objects, so the memory leak here.
+    intialize_op_defs_old(contrib_domains, ret_domain);
+  }
+  intialize_op_defs(ret_domain);
 }
 VAIP_DLL_SPEC
 void deinitialize_onnxruntime_vitisai_ep() {

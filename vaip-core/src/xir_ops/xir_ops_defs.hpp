@@ -32,8 +32,8 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
-#pragma once
-#include "morphizen/onnxruntime_api.hpp"
-namespace vaip_core {
-OrtCustomOpDomain* register_xir_ops();
-} // namespace vaip_core
+// #pragma once
+// #include "morphizen/onnxruntime_api.hpp"
+// namespace vaip_core {
+// OrtCustomOpDomain* register_xir_ops();
+// } // namespace vaip_core

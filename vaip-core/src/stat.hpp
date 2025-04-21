@@ -31,10 +31,13 @@
  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
+#pragma once
 #include "morphizen/vaip.hpp"
-
+#include <set>
+#include <string>
 namespace vaip_core {
 StatProto& get_stat_proto();
 void clean_stat();
 void collect_stat(const onnxruntime::Graph& graph, const ContextProto& context);
+std::set<std::string>& get_vitis_ep_custom_ops();
 } // namespace vaip_core

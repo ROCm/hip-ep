@@ -251,11 +251,11 @@ thread_local StatProto stat_proto;
 StatProto& get_stat_proto() { return stat_proto; }
 
 void clean_stat() { get_stat_proto().Clear(); }
-static std::set<std::string> g_vitis_ep_custom_ops;
-void set_vitis_ep_custom_ops(const std::set<std::string>& vitis_ep_custom_ops) {
-  g_vitis_ep_custom_ops = vitis_ep_custom_ops;
-}
 
+std::set<std::string>& get_vitis_ep_custom_ops() {
+  static std::set<std::string> g_vitis_ep_custom_ops;
+  return g_vitis_ep_custom_ops;
+}
 void collect_stat(const onnxruntime::Graph& graph,
                   const ContextProto& context_proto) {
   StatProto& proto = get_stat_proto();
@@ -281,7 +281,7 @@ void collect_stat(const onnxruntime::Graph& graph,
     auto comment = node_as_string(*node);
     add_node_stat(proto, input, output, domain, op_type, comment, device);
     auto domain_op = domain + "::" + op_type;
-    if ("CPU" == device && g_vitis_ep_custom_ops.count(domain_op)) {
+    if ("CPU" == device && get_vitis_ep_custom_ops().count(domain_op)) {
       device = "VITIS_EP_CPU";
     }
 

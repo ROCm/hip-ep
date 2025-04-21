@@ -41,11 +41,12 @@
 #include <unordered_map>
 #include <exception>
 #include "onnxruntime_cxx_api.h"
-#include "morphizen/vaip.hpp"
-#include "morphizen/env_config.hpp"
 #ifdef ORT_API_MANUAL_INIT
 #error "HELLO, please use ORT_API_MANUAL_INIT=0 to build this file"
 #endif
+#include "morphizen/vaip.hpp"
+#include "morphizen/env_config.hpp"
+
 DEF_ENV_PARAM(IGNORE_CONSTANT, "1")
 DEF_ENV_PARAM_2(NODE_FORMAT, "$cxx_name<br>$shape, id=$pattern_id, ty=$type<br>$node_arg_name",std::string)
 DEF_ENV_PARAM_2(INPUT_FORMAT, "$cxx_name<br>$shape, id=$pattern_id, ty=$type<br>$node_arg_name",std::string)

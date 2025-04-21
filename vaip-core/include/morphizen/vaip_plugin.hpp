@@ -84,7 +84,19 @@ struct Plugin {
   bool has_method(const char* name) const {
     return my_plugin_sym(plugin_, name) != nullptr;
   };
-  static std::vector<void*> get_all_symbols(const char* name);
+  /**
+   * @brief Retrieves all symbols associated with the given name.
+   *
+   * This function returns a vector of pairs, where each pair consists of a
+   * string representing the plugin name and a void pointer to the symbol's
+   * associated data or function.
+   *
+   * @param name The name of the symbol group to retrieve.
+   * @return A vector of pairs containing plugin names and their corresponding
+   * pointers.
+   */
+  static std::vector<std::pair<std::string, void*>>
+  get_all_symbols(const char* name);
   template <typename R, typename... Args> using method_t = R (*)(Args...);
 
   template <typename R, typename... Args>

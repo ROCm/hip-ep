@@ -150,14 +150,15 @@ get_store() {
   return store_;
 }
 
-std::vector<void*> Plugin::get_all_symbols(const char* name) {
+std::vector<std::pair<std::string, void*>>
+Plugin::get_all_symbols(const char* name) {
   auto& store = get_store();
-  auto ret = std::vector<void*>();
+  auto ret = std::vector<std::pair<std::string, void*>>();
   for (auto it = store.begin(); it != store.end(); ++it) {
     for (auto it_sym = it->second.begin(); it_sym != it->second.end();
          ++it_sym) {
       if (it_sym->first == name) {
-        ret.push_back(it_sym->second);
+        ret.emplace_back(it->first, it_sym->second);
       }
     }
   }

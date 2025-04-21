@@ -123,6 +123,8 @@ add_library(${LIB_NAME} STATIC
   src/rewrite_rule.cpp
   src/xir_ops/xir_ops_defs.hpp
   src/xir_ops/xir_ops_defs.cpp
+  src/xir_ops/xir_ops.cpp
+  include/morphizen/xir_ops.hpp
   src/xir_ops/ort_custom_ops.hpp
   src/stat.cpp
   src/stat.hpp
