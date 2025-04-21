@@ -1,0 +1,14 @@
+﻿add_custom_command (
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/vaip_version_info.hpp.inc ${CMAKE_CURRENT_BINARY_DIR}/version.rc
+  COMMAND ${CMAKE_COMMAND} -E env
+  "PROJECT_GIT_COMMIT_ID=${PROJECT_GIT_COMMIT_ID}"
+  "ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR=${ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR}"
+  "morphizen_OUTPUT_NAME=${morphizen_OUTPUT_NAME}.dll"
+  $<TARGET_FILE:Python3::Interpreter>  ${CMAKE_CURRENT_SOURCE_DIR}/src/vaip_version_info.hpp.inc.py "${VAIP_VERSEION_INFO_FILE}"
+  DEPENDS ${VAIP_VERSEION_INFO_FILE}
+)
+
+add_custom_target(generate_vaip_version_info
+  DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/vaip_version_info.hpp.inc ${CMAKE_CURRENT_BINARY_DIR}/version.rc
+)
+set_target_properties(generate_vaip_version_info PROPERTIES FOLDER morphizen)

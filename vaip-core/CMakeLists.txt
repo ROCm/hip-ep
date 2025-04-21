@@ -23,6 +23,7 @@
 #    OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
 #
 
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/version_info.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/proto.cmake)
 # MorphiZen must be build along with onnxruntime source tree
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/find_onnxruntime.cmake)

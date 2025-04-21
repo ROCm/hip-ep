@@ -17,14 +17,7 @@ add_custom_command (
   ${CMAKE_CURRENT_BINARY_DIR}/mem_xclbin_file.hpp.inc
   "${VAIP_XCLBIN_DIR}"
 )
-add_custom_command (
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/vaip_version_info.hpp.inc
-  COMMAND ${CMAKE_COMMAND} -E env
-  "PROJECT_GIT_COMMIT_ID=${PROJECT_GIT_COMMIT_ID}"
-  "ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR=${ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR}"
-  $<TARGET_FILE:Python3::Interpreter>  ${CMAKE_CURRENT_SOURCE_DIR}/src/vaip_version_info.hpp.inc.py "${VAIP_VERSEION_INFO_FILE}"
-  DEPENDS ${VAIP_VERSEION_INFO_FILE}
-)
+
 add_custom_command (
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/config_json_binary.hpp ${CMAKE_CURRENT_BINARY_DIR}/vaip_config.json
   COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../tools"

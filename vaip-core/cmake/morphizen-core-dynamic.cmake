@@ -5,7 +5,7 @@ set_target_properties(morphizen-core-dynamic PROPERTIES FOLDER morphizen)
 set_target_properties(morphizen-core-dynamic PROPERTIES OUTPUT_NAME ${morphizen_OUTPUT_NAME})
 
 if(MSVC)
-  target_sources(morphizen-core-dynamic PRIVATE onnxruntime_vitisai_ep.def)
+  target_sources(morphizen-core-dynamic PRIVATE onnxruntime_vitisai_ep.def ${CMAKE_CURRENT_BINARY_DIR}/version.rc)
 endif(MSVC)
 
 
