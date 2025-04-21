@@ -101,7 +101,8 @@ public:
     if (domains.count(domain) == 0) {
       domains.emplace(domain, Ort::CustomOpDomain(domain1));
     }
-    domains[domain].Add(
+    auto& domain_obj = domains.at(domain);
+    domain_obj.Add(
         op); // This does not take ownership of the op, simply registers it.
     // it is owned by all_ops_.
   }
