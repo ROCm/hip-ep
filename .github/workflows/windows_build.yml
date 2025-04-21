@@ -27,38 +27,29 @@ jobs:
           if (-Not (Test-Path -Path $directoryPath)) {
               Write-Host "Directory does not exist. Cloning the repository..."
               git clone https://github.com/Microsoft/onnxruntime.git --branch main --single-branch --depth 1 $directoryPath
-          } else {
-            # Directory exists, skip cloning
-            Write-Host "Directory already exists. Skipping clone."
           }
           # Restore the directory to its original state
           # save the current dirctory
           $currentDirectory = Get-Location
           Set-Location -Path $directoryPath
           git fetch origin main
-          $originalCommit = git rev-parse HEAD
-          $wednesdayDate = (Get-Date).AddDays(-(7 + [int](Get-Date).DayOfWeek - 3) % 7).ToString("yyyy-MM-dd")
-          Write-Host "Last Wednesday was $wednesdayDate"
-          $firstCommit = git rev-list --reverse --since="$wednesdayDate 00:00" --until="$wednesdayDate 23:59" origin/main | Select-Object -First 1
-          if ([string]::IsNullOrEmpty($firstCommit)) {
-            Write-Host "No need to update ONNXRuntime commit ID , no commits found on last Wednesday. "
-          } elseif ($originalCommit -eq $firstCommit) {
-            Write-Host "No need to update ONNXRuntime commit ID ,  ORT commit ID is $originalCommit"
-          } else {
-            Write-Host "Upgrade Onnxruntime commit ID from $originalCommit to $firstCommit "
-            git checkout $firstCommit --force
-          }
-          git clean -fdx
-          Write-Host ""
-          # restore to old directory
-          Set-Location -Path $currentDirectory
+          $lastSaturday = (Get-Date).AddDays(-1 * ((([int](Get-Date).DayOfWeek + 1) % 7) + 1)).Date
+          $originalCommit = git rev-list -1 --before="$($lastSaturday.ToString("o"))" origin/main
+          git checkout --detach $originalCommit
+          git reset --hard
+          $hash = git rev-parse HEAD
 
+          # restore to old directory
+          Write-Host "ONNXRuntime commit_hash=$hash in last Saturday, $originalCommit"
+
+          Set-Location -Path $currentDirectory
 
       - name: Get ONNXRuntime commit hash
         id: ort-commit
         run: |
             cd ../onnxruntime
             $hash = git rev-parse HEAD
+            Write-Host "ONNXRuntime commit_hash=$hash"
             echo "commit_hash=$hash" >> $env:GITHUB_OUTPUT
 
       - name: Cache ONNXRuntime install
@@ -66,6 +57,8 @@ jobs:
         with:
             path: ${{ env.VAI_RT_PREFIX }}
             key: ort-install-${{ steps.ort-commit.outputs.commit_hash }}
+            restore-keys: |
+              ort-install-${{ steps.ort-commit.outputs.commit_hash }}
 
       - name: Build and install ONNXRuntime
         run: |
@@ -85,18 +78,8 @@ jobs:
             $jobs = [Environment]::ProcessorCount
             cmake --build "$Env:VAI_RT_BUILD_DIR/onnxruntime" -j $job --target install
 
-      - name: Cache morphizen build_deps
-        uses: actions/cache@v3
-        with:
-            path: ${{ env.VAI_RT_BUILD_DIR }}/morphizen_deps
-            key: morphizen-build-{{ hashFiles('./cmake/deps.txt' './cmake/deps.cmake') }}
-            restore-keys: |
-              morphizen-build-
-              morphizen-build-{{ hashFiles('./cmake/deps.txt' './cmake/deps.cmake') }}
-              morphizen-build-
-
       - name: Configure morphizen
-        if: true
+        if: false
         run: |
           echo "Configure morphizen on Windows... using ${{ env.VAI_RT_BUILD_DIR }}/morphizen_deps"
           $ErrorActionPreference = "Stop"
@@ -110,28 +93,28 @@ jobs:
               -DFETCHCONTENT_BASE_DIR=${{ env.VAI_RT_BUILD_DIR }}/morphizen_deps    `
               --fresh
 
-      - name: Build morphizen
-        if: true
-        run: |
-          echo "Build morphizen on Windows..."
-          $ErrorActionPreference = "Stop"
-          $jobs = [Environment]::ProcessorCount
-          cmake --build  "$Env:VAI_RT_BUILD_DIR/morphizen" -j $jobs
+      # - name: Build morphizen
+      #   if: false
+      #   run: |
+      #     echo "Build morphizen on Windows..."
+      #     $ErrorActionPreference = "Stop"
+      #     $jobs = [Environment]::ProcessorCount
+      #     cmake --build  "$Env:VAI_RT_BUILD_DIR/morphizen" -j $jobs
 
-      - name: Install morphizen
-        if: true
-        run: |
-            echo "Install morphizen on Windows..."
-            $ErrorActionPreference = "Stop"
-            $jobs = [Environment]::ProcessorCount
-            cmake --install  "$Env:VAI_RT_BUILD_DIR/morphizen" --config Debug
+      # - name: Install morphizen
+      #   if: false
+      #   run: |
+      #       echo "Install morphizen on Windows..."
+      #       $ErrorActionPreference = "Stop"
+      #       $jobs = [Environment]::ProcessorCount
+      #       cmake --install  "$Env:VAI_RT_BUILD_DIR/morphizen" --config Debug
 
-      - name: Run Unittests
-        if: true
-        run: |
-            echo "Run morphizen unittests on Windows..."
-            $ErrorActionPreference = "Stop"
-            ${{ env.VAI_RT_BUILD_DIR }}morphizen\bin\Debug\morphizen-unit-tests.exe
+      # - name: Run Unittests
+      #   if: false
+      #   run: |
+      #       echo "Run morphizen unittests on Windows..."
+      #       $ErrorActionPreference = "Stop"
+      #       ${{ env.VAI_RT_BUILD_DIR }}morphizen\bin\Debug\morphizen-unit-tests.exe
 
 
       - name : Download morphizen-demo
@@ -161,60 +144,24 @@ jobs:
           cmake -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF `
                 -DCMAKE_FIND_PACKAGE_NO_SYSTEM_PACKAGE_REGISTRY=ON `
                 -DBUILD_SHARED_LIBS=OFF `
+                -Dmorphizen_ENABLE_UNIT_TEST=ON   `
               -S ../morphizen-demo -B "$Env:VAI_RT_BUILD_DIR/morphizen-demo" `
               "-DCMAKE_INSTALL_PREFIX=$Env:VAI_RT_PREFIX" `
-              -DFETCHCONTENT_BASE_DIR=${{ env.VAI_RT_BUILD_DIR }}/morphizen_deps `
+              -DFETCHCONTENT_BASE_DIR="$Env:VAI_RT_PREFIX/morphizen_deps" `
               --fresh
 
       - name: Build morphizen-demo
         if: true
         run: |
-          echo "Build morphizen-demo on Windows ..."
+          echo "Build and Install morphizen-demo on Windows ..."
           $ErrorActionPreference = "Stop"
-          cmake  --build  "$Env:VAI_RT_BUILD_DIR/morphizen-demo" -j $jobs
-
-      - name: Install morphizen-demo
-        if: true
-        run: |
-            echo "Install morphizen-demo on Windows..."
-            $ErrorActionPreference = "Stop"
-            cmake --install  "$Env:VAI_RT_BUILD_DIR/morphizen-demo" --config Debug
-
-
-      - name: Build test_onnx_runner
-        if: true
-        run: |
-           echo "Download test_onnx_runner on Windows..."
-           $ErrorActionPreference = "Stop"
-           $testOnnxRunnerPath = "../test_onnx_runner"
-           if (-Not (Test-Path -Path $testOnnxRunnerPath)) {
-             Write-Host "test_onnx_runner Directory does not exist. Cloning the repository..."
-             git clone https://gitenterprise.xilinx.com/VitisAI/test_onnx_runner.git --branch dev --single-branch --depth 1 $testOnnxRunnerPath
-           }
-           Write-Host "test_onnx_runner Directory has exist. Using the latest commit..."
-           $currentDirectory = Get-Location
-           Set-Location -Path $testOnnxRunnerPath
-           git fetch --depth 1 origin dev
-           git reset --hard FETCH_HEAD
-           git clean -fdx
-           Set-Location -Path $currentDirectory
-           # build test_onnx_runner
-           echo "Configure test_onnx_runner on Windows..."
-           cmake -S ../test_onnx_runner -B "$Env:VAI_RT_BUILD_DIR/test_onnx_runner" `
-                "-DCMAKE_INSTALL_PREFIX=$Env:VAI_RT_PREFIX" --fresh
-           echo "Build test_onnx_runner on Windows.."
-           cmake --build "$Env:VAI_RT_BUILD_DIR/test_onnx_runner" -j $jobs
-           echo "Install test_onnx_runner on Windows.."
-           cmake --install "$Env:VAI_RT_BUILD_DIR/test_onnx_runner" --config Debug
-
+          $jobs = [Environment]::ProcessorCount
+          cmake  --build  "$Env:VAI_RT_BUILD_DIR/morphizen-demo" -j $jobs --target install
 
       - name: Run Sample
         if: true
         run: |
-           echo "Run renset50 sample on windows..."
-           $testOnnxRunnerPath = "../test_onnx_runner"
-           $env:XLNX_ONNX_EP_VERBOSE = "2"
-           $env:DEBUG_LOG_LEVEL = "info"
-           $env:DEBUG_VAIP_PASS = "1"
-           $env:XLNX_ENABLE_CACHE = "0"
-           ${{ env.VAI_RT_PREFIX }}bin\test_onnx_runner.exe $testOnnxRunnerPath\data\pt_resnet50.onnx
+           echo "Run unit test and resnet50 sample ..."
+           $ErrorActionPreference = "Stop"
+           & "$Env:VAI_RT_BUILD_DIR\morphizen-demo\bin\Debug\morphizen-unit-tests.exe"
+           cmake  --build  "$Env:VAI_RT_BUILD_DIR/morphizen-demo" --target generate_ep_context_model
