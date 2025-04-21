@@ -198,11 +198,12 @@ static void intialize_op_defs(std::vector<OrtCustomOpDomain*>& ret_domain) {
   LOG_IF(INFO, ENV_PARAM(DEBUG_OP_REGISTER))
       << " register op find " << register_ops_all.size() << " symbols";
   for (const auto& register_ops : register_ops_all) {
+    LOG_IF(INFO, ENV_PARAM(DEBUG_OP_REGISTER))
+        << " ----------------------" << register_ops.first
+        << "-------------------------- ";
     auto register_ops_func =
         reinterpret_cast<register_ops_t>(register_ops.second);
     register_ops_func(&op_holder, add_op);
-    LOG_IF(INFO, ENV_PARAM(DEBUG_OP_REGISTER))
-        << " ------------------------------------------------- ";
   }
   auto tmp = op_holder.get_domains();
   ret_domain.insert(ret_domain.end(), tmp.begin(), tmp.end());

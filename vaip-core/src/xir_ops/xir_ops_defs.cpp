@@ -165,7 +165,7 @@ public:
     AddOp("com.xilinx", XilinxCustomOp::create("VAIMLQElwise"));
     AddOp("com.xilinx", XilinxCustomOp::create("QMatmulDynamicTranspose"));
     AddOp("com.xilinx", XilinxCustomOp::create("QGemmTanh"));
-    AddOp("com.xilinx", XilinxCustomOp::create("Identity"));
+    AddOp("com.xilinx", XilinxCustomOp::create("NoOp"));
     return 0;
   }
 };
