@@ -166,6 +166,8 @@ public:
     AddOp("com.xilinx", XilinxCustomOp::create("QMatmulDynamicTranspose"));
     AddOp("com.xilinx", XilinxCustomOp::create("QGemmTanh"));
     AddOp("com.xilinx", XilinxCustomOp::create("NoOp"));
+    AddOp("com.xilinx", XilinxCustomOp::create("QMHAMask"));
+    AddOp("com.xilinx", XilinxCustomOp::create("RowWiseConcat"));
     return 0;
   }
 };
