@@ -223,8 +223,6 @@ static void pass_context_update_context_json(PassContextImp& context,
 }
 static void update_pass_context_from_context_json_in_cache(
     std::shared_ptr<PassContextImp> context) {
-  auto log_dir = context->get_log_dir();
-  auto context_json_path = log_dir / "context.json";
   auto context_context_json = context->read_file_c8("context.json");
   auto context_context_json_text = dos2unix(*context_context_json);
   pass_context_update_context_json(*context, context_context_json_text);

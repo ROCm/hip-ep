@@ -58,7 +58,7 @@ jobs:
             path: ${{ env.VAI_RT_PREFIX }}
             key: ort-install-${{ steps.ort-commit.outputs.commit_hash }}
             restore-keys: |
-              ort-install-${{ steps.ort-commit.outputs.commit_hash }}
+              ort-install-
 
       - name: Build and install ONNXRuntime
         run: |
@@ -78,20 +78,20 @@ jobs:
             $jobs = [Environment]::ProcessorCount
             cmake --build "$Env:VAI_RT_BUILD_DIR/onnxruntime" -j $job --target install
 
-      - name: Configure morphizen
-        if: false
-        run: |
-          echo "Configure morphizen on Windows... using ${{ env.VAI_RT_BUILD_DIR }}/morphizen_deps"
-          $ErrorActionPreference = "Stop"
-          git submodule update --init --recursive
-          # prevent cmake from using the package registry
-          # -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF
-          # -DCMAKE_FIND_PACKAGE_NO_SYSTEM_PACKAGE_REGISTRY=ON `
-          cmake -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF `
-                -DCMAKE_FIND_PACKAGE_NO_SYSTEM_PACKAGE_REGISTRY=ON `
-              -S . -B "$Env:VAI_RT_BUILD_DIR/morphizen"  "-DCMAKE_INSTALL_PREFIX=$Env:VAI_RT_PREFIX" `
-              -DFETCHCONTENT_BASE_DIR=${{ env.VAI_RT_BUILD_DIR }}/morphizen_deps    `
-              --fresh
+      # - name: Configure morphizen
+      #   if: false
+      #   run: |
+      #     echo "Configure morphizen on Windows... using ${{ env.VAI_RT_BUILD_DIR }}/morphizen_deps"
+      #     $ErrorActionPreference = "Stop"
+      #     git submodule update --init --recursive
+      #     # prevent cmake from using the package registry
+      #     # -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF
+      #     # -DCMAKE_FIND_PACKAGE_NO_SYSTEM_PACKAGE_REGISTRY=ON `
+      #     cmake -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF `
+      #           -DCMAKE_FIND_PACKAGE_NO_SYSTEM_PACKAGE_REGISTRY=ON `
+      #         -S . -B "$Env:VAI_RT_BUILD_DIR/morphizen"  "-DCMAKE_INSTALL_PREFIX=$Env:VAI_RT_PREFIX" `
+      #         -DFETCHCONTENT_BASE_DIR=${{ env.VAI_RT_BUILD_DIR }}/morphizen_deps    `
+      #         --fresh
 
       # - name: Build morphizen
       #   if: false
