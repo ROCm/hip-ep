@@ -76,6 +76,12 @@ public:
     attrs_.emplace_back(name, std::forward<T>(value));
     return *this;
   }
+  /**
+   * @brief Retrieves the list of node attributes.
+   *
+   * @return A constant reference to a vector containing the node attributes.
+   */
+  const std::vector<NodeAttr>& get() const { return attrs_; }
 
 private:
   std::vector<NodeAttr> attrs_;
