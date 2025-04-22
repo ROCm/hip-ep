@@ -88,7 +88,7 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
-            VALUE "FileDescription", "{PRODUCT_DESCRIPTION} @{GIT_COMMIT}"
+            VALUE "FileDescription", "{PRODUCT_DESCRIPTION} b{BUILD_NUMBER}-g{GIT_COMMIT}@{GIT_BRANCH}"
             VALUE "FileVersion", "{MORPHIZEN_FILE_MAJOR}.{MORPHIZEN_FILE_MINOR}.{MORPHIZEN_FILE_PATCH}.{BUILD_NUMBER}"
             VALUE "ProductVersion", "{MORPHIZEN_PRODUCT_MAJOR}.{MORPHIZEN_PRODUCT_MINOR}.{MORPHIZEN_PRODUCT_PATCH}.{BUILD_NUMBER}"
             VALUE "CompanyName", "AMD"
@@ -174,27 +174,16 @@ def main2(workspace_directory):
 def get_version_info_for_rc():
     project_directory = pathlib.Path(__file__).parent.parent.parent
     # Run a command and capture its output
-    branch_name = os.environ.get("GIT_BRANCH", "N/A")
-    pattern_ddmm = re.compile(r".*_(\d{2})(\d{2})_rc.*")
-    pattern_ddmmyyyy = re.compile(r".*_(\d{2})(\d{2})(\d{4})_rc.*")
-    if match := pattern_ddmmyyyy.match(branch_name):
-        month, day, year = match.groups()
-    elif match := pattern_ddmm.match(branch_name):
-        month, day = match.groups()
-        year = datetime.now().year  # Year is not present in MMDD format
-    else:
-        year = datetime.now().year  # Year is not present in MMDD format
-        month = datetime.now().month
-        day = datetime.now().day
     return {
         "GIT_COMMIT": "N/A",
+        "GIT_BRANCH": "N/A",
         "BUILD_NUMBER": "0",
-        "MORPHIZEN_FILE_MAJOR": year,
-        "MORPHIZEN_FILE_MINOR": month,
-        "MORPHIZEN_FILE_PATCH": day,
-        "MORPHIZEN_PRODUCT_MAJOR": year,
-        "MORPHIZEN_PRODUCT_MINOR": month,
-        "MORPHIZEN_PRODUCT_PATCH": day,
+        "MORPHIZEN_FILE_MAJOR": 1,
+        "MORPHIZEN_FILE_MINOR": 0,
+        "MORPHIZEN_FILE_PATCH": 0,
+        "MORPHIZEN_PRODUCT_MAJOR": 1,
+        "MORPHIZEN_PRODUCT_MINOR": 0,
+        "MORPHIZEN_PRODUCT_PATCH": 0,
         "PRODUCT_DESCRIPTION": "ONNXRuntime VitisAI EP",
         "PRODUCT_NAME": "MorphiZen",
         "morphizen_OUTPUT_NAME": "onnxruntime_vitisai_ep",

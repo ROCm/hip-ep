@@ -135,7 +135,6 @@ jobs:
           git clean -fdx
           Set-Location -Path $currentDirectory
 
-
       - name: Configure morphizen-demo
         if: true
         run: |
