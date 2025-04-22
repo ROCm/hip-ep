@@ -610,7 +610,7 @@ public:
 
     auto code = cxx_src_stream.str();
     // dump the file
-    auto inc = std::filesystem::path(__FILE__).parent_path() / opt_cxx_file;
+    auto inc = opt_cxx_file;
     CHECK(std::ofstream(inc).write(code.data(), code.size()).good())
         << " failed to write to " << inc;
     LOG(INFO) << "write generated c++ code to " << inc;
@@ -637,7 +637,7 @@ public:
     }
     auto code = mmd_stream.str();
     // dump the file
-    auto inc = std::filesystem::path(__FILE__).parent_path() / opt_mmd_file;
+    auto inc = opt_mmd_file;
     CHECK(std::ofstream(inc).write(code.data(), code.size()).good())
         << " failed to write to " << inc;
     LOG(INFO) << "write generated mermaid diagram to " << inc;
