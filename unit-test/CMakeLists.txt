@@ -51,7 +51,7 @@ set_target_properties(${TEST_EXE_NAME} PROPERTIES FOLDER morphizen/unit-tests)
 find_package(onnxruntime REQUIRED)
 target_link_libraries(${TEST_EXE_NAME}
     PRIVATE
-    morphizen-core-dynamic
+    ${morphizen_CORE_DYNAMIC_UNIQUE_ID}
     GTest::gtest
     onnxruntime::onnxruntime
     glog::glog)

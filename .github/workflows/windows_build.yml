@@ -18,7 +18,11 @@ jobs:
         os: [ windows_vitisai ]
 
     steps:
-      - uses: actions/checkout@v3
+      - name: Download MorphiZen
+        uses: actions/checkout@v3
+        with:
+          submodules: recursive
+
       - name: Download ONNXRuntime
         run: |
           echo "Download ONNXRuntime on Windows..."

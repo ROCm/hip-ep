@@ -5,6 +5,13 @@
 
 # enable morphizen-core-dynamic or not. when VAIP is built as a standalone library, this option should be ON
 # when VAIP is built as part of onnxruntime, this option should be OFF
+execute_process(
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMAND git rev-parse HEAD
+    OUTPUT_VARIABLE GIT_VERSION
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+set(morphizen_CORE_DYNAMIC_UNIQUE_ID "morphizen-core-dynamic-${GIT_VERSION}")
 if (TARGET onnxruntime_providers_vitisai)
   set(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC_DEFAULT OFF)
   set(morphizen_WITH_VAIP_CONFIG_FILE_DEFAULT OFF)
@@ -15,7 +22,7 @@ else()
   set(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC_DEFAULT ON)
   set(morphizen_WITH_VAIP_CONFIG_FILE_DEFAULT ON)
   set(morphizen_ENABLE_UNIT_TEST_DEFAULT ON)
-  set(morphizen_ONNXRUNTIME_VITISAI_EP_TARGET_DEFAULT "morphizen-core-dynamic")
+  set(morphizen_ONNXRUNTIME_VITISAI_EP_TARGET_DEFAULT ${morphizen_CORE_DYNAMIC_UNIQUE_ID})
   set(TRIM_CONFIG_DEFAULT OFF)
 endif()
 option(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC "enable morphizen-core-dynamic or not" ${morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC_DEFAULT})

@@ -9,7 +9,7 @@ add_executable(${EXEC_NAME} onnx_grep.cpp)
 target_include_directories(${EXEC_NAME}
                            PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 find_package(onnxruntime REQUIRED)
-target_link_libraries(${EXEC_NAME} PRIVATE morphizen-core-dynamic onnxruntime::onnxruntime glog::glog)
+target_link_libraries(${EXEC_NAME} PRIVATE ${morphizen_CORE_DYNAMIC_UNIQUE_ID} onnxruntime::onnxruntime glog::glog)
 
 set(ARGS
     "-f ${CMAKE_CURRENT_BINARY_DIR}/../unit-test/pt_resnet50.onnx")

@@ -28,10 +28,16 @@ include("${CMAKE_CURRENT_LIST_DIR}/morphizen-core-targets.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/morphizen-encryption-targets.cmake")
 set(@PROJECT_NAME@_FOUND True)
 
-foreach (target morphizen-encryption morphizen-core-static morphizen-core-dynamic )
+foreach (target morphizen-encryption morphizen-core-static)
   get_target_property(TARGET_LOCATION @PROJECT_NAME@::${target} LOCATION)
   message(STATUS "Found importable target @PROJECT_NAME@::${target} ${TARGET_LOCATION}")
 endforeach()
+
+if(TARGET ${morphizen_CORE_DYNAMIC_UNIQUE_ID})
+  get_target_property(TARGET_LOCATION @PROJECT_NAME@::${morphizen_CORE_DYNAMIC_UNIQUE_ID} LOCATION)
+  message(STATUS "Found importable target @PROJECT_NAME@::${morphizen_CORE_DYNAMIC_UNIQUE_ID} ${TARGET_LOCATION}")
+endif(TARGET ${morphizen_CORE_DYNAMIC_UNIQUE_ID})
+
 
 find_package(glog CONFIG REQUIRED)
 find_package(Protobuf CONFIG REQUIRED)

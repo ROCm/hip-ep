@@ -1,11 +1,11 @@
-﻿add_library(morphizen-core-dynamic SHARED src/main.cpp)
-add_library (morphizen::morphizen-core-dynamic ALIAS morphizen-core-dynamic)
-set_target_properties(morphizen-core-dynamic PROPERTIES FOLDER morphizen)
-# set output name of morphizen-core-dynamic, it is required by VitisAI EP.
-set_target_properties(morphizen-core-dynamic PROPERTIES OUTPUT_NAME ${morphizen_OUTPUT_NAME})
+﻿add_library(${morphizen_CORE_DYNAMIC_UNIQUE_ID} SHARED src/main.cpp)
+add_library (morphizen::${morphizen_CORE_DYNAMIC_UNIQUE_ID} ALIAS ${morphizen_CORE_DYNAMIC_UNIQUE_ID})
+set_target_properties(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PROPERTIES FOLDER morphizen)
+# set output name of ${morphizen_CORE_DYNAMIC_UNIQUE_ID}, it is required by VitisAI EP.
+set_target_properties(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PROPERTIES OUTPUT_NAME ${morphizen_OUTPUT_NAME})
 
 if(MSVC)
-  target_sources(morphizen-core-dynamic PRIVATE onnxruntime_vitisai_ep.def ${CMAKE_CURRENT_BINARY_DIR}/version.rc)
+  target_sources(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PRIVATE onnxruntime_vitisai_ep.def ${CMAKE_CURRENT_BINARY_DIR}/version.rc)
 endif(MSVC)
 
 
@@ -18,28 +18,28 @@ endif(MSVC)
 # onnxruntime_vitisai_ep.def file. tools/parse_cl_link_error.py is
 # used to parse the link error and update onnxruntime_vitisai_ep.def
 # automatically, see tools/parse_cl_link_error.py for more details.
-target_link_libraries(morphizen-core-dynamic
+target_link_libraries(${morphizen_CORE_DYNAMIC_UNIQUE_ID}
   PRIVATE
   morphizen-core-static)
 
-target_include_directories(morphizen-core-dynamic
+target_include_directories(${morphizen_CORE_DYNAMIC_UNIQUE_ID}
   PUBLIC
   $<BUILD_INTERFACE:$<TARGET_PROPERTY:morphizen-core-static,INTERFACE_INCLUDE_DIRECTORIES>>
   $<INSTALL_INTERFACE:include>
 )
-target_compile_features(morphizen-core-dynamic PUBLIC cxx_std_17)
-target_compile_definitions(morphizen-core-dynamic
+target_compile_features(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PUBLIC cxx_std_17)
+target_compile_definitions(${morphizen_CORE_DYNAMIC_UNIQUE_ID}
   PRIVATE "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1"
   PUBLIC "-DONNX_NAMESPACE=onnx")
 if(MSVC)
-  target_compile_options(morphizen-core-dynamic PUBLIC "/Zc:__cplusplus")
+  target_compile_options(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PUBLIC "/Zc:__cplusplus")
 endif(MSVC)
 
 if(WIN24_BUILD)
   target_compile_definitions(${LIB_NAME} PUBLIC "-DWIN24_BUILD=ON")
 endif()
 
-set_target_properties(morphizen-core-dynamic PROPERTIES
+set_target_properties(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PROPERTIES
   VS_DEBUGGER_COMMAND "${CMAKE_INSTALL_PREFIX}\\bin\\test_onnx_runner.exe"
   VS_DEBUGGER_COMMAND_ARGUMENTS "${CMAKE_CURRENT_SOURCE_DIR}\\..\\..\\test_onnx_runner\\data\\pt_resnet50.onnx"
   VS_DEBUGGER_ENVIRONMENT "XLNX_ONNX_EP_VERBOSE=2
@@ -51,4 +51,4 @@ DEBUG_TAR_CACHE=1
 "
 )
 
-add_dependencies(morphizen-core-dynamic generate_vaip_config)
+add_dependencies(${morphizen_CORE_DYNAMIC_UNIQUE_ID} generate_vaip_config)
