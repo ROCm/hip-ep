@@ -4,7 +4,9 @@ on:
   pull_request:
   merge_group:
   workflow_dispatch:
-
+  push:
+    branches:
+      - main
 env:
   VAI_RT_PREFIX: ${{ github.workspace }}/gi/
   VAI_RT_WORKSPACE: ${{ github.workspace }}/src_dir

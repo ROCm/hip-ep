@@ -1,0 +1,48 @@
+﻿name: Submit PR to update cmake/deps.txt in vaip
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix-submit-pr
+env:
+    VAIP_BRANCH: cp_dev
+    VAIP_REPO: git@gitenterprise.xilinx.com:VitisAI/vaip.git
+    GH_TOKEN: ${{ secrets.GH_TOKEN }}  # Store your PAT here securely
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Store your PAT here securely
+jobs:
+  lint:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ windows_vitisai ]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Call GitHub API with PowerShell
+        run: |
+          $token = $env:GITHUB_TOKEN
+          $repo = "VitisAI/MorphiZen"
+          $url = "https://gitenterprise.xilinx.com/api/v3/repos/$repo/pulls"
+
+          $headers = @{
+            Authorization = "token $token"
+            Accept = "application/vnd.github.v3+json"
+          }
+
+          $response = Invoke-RestMethod -Uri $url -Headers $headers
+          $response | ConvertTo-Json -Depth 5
+
+
+      - name: Submit PR to update cmake/deps.txt in vaip
+        run: |
+            # show where is bash in PS1
+            if (-Not (Test-Path -Path ../vaip)) {
+              git clone "$Env:VAIP_REPO" --branch "$Env:VAIP_BRANCH" ../vaip
+            }
+            set-location ../vaip
+            $whoami = gh --hostname gitenterprise.xilinx.com api user --jq .login
+            Write-Host "whoami: $whoami"
+

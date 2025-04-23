@@ -1,10 +1,17 @@
-﻿W=${W:-$HOME/workspace}
-set -e
-echo "sync vaip"
-(cd $W/vaip; git fetch --all)
-(cd $W/MorphiZen; git fetch --all;)
+﻿echo "running ${BASH_VERSION}"
+SCRIPT_DIR=$(cd $(dirname $0); pwd)
+PROJECT_DIR=$(cd $SCRIPT_DIR/..; pwd)
+W=$(cd $PROJECT_DIR/..; pwd)
+VAIP_DIR=$W/vaip
 
-old_commit_id=$(echo -n $(cd $W/vaip; git show origin/cp_dev:cmake/deps.txt | grep -i 'MorphiZen;' | awk -F';' '{print $3}'))
+if [ ! -d $VAIP_DIR ]; then
+    git clone git@gitenterprise.xilinx.com:VitisAI/vaip.git $VAIP_DIR
+fi
+echo "sync vaip"
+(cd $VAIP_DIR; git fetch --all)
+(cd $PROJECT_DIR; git fetch --all;)
+
+old_commit_id=$(echo -n $(cd $VAIP_DIR; git show origin/cp_dev:cmake/deps.txt | grep -i 'MorphiZen;' | awk -F';' '{print $3}'))
 echo "old commit id = $old_commit_id"
 
 new_commit_id=$(cd $W/MorphiZen; git rev-parse origin/main)
@@ -15,7 +22,7 @@ if [ x"$old_commit_id" == x"$new_commit_id" ]; then
     exit 0
 fi
 
-cd $W/vaip;
+cd $VAIP_DIR;
 
 branch_name="br_update_morphizen_from_${old_commit_id:0:8}"
 echo "branch_name = $branch_name"
@@ -26,8 +33,9 @@ else
     git reset --hard origin/cp_dev
 fi
 git checkout --force $branch_name
+git reset --hard origin/cp_dev
 git show origin/cp_dev:cmake/deps.txt |
-    sed "s/MorphiZen;\\(.*\\);\\(.*\\)/MorphiZen;\\1;$new_commit_id/g" > cmake/deps.txt;
+    sed "s/morphizen;\\(.*\\);\\(.*\\)/morphizen;\\1;$new_commit_id/g" > cmake/deps.txt;
 git add cmake/deps.txt
 title="update morphizen from ${old_commit_id:0:8} to ${new_commit_id:0:8}"
 body=$(
@@ -39,7 +47,7 @@ msg=$(echo $title
       echo
       echo $body)
 
-git commit -m "$msg"
+git commit -am "$msg"
 git push --force -u fork $branch_name
 
 title="update vaip from ${old_commit_id:0:8} to ${new_commit_id:0:8}"
