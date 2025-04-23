@@ -78,7 +78,6 @@ void add_cleanup_function(const std::string& name,
 VAIP_DLL_SPEC
 void deinitialize_onnxruntime_vitisai_ep() {
   MY_LOG(1) << "deinitialize_onnxruntime_vitisai_ep";
-  deinitialize_transpose();
   for (auto& item : g_at_exits) {
     MY_LOG(1) << " deinitialize " << item.first;
   }
