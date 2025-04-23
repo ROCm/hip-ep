@@ -1,6 +1,7 @@
 ﻿#include "./tar_file.hpp"
 #include "./tar_header.hpp"
 #include "morphizen/env_config.hpp"
+#include <algorithm>
 #include <glog/logging.h>
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE, "0")

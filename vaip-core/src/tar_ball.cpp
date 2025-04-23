@@ -163,7 +163,7 @@ int TarWriter::write_internal(const IStreamReader& src, const std::string& name,
   if (size == 0) {
     return 0;
   }
-  for (auto i = 0; i < size; i += BUFFER_SIZE) {
+  for (auto i = 0u; i < size; i += BUFFER_SIZE) {
     auto buffer = src.read(BUFFER_SIZE);
     CHECK(buffer.has_value()) << "failed to read file";
     auto read_size = buffer->size();
@@ -263,10 +263,10 @@ constexpr bool DEBUG_TAR = false;
   } while (0)
 
 namespace vaip_tar {
-int getNextMultiple(int num, int size) {
+template <typename T> T getNextMultiple(T num, T size) {
   if (size <= 0)
     return num;
-  int n = num / size;
+  T n = num / size;
   return (num % size == 0) ? (num) : ((n + 1) * size);
 }
 int tar_checksum(block* header) {
@@ -335,12 +335,12 @@ TarFile::TarFile(const std::filesystem::path& file_path)
     }
     auto* header = &block->header;
     std::string filename(header->name);
-    unsigned long size_ = 0u;
+    size_t size_ = 0u;
     if (header->typeflag == 'L') {
       size_ = std::stoul(header->size, nullptr, 8);
       filename.resize(size_);
       readed_size = file.read(filename.data(), size_).gcount();
-      if (readed_size != size_) {
+      if (static_cast<unsigned long>(readed_size) != size_) {
         MY_LOG("attemp read filename fail");
         return;
       }
@@ -380,11 +380,11 @@ TarFile::TarFile(const std::filesystem::path& file_path)
       MY_LOG("currently position = " << file.tellg());
       continue;
     }
-    size_t need_read_size = getNextMultiple(size_, 512);
+    size_t need_read_size = getNextMultiple(size_, size_t(512u));
     std::vector<char> temp(need_read_size);
     MY_LOG(std::to_string(file.tellg()));
     readed_size = file.read(temp.data(), need_read_size).gcount();
-    if (readed_size != need_read_size) {
+    if (static_cast<size_t>(readed_size) != need_read_size) {
       MY_LOG(std::string("read data fail,need read ") +
              std::to_string(need_read_size) + ", but only read " +
              std::to_string(readed_size));
@@ -455,8 +455,8 @@ const char* TarEntry::data() {
   const block* block = (union block*)(this->datas.data());
   bool is_long_name = block->header.typeflag == 'L';
   if (is_long_name) {
-    auto name_size = std::stoul(block->header.size, nullptr, 8);
-    auto name_context_size = getNextMultiple(name_size, 512);
+    size_t name_size = std::stoul(block->header.size, nullptr, 8);
+    auto name_context_size = getNextMultiple(name_size, size_t(512));
     return this->datas.data() + BLOCKSIZE + name_context_size + BLOCKSIZE;
   } else {
     return this->datas.data() + BLOCKSIZE;
@@ -467,8 +467,8 @@ size_t TarEntry::size() {
   const block* block = (union block*)(this->datas.data());
   bool is_long_name = block->header.typeflag == 'L';
   if (is_long_name) {
-    auto name_size = std::stoul(block->header.size, nullptr, 8);
-    auto name_context_size = getNextMultiple(name_size, 512);
+    size_t name_size = std::stoul(block->header.size, nullptr, 8);
+    auto name_context_size = getNextMultiple(name_size, size_t(512));
     block = (union block*)(this->datas.data() + BLOCKSIZE + name_context_size);
   }
   auto size_ = std::stoul(block->header.size, nullptr, 8);

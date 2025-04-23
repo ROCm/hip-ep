@@ -39,9 +39,9 @@ inline void parse_value(const std::string& text, long long& value) {
 
 inline void parse_value(const std::string& text, uint32_t& value) {
   if (text.size() > 2 && text[0] == '0' && text[1] == 'x') {
-    value = stoul(text.substr(2), 0, 16);
+    value = static_cast<uint32_t>(stoul(text.substr(2), 0, 16));
   } else {
-    value = stoul(text, 0, 10);
+    value = static_cast<uint32_t>(stoul(text, 0, 10));
   }
 }
 

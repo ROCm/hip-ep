@@ -127,10 +127,6 @@ bool Symbolize(void* /*pc*/, char* /*out*/, size_t /*out_size*/);
 } // namespace google
 
 namespace vaip_core {
-static std::string get_session_config_option(const PassContextImp& context,
-                                             const std::string& key,
-                                             const std::string& default_value);
-
 static void save_protobuf_message(const fs::path& filename,
                                   const google::protobuf::Message& msg) {
   try {
@@ -669,14 +665,12 @@ initialize_context(const std::string& model_path, const Graph& onnx_graph,
                       context->get_log_dir().u8string());
   //
   auto is_shared_context_enabled =
-      get_session_config_option(*context, kOrtSessionOptionShareEpContexts,
-                                "0") == "1";
+      context->get_session_config(kOrtSessionOptionShareEpContexts, "0") == "1";
   auto is_ep_context_enabled =
-      get_session_config_option(*context, kOrtSessionOptionEpContextEnable,
-                                "0") == "1";
+      context->get_session_config(kOrtSessionOptionEpContextEnable, "0") == "1";
   auto is_ep_context_embed_mode =
-      get_session_config_option(*context, kOrtSessionOptionEpContextEmbedMode,
-                                "1") == "1";
+      context->get_session_config(kOrtSessionOptionEpContextEmbedMode, "1") ==
+      "1";
 
   if (ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE) && //
       is_shared_context_enabled &&                 //
@@ -684,9 +678,8 @@ initialize_context(const std::string& model_path, const Graph& onnx_graph,
       !is_ep_context_embed_mode) {
     auto ep_binary_file_path = std::string("VITISAI.bin");
     auto ep_context_binary_file = std::filesystem::path();
-    auto session_ep_context_path =
-        std::filesystem::path(get_session_config_option(
-            *context, kOrtSessionOptionEpContextFilePath, ""));
+    auto session_ep_context_path = std::filesystem::path(
+        context->get_session_config(kOrtSessionOptionEpContextFilePath, ""));
     if (session_ep_context_path != "") {
       ep_context_binary_file =
           session_ep_context_path.parent_path() / ep_binary_file_path;
@@ -713,32 +706,6 @@ initialize_context(const std::string& model_path, const Graph& onnx_graph,
   // log version of binary
   print_version_verbose("EXEC VERISON: ", context->context_proto.config());
   return context;
-}
-static std::string get_provider_option(const PassContextImp& context,
-                                       const std::string& key,
-                                       const std::string& default_value) {
-  auto& options = context.context_proto.config().provider_options();
-  auto it = options.find(key);
-  auto ret = std::string();
-  if (it == options.end()) {
-    ret = default_value;
-  } else {
-    ret = it->second;
-  }
-  return ret;
-}
-static std::string get_session_config_option(const PassContextImp& context,
-                                             const std::string& key,
-                                             const std::string& default_value) {
-  auto& options = context.context_proto.config().session_configs();
-  auto it = options.find(key);
-  auto ret = std::string();
-  if (it == options.end()) {
-    ret = default_value;
-  } else {
-    ret = it->second;
-  }
-  return ret;
 }
 static void get_ep_cache_context_common(PassContextImp& context,
                                         IStreamWriter& dst) {
@@ -782,7 +749,7 @@ static std::string get_ep_cache_context_nonembed_mode(PassContextImp& context) {
       context.measure("get_ep_cache_context_nonembed_mode");
   auto model_path = context.model_path;
   auto OrtSessionOptionEpContextFilePath = std::filesystem::path(
-      get_session_config_option(context, "ep.context_file_path", ""));
+      context.get_session_config("ep.context_file_path", ""));
   if (OrtSessionOptionEpContextFilePath.empty()) {
     OrtSessionOptionEpContextFilePath = model_path;
     OrtSessionOptionEpContextFilePath += "_ctx.onnx";
@@ -793,8 +760,8 @@ static std::string get_ep_cache_context_nonembed_mode(PassContextImp& context) {
 
   auto OrtSessionOptionEpContextFilePath_binay =
       OrtSessionOptionEpContextFilePath.replace_extension(".bin");
-  if (get_session_config_option(context, kOrtSessionOptionShareEpContexts,
-                                "0") == "1") {
+  if (context.get_session_config(kOrtSessionOptionShareEpContexts, "0") ==
+      "1") {
     OrtSessionOptionEpContextFilePath_binay =
         OrtSessionOptionEpContextFilePath.parent_path() / "VITISAI.bin";
   }
@@ -880,9 +847,7 @@ create_ep_context_node(vaip_core::ExecutionProviderConcrete* ep) {
   int64_t main_context = index == 0 ? 1 : 0;
   attrs.add("main_context", main_context);
   int64_t embed_mode =
-      get_session_config_option(context, "ep.context_embed_mode", "1") == "1"
-          ? 1
-          : 0;
+      context.get_session_config("ep.context_embed_mode", "1") == "1" ? 1 : 0;
   attrs.add("embed_mode", embed_mode);
   attrs.add("source", std::string("VitisAIExecutionProvider"));
   attrs.add("log_dir", context.log_dir.u8string());
@@ -1046,7 +1011,7 @@ store_cache_directory_from_main_node(PassContextImp& context,
     // special optimization for PSU cases.
     auto ep_context_binary_file = std::filesystem::path();
     auto session_ep_context_path = std::filesystem::path(
-        get_session_config_option(context, "ep.context_file_path", ""));
+        context.get_session_config("ep.context_file_path", ""));
     if (session_ep_context_path != "") {
       ep_context_binary_file =
           session_ep_context_path.parent_path() / *ep_cache_context;
@@ -1075,7 +1040,7 @@ store_cache_directory_from_main_node(PassContextImp& context,
     } else {
       auto ep_context_binary_file = std::filesystem::path();
       auto session_ep_context_path = std::filesystem::path(
-          get_session_config_option(context, "ep.context_file_path", ""));
+          context.get_session_config("ep.context_file_path", ""));
       if (session_ep_context_path != "") {
         ep_context_binary_file =
             session_ep_context_path.parent_path() / *ep_cache_context;

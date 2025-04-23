@@ -45,8 +45,8 @@ public: // make std::unique_ptr happy
   // Seek support using fseek
   std::streampos seekoff(std::streamoff offset, std::ios_base::seekdir way,
                          std::ios_base::openmode which) override;
-  std::streampos TarEntryInputStreamBuffer::seekpos(
-      std::streampos sp, std::ios_base::openmode which) override final;
+  std::streampos seekpos(std::streampos sp,
+                         std::ios_base::openmode which) override final;
   // for logging
   std::string to_string() const;
 
@@ -130,8 +130,8 @@ public:
 
 private:
   TarEntryOutputStream() = delete;
-  static std::streampos TarEntryOutputStream::calculate_tar_append_pos(
-      const TarEntryInputStream& last_entry);
+  static std::streampos
+  calculate_tar_append_pos(const TarEntryInputStream& last_entry);
   std::optional<std::string> get_content_check_sum();
   TarEntryInputStream* find_prev_entry_for_md5(const std::string& md5);
   TarEntryInputStream* find_prev_entry_for_path(const std::string& name);

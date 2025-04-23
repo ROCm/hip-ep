@@ -50,7 +50,6 @@ std::vector<char> get_mem_xclbin_builtin(const std::string& filename) {
 std::vector<char> get_mem_xclbin(const std::string& filename) {
   std::vector<char> mem_xclbin;
   auto vaip_get_mem_xclbin_plugin = Plugin::get(ENV_PARAM(VAIP_XCLBIN_BACKEND));
-  auto loaded_from_backend = false;
   auto has_mem_xclbin = xclbin_map.find(filename) != xclbin_map.end();
   if (has_mem_xclbin) {
     MY_LOG(1) << "  -- found mem_xclbin: " << filename
@@ -71,11 +70,9 @@ std::vector<char> get_mem_xclbin(const std::string& filename) {
                 filename.data(), reinterpret_cast<void*>(&mem_xclbin),
                 [](void* env, void* data, size_t size) {
                   auto* ret = static_cast<std::vector<char>*>(env);
-                  std::swap(*ret,
-                            std::vector<char>(static_cast<char*>(data),
-                                              static_cast<char*>(data) + size));
+                  *ret = std::vector<char>(static_cast<char*>(data),
+                                           static_cast<char*>(data) + size);
                 });
-            loaded_from_backend = true;
             MY_LOG(1) << "  -- found mem_xclbin: " << filename
                       << " from backend " << ENV_PARAM(VAIP_XCLBIN_BACKEND);
           } else {

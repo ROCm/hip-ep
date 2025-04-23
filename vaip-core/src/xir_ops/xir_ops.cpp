@@ -30,7 +30,6 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
-#pragma once
 #include "morphizen/vaip.hpp"
 
 #include "morphizen/env_config.hpp"

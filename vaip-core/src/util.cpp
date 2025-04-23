@@ -441,11 +441,14 @@ void compress(const IStreamReader& src, IStreamWriter& dst,
   do {
     auto in = src.read(CHUNK);
     bytes_read = in.has_value() ? in->size() : 0;
-    if (bytes_read < 0) {
-      deflateEnd(&strm);
-      LOG(FATAL) << "Failed to read from source stream.";
-      return;
-    }
+    // comparison of unsigned expression in '< 0' is always false
+    // [-Werror=type-limits]
+    //
+    // if (bytes_read < 0) {
+    //   deflateEnd(&strm);
+    //   LOG(FATAL) << "Failed to read from source stream.";
+    //   return;
+    // }
     flush = (bytes_read == 0) ? Z_FINISH : Z_NO_FLUSH;
     strm.avail_in = (uInt)bytes_read;
     strm.next_in =

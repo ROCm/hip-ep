@@ -1,5 +1,12 @@
 #include <dlfcn.h>
+#include <sstream>
+#include <string>
 #include <utility>
+
+namespace vaip_core {
+using plugin_t = void*;
+enum class scope_t { PUBLIC, PRIVATE };
+
 std::pair<plugin_t, bool> open_plugin_dyn(const std::string& name,
                                           scope_t scope) {
   auto flag_public = (RTLD_LAZY | RTLD_GLOBAL);
@@ -18,3 +25,4 @@ std::string plugin_error_dyn(plugin_t plugin) {
   return str.str();
 }
 void close_plugin_dyn(plugin_t plugin) { dlclose(plugin); }
+} // namespace vaip_core

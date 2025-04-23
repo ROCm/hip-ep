@@ -1,4 +1,5 @@
 ﻿add_library(${morphizen_CORE_DYNAMIC_UNIQUE_ID} SHARED src/main.cpp)
+message(STATUS "create target ${morphizen_CORE_DYNAMIC_UNIQUE_ID} for onnxruntime_vitisai_ep.dll")
 add_library (morphizen::${morphizen_CORE_DYNAMIC_UNIQUE_ID} ALIAS ${morphizen_CORE_DYNAMIC_UNIQUE_ID})
 set_target_properties(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PROPERTIES FOLDER morphizen)
 # set output name of ${morphizen_CORE_DYNAMIC_UNIQUE_ID}, it is required by VitisAI EP.
@@ -35,10 +36,6 @@ if(MSVC)
   target_compile_options(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PUBLIC "/Zc:__cplusplus")
 endif(MSVC)
 
-if(WIN24_BUILD)
-  target_compile_definitions(${LIB_NAME} PUBLIC "-DWIN24_BUILD=ON")
-endif()
-
 set_target_properties(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PROPERTIES
   VS_DEBUGGER_COMMAND "${CMAKE_INSTALL_PREFIX}\\bin\\test_onnx_runner.exe"
   VS_DEBUGGER_COMMAND_ARGUMENTS "${CMAKE_CURRENT_SOURCE_DIR}\\..\\..\\test_onnx_runner\\data\\pt_resnet50.onnx"
@@ -52,3 +49,7 @@ DEBUG_TAR_CACHE=1
 )
 
 add_dependencies(${morphizen_CORE_DYNAMIC_UNIQUE_ID} generate_vaip_config)
+
+if(NOT MSVC)
+  target_link_libraries(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PUBLIC glog::glog protobuf::libprotobuf )
+endif(NOT MSVC)

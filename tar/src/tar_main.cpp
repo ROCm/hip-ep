@@ -11,7 +11,6 @@ get_readable_path(const vaip_core::TarEntryInputStream& entry);
 
 int main(int argc, char* argv[]) {
   int opt = 0;
-  int option_index = 0;
   int list_flag = 0;
   const char* file = nullptr;
   while ((opt = getopt(argc, argv, "l")) != -1) {

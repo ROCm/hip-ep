@@ -162,7 +162,7 @@ void TarHeader::now() {
 void TarHeader::fill_name(HD_USTAR* header, const char* name, size_t n) {
   // NOTE: name is not null-terminated
   auto len = std::min(n, sizeof(header->name));
-  std::copy(name, name + n, &header->name[0]);
+  std::copy(name, name + len, &header->name[0]);
 }
 void TarHeader::fill_mode(HD_USTAR* header, int mode) {
   snprintf(header->mode, sizeof(header->mode), "%07o", mode);
@@ -205,7 +205,7 @@ void TarHeader::fill_linkflag(HD_USTAR* header, char c) {
 void TarHeader::fill_linkname(HD_USTAR* header, const char* name, size_t n) {
   // NOTE: name is not null-terminated
   auto len = std::min(n, sizeof(header->linkname));
-  std::copy(name, name + n, &header->linkname[0]);
+  std::copy(name, name + len, &header->linkname[0]);
 }
 void TarHeader::fill_magic(HD_USTAR* header) {
 
@@ -225,12 +225,12 @@ void TarHeader::fill_version(HD_USTAR* header) {
 void TarHeader::fill_uname(HD_USTAR* header, const char* uname, size_t n) {
   // NOTE: uname is not null-terminated
   auto len = std::min(n, sizeof(header->uname));
-  std::copy(uname, uname + n, &header->uname[0]);
+  std::copy(uname, uname + len, &header->uname[0]);
 }
 void TarHeader::fill_gname(HD_USTAR* header, const char* gname, size_t n) {
   // NOTE: gname is not null-terminated
   auto len = std::min(n, sizeof(header->gname));
-  std::copy(gname, gname + n, &header->gname[0]);
+  std::copy(gname, gname + len, &header->gname[0]);
 }
 void TarHeader::fill_devmajor(HD_USTAR* header, int devmajor) {
   snprintf(header->devmajor, sizeof(header->devmajor), "%07o", devmajor);
@@ -243,7 +243,7 @@ void TarHeader::fill_devminor(HD_USTAR* header, int devminor) {
 void TarHeader::fill_prefix(HD_USTAR* header, const char* prefix, size_t n) {
   // NOTE: prefix is not null-terminated
   auto len = std::min(n, sizeof(header->prefix));
-  std::copy(prefix, prefix + n, &header->prefix[0]);
+  std::copy(prefix, prefix + len, &header->prefix[0]);
 }
 
 /**

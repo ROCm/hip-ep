@@ -148,6 +148,8 @@ store_cache_directory_from_main_node(class PassContextImp& context,
                                      vaip_cxx::NodeConstRef main_node);
 class ExecutionProviderConcrete;
 static onnxruntime::Node* create_ep_context_node(ExecutionProviderConcrete* ep);
+static std::string get_ep_cache_context_nonembed_mode(PassContextImp& context);
+
 class PassContextImp : public PassContext {
 public:
   std::vector<char> const_data_;
@@ -190,7 +192,6 @@ public:
                  const std::string& default_value) const override final;
   virtual std::string
   get_meta_def_param(const MetaDefProto& meta_def) const override final;
-  ;
 
   virtual std::string
   get_ep_dynamic_option(const std::string& option_name,
@@ -290,6 +291,11 @@ private:
   bool cache_file_use_cache_key_prefix_ = false;
 
 private:
+#if defined(__GNUC__)
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wmissing-declarations"
+#  pragma GCC diagnostic ignored "-Wunused-function"
+#endif
   friend void
   store_cache_directory_from_main_node(PassContextImp& context,
                                        vaip_cxx::NodeConstRef main_node);
@@ -301,6 +307,9 @@ private:
   create_ep_context_node(vaip_core::ExecutionProviderConcrete* ep);
   friend std::string
   get_ep_cache_context_nonembed_mode(PassContextImp& context);
+#if defined(__GNUC__)
+#  pragma GCC diagnostic pop
+#endif
 };
 
 struct PassContextTimerImp : public PassContextTimer {

@@ -32,7 +32,7 @@ TarEntryInputStreamBuffer::TarEntryInputStreamBuffer(
       buffer_(bufferSize) {
   setg(buffer_.data(), buffer_.data(), buffer_.data());
   // does not support writing.
-  setp(nullptr, nullptr, nullptr); // Set write buffer
+  setp(nullptr, nullptr); // Set write buffer
   // Set read buffer
   // set the end_pos_ according to the TAR header
 }

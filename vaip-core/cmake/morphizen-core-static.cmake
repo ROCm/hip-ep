@@ -134,20 +134,6 @@ add_library(${LIB_NAME} STATIC
   src/transpose.cpp
   include/morphizen/guess_reshape.hpp
   src/guess_reshape.cpp
-  ../3rd-party/hash-library/crc32.cpp
-  ../3rd-party/hash-library/crc32.h
-  ../3rd-party/hash-library/hash.h
-  ../3rd-party/hash-library/hmac.h
-  ../3rd-party/hash-library/keccak.cpp
-  ../3rd-party/hash-library/keccak.h
-  ../3rd-party/hash-library/md5.cpp
-  ../3rd-party/hash-library/md5.h
-  ../3rd-party/hash-library/sha1.cpp
-  ../3rd-party/hash-library/sha1.h
-  ../3rd-party/hash-library/sha256.cpp
-  ../3rd-party/hash-library/sha256.h
-  ../3rd-party/hash-library/sha3.cpp
-  ../3rd-party/hash-library/sha3.h
   include/morphizen/config_reader.hpp
   src/xclbin/config_reader.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/config_json_binary.hpp

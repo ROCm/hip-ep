@@ -41,6 +41,9 @@
 #include <gsl/span>
 #include <memory>
 #include <optional>
+namespace morphizen {
+template <typename T> struct env_config_helper;
+}
 namespace vaip_core {
 // The reason PassContext exists is that PassContext has a longer life cycle
 // than Pass. The Pass will be destoryed after model is compiled but some info
@@ -193,8 +196,9 @@ public:
     const char* name = env_name::get_name();
     const char* defvalue = env_name::get_default_value();
     auto p = get_provider_option(std::string(name), std::string(defvalue));
-    return morphizen::env_config_helper<decltype(env_name::value)>::from_string(
-        p);
+    using helper =
+        typename morphizen::env_config_helper<decltype(env_name::value)>;
+    return helper::from_string(p);
   }
 
   /**

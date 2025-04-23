@@ -1,4 +1,5 @@
 #include "morphizen/onnxruntime_vitisai_ep.hpp"
+#include "morphizen/pattern.hpp"
 #include "morphizen/vaip.hpp"
 extern "C" {
 VAIP_DLL_SPEC
@@ -12,12 +13,12 @@ typedef void* voidp;
 static struct {
   const char* name;
   void* symbol;
-} table[] = {
-    {"initialize_onnxruntime_vitisai_ep",
-     vaip_core::initialize_onnxruntime_vitisai_ep},
-    {"deinitialize_onnxruntime_vitisai_ep",
-     deinitialize_onnxruntime_vitisai_ep},
-};
+} table[] = {{"initialize_onnxruntime_vitisai_ep",
+              (void*)vaip_core::initialize_onnxruntime_vitisai_ep},
+             {"deinitialize_onnxruntime_vitisai_ep",
+              (void*)deinitialize_onnxruntime_vitisai_ep},
+             {"vaip_core::Pattern::enable_trace",
+              (void*)vaip_core::Pattern::enable_trace}};
 extern "C" VAIP_DLL_SPEC int morphizen_main(int argc, char* argv[]) {
   if (argc >= 1) {
     auto cmd = std::string(argv[1]);

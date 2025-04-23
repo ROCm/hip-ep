@@ -32,6 +32,16 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
  */
 
+// env_config.hpp must be included before pass.hpp
+// otherwise it is an error, in pass_context.hpp
+//
+// return ::morphizen::env_config_helper<
+//     decltype(env_name::value)>::from_string(p);
+//
+// we cannot add env_config.hpp into vaip.hpp, otherwise macro
+// ENV_PARAM conflicts with vart
+#include "morphizen/env_config.hpp"
+//
 #include "morphizen/node_input.hpp"
 
 namespace vaip_cxx {

@@ -11,7 +11,7 @@ execute_process(
     OUTPUT_VARIABLE GIT_VERSION
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
-set(morphizen_CORE_DYNAMIC_UNIQUE_ID "morphizen-core-dynamic-${GIT_VERSION}")
+set(morphizen_CORE_DYNAMIC_UNIQUE_ID "morphizen-core-dynamic-${GIT_VERSION}" CACHE STRING "the unique name for morphizen-core-dynamic")
 if (TARGET onnxruntime_providers_vitisai)
   set(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC_DEFAULT OFF)
   set(morphizen_WITH_VAIP_CONFIG_FILE_DEFAULT OFF)
