@@ -76,8 +76,9 @@ else()
   find_package(glog REQUIRED)
 endif()
 
-set(ZLIB_USE_STATIC_LIBS ON CACHE BOOL "use static zip")
-find_package(ZLIB QUIET)
+if(NOT ${BUILD_SHARED_LIBS})
+  set(ZLIB_USE_STATIC_LIBS ON CACHE BOOL "use static zip")
+endif()
 if(TARGET ZLIB::ZLIB)
   get_target_property(TMP ZLIB::ZLIB INTERFACE_INCLUDE_DIRECTORIES)
   message(STATUS "found ZLIB at ${TMP}")
@@ -92,7 +93,13 @@ else()
     OVERRIDE_FIND_PACKAGE
   )
   find_package(ZLIB REQUIRED)
-  add_library(ZLIB::ZLIB ALIAS zlibstatic)
+  if(NOT ${BUILD_SHARED_LIBS})
+    add_library(ZLIB::ZLIB ALIAS zlibstatic)
+    target_include_directories(zlibstatic PRIVATE ${zlib_SOURCE_DIR} ${zlib_BINARY_DIR})
+  else()
+    add_library(ZLIB::ZLIB ALIAS zlib)
+    target_include_directories(zlib PRIVATE ${zlib_SOURCE_DIR} ${zlib_BINARY_DIR})
+  endif()
   # TODO: I don't know why, the following line does not work we have
   # to set the include path explicitly in vaip_core_static
 
