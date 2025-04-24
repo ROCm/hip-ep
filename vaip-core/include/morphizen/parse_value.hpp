@@ -15,6 +15,7 @@
  */
 #pragma once
 #include <cassert>
+#include <cstdint>
 #include <sstream>
 namespace morphizen {
 

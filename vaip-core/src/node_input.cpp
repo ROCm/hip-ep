@@ -40,9 +40,9 @@
 //
 // we cannot add env_config.hpp into vaip.hpp, otherwise macro
 // ENV_PARAM conflicts with vart
-#include "morphizen/env_config.hpp"
-//
 #include "morphizen/node_input.hpp"
+#include "morphizen/env_config.hpp"
+#include <cstdint>
 
 namespace vaip_cxx {
 NodeInput::NodeInput(const GraphConstRef graph,
