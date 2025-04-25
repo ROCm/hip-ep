@@ -39,7 +39,18 @@
 #include <glog/logging.h>
 DEF_ENV_PARAM(MORPHIZEN_SUPRRESS_DEPRECATED_WARNG, "1")
 DEF_ENV_PARAM(DEBUG_OP_REGISTER, "0")
+DEF_ENV_PARAM(MORPHIZEN_DEBUG_DEINITIALIZE, "0")
+#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_DEINITIALIZE) >= n)
 
+namespace {
+std::vector<std::pair<std::string, std::function<void()>>> g_at_exits;
+}
+namespace vaip_core {
+void add_cleanup_function(const std::string& name,
+                          std::function<void()> cleanup_function) {
+  g_at_exits.emplace_back(name, cleanup_function);
+}
+} // namespace vaip_core
 extern void* BuildInOPs__hook; // prevent xir_opes_defs.obj symbol gc
 namespace onnxruntime_vitisai_ep {
 using namespace vaip_core;
@@ -132,7 +143,6 @@ private:
   std::map<std::string, Ort::CustomOpDomain> domains;
   std::vector<Opdef> all_ops_;
 };
-static OpHolder& get_global_op_holder();
 
 static OpHolder& get_global_op_holder() {
   static auto instance = std::make_unique<OpHolder>();
@@ -229,7 +239,7 @@ VAIP_DLL_SPEC
 void initialize_onnxruntime_vitisai_ep(
     vaip_core::OrtApiForVaip* api,
     std::vector<OrtCustomOpDomain*>& ret_domain) {
-  vaip_core::initialize_onnxruntime_vitisai_ep(api, ret_domain);
+  vaip_core::set_the_global_api(api);
   {
     static std::vector<OrtCustomOpDomain*> contrib_domains;
     // contrib_domains is used to hold the raw pointers, however,there is no way
@@ -238,9 +248,14 @@ void initialize_onnxruntime_vitisai_ep(
   }
   intialize_op_defs(ret_domain);
 }
+
 VAIP_DLL_SPEC
 void deinitialize_onnxruntime_vitisai_ep() {
-  vaip_core::deinitialize_onnxruntime_vitisai_ep();
+  MY_LOG(1) << "deinitialize_onnxruntime_vitisai_ep";
+  for (auto& item : g_at_exits) {
+    MY_LOG(1) << " deinitialize " << item.first;
+  }
+  g_at_exits.clear();
 }
 
 VAIP_DLL_SPEC

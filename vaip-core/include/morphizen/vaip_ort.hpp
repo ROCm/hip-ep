@@ -61,12 +61,6 @@ using vaip_error_report_func = void (*)(
     void*, int, const char*); // should be same as vaip_core::error_report_func,
                               // for compile issue we  defined it
 
-VAIP_DLL_SPEC void
-initialize_onnxruntime_vitisai_ep(OrtApiForVaip* api,
-                                  std::vector<OrtCustomOpDomain*>& ret_domain);
-
-VAIP_DLL_SPEC void deinitialize_onnxruntime_vitisai_ep();
-
 VAIP_DLL_SPEC void set_the_global_api(OrtApiForVaip* api);
 
 VAIP_DLL_SPEC const OrtApiForVaip* api();

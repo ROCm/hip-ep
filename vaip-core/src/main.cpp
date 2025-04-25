@@ -18,9 +18,7 @@ typedef void* voidp;
 static struct {
   const char* name;
   void* symbol;
-} table[] = {{"initialize_onnxruntime_vitisai_ep",
-              (void*)vaip_core::initialize_onnxruntime_vitisai_ep},
-             {"deinitialize_onnxruntime_vitisai_ep",
+} table[] = {{"deinitialize_onnxruntime_vitisai_ep",
               (void*)deinitialize_onnxruntime_vitisai_ep},
              {"vaip_core::Pattern::enable_trace",
               (void*)vaip_core::Pattern::enable_trace}};
