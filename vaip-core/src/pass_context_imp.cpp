@@ -291,6 +291,89 @@ std::filesystem::path PassContextImp::get_model_path() const {
   return model_path;
 }
 
+/**
+ * @brief Retrieves the file path for the ONNX context file associated with the
+ * execution provider (EP).
+ *
+ * input : ep.context_file_path
+ * input : model_path
+ * output : ep_context_onnx_file_path
+ *
+ * This function determines the ONNX context file path based on the session
+ * configuration or the model path. If the "ep.context_file_path" session
+ * configuration is specified and not empty, it uses that value. Otherwise, if
+ * the model path is available, it constructs the ONNX context file path by
+ * appending "_ctx" to the model's stem and preserving its extension.
+ * If both "ep.context_file_path" and the model path are empty, it throws a
+ * runtime error.
+ *
+ * @return std::filesystem::path The resolved ONNX context file path.
+ *
+ * @throws std::runtime_error If both "ep.context_file_path" and the model path
+ * are empty.
+ */
+std::filesystem::path PassContextImp::get_ep_context_onnx_file_path() {
+  auto ep_context_onnx_file_path = std::filesystem::path();
+  auto ep_context_file_path = get_session_config("ep.context_file_path");
+  // For same with onnxruntime (graph_partitioner.cc::GetValidatedEpContextPath)
+  // ep.context_file_path validated in onnxruntime
+  // ep.context_file_path is a file path, not a directory path.
+  // support absolute path and relative path
+  // relative path is relative to current working directory
+  if (ep_context_file_path.has_value()) {
+    ep_context_onnx_file_path =
+        std::filesystem::u8path(ep_context_file_path.value());
+  } else if (!model_path.empty()) {
+    ep_context_onnx_file_path =
+        model_path.parent_path() /
+        std::filesystem::u8path(model_path.stem().u8string() + "_ctx.onnx");
+  } else {
+    // ??? Is it possible for both model_path and ep.context_file_path are empty
+    // at same time
+    LOG(FATAL) << "ep.context_file_path and model_path are both empty.";
+  }
+  return ep_context_onnx_file_path;
+}
+
+/**
+ * @brief Generates the file path for the EP context binary file based on the
+ * given ONNX file path and sharing mode.
+ *
+ * input : ep_context_onnx_file_path
+ * input : is_shared_ep_contexts
+ * output : ep_context_binary_file_path
+ *
+ * @param ep_context_onnx_file Reference to the ONNX file path for the EP
+ * context.
+ * @param is_shared_ep_contexts Boolean flag indicating whether the EP contexts
+ * are shared.
+ *        - If true, the binary file will be named "VITISAI.bin" in the same
+ * directory as the ONNX file.
+ *        - If false, the binary file will be named "<ONNX
+ * filename>_VITISAI.bin" in the same directory.
+ *
+ * @return A std::filesystem::path object representing the generated binary file
+ * path.
+ */
+std::filesystem::path PassContextImp::get_ep_context_binary_file_path() {
+  auto ep_context_binary_file_path = std::filesystem::path();
+  auto ep_context_onnx_file = get_ep_context_onnx_file_path();
+  auto is_shared_ep_contexts =
+      get_session_config("ep.share_ep_contexts", "0") == "1";
+  if (ep_context_onnx_file.empty()) {
+    LOG(FATAL) << "Both ep.context_file_path and model_path are empty.";
+  } else if (is_shared_ep_contexts) {
+    ep_context_binary_file_path = ep_context_onnx_file.parent_path() /
+                                  std::filesystem::u8path("VITISAI.bin");
+  } else {
+    ep_context_binary_file_path =
+        ep_context_onnx_file.parent_path() /
+        std::filesystem::u8path(ep_context_onnx_file.filename().u8string() +
+                                "_VITISAI.bin");
+  }
+  return ep_context_binary_file_path;
+}
+
 std::optional<std::vector<char>>
 PassContextImp::read_file_c8(const std::string& filename) const {
   return read_file_generic<char>(filename);

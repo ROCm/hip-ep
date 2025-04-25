@@ -20,6 +20,8 @@ ORT point of view, end users must set session config
 ```c++
     return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT, "Both ep_context_path and model_path are empty");
 ```
+The `ep.context_file_path` support absolute path and relative path.
+relative path is relative to current working directory. 
 
 ```c++
   auto session_options = Ort::SessionOptions();
@@ -53,7 +55,7 @@ file. It is only applicable for non-embed model.
   session_options.AddConfigEntry("ep.context_embed_mode", "0");
   session_options.AddConfigEntry("ep.shared_contexts", "1");
 ```
-2c
+
 VitisAI EP would raises an exception if `ep.ep_shared_contexts=1`
 however `ep.context_embed_mode=1`
 
@@ -79,14 +81,14 @@ when `ep.shared_contexts=0`, it would generates the following files.
 
 ```
 A.onnx
-A.onnx_ctx.onnx
-A.onnx_ctx.onnx_VITISAI.bin
+A_ctx.onnx
+A_ctx.onnx_VITISAI.bin
 B.onnx
-B.onnx_ctx.onnx
-B.onnx_ctx.onnx_VITISAI.bin
+B_ctx.onnx
+B_ctx.onnx_VITISAI.bin
 C.onnx
-C.onnx_ctx.onnx
-C.onnx_ctx.onnx_VITISAI.bin
+C_ctx.onnx
+C_ctx.onnx_VITISAI.bin
 ```
 
 when `ep.shared_contexts=1`, it would generates the following files.
@@ -94,11 +96,11 @@ when `ep.shared_contexts=1`, it would generates the following files.
 ```
 VITISAI.bin
 A.onnx
-A.onnx_ctx.onnx
+A_ctx.onnx
 B.onnx
-B.onnx_ctx.onnx
+B_ctx.onnx
 C.onnx
-C.onnx_ctx.onnx
+C_ctx.onnx
 ```
 
-And all `{A,B,C}.onnx_ctx.onnx` refer to the same `VITISAI.bin`
+And all `{A,B,C}_ctx.onnx` refer to the same `VITISAI.bin`

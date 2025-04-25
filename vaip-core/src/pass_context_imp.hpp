@@ -212,6 +212,9 @@ private:
   std::optional<std::vector<T>>
   read_file_generic(const std::string& filename) const;
 
+  std::filesystem::path get_ep_context_onnx_file_path();
+  std::filesystem::path get_ep_context_binary_file_path();
+
 public:
   virtual std::filesystem::path get_model_path() const override final;
   virtual std::optional<std::vector<char>>

@@ -676,19 +676,8 @@ initialize_context(const std::string& model_path, const Graph& onnx_graph,
       is_shared_context_enabled &&                 //
       is_ep_context_enabled &&                     //
       !is_ep_context_embed_mode) {
-    auto ep_binary_file_path = std::string("VITISAI.bin");
-    auto ep_context_binary_file = std::filesystem::path();
-    auto session_ep_context_path = std::filesystem::path(
-        context->get_session_config(kOrtSessionOptionEpContextFilePath, ""));
-    if (session_ep_context_path != "") {
-      ep_context_binary_file =
-          session_ep_context_path.parent_path() / ep_binary_file_path;
-    } else if (!context->model_path.empty()) {
-      ep_context_binary_file =
-          context->model_path.parent_path() / ep_binary_file_path;
-    } else {
-      ep_context_binary_file = ep_binary_file_path;
-    }
+    auto ep_context_binary_file = context->get_ep_context_binary_file_path();
+
     auto open_mode = std::ios::binary | std::ios::in | std::ios::out;
     if (!std::filesystem::exists(ep_context_binary_file)) {
       open_mode |= std::ios::trunc;
@@ -747,24 +736,8 @@ static std::string get_ep_cache_context_embed_mode(PassContextImp& context) {
 static std::string get_ep_cache_context_nonembed_mode(PassContextImp& context) {
   auto measure_get_ep_cache_context_embed_mode =
       context.measure("get_ep_cache_context_nonembed_mode");
-  auto model_path = context.model_path;
-  auto OrtSessionOptionEpContextFilePath = std::filesystem::path(
-      context.get_session_config("ep.context_file_path", ""));
-  if (OrtSessionOptionEpContextFilePath.empty()) {
-    OrtSessionOptionEpContextFilePath = model_path;
-    OrtSessionOptionEpContextFilePath += "_ctx.onnx";
-  }
-  LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
-      << "embed mode = 0, save ep context file to "
-      << OrtSessionOptionEpContextFilePath.filename();
-
   auto OrtSessionOptionEpContextFilePath_binay =
-      OrtSessionOptionEpContextFilePath.replace_extension(".bin");
-  if (context.get_session_config(kOrtSessionOptionShareEpContexts, "0") ==
-      "1") {
-    OrtSessionOptionEpContextFilePath_binay =
-        OrtSessionOptionEpContextFilePath.parent_path() / "VITISAI.bin";
-  }
+      context.get_ep_context_binary_file_path();
   LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
       << "embed mode = 0, save cache directory to tar file "
       << OrtSessionOptionEpContextFilePath_binay.filename();
@@ -1009,18 +982,10 @@ store_cache_directory_from_main_node(PassContextImp& context,
   if (ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE) //
       && !enable_compression && !enable_encryption && ep_embed_mode == 0) {
     // special optimization for PSU cases.
-    auto ep_context_binary_file = std::filesystem::path();
-    auto session_ep_context_path = std::filesystem::path(
-        context.get_session_config("ep.context_file_path", ""));
-    if (session_ep_context_path != "") {
-      ep_context_binary_file =
-          session_ep_context_path.parent_path() / *ep_cache_context;
-    } else if (context.model_path.empty()) {
-      ep_context_binary_file = std::filesystem::u8path(*ep_cache_context);
-    } else {
-      ep_context_binary_file = context.model_path.parent_path() /
-                               std::filesystem::u8path(*ep_cache_context);
-    }
+    auto ep_context_onnx_file = context.get_ep_context_onnx_file_path();
+    auto ep_context_binary_file = ep_context_onnx_file.parent_path() /
+                                  std::filesystem::u8path(*ep_cache_context);
+
     MY_LOG(1) << "open tar file: " << ep_context_binary_file;
     context.tar_file_ = TarFile::create(std::make_unique<std::fstream>(
         ep_context_binary_file,
@@ -1038,18 +1003,9 @@ store_cache_directory_from_main_node(PassContextImp& context,
       LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
           << "embed mode = 1, load ep context " << ep_context_size << " bytes";
     } else {
-      auto ep_context_binary_file = std::filesystem::path();
-      auto session_ep_context_path = std::filesystem::path(
-          context.get_session_config("ep.context_file_path", ""));
-      if (session_ep_context_path != "") {
-        ep_context_binary_file =
-            session_ep_context_path.parent_path() / *ep_cache_context;
-      } else if (context.model_path.empty()) {
-        ep_context_binary_file = std::filesystem::u8path(*ep_cache_context);
-      } else {
-        ep_context_binary_file = context.model_path.parent_path() /
-                                 std::filesystem::u8path(*ep_cache_context);
-      }
+      auto ep_context_onnx_file = context.get_ep_context_onnx_file_path();
+      auto ep_context_binary_file = ep_context_onnx_file.parent_path() /
+                                    std::filesystem::u8path(*ep_cache_context);
       ep_context_file = IStreamReader::from_path(ep_context_binary_file);
     }
 #if VAIP_ORT_API_MAJOR >= 12
