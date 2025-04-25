@@ -3,10 +3,6 @@
 #include "morphizen/vaip.hpp"
 #include <glog/logging.h>
 #include <gtest/gtest.h>
-VAIP_DLL_SPEC
-extern "C" const ::OrtCustomOp*
-morphizen_get_registered_custom_op(const std::string& domain,
-                                   const std::string& op_name);
 namespace {
 
 class UnitTestOps : public OpRegister {
@@ -31,7 +27,9 @@ static ::vaip_core::StaticPluginRegister
 TEST(OpDefTest, TestAddAndRemove) {
   {
     auto unit_test_op_add =
-        morphizen_get_registered_custom_op("com.test.unit", "add");
+        vaip_core::Plugin::invoke<OrtCustomOp*, const char*, const char*>(
+            "onnxruntime_vitisai_ep", "morphizen_get_registered_custom_op",
+            "com.test.unit", "add");
     ASSERT_TRUE(unit_test_op_add != nullptr);
   }
 }

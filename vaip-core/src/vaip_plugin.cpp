@@ -254,4 +254,23 @@ StaticPluginRegister::StaticPluginRegister(const char* name, const char* symbol,
 }
 StaticPluginRegister::~StaticPluginRegister() {}
 
+extern "C" void morphizen_register_static_plugin(const char* name,
+                                                 const char* symbol,
+                                                 void* addr) {
+  register_plugin_static(name, symbol, addr);
+}
+
+void StaticPluginRegister::sync_static_plugin_into_module(
+    const char* module_name) {
+  // this function try to sync with onnxruntime_vitisai_ep.dll
+  auto& store = get_store();
+  for (auto& x : store) {
+    for (auto& y : x.second) {
+      Plugin::invoke<void, const char*, const char*, void*>(
+          module_name, "morphizen_register_static_plugin", x.first.c_str(),
+          y.first.c_str(), y.second);
+    }
+  }
+}
+
 } // namespace vaip_core

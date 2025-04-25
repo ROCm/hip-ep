@@ -127,6 +127,7 @@ static std::string generateRandomString(size_t length) {
 }
 
 TEST_F(TarBallTest, CompressTest) {
+
   auto data = generateRandomString(65536);
   std::stringstream result;
   {

@@ -21,8 +21,11 @@ endif(MSVC)
 # automatically, see tools/parse_cl_link_error.py for more details.
 target_link_libraries(${morphizen_CORE_DYNAMIC_UNIQUE_ID}
   PRIVATE
-  morphizen-core-static)
-
+  morphizen-core-static
+)
+target_sources(${morphizen_CORE_DYNAMIC_UNIQUE_ID} INTERFACE 
+    $<TARGET_OBJECTS:morphizen-dirty-hack-env-lib>
+)
 target_include_directories(${morphizen_CORE_DYNAMIC_UNIQUE_ID}
   PUBLIC
   $<BUILD_INTERFACE:$<TARGET_PROPERTY:morphizen-core-static,INTERFACE_INCLUDE_DIRECTORIES>>

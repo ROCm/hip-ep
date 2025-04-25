@@ -121,7 +121,6 @@ EXPORTS
     ?match@Pattern@vaip_core@@QEBA?AV?$unique_ptr@VBinder@vaip_core@@U?$default_delete@VBinder@vaip_core@@@std@@@std@@VNodeConstRef@vaip_cxx@@@Z
     ?model_load@vaip_core@@YA?AV?$unique_ptr@UModel@onnxruntime@@UModelDeleter@vaip_core@@@std@@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@3@@Z
     ?model_path@GraphConstRef@vaip_cxx@@QEBAAEBVpath@filesystem@std@@XZ
-    ?my_getenv_s@morphizen@@YA?AV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@PEBDAEBV23@@Z
     ?name@GraphConstRef@vaip_cxx@@QEBAAEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@XZ
     ?name@Model@vaip_cxx@@QEBAAEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@XZ
     ?name@NodeConstRef@vaip_cxx@@QEBAAEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@XZ

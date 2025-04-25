@@ -55,6 +55,17 @@ public:
   VAIP_DLL_SPEC StaticPluginRegister(const char* name, const char* symbol,
                                      void* addr);
   VAIP_DLL_SPEC ~StaticPluginRegister();
+  /**
+   * @brief Synchronizes a static plugin into the specified module.
+   *
+   * This function copies all registered static plugin in the current module
+   * into a module identified by its name. It ensures that the plugin is
+   * properly synchronized and available for use within the specified module.
+   *
+   * @param module_name The name of the module into which the static plugin will
+   * be synchronized.
+   */
+  static void sync_static_plugin_into_module(const char* module_name);
 
 private:
   const char* name_;
@@ -62,10 +73,23 @@ private:
   void* addr_;
 };
 
+extern "C" VAIP_DLL_SPEC void
+morphizen_register_static_plugin(const char* name, const char* symbol,
+                                 void* addr);
+
 struct Plugin {
   VAIP_DLL_SPEC
   Plugin(const char* name);
   VAIP_DLL_SPEC ~Plugin();
+  template <typename R, typename... Args>
+  static R invoke(const char* plugin_name, const char* symbol, Args... args) {
+    auto plugin = Plugin::get(plugin_name);
+    if (plugin == nullptr) {
+      std::cerr << "no such plugin: " << plugin_name << std::endl;
+      std::abort();
+    }
+    return plugin->invoke<R, Args...>(symbol, args...);
+  }
   template <typename R, typename... Args>
   R invoke(const char* name, Args... args) {
     auto method = get_method<R, Args...>(name);

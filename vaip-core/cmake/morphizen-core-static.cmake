@@ -38,12 +38,18 @@ configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/version_info.cpp.in
   ${CMAKE_CURRENT_BINARY_DIR}/src/version_info.cpp
   @ONLY)
+add_library(morphizen-dirty-hack-env-lib OBJECT
+  # NOTE: this is a dirty hack, it is not safe to use my_getenv_s accoss DLL,
+  # string allocated in one dll cannot be released in another dll
+  # so my_getenv_s is deleted from onnxruntime_vitisai_ep.def
+  # and we add the source file here to avoid the linker error
+  ${CMAKE_CURRENT_SOURCE_DIR}/../vaip-core/src/getenv.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../vaip-core/src/getenv.c
+)
 add_library(${LIB_NAME} STATIC
   ${PROTO_SRCS} ${PROTO_HDRS}
   src/version_info.hpp
   ${CMAKE_CURRENT_BINARY_DIR}/src/version_info.cpp
-  src/getenv.cpp
-  src/getenv.c
   include/morphizen/vaip_plugin.hpp
   src/vaip_plugin.cpp
   include/morphizen/vaip.hpp
@@ -144,7 +150,7 @@ add_library(${LIB_NAME} STATIC
   src/file_stream.hpp
   src/file_stream.cpp
 )
-
+target_link_libraries(${LIB_NAME} PUBLIC morphizen-dirty-hack-env-lib)
 add_library (morphizen::morphizen-core-static ALIAS morphizen-core-static)
 set_target_properties(${LIB_NAME} PROPERTIES FOLDER morphizen)
 if(MSVC)

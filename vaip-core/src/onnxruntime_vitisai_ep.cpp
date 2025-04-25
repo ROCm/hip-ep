@@ -132,6 +132,8 @@ private:
   std::map<std::string, Ort::CustomOpDomain> domains;
   std::vector<Opdef> all_ops_;
 };
+static OpHolder& get_global_op_holder();
+
 static OpHolder& get_global_op_holder() {
   static auto instance = std::make_unique<OpHolder>();
   static bool init = false;
@@ -139,6 +141,9 @@ static OpHolder& get_global_op_holder() {
     init = true;
     vaip_core::add_cleanup_function("cleanup global plugin store",
                                     []() { instance.reset(); });
+    /*vaip_core::StaticPluginRegister(
+        "onnxruntime_vitisai_ep", "morphizen_get_registered_custom_op",
+        (void*)local_morphizen_get_registered_custom_op);*/
   }
   return *instance;
 }
@@ -209,12 +214,15 @@ static void intialize_op_defs(std::vector<OrtCustomOpDomain*>& ret_domain) {
   auto tmp = op_holder.get_domains();
   ret_domain.insert(ret_domain.end(), tmp.begin(), tmp.end());
 }
-// The interface exported below is used by onnxruntime_providers_vitisai.so
 VAIP_DLL_SPEC
-const ::OrtCustomOp*
-morphizen_get_registered_custom_op(const std::string& domain,
-                                   const std::string& op_name) {
+const ::OrtCustomOp* morphizen_get_registered_custom_op(const char* domain,
+                                                        const char* op_name) {
+  /* static auto plugin = vaip_core::Plugin::get("onnxruntime_vitisai_ep");
+   static auto func =
+       plugin->get_method<const ::OrtCustomOp*, const char*, const char*>(
+           "morphizen_get_registered_custom_op");*/
   return get_global_op_holder().get_op(domain, op_name);
+  // return func(domain.c_str(), op_name.c_str());
 }
 // The interface exported below is used by onnxruntime_providers_vitisai.so
 VAIP_DLL_SPEC

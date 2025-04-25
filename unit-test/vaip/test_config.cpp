@@ -40,6 +40,8 @@
 #include <gtest/gtest.h>
 #include <limits>
 class ConfigTest : public DebugLogger {};
+// disable this test
+
 TEST_F(ConfigTest, Simple) {
   const char config[] =
       R"json(

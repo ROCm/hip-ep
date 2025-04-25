@@ -6,10 +6,11 @@
 # enable morphizen-core-dynamic or not. when VAIP is built as a standalone library, this option should be ON
 # when VAIP is built as part of onnxruntime, this option should be OFF
 execute_process(
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     COMMAND git rev-parse HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     OUTPUT_VARIABLE GIT_VERSION
     OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE GIT_VERSION_FOUND
   )
 set(morphizen_CORE_DYNAMIC_UNIQUE_ID "morphizen-core-dynamic-${GIT_VERSION}" CACHE STRING "the unique name for morphizen-core-dynamic")
 if (TARGET onnxruntime_providers_vitisai)

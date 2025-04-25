@@ -31,21 +31,15 @@
  */
 
 #include "debug_logger.hpp"
+#include "morphizen/vaip.hpp"
 #include "unit_test_env_params.hpp"
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 #include <limits>
-//
-#include "morphizen/vaip.hpp"
-
-class GraphTest : public DebugLogger {};
-
+class GraphTest : public ::testing::Test {};
 TEST_F(GraphTest, LoadAndSave) {
-  open_logger_file("GraphTest.Load.log");
-  logger() << "LOADING "
-           << "INPUT_MODEL " << ENV_PARAM(INPUT_MODEL);
   auto model = vaip_cxx::Model::load(ENV_PARAM(INPUT_MODEL));
   auto graph = model->main_graph();
   graph.set_name("resent50_by_vaip");
@@ -64,7 +58,7 @@ TEST_F(GraphTest, LoadAndSave) {
   auto c = 0;
   LOG(INFO) << "first 10 initializers:";
   for (auto& init : graph.constant_initializers()) {
-    logger() << " " << c++ << " " << init << std::endl;
+    LOG(INFO) << " " << c++ << " " << init << std::endl;
   }
   for (auto& init : graph.constant_initializers()) {
     // NOTE: constant_initializers is not ordered.
@@ -130,6 +124,7 @@ TEST_F(GraphTest, FindNodeArgGraphInput) {
   EXPECT_EQ(*shape, std::vector<int64_t>({1, 3, 224, 224}));
 }
 TEST_F(GraphTest, FindNodeArgGraphOutput) {
+
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.resolve();
@@ -151,6 +146,7 @@ TEST_F(GraphTest, FindNodeArgGraphOutput) {
 }
 
 TEST_F(GraphTest, NodesInTopologicalOrder) {
+
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.resolve();
@@ -180,6 +176,7 @@ TEST_F(GraphTest, NodesInTopologicalOrder) {
 }
 
 TEST_F(GraphTest, NodeIndex) {
+
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.resolve();
@@ -193,6 +190,7 @@ TEST_F(GraphTest, NodeIndex) {
   EXPECT_EQ(op_domain, "");
 }
 TEST_F(GraphTest, FindConsumers) {
+
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.resolve();
@@ -206,6 +204,7 @@ TEST_F(GraphTest, FindConsumers) {
 }
 
 TEST_F(GraphTest, NodeArgFindProducer) {
+
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.resolve();
@@ -217,7 +216,7 @@ TEST_F(GraphTest, NodeArgFindProducer) {
   LOG(INFO) << "found node's producer: " << node.value();
 }
 TEST_F(GraphTest, Fuse) {
-  open_logger_file("GraphTest.Fuse.log");
+
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.resolve();
@@ -258,12 +257,12 @@ TEST_F(GraphTest, Fuse) {
   // FIXME: support save subgrahp
   // the saved graph cannot be read by Netron.
   // graph.save("C:\\temp\\a.onnx", "C:\\temp\\a.dat", 128u);
-  logger() << "fused node: " << node << std::endl;
-  logger() << "graph after fuse: " << graph << std::endl;
+  LOG(INFO) << "fused node: " << node << std::endl;
+  LOG(INFO) << "graph after fuse: " << graph << std::endl;
 }
 
 TEST_F(GraphTest, TryFuse) {
-  open_logger_file("GraphTest.Fuse.log");
+
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.resolve();
@@ -274,6 +273,7 @@ TEST_F(GraphTest, TryFuse) {
 }
 
 TEST_F(GraphTest, NewConstantInitializer) {
+
   LOG(INFO) << "LOADING " << ENV_PARAM(SAMPLE_ONNX) << std::endl;
   auto model = vaip_cxx::Model::load(ENV_PARAM(SAMPLE_ONNX));
   auto graph = vaip_cxx::GraphRef(model->main_graph());
@@ -530,7 +530,6 @@ TEST_F(GraphTest, NewConstantInitializer) {
 }
 
 TEST_F(GraphTest, VirtualFuse) {
-  open_logger_file("GraphTest.Fuse.log");
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.resolve();

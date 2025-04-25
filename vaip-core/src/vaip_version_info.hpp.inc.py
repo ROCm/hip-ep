@@ -128,14 +128,17 @@ def get_dir_version_info(path):
             ["git", "rev-parse", "HEAD"], cwd=path, text=True
         ).strip()
     except subprocess.CalledProcessError as e:
-        raise ValueError("Error while getting morphizen git hash")
+        print(f"Error while getting morphizen git hash {path}")
+        return "N/A", "N/A"
 
     try:
         git_branch = subprocess.check_output(
             ["git", "branch", "--show-current"], cwd=path, text=True
         ).strip()
     except subprocess.CalledProcessError as e:
-        git_branch = git_hash[0:6]
+        print(f"Error while getting morphizen git branch {path}")
+        return "N/A", "N/A"
+    git_branch = git_hash[0:6]
     return git_branch, git_hash
 
 

@@ -51,10 +51,12 @@ set_target_properties(${TEST_EXE_NAME} PROPERTIES FOLDER morphizen/unit-tests)
 find_package(onnxruntime REQUIRED)
 target_link_libraries(${TEST_EXE_NAME}
     PRIVATE
-    ${morphizen_CORE_DYNAMIC_UNIQUE_ID}
+    morphizen-core-static
     GTest::gtest
     onnxruntime::onnxruntime
-    glog::glog)
+    glog::glog
+    $<LINK_LIBRARY:WHOLE_ARCHIVE,morphizen-pass-init>
+)
 target_include_directories(
   ${TEST_EXE_NAME}
   PRIVATE
@@ -102,4 +104,11 @@ add_dependencies(${TEST_EXE_NAME}
   tgt_sample.onnx
   tgt_sample_src_tar
   tgt_test_custom_op.onnx
+  ${morphizen_CORE_DYNAMIC_UNIQUE_ID}
 )
+add_custom_target(morphizen-run-unit-tests
+    ${CMAKE_COMMAND} -E env CI=1
+    $<TARGET_FILE:${TEST_EXE_NAME}>
+    DEPENDS ${TEST_EXE_NAME}
+)
+
