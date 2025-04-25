@@ -120,11 +120,13 @@ OrtStatusPtr xilinx_custom_op_shape_infer(const OrtCustomOp* op,
         auto data_type = ctx.GetAttrString(data_type_attr_name.c_str());
         auto shape_attr_name = std::string("shape_") + std::to_string(i);
         auto shape = ctx.GetAttrInts(shape_attr_name.c_str());
-        if (shape.empty()) {
-          break;
-        }
         ctx.SetOutputShape(i, convert_shape(shape),
                            convert_elem_type(data_type));
+      } catch (const Ort::Exception& status) {
+        if (status.GetOrtErrorCode() == ORT_INVALID_ARGUMENT) {
+          // it is fine that the attribute does not exist.
+          break;
+        }
       } catch (const std::exception& e) {
         LOG(FATAL) << "[VitisAI] custom op shape infer get shape_"
                    << std::to_string(i)
