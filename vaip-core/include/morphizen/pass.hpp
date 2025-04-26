@@ -478,25 +478,11 @@ create_action_from_node_action(IPass::node_action_t node_action);
 IPass::action_t create_xmodel_process_graph(IPass::action_t action);
 } // namespace vaip_core
 
-#ifndef _WIN32
-#  define DEFINE_VAIP_PASS(cls, id)                                            \
-    extern "C" VAIP_PASS_ENTRY vaip_core::PassInfo* vaip_pass_info() {         \
-      return ProcessorPassInfo<cls>::pass_info();                              \
-    }                                                                          \
-    extern "C" {                                                               \
-    void* /* a hook var*/ id##__hook = nullptr;                                \
-    }
-#else
-#  define DEFINE_VAIP_PASS(cls, id)                                            \
-    static ::vaip_core::PassInfo* vaip_pass_info() {                           \
-      return ProcessorPassInfo<cls>::pass_info();                              \
-    }                                                                          \
-    namespace {                                                                \
-    static ::vaip_core::StaticPluginRegister                                   \
-        __register(OUTPUT_NAME, "vaip_pass_info", (void*)&vaip_pass_info);     \
-    }                                                                          \
-    extern "C" {                                                               \
-    void* /* a hook var*/ id##__hook = &__register;                            \
-    }
-
-#endif
+#define DEFINE_VAIP_PASS(cls, id)                                              \
+  static ::vaip_core::PassInfo* vaip_pass_info() {                             \
+    return ProcessorPassInfo<cls>::pass_info();                                \
+  }                                                                            \
+  namespace {                                                                  \
+  static ::vaip_core::StaticPluginRegister                                     \
+      __register(OUTPUT_NAME, "vaip_pass_info", (void*)&vaip_pass_info);       \
+  }
