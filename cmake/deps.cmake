@@ -2,14 +2,15 @@
 #  Copyright (C) 2023 – 2024 Advanced Micro Devices, Inc. All rights reserved.
 #  Licensed under the MIT License.
 #
+set(FETCHCONTENT_QUIET TRUE CACHE BOOL "enable fetchcontent quiet")
 include(FetchContent)
 file(STRINGS ${CMAKE_CURRENT_LIST_DIR}/deps.txt VAIP_DEPS_LIST)
 file(READ "${CMAKE_CURRENT_LIST_DIR}/dep.h.inc.in" VAIP_DEP_H_INC_IN)
 set(VAIP_DEP_H_INC "")
 foreach(VAIP_DEP IN LISTS VAIP_DEPS_LIST)
-  message(STATUS "VAIP_DEP = ${VAIP_DEP}")
   # Lines start with "#" are comments
   if(NOT VAIP_DEP MATCHES "^#")
+    message(STATUS "VAIP_DEP = ${VAIP_DEP}")
     # The first column is name
     list(POP_FRONT VAIP_DEP VAIP_DEP_NAME)
     # The second column is URL
@@ -76,29 +77,47 @@ else()
   find_package(glog REQUIRED)
 endif()
 
-if(NOT ${BUILD_SHARED_LIBS})
+
+# must use static zlib on windows,even if BUILD_SHARED_LIBS is undfined or OFF,
+# because we assume static msvc runtime is used
+# because file opened in one dll cannot be used in another dll
+# see unit-test PassContextTest.TestCompress
+# NOTE: BUILD_SHARED_LIBS might not be defined
+if(MSVC)
   set(ZLIB_USE_STATIC_LIBS ON CACHE BOOL "use static zip")
+elseif(NOT ${BUILD_SHARED_LIBS})
+  set(ZLIB_USE_STATIC_LIBS OFF CACHE BOOL "use static zip")
 endif()
+# todo: try to find prebuilt zlib
 if(TARGET ZLIB::ZLIB)
   get_target_property(TMP ZLIB::ZLIB INTERFACE_INCLUDE_DIRECTORIES)
   message(STATUS "found ZLIB at ${TMP}")
 else()
   message(STATUS "cannot find_package(ZLIB), fetch it from ${DEP_URL_zlib}")
   FetchContent_Declare(
-    ZLIB
-    GIT_REPOSITORY ${DEP_URL_zlib}
-    GIT_TAG ${DEP_SHA1_zlib}
-    GIT_SHALLOW TRUE
-    EXCLUDE_FROM_ALL
-    OVERRIDE_FIND_PACKAGE
+      ZLIB
+      GIT_REPOSITORY ${DEP_URL_zlib}
+      GIT_TAG ${DEP_SHA1_zlib}
+      GIT_SHALLOW TRUE
+      EXCLUDE_FROM_ALL
+      OVERRIDE_FIND_PACKAGE
+      PATCH_COMMAND
+          ${CMAKE_COMMAND} -E echo "Checking if patch is already applied..." &&
+          git apply --check "${CMAKE_CURRENT_SOURCE_DIR}/cmake/zlib.patch" -q &&
+          git apply "${CMAKE_CURRENT_SOURCE_DIR}/cmake/zlib.patch" ||
+          ${CMAKE_COMMAND} -E echo "Patch already applied or failed to apply"
   )
   find_package(ZLIB REQUIRED)
-  if(NOT ${BUILD_SHARED_LIBS})
+  if(ZLIB_USE_STATIC_LIBS)
     add_library(ZLIB::ZLIB ALIAS zlibstatic)
-    target_include_directories(zlibstatic PRIVATE ${zlib_SOURCE_DIR} ${zlib_BINARY_DIR})
+    target_include_directories(zlibstatic PUBLIC ${zlib_SOURCE_DIR} ${zlib_BINARY_DIR})
+    set_target_properties(zlibstatic PROPERTIES FOLDER morphizen/deps)
+    message(STATUS "found static ZLIB at ${zlib_SOURCE_DIR} ${zlib_BINARY_DIR}")
   else()
     add_library(ZLIB::ZLIB ALIAS zlib)
     target_include_directories(zlib PRIVATE ${zlib_SOURCE_DIR} ${zlib_BINARY_DIR})
+    set_target_properties(zlib PROPERTIES FOLDER morphizen/deps)
+    message(STATUS "found dynamic ZLIB at ${zlib_SOURCE_DIR} ${zlib_BINARY_DIR}")
   endif()
   # TODO: I don't know why, the following line does not work we have
   # to set the include path explicitly in vaip_core_static

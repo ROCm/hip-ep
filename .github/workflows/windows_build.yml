@@ -15,7 +15,7 @@ env:
   VAI_RT_PREFIX: ${{ github.workspace }}/gi
   VAI_RT_WORKSPACE: ${{ github.workspace }}/gw
   VAI_RT_BUILD_DIR: ${{ github.workspace }}/gb
-
+  MY_GITHUB_TOKEN : ${{ secrets.MY_GITHUB_TOKEN }}
 jobs:
   windows-build:
     runs-on: ${{ matrix.os }}
@@ -28,9 +28,15 @@ jobs:
       - name: Get Onnxruntime SHA1
         id: ort-commit
         run: |
+          $ErrorActionPreference = "Stop"
           $lastSaturday = (Get-Date).AddDays(-1 * ((([int](Get-Date).DayOfWeek + 1) % 7) + 1)).Date
           $url = "https://api.github.com/repos/Microsoft/onnxruntime/commits?sha=main&until=$($lastSaturday.ToString("yyyy-MM-ddTHH:mm:ssZ"))"
-          $response = Invoke-RestMethod -Uri $url -Headers @{}
+          $headers = @{
+              Authorization = "token $Env:MY_GITHUB_TOKEN"  # Use the GitHub token for authentication
+              "Accept" = "application/vnd.github.v3+json"
+              "User-Agent" = "PowerShellScript"  # GitHub requires a User-Agent
+          }
+          $response = Invoke-RestMethod -Uri $url -Headers $headers
           $hash = $response[0].sha
           Write-Host "onnxruntime commit hash: $hash"
           echo "commit_hash=$hash" >> $env:GITHUB_OUTPUT
@@ -51,13 +57,14 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           echo "Download ONNXRuntime ..."
+          . "$Env:VAI_RT_WORKSPACE/../tools/run-external-command.ps1"
           Write-Host "Current Directory: $(Get-Location)"
           $directoryPath = "onnxruntime"
           $ErrorActionPreference = "Stop"
           New-Item -Path $Env:VAI_RT_WORKSPACE -ItemType Directory -Force
-          git clone "--separate-git-dir=$Env:VAI_RT_WORKSPACE/ort.git" https://github.com/Microsoft/onnxruntime.git --branch main --single-branch --depth 1 "$directoryPath" --quiet
-          git "--git-dir=$Env:VAI_RT_WORKSPACE/ort.git"  "--work-tree=$directoryPath" fetch origin "$Env:COMMIT_ID" --quiet
-          git "--git-dir=$Env:VAI_RT_WORKSPACE/ort.git"  "--work-tree=$directoryPath" checkout  --detach "$Env:COMMIT_ID"
+          run git clone "--separate-git-dir=$Env:VAI_RT_WORKSPACE/ort.git" https://github.com/Microsoft/onnxruntime.git --branch main --single-branch --depth 1 "$directoryPath" --quiet
+          run git "--git-dir=$Env:VAI_RT_WORKSPACE/ort.git"  "--work-tree=$directoryPath" fetch origin "$Env:COMMIT_ID" --quiet
+          run git "--git-dir=$Env:VAI_RT_WORKSPACE/ort.git"  "--work-tree=$directoryPath" checkout  --detach "$Env:COMMIT_ID"
 
       - name: Cache installed ONNXRuntime and deps
         id: cache-onnxruntime-and-deps
@@ -75,49 +82,57 @@ jobs:
             ref: cp_dev
 
       - name: Build and install ONNXRuntime
-        if: steps.cache-onnxruntime-and-deps.outputs.cache-hit != 'true'
+        if: >
+          steps.cache-onnxruntime-checkout.outputs.cache-hit == 'true' &&
+          steps.cache-onnxruntime-and-deps.outputs.cache-hit != 'true'
         working-directory: ${{ github.workspace }}/onnxruntime
         run: |
           echo " Build ONNXRuntime on Windows..."
           $ErrorActionPreference = "Stop"
+          . "$Env:VAI_RT_WORKSPACE/../tools/run-external-command.ps1"
           # cheat cmake/onnxruntime_providers_vitisai.cmake:8
           $filePath = "onnxruntime/core/providers/vitisai/imp/global_api.cc"
           $oldString = '#include "version_info.h".*'
           $newString = '#define GIT_COMMIT_ID "abc"'
           (Get-Content -Path $filePath) -replace $oldString, $newString | Set-Content -Path $filePath
-          python tools/ci_build/build.py --use_vitisai --config Debug --build_shared_lib --parallel --compile_no_warning_as_error `
+          Run python tools/ci_build/build.py --use_vitisai --config Debug --build_shared_lib --parallel --compile_no_warning_as_error `
             --skip_submodule_sync --build_dir "$Env:VAI_RT_BUILD_DIR/onnxruntime"   `
             --skip_tests `
             --enable_msvc_static_runtime `
-            --cmake_extra_defines "CMAKE_INSTALL_PREFIX=$Env:VAI_RT_PREFIX"
-          cmake --build "$Env:VAI_RT_BUILD_DIR/onnxruntime/Debug" --target install
-          python ../vai-rt/main.py --dev-mode --release_file=../vai-rt/release_file/latest_stx.txt --project zlib gsl json gtest protobuf glog
+            --cmake_extra_defines `
+              "CMAKE_INSTALL_PREFIX=$Env:VAI_RT_PREFIX" `
+              onnxruntime_BUILD_UNIT_TESTS=OFF `
+              "CMAKE_CXX_FLAGS=/bigobj"
+          Run cmake --build "$Env:VAI_RT_BUILD_DIR/onnxruntime/Debug" --target install
+          Run python ../vai-rt/main.py --dev-mode --release_file=../vai-rt/release_file/latest_stx.txt --project zlib gsl json gtest protobuf glog
       - name: Checkout morphizen-demo
-        if: true
+        if: steps.cache-onnxruntime-and-deps.outputs.cache-hit == 'true'
         run: |
           # again I cannot use actions/checkout@v3 because it needs to secret token.
           echo "Download morphizen-demo ..."
-          Write-Host "Current Directory: $(Get-Location)"
           $ErrorActionPreference = "Stop"
+          . "$Env:VAI_RT_WORKSPACE/../tools/run-external-command.ps1"
           $directoryPath = "morphizen-demo"
           if (-Not (Test-Path -Path $directoryPath)) {
               git clone git@gitenterprise.xilinx.com:VitisAI/morphizen-demo.git --branch dev --single-branch --depth 1 "$directoryPath" --quiet
           }
           & {
             Push-Location "$directoryPath"
-            git fetch origin dev --quiet
-            git checkout  --detach dev
+            Run  git fetch origin dev --quiet
+            Run  git checkout  --detach dev
             Write-Host "Current Directory: $(Get-Location)"
             Write-Host "morphizen-demo commit: $(git rev-parse HEAD)"
             Pop-Location
           }
 
       - name: Configure morphizen-demo
-        if: true
+        # generate a cache anyway
+        if: steps.cache-onnxruntime-and-deps.outputs.cache-hit == 'true'
         run: |
           echo "Configure morphizen-demo on Windows..."
           $ErrorActionPreference = "Stop"
-          git submodule update --init --recursive
+          . "$Env:VAI_RT_WORKSPACE/../tools/run-external-command.ps1"
+          Run git submodule update --init --recursive
           cmake -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF `
                 -DCMAKE_FIND_PACKAGE_NO_SYSTEM_PACKAGE_REGISTRY=ON `
                 -DBUILD_SHARED_LIBS=OFF `
@@ -128,25 +143,28 @@ jobs:
               --fresh
 
       - name: Build morphizen-demo
-        if: true
+        if: steps.cache-onnxruntime-and-deps.outputs.cache-hit == 'true'
         run: |
           echo "Build and Install morphizen-demo on Windows ..."
           $ErrorActionPreference = "Stop"
+          . "$Env:VAI_RT_WORKSPACE/../tools/run-external-command.ps1"
           $jobs = [Environment]::ProcessorCount
-          cmake  --build  "$Env:VAI_RT_BUILD_DIR/morphizen-demo" -j $jobs --target install
+          Run cmake  --build  "$Env:VAI_RT_BUILD_DIR/morphizen-demo" -j $jobs --target install
 
       - name: Run Unit test
-        if: true
+        if: steps.cache-onnxruntime-and-deps.outputs.cache-hit == 'true'
         timeout-minutes: 2  # This step will timeout if it runs longer than 2 minutes
         run: |
           echo "Run unit test..."
           $ErrorActionPreference = "Stop"
-          # cmake  --build  "$Env:VAI_RT_BUILD_DIR/morphizen-demo" --target morphizen-run-unit-tests
+          . "$Env:VAI_RT_WORKSPACE/../tools/run-external-command.ps1"
+          Run cmake  --build  "$Env:VAI_RT_BUILD_DIR/morphizen-demo" --target morphizen-run-all-unit-tests
           # cmake  --build  "$Env:VAI_RT_BUILD_DIR/morphizen-demo" -j $jobs --target install
-          & "$Env:VAI_RT_BUILD_DIR/morphizen-demo/bin/Debug/morphizen-unit-tests"
+          # & "$Env:VAI_RT_BUILD_DIR/morphizen-demo/bin/Debug/morphizen-unit-tests"
       - name: Run Sample
-        if: true
+        if: steps.cache-onnxruntime-and-deps.outputs.cache-hit == 'true'
         run: |
-           echo "Run unit test and resnet50 sample ..."
-           $ErrorActionPreference = "Stop"
-           cmake  --build  "$Env:VAI_RT_BUILD_DIR/morphizen-demo" --target generate_ep_context_model
+          echo "Run unit test and resnet50 sample ..."
+          $ErrorActionPreference = "Stop"
+          . "$Env:VAI_RT_WORKSPACE/../tools/run-external-command.ps1"
+           Run  cmake  --build  "$Env:VAI_RT_BUILD_DIR/morphizen-demo" --target generate_ep_context_model

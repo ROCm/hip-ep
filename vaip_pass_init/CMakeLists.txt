@@ -45,3 +45,7 @@ if(TARGET ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET})
   target_link_libraries(${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET} PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,morphizen-pass-init>)
 endif(TARGET ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET})
 
+set_target_properties(morphizen-pass-init
+  PROPERTIES
+  FOLDER "morphizen/passes")
+  

@@ -744,7 +744,9 @@ int main(int argc, char* argv[]) {
     // intialize the main function.
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "onnx_pattern_gen");
     Ort::SessionOptions().AppendExecutionProvider_VitisAI();
-
+    vaip_core::set_the_global_api(
+        vaip_core::Plugin::invoke<vaip_core::OrtApiForVaip*>(
+            "onnxruntime_vitisai_ep", "get_the_global_api"));
     // Check command line args
     CHECK_NE(opt_onnx_file, "")
         << " -f <model.onnx> is required. " << opt_onnx_file;

@@ -121,7 +121,9 @@ int main(int argc, char* argv[]) {
 
     Ort::Env env(ORT_LOGGING_LEVEL_ERROR, "onnx_grep");
     Ort::SessionOptions().AppendExecutionProvider_VitisAI();
-
+         vaip_core::set_the_global_api(
+          vaip_core::Plugin::invoke<vaip_core::OrtApiForVaip*>(
+              "onnxruntime_vitisai_ep", "get_the_global_api"));
     CHECK_NE(file, "");
 
     auto p = get_pattern(pattern);

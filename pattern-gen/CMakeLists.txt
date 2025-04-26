@@ -9,7 +9,9 @@ add_executable(${EXEC_NAME} onnx_pattern_gen.cpp)
 target_include_directories(${EXEC_NAME}
                            PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 find_package(onnxruntime REQUIRED)
-target_link_libraries(${EXEC_NAME} PRIVATE ${morphizen_CORE_DYNAMIC_UNIQUE_ID} onnxruntime::onnxruntime glog::glog)
+target_link_libraries(${EXEC_NAME} PRIVATE 
+    morphizen-core-static
+    onnxruntime::onnxruntime glog::glog)
 set(ARGS
 	"-f ${CMAKE_CURRENT_BINARY_DIR}/../unit-test/pt_resnet50.onnx")
 string(APPEND ARGS " -m ${CMAKE_CURRENT_BINARY_DIR}/conv_relu_maxpool.mmd")

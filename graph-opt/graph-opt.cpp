@@ -89,8 +89,15 @@ int main(int argc, char* argv[]) {
       }
       }
     }
-    Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "voe_py_pass");
-    initialize_vaip();
+    try {
+      Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "morphizen-graph-opt");
+      Ort::SessionOptions().AppendExecutionProvider_VitisAI();
+      vaip_core::set_the_global_api(
+          vaip_core::Plugin::invoke<vaip_core::OrtApiForVaip*>(
+              "onnxruntime_vitisai_ep", "get_the_global_api"));
+    } catch (const std::exception& e) {
+      std::cerr << "exception occurs : " << e.what() << "\n";
+    }
     std::shared_ptr<PassContext> context = PassContext::create();
     if (!opt_cache.empty()) {
       context = load_context(opt_cache);

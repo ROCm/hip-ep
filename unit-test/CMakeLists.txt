@@ -97,7 +97,7 @@ set_target_properties(${TEST_EXE_NAME} PROPERTIES
 
 ## for test hello_plugin test
 add_library(hello_plugin_dll SHARED vaip/hello_plugin.cpp)
-set_target_properties(hello_plugin_dll PROPERTIES FOLDER morphizen/unit-tests)
+set_target_properties(hello_plugin_dll PROPERTIES FOLDER morphizen/unit-tests/data)
 add_dependencies(${TEST_EXE_NAME}
   tgt_pt_resnet50.onnx
   tgt_test_constant_initializer.onnx
@@ -106,9 +106,5 @@ add_dependencies(${TEST_EXE_NAME}
   tgt_test_custom_op.onnx
   ${morphizen_CORE_DYNAMIC_UNIQUE_ID}
 )
-add_custom_target(morphizen-run-unit-tests
-    ${CMAKE_COMMAND} -E env CI=1
-    $<TARGET_FILE:${TEST_EXE_NAME}>
-    DEPENDS ${TEST_EXE_NAME}
-)
-
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/customize_targets.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/add_gtest_debug_targets.cmake)

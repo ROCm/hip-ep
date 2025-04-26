@@ -23,9 +23,7 @@ target_link_libraries(${morphizen_CORE_DYNAMIC_UNIQUE_ID}
   PRIVATE
   morphizen-core-static
 )
-target_sources(${morphizen_CORE_DYNAMIC_UNIQUE_ID} INTERFACE 
-    $<TARGET_OBJECTS:morphizen-dirty-hack-env-lib>
-)
+
 target_include_directories(${morphizen_CORE_DYNAMIC_UNIQUE_ID}
   PUBLIC
   $<BUILD_INTERFACE:$<TARGET_PROPERTY:morphizen-core-static,INTERFACE_INCLUDE_DIRECTORIES>>
@@ -50,8 +48,6 @@ MORPHIZEN_DEBUG_TAR_FILE=1
 DEBUG_TAR_CACHE=1
 "
 )
-
-add_dependencies(${morphizen_CORE_DYNAMIC_UNIQUE_ID} generate_vaip_config)
 
 if(NOT MSVC)
   target_link_libraries(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PUBLIC glog::glog protobuf::libprotobuf )

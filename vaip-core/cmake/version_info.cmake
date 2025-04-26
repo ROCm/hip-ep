@@ -7,8 +7,3 @@
   $<TARGET_FILE:Python3::Interpreter>  ${CMAKE_CURRENT_SOURCE_DIR}/src/vaip_version_info.hpp.inc.py "${VAIP_VERSEION_INFO_FILE}"
   DEPENDS ${VAIP_VERSEION_INFO_FILE}
 )
-
-add_custom_target(generate_vaip_version_info
-  DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/vaip_version_info.hpp.inc ${CMAKE_CURRENT_BINARY_DIR}/version.rc
-)
-set_target_properties(generate_vaip_version_info PROPERTIES FOLDER morphizen)
