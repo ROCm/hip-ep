@@ -2,10 +2,13 @@ name: sync_onnxruntime
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * 0' # every Sunday at midnight
+    # Every day at midnight Beijing time (UTC+8)
+    - cron: '0 16 * * *'
 
 env:
+  VAI_RT_PREFIX: ${{ github.workspace }}/gi
   VAI_RT_WORKSPACE: ${{ github.workspace }}
+  VAI_RT_BUILD_DIR: ${{ github.workspace }}/gb
 
 jobs:
   sync_onnxruntime_code:
@@ -15,8 +18,8 @@ jobs:
         os: [ windows_vitisai ]
 
     steps:
-      - name: Checkout VitisAI/onnxruntime  
-        uses: actions/checkout@v3
+      - name: Checkout VitisAI/onnxruntime
+        uses: actions/checkout@v4
         with:
           token: ${{ secrets.Z1AIEBUILD_GHE_PAT }}
           repository: VitisAI/onnxruntime
@@ -27,13 +30,25 @@ jobs:
         run: |
           set -e
           cd onnxruntime
-          pwd
-          echo "before sync onnxruntime commit ID: $(git rev-parse HEAD)"
-          
           # fetch upstream main branch
           git fetch https://github.com/microsoft/onnxruntime.git main
-
-          # push to origin
+          echo "onnxruntime commit ID: $(git rev-parse HEAD)"
           git push origin FETCH_HEAD:refs/heads/morphizen-ci-test --force
           git ls-remote origin morphizen-ci-test
+        shell: bash
+
+      - name: build deps
+        uses: ./.github/actions/build-deps
+        id: build-deps-action
+        with:
+          token: ${{ secrets.Z1AIEBUILD_GHE_PAT }}
+          onnxruntime_branch_name: morphizen-ci-test
+
+      - name: update morphizen-ci branch
+        run: |
+          set -e
+          cd onnxruntime
+          echo "sync onnxruntime commit ID: $(git rev-parse HEAD)"
+          git push origin FETCH_HEAD:refs/heads/morphizen-ci --force
+          git ls-remote origin morphizen-ci
         shell: bash

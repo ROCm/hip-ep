@@ -1,0 +1,58 @@
+name: main.pull_request
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+env:
+  VAI_RT_PREFIX: ${{ github.workspace }}/gi
+  VAI_RT_WORKSPACE: ${{ github.workspace }}
+  VAI_RT_BUILD_DIR: ${{ github.workspace }}/gb
+  MY_GITHUB_TOKEN : ${{ secrets.MY_GITHUB_TOKEN }}
+
+jobs:
+  lint:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ windows_vitisai ]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0  # Fetch all history for all branches and tags
+          show-progress: false
+
+      - name: Check code style
+        uses: ./.github/actions/lint
+
+  build-deps-and-build-and-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ windows_vitisai ]
+    needs: lint
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0  # Fetch all history for all branches and tags
+          show-progress: false
+
+      - name: build deps
+        uses: ./.github/actions/build-deps
+        id: build-deps-action
+        with:
+          token: ${{ secrets.Z1AIEBUILD_GHE_PAT }}
+          onnxruntime_branch_name: morphizen-ci
+      # build-and-test job depends on build-deps job, because cache
+      # cannot be shared between jobs, potentially jobs allocated to
+      # different runners.
+      - name: build and test
+        uses: ./.github/actions/build-and-test
+        with:
+          ort_hash_id: ${{ steps.build-deps-action.outputs.cache_key }}
+          onnxruntime_branch_name: morphizen-ci
+          token: ${{ secrets.Z1AIEBUILD_GHE_PAT }}
