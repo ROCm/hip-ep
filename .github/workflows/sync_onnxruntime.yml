@@ -44,6 +44,16 @@ jobs:
           token: ${{ secrets.Z1AIEBUILD_GHE_PAT }}
           onnxruntime_branch_name: morphizen-ci-test
 
+      # build-and-test job depends on build-deps job, because cache
+      # cannot be shared between jobs, potentially jobs allocated to
+      # different runners.
+      - name: build and test
+        uses: ./.github/actions/build-and-test
+        with:
+          ort_hash_id: ${{ steps.build-deps-action.outputs.cache_key }}
+          onnxruntime_branch_name: morphizen-ci
+          token: ${{ secrets.Z1AIEBUILD_GHE_PAT }}
+
       - name: update morphizen-ci branch
         run: |
           set -e
