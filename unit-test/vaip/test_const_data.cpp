@@ -47,7 +47,7 @@ public:
               << std::endl;
     auto model =
         vaip_cxx::Model::load(ENV_PARAM(TEST_CONSTANT_INITIALIZER_ONNX));
-    auto cloned_model = model->clone();
+    auto cloned_model = model->ref().clone();
     graph = std::make_unique<vaip_cxx::GraphRef>(cloned_model->main_graph());
     graph->resolve();
     check();

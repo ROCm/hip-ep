@@ -45,14 +45,14 @@ TEST_F(ModelTest, Load) {
   open_logger_file("ModelTest.Load.log");
   logger() << "LOADING " << RESNET_50_PATH;
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);
-  LOG(INFO) << "model: " << model->name() << " is loaded";
+  LOG(INFO) << "model: " << model->ref().name() << " is loaded";
 }
 TEST_F(ModelTest, Clone) {
   open_logger_file("ModelTest.Load.log");
   logger() << "LOADING " << RESNET_50_PATH;
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);
-  auto cloned_model = model->clone();
-  LOG(INFO) << "cloned model: " << cloned_model->name() << " is cloned";
+  auto cloned_model = model->ref().clone();
+  LOG(INFO) << "cloned model: " << cloned_model->ref().name() << " is cloned";
   cloned_model->main_graph().save(CMAKE_CURRENT_BINARY_PATH /
                                   "resnet50_cloned.onnx");
 }
@@ -73,12 +73,12 @@ TEST_F(ModelTest, SetAndGetMetadata) {
   model->set_metadata(key, value);
 
   // Get metadata
-  std::string retrievedValue = model->get_metadata(key);
+  std::string retrievedValue = model->ref().get_metadata(key);
   EXPECT_EQ(retrievedValue, value);
 
   // Has metadata
-  EXPECT_TRUE(model->has_metadata(key));
-  EXPECT_FALSE(model->has_metadata("non-existing-key"));
+  EXPECT_TRUE(model->ref().has_metadata(key));
+  EXPECT_FALSE(model->ref().has_metadata("non-existing-key"));
 }
 
 TEST_F(ModelTest, ImplicitConversion) {

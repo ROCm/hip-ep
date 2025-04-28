@@ -69,6 +69,22 @@ VAIP_DLL_SPEC void ModelDeleter::operator()(Model* model) const {
 } // namespace vaip_core
 
 namespace vaip_cxx {
+ModelConstRef::ModelConstRef(const vaip_core::Model& model) : self_(model) {}
+const std::string& ModelConstRef::name() const {
+  return VAIP_ORT_API(graph_get_name)(
+      VAIP_ORT_API(model_main_graph)(const_cast<onnxruntime::Model&>(self_)));
+}
+std::string ModelConstRef::get_metadata(const std::string& name) const {
+  return *VAIP_ORT_API(model_get_meta_data)(self_, name);
+}
+bool ModelConstRef::has_metadata(const std::string& name) const {
+  return VAIP_ORT_API(model_has_meta_data)(self_, name);
+}
+std::unique_ptr<Model>
+ModelConstRef::clone(int64_t external_data_threshold) const {
+  return std::unique_ptr<Model>(new Model(vaip_core::model_clone(
+      const_cast<onnxruntime::Model&>(self_), external_data_threshold)));
+}
 std::unique_ptr<Model> Model::load(const std::filesystem::path& model_path) {
   return std::unique_ptr<Model>(
       new Model(vaip_core::model_load(model_path.u8string())));
@@ -80,36 +96,19 @@ Model::create(const std::filesystem::path& model_path,
       VAIP_ORT_API(create_empty_model)(model_path, opset))));
 }
 Model::Model(vaip_core::ModelPtr&& ptr) : self_{std::move(ptr)} {}
-const std::string& Model::name() const {
-  return VAIP_ORT_API(graph_get_name)(VAIP_ORT_API(model_main_graph)(*self_));
-}
 
 Model::~Model() {
   MY_LOG(1) << "dtor " << (void*)this << "." << (void*)self_.get()
-            << " name:" << name();
+            << " name:" << ref().name();
 }
 
 Model& Model::set_metadata(const std::string& name, const std::string& value) {
   vaip_core::model_set_meta_data(*self_, name, value);
   return *this;
 }
-std::string Model::get_metadata(const std::string& name) const {
-  return *VAIP_ORT_API(model_get_meta_data)(*self_, name);
-}
-bool Model::has_metadata(const std::string& name) const {
-  return VAIP_ORT_API(model_has_meta_data)(*self_, name);
-}
 
 GraphRef Model::main_graph() {
   return GraphRef(VAIP_ORT_API(model_main_graph)(*self_));
 }
 
-const GraphRef Model::main_graph() const {
-  return GraphRef(VAIP_ORT_API(model_main_graph)(*self_));
-}
-
-std::unique_ptr<Model> Model::clone(int64_t external_data_threshold) const {
-  return std::unique_ptr<Model>(
-      new Model(vaip_core::model_clone(*self_, external_data_threshold)));
-}
 } // namespace vaip_cxx
