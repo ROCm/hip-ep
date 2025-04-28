@@ -48,7 +48,8 @@
 #endif
 
 namespace vaip_core {
-void update_config_by_target(ConfigProto& proto, const MepConfigTable* mep);
+void update_config_by_target(ConfigProto& proto, const MepConfigTable* mep,
+                             const Model& Model);
 class Config {
 public:
   VAIP_DLL_SPEC

@@ -66,6 +66,7 @@
 #include <vaip/vaip_ort_api.h>
 
 DEF_ENV_PARAM(DEBUG_VAIP_CONFIG, "0")
+DEF_ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY, "0")
 DEF_ENV_PARAM(XLNX_ONNX_EP_VERBOSE, "0")
 DEF_ENV_PARAM_2(XLNX_VART_FIRMWARE, "", std::string)
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_VAIP_CONFIG) >= n)
@@ -300,8 +301,40 @@ static void update_graph_engine_qos_priority(ConfigProto& proto,
         std::to_string(qos_priority);
   }
 }
-
-void update_config_by_target(ConfigProto& proto, const MepConfigTable* mep) {
+static std::optional<std::string> discover_target(const ConfigProto& proto,
+                                                  const Model& model) {
+  typedef std::optional<std::string> (*discovery_function_t)(const ConfigProto&,
+                                                             const Model&);
+  auto all_plugin_functions =
+      vaip_core::Plugin::get_all_symbols("morphizen_target_discovery");
+  std::sort(
+      all_plugin_functions.begin(), all_plugin_functions.end(),
+      [](const std::pair<std::string, void*>& a,
+         const std::pair<std::string, void*>& b) { return a.first < b.first; });
+  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
+      << "discover_target: all_plugin_functions size: "
+      << all_plugin_functions.size();
+  for (auto& plugin : all_plugin_functions) {
+    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
+        << "discover_target: plugin name: " << plugin.first
+        << " model id:" << (void*)(&model) << " id: " << plugin.second;
+    auto target_discovery_func = (discovery_function_t)plugin.second;
+    auto target = target_discovery_func(proto, model);
+    if (target.has_value()) {
+      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
+          << "discover_target: plugin name: " << plugin.first
+          << " target: " << target.value();
+      return target;
+    } else {
+      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
+          << "discover_target: plugin name: " << plugin.first
+          << " cannot guess target, continue";
+    }
+  }
+  return std::nullopt;
+}
+void update_config_by_target(ConfigProto& proto, const MepConfigTable* mep,
+                             const Model& model) {
   auto target = std::string();
   auto xclbin = std::string();
 
@@ -312,6 +345,11 @@ void update_config_by_target(ConfigProto& proto, const MepConfigTable* mep) {
     if (mep->has_xclbin()) {
       xclbin = mep->xclbin();
     }
+  } else {
+    auto maybe_target = discover_target(proto, model);
+    if (maybe_target.has_value()) {
+      target = maybe_target.value();
+    }
   }
   if (target.empty()) {
     target = proto.target();
@@ -319,7 +357,8 @@ void update_config_by_target(ConfigProto& proto, const MepConfigTable* mep) {
   // Target priority
   // 1. provider option
   // 2. meptable
-  // 3. default target in config file
+  // 3. heuristic process or method:
+  // 4. default target in config file
   auto target_it = proto.provider_options().find("target");
   if (target_it != proto.provider_options().end()) {
     target = target_it->second;
