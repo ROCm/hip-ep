@@ -149,8 +149,10 @@ static OpHolder& get_global_op_holder() {
   static bool init = false;
   if (init == false) {
     init = true;
+#if VAIP_ORT_API_MAJOR >= 17
     vaip_core::add_cleanup_function("cleanup global plugin store",
                                     []() { instance.reset(); });
+#endif
     /*vaip_core::StaticPluginRegister(
         "onnxruntime_vitisai_ep", "morphizen_get_registered_custom_op",
         (void*)local_morphizen_get_registered_custom_op);*/
@@ -254,6 +256,7 @@ void deinitialize_onnxruntime_vitisai_ep() {
   MY_LOG(1) << "deinitialize_onnxruntime_vitisai_ep";
   for (auto& item : g_at_exits) {
     MY_LOG(1) << " deinitialize " << item.first;
+    item.second();
   }
   g_at_exits.clear();
 }
