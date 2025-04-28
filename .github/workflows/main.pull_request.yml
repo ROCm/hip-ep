@@ -14,10 +14,10 @@ env:
   VAI_RT_PREFIX: ${{ github.workspace }}/gi
   VAI_RT_WORKSPACE: ${{ github.workspace }}
   VAI_RT_BUILD_DIR: ${{ github.workspace }}/gb
-  MY_GITHUB_TOKEN : ${{ secrets.MY_GITHUB_TOKEN }}
 
 jobs:
   lint:
+    if: github.event.pull_request.draft == false
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -34,6 +34,7 @@ jobs:
         uses: ./.github/actions/lint
 
   build-deps-and-build-and-test:
+    if: github.event.pull_request.draft == false
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:

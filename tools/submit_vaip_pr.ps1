@@ -16,7 +16,7 @@ if (-Not (Test-Path $VAIP_DIR)) {
     git clone git@gitenterprise.xilinx.com:VitisAI/vaip.git $VAIP_DIR
 }
 Write-Host "Syncing VAIP repository"
-git -C $VAIP_DIR fetch --all
+git -C $VAIP_DIR fetch origin ${Env:VAIP_REMOTE_BRANCH}
 git -C $PROJECT_DIR fetch --all
 
 # Get old and new commit IDs
@@ -59,16 +59,8 @@ $body = "Change Log`n`n$change_log`n`n"
 $msg = "$title`n`n$body"
 git --git-dir="$VAIP_DIR/.git" --work-tree="$VAIP_DIR" commit -am "$msg"
 git --git-dir="$VAIP_DIR/.git" --work-tree="$VAIP_DIR" push --force origin "HEAD:refs/heads/$branch_name"
-& {
-    $Env:GH_HOST = "gitenterprise.xilinx.com"
-    $Env:GH_REPO = "VitisAI/vaip"
-    # Create PR
-    # Get PR number
-    $pr_number = gh pr list --head "$branch_name" --json number,title --jq '.[0].number'
-    if (-Not $pr_number) {
-        gh pr create --base "$Env:VAIP_REMOTE_BRANCH" --head "$branch_name" --title "$title" --body "$body"
-        $pr_number = gh pr list --head "$branch_name" --json number,title --jq '.[0].number'
-    }
-    Write-Host "PR number = $pr_number"
-    gh pr edit $pr_number --title "$title" --body "$body"
-}
+
+$Env:MY_TITLE = "$title"
+$Env:MY_BODY = "$body"
+$Env:MY_BRANCH = "$branch_name"
+powershell "$SCRIPT_DIR/create_pr.ps1"
