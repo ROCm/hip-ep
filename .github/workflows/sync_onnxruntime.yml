@@ -32,9 +32,9 @@ jobs:
           cd onnxruntime
           # fetch upstream main branch
           git fetch https://github.com/microsoft/onnxruntime.git main
-          echo "onnxruntime commit ID: $(git rev-parse HEAD)"
+          echo "sync onnxruntime/morphizen-ci-test commit ID from $(git rev-parse HEAD) to $(git rev-parse FETCH_HEAD)"
           git push origin FETCH_HEAD:refs/heads/morphizen-ci-test --force
-          git ls-remote origin morphizen-ci-test
+          git ls-remote origin refs/heads/morphizen-ci-test
         shell: bash
 
       - name: build deps
@@ -51,14 +51,14 @@ jobs:
         uses: ./.github/actions/build-and-test
         with:
           ort_hash_id: ${{ steps.build-deps-action.outputs.cache_key }}
-          onnxruntime_branch_name: morphizen-ci
+          onnxruntime_branch_name: morphizen-ci-test
           token: ${{ secrets.Z1AIEBUILD_GHE_PAT }}
 
       - name: update morphizen-ci branch
         run: |
           set -e
           cd onnxruntime
-          echo "sync onnxruntime commit ID: $(git rev-parse HEAD)"
+          echo "sync onnxruntime commit ID from $(git ls-remote origin refs/heads/morphizen-ci) to $(git rev-parse FETCH_HEAD)"
           git push origin FETCH_HEAD:refs/heads/morphizen-ci --force
           git ls-remote origin morphizen-ci
         shell: bash

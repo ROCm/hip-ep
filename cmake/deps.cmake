@@ -88,7 +88,7 @@ if(MSVC)
 elseif(NOT ${BUILD_SHARED_LIBS})
   set(ZLIB_USE_STATIC_LIBS OFF CACHE BOOL "use static zip")
 endif()
-# todo: try to find prebuilt zlib
+find_package(ZLIB QUIET)
 if(TARGET ZLIB::ZLIB)
   get_target_property(TMP ZLIB::ZLIB INTERFACE_INCLUDE_DIRECTORIES)
   message(STATUS "found ZLIB at ${TMP}")

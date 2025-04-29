@@ -28,7 +28,6 @@ runs:
       with:
         path: ${{ env.VAI_RT_PREFIX }}
         key: ${{ inputs.ort_hash_id }}
-        fail-on-cache-miss: true
 
     - name: Checkout VitisAI/morphizen-demo
       uses: actions/checkout@v4
