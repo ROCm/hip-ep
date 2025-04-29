@@ -156,22 +156,6 @@ else()
   find_package(Protobuf REQUIRED)
 endif()
 
-find_package(nlohmann_json QUIET)
-if(TARGET  nlohmann_json::nlohmann_json)
-  get_target_property(TMP nlohmann_json::nlohmann_json INTERFACE_INCLUDE_DIRECTORIES)
-  message(STATUS "found nlohmann_json at ${TMP}")
-else()
-  message(STATUS "cannot find_package(nlohmann_json), fetch it from ${DEP_URL_json}")
-  FetchContent_Declare(
-    nlohmann_json
-    URL ${DEP_URL_json}
-    URL_HASH SHA1=${DEP_SHA1_json}
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    EXCLUDE_FROM_ALL
-    OVERRIDE_FIND_PACKAGE)
-  find_package(nlohmann_json REQUIRED)
-endif()
-
 ## in order to build it, we need to run some python scripts to
 ## generate some source code.
 if(BUILD_PYTHON)

@@ -8,5 +8,4 @@ zlib;https://github.com/madler/zlib.git;v1.2.13
 glog;https://github.com/google/glog/archive/refs/tags/v0.6.0.zip;b9c4c032e79300665a92d8dbc25513a0ee7ea47c
 GTest;https://github.com/google/googletest.git;v1.15.0
 protobuf;https://github.com/protocolbuffers/protobuf/archive/refs/tags/v21.12.zip;7cf2733949036c7d52fda017badcab093fe73bfa
-json;https://github.com/nlohmann/json/archive/refs/tags/v3.11.3.zip;5e88795165cc8590138d1f47ce94ee567b85b4d6
 pybind11;https://github.com/pybind/pybind11/archive/refs/tags/v2.13.6.tar.gz;a2e59f0e7065404b44dfe92a28aca47ba1378dc4

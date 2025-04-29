@@ -184,7 +184,7 @@ target_include_directories(${LIB_NAME}
 )
 
 set(MorphiZen_DEPS protobuf::libprotobuf
-  glog::glog morphizen::encryption ZLIB::ZLIB nlohmann_json::nlohmann_json Microsoft.GSL::GSL)
+  glog::glog morphizen::encryption ZLIB::ZLIB Microsoft.GSL::GSL)
 target_link_libraries(${LIB_NAME} PUBLIC ${MorphiZen_DEPS})
 target_compile_definitions(${LIB_NAME}
   PRIVATE "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1"

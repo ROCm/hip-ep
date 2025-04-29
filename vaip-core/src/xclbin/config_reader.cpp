@@ -5,11 +5,12 @@
 #include "morphizen/config_reader.hpp"
 #include "morphizen/env_config.hpp"
 #include "morphizen/vaip_plugin.hpp"
-#include "nlohmann/json.hpp"
 #include "vaip/vaip_ort_api.h"
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
+#include <google/protobuf/struct.pb.h>
+#include <google/protobuf/util/json_util.h>
 #include <stdlib.h>
 #include <string>
 #include <unordered_map>
@@ -34,17 +35,60 @@ static const char* get_default_config() {
   }
   return nullptr;
 }
+static google::protobuf::util::Status
+JsonFileToMessage(const std::string& file_path,
+                  google::protobuf::Message* message) {
+  std::ifstream input(file_path);
+  if (!input.is_open()) {
+    std::string error_message = "Failed to open file: " + file_path;
+    MY_LOG(1) << error_message;
+    return google::protobuf::util::Status(
+        google::protobuf::util::StatusCode::kInvalidArgument, error_message);
+  }
 
-// FIXME: The name of this function is misleading.
-static nlohmann::json
-get_config_json_str_from_config_file(const std::string& filename) {
+  std::string json_content((std::istreambuf_iterator<char>(input)),
+                           std::istreambuf_iterator<char>());
+  google::protobuf::util::JsonParseOptions options;
+  auto status = google::protobuf::util::JsonStringToMessage(json_content,
+                                                            message, options);
+
+  if (!status.ok()) {
+    std::string error_message =
+        "Failed to parse JSON: " + std::string(status.message().data());
+    MY_LOG(1) << error_message;
+    return google::protobuf::util::Status(
+        google::protobuf::util::StatusCode::kInvalidArgument, error_message);
+  }
+
+  return status; // Return the successful status
+}
+static void set_struct_value(google::protobuf::Struct& struct_value,
+                             const std::string& key1, const std::string& key2,
+                             const std::string& string_value) {
+  auto field1 = struct_value.mutable_fields()->find(key1);
+  if (field1 == struct_value.mutable_fields()->end()) {
+    field1 = struct_value.mutable_fields()->insert({key1, {}}).first;
+  }
+  auto fields2 = field1->second.mutable_struct_value()->mutable_fields();
+  auto field2 = fields2->find(key2);
+  if (field2 == fields2->end()) {
+    field2 = fields2->insert({key1, {}}).first;
+  }
+  field2->second.set_string_value(string_value);
+}
+static std::unique_ptr<google::protobuf::Struct>
+get_protobuf_struct_from_config_file(const std::string& filename) {
   std::ifstream f(filename);
-  if (!f.is_open()) {
+  // parse the json file into Struct message
+  auto config = std::make_unique<google::protobuf::Struct>();
+  auto status = JsonFileToMessage(filename, config.get());
+  if (!status.ok()) {
     std::string err_msg =
-        std::string{"failed to open config file: "} + filename;
+        std::string{"failed to parse config file: "} + filename;
+    err_msg += "\n" + status.ToString();
     throw std::runtime_error(err_msg);
   }
-  return nlohmann::json::parse(f);
+  return config;
 }
 
 static void
@@ -98,7 +142,7 @@ update_log_level(const onnxruntime::ProviderOptions& session_option) {
     FLAGS_minloglevel = google::GLOG_ERROR;
   }
 }
-static void restore_session_options(nlohmann::json& ret,
+static void restore_session_options(google::protobuf::Struct& ret,
                                     std::string entry_second) {
   std::map<std::string, std::string> session_config_options_entry_list = {};
 #if VAIP_ORT_API_MAJOR >= 10
@@ -117,15 +161,13 @@ static void restore_session_options(nlohmann::json& ret,
                << ", session options will not be restored.";
 #endif
   for (const auto& option : session_config_options_entry_list) {
-    std::string key = option.first;
-    // Here are the actual session_configs.
-    ret["ort_session_config"][key] = option.second;
+    set_struct_value(ret, "ort_session_config", option.first, option.second);
   }
 }
 
-static nlohmann::json
+static google::protobuf::Struct
 get_config_json(const onnxruntime::ProviderOptions& options) {
-  nlohmann::json ret;
+  google::protobuf::Struct ret;
   update_log_level(options);
   update_enable_batch(options);
   update_num_dpu_runners(options);
@@ -156,7 +198,12 @@ get_config_json(const onnxruntime::ProviderOptions& options) {
   if (config_set) {
     std::string config_file = options.at("config_file");
     MY_LOG(1) << " overwrite default config, read if from " << config_file;
-    ret = get_config_json_str_from_config_file(config_file);
+    auto struct_from_config_file =
+        get_protobuf_struct_from_config_file(config_file);
+    if (struct_from_config_file == nullptr) {
+      LOG(FATAL) << "failed to parse config file: " << config_file;
+    }
+    ret = std::move(*struct_from_config_file);
   } else {
     MY_LOG(1) << "use default config";
     if (default_config == nullptr) {
@@ -171,10 +218,17 @@ get_config_json(const onnxruntime::ProviderOptions& options) {
         MY_LOG(2) << line;
       }
     }
-    ret = nlohmann::json::parse(default_config);
+    auto status =
+        google::protobuf::util::JsonStringToMessage(default_config, &ret);
+    if (!status.ok()) {
+      std::string err_msg =
+          std::string{"failed to parse default config: "} + default_config;
+      err_msg += "\n" + status.ToString();
+      LOG(FATAL) << err_msg;
+    }
   }
-  bool xclbin_in_config_file = ret.count("xclbin") > 0;
-  const std::string session_prefix = "ort_session_config.";
+  auto xclbin_in_config_file =
+      ret.fields().find("xclbin") != ret.fields().end();
   for (const auto& entry : options) {
     // In the case where xclbin are (mistakenly) specified both in
     // `ProviderOptions["config_file"]` and in `ProvidersOptions["xclbin"]`.
@@ -189,7 +243,8 @@ get_config_json(const onnxruntime::ProviderOptions& options) {
     }
     // this is actually provider options, for backward compatibility, we keep
     // this key in the root of the json.
-    ret["sessionOptions"][entry.first] = entry.second;
+    auto kProviderOptions = "sessionOptions";
+    set_struct_value(ret, kProviderOptions, entry.first, entry.second);
   }
   return ret;
 }
@@ -197,12 +252,22 @@ get_config_json(const onnxruntime::ProviderOptions& options) {
 std::string get_config_json_str(const onnxruntime::ProviderOptions& options) {
   try {
     auto data = vaip_core::get_config_json(options);
-    return data.dump();
+    auto ret = std::string();
+    auto status = google::protobuf::util::MessageToJsonString(
+        data, &ret, google::protobuf::util::JsonPrintOptions());
+    if (!status.ok()) {
+      std::string err_msg =
+          std::string{"failed to convert config to json string: "} + ret;
+      err_msg += "\n" + status.ToString();
+      LOG(FATAL) << err_msg;
+    }
+    return ret;
   } catch (const std::exception& e) {
     LOG(FATAL) << "Error: " << e.what() << std::endl;
     return "";
   }
 }
+
 Ort::SessionOptions*
 get_session_option(const onnxruntime::ProviderOptions& options) {
   auto iter = options.find("session_options");
