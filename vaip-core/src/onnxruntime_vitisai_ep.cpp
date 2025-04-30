@@ -249,6 +249,9 @@ void initialize_onnxruntime_vitisai_ep(
     intialize_op_defs_old(contrib_domains, ret_domain);
   }
   intialize_op_defs(ret_domain);
+  vaip_core::add_cleanup_function("protobuf shutdown", []() {
+    google::protobuf::ShutdownProtobufLibrary();
+  });
 }
 
 VAIP_DLL_SPEC

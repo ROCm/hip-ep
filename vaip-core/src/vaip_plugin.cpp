@@ -266,9 +266,8 @@ void StaticPluginRegister::sync_static_plugin_into_module(
   auto& store = get_store();
   for (auto& x : store) {
     for (auto& y : x.second) {
-      Plugin::invoke<void, const char*, const char*, void*>(
-          module_name, "morphizen_register_static_plugin", x.first.c_str(),
-          y.first.c_str(), y.second);
+      Plugin::invoke<void>(module_name, "morphizen_register_static_plugin",
+                           x.first.c_str(), y.first.c_str(), y.second);
     }
   }
 }

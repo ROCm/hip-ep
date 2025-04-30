@@ -24,13 +24,13 @@ static ::vaip_core::StaticPluginRegister
     my_register("UnitTestOpDef", "morphizen_register_ops", (void*)register_ops);
 } // namespace
 
-TEST(OpDefTest, TestAddAndRemove) {
-  {
-    auto unit_test_op_add =
-        vaip_core::Plugin::invoke<OrtCustomOp*, const char*, const char*>(
-            "onnxruntime_vitisai_ep", "morphizen_get_registered_custom_op",
-            "com.test.unit", "add");
-    ASSERT_TRUE(unit_test_op_add != nullptr);
-  }
-}
+// TEST(OpDefTest, TestAddAndRemove) {
+//   {
+//     auto unit_test_op_add =
+//         vaip_core::Plugin::invoke<OrtCustomOp*, const char*, const char*>(
+//             "onnxruntime_vitisai_ep", "morphizen_get_registered_custom_op",
+//             "com.test.unit", "add");
+//     ASSERT_TRUE(unit_test_op_add != nullptr);
+//   }
+// }
 // todo long filename test

@@ -82,17 +82,17 @@ struct Plugin {
   Plugin(const char* name);
   VAIP_DLL_SPEC ~Plugin();
   template <typename R, typename... Args>
-  static R invoke(const char* plugin_name, const char* symbol, Args... args) {
+  static R invoke(const char* plugin_name, const char* symbol, Args&&... args) {
     auto plugin = Plugin::get(plugin_name);
     if (plugin == nullptr) {
       std::cerr << "no such plugin: " << plugin_name << std::endl;
       std::abort();
     }
-    return plugin->invoke<R, Args...>(symbol, args...);
+    return plugin->invoke<R, Args...>(symbol, std::forward<Args>(args)...);
   }
   template <typename R, typename... Args>
-  R invoke(const char* name, Args... args) {
-    auto method = get_method<R, Args...>(name);
+  R invoke(const char* name, Args&&... args) {
+    auto method = get_method<R, Args&&...>(name);
     if (method == nullptr) {
       std::cerr << "no such function: " << name << "; " //
                 << "libname " << name_ << " "           //
@@ -150,13 +150,13 @@ private:
 template <typename T, typename... Args> class WithPlugin {
 public:
   static std::unique_ptr<T> create(const std::string& plugin_name,
-                                   Args... args) {
+                                   Args&&... args) {
     auto plugin = Plugin::get(plugin_name);
     if (plugin == nullptr) {
       std::cerr << "no such plugin: " << plugin_name << std::endl;
       std::abort();
     }
-    auto ret = plugin->invoke<T*>(T::entry_point, args...);
+    auto ret = plugin->invoke<T*>(T::entry_point, std::forward<Args>(args)...);
     return std::unique_ptr<T>(ret);
   }
 };
