@@ -252,7 +252,7 @@ message PassVaimlConfigProto {
   optional string vaiml_unarchive_path = 18;
   optional string vaiml_archive_file = 19;
   optional bool run_archive = 20;
-  optional bool single_archive = 21;
+  optional bool ep_context_enable = 21;
   optional float removable_cluster_node_ratio = 22;
   optional int32 min_subgraph_size = 23;
   repeated string supported_custom_ops = 24;
