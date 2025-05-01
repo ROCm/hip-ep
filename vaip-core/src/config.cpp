@@ -345,7 +345,8 @@ void update_config_by_target(ConfigProto& proto, const MepConfigTable* mep,
     if (mep->has_xclbin()) {
       xclbin = mep->xclbin();
     }
-  } else {
+  } else if (proto.targets().size()) { // VAIML flow still use old config which
+                                       // has only passes
     auto maybe_target = discover_target(proto, model);
     if (maybe_target.has_value()) {
       target = maybe_target.value();
