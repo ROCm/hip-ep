@@ -1,4 +1,4 @@
-﻿#include "./tar_file.hpp"
+#include "./tar_file.hpp"
 #include "./tar_header.hpp"
 #include "morphizen/env_config.hpp"
 #include <algorithm>

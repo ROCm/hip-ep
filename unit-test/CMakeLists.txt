@@ -106,5 +106,4 @@ add_dependencies(${TEST_EXE_NAME}
   tgt_test_custom_op.onnx
   ${morphizen_CORE_DYNAMIC_UNIQUE_ID}
 )
-include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/customize_targets.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/add_gtest_debug_targets.cmake)

@@ -1,4 +1,4 @@
-﻿Write-Host "Running PowerShell version $($PSVersionTable.PSVersion)"
+Write-Host "Running PowerShell version $($PSVersionTable.PSVersion)"
 # Set-PSDebug -Trace 1
 $ErrorActionPreference = "Stop"
 # Set environment variables if it is not set

@@ -1,4 +1,4 @@
-﻿/*
+/*
  *     The Xilinx Vitis AI Vaip in this distribution are provided under the
  * following free and permissive binary-only license, but are not provided in
  * source code form.  While the following free and permissive license is similar

@@ -1,4 +1,4 @@
-﻿vaip_add_remote_target(
+vaip_add_remote_target(
   FILE ${CMAKE_CURRENT_BINARY_DIR}/tar.h
   URL https://raw.githubusercontent.com/freebsd/freebsd-src/refs/heads/stable/12/bin/pax/tar.h
   EXPECTED_MD5 eab89f86c63edb8e9dec2ea8faf5ebe2

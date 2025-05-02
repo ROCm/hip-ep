@@ -1,4 +1,4 @@
-﻿# EP context design
+# EP context design
 
 see https://onnxruntime.ai/docs/execution-providers/EP-Context-Design.html
 

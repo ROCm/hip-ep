@@ -1,4 +1,4 @@
-﻿Write-Host " Build ONNXRuntime on Windows..."
+Write-Host " Build ONNXRuntime on Windows..."
 $ErrorActionPreference = "Stop"
 New-Item -Path $Env:VAI_RT_BUILD_DIR -ItemType Directory -Force | Out-Null
 New-Item -Path $Env:VAI_RT_PREFIX -ItemType Directory -Force | Out-Null

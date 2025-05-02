@@ -1,4 +1,4 @@
-﻿add_library(${morphizen_CORE_DYNAMIC_UNIQUE_ID} SHARED src/main.cpp)
+add_library(${morphizen_CORE_DYNAMIC_UNIQUE_ID} SHARED src/main.cpp)
 message(STATUS "create target ${morphizen_CORE_DYNAMIC_UNIQUE_ID} for onnxruntime_vitisai_ep.dll")
 add_library (morphizen::${morphizen_CORE_DYNAMIC_UNIQUE_ID} ALIAS ${morphizen_CORE_DYNAMIC_UNIQUE_ID})
 set_target_properties(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PROPERTIES FOLDER morphizen)

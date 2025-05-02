@@ -1,4 +1,4 @@
-﻿set(TMP_INSTALL_TARGETS morphizen-core-static morphizen-core-dynamic zlibstatic GSL nlohmann_json)
+set(TMP_INSTALL_TARGETS morphizen-core-static morphizen-core-dynamic zlibstatic GSL nlohmann_json)
 #temp comments install for skip error
 # -- Configuring done (32.8s)
 #CMake Error: install(EXPORT "morphizen-core-targets" ...) includes target "morphizen-core-static" which requires tar#get "zlibstatic" that is not in any export set.

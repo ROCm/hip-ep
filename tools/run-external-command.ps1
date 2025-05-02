@@ -1,4 +1,4 @@
-﻿function Run {
+function Run {
     param (
         [Parameter(ValueFromRemainingArguments = $true)]
         [string[]]$Args  # Remaining arguments for the command

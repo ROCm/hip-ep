@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Stop"
 $SCRIPT_DIR = $PSScriptRoot
 . "$SCRIPT_DIR/run-external-command.ps1"
 

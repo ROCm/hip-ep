@@ -1,4 +1,4 @@
-﻿add_custom_command (
+add_custom_command (
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/vaip_version_info.hpp.inc ${CMAKE_CURRENT_BINARY_DIR}/version.rc
   COMMAND ${CMAKE_COMMAND} -E env
   "PROJECT_GIT_COMMIT_ID=${PROJECT_GIT_COMMIT_ID}"

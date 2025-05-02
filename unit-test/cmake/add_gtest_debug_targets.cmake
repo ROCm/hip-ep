@@ -1,4 +1,4 @@
-﻿include(${CMAKE_CURRENT_LIST_DIR}/generated_gtest_targets.cmake OPTIONAL)
+include(${CMAKE_CURRENT_LIST_DIR}/generated_gtest_targets.cmake OPTIONAL)
 add_custom_target(
     generate_gtest_targets_cmake
     COMMAND

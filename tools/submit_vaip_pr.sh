@@ -1,4 +1,4 @@
-﻿echo "running ${BASH_VERSION}"
+echo "running ${BASH_VERSION}"
 SCRIPT_DIR=$(cd $(dirname $0); pwd)
 PROJECT_DIR=$(cd $SCRIPT_DIR/..; pwd)
 W=$(cd $PROJECT_DIR/..; pwd)

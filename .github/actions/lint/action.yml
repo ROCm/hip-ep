@@ -1,4 +1,4 @@
-﻿name: Lint
+name: Lint
 
 runs:
   using: "composite"
@@ -26,5 +26,17 @@ runs:
       run: |
         lintrunner init
         lintrunner -v --force-color --all-files
-      shell: powershell
+        has_bom=false
+        for file in $(find . -type f -not -path './.git/*'); do
+          if head -c 3 "$file" | grep -q $'\xEF\xBB\xBF' ; then
+            echo "Removing BOM from $file";
+            tail -c +4 "$file" > "$file.nobom" && mv "$file.nobom" "$file";
+            has_bom=true
+          fi;
+        done
+        if [ "$has_bom" = true ]; then
+          echo "BOM removed from some files. Please check the output above."
+          exit 1
+        fi
+      shell: bash
 

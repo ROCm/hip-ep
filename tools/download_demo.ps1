@@ -1,4 +1,4 @@
-﻿Write-Host "Download morphizen-demo ..."
+Write-Host "Download morphizen-demo ..."
 $ErrorActionPreference = "Stop"
 $morphizenDemoPath = "$Env:VAI_RT_WORKSPACE/morphizen-demo"
 if (-Not (Test-Path -Path $morphizenDemoPath)) {

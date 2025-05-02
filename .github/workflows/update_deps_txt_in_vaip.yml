@@ -1,4 +1,4 @@
-﻿name: Submit PR to update cmake/deps.txt in vaip
+name: Submit PR to update cmake/deps.txt in vaip
 
 on:
   workflow_dispatch:

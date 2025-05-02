@@ -1,4 +1,4 @@
-﻿## generate a new pattern
+## generate a new pattern
 
 
 ```

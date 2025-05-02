@@ -1,4 +1,4 @@
-﻿Write-Host "Download ONNXRuntime on Windows..."
+Write-Host "Download ONNXRuntime on Windows..."
 $ErrorActionPreference = "Stop"
 New-Item -Path $Env:VAI_RT_WORKSPACE -ItemType Directory -Force | Out-Null
 $directoryPath = "$Env:VAI_RT_WORKSPACE/onnxruntime"

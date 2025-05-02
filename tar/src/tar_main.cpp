@@ -1,4 +1,4 @@
-﻿
+
 extern "C" {
 #include "getopt.h"
 }

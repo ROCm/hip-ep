@@ -1,4 +1,4 @@
-﻿name: build-deps
+name: build-deps
 
 inputs:
   token:

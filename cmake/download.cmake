@@ -1,4 +1,4 @@
-﻿message(STATUS "download ${URL} to ${FILE}")
+message(STATUS "download ${URL} to ${FILE}")
 set(args "${URL}" "${FILE}")
 if(EXPECTED_MD5)
     list(APPEND args "EXPECTED_MD5" "${EXPECTED_MD5}")

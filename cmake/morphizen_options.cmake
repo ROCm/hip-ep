@@ -1,4 +1,4 @@
-﻿
+
 # This file is used to set options for MorphiZen
 
 # MorphiZen options

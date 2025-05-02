@@ -1,4 +1,4 @@
-﻿# Define your variables
+# Define your variables
 $ErrorActionPreference = "Stop"
 
 $token = "$Env:MY_GHE_TOKEN"
