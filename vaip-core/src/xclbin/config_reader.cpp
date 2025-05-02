@@ -72,7 +72,7 @@ static void set_struct_value(google::protobuf::Struct& struct_value,
   auto fields2 = field1->second.mutable_struct_value()->mutable_fields();
   auto field2 = fields2->find(key2);
   if (field2 == fields2->end()) {
-    field2 = fields2->insert({key1, {}}).first;
+    field2 = fields2->insert({key2, {}}).first;
   }
   field2->second.set_string_value(string_value);
 }

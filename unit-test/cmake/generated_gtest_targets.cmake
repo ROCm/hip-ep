@@ -25,6 +25,32 @@ set_target_properties(morphizen-unit-test-ConfigTest-Simple PROPERTIES
     )
 #end
     
+add_custom_target(morphizen-unit-test-ConfigTest-EmptyProviderOption
+    COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConfigTest.EmptyProviderOption
+    DEPENDS ${TEST_EXE_NAME}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    )
+set_target_properties(morphizen-unit-test-ConfigTest-EmptyProviderOption PROPERTIES
+    FOLDER "morphizen/unit-tests/cases/ConfigTest/EmptyProviderOption"
+    VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
+    VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
+    VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConfigTest.EmptyProviderOption
+    )
+#end
+    
+add_custom_target(morphizen-unit-test-ConfigTest-ProviderOptionCacheDir
+    COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConfigTest.ProviderOptionCacheDir
+    DEPENDS ${TEST_EXE_NAME}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    )
+set_target_properties(morphizen-unit-test-ConfigTest-ProviderOptionCacheDir PROPERTIES
+    FOLDER "morphizen/unit-tests/cases/ConfigTest/ProviderOptionCacheDir"
+    VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
+    VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
+    VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConfigTest.ProviderOptionCacheDir
+    )
+#end
+    
 add_custom_target(morphizen-unit-test-ModelTest-Load
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ModelTest.Load
     DEPENDS ${TEST_EXE_NAME}
@@ -802,19 +828,6 @@ set_target_properties(morphizen-unit-test-FileStreamTest-HelloWorld PROPERTIES
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=FileStreamTest.HelloWorld
-    )
-#end
-    
-add_custom_target(morphizen-unit-test-OpDefTest-TestAddAndRemove
-    COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=OpDefTest.TestAddAndRemove
-    DEPENDS ${TEST_EXE_NAME}
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    )
-set_target_properties(morphizen-unit-test-OpDefTest-TestAddAndRemove PROPERTIES
-    FOLDER "morphizen/unit-tests/cases/OpDefTest/TestAddAndRemove"
-    VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
-    VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
-    VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=OpDefTest.TestAddAndRemove
     )
 #end
     

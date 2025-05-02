@@ -510,6 +510,8 @@ void Config::merge_config_proto(ConfigProto& config_proto,
 
       json_str, &cache_dir_msg, options);
   CHECK(status.ok()) << "cannot parse json string:" << json_str;
+  MY_LOG(2) << "json_str = " << json_str
+            << " cache_dir_msg = " << cache_dir_msg.DebugString();
   add_custom_field(cache_dir_msg, json_str);
   config_proto.MergeFrom(cache_dir_msg);
 }
