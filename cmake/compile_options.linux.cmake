@@ -1,3 +1,7 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
 set(CMAKE_CXX_FLAGS_DEBUG
   "${CMAKE_CXX_FLAGS_DEBUG} -ggdb -O0 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-inline"
 )

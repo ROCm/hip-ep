@@ -1,3 +1,8 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
 # `/Zc:__cplusplus`: This option ensures that the `__cplusplus`
 # macro reflects the correct version of the C++ standard used by the
 # compiler. By default, MSVC might not update this macro correctly

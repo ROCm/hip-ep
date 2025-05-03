@@ -1,3 +1,7 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
 add_custom_command (
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/vaip_version_info.hpp.inc ${CMAKE_CURRENT_BINARY_DIR}/version.rc
   COMMAND ${CMAKE_COMMAND} -E env

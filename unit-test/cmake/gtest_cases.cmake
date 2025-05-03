@@ -1,3 +1,7 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
 
 add_custom_target(morphizen-unit-test-GTest-hello
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=GTest.hello

@@ -1,7 +1,7 @@
-#
-#  Copyright (C) 2023 – 2024 Advanced Micro Devices, Inc. All rights reserved.
-#  Licensed under the MIT License.
-#
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
 set(FETCHCONTENT_QUIET TRUE CACHE BOOL "enable fetchcontent quiet")
 include(FetchContent)
 file(STRINGS ${CMAKE_CURRENT_LIST_DIR}/deps.txt VAIP_DEPS_LIST)

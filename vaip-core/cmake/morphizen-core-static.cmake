@@ -1,3 +1,7 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
 vaip_add_remote_target(
   FILE ${CMAKE_CURRENT_BINARY_DIR}/tar.h
   URL https://raw.githubusercontent.com/freebsd/freebsd-src/refs/heads/stable/12/bin/pax/tar.h

@@ -1,3 +1,7 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
 find_path(ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR
   NAMES vaip/vaip_ort_api.h
   PATHS "${ONNXRUNTIME_SOURCE_TREE_DIR}/onnxruntime/core/providers/vitisai/include"

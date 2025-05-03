@@ -1,3 +1,7 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
 add_library(${morphizen_CORE_DYNAMIC_UNIQUE_ID} SHARED src/main.cpp)
 message(STATUS "create target ${morphizen_CORE_DYNAMIC_UNIQUE_ID} for onnxruntime_vitisai_ep.dll")
 add_library (morphizen::${morphizen_CORE_DYNAMIC_UNIQUE_ID} ALIAS ${morphizen_CORE_DYNAMIC_UNIQUE_ID})

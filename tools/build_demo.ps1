@@ -1,3 +1,7 @@
+##
+## Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
 $morphizenDemoPath = "$Env:VAI_RT_WORKSPACE/morphizen-demo"
 if (-Not (Test-Path -Path $morphizenDemoPath)) {
     Write-Host "morphizen-demo Directory does not exist. please download it with download_demo.ps1"

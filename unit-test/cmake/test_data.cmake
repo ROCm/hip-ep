@@ -1,3 +1,7 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
 set(RESNET_50_ONNX_PATH "${CMAKE_CURRENT_BINARY_DIR}/pt_resnet50.onnx")
 vaip_add_remote_target(
   TARGET tgt_pt_resnet50.onnx

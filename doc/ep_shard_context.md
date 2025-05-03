@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # EP context design
 
 see https://onnxruntime.ai/docs/execution-providers/EP-Context-Design.html

@@ -1,3 +1,7 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
 message(STATUS "download ${URL} to ${FILE}")
 set(args "${URL}" "${FILE}")
 if(EXPECTED_MD5)

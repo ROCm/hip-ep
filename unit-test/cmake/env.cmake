@@ -1,3 +1,7 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
 if(WIN32)
   set(PATH_ENV_VAR_NAME "PATH")
 else(WIN32)

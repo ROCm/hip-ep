@@ -1,3 +1,7 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
 cmake_minimum_required(VERSION 3.5)
 project(morphizen-tar VERSION 1.0.0 LANGUAGES C CXX)
 find_package(glog REQUIRED)

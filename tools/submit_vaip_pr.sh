@@ -1,3 +1,7 @@
+##
+## Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
 echo "running ${BASH_VERSION}"
 SCRIPT_DIR=$(cd $(dirname $0); pwd)
 PROJECT_DIR=$(cd $SCRIPT_DIR/..; pwd)

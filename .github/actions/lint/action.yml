@@ -1,3 +1,7 @@
+##
+## Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
 name: Lint
 
 runs:
@@ -24,10 +28,14 @@ runs:
 
     - name: Run lintrunner
       run: |
+        set -e
+        set -o pipefail
         lintrunner init
         lintrunner -v --force-color --all-files
         has_bom=false
-        for file in $(find . -type f -not -path './.git/*'); do
+        printenv
+        echo "Checking for BOM in files..."
+        for file in $(/usr/bin/find . -type f -not -path './.git/*' || exit 1); do
           if head -c 3 "$file" | grep -q $'\xEF\xBB\xBF' ; then
             echo "Removing BOM from $file";
             tail -c +4 "$file" > "$file.nobom" && mv "$file.nobom" "$file";
@@ -37,6 +45,16 @@ runs:
         if [ "$has_bom" = true ]; then
           echo "BOM removed from some files. Please check the output above."
           exit 1
+        else
+          echo "No BOM found in files."
+        fi
+        echo "Checking for license headers..."
+        python -m licenseheaders -t ./LICENSES/license.txt -x '3rd-party/*'  -s ./LICENSES/settings.json -d .
+        if $(git status --porcelain | grep -q '^[AM]'); then
+          echo "License header check failed. Please run the license header check locally and fix the issues."
+          exit 1
+        else
+          echo "License header check passed."
         fi
       shell: bash
 

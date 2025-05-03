@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
 #define _CRT_SECURE_NO_WARNINGS 1
 #include "./tar_entry.hpp"
 #include "./hash-library/md5.h"

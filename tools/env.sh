@@ -1,3 +1,7 @@
+##
+## Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
 export C=$(dirname $(realpath --no-symlinks ${BASH_SOURCE[0]}) | sed 's?/c/?C:/?g')
 export BUILD_TYPE=debug
 export W=$C/source

@@ -1,3 +1,7 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
 include(${CMAKE_CURRENT_LIST_DIR}/generated_gtest_targets.cmake OPTIONAL)
 add_custom_target(
     generate_gtest_targets_cmake

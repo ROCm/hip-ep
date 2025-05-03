@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # MorphiZen
 
 **MorphiZen** is a powerful AI compiler framework that enables dynamic manipulation of ONNX graphs. Built for AMD Ryzen AI, MorphiZen provides a flexible, high-performance environment for writing passes, pattern matching, and rule-based transformations. With its advanced capabilities, MorphiZen optimizes AI models to achieve efficient and scalable deployment.

@@ -1,3 +1,7 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
 set(TMP_INSTALL_TARGETS morphizen-core-static morphizen-core-dynamic zlibstatic GSL nlohmann_json)
 #temp comments install for skip error
 # -- Configuring done (32.8s)

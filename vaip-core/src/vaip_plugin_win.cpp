@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
 
 // NOTE: it would be better that platform speicif codes go to a single
 // cpp file, because "windows.h" does not work well with other header

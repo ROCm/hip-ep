@@ -1,3 +1,7 @@
+##
+## Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
 Write-Host " Build ONNXRuntime on Windows..."
 $ErrorActionPreference = "Stop"
 New-Item -Path $Env:VAI_RT_BUILD_DIR -ItemType Directory -Force | Out-Null

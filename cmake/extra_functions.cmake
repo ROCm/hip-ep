@@ -1,3 +1,7 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
 function(vaip_add_remote_target)
   set(options)
   set(oneValueArgs TARGET FILE URL EXPECTED_MD5)
