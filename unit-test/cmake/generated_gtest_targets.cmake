@@ -1,7 +1,3 @@
-##
-# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
-# ** Licensed under the MIT License.
-##
 
 add_custom_target(morphizen-unit-test-GTest-hello
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=GTest.hello
@@ -52,6 +48,19 @@ set_target_properties(morphizen-unit-test-ConfigTest-ProviderOptionCacheDir PROP
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConfigTest.ProviderOptionCacheDir
+    )
+#end
+    
+add_custom_target(morphizen-unit-test-ConfigTest-SessionConfigs
+    COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConfigTest.SessionConfigs
+    DEPENDS ${TEST_EXE_NAME}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    )
+set_target_properties(morphizen-unit-test-ConfigTest-SessionConfigs PROPERTIES
+    FOLDER "morphizen/unit-tests/cases/ConfigTest/SessionConfigs"
+    VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
+    VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
+    VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConfigTest.SessionConfigs
     )
 #end
     
