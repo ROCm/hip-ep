@@ -38,14 +38,14 @@ else()
   target_link_libraries(${LIB_NAME} PRIVATE glog::glog)
 endif()
 
-install(
-  TARGETS ${LIB_NAME}
-  EXPORT ${LIB_NAME}-targets
-  RUNTIME DESTINATION bin
-  ARCHIVE DESTINATION lib
-  LIBRARY DESTINATION lib)
-install(
-  EXPORT ${LIB_NAME}-targets
-  NAMESPACE ${PROJECT_NAME}::
-  COMPONENT base
-  DESTINATION share/cmake/${PROJECT_NAME})
+# install(
+#   TARGETS ${LIB_NAME}
+#   EXPORT ${LIB_NAME}-targets
+#   RUNTIME DESTINATION bin
+#   ARCHIVE DESTINATION lib
+#   LIBRARY DESTINATION lib)
+# install(
+#   EXPORT ${LIB_NAME}-targets
+#   NAMESPACE ${PROJECT_NAME}::
+#   COMPONENT base
+#   DESTINATION share/cmake/${PROJECT_NAME})

@@ -25,13 +25,12 @@ install(
 #  EXCLUDE_FROM_ALL)
 endif()
 
-install(
-  FILES ${PROTO_HDRS}
-  DESTINATION include/morphizen)
-install(
-  DIRECTORY include/morphizen DESTINATION include)
-
-install(
-  DIRECTORY
-  ${ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR}/vaip
-  DESTINATION include)
+# install(
+#   FILES ${PROTO_HDRS}
+#   DESTINATION include/morphizen)
+# install(
+#   DIRECTORY include/morphizen DESTINATION include)
+# install(
+#   DIRECTORY
+#   ${ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR}/vaip
+#   DESTINATION include)

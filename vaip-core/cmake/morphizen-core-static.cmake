@@ -196,6 +196,8 @@ target_compile_definitions(${LIB_NAME}
 target_compile_features(morphizen-core-static PUBLIC cxx_std_17)
 if(MSVC)
   target_compile_options(morphizen-core-static PUBLIC "/Zc:__cplusplus")
+else(MSVC)
+  target_compile_options(morphizen-core-static PUBLIC "-fPIC")
 endif(MSVC)
 
 if(WIN24_BUILD)

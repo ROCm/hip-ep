@@ -39,7 +39,6 @@ TEST(TarFileTest, DoubleRead) {
   // read first entry twice
   auto& entry = entries[0];
   auto name = entry->path();
-  auto size = entry->size();
   // 1
   auto stream = tar_file_obj->open_for_read(name);
   ASSERT_TRUE(stream) << "Failed to open entry for read: " << entry->path();
@@ -88,7 +87,6 @@ static void test_write_override(bool write_same_data) {
       // read first entry twice
       auto& entry = entries[0];
       auto name = entry->path();
-      auto size = entry->size();
       if (write_same_data) {
         // read the data into const_test_content
         auto stream = tar_file_obj->open_for_read(name);

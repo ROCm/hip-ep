@@ -128,6 +128,7 @@ END
 
 def get_dir_version_info(path):
     try:
+        print(f"CWD={path}")
         git_hash = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=path, text=True
         ).strip()

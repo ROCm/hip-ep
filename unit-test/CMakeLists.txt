@@ -85,6 +85,12 @@ set_target_properties(${TEST_EXE_NAME} PROPERTIES
 
 ## for test hello_plugin test
 add_library(hello_plugin_dll SHARED vaip/hello_plugin.cpp)
+install(
+ TARGETS hello_plugin_dll
+ RUNTIME DESTINATION bin
+ ARCHIVE DESTINATION lib
+ LIBRARY DESTINATION lib)
+
 set_target_properties(hello_plugin_dll PROPERTIES FOLDER morphizen/unit-tests/data)
 add_dependencies(${TEST_EXE_NAME}
   tgt_pt_resnet50.onnx
