@@ -6,6 +6,7 @@ $ErrorActionPreference = "Stop"
 $SCRIPT_DIR = $PSScriptRoot
 . "$SCRIPT_DIR/run-external-command.ps1"
 
+Run python -m pip install --user numpy==2.1.1 onnx==1.16.0
 Run cmake -DBUILD_SHARED_LIBS=OFF `
     "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>" `
     -S "${Env:VAI_RT_WORKSPACE}/morphizen-demo" -B "$Env:VAI_RT_BUILD_DIR/morphizen-demo" `

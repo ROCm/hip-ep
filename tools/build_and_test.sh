@@ -3,6 +3,7 @@
 ## Licensed under the MIT License.
 ##
 set -e
+python -m pip install --user numpy==2.1.1 onnx==1.16.0
 
 cmake -DBUILD_SHARED_LIBS=OFF \
     "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>" \

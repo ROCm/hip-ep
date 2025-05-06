@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y \
     emacs \
     vim \
     bash-completion \
+    gdb \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m pip install cmake==3.29.6 --force-reinstall
@@ -41,8 +42,15 @@ RUN python tools/ci_build/build.py --use_vitisai --config ${BUILD_TYPE} --build_
 
 RUN cmake --install $PWD/../build/onnxruntime/${BUILD_TYPE}
 RUN env VAI_RT_BUILD_DIR=/workspace/build VAI_RT_PREFIX=/workspace/local python ../vai-rt/main.py --type ${BUILD_TYPE} --dev-mode --release_file=../vai-rt/release_file/latest_stx.txt --project  gsl gtest protobuf glog
-RUN chmod o+rwx /workspace/build /workspace/local /workspace/local/lib /workspace/local/share /workspace/local/share/cmake   /workspace/local/bin   /workspace/local/include
-
+RUN mkdir -p /github/workspace;  \
+    chmod o+rwx /workspace/build \
+    /workspace/local \
+    /workspace/local/lib \
+    /workspace/local/share \
+    /workspace/local/share/cmake \
+    /workspace/local/bin \
+    /workspace/local/include \
+    /github/workspace
 
 
 COPY entrypoint.sh /entrypoint.sh
