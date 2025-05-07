@@ -70,6 +70,22 @@ create_action_from_node_action(IPass::node_action_t node_action) {
     do {
       modified = false;
       match_idx = -1;
+#if VAIP_ORT_API_MAJOR >= 14
+      auto leaf_nodes = graph_get_output_nodes(graph);
+      VAIP_ORT_API(graph_reverse_dfs_from_preemp)
+      (
+          graph, leaf_nodes, nullptr,
+          [&](const Node* node) {
+            auto node_idx = VAIP_ORT_API(node_get_index)(*node);
+            modified = node_action(self, graph, *node);
+            if (modified) {
+              match_idx = (int)node_idx;
+            }
+            return modified;
+          },
+          nullptr,
+          [&modified](const Node* from, const Node* to) { return modified; });
+#else
       try {
         auto leaf_nodes = graph_get_output_nodes(graph);
         VAIP_ORT_API(graph_reverse_dfs_from)
@@ -90,6 +106,7 @@ create_action_from_node_action(IPass::node_action_t node_action) {
             [&modified](const Node* from, const Node* to) { return modified; });
       } catch ([[maybe_unused]] BreakOnModifed break_on_modifed) {
       }
+#endif
       if (last_match_idx == match_idx) {
         counter++;
       }
