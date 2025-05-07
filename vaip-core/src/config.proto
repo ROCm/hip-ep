@@ -95,6 +95,7 @@ message TargetProto {
   optional int32 graph_engine_qos_priority = 6; // GraphEngine::qos_priority
   optional bool old_qdq = 7;
   optional bool py3_round = 8;
+  map<string, string> provider_options = 9; // default value for provider_options
 }
 
 message TargetAttrProto {

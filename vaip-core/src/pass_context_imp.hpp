@@ -264,6 +264,7 @@ private:
   // open_file_for_write, the file name will be prefixed with cache_key_prefix_.
   // this feature only tested when tar_file_ is not null.
   bool cache_file_use_cache_key_prefix_ = false;
+  std::unique_ptr<TargetProto> target_proto_ = nullptr;
 
 private:
 #if defined(__GNUC__)

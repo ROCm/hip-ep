@@ -619,8 +619,8 @@ initialize_context(const std::string& model_path, const Graph& onnx_graph,
           ->insert({"constbo_sharing_key", constbo_sharing_key});
     }
   }
-  vaip_core::update_config_by_target(*context->context_proto.mutable_config(),
-                                     mep_table, model);
+  context->target_proto_ = vaip_core::update_config_by_target(
+      *context->context_proto.mutable_config(), mep_table, model);
 
   auto onnx_path = model_path.empty() ? std::string("N/A") : model_path;
   *context->context_proto.mutable_config()->mutable_onnx_path() = onnx_path;

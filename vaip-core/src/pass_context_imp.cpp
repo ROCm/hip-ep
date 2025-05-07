@@ -98,6 +98,13 @@ PassContextImp::get_provider_option(const std::string& option_name) const {
   if (it != config.provider_options().end()) {
     return it->second;
   }
+  if (target_proto_) {
+    auto& target_options = target_proto_->provider_options();
+    auto it = target_options.find(option_name);
+    if (it != target_options.end()) {
+      return it->second;
+    }
+  }
   return std::nullopt;
 }
 

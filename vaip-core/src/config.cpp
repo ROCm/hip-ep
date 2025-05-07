@@ -304,8 +304,9 @@ static std::optional<std::string> discover_target(const ConfigProto& proto,
   }
   return std::nullopt;
 }
-void update_config_by_target(ConfigProto& proto, const MepConfigTable* mep,
-                             const Model& model) {
+std::unique_ptr<TargetProto> update_config_by_target(ConfigProto& proto,
+                                                     const MepConfigTable* mep,
+                                                     const Model& model) {
   auto target = std::string();
   auto xclbin = std::string();
 
@@ -340,7 +341,7 @@ void update_config_by_target(ConfigProto& proto, const MepConfigTable* mep,
         << "Target is empty, run all passes."; // old version, compatible
     // TODO: now is it a fatal error? because passes in vaip_config.jsson are
     // all available passes, it makes not much sense to run all passes.
-    return;
+    return nullptr;
   }
   auto target_proto = get_target_proto(proto, target);
   CHECK(target_proto != nullptr)
@@ -392,6 +393,7 @@ void update_config_by_target(ConfigProto& proto, const MepConfigTable* mep,
   update_xclbin(proto, target_proto);
   update_hw_context_share(proto, target_proto);
   update_graph_engine_qos_priority(proto, target_proto);
+  return std::make_unique<TargetProto>(*target_proto);
 }
 
 static const google::protobuf::FieldDescriptor*
