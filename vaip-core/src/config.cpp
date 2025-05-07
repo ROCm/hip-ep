@@ -372,6 +372,9 @@ std::unique_ptr<TargetProto> update_config_by_target(ConfigProto& proto,
       use_old_qdq = target_proto->old_qdq();
     }
   }
+  if (target_proto->has_old_qdq()) {
+    use_old_qdq = target_proto->old_qdq();
+  }
   if (target_proto->has_py3_round()) {
     use_py3_round = target_proto->py3_round();
     auto iter = proto.provider_options().find("xlnx_enable_py3_round");
