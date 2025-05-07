@@ -27,7 +27,7 @@ template <typename T> std::weak_ptr<T> WeakSingleton<T>::the_instance_;
 // we don't support c++17 yet.
 template <class...> using my_void_t = void;
 template <typename T, class = void> struct invoke_initialize_if_possible {
-  static void initialize(T* t) {}
+  static void initialize(T* /*t*/) {}
 };
 template <typename T> struct WithInjection;
 template <typename T>

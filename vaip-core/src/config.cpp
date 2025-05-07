@@ -414,7 +414,7 @@ FindFieldByNameOrCamelCase(const google::protobuf::Descriptor* descriptor,
   return field;
 }
 
-void add_custom_field(ConfigProto& proto, const std::string& str) {
+void add_custom_field(ConfigProto& proto) {
   const google::protobuf::Descriptor* descriptor = proto.GetDescriptor();
   const google::protobuf::Reflection* reflection = proto.GetReflection();
   std::set<std::string> to_be_delete;
@@ -488,7 +488,7 @@ void Config::merge_config_proto(ConfigProto& config_proto,
   CHECK(status.ok()) << "cannot parse json string:" << json_str;
   MY_LOG(2) << "json_str = " << json_str
             << " cache_dir_msg = " << cache_dir_msg.DebugString();
-  add_custom_field(cache_dir_msg, json_str);
+  add_custom_field(cache_dir_msg);
   config_proto.MergeFrom(cache_dir_msg);
 }
 

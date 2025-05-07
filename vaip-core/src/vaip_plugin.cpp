@@ -137,7 +137,7 @@ Plugin::get_all_symbols(const char* name) {
 }
 
 static std::pair<plugin_t, bool> open_plugin_static(const std::string& name,
-                                                    scope_t scope) {
+                                                    scope_t /*scope*/) {
   auto& store = get_store();
   auto it = store.find(name);
   if (it == store.end()) {
@@ -183,7 +183,7 @@ static void close_plugin_static(plugin_t plugin) {
   delete reinterpret_cast<std::string*>(plugin);
 }
 
-std::string plugin_error_static(plugin_t plugin) { return "N/A"; }
+std::string plugin_error_static(plugin_t /*plugin*/) { return "N/A"; }
 
 void register_plugin_static(const std::string& name, const std::string& symbol,
                             void* addr) {

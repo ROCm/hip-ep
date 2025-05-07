@@ -318,8 +318,8 @@ public:
     auto pattern_args = std::vector<std::shared_ptr<Pattern>>{};
     auto node_pattern_inputs = std::vector<std::shared_ptr<NodePattern>>{};
     for (auto ni : node_inputs) {
-      auto ni_name = node_arg_get_name(*ni.node_arg);
-      auto it = map_node_patterns_.find(ni_name);
+      auto ni_name_1 = node_arg_get_name(*ni.node_arg);
+      auto it = map_node_patterns_.find(ni_name_1);
       auto arg_node_pattern = std::shared_ptr<NodePattern>();
       if (it != map_node_patterns_.end()) {
         if (ni.node == nullptr) {
@@ -598,9 +598,9 @@ public:
    * @param opt_mmd_file A string representing the path to the output Mermaid
    * file.
    */
-  void generate_mmd_code(const std::vector<std::string>& opt_inputs,
+  void generate_mmd_code(const std::vector<std::string>& /*opt_inputs*/,
                          const std::vector<std::string>& opt_outputs,
-                         const std::string opt_onnx_file,
+                         const std::string /*opt_onnx_file*/,
                          const std::string& opt_mmd_file) const {
     std::ostringstream mmd_stream;
     mmd_stream << "flowchart TB" << std::endl;

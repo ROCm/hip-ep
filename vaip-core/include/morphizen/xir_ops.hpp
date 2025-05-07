@@ -36,14 +36,14 @@ struct XilinxCustomOpBase
 
   size_t GetInputTypeCount() const { return 1u; }
 
-  ONNXTensorElementDataType GetInputType(size_t index) const {
+  ONNXTensorElementDataType GetInputType(size_t /*index*/) const {
     // versions of the same operator define.
     return ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
   };
 
   size_t GetOutputTypeCount() const { return 1u; };
 
-  ONNXTensorElementDataType GetOutputType(size_t index) const {
+  ONNXTensorElementDataType GetOutputType(size_t /*index*/) const {
     // CHECK_EQ(index, 0u)
     //   << "'com.xilinx' domain's op not support multiple outputs ";
     // If 'type' is undefined, all types are allowed regardless of what
@@ -69,7 +69,7 @@ struct XilinxCustomOpBase
 };
 
 struct XilinxCustomKernel {
-  XilinxCustomKernel(const OrtApi& api, const OrtKernelInfo* info) {}
+  XilinxCustomKernel(const OrtApi& /*api*/, const OrtKernelInfo* /*info*/) {}
   void Compute(OrtKernelContext* context);
 };
 

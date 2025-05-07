@@ -126,7 +126,6 @@ private:
     } else {
       return const_cast<mapped_type*>(&x->value.second);
     }
-    return nullptr;
   }
   template <typename key_type, typename mapped_type>
   friend std::ostream& operator<<(std::ostream& str,

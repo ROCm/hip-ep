@@ -222,7 +222,7 @@ void TarHeader::fill_magic(HD_USTAR* header) {
   const char magic[] = "ustar  ";
   std::copy(&magic[0], &magic[0] + sizeof(magic), &header->magic[0]);
 }
-void TarHeader::fill_version(HD_USTAR* header) {
+void TarHeader::fill_version(HD_USTAR* /*header*/) {
   // const char version[] = "  ";
   // std::copy(&version[0], &version[0] + sizeof(version), &header->version[0]);
 }
@@ -315,7 +315,6 @@ std::optional<TarHeader> TarHeader::read_header(std::istream& is) {
       MY_LOG(1) << "Failed to read tar header";
       return std::nullopt;
     }
-    return std::nullopt;
   }
   ret->block_begin_pos_ = is.tellg() - std::streampos(BLOCKSIZE);
   auto header = reinterpret_cast<HD_USTAR*>(block);
@@ -342,7 +341,7 @@ std::optional<TarHeader> TarHeader::read_header(std::istream& is) {
       MY_LOG(1) << "Failed to read tar long name";
       return std::nullopt;
     }
-    auto check_sum = tar_checksum(header);
+    check_sum = tar_checksum(header);
     if (check_sum == -1) {
       MY_LOG(1) << "Invalid tar header checksum for long name: " << ret->name_;
       return std::nullopt;

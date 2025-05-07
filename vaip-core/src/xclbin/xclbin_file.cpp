@@ -40,7 +40,6 @@ axlf_section_header get_section_hdr(std::istream& file, const axlf& file_hdr,
   std::string error =
       std::string("section not found for kind ") + std::to_string(kind);
   throw std::runtime_error(error);
-  return {};
 }
 
 axlf get_hdr(std::istream& file, const std::string& filename) {

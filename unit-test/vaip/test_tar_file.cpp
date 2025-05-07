@@ -107,11 +107,11 @@ static void test_write_override(bool write_same_data) {
       stream->flush();
       stream.reset();
       // show
-      for (auto& entry : entries) {
-        auto name = entry->path();
-        auto size = entry->size();
+      for (auto& entry_1 : entries) {
+        auto name_1 = entry_1->path();
+        auto size = entry_1->size();
         // use LOG(INFO) print all entry name and size
-        LOG(INFO) << "Entry name: " << name << ", size: " << size;
+        LOG(INFO) << "Entry name: " << name_1 << ", size: " << size;
       }
       ASSERT_TRUE(true);
       LOG(INFO) << " ======== overwrite " << name << " ========";

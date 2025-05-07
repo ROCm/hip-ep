@@ -27,7 +27,7 @@ static std::wstring s2ws(const std::string& s) {
 }
 
 std::pair<plugin_t, bool> open_plugin_dyn(const std::string& name,
-                                          scope_t scope) {
+                                          scope_t /*scope*/) {
   static_assert(sizeof(plugin_t) == sizeof(HMODULE));
   auto handle = reinterpret_cast<HMODULE>(GetModuleHandleW(s2ws(name).c_str()));
   if (handle) {
@@ -39,7 +39,7 @@ std::pair<plugin_t, bool> open_plugin_dyn(const std::string& name,
 void* plugin_sym_dyn(plugin_t plugin, const std::string& name) {
   return GetProcAddress((HMODULE)plugin, name.c_str());
 }
-std::string plugin_error_dyn(plugin_t plugin) {
+std::string plugin_error_dyn(plugin_t /*plugin*/) {
   std::ostringstream str;
   str << "ERROR CODE: " << GetLastError();
   return str.str();

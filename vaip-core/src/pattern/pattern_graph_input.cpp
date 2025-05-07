@@ -55,7 +55,7 @@ PatternGraphInput::match_uncached(const onnxruntime::Graph& graph,
   }
   return ret;
 }
-void PatternGraphInput::dump_to_proto_imp(RootPatternProto& pattern_proto,
+void PatternGraphInput::dump_to_proto_imp(RootPatternProto& /*pattern_proto*/,
                                           PatternProto& this_proto) const {
   this_proto.mutable_graph_input();
 }

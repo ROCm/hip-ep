@@ -57,7 +57,6 @@ public:
 private:
   std::vector<NodeAttr> attrs_;
 };
-std::string attr_proto_as_string(const AttributeProto& attr);
 std::string data_type_to_string(int elem_type);
 VAIP_DLL_SPEC AttributeProtoPtr attr_proto_clone(const AttributeProto& attr);
 VAIP_DLL_SPEC AttributeProtoPtr

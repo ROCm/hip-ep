@@ -100,9 +100,9 @@ PassContextImp::get_provider_option(const std::string& option_name) const {
   }
   if (target_proto_) {
     auto& target_options = target_proto_->provider_options();
-    auto it = target_options.find(option_name);
-    if (it != target_options.end()) {
-      return it->second;
+    auto it_1 = target_options.find(option_name);
+    if (it_1 != target_options.end()) {
+      return it_1->second;
     }
   }
   return std::nullopt;
@@ -151,8 +151,8 @@ PassContextImp::~PassContextImp() {
     fclose(iter.second);
   }
 }
-void PassContextImp::set_is_ep_context_model(bool is_ep_context_model) {
-  this->is_ep_context_model = is_ep_context_model;
+void PassContextImp::set_is_ep_context_model(bool is_ep_context) {
+  this->is_ep_context_model = is_ep_context;
 }
 
 bool PassContextImp::get_is_ep_context_model() {

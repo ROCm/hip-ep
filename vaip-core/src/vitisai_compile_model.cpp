@@ -229,7 +229,7 @@ static void update_primary_context(std::shared_ptr<PassContextImp> context) {
 static void update_cache(std::shared_ptr<PassContextImp> context,
                          onnxruntime::Graph& graph) {
   auto deferred_write = std::shared_ptr<void>(
-      nullptr, [context](void* p) { context->save_context_json(); });
+      nullptr, [context](void* /*p*/) { context->save_context_json(); });
   auto measure_update_cache = context->measure("update_cache");
   auto passes =
       IPass::create_passes(context, context->get_config_proto().passes());
@@ -302,7 +302,7 @@ static bool check_cache_hit(PassContextImp& context) {
 }
 
 void compile_onnx_model_2(std::shared_ptr<PassContextImp> context,
-                          onnxruntime::Graph& graph, const Graph& onnx_graph) {
+                          onnxruntime::Graph& graph) {
   bool cache_hit = check_cache_hit(*context);
   if (!cache_hit) {
     update_cache(context, graph);
@@ -850,16 +850,16 @@ extern "C" VAIP_DLL_SPEC int create_ep_context_nodes(
   auto p_context = dynamic_cast<PassContextImp*>(ep->get_context().get());
   CHECK(p_context != nullptr);
   auto& context = *p_context;
-  auto deferred_write = std::shared_ptr<void>(nullptr, [&context](void* p) {
+  auto deferred_write = std::shared_ptr<void>(nullptr, [&context](void* /*p*/) {
     if (0)
       context.save_context_json();
   });
   auto measure_create_ep_context_nodes =
       context.measure("create_ep_context_nodes");
   ret.reserve(eps.size());
-  for (auto& ep : eps) {
+  for (auto& ep_1 : eps) {
     ret.push_back(create_ep_context_node(
-        dynamic_cast<vaip_core::ExecutionProviderConcrete*>(ep.get())));
+        dynamic_cast<vaip_core::ExecutionProviderConcrete*>(ep_1.get())));
   }
   *ret_value = vaip_core::DllSafe<std::vector<Node*>>(
       new std::vector<Node*>(std::move(ret)));
@@ -1106,11 +1106,11 @@ compile_onnx_model_internal(
     auto cloned_model = model_clone(model, threshold);
     auto& cloned_graph = VAIP_ORT_API(model_main_graph)(*cloned_model);
     auto deferred_collect =
-        std::shared_ptr<void>(nullptr, [context, &onnx_graph](void* p) {
+        std::shared_ptr<void>(nullptr, [context, &onnx_graph](void* /*p*/) {
           collect_stat_and_dump(*context, onnx_graph);
         });
     measure_before_compile_onnx_model_2 = nullptr;
-    compile_onnx_model_2(context, cloned_graph, onnx_graph);
+    compile_onnx_model_2(context, cloned_graph);
     measure_after_compile_onnx_model_2 =
         context->measure("after_compile_onnx_model_internal");
     ret.reserve(context->context_proto.meta_def_size());
@@ -1231,7 +1231,7 @@ compile_onnx_model_3(const std::string& model_path, const Graph& onnx_graph,
   context->add_context_resource(
       "__level_0_graph",
       std::shared_ptr<void>((void*)&cloned_graph, [](void*) {}));
-  auto deferred_write = std::shared_ptr<void>(nullptr, [context](void* p) {
+  auto deferred_write = std::shared_ptr<void>(nullptr, [context](void* /*p*/) {
     if (0)
       context->save_context_json();
   });
@@ -1382,7 +1382,7 @@ int optimize_onnx_model(const std::filesystem::path& model_path_in,
   return 0;
 }
 
-void initialize_graph_optimizer(const std::string& json_path) {
+void initialize_graph_optimizer(const std::string& /*json_path*/) {
   LOG(FATAL) << "initialize_graph_optimizer todo";
 }
 

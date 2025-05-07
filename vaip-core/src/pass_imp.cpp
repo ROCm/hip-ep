@@ -84,7 +84,9 @@ create_action_from_node_action(IPass::node_action_t node_action) {
             return modified;
           },
           nullptr,
-          [&modified](const Node* from, const Node* to) { return modified; });
+          [&modified](const Node* /*from*/, const Node* /*to*/) {
+            return modified;
+          });
 #else
       try {
         auto leaf_nodes = graph_get_output_nodes(graph);
@@ -103,7 +105,9 @@ create_action_from_node_action(IPass::node_action_t node_action) {
                 throw BreakOnModifed{1};
               }
             }, //
-            [&modified](const Node* from, const Node* to) { return modified; });
+            [&modified](const Node* /*from*/, const Node* /*to*/) {
+              return modified;
+            });
       } catch ([[maybe_unused]] BreakOnModifed break_on_modifed) {
       }
 #endif

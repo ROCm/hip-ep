@@ -501,8 +501,8 @@ IPass_try_fuse(const Graph& graph, const std::string& name,
   for (auto island : isolated_nodes) {
     // island node's all input node in body_nodes => is_body
     auto is_body = true;
-    auto node_inputs = node_get_inputs(*island);
-    for (auto& input : node_inputs) {
+    auto node_inputs_1 = node_get_inputs(*island);
+    for (auto& input : node_inputs_1) {
       if (input.node != nullptr &&
           std::find(body_nodes.begin(), body_nodes.end(), input.node) ==
               body_nodes.end()) {
@@ -513,7 +513,7 @@ IPass_try_fuse(const Graph& graph, const std::string& name,
     if (is_body) {
       body_nodes.push_back(island);
       // insert island's initalizers input args
-      for (auto input : node_inputs) {
+      for (auto input : node_inputs_1) {
         if (input.node == nullptr) {
           constant_initializers.insert(node_arg_get_name(*input.node_arg));
         }

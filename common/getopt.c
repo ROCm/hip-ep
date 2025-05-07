@@ -2,7 +2,9 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-
+#ifdef _WIN32 
+  #pragma warning(disable: 4706)
+#endif
 #include "getopt.h"
 
 #include <stdio.h>

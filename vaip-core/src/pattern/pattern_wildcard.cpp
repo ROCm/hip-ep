@@ -20,7 +20,7 @@ std::string PatternWildcard::debug_string() const {
 }
 
 BinderBuilderPtr
-PatternWildcard::match_uncached(const onnxruntime::Graph& graph,
+PatternWildcard::match_uncached(const onnxruntime::Graph& /*graph*/,
                                 const NodeInput& node_input,
                                 const BinderBuilder& binder) const {
   MY_LOG(1) << "MATCH OK. ID=" << get_id() << ", wildcard matched: "
@@ -29,7 +29,7 @@ PatternWildcard::match_uncached(const onnxruntime::Graph& graph,
                     : node_arg_as_string(*node_input.node_arg));
   return binder.add(this->get_id(), node_input);
 }
-void PatternWildcard::dump_to_proto_imp(RootPatternProto& pattern_proto,
+void PatternWildcard::dump_to_proto_imp(RootPatternProto& /*pattern_proto*/,
                                         PatternProto& this_proto) const {
   this_proto.mutable_wildcard();
 }

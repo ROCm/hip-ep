@@ -58,7 +58,7 @@ PatternConstant::match_uncached(const onnxruntime::Graph& graph,
   }
   return ret;
 }
-void PatternConstant::dump_to_proto_imp(RootPatternProto& pattern_proto,
+void PatternConstant::dump_to_proto_imp(RootPatternProto& /*pattern_proto*/,
                                         PatternProto& this_proto) const {
   this_proto.mutable_constant();
 }

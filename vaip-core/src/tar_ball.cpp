@@ -140,10 +140,10 @@ int TarWriter::write_internal(const IStreamReader& src, const std::string& name,
   CHECK(sizeof(block) == t)
       << "failed to write header. name = " << name << " size = " << size;
   if (name.size() >= sizeof(header.name)) {
-    auto size = name.size();
-    CHECK(size == tarball_.write(name.data(), size))
-        << "failed to write data. name = " << name << " size = " << size;
-    auto const padding_size{512u - static_cast<unsigned int>(size % 512)};
+    auto size_1 = name.size();
+    CHECK(size_1 == tarball_.write(name.data(), size_1))
+        << "failed to write data. name = " << name << " size = " << size_1;
+    auto const padding_size{512u - static_cast<unsigned int>(size_1 % 512)};
     const char padding_data[512] = {0};
     if (padding_size != 512) {
       CHECK(padding_size == tarball_.write(&padding_data[0], padding_size))
@@ -154,15 +154,15 @@ int TarWriter::write_internal(const IStreamReader& src, const std::string& name,
     my_strncpy(header.name, name.c_str(), sizeof(header.name));
     my_strncpy(header.chksum, EIGHT_SPACE, 8);
     header.typeflag = '0';
-    safe_sprintf(header.size, "%011lo", (unsigned long)size);
-    unsigned int checksum_value = 0;
+    safe_sprintf(header.size, "%011lo", (unsigned long)size_1);
+    unsigned int checksum_value_1 = 0;
     for (unsigned int i = 0; i != sizeof(block.buffer); ++i) {
-      checksum_value += (uint8_t)block.buffer[i];
+      checksum_value_1 += (uint8_t)block.buffer[i];
     }
-    safe_sprintf(header.chksum, "%06o", checksum_value);
+    safe_sprintf(header.chksum, "%06o", checksum_value_1);
     header.chksum[7] = ' ';
     CHECK(sizeof(block) == tarball_.write(&block.buffer[0], sizeof(block)))
-        << "failed to write header. name = " << name << " size = " << size;
+        << "failed to write header. name = " << name << " size = " << size_1;
   }
   if (size == 0) {
     return 0;
@@ -232,8 +232,8 @@ int TarReader::read(IStreamWriterBuilder& dst_builder) {
       return 0;
     }
     block = (union block*)(ret.value().data());
-    auto check_ok = tar_checksum(block);
-    CHECK(check_ok) << "tallball not valid: checksum failed.";
+    auto check_ok_1 = tar_checksum(block);
+    CHECK(check_ok_1) << "tallball not valid: checksum failed.";
     header = &block->header;
   }
   size_ = std::stoul(header->size, nullptr, 8);
@@ -359,7 +359,7 @@ TarFile::TarFile(const std::filesystem::path& file_path)
         }
         bytes.insert(bytes.end(), tmp_buffer.begin(), tmp_buffer.end());
       }
-      auto readed_size = file.read(block_buffer.data(), sizeof(block)).gcount();
+      readed_size = file.read(block_buffer.data(), sizeof(block)).gcount();
       if (readed_size != sizeof(block)) {
         MY_LOG("attemp read header 2 fail");
         return;
@@ -367,9 +367,9 @@ TarFile::TarFile(const std::filesystem::path& file_path)
       bytes.insert(bytes.end(), block_buffer.begin(), block_buffer.end());
 
       block = (union block*)(block_buffer.data());
-      auto check_ok = tar_checksum(block);
-      if (check_ok != 1) {
-        MY_LOG(std::string("checksum = ") + std::to_string(check_ok));
+      auto check_ok_1 = tar_checksum(block);
+      if (check_ok_1 != 1) {
+        MY_LOG(std::string("checksum = ") + std::to_string(check_ok_1));
         return;
       }
       header = &block->header;

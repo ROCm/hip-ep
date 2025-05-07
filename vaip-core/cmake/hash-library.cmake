@@ -25,7 +25,7 @@ target_sources(morphizen-core-static PRIVATE ${SOURCES})
 # Apply compile options only to those files
 foreach(source_file ${SOURCES})
   if(MSVC)
-    # set_source_files_properties(${source_file} PROPERTIES COMPILE_FLAGS "-O3 -Wall")
+    set_source_files_properties(${source_file} PROPERTIES COMPILE_FLAGS "/W3")
   else(MSVC)
     set_source_files_properties(${source_file} PROPERTIES COMPILE_FLAGS "-Wno-error")
   endif(MSVC)

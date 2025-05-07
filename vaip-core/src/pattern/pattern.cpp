@@ -132,7 +132,8 @@ std::vector<std::string> Pattern::get_ops_list_name() const {
   return ret;
 }
 
-void Pattern::fill_ops_name(std::vector<std::string>& list_of_ops_name) const {
+void Pattern::fill_ops_name(
+    std::vector<std::string>& /*list_of_ops_name*/) const {
   return;
 }
 
@@ -160,8 +161,8 @@ PatternProto* Pattern::dump_to_proto(RootPatternProto& pattern_proto) const {
   dump_to_proto_imp(pattern_proto, *new_pattern);
   return new_pattern;
 }
-void Pattern::dump_to_proto_imp(RootPatternProto& pattern_proto,
-                                PatternProto& this_proto) const {
+void Pattern::dump_to_proto_imp(RootPatternProto& /*pattern_proto*/,
+                                PatternProto& /*this_proto*/) const {
   LOG(FATAL) << "not implemented.";
 }
 

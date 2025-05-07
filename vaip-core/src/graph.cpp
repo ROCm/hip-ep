@@ -721,7 +721,7 @@ GraphConstRef::virtual_fuse(const vaip_core::MetaDefProto& meta_def) const {
       [&ret, this, &nodes](const onnxruntime::Node* n) mutable {
         nodes.push_back(NodeConstRef::from_node(*this, *n));
       }, //
-      [&node_indice, this](const onnxruntime::Node* from,
+      [&node_indice, this](const onnxruntime::Node* /*from*/,
                            const onnxruntime::Node* to) -> bool {
         auto in_body =
             node_indice.find(NodeConstRef::from_node(*this, *to).index()) !=

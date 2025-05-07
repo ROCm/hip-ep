@@ -68,10 +68,10 @@ TEST_F(GraphTest, LoadAndSave) {
   // 3. make sure "exteran_data.location" is relative path.
   // EXPECT_TRUE(std::filesystem::exists("resnet50.dat"));
   {
-    auto model = vaip_cxx::Model::load(resnet50_file);
-    auto graph = model->main_graph();
+    auto model_1 = vaip_cxx::Model::load(resnet50_file);
+    auto graph_1 = model_1->main_graph();
     if (vaip_core::VaipOrtApi2::has_graph_set_name) {
-      EXPECT_EQ(graph.name(), "resent50_by_vaip");
+      EXPECT_EQ(graph_1.name(), "resent50_by_vaip");
     }
   }
 }

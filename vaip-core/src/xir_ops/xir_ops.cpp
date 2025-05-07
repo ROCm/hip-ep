@@ -113,7 +113,7 @@ OrtStatusPtr xilinx_custom_op_shape_infer(const OrtCustomOp* op,
   return nullptr;
 };
 
-void XilinxCustomKernel::Compute(OrtKernelContext* context) {
+void XilinxCustomKernel::Compute(OrtKernelContext* /*context*/) {
   MY_LOG(1) << "XilinxCustomKernel Compute called for op: "; //
   // Implement the kernel computation logic here
 }

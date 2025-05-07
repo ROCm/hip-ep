@@ -18,8 +18,9 @@ namespace vaip_core {
  *
  * Return trace data to onnxruntime.
  */
-VAIP_DLL_SPEC void profiler_collect(std::vector<EventInfo>& api_events,
-                                    std::vector<EventInfo>& kernel_events) {
+VAIP_DLL_SPEC void
+profiler_collect([[maybe_unused]] std::vector<EventInfo>& api_events,
+                 [[maybe_unused]] std::vector<EventInfo>& kernel_events) {
 
 #if USE_VART_TRACE
   uint64_t start_time = 0;

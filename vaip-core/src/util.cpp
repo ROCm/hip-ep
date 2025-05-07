@@ -297,7 +297,7 @@ template <typename T> struct zlib {
     return update_crc(0L, buf, len);
   }
   static std::vector<char_type> compress(gsl::span<const char_type> data,
-                                         int level) {
+                                         int /*level*/) {
 #if _WIN32
     FILE* tmp_file = nullptr;
     auto err = tmpfile_s(&tmp_file);

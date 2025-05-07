@@ -15,7 +15,6 @@ VAIP_DLL_SPEC void AttributeProtoDeleter::operator()(AttributeProto* p) const {
 VAIP_DLL_SPEC void NodeAttributesDeleter::operator()(NodeAttributes* p) const {
   VAIP_ORT_API(node_attributes_delete)(p);
 }
-std::string attr_proto_as_string(const AttributeProto& attr) { return "TODO"; }
 std::string data_type_to_string(int elem_type) {
   auto ret = std::string();
   if (elem_type ==

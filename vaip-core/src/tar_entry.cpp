@@ -333,8 +333,9 @@ TarEntryOutputStream::find_prev_entry_for_md5(const std::string& md5) {
   return nullptr;
 }
 
+// FIXME , the param "name" is not used
 TarEntryInputStream*
-TarEntryOutputStream::find_prev_entry_for_path(const std::string& name) {
+TarEntryOutputStream::find_prev_entry_for_path(const std::string& /*name*/) {
   for (auto& entry : tar_file_.entries_) {
     if (entry->path() == name_) {
       MY_LOG(1) << " duplicated file found for entry " //

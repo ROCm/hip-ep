@@ -50,9 +50,9 @@ PatternSequence::match_uncached(const onnxruntime::Graph& graph1,
         if (output_node_arg == std::nullopt) {
           continue;
         }
-        auto node_input =
+        auto node_input_1 =
             vaip_core::NodeInput{node.ptr(), output_node_arg->ptr()};
-        result_i = patterns_[i]->match_cached(graph, node_input, *ret);
+        result_i = patterns_[i]->match_cached(graph, node_input_1, *ret);
         if (result_i != nullptr) {
           mached_node = node;
           break;

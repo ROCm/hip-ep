@@ -163,14 +163,14 @@ static void collect_subgraph_stat(StatProto& proto,
     subgraph_count.erase(iter);
   }
 
-  for (auto iter : subgraph_count) {
+  for (auto iter2 : subgraph_count) {
     auto* subgraph_stat = proto.add_subgraph_stat();
-    if ("IPU" == iter.first || "DOD" == iter.first) {
+    if ("IPU" == iter2.first || "DOD" == iter2.first) {
       subgraph_stat->set_device("NPU");
     } else {
-      subgraph_stat->set_device(iter.first);
+      subgraph_stat->set_device(iter2.first);
     }
-    subgraph_stat->set_count(iter.second);
+    subgraph_stat->set_count(iter2.second);
   }
   if (actuall_ipu_count != -1) {
     auto* subgraph_stat = proto.add_subgraph_stat();

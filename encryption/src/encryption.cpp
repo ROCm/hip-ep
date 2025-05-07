@@ -19,7 +19,8 @@
 namespace vaip_encryption {
 
 void aes_encryption(const vaip_core::IStreamReader& src,
-                    vaip_core::IStreamWriter& dst, const std::string& key) {
+                    vaip_core::IStreamWriter& dst,
+                    [[maybe_unused]] const std::string& key) {
 #ifdef WITH_OPENSSL
   // key
   std::array<char, 32> aes_256_key = {'\0'};
@@ -73,7 +74,8 @@ void aes_encryption(const vaip_core::IStreamReader& src,
 #endif
 }
 void aes_decryption(const vaip_core::IStreamReader& src,
-                    vaip_core::IStreamWriter& dst, const std::string& key) {
+                    vaip_core::IStreamWriter& dst,
+                    [[maybe_unused]] const std::string& key) {
 #ifdef WITH_OPENSSL
   // key
   std::array<char, 32> aes_256_key = {'\0'};

@@ -30,11 +30,6 @@ TEST(PluginTest, StaticHelloPlugin) {
 }
 TEST(PluginTest, DynamicHelloPlugin) {
   {
-    const char* (*func)() = []() -> const char* {
-      LOG(INFO) << "Hello, world!";
-      return "hello, world!";
-    };
-
     auto plugin = vaip_core::Plugin::get("hello_plugin_dll");
     ASSERT_TRUE(plugin != nullptr);
     auto fp = plugin->get_method<const char*>("say_hello");
