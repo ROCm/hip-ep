@@ -88,7 +88,7 @@ TEST_F(ModelTest, ModelCreationTest) {
       "my_output", i_shape, ONNX_NAMESPACE::TensorProto_DataType_INT64)};
 
   auto newly_created_node =
-      graph.add_node("My_ReLu_unique_name", "amd.com", "Relu", "test", i, o,
+      graph.add_node("My_ReLu_unique_name", "", "Relu", "test", i, o,
                      vaip_core::NodeAttributesBuilder().build());
 
   LOG(INFO) << "happy, a new node is created " << newly_created_node;
