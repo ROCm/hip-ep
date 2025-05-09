@@ -16,6 +16,7 @@ configure_file(unit_test_env_params.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/unit_test
 ## add a new test for class vaip_cxx::Model
 set(TEST_EXE_NAME morphizen-unit-tests)
 add_executable(${TEST_EXE_NAME}
+  test_environment.hpp
   main.cpp
   vaip/test_config.cpp
   vaip/test_model.cpp
@@ -44,6 +45,7 @@ target_link_libraries(${TEST_EXE_NAME}
     onnxruntime::onnxruntime
     glog::glog
     $<LINK_LIBRARY:WHOLE_ARCHIVE,morphizen-pass-init>
+    Boost::process
 )
 target_include_directories(
   ${TEST_EXE_NAME}
@@ -52,7 +54,10 @@ target_include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_compile_definitions(${TEST_EXE_NAME} PRIVATE -DONNX_NAMESPACE=onnx)
+target_compile_definitions(${TEST_EXE_NAME} PRIVATE
+  -DONNX_NAMESPACE=onnx
+  -DPYTHON_EXE="$<TARGET_FILE:Python3::Interpreter>"
+  -DTEST_CWD="${CMAKE_CURRENT_BINARY_DIR}")
 add_custom_command(
   TARGET ${TEST_EXE_NAME}
   POST_BUILD

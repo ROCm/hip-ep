@@ -46,7 +46,7 @@ static std::mutex& get_mutex_lock() {
   MY_LOG(1) << "get std::mutex lock success ... ";
   return mutex;
 }
-WithFileLock::WithFileLock(std::filesystem::path filename)
+WithFileLock::WithFileLock(std::filesystem::path /*filename*/)
     : lock_(get_mutex_lock()) {}
 WithFileLock::~WithFileLock() {
   MY_LOG(1) << "unlock std::mutex lock ... " << std::endl;

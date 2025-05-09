@@ -42,7 +42,8 @@
 # that reduces vulnerabilities and security issues.
 
 # Microsoft requested
-add_compile_options(
+
+set(MORPHIZEN_COMPILER_OPTIONS
   /Zc:__cplusplus #
   /Zi # generate complete debugging information
   /Qspectre # enable Spectre mitigations, required by MS
@@ -55,10 +56,11 @@ add_compile_options(
   # TODO: fix the following warning
   /wd4251 #warning C4251: needs to have dll-interface to be used by clients of
   /wd4275 #warning C4275: non dll-interface class
+  CACHE STRING "Compiler options for Morphizen"
 )
 
 
-add_link_options(
+set(MORPHIZEN_LINKER_OPTIONS
   # `/DEBUG`: This option instructs the linker to generate debug
   # information for the compiled binaries. This debug information is
   # crucial for debugging the application, as it maps the binary code
@@ -89,6 +91,7 @@ add_link_options(
   # the hardware, further enhancing the security of the application.
   /DEBUG
   /CETCOMPAT
+  CACHE STRING "Linker options for Morphizen"
 )
 
 # put all executables and dll files into a shared libary, make

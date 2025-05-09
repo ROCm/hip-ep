@@ -198,7 +198,7 @@ if(MSVC)
 else(MSVC)
   target_compile_options(morphizen-core-static PUBLIC "-fPIC")
 endif(MSVC)
-
+target_compile_options(morphizen-core-static PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_COMPILER_OPTIONS}>")
 if(WIN24_BUILD)
   target_compile_definitions(${LIB_NAME} PUBLIC "-DWIN24_BUILD=ON")
 endif()

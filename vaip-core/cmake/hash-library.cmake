@@ -3,7 +3,7 @@
 # ** Licensed under the MIT License.
 ##
 
-set(SOURCES
+add_library(HASH_LIBRARY OBJECT
   ../3rd-party/hash-library/crc32.cpp
   ../3rd-party/hash-library/crc32.h
   ../3rd-party/hash-library/hash.h
@@ -19,14 +19,5 @@ set(SOURCES
   ../3rd-party/hash-library/sha3.cpp
   ../3rd-party/hash-library/sha3.h)
 
-
-target_sources(morphizen-core-static PRIVATE ${SOURCES})
-
-# Apply compile options only to those files
-foreach(source_file ${SOURCES})
-  if(MSVC)
-    set_source_files_properties(${source_file} PROPERTIES COMPILE_FLAGS "/W3")
-  else(MSVC)
-    set_source_files_properties(${source_file} PROPERTIES COMPILE_FLAGS "-Wno-error")
-  endif(MSVC)
-endforeach()
+target_link_libraries(morphizen-core-static PRIVATE HASH_LIBRARY)
+set_target_properties(HASH_LIBRARY PROPERTIES FOLDER Dependencies/hash-library)

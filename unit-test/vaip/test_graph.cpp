@@ -6,6 +6,7 @@
 #include "debug_logger.hpp"
 #include "morphizen/vaip.hpp"
 #include "unit_test_env_params.hpp"
+#include <boost/process.hpp>
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
@@ -73,6 +74,16 @@ TEST_F(GraphTest, LoadAndSave) {
     if (vaip_core::VaipOrtApi2::has_graph_set_name) {
       EXPECT_EQ(graph_1.name(), "resent50_by_vaip");
     }
+    std::ostringstream python_code;
+    python_code << "import onnx"
+                << "\n";
+    python_code << "m=onnx.load(r\"" << resnet50_file.u8string() << "\")"
+                << "\n";
+    python_code << "onnx.checker.check_model(m)"
+                << "\n";
+    auto exit_code =
+        boost::process::system(PYTHON_EXE, "-c", python_code.str().c_str());
+    EXPECT_EQ(exit_code, 0) << "onnx.checker.check_model failed";
   }
 }
 

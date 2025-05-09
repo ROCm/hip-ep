@@ -1050,7 +1050,8 @@ create_execution_providers_from_ep_context_nodes(
 }
 static std::vector<std::unique_ptr<ExecutionProvider>>
 restore_execution_providers_from_ep_context_model(
-    vaip_cxx::GraphConstRef onnx_graph, std::shared_ptr<PassContextImp> context,
+    vaip_cxx::GraphConstRef /*onnx_graph*/,
+    std::shared_ptr<PassContextImp> context,
     std::vector<vaip_cxx::NodeConstRef> ep_context_nodes) {
   auto measture =
       context->measure("restore_execution_providers_from_ep_context_model");

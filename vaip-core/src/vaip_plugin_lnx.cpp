@@ -23,7 +23,7 @@ void* plugin_sym_dyn(plugin_t plugin, const std::string& name) {
   dlerror(); // clean up error;
   return dlsym(plugin, name.c_str());
 }
-std::string plugin_error_dyn(plugin_t plugin) {
+std::string plugin_error_dyn(plugin_t /*plugin*/) {
   std::ostringstream str;
   str << "ERROR CODE: " << dlerror();
   return str.str();

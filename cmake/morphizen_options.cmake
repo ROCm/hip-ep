@@ -7,7 +7,7 @@
 # This file is used to set options for MorphiZen
 
 # MorphiZen options
-
+set(FETCHCONTENT_QUIET FALSE CACHE BOOL "disable download progress")
 # enable morphizen-core-dynamic or not. when VAIP is built as a standalone library, this option should be ON
 # when VAIP is built as part of onnxruntime, this option should be OFF
 execute_process(

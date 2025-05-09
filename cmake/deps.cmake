@@ -57,6 +57,25 @@ if(morphizen_ENABLE_UNIT_TEST)
     )
     find_package(GTest REQUIRED)
   endif()
+  find_package(Boost COMPONENTS process QUIET)
+  if(TARGET Boost::process)
+    get_target_property(TMP Boost::process INTERFACE_INCLUDE_DIRECTORIES)
+    message(STATUS "found Boost::process at ${TMP}")
+  else()
+    message(STATUS "cannot find_package(Boost::process), fetch it from ${DEP_URL_Boost}")
+    list(APPEND BOOST_INCLUDE_LIBRARIES "process")
+    # disable Boost.Context execution context, there is a build error like MASM
+    set(BOOST_CONTEXT_NO_EXECUTION_CONTEXT ON CACHE BOOL "disable Boost.Context execution context")
+    FetchContent_Declare(
+      Boost
+      URL ${DEP_URL_Boost}
+      URL_MD5 ${DEP_SHA1_Boost}
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+      EXCLUDE_FROM_ALL
+      OVERRIDE_FIND_PACKAGE
+    )
+    find_package(Boost REQUIRED COMPONENTS process)
+  endif()
 endif()
 
 set(WITH_GFLAGS OFF CACHE BOOL "disable WITH_GFLAGS for glog")
