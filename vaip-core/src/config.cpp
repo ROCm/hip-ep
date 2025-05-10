@@ -178,9 +178,9 @@ static void update_target_attr(ConfigProto& proto,
 
 static void update_xclbin(ConfigProto& proto, const TargetProto* target_proto) {
   std::string xclbin;
-  auto session_option = proto.provider_options();
-  if (session_option.find("xclbin") != session_option.end()) {
-    xclbin = session_option.at("xclbin");
+  auto provider_option = proto.provider_options();
+  if (provider_option.find("xclbin") != provider_option.end()) {
+    xclbin = provider_option.at("xclbin");
   } else if (target_proto->has_xclbin()) {
 #ifdef _WIN32
     const std::filesystem::path dir("C:\\Windows\\System32\\AMD");

@@ -93,18 +93,41 @@ PassContextImp::WithPass PassContextImp::with_current_pass(IPass& pass) {
 std::filesystem::path PassContextImp::get_log_dir() const { return log_dir; }
 std::optional<std::string>
 PassContextImp::get_provider_option(const std::string& option_name) const {
-  const auto& config = context_proto.config();
-  auto it = config.provider_options().find(option_name);
-  if (it != config.provider_options().end()) {
-    return it->second;
-  }
-  if (target_proto_) {
-    auto& target_options = target_proto_->provider_options();
-    auto it_1 = target_options.find(option_name);
-    if (it_1 != target_options.end()) {
-      return it_1->second;
+  // priority order:
+  // 1. context_proto, provided explicitly by end users
+  // 2. mep_config_proto, from known models.
+  // 3. target_proto, from target discovery
+  //    Target priority
+  //        1. provider option
+  //        2. meptable
+  //        3. heuristic process or method:
+  //        4. default target in config file
+  //
+  //  4. default value
+  if (1) { // add a scope to suppress warning
+    const auto& config = context_proto.config();
+    auto it = config.provider_options().find(option_name);
+    if (it != config.provider_options().end()) {
+      return it->second;
     }
   }
+
+  if (mep_config_proto_) {
+    auto& mep_options = mep_config_proto_->provider_options();
+    auto it = mep_options.find(option_name);
+    if (it != mep_options.end()) {
+      return it->second;
+    }
+  }
+
+  if (target_proto_) {
+    auto& target_options = target_proto_->provider_options();
+    auto it = target_options.find(option_name);
+    if (it != target_options.end()) {
+      return it->second;
+    }
+  }
+
   return std::nullopt;
 }
 

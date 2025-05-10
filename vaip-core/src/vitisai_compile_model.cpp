@@ -537,6 +537,7 @@ initialize_context(const std::string& model_path, const Graph& onnx_graph,
   // Algorithm-A first, if that fails then use Algorithm-B to identify the
   // model/target
   if (mep_table) {
+    context->mep_config_proto_ = std::make_unique<MepConfigTable>(*mep_table);
     context->context_proto.mutable_config()->mutable_provider_options()->insert(
         {"model_name", mep_table->model_name()});
     std::string model_category = "";

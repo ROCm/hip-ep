@@ -83,6 +83,7 @@ message MepConfigTable {
   optional bool dd_dealloc_scratch_bo = 17;
   optional string perf_pref = 18;
   map<string, string> qos_generic_params = 19;
+  map<string, string> provider_options = 20;
 }
 
 message TargetProto {

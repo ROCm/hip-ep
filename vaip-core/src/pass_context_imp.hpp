@@ -265,6 +265,7 @@ private:
   // this feature only tested when tar_file_ is not null.
   bool cache_file_use_cache_key_prefix_ = false;
   std::unique_ptr<TargetProto> target_proto_ = nullptr;
+  std::unique_ptr<MepConfigTable> mep_config_proto_ = nullptr;
 
 private:
 #if defined(__GNUC__)
