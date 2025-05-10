@@ -5,6 +5,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "../../vaip-core/src/tar_file.hpp"
 #include "debug_logger.hpp"
+#include <boost/process.hpp>
 #include <cerrno>
 #include <cstring>
 #include <gtest/gtest.h>
@@ -285,6 +286,22 @@ TEST(TarFileTest, WriteTo) {
     { read_and_check("b.txt", *tar_file_obj, "hello"); }
     { read_and_check("c.txt", *tar_file_obj, "hello"); }
     LOG(INFO) << " ====== end to read and check ==== ";
+  }
+  //  run tar -tvf to check the result
+  {
+    auto tarFileName =
+        CMAKE_CURRENT_BINARY_PATH / "written_by_tar_file_test_write_to.tar";
+    auto tar_exe_path = boost::process::search_path("tar");
+    if (tar_exe_path.empty()) {
+      LOG(INFO) << "cannot find tar exe. cancel testing";
+    } else {
+      LOG(INFO) << "run " << tar_exe_path << " -tvf " << tarFileName.u8string();
+      auto exit_code =
+          boost::process::system(tar_exe_path, "-tvf", tarFileName.u8string());
+      ASSERT_EQ(exit_code, 0)
+          << "Failed to run tar command. Exit code: " << exit_code;
+    }
+    auto morphizen_tar_exe_path = boost::process::search_path("tar");
   }
   // frehs read.
   {

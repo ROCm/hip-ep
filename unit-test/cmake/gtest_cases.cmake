@@ -15,7 +15,7 @@ set_target_properties(morphizen-unit-test-GTest-hello PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GTest.hello
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ConfigTest-Simple
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ConfigTest.Simple
     DEPENDS morphizen-unit-test
@@ -28,7 +28,7 @@ set_target_properties(morphizen-unit-test-ConfigTest-Simple PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConfigTest.Simple
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ModelTest-Load
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ModelTest.Load
     DEPENDS morphizen-unit-test
@@ -41,7 +41,7 @@ set_target_properties(morphizen-unit-test-ModelTest-Load PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ModelTest.Load
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ModelTest-Clone
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ModelTest.Clone
     DEPENDS morphizen-unit-test
@@ -54,7 +54,7 @@ set_target_properties(morphizen-unit-test-ModelTest-Clone PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ModelTest.Clone
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ModelTest-MainGraph
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ModelTest.MainGraph
     DEPENDS morphizen-unit-test
@@ -67,7 +67,7 @@ set_target_properties(morphizen-unit-test-ModelTest-MainGraph PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ModelTest.MainGraph
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ModelTest-SetAndGetMetadata
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ModelTest.SetAndGetMetadata
     DEPENDS morphizen-unit-test
@@ -80,7 +80,7 @@ set_target_properties(morphizen-unit-test-ModelTest-SetAndGetMetadata PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ModelTest.SetAndGetMetadata
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ModelTest-ImplicitConversion
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ModelTest.ImplicitConversion
     DEPENDS morphizen-unit-test
@@ -93,7 +93,7 @@ set_target_properties(morphizen-unit-test-ModelTest-ImplicitConversion PROPERTIE
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ModelTest.ImplicitConversion
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ModelTest-ModelCreationTest
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ModelTest.ModelCreationTest
     DEPENDS morphizen-unit-test
@@ -106,7 +106,7 @@ set_target_properties(morphizen-unit-test-ModelTest-ModelCreationTest PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ModelTest.ModelCreationTest
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-GraphTest-LoadAndSave
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=GraphTest.LoadAndSave
     DEPENDS morphizen-unit-test
@@ -119,7 +119,7 @@ set_target_properties(morphizen-unit-test-GraphTest-LoadAndSave PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.LoadAndSave
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-GraphTest-FindNodeArgGraphInput
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=GraphTest.FindNodeArgGraphInput
     DEPENDS morphizen-unit-test
@@ -132,7 +132,7 @@ set_target_properties(morphizen-unit-test-GraphTest-FindNodeArgGraphInput PROPER
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.FindNodeArgGraphInput
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-GraphTest-FindNodeArgGraphOutput
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=GraphTest.FindNodeArgGraphOutput
     DEPENDS morphizen-unit-test
@@ -145,7 +145,7 @@ set_target_properties(morphizen-unit-test-GraphTest-FindNodeArgGraphOutput PROPE
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.FindNodeArgGraphOutput
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-GraphTest-NodesInTopologicalOrder
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=GraphTest.NodesInTopologicalOrder
     DEPENDS morphizen-unit-test
@@ -158,7 +158,7 @@ set_target_properties(morphizen-unit-test-GraphTest-NodesInTopologicalOrder PROP
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.NodesInTopologicalOrder
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-GraphTest-NodeIndex
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=GraphTest.NodeIndex
     DEPENDS morphizen-unit-test
@@ -171,7 +171,7 @@ set_target_properties(morphizen-unit-test-GraphTest-NodeIndex PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.NodeIndex
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-GraphTest-FindConsumers
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=GraphTest.FindConsumers
     DEPENDS morphizen-unit-test
@@ -184,7 +184,7 @@ set_target_properties(morphizen-unit-test-GraphTest-FindConsumers PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.FindConsumers
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-GraphTest-NodeArgFindProducer
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=GraphTest.NodeArgFindProducer
     DEPENDS morphizen-unit-test
@@ -197,7 +197,7 @@ set_target_properties(morphizen-unit-test-GraphTest-NodeArgFindProducer PROPERTI
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.NodeArgFindProducer
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-GraphTest-Fuse
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=GraphTest.Fuse
     DEPENDS morphizen-unit-test
@@ -210,7 +210,7 @@ set_target_properties(morphizen-unit-test-GraphTest-Fuse PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.Fuse
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-GraphTest-TryFuse
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=GraphTest.TryFuse
     DEPENDS morphizen-unit-test
@@ -223,7 +223,7 @@ set_target_properties(morphizen-unit-test-GraphTest-TryFuse PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.TryFuse
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-GraphTest-NewConstantInitializer
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=GraphTest.NewConstantInitializer
     DEPENDS morphizen-unit-test
@@ -236,7 +236,7 @@ set_target_properties(morphizen-unit-test-GraphTest-NewConstantInitializer PROPE
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.NewConstantInitializer
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-GraphTest-VirtualFuse
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=GraphTest.VirtualFuse
     DEPENDS morphizen-unit-test
@@ -249,7 +249,7 @@ set_target_properties(morphizen-unit-test-GraphTest-VirtualFuse PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.VirtualFuse
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ConstDataTest-int8_scalar
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ConstDataTest.int8_scalar
     DEPENDS morphizen-unit-test
@@ -262,7 +262,7 @@ set_target_properties(morphizen-unit-test-ConstDataTest-int8_scalar PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.int8_scalar
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ConstDataTest-int8
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ConstDataTest.int8
     DEPENDS morphizen-unit-test
@@ -275,7 +275,7 @@ set_target_properties(morphizen-unit-test-ConstDataTest-int8 PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.int8
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ConstDataTest-uint8_scalar
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ConstDataTest.uint8_scalar
     DEPENDS morphizen-unit-test
@@ -288,7 +288,7 @@ set_target_properties(morphizen-unit-test-ConstDataTest-uint8_scalar PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.uint8_scalar
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ConstDataTest-uint8
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ConstDataTest.uint8
     DEPENDS morphizen-unit-test
@@ -301,7 +301,7 @@ set_target_properties(morphizen-unit-test-ConstDataTest-uint8 PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.uint8
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ConstDataTest-int16_scalar
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ConstDataTest.int16_scalar
     DEPENDS morphizen-unit-test
@@ -314,7 +314,7 @@ set_target_properties(morphizen-unit-test-ConstDataTest-int16_scalar PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.int16_scalar
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ConstDataTest-int16
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ConstDataTest.int16
     DEPENDS morphizen-unit-test
@@ -327,7 +327,7 @@ set_target_properties(morphizen-unit-test-ConstDataTest-int16 PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.int16
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ConstDataTest-uint16_scalar
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ConstDataTest.uint16_scalar
     DEPENDS morphizen-unit-test
@@ -340,7 +340,7 @@ set_target_properties(morphizen-unit-test-ConstDataTest-uint16_scalar PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.uint16_scalar
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ConstDataTest-uint16
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ConstDataTest.uint16
     DEPENDS morphizen-unit-test
@@ -353,7 +353,7 @@ set_target_properties(morphizen-unit-test-ConstDataTest-uint16 PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.uint16
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ConstDataTest-int32_scalar
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ConstDataTest.int32_scalar
     DEPENDS morphizen-unit-test
@@ -366,7 +366,7 @@ set_target_properties(morphizen-unit-test-ConstDataTest-int32_scalar PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.int32_scalar
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ConstDataTest-int32
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ConstDataTest.int32
     DEPENDS morphizen-unit-test
@@ -379,7 +379,7 @@ set_target_properties(morphizen-unit-test-ConstDataTest-int32 PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.int32
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ConstDataTest-uint32_scalar
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ConstDataTest.uint32_scalar
     DEPENDS morphizen-unit-test
@@ -392,7 +392,7 @@ set_target_properties(morphizen-unit-test-ConstDataTest-uint32_scalar PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.uint32_scalar
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ConstDataTest-uint32
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ConstDataTest.uint32
     DEPENDS morphizen-unit-test
@@ -405,7 +405,7 @@ set_target_properties(morphizen-unit-test-ConstDataTest-uint32 PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.uint32
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ConstDataTest-int64_scalar
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ConstDataTest.int64_scalar
     DEPENDS morphizen-unit-test
@@ -418,7 +418,7 @@ set_target_properties(morphizen-unit-test-ConstDataTest-int64_scalar PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.int64_scalar
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ConstDataTest-int64
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ConstDataTest.int64
     DEPENDS morphizen-unit-test
@@ -431,7 +431,7 @@ set_target_properties(morphizen-unit-test-ConstDataTest-int64 PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.int64
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ConstDataTest-uint64_scalar
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ConstDataTest.uint64_scalar
     DEPENDS morphizen-unit-test
@@ -444,7 +444,7 @@ set_target_properties(morphizen-unit-test-ConstDataTest-uint64_scalar PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.uint64_scalar
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ConstDataTest-uint64
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ConstDataTest.uint64
     DEPENDS morphizen-unit-test
@@ -457,7 +457,7 @@ set_target_properties(morphizen-unit-test-ConstDataTest-uint64 PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.uint64
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-TestAnchorPoint-Case0
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=TestAnchorPoint.Case0
     DEPENDS morphizen-unit-test
@@ -470,7 +470,7 @@ set_target_properties(morphizen-unit-test-TestAnchorPoint-Case0 PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TestAnchorPoint.Case0
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-TestAnchorPoint-Case1
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=TestAnchorPoint.Case1
     DEPENDS morphizen-unit-test
@@ -483,7 +483,7 @@ set_target_properties(morphizen-unit-test-TestAnchorPoint-Case1 PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TestAnchorPoint.Case1
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-TestAnchorPoint-Case2
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=TestAnchorPoint.Case2
     DEPENDS morphizen-unit-test
@@ -496,7 +496,7 @@ set_target_properties(morphizen-unit-test-TestAnchorPoint-Case2 PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TestAnchorPoint.Case2
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-TestAnchorPoint-Case3
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=TestAnchorPoint.Case3
     DEPENDS morphizen-unit-test
@@ -509,7 +509,7 @@ set_target_properties(morphizen-unit-test-TestAnchorPoint-Case3 PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TestAnchorPoint.Case3
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-TestAnchorPoint-Case4
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=TestAnchorPoint.Case4
     DEPENDS morphizen-unit-test
@@ -522,7 +522,7 @@ set_target_properties(morphizen-unit-test-TestAnchorPoint-Case4 PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TestAnchorPoint.Case4
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-TestAnchorPoint-Append
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=TestAnchorPoint.Append
     DEPENDS morphizen-unit-test
@@ -535,7 +535,7 @@ set_target_properties(morphizen-unit-test-TestAnchorPoint-Append PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TestAnchorPoint.Append
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ImmutableMapTest-InsertSingleNode
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ImmutableMapTest.InsertSingleNode
     DEPENDS morphizen-unit-test
@@ -548,7 +548,7 @@ set_target_properties(morphizen-unit-test-ImmutableMapTest-InsertSingleNode PROP
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ImmutableMapTest.InsertSingleNode
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-ImmutableMapTest-InsertMultipleNodes
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=ImmutableMapTest.InsertMultipleNodes
     DEPENDS morphizen-unit-test
@@ -561,7 +561,7 @@ set_target_properties(morphizen-unit-test-ImmutableMapTest-InsertMultipleNodes P
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ImmutableMapTest.InsertMultipleNodes
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-PatternTest-CommutableNode
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=PatternTest.CommutableNode
     DEPENDS morphizen-unit-test
@@ -574,7 +574,7 @@ set_target_properties(morphizen-unit-test-PatternTest-CommutableNode PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PatternTest.CommutableNode
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-PatternTest-LoadSaveBinary
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=PatternTest.LoadSaveBinary
     DEPENDS morphizen-unit-test
@@ -587,7 +587,7 @@ set_target_properties(morphizen-unit-test-PatternTest-LoadSaveBinary PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PatternTest.LoadSaveBinary
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-PassContextTest-ReadFileTest
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=PassContextTest.ReadFileTest
     DEPENDS morphizen-unit-test
@@ -600,7 +600,7 @@ set_target_properties(morphizen-unit-test-PassContextTest-ReadFileTest PROPERTIE
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PassContextTest.ReadFileTest
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-PassContextTest-UntarCacheTest
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=PassContextTest.UntarCacheTest
     DEPENDS morphizen-unit-test
@@ -613,7 +613,7 @@ set_target_properties(morphizen-unit-test-PassContextTest-UntarCacheTest PROPERT
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PassContextTest.UntarCacheTest
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-PassContextTest-TestEmptyFiles
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=PassContextTest.TestEmptyFiles
     DEPENDS morphizen-unit-test
@@ -626,7 +626,7 @@ set_target_properties(morphizen-unit-test-PassContextTest-TestEmptyFiles PROPERT
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PassContextTest.TestEmptyFiles
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-PassContextTest-TestCompress
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=PassContextTest.TestCompress
     DEPENDS morphizen-unit-test
@@ -639,7 +639,7 @@ set_target_properties(morphizen-unit-test-PassContextTest-TestCompress PROPERTIE
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PassContextTest.TestCompress
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-PassContextTest-TestGzTar
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=PassContextTest.TestGzTar
     DEPENDS morphizen-unit-test
@@ -652,7 +652,7 @@ set_target_properties(morphizen-unit-test-PassContextTest-TestGzTar PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PassContextTest.TestGzTar
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-NodeBuilderTest-SkipSimplifiedLayerNormalization
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=NodeBuilderTest.SkipSimplifiedLayerNormalization
     DEPENDS morphizen-unit-test
@@ -665,7 +665,7 @@ set_target_properties(morphizen-unit-test-NodeBuilderTest-SkipSimplifiedLayerNor
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=NodeBuilderTest.SkipSimplifiedLayerNormalization
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-TarBallTest-TarTest
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=TarBallTest.TarTest
     DEPENDS morphizen-unit-test
@@ -678,7 +678,7 @@ set_target_properties(morphizen-unit-test-TarBallTest-TarTest PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TarBallTest.TarTest
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-TarBallTest-CompressTest
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=TarBallTest.CompressTest
     DEPENDS morphizen-unit-test
@@ -691,7 +691,7 @@ set_target_properties(morphizen-unit-test-TarBallTest-CompressTest PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TarBallTest.CompressTest
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-TarBallTest-Encrypt_Test
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=TarBallTest.Encrypt_Test
     DEPENDS morphizen-unit-test
@@ -704,7 +704,7 @@ set_target_properties(morphizen-unit-test-TarBallTest-Encrypt_Test PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TarBallTest.Encrypt_Test
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-PluginTest-StaticHelloPlugin
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=PluginTest.StaticHelloPlugin
     DEPENDS morphizen-unit-test
@@ -717,7 +717,7 @@ set_target_properties(morphizen-unit-test-PluginTest-StaticHelloPlugin PROPERTIE
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PluginTest.StaticHelloPlugin
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-PluginTest-DynamicHelloPlugin
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=PluginTest.DynamicHelloPlugin
     DEPENDS morphizen-unit-test
@@ -730,7 +730,7 @@ set_target_properties(morphizen-unit-test-PluginTest-DynamicHelloPlugin PROPERTI
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PluginTest.DynamicHelloPlugin
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-TarEntryTest-ReadFrom
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=TarEntryTest.ReadFrom
     DEPENDS morphizen-unit-test
@@ -743,7 +743,7 @@ set_target_properties(morphizen-unit-test-TarEntryTest-ReadFrom PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TarEntryTest.ReadFrom
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-TarFileTest-ReadFrom
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=TarFileTest.ReadFrom
     DEPENDS morphizen-unit-test
@@ -756,7 +756,7 @@ set_target_properties(morphizen-unit-test-TarFileTest-ReadFrom PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TarFileTest.ReadFrom
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-TarFileTest-DoubleRead
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=TarFileTest.DoubleRead
     DEPENDS morphizen-unit-test
@@ -769,7 +769,7 @@ set_target_properties(morphizen-unit-test-TarFileTest-DoubleRead PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TarFileTest.DoubleRead
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-TarFileTest-WriteOverride
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=TarFileTest.WriteOverride
     DEPENDS morphizen-unit-test
@@ -782,7 +782,7 @@ set_target_properties(morphizen-unit-test-TarFileTest-WriteOverride PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TarFileTest.WriteOverride
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-TarFileTest-WriteTo
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=TarFileTest.WriteTo
     DEPENDS morphizen-unit-test
@@ -792,10 +792,12 @@ set_target_properties(morphizen-unit-test-TarFileTest-WriteTo PROPERTIES
     FOLDER "morphizen/unit-tests/TarFileTest/WriteTo"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:morphizen-unit-test>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
-    VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TarFileTest.WriteTo
-    )
+    VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TarFileTest.WriteTo1
+    SOURCES vaip/test_graph.cpp
+  )
+
 #end
-    
+
 add_custom_target(morphizen-unit-test-FileStreamTest-HelloWorld
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=FileStreamTest.HelloWorld
     DEPENDS morphizen-unit-test
@@ -808,7 +810,7 @@ set_target_properties(morphizen-unit-test-FileStreamTest-HelloWorld PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=FileStreamTest.HelloWorld
     )
 #end
-    
+
 add_custom_target(morphizen-unit-test-OpDefTest-TestAddAndRemove
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=OpDefTest.TestAddAndRemove
     DEPENDS morphizen-unit-test
@@ -821,4 +823,3 @@ set_target_properties(morphizen-unit-test-OpDefTest-TestAddAndRemove PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=OpDefTest.TestAddAndRemove
     )
 #end
-    
