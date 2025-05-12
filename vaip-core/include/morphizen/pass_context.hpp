@@ -57,6 +57,7 @@ public:
   virtual size_t size() const = 0;
   virtual void rewind() const = 0;
   virtual std::size_t fread(void* buffer, std::size_t size) const = 0;
+  virtual void* mmap() { return nullptr; }
 };
 class CacheFileWriter {
 public:
@@ -347,10 +348,6 @@ public:
    * Saves the context to `get_log_dir()/context.json`
    */
   virtual void save_context_json() const = 0;
-
-  virtual void set_is_ep_context_model(bool is_ep_context_model) = 0;
-
-  virtual bool get_is_ep_context_model() = 0;
 
   virtual void on_custom_op_create_end() = 0;
 

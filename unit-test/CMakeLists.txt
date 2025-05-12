@@ -33,6 +33,7 @@ add_executable(${TEST_EXE_NAME}
   vaip/test_tar_file.cpp
   vaip/test_file_stream.cpp
   vaip/test_op_def.cpp
+  vaip/test_mmap_file.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/debug_logger.hpp
   ${CMAKE_CURRENT_BINARY_DIR}/unit_test_env_params.hpp
 )

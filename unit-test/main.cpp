@@ -55,6 +55,7 @@ int main(int argc, char** argv) {
   }
 #  endif
 #endif
+  auto ret = 0;
   {
     auto env =
         std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "vaip_unit_test");
@@ -66,6 +67,12 @@ int main(int argc, char** argv) {
         vaip_core::Plugin::invoke<vaip_core::OrtApiForVaip*>(
             "onnxruntime_vitisai_ep", "get_the_global_api"));
     testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
+    ret = RUN_ALL_TESTS();
   }
+  if (ret == 0) {
+    std::cout << "All tests passed." << std::endl;
+  } else {
+    std::cout << "Some tests failed." << std::endl;
+  }
+  return ret;
 }

@@ -36,7 +36,7 @@ private:
 class CacheFileReaderStreamImp : public CacheFileReader {
 public:
   CacheFileReaderStreamImp(const std::string& name, size_t size,
-                           std::istream& stream);
+                           TarEntryInputStream& stream);
   virtual ~CacheFileReaderStreamImp();
 
 private:
@@ -44,11 +44,12 @@ private:
   void rewind() const override final;
   virtual std::size_t fread(void* buffer,
                             std::size_t size) const override final;
+  virtual void* mmap() override final;
 
 private:
   const std::string name_; // for debugging purpuse
   const size_t size_;
-  std::istream& stream_;
+  TarEntryInputStream& stream_;
 };
 class CacheFileWriterImp : public CacheFileWriter {
 public:
@@ -121,7 +122,11 @@ store_cache_directory_from_main_node(class PassContextImp& context,
 class ExecutionProviderConcrete;
 static onnxruntime::Node* create_ep_context_node(ExecutionProviderConcrete* ep);
 static std::string get_ep_cache_context_nonembed_mode(PassContextImp& context);
-
+static std::vector<std::unique_ptr<ExecutionProvider>>
+compile_onnx_model_internal(
+    const Graph& onnx_graph,
+    const std::vector<vaip_cxx::NodeConstRef>& ep_context_nodes,
+    std::shared_ptr<PassContextImp> context);
 class PassContextImp : public PassContext {
 public:
   std::vector<char> const_data_;
@@ -154,8 +159,6 @@ public:
   virtual int64_t get_provider_option_i64(const std::string& option_name,
                                           int64_t default_value) const;
   virtual bool cache_in_mem() const override final;
-  virtual void set_is_ep_context_model(bool is_ep_context_model) override final;
-  virtual bool get_is_ep_context_model() override final;
   virtual std::string
   get_session_config(const std::string& option_name,
                      const std::string& default_value) const override final;
@@ -185,7 +188,10 @@ private:
   read_file_generic(const std::string& filename) const;
 
   std::filesystem::path get_ep_context_onnx_file_path();
-  std::filesystem::path get_ep_context_binary_file_path();
+  std::filesystem::path generate_ep_context_binary_file_path();
+  void maybe_create_tar_file_for_write();
+  void maybe_create_tar_file_for_read(
+      const std::string& ep_context_binary_file_name);
 
 public:
   virtual std::filesystem::path get_model_path() const override final;
@@ -251,6 +257,7 @@ private:
   friend int vitisai_ep_set_ep_dynamic_options(
       const std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>& eps,
       const char* const* keys, const char* const* values, size_t kv_len);
+
   std::map<std::string, std::string> ep_dynamic_options;
   mutable std::mutex ep_dynamic_options_lock;
   // for share context, many context may be same. may need to change container
@@ -284,6 +291,11 @@ private:
   create_ep_context_node(vaip_core::ExecutionProviderConcrete* ep);
   friend std::string
   get_ep_cache_context_nonembed_mode(PassContextImp& context);
+  friend std::vector<std::unique_ptr<ExecutionProvider>>
+  compile_onnx_model_internal(
+      const Graph& onnx_graph,
+      const std::vector<vaip_cxx::NodeConstRef>& ep_context_nodes,
+      std::shared_ptr<PassContextImp> context);
 #if defined(__GNUC__)
 #  pragma GCC diagnostic pop
 #endif

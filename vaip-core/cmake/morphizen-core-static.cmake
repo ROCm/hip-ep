@@ -72,6 +72,9 @@ add_library(${LIB_NAME} STATIC
   src/tar_header.cpp
   src/tar_entry.cpp
   src/tar_entry.hpp
+  src/mmap_file.hpp
+  src/mmap_file.cpp
+  src/mem_stream_buffer.hpp
   include/morphizen/pass.hpp
   src/pass.cpp
   include/morphizen/model.hpp
@@ -149,6 +152,8 @@ add_library (morphizen::morphizen-core-static ALIAS morphizen-core-static)
 set_target_properties(${LIB_NAME} PROPERTIES FOLDER morphizen)
 if(MSVC)
   target_sources(${LIB_NAME} PRIVATE
+    src/mmap_file_win.hpp
+    src/mmap_file_win.cpp
     src/vaip_plugin_win.cpp
     src/util_mswin.cpp)
 else(MSVC)

@@ -1,0 +1,31 @@
+#include "../../vaip-core/src/mmap_file.hpp"
+#include "../../vaip-core/src/tar_file.hpp"
+#include "debug_logger.hpp"
+#include <gtest/gtest.h>
+TEST(MMapfileTest, create) {
+#ifdef _WIN32
+  auto mmap_file = vaip_core::MemFile::create(RESNET_50_PATH);
+  ASSERT_TRUE(mmap_file) << "Failed to create MMapFile object";
+  auto mmap_file_obj = std::move(mmap_file);
+  ASSERT_TRUE(mmap_file_obj->base() != nullptr)
+      << "MMapFile base should be nullptr";
+  ASSERT_EQ(mmap_file_obj->size(), 102196389) << "MMapFile size should be 0";
+#endif
+}
+TEST(MMapfileTest, CreateTar) {
+  auto tarFileName = CMAKE_CURRENT_BINARY_PATH / "sample.src.tar";
+
+  auto tar_file_obj = vaip_core::TarFile::create(tarFileName);
+  ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
+  for (auto& entry : tar_file_obj->entries()) {
+    LOG(INFO) << "entry: " << entry->path()
+              << (entry->real_path()
+                      ? std::string("->") + entry->real_path().value()
+                      : "")
+              << " size=" << entry->size();
+#ifdef _WIN32
+    auto mmap = entry->mmap();
+    ASSERT_TRUE(mmap) << "Failed to create MMapFile object";
+#endif
+  }
+}

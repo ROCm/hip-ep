@@ -3,8 +3,11 @@
  * Licensed under the MIT License.
  */
 #pragma once
+#include "./mem_stream_buffer.hpp"
+#include "./mmap_file.hpp"
 #include "./tar_entry.hpp"
 #include "vaip/export.h"
+#include <filesystem>
 #include <iostream>
 #include <optional>
 
@@ -14,8 +17,24 @@ public:
   VAIP_DLL_SPEC static std::unique_ptr<TarFile>
   create(std::unique_ptr<std::iostream> stream);
 
+  /**
+   * @brief Creates a TarFile instance from the specified file path.
+   *
+   * This function initializes and returns a unique pointer to a TarFile
+   * object, which represents the tar file located at the given file path.
+   *
+   * this function potentially open a file and create a memory map file, then
+   * `mmap` interface method is implemented for open_file_for_read()
+   *
+   * @param path The file system path to the tar file to be opened or created.
+   * @return A unique pointer to the created TarFile instance.
+   */
+  VAIP_DLL_SPEC static std::unique_ptr<TarFile>
+  create(const std::filesystem::path& path);
+
 public:
   TarFile(std::unique_ptr<std::iostream> stream);
+  TarFile(std::unique_ptr<MemStream<MemFile>> stream);
   VAIP_DLL_SPEC
   bool has_file(const std::string& filename) const;
   VAIP_DLL_SPEC
@@ -47,11 +66,12 @@ public:
   std::unique_ptr<std::ostream> open_for_write(const std::string& filename);
 
 private:
-  TarEntryInputStream& add_entry(const std::string& path, // path of the entry
-                                 std::streambuf::pos_type data_begin_pos,
-                                 std::streambuf::pos_type data_end_pos,
-                                 std::streambuf::pos_type block_begin_pos,
-                                 std::streambuf::pos_type block_end_pos);
+  TarEntryInputStream&
+  add_regular_entry(const std::string& path, // path of the entry
+                    std::streambuf::pos_type data_begin_pos,
+                    std::streambuf::pos_type data_end_pos,
+                    std::streambuf::pos_type block_begin_pos,
+                    std::streambuf::pos_type block_end_pos);
 
   TarEntryInputStream*
   add_symlink_entry(const std::string& symlink_name,
@@ -84,11 +104,22 @@ private:
    * @return A unique pointer to a TarEntryInputStreamBuffer object.
    */
   TarEntryInputStream* read_tar_entry(std::shared_ptr<std::istream> stream);
+  TarEntryInputStream* add_entry(const std::string& path, // name of the entry
+                                 const std::optional<std::string>& real_path, //
+                                 std::streambuf::pos_type data_begin_pos,
+                                 std::streambuf::pos_type data_end_pos,
+                                 std::streambuf::pos_type block_begin_pos,
+                                 std::streambuf::pos_type block_end_pos);
 
 private:
   std::shared_ptr<std::iostream> stream_;
+  // it is nullptr if stream_ is not a
+  // memory map file. it is stream_.get() if
+  // stream_ is a memory map file.
+  MemStream<MemFile>* mem_stream_;
   std::vector<std::unique_ptr<TarEntryInputStream>> entries_;
   bool is_writing_{false};
+  int padding_count_{0};
   friend class TarEntryOutputStream;
 };
 } // namespace vaip_core

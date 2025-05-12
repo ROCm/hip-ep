@@ -118,7 +118,7 @@ static void test_write_override(bool write_same_data) {
       LOG(INFO) << " ======== overwrite " << name << " ========";
     }
     // after the overwriting, the original file is corrupted.
-    auto first_entry_name = "sample_src_tar/test_config.cpp";
+    auto first_entry_name = "sample_src_tar/hello.txt";
     {
       LOG(INFO) << " ======== read " << first_entry_name
                 << " and check ========";
@@ -132,17 +132,31 @@ static void test_write_override(bool write_same_data) {
       ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
       auto& entries = tar_file_obj->entries();
       ASSERT_TRUE(!entries.empty()) << "Failed to read tar entries";
-      ASSERT_EQ(entries.size(), 3) << "Expected two tar entries";
+
+      ASSERT_EQ(entries.size(), 3);
+
       // clang-format off
-    // the content after overwriting
+    // the content after overwriting fot same data  write_same_data == true
     /*
-md5                                      size   blk-begin     blk-end  data-begin    data-end path
-618eac9918e0638aaa8b4d931a6ba357         2512           0         512         512        3024 sample_src_tar/test_config.cpp
-8558330fe7b37b216f838296deb75257         6077        3072        3584        3584        9661 sample_src_tar/test_tarball.cpp
-e807f1fcf82d132f9bb018ca6738a19f           10        9728       10240       10240       10250 _data/e807f1fcf82d132f9bb018ca6738a19f
-e807f1fcf82d132f9bb018ca6738a19f           10       10752       11264       10240       10250 sample_src_tar/test_config.cpp -> _data/e807f1fcf82d132f9bb018ca6738a19f
-    */
-      // clang-format on
+        size   blk-begin     blk-end  data-begin    data-end path
+           6           0         512         512         518 sample_src_tar/hello.txt
+           9        1024        1536        1536        1545 sample_src_tar/tar_file.txt
+           6        2048        2560        2560        2566 _data/b1946ac92492d2347c6235b4d2611184
+           0        3072        3584        3584        3584 sample_src_tar/hello.txt
+    
+    // the content after overwriting fot same data  write_same_data == false
+        size   blk-begin     blk-end  data-begin    data-end path
+           6           0         512         512         518 sample_src_tar/hello.txt
+           9        1024        1536        1536        1545 sample_src_tar/tar_file.txt
+           6        2048        2560        2560        2566 _data/b1946ac92492d2347c6235b4d2611184
+           0        3072        3584        3584        3584 sample_src_tar/hello.txt
+ $ for i in 1 2 3 4 5; do echo $i $((i*4096 - 512)); done
+1 3584
+2 7680
+3 11776
+4 15872
+5 19968
+*/ // clang-format on
       auto stream = tar_file_obj->open_for_read(first_entry_name);
       ASSERT_TRUE(stream) << "Failed to open entry for read: "
                           << first_entry_name;
@@ -235,6 +249,45 @@ static void expect_tar_entry(const vaip_core::TarEntryInputStream& entry,
               << " OK";
   }
 }
+
+static void check_entries(
+    const std::vector<std::unique_ptr<vaip_core::TarEntryInputStream>>&
+        entries) {
+  ASSERT_EQ(entries.size(), 5)
+      << "Expected five tar entries, but got " << entries.size();
+  // clang-format off
+    /*
+md5                                      size   blk-begin     blk-end  data-begin    data-end path
+5d41402abc4b2a76b9719d911017c592            5        3584        4096        4096        4101 _data/5d41402abc4b2a76b9719d911017c592
+5d41402abc4b2a76b9719d911017c592            5        7680        8192        4096        4101 b.txt -> _data/5d41402abc4b2a76b9719d911017c592
+5d41402abc4b2a76b9719d911017c592            5       11776       12288        4096        4101 c.txt -> _data/5d41402abc4b2a76b9719d911017c592
+08cf82251c975a5e9734699fadf5e9c0            6       15872       16384       16384       16390 _data/08cf82251c975a5e9734699fadf5e9c0
+08cf82251c975a5e9734699fadf5e9c0            6       16896       17408       16384       16390 a.txt -> _data/08cf82251c975a5e9734699fadf5e9c0
+	*/
+  // clang-format on
+  expect_tar_entry(*entries[0], "_data/5d41402abc4b2a76b9719d911017c592",
+                   std::nullopt, //
+                   5, 3584, 4096, 4096, 4101);
+  expect_tar_entry(*entries[1], "b.txt",
+                   std::string("_data/5d41402abc4b2a76b9719d911017c592"), //
+                   5, 7680, 8192, 4096, 4101);
+  expect_tar_entry(*entries[2], "c.txt",
+                   std::string("_data/5d41402abc4b2a76b9719d911017c592"), //
+                   5, 11776, 12288, 4096, 4101);
+  expect_tar_entry(*entries[3], "_data/08cf82251c975a5e9734699fadf5e9c0",
+                   std::nullopt, //
+                   6, 15872, 16384, 16384, 16390);
+  expect_tar_entry(*entries[4], "a.txt",
+                   std::string("_data/08cf82251c975a5e9734699fadf5e9c0"), //
+                   6, 16896, 17408, 16384, 16390);
+}
+static void check_abc(vaip_core::TarFile* tar_file_obj) {
+  check_entries(tar_file_obj->entries());
+  { read_and_check("a.txt", *tar_file_obj, "world!"); }
+  { read_and_check("b.txt", *tar_file_obj, "hello"); }
+  { read_and_check("c.txt", *tar_file_obj, "hello"); }
+}
+
 TEST(TarFileTest, WriteTo) {
   // Assuming you have a tar file named "sample.src.tar" in the current
   // directory
@@ -261,30 +314,9 @@ TEST(TarFileTest, WriteTo) {
     { write_to_stream("a.txt", *tar_file_obj, "world!"); }
     // write to the same file with same data
     { write_to_stream("b.txt", *tar_file_obj, "hello"); }
-    auto& entries = tar_file_obj->entries();
-
-    ASSERT_EQ(entries.size(), 5)
-        << "Expected five tar entries, but got " << entries.size();
-
-    expect_tar_entry(*entries[0], "_data/5d41402abc4b2a76b9719d911017c592",
-                     std::nullopt, //
-                     5, 0, 512, 512, 517);
-    expect_tar_entry(*entries[1], "b.txt",
-                     std::string("_data/5d41402abc4b2a76b9719d911017c592"), //
-                     5, 1536, 2048, 512, 517);
-    expect_tar_entry(*entries[2], "c.txt",
-                     std::string("_data/5d41402abc4b2a76b9719d911017c592"), //
-                     5, 2048, 2560, 512, 517);
-    expect_tar_entry(*entries[3], "_data/08cf82251c975a5e9734699fadf5e9c0",
-                     std::nullopt, 6, 2560, 3072, 3072, 3078);
-    expect_tar_entry(*entries[4], "a.txt",
-                     std::string("_data/08cf82251c975a5e9734699fadf5e9c0"), 6,
-                     3584, 4096, 3072, 3078);
     LOG(INFO) << " ====== end write to tar file. ==== ";
     LOG(INFO) << " ====== begin to read and check ==== ";
-    { read_and_check("a.txt", *tar_file_obj, "world!"); }
-    { read_and_check("b.txt", *tar_file_obj, "hello"); }
-    { read_and_check("c.txt", *tar_file_obj, "hello"); }
+    check_abc(tar_file_obj.get());
     LOG(INFO) << " ====== end to read and check ==== ";
   }
   //  run tar -tvf to check the result
@@ -314,9 +346,7 @@ TEST(TarFileTest, WriteTo) {
         tarFileName, std::ios::binary | std::ios::in | std::ios::out);
     auto tar_file_obj = vaip_core::TarFile::create(std::move(tarStream));
     ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
-    { read_and_check("a.txt", *tar_file_obj, "world!"); }
-    { read_and_check("b.txt", *tar_file_obj, "hello"); }
-    { read_and_check("c.txt", *tar_file_obj, "hello"); }
+    check_abc(tar_file_obj.get());
     LOG(INFO) << " =======================================";
     LOG(INFO) << " ======  fresh read is done ============";
     LOG(INFO) << " =======================================";

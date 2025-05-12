@@ -1,0 +1,103 @@
+#pragma once
+#include "vaip/export.h"
+#include <cstdio>
+#include <glog/logging.h>
+#include <iostream>
+#include <memory>
+#include <streambuf>
+#include <vector>
+namespace vaip_core {
+template <typename T> class MemBuffer : public std::streambuf {
+public:
+  static std::unique_ptr<MemBuffer<T>> create(void* base, std::size_t size,
+                                              std::unique_ptr<T> owner) {
+    return std::make_unique<MemBuffer<T>>(base, size, std::move(owner));
+  }
+
+public:
+  explicit MemBuffer(void* base, std::size_t size, std::unique_ptr<T> owner)
+      : base_((char*)base), size_(size), owner_(std::move(owner)) {
+    my_setg(base_);
+    // disable put
+    setp(base_, base_);
+  }
+
+  virtual ~MemBuffer() {}
+  virtual int_type underflow() override final {
+    if (gptr() >= base_ + size_) {
+      return traits_type::eof();
+    }
+    my_setg(gptr());
+    return traits_type::to_int_type(*gptr());
+  }
+  virtual int_type overflow(int_type /*ch*/) override {
+    return traits_type::eof();
+  }
+
+  std::streampos seekoff(std::streamoff offset, std::ios_base::seekdir way,
+                         std::ios_base::openmode which) override {
+    if (which & std::ios_base::in) {
+      if (way == std::ios_base::beg) {
+        my_setg(base_ + offset);
+      } else if (way == std::ios_base::cur) {
+        my_setg(gptr() + offset);
+      } else if (way == std::ios_base::end) {
+        my_setg(egptr() + offset);
+      }
+      return gptr() - base_;
+    } else {
+      // CHECK(false) << " do not support writing";
+      return -1;
+    }
+  }
+
+  std::streampos seekpos(std::streampos pos,
+                         std::ios_base::openmode which) override {
+    // optionally call seekoff() here to centralize logic
+    return seekoff(pos, std::ios_base::beg, which);
+  }
+  char* base() { return base_; }
+
+private:
+  static constexpr size_t PAGE_SIZE = 4096u;
+  static constexpr uintptr_t PAGE_SIZE_MASK = PAGE_SIZE - 1;
+  void my_setg(char* cur) {
+    uintptr_t beg = ((uintptr_t)cur) & ~PAGE_SIZE_MASK;
+    /* setg() // set pointers for read buffer
+     *_IGfirst = _First;
+     *_IGnext  = _Next;
+     *_IGcount = static_cast<int>(_Last - _Next);
+     */
+    // we see msvc have above limitation, the max end must be less than
+    // std::numeric_limits<int>::max(), otherwise , *_IGcount will be negative
+    // which results in undefined bahavior
+    uintptr_t end_max = ((uintptr_t)base_) +
+                        static_cast<uintptr_t>(std::numeric_limits<int>::max());
+    uintptr_t end_intented = beg + size_;
+    uintptr_t end = std::min(end_intented, end_max);
+    setg((char*)beg, (char*)cur, (char*)end);
+  }
+
+private:
+  char* base_;
+
+  size_t size_;
+  std::unique_ptr<T> owner_;
+};
+
+template <typename T> class MemStream : public std::iostream {
+public:
+  static std::unique_ptr<MemStream<T>>
+  create(size_t size, std::shared_ptr<MemBuffer<T>> sb) {
+    return std::make_unique<MemStream<T>>(size, std::move(sb));
+  }
+  MemStream(std::shared_ptr<MemBuffer<T>> sb)
+      : std::iostream(sb.get()), buffer_{sb} {}
+
+public:
+  char* offset(std::streamoff offset) { return buffer_->base() + offset; }
+
+private:
+  std::shared_ptr<MemBuffer<T>> buffer_;
+};
+} // namespace vaip_core

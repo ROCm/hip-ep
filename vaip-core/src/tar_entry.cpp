@@ -79,7 +79,6 @@ bool TarEntryInputStreamBuffer::rename_symlink(const std::string& new_name,
             << " new_name=" << new_name;
   return false;
 }
-
 std::string TarEntryInputStreamBuffer::to_string() const {
   std::ostringstream ret;
   ret << "TarEntryInputStreamBuffer{"
@@ -167,8 +166,8 @@ TarEntryInputStreamBuffer::seekpos(std::streampos sp,
 }
 
 TarEntryInputStream::TarEntryInputStream(
-    std::unique_ptr<TarEntryInputStreamBuffer> buf)
-    : std::istream(buf.get()), buf_{nullptr} {
+    std::unique_ptr<TarEntryInputStreamBuffer> buf, MemStream<MemFile>* mem_buf)
+    : std::istream(buf.get()), buf_{nullptr}, mem_buf_{mem_buf} {
   buf_ = std::move(buf);
 }
 
@@ -224,6 +223,13 @@ bool TarEntryInputStream::rename_symlink(
     const std::string& new_name, pos_type data_begin_pos,
     pos_type data_end_pos) { // rename the symlink
   return buf_->rename_symlink(new_name, data_begin_pos, data_end_pos);
+}
+
+void* TarEntryInputStream::mmap() {
+  if (mem_buf_) {
+    return mem_buf_->offset(buf_->data_begin_pos());
+  }
+  return nullptr;
 }
 std::string TarEntryInputStream::to_string() const {
   return std::string("TarEntryInputStream{buf=") + buf_->to_string() + "}";
@@ -367,11 +373,11 @@ TarEntryOutputStream::add_entry_for_new_data(const std::string& md5) {
     MY_LOG(1) << " write header for " << data_file_name << " size=" << size_
               << " OK. header=" << header.to_string();
   }
-  auto& ret = tar_file_.add_entry(data_file_name,           //
-                                  header.data_begin_pos(),  //
-                                  header.data_end_pos(),    //
-                                  header.block_begin_pos(), //
-                                  header.block_end_pos()    //
+  auto& ret = tar_file_.add_regular_entry(data_file_name,           //
+                                          header.data_begin_pos(),  //
+                                          header.data_end_pos(),    //
+                                          header.block_begin_pos(), //
+                                          header.block_end_pos()    //
   );
   // go back to the original position
   this->seekp(end_pos_);
@@ -423,7 +429,9 @@ void TarEntryOutputStream::add_symlink_for_existing_entry(
                               sym_header.block_begin_pos(),
                               sym_header.block_end_pos());
 }
-void TarEntryOutputStream::add_1024_padding() {
+
+// FIXME , the param "name" is not used
+void TarEntryOutputStream::add_1024_padding(const std::string& /*name*/) {
   // write 1024 bytes of zeros at the end of the file
   std::string zeros(1024, '\0');
   this->write(zeros.data(), zeros.size());
@@ -432,6 +440,38 @@ void TarEntryOutputStream::add_1024_padding() {
   }
   this->flush();
 }
+void TarEntryOutputStream::maybe_add_4k_align(TarFile& tar_file,
+                                              const std::string& name) {
+  static const auto const_512 = std::streamoff(512);
+  static const auto const_4k = std::streamoff(4096);
+  auto current_pos = tar_file.stream_->tellp();
+  tar_file.stream_->seekp(current_pos -
+                          const_512); // rewind to the block header
+  if (!tar_file.stream_->good()) {
+    MY_LOG(1) << "seekp failed. current_pos=" << current_pos << " name=" << name
+              << " stream_pos=" << tar_file.stream_->tellp();
+    CHECK(false);
+  }
+  // the first block might be overwritten if it happens to be 4k aligned
+  auto block_idx = 0;
+  add_padding_block_for_4k(tar_file, name, block_idx++);
+  auto next_data_begin = tar_file.stream_->tellp();
+  while (next_data_begin % const_4k != 0) {
+    add_padding_block_for_4k(tar_file, name, block_idx++);
+    next_data_begin = tar_file.stream_->tellp();
+  }
+  return;
+}
+void TarEntryOutputStream::add_padding_block_for_4k(TarFile& tar_file,
+                                                    const std::string& name,
+                                                    int /*block_idx*/) {
+  auto short_name = name.size() < 50u ? name : name.substr(0, 50);
+  auto data_file_name = std::string("_data/") + "padding_" +
+                        std::to_string(tar_file.padding_count_++);
+  auto sym_header = TarHeader(data_file_name, 0);
+  sym_header.write_header(*tar_file.stream_);
+}
+
 void TarEntryOutputStream::rename_existing_entry(
     TarEntryInputStream& data_entry, TarEntryInputStream& prev_entry) {
   MY_LOG(1) << " rename existing entry " << prev_entry.to_string() << " to "
@@ -470,11 +510,11 @@ TarEntryOutputStream::~TarEntryOutputStream() {
     // TAR file is designed to be append only, so we need to add a new entry for
     // the later entry wins if the file name is the same.
     add_entry_for_new_data(md5.value());
-    add_1024_padding();
+    add_1024_padding(name_);
   } else if (same_data_exists && !same_path_exists) {
     // this is the second case for shared data, but different file name.
     add_symlink_for_existing_entry(md5.value());
-    add_1024_padding();
+    add_1024_padding(name_);
   } else if (same_data_exists && same_path_exists) {
     // this is the third case for shared data and same file name.
     // we do nothing more than write 1024 bytes of zeros at the end.
@@ -483,20 +523,21 @@ TarEntryOutputStream::~TarEntryOutputStream() {
               << " prev_entry_for_md5=" << prev_entry_for_md5->to_string()
               << " prev_entry_for_path=" << prev_entry_for_path->to_string();
     CHECK(seekp(begin_pos_ - std::streampos(512)).good());
-    add_1024_padding();
+    add_1024_padding(name_);
   } else if (!same_data_exists && same_path_exists) {
     // this is the fourth case for different data and same file name.
     // we need to rename the old entry to a new name.
     // TAR is append only, append the new entry to the end of the file.
     // this is as same as the first case.
     add_entry_for_new_data(md5.value());
-    add_1024_padding();
+    add_1024_padding(name_);
   } else {
     CHECK(false) << "never goes here. this is a bug. "       //
                  << " same_data_exists=" << same_data_exists //
                  << " same_path_exists=" << same_path_exists //
         ;
   }
+  tar_file_.stream_->flush();
 }
 
 std::streampos TarEntryOutputStream::calculate_tar_append_pos(
@@ -584,10 +625,12 @@ TarEntryOutputStream::create(class TarFile& tar_file, const std::string& name) {
         ;
     return nullptr;
   }
+  maybe_add_4k_align(tar_file, name);
   MY_LOG(1) << " TarEntryOutputStream::create: start to writing to file \""
             << name << "\" from " << tar_file.stream_->tellp()
             << " begin_pos=" << begin_pos;
-  return std::make_unique<TarEntryOutputStream>(name, begin_pos, tar_file);
+  return std::make_unique<TarEntryOutputStream>(name, tar_file.stream_->tellp(),
+                                                tar_file);
 }
 
 } // namespace vaip_core

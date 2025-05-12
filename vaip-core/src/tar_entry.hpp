@@ -3,6 +3,8 @@
  * Licensed under the MIT License.
  */
 #pragma once
+#include "./mem_stream_buffer.hpp"
+#include "./mmap_file.hpp"
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -40,6 +42,7 @@ public: // make std::unique_ptr happy
       std::streambuf::pos_type block_begin_pos, // beginning of the tar entry.
       std::streambuf::pos_type block_end_pos,   // end of the tar entry.
       std::shared_ptr<std::istream> stream,     //
+
       std::size_t bufferSize = 1024);
   // Handles reading from FILE*
   virtual int_type underflow() override final;
@@ -111,12 +114,15 @@ public:
    */
   VAIP_DLL_SPEC std::string md5(); // MD5 checksum of the content
   std::string to_string() const;   // for logging
+  void* mmap();
 
-public:                            // only for uniqute_ptr
-  explicit TarEntryInputStream(std::unique_ptr<TarEntryInputStreamBuffer> buf);
+public: // only for uniqute_ptr
+  explicit TarEntryInputStream(std::unique_ptr<TarEntryInputStreamBuffer> buf,
+                               MemStream<MemFile>* mem_file);
 
 private:
   std::unique_ptr<TarEntryInputStreamBuffer> buf_;
+  MemStream<MemFile>* mem_buf_;
   friend class TarFile;
   friend class TarFile;
 };
@@ -141,7 +147,11 @@ private:
   TarEntryInputStream* find_prev_entry_for_path(const std::string& name);
   TarEntryInputStream& add_entry_for_new_data(const std::string& md5);
   void add_symlink_for_existing_entry(const std::string& md5);
-  void add_1024_padding();
+  void add_1024_padding(const std::string& name);
+  static void maybe_add_4k_align(class TarFile& tar_file,
+                                 const std::string& name);
+  static void add_padding_block_for_4k(class TarFile& tar_file,
+                                       const std::string& name, int block_idx);
   void rename_existing_entry(TarEntryInputStream& data_entry,
                              TarEntryInputStream& prev_entry);
 

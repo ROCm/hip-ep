@@ -43,10 +43,8 @@
 // open the ep context binary file directly.  limitation: it does not
 // when compression or encryption is enabled.
 DEF_ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE, "1")
-
 DEF_ENV_PARAM_2(XLNX_ONNX_EP_REPORT_FILE, "", std::string)
 DEF_ENV_PARAM(XLNX_ENABLE_CACHE, "1")
-DEF_ENV_PARAM(ENABLE_TAR_CACHE, "0")
 DEF_ENV_PARAM(XLNX_ENABLE_SKIP_FATAL, "1")
 DEF_ENV_PARAM(XLNX_ONNX_EP_VERBOSE, "0")
 DEF_ENV_PARAM(XLNX_ENABLE_FILE_BASED_CACHE_KEY, "0")
@@ -275,14 +273,7 @@ static bool cache_valid(const PassContextImp& context) {
 }
 
 static bool check_cache_exist(const PassContextImp& context) {
-  fs::path cache_file;
-  if (ENV_PARAM(ENABLE_TAR_CACHE)) {
-    // TODO: support tar.gz also
-    cache_file = context.log_dir;
-    cache_file += ".tar ";
-  } else {
-    cache_file = get_cache_file_name(context, "context.json");
-  }
+  fs::path cache_file = get_cache_file_name(context, "context.json");
   return file_exists(cache_file);
 }
 
@@ -635,37 +626,11 @@ initialize_context(const std::string& model_path, const Graph& onnx_graph,
   Model& mutable_model = const_cast<Model&>(model);
   model_set_meta_data(mutable_model, "vaip_log_dir",
                       context->get_log_dir().u8string());
-  //
-  auto is_shared_context_enabled =
-      context->get_session_config(kOrtSessionOptionShareEpContexts, "0") == "1";
-  auto is_ep_context_enabled =
-      context->get_session_config(kOrtSessionOptionEpContextEnable, "0") == "1";
-  auto is_ep_context_embed_mode =
-      context->get_session_config(kOrtSessionOptionEpContextEmbedMode, "1") ==
-      "1";
-
-  if (ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE) && //
-      is_shared_context_enabled &&                 //
-      is_ep_context_enabled &&                     //
-      !is_ep_context_embed_mode) {
-    auto ep_context_binary_file = context->get_ep_context_binary_file_path();
-
-    auto open_mode = std::ios::binary | std::ios::in | std::ios::out;
-    if (!std::filesystem::exists(ep_context_binary_file)) {
-      open_mode |= std::ios::trunc;
-    }
-    auto stream = std::unique_ptr<std::fstream>();
-    stream = std::make_unique<std::fstream>(ep_context_binary_file, open_mode);
-
-    CHECK(stream->is_open())
-        << "failed to open ep context file " << ep_context_binary_file;
-    CHECK(!context->get_config_proto().cache_key().empty())
-        << "cache_key should be empty when using tar file";
-    context->tar_file_ = TarFile::create(std::move(stream));
-    context->cache_file_use_cache_key_prefix_ = true;
-  }
   // log version of binary
   print_version_verbose("EXEC VERISON: ", context->context_proto.config());
+  if (!context->is_ep_context_model) {
+    context->maybe_create_tar_file_for_write();
+  }
   return context;
 }
 static void get_ep_cache_context_common(PassContextImp& context,
@@ -709,10 +674,12 @@ static std::string get_ep_cache_context_nonembed_mode(PassContextImp& context) {
   auto measure_get_ep_cache_context_embed_mode =
       context.measure("get_ep_cache_context_nonembed_mode");
   auto OrtSessionOptionEpContextFilePath_binay =
-      context.get_ep_context_binary_file_path();
+      context.generate_ep_context_binary_file_path();
   LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
       << "embed mode = 0, save cache directory to tar file "
       << OrtSessionOptionEpContextFilePath_binay.filename();
+  // return a file name for the binary file, the file name is written into the
+  // atttribute "ep.cache_context"
   auto binary_name =
       OrtSessionOptionEpContextFilePath_binay.filename().u8string();
   if (context.tar_file_) {
@@ -843,13 +810,15 @@ extern "C" VAIP_DLL_SPEC int create_ep_context_nodes(
   }
   auto ep =
       dynamic_cast<vaip_core::ExecutionProviderConcrete*>(eps.front().get());
-  if (ep->get_context()->get_is_ep_context_model()) {
+
+  auto p_context = dynamic_cast<PassContextImp*>(ep->get_context().get());
+  CHECK(p_context != nullptr);
+  if (p_context->is_ep_context_model) {
+    // cannot create a ep context model when it is already a ep context
     *ret_value =
         vaip_core::DllSafe<std::vector<Node*>>(new std::vector<Node*>());
     return 1;
   }
-  auto p_context = dynamic_cast<PassContextImp*>(ep->get_context().get());
-  CHECK(p_context != nullptr);
   auto& context = *p_context;
   auto deferred_write = std::shared_ptr<void>(nullptr, [&context](void* /*p*/) {
     if (0)
@@ -953,15 +922,7 @@ store_cache_directory_from_main_node(PassContextImp& context,
 
   if (ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE) //
       && !enable_compression && !enable_encryption && ep_embed_mode == 0) {
-    // special optimization for PSU cases.
-    auto ep_context_onnx_file = context.get_ep_context_onnx_file_path();
-    auto ep_context_binary_file = ep_context_onnx_file.parent_path() /
-                                  std::filesystem::u8path(*ep_cache_context);
-
-    MY_LOG(1) << "open tar file: " << ep_context_binary_file;
-    context.tar_file_ = TarFile::create(std::make_unique<std::fstream>(
-        ep_context_binary_file,
-        std::ios::binary | std::ios::in | std::ios::out));
+    context.maybe_create_tar_file_for_read(*ep_cache_context);
   } else {
     std::unique_ptr<IStreamReader> ep_context_file;
     auto context_holder = std::make_shared<TempFile>();

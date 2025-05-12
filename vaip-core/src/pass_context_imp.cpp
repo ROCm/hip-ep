@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #define _CRT_SECURE_NO_WARNINGS
+#include "core/session/onnxruntime_session_options_config_keys.h"
 #include <fstream>
 #include <glog/logging.h>
 #include <google/protobuf/util/json_util.h>
@@ -16,6 +17,7 @@
 #include "profile_utils.hpp"
 #include "tar_ball.hpp"
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE, "0")
+DEF_ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE, "1")
 
 namespace vaip_core {
 
@@ -174,18 +176,12 @@ PassContextImp::~PassContextImp() {
     fclose(iter.second);
   }
 }
-void PassContextImp::set_is_ep_context_model(bool is_ep_context) {
-  this->is_ep_context_model = is_ep_context;
-}
-
-bool PassContextImp::get_is_ep_context_model() {
-  return this->is_ep_context_model;
-}
 
 void PassContextImp::set_cache_file_md5_map(
     const std::map<std::string, std::string>& cache_file_md5) {
   cache_file_md5s_ = cache_file_md5;
 }
+
 std::map<std::string, std::string> PassContextImp::get_cache_file_md5_map() {
   return cache_file_md5s_;
 }
@@ -357,7 +353,7 @@ std::filesystem::path PassContextImp::get_ep_context_onnx_file_path() {
  * @return A std::filesystem::path object representing the generated binary file
  * path.
  */
-std::filesystem::path PassContextImp::get_ep_context_binary_file_path() {
+std::filesystem::path PassContextImp::generate_ep_context_binary_file_path() {
   auto ep_context_binary_file_path = std::filesystem::path();
   auto ep_context_onnx_file = get_ep_context_onnx_file_path();
   auto is_shared_ep_contexts =
@@ -883,7 +879,7 @@ void CacheFileReaderImp::rewind() const { std::rewind(fp_); }
 
 CacheFileReaderStreamImp::CacheFileReaderStreamImp(const std::string& name,
                                                    size_t size,
-                                                   std::istream& stream)
+                                                   TarEntryInputStream& stream)
     : name_{name}, size_{size}, stream_{stream} {
   LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
       << "open " << name << " for read";
@@ -904,6 +900,8 @@ std::size_t CacheFileReaderStreamImp::fread(void* buffer,
       << " size_ =" << size_;
   return ret;
 }
+
+void* CacheFileReaderStreamImp::mmap() { return stream_.mmap(); }
 
 size_t CacheFileReaderStreamImp::size() const { return size_; }
 
@@ -958,5 +956,53 @@ std::size_t CacheFileWriterStreamImp::fwrite(const void* buffer,
   LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE) >= 3)
       << "failed to write " << name_;
   return ret;
+}
+
+void PassContextImp::maybe_create_tar_file_for_write() {
+  auto is_shared_context_enabled =
+      get_session_config(kOrtSessionOptionShareEpContexts, "0") == "1";
+  auto is_ep_context_enabled =
+      get_session_config(kOrtSessionOptionEpContextEnable, "0") == "1";
+  auto is_ep_context_embed_mode =
+      get_session_config(kOrtSessionOptionEpContextEmbedMode, "1") == "1";
+  if (ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE) && //
+      is_ep_context_enabled &&                     //
+      !is_ep_context_embed_mode) {
+    auto ep_context_binary_file = generate_ep_context_binary_file_path();
+    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+        << "open tar file for write: " << ep_context_binary_file;
+
+    auto open_mode = std::ios::binary | std::ios::in | std::ios::out;
+    if (!is_shared_context_enabled) {
+      // overwrite existing file if it is not shared.
+      open_mode |= std::ios::trunc;
+    }
+    if (!std::filesystem::exists(ep_context_binary_file)) {
+      open_mode |= std::ios::trunc;
+    }
+    auto stream = std::unique_ptr<std::fstream>();
+    stream = std::make_unique<std::fstream>(ep_context_binary_file, open_mode);
+
+    CHECK(stream->is_open())
+        << "failed to open ep context file " << ep_context_binary_file;
+    CHECK(!get_config_proto().cache_key().empty())
+        << "cache_key should be empty when using tar file";
+    tar_file_ = TarFile::create(std::move(stream));
+    cache_file_use_cache_key_prefix_ = true;
+  }
+}
+void PassContextImp::maybe_create_tar_file_for_read(
+    const std::string& ep_context_binary_file_name) {
+
+  auto ep_context_onnx_file = get_ep_context_onnx_file_path();
+  auto ep_context_binary_file =
+      ep_context_onnx_file.parent_path() /
+      std::filesystem::u8path(ep_context_binary_file_name);
+
+  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+      << "open tar file for read: " << ep_context_binary_file;
+  tar_file_ = TarFile::create(ep_context_binary_file);
+  CHECK(tar_file_ != nullptr)
+      << "failed to open ep context file " << ep_context_binary_file;
 }
 } // namespace vaip_core

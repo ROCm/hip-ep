@@ -25,9 +25,12 @@ public:
   void set_name(const std::string& name) { name_ = name; }
   void set_size(size_t size) { size_ = size; }
   void set_link_name(const std::string& real_path) { real_path_ = real_path; }
-  const std::string& name() const { return name_; }
+  const std::string& path() const { return name_; }
+  const std::optional<std::string> real_path() const { return real_path_; }
+  bool is_symlink() const {
+    return real_path_.has_value() && !real_path_->empty();
+  }
   size_t size() const { return size_; }
-  const std::optional<std::string>& real_path() const { return real_path_; }
   std::streampos data_begin_pos() const { return data_begin_pos_; }
   std::streampos data_end_pos() const { return data_end_pos_; }
   std::streampos block_begin_pos() const { return block_begin_pos_; }

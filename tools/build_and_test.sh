@@ -10,7 +10,12 @@ cmake -DBUILD_SHARED_LIBS=OFF \
     -S "$VAI_RT_WORKSPACE/morphizen-demo" -B "$VAI_RT_BUILD_DIR/morphizen-demo" \
     "-DCMAKE_INSTALL_PREFIX=$VAI_RT_PREFIX" \
     "-DCMAKE_PREFIX_PATH=$VAI_RT_PREFIX" \
+    "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" \
+    "-DCMAKE_BUILD_TYPE=Debug" \
     --fresh
+
+cp -av $VAI_RT_BUILD_DIR/morphizen-demo/compile_commands.json "$VAI_RT_WORKSPACE/morphizen-demo"
+cp -av $VAI_RT_BUILD_DIR/morphizen-demo/compile_commands.json "$VAI_RT_WORKSPACE/Morphizen"  || true
 
 jobs=$(nproc)
 
