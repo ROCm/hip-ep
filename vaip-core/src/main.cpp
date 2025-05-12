@@ -10,13 +10,6 @@
 #    include <crtdbg.h>
 #  endif
 #endif
-extern "C" {
-VAIP_DLL_SPEC
-void initialize_onnxruntime_vitisai_ep(
-    vaip_core::OrtApiForVaip* api, std::vector<OrtCustomOpDomain*>& ret_domain);
-VAIP_DLL_SPEC
-void deinitialize_onnxruntime_vitisai_ep();
-}
 
 typedef void* voidp;
 static struct {

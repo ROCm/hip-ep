@@ -27,39 +27,8 @@
 #include <glog/logging.h>
 DEF_ENV_PARAM(MORPHIZEN_SUPRRESS_DEPRECATED_WARNG, "1")
 DEF_ENV_PARAM(DEBUG_OP_REGISTER, "0")
-DEF_ENV_PARAM(MORPHIZEN_DEBUG_DEINITIALIZE, "0")
-#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_DEINITIALIZE) >= n)
-
-namespace {
-std::vector<std::pair<std::string, std::function<void()>>> g_at_exits;
-}
-namespace vaip_core {
-void add_cleanup_function(const std::string& name,
-                          std::function<void()> cleanup_function) {
-  g_at_exits.emplace_back(name, cleanup_function);
-}
-} // namespace vaip_core
 extern void* BuildInOPs__hook; // prevent xir_opes_defs.obj symbol gc
-namespace onnxruntime_vitisai_ep {
-using namespace vaip_core;
-int optimize_onnx_model(const std::filesystem::path& model_path_in,
-                        const std::filesystem::path& model_path_out,
-                        const char* json_config) {
-  return vaip_core::optimize_onnx_model(model_path_in, model_path_out,
-                                        json_config);
-}
-void initialize_graph_optimizer(const std::string& json_path) {
-  vaip_core::initialize_graph_optimizer(json_path);
-}
-} // namespace onnxruntime_vitisai_ep
-
 extern "C" {
-VAIP_DLL_SPEC
-const vaip_core::OrtApiForVaip* get_the_global_api() {
-  // The test program is using this interface
-  return vaip_core::api();
-}
-
 class OpHolder {
   struct Opdef {
     std::string domain;
@@ -244,12 +213,7 @@ void initialize_onnxruntime_vitisai_ep(
 
 VAIP_DLL_SPEC
 void deinitialize_onnxruntime_vitisai_ep() {
-  MY_LOG(1) << "deinitialize_onnxruntime_vitisai_ep";
-  for (auto& item : g_at_exits) {
-    MY_LOG(1) << " deinitialize " << item.first;
-    item.second();
-  }
-  g_at_exits.clear();
+  vaip_core::deinitialize_onnxruntime_vitisai_ep();
 }
 
 VAIP_DLL_SPEC

@@ -147,6 +147,8 @@ add_library(${LIB_NAME} STATIC
   src/onnxruntime_vitisai_ep.cpp
   src/file_stream.hpp
   src/file_stream.cpp
+  src/cleanup.hpp
+  src/cleanup.cpp
 )
 add_library (morphizen::morphizen-core-static ALIAS morphizen-core-static)
 set_target_properties(${LIB_NAME} PROPERTIES FOLDER morphizen)

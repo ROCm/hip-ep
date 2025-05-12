@@ -54,3 +54,11 @@ VAIP_DLL_SPEC void set_the_global_api(OrtApiForVaip* api) {
   }
 }
 } // namespace vaip_core
+
+extern "C" {
+VAIP_DLL_SPEC
+const vaip_core::OrtApiForVaip* get_the_global_api() {
+  // The test program is using this interface
+  return vaip_core::api();
+}
+} // extern "C"

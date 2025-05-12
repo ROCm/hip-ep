@@ -10,4 +10,5 @@ namespace vaip_core {
 // this function cannot be shared between DLLs
 void add_cleanup_function(const std::string& name,
                           std::function<void()> cleanup_function);
+void deinitialize_onnxruntime_vitisai_ep();
 } // namespace vaip_core
