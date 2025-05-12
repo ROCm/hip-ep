@@ -4,10 +4,12 @@
  */
 #define _CRT_SECURE_NO_WARNINGS
 #include "../../vaip-core/src/tar_file.hpp"
-#include "debug_logger.hpp"
+#include "test_environment.hpp"
 #include <boost/process.hpp>
 #include <cerrno>
 #include <cstring>
+#include <fstream>
+#include <glog/logging.h>
 #include <gtest/gtest.h>
 TEST(TarFileTest, ReadFrom) {
   auto tarFileName = CMAKE_CURRENT_BINARY_PATH / "sample.src.tar";
@@ -328,8 +330,12 @@ TEST(TarFileTest, WriteTo) {
       LOG(INFO) << "cannot find tar exe. cancel testing";
     } else {
       LOG(INFO) << "run " << tar_exe_path << " -tvf " << tarFileName.u8string();
-      auto exit_code =
-          boost::process::system(tar_exe_path, "-tvf", tarFileName.u8string());
+      // on Windows, "tar -tvf C:/..." results in an error.
+      // /usr/bin/tar: Cannot connect to C: resolve failed
+      // because tar is part of git. it cannnot recognize windows drive C:
+      auto exit_code = boost::process::system(
+          tar_exe_path, "-tvf", tarFileName.filename().u8string(),
+          boost::process::start_dir(CMAKE_CURRENT_BINARY_PATH.u8string()));
       ASSERT_EQ(exit_code, 0)
           << "Failed to run tar command. Exit code: " << exit_code;
     }

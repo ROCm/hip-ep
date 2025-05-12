@@ -80,7 +80,7 @@ def create_sample_onnx_model_with_all_constant_initializers():
         nodes=[node],  # nodes
         name="SampleModelWithAllConstantInitializers",
         inputs=[],  # inputs
-        outputs=[helper.make_tensor_value_info("out", TensorProto.FLOAT, [2])],
+        outputs=[helper.make_tensor_value_info("out", TensorProto.FLOAT, [1])],
         initializer=initializers,  # initializers
     )
 

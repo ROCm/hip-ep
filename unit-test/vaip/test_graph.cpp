@@ -3,8 +3,8 @@
  * Licensed under the MIT License.
  */
 
-#include "debug_logger.hpp"
 #include "morphizen/vaip.hpp"
+#include "test_environment.hpp"
 #include "unit_test_env_params.hpp"
 #include <boost/process.hpp>
 #include <filesystem>
@@ -82,7 +82,7 @@ TEST_F(GraphTest, LoadAndSave) {
     python_code << "onnx.checker.check_model(m)"
                 << "\n";
     auto exit_code =
-        boost::process::system(PYTHON_EXE, "-c", python_code.str().c_str());
+        boost::process::system(PYTHON_EXE.u8string(), "-c", python_code.str());
     EXPECT_EQ(exit_code, 0) << "onnx.checker.check_model failed";
   }
 }
@@ -257,9 +257,14 @@ TEST_F(GraphTest, TryFuse) {
 }
 
 TEST_F(GraphTest, NewConstantInitializer) {
-
-  LOG(INFO) << "LOADING " << ENV_PARAM(SAMPLE_ONNX) << std::endl;
-  auto model = vaip_cxx::Model::load(ENV_PARAM(SAMPLE_ONNX));
+  auto SAMPLE_ONNX = CMAKE_CURRENT_BINARY_PATH / "sample.onnx";
+  auto exit_code = boost::process::system(
+      PYTHON_EXE.u8string(),
+      (TEST_SRC_DIR / "vaip" / "create_sample_onnx_model.py").u8string(),
+      SAMPLE_ONNX.u8string());
+  ASSERT_TRUE(exit_code == 0) << "Failed to generate test file";
+  LOG(INFO) << "LOADING " << (SAMPLE_ONNX) << std::endl;
+  auto model = vaip_cxx::Model::load(SAMPLE_ONNX);
   auto graph = vaip_cxx::GraphRef(model->main_graph());
   graph.resolve();
   // Test for new_constant_initializer_i8

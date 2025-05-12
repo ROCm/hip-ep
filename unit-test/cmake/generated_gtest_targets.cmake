@@ -1,846 +1,1236 @@
 
-add_custom_target(morphizen-unit-test-GTest-hello
+add_custom_target(morphizen-unit-test-GTest.hello
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=GTest.hello
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-GTest-hello PROPERTIES
+set_target_properties(morphizen-unit-test-GTest.hello PROPERTIES
     FOLDER "morphizen/unit-tests/cases/GTest/hello"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GTest.hello
     )
+target_sources(morphizen-unit-test-GTest.hello PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ConfigTest-Simple
+add_custom_target(morphizen-unit-test-ConfigTest.Simple
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConfigTest.Simple
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ConfigTest-Simple PROPERTIES
+set_target_properties(morphizen-unit-test-ConfigTest.Simple PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ConfigTest/Simple"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConfigTest.Simple
     )
+target_sources(morphizen-unit-test-ConfigTest.Simple PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ConfigTest-EmptyProviderOption
+add_custom_target(morphizen-unit-test-ConfigTest.EmptyProviderOption
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConfigTest.EmptyProviderOption
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ConfigTest-EmptyProviderOption PROPERTIES
+set_target_properties(morphizen-unit-test-ConfigTest.EmptyProviderOption PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ConfigTest/EmptyProviderOption"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConfigTest.EmptyProviderOption
     )
+target_sources(morphizen-unit-test-ConfigTest.EmptyProviderOption PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ConfigTest-ProviderOptionCacheDir
+add_custom_target(morphizen-unit-test-ConfigTest.ProviderOptionCacheDir
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConfigTest.ProviderOptionCacheDir
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ConfigTest-ProviderOptionCacheDir PROPERTIES
+set_target_properties(morphizen-unit-test-ConfigTest.ProviderOptionCacheDir PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ConfigTest/ProviderOptionCacheDir"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConfigTest.ProviderOptionCacheDir
     )
+target_sources(morphizen-unit-test-ConfigTest.ProviderOptionCacheDir PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ConfigTest-SessionConfigs
+add_custom_target(morphizen-unit-test-ConfigTest.SessionConfigs
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConfigTest.SessionConfigs
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ConfigTest-SessionConfigs PROPERTIES
+set_target_properties(morphizen-unit-test-ConfigTest.SessionConfigs PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ConfigTest/SessionConfigs"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConfigTest.SessionConfigs
     )
+target_sources(morphizen-unit-test-ConfigTest.SessionConfigs PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ModelTest-Load
+add_custom_target(morphizen-unit-test-ModelTest.Load
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ModelTest.Load
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ModelTest-Load PROPERTIES
+set_target_properties(morphizen-unit-test-ModelTest.Load PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ModelTest/Load"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ModelTest.Load
     )
+target_sources(morphizen-unit-test-ModelTest.Load PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ModelTest-Clone
+add_custom_target(morphizen-unit-test-ModelTest.Clone
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ModelTest.Clone
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ModelTest-Clone PROPERTIES
+set_target_properties(morphizen-unit-test-ModelTest.Clone PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ModelTest/Clone"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ModelTest.Clone
     )
+target_sources(morphizen-unit-test-ModelTest.Clone PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ModelTest-MainGraph
+add_custom_target(morphizen-unit-test-ModelTest.MainGraph
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ModelTest.MainGraph
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ModelTest-MainGraph PROPERTIES
+set_target_properties(morphizen-unit-test-ModelTest.MainGraph PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ModelTest/MainGraph"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ModelTest.MainGraph
     )
+target_sources(morphizen-unit-test-ModelTest.MainGraph PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ModelTest-SetAndGetMetadata
+add_custom_target(morphizen-unit-test-ModelTest.SetAndGetMetadata
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ModelTest.SetAndGetMetadata
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ModelTest-SetAndGetMetadata PROPERTIES
+set_target_properties(morphizen-unit-test-ModelTest.SetAndGetMetadata PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ModelTest/SetAndGetMetadata"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ModelTest.SetAndGetMetadata
     )
+target_sources(morphizen-unit-test-ModelTest.SetAndGetMetadata PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ModelTest-ImplicitConversion
+add_custom_target(morphizen-unit-test-ModelTest.ImplicitConversion
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ModelTest.ImplicitConversion
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ModelTest-ImplicitConversion PROPERTIES
+set_target_properties(morphizen-unit-test-ModelTest.ImplicitConversion PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ModelTest/ImplicitConversion"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ModelTest.ImplicitConversion
     )
+target_sources(morphizen-unit-test-ModelTest.ImplicitConversion PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ModelTest-ModelCreationTest
+add_custom_target(morphizen-unit-test-ModelTest.ModelCreationTest
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ModelTest.ModelCreationTest
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ModelTest-ModelCreationTest PROPERTIES
+set_target_properties(morphizen-unit-test-ModelTest.ModelCreationTest PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ModelTest/ModelCreationTest"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ModelTest.ModelCreationTest
     )
+target_sources(morphizen-unit-test-ModelTest.ModelCreationTest PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-GraphTest-LoadAndSave
+add_custom_target(morphizen-unit-test-GraphTest.LoadAndSave
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=GraphTest.LoadAndSave
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-GraphTest-LoadAndSave PROPERTIES
+set_target_properties(morphizen-unit-test-GraphTest.LoadAndSave PROPERTIES
     FOLDER "morphizen/unit-tests/cases/GraphTest/LoadAndSave"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.LoadAndSave
     )
+target_sources(morphizen-unit-test-GraphTest.LoadAndSave PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-GraphTest-FindNodeArgGraphInput
+add_custom_target(morphizen-unit-test-GraphTest.FindNodeArgGraphInput
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=GraphTest.FindNodeArgGraphInput
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-GraphTest-FindNodeArgGraphInput PROPERTIES
+set_target_properties(morphizen-unit-test-GraphTest.FindNodeArgGraphInput PROPERTIES
     FOLDER "morphizen/unit-tests/cases/GraphTest/FindNodeArgGraphInput"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.FindNodeArgGraphInput
     )
+target_sources(morphizen-unit-test-GraphTest.FindNodeArgGraphInput PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-GraphTest-FindNodeArgGraphOutput
+add_custom_target(morphizen-unit-test-GraphTest.FindNodeArgGraphOutput
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=GraphTest.FindNodeArgGraphOutput
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-GraphTest-FindNodeArgGraphOutput PROPERTIES
+set_target_properties(morphizen-unit-test-GraphTest.FindNodeArgGraphOutput PROPERTIES
     FOLDER "morphizen/unit-tests/cases/GraphTest/FindNodeArgGraphOutput"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.FindNodeArgGraphOutput
     )
+target_sources(morphizen-unit-test-GraphTest.FindNodeArgGraphOutput PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-GraphTest-NodesInTopologicalOrder
+add_custom_target(morphizen-unit-test-GraphTest.NodesInTopologicalOrder
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=GraphTest.NodesInTopologicalOrder
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-GraphTest-NodesInTopologicalOrder PROPERTIES
+set_target_properties(morphizen-unit-test-GraphTest.NodesInTopologicalOrder PROPERTIES
     FOLDER "morphizen/unit-tests/cases/GraphTest/NodesInTopologicalOrder"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.NodesInTopologicalOrder
     )
+target_sources(morphizen-unit-test-GraphTest.NodesInTopologicalOrder PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-GraphTest-NodeIndex
+add_custom_target(morphizen-unit-test-GraphTest.NodeIndex
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=GraphTest.NodeIndex
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-GraphTest-NodeIndex PROPERTIES
+set_target_properties(morphizen-unit-test-GraphTest.NodeIndex PROPERTIES
     FOLDER "morphizen/unit-tests/cases/GraphTest/NodeIndex"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.NodeIndex
     )
+target_sources(morphizen-unit-test-GraphTest.NodeIndex PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-GraphTest-FindConsumers
+add_custom_target(morphizen-unit-test-GraphTest.FindConsumers
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=GraphTest.FindConsumers
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-GraphTest-FindConsumers PROPERTIES
+set_target_properties(morphizen-unit-test-GraphTest.FindConsumers PROPERTIES
     FOLDER "morphizen/unit-tests/cases/GraphTest/FindConsumers"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.FindConsumers
     )
+target_sources(morphizen-unit-test-GraphTest.FindConsumers PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-GraphTest-NodeArgFindProducer
+add_custom_target(morphizen-unit-test-GraphTest.NodeArgFindProducer
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=GraphTest.NodeArgFindProducer
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-GraphTest-NodeArgFindProducer PROPERTIES
+set_target_properties(morphizen-unit-test-GraphTest.NodeArgFindProducer PROPERTIES
     FOLDER "morphizen/unit-tests/cases/GraphTest/NodeArgFindProducer"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.NodeArgFindProducer
     )
+target_sources(morphizen-unit-test-GraphTest.NodeArgFindProducer PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-GraphTest-Fuse
+add_custom_target(morphizen-unit-test-GraphTest.Fuse
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=GraphTest.Fuse
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-GraphTest-Fuse PROPERTIES
+set_target_properties(morphizen-unit-test-GraphTest.Fuse PROPERTIES
     FOLDER "morphizen/unit-tests/cases/GraphTest/Fuse"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.Fuse
     )
+target_sources(morphizen-unit-test-GraphTest.Fuse PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-GraphTest-TryFuse
+add_custom_target(morphizen-unit-test-GraphTest.TryFuse
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=GraphTest.TryFuse
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-GraphTest-TryFuse PROPERTIES
+set_target_properties(morphizen-unit-test-GraphTest.TryFuse PROPERTIES
     FOLDER "morphizen/unit-tests/cases/GraphTest/TryFuse"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.TryFuse
     )
+target_sources(morphizen-unit-test-GraphTest.TryFuse PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-GraphTest-NewConstantInitializer
+add_custom_target(morphizen-unit-test-GraphTest.NewConstantInitializer
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=GraphTest.NewConstantInitializer
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-GraphTest-NewConstantInitializer PROPERTIES
+set_target_properties(morphizen-unit-test-GraphTest.NewConstantInitializer PROPERTIES
     FOLDER "morphizen/unit-tests/cases/GraphTest/NewConstantInitializer"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.NewConstantInitializer
     )
+target_sources(morphizen-unit-test-GraphTest.NewConstantInitializer PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-GraphTest-VirtualFuse
+add_custom_target(morphizen-unit-test-GraphTest.VirtualFuse
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=GraphTest.VirtualFuse
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-GraphTest-VirtualFuse PROPERTIES
+set_target_properties(morphizen-unit-test-GraphTest.VirtualFuse PROPERTIES
     FOLDER "morphizen/unit-tests/cases/GraphTest/VirtualFuse"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=GraphTest.VirtualFuse
     )
+target_sources(morphizen-unit-test-GraphTest.VirtualFuse PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ConstDataTest-int8_scalar
+add_custom_target(morphizen-unit-test-ConstDataTest.int8_scalar
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConstDataTest.int8_scalar
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ConstDataTest-int8_scalar PROPERTIES
+set_target_properties(morphizen-unit-test-ConstDataTest.int8_scalar PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ConstDataTest/int8_scalar"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.int8_scalar
     )
+target_sources(morphizen-unit-test-ConstDataTest.int8_scalar PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ConstDataTest-int8
+add_custom_target(morphizen-unit-test-ConstDataTest.int8
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConstDataTest.int8
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ConstDataTest-int8 PROPERTIES
+set_target_properties(morphizen-unit-test-ConstDataTest.int8 PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ConstDataTest/int8"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.int8
     )
+target_sources(morphizen-unit-test-ConstDataTest.int8 PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ConstDataTest-uint8_scalar
+add_custom_target(morphizen-unit-test-ConstDataTest.uint8_scalar
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConstDataTest.uint8_scalar
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ConstDataTest-uint8_scalar PROPERTIES
+set_target_properties(morphizen-unit-test-ConstDataTest.uint8_scalar PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ConstDataTest/uint8_scalar"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.uint8_scalar
     )
+target_sources(morphizen-unit-test-ConstDataTest.uint8_scalar PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ConstDataTest-uint8
+add_custom_target(morphizen-unit-test-ConstDataTest.uint8
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConstDataTest.uint8
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ConstDataTest-uint8 PROPERTIES
+set_target_properties(morphizen-unit-test-ConstDataTest.uint8 PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ConstDataTest/uint8"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.uint8
     )
+target_sources(morphizen-unit-test-ConstDataTest.uint8 PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ConstDataTest-int16_scalar
+add_custom_target(morphizen-unit-test-ConstDataTest.int16_scalar
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConstDataTest.int16_scalar
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ConstDataTest-int16_scalar PROPERTIES
+set_target_properties(morphizen-unit-test-ConstDataTest.int16_scalar PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ConstDataTest/int16_scalar"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.int16_scalar
     )
+target_sources(morphizen-unit-test-ConstDataTest.int16_scalar PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ConstDataTest-int16
+add_custom_target(morphizen-unit-test-ConstDataTest.int16
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConstDataTest.int16
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ConstDataTest-int16 PROPERTIES
+set_target_properties(morphizen-unit-test-ConstDataTest.int16 PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ConstDataTest/int16"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.int16
     )
+target_sources(morphizen-unit-test-ConstDataTest.int16 PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ConstDataTest-uint16_scalar
+add_custom_target(morphizen-unit-test-ConstDataTest.uint16_scalar
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConstDataTest.uint16_scalar
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ConstDataTest-uint16_scalar PROPERTIES
+set_target_properties(morphizen-unit-test-ConstDataTest.uint16_scalar PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ConstDataTest/uint16_scalar"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.uint16_scalar
     )
+target_sources(morphizen-unit-test-ConstDataTest.uint16_scalar PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ConstDataTest-uint16
+add_custom_target(morphizen-unit-test-ConstDataTest.uint16
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConstDataTest.uint16
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ConstDataTest-uint16 PROPERTIES
+set_target_properties(morphizen-unit-test-ConstDataTest.uint16 PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ConstDataTest/uint16"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.uint16
     )
+target_sources(morphizen-unit-test-ConstDataTest.uint16 PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ConstDataTest-int32_scalar
+add_custom_target(morphizen-unit-test-ConstDataTest.int32_scalar
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConstDataTest.int32_scalar
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ConstDataTest-int32_scalar PROPERTIES
+set_target_properties(morphizen-unit-test-ConstDataTest.int32_scalar PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ConstDataTest/int32_scalar"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.int32_scalar
     )
+target_sources(morphizen-unit-test-ConstDataTest.int32_scalar PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ConstDataTest-int32
+add_custom_target(morphizen-unit-test-ConstDataTest.int32
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConstDataTest.int32
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ConstDataTest-int32 PROPERTIES
+set_target_properties(morphizen-unit-test-ConstDataTest.int32 PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ConstDataTest/int32"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.int32
     )
+target_sources(morphizen-unit-test-ConstDataTest.int32 PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ConstDataTest-uint32_scalar
+add_custom_target(morphizen-unit-test-ConstDataTest.uint32_scalar
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConstDataTest.uint32_scalar
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ConstDataTest-uint32_scalar PROPERTIES
+set_target_properties(morphizen-unit-test-ConstDataTest.uint32_scalar PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ConstDataTest/uint32_scalar"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.uint32_scalar
     )
+target_sources(morphizen-unit-test-ConstDataTest.uint32_scalar PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ConstDataTest-uint32
+add_custom_target(morphizen-unit-test-ConstDataTest.uint32
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConstDataTest.uint32
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ConstDataTest-uint32 PROPERTIES
+set_target_properties(morphizen-unit-test-ConstDataTest.uint32 PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ConstDataTest/uint32"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.uint32
     )
+target_sources(morphizen-unit-test-ConstDataTest.uint32 PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ConstDataTest-int64_scalar
+add_custom_target(morphizen-unit-test-ConstDataTest.int64_scalar
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConstDataTest.int64_scalar
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ConstDataTest-int64_scalar PROPERTIES
+set_target_properties(morphizen-unit-test-ConstDataTest.int64_scalar PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ConstDataTest/int64_scalar"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.int64_scalar
     )
+target_sources(morphizen-unit-test-ConstDataTest.int64_scalar PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ConstDataTest-int64
+add_custom_target(morphizen-unit-test-ConstDataTest.int64
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConstDataTest.int64
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ConstDataTest-int64 PROPERTIES
+set_target_properties(morphizen-unit-test-ConstDataTest.int64 PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ConstDataTest/int64"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.int64
     )
+target_sources(morphizen-unit-test-ConstDataTest.int64 PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ConstDataTest-uint64_scalar
+add_custom_target(morphizen-unit-test-ConstDataTest.uint64_scalar
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConstDataTest.uint64_scalar
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ConstDataTest-uint64_scalar PROPERTIES
+set_target_properties(morphizen-unit-test-ConstDataTest.uint64_scalar PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ConstDataTest/uint64_scalar"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.uint64_scalar
     )
+target_sources(morphizen-unit-test-ConstDataTest.uint64_scalar PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ConstDataTest-uint64
+add_custom_target(morphizen-unit-test-ConstDataTest.uint64
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ConstDataTest.uint64
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ConstDataTest-uint64 PROPERTIES
+set_target_properties(morphizen-unit-test-ConstDataTest.uint64 PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ConstDataTest/uint64"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ConstDataTest.uint64
     )
+target_sources(morphizen-unit-test-ConstDataTest.uint64 PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-TestAnchorPoint-Case0
+add_custom_target(morphizen-unit-test-TestAnchorPoint.Case0
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=TestAnchorPoint.Case0
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-TestAnchorPoint-Case0 PROPERTIES
+set_target_properties(morphizen-unit-test-TestAnchorPoint.Case0 PROPERTIES
     FOLDER "morphizen/unit-tests/cases/TestAnchorPoint/Case0"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TestAnchorPoint.Case0
     )
+target_sources(morphizen-unit-test-TestAnchorPoint.Case0 PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-TestAnchorPoint-Case1
+add_custom_target(morphizen-unit-test-TestAnchorPoint.Case1
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=TestAnchorPoint.Case1
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-TestAnchorPoint-Case1 PROPERTIES
+set_target_properties(morphizen-unit-test-TestAnchorPoint.Case1 PROPERTIES
     FOLDER "morphizen/unit-tests/cases/TestAnchorPoint/Case1"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TestAnchorPoint.Case1
     )
+target_sources(morphizen-unit-test-TestAnchorPoint.Case1 PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-TestAnchorPoint-Case2
+add_custom_target(morphizen-unit-test-TestAnchorPoint.Case2
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=TestAnchorPoint.Case2
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-TestAnchorPoint-Case2 PROPERTIES
+set_target_properties(morphizen-unit-test-TestAnchorPoint.Case2 PROPERTIES
     FOLDER "morphizen/unit-tests/cases/TestAnchorPoint/Case2"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TestAnchorPoint.Case2
     )
+target_sources(morphizen-unit-test-TestAnchorPoint.Case2 PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-TestAnchorPoint-Case3
+add_custom_target(morphizen-unit-test-TestAnchorPoint.Case3
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=TestAnchorPoint.Case3
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-TestAnchorPoint-Case3 PROPERTIES
+set_target_properties(morphizen-unit-test-TestAnchorPoint.Case3 PROPERTIES
     FOLDER "morphizen/unit-tests/cases/TestAnchorPoint/Case3"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TestAnchorPoint.Case3
     )
+target_sources(morphizen-unit-test-TestAnchorPoint.Case3 PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-TestAnchorPoint-Case4
+add_custom_target(morphizen-unit-test-TestAnchorPoint.Case4
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=TestAnchorPoint.Case4
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-TestAnchorPoint-Case4 PROPERTIES
+set_target_properties(morphizen-unit-test-TestAnchorPoint.Case4 PROPERTIES
     FOLDER "morphizen/unit-tests/cases/TestAnchorPoint/Case4"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TestAnchorPoint.Case4
     )
+target_sources(morphizen-unit-test-TestAnchorPoint.Case4 PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-TestAnchorPoint-Append
+add_custom_target(morphizen-unit-test-TestAnchorPoint.Append
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=TestAnchorPoint.Append
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-TestAnchorPoint-Append PROPERTIES
+set_target_properties(morphizen-unit-test-TestAnchorPoint.Append PROPERTIES
     FOLDER "morphizen/unit-tests/cases/TestAnchorPoint/Append"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TestAnchorPoint.Append
     )
+target_sources(morphizen-unit-test-TestAnchorPoint.Append PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ImmutableMapTest-InsertSingleNode
+add_custom_target(morphizen-unit-test-ImmutableMapTest.InsertSingleNode
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ImmutableMapTest.InsertSingleNode
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ImmutableMapTest-InsertSingleNode PROPERTIES
+set_target_properties(morphizen-unit-test-ImmutableMapTest.InsertSingleNode PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ImmutableMapTest/InsertSingleNode"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ImmutableMapTest.InsertSingleNode
     )
+target_sources(morphizen-unit-test-ImmutableMapTest.InsertSingleNode PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-ImmutableMapTest-InsertMultipleNodes
+add_custom_target(morphizen-unit-test-ImmutableMapTest.InsertMultipleNodes
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=ImmutableMapTest.InsertMultipleNodes
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-ImmutableMapTest-InsertMultipleNodes PROPERTIES
+set_target_properties(morphizen-unit-test-ImmutableMapTest.InsertMultipleNodes PROPERTIES
     FOLDER "morphizen/unit-tests/cases/ImmutableMapTest/InsertMultipleNodes"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=ImmutableMapTest.InsertMultipleNodes
     )
+target_sources(morphizen-unit-test-ImmutableMapTest.InsertMultipleNodes PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-PatternTest-CommutableNode
+add_custom_target(morphizen-unit-test-PatternTest.CommutableNode
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=PatternTest.CommutableNode
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-PatternTest-CommutableNode PROPERTIES
+set_target_properties(morphizen-unit-test-PatternTest.CommutableNode PROPERTIES
     FOLDER "morphizen/unit-tests/cases/PatternTest/CommutableNode"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PatternTest.CommutableNode
     )
+target_sources(morphizen-unit-test-PatternTest.CommutableNode PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-PatternTest-LoadSaveBinary
+add_custom_target(morphizen-unit-test-PatternTest.LoadSaveBinary
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=PatternTest.LoadSaveBinary
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-PatternTest-LoadSaveBinary PROPERTIES
+set_target_properties(morphizen-unit-test-PatternTest.LoadSaveBinary PROPERTIES
     FOLDER "morphizen/unit-tests/cases/PatternTest/LoadSaveBinary"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PatternTest.LoadSaveBinary
     )
+target_sources(morphizen-unit-test-PatternTest.LoadSaveBinary PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-PassContextTest-ReadFileTest
+add_custom_target(morphizen-unit-test-PassContextTest.ReadFileTest
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=PassContextTest.ReadFileTest
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-PassContextTest-ReadFileTest PROPERTIES
+set_target_properties(morphizen-unit-test-PassContextTest.ReadFileTest PROPERTIES
     FOLDER "morphizen/unit-tests/cases/PassContextTest/ReadFileTest"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PassContextTest.ReadFileTest
     )
+target_sources(morphizen-unit-test-PassContextTest.ReadFileTest PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-PassContextTest-UntarCacheTest
+add_custom_target(morphizen-unit-test-PassContextTest.UntarCacheTest
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=PassContextTest.UntarCacheTest
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-PassContextTest-UntarCacheTest PROPERTIES
+set_target_properties(morphizen-unit-test-PassContextTest.UntarCacheTest PROPERTIES
     FOLDER "morphizen/unit-tests/cases/PassContextTest/UntarCacheTest"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PassContextTest.UntarCacheTest
     )
+target_sources(morphizen-unit-test-PassContextTest.UntarCacheTest PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-PassContextTest-TestEmptyFiles
+add_custom_target(morphizen-unit-test-PassContextTest.TestEmptyFiles
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=PassContextTest.TestEmptyFiles
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-PassContextTest-TestEmptyFiles PROPERTIES
+set_target_properties(morphizen-unit-test-PassContextTest.TestEmptyFiles PROPERTIES
     FOLDER "morphizen/unit-tests/cases/PassContextTest/TestEmptyFiles"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PassContextTest.TestEmptyFiles
     )
+target_sources(morphizen-unit-test-PassContextTest.TestEmptyFiles PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-PassContextTest-TestCompress
+add_custom_target(morphizen-unit-test-PassContextTest.TestCompress
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=PassContextTest.TestCompress
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-PassContextTest-TestCompress PROPERTIES
+set_target_properties(morphizen-unit-test-PassContextTest.TestCompress PROPERTIES
     FOLDER "morphizen/unit-tests/cases/PassContextTest/TestCompress"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PassContextTest.TestCompress
     )
+target_sources(morphizen-unit-test-PassContextTest.TestCompress PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-PassContextTest-TestGzTar
+add_custom_target(morphizen-unit-test-PassContextTest.TestGzTar
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=PassContextTest.TestGzTar
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-PassContextTest-TestGzTar PROPERTIES
+set_target_properties(morphizen-unit-test-PassContextTest.TestGzTar PROPERTIES
     FOLDER "morphizen/unit-tests/cases/PassContextTest/TestGzTar"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PassContextTest.TestGzTar
     )
+target_sources(morphizen-unit-test-PassContextTest.TestGzTar PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-NodeBuilderTest-SkipSimplifiedLayerNormalization
+add_custom_target(morphizen-unit-test-NodeBuilderTest.SkipSimplifiedLayerNormalization
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=NodeBuilderTest.SkipSimplifiedLayerNormalization
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-NodeBuilderTest-SkipSimplifiedLayerNormalization PROPERTIES
+set_target_properties(morphizen-unit-test-NodeBuilderTest.SkipSimplifiedLayerNormalization PROPERTIES
     FOLDER "morphizen/unit-tests/cases/NodeBuilderTest/SkipSimplifiedLayerNormalization"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=NodeBuilderTest.SkipSimplifiedLayerNormalization
     )
+target_sources(morphizen-unit-test-NodeBuilderTest.SkipSimplifiedLayerNormalization PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-TarBallTest-TarTest
+add_custom_target(morphizen-unit-test-TarBallTest.TarTest
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=TarBallTest.TarTest
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-TarBallTest-TarTest PROPERTIES
+set_target_properties(morphizen-unit-test-TarBallTest.TarTest PROPERTIES
     FOLDER "morphizen/unit-tests/cases/TarBallTest/TarTest"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TarBallTest.TarTest
     )
+target_sources(morphizen-unit-test-TarBallTest.TarTest PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-TarBallTest-CompressTest
+add_custom_target(morphizen-unit-test-TarBallTest.CompressTest
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=TarBallTest.CompressTest
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-TarBallTest-CompressTest PROPERTIES
+set_target_properties(morphizen-unit-test-TarBallTest.CompressTest PROPERTIES
     FOLDER "morphizen/unit-tests/cases/TarBallTest/CompressTest"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TarBallTest.CompressTest
     )
+target_sources(morphizen-unit-test-TarBallTest.CompressTest PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-TarBallTest-Encrypt_Test
+add_custom_target(morphizen-unit-test-TarBallTest.Encrypt_Test
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=TarBallTest.Encrypt_Test
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-TarBallTest-Encrypt_Test PROPERTIES
+set_target_properties(morphizen-unit-test-TarBallTest.Encrypt_Test PROPERTIES
     FOLDER "morphizen/unit-tests/cases/TarBallTest/Encrypt_Test"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TarBallTest.Encrypt_Test
     )
+target_sources(morphizen-unit-test-TarBallTest.Encrypt_Test PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-PluginTest-StaticHelloPlugin
+add_custom_target(morphizen-unit-test-PluginTest.StaticHelloPlugin
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=PluginTest.StaticHelloPlugin
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-PluginTest-StaticHelloPlugin PROPERTIES
+set_target_properties(morphizen-unit-test-PluginTest.StaticHelloPlugin PROPERTIES
     FOLDER "morphizen/unit-tests/cases/PluginTest/StaticHelloPlugin"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PluginTest.StaticHelloPlugin
     )
+target_sources(morphizen-unit-test-PluginTest.StaticHelloPlugin PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-PluginTest-DynamicHelloPlugin
+add_custom_target(morphizen-unit-test-PluginTest.DynamicHelloPlugin
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=PluginTest.DynamicHelloPlugin
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-PluginTest-DynamicHelloPlugin PROPERTIES
+set_target_properties(morphizen-unit-test-PluginTest.DynamicHelloPlugin PROPERTIES
     FOLDER "morphizen/unit-tests/cases/PluginTest/DynamicHelloPlugin"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PluginTest.DynamicHelloPlugin
     )
+target_sources(morphizen-unit-test-PluginTest.DynamicHelloPlugin PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-TarEntryTest-ReadFrom
+add_custom_target(morphizen-unit-test-TarEntryTest.ReadFrom
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=TarEntryTest.ReadFrom
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-TarEntryTest-ReadFrom PROPERTIES
+set_target_properties(morphizen-unit-test-TarEntryTest.ReadFrom PROPERTIES
     FOLDER "morphizen/unit-tests/cases/TarEntryTest/ReadFrom"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TarEntryTest.ReadFrom
     )
+target_sources(morphizen-unit-test-TarEntryTest.ReadFrom PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-TarFileTest-ReadFrom
+add_custom_target(morphizen-unit-test-TarFileTest.ReadFrom
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=TarFileTest.ReadFrom
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-TarFileTest-ReadFrom PROPERTIES
+set_target_properties(morphizen-unit-test-TarFileTest.ReadFrom PROPERTIES
     FOLDER "morphizen/unit-tests/cases/TarFileTest/ReadFrom"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TarFileTest.ReadFrom
     )
+target_sources(morphizen-unit-test-TarFileTest.ReadFrom PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-TarFileTest-DoubleRead
+add_custom_target(morphizen-unit-test-TarFileTest.DoubleRead
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=TarFileTest.DoubleRead
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-TarFileTest-DoubleRead PROPERTIES
+set_target_properties(morphizen-unit-test-TarFileTest.DoubleRead PROPERTIES
     FOLDER "morphizen/unit-tests/cases/TarFileTest/DoubleRead"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TarFileTest.DoubleRead
     )
+target_sources(morphizen-unit-test-TarFileTest.DoubleRead PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-TarFileTest-WriteOverride
+add_custom_target(morphizen-unit-test-TarFileTest.WriteOverride
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=TarFileTest.WriteOverride
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-TarFileTest-WriteOverride PROPERTIES
+set_target_properties(morphizen-unit-test-TarFileTest.WriteOverride PROPERTIES
     FOLDER "morphizen/unit-tests/cases/TarFileTest/WriteOverride"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TarFileTest.WriteOverride
     )
+target_sources(morphizen-unit-test-TarFileTest.WriteOverride PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-TarFileTest-WriteTo
+add_custom_target(morphizen-unit-test-TarFileTest.WriteTo
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=TarFileTest.WriteTo
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-TarFileTest-WriteTo PROPERTIES
+set_target_properties(morphizen-unit-test-TarFileTest.WriteTo PROPERTIES
     FOLDER "morphizen/unit-tests/cases/TarFileTest/WriteTo"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TarFileTest.WriteTo
     )
+target_sources(morphizen-unit-test-TarFileTest.WriteTo PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     
-add_custom_target(morphizen-unit-test-FileStreamTest-HelloWorld
+add_custom_target(morphizen-unit-test-FileStreamTest.HelloWorld
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=FileStreamTest.HelloWorld
     DEPENDS ${TEST_EXE_NAME}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
-set_target_properties(morphizen-unit-test-FileStreamTest-HelloWorld PROPERTIES
+set_target_properties(morphizen-unit-test-FileStreamTest.HelloWorld PROPERTIES
     FOLDER "morphizen/unit-tests/cases/FileStreamTest/HelloWorld"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=FileStreamTest.HelloWorld
     )
+target_sources(morphizen-unit-test-FileStreamTest.HelloWorld PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     

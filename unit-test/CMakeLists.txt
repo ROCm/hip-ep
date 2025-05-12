@@ -46,8 +46,18 @@ target_link_libraries(${TEST_EXE_NAME}
     onnxruntime::onnxruntime
     glog::glog
     $<LINK_LIBRARY:WHOLE_ARCHIVE,morphizen-pass-init>
-    Boost::process
+
 )
+if(TARGET Boost::process)
+  # boost 1.84 does have Boost::process, and dependencies is automatically managed.
+  target_link_libraries(${TEST_EXE_NAME} PRIVATE Boost::process)
+endif()
+if(TARGET Boost::headers)
+  target_link_libraries(${TEST_EXE_NAME} PRIVATE Boost::headers
+    # boost 1.79.0 needs to specify the lib explicitly
+    Boost::filesystem)
+endif()
+
 target_include_directories(
   ${TEST_EXE_NAME}
   PRIVATE
@@ -55,16 +65,21 @@ target_include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
+
 target_compile_definitions(${TEST_EXE_NAME} PRIVATE
   -DONNX_NAMESPACE=onnx
-  -DPYTHON_EXE="$<TARGET_FILE:Python3::Interpreter>"
-  -DTEST_CWD="${CMAKE_CURRENT_BINARY_DIR}")
-add_custom_command(
-  TARGET ${TEST_EXE_NAME}
-  POST_BUILD
-  DEPENDS tgt_test_constant_initializer.onnx tgt_sample.onnx tgt_test_custom_op.onnx
-  tgt_sample_src_tar
-)
+  -DPYTHON_EXE_STR="$<TARGET_FILE:Python3::Interpreter>"
+  -DTEST_CWD_STR="${CMAKE_CURRENT_BINARY_DIR}"
+  -DMORPHIZEN_TAR_EXE_STR="$<TARGET_FILE:morphizen-tar>"
+  -DTEST_SRC_DIR_STR="${CMAKE_CURRENT_SOURCE_DIR}"
+  # avoid warning message as below
+  # Please define _WIN32_WINNT or _WIN32_WINDOWS appropriately. For example:
+  # - add -D_WIN32_WINNT=0x0601 to the compiler command line; or
+  # - add _WIN32_WINNT=0x0601 to your project's Preprocessor Definitions.
+  # Assuming _WIN32_WINNT=0x0601 (i.e. Windows 7 target).
+  -D_WIN32_WINNT=0x0601
+  )
+
 include(GoogleTest)
 gtest_discover_tests(${TEST_EXE_NAME} DISCOVERY_MODE "POST_BUILD" PROPERTIES
   ${TEST_ENV}
@@ -100,10 +115,7 @@ install(
 set_target_properties(hello_plugin_dll PROPERTIES FOLDER morphizen/unit-tests/data)
 add_dependencies(${TEST_EXE_NAME}
   tgt_pt_resnet50.onnx
-  tgt_test_constant_initializer.onnx
-  tgt_sample.onnx
   tgt_sample_src_tar
-  tgt_test_custom_op.onnx
   ${morphizen_CORE_DYNAMIC_UNIQUE_ID}
 )
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/add_gtest_debug_targets.cmake)

@@ -11,28 +11,6 @@ vaip_add_remote_target(
 )
 set_target_properties(tgt_pt_resnet50.onnx PROPERTIES FOLDER morphizen/unit-tests/data)
 
-morphizen_add_python_target (
-  TARGET tgt_test_constant_initializer.onnx
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/test_constant_initializer.onnx
-  SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/vaip/test_constant_initializer.py
-  ARGS ${CMAKE_CURRENT_BINARY_DIR}/test_constant_initializer.onnx
-  FOLDER "morphizen/unit-tests/data"
-)
-morphizen_add_python_target (
-  TARGET tgt_sample.onnx
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/sample.onnx
-  SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/vaip/create_sample_onnx_model.py
-  ARGS ${CMAKE_CURRENT_BINARY_DIR}/sample.onnx
-  FOLDER "morphizen/unit-tests/data"
-)
-morphizen_add_python_target (
-  TARGET tgt_test_custom_op.onnx
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/test_costom_op.onnx
-  SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/vaip/test_custom_op.py
-  ARGS ${CMAKE_CURRENT_BINARY_DIR}/test_costom_op.onnx
-  FOLDER "morphizen/unit-tests/data"
-)
-
 add_custom_target(tgt_sample_src_tar
   COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/sample_src_tar
   COMMAND ${CMAKE_COMMAND} -E echo hello >${CMAKE_CURRENT_BINARY_DIR}/sample_src_tar/hello.txt

@@ -13,17 +13,23 @@ CURRENT_DIR = pathlib.Path(
 test_executable = sys.argv[1]  # Get the test executable from command line arguments
 
 TEMPLATE = r"""
-add_custom_target(morphizen-unit-test-{suite}-{case}
+add_custom_target(morphizen-unit-test-{suite}.{case}
     COMMAND $<TARGET_FILE:${{TEST_EXE_NAME}}> --gtest_filter={suite}.{case}
     DEPENDS ${{TEST_EXE_NAME}}
     WORKING_DIRECTORY ${{CMAKE_CURRENT_BINARY_DIR}}
     )
-set_target_properties(morphizen-unit-test-{suite}-{case} PROPERTIES
+set_target_properties(morphizen-unit-test-{suite}.{case} PROPERTIES
     FOLDER "morphizen/unit-tests/cases/{suite}/{case}"
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:${{TEST_EXE_NAME}}>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter={suite}.{case}
     )
+target_sources(morphizen-unit-test-{suite}.{case} PRIVATE
+        cmake/generate_gtest_targets_for_debugging.py
+        cmake/generated_gtest_targets.cmake
+)
+source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
+source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
     """
 # Run the test executable and capture its output
@@ -56,6 +62,6 @@ fname = CURRENT_DIR / "generated_gtest_targets.cmake"
 with open(fname, "w") as f:
     for test_case in test_cases:
         # Write the formatted string to the file
-        f.write(TEMPLATE.format(**test_case))
+        f.write(TEMPLATE.format(**{**test_case}))
 
 print(f"write to {fname} successfully")

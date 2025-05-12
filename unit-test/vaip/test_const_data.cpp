@@ -3,7 +3,8 @@
  * Licensed under the MIT License.
  */
 
-#include "debug_logger.hpp"
+#include "test_environment.hpp"
+#include <boost/process.hpp>
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
@@ -12,14 +13,23 @@
 //
 #include "morphizen/vaip.hpp"
 #include "unit_test_env_params.hpp"
-
-class ConstDataTest : public DebugLogger {
+const static std::filesystem::path TEST_CONSTANT_INITIALIZER_ONNX =
+    TEST_CWD / "test_constant_initializer.onnx";
+class ConstDataTest : public ::testing::Test {
 public:
   template <typename F> void run_test(F check) {
-    LOG(INFO) << "LOADING " << ENV_PARAM(TEST_CONSTANT_INITIALIZER_ONNX)
-              << std::endl;
-    auto model =
-        vaip_cxx::Model::load(ENV_PARAM(TEST_CONSTANT_INITIALIZER_ONNX));
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!std::filesystem::exists(TEST_CONSTANT_INITIALIZER_ONNX)) {
+      auto exit_code = boost::process::system(
+          PYTHON_EXE.u8string(),
+          (TEST_SRC_DIR / "vaip" / "test_constant_initializer.py").u8string(),
+          TEST_CONSTANT_INITIALIZER_ONNX.u8string());
+      ASSERT_TRUE(exit_code == 0) << "Failed to generate test file";
+      ASSERT_TRUE(std::filesystem::exists(TEST_CONSTANT_INITIALIZER_ONNX));
+    }
+    LOG(INFO) << "LOADING " << TEST_CONSTANT_INITIALIZER_ONNX << std::endl;
+    auto model = vaip_cxx::Model::load(TEST_CONSTANT_INITIALIZER_ONNX);
     auto cloned_model = model->ref().clone();
     graph = std::make_unique<vaip_cxx::GraphRef>(cloned_model->main_graph());
     graph->resolve();
