@@ -159,7 +159,7 @@ std::shared_ptr<void> init_interpreter() {
   if (!Py_IsInitialized()) {
     static py::scoped_interpreter inter{};
     auto p = static_cast<void*>(&inter);
-    ret = std::shared_ptr<void>(p, [](void* p) {});
+    ret = std::shared_ptr<void>(p, [](void* /*p*/) {});
     py_interpreter_holder = ret;
   }
   if (!ret) {

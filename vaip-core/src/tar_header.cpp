@@ -73,7 +73,7 @@ void TarHeader::allocate_block() {
   } else {
     block_.resize(BLOCKSIZE); // Allocate one block
   }
-  std::fill(std::begin(block_), std::end(block_), 0);
+  std::fill(std::begin(block_), std::end(block_), static_cast<char>(0));
 }
 bool TarHeader::write_header(std::ostream& os) {
   construct_header();
