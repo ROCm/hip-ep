@@ -141,6 +141,8 @@ public:
     AddOp("com.xilinx", XilinxCustomOp::create("NoOp"));
     AddOp("com.xilinx", XilinxCustomOp::create("QMHAMask"));
     AddOp("com.xilinx", XilinxCustomOp::create("RowWiseConcat"));
+    AddOp("com.xilinx", XilinxCustomOp::create("QMatMul_QRopeConst"));
+    AddOp("com.xilinx", XilinxCustomOp::create("QMatMul_QRopeInput"));
     return 0;
   }
 };
