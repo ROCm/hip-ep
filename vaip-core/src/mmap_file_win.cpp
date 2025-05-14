@@ -66,7 +66,8 @@ std::unique_ptr<MemFile> MemFileWin::create(const std::filesystem::path& path) {
   auto handle = CreateFileW(
       path.wstring().c_str(),
       GENERIC_READ | GENERIC_WRITE, // for some reason doesn't work w/o write
-      0, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+      FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
+      FILE_ATTRIBUTE_NORMAL, nullptr);
   if (handle == INVALID_HANDLE_VALUE) {
     std::string error_msg = "CreateFileW failed: " + GetLastErrorAsString();
     throw std::runtime_error(error_msg);
