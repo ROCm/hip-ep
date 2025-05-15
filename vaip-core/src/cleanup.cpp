@@ -4,6 +4,7 @@
  */
 #include "./cleanup.hpp"
 #include "morphizen/env_config.hpp"
+#include "morphizen/vaip.hpp"
 #include <functional>
 #include <glog/logging.h>
 #include <utility>
@@ -21,6 +22,8 @@ void add_cleanup_function(const std::string& name,
 }
 
 void deinitialize_onnxruntime_vitisai_ep() {
+  // it is not safe to call glog() any longer
+  // deinitialize_onnxruntime_vitisai_ep might be called again.
   MY_LOG(1) << "deinitialize_onnxruntime_vitisai_ep() called";
   for (auto& cleanup : g_at_exits) {
     MY_LOG(1) << "cleanup function: " << cleanup.first;
@@ -28,5 +31,8 @@ void deinitialize_onnxruntime_vitisai_ep() {
   }
   g_at_exits.clear();
   MY_LOG(1) << "deinitialize_onnxruntime_vitisai_ep() done";
+  // it is possible that the deinitialization is called multiple times, and
+  // after glog is deconstructed it is not safe to call MY_LOG any longer
+  ENV_PARAM(MORPHIZEN_DEBUG_DEINITIALIZE) = 0;
 }
 } // namespace vaip_core

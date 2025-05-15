@@ -60,5 +60,8 @@ struct VaipOrtApi2 {
   DECL_VAIP_ORT_OPTIONAL_API(TensorProto*, tensor_proto_new_u4)
   DECL_VAIP_ORT_OPTIONAL_API(TensorProto*, tensor_proto_new_i4)
   DECL_VAIP_ORT_OPTIONAL_API(bool, is_profiling_enabled)
+  DECL_VAIP_ORT_OPTIONAL_API_with_fallback(void, cleanup_vaip)() {
+    // do nothing.
+  }
 };
 } // namespace vaip_core
