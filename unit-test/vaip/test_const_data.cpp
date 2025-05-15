@@ -17,19 +17,19 @@ const static std::filesystem::path TEST_CONSTANT_INITIALIZER_ONNX =
     TEST_CWD / "test_constant_initializer.onnx";
 class ConstDataTest : public ::testing::Test {
 public:
-  template <typename F> void run_test(F check) {
-    static std::mutex mutex;
-    std::lock_guard<std::mutex> lock(mutex);
-    if (!std::filesystem::exists(TEST_CONSTANT_INITIALIZER_ONNX)) {
-      auto exit_code = boost::process::system(
-          PYTHON_EXE.u8string(),
-          (TEST_SRC_DIR / "vaip" / "test_constant_initializer.py").u8string(),
-          TEST_CONSTANT_INITIALIZER_ONNX.u8string());
-      ASSERT_TRUE(exit_code == 0) << "Failed to generate test file";
-      ASSERT_TRUE(std::filesystem::exists(TEST_CONSTANT_INITIALIZER_ONNX));
-    }
-    LOG(INFO) << "LOADING " << TEST_CONSTANT_INITIALIZER_ONNX << std::endl;
-    auto model = vaip_cxx::Model::load(TEST_CONSTANT_INITIALIZER_ONNX);
+  template <typename F> void run_test(int line, F check) {
+    auto test_constant_initializer_onnx =
+        TEST_CWD / (std::string("test_constant_initializer_") +
+                    std::to_string(line) + ".onnx")
+                       .c_str();
+    auto exit_code = boost::process::system(
+        PYTHON_EXE.u8string(),
+        (TEST_SRC_DIR / "vaip" / "test_constant_initializer.py").u8string(),
+        test_constant_initializer_onnx.u8string());
+    ASSERT_TRUE(exit_code == 0) << "Failed to generate test file";
+    ASSERT_TRUE(std::filesystem::exists(test_constant_initializer_onnx));
+    LOG(INFO) << "LOADING " << test_constant_initializer_onnx << std::endl;
+    auto model = vaip_cxx::Model::load(test_constant_initializer_onnx);
     auto cloned_model = model->ref().clone();
     graph = std::make_unique<vaip_cxx::GraphRef>(cloned_model->main_graph());
     graph->resolve();
@@ -41,7 +41,7 @@ public:
 };
 
 TEST_F(ConstDataTest, int8_scalar) {
-  run_test([this]() {
+  run_test(__LINE__, [this]() {
     auto const_value_opt = graph->find_node_arg("const_int8_scalar");
     ASSERT_TRUE(const_value_opt);
     EXPECT_EQ(const_value_opt.value().element_type(),
@@ -52,7 +52,7 @@ TEST_F(ConstDataTest, int8_scalar) {
 }
 
 TEST_F(ConstDataTest, int8) {
-  run_test([this]() {
+  run_test(__LINE__, [this]() {
     auto const_value_opt = graph->find_node_arg("const_int8");
     ASSERT_TRUE(const_value_opt);
     EXPECT_EQ(const_value_opt.value().element_type(),
@@ -65,7 +65,7 @@ TEST_F(ConstDataTest, int8) {
 }
 
 TEST_F(ConstDataTest, uint8_scalar) {
-  run_test([this]() {
+  run_test(__LINE__, [this]() {
     auto const_value_opt = graph->find_node_arg("const_uint8_scalar");
     ASSERT_TRUE(const_value_opt);
     EXPECT_EQ(const_value_opt.value().element_type(),
@@ -76,7 +76,7 @@ TEST_F(ConstDataTest, uint8_scalar) {
 }
 
 TEST_F(ConstDataTest, uint8) {
-  run_test([this]() {
+  run_test(__LINE__, [this]() {
     auto const_value_opt = graph->find_node_arg("const_uint8");
     ASSERT_TRUE(const_value_opt);
     EXPECT_EQ(const_value_opt.value().element_type(),
@@ -89,7 +89,7 @@ TEST_F(ConstDataTest, uint8) {
 }
 
 TEST_F(ConstDataTest, int16_scalar) {
-  run_test([this]() {
+  run_test(__LINE__, [this]() {
     auto const_value_opt = graph->find_node_arg("const_int16_scalar");
     ASSERT_TRUE(const_value_opt);
     EXPECT_EQ(const_value_opt.value().element_type(),
@@ -100,7 +100,7 @@ TEST_F(ConstDataTest, int16_scalar) {
 }
 
 TEST_F(ConstDataTest, int16) {
-  run_test([this]() {
+  run_test(__LINE__, [this]() {
     auto const_value_opt = graph->find_node_arg("const_int16");
     ASSERT_TRUE(const_value_opt);
     EXPECT_EQ(const_value_opt.value().element_type(),
@@ -113,7 +113,7 @@ TEST_F(ConstDataTest, int16) {
 }
 
 TEST_F(ConstDataTest, uint16_scalar) {
-  run_test([this]() {
+  run_test(__LINE__, [this]() {
     auto const_value_opt = graph->find_node_arg("const_uint16_scalar");
     ASSERT_TRUE(const_value_opt);
     EXPECT_EQ(const_value_opt.value().element_type(),
@@ -124,7 +124,7 @@ TEST_F(ConstDataTest, uint16_scalar) {
 }
 
 TEST_F(ConstDataTest, uint16) {
-  run_test([this]() {
+  run_test(__LINE__, [this]() {
     auto const_value_opt = graph->find_node_arg("const_uint16");
     ASSERT_TRUE(const_value_opt);
     EXPECT_EQ(const_value_opt.value().element_type(),
@@ -137,7 +137,7 @@ TEST_F(ConstDataTest, uint16) {
 }
 
 TEST_F(ConstDataTest, int32_scalar) {
-  run_test([this]() {
+  run_test(__LINE__, [this]() {
     auto const_value_opt = graph->find_node_arg("const_int32_scalar");
     ASSERT_TRUE(const_value_opt);
     EXPECT_EQ(const_value_opt.value().element_type(),
@@ -148,7 +148,7 @@ TEST_F(ConstDataTest, int32_scalar) {
 }
 
 TEST_F(ConstDataTest, int32) {
-  run_test([this]() {
+  run_test(__LINE__, [this]() {
     auto const_value_opt = graph->find_node_arg("const_int32");
     ASSERT_TRUE(const_value_opt);
     EXPECT_EQ(const_value_opt.value().element_type(),
@@ -161,7 +161,7 @@ TEST_F(ConstDataTest, int32) {
 }
 
 TEST_F(ConstDataTest, uint32_scalar) {
-  run_test([this]() {
+  run_test(__LINE__, [this]() {
     auto const_value_opt = graph->find_node_arg("const_uint32_scalar");
     ASSERT_TRUE(const_value_opt);
     EXPECT_EQ(const_value_opt.value().element_type(),
@@ -172,7 +172,7 @@ TEST_F(ConstDataTest, uint32_scalar) {
 }
 
 TEST_F(ConstDataTest, uint32) {
-  run_test([this]() {
+  run_test(__LINE__, [this]() {
     auto const_value_opt = graph->find_node_arg("const_uint32");
     ASSERT_TRUE(const_value_opt);
     EXPECT_EQ(const_value_opt.value().element_type(),
@@ -185,7 +185,7 @@ TEST_F(ConstDataTest, uint32) {
 }
 
 TEST_F(ConstDataTest, int64_scalar) {
-  run_test([this]() {
+  run_test(__LINE__, [this]() {
     auto const_value_opt = graph->find_node_arg("const_int64_scalar");
     ASSERT_TRUE(const_value_opt);
     EXPECT_EQ(const_value_opt.value().element_type(),
@@ -196,7 +196,7 @@ TEST_F(ConstDataTest, int64_scalar) {
 }
 
 TEST_F(ConstDataTest, int64) {
-  run_test([this]() {
+  run_test(__LINE__, [this]() {
     auto const_value_opt = graph->find_node_arg("const_int64");
     ASSERT_TRUE(const_value_opt);
     EXPECT_EQ(const_value_opt.value().element_type(),
@@ -209,7 +209,7 @@ TEST_F(ConstDataTest, int64) {
 }
 
 TEST_F(ConstDataTest, uint64_scalar) {
-  run_test([this]() {
+  run_test(__LINE__, [this]() {
     auto const_value_opt = graph->find_node_arg("const_uint64_scalar");
     ASSERT_TRUE(const_value_opt);
     EXPECT_EQ(const_value_opt.value().element_type(),
@@ -220,7 +220,7 @@ TEST_F(ConstDataTest, uint64_scalar) {
 }
 
 TEST_F(ConstDataTest, uint64) {
-  run_test([this]() {
+  run_test(__LINE__, [this]() {
     auto const_value_opt = graph->find_node_arg("const_uint64");
     ASSERT_TRUE(const_value_opt);
     EXPECT_EQ(const_value_opt.value().element_type(),
