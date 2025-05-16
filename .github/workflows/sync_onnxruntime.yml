@@ -22,6 +22,12 @@ jobs:
         os: [ windows_vitisai ]
 
     steps:
+      - name: Checkout code
+          uses: actions/checkout@v4
+          with:
+            submodules: true
+            fetch-depth: 0  # Fetch all history for all branches and tags
+
       - name: Checkout VitisAI/onnxruntime
         uses: actions/checkout@v4
         with:
