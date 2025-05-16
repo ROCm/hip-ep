@@ -17,5 +17,6 @@ set(MORPHIZEN_COMPILER_OPTIONS
 )
 
 set(MORPHIZEN_LINKER_OPTIONS
-  "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--no-undefined"
+  "-ggdb"
+  "-Wl,--no-undefined"
   CACHE STRING "Linker options for Morphizen")
