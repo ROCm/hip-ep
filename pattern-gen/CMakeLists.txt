@@ -9,7 +9,7 @@ project(
   LANGUAGES C CXX)
 find_package(glog REQUIRED)
 set(EXEC_NAME morphizen-pattern-gen)
-add_executable(${EXEC_NAME} onnx_pattern_gen.cpp)
+add_executable(${EXEC_NAME} onnx_pattern_gen.cpp ${ryzenai_version_rc_file})
 target_include_directories(${EXEC_NAME}
                            PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 find_package(onnxruntime REQUIRED)

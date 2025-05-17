@@ -9,7 +9,7 @@ project(
   LANGUAGES C CXX)
 find_package(glog REQUIRED)
 set(EXEC_NAME morphizen-onnx-grep)
-add_executable(${EXEC_NAME} onnx_grep.cpp)
+add_executable(${EXEC_NAME} onnx_grep.cpp ${ryzenai_version_rc_file})
 target_include_directories(${EXEC_NAME}
                            PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 find_package(onnxruntime REQUIRED)

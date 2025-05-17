@@ -6,7 +6,7 @@ cmake_minimum_required(VERSION 3.5)
 project(morphizen-graph-opt VERSION 1.0.0 LANGUAGES C CXX)
 find_package(glog REQUIRED)
 set(EXEC_NAME morphizen-graph-opt)
-add_executable(${EXEC_NAME} graph-opt.cpp)
+add_executable(${EXEC_NAME} graph-opt.cpp ${ryzenai_version_rc_file})
 target_include_directories(${EXEC_NAME}
   PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../common

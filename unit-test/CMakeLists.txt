@@ -36,6 +36,7 @@ add_executable(${TEST_EXE_NAME}
   vaip/test_mmap_file.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/debug_logger.hpp
   ${CMAKE_CURRENT_BINARY_DIR}/unit_test_env_params.hpp
+  ${ryzenai_version_rc_file}
 )
 set_target_properties(${TEST_EXE_NAME} PROPERTIES FOLDER morphizen/unit-tests)
 find_package(onnxruntime REQUIRED)
@@ -105,7 +106,7 @@ set_target_properties(${TEST_EXE_NAME} PROPERTIES
 )
 
 ## for test hello_plugin test
-add_library(hello_plugin_dll SHARED vaip/hello_plugin.cpp)
+add_library(hello_plugin_dll SHARED vaip/hello_plugin.cpp ${ryzenai_version_rc_file})
 install(
  TARGETS hello_plugin_dll
  RUNTIME DESTINATION bin
