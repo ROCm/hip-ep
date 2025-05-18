@@ -23,7 +23,13 @@ DEF_ENV_PARAM(XLNX_ENABLE_BATCH, "0")
 DEF_ENV_PARAM(NUM_OF_DPU_RUNNERS, "1")
 DEF_ENV_PARAM_2(VAIP_CONFIG_PROVIDER_BACKEND, "onnxruntime_vitisai_ep",
                 std::string)
-
+// this is actually provider options, for backward compatibility, we keep
+// this key in the root of the json.
+static constexpr char kProviderOptions[] = "sessionOptions";
+static constexpr char kSessionConfig[] = "ort_session_config";
+static constexpr char kSessionOptionPtr[] = "session_options";
+static constexpr char kEpProviderOptionPrefix[] =
+    "ep.vitisaiexecutionprovider.";
 namespace vaip_core {
 static const char* get_default_config() {
 #include "config_json_binary.hpp"
@@ -142,6 +148,24 @@ update_log_level(const onnxruntime::ProviderOptions& session_option) {
     FLAGS_minloglevel = google::GLOG_ERROR;
   }
 }
+static void set_session_config(google::protobuf::Struct& ret,
+                               const std::string& key,
+                               const std::string& value) {
+  if (key.rfind(kEpProviderOptionPrefix, 0) == 0) {
+    auto key2 = key.substr(sizeof(kEpProviderOptionPrefix) - 1);
+    MY_LOG(1) << "convert " << key << " to " << key2 << " and set "
+              << "provider_options"
+              << "[" << key2 << "]=\"" << value << "\"";
+    // The key is prefixed with "ep.vitisaiexecutionprovider."
+    // Remove the prefix before setting the value.
+    set_struct_value(ret, kProviderOptions, key2, value);
+  } else {
+    MY_LOG(1) << "set " << kSessionConfig << "[" << key << "]=\"" << value
+              << "\"";
+    set_struct_value(ret, kSessionConfig, key, value);
+  }
+}
+
 static void restore_session_options(google::protobuf::Struct& ret,
                                     std::string entry_second) {
   std::map<std::string, std::string> session_config_options_entry_list = {};
@@ -161,7 +185,7 @@ static void restore_session_options(google::protobuf::Struct& ret,
                << ", session options will not be restored.";
 #endif
   for (const auto& option : session_config_options_entry_list) {
-    set_struct_value(ret, "ort_session_config", option.first, option.second);
+    set_session_config(ret, option.first, option.second);
   }
 }
 
@@ -229,22 +253,31 @@ get_config_json(const onnxruntime::ProviderOptions& options) {
   }
   auto xclbin_in_config_file =
       ret.fields().find("xclbin") != ret.fields().end();
+  const std::string ort_session_config_prefix =
+      std::string(kSessionConfig) + ".";
+
   for (const auto& entry : options) {
-    // In the case where xclbin are (mistakenly) specified both in
-    // `ProviderOptions["config_file"]` and in `ProvidersOptions["xclbin"]`.
+    MY_LOG(1) << "process \"" << entry.first << "\"= \"" << entry.second
+              << "\"";
     if (entry.first == "xclbin" && xclbin_in_config_file) {
-      continue;
-    }
-    if (entry.first == "session_options") {
+      // FIXME: below comments might not be accurate.
+      //
+      // In the case where xclbin are (mistakenly) specified both in
+      // `ProviderOptions["config_file"]` and in `ProvidersOptions["xclbin"]`.
+    } else if (entry.first == kSessionOptionPtr) {
       // The key here is "session_options," and the value is a string that
       // points to the session_options object.
       restore_session_options(ret, entry.second);
-      continue;
+    } else if (entry.first.rfind(ort_session_config_prefix, 0) == 0) {
+      set_session_config(ret,
+                         entry.first.substr(ort_session_config_prefix.size()),
+                         entry.second);
+    } else {
+      MY_LOG(1) << "set "
+                << "provider_options"
+                << "[" << entry.first << "]=\"" << entry.second << "\"";
+      set_struct_value(ret, kProviderOptions, entry.first, entry.second);
     }
-    // this is actually provider options, for backward compatibility, we keep
-    // this key in the root of the json.
-    auto kProviderOptions = "sessionOptions";
-    set_struct_value(ret, kProviderOptions, entry.first, entry.second);
   }
   return ret;
 }
