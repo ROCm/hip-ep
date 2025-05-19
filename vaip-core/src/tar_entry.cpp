@@ -25,14 +25,14 @@ TarEntryInputStreamBuffer::TarEntryInputStreamBuffer(
     std::streambuf::pos_type block_end_pos,      // end of the tar entry.
     std::shared_ptr<std::istream> stream,        //
     std::size_t bufferSize)
-    : path_{name},                               //
-      real_path_{real_path},                     //
-      data_begin_pos_{data_begin_pos},           //
-      data_end_pos_{data_end_pos},               //
-      block_begin_pos_{block_begin_pos},         //
-      block_end_pos_{block_end_pos},             //
-      buffer_pos_{block_begin_pos},              //
-      stream_{stream},                           //
+    : path_{name},                       //
+      real_path_{real_path},             //
+      data_begin_pos_{data_begin_pos},   //
+      data_end_pos_{data_end_pos},       //
+      block_begin_pos_{block_begin_pos}, //
+      block_end_pos_{block_end_pos},     //
+      buffer_pos_{block_begin_pos},      //
+      stream_{stream},                   //
       buffer_(bufferSize) {
   setg(buffer_.data(), buffer_.data(), buffer_.data());
   // does not support writing.
@@ -197,8 +197,8 @@ std::string TarEntryInputStream::md5() {
   if (!this->good()) {
     MY_LOG(1) << "seekg failed. begin_pos=" << 0 << "size=" << size() //
               << " stream " << this->tellg() << "stream.fail() " << this->fail()
-              << " "                                                  //
-              << "stream.bad() " << this->bad() << " "                //
+              << " "                                   //
+              << "stream.bad() " << this->bad() << " " //
         ;
     return "";
   }
@@ -250,7 +250,7 @@ static std::string calculate_md5(std::istream& str, std::streampos begin_pos,
   // calculate md5 sum of the stream
   str.seekg(begin_pos);
   CHECK(str.good()) << "seekg failed. begin_pos=" << begin_pos
-                    << "size=" << size                     //
+                    << "size=" << size //
                     << " stream " << str.tellg() << "stream.fail() "
                     << str.fail() << " "                   //
                     << "stream.bad() " << str.bad() << " " //

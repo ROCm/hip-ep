@@ -167,7 +167,7 @@ const Node& NodeBuilder::build() {
                 << "new_node " << node_as_string(newly_added_node) << " "    //
                 << "name_suffix " << name_with_suffix << " "                 //
                 << "anchor_point_ " << anchor_point_[i]->op_debug_string()
-                << " "                                                       //
+                << " " //
           ;
       if (existing_node.has_value()) {
         auto existing_node_args = existing_node.value().outputs();
@@ -189,7 +189,7 @@ const Node& NodeBuilder::build() {
                 << "new_node " << node_as_string(newly_added_node) << " "    //
                 << "name_suffix " << name_with_suffix << " "                 //
                 << "anchor_point_ " << anchor_point_[i]->op_debug_string()
-                << " "                                                       //
+                << " " //
           ;
       anchor_point_[i]->insert_into_context(*pass_);
     }

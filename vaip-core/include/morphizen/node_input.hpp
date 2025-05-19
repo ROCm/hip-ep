@@ -88,6 +88,6 @@ private:
   GraphConstRef graph_;      // The graph that the input belongs to.
   NodeArgConstRef node_arg_; // The node argument associated with the input.
   std::optional<NodeConstRef>
-      node_;                 // The node that the input is connected to, if any.
+      node_; // The node that the input is connected to, if any.
 };
 } // namespace vaip_cxx

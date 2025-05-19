@@ -385,7 +385,7 @@ private:
   virtual void fill_ops_name(std::vector<std::string>& list_of_ops_name) const;
 
 private:
-  int id_;                      // The ID of the pattern.
+  int id_; // The ID of the pattern.
   std::shared_ptr<std::unordered_map<std::string, int>>
       name_to_ids_;             // A shared pointer to a map of names to IDs.
   friend struct PatternBuilder; // Friend struct for pattern building.

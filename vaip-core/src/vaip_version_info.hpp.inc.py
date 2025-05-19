@@ -4,8 +4,6 @@
 #
 import sys
 import os
-import re
-from datetime import datetime
 import pathlib
 import subprocess
 
@@ -132,7 +130,7 @@ def get_dir_version_info(path):
         git_hash = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=path, text=True
         ).strip()
-    except subprocess.CalledProcessError as e:
+    except subprocess.CalledProcessError:
         print(f"Error while getting morphizen git hash {path}")
         return "N/A", "N/A"
 
@@ -140,7 +138,7 @@ def get_dir_version_info(path):
         git_branch = subprocess.check_output(
             ["git", "branch", "--show-current"], cwd=path, text=True
         ).strip()
-    except subprocess.CalledProcessError as e:
+    except subprocess.CalledProcessError:
         print(f"Error while getting morphizen git branch {path}")
         return "N/A", "N/A"
     git_branch = git_hash[0:6]
@@ -180,7 +178,6 @@ def main2(workspace_directory):
 
 
 def get_version_info_for_rc():
-    project_directory = pathlib.Path(__file__).parent.parent.parent
     # Run a command and capture its output
     return {
         "GIT_COMMIT": "N/A",

@@ -46,7 +46,6 @@ def generate_map(xclbin_root_path):
             data_str += "{" + compressed_str + "};\n"
 
             basename = '"' + os.path.basename(file) + '"'
-            compressed_arr = "{" + compressed_str + "}"
             info = (
                 "CompressionInfo("
                 + variable_name

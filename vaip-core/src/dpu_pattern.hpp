@@ -10,7 +10,7 @@ struct SimpleConvPattern {
   std::shared_ptr<Pattern> weight_fix_;
   std::shared_ptr<Pattern> bias_fix_; // optional
   std::shared_ptr<Pattern> conv_;
-  std::shared_ptr<Pattern> relu_;     // optional
+  std::shared_ptr<Pattern> relu_; // optional
   std::shared_ptr<Pattern> end_fix_;
 };
 

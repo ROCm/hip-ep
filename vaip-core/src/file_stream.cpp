@@ -13,15 +13,15 @@ FileBuf::FileBuf(FILE* file, std::size_t bufferSize) {
   if (!file_) {
     throw std::runtime_error("Invalid FILE* provided");
   }
-  buffer_.resize(bufferSize_ + 1);    // Extra space for safety
+  buffer_.resize(bufferSize_ + 1); // Extra space for safety
   setg(buffer_.data(), buffer_.data(),
-       buffer_.data());               // Set read buffer
+       buffer_.data()); // Set read buffer
   setp(buffer_.data(),
        buffer_.data() + bufferSize_); // Set write buffer
 }
 
 FileBuf::~FileBuf() {
-  sync();          // Ensure all data is flushed before destruction
+  sync(); // Ensure all data is flushed before destruction
   if (file_) {
     fclose(file_); // Close the file if it was opened
   }

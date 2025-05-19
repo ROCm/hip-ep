@@ -3,10 +3,6 @@
 # Licensed under the MIT License.
 #
 import sys
-import json
-import codecs
-import re
-from pathlib import Path
 
 
 def get_escape_json_str(path):

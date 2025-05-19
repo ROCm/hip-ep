@@ -35,7 +35,7 @@ def main(argv):
                 f"/*{i:08x} */  {hex_chunk:<{args.column * 3}}, /* {ascii_chunk} */",
                 file=output_fh,
             )
-        print(f"0x00}};", file=output_fh)
+        print("0x00};", file=output_fh)
 
 
 if __name__ == "__main__":

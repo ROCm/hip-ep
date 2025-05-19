@@ -285,9 +285,15 @@ md5                                      size   blk-begin     blk-end  data-begi
 }
 static void check_abc(vaip_core::TarFile* tar_file_obj) {
   check_entries(tar_file_obj->entries());
-  { read_and_check("a.txt", *tar_file_obj, "world!"); }
-  { read_and_check("b.txt", *tar_file_obj, "hello"); }
-  { read_and_check("c.txt", *tar_file_obj, "hello"); }
+  {
+    read_and_check("a.txt", *tar_file_obj, "world!");
+  }
+  {
+    read_and_check("b.txt", *tar_file_obj, "hello");
+  }
+  {
+    read_and_check("c.txt", *tar_file_obj, "hello");
+  }
 }
 
 TEST(TarFileTest, WriteTo) {
@@ -308,14 +314,26 @@ TEST(TarFileTest, WriteTo) {
     auto tar_file_obj = vaip_core::TarFile::create(std::move(tarStream));
     ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
     LOG(INFO) << " ====== begin to write to tar file. ==== ";
-    { write_to_stream("a.txt", *tar_file_obj, "hello"); }
-    { write_to_stream("b.txt", *tar_file_obj, "hello"); }
-    { write_to_stream("c.txt", *tar_file_obj, "hello"); }
-    { write_to_stream("a.txt", *tar_file_obj, "hello"); }
+    {
+      write_to_stream("a.txt", *tar_file_obj, "hello");
+    }
+    {
+      write_to_stream("b.txt", *tar_file_obj, "hello");
+    }
+    {
+      write_to_stream("c.txt", *tar_file_obj, "hello");
+    }
+    {
+      write_to_stream("a.txt", *tar_file_obj, "hello");
+    }
     // write to the same file with different data
-    { write_to_stream("a.txt", *tar_file_obj, "world!"); }
+    {
+      write_to_stream("a.txt", *tar_file_obj, "world!");
+    }
     // write to the same file with same data
-    { write_to_stream("b.txt", *tar_file_obj, "hello"); }
+    {
+      write_to_stream("b.txt", *tar_file_obj, "hello");
+    }
     LOG(INFO) << " ====== end write to tar file. ==== ";
     LOG(INFO) << " ====== begin to read and check ==== ";
     check_abc(tar_file_obj.get());
