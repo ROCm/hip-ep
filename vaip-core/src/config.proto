@@ -57,6 +57,7 @@ message ConfigProto {
   string onnx_md5_a = 18;
   string onnx_md5_b = 19;
   map<string, string> qos_provider_options = 20;
+  optional bool enable_preemption = 21;
   // static table for whitelist for xclbin, vaip_config
   repeated MepConfigTable mep_table = 100;
 
