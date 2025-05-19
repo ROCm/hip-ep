@@ -57,10 +57,10 @@ file. It is only applicable for non-embed model.
   auto session_options = Ort::SessionOptions();
   session_options.AddConfigEntry("ep.context_enable", "1");
   session_options.AddConfigEntry("ep.context_embed_mode", "0");
-  session_options.AddConfigEntry("ep.shared_contexts", "1");
+  session_options.AddConfigEntry("ep.share_ep_contexts", "1");
 ```
 
-VitisAI EP would raises an exception if `ep.ep_shared_contexts=1`
+VitisAI EP would raises an exception if `ep.share_ep_contexts=1`
 however `ep.context_embed_mode=1`
 
 In this case, it is suggested that all onnx models are put into a same
@@ -81,7 +81,7 @@ B.onnx
 C.onnx
 ```
 
-when `ep.shared_contexts=0`, it would generates the following files.
+when `ep.share_ep_contexts=0`, it would generates the following files.
 
 ```
 A.onnx
@@ -95,7 +95,7 @@ C_ctx.onnx
 C_ctx.onnx_VITISAI.bin
 ```
 
-when `ep.shared_contexts=1`, it would generates the following files.
+when `ep.share_ep_contexts=1`, it would generates the following files.
 
 ```
 VITISAI.bin
