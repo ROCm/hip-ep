@@ -3,252 +3,137 @@
  * Licensed under the MIT License.
  */
 
+#define EIGEN_USE_THREADS
 #include "morphizen/transpose.hpp"
+#include "cleanup.hpp"
 #include "morphizen/env_config.hpp"
-#include <algorithm>
-#include <chrono>
 #include <glog/logging.h>
-
+#ifndef _WIN32
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wconversion"
+#  pragma GCC diagnostic ignored "-Wfloat-conversion"
+#endif
+#include <unsupported/Eigen/CXX11/Tensor>
+#include <unsupported/Eigen/CXX11/ThreadPool>
+#ifndef _WIN32
+#  pragma GCC diagnostic pop
+#endif
+DEF_ENV_PARAM(NUM_OF_ENGINE_THREAD, "4")
 namespace {
 
-inline void calc_dst_shape_and_flat_src_step(const int* src_shape,
-                                             const int* perm, const int& NDIMS,
-                                             int* dst_shape,
-                                             int* flat_src_step) {
-  for (int i = 0; i < NDIMS; ++i) {
-    dst_shape[i] = src_shape[NDIMS - 1 - perm[i]];
+struct EigenThreadPool {
+public:
+  EigenThreadPool(int num_threads)
+      : pool_(std::make_unique<Eigen::ThreadPool>(num_threads)),
+        device_(std::make_unique<Eigen::ThreadPoolDevice>(pool_.get(),
+                                                          num_threads)) {}
+  void Clear() {
+    device_.reset();
+    pool_.reset();
   }
-  int p_inv[5];
-  for (int i = 0; i < NDIMS; ++i) {
-    p_inv[i] = NDIMS - 1 - perm[i];
+  ~EigenThreadPool() { Clear(); }
+
+  Eigen::ThreadPoolDevice& get_device() { return *device_; }
+
+private:
+  std::unique_ptr<Eigen::ThreadPool> pool_;
+  std::unique_ptr<Eigen::ThreadPoolDevice> device_;
+};
+
+static EigenThreadPool& tp() {
+  static EigenThreadPool tp(ENV_PARAM(NUM_OF_ENGINE_THREAD));
+  static bool init = false;
+
+  if (!init) {
+    vaip_core::add_cleanup_function("Eigen pool", []() { tp.Clear(); });
+    init = true;
   }
-  int src_stride[5];
-  src_stride[0] = 1;
-  for (int i = 1; i < NDIMS; ++i) {
-    src_stride[i] = src_stride[i - 1] * src_shape[i - 1];
-  }
-  int st[5];
-  for (int i = 0; i < NDIMS; i++) {
-    st[i] = src_stride[p_inv[i]];
-  }
-  flat_src_step[0] = st[0];
-  for (int i = 1; i < NDIMS; i++) {
-    flat_src_step[i] = st[i] - dst_shape[i - 1] * st[i - 1];
-  }
+  return tp;
 }
 
-inline void calc_flat_dst_step(const int* src_shape, const int* perm,
-                               const int& NDIMS, const int* dst_shape,
-                               int* flat_dst_step) {
-  int p_inv[5];
+// in Eigen convention, the first dimention is continous in memory.
+// a(d0, d1, d2, ...., dn), where d0 varis in memory first, i.e. stride = 1
+// shape
+
+// float data[] = {0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14,
+//                   15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
+//                   29};
+//   Eigen::TensorMap<Eigen::Tensor<float, 3>> a(data,
+//                                               std::array<int, 3>{2, 3, 5});
+//   std::cout << "NumRows: " << a.dimension(0) << " NumCols: " <<
+//   a.dimension(1)
+//             << " NumZ " << a.dimension(2) << std::endl;
+//
+//   for (auto z = 0u; z < a.dimension(2); ++z) {
+//     for (auto y = 0u; y < a.dimension(1); ++y) {
+//       for (auto x = 0u; x < a.dimension(0); ++x) {
+//         std::cout << a(x, y, z) << " ";
+//       }
+//     }
+//     std::cout << std::endl;
+//   }
+
+template <int NDIMS, typename T>
+void transpose1(const T* src, T* dst, const std::array<int, NDIMS>& shape_src,
+                const std::array<int, NDIMS>& perm) {
+  Eigen::array<int, NDIMS> p;
   for (int i = 0; i < NDIMS; ++i) {
-    p_inv[NDIMS - 1 - perm[i]] = i;
+    p[i] = (int)(NDIMS - 1 - perm[i]);
   }
-  int dst_stride[5];
-  dst_stride[0] = 1;
-  for (int i = 1; i < NDIMS; ++i) {
-    dst_stride[i] = dst_stride[i - 1] * dst_shape[i - 1];
+  Eigen::TensorMap<Eigen::Tensor<T, NDIMS>, Eigen::Aligned> x(
+      const_cast<T*>(src), shape_src);
+  Eigen::array<int, NDIMS> shape_dst;
+  for (int i = 0; i < NDIMS; ++i) {
+    shape_dst[i] = shape_src[p[i]];
   }
-  int st[5];
-  for (int i = 0; i < NDIMS; i++) {
-    st[i] = dst_stride[p_inv[i]];
-  }
-  flat_dst_step[0] = st[0];
-  for (int i = 1; i < NDIMS; i++) {
-    flat_dst_step[i] = st[i] - src_shape[i - 1] * st[i - 1];
-  }
-}
-template <typename T>
-void transpose1_2(const T* src, T* dst, const int* src_shape, const int* perm) {
-  const int NDIMS = 2;
-  int dst_shape[NDIMS];
-  int flat_src_step[NDIMS];
-  calc_dst_shape_and_flat_src_step(src_shape, perm, NDIMS, dst_shape,
-                                   flat_src_step);
-  if (dst_shape[0] < src_shape[0]) {
-    int flat_dst = 0, flat_src = 0;
-    for (int idx1 = 0; idx1 < dst_shape[1];
-         ++idx1, flat_src += flat_src_step[1]) {
-      for (int flat_dst_end = flat_dst + dst_shape[0]; flat_dst < flat_dst_end;
-           flat_src += flat_src_step[0], ++flat_dst) {
-        dst[flat_dst] = src[flat_src];
-      }
-    }
-  } else {
-    int flat_dst_step[NDIMS];
-    calc_flat_dst_step(src_shape, perm, NDIMS, dst_shape, flat_dst_step);
-    int flat_dst = 0, flat_src = 0;
-    for (int idx1 = 0; idx1 < src_shape[1];
-         ++idx1, flat_dst += flat_dst_step[1]) {
-      for (int flat_src_end = flat_src + src_shape[0]; flat_src < flat_src_end;
-           ++flat_src, flat_dst += flat_dst_step[0]) {
-        dst[flat_dst] = src[flat_src];
-      }
-    }
-  }
-}
-template <typename T>
-void transpose1_3(const T* src, T* dst, const int* src_shape, const int* perm) {
-  const int NDIMS = 3;
-  int dst_shape[NDIMS];
-  int flat_src_step[NDIMS];
-  calc_dst_shape_and_flat_src_step(src_shape, perm, NDIMS, dst_shape,
-                                   flat_src_step);
-  int flat_dst = 0, flat_src = 0;
-  for (int idx2 = 0; idx2 < dst_shape[2];
-       ++idx2, flat_src += flat_src_step[2]) {
-    for (int idx1 = 0; idx1 < dst_shape[1];
-         ++idx1, flat_src += flat_src_step[1]) {
-      int flat_dst_end = flat_dst + dst_shape[0];
-      for (; flat_dst < flat_dst_end;
-           flat_src += flat_src_step[0], ++flat_dst) {
-        dst[flat_dst] = src[flat_src];
-      }
-    }
-  }
-}
-template <typename T>
-void transpose1_4(const T* src, T* dst, const int* src_shape, const int* perm) {
-  const int NDIMS = 4;
-  int dst_shape[NDIMS];
-  int flat_src_step[NDIMS];
-  calc_dst_shape_and_flat_src_step(src_shape, perm, NDIMS, dst_shape,
-                                   flat_src_step);
-  int flat_dst = 0, flat_src = 0;
-  for (int idx3 = 0; idx3 < dst_shape[3];
-       ++idx3, flat_src += flat_src_step[3]) {
-    for (int idx2 = 0; idx2 < dst_shape[2];
-         ++idx2, flat_src += flat_src_step[2]) {
-      for (int idx1 = 0; idx1 < dst_shape[1];
-           ++idx1, flat_src += flat_src_step[1]) {
-        auto dst_end = flat_dst + dst_shape[0];
-        for (; flat_dst < dst_end; flat_src += flat_src_step[0], ++flat_dst) {
-          dst[flat_dst] = src[flat_src];
-        }
-      }
-    }
-  }
+  Eigen::TensorMap<Eigen::Tensor<T, NDIMS>, Eigen::Aligned> y(dst, shape_dst);
+  y.device(tp().get_device()) = x.shuffle(p);
 }
 
-template <typename T>
-void transpose1_5(const T* src, T* dst, const int* src_shape, const int* perm) {
-  const int NDIMS = 5;
-  int dst_shape[NDIMS];
-  int flat_src_step[NDIMS];
-  calc_dst_shape_and_flat_src_step(src_shape, perm, NDIMS, dst_shape,
-                                   flat_src_step);
-  int flat_dst = 0, flat_src = 0;
-
-  for (int idx4 = 0; idx4 < dst_shape[4];
-       ++idx4, flat_src += flat_src_step[4]) {
-    for (int idx3 = 0; idx3 < dst_shape[3];
-         ++idx3, flat_src += flat_src_step[3]) {
-      for (int idx2 = 0; idx2 < dst_shape[2];
-           ++idx2, flat_src += flat_src_step[2]) {
-        for (int idx1 = 0; idx1 < dst_shape[1];
-             ++idx1, flat_src += flat_src_step[1]) {
-          auto dst_end = flat_dst + dst_shape[0];
-          for (; flat_dst < dst_end; flat_src += flat_src_step[0], ++flat_dst) {
-            dst[flat_dst] = src[flat_src];
-          }
-        }
-      }
-    }
-  }
-}
-inline void reverse(const std::vector<int64_t>& v, int NDIMS, int* ret) {
+template <int NDIMS, typename C>
+static std::array<int, NDIMS> to_array(const C& v) {
+  auto ret = std::array<int, NDIMS>();
   DCHECK_EQ(v.size(), (size_t)NDIMS);
-  for (size_t i = 0u, j = v.size() - 1; i < v.size(); ++i, --j) {
-    ret[i] = (int)v[j];
+  for (auto i = 0u; i < v.size(); ++i) {
+    ret[i] = (int)v[i];
   }
+  return ret;
 }
-void optimize_shape(int* shape, int* perm, int& NDIMS) {
-  int l_end = NDIMS;
-  for (int l = 0; l < l_end; l++) {
-    for (int i = 0; i < NDIMS && NDIMS > 1; i++) {
-      if (shape[i] == 1) {
-        for (int j = i + 1; j < NDIMS; j++) {
-          shape[j - 1] = shape[j];
-        }
-        int delperm = NDIMS - 1 - i;
-        int k = 0;
-        for (; k < NDIMS; ++k) {
-          if (perm[k] == delperm) {
-            break;
-          }
-        }
-        for (int j = k; j < NDIMS - 1; ++j) {
-          perm[j] = perm[j + 1];
-        }
-        for (int j = 0; j < NDIMS - 1; j++) {
-          if (perm[j] > delperm) {
-            perm[j]--;
-          }
-        }
-        NDIMS -= 1;
-        break;
-      }
-    }
-  }
-  l_end = NDIMS;
-  for (int l = 0; l < l_end; l++) {
-    for (int i = 0; i < NDIMS - 1; i++) {
-      if (perm[i] - 1 == perm[i + 1]) {
-        shape[NDIMS - 1 - (perm[i] - 1)] *= shape[NDIMS - 1 - perm[i]];
-        for (int j = NDIMS - 1 - perm[i] + 1; j < NDIMS; j++) {
-          shape[j - 1] = shape[j];
-        }
-        int delperm = perm[i];
-        int k = 0;
-        for (; k < NDIMS; ++k) {
-          if (perm[k] == delperm) {
-            break;
-          }
-        }
-        for (int j = k; j < NDIMS - 1; ++j) {
-          perm[j] = perm[j + 1];
-        }
-        for (int j = 0; j < NDIMS - 1; j++) {
-          if (perm[j] > delperm) {
-            perm[j]--;
-          }
-        }
-        NDIMS -= 1;
-        break;
-      }
-    }
-  }
+
+template <typename T> static std::vector<T> reverse(const std::vector<T>& v) {
+  std::vector<T> ret(v);
+  std::reverse(ret.begin(), ret.end());
+  return ret;
 }
-template <typename T>
-void transpose0(const T* src, T* dst, const std::vector<int64_t>& shape,
-                const std::vector<int64_t>& perm) {
+
+template <typename T, typename Shape, typename Perm>
+void transpose0(const T* src, T* dst, const Shape& shape, const Perm& perm) {
   CHECK_EQ(shape.size(), perm.size());
-  int NDIMS = int(shape.size());
-  CHECK_LE(NDIMS, 5) << "unsupported rank. rank=" << NDIMS;
-  int shape_reverse[5];
-  int perm_reverse[5];
-  reverse(shape, NDIMS, shape_reverse);
-  reverse(perm, NDIMS, perm_reverse);
-  optimize_shape(shape_reverse, perm_reverse, NDIMS);
-  switch (NDIMS) {
-  case 1:
-    memcpy(dst, src, shape_reverse[0] * sizeof(T));
+  auto size = shape.size();
+  switch (size) {
+  case 2: {
+    transpose1<2, T>(src, dst, to_array<2>(reverse(shape)),
+                     to_array<2>(reverse(perm)));
     break;
-  case 2:
-    transpose1_2(src, dst, shape_reverse, perm_reverse);
+  }
+  case 3: {
+    // test case: issue #1143
+    transpose1<3, T>(src, dst, to_array<3>(reverse(shape)),
+                     to_array<3>(reverse(perm)));
     break;
-  case 3:
-    transpose1_3(src, dst, shape_reverse, perm_reverse);
+  }
+  case 4: {
+    transpose1<4, T>(src, dst, to_array<4>(reverse(shape)),
+                     to_array<4>(reverse(perm)));
     break;
-  case 4:
-    transpose1_4(src, dst, shape_reverse, perm_reverse);
+  }
+  case 5: {
+    transpose1<5, T>(src, dst, to_array<5>(reverse(shape)),
+                     to_array<5>(reverse(perm)));
     break;
-  case 5:
-    transpose1_5(src, dst, shape_reverse, perm_reverse);
-    break;
+  }
   default:
-    LOG(FATAL) << "unsupported rank. rank=" << NDIMS;
-    break;
+    LOG(FATAL) << "unsupported rank. rank=" << size;
   }
   return;
 }
@@ -258,35 +143,42 @@ namespace vaip_core {
 void transpose_f(const float* src, float* dst,
                  const std::vector<int64_t>& shape,
                  const std::vector<int64_t>& perm) {
-  transpose0<float>(src, dst, shape, perm);
+  transpose0<float, std::vector<int64_t>, std::vector<int64_t>>(src, dst, shape,
+                                                                perm);
 }
 
 void transpose_i8(const int8_t* src, int8_t* dst,
                   const std::vector<int64_t>& shape,
                   const std::vector<int64_t>& perm) {
-  transpose0<int8_t>(src, dst, shape, perm);
+  transpose0<int8_t, std::vector<int64_t>, std::vector<int64_t>>(src, dst,
+                                                                 shape, perm);
 }
 
 void transpose_ui8(const uint8_t* src, uint8_t* dst,
                    const std::vector<int64_t>& shape,
                    const std::vector<int64_t>& perm) {
-  transpose0<uint8_t>(src, dst, shape, perm);
+  transpose0<uint8_t, std::vector<int64_t>, std::vector<int64_t>>(src, dst,
+                                                                  shape, perm);
 }
 
 void transpose_i16(const int16_t* src, int16_t* dst,
                    const std::vector<int64_t>& shape,
                    const std::vector<int64_t>& perm) {
-  transpose0<int16_t>(src, dst, shape, perm);
+  transpose0<int16_t, std::vector<int64_t>, std::vector<int64_t>>(src, dst,
+                                                                  shape, perm);
 }
 void transpose_u16(const uint16_t* src, uint16_t* dst,
                    const std::vector<int64_t>& shape,
                    const std::vector<int64_t>& perm) {
-  transpose0<uint16_t>(src, dst, shape, perm);
+  transpose0<uint16_t, std::vector<int64_t>, std::vector<int64_t>>(src, dst,
+                                                                   shape, perm);
 }
+
 void transpose_bf16(const xir::bfloat16_t* src, xir::bfloat16_t* dst,
                     const std::vector<int64_t>& shape,
                     const std::vector<int64_t>& perm) {
-  transpose0<uint16_t>((const uint16_t*)src, (uint16_t*)dst, shape, perm);
+  transpose0<uint16_t, std::vector<int64_t>, std::vector<int64_t>>(
+      (const uint16_t*)src, (uint16_t*)dst, shape, perm);
 }
 
 } // namespace vaip_core
