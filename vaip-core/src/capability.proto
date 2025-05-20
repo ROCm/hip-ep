@@ -166,6 +166,7 @@ message VaimlParam {
   repeated string input_names = 26;
   repeated string output_names = 27;
   bool enable_update_initializer = 28;
+  uint64 max_spill_buffer_size = 29;
 }
 
 
