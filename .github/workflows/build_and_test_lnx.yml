@@ -55,7 +55,7 @@ jobs:
         if: steps.cache-onnxruntime-and-deps.outputs.cache-hit != 'true'
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.Z1AIEBUILD_GHE_PAT }}
+          token: ${{ secrets.Z1AIEBUILD_GHE_PAT_NEW }}
           repository: VitisAI/onnxruntime
           path: onnxruntime
           ref: ${{ env.ORT_BRANCH_NAME }}
@@ -67,7 +67,7 @@ jobs:
           repository: VitisAI/morphizen-demo
           path: morphizen-demo
           ref: dev
-          token: ${{ secrets.Z1AIEBUILD_GHE_PAT }}
+          token: ${{ secrets.Z1AIEBUILD_GHE_PAT_NEW }}
           show-progress: false
 
       - name: run docker
