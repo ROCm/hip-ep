@@ -6,8 +6,8 @@ description: >
 
 inputs:
   token:
-    description: 'GitHub token (optional)'
-    required: false
+    description: 'GitHub token'
+    required: true
 
   repository:
     description: 'Repository to checkout (e.g. owner/repo)'
