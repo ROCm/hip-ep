@@ -3,10 +3,10 @@ runs:
   steps:
     - name: Set env var (Linux/macOS)
       if: runner.os != 'Windows'
-      run: echo "Z1AIEBUILD_GHE_PAT=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" >> $GITHUB_ENV
+      run: echo "Z1AIEBUILD_GHE_PAT=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" >> $GITHUB_ENV
       shell: bash
 
     - name: Set env var (Windows)
       if: runner.os == 'Windows'
-      run: echo "Z1AIEBUILD_GHE_PAT=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" >> $env:GITHUB_ENV
+      run: echo "Z1AIEBUILD_GHE_PAT=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" >> $env:GITHUB_ENV
       shell: powershell
