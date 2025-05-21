@@ -50,12 +50,14 @@ jobs:
             --progress=plain --secret id=github_token,src=github.token  \
             --build-arg ORT_COMMIT_ID=${{ steps.ort-commit.outputs.commit_hash }} \
             .
-
+      - name: set credential
+        uses: ./.github/actions/set-env
+        
       - name: Checkout VitisAI/onnxruntime
         if: steps.cache-onnxruntime-and-deps.outputs.cache-hit != 'true'
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.Z1AIEBUILD_GHE_PAT }}
+          token: ${{ env.Z1AIEBUILD_GHE_PAT }}
           repository: VitisAI/onnxruntime
           path: onnxruntime
           ref: ${{ env.ORT_BRANCH_NAME }}
@@ -67,7 +69,7 @@ jobs:
           repository: VitisAI/morphizen-demo
           path: morphizen-demo
           ref: dev
-          token: ${{ secrets.Z1AIEBUILD_GHE_PAT }}
+          token: ${{ env.Z1AIEBUILD_GHE_PAT }}
           show-progress: false
 
       - name: run docker

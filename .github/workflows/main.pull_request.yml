@@ -51,12 +51,13 @@ jobs:
           submodules: true
           fetch-depth: 0  # Fetch all history for all branches and tags
           show-progress: false
-
+      - name: set credential
+        uses: ./.github/actions/set-env
       - name: build deps
         uses: ./.github/actions/build-deps
         id: build-deps-action
         with:
-          token: ${{ secrets.Z1AIEBUILD_GHE_PAT }}
+          token: ${{ env.Z1AIEBUILD_GHE_PAT }}
           onnxruntime_branch_name: morphizen-ci
       # build-and-test job depends on build-deps job, because cache
       # cannot be shared between jobs, potentially jobs allocated to
@@ -66,4 +67,4 @@ jobs:
         with:
           ort_hash_id: ${{ steps.build-deps-action.outputs.cache_key }}
           onnxruntime_branch_name: morphizen-ci
-          token: ${{ secrets.Z1AIEBUILD_GHE_PAT }}
+          token: ${{ env.Z1AIEBUILD_GHE_PAT }}

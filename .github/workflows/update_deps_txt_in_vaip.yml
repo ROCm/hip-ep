@@ -28,12 +28,14 @@ jobs:
           fetch-depth: 0  # Fetch all history for all branches and tags
           show-progress: false
 
-
+      - name: set credential
+        uses: ./.github/actions/set-env
+        
       - name: Submit PR to update cmake/deps.txt in vaip
         shell: powershell
         run: |
             echo "Submit PR to update cmake/deps.txt in vaip"
             . ${{ github.workspace}}/tools/submit_vaip_pr.ps1
         env:
-            MY_GHE_TOKEN : ${{ secrets.Z1AIEBUILD_GHE_PAT }}
+            MY_GHE_TOKEN : ${{ env.Z1AIEBUILD_GHE_PAT }}
             VAIP_REMOTE_BRANCH: ${{ env.VAIP_BRANCH }}

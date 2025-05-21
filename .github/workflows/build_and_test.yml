@@ -56,13 +56,16 @@ jobs:
             echo "ORT_HASH_ID: ${{ inputs.ort_hash_id }}"
             Get-ChildItem -Path ${{ env.VAI_RT_PREFIX }} -Recurse | Select-Object FullName, Length, LastWriteTime
 
+        - name: set credential
+          uses: ./.github/actions/set-env
+          
         - name: Checkout VitisAI/morphizen-demo
           uses: actions/checkout@v4
           with:
             repository: VitisAI/morphizen-demo
             path: morphizen-demo
             ref: dev
-            token: ${{ secrets.Z1AIEBUILD_GHE_PAT }}
+            token: ${{ env.Z1AIEBUILD_GHE_PAT }}
 
         - name: build and install onnxrutime and deps
           run: |

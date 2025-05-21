@@ -45,12 +45,14 @@ jobs:
               path: ${{ env.VAI_RT_PREFIX }}
               key: ort-install-${{ steps.ort-commit.outputs.commit_hash }}-with-deps
 
-
+      - name: set credential
+        uses: ./.github/actions/set-env
+        
       - name: Checkout VitisAI/onnxruntime
         if: steps.cache-onnxruntime-and-deps.outputs.cache-hit != 'true'
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.Z1AIEBUILD_GHE_PAT }}
+          token: ${{ env.Z1AIEBUILD_GHE_PAT }}
           repository: VitisAI/onnxruntime
           path: onnxruntime
           ref: ${{ env.ORT_BRANCH_NAME }}
@@ -59,7 +61,7 @@ jobs:
         if: steps.cache-onnxruntime-and-deps.outputs.cache-hit != 'true'
         uses: actions/checkout@v4
         with:
-            token: ${{ secrets.Z1AIEBUILD_GHE_PAT }}
+           
             repository: VitisAI/vai-rt
             path: vai-rt
             ref: cp_dev
@@ -104,4 +106,4 @@ jobs:
     with:
       ort_hash_id: ort-install-${{ needs.build-deps.outputs.commit_hash }}-with-deps
     secrets:
-      Z1AIEBUILD_GHE_PAT: ${{ secrets.Z1AIEBUILD_GHE_PAT }}
+      Z1AIEBUILD_GHE_PAT: ${{ env.Z1AIEBUILD_GHE_PAT }}
