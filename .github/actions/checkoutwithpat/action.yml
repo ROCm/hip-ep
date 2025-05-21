@@ -1,0 +1,44 @@
+name: Checkout Repository with pat
+
+description: >
+  Checkout a GitHub repository using a token when available.
+  Falls back to anonymous checkout for forked PRs.
+
+inputs:
+  token:
+    description: 'GitHub token (optional)'
+    required: false
+
+  repository:
+    description: 'Repository to checkout (e.g. owner/repo)'
+    required: true
+
+  ref:
+    description: 'Branch or tag to checkout'
+    required: true
+
+  path:
+    description: 'Destination path for checkout'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout with token (internal PRs only)
+      if: github.event.pull_request.head.repo.full_name == github.repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ inputs.token }}
+        repository: ${{ inputs.repository }}
+        path: ${{ inputs.path }}
+        ref: ${{ inputs.ref }}
+        show-progress: false
+
+    - name: Checkout without token (public forks)
+      if: github.event.pull_request.head.repo.full_name != github.repository
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.repository }}
+        path: ${{ inputs.path }}
+        ref: ${{ inputs.ref }}
+        show-progress: false
