@@ -178,7 +178,9 @@ set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "disable protobuf build shared lib
 set(protobuf_BUILD_EXAMPLES OFF CACHE BOOL "disable protobuf examples")
 ## it is error-prone to use MODULE mode to find protobuf,
 ## Protobuf_USE_STATIC_LIBS must be defined.
-find_package(Protobuf CONFIG QUIET)
+if(NOT Protobuf_FOUND)
+  find_package(Protobuf CONFIG QUIET)
+endif()
 if(TARGET protobuf::libprotobuf)
   get_target_property(TMP protobuf::libprotobuf INTERFACE_INCLUDE_DIRECTORIES)
   message(STATUS "found protobuf at ${TMP}")
