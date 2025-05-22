@@ -91,6 +91,7 @@ set(MORPHIZEN_LINKER_OPTIONS
   # the hardware, further enhancing the security of the application.
   /DEBUG
   /CETCOMPAT
+  /DYNAMICBASE
   CACHE STRING "Linker options for Morphizen"
 )
 
