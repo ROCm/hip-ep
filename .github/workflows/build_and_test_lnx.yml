@@ -38,6 +38,9 @@ jobs:
           echo "commit_hash=$hash"
           echo "commit_hash=$hash" >> $GITHUB_OUTPUT
 
+      - name: set credential
+        uses: ./.github/actions/set-env
+
       - name: build docker
         id: build_docker
         working-directory: ${{ github.workspace }}/.github/actions/buid-and-test-lnx
@@ -45,14 +48,12 @@ jobs:
           set -e
           ORT_COMMIT_ID=${{ steps.ort-commit.outputs.commit_hash }}
           SHORT_ORT_COMMIT_ID=${ORT_COMMIT_ID:0:7}
-          echo "${{ secrets.Z1AIEBUILD_GHE_PAT }}" >github.token
+          echo "${{ env.Z1AIEBUILD_GHE_PAT }}" >github.token
           docker build -t morphizen-ci:v1.0-${SHORT_ORT_COMMIT_ID} \
             --progress=plain --secret id=github_token,src=github.token  \
             --build-arg ORT_COMMIT_ID=${{ steps.ort-commit.outputs.commit_hash }} \
             .
-      - name: set credential
-        uses: ./.github/actions/set-env
-        
+
       - name: Checkout VitisAI/onnxruntime
         if: steps.cache-onnxruntime-and-deps.outputs.cache-hit != 'true'
         uses: actions/checkout@v4

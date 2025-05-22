@@ -24,6 +24,11 @@ outputs:
 runs:
   using: 'composite'
   steps:
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
     - name: get Onnxruntime SHA1
       id: ort-commit
       run: |
