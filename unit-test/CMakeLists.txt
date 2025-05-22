@@ -17,7 +17,7 @@ configure_file(unit_test_env_params.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/unit_test
 set(TEST_EXE_NAME morphizen-unit-tests)
 add_executable(${TEST_EXE_NAME}
   test_environment.hpp
-  main.cpp
+  morphizen_unit_test_main.cpp
   vaip/test_config.cpp
   vaip/test_model.cpp
   vaip/test_graph.cpp

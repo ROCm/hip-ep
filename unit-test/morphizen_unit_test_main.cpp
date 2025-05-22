@@ -4,6 +4,7 @@
  */
 #define _CRT_SECURE_NO_WARNINGS 1
 #include <gtest/gtest.h>
+
 #ifdef __GNUC__
 #  pragma GCC diagnostic ignored "-Wpedantic"
 #  pragma GCC diagnostic ignored "-Wconversion"
@@ -37,8 +38,35 @@ template <typename... Args> void* morphizen_main_cmd(Args... args) {
 namespace gtest_example {
 TEST(GTest, hello) { LOG(INFO) << "Hello GTest"; }
 } // namespace gtest_example
+static void show_test_case() {
+  // Get the unit test singleton
+  const ::testing::UnitTest& unit_test = *::testing::UnitTest::GetInstance();
 
-int main(int argc, char** argv) {
+  // Iterate over all test suites
+  for (int i = 0; i < unit_test.total_test_suite_count(); ++i) {
+    const ::testing::TestSuite* test_suite = unit_test.GetTestSuite(i);
+
+    std::cout << test_suite->name() << "." << std::endl;
+
+    // Iterate over all test infos in the suite
+    for (int j = 0; j < test_suite->total_test_count(); ++j) {
+      const ::testing::TestInfo* test_info = test_suite->GetTestInfo(j);
+
+      std::cout << "  " << test_info->name() << " " << test_info->file() << ":"
+                << test_info->line() << std::endl;
+    }
+  }
+}
+bool arg_get(int argc, const char* argv[], const char* name) {
+  for (int i = 0; i < argc; ++i) {
+    if (strcmp(argv[i], name) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+int main(int argc, const char* argv[]) {
 #if _WIN32
 #  ifdef _DEBUG
   auto env_ci = getenv("CI");
@@ -66,7 +94,13 @@ int main(int argc, char** argv) {
     vaip_core::set_the_global_api(
         vaip_core::Plugin::invoke<vaip_core::OrtApiForVaip*>(
             "onnxruntime_vitisai_ep", "get_the_global_api"));
-    testing::InitGoogleTest(&argc, argv);
+    testing::InitGoogleTest(&argc, (char**)argv);
+    if (arg_get(argc, argv, "--gtest_list_test_cases")) {
+      std::cout << "List all test cases:" << std::endl;
+      show_test_case();
+      return 0;
+    }
+
     ret = RUN_ALL_TESTS();
   }
   if (ret == 0) {
