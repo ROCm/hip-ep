@@ -242,6 +242,18 @@ void profiler_collect(std::vector<EventInfo>& api_events,
                       std::vector<EventInfo>& kernel_events) {
   vaip_core::profiler_collect(api_events, kernel_events);
 }
+VAIP_DLL_SPEC
+void* vaip_get_execution_provider_deletor() {
+  void (*ret)(void*) = nullptr;
+  ret = [](void* p) {
+    auto ep = reinterpret_cast<
+        std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>*>(p);
+    if (ep != nullptr) {
+      delete ep;
+    }
+  };
+  return reinterpret_cast<void*>(ret);
+}
 }
 #if _WIN32
 #  include <windows.h>

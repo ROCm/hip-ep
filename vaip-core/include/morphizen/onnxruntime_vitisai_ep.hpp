@@ -234,4 +234,22 @@ void profiler_collect(std::vector<EventInfo>& api_events,
  * @return Pointer to the OrtApiForVaip instance.
  */
 VAIP_DLL_SPEC const vaip_core::OrtApiForVaip* get_the_global_api();
+
+/**
+ * @brief Returns a function pointer that deletes a dynamically allocated
+ * std::vector<std::unique_ptr<vaip_core::ExecutionProvider>> object.
+ *
+ * This function returns a generic void* pointer that internally points to a
+ * deleter function. The deleter expects a void* pointing to a
+ * std::vector<std::unique_ptr<vaip_core::ExecutionProvider>> and deletes it.
+ *
+ * The std::vector<std::unique_ptr<ExecutionProvider>> created in
+ * onnxruntime_vitisai_ep.dll cannot be deleted in
+ * onnxruntime_providers_vitisai.dll
+ *
+ *
+ * @return void* A function pointer to a deleter function for the specified
+ * type.
+ */
+VAIP_DLL_SPEC void* vaip_get_execution_provider_deletor();
 }
