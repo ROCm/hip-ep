@@ -27,10 +27,10 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0  # Fetch all history for all branches and tags
-          
+
       - name: set credential
         uses: ./.github/actions/set-env
-        
+
       - name: Checkout VitisAI/onnxruntime
         uses: actions/checkout@v4
         with:
@@ -43,10 +43,13 @@ jobs:
         run: |
           set -e
           cd onnxruntime
+          git fetch origin tag morphize-ci-patch-v1.0.0
           # fetch upstream main branch
           git fetch https://github.com/microsoft/onnxruntime.git main
           echo "sync onnxruntime/morphizen-ci-test commit ID from $(git rev-parse HEAD) to $(git rev-parse FETCH_HEAD)"
-          git push origin FETCH_HEAD:refs/heads/morphizen-ci-test --force
+          git reset --hard FETCH_HEAD
+          git cherry-pick $(git rev-parse morphize-ci-patch-v1.0.0)
+          git push origin HEAD:refs/heads/morphizen-ci-test --force
           git ls-remote origin refs/heads/morphizen-ci-test
         shell: bash
 
@@ -72,6 +75,6 @@ jobs:
           set -e
           cd onnxruntime
           echo "sync onnxruntime commit ID from $(git ls-remote origin refs/heads/morphizen-ci) to $(git rev-parse FETCH_HEAD)"
-          git push origin FETCH_HEAD:refs/heads/morphizen-ci --force
+          git push origin HEAD:refs/heads/morphizen-ci --force
           git ls-remote origin morphizen-ci
         shell: bash
