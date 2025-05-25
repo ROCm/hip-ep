@@ -47,7 +47,7 @@ jobs:
 
       - name: set credential
         uses: ./.github/actions/set-env
-        
+
       - name: Checkout VitisAI/onnxruntime
         if: steps.cache-onnxruntime-and-deps.outputs.cache-hit != 'true'
         uses: actions/checkout@v4
@@ -61,7 +61,7 @@ jobs:
         if: steps.cache-onnxruntime-and-deps.outputs.cache-hit != 'true'
         uses: actions/checkout@v4
         with:
-           
+
             repository: VitisAI/vai-rt
             path: vai-rt
             ref: cp_dev

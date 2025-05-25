@@ -25,7 +25,7 @@ ORT point of view, end users must set session config
     return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT, "Both ep_context_path and model_path are empty");
 ```
 The `ep.context_file_path` support absolute path and relative path.
-relative path is relative to current working directory. 
+relative path is relative to current working directory.
 
 ```c++
   auto session_options = Ort::SessionOptions();

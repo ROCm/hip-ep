@@ -58,7 +58,7 @@ jobs:
 
         - name: set credential
           uses: ./.github/actions/set-env
-          
+
         - name: Checkout VitisAI/morphizen-demo
           uses: actions/checkout@v4
           with:

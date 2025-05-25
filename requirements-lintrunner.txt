@@ -6,3 +6,5 @@ lintrunner-adapters==0.12.4
 ruff==0.11.9
 # CLANGFORMAT
 clang-format==19.1.7
+pre-commit==4.0.1
+licenseheaders==0.8.8

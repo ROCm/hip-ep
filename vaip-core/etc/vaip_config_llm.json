@@ -15,7 +15,7 @@
     {
       "name": "SSMLP",
       "plugin": "vaip-pass_ssmlp",
-      "enable_gc": true,  
+      "enable_gc": true,
       "disabled": false
     }
   ]

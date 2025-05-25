@@ -28,4 +28,3 @@ endif(TARGET ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET})
 set_target_properties(morphizen-pass-init
   PROPERTIES
   FOLDER "morphizen/passes")
-  

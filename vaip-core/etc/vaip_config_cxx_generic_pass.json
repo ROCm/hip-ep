@@ -53,7 +53,7 @@
       "name": "fuse_dynamic_dispatch_psf",
       "plugin": "vaip-pass_level1_dd_cxx",
       "passDpuParam": {
-        "subPass": [          
+        "subPass": [
           {
             "name": "vaip_pass_dd_merge_top_fuse",
             "plugin": "vaip-pass_dd_merge_top_fuse",
@@ -117,7 +117,7 @@
                   "initializer_accessor": {
                     "node_binder_name": "q3_z"
                   }
-                }               
+                }
           }
         }
       }
@@ -202,7 +202,7 @@
               "attribute_name": "design_param",
               "attribute_value": "4x2"
             }
-          }                
+          }
     }
   }
 }
@@ -250,7 +250,7 @@
             "plugin": "vaip-pass_dd_merge_qmhachannel",
             "enable_gc": true,
             "disabled": false
-          }, 
+          },
           {
             "name": "merge_qmhawindow",
             "plugin": "vaip-pass_dd_merge_qmhawindow",
@@ -401,18 +401,18 @@
             "enable_gc": true,
             "disabled": false
           },
-          { 
+          {
             "name": "vaip_pass_dd_merge_attentionprepro_mxgan",
             "plugin": "vaip-pass_dd_merge_attentionprepro_mxgan",
             "enable_gc": true,
             "disabled": false
           },
-          { 
+          {
             "name": "vaip_pass_dd_merge_attentionprepro_mxpzi",
             "plugin": "vaip-pass_dd_merge_attentionprepro_mxpzi",
             "enable_gc": true,
             "disabled": false
-          },              
+          },
           {
             "name": "vaip_pass_dd_merge_dtype",
             "plugin": "vaip-pass_dd_merge_dtype",
@@ -479,23 +479,23 @@
             "plugin": "vaip-pass_dd_merge_qconv2matmul_0",
             "enable_gc": false,
             "disabled": false
-          }, 
+          },
           { "name": "vaip_pass_dd_merge_qconv2matmul_1",
             "plugin": "vaip-pass_dd_merge_qconv2matmul_1",
             "enable_gc": false,
             "disabled": false
-          }, 
+          },
           { "name": "vaip_pass_dd_merge_qconv2matmul_2",
             "plugin": "vaip-pass_dd_merge_qconv2matmul_2",
             "enable_gc": false,
             "disabled": false
-          }, 
+          },
           {
             "name": "merge_qmatmul_add3",
             "plugin": "vaip-pass_dd_merge_qmatmul_add3",
             "enable_gc": false,
             "disabled": false
-          },   
+          },
           {
             "name": "merge_qmatmul_add",
             "plugin": "vaip-pass_dd_merge_qmatmul_add",
@@ -507,13 +507,13 @@
             "plugin": "vaip-pass_dd_merge_qmatmul_add2",
             "enable_gc": false,
             "disabled": false
-          },               
+          },
           {
             "name": "vaip_pass_dd_merge_qslice",
             "plugin": "vaip-pass_dd_merge_qslice",
             "enable_gc": false,
             "disabled": false
-          },            
+          },
           {
             "name": "vaip_pass_dd_merge_qconcat",
             "plugin": "vaip-pass_dd_merge_qconcat",
@@ -524,13 +524,13 @@
             "plugin": "vaip-pass_dd_merge_qgemmv",
             "enable_gc": false,
             "disabled": false
-          }, 
+          },
           {
             "name": "merge_qmatmul",
             "plugin": "vaip-pass_dd_merge_qmatmul",
             "enable_gc": false,
             "disabled": false
-          }, 
+          },
           { "name": "vaip_pass_dd_merge_qsilu",
             "plugin": "vaip-pass_dd_merge_qsilu",
             "enable_gc": false,
@@ -547,7 +547,7 @@
             "enable_gc": false,
             "disabled": false
           },
-          { 
+          {
             "name": "vaip_pass_dd_merge_qelwemul",
             "plugin": "vaip-pass_dd_merge_qelwemul",
             "enable_gc": false,
@@ -579,7 +579,7 @@
             "plugin": "vaip-pass_dd_merge_quant",
             "enable_gc": false,
             "disabled": false
-          }, 
+          },
           { "name": "vaip_pass_dd_merge_dequant",
             "plugin": "vaip-pass_dd_merge_dequant",
             "enable_gc": false,
@@ -671,7 +671,7 @@
             "enable_gc": true,
             "disabled": false
           },
-          { 
+          {
             "name": "vaip_pass_dd_merge_qelwemul_mxgan",
             "plugin": "vaip-pass_dd_merge_qelwemul_mxgan",
             "enable_gc": true,
@@ -706,18 +706,18 @@
             "enable_gc": true,
             "disabled": false
           },
-          { 
+          {
             "name": "vaip_pass_dd_merge_attentionprepro_mxgan",
             "plugin": "vaip-pass_dd_merge_attentionprepro_mxgan",
             "enable_gc": true,
             "disabled": false
-          },  
+          },
           {
             "name": "merge_reduce_sum",
             "plugin": "vaip-pass_dd_merge_reduce_sum",
             "enable_gc": true,
             "disabled": false
-          }, 
+          },
           {
             "name": "merge_expand",
             "plugin": "vaip-pass_dd_merge_expand",
@@ -768,7 +768,7 @@
       "plugin": "vaip-pass_level1_dd_cxx",
       "passDpuParam": {
         "subPass": [
-          
+
           { "name": "vaip_pass_dd_merge_actconstadd",
             "plugin": "vaip-pass_dd_merge_actconstadd",
             "enable_gc": true,
@@ -834,7 +834,7 @@
             "plugin": "vaip-pass_dd_merge_dqop",
             "enable_gc": true,
             "disabled": false
-          }          
+          }
         ]
       }
     },
@@ -1501,7 +1501,7 @@
       "modelName": "PSO2-320",
       "md5sumOnDisk": "4a6a777fc11158c1ca70ebdd6caae3fe",
       "md5sumInMemory": "1bd58439b3a31d4e6edce0689e552ccf",
-      "md5sumInMemoryWithIo":"eb0cd98491be811c3acdf79d38981cd6",      
+      "md5sumInMemoryWithIo":"eb0cd98491be811c3acdf79d38981cd6",
       "xclbin": "4x2_pso2_model_a16w16_qdq.xclbin",
       "target": "RyzenAI_transformer_cxx_pso2",
       "qos_priority": "512"

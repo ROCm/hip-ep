@@ -61,4 +61,3 @@ runs:
         echo "build and test morphizen-demo..."
         . ${{ github.workspace }}/tools/build_and_test.ps1
       shell: powershell
-

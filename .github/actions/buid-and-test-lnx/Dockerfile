@@ -1,3 +1,8 @@
+##
+## Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+
 # Container image that runs your code
 FROM ubuntu:22.04
 RUN apt-get update && apt-get install -y \
@@ -25,7 +30,7 @@ RUN cmake --version; g++ --version; python --version; git --version
 WORKDIR /workspace
 ARG ORT_COMMIT_ID=173a11a4e7a2f7a360c9db6abbe601a06a16f004
 RUN --mount=type=secret,id=github_token  \
-    echo "clone onnxruntime to commit id ${ORT_COMMIT_ID}"; git clone https://$(cat /run/secrets/github_token)@gitenterprise.xilinx.com/VitisAI/onnxruntime.git -b morphizen-ci; 
+    echo "clone onnxruntime to commit id ${ORT_COMMIT_ID}"; git clone https://$(cat /run/secrets/github_token)@gitenterprise.xilinx.com/VitisAI/onnxruntime.git -b morphizen-ci;
 RUN --mount=type=secret,id=github_token  \
     git clone https://$(cat /run/secrets/github_token)@gitenterprise.xilinx.com/VitisAI/vai-rt.git -b cp_dev
 

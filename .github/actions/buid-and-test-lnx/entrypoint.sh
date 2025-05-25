@@ -1,4 +1,8 @@
 #!/bin/bash
+##
+## Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
 adduser --disabled-password --uid $HOST_USER_ID --home /github/workspace --shell /bin/bash --no-create-home --gecos "" $HOST_USER_NAME
 printenv
 chmod +x /entrypoint.user.sh

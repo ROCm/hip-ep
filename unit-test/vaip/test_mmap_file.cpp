@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
 #include "../../vaip-core/src/mmap_file.hpp"
 #include "../../vaip-core/src/tar_file.hpp"
 #include "debug_logger.hpp"

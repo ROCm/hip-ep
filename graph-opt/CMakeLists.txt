@@ -11,7 +11,7 @@ target_include_directories(${EXEC_NAME}
   PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../common
 )
-target_link_libraries(${EXEC_NAME} PRIVATE 
+target_link_libraries(${EXEC_NAME} PRIVATE
 	morphizen-core-static
 	glog::glog)
 set_target_properties(${EXEC_NAME} PROPERTIES FOLDER morphizen/tools)

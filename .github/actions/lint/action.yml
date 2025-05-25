@@ -32,22 +32,7 @@ runs:
         set -o pipefail
         lintrunner init
         lintrunner -v --force-color --all-files
-        has_bom=false
-        printenv
-        echo "Checking for BOM in files..."
-        for file in $(/usr/bin/find . -type f -not -path './.git/*' || exit 1); do
-          if head -c 3 "$file" | grep -q $'\xEF\xBB\xBF' ; then
-            echo "Removing BOM from $file";
-            tail -c +4 "$file" > "$file.nobom" && mv "$file.nobom" "$file";
-            has_bom=true
-          fi;
-        done
-        if [ "$has_bom" = true ]; then
-          echo "BOM removed from some files. Please check the output above."
-          exit 1
-        else
-          echo "No BOM found in files."
-        fi
+        pre-commit run --all-files
         echo "Checking for license headers..."
         python -m licenseheaders -t ./LICENSES/license.txt -x '3rd-party/*'  -s ./LICENSES/settings.json -d .
         if $(git status --porcelain | grep -q '^[AM]'); then
@@ -57,4 +42,3 @@ runs:
           echo "License header check passed."
         fi
       shell: bash
-

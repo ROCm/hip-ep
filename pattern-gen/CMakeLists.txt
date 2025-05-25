@@ -13,7 +13,7 @@ add_executable(${EXEC_NAME} onnx_pattern_gen.cpp ${ryzenai_version_rc_file})
 target_include_directories(${EXEC_NAME}
                            PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 find_package(onnxruntime REQUIRED)
-target_link_libraries(${EXEC_NAME} PRIVATE 
+target_link_libraries(${EXEC_NAME} PRIVATE
     morphizen-core-static
     onnxruntime::onnxruntime glog::glog)
 set(ARGS

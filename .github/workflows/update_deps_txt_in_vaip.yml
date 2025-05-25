@@ -30,7 +30,7 @@ jobs:
 
       - name: set credential
         uses: ./.github/actions/set-env
-        
+
       - name: Submit PR to update cmake/deps.txt in vaip
         shell: powershell
         run: |

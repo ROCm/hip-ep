@@ -11,4 +11,3 @@ index b412dc7..a9388b4 100644
 +project(zlib VERSION 1.2.13 LANGUAGES C)
 
  set(VERSION "1.2.13")
-

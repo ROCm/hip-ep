@@ -145,7 +145,7 @@ static void test_write_override(bool write_same_data) {
            9        1024        1536        1536        1545 sample_src_tar/tar_file.txt
            6        2048        2560        2560        2566 _data/b1946ac92492d2347c6235b4d2611184
            0        3072        3584        3584        3584 sample_src_tar/hello.txt
-    
+
     // the content after overwriting fot same data  write_same_data == false
         size   blk-begin     blk-end  data-begin    data-end path
            6           0         512         512         518 sample_src_tar/hello.txt

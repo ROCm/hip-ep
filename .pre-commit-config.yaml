@@ -1,0 +1,32 @@
+##
+## Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+repos:
+-   repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+    -   id: trailing-whitespace
+    -   id: end-of-file-fixer
+    -   id: check-yaml
+    -   id: check-added-large-files
+    -   id: fix-byte-order-marker
+    -   id: mixed-line-ending
+    -   id: check-merge-conflict
+-   repo: local
+    hooks:
+    -   id: lintrunner
+        name: lintrunner
+        entry: lintrunner
+        language: system
+        types: [file]
+        require_serial: true
+    -   id: licenseheaders
+        name: licenseheaders
+        entry: python
+        args: [-m,licenseheaders,-t,./LICENSES/license.txt,-x,3rd-party/*,-s,./LICENSES/settings.json,-f]
+        language: system
+        types: [file]

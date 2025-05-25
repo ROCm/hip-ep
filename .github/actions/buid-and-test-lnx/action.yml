@@ -1,3 +1,8 @@
+##
+## Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+
 # action.yml
 name: 'Hello World'
 description: 'Greet someone and record the time'

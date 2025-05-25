@@ -8,8 +8,8 @@
       "name": "fuse_dynamic_dispatch_psf",
       "plugin": "vaip-pass_level1_dd_cxx",
       "passDpuParam": {
-        "subPass": [  
-          { 
+        "subPass": [
+          {
           "name": "vaip_pass_dd_merge_top_fuse",
           "plugin": "vaip-pass_dd_merge_top_fuse",
           "enable_gc": true,
@@ -56,7 +56,7 @@
             }
           }
         }
-              },       
+              },
           {
 
             "name": "vaip_pass_dd_merge_top_fuse",
@@ -121,7 +121,7 @@
                   "initializer_accessor": {
                     "node_binder_name": "q3_z"
                   }
-                }               
+                }
           }
         }
       }
@@ -205,7 +205,7 @@
               "node_binder_name": "e_z"
             }
           },
-          
+
           "axis": {
             "attribute_accessor": {
               "node_binder_name": "ln",
@@ -236,7 +236,7 @@
         }
       }
     }
-                          
+
     },
     {
       "name": "vaip_pass_dd_merge_top_fuse",
@@ -322,7 +322,7 @@
         }
       }
     }
-                          
+
     },
     {
       "name": "vaip_pass_dd_merge_top_fuse",
@@ -383,7 +383,7 @@
               "attribute_name": "design_param",
               "attribute_value": "4x2"
             }
-        
+
 }
         }
       }
@@ -438,7 +438,7 @@
             "attribute_name": "design_param",
             "attribute_value": "4x2"
           }
-      
+
 }
       }
     }
@@ -493,7 +493,7 @@
           "attribute_name": "design_param",
           "attribute_value": "4x2"
         }
-    
+
 }
     }
   }
@@ -558,7 +558,7 @@
           "attribute_name": "design_param",
           "attribute_value": "4x2"
         }
-    
+
 }
     }
   }
@@ -567,7 +567,7 @@
         ]
       }
       }
-      
+
 ],
   "mepTable": [
     {
