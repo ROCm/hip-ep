@@ -278,14 +278,21 @@ static bool check_cache_exist(const PassContextImp& context) {
 }
 
 static bool check_cache_hit(PassContextImp& context) {
+
   auto measure_check_cache_hit = context.measure("check_cache_hit");
-  auto no_recompile_option = context.get_provider_option("xlnx_no_recompile");
-  bool no_recompile =
-      no_recompile_option.has_value() && no_recompile_option == "1";
-  bool can_recompile = !no_recompile;
-  if (can_recompile && (context.get_config_proto().ai_analyzer_profiling() ||
-                        context.get_config_proto().ai_analyzer_visualization()))
+  auto can_recompile =
+      context.get_provider_option("xlnx_no_recompile", "0") == "0";
+  auto cache_in_mem = context.cache_in_mem();
+  if (cache_in_mem) {
     return false;
+  }
+  if (can_recompile) {
+    return false;
+  }
+  if (context.get_config_proto().ai_analyzer_profiling() ||
+      context.get_config_proto().ai_analyzer_visualization()) {
+    return false;
+  }
   if (ENV_PARAM(XLNX_ENABLE_CACHE)) {
     return check_cache_exist(context) && cache_valid(context);
   }
@@ -888,7 +895,8 @@ static std::optional<vaip_cxx::NodeConstRef> get_main_ep_context_node(
     }
   }
   CHECK_EQ(count_main_context, 1)
-      << "There must be exactly one main EPContext node. The EP context model "
+      << "There must be exactly one main EPContext node. The EP context "
+         "model "
          "have "
       << count_main_context << " main EPContext nodes.";
   return ret;
