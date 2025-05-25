@@ -37,11 +37,8 @@ target_compile_features(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PUBLIC cxx_std_17)
 target_compile_definitions(${morphizen_CORE_DYNAMIC_UNIQUE_ID}
   PRIVATE "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1"
   PUBLIC "-DONNX_NAMESPACE=onnx")
-if(MSVC)
-  target_compile_options(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PUBLIC "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_COMPILER_OPTIONS}>")
-endif(MSVC)
+target_compile_options(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_COMPILER_OPTIONS}>")
 target_link_options(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_LINKER_OPTIONS}>")
-
 set_target_properties(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PROPERTIES
   VS_DEBUGGER_COMMAND "${CMAKE_INSTALL_PREFIX}\\bin\\test_onnx_runner.exe"
   VS_DEBUGGER_COMMAND_ARGUMENTS "${CMAKE_CURRENT_SOURCE_DIR}\\..\\..\\test_onnx_runner\\data\\pt_resnet50.onnx"
