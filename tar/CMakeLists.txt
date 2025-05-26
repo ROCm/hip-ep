@@ -16,4 +16,5 @@ set_target_properties(${EXEC_NAME} PROPERTIES
 	FOLDER morphizen/tools
 	VS_DEBUGGER_COMMAND_ARGUMENTS "-l ${CMAKE_CURRENT_BINARY_DIR}/../unit-test/sample.src.tar"
 )
+target_link_options(${EXEC_NAME} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_LINKER_OPTIONS}>")
 install(TARGETS ${EXEC_NAME} DESTINATION bin)

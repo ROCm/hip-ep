@@ -67,6 +67,9 @@ target_include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
+target_link_options(${TEST_EXE_NAME} PRIVATE
+  "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_LINKER_OPTIONS}>"
+)
 target_compile_definitions(${TEST_EXE_NAME} PRIVATE
   -DONNX_NAMESPACE=onnx
   -DPYTHON_EXE_STR="$<TARGET_FILE:Python3::Interpreter>"
@@ -104,6 +107,7 @@ set_target_properties(${TEST_EXE_NAME} PROPERTIES
       VS_DEBUGGER_COMMAND_ARGUMENTS " --gtest_list_tests"
       #VS_DEBUGGER_ENVIRONMENT "${DEBUG_ENV}"
 )
+
 
 ## for test hello_plugin test
 add_library(hello_plugin_dll SHARED vaip/hello_plugin.cpp ${ryzenai_version_rc_file})

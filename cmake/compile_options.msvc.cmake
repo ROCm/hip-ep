@@ -93,6 +93,7 @@ set(MORPHIZEN_LINKER_OPTIONS
   /CETCOMPAT
   /DYNAMICBASE
   /ignore:4099 # ignore warning about PDB file not found
+  /ignore:4197 # ignore warning about /INCREMENTAL:NO
   CACHE STRING "Linker options for Morphizen"
 )
 

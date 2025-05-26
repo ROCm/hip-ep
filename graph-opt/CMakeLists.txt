@@ -14,6 +14,7 @@ target_include_directories(${EXEC_NAME}
 target_link_libraries(${EXEC_NAME} PRIVATE
 	morphizen-core-static
 	glog::glog)
+target_link_options(${EXEC_NAME} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_LINKER_OPTIONS}>")
 set_target_properties(${EXEC_NAME} PROPERTIES FOLDER morphizen/tools)
 install(TARGETS ${EXEC_NAME} DESTINATION bin)
 # originally morphizen-graph-opt is callled `voe_py_pass`, to minimize

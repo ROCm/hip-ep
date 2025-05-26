@@ -23,6 +23,7 @@ repos:
         entry: lintrunner
         language: system
         types: [file]
+        args: [--apply-patches]
         require_serial: true
     -   id: licenseheaders
         name: licenseheaders
