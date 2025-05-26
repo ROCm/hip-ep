@@ -71,6 +71,8 @@ static int data_type_2_element_type(const std::string& data_type) {
     ret = onnx::TensorProto_DataType_UINT16;
   } else if (data_type == "int16") {
     ret = onnx::TensorProto_DataType_INT16;
+  } else if (data_type == "int1") {
+    ret = onnx::TensorProto_DataType_BOOL;
   } else {
     LOG(FATAL) << "data_type " << data_type << " " //
         ;
