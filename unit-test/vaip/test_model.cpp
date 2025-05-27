@@ -3,25 +3,21 @@
  * Licensed under the MIT License.
  */
 
-#include "debug_logger.hpp"
+#include "./test_environment.hpp"
+#include "morphizen/vaip.hpp"
+#include "gtest/gtest.h"
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 #include <limits>
-//
-#include "morphizen/vaip.hpp"
 
-class ModelTest : public DebugLogger {};
+class ModelTest : public ::testing::Test {};
 TEST_F(ModelTest, Load) {
-  open_logger_file("ModelTest.Load.log");
-  logger() << "LOADING " << RESNET_50_PATH;
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);
   LOG(INFO) << "model: " << model->ref().name() << " is loaded";
 }
 TEST_F(ModelTest, Clone) {
-  open_logger_file("ModelTest.Load.log");
-  logger() << "LOADING " << RESNET_50_PATH;
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);
   auto cloned_model = model->ref().clone();
   LOG(INFO) << "cloned model: " << cloned_model->ref().name() << " is cloned";
@@ -29,14 +25,11 @@ TEST_F(ModelTest, Clone) {
                                   "resnet50_cloned.onnx");
 }
 TEST_F(ModelTest, MainGraph) {
-  open_logger_file("ModelTest.Load.log");
-  logger() << "LOADING " << RESNET_50_PATH;
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   LOG(INFO) << "main graph: " << graph.name() << " is loaded";
 }
 TEST_F(ModelTest, SetAndGetMetadata) {
-  open_logger_file("ModelTest.SetAndGetMetadata.log");
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);
 
   // Set metadata
@@ -54,7 +47,6 @@ TEST_F(ModelTest, SetAndGetMetadata) {
 }
 
 TEST_F(ModelTest, ImplicitConversion) {
-  open_logger_file("ModelTest.ImplicitConversion.log");
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);
 
   // Implicit conversion to onnxruntime::Model reference

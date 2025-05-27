@@ -1,0 +1,25 @@
+// Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+syntax = "proto3";
+
+message EnvConfigProto {
+    map<string, OrtConfigProto> configs = 1;
+}
+
+message OrtConfigProto {
+    SessionOptionsProto session_options = 1;
+    optional bool enable_vitisai_ep = 2;
+    bool use_memory_model = 3;
+    optional int64 batch_number = 4;
+    optional int64 session_count = 5;
+    optional int64 run_count = 6;
+    bool skip_test = 7; // by default: do not skip.
+}
+
+message SessionOptionsProto {
+    optional int64 graph_optimization_level = 1;
+    repeated string custom_op_library = 2;
+    bool enable_profiling = 3;
+    map<string, string> session_configs = 4;
+    map<string, string> provider_options = 5;
+}

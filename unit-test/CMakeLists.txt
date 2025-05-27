@@ -10,9 +10,9 @@ cmake_policy(SET CMP0135 NEW)
 find_package(GTest REQUIRED)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_data.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/env.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/test-onnx-runner/cmake/proto.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/test-onnx-runner/cmake/etc-config.cmake)
 
-configure_file(debug_logger.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/debug_logger.hpp @ONLY)
-configure_file(unit_test_env_params.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/unit_test_env_params.hpp @ONLY)
 ## add a new test for class vaip_cxx::Model
 set(TEST_EXE_NAME morphizen-unit-tests)
 add_executable(${TEST_EXE_NAME}
@@ -34,8 +34,15 @@ add_executable(${TEST_EXE_NAME}
   vaip/test_file_stream.cpp
   vaip/test_op_def.cpp
   vaip/test_mmap_file.cpp
-  ${CMAKE_CURRENT_BINARY_DIR}/debug_logger.hpp
-  ${CMAKE_CURRENT_BINARY_DIR}/unit_test_env_params.hpp
+  ${TEST_ONNX_RUNNER_PROTO_SRCS}
+  ${TEST_ONNX_RUNNER_PROTO_HDRS}
+  test-onnx-runner/create-session.cpp
+  test-onnx-runner/create-session.hpp
+  test-onnx-runner/run-session.cpp
+  test-onnx-runner/run-session.hpp
+  test-onnx-runner/config.cpp
+  test-onnx-runner/config.hpp
+  test-onnx-runner/test-onnx-runner-main.cpp
   ${ryzenai_version_rc_file}
 )
 set_target_properties(${TEST_EXE_NAME} PROPERTIES FOLDER morphizen/unit-tests)
@@ -101,12 +108,15 @@ if(MSVC)
       $<TARGET_FILE_DIR:${TEST_EXE_NAME}>
   )
 endif(MSVC)
+set(ENVS "")
+string(APPEND ENVS "\nTEST_ONNX_MODEL=${RESNET_50_ONNX_PATH}")
 set_target_properties(${TEST_EXE_NAME} PROPERTIES
       VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
       VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
       VS_DEBUGGER_COMMAND_ARGUMENTS " --gtest_list_tests"
-      #VS_DEBUGGER_ENVIRONMENT "${DEBUG_ENV}"
+      VS_DEBUGGER_ENVIRONMENT "${ENVS}"
 )
+add_dependencies(${TEST_EXE_NAME} test_onnx_runner_generate_env_config)
 
 
 ## for test hello_plugin test

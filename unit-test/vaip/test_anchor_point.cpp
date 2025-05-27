@@ -2,14 +2,13 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#include "debug_logger.hpp"
-//
 #include <exception>
 // must include glog/logging before vaip.hpp
 #include <glog/logging.h>
 //
+#include "./test_environment.hpp"
 #include "morphizen/vaip.hpp"
-
+#include "gtest/gtest.h"
 #include <filesystem>
 #include <fstream>
 #include <google/protobuf/text_format.h>
@@ -76,7 +75,7 @@ static void test_append(const IPass& pass, const std::string& f1,
             << i1->append(pass, *i2)->get_proto().DebugString() << "\n";
 }
 
-class TestAnchorPoint : public DebugLogger {
+class TestAnchorPoint : public ::testing::Test {
 public:
   void test_optimize(const std::filesystem::path& file) {
     auto cwd = std::filesystem::path(__FILE__).parent_path() /

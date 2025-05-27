@@ -12,7 +12,6 @@
 #include <limits>
 //
 #include "morphizen/vaip.hpp"
-#include "unit_test_env_params.hpp"
 const static std::filesystem::path TEST_CONSTANT_INITIALIZER_ONNX =
     TEST_CWD / "test_constant_initializer.onnx";
 class ConstDataTest : public ::testing::Test {

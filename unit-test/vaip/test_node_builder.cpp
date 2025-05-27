@@ -3,19 +3,17 @@
  * Licensed under the MIT License.
  */
 
-#include "debug_logger.hpp"
-#include "unit_test_env_params.hpp"
+#include "./test_environment.hpp"
+#include "morphizen/vaip.hpp"
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 #include <limits>
-//
-#include "morphizen/vaip.hpp"
-class NodeBuilderTest : public DebugLogger {};
+class NodeBuilderTest : public ::testing::Test {};
 
 TEST_F(NodeBuilderTest, SkipSimplifiedLayerNormalization) {
-  auto output_dir = std::filesystem::path(ENV_PARAM(CMAKE_CURRENT_BINARY_DIR));
+  auto output_dir = CMAKE_CURRENT_BINARY_PATH;
   auto onnx_file = output_dir / ".." / ".." / ".." / "vaip_regression" /
                    "llama2-7b-int4-gs128-asym-mha" / "model.onnx";
   onnx_file.make_preferred();

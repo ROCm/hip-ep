@@ -3,17 +3,16 @@
  * Licensed under the MIT License.
  */
 
+#include "./test_environment.hpp"
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 #include <limits>
-
 //
-#include "debug_logger.hpp"
 #include "morphizen/vaip.hpp"
 
-class PatternTest : public DebugLogger {};
+class PatternTest : public ::testing::Test {};
 
 static std::tuple<std::shared_ptr<vaip_core::Pattern>,
                   std::shared_ptr<vaip_core::Pattern>,

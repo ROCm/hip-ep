@@ -4,7 +4,7 @@
  */
 #include "../../vaip-core/src/mmap_file.hpp"
 #include "../../vaip-core/src/tar_file.hpp"
-#include "debug_logger.hpp"
+#include "./test_environment.hpp"
 #include <gtest/gtest.h>
 TEST(MMapfileTest, create) {
 #ifdef _WIN32

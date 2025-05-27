@@ -3,33 +3,30 @@
  * Licensed under the MIT License.
  */
 
+#include "morphizen/env_config.hpp"
 #include <filesystem>
 #include <fstream>
+#include <glog/logging.h>
 #include <gtest/gtest.h>
 #include <limits>
-
-//
-#include "debug_logger.hpp"
 //
 #include "../vaip-core/src/pattern/immutable_map.hpp"
 
 using namespace vaip_core::immutable_map;
-class ImmutableMapTest : public DebugLogger {
+class ImmutableMapTest : public ::testing::Test {
 protected:
   void SetUp() override {}
   void TearDown() override {}
 };
 
 TEST_F(ImmutableMapTest, InsertSingleNode) {
-  open_logger_file("ImmutableMapTest.InsertSingleNode.log");
   using Map = ImmutableMap<int, std::string>;
   auto m1 = Map();
   auto result = m1.insert({1, "one"});
-  MY_LOG() << "result = " << result << std::endl;
+  LOG(INFO) << "result = " << result << std::endl;
 }
 
 TEST_F(ImmutableMapTest, InsertMultipleNodes) {
-  open_logger_file("ImmutableMapTest.InsertMultipleNodes.log");
   using Map = ImmutableMap<int, std::string>;
   auto m0 = Map();
   EXPECT_EQ(m0.size(), 0);
@@ -43,10 +40,10 @@ TEST_F(ImmutableMapTest, InsertMultipleNodes) {
   }
   c = 0;
   for (auto& m : maps) {
-    MY_LOG() << "m[" << c << "]"
-             << " = " << m << std::endl;
+    LOG(INFO) << "m[" << c << "]"
+              << " = " << m << std::endl;
   }
-  MY_LOG() << "maps.back().size() = " << maps.back().size() << std::endl;
+  LOG(INFO) << "maps.back().size() = " << maps.back().size() << std::endl;
   EXPECT_EQ(maps.back().size(), 16);
   auto& m3 = maps[3];
   auto v3 = m3.find(3);
@@ -56,6 +53,6 @@ TEST_F(ImmutableMapTest, InsertMultipleNodes) {
   auto v4 = m3.find(4);
   EXPECT_EQ(v4, nullptr);
   for (auto elt : maps.back()) {
-    MY_LOG() << "   " << elt.first << " ---> " << elt.second << std::endl;
+    LOG(INFO) << "   " << elt.first << " ---> " << elt.second << std::endl;
   }
 }

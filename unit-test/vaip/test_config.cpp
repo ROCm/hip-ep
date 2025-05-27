@@ -4,7 +4,6 @@
  */
 
 #include "../vaip-core/src/config.hpp"
-#include "debug_logger.hpp"
 #include "morphizen/config_reader.hpp"
 #include "morphizen/vaip.hpp"
 #include <filesystem>

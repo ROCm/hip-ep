@@ -2,9 +2,7 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#include "debug_logger.hpp"
 #include "morphizen/vaip.hpp" // NOLINT
-#include "unit_test_env_params.hpp"
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
@@ -13,6 +11,7 @@
 // clang-format off
 // NOLINTBEGIN
 #include "morphizen/vaip.hpp"
+#include "./test_environment.hpp"
 #include "../src/pass_context_imp.hpp"
 // NOLINTEND
 // clang-format on
@@ -24,8 +23,7 @@ protected:
     // Set up any necessary resources before each test
     passContext = vaip_core::PassContext::create();
     dynamic_cast<vaip_core::PassContextImp*>(passContext.get())->log_dir =
-        std::filesystem::path(ENV_PARAM(CMAKE_CURRENT_BINARY_DIR));
-    ;
+        CMAKE_CURRENT_BINARY_PATH;
   }
 
   void TearDown() override {

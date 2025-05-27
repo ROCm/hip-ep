@@ -12,7 +12,6 @@
 #  pragma GCC diagnostic ignored "-Wunused-variable"
 #  pragma GCC diagnostic ignored "-Wunused-but-set-variable"
 #endif
-#include "debug_logger.hpp"
 #include <glog/logging.h>
 #include <onnxruntime_cxx_api.h>
 #if _WIN32

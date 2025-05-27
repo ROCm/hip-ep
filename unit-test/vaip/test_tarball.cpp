@@ -7,9 +7,8 @@
 #include "morphizen/vaip.hpp"
 #include "morphizen/encryption.hpp"
 #include "../vaip-core/src/pass_context_imp.hpp"
-#include "../vaip-core/src/tar_ball.hpp"
-#include "debug_logger.hpp"
 #include <ctime>
+#include "../vaip-core/src/tar_ball.hpp"
 #include <gtest/gtest.h>
 #include <iostream>
 #include <map>
@@ -66,7 +65,7 @@ public:
 private:
   std::map<std::string, std::stringstream>& ss_map_;
 };
-class TarBallTest : public DebugLogger {};
+class TarBallTest : public ::testing::Test {};
 TEST_F(TarBallTest, TarTest) {
   std::vector<std::string> test_strings = {"I am ss1", "I am ss2 ,123456",
                                            "I am ss3, 1234567890abcdef"};

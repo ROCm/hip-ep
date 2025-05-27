@@ -5,7 +5,6 @@
 
 #include "morphizen/vaip.hpp"
 #include "test_environment.hpp"
-#include "unit_test_env_params.hpp"
 #include <boost/process.hpp>
 #include <filesystem>
 #include <fstream>
@@ -14,7 +13,7 @@
 #include <limits>
 class GraphTest : public ::testing::Test {};
 TEST_F(GraphTest, LoadAndSave) {
-  auto model = vaip_cxx::Model::load(ENV_PARAM(INPUT_MODEL));
+  auto model = vaip_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.set_name("resent50_by_vaip");
   graph.resolve();
@@ -55,7 +54,8 @@ TEST_F(GraphTest, LoadAndSave) {
       EXPECT_EQ(data.size(), 16384u);
     }
   }
-  auto output_dir = std::filesystem::path(ENV_PARAM(CMAKE_CURRENT_BINARY_DIR));
+  auto output_dir = CMAKE_CURRENT_BINARY_PATH;
+
   auto resnet50_file = output_dir / "resnet50.onnx";
   std::filesystem::remove(resnet50_file);
   std::filesystem::remove(output_dir / "resnet50.dat");

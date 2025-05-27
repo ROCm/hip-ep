@@ -26,7 +26,7 @@ set_target_properties(morphizen-unit-test-{suite}.{case}.{line} PROPERTIES
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter={suite}.{case}
     )
 target_sources(morphizen-unit-test-{suite}.{case}.{line} PRIVATE
-        {file} # line {line}
+        # {file} # line {line} don't add c++ file, otherwise `compile` does works
         cmake/generate_gtest_targets_for_debugging.py
         cmake/generated_gtest_targets.cmake
 )

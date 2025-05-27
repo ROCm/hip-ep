@@ -1,0 +1,17 @@
+{
+    "enable_vitisai_ep" : true,
+    "session_count" : 1,
+    "offline_compilation" : false,
+    "use_memory_model" : false,
+    "session_options": {
+        "custom_op_library": [],
+        "enable_profiling": false,
+        "session_configs": {
+            "ep.context_enable": "1",
+            "ep.context_embed_mode": "0"
+        },
+        "provider_options": {
+            "log_level": "info"
+        }
+    }
+}
