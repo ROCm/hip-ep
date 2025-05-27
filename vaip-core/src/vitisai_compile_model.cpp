@@ -992,7 +992,6 @@ create_execution_providers_from_ep_context_nodes(
       [](const vaip_cxx::NodeConstRef& a, const vaip_cxx::NodeConstRef& b) {
         return get_ep_context_index(a) < get_ep_context_index(b);
       });
-
   for (auto idx = 0u; idx < size; ++idx) {
     auto node = ep_context_nodes[idx];
     auto index = get_ep_context_index(node);
@@ -1038,7 +1037,44 @@ static void dirty_hack_for_model_clone_external_data_threshold(
     }
   }
 }
-
+static bool is_compiling_on_non_npu_platform(PassContextImp& context) {
+  auto is_ep_context_enabled =
+      context.get_session_config(kOrtSessionOptionEpContextEnable, "0") == "1";
+  if (!is_ep_context_enabled) {
+    // if EP context is not enabled, it is not a compilation flow.
+    return false;
+  }
+  auto enable_generic_custom_op =
+      context.get_provider_option("XLNX_enable_generic_custom_op", "0") != "0";
+  if (context.get_session_config(kOrtSessionOptionsDisableModelCompile, "1") ==
+      "0") {
+    enable_generic_custom_op = true; // see also MicroSoft/Onnxruntime#24416
+  }
+  if (enable_generic_custom_op) {
+    return true;
+  }
+  auto xrt_coreutil_dll = vaip_core::Plugin::get("xrt_coreutil");
+  if (xrt_coreutil_dll == nullptr) {
+    // when xrt is not installed, we assume it is on non-npu platform.
+    return true;
+  }
+  auto xrt_device_open =
+      xrt_coreutil_dll->get_method<void*, int>("xrtDeviceOpen");
+  auto xrt_device_close =
+      xrt_coreutil_dll->get_method<int, void*>("xrtDeviceClose");
+  if (xrt_device_open == nullptr || xrt_device_close == nullptr) {
+    // when wrong version of xrt is installed, it won't work, we also assume
+    // there is no NPU.
+    return true;
+  }
+  auto device_id = xrt_device_open(0);
+  auto cannot_open_npu_device = device_id == nullptr;
+  xrt_device_close(device_id);
+  if (cannot_open_npu_device) {
+    return true;
+  }
+  return false;
+}
 static std::vector<std::unique_ptr<ExecutionProvider>>
 compile_onnx_model_internal(
     const Graph& onnx_graph,
@@ -1075,8 +1111,17 @@ compile_onnx_model_internal(
     measure_after_compile_onnx_model_2 =
         context->measure("after_compile_onnx_model_internal");
     ret.reserve(context->context_proto.meta_def_size());
-    for (auto& meta_def : context->context_proto.meta_def()) {
-      auto& device = meta_def.device();
+    auto enable_generic_custom_op = is_compiling_on_non_npu_platform(*context);
+    if (enable_generic_custom_op) {
+      LOG(INFO) << "detect running on Non-NPU platform, compilation only";
+    }
+    for (auto& meta_def : *context->context_proto.mutable_meta_def()) {
+      std::string device = meta_def.device();
+      if (enable_generic_custom_op) {
+        // ovewrite default device for offline compilation flow.
+        device = "GENERIC";
+        meta_def.set_fallback_cpu(true);
+      }
       auto plugin_name = std::string("vaip_custom_op_") + device;
       ret.emplace_back(
           ExecutionProviderConcrete::create(plugin_name, context, meta_def));

@@ -729,6 +729,20 @@ void PassContextImp::save_context_json() const {
                   "context.json") == proto.mutable_cache_files()->end()) {
       proto.add_cache_files("context.json");
     }
+    // When the GENERIC device is used, set fallback_cpu to true. When
+    // inferencing a cached model, either from the cache directory or the EP
+    // cache context file, we should not enable fallback_cpu. Otherwise, a
+    // considerable amount of overhead is incurred for creating an
+    // `Ort::Session` object for the subgraph behind the scenes.
+
+    // There is a pitfall: if a custom op really needs to fall back to the CPU,
+    // and the GENERIC device is enabled for model compilation, it is a bug.
+    // However, this combination is not in used for now. We can fix it later.
+    for (auto& meta_def : *proto.mutable_meta_def()) {
+      if (meta_def.device() == "GENERIC") {
+        meta_def.set_fallback_cpu(true);
+      }
+    }
     auto json_str = msg_to_json_string(proto);
     const_cast<PassContextImp*>(this)->write_file("context.json", json_str);
   } catch (const std::exception& e) {

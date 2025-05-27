@@ -30,7 +30,10 @@ if(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC)
   add_subdirectory (pattern-gen)
   add_subdirectory (onnx-grep)
 endif(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC)
-  add_subdirectory (vaip_pass_init)
+
+add_subdirectory (vaip_pass_init)
+add_subdirectory (custom-op-generic)
+
 if(morphizen_ENABLE_UNIT_TEST AND morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC)
   # when morphzen-core-dyanmic is enabled, we can build unit-test, otherwise we will get link errors.
   include(CTest)
