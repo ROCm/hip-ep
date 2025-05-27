@@ -278,19 +278,9 @@ static bool check_cache_exist(const PassContextImp& context) {
 }
 
 static bool check_cache_hit(PassContextImp& context) {
-
   auto measure_check_cache_hit = context.measure("check_cache_hit");
-  auto can_recompile =
-      context.get_provider_option("xlnx_no_recompile", "0") == "0";
   auto cache_in_mem = context.cache_in_mem();
   if (cache_in_mem) {
-    return false;
-  }
-  if (can_recompile) {
-    return false;
-  }
-  if (context.get_config_proto().ai_analyzer_profiling() ||
-      context.get_config_proto().ai_analyzer_visualization()) {
     return false;
   }
   if (ENV_PARAM(XLNX_ENABLE_CACHE)) {
