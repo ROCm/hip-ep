@@ -48,6 +48,8 @@ VAIP_DLL_SPEC gsl::span<const int8_t>
 node_arg_get_const_data_as_i8s(const Graph& graph, const NodeArg& node_arg);
 VAIP_DLL_SPEC gsl::span<const uint16_t>
 node_arg_get_const_data_as_u16s(const Graph& graph, const NodeArg& node_arg);
+VAIP_DLL_SPEC gsl::span<const int16_t>
+node_arg_get_const_data_as_i16s(const Graph& graph, const NodeArg& node_arg);
 VAIP_DLL_SPEC gsl::span<const float>
 node_arg_get_const_data_as_floats(const Graph& graph, const NodeArg& node_arg);
 VAIP_DLL_SPEC gsl::span<const int32_t>
