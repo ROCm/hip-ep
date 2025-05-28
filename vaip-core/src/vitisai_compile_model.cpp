@@ -1046,8 +1046,11 @@ static bool is_compiling_on_non_npu_platform(PassContextImp& context) {
   }
   auto enable_generic_custom_op =
       context.get_provider_option("XLNX_enable_generic_custom_op", "0") != "0";
-  if (context.get_session_config(kOrtSessionOptionsDisableModelCompile, "1") ==
-      "0") {
+  // TODO: vai-rt need to upgrade onnxruntime
+  static const char* kOrtSessionOptionsDisableModelCompile_local =
+      "session.disable_model_compile";
+  if (context.get_session_config(kOrtSessionOptionsDisableModelCompile_local,
+                                 "1") == "0") {
     enable_generic_custom_op = true; // see also MicroSoft/Onnxruntime#24416
   }
   if (enable_generic_custom_op) {
