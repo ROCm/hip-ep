@@ -17,6 +17,13 @@
 #include <vector>
 DEF_ENV_PARAM_2(TEST_ONNX_MODEL, "", std::string);
 
+static std::unordered_map<std::string, std::string>
+create_provider_options(const Config& config) {
+  auto& provider_options = config.proto().session_options().provider_options();
+  return std::unordered_map<std::string, std::string>(provider_options.begin(),
+                                                      provider_options.end());
+}
+
 static std::unique_ptr<Ort::SessionOptions>
 create_session_options(const Config& config) {
   auto& session_option_proto = config.proto().session_options();
@@ -47,17 +54,13 @@ create_session_options(const Config& config) {
     session_options->AddConfigEntry(session_config.first.c_str(),
                                     session_config.second.c_str());
   }
-  return std::move(session_options);
-}
 
-static std::unordered_map<std::string, std::string>
-create_provider_options(const Config& config) {
-  auto& provider_options = config.proto().session_options().provider_options();
-  auto options = std::unordered_map<std::string, std::string>{};
-  for (const auto& provider_option : provider_options) {
-    options[provider_option.first] = provider_option.second;
+  if (config.enable_vitisai_ep()) {
+    auto provider_options = create_provider_options(config);
+    // only append vitisai ep once each session_options
+    session_options->AppendExecutionProvider_VitisAI(provider_options);
   }
-  return options;
+  return std::move(session_options);
 }
 
 static void del_ctx_model(const std::filesystem::path& model_path) {
@@ -72,9 +75,6 @@ static void offline_compilation(const std::filesystem::path& model_path,
                                 Ort::Env& env,
                                 Ort::SessionOptions& session_options,
                                 const Config& config) {
-  auto provider_options = create_provider_options(config);
-  session_options.AppendExecutionProvider_VitisAI(provider_options);
-
   Ort::ModelCompilationOptions compile_options(env, session_options);
   compile_options.SetInputModelPath(
       PathToString<ORTCHAR_T>()(model_path).c_str());
@@ -114,25 +114,34 @@ protected:
       model_path = std::filesystem::u8path(ENV_PARAM(TEST_ONNX_MODEL));
     }
     env_config_map = Config::create(ENV_CONFIG_JSON_PATH);
+    env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING,
+                                     "test_onnx_runner");
   }
   void TearDown() override {
     // Cleanup code if needed
   }
+
+  const Config& select_config(const std::string& name) {
+    auto it = env_config_map.find(name);
+    EXPECT_TRUE(it != env_config_map.end() && it->second != nullptr)
+        << "Config with name \"" << name << "\" not found";
+    const auto& ret = *(it->second);
+    env = std::make_unique<Ort::Env>(ret.ort_log_level(),
+                                     ret.ort_log_id().c_str());
+    return ret;
+  }
+
   std::filesystem::path model_path;
+  std::unique_ptr<Ort::Env> env;
+
+private:
   std::unordered_map<std::string, std::unique_ptr<Config>> env_config_map;
 };
 
 TEST_F(TestOnnxRunner, Run) {
-  const auto& config = *env_config_map["default_config"];
-  auto env = std::make_unique<Ort::Env>(config.ort_log_level(),
-                                        config.ort_log_id().c_str());
+  const auto& config = select_config("default_config");
   // shared session_options between generate ctx model and run ctx model
   auto session_options = create_session_options(config);
-  if (config.enable_vitisai_ep()) {
-    auto provider_options = create_provider_options(config);
-    // only append vitisai ep once each session_options
-    session_options->AppendExecutionProvider_VitisAI(provider_options);
-  }
   // run model
   run_many_sessions(model_path, *env, *session_options, config);
   if (config.ep_context_enable()) {
@@ -146,27 +155,13 @@ TEST_F(TestOnnxRunner, Run) {
 }
 
 TEST_F(TestOnnxRunner, SingleModelSingleSession) {
-  const auto& config = *env_config_map["single_session"];
-  if (config.proto().skip_test()) {
-    GTEST_SKIP() << "Skipping single test";
-  }
-  auto env = std::make_unique<Ort::Env>(config.ort_log_level(),
-                                        config.ort_log_id().c_str());
-  // shared session_options between generate ctx model and run ctx model
+  const auto& config = select_config("single_session");
   auto session_options = create_session_options(config);
-  if (config.enable_vitisai_ep()) {
-    auto provider_options = create_provider_options(config);
-    // only append vitisai ep once each session_options
-    session_options->AppendExecutionProvider_VitisAI(provider_options);
-  }
-  // run model
   run_many_sessions(model_path, *env, *session_options, config);
 }
 
 TEST_F(TestOnnxRunner, OfflineCompile) {
-  const auto& config = *env_config_map["offline_compilation_config"];
-  auto env = std::make_unique<Ort::Env>(config.ort_log_level(),
-                                        config.ort_log_id().c_str());
+  const auto& config = select_config("offline_compilation_config");
   auto session_options = create_session_options(config);
   offline_compilation(model_path, *env, *session_options, config);
 }
