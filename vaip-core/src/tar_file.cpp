@@ -14,7 +14,7 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE, "0")
 namespace vaip_core {
 
 std::unique_ptr<TarFile>
-TarFile::create(std::unique_ptr<std::iostream> stream) {
+TarFile::create(std::unique_ptr<std::iostream>&& stream) {
   return std::make_unique<TarFile>(std::move(stream));
 }
 std::unique_ptr<TarFile> TarFile::create(const std::filesystem::path& path) {

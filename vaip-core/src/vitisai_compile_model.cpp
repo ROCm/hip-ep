@@ -31,6 +31,7 @@
 #include <string>
 #include "morphizen/encryption.hpp"
 #include "core/session/onnxruntime_session_options_config_keys.h"
+#include "morphizen/mem_xclbin.hpp"
 // clang-format on
 
 // this is an experimental feature. When this feature is enabled, the
@@ -277,8 +278,23 @@ static bool check_cache_exist(const PassContextImp& context) {
   return file_exists(cache_file);
 }
 
-static bool check_cache_hit(PassContextImp& context) {
+bool check_cache_hit(PassContextImp& context) {
   auto measure_check_cache_hit = context.measure("check_cache_hit");
+  auto prebuild_cache_context_name =
+      context.get_provider_option("prebuild_cache_context");
+  if (prebuild_cache_context_name) {
+    MY_LOG(1) << "==== prebuild_cache_context hit ====";
+    if (!has_mem_xclbin(prebuild_cache_context_name.value())) {
+      LOG(ERROR) << " " << prebuild_cache_context_name.value()
+                 << " does not in mem please check vaip_config.json";
+
+      std::abort();
+    }
+    auto prebuild_ep_context_in_mem =
+        get_mem_xclbin(prebuild_cache_context_name.value());
+    context.create_tar_file_from_memory(std::move(prebuild_ep_context_in_mem));
+    return true;
+  }
   auto cache_in_mem = context.cache_in_mem();
   if (cache_in_mem) {
     return false;
@@ -1038,6 +1054,12 @@ static void dirty_hack_for_model_clone_external_data_threshold(
   }
 }
 static bool is_compiling_on_non_npu_platform(PassContextImp& context) {
+  auto is_compiling_on_non_npu_platform_provider_option =
+      context.get_provider_option("is_compiling_on_non_npu_platform");
+  if (is_compiling_on_non_npu_platform_provider_option) {
+    // this is a dirty hack for debugging purpose only.
+    return is_compiling_on_non_npu_platform_provider_option.value() == "1";
+  }
   auto is_ep_context_enabled =
       context.get_session_config(kOrtSessionOptionEpContextEnable, "0") == "1";
   if (!is_ep_context_enabled) {

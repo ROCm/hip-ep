@@ -14,7 +14,7 @@ namespace vaip_core {
 template <typename T> class MemBuffer : public std::streambuf {
 public:
   static std::unique_ptr<MemBuffer<T>> create(void* base, std::size_t size,
-                                              std::unique_ptr<T> owner) {
+                                              std::unique_ptr<T>&& owner) {
     return std::make_unique<MemBuffer<T>>(base, size, std::move(owner));
   }
 

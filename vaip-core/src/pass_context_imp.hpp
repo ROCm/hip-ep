@@ -193,6 +193,8 @@ private:
   void maybe_create_tar_file_for_read(
       const std::string& ep_context_binary_file_name);
 
+  void create_tar_file_from_memory(std::vector<char>&& buffer);
+
 public:
   virtual std::filesystem::path get_model_path() const override final;
   virtual std::optional<std::vector<char>>
@@ -257,7 +259,7 @@ private:
   friend int vitisai_ep_set_ep_dynamic_options(
       const std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>& eps,
       const char* const* keys, const char* const* values, size_t kv_len);
-
+  friend bool check_cache_hit(PassContextImp& context);
   std::map<std::string, std::string> ep_dynamic_options;
   mutable std::mutex ep_dynamic_options_lock;
   // for share context, many context may be same. may need to change container

@@ -72,8 +72,17 @@ default_config = {
 }
 single_session = {
     **default_config,
-    "skip_test": True,
+    "skip_test": False,
     "session_count": 1,
+    "session_options": {
+        **default_config["session_options"],
+        "session_configs": {
+            **default_session_configs,
+            "ep.context_enable": "1",
+            "ep.context_embed_mode": "0",
+            "ep.context_file_path": "single_session.onnx",
+        },
+    },
 }
 
 offline_compilation_config = {

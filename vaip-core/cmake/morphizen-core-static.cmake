@@ -30,6 +30,7 @@ add_custom_command (
   "${TRIM_CONFIG}"
   "${VAIP_XCLBIN_DIR}"
   "${morphizen_WITH_VAIP_CONFIG_FILE}"
+  DEPENDS "${VAIP_JSON_CONFIG_FILE}"
 )
 
 if(morphizen_WITH_VAIP_CONFIG_FILE)

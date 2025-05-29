@@ -15,7 +15,7 @@ namespace vaip_core {
 class TarFile {
 public:
   VAIP_DLL_SPEC static std::unique_ptr<TarFile>
-  create(std::unique_ptr<std::iostream> stream);
+  create(std::unique_ptr<std::iostream>&& stream);
 
   /**
    * @brief Creates a TarFile instance from the specified file path.

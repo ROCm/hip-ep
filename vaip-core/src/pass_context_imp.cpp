@@ -1019,4 +1019,18 @@ void PassContextImp::maybe_create_tar_file_for_read(
   CHECK(tar_file_ != nullptr)
       << "failed to open ep context file " << ep_context_binary_file;
 }
+void PassContextImp::create_tar_file_from_memory(std::vector<char>&& buffer) {
+  auto owner = std::make_unique<std::vector<char>>(std::move(buffer));
+  auto base = owner->data();
+  auto size = owner->size();
+
+  auto stream = std::make_unique<MemStream<std::vector<char>>>(
+      MemBuffer<std::vector<char>>::create(base, size, std::move(owner)));
+  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+      << " create a tar file from memory " << (void*)base << " " << size;
+  tar_file_ = TarFile::create(std::move(stream));
+
+  CHECK(tar_file_ != nullptr)
+      << " create a tar file from memory " << (void*)base << " " << size;
+}
 } // namespace vaip_core
