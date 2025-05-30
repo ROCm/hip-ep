@@ -242,7 +242,7 @@ message PassVaimlConfigProto {
   optional string vaiml_model_path =2 ;
   optional string user_subgraph_config = 3;
   optional bool override_batch_size = 4;
-  // 5 open
+  optional string logging_level = 5;
   optional string model_type = 6;
   optional bool debug = 7;
   optional int32 max_num_inputs = 8;
