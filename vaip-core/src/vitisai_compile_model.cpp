@@ -1057,7 +1057,8 @@ static bool is_compiling_on_non_npu_platform(PassContextImp& context) {
   auto is_compiling_on_non_npu_platform_provider_option =
       context.get_provider_option("is_compiling_on_non_npu_platform");
   if (is_compiling_on_non_npu_platform_provider_option) {
-    // this is a dirty hack for debugging purpose only.
+    // it takes the precedence over the EP context enable option. this is only
+    // for internal use, for debugging and testing purpose.
     return is_compiling_on_non_npu_platform_provider_option.value() == "1";
   }
   auto is_ep_context_enabled =
@@ -1066,38 +1067,28 @@ static bool is_compiling_on_non_npu_platform(PassContextImp& context) {
     // if EP context is not enabled, it is not a compilation flow.
     return false;
   }
-  auto enable_generic_custom_op =
-      context.get_provider_option("XLNX_enable_generic_custom_op", "0") != "0";
   // TODO: vai-rt need to upgrade onnxruntime
   static const char* kOrtSessionOptionsDisableModelCompile_local =
       "session.disable_model_compile";
   if (context.get_session_config(kOrtSessionOptionsDisableModelCompile_local,
                                  "1") == "0") {
-    enable_generic_custom_op = true; // see also MicroSoft/Onnxruntime#24416
+    return true; // see also MicroSoft/Onnxruntime#24416
   }
-  if (enable_generic_custom_op) {
-    return true;
+#if defined(_WIN32)
+  std::filesystem::path xilinx_dll =
+      std::filesystem::path("C:\\Windows\\System32\\xrt_coreutil.dll");
+  if (!std::filesystem::exists(xilinx_dll)) {
+    return true; // assume compiling on non-npu platform if xrt_coreutil.dll
+                 // does not exist.
   }
-  auto xrt_coreutil_dll = vaip_core::Plugin::get("xrt_coreutil");
-  if (xrt_coreutil_dll == nullptr) {
-    // when xrt is not installed, we assume it is on non-npu platform.
-    return true;
+#elif !defined(__aarch64__)
+  // If XILINX_XRT is not set on Linux, it's a compile only run
+  auto xilinx_xrt = getenv("XILINX_XRT");
+  if (xilinx_xrt == nullptr) {
+    return true; // assume compiling on non-npu platform if XILINX_XRT is not
+                 // set.
   }
-  auto xrt_device_open =
-      xrt_coreutil_dll->get_method<void*, int>("xrtDeviceOpen");
-  auto xrt_device_close =
-      xrt_coreutil_dll->get_method<int, void*>("xrtDeviceClose");
-  if (xrt_device_open == nullptr || xrt_device_close == nullptr) {
-    // when wrong version of xrt is installed, it won't work, we also assume
-    // there is no NPU.
-    return true;
-  }
-  auto device_id = xrt_device_open(0);
-  auto cannot_open_npu_device = device_id == nullptr;
-  xrt_device_close(device_id);
-  if (cannot_open_npu_device) {
-    return true;
-  }
+#endif
   return false;
 }
 static std::vector<std::unique_ptr<ExecutionProvider>>
