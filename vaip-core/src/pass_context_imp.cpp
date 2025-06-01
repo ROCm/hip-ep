@@ -631,6 +631,19 @@ bool PassContextImp::cache_files_to_tar_file(IStreamWriter& writer) const {
   return true;
 }
 
+bool PassContextImp::tar_file_to_tar_file(IStreamWriter& writer) const {
+  if (!tar_file_) {
+    return false;
+  }
+  TarWriter tar_writer(writer);
+  auto& entries = tar_file_->entries();
+  for (auto& entry : entries) {
+    auto name = entry->path();
+    tar_writer.write(CacheFileStreamReader(open_file_for_read(name)), name);
+  }
+  return true;
+}
+
 size_t CacheFileStreamWriter::write(const char* data, size_t size) {
   auto write_size = writer_->fwrite(data, size);
   CHECK_EQ((size_t)write_size, size);
@@ -1032,5 +1045,10 @@ void PassContextImp::create_tar_file_from_memory(std::vector<char>&& buffer) {
 
   CHECK(tar_file_ != nullptr)
       << " create a tar file from memory " << (void*)base << " " << size;
+  // somehow embed mode or not would cause this prefix to change
+  // which leads to search file under cache_key/file fail
+  if (!has_cache_file("context.json")) {
+    cache_file_use_cache_key_prefix_ = !cache_file_use_cache_key_prefix_;
+  }
 }
 } // namespace vaip_core

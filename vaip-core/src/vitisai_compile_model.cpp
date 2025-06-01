@@ -650,7 +650,11 @@ static void get_ep_cache_context_common(PassContextImp& context,
                                         IStreamWriter& dst) {
   auto measure_get_ep_cache_context_embed_mode =
       context.measure("get_ep_cache_context_common");
-  auto reader = context_cache_files_to_tar_stream(context);
+  std::unique_ptr<IStreamReader> reader =
+      context_tar_file_to_tar_stream(context);
+  if (!reader) {
+    reader = context_cache_files_to_tar_stream(context);
+  }
   if (ENV_PARAM(XLNX_EP_CONTEXT_ENABLE_COMPRESSION)) {
     auto measure_compression = context.measure("vaip_core::compress");
     LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
@@ -695,7 +699,8 @@ static std::string get_ep_cache_context_nonembed_mode(PassContextImp& context) {
   // atttribute "ep.cache_context"
   auto binary_name =
       OrtSessionOptionEpContextFilePath_binay.filename().u8string();
-  if (context.tar_file_) {
+  auto prebuild = context.get_provider_option("prebuild_cache_context");
+  if (context.tar_file_ && (!prebuild.has_value())) {
     // do nothing
   } else {
     auto dst =

@@ -218,6 +218,7 @@ public:
 
   virtual bool
   cache_files_to_tar_file(IStreamWriter& writer) const override final;
+  virtual bool tar_file_to_tar_file(IStreamWriter& writer) const override final;
   virtual bool tar_file_to_cache_files(class IStreamReader& src) override final;
 
   virtual std::shared_ptr<void>

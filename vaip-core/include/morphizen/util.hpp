@@ -129,6 +129,9 @@ uncompress(const IStreamReader& src);
 VAIP_DLL_SPEC std::unique_ptr<IStreamReader>
 context_cache_files_to_tar_stream(class PassContext& context);
 
+VAIP_DLL_SPEC std::unique_ptr<IStreamReader>
+context_tar_file_to_tar_stream(class PassContext& context);
+
 // TODO: defined vitisai_compile_model.cpp
 VAIP_DLL_SPEC std::string get_md5_of_file(const std::filesystem::path& path);
 VAIP_DLL_SPEC std::string get_md5_of_buffer(const char* buffer, size_t size);
