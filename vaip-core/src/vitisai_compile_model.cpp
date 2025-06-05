@@ -1096,6 +1096,18 @@ static bool is_compiling_on_non_npu_platform(PassContextImp& context) {
 #endif
   return false;
 }
+static void log_stat_subgraph(const ContextProto& context_proto) {
+  auto stat = std::map<std::string, int>{};
+  for (auto& meta_def : context_proto.meta_def()) {
+    stat[meta_def.device()]++;
+  }
+  std::cout << "[Vitis AI EP] No. of Subgraphs supported by Vitis AI EP:";
+  for (const auto& subgraph_stat : stat) {
+    std::cout << std::setw(6) << subgraph_stat.first << std::setw(6)
+              << subgraph_stat.second << " ";
+  }
+  std::cout << std::endl;
+}
 static std::vector<std::unique_ptr<ExecutionProvider>>
 compile_onnx_model_internal(
     const Graph& onnx_graph,
@@ -1109,6 +1121,7 @@ compile_onnx_model_internal(
   if (is_ep_context_model) {
     ret = restore_execution_providers_from_ep_context_model(onnx_graph, context,
                                                             ep_context_nodes);
+    log_stat_subgraph(context->get_context_proto());
   } else {
     dirty_hack_for_model_clone_external_data_threshold(
         context->get_config_proto());
