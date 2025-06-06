@@ -1265,12 +1265,7 @@ compile_onnx_model_3(const std::string& model_path, const Graph& onnx_graph,
   auto ep_context_nodes = get_ep_context_nodes(onnx_graph);
   auto context =
       initialize_context(model_path, onnx_graph, ep_context_nodes, json_config);
-  const auto& model = graph_get_model(onnx_graph);
-  auto cloned_model = model_clone(model, std::numeric_limits<int>::max());
-  auto& cloned_graph = VAIP_ORT_API(model_main_graph)(*cloned_model);
-  context->add_context_resource(
-      "__level_0_graph",
-      std::shared_ptr<void>((void*)&cloned_graph, [](void*) {}));
+
   auto deferred_write = std::shared_ptr<void>(nullptr, [context](void* /*p*/) {
     if (0)
       context->save_context_json();
