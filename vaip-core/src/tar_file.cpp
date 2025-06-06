@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <fstream>
 #include <glog/logging.h>
+DEF_ENV_PARAM(MORPHIZEN_ENABLE_TAR_MMAP, "1")
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE) >= n)
 #include <iostream>
@@ -18,30 +19,38 @@ TarFile::create(std::unique_ptr<std::iostream>&& stream) {
   return std::make_unique<TarFile>(std::move(stream));
 }
 std::unique_ptr<TarFile> TarFile::create(const std::filesystem::path& path) {
-  auto mem_file = std::unique_ptr<MemFile>();
-  try {
-    mem_file = MemFile::create(path);
-    if (mem_file == nullptr) {
-      throw std::runtime_error("cannot create mem file for linux");
-    }
-  } catch (const std::exception& e) {
-    MY_LOG(1) << "Failed to create MMapFile object: " << e.what();
+  auto create_with_regular_stream = [&]() -> std::unique_ptr<TarFile> {
     auto stream =
         std::make_unique<std::fstream>(path, std::ios::binary | std::ios::in);
     if (!stream->is_open()) {
       MY_LOG(1) << "Failed to open file: " << path.string();
       return nullptr;
     }
-    return std::make_unique<TarFile>(std::move(stream));
+    return TarFile::create(std::move(stream));
+  };
+  if (ENV_PARAM(MORPHIZEN_ENABLE_TAR_MMAP) == 0) {
+    // if MORPHIZEN_ENABLE_TAR_MMAP is set to 0, we do not use mmap
+    return create_with_regular_stream();
   }
-  auto base = mem_file->base();
-  auto size = mem_file->size();
-  auto stream = std::make_unique<MemStream<MemFile>>(
-      MemBuffer<MemFile>::create(base, size, std::move(mem_file)));
-  return std::make_unique<TarFile>(std::move(stream));
+  try {
+    auto mem_file = MemFile::create(path);
+    if (mem_file == nullptr) {
+      MY_LOG(1) << "do not support to create MMapFile object: ";
+      return create_with_regular_stream();
+    }
+    auto base = mem_file->base();
+    auto size = mem_file->size();
+    auto stream = std::make_unique<MemStream<MemFile>>(
+        MemBuffer<MemFile>::create(base, size, std::move(mem_file)));
+    return TarFile::create(std::move(stream));
+  } catch (const std::exception& e) {
+    MY_LOG(1) << "Failed to create MMapFile object: " << e.what();
+  }
+  return create_with_regular_stream();
 }
 TarFile::TarFile(std::unique_ptr<std::iostream> stream)
-    : stream_(std::move(stream)), mem_stream_{nullptr} {
+    : stream_(std::move(stream)),
+      mem_stream_{dynamic_cast<decltype(mem_stream_)>(stream_.get())} {
   CHECK(stream_->seekg(0, std::ios::beg).good())
       << "Failed to seek to the beginning of the stream";
   // Read the tar header to get the number of entries
@@ -49,16 +58,6 @@ TarFile::TarFile(std::unique_ptr<std::iostream> stream)
   } while (read_tar_entry(stream_));
 }
 
-TarFile::TarFile(std::unique_ptr<MemStream<MemFile>> stream)
-    : stream_(nullptr), mem_stream_{nullptr} {
-  mem_stream_ = stream.get();
-  stream_ = std::move(stream);
-  CHECK(stream_->seekg(0, std::ios::beg).good())
-      << "Failed to seek to the beginning of the stream";
-  // Read the tar header to get the number of entries
-  do {
-  } while (read_tar_entry(stream_));
-}
 bool TarFile::has_file(const std::string& filename) const {
   for (auto& entry : entries()) {
     if (entry->path() == filename) {
