@@ -1020,11 +1020,30 @@ void PassContextImp::maybe_create_tar_file_for_write() {
 }
 void PassContextImp::maybe_create_tar_file_for_read(
     const std::string& ep_context_binary_file_name) {
-
-  auto ep_context_onnx_file = get_ep_context_onnx_file_path();
-  auto ep_context_binary_file =
-      ep_context_onnx_file.parent_path() /
-      std::filesystem::u8path(ep_context_binary_file_name);
+  auto ep_context_binary_file = std::filesystem::path();
+  auto session_ep_context_path =
+      std::filesystem::path(get_session_config("ep.context_file_path", ""));
+  if (session_ep_context_path != "") {
+    ep_context_binary_file =
+        session_ep_context_path.parent_path() /
+        std::filesystem::u8path(ep_context_binary_file_name);
+    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+        << "load ep context file using ep.context_file_path from "
+        << ep_context_binary_file.string();
+  } else if (model_path.empty()) {
+    ep_context_binary_file =
+        std::filesystem::u8path(ep_context_binary_file_name);
+    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+        << "load ep context file using current directory from "
+        << ep_context_binary_file.string();
+  } else {
+    ep_context_binary_file =
+        model_path.parent_path() /
+        std::filesystem::u8path(ep_context_binary_file_name);
+    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+        << "load ep context file using model_path from "
+        << ep_context_binary_file.string();
+  }
 
   LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
       << "open tar file for read: " << ep_context_binary_file;
