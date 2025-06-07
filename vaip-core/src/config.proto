@@ -254,7 +254,7 @@ message PassVaimlConfigProto {
   optional string aie_unsupported_ops_override = 14;
   optional string custom_op_repo = 15;
   optional string overlay_json = 16;
-  // 17 open
+  optional string preemption_layers = 17;
   optional string vaiml_unarchive_path = 18;
   optional string vaiml_archive_file = 19;
   optional bool run_archive = 20;
