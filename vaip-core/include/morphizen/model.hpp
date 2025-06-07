@@ -73,7 +73,7 @@ public:
    *
    * @return A const reference to the main graph of the model.
    */
-  const GraphRef main_graph() const;
+  GraphConstRef main_graph() const;
 
   /**
    *  @brief Clones the model.
@@ -81,6 +81,16 @@ public:
    *  @return A new Model object that is a clone of the current Model object.
    */
   std::unique_ptr<Model> clone(int64_t external_data_threshold = 64) const;
+  /**
+   * @brief Retrieves the model path.
+   * @return The path to the model file.
+   *
+   * This function returns the path to the model file associated with the
+   * current Model object.
+   *
+   * @note The returned path is a std::filesystem::path object.
+   */
+  std::filesystem::path model_path() const;
 
 private:
   const vaip_core::Model& self_;

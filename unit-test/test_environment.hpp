@@ -28,6 +28,8 @@ static const std::filesystem::path MORPHIZEN_TAR_EXE =
     std::filesystem::u8path(MORPHIZEN_TAR_EXE_STR);
 static const std::filesystem::path TEST_SRC_DIR =
     std::filesystem::u8path(TEST_SRC_DIR_STR);
+static const std::filesystem::path CMAKE_CURRENT_SOURCE_PATH =
+    std::filesystem::u8path(TEST_SRC_DIR_STR);
 static const std::filesystem::path RESNET_50_PATH =
     TEST_CWD / "pt_resnet50.onnx";
 static const std::filesystem::path ENV_CONFIG_JSON_PATH =

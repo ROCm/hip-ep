@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #pragma once
+#include "morphizen/vaip.hpp"
 #include <deque>
 #include <shared_mutex>
 
@@ -15,6 +16,7 @@
 #include "morphizen/pass_context.hpp"
 #include "morphizen/vaip_io.hpp"
 #include "morphizen/vaip_plugin.hpp"
+
 namespace vaip_core {
 class CacheFileReaderImp : public CacheFileReader {
 public:
@@ -194,6 +196,9 @@ private:
       const std::string& ep_context_binary_file_name);
 
   void create_tar_file_from_memory(std::vector<char>&& buffer);
+  void print_version_info(const char* prefix);
+  void pass_context_update_context_json(gsl::span<char> json_str);
+  void update_pass_context_from_context_json_in_cache();
 
 public:
   virtual std::filesystem::path get_model_path() const override final;
@@ -276,6 +281,7 @@ private:
   bool cache_file_use_cache_key_prefix_ = false;
   std::unique_ptr<TargetProto> target_proto_ = nullptr;
   std::unique_ptr<MepConfigTable> mep_config_proto_ = nullptr;
+  std::map<std::string, std::string> provider_option_origin_ = {};
 
 private:
 #if defined(__GNUC__)
@@ -289,7 +295,7 @@ private:
   friend std::shared_ptr<PassContextImp> initialize_context(
       const std::string& model_path, const Graph& onnx_graph,
       const std::vector<vaip_cxx::NodeConstRef>& ep_context_nodes,
-      const char* json_config);
+      const onnxruntime::ProviderOptions& options);
   friend onnxruntime::Node*
   create_ep_context_node(vaip_core::ExecutionProviderConcrete* ep);
   friend std::string
@@ -299,6 +305,12 @@ private:
       const Graph& onnx_graph,
       const std::vector<vaip_cxx::NodeConstRef>& ep_context_nodes,
       std::shared_ptr<PassContextImp> context);
+  friend void read_cache(std::shared_ptr<PassContextImp> context);
+  friend std::vector<std::unique_ptr<ExecutionProvider>>
+  restore_execution_providers_from_ep_context_model(
+      vaip_cxx::GraphConstRef /*onnx_graph*/,
+      std::shared_ptr<PassContextImp> context,
+      std::vector<vaip_cxx::NodeConstRef> ep_context_nodes);
 #if defined(__GNUC__)
 #  pragma GCC diagnostic pop
 #endif

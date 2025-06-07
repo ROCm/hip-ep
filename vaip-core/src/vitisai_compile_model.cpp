@@ -32,6 +32,7 @@
 #include "morphizen/encryption.hpp"
 #include "core/session/onnxruntime_session_options_config_keys.h"
 #include "morphizen/mem_xclbin.hpp"
+#include "morphizen/config_reader.hpp"
 // clang-format on
 
 // this is an experimental feature. When this feature is enabled, the
@@ -133,66 +134,8 @@ static inline void remove_encryption(ConfigProto& proto) {
   proto.clear_encryption_key();
 }
 
-static void save_config_json(PassContextImp& context) {
-  ConfigProto proto;
-  proto.CopyFrom(context.context_proto.config());
-  remove_encryption(proto);
-  save_protobuf_message(get_cache_file_name(context, "config.json"), proto);
-}
-
 static void print_device_subgraph(const PassContextImp& context) {
   LOG_VERBOSE(2) << "dpu subgraph: " << context.context_proto.meta_def_size();
-}
-
-static void print_version_verbose(const char* prefix,
-                                  const ConfigProto& config) {
-  for (auto version_info : config.version().version_infos()) {
-    LOG_VERBOSE(1) << prefix << version_info.package_name() << " ("
-                   << version_info.version() << ") :" + version_info.commit();
-  }
-  LOG_VERBOSE(1) << prefix << "cache_dir: " << config.cache_dir();
-  LOG_VERBOSE(1) << prefix << "cache_key: " << config.cache_key();
-  for (auto kv : config.provider_options()) {
-    LOG_VERBOSE(1) << "provider_options: " << kv.first << " = " << kv.second;
-  }
-  for (auto kv : config.session_configs()) {
-    LOG_VERBOSE(1) << "session_config: " << kv.first << " = " << kv.second;
-  }
-}
-
-static void pass_context_update_context_json(PassContextImp& context,
-                                             gsl::span<char> json_str) {
-  auto session_options_saved = context.context_proto.config().session_configs();
-  // Some options are only relevant at runtime and do not require caching.
-  auto provider_options_saved =
-      context.context_proto.config().provider_options();
-  // TODO: this is a bad solution, how about cache_key, cache_dir etc.
-  bool enable_cache_in_mem = false;
-  if (context.context_proto.config().has_enable_cache_file_io_in_mem()) {
-    enable_cache_in_mem =
-        context.context_proto.config().enable_cache_file_io_in_mem();
-  }
-
-  context.context_proto.Clear();
-  auto status = google::protobuf::util::JsonStringToMessage(
-      &json_str[0], &context.context_proto);
-  context.context_proto.mutable_config()->mutable_session_configs()->swap(
-      session_options_saved);
-  // all provider options no cache
-  context.context_proto.mutable_config()->mutable_provider_options()->swap(
-      provider_options_saved);
-  context.context_proto.mutable_config()->set_enable_cache_file_io_in_mem(
-      enable_cache_in_mem);
-  CHECK(status.ok()) << "cannot parse json string:" << status.message()
-                     << &json_str[0];
-  print_version_verbose("CACHE VERSION: ", context.get_config_proto());
-}
-static void update_pass_context_from_context_json_in_cache(
-    std::shared_ptr<PassContextImp> context) {
-  auto context_context_json = context->read_file_c8("context.json");
-  auto context_context_json_text = dos2unix(*context_context_json);
-  pass_context_update_context_json(*context, context_context_json_text);
-  context->restore_cache_files();
 }
 
 static ContextProto load_context_json_2(PassContextImp& context) {
@@ -240,9 +183,9 @@ static void update_cache(std::shared_ptr<PassContextImp> context,
   update_primary_context(context);
 }
 
-static void read_cache(std::shared_ptr<PassContextImp> context) {
+void read_cache(std::shared_ptr<PassContextImp> context) {
   auto measure = context->measure("read_cache");
-  update_pass_context_from_context_json_in_cache(context);
+  context->update_pass_context_from_context_json_in_cache();
 }
 
 static std::string get_commit(const AllVersionInfoProto& proto,
@@ -492,8 +435,11 @@ get_signature_with_meptable(const std::string& model_path,
 std::shared_ptr<PassContextImp>
 initialize_context(const std::string& model_path, const Graph& onnx_graph,
                    const std::vector<vaip_cxx::NodeConstRef>& ep_context_nodes,
-                   const char* json_config) {
+                   const onnxruntime::ProviderOptions& options) {
+  auto json_config_string = get_config_json_str(options);
+  const char* json_config = json_config_string.c_str();
   std::shared_ptr<PassContextImp> context = std::make_shared<PassContextImp>();
+  context->provider_option_origin_.insert(options.begin(), options.end());
   // "session.model_external_initializers_file_folder_path/virtual_model.onnx
   // would be passed for in-mem model when this happen, a invalid path is
   // passed, we use the model_path == empty to differentiate if the model is
@@ -653,7 +599,7 @@ initialize_context(const std::string& model_path, const Graph& onnx_graph,
   model_set_meta_data(mutable_model, "vaip_log_dir",
                       context->get_log_dir().u8string());
   // log version of binary
-  print_version_verbose("EXEC VERISON: ", context->context_proto.config());
+  context->print_version_info("EXEC VERISON: ");
   if (!context->is_ep_context_model) {
     context->maybe_create_tar_file_for_write();
   }
@@ -1041,7 +987,7 @@ create_execution_providers_from_ep_context_nodes(
   }
   return ret;
 }
-static std::vector<std::unique_ptr<ExecutionProvider>>
+std::vector<std::unique_ptr<ExecutionProvider>>
 restore_execution_providers_from_ep_context_model(
     vaip_cxx::GraphConstRef /*onnx_graph*/,
     std::shared_ptr<PassContextImp> context,
@@ -1055,7 +1001,7 @@ restore_execution_providers_from_ep_context_model(
   auto main_node = get_main_ep_context_node(ep_context_nodes);
   CHECK(main_node) << " no main EPContext node";
   store_cache_directory_from_main_node(*context, main_node.value());
-  update_pass_context_from_context_json_in_cache(context);
+  context->update_pass_context_from_context_json_in_cache();
   return create_execution_providers_from_ep_context_nodes(context,
                                                           ep_context_nodes);
 }
@@ -1220,20 +1166,12 @@ static bool is_cpu_only_inference(const PassContextImp& context) {
   }
   return ret;
 }
-std::vector<std::unique_ptr<ExecutionProvider>>
-compile_onnx_model_3(const std::string& model_path, const Graph& onnx_graph,
-                     const char* json_config) {
+
+static void print_graph_input_and_output(const Graph& onnx_graph) {
 #ifdef _WIN32
   _setmaxstdio(8192);
 #endif
-  if (ENV_PARAM(XLNX_ENABLE_SKIP_FATAL)) {
-    // clang warning: cannot initialize a parameter of type
-    // 'google::logging_fail_func_t' (aka 'void (*)()
-    // __attribute__((noreturn))') with an rvalue of type 'void
-    // (*)()'
-    google::InstallFailureFunction(
-        (google::logging_fail_func_t)&compile_fatal_func);
-  }
+
   auto graph_inputs = graph_get_inputs(onnx_graph);
   auto graph_outputs = graph_get_outputs(onnx_graph);
 
@@ -1258,17 +1196,16 @@ compile_onnx_model_3(const std::string& model_path, const Graph& onnx_graph,
       LOG(INFO) << "\t " << node_arg_get_name(*output) << " : []";
     }
   }
-
+}
+std::vector<std::unique_ptr<ExecutionProvider>>
+compile_onnx_model_3(const std::string& model_path, const Graph& onnx_graph,
+                     const onnxruntime::ProviderOptions& options) {
+  print_graph_input_and_output(onnx_graph);
   static std::mutex mtx;
   std::lock_guard<std::mutex> t_lock(mtx);
   auto ep_context_nodes = get_ep_context_nodes(onnx_graph);
   auto context =
-      initialize_context(model_path, onnx_graph, ep_context_nodes, json_config);
-
-  auto deferred_write = std::shared_ptr<void>(nullptr, [context](void* /*p*/) {
-    if (0)
-      context->save_context_json();
-  });
+      initialize_context(model_path, onnx_graph, ep_context_nodes, options);
   auto measture_compile_onnx_model_3 = context->measure("compile_onnx_model_3");
   // we cannot use get_cache_filename because cache might be a tar file in
   // memory instead of a physical directory.
@@ -1281,6 +1218,14 @@ compile_onnx_model_3(const std::string& model_path, const Graph& onnx_graph,
   (void)lock;
   auto p_cpu_usage = CreateICPUUsage();
   std::vector<std::unique_ptr<ExecutionProvider>> ret{};
+  if (ENV_PARAM(XLNX_ENABLE_SKIP_FATAL)) {
+    // clang warning: cannot initialize a parameter of type
+    // 'google::logging_fail_func_t' (aka 'void (*)()
+    // __attribute__((noreturn))') with an rvalue of type 'void
+    // (*)()'
+    google::InstallFailureFunction(
+        (google::logging_fail_func_t)&compile_fatal_func);
+  }
   try {
     ret = compile_onnx_model_internal(onnx_graph, ep_context_nodes, context);
   } catch (const GlogFatalException& e) {
@@ -1344,80 +1289,6 @@ compile_onnx_model_3(const std::string& model_path, const Graph& onnx_graph,
     }
   }
   return ret;
-}
-
-static std::shared_ptr<PassContextImp>
-initialize_context_for_graph_optimizer(const std::string& model_path,
-                                       const Graph& onnx_graph,
-                                       const char* json_config) {
-  std::shared_ptr<PassContextImp> context = std::make_shared<PassContextImp>();
-  auto config_proto = ConfigProto();
-
-  if (json_config != nullptr && !std::string(json_config).empty()) {
-    Config::merge_config_proto(config_proto, json_config);
-  }
-  *context->context_proto.mutable_config() = std::move(config_proto);
-  auto& model = graph_get_model(onnx_graph);
-
-  if (!context->context_proto.config().cache_key().empty()) {
-    LOG(INFO) << "use cache key "
-              << context->context_proto.config().cache_key();
-  } else if (VAIP_ORT_API(model_has_meta_data)(model, "vaip_model_md5sum")) {
-    *context->context_proto.mutable_config()->mutable_cache_key() =
-        *VAIP_ORT_API(model_get_meta_data)(model, "vaip_model_md5sum");
-  } else if (!model_path.empty()) {
-    *context->context_proto.mutable_config()->mutable_cache_key() =
-        vaip_core::get_md5_of_file(model_path);
-  }
-  // update cache key
-  auto& cache_key = context->context_proto.config().cache_key();
-  if (cache_key.empty()) {
-    LOG(WARNING) << "the onnx model have no valid module path and "
-                    "json_config.cache_key is not set.";
-    return {};
-  }
-  *context->context_proto.mutable_config()->mutable_cache_key() =
-      context->context_proto.config().cache_key() + ".opt";
-  // update cache dir
-  update_cache_dir(*context);
-  save_config_json(*context);
-  return context;
-}
-
-int optimize_onnx_model(const std::filesystem::path& model_path_in,
-                        const std::filesystem::path& model_path_out,
-                        const char* json_config) {
-  auto model_in = model_load(model_path_in.u8string());
-  auto& graph = VAIP_ORT_API(model_main_graph)(*model_in);
-  graph_resolve(graph);
-  model_set_meta_data(*model_in, "vaip_model_md5sum",
-                      vaip_core::get_md5_of_file(model_path_in.u8string()));
-  auto context = initialize_context_for_graph_optimizer(
-      model_path_in.u8string(), graph, json_config);
-
-  if (!check_cache_hit(*context)) {
-    context->add_context_resource(
-        "__current_graph", std::shared_ptr<void>((void*)&graph, [](void*) {}));
-    update_cache(context, graph);
-
-    auto new_graph =
-        (Graph*)context->get_context_resource("__current_graph").get();
-    auto& new_model =
-        const_cast<onnxruntime::Model&>(graph_get_model(*new_graph));
-    model_set_meta_data(new_model, "suffix_counter",
-                        std::to_string(context->suffix_counter));
-
-    auto model_data = model_path_out;
-    model_data.replace_extension(".dat");
-    VAIP_ORT_API(graph_save)
-    (*new_graph, model_path_out.u8string(), model_data.u8string(),
-     std::numeric_limits<size_t>::max());
-  }
-  return 0;
-}
-
-void initialize_graph_optimizer(const std::string& /*json_path*/) {
-  LOG(FATAL) << "initialize_graph_optimizer todo";
 }
 
 thread_local const void* g_state = nullptr;

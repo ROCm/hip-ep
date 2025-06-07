@@ -310,11 +310,14 @@ std::unique_ptr<TargetProto> update_config_by_target(ConfigProto& proto,
   auto target = std::string();
   auto xclbin = std::string();
 
-  if (proto.provider_options().contains("xlnx_target")) {
+  if (proto.provider_options().contains(
+          "xlnx_target")) { // for backward compatibility, to be removed
     target = proto.provider_options().at("xlnx_target");
-  } else if (mep != nullptr) {
+  } else if (proto.provider_options().contains("target")) {
+    target = proto.provider_options().at("target");
+  } else if (mep != nullptr && !mep->target().empty()) {
     target = mep->target();
-    if (mep->has_xclbin()) {
+    if (mep->has_xclbin()) { // FIXME: to be removed
       xclbin = mep->xclbin();
     }
   } else if (proto.targets().size()) { // VAIML flow still use old config which
@@ -460,16 +463,6 @@ void add_custom_field(ConfigProto& proto) {
         break;
       }
     }
-  }
-  auto po = proto.mutable_provider_options();
-  for (auto key : to_be_delete) {
-    if (key == "target") {
-      // The target needs to be kept in the provider options , "target" has
-      // default value in config file.
-      continue;
-    }
-    LOG_VERBOSE(1) << "picked_out_config: " << key << " = " << po->at(key);
-    po->erase(key);
   }
 }
 

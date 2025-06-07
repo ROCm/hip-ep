@@ -1,0 +1,51 @@
+{
+    "provider_options": {
+        "k0": "value0_in_config",
+        "k1": "value1_in_config",
+        "cacheDir": "cacheDir_in_config",
+        "config_file": "config.json",
+        "cache_key": "cache_key_in_config"
+    },
+    "mepTable": [
+        {
+            "modelName": "PSA",
+            "md5sumOnDisk": "3f97582a85b8ae1be41127f326bbf9b2",
+            "md5sumInMemory": "d41d8cd98f00b204e9800998ecf8427e",
+            "target": "relu-dq-target",
+            "provider_options": {
+                "k0": "value0_in_mep_table",
+                "k1": "value1_in_mep_table",
+                "k2": "value2_in_mep_table"
+            }
+        }
+    ],
+    "passes": [
+        {
+            "name": "init",
+            "plugin": "vaip-pass_init"
+        },
+        {
+            "name": "fuse-rele-dq",
+            "plugin": "morphizen-level1-pass-relu-dq"
+        }
+    ],
+    "target": "relu-dq-target",
+    "targets": [
+        {
+            "name": "relu-dq-target",
+            "pass": [
+                "init",
+                "fuse-rele-dq"
+            ],
+            "provider_options": {
+                "k1": "value1_in_target_proto",
+                "k2": "value2_in_target_proto",
+                "k3": "value3_in_target_proto",
+                "pass.init.enable_dump": "1",
+                "pass.init.directory": "vaip_init",
+                "pass.init.filename": "init-graph-for-requ-dq.onnx",
+                "XLNX_model_clone_external_data_threshold": "17179869184"
+            }
+        }
+    ]
+}

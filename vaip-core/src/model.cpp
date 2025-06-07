@@ -81,5 +81,11 @@ Model& Model::set_metadata(const std::string& name, const std::string& value) {
 GraphRef Model::main_graph() {
   return GraphRef(VAIP_ORT_API(model_main_graph)(*self_));
 }
-
+GraphConstRef ModelConstRef::main_graph() const {
+  return GraphConstRef(
+      VAIP_ORT_API(model_main_graph)(const_cast<onnxruntime::Model&>(self_)));
+}
+std::filesystem::path ModelConstRef::model_path() const {
+  return VAIP_ORT_API(get_model_path)(main_graph());
+}
 } // namespace vaip_cxx

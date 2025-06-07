@@ -4,13 +4,11 @@
  */
 #pragma once
 
+#include "./vaip.hpp"
 #include "onnxruntime_api.hpp"
 #include <cstdint>
 #include <string>
 #include <unordered_map>
-namespace onnxruntime {
-using ProviderOptions = std::unordered_map<std::string, std::string>;
-}
 namespace vaip_core {
 /**
  * Precedence: "config_file" option > "xclbin" option > XLNX_VART_FIRMWARE

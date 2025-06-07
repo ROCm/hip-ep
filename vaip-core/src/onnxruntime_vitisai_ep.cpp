@@ -221,9 +221,8 @@ std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>*
 compile_onnx_model_vitisai_ep_with_options(
     const std::string& model_path, const onnxruntime::Graph& graph,
     const onnxruntime::ProviderOptions& options) {
-  auto json_config = vaip_core::get_config_json_str(options);
   return new std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>(
-      vaip_core::compile_onnx_model_3(model_path, graph, json_config.c_str()));
+      vaip_core::compile_onnx_model_3(model_path, graph, options));
 }
 
 VAIP_DLL_SPEC
@@ -232,9 +231,8 @@ compile_onnx_model_vitisai_ep_with_error_handling(
     const std::string& model_path, const onnxruntime::Graph& graph,
     const onnxruntime::ProviderOptions& options, [[maybe_unused]] void* status,
     [[maybe_unused]] void (*func)(void*, int, const char*)) {
-  auto json_config = vaip_core::get_config_json_str(options);
   return new std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>(
-      vaip_core::compile_onnx_model_3(model_path, graph, json_config.c_str()));
+      vaip_core::compile_onnx_model_3(model_path, graph, options));
 }
 
 VAIP_DLL_SPEC

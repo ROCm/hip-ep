@@ -44,7 +44,7 @@ compile_onnx_model_5(const std::filesystem::path& model_path,
 
 VAIP_DLL_SPEC std::vector<std::unique_ptr<ExecutionProvider>>
 compile_onnx_model_3(const std::string& model_path, const Graph& graph,
-                     const char* json_config);
+                     const onnxruntime::ProviderOptions& options);
 
 VAIP_DLL_SPEC void profiler_collect(std::vector<EventInfo>& api_events,
                                     std::vector<EventInfo>& kernel_events);
@@ -54,9 +54,5 @@ int optimize_onnx_model(const std::filesystem::path& model_path_in,
                         const char* json_config);
 
 void initialize_graph_optimizer(const std::string& json_path);
-
-std::shared_ptr<PassContextImp>
-initialize_context(const std::string& model_path, const Graph& onnx_graph,
-                   const char* json_config);
 
 } // namespace vaip_core

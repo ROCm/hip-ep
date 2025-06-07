@@ -18,6 +18,10 @@
 #include "tar_ball.hpp"
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE, "0")
 DEF_ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE, "1")
+DEF_ENV_PARAM(XLNX_ONNX_EP_VERBOSE, "0")
+#define LOG_VERBOSE(n)                                                         \
+  LOG_IF(INFO, ENV_PARAM(XLNX_ONNX_EP_VERBOSE) >= n)                           \
+      << "[XLNX_ONNX_EP_VERBOSE] "
 
 namespace vaip_core {
 
@@ -96,7 +100,8 @@ std::filesystem::path PassContextImp::get_log_dir() const { return log_dir; }
 std::optional<std::string>
 PassContextImp::get_provider_option(const std::string& option_name) const {
   // priority order:
-  // 1. context_proto, provided explicitly by end users
+  // 0. provider_option privded by user
+  // 1. context_proto,
   // 2. mep_config_proto, from known models.
   // 3. target_proto, from target discovery
   //    Target priority
@@ -106,6 +111,12 @@ PassContextImp::get_provider_option(const std::string& option_name) const {
   //        4. default target in config file
   //
   //  4. default value
+  {
+    auto it = provider_option_origin_.find(option_name);
+    if (it != provider_option_origin_.end()) {
+      return it->second;
+    }
+  }
   if (1) { // add a scope to suppress warning
     const auto& config = context_proto.config();
     auto it = config.provider_options().find(option_name);
@@ -1069,5 +1080,59 @@ void PassContextImp::create_tar_file_from_memory(std::vector<char>&& buffer) {
   if (!has_cache_file("context.json")) {
     cache_file_use_cache_key_prefix_ = !cache_file_use_cache_key_prefix_;
   }
+}
+void PassContextImp::print_version_info(const char* prefix) {
+  auto& config = get_config_proto();
+  for (auto version_info : config.version().version_infos()) {
+    LOG_VERBOSE(1) << prefix << version_info.package_name() << " ("
+                   << version_info.version() << ") :" + version_info.commit();
+  }
+  LOG_VERBOSE(1) << prefix << "cache_dir: " << config.cache_dir();
+  LOG_VERBOSE(1) << prefix << "cache_key: " << config.cache_key();
+  for (auto& kv : provider_option_origin_) {
+    LOG_VERBOSE(1) << "provider_options_origin: " << kv.first << " = "
+                   << kv.second;
+  }
+  for (auto& kv : config.provider_options()) {
+    LOG_VERBOSE(1) << "provider_options: " << kv.first << " = " << kv.second;
+  }
+  for (auto& kv : config.session_configs()) {
+    LOG_VERBOSE(1) << "session_config: " << kv.first << " = " << kv.second;
+  }
+}
+void PassContextImp::pass_context_update_context_json(
+    gsl::span<char> json_str) {
+  auto& context = *this;
+  auto session_options_saved = context.context_proto.config().session_configs();
+  // Some options are only relevant at runtime and do not require caching.
+  auto provider_options_saved =
+      context.context_proto.config().provider_options();
+  // TODO: this is a bad solution, how about cache_key, cache_dir etc.
+  bool enable_cache_in_mem = false;
+  if (context.context_proto.config().has_enable_cache_file_io_in_mem()) {
+    enable_cache_in_mem =
+        context.context_proto.config().enable_cache_file_io_in_mem();
+  }
+
+  context.context_proto.Clear();
+  auto status = google::protobuf::util::JsonStringToMessage(
+      &json_str[0], &context.context_proto);
+  context.context_proto.mutable_config()->mutable_session_configs()->swap(
+      session_options_saved);
+  // all provider options no cache
+  context.context_proto.mutable_config()->mutable_provider_options()->swap(
+      provider_options_saved);
+  context.context_proto.mutable_config()->set_enable_cache_file_io_in_mem(
+      enable_cache_in_mem);
+  CHECK(status.ok()) << "cannot parse json string:" << status.message()
+                     << &json_str[0];
+  context.print_version_info("CACHE VERSION: ");
+}
+
+void PassContextImp::update_pass_context_from_context_json_in_cache() {
+  auto context_context_json = read_file_c8("context.json");
+  auto context_context_json_text = dos2unix(*context_context_json);
+  pass_context_update_context_json(context_context_json_text);
+  restore_cache_files();
 }
 } // namespace vaip_core
