@@ -306,10 +306,23 @@ bool check_cache_hit(PassContextImp& context) {
 }
 
 void compile_onnx_model_2(std::shared_ptr<PassContextImp> context,
-                          onnxruntime::Graph& graph) {
+                          const Graph& onnx_graph) {
   bool cache_hit = check_cache_hit(*context);
   if (!cache_hit) {
-    update_cache(context, graph);
+    auto& model = graph_get_model(onnx_graph);
+    int64_t threshold = ENV_PARAM(XLNX_model_clone_external_data_threshold);
+    auto po_threshold = context->get_provider_option(
+        "XLNX_model_clone_external_data_threshold");
+    if (po_threshold) {
+      threshold = std::stoll(po_threshold.value());
+    }
+    auto cloned_model = model_clone(model, threshold);
+    auto& cloned_graph = VAIP_ORT_API(model_main_graph)(*cloned_model);
+    auto deferred_collect =
+        std::shared_ptr<void>(nullptr, [context, &onnx_graph](void* /*p*/) {
+          collect_stat_and_dump(*context, onnx_graph);
+        });
+    update_cache(context, cloned_graph);
   } else {
     MY_LOG(1) << "==== cache hit ====";
   }
@@ -1127,21 +1140,7 @@ compile_onnx_model_internal(
         context->get_config_proto());
     auto measure_before_compile_onnx_model_2 =
         context->measure("before_compile_onnx_model_internal");
-    auto& model = graph_get_model(onnx_graph);
-    int64_t threshold = ENV_PARAM(XLNX_model_clone_external_data_threshold);
-    auto po_threshold = context->get_provider_option(
-        "XLNX_model_clone_external_data_threshold");
-    if (po_threshold) {
-      threshold = std::stoll(po_threshold.value());
-    }
-    auto cloned_model = model_clone(model, threshold);
-    auto& cloned_graph = VAIP_ORT_API(model_main_graph)(*cloned_model);
-    auto deferred_collect =
-        std::shared_ptr<void>(nullptr, [context, &onnx_graph](void* /*p*/) {
-          collect_stat_and_dump(*context, onnx_graph);
-        });
-    measure_before_compile_onnx_model_2 = nullptr;
-    compile_onnx_model_2(context, cloned_graph);
+    compile_onnx_model_2(context, onnx_graph);
     measure_after_compile_onnx_model_2 =
         context->measure("after_compile_onnx_model_internal");
     ret.reserve(context->context_proto.meta_def_size());
