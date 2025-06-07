@@ -130,7 +130,23 @@ protected:
                                      ret.ort_log_id().c_str());
     return ret;
   }
-
+  void
+  run_config_origin_model_and_ep_context_model(const std::string& config_name) {
+    const auto& config = select_config(config_name);
+    // shared session_options between generate ctx model and run ctx model
+    auto session_options = create_session_options(config);
+    session_options->AddConfigEntry("ep.context_enable", "1");
+    // run model
+    run_many_sessions(model_path, *env, *session_options, config);
+    if (config.ep_context_enable()) {
+      // run ctx model
+      auto ctx_model_path = config.get_ctx_model_path(model_path);
+      EXPECT_TRUE(std::filesystem::exists(ctx_model_path))
+          << "ctx model not exist";
+      session_options->AddConfigEntry("ep.context_enable", "0");
+      run_many_sessions(ctx_model_path, *env, *session_options, config);
+    }
+  }
   std::filesystem::path model_path;
   std::unique_ptr<Ort::Env> env;
 
@@ -138,22 +154,15 @@ private:
   std::unordered_map<std::string, std::unique_ptr<Config>> env_config_map;
 };
 
-TEST_F(TestOnnxRunner, Run) {
-  const auto& config = select_config("default_config");
-  // shared session_options between generate ctx model and run ctx model
-  auto session_options = create_session_options(config);
-  // run model
-  run_many_sessions(model_path, *env, *session_options, config);
-  if (config.ep_context_enable()) {
-    // run ctx model
-    auto ctx_model_path = config.get_ctx_model_path(model_path);
-    EXPECT_TRUE(std::filesystem::exists(ctx_model_path))
-        << "ctx model not exist";
-    session_options->AddConfigEntry("ep.context_enable", "0");
-    run_many_sessions(ctx_model_path, *env, *session_options, config);
-  }
+TEST_F(TestOnnxRunner, RunOriginAndEpContextModel_embed_mode) {
+  run_config_origin_model_and_ep_context_model("embed_mode");
 }
-
+TEST_F(TestOnnxRunner, RunOriginAndEpContextModel_non_embed_mode) {
+  run_config_origin_model_and_ep_context_model("non_embed_mode");
+}
+TEST_F(TestOnnxRunner, RunOriginAndEpContextModel_non_embed_mode_no_prefix) {
+  run_config_origin_model_and_ep_context_model("non_embed_mode_no_prefix");
+}
 TEST_F(TestOnnxRunner, SingleModelSingleSession) {
   const auto& config = select_config("single_session");
   auto session_options = create_session_options(config);

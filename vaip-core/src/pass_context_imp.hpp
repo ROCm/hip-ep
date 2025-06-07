@@ -192,13 +192,14 @@ private:
   std::filesystem::path get_ep_context_onnx_file_path();
   std::filesystem::path generate_ep_context_binary_file_path();
   void maybe_create_tar_file_for_write();
-  void maybe_create_tar_file_for_read(
-      const std::string& ep_context_binary_file_name);
+  void
+  create_tar_file_for_read(DllSafe<std::string>&& ep_context_binary_file_name,
+                           bool embed_mode);
 
-  void create_tar_file_from_memory(std::vector<char>&& buffer);
   void print_version_info(const char* prefix);
   void pass_context_update_context_json(gsl::span<char> json_str);
   void update_pass_context_from_context_json_in_cache();
+  void create_tar_file_for_prebuild_cache(std::vector<char>&& buffer);
 
 public:
   virtual std::filesystem::path get_model_path() const override final;
@@ -223,7 +224,6 @@ public:
 
   virtual bool
   cache_files_to_tar_file(IStreamWriter& writer) const override final;
-  virtual bool tar_file_to_tar_file(IStreamWriter& writer) const override final;
   virtual bool tar_file_to_cache_files(class IStreamReader& src) override final;
 
   virtual std::shared_ptr<void>
@@ -311,6 +311,7 @@ private:
       vaip_cxx::GraphConstRef /*onnx_graph*/,
       std::shared_ptr<PassContextImp> context,
       std::vector<vaip_cxx::NodeConstRef> ep_context_nodes);
+  friend std::string get_ep_cache_context_embed_mode(PassContextImp& context);
 #if defined(__GNUC__)
 #  pragma GCC diagnostic pop
 #endif

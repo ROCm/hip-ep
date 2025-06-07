@@ -300,11 +300,9 @@ public:
   /**
    * @brief Creates a in-memory tar file from in-memory cache files
    *
-   * @return A std::vector<char representing the tar file.
+   * @return A std::vector<char> representing the tar file.
    *
    */
-
-  virtual bool tar_file_to_tar_file(IStreamWriter& writer) const = 0;
 
   virtual std::vector<char> cache_files_to_tar_mem() const = 0;
 

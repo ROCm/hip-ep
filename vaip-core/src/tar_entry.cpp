@@ -227,7 +227,7 @@ bool TarEntryInputStream::rename_symlink(
 
 void* TarEntryInputStream::mmap() {
   if (mem_buf_) {
-    return mem_buf_->offset(buf_->data_begin_pos());
+    return (void*)mem_buf_->offset(buf_->data_begin_pos());
   }
   return nullptr;
 }

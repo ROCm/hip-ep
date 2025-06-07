@@ -2,7 +2,9 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+#define _CRT_SECURE_NO_WARNINGS
 #include "./tar_file.hpp"
+#include "./file_stream.hpp"
 #include "./tar_header.hpp"
 #include "morphizen/env_config.hpp"
 #include <algorithm>
@@ -48,7 +50,51 @@ std::unique_ptr<TarFile> TarFile::create(const std::filesystem::path& path) {
   }
   return create_with_regular_stream();
 }
-TarFile::TarFile(std::unique_ptr<std::iostream> stream)
+std::unique_ptr<TarFile> TarFile::create() {
+  auto file = std::tmpfile();
+  CHECK(file != nullptr) << "cannot create a tmpfile";
+  auto stream = std::unique_ptr<std::iostream>(new FileStream(file));
+  if (!stream->good()) {
+    MY_LOG(1) << "Failed to create a temporary file for TarFile";
+    return nullptr;
+  }
+  return create(std::move(stream));
+}
+std::unique_ptr<TarFile> TarFile::create(std::vector<char>&& buffer) {
+  auto owner = std::make_unique<std::vector<char>>(std::move(buffer));
+  auto base = owner->data();
+  auto size = owner->size();
+  auto stream = std::make_unique<MemStream<std::vector<char>>>(
+      MemBuffer<std::vector<char>>::create(base, size, std::move(owner)));
+  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+      << " create a tar file from memory " << (void*)base << " " << size;
+  return create(std::move(stream));
+}
+std::unique_ptr<TarFile> TarFile::create(const char* base, size_t size) {
+  auto stream = std::make_unique<MemStream<int>>(
+      MemBuffer<int>::create(base, size, std::unique_ptr<int>()));
+  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+      << " create a tar file from memory " << (void*)base << " " << size;
+  return create(std::move(stream));
+}
+std::unique_ptr<TarFile> TarFile::create(DllSafe<std::string>&& buffer0) {
+  auto buffer = DllSafe<std::string>(std::move(buffer0));
+  auto file = std::tmpfile();
+  CHECK(file != nullptr) << "cannot open tmp file";
+  auto r = fwrite(buffer->data(), 1, buffer->size(), file);
+  CHECK_EQ(r, buffer->size()) << "write error";
+  r = fseek(file, 0, SEEK_SET);
+  CHECK_EQ(r, 0);
+  auto pos = ftell(file);
+  MY_LOG(1) << " pos=" << pos;
+  auto stream = std::make_unique<FileStream>(file);
+  if (!stream->good()) {
+    MY_LOG(1) << "Failed to create a temporary file for TarFile";
+    return nullptr;
+  }
+  return create(std::move(stream));
+}
+TarFile::TarFile(std::unique_ptr<std::iostream>&& stream)
     : stream_(std::move(stream)),
       mem_stream_{dynamic_cast<decltype(mem_stream_)>(stream_.get())} {
   CHECK(stream_->seekg(0, std::ios::beg).good())
@@ -68,6 +114,38 @@ bool TarFile::has_file(const std::string& filename) const {
     }
   }
   return false;
+}
+
+size_t TarFile::current_size() const {
+  auto old_pos = stream_->tellg();
+  stream_->seekg(0, std::ios::end);
+  CHECK(stream_->good()) << "Failed to seek to the end of the stream";
+  size_t size = stream_->tellg();
+  stream_->seekg(old_pos, std::ios::beg);
+  CHECK(stream_->good())
+      << "Failed to seek back to the old position in the stream";
+  MY_LOG(1) << " current_size: " << size;
+  return size;
+}
+
+bool TarFile::dump_to(char* data, size_t size) const {
+  auto expected_size = current_size();
+  if (size < expected_size) {
+    MY_LOG(1)
+        << " dump_to: size is less than the current size of the tar file: ";
+    return false;
+  }
+  auto old_pos = stream_->tellg();
+  stream_->seekg(0, std::ios::beg);
+  CHECK(stream_->good())
+      << "Failed to seek to the beginning of the stream for dump_to";
+  stream_->read(data, size);
+  CHECK(stream_->good()) << "Failed to read from the stream for dump_to";
+  stream_->seekg(old_pos, std::ios::beg);
+  CHECK(stream_->good())
+      << "Failed to seek back to the old position in the stream for dump_to";
+  MY_LOG(1) << " dump_to: dumped " << size << " bytes";
+  return true;
 }
 
 std::vector<std::unique_ptr<TarEntryInputStream>>& TarFile::entries() {

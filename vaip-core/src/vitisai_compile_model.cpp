@@ -220,7 +220,6 @@ static bool check_cache_exist(const PassContextImp& context) {
   fs::path cache_file = get_cache_file_name(context, "context.json");
   return file_exists(cache_file);
 }
-
 bool check_cache_hit(PassContextImp& context) {
   auto measure_check_cache_hit = context.measure("check_cache_hit");
   auto prebuild_cache_context_name =
@@ -235,7 +234,8 @@ bool check_cache_hit(PassContextImp& context) {
     }
     auto prebuild_ep_context_in_mem =
         get_mem_xclbin(prebuild_cache_context_name.value());
-    context.create_tar_file_from_memory(std::move(prebuild_ep_context_in_mem));
+    context.create_tar_file_for_prebuild_cache(
+        std::move(prebuild_ep_context_in_mem));
     return true;
   }
   auto cache_in_mem = context.cache_in_mem();
@@ -609,11 +609,7 @@ static void get_ep_cache_context_common(PassContextImp& context,
                                         IStreamWriter& dst) {
   auto measure_get_ep_cache_context_embed_mode =
       context.measure("get_ep_cache_context_common");
-  std::unique_ptr<IStreamReader> reader =
-      context_tar_file_to_tar_stream(context);
-  if (!reader) {
-    reader = context_cache_files_to_tar_stream(context);
-  }
+  auto reader = context_cache_files_to_tar_stream(context);
   if (ENV_PARAM(XLNX_EP_CONTEXT_ENABLE_COMPRESSION)) {
     auto measure_compression = context.measure("vaip_core::compress");
     LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
@@ -634,16 +630,24 @@ static void get_ep_cache_context_common(PassContextImp& context,
   return;
 }
 
-static std::string get_ep_cache_context_embed_mode(PassContextImp& context) {
+std::string get_ep_cache_context_embed_mode(PassContextImp& context) {
   auto measure_get_ep_cache_context_embed_mode =
       context.measure("get_ep_cache_context_embed_mode");
-  std::vector<char> out;
-  auto dst = IStreamWriter::from_bytes(out); // TODO: add from_string.
-  get_ep_cache_context_common(context, *dst);
-  LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
-      << "embed mode = 1, load cache directory  to tar memory " << out.size()
-      << " bytes";
-  return std::string(out.begin(), out.end());
+  if (context.tar_file_ != nullptr) {
+    auto out = std::string();
+    out.resize(context.tar_file_->current_size());
+    auto ok = context.tar_file_->dump_to(out.data(), out.size());
+    CHECK(ok) << "cannot dump, size=" << out.size();
+    return out;
+  } else {
+    std::vector<char> out;
+    auto dst = IStreamWriter::from_bytes(out); // TODO: add from_string.
+    get_ep_cache_context_common(context, *dst);
+    LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
+        << "embed mode = 1, load cache directory  to tar memory " << out.size()
+        << " bytes";
+    return std::string(out.begin(), out.end());
+  }
 }
 
 static std::string get_ep_cache_context_nonembed_mode(PassContextImp& context) {
@@ -658,8 +662,7 @@ static std::string get_ep_cache_context_nonembed_mode(PassContextImp& context) {
   // atttribute "ep.cache_context"
   auto binary_name =
       OrtSessionOptionEpContextFilePath_binay.filename().u8string();
-  auto prebuild = context.get_provider_option("prebuild_cache_context");
-  if (context.tar_file_ && (!prebuild.has_value())) {
+  if (context.tar_file_) {
     // do nothing
   } else {
     auto dst =
@@ -890,17 +893,16 @@ store_cache_directory_from_main_node(PassContextImp& context,
            "true";
   }
 #if VAIP_ORT_API_MAJOR >= 12
-  auto ep_cache_context =
-      main_node.release_attr_string("ep_cache_context").to_ptr();
+  auto ep_cache_context = main_node.release_attr_string("ep_cache_context");
 #else
-  auto ep_cache_context_data = main_node.get_attr_string("ep_cache_context");
-  auto ep_cache_context = &ep_cache_context_data;
+#  error "not supported any more"
 #endif
   auto ep_context_size = ep_cache_context->size();
 
   if (ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE) //
-      && !enable_compression && !enable_encryption && ep_embed_mode == 0) {
-    context.maybe_create_tar_file_for_read(*ep_cache_context);
+      && !enable_compression && !enable_encryption) {
+    context.create_tar_file_for_read(std::move(ep_cache_context),
+                                     ep_embed_mode != 0);
   } else {
     std::unique_ptr<IStreamReader> ep_context_file;
     auto context_holder = std::make_shared<TempFile>();
@@ -919,9 +921,6 @@ store_cache_directory_from_main_node(PassContextImp& context,
                                     std::filesystem::u8path(*ep_cache_context);
       ep_context_file = IStreamReader::from_path(ep_context_binary_file);
     }
-#if VAIP_ORT_API_MAJOR >= 12
-    ep_cache_context.reset();
-#endif
     if (enable_encryption) {
       auto encryption_key = context.context_proto.config().encryption_key();
       if (encryption_key.empty()) {

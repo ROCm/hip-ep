@@ -5,6 +5,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "../../vaip-core/src/tar_file.hpp"
 #include "test_environment.hpp"
+#include "vaip/dll_safe.h"
 #include <boost/process.hpp>
 #include <cerrno>
 #include <cstring>
@@ -283,19 +284,45 @@ md5                                      size   blk-begin     blk-end  data-begi
                    std::string("_data/08cf82251c975a5e9734699fadf5e9c0"), //
                    6, 16896, 17408, 16384, 16390);
 }
-static void check_abc(vaip_core::TarFile* tar_file_obj) {
-  check_entries(tar_file_obj->entries());
+static void check_abc(vaip_core::TarFile& tar_file_obj) {
+  check_entries(tar_file_obj.entries());
   {
-    read_and_check("a.txt", *tar_file_obj, "world!");
+    read_and_check("a.txt", tar_file_obj, "world!");
   }
   {
-    read_and_check("b.txt", *tar_file_obj, "hello");
+    read_and_check("b.txt", tar_file_obj, "hello");
   }
   {
-    read_and_check("c.txt", *tar_file_obj, "hello");
+    read_and_check("c.txt", tar_file_obj, "hello");
   }
 }
-
+static void test_abc(vaip_core::TarFile& tar_file_obj) {
+  LOG(INFO) << " ====== begin to write to tar file. ==== ";
+  {
+    write_to_stream("a.txt", tar_file_obj, "hello");
+  }
+  {
+    write_to_stream("b.txt", tar_file_obj, "hello");
+  }
+  {
+    write_to_stream("c.txt", tar_file_obj, "hello");
+  }
+  {
+    write_to_stream("a.txt", tar_file_obj, "hello");
+  }
+  // write to the same file with different data
+  {
+    write_to_stream("a.txt", tar_file_obj, "world!");
+  }
+  // write to the same file with same data
+  {
+    write_to_stream("b.txt", tar_file_obj, "hello");
+  }
+  LOG(INFO) << " ====== end write to tar file. ==== ";
+  LOG(INFO) << " ====== begin to read and check ==== ";
+  check_abc(tar_file_obj);
+  LOG(INFO) << " ====== end to read and check ==== ";
+}
 TEST(TarFileTest, WriteTo) {
   // Assuming you have a tar file named "sample.src.tar" in the current
   // directory
@@ -313,31 +340,7 @@ TEST(TarFileTest, WriteTo) {
         << " Error opening file: " << std::strerror(errno);
     auto tar_file_obj = vaip_core::TarFile::create(std::move(tarStream));
     ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
-    LOG(INFO) << " ====== begin to write to tar file. ==== ";
-    {
-      write_to_stream("a.txt", *tar_file_obj, "hello");
-    }
-    {
-      write_to_stream("b.txt", *tar_file_obj, "hello");
-    }
-    {
-      write_to_stream("c.txt", *tar_file_obj, "hello");
-    }
-    {
-      write_to_stream("a.txt", *tar_file_obj, "hello");
-    }
-    // write to the same file with different data
-    {
-      write_to_stream("a.txt", *tar_file_obj, "world!");
-    }
-    // write to the same file with same data
-    {
-      write_to_stream("b.txt", *tar_file_obj, "hello");
-    }
-    LOG(INFO) << " ====== end write to tar file. ==== ";
-    LOG(INFO) << " ====== begin to read and check ==== ";
-    check_abc(tar_file_obj.get());
-    LOG(INFO) << " ====== end to read and check ==== ";
+    test_abc(*tar_file_obj);
   }
   //  run tar -tvf to check the result
   {
@@ -370,7 +373,62 @@ TEST(TarFileTest, WriteTo) {
         tarFileName, std::ios::binary | std::ios::in | std::ios::out);
     auto tar_file_obj = vaip_core::TarFile::create(std::move(tarStream));
     ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
-    check_abc(tar_file_obj.get());
+    check_abc(*tar_file_obj);
+    LOG(INFO) << " =======================================";
+    LOG(INFO) << " ======  fresh read is done ============";
+    LOG(INFO) << " =======================================";
+  }
+}
+TEST(TarFileTest, MemoryTar) {
+  auto buf = std::vector<char>();
+  {
+    LOG(INFO) << " ==========================================================";
+    LOG(INFO) << " ======  start a fresh write and check to tmpfile =========";
+    LOG(INFO) << " ==========================================================";
+    auto tar_file_obj = vaip_core::TarFile::create();
+    ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
+    test_abc(*tar_file_obj);
+    check_abc(*tar_file_obj);
+    auto size = tar_file_obj->current_size();
+    buf.resize(size);
+    ASSERT_GE(size, 0);
+    tar_file_obj->dump_to(buf.data(), buf.size());
+    LOG(INFO) << " ==========================================================";
+    LOG(INFO) << " ======  a fresh write and check to tmpfile is done =======";
+    LOG(INFO) << " ==========================================================";
+  }
+  {
+    LOG(INFO) << " ==========================================================";
+    LOG(INFO) << " ======  start a fresh read on un-owned buffer ============";
+    LOG(INFO) << " ==========================================================";
+    auto tar_file_obj = vaip_core::TarFile::create(buf.data(), buf.size());
+    ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
+    check_abc(*tar_file_obj);
+    LOG(INFO) << " =======================================";
+    LOG(INFO) << " ======  fresh read is done ============";
+    LOG(INFO) << " =======================================";
+  }
+  {
+    LOG(INFO) << " ==========================================================";
+    LOG(INFO)
+        << " ======  start a fresh read on dllsafe buffer ===============";
+    LOG(INFO) << " ==========================================================";
+    vaip_core::DllSafe<std::string> new_buf(
+        new std::string(buf.begin(), buf.end()));
+    auto tar_file_obj = vaip_core::TarFile::create(std::move(new_buf));
+    ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
+    check_abc(*tar_file_obj);
+    LOG(INFO) << " =======================================";
+    LOG(INFO) << " ======  fresh read is done ============";
+    LOG(INFO) << " =======================================";
+  }
+  {
+    LOG(INFO) << " ==========================================================";
+    LOG(INFO) << " ======  start a fresh read on owned buffer ===============";
+    LOG(INFO) << " ==========================================================";
+    auto tar_file_obj = vaip_core::TarFile::create(std::move(buf));
+    ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
+    check_abc(*tar_file_obj);
     LOG(INFO) << " =======================================";
     LOG(INFO) << " ======  fresh read is done ============";
     LOG(INFO) << " =======================================";

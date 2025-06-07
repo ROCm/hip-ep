@@ -6,11 +6,11 @@
 #include "./mem_stream_buffer.hpp"
 #include "./mmap_file.hpp"
 #include "./tar_entry.hpp"
+#include "vaip/dll_safe.h"
 #include "vaip/export.h"
 #include <filesystem>
 #include <iostream>
 #include <optional>
-
 namespace vaip_core {
 class TarFile {
 public:
@@ -32,9 +32,55 @@ public:
   VAIP_DLL_SPEC static std::unique_ptr<TarFile>
   create(const std::filesystem::path& path);
 
+  /**
+   * @brief Creates a new instance of TarFile.
+   *
+   * This static factory method returns a unique pointer to a newly created
+   * TarFile object. create a tar file from tmpfile
+   *
+   * @return std::unique_ptr<TarFile> A unique pointer to the created TarFile
+   * instance.
+   */
+  VAIP_DLL_SPEC static std::unique_ptr<TarFile> create();
+  /**
+   * @brief Creates a TarFile instance from a vector buffer.
+   *
+   * This function initializes and returns a unique pointer to a TarFile
+   * object, which represents the tar file created from the provided buffer.
+   *
+   * @param buffer A vector of characters containing the tar file data.
+   * @return A unique pointer to the created TarFile instance.
+   */
+  static std::unique_ptr<TarFile> create(std::vector<char>&& buffer);
+
+  /**
+   * @brief Creates a TarFile instance from a DllSafe buffer.
+   *
+   * This function initializes and returns a unique pointer to a TarFile
+   * object, which represents the tar file created from the provided DllSafe
+   * buffer.
+   *
+   * @param buffer A DllSafe object containing the tar file data.
+   * @return A unique pointer to the created TarFile instance.
+   */
+  static std::unique_ptr<TarFile> create(DllSafe<std::string>&& buffer);
+  /**
+   * @brief Creates a TarFile instance from raw data.
+   *
+   * This function initializes and returns a unique pointer to a TarFile
+   * object, which represents the tar file created from the provided raw data
+   * and size.
+   *
+   * the caller need to ensure `data` and `size` lifetime is long enough
+   *
+   * @param data Pointer to the raw data buffer containing the tar file data.
+   * @param size The size of the raw data buffer.
+   * @return A unique pointer to the created TarFile instance.
+   */
+  static std::unique_ptr<TarFile> create(const char* data, size_t size);
+
 public:
-  TarFile(std::unique_ptr<std::iostream> stream);
-  TarFile(std::unique_ptr<MemStream<MemFile>> stream);
+  TarFile(std::unique_ptr<std::iostream>&& stream);
   VAIP_DLL_SPEC
   bool has_file(const std::string& filename) const;
   VAIP_DLL_SPEC
@@ -64,6 +110,34 @@ public:
   // NOTE: the stream is not thread safe.
   VAIP_DLL_SPEC
   std::unique_ptr<std::ostream> open_for_write(const std::string& filename);
+  /**
+   * @brief Returns the current size of the object.
+   *
+   * This function provides the current size, typically representing
+   * the number of bytes for the tar file.
+   *
+   * @code
+   *     auto size = tar_file.current_size();
+   *     auto buf = std::vector<char>(size);
+   *     tar_file.dump_to(buf.data(), buffer.size())
+   * @return The current size as a value of type size_t.
+   */
+  VAIP_DLL_SPEC
+  size_t current_size() const;
+  /**
+   * @brief Dumps the contents of the object to the provided buffer.
+   *
+   * Copies the tar file content into the specified buffer up to the given size.
+   *
+   * @param data Pointer to the destination buffer where the data will be
+   * written.
+   * @param size The maximum number of bytes to write to the buffer.
+   * @return return true if sucess, false otherise.
+   * value on error.
+   * @note if the size is less than the current size of the tar file, it results
+   * in a corrupted tar file
+   */
+  bool dump_to(char* data, size_t size) const;
 
 private:
   TarEntryInputStream&

@@ -19,21 +19,24 @@ public:
   // Handles writing to FILE*
   virtual int_type overflow(int_type ch) override;
   // Flushes the output buffer
-  virtual int sync() override { return flushBuffer() ? 0 : -1; }
+  virtual int sync() override { return flush_buffer() ? 0 : -1; }
 
   // Seek support using fseek
   std::streampos seekoff(std::streamoff offset, std::ios_base::seekdir way,
                          std::ios_base::openmode which) override;
-
+  std::streampos seekoff_in(std::streamoff offset, std::ios_base::seekdir way);
+  std::streampos seekoff_out(std::streamoff offset, std::ios_base::seekdir way);
   std::streampos seekpos(std::streampos pos,
                          std::ios_base::openmode which) override;
 
 private:
-  bool flushBuffer();
+  bool flush_buffer();
 
   FILE* file_;
-  std::size_t bufferSize_;
-  std::vector<char> buffer_;
+  std::streambuf::off_type get_pos_ = 0;
+  std::streambuf::off_type put_pos_ = 0;
+  std::vector<char_type> get_buffer_;
+  std::vector<char_type> put_buffer_;
 };
 
 // Utility class for stream interface

@@ -506,18 +506,6 @@ context_cache_files_to_tar_stream(PassContext& context) {
   return std::move(reader_and_size.first);
 }
 
-std::unique_ptr<IStreamReader>
-context_tar_file_to_tar_stream(PassContext& context) {
-  auto temp_file = std::make_shared<TempFile>();
-  auto writer = temp_file->build_writer();
-  bool suc = context.tar_file_to_tar_file(*writer);
-  if (!suc) {
-    return nullptr;
-  }
-  auto reader_and_size = temp_file->build_reader();
-  return std::move(reader_and_size.first);
-}
-
 std::string get_md5_of_buffer(const char* buffer, size_t size) {
   auto MD5_computer = MD5();
   MD5_computer.add(buffer, size);

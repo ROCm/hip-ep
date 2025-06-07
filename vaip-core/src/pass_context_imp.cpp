@@ -642,19 +642,6 @@ bool PassContextImp::cache_files_to_tar_file(IStreamWriter& writer) const {
   return true;
 }
 
-bool PassContextImp::tar_file_to_tar_file(IStreamWriter& writer) const {
-  if (!tar_file_) {
-    return false;
-  }
-  TarWriter tar_writer(writer);
-  auto& entries = tar_file_->entries();
-  for (auto& entry : entries) {
-    auto name = entry->path();
-    tar_writer.write(CacheFileStreamReader(open_file_for_read(name)), name);
-  }
-  return true;
-}
-
 size_t CacheFileStreamWriter::write(const char* data, size_t size) {
   auto write_size = writer_->fwrite(data, size);
   CHECK_EQ((size_t)write_size, size);
@@ -997,15 +984,41 @@ std::size_t CacheFileWriterStreamImp::fwrite(const void* buffer,
 }
 
 void PassContextImp::maybe_create_tar_file_for_write() {
+  if (ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE) != 1) {
+    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+        << "MORPHIZEN_FEATURE_USE_TAR_FILE=1, disabled by user explicily";
+    return;
+  }
   auto is_shared_context_enabled =
       get_session_config(kOrtSessionOptionShareEpContexts, "0") == "1";
+  auto is_encryption_enabled = !context_proto.config().encryption_key().empty();
   auto is_ep_context_enabled =
       get_session_config(kOrtSessionOptionEpContextEnable, "0") == "1";
   auto is_ep_context_embed_mode =
       get_session_config(kOrtSessionOptionEpContextEmbedMode, "1") == "1";
-  if (ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE) && //
-      is_ep_context_enabled &&                     //
-      !is_ep_context_embed_mode) {
+  if (is_encryption_enabled) {
+    // TODO: remove this, after tar_file_ also supports encryption.
+    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+        << "TODO: tar_file_ does not support encryption yet, "
+           "please use a different cache file format.";
+    return;
+  }
+  if (cache_in_mem() == false) {
+    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+        << "no need to create create tar file for write";
+    return;
+  }
+  if (!is_ep_context_enabled) {
+    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+        << "ep.context is not enabled, no need to create tar file for write";
+    return;
+  }
+  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+      << "now, create tar file for write for ep context";
+  // the tar_file_ is created upon the follow
+  // 1. std::tmpfile(), i.e. TarFile::create(), for embed mode.
+  // 2. ep_context_binary_file.
+  if (!is_ep_context_embed_mode) {
     auto ep_context_binary_file = generate_ep_context_binary_file_path();
     LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
         << "open tar file for write: " << ep_context_binary_file;
@@ -1026,59 +1039,115 @@ void PassContextImp::maybe_create_tar_file_for_write() {
     CHECK(!get_config_proto().cache_key().empty())
         << "cache_key should be empty when using tar file";
     tar_file_ = TarFile::create(std::move(stream));
-    cache_file_use_cache_key_prefix_ = true;
-  }
-}
-void PassContextImp::maybe_create_tar_file_for_read(
-    const std::string& ep_context_binary_file_name) {
-  auto ep_context_binary_file = std::filesystem::path();
-  auto session_ep_context_path =
-      std::filesystem::path(get_session_config("ep.context_file_path", ""));
-  if (session_ep_context_path != "") {
-    ep_context_binary_file =
-        session_ep_context_path.parent_path() /
-        std::filesystem::u8path(ep_context_binary_file_name);
-    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-        << "load ep context file using ep.context_file_path from "
-        << ep_context_binary_file.string();
-  } else if (model_path.empty()) {
-    ep_context_binary_file =
-        std::filesystem::u8path(ep_context_binary_file_name);
-    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-        << "load ep context file using current directory from "
-        << ep_context_binary_file.string();
   } else {
-    ep_context_binary_file =
-        model_path.parent_path() /
-        std::filesystem::u8path(ep_context_binary_file_name);
-    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-        << "load ep context file using model_path from "
-        << ep_context_binary_file.string();
+    tar_file_ = TarFile::create();
+    CHECK(tar_file_ != nullptr)
+        << " create a tar file for write in embed mode, but tar_file_ is "
+           "nullptr";
   }
-
-  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-      << "open tar file for read: " << ep_context_binary_file;
-  tar_file_ = TarFile::create(ep_context_binary_file);
-  CHECK(tar_file_ != nullptr)
-      << "failed to open ep context file " << ep_context_binary_file;
+  if (is_shared_context_enabled) {
+    // for shared ep context, we must enable file prefix.
+    cache_file_use_cache_key_prefix_ = true;
+  } else {
+    // for non-shared ep context, we can use cache_key_prefix or not, it is
+    // and we prefer to enable it.
+    cache_file_use_cache_key_prefix_ =
+        get_provider_option("use_cache_key_prefix", "1") == "1";
+  }
 }
-void PassContextImp::create_tar_file_from_memory(std::vector<char>&& buffer) {
-  auto owner = std::make_unique<std::vector<char>>(std::move(buffer));
-  auto base = owner->data();
-  auto size = owner->size();
+void PassContextImp::create_tar_file_for_read(
+    DllSafe<std::string>&& ep_context_binary, bool embed_mode) {
+  auto get_ep_context_binary_path_local =
+      [&](const std::string& ep_context_binary_file_name)
+      -> std::filesystem::path {
+    auto ep_context_binary_file = std::filesystem::path();
+    auto session_ep_context_path =
+        std::filesystem::path(get_session_config("ep.context_file_path", ""));
+    if (session_ep_context_path != "") {
+      ep_context_binary_file =
+          session_ep_context_path.parent_path() /
+          std::filesystem::u8path(ep_context_binary_file_name);
+      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+          << "load ep context file using ep.context_file_path from "
+          << ep_context_binary_file.string();
+    } else if (model_path.empty()) {
+      ep_context_binary_file =
+          std::filesystem::u8path(ep_context_binary_file_name);
+      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+          << "load ep context file using current directory from "
+          << ep_context_binary_file.string();
+    } else {
+      ep_context_binary_file =
+          model_path.parent_path() /
+          std::filesystem::u8path(ep_context_binary_file_name);
+      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+          << "load ep context file using model_path from "
+          << ep_context_binary_file.string();
+    }
+    return ep_context_binary_file;
+  };
+  if (!embed_mode) {
+    auto ep_context_binary_file =
+        get_ep_context_binary_path_local(*ep_context_binary);
+    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+        << "open tar file for read: " << ep_context_binary_file;
+    CHECK(std::filesystem::exists(ep_context_binary_file))
+        << "ep context binary file does not exist at path: "
+        << ep_context_binary_file;
+    if (!std::filesystem::is_regular_file(ep_context_binary_file)) {
+      LOG(FATAL) << "ep context binary does not exist at path: "
+                 << ep_context_binary_file;
+    }
+    tar_file_ = TarFile::create(ep_context_binary_file);
+    CHECK(tar_file_ != nullptr)
+        << "failed to open ep context file " << ep_context_binary_file;
+  } else {
+    tar_file_ = TarFile::create(std::move(ep_context_binary));
+  }
+}
 
-  auto stream = std::make_unique<MemStream<std::vector<char>>>(
-      MemBuffer<std::vector<char>>::create(base, size, std::move(owner)));
-  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-      << " create a tar file from memory " << (void*)base << " " << size;
-  tar_file_ = TarFile::create(std::move(stream));
+void PassContextImp::create_tar_file_for_prebuild_cache(
+    std::vector<char>&& buffer) {
+  auto is_ep_context_enabled =
+      get_session_config(kOrtSessionOptionEpContextEnable, "0") == "1";
+  auto is_ep_context_embed_mode =
+      get_session_config(kOrtSessionOptionEpContextEmbedMode, "1") == "1";
 
-  CHECK(tar_file_ != nullptr)
-      << " create a tar file from memory " << (void*)base << " " << size;
-  // somehow embed mode or not would cause this prefix to change
-  // which leads to search file under cache_key/file fail
-  if (!has_cache_file("context.json")) {
-    cache_file_use_cache_key_prefix_ = !cache_file_use_cache_key_prefix_;
+  if (!is_ep_context_enabled) {
+    // when ep.context is not enabled, we don't need to worry to much about
+    // how to save tar_file_
+    tar_file_ = TarFile::create(std::move(buffer));
+    CHECK(tar_file_ != nullptr) << " create a tar file from memory ";
+  } else {
+    if (is_ep_context_embed_mode) {
+      // for embeded mode, it works similar to is_ep_context_enable = false;
+      tar_file_ = TarFile::create(std::move(buffer));
+      CHECK(tar_file_ != nullptr) << " create a tar file from memory ";
+    } else {
+      auto binary_file_path = generate_ep_context_binary_file_path();
+      auto open_mode =
+          std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc;
+      auto stream = std::unique_ptr<std::fstream>();
+      stream = std::make_unique<std::fstream>(binary_file_path, open_mode);
+      CHECK(stream->is_open())
+          << "failed to open ep context file " << binary_file_path;
+      CHECK(stream->write(buffer.data(), buffer.size()).good())
+          << "fail to write to " << binary_file_path;
+      stream->seekg(0);
+      stream->seekp(0);
+      stream->flush();
+      tar_file_ = TarFile::create(std::move(stream));
+    }
+  }
+  if (tar_file_->has_file("context.json")) {
+    cache_file_use_cache_key_prefix_ = false;
+  } else {
+    cache_file_use_cache_key_prefix_ = true;
+    auto prefix = get_config_proto().cache_key();
+    CHECK(tar_file_->has_file(prefix + "/context.json"))
+        << "tar file does not have context.json, cache_key_prefix is "
+           "enabled, but context.json is not found in the tar file, please "
+           "check prebuild ep context generation";
   }
 }
 void PassContextImp::print_version_info(const char* prefix) {
@@ -1131,6 +1200,8 @@ void PassContextImp::pass_context_update_context_json(
 
 void PassContextImp::update_pass_context_from_context_json_in_cache() {
   auto context_context_json = read_file_c8("context.json");
+  CHECK(context_context_json.has_value())
+      << "cannot read context.json from ep context";
   auto context_context_json_text = dos2unix(*context_context_json);
   pass_context_update_context_json(context_context_json_text);
   restore_cache_files();

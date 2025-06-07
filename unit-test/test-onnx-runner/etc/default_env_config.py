@@ -95,9 +95,50 @@ offline_compilation_config = {
         },
     },
 }
-
+embed_mode_config = {
+    **default_config,
+    "session_count": 2,
+    "session_options": {
+        **default_config["session_options"],
+        "session_configs": {
+            **default_session_configs,
+            "ep.context_embed_mode": "1",
+            "ep.context_file_path": "embed_mode_config_ctx.onnx",
+        },
+    },
+}
+non_embed_mode_config = {
+    **default_config,
+    "session_count": 2,
+    "session_options": {
+        **default_config["session_options"],
+        "session_configs": {
+            **default_session_configs,
+            "ep.context_embed_mode": "0",
+            "ep.context_file_path": "non_embed_mode_config_ctx.onnx",
+        },
+    },
+}
+non_embed_mode_no_prefix_config = {
+    **default_config,
+    "session_count": 2,
+    "session_options": {
+        **default_config["session_options"],
+        "session_configs": {
+            **default_session_configs,
+            "ep.context_embed_mode": "0",
+            "ep.context_file_path": "non_embed_mode_config_no_prefix_ctx.onnx",
+        },
+        "provider_options": {
+            **default_provider_options,
+            "use_cache_key_prefix": "0",
+        },
+    },
+}
 config = {
-    "default_config": default_config,
+    "embed_mode": embed_mode_config,
+    "non_embed_mode": non_embed_mode_config,
+    "non_embed_mode_no_prefix": non_embed_mode_no_prefix_config,
     "single_session": single_session,
     "offline_compilation_config": offline_compilation_config,
 }
