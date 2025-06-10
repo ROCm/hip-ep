@@ -273,10 +273,10 @@ get_config_json(const onnxruntime::ProviderOptions& options) {
                          entry.first.substr(ort_session_config_prefix.size()),
                          entry.second);
     } else {
-      MY_LOG(1) << "set "
+      /* MY_LOG(1) << "set "
                 << "provider_options"
                 << "[" << entry.first << "]=\"" << entry.second << "\"";
-      set_struct_value(ret, kProviderOptions, entry.first, entry.second);
+      set_struct_value(ret, kProviderOptions, entry.first, entry.second);*/
     }
   }
   return ret;

@@ -131,10 +131,16 @@ compile_onnx_model_internal(
     std::shared_ptr<PassContextImp> context);
 class PassContextImp : public PassContext {
 public:
+  static std::unique_ptr<PassContextImp>
+  create_pass_context(const ConfigProto& config);
+  static std::unique_ptr<PassContextImp>
+  create_pass_context(const onnxruntime::ProviderOptions& options);
+
+public:
   std::vector<char> const_data_;
   std::map<std::string, std::shared_ptr<std::function<void(gsl::span<char>)>>>
       const_lazy_;
-  std::filesystem::path log_dir;
+  std::filesystem::path pass_context_log_dir_;
   std::map<std::string, std::vector<AttributeProtoPtr>> node_extra_attrs;
   std::deque<IPass*> current_pass_stack;
   ContextProto context_proto;
@@ -150,7 +156,7 @@ public:
 public:
   ~PassContextImp();
   int allocate_suffix() const;
-  virtual std::filesystem::path get_log_dir() const override final;
+  virtual const std::filesystem::path& get_log_dir() const override final;
   virtual std::optional<std::string>
   get_provider_option(const std::string& option_name) const override final;
   virtual std::optional<std::string>
@@ -183,8 +189,30 @@ public:
   virtual ContextProto& get_context_proto() override final;
   void load_plugins();
   std::shared_ptr<Plugin> load_plugin(const std::string& plugin_name);
+  virtual std::map<std::string, std::string>
+  get_all_provider_options() const override final;
 
 private:
+  template <typename T1, typename T2>
+  std::optional<std::string>
+  get_provider_option_impl(const T1& option_names,
+                           const T2& privider_options) const;
+  template <typename T1, typename T, typename... T2>
+  std::optional<std::string>
+  get_provider_option_impl(const T1& option_names, const T& options1,
+                           const T2&... options) const;
+
+  template <typename T>
+  void get_all_provider_option_impl(std::map<std::string, std::string>& ret,
+                                    const T& source) const;
+  template <typename T, typename... T1>
+  void get_all_provider_option_impl(std::map<std::string, std::string>& ret,
+                                    const T& source,
+                                    const T1&... options) const;
+
+  template <typename T1, typename... T2>
+  std::optional<std::string>
+  get_provider_option_with_priority(const T1& option_names) const;
   template <typename T>
   std::optional<std::vector<T>>
   read_file_generic(const std::string& filename) const;
@@ -200,6 +228,7 @@ private:
   void pass_context_update_context_json(gsl::span<char> json_str);
   void update_pass_context_from_context_json_in_cache();
   void create_tar_file_for_prebuild_cache(std::vector<char>&& buffer);
+  void update_config_proto_root_field();
 
 public:
   virtual std::filesystem::path get_model_path() const override final;
@@ -282,6 +311,7 @@ private:
   std::unique_ptr<TargetProto> target_proto_ = nullptr;
   std::unique_ptr<MepConfigTable> mep_config_proto_ = nullptr;
   std::map<std::string, std::string> provider_option_origin_ = {};
+  std::map<std::string, std::string> provider_option_from_cache_ = {};
 
 private:
 #if defined(__GNUC__)
@@ -312,6 +342,7 @@ private:
       std::shared_ptr<PassContextImp> context,
       std::vector<vaip_cxx::NodeConstRef> ep_context_nodes);
   friend std::string get_ep_cache_context_embed_mode(PassContextImp& context);
+  friend class PassContextConfigTest; // for unit test.
 #if defined(__GNUC__)
 #  pragma GCC diagnostic pop
 #endif

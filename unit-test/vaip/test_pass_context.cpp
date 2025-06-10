@@ -29,8 +29,8 @@ protected:
   void SetUp() override {
     // Set up any necessary resources before each test
     passContext = vaip_core::PassContext::create();
-    dynamic_cast<vaip_core::PassContextImp*>(passContext.get())->log_dir =
-        CMAKE_CURRENT_BINARY_PATH;
+    dynamic_cast<vaip_core::PassContextImp*>(passContext.get())
+        ->pass_context_log_dir_ = CMAKE_CURRENT_BINARY_PATH;
   }
 
   void TearDown() override {
@@ -379,6 +379,9 @@ TEST_F(PassContextTest, TestGzTar) {
 //   // ASSERT_TRUE(false);
 // }
 // Test fixture for PassContext
+namespace vaip_core {
+// put it to namespace vaip_core, so that friend class in PassContextImp works
+// easily.
 class PassContextConfigTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -394,10 +397,37 @@ protected:
     // Clean up any resources after each test
     passContext_.reset();
   }
+  void load_context_json(const std::filesystem::path& context_json_path) {
+    LOG(INFO) << "================== update context.json from "
+              << context_json_path << " =======";
+    auto stream = std::make_unique<std::ifstream>(context_json_path);
+    auto dst = passContext_->open_file_for_write("context.json");
+    if (!stream->is_open()) {
+      LOG(ERROR) << "Failed to open context json file: "
+                 << context_json_path.u8string();
+      return;
+    }
+    if (!dst) {
+      LOG(ERROR) << "Failed to open context json file for write: "
+                 << context_json_path.u8string();
+      return;
+    }
+    std::string line;
+    while (std::getline(*stream, line)) {
+      if (!line.empty()) {
+        dst->fwrite(line.c_str(), line.size());
+        dst->fwrite("\n", 1);
+      }
+    }
+    passContext_->update_pass_context_from_context_json_in_cache();
+  }
+  // Path to the ResNet-50 model
   std::unique_ptr<vaip_cxx::Model> model_ = nullptr;
   // Pointer to the PassContext object
-  std::shared_ptr<vaip_core::PassContext> passContext_ = nullptr;
+  std::shared_ptr<vaip_core::PassContextImp> passContext_ = nullptr;
 };
+} // namespace vaip_core
+using namespace vaip_core;
 TEST_F(PassContextConfigTest, Config) {
   auto cache_dir = CMAKE_CURRENT_BINARY_PATH / "c1";
   std::string cache_key = "d41d8cd98f00b204e9800998ecf8427e";
@@ -413,27 +443,43 @@ TEST_F(PassContextConfigTest, Config) {
 }
 
 TEST_F(PassContextConfigTest, Target) {
-  auto cache_dir = CMAKE_CURRENT_BINARY_PATH / "c1";
   std::string cache_key = "d41d8cd98f00b204e9800998ecf8427e";
-  auto log_dir = cache_dir / cache_key;
   auto config_file = CMAKE_CURRENT_SOURCE_PATH / "vaip" /
                      "test_pass_context.data" / "sample_config_1.json";
+  auto context_json = CMAKE_CURRENT_SOURCE_PATH / "vaip" /
+                      "test_pass_context.data" / "sample_context_1.json";
   CreateContext(onnxruntime::ProviderOptions{
-      {"k0", "value0_provider_option"},
-      {"cacheDir", cache_dir.u8string()},
-      {"cacheKey", "d41d8cd98f00b204e9800998ecf8427e"},
+      {"k0", "value0_in_provider_option"},
+      {"cache_dir", "cache_dir_in_provider_option"},
+      {"cache_key", "cache_key_in_provider_option"},
       {"config_file", config_file.u8string()},
   });
-  EXPECT_EQ(passContext_->get_provider_option("k0", "value1_in_code"),
-            "value0_provider_option");
-  EXPECT_EQ(passContext_->get_provider_option("k1", "value1_in_code"),
-            "value1_in_config");
-  EXPECT_EQ(passContext_->get_provider_option("k2", "value2_in_code"),
-            "value2_in_mep_table");
-  EXPECT_EQ(passContext_->get_provider_option("k3", "value3_in_code"),
-            "value3_in_target_proto");
-  // TODO FIX THIS
-  //  EXPECT_EQ(passContext_->get_log_dir(), log_dir);
 
+  load_context_json(context_json);
+  EXPECT_EQ(passContext_->get_provider_option("k_not_exists", "value_in_code"),
+            "value_in_code");
+  EXPECT_EQ(passContext_->get_provider_option("k0", "value0_in_code"),
+            "value0_in_provider_option");
+  EXPECT_EQ(passContext_->get_provider_option("k1", "value1_in_code"),
+            "value1_in_context.json");
+  EXPECT_EQ(passContext_->get_provider_option("k2", "value2_in_code"),
+            "value2_in_config");
+  EXPECT_EQ(passContext_->get_provider_option("k3", "value3_in_code"),
+            "value3_in_mep_table");
+  EXPECT_EQ(passContext_->get_provider_option("k4", "value4_in_code"),
+            "value4_in_target_proto");
+  EXPECT_EQ(passContext_->get_log_dir(),
+            std::filesystem::path("cache_dir_in_provider_option") /
+                "cache_key_in_provider_option");
+  auto all_provider_options = passContext_->get_all_provider_options();
+  EXPECT_EQ(all_provider_options["k0"], "value0_in_provider_option");
+  EXPECT_EQ(all_provider_options["k1"], "value1_in_context.json");
+  EXPECT_EQ(all_provider_options["k2"], "value2_in_config");
+  EXPECT_EQ(all_provider_options["k3"], "value3_in_mep_table");
+  EXPECT_EQ(all_provider_options["k4"], "value4_in_target_proto");
+  for (auto& kv : all_provider_options) {
+    auto& [k, v] = kv;
+    std::cout << "      all PO " << k << " = " << v << std::endl;
+  }
   std::cout << "DONE" << std::endl;
 }

@@ -2,9 +2,12 @@
     "provider_options": {
         "k0": "value0_in_config",
         "k1": "value1_in_config",
+        "k2": "value2_in_config",
+        "xclbin": "abc_in_config.xclbin",
         "cacheDir": "cacheDir_in_config",
         "config_file": "config.json",
-        "cache_key": "cache_key_in_config"
+        "cache_key": "cache_key_in_config",
+        "log_level": "info"
     },
     "mepTable": [
         {
@@ -12,10 +15,12 @@
             "md5sumOnDisk": "3f97582a85b8ae1be41127f326bbf9b2",
             "md5sumInMemory": "d41d8cd98f00b204e9800998ecf8427e",
             "target": "relu-dq-target",
+            "xclbin": "abc_in_mep_table.xclbin",
             "provider_options": {
                 "k0": "value0_in_mep_table",
                 "k1": "value1_in_mep_table",
-                "k2": "value2_in_mep_table"
+                "k2": "value2_in_mep_table",
+                "k3": "value3_in_mep_table"
             }
         }
     ],
@@ -37,10 +42,13 @@
                 "init",
                 "fuse-rele-dq"
             ],
+            "xclbin": "abc_in_target_proto.xclbin",
             "provider_options": {
+                "k0": "value0_in_target_proto",
                 "k1": "value1_in_target_proto",
                 "k2": "value2_in_target_proto",
                 "k3": "value3_in_target_proto",
+                "k4": "value4_in_target_proto",
                 "pass.init.enable_dump": "1",
                 "pass.init.directory": "vaip_init",
                 "pass.init.filename": "init-graph-for-requ-dq.onnx",

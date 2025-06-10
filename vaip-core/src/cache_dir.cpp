@@ -62,7 +62,7 @@ void update_cache_dir(PassContextImp& context) {
     cache_dir = default_cache_directory();
   }
 
-  context.log_dir =
+  context.pass_context_log_dir_ =
       cache_dir / fs::u8path(context.context_proto.config().cache_key());
   *context.context_proto.mutable_config()->mutable_cache_dir() =
       cache_dir.u8string();
@@ -70,9 +70,10 @@ void update_cache_dir(PassContextImp& context) {
     LOG(WARNING) << "skip update cache dir: in-mem mode";
     return;
   }
-  if (!fs::exists(context.log_dir) &&
-      !fs::create_directories(context.log_dir)) {
-    LOG(WARNING) << "cannot create cache directory: dir=" << context.log_dir;
+  if (!fs::exists(context.get_log_dir()) &&
+      !fs::create_directories(context.get_log_dir())) {
+    LOG(WARNING) << "cannot create cache directory: dir="
+                 << context.get_log_dir();
   }
 }
 

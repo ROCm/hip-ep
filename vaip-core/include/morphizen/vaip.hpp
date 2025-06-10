@@ -26,7 +26,7 @@
 #    define VAIP_USER VAIP_USER__PASS
 #  endif
 #endif
-
+#include "./provider_option_keys.hpp"
 #if VAIP_USER == VAIP_USER__PASS
 #  include "./graph.hpp"
 #  include "./guess_reshape.hpp"

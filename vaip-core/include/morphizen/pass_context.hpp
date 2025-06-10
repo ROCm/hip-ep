@@ -84,7 +84,7 @@ public:
    *
    * This directory is the cache directory.
    */
-  virtual std::filesystem::path get_log_dir() const = 0;
+  virtual const std::filesystem::path& get_log_dir() const = 0;
   /**
    * Retrieves the value of a provider option based on the given option name.
    *
@@ -356,5 +356,8 @@ public:
   virtual void set_cache_file_md5_map(
       const std::map<std::string, std::string>& cache_file_md5) = 0;
   virtual std::map<std::string, std::string> get_cache_file_md5_map() = 0;
+
+  virtual std::map<std::string, std::string>
+  get_all_provider_options() const = 0;
 };
 } // namespace vaip_core

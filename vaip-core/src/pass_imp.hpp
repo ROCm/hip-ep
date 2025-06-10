@@ -45,6 +45,8 @@ private:
   virtual std::filesystem::path
   get_cache_file_name(const std::string& filename) const override final;
   virtual const ConfigProto& get_config_proto() const override final;
+  virtual std::map<std::string, std::string>
+  get_all_provider_options() const override final;
   virtual const std::filesystem::path& get_log_path() const override final;
   virtual void add_subgraph_device_count(const std::string& device,
                                          int count) override final;

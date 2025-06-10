@@ -283,9 +283,12 @@ Pass::get_cache_file_name(const std::string& filename) const {
 const ConfigProto& Pass::get_config_proto() const {
   return context_->context_proto.config();
 }
+std::map<std::string, std::string> Pass::get_all_provider_options() const {
+  return context_->get_all_provider_options();
+}
 
 const std::filesystem::path& Pass::get_log_path() const {
-  return context_->log_dir;
+  return context_->get_log_dir();
 }
 
 void Pass::add_subgraph_device_count(const std::string& device, int count) {
@@ -611,7 +614,7 @@ static void load_context_const_bin(PassContextImp& context) {
 VAIP_DLL_SPEC std::shared_ptr<PassContext>
 load_context(const std::filesystem::path& cache_dir) {
   auto context = std::make_shared<vaip_core::PassContextImp>();
-  context->log_dir = cache_dir;
+  context->pass_context_log_dir_ = cache_dir;
   load_context_json(*context);
   load_context_const_bin(*context);
   return context;

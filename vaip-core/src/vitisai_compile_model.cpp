@@ -436,10 +436,9 @@ std::shared_ptr<PassContextImp>
 initialize_context(const std::string& model_path, const Graph& onnx_graph,
                    const std::vector<vaip_cxx::NodeConstRef>& ep_context_nodes,
                    const onnxruntime::ProviderOptions& options) {
-  auto json_config_string = get_config_json_str(options);
-  const char* json_config = json_config_string.c_str();
-  std::shared_ptr<PassContextImp> context = std::make_shared<PassContextImp>();
-  context->provider_option_origin_.insert(options.begin(), options.end());
+
+  std::shared_ptr<PassContextImp> context =
+      PassContextImp::create_pass_context(options);
   // "session.model_external_initializers_file_folder_path/virtual_model.onnx
   // would be passed for in-mem model when this happen, a invalid path is
   // passed, we use the model_path == empty to differentiate if the model is
@@ -447,27 +446,8 @@ initialize_context(const std::string& model_path, const Graph& onnx_graph,
   if (std::filesystem::is_regular_file(model_path)) {
     context->model_path = model_path;
   }
-  auto config_proto = ConfigProto();
-  if (json_config != nullptr && !std::string(json_config).empty()) {
-    Config::merge_config_proto(config_proto, json_config);
-  }
-  context->cache_dir_set = (config_proto.cache_dir().size() > 0);
   context->is_ep_context_model = !ep_context_nodes.empty();
-  // DL Analyzer dumping partition.json and fused.viz.json, or not.
-  bool analyzer_visualization_enabled =
-      config_proto.has_ai_analyzer_visualization() &&
-      config_proto.ai_analyzer_visualization();
-  ENV_PARAM(XLNX_ONNX_EP_DL_ANALYZER_VISUALIZATION) =
-      analyzer_visualization_enabled;
-  // DL Analyzer creating dpu_timestamp_info.json, or not.
-  bool analyzer_profiling_enabled = config_proto.has_ai_analyzer_profiling() &&
-                                    config_proto.ai_analyzer_profiling();
-  ENV_PARAM(XLNX_ONNX_EP_DL_ANALYZER_PROFILING) = analyzer_profiling_enabled;
-
-  Config::add_version_info(config_proto);
-  *context->context_proto.mutable_config() = std::move(config_proto);
   auto& model = graph_get_model(onnx_graph);
-
   auto [md5, mep_table] =
       get_signature_with_meptable(context->model_path.string(), onnx_graph,
                                   *context->context_proto.mutable_config());
@@ -742,7 +722,7 @@ create_ep_context_node(vaip_core::ExecutionProviderConcrete* ep) {
       context.get_session_config("ep.context_embed_mode", "1") == "1" ? 1 : 0;
   attrs.add("embed_mode", embed_mode);
   attrs.add("source", std::string("VitisAIExecutionProvider"));
-  attrs.add("log_dir", context.log_dir.u8string());
+  attrs.add("log_dir", context.get_log_dir().u8string());
   attrs.add("onnx_model_filename", context.model_path.u8string());
   attrs.add("partition_name", name);
   attrs.add("enable_compression",
@@ -1212,7 +1192,7 @@ compile_onnx_model_3(const std::string& model_path, const Graph& onnx_graph,
   std::unique_ptr<WithFileLock> lock;
   if (!in_mem) {
     lock = std::make_unique<WithFileLock>(
-        (context->log_dir / ".lock").u8string().c_str());
+        (context->get_log_dir() / ".lock").u8string().c_str());
   }
   (void)lock;
   auto p_cpu_usage = CreateICPUUsage();

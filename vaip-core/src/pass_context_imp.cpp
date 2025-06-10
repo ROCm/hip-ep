@@ -8,6 +8,9 @@
 #include <glog/logging.h>
 #include <google/protobuf/util/json_util.h>
 
+#include "./cache_dir.hpp"
+#include "config.hpp"
+#include "morphizen/config_reader.hpp"
 #include "morphizen/env_config.hpp"
 #include "morphizen/mem_xclbin.hpp"
 #include "morphizen/util.hpp"
@@ -16,6 +19,7 @@
 #include "pass_context_imp.hpp"
 #include "profile_utils.hpp"
 #include "tar_ball.hpp"
+
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE, "0")
 DEF_ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE, "1")
 DEF_ENV_PARAM(XLNX_ONNX_EP_VERBOSE, "0")
@@ -84,7 +88,29 @@ static std::string msg_to_json_string(const google::protobuf::Message& msg) {
   CHECK(status.ok()) << "cannot write json string:" << msg.DebugString();
   return json_str;
 }
-
+std::unique_ptr<PassContextImp>
+PassContextImp::create_pass_context(const ConfigProto& config_proto1) {
+  auto ret = std::make_unique<PassContextImp>();
+  auto config_proto = ConfigProto(config_proto1);
+  Config::add_version_info(config_proto);
+  ret->cache_dir_set = (config_proto.cache_dir().size() > 0);
+  ret->context_proto.mutable_config()->Swap(&config_proto);
+  ret->update_config_proto_root_field();
+  return ret;
+}
+std::unique_ptr<PassContextImp> PassContextImp::create_pass_context(
+    const onnxruntime::ProviderOptions& options) {
+  auto json_config_string = get_config_json_str(options);
+  const char* json_config = json_config_string.c_str();
+  auto config_proto = ConfigProto();
+  if (json_config != nullptr && !std::string(json_config).empty()) {
+    Config::merge_config_proto(config_proto, json_config);
+  }
+  auto ret = create_pass_context(config_proto);
+  ret->provider_option_origin_.insert(options.begin(), options.end());
+  ret->update_config_proto_root_field();
+  return ret;
+}
 /// struct PassContextImp
 int PassContextImp::allocate_suffix()
     const { // it is not a big deal to update suffix_counter
@@ -96,11 +122,42 @@ PassContextImp::WithPass PassContextImp::with_current_pass(IPass& pass) {
   return WithPass(*this, pass);
 }
 
-std::filesystem::path PassContextImp::get_log_dir() const { return log_dir; }
+const std::filesystem::path& PassContextImp::get_log_dir() const {
+  return pass_context_log_dir_;
+}
+
+template <typename T1, typename T2>
 std::optional<std::string>
-PassContextImp::get_provider_option(const std::string& option_name) const {
+PassContextImp::get_provider_option_impl(const T1& option_names,
+                                         const T2& privider_options) const {
+  auto ret = std::optional<std::string>();
+  if (privider_options) {
+    for (auto& option_name : option_names) {
+      auto it = privider_options->find(option_name);
+      if (it != privider_options->end()) {
+        ret = it->second;
+        break;
+      }
+    }
+  }
+  return ret;
+}
+template <typename T1, typename T, typename... T2>
+std::optional<std::string> PassContextImp::get_provider_option_impl(
+    const T1& option_names, const T& options1, const T2&... options) const {
+  auto ret = get_provider_option_impl(option_names, options1);
+  if (ret) {
+    return ret;
+  }
+  return get_provider_option_impl(option_names, options...);
+}
+
+template <typename T1, typename... T2>
+std::optional<std::string> PassContextImp::get_provider_option_with_priority(
+    const T1& option_names) const {
   // priority order:
   // 0. provider_option privded by user
+  // 1. provider_option in cache
   // 1. context_proto,
   // 2. mep_config_proto, from known models.
   // 3. target_proto, from target discovery
@@ -111,39 +168,51 @@ PassContextImp::get_provider_option(const std::string& option_name) const {
   //        4. default target in config file
   //
   //  4. default value
-  {
-    auto it = provider_option_origin_.find(option_name);
-    if (it != provider_option_origin_.end()) {
-      return it->second;
-    }
-  }
-  if (1) { // add a scope to suppress warning
-    const auto& config = context_proto.config();
-    auto it = config.provider_options().find(option_name);
-    if (it != config.provider_options().end()) {
-      return it->second;
-    }
-  }
-
-  if (mep_config_proto_) {
-    auto& mep_options = mep_config_proto_->provider_options();
-    auto it = mep_options.find(option_name);
-    if (it != mep_options.end()) {
-      return it->second;
-    }
-  }
-
-  if (target_proto_) {
-    auto& target_options = target_proto_->provider_options();
-    auto it = target_options.find(option_name);
-    if (it != target_options.end()) {
-      return it->second;
-    }
-  }
-
-  return std::nullopt;
+  return get_provider_option_impl(
+      option_names,
+      &provider_option_origin_,                                             //
+      &provider_option_from_cache_,                                         //
+      &context_proto.config().provider_options(),                           //
+      mep_config_proto_ ? &mep_config_proto_->provider_options() : nullptr, //
+      target_proto_ ? &target_proto_->provider_options() : nullptr          //
+  );
+}
+std::map<std::string, std::string>
+PassContextImp::get_all_provider_options() const {
+  auto ret = std::map<std::string, std::string>();
+  get_all_provider_option_impl(
+      ret,
+      &provider_option_origin_,                                             //
+      &provider_option_from_cache_,                                         //
+      &context_proto.config().provider_options(),                           //
+      mep_config_proto_ ? &mep_config_proto_->provider_options() : nullptr, //
+      target_proto_ ? &target_proto_->provider_options() : nullptr          //
+  );
+  return ret;
 }
 
+template <typename T>
+void PassContextImp::get_all_provider_option_impl(
+    std::map<std::string, std::string>& ret, const T& provider_options) const {
+  if (provider_options) {
+    for (auto& kv : *provider_options) {
+      ret.insert({kv.first, kv.second});
+    }
+  };
+}
+template <typename T, typename... T1>
+void PassContextImp::get_all_provider_option_impl(
+    std::map<std::string, std::string>& ret, const T& options1,
+    const T1&... options) const {
+  get_all_provider_option_impl(ret, options1);
+  get_all_provider_option_impl(ret, options...);
+}
+
+std::optional<std::string>
+PassContextImp::get_provider_option(const std::string& option_name) const {
+  return get_provider_option_with_priority(
+      std::array<std::string, 1>{option_name});
+}
 std::optional<std::string>
 PassContextImp::get_session_config(const std::string& option_name) const {
   const auto& config = context_proto.config();
@@ -301,8 +370,8 @@ std::filesystem::path PassContextImp::get_model_path() const {
 }
 
 /**
- * @brief Retrieves the file path for the ONNX context file associated with the
- * execution provider (EP).
+ * @brief Retrieves the file path for the ONNX context file associated with
+ * the execution provider (EP).
  *
  * input : ep.context_file_path
  * input : model_path
@@ -318,17 +387,17 @@ std::filesystem::path PassContextImp::get_model_path() const {
  *
  * @return std::filesystem::path The resolved ONNX context file path.
  *
- * @throws std::runtime_error If both "ep.context_file_path" and the model path
- * are empty.
+ * @throws std::runtime_error If both "ep.context_file_path" and the model
+ * path are empty.
  */
 std::filesystem::path PassContextImp::get_ep_context_onnx_file_path() {
   auto ep_context_onnx_file_path = std::filesystem::path();
   auto ep_context_file_path = get_session_config("ep.context_file_path");
-  // For same with onnxruntime (graph_partitioner.cc::GetValidatedEpContextPath)
-  // ep.context_file_path validated in onnxruntime
-  // ep.context_file_path is a file path, not a directory path.
-  // support absolute path and relative path
-  // relative path is relative to current working directory
+  // For same with onnxruntime
+  // (graph_partitioner.cc::GetValidatedEpContextPath) ep.context_file_path
+  // validated in onnxruntime ep.context_file_path is a file path, not a
+  // directory path. support absolute path and relative path relative path is
+  // relative to current working directory
   if (ep_context_file_path.has_value()) {
     ep_context_onnx_file_path =
         std::filesystem::u8path(ep_context_file_path.value());
@@ -337,8 +406,8 @@ std::filesystem::path PassContextImp::get_ep_context_onnx_file_path() {
         model_path.parent_path() /
         std::filesystem::u8path(model_path.stem().u8string() + "_ctx.onnx");
   } else {
-    // ??? Is it possible for both model_path and ep.context_file_path are empty
-    // at same time
+    // ??? Is it possible for both model_path and ep.context_file_path are
+    // empty at same time
     LOG(FATAL) << "ep.context_file_path and model_path are both empty.";
   }
   return ep_context_onnx_file_path;
@@ -354,15 +423,15 @@ std::filesystem::path PassContextImp::get_ep_context_onnx_file_path() {
  *
  * @param ep_context_onnx_file Reference to the ONNX file path for the EP
  * context.
- * @param is_shared_ep_contexts Boolean flag indicating whether the EP contexts
- * are shared.
+ * @param is_shared_ep_contexts Boolean flag indicating whether the EP
+ * contexts are shared.
  *        - If true, the binary file will be named "VITISAI.bin" in the same
  * directory as the ONNX file.
  *        - If false, the binary file will be named "<ONNX
  * filename>_VITISAI.bin" in the same directory.
  *
- * @return A std::filesystem::path object representing the generated binary file
- * path.
+ * @return A std::filesystem::path object representing the generated binary
+ * file path.
  */
 std::filesystem::path PassContextImp::generate_ep_context_binary_file_path() {
   auto ep_context_binary_file_path = std::filesystem::path();
@@ -700,9 +769,9 @@ std::filesystem::path PassContextImp::xclbin_path_to_cache_files(
   } else if (std::filesystem::is_regular_file(path, ec)) {
     buffer = read_file_to_buffer(path);
   } else {
-    LOG(WARNING)
-        << "Xclbin path doesn't exist, are you running with cpu runner? Path: "
-        << path.string();
+    LOG(WARNING) << "Xclbin path doesn't exist, are you running with cpu "
+                    "runner? Path: "
+                 << path.string();
     return path;
   }
   const_cast<PassContextImp*>(this)->write_file(filename, buffer);
@@ -734,6 +803,10 @@ void PassContextImp::save_context_json() const {
   ContextProto proto;
   proto.CopyFrom(this->context_proto);
   proto.mutable_config()->clear_encryption_key();
+  auto all_provider_options = get_all_provider_options();
+  proto.mutable_config()->mutable_provider_options()->clear();
+  proto.mutable_config()->mutable_provider_options()->insert(
+      all_provider_options.begin(), all_provider_options.end());
   try {
     if (std::find(proto.mutable_cache_files()->begin(),
                   proto.mutable_cache_files()->end(),
@@ -746,9 +819,10 @@ void PassContextImp::save_context_json() const {
     // considerable amount of overhead is incurred for creating an
     // `Ort::Session` object for the subgraph behind the scenes.
 
-    // There is a pitfall: if a custom op really needs to fall back to the CPU,
-    // and the GENERIC device is enabled for model compilation, it is a bug.
-    // However, this combination is not in used for now. We can fix it later.
+    // There is a pitfall: if a custom op really needs to fall back to the
+    // CPU, and the GENERIC device is enabled for model compilation, it is a
+    // bug. However, this combination is not in used for now. We can fix it
+    // later.
     for (auto& meta_def : *proto.mutable_meta_def()) {
       if (meta_def.device() == "GENERIC") {
         meta_def.set_fallback_cpu(true);
@@ -1158,44 +1232,69 @@ void PassContextImp::print_version_info(const char* prefix) {
   }
   LOG_VERBOSE(1) << prefix << "cache_dir: " << config.cache_dir();
   LOG_VERBOSE(1) << prefix << "cache_key: " << config.cache_key();
+  LOG_VERBOSE(1) << prefix << "log_dir: " << get_log_dir();
   for (auto& kv : provider_option_origin_) {
-    LOG_VERBOSE(1) << "provider_options_origin: " << kv.first << " = "
+    LOG_VERBOSE(3) << "provider_options_origin: " << kv.first << " = "
                    << kv.second;
   }
-  for (auto& kv : config.provider_options()) {
-    LOG_VERBOSE(1) << "provider_options: " << kv.first << " = " << kv.second;
+  for (auto& kv : provider_option_from_cache_) {
+    LOG_VERBOSE(3) << "provider_options_from_cache: " << kv.first << " = "
+                   << kv.second;
+  }
+  for (auto& kv :
+       // print sorted keys
+       std::map<std::string, std::string>(config.provider_options().begin(),
+                                          config.provider_options().end())) {
+    LOG_VERBOSE(3) << "provider_options_in_config: " << kv.first << " = "
+                   << kv.second;
+  }
+  if (mep_config_proto_) {
+    for (auto& kv : std::map<std::string, std::string>(
+             mep_config_proto_->provider_options().begin(),
+             mep_config_proto_->provider_options().end())) {
+      LOG_VERBOSE(3) << "provider_options_in_mep_table: " << kv.first << " = "
+                     << kv.second;
+    }
+  }
+  if (target_proto_) {
+    for (auto& kv : std::map<std::string, std::string>(
+             target_proto_->provider_options().begin(),
+             target_proto_->provider_options().end())) {
+      LOG_VERBOSE(3) << "provider_options_in_target_proto: " << kv.first
+                     << " = " << kv.second;
+    }
   }
   for (auto& kv : config.session_configs()) {
-    LOG_VERBOSE(1) << "session_config: " << kv.first << " = " << kv.second;
+    LOG_VERBOSE(3) << "session_config: " << kv.first << " = " << kv.second;
+  }
+  auto all_po = get_all_provider_options();
+  for (auto& kv : all_po) {
+    LOG_VERBOSE(1) << "provider_option: " << kv.first << " = " << kv.second;
   }
 }
 void PassContextImp::pass_context_update_context_json(
     gsl::span<char> json_str) {
-  auto& context = *this;
-  auto session_options_saved = context.context_proto.config().session_configs();
-  // Some options are only relevant at runtime and do not require caching.
-  auto provider_options_saved =
-      context.context_proto.config().provider_options();
-  // TODO: this is a bad solution, how about cache_key, cache_dir etc.
-  bool enable_cache_in_mem = false;
-  if (context.context_proto.config().has_enable_cache_file_io_in_mem()) {
-    enable_cache_in_mem =
-        context.context_proto.config().enable_cache_file_io_in_mem();
-  }
-
-  context.context_proto.Clear();
+  // parse the context proto
+  ContextProto context_proto_in_cache;
   auto status = google::protobuf::util::JsonStringToMessage(
-      &json_str[0], &context.context_proto);
-  context.context_proto.mutable_config()->mutable_session_configs()->swap(
-      session_options_saved);
-  // all provider options no cache
-  context.context_proto.mutable_config()->mutable_provider_options()->swap(
-      provider_options_saved);
-  context.context_proto.mutable_config()->set_enable_cache_file_io_in_mem(
-      enable_cache_in_mem);
+      &json_str[0], &context_proto_in_cache);
   CHECK(status.ok()) << "cannot parse json string:" << status.message()
                      << &json_str[0];
-  context.print_version_info("CACHE VERSION: ");
+  // save cached provider options
+  provider_option_from_cache_.insert(
+      context_proto_in_cache.config().provider_options().begin(),
+      context_proto_in_cache.config().provider_options().end());
+  this->context_proto.Swap(&context_proto_in_cache);
+  auto& context_proto_origin =
+      context_proto_in_cache; // give it a new name after swap.
+  // restore session options
+  this->context_proto.mutable_config()->mutable_session_configs()->swap(
+      *context_proto_origin.mutable_config()->mutable_session_configs());
+  this->context_proto.mutable_config()->mutable_provider_options()->swap(
+      *context_proto_origin.mutable_config()->mutable_provider_options());
+  this->update_config_proto_root_field();
+  // update_cache_dir(*this);
+  print_version_info("CACHE VERSION: ");
 }
 
 void PassContextImp::update_pass_context_from_context_json_in_cache() {
@@ -1205,5 +1304,58 @@ void PassContextImp::update_pass_context_from_context_json_in_cache() {
   auto context_context_json_text = dos2unix(*context_context_json);
   pass_context_update_context_json(context_context_json_text);
   restore_cache_files();
+}
+void PassContextImp::update_config_proto_root_field() {
+  // ADD_CUSTOM_FIELD∆
+  // NOTE:
+  //  1. FOR BACKWARD COMPATIBILITY, NO MORE NEW FIELD PLEASE
+  //  2. FOR BACKWARD COMPATIBILITY, NO MORE NEW FIELD PLEASE
+  //  3. FOR BACKWARD COMPATIBILITY, NO MORE NEW FIELD PLEASE
+  auto get_provider_option_local =
+      [this](
+          const std::vector<std::string>& names) -> std::optional<std::string> {
+    auto ret = std::optional<std::string>();
+    return this->get_provider_option_with_priority(names);
+  };
+  if (auto cache_key = get_provider_option_local({"cache_key", "cacheKey"})) {
+    context_proto.mutable_config()->set_cache_key(*cache_key);
+  }
+  if (auto cache_dir = get_provider_option_local({"cache_dir", "cacheDir"})) {
+    context_proto.mutable_config()->set_cache_dir(*cache_dir);
+  }
+  if (auto encryption_key =
+          get_provider_option_local({"encryption_key", "encryptionKey"})) {
+    context_proto.mutable_config()->set_encryption_key(*encryption_key);
+  }
+  if (auto target = get_provider_option_local({"target", "xlnx_target_name"})) {
+    context_proto.mutable_config()->set_target(*target);
+  }
+  if (auto enable_cache_file_io_in_mem = get_provider_option_local(
+          {"enable_cache_file_io_in_mem", "enableCacheFileIoInMem"})) {
+    context_proto.mutable_config()->set_enable_cache_file_io_in_mem(
+        *enable_cache_file_io_in_mem == "1");
+  }
+  if (auto priority = get_provider_option_local({"priority"})) {
+    context_proto.mutable_config()->set_priority(*priority);
+  }
+  if (auto no_failsafe =
+          get_provider_option_local({"no_fail_safe", "noFailSafe"})) {
+    context_proto.mutable_config()->set_no_failsafe(*no_failsafe == "1");
+  }
+  if (auto enable_preemption = get_provider_option_local(
+          {"enable_preemption", "enablePreemption"})) {
+    context_proto.mutable_config()->set_enable_preemption(*enable_preemption ==
+                                                          "1");
+  }
+  if (auto enable_cache_file_io_in_mem = get_provider_option_local(
+          {"enable_cache_file_io_in_mem", "enableCacheFileIOInMem"})) {
+    context_proto.mutable_config()->set_enable_cache_file_io_in_mem(
+        *enable_cache_file_io_in_mem == "1");
+  }
+  if (auto max_spill_buffer_size = get_provider_option_local(
+          {"max_spill_buffer_size", "maxSpillBufferSize"})) {
+    context_proto.mutable_config()->set_max_spill_buffer_size(
+        std::stoull(*max_spill_buffer_size));
+  }
 }
 } // namespace vaip_core

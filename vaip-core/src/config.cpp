@@ -402,70 +402,6 @@ std::unique_ptr<TargetProto> update_config_by_target(ConfigProto& proto,
   return std::make_unique<TargetProto>(*target_proto);
 }
 
-static const google::protobuf::FieldDescriptor*
-FindFieldByNameOrCamelCase(const google::protobuf::Descriptor* descriptor,
-                           const std::string& field_name) {
-  const google::protobuf::FieldDescriptor* field =
-      descriptor->FindFieldByName(field_name);
-  if (!field) {
-    const google::protobuf::FieldDescriptor* field_camel =
-        descriptor->FindFieldByCamelcaseName(field_name);
-    if (field_camel) {
-      field = field_camel;
-    }
-  }
-  return field;
-}
-
-void add_custom_field(ConfigProto& proto) {
-  const google::protobuf::Descriptor* descriptor = proto.GetDescriptor();
-  const google::protobuf::Reflection* reflection = proto.GetReflection();
-  std::set<std::string> to_be_delete;
-  for (auto& el : proto.provider_options()) {
-    const std::string& field_name = el.first;
-    const std::string& value = el.second;
-
-    // Find the field in the descriptor
-    const google::protobuf::FieldDescriptor* field =
-        FindFieldByNameOrCamelCase(descriptor, field_name);
-    if (field) {
-      if (field->is_repeated()) {
-        continue;
-      }
-      // Field exists, set its value based on type
-      switch (field->type()) {
-      case google::protobuf::FieldDescriptor::TYPE_STRING:
-        reflection->SetString(&proto, field, value);
-        to_be_delete.insert(field_name);
-        break;
-      case google::protobuf::FieldDescriptor::TYPE_INT32: {
-        long x;
-        morphizen::parse_value(value, x);
-        reflection->SetInt32(&proto, field, (int32_t)x);
-        to_be_delete.insert(field_name);
-        break;
-      }
-      case google::protobuf::FieldDescriptor::TYPE_BOOL: {
-        bool x;
-        // vitis::ai::parse_value(value, x);
-        if (value == "yes" || value == "on" || value == "enable" ||
-            value == "true" || value == "True" || value == "1") {
-          x = true;
-        } else {
-          x = false;
-        }
-        reflection->SetBool(&proto, field, x);
-        to_be_delete.insert(field_name);
-        break;
-      }
-      default:
-        // Handle other types as needed
-        break;
-      }
-    }
-  }
-}
-
 void Config::merge_config_proto(ConfigProto& config_proto,
                                 const char* json_config) {
   std::string json_str(json_config);
@@ -481,7 +417,6 @@ void Config::merge_config_proto(ConfigProto& config_proto,
   CHECK(status.ok()) << "cannot parse json string:" << json_str;
   MY_LOG(2) << "json_str = " << json_str
             << " cache_dir_msg = " << cache_dir_msg.DebugString();
-  add_custom_field(cache_dir_msg);
   config_proto.MergeFrom(cache_dir_msg);
 }
 

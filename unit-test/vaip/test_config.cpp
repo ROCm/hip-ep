@@ -4,6 +4,7 @@
  */
 
 #include "../vaip-core/src/config.hpp"
+#include "../vaip-core/src/pass_context_imp.hpp"
 #include "morphizen/config_reader.hpp"
 #include "morphizen/vaip.hpp"
 #include <filesystem>
@@ -11,14 +12,13 @@
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 #include <limits>
-
 // disable this test
 static const char config[] =
     R"json(
 {
    "sessionOptions": {
-     "cacheDir" : "hello1",
-     "cache_key" : "key",
+     "cacheDir" : "cacheDir",
+     "cache_dir" : "cache_dir",
      "enable_cache_file_io_in_mem":"1"
    }
 }
@@ -26,9 +26,15 @@ static const char config[] =
 TEST(ConfigTest, Simple) {
   auto config_proto = vaip_core::Config::parse_from_string(config);
   LOG(INFO) << "config: " << config_proto.DebugString();
-  // when both cache_dir and cacheDir are set, cache_dir should be used
-  EXPECT_EQ("hello1", config_proto.cache_dir());
-  EXPECT_TRUE(config_proto.enable_cache_file_io_in_mem());
+  // add_custom_field is removed, so that we need passcontext.set_config_prot();
+  EXPECT_NE("key", config_proto.cache_dir());
+  EXPECT_FALSE(config_proto.enable_cache_file_io_in_mem());
+  //
+  auto pass_context =
+      vaip_core::PassContextImp::create_pass_context(config_proto);
+  auto& config_proto_in_context = pass_context->get_config_proto();
+  EXPECT_EQ("cache_dir", config_proto_in_context.cache_dir());
+  EXPECT_TRUE(config_proto_in_context.enable_cache_file_io_in_mem());
 }
 
 TEST(ConfigTest, EmptyProviderOption) {
@@ -44,9 +50,8 @@ TEST(ConfigTest, ProviderOptionCacheDir) {
       {"log_level", "info"},
       {"cache_dir", "hello1"},
   };
-  auto json_config = vaip_core::get_config_json_str(options);
-  LOG(INFO) << "json_config: " << json_config;
-  auto config_proto = vaip_core::Config::parse_from_string(json_config.c_str());
+  auto pass_context = vaip_core::PassContextImp::create_pass_context(options);
+  auto& config_proto = pass_context->get_config_proto();
   EXPECT_EQ("hello1", config_proto.cache_dir());
   LOG(INFO) << "config: " << config_proto.DebugString();
 }
@@ -75,9 +80,8 @@ TEST(ConfigTest, SessionConfigs) {
       {"session_options",
        std::to_string((uintptr_t)(static_cast<void*>(&session_configs)))},
   };
-  auto json_config = vaip_core::get_config_json_str(options);
-  LOG(INFO) << "json_config: " << json_config;
-  auto config_proto = vaip_core::Config::parse_from_string(json_config.c_str());
+  auto pass_context = vaip_core::PassContextImp::create_pass_context(options);
+  auto& config_proto = pass_context->get_config_proto();
   EXPECT_EQ("hello1", config_proto.cache_dir());
   LOG(INFO) << "config: " << config_proto.DebugString();
   auto& sc = config_proto.session_configs();
