@@ -31,7 +31,7 @@
 #include <string>
 #include "morphizen/encryption.hpp"
 #include "core/session/onnxruntime_session_options_config_keys.h"
-#include "morphizen/mem_xclbin.hpp"
+#include "binary/mem_binary.hpp"
 #include "morphizen/config_reader.hpp"
 // clang-format on
 
@@ -226,14 +226,14 @@ bool check_cache_hit(PassContextImp& context) {
       context.get_provider_option("prebuild_cache_context");
   if (prebuild_cache_context_name) {
     MY_LOG(1) << "==== prebuild_cache_context hit ====";
-    if (!has_mem_xclbin(prebuild_cache_context_name.value())) {
+    if (!has_mem_binary(prebuild_cache_context_name.value())) {
       LOG(ERROR) << " " << prebuild_cache_context_name.value()
                  << " does not in mem please check vaip_config.json";
 
       std::abort();
     }
     auto prebuild_ep_context_in_mem =
-        get_mem_xclbin(prebuild_cache_context_name.value());
+        get_mem_binary(prebuild_cache_context_name.value());
     context.create_tar_file_for_prebuild_cache(
         std::move(prebuild_ep_context_in_mem));
     return true;

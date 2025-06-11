@@ -15,17 +15,17 @@ vaip_add_remote_target(
   EXPECTED_MD5 a3eb400c4836d01a59b7c5bb3ddd83e3
 )
 add_custom_command (
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/mem_xclbin_file.hpp.inc
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/mem_binary_file.hpp.inc
   COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../tools"
-  $<TARGET_FILE:Python3::Interpreter> ${CMAKE_CURRENT_SOURCE_DIR}/src/xclbin/compress_xclbin.py
-  ${CMAKE_CURRENT_BINARY_DIR}/mem_xclbin_file.hpp.inc
+  $<TARGET_FILE:Python3::Interpreter> ${CMAKE_CURRENT_SOURCE_DIR}/src/binary/compress_binary.py
+  ${CMAKE_CURRENT_BINARY_DIR}/mem_binary_file.hpp.inc
   "${VAIP_XCLBIN_DIR}"
 )
 
 add_custom_command (
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/config_json_binary.hpp ${CMAKE_CURRENT_BINARY_DIR}/vaip_config.json
   COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../tools"
-  $<TARGET_FILE:Python3::Interpreter> ${CMAKE_CURRENT_SOURCE_DIR}/src/xclbin/config_json_binary.hpp.py
+  $<TARGET_FILE:Python3::Interpreter> ${CMAKE_CURRENT_SOURCE_DIR}/src/binary/config_json_binary.hpp.py
   "${VAIP_JSON_CONFIG_FILE}"
   "${TRIM_CONFIG}"
   "${VAIP_XCLBIN_DIR}"
@@ -94,12 +94,12 @@ add_library(${LIB_NAME} STATIC
   src/node.cpp
   src/profile_utils.hpp
   src/profile_utils.cpp
-  ${CMAKE_CURRENT_BINARY_DIR}/mem_xclbin_file.hpp.inc
-  include/morphizen/mem_xclbin.hpp
-  src/xclbin/mem_xclbin.cpp
+  ${CMAKE_CURRENT_BINARY_DIR}/mem_binary_file.hpp.inc
+  src/binary/mem_binary.hpp
+  src/binary/mem_binary.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/xclbin.h
   include/morphizen/xclbin_file.hpp
-  src/xclbin/xclbin_file.cpp
+  src/binary/xclbin_file.cpp
   src/util.cpp
   src/cache_dir.cpp
   src/cache_dir.hpp
@@ -141,7 +141,7 @@ add_library(${LIB_NAME} STATIC
   include/morphizen/guess_reshape.hpp
   src/guess_reshape.cpp
   include/morphizen/config_reader.hpp
-  src/xclbin/config_reader.cpp
+  src/binary/config_reader.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/config_json_binary.hpp
   src/vitisai_compile_model.cpp
   src/vaip_profile.cpp

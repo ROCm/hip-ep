@@ -7,6 +7,6 @@
 #include <string>
 #include <vector>
 namespace vaip_core {
-std::vector<char> get_mem_xclbin(const std::string& filename);
-bool has_mem_xclbin(const std::string& filename);
+std::vector<char> get_mem_binary(const std::string& filename);
+bool has_mem_binary(const std::string& filename);
 } // namespace vaip_core

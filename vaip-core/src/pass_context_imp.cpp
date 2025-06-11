@@ -8,11 +8,11 @@
 #include <glog/logging.h>
 #include <google/protobuf/util/json_util.h>
 
+#include "./binary/mem_binary.hpp"
 #include "./cache_dir.hpp"
 #include "config.hpp"
 #include "morphizen/config_reader.hpp"
 #include "morphizen/env_config.hpp"
-#include "morphizen/mem_xclbin.hpp"
 #include "morphizen/util.hpp"
 #include "morphizen/vaip_io.hpp"
 #include "morphizen/weak.hpp"
@@ -764,8 +764,8 @@ std::filesystem::path PassContextImp::xclbin_path_to_cache_files(
   }
 
   std::vector<char> buffer;
-  if (has_mem_xclbin(filename)) {
-    buffer = get_mem_xclbin(filename);
+  if (has_mem_binary(filename)) {
+    buffer = get_mem_binary(filename);
   } else if (std::filesystem::is_regular_file(path, ec)) {
     buffer = read_file_to_buffer(path);
   } else {

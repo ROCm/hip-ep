@@ -12,7 +12,6 @@
 #include "./cache_dir.hpp"
 #include "./config.hpp"
 #include "./profile_utils.hpp"
-// #include "mem_xclbin.hpp"
 #include "morphizen/env_config.hpp"
 #include "morphizen/graph.hpp"
 #include "morphizen/util.hpp"
