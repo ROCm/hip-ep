@@ -351,12 +351,6 @@ public:
   virtual void save_context_json() const = 0;
 
   virtual void on_custom_op_create_end() = 0;
-
-  // for support combined shared context models
-  virtual void set_cache_file_md5_map(
-      const std::map<std::string, std::string>& cache_file_md5) = 0;
-  virtual std::map<std::string, std::string> get_cache_file_md5_map() = 0;
-
   virtual std::map<std::string, std::string>
   get_all_provider_options() const = 0;
 };

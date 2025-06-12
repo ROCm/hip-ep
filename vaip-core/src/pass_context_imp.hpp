@@ -266,10 +266,6 @@ public:
   virtual std::unique_ptr<PassContextTimer>
   measure(const std::string& label) override final;
   virtual void on_custom_op_create_end() override final;
-  virtual void set_cache_file_md5_map(
-      const std::map<std::string, std::string>& cache_file_md5) override final;
-  virtual std::map<std::string, std::string>
-  get_cache_file_md5_map() override final;
   // helper class
   struct WithPass {
     WithPass(PassContextImp& context, IPass& pass);
@@ -285,7 +281,6 @@ public:
 private:
   // use std::map to keep filename ordered.
   std::map<std::string, FILE*> cache_files_;
-  std::map<std::string, std::string> cache_file_md5s_;
   std::function<std::optional<std::string>(std::string)> get_run_options_;
   std::shared_mutex rw_mutex_;
   friend int vitisai_ep_on_run_start(

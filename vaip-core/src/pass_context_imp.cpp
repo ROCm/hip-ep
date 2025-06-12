@@ -258,15 +258,6 @@ PassContextImp::~PassContextImp() {
   }
 }
 
-void PassContextImp::set_cache_file_md5_map(
-    const std::map<std::string, std::string>& cache_file_md5) {
-  cache_file_md5s_ = cache_file_md5;
-}
-
-std::map<std::string, std::string> PassContextImp::get_cache_file_md5_map() {
-  return cache_file_md5s_;
-}
-
 int64_t PassContextImp::get_provider_option_i64(const std::string& option_name,
                                                 int64_t default_value) const {
   auto config_value = get_provider_option(option_name);
