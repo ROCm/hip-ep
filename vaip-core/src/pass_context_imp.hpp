@@ -217,8 +217,10 @@ private:
   std::optional<std::vector<T>>
   read_file_generic(const std::string& filename) const;
 
-  std::filesystem::path get_ep_context_onnx_file_path();
-  std::filesystem::path generate_ep_context_binary_file_path();
+  std::filesystem::path get_dir_of_ep_context_model();
+  std::filesystem::path get_basename_of_ep_context_model();
+  std::filesystem::path get_basename_of_ep_context_binary_file();
+
   void maybe_create_tar_file_for_write();
   void
   create_tar_file_for_read(DllSafe<std::string>&& ep_context_binary_file_name,
@@ -302,6 +304,7 @@ private:
   mutable std::vector<std::shared_ptr<QoSUpdateInterface>> qos_updaters_;
   int created_customop_count = 0;
   std::unique_ptr<TarFile> tar_file_ = nullptr;
+  std::filesystem::path tar_file_file_name_;
   // cache_file_use_cache_key_prefix_ is only enabled for shared ep context is
   // enabled.
   // when this feature is enabled, open_file_for_read and

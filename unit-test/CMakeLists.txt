@@ -34,6 +34,7 @@ add_executable(${TEST_EXE_NAME}
   vaip/test_file_stream.cpp
   vaip/test_op_def.cpp
   vaip/test_mmap_file.cpp
+  vaip/test_ep_shared_context_workspace.cpp
   ${TEST_ONNX_RUNNER_PROTO_SRCS}
   ${TEST_ONNX_RUNNER_PROTO_HDRS}
   test-onnx-runner/create-session.cpp

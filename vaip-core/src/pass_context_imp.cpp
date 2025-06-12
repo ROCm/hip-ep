@@ -11,6 +11,7 @@
 #include "./binary/mem_binary.hpp"
 #include "./cache_dir.hpp"
 #include "config.hpp"
+#include "ep_shared_context_workspace.hpp"
 #include "morphizen/config_reader.hpp"
 #include "morphizen/env_config.hpp"
 #include "morphizen/util.hpp"
@@ -370,27 +371,62 @@ std::filesystem::path PassContextImp::get_model_path() const {
 }
 
 /**
- * @brief Retrieves the file path for the ONNX context file associated with
- * the execution provider (EP).
+ * @brief Retrieves the directory of the execution provider (EP) context model.
  *
- * input : ep.context_file_path
- * input : model_path
- * output : ep_context_onnx_file_path
+ * input : session config `ep.context_file_path` [optional]
+ * input : model_path [optional]
+ * output : directory of the EP context model
  *
- * This function determines the ONNX context file path based on the session
- * configuration or the model path. If the "ep.context_file_path" session
- * configuration is specified and not empty, it uses that value. Otherwise, if
- * the model path is available, it constructs the ONNX context file path by
- * appending "_ctx" to the model's stem and preserving its extension.
- * If both "ep.context_file_path" and the model path are empty, it throws a
+ * This function checks the session configuration for the "ep.context_file_path"
+ * key. If it exists and is not empty, it returns the parent directory of the
+ * specified path. If the key is not set, it returns the parent directory of the
+ * model path.
+ * If both the session configuration and model path are empty, it returns the
+ * current working directory.
+ *
+ * @return std::filesystem::path The directory of the EP context model.
+ */
+std::filesystem::path PassContextImp::get_dir_of_ep_context_model() {
+  // get the directory of the ep context onnx model
+  auto ret = std::filesystem::path();
+  auto ep_context_file_path = get_session_config("ep.context_file_path");
+  // For same with onnxruntime (graph_partitioner.cc::GetValidatedEpContextPath)
+  // ep.context_file_path validated in onnxruntime
+  // ep.context_file_path is a file path, not a directory path.
+  // support absolute path and relative path
+  // relative path is relative to current working directory
+  if (ep_context_file_path.has_value()) {
+    ret = std::filesystem::u8path(ep_context_file_path.value()).parent_path();
+  } else if (!model_path.empty()) {
+    ret = model_path.parent_path();
+  } else {
+    ret = std::filesystem::path(".");
+  }
+  return ret;
+}
+
+/**
+ * @brief Retrieves the basename of the execution provider (EP) context model.
+ *
+ * input1 : session config `ep.context_file_path` [optional]
+ * input2 : model_path  [optional]
+ * output : ep_context_onnx_file_path.filename()
+ * The input2 and input2 must not be both empty.
+ *
+ * This function checks the session configuration for the "ep.context_file_path"
+ * key. If it exists and is not empty, it returns the filename of the specified
+ * path. If the key is not set, it constructs the filename by appending "_ctx"
+ * to the stem of the model path.
+ * If both the session configuration and model path are empty, it throws a
  * runtime error.
  *
- * @return std::filesystem::path The resolved ONNX context file path.
+ * @return std::filesystem::path The basename of the EP context model.
  *
  * @throws std::runtime_error If both "ep.context_file_path" and the model
  * path are empty.
+ *
  */
-std::filesystem::path PassContextImp::get_ep_context_onnx_file_path() {
+std::filesystem::path PassContextImp::get_basename_of_ep_context_model() {
   auto ep_context_onnx_file_path = std::filesystem::path();
   auto ep_context_file_path = get_session_config("ep.context_file_path");
   // For same with onnxruntime
@@ -410,46 +446,24 @@ std::filesystem::path PassContextImp::get_ep_context_onnx_file_path() {
     // empty at same time
     LOG(FATAL) << "ep.context_file_path and model_path are both empty.";
   }
-  return ep_context_onnx_file_path;
+  return ep_context_onnx_file_path.filename();
 }
 
 /**
- * @brief Generates the file path for the EP context binary file based on the
- * given ONNX file path and sharing mode.
+ * @brief Retrieves the basename of the EP context binary file.
  *
- * input : ep_context_onnx_file_path
- * input : is_shared_ep_contexts
- * output : ep_context_binary_file_path
+ * This function constructs the basename of the EP context binary file by
+ * appending "_VITISAI.bin" to the basename of the EP context model.
  *
- * @param ep_context_onnx_file Reference to the ONNX file path for the EP
- * context.
- * @param is_shared_ep_contexts Boolean flag indicating whether the EP
- * contexts are shared.
- *        - If true, the binary file will be named "VITISAI.bin" in the same
- * directory as the ONNX file.
- *        - If false, the binary file will be named "<ONNX
- * filename>_VITISAI.bin" in the same directory.
- *
- * @return A std::filesystem::path object representing the generated binary
- * file path.
+ * @return std::filesystem::path The basename of the EP context binary file.
  */
-std::filesystem::path PassContextImp::generate_ep_context_binary_file_path() {
-  auto ep_context_binary_file_path = std::filesystem::path();
-  auto ep_context_onnx_file = get_ep_context_onnx_file_path();
-  auto is_shared_ep_contexts =
-      get_session_config("ep.share_ep_contexts", "0") == "1";
-  if (ep_context_onnx_file.empty()) {
-    LOG(FATAL) << "Both ep.context_file_path and model_path are empty.";
-  } else if (is_shared_ep_contexts) {
-    ep_context_binary_file_path = ep_context_onnx_file.parent_path() /
-                                  std::filesystem::u8path("VITISAI.bin");
-  } else {
-    ep_context_binary_file_path =
-        ep_context_onnx_file.parent_path() /
-        std::filesystem::u8path(ep_context_onnx_file.filename().u8string() +
-                                "_VITISAI.bin");
+std::filesystem::path PassContextImp::get_basename_of_ep_context_binary_file() {
+  auto ctx_model_basename = get_basename_of_ep_context_model();
+  if (ctx_model_basename.empty()) {
+    LOG(FATAL) << "get_basename_of_ep_context_model() returned empty path.";
   }
-  return ep_context_binary_file_path;
+  return std::filesystem::u8path(ctx_model_basename.u8string() +
+                                 "_VITISAI.bin");
 }
 
 std::optional<std::vector<char>>
@@ -1065,11 +1079,14 @@ void PassContextImp::maybe_create_tar_file_for_write() {
   }
   auto is_shared_context_enabled =
       get_session_config(kOrtSessionOptionShareEpContexts, "0") == "1";
+  auto is_stop_shared_context =
+      get_session_config(kOrtSessionOptionStopShareEpContexts, "0") == "1";
   auto is_encryption_enabled = !context_proto.config().encryption_key().empty();
   auto is_ep_context_enabled =
       get_session_config(kOrtSessionOptionEpContextEnable, "0") == "1";
   auto is_ep_context_embed_mode =
       get_session_config(kOrtSessionOptionEpContextEmbedMode, "1") == "1";
+
   if (is_encryption_enabled) {
     // TODO: remove this, after tar_file_ also supports encryption.
     LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
@@ -1093,9 +1110,20 @@ void PassContextImp::maybe_create_tar_file_for_write() {
   // 1. std::tmpfile(), i.e. TarFile::create(), for embed mode.
   // 2. ep_context_binary_file.
   if (!is_ep_context_embed_mode) {
-    auto ep_context_binary_file = generate_ep_context_binary_file_path();
+    auto ep_context_binary_file = get_dir_of_ep_context_model() /
+                                  get_basename_of_ep_context_binary_file();
     LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
         << "open tar file for write: " << ep_context_binary_file;
+
+    if (is_shared_context_enabled) {
+      auto& shared_workspace =
+          SharedContextContextWorkspace::create_workspace_or_get(
+              ep_context_binary_file);
+      ep_context_binary_file = shared_workspace.get_ep_context_binary_file();
+      if (is_stop_shared_context) {
+        shared_workspace.close_workspace();
+      }
+    }
 
     auto open_mode = std::ios::binary | std::ios::in | std::ios::out;
     if (!is_shared_context_enabled) {
@@ -1106,6 +1134,7 @@ void PassContextImp::maybe_create_tar_file_for_write() {
       open_mode |= std::ios::trunc;
     }
     auto stream = std::unique_ptr<std::fstream>();
+    tar_file_file_name_ = ep_context_binary_file;
     stream = std::make_unique<std::fstream>(ep_context_binary_file, open_mode);
 
     CHECK(stream->is_open())
@@ -1114,6 +1143,7 @@ void PassContextImp::maybe_create_tar_file_for_write() {
         << "cache_key should be empty when using tar file";
     tar_file_ = TarFile::create(std::move(stream));
   } else {
+    tar_file_file_name_.clear();
     tar_file_ = TarFile::create();
     CHECK(tar_file_ != nullptr)
         << " create a tar file for write in embed mode, but tar_file_ is "
@@ -1131,38 +1161,9 @@ void PassContextImp::maybe_create_tar_file_for_write() {
 }
 void PassContextImp::create_tar_file_for_read(
     DllSafe<std::string>&& ep_context_binary, bool embed_mode) {
-  auto get_ep_context_binary_path_local =
-      [&](const std::string& ep_context_binary_file_name)
-      -> std::filesystem::path {
-    auto ep_context_binary_file = std::filesystem::path();
-    auto session_ep_context_path =
-        std::filesystem::path(get_session_config("ep.context_file_path", ""));
-    if (session_ep_context_path != "") {
-      ep_context_binary_file =
-          session_ep_context_path.parent_path() /
-          std::filesystem::u8path(ep_context_binary_file_name);
-      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-          << "load ep context file using ep.context_file_path from "
-          << ep_context_binary_file.string();
-    } else if (model_path.empty()) {
-      ep_context_binary_file =
-          std::filesystem::u8path(ep_context_binary_file_name);
-      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-          << "load ep context file using current directory from "
-          << ep_context_binary_file.string();
-    } else {
-      ep_context_binary_file =
-          model_path.parent_path() /
-          std::filesystem::u8path(ep_context_binary_file_name);
-      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-          << "load ep context file using model_path from "
-          << ep_context_binary_file.string();
-    }
-    return ep_context_binary_file;
-  };
   if (!embed_mode) {
-    auto ep_context_binary_file =
-        get_ep_context_binary_path_local(*ep_context_binary);
+    auto ep_context_binary_file = get_dir_of_ep_context_model() /
+                                  std::filesystem::u8path(*ep_context_binary);
     LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
         << "open tar file for read: " << ep_context_binary_file;
     CHECK(std::filesystem::exists(ep_context_binary_file))
@@ -1198,7 +1199,8 @@ void PassContextImp::create_tar_file_for_prebuild_cache(
       tar_file_ = TarFile::create(std::move(buffer));
       CHECK(tar_file_ != nullptr) << " create a tar file from memory ";
     } else {
-      auto binary_file_path = generate_ep_context_binary_file_path();
+      auto binary_file_path = get_dir_of_ep_context_model() /
+                              get_basename_of_ep_context_binary_file();
       auto open_mode =
           std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc;
       auto stream = std::unique_ptr<std::fstream>();
@@ -1211,6 +1213,7 @@ void PassContextImp::create_tar_file_for_prebuild_cache(
       stream->seekp(0);
       stream->flush();
       tar_file_ = TarFile::create(std::move(stream));
+      tar_file_file_name_ = binary_file_path;
     }
   }
   if (tar_file_->has_file("context.json")) {

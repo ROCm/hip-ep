@@ -147,14 +147,12 @@ Enable shared context with:
 VitisAI EP would raises an exception if `ep.share_ep_contexts=1`
 however `ep.context_embed_mode=1`
 
-In this case, it is suggested that all onnx models are put into a same
-directory, or all `ep.context_file_path` points to file names in a
-same directory.
 
-When it is enabled, instead of generating
-`[ep_context_file_path1]_VITISAI.bin`,
-`[ep_context_file_path2]_VITISAI.bin` for each individual EP context
-models, a shared binary file is generated in the same directory, `VITISAI.bin`
+Models that share weights are grouped into a shared context workspace, where each directory is treated as a separate workspace.
+The final ONNXRuntime session should set `ep.stop_share_ep_contexts` to indicate that it is the last session within the workspace.
+It is recommended to place ONNX models from the same group in the same directory, or ensure that all `ep.context_file_path` values point to files within the same directory.
+
+According [Implementation Guidelines for EPContext Model Generation with Weight Sharing][guide]
 
 
 ### Example: Shared EP Context
@@ -163,31 +161,111 @@ Given models:
 A.onnx
 B.onnx
 C.onnx
+D.onnx
 ```
 
-#### Without shared context(`ep.share_ep_contexts=0`)
-Resulting files:
 ```
-A.onnx
+ep.share_ep_contexts|1
+generate context for A.onnx
+generate context for B.onnx
+ep.stop_share_ep_contexts
+
+ep.share_ep_contexts|1
+generate context for C.onnx
+generate context for D.onnx
+ep.stop_share_ep_contexts
+
+```
+In the above case we when context cache is generated for `A.onnx`, the bin will be `A_ctx.onnx_VITISAI.bin`
+For the second call `A_ctx.onnx_VITISAI.bin` will be updated
+
+Then `C_ctx.onnx_VITISAI.bin` will be generated for `C.onnx` and then when `D.onnx` is called, `C_ctx.onnx_VITISAI.bin` will be updated
+
+As results, the following files are generated.
+
+```
 A_ctx.onnx
 A_ctx.onnx_VITISAI.bin
-B.onnx
 B_ctx.onnx
-B_ctx.onnx_VITISAI.bin
-C.onnx
+
 C_ctx.onnx
 C_ctx.onnx_VITISAI.bin
+D_ctx.onnx
 ```
 
-#### With shared context(`ep.share_ep_contexts=1`)
-Resulting files:
+`A_ctx.onnx` and `B_ctx.onnx` share `A_ctx.onnx_VITISAI.bin`.
+`C_ctx.onnx` and `D_ctx.onnx` share `C_ctx.onnx_VITISAI.bin`.
+
+
+### Example : Some compilicated use cases
+
+Given models
 ```
-A.onnx
-A_ctx.onnx
-B.onnx
-B_ctx.onnx
-C.onnx
-C_ctx.onnx
-VITISAI.bin
+dir1/A1.onnx
+dir1/A2.onnx
+dir1/B1.onnx
+dir1/B2.onnx
+
+dir2/B3.onnx
 ```
-Each of the *_ctx.onnx (`{A,B,C}_ctx.onnx`) models references the same `VITISAI.bin`.
+Models `dir1/A1.onnx` and `dir1/A2.onnx` belong to the same group and share common weights through the shared context mechanism.
+
+Models `dir1/B1.onnx`, `dir1/B2.onnx` and `dir2/B3.onnx` belong to the same group and share common weights through the shared context mechanism.
+
+Python sample codes:
+``` python
+options = onnxruntime.SessionOptions()
+options.add_session_config_entry("ep.context_enable", "1")
+options.add_session_config_entry("ep.context_embed_mode", "0")
+options.add_session_config_entry("ep.share_ep_contexts", "1")
+
+# open workspace `dir1`, shared binray file : dir1/A1_ctx.onnx_VITISAI.bin
+create_ort_session("dir1/A1.onnx", options)
+# close workspace `dir1`, dir1/A1_ctx.onnx and dir2/A2_ctx.onnx as a group for shared weights.
+options.add_session_config_entry("ep.stop_share_ep_contexts", "1")
+create_ort_session("dir1/A2.onnx", options)
+
+# open workspace `dir1` , shared library file: dir1/B1_ctx.onnx_VITISAI.bin
+options.add_session_config_entry("ep.stop_share_ep_contexts", "0")
+create_ort_session("dir1/B1.onnx", options)
+create_ort_session("dir1/B2.onnx", options)
+# close workspace `dir1`, dir1/B1.onnx dir1/B2.onnx and dir1/B3.onnx as a group for shared weights
+options.add_session_config_entry("ep.stop_share_ep_contexts", "1")
+# Point the EP context onnx model of `dir2/B3.onnx` to the workspace directory `dir1/`.
+options.add_session_config_entry("ep.context_file_path", "dir1/B3_ctx.onnx")
+create_ort_session("dir2/B3.onnx", options)
+```
+
+As results, the following files are generated.
+```
+dir1/A1_ctx.onnx
+dir1/A1_ctx.onnx_VITISAI.bin
+dir1/A2_ctx.onnx
+dir1/B1_ctx.onnx
+dir1/B1_ctx.onnx_VITISAI.bin
+dir1/B2_ctx.onnx
+dir1/B3_ctx.onnx
+```
+`dir1/A1_ctx.onnx` and `dir1/A2_ctx.onnx` share `dir1/A1_ctx.onnx_VITISAI.bin`.
+`dir1/B1_ctx.onnx`, `dir1/B2_ctx.onnx`  and `dir1/B3_ctx.onnx` share `dir1/B1_ctx.onnx_VITISAI.bin`.
+
+
+Others:
+```
+if you want to share, all models must in the same directory or point output ep context model to workspace directory.
+dir1/A1.onnx -> dir1/A1_ctx.onnx dir1/A1_ctx.onnx_VITISAI.bin
+dir2/A1.onnx -> dir2/A1_ctx.onnx dir2/A1_ctx.onnx_VITISAI.bin
+dir1/A2.onnx -> dir1/A2_ctx.onnx dir1/A1_ctx.onnx_VITISAI.bin  : shared =1 stop=1
+dir2/A2.onnx -> dir2/A2_ctx.onnx dir2/A1_ctx.onnx_VITISAI.bin  : shared =1 stop=1
+
+dir1/B1.onnx -> dir1/B1_ctx.onnx dir1/B1_ctx.onnx_VITISAI.bin
+dir1/B2.onnx -> dir1/B2_ctx.onnx dir1/B1_ctx.onnx_VITSIAI.bin
+dir1/B3.onnx -> dir1/B3_ctx.onnx dir1/B1_ctx.onnx_VITSIAI.bin : shared=1 stop=1
+
+dir1/A1.onnx -> dir1/A1_ctx.onnx dir1/A1_ctx.onnx_VITISIA.bin
+dir2/A2.onnx -> dir1/A2_ctx.onnx dir1/A1_ctx.onnx_VITISIA.bin : ep.config_file_path = dir1/A2_ctx.onnx
+dir3/A3.onnx -> dir1/A3_ctx.onnx dir1/A1_ctx.onnx_VITISIA.bin : ep.config_file_path = dir2/A3_ctx.onnx  shared=1 stop=1
+```
+
+
+[guide]:https://onnxruntime.ai/docs/execution-providers/EP-Context-Design.html#implementation-guidelines-for-epcontext-model-generation-with-weight-sharing_

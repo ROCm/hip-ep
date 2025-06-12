@@ -633,22 +633,29 @@ std::string get_ep_cache_context_embed_mode(PassContextImp& context) {
 static std::string get_ep_cache_context_nonembed_mode(PassContextImp& context) {
   auto measure_get_ep_cache_context_embed_mode =
       context.measure("get_ep_cache_context_nonembed_mode");
-  auto OrtSessionOptionEpContextFilePath_binay =
-      context.generate_ep_context_binary_file_path();
-  LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
-      << "embed mode = 0, save cache directory to tar file "
-      << OrtSessionOptionEpContextFilePath_binay.filename();
+  auto OrtSessionOptionEpContextFilePath_binay = std::filesystem::path();
   // return a file name for the binary file, the file name is written into the
   // atttribute "ep.cache_context"
-  auto binary_name =
-      OrtSessionOptionEpContextFilePath_binay.filename().u8string();
   if (context.tar_file_) {
+    CHECK(!context.tar_file_file_name_.empty())
+        << "tar_file_file_name_ is empty, please check the context";
+    OrtSessionOptionEpContextFilePath_binay = context.tar_file_file_name_;
     // do nothing
   } else {
+    OrtSessionOptionEpContextFilePath_binay =
+        context.get_dir_of_ep_context_model() /
+        context.get_basename_of_ep_context_binary_file();
     auto dst =
         IStreamWriter::from_path(OrtSessionOptionEpContextFilePath_binay);
     get_ep_cache_context_common(context, *dst);
   }
+  CHECK(OrtSessionOptionEpContextFilePath_binay.has_filename())
+      << "OrtSessionOptionEpContextFilePath_binay has no filename";
+  LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
+      << "embed mode = 0, save cache directory to tar file "
+      << OrtSessionOptionEpContextFilePath_binay.filename();
+  auto binary_name =
+      OrtSessionOptionEpContextFilePath_binay.filename().u8string();
   return binary_name;
 }
 
@@ -896,8 +903,7 @@ store_cache_directory_from_main_node(PassContextImp& context,
       LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
           << "embed mode = 1, load ep context " << ep_context_size << " bytes";
     } else {
-      auto ep_context_onnx_file = context.get_ep_context_onnx_file_path();
-      auto ep_context_binary_file = ep_context_onnx_file.parent_path() /
+      auto ep_context_binary_file = context.get_dir_of_ep_context_model() /
                                     std::filesystem::u8path(*ep_cache_context);
       ep_context_file = IStreamReader::from_path(ep_context_binary_file);
     }
