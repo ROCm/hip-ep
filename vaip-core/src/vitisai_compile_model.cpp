@@ -1004,7 +1004,7 @@ static void dirty_hack_for_model_clone_external_data_threshold(
 }
 static bool is_compiling_on_non_npu_platform(PassContextImp& context) {
   auto is_compiling_on_non_npu_platform_provider_option =
-      context.get_provider_option("is_compiling_on_non_npu_platform");
+      context.get_provider_option(kProviderOptionIsCompilingOnNonNpuPlatform);
   if (is_compiling_on_non_npu_platform_provider_option) {
     // it takes the precedence over the EP context enable option. this is only
     // for internal use, for debugging and testing purpose.
