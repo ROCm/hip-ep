@@ -218,14 +218,29 @@ get_config_json(const onnxruntime::ProviderOptions& options) {
                 << " fall back to builtin default";
     }
   }
-  bool config_set = options.find("config_file") != options.end();
-  if (config_set) {
+  auto iterator_config_file = options.find("config_file");
+  auto opt_config_file = std::optional<std::filesystem::path>();
+  if (iterator_config_file != options.end()) {
+    MY_LOG(1) << "found config_file in provider options: "
+              << iterator_config_file->second;
+    auto tmp_opt_config_file =
+        std::filesystem::path(iterator_config_file->second);
+    if (std::filesystem::exists(tmp_opt_config_file)) {
+      opt_config_file = tmp_opt_config_file;
+    } else {
+      LOG(WARNING) << "config_file does not exist: "
+                   << iterator_config_file->second
+                   << " fall back to default config";
+    }
+  }
+  if (opt_config_file.has_value()) {
     std::string config_file = options.at("config_file");
-    MY_LOG(1) << " overwrite default config, read if from " << config_file;
+    MY_LOG(1) << " overwrite default config, read if from "
+              << opt_config_file.value();
     auto struct_from_config_file =
-        get_protobuf_struct_from_config_file(config_file);
+        get_protobuf_struct_from_config_file(opt_config_file.value().string());
     if (struct_from_config_file == nullptr) {
-      LOG(FATAL) << "failed to parse config file: " << config_file;
+      LOG(FATAL) << "failed to parse config file: " << opt_config_file.value();
     }
     ret = std::move(*struct_from_config_file);
   } else {
