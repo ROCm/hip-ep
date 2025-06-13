@@ -18,9 +18,10 @@ namespace vaip_core {
 
 std::unique_ptr<TarFile>
 TarFile::create(std::unique_ptr<std::iostream>&& stream) {
-  return std::make_unique<TarFile>(std::move(stream));
+  return std::make_unique<TarFile>(PrivateTag{}, std::move(stream));
 }
-std::unique_ptr<TarFile> TarFile::create(const std::filesystem::path& path) {
+std::unique_ptr<TarFile>
+TarFile::create_from_path(const std::filesystem::path& path, bool enable_mmap) {
   auto create_with_regular_stream = [&]() -> std::unique_ptr<TarFile> {
     auto stream =
         std::make_unique<std::fstream>(path, std::ios::binary | std::ios::in);
@@ -30,6 +31,10 @@ std::unique_ptr<TarFile> TarFile::create(const std::filesystem::path& path) {
     }
     return TarFile::create(std::move(stream));
   };
+  if (!enable_mmap) {
+    // if enable_mmap is false, we do not use mmap
+    return create_with_regular_stream();
+  }
   if (ENV_PARAM(MORPHIZEN_ENABLE_TAR_MMAP) == 0) {
     // if MORPHIZEN_ENABLE_TAR_MMAP is set to 0, we do not use mmap
     return create_with_regular_stream();
@@ -94,7 +99,7 @@ std::unique_ptr<TarFile> TarFile::create(DllSafe<std::string>&& buffer0) {
   }
   return create(std::move(stream));
 }
-TarFile::TarFile(std::unique_ptr<std::iostream>&& stream)
+TarFile::TarFile(PrivateTag, std::unique_ptr<std::iostream>&& stream)
     : stream_(std::move(stream)),
       mem_stream_{dynamic_cast<decltype(mem_stream_)>(stream_.get())} {
   CHECK(stream_->seekg(0, std::ios::beg).good())

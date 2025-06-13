@@ -20,4 +20,14 @@ static constexpr const char* kProviderOptionLogLevel = "log_level";
  * cached files should be stored by the provider.
  */
 static constexpr const char* kProviderOptionCacheDir = "cache_dir";
+
+/**
+ * @brief Option key to enable TAR memory-mapped execution provider context.
+ *
+ * This constant string is used as a key for specifying whether we should
+ * enable the TAR memory-mapped execution provider context in the system.
+ */
+static constexpr const char* kProviderOptionEpContextEnableMmap =
+    "ep_context_enable_mmap";
+
 } // namespace vaip_core

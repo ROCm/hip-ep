@@ -12,6 +12,7 @@
 #include <iostream>
 #include <optional>
 namespace vaip_core {
+
 class TarFile {
 public:
   VAIP_DLL_SPEC static std::unique_ptr<TarFile>
@@ -29,8 +30,8 @@ public:
    * @param path The file system path to the tar file to be opened or created.
    * @return A unique pointer to the created TarFile instance.
    */
-  VAIP_DLL_SPEC static std::unique_ptr<TarFile>
-  create(const std::filesystem::path& path);
+  static std::unique_ptr<TarFile>
+  create_from_path(const std::filesystem::path& path, bool enable_mmap = true);
 
   /**
    * @brief Creates a new instance of TarFile.
@@ -79,8 +80,11 @@ public:
    */
   static std::unique_ptr<TarFile> create(const char* data, size_t size);
 
+private:
+  struct PrivateTag {}; // for std::make_unique
 public:
-  TarFile(std::unique_ptr<std::iostream>&& stream);
+  TarFile(PrivateTag, std::unique_ptr<std::iostream>&& stream);
+
   VAIP_DLL_SPEC
   bool has_file(const std::string& filename) const;
   VAIP_DLL_SPEC

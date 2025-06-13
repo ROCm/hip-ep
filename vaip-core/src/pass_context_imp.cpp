@@ -1164,7 +1164,9 @@ void PassContextImp::create_tar_file_for_read(
       LOG(FATAL) << "ep context binary does not exist at path: "
                  << ep_context_binary_file;
     }
-    tar_file_ = TarFile::create(ep_context_binary_file);
+    tar_file_ = TarFile::create_from_path(
+        ep_context_binary_file,
+        get_provider_option(kProviderOptionEpContextEnableMmap, "1") == "1");
     CHECK(tar_file_ != nullptr)
         << "failed to open ep context file " << ep_context_binary_file;
   } else {

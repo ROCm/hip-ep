@@ -21,7 +21,7 @@ template <typename T> static std::string get_readable_path(const T& entry) {
 }
 static int list_tar(const char* file) {
   auto tar_path = std::filesystem::u8path(file);
-  auto tar_file_obj = vaip_core::TarFile::create(tar_path);
+  auto tar_file_obj = vaip_core::TarFile::create_from_path(tar_path);
   if (tar_file_obj == nullptr) {
     std::cerr << "Failed to open tar file: " << file << std::endl;
     return 1;
