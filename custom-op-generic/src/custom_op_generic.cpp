@@ -2,7 +2,6 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#pragma once
 #include "./custom_op_generic.hpp"
 #include "morphizen/onnxruntime_api.hpp"
 #include <glog/logging.h>
