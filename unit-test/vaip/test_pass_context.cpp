@@ -9,6 +9,7 @@
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 #include <limits>
+#include <stdexcept>
 // clang-format off
 // NOLINTBEGIN
 #include "morphizen/vaip.hpp"
@@ -310,7 +311,7 @@ TEST_F(PassContextTest, TestGzTar) {
     }
   }
 }
-
+// TODO: move it to another test file.
 // TEST_F(PassContextTest, TestLongFilenames) {
 //   auto buffer = std::vector<char>{};
 //   std::string long_name(101u, 'x');
@@ -430,7 +431,8 @@ protected:
 using namespace vaip_core;
 TEST_F(PassContextConfigTest, Config) {
   auto cache_dir = CMAKE_CURRENT_BINARY_PATH / "c1";
-  std::string cache_key = "d41d8cd98f00b204e9800998ecf8427e";
+  std::string cache_key =
+      "33ad2fe7c4a7b71e55f5cbd9c0569bb4"; // use graph io based memory md5value.
   auto log_dir = cache_dir / cache_key;
   CreateContext(onnxruntime::ProviderOptions{
       {"cacheDir", cache_dir.u8string()},
@@ -442,8 +444,8 @@ TEST_F(PassContextConfigTest, Config) {
   ASSERT_EQ(passContext_->get_log_dir(), log_dir);
 }
 
-TEST_F(PassContextConfigTest, Target) {
-  std::string cache_key = "d41d8cd98f00b204e9800998ecf8427e";
+TEST_F(PassContextConfigTest, ProviderOptions) {
+  std::string cache_key = "33ad2fe7c4a7b71e55f5cbd9c0569bb4";
   auto config_file = CMAKE_CURRENT_SOURCE_PATH / "vaip" /
                      "test_pass_context.data" / "sample_config_1.json";
   auto context_json = CMAKE_CURRENT_SOURCE_PATH / "vaip" /
@@ -483,3 +485,131 @@ TEST_F(PassContextConfigTest, Target) {
   }
   std::cout << "DONE" << std::endl;
 }
+
+TEST_F(PassContextConfigTest, TargetSpecifiedByEndUserNotValid) {
+
+  try {
+    CreateContext(onnxruntime::ProviderOptions{
+        {"target", "target-not-exists"},
+    });
+    ASSERT_TRUE(false) << "Should throw exception when target is not exists";
+  } catch (const std::invalid_argument& e) {
+    std::string error_message = e.what();
+    ASSERT_TRUE(error_message.find("not a valid target") != std::string::npos)
+        << " Expected error message to contain 'not a valid target', but got: "
+        << error_message;
+  }
+}
+
+TEST_F(PassContextConfigTest, TargetSpecifiedByEndUserValid) {
+  CreateContext(onnxruntime::ProviderOptions{
+      {"target", "dummy-target"},
+  });
+  auto dummy_option =
+      passContext_->get_provider_option("dummy_provier_option_for_test");
+  ASSERT_EQ(dummy_option, "bingo");
+}
+
+TEST_F(PassContextConfigTest, TargetInConfigFileNotValidTarget) {
+
+  try {
+    CreateContext(onnxruntime::ProviderOptions{
+        {"config_file",
+         (CMAKE_CURRENT_SOURCE_PATH / "vaip" / "test_pass_context.data" /
+          "sample_config_for_target_disovery_not_valid_target.json")
+             .u8string()},
+    });
+    ASSERT_TRUE(false) << "Should throw exception when target is not exists";
+  } catch (const std::invalid_argument& e) {
+    std::string error_message = e.what();
+    ASSERT_TRUE(error_message.find("not a valid target") != std::string::npos)
+        << " Expected error message to contain 'not a valid target', but got: "
+        << error_message;
+  }
+}
+
+TEST_F(PassContextConfigTest, TargetInConfigFileValidTarget) {
+  CreateContext(onnxruntime::ProviderOptions{
+      {"config_file",
+       (CMAKE_CURRENT_SOURCE_PATH / "vaip" / "test_pass_context.data" /
+        "sample_config_for_target_disovery_valid_target.json")
+           .u8string()},
+  });
+  auto dummy_option =
+      passContext_->get_provider_option("dummy_provier_option_for_test");
+  ASSERT_EQ(dummy_option, "bingo");
+}
+
+TEST_F(PassContextConfigTest, TargetInMepTableValidTarget) {
+  CreateContext(onnxruntime::ProviderOptions{
+      {"config_file",
+       (CMAKE_CURRENT_SOURCE_PATH / "vaip" / "test_pass_context.data" /
+        "sample_config_for_target_disovery_valid_in_mep_table.json")
+           .u8string()},
+  });
+  auto dummy_option =
+      passContext_->get_provider_option("dummy_provier_option_for_test");
+  ASSERT_EQ(dummy_option, "mep-target-hit-in-sampel-config");
+}
+
+TEST_F(PassContextConfigTest, TargetInMepTableValidTarget_builtin_config) {
+  CreateContext(onnxruntime::ProviderOptions{});
+  auto dummy_option =
+      passContext_->get_provider_option("dummy_provier_option_for_test");
+  ASSERT_EQ(dummy_option, "mep-target-hit");
+}
+
+TEST_F(PassContextConfigTest,
+       TargetInMepTableValidTarget_builtin_config_auto_disvoery) {
+  // first we need to modify model inputs and outputs to make mep table miss.
+  auto graph = model_->main_graph();
+
+  auto rename_inputs =
+      [this](vaip_cxx::NodeArgConstRef old) -> vaip_cxx::NodeArgConstRef {
+    auto graph = model_->main_graph();
+    return graph.new_node_arg(
+        old.name() + "_new_name", *old.shape(),
+        (ONNX_NAMESPACE::TensorProto_DataType)old.element_type());
+  };
+  auto old_inputs = model_->main_graph().inputs();
+
+  auto inputs = std::vector<vaip_cxx::NodeArgConstRef>{};
+  for (auto& old_input : old_inputs) {
+    auto new_input = rename_inputs(old_input);
+    inputs.push_back(new_input);
+  }
+  model_->main_graph().set_inputs(inputs);
+  model_->set_metadata("relu_dq_target_name",
+                       "relu_dq_target_by_auto_discovery");
+  CreateContext(onnxruntime::ProviderOptions{});
+  auto dummy_option =
+      passContext_->get_provider_option("dummy_provier_option_for_test");
+  ASSERT_EQ(dummy_option, "auto-discovery-hit");
+}
+// "99_vaip_centralized_target_discovery", the plugin is ordered alphabetically
+// by name so it is probably the laster resort.
+//
+// we must register this along with a pass or custom op, vaip::core is not build
+// with WHOLE_ARCHIVE enabled. it would be removed by linker if not used.
+static std::string get_meta(const onnxruntime::Model& model,
+                            const std::string& key) {
+  if (VAIP_ORT_API(model_has_meta_data)(model, key))
+    return *(VAIP_ORT_API(model_get_meta_data)(model, key));
+  return "";
+}
+static std::optional<std::string>
+relu_dq_centralized_target_discovery(const vaip_core::ConfigProto& config,
+                                     const onnxruntime::Model& model) {
+  auto graph = vaip_cxx::GraphConstRef(
+      VAIP_ORT_API(model_main_graph)(const_cast<onnxruntime::Model&>(model)));
+  auto ret = std::optional<std::string>();
+  auto relu_dq_target_name = get_meta(model, "relu_dq_target_name");
+  if (!relu_dq_target_name.empty()) {
+    ret = relu_dq_target_name;
+  }
+  return ret;
+}
+static ::vaip_core::StaticPluginRegister
+    __plugin_register("99_relu_dq_centralized_target_discovery",
+                      "morphizen_target_discovery",
+                      (void*)&relu_dq_centralized_target_discovery);

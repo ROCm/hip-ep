@@ -86,9 +86,9 @@ int main(int argc, const char* argv[]) {
   {
     auto env =
         std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "vaip_unit_test");
-    vaip_core::StaticPluginRegister::sync_static_plugin_into_module(
+    /* vaip_core::StaticPluginRegister::sync_static_plugin_into_module(
         "onnxruntime_vitisai_ep");
-
+        */
     Ort::SessionOptions().AppendExecutionProvider_VitisAI();
     vaip_core::set_the_global_api(
         vaip_core::Plugin::invoke<vaip_core::OrtApiForVaip*>(

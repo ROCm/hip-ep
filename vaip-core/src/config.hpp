@@ -19,9 +19,8 @@
 #endif
 
 namespace vaip_core {
-std::unique_ptr<TargetProto> update_config_by_target(ConfigProto& proto,
-                                                     const MepConfigTable* mep,
-                                                     const Model& Model);
+void update_config_by_target(ConfigProto& proto, const MepConfigTable* mep,
+                             TargetProto* target_proto_in_pass_context);
 class Config {
 public:
   VAIP_DLL_SPEC

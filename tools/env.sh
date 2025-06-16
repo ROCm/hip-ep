@@ -3,21 +3,21 @@
 ## Licensed under the MIT License.
 ##
 export C=$(dirname $(realpath --no-symlinks ${BASH_SOURCE[0]}) | sed 's?/c/?C:/?g')
+export CW=$(dirname $(realpath  ${BASH_SOURCE[0]}) | sed 's?/c/?C:/?g')
 export BUILD_TYPE=debug
-export W=$C/source
+export W=$CW/source
 export EN_VAIML=ON
 export WIN24_BUILD=ON
-export VAI_RT_WORKSPACE=$C/source
+export VAI_RT_WORKSPACE=$(realpath $CW/../..)
 export VAI_RT_BUILD_DIR=$C/build/${BUILD_TYPE}
-export VAI_RT_GENERATE_CMAKE_PRESET=ON
 export VAI_RT_PREFIX=$C/local/${BUILD_TYPE}
-export BUILD=$C/build/${BUILD_TYPE}
-export PREFIX=$C/local/${BUILD_TYPE}
+export VAI_RT_GENERATE_CMAKE_PRESET=ON
+export BUILD=$VAI_RT_BUILD_DIR
+export PREFIX=$VAI_RT_PREFIX
 mkdir -p $VAI_RT_PREFIX
 mkdir -p $VAI_RT_BUILD_DIR
 mkdir -p $VAI_RT_WORKSPACE
 cd $VAI_RT_WORKSPACE
-export PS1="\[\033]0;$TITLEPREFIX:$PWD\007\]\n\[\033[32m\]\u@\h [\$VAI_RT_PREFIX] \[\033[35m\]$MSYSTEM \[\033[33m\]\w\[\033[36m\] \[\033[0m\]\n$ "
 
 function vaip_banner() {
 
@@ -51,3 +51,12 @@ EOF
 }
 
 vaip_banner
+
+cat <<EOF >$C/env.txt
+VAI_RT_WORKSPACE=$VAI_RT_WORKSPACE
+VAI_RT_BUILD_DIR=$VAI_RT_BUILD_DIR
+VAI_RT_PREFIX=$VAI_RT_PREFIX
+W=$W
+BUILD=$BUILD
+PREFIX=$PREFIX
+EOF

@@ -119,15 +119,6 @@ add_target_pass(ConfigProto& proto,
   }
 }
 
-static std::string dump_all_targets(const ConfigProto& proto) {
-  std::string targets;
-  for (const TargetProto& target : proto.targets()) {
-    targets += std::string(target.name());
-    targets += std::string(";");
-  }
-  return targets;
-}
-
 static void update_target_compiler_atttr(ConfigProto& proto,
                                          const TargetAttrProto& opts) {
   // update:
@@ -272,96 +263,28 @@ static void update_graph_engine_qos_priority(ConfigProto& proto,
         std::to_string(qos_priority);
   }
 }
-static std::optional<std::string> discover_target(const ConfigProto& proto,
-                                                  const Model& model) {
-  typedef std::optional<std::string> (*discovery_function_t)(const ConfigProto&,
-                                                             const Model&);
-  auto all_plugin_functions =
-      vaip_core::Plugin::get_all_symbols("morphizen_target_discovery");
-  std::sort(
-      all_plugin_functions.begin(), all_plugin_functions.end(),
-      [](const std::pair<std::string, void*>& a,
-         const std::pair<std::string, void*>& b) { return a.first < b.first; });
-  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
-      << "discover_target: all_plugin_functions size: "
-      << all_plugin_functions.size();
-  for (auto& plugin : all_plugin_functions) {
-    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
-        << "discover_target: plugin name: " << plugin.first
-        << " model id:" << (void*)(&model) << " id: " << plugin.second;
-    auto target_discovery_func = (discovery_function_t)plugin.second;
-    auto target = target_discovery_func(proto, model);
-    if (target.has_value()) {
-      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
-          << "discover_target: plugin name: " << plugin.first
-          << " target: " << target.value();
-      return target;
-    } else {
-      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
-          << "discover_target: plugin name: " << plugin.first
-          << " cannot guess target, continue";
-    }
-  }
-  return std::nullopt;
-}
-std::unique_ptr<TargetProto> update_config_by_target(ConfigProto& proto,
-                                                     const MepConfigTable* mep,
-                                                     const Model& model) {
+
+void update_config_by_target(ConfigProto& proto,        //
+                             const MepConfigTable* mep, //
+                             TargetProto* target_proto_in_pass_context) {
   auto target = std::string();
   auto xclbin = std::string();
 
-  if (proto.provider_options().contains(
-          "xlnx_target")) { // for backward compatibility, to be removed
-    target = proto.provider_options().at("xlnx_target");
-  } else if (proto.provider_options().contains("target")) {
-    target = proto.provider_options().at("target");
-  } else if (mep != nullptr && !mep->target().empty()) {
-    target = mep->target();
-    if (mep->has_xclbin()) { // FIXME: to be removed
-      xclbin = mep->xclbin();
-    }
-  } else if (proto.targets().size()) { // VAIML flow still use old config which
-                                       // has only passes
-    auto maybe_target = discover_target(proto, model);
-    if (maybe_target.has_value()) {
-      target = maybe_target.value();
-    }
-  }
-  if (target.empty()) {
-    target = proto.target();
-  }
-  // Target priority
-  // 1. provider option
-  // 2. meptable
-  // 3. heuristic process or method:
-  // 4. default target in config file
-  auto target_it = proto.provider_options().find("target");
-  if (target_it != proto.provider_options().end()) {
-    target = target_it->second;
-  }
-  if (target.empty()) {
-    LOG_VERBOSE(1)
-        << "Target is empty, run all passes."; // old version, compatible
-    // TODO: now is it a fatal error? because passes in vaip_config.jsson are
-    // all available passes, it makes not much sense to run all passes.
-    return nullptr;
-  }
-  auto target_proto = get_target_proto(proto, target);
+  auto target_proto =
+      get_target_proto(proto, target_proto_in_pass_context->name());
   CHECK(target_proto != nullptr)
-      << "No valid target found: " << target
-      << "Valid targets are: " << dump_all_targets(proto);
+      << "No valid target found: " << target << " logical error";
   // update xclbin (mepcofig -> target)
-  if (!xclbin.empty()) {
-    target_proto->set_xclbin(xclbin);
+  if (mep != nullptr && mep->has_xclbin() && !mep->xclbin().empty()) {
+    target_proto->set_xclbin(mep->xclbin());
   }
-
   // update hw context sharing (mepconfig -> target)
   if (mep != nullptr && mep->has_share_hw_context()) {
     target_proto->set_share_hw_context(mep->share_hw_context());
   }
 
   if (mep != nullptr && mep->has_model_clone_threshold()) {
-    (*proto.mutable_provider_options())
+    (*target_proto->mutable_provider_options())
         ["XLNX_model_clone_external_data_threshold"] =
             std::to_string(mep->model_clone_threshold());
   }
@@ -399,7 +322,7 @@ std::unique_ptr<TargetProto> update_config_by_target(ConfigProto& proto,
   update_xclbin(proto, target_proto);
   update_hw_context_share(proto, target_proto);
   update_graph_engine_qos_priority(proto, target_proto);
-  return std::make_unique<TargetProto>(*target_proto);
+  *target_proto_in_pass_context = *target_proto;
 }
 
 void Config::merge_config_proto(ConfigProto& config_proto,

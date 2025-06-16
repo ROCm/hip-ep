@@ -1,0 +1,50 @@
+{
+    "passes": [
+        {
+            "name": "init",
+            "plugin": "vaip-pass_init"
+        },
+        {
+            "name": "fuse-rele-dq",
+            "plugin": "morphizen-level1-pass-relu-dq"
+        }
+    ],
+    "mepTable": [
+        {
+            "modelName": "PSA",
+            "md5sumOnDisk": "3f97582a85b8ae1be41127f326bbf9b2",
+            "md5sumInMemory": "d41d8cd98f00b204e9800998ecf8427e",
+            "target": "mep-target"
+        }
+    ],
+    "target": "relu-dq-target",
+    "targets": [
+        {
+            "name": "relu-dq-target",
+            "pass": [
+                "init",
+                "fuse-rele-dq"
+            ]
+        },
+        {
+            "name": "dummy-target",
+            "pass": [
+                "init",
+                "fuse-rele-dq"
+            ],
+            "provider_options": {
+                "dummy_provier_option_for_test": "bingo"
+            }
+        },
+        {
+            "name": "mep-target",
+            "pass": [
+                "init",
+                "fuse-rele-dq"
+            ],
+            "provider_options": {
+                "dummy_provier_option_for_test": "mep-target-hit-in-sampel-config"
+            }
+        }
+    ]
+}

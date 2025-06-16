@@ -7,6 +7,7 @@
 #include <fstream>
 #include <glog/logging.h>
 #include <google/protobuf/util/json_util.h>
+#include <stdexcept>
 
 #include "./binary/mem_binary.hpp"
 #include "./cache_dir.hpp"
@@ -23,6 +24,7 @@
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE, "0")
 DEF_ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE, "1")
+DEF_ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY, "0")
 DEF_ENV_PARAM(XLNX_ONNX_EP_VERBOSE, "0")
 #define LOG_VERBOSE(n)                                                         \
   LOG_IF(INFO, ENV_PARAM(XLNX_ONNX_EP_VERBOSE) >= n)                           \
@@ -1353,5 +1355,155 @@ void PassContextImp::update_config_proto_root_field() {
     context_proto.mutable_config()->set_max_spill_buffer_size(
         std::stoull(*max_spill_buffer_size));
   }
+}
+template <typename T>
+static std::optional<std::string>
+get_provider_option_internal(const std::string& name, const T& options) {
+  auto it = options.find(name);
+  if (it != options.end()) {
+    return it->second;
+  }
+  return std::nullopt;
+}
+
+std::unique_ptr<TargetProto>
+PassContextImp::find_target_proto(const std::string& target_name) {
+  auto& targets = context_proto.config().targets();
+  auto it = std::find_if(targets.begin(), targets.end(),
+                         [&target_name](const TargetProto& target) {
+                           return target.name() == target_name;
+                         });
+  if (it != targets.end()) {
+    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
+        << "Found target proto for target: " << target_name;
+    return std::make_unique<TargetProto>(*it);
+  }
+  return nullptr; // not found
+}
+
+std::string PassContextImp::get_valid_target_names() {
+  std::ostringstream valid_names;
+  int c = 0;
+  auto& targets = context_proto.config().targets();
+
+  for (const auto& target : targets) {
+    if (c++ > 0) {
+      valid_names << ", ";
+    }
+    valid_names << '"' << target.name() << '"';
+  }
+  return valid_names.str();
+}
+bool PassContextImp::try_initialize_target_proto(const std::string& target_name,
+                                                 bool thorow_if_not_found) {
+  target_proto_ = find_target_proto(target_name);
+  if (target_proto_ == nullptr) {
+    auto valid_target_names = get_valid_target_names();
+    if (thorow_if_not_found) {
+      LOG(ERROR) << "Target auto-discovery: target proto not found for "
+                    "target: "
+                 << target_name
+                 << ", valid target names: " << valid_target_names;
+      throw std::invalid_argument("not a valid target name, valid names:" +
+                                  valid_target_names);
+    } else {
+      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
+          << "Target auto-discovery: target proto not found for target: "
+          << target_name << ", valid target names: " << valid_target_names;
+    }
+  }
+  return target_proto_ != nullptr;
+}
+static std::optional<std::string> discover_target(const ConfigProto& proto,
+                                                  const Model& model) {
+  typedef std::optional<std::string> (*discovery_function_t)(const ConfigProto&,
+                                                             const Model&);
+  auto all_plugin_functions =
+      vaip_core::Plugin::get_all_symbols("morphizen_target_discovery");
+  std::sort(
+      all_plugin_functions.begin(), all_plugin_functions.end(),
+      [](const std::pair<std::string, void*>& a,
+         const std::pair<std::string, void*>& b) { return a.first < b.first; });
+  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
+      << "discover_target: all_plugin_functions size: "
+      << all_plugin_functions.size();
+  for (auto& plugin : all_plugin_functions) {
+    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
+        << "discover_target: plugin name: " << plugin.first
+        << " model id:" << (void*)(&model) << " id: " << plugin.second;
+    auto target_discovery_func = (discovery_function_t)plugin.second;
+    auto target = target_discovery_func(proto, model);
+    if (target.has_value()) {
+      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
+          << "discover_target: plugin name: " << plugin.first
+          << " target: " << target.value();
+      return target;
+    } else {
+      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
+          << "discover_target: plugin name: " << plugin.first
+          << " cannot guess target, continue";
+    }
+  }
+  return std::nullopt;
+}
+void PassContextImp::target_auto_discovery(const Model& model) {
+  auto target_specified_by_end_user = get_provider_option_internal(
+      kProviderOptionTarget, provider_option_origin_);
+  auto config_file = get_provider_option_internal(kProviderOptionConfigFile,
+                                                  provider_option_origin_);
+  do {
+    // 1. `provider_options["target"]` set explicitly by users
+    if (target_specified_by_end_user) {
+      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
+          << "Target auto-discovery: target proto specified by end user: "
+          << *target_specified_by_end_user;
+      if (try_initialize_target_proto(*target_specified_by_end_user, true)) {
+        break;
+      }
+    }
+    // 2. `provider_options["target"]` not set, but `config_file` is set.
+    // try to find target proto from config file.
+    if (mep_config_proto_) {
+      auto& target_name = mep_config_proto_->target();
+      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
+          << "Target auto-discovery: target proto specified by MEP table: "
+          << target_name << "; MEP table = " << mep_config_proto_->model_name();
+      if (try_initialize_target_proto(target_name, true)) {
+        if (mep_config_proto_->has_xclbin()) {
+          // FIXME: we need to find xclbin in a proper way.
+          target_proto_->set_xclbin(mep_config_proto_->xclbin());
+        }
+        break;
+      }
+    }
+    {
+      // 3. auto target discovery
+      //
+      // - when the build-in config file is used, the plugin must return
+      // a valid target name, otherwise it is a fatal error, because it
+      // means that the source code is not consistent with the built-in
+      // config file, and the built-in config file is regarded as the
+      // part source code.
+      auto discoveried_target_name =
+          discover_target(context_proto.config(), model);
+      if (discoveried_target_name.has_value()) {
+        if (try_initialize_target_proto(*discoveried_target_name, true)) {
+          LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
+              << "Target auto-discovery: target proto discovered: "
+              << *discoveried_target_name;
+          break;
+        }
+      }
+    }
+    { // 4. default target in config file
+      auto& target_name = context_proto.config().target();
+      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
+          << "Target auto-discovery: target proto specified by config file: "
+          << target_name;
+      if (try_initialize_target_proto(target_name, true)) {
+        break;
+      }
+    }
+  } while (0);
 }
 } // namespace vaip_core

@@ -231,6 +231,12 @@ private:
   void update_pass_context_from_context_json_in_cache();
   void create_tar_file_for_prebuild_cache(std::vector<char>&& buffer);
   void update_config_proto_root_field();
+  void target_auto_discovery(const Model& model);
+  std::unique_ptr<TargetProto>
+  find_target_proto(const std::string& target_name);
+  bool try_initialize_target_proto(const std::string& target_name,
+                                   bool thorow_if_not_found);
+  std::string get_valid_target_names();
 
 public:
   virtual std::filesystem::path get_model_path() const override final;

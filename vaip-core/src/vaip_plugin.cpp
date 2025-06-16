@@ -234,11 +234,18 @@ extern "C" void morphizen_register_static_plugin(const char* name,
 void StaticPluginRegister::sync_static_plugin_into_module(
     const char* module_name) {
   // this function try to sync with onnxruntime_vitisai_ep.dll
+  auto morphizen_register_static_plugin_func =
+      Plugin::get(module_name)
+          ->get_method<void, const char*, const char*, void*>(
+              "morphizen_register_static_plugin");
+  CHECK(morphizen_register_static_plugin_func)
+      << "cannot find morphizen_register_static_plugin in module: "
+      << module_name;
   auto& store = get_store();
   for (auto& x : store) {
     for (auto& y : x.second) {
-      Plugin::invoke<void>(module_name, "morphizen_register_static_plugin",
-                           x.first.c_str(), y.first.c_str(), y.second);
+      morphizen_register_static_plugin_func(x.first.c_str(), y.first.c_str(),
+                                            y.second);
     }
   }
 }
