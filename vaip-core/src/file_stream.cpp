@@ -86,7 +86,7 @@ std::streambuf::int_type FileBuf::overflow(int_type ch) {
       });
   auto r = std::fseek(file_, (long)put_pos_, SEEK_SET);
   CHECK(r == 0) << " conner case: fseek fail";
-  auto num_of_elements = end - pbase();
+  auto num_of_elements = static_cast<std::size_t>(end - pbase());
   auto num_of_element_written =
       std::fwrite(pbase(), sizeof(char_type), num_of_elements, file_);
   CHECK_EQ(num_of_element_written, num_of_elements) << " error writing.";
@@ -206,7 +206,7 @@ bool FileBuf::flush_buffer() {
   std::ptrdiff_t count = pptr() - pbase();
   if (count > 0) {
     std::size_t written = std::fwrite(pbase(), sizeof(char_type), count, file_);
-    CHECK_EQ(written, count);
+    CHECK_EQ(written, static_cast<std::size_t>(count));
     setp(put_buffer_.data(),
          put_buffer_.data() + put_buffer_.size() -
              1 /*overflow() needs one more ch to be written*/);
