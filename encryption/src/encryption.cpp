@@ -35,8 +35,8 @@ void aes_encryption(const vaip_core::IStreamReader& src,
   }
 
   const size_t READ_SIZE = 1024;
-  EVP_CIPHER_CTX* ctx;
-  if (!(ctx = EVP_CIPHER_CTX_new())) {
+  EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+  if (!ctx) {
     throw std::runtime_error("encryption creating context failed");
   }
 
@@ -90,8 +90,8 @@ void aes_decryption(const vaip_core::IStreamReader& src,
   }
 
   const size_t READ_SIZE = 1024;
-  EVP_CIPHER_CTX* ctx;
-  if (!(ctx = EVP_CIPHER_CTX_new())) {
+  EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+  if (!ctx) {
     throw std::runtime_error("decryption creating context failed");
   }
 
