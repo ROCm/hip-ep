@@ -22,6 +22,7 @@
 #  pragma warning(pop)
 #endif
 #include "morphizen/env_config.hpp"
+#include "morphizen/pass_context.hpp"
 #include "morphizen/util.hpp"
 #include "morphizen/weak.hpp"
 #include "morphizen/xclbin_file.hpp"
@@ -167,9 +168,10 @@ static void update_target_attr(ConfigProto& proto,
   }
 }
 
-static void update_xclbin(ConfigProto& proto, const TargetProto* target_proto) {
+static void update_xclbin(ConfigProto& proto, const TargetProto* target_proto,
+                          std::shared_ptr<PassContext> ctx) {
   std::string xclbin;
-  auto provider_option = proto.provider_options();
+  auto provider_option = ctx->get_all_provider_options();
   if (provider_option.find("xclbin") != provider_option.end()) {
     xclbin = provider_option.at("xclbin");
   } else if (target_proto->has_xclbin()) {
@@ -189,7 +191,7 @@ static void update_xclbin(ConfigProto& proto, const TargetProto* target_proto) {
   }
   // now the session option has the real xclbin
   // so, the custom op/pass can get the correct one
-  (*proto.mutable_provider_options())["xclbin"] = xclbin;
+  // (*proto.mutable_provider_options())["xclbin"] = xclbin;
   // only for Backward Compatibility ， will be deleted
   // Note : writing back the xclbin from session option to PassDpuParam is
   // generally not recommended, but this is a special case.
@@ -264,9 +266,9 @@ static void update_graph_engine_qos_priority(ConfigProto& proto,
   }
 }
 
-void update_config_by_target(ConfigProto& proto,        //
-                             const MepConfigTable* mep, //
-                             TargetProto* target_proto_in_pass_context) {
+void update_config_by_target(ConfigProto& proto, const MepConfigTable* mep,
+                             TargetProto* target_proto_in_pass_context,
+                             std::shared_ptr<PassContext> ctx) {
   auto target = std::string();
   auto xclbin = std::string();
 
@@ -319,7 +321,7 @@ void update_config_by_target(ConfigProto& proto,        //
   remove_pass(proto, pass_map);
   add_target_pass(proto, pass_map, target_proto);
   update_target_attr(proto, target_proto);
-  update_xclbin(proto, target_proto);
+  update_xclbin(proto, target_proto, ctx);
   update_hw_context_share(proto, target_proto);
   update_graph_engine_qos_priority(proto, target_proto);
   *target_proto_in_pass_context = *target_proto;
