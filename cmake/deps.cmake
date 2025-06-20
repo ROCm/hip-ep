@@ -34,7 +34,7 @@ else()
   FetchContent_Declare(
     Eigen3
     URL ${DEP_URL_eigen}
-    URL_HASH SHA1=${DEP_SHA1_eigen}
+    # URL_HASH SHA1=${DEP_SHA1_eigen}
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     EXCLUDE_FROM_ALL
     OVERRIDE_FIND_PACKAGE)

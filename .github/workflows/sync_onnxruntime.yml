@@ -38,19 +38,22 @@ jobs:
           repository: VitisAI/onnxruntime
           path: onnxruntime
           ref: morphizen-ci-test
+          fetch-depth: 0  # Fetch morphizen-ci-test branch with all history for rebase
+          show-progress: false
 
       - name: Sync github/onnxruntime
         run: |
           set -e
           cd onnxruntime
-          git fetch origin tag morphize-ci-patch-v1.0.0
           # fetch upstream main branch
           git fetch https://github.com/microsoft/onnxruntime.git main
-          echo "sync onnxruntime/morphizen-ci-test commit ID from $(git rev-parse HEAD) to $(git rev-parse FETCH_HEAD)"
-          git reset --hard FETCH_HEAD
-          git cherry-pick $(git rev-parse morphize-ci-patch-v1.0.0)
+          head_commit=$(git rev-parse HEAD)
+          echo "github/onnxruntime will upgrade to commit ID $(git rev-parse FETCH_HEAD)"
+          # all patches in morphizen-ci-test branch are already applied to main branch,
+          git rebase FETCH_HEAD
           git push origin HEAD:refs/heads/morphizen-ci-test --force
-          git ls-remote origin refs/heads/morphizen-ci-test
+          echo "sync onnxruntime/morphizen-ci-test commit ID from $head_commit to $(git ls-remote origin refs/heads/morphizen-ci-test)"
+
         shell: bash
 
       - name: build deps

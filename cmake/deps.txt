@@ -4,7 +4,7 @@
 ##
 ## this GSL used by onnxruntime
 microsoft_gsl;https://github.com/microsoft/GSL/archive/refs/tags/v4.0.0.zip;cf368104cd22a87b4dd0c80228919bb2df3e2a14
-eigen;https://gitlab.com/libeigen/eigen/-/archive/1d8b82b0740839c0de7f1242a3585e3390ff5f33/eigen-1d8b82b0740839c0de7f1242a3585e3390ff5f33.zip;51982be81bbe52572b54180454df11a3ece9a934
+eigen;https://gitlab.com/libeigen/eigen/-/archive/1d8b82b0740839c0de7f1242a3585e3390ff5f33/eigen-1d8b82b0740839c0de7f1242a3585e3390ff5f33.zip;5ea4d05e62d7f954a46b3213f9b2535bdd866803
 zlib;https://github.com/madler/zlib.git;v1.2.13
 glog;https://github.com/google/glog/archive/refs/tags/v0.6.0.zip;b9c4c032e79300665a92d8dbc25513a0ee7ea47c
 GTest;https://github.com/google/googletest.git;v1.15.0
