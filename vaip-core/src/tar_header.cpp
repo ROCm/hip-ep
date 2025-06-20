@@ -160,8 +160,8 @@ void TarHeader::construct_header() {
 }
 void TarHeader::now() {
   auto now = std::chrono::system_clock::now();
-  std::time_t now_sec = std::chrono::system_clock::to_time_t(now);
-  mtime_ = static_cast<unsigned long>(now_sec);
+  mtime_ =
+      static_cast<unsigned long>(std::chrono::system_clock::to_time_t(now));
 }
 void TarHeader::fill_name(HD_USTAR* header, const char* name, size_t n) {
   // NOTE: name is not null-terminated
