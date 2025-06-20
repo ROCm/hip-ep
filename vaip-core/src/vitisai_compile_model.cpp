@@ -1086,7 +1086,7 @@ compile_onnx_model_internal(
       if (enable_generic_custom_op) {
         // ovewrite default device for offline compilation flow.
         device = "GENERIC";
-        meta_def.set_fallback_cpu(true);
+        meta_def.set_fallback_cpu(false);
       }
       auto plugin_name = std::string("vaip_custom_op_") + device;
       ret.emplace_back(
