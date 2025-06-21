@@ -78,6 +78,32 @@ DEF_ENV_PARAM_2(XLNX_model_clone_external_data_threshold, "128", int64_t)
 DEF_ENV_PARAM_2(XLNX_model_clone_external_data_threshold, "17179869184",
                 int64_t)
 #endif
+namespace vaip_core {
+// this template is to be deprecated. this function is to be deprecated, please
+// use get_provier_option, only support XLNX_model_clone_external_data_threshold
+// for backward compatibility.
+template <>
+int64_t PassContext::get_provier_option_with_class<
+    ENV_PARAM_XLNX_model_clone_external_data_threshold>() const {
+  using env_name = ENV_PARAM_XLNX_model_clone_external_data_threshold;
+  const char* name = env_name::get_name();
+  const char* defvalue = env_name::get_default_value();
+  auto p = get_provider_option(std::string(name), std::string(defvalue));
+  using helper =
+      typename morphizen::env_config_helper<decltype(env_name::value)>;
+  return helper::from_string(p);
+} /*
+ void force_instantiate_get_provider_options_with_class () {
+   // This function is to force the instantiation of the
+   // get_provier_option_with_class function template.
+   // It is used to ensure that the function is instantiated
+   // when the header file is included.
+   auto p = PassContext::create();
+   auto _ = p->get_provier_option_with_class<
+       ENV_PARAM_XLNX_model_clone_external_data_threshold>();
+   (void)_;
+ }*/
+} // namespace vaip_core
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_VITIS_AI_EP) >= n)
 
 DEF_ENV_PARAM_2(XLNX_MD5_SIG_SKIP_OPS, "QuantizeLinear,DequantizeLinear",

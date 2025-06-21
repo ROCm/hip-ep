@@ -44,8 +44,6 @@ configure_file(
 
 add_library(${LIB_NAME} STATIC
   ${PROTO_SRCS} ${PROTO_HDRS}
-  ${CMAKE_CURRENT_SOURCE_DIR}/../vaip-core/src/getenv.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../vaip-core/src/getenv.c
   src/version_info.hpp
   ${CMAKE_CURRENT_BINARY_DIR}/src/version_info.cpp
   include/morphizen/vaip_plugin.hpp
@@ -195,7 +193,7 @@ target_include_directories(${LIB_NAME}
 )
 
 set(MorphiZen_DEPS protobuf::libprotobuf
-  glog::glog Eigen3::Eigen morphizen::encryption ZLIB::ZLIB Microsoft.GSL::GSL)
+  glog::glog Eigen3::Eigen morphizen::encryption ZLIB::ZLIB Microsoft.GSL::GSL morphizen-utils)
 target_link_libraries(${LIB_NAME} PUBLIC ${MorphiZen_DEPS})
 target_compile_definitions(${LIB_NAME}
   PRIVATE "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1"

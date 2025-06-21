@@ -22,7 +22,7 @@ MyCustomOp::MyCustomOp(std::shared_ptr<const PassContext> context,
 }
 MyCustomOp::~MyCustomOp() { MY_LOG(1) << "MyCustomOp dtor: "; }
 void MyCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const {
-  this->ComputeCpu(api, context);
+  // this->ComputeCpu(api, context);
 }
 } // namespace custom_op_generic
 } // namespace morphizen

@@ -21,6 +21,9 @@ list(APPEND CMAKE_MODULE_PATH
 include(binMetaData)
 precompile_version_rc(3rd-party/ryzenai_bin_metadata)
 
+# Add utility library first (other projects may depend on it)
+add_subdirectory(morphizen-utils)
+
 add_subdirectory (encryption)
 add_subdirectory (vaip-core)
 if(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC)
@@ -40,3 +43,4 @@ if(morphizen_ENABLE_UNIT_TEST AND morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC)
   enable_testing()
   add_subdirectory (unit-test)
 endif()
+add_subdirectory(ort-bridge)

@@ -197,6 +197,25 @@ else()
   find_package(Protobuf REQUIRED)
 endif()
 
+## find_package(onnx)
+set(ONNX_USE_MSVC_STATIC_RUNTIME ON CACHe BOOL "use static onnx")
+if(TARGET onnx::onnx)
+  get_target_property(TMP onnx::onnx INTERFACE_INCLUDE_DIRECTORIES)
+  message(STATUS "found onnx at ${TMP}")
+else()
+  message(STATUS "cannot find_package(onnx), fetch it from ${DEP_URL_onnx}")
+  FetchContent_Declare(
+    onnx
+    URL ${DEP_URL_onnx}
+    URL_HASH SHA1=${DEP_SHA1_onnx}
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    CMAKE_ARGS
+    EXCLUDE_FROM_ALL
+    OVERRIDE_FIND_PACKAGE)
+  find_package(onnx REQUIRED)
+endif()
+
+
 ## in order to build it, we need to run some python scripts to
 ## generate some source code.
 if(BUILD_PYTHON)

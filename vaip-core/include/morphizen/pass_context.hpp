@@ -12,9 +12,7 @@
 #include <gsl/span>
 #include <memory>
 #include <optional>
-namespace morphizen {
-template <typename T> struct env_config_helper;
-}
+
 namespace vaip_core {
 // The reason PassContext exists is that PassContext has a longer life cycle
 // than Pass. The Pass will be destoryed after model is compiled but some info
@@ -162,17 +160,12 @@ public:
    *
    * @tparam env_name The class name of the environment parameter.
    * @return The value of the provider option converted to the appropriate type.
+   * @note this function is to be deprecated, please use get_provier_option,
+   * only support XLNX_model_clone_external_data_threshold for backward
+   * compatibility.
    */
   template <typename env_name>
-  decltype(env_name::value) get_provier_option_with_class() const {
-    const char* name = env_name::get_name();
-    const char* defvalue = env_name::get_default_value();
-    auto p = get_provider_option(std::string(name), std::string(defvalue));
-    using helper =
-        typename morphizen::env_config_helper<decltype(env_name::value)>;
-    return helper::from_string(p);
-  }
-
+  decltype(env_name::value) get_provier_option_with_class() const;
   /**
    * Retrieves the value of a session configuration.
    *
