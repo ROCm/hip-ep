@@ -246,7 +246,18 @@ bool PassContextImp::cache_in_mem() const {
     if (cache_dir_set) {
       return false;
     }
-    return get_config_proto().enable_cache_file_io_in_mem();
+    // NOTE: Workaround fix for AIESW-5439
+    // TODO: this fix is only a placeholder and enable_cache_file_io_in_mem
+    // should
+    //       be handled with a general solution to override pass related default
+    //       values
+    auto enable_cache_file_io_in_mem =
+        this->get_provider_option("enable_cache_file_io_in_mem");
+    if (enable_cache_file_io_in_mem) {
+      return enable_cache_file_io_in_mem.value() == "1";
+    } else {
+      return get_config_proto().enable_cache_file_io_in_mem();
+    }
 #else
     return false;
 #endif
