@@ -70,6 +70,7 @@ set(morphizen_OUTPUT_NAME "onnxruntime_vitisai_ep" CACHE STRING "Output name of 
 
 ## this optio is used to trim vaip_config.json, we choose the original name for backward compatibility.
 option(TRIM_CONFIG "trim default vaip_config.json" "${TRIM_CONFIG_DEFAULT}")
+option(morphizen_ENABALE_ORT_BRIDGE "enable onnxruntime bridge" OFF)
 # print all options
 message(STATUS "MorphiZen OPTIONS:")
 message(STATUS "  morphizen_ONNXRUNTIME_VITISAI_EP_TARGET : ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET}")
@@ -82,3 +83,4 @@ message(STATUS "  VAIP_VERSEION_INFO_FILE : ${VAIP_VERSEION_INFO_FILE}")
 message(STATUS "  morphizen_OUTPUT_NAME : ${morphizen_OUTPUT_NAME}")
 message(STATUS "  TRIM_CONFIG : ${TRIM_CONFIG}")
 message(STATUS "  BUILD_PYTHON : ${BUILD_PYTHON}")
+message(STATUS "  morphizen_ENABALE_ORT_BRIDGE : ${morphizen_ENABALE_ORT_BRIDGE}")
