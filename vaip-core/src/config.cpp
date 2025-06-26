@@ -191,7 +191,7 @@ static void update_xclbin(ConfigProto& proto, const TargetProto* target_proto,
   }
   // now the session option has the real xclbin
   // so, the custom op/pass can get the correct one
-  // (*proto.mutable_provider_options())["xclbin"] = xclbin;
+  (*proto.mutable_provider_options())["xclbin"] = xclbin;
   // only for Backward Compatibility ， will be deleted
   // Note : writing back the xclbin from session option to PassDpuParam is
   // generally not recommended, but this is a special case.
