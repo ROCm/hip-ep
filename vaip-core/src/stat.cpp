@@ -133,12 +133,12 @@ static void write_shape_info(StatProto& proto, const Node& node) {
   }
 }
 
-static void collect_subgraph_stat(StatProto& proto,
-                                  const ContextProto& context) {
+static int collect_subgraph_stat(StatProto& proto,
+                                 const ContextProto& context) {
   std::map<std::string, int32_t> subgraph_count;
-  for (const auto& count : context.device_subgraph_count()) {
-    subgraph_count[count.first] = count.second;
-  }
+  // metaDef contains subgraphs acturally running on devices.
+  // For NPU, its backend device includes DPU, DOD, VAIML,
+  // others may regard as device VITIS_EP_CPU
   for (auto& meta_def : context.meta_def()) {
     auto device = meta_def.device();
     // concat and qdq custom ops, QDQUNSQUEEZE are internally running on cpu
@@ -155,31 +155,35 @@ static void collect_subgraph_stat(StatProto& proto,
       ++subgraph_count[device];
     }
   }
-
-  auto iter = subgraph_count.find("DPU");
-  int actuall_ipu_count = -1;
-  if (iter != subgraph_count.end()) {
-    actuall_ipu_count = iter->second;
-    subgraph_count.erase(iter);
+  // TODO: For DPU, get compiled subgraph count, update DPU count with compiled
+  // results
+  int32_t dpu_device_subg_cnt = 0;
+  auto dpu_device_count = subgraph_count.find("DPU");
+  if (dpu_device_count != subgraph_count.end()) {
+    dpu_device_subg_cnt = dpu_device_count->second;
+  }
+  if (context.device_subgraph_count_size()) {
+    int32_t dpu_subg_cnt = context.device_subgraph_count().begin()->second;
+    if (dpu_subg_cnt > dpu_device_subg_cnt) {
+      subgraph_count["DPU"] = dpu_subg_cnt;
+    }
   }
 
   for (auto iter2 : subgraph_count) {
     auto* subgraph_stat = proto.add_subgraph_stat();
-    if ("IPU" == iter2.first || "DOD" == iter2.first) {
-      subgraph_stat->set_device("NPU");
-    } else {
-      subgraph_stat->set_device(iter2.first);
-    }
+    subgraph_stat->set_device(iter2.first);
     subgraph_stat->set_count(iter2.second);
   }
-  if (actuall_ipu_count != -1) {
-    auto* subgraph_stat = proto.add_subgraph_stat();
-    subgraph_stat->set_device("Actually running on NPU");
-    subgraph_stat->set_count(actuall_ipu_count);
-  }
+
+  // TODO: none device info save to vitisai_ep_report.json for DPU only.
+  /*auto* subgraph_stat = proto.add_subgraph_stat();
+  subgraph_stat->set_device("Actually running on NPU");
+  subgraph_stat->set_count(dpu_device_subg_cnt);*/
+
+  return dpu_device_subg_cnt;
 }
 
-static void log_stat(const StatProto& proto) {
+static void log_stat(const StatProto& proto, int subgraph_count) {
   if (!ENV_PARAM(XLNX_ENABLE_SUMMARY_LOG)) {
     return;
   }
@@ -212,10 +216,15 @@ static void log_stat(const StatProto& proto) {
   if (!subgraph_proto.empty()) {
     std::cout << "[Vitis AI EP] No. of Subgraphs :";
     for (const auto& subgraph_stat : subgraph_proto) {
-      std::cout << std::setw(6) << subgraph_stat.device() << std::setw(6)
-                << subgraph_stat.count() << " ";
+      auto name = subgraph_stat.device();
+      if (name == "DPU" || name == "DOD") {
+        name = "NPU";
+      }
+      std::cout << std::setw(6) << name << std::setw(6) << subgraph_stat.count()
+                << " ";
     }
-    std::cout << std::endl;
+    std::cout << "Actually running on NPU " << std::setw(6) << subgraph_count
+              << std::endl;
   }
 }
 
@@ -262,8 +271,8 @@ void collect_stat(const onnxruntime::Graph& graph,
     update_device_stat(ALL_DEVICE_NAME, device_stat_map, domain_op);
     write_shape_info(proto, *node);
   }
-  collect_subgraph_stat(proto, context_proto);
+  int subg_cnt = collect_subgraph_stat(proto, context_proto);
   write_device_stat(proto, device_stat_map);
-  log_stat(proto);
+  log_stat(proto, subg_cnt);
 }
 } // namespace vaip_core
