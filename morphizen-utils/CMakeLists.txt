@@ -28,7 +28,7 @@ set(MORPHIZEN_UTILS_HEADERS
 )
 
 # Create the library
-add_library(morphizen-utils ${MORPHIZEN_UTILS_SOURCES} ${MORPHIZEN_UTILS_HEADERS})
+add_library(morphizen-utils STATIC ${MORPHIZEN_UTILS_SOURCES} ${MORPHIZEN_UTILS_HEADERS})
 
 # Set target properties
 set_target_properties(morphizen-utils PROPERTIES
