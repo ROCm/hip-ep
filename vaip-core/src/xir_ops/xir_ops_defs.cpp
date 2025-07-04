@@ -143,6 +143,7 @@ public:
     AddOp("com.xilinx", XilinxCustomOp::create("RowWiseConcat"));
     AddOp("com.xilinx", XilinxCustomOp::create("QMatMul_QRopeConst"));
     AddOp("com.xilinx", XilinxCustomOp::create("QMatMul_QRopeInput"));
+    AddOp("com.xilinx", XilinxCustomOp::create("Qblresize"));
     return 0;
   }
 };
