@@ -137,7 +137,7 @@ static int collect_subgraph_stat(StatProto& proto,
                                  const ContextProto& context) {
   std::map<std::string, int32_t> subgraph_count;
   // metaDef contains subgraphs acturally running on devices.
-  // For NPU, its backend device includes DPU, DOD, VAIML,
+  // For NPU, its backend device includes DPU, DOD, VAIML, WAIC
   // others may regard as device VITIS_EP_CPU
   for (auto& meta_def : context.meta_def()) {
     auto device = meta_def.device();
@@ -157,33 +157,34 @@ static int collect_subgraph_stat(StatProto& proto,
   }
   // TODO: For DPU, get compiled subgraph count, update DPU count with compiled
   // results
+  int32_t dpu_subg_cnt = 0;
   int32_t dpu_device_subg_cnt = 0;
   auto dpu_device_count = subgraph_count.find("DPU");
   if (dpu_device_count != subgraph_count.end()) {
     dpu_device_subg_cnt = dpu_device_count->second;
   }
   if (context.device_subgraph_count_size()) {
-    int32_t dpu_subg_cnt = context.device_subgraph_count().begin()->second;
+    dpu_subg_cnt = context.device_subgraph_count().begin()->second;
     if (dpu_subg_cnt > dpu_device_subg_cnt) {
       subgraph_count["DPU"] = dpu_subg_cnt;
     }
   }
+  int32_t failed_dpu_subg_cnt = dpu_subg_cnt - dpu_device_subg_cnt;
 
   for (auto iter2 : subgraph_count) {
     auto* subgraph_stat = proto.add_subgraph_stat();
     subgraph_stat->set_device(iter2.first);
     subgraph_stat->set_count(iter2.second);
   }
-
   // TODO: none device info save to vitisai_ep_report.json for DPU only.
   /*auto* subgraph_stat = proto.add_subgraph_stat();
   subgraph_stat->set_device("Actually running on NPU");
   subgraph_stat->set_count(dpu_device_subg_cnt);*/
 
-  return dpu_device_subg_cnt;
+  return failed_dpu_subg_cnt;
 }
 
-static void log_stat(const StatProto& proto, int subgraph_count) {
+static void log_stat(const StatProto& proto, int dpu_failed_cnt) {
   if (!ENV_PARAM(XLNX_ENABLE_SUMMARY_LOG)) {
     return;
   }
@@ -213,18 +214,20 @@ static void log_stat(const StatProto& proto, int subgraph_count) {
   std::cout << std::endl;
 
   const auto& subgraph_proto = proto.subgraph_stat();
+  int32_t actually_on_npu = 0;
   if (!subgraph_proto.empty()) {
     std::cout << "[Vitis AI EP] No. of Subgraphs :";
     for (const auto& subgraph_stat : subgraph_proto) {
       auto name = subgraph_stat.device();
-      if (name == "DPU" || name == "DOD") {
+      if (name == "DPU" || name == "DOD" || name == "WAIC") {
         name = "NPU";
+        actually_on_npu += subgraph_stat.count();
       }
       std::cout << std::setw(6) << name << std::setw(6) << subgraph_stat.count()
                 << " ";
     }
-    std::cout << "Actually running on NPU " << std::setw(6) << subgraph_count
-              << std::endl;
+    std::cout << "Actually running on NPU " << std::setw(6)
+              << (actually_on_npu - dpu_failed_cnt) << std::endl;
   }
 }
 
@@ -250,7 +253,7 @@ void collect_stat(const onnxruntime::Graph& graph,
     auto op_type = node_op_type(*node);
     auto domain = node_op_domain(*node);
     auto device = get_device(node_to_device_map, output[0]);
-    if ("DPU" == device || "DOD" == device) {
+    if ("DPU" == device || "DOD" == device || "WAIC" == device) {
       device = "NPU";
     }
     // concat and qdq custom ops, QDQUNSQUEEZE are internally running on cpu
