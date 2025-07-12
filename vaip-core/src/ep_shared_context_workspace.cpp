@@ -42,7 +42,9 @@ static store_t& the_store() {
 SharedContextContextWorkspace&
 SharedContextContextWorkspace::create_workspace_or_get(
     const std::filesystem::path& ep_context_binary_file) {
-  auto directory = ep_context_binary_file.parent_path();
+  auto directory = ep_context_binary_file.has_parent_path()
+                       ? ep_context_binary_file.parent_path()
+                       : std::filesystem::u8path(".");
   auto filename = ep_context_binary_file.filename().u8string();
   auto& store = the_store();
   auto it = store.find(directory);
@@ -74,7 +76,10 @@ void SharedContextContextWorkspace::close_workspace() {
   MY_LOG(1) << "Closing workspace for EP context binary file: "
             << ep_context_binary_file_;
   auto& store = the_store();
-  auto directory = ep_context_binary_file_.parent_path();
+  auto directory = ep_context_binary_file_.has_parent_path()
+                       ? ep_context_binary_file_.parent_path()
+                       : std::filesystem::u8path(".");
+
   auto it = store.find(directory);
   if (it != store.end()) {
     store.erase(it);
