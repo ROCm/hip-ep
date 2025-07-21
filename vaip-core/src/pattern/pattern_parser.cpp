@@ -118,12 +118,12 @@ Parser<std::unique_ptr<Pattern>> Parser<T>::parse_pattern() {
   }
   return fail<std::unique_ptr<Pattern>>();
 }
-
+/*
 VAIP_DLL_SPEC std::unique_ptr<Pattern>
 Pattern::parse(const std::string& pattern) {
   auto builder = PatternBuilder();
   auto parser = Parser<char>(builder, pattern, 0u, ' ');
   auto root_pat = parser.parse_pattern();
   return std::move(root_pat.result_.value());
-}
+}*/
 } // namespace vaip_core

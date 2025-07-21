@@ -27,6 +27,8 @@ target_include_directories(${LIB_NAME}
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
+target_link_libraries(${LIB_NAME} PUBLIC vaip_io)
+
 if(TARGET OpenSSL::SSL)
   target_compile_definitions(${LIB_NAME} PUBLIC -DWITH_OPENSSL)
   target_compile_options(${LIB_NAME} PRIVATE ${MORPHIZEN_COMPILER_OPTIONS})

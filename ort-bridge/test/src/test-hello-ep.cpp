@@ -10,7 +10,12 @@
 
 struct HelloEpTest : public ::testing::Test {
   void SetUp() override {
-    registration_name = "a_sample_ep";
+    // we must use the reserved name "VitisAIExecutionProvider" to register the
+    // EP library, otherwise the EP will be regarded as a non-cpu EP by the ONNX
+    // Runtime, and must implement a kernel for the "MemcopyFromHost" node.
+    // see `ProviderIsCpuBased` and `MemcpyTransformer::ApplyImpl` for more
+    // details.
+    registration_name = "VitisAIExecutionProvider";
     ort_env =
         std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "HelloEp.Test0");
     auto status = Ort::GetApi().RegisterExecutionProviderLibrary(
@@ -54,6 +59,7 @@ TEST_F(HelloEpTest, CreateSession) {
   ASSERT_TRUE(!selected_devices.empty())
       << "No devices found for EP: " << registration_name;
   Ort::KeyValuePairs ep_options;
+  session_options.AddConfigEntry("ep.context_enable", "1");
   session_options.AppendExecutionProvider_V2(*ort_env, selected_devices,
                                              ep_options);
   LOG(INFO) << "Creating session with EP: model_path=" << RESNET_50_PATH;

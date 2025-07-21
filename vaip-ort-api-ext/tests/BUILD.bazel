@@ -1,0 +1,12 @@
+cc_binary(
+    name = "test_onnxruntime",
+    srcs = ["test_onnxruntime.cpp"],
+    deps = [
+        "@onnxruntime//:onnxruntime_headers",
+    ],
+    copts = select({
+        "@bazel_tools//src/conditions:windows": ["/std:c++17"],
+        "//conditions:default": ["-std=c++17"],
+    }),
+    visibility = ["//visibility:public"],
+)

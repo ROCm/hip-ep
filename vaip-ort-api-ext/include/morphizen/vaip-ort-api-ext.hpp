@@ -1,0 +1,67 @@
+/*
+ * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+#pragma once
+#ifndef ORT_API_MANUAL_INIT
+#  define ORT_API_MANUAL_INIT 1
+#endif
+#ifdef __GNUC__
+#  pragma GCC diagnostic ignored "-Wpedantic"
+#  pragma GCC diagnostic ignored "-Wconversion"
+#  pragma GCC diagnostic ignored "-Wsign-compare"
+#  pragma GCC diagnostic ignored "-Wunused-variable"
+#  pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+#endif
+#include <core/session/onnxruntime_c_api.h>
+#include <core/session/onnxruntime_cxx_api.h>
+#include <core/session/onnxruntime_lite_custom_op.h>
+#undef ORT_API_MANUAL_INIT
+
+#include <vaip/vaip_ort_api.h>
+
+namespace morphizen {
+uint32_t get_vaip_version_major();
+uint32_t get_vaip_version_minor();
+uint32_t get_vaip_version_patch();
+
+struct VaipOrtApiExt : public vaip_core::OrtApiForVaip {
+  vaip_core::TensorProto* (*tensor_proto_new_with_external_data)(
+      const std::string& name,           //
+      const std::vector<int64_t>& shape, //
+      int element_type,                  //
+      const std::string& location_file,  //
+      size_t location_size,              //
+      size_t location_offset             //
+  );
+  vaip_core::TensorProto* (*tensor_proto_new_raw_data)(
+      const std::string& name,           //
+      const std::vector<int64_t>& shape, //
+      int element_type,                  //
+      const void* data,                  //
+      size_t size);
+};
+
+/**
+ * @brief Create and initialize the VAIP ORT API
+ * @return an opaque pointer which restore api.
+ */
+std::shared_ptr<void> setup_global_vaip_ort_api(const char* backend_ir);
+
+const vaip_core::OrtApiForVaip*
+get_global_vaip_ort_api(const char* ir_backend_name);
+
+const vaip_core::OrtApiForVaip* get_the_global_api_unsafe();
+const vaip_core::OrtApiForVaip* get_global_vaip_ort_api();
+
+void set_the_global_api(vaip_core::OrtApiForVaip* api);
+const vaip_core::OrtApiForVaip* api();
+
+} // namespace morphizen
+
+#define VAIP_ORT_API_EXT(name)                                                 \
+  (static_cast<const ::morphizen::VaipOrtApiExt*>(::vaip_core::api())->name != \
+           nullptr                                                             \
+       ? static_cast<const ::morphizen::VaipOrtApiExt*>(::vaip_core::api())    \
+             ->name                                                            \
+       : (assert(false && #name " is not set"), nullptr))

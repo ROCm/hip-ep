@@ -1,0 +1,82 @@
+/*
+ * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+#pragma once
+
+#include <glog/logging.h>
+#include <gtest/gtest.h>
+#include <map>
+#include <memory>
+#include <morphizen/vaip.hpp>
+#include <string>
+#include <vaip/vaip_ort_api.h>
+
+namespace morphizen {
+// defined in onnx-ir-imp/src/vaip-ort-api.cpp
+const vaip_core::OrtApiForVaip*
+get_global_vaip_ort_api(const char* ir_backend_name);
+
+namespace test {
+
+/**
+ * @brief Create a test coverage wrapper for OrtApiForVaip
+ *
+ * This function creates a wrapper implementation that logs API calls
+ * and delegates to the original API for test coverage purposes.
+ *
+ * @param original_api The original OrtApiForVaip instance to wrap
+ * @return OrtApiForVaip* Wrapped API instance for testing
+ */
+vaip_core::OrtApiForVaip*
+get_vaip_ort_api_for_coverage_test(vaip_core::OrtApiForVaip* original_api);
+
+/**
+ * @brief Delete the test coverage wrapper
+ *
+ * @param wrapped_api The wrapped API instance to delete
+ */
+void delete_vaip_ort_api_coverage_test(vaip_core::OrtApiForVaip* wrapped_api);
+
+/**
+ * @brief Get current API call statistics
+ *
+ * @return std::map<std::string, size_t> Map of API function names to call
+ * counts
+ */
+std::map<std::string, size_t> get_vaip_ort_api_call_statistics();
+
+/**
+ * @brief Reset API call statistics
+ */
+void reset_vaip_ort_api_call_statistics();
+
+class TestCoverageWrapperTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    // Enable verbose logging for API calls
+    FLAGS_v = 3;
+
+    // Get the original API
+    original_api_ = const_cast<vaip_core::OrtApiForVaip*>(
+        morphizen::get_global_vaip_ort_api("onnx-ir-imp"));
+
+    // Create the coverage wrapper
+    wrapped_api_ = get_vaip_ort_api_for_coverage_test(original_api_);
+    ASSERT_NE(wrapped_api_, nullptr);
+    vaip_core::set_the_global_api(wrapped_api_);
+  }
+
+  void TearDown() override {
+    // Clean up the wrapper and print statistics
+    if (wrapped_api_) {
+      delete_vaip_ort_api_coverage_test(wrapped_api_);
+      wrapped_api_ = nullptr;
+    }
+  }
+
+  vaip_core::OrtApiForVaip* original_api_ = nullptr;
+  vaip_core::OrtApiForVaip* wrapped_api_ = nullptr;
+};
+} // namespace test
+} // namespace morphizen

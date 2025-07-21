@@ -11,9 +11,9 @@
 #  error "must enable c++17"
 #endif
 
+#include <morphizen/vaip-ort-api-ext.hpp>
 #include <vaip/custom_op.h>
 #include <vaip/export.h>
-#include <vaip/vaip_ort_api.h>
 /// header file used by ort VITISAI execution providers.
 
 using EventInfo = std::tuple<std::string, // name

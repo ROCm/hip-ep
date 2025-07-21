@@ -144,6 +144,8 @@ public:
     AddOp("com.xilinx", XilinxCustomOp::create("QMatMul_QRopeConst"));
     AddOp("com.xilinx", XilinxCustomOp::create("QMatMul_QRopeInput"));
     AddOp("com.xilinx", XilinxCustomOp::create("Qblresize"));
+    // for unittest
+    AddOp("com.xilinx", XilinxCustomOp::create("QRelu"));
     return 0;
   }
 };

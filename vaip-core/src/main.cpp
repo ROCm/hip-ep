@@ -17,6 +17,7 @@ static struct {
   void* symbol;
 } table[] = {{"deinitialize_onnxruntime_vitisai_ep",
               (void*)deinitialize_onnxruntime_vitisai_ep},
+             {"vaip_get_version", (void*)vaip_get_version},
              {"vaip_core::Pattern::enable_trace",
               (void*)vaip_core::Pattern::enable_trace}};
 

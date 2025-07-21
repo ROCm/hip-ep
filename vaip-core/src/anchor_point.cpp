@@ -473,7 +473,8 @@ void AnchorPoint::insert_into_context(IPass& pass) const {
   auto origin_nodes = context.context_proto.mutable_origin_nodes();
   const auto& name_with_suffix = this->get_proto().name();
   auto insert_it = origin_nodes->insert(
-      google::protobuf::MapPair{name_with_suffix, this->get_proto()});
+      google::protobuf::MapPair<std::string, AnchorPointProto>{
+          name_with_suffix, this->get_proto()});
   CHECK(insert_it.second)
       << "duplicated node arg name: " << name_with_suffix
       << "original anchor point:\n"

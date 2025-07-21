@@ -1,0 +1,131 @@
+/*
+ * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
+//  ERROR macro is defined. Define GLOG_NO_ABBREVIATED_SEVERITIES
+//  before including logging.h. See the document for
+//  detail.
+#ifndef GLOG_NO_ABBREVIATED_SEVERITIES
+#  define GLOG_NO_ABBREVIATED_SEVERITIES
+#endif
+// disable all warnings in this file on Windows
+#if defined(_WIN32)
+#  pragma warning(push, 0)
+#endif
+#include <glog/logging.h>
+#if defined(_WIN32)
+#  pragma warning(pop)
+#endif
+//
+#include "morphizen/vaip-ort-api-ext.hpp"
+//
+#include "morphizen-utils/vaip_plugin.hpp"
+
+namespace morphizen {
+
+unsigned int get_vaip_version_major() {
+#ifdef VAIP_ORT_API_MAJOR
+  return VAIP_ORT_API_MAJOR;
+#else
+  return 1;
+#endif
+}
+
+unsigned int get_vaip_version_minor() {
+#ifdef VAIP_ORT_API_MINOR
+  return VAIP_ORT_API_MINOR;
+#else
+  return 0;
+#endif
+}
+
+unsigned int get_vaip_version_patch() {
+#ifdef VAIP_ORT_API_PATCH
+  return VAIP_ORT_API_PATCH;
+#else
+  return 0;
+#endif
+}
+using OrtApiForVaip = vaip_core::OrtApiForVaip;
+static OrtApiForVaip* the_global_api = nullptr;
+
+const OrtApiForVaip& __api() {
+  DCHECK(the_global_api != nullptr)
+      << "please set_the_global_api() before invoking this function";
+  return *the_global_api;
+}
+
+VAIP_DLL_SPEC const OrtApiForVaip* api() { return &__api(); }
+
+VAIP_DLL_SPEC void set_the_global_api(OrtApiForVaip* api) {
+  if (the_global_api == api) {
+    // python reset the api. If the api is the same, don't shift the address.
+    return;
+  }
+  uint32_t onnx_major_version = 1;
+  const char* magic = "VAIP";
+  bool cmp =
+      std::strncmp(reinterpret_cast<char*>(&api->magic), magic, strlen(magic));
+  if (cmp == 0) {
+    onnx_major_version = api->major;
+  } else {
+    // new vaip with old onnx, shift by version field
+    uint64_t addr = reinterpret_cast<uint64_t>(&(api));
+    uint64_t old_addr = reinterpret_cast<uint64_t>(&(api->host_));
+    uint64_t diff = old_addr - addr;
+    api = reinterpret_cast<OrtApiForVaip*>(addr - diff);
+  }
+  if (onnx_major_version != get_vaip_version_major()) {
+    LOG(FATAL) << "version is not compatible: onnxruntime api version is: "
+               << onnx_major_version
+               << ", but vaip version is: " << get_vaip_version_major();
+  }
+  the_global_api = api;
+  Ort::Global<void>::api_ = api->ort_api_;
+  typedef void* void_ptr_t;
+  auto p = (void_ptr_t*)(&(api->host_)); // first api addr
+  size_t api_size =
+      reinterpret_cast<size_t>(api + 1) - reinterpret_cast<size_t>(p);
+  for (auto i = 0u; i < api_size / sizeof(void_ptr_t); ++i) {
+    // coverity[ptr_arith]
+    if (p[i] == nullptr) {
+      LOG(FATAL) << "the_global_api[" << i << "] is not set";
+    }
+  }
+}
+const vaip_core::OrtApiForVaip*
+get_global_vaip_ort_api(const char* ir_backend_name) {
+  auto plugin = vaip_core::Plugin::get(ir_backend_name);
+  CHECK(plugin != nullptr) << "Failed to get plugin for ir_backend_name: "
+                           << ir_backend_name;
+  auto method =
+      plugin->get_method<const vaip_core::OrtApiForVaip*>("vaip_ort_api_imp");
+  CHECK(method != nullptr)
+      << "Failed to get method 'vaip_ort_api_imp' from plugin: "
+      << ir_backend_name;
+  auto api = method();
+  CHECK(api != nullptr) << "Failed to get vaip_ort_api from plugin: "
+                        << ir_backend_name;
+  return api;
+}
+
+std::shared_ptr<void> setup_global_vaip_ort_api(const char* ir_backend_name) {
+  auto old_global_api = the_global_api;
+  auto deferred_recover_the_global_api =
+      std::shared_ptr<void>((void*)old_global_api, [](void* old_global_api) {
+        if (old_global_api != nullptr) {
+          set_the_global_api(
+              static_cast<vaip_core::OrtApiForVaip*>(old_global_api));
+        }
+      });
+  auto new_global_api = get_global_vaip_ort_api(ir_backend_name);
+  set_the_global_api(const_cast<vaip_core::OrtApiForVaip*>(new_global_api));
+  return deferred_recover_the_global_api;
+}
+
+const vaip_core::OrtApiForVaip* get_the_global_api_unsafe() {
+  return the_global_api;
+}
+
+} // namespace morphizen

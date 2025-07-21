@@ -23,6 +23,9 @@
 namespace gtest_example {
 TEST(GTest, hello) {
   LOG(INFO) << "CMAKE_CURRENT_BINARY_PATH=" << CMAKE_CURRENT_BINARY_PATH;
+  // print current test name
+  LOG(INFO) << "Test name: "
+            << ::testing::UnitTest::GetInstance()->current_test_info()->name();
   LOG(INFO) << "Hello GTest";
 }
 } // namespace gtest_example

@@ -1,0 +1,99 @@
+# Bazel configuration for MorphiZen
+#
+# Note: Some packages are temporarily excluded from builds:
+# - onnx-ir-imp: BUILD.bazel.disabled (glob pattern issues)
+# See doc/excluded-packages.md for details.
+
+# Import platform-specific configs if they exist
+try-import %workspace%/.bazelrc.local
+
+
+startup --host_jvm_args="-Djavax.net.ssl.trustStore=none" --host_jvm_args="-Djavax.net.ssl.trustStorePassword=none"
+
+# Cache configuration - platform specific
+build:windows --disk_cache=C:/temp/bazel-cache
+build:linux --disk_cache=/tmp/bazel-cache
+build:macos --disk_cache=/tmp/bazel-cache
+
+# Disable workspace symlinks (bazel-morphizen, bazel-bin, etc.) to keep workspace clean
+# no it  does not work on Windows, update .gignore instead
+# build:windows --symlink_prefix=C:/temp/bazel-symlinks
+# Output root - defaults to Windows, override in .bazelrc.local for Linux/macOS
+startup --output_user_root=C:/temp/bazel-user-root
+
+# C++ standard and compilation flags
+build:windows --cxxopt=/std:c++17
+build:windows --host_cxxopt=/std:c++17
+build:linux --cxxopt=-std=c++17
+build:linux --host_cxxopt=-std=c++17
+build:macos --cxxopt=-std=c++17
+build:macos --host_cxxopt=-std=c++17
+
+# Additional C++17 enforcement
+build --cxxopt=/std:c++17
+build --host_cxxopt=/std:c++17
+
+# Clang-cl configuration for Windows
+build:clang-cl --extra_toolchains=@llvm_toolchain//:all
+build:clang-cl --cxxopt=/std:c++17
+build:clang-cl --host_cxxopt=/std:c++17
+build:clang-cl --copt=-DWIN32_LEAN_AND_MEAN
+build:clang-cl --copt=-DNOMINMAX
+build:clang-cl --host_copt=-DWIN32_LEAN_AND_MEAN
+build:clang-cl --host_copt=-DNOMINMAX
+
+# Use clang-cl by default on Windows
+# build:windows --config=clang-cl  # Commented out to avoid double expansion when using --config=clang-cl explicitly
+
+# Enable bzlmod
+common --enable_bzlmod
+
+# Platform-specific configurations
+build:windows --copt=-DWIN32_LEAN_AND_MEAN
+build:windows --host_copt=-DWIN32_LEAN_AND_MEAN
+build:windows --copt=-DNOMINMAX
+build:windows --host_copt=-DNOMINMAX
+build:linux --copt=-D_GNU_SOURCE
+build:linux --host_copt=-D_GNU_SOURCE
+
+build:macos --copt=-D_DARWIN_C_SOURCE
+build:macos --host_copt=-D_DARWIN_C_SOURCE
+
+# Debug configuration
+build:debug --compilation_mode=dbg
+build:debug --strip=never
+
+# Release configuration
+build:release --compilation_mode=opt
+build:release --strip=always
+
+# Clang-cl specific debug configuration
+build:clang-cl-debug --config=clang-cl
+build:clang-cl-debug --compilation_mode=dbg
+build:clang-cl-debug --copt=-gline-tables-only
+build:clang-cl-debug --copt=-fstandalone-debug
+
+# Clang-cl specific release configuration
+build:clang-cl-release --config=clang-cl
+build:clang-cl-release --compilation_mode=opt
+build:clang-cl-release --copt=-O2
+build:clang-cl-release --linkopt=-OPT:REF
+build:clang-cl-release --linkopt=-OPT:ICF
+
+# Add ONNX namespace definition (all platforms)
+build --copt=-DONNX_NAMESPACE=morphizen_onnx
+build --host_copt=-DONNX_NAMESPACE=morphizen_onnx
+
+# Allow protobuf to work with MSVC (required for clang-cl builds)
+build --define=protobuf_allow_msvc=true
+
+# Auto-detect platform and apply appropriate config
+# Usage:
+#   Windows: bazel build --config=windows <target>
+#   Linux:   bazel build --config=linux <target>
+#   macOS:   bazel build --config=macos <target>
+#
+# Or create .bazelrc.local with:
+#   build --config=linux   # for Linux auto-config
+#   build --config=macos   # for macOS auto-config
+#   startup --output_user_root=/tmp/bazel-user-root  # for Unix systems

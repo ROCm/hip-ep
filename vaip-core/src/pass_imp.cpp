@@ -292,12 +292,12 @@ const std::filesystem::path& Pass::get_log_path() const {
 
 void Pass::add_subgraph_device_count(const std::string& device, int count) {
   context_->context_proto.mutable_device_subgraph_count()->insert(
-      google::protobuf::MapPair{device, count});
+      google::protobuf::MapPair<std::string, int>{device, count});
 }
 
 void Pass::set_fix_info(const char* name, int fix_pos) {
   context_->context_proto.mutable_fix_info()->insert(
-      google::protobuf::MapPair{std::string(name), fix_pos});
+      google::protobuf::MapPair<std::string, int>{std::string(name), fix_pos});
 }
 
 int Pass::get_fix_info(const char* name) const {
@@ -339,7 +339,8 @@ void Pass::create_const(const char* name, gsl::span<const char> data,
   const_data.mutable_shape()->Assign(shape.begin(), shape.end());
   const_data.set_type(type);
   context_->context_proto.mutable_const_data_info()->insert(
-      google::protobuf::MapPair{std::string(name), const_data});
+      google::protobuf::MapPair<std::string, ConstDataInfo>{std::string(name),
+                                                            const_data});
 }
 
 void Pass::create_empty_const(const char* name, size_t size,
@@ -352,7 +353,8 @@ void Pass::create_empty_const(const char* name, size_t size,
   const_data.set_type(type);
   context_->const_data_.resize(context_->const_data_.size() + size);
   context_->context_proto.mutable_const_data_info()->insert(
-      google::protobuf::MapPair{std::string(name), const_data});
+      google::protobuf::MapPair<std::string, ConstDataInfo>{std::string(name),
+                                                            const_data});
 }
 
 void Pass::create_lazy_const(const char* name, size_t size,
@@ -369,7 +371,8 @@ void Pass::create_const_alias(const char* alias_name, const char* name) {
   CHECK(it != context_->context_proto.const_data_info().end())
       << "cannot find const info " << name;
   context_->context_proto.mutable_const_data_info()->insert(
-      google::protobuf::MapPair{std::string(alias_name), it->second});
+      google::protobuf::MapPair<std::string, ConstDataInfo>{
+          std::string(alias_name), it->second});
   auto it_lazy = context_->const_lazy_.find(name);
   if (it_lazy != context_->const_lazy_.end()) {
     context_->const_lazy_[alias_name] = it_lazy->second;

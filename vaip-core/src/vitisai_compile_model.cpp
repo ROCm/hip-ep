@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <glog/logging.h>
 
-#include "hash-library/md5.h"
+#include <hash-library/md5.h>
 #include "./cache_dir.hpp"
 #include "./config.hpp"
 #include "./file_lock.hpp"
@@ -727,30 +727,78 @@ static std::string get_nodes(PassContextImp& context) {
   return o.str();
 }
 #endif
+template <typename T> static std::string combine_outputs_name(T& collection) {
+  std::ostringstream oss;
+  auto sorted_names =
+      std::set<std::string>(collection.begin(), collection.end());
+  for (auto& name : sorted_names) {
+    oss << " " << name;
+  }
+  return oss.str();
+}
+static std::vector<std::optional<vaip_cxx::NodeArgConstRef>>
+convert_to_node_arg_const_ref(vaip_cxx::GraphRef g,
+                              const std::vector<std::string>& names) {
+  auto ret = std::vector<std::optional<vaip_cxx::NodeArgConstRef>>();
+  std::transform(
+      names.begin(), names.end(), std::back_inserter(ret),
+      [&g](
+          const std::string& name) -> std::optional<vaip_cxx::NodeArgConstRef> {
+        if (name.empty()) {
+          return std::nullopt;
+        }
+        // find node_arg by name frist, beacuse maybe an EPContext's output is
+        // the input to another EPContext node
+        auto node_arg = g.find_node_arg(name);
+        if (node_arg.has_value()) {
+          return node_arg;
+        }
+        return std::optional<vaip_cxx::NodeArgConstRef>(g.new_node_arg(
+            name, {}, onnx::TensorProto_DataType::TensorProto_DataType_FLOAT));
+      });
+  return ret;
+}
+
 static onnxruntime::Node*
-create_ep_context_node(vaip_core::ExecutionProviderConcrete* ep) {
+create_ep_context_node(vaip_core::ExecutionProviderConcrete* ep, int index) {
   CHECK(ep != nullptr);
-  CHECK(ep->get_fused_node() != nullptr);
   auto p_context = dynamic_cast<PassContextImp*>(ep->get_context().get());
   CHECK(p_context != nullptr);
   auto& context = *p_context;
+
+  if (ENV_PARAM(DEBUG_EP_CONTEXT) >= 2) {
+    LOG(INFO) << "create ep context node , index=" << index;
+    LOG(INFO) << "Input meta-defs: "
+              << vaip_core::combine_outputs_name(*ep->get_meta_def_inputs());
+    LOG(INFO) << "Output meta-defs: "
+              << vaip_core::combine_outputs_name(*ep->get_meta_def_outputs());
+  }
 
   if (!context.ep_context_model_) {
     context.ep_context_model_ =
         vaip_cxx::Model::create(context.model_path, {{"ai.onnx", 21}});
   }
   auto ep_context_graph = context.ep_context_model_->main_graph();
-  auto fused_node = vaip_cxx::NodeConstRef::from_node(ep_context_graph,
-                                                      *ep->get_fused_node());
   auto op_type = "EPContext";
   auto op_domain = "com.microsoft";
-  auto name = fused_node.name();
   auto description = "description";
-  auto input_args = fused_node.inputs();
-  auto output_args = fused_node.outputs();
+  auto input_args = convert_to_node_arg_const_ref(
+      vaip_cxx::GraphRef(ep_context_graph), *ep->get_meta_def_inputs());
+  auto output_args = convert_to_node_arg_const_ref(
+      vaip_cxx::GraphRef(ep_context_graph), *ep->get_meta_def_outputs());
+  // for new ABI EP, fused_node is nullptr
+  auto fused_node = ep->get_fused_node();
+  auto name = fused_node ? vaip_cxx::NodeConstRef::from_node(ep_context_graph,
+                                                             *fused_node)
+                               .name()
+                         : "" /* for new ABI EP, name is not used*/;
+  if (fused_node) {
+    // strictly speaking, it is probably not necessary if we assume
+    // that ORT would keep ep and fused_node in the same order.
+    index = (int)node_get_attr_int(*fused_node, "index");
+  }
   auto attrs = NodeAttributesBuilder();
-  auto index = node_get_attr_int(fused_node, "index");
-  attrs.add("index", index);
+  attrs.add("index", (int64_t)index);
   int64_t main_context = index == 0 ? 1 : 0;
   attrs.add("main_context", main_context);
   int64_t embed_mode =
@@ -825,13 +873,15 @@ extern "C" VAIP_DLL_SPEC int create_ep_context_nodes(
   auto measure_create_ep_context_nodes =
       context.measure("create_ep_context_nodes");
   ret.reserve(eps.size());
+  auto ep_index = 0;
   for (auto& ep_1 : eps) {
     ret.push_back(create_ep_context_node(
-        dynamic_cast<vaip_core::ExecutionProviderConcrete*>(ep_1.get())));
+        dynamic_cast<vaip_core::ExecutionProviderConcrete*>(ep_1.get()),
+        ep_index++));
   }
   *ret_value = vaip_core::DllSafe<std::vector<Node*>>(
       new std::vector<Node*>(std::move(ret)));
-  return 1;
+  return 0;
 }
 
 static std::vector<vaip_cxx::NodeConstRef>

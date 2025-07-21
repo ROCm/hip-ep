@@ -41,15 +41,14 @@ static const char* get_default_config() {
   }
   return nullptr;
 }
-static google::protobuf::util::Status
-JsonFileToMessage(const std::string& file_path,
-                  google::protobuf::Message* message) {
+
+static void JsonFileToMessage(const std::string& file_path,
+                              google::protobuf::Message* message) {
   std::ifstream input(file_path);
   if (!input.is_open()) {
     std::string error_message = "Failed to open file: " + file_path;
     MY_LOG(1) << error_message;
-    return google::protobuf::util::Status(
-        google::protobuf::util::StatusCode::kInvalidArgument, error_message);
+    throw std::runtime_error(error_message);
   }
 
   std::string json_content((std::istreambuf_iterator<char>(input)),
@@ -62,11 +61,10 @@ JsonFileToMessage(const std::string& file_path,
     std::string error_message =
         "Failed to parse JSON: " + std::string(status.message().data());
     MY_LOG(1) << error_message;
-    return google::protobuf::util::Status(
-        google::protobuf::util::StatusCode::kInvalidArgument, error_message);
+    throw std::runtime_error(error_message);
   }
 
-  return status; // Return the successful status
+  return; // Return the successful status
 }
 static void set_struct_value(google::protobuf::Struct& struct_value,
                              const std::string& key1, const std::string& key2,
@@ -87,13 +85,7 @@ get_protobuf_struct_from_config_file(const std::string& filename) {
   std::ifstream f(filename);
   // parse the json file into Struct message
   auto config = std::make_unique<google::protobuf::Struct>();
-  auto status = JsonFileToMessage(filename, config.get());
-  if (!status.ok()) {
-    std::string err_msg =
-        std::string{"failed to parse config file: "} + filename;
-    err_msg += "\n" + status.ToString();
-    throw std::runtime_error(err_msg);
-  }
+  JsonFileToMessage(filename, config.get());
   return config;
 }
 

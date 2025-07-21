@@ -39,3 +39,7 @@
 /tools/__pycache__/
 CMakePresets.json
 /.vscode/
+/MODULE.bazel.lock
+/bazel-*
+/.clwb
+/.idea

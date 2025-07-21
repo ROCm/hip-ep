@@ -2,7 +2,7 @@ diff --git a/tar.h b/tar.h
 index 806a9e9ef12c..62c69ada614c 100644
 --- a/tar.h
 +++ b/tar.h
-@@ -82,10 +82,15 @@
+@@ -85,10 +85,15 @@
  #define TAR_PAD(x)	((512 - ((x) & 511)) & 511)
  #endif /* _PAX_ */
 
@@ -19,7 +19,7 @@ index 806a9e9ef12c..62c69ada614c 100644
  	char name[TNMSZ];		/* name of entry */
  	char mode[8]; 			/* mode */
  	char uid[8]; 			/* uid */
-@@ -95,7 +100,7 @@ typedef struct {
+@@ -98,7 +103,7 @@
  	char chksum[CHK_LEN];		/* checksum */
  	char linkflag;			/* norm, hard, or sym. */
  	char linkname[TNMSZ];		/* linked to name */
@@ -28,7 +28,7 @@ index 806a9e9ef12c..62c69ada614c 100644
 
  #ifdef _PAX_
  /*
-@@ -124,7 +129,7 @@ typedef struct {
+@@ -127,7 +132,7 @@
  #define	TVERSION	"00"		/* 00 and no null */
  #define	TVERSLEN	2
 
@@ -37,7 +37,7 @@ index 806a9e9ef12c..62c69ada614c 100644
  	char name[TNMSZ];		/* name of entry */
  	char mode[8]; 			/* mode */
  	char uid[8]; 			/* uid */
-@@ -141,4 +146,4 @@ typedef struct {
+@@ -144,4 +149,4 @@
  	char devmajor[8];		/* major device number */
  	char devminor[8];		/* minor device number */
  	char prefix[TPFSZ];		/* linked to name */

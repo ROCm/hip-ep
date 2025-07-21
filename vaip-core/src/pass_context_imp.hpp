@@ -122,7 +122,8 @@ static void
 store_cache_directory_from_main_node(class PassContextImp& context,
                                      vaip_cxx::NodeConstRef main_node);
 class ExecutionProviderConcrete;
-static onnxruntime::Node* create_ep_context_node(ExecutionProviderConcrete* ep);
+static onnxruntime::Node* create_ep_context_node(ExecutionProviderConcrete* ep,
+                                                 int index);
 static std::string get_ep_cache_context_nonembed_mode(PassContextImp& context);
 static std::vector<std::unique_ptr<ExecutionProvider>>
 compile_onnx_model_internal(
@@ -331,7 +332,7 @@ private:
       const std::vector<vaip_cxx::NodeConstRef>& ep_context_nodes,
       const onnxruntime::ProviderOptions& options);
   friend onnxruntime::Node*
-  create_ep_context_node(vaip_core::ExecutionProviderConcrete* ep);
+  create_ep_context_node(vaip_core::ExecutionProviderConcrete* ep, int index);
   friend std::string
   get_ep_cache_context_nonembed_mode(PassContextImp& context);
   friend std::vector<std::unique_ptr<ExecutionProvider>>

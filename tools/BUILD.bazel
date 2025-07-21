@@ -1,0 +1,17 @@
+load("@rules_python//python:defs.bzl", "py_binary")
+
+py_binary(
+    name = "patch_wrapper",
+    srcs = ["patch_wrapper.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@my_pip_deps//patch",
+    ],
+)
+py_library(
+    name = "xxd",
+    srcs = ["xxd.py"],
+    visibility = ["//visibility:public"],
+)
+
+# exports_files(["collect_pb.bzl"])

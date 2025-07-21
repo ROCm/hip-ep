@@ -1,0 +1,16 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+cc_library(
+    name = "vaip_io",
+    srcs = glob([
+        "src/*.cpp",
+    ]),
+    hdrs = glob([
+        "include/**/*.hpp",
+    ]),
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@glog",
+    ],
+)

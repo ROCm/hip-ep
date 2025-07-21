@@ -37,21 +37,13 @@ if(morphizen_WITH_VAIP_CONFIG_FILE)
   install(FILES ${CMAKE_CURRENT_BINARY_DIR}/vaip_config.json DESTINATION bin)
 endif()
 set(LIB_NAME morphizen-core-static)
-configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/version_info.cpp.in
-  ${CMAKE_CURRENT_BINARY_DIR}/src/version_info.cpp
-  @ONLY)
-
 add_library(${LIB_NAME} STATIC
   ${PROTO_SRCS} ${PROTO_HDRS}
   src/version_info.hpp
-  ${CMAKE_CURRENT_BINARY_DIR}/src/version_info.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/version_info.cpp
   include/morphizen/vaip_plugin.hpp
-  src/vaip_plugin.cpp
   include/morphizen/vaip.hpp
   include/morphizen/_sanity_check.hpp
-  include/morphizen/vaip_io.hpp
-  src/vaip_io.cpp
   src/vaip_ort_api.cpp
   include/morphizen/pass_context.hpp
   src/pass_context_imp.hpp
@@ -157,11 +149,9 @@ if(MSVC)
   target_sources(${LIB_NAME} PRIVATE
     src/mmap_file_win.hpp
     src/mmap_file_win.cpp
-    src/vaip_plugin_win.cpp
     src/util_mswin.cpp)
 else(MSVC)
   target_sources(${LIB_NAME} PRIVATE
-    src/vaip_plugin_lnx.cpp
     src/util_linux.cpp)
 endif(MSVC)
 target_include_directories(${LIB_NAME}
@@ -193,11 +183,14 @@ target_include_directories(${LIB_NAME}
 )
 
 set(MorphiZen_DEPS protobuf::libprotobuf
-  glog::glog Eigen3::Eigen morphizen::encryption ZLIB::ZLIB Microsoft.GSL::GSL morphizen-utils)
+  vaip_io
+  glog::glog Eigen3::Eigen morphizen::encryption ZLIB::ZLIB Microsoft.GSL::GSL morphizen-utils vaip-ort-api-ext)
 target_link_libraries(${LIB_NAME} PUBLIC ${MorphiZen_DEPS})
 target_compile_definitions(${LIB_NAME}
+  PUBLIC
+  "-DONNX_NAMESPACE=onnx"
   PRIVATE "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1"
-  PUBLIC "-DONNX_NAMESPACE=onnx")
+  )
 target_compile_features(morphizen-core-static PUBLIC cxx_std_17)
 if(MSVC)
   target_compile_options(morphizen-core-static PUBLIC "/Zc:__cplusplus")

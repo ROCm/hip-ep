@@ -234,6 +234,7 @@ void profiler_collect(std::vector<EventInfo>& api_events,
  * @return Pointer to the OrtApiForVaip instance.
  */
 VAIP_DLL_SPEC const vaip_core::OrtApiForVaip* get_the_global_api();
+VAIP_DLL_SPEC const vaip_core::OrtApiForVaip* get_the_global_api_unsafe();
 
 /**
  * @brief Returns a function pointer that deletes a dynamically allocated

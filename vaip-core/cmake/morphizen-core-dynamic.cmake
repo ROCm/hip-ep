@@ -10,7 +10,7 @@ set_target_properties(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PROPERTIES FOLDER morp
 set_target_properties(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PROPERTIES OUTPUT_NAME ${morphizen_OUTPUT_NAME})
 
 if(MSVC)
-  if(morphizen_ENABALE_ORT_BRIDGE)
+  if(morphizen_ENABLE_ORT_BRIDGE)
     target_sources(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PRIVATE onnxruntime_vitisai_ep_with_ort_bridge.def)
   else()
     target_sources(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PRIVATE onnxruntime_vitisai_ep.def)

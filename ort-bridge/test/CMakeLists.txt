@@ -2,16 +2,30 @@
 # ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
-set(TEST_EXE_NAME  ort-bridge-test)
 find_package(GTest REQUIRED)
 find_package(onnxruntime REQUIRED)
+set(TEST_EXE_NAME ort-bridge-test)
 add_executable(${TEST_EXE_NAME}
   src/ort-bridge-test.cpp
   src/test-environment.hpp
   src/test-hello-ep.cpp
+  src/test-compile-model.cpp
+  src/test-coverage-wrapper.cpp
+  src/test-vaip-ort-implementation.cpp
+  # test-ort-array-span.cpp
+  # test-graph-classes.cpp
+  src/test-coverage-wrapper.hpp
+  src/test-coverage-wrapper.cpp
+  src/test-api-coverage-checker.hpp
+)
+target_include_directories(${TEST_EXE_NAME}
+    PRIVATE
+    $<BUILD_INTERFACE:${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime>
+    $<BUILD_INTERFACE:${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime/core/session>
+    $<BUILD_INTERFACE:${VAIP_ORT_API_DIR}>
+    $<INSTALL_INTERFACE:../include>
 )
 target_compile_definitions(${TEST_EXE_NAME} PRIVATE
-  -DONNX_NAMESPACE=onnx
   -DPYTHON_EXE_STR="$<TARGET_FILE:Python3::Interpreter>"
   -DTEST_CWD_STR="${CMAKE_CURRENT_BINARY_DIR}"
   -DMORPHIZEN_TAR_EXE_STR="$<TARGET_FILE:morphizen-tar>"
@@ -23,14 +37,17 @@ target_compile_definitions(${TEST_EXE_NAME} PRIVATE
   # - add _WIN32_WINNT=0x0601 to your project's Preprocessor Definitions.
   # Assuming _WIN32_WINNT=0x0601 (i.e. Windows 7 target).
   -D_WIN32_WINNT=0x0601
+  # from test point of view, ort-bridge can only see public onnx definitions in my_ort.h
 )
 
 target_link_libraries(${TEST_EXE_NAME}
     PRIVATE
-    ort-bridge
     GTest::gtest
     onnxruntime::onnxruntime
     glog::glog
+    morphizen-core-static
+    vaip-ort-api-ext
+    $<GENEX_EVAL:$<TARGET_PROPERTY:${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET},LINK_LIBRARIES>>
 )
 # add debug flags and environment variables
 set(ENVS "")

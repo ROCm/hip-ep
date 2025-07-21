@@ -1,19 +1,7 @@
-((nil .
-      ((projectile-project-configure-cmd
-        .
-        "powershell tools/cmake-configure.ps1")
-       (projectile-project-compilation-cmd
-        .
-        "powershell tools/cmake-compilation.ps1")
-       (projectile-project-install-cmd
-        .
-        "powershell tools/cmake-install.ps1")
-       (projectile-project-run-cmd
-        .
-        "powershell tools/cmake-run.ps1")
-       (projectile-project-test-cmd
-        .
-        "powershell tools/cmake-test.ps1"))))
+;;; Directory Local Variables            -*- no-byte-compile: t -*-
+;;; For more information see (info "(emacs) Directory Variables")
+
+((nil . ((compile-command . "cmake --build c:/Users/chunye.wang/workspace/vaip_minimal_build/build/debug/morphizen-demo --target install -j66 && echo ok"))))
 
 
 ;; Local Variables:

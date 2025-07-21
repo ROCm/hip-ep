@@ -120,7 +120,7 @@ std::string Pattern::to_json() const {
   std::string ret;
   google::protobuf::util::JsonPrintOptions options;
   options.add_whitespace = true;
-  options.always_print_primitive_fields = true;
+  // options.always_print_primitive_fields = true;
   auto status = google::protobuf::util::MessageToJsonString(root_pattern_proto,
                                                             &ret, options);
   CHECK(status.ok()) << "cannot serialized to json";

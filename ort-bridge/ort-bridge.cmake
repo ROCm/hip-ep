@@ -9,15 +9,16 @@ add_library(ort-bridge
   src/api-ptrs.cpp
   src/ort-status-exception.hpp
   src/ort-status-exception.cpp
-  src/ort-array-span.hpp
-  src/graph.hpp
-  src/graph.cpp
+  src/ort-graph-wrapper.hpp
+  src/ort-graph-wrapper.cpp
   src/vitisai-ep-factory.cpp
   src/vitisai-ep-factory.hpp
   src/vitisai-ep.hpp
   src/vitisai-ep.cpp
   src/ir-converter.hpp
   src/ir-converter.cpp
+  src/ir-converter-imp.hpp
+  src/ir-converter-imp.cpp
 )
 
 target_include_directories(ort-bridge
@@ -51,11 +52,9 @@ target_compile_options(ort-bridge
   ${MORPHIZEN_COMPILER_OPTIONS})
 target_link_libraries(ort-bridge
   PRIVATE
-  morphizen-utils
-  Microsoft.GSL::GSL
-  onnx
-  )
-
+  vaip-ort-api-ext
+  morphizen-core-static
+)
 if(TARGET ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET})
   target_link_libraries(${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET} PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,ort-bridge>)
 endif(TARGET ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET})
