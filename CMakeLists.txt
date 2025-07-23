@@ -19,7 +19,7 @@ list(APPEND CMAKE_MODULE_PATH
      ${CMAKE_CURRENT_SOURCE_DIR}/3rd-party/ryzenai_bin_metadata
 )
 include(binMetaData)
-precompile_version_rc(3rd-party/ryzenai_bin_metadata)
+binmetadata_precompile_version_rc(3rd-party/ryzenai_bin_metadata)
 
 # Add utility library first (other projects may depend on it)
 add_subdirectory(morphizen-utils)
