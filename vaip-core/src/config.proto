@@ -291,7 +291,7 @@ message PassVaimlConfigProto {
   optional bool run_vaiml_compile = 103;
   optional string device_name = 104;
 
-  optional string tilers = 120;
+  optional string recipes = 120;
 }
 
 message PassVaimlParamProto {
