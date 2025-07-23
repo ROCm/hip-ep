@@ -292,6 +292,7 @@ message PassVaimlConfigProto {
   optional string device_name = 104;
 
   optional string recipes = 120;
+  optional string visualization = 121;
 }
 
 message PassVaimlParamProto {
