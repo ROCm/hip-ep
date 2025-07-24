@@ -782,12 +782,20 @@ create_ep_context_node(vaip_core::ExecutionProviderConcrete* ep, int index) {
   auto op_type = "EPContext";
   auto op_domain = "com.microsoft";
   auto description = "description";
-  auto input_args = convert_to_node_arg_const_ref(
-      vaip_cxx::GraphRef(ep_context_graph), *ep->get_meta_def_inputs());
-  auto output_args = convert_to_node_arg_const_ref(
-      vaip_cxx::GraphRef(ep_context_graph), *ep->get_meta_def_outputs());
-  // for new ABI EP, fused_node is nullptr
   auto fused_node = ep->get_fused_node();
+  auto input_args =
+      fused_node
+          ? vaip_cxx::NodeConstRef::from_node(ep_context_graph, *fused_node)
+                .inputs()
+          : convert_to_node_arg_const_ref(vaip_cxx::GraphRef(ep_context_graph),
+                                          *ep->get_meta_def_inputs());
+  auto output_args =
+      fused_node
+          ? vaip_cxx::NodeConstRef::from_node(ep_context_graph, *fused_node)
+                .outputs()
+          : convert_to_node_arg_const_ref(vaip_cxx::GraphRef(ep_context_graph),
+                                          *ep->get_meta_def_outputs());
+  // for new ABI EP, fused_node is nullptr
   auto name = fused_node ? vaip_cxx::NodeConstRef::from_node(ep_context_graph,
                                                              *fused_node)
                                .name()
