@@ -6,7 +6,8 @@
 #include "./api-ptrs.hpp"
 namespace morphizen {
 struct VitisAiEpFactory : OrtEpFactory, ApiPtrs {
-  VitisAiEpFactory(const char* ep_name, ApiPtrs apis);
+  VitisAiEpFactory(const char* ep_name, ApiPtrs apis,
+                   const OrtLogger& default_logger);
 
   static const char* ORT_API_CALL
   GetNameImpl(const OrtEpFactory* this_ptr) noexcept;
@@ -46,6 +47,15 @@ struct VitisAiEpFactory : OrtEpFactory, ApiPtrs {
   static OrtStatus* ORT_API_CALL CreateDataTransferImpl(
       OrtEpFactory* this_ptr, OrtDataTransferImpl** data_transfer) noexcept;
 
+  static bool ORT_API_CALL
+  IsStreamAwareImpl(const OrtEpFactory* /*this_ptr*/) noexcept;
+
+  static OrtStatus* ORT_API_CALL CreateSyncStreamForDeviceImpl(
+      OrtEpFactory* this_ptr, const OrtMemoryDevice* /*memory_device*/,
+      const OrtKeyValuePairs* /*stream_options*/,
+      OrtSyncStreamImpl** stream) noexcept;
+
+  const OrtLogger& default_logger_;       // default logger for the EP factory
   const std::string ep_name_;             // EP name
   const std::string vendor_{"AMD"};       // EP vendor name
   const uint32_t vendor_id_{0x1002};      // EP vendor ID

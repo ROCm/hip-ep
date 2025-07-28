@@ -13,6 +13,7 @@ extern "C" {
 
 OrtStatus* CreateEpFactories(const char* registration_name,
                              const OrtApiBase* ort_api_base,
+                             const OrtLogger* default_logger,
                              OrtEpFactory** factories, size_t max_factories,
                              size_t* num_factories) {
   const OrtApi* ort_api = ort_api_base->GetApi(ORT_API_VERSION);
@@ -26,7 +27,8 @@ OrtStatus* CreateEpFactories(const char* registration_name,
   // Factory could use registration_name or define its own EP name.
   std::unique_ptr<OrtEpFactory> factory =
       std::make_unique<morphizen::VitisAiEpFactory>(
-          registration_name, morphizen::ApiPtrs{*ort_api, *ort_ep_api});
+          registration_name, morphizen::ApiPtrs{*ort_api, *ort_ep_api},
+          *default_logger);
 
   if (max_factories < 1) {
     return ort_api->CreateStatus(

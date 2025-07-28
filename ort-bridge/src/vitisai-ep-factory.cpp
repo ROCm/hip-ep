@@ -11,8 +11,9 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_VITISAI_EP_FACTORY, "0")
   LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_VITISAI_EP_FACTORY) >= n)
 namespace morphizen {
 
-VitisAiEpFactory::VitisAiEpFactory(const char* ep_name, ApiPtrs apis)
-    : ApiPtrs(apis), ep_name_{ep_name},
+VitisAiEpFactory::VitisAiEpFactory(const char* ep_name, ApiPtrs apis,
+                                   const OrtLogger& default_logger)
+    : ApiPtrs(apis), default_logger_{default_logger}, ep_name_{ep_name},
       ep_metadata_{nullptr, apis.ort_api.ReleaseKeyValuePairs},
       ep_options_{nullptr, apis.ort_api.ReleaseKeyValuePairs} {
   ort_version_supported =
@@ -27,6 +28,8 @@ VitisAiEpFactory::VitisAiEpFactory(const char* ep_name, ApiPtrs apis)
   CreateAllocator = CreateAllocatorImpl;
   ReleaseAllocator = ReleaseAllocatorImpl;
   CreateDataTransfer = CreateDataTransferImpl;
+  IsStreamAware = IsStreamAwareImpl;
+  CreateSyncStreamForDevice = CreateSyncStreamForDeviceImpl;
 }
 const char* ORT_API_CALL
 VitisAiEpFactory::GetNameImpl(const OrtEpFactory* this_ptr) noexcept {
@@ -130,22 +133,45 @@ void ORT_API_CALL VitisAiEpFactory::ReleaseEpImpl(OrtEpFactory* /*this_ptr*/,
 }
 
 OrtStatus* ORT_API_CALL VitisAiEpFactory::CreateAllocatorImpl(
-    OrtEpFactory* /*this_ptr*/, const OrtMemoryInfo* /*memory_info*/,
+    OrtEpFactory* this_ptr, const OrtMemoryInfo* /*memory_info*/,
     const OrtKeyValuePairs* /*allocator_options*/,
-    OrtAllocator** /*allocator*/) noexcept {
-  return nullptr; // TODO: Implement allocator creation if needed
+    OrtAllocator** allocator) noexcept {
+  auto* factory = static_cast<VitisAiEpFactory*>(this_ptr);
+
+  *allocator = nullptr;
+  return factory->ort_api.CreateStatus(
+      ORT_INVALID_ARGUMENT, "CreateAllocator should not be called as we did "
+                            "not add OrtMemoryInfo to our OrtEpDevice.");
 }
 
 void ORT_API_CALL VitisAiEpFactory::ReleaseAllocatorImpl(
     OrtEpFactory* /*this*/, OrtAllocator* /*allocator*/) noexcept {
-  // TODO: Implement allocator release if needed
+  // should never be called as we don't implement CreateAllocator
+  // TODO : implement release allocator if needed
   LOG(FATAL) << "TODO";
 }
 
 OrtStatus* ORT_API_CALL VitisAiEpFactory::CreateDataTransferImpl(
-    OrtEpFactory* /*this_ptr*/,
-    OrtDataTransferImpl** /*data_transfer*/) noexcept {
-  return nullptr; // TODO: Implement data transfer if needed
+    OrtEpFactory* /*this_ptr*/, OrtDataTransferImpl** data_transfer) noexcept {
+  *data_transfer = nullptr; // not implemented
+  return nullptr;
+}
+
+bool ORT_API_CALL
+VitisAiEpFactory::IsStreamAwareImpl(const OrtEpFactory* /*this_ptr*/) noexcept {
+  return false;
+}
+
+OrtStatus* ORT_API_CALL VitisAiEpFactory::CreateSyncStreamForDeviceImpl(
+    OrtEpFactory* this_ptr, const OrtMemoryDevice* /*memory_device*/,
+    const OrtKeyValuePairs* /*stream_options*/,
+    OrtSyncStreamImpl** stream) noexcept {
+  auto* factory = static_cast<VitisAiEpFactory*>(this_ptr);
+
+  *stream = nullptr;
+  return factory->ort_api.CreateStatus(
+      ORT_INVALID_ARGUMENT, "CreateSyncStreamForDevice should not be called as "
+                            "IsStreamAware returned false.");
 }
 
 } // namespace morphizen
