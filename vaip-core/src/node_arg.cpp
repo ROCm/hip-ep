@@ -157,6 +157,7 @@ VAIP_DLL_SPEC const TensorProto&
 node_arg_get_const_data_as_tensor(const Graph& graph, const NodeArg& node_arg) {
 #if VAIP_ORT_API_MAJOR >= 7
   std::string location = "";
+  location.reserve(1024);
   size_t size = 0;
   size_t offset = 0;
   size_t checksum = 0;
@@ -166,6 +167,8 @@ node_arg_get_const_data_as_tensor(const Graph& graph, const NodeArg& node_arg) {
     auto original_graph = get_original_graph(location.substr(1));
     return node_arg_get_const_data_as_tensor(*original_graph, node_arg);
   }
+  CHECK_LE(location.size(), 1024)
+      << "External data location is too long: " << location.size();
 #endif
   return VAIP_ORT_API(node_arg_get_const_data_as_tensor)(graph, node_arg);
 }
