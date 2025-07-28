@@ -34,3 +34,5 @@ static const std::filesystem::path RESNET_50_PATH =
     TEST_CWD / "pt_resnet50.onnx";
 static const std::filesystem::path ENV_CONFIG_JSON_PATH =
     TEST_CWD / "env_config.json";
+static const std::filesystem::path E2E_TEST_CONFIG_JSON_PATH =
+    TEST_CWD / "morphizen_e2e_tests_config.json";

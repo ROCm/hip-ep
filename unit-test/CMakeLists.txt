@@ -12,6 +12,8 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_data.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/env.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/test-onnx-runner/cmake/proto.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/test-onnx-runner/cmake/etc-config.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/morphizen-e2e-test/cmake/proto.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/morphizen-e2e-test/cmake/gen-e2e-tests-config.cmake)
 
 ## add a new test for class vaip_cxx::Model
 set(TEST_EXE_NAME morphizen-unit-tests)
@@ -44,6 +46,19 @@ add_executable(${TEST_EXE_NAME}
   test-onnx-runner/config.cpp
   test-onnx-runner/config.hpp
   test-onnx-runner/test-onnx-runner-main.cpp
+  ${MORPHIZEN_E2E_TESTS_PROTO_SRCS}
+  ${MORPHIZEN_E2E_TESTS_PROTO_HDRS}
+  morphizen-e2e-test/config.cpp
+  morphizen-e2e-test/config.hpp
+  morphizen-e2e-test/env.cpp
+  morphizen-e2e-test/env.hpp
+  morphizen-e2e-test/session-options.cpp
+  morphizen-e2e-test/session-options.hpp
+  morphizen-e2e-test/session.cpp
+  morphizen-e2e-test/session.hpp
+  morphizen-e2e-test/session-run.cpp
+  morphizen-e2e-test/session-run.hpp
+  morphizen-e2e-test/morphizen-e2e-test-main.cpp
   ${ryzenai_version_rc_file}
 )
 set_target_properties(${TEST_EXE_NAME} PROPERTIES FOLDER morphizen/unit-tests)
@@ -78,6 +93,12 @@ target_include_directories(
 target_link_options(${TEST_EXE_NAME} PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_LINKER_OPTIONS}>"
 )
+if(morphizen_ENABLE_ORT_BRIDGE)
+  target_compile_definitions(${TEST_EXE_NAME} PRIVATE
+    -DMORPHIZEN_ENABLE_ORT_BRIDGE=1
+  )
+endif()
+
 target_compile_definitions(${TEST_EXE_NAME} PRIVATE
   -DONNX_NAMESPACE=onnx
   -DPYTHON_EXE_STR="$<TARGET_FILE:Python3::Interpreter>"
@@ -91,6 +112,7 @@ target_compile_definitions(${TEST_EXE_NAME} PRIVATE
   # Assuming _WIN32_WINNT=0x0601 (i.e. Windows 7 target).
   -D_WIN32_WINNT=0x0601
   )
+
 
 include(GoogleTest)
 gtest_discover_tests(${TEST_EXE_NAME} DISCOVERY_MODE "POST_BUILD" PROPERTIES
@@ -118,6 +140,7 @@ set_target_properties(${TEST_EXE_NAME} PROPERTIES
       VS_DEBUGGER_ENVIRONMENT "${ENVS}"
 )
 add_dependencies(${TEST_EXE_NAME} test_onnx_runner_generate_env_config)
+add_dependencies(${TEST_EXE_NAME} morphizen_e2e_tests_generate_env_config)
 
 
 ## for test hello_plugin test
