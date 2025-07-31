@@ -34,6 +34,9 @@ public:
     return std::const_pointer_cast<PassContext>(context_);
   }
 
+  // do not use this function, it is a workaround for ORT new EP ABI.
+  MetaDefProto& get_meta_def() { return *meta_def_; }
+
 protected:
   std::shared_ptr<const PassContext> context_;
   std::shared_ptr<MetaDefProto> meta_def_;

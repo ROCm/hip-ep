@@ -127,9 +127,14 @@ std::vector<NodeArgIndex> Graph::get_outputs_unsafe() const {
     auto node_arg = get_node_arg(output_name);
     CHECK(node_arg.is_valid()) << "Output node_arg not found: " << output_name
                                << ", graph ID: " << get_graph_id().to_string();
+    // remove this checking, for Model-PSI-QDQ-v3_0.onnx, it is possible that
+    // a constant initializer is a group output due to the ORT constant
+    // folding optimization
+    /*
     CHECK(node_arg.is_graph_output())
         << "Output node_arg is not a graph output: " << output_name
         << ", graph ID: " << get_graph_id().to_string();
+    */
     result.push_back(node_arg);
   }
   return result;

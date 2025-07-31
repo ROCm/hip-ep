@@ -189,4 +189,6 @@ message MetaDefProto {
   }
   bool fallback_CPU = 12;
   google.protobuf.Struct param = 13;
+  repeated int32 input_argument_indice = 14;
+  repeated int32 output_argument_indice = 15;
 }

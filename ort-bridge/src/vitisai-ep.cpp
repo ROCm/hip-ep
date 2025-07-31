@@ -10,6 +10,7 @@
 #include "morphizen-utils/morphizen-utils.hpp"
 #include "morphizen/onnxruntime_vitisai_ep.hpp"
 #include "morphizen/vaip-ort-api-ext.hpp"
+#include "morphizen/vaip.hpp"
 #include <set>
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_VITISAI_EP, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_VITISAI_EP) >= n)
@@ -308,6 +309,44 @@ OrtStatus* VitisAIEP::GetCapability(OrtGraphWrapper& graph_viewer,
   }
   return nullptr;
 }
+
+static void update_argument_indice(
+    const google::protobuf::RepeatedPtrField<std::string>& meta_def_args,
+    google::protobuf::RepeatedField<int32_t>* argument_indices,
+    const std::vector<const OrtValueInfo*>& node_value_infos) {
+  CHECK_EQ(meta_def_args.size(), node_value_infos.size());
+  argument_indices->Clear();
+  argument_indices->Reserve(meta_def_args.size());
+  auto size = meta_def_args.size();
+  for (size_t i = 0; i < size; ++i) {
+    auto name = Ort::ConstValueInfo(node_value_infos[i]).Name();
+    auto it = std::find(meta_def_args.begin(), meta_def_args.end(), name);
+    CHECK(it != meta_def_args.end()) << " cannot find name: " << name;
+    auto index = std::distance(meta_def_args.begin(), it);
+    argument_indices->Add((int32_t)index);
+  }
+}
+void VitisAIEP::update_input_output_argument_indice(
+    vaip_core::ExecutionProvider& ep, const OrtNode* node) {
+  auto ep_ext = dynamic_cast<vaip_core::ExecutionProviderConcrete*>(&ep);
+  CHECK(ep_ext != nullptr) << "Execution provider does not support "
+                              "ExecutionProviderExt interface.";
+  auto& meta_def = ep_ext->get_meta_def();
+  std::vector<const OrtValueInfo*> inputs = {};
+  size_t num_of_inputs = 0;
+  throw_if_error(ort_api.Node_GetNumInputs(node, &num_of_inputs));
+  inputs.resize(num_of_inputs);
+  throw_if_error(ort_api.Node_GetInputs(node, inputs.data(), num_of_inputs));
+  std::vector<const OrtValueInfo*> outputs = {};
+  size_t num_of_outputs = 0;
+  throw_if_error(ort_api.Node_GetNumOutputs(node, &num_of_outputs));
+  outputs.resize(num_of_outputs);
+  throw_if_error(ort_api.Node_GetOutputs(node, outputs.data(), num_of_outputs));
+  update_argument_indice(meta_def.inputs(),
+                         meta_def.mutable_input_argument_indice(), inputs);
+  update_argument_indice(meta_def.outputs(),
+                         meta_def.mutable_output_argument_indice(), outputs);
+}
 OrtStatus* VitisAIEP::Compile(const OrtGraph** graphs,
                               const OrtNode** fused_nodes, size_t count,
                               OrtNodeComputeInfo** node_compute_infos,
@@ -329,6 +368,7 @@ OrtStatus* VitisAIEP::Compile(const OrtGraph** graphs,
     auto status =
         CompileSubgraph(*ep_ptr, graphs[index], fused_nodes[index],
                         node_compute_infos[index], ep_context_nodes[index]);
+    update_input_output_argument_indice(*ep_ptr, fused_nodes[index]);
     if (status != nullptr) {
       MY_LOG(1) << "Failed to compile subgraph for execution provider at index "
                 << index << ": " << ort_api.GetErrorMessage(status);

@@ -82,6 +82,8 @@ private:
                                  const char* config_key,
                                  const std::string& default_val,
                                  /*out*/ std::string& config_val);
+  void update_input_output_argument_indice(vaip_core::ExecutionProvider& ep,
+                                           const OrtNode* fused_node);
 
 private:
   std::string name_;
