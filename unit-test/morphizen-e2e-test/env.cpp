@@ -67,12 +67,6 @@ E2ETestEnv::E2ETestEnv(const E2ETestEnvProto& env_proto)
 E2ETestEnv::~E2ETestEnv() {
   LOG(INFO) << "E2ETestEnv being destroyed.";
 
-  // IMPORTANT: Must explicitly clear session options before unregistering EPs
-  // This ensures sessions are destroyed before we unregister execution
-  // providers Without this, the automatic destruction would happen AFTER
-  // unregistration
-  e2e_test_session_options_.clear();
-
 #ifdef MORPHIZEN_ENABLE_ORT_BRIDGE
   // Now it's safe to unregister execution providers
   for (const auto& registration : env_proto_.registration()) {
@@ -86,16 +80,14 @@ E2ETestEnv::~E2ETestEnv() {
   LOG(INFO) << "E2ETestEnv destroyed.";
 }
 
-std::vector<std::unique_ptr<E2ETestSessionOptions>>&
-E2ETestEnv::get_e2e_test_session_options() {
-  if (e2e_test_session_options_.empty()) {
-    for (const auto& session_option_proto : env_proto_.session_options()) {
-      e2e_test_session_options_.emplace_back(
-          std::make_unique<E2ETestSessionOptions>(
-              session_option_proto, *ort_env_, selected_devices_));
-    }
+std::vector<std::unique_ptr<E2ETestSessionOptions>>
+E2ETestEnv::create_e2e_test_session_options() {
+  auto ret = std::vector<std::unique_ptr<E2ETestSessionOptions>>();
+  for (const auto& session_option_proto : env_proto_.session_options()) {
+    ret.emplace_back(std::make_unique<E2ETestSessionOptions>(
+        session_option_proto, *ort_env_, selected_devices_));
   }
-  return e2e_test_session_options_;
+  return std::move(ret);
 }
 
 } // namespace morphizen_e2e_test

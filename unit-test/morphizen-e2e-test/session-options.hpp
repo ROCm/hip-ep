@@ -21,7 +21,7 @@ public:
   E2ETestSessionOptions& operator=(const E2ETestSessionOptions&) = delete;
   ~E2ETestSessionOptions() = default;
 
-  const std::vector<std::unique_ptr<E2ETestSession>>& get_e2e_test_sessions();
+  std::vector<std::unique_ptr<E2ETestSession>> create_e2e_test_sessions();
 
   Ort::SessionOptions& get_ort_session_options() {
     return *ort_session_options_;
@@ -36,8 +36,6 @@ private:
   Ort::Env& env_;
 
   std::unique_ptr<Ort::SessionOptions> ort_session_options_;
-
-  std::vector<std::unique_ptr<E2ETestSession>> e2e_test_sessions_;
 };
 
 } // namespace morphizen_e2e_test

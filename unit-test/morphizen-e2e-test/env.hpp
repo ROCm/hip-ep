@@ -18,8 +18,8 @@ public:
   E2ETestEnv(const E2ETestEnv&) = delete;
   E2ETestEnv& operator=(const E2ETestEnv&) = delete;
 
-  std::vector<std::unique_ptr<E2ETestSessionOptions>>&
-  get_e2e_test_session_options();
+  std::vector<std::unique_ptr<E2ETestSessionOptions>>
+  create_e2e_test_session_options();
 
 public:
   const E2ETestEnvProto& proto() const { return env_proto_; }
@@ -32,8 +32,6 @@ private:
   const E2ETestEnvProto& env_proto_;
   std::unique_ptr<Ort::Env> ort_env_;
   std::vector<Ort::ConstEpDevice> selected_devices_;
-
-  std::vector<std::unique_ptr<E2ETestSessionOptions>> e2e_test_session_options_;
 };
 
 } // namespace morphizen_e2e_test

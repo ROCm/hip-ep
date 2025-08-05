@@ -43,9 +43,10 @@ TEST_P(MorphizenE2ETest, RunE2ETests) {
   auto e2e_test_env =
       std::make_unique<morphizen_e2e_test::E2ETestEnv>(config->proto().env());
 
-  auto& e2e_session_options = e2e_test_env->get_e2e_test_session_options();
+  auto e2e_session_options = e2e_test_env->create_e2e_test_session_options();
+
   for (const auto& session_option : e2e_session_options) {
-    auto& e2e_sessions = session_option->get_e2e_test_sessions();
+    auto e2e_sessions = session_option->create_e2e_test_sessions();
     for (auto& session : e2e_sessions) {
       session->run();
     }
@@ -54,5 +55,9 @@ TEST_P(MorphizenE2ETest, RunE2ETests) {
   LOG(INFO) << "E2E tests completed for config: " << config->proto().name();
 }
 
-INSTANTIATE_TEST_SUITE_P(MorphizenE2ETestSuite, MorphizenE2ETest,
-                         ::testing::ValuesIn(get_test_configs()));
+INSTANTIATE_TEST_SUITE_P(
+    MorphizenE2ETestSuite, MorphizenE2ETest,
+    ::testing::ValuesIn(get_test_configs()),
+    [](const testing::TestParamInfo<const E2ETestConfig*>& info) {
+      return info.param->proto().name();
+    });

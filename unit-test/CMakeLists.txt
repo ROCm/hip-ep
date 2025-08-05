@@ -10,8 +10,6 @@ cmake_policy(SET CMP0135 NEW)
 find_package(GTest REQUIRED)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_data.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/env.cmake)
-include(${CMAKE_CURRENT_SOURCE_DIR}/test-onnx-runner/cmake/proto.cmake)
-include(${CMAKE_CURRENT_SOURCE_DIR}/test-onnx-runner/cmake/etc-config.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/morphizen-e2e-test/cmake/proto.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/morphizen-e2e-test/cmake/gen-e2e-tests-config.cmake)
 
@@ -37,15 +35,6 @@ add_executable(${TEST_EXE_NAME}
   vaip/test_op_def.cpp
   vaip/test_mmap_file.cpp
   vaip/test_ep_shared_context_workspace.cpp
-  ${TEST_ONNX_RUNNER_PROTO_SRCS}
-  ${TEST_ONNX_RUNNER_PROTO_HDRS}
-  test-onnx-runner/create-session.cpp
-  test-onnx-runner/create-session.hpp
-  test-onnx-runner/run-session.cpp
-  test-onnx-runner/run-session.hpp
-  test-onnx-runner/config.cpp
-  test-onnx-runner/config.hpp
-  test-onnx-runner/test-onnx-runner-main.cpp
   ${MORPHIZEN_E2E_TESTS_PROTO_SRCS}
   ${MORPHIZEN_E2E_TESTS_PROTO_HDRS}
   morphizen-e2e-test/config.cpp
@@ -139,7 +128,6 @@ set_target_properties(${TEST_EXE_NAME} PROPERTIES
       VS_DEBUGGER_COMMAND_ARGUMENTS " --gtest_list_tests"
       VS_DEBUGGER_ENVIRONMENT "${ENVS}"
 )
-add_dependencies(${TEST_EXE_NAME} test_onnx_runner_generate_env_config)
 add_dependencies(${TEST_EXE_NAME} morphizen_e2e_tests_generate_env_config)
 
 

@@ -60,23 +60,24 @@ E2ETestSessionOptions::E2ETestSessionOptions(
   }
 }
 
-const std::vector<std::unique_ptr<E2ETestSession>>&
-E2ETestSessionOptions::get_e2e_test_sessions() {
-  if (e2e_test_sessions_.empty()) {
+std::vector<std::unique_ptr<E2ETestSession>>
+E2ETestSessionOptions::create_e2e_test_sessions() {
+  auto ret = std::vector<std::unique_ptr<E2ETestSession>>();
+
 #ifndef MORPHIZEN_ENABLE_ORT_BRIDGE
-    if (proto_.has_v2_param()) {
-      LOG(INFO) << "MORPHIZEN_ENABLE_ORT_BRIDGE is not defined, "
-                << "skipping E2ETestSession with V2 execution provider.";
-      return e2e_test_sessions_;
-    }
+  if (proto_.has_v2_param()) {
+    LOG(INFO) << "MORPHIZEN_ENABLE_ORT_BRIDGE is not defined, "
+              << "skipping E2ETestSession with V2 execution provider.";
+    return ret;
+  }
 #endif
 
-    for (const auto& session_proto : proto_.session()) {
-      e2e_test_sessions_.emplace_back(std::make_unique<E2ETestSession>(
-          env_, *ort_session_options_, session_proto));
-    }
+  for (const auto& session_proto : proto_.session()) {
+    ret.emplace_back(std::make_unique<E2ETestSession>(
+        env_, *ort_session_options_, session_proto));
   }
-  return e2e_test_sessions_;
+
+  return ret;
 }
 
 } // namespace morphizen_e2e_test

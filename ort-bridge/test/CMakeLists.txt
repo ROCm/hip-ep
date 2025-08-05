@@ -40,6 +40,10 @@ target_compile_definitions(${TEST_EXE_NAME} PRIVATE
   # from test point of view, ort-bridge can only see public onnx definitions in my_ort.h
 )
 
+target_link_options(${TEST_EXE_NAME} PRIVATE
+  "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_LINKER_OPTIONS}>"
+)
+
 target_link_libraries(${TEST_EXE_NAME}
     PRIVATE
     GTest::gtest

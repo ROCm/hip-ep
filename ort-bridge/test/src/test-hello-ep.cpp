@@ -2,11 +2,19 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#include "../../../unit-test/test-onnx-runner/wide-string.hpp"
+#include "../../../unit-test/morphizen-e2e-test/wide-string.hpp"
 #include "./test-environment.hpp"
 #include "onnxruntime_cxx_api.h"
 #include "gtest/gtest.h"
 #include <glog/logging.h>
+
+static void del_ctx_model(const std::filesystem::path& model_path) {
+  try {
+    std::filesystem::remove(model_path);
+  } catch (std::exception& e) {
+    std::cerr << "Exception: " << e.what() << std::endl;
+  }
+}
 
 struct HelloEpTest : public ::testing::Test {
   void SetUp() override {
@@ -59,7 +67,13 @@ TEST_F(HelloEpTest, CreateSession) {
   ASSERT_TRUE(!selected_devices.empty())
       << "No devices found for EP: " << registration_name;
   Ort::KeyValuePairs ep_options;
+  auto ctx_model = std::filesystem::u8path("hello_ep_create_session_ctx.onnx");
+  if (std::filesystem::exists(ctx_model)) {
+    del_ctx_model(ctx_model);
+  }
   session_options.AddConfigEntry("ep.context_enable", "1");
+  session_options.AddConfigEntry("ep.context_file_path",
+                                 ctx_model.u8string().c_str());
   session_options.AppendExecutionProvider_V2(*ort_env, selected_devices,
                                              ep_options);
   LOG(INFO) << "Creating session with EP: model_path=" << RESNET_50_PATH;

@@ -2,7 +2,7 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#include "../../../unit-test/test-onnx-runner/wide-string.hpp"
+#include "../../../unit-test/morphizen-e2e-test/wide-string.hpp"
 #include "./test-environment.hpp"
 #include "morphizen/vaip-ort-api-ext.hpp"
 #include "onnxruntime_cxx_api.h"
