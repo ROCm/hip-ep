@@ -1626,6 +1626,12 @@ void VaipOrtApiTest::Test20_conv_relu_fuse_conv2d_nchw() {
     wrapped_api_->graph_save(graph, temp_path.u8string(), "",
                              std::numeric_limits<size_t>::max());
 
+#if VAIP_ORT_API_MAJOR >= 18
+    auto save_string = wrapped_api_->graph_save_string(graph);
+    EXPECT_FALSE(save_string->empty());
+    // LOG(INFO) << "graph save to string" << *save_string;
+#endif
+
     wrapped_api_->node_attributes_delete(new_conv2d_attrs);
     wrapped_api_->model_delete(cloned_model);
     LOG(INFO) << "Test20_conv_relu_fuse_conv2d_nchw completed successfully";

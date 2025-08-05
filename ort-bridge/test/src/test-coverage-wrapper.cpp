@@ -140,6 +140,12 @@ void wrapped_graph_save(const vaip_core::Graph& graph,
   WRAP_API_CALL(graph_save, graph, filename, dat_filename,
                 external_data_threshold);
 }
+#if VAIP_ORT_API_MAJOR >= 18
+vaip_core::DllSafe<std::string>
+wrapped_graph_save_string(const vaip_core::Graph& graph) {
+  WRAP_API_CALL(graph_save_string, graph);
+}
+#endif // VAIP_ORT_API_MAJOR >= 18
 
 vaip_core::Node&
 wrapped_graph_fuse(vaip_core::Graph& graph, const std::string& name,
@@ -678,6 +684,9 @@ get_vaip_ort_api_for_coverage_test(vaip_core::OrtApiForVaip* original_api) {
   g_wrapped_api->graph_remove_node = wrapped_graph_remove_node;
   g_wrapped_api->graph_add_node = wrapped_graph_add_node;
   g_wrapped_api->graph_save = wrapped_graph_save;
+#if VAIP_ORT_API_MAJOR >= 18
+  g_wrapped_api->graph_save_string = wrapped_graph_save_string;
+#endif // VAIP_ORT_API_MAJOR >= 18
   g_wrapped_api->graph_fuse = wrapped_graph_fuse;
   g_wrapped_api->graph_resolve = wrapped_graph_resolve;
   g_wrapped_api->graph_get_consumer_nodes_unsafe =

@@ -232,6 +232,28 @@ void Graph::save(const std::string& filename, const std::string& dat_filename,
   (void)dat_filename;
   (void)external_data_threshold;
 }
+std::string Graph::save_string() const {
+  // Create a temporary model proto containing this graph for saving
+  morphizen_onnx::ModelProto temp_model;
+  temp_model.set_ir_version(parent_model_->ir_version());
+  temp_model.set_producer_name(parent_model_->producer_name());
+  temp_model.set_producer_version(parent_model_->producer_version());
+  temp_model.set_domain(parent_model_->domain());
+  temp_model.set_model_version(parent_model_->model_version());
+  // Copy opset imports
+  for (const auto& opset_import : parent_model_->model_proto().opset_import()) {
+    *temp_model.add_opset_import() = opset_import;
+  }
+  // Copy the graph
+  *temp_model.mutable_graph() = graph_proto_;
+  // Serialize to string
+  std::string output_string;
+  output_string.reserve(temp_model.ByteSizeLong());
+  if (!temp_model.SerializeToString(&output_string)) {
+    throw std::runtime_error("Failed to serialize model to string");
+  }
+  return output_string;
+}
 
 NodeIndex
 Graph::fuse(const std::string& name, const std::string& op_type,

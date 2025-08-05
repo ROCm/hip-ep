@@ -303,6 +303,16 @@ static void initialize_dummy_api() {
     morphizen_graph->save(filename, dat_filename, external_data_threshold);
   };
 
+#if VAIP_ORT_API_MAJOR >= 18
+  the_instance_of_vaip_ort_api.graph_save_string =
+      [](const vaip_core::Graph& graph) -> vaip_core::DllSafe<std::string> {
+    auto* morphizen_graph = reinterpret_cast<const morphizen::Graph*>(&graph);
+    auto model_string = morphizen_graph->save_string();
+    return vaip_core::DllSafe<std::string>(
+        new std::string(std::move(model_string)));
+  };
+#endif // VAIP_ORT_API_MAJOR >= 18
+
   the_instance_of_vaip_ort_api.graph_fuse =
       [](vaip_core::Graph& graph, const std::string& name,
          const std::string& op_type, const std::vector<size_t>& nodes,

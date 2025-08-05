@@ -89,6 +89,7 @@ public:
   // I/O operations
   void save(const std::string& filename, const std::string& dat_filename,
             size_t external_data_threshold) const;
+  std::string save_string() const;
 
   // === Const Methods that Modify Staging Graph (Logical Const) ===
   // Note: These are const because they don't modify the current graph state,

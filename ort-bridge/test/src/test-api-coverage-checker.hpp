@@ -81,7 +81,11 @@ inline std::vector<std::string> get_all_vaip_ort_api_functions() {
       "tensor_proto_new_i4", "tensor_proto_new_u4",
       "graph_remove_initialized_tensor", "graph_reverse_dfs_from_preemp",
       "graph_set_name", "graph_infer_shapes_from_filepath",
-      "graph_to_graph_proto", "graph_proto_delete", "graph_infer_shapes"};
+      "graph_to_graph_proto", "graph_proto_delete",
+#if VAIP_ORT_API_MAJOR >= 18
+      "graph_save_string",
+#endif
+      "graph_infer_shapes"};
 }
 
 /**
@@ -110,6 +114,9 @@ get_vaip_ort_api_by_category() {
         "graph_remove_node",
         "graph_add_node",
         "graph_save",
+#if VAIP_ORT_API_MAJOR >= 18
+        "graph_save_string",
+#endif // VAIP_ORT_API_MAJOR >= 18
         "graph_fuse",
         "graph_resolve",
         "graph_get_consumer_nodes_unsafe",
