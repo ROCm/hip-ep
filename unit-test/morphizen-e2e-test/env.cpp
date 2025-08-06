@@ -31,7 +31,7 @@ E2ETestEnv::E2ETestEnv(const E2ETestEnvProto& env_proto)
   ort_env_ =
       std::make_unique<Ort::Env>(convert_log_level(env_proto_.ort_log_level()),
                                  env_proto_.ort_log_id().c_str());
-#ifdef MORPHIZEN_ENABLE_ORT_BRIDGE
+
   const auto& registrations = env_proto_.registration();
   for (const auto& registration : registrations) {
     LOG(INFO) << "Registering: " << registration.name()
@@ -46,8 +46,14 @@ E2ETestEnv::E2ETestEnv(const E2ETestEnvProto& env_proto)
 
   // get selected devices
   auto ep_devices = ort_env_->GetEpDevices();
-  CHECK(!ep_devices.empty())
-      << "No execution provider devices found. Please check your environment.";
+// on Linux, the ep_devices is empty
+// error message :
+// Check failed: !ep_devices.empty() No execution provider devices found. Please
+// check your environment.
+#ifdef _WIN32
+  CHECK(!ep_devices.empty()) << "No execution provider devices found. Please "
+                                "check your environment.";
+#endif
   std::unordered_set<std::string> registration_names;
   registration_names.reserve(registrations.size());
   for (const auto& registration : registrations) {
@@ -61,13 +67,10 @@ E2ETestEnv::E2ETestEnv(const E2ETestEnvProto& env_proto)
                  return registration_names.find(device.EpName()) !=
                         registration_names.end();
                });
-#endif
 }
 
 E2ETestEnv::~E2ETestEnv() {
   LOG(INFO) << "E2ETestEnv being destroyed.";
-
-#ifdef MORPHIZEN_ENABLE_ORT_BRIDGE
   // Now it's safe to unregister execution providers
   for (const auto& registration : env_proto_.registration()) {
     LOG(INFO) << "Unregistering: " << registration.name();
@@ -76,7 +79,6 @@ E2ETestEnv::~E2ETestEnv() {
     CHECK(status == nullptr) << "UnregisterExecutionProvider failed: status = "
                              << Ort::GetApi().GetErrorMessage(status);
   }
-#endif
   LOG(INFO) << "E2ETestEnv destroyed.";
 }
 

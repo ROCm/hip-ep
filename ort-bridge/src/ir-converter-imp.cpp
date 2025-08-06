@@ -384,7 +384,7 @@ static std::string get_attr_value_string(const OrtApi& ort_api,
     std::string chars(out, '\0');
     Ort::ThrowOnError(ort_api.ReadOpAttr(
         attr, OrtOpAttrType::ORT_OP_ATTR_STRING, chars.data(), out, &out));
-    return std::move(chars);
+    return chars;
   } else {
     return {c};
   }

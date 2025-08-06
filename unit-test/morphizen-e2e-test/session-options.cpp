@@ -35,7 +35,6 @@ E2ETestSessionOptions::E2ETestSessionOptions(
 
     ort_session_options_->AppendExecutionProvider_VitisAI(provider_options);
   } else if (proto_.has_v2_param()) {
-#ifdef MORPHIZEN_ENABLE_ORT_BRIDGE
     auto& provider_options_config = proto_.v2_param().provider_options();
     auto provider_options = std::unordered_map<std::string, std::string>(
         provider_options_config.begin(), provider_options_config.end());
@@ -51,10 +50,6 @@ E2ETestSessionOptions::E2ETestSessionOptions(
     }
     ort_session_options_->AppendExecutionProvider_V2(env_, selected_devices,
                                                      provider_options);
-#else
-    LOG(WARNING) << "MORPHIZEN_ENABLE_ORT_BRIDGE is not defined, "
-                 << "skipping V2 execution provider configuration.";
-#endif
   } else {
     LOG(INFO) << "Defaulting to CPU execution provider.";
   }
@@ -63,14 +58,6 @@ E2ETestSessionOptions::E2ETestSessionOptions(
 std::vector<std::unique_ptr<E2ETestSession>>
 E2ETestSessionOptions::create_e2e_test_sessions() {
   auto ret = std::vector<std::unique_ptr<E2ETestSession>>();
-
-#ifndef MORPHIZEN_ENABLE_ORT_BRIDGE
-  if (proto_.has_v2_param()) {
-    LOG(INFO) << "MORPHIZEN_ENABLE_ORT_BRIDGE is not defined, "
-              << "skipping E2ETestSession with V2 execution provider.";
-    return ret;
-  }
-#endif
 
   for (const auto& session_proto : proto_.session()) {
     ret.emplace_back(std::make_unique<E2ETestSession>(

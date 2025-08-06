@@ -18,6 +18,7 @@ add_executable(${TEST_EXE_NAME}
   src/test-coverage-wrapper.cpp
   src/test-api-coverage-checker.hpp
 )
+
 target_include_directories(${TEST_EXE_NAME}
     PRIVATE
     $<BUILD_INTERFACE:${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime>

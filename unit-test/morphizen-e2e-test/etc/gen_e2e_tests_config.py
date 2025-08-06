@@ -7,6 +7,13 @@
 import json
 import sys
 
+import platform
+
+
+def is_windows():
+    return platform.system() == "Windows"
+
+
 single_session_gen_and_run_embed_ctx = {
     "name": "single_session_gen_and_run_embed_ctx",
     "env": {
@@ -233,7 +240,9 @@ config = [
     single_session_gen_and_run_embed_ctx,
     multiple_session_gen_and_run_embed_ctx,
     single_session_gen_and_run_non_embed_no_prefix_ctx,
-    v2_single_session_gen_and_run_embed_ctx,
 ]
+## only add v2_single_session_gen_and_run_embed_ctx if running on Windows
+if is_windows():
+    config.append(v2_single_session_gen_and_run_embed_ctx)
 
 json.dump(config, open(sys.argv[1], "w"), indent=4)

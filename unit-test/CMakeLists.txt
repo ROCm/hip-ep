@@ -82,11 +82,6 @@ target_include_directories(
 target_link_options(${TEST_EXE_NAME} PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_LINKER_OPTIONS}>"
 )
-if(morphizen_ENABLE_ORT_BRIDGE)
-  target_compile_definitions(${TEST_EXE_NAME} PRIVATE
-    -DMORPHIZEN_ENABLE_ORT_BRIDGE=1
-  )
-endif()
 
 target_compile_definitions(${TEST_EXE_NAME} PRIVATE
   -DONNX_NAMESPACE=onnx
