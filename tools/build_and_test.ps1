@@ -5,13 +5,15 @@
 $ErrorActionPreference = "Stop"
 $SCRIPT_DIR = $PSScriptRoot
 . "$SCRIPT_DIR/run-external-command.ps1"
+. "$SCRIPT_DIR/setup_msvc_env.ps1"
 
 Run python -m pip install --user numpy==2.1.1 onnx==1.16.0
-Run cmake -DBUILD_SHARED_LIBS=OFF `
+
+Run cmake -G Ninja -DBUILD_SHARED_LIBS=OFF `
     "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>" `
     -S "${Env:VAI_RT_WORKSPACE}/morphizen-demo" -B "$Env:VAI_RT_BUILD_DIR/morphizen-demo" `
     "-DCMAKE_INSTALL_PREFIX=$Env:VAI_RT_PREFIX" `
-    "-DFETCHCONTENT_BASE_DIR=$Env:VAI_RT_PREFIX/morphizen_deps" `
+    "-DFETCHCONTENT_BASE_DIR=$Env:VAI_RT_PREFIX/morphizen_deps_ninja" `
     "-DCMAKE_FIND_PACKAGE_NO_PACKAGE_REGISTRY=ON" `
     "-Dmorphizen_ENABLE_ORT_BRIDGE=ON" `
     "-DCMAKE_BUILD_TYPE=Debug" `
@@ -19,6 +21,6 @@ Run cmake -DBUILD_SHARED_LIBS=OFF `
 
 $jobs = [Environment]::ProcessorCount
 
-Run cmake  --build  "$Env:VAI_RT_BUILD_DIR/morphizen-demo" --parallel $jobs --config Debug --target install
+Run ninja -C "$Env:VAI_RT_BUILD_DIR/morphizen-demo" -j $jobs install
 
 Run ctest -j $jobs --test-dir "$Env:VAI_RT_BUILD_DIR/morphizen-demo" -C Debug --output-on-failure --timeout 600
