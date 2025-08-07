@@ -58,7 +58,7 @@ struct VitisAiEpFactory : OrtEpFactory, ApiPtrs {
   const OrtLogger& default_logger_;       // default logger for the EP factory
   const std::string ep_name_;             // EP name
   const std::string vendor_{"AMD"};       // EP vendor name
-  const uint32_t vendor_id_{0x1002};      // EP vendor ID
+  const uint32_t vendor_id_{0x1022};      // EP vendor ID
   const std::string ep_version_{"0.1.0"}; // EP version
   std::unique_ptr<OrtKeyValuePairs, void (*)(OrtKeyValuePairs*)>
       ep_metadata_; // EP metadata

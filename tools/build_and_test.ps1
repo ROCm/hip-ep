@@ -23,4 +23,5 @@ $jobs = [Environment]::ProcessorCount
 
 Run ninja -C "$Env:VAI_RT_BUILD_DIR/morphizen-demo" -j $jobs install
 
+$ENV:MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE="1"
 Run ctest -j $jobs --test-dir "$Env:VAI_RT_BUILD_DIR/morphizen-demo" -C Debug --output-on-failure --timeout 600

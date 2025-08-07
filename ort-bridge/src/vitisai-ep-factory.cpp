@@ -7,6 +7,7 @@
 #include "morphizen-utils/morphizen-utils.hpp"
 #include <glog/logging.h>
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_VITISAI_EP_FACTORY, "0")
+DEF_ENV_PARAM(MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE, "0")
 #define MY_LOG(n)                                                              \
   LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_VITISAI_EP_FACTORY) >= n)
 namespace morphizen {
@@ -62,31 +63,45 @@ OrtStatus* ORT_API_CALL VitisAiEpFactory::GetSupportedDevicesImpl(
 
   for (size_t i = 0; i < num_devices && num_ep_devices < max_ep_devices; ++i) {
     // C API
-    const OrtHardwareDevice& device = *devices[i];
-    if (factory->ort_api.HardwareDevice_Type(&device) ==
-        OrtHardwareDeviceType::OrtHardwareDeviceType_CPU) {
-      // these can be returned as nullptr if you have nothing to add.
-      OrtKeyValuePairs* ep_metadata = nullptr;
-      OrtKeyValuePairs* ep_options = nullptr;
-      factory->ort_api.CreateKeyValuePairs(&ep_metadata);
-      factory->ort_api.CreateKeyValuePairs(&ep_options);
-      factory->ep_metadata_ =
-          std::unique_ptr<OrtKeyValuePairs, void (*)(OrtKeyValuePairs*)>(
-              ep_metadata, factory->ort_api.ReleaseKeyValuePairs);
-      factory->ep_options_ =
-          std::unique_ptr<OrtKeyValuePairs, void (*)(OrtKeyValuePairs*)>(
-              ep_options, factory->ort_api.ReleaseKeyValuePairs);
-      // random example using made up values
-      // factory->ort_api.AddKeyValuePair(ep_metadata, "version", "0.1");
-      factory->ort_api.AddKeyValuePair(ep_options, "run_really_fast", "true");
+    const OrtHardwareDevice* hardware_device = devices[i];
+    const std::uint32_t vendor_id =
+        factory->ort_api.HardwareDevice_VendorId(hardware_device);
+    const OrtHardwareDeviceType device_type =
+        factory->ort_api.HardwareDevice_Type(hardware_device);
+    static constexpr std::uint32_t hardware_vendor_id{0x1022};
 
-      // OrtEpDevice copies ep_metadata and ep_options.
-      auto* status = factory->ort_api.GetEpApi()->CreateEpDevice(
-          factory, &device, ep_metadata, ep_options,
-          &ep_devices[num_ep_devices++]);
-      if (status != nullptr) {
-        return status;
+    if (ENV_PARAM(MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE)) {
+      // only for internal test, we pretend to support CPU EP.
+      if (device_type != OrtHardwareDeviceType_CPU) {
+        continue;
       }
+    } else {
+      if ((vendor_id != factory->vendor_id_) ||
+          (device_type != OrtHardwareDeviceType_NPU)) {
+        continue;
+      }
+    }
+    // these can be returned as nullptr if you have nothing to add.
+    OrtKeyValuePairs* ep_metadata = nullptr;
+    OrtKeyValuePairs* ep_options = nullptr;
+    factory->ort_api.CreateKeyValuePairs(&ep_metadata);
+    factory->ort_api.CreateKeyValuePairs(&ep_options);
+    factory->ep_metadata_ =
+        std::unique_ptr<OrtKeyValuePairs, void (*)(OrtKeyValuePairs*)>(
+            ep_metadata, factory->ort_api.ReleaseKeyValuePairs);
+    factory->ep_options_ =
+        std::unique_ptr<OrtKeyValuePairs, void (*)(OrtKeyValuePairs*)>(
+            ep_options, factory->ort_api.ReleaseKeyValuePairs);
+    if (num_ep_devices == max_ep_devices) {
+      return factory->ort_api.CreateStatus(
+          ORT_INVALID_ARGUMENT, "Not enough space to return EP devices.");
+    }
+    // OrtEpDevice copies ep_metadata and ep_options.
+    auto* status = factory->ort_api.GetEpApi()->CreateEpDevice(
+        factory, hardware_device, ep_metadata, ep_options,
+        &ep_devices[num_ep_devices++]);
+    if (status != nullptr) {
+      return status;
     }
   }
   return nullptr;
