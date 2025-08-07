@@ -691,18 +691,10 @@ void Graph::initialize_nodes() {
     auto output_args = std::vector<NodeArgIndex>();
     for (auto& node_input : node_proto.input()) {
       auto node_arg = get_node_arg(node_input);
-      if (!node_arg.is_valid()) {
-        throw std::runtime_error("Input not found in node_args_map: " +
-                                 node_input);
-      }
       input_args.push_back(node_arg);
     }
     for (auto& node_output : node_proto.output()) {
       auto node_arg = get_node_arg(node_output);
-      if (!node_arg.is_valid()) {
-        throw std::runtime_error("Output not found in node_args_map: " +
-                                 node_output);
-      }
       output_args.push_back(node_arg);
     }
     nodes_.emplace_back(Node::create_node(self, input_args, output_args));
@@ -735,8 +727,9 @@ void Graph::initialize_consumer_map() {
             ->consumer_map_[node_arg_index]
             .push_back(node_idx);
       } else {
-        throw std::runtime_error("Input not found in node_args_map: " +
-                                 input_name);
+        // throw std::runtime_error("Input not found in node_args_map: " +
+        //                          input_name);
+        // invalid input means optional input.
       }
       // Note: If input is not found in node_args_map_, it might be
       // 1. an optional input
@@ -906,12 +899,18 @@ void Graph::validate_add_node_parameters(
   };
 
   for (const auto& input_arg : input_args) {
+    if (!input_arg.is_valid()) {
+      continue; // invalid input arg means optional input.
+    }
     if (!is_valid_node_arg_index(input_arg)) {
       throw std::runtime_error("Invalid input argument: " +
                                input_arg.to_string());
     }
   }
   for (const auto& output_arg : output_args) {
+    if (!output_arg.is_valid()) {
+      continue; // invalid output arg means optional output.
+    }
     if (!is_valid_node_arg_index(output_arg)) {
       throw std::runtime_error("Invalid output argument: " +
                                output_arg.to_string());

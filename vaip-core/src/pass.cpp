@@ -462,7 +462,10 @@ IPass_try_fuse(const Graph& graph, const std::string& name,
           body_nodes.push_back(node1);
           auto node_args = node_get_input_node_args(*node1);
           for (auto node_arg : node_args) {
-            CHECK(node_arg != nullptr);
+            if (node_arg == nullptr) {
+              // node_arg == nullptr mean optionsl argument.
+              continue;
+            }
             // add node_arg_is_exists
             // test case 18,  Resize_496, The second input to resize is
             // optional

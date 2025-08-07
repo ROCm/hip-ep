@@ -440,17 +440,19 @@ static void initialize_dummy_api() {
     result.reserve(input_nodes_args.size());
     for (const auto& input_arg : input_nodes_args) {
       // Convert NodeArgIndex to vaip_core::NodeInput
-      CHECK(input_arg.is_valid())
-          << "NodeArgIndex is not valid in node_get_inputs_unsafe";
-      auto input_node =
-          input_arg.get_producer_node(); // Returns NodeIndex by value
-      auto vaip_core_node_ptr = input_node.is_valid()
-                                    ? static_cast<const vaip_core::Node*>(
-                                          input_node.to_vaip_core_node_ptr())
-                                    : nullptr;
-      result.push_back(vaip_core::NodeInput{
-          vaip_core_node_ptr, static_cast<const vaip_core::NodeArg*>(
-                                  input_arg.to_vaip_core_node_arg_ptr())});
+      if (!input_arg.is_valid()) {
+        result.push_back(vaip_core::NodeInput{nullptr, nullptr});
+      } else {
+        auto input_node =
+            input_arg.get_producer_node(); // Returns NodeIndex by value
+        auto vaip_core_node_ptr = input_node.is_valid()
+                                      ? static_cast<const vaip_core::Node*>(
+                                            input_node.to_vaip_core_node_ptr())
+                                      : nullptr;
+        result.push_back(vaip_core::NodeInput{
+            vaip_core_node_ptr, static_cast<const vaip_core::NodeArg*>(
+                                    input_arg.to_vaip_core_node_arg_ptr())});
+      }
     }
     return vaip_core::DllSafe<std::vector<vaip_core::NodeInput>>(result);
   };

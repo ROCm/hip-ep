@@ -33,7 +33,10 @@ ModelUniquePtr IRConverterImp::to_onnx_model(const ApiPtrs& api_ptrs,
   }
   auto model = ModelUniquePtr(
       VAIP_ORT_API(create_empty_model)(model_path, opset_imports),
-      [](onnxruntime::Model* model) { VAIP_ORT_API(model_delete)(model); });
+      [](onnxruntime::Model* model) {
+        VAIP_ORT_API(model_delete)
+        (model);
+      });
   IRConverterImp converter(api_ptrs, graph);
   converter.throw_if_error(converter.convert_to_model(*model.get()));
   return model;
@@ -62,8 +65,9 @@ void IRConverterImp::save_model_for_debugging(
       MY_LOG(4) << "Saving converted ONNX model to: " << output_file;
       auto& main_graph =
           VAIP_ORT_API(model_main_graph)(const_cast<vaip_core::Model&>(model));
-      VAIP_ORT_API(graph_save)(main_graph, output_file, output_file + ".dat",
-                               std::numeric_limits<size_t>::max());
+      VAIP_ORT_API(graph_save)
+      (main_graph, output_file, output_file + ".dat",
+       std::numeric_limits<size_t>::max());
     } else {
       MY_LOG(4)
           << "Debug level > 4 but no output file specified. Set "
@@ -455,16 +459,20 @@ OrtStatus* IRConverterImp::convert_graph_nodes(vaip_core::Graph& graph) const {
     node_inputs.reserve(inputs.size());
     for (auto input : inputs) {
       vaip_core::NodeArg* node_arg = nullptr;
-      throw_if_error(convert_value_info_proto(Ort::ConstValueInfo(input), graph,
-                                              &node_arg));
+      if (input != nullptr) { // input == nullptr mean optionsl argument.
+        throw_if_error(convert_value_info_proto(Ort::ConstValueInfo(input),
+                                                graph, &node_arg));
+      }
       node_inputs.push_back(node_arg);
     }
     auto node_outputs = std::vector<const vaip_core::NodeArg*>();
     node_outputs.reserve(outputs.size());
     for (auto output : outputs) {
       vaip_core::NodeArg* node_arg = nullptr;
-      throw_if_error(convert_value_info_proto(Ort::ConstValueInfo(output),
-                                              graph, &node_arg));
+      if (output != nullptr) { // output == nullptr mean optionsl argument.
+        throw_if_error(convert_value_info_proto(Ort::ConstValueInfo(output),
+                                                graph, &node_arg));
+      }
       node_outputs.push_back(node_arg);
     }
 
@@ -494,16 +502,16 @@ OrtStatus* IRConverterImp::convert_graph_nodes(vaip_core::Graph& graph) const {
         MY_LOG(3) << "Attribute " << attr_name << " is of type INT with value "
                   << value;
         auto new_attr = VAIP_ORT_API(attr_proto_new_int)(attr_name, value);
-        VAIP_ORT_API(node_attributes_add)(*node_attributes,
-                                          std::move(*new_attr));
+        VAIP_ORT_API(node_attributes_add)
+        (*node_attributes, std::move(*new_attr));
         VAIP_ORT_API(attr_proto_delete)(new_attr);
         break;
       }
       case OrtOpAttrType::ORT_OP_ATTR_INTS: {
         auto new_attr = VAIP_ORT_API(attr_proto_new_ints)(
             attr_name, get_attr_value_ints(ort_api, attr));
-        VAIP_ORT_API(node_attributes_add)(*node_attributes,
-                                          std::move(*new_attr));
+        VAIP_ORT_API(node_attributes_add)
+        (*node_attributes, std::move(*new_attr));
         VAIP_ORT_API(attr_proto_delete)(new_attr);
         break;
       }
@@ -512,16 +520,16 @@ OrtStatus* IRConverterImp::convert_graph_nodes(vaip_core::Graph& graph) const {
         MY_LOG(3) << "Attribute " << attr_name
                   << " is of type FLOAT with value " << value;
         auto new_attr = VAIP_ORT_API(attr_proto_new_float)(attr_name, value);
-        VAIP_ORT_API(node_attributes_add)(*node_attributes,
-                                          std::move(*new_attr));
+        VAIP_ORT_API(node_attributes_add)
+        (*node_attributes, std::move(*new_attr));
         VAIP_ORT_API(attr_proto_delete)(new_attr);
         break;
       }
       case OrtOpAttrType::ORT_OP_ATTR_FLOATS: {
         auto new_attr = VAIP_ORT_API(attr_proto_new_floats)(
             attr_name, get_attr_value_floats(ort_api, attr));
-        VAIP_ORT_API(node_attributes_add)(*node_attributes,
-                                          std::move(*new_attr));
+        VAIP_ORT_API(node_attributes_add)
+        (*node_attributes, std::move(*new_attr));
         VAIP_ORT_API(attr_proto_delete)(new_attr);
         break;
       }
@@ -530,16 +538,16 @@ OrtStatus* IRConverterImp::convert_graph_nodes(vaip_core::Graph& graph) const {
         MY_LOG(3) << "Attribute " << attr_name
                   << " is of type STRING with value " << value;
         auto new_attr = VAIP_ORT_API(attr_proto_new_string)(attr_name, value);
-        VAIP_ORT_API(node_attributes_add)(*node_attributes,
-                                          std::move(*new_attr));
+        VAIP_ORT_API(node_attributes_add)
+        (*node_attributes, std::move(*new_attr));
         VAIP_ORT_API(attr_proto_delete)(new_attr);
         break;
       }
       case OrtOpAttrType::ORT_OP_ATTR_STRINGS: {
         auto new_attr = VAIP_ORT_API(attr_proto_new_strings)(
             attr_name, get_attr_value_strings(ort_api, attr));
-        VAIP_ORT_API(node_attributes_add)(*node_attributes,
-                                          std::move(*new_attr));
+        VAIP_ORT_API(node_attributes_add)
+        (*node_attributes, std::move(*new_attr));
         VAIP_ORT_API(attr_proto_delete)(new_attr);
         break;
       }
@@ -553,8 +561,9 @@ OrtStatus* IRConverterImp::convert_graph_nodes(vaip_core::Graph& graph) const {
       }
     }
 
-    VAIP_ORT_API(graph_add_node)(graph, name, op_type, description, node_inputs,
-                                 node_outputs, *node_attributes, domain);
+    VAIP_ORT_API(graph_add_node)
+    (graph, name, op_type, description, node_inputs, node_outputs,
+     *node_attributes, domain);
     MY_LOG(3) << "Added node: " << name << " (op_type: " << op_type << ")";
   }
 
