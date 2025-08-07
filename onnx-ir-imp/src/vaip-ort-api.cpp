@@ -1116,7 +1116,9 @@ static void initialize_dummy_api() {
 
     // Create the Model instance using the existing factory method
     auto model = morphizen::Model::create_model(std::move(model_proto));
-
+    if (!path.empty()) {
+      model->set_model_path(path);
+    }
     // Release ownership and return as vaip_core::Model*
     return reinterpret_cast<vaip_core::Model*>(model.release());
   };
