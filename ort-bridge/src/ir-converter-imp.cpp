@@ -20,7 +20,11 @@ IRConverterImp::IRConverterImp(const ApiPtrs& api_ptrs, const OrtGraph& graph)
 ModelUniquePtr IRConverterImp::to_onnx_model(const ApiPtrs& api_ptrs,
                                              const OrtGraph& graph) {
   // Forward call to instance method
-  auto model_path = std::filesystem::path();
+  const ORTCHAR_T* api_model_path = nullptr;
+  api_ptrs.throw_if_error(
+      api_ptrs.ort_api.Graph_GetModelPath(&graph, &api_model_path));
+  auto model_path = std::filesystem::path(api_model_path);
+  MY_LOG(1) << "Converting ORT graph to ONNX model at: " << model_path;
   auto opset_imports = std::vector<std::pair<std::string, int64_t>>();
   auto graph_wrapper = OrtGraphWrapper(api_ptrs, graph);
   for (const auto& [domain, version] : graph_wrapper.guess_opset()) {
