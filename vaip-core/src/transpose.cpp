@@ -175,6 +175,12 @@ void transpose_u16(const uint16_t* src, uint16_t* dst,
                                                                    shape, perm);
 }
 
+void transpose_i32(const int32_t* src, int32_t* dst,
+                   const std::vector<int64_t>& shape,
+                   const std::vector<int64_t>& perm) {
+  transpose0<int32_t, std::vector<int64_t>, std::vector<int64_t>>(src, dst,
+                                                                  shape, perm);
+}
 void transpose_bf16(const xir::bfloat16_t* src, xir::bfloat16_t* dst,
                     const std::vector<int64_t>& shape,
                     const std::vector<int64_t>& perm) {

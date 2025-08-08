@@ -38,5 +38,9 @@ VAIP_DLL_SPEC
 void transpose_bf16(const xir::bfloat16_t* src, xir::bfloat16_t* dst,
                     const std::vector<int64_t>& shape,
                     const std::vector<int64_t>& perm);
+VAIP_DLL_SPEC
+void transpose_i32(const int32_t* src, int32_t* dst,
+                   const std::vector<int64_t>& shape,
+                   const std::vector<int64_t>& perm);
 
 } // namespace vaip_core
