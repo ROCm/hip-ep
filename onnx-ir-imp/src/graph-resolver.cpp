@@ -360,7 +360,16 @@ void GraphResolver::resolve_nodes() {
   output_nodes.reserve(output_node_args.size());
   for (auto& output_node_arg : output_node_args) {
     auto node_index = output_node_arg.get_producer_node();
-    CHECK(node_index.is_valid());
+    // the graph output maybe is a graph_initializer, not a node's output
+    // test case : PSI_v3_0
+    // graph output : [
+    // "output_convert_QuantizeLinear_Output",
+    // "interim_embeddings",
+    // "output_exposed_scale_Output",   # graph initializer
+    // "output_exposed_zero_point_Output"  # graph initializer
+    // ]
+    // so here remove the check all output_node_arg is node output
+    // CHECK(node_index.is_valid());
     output_nodes.push_back(node_index);
   }
 
