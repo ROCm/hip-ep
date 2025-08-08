@@ -909,6 +909,11 @@ get_ep_context_nodes(vaip_cxx::GraphConstRef onnx_graph) {
 
 static void update_meta_def_from_ep_node(vaip_cxx::NodeConstRef node,
                                          MetaDefProto& meta_def) {
+  // There are legacy issues, and it's unclear why metadef inputs and outputs
+  // were changed. The inputs/outputs order between ORT FuseNode (EPContext
+  // node) and metadef may not match. Test case: running PSI ctx model with new
+  // ABI.
+  /*
   meta_def.mutable_inputs()->Clear();
   for (auto input : node.inputs()) {
     if (input.has_value()) {
@@ -916,6 +921,7 @@ static void update_meta_def_from_ep_node(vaip_cxx::NodeConstRef node,
     }
   }
   meta_def.mutable_outputs()->Clear();
+  */
   auto output_name = std::string();
   for (auto output : node.outputs()) {
     if (output.has_value()) {
@@ -923,9 +929,14 @@ static void update_meta_def_from_ep_node(vaip_cxx::NodeConstRef node,
         // use the first node arg name.
         output_name = output->name();
       }
-      meta_def.add_outputs(output->name());
+      //  meta_def.add_outputs(output->name());
     }
   }
+
+  // here is to trace back the ExecutionProvider from the EPContext node.
+  // The nodes and constant_initializers in metadef are from the original graph,
+  // but these nodes and constant_initializers do not exist in the EP context
+  // model, so they need to be cleared here.
   meta_def.mutable_nodes()->Clear();
   CHECK(!output_name.empty())
       << "EPContext node must have at least one output.";
