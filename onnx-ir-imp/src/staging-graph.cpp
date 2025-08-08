@@ -344,8 +344,29 @@ void StagingGraph::set_outputs(gsl::span<const NodeArgIndex> outputs) {
         << output.to_string();
     auto* go = graph_proto_.add_output();
     *go = output.get_value_info();
-    node_args_map_[*name] =
-        NodeArgIndex::graph_output(output_index - 1, get_graph_id());
+    auto graph_id = get_graph_id();
+    auto new_node_arg_index =
+        NodeArgIndex::graph_output(output_index - 1, graph_id);
+    node_args_map_[*name] = new_node_arg_index;
+    auto output_graph_id = output.get_graph_id();
+    if (output_graph_id.is_staging()) {
+      // Graph::get_outputs will returns `new_node_arg_index`, producer_map_
+      // must be updated properly, otherwise we cannot get a complete graph from
+      // graph outputs to graph inputs. However it is possible to create a node
+      // arg first and then set it as a graph output, so that we cannot get the
+      // output node until Graph::add_node
+      auto v = output.get_producer_node();
+      if (v.is_valid()) {
+        producer_map_[new_node_arg_index] = v;
+      }
+    } else {
+      producer_map_[output] =
+          output.get_producer_node(); // to redirect node arg from original
+                                      // graph into the staging graph.
+      producer_map_[new_node_arg_index] =
+          output.get_producer_node(); // for a fresh
+                                      // get_all_nodes_topolocial_order.
+    }
   }
 }
 void StagingGraph::log_set_inputs(gsl::span<const NodeArgIndex> inputs) {
@@ -478,7 +499,11 @@ NodeIndex StagingGraph::add_node(
   process_output_arguments(new_node, output_args);
 
   // 6. Update nodes_
-  auto node_index = update_staging_nodes_structures(input_args, output_args);
+  auto output_args1 =
+      output_args; // output_args1 might be changed by
+                   // update_staging_nodes_structures to create a new node and
+                   // replace constant initializers or graph input.
+  auto node_index = update_staging_nodes_structures(input_args, output_args1);
   // no need to update name_args_map_ as it is already done in
   // node_arg_new or get_node_arg, i.e. all input node args and output node
   // args must be valid.
@@ -509,6 +534,18 @@ void StagingGraph::update_producers_for_new_node(
         << node_index.get_graph_id().to_string() << " vs "
         << graph_id.to_string();
     producer_map_[output_arg] = node_index;
+    // potentially update graph outputs, otherwise Graph::resolve cannot get all
+    // nodes.
+    {
+      auto name = output_arg.get_name_unsafe();
+      CHECK(name != nullptr && !name->empty());
+      auto graph_output_node_arg = this->node_args_map_.find(*name);
+      if (graph_output_node_arg != this->node_args_map_.end()) {
+        if (graph_output_node_arg->second.is_graph_output()) {
+          producer_map_[graph_output_node_arg->second] = node_index;
+        }
+      }
+    }
     // If not found, insert the new producer
     MY_LOG(1) << "Adding new producer for output node arg: "
               << output_arg.to_string()
@@ -612,8 +649,8 @@ void StagingGraph::process_output_arguments(
 
 NodeIndex StagingGraph::update_staging_nodes_structures(
     const std::vector<NodeArgIndex>& input_node_arg_indices,
-    const std::vector<NodeArgIndex>& output_node_arg_indices) {
-  for (auto output_node_arg_index : output_node_arg_indices) {
+    std::vector<NodeArgIndex>& output_node_arg_indices) {
+  for (auto& output_node_arg_index : output_node_arg_indices) {
     CHECK(output_node_arg_index.is_valid_node_output() ||
           output_node_arg_index.is_valid_graph_output() ||
           output_node_arg_index.is_initializer())
@@ -655,7 +692,6 @@ NodeIndex StagingGraph::update_staging_nodes_structures(
     //
     // then node_arg_index.get_producer could return a node index on the staging
     // graph, in this way, we connect the original graph to the staging graph
-    node_args_map_[*output_name] = output_node_arg_index;
     if (output_node_arg_index.is_initializer()) {
       // convert initializer to value info
       // when convert initializer to a const op.
@@ -671,6 +707,19 @@ NodeIndex StagingGraph::update_staging_nodes_structures(
       for (auto dim : initializer->dims()) {
         shape->mutable_dim()->Add()->set_dim_value(dim);
       }
+      // replace initializer node arg to node output node arg
+    }
+    if (output_node_arg_index.is_node_output() ||
+        output_node_arg_index.is_graph_output()) {
+      node_args_map_[*output_name] = output_node_arg_index;
+    } else if (output_node_arg_index.is_initializer()) {
+      // NOTE: output_node_arg_index is a reference, the output_node_arg_indices
+      // is changed.
+      // output_node_arg_index = output_node_arg_index;
+      auto insert_results = node_args_map_[*output_name] =
+          output_node_arg_index;
+    } else {
+      LOG(FATAL) << "TODO: create a new node to replace graph inputs";
     }
   }
   auto node_index = NodeIndex((unsigned int)(nodes_.size()), get_graph_id());

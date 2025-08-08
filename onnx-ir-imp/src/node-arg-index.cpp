@@ -140,7 +140,8 @@ std::vector<int64_t>* NodeArgIndex::extract_shape_from_tensor_type(
 
 std::vector<int64_t>* NodeArgIndex::extract_shape_from_value_info(
     const morphizen_onnx::ValueInfoProto& value_info) {
-  CHECK(value_info.has_type()) << "ValueInfo must have type information";
+  CHECK(value_info.has_type())
+      << "ValueInfo must have type information: " << value_info.DebugString();
   CHECK(value_info.type().has_tensor_type())
       << "Only tensor_type is supported for shape extraction";
 
@@ -375,9 +376,12 @@ NodeArgIndex NodeArgIndex::from_vaip_core_node_arg_ptr(const void* ptr) {
 }
 
 NodeIndex NodeArgIndex::get_producer_node() const {
-  if (!is_valid_graph_output() && !is_valid_node_output()) {
+  /*if (!is_valid_graph_output() && !is_valid_node_output()) {
     return NodeIndex::invalid();
-  }
+  }*/
+  // constant_initializer and graph input potentially has producer also because
+  // it is possible to add a new node to replace the constant initializer and
+  // graph input
   auto graph_id = get_graph_id();
   const auto* graph = graph_id.get_graph();
   CHECK(graph != nullptr) << "Graph not found for NodeArgIndex";

@@ -493,7 +493,7 @@ void VaipOrtApiTest::Test09_NodeArgOperations() {
       int element_type = wrapped_api_->node_arg_get_element_type(new_node_arg);
 
       // Test shape and denotation setting
-      std::vector<int64_t> new_shape = {1, 3, 256, 256};
+      std::vector<int64_t> new_shape = {1, 64, 222, 222};
       wrapped_api_->node_arg_set_shape_i64(new_node_arg, new_shape);
 
       std::vector<std::string> denotation = {"BATCH", "CHANNEL", "HEIGHT",
@@ -863,9 +863,12 @@ void VaipOrtApiTest::Test13_ExtendedApiOperations() { // Test library
   try {
     // Test model proto operations
     std::filesystem::path temp_path =
-        std::filesystem::temp_directory_path() / "test_proto.onnx";
+        CMAKE_CURRENT_BINARY_PATH / "test_proto.onnx";
     std::vector<std::pair<std::string, int64_t>> opset = {{"", 11}};
-
+    if (!simple_conv_relu_model_) {
+      LOG(INFO) << "No model available for fuse test, creating one first...";
+      Test07_create_simple_conv_relu_model();
+    }
     auto* model = simple_conv_relu_model_;
     ASSERT_TRUE(model != nullptr);
     {

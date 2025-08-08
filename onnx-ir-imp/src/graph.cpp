@@ -425,13 +425,30 @@ int Graph::resolve(bool force) {
   // Use GraphResolver to handle the resolution process
   GraphResolver resolver;
 
+  // allocate a new graph ID for the resolved graph
+  // the new graph ID must be larger than the original graph id.
+  // to make sure all old node arg index and node index are properly
+  // invalidated.
+  // it must before staging_graph_.reset();, otherwise the
+  // staging_graph_.graph_index_ will be in use and causes troubles.
+  CHECK(staging_graph_ != nullptr)
+      << "Staging graph must not be released before allocating new graph ID";
+  uint32_t old_graph_index = graph_index_;
+  uint32_t new_graph_index = GraphStore::allocate_graph_id(this, graph_index_);
+  CHECK_GT(new_graph_index, old_graph_index)
+      << "New graph ID must be greater than the old graph ID";
+
   // Get the new graph ID first
-  auto new_graph_id = allocate_new_graph_index_and_release_old();
+  auto new_graph_id = GraphId::create_main_graph(graph_index_);
 
   auto resolved_proto =
       resolver.resolve(*this, new_graph_id,
                        const_cast<Model*>(parent_model_)->get_opset_imports());
-
+  // we must reset graph_index after resolve, otherwise, we cannot get constant
+  // initializers.
+  graph_index_ = new_graph_index;
+  // Release the old graph ID and invalidate references
+  GraphStore::release_graph_id(this, old_graph_index);
   // Update our graph proto with the resolved version
   graph_proto_ = std::move(resolved_proto);
 
@@ -443,7 +460,6 @@ int Graph::resolve(bool force) {
 
   // Re-initialize the graph to ensure all internal structures are consistent
   initialize();
-
   MY_LOG(1) << "Graph::resolve completed successfully";
   return 0; // Success
 }
@@ -515,7 +531,15 @@ void Graph::remove_initialized_tensor(const std::string& tensor_name) const {
   // in vaip pass, create-const-op, we need to remove original initializer
   // otherwise ORT graph resolver will fail because of duplicated node arg
   // names.
-  auto node_arg_index = get_node_arg(tensor_name);
+  auto get_node_arg_local = [this](const std::string& name) -> NodeArgIndex {
+    auto it = node_args_map_.find(name);
+    if (it != node_args_map_.end()) {
+      return it->second; // Return the NodeArgIndex if found
+    }
+    return NodeArgIndex::invalid();
+  };
+  // do not search for the constant initializer recursively
+  auto node_arg_index = get_node_arg_local(tensor_name);
   if (!node_arg_index.is_valid()) {
     LOG(ERROR) << "NodeArg name not found: " << tensor_name;
     return; // If not found, do nothing
@@ -919,23 +943,7 @@ void Graph::validate_add_node_parameters(
 }
 
 GraphId Graph::allocate_new_graph_index_and_release_old() {
-  // allocate a new graph ID for the resolved graph
-  // the new graph ID must be larger than the original graph id.
-  // to make sure all old node arg index and node index are properly
-  // invalidated.
-  // it must before staging_graph_.reset();, otherwise the
-  // staging_graph_.graph_index_ will be in use and causes troubles.
-  CHECK(staging_graph_ != nullptr)
-      << "Staging graph must not be released before allocating new graph ID";
-  uint32_t old_graph_index = graph_index_;
-  uint32_t new_graph_index = GraphStore::allocate_graph_id(this, graph_index_);
-  CHECK_GT(new_graph_index, old_graph_index)
-      << "New graph ID must be greater than the old graph ID";
-  // Release the old graph ID and invalidate references
-  GraphStore::release_graph_id(this, old_graph_index);
-  graph_index_ = new_graph_index;
-  return GraphId::create_main_graph(graph_index_);
-  ;
+  return GraphId::from_raw(0);
 }
 
 } // namespace morphizen

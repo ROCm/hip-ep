@@ -136,7 +136,7 @@ private:
 
   NodeIndex update_staging_nodes_structures(
       const std::vector<NodeArgIndex>& input_node_arg_indices,
-      const std::vector<NodeArgIndex>& output_node_arg_indices);
+      std::vector<NodeArgIndex>& output_node_arg_indices);
 
   void
   update_producers_for_new_node(NodeIndex node_index,

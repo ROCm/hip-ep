@@ -44,7 +44,14 @@ void NodeArgProducer::set_producer(const NodeArgIndex& node_arg_index,
   // Validate input parameters
   CHECK(producer_index.is_valid())
       << "Setting invalid producer for node argument";
-  CHECK(producer_index.get_graph_id() == graph_id_)
+  // it is possbile that
+  // staging_graph_.producer[node_arg_index_on_staging_graph] =
+  // node_indx_on_original_graph because of set output.
+  // so that we cannot CHECK(producer_index.get_graph_id() == graph_id_)
+  // we only check that get_index is same.
+  auto producer_graph_id = producer_index.get_graph_id();
+
+  CHECK(producer_graph_id.get_index() == graph_id_.get_index())
       << "Producer NodeIndex graph ID ("
       << producer_index.get_graph_id().to_string()
       << ") does not match producer map graph ID (" << graph_id_.to_string()
@@ -106,13 +113,17 @@ void NodeArgProducer::set_producer(const NodeArgIndex& node_arg_index,
     // Use graph output vector
     unsigned int index = node_arg_index.get_index();
     ensure_graph_output_capacity(index);
-
-    // Check if we're overwriting an existing entry
-    CHECK(!graph_output_producers_[index].is_valid())
-        << "Overwriting existing producer for graph output at index " << index;
-    graph_output_producers_[index] = producer_index;
-    MY_LOG(1) << "Set producer " << producer_index.to_string()
-              << " for graph output at index " << index;
+    if (graph_output_producers_[index] == producer_index) {
+      // ignore , write the same value more than once.
+    } else {
+      // Check if we're overwriting an existing entry
+      CHECK(!graph_output_producers_[index].is_valid())
+          << "Overwriting existing producer for graph output at index "
+          << index;
+      graph_output_producers_[index] = producer_index;
+      MY_LOG(1) << "Set producer " << producer_index.to_string()
+                << " for graph output at index " << index;
+    }
   } else {
     // For other cases (graph inputs, initializers, etc.), we should not reach
     // here due to the CHECK statements above, but log an error if we do
@@ -130,8 +141,13 @@ NodeArgProducer::get_producer(const NodeArgIndex& node_arg_index) const {
     return NodeIndex::invalid(); // Invalid NodeIndex
   }
   // Graph inputs and initializers don't have producers
-  if (node_arg_index.is_graph_input() || node_arg_index.is_initializer()) {
-    return NodeIndex::invalid(); // Invalid NodeIndex
+  if (!graph_id_.is_staging()) {
+    if (node_arg_index.is_graph_input() || node_arg_index.is_initializer()) {
+      return NodeIndex::invalid(); // Invalid NodeIndex
+    }
+  } else {
+    // for staging graph, it is possible to create a new node to replace
+    // initializer and graph inputs.
   }
 
   // Use appropriate vector storage based on NodeArgIndex type

@@ -272,74 +272,151 @@ void GraphResolver::resolve_constant_initializers() {
       << resolved_graph_proto_.initializer_size() << " initializers";
 }
 
+void GraphResolver::troubleshooting(int staging_node_index,
+                                    int origin_node_index) const {
+  auto find_all = [](const std::string& name, int index,
+                     const morphizen_onnx::GraphProto& graph) -> bool {
+    for (auto& output : graph.node(index).output()) {
+      if (output == name) {
+        return true;
+      }
+    }
+    return false;
+  };
+  auto search_in_graph = [&](const std::string& name, int index,
+                             const morphizen_onnx::GraphProto& graph) -> int {
+    for (int i = index + 1; i < graph.node_size(); ++i) {
+      if (find_all(name, i, graph)) {
+        return i;
+      }
+    }
+    return -1;
+  };
+
+  auto& staging_graph_proto = staging_graph_->get_graph_proto();
+  auto& origin_graph_proto = origin_graph_->get_graph_proto();
+  auto search_for_node = [&](int index,
+                             const morphizen_onnx::GraphProto& graph) {
+    for (auto& input : graph.node(index).input()) {
+      LOG(INFO) << "searching for input: " << input
+                << " in graph node: " << graph.node(index).name()
+                << " at index: " << index;
+      auto found_in_staging_graph =
+          search_in_graph(input, staging_node_index, staging_graph_proto);
+      auto found_in_origin_graph =
+          search_in_graph(input, origin_node_index, origin_graph_proto);
+      if (found_in_origin_graph >= 0) {
+        LOG(INFO)
+            << "Input: " << input
+            << " found in origin graph at node index: " << found_in_origin_graph
+            << "\n"
+            << origin_graph_proto.node(found_in_origin_graph).DebugString();
+        ;
+      }
+      if (found_in_staging_graph >= 0) {
+        LOG(INFO)
+            << "Input: " << input << " found in staging graph at node index: "
+            << found_in_staging_graph << "\n"
+            << staging_graph_proto.node(found_in_staging_graph).DebugString();
+      }
+    }
+  };
+  LOG(INFO) << "searching for staging node";
+  search_for_node(staging_node_index, staging_graph_proto);
+  LOG(INFO) << "searching for origin node";
+  search_for_node(origin_node_index, origin_graph_proto);
+}
+static std::string proto_debug_string(const morphizen_onnx::NodeProto& node) {
+  auto ss = std::ostringstream();
+  ss << node.name() << " (" << node.op_type() << ")";
+  if (!node.domain().empty()) {
+    ss << " [domain: " << node.domain() << "]";
+  }
+  ss << "input: [";
+  int c = 0;
+  for (const auto& input : node.input()) {
+    if (c++ != 0) {
+      ss << ",";
+    }
+    ss << "\"" << input << "\"";
+  }
+  ss << "],";
+  c = 0;
+  ss << "outputs: [";
+
+  for (const auto& output : node.output()) {
+    if (c++ != 0) {
+      ss << ",";
+    }
+    ss << "\"" << output << "\"";
+  }
+  ss << "],";
+  return ss.str();
+};
 void GraphResolver::resolve_nodes() {
   MY_LOG(1) << "GraphResolver::resolve_nodes() - Starting node resolution";
-  const auto& origin_nodes = origin_graph_->get_graph_proto().node();
-  const auto& staging_nodes = staging_graph_->get_graph_proto().node();
-
-  for (int origin_node_index = 0, staging_node_index = 0;
-       origin_node_index < origin_nodes.size() ||
-       staging_node_index < staging_nodes.size();
-       /* no op on purpose*/) {
-    // we must maintain the topological order of the nodes
-    // we check if all input are availabe for staging nodes first.
-    if (staging_node_index < staging_nodes.size()) {
-      const auto& staging_node = staging_nodes[staging_node_index];
-      if (is_meta_node(staging_node)) {
-        // skip meta nodes, they are not part of the resolved graph
-        MY_LOG(2) << "Skipping meta node: " << staging_node.name();
-        staging_node_index++;
-        continue;
-      }
-      if (all_input_is_availabele(staging_node, node_args_map_)) {
-        MY_LOG(2) << "Resolving staging node: " << staging_node.name();
-        add_node(staging_node, nullptr);
-        staging_node_index++;
-        // it is important to continue here, because we try best effort to
-        // merge all newly created nodes from staging graph
-        // into the resolved graph proto, replace oiriginal nodes as much as
-        // possible
-        continue;
-      }
-    }
-    // check origin node if it is deleted
-    if (origin_node_index < origin_nodes.size()) {
-      const auto& node = origin_nodes[origin_node_index];
-      if (is_node_deleted(node, origin_node_index)) {
-        MY_LOG(2) << "Skipping deleted node: " << node.name();
-        origin_node_index++;
-        continue;
-      }
-      if (all_input_is_availabele(node, node_args_map_)) {
-        MY_LOG(2) << "Resolving origin node: " << node.name();
-        add_node(node, origin_graph_);
-        origin_node_index++;
-        continue;
-      }
-    }
-    // check endless loop
-    LOG(ERROR) << "GraphResolver::resolve_nodes() - No progress made, "
-               << " - origin_node_index: " << origin_node_index
-               << ", staging_node_index: " << staging_node_index
-               << " - origin_nodes.size(): " << origin_nodes.size()
-               << " - staging_nodes.size(): " << staging_nodes.size();
-    if (origin_node_index < origin_nodes.size()) {
-      LOG(ERROR) << "the top node in origin_nodes is: \n"
-                 << origin_nodes[origin_node_index].DebugString();
-    }
-    if (staging_node_index < staging_nodes.size()) {
-      LOG(ERROR) << "the top node in staging_nodes is: \n"
-                 << staging_nodes[staging_node_index].DebugString();
-    }
-    // current available node args
-    LOG(ERROR) << "Current available node args:"
-               << "node_args_map_.size() = " << node_args_map_.size();
-    for (const auto& [name, index] : node_args_map_) {
-      LOG(ERROR) << "  - \"" << name << "\": " << index.to_string();
-    }
-    LOG(FATAL) << "GraphResolver::resolve_nodes() - failed";
-    break; // never goes here, but just in case
+  auto output_node_args = origin_graph_->get_outputs_unsafe();
+  auto output_nodes = std::vector<NodeIndex>{};
+  output_nodes.reserve(output_node_args.size());
+  for (auto& output_node_arg : output_node_args) {
+    auto node_index = output_node_arg.get_producer_node();
+    CHECK(node_index.is_valid());
+    output_nodes.push_back(node_index);
   }
+
+  origin_graph_->reverse_dfs_from_preemp(
+      output_nodes, /*enter*/
+      [this](const NodeIndex& node) {
+        MY_LOG(1) << "enter :" << proto_debug_string(node.get_node_proto());
+        return false;
+      },
+      [this](const NodeIndex& node) -> bool {
+        auto graph_id = node.get_graph_id();
+        auto& node_proto = node.get_node_proto();
+
+        if (graph_id.is_staging()) {
+          MY_LOG(1) << "merge from staging graph node: " << node.to_string()
+                    << " at index: " << node.get_index() << " with "
+                    << proto_debug_string(node_proto);
+
+        } else {
+          MY_LOG(1) << "merge from origin graph node: " << node.to_string()
+                    << " at index: " << node.get_index() << " with "
+                    << proto_debug_string(node_proto);
+        }
+        resolved_graph_proto_.add_node()->Swap(
+            const_cast<morphizen_onnx::NodeProto*>(&node_proto));
+        auto outputs = node.get_output_node_args();
+        for (auto& output_node_arg_index : outputs) {
+          if (output_node_arg_index.is_node_output()) {
+            // Add to node_args_map for tracking
+            *resolved_graph_proto_.mutable_value_info()->Add() =
+                output_node_arg_index.get_value_info();
+          } else if (output_node_arg_index.is_graph_output()) {
+            // suppose graph output already have value info.
+          } else if (output_node_arg_index.is_initializer()) {
+            // create a new node to replace initializer.
+            // import value info
+            auto initializer = output_node_arg_index.get_const_data_as_tensor(
+                *this->origin_graph_);
+            CHECK(initializer != nullptr) << " cannot find initializer.";
+            auto new_value_info =
+                resolved_graph_proto_.mutable_value_info()->Add();
+            new_value_info->set_name(initializer->name());
+            new_value_info->mutable_type()
+                ->mutable_tensor_type()
+                ->set_elem_type(initializer->data_type());
+            auto shape = new_value_info->mutable_type()
+                             ->mutable_tensor_type()
+                             ->mutable_shape();
+            for (auto dim : initializer->dims()) {
+              shape->mutable_dim()->Add()->set_dim_value(dim);
+            }
+          }
+        }
+        return false; // we do not stop travales.
+      },
+      nullptr /*compare*/, nullptr /* if*/);
   MY_LOG(1) << "GraphResolver::resolve_nodes() - Completed with "
             << resolved_graph_proto_.node_size() << " total nodes";
 }
@@ -348,41 +425,41 @@ void GraphResolver::resolve_value_info() {
   MY_LOG(1)
       << "GraphResolver::resolve_value_info() - Starting value_info resolution";
 
-  const auto& orig_proto = origin_graph_->get_graph_proto();
-  const auto& staging_proto = staging_graph_->get_graph_proto();
+  // const auto& orig_proto = origin_graph_->get_graph_proto();
+  // const auto& staging_proto = staging_graph_->get_graph_proto();
 
-  // Create a map to track value_info by name for deduplication
-  std::unordered_map<std::string, int> value_info_map;
+  //// Create a map to track value_info by name for deduplication
+  // std::unordered_map<std::string, int> value_info_map;
 
-  // First, add all value_info from the original graph
-  for (const auto& value_info : orig_proto.value_info()) {
-    if (!value_info_map.count(value_info.name())) {
-      MY_LOG(2) << "Adding original value_info: " << value_info.name();
-      // Add to the map if it doesn't already exist
-      int index = resolved_graph_proto_.value_info_size();
-      resolved_graph_proto_.add_value_info();
-      value_info_map[value_info.name()] = index;
-    }
-    resolved_graph_proto_.mutable_value_info()->at(
-        value_info_map[value_info.name()]) = value_info;
-    MY_LOG(2) << "Added original value_info: " << value_info.name();
-  }
+  //// First, add all value_info from the original graph
+  // for (const auto& value_info : orig_proto.value_info()) {
+  //   if (!value_info_map.count(value_info.name())) {
+  //     MY_LOG(2) << "Adding original value_info: " << value_info.name();
+  //     // Add to the map if it doesn't already exist
+  //     int index = resolved_graph_proto_.value_info_size();
+  //     resolved_graph_proto_.add_value_info();
+  //     value_info_map[value_info.name()] = index;
+  //   }
+  //   resolved_graph_proto_.mutable_value_info()->at(
+  //       value_info_map[value_info.name()]) = value_info;
+  //   MY_LOG(2) << "Added original value_info: " << value_info.name();
+  // }
 
-  // Secondly, add value_info from staging graph (overriding original ones with
-  // same name)
-  for (const auto& value_info : staging_proto.value_info()) {
-    if (!value_info_map.count(value_info.name())) {
-      MY_LOG(2) << "Adding staging value_info: " << value_info.name();
-      // Add to the map if it doesn't already exist
-      int index = resolved_graph_proto_.value_info_size();
-      resolved_graph_proto_.add_value_info();
-      value_info_map[value_info.name()] = index;
-    }
-    resolved_graph_proto_.mutable_value_info()->at(
-        value_info_map[value_info.name()]) = value_info;
+  //// Secondly, add value_info from staging graph (overriding original ones
+  /// with / same name)
+  // for (const auto& value_info : staging_proto.value_info()) {
+  //   if (!value_info_map.count(value_info.name())) {
+  //     MY_LOG(2) << "Adding staging value_info: " << value_info.name();
+  //     // Add to the map if it doesn't already exist
+  //     int index = resolved_graph_proto_.value_info_size();
+  //     resolved_graph_proto_.add_value_info();
+  //     value_info_map[value_info.name()] = index;
+  //   }
+  //   resolved_graph_proto_.mutable_value_info()->at(
+  //       value_info_map[value_info.name()]) = value_info;
 
-    MY_LOG(2) << "Added staging value_info: " << value_info.name();
-  }
+  //  MY_LOG(2) << "Added staging value_info: " << value_info.name();
+  //}
 
   MY_LOG(1) << "GraphResolver::resolve_value_info() - Completed with "
             << resolved_graph_proto_.value_info_size() << " value_info entries";

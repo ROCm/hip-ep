@@ -67,6 +67,7 @@ private:
   void resolve_outputs();
   void resolve_constant_initializers();
   void resolve_nodes();
+  void troubleshooting(int staging_node_index, int origin_node_index) const;
   void resolve_value_info();
 
   void print_log_message();

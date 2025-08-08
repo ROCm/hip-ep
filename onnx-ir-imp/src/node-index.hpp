@@ -255,7 +255,7 @@ public:
    */
   std::string to_string() const;
 
-private:
+public:
   /**
    * @brief Get reference to the underlying node protobuf
    * @return Reference to the NodeProto for this node
@@ -263,6 +263,7 @@ private:
    */
   const morphizen_onnx::NodeProto& get_node_proto() const;
 
+private:
   /**
    * @brief Get reference to the underlying Node object
    * @return Reference to the Node for this node
