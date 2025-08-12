@@ -173,6 +173,12 @@ public:
                             onnxruntime::Model* model);
   VAIP_DLL_SPEC virtual ~CustomOpImp();
 
+protected:
+  Ort::ConstValue ctxGetInput(Ort::KernelContext& ctx, int index) const;
+  Ort::UnownedValue ctxGetOutput(Ort::KernelContext& ctx, int index,
+                                 const int64_t* dim_values,
+                                 size_t dim_count) const;
+
 public:
   virtual void Compute(const OrtApi* api, OrtKernelContext* context) const = 0;
   /*

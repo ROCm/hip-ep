@@ -175,7 +175,7 @@ NodeArgProducer::get_producer(const NodeArgIndex& node_arg_index) const {
   }
 
   // For other cases, return invalid NodeIndex
-  LOG(ERROR) << "Unexpected NodeArgIndex type in get_producer";
+  // LOG(ERROR) << "Unexpected NodeArgIndex type in get_producer";
   return NodeIndex::invalid();
 }
 void NodeArgProducer::reserve(size_t num_of_node_args,

@@ -93,4 +93,20 @@ void CustomOpImp::ComputeCpu(const OrtApi* api,
                              output_names.data(), output_names.size(),
                              output_values.data()));
 }
+Ort::ConstValue CustomOpImp::ctxGetInput(Ort::KernelContext& ctx,
+                                         int index) const {
+  if (!meta_def_->input_argument_indice().empty()) {
+    index = meta_def_->input_argument_indice(index);
+  }
+  return ctx.GetInput(index);
+}
+Ort::UnownedValue CustomOpImp::ctxGetOutput(Ort::KernelContext& ctx, int index,
+                                            const int64_t* dim_values,
+                                            size_t dim_count) const {
+  if (!meta_def_->output_argument_indice().empty()) {
+    index = meta_def_->output_argument_indice(index);
+  }
+  return ctx.GetOutput(index, dim_values, dim_count);
+}
+
 } // namespace vaip_core

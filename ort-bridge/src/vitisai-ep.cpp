@@ -318,12 +318,31 @@ static void update_argument_indice(
   argument_indices->Clear();
   argument_indices->Reserve(meta_def_args.size());
   auto size = meta_def_args.size();
-  for (size_t i = 0; i < size; ++i) {
-    auto name = Ort::ConstValueInfo(node_value_infos[i]).Name();
-    auto it = std::find(meta_def_args.begin(), meta_def_args.end(), name);
-    CHECK(it != meta_def_args.end()) << " cannot find name: " << name;
-    auto index = std::distance(meta_def_args.begin(), it);
-    argument_indices->Add((int32_t)index);
+  for (size_t j = 0; j < size; ++j) {
+    auto& meta_def_name = meta_def_args[(int)j];
+    bool found = false;
+    for (size_t i = 0; i < size; ++i) {
+      auto name = Ort::ConstValueInfo(node_value_infos[i]).Name();
+      if (name == meta_def_name) {
+        argument_indices->Add((int32_t)i);
+        found = true;
+        break;
+      }
+    }
+    CHECK(found) << " cannot find index for meta_def_args[" << j
+                 << "] =" << meta_def_name;
+  }
+  if (ENV_PARAM(MORPHIZEN_DEBUG_VITISAI_EP) >= 1) {
+    for (size_t i = 0; i < size; ++i) {
+      auto name = Ort::ConstValueInfo(node_value_infos[i]).Name();
+      LOG(INFO) << " fused_node[" << i << "] = " << name;
+    }
+    for (size_t i = 0; i < size; ++i) {
+      auto index = (*argument_indices)[(int)i];
+      auto name = Ort::ConstValueInfo(node_value_infos[index]).Name();
+      LOG(INFO) << "meta_def_args[" << i << "] = " << meta_def_args[(int)i]
+                << " => fused[" << index << "] " << name;
+    }
   }
 }
 void VitisAIEP::update_input_output_argument_indice(
@@ -359,8 +378,8 @@ OrtStatus* VitisAIEP::Compile(const OrtGraph** graphs,
             << " execution providers.";
   throw_if_error(CreateEpContextNodes(fused_nodes, ep_context_nodes, count));
   for (auto index = 0u; index < count; ++index) {
-    // here we assume that the execution_providers_ are in the same order as the
-    // nodes in the graph. this is the tight coupling between the
+    // here we assume that the execution_providers_ are in the same order as
+    // the nodes in the graph. this is the tight coupling between the
     // execution providers and the graph nodes.
     auto& ep_ptr = (**execution_providers_)[index];
     CHECK(ep_ptr.get() != nullptr)

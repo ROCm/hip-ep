@@ -836,6 +836,16 @@ void Graph::reverse_dfs_from_impl(
       std::vector<NodeIndex> producer_nodes;
 
       for (const auto& input_arg_idx : input_args) {
+        if (!input_arg_idx.is_valid()) {
+          // when input_arg_idex.is_valid() is false, it means an optional
+          // argument.
+          continue;
+        } else if (input_arg_idx.is_initializer()) {
+          // continue;
+        } else if (input_arg_idx.is_graph_input()) {
+          continue;
+        }
+
         auto producer_idx = input_arg_idx.get_producer_node();
         // Skip invalid producers (graph inputs, initializers)
         if (!producer_idx.is_valid()) {
