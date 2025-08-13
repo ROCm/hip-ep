@@ -607,7 +607,7 @@ initialize_context(const std::string& model_path, const Graph& onnx_graph,
   model_set_meta_data(mutable_model, "vaip_log_dir",
                       context->get_log_dir().u8string());
   // log version of binary
-  context->print_version_info("EXEC VERISON: ");
+  context->print_version_info("EXEC VERSION: ");
   if (!context->is_ep_context_model) {
     context->maybe_create_tar_file_for_write();
   }
