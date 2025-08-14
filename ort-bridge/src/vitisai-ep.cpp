@@ -314,14 +314,14 @@ static void update_argument_indice(
     const google::protobuf::RepeatedPtrField<std::string>& meta_def_args,
     google::protobuf::RepeatedField<int32_t>* argument_indices,
     const std::vector<const OrtValueInfo*>& node_value_infos) {
-  CHECK_EQ(meta_def_args.size(), node_value_infos.size());
+  CHECK_LE(meta_def_args.size(), node_value_infos.size());
   argument_indices->Clear();
   argument_indices->Reserve(meta_def_args.size());
   auto size = meta_def_args.size();
   for (size_t j = 0; j < size; ++j) {
     auto& meta_def_name = meta_def_args[(int)j];
     bool found = false;
-    for (size_t i = 0; i < size; ++i) {
+    for (size_t i = 0; i < node_value_infos.size(); ++i) {
       auto name = Ort::ConstValueInfo(node_value_infos[i]).Name();
       if (name == meta_def_name) {
         argument_indices->Add((int32_t)i);
@@ -475,8 +475,9 @@ OrtStatus* VitisAIEP::CompileSubgraph(const vaip_core::ExecutionProvider& ep,
   }
 }
 
-static bool vaip_and_ort_have_same_names(std::set<std::string>& vaip_names,
-                                         std::set<std::string>& ort_names) {
+static bool
+vaip_names_are_contained_in_ort_names(std::set<std::string>& vaip_names,
+                                      std::set<std::string>& ort_names) {
   auto join = [](const auto& set) {
     std::ostringstream oss;
     for (const auto& name : set) {
@@ -487,15 +488,17 @@ static bool vaip_and_ort_have_same_names(std::set<std::string>& vaip_names,
     }
     return oss.str();
   };
-  // Check if both sets have the same names
-  auto ret =
-      std::equal(vaip_names.begin(), vaip_names.end(), ort_names.begin());
+  // Check if all vaip_names are contained in ort_names
+  auto ret = std::all_of(vaip_names.begin(), vaip_names.end(),
+                         [&ort_names](const std::string& name) {
+                           return ort_names.count(name) > 0;
+                         });
   if (!ret) {
-    MY_LOG(1) << "VitisAI EP and ORT have different names: "
+    MY_LOG(1) << "Not all VitisAI EP names are in ORT names: "
               << "VitisAI EP names: " << join(vaip_names)
               << ", ORT names: " << join(ort_names);
   } else {
-    MY_LOG(1) << "VitisAI EP and ORT have the same names: "
+    MY_LOG(1) << "All VitisAI EP names are contained in ORT names: "
               << "VitisAI EP names: " << join(vaip_names)
               << ", ORT names: " << join(ort_names);
   }
@@ -605,9 +608,11 @@ OrtNode* VitisAIEP::convert_vaip_node_to_ort_node(
                                         input_names_2.end());
   std::set<std::string> ort_output_names(output_names_2.begin(),
                                          output_names_2.end());
-  CHECK(vaip_and_ort_have_same_names(vaip_input_names, ort_input_names))
+  CHECK(
+      vaip_names_are_contained_in_ort_names(vaip_input_names, ort_input_names))
       << "VitisAI EP and ORT have different input names: ";
-  CHECK(vaip_and_ort_have_same_names(vaip_output_names, ort_output_names))
+  CHECK(vaip_names_are_contained_in_ort_names(vaip_output_names,
+                                              ort_output_names))
       << "VitisAI EP and ORT have different output names: ";
   std::vector<const char*> input_names_c;
   std::vector<const char*> output_names_c;
