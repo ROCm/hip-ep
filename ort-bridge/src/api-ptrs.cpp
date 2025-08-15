@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "./api-ptrs.hpp"
+#include <glog/logging.h>
 #include <string>
 
 namespace morphizen {
@@ -13,6 +14,8 @@ void ApiPtrs::throw_if_error(OrtStatus* status) const {
 #  pragma warning(push)
 #  pragma warning(disable : 5272) // throwing non-copyable exception type
 #endif
+    LOG(INFO) << "Error in ORT API: " << ort_api.GetErrorCode(status)
+              << ", message: " << ort_api.GetErrorMessage(status);
     throw OrtStatusException(ort_api, status);
 #ifdef _MSC_VER
 #  pragma warning(pop)

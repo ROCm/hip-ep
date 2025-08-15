@@ -167,60 +167,10 @@ IRConverterImp::convert_graph_initializers(vaip_core::Graph& graph) const {
     // Set element type
     auto element_type = tensor_info.GetElementType();
     auto shape = tensor_info.GetShape();
-    // Get tensor data
-    size_t element_count = tensor_info.GetElementCount();
-    size_t element_size = 0;
-
-    // Calculate element size based on data type
-    switch (element_type) {
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
-      element_size = sizeof(float);
-      break;
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
-      element_size = sizeof(double);
-      break;
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
-      element_size = sizeof(int32_t);
-      break;
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
-      element_size = sizeof(int64_t);
-      break;
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
-      element_size = sizeof(uint8_t);
-      break;
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
-      element_size = sizeof(int8_t);
-      break;
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
-      element_size = sizeof(uint16_t);
-      break;
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
-      element_size = sizeof(int16_t);
-      break;
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
-      element_size = sizeof(uint32_t);
-      break;
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
-      element_size = sizeof(uint64_t);
-      break;
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
-      element_size = sizeof(bool);
-      break;
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
-      element_size = sizeof(uint16_t); // Float16 is stored as uint16
-      break;
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
-      element_size = sizeof(uint16_t); // BFloat16 is stored as uint16
-      break;
-    default:
-      return ort_api.CreateStatus(
-          ORT_INVALID_ARGUMENT,
-          "Unsupported tensor element type for conversion");
-    }
 
     // Get raw tensor data
     const void* tensor_data = tensor_value.GetTensorRawData();
-    size_t data_size = element_count * element_size;
+    size_t data_size = tensor_value.GetTensorSizeInBytes();
 
     // // Store data as external data instead of copying
     // // Generate a unique external data location (could be memory address or
