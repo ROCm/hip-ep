@@ -517,6 +517,11 @@ public:
             const std::filesystem::path& external_data_file,
             size_t threshold) const;
   /**
+   * @brief Save the graph to a string.
+   *
+   */
+  vaip_core::DllSafe<std::string> save_string() const;
+  /**
    * @brief Retrieves a constant reference to the node at the specified index.
    *
    * @param index The index of the node to retrieve.
@@ -711,7 +716,24 @@ public:
    * @return The created NodeBuilder object.
    */
   vaip_core::NodeBuilder node_builder(vaip_core::IPass& pass);
+  /** @brief save a graph to a file
+   * this function is not a const member function, because when
+   * `filter_out_special_tensor` is true, the constant initializers might be
+   * replaced with the regular tensor proto, i.e. revert the optimization of
+   * model clone, i.e. no weights sharing.
+   */
+  void mut_save(const std::filesystem::path& file_path,
+                const std::filesystem::path& external_data_file,
+                size_t threshold, bool filter_out_special_tensor);
 
+  /** @brief save a graph to a string
+   * this function is not a const member function, because when
+   * `filter_out_special_tensor` is true, the constant initializers might be
+   * replaced with the regular tensor proto, i.e. revert the optimization of
+   * model clone, i.e. no weights sharing.
+   */
+  vaip_core::DllSafe<std::string>
+  mut_save_string(bool filter_out_special_tensor);
   /**
    * @brief Performs garbage collection.
    *
@@ -1063,6 +1085,10 @@ public:
                    const std::vector<std::optional<NodeArgConstRef>>& inputs,
                    const std::vector<std::optional<NodeArgConstRef>>& outputs,
                    vaip_core::NodeAttributesPtr attributes);
+
+  /** prune_special_tensor_proto
+   */
+  void prune_special_tensor_proto();
 };
 class Subgraph {
 public:

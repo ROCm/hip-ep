@@ -61,6 +61,7 @@ TEST_F(GraphTest, LoadAndSave) {
   std::filesystem::remove(output_dir / "resnet50.dat");
   LOG(INFO) << "Saving file to " << resnet50_file.u8string();
   graph.save(resnet50_file.u8string(), "resnet50.dat", 128u);
+  // graph.save_without(resnet50_file.u8string(), "resnet50.dat", 128u);
   EXPECT_TRUE(std::filesystem::exists(resnet50_file));
   // TODO: fix this bug:
   // 1. the resnet50.onnx is too big, external data is still not supported
@@ -86,7 +87,17 @@ TEST_F(GraphTest, LoadAndSave) {
     EXPECT_EQ(exit_code, 0) << "onnx.checker.check_model failed";
   }
 }
-
+TEST_F(GraphTest, CloneAndSave) {
+  auto model = vaip_cxx::Model::load(RESNET_50_PATH);
+  auto cloned_model = model->ref().clone();
+  auto main_graph = cloned_model->main_graph();
+  auto output_dir = CMAKE_CURRENT_BINARY_PATH;
+  auto resnet50_file = output_dir / "resnet50_cloned.onnx";
+  LOG(INFO) << " save graph to " << resnet50_file;
+  auto filter_out_special_tensor = true;
+  main_graph.mut_save(resnet50_file.u8string(), "resnet50.dat", 128u,
+                      filter_out_special_tensor);
+}
 TEST_F(GraphTest, FindNodeArgGraphInput) {
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();

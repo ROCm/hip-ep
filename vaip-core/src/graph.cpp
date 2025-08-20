@@ -636,6 +636,14 @@ void GraphConstRef::save(const std::filesystem::path& file_path,
   (*this, file_path.u8string(), external_data_file.u8string(), threshold);
 }
 
+vaip_core::DllSafe<std::string> GraphConstRef::save_string() const {
+#if VAIP_ORT_API_MAJOR >= 18
+  return VAIP_ORT_API(graph_save_string)(*this);
+#else
+  LOG(FATAL) << "graph_save_string is not supported in this version of ORT";
+#endif
+}
+
 std::optional<NodeArgConstRef>
 GraphConstRef::find_node_arg(const std::string& name) const {
   auto node_arg = VAIP_ORT_API(graph_get_node_arg)(*this, name);
@@ -933,5 +941,110 @@ GraphRef::add_node(const std::string& name, const std::string& op_domain,
       *this, name, op_type, description, inputs_ptr, outputs_ptr,
       *attributes.get(), op_domain);
   return NodeRef(*this, new_node);
+}
+void GraphRef::mut_save(const std::filesystem::path& file_path,
+                        const std::filesystem::path& external_data_file,
+                        size_t threshold, bool filter_out_special_tensor) {
+  if (filter_out_special_tensor) {
+    prune_special_tensor_proto();
+  }
+  if (name().empty()) {
+    set_name("no_name");
+  }
+  save(file_path, external_data_file, threshold);
+}
+
+vaip_core::DllSafe<std::string>
+GraphRef::mut_save_string(bool filter_out_special_tensor) {
+  if (filter_out_special_tensor) {
+    prune_special_tensor_proto();
+  }
+  if (name().empty()) {
+    set_name("no_name");
+  }
+  return save_string();
+}
+
+#if VAIP_ORT_API_MAJOR >= 7
+static GraphConstRef get_original_graph(const std::string& ptr) {
+  uintptr_t ptr1 = std::stoull(ptr);
+  return *reinterpret_cast<vaip_core::Graph*>(ptr1);
+}
+#endif
+void revert_mem_tag_tensor(GraphRef target_graph, const std::string& name,
+                           const int element_type,
+                           const std::unique_ptr<std::vector<int64_t>>& shape,
+                           size_t ptr, size_t size) {
+  auto base = reinterpret_cast<void*>(ptr);
+  std::vector<int64_t> empty = {};
+#define REVERT_MEM_TAG_DEF(type, cxx_type, tensor_data_type)                   \
+  case ONNX_NAMESPACE::TensorProto_DataType_##tensor_data_type: {              \
+    auto beg = reinterpret_cast<cxx_type*>(base);                              \
+    auto end = beg + (size / sizeof(cxx_type));                                \
+    auto values = std::vector<cxx_type>(beg, end);                             \
+    auto tensor = vaip_core::tensor_proto_new_##type(                          \
+        name, shape.get() ? *shape : empty, values);                           \
+    VAIP_ORT_API(graph_add_initialized_tensor)(target_graph, *tensor);         \
+    break;                                                                     \
+  }
+  switch (element_type) {
+    REVERT_MEM_TAG_DEF(i8, int8_t, INT8)
+    REVERT_MEM_TAG_DEF(u8, uint8_t, UINT8)
+    REVERT_MEM_TAG_DEF(i16, int16_t, INT16)
+    REVERT_MEM_TAG_DEF(u16, uint16_t, UINT16)
+    REVERT_MEM_TAG_DEF(i32, int32_t, INT32)
+    REVERT_MEM_TAG_DEF(u32, uint32_t, UINT32)
+    REVERT_MEM_TAG_DEF(i64, int64_t, INT64)
+    REVERT_MEM_TAG_DEF(u64, uint64_t, UINT64)
+    REVERT_MEM_TAG_DEF(f32, float, FLOAT)
+    REVERT_MEM_TAG_DEF(f64, double, DOUBLE)
+    REVERT_MEM_TAG_DEF(bf16, bf16_t, BFLOAT16)
+    REVERT_MEM_TAG_DEF(fp16, fp16_t, FLOAT16)
+  default:
+    LOG(FATAL) << "unknown type " << element_type << " name=" << name;
+  }
+}
+static void prune_special_tensor_proto_for_graph(GraphRef target_graph,
+                                                 GraphConstRef original_graph,
+                                                 NodeArgConstRef node_arg) {
+  bool is_first_call = target_graph == original_graph;
+  std::string location = "";
+  location.reserve(1024);
+  size_t size = 0;
+  size_t offset = 0;
+  size_t checksum = 0;
+  int external_data = VAIP_ORT_API(node_arg_external_location)(
+      original_graph, node_arg, location, offset, size, checksum);
+  CHECK_LE(location.size(), 1024)
+      << "External data location is too long: " << location.size();
+  if (external_data && !location.empty() && (location.front() == '<')) {
+    auto new_original_graph = get_original_graph(location.substr(1));
+    prune_special_tensor_proto_for_graph(target_graph, new_original_graph,
+                                         node_arg);
+  } else if (!is_first_call) {
+    auto& original_tensor = vaip_core::node_arg_get_const_data_as_tensor(
+        original_graph, node_arg /*hopefully, only node arg name is used.*/);
+    if (external_data && !location.empty() && (location.front() == '*')) {
+      VAIP_ORT_API(graph_remove_initialized_tensor)
+      (target_graph, node_arg.name());
+      revert_mem_tag_tensor(target_graph, node_arg.name(),
+                            node_arg.element_type(), node_arg.shape(), offset,
+                            size);
+    } else {
+      VAIP_ORT_API(graph_remove_initialized_tensor)
+      (target_graph, node_arg.name());
+      VAIP_ORT_API(graph_add_initialized_tensor)
+      (target_graph, original_tensor);
+    }
+  }
+}
+void GraphRef::prune_special_tensor_proto() {
+#if VAIP_ORT_API_MAJOR >= 7
+
+  auto all = constant_initializers();
+  for (auto node_arg : all) {
+    prune_special_tensor_proto_for_graph(*this, *this, node_arg);
+  }
+#endif
 }
 } // namespace vaip_cxx
