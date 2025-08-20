@@ -115,6 +115,43 @@ OrtStatus* IRConverterImp::convert_graph_inputs(vaip_core::Graph& graph) const {
   MY_LOG(2) << "Converted " << inputs.size() << " inputs";
   return nullptr;
 }
+
+std::vector<vaip_core::NodeArg*>
+IRConverterImp::gueess_missing_output(std::vector<vaip_core::NodeArg*> outputs,
+                                      vaip_core::Graph& graph) const {
+  // gueess output
+  auto nodes = graph_.nodes();
+  for (auto& node : nodes) {
+    std::vector<const OrtValueInfo*> node_outputs = {};
+    size_t num_of_outputs = 0;
+    throw_if_error(ort_api.Node_GetNumOutputs(node, &num_of_outputs));
+    node_outputs.resize(num_of_outputs);
+    throw_if_error(
+        ort_api.Node_GetOutputs(node, node_outputs.data(), num_of_outputs));
+    for (auto output : node_outputs) {
+      if (output != nullptr) { // output == nullptr mean optionsl argument.
+        size_t num_consumer;
+        throw_if_error(
+            ort_api.ValueInfo_GetValueNumConsumers(output, &num_consumer));
+        if (num_consumer == 0) {
+          // Create ValueInfo wrapper for the output
+          auto value_info = Ort::ConstValueInfo(output);
+          vaip_core::NodeArg* node_arg = nullptr;
+          throw_if_error(
+              convert_value_info_proto(value_info, graph, &node_arg));
+          CHECK(node_arg != nullptr);
+          if (std::find(outputs.begin(), outputs.end(), node_arg) ==
+              outputs.end()) {
+            outputs.push_back(node_arg);
+            MY_LOG(3) << "Added output: " << value_info.Name();
+          }
+        }
+      }
+    }
+  }
+  return outputs;
+}
+
 OrtStatus*
 IRConverterImp::convert_graph_outputs(vaip_core::Graph& graph) const {
   MY_LOG(2) << "Converting graph outputs to ONNX format";
@@ -132,6 +169,9 @@ IRConverterImp::convert_graph_outputs(vaip_core::Graph& graph) const {
     new_outputs.push_back(node_arg);
     MY_LOG(3) << "Added output: " << value_info.Name();
   }
+  // gueess output
+  new_outputs = gueess_missing_output(new_outputs, graph);
+
   VAIP_ORT_API(graph_set_outputs)(graph, new_outputs);
   MY_LOG(2) << "Converted " << outputs.size() << " outputs";
   return nullptr;
