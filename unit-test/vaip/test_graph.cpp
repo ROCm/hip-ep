@@ -92,11 +92,11 @@ TEST_F(GraphTest, CloneAndSave) {
   auto cloned_model = model->ref().clone();
   auto main_graph = cloned_model->main_graph();
   auto output_dir = CMAKE_CURRENT_BINARY_PATH;
-  auto resnet50_file = output_dir / "resnet50_cloned.onnx";
+  auto resnet50_file = output_dir / "resnet50_for_mut_save.onnx";
   LOG(INFO) << " save graph to " << resnet50_file;
   auto filter_out_special_tensor = true;
-  main_graph.mut_save(resnet50_file.u8string(), "resnet50.dat", 128u,
-                      filter_out_special_tensor);
+  main_graph.mut_save(resnet50_file.u8string(), "resnet50_for_mut_save.dat",
+                      128u, filter_out_special_tensor);
 }
 TEST_F(GraphTest, FindNodeArgGraphInput) {
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);

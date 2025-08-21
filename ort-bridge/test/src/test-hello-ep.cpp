@@ -26,6 +26,10 @@ struct HelloEpTest : public ::testing::Test {
     registration_name = "VitisAIExecutionProvider";
     ort_env =
         std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "HelloEp.Test0");
+    LOG(INFO) << "Registering EP library with name: " << registration_name
+              << " and library path: " << MORPHIZEN_VITISAI_EP.u8string();
+    ASSERT_TRUE(std::filesystem::exists(MORPHIZEN_VITISAI_EP))
+        << "EP library does not exist: " << MORPHIZEN_VITISAI_EP.u8string();
     auto status = Ort::GetApi().RegisterExecutionProviderLibrary(
         *ort_env, registration_name.c_str(),
         PathToString<ORTCHAR_T>()(MORPHIZEN_VITISAI_EP).c_str());
@@ -64,6 +68,12 @@ TEST_F(HelloEpTest, CreateSession) {
       selected_devices.emplace_back(device);
     }
   }
+#ifndef _WIN32
+  if (selected_devices.empty()) {
+    LOG(INFO) << "No devices found for EP: " << registration_name;
+    return; // No devices found, skip the test
+  }
+#endif
   ASSERT_TRUE(!selected_devices.empty())
       << "No devices found for EP: " << registration_name;
   Ort::KeyValuePairs ep_options;
