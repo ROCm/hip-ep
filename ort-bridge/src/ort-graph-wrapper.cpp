@@ -27,7 +27,9 @@ int64_t OrtGraphWrapper::ir_version() const {
   throw_if_error(ort_api.Graph_GetOnnxIRVersion(p_, &ret));
   return ret;
 }
-
+Ort::ModelMetadata OrtGraphWrapper::get_model_metadata() const {
+  return Ort::ConstGraph(this->p_).GetModelMetadata();
+}
 // Convenience methods that copy to vector
 std::vector<const OrtNode*> OrtGraphWrapper::nodes() const {
   auto ret = std::vector<const OrtNode*>{};

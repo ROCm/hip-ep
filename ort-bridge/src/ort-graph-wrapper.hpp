@@ -34,6 +34,7 @@ struct OrtGraphWrapper
 
   // Convenience methods that immediately copy to vector (for short-lived
   // access)
+  Ort::ModelMetadata get_model_metadata() const;
   std::vector<const OrtNode*> nodes() const;
   std::vector<const OrtValueInfo*> inputs() const;
   std::vector<const OrtValueInfo*> outputs() const;

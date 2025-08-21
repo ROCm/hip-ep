@@ -17,6 +17,8 @@ public:
 
   OrtStatus* convert_to_model(vaip_core::Model& model)
       const; // Instance method for converting to ONNX graph
+  OrtStatus* convert_metadata(vaip_core::Graph& graph,
+                              vaip_core::Model& model) const;
   OrtStatus* convert_graph(vaip_core::Graph& graph) const;
 
   void save_model_for_debugging(const vaip_core::Model& model) const;

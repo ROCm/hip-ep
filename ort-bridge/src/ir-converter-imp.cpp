@@ -46,11 +46,27 @@ OrtStatus* IRConverterImp::convert_to_model(vaip_core::Model& model) const {
   // This is a stub implementation. Replace with actual conversion logic.
   MY_LOG(1) << "graph name =" << graph_.name();
   auto& main_graph = VAIP_ORT_API(model_main_graph)(model);
+
+  throw_if_error(convert_metadata(main_graph, model));
   throw_if_error(convert_graph(main_graph));
 
   // Save converted model to file for debugging if enabled
   save_model_for_debugging(model);
 
+  return nullptr;
+}
+OrtStatus* IRConverterImp::convert_metadata(vaip_core::Graph& /*graph*/,
+                                            vaip_core::Model& model) const {
+  Ort::AllocatorWithDefaultOptions allocator;
+  auto metadata = graph_.get_model_metadata();
+  auto customized_keys = metadata.GetCustomMetadataMapKeysAllocated(allocator);
+  for (auto& key : customized_keys) {
+    auto value =
+        metadata.LookupCustomMetadataMapAllocated(key.get(), allocator);
+    auto cxx_key = std::string(key.get());
+    auto cxx_value = std::string(value.get());
+    VAIP_ORT_API(model_set_meta_data)(model, cxx_key, cxx_value);
+  }
   return nullptr;
 }
 

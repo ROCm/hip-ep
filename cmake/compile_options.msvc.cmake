@@ -56,6 +56,7 @@ set(MORPHIZEN_COMPILER_OPTIONS
   # TODO: fix the following warning
   /wd4251 #warning C4251: needs to have dll-interface to be used by clients of
   /wd4275 #warning C4275: non dll-interface class
+  /utf-8
   CACHE STRING "Compiler options for Morphizen"
 )
 
