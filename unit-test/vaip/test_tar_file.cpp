@@ -15,7 +15,7 @@
 TEST(TarFileTest, ReadFrom) {
   auto tarFileName = CMAKE_CURRENT_BINARY_PATH / "sample.src.tar";
   auto tarStream = std::make_unique<std::fstream>(
-      tarFileName, std::ios::binary | std::ios::in | std::ios::out);
+      tarFileName, std::ios::binary | std::ios::in);
   auto tar_file_obj = vaip_core::TarFile::create(std::move(tarStream));
   ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
   for (auto& entry : tar_file_obj->entries()) {
@@ -31,7 +31,7 @@ TEST(TarFileTest, DoubleRead) {
   auto tarFileName = CMAKE_CURRENT_BINARY_PATH / "sample.src.tar";
 
   auto tarStream = std::make_unique<std::fstream>(
-      tarFileName, std::ios::binary | std::ios::in | std::ios::out);
+      tarFileName, std::ios::binary | std::ios::in);
   ASSERT_TRUE(tarStream->is_open())
       << "Failed to open tar file: " << tarFileName
       << " Error opening file: " << std::strerror(errno);
