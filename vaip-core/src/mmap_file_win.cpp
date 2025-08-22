@@ -40,7 +40,9 @@ std::unique_ptr<MemFile> MemFileWin::create(const std::filesystem::path& path) {
       FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
       FILE_ATTRIBUTE_NORMAL, nullptr);
   if (handle == INVALID_HANDLE_VALUE) {
-    std::string error_msg = "CreateFileW failed: " + GetLastErrorAsString();
+    std::string error_msg = "CreateFileW \"" + path.u8string() +
+                            "\" failed: " + GetLastErrorAsString();
+    ;
     throw std::runtime_error(error_msg);
   }
   auto size = GetFileSize(

@@ -8,7 +8,13 @@
 #include <gtest/gtest.h>
 TEST(MMapfileTest, create) {
 #ifdef _WIN32
-  auto mmap_file = vaip_core::MemFile::create(RESNET_50_PATH);
+  auto RESNET_50_PATH_MMAP =
+      RESNET_50_PATH.parent_path() / "MMapfileTest.create";
+  std::filesystem::copy_file(
+      RESNET_50_PATH, RESNET_50_PATH_MMAP,
+      std::filesystem::copy_options::overwrite_existing |
+          std::filesystem::copy_options::update_existing);
+  auto mmap_file = vaip_core::MemFile::create(RESNET_50_PATH_MMAP);
   ASSERT_TRUE(mmap_file) << "Failed to create MMapFile object";
   auto mmap_file_obj = std::move(mmap_file);
   ASSERT_TRUE(mmap_file_obj->base() != nullptr)
