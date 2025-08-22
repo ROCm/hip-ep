@@ -83,8 +83,8 @@ public:
       const std::function<bool(const NodeIndex&)>& enter,
       const std::function<bool(const NodeIndex&)>& leave,
       const std::function<bool(const NodeIndex&, const NodeIndex&)>& comp,
-      const std::function<bool(const NodeIndex&, const NodeIndex&)>& stop)
-      const;
+      const std::function<bool(const NodeIndex&, const NodeIndex&)>& stop,
+      bool include_staging_graph) const;
 
   // I/O operations
   void save(const std::string& filename, const std::string& dat_filename,
@@ -165,7 +165,7 @@ private:
       const std::function<bool(const NodeIndex&)>& leave,
       const std::function<bool(const NodeIndex&, const NodeIndex&)>& comp,
       const std::function<bool(const NodeIndex&, const NodeIndex&)>& stop,
-      bool use_return_values) const;
+      bool include_staging_graph) const;
 
   // Staging graph management
   void ensure_enter_into_inconsistent_state() const;

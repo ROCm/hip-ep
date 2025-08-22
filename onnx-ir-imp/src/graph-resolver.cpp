@@ -425,7 +425,7 @@ void GraphResolver::resolve_nodes() {
         }
         return false; // we do not stop travales.
       },
-      nullptr /*compare*/, nullptr /* if*/);
+      nullptr /*compare*/, nullptr /* if*/, true /*include_staging_graph*/);
   MY_LOG(1) << "GraphResolver::resolve_nodes() - Completed with "
             << resolved_graph_proto_.node_size() << " total nodes";
 }

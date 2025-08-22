@@ -572,10 +572,11 @@ void Graph::reverse_dfs_from_preemp(
     const std::function<bool(const NodeIndex&)>& enter,
     const std::function<bool(const NodeIndex&)>& leave,
     const std::function<bool(const NodeIndex&, const NodeIndex&)>& comp,
-    const std::function<bool(const NodeIndex&, const NodeIndex&)>& stop) const {
+    const std::function<bool(const NodeIndex&, const NodeIndex&)>& stop,
+    bool include_staging_graph) const {
 
   // Call common implementation with sorting and return value handling
-  reverse_dfs_from_impl(from, enter, leave, comp, stop, true);
+  reverse_dfs_from_impl(from, enter, leave, comp, stop, include_staging_graph);
 }
 
 void Graph::set_graph_name(const char* name) const {
@@ -768,8 +769,8 @@ void Graph::reverse_dfs_from_impl(
     const std::function<bool(const NodeIndex&)>& leave,
     const std::function<bool(const NodeIndex&, const NodeIndex&)>& comp,
     const std::function<bool(const NodeIndex&, const NodeIndex&)>& stop,
-    bool use_return_values) const {
-
+    bool include_staging_graph) const {
+  constexpr bool use_return_values = true;
   using WorkEntry = std::pair<NodeIndex, bool>; // bool represents leave or not
   std::vector<WorkEntry> stack;
   stack.reserve(from.size());
@@ -851,6 +852,13 @@ void Graph::reverse_dfs_from_impl(
         if (!producer_idx.is_valid()) {
           continue;
         }
+        // do not include staging graph for dfs
+        // For PSS fuse_transpose pass time :  31,726ms -> 9994ms
+        if (!include_staging_graph) {
+          if (producer_idx.get_graph_id().is_staging()) {
+            continue;
+          }
+        }
 
         // Check stop condition
         if (stop && stop(node_idx, producer_idx)) {
@@ -867,8 +875,18 @@ void Graph::reverse_dfs_from_impl(
       if (comp && !producer_nodes.empty()) {
         std::sort(producer_nodes.begin(), producer_nodes.end(), comp);
       } // Add producer nodes to stack (sorted if comp was provided)
-      for (const auto& producer_idx : producer_nodes) {
-        stack.emplace_back(producer_idx, false);
+      // Note: we use rbegin & rend to reverse the order of processing (same
+      // with onnxruntime) . because we want to process the last producer node
+      // first, which is important for certain optimizations.
+      // Usually, in models there are many Q/DQ ops. The inputs of a Q/DQ op are
+      // (X, scale, zero_point), where scale and zero_point are typically
+      // initializers. Traversing the X node first is more effective for pattern
+      // matching.
+      // e.g. PSS fuse_transpose pass profiling :
+      // The first transpose matching , visited_counter is 23 -> 13
+      // The fuse_transpose pass time : 9994ms -> 228ms
+      for (auto i = producer_nodes.rbegin(); i != producer_nodes.rend(); ++i) {
+        stack.emplace_back(*i, false); // OK.
       }
     }
   }

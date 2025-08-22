@@ -1466,7 +1466,7 @@ void VaipOrtApiTest::Test19_add_sin_op_before_relu_op() {
         new_relu_inputs, new_relu_outputs, *new_relu_attrs, "");
 
     {
-      LOG(INFO) << "DFS the unresolved graph to ensure all nodes are connected";
+      wrapped_api_->graph_resolve(graph, true);
       auto topo_node_indices =
           vaip_core::graph_get_node_in_topoligical_order(graph);
       for (auto node_index : topo_node_indices) {

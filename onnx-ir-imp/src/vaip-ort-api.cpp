@@ -397,9 +397,10 @@ static void initialize_dummy_api() {
     : std::function<bool(const NodeIndex&, const NodeIndex&)>{};
 
     // Call the morphizen graph reverse_dfs_from method
+    bool include_staging_graph = false; // keep same ORT semantics
     morphizen_graph->reverse_dfs_from_preemp(
         gsl::span<const NodeIndex>(node_indices), enter_wrapper, leave_wrapper,
-        nullptr, stop_wrapper);
+        nullptr, stop_wrapper, include_staging_graph);
   };
   // Node API functions [24-33]
   the_instance_of_vaip_ort_api.node_get_name =
@@ -1299,9 +1300,11 @@ static void initialize_dummy_api() {
                          const morphizen::NodeIndex&)>();
 
     // Call the morphizen graph method with converted parameters
+    bool include_staging_graph =
+        false; // keep same semantic with ORT implementation
     morphizen_graph->reverse_dfs_from_preemp(
         gsl::span<const morphizen::NodeIndex>(morphizen_from), morphizen_enter,
-        morphizen_leave, morphizen_comp, morphizen_stop);
+        morphizen_leave, morphizen_comp, morphizen_stop, include_staging_graph);
   };
 
   the_instance_of_vaip_ort_api.graph_set_name = [](vaip_core::Graph& graph,
