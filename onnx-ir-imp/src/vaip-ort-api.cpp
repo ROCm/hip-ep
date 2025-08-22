@@ -461,18 +461,15 @@ static void initialize_dummy_api() {
       [](const vaip_core::Node& node)
       -> vaip_core::DllSafe<std::vector<const vaip_core::NodeArg*>> {
     auto node_index = NodeIndex::from_vaip_core_node_ptr(&node);
-    auto output_node_args =
+    auto& output_node_args =
         node_index.get_output_node_args(); // Get outputs as NodeArgIndex
-    auto result = std::vector<const vaip_core::NodeArg*>();
-    result.reserve(output_node_args.size());
-    for (const auto& output_arg : output_node_args) {
-      CHECK(output_arg.is_valid())
-          << "NodeArgIndex is not valid in node_get_output_node_args_unsafe";
-      // Convert NodeArgIndex to vaip_core::NodeArg*
-      result.push_back(static_cast<const vaip_core::NodeArg*>(
-          output_arg.to_vaip_core_node_arg_ptr()));
-    }
-    return vaip_core::DllSafe<std::vector<const vaip_core::NodeArg*>>(result);
+    // optimize this API impl (ref PR#362)
+    // The PSS fuse_transpose pass time : 228ms -> 179ms
+    auto ret = std::vector<const vaip_core::NodeArg*>(
+        *reinterpret_cast<const std::vector<const vaip_core::NodeArg*>*>(
+            &output_node_args));
+    return vaip_core::DllSafe<std::vector<const vaip_core::NodeArg*>>(
+        std::move(ret));
   };
 
   the_instance_of_vaip_ort_api.node_get_attributes =

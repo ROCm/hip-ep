@@ -221,14 +221,14 @@ public:
    * @return Vector of NodeArgIndex representing inputs
    * @note Returns empty vector if node has no inputs
    */
-  std::vector<NodeArgIndex> get_input_node_args() const;
+  const std::vector<NodeArgIndex>& get_input_node_args() const;
 
   /**
    * @brief Get all output node arguments produced by this node
    * @return Vector of NodeArgIndex representing outputs
    * @note Returns empty vector if node has no outputs
    */
-  std::vector<NodeArgIndex> get_output_node_args() const;
+  const std::vector<NodeArgIndex>& get_output_node_args() const;
 
   /**
    * @brief Get ONNX attributes associated with this node

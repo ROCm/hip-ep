@@ -176,11 +176,11 @@ const std::string& NodeIndex::get_description() const {
   return node_proto.doc_string();
 }
 
-std::vector<NodeArgIndex> NodeIndex::get_input_node_args() const {
+const std::vector<NodeArgIndex>& NodeIndex::get_input_node_args() const {
   const auto& node = get_node();
   return node.get_inputs();
 }
-std::vector<NodeArgIndex> NodeIndex::get_output_node_args() const {
+const std::vector<NodeArgIndex>& NodeIndex::get_output_node_args() const {
   const auto& node = get_node();
   return node.get_outputs();
 }
