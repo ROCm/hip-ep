@@ -286,6 +286,8 @@ message PassVaimlConfigProto {
   optional uint64 max_spill_buffer_size = 46;
   optional string ref_model_path = 47;
   optional bool single_file_cache = 48;
+  optional float preemption_interval = 49;
+  optional float npu_frequency = 50;
 
   optional bool supported_node_mode = 101;
   optional bool binary_module = 102;
