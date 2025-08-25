@@ -13,8 +13,8 @@ function Run {
     &  $Args[0] $Args[1..$Args.Length]
     # Check the exit code
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "[fail] '$($Args -join ' ')' failed with exit code $LASTEXITCODE"
+        Write-Error " $(Get-Date) [fail] '$($Args -join ' ')' failed with exit code $LASTEXITCODE"
         exit $LASTEXITCODE
     }
-    Write-Host "[ok]     :  $($Args -join ' ')"
+    Write-Host "$(Get-Date) [ok]     :  $($Args -join ' ')"
 }

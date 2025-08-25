@@ -94,7 +94,7 @@ multiple_session_gen_and_run_embed_ctx = {
                         },
                     },
                     {
-                        "model_path": "resnet50.onnx",
+                        "model_path": "pt_resnet50.onnx",
                         "session_count": 1,
                         "run": {
                             "run_count": 1,
@@ -141,6 +141,7 @@ single_session_gen_and_run_non_embed_no_prefix_ctx = {
                     "provider_options": {
                         "log_level": "info",
                         "use_cache_key_prefix": "0",
+                        "enable_cache_file_io_in_mem": "1",
                     }
                 },
                 "session": [

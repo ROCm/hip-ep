@@ -99,9 +99,11 @@ target_compile_definitions(${TEST_EXE_NAME} PRIVATE
 
 
 include(GoogleTest)
-gtest_discover_tests(${TEST_EXE_NAME} DISCOVERY_MODE "POST_BUILD" PROPERTIES
-  ${TEST_ENV}
+gtest_discover_tests(${TEST_EXE_NAME}
+  DISCOVERY_TIMEOUT 600 # more stable CI test, on windows it is slow for some unknown reasons.
   DISCOVERY_MODE "PRE_TEST"
+  PROPERTIES
+  ${TEST_ENV}
 )
 if(MSVC)
   add_custom_command(

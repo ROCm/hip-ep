@@ -30,9 +30,14 @@ template <typename T> static void show_entry(const T& entry) {
             << " size=" << entry->size();
 }
 TEST(MMapfileTest, CreateTar) {
-  auto tarFileName = CMAKE_CURRENT_BINARY_PATH / "sample.src.tar";
-
-  auto tar_file_obj = vaip_core::TarFile::create_from_path(tarFileName);
+  auto tarFileName1 = CMAKE_CURRENT_BINARY_PATH / "sample.src.tar";
+  auto tarFileName2 =
+      CMAKE_CURRENT_BINARY_PATH / "sample.src.tar.MMapfileTest.CreateTar";
+  std::filesystem::copy_file(
+      tarFileName1, tarFileName2,
+      std::filesystem::copy_options::overwrite_existing |
+          std::filesystem::copy_options::update_existing);
+  auto tar_file_obj = vaip_core::TarFile::create_from_path(tarFileName2);
   ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
   for (auto& entry : tar_file_obj->entries()) {
     show_entry(entry);
@@ -44,10 +49,15 @@ TEST(MMapfileTest, CreateTar) {
 }
 
 TEST(MMapfileTest, CreateTarNoMMap) {
-  auto tarFileName = CMAKE_CURRENT_BINARY_PATH / "sample.src.tar";
-
+  auto tarFileName1 = CMAKE_CURRENT_BINARY_PATH / "sample.src.tar";
+  auto tarFileName2 =
+      CMAKE_CURRENT_BINARY_PATH / "sample.src.tar.MMapfileTest.CreateTarNoMMap";
+  std::filesystem::copy_file(
+      tarFileName1, tarFileName2,
+      std::filesystem::copy_options::overwrite_existing |
+          std::filesystem::copy_options::update_existing);
   auto tar_file_obj =
-      vaip_core::TarFile::create_from_path(tarFileName, false /*enable mmap*/);
+      vaip_core::TarFile::create_from_path(tarFileName2, false /*enable mmap*/);
   ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
   for (auto& entry : tar_file_obj->entries()) {
     show_entry(entry);

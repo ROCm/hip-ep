@@ -69,9 +69,12 @@ set_target_properties(${TEST_EXE_NAME} PROPERTIES
       VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
       VS_DEBUGGER_COMMAND_ARGUMENTS "--gtest_filter=HelloEpTest.CreateSession"
       VS_DEBUGGER_ENVIRONMENT "${ENVS}"
+      WIN32_EXECUTABLE FALSE  # Ensures console subsystem
 )
 include(GoogleTest)
-gtest_discover_tests(${TEST_EXE_NAME} DISCOVERY_MODE "POST_BUILD" PROPERTIES
-  ${TEST_ENV}
+gtest_discover_tests(${TEST_EXE_NAME} DISCOVERY_MODE "POST_BUILD"
+  DISCOVERY_TIMEOUT 600
   DISCOVERY_MODE "PRE_TEST"
+  PROPERTIES
+  ${TEST_ENV}
 )

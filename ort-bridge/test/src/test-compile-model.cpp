@@ -46,6 +46,7 @@ TEST_F(CompileModel, T0) {
   auto model_path = VAIP_ORT_API(get_model_path)(graph);
   OrtStatus* status = nullptr;
   auto provider_options = std::unordered_map<std::string, std::string>{};
+  provider_options["enable_cache_file_io_in_mem"] = "1";
   auto execution_providers = std::make_unique<vaip_core::DllSafe<
       std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>>>(
       compile_onnx_model_vitisai_ep_with_error_handling(

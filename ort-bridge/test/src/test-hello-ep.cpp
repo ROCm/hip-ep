@@ -77,6 +77,7 @@ TEST_F(HelloEpTest, CreateSession) {
   ASSERT_TRUE(!selected_devices.empty())
       << "No devices found for EP: " << registration_name;
   Ort::KeyValuePairs ep_options;
+  ep_options.Add("enable_cache_file_io_in_mem", "1");
   auto ctx_model = std::filesystem::u8path("hello_ep_create_session_ctx.onnx");
   if (std::filesystem::exists(ctx_model)) {
     del_ctx_model(ctx_model);

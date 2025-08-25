@@ -58,31 +58,17 @@ bool arg_get(int argc, const char* argv[], const char* name) {
 }
 
 int main(int argc, const char* argv[]) {
-#if _WIN32
-#  ifdef _DEBUG
-  auto env_ci = getenv("CI");
-  auto ci = std::string(env_ci ? env_ci : "");
-  if (ci == "1") {
-    // Disable assertion dialog in CI
-    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
-    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
-    _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
-    _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
-    _CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_FILE);
-    _CrtSetReportFile(_CRT_WARN, _CRTDBG_FILE_STDERR);
+  testing::InitGoogleTest(&argc, (char**)argv);
+  if (arg_get(argc, argv, "--gtest_list_test_cases")) {
+    std::cout << "List all test cases:" << std::endl;
+    show_test_case();
+    return 0;
   }
-#  endif
-#endif
+
   auto ret = 0;
   {
     auto env =
         std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "vaip_unit_test");
-    testing::InitGoogleTest(&argc, (char**)argv);
-    if (arg_get(argc, argv, "--gtest_list_test_cases")) {
-      std::cout << "List all test cases:" << std::endl;
-      show_test_case();
-      return 0;
-    }
 
     ret = RUN_ALL_TESTS();
   }

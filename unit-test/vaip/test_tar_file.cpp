@@ -360,7 +360,6 @@ TEST(TarFileTest, WriteTo) {
       ASSERT_EQ(exit_code, 0)
           << "Failed to run tar command. Exit code: " << exit_code;
     }
-    auto morphizen_tar_exe_path = boost::process::search_path("tar");
   }
   // frehs read.
   {
