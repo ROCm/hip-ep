@@ -264,8 +264,8 @@ get_config_json(const onnxruntime::ProviderOptions& options) {
       std::string(kSessionConfig) + ".";
 
   for (const auto& entry : options) {
-    MY_LOG(1) << "process \"" << entry.first << "\"= \"" << entry.second
-              << "\"";
+    MY_LOG(1) << "process provider_option[\"" << entry.first << "\"]= \""
+              << entry.second << "\"";
     if (entry.first == "xclbin" && xclbin_in_config_file) {
       // FIXME: below comments might not be accurate.
       //
@@ -288,8 +288,46 @@ get_config_json(const onnxruntime::ProviderOptions& options) {
   }
   return ret;
 }
-
-std::string get_config_json_str(const onnxruntime::ProviderOptions& options) {
+extern "C" char** environ;
+static std::unordered_map<std::string, std::string>
+get_environment_variables() {
+  std::unordered_map<std::string, std::string> env_map;
+  for (auto env = environ; *env; ++env) {
+    MY_LOG(3) << "get environment variable: " << *env;
+    std::string key_value = *env;
+    size_t pos = key_value.find('=');
+    if (pos != std::string::npos) {
+      std::string key = key_value.substr(0, pos);
+      std::string value = key_value.substr(pos + 1);
+      env_map[key] = value;
+    }
+  }
+  return env_map;
+}
+static const onnxruntime::ProviderOptions get_provider_option_from_env_variable(
+    const onnxruntime::ProviderOptions& options) {
+  // enumerate all environment variables and check if the variable name start
+  // with "VITISAI_EP_PROVIER_OPTION."
+  const std::string prefix = "VITISAI_EP_PROVIDER_OPTION_";
+  onnxruntime::ProviderOptions ret = options;
+  for (const auto& entry : get_environment_variables()) {
+    if (entry.first.rfind(prefix, 0) == 0) {
+      // Extract the option name and value from the environment variable
+      std::string option_name = entry.first.substr(prefix.size());
+      std::string option_value = entry.second;
+      MY_LOG(1) << "set "
+                << "provider_options"
+                << "[\"" << option_name << "\"]=\"" << option_value
+                << "\" from \"${ENV:" << entry.first << "}\"=\"" << entry.second
+                << "\"";
+      // Set the option in the ProviderOptions
+      ret[option_name] = option_value;
+    }
+  }
+  return ret;
+}
+std::string get_config_json_str(const onnxruntime::ProviderOptions& options1) {
+  auto options = get_provider_option_from_env_variable(options1);
   try {
     auto data = vaip_core::get_config_json(options);
     auto ret = std::string();

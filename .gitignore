@@ -37,7 +37,6 @@
 /build.ninja/
 /compile_commands.json
 /tools/__pycache__/
-CMakePresets.json
 /.vscode/
 /MODULE.bazel.lock
 /bazel-*
