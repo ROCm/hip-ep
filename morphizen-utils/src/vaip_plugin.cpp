@@ -111,6 +111,8 @@ Plugin* Plugin::get(const std::string& plugin_name) {
   return it->second.get();
 }
 void* Plugin::my_plugin_sym(void* handle, const char* name) const {
+  if (!func_set_)
+    return nullptr;
   return func_set_->plugin_sym((plugin_t)handle, name);
 }
 
