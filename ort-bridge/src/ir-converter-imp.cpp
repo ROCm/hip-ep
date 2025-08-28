@@ -133,10 +133,27 @@ OrtStatus* IRConverterImp::convert_graph_inputs(vaip_core::Graph& graph) const {
 }
 
 std::vector<vaip_core::NodeArg*>
-IRConverterImp::gueess_missing_output(std::vector<vaip_core::NodeArg*> outputs,
-                                      vaip_core::Graph& graph) const {
-  // gueess output
+IRConverterImp::guess_missing_output(std::vector<vaip_core::NodeArg*> outputs,
+                                     vaip_core::Graph& graph) const {
+
   auto nodes = graph_.nodes();
+  // collect all inputs
+  std::unordered_set<const OrtValueInfo*> all_inputs;
+  for (auto& node : nodes) {
+    std::vector<const OrtValueInfo*> node_inputs = {};
+    size_t num_of_inputs = 0;
+    throw_if_error(ort_api.Node_GetNumInputs(node, &num_of_inputs));
+    node_inputs.resize(num_of_inputs);
+    throw_if_error(
+        ort_api.Node_GetInputs(node, node_inputs.data(), num_of_inputs));
+    for (auto input : node_inputs) {
+      if (input != nullptr) { // input == nullptr mean optional argument.
+        all_inputs.insert(input);
+      }
+    }
+  }
+
+  // guess output
   for (auto& node : nodes) {
     std::vector<const OrtValueInfo*> node_outputs = {};
     size_t num_of_outputs = 0;
@@ -145,11 +162,8 @@ IRConverterImp::gueess_missing_output(std::vector<vaip_core::NodeArg*> outputs,
     throw_if_error(
         ort_api.Node_GetOutputs(node, node_outputs.data(), num_of_outputs));
     for (auto output : node_outputs) {
-      if (output != nullptr) { // output == nullptr mean optionsl argument.
-        size_t num_consumer;
-        throw_if_error(
-            ort_api.ValueInfo_GetValueNumConsumers(output, &num_consumer));
-        if (num_consumer == 0) {
+      if (output != nullptr) { // output == nullptr mean optional argument.
+        if (all_inputs.count(output) == 0) {
           // Create ValueInfo wrapper for the output
           auto value_info = Ort::ConstValueInfo(output);
           vaip_core::NodeArg* node_arg = nullptr;
@@ -185,8 +199,8 @@ IRConverterImp::convert_graph_outputs(vaip_core::Graph& graph) const {
     new_outputs.push_back(node_arg);
     MY_LOG(3) << "Added output: " << value_info.Name();
   }
-  // gueess output
-  new_outputs = gueess_missing_output(new_outputs, graph);
+  // guess output
+  new_outputs = guess_missing_output(new_outputs, graph);
 
   VAIP_ORT_API(graph_set_outputs)(graph, new_outputs);
   MY_LOG(2) << "Converted " << outputs.size() << " outputs";

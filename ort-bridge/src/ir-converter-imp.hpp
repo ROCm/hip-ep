@@ -35,8 +35,8 @@ public:
                                 int* element_type,
                                 std::vector<int64_t>* shape) const;
   std::vector<vaip_core::NodeArg*>
-  gueess_missing_output(std::vector<vaip_core::NodeArg*> outputs,
-                        vaip_core::Graph& graph) const;
+  guess_missing_output(std::vector<vaip_core::NodeArg*> outputs,
+                       vaip_core::Graph& graph) const;
 
 private:
   OrtGraphWrapper graph_;
