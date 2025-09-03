@@ -1239,38 +1239,42 @@ void PassContextImp::print_version_info(const char* prefix) {
     LOG_VERBOSE(1) << prefix << version_info.package_name() << " ("
                    << version_info.version() << ") :" + version_info.commit();
   }
+  auto print_kv = [](int level, const char* prefix,
+                     std::pair<const std::string, std::string>& kv) {
+    if (kv.first != "encryption_key") {
+      LOG_VERBOSE(level) << prefix << ": " << kv.first << " = " << kv.second;
+    } else {
+      LOG_VERBOSE(level) << prefix << ": " << kv.first << " = "
+                         << "******";
+    }
+  };
   LOG_VERBOSE(1) << prefix << "cache_dir: " << config.cache_dir();
   LOG_VERBOSE(1) << prefix << "cache_key: " << config.cache_key();
   LOG_VERBOSE(1) << prefix << "log_dir: " << get_log_dir();
   for (auto& kv : provider_option_origin_) {
-    LOG_VERBOSE(3) << "provider_options_origin: " << kv.first << " = "
-                   << kv.second;
+    print_kv(3, "provider_option_from_origin", kv);
   }
   for (auto& kv : provider_option_from_cache_) {
-    LOG_VERBOSE(3) << "provider_options_from_cache: " << kv.first << " = "
-                   << kv.second;
+    print_kv(3, "provider_options_from_cache", kv);
   }
   for (auto& kv :
        // print sorted keys
        std::map<std::string, std::string>(config.provider_options().begin(),
                                           config.provider_options().end())) {
-    LOG_VERBOSE(3) << "provider_options_in_config: " << kv.first << " = "
-                   << kv.second;
+    print_kv(3, "provider_options_in_config", kv);
   }
   if (mep_config_proto_) {
     for (auto& kv : std::map<std::string, std::string>(
              mep_config_proto_->provider_options().begin(),
              mep_config_proto_->provider_options().end())) {
-      LOG_VERBOSE(3) << "provider_options_in_mep_table: " << kv.first << " = "
-                     << kv.second;
+      print_kv(3, "provider_options_in_mep_table", kv);
     }
   }
   if (target_proto_) {
     for (auto& kv : std::map<std::string, std::string>(
              target_proto_->provider_options().begin(),
              target_proto_->provider_options().end())) {
-      LOG_VERBOSE(3) << "provider_options_in_target_proto: " << kv.first
-                     << " = " << kv.second;
+      print_kv(3, "provider_options_in_target_proto", kv);
     }
   }
   for (auto& kv : config.session_configs()) {
@@ -1278,7 +1282,7 @@ void PassContextImp::print_version_info(const char* prefix) {
   }
   auto all_po = get_all_provider_options();
   for (auto& kv : all_po) {
-    LOG_VERBOSE(1) << "provider_option: " << kv.first << " = " << kv.second;
+    print_kv(1, "provider_option", kv);
   }
 }
 void PassContextImp::pass_context_update_context_json(
