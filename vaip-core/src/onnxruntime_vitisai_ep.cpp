@@ -102,19 +102,18 @@ private:
 };
 
 static OpHolder& get_global_op_holder() {
-  static auto instance = std::make_unique<OpHolder>();
-  static bool init = false;
-  if (init == false) {
-    init = true;
+  static std::unique_ptr<OpHolder> opholder_instance = nullptr;
+  if (!opholder_instance) {
+    opholder_instance = std::make_unique<OpHolder>();
 #if VAIP_ORT_API_MAJOR >= 17
     vaip_core::add_cleanup_function("cleanup global plugin store",
-                                    []() { instance.reset(); });
+                                    []() { opholder_instance.reset(); });
 #endif
     /*vaip_core::StaticPluginRegister(
         "onnxruntime_vitisai_ep", "morphizen_get_registered_custom_op",
         (void*)local_morphizen_get_registered_custom_op);*/
   }
-  return *instance;
+  return *opholder_instance;
 }
 
 static void
