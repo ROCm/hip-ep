@@ -13,6 +13,7 @@
 #  pragma GCC diagnostic ignored "-Wunused-but-set-variable"
 #endif
 #include <glog/logging.h>
+#define ORT_API_MANUAL_INIT 1
 #include <onnxruntime_cxx_api.h>
 #if _WIN32
 #  ifdef _DEBUG
@@ -66,6 +67,7 @@ bool arg_get(int argc, const char* argv[], const char* name) {
 }
 
 int main(int argc, const char* argv[]) {
+  Ort::InitApi();
 #if _WIN32
 #  ifdef _DEBUG
   auto env_ci = getenv("CI");

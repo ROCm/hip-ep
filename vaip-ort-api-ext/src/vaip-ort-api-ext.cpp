@@ -82,7 +82,7 @@ VAIP_DLL_SPEC void set_the_global_api(OrtApiForVaip* api) {
                << ", but vaip version is: " << get_vaip_version_major();
   }
   the_global_api = api;
-  Ort::Global<void>::api_ = api->ort_api_;
+  Ort::InitApi(api->ort_api_);
   typedef void* void_ptr_t;
   auto p = (void_ptr_t*)(&(api->host_)); // first api addr
   size_t api_size =

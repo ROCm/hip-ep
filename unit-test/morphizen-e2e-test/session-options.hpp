@@ -6,6 +6,7 @@
 #include "./session.hpp"
 #include "e2e_config_proto/test_case_config.pb.h"
 #include <memory>
+#define ORT_API_MANUAL_INIT 1
 #include <onnxruntime_cxx_api.h>
 
 namespace morphizen_e2e_test {

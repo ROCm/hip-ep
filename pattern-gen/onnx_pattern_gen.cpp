@@ -12,10 +12,8 @@
 #include <fstream>
 #include <unordered_map>
 #include <exception>
+#define ORT_API_MANUAL_INIT 1
 #include "onnxruntime_cxx_api.h"
-#ifdef ORT_API_MANUAL_INIT
-#error "HELLO, please use ORT_API_MANUAL_INIT=0 to build this file"
-#endif
 #include "morphizen/vaip.hpp"
 #include "morphizen/env_config.hpp"
 
@@ -673,6 +671,7 @@ static void usage(const char* programName) {
 // $BUILD/vaip/onnxruntime_vitisai_ep/onnx_pattern_gen -i 38 -o 62 -f $BUILD/../vaip_regression/5/Resnet18_int.onnx
 // clang-format on
 int main(int argc, char* argv[]) {
+  Ort::InitApi();
   try {
     auto opt_onnx_file = std::string();
     int opt = 0;

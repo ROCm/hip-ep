@@ -6,7 +6,6 @@
 #include "e2e_config_proto/test_case_config.pb.h"
 #include "session-options.hpp"
 #include <memory>
-#include <onnxruntime_cxx_api.h>
 
 namespace morphizen_e2e_test {
 

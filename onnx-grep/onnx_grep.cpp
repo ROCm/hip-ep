@@ -6,6 +6,7 @@
 #include <glog/logging.h>
 #include <exception>
 #include <limits>
+#define ORT_API_MANUAL_INIT 1
 #include "onnxruntime_cxx_api.h"
 #include "morphizen/vaip.hpp"
 
@@ -60,6 +61,7 @@ static void usage(const char* prog) {
 }
 
 int main(int argc, char* argv[]) {
+  Ort::InitApi();
   std::cout << "- ONNX Grep utility ..." << std::endl;
   try {
     auto file = std::string();

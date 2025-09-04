@@ -7,7 +7,7 @@ include(CheckSourceCompiles)
 
 
 set(HEADERS "${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime/core/session/onnxruntime_cxx_api.h")
-set(CODE_HEAD "#define ORT_API_MANUAL_INIT\n
+set(CODE_HEAD "#define ORT_API_MANUAL_INIT 1\n
 #include \"${HEADERS}\"\n
 int main() {
 ")

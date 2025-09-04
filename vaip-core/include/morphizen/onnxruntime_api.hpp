@@ -10,7 +10,7 @@
 #  pragma GCC diagnostic ignored "-Wunused-variable"
 #  pragma GCC diagnostic ignored "-Wunused-but-set-variable"
 #endif
-#define ORT_API_MANUAL_INIT
+#define ORT_API_MANUAL_INIT 1
 #include <core/session/onnxruntime_c_api.h>
 #include <core/session/onnxruntime_cxx_api.h>
 #include <core/session/onnxruntime_lite_custom_op.h>

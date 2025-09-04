@@ -4,6 +4,7 @@
  */
 #include "../../../unit-test/morphizen-e2e-test/wide-string.hpp"
 #include "./test-environment.hpp"
+#define ORT_API_MANUAL_INIT 1
 #include "onnxruntime_cxx_api.h"
 #include "gtest/gtest.h"
 #include <glog/logging.h>

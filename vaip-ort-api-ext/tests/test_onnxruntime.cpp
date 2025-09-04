@@ -7,6 +7,7 @@
 #include <vaip/vaip_ort_api.h>
 
 int main() {
+  Ort::InitApi();
   std::cout << "ONNXRuntime integration test successful!" << std::endl;
   std::cout << "API Version: " << ORT_API_VERSION << std::endl;
   std::cout << "VAIP_ORT_API Version: " << VAIP_ORT_API_MAJOR << "."

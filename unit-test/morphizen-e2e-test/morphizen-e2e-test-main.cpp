@@ -10,6 +10,7 @@
 #include <fstream>
 #include <glog/logging.h>
 #include <gtest/gtest.h>
+#define ORT_API_MANUAL_INIT 1
 #include <onnxruntime_cxx_api.h>
 #include <vector>
 
