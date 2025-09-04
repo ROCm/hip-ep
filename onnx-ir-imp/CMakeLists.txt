@@ -60,7 +60,9 @@ add_library(${LIB_NAME}
 
   src/core/graph/contrib_ops/contrib_defs.cc
 )
-
+target_sources(${LIB_NAME}
+     INTERFACE
+     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/onnx_protobuf.natvis>)
 ## compile time dependency
 set(ORT_INC  "")
 list(APPEND ORT_INC
