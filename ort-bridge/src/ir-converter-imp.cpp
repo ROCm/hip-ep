@@ -125,7 +125,7 @@ OrtStatus* IRConverterImp::convert_graph_inputs(vaip_core::Graph& graph) const {
     throw_if_error(convert_value_info_proto(value_info, graph, &node_arg));
     CHECK(node_arg != nullptr);
     new_inputs.push_back(node_arg);
-    MY_LOG(3) << "Added input: " << value_info.Name();
+    MY_LOG(3) << "Added input: " << value_info.GetName();
   }
   VAIP_ORT_API(graph_set_inputs)(graph, new_inputs);
   MY_LOG(2) << "Converted " << inputs.size() << " inputs";
@@ -173,7 +173,7 @@ IRConverterImp::guess_missing_output(std::vector<vaip_core::NodeArg*> outputs,
           if (std::find(outputs.begin(), outputs.end(), node_arg) ==
               outputs.end()) {
             outputs.push_back(node_arg);
-            MY_LOG(3) << "Added output: " << value_info.Name();
+            MY_LOG(3) << "Added output: " << value_info.GetName();
           }
         }
       }
@@ -197,7 +197,7 @@ IRConverterImp::convert_graph_outputs(vaip_core::Graph& graph) const {
     throw_if_error(convert_value_info_proto(value_info, graph, &node_arg));
     CHECK(node_arg != nullptr);
     new_outputs.push_back(node_arg);
-    MY_LOG(3) << "Added output: " << value_info.Name();
+    MY_LOG(3) << "Added output: " << value_info.GetName();
   }
   // guess output
   new_outputs = guess_missing_output(new_outputs, graph);
@@ -220,9 +220,9 @@ IRConverterImp::convert_graph_initializers(vaip_core::Graph& graph) const {
     throw_if_error(
         ort_api.ValueInfo_GetInitializerValue(value_info, &ort_value));
     if (ort_value == nullptr) {
-      MY_LOG(2) << "Initializer value is null for: " << value_info.Name();
+      MY_LOG(2) << "Initializer value is null for: " << value_info.GetName();
       throw_error(std::string("cannot get OrtValue from OrtValueInfo: name=") +
-                  value_info.Name());
+                  value_info.GetName());
     }
     // Get tensor type and shape information
     auto tensor_value = Ort::ConstValue(ort_value);
@@ -259,13 +259,13 @@ IRConverterImp::convert_graph_initializers(vaip_core::Graph& graph) const {
     auto tensor_proto = std::unique_ptr<vaip_core::TensorProto,
                                         void (*)(vaip_core::TensorProto*)>(
         VAIP_ORT_API_EXT(tensor_proto_new_raw_data)(
-            value_info.Name(), shape, element_type, tensor_data, data_size),
+            value_info.GetName(), shape, element_type, tensor_data, data_size),
         [](vaip_core::TensorProto* p) {
           VAIP_ORT_API(tensor_proto_delete)(p);
         });
 
     VAIP_ORT_API(graph_add_initialized_tensor)(graph, *tensor_proto);
-    MY_LOG(3) << "Added initializer: " << value_info.Name();
+    MY_LOG(3) << "Added initializer: " << value_info.GetName();
   }
 
   MY_LOG(2) << "Converted " << initializers.size() << " initializers";
@@ -279,7 +279,7 @@ IRConverterImp::convert_value_info_proto(const Ort::ConstValueInfo& value_info,
   // Get type information and convert it
   auto type_info = value_info.TypeInfo();
   auto shape = std::vector<int64_t>();
-  auto name = value_info.Name();
+  auto name = value_info.GetName();
   int element_type = 0; // Placeholder for element type
   throw_if_error(convert_type_proto(type_info, &element_type, &shape));
   auto existing_node_arg = VAIP_ORT_API(graph_get_node_arg)(graph, name);

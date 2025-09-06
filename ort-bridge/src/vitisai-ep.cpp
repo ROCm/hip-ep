@@ -322,7 +322,7 @@ static void update_argument_indice(
     auto& meta_def_name = meta_def_args[(int)j];
     bool found = false;
     for (size_t i = 0; i < node_value_infos.size(); ++i) {
-      auto name = Ort::ConstValueInfo(node_value_infos[i]).Name();
+      auto name = Ort::ConstValueInfo(node_value_infos[i]).GetName();
       if (name == meta_def_name) {
         argument_indices->Add((int32_t)i);
         found = true;
@@ -334,12 +334,12 @@ static void update_argument_indice(
   }
   if (ENV_PARAM(MORPHIZEN_DEBUG_VITISAI_EP) >= 1) {
     for (size_t i = 0; i < size; ++i) {
-      auto name = Ort::ConstValueInfo(node_value_infos[i]).Name();
+      auto name = Ort::ConstValueInfo(node_value_infos[i]).GetName();
       LOG(INFO) << " fused_node[" << i << "] = " << name;
     }
     for (size_t i = 0; i < size; ++i) {
       auto index = (*argument_indices)[(int)i];
-      auto name = Ort::ConstValueInfo(node_value_infos[index]).Name();
+      auto name = Ort::ConstValueInfo(node_value_infos[index]).GetName();
       LOG(INFO) << "meta_def_args[" << i << "] = " << meta_def_args[(int)i]
                 << " => fused[" << index << "] " << name;
     }
@@ -597,12 +597,12 @@ OrtNode* VitisAIEP::convert_vaip_node_to_ort_node(
   std::transform(fused_node_inputs.begin(), fused_node_inputs.end(),
                  std::back_inserter(input_names_2),
                  [](const OrtValueInfo* input) {
-                   return Ort::ConstValueInfo(input).Name();
+                   return Ort::ConstValueInfo(input).GetName();
                  });
   std::transform(fused_node_outputs.begin(), fused_node_outputs.end(),
                  std::back_inserter(output_names_2),
                  [](const OrtValueInfo* output) {
-                   return Ort::ConstValueInfo(output).Name();
+                   return Ort::ConstValueInfo(output).GetName();
                  });
   std::set<std::string> ort_input_names(input_names_2.begin(),
                                         input_names_2.end());
@@ -718,7 +718,7 @@ get_supported_nodes(const vaip_core::ExecutionProvider& ep,
 
           // Get the output name
           auto output_value_info = Ort::ConstValueInfo(output);
-          std::string output_name = output_value_info.Name();
+          std::string output_name = output_value_info.GetName();
           size_t node_id = 0u;
           graph_viewer.throw_if_error(
               graph_viewer.ort_api.Node_GetId(node, &node_id));
