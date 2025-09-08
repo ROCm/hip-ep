@@ -62,7 +62,7 @@ message ConfigProto {
   // static table for whitelist for xclbin, vaip_config
   repeated MepConfigTable mep_table = 100;
 
-  optional bool enable_cache_file_io_in_mem = 1024;
+  // optional bool enable_cache_file_io_in_mem = 1024; // obsoleted
 }
 
 message MepConfigTable {
