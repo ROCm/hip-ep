@@ -165,22 +165,48 @@ TEST_F(TarBallTest, CompressTest) {
   }
 }
 
-TEST_F(TarBallTest, Encrypt_Test) {
+TEST_F(TarBallTest, AES_Encrypt_Test) {
   auto data = generateRandomString(65536);
   auto key = generateRandomString(32);
   std::stringstream data_ss;
   data_ss << data;
   std::stringstream encrypted_str;
   auto writer1 = StringStreamWriter(encrypted_str);
-  vaip_encryption::aes_encryption(StringStreamReader(data_ss), writer1, key);
+  vaip_encryption::encryption(StringStreamReader(data_ss), writer1, key,
+                              vaip_encryption::CryptoAlgorithm::AES);
   // debug info
   std::cout << data.substr(0, 10) << " has been encrypt to "
             << encrypted_str.str().substr(0, 10) << std::endl;
 
   std::stringstream decrypted_str;
   auto writer2 = StringStreamWriter(decrypted_str);
-  vaip_encryption::aes_decryption(StringStreamReader(encrypted_str), writer2,
-                                  key);
+  vaip_encryption::decryption(StringStreamReader(encrypted_str), writer2, key,
+                              vaip_encryption::CryptoAlgorithm::AES);
+  std::cout << encrypted_str.str().substr(0, 10) << " has been encrypt to "
+            << decrypted_str.str().substr(0, 10) << std::endl;
+
+  ASSERT_TRUE(data == decrypted_str.str());
+}
+
+TEST_F(TarBallTest, XChaCha20_Poly1305_Encrypt_Test) {
+  auto data = generateRandomString(65536);
+  auto key = generateRandomString(32);
+  std::stringstream data_ss;
+  data_ss << data;
+  std::stringstream encrypted_str;
+  auto writer1 = StringStreamWriter(encrypted_str);
+  vaip_encryption::encryption(
+      StringStreamReader(data_ss), writer1, key,
+      vaip_encryption::CryptoAlgorithm::XChaCha20_Poly1305);
+  // debug info
+  std::cout << data.substr(0, 10) << " has been encrypt to "
+            << encrypted_str.str().substr(0, 10) << std::endl;
+
+  std::stringstream decrypted_str;
+  auto writer2 = StringStreamWriter(decrypted_str);
+  vaip_encryption::decryption(
+      StringStreamReader(encrypted_str), writer2, key,
+      vaip_encryption::CryptoAlgorithm::XChaCha20_Poly1305);
   std::cout << encrypted_str.str().substr(0, 10) << " has been encrypt to "
             << decrypted_str.str().substr(0, 10) << std::endl;
 

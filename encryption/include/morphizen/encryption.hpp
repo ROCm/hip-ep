@@ -9,8 +9,16 @@ class IStreamReader;
 class IStreamWriter;
 } // namespace vaip_core
 namespace vaip_encryption {
-void aes_encryption(const vaip_core::IStreamReader& src,
-                    vaip_core::IStreamWriter& dst, const std::string& key);
-void aes_decryption(const vaip_core::IStreamReader& src,
-                    vaip_core::IStreamWriter& dst, const std::string& key);
+enum class CryptoAlgorithm : int {
+  None = 0,
+  AES = 1,                // openssl
+  XChaCha20_Poly1305 = 2, // sodium
+};
+void encryption(const vaip_core::IStreamReader& src,
+                vaip_core::IStreamWriter& dst, const std::string& key,
+                CryptoAlgorithm algo = CryptoAlgorithm::XChaCha20_Poly1305);
+void decryption(const vaip_core::IStreamReader& src,
+                vaip_core::IStreamWriter& dst, const std::string& key,
+                CryptoAlgorithm algo);
+
 } // namespace vaip_encryption

@@ -15,9 +15,50 @@
 #include <algorithm>
 #include <array>
 #include <glog/logging.h>
+#include <sodium.h>
 #include <stdexcept>
-namespace vaip_encryption {
 
+namespace vaip_encryption {
+void aes_encryption(const vaip_core::IStreamReader& src,
+                    vaip_core::IStreamWriter& dst, const std::string& key);
+void aes_decryption(const vaip_core::IStreamReader& src,
+                    vaip_core::IStreamWriter& dst, const std::string& key);
+void XChaCha20_Poly1305_encryption(const vaip_core::IStreamReader& src,
+                                   vaip_core::IStreamWriter& dst,
+                                   const std::string& key);
+void XChaCha20_Poly1305_decryption(const vaip_core::IStreamReader& src,
+                                   vaip_core::IStreamWriter& dst,
+                                   const std::string& key);
+void encryption(const vaip_core::IStreamReader& src,
+                vaip_core::IStreamWriter& dst, const std::string& key,
+                CryptoAlgorithm algo) {
+  switch (algo) {
+  case CryptoAlgorithm::AES:
+    aes_encryption(src, dst, key);
+    break;
+  case CryptoAlgorithm::XChaCha20_Poly1305:
+    XChaCha20_Poly1305_encryption(src, dst, key);
+    break;
+  default:
+    LOG(WARNING) << "The model will not be encrypted due to algo = None";
+    break;
+  }
+}
+void decryption(const vaip_core::IStreamReader& src,
+                vaip_core::IStreamWriter& dst, const std::string& key,
+                CryptoAlgorithm algo) {
+  switch (algo) {
+  case CryptoAlgorithm::AES:
+    aes_decryption(src, dst, key);
+    break;
+  case CryptoAlgorithm::XChaCha20_Poly1305:
+    XChaCha20_Poly1305_decryption(src, dst, key);
+    break;
+  default:
+    LOG(WARNING) << "The model will not be decryption due to algo = None";
+    break;
+  }
+}
 void aes_encryption(const vaip_core::IStreamReader& src,
                     vaip_core::IStreamWriter& dst,
                     [[maybe_unused]] const std::string& key) {
@@ -128,5 +169,92 @@ void aes_decryption(const vaip_core::IStreamReader& src,
   }
   return;
 #endif
+}
+
+void XChaCha20_Poly1305_encryption(const vaip_core::IStreamReader& src,
+                                   vaip_core::IStreamWriter& dst,
+                                   const std::string& key) {
+  constexpr size_t CHUNK_SIZE = 4096;
+  // ensure k length = 32 bytes
+  unsigned char k[crypto_secretstream_xchacha20poly1305_KEYBYTES];
+  crypto_generichash(k, sizeof k,
+                     reinterpret_cast<const unsigned char*>(key.data()),
+                     key.size(), nullptr, 0);
+
+  crypto_secretstream_xchacha20poly1305_state state;
+  unsigned char header[crypto_secretstream_xchacha20poly1305_HEADERBYTES];
+  crypto_secretstream_xchacha20poly1305_init_push(&state, header, k);
+
+  dst.write(reinterpret_cast<const char*>(header), sizeof header);
+
+  while (true) {
+    auto chunk_opt = src.read(CHUNK_SIZE);
+    if (!chunk_opt || chunk_opt->empty())
+      break;
+    const unsigned char* chunk =
+        reinterpret_cast<const unsigned char*>(chunk_opt->data());
+    size_t len = chunk_opt->size();
+
+    std::vector<unsigned char> out(
+        len + crypto_secretstream_xchacha20poly1305_ABYTES);
+    unsigned long long outlen;
+    unsigned char tag = (len < CHUNK_SIZE)
+                            ? crypto_secretstream_xchacha20poly1305_TAG_FINAL
+                            : 0;
+
+    crypto_secretstream_xchacha20poly1305_push(&state, out.data(), &outlen,
+                                               chunk, len, nullptr, 0, tag);
+    dst.write(reinterpret_cast<const char*>(out.data()),
+              static_cast<size_t>(outlen));
+
+    if (tag == crypto_secretstream_xchacha20poly1305_TAG_FINAL)
+      break;
+  }
+}
+
+void XChaCha20_Poly1305_decryption(const vaip_core::IStreamReader& src,
+                                   vaip_core::IStreamWriter& dst,
+                                   const std::string& key) {
+  constexpr size_t CHUNK_SIZE = 4096;
+
+  unsigned char k[crypto_secretstream_xchacha20poly1305_KEYBYTES];
+  crypto_generichash(k, sizeof k,
+                     reinterpret_cast<const unsigned char*>(key.data()),
+                     key.size(), nullptr, 0);
+
+  auto header_opt = src.read(crypto_secretstream_xchacha20poly1305_HEADERBYTES);
+  if (!header_opt ||
+      header_opt->size() != crypto_secretstream_xchacha20poly1305_HEADERBYTES)
+    throw std::runtime_error("Failed to read header");
+
+  crypto_secretstream_xchacha20poly1305_state state;
+  crypto_secretstream_xchacha20poly1305_init_pull(
+      &state, reinterpret_cast<const unsigned char*>(header_opt->data()), k);
+
+  while (true) {
+    auto chunk_opt =
+        src.read(CHUNK_SIZE + crypto_secretstream_xchacha20poly1305_ABYTES);
+    if (!chunk_opt || chunk_opt->empty())
+      break;
+
+    const unsigned char* chunk =
+        reinterpret_cast<const unsigned char*>(chunk_opt->data());
+    size_t chunk_len = chunk_opt->size();
+
+    std::vector<unsigned char> out(chunk_len);
+    unsigned long long outlen;
+    unsigned char tag;
+
+    if (crypto_secretstream_xchacha20poly1305_pull(&state, out.data(), &outlen,
+                                                   &tag, chunk, chunk_len,
+                                                   nullptr, 0) != 0)
+      throw std::runtime_error("Decryption failed");
+
+    dst.write(reinterpret_cast<const char*>(out.data()),
+              static_cast<size_t>(outlen));
+
+    if (tag & crypto_secretstream_xchacha20poly1305_TAG_FINAL)
+      break;
+  }
 }
 } // namespace vaip_encryption

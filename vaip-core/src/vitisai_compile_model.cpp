@@ -630,7 +630,9 @@ static void get_ep_cache_context_common(PassContextImp& context,
         *reader,
         [](const IStreamReader& src, IStreamWriter& dst,
            const std::string& encryption_key) {
-          vaip_encryption::aes_encryption(src, dst, encryption_key);
+          vaip_encryption::encryption(
+              src, dst, encryption_key,
+              vaip_encryption::CryptoAlgorithm::XChaCha20_Poly1305);
         },
         encryption_key);
   }
@@ -818,11 +820,8 @@ create_ep_context_node(vaip_core::ExecutionProviderConcrete* ep, int index) {
   attrs.add("partition_name", name);
   attrs.add("enable_compression",
             (int64_t)ENV_PARAM(XLNX_EP_CONTEXT_ENABLE_COMPRESSION));
-  auto enable_encryption = 0;
-#ifdef WITHOPENSSL
-  enable_encryption =
-      context.context_proto.config().encryption_key().empty() ? 0 : 1;
-#endif
+  auto enable_encryption =
+      context.context_proto.config().encryption_key().empty() ? 0 : 2;
   attrs.add("enable_encryption", (int64_t)enable_encryption);
   attrs.add("cache_file_use_cache_key_prefix",
             (int64_t)context.cache_file_use_cache_key_prefix_);
@@ -1014,11 +1013,13 @@ store_cache_directory_from_main_node(PassContextImp& context,
         std::abort();
       }
       try {
+        auto algo =
+            static_cast<vaip_encryption::CryptoAlgorithm>(enable_encryption);
         ep_context_file = stream_filter(
             *ep_context_file,
-            [](const IStreamReader& src, IStreamWriter& dst,
-               const std::string& encryption_key) {
-              vaip_encryption::aes_decryption(src, dst, encryption_key);
+            [algo](const IStreamReader& src, IStreamWriter& dst,
+                   const std::string& encryption_key) {
+              vaip_encryption::decryption(src, dst, encryption_key, algo);
             },
             encryption_key);
       } catch (std::runtime_error& e) {
