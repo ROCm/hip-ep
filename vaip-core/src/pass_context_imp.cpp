@@ -236,34 +236,7 @@ PassContextImp::get_provider_option(const std::string& option_name,
 }
 
 bool PassContextImp::cache_in_mem() const {
-  auto context_enable_option = this->get_session_config("ep.context_enable");
-  bool cache_inside_model = context_enable_option.has_value() &&
-                            (context_enable_option.value() == "1");
-  bool use_cache_model = cache_inside_model || is_ep_context_model;
-  if (!use_cache_model) {
-#ifdef WIN24_BUILD
-    // session option set
-    if (cache_dir_set) {
-      return false;
-    }
-    // NOTE: Workaround fix for AIESW-5439
-    // TODO: this fix is only a placeholder and enable_cache_file_io_in_mem
-    // should
-    //       be handled with a general solution to override pass related default
-    //       values
-    auto enable_cache_file_io_in_mem =
-        this->get_provider_option("enable_cache_file_io_in_mem");
-    if (enable_cache_file_io_in_mem) {
-      return enable_cache_file_io_in_mem.value() == "1";
-    } else {
-      return get_config_proto().enable_cache_file_io_in_mem();
-    }
-#else
-    return false;
-#endif
-  } else {
-    return get_config_proto().enable_cache_file_io_in_mem();
-  }
+  return this->get_provider_option("enable_cache_file_io_in_mem", "1") == "1";
 }
 PassContextImp::~PassContextImp() {
   for (auto iter : cache_files_) {
@@ -1343,11 +1316,6 @@ void PassContextImp::update_config_proto_root_field() {
   if (auto target = get_provider_option_local({"target", "xlnx_target_name"})) {
     context_proto.mutable_config()->set_target(*target);
   }
-  if (auto enable_cache_file_io_in_mem = get_provider_option_local(
-          {"enable_cache_file_io_in_mem", "enableCacheFileIoInMem"})) {
-    context_proto.mutable_config()->set_enable_cache_file_io_in_mem(
-        *enable_cache_file_io_in_mem == "1");
-  }
   if (auto priority = get_provider_option_local({"priority"})) {
     context_proto.mutable_config()->set_priority(*priority);
   }
@@ -1359,11 +1327,6 @@ void PassContextImp::update_config_proto_root_field() {
           {"enable_preemption", "enablePreemption"})) {
     context_proto.mutable_config()->set_enable_preemption(*enable_preemption ==
                                                           "1");
-  }
-  if (auto enable_cache_file_io_in_mem = get_provider_option_local(
-          {"enable_cache_file_io_in_mem", "enableCacheFileIOInMem"})) {
-    context_proto.mutable_config()->set_enable_cache_file_io_in_mem(
-        *enable_cache_file_io_in_mem == "1");
   }
   if (auto max_spill_buffer_size = get_provider_option_local(
           {"max_spill_buffer_size", "maxSpillBufferSize"})) {
