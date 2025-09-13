@@ -219,7 +219,7 @@ static void log_stat(const StatProto& proto, int dpu_failed_cnt) {
     std::cout << "[Vitis AI EP] No. of Subgraphs :";
     for (const auto& subgraph_stat : subgraph_proto) {
       auto name = subgraph_stat.device();
-      if (name == "DPU" || name == "DOD" || name == "WAIC") {
+      if (name == "DPU" || name == "DOD" || name == "WAIC" || name == "VAIML") {
         name = "NPU";
         actually_on_npu += subgraph_stat.count();
       }
