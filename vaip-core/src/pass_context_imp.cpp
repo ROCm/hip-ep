@@ -236,7 +236,7 @@ PassContextImp::get_provider_option(const std::string& option_name,
 }
 
 bool PassContextImp::cache_in_mem() const {
-  return this->get_provider_option("enable_cache_file_io_in_mem", "1") == "1";
+  return this->get_provider_option("enable_cache_file_io_in_mem", "0") == "1";
 }
 PassContextImp::~PassContextImp() {
   for (auto iter : cache_files_) {
