@@ -219,7 +219,8 @@ static void log_stat(const StatProto& proto, int dpu_failed_cnt) {
     std::cout << "[Vitis AI EP] No. of Subgraphs :";
     for (const auto& subgraph_stat : subgraph_proto) {
       auto name = subgraph_stat.device();
-      if (name == "DPU" || name == "DOD" || name == "WAIC" || name == "VAIML") {
+      if (name == "DPU" || name == "DOD" || name == "WAIC" || name == "VAIML" ||
+          name == "MATMULNBITS" || name == "SSMLP") {
         name = "NPU";
         actually_on_npu += subgraph_stat.count();
       }
@@ -253,7 +254,8 @@ void collect_stat(const onnxruntime::Graph& graph,
     auto op_type = node_op_type(*node);
     auto domain = node_op_domain(*node);
     auto device = get_device(node_to_device_map, output[0]);
-    if ("DPU" == device || "DOD" == device || "WAIC" == device) {
+    if ("DPU" == device || "DOD" == device || "WAIC" == device ||
+        "MATMULNBITS" == device || "SSMLP" == device) {
       device = "NPU";
     }
     // concat and qdq custom ops, QDQUNSQUEEZE are internally running on cpu
