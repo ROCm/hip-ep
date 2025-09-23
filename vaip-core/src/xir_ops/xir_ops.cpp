@@ -118,16 +118,12 @@ void XilinxCustomKernel::Compute(OrtKernelContext* /*context*/) {
   // Implement the kernel computation logic here
 }
 
-std::unique_ptr<XilinxCustomOp> XilinxCustomOp::create(const std::string& name,
-                                                       bool is_single_output) {
-  return std::make_unique<XilinxCustomOp>(name, is_single_output);
+void debugCreateXilinxCustomOp(const std::string& name) {
+  MY_LOG(1) << "XilinxCustomOp constructor called for op: " << name;
 }
 
-XilinxCustomOp::XilinxCustomOp(const std::string& name, bool is_single_output)
-    : XilinxCustomOpBase<XilinxCustomKernel>(name, is_single_output) {
-  MY_LOG(1) << "XilinxCustomOp constructor called for op: " << name_;
+void debugDestructXilinxCustomOp(const std::string& name) {
+  MY_LOG(1) << "XilinxCustomOp destructor called for op: " << name;
 }
-XilinxCustomOp::~XilinxCustomOp() {
-  MY_LOG(1) << "XilinxCustomOp destructor called for op: " << name_;
-}
+
 } // namespace vaip_core

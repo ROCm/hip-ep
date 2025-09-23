@@ -16,7 +16,7 @@ public:
     // Register your ops here
     auto op_name = std::string("add");
     AddOp("com.test.unit",
-          std::make_unique<vaip_core::XilinxCustomOp>(op_name));
+          std::make_unique<vaip_core::XilinxCustomOp<>>(op_name));
     return 0;
   }
 };

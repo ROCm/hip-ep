@@ -6,6 +6,7 @@
 #pragma once
 
 #include "./onnxruntime_api.hpp"
+#include "onnxruntime_c_api.h"
 
 namespace vaip_core {
 
@@ -13,8 +14,9 @@ OrtStatusPtr xilinx_custom_op_shape_infer(const OrtCustomOp* op,
                                           OrtShapeInferContext* ort_ctx);
 
 template <typename TKernel>
-struct XilinxCustomOpBase
+class XilinxCustomOpBase
     : public Ort::CustomOpBase<XilinxCustomOpBase<TKernel>, TKernel> {
+public:
   std::string name_;
   bool is_single_output_;
 
@@ -25,7 +27,7 @@ struct XilinxCustomOpBase
   }
 
   void* CreateKernel(const OrtApi& api, const OrtKernelInfo* info) const {
-    return std::make_unique<TKernel>(api, info).release();
+    return std::make_unique<TKernel>(api, info, *this).release();
   };
 
   const char* GetName() const { return name_.c_str(); };
@@ -68,17 +70,30 @@ struct XilinxCustomOpBase
   bool GetVariadicInputHomogeneity() const { return false; }
 };
 
-struct XilinxCustomKernel {
-  XilinxCustomKernel(const OrtApi& /*api*/, const OrtKernelInfo* /*info*/) {}
+class XilinxCustomKernel {
+public:
+  XilinxCustomKernel(const OrtApi& /*api*/, const OrtKernelInfo* /*info*/,
+                     const OrtCustomOp& /*op*/) {}
   void Compute(OrtKernelContext* context);
 };
 
-struct XilinxCustomOp : XilinxCustomOpBase<XilinxCustomKernel> {
-  VAIP_DLL_SPEC
+// Debug functions use data that should be local to the compile unit
+void debugCreateXilinxCustomOp(const std::string&);
+void debugDestructXilinxCustomOp(const std::string&);
+
+template <class TKernel = XilinxCustomKernel>
+class XilinxCustomOp : public XilinxCustomOpBase<TKernel> {
+
+public:
   static std::unique_ptr<XilinxCustomOp> create(const std::string& name,
-                                                bool is_single_output = true);
-  VAIP_DLL_SPEC
-  XilinxCustomOp(const std::string& name, bool is_single_output = true);
-  VAIP_DLL_SPEC ~XilinxCustomOp();
+                                                bool is_single_output = true) {
+    return std::make_unique<XilinxCustomOp<TKernel>>(name, is_single_output);
+  }
+  XilinxCustomOp(const std::string& name, bool is_single_output = true)
+      : vaip_core::XilinxCustomOpBase<TKernel>(name, is_single_output) {
+    debugCreateXilinxCustomOp(this->name_);
+  }
+  virtual ~XilinxCustomOp() { debugDestructXilinxCustomOp(this->name_); }
 };
+
 } // namespace vaip_core
