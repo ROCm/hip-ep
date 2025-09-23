@@ -38,6 +38,11 @@ target_include_directories(${morphizen_CORE_DYNAMIC_UNIQUE_ID}
   $<INSTALL_INTERFACE:include>
 )
 target_compile_features(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PUBLIC cxx_std_17)
+if(MSVC)
+  target_compile_options(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PUBLIC "/Zc:__cplusplus")
+else(MSVC)
+  target_compile_options(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PUBLIC "-fPIC")
+endif(MSVC)
 target_compile_definitions(${morphizen_CORE_DYNAMIC_UNIQUE_ID}
   PRIVATE "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1"
   PUBLIC "-DONNX_NAMESPACE=onnx")
@@ -55,6 +60,4 @@ DEBUG_TAR_CACHE=1
 "
 )
 
-if(NOT MSVC)
-  target_link_libraries(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PUBLIC glog::glog protobuf::libprotobuf )
-endif(NOT MSVC)
+target_link_libraries(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PUBLIC glog::glog protobuf::libprotobuf )

@@ -4,7 +4,9 @@
 ##
 cmake_minimum_required(VERSION 3.5)
 project(morphizen-graph-opt VERSION 1.0.0 LANGUAGES C CXX)
+
 find_package(glog REQUIRED)
+find_package(onnxruntime REQUIRED)
 set(EXEC_NAME morphizen-graph-opt)
 add_executable(${EXEC_NAME} graph-opt.cpp ${ryzenai_version_rc_file})
 target_include_directories(${EXEC_NAME}
@@ -12,11 +14,18 @@ target_include_directories(${EXEC_NAME}
   ${CMAKE_CURRENT_SOURCE_DIR}/../common
 )
 target_link_libraries(${EXEC_NAME} PRIVATE
-	morphizen-core-static
-	glog::glog)
+  ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET}
+	glog::glog
+  onnxruntime::onnxruntime)
 target_link_options(${EXEC_NAME} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_LINKER_OPTIONS}>")
 set_target_properties(${EXEC_NAME} PROPERTIES FOLDER morphizen/tools)
 install(TARGETS ${EXEC_NAME} DESTINATION bin)
+
+if(morphizen_ENABLE_UNIT_TEST)
+  enable_testing()
+  add_test(NAME ${EXEC_NAME} COMMAND $<TARGET_FILE:${EXEC_NAME}> -i ${CMAKE_CURRENT_BINARY_DIR}/../unit-test/pt_resnet50.onnx -p vaip-pass_init)
+endif()
+
 # originally morphizen-graph-opt is callled `voe_py_pass`, to minimize
 # changes at vaip side we add an alias here.
 add_executable (voe_py_pass ALIAS ${EXEC_NAME})

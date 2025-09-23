@@ -12,3 +12,4 @@ EXPORTS
     vaip_get_execution_provider_deletor
     CreateEpFactories
     ReleaseEpFactory
+    ??_7PassProto@vaip_core@@6B@

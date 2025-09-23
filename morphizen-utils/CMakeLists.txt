@@ -14,6 +14,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+include(${CMAKE_CURRENT_SOURCE_DIR}/../vaip-core/cmake/find_onnxruntime.cmake)
+
 # Library source files
 set(MORPHIZEN_UTILS_SOURCES
     src/env_config.cpp
@@ -51,6 +53,7 @@ target_include_directories(morphizen-utils
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
+        $<BUILD_INTERFACE:${VAIP_ORT_API_DIR}>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
 )

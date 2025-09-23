@@ -9,6 +9,8 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vaip/export.h>
+
 namespace vaip_core {
 using plugin_t = void*;
 enum class scope_t { PUBLIC, PRIVATE };
@@ -71,7 +73,7 @@ struct Plugin {
     return method(std::forward<Args>(args)...);
   }
 
-  static Plugin* get(const std::string& name);
+  VAIP_DLL_SPEC static Plugin* get(const std::string& name);
 
   bool has_method(const char* name) const {
     return my_plugin_sym(plugin_, name) != nullptr;
@@ -112,7 +114,7 @@ private:
 private:
   static std::string guess_name(const char* name);
 
-  void* my_plugin_sym(void*, const char*) const;
+  VAIP_DLL_SPEC void* my_plugin_sym(void*, const char*) const;
 };
 
 template <typename T, typename... Args> class WithPlugin {
