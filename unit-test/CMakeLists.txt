@@ -35,6 +35,7 @@ add_executable(${TEST_EXE_NAME}
   vaip/test_op_def.cpp
   vaip/test_mmap_file.cpp
   vaip/test_ep_shared_context_workspace.cpp
+  vaip/test_op_invoker.cpp
   ${MORPHIZEN_E2E_TESTS_PROTO_SRCS}
   ${MORPHIZEN_E2E_TESTS_PROTO_HDRS}
   morphizen-e2e-test/config.cpp

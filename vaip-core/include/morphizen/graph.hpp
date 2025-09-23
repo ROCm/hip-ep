@@ -1069,6 +1069,17 @@ public:
                                const std::vector<int64_t>& shape,
                                ONNX_NAMESPACE::TensorProto_DataType data_type);
   /**
+   * Creates a new NodeArgRef object with the specified name, data type and
+   * unknown shape.
+   *
+   * @param name The name of the NodeArgRef object.
+   * @param data_type The data type of the NodeArgRef object.
+   * @return A NodeArgRef object with the specified name, data type and unknown
+   * shape.
+   */
+  NodeArgConstRef new_node_arg(const std::string& name,
+                               ONNX_NAMESPACE::TensorProto_DataType data_type);
+  /**
    * Adds a node to the graph.
    *
    * @param name The name of the node.

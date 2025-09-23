@@ -142,6 +142,8 @@ add_library(${LIB_NAME} STATIC
   src/cleanup.cpp
   src/ep_shared_context_workspace.cpp
   src/ep_shared_context_workspace.hpp
+  include/morphizen/op_invoker.hpp
+  src/op_invoker.cpp
 )
 add_library (morphizen::morphizen-core-static ALIAS morphizen-core-static)
 set_target_properties(${LIB_NAME} PROPERTIES FOLDER morphizen)

@@ -903,6 +903,12 @@ GraphRef::new_node_arg(const std::string& name,
   return NodeArgConstRef::from_node_arg(
       self(), VAIP_ORT_API(node_arg_new)(*this, name, &shape, data_type));
 }
+NodeArgConstRef
+GraphRef::new_node_arg(const std::string& name,
+                       ONNX_NAMESPACE::TensorProto_DataType data_type) {
+  return NodeArgConstRef::from_node_arg(
+      self(), VAIP_ORT_API(node_arg_new)(*this, name, nullptr, data_type));
+}
 NodeRef
 GraphRef::add_node(const std::string& name, const std::string& op_domain,
                    const std::string& op_type, const std::string& description,
