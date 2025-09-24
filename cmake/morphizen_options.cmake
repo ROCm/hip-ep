@@ -44,7 +44,9 @@ set(ONNXRUNTIME_SOURCE_TREE_DIR "${CMAKE_SOURCE_DIR}/../onnxruntime" CACHE PATH 
 #
 # it is possible to emebed xclbin files in the binary, assume the xclbin files are in the directory
 #
+set(VAIP_EMBEDDED_RESOURCE_PATH ${CMAKE_SOURCE_DIR}/../vaip_xclbin/embedded_resource.txt CACHE PATH "Path to the meta info of embedded resource files")
 set(VAIP_XCLBIN_DIR ${CMAKE_SOURCE_DIR}/../vaip_xclbin CACHE PATH "Path to the directory containing xclbin files")
+
 
 # morphizen_WITH_VAIP_CONFIG_FILE = ON if build with default vaip
 # config in morphizen-core-dynamic, i.e. onnxruntime_vitisai_ep.dll
@@ -68,13 +70,15 @@ set(VAIP_VERSEION_INFO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/vaip-core/etc/version_i
 #
 set(morphizen_OUTPUT_NAME "onnxruntime_vitisai_ep" CACHE STRING "Output name of MorphiZen library")
 
-## this optio is used to trim vaip_config.json, we choose the original name for backward compatibility.
+## this option is used to trim vaip_config.json, we choose the original name for backward compatibility.
 option(TRIM_CONFIG "trim default vaip_config.json" "${TRIM_CONFIG_DEFAULT}")
 option(morphizen_ENABLE_ORT_BRIDGE "enable onnxruntime bridge" OFF)
 # print all options
 message(STATUS "MorphiZen OPTIONS:")
 message(STATUS "  morphizen_ONNXRUNTIME_VITISAI_EP_TARGET : ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET}")
 message(STATUS "  morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC : ${morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC}")
+message(STATUS "  VAIP_EMBEDDED_RESOURCE_PATH : ${VAIP_EMBEDDED_RESOURCE_PATH}")
+# compatibility, to be removed before 2026
 message(STATUS "  VAIP_XCLBIN_DIR : ${VAIP_XCLBIN_DIR}")
 message(STATUS "  ONNX_RUNTIME_SOURCE_TREE_DIR : ${ONNXRUNTIME_SOURCE_TREE_DIR}")
 message(STATUS "  morphizen_WITH_VAIP_CONFIG_FILE : ${morphizen_WITH_VAIP_CONFIG_FILE}")

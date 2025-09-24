@@ -5,7 +5,7 @@
 import zlib
 import sys
 import os
-import glob
+import ast
 from pathlib import Path
 
 
@@ -14,76 +14,72 @@ def to_compressed_byte(filename):
     binary_data = file.read()
     origin_size = len(binary_data)
     compressed_data = zlib.compress(binary_data)
-    ret_str = ""
-    for byte in compressed_data:
-        ret_str += str(byte) + ","
-    ret_str = ret_str[:-1]
+    ret_str = ",".join(f"0x{byte:02x}" for byte in compressed_data)
+
     return ret_str, len(compressed_data), origin_size
 
 
 def to_byte(filename):
     file = open(filename, "rb")
     binary_data = file.read()
-    ret_str = ""
-    for byte in binary_data:
-        ret_str += str(byte) + ","
-    ret_str = ret_str[:-1]
+    origin_size = len(binary_data)
+    ret_str = ",".join(f"0x{byte:02x}" for byte in binary_data)
     # 0 for uncompressed
-    return ret_str, 0, binary_data
+    return ret_str, 0, origin_size
 
 
-def generate_map(binary_root_path):
+def generate_map(embedded_resource_file):
+    meta_info_list = []
+    if os.path.isfile(embedded_resource_file):
+        print(f"-- load meta info from {embedded_resource_file}")
+        f = open(embedded_resource_file, "r", encoding="utf-8")
+        meta_info_list = ast.literal_eval(f.read())
+    else:
+        print(
+            "-- embbed resource file not found, please set -DVAIP_EMBEDDED_RESOURCE_PATH=<>"
+        )
     data_str = ""
     map_str = "static std::unordered_map<std::string, CompressionInfo> binary_map = {"
-    file_list = []
-    # probably bundleing xclbin is disabled.
-    if binary_root_path != "":
-        print(f"-- search binary files in {binary_root_path}")
-        # there is also some python scripts and md files.
-        # treat it as a white list for now.
-        file_list = glob.glob(
-            str(Path(binary_root_path) / "**" / "*.*bin"), recursive=True
+
+    for meta_info in meta_info_list:
+        filename = os.path.basename(meta_info["name"])
+        compression = meta_info["compression"]
+        print(f"-- add binary file {filename} with compression = {compression}")
+        suffix = Path(filename).suffix
+        variable_name = "_" + filename.split(suffix)[0].replace(".", "_")
+        path = Path(embedded_resource_file) / ".." / meta_info["name"]
+        byte_str = ""
+        compressed_size = 0
+        origin_size = 0
+        byte_str, compressed_size, origin_size = (
+            to_compressed_byte(path) if compression else to_byte(path)
         )
-    else:
-        print("-- no binary path is not specified, please set -DVAIP_XCLBIN_PATH=<>")
 
-    for file in file_list:
-        if os.path.isfile(file):
-            print(f"-- add binary file {file}")
-            suffix = Path(file).suffix
-            variable_name = "_" + os.path.basename(file).split(suffix)[0].replace(
-                ".", "_"
-            )
-            # to do, need change at create tar from mem
-            # byte_str, compressed_size, origin_size = (
-            #     to_compressed_byte(file) if suffix == ".xclbin" else to_byte(file)
-            # )
-            byte_str, compressed_size, origin_size = to_compressed_byte(file)
-            data_str += f"static const uint8_t {variable_name}[] = "
-            data_str += "{" + byte_str + "};\n"
+        data_str += f"static const uint8_t {variable_name}[] = "
+        data_str += "{" + byte_str + "};\n"
 
-            basename = '"' + os.path.basename(file) + '"'
-            info = (
-                "CompressionInfo("
-                + variable_name
-                + ", "
-                + str(compressed_size)
-                + ", "
-                + str(origin_size)
-                + ")"
-            )
-            map_str += "{" + basename + "," + info + "},"
+        basename = '"' + filename + '"'
+        info = (
+            "CompressionInfo("
+            + variable_name
+            + ", "
+            + str(compressed_size)
+            + ", "
+            + str(origin_size)
+            + ")"
+        )
+        map_str += "{" + basename + "," + info + "},"
     map_str += "};"
     return data_str + map_str
 
 
 def main():
     h_inc = sys.argv[1]
-    binary_root_path = ""
+    embedded_resource_file = ""
     if len(sys.argv) > 2:
-        binary_root_path = sys.argv[2]
+        embedded_resource_file = sys.argv[2]
     with open(h_inc, "w") as f:
-        f.write(generate_map(binary_root_path))
+        f.write(generate_map(embedded_resource_file))
 
 
 if __name__ == "__main__":
