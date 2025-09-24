@@ -1,0 +1,45 @@
+##
+## Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: Submit PR in vaip to verify the PR
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened, ready_for_review]
+
+env:
+    VAIP_BRANCH: cp_dev
+    VAIP_REPO: git@gitenterprise.xilinx.com:VitisAI/vaip.git
+
+jobs:
+  update-deps-txt-in-vaip:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ windows_vitisai ]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0  # Fetch all history for all branches and tags
+          show-progress: false
+
+      - name: set credential
+        uses: ./.github/actions/set-env
+
+      - name: Submit PR in vaip to verify the PR
+        shell: powershell
+        run: |
+            echo "Submit PR in vaip to verify the PR"
+            echo "PR Number: ${{ github.event.pull_request.number || 'manual_trigger' }}"
+            . ${{ github.workspace}}/tools/submit_vaip_pr_for_verify_the_pr.ps1
+        env:
+            MY_GHE_TOKEN : ${{ env.Z1AIEBUILD_GHE_PAT }}
+            VAIP_REMOTE_BRANCH: ${{ env.VAIP_BRANCH }}
+            MORPHIZEN_PR_NUMBER: ${{ github.event.pull_request.number || '0' }}
