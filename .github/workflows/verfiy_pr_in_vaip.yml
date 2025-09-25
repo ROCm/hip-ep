@@ -17,6 +17,7 @@ env:
 
 jobs:
   update-deps-txt-in-vaip:
+    if: github.event.pull_request.draft == false
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:

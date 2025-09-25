@@ -57,6 +57,44 @@ if ($null -eq $existingPrs) {
     $response = Invoke-RestMethod -Uri $apiUrl -Method Post -Headers $headers -Body $body
 
     Write-Host "PR created successfully."
+
+    # Add comment to original MorphiZen PR only when creating new PR
+    if ($Env:MORPHIZEN_PR_NUMBER) {
+        Write-Host "Adding comment to MorphiZen PR #$($Env:MORPHIZEN_PR_NUMBER)..."
+
+        $morphizenCommentUrl = "https://gitenterprise.xilinx.com/api/v3/repos/VitisAI/MorphiZen/issues/$($Env:MORPHIZEN_PR_NUMBER)/comments"
+
+        # Create comment text without emoji or special characters
+        $commentText = "**VAIP Verification PR Created**" + "`n`n" + "Verification PR: " + $response.html_url + "`n`n" + "This PR will test the MorphiZen changes in the VAIP environment."
+
+        $commentBody = @{
+            body = $commentText
+        } | ConvertTo-Json -Compress
+
+        # Debug: Show the JSON payload being sent
+        Write-Host "Debug - Comment JSON payload: $commentBody"
+        Write-Host "Debug - Comment URL: $morphizenCommentUrl"
+
+        try {
+            $commentResponse = Invoke-RestMethod -Uri $morphizenCommentUrl -Method Post -Headers $headers -Body $commentBody
+            Write-Host "Comment added to MorphiZen PR successfully: $($commentResponse.html_url)"
+        }
+        catch {
+            Write-Host "Failed to add comment to MorphiZen PR. Error details:"
+            Write-Host "Status Code: $($_.Exception.Response.StatusCode)"
+            Write-Host "Status Description: $($_.Exception.Response.StatusDescription)"
+
+            # Try to get response body for more details
+            if ($_.Exception.Response) {
+                $responseStream = $_.Exception.Response.GetResponseStream()
+                $reader = New-Object System.IO.StreamReader($responseStream)
+                $responseBody = $reader.ReadToEnd()
+                Write-Host "Response Body: $responseBody"
+            }
+
+            Write-Warning "Full Error: $($_.Exception.Message)"
+        }
+    }
 } else {
     # If a PR already exists, update it
     $prNumber = $existingPrs.number
@@ -75,7 +113,6 @@ if ($null -eq $existingPrs) {
 
 write-host "PR url: $($response.html_url)"
 Write-Host "PR body: $($response.body)"
-
 
 # Output the result
 # $response | Format-List
