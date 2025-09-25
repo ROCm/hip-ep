@@ -42,12 +42,16 @@ def generate_map(embedded_resource_file):
     map_str = "static std::unordered_map<std::string, CompressionInfo> binary_map = {"
 
     for meta_info in meta_info_list:
-        filename = os.path.basename(meta_info["name"])
+        normalized_rel_path = (
+            meta_info["name"].replace("/", os.sep).replace("\\", os.sep)
+        )
+        filename = os.path.basename(normalized_rel_path)
         compression = meta_info["compression"]
         print(f"-- add binary file {filename} with compression = {compression}")
         suffix = Path(filename).suffix
         variable_name = "_" + filename.split(suffix)[0].replace(".", "_")
-        path = Path(embedded_resource_file) / ".." / meta_info["name"]
+        path = Path(embedded_resource_file) / ".." / normalized_rel_path
+        path = os.path.normpath(path)
         byte_str = ""
         compressed_size = 0
         origin_size = 0
