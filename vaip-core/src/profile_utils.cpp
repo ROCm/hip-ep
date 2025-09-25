@@ -7,6 +7,13 @@
 
 #include "profile_utils.hpp"
 #include <glog/logging.h>
+#ifdef _WIN32
+#  include <Windows.h>
+#  include <psapi.h>
+#else
+#  include <sys/resource.h>
+#  include <sys/times.h>
+#endif
 
 namespace vaip_core {
 
@@ -20,8 +27,6 @@ namespace vaip_core {
  * @return The CPU usage percentage.
  */
 #ifdef _WIN32
-#  include <Windows.h>
-#  include <psapi.h>
 size_t GetPeakWorkingSetSize() {
   PROCESS_MEMORY_COUNTERS pmc;
   if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
@@ -119,8 +124,6 @@ private:
   FILETIME proc_user_ft_;   ///< The process user time.
 };
 #else
-#  include <sys/resource.h>
-#  include <sys/times.h>
 std::size_t GetPeakWorkingSetSize() {
   struct rusage rusage;
   getrusage(RUSAGE_SELF, &rusage);
