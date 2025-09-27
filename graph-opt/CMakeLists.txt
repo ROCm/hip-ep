@@ -15,7 +15,7 @@ target_include_directories(${EXEC_NAME}
 )
 target_link_libraries(${EXEC_NAME} PRIVATE
   ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET}
-	glog::glog
+	glog::glog sodium
   onnxruntime::onnxruntime)
 target_link_options(${EXEC_NAME} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_LINKER_OPTIONS}>")
 set_target_properties(${EXEC_NAME} PROPERTIES FOLDER morphizen/tools)
