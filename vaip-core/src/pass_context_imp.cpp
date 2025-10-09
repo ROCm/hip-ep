@@ -1262,8 +1262,11 @@ void PassContextImp::pass_context_update_context_json(
     gsl::span<char> json_str) {
   // parse the context proto
   ContextProto context_proto_in_cache;
+  google::protobuf::util::JsonParseOptions options;
+  options.ignore_unknown_fields = true;
   auto status = google::protobuf::util::JsonStringToMessage(
-      &json_str[0], &context_proto_in_cache);
+      &json_str[0], &context_proto_in_cache, options);
+
   CHECK(status.ok()) << "cannot parse json string:" << status.message()
                      << &json_str[0];
   // save cached provider options
