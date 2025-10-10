@@ -311,6 +311,10 @@ private:
   std::vector<std::string> data_type_;
   std::vector<std::unique_ptr<AnchorPoint>> anchor_point_;
   std::vector<std::optional<vaip_cxx::NodeArgConstRef>> anchor_node_arg_;
+  // Cache producer nodes
+  // After node addition in MLIR, original nodes become inaccessible via
+  // graph_producer_node
+  std::vector<std::optional<vaip_cxx::NodeConstRef>> anchor_producer_node_;
 };
 
 const Model& graph_get_model(const Graph& graph);

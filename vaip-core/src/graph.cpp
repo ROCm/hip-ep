@@ -160,7 +160,13 @@ const Node& NodeBuilder::build() {
     if (!anchor_node_arg_[i].has_value()) {
       continue;
     }
-    auto existing_node = anchor_node_arg_[i].value().find_producer();
+    // After graph modifications (e.g., after calling graph add_node/remove_node
+    // but before graph resolve), the graph is in a temporarily invalid state.
+    // Avoid calling get_producer/get_consumer functions as their return values
+    // are unstable and may reference either pre-modification or
+    // post-modification nodes, depending on the specific scenario and timing
+    // requirements.
+    auto existing_node = anchor_producer_node_[i];
     if (anchor_point_[i]->is_identity(/*test_all=*/false)) {
       auto origin_node_arg_name = anchor_point_[i]->origin_node_arg_name();
       MY_LOG(1) << " try to replace node: "
@@ -293,6 +299,8 @@ NodeBuilder& NodeBuilder::set_anchor_point1(const NodeArg& node_arg1) {
       vaip_cxx::NodeArgConstRef::from_node_arg(graph_, node_arg1));
   CHECK_EQ(anchor_node_arg_.size(), num_of_outputs_)
       << "cannot invoke set_anchor_point1 more than once";
+  anchor_producer_node_.emplace_back(
+      anchor_node_arg_.rbegin()->value().find_producer());
 
   anchor_point_.emplace_back(AnchorPoint::identity(*pass_, node_arg1));
   CHECK_EQ(anchor_point_.size(), num_of_outputs_)
@@ -328,6 +336,8 @@ NodeBuilder& NodeBuilder::set_anchor_point4(
       vaip_cxx::NodeArgConstRef::from_node_arg(graph_, node_arg));
   CHECK_EQ(anchor_node_arg_.size(), num_of_outputs_)
       << "cannot invoke set_anchor_point2/3/4 more than once";
+  anchor_producer_node_.emplace_back(
+      anchor_node_arg_.rbegin()->value().find_producer());
 
   anchor_point_.emplace_back(
       AnchorPoint::create(*pass_, node_arg, description));
@@ -352,6 +362,7 @@ NodeBuilder& NodeBuilder ::skip_optional_output() {
   shape_.emplace_back();
   data_type_.emplace_back();
   anchor_node_arg_.emplace_back(std::nullopt);
+  anchor_producer_node_.emplace_back(std::nullopt);
   anchor_point_.emplace_back(nullptr);
   return *this;
 }
@@ -432,7 +443,10 @@ void graph_gc(Graph& graph) {
       }, //
       nullptr);
   MY_LOG(1) << "prepare to remove " << all_nodes.size() << " nodes";
-  for (auto n : all_nodes) {
+
+  // Remove nodes in reverse order to handle dependencies correctly
+  for (auto it = all_nodes.rbegin(); it != all_nodes.rend(); ++it) {
+    auto n = *it;
     MY_LOG(1) << "\tremove " << node_as_string(*n);
     VAIP_ORT_API(graph_remove_node)(graph, {n, nullptr});
   }

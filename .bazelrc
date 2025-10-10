@@ -11,15 +11,15 @@ try-import %workspace%/.bazelrc.local
 startup --host_jvm_args="-Djavax.net.ssl.trustStore=none" --host_jvm_args="-Djavax.net.ssl.trustStorePassword=none"
 
 # Cache configuration - platform specific
-build:windows --disk_cache=C:/temp/bazel-cache
+build:windows --disk_cache=C:/Develop/temp/bazel-cache
 build:linux --disk_cache=/tmp/bazel-cache
 build:macos --disk_cache=/tmp/bazel-cache
 
 # Disable workspace symlinks (bazel-morphizen, bazel-bin, etc.) to keep workspace clean
 # no it  does not work on Windows, update .gignore instead
-# build:windows --symlink_prefix=C:/temp/bazel-symlinks
+# build:windows --symlink_prefix=C:/Develop/temp/bazel-symlinks
 # Output root - defaults to Windows, override in .bazelrc.local for Linux/macOS
-startup --output_user_root=C:/temp/bazel-user-root
+startup --output_user_root=C:/Develop/temp/bazel-user-root
 
 # C++ standard and compilation flags
 build:windows --cxxopt=/std:c++17

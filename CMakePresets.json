@@ -84,21 +84,435 @@
             }
         },
         {
-            "name": "Test07",
+            "name": "New ABI Test01",
             "configurePreset": "Morphizen Ninja",
             "configuration": "Debug",
-            "description": "run test 07",
-            "displayName": "run test 07",
             "filter": {
                 "include": {
                     "name": "VaipOrtApiTest.TestAll"
                 }
             },
             "output": {
-                "outputLogFile": "${sourceParentDir}/test_results.log"
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
             },
             "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "1"
+            }
+        },
+        {
+            "name": "New ABI Test02",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "2"
+            }
+        },
+        {
+            "name": "New ABI Test03",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "3"
+            }
+        },
+        {
+            "name": "New ABI Test04",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "4"
+            }
+        },
+        {
+            "name": "New ABI Test05",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "5"
+            }
+        },
+        {
+            "name": "New ABI Test06",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "6"
+            }
+        },
+        {
+            "name": "New ABI Test07",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
                 "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "7"
+            }
+        },
+        {
+            "name": "New ABI Test08",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "8"
+            }
+        },
+        {
+            "name": "New ABI Test09",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "9"
+            }
+        },
+        {
+            "name": "New ABI Test10",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "10"
+            }
+        },
+        {
+            "name": "New ABI Test11",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "11"
+            }
+        },
+        {
+            "name": "New ABI Test12",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "12"
+            }
+        },
+        {
+            "name": "New ABI Test13",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "13"
+            }
+        },
+        {
+            "name": "New ABI Test14",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "14"
+            }
+        },
+        {
+            "name": "New ABI Test15",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "15"
+            }
+        },
+        {
+            "name": "New ABI Test16",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "16"
+            }
+        },
+        {
+            "name": "New ABI Test17",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "17"
+            }
+        },
+        {
+            "name": "New ABI Test18",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "18"
+            }
+        },
+        {
+            "name": "New ABI Test19",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "19"
+            }
+        },
+        {
+            "name": "New ABI Test20",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "20"
+            }
+        },
+        {
+            "name": "New ABI Test21",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "21"
+            }
+        },
+        {
+            "name": "New ABI Test22",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "22"
+            }
+        },
+        {
+            "name": "New ABI Test23",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "23"
+            }
+        },
+        {
+            "name": "New ABI Test24",
+            "configurePreset": "Morphizen Ninja",
+            "configuration": "Debug",
+            "filter": {
+                "include": {
+                    "name": "VaipOrtApiTest.TestAll"
+                }
+            },
+            "output": {
+                "outputLogFile": "${sourceParentDir}/test_results.log",
+                "verbosity": "extra"
+            },
+            "environment": {
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND": "mlir-backend",
+                "MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE": "24"
             }
         }
     ]

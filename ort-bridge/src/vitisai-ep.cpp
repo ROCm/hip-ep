@@ -12,6 +12,9 @@
 #include "morphizen/vaip-ort-api-ext.hpp"
 #include "morphizen/vaip.hpp"
 #include <set>
+DEF_ENV_PARAM_2(MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND,
+                morphizen::kONNXIRBackend, // default to "onnx-ir-imp"
+                std::string)               // or "mlir-backend"
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_VITISAI_EP, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_VITISAI_EP) >= n)
 namespace morphizen {
@@ -268,7 +271,11 @@ OrtStatus* VitisAIEP::GetCapability(OrtGraphWrapper& graph_viewer,
     return nullptr;
   }
   // setup API environment
-  const char* backend_ir = "onnx-ir-imp";
+  const char* backend_ir = morphizen::kONNXIRBackend;
+  if (ENV_PARAM(MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND) ==
+      morphizen::kMLIRBackend) {
+    backend_ir = morphizen::kMLIRBackend;
+  }
   auto with_new_api = setup_global_vaip_ort_api(backend_ir);
   //
   auto ir_model = ir_converter(*this, graph_viewer.get());

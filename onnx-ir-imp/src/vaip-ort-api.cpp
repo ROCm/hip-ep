@@ -1406,6 +1406,6 @@ const vaip_core::OrtApiForVaip* morphizen_onnx_ir_imp_get_vaip_ort_api() {
 }
 
 static ::vaip_core::StaticPluginRegister
-    __register("onnx-ir-imp", "vaip_ort_api_imp",
+    __register(morphizen::kONNXIRBackend, "vaip_ort_api_imp",
                (void*)&morphizen_onnx_ir_imp_get_vaip_ort_api);
 } // namespace

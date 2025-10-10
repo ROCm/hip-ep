@@ -18,6 +18,15 @@ DEF_ENV_PARAM_2(MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE, "", std::string)
 namespace morphizen {
 namespace test {
 
+std::string vec_to_string(const std::vector<int64_t>& vec) {
+  std::ostringstream oss;
+  oss << "{ ";
+  for (const auto& elem : vec) {
+    oss << elem << " ";
+  }
+  oss << "}";
+  return oss.str();
+}
 /**
  * Test fixture specifically for testing VAIP ORT API implementation
  * through the coverage wrapper
@@ -120,8 +129,15 @@ void VaipOrtApiTest::Test01_TestIsolationVerification() {
   auto lib_name = wrapped_api_->get_lib_name();
   ASSERT_EQ((std::string)lib_id->c_str(), "v1.0.0")
       << "Expected library ID to be 'v1.0.0'";
-  ASSERT_EQ((std::string)lib_name->c_str(), "morphizen-onnx-imp")
-      << "Expected library name to be 'morphizen-onnx-imp'";
+  if (backend_ == morphizen::kONNXIRBackend) {
+    ASSERT_EQ((std::string)lib_name->c_str(), "morphizen-onnx-imp")
+        << "Expected library name to be 'morphizen-onnx-imp'";
+  } else if (backend_ == morphizen::kMLIRBackend) {
+    ASSERT_EQ((std::string)lib_name->c_str(), "morphizen-mlir-imp")
+        << "Expected library name to be 'morphizen-mlir-imp'";
+  } else {
+    ASSERT_TRUE(false) << "not support backend : " << backend_;
+  }
   LOG(INFO) << "Test suite initialization verification passed";
 }
 
@@ -155,7 +171,11 @@ void VaipOrtApiTest::Test03_ModelLoadAndDelete() {
   // This will likely fail with actual file operations, but will test the
   // wrapper
   try {
-    auto* model = wrapped_api_->model_load(RESNET_50_PATH.u8string());
+    auto test_model_path = RESNET_50_PATH;
+    if (backend_ == morphizen::kMLIRBackend) {
+      test_model_path = RESNET_50_MLIR_PATH;
+    }
+    auto* model = wrapped_api_->model_load(test_model_path.u8string());
     ASSERT_TRUE(model != nullptr) << "Failed to load model from file";
     // auto* morphizen_model = reinterpret_cast<morphizen::Model*>(model);
     // ASSERT_TRUE(morphizen_model->is_valid())
@@ -208,7 +228,14 @@ void VaipOrtApiTest::Test04_ModelMetaDataOperations() {
 
 void VaipOrtApiTest::Test05_GraphBasicOperations() {
   try {
-    auto* model = wrapped_api_->model_load(RESNET_50_PATH.u8string());
+    if (!simple_conv_relu_model_) {
+      Test07_create_simple_conv_relu_model();
+    }
+    std::filesystem::path test07_output_model =
+        CMAKE_CURRENT_BINARY_PATH /
+        "Test07_create_simple_conv_relu_model.onnx.graph.onnx";
+
+    auto* model = wrapped_api_->model_load(test07_output_model.u8string());
     ASSERT_TRUE(model != nullptr) << "Failed to load model for graph tests";
 
     auto& graph = wrapped_api_->model_main_graph(*model);
@@ -230,9 +257,18 @@ void VaipOrtApiTest::Test05_GraphBasicOperations() {
     auto inputs = wrapped_api_->graph_get_inputs_unsafe(graph);
     ASSERT_GE(inputs->size(), 1)
         << "Expected at least 1 input node argument, got: " << inputs->size();
+    for (auto i = 0; i < inputs->size(); i++) {
+      LOG(INFO) << "Input node argument name: "
+                << wrapped_api_->node_arg_get_name_unsafe(*(*inputs)[i]);
+    }
     auto outputs = wrapped_api_->graph_get_outputs_unsafe(graph);
     ASSERT_GE(outputs->size(), 1)
         << "Expected at least 1 output node argument, got: " << outputs->size();
+    for (auto i = 0; i < outputs->size(); i++) {
+      LOG(INFO) << "Output node argument name: "
+                << wrapped_api_->node_arg_get_name_unsafe(*(*outputs)[i]);
+    }
+
     auto output_0_arg_name = wrapped_api_->node_arg_get_name_unsafe(
         *(*outputs)[0]); // Get the name of the first output node argument
     LOG(INFO) << "First output node argument name: " << output_0_arg_name;
@@ -252,6 +288,10 @@ void VaipOrtApiTest::Test05_GraphBasicOperations() {
     ASSERT_TRUE(node == (*nodes)[0]) << "First node should not be null";
     const std::string& node_name = wrapped_api_->node_get_name(*node);
     LOG(INFO) << "First node name: " << node_name;
+    const std::string& op_domain = wrapped_api_->node_op_domain(*node);
+    LOG(INFO) << "First node op domain: " << op_domain;
+    const std::string& op_type = wrapped_api_->node_op_type(*node);
+    LOG(INFO) << "First node op_type: " << op_type;
 
     // Test graph_get_node_arg - try to get a node argument by name
     auto first_input_name =
@@ -286,12 +326,16 @@ void VaipOrtApiTest::Test05_GraphBasicOperations() {
 
 void VaipOrtApiTest::Test06_GraphAdvancedOperations() {
   try {
-    auto* model = wrapped_api_->model_load(RESNET_50_PATH.u8string());
+    auto test_model_path = RESNET_50_PATH;
+    if (backend_ == morphizen::kMLIRBackend) {
+      test_model_path = RESNET_50_MLIR_PATH;
+    }
+    auto* model = wrapped_api_->model_load(test_model_path.u8string());
     ASSERT_TRUE(model != nullptr) << "Failed to load model for graph tests";
     auto& graph = wrapped_api_->model_main_graph(*model);
     // Test model path
     const auto& model_path = wrapped_api_->get_model_path(graph);
-    EXPECT_EQ(model_path, RESNET_50_PATH.u8string())
+    EXPECT_EQ(model_path, test_model_path.u8string())
         << "Model path should match the loaded model path";
     // Test graph name setting
     wrapped_api_->graph_set_name(graph, "test_graph_name");
@@ -418,7 +462,10 @@ void VaipOrtApiTest::Test06_GraphAdvancedOperations() {
 
 void VaipOrtApiTest::Test08_NodeOperations() {
   try {
-
+    if (!simple_conv_relu_model_) {
+      LOG(INFO) << "No model available for fuse test, creating one first...";
+      Test07_create_simple_conv_relu_model();
+    }
     auto* model = simple_conv_relu_model_;
     ASSERT_TRUE(model != nullptr);
     {
@@ -470,6 +517,11 @@ void VaipOrtApiTest::Test09_NodeArgOperations() {
         std::filesystem::temp_directory_path() / "test_nodeargs.onnx";
     std::vector<std::pair<std::string, int64_t>> opset = {{"", 11}};
 
+    if (!simple_conv_relu_model_) {
+      LOG(INFO) << "No model available for fuse test, creating one first...";
+      Test07_create_simple_conv_relu_model();
+    }
+
     auto* model = simple_conv_relu_model_;
     ASSERT_TRUE(model != nullptr) << "Failed to load model for NodeArg tests";
     {
@@ -483,14 +535,21 @@ void VaipOrtApiTest::Test09_NodeArgOperations() {
       // Test NodeArg operations
       const std::string& name =
           wrapped_api_->node_arg_get_name_unsafe(new_node_arg);
-      EXPECT_EQ(name, "test_input");
+      ASSERT_TRUE(name == "test_input")
+          << "Expected node arg name to be 'test_input', got: " << name;
 
       bool exists = wrapped_api_->node_arg_is_exists(new_node_arg);
       bool is_constant =
           wrapped_api_->node_arg_is_constant(graph, new_node_arg);
       auto node_arg_shape =
           wrapped_api_->node_arg_get_shape_i64_unsafe(new_node_arg);
+      ASSERT_TRUE(*node_arg_shape == shape)
+          << "Expected shape to be {1, 3, 224, 224}, got: "
+          << vec_to_string(*node_arg_shape);
+
       int element_type = wrapped_api_->node_arg_get_element_type(new_node_arg);
+      ASSERT_TRUE(element_type == 1) // FLOAT type
+          << "Expected element type to be FLOAT (1), got: " << element_type;
 
       // Test shape and denotation setting
       std::vector<int64_t> new_shape = {1, 64, 222, 222};
@@ -513,13 +572,10 @@ void VaipOrtApiTest::Test09_NodeArgOperations() {
           graph, new_node_arg, external_file, offset, size, checksum);
 
       // Test get_const_data_as_tensor (may throw for non-constant args)
-      try {
+      if (wrapped_api_->node_arg_is_constant(graph, new_node_arg)) {
         const auto& tensor_data =
             wrapped_api_->node_arg_get_const_data_as_tensor(graph,
                                                             new_node_arg);
-        // If we get here, the node arg has constant data
-      } catch (...) {
-        // Expected for most node args that don't have constant data
       }
 
       // Test cloning
@@ -732,6 +788,9 @@ void VaipOrtApiTest::Test12_TensorProtoOperations() {
     EXPECT_EQ(tensor_shape->size(), shape.size());
 
     int data_type = wrapped_api_->tensor_proto_data_type(*float_tensor);
+    ASSERT_TRUE(data_type ==
+                (int)ONNX_NAMESPACE::TensorProto_DataType::
+                    TensorProto_DataType_FLOAT); // Check type is FLOAT
     size_t raw_size = wrapped_api_->tensor_proto_raw_data_size(*float_tensor);
 
     wrapped_api_->tensor_proto_delete(float_tensor);
@@ -742,6 +801,10 @@ void VaipOrtApiTest::Test12_TensorProtoOperations() {
   auto* int64_tensor =
       wrapped_api_->tensor_proto_new_i64("int64_tensor", shape, int64_data);
   if (int64_tensor) {
+    auto data_type = wrapped_api_->tensor_proto_data_type(*int64_tensor);
+    ASSERT_TRUE(data_type ==
+                (int)ONNX_NAMESPACE::TensorProto_DataType::
+                    TensorProto_DataType_INT64); // Check type is INT64
     wrapped_api_->tensor_proto_delete(int64_tensor);
   }
 
@@ -749,6 +812,10 @@ void VaipOrtApiTest::Test12_TensorProtoOperations() {
   auto* int32_tensor =
       wrapped_api_->tensor_proto_new_i32("int32_tensor", shape, int32_data);
   if (int32_tensor) {
+    auto data_type = wrapped_api_->tensor_proto_data_type(*int32_tensor);
+    ASSERT_TRUE(data_type ==
+                (int)ONNX_NAMESPACE::TensorProto_DataType::
+                    TensorProto_DataType_INT32); // Check type is INT32
     wrapped_api_->tensor_proto_delete(int32_tensor);
   }
 
@@ -756,6 +823,10 @@ void VaipOrtApiTest::Test12_TensorProtoOperations() {
   auto* int16_tensor =
       wrapped_api_->tensor_proto_new_i16("int16_tensor", shape, int16_data);
   if (int16_tensor) {
+    auto data_type = wrapped_api_->tensor_proto_data_type(*int16_tensor);
+    ASSERT_TRUE(data_type ==
+                (int)ONNX_NAMESPACE::TensorProto_DataType::
+                    TensorProto_DataType_INT16); // Check type is INT16
     wrapped_api_->tensor_proto_delete(int16_tensor);
   }
 
@@ -763,6 +834,10 @@ void VaipOrtApiTest::Test12_TensorProtoOperations() {
   auto* int8_tensor =
       wrapped_api_->tensor_proto_new_i8("int8_tensor", shape, int8_data);
   if (int8_tensor) {
+    auto data_type = wrapped_api_->tensor_proto_data_type(*int8_tensor);
+    ASSERT_TRUE(data_type ==
+                (int)ONNX_NAMESPACE::TensorProto_DataType::
+                    TensorProto_DataType_INT8); // Check type is INT8
     wrapped_api_->tensor_proto_delete(int8_tensor);
   }
 
@@ -771,6 +846,10 @@ void VaipOrtApiTest::Test12_TensorProtoOperations() {
   auto* uint64_tensor =
       wrapped_api_->tensor_proto_new_u64("uint64_tensor", shape, uint64_data);
   if (uint64_tensor) {
+    auto data_type = wrapped_api_->tensor_proto_data_type(*uint64_tensor);
+    ASSERT_TRUE(data_type ==
+                (int)ONNX_NAMESPACE::TensorProto_DataType::
+                    TensorProto_DataType_UINT64); // Check type is UINT64
     wrapped_api_->tensor_proto_delete(uint64_tensor);
   }
 
@@ -778,6 +857,10 @@ void VaipOrtApiTest::Test12_TensorProtoOperations() {
   auto* uint32_tensor =
       wrapped_api_->tensor_proto_new_u32("uint32_tensor", shape, uint32_data);
   if (uint32_tensor) {
+    auto data_type = wrapped_api_->tensor_proto_data_type(*uint32_tensor);
+    ASSERT_TRUE(data_type ==
+                (int)ONNX_NAMESPACE::TensorProto_DataType::
+                    TensorProto_DataType_UINT32); // Check type is UINT32
     wrapped_api_->tensor_proto_delete(uint32_tensor);
   }
 
@@ -785,6 +868,10 @@ void VaipOrtApiTest::Test12_TensorProtoOperations() {
   auto* uint16_tensor =
       wrapped_api_->tensor_proto_new_u16("uint16_tensor", shape, uint16_data);
   if (uint16_tensor) {
+    auto data_type = wrapped_api_->tensor_proto_data_type(*uint16_tensor);
+    ASSERT_TRUE(data_type ==
+                (int)ONNX_NAMESPACE::TensorProto_DataType::
+                    TensorProto_DataType_UINT16); // Check type is UINT16
     wrapped_api_->tensor_proto_delete(uint16_tensor);
   }
 
@@ -792,6 +879,10 @@ void VaipOrtApiTest::Test12_TensorProtoOperations() {
   auto* uint8_tensor =
       wrapped_api_->tensor_proto_new_u8("uint8_tensor", shape, uint8_data);
   if (uint8_tensor) {
+    auto data_type = wrapped_api_->tensor_proto_data_type(*uint8_tensor);
+    ASSERT_TRUE(data_type ==
+                (int)ONNX_NAMESPACE::TensorProto_DataType::
+                    TensorProto_DataType_UINT8); // Check type is UINT8
     wrapped_api_->tensor_proto_delete(uint8_tensor);
   }
 
@@ -800,6 +891,10 @@ void VaipOrtApiTest::Test12_TensorProtoOperations() {
   auto* double_tensor = wrapped_api_->tensor_proto_new_doubles(
       "double_tensor", shape, double_data);
   if (double_tensor) {
+    auto data_type = wrapped_api_->tensor_proto_data_type(*double_tensor);
+    ASSERT_TRUE(data_type ==
+                (int)ONNX_NAMESPACE::TensorProto_DataType::
+                    TensorProto_DataType_DOUBLE); // Check type is DOUBLE
     wrapped_api_->tensor_proto_delete(double_tensor);
   }
 
@@ -809,12 +904,20 @@ void VaipOrtApiTest::Test12_TensorProtoOperations() {
   auto* fp16_tensor =
       wrapped_api_->tensor_proto_new_fp16("fp16_tensor", shape, fp16_data);
   if (fp16_tensor) {
+    auto data_type = wrapped_api_->tensor_proto_data_type(*fp16_tensor);
+    ASSERT_TRUE(data_type ==
+                (int)ONNX_NAMESPACE::TensorProto_DataType::
+                    TensorProto_DataType_FLOAT16); // Check type is FLOAT16
     wrapped_api_->tensor_proto_delete(fp16_tensor);
   }
 
   auto* bf16_tensor =
       wrapped_api_->tensor_proto_new_bf16("bf16_tensor", shape, fp16_data);
   if (bf16_tensor) {
+    auto data_type = wrapped_api_->tensor_proto_data_type(*bf16_tensor);
+    ASSERT_TRUE(data_type ==
+                (int)ONNX_NAMESPACE::TensorProto_DataType::
+                    TensorProto_DataType_BFLOAT16); // Check type is BFLOAT16
     wrapped_api_->tensor_proto_delete(bf16_tensor);
   }
 
@@ -823,6 +926,10 @@ void VaipOrtApiTest::Test12_TensorProtoOperations() {
   auto* i4_tensor =
       wrapped_api_->tensor_proto_new_i4("i4_tensor", shape, i4_data);
   if (i4_tensor) {
+    auto data_type = wrapped_api_->tensor_proto_data_type(*i4_tensor);
+    ASSERT_TRUE(data_type ==
+                (int)ONNX_NAMESPACE::TensorProto_DataType::
+                    TensorProto_DataType_INT4); // Check type is INT4
     wrapped_api_->tensor_proto_delete(i4_tensor);
   }
 
@@ -830,6 +937,10 @@ void VaipOrtApiTest::Test12_TensorProtoOperations() {
   auto* u4_tensor =
       wrapped_api_->tensor_proto_new_u4("u4_tensor", shape, u4_data);
   if (u4_tensor) {
+    auto data_type = wrapped_api_->tensor_proto_data_type(*u4_tensor);
+    ASSERT_TRUE(data_type ==
+                (int)ONNX_NAMESPACE::TensorProto_DataType::
+                    TensorProto_DataType_UINT4); // Check type is UINT4
     wrapped_api_->tensor_proto_delete(u4_tensor);
   }
 }
@@ -872,19 +983,26 @@ void VaipOrtApiTest::Test13_ExtendedApiOperations() { // Test library
     auto* model = simple_conv_relu_model_;
     ASSERT_TRUE(model != nullptr);
     {
+      // the API model_to__proto and model_proto_serialize_as_string only for
+      // fallback_cpu not implement in MLIR backend
       auto* model_proto = wrapped_api_->model_to_proto(*model);
-      ASSERT_TRUE(model_proto);
-      auto serialized =
-          wrapped_api_->model_proto_serialize_as_string(*model_proto);
-      EXPECT_FALSE(serialized->empty());
+      if (model_proto) {
+        auto serialized =
+            wrapped_api_->model_proto_serialize_as_string(*model_proto);
+        EXPECT_FALSE(serialized->empty());
+      }
 
       // Test graph proto operations
       auto& graph = wrapped_api_->model_main_graph(*model);
+      // The API graph_to_graph_proto will be obsolete soon
       auto* graph_proto = wrapped_api_->graph_to_graph_proto(graph);
-      ASSERT_TRUE(graph_proto);
-      wrapped_api_->graph_proto_delete(graph_proto);
-      wrapped_api_->graph_infer_shapes(*model_proto);
-      wrapped_api_->model_proto_delete(model_proto);
+      if (graph_proto) {
+        wrapped_api_->graph_proto_delete(graph_proto);
+      }
+      if (model_proto) {
+        wrapped_api_->graph_infer_shapes(*model_proto);
+        wrapped_api_->model_proto_delete(model_proto);
+      }
     }
   } catch (...) {
     LOG(INFO) << "Extended API operations tested";
@@ -1071,13 +1189,6 @@ void VaipOrtApiTest::Test17_GraphNodeRemovalOperations() {
     std::filesystem::path temp_path =
         CMAKE_CURRENT_BINARY_PATH / "Test17_graph_node_removal";
 
-    LOG(INFO) << "Now delete the ReLU node (node at index 1)";
-    // Delete the ReLU node
-    // NOTE: we cannot use relu_node any more, because it is invalidated
-    // after `graph_resolve()`
-    wrapped_api_->graph_remove_node(graph,
-                                    vaip_core::NodeInput{(*nodes)[1], nullptr});
-
     // Set output to Conv node
     // We cannot use conv_output_arg any more, because it is invalidated after
     // `graph_resolve()`
@@ -1091,6 +1202,12 @@ void VaipOrtApiTest::Test17_GraphNodeRemovalOperations() {
         graph,
         gsl::span<const vaip_core::NodeArg* const>({(*conv_node_outputs)[0]}));
 
+    LOG(INFO) << "Now delete the ReLU node (node at index 1)";
+    // Delete the ReLU node
+    // NOTE: we cannot use relu_node any more, because it is invalidated
+    // after `graph_resolve()`
+    wrapped_api_->graph_remove_node(graph,
+                                    vaip_core::NodeInput{(*nodes)[1], nullptr});
     // Resolve the graph again
     int resolution_result = wrapped_api_->graph_resolve(graph, false);
     LOG(INFO) << "Graph resolution result after deleting ReLU node: "
@@ -1224,15 +1341,10 @@ void VaipOrtApiTest::Test18_MissingApisCoverage() {
 
           // Test node_arg_get_const_data_as_tensor (may throw for non-constant
           // args)
-          try {
+          if (wrapped_api_->node_arg_is_constant(graph, *node_arg)) {
             const auto& tensor_data =
                 wrapped_api_->node_arg_get_const_data_as_tensor(graph,
                                                                 *node_arg);
-            LOG(INFO) << "Got constant data for node arg: "
-                      << wrapped_api_->node_arg_get_name_unsafe(*node_arg);
-          } catch (...) {
-            LOG(INFO) << "node_arg_get_const_data_as_tensor threw (expected "
-                         "for non-constant args)";
           }
         }
       }
@@ -1464,7 +1576,7 @@ void VaipOrtApiTest::Test19_add_sin_op_before_relu_op() {
     auto& new_relu_node = wrapped_api_->graph_add_node(
         graph, "new_relu_node", "Relu", "ReLU activation operation",
         new_relu_inputs, new_relu_outputs, *new_relu_attrs, "");
-
+    wrapped_api_->graph_remove_node(graph, {relu_node, nullptr});
     {
       wrapped_api_->graph_resolve(graph, true);
       auto topo_node_indices =
@@ -1654,7 +1766,11 @@ void VaipOrtApiTest::Test20_conv_relu_fuse_conv2d_nchw() {
 
 void VaipOrtApiTest::Test21_fuse_relu_q() {
   try {
-    auto* model = wrapped_api_->model_load(RESNET_50_PATH.u8string());
+    auto test_model_path = RESNET_50_PATH;
+    if (backend_ == morphizen::kMLIRBackend) {
+      test_model_path = RESNET_50_MLIR_PATH;
+    }
+    auto* model = wrapped_api_->model_load(test_model_path.u8string());
     ASSERT_TRUE(model != nullptr) << "Failed to load ResNet-50 model";
 
     auto* cloned_model =
@@ -1940,6 +2056,42 @@ void VaipOrtApiTest::Test24_convert_initializer_to_const_op() {
           << "Data type for initializer tensor " << constant_tensor.first
           << " should be FLOAT, but found: " << data_type;
 
+      {
+        // add testcase for cover tensor_proto_get_shape_unsafe API
+        auto tensor_shape = wrapped_api_->tensor_proto_get_shape_unsafe(
+            *constant_tensor.second);
+        ASSERT_TRUE(tensor_shape.get() != nullptr)
+            << "Tensor shape for initializer tensor " << constant_tensor.first
+            << " should not be null";
+        ASSERT_EQ(*tensor_shape, *shape)
+            << "Tensor shape from NodeArg and TensorProto should match for "
+               "initializer tensor "
+            << constant_tensor.first;
+
+        auto tensor_data_type =
+            wrapped_api_->tensor_proto_data_type(*constant_tensor.second);
+        ASSERT_EQ(tensor_data_type, data_type)
+            << "Tensor data type for initializer tensor "
+            << constant_tensor.first
+            << " should be FLOAT, but found: " << tensor_data_type;
+
+        auto tensor_data =
+            wrapped_api_->tensor_proto_as_raw(graph, *constant_tensor.second);
+        auto tensor_data_size =
+            wrapped_api_->tensor_proto_raw_data_size(*constant_tensor.second);
+        ASSERT_EQ(tensor_data.size(), tensor_data_size)
+            << "Tensor data size for initializer tensor "
+            << constant_tensor.first
+            << " does not match expected size from raw data";
+        ASSERT_EQ(tensor_data_size,
+                  sizeof(float) * std::accumulate(tensor_shape->begin(),
+                                                  tensor_shape->end(), 1,
+                                                  std::multiplies<int64_t>()))
+            << "Tensor data size for initializer tensor "
+            << constant_tensor.first
+            << " does not match expected size from shape";
+      }
+
       auto op_type = std::string("const");
       auto attrs = vaip_core::NodeAttributesBuilder();
       attrs.add("data_type", "float");
@@ -2181,12 +2333,14 @@ void VaipOrtApiTest::Test07_create_simple_conv_relu_model() {
     // Create an empty model
     auto* model = wrapped_api_->create_empty_model(temp_path, opset);
     ASSERT_TRUE(model != nullptr) << "Failed to create empty model";
-
     auto& graph = wrapped_api_->model_main_graph(*model);
+    LOG(INFO) << " the default graph name is "
+              << wrapped_api_->graph_get_name(graph);
 
     // Set a meaningful graph name
     wrapped_api_->graph_set_name(graph, "simple_conv_relu");
-
+    LOG(INFO) << " the after set name,  graph name is "
+              << wrapped_api_->graph_get_name(graph);
     // Create input tensor (NCHW format: batch=1, channels=3, height=224,
     // width=224)
     std::vector<int64_t> input_shape = {1, 3, 224, 224};
@@ -2324,7 +2478,9 @@ void VaipOrtApiTest::Test07_create_simple_conv_relu_model() {
     // NOTE: this will invalidate all node_arg and node index
     int resolution_result = wrapped_api_->graph_resolve(graph, false);
     LOG(INFO) << "Graph resolution result: " << resolution_result;
-
+    LOG(INFO) << "Saving graph to file: " << temp_path.string() + ".graph.onnx";
+    wrapped_api_->graph_save(graph, temp_path.string() + ".graph.onnx", "",
+                             1024);
     // Get graph statistics
     auto inputs = wrapped_api_->graph_get_inputs_unsafe(graph);
     auto outputs = wrapped_api_->graph_get_outputs_unsafe(graph);
@@ -2338,9 +2494,7 @@ void VaipOrtApiTest::Test07_create_simple_conv_relu_model() {
     LOG(INFO) << "  - Nodes: " << nodes->size();
     LOG(INFO) << "  - Initialized tensors: " << tensors.size();
     // Save the initial graph to file
-    LOG(INFO) << "Saving graph to file: " << temp_path.string() + ".graph.onnx";
-    wrapped_api_->graph_save(graph, temp_path.string() + ".graph.onnx", "",
-                             1024);
+
     LOG(INFO) << "Graph saved successfully";
     // Cleanup
     wrapped_api_->node_attributes_delete(conv_attrs);
@@ -2598,13 +2752,14 @@ TEST_F(VaipOrtApiTest, TestAll) {
       return;
     }
   }
-
-  DeleteSimpleConvReluModel();
-  LOG(INFO) << "Running ComprehensiveCoverageReport...";
-  ComprehensiveCoverageReport();
-  LOG(INFO) << "Running DetailedCoverageAnalysis...";
-  DetailedCoverageAnalysis();
-  LOG(INFO) << "=== Sequential Test Execution Completed ===";
+  if (enable_test_all) {
+    LOG(INFO) << "Running ComprehensiveCoverageReport...";
+    ComprehensiveCoverageReport();
+    LOG(INFO) << "Running DetailedCoverageAnalysis...";
+    DetailedCoverageAnalysis();
+  }
+  LOG(INFO) << "=== Sequential Test Execution Completed (enable_unittest=\""
+            << enable_unittest << "\", backend=\"" << backend_ << "\") === ";
 }
 
 } // namespace test

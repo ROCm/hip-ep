@@ -59,21 +59,8 @@ target_include_directories(morphizen-utils
 )
 
 # Compiler-specific options
-if(MSVC)
-    target_compile_options(morphizen-utils PRIVATE
-        /W4
-        /WX  # Treat warnings as errors
-    )
-else()
-    target_compile_options(morphizen-utils PRIVATE
-        -Wall
-        -Wextra
-        -fPIC
-        -Wpedantic
-        -Werror  # Treat warnings as errors
-    )
-endif()
-
+message("MORPHIZEN_COMPILER_OPTIONS is ${MORPHIZEN_COMPILER_OPTIONS}")
+target_compile_options(morphizen-utils PRIVATE ${MORPHIZEN_COMPILER_OPTIONS})
 target_link_libraries(morphizen-utils PRIVATE glog::glog)
 
 # Optional: Enable testing

@@ -99,12 +99,12 @@ OrtStatus* IRConverterImp::convert_graph(vaip_core::Graph& graph) const {
   // throw_if_error(convert_nodes(graph, graph_proto));
   // - Converting inputs
   throw_if_error(convert_graph_inputs(graph));
-  // - Converting outputs
-  throw_if_error(convert_graph_outputs(graph));
   // - Converting initializers
   throw_if_error(convert_graph_initializers(graph));
   // - Converting Nodes
   throw_if_error(convert_graph_nodes(graph));
+  // - Converting outputs
+  throw_if_error(convert_graph_outputs(graph));
   // - Resolve the graph
   VAIP_ORT_API(graph_resolve)(graph, true);
   MY_LOG(2) << "Graph conversion completed";
@@ -256,6 +256,7 @@ IRConverterImp::convert_graph_initializers(vaip_core::Graph& graph) const {
     //     [](vaip_core::TensorProto* p) {
     //       VAIP_ORT_API(tensor_proto_delete)(p);
     //     });
+
     auto tensor_proto = std::unique_ptr<vaip_core::TensorProto,
                                         void (*)(vaip_core::TensorProto*)>(
         VAIP_ORT_API_EXT(tensor_proto_new_raw_data)(

@@ -8,9 +8,13 @@
 #include <gtest/gtest.h>
 #include <map>
 #include <memory>
+#include <morphizen-utils/morphizen-utils.hpp>
 #include <morphizen/vaip.hpp>
 #include <string>
 #include <vaip/vaip_ort_api.h>
+DEF_ENV_PARAM_2(MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND,
+                morphizen::kONNXIRBackend, // default to "onnx-ir-imp"
+                std::string)               // or "mlir-backend"
 
 namespace morphizen {
 // defined in onnx-ir-imp/src/vaip-ort-api.cpp
@@ -56,11 +60,10 @@ protected:
   void SetUp() override {
     // Enable verbose logging for API calls
     FLAGS_v = 3;
-
+    backend_ = ENV_PARAM(MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND);
     // Get the original API
     original_api_ = const_cast<vaip_core::OrtApiForVaip*>(
-        morphizen::get_global_vaip_ort_api("onnx-ir-imp"));
-
+        morphizen::get_global_vaip_ort_api(backend_.c_str()));
     // Create the coverage wrapper
     wrapped_api_ = get_vaip_ort_api_for_coverage_test(original_api_);
     ASSERT_NE(wrapped_api_, nullptr);
@@ -75,6 +78,7 @@ protected:
     }
   }
 
+  std::string backend_;
   vaip_core::OrtApiForVaip* original_api_ = nullptr;
   vaip_core::OrtApiForVaip* wrapped_api_ = nullptr;
 };

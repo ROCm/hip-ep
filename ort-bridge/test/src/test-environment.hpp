@@ -36,3 +36,5 @@ static const std::filesystem::path ENV_CONFIG_JSON_PATH =
     TEST_CWD / "env_config.json";
 static const std::filesystem::path MORPHIZEN_VITISAI_EP =
     std::filesystem::u8path(MORPHIZEN_VITISAI_EP_STR);
+static const std::filesystem::path RESNET_50_MLIR_PATH =
+    CMAKE_CURRENT_SOURCE_PATH / "src" / "pt_resnet50.onnx.mlir";

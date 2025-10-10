@@ -21,6 +21,9 @@
 #include <vaip/vaip_ort_api.h>
 
 namespace morphizen {
+static constexpr const char* kONNXIRBackend = "onnx-ir-imp";
+static constexpr const char* kMLIRBackend = "mlir-backend";
+
 uint32_t get_vaip_version_major();
 uint32_t get_vaip_version_minor();
 uint32_t get_vaip_version_patch();

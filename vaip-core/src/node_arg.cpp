@@ -23,13 +23,15 @@ shape_proto_as_string(const std::vector<int64_t>& shape,
   CHECK((&denotation) != nullptr);
   std::ostringstream str;
   auto size = shape.size();
-  CHECK_EQ(size, denotation.size());
+  auto is_empty_denotation = denotation.empty();
+  // The denotation is not support in MLIR-backend now
+  // CHECK_EQ(size, denotation.size());
   str << "[";
   for (auto i = 0u; i < size; ++i) {
     if (i != 0) {
       str << ",";
     }
-    auto has_denotation = denotation[i].empty();
+    auto has_denotation = is_empty_denotation || denotation[i].empty();
     if (!has_denotation) {
       str << denotation[i] << "=" << shape[i];
     } else {

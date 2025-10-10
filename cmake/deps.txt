@@ -12,3 +12,5 @@ protobuf;https://github.com/protocolbuffers/protobuf/archive/refs/tags/v21.12.zi
 pybind11;https://github.com/pybind/pybind11/archive/refs/tags/v2.13.6.tar.gz;a2e59f0e7065404b44dfe92a28aca47ba1378dc4
 Boost;https://github.com/boostorg/boost/releases/download/boost-1.84.0/boost-1.84.0.tar.xz;893b5203b862eb9bbd08553e24ff146a
 onnx;https://github.com/onnx/onnx/archive/refs/tags/v1.18.0.zip;f156d032a3af91b66d554e11158b33ca77bbb1f2
+llvm;https://github.com/llvm/llvm-project.git;43d71baae36c8d8b5a9995aa35efebe09cc9c2d6
+onnx-mlir;git@gitenterprise.xilinx.com:VitisAI/onnx-mlir.git;426e63666844fbc377fbf5e1efc5d2f5bd73dda8
