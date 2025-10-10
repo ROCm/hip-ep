@@ -19,4 +19,7 @@ namespace vaip_core {
   }
   return "nil";
 }
+inline std::string normalize_domain(const std::string& domain) {
+  return (domain == "ai.onnx") || (domain == "onnx") ? "" : domain;
+}
 } // namespace vaip_core

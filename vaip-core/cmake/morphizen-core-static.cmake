@@ -173,6 +173,7 @@ add_library(${LIB_NAME} STATIC
   include/morphizen/config_reader.hpp
   src/binary/config_reader.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/config_json_binary.hpp
+  src/binary/onnx_schema_json_binary.hpp
   src/vitisai_compile_model.cpp
   src/vaip_profile.cpp
   src/onnxruntime_vitisai_ep.cpp
@@ -184,6 +185,8 @@ add_library(${LIB_NAME} STATIC
   src/ep_shared_context_workspace.hpp
   include/morphizen/op_invoker.hpp
   src/op_invoker.cpp
+  include/morphizen/onnx_schema.hpp
+  src/onnx_schema.cpp
 )
 add_library (morphizen::morphizen-core-static ALIAS morphizen-core-static)
 set_target_properties(${LIB_NAME} PROPERTIES FOLDER morphizen)
@@ -248,3 +251,12 @@ if(BUILD_PYTHON)
   target_link_libraries(${LIB_NAME} PRIVATE Python3::Python)
   target_compile_definitions(${LIB_NAME} PRIVATE "ENABLE_PYTHON=1")
 endif(BUILD_PYTHON)
+
+# ONNX is special, we must not inherit ONNX_NAMESPAE definition
+set(onnx_targets onnx onnx_proto)
+foreach(tgt IN LISTS onnx_targets)
+    target_include_directories(${LIB_NAME} PRIVATE $<TARGET_PROPERTY:${tgt},INTERFACE_INCLUDE_DIRECTORIES>)
+    target_link_libraries(${LIB_NAME} PRIVATE $<TARGET_FILE:${tgt}>)
+    add_dependencies(${LIB_NAME} ${tgt})
+endforeach()
+target_compile_definitions(${LIB_NAME} PRIVATE ONNX_ML=1)

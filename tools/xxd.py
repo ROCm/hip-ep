@@ -29,7 +29,10 @@ def main(argv):
             chunk = data[i : i + args.column]
             hex_chunk = ",".join(f"0x{byte:02x}" for byte in chunk)
             ascii_chunk = "".join(
-                chr(byte) if 32 <= byte < 127 else "." for byte in chunk
+                chr(byte)
+                if 32 <= byte < 127 and byte not in [ord("*"), ord("/"), ord("\\")]
+                else "."
+                for byte in chunk
             )
             print(
                 f"/*{i:08x} */  {hex_chunk:<{args.column * 3}}, /* {ascii_chunk} */",

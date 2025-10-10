@@ -28,3 +28,22 @@ set_target_properties(${EXEC_NAME} PROPERTIES
 )
 target_link_options(${EXEC_NAME} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_LINKER_OPTIONS}>")
 install(TARGETS ${EXEC_NAME} DESTINATION bin)
+
+if(morphizen_ENABLE_UNIT_TEST)
+  add_test(NAME ${EXEC_NAME}_test
+           COMMAND $<TARGET_FILE:${EXEC_NAME}>
+            -f ${CMAKE_CURRENT_BINARY_DIR}/../unit-test/pt_resnet50.onnx
+            -m ${CMAKE_CURRENT_BINARY_DIR}/conv_relu_maxpool.mmd
+            -i 111
+            -o 135
+            -j ${CMAKE_CURRENT_BINARY_DIR}/conv_relu_maxpool.json)
+
+  add_test(NAME ${EXEC_NAME}_onnx-grep_test
+           COMMAND $<TARGET_FILE:morphizen-onnx-grep>
+            -f ${CMAKE_CURRENT_BINARY_DIR}/../unit-test/pt_resnet50.onnx
+            -p ${CMAKE_CURRENT_BINARY_DIR}/conv_relu_maxpool.json
+            -n 135)
+
+  set_tests_properties(${EXEC_NAME}_onnx-grep_test PROPERTIES
+                       DEPENDS ${EXEC_NAME}_test)
+endif()

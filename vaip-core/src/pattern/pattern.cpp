@@ -31,6 +31,9 @@
 namespace py = pybind11;
 #endif
 #include "./immutable_map.hpp"
+// NOTE: onnx-schema.hpp must be included last as it redefines ONNX_NAMESPACE
+// to morphizen_onnx to prevent naming conflicts.
+#include "morphizen/onnx_schema.hpp"
 namespace vaip_core {
 std::optional<vaip_cxx::NodeInput>
 Binder::create_vaip_cxx_node_input(NodeInput node_input) const {
@@ -174,6 +177,20 @@ std::string Pattern::virtualize_label() const {
   return std::string("virtualize_label is not implemented yet");
 }
 
+namespace {
+// Helper function to parse op_type_and_domain string
+std::pair<std::string, std::string>
+parse_op_type_and_domain(const std::string& op_type_and_domain) {
+  auto colon_pos = op_type_and_domain.find(':');
+  if (colon_pos != std::string::npos) {
+    return {op_type_and_domain.substr(0, colon_pos),
+            op_type_and_domain.substr(colon_pos + 1)};
+  } else {
+    return {"", op_type_and_domain}; // Domain is optional
+  }
+}
+} // anonymous namespace
+
 PatternBuilder::PatternBuilder()
     : id_map_{std::make_shared<std::unordered_map<std::string, int>>()} {}
 static std::shared_ptr<Pattern>
@@ -224,13 +241,20 @@ PatternBuilder_create(PatternBuilder* self, const PatternProto& pattern_proto) {
     ret = self->graph_input();
     break;
   case PatternProto::kCallNode: {
-    auto op_type = pattern_proto.call_node().op_type();
+    auto [op_domain, op_type] =
+        parse_op_type_and_domain(pattern_proto.call_node().op_type());
+    if (op_domain.empty()) {
+      op_domain = pattern_proto.call_node().op_domain();
+    } else {
+      LOG(ERROR) << "Please use op_domain field to store op domain seperately.";
+    }
     auto args =
         PatternBuilder_build_args(self, pattern_proto.call_node().args());
     std::vector<bool> optional_args(
         pattern_proto.call_node().optional_args().begin(),
         pattern_proto.call_node().optional_args().end());
-    ret = self->node3(op_type, args, optional_args);
+    ret = self->node3_with_optional_domain(op_type, args, optional_args,
+                                           op_domain);
   } break;
   default:
     ret = nullptr;
@@ -318,31 +342,127 @@ std::shared_ptr<Pattern> PatternBuilder::wildcard() {
 }
 
 std::shared_ptr<Pattern>
-PatternBuilder::node2(const std::string& op_type,
+PatternBuilder::node2(const std::string& op_type_and_domain,
                       const std::vector<std::shared_ptr<Pattern>>& args) {
-  return create_internal([=](int id) {
-    auto is_args_optional = std::vector<bool>(args.size(), false);
-    return new PatternNode(id, op_type, std::move(args),
-                           std::move(is_args_optional));
-  });
+  auto [op_domain, op_type] = parse_op_type_and_domain(op_type_and_domain);
+  return node2_with_optional_domain(op_type, args, op_domain);
+}
+
+std::shared_ptr<Pattern> PatternBuilder::node2_with_optional_domain(
+    const std::string& op_type,
+    const std::vector<std::shared_ptr<Pattern>>& args,
+    const std::string& op_domain) {
+  auto is_args_optional = std::vector<bool>(args.size(), false);
+  return node3_with_optional_domain(op_type, args, is_args_optional, op_domain);
 }
 
 std::shared_ptr<Pattern>
-PatternBuilder::node3(const std::string& op_type,
+PatternBuilder::node3(const std::string& op_type_and_domain,
                       const std::vector<std::shared_ptr<Pattern>>& args,
                       const std::vector<bool>& optional_args) {
+  auto [op_domain, op_type] = parse_op_type_and_domain(op_type_and_domain);
+  return node3_with_optional_domain(op_type, args, optional_args, op_domain);
+}
+
+std::shared_ptr<Pattern> PatternBuilder::node3_with_optional_domain(
+    const std::string& op_type,
+    const std::vector<std::shared_ptr<Pattern>>& args,
+    const std::vector<bool>& optional_args, const std::string& op_domain) {
   return create_internal([=](int id) {
-    return new PatternNode(id, op_type, std::move(args),
+    return new PatternNode(id, op_type, op_domain, std::move(args),
                            std::move(optional_args));
   });
 }
 
+std::shared_ptr<Pattern> PatternBuilder::node_with_named_args(
+    const std::string& op_type,
+    const std::map<std::string, std::shared_ptr<Pattern>>& named_args,
+    const std::string& op_domain) {
+  // Get the OpSchema to understand input names and their positions
+  const auto* schema = morphizen::GetOpSchema(
+      op_type, op_domain); // Use high version number to get latest schema
+
+  if (!schema) {
+    LOG(FATAL) << "No schema found for op_type: " << op_type
+               << " in domain: " << op_domain;
+    return nullptr;
+  }
+
+  // Build ordered argument list based on schema input definitions
+  std::vector<std::shared_ptr<Pattern>> args;
+  std::vector<bool> optional_args;
+
+  // Get schema inputs
+  auto inputs = schema->inputs();
+  args.resize(inputs.size());
+  optional_args.resize(inputs.size(), true); // Default to optional
+
+  // Fill arguments based on schema input order
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    const auto& input = inputs[i];
+    std::string input_name = input.GetName();
+
+    // Look for exact match first
+    auto it = named_args.find(input_name);
+    bool user_marked_optional = false;
+
+    if (it == named_args.end()) {
+      // Look for user-provided optional version (name with '*' suffix)
+      it = named_args.find(input_name + "*");
+      if (it != named_args.end()) {
+        user_marked_optional = true;
+      }
+    }
+
+    if (it != named_args.end() && it->second != nullptr) {
+      args[i] = it->second;
+      // Argument is required unless:
+      // 1. It's explicitly nullptr
+      // 2. User marked it optional with '*' suffix
+      // 3. Schema defines it as optional
+      optional_args[i] =
+          user_marked_optional ||
+          (input.GetOption() !=
+           morphizen_onnx::OpSchema::FormalParameterOption::Single);
+    } else {
+      // Argument not specified - use wildcard pattern to match any input
+      args[i] = wildcard();
+      optional_args[i] = true;
+    }
+  }
+
+  // Handle any extra named arguments that don't match schema inputs
+  for (const auto& [name, pattern] : named_args) {
+    std::string clean_name = name;
+    if (!clean_name.empty() && clean_name.back() == '*') {
+      clean_name.pop_back();
+    }
+
+    // Check if this argument was already handled
+    bool found = false;
+    for (size_t i = 0; i < inputs.size(); ++i) {
+      if (inputs[i].GetName() == clean_name) {
+        found = true;
+        break;
+      }
+    }
+
+    if (!found) {
+      LOG(WARNING) << "Named argument '" << name << "' not found in schema for "
+                   << op_type << " in domain " << op_domain;
+    }
+  }
+
+  return node3_with_optional_domain(op_type, args, optional_args, op_domain);
+}
+
 std::shared_ptr<Pattern>
-PatternBuilder::commutable_node(const std::string& op_type,
+PatternBuilder::commutable_node(const std::string& op_type_and_domain,
                                 std::shared_ptr<Pattern> arg1,
                                 std::shared_ptr<Pattern> arg2) {
+  auto [op_domain, op_type] = parse_op_type_and_domain(op_type_and_domain);
   return create_internal([=](int id) {
-    return new PatternCommutableNode(id, op_type, arg1, arg2);
+    return new PatternCommutableNode(id, op_type, op_domain, arg1, arg2);
   });
 }
 

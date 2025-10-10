@@ -9,6 +9,7 @@ namespace vaip_core {
 class PatternCommutableNode : public Pattern {
 public:
   explicit PatternCommutableNode(int id, const std::string& op_type,
+                                 const std::string& op_domain,
                                  const std::shared_ptr<Pattern>& arg1,
                                  const std::shared_ptr<Pattern>& arg2);
   ~PatternCommutableNode();
@@ -23,6 +24,7 @@ private:
 
 private:
   const std::string op_type_;
+  const std::string op_domain_;
   const std::shared_ptr<Pattern> arg1_;
   const std::shared_ptr<Pattern> arg2_;
 };

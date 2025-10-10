@@ -57,6 +57,41 @@ TEST_F(PatternTest, CommutableNode) {
   EXPECT_EQ(match_node.value().name(), "Add_178")
       << "name must be " << match_node.value();
 }
+
+TEST_F(PatternTest, NamedArgs) {
+  auto model = vaip_cxx::Model::load(RESNET_50_PATH);
+  auto graph = model->main_graph();
+  graph.resolve();
+  auto node_arg_name = std::string("127"); // Conv output
+  auto node = graph.find_node(node_arg_name);
+  ASSERT_TRUE(node.has_value()) << "cannot find node " << node_arg_name;
+
+  vaip_core::Pattern::enable_trace(1);
+  vaip_core::PatternBuilder builder;
+  auto X = builder.wildcard();
+  auto W = builder.wildcard();
+  auto B = builder.wildcard();
+  auto conv =
+      builder.node_with_named_args("Conv", {{"X", X}, {"W", W}, {"B", B}});
+  ASSERT_TRUE(conv != nullptr) << "cannot build Conv pattern";
+  builder.bind("conv_0", conv);
+
+  auto binder = conv->match(node.value());
+  EXPECT_TRUE(binder != nullptr) << "cannot match the pattern";
+
+  auto match_node_input = (*binder)("conv_0");
+  ASSERT_TRUE(match_node_input.has_value());
+  LOG(INFO) << "matched node arg: " << match_node_input.value();
+  EXPECT_EQ(match_node_input.value().as_node_arg().name(), "127")
+      << "name must be " << match_node_input.value();
+
+  auto match_node = match_node_input.value().as_node();
+  ASSERT_TRUE(match_node.has_value());
+  LOG(INFO) << "matched node" << match_node.value();
+  EXPECT_EQ(match_node.value().name(), "Conv_18")
+      << "name must be " << match_node.value();
+}
+
 /*
 TEST_F(PatternTest, SequenceNode) {
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);

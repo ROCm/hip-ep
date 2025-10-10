@@ -36,6 +36,7 @@ add_executable(${TEST_EXE_NAME}
   vaip/test_mmap_file.cpp
   vaip/test_ep_shared_context_workspace.cpp
   vaip/test_op_invoker.cpp
+  vaip/test_onnx_schema.cpp
   ${MORPHIZEN_E2E_TESTS_PROTO_SRCS}
   ${MORPHIZEN_E2E_TESTS_PROTO_HDRS}
   morphizen-e2e-test/config.cpp
@@ -78,6 +79,8 @@ target_include_directories(
   ${CMAKE_CURRENT_BINARY_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}
+  target_include_directories(${LIB_NAME} PRIVATE $<TARGET_PROPERTY:onnx,INTERFACE_INCLUDE_DIRECTORIES>)
+  target_include_directories(${LIB_NAME} PRIVATE $<TARGET_PROPERTY:onnx_proto,INTERFACE_INCLUDE_DIRECTORIES>)
 )
 
 target_link_options(${TEST_EXE_NAME} PRIVATE
@@ -96,6 +99,8 @@ target_compile_definitions(${TEST_EXE_NAME} PRIVATE
   # - add _WIN32_WINNT=0x0601 to your project's Preprocessor Definitions.
   # Assuming _WIN32_WINNT=0x0601 (i.e. Windows 7 target).
   -D_WIN32_WINNT=0x0601
+  # for test onnx::OpSchema
+  -DONNX_ML=1
   )
 
 

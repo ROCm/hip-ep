@@ -299,6 +299,8 @@ public:
    * Extarct all the ops name present in pattern using recursion
    *
    * @return A vector of all ops name.
+   *
+   * @note it is only used by PatternInfo in vaip. TODO: to be clarified.
    */
   VAIP_DLL_SPEC std::vector<std::string> get_ops_list_name() const;
 
@@ -455,27 +457,106 @@ struct PatternBuilder {
   /**
    * @brief Creates a node pattern with two arguments.
    *
-   * @param op_type The type of the node.
+   * @param op_type_and_domain The type and domain of the node, seperated by
+   * ":", for example, "com.microsoft:EPContext"
    * @param args The vector of arguments for the node.
    * @return std::shared_ptr<Pattern> The created node pattern.
    */
   VAIP_DLL_SPEC std::shared_ptr<Pattern>
-  node2(const std::string& op_type,
+  node2(const std::string& op_type_and_domain,
         const std::vector<std::shared_ptr<Pattern>>& args);
 
   /**
+   * @brief Creates a pattern for matching nodes with exactly 3 input arguments.
+   *
+   * This function constructs a pattern that matches ONNX nodes of a specific
+   * operation type with exactly three input patterns. It's part of the pattern
+   * matching system for identifying specific node configurations in
+   * computational graphs.
+   *
+   * @param op_type The operation type to match (e.g., "Add", "Conv", "MatMul")
+   * @param args Vector containing exactly 3 shared pointers to Pattern objects
+   * representing the input patterns that must match the node's inputs
+   * @param op_domain The operation domain namespace, defaults to empty for
+   * standard ONNX operators
+   *
+   * @return std::shared_ptr<Pattern> A shared pointer to the created Pattern
+   * object that can be used for graph pattern matching and transformation
+   * operations
+   *
+   * @note This is a DLL-exported function (VAIP_DLL_SPEC) making it available
+   * across module boundaries
+   * @see Pattern class for more details on pattern matching capabilities
+   */
+  VAIP_DLL_SPEC std::shared_ptr<Pattern>
+  node2_with_optional_domain(const std::string& op_type,
+                             const std::vector<std::shared_ptr<Pattern>>& args,
+                             const std::string& op_domain = "");
+  /**
    * @brief Creates a node pattern with three arguments.
    *
-   * @param op_type The type of the node.
+   * @param op_type_and_domain The type and domain of the node, seperated by
+   * ":", for example, "com.microsoft:EPContext"
    * @param args The vector of arguments for the node.
    * @param optional_args The vector indicating whether each argument is
    * optional.
    * @return std::shared_ptr<Pattern> The created node pattern.
    */
   VAIP_DLL_SPEC std::shared_ptr<Pattern>
-  node3(const std::string& op_type,
+  node3(const std::string& op_type_and_domain,
         const std::vector<std::shared_ptr<Pattern>>& args,
         const std::vector<bool>& optional_args);
+
+  /**
+   * @brief Creates a pattern node with specified operation type and arguments.
+   *
+   * @param op_type The operation type string identifying the node operation
+   * @param args Vector of shared pointers to Pattern objects representing the
+   * input arguments
+   * @param optional_args Vector of boolean values indicating which arguments
+   * are optional (true = optional, false = required)
+   * @param op_domain The operation domain, defaults to empty
+   * @return std::shared_ptr<Pattern> A shared pointer to the created Pattern
+   * node
+   */
+  VAIP_DLL_SPEC std::shared_ptr<Pattern>
+  node3_with_optional_domain(const std::string& op_type,
+                             const std::vector<std::shared_ptr<Pattern>>& args,
+                             const std::vector<bool>& optional_args,
+                             const std::string& op_domain = "");
+  /**
+   * @brief Creates a node pattern using named arguments.
+   *
+   * This method creates node patterns where inputs are identified by name
+   * rather than position, providing clearer and more flexible pattern
+   * specifications. The operation domain defaults to empty.
+   *
+   * Named arguments allow specification of only the inputs you need to match,
+   * making patterns more maintainable when operators have many optional inputs.
+   *
+   * @param op_type The operation type (e.g., "Conv", "Add", "MatMul").
+   * @param named_args Map of argument names to their Pattern objects.
+   *                   Use nullptr to indicate an optional argument that matches
+   * any input.
+   * @param op_domain The operation domain (default: empty).
+   * @return Shared pointer to the created node Pattern.
+   *
+   * @note Unspecified arguments are treated as optional. Examples:
+   * @code
+   * // These patterns are equivalent - both treat bias 'B' as optional
+   * auto conv1 = builder.node_with_named_args("Conv", {{"X", input}, {"W",
+   * weight}}); auto conv2 = builder.node_with_named_args("Conv", {{"X", input},
+   * {"W", weight}, {"B", nullptr}});
+   *
+   * // Suffix '*' explicitly marks an argument as optional
+   * auto conv3 = builder.node_with_named_args("Conv", {{"X", input}, {"W",
+   * weight}, {"B*", bias_pattern}});
+   * @endcode
+   */
+  VAIP_DLL_SPEC std::shared_ptr<Pattern> node_with_named_args(
+      const std::string& op_type,
+      const std::map<std::string, std::shared_ptr<Pattern>>& named_args,
+      const std::string& op_domain = "");
 
   /**
    * Creates a commutable node pattern.

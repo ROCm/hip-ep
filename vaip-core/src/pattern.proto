@@ -60,6 +60,7 @@ message PatternConstantProto {
 
 message PatternCallNodeProto {
   string op_type = 1;
+  string op_domain = 4;
   repeated PatternCallNodeArgProto args = 2;
   repeated bool optional_args = 3;
 }

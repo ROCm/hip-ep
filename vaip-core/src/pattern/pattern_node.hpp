@@ -12,6 +12,7 @@ namespace vaip_core {
 class PatternNode : public Pattern {
 public:
   explicit PatternNode(int id, const std::string& op_type,
+                       const std::string& op_domain,
                        std::vector<std::shared_ptr<Pattern>> args,
                        std::vector<bool> is_args_optional);
   ~PatternNode();
@@ -29,6 +30,7 @@ public:
 
 private:
   const std::string op_type_;
+  const std::string op_domain_;
   std::vector<std::shared_ptr<Pattern>> args_;
   std::vector<bool> is_args_optional_;
 };

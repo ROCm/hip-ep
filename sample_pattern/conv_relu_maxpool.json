@@ -48,7 +48,7 @@
   {
    "isRoot": false,
    "callNode": {
-    "opType": "onnx:QuantizeLinear",
+    "opType": "QuantizeLinear",
     "args": [
      {
       "name": "module_2.bias"
@@ -71,7 +71,7 @@
   {
    "isRoot": false,
    "callNode": {
-    "opType": "onnx:DequantizeLinear",
+    "opType": "DequantizeLinear",
     "args": [
      {
       "name": "123"
@@ -119,7 +119,7 @@
   {
    "isRoot": false,
    "callNode": {
-    "opType": "onnx:QuantizeLinear",
+    "opType": "QuantizeLinear",
     "args": [
      {
       "name": "module_2.weight"
@@ -142,7 +142,7 @@
   {
    "isRoot": false,
    "callNode": {
-    "opType": "onnx:DequantizeLinear",
+    "opType": "DequantizeLinear",
     "args": [
      {
       "name": "117"
@@ -180,7 +180,7 @@
   {
    "isRoot": false,
    "callNode": {
-    "opType": "onnx:DequantizeLinear",
+    "opType": "DequantizeLinear",
     "args": [
      {
       "name": "111"
@@ -203,7 +203,7 @@
   {
    "isRoot": false,
    "callNode": {
-    "opType": "onnx:Conv",
+    "opType": "Conv",
     "args": [
      {
       "name": "114"
@@ -226,7 +226,7 @@
   {
    "isRoot": false,
    "callNode": {
-    "opType": "onnx:Relu",
+    "opType": "Relu",
     "args": [
      {
       "name": "127"
@@ -241,7 +241,7 @@
   {
    "isRoot": false,
    "callNode": {
-    "opType": "onnx:QuantizeLinear",
+    "opType": "QuantizeLinear",
     "args": [
      {
       "name": "128"
@@ -264,7 +264,7 @@
   {
    "isRoot": false,
    "callNode": {
-    "opType": "onnx:DequantizeLinear",
+    "opType": "DequantizeLinear",
     "args": [
      {
       "name": "131"
@@ -287,7 +287,7 @@
   {
    "isRoot": true,
    "callNode": {
-    "opType": "onnx:MaxPool",
+    "opType": "MaxPool",
     "args": [
      {
       "name": "134"

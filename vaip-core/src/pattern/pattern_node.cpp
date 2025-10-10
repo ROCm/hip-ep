@@ -15,36 +15,21 @@
 
 #include "./pattern_log.hpp"
 #include "morphizen/pattern.pb.h"
-
 namespace vaip_core {
-
-std::string get_op_type(const std::string& op_type) {
-  auto pos = op_type.find(':');
-  if (pos == std::string::npos) {
-    return std::string("onnx") + ":" + op_type;
-  }
-  return op_type;
-}
-// op_type is in format `domain::op_type`
-
 PatternNode::PatternNode(int id, const std::string& op_type,
+                         const std::string& op_domain,
                          std::vector<std::shared_ptr<Pattern>> args,
                          std::vector<bool> is_args_optional)
-    : Pattern(id), op_type_(get_op_type(op_type)), args_(std::move(args)),
-      is_args_optional_(std::move(is_args_optional)) {
+    : Pattern(id), op_type_(op_type), op_domain_(normalize_domain(op_domain)),
+      args_(std::move(args)), is_args_optional_(std::move(is_args_optional)) {
+  LOG_IF(ERROR, (op_domain == "ai.onnx") || (op_domain == "onnx"))
+      << "Please use \"\" (empty string) as default onnx domain instead of "
+      << op_domain;
+
   CHECK(args_.size() == is_args_optional_.size());
 }
 
 PatternNode::~PatternNode() {}
-// 1: op_type must be equal
-// 2: input_pattern match all
-static std::string get_full_op_type(const onnxruntime::Node& node) {
-  auto domain = VAIP_ORT_API(node_op_domain)(node);
-  if ("" == domain) {
-    domain = "onnx";
-  };
-  return domain + ":" + VAIP_ORT_API(node_op_type)(node);
-}
 
 BinderBuilderPtr
 PatternNode::match_uncached(const onnxruntime::Graph& graph,
@@ -55,11 +40,12 @@ PatternNode::match_uncached(const onnxruntime::Graph& graph,
     return nullptr;
   }
   auto& node = *node_input.node;
-  auto full_op_type = get_full_op_type(node);
-  if (full_op_type != this->op_type_) {
-    MATCH_FAILED << " expect node_type is " << this->op_type_
-                 << " actually node type is " << full_op_type
-                 << node_as_string(node);
+  auto domain = normalize_domain(VAIP_ORT_API(node_op_domain)(node));
+  auto op_type = VAIP_ORT_API(node_op_type)(node);
+  if (domain != this->op_domain_ || op_type != this->op_type_) {
+    MATCH_FAILED << " expect node_type is " << this->op_domain_ << ":"
+                 << this->op_type_ << " actually node type is " << domain << ":"
+                 << op_type << node_as_string(node);
     return nullptr;
   }
   auto inputs = node_get_inputs(node);
@@ -103,7 +89,7 @@ PatternNode::match_uncached(const onnxruntime::Graph& graph,
 std::string PatternNode::debug_string() const {
   auto ret = std::string("#");
   ret += std::to_string(this->get_id()) + std::string("(");
-  ret += this->op_type_;
+  ret += this->op_domain_ + ":" + this->op_type_;
   if (!args_.empty()) {
     ret += std::string("(");
     for (auto i = 0u; i < args_.size() - 1; i++) {
@@ -119,6 +105,7 @@ void PatternNode::dump_to_proto_imp(RootPatternProto& pattern_proto,
                                     PatternProto& this_proto) const {
   auto proto = this_proto.mutable_call_node();
   proto->set_op_type(this->op_type_);
+  proto->set_op_domain(this->op_domain_);
   for (auto is_optional : is_args_optional_) {
     proto->add_optional_args(is_optional);
   }

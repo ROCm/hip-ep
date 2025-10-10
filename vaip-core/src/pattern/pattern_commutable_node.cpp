@@ -8,29 +8,20 @@
 #include "morphizen/graph.hpp"
 
 namespace vaip_core {
-static std::string get_op_type(const std::string& op_type) {
-  auto pos = op_type.find(':');
-  if (pos == std::string::npos) {
-    return std::string("onnx") + ":" + op_type;
-  }
-  return op_type;
-}
 PatternCommutableNode::PatternCommutableNode(
-    int id, const std::string& op_type, const std::shared_ptr<Pattern>& arg1,
-    const std::shared_ptr<Pattern>& arg2)
-    : Pattern(id), op_type_(get_op_type(op_type)), arg1_(arg1), arg2_(arg2) {
+    int id, const std::string& op_type, const std::string& op_domain,
+    const std::shared_ptr<Pattern>& arg1, const std::shared_ptr<Pattern>& arg2)
+    : Pattern(id), op_type_(op_type), op_domain_(normalize_domain(op_domain)),
+      arg1_(arg1), arg2_(arg2) {
+  LOG_IF(ERROR, (op_domain == "ai.onnx") || (op_domain == "onnx"))
+      << "Please use \"\" (empty string) as default onnx domain instead of "
+      << op_domain;
+
   CHECK(arg1_ != nullptr);
   CHECK(arg2_ != nullptr);
 }
 
 PatternCommutableNode::~PatternCommutableNode() {}
-static std::string get_full_op_type(const onnxruntime::Node& node) {
-  auto domain = VAIP_ORT_API(node_op_domain)(node);
-  if ("" == domain) {
-    domain = "onnx";
-  };
-  return domain + ":" + VAIP_ORT_API(node_op_type)(node);
-}
 
 BinderBuilderPtr
 PatternCommutableNode::match_uncached(const onnxruntime::Graph& graph,
@@ -41,11 +32,12 @@ PatternCommutableNode::match_uncached(const onnxruntime::Graph& graph,
     return nullptr;
   }
   const auto& node = *node_input.node;
-  auto full_op_type = get_full_op_type(node);
-  if (full_op_type != this->op_type_) {
-    MATCH_FAILED << " expect node_type is " << this->op_type_
-                 << " actually node type is " << full_op_type
-                 << node_as_string(node);
+  auto domain = normalize_domain(VAIP_ORT_API(node_op_domain)(node));
+  auto op_type = VAIP_ORT_API(node_op_type)(node);
+  if (domain != this->op_domain_ || op_type != this->op_type_) {
+    MATCH_FAILED << " expect node_type is " << this->op_domain_ << ":"
+                 << this->op_type_ << " actually node type is " << domain << ":"
+                 << op_type << node_as_string(node);
     return nullptr;
   }
   auto inputs = node_get_inputs(node);
@@ -111,7 +103,7 @@ PatternCommutableNode::match_uncached(const onnxruntime::Graph& graph,
 std::string PatternCommutableNode::debug_string() const {
   auto ret = std::string("#");
   ret += std::to_string(this->get_id()) + std::string("(");
-  ret += this->op_type_;
+  ret += this->op_domain_ + ":" + this->op_type_;
   ret += std::string("(");
   ret += arg1_->debug_string() + ", " + arg2_->debug_string();
   ret += std::string(")");
