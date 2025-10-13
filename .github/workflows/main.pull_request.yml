@@ -27,6 +27,8 @@ jobs:
       matrix:
         os: [ windows_vitisai ]
     steps:
+      - name: Setup Git LFS
+        uses: git-lfs/setup-git-lfs@v2
       - name: Checkout code
         uses: actions/checkout@v4
         with:
