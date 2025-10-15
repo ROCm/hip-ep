@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string>
+#include <set>
 #include "morphizen/encryption.hpp"
 #include "core/session/onnxruntime_session_options_config_keys.h"
 #include "binary/mem_binary.hpp"
@@ -850,7 +851,49 @@ create_ep_context_node(vaip_core::ExecutionProviderConcrete* ep, int index) {
   LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT)) << "add ep node:" << ret;
   return ret.ptr();
 }
+static void init_ep_context_model_inputs(
+    const std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>& eps) {
+  // guess graph input
+  std::set<std::string> all_ep_inputs;
+  std::set<std::string> all_ep_outputs;
+  for (const auto& ep : eps) {
+    auto ep_concrete =
+        dynamic_cast<const vaip_core::ExecutionProviderConcrete*>(ep.get());
+    if (ep_concrete) {
+      auto inputs = ep_concrete->get_meta_def_inputs();
+      all_ep_inputs.insert(inputs->begin(), inputs->end());
 
+      auto outputs = ep_concrete->get_meta_def_outputs();
+      all_ep_outputs.insert(outputs->begin(), outputs->end());
+    }
+  }
+
+  std::vector<std::string> graph_inputs;
+  std::set_difference(all_ep_inputs.begin(), all_ep_inputs.end(),
+                      all_ep_outputs.begin(), all_ep_outputs.end(),
+                      std::back_inserter(graph_inputs));
+  // set graph input
+  if (auto ep = dynamic_cast<vaip_core::ExecutionProviderConcrete*>(
+          eps.front().get())) {
+    if (auto p_context =
+            dynamic_cast<PassContextImp*>(ep->get_context().get())) {
+      if (!p_context->ep_context_model_) {
+        p_context->ep_context_model_ =
+            vaip_cxx::Model::create(p_context->model_path, {{"ai.onnx", 21}});
+      }
+      auto ep_context_graph = p_context->ep_context_model_->main_graph();
+      auto optional_inputs =
+          convert_to_node_arg_const_ref(ep_context_graph, graph_inputs);
+      std::vector<vaip_cxx::NodeArgConstRef> actual_inputs;
+      for (const auto& opt_input : optional_inputs) {
+        if (opt_input.has_value()) {
+          actual_inputs.push_back(opt_input.value());
+        }
+      }
+      vaip_cxx::GraphRef(ep_context_graph).set_inputs(actual_inputs);
+    }
+  }
+}
 extern "C" VAIP_DLL_SPEC int create_ep_context_nodes(
 #if VAIP_ORT_API_MAJOR < 6
     onnxruntime::Graph& /*ep_context_graph unused to deleted*/,
@@ -881,6 +924,9 @@ extern "C" VAIP_DLL_SPEC int create_ep_context_nodes(
   });
   auto measure_create_ep_context_nodes =
       context.measure("create_ep_context_nodes");
+  // Inputs need to be set beforehand because the MLIR workflow requires them to
+  // be defined before add node
+  init_ep_context_model_inputs(eps);
   ret.reserve(eps.size());
   auto ep_index = 0;
   for (auto& ep_1 : eps) {
@@ -912,8 +958,8 @@ static void update_meta_def_from_ep_node(vaip_cxx::NodeConstRef node,
                                          MetaDefProto& meta_def) {
   // There are legacy issues, and it's unclear why metadef inputs and outputs
   // were changed. The inputs/outputs order between ORT FuseNode (EPContext
-  // node) and metadef may not match. Test case: running PSI ctx model with new
-  // ABI.
+  // node) and metadef may not match. Test case: running PSI ctx model with
+  // new ABI.
   /*
   meta_def.mutable_inputs()->Clear();
   for (auto input : node.inputs()) {
@@ -935,9 +981,9 @@ static void update_meta_def_from_ep_node(vaip_cxx::NodeConstRef node,
   }
 
   // here is to trace back the ExecutionProvider from the EPContext node.
-  // The nodes and constant_initializers in metadef are from the original graph,
-  // but these nodes and constant_initializers do not exist in the EP context
-  // model, so they need to be cleared here.
+  // The nodes and constant_initializers in metadef are from the original
+  // graph, but these nodes and constant_initializers do not exist in the EP
+  // context model, so they need to be cleared here.
   meta_def.mutable_nodes()->Clear();
   CHECK(!output_name.empty())
       << "EPContext node must have at least one output.";

@@ -50,15 +50,29 @@ jobs:
         with:
           submodules: true
           fetch-depth: 0  # Fetch all history for all branches and tags
+          lfs: true
           show-progress: false
       - name: set credential
         uses: ./.github/actions/set-env
-      - name: build deps
+
+      - name: Ensure Git LFS files are pulled
+        run: |
+          git lfs install
+          git lfs pull
+
+      - name: build ort and deps
         uses: ./.github/actions/build-deps
         id: build-deps-action
         with:
           token: ${{ env.Z1AIEBUILD_GHE_PAT }}
           onnxruntime_branch_name: morphizen-ci
+
+      - name: build llvm
+        uses: ./.github/actions/build-llvm
+        id: build-llvm-action
+        with:
+          token: ${{ env.Z1AIEBUILD_GHE_PAT }}
+
       # build-and-test job depends on build-deps job, because cache
       # cannot be shared between jobs, potentially jobs allocated to
       # different runners.

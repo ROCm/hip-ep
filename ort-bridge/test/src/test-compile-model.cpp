@@ -37,9 +37,14 @@ TEST_F(CompileModel, T0) {
   // Note: Some dependencies may need to be properly configured
 
   // Load IR model from a file
-  auto ir_model = VAIP_ORT_API(model_load)(RESNET_50_PATH.u8string());
+  auto test_model_path = RESNET_50_PATH;
+  if (ENV_PARAM(MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND) ==
+      morphizen::kMLIRBackend) {
+    test_model_path = RESNET_50_MLIR_PATH;
+  }
+  auto ir_model = VAIP_ORT_API(model_load)(test_model_path.u8string());
   ASSERT_TRUE(ir_model != nullptr)
-      << "Failed to load IR model from file: " << RESNET_50_PATH;
+      << "Failed to load IR model from file: " << test_model_path;
   // Get graph and model path
 
   auto& graph = VAIP_ORT_API(model_main_graph)(*ir_model);

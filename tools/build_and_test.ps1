@@ -18,6 +18,7 @@ Run cmake -G Ninja -DBUILD_SHARED_LIBS=OFF `
     "-DFETCHCONTENT_BASE_DIR=$Env:VAI_RT_PREFIX/morphizen_deps_ninja" `
     "-DCMAKE_FIND_PACKAGE_NO_PACKAGE_REGISTRY=ON" `
     "-Dmorphizen_ENABLE_ORT_BRIDGE=ON" `
+    "-Dmorphizen_ENABLE_MLIR_BACNEND=ON" `
     "-DCMAKE_BUILD_TYPE=Debug" `
     "-DWIN24_BUILD=ON"  `
     --fresh
@@ -31,4 +32,8 @@ $ENV:ENABLE_CACHE_FILE_IO_IN_MEM="1"  # for stable CI tests
 # print current timestamp
 Write-Output "current timestamp: $(Get-Date)"
 Run ctest --test-dir "$Env:VAI_RT_BUILD_DIR/morphizen-demo" -C Debug --output-on-failure --timeout 600 -N
+Run ctest -j $jobs --test-dir "$Env:VAI_RT_BUILD_DIR/morphizen-demo" -C Debug --output-on-failure --timeout 600
+
+Write-Output "Run unittests with mlir-backend"
+$ENV:MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND="mlir-backend"
 Run ctest -j $jobs --test-dir "$Env:VAI_RT_BUILD_DIR/morphizen-demo" -C Debug --output-on-failure --timeout 600

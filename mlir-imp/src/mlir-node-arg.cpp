@@ -88,7 +88,8 @@ int extractElementTypeFromValue(mlir::Value value) {
 MLIRNodeArg::MLIRNodeArg(const std::string& name, const shape_t& shape,
                          int element_type)
     : name_(name), shape_(shape), element_type_(element_type), value_(nullptr) {
-  CHECK(!name.empty()) << "Argument name cannot be empty";
+  // CHECK(!name.empty()) << "Argument name cannot be empty";
+  // arg name is optional in ep context flow
   validateElementType(element_type);
 }
 
