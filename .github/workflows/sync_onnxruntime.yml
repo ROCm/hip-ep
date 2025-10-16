@@ -63,6 +63,11 @@ jobs:
           token: ${{ env.Z1AIEBUILD_GHE_PAT }}
           onnxruntime_branch_name: morphizen-ci-test
 
+      - name: build llvm
+        uses: ./.github/actions/build-llvm
+        id: build-llvm-action
+        with:
+          token: ${{ env.Z1AIEBUILD_GHE_PAT }}
       # build-and-test job depends on build-deps job, because cache
       # cannot be shared between jobs, potentially jobs allocated to
       # different runners.
