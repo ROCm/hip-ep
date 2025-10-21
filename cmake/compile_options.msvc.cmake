@@ -51,7 +51,6 @@ set(MORPHIZEN_COMPILER_OPTIONS
   /guard:cf # Control Flow Guard
   /sdl # Security Development Lifecycle
   /MP # build with multiple processes
-  /WX # warning as error
   /W4
   /Ehsc
   # TODO: fix the following warning
@@ -61,6 +60,9 @@ set(MORPHIZEN_COMPILER_OPTIONS
   CACHE STRING "Compiler options for Morphizen"
 )
 
+if (WIN32 AND CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
+  list(APPEND MORPHIZEN_COMPILER_OPTIONS /WX) # enable warning as error for x64
+endif()
 
 set(MORPHIZEN_LINKER_OPTIONS
   # `/DEBUG`: This option instructs the linker to generate debug
@@ -92,12 +94,15 @@ set(MORPHIZEN_LINKER_OPTIONS
   # generated binary can take advantage of CET if it's supported by
   # the hardware, further enhancing the security of the application.
   /DEBUG
-  /CETCOMPAT
   /DYNAMICBASE
   /ignore:4099 # ignore warning about PDB file not found
   /ignore:4197 # ignore warning about /INCREMENTAL:NO
   CACHE STRING "Linker options for Morphizen"
 )
+
+if (WIN32 AND CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
+  list(APPEND MORPHIZEN_LINKER_OPTIONS /CETCOMPAT)
+endif()
 
 # put all executables and dll files into a shared libary, make
 # debugging easy.

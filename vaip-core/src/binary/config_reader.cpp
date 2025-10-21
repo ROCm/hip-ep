@@ -31,13 +31,17 @@ static constexpr char kSessionOptionPtr[] = "session_options";
 static constexpr char kEpProviderOptionPrefix[] =
     "ep.vitisaiexecutionprovider.";
 namespace vaip_core {
-static const char* get_default_config() {
+
+namespace config_default {
 #include "config_json_binary.hpp"
+}
+
+static const char* get_default_config() {
   // `with_default_vaip_config` and `config` are generated
   // automatically by
   // ${CMAKE_CURRENT_SOURCE_DIR}/src/xclbin/config_json_binary.hpp.py
-  if (with_default_vaip_config) {
-    return (const char*)&config[0];
+  if (config_default::with_default_vaip_config) {
+    return (const char*)&config_default::config[0];
   }
   return nullptr;
 }
