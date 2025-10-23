@@ -16,31 +16,51 @@ mlir::Type onnxElementTypeToMlirType(int element_type, mlir::OpBuilder& builder,
   // First get the element type
   mlir::Type elementType;
   switch (element_type) {
-  case 1: // FLOAT
+  case 1: // TensorProto_DataType_FLOAT
     elementType = builder.getF32Type();
     break;
-  case 2: // UINT8
+  case 2: // TensorProto_DataType_UINT8
     elementType = builder.getIntegerType(8, false);
     break;
-  case 3: // INT8
+  case 3: // TensorProto_DataType_INT8
     // builder.getIntegerType(8, true) -> si8
     // builder.getIntegerType(8, false) -> ui8
     // builder.getIntegerType(8) -> i8
     elementType = builder.getIntegerType(8);
     break;
-  case 6: // INT32
+  case 4: // TensorProto_DataType_UINT16
+    elementType = builder.getIntegerType(16, false);
+    break;
+  case 5: // TensorProto_DataType_INT16
+    elementType = builder.getIntegerType(16);
+    break;
+  case 6: // TensorProto_DataType_INT32
     elementType = builder.getI32Type();
     break;
-  case 7: // INT64
+  case 7: // TensorProto_DataType_INT64
     elementType = builder.getI64Type();
     break;
-  case 11: // DOUBLE
-    elementType = builder.getF64Type();
-    break;
-  case 10: // FLOAT16
+  case 10: // TensorProto_DataType_FLOAT16
     elementType = builder.getF16Type();
     break;
+  case 11: // TensorProto_DataType_DOUBLE
+    elementType = builder.getF64Type();
+    break;
   default:
+    // TensorProto_DataType_UNDEFINED = 0,
+    // TensorProto_DataType_STRING = 8,
+    // TensorProto_DataType_BOOL = 9,
+    // TensorProto_DataType_UINT32 = 12,
+    // TensorProto_DataType_UINT64 = 13,
+    // TensorProto_DataType_COMPLEX64 = 14,
+    // TensorProto_DataType_COMPLEX128 = 15,
+    // TensorProto_DataType_BFLOAT16 = 16,
+    // TensorProto_DataType_FLOAT8E4M3FN = 17,
+    // TensorProto_DataType_FLOAT8E4M3FNUZ = 18,
+    // TensorProto_DataType_FLOAT8E5M2 = 19,
+    // TensorProto_DataType_FLOAT8E5M2FNUZ = 20,
+    // TensorProto_DataType_UINT4 = 21,
+    // TensorProto_DataType_INT4 = 22
     LOG(WARNING) << "Unsupported element type: " << element_type
                  << ", using F32";
     elementType = builder.getF32Type();

@@ -1122,10 +1122,25 @@ MLIRGraph::create_func_func(
 mlir::Operation* MLIRGraph::create_func_call(
     const std::string& name, const std::vector<MLIRNodeArgIndex>& inputs,
     const std::vector<MLIRNodeArgIndex>& outputs, mlir::func::FuncOp fused_func,
-    const std::stack<mlir::Operation*>& cloned_ops_cache) {
+    const std::stack<mlir::Operation*>& /* cloned_ops_cache */) {
   mlir::IRRewriter rewriter(func_->getContext());
 
-  rewriter.setInsertionPoint(cloned_ops_cache.top());
+  // Find the earliest user of any output to ensure proper insertion order
+  mlir::Operation* earliest_user = nullptr;
+  for (const auto& output : outputs) {
+    auto value = output.get_node_arg().getValue();
+    for (auto user : value.getUsers()) {
+      if (!earliest_user || user->isBeforeInBlock(earliest_user)) {
+        earliest_user = user;
+      }
+    }
+  }
+
+  if (earliest_user) {
+    rewriter.setInsertionPoint(earliest_user);
+  } else {
+    rewriter.setInsertionPoint(terminator_);
+  }
 
   auto mlir_input_args =
       llvm::to_vector(llvm::map_range(inputs, [](const auto& input) {
