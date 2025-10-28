@@ -156,6 +156,7 @@ private:
   mlir::func::FuncOp func_;
   uint32_t graph_id_;
   mlir::Operation* terminator_;
+  mlir::Operation* none_;
   MLIRSymbolTable value_map_;
 
   std::vector<std::unique_ptr<MLIRGraph>> subgraphs_cache_;

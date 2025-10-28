@@ -58,13 +58,36 @@ static mlir::Operation* get_or_create_terminator(mlir::func::FuncOp func) {
   return terminator;
 }
 
+static mlir::Operation* get_or_create_none(mlir::func::FuncOp func) {
+  // First, try to find an existing NoneOp in the function
+  mlir::Operation* existing_none = nullptr;
+  func.walk([&](mlir::Operation* op) {
+    if (op->getName().getStringRef() == onnx_mlir::ONNX_NONE) {
+      existing_none = op;
+      return mlir::WalkResult::interrupt();
+    }
+    return mlir::WalkResult::advance();
+  });
+
+  if (existing_none) {
+    return existing_none;
+  }
+
+  // No existing NoneOp found, create a new one
+  mlir::OpBuilder builder(func->getContext());
+  builder.setInsertionPointToStart(&func.getBody().front());
+  mlir::OperationState state(builder.getUnknownLoc(), onnx_mlir::ONNX_NONE);
+  state.addTypes(builder.getNoneType());
+  return builder.create(state);
+}
 MLIRGraph::MLIRGraph(MLIRModel& model, mlir::func::FuncOp func,
                      uint32_t proposed_graph_id)
     : model_(model), func_(func),
       graph_id_(proposed_graph_id > 0
                     ? GraphStore::allocate_graph_id(this, proposed_graph_id)
                     : GraphStore::allocate_graph_id(this)),
-      terminator_{get_or_create_terminator(func)}, value_map_() {
+      terminator_{get_or_create_terminator(func)},
+      none_{get_or_create_none(func)}, value_map_() {
   initialize();
 }
 
@@ -139,6 +162,9 @@ void MLIRGraph::initialize_node_args_map() {
     // GraphProto.initializer
     if (mlir::isa<mlir::arith::ConstantOp>(op)) {
       // already processed in initialize_constant_initializers
+      return;
+    }
+    if (op->getName().getStringRef() == onnx_mlir::ONNX_NONE) {
       return;
     }
 
@@ -234,10 +260,11 @@ void MLIRGraph::maintain_morphizen_attributes() {
   auto* context = func_->getContext();
   mlir::OpBuilder builder(context);
   func_.walk([&](mlir::Operation* op) {
-    // Skip function operation itself, return operations, and constant
-    // operations
+    // Skip function operation itself, return operations, constant operations,
+    // and our custom onnx.None operations
     if (op != func_.getOperation() && !mlir::isa<mlir::func::ReturnOp>(op) &&
-        !mlir::isa<mlir::arith::ConstantOp>(op)) {
+        !mlir::isa<mlir::arith::ConstantOp>(op) &&
+        op->getName().getStringRef() != onnx_mlir::ONNX_NONE) {
       // Collect input NodeArg pointers for this operation
       llvm::SmallVector<mlir::Attribute> inputIndexes;
       for (mlir::Value operand : op->getOperands()) {
@@ -302,11 +329,12 @@ std::vector<mlir::Operation*> MLIRGraph::nodes_unsafe() const {
 
   // Iterate over all operations in the function body
   const_cast<mlir::func::FuncOp&>(func_).walk([&](mlir::Operation* op) {
-    // Skip function operation itself, return operations, and constant
-    // operations
+    // Skip function operation itself, return operations, constant operations,
+    // and our custom onnx.None operations
     if (op != const_cast<mlir::func::FuncOp&>(func_).getOperation() &&
         !mlir::isa<mlir::func::ReturnOp>(op) &&
-        !mlir::isa<mlir::arith::ConstantOp>(op)) {
+        !mlir::isa<mlir::arith::ConstantOp>(op) &&
+        op->getName().getStringRef() != onnx_mlir::ONNX_NONE) {
       // Add operation as node
       nodes.push_back(op);
     }
@@ -423,6 +451,10 @@ MLIRGraph::producer_node(const std::string& node_arg_name) const {
           // For constant initlalizer we skip it , for same with onnx
           return nullptr;
         }
+
+        if (defining_op->getName().getStringRef() == onnx_mlir::ONNX_NONE) {
+          return nullptr;
+        }
         return defining_op;
       }
     }
@@ -504,18 +536,20 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
     builder.setInsertionPointToStart(&entryBlock);
   } else {
     for (const auto& arg : input_args) {
-      if (auto& value = arg.get_node_arg().getValue()) {
-        if (auto* definingOp = value.getDefiningOp()) {
-          if (!latestInputOp || latestInputOp->isBeforeInBlock(definingOp)) {
-            latestInputOp = definingOp;
-            builder.setInsertionPointAfter(latestInputOp);
-          }
-        } else {
-          // means graph input
-          if (!latestInputOp) {
-            // Only handle cases where InsertionPoint is not set
-            auto& entryBlock = func_.getBody().front();
-            builder.setInsertionPointToStart(&entryBlock);
+      if (auto* input_node_arg = get_node_arg(arg)) {
+        if (auto& value = input_node_arg->getValue()) {
+          if (auto* definingOp = value.getDefiningOp()) {
+            if (!latestInputOp || latestInputOp->isBeforeInBlock(definingOp)) {
+              latestInputOp = definingOp;
+              builder.setInsertionPointAfter(latestInputOp);
+            }
+          } else {
+            // means graph input
+            if (!latestInputOp) {
+              // Only handle cases where InsertionPoint is not set
+              auto& entryBlock = func_.getBody().front();
+              builder.setInsertionPointToStart(&entryBlock);
+            }
           }
         }
       }
@@ -524,9 +558,14 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
 
   // Convert MLIRNodeArgIndex to mlir::Value for input arguments
   llvm::SmallVector<mlir::Value> mlir_input_args;
-  mlir_input_args.reserve(input_args.size());
   for (const auto& input : input_args) {
-    mlir_input_args.push_back(get_node_arg(input)->getValue());
+    if (auto* input_node_arg = get_node_arg(input)) {
+      if (auto mlir_value = input_node_arg->getValue()) {
+        mlir_input_args.push_back(mlir_value);
+        continue;
+      }
+    }
+    mlir_input_args.push_back(none_->getResult(0));
   }
 
   // For now, create a generic ONNX operation
@@ -788,6 +827,8 @@ void MLIRGraph::save(const std::string& filename,
 }
 const MLIRNodeArg*
 MLIRGraph::get_node_arg(MLIRNodeArgIndex node_arg_index) const {
+  if (!node_arg_index.is_valid())
+    return nullptr;
   return all_node_args_.size() > node_arg_index.get_index()
              ? all_node_args_.at(node_arg_index.get_index()).get()
              : nullptr;
@@ -893,6 +934,9 @@ void MLIRGraph::reverse_dfs_from_preemp(
       if (mlir::isa<mlir::arith::ConstantOp>(producer_op)) {
         continue;
       }
+      if (producer_op->getName().getStringRef() == onnx_mlir::ONNX_NONE) {
+        continue;
+      }
       if (staging_nodes_.count(producer_op)) {
         continue;
       }
@@ -974,6 +1018,9 @@ void MLIRGraph::remove_node(mlir::Operation* op) {
 
 void MLIRGraph::remove_initialized_tensor(const std::string& name) {
   func_.walk([&](mlir::Operation* op) -> mlir::WalkResult {
+    if (!mlir::isa<mlir::arith::ConstantOp>(op)) {
+      return mlir::WalkResult::advance();
+    }
     if (op && op->use_empty()) {
       auto node_attr = MLIRNodeAttributes(op);
       auto node_output_names =
@@ -982,7 +1029,6 @@ void MLIRGraph::remove_initialized_tensor(const std::string& name) {
         if (output_name == name) {
           op->erase();
           return mlir::WalkResult::interrupt();
-          ;
         }
       }
     }

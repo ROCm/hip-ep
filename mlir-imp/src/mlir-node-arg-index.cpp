@@ -211,6 +211,9 @@ const MLIRGraph& MLIRNodeArgIndex::get_graph() const {
 
 mlir::Operation* MLIRNodeArgIndex::get_producer_node() const {
   // Get the node argument name and delegate to graph's producer_node method
+  if (!is_valid()) {
+    return nullptr;
+  }
   const std::string& node_arg_name = get_name();
   return get_graph().producer_node(node_arg_name);
 }

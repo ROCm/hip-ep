@@ -72,6 +72,15 @@ constexpr const char* ONNX_NAME = "onnx.name";
 
 } // namespace attr_names
 
+namespace onnx_mlir {
+// "onnx.None" for representing optional/empty operands in ONNX operations
+// MLIR has semantic differences from ONNX: MLIR cannot create values out of
+// thin air; values must either be operation results or graph inputs. The
+// onnx.None operation is adopted from the onnx-mlir project to handle optional
+// operands consistently.
+constexpr const char* ONNX_NONE = "onnx.None";
+} // namespace onnx_mlir
+
 // Utility function to convert ONNX element types to MLIR types
 // If shape is provided, creates a tensor type (ranked or unranked)
 // If shape is not provided, returns just the element type
