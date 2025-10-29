@@ -16,10 +16,6 @@ add_library(${LIB_NAME}
   src/graph-resolver.cpp
   src/graph-store.hpp
   src/graph-store.cpp
-  #src/graph-shape-infer.hpp
-  #src/graph-shape-infer.cpp
-  #src/graph-inference-context.hpp
-  #src/graph-inference-context.cpp
   src/node.cpp
   src/node.hpp
   src/node-arg.hpp

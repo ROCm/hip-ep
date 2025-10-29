@@ -20,10 +20,10 @@ if __name__ == "__main__":
         schema_obj = {}
         schema_obj["domain"] = s.domain
         schema_obj["name"] = s.name
-        schema_obj["doc"] = s.doc
+        # schema_obj["doc"] = s.doc
         schema_obj["deprecated"] = s.deprecated
-        schema_obj["file"] = s.file
-        schema_obj["line"] = s.line
+        # schema_obj["file"] = s.file
+        # schema_obj["line"] = s.line
         schema_obj["since_version"] = s.since_version
         schema_obj["support_level"] = str(s.support_level)
         schema_obj["min_input"] = s.min_input
@@ -45,7 +45,7 @@ if __name__ == "__main__":
         for i in s.inputs:
             schema_input_obj = {}
             schema_input_obj["name"] = i.name
-            schema_input_obj["description"] = i.description
+            # schema_input_obj["description"] = i.description
             schema_input_obj["isHomogeneous"] = i.isHomogeneous
             schema_input_obj["option"] = str(i.option)
             schema_input_obj["typeStr"] = i.typeStr
@@ -57,7 +57,7 @@ if __name__ == "__main__":
         for o in s.outputs:
             schema_output_obj = {}
             schema_output_obj["name"] = o.name
-            schema_output_obj["description"] = o.description
+            # schema_output_obj["description"] = o.description
             schema_output_obj["isHomogeneous"] = o.isHomogeneous
             schema_output_obj["option"] = str(o.option)
             schema_output_obj["typeStr"] = o.typeStr
@@ -69,7 +69,7 @@ if __name__ == "__main__":
         for c in s.type_constraints:
             schema_type_constraint_obj = {}
             schema_type_constraint_obj["type_param_str"] = c.type_param_str
-            schema_type_constraint_obj["description"] = c.description
+            # schema_type_constraint_obj["description"] = c.description
 
             schema_type_constraint_allowed_type_strs = []
             for t in c.allowed_type_strs:
@@ -86,7 +86,7 @@ if __name__ == "__main__":
         for _, a in s.attributes.items():
             schema_attribut_obj = {}
             schema_attribut_obj["name"] = a.name
-            schema_attribut_obj["description"] = a.description
+            # schema_attribut_obj["description"] = a.description
             schema_attribut_obj["required"] = a.required
             schema_attribut_obj["type"] = str(a.type)
             schema_attributes.append(schema_attribut_obj)

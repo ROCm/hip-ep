@@ -19,7 +19,7 @@ Licensed under the MIT License.
 Clone the repository:
 
 ```bash
-git clone git@gitenterprise.xilinx.com:aisw/MorphiZen.git
+# clone MorphiZen
 cd MorphiZen
 git submodule upgrade --init
 mkdir build

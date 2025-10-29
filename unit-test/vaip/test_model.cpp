@@ -67,7 +67,7 @@ TEST_F(ModelTest, ModelCreationTest) {
   auto path = CMAKE_CURRENT_BINARY_PATH / std::filesystem::path("new.onnx");
   auto data_path = std::filesystem::path("new.dat");
   std::vector<std::pair<std::string, int64_t>> opset = {
-      {"apple", 10}, {"banana", 20}, {"cherry", 30}};
+      {"appple", 10}, {"banana", 20}, {"cherry", 30}};
   auto model = vaip_cxx::Model::create(path, opset);
   auto graph = model->main_graph();
   std::vector<int64_t> i_shape = {8};

@@ -63,7 +63,7 @@ static int data_type_2_element_type(const std::string& data_type) {
     ret = onnx::TensorProto_DataType_UINT8;
   } else if (data_type == "float16") {
     // It seems that FP16 is float16, and BFLOAT16 is bf16. but xir don't
-    // support it or don't care now. test case: adobe fp16 model.
+    // support it or don't care now. test case: ado be fp16 model.
     ret = onnx::TensorProto_DataType_FLOAT16;
   } else if (data_type == "bfloat16") {
     ret = onnx::TensorProto_DataType_BFLOAT16;

@@ -83,6 +83,6 @@ TODO:
 
   Uses `cache_files_`, to be deprecated. Needs more effort, low priority.
 
-[136]: https://gitenterprise.xilinx.com/VitisAI/MorphiZen/pull/136 (mmap)
-[44]: https://gitenterprise.xilinx.com/VitisAI/MorphiZen/pull/44 (shared ep context)
-[238]: https://gitenterprise.xilinx.com/VitisAI/MorphiZen/pull/238 (prebuilt ep context)
+[136]: #136 (mmap)
+[44]: #44 (shared ep context)
+[238]: #238 (prebuilt ep context)

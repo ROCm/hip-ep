@@ -38,7 +38,7 @@ std::string data_type_to_string(int elem_type) {
   } else if (elem_type == ONNX_NAMESPACE::TensorProto_DataType::
                               TensorProto_DataType_FLOAT16) {
     // It seems that FP16 is float16, and BFLOAT16 is bf16. but xir don't
-    // support it or don't care now. test case: adobe fp16 model.
+    // support it or don't care now. test case: ado be fp16 model.
     ret = "float16";
   } else if (elem_type ==
              ONNX_NAMESPACE::TensorProto_DataType::TensorProto_DataType_BOOL) {

@@ -37,7 +37,7 @@ the content of `vaip_config.json`
 
 ## read from `context.json`
 
-it is removed. see https://jira.xilinx.com/browse/VAI-9685. and [pass_context_imp.cpp#L1177][s1]
+it is removed. see jira:VAI-9685. and [pass_context_imp.cpp#L1177][s1]
 
 ## set when MEP table hit
 
