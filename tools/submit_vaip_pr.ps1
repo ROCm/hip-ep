@@ -49,6 +49,7 @@ git --git-dir="$VAIP_DIR/.git" --work-tree="$VAIP_DIR" checkout --detach --force
      -replace "(morphizen;https://gitenterprise\.xilinx\.com/VitisAI/MorphiZen\.git;)[a-f0-9]+", "`${1}$new_commit_id" |
     Set-Content "$VAIP_DIR/cmake/deps.txt"
 
+git --git-dir="$VAIP_DIR/.git" --work-tree="$VAIP_DIR" diff cmake/deps.txt
 git --git-dir="$VAIP_DIR/.git" --work-tree="$VAIP_DIR" add cmake/deps.txt
 
 # Commit changes
@@ -60,8 +61,12 @@ $change_log = git --git-dir="$PROJECT_DIR/.git" --work-tree="$PROJECT_DIR" log `
     ForEach-Object { $_ -replace "#(\d+)", "VitisAI/MorphiZen#`${1}" }
 $change_log = $change_log -join "`n"
 $body = "Change Log`n`n$change_log`n`n"
-$msg = "$title`n`n$body"
-git --git-dir="$VAIP_DIR/.git" --work-tree="$VAIP_DIR" commit -am "$msg"
+$msg = @"
+$title
+
+$body
+"@
+$msg | git --git-dir="$VAIP_DIR/.git" --work-tree="$VAIP_DIR" commit -F -
 git --git-dir="$VAIP_DIR/.git" --work-tree="$VAIP_DIR" push --force origin "HEAD:refs/heads/$branch_name"
 
 $Env:MY_TITLE = "$title"
