@@ -73,3 +73,36 @@ runs:
       run: |
           echo "build and install onnxrutime and deps.."
           . ${{ github.workspace}}/tools/build_ort_and_deps.ps1
+
+    - name: Get llvm-project repo URL and SHA1
+      id: llvm-commit
+      run: |
+        # Read the deps.txt file and extract the llvm URL and commit hash
+        $depsFile = "${{ github.workspace}}/cmake/deps.txt"
+        $llvmLine = Select-String '^llvm;' $depsFile | ForEach-Object { $_.Line -split ';' }
+        if ($llvmLine.Count -ge 3) {
+          # Extract from the line format: llvm;https://github.com/llvm/llvm-project.git;commit_hash
+          $url, $hash = $llvmLine[1], $llvmLine[2]
+          echo "llvm_repo_url=$url" >> $env:GITHUB_OUTPUT
+          echo "llvm_commit_hash=$hash" >> $env:GITHUB_OUTPUT
+          echo "Found LLVM repo URL: $url"
+          echo "Found LLVM commit hash: $hash"
+        } else {
+          echo "Error: Could not find LLVM entry in deps.txt"
+          exit 1
+        }
+      shell: powershell
+
+    - name: Checkout llvm-project
+      if: steps.cache-onnxruntime-and-deps.outputs.cache-hit != 'true'
+      run: |
+        git clone ${{ steps.llvm-commit.outputs.llvm_repo_url }} llvm
+        git -C llvm checkout ${{ steps.llvm-commit.outputs.llvm_commit_hash }}
+      shell: powershell
+
+    - name: build and install llvm
+      if: steps.cache-onnxruntime-and-deps.outputs.cache-hit != 'true'
+      shell: powershell
+      run: |
+          echo "build and install llvm.."
+          . ${{ github.workspace}}/tools/build_llvm.ps1

@@ -56,7 +56,23 @@ runs:
         token: ${{ inputs.token }}
         show-progress: false
 
-    - name: build and install onnxrutime and deps
+    - name: Checkout onnx-mlir
+      run: |
+        # Get onnx-mlir repo URL and SHA1
+        $depsFile = "${{ github.workspace}}/cmake/deps.txt"
+        $onnxMlir = Select-String '^onnx-mlir;' $depsFile | ForEach-Object { $_.Line -split ';' }
+        if ($onnxMlir.Count -ge 3) {
+          $url, $hash = $onnxMlir[1], $onnxMlir[2]
+          echo "Checkout ONNX-MLIR $url at $hash"
+          git clone $url onnx-mlir
+          git -C onnx-mlir checkout $hash
+        } else {
+          echo "Error: Could not find ONNX-MLIR entry in deps.txt"
+          exit 1
+        }
+      shell: powershell
+
+    - name: build and test
       run: |
         echo "build and test morphizen-demo..."
         . ${{ github.workspace }}/tools/build_and_test.ps1
