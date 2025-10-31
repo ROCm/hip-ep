@@ -14,7 +14,9 @@ namespace morphizen {
 
 VitisAiEpFactory::VitisAiEpFactory(const char* ep_name, ApiPtrs apis,
                                    const OrtLogger& default_logger)
-    : ApiPtrs(apis), default_logger_{default_logger}, ep_name_{ep_name},
+    : OrtEpFactory{}, // Ensure optional functions are default initialized to
+                      // nullptr
+      ApiPtrs(apis), default_logger_{default_logger}, ep_name_{ep_name},
       ep_metadata_{nullptr, apis.ort_api.ReleaseKeyValuePairs},
       ep_options_{nullptr, apis.ort_api.ReleaseKeyValuePairs} {
   ort_version_supported =
