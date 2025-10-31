@@ -41,9 +41,10 @@ VAIP_DLL_SPEC TensorProtoPtr tensor_proto_new_floats(
 }
 #if VAIP_ORT_API_MAJOR >= 3
 
-VAIP_DLL_SPEC TensorProtoPtr tensor_proto_new_doubles(
-    const std::string& name, const std::vector<int64_t>& shape,
-    const std::vector<double>& data) {
+VAIP_DLL_SPEC
+TensorProtoPtr tensor_proto_new_doubles(const std::string& name,
+                                        const std::vector<int64_t>& shape,
+                                        const std::vector<double>& data) {
   return TensorProtoPtr(
       VAIP_ORT_API(tensor_proto_new_doubles)(name, shape, data));
 }
@@ -61,9 +62,10 @@ VAIP_DLL_SPEC TensorProtoPtr tensor_proto_new_fp16(
 }
 #endif
 
-VAIP_DLL_SPEC TensorProtoPtr
-tensor_proto_new_i32(const std::string& name, const std::vector<int64_t>& shape,
-                     const std::vector<int32_t>& data) {
+VAIP_DLL_SPEC
+TensorProtoPtr tensor_proto_new_i32(const std::string& name,
+                                    const std::vector<int64_t>& shape,
+                                    const std::vector<int32_t>& data) {
   return TensorProtoPtr(VAIP_ORT_API(tensor_proto_new_i32)(name, shape, data));
 }
 VAIP_DLL_SPEC TensorProtoPtr
@@ -78,9 +80,10 @@ tensor_proto_new_i8(const std::string& name, const std::vector<int64_t>& shape,
 }
 
 #if VAIP_ORT_API_MAJOR >= 3
-VAIP_DLL_SPEC TensorProtoPtr
-tensor_proto_new_i16(const std::string& name, const std::vector<int64_t>& shape,
-                     const std::vector<int16_t>& data) {
+VAIP_DLL_SPEC
+TensorProtoPtr tensor_proto_new_i16(const std::string& name,
+                                    const std::vector<int64_t>& shape,
+                                    const std::vector<int16_t>& data) {
   return TensorProtoPtr(VAIP_ORT_API(tensor_proto_new_i16)(name, shape, data));
 }
 
@@ -110,9 +113,10 @@ tensor_proto_new_u64(const std::string& name, const std::vector<int64_t>& shape,
 
 #endif
 
-VAIP_DLL_SPEC TensorProtoPtr
-tensor_proto_new_i4(const std::string& name, const std::vector<int64_t>& shape,
-                    const std::vector<int8_t>& data) {
+VAIP_DLL_SPEC
+TensorProtoPtr tensor_proto_new_i4(const std::string& name,
+                                   const std::vector<int64_t>& shape,
+                                   const std::vector<int8_t>& data) {
   return TensorProtoPtr(VaipOrtApi2::tensor_proto_new_i4(name, shape, data));
 }
 
@@ -121,6 +125,15 @@ tensor_proto_new_u4(const std::string& name, const std::vector<int64_t>& shape,
                     const std::vector<uint8_t>& data) {
   return TensorProtoPtr(VaipOrtApi2::tensor_proto_new_u4(name, shape, data));
 }
+
+#if VAIP_ORT_API_MAJOR >= 19
+VAIP_DLL_SPEC
+TensorProtoPtr tensor_proto_new_bool(const std::string& name,
+                                     const std::vector<int64_t>& shape,
+                                     const std::vector<uint8_t>& data) {
+  return TensorProtoPtr(VAIP_ORT_API(tensor_proto_new_bool)(name, shape, data));
+}
+#endif
 
 VAIP_DLL_SPEC gsl::span<const char>
 tensor_proto_as_raw(const onnxruntime::Graph& graph,

@@ -105,6 +105,19 @@ tensor_proto_new_u4(const std::string& name, const std::vector<int64_t>& shape,
                     const std::vector<uint8_t>& data);
 
 #endif
+#if VAIP_ORT_API_MAJOR >= 19
+/**
+ * @brief Creates a new TensorProto with bool data type.
+ * @param name The name of the tensor.
+ * @param shape The shape of the tensor.
+ * @param data The bool data of the tensor.
+ * @return A pointer to the created TensorProto.
+ */
+VAIP_DLL_SPEC TensorProtoPtr tensor_proto_new_bool(
+    const std::string& name, const std::vector<int64_t>& shape,
+    const std::vector<uint8_t>& data);
+#endif
+
 /**
  * @brief Creates a new TensorProto with int32 data type.
  * @param name The name of the tensor.

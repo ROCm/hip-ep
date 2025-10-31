@@ -1016,6 +1016,13 @@ void revert_mem_tag_tensor(GraphRef target_graph, const std::string& name,
     REVERT_MEM_TAG_DEF(u32, uint32_t, UINT32)
     REVERT_MEM_TAG_DEF(i64, int64_t, INT64)
     REVERT_MEM_TAG_DEF(u64, uint64_t, UINT64)
+#if VAIP_ORT_API_MAJOR >= 13
+    REVERT_MEM_TAG_DEF(i4, int8_t, INT4)
+    REVERT_MEM_TAG_DEF(u4, uint8_t, UINT4)
+#endif
+#if VAIP_ORT_API_MAJOR >= 19
+    REVERT_MEM_TAG_DEF(bool, uint8_t, BOOL)
+#endif
     REVERT_MEM_TAG_DEF(f32, float, FLOAT)
     REVERT_MEM_TAG_DEF(f64, double, DOUBLE)
     REVERT_MEM_TAG_DEF(bf16, bf16_t, BFLOAT16)
