@@ -42,3 +42,5 @@
 /bazel-*
 /.clwb
 /.idea
+/.cline_storage/
+/.clinerules/

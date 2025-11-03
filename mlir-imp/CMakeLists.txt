@@ -5,6 +5,11 @@
 include(cmake/llvm.cmake)
 include(cmake/onnx-mlir.cmake)
 
+# Check if ONNX-MLIR source tree is available (LLVM/MLIR are required)
+if(NOT ONNX_MLIR_SOURCE_TREE)
+  message(STATUS "Skipping mlir-imp: ONNX-MLIR source tree not found")
+  return()
+endif()
 
 set(LIB_NAME mlir-imp)
 # find_package(MLIR REQUIRED CONFIG)

@@ -18,7 +18,7 @@ Run cmake -G Ninja -DBUILD_SHARED_LIBS=OFF `
     "-DFETCHCONTENT_BASE_DIR=$Env:VAI_RT_PREFIX/morphizen_deps_ninja" `
     "-DCMAKE_FIND_PACKAGE_NO_PACKAGE_REGISTRY=ON" `
     "-Dmorphizen_ENABLE_ORT_BRIDGE=ON" `
-    "-Dmorphizen_ENABLE_MLIR_BACNEND=ON" `
+    "-Dmorphizen_ENABLE_MLIR_BACKEND=ON" `
     "-DCMAKE_BUILD_TYPE=Debug" `
     "-DWIN24_BUILD=ON"  `
     --fresh

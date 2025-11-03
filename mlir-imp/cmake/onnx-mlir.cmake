@@ -4,7 +4,6 @@
 ##
 find_package(LLVM REQUIRED CONFIG)
 find_package(MLIR REQUIRED CONFIG)
-find_package(MLIR REQUIRED CONFIG)
 
 find_path(ONNX_MLIR_SOURCE_TREE
   NAMES "src/Dialect/ONNX/ONNXDialect.hpp"
@@ -18,12 +17,14 @@ find_path(ONNX_MLIR_SOURCE_TREE
 )
 
 if(NOT ONNX_MLIR_SOURCE_TREE)
-  message(FATAL_ERROR "cannot find ONNX-MLIR source tree. ONNX_MLIR_SOURCE_TREE=${ONNX_MLIR_SOURCE_TREE}, search in "
+  message(WARNING "cannot find ONNX-MLIR source tree. ONNX_MLIR_SOURCE_TREE=${ONNX_MLIR_SOURCE_TREE}, search in "
     "\n\t${CMAKE_SOURCE_DIR}/../onnx-mlir"
     "\n\t${CMAKE_SOURCE_DIR}/3rd-party/onnx-mlir"
     "\n\t${CMAKE_SOURCE_DIR}/thirdparty/onnx-mlir"
     "\n\t${CMAKE_SOURCE_DIR}/onnx-mlir"
+    "\n\tMLIR backend will be disabled."
   )
+  return()
 else()
   message(STATUS "ONNX_MLIR_SOURCE_TREE: ${ONNX_MLIR_SOURCE_TREE}")
 endif()
