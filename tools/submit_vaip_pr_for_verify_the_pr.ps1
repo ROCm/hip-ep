@@ -71,6 +71,7 @@ $change_log = git --git-dir="$PROJECT_DIR/.git" --work-tree="$PROJECT_DIR" log `
     --date-order |
     ForEach-Object { $_ -replace "#(\d+)", "VitisAI/MorphiZen#`${1}" }
 $change_log = $change_log -join "`n"
+$change_log = $change_log -replace '"', '\"'
 $body = "Change Log`n`n$change_log`n`n"
 $msg = @"
 $title

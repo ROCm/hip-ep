@@ -225,21 +225,6 @@ if(NOT TARGET Python3::Interpreter)
   message(FATAL_ERROR "Python3::Interpreter not found")
 endif(NOT TARGET Python3::Interpreter)
 
-set(SODIUM_DISABLE_TESTS  ON CACHE BOOL "Disable sodium tests" FORCE)
-FetchContent_Declare(Sodium
-    GIT_REPOSITORY https://github.com/robinlinden/libsodium-cmake.git
-    GIT_TAG e5b985ad0dd235d8c4307ea3a385b45e76c74c6a
-)
-FetchContent_MakeAvailable(Sodium)
-set_property(TARGET sodium PROPERTY POSITION_INDEPENDENT_CODE ON)
-install(TARGETS sodium
-  LIBRARY DESTINATION lib
-  ARCHIVE DESTINATION lib
-  RUNTIME DESTINATION bin
-)
-
-
-
 ## find_package(onnx)
 set(ONNX_USE_MSVC_STATIC_RUNTIME ON CACHE BOOL "use static onnx")
 set(ONNX_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})

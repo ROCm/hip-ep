@@ -28,16 +28,17 @@ target_include_directories(${LIB_NAME}
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 target_link_libraries(${LIB_NAME} PUBLIC vaip_io)
-target_compile_options(${LIB_NAME} PRIVATE ${MORPHIZEN_COMPILER_OPTIONS})
+
 if(TARGET OpenSSL::SSL)
   target_compile_definitions(${LIB_NAME} PUBLIC -DWITH_OPENSSL)
-  target_link_libraries(${LIB_NAME} PRIVATE OpenSSL::SSL OpenSSL::Crypto ${CMAKE_DL_LIBS} glog::glog sodium)
+  target_compile_options(${LIB_NAME} PRIVATE ${MORPHIZEN_COMPILER_OPTIONS})
+  target_link_libraries(${LIB_NAME} PRIVATE OpenSSL::SSL OpenSSL::Crypto ${CMAKE_DL_LIBS} glog::glog)
   if (MSVC)
     # TODO: why we need these windows specific libraries
     target_link_libraries(${LIB_NAME} PRIVATE WS2_32.LIB GDI32.LIB ADVAPI32.LIB CRYPT32.LIB USER32.LIB)
   endif()
 else()
-  target_link_libraries(${LIB_NAME} PRIVATE glog::glog sodium)
+  target_link_libraries(${LIB_NAME} PRIVATE glog::glog)
 endif()
 
 # install(
