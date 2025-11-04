@@ -82,21 +82,37 @@ std::unique_ptr<TarFile> TarFile::create(const char* base, size_t size) {
       << " create a tar file from memory " << (void*)base << " " << size;
   return create(std::move(stream));
 }
-std::unique_ptr<TarFile> TarFile::create(DllSafe<std::string>&& buffer0) {
-  auto buffer = DllSafe<std::string>(std::move(buffer0));
+std::unique_ptr<TarFile> TarFile::create(std::string&& buffer0) {
+  std::unique_ptr<std::iostream> stream;
   auto file = std::tmpfile();
-  CHECK(file != nullptr) << "cannot open tmp file";
-  auto r = fwrite(buffer->data(), 1, buffer->size(), file);
-  CHECK_EQ(r, buffer->size()) << "write error";
-  r = fseek(file, 0, SEEK_SET);
-  CHECK_EQ(r, 0);
-  auto pos = ftell(file);
-  MY_LOG(1) << " pos=" << pos;
-  auto stream = std::make_unique<FileStream>(file);
+  // by default, the stream will be from a tmp file to decrease memory,
+  // but if access to tmp is restricted, like web sandbox condition,
+  // the stream should be from a memory buffer
+  if (file) {
+    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+        << " create a tar file from temp file";
+    auto r = fwrite(buffer0.data(), 1, buffer0.size(), file);
+    CHECK_EQ(r, buffer0.size()) << "write error";
+    r = fseek(file, 0, SEEK_SET);
+    CHECK_EQ(r, 0);
+    auto pos = ftell(file);
+    MY_LOG(1) << " pos=" << pos;
+    stream = std::make_unique<FileStream>(file);
+  } else {
+    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+        << " create a tar file from memory buffer";
+    auto buff_owner = std::make_unique<std::string>(std::move(buffer0));
+    auto buff_base = buff_owner->data();
+    auto buff_size = buff_owner->size();
+    stream =
+        std::make_unique<MemStream<std::string>>(MemBuffer<std::string>::create(
+            buff_base, buff_size, std::move(buff_owner)));
+  }
   if (!stream->good()) {
-    MY_LOG(1) << "Failed to create a temporary file for TarFile";
+    MY_LOG(1) << "Failed to create TarFile";
     return nullptr;
   }
+
   return create(std::move(stream));
 }
 TarFile::TarFile(PrivateTag, std::unique_ptr<std::iostream>&& stream)

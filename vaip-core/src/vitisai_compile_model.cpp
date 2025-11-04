@@ -1036,7 +1036,7 @@ store_cache_directory_from_main_node(PassContextImp& context,
 
   if (ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE) //
       && !enable_compression && !enable_encryption) {
-    context.create_tar_file_for_read(std::move(ep_cache_context),
+    context.create_tar_file_for_read(std::move(*ep_cache_context),
                                      ep_embed_mode != 0);
   } else {
     std::unique_ptr<IStreamReader> ep_context_file;

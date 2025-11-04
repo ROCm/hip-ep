@@ -223,9 +223,8 @@ private:
   std::filesystem::path get_basename_of_ep_context_binary_file();
 
   void maybe_create_tar_file_for_write();
-  void
-  create_tar_file_for_read(DllSafe<std::string>&& ep_context_binary_file_name,
-                           bool embed_mode);
+  void create_tar_file_for_read(std::string&& ep_context_binary_file_name,
+                                bool embed_mode);
 
   void print_version_info(const char* prefix);
   void pass_context_update_context_json(gsl::span<char> json_str);

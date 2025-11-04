@@ -105,6 +105,7 @@ public:
   }
 
 private:
+  // a buffer can be used by multiple streams
   std::shared_ptr<MemBuffer<T>> buffer_;
 };
 } // namespace vaip_core

@@ -412,8 +412,7 @@ TEST(TarFileTest, MemoryTar) {
     LOG(INFO)
         << " ======  start a fresh read on dllsafe buffer ===============";
     LOG(INFO) << " ==========================================================";
-    vaip_core::DllSafe<std::string> new_buf(
-        new std::string(buf.begin(), buf.end()));
+    std::string new_buf(buf.begin(), buf.end());
     auto tar_file_obj = vaip_core::TarFile::create(std::move(new_buf));
     ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
     check_abc(*tar_file_obj);

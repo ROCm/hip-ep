@@ -64,7 +64,7 @@ public:
    * @param buffer A DllSafe object containing the tar file data.
    * @return A unique pointer to the created TarFile instance.
    */
-  static std::unique_ptr<TarFile> create(DllSafe<std::string>&& buffer);
+  static std::unique_ptr<TarFile> create(std::string&& buffer);
   /**
    * @brief Creates a TarFile instance from raw data.
    *

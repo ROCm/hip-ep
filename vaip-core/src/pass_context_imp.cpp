@@ -1136,11 +1136,11 @@ void PassContextImp::maybe_create_tar_file_for_write() {
         get_provider_option("use_cache_key_prefix", "1") == "1";
   }
 }
-void PassContextImp::create_tar_file_for_read(
-    DllSafe<std::string>&& ep_context_binary, bool embed_mode) {
+void PassContextImp::create_tar_file_for_read(std::string&& ep_context_binary,
+                                              bool embed_mode) {
   if (!embed_mode) {
     auto ep_context_binary_file = get_dir_of_ep_context_model() /
-                                  std::filesystem::u8path(*ep_context_binary);
+                                  std::filesystem::u8path(ep_context_binary);
     LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
         << "open tar file for read: " << ep_context_binary_file;
     CHECK(std::filesystem::exists(ep_context_binary_file))
