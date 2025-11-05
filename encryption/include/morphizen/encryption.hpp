@@ -9,6 +9,7 @@ class IStreamReader;
 class IStreamWriter;
 } // namespace vaip_core
 namespace vaip_encryption {
+int has_encryption_support();
 void aes_encryption(const vaip_core::IStreamReader& src,
                     vaip_core::IStreamWriter& dst, const std::string& key);
 void aes_decryption(const vaip_core::IStreamReader& src,

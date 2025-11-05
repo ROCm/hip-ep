@@ -821,11 +821,9 @@ create_ep_context_node(vaip_core::ExecutionProviderConcrete* ep, int index) {
   attrs.add("partition_name", name);
   attrs.add("enable_compression",
             (int64_t)ENV_PARAM(XLNX_EP_CONTEXT_ENABLE_COMPRESSION));
-  auto enable_encryption = 0;
-#ifdef WITHOPENSSL
-  enable_encryption =
-      context.context_proto.config().encryption_key().empty() ? 0 : 1;
-#endif
+  bool enable_encryption =
+      vaip_encryption::has_encryption_support() &&
+      (!context.context_proto.config().encryption_key().empty());
   attrs.add("enable_encryption", (int64_t)enable_encryption);
   attrs.add("cache_file_use_cache_key_prefix",
             (int64_t)context.cache_file_use_cache_key_prefix_);

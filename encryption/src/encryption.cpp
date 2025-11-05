@@ -17,7 +17,13 @@
 #include <glog/logging.h>
 #include <stdexcept>
 namespace vaip_encryption {
-
+int has_encryption_support() {
+#ifdef WITH_OPENSSL
+  return 1;
+#else
+  return 0;
+#endif
+}
 void aes_encryption(const vaip_core::IStreamReader& src,
                     vaip_core::IStreamWriter& dst,
                     [[maybe_unused]] const std::string& key) {
