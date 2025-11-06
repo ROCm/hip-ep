@@ -1,0 +1,11 @@
+# PR Review Toolkit - Add these to your .gitignore
+
+# Generated review files (created by submit_review.ps1)
+pr*_review.md
+
+# Temporary PR branches (optional - if you prefer to keep PR branches local)
+# pr-*
+
+# Example:
+# pr437_review.md  <- Will be ignored
+# pr999_review.md  <- Will be ignored
