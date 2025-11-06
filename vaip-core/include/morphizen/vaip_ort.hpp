@@ -26,8 +26,16 @@ using EventInfo = std::tuple<std::string, // name
 namespace onnxruntime {
 using ProviderOptions = std::unordered_map<std::string, std::string>;
 }
+
+// Forward declarations for logger types (outside vaip_core namespace)
+namespace Ort {
+struct Logger;
+}
+
 namespace vaip_core {
 class PassContextImp;
+class LoggerAdapter;
+
 using vaip_error_report_func = void (*)(
     void*, int, const char*); // should be same as vaip_core::error_report_func,
                               // for compile issue we  defined it
@@ -45,6 +53,14 @@ compile_onnx_model_5(const std::filesystem::path& model_path,
 VAIP_DLL_SPEC std::vector<std::unique_ptr<ExecutionProvider>>
 compile_onnx_model_3(const std::string& model_path, const Graph& graph,
                      const onnxruntime::ProviderOptions& options);
+
+// Internal version that accepts logger_adapter for lifetime management
+VAIP_DLL_SPEC std::vector<std::unique_ptr<ExecutionProvider>>
+compile_onnx_model_3_internal(
+    const std::string& model_path, const Graph& onnx_graph,
+    const onnxruntime::ProviderOptions& options,
+    std::shared_ptr<::Ort::Logger> logger = nullptr,
+    std::shared_ptr<LoggerAdapter> logger_adapter = nullptr);
 
 VAIP_DLL_SPEC void profiler_collect(std::vector<EventInfo>& api_events,
                                     std::vector<EventInfo>& kernel_events);

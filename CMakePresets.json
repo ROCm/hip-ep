@@ -23,7 +23,7 @@
                 "morphizen_ENABLE_ORT_BRIDGE": "ON",
                 "morphizen_DEMO_DIR": "${sourceDir}/../morphizen-demo",
                 "VAIP_JSON_CONFIG_FILE": "${sourceDir}/../morphizen-demo/etc/vaip_config.json",
-                "morphizen_ENABLE_MLIR_BACKEND": "ON"
+                "morphizen_ENABLE_MLIR_BACKEND": "OFF"
             }
         },
         {
@@ -46,7 +46,7 @@
                 "morphizen_ENABLE_ORT_BRIDGE": "ON",
                 "morphizen_DEMO_DIR": "${sourceDir}/morphizen-demo",
                 "VAIP_JSON_CONFIG_FILE": "${sourceDir}/morphizen-demo/etc/vaip_config.json",
-                "morphizen_ENABLE_MLIR_BACKEND": "ON"
+                "morphizen_ENABLE_MLIR_BACKEND": "OFF"
             }
         }
     ],

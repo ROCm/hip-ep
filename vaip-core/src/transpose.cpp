@@ -61,7 +61,7 @@ static EigenThreadPool& tp() {
 //                   29};
 //   Eigen::TensorMap<Eigen::Tensor<float, 3>> a(data,
 //                                               std::array<int, 3>{2, 3, 5});
-//   std::cout << "NumRows: " << a.dimension(0) << " NumCols: " <<
+//   LOG(INFO << "NumRows: " << a.dimension(0) << " NumCols: " <<
 //   a.dimension(1)
 //             << " NumZ " << a.dimension(2) << std::endl;
 //

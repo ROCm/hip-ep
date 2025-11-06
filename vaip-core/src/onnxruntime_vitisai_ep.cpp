@@ -16,6 +16,7 @@
 // static void_ptr_t reserved_symbols[] = {SYMBOLS(DEFINE_SYMBOL)};
 #include "morphizen/onnxruntime_vitisai_ep.hpp"
 #include "./cleanup.hpp"
+#include "./logger_adapter.hpp"
 #include "./stat.hpp"
 #include "./xir_ops/xir_ops_defs.hpp"
 #include "morphizen/config_reader.hpp"
@@ -232,6 +233,23 @@ compile_onnx_model_vitisai_ep_with_error_handling(
     [[maybe_unused]] void (*func)(void*, int, const char*)) {
   return new std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>(
       vaip_core::compile_onnx_model_3(model_path, graph, options));
+}
+
+VAIP_DLL_SPEC
+std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>*
+compile_onnx_model_vitisai_ep_v4(
+    const std::string& model_path, const onnxruntime::Graph& graph,
+    const onnxruntime::ProviderOptions& options, [[maybe_unused]] void* status,
+    [[maybe_unused]] void (*func)(void*, int, const char*),
+    const OrtLogger* ort_logger) {
+  // Create logger and logger_adapter early to ensure they're available
+  // They will be stored in PassContext to prolong their lifetime
+  auto logger = std::make_shared<Ort::Logger>(ort_logger);
+  auto logger_adapter = vaip_core::LoggerAdapter::create(*logger);
+
+  return new std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>(
+      vaip_core::compile_onnx_model_3_internal(model_path, graph, options,
+                                               logger, logger_adapter));
 }
 
 VAIP_DLL_SPEC

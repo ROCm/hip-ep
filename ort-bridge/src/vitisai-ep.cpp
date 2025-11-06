@@ -282,14 +282,15 @@ OrtStatus* VitisAIEP::GetCapability(OrtGraphWrapper& graph_viewer,
   auto& graph = VAIP_ORT_API(model_main_graph)(*ir_model);
   auto model_path = VAIP_ORT_API(get_model_path)(graph);
   OrtStatus* status = nullptr;
-  execution_providers_ = std::make_unique<my_ep_t>(
-      compile_onnx_model_vitisai_ep_with_error_handling(
+  execution_providers_ =
+      std::make_unique<my_ep_t>(compile_onnx_model_vitisai_ep_v4(
           model_path.u8string(), graph, provider_options_, (void*)&status,
           [](void* status, int code, const char* error_message) {
             OrtStatus** ort_status = static_cast<OrtStatus**>(status);
             *ort_status =
                 Ort::GetApi().CreateStatus((OrtErrorCode)code, error_message);
-          }));
+          },
+          &logger_));
 
   if (!execution_providers_) {
     MY_LOG(1) << "Failed to compile ONNX model to Vitis AI EP.";

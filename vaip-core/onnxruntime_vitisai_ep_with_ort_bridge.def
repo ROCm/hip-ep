@@ -1,6 +1,7 @@
 LIBRARY onnxruntime_vitisai_ep
 EXPORTS
     compile_onnx_model_vitisai_ep_with_options
+    compile_onnx_model_vitisai_ep_v4
     create_ep_context_nodes
     deinitialize_onnxruntime_vitisai_ep
     initialize_onnxruntime_vitisai_ep

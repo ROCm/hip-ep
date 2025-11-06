@@ -181,6 +181,8 @@ add_library(${LIB_NAME} STATIC
   src/file_stream.cpp
   src/cleanup.hpp
   src/cleanup.cpp
+  src/logger_adapter.hpp
+  src/logger_adapter.cpp
   src/ep_shared_context_workspace.cpp
   src/ep_shared_context_workspace.hpp
   include/morphizen/op_invoker.hpp

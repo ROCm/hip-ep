@@ -18,6 +18,9 @@
 #include "morphizen/vaip_plugin.hpp"
 
 namespace vaip_core {
+// Forward declaration for logger adapter
+class LoggerAdapter;
+
 class CacheFileReaderImp : public CacheFileReader {
 public:
   CacheFileReaderImp(bool in_mem, const std::string& filename, FILE* fp);
@@ -153,6 +156,9 @@ public:
       std::chrono::steady_clock::now();
   mutable int suffix_counter = 0;
   std::unordered_map<std::string, std::shared_ptr<void>> pass_resources;
+  // Logger integration - keep these alive for the duration of PassContext
+  std::shared_ptr<Ort::Logger> ort_logger_;
+  std::shared_ptr<LoggerAdapter> logger_adapter_;
 
 public:
   ~PassContextImp();
@@ -329,7 +335,9 @@ private:
   friend std::shared_ptr<PassContextImp> initialize_context(
       const std::string& model_path, const Graph& onnx_graph,
       const std::vector<vaip_cxx::NodeConstRef>& ep_context_nodes,
-      const onnxruntime::ProviderOptions& options);
+      const onnxruntime::ProviderOptions& options,
+      std::shared_ptr<::Ort::Logger> logger,
+      std::shared_ptr<LoggerAdapter> logger_adapter);
   friend onnxruntime::Node*
   create_ep_context_node(vaip_core::ExecutionProviderConcrete* ep, int index);
   friend std::string

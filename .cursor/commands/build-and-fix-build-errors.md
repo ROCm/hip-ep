@@ -43,6 +43,38 @@ Please build the MorphiZen project and fix any build errors that occur.
 - `ort-bridge-test.exe` - ORT bridge tests
 - Various other tools and libraries
 
+5. Commit changes after successful build:
+   ```powershell
+   # Check git status to see what changed
+   git status
+
+   # Stage the modified files
+   git add <modified-files>
+
+   # Commit with a descriptive message.
+   git commit -m "refactor: <brief summary>
+
+   - <detailed change 1>
+   - <detailed change 2>
+   - <detailed change 3>
+
+   <optional additional context>"
+   ```
+   **Note**: Only commit after verifying the build succeeds. Pre-commit hooks will automatically run linters and formatters, modify files if needed, please accept the changes made by pre-commit.
+
+6. Run unit tests in parallel:
+   ```powershell
+   ctest --test-dir "C:/Develop/m/build/morphizen.ninja" -C Debug --output-on-failure --timeout 600 -j $(Get-Command -Name ctest | ForEach-Object { [Environment]::ProcessorCount })
+   ```
+   Or specify the number of parallel jobs explicitly (e.g., 8):
+   ```powershell
+   ctest --test-dir "C:/Develop/m/build/morphizen.ninja" -C Debug --output-on-failure --timeout 600 -j 8
+   ```
+   Alternatively, you may run test executables using parallel shell jobs for fine-grained control.
+
+
+
+
 ## Notes:
 - The project uses Ninja generator for faster builds
 - Dependencies are automatically fetched via CMake FetchContent

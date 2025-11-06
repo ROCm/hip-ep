@@ -143,6 +143,32 @@ compile_onnx_model_vitisai_ep_with_options(
     const onnxruntime::ProviderOptions& options);
 
 /**
+ * @brief Compiles an ONNX model using the Vitis AI Execution Provider with
+ * error handling and ORT logger integration (v4 API).
+ *
+ * This is the latest version of the compile API that integrates glog with
+ * ORT's logging system, allowing users to control log levels through ORT APIs.
+ *
+ * Called by `VitisAIExecutionProvider::GetCapability()`.
+ *
+ * @param model_path Path to the ONNX model file.
+ * @param graph Reference to the ONNX Runtime graph.
+ * @param options Provider options for compilation.
+ * @param status Pointer to a status object for error handling.
+ * @param func Callback function for error handling.
+ * @param ort_logger Pointer to ORT logger for log integration.
+ * @return Pointer to a vector of unique pointers to ExecutionProvider
+ * instances.
+ */
+VAIP_DLL_SPEC std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>*
+compile_onnx_model_vitisai_ep_v4(const std::string& model_path,
+                                 const onnxruntime::Graph& graph,
+                                 const onnxruntime::ProviderOptions& options,
+                                 void* status,
+                                 void (*func)(void*, int, const char*),
+                                 const OrtLogger* ort_logger);
+
+/**
  * @brief Creates EPContxt Nodes for the Vitis AI Execution Provider.
  *
  * Called after compile onnx model when ep.context_enbale is set to 1.

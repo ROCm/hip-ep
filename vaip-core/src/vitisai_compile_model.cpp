@@ -12,6 +12,7 @@
 #include "./cache_dir.hpp"
 #include "./config.hpp"
 #include "./file_lock.hpp"
+#include "./logger_adapter.hpp"
 #include "./pass_imp.hpp"
 #include "./stat.hpp"
 #include "profile_utils.hpp"
@@ -462,10 +463,18 @@ get_signature_with_meptable(const std::string& model_path,
 std::shared_ptr<PassContextImp>
 initialize_context(const std::string& model_path, const Graph& onnx_graph,
                    const std::vector<vaip_cxx::NodeConstRef>& ep_context_nodes,
-                   const onnxruntime::ProviderOptions& options) {
+                   const onnxruntime::ProviderOptions& options,
+                   std::shared_ptr<Ort::Logger> logger,
+                   std::shared_ptr<LoggerAdapter> logger_adapter) {
 
   std::shared_ptr<PassContextImp> context =
       PassContextImp::create_pass_context(options);
+
+  // Store logger and logger_adapter to prolong their lifetime
+  if (logger && logger_adapter) {
+    context->ort_logger_ = logger;
+    context->logger_adapter_ = logger_adapter;
+  }
   // "session.model_external_initializers_file_folder_path/virtual_model.onnx
   // would be passed for in-mem model when this happen, a invalid path is
   // passed, we use the model_path == empty to differentiate if the model is
@@ -1191,12 +1200,12 @@ static void log_stat_subgraph(const ContextProto& context_proto) {
   for (auto& meta_def : context_proto.meta_def()) {
     stat[meta_def.device()]++;
   }
-  std::cout << "[Vitis AI EP] No. of Subgraphs supported by Vitis AI EP:";
+  // as per AIESW-11754 request, use LOG(INFO) instead of std::cout
+  LOG(INFO) << "[Vitis AI EP] No. of Subgraphs supported by Vitis AI EP:";
   for (const auto& subgraph_stat : stat) {
-    std::cout << std::setw(6) << subgraph_stat.first << std::setw(6)
+    LOG(INFO) << std::setw(6) << subgraph_stat.first << std::setw(6)
               << subgraph_stat.second << " ";
   }
-  std::cout << std::endl;
 }
 static std::vector<std::unique_ptr<ExecutionProvider>>
 compile_onnx_model_internal(
@@ -1328,15 +1337,19 @@ static void print_graph_input_and_output(const Graph& onnx_graph) {
     }
   }
 }
+// Internal helper that accepts logger_adapter for lifetime management
 std::vector<std::unique_ptr<ExecutionProvider>>
-compile_onnx_model_3(const std::string& model_path, const Graph& onnx_graph,
-                     const onnxruntime::ProviderOptions& options) {
+compile_onnx_model_3_internal(const std::string& model_path,
+                              const Graph& onnx_graph,
+                              const onnxruntime::ProviderOptions& options,
+                              std::shared_ptr<Ort::Logger> logger,
+                              std::shared_ptr<LoggerAdapter> logger_adapter) {
   print_graph_input_and_output(onnx_graph);
   static std::mutex mtx;
   std::lock_guard<std::mutex> t_lock(mtx);
   auto ep_context_nodes = get_ep_context_nodes(onnx_graph);
-  auto context =
-      initialize_context(model_path, onnx_graph, ep_context_nodes, options);
+  auto context = initialize_context(model_path, onnx_graph, ep_context_nodes,
+                                    options, logger, logger_adapter);
   auto measture_compile_onnx_model_3 = context->measure("compile_onnx_model_3");
   // we cannot use get_cache_filename because cache might be a tar file in
   // memory instead of a physical directory.
@@ -1420,6 +1433,14 @@ compile_onnx_model_3(const std::string& model_path, const Graph& onnx_graph,
     }
   }
   return ret;
+}
+
+// Public API - calls internal version without logger
+std::vector<std::unique_ptr<ExecutionProvider>>
+compile_onnx_model_3(const std::string& model_path, const Graph& onnx_graph,
+                     const onnxruntime::ProviderOptions& options) {
+  return compile_onnx_model_3_internal(model_path, onnx_graph, options, nullptr,
+                                       nullptr);
 }
 
 thread_local const void* g_state = nullptr;

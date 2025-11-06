@@ -188,9 +188,9 @@ static void log_stat(const StatProto& proto, int dpu_failed_cnt) {
   if (!ENV_PARAM(XLNX_ENABLE_SUMMARY_LOG)) {
     return;
   }
-
+  // as per AIESW-11754 request, use LOG(INFO) instead of std::cout
   const auto& device_proto = proto.device_stat();
-  std::cout << "[Vitis AI EP] No. of Operators :";
+  LOG(INFO) << "[Vitis AI EP] No. of Operators :";
   auto all_op_num = 0;
   for (const auto& device_stat : device_proto) {
     if (device_stat.name() == "all") {
@@ -201,22 +201,21 @@ static void log_stat(const StatProto& proto, int dpu_failed_cnt) {
   for (const auto& device_stat : device_proto) {
     auto name = device_stat.name() == "DPU" ? "IPU" : device_stat.name();
     if (name != "all") {
-      std::cout << std::setw(6) << name << std::setw(6)
+      LOG(INFO) << std::setw(6) << name << std::setw(6)
                 << device_stat.node_num() << " ";
     }
     if (name == "IPU") {
-      std::cout << std::setw(6) << std::fixed << std::setprecision(2)
+      LOG(INFO) << std::setw(6) << std::fixed << std::setprecision(2)
                 << (float)device_stat.node_num() / (float)all_op_num * 100
                 << "%";
-      std::cout.precision(6);
     }
   }
-  std::cout << std::endl;
+  LOG(INFO) << std::endl;
 
   const auto& subgraph_proto = proto.subgraph_stat();
   int32_t actually_on_npu = 0;
   if (!subgraph_proto.empty()) {
-    std::cout << "[Vitis AI EP] No. of Subgraphs :";
+    LOG(INFO) << "[Vitis AI EP] No. of Subgraphs :";
     for (const auto& subgraph_stat : subgraph_proto) {
       auto name = subgraph_stat.device();
       if (name == "DPU" || name == "DOD" || name == "WAIC" || name == "VAIML" ||
@@ -224,10 +223,10 @@ static void log_stat(const StatProto& proto, int dpu_failed_cnt) {
         name = "NPU";
         actually_on_npu += subgraph_stat.count();
       }
-      std::cout << std::setw(6) << name << std::setw(6) << subgraph_stat.count()
+      LOG(INFO) << std::setw(6) << name << std::setw(6) << subgraph_stat.count()
                 << " ";
     }
-    std::cout << "Actually running on NPU " << std::setw(6)
+    LOG(INFO) << "Actually running on NPU " << std::setw(6)
               << (actually_on_npu - dpu_failed_cnt) << std::endl;
   }
 }

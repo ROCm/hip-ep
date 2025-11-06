@@ -21,7 +21,9 @@ std::shared_ptr<PassContextImp>
 initialize_context(const std::string& model_path,
                    const onnxruntime::Graph& onnx_graph,
                    const std::vector<vaip_cxx::NodeConstRef>& ep_context_nodes,
-                   const onnxruntime::ProviderOptions& options);
+                   const onnxruntime::ProviderOptions& options,
+                   std::shared_ptr<Ort::Logger> logger,
+                   std::shared_ptr<LoggerAdapter> logger_adapter);
 }
 
 // Test fixture for PassContext
@@ -392,7 +394,7 @@ protected:
   void CreateContext(onnxruntime::ProviderOptions provider_options) {
     passContext_ = vaip_core::initialize_context(
         model_->ref().model_path().u8string(), model_->ref().main_graph(), {},
-        provider_options);
+        provider_options, nullptr, nullptr);
   }
   void TearDown() override {
     // Clean up any resources after each test
