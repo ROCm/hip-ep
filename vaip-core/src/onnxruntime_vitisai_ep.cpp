@@ -222,7 +222,7 @@ compile_onnx_model_vitisai_ep_with_options(
     const std::string& model_path, const onnxruntime::Graph& graph,
     const onnxruntime::ProviderOptions& options) {
   return new std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>(
-      vaip_core::compile_onnx_model_3(model_path, graph, options));
+      vaip_core::compile_onnx_model_3(model_path, graph, options, nullptr));
 }
 
 VAIP_DLL_SPEC
@@ -231,8 +231,14 @@ compile_onnx_model_vitisai_ep_with_error_handling(
     const std::string& model_path, const onnxruntime::Graph& graph,
     const onnxruntime::ProviderOptions& options, [[maybe_unused]] void* status,
     [[maybe_unused]] void (*func)(void*, int, const char*)) {
+  auto set_ort_status = [&](int error_code, const char* error_message) {
+    if (func != nullptr) {
+      func(status, error_code, error_message);
+    }
+  };
   return new std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>(
-      vaip_core::compile_onnx_model_3(model_path, graph, options));
+      vaip_core::compile_onnx_model_3(model_path, graph, options,
+                                      set_ort_status));
 }
 
 VAIP_DLL_SPEC
@@ -246,10 +252,14 @@ compile_onnx_model_vitisai_ep_v4(
   // They will be stored in PassContext to prolong their lifetime
   auto logger = std::make_shared<Ort::Logger>(ort_logger);
   auto logger_adapter = vaip_core::LoggerAdapter::create(*logger);
-
+  auto set_ort_status = [&](int error_code, const char* error_message) {
+    if (func != nullptr) {
+      func(status, error_code, error_message);
+    }
+  };
   return new std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>(
-      vaip_core::compile_onnx_model_3_internal(model_path, graph, options,
-                                               logger, logger_adapter));
+      vaip_core::compile_onnx_model_3_internal(
+          model_path, graph, options, logger, logger_adapter, set_ort_status));
 }
 
 VAIP_DLL_SPEC

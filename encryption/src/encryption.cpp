@@ -15,7 +15,6 @@
 #include <algorithm>
 #include <array>
 #include <glog/logging.h>
-#include <stdexcept>
 namespace vaip_encryption {
 int has_encryption_support() {
 #ifdef WITH_OPENSSL
@@ -24,6 +23,7 @@ int has_encryption_support() {
   return 0;
 #endif
 }
+
 void aes_encryption(const vaip_core::IStreamReader& src,
                     vaip_core::IStreamWriter& dst,
                     [[maybe_unused]] const std::string& key) {
@@ -43,12 +43,12 @@ void aes_encryption(const vaip_core::IStreamReader& src,
   const size_t READ_SIZE = 1024;
   EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
   if (!ctx) {
-    throw std::runtime_error("encryption creating context failed");
+    throw EncryptionError("encryption creating context failed");
   }
 
   if (1 != EVP_EncryptInit_ex(ctx, EVP_aes_256_ecb(), NULL,
                               (const unsigned char*)aes_256_key.data(), NULL)) {
-    throw std::runtime_error("encryption initialization failed");
+    throw EncryptionError("encryption initialization failed");
   }
   int len = 0;
   char buffer_out[READ_SIZE] = {0};
@@ -57,14 +57,14 @@ void aes_encryption(const vaip_core::IStreamReader& src,
     if (1 != EVP_EncryptUpdate(ctx, (unsigned char*)buffer_out, &len,
                                (const unsigned char*)data_in.value().data(),
                                (int)data_in->size())) {
-      throw std::runtime_error("encryption update failed");
+      throw EncryptionError("encryption update failed");
     }
     dst.write(buffer_out, len);
     data_in = src.read(READ_SIZE);
   }
   char evp_cipher_block[AES_BLOCK_SIZE];
   if (1 != EVP_EncryptFinal_ex(ctx, (unsigned char*)evp_cipher_block, &len)) {
-    throw std::runtime_error("encryption finalization failed");
+    throw EncryptionError("encryption finalization failed");
   }
   dst.write(evp_cipher_block, len);
   EVP_CIPHER_CTX_free(ctx);
@@ -98,12 +98,12 @@ void aes_decryption(const vaip_core::IStreamReader& src,
   const size_t READ_SIZE = 1024;
   EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
   if (!ctx) {
-    throw std::runtime_error("decryption creating context failed");
+    throw EncryptionError("decryption creating context failed");
   }
 
   if (1 != EVP_DecryptInit_ex(ctx, EVP_aes_256_ecb(), NULL,
                               (const unsigned char*)aes_256_key.data(), NULL)) {
-    throw std::runtime_error("decryption initialization failed");
+    throw EncryptionError("decryption initialization failed");
   }
   char buffer_out[READ_SIZE] = {0};
   int len = 0;
@@ -112,7 +112,7 @@ void aes_decryption(const vaip_core::IStreamReader& src,
     if (1 != EVP_DecryptUpdate(ctx, (unsigned char*)buffer_out, &len,
                                (const unsigned char*)data_in.value().data(),
                                (int)data_in->size())) {
-      throw std::runtime_error("encryption update failed");
+      throw EncryptionError("decryption update failed");
     }
     dst.write(buffer_out, len);
     data_in = src.read(READ_SIZE);
@@ -120,7 +120,8 @@ void aes_decryption(const vaip_core::IStreamReader& src,
   char evp_cipher_block[AES_BLOCK_SIZE];
 
   if (1 != EVP_DecryptFinal_ex(ctx, (unsigned char*)evp_cipher_block, &len)) {
-    throw std::runtime_error("decryption finalization failed");
+    throw EncryptionError("decryption finalization failed, maybe the "
+                          "encryption key is incorrect.");
   }
   dst.write(evp_cipher_block, len);
   EVP_CIPHER_CTX_free(ctx);

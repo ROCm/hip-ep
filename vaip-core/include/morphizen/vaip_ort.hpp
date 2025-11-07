@@ -11,6 +11,7 @@
 #  error "must enable c++17"
 #endif
 
+#include <functional>
 #include <morphizen/vaip-ort-api-ext.hpp>
 #include <vaip/custom_op.h>
 #include <vaip/export.h>
@@ -51,8 +52,10 @@ compile_onnx_model_5(const std::filesystem::path& model_path,
                      vaip_error_report_func func);
 
 VAIP_DLL_SPEC std::vector<std::unique_ptr<ExecutionProvider>>
-compile_onnx_model_3(const std::string& model_path, const Graph& graph,
-                     const onnxruntime::ProviderOptions& options);
+compile_onnx_model_3(
+    const std::string& model_path, const Graph& graph,
+    const onnxruntime::ProviderOptions& options,
+    std::function<void(int, const char*)> set_ort_status = nullptr);
 
 // Internal version that accepts logger_adapter for lifetime management
 VAIP_DLL_SPEC std::vector<std::unique_ptr<ExecutionProvider>>
@@ -60,7 +63,8 @@ compile_onnx_model_3_internal(
     const std::string& model_path, const Graph& onnx_graph,
     const onnxruntime::ProviderOptions& options,
     std::shared_ptr<::Ort::Logger> logger = nullptr,
-    std::shared_ptr<LoggerAdapter> logger_adapter = nullptr);
+    std::shared_ptr<LoggerAdapter> logger_adapter = nullptr,
+    std::function<void(int, const char*)> set_ort_status = nullptr);
 
 VAIP_DLL_SPEC void profiler_collect(std::vector<EventInfo>& api_events,
                                     std::vector<EventInfo>& kernel_events);

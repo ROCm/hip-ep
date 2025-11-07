@@ -21,6 +21,7 @@
 #include "morphizen/env_config.hpp"
 #include <codecvt>
 #include <errno.h>
+#include <functional>
 #include <google/protobuf/util/json_util.h>
 #include <ios>
 #include <limits>
@@ -1068,18 +1069,13 @@ store_cache_directory_from_main_node(PassContextImp& context,
         LOG(ERROR) << "enable_encryption is set, but encryption_key is empty";
         std::abort();
       }
-      try {
-        ep_context_file = stream_filter(
-            *ep_context_file,
-            [](const IStreamReader& src, IStreamWriter& dst,
-               const std::string& encryption_key) {
-              vaip_encryption::aes_decryption(src, dst, encryption_key);
-            },
-            encryption_key);
-      } catch (std::runtime_error& e) {
-        LOG(ERROR) << "exception occurs when decryption: " << e.what();
-        std::abort();
-      }
+      ep_context_file = stream_filter(
+          *ep_context_file,
+          [](const IStreamReader& src, IStreamWriter& dst,
+             const std::string& encryption_key) {
+            vaip_encryption::aes_decryption(src, dst, encryption_key);
+          },
+          encryption_key);
     }
     if (enable_compression) {
       ep_context_file = uncompress(*ep_context_file);
@@ -1338,12 +1334,12 @@ static void print_graph_input_and_output(const Graph& onnx_graph) {
   }
 }
 // Internal helper that accepts logger_adapter for lifetime management
-std::vector<std::unique_ptr<ExecutionProvider>>
-compile_onnx_model_3_internal(const std::string& model_path,
-                              const Graph& onnx_graph,
-                              const onnxruntime::ProviderOptions& options,
-                              std::shared_ptr<Ort::Logger> logger,
-                              std::shared_ptr<LoggerAdapter> logger_adapter) {
+std::vector<std::unique_ptr<ExecutionProvider>> compile_onnx_model_3_internal(
+    const std::string& model_path, const Graph& onnx_graph,
+    const onnxruntime::ProviderOptions& options,
+    std::shared_ptr<Ort::Logger> logger,
+    std::shared_ptr<LoggerAdapter> logger_adapter,
+    std::function<void(int, const char*)> set_ort_status) {
   print_graph_input_and_output(onnx_graph);
   static std::mutex mtx;
   std::lock_guard<std::mutex> t_lock(mtx);
@@ -1394,7 +1390,12 @@ compile_onnx_model_3_internal(const std::string& model_path,
     }
   }
 #endif
-  catch (const std::exception& e) {
+  catch (const vaip_encryption::EncryptionError& e) {
+    if (set_ort_status) {
+      set_ort_status(1, e.what());
+    }
+    return {};
+  } catch (const std::exception& e) {
     if (ENV_PARAM(XLNX_ENABLE_SKIP_FATAL)) {
       LOG(INFO) << " catch other exception, skip this subgraph: " << e.what();
     } else {
@@ -1438,9 +1439,10 @@ compile_onnx_model_3_internal(const std::string& model_path,
 // Public API - calls internal version without logger
 std::vector<std::unique_ptr<ExecutionProvider>>
 compile_onnx_model_3(const std::string& model_path, const Graph& onnx_graph,
-                     const onnxruntime::ProviderOptions& options) {
+                     const onnxruntime::ProviderOptions& options,
+                     std::function<void(int, const char*)> set_ort_status) {
   return compile_onnx_model_3_internal(model_path, onnx_graph, options, nullptr,
-                                       nullptr);
+                                       nullptr, set_ort_status);
 }
 
 thread_local const void* g_state = nullptr;
