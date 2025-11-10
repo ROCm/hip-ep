@@ -36,6 +36,7 @@ public:
     AddOp("com.xilinx", XilinxCustomOp<>::create("transposed_conv2d_nchw"));
     AddOp("com.xilinx", XilinxCustomOp<>::create("conv3d_ncdhw"));
     AddOp("com.xilinx", XilinxCustomOp<>::create("depthwise_conv3d_ncdhw"));
+    AddOp("com.xilinx", XilinxCustomOp<>::create("transposed_conv3d_ncdhw"));
     AddOp("com.xilinx", XilinxCustomOp<>::create("maxpool2d_nchw"));
     AddOp("com.xilinx", XilinxCustomOp<>::create("avgpool2d_nchw"));
     AddOp("com.xilinx", XilinxCustomOp<>::create("resize_nchw"));
