@@ -348,7 +348,17 @@ static void initialize_mlir_api() {
                                                16); // BFLOAT16 = 16
   };
 
-  // Additional tensor proto functions for 4-bit types
+// Additional tensor proto functions for 4-bit types
+#if VAIP_ORT_API_MAJOR >= 19
+  the_mlir_instance_of_vaip_ort_api.tensor_proto_new_bool =
+      [](const std::string& name, const std::vector<int64_t>& shape,
+         const std::vector<uint8_t>& data) -> vaip_core::TensorProto* {
+    return tensor_proto_new_with_raw_data_mlir(name, shape, data.data(),
+                                               data.size() * sizeof(uint8_t),
+                                               9); // BOOL = 9
+  };
+#endif // VAIP_ORT_API_MAJOR >= 19
+
   the_mlir_instance_of_vaip_ort_api.tensor_proto_new_i4 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<int8_t>& data) -> vaip_core::TensorProto* {

@@ -587,6 +587,14 @@ wrapped_attr_proto_release_string(vaip_core::AttributeProto* attr) {
 bool wrapped_is_profiling_enabled(void* session_options) {
   WRAP_API_CALL(is_profiling_enabled, session_options);
 }
+#if VAIP_ORT_API_MAJOR >= 19
+vaip_core::TensorProto*
+wrapped_tensor_proto_new_bool(const std::string& name,
+                              const std::vector<int64_t>& shape,
+                              const std::vector<uint8_t>& data) {
+  WRAP_API_CALL(tensor_proto_new_bool, name, shape, data);
+}
+#endif // VAIP_ORT_API_MAJOR >= 19
 
 vaip_core::TensorProto*
 wrapped_tensor_proto_new_i4(const std::string& name,
@@ -797,6 +805,9 @@ get_vaip_ort_api_for_coverage_test(vaip_core::OrtApiForVaip* original_api) {
   g_wrapped_api->graph_to_graph_proto = wrapped_graph_to_graph_proto;
   g_wrapped_api->graph_proto_delete = wrapped_graph_proto_delete;
   g_wrapped_api->graph_infer_shapes = wrapped_graph_infer_shapes;
+#if VAIP_ORT_API_MAJOR >= 19
+  g_wrapped_api->tensor_proto_new_bool = wrapped_tensor_proto_new_bool;
+#endif // VAIP_ORT_API_MAJOR >= 19
 
   LOG(INFO) << "Created VAIP ORT API test coverage wrapper with "
             << sizeof(vaip_core::OrtApiForVaip) << " bytes";

@@ -1201,6 +1201,17 @@ static void initialize_dummy_api() {
     LOG(WARNING) << "is_profiling_enabled is not implemented yet";
     return false;
   };
+#if VAIP_ORT_API_MAJOR >= 19
+  the_instance_of_vaip_ort_api.tensor_proto_new_bool =
+      [](const std::string& name, const std::vector<int64_t>& shape,
+         const std::vector<uint8_t>& data) -> vaip_core::TensorProto* {
+    return tensor_proto_new_with_raw_data(
+        name, shape,
+        const_cast<void*>(reinterpret_cast<const void*>(data.data())),
+        data.size() * sizeof(uint8_t),
+        9); // BOOL = 9
+  };
+#endif // VAIP_ORT_API_MAJOR >= 19
 
   the_instance_of_vaip_ort_api.tensor_proto_new_i4 =
       [](const std::string& name, const std::vector<int64_t>& shape,
