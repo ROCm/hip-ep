@@ -290,6 +290,7 @@ message PassVaimlConfigProto {
   optional float npu_frequency = 50;
   optional string input_tensor_name = 51;
   optional bool enable_temp_file_io_in_mem = 52;
+  optional int32 batch_dimension = 53;
 
   optional bool supported_node_mode = 101;
   optional bool binary_module = 102;
