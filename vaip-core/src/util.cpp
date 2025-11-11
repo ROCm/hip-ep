@@ -47,6 +47,8 @@ std::string convert_to_xir_op_type(const std::string& domain,
       return op_type.substr(0u, op_type.size() - 4u) + "-fix";
     } else if (op_type == "transposed_conv2d") {
       return "transposed-conv2d";
+    } else if (op_type == "transposed_conv3d") {
+      return "transposed-conv3d";
     } else if (op_type == "leaky_relu") {
       return "leaky-relu";
     } else if (op_type == "depthwise_conv2d") {
