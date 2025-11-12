@@ -13,25 +13,17 @@ Please build the MorphiZen project and fix any build errors that occur.
 - **CMake Preset**: "Morphizen Ninja"
 
 ## Build Steps:
-1. Set environment variables:
+1. Configure with CMake preset (includes MSVC environment setup):
    ```powershell
-   $env:VAI_RT_WORKSPACE = "c:/Develop/m/source"
-   $env:VAI_RT_BUILD_DIR = "C:/Develop/m/build"
-   $env:VAI_RT_PREFIX = "C:/Develop/m/local"
+   cmd /c "C:\msvsn2022\VC\Auxiliary\Build\vcvarsall.bat x64 && set VAI_RT_WORKSPACE=c:/Develop/m/source && set VAI_RT_BUILD_DIR=C:/Develop/m/build && set VAI_RT_PREFIX=C:/Develop/m/local && cd C:\Develop\m\source\MorphiZen && cmake --preset ""Morphizen Ninja"" -DCMAKE_BUILD_TYPE=Debug"
    ```
 
-2. Configure with CMake preset:
+2. Build the project (includes MSVC environment setup):
    ```powershell
-   cd C:\Develop\m\source\MorphiZen
-   cmake --preset "Morphizen Ninja"
+   cmd /c "C:\msvsn2022\VC\Auxiliary\Build\vcvarsall.bat x64 && set VAI_RT_WORKSPACE=c:/Develop/m/source && set VAI_RT_BUILD_DIR=C:/Develop/m/build && set VAI_RT_PREFIX=C:/Develop/m/local && cmake --build ""C:/Develop/m/build/morphizen.ninja"" --parallel"
    ```
 
-3. Build the project:
-   ```powershell
-   cmake --build "C:/Develop/m/build/morphizen.ninja" --config Debug --parallel
-   ```
-
-4. If there are any build errors:
+3. If there are any build errors:
    - Read the error messages
    - Fix the errors in the source files
    - Re-run the build command
@@ -43,7 +35,7 @@ Please build the MorphiZen project and fix any build errors that occur.
 - `ort-bridge-test.exe` - ORT bridge tests
 - Various other tools and libraries
 
-5. Commit changes after successful build:
+4. Commit changes after successful build:
    ```powershell
    # Check git status to see what changed
    git status
@@ -62,7 +54,7 @@ Please build the MorphiZen project and fix any build errors that occur.
    ```
    **Note**: Only commit after verifying the build succeeds. Pre-commit hooks will automatically run linters and formatters, modify files if needed, please accept the changes made by pre-commit.
 
-6. Run unit tests in parallel:
+5. Run unit tests in parallel:
    ```powershell
    ctest --test-dir "C:/Develop/m/build/morphizen.ninja" -C Debug --output-on-failure --timeout 600 -j $(Get-Command -Name ctest | ForEach-Object { [Environment]::ProcessorCount })
    ```

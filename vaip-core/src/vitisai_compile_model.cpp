@@ -15,6 +15,7 @@
 #include "./logger_adapter.hpp"
 #include "./pass_imp.hpp"
 #include "./stat.hpp"
+#include "./version_info.hpp"
 #include "profile_utils.hpp"
 #include "morphizen/vaip.hpp"
 #include "morphizen/util.hpp"
@@ -854,6 +855,21 @@ create_ep_context_node(vaip_core::ExecutionProviderConcrete* ep, int index) {
     ep_cache_context = get_ep_cache_context(context, embed_mode != 0);
   }
   attrs.add("ep_cache_context", ep_cache_context);
+
+  // Add detailed version information from DLL resource
+  // (3rd-party/ryzenai_bin_metadata/version.rc.in) These values are read
+  // directly from the DLL's embedded version resource
+  attrs.add("CompanyName", vaip_core::get_dll_company_name());
+  attrs.add("ProductName", vaip_core::get_dll_product_name());
+  attrs.add("LegalCopyright", vaip_core::get_dll_legal_copyright());
+  attrs.add("FileVersion", vaip_core::get_dll_file_version());
+  attrs.add("ProductVersion", vaip_core::get_dll_product_version());
+  attrs.add("FileDescription", vaip_core::get_dll_file_description());
+
+  // Add library name and commit ID
+  attrs.add("LibraryName", vaip_core::get_lib_name());
+  attrs.add("LibraryCommitId", vaip_core::get_lib_id());
+
   auto ret = vaip_cxx::GraphRef(ep_context_graph)
                  .add_node(name, op_domain, op_type, description, input_args,
                            output_args, attrs.build());
@@ -1135,6 +1151,17 @@ restore_execution_providers_from_ep_context_model(
          "context model";
   // untar the cache directory.
   auto main_node = get_main_ep_context_node(ep_context_nodes);
+  // print some attr in main_node if attr is exist
+  if (main_node.has_value()) {
+    std::vector<std::string> attr_names = {
+        "ProductVersion", "onnx_model_filename", "cache_file_prefix"};
+    for (auto& attr_name : attr_names) {
+      if (main_node.value().has_attr(attr_name)) {
+        MY_LOG(1) << "main_node attr " << attr_name << " = "
+                  << main_node.value().get_attr_string(attr_name);
+      }
+    }
+  }
   CHECK(main_node) << " no main EPContext node";
   store_cache_directory_from_main_node(*context, main_node.value());
   context->update_pass_context_from_context_json_in_cache();

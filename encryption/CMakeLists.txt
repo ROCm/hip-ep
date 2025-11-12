@@ -29,9 +29,9 @@ target_include_directories(${LIB_NAME}
 )
 target_link_libraries(${LIB_NAME} PUBLIC vaip_io)
 
+target_compile_options(${LIB_NAME} PRIVATE ${MORPHIZEN_COMPILER_OPTIONS})
 if(TARGET OpenSSL::SSL)
   target_compile_definitions(${LIB_NAME} PUBLIC -DWITH_OPENSSL)
-  target_compile_options(${LIB_NAME} PRIVATE ${MORPHIZEN_COMPILER_OPTIONS})
   target_link_libraries(${LIB_NAME} PRIVATE OpenSSL::SSL OpenSSL::Crypto ${CMAKE_DL_LIBS} glog::glog)
   if (MSVC)
     # TODO: why we need these windows specific libraries

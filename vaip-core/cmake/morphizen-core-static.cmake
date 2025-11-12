@@ -227,6 +227,7 @@ target_include_directories(${LIB_NAME}
   PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../3rd-party
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+  ${CMAKE_CURRENT_BINARY_DIR}  # For generated version_info_config.h
 )
 
 set(MorphiZen_DEPS protobuf::libprotobuf
@@ -236,7 +237,10 @@ target_link_libraries(${LIB_NAME} PUBLIC ${MorphiZen_DEPS})
 target_compile_definitions(${LIB_NAME}
   PUBLIC
   "-DONNX_NAMESPACE=onnx"
-  PRIVATE "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1"
+  PRIVATE
+    "-DVAIP_USE_DLL=1"
+    "-DVAIP_EXPORT_DLL=1"
+    "-DHAVE_VERSION_INFO_CONFIG=1"  # Enable generated version header
   )
 target_compile_features(morphizen-core-static PUBLIC cxx_std_17)
 if(MSVC)

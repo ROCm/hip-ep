@@ -16,5 +16,14 @@ uint32_t get_vaip_version_minor();
 uint32_t get_vaip_version_patch();
 extern "C" uint32_t vaip_get_version();
 
+// Additional version info from DLL resource (matching version.rc.in)
+// These functions read the version information from the DLL's embedded resource
+const std::string get_dll_company_name();
+const std::string get_dll_product_name();
+const std::string get_dll_legal_copyright();
+const std::string get_dll_file_version();
+const std::string get_dll_product_version();
+const std::string get_dll_file_description();
+
 } // namespace vaip_core
 extern "C" const char* morphizen_get_build_info();

@@ -7,9 +7,20 @@
 #include "vaip/vaip_ort_api.h"
 #include <glog/logging.h>
 #include <sstream>
+#include <vector>
 
 #ifndef PROJECT_GIT_COMMIT_ID
 #  define PROJECT_GIT_COMMIT_ID "N/A"
+#endif
+
+// Include generated version header (for Linux and as fallback for Windows)
+#ifdef HAVE_VERSION_INFO_CONFIG
+#  include "version_info_config.h"
+#endif
+
+#ifdef _WIN32
+#  include <windows.h>
+#  pragma comment(lib, "version.lib")
 #endif
 namespace vaip_core {
 const std::string get_lib_name() {
@@ -52,6 +63,125 @@ extern "C" uint32_t vaip_get_version() {
   return (get_vaip_version_major() << 24) | (get_vaip_version_minor() << 16) |
          (get_vaip_version_patch() << 8);
 }
+
+#ifdef _WIN32
+// Helper function to query version info string from DLL resource
+static std::string query_version_info(const char* value_name) {
+  // Get the path of the current DLL
+  HMODULE hModule = NULL;
+  if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                              GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          (LPCSTR)&query_version_info, &hModule)) {
+    return "N/A";
+  }
+
+  char module_path[MAX_PATH];
+  if (GetModuleFileNameA(hModule, module_path, MAX_PATH) == 0) {
+    return "N/A";
+  }
+
+  // Get version info size
+  DWORD handle;
+  DWORD size = GetFileVersionInfoSizeA(module_path, &handle);
+  if (size == 0) {
+    return "N/A";
+  }
+
+  // Allocate buffer and get version info
+  std::vector<BYTE> buffer(size);
+  if (!GetFileVersionInfoA(module_path, handle, size, buffer.data())) {
+    return "N/A";
+  }
+
+  // Query the value
+  struct LANGANDCODEPAGE {
+    WORD wLanguage;
+    WORD wCodePage;
+  }* lpTranslate;
+
+  UINT cbTranslate;
+  if (!VerQueryValueA(buffer.data(), "\\VarFileInfo\\Translation",
+                      (LPVOID*)&lpTranslate, &cbTranslate)) {
+    return "N/A";
+  }
+
+  // Use the first language/codepage pair
+  char sub_block[256];
+  sprintf_s(sub_block, sizeof(sub_block), "\\StringFileInfo\\%04x%04x\\%s",
+            lpTranslate[0].wLanguage, lpTranslate[0].wCodePage, value_name);
+
+  LPVOID value;
+  UINT value_len;
+  if (VerQueryValueA(buffer.data(), sub_block, &value, &value_len)) {
+    return std::string((char*)value);
+  }
+
+  return "N/A";
+}
+#endif
+
+// Version resource information from DLL
+// (3rd-party/ryzenai_bin_metadata/version.rc.in)
+const std::string get_dll_company_name() {
+#ifdef _WIN32
+  return query_version_info("CompanyName");
+#elif defined(HAVE_VERSION_INFO_CONFIG)
+  return RAI_COMPANY_NAME;
+#else
+  return "AMD Inc";
+#endif
+}
+
+const std::string get_dll_product_name() {
+#ifdef _WIN32
+  return query_version_info("ProductName");
+#elif defined(HAVE_VERSION_INFO_CONFIG)
+  return RAI_PRODUCT_NAME;
+#else
+  return "AMD Ryzen AI";
+#endif
+}
+
+const std::string get_dll_legal_copyright() {
+#ifdef _WIN32
+  return query_version_info("LegalCopyright");
+#elif defined(HAVE_VERSION_INFO_CONFIG)
+  return RAI_LEGAL_COPYRIGHT;
+#else
+  return "\u00A9 AMD Inc. All rights reserved.";
+#endif
+}
+
+const std::string get_dll_file_version() {
+#ifdef _WIN32
+  return query_version_info("FileVersion");
+#elif defined(HAVE_VERSION_INFO_CONFIG)
+  return RAI_DOTTED_VERSION;
+#else
+  return "N/A";
+#endif
+}
+
+const std::string get_dll_product_version() {
+#ifdef _WIN32
+  return query_version_info("ProductVersion");
+#elif defined(HAVE_VERSION_INFO_CONFIG)
+  return RAI_PRODUCT_VERSION;
+#else
+  return "N/A";
+#endif
+}
+
+const std::string get_dll_file_description() {
+#ifdef _WIN32
+  return query_version_info("FileDescription");
+#elif defined(HAVE_VERSION_INFO_CONFIG)
+  return RAI_FILE_DESCRIPTION;
+#else
+  return "N/A";
+#endif
+}
+
 } // namespace vaip_core
 extern "C" const char* morphizen_get_build_info() {
   static char ret[2048] = {'\0'};

@@ -2,6 +2,11 @@
 # ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
+
+# Generate version info header for cross-platform version information
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_version_header.cmake)
+generate_version_info_header()
+
 add_library(${morphizen_CORE_DYNAMIC_UNIQUE_ID} SHARED src/main.cpp ${ryzenai_version_rc_file})
 message(STATUS "create target ${morphizen_CORE_DYNAMIC_UNIQUE_ID} for onnxruntime_vitisai_ep.dll")
 add_library (morphizen::${morphizen_CORE_DYNAMIC_UNIQUE_ID} ALIAS ${morphizen_CORE_DYNAMIC_UNIQUE_ID})
@@ -36,6 +41,8 @@ target_include_directories(${morphizen_CORE_DYNAMIC_UNIQUE_ID}
   PUBLIC
   $<BUILD_INTERFACE:$<TARGET_PROPERTY:morphizen-core-static,INTERFACE_INCLUDE_DIRECTORIES>>
   $<INSTALL_INTERFACE:include>
+  PRIVATE
+  ${CMAKE_CURRENT_BINARY_DIR}  # For generated version_info_config.h
 )
 target_compile_features(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PUBLIC cxx_std_17)
 if(MSVC)
@@ -44,8 +51,13 @@ else(MSVC)
   target_compile_options(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PUBLIC "-fPIC")
 endif(MSVC)
 target_compile_definitions(${morphizen_CORE_DYNAMIC_UNIQUE_ID}
-  PRIVATE "-DVAIP_USE_DLL=1" "-DVAIP_EXPORT_DLL=1"
-  PUBLIC "-DONNX_NAMESPACE=onnx")
+  PRIVATE
+    "-DVAIP_USE_DLL=1"
+    "-DVAIP_EXPORT_DLL=1"
+    "-DHAVE_VERSION_INFO_CONFIG=1"  # Enable generated version header
+  PUBLIC
+    "-DONNX_NAMESPACE=onnx"
+)
 target_compile_options(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_COMPILER_OPTIONS}>")
 target_link_options(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_LINKER_OPTIONS}>")
 set_target_properties(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PROPERTIES
