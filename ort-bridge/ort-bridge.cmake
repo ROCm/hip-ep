@@ -19,6 +19,8 @@ add_library(ort-bridge
   src/ir-converter.cpp
   src/ir-converter-imp.hpp
   src/ir-converter-imp.cpp
+  ${MODEL_COMPATIBILITY_PROTO_SRCS}
+  ${MODEL_COMPATIBILITY_PROTO_HDRS}
 )
 
 target_include_directories(ort-bridge
@@ -37,6 +39,7 @@ target_include_directories(ort-bridge
   # then use #include <morphizen/onnxruntime_api.h> instread.
   #
   PRIVATE
+  $<BUILD_INTERFACE:${MODEL_COMPATIBILITY_PROTO_DIR}>  # For generated protobuf headers
   $<BUILD_INTERFACE:${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime>
   $<BUILD_INTERFACE:${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime/core/session>
   $<BUILD_INTERFACE:${VAIP_ORT_API_DIR}>
@@ -54,6 +57,7 @@ target_link_libraries(ort-bridge
   PRIVATE
   vaip-ort-api-ext
   morphizen-core-static
+  protobuf::libprotobuf
 )
 if(TARGET ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET})
   target_link_libraries(${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET} PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,ort-bridge>)

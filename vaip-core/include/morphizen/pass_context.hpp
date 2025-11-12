@@ -346,5 +346,37 @@ public:
   virtual void on_custom_op_create_end() = 0;
   virtual std::map<std::string, std::string>
   get_all_provider_options() const = 0;
+
+  /**
+   * @brief Appends compatibility information for a compiled model.
+   *
+   *  This method is intended to be called by each level-1 pass during the model
+   * compilation process. It records backend-specific compatibility information
+   * that describes special requirements, limitations, or metadata associated
+   * with the compiled model for a given backend.
+   *
+   * @param backend_name The name of the backend (e.g., "vaip-pass_level1_dpu",
+   * "vaip-pass_level1_dd_cxx", "vaip-pass_vaiml_partition") to which the
+   * compatibility information applies.
+   *
+   * @param compatibility_info A string containing the compatibility details or
+   * metadata for the specified backend.
+   *
+   */
+  virtual void append_compiled_model_compatibility_info(
+      const std::string& backend_name,
+      const std::string& compatibility_info) = 0;
+  /**
+   * @brief Retrieves the compiled model compatibility information.
+   * This method returns a const reference to the map of all backend names
+   * to their associated compatibility information that has been recorded
+   * during compilation.
+   *
+   * @return A const reference to a map where each key is a backend name
+   *         and the corresponding value is its compatibility information
+   * string. The reference remains valid as long as the PassContext exists.
+   */
+  virtual const std::map<std::string, std::string>&
+  get_compiled_model_compatibility_info() const = 0;
 };
 } // namespace vaip_core

@@ -1487,4 +1487,29 @@ void PassContextImp::target_auto_discovery(const Model& model) {
     }
   } while (0);
 }
+
+void PassContextImp::append_compiled_model_compatibility_info(
+    const std::string& backend_name, const std::string& compatibility_info) {
+  // Validate that compatibility_info is not empty
+  if (compatibility_info.empty()) {
+    LOG(WARNING) << "Backend '" << backend_name
+                 << "' provided empty compatibility info. Ignoring.";
+    return;
+  }
+
+  // Check if backend already has compatibility info
+  auto it = compiled_model_compatibility_info_.find(backend_name);
+  if (it != compiled_model_compatibility_info_.end()) {
+    LOG(WARNING) << "Compatibility info for backend '" << backend_name
+                 << "' already exists. Overwriting previous value.";
+  }
+
+  compiled_model_compatibility_info_[backend_name] = compatibility_info;
+}
+
+const std::map<std::string, std::string>&
+PassContextImp::get_compiled_model_compatibility_info() const {
+  return compiled_model_compatibility_info_;
+}
+
 } // namespace vaip_core

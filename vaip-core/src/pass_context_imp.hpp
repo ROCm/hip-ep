@@ -290,6 +290,12 @@ public:
                             std::shared_ptr<void> resource);
   virtual void save_context_json() const override final;
 
+  virtual void append_compiled_model_compatibility_info(
+      const std::string& backend_name,
+      const std::string& compatibility_info) override final;
+  virtual const std::map<std::string, std::string>&
+  get_compiled_model_compatibility_info() const override final;
+
 private:
   // use std::map to keep filename ordered.
   std::map<std::string, FILE*> cache_files_;
@@ -322,6 +328,7 @@ private:
   std::unique_ptr<MepConfigTable> mep_config_proto_ = nullptr;
   std::map<std::string, std::string> provider_option_origin_ = {};
   std::map<std::string, std::string> provider_option_from_cache_ = {};
+  std::map<std::string, std::string> compiled_model_compatibility_info_ = {};
 
 private:
 #if defined(__GNUC__)

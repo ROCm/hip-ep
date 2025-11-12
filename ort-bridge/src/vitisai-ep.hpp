@@ -33,6 +33,8 @@ public:
   static void ORT_API_CALL ReleaseNodeComputeInfosImpl(
       OrtEp* this_ptr, OrtNodeComputeInfo** node_compute_infos,
       size_t num_node_compute_infos) noexcept;
+  static const char* ORT_API_CALL GetCompiledModelCompatibilityInfoImpl(
+      OrtEp* this_ptr, const OrtGraph* graph) noexcept;
 
 private:
   OrtStatus* GetCapability(OrtGraphWrapper& graph_wrapper,
@@ -98,6 +100,7 @@ private:
   mutable my_ep_uptr_t execution_providers_;
   std::unordered_map<std::string, std::string> provider_options_;
   bool enable_ep_context_;
+  mutable std::string compiled_model_compatibility_info_storage_;
 };
 struct VitisAIEP_ComputeInfo : public OrtNodeComputeInfo {
   vaip_core::ExecutionProvider* vitisai_ep =

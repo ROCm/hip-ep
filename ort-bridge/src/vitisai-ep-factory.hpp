@@ -36,6 +36,37 @@ struct VitisAiEpFactory : OrtEpFactory, ApiPtrs {
 
   static void ORT_API_CALL ReleaseEpImpl(OrtEpFactory* /*this_ptr*/,
                                          OrtEp* /*ep*/) noexcept;
+
+  // Complete Use Case Flow:
+  //
+  // COMPILE TIME (Development):
+  // 1. Developer: model.compile(ep_context=True)
+  // 2. VitisAIEP processes model through backends (DPU, DD, etc.)
+  // 3. Each backend: PassContext::append_compiled_model_compatibility_info()
+  // 4. VitisAIEP::GetCompiledModelCompatibilityInfo() aggregates & serializes
+  // to JSON
+  // 5. ORT embeds JSON in EP context model file
+  //
+  // RUNTIME (Production):
+  // 1. User: session = ort.InferenceSession("model.onnx")
+  // 2. ORT reads EP context model, extracts compatibility JSON
+  // 3. ORT calls THIS METHOD → ValidateCompiledModelCompatibilityInfoImpl()
+  // 4. This method:
+  //    - Parses JSON
+  //    - For each backend: finds plugin, calls validation function
+  //    - Aggregates results (worst case wins)
+  // 5. Returns compatibility status to ORT (most restrictive wins):
+  //    - EP_UNSUPPORTED → Reject model, show error (highest priority)
+  //    - EP_SUPPORTED_PREFER_RECOMPILATION → Load but warn user
+  //    - EP_SUPPORTED_OPTIMAL → Load model (best case)
+  //    - EP_NOT_APPLICABLE → ORT decides (graceful fallback)
+
+  static OrtStatus* ORT_API_CALL ValidateCompiledModelCompatibilityInfoImpl(
+      OrtEpFactory* this_ptr,
+      _In_reads_(num_devices) const OrtHardwareDevice* const* devices,
+      _In_ size_t num_devices, _In_ const char* compatibility_info,
+      _Out_ OrtCompiledModelCompatibility* model_compatibility) noexcept;
+
   static OrtStatus* ORT_API_CALL
   CreateAllocatorImpl(OrtEpFactory* this_ptr, const OrtMemoryInfo* memory_info,
                       const OrtKeyValuePairs* /*allocator_options*/,
