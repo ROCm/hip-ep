@@ -73,9 +73,6 @@ public:
   /// Get total number of elements
   int64_t getElementCount() const;
 
-  /// Get size of a single element in bytes
-  size_t getElementSize() const;
-
   /// Check if the held mlir::Value is a constant
   /// Returns true if the value is produced by a constant operation
   /// (e.g., arith.constant, std.constant, or has ConstantLike trait)

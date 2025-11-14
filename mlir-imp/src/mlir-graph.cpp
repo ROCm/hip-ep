@@ -21,6 +21,7 @@
 #include "mlir/IR/Verifier.h"
 #include "morphizen-utils/env_config.hpp"
 #include "llvm/ADT/STLExtras.h"       // for map_range, to_vector
+#include "llvm/ADT/SmallSet.h"        // for SmallSet
 #include "llvm/ADT/SmallVector.h"     // for SmallVector
 #include "llvm/Support/raw_ostream.h" // for raw_fd_ostream
 #include <algorithm>                  // for std::sort
@@ -177,7 +178,7 @@ void MLIRGraph::initialize_node_args_map() {
       node_args_map_.emplace(name, MLIRNodeArgIndex::node_output(
                                        (int32_t)all_node_args_.size() - 1,
                                        GraphId::create_main_graph(graph_id_)));
-      MY_LOG(1) << "Extracted node arg from operation result: " << name;
+      // MY_LOG(1) << "Extracted node arg from operation result: " << name;
     }
   });
 }
@@ -530,6 +531,8 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
   builder.setInsertionPoint(terminator_);
 
   mlir::Operation* latestInputOp = nullptr;
+  bool hasConstantInput = false;
+
   if (input_args.empty()) {
     // Insert at the beginning of the function body when no input arguments
     auto& entryBlock = func_.getBody().front();
@@ -539,6 +542,10 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
       if (auto* input_node_arg = get_node_arg(arg)) {
         if (auto& value = input_node_arg->getValue()) {
           if (auto* definingOp = value.getDefiningOp()) {
+            if (mlir::isa<mlir::arith::ConstantOp>(definingOp)) {
+              hasConstantInput = true;
+            }
+
             if (!latestInputOp || latestInputOp->isBeforeInBlock(definingOp)) {
               latestInputOp = definingOp;
               builder.setInsertionPointAfter(latestInputOp);
@@ -552,6 +559,28 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
             }
           }
         }
+      }
+    }
+
+    // If any input is from arith.constant, find the last arith.constant in the
+    // block and use it as reference point to ensure all constants stay at the
+    // beginning
+    if (hasConstantInput) {
+      auto& entryBlock = func_.getBody().front();
+      mlir::Operation* lastConstantOp = nullptr;
+
+      for (auto& op : entryBlock.getOperations()) {
+        if (mlir::isa<mlir::arith::ConstantOp>(op)) {
+          lastConstantOp = &op;
+        }
+      }
+
+      // Use the last constant operation as reference if it's after our current
+      // insertion point
+      if (lastConstantOp &&
+          (!latestInputOp || latestInputOp->isBeforeInBlock(lastConstantOp))) {
+        latestInputOp = lastConstantOp;
+        builder.setInsertionPointAfter(latestInputOp);
       }
     }
   }
@@ -613,8 +642,6 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
     op->setAttr(attr_names::MORPHIZEN_NODE_OUTPUTS,
                 builder.getArrayAttr(outputIndexes));
   }
-
-  MY_LOG(1) << " OP=" << (void*)op;
 
   // Collect output names for the "node.outputs" attribute
   llvm::SmallVector<mlir::Attribute> outputNames;
@@ -690,9 +717,38 @@ void MLIRGraph::add_constant_initialized_tensor(
   // Get MLIR context and builder
   auto* context = func_->getContext();
   mlir::OpBuilder builder(context);
-  CHECK(terminator_ != nullptr);
-  // Set insertion point before the terminator
-  builder.setInsertionPoint(terminator_);
+
+  // Find the last arith.constant operation to insert after it
+  // Order should be: onnx.None -> arith.constant ops -> other ops -> return
+  auto& block = func_.getBody().front();
+  mlir::Operation* lastConstantOp = nullptr;
+  mlir::Operation* noneOp = nullptr;
+
+  for (auto& op : block.getOperations()) {
+    // Track onnx.None operation
+    if (op.getName().getStringRef() == onnx_mlir::ONNX_NONE) {
+      noneOp = &op;
+    }
+    // Track arith.constant operations
+    else if (mlir::isa<mlir::arith::ConstantOp>(op)) {
+      lastConstantOp = &op;
+    } else if (!mlir::isa<mlir::func::ReturnOp>(op)) {
+      // Stop searching when we hit the first non-constant, non-return, non-None
+      // operation
+      break;
+    }
+  }
+
+  // Set insertion point: after last constant, or after None, or at start
+  if (lastConstantOp) {
+    builder.setInsertionPointAfter(lastConstantOp);
+  } else if (noneOp) {
+    // If no constants exist but None exists, insert after None
+    builder.setInsertionPointAfter(noneOp);
+  } else {
+    builder.setInsertionPointToStart(&block);
+  }
+
   mlir::Location loc = builder.getUnknownLoc();
   // Convert element_type (ONNX TensorProto::DataType) to MLIR tensor type
   auto tensorType = node_arg->getType(builder);
@@ -839,6 +895,15 @@ MLIRGraph::get_consumer_nodes(const std::string& node_arg_name) const {
   std::vector<const mlir::Operation*> consumers;
   auto node_arg = get_node_arg(get_node_arg_index(node_arg_name));
   for (mlir::Operation* userOp : node_arg->getValue().getUsers()) {
+    // Skip func.return operations to avoid treating function outputs as regular
+    // consumers. Bug scenario: When a node's output (e.g.,
+    // "linear_img_add_DequantizeLinear") is directly returned by the function,
+    // including func.return as a consumer causes incorrect dependency analysis
+    // in graph partitioning, leading to wrong subgraph boundaries or the
+    // Partitioner incorrectly treating graph outputs as having real successors.
+    if (mlir::isa<mlir::func::ReturnOp>(userOp)) {
+      continue;
+    }
     consumers.push_back(userOp);
   }
   MY_LOG(1) << "Found " << consumers.size()
@@ -1003,11 +1068,15 @@ const MLIRGraph* MLIRGraph::add_subgraph(std::unique_ptr<MLIRGraph> graph) {
 
 void MLIRGraph::remove_node(mlir::Operation* op) {
   if (op) {
-    LOG_IF(WARNING, op->getParentOp() != func_.getOperation())
-        << "Attempting to remove operation that does not belong to this "
-        << "function. Operation: " << op->getName().getStringRef().str()
-        << ", Expected parent: " << func_.getName().str();
-    op->erase();
+    // Note: The operation will only be removed from the parent function, not
+    // from all users.
+    //       If it still has users, use remove() to detach, otherwise erase() to
+    //       fully delete.
+    if (op->use_empty()) {
+      op->erase();
+    } else {
+      op->remove();
+    }
   }
   // Node replacement requires two steps: 1. add new node; 2. remove old node
   // In ONNX: deletion order doesn't matter
@@ -1171,19 +1240,45 @@ mlir::Operation* MLIRGraph::create_func_call(
     const std::stack<mlir::Operation*>& /* cloned_ops_cache */) {
   mlir::IRRewriter rewriter(func_->getContext());
 
-  // Find the earliest user of any output to ensure proper insertion order
-  mlir::Operation* earliest_user = nullptr;
-  for (const auto& output : outputs) {
-    auto value = output.get_node_arg().getValue();
-    for (auto user : value.getUsers()) {
-      if (!earliest_user || user->isBeforeInBlock(earliest_user)) {
-        earliest_user = user;
+  // Set insertion point based on inputs
+  mlir::Operation* latestInputOp = nullptr;
+  bool hasConstantInput = false;
+
+  for (const auto& input : inputs) {
+    auto value = input.get_node_arg().getValue();
+    if (auto* definingOp = value.getDefiningOp()) {
+      if (mlir::isa<mlir::arith::ConstantOp>(definingOp)) {
+        hasConstantInput = true;
+      }
+
+      if (!latestInputOp || latestInputOp->isBeforeInBlock(definingOp)) {
+        latestInputOp = definingOp;
       }
     }
   }
 
-  if (earliest_user) {
-    rewriter.setInsertionPoint(earliest_user);
+  // If any input is from arith.constant, find the last arith.constant in the
+  // block
+  if (hasConstantInput) {
+    auto& entryBlock = func_.getBody().front();
+    mlir::Operation* lastConstantOp = nullptr;
+
+    for (auto& op : entryBlock.getOperations()) {
+      if (mlir::isa<mlir::arith::ConstantOp>(op)) {
+        lastConstantOp = &op;
+      } else if (!mlir::isa<mlir::func::ReturnOp>(op)) {
+        break;
+      }
+    }
+
+    if (lastConstantOp &&
+        (!latestInputOp || latestInputOp->isBeforeInBlock(lastConstantOp))) {
+      latestInputOp = lastConstantOp;
+    }
+  }
+
+  if (latestInputOp) {
+    rewriter.setInsertionPointAfter(latestInputOp);
   } else {
     rewriter.setInsertionPoint(terminator_);
   }
@@ -1235,6 +1330,49 @@ mlir::Operation* MLIRGraph::create_func_call(
     rewriter.replaceAllUsesWith(output.get_node_arg().getValue(), result);
     output.get_node_arg().setValue(result);
   }
+
+  // After creating func.call, move all operations that use its outputs after it
+  llvm::SmallVector<mlir::Operation*> opsToMove;
+  llvm::SmallSet<mlir::Operation*, 16> visited;
+
+  std::function<void(mlir::Operation*)> collectDependentOps =
+      [&](mlir::Operation* userOp) {
+        if (visited.count(userOp) || userOp == fuse_node ||
+            mlir::isa<mlir::func::ReturnOp>(userOp)) {
+          return;
+        }
+        visited.insert(userOp);
+
+        if (!userOp->isBeforeInBlock(fuse_node) && userOp != fuse_node) {
+          return;
+        }
+
+        opsToMove.push_back(userOp);
+
+        for (auto result : userOp->getResults()) {
+          for (auto& use : result.getUses()) {
+            collectDependentOps(use.getOwner());
+          }
+        }
+      };
+
+  for (auto result : fuse_node->getResults()) {
+    for (auto& use : result.getUses()) {
+      collectDependentOps(use.getOwner());
+    }
+  }
+
+  std::sort(opsToMove.begin(), opsToMove.end(),
+            [](mlir::Operation* a, mlir::Operation* b) {
+              return a->isBeforeInBlock(b);
+            });
+
+  mlir::Operation* lastMovedOp = fuse_node;
+  for (auto* opToMove : opsToMove) {
+    opToMove->moveAfter(lastMovedOp);
+    lastMovedOp = opToMove;
+  }
+
   return fuse_node;
 }
 void MLIRGraph::remove_func_ops(

@@ -29,59 +29,70 @@ MLIRNodeArg::shape_t extractShapeFromValue(mlir::Value value) {
 
 // Helper function to extract element type from MLIR value
 int extractElementTypeFromValue(mlir::Value value) {
-  if (auto tensorType =
-          mlir::dyn_cast<mlir::RankedTensorType>(value.getType())) {
-    if (auto intType =
-            mlir::dyn_cast<mlir::IntegerType>(tensorType.getElementType())) {
+  mlir::Type type = value.getType();
+  mlir::Type elementType;
+  if (auto shapedType = mlir::dyn_cast<mlir::RankedTensorType>(type)) {
+    elementType = shapedType.getElementType();
+  } else if (auto unrankedType =
+                 mlir::dyn_cast<mlir::UnrankedTensorType>(type)) {
+    elementType = unrankedType.getElementType();
+  }
+  if (elementType) {
+    if (auto intType = mlir::dyn_cast<mlir::IntegerType>(elementType)) {
       // Map MLIR integer types to our element type constants
       unsigned width = intType.getWidth();
       bool isSigned = intType.isSigned() || intType.isSignless();
-
-      if (width == 4) {
-        return isSigned ? 21 : 22; // TensorProto_DataType_INT4 :
-                                   // TensorProto_DataType_UINT4
-      } else if (width == 8) {
-        return isSigned ? 3 : 2; // TensorProto_DataType_INT8 :
-                                 // TensorProto_DataType_UINT8
-      } else if (width == 16) {
-        return isSigned ? 5 : 4; // TensorProto_DataType_INT16 :
-                                 // TensorProto_DataType_UINT16
-      } else if (width == 32) {
-        return isSigned ? 6 : 12; // TensorProto_DataType_INT32 :
-                                  // TensorProto_DataType_UINT32
-      } else if (width == 64) {
-        return isSigned ? 7 : 13; // TensorProto_DataType_INT64 :
-                                  // TensorProto_DataType_UINT64
-      } else {
+      int mlir_type_code = -1;
+      switch (width) {
+      case 4:
+        mlir_type_code =
+            isSigned ? 21 : 22; // TensorProto_DataType_INT4 or UINT4
+        break;
+      case 8:
+        mlir_type_code = isSigned ? 3 : 2; // INT8 : UINT8
+        break;
+      case 16:
+        mlir_type_code = isSigned ? 5 : 4; // INT16 : UINT16
+        break;
+      case 32:
+        mlir_type_code = isSigned ? 6 : 12; // INT32 : UINT32
+        break;
+      case 64:
+        mlir_type_code = isSigned ? 7 : 13; // INT64 : UINT64
+        break;
+      default:
         LOG(WARNING) << "Unsupported integer width: " << width
                      << ", defaulting to INT32";
-        return 6; // TensorProto_DataType_INT32
+        mlir_type_code = 6; // Default to INT32
+        break;
       }
-    } else if (auto floatType = mlir::dyn_cast<mlir::FloatType>(
-                   tensorType.getElementType())) {
+      return mlir_type_code;
+    } else if (auto floatType = mlir::dyn_cast<mlir::FloatType>(elementType)) {
       // Map MLIR float types to our element type constants
       unsigned width = floatType.getWidth();
-
-      if (width == 16) {
-        return 10; // TensorProto_DataType_FLOAT16
-      } else if (width == 32) {
-        return 1; // TensorProto_DataType_FLOAT
-      } else if (width == 64) {
-        return 11; // TensorProto_DataType_DOUBLE
-      } else {
+      int mlir_type_code = -1;
+      switch (width) {
+      case 16:
+        mlir_type_code = 10; // TensorProto_DataType_FLOAT16
+        break;
+      case 32:
+        mlir_type_code = 1; // TensorProto_DataType_FLOAT
+        break;
+      case 64:
+        mlir_type_code = 11; // TensorProto_DataType_DOUBLE
+        break;
+      default:
         LOG(WARNING) << "Unsupported float width: " << width
                      << ", defaulting to FLOAT";
-        return 1; // TensorProto_DataType_FLOAT
+        mlir_type_code = 1; // Default to FLOAT
+        break;
       }
-    } else {
-      LOG(WARNING) << "Unsupported element type, defaulting to FLOAT";
-      return 1; // TensorProto_DataType_FLOAT
+      return mlir_type_code;
     }
-  } else {
-    LOG(WARNING) << "Value does not have a ranked tensor type, using default "
-                    "shape and type";
-    return 1; // TensorProto_DataType_FLOAT
   }
+  LOG(WARNING) << "Value does not have a ranked or unranked tensor type, "
+                  "using default shape and type";
+  return 1; // TensorProto_DataType_FLOAT
 }
 } // anonymous namespace
 
@@ -204,11 +215,13 @@ const void* MLIRNodeArg::getData() const {
           // binary data) This covers: dense<0>, dense<[1, -1]>,
           // dense<"0xFD09..."> etc.
           auto raw_data = dense_attr.getRawData();
-          if (raw_data.empty()) {
-            LOG(WARNING) << "DenseElementsAttr has empty raw data for: "
-                         << name_;
-            return nullptr;
-          }
+
+          // Skip the raw_data.empty() check because {value = dense<> :
+          // tensor<0xf32>} is valid. Its print result is shown below and it is
+          // expected to be nullptr: LOG(WARNING) << "DenseElementsAttr has
+          // empty raw data for: " << name_ << " " << (void*)raw_data.data();
+          // DenseElementsAttr has empty raw data for: 801 0000000000000000
+
           return raw_data.data();
         }
       }
@@ -269,43 +282,6 @@ int64_t MLIRNodeArg::getElementCount() const {
   }
   return std::accumulate(shape_.begin(), shape_.end(), 1LL,
                          std::multiplies<int64_t>());
-}
-
-size_t MLIRNodeArg::getElementSize() const {
-  switch (element_type_) {
-  case 1: // TensorProto_DataType_FLOAT
-    return sizeof(float);
-  case 2: // TensorProto_DataType_UINT8
-    return sizeof(uint8_t);
-  case 3: // TensorProto_DataType_INT8
-    return sizeof(int8_t);
-  case 4: // TensorProto_DataType_UINT16
-    return sizeof(uint16_t);
-  case 5: // TensorProto_DataType_INT16
-    return sizeof(int16_t);
-  case 6: // TensorProto_DataType_INT32
-    return sizeof(int32_t);
-  case 7: // TensorProto_DataType_INT64
-    return sizeof(int64_t);
-  case 9: // TensorProto_DataType_BOOL
-    return sizeof(bool);
-  case 10: // TensorProto_DataType_FLOAT16
-    return sizeof(uint16_t);
-  case 11: // TensorProto_DataType_DOUBLE
-    return sizeof(double);
-  case 12: // TensorProto_DataType_UINT32
-    return sizeof(uint32_t);
-  case 13: // TensorProto_DataType_UINT64
-    return sizeof(uint64_t);
-  case 16: // TensorProto_DataType_BFLOAT16
-    return sizeof(uint16_t);
-  case 21:                      // TensorProto_DataType_INT4
-    return sizeof(uint8_t) / 2; // 4 bits
-  case 22:                      // TensorProto_DataType_UINT4
-    return sizeof(uint8_t) / 2; // 4 bits
-  default:
-    return sizeof(float);
-  }
 }
 
 bool MLIRNodeArg::isConstantValue() const {

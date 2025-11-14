@@ -40,6 +40,11 @@ mlir::Type onnxElementTypeToMlirType(int element_type, mlir::OpBuilder& builder,
   case 7: // TensorProto_DataType_INT64
     elementType = builder.getI64Type();
     break;
+  case 9: // TensorProto_DataType_BOOL
+    // ONNX stores BOOL as 8-bit (1 byte): 0x00=False, 0x01=True
+    // Use ui8 to match ONNX physical storage format
+    elementType = builder.getIntegerType(8, false);
+    break;
   case 10: // TensorProto_DataType_FLOAT16
     elementType = builder.getF16Type();
     break;
@@ -49,7 +54,6 @@ mlir::Type onnxElementTypeToMlirType(int element_type, mlir::OpBuilder& builder,
   default:
     // TensorProto_DataType_UNDEFINED = 0,
     // TensorProto_DataType_STRING = 8,
-    // TensorProto_DataType_BOOL = 9,
     // TensorProto_DataType_UINT32 = 12,
     // TensorProto_DataType_UINT64 = 13,
     // TensorProto_DataType_COMPLEX64 = 14,
