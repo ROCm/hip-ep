@@ -207,7 +207,9 @@ void initialize_onnxruntime_vitisai_ep(
   }
   intialize_op_defs(ret_domain);
   vaip_core::add_cleanup_function("protobuf shutdown", []() {
+#ifdef _WIN32
     google::protobuf::ShutdownProtobufLibrary();
+#endif
   });
 }
 
