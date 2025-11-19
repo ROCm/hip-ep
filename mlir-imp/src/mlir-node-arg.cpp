@@ -6,7 +6,7 @@
 #include "./mlir-constants.hpp"
 #include "mlir/Dialect/Arith/IR/Arith.h" // for ConstantOp
 #include "mlir/IR/Builders.h"
-#include "mlir/IR/BuiltinAttributes.h" // for DenseElementsAttr
+#include "mlir/IR/BuiltinAttributes.h"   // for DenseElementsAttr
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/OpDefinition.h"
 #include <cstring>

@@ -47,11 +47,11 @@ static int list_tar(const char* file) {
               << std::right                        // Align fields to the right
               << std::setw(width) << entry->size() // File size
               << std::setw(width)
-              << entry->block_begin_pos() // Block begin position
+              << entry->block_begin_pos()          // Block begin position
               << std::setw(width)
-              << entry->block_end_pos() // Block end position
+              << entry->block_end_pos()            // Block end position
               << std::setw(width)
-              << entry->data_begin_pos() // Data begin position
+              << entry->data_begin_pos()           // Data begin position
               << std::setw(width) << entry->data_end_pos() // Data end position
               << std::left    // Align fields to the left
               << std::setw(0) // File path
@@ -81,11 +81,11 @@ static int list_header_tar(const char* file) {
               << std::right                        // Align fields to the right
               << std::setw(width) << entry->size() // File size
               << std::setw(width)
-              << entry->block_begin_pos() // Block begin position
+              << entry->block_begin_pos()          // Block begin position
               << std::setw(width)
-              << entry->block_end_pos() // Block end position
+              << entry->block_end_pos()            // Block end position
               << std::setw(width)
-              << entry->data_begin_pos() // Data begin position
+              << entry->data_begin_pos()           // Data begin position
               << std::setw(width) << entry->data_end_pos() // Data end position
               << std::left    // Align fields to the left
               << std::setw(0) // File path

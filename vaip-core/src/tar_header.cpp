@@ -31,7 +31,7 @@ std::string TarHeader::to_string() const {
       << ", data_begin_pos=" << data_begin_pos_                         //
       << ", data_end_pos=" << data_end_pos_                             //
       << ", size=" << size_
-      << " bytes" //
+      << " bytes"                                                       //
       // << ", mode=" << mode_ << ", uid=" << uid_ << ", gid=" << gid_
       // << ", mtime=" << mtime_ << ", checksum=" << checksum_
       // << ", linkflag=" << linkflag_ << ", magic=\"" << magic_ << "\""

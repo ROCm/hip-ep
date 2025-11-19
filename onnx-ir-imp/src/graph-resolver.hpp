@@ -86,9 +86,9 @@ private:
   StagingGraph* staging_graph_; // Pointer to the staging graph being resolved
   GraphId new_graph_id_;        // New graph ID to assign to resolved graph
   std::unordered_map<std::string, NodeArgIndex>
-      node_args_map_; // Map to track node args for resolution
+      node_args_map_;           // Map to track node args for resolution
   morphizen_onnx::GraphProto
-      resolved_graph_proto_; // Resolved graph proto after processing
+      resolved_graph_proto_;    // Resolved graph proto after processing
   std::vector<bool> initializer_deleted_flags_; // Flags to track deleted nodes
   std::vector<bool> node_deleted_flags_;        // Flags to track deleted nodes
   std::unordered_set<std::string>

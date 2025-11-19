@@ -88,7 +88,7 @@ TEST(OpInvokerTest, CreateAndInvoke) {
         ONNXTensorElementDataType::
             ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, // cos_cache
         ONNXTensorElementDataType::
-            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT // sin_cache
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT  // sin_cache
     };
 
     // output type values
@@ -98,7 +98,7 @@ TEST(OpInvokerTest, CreateAndInvoke) {
         ONNXTensorElementDataType::
             ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, // present_key
         ONNXTensorElementDataType::
-            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT // present_value
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT  // present_value
     };
 
     op_invoker = morphizen::OpInvoker::Create(

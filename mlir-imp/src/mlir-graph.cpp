@@ -13,7 +13,7 @@
 #include "mlir-model.hpp"
 #include "mlir-named-attribute.hpp"
 #include "mlir-node-attributes.hpp"
-#include "mlir/Dialect/Arith/IR/Arith.h" // for ConstantOp
+#include "mlir/Dialect/Arith/IR/Arith.h"   // for ConstantOp
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h" // for EmptyOp
 #include "mlir/IR/Builders.h"
@@ -26,9 +26,9 @@
 #include "llvm/Support/raw_ostream.h" // for raw_fd_ostream
 #include <algorithm>                  // for std::sort
 #include <glog/logging.h>
-#include <iomanip>       // for std::setprecision
-#include <system_error>  // for std::error_code
-#include <unordered_set> // for std::unordered_set
+#include <iomanip>                    // for std::setprecision
+#include <system_error>               // for std::error_code
+#include <unordered_set>              // for std::unordered_set
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_GRAPH, "0")
 DEF_ENV_PARAM(MORPHIZEN_MLIR_SAVE_WITH_GENERIC, "0")
 DEF_ENV_PARAM(MORPHIZEN_MLIR_SAVE_WITH_DEBUG_INFO, "0")

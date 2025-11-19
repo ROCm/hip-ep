@@ -154,7 +154,7 @@ NodeArgProducer::get_producer(const NodeArgIndex& node_arg_index) const {
   if (graph_id_.is_staging() && !node_arg_graph_id.is_staging()) {
     auto it = node_arg_producer_map_.find(node_arg_index);
     if (it != node_arg_producer_map_.end()) {
-      return it->second; // Return the producer NodeIndex
+      return it->second;           // Return the producer NodeIndex
     } else {
       return NodeIndex::invalid(); // Invalid NodeIndex
     }

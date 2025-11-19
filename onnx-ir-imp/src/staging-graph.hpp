@@ -153,7 +153,7 @@ private:
 private:
   const Graph& main_graph_; ///< Reference to the main graph
   morphizen_onnx::GraphProto
-      graph_proto_; ///< Staging graph proto for modifications
+      graph_proto_;         ///< Staging graph proto for modifications
   // Graph structure (similar to Graph class)
   std::unordered_map<std::string, NodeArgIndex> node_args_map_;
   NodeArgProducer producer_map_;

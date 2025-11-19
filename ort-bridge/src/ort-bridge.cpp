@@ -21,8 +21,8 @@ OrtStatus* CreateEpFactories(const char* registration_name,
   Ort::InitApi(ort_api);
   const OrtEpApi* ort_ep_api = ort_api->GetEpApi();
   MY_LOG(1) << "ORT is initalized, ORT_API_VERSION=" << ORT_API_VERSION
-            << ", ptr=" << (void*)ort_ep_api << ", registration_name=" << "\""
-            << registration_name << "\"";
+            << ", ptr=" << (void*)ort_ep_api << ", registration_name="
+            << "\"" << registration_name << "\"";
 
   // Factory could use registration_name or define its own EP name.
   std::unique_ptr<OrtEpFactory> factory =

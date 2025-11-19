@@ -32,7 +32,7 @@ public:
   enum class Type : int {
     INVALID = 0, // Represents an invalid index
     GRAPH_INPUT =
-        1, // Represents a graph input value, index to GraphProto_.input
+        1,       // Represents a graph input value, index to GraphProto_.input
     INITIALIZER =
         2, // Represents a graph initializer, index to GraphProto_.value_info
     NODE_OUTPUT = 3, // Represents an output value from a node, index to
@@ -136,7 +136,7 @@ private:
     } fields_;
     uint64_t value_; // 64 bits total: 29 for index, 3 for type, 32 for graph_id
   };
-}; // class MLIRNodeArgIndex
+};                   // class MLIRNodeArgIndex
 
 static_assert(8 == sizeof(MLIRNodeArgIndex),
               "MLIRNodeArgIndex type must be 8 bytes");

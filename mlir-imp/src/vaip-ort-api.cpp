@@ -357,7 +357,7 @@ static void initialize_mlir_api() {
                                                data.size() * sizeof(uint8_t),
                                                9); // BOOL = 9
   };
-#endif // VAIP_ORT_API_MAJOR >= 19
+#endif                                             // VAIP_ORT_API_MAJOR >= 19
 
   the_mlir_instance_of_vaip_ort_api.tensor_proto_new_i4 =
       [](const std::string& name, const std::vector<int64_t>& shape,

@@ -92,8 +92,8 @@ struct VitisAiEpFactory : OrtEpFactory, ApiPtrs {
   const uint32_t vendor_id_{0x1022};      // EP vendor ID
   const std::string ep_version_{"0.1.0"}; // EP version
   std::unique_ptr<OrtKeyValuePairs, void (*)(OrtKeyValuePairs*)>
-      ep_metadata_; // EP metadata
+      ep_metadata_;                       // EP metadata
   std::unique_ptr<OrtKeyValuePairs, void (*)(OrtKeyValuePairs*)>
-      ep_options_; // EP metadata
+      ep_options_;                        // EP metadata
 };
 } // namespace morphizen

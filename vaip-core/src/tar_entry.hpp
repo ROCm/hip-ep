@@ -61,8 +61,8 @@ private:
   const std::string path_;                     // name of the entry
   const std::optional<std::string> real_path_; //
 
-  const pos_type data_begin_pos_; // beginning of the data
-  const pos_type data_end_pos_;   // end of the data, not including the padding.
+  const pos_type data_begin_pos_;              // beginning of the data
+  const pos_type data_end_pos_; // end of the data, not including the padding.
   const pos_type
       block_begin_pos_; // beginning of the tar entry, point to the data.
   const pos_type block_end_pos_; // end of the tar entry

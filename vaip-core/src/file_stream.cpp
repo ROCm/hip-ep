@@ -19,7 +19,7 @@ FileBuf::FileBuf(FILE* file, std::size_t buffer_size) {
   }
   get_buffer_.resize(buffer_size);
   put_buffer_.resize(
-      buffer_size); // overflow() needs one more ch to be written.
+      buffer_size);         // overflow() needs one more ch to be written.
   setg(get_buffer_.data(), get_buffer_.data(),
        get_buffer_.data()); // Set read buffer
   setp(
@@ -35,7 +35,7 @@ FileBuf::FileBuf(FILE* file, std::size_t buffer_size) {
 }
 
 FileBuf::~FileBuf() {
-  sync(); // Ensure all data is flushed before destruction
+  sync();          // Ensure all data is flushed before destruction
   if (file_) {
     fclose(file_); // Close the file if it was opened
   }

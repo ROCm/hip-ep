@@ -392,12 +392,14 @@ void VaipOrtApiTest::Test06_GraphAdvancedOperations() {
     ASSERT_TRUE(!nodes_leaving.empty())
         << "Expected at least one node to be left during DFS traversal";
     for (const auto* node : nodes_entering) {
-      LOG_IF(INFO, verbose_log) << "Entered node: " << "\""
-                                << wrapped_api_->node_get_name(*node) << "\"";
+      LOG_IF(INFO, verbose_log)
+          << "Entered node: "
+          << "\"" << wrapped_api_->node_get_name(*node) << "\"";
     }
     for (const auto* node : nodes_leaving) {
-      LOG_IF(INFO, verbose_log) << "Left node: " << "\""
-                                << wrapped_api_->node_get_name(*node) << "\"";
+      LOG_IF(INFO, verbose_log)
+          << "Left node: "
+          << "\"" << wrapped_api_->node_get_name(*node) << "\"";
     }
     auto nodes_entering2 = std::vector<const vaip_core::Node*>{};
     auto nodes_leaving2 = std::vector<const vaip_core::Node*>{};

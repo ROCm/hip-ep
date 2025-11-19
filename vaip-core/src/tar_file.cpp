@@ -190,7 +190,7 @@ TarEntryInputStream* TarFile::open_for_read(const std::string& filename) {
         const_cast<std::streampos&>(entry->buf_->data_begin_pos_) =
             real_entry->data_begin_pos(); // set the data begin pos
         const_cast<std::streampos&>(entry->buf_->data_end_pos_) =
-            real_entry->data_end_pos(); // set the data begin pos
+            real_entry->data_end_pos();   // set the data begin pos
         const_cast<std::streampos&>(entry->buf_->buffer_pos_) =
             real_entry->data_begin_pos(); // set the data begin pos
         return entry.get();

@@ -91,7 +91,7 @@ create_action_from_node_action(IPass::node_action_t node_action) {
         auto leaf_nodes = graph_get_output_nodes(graph);
         VAIP_ORT_API(graph_reverse_dfs_from)
         (
-            graph, //
+            graph,   //
             leaf_nodes,
             nullptr, //
             [&](const Node* node) {
@@ -194,8 +194,8 @@ void Pass::run_all_passes(std::vector<std::shared_ptr<IPass>>& all_pass,
     auto __pass1_start_time = std::chrono::steady_clock::now();
     MY_LOG(1) << "begin pass :"
               << "run pass [" << pass->seq_num_as_string()
-              << "]: " << pass->name()                         //
-              << " plugin=" << pass->get_pass_proto().plugin() //
+              << "]: " << pass->name()                                       //
+              << " plugin=" << pass->get_pass_proto().plugin()               //
               << " enable_log="
               << (pass->get_pass_proto().enable_log() ? "true" : "false")    //
               << " log_verbosity=" << pass->get_pass_proto().log_verbosity() //

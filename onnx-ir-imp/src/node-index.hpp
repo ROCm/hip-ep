@@ -291,7 +291,7 @@ private:
       unsigned int is_valid_ : 1;  // Validity flag (0=invalid, 1=valid)
       unsigned int graph_id_ : 32; // Graph ID for context identification
     } fields_;
-    uint64_t value_; // Raw 64-bit value for fast operations
+    uint64_t value_;               // Raw 64-bit value for fast operations
   };
 };
 
