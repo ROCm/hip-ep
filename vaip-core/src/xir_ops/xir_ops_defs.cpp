@@ -22,46 +22,7 @@ public:
     //  TODO: check whether this is dead code, when a subgraph fuse into a node,
     //  the op type is hardcoded to "com.xilinx::super_layer", because the node
     //  has a body, so that the shape info might not be needed.
-    //
-    // AddOp("com.xilinx", XilinxCustomOp::create("super_layer"));
-    //
-    AddOp("com.xilinx", XilinxCustomOp<>::create("unknown"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("conv2d_nchw"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("fix2float"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("float2fix"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("depthwise_conv2d_nchw"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("conv1d_ncd"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("depthwise_conv1d_ncd"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("depthwise_conv1d"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("transposed_conv2d_nchw"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("conv3d_ncdhw"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("depthwise_conv3d_ncdhw"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("transposed_conv3d_ncdhw"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("maxpool2d_nchw"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("avgpool2d_nchw"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("resize_nchw"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("ConvTranspose_nhwc"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("GlobalAveragePool_nhwc"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("depthwise_conv2d_ihwo"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("pixel_shuffle_nchw"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("gstiling_nchw"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("quantize_linear"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("dequantize_linear"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("layernorm"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("abs"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("clamp"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("instancenorm_nchw"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("instancenorm_ncd"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("groupnorm_nchw"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("groupnorm_ncd"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("space_to_depth"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("space_to_depth_nchw"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("sqrt"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("pow"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("gather"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("expand"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("reduction_min"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("broadcast_tile"));
+    // for vaip op, please edit dpu_ops.cpp/dd_ops.cpp/vaiml_ops.cc instead
     AddOp("com.xilinx", XilinxCustomOp<>::create("QMHAGRPB"));
     AddOp("com.xilinx", XilinxCustomOp<>::create("DQAdd"));
     AddOp("com.xilinx", XilinxCustomOp<>::create("QActConstAdd"));
@@ -123,9 +84,6 @@ public:
     AddOp("com.xilinx", XilinxCustomOp<>::create("QSigmoid"));
     AddOp("com.xilinx", XilinxCustomOp<>::create("MLADFADD"));
     AddOp("com.xilinx", XilinxCustomOp<>::create("Qbias_add"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("round"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("equal"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("reciprocal"));
     AddOp("com.xilinx", XilinxCustomOp<>::create("QDeMHA"));
     AddOp("com.xilinx", XilinxCustomOp<>::create("QGatherDivAdd"));
     AddOp("com.xilinx", XilinxCustomOp<>::create("QIntEltwiseAdd"));
@@ -134,7 +92,6 @@ public:
     AddOp("com.xilinx", XilinxCustomOp<>::create("DQLinear_CPU"));
     AddOp("com.xilinx", XilinxCustomOp<>::create("DQSoftmax_CPU"));
     AddOp("com.xilinx", XilinxCustomOp<>::create("Transpose_CPU"));
-    AddOp("com.xilinx", XilinxCustomOp<>::create("einsum"));
     AddOp("com.xilinx", XilinxCustomOp<>::create("VAIMLQMatmul"));
     AddOp("com.xilinx", XilinxCustomOp<>::create("VAIMLQSilu"));
     AddOp("com.xilinx", XilinxCustomOp<>::create("VAIMLQRMSNorm"));
