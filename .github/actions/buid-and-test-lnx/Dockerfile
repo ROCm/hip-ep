@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y \
     gdb \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m pip install cmake==3.29.6 --force-reinstall
+RUN python3 -m pip install cmake==3.29.6 requests --force-reinstall
 RUN cmake --version; g++ --version; python --version; git --version
 WORKDIR /workspace
 ARG ORT_COMMIT_ID=173a11a4e7a2f7a360c9db6abbe601a06a16f004
