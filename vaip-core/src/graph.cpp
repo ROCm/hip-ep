@@ -179,6 +179,28 @@ const Node& NodeBuilder::build() {
           ;
       if (existing_node.has_value()) {
         auto existing_node_args = existing_node.value().outputs();
+        // Note: existing_node is cached, so has_value() always returns true.
+        // However, when node has multiple outputs, different outputs may
+        // reference the same node through different anchor_points. During
+        // fusion operations, the node might be deleted when processing one
+        // output, but the cached existing_node still exists when processing
+        // another output. We need to filter out this case.
+        //
+        // Example testcase: [PSU1] dd_merge_dqd_gqa pass
+        // pattern : *->Q (a) -> GQA(output0, output1, output2) -> DQ (b)
+        //        set_anchor_point1(b)
+        //        add_output()
+        //        set_anchor_point1(output1)
+        //        add_output()
+        //        set_anchor_point1(output2)
+        // result:  * -> FLATMHA (b, output1, output2)
+        //
+        // the existing_node_args is empty means the node has been deleted
+        // already.
+        if (existing_node_args.size() == 0) {
+          MY_LOG(1) << " node has no outputs, might be deleted already.";
+          continue;
+        }
         CHECK(existing_node_args[0].has_value()) << existing_node.value();
         MY_LOG(1) << " node is deleted: " << existing_node.value();
         VAIP_ORT_API(graph_remove_node)
