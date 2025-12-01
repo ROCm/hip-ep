@@ -2,17 +2,10 @@
 # ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
-include(cmake/llvm.cmake)
-include(cmake/onnx-mlir.cmake)
-
-# Check if ONNX-MLIR source tree is available (LLVM/MLIR are required)
-if(NOT ONNX_MLIR_SOURCE_TREE)
-  message(STATUS "Skipping mlir-imp: ONNX-MLIR source tree not found")
-  return()
-endif()
+find_package(LLVM REQUIRED CONFIG)
+find_package(MLIR REQUIRED CONFIG)
 
 set(LIB_NAME mlir-imp)
-# find_package(MLIR REQUIRED CONFIG)
 
 add_library(${LIB_NAME}
   STATIC
@@ -49,7 +42,7 @@ target_include_directories(${LIB_NAME}
   PRIVATE
   $<INSTALL_INTERFACE:include>
   src
-  ${ONNX_MLIR_SOURCE_TREE}
+  #${ONNX_MLIR_SOURCE_TREE}
   # ${ONNX_MLIR_BINARY_DIR}
   ${LLVM_INCLUDE_DIRS}
   ${MLIR_INCLUDE_DIRS}
