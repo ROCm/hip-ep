@@ -32,7 +32,7 @@ jobs:
 
       - name: Run Keyword Scan
         id: reports
-        uses: actions-int/keyword-scan@v4
+        uses: actions-int/keyword-scan@v5
         with:
           source_path: .
           type_of_scan: 'swv'  ### [ To be changed to 'release' on release branches ]
