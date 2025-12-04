@@ -1,1 +1,10 @@
 # To be updated
+doc/enable-ort-etw-trace-and-logs.md
+doc/pr/443/SECURITY_REVIEW.md
+tools/create_pr.ps1
+tools/download_demo.ps1
+tools/list_pr.ps1
+tools/submit_vaip_pr.ps1
+tools/submit_vaip_pr.sh
+tools/submit_vaip_pr_for_verify_the_pr.ps1
+unit-test/cmake/test_data.cmake
