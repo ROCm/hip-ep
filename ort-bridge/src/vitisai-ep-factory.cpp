@@ -2,11 +2,13 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+#include "morphizen/vaip.hpp"
+
 #include "./vitisai-ep-factory.hpp"
 #include "./vitisai-ep.hpp"
-#include "model_compatibility.pb.h"
 #include "morphizen-utils/morphizen-utils.hpp"
 #include "morphizen-utils/vaip_plugin.hpp"
+#include "morphizen/onnxruntime_vitisai_ep.hpp"
 #include <glog/logging.h>
 #include <google/protobuf/util/json_util.h>
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_VITISAI_EP_FACTORY, "0")
@@ -154,257 +156,31 @@ void ORT_API_CALL VitisAiEpFactory::ReleaseEpImpl(OrtEpFactory* /*this_ptr*/,
   delete vitisai_ep;
 }
 
-// clang-format off
-// ┌───────────────────────────────────────────────────────────────────────────────────────────┐
-// │                Compiled Model Compatibility Validation - Use Cases                       │
-// │   Dimensions: Compilation EP | Runtime EP | Feature Support | Version Compatibility      │
-// └───────────────────────────────────────────────────────────────────────────────────────────┘
-//
-// Terminology (to avoid ambiguity):
-//   Feature Capability:
-//     • Legacy EP:  EP WITHOUT ValidateCompiledModelCompatibilityInfo feature
-//     • Modern EP:  EP WITH ValidateCompiledModelCompatibilityInfo feature
-//
-//   Version Naming:
-//     • EP v1.x, v2.0, v2.1, etc. - Specific version numbers
-//     • Same version: Compile version == Runtime version (e.g., v2.0 → v2.0)
-//     • Different versions: Compile version != Runtime version (e.g., v2.0 → v2.1)
-//
-//   Other:
-//     • Compat Info: Compatibility metadata embedded in compiled model
-//
-// Return Values:
-//   • EP_SUPPORTED_OPTIMAL: Fully compatible, no recompilation needed
-//   • EP_SUPPORTED_PREFER_RECOMPILATION: Compatible but recompilation recommended
-//   • EP_UNSUPPORTED: Incompatible, model cannot run on this runtime
-//   • EP_NOT_APPLICABLE: No compatibility check performed (default ORT behavior)
-//
-// ═══════════════════════════════════════════════════════════════════════════════════════════
-// Case 1: Modern EP (Compile) → Modern EP (Runtime)
-// ───────────────────────────────────────────────────────────────────────────────────────────
-//   Compile EP:  Modern EP (has compatibility feature)
-//   Runtime EP:  Modern EP (has compatibility feature)
-//   Compat Info: Yes (generated and validated)
-//
-//   How It Works:
-//     1. Compile EP embeds compatibility info into the compiled model
-//     2. Runtime EP calls ValidateCompiledModelCompatibilityInfo
-//     3. Backend validation logic determines compatibility
-//     4. Result depends on what Runtime EP's validation logic returns
-//
-//   Possible Results (determined by Runtime EP's validation):
-//     • EP_SUPPORTED_OPTIMAL             - Fully compatible, optimal performance
-//     • EP_SUPPORTED_PREFER_RECOMPILATION - Compatible but recompilation recommended
-//     • EP_UNSUPPORTED                   - Incompatible, cannot run
-//     • EP_NOT_APPLICABLE                - Backend cannot determine compatibility
-//
-//   Example Scenarios:
-//
-//   ✓ Same Version (Most Common - Optimal)
-//     Compile: Modern EP v2.0  →  Runtime: Modern EP v2.0
-//     Result:  EP_SUPPORTED_OPTIMAL
-//     Reason:  Identical versions guarantee full compatibility
-//
-//   ? Cross-Version (Result Varies - Backend Decides)
-//     Compile: Modern EP v2.0  →  Runtime: Modern EP v1.5
-//     Result:  Depends on Runtime EP v1.5's validation logic
-//              - Can be EP_SUPPORTED_OPTIMAL if backward compatible
-//              - Can be EP_SUPPORTED_PREFER_RECOMPILATION if suboptimal
-//              - Can be EP_UNSUPPORTED if incompatible
-//
-//     Compile: Modern EP v1.5  →  Runtime: Modern EP v2.0
-//     Result:  Depends on Runtime EP v2.0's validation logic
-//              - Can be EP_SUPPORTED_OPTIMAL if forward compatible
-//              - Can be EP_SUPPORTED_PREFER_RECOMPILATION if can optimize
-//              - Can be EP_UNSUPPORTED if breaking changes exist
-//
-//   ✗ Hardware Platform Changes (Typically Unsupported)
-//     Compile: Modern EP (AIE2/Phoenix)  →  Runtime: Modern EP (AIE2P/Strix)
-//     Result:  EP_UNSUPPORTED
-//     Reason:  Different hardware platforms, incompatible binaries
-//
-//   ✗ Build Configuration Mismatch (Backend Missing)
-//     Compile: Modern EP (with xcompiler backend)  →  Runtime: Modern EP (no xcompiler)
-//     Result:  EP_UNSUPPORTED
-//     Reason:  Required backend plugin not found at runtime
-//
-//   ✗ Backend Name Changed (Breaking Change)
-//     Compile: Modern EP (backend="old_name")  →  Runtime: Modern EP (backend="new_name")
-//     Result:  EP_UNSUPPORTED
-//     Reason:  Backend plugin name mismatch, required backend not found
-//
-//   Purpose: PRIMARY use case - enables intelligent cross-version compatibility checking
-//
-// ═══════════════════════════════════════════════════════════════════════════════════════════
-// Case 2: Modern EP (Compile) → Legacy EP (Runtime)
-// ───────────────────────────────────────────────────────────────────────────────────────────
-//   Compile EP:  Modern EP (has compatibility feature)
-//   Runtime EP:  Legacy EP (lacks ValidateCompiledModelCompatibilityInfo)
-//   Compat Info: Yes (generated but ignored)
-//   Result:      EP_NOT_APPLICABLE
-//
-//   Reason: Legacy runtime doesn't have validation method, compatibility info is silently
-//           ignored. Model may or may not work depending on actual compatibility.
-//
-//   Purpose: Backward compatibility - models from modern EP can attempt to run on legacy EP
-//
-// ═══════════════════════════════════════════════════════════════════════════════════════════
-// Case 3: Legacy EP (Compile) → Modern EP (Runtime)
-// ───────────────────────────────────────────────────────────────────────────────────────────
-//   Compile EP:  Legacy EP (no compatibility feature)
-//   Runtime EP:  Modern EP (has compatibility feature)
-//   Compat Info: No (not generated during compilation)
-//   Result:      EP_NOT_APPLICABLE
-//
-//   Reason: No compatibility information available to validate. Modern runtime falls back
-//           to default ORT behavior and attempts to load the model.
-//
-//   Purpose: Backward compatibility - models from legacy EP continue to work on modern EP
-//
-// ═══════════════════════════════════════════════════════════════════════════════════════════
-// Case 4: Legacy EP (Compile) → Legacy EP (Runtime)
-// ───────────────────────────────────────────────────────────────────────────────────────────
-//   Compile EP:  Legacy EP (no compatibility feature)
-//   Runtime EP:  Legacy EP (no compatibility feature)
-//   Compat Info: No (feature doesn't exist)
-//   Result:      EP_NOT_APPLICABLE
-//
-//   Reason: Neither side has compatibility checking capability. This is the traditional
-//           pre-feature behavior.
-//
-//   Purpose: Baseline behavior before compatibility feature was introduced
-//
-// ═══════════════════════════════════════════════════════════════════════════════════════════
-// clang-format on
 OrtStatus* ORT_API_CALL
 VitisAiEpFactory::ValidateCompiledModelCompatibilityInfoImpl(
     OrtEpFactory* this_ptr,
     _In_reads_(num_devices) const OrtHardwareDevice* const* devices,
     _In_ size_t num_devices, _In_ const char* compatibility_info,
     _Out_ OrtCompiledModelCompatibility* model_compatibility) noexcept {
-  (void)this_ptr;
-  // if compatibility_info is null or empty, return EP_NOT_APPLICABLE
-  if (compatibility_info == nullptr || compatibility_info[0] == '\0') {
-    *model_compatibility = OrtCompiledModelCompatibility_EP_NOT_APPLICABLE;
-    return nullptr;
-  }
-  morphizen::ModelCompatibilityProto compatibility_proto;
-  auto status = google::protobuf::util::JsonStringToMessage(
-      compatibility_info, &compatibility_proto);
-  if (!status.ok()) {
-    MY_LOG(1) << "Failed to parse ModelCompatibilityProto: "
-              << status.message();
-    *model_compatibility = OrtCompiledModelCompatibility_EP_NOT_APPLICABLE;
-    return nullptr;
-  }
+  auto* factory = static_cast<VitisAiEpFactory*>(this_ptr);
 
-  // clang-format off
-  // Is backend compatibility info generated? (Y/N)
-  //   |
-  //   +-- N --> (compile time EP not include Compatibility checking feature) Keep ORT default behavior --> Return EP_NOT_APPLICABLE
-  //   |
-  //   +-- Y
-  //       |
-  //       v
-  //    Is backend `plugin` found?
-  //        |
-  //        +-- No --> Runtime EP not built with backend/ runtime EP `backend name` changed, but EP ctx model expected run the original backend
-  //               --> Return EP_NOT_SUPPORTED
-  //        |
-  //        +-- Yes
-  //              |
-  //              v
-  //         Is `morphizen_OrtCompiledModelCompatibility` function pointer (fp) found?
-  //              |
-  //              +-- Yes --> Return backend's own compatibility checking result
-  //              |
-  //              +-- No  --> Runtime EP did not register compatibility checking function --> Return EP_NOT_APPLICABLE
-  // clang-format on
-  auto compatibility_infos = std::vector<OrtCompiledModelCompatibility>();
-  bool any_plugin_missing = false;
+  // Empty eps pointer since validation is based on compatibility_info and
+  // devices eps may be used in future for EP-specific validation
+  int compatibility_result = 0;
+  int status = validate_compiled_model_compatibility_info(
+      nullptr, // eps - not available in factory context
+      compatibility_info, reinterpret_cast<const void* const*>(devices),
+      num_devices, &compatibility_result);
 
-  for (const auto& entry : compatibility_proto.backend_compatibility()) {
-    MY_LOG(2) << "Backend: " << entry.first
-              << ", Compatibility Info: " << entry.second;
-    auto plugin = vaip_core::Plugin::get(entry.first);
-    // Check if the corresponding backend plugin exists in the current EP
-    // (Execution Provider) environment.
-    // if the plugin is not found , it means the compiled model was built with
-    // the backend that is not available in the current runtime setup.
-    // for example, when:
-    // - The EP shared library in the production environment of the compiled
-    // model was built with that backend enabled.
-    // - The current EP shared library was not built with support for that
-    // backend.
-    // In such a case, the compiled model expects to run on the backend, but it
-    // was not found in this backend, we should return EP_UNSUPPORTED.
-    if (!plugin) {
-      MY_LOG(1) << "Backend plugin " << entry.first << " is not available.";
-      any_plugin_missing = true;
-      continue; // Check remaining backends
-    }
-
-    auto fp =
-        plugin
-            ->get_method<OrtCompiledModelCompatibility,
-                         const OrtHardwareDevice* const*, size_t, const char*>(
-                "morphizen_OrtCompiledModelCompatibility");
-    // if the fp is not found , it means that the backend has not properly
-    // registered or implemented morphizen_OrtCompiledModelCompatibility.
-    // In such a case , not support the CompiledModelCompatibility checking
-    // and Keep ORT default behavior --> this backend returns EP_NOT_APPLICABLE
-    if (!fp) {
-      MY_LOG(1) << "Backend plugin " << entry.first
-                << " does not support morphizen_OrtCompiledModelCompatibility.";
-      compatibility_infos.push_back(
-          OrtCompiledModelCompatibility_EP_NOT_APPLICABLE);
-      continue; // Check remaining backends
-    }
-
-    OrtCompiledModelCompatibility backend_compatibility =
-        fp(devices, num_devices, entry.second.c_str());
-    compatibility_infos.push_back(backend_compatibility);
-  }
-
-  // Handle cases where some backends couldn't be validated
-  if (any_plugin_missing) {
-    MY_LOG(1) << "One or more required backend plugins are missing. "
-              << "Successfully validated " << compatibility_infos.size()
-              << " of " << compatibility_proto.backend_compatibility().size()
-              << " backends.";
-    *model_compatibility = OrtCompiledModelCompatibility_EP_UNSUPPORTED;
-    return nullptr;
-  }
-
-  if (compatibility_infos.empty()) {
-    *model_compatibility = OrtCompiledModelCompatibility_EP_NOT_APPLICABLE;
-    return nullptr;
-  }
-  // The return value :
-  // typedef enum OrtCompiledModelCompatibility {
-  // OrtCompiledModelCompatibility_EP_NOT_APPLICABLE = 0,
-  // OrtCompiledModelCompatibility_EP_SUPPORTED_OPTIMAL,
-  // OrtCompiledModelCompatibility_EP_SUPPORTED_PREFER_RECOMPILATION,
-  // OrtCompiledModelCompatibility_EP_UNSUPPORTED,
-  // } OrtCompiledModelCompatibility;
-  if (std::find(compatibility_infos.begin(), compatibility_infos.end(),
-                OrtCompiledModelCompatibility_EP_UNSUPPORTED) !=
-      compatibility_infos.end()) {
-    *model_compatibility = OrtCompiledModelCompatibility_EP_UNSUPPORTED;
-  } else if (
-      std::find(
-          compatibility_infos.begin(), compatibility_infos.end(),
-          OrtCompiledModelCompatibility_EP_SUPPORTED_PREFER_RECOMPILATION) !=
-      compatibility_infos.end()) {
-    *model_compatibility =
-        OrtCompiledModelCompatibility_EP_SUPPORTED_PREFER_RECOMPILATION;
-  } else if (std::find(compatibility_infos.begin(), compatibility_infos.end(),
-                       OrtCompiledModelCompatibility_EP_SUPPORTED_OPTIMAL) !=
-             compatibility_infos.end()) {
-    *model_compatibility = OrtCompiledModelCompatibility_EP_SUPPORTED_OPTIMAL;
-  } else {
+  if (status != 0) {
+    LOG(WARNING)
+        << "VitisAIEP validate compiled model compatibility info failed: "
+        << status << ", compatibility_info: " << compatibility_info;
     *model_compatibility = OrtCompiledModelCompatibility_EP_NOT_APPLICABLE;
   }
+
+  *model_compatibility =
+      static_cast<OrtCompiledModelCompatibility>(compatibility_result);
   return nullptr;
 }
 

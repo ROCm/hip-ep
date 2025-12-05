@@ -10,6 +10,7 @@ set(PROTO_FILES
   src/version.proto
   src/pattern.proto
   src/dpu_sg_report.proto
+  src/model_compatibility.proto
 )
 set(PROTO_SRCS "")
 set(PROTO_HDRS "")

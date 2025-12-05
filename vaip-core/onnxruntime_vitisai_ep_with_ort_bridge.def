@@ -11,6 +11,8 @@ EXPORTS
     vitisai_ep_set_ep_dynamic_options
     morphizen_get_build_info
     vaip_get_execution_provider_deletor
+    get_compiled_model_compatibility_info
+    validate_compiled_model_compatibility_info
     CreateEpFactories
     ReleaseEpFactory
     ??_7PassProto@vaip_core@@6B@

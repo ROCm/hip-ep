@@ -210,6 +210,57 @@ VAIP_DLL_SPEC int create_ep_context_nodes(
     vaip_core::DllSafe<std::vector<onnxruntime::Node*>>* ret_value);
 
 /**
+ * @brief Gets the compiled model compatibility information from execution
+ * providers.
+ *
+ * This function extracts compatibility information from the pass context of the
+ * execution providers and serializes it to JSON format. The resulting JSON
+ * string follows the ModelCompatibilityProto schema defined in
+ * model_compatibility.proto.
+ *
+ * Called by Old ABI (ort-bridge) and New ABI implementations.
+ *
+ * @param eps Vector of unique pointers to ExecutionProvider instances.
+ * @param graph_viewer Pointer to GraphViewer (for ORT) or OrtGraph (for
+ * ort-bridge). Can be nullptr if not needed.
+ * @return Pointer to the JSON string, or nullptr/empty string if unavailable.
+ *         The returned pointer is valid until the next call to this function or
+ * EP destruction.
+ */
+VAIP_DLL_SPEC const char* get_compiled_model_compatibility_info(
+    const std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>* eps,
+    const void* graph_viewer);
+
+/**
+ * @brief Validates the compiled model compatibility information.
+ *
+ * This function deserializes the compatibility info JSON, queries backend
+ * plugins for their compatibility status, and determines the overall
+ * compatibility level. The function follows the same validation logic as
+ * defined in the OrtCompiledModelCompatibility enum: UNSUPPORTED >
+ * PREFER_RECOMPILATION > SUPPORTED_OPTIMAL > NOT_APPLICABLE.
+ *
+ * Called by both Old ABI (ort-bridge) and ORT Provider (vitisai).
+ *
+ * @param compatibility_info JSON string containing compatibility information.
+ * @param devices Array of hardware devices for validation
+ * (OrtHardwareDevice**). Can be nullptr if device information is not available
+ * (e.g., when called from ORT provider).
+ * @param num_devices Number of devices in the array. Should be 0 if devices is
+ * nullptr.
+ * @param model_compatibility Output parameter for the compatibility result:
+ *                            0 = EP_NOT_APPLICABLE
+ *                            1 = EP_SUPPORTED_OPTIMAL
+ *                            2 = EP_SUPPORTED_PREFER_RECOMPILATION
+ *                            3 = EP_UNSUPPORTED
+ * @return 0 on success, non-zero on failure.
+ */
+VAIP_DLL_SPEC int validate_compiled_model_compatibility_info(
+    const std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>* eps,
+    const char* compatibility_info, const void* const* devices,
+    size_t num_devices, int* model_compatibility);
+
+/**
  * @brief Retrieves the VAIP version as a 32-bit unsigned integer.
  *
  * This function returns the version number of the VAIP (Vitis AI Execution

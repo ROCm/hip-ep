@@ -177,6 +177,7 @@ add_library(${LIB_NAME} STATIC
   src/vitisai_compile_model.cpp
   src/vaip_profile.cpp
   src/onnxruntime_vitisai_ep.cpp
+  src/model_compatibility.cpp
   src/file_stream.hpp
   src/file_stream.cpp
   src/cleanup.hpp

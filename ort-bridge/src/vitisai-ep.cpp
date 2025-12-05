@@ -7,7 +7,6 @@
 #include "./ort-graph-wrapper.hpp"
 #include "./vaip-deps.hpp"
 #include "glog/logging.h"
-#include "model_compatibility.pb.h"
 #include "morphizen-utils/morphizen-utils.hpp"
 #include "morphizen/onnxruntime_vitisai_ep.hpp"
 #include "morphizen/vaip-ort-api-ext.hpp"
@@ -265,54 +264,13 @@ void ORT_API_CALL VitisAIEP::ReleaseNodeComputeInfosImpl(
 }
 
 const char* ORT_API_CALL VitisAIEP::GetCompiledModelCompatibilityInfoImpl(
-    OrtEp* this_ptr, const OrtGraph* /*graph*/) noexcept {
+    OrtEp* this_ptr, const OrtGraph* graph) noexcept {
   VitisAIEP* self = static_cast<VitisAIEP*>(this_ptr);
-
-  self->compiled_model_compatibility_info_storage_.clear();
-
-  std::shared_ptr<vaip_core::PassContext> pass_context = nullptr;
-  if (self->execution_providers_ && !(*self->execution_providers_)->empty()) {
-    auto& first_ep = (*self->execution_providers_)->front();
-    if (first_ep) {
-      auto* ep_concrete =
-          dynamic_cast<vaip_core::ExecutionProviderConcrete*>(first_ep.get());
-      if (ep_concrete) {
-        pass_context = ep_concrete->get_context();
-      }
-    }
+  if (!self->execution_providers_ || (*self->execution_providers_)->empty()) {
+    return nullptr;
   }
-  if (pass_context) {
-    const auto& compatibility_info_map =
-        pass_context->get_compiled_model_compatibility_info();
-    if (!compatibility_info_map.empty()) {
-      morphizen::ModelCompatibilityProto compatibility_info_proto;
-      compatibility_info_proto.mutable_version()->set_major(1);
-      compatibility_info_proto.mutable_version()->set_minor(0);
-      compatibility_info_proto.mutable_version()->set_patch(0);
-      // base64_encoding field reserved for future use when compatibility info
-      // needs to be encoded (e.g., for binary data or special characters)
-      compatibility_info_proto.set_base64_encoding(false);
-
-      for (const auto& entry : compatibility_info_map) {
-        (*compatibility_info_proto
-              .mutable_backend_compatibility())[entry.first] = entry.second;
-      }
-      auto status = google::protobuf::util::MessageToJsonString(
-          compatibility_info_proto,
-          &self->compiled_model_compatibility_info_storage_);
-      if (!status.ok()) {
-        LOG(WARNING) << "Failed to serialize ModelCompatibilityProto: "
-                     << status.message();
-      }
-    }
-  }
-
-  MY_LOG(2) << "Compiled Model Compatibility Info: "
-            << self->compiled_model_compatibility_info_storage_;
-  // Returns a pointer valid until the next call to this method or EP
-  // destruction. ORT is responsible for copying this string if needed beyond
-  // that scope.
-  return self->compiled_model_compatibility_info_storage_.c_str();
+  return get_compiled_model_compatibility_info(
+      (*self->execution_providers_).get(), graph);
 }
 
 OrtStatus* VitisAIEP::GetCapability(OrtGraphWrapper& graph_viewer,
