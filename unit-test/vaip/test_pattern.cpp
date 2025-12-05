@@ -9,6 +9,7 @@
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 #include <limits>
+#include <string>
 //
 #include "morphizen/vaip.hpp"
 
@@ -90,6 +91,248 @@ TEST_F(PatternTest, NamedArgs) {
   LOG(INFO) << "matched node" << match_node.value();
   EXPECT_EQ(match_node.value().name(), "Conv_18")
       << "name must be " << match_node.value();
+}
+
+static std::shared_ptr<vaip_core::Pattern>
+save_and_load_pattern(std::shared_ptr<vaip_core::Pattern> pattern) {
+  auto encoded_pattern = pattern->to_binary();
+  return vaip_core::PatternBuilder().create_from_binary(encoded_pattern.data(),
+                                                        encoded_pattern.size());
+}
+
+TEST_F(PatternTest, MultipleOutputs) {
+  // Test description patterns: output_arg and is_graph_output
+  // Creates a model with LayerNormalization (3 outputs) -> Relu (graph outputs)
+  //
+  // Graph structure:
+  //   LayerNormalization (outputs: output_0, output_1, output_2)
+  //     -> Relu (g_output_0) [graph output]
+  //     -> Relu (g_output_1) [graph output]
+  //     -> Relu (g_output_2) [graph output]
+
+  // create test model
+  auto path =
+      CMAKE_CURRENT_BINARY_PATH / std::filesystem::path("multi_outputs.onnx");
+  auto data_path = std::filesystem::path("multi_outputs.dat");
+  std::vector<std::pair<std::string, int64_t>> opset = {{"test", 1}};
+
+  auto model = vaip_cxx::Model::create(path, opset);
+  auto graph = model->main_graph();
+
+  std::vector<std::vector<int64_t>> i_shapes = {{8}, {1}, {1}};
+  std::vector<std::vector<int64_t>> o_shapes = {{8}, {1}, {1}};
+
+  std::vector<std::optional<vaip_cxx::NodeArgConstRef>> i = {
+      graph.new_node_arg("input_0", i_shapes[0],
+                         ONNX_NAMESPACE::TensorProto_DataType_FLOAT),
+      graph.new_node_arg("input_1", i_shapes[1],
+                         ONNX_NAMESPACE::TensorProto_DataType_FLOAT),
+      graph.new_node_arg("input_2", i_shapes[2],
+                         ONNX_NAMESPACE::TensorProto_DataType_FLOAT)};
+
+  std::vector<std::optional<vaip_cxx::NodeArgConstRef>> o = {
+      graph.new_node_arg("output_0", o_shapes[0],
+                         ONNX_NAMESPACE::TensorProto_DataType_FLOAT),
+      graph.new_node_arg("output_1", o_shapes[1],
+                         ONNX_NAMESPACE::TensorProto_DataType_FLOAT),
+      graph.new_node_arg("output_2", o_shapes[2],
+                         ONNX_NAMESPACE::TensorProto_DataType_FLOAT)};
+
+  std::vector<std::optional<vaip_cxx::NodeArgConstRef>> g_o = {
+      graph.new_node_arg("g_output_0", o_shapes[0],
+                         ONNX_NAMESPACE::TensorProto_DataType_FLOAT),
+      graph.new_node_arg("g_output_1", o_shapes[1],
+                         ONNX_NAMESPACE::TensorProto_DataType_FLOAT),
+      graph.new_node_arg("g_output_2", o_shapes[2],
+                         ONNX_NAMESPACE::TensorProto_DataType_FLOAT)};
+
+  graph.add_node("node_0", "", "LayerNormalization", "", i, o,
+                 vaip_core::NodeAttributesBuilder().build());
+  graph.add_node("node_1", "", "Relu", "", {o[0]}, {g_o[0]},
+                 vaip_core::NodeAttributesBuilder().build());
+  graph.add_node("node_2", "", "Relu", "", {o[1]}, {g_o[1]},
+                 vaip_core::NodeAttributesBuilder().build());
+  graph.add_node("node_3", "", "Relu", "", {o[2]}, {g_o[2]},
+                 vaip_core::NodeAttributesBuilder().build());
+
+  graph.set_inputs({i[0].value(), i[1].value(), i[2].value()});
+  graph.set_outputs({g_o[0].value(), g_o[1].value(), g_o[2].value()});
+  graph.resolve();
+
+  graph.save(path, data_path, 999999);
+  ASSERT_TRUE(std::filesystem::exists(path));
+
+  {
+    SCOPED_TRACE("OutputArg");
+
+    vaip_core::PatternBuilder builder;
+    auto node_outputs = builder.node_with_multiple_outputs(
+        "LayerNormalization",
+        {builder.wildcard(), builder.wildcard(), builder.wildcard()},
+        {false, false, false}, "", 3);
+
+    std::vector<std::string> output_names = {"output_0", "output_1",
+                                             "output_2"};
+    std::vector<std::string> g_output_names = {"g_output_0", "g_output_1",
+                                               "g_output_2"};
+
+    for (size_t i = 0; i < g_output_names.size(); ++i) {
+      for (size_t j = 0; j < g_output_names.size(); ++j) {
+        auto node = graph.find_node(g_output_names[i]);
+        ASSERT_TRUE(node.has_value())
+            << "cannot find node " << g_output_names[i];
+
+        auto p_output_arg = node_outputs.at(j);
+        auto g_output = builder.node2("Relu", {p_output_arg});
+        auto binder = g_output->match(node.value());
+
+        auto g_output_2 = save_and_load_pattern(g_output);
+        auto binder_2 = g_output_2->match(node.value());
+
+        if (i == j) {
+          ASSERT_TRUE(binder != nullptr) << "cannot match the pattern";
+          ASSERT_TRUE(binder_2 != nullptr) << "cannot match the pattern";
+
+          auto match_node_input = (*binder)(p_output_arg->get_id());
+          ASSERT_TRUE(match_node_input.has_value());
+          EXPECT_EQ(match_node_input.value().as_node_arg().name(),
+                    output_names[j])
+              << "name must be " << output_names[j];
+
+          auto match_node_input_2 =
+              (*binder_2)(std::to_string(p_output_arg->get_id()));
+          ASSERT_TRUE(match_node_input_2.has_value());
+          EXPECT_EQ(match_node_input_2.value().as_node_arg().name(),
+                    output_names[j])
+              << "name must be " << output_names[j];
+        } else {
+          EXPECT_TRUE(binder == nullptr) << "should not match the pattern";
+          EXPECT_TRUE(binder_2 == nullptr) << "should not match the pattern";
+        }
+      }
+    }
+  }
+
+  {
+    SCOPED_TRACE("GraphOutput");
+
+    vaip_core::PatternBuilder builder;
+    auto node_outputs = builder.node_with_multiple_outputs(
+        "LayerNormalization",
+        {builder.wildcard(), builder.wildcard(), builder.wildcard()},
+        {false, false, false}, "", 3);
+
+    std::vector<std::string> g_output_names = {"g_output_0", "g_output_1",
+                                               "g_output_2"};
+
+    {
+      SCOPED_TRACE("all");
+      // Test is_graph_output() without index/name: should match any graph
+      // output
+
+      for (size_t i = 0; i < g_output_names.size(); ++i) {
+        auto node = graph.find_node(g_output_names[i]);
+        ASSERT_TRUE(node.has_value())
+            << "cannot find node " << g_output_names[i];
+
+        auto p_output_arg = node_outputs.at(i);
+        auto relu_output = builder.node2("Relu", {p_output_arg});
+        auto g_output = builder.is_graph_output(relu_output);
+        auto binder = g_output->match(node.value());
+
+        auto g_output_2 = save_and_load_pattern(g_output);
+        auto binder_2 = g_output_2->match(node.value());
+
+        EXPECT_TRUE(binder != nullptr) << "cannot match the pattern";
+        EXPECT_TRUE(binder_2 != nullptr) << "cannot match the pattern";
+      }
+    }
+
+    {
+      SCOPED_TRACE("index");
+      // Test is_graph_output() with index: should match only the specified
+      // graph output index
+
+      for (size_t i = 0; i < g_output_names.size(); ++i) {
+        for (size_t j = 0; j < g_output_names.size(); ++j) {
+          auto node = graph.find_node(g_output_names[i]);
+          ASSERT_TRUE(node.has_value())
+              << "cannot find node " << g_output_names[i];
+
+          auto p_output_arg = node_outputs.at(i);
+          auto relu_output = builder.node2("Relu", {p_output_arg});
+          auto g_output = builder.is_graph_output(relu_output, j);
+          auto binder = g_output->match(node.value());
+
+          auto g_output_2 = save_and_load_pattern(g_output);
+          auto binder_2 = g_output_2->match(node.value());
+
+          if (i == j) {
+            ASSERT_TRUE(binder != nullptr) << "cannot match the pattern";
+            ASSERT_TRUE(binder_2 != nullptr) << "cannot match the pattern";
+
+            auto match_node_input = (*binder)(g_output->get_id());
+            ASSERT_TRUE(match_node_input.has_value());
+            EXPECT_EQ(match_node_input.value().as_node_arg().name(),
+                      g_output_names[j])
+                << "name must be " << g_output_names[j];
+
+            auto match_node_input_2 = (*binder_2)(g_output_2->get_id());
+            ASSERT_TRUE(match_node_input_2.has_value());
+            EXPECT_EQ(match_node_input_2.value().as_node_arg().name(),
+                      g_output_names[j])
+                << "name must be " << g_output_names[j];
+          } else {
+            EXPECT_TRUE(binder == nullptr) << "should not match the pattern";
+            EXPECT_TRUE(binder_2 == nullptr) << "should not match the pattern";
+          }
+        }
+      }
+    }
+
+    {
+      SCOPED_TRACE("name");
+      // Test is_graph_output() with name: should match only the specified
+      // graph output name
+
+      for (size_t i = 0; i < g_output_names.size(); ++i) {
+        for (size_t j = 0; j < g_output_names.size(); ++j) {
+          auto node = graph.find_node(g_output_names[i]);
+          ASSERT_TRUE(node.has_value())
+              << "cannot find node " << g_output_names[i];
+
+          auto p_output_arg = node_outputs.at(i);
+          auto relu_output = builder.node2("Relu", {p_output_arg});
+          auto g_output =
+              builder.is_graph_output(relu_output, g_output_names[j]);
+          auto binder = g_output->match(node.value());
+
+          auto g_output_2 = save_and_load_pattern(g_output);
+          auto binder_2 = g_output_2->match(node.value());
+
+          if (i == j) {
+            ASSERT_TRUE(binder != nullptr) << "cannot match the pattern";
+            ASSERT_TRUE(binder_2 != nullptr) << "cannot match the pattern";
+
+            auto match_node_input = (*binder)(g_output->get_id());
+            ASSERT_TRUE(match_node_input.has_value());
+            EXPECT_EQ(match_node_input.value().as_node_arg().name(),
+                      g_output_names[j])
+                << "name must be " << g_output_names[j];
+
+            auto match_node_input_2 = (*binder_2)(g_output_2->get_id());
+            ASSERT_TRUE(match_node_input_2.has_value());
+            EXPECT_EQ(match_node_input_2.value().as_node_arg().name(),
+                      g_output_names[j])
+                << "name must be " << g_output_names[j];
+          } else {
+            EXPECT_TRUE(binder == nullptr) << "should not match the pattern";
+            EXPECT_TRUE(binder_2 == nullptr) << "should not match the pattern";
+          }
+        }
+      }
+    }
+  }
 }
 
 /*

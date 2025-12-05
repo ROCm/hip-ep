@@ -186,6 +186,10 @@ calculate_return_values(const Graph& graph, const Node& output_node,
   auto args = node_get_output_node_args(output_node);
   auto graph_outputs = graph_get_outputs(graph);
   for (auto arg : args) {
+    if (arg == nullptr) {
+      // for optional outputs
+      continue;
+    }
     auto& arg_name = node_arg_get_name(*arg);
     auto consumers = graph_get_consumer_nodes(graph, arg_name);
     auto num_of_external_out_edges = 0;

@@ -210,6 +210,8 @@ private:
   friend class PatternOr;
   friend class PatternWhere;
   friend class PatternGraphInput;
+  friend class PatternNodeOutputArg;
+  friend class PatternGraphOutput;
 
 private:
   const void* map_;
@@ -304,14 +306,6 @@ public:
    */
   VAIP_DLL_SPEC std::vector<std::string> get_ops_list_name() const;
 
-  /**
-   * @brief Matches the pattern against a graph and a node using a cached
-   * binder.
-   * @param graph The graph to match against.
-   * @param node_input The input node to match against.
-   * @param cached_binder The cached binder to use for matching.
-   * @return A `binder_ptr_t` object representing the match result.
-   */
 protected:
   /**
    * Matches the given `node_input` against the `cached_binder` and returns a
@@ -396,6 +390,8 @@ private:
   friend class PatternCommutableNode;
   friend class PatternOr;
   friend class PatternWhere;
+  friend class PatternNodeOutputArg;
+  friend class PatternGraphOutput;
 };
 
 /**
@@ -559,6 +555,73 @@ struct PatternBuilder {
       const std::string& op_domain = "");
 
   /**
+   * @brief Creates patterns for nodes with multiple outputs.
+   *
+   * Many ONNX operators produce multiple outputs (e.g., LayerNormalization,
+   * BatchNormalization, Split, TopK). This method creates a pattern for such
+   * nodes and returns a vector of Pattern objects, one for each output,
+   * allowing you to reference and use each output independently in subsequent
+   * patterns.
+   *
+   * @param op_type The operation type string (e.g., "LayerNormalization",
+   * "BatchNormalization")
+   * @param args Vector of shared pointers to Pattern objects representing the
+   * input arguments to the node
+   * @param optional_args Vector of boolean values indicating which arguments
+   * are optional (true = optional, false = required)
+   * @param op_domain The operation domain (e.g., "" for standard ONNX
+   * operators)
+   * @param num_of_outputs The number of outputs this node produces
+   *
+   * @return std::vector<std::shared_ptr<Pattern>> A vector containing Pattern
+   * objects for each output. The vector size equals num_of_outputs, with
+   * patterns[0] representing the first output, patterns[1] the second, etc.
+   *
+   * @note The returned patterns can be used individually in subsequent pattern
+   * matching operations.
+   *
+   * Example usage:
+   * @code
+   * vaip_core::PatternBuilder builder;
+   *
+   * // Create input patterns
+   * auto input = builder.wildcard();
+   * auto scale = builder.wildcard();
+   * auto bias = builder.wildcard();
+   *
+   * // LayerNormalization has 3 outputs: output, mean, inv_std_var
+   * auto ln_outputs = builder.node_with_multiple_outputs(
+   *     "LayerNormalization",
+   *     {input, scale, bias},
+   *     {false, false, false},  // All inputs are required
+   *     "",                      // Standard ONNX domain
+   *     3                        // Number of outputs
+   * );
+   *
+   * // Use the outputs individually
+   * auto ln_output = ln_outputs[0];      // Main normalized output
+   * auto ln_mean = ln_outputs[1];        // Mean output
+   * auto ln_inv_std = ln_outputs[2];     // Inverse std deviation output
+   *
+   * // Create subsequent patterns using specific outputs
+   * auto next_op = builder.node2("Add", {ln_mean, builder.wildcard()});
+   *
+   * // Match the pattern
+   * auto match_result = next_op->match(graph, node);
+   * if (match_result) {
+   *     // Pattern matched successfully
+   *     // Access matched nodes through binder
+   * }
+   * @endcode
+   */
+  VAIP_DLL_SPEC std::vector<std::shared_ptr<Pattern>>
+  node_with_multiple_outputs(const std::string& op_type,
+                             const std::vector<std::shared_ptr<Pattern>>& args,
+                             const std::vector<bool>& optional_args,
+                             const std::string& op_domain,
+                             const size_t num_of_outputs);
+
+  /**
    * Creates a commutable node pattern.
    *
    * This function creates a commutable node pattern with the specified
@@ -617,6 +680,129 @@ struct PatternBuilder {
    * @return std::shared_ptr<Pattern> The created graph input pattern.
    */
   VAIP_DLL_SPEC std::shared_ptr<Pattern> graph_input();
+
+  /**
+   * @brief Creates a pattern that matches a node used as any graph output.
+   *
+   * This method wraps a pattern to constrain it to match only nodes whose
+   * outputs are used as graph outputs. It checks if the matched node produces
+   * any of the graph's output tensors, regardless of which output index or
+   * name.
+   *
+   * @param arg The pattern to constrain. Must match a node that produces a
+   * graph output.
+   *
+   * @return std::shared_ptr<Pattern> A pattern that succeeds only if arg
+   * matches and the matched node produces a graph output.
+   *
+   * Example usage:
+   * @code
+   * vaip_core::PatternBuilder builder;
+   *
+   * // Match any Softmax node that is used as a graph output
+   * auto softmax_input = builder.wildcard();
+   * auto softmax = builder.node2("Softmax", {softmax_input});
+   * auto graph_output_softmax = builder.is_graph_output(softmax);
+   *
+   * // This will only match if the Softmax node's output is one of the
+   * // graph's output tensors
+   * auto match_result = graph_output_softmax->match(graph, node);
+   * if (match_result) {
+   *     // The Softmax node is confirmed to be a graph output
+   * }
+   * @endcode
+   *
+   * @note This is useful for identifying nodes that produce final results,
+   * which often have different optimization or preservation requirements.
+   */
+  VAIP_DLL_SPEC std::shared_ptr<Pattern>
+  is_graph_output(const std::shared_ptr<Pattern>& arg);
+
+  /**
+   * @brief Creates a pattern that matches a node at a specific graph output
+   * index.
+   *
+   * This method constrains a pattern to match only nodes whose outputs are used
+   * as a specific graph output, identified by its index position in the graph's
+   * output list.
+   *
+   * @param arg The pattern to constrain. Must match a node that produces the
+   * graph output at the specified index.
+   * @param graph_output_index The zero-based index of the graph output to
+   * match. For example, 0 for the first output, 1 for the second, etc.
+   *
+   * @return std::shared_ptr<Pattern> A pattern that succeeds only if arg
+   * matches and the matched node is at the specified graph output index.
+   *
+   * Example usage:
+   * @code
+   * vaip_core::PatternBuilder builder;
+   *
+   * // Suppose a graph has multiple outputs: [output0, output1, output2]
+   * // Match a Conv node that specifically produces the second graph output
+   * // (index 1)
+   * auto conv_input = builder.wildcard();
+   * auto conv_weight = builder.wildcard();
+   * auto conv = builder.node2("Conv", {conv_input, conv_weight});
+   * auto second_output = builder.is_graph_output(conv, 1);
+   *
+   * // This will only match if the Conv node's output is the graph's second
+   * // output (index 1)
+   * auto match_result = second_output->match(graph, node);
+   * if (match_result) {
+   *     // The Conv node produces the second graph output
+   * }
+   * @endcode
+   *
+   * @note Useful when you need to handle specific outputs differently, such as
+   * applying different quantization schemes to different outputs.
+   */
+  VAIP_DLL_SPEC std::shared_ptr<Pattern>
+  is_graph_output(const std::shared_ptr<Pattern>& arg,
+                  size_t graph_output_index);
+
+  /**
+   * @brief Creates a pattern that matches a node with a specific graph output
+   * name.
+   *
+   * This method constrains a pattern to match only nodes whose outputs are used
+   * as a graph output with a specific name. This is the most precise way to
+   * identify graph outputs when output names are known.
+   *
+   * @param arg The pattern to constrain. Must match a node that produces the
+   * graph output with the specified name.
+   * @param graph_output_name The name of the graph output to match. This should
+   * match the exact name as defined in the ONNX graph's output list.
+   *
+   * @return std::shared_ptr<Pattern> A pattern that succeeds only if arg
+   * matches and the matched node produces the named graph output.
+   *
+   * Example usage:
+   * @code
+   * vaip_core::PatternBuilder builder;
+   *
+   * // Match a Sigmoid node that produces a graph output named "probabilities"
+   * auto sigmoid_input = builder.wildcard();
+   * auto sigmoid = builder.node2("Sigmoid", {sigmoid_input});
+   * auto prob_output = builder.is_graph_output(sigmoid, "probabilities");
+   *
+   * // This will only match if:
+   * // 1. The pattern matches a Sigmoid node
+   * // 2. The Sigmoid node's output is a graph output
+   * // 3. That graph output is named "probabilities"
+   * auto match_result = prob_output->match(graph, node);
+   * if (match_result) {
+   *     // The Sigmoid node produces the "probabilities" output
+   * }
+   * @endcode
+   *
+   * @note This is the most robust method when working with models that have
+   * well-defined output names, as it's immune to changes in output ordering.
+   */
+  VAIP_DLL_SPEC std::shared_ptr<Pattern>
+  is_graph_output(const std::shared_ptr<Pattern>& arg,
+                  const std::string& graph_output_name);
+
   /**
    * Creates a pattern that represents a sequence of other patterns.
    *
@@ -711,8 +897,36 @@ private:
   std::shared_ptr<Pattern>
   create_internal(const std::function<Pattern*(int id)>& f);
 
+  /**
+   * @brief Creates a pattern that matches a specific output of a multi-output
+   * node.
+   *
+   * Many ONNX operators produce multiple outputs (e.g., LayerNormalization,
+   * BatchNormalization, Split). This method allows you to constrain matching
+   * to a specific output index.
+   *
+   * @param arg The node pattern whose output to constrain.
+   *            Must be a Node pattern (not NodeArg).
+   * @param output_arg_index The index of the output to match.
+   *
+   * @return A pattern that matches the specified output of the node.
+   *
+   * Error Handling:
+   * - If output_arg_index is out of bounds, match will fail
+   * - If arg is not a Node-type pattern, CHECK will fail
+   * - If the node doesn't produce the specified output, match returns nullptr
+   *
+   * @note This method is essential when working with multi-output
+   * operators to avoid ambiguity about which output is being matched.
+   */
+  std::shared_ptr<Pattern>
+  get_node_output_arg_by_index(const std::shared_ptr<Pattern>& arg,
+                               size_t output_arg_index);
+
 private:
   std::vector<std::shared_ptr<Pattern>> patterns_;
   std::shared_ptr<std::unordered_map<std::string, int>> id_map_;
+
+  friend struct PatternBuilderHelper;
 };
 } // namespace vaip_core

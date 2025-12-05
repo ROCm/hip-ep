@@ -306,7 +306,12 @@ NodeBuilder& NodeBuilder::set_data_type(const std::string& data_type) {
 NodeBuilder& NodeBuilder::set_anchor_point1(const Node& node1) {
   auto node = vaip_cxx::NodeConstRef::from_node(graph_, node1);
   auto args = node.outputs();
+
   for (auto i = 0u; i < args.size(); ++i) {
+    if (i > 0u) {
+      add_output();
+    }
+
     if (args[i].has_value()) {
       set_anchor_point1(args[i].value());
     } else {

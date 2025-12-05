@@ -156,6 +156,10 @@ add_library(${LIB_NAME} STATIC
   src/pattern/pattern_graph_input.hpp
   src/pattern/pattern_where.cpp
   src/pattern/pattern_where.hpp
+  src/pattern/pattern_node_output_arg.cpp
+  src/pattern/pattern_node_output_arg.hpp
+  src/pattern/pattern_graph_output.cpp
+  src/pattern/pattern_graph_output.hpp
   include/morphizen/rewrite_rule.hpp
   src/rewrite_rule.cpp
   src/xir_ops/xir_ops_defs.hpp

@@ -58,6 +58,14 @@ PatternNode::match_uncached(const onnxruntime::Graph& graph,
                  << "; node=" << node_as_string(node);
     return nullptr;
   }
+
+  if (node_input.node_arg != &node_get_first_output_node_arg(node)) {
+    MATCH_FAILED << "  PatternNode treats Node as single output, please use "
+                    "node_with_multiple_outputs to deal with multiple outputs"
+                 << "; node=" << node_as_string(node);
+    return nullptr;
+  }
+
   auto ret = binder.add(this->get_id(), node_input);
   for (auto arg_idx = 0u; arg_idx < inputs_size; ++arg_idx) {
     if (is_args_optional_[arg_idx]) {

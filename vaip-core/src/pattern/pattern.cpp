@@ -16,8 +16,10 @@
 #include "./pattern_commutable_node.hpp"
 #include "./pattern_constant.hpp"
 #include "./pattern_graph_input.hpp"
+#include "./pattern_graph_output.hpp"
 #include "./pattern_log.hpp"
 #include "./pattern_node.hpp"
+#include "./pattern_node_output_arg.hpp"
 #include "./pattern_or.hpp"
 #include "./pattern_sequence.hpp"
 #include "./pattern_where.hpp"
@@ -60,10 +62,6 @@ binder_ptr_t Pattern::match(const onnxruntime::Graph& graph,
   // if node has no output, it does not match any pattern.
   // node is useless if it has no output.
   auto outputs = node_get_output_node_args(node);
-  auto size = (size_t)get_id() + 1;
-  auto store = std::make_shared<std::vector<NodeInput>>();
-  store->resize(size);
-  // outputs[i] is only used if it is a graph input or constant
   for (auto i = 0u; i < outputs.size(); ++i) {
     auto init = BinderBuilderPtr(new BinderBuilder(new Map(), graph));
     auto ret = this->match_cached(graph, {&node, outputs[i]}, *init);
@@ -71,6 +69,7 @@ binder_ptr_t Pattern::match(const onnxruntime::Graph& graph,
       return ret->build(name_to_ids_);
     }
   }
+
   return nullptr;
 }
 binder_ptr_t Pattern::match(vaip_cxx::NodeConstRef node) const {
@@ -191,43 +190,23 @@ parse_op_type_and_domain(const std::string& op_type_and_domain) {
 }
 } // anonymous namespace
 
-PatternBuilder::PatternBuilder()
-    : id_map_{std::make_shared<std::unordered_map<std::string, int>>()} {}
-static std::shared_ptr<Pattern>
-PatternBuilder_create(PatternBuilder* self, const PatternProto& pattern_proto);
+struct PatternBuilderHelper {
+  static std::shared_ptr<Pattern> create(PatternBuilder* self,
+                                         const PatternProto& pattern_proto);
 
-static std::shared_ptr<Pattern>
-PatternBuilder_build_arg(PatternBuilder* self,
-                         const vaip_core::PatternCallNodeArgProto& arg) {
-  auto ret = std::shared_ptr<Pattern>();
-  switch (arg.arg_case()) {
-  case PatternCallNodeArgProto::kName:
-    ret = self->get_pattern(arg.name());
-    break;
-  case PatternCallNodeArgProto::kPattern:
-    ret = PatternBuilder_create(self, arg.pattern());
-    break;
-  default:
-    ret = nullptr;
-  }
-  CHECK(ret != nullptr) << arg.DebugString();
-  return ret;
-}
+  static std::shared_ptr<Pattern>
+  build_arg(PatternBuilder* self,
+            const vaip_core::PatternCallNodeArgProto& arg);
 
-static std::vector<std::shared_ptr<Pattern>>
-PatternBuilder_build_args(PatternBuilder* self,
-                          const google::protobuf::RepeatedPtrField<
-                              vaip_core::PatternCallNodeArgProto>& args) {
-  auto ret = std::vector<std::shared_ptr<Pattern>>{};
-  ret.reserve(args.size());
-  for (auto& arg : args) {
-    ret.push_back(PatternBuilder_build_arg(self, arg));
-  }
-  return ret;
-}
+  static std::vector<std::shared_ptr<Pattern>>
+  build_args(PatternBuilder* self,
+             const google::protobuf::RepeatedPtrField<
+                 vaip_core::PatternCallNodeArgProto>& args);
+};
 
-static std::shared_ptr<Pattern>
-PatternBuilder_create(PatternBuilder* self, const PatternProto& pattern_proto) {
+std::shared_ptr<Pattern>
+PatternBuilderHelper::create(PatternBuilder* self,
+                             const PatternProto& pattern_proto) {
   auto ret = std::shared_ptr<Pattern>();
   switch (pattern_proto.type_case()) {
   case PatternProto::kWildcard:
@@ -248,13 +227,31 @@ PatternBuilder_create(PatternBuilder* self, const PatternProto& pattern_proto) {
     } else {
       LOG(ERROR) << "Please use op_domain field to store op domain seperately.";
     }
-    auto args =
-        PatternBuilder_build_args(self, pattern_proto.call_node().args());
+    auto args = build_args(self, pattern_proto.call_node().args());
     std::vector<bool> optional_args(
         pattern_proto.call_node().optional_args().begin(),
         pattern_proto.call_node().optional_args().end());
     ret = self->node3_with_optional_domain(op_type, args, optional_args,
                                            op_domain);
+  } break;
+  case PatternProto::kNodeOutputArg: {
+    auto& node_output_arg_proto = pattern_proto.node_output_arg();
+    auto call_node_pattern = build_arg(self, node_output_arg_proto.call_node());
+    ret = self->get_node_output_arg_by_index(
+        call_node_pattern, node_output_arg_proto.output_arg_index());
+  } break;
+  case PatternProto::kGraphOutput: {
+    auto& graph_output_proto = pattern_proto.graph_output();
+    auto node_arg_pattern = build_arg(self, graph_output_proto.node_arg());
+    if (graph_output_proto.has_graph_output_index()) {
+      ret = self->is_graph_output(node_arg_pattern,
+                                  graph_output_proto.graph_output_index());
+    } else if (graph_output_proto.has_graph_output_name()) {
+      ret = self->is_graph_output(node_arg_pattern,
+                                  graph_output_proto.graph_output_name());
+    } else {
+      ret = self->is_graph_output(node_arg_pattern);
+    }
   } break;
   default:
     ret = nullptr;
@@ -264,6 +261,38 @@ PatternBuilder_create(PatternBuilder* self, const PatternProto& pattern_proto) {
   }
   return ret;
 }
+
+std::shared_ptr<Pattern>
+PatternBuilderHelper::build_arg(PatternBuilder* self,
+                                const vaip_core::PatternCallNodeArgProto& arg) {
+  auto ret = std::shared_ptr<Pattern>();
+  switch (arg.arg_case()) {
+  case PatternCallNodeArgProto::kName:
+    ret = self->get_pattern(arg.name());
+    break;
+  case PatternCallNodeArgProto::kPattern:
+    ret = create(self, arg.pattern());
+    break;
+  default:
+    ret = nullptr;
+  }
+  CHECK(ret != nullptr) << arg.DebugString();
+  return ret;
+}
+
+std::vector<std::shared_ptr<Pattern>> PatternBuilderHelper::build_args(
+    PatternBuilder* self, const google::protobuf::RepeatedPtrField<
+                              vaip_core::PatternCallNodeArgProto>& args) {
+  auto ret = std::vector<std::shared_ptr<Pattern>>{};
+  ret.reserve(args.size());
+  for (auto& arg : args) {
+    ret.push_back(build_arg(self, arg));
+  }
+  return ret;
+}
+
+PatternBuilder::PatternBuilder()
+    : id_map_{std::make_shared<std::unordered_map<std::string, int>>()} {}
 
 std::shared_ptr<Pattern>
 PatternBuilder::create_by_json(const std::string& pattern_json) {
@@ -277,7 +306,7 @@ PatternBuilder::create_by_json(const std::string& pattern_json) {
   auto ret = std::shared_ptr<Pattern>{};
   auto last = std::shared_ptr<Pattern>{};
   for (auto& p : pattern_proto.patterns()) {
-    last = PatternBuilder_create(this, p);
+    last = PatternBuilderHelper::create(this, p);
     if (p.is_root()) {
       ret = last;
     }
@@ -296,7 +325,7 @@ std::shared_ptr<Pattern> PatternBuilder::create_from_binary(const char* data,
   auto ret = std::shared_ptr<Pattern>{};
   auto last = std::shared_ptr<Pattern>{};
   for (auto& p : pattern_proto.patterns()) {
-    last = PatternBuilder_create(this, p);
+    last = PatternBuilderHelper::create(this, p);
     if (p.is_root()) {
       ret = last;
     }
@@ -456,6 +485,23 @@ std::shared_ptr<Pattern> PatternBuilder::node_with_named_args(
   return node3_with_optional_domain(op_type, args, optional_args, op_domain);
 }
 
+std::vector<std::shared_ptr<Pattern>>
+PatternBuilder::node_with_multiple_outputs(
+    const std::string& op_type,
+    const std::vector<std::shared_ptr<Pattern>>& args,
+    const std::vector<bool>& optional_args, const std::string& op_domain,
+    const size_t num_of_outputs) {
+  auto node =
+      node3_with_optional_domain(op_type, args, optional_args, op_domain);
+
+  std::vector<std::shared_ptr<Pattern>> ret;
+  for (size_t i = 0; i < num_of_outputs; ++i) {
+    ret.push_back(get_node_output_arg_by_index(node, i));
+  }
+
+  return ret;
+}
+
 std::shared_ptr<Pattern>
 PatternBuilder::commutable_node(const std::string& op_type_and_domain,
                                 std::shared_ptr<Pattern> arg1,
@@ -485,13 +531,34 @@ std::shared_ptr<Pattern> PatternBuilder::graph_input() {
   return create_internal([](int id) { return new PatternGraphInput(id); });
 }
 
+std::shared_ptr<Pattern>
+PatternBuilder::is_graph_output(const std::shared_ptr<Pattern>& arg) {
+  return create_internal(
+      [=](int id) { return new PatternGraphOutput(id, arg); });
+}
+
+std::shared_ptr<Pattern>
+PatternBuilder::is_graph_output(const std::shared_ptr<Pattern>& arg,
+                                size_t graph_output_index) {
+  return create_internal([=](int id) {
+    return new PatternGraphOutput(id, arg, graph_output_index);
+  });
+}
+
+std::shared_ptr<Pattern>
+PatternBuilder::is_graph_output(const std::shared_ptr<Pattern>& arg,
+                                const std::string& graph_output_name) {
+  return create_internal([=](int id) {
+    return new PatternGraphOutput(id, arg, graph_output_name);
+  });
+}
+
 std::shared_ptr<Pattern> PatternBuilder::xir_const_op() {
   return node2("com.xilinx:const", {});
 }
 
 void PatternBuilder::bind(const std::string& name,
                           const std::shared_ptr<Pattern>& pat) {
-
   (*id_map_)[name] = pat->get_id();
 }
 
@@ -521,6 +588,16 @@ PatternBuilder::create_internal(const std::function<Pattern*(int id)>& f) {
   patterns_.push_back(ret);
   ret->name_to_ids_ = id_map_;
   return ret;
+}
+
+std::shared_ptr<Pattern> PatternBuilder::get_node_output_arg_by_index(
+    const std::shared_ptr<Pattern>& arg, size_t output_arg_index) {
+  CHECK(std::dynamic_pointer_cast<PatternNode>(arg))
+      << " get_node_output_arg_by_index only accepts parameter of type "
+         "PatternNode";
+  return create_internal([=](int id) {
+    return new PatternNodeOutputArg(id, arg, output_arg_index);
+  });
 }
 
 std::unordered_map<std::string, int> PatternBuilder::bindings() const {

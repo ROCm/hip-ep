@@ -46,6 +46,8 @@ message PatternProto {
     PatternGraphInputProto graph_input = 11;
     PatternConstantProto constant = 12;
     PatternCallNodeProto call_node = 13;
+    PatternNodeOutputArgProto node_output_arg = 14;
+    PatternGraphOutputProto graph_output = 15;
   }
 }
 
@@ -70,4 +72,15 @@ message PatternCallNodeArgProto {
     string name = 1;
     PatternProto pattern  = 2;
   }
+}
+
+message PatternNodeOutputArgProto {
+  PatternCallNodeArgProto call_node = 1;
+  uint64 output_arg_index = 2;
+}
+
+message PatternGraphOutputProto {
+  PatternCallNodeArgProto node_arg = 1;
+  optional uint64 graph_output_index = 2;
+  optional string graph_output_name = 3;
 }
