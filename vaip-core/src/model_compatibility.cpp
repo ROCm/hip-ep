@@ -5,11 +5,15 @@
 #include "morphizen/vaip.hpp"
 
 #include "morphizen/custom_op_imp.hpp"
+#include "morphizen/env_config.hpp"
 #include "morphizen/model_compatibility.pb.h"
 #include "morphizen/onnxruntime_vitisai_ep.hpp"
 #include "morphizen/vaip_plugin.hpp"
 #include <glog/logging.h>
 #include <google/protobuf/util/json_util.h>
+
+DEF_ENV_PARAM(DEBUG_MODEL_COMPATIBILITY, "0")
+#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_MODEL_COMPATIBILITY) >= n)
 
 namespace vaip_core {
 
@@ -37,30 +41,6 @@ extern "C" VAIP_DLL_SPEC const char* get_compiled_model_compatibility_info(
                       // info
 
   g_compiled_model_compatibility_info_result.clear();
-
-  if (!eps || eps->empty()) {
-    return g_compiled_model_compatibility_info_result.c_str();
-  }
-
-  auto* ep_concrete =
-      dynamic_cast<vaip_core::ExecutionProviderConcrete*>(eps->front().get());
-  if (!ep_concrete) {
-    LOG(WARNING) << "Failed to cast to ExecutionProviderConcrete.";
-    return g_compiled_model_compatibility_info_result.c_str();
-  }
-
-  auto pass_context = ep_concrete->get_context();
-  if (!pass_context) {
-    LOG(WARNING) << "PassContext is null.";
-    return g_compiled_model_compatibility_info_result.c_str();
-  }
-
-  const auto& compatibility_info_map =
-      pass_context->get_compiled_model_compatibility_info();
-  if (compatibility_info_map.empty()) {
-    return g_compiled_model_compatibility_info_result.c_str();
-  }
-
   morphizen::ModelCompatibilityProto compatibility_info_proto;
   compatibility_info_proto.mutable_version()->set_major(1);
   compatibility_info_proto.mutable_version()->set_minor(0);
@@ -69,20 +49,50 @@ extern "C" VAIP_DLL_SPEC const char* get_compiled_model_compatibility_info(
   // needs to be encoded (e.g. for binary data or special characters)
   compatibility_info_proto.set_base64_encoding(false);
 
-  for (const auto& entry : compatibility_info_map) {
-    (*compatibility_info_proto.mutable_backend_compatibility())[entry.first] =
-        entry.second;
+  if (eps && !eps->empty()) {
+    auto* ep_concrete =
+        dynamic_cast<vaip_core::ExecutionProviderConcrete*>(eps->front().get());
+    if (ep_concrete) {
+      auto pass_context = ep_concrete->get_context();
+      if (pass_context) {
+        const auto& compatibility_info_map =
+            pass_context->get_compiled_model_compatibility_info();
+        if (compatibility_info_map.empty()) {
+          MY_LOG(1) << " [VitisAI EP][GetCompiledModelCompatibilityInfo] "
+                       "Compatibility info map is empty. No backend "
+                       "compatibility info is available.";
+        }
+        for (const auto& entry : compatibility_info_map) {
+          (*compatibility_info_proto
+                .mutable_backend_compatibility())[entry.first] = entry.second;
+        }
+      } else {
+        MY_LOG(1) << " [VitisAI EP][GetCompiledModelCompatibilityInfo] "
+                     "PassContext is null. No backend compatibility info is "
+                     "available.";
+      }
+    } else {
+      MY_LOG(1) << " [VitisAI EP][GetCompiledModelCompatibilityInfo] "
+                   "Failed to cast to ExecutionProviderConcrete. No backend "
+                   "compatibility info is available.";
+    }
+  } else {
+    MY_LOG(1) << " [VitisAI EP][GetCompiledModelCompatibilityInfo] "
+                 "ExecutionProvider is empty. No backend compatibility info is "
+                 "available.";
   }
 
   auto status = google::protobuf::util::MessageToJsonString(
       compatibility_info_proto, &g_compiled_model_compatibility_info_result);
   if (!status.ok()) {
-    LOG(WARNING) << "Failed to serialize ModelCompatibilityProto. Error: "
-                 << status.message();
+    MY_LOG(1) << " [VitisAI EP][GetCompiledModelCompatibilityInfo] Failed to "
+                 "serialize ModelCompatibilityProto. Error: "
+              << status.message();
     return g_compiled_model_compatibility_info_result.c_str();
   }
 
-  LOG(INFO) << "Compiled Model Compatibility Info: "
+  MY_LOG(1) << " [VitisAI EP][GetCompiledModelCompatibilityInfo] Compiled "
+               "Model Compatibility Info: "
             << g_compiled_model_compatibility_info_result;
   // Returns a pointer valid until the next call to this method or EP
   // destruction. ORT is responsible for copying this string if needed beyond
@@ -233,6 +243,8 @@ extern "C" VAIP_DLL_SPEC int validate_compiled_model_compatibility_info(
 
   // If compatibility_info is null or empty, return EP_NOT_APPLICABLE
   if (compatibility_info == nullptr || compatibility_info[0] == '\0') {
+    MY_LOG(1) << " [VitisAI EP][ValidateCompiledModelCompatibilityInfo] "
+                 "Compatibility info is null or empty. Return NOT_APPLICABLE.";
     *model_compatibility = 0; // OrtCompiledModelCompatibility_EP_NOT_APPLICABLE
     return 0;
   }
@@ -241,8 +253,9 @@ extern "C" VAIP_DLL_SPEC int validate_compiled_model_compatibility_info(
   auto status = google::protobuf::util::JsonStringToMessage(
       compatibility_info, &compatibility_proto);
   if (!status.ok()) {
-    LOG(WARNING) << "Failed to parse ModelCompatibilityProto. Error: "
-                 << status.message();
+    MY_LOG(1) << " [VitisAI EP][ValidateCompiledModelCompatibilityInfo] Failed "
+                 "to parse ModelCompatibilityProto. Error: "
+              << status.message() << ". Return NOT_APPLICABLE.";
     *model_compatibility = 0; // OrtCompiledModelCompatibility_EP_NOT_APPLICABLE
     return 0;
   }
@@ -272,8 +285,9 @@ extern "C" VAIP_DLL_SPEC int validate_compiled_model_compatibility_info(
   std::vector<int> compatibility_results;
   bool any_plugin_missing = false;
   for (const auto& entry : compatibility_proto.backend_compatibility()) {
-    LOG(INFO) << "Validating backend: " << entry.first
-              << " with compatibility info: " << entry.second;
+    MY_LOG(1) << " [VitisAI EP][ValidateCompiledModelCompatibilityInfo] "
+                 "Validating backend: "
+              << entry.first << " with compatibility info: " << entry.second;
     auto plugin = vaip_core::Plugin::get(entry.first);
     // Check if the corresponding backend plugin exists in the current EP
     // (Execution Provider) environment.
@@ -287,8 +301,10 @@ extern "C" VAIP_DLL_SPEC int validate_compiled_model_compatibility_info(
     // In such a case, the compiled model expects to run on the backend, but it
     // was not found in this backend, we should return EP_UNSUPPORTED.
     if (!plugin) {
-      LOG(WARNING) << "Backend plugin " << entry.first
-                   << " is not available in the current EP environment.";
+      MY_LOG(1) << " [VitisAI EP][ValidateCompiledModelCompatibilityInfo] "
+                   "Backend plugin "
+                << entry.first
+                << " is not available in the current EP environment. ";
       any_plugin_missing = true; // Check remaining backends
       continue;
     }
@@ -301,9 +317,12 @@ extern "C" VAIP_DLL_SPEC int validate_compiled_model_compatibility_info(
     // In such a case , not support the CompiledModelCompatibility checking
     // and Keep ORT default behavior --> this backend returns EP_NOT_APPLICABLE
     if (!fp) {
-      LOG(WARNING)
-          << "Backend plugin " << entry.first
-          << " does not support morphizen_OrtCompiledModelCompatibility.";
+      MY_LOG(1)
+          << " [VitisAI EP][ValidateCompiledModelCompatibilityInfo] Backend  "
+          << entry.first
+          << " does not support morphizen_OrtCompiledModelCompatibility. "
+             "cannot validate the backend compatibility. Return "
+             "NOT_APPLICABLE.";
       compatibility_results.push_back(
           0); // OrtCompiledModelCompatibility_EP_NOT_APPLICABLE
       continue;
@@ -329,15 +348,17 @@ extern "C" VAIP_DLL_SPEC int validate_compiled_model_compatibility_info(
 
   // Handle cases where some backends couldn't be validated
   if (any_plugin_missing) {
-    LOG(WARNING) << "One or more required backend plugins are missing. "
-                 << "Successfully validated " << compatibility_results.size()
-                 << " of " << compatibility_proto.backend_compatibility().size()
-                 << " backends.";
+    MY_LOG(1) << " [VitisAI EP][ValidateCompiledModelCompatibilityInfo] One or "
+                 "more required backend plugins are missing. "
+              << "Return UNSUPPORTED.";
     *model_compatibility = 3; // OrtCompiledModelCompatibility_EP_UNSUPPORTED
     return 0;
   }
 
   if (compatibility_results.empty()) {
+    MY_LOG(1)
+        << " [VitisAI EP][ValidateCompiledModelCompatibilityInfo] No backend "
+           "compatibility info is available. Return NOT_APPLICABLE.";
     *model_compatibility = 0; // OrtCompiledModelCompatibility_EP_NOT_APPLICABLE
     return 0;
   }
@@ -366,6 +387,9 @@ extern "C" VAIP_DLL_SPEC int validate_compiled_model_compatibility_info(
     *model_compatibility = 0; // OrtCompiledModelCompatibility_EP_NOT_APPLICABLE
   }
 
+  MY_LOG(1) << " [VitisAI EP][ValidateCompiledModelCompatibilityInfo] Model "
+               "compatibility: "
+            << *model_compatibility;
   return 0;
 }
 
