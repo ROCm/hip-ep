@@ -1,10 +1,19 @@
-# To be updated
-doc/enable-ort-etw-trace-and-logs.md
-doc/pr/443/SECURITY_REVIEW.md
+# gitenterprise - Temporarily ok: this is for discussion
 tools/create_pr.ps1
 tools/download_demo.ps1
 tools/list_pr.ps1
 tools/submit_vaip_pr.ps1
 tools/submit_vaip_pr.sh
 tools/submit_vaip_pr_for_verify_the_pr.ps1
-unit-test/cmake/test_data.cmake
+doc/pr/443/SECURITY_REVIEW.md
+.cursor/commands/commit-push-update-pr.md
+.cursor/commands/create-pull-request.md
+
+# Exclude workflows
+.github
+
+# Exclude submodules
+.gitmodules
+
+.git
+.pre-commit-config.yaml

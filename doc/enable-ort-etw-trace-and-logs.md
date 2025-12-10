@@ -13,10 +13,3 @@ Licensed under the MIT License.
 3. Users cannot control the log level using the standard ORT APIs.
 
 ## How ORT logging system works
-
-
-
-## References
-
-- [ONNX Runtime Logging and Tracing](https://onnxruntime.ai/docs/performance/tune-performance/logging_tracing.html)
-- [Instrumenting Your Code with ETW](https://learn.microsoft.com/en-us/windows-hardware/test/weg/instrumenting-your-code-with-etw)

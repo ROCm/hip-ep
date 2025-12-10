@@ -30,6 +30,10 @@ jobs:
           submodules: true
           fetch-depth: 0  # Fetch all history for all branches and tags
           show-progress: false
+          lfs: true  # Enable Git LFS support
+
+      - name: Pull Git LFS files
+        run: git lfs pull
 
       - name: get Onnxruntime SHA1
         id: ort-commit

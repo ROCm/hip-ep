@@ -143,6 +143,16 @@ install(
  LIBRARY DESTINATION lib)
 
 set_target_properties(hello_plugin_dll PROPERTIES FOLDER morphizen/unit-tests/data)
+
+# Copy test data files to build directory for tests
+add_custom_command(
+  TARGET ${TEST_EXE_NAME} POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    ${RESNET_50_ONNX_PATH}
+    ${CMAKE_CURRENT_BINARY_DIR}/pt_resnet50.onnx
+  COMMENT "Copying pt_resnet50.onnx to test build directory"
+)
+
 add_dependencies(${TEST_EXE_NAME}
   tgt_pt_resnet50.onnx
   tgt_sample_src_tar
