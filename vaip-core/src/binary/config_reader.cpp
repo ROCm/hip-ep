@@ -18,7 +18,6 @@
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_CONFIG_READER, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_CONFIG_READER) >= n)
 DEF_ENV_PARAM_2(XLNX_VART_FIRMWARE, "", std::string)
-DEF_ENV_PARAM_2(DEBUG_LOG_LEVEL, "error", std::string)
 DEF_ENV_PARAM(XLNX_ENABLE_BATCH, "0")
 DEF_ENV_PARAM(NUM_OF_DPU_RUNNERS, "1")
 DEF_ENV_PARAM_2(VAIP_CONFIG_PROVIDER_BACKEND, "onnxruntime_vitisai_ep",
@@ -125,25 +124,6 @@ update_num_dpu_runners(const onnxruntime::ProviderOptions& session_option) {
   }
 }
 
-static void
-update_log_level(const onnxruntime::ProviderOptions& session_option) {
-  std::string log_level = ENV_PARAM(DEBUG_LOG_LEVEL);
-  if (session_option.find("log_level") != session_option.end()) {
-    log_level = session_option.at("log_level");
-  }
-
-  if (log_level == "info") {
-    FLAGS_minloglevel = google::GLOG_INFO;
-  } else if (log_level == "warning") {
-    FLAGS_minloglevel = google::GLOG_WARNING;
-  } else if (log_level == "error") {
-    FLAGS_minloglevel = google::GLOG_ERROR;
-  } else if (log_level == "fatal") {
-    FLAGS_minloglevel = google::GLOG_FATAL;
-  } else {
-    FLAGS_minloglevel = google::GLOG_ERROR;
-  }
-}
 static void set_session_config(google::protobuf::Struct& ret,
                                const std::string& key,
                                const std::string& value) {
@@ -188,7 +168,7 @@ static void restore_session_options(google::protobuf::Struct& ret,
 static google::protobuf::Struct
 get_config_json(const onnxruntime::ProviderOptions& options) {
   google::protobuf::Struct ret;
-  update_log_level(options);
+  // update_log_level(options);
   update_enable_batch(options);
   update_num_dpu_runners(options);
   auto vaip_get_default_config_plugin =
