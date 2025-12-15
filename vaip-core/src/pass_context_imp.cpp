@@ -9,12 +9,12 @@
 #include <google/protobuf/util/json_util.h>
 #include <stdexcept>
 
-#include "./binary/mem_binary.hpp"
 #include "./cache_dir.hpp"
 #include "config.hpp"
 #include "ep_shared_context_workspace.hpp"
 #include "morphizen/config_reader.hpp"
 #include "morphizen/env_config.hpp"
+#include "morphizen/mem_binary.hpp"
 #include "morphizen/util.hpp"
 #include "morphizen/vaip_io.hpp"
 #include "morphizen/weak.hpp"

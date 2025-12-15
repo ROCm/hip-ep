@@ -125,7 +125,7 @@ add_library(${LIB_NAME} STATIC
   src/profile_utils.hpp
   src/profile_utils.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/mem_binary_file.hpp.inc
-  src/binary/mem_binary.hpp
+  include/morphizen/mem_binary.hpp
   src/binary/mem_binary.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/xclbin.h
   include/morphizen/xclbin_file.hpp

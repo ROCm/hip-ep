@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "mem_binary.hpp"
+#include "morphizen/mem_binary.hpp"
 #include "morphizen/env_config.hpp"
 #include "morphizen/vaip_plugin.hpp"
 #include <glog/logging.h>
