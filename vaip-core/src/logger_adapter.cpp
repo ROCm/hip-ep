@@ -6,9 +6,78 @@
 //
 #include "./logger_adapter.hpp"
 #include "core/graph/constants.h"
+#include "morphizen/env_config.hpp"
 #include "onnxruntime_cxx_api.h"
 #include <cassert>
+#include <glog/logging.h>
+
+DEF_ENV_PARAM_2(DEBUG_LOG_LEVEL, "", std::string)
+
 namespace vaip_core {
+
+static int LogLevelStringToGlogSeverity(const std::string& level_str,
+                                        int default_level) {
+  if (level_str.empty()) {
+    return default_level;
+  }
+
+  if (level_str == "info" || level_str == "INFO" || level_str == "verbose") {
+    return google::GLOG_INFO;
+  } else if (level_str == "warning" || level_str == "WARNING" ||
+             level_str == "warn") {
+    return google::GLOG_WARNING;
+  } else if (level_str == "error" || level_str == "ERROR") {
+    return google::GLOG_ERROR;
+  } else if (level_str == "fatal" || level_str == "FATAL") {
+    return google::GLOG_FATAL;
+  } else {
+    return default_level;
+  }
+}
+
+static int OrtLoggingLevelToGlogSeverity(OrtLoggingLevel ort_level) {
+  switch (ort_level) {
+  case OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE:
+    return google::GLOG_INFO;
+  case OrtLoggingLevel::ORT_LOGGING_LEVEL_INFO:
+    return google::GLOG_INFO;
+  case OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING:
+    return google::GLOG_WARNING;
+  case OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR:
+    return google::GLOG_ERROR;
+  case OrtLoggingLevel::ORT_LOGGING_LEVEL_FATAL:
+    return google::GLOG_FATAL;
+  default:
+    return google::GLOG_ERROR;
+  }
+}
+
+static void SetGlogMinLogLevelWithOrt(const std::string& session_option,
+                                      OrtLoggingLevel ort_level) {
+  int log_level = google::GLOG_ERROR; // default
+  std::string env_log_level = ENV_PARAM(DEBUG_LOG_LEVEL);
+
+  // Priority 1: Check session_option parameter
+  if (!session_option.empty()) {
+    log_level =
+        LogLevelStringToGlogSeverity(session_option, google::GLOG_ERROR);
+  }
+  // Priority 2: Check ENV_PARAM(DEBUG_LOG_LEVEL)
+  else if (!env_log_level.empty()) {
+    log_level = LogLevelStringToGlogSeverity(env_log_level, google::GLOG_ERROR);
+  }
+  // Priority 3: Use ORT logging level
+  else if (ort_level != ORT_LOGGING_LEVEL_ERROR) {
+    log_level = OrtLoggingLevelToGlogSeverity(ort_level);
+  }
+
+  FLAGS_minloglevel = log_level;
+}
+
+void SetGlogMinLogLevel(const std::string& session_option) {
+  SetGlogMinLogLevelWithOrt(session_option, ORT_LOGGING_LEVEL_ERROR);
+}
+
 static std::weak_ptr<LoggerAdapter> g_the_current_logger;
 
 std::shared_ptr<LoggerAdapter>
@@ -43,26 +112,8 @@ LoggerAdapter::LoggerAdapter(const Ort::Logger& logger)
     google::InitGoogleLogging(onnxruntime::kVitisAIExecutionProvider);
   }
   auto ort_logging_level = logger_.GetLoggingSeverityLevel();
-  switch (ort_logging_level) {
-  case OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE:
-    FLAGS_minloglevel = google::GLOG_INFO;
-    break;
-  case OrtLoggingLevel::ORT_LOGGING_LEVEL_INFO:
-    FLAGS_minloglevel = google::GLOG_INFO;
-    break;
-  case OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING:
-    FLAGS_minloglevel = google::GLOG_WARNING;
-    break;
-  case OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR:
-    FLAGS_minloglevel = google::GLOG_ERROR;
-    break;
-  case OrtLoggingLevel::ORT_LOGGING_LEVEL_FATAL:
-    FLAGS_minloglevel = google::GLOG_FATAL;
-    break;
-  default:
-    FLAGS_minloglevel = FLAGS_minloglevel_;
-    break;
-  }
+  // Use unified log level interface with ORT level
+  vaip_core::SetGlogMinLogLevelWithOrt("", ort_logging_level);
   google::AddLogSink(this);
 }
 LoggerAdapter::~LoggerAdapter() {

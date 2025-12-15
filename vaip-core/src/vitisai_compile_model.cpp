@@ -63,7 +63,6 @@ DEF_ENV_PARAM(XLNX_ONNX_EP_DL_ANALYZER_PROFILING, "0")
 DEF_ENV_PARAM(XLNX_ONNX_EP_DL_ANALYZER_VISUALIZATION, "0")
 DEF_ENV_PARAM_2(XLNX_VAIML_LEVEL_1_NAME, "vaip-pass_vaiml_partition",
                 std::string)
-DEF_ENV_PARAM_2(DEBUG_LOG_LEVEL, "error", std::string)
 
 #ifdef _WIN32
 #  ifdef ENABLE_PYTHON
@@ -1466,22 +1465,11 @@ std::vector<std::unique_ptr<ExecutionProvider>> compile_onnx_model_3_internal(
 
 static void
 update_log_level(const onnxruntime::ProviderOptions& session_option) {
-  std::string log_level = ENV_PARAM(DEBUG_LOG_LEVEL);
+  std::string log_level;
   if (session_option.find("log_level") != session_option.end()) {
     log_level = session_option.at("log_level");
   }
-
-  if (log_level == "info") {
-    FLAGS_minloglevel = google::GLOG_INFO;
-  } else if (log_level == "warning") {
-    FLAGS_minloglevel = google::GLOG_WARNING;
-  } else if (log_level == "error") {
-    FLAGS_minloglevel = google::GLOG_ERROR;
-  } else if (log_level == "fatal") {
-    FLAGS_minloglevel = google::GLOG_FATAL;
-  } else {
-    FLAGS_minloglevel = google::GLOG_ERROR;
-  }
+  vaip_core::SetGlogMinLogLevel(log_level);
 }
 
 // Public API - calls internal version without logger
