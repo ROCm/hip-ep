@@ -241,6 +241,11 @@ extern "C" VAIP_DLL_SPEC int validate_compiled_model_compatibility_info(
     size_t num_devices, int* model_compatibility) {
   (void)eps; // May be used in future for EP-specific validation
 
+  MY_LOG(1) << " [VitisAI EP][ValidateCompiledModelCompatibilityInfo] "
+               "ValidateCompiledModelCompatibilityInfo called with "
+               "compatibility_info: "
+            << compatibility_info;
+
   // If compatibility_info is null or empty, return EP_NOT_APPLICABLE
   if (compatibility_info == nullptr || compatibility_info[0] == '\0') {
     MY_LOG(1) << " [VitisAI EP][ValidateCompiledModelCompatibilityInfo] "
@@ -331,6 +336,10 @@ extern "C" VAIP_DLL_SPEC int validate_compiled_model_compatibility_info(
     try {
       int backend_compatibility =
           fp(devices, num_devices, entry.second.c_str());
+      MY_LOG(1) << " [VitisAI EP][ValidateCompiledModelCompatibilityInfo] "
+                   "Backend "
+                << entry.first
+                << " compatibility check result: " << backend_compatibility;
       compatibility_results.push_back(backend_compatibility);
     } catch (const std::exception& e) {
       LOG(ERROR) << "Exception in backend plugin " << entry.first
