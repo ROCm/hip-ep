@@ -52,6 +52,9 @@ def generate_map(embedded_resource_file):
         variable_name = "_" + filename.split(suffix)[0].replace(".", "_")
         path = Path(embedded_resource_file) / ".." / normalized_rel_path
         path = os.path.normpath(path)
+        if not os.path.exists(path):
+            print(f"-- {filename} does not exist")
+            continue
         byte_str = ""
         compressed_size = 0
         origin_size = 0
