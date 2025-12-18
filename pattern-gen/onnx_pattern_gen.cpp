@@ -31,7 +31,6 @@ extern "C" {
 
 namespace {
 using namespace vaip_core;
-
 struct NodePattern {
 public:
   NodePattern(const NodeInput& node_input, const std::string& hint,
@@ -613,6 +612,25 @@ public:
     LOG(INFO) << "write generated mermaid diagram to " << inc;
   }
 
+  void dump_subgraph_to_onnx(vaip_cxx::GraphRef& graph_ref,
+                             const std::vector<std::string>& opt_inputs,
+                             const std::vector<std::string>& opt_outputs,
+                             const std::string& out_onnx) {
+    graph_ref.resolve();
+    auto [meta_def, error] = graph_ref.try_fuse("onnx_pattern_gen", opt_inputs,
+                                                opt_outputs, {}, "no_device");
+    if (meta_def == nullptr) {
+      LOG(FATAL) << "try_fuse error: " << error.comments;
+    }
+    auto node = graph_ref.fuse(*meta_def);
+    auto subgraph = node.get_function_body();
+    std::filesystem::path onnx_path = out_onnx;
+
+    subgraph.save(onnx_path);
+
+    LOG(INFO) << "Subgraph dumped to: " << out_onnx;
+  }
+
 private:
   PatternBuilder builder_;
   std::unordered_map<std::string, int> name_counter_;
@@ -678,9 +696,10 @@ int main(int argc, char* argv[]) {
     auto opt_cxx_output_file = std::string("");
     auto opt_mmd_output_file = std::string("");
     auto opt_json_output_file = std::string("");
+    auto opt_onnx_output_file = std::string("");
     auto opt_inputs = std::vector<std::string>{};
     auto opt_outputs = std::vector<std::string>{};
-    while ((opt = getopt(argc, argv, "f:i:o:c:m:j:h")) != -1) {
+    while ((opt = getopt(argc, argv, "f:i:o:c:m:j:x:h")) != -1) {
       switch (opt) {
       case 'i': {
         opt_inputs.push_back(std::string(optarg));
@@ -704,6 +723,10 @@ int main(int argc, char* argv[]) {
       }
       case 'j': {
         opt_json_output_file = std::string(optarg);
+        break;
+      }
+      case 'x': {
+        opt_onnx_output_file = std::string(optarg);
         break;
       }
       case 'h': {
@@ -765,7 +788,12 @@ int main(int argc, char* argv[]) {
       std::cout << " generate mermaid diagram: " << opt_mmd_output_file
                 << std::endl;
     }
-
+    if (opt_onnx_output_file != "") {
+      builder.dump_subgraph_to_onnx(graph, opt_inputs, opt_outputs,
+                                    opt_onnx_output_file);
+      std::cout << " generate spilt onnx model: " << opt_onnx_output_file
+                << std::endl;
+    }
   } catch (const std::exception& e) {
     std::cerr << "exception occurs : " << e.what() << "\n";
   }
