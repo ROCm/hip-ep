@@ -15,46 +15,6 @@ vaip_add_remote_target(
   EXPECTED_MD5 a3eb400c4836d01a59b7c5bb3ddd83e3
 )
 
-# to be removed before 2026
-if(NOT EXISTS "${VAIP_EMBEDDED_RESOURCE_PATH}" AND EXISTS "${VAIP_XCLBIN_DIR}")
-  message(STATUS "Fall back to compatible version for packaging")
-  file(GLOB_RECURSE XCLBIN_FILES "${VAIP_XCLBIN_DIR}/*.xclbin")
-  list(SORT XCLBIN_FILES)
-  set(ADDED_XCLBIN)
-  set(META_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/embedded_resource.txt")
-
-  set(JSON_CONTENT "[\n")
-
-  foreach(xclbin ${XCLBIN_FILES})
-    get_filename_component(filename "${xclbin}" NAME)
-    string(REGEX REPLACE "_[0-9]+\\.xclbin$" ".xclbin" no_version_filename "${filename}")
-    set(dest "${CMAKE_CURRENT_BINARY_DIR}/${no_version_filename}")
-    configure_file("${xclbin}" "${dest}" COPYONLY)
-    set(dest "${CMAKE_CURRENT_BINARY_DIR}/${filename}")
-    configure_file("${xclbin}" "${dest}" COPYONLY)
-
-
-    list(FIND ADDED_XCLBIN "${no_version_filename}" _found)
-    if(_found EQUAL -1)
-      list(APPEND ADDED_XCLBIN "${no_version_filename}")
-      set(JSON_CONTENT "${JSON_CONTENT}  {\n")
-      set(JSON_CONTENT "${JSON_CONTENT}    \"name\": r\"${CMAKE_CURRENT_BINARY_DIR}/${no_version_filename}\",\n")
-      set(JSON_CONTENT "${JSON_CONTENT}    \"compression\": True\n")
-      set(JSON_CONTENT "${JSON_CONTENT}  },\n")
-    endif()
-
-    set(JSON_CONTENT "${JSON_CONTENT}  {\n")
-    set(JSON_CONTENT "${JSON_CONTENT}    \"name\": r\"${CMAKE_CURRENT_BINARY_DIR}/${filename}\",\n")
-    set(JSON_CONTENT "${JSON_CONTENT}    \"compression\": True\n")
-    set(JSON_CONTENT "${JSON_CONTENT}  },\n")
-  endforeach()
-
-  string(REGEX REPLACE ",\n$" "\n" JSON_CONTENT "${JSON_CONTENT}")
-  set(JSON_CONTENT "${JSON_CONTENT}  ]\n")
-  file(WRITE "${META_INFO_FILE}" "${JSON_CONTENT}")
-  set(VAIP_EMBEDDED_RESOURCE_PATH ${META_INFO_FILE})
-endif()
-
 add_custom_command (
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/mem_binary_file.hpp.inc
   COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../tools"
