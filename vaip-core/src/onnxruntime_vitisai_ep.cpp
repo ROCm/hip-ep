@@ -28,6 +28,32 @@
 #include <glog/logging.h>
 DEF_ENV_PARAM(MORPHIZEN_SUPRRESS_DEPRECATED_WARNG, "1")
 DEF_ENV_PARAM(DEBUG_OP_REGISTER, "0")
+DEF_ENV_PARAM_2(DEBUG_LOG_LEVEL, "", std::string)
+
+static void SetGlogMinLogLevel(const std::string& log_level) {
+  if (log_level == "info") {
+    FLAGS_minloglevel = google::GLOG_INFO;
+  } else if (log_level == "warning") {
+    FLAGS_minloglevel = google::GLOG_WARNING;
+  } else if (log_level == "error") {
+    FLAGS_minloglevel = google::GLOG_ERROR;
+  } else if (log_level == "fatal") {
+    FLAGS_minloglevel = google::GLOG_FATAL;
+  }
+}
+
+static void
+update_log_level(const onnxruntime::ProviderOptions& session_option) {
+  std::string log_level = "error";
+  if (!ENV_PARAM(DEBUG_LOG_LEVEL).empty()) {
+    log_level = ENV_PARAM(DEBUG_LOG_LEVEL);
+  }
+  if (session_option.find("log_level") != session_option.end()) {
+    log_level = session_option.at("log_level");
+  }
+  SetGlogMinLogLevel(log_level);
+}
+
 extern void* BuildInOPs__hook; // prevent xir_opes_defs.obj symbol gc
 extern "C" {
 class OpHolder {
@@ -223,6 +249,7 @@ std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>*
 compile_onnx_model_vitisai_ep_with_options(
     const std::string& model_path, const onnxruntime::Graph& graph,
     const onnxruntime::ProviderOptions& options) {
+  update_log_level(options);
   return new std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>(
       vaip_core::compile_onnx_model_3(model_path, graph, options, nullptr));
 }
@@ -233,6 +260,7 @@ compile_onnx_model_vitisai_ep_with_error_handling(
     const std::string& model_path, const onnxruntime::Graph& graph,
     const onnxruntime::ProviderOptions& options, [[maybe_unused]] void* status,
     [[maybe_unused]] void (*func)(void*, int, const char*)) {
+  update_log_level(options);
   auto set_ort_status = [&](int error_code, const char* error_message) {
     if (func != nullptr) {
       func(status, error_code, error_message);
@@ -250,15 +278,26 @@ compile_onnx_model_vitisai_ep_v4(
     const onnxruntime::ProviderOptions& options, [[maybe_unused]] void* status,
     [[maybe_unused]] void (*func)(void*, int, const char*),
     const OrtLogger* ort_logger) {
-  // Create logger and logger_adapter early to ensure they're available
-  // They will be stored in PassContext to prolong their lifetime
-  auto logger = std::make_shared<Ort::Logger>(ort_logger);
-  auto logger_adapter = vaip_core::LoggerAdapter::create(*logger);
   auto set_ort_status = [&](int error_code, const char* error_message) {
     if (func != nullptr) {
       func(status, error_code, error_message);
     }
   };
+
+  std::shared_ptr<Ort::Logger> logger = nullptr;
+  std::shared_ptr<vaip_core::LoggerAdapter> logger_adapter = nullptr;
+
+  if (ENV_PARAM(DEBUG_LOG_LEVEL).empty()) {
+    // Create logger and logger_adapter early to ensure they're available
+    // They will be stored in PassContext to prolong their lifetime
+    logger = std::make_shared<Ort::Logger>(ort_logger);
+    logger_adapter = vaip_core::LoggerAdapter::create(*logger);
+  } else {
+    SetGlogMinLogLevel(ENV_PARAM(DEBUG_LOG_LEVEL));
+    logger = nullptr;
+    logger_adapter = nullptr;
+  }
+
   return new std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>(
       vaip_core::compile_onnx_model_3_internal(
           model_path, graph, options, logger, logger_adapter, set_ort_status));

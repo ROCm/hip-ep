@@ -1463,37 +1463,11 @@ std::vector<std::unique_ptr<ExecutionProvider>> compile_onnx_model_3_internal(
   return ret;
 }
 
-static void
-update_log_level(const onnxruntime::ProviderOptions& session_option) {
-  std::string log_level;
-  if (session_option.find("log_level") != session_option.end()) {
-    log_level = session_option.at("log_level");
-  }
-  vaip_core::SetGlogMinLogLevel(log_level);
-}
-
 // Public API - calls internal version without logger
 std::vector<std::unique_ptr<ExecutionProvider>>
 compile_onnx_model_3(const std::string& model_path, const Graph& onnx_graph,
                      const onnxruntime::ProviderOptions& options,
                      std::function<void(int, const char*)> set_ort_status) {
-  // compile_onnx_model_3(options)
-  //   ↓
-  // compile_onnx_model_3_internal(options)
-  //   ↓
-  // initialize_context(options)
-  //   ↓
-  // PassContextImp::create_pass_context(options) [pass_context_imp.cpp:106]
-  //   ↓
-  // get_config_json_str(options) [config_reader.cpp:336]
-  //   ↓
-  // get_config_json(options) [config_reader.cpp:191]
-  //   ↓
-  // update_log_level(options)
-  // Update log level early for better debugging visibility
-
-  update_log_level(options);
-
   return compile_onnx_model_3_internal(model_path, onnx_graph, options, nullptr,
                                        nullptr, set_ort_status);
 }

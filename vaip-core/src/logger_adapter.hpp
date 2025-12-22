@@ -6,28 +6,10 @@
 #include "glog/logging.h"
 #include <chrono>
 #include <memory>
-#include <string>
-
 namespace Ort {
 struct Logger;
 }
-
 namespace vaip_core {
-
-/**
- * @brief Set glog minimum log level from session option string
- *
- * This function provides a simplified interface for external callers.
- * Priority:
- * 1. session_option parameter (highest priority)
- * 2. ENV_PARAM(DEBUG_LOG_LEVEL) environment variable
- * 3. Default (ERROR level)
- *
- * @param session_option Optional session option string ("info", "warning",
- * "error", "fatal")
- */
-void SetGlogMinLogLevel(const std::string& session_option);
-
 class LoggerAdapter : public google::LogSink {
 public:
   static std::shared_ptr<LoggerAdapter> get_current_logger();
