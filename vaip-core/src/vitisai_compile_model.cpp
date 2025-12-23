@@ -1082,8 +1082,8 @@ store_cache_directory_from_main_node(PassContextImp& context,
     if (enable_encryption) {
       auto encryption_key = context.context_proto.config().encryption_key();
       if (encryption_key.empty()) {
-        LOG(ERROR) << "enable_encryption is set, but encryption_key is empty";
-        std::abort();
+        throw vaip_encryption::EncryptionError(
+            "enable_encryption is set, but encryption_key is empty");
       }
       ep_context_file = stream_filter(
           *ep_context_file,
