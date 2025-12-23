@@ -47,7 +47,9 @@ struct CustomOp_compile_t {
   static std::unique_ptr<CustomOp>
   CustomOp_compile(const T* self, std::shared_ptr<const PassContext> context,
                    std::shared_ptr<MetaDefProto> meta_def) {
-    return std::make_unique<CustomOpImp>(context, meta_def, nullptr);
+    auto ret = std::make_unique<CustomOpImp>(context, meta_def, nullptr);
+    const_cast<PassContext*>(context.get())->on_custom_op_create_end();
+    return ret;
   }
 };
 
@@ -122,6 +124,7 @@ struct CustomOp_compile_t<
     auto ret =
         std::make_unique<CustomOpImp>(context, meta_def, self->get_model());
     const_cast<T*>(self)->set_model(nullptr);
+    const_cast<PassContext*>(context.get())->on_custom_op_create_end();
     return ret;
   }
 };

@@ -378,5 +378,7 @@ public:
    */
   virtual const std::map<std::string, std::string>&
   get_compiled_model_compatibility_info() const = 0;
+
+  virtual void disable_delete_tar_file_in_session_created() = 0;
 };
 } // namespace vaip_core

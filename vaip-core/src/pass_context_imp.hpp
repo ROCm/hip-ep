@@ -326,6 +326,7 @@ public:
       const std::string& compatibility_info) override final;
   virtual const std::map<std::string, std::string>&
   get_compiled_model_compatibility_info() const override final;
+  virtual void disable_delete_tar_file_in_session_created() override final;
 
 private:
   // use std::map to keep filename ordered.
@@ -349,6 +350,7 @@ private:
   mutable std::vector<std::shared_ptr<QoSUpdateInterface>> qos_updaters_;
   int created_customop_count = 0;
   std::unique_ptr<TarFile> tar_file_ = nullptr;
+  bool delete_tar_file_on_session_created_ = true;
   std::filesystem::path tar_file_file_name_;
   // cache_file_use_cache_key_prefix_ is only enabled for shared ep context is
   // enabled.

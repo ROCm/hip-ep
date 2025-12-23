@@ -25,6 +25,7 @@
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE, "0")
 DEF_ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE, "1")
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY, "0")
+DEF_ENV_PARAM(MORPHIZEN_DELETE_TAR_FILE_ON_SESSION_CREATED, "0")
 DEF_ENV_PARAM(XLNX_ONNX_EP_VERBOSE, "0")
 #define LOG_VERBOSE(n)                                                         \
   LOG_IF(INFO, ENV_PARAM(XLNX_ONNX_EP_VERBOSE) >= n)                           \
@@ -885,6 +886,11 @@ void PassContextImp::on_custom_op_create_end() {
       fclose(iter.second);
     }
     cache_files_.clear();
+    if (delete_tar_file_on_session_created_ && tar_file_) {
+      if (ENV_PARAM(MORPHIZEN_DELETE_TAR_FILE_ON_SESSION_CREATED) == 1) {
+        tar_file_.reset();
+      }
+    }
   }
 }
 /// struct PassContextTimerImp
@@ -1224,6 +1230,9 @@ void PassContextImp::maybe_create_tar_file_for_write() {
 void PassContextImp::create_tar_file_for_read(std::string&& ep_context_binary,
                                               bool embed_mode) {
   if (!embed_mode) {
+    // non-embed mode: To ensure the mmap functionality, the non-embed mode does
+    // not delete the tar file.
+    disable_delete_tar_file_in_session_created();
     auto ep_context_binary_file = get_dir_of_ep_context_model() /
                                   std::filesystem::u8path(ep_context_binary);
     LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
@@ -1595,6 +1604,9 @@ void PassContextImp::append_compiled_model_compatibility_info(
 const std::map<std::string, std::string>&
 PassContextImp::get_compiled_model_compatibility_info() const {
   return compiled_model_compatibility_info_;
+}
+void PassContextImp::disable_delete_tar_file_in_session_created() {
+  delete_tar_file_on_session_created_ = false;
 }
 
 } // namespace vaip_core
