@@ -31,14 +31,17 @@ DEF_ENV_PARAM(DEBUG_OP_REGISTER, "0")
 DEF_ENV_PARAM_2(DEBUG_LOG_LEVEL, "", std::string)
 
 static void SetGlogMinLogLevel(const std::string& log_level) {
-  if (log_level == "info") {
+  if (log_level == "info" || log_level == "INFO" || log_level == "verbose") {
     FLAGS_minloglevel = google::GLOG_INFO;
-  } else if (log_level == "warning") {
+  } else if (log_level == "warning" || log_level == "WARNING" ||
+             log_level == "warn") {
     FLAGS_minloglevel = google::GLOG_WARNING;
-  } else if (log_level == "error") {
+  } else if (log_level == "error" || log_level == "ERROR") {
     FLAGS_minloglevel = google::GLOG_ERROR;
-  } else if (log_level == "fatal") {
+  } else if (log_level == "fatal" || log_level == "FATAL") {
     FLAGS_minloglevel = google::GLOG_FATAL;
+  } else {
+    FLAGS_minloglevel = google::GLOG_ERROR;
   }
 }
 
