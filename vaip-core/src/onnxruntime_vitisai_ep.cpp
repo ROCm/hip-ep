@@ -24,21 +24,31 @@
 #include "morphizen/onnxruntime_api.hpp"
 #include "morphizen/op_def.hpp"
 #include "morphizen/vaip.hpp"
+#include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <glog/logging.h>
 DEF_ENV_PARAM(MORPHIZEN_SUPRRESS_DEPRECATED_WARNG, "1")
 DEF_ENV_PARAM(DEBUG_OP_REGISTER, "0")
 DEF_ENV_PARAM_2(DEBUG_LOG_LEVEL, "", std::string)
 
+static inline std::string to_lower(const std::string& str) {
+  std::string result = str;
+  std::transform(result.begin(), result.end(), result.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return result;
+}
+
 static void SetGlogMinLogLevel(const std::string& log_level) {
-  if (log_level == "info" || log_level == "INFO" || log_level == "verbose") {
+  std::string level_lower = to_lower(log_level);
+
+  if (level_lower == "info") {
     FLAGS_minloglevel = google::GLOG_INFO;
-  } else if (log_level == "warning" || log_level == "WARNING" ||
-             log_level == "warn") {
+  } else if (level_lower == "warning") {
     FLAGS_minloglevel = google::GLOG_WARNING;
-  } else if (log_level == "error" || log_level == "ERROR") {
+  } else if (level_lower == "error") {
     FLAGS_minloglevel = google::GLOG_ERROR;
-  } else if (log_level == "fatal" || log_level == "FATAL") {
+  } else if (level_lower == "fatal") {
     FLAGS_minloglevel = google::GLOG_FATAL;
   } else {
     FLAGS_minloglevel = google::GLOG_ERROR;
