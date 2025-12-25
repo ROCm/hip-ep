@@ -6,6 +6,7 @@ cmake_minimum_required(VERSION 3.5)
 project(morphizen-graph-opt VERSION 1.0.0 LANGUAGES C CXX)
 
 find_package(glog REQUIRED)
+find_package(Boost REQUIRED COMPONENTS program_options)
 find_package(onnxruntime REQUIRED)
 set(EXEC_NAME morphizen-graph-opt)
 add_executable(${EXEC_NAME} graph-opt.cpp ${ryzenai_version_rc_file})
@@ -16,7 +17,8 @@ target_include_directories(${EXEC_NAME}
 target_link_libraries(${EXEC_NAME} PRIVATE
   ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET}
 	glog::glog
-  onnxruntime::onnxruntime)
+  onnxruntime::onnxruntime
+  Boost::program_options)
 target_link_options(${EXEC_NAME} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_LINKER_OPTIONS}>")
 set_target_properties(${EXEC_NAME} PROPERTIES FOLDER morphizen/tools)
 install(TARGETS ${EXEC_NAME} DESTINATION bin)

@@ -8,6 +8,7 @@ project(
   VERSION 1.0.0
   LANGUAGES C CXX)
 find_package(glog REQUIRED)
+find_package(Boost REQUIRED COMPONENTS program_options)
 set(EXEC_NAME morphizen-pattern-gen)
 add_executable(${EXEC_NAME} onnx_pattern_gen.cpp ${ryzenai_version_rc_file})
 target_include_directories(${EXEC_NAME}
@@ -15,7 +16,7 @@ target_include_directories(${EXEC_NAME}
 find_package(onnxruntime REQUIRED)
 target_link_libraries(${EXEC_NAME} PRIVATE
     morphizen-core-static
-    onnxruntime::onnxruntime glog::glog)
+    onnxruntime::onnxruntime glog::glog Boost::program_options)
 set(ARGS
 	"-f ${CMAKE_CURRENT_BINARY_DIR}/../unit-test/pt_resnet50.onnx")
 string(APPEND ARGS " -m ${CMAKE_CURRENT_BINARY_DIR}/conv_relu_maxpool.mmd")

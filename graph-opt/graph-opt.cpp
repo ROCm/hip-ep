@@ -7,65 +7,86 @@
 #include <filesystem>
 #include <limits>
 #include <glog/logging.h>
+#include <boost/program_options.hpp>
 #include "onnxruntime_cxx_api.h"
 #include "morphizen/vaip.hpp"
 // clang-format on
 
-extern "C" {
-#include "getopt.h"
-}
-
+namespace po = boost::program_options;
 using namespace vaip_core;
 using namespace std;
 
-static void usage(const char* prog) {
-  std::cout << "Usage: " << prog
-            << " -i <input_onnx_model> -o <output_onnx_model> -t "
-               "<output_txt_file> -p <vaip-pass_1> [vaip-pass_2 ...] [-h]"
-            << std::endl;
-  std::cout << "\t-i <input_onnx_model> : input onnx model file" << std::endl;
-  std::cout << "\t-o <output_onnx_model> : output onnx model file" << std::endl;
-  std::cout << "\t-t <output_txt_file> : output model to txt file" << std::endl;
-  std::cout << "\t-p <vaip-pass_1> [vaip-pass_2 ...] : pass list" << std::endl;
-  std::cout << "\t-h : help" << std::endl;
-  return;
+// Validate file path to mitigate path traversal risks
+static bool validate_path(const std::string& path,
+                          const std::string& param_name) {
+  if (path.empty()) {
+    return true; // Empty paths are handled by subsequent checks
+  }
+
+  // Check for null bytes (potential for path truncation attacks)
+  if (path.find('\0') != std::string::npos) {
+    std::cerr << "Error: " << param_name << " contains null byte: " << path
+              << std::endl;
+    return false;
+  }
+
+  // Warn about suspicious patterns but don't block them (users may legitimately
+  // need them)
+  if (path.find("..") != std::string::npos) {
+    std::cerr << "Warning: " << param_name << " contains '..': " << path
+              << std::endl;
+  }
+
+  return true;
 }
 
 int main(int argc, char* argv[]) {
   try {
-    auto opt_input_file = std::string();
-    auto opt_cache = std::string();
-    auto opt_output_file = std::string();
-    auto opt_output_txt_file = std::string();
-    auto opt_pass = std::vector<std::string>();
-    int opt = 0;
-    while ((opt = getopt(argc, argv, "i:o:t:c:p:h")) != -1) {
-      switch (opt) {
-      case 'i': {
-        opt_input_file = std::string(optarg);
-        break;
-      }
-      case 'o': {
-        opt_output_file = std::string(optarg);
-        break;
-      }
-      case 't': {
-        opt_output_txt_file = std::string(optarg);
-        break;
-      }
-      case 'p': {
-        opt_pass.push_back(std::string(optarg));
-        break;
-      }
-      case 'c': {
-        opt_cache = std::string(optarg);
-        break;
-      }
-      case 'h': {
-        usage(argv[0]);
-        exit(0);
-      }
-      }
+    // Define command line options
+    po::options_description desc("Allowed options");
+    desc.add_options()("help,h", "produce help message")(
+        "input,i", po::value<std::string>(), "input onnx model file")(
+        "output,o", po::value<std::string>(), "output onnx model file")(
+        "output-txt,t", po::value<std::string>(), "output model to txt file")(
+        "cache,c", po::value<std::string>(), "cache file")(
+        "pass,p", po::value<std::vector<std::string>>()->multitoken(),
+        "pass list (can be specified multiple times)");
+
+    po::variables_map vm;
+    po::store(po::parse_command_line(argc, argv, desc), vm);
+    po::notify(vm);
+
+    // Handle help option
+    if (vm.count("help")) {
+      std::cout << "Usage: " << argv[0] << " [options]\n" << desc << std::endl;
+      return 0;
+    }
+
+    // Extract option values
+    auto opt_input_file =
+        vm.count("input") ? vm["input"].as<std::string>() : std::string();
+    auto opt_output_file =
+        vm.count("output") ? vm["output"].as<std::string>() : std::string();
+    auto opt_output_txt_file = vm.count("output-txt")
+                                   ? vm["output-txt"].as<std::string>()
+                                   : std::string();
+    auto opt_cache =
+        vm.count("cache") ? vm["cache"].as<std::string>() : std::string();
+    auto opt_pass = vm.count("pass") ? vm["pass"].as<std::vector<std::string>>()
+                                     : std::vector<std::string>();
+
+    // Validate all paths at entry point
+    if (!validate_path(opt_input_file, "input")) {
+      return 1;
+    }
+    if (!validate_path(opt_output_file, "output")) {
+      return 1;
+    }
+    if (!validate_path(opt_output_txt_file, "output-txt")) {
+      return 1;
+    }
+    if (!validate_path(opt_cache, "cache")) {
+      return 1;
     }
 
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "morphizen-graph-opt");
@@ -113,5 +134,3 @@ int main(int argc, char* argv[]) {
 
   return 0;
 }
-
-#include "getopt.c"

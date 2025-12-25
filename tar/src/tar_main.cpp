@@ -3,17 +3,42 @@
  * Licensed under the MIT License.
  */
 
-extern "C" {
-#include "getopt.h"
-}
 #include "../vaip-core/src/tar_file.hpp"
 #include "../vaip-core/src/tar_header.hpp"
+#include <boost/program_options.hpp>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+
+namespace po = boost::program_options;
 using std::cerr;
 using std::cout;
 using std::endl;
+
+// Validate file path to mitigate path traversal risks
+static bool validate_path(const std::string& path,
+                          const std::string& param_name) {
+  if (path.empty()) {
+    return false;
+  }
+
+  // Check for null bytes (potential for path truncation attacks)
+  if (path.find('\0') != std::string::npos) {
+    std::cerr << "Error: " << param_name << " contains null byte: " << path
+              << std::endl;
+    return false;
+  }
+
+  // Warn about suspicious patterns but don't block them (users may legitimately
+  // need them)
+  if (path.find("..") != std::string::npos) {
+    std::cerr << "Warning: " << param_name << " contains '..': " << path
+              << std::endl;
+  }
+
+  return true;
+}
+
 template <typename T> static std::string get_readable_path(const T& entry) {
   return (entry.path() + (!entry.is_symlink() ? std::string("")
                                               : std::string(" -> ") +
@@ -101,40 +126,46 @@ static int list_header_tar(const char* file) {
   return 0;
 }
 int main(int argc, char* argv[]) {
-  int opt = 0;
-  int list_flag = 0;
-  int header_flag = 0;
-  const char* file = nullptr;
-  while ((opt = getopt(argc, argv, "lh")) != -1) {
-    switch (opt) {
-    case 'l': {
-      list_flag = 1;
-      break;
-    }
-    case 'h': {
-      header_flag = 1;
-      break;
-    }
-    default: {
-      std::cerr << "Usage: " << argv[0] << " [-l]" << std::endl;
-      return 1;
-    }
-    }
+  // Define command line options
+  po::options_description desc("Allowed options");
+  desc.add_options()("help", "produce help message")(
+      "list,l", "list tar file contents")("header,h", "list tar headers")(
+      "file", po::value<std::string>(), "tar file to process");
+
+  po::positional_options_description p;
+  p.add("file", 1);
+
+  po::variables_map vm;
+  po::store(
+      po::command_line_parser(argc, argv).options(desc).positional(p).run(),
+      vm);
+  po::notify(vm);
+
+  // Handle help option
+  if (vm.count("help") || !vm.count("file")) {
+    std::cout << "Usage: " << argv[0] << " [options] <file>\n"
+              << desc << std::endl;
+    return vm.count("help") ? 0 : 1;
   }
-  if (optind < argc) {
-    file = argv[optind];
-  } else {
-    std::cerr << "Usage: " << argv[0] << " [-l] <file>" << std::endl;
+
+  // Extract option values
+  auto file_str = vm["file"].as<std::string>();
+  bool list_flag = vm.count("list") > 0;
+  bool header_flag = vm.count("header") > 0;
+
+  // Validate path at entry point
+  if (!validate_path(file_str, "file")) {
     return 1;
   }
+
   if (list_flag) {
-    list_tar(file);
+    list_tar(file_str.c_str());
   } else if (header_flag) {
-    list_header_tar(file);
+    list_header_tar(file_str.c_str());
   } else {
-    std::cerr << "Usage: " << argv[0] << " [-l] <file>" << std::endl;
+    std::cerr << "Usage: " << argv[0] << " [--list | --header] <file>"
+              << std::endl;
     return 1;
   }
   return 0;
 }
-#include "getopt.c"

@@ -6,12 +6,31 @@
 #include <glog/logging.h>
 #include <exception>
 #include <limits>
+#include <boost/program_options.hpp>
 #define ORT_API_MANUAL_INIT 1
 #include "onnxruntime_cxx_api.h"
 #include "morphizen/vaip.hpp"
 
-extern "C" {
-#include "./getopt.h"
+namespace po = boost::program_options;
+
+// Validate file path to mitigate path traversal risks
+static bool validate_path(const std::string& path, const std::string& param_name) {
+  if (path.empty()) {
+    return true;  // Empty paths are handled by subsequent checks
+  }
+
+  // Check for null bytes (potential for path truncation attacks)
+  if (path.find('\0') != std::string::npos) {
+    std::cerr << "Error: " << param_name << " contains null byte: " << path << std::endl;
+    return false;
+  }
+
+  // Warn about suspicious patterns but don't block them (users may legitimately need them)
+  if (path.find("..") != std::string::npos) {
+    std::cerr << "Warning: " << param_name << " contains '..': " << path << std::endl;
+  }
+
+  return true;
 }
 
 #ifdef CREATE_DUMMY_SESSION
@@ -47,51 +66,41 @@ static std::shared_ptr<vaip_core::Pattern> get_pattern(const std::string& file) 
   return ret;
 }
 
-static void usage(const char* prog) {
-  std::cout << "Usage: " << prog
-            << " -f <onnx_model> -p <pattern_file> [-n <node_arg>] [-v]"
-            << std::endl;
-  std::cout << "    -f <onnx_model> : onnx model file" << std::endl;
-  std::cout
-      << "    -p <pattern_file> : pattern file, can be json or python"
-      << std::endl;
-  std::cout << "    -n <node_arg> : node arg name to trace" << std::endl;
-  std::cout << "    -v : verbose mode" << std::endl;
-  std::cout << "    -h : help" << std::endl;
-}
-
 int main(int argc, char* argv[]) {
   Ort::InitApi();
   std::cout << "- ONNX Grep utility ..." << std::endl;
   try {
-    auto file = std::string();
-    auto pattern = std::string();
-    auto node_arg = std::string();
-    auto opt_verbose = false;
-    int opt = 0;
-    while ((opt = getopt(argc, argv, "p:f:n:vh")) != -1) {
-      switch (opt) {
-      case 'f': {
-        file = std::string(optarg);
-        break;
-      }
-      case 'p': {
-        pattern = std::string(optarg);
-        break;
-      }
-      case 'n': {
-        node_arg = std::string(optarg);
-        break;
-      }
-      case 'v': {
-        opt_verbose = true;
-        break;
-      }
-      case 'h': {
-        usage(argv[0]);
-        exit(0);
-      }
-      }
+    // Define command line options
+    po::options_description desc("Allowed options");
+    desc.add_options()
+        ("help,h", "produce help message")
+        ("file,f", po::value<std::string>(), "onnx model file")
+        ("pattern,p", po::value<std::string>(), "pattern file (can be json or python)")
+        ("node-arg,n", po::value<std::string>(), "node arg name to trace")
+        ("verbose,v", "verbose mode");
+
+    po::variables_map vm;
+    po::store(po::parse_command_line(argc, argv, desc), vm);
+    po::notify(vm);
+
+    // Handle help option
+    if (vm.count("help")) {
+      std::cout << "Usage: " << argv[0] << " [options]\n" << desc << std::endl;
+      return 0;
+    }
+
+    // Extract option values
+    auto file = vm.count("file") ? vm["file"].as<std::string>() : std::string();
+    auto pattern = vm.count("pattern") ? vm["pattern"].as<std::string>() : std::string();
+    auto node_arg = vm.count("node-arg") ? vm["node-arg"].as<std::string>() : std::string();
+    auto opt_verbose = vm.count("verbose") > 0;
+
+    // Validate paths at entry point
+    if (!validate_path(file, "file")) {
+      return 1;
+    }
+    if (!validate_path(pattern, "pattern")) {
+      return 1;
     }
 
     Ort::Env env(ORT_LOGGING_LEVEL_ERROR, "onnx_grep");
@@ -149,5 +158,3 @@ int main(int argc, char* argv[]) {
 
   return 0;
 }
-
-#include "./getopt.c"

@@ -12,10 +12,33 @@
 #include <fstream>
 #include <unordered_map>
 #include <exception>
+#include <boost/program_options.hpp>
 #define ORT_API_MANUAL_INIT 1
 #include "onnxruntime_cxx_api.h"
 #include "morphizen/vaip.hpp"
 #include "morphizen/env_config.hpp"
+
+namespace po = boost::program_options;
+
+// Validate file path to mitigate path traversal risks
+static bool validate_path(const std::string& path, const std::string& param_name) {
+  if (path.empty()) {
+    return true;  // Empty paths are handled by subsequent checks
+  }
+
+  // Check for null bytes (potential for path truncation attacks)
+  if (path.find('\0') != std::string::npos) {
+    std::cerr << "Error: " << param_name << " contains null byte: " << path << std::endl;
+    return false;
+  }
+
+  // Warn about suspicious patterns but don't block them (users may legitimately need them)
+  if (path.find("..") != std::string::npos) {
+    std::cerr << "Warning: " << param_name << " contains '..': " << path << std::endl;
+  }
+
+  return true;
+}
 
 DEF_ENV_PARAM(IGNORE_CONSTANT, "1")
 DEF_ENV_PARAM_2(NODE_FORMAT, "$cxx_name<br>$shape, id=$pattern_id, ty=$type<br>$node_arg_name",std::string)
@@ -23,10 +46,6 @@ DEF_ENV_PARAM_2(INPUT_FORMAT, "$cxx_name<br>$shape, id=$pattern_id, ty=$type<br>
 DEF_ENV_PARAM_2(CONSTANT_FORMAT, "$cxx_name<br>$shape, id=$pattern_id, ty=$type<br>$node_arg_name",std::string)
 DEF_ENV_PARAM(ENABLE_CONSTANT_SHARING, "0")
 
-
-extern "C" {
-#include "./getopt.h"
-}
 // clang-format on
 
 namespace {
@@ -671,17 +690,6 @@ std::vector<vaip_cxx::NodeConstRef> get_nodes(vaip_cxx::GraphConstRef graph,
             [](const auto& a, const auto& b) { return a.index() < b.index(); });
   return nodes;
 }
-static void usage(const char* programName) {
-  std::cout << "Usage: " << programName << " [options]\n"
-            << "Options:\n"
-            << " -i <input>   Specify input of an onnx model\n"
-            << " -o <output>  Specify output of an onnx model\n"
-            << " -f <file>    Specify file of an onnx model\n"
-            << " -c <file>    Specify C++ output file\n"
-            << " -m <file>    Specify mermaid output file\n"
-            << " -j <file>    Specify json output file\n"
-            << " -h           Display this help message\n";
-}
 
 // example usage:
 
@@ -691,50 +699,64 @@ static void usage(const char* programName) {
 int main(int argc, char* argv[]) {
   Ort::InitApi();
   try {
-    auto opt_onnx_file = std::string();
-    int opt = 0;
-    auto opt_cxx_output_file = std::string("");
-    auto opt_mmd_output_file = std::string("");
-    auto opt_json_output_file = std::string("");
-    auto opt_onnx_output_file = std::string("");
-    auto opt_inputs = std::vector<std::string>{};
-    auto opt_outputs = std::vector<std::string>{};
-    while ((opt = getopt(argc, argv, "f:i:o:c:m:j:x:h")) != -1) {
-      switch (opt) {
-      case 'i': {
-        opt_inputs.push_back(std::string(optarg));
-        break;
-      }
-      case 'o': {
-        opt_outputs.push_back(std::string(optarg));
-        break;
-      }
-      case 'f': {
-        opt_onnx_file = std::string(optarg);
-        break;
-      }
-      case 'c': {
-        opt_cxx_output_file = std::string(optarg);
-        break;
-      }
-      case 'm': {
-        opt_mmd_output_file = std::string(optarg);
-        break;
-      }
-      case 'j': {
-        opt_json_output_file = std::string(optarg);
-        break;
-      }
-      case 'x': {
-        opt_onnx_output_file = std::string(optarg);
-        break;
-      }
-      case 'h': {
-        usage(argv[0]);
-        exit(0);
-      }
-      }
+    // Define command line options
+    po::options_description desc("Allowed options");
+    desc.add_options()("help,h", "produce help message")(
+        "input,i", po::value<std::vector<std::string>>()->multitoken(),
+        "input of an onnx model (can be specified multiple times)")(
+        "output,o", po::value<std::vector<std::string>>()->multitoken(),
+        "output of an onnx model (can be specified multiple times)")(
+        "file,f", po::value<std::string>(), "file of an onnx model")(
+        "cxx,c", po::value<std::string>(), "C++ output file")(
+        "mermaid,m", po::value<std::string>(), "mermaid output file")(
+        "json,j", po::value<std::string>(), "json output file")(
+        "onnx,x", po::value<std::string>(), "onnx output file");
+
+    po::variables_map vm;
+    po::store(po::parse_command_line(argc, argv, desc), vm);
+    po::notify(vm);
+
+    // Handle help option
+    if (vm.count("help")) {
+      std::cout << "Usage: " << argv[0] << " [options]\n" << desc << std::endl;
+      return 0;
     }
+
+    // Extract option values
+    auto opt_onnx_file =
+        vm.count("file") ? vm["file"].as<std::string>() : std::string();
+    auto opt_cxx_output_file =
+        vm.count("cxx") ? vm["cxx"].as<std::string>() : std::string("");
+    auto opt_mmd_output_file =
+        vm.count("mermaid") ? vm["mermaid"].as<std::string>() : std::string("");
+    auto opt_json_output_file =
+        vm.count("json") ? vm["json"].as<std::string>() : std::string("");
+    auto opt_onnx_output_file =
+        vm.count("onnx") ? vm["onnx"].as<std::string>() : std::string("");
+    auto opt_inputs = vm.count("input")
+                          ? vm["input"].as<std::vector<std::string>>()
+                          : std::vector<std::string>{};
+    auto opt_outputs = vm.count("output")
+                           ? vm["output"].as<std::vector<std::string>>()
+                           : std::vector<std::string>{};
+
+    // Validate all paths at entry point
+    if (!validate_path(opt_onnx_file, "file")) {
+      return 1;
+    }
+    if (!validate_path(opt_cxx_output_file, "cxx")) {
+      return 1;
+    }
+    if (!validate_path(opt_mmd_output_file, "mermaid")) {
+      return 1;
+    }
+    if (!validate_path(opt_json_output_file, "json")) {
+      return 1;
+    }
+    if (!validate_path(opt_onnx_output_file, "onnx")) {
+      return 1;
+    }
+
     // intialize the main function.
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "onnx_pattern_gen");
     Ort::SessionOptions().AppendExecutionProvider_VitisAI();
@@ -800,5 +822,3 @@ int main(int argc, char* argv[]) {
 
   return 0;
 }
-
-#include "./getopt.c"

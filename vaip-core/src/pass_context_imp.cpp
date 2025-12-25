@@ -9,6 +9,13 @@
 #include <google/protobuf/util/json_util.h>
 #include <stdexcept>
 
+#ifdef _WIN32
+#  include <fcntl.h>
+#  include <io.h>
+#  include <share.h>
+#  include <sys/stat.h>
+#endif
+
 #include "./cache_dir.hpp"
 #include "config.hpp"
 #include "ep_shared_context_workspace.hpp"
@@ -642,7 +649,19 @@ PassContextImp::open_file_for_write(const std::string& filename) {
       std::filesystem::create_directories(tmp_dir);
     }
 #ifdef _WIN32
-    tmp_file = _wfopen((get_log_dir() / filename).c_str(), L"wb+");
+    int fd;
+    errno_t err = _wsopen_s(&fd, (get_log_dir() / filename).c_str(),
+                            _O_CREAT | _O_RDWR | _O_BINARY | _O_TRUNC,
+                            _SH_DENYNO,            // Share mode
+                            _S_IREAD | _S_IWRITE); // User read/write only
+    if (err == 0 && fd != -1) {
+      tmp_file = _fdopen(fd, "wb+");
+      if (tmp_file == nullptr) {
+        _close(fd); // Close fd if fdopen fails
+      }
+    } else {
+      tmp_file = nullptr;
+    }
 #else
     tmp_file = std::fopen((get_log_dir() / filename).c_str(), "wb+");
 #endif //  _WIN32
