@@ -13,7 +13,6 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/compiler_options.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/morphizen_options.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/extra_functions.cmake)
-
 # loads the functions precompile_version_rc and add_version_rc_to_listed_targets
 list(APPEND CMAKE_MODULE_PATH
   ${CMAKE_CURRENT_SOURCE_DIR}/3rd-party/ryzenai_bin_metadata
@@ -24,6 +23,7 @@ binmetadata_precompile_version_rc(3rd-party/ryzenai_bin_metadata)
 # Add utility library first (other projects may depend on it)
 add_subdirectory(morphizen-utils)
 add_subdirectory(vaip_io)
+add_subdirectory(mem_binary)
 add_subdirectory(encryption)
 add_subdirectory(vaip-core)
 if(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC)

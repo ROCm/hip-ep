@@ -805,18 +805,18 @@ std::filesystem::path PassContextImp::xclbin_path_to_cache_files(
     return ret;
   }
 
-  std::vector<char> buffer;
-  if (has_mem_binary(filename)) {
-    buffer = get_mem_binary(filename);
+  std::optional<gsl::span<const char>> span = get_mem_binary_span(filename);
+  if (span.has_value()) {
+    const_cast<PassContextImp*>(this)->write_file(filename, *span);
   } else if (std::filesystem::is_regular_file(path, ec)) {
-    buffer = read_file_to_buffer(path);
+    std::vector<char> buffer = read_file_to_buffer(path);
+    const_cast<PassContextImp*>(this)->write_file(filename, buffer);
   } else {
     LOG(WARNING) << "Xclbin path doesn't exist, are you running with cpu "
                     "runner? Path: "
                  << path.string();
     return path;
   }
-  const_cast<PassContextImp*>(this)->write_file(filename, buffer);
   return ret;
 }
 

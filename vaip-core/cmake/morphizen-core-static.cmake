@@ -16,14 +16,6 @@ vaip_add_remote_target(
 )
 
 add_custom_command (
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/mem_binary_file.hpp.inc
-  COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../tools"
-  $<TARGET_FILE:Python3::Interpreter> ${CMAKE_CURRENT_SOURCE_DIR}/src/binary/compress_binary.py
-  ${CMAKE_CURRENT_BINARY_DIR}/mem_binary_file.hpp.inc
-  "${VAIP_EMBEDDED_RESOURCE_PATH}"
-)
-
-add_custom_command (
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/config_json_binary.hpp ${CMAKE_CURRENT_BINARY_DIR}/vaip_config.json
   COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../tools"
   $<TARGET_FILE:Python3::Interpreter> ${CMAKE_CURRENT_SOURCE_DIR}/src/binary/config_json_binary.hpp.py
@@ -84,9 +76,6 @@ add_library(${LIB_NAME} STATIC
   src/node.cpp
   src/profile_utils.hpp
   src/profile_utils.cpp
-  ${CMAKE_CURRENT_BINARY_DIR}/mem_binary_file.hpp.inc
-  include/morphizen/mem_binary.hpp
-  src/binary/mem_binary.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/xclbin.h
   include/morphizen/xclbin_file.hpp
   src/binary/xclbin_file.cpp
@@ -197,7 +186,7 @@ target_include_directories(${LIB_NAME}
 
 set(MorphiZen_DEPS protobuf::libprotobuf
   vaip_io
-  glog::glog Eigen3::Eigen morphizen::encryption ZLIB::ZLIB Microsoft.GSL::GSL morphizen-utils vaip-ort-api-ext)
+  glog::glog Eigen3::Eigen morphizen::encryption morphizen::mem_binary ZLIB::ZLIB Microsoft.GSL::GSL morphizen-utils vaip-ort-api-ext)
 target_link_libraries(${LIB_NAME} PUBLIC ${MorphiZen_DEPS})
 target_compile_definitions(${LIB_NAME}
   PUBLIC
