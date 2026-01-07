@@ -3,14 +3,14 @@
 syntax = "proto3";
 package hipdnn;
 message HipdnnParamProto {
-  string sample_string = 1;
-  int32 sample_int = 2;
-  repeated string sample_strings = 4;
-  repeated int32 sample_ints = 5;
-  string ep_context_file_name = 6;
-  int32 ep_context_file_size = 7;
   // HIP DNN specific parameters
-  string device_id = 8;
-  string kernel_type = 9;
-  repeated float kernel_params = 10;
+  string device_id = 1;
+  string kernel_type = 2;
+  
+  // Conv operation parameters
+  string op_type = 3;
+  repeated int64 pads = 4;
+  repeated int64 strides = 5;
+  repeated int64 dilations = 6;
+  int64 group = 7;
 }

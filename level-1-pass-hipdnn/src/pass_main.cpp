@@ -28,6 +28,7 @@ struct Level1HipDnn {
               *graph, *binder["input"].node_arg);
           auto output = vaip_cxx::NodeArgConstRef::from_node_arg(
               *graph, *binder["output"].node_arg);
+          auto conv_node = binder["hipdnn_op"].node;
           auto unique_id = output.name();
           auto [meta_def, fuse_error] =
               self_.try_fuse(*graph, unique_id, {input.name()}, {output.name()},
@@ -38,30 +39,36 @@ struct Level1HipDnn {
           } else {
             MY_LOG(1) << "merge hipdnn operation";
             auto hipdnn_param = hipdnn::HipdnnParamProto();
-            *hipdnn_param.mutable_sample_string() = "hipdnn_op";
-            hipdnn_param.set_sample_int(1);
-            hipdnn_param.add_sample_strings(input.name());
-            hipdnn_param.add_sample_strings(output.name());
-            hipdnn_param.set_device_id("0");
-            hipdnn_param.set_kernel_type("default");
             
-            // demo for writing a file into ep context model
-            auto ep_context_file_name = output.name() + ".dat";
-            hipdnn_param.set_ep_context_file_name(ep_context_file_name);
-            auto stream =
-                self_.get_context()->open_file_for_write(ep_context_file_name);
-            if (stream == nullptr) {
-              MY_LOG(1) << "open file error " << ep_context_file_name;
-              return false;
+            // Set device and kernel type
+            hipdnn_param.set_device_id("0");
+            hipdnn_param.set_kernel_type("conv");
+            
+            // Extract Conv attributes from the node
+            hipdnn_param.set_op_type(node_get_op_type(*conv_node));
+            auto pads_attr = node_get_attr_ints(*conv_node, "pads");
+            if (pads_attr.has_value()) {
+              for (auto pad : pads_attr.value()) {
+                hipdnn_param.add_pads(pad);
+              }
             }
-            std::string sample_content =
-                "HIP DNN kernel data for tensor " + output.name();
-            CHECK_EQ(
-                stream->fwrite(sample_content.c_str(), sample_content.size()),
-                sample_content.size())
-                << "write file error " << ep_context_file_name;
-            stream.reset(); // close file
-            hipdnn_param.set_ep_context_file_size(sample_content.size());
+            auto strides_attr = node_get_attr_ints(*conv_node, "strides");
+            if (strides_attr.has_value()) {
+              for (auto stride : strides_attr.value()) {
+                hipdnn_param.add_strides(stride);
+              }
+            }
+            auto dilations_attr = node_get_attr_ints(*conv_node, "dilations");
+            if (dilations_attr.has_value()) {
+              for (auto dilation : dilations_attr.value()) {
+                hipdnn_param.add_dilations(dilation);
+              }
+            }
+            auto group_attr = node_get_attr_int(*conv_node, "group");
+            if (group_attr.has_value()) {
+              hipdnn_param.set_group(group_attr.value());
+            }
+            
             auto hipdnn_json_str = std::string();
             auto status = google::protobuf::util::MessageToJsonString(
                 hipdnn_param, &hipdnn_json_str);

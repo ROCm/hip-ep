@@ -25,7 +25,7 @@ namespace hipdnn {
 		const std::shared_ptr<MetaDefProto>& meta_def,
 		onnxruntime::Model* model)
 		: CustomOpImp(context, meta_def, model){
-		MY_LOG(1) << "HipdnnCustomOp constructor: ";
+		MY_LOG(1) << "HipdnnCustomOp constructor";
 		auto hipdnn_json_str = get_meta_def_param();
 		auto status = google::protobuf::util::JsonStringToMessage(hipdnn_json_str,&hipdnn_proto_);
 		if(status.ok()) {
@@ -34,19 +34,9 @@ namespace hipdnn {
 			LOG(FATAL) << "failed to parse hipdnn_json_str: " << status.ToString();
 			return;
 		}
-		std::string ep_context_data;
-		ep_context_data.resize((size_t)hipdnn_proto_.ep_context_file_size());
-		auto dat_file = context->open_file_for_read(hipdnn_proto_.ep_context_file_name());
-		if(dat_file == nullptr) {
-			LOG(FATAL) << "failed to open file: " << hipdnn_proto_.ep_context_file_name();
-		}
-		auto read_size = dat_file->fread(ep_context_data.data(), hipdnn_proto_.ep_context_file_size());
-		if(read_size != hipdnn_proto_.ep_context_file_size()) {
-			LOG(FATAL) << "failed to read file: " << hipdnn_proto_.ep_context_file_name();
-		}
-		LOG(INFO) << "read ep_context_data size: " << ep_context_data;
 		LOG(INFO) << "HIP DNN device_id: " << hipdnn_proto_.device_id();
 		LOG(INFO) << "HIP DNN kernel_type: " << hipdnn_proto_.kernel_type();
+		LOG(INFO) << "HIP DNN op_type: " << hipdnn_proto_.op_type();
 	}
 
 	HipdnnCustomOp::~HipdnnCustomOp() {}
@@ -72,6 +62,31 @@ namespace hipdnn {
 		LOG(INFO) << "num_inputs " << num_inputs << " "   //
 			<< "num_outputs " << num_outputs << " " //
 			;
+		
+		// Log Conv operation parameters
+		MY_LOG(1) << "Op type: " << hipdnn_proto_.op_type();
+		MY_LOG(1) << "Kernel type: " << hipdnn_proto_.kernel_type();
+		
+		if (hipdnn_proto_.op_type() == "Conv") {
+			MY_LOG(1) << "Conv operation detected";
+			MY_LOG(1) << "Pads: [";
+			for (auto i = 0; i < hipdnn_proto_.pads_size(); ++i) {
+				MY_LOG(1) << hipdnn_proto_.pads(i) << (i < hipdnn_proto_.pads_size() - 1 ? ", " : "");
+			}
+			MY_LOG(1) << "]";
+			MY_LOG(1) << "Strides: [";
+			for (auto i = 0; i < hipdnn_proto_.strides_size(); ++i) {
+				MY_LOG(1) << hipdnn_proto_.strides(i) << (i < hipdnn_proto_.strides_size() - 1 ? ", " : "");
+			}
+			MY_LOG(1) << "]";
+			MY_LOG(1) << "Dilations: [";
+			for (auto i = 0; i < hipdnn_proto_.dilations_size(); ++i) {
+				MY_LOG(1) << hipdnn_proto_.dilations(i) << (i < hipdnn_proto_.dilations_size() - 1 ? ", " : "");
+			}
+			MY_LOG(1) << "]";
+			MY_LOG(1) << "Group: " << hipdnn_proto_.group();
+		}
+		
 		auto tensor_shape = std::vector<int64_t>();
 		for (auto idx = 0u; idx < num_inputs; ++idx) {
 			auto input_tensor = ctx.GetInput(idx);
@@ -86,18 +101,6 @@ namespace hipdnn {
 				<< "shape: " << shape_to_string(tensor_shape);
 		}
 
-		MY_LOG(1) << "sample_string: " << hipdnn_proto_.sample_string();
-		MY_LOG(1) << "sample_int: " << hipdnn_proto_.sample_int();
-		auto index = 0u;
-		for(auto str : hipdnn_proto_.sample_strings()) {
-			MY_LOG(1) << "sample_string[" << index << "]: " << str;
-			index = index + 1;
-		}
-		index = 0u;
-		for(auto i : hipdnn_proto_.sample_ints()) {
-			MY_LOG(1) << "sample_int[" << index << "]: " << i;
-			index = index + 1;
-		}
 		auto idx = 0u;
 		// NOTE: must call this GetOutput function, otherwise the output tensor will not be created
 		// it will crash when trying to access the output tensor
@@ -109,12 +112,30 @@ namespace hipdnn {
 			<< "tensor_type " << tensor_type << " " //
 			<< "shape: " << shape_to_string(tensor_shape);
 		
-		// HIP DNN kernel execution placeholder
-		auto in_base = ctx.GetInput(idx).GetTensorData<float>();
-  		auto out_base = output_tensor.GetTensorMutableData<int8_t>();
-		for(auto i = 0; i < element_num; ++i) {
-			// TODO: Replace with actual HIP DNN kernel implementation
-			out_base[i] = static_cast<int8_t>(in_base[i]);
+		// HIP DNN kernel execution
+		if (hipdnn_proto_.op_type() == "Conv") {
+			// TODO: Implement actual hipDNN Conv execution
+			// For now, this is a placeholder that demonstrates the structure
+			// In a real implementation, you would:
+			// 1. Create hipDNN graph with Conv operation using captured parameters
+			// 2. Build and compile the graph
+			// 3. Execute with variant pack mapping tensors to device memory
+			
+			auto in_base = ctx.GetInput(idx).GetTensorData<float>();
+			auto out_base = output_tensor.GetTensorMutableData<float>();
+			
+			// Placeholder: copy input to output
+			// Replace with hipDNN Conv execution
+			for(auto i = 0; i < element_num; ++i) {
+				out_base[i] = in_base[i];
+			}
+		} else {
+			// Fallback for non-Conv operations
+			auto in_base = ctx.GetInput(idx).GetTensorData<float>();
+			auto out_base = output_tensor.GetTensorMutableData<int8_t>();
+			for(auto i = 0; i < element_num; ++i) {
+				out_base[i] = static_cast<int8_t>(in_base[i]);
+			}
 		}
 		return;
 	}
