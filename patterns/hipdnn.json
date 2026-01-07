@@ -1,0 +1,23 @@
+{
+  "pattern": {
+    "version": "1.0",
+    "name": "hipdnn",
+    "description": "HIP DNN operation pattern",
+    "nodes": [
+      {
+        "id": "input",
+        "op_type": "Input"
+      },
+      {
+        "id": "hipdnn_op",
+        "op_type": "Conv",
+        "inputs": ["input"]
+      },
+      {
+        "id": "output",
+        "op_type": "Output",
+        "inputs": ["hipdnn_op"]
+      }
+    ]
+  }
+}
