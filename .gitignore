@@ -1,0 +1,59 @@
+# Build directories
+build/
+bin/
+lib/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CMakePresets.json
+*.cmake.in
+
+# IDE
+.vscode/
+.vs/
+*.user
+*.suo
+*.sln
+*.vcxproj
+*.vcxproj.filters
+
+# Generated files
+*.pb.cc
+*.pb.h
+*_pattern_json.hpp
+version.txt
+
+# Logs
+*.log
+
+# Temp files
+*.tmp
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cline storage and binary files
+.cline_storage/
+.cline/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Binary and object files
+*.o
+*.obj
+*.a
+*.lib
+*.pdb

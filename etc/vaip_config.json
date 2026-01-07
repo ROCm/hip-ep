@@ -1,0 +1,72 @@
+{
+  "passes": [
+    {
+      "name": "init",
+      "plugin": "vaip-pass_init"
+    },
+    {
+      "name": "fuse-hipdnn",
+      "plugin": "morphizen-level1-pass-hipdnn"
+    }
+  ],
+  "mepTable": [
+    {
+      "modelName": "PSA",
+      "md5sumOnDisk": "_3f97582a85b8ae1be41127f326bbf9b2",
+      "md5sumInMemory": "_d41d8cd98f00b204e9800998ecf8427e",
+      "md5sumInMemoryWithIo": "33ad2fe7c4a7b71e55f5cbd9c0569bb4",
+      "target": "mep-target",
+      "provider_options": {
+        "log_level": "info",
+        "XLNX_ONNX_EP_VERBOSE": "2",
+        "is_compiling_on_non_npu_platform": "0"
+      }
+    }
+  ],
+  "target": "hipdnn-target",
+  "targets": [
+    {
+      "name": "hipdnn-target",
+      "pass": [
+        "init",
+        "fuse-hipdnn"
+      ],
+      "provider_options": {
+        "pass.init.enable_dump": "1",
+        "pass.init.directory": "vaip_init",
+        "pass.init.filename": "init-graph-for-hipdnn.onnx",
+        "XLNX_model_clone_external_data_threshold": "17179869184"
+      }
+    },
+    {
+      "name": "dummy-target",
+      "pass": [
+        "init",
+        "fuse-hipdnn"
+      ],
+      "provider_options": {
+        "dummy_provier_option_for_test": "bingo"
+      }
+    },
+    {
+      "name": "mep-target",
+      "pass": [
+        "init",
+        "fuse-hipdnn"
+      ],
+      "provider_options": {
+        "dummy_provier_option_for_test": "mep-target-hit"
+      }
+    },
+    {
+      "name": "hipdnn_target_by_auto_discovery",
+      "pass": [
+        "init",
+        "fuse-hipdnn"
+      ],
+      "provider_options": {
+        "dummy_provier_option_for_test": "auto-discovery-hit"
+      }
+    }
+  ]
+}
