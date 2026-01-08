@@ -312,6 +312,16 @@ PassContextImp::get_ep_dynamic_option(const std::string& option_name,
   }
 }
 
+void PassContextImp::remove_QosUpdater(QoSUpdateInterface* updater) {
+  qos_updaters_.erase(
+      std::remove_if(
+          qos_updaters_.begin(), qos_updaters_.end(),
+          [updater](const std::shared_ptr<QoSUpdateInterface>& item) {
+            return item.get() == updater;
+          }),
+      qos_updaters_.end());
+}
+
 void PassContextImp::add_QosUpdater(
     const std::shared_ptr<QoSUpdateInterface>& updater) const {
   CHECK(updater) << "Null QoS updater cannot be added to PassContext";

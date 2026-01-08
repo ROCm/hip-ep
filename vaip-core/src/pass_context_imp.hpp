@@ -217,7 +217,7 @@ public:
   virtual std::string
   get_ep_dynamic_option(const std::string& option_name,
                         const std::string& default_value) const override final;
-
+  virtual void remove_QosUpdater(QoSUpdateInterface*) override final;
   virtual void add_QosUpdater(
       const std::shared_ptr<QoSUpdateInterface>& updater) const override final;
   virtual void

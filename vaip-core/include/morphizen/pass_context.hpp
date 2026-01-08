@@ -198,6 +198,7 @@ public:
   get_ep_dynamic_option(const std::string& option_name,
                         const std::string& default_value) const = 0;
 
+  virtual void remove_QosUpdater(QoSUpdateInterface* updater) = 0;
   virtual void
   add_QosUpdater(const std::shared_ptr<QoSUpdateInterface>& updater) const = 0;
   virtual void update_all_qos(const std::string& workload_type) const = 0;
