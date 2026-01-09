@@ -10,6 +10,23 @@ project(
   VERSION 1.0.0
   LANGUAGES C CXX)
 
+# TheRock installation root - contains HIP, hipDNN, and other ROCm components
+set(THEROCK_DIST "$ENV{THEROCK_DIST}" CACHE PATH "Path to TheRock dist/rocm directory")
+if(NOT THEROCK_DIST)
+  message(FATAL_ERROR "THEROCK_DIST must be specified. Set it via -DTHEROCK_DIST=<path> or THEROCK_DIST environment variable.")
+endif()
+
+# Add TheRock to CMAKE_PREFIX_PATH
+list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}/lib/cmake")
+
+# Third-party dependencies from TheRock (nlohmann-json is required by hipdnn_sdk)
+list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}/../../third-party/nlohmann-json/dist/share/cmake")
+
+# Find hipDNN from TheRock
+find_package(hipdnn_frontend CONFIG REQUIRED)
+find_package(hipdnn_backend CONFIG REQUIRED)
+find_package(hipdnn_data_sdk CONFIG REQUIRED)
+
 find_package (glog CONFIG REQUIRED)
 # TODO: do we really need to depends on onnxruntime? it is only needed
 # at compile time.
@@ -17,13 +34,24 @@ find_package (onnxruntime CONFIG REQUIRED)
 set(LIB_NAME morphizen-custom-op-hipdnn)
 add_library(${LIB_NAME} STATIC src/main.cpp src/custom_op.hpp src/custom_op.cpp)
 set_target_properties(${LIB_NAME} PROPERTIES FOLDER "hipdnn")
-target_include_directories(${LIB_NAME} PRIVATE include)
+target_include_directories(${LIB_NAME} PRIVATE 
+  include
+  ${CMAKE_CURRENT_SOURCE_DIR}/../external/hipDNNEP/include
+  ${THEROCK_DIST}/include
+)
 # TODO: remove VAIP_CUSTOM_OP=1
-target_compile_definitions(${LIB_NAME} PRIVATE "VAIP_CUSTOM_OP=1")
+target_compile_definitions(${LIB_NAME} PRIVATE 
+  "VAIP_CUSTOM_OP=1"
+  "__HIP_PLATFORM_AMD__"
+)
+target_compile_options(${LIB_NAME} PRIVATE /utf-8)
 target_link_libraries(${LIB_NAME} PRIVATE
   hipdnn_proto
   glog::glog
   morphizen::morphizen-core-static
+  hipdnn_frontend
+  hipdnn_backend
+  hipdnn_data_sdk
   )
 set_target_properties(${LIB_NAME} PROPERTIES
   OUTPUT_NAME "${LIB_NAME}")

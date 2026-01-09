@@ -9,10 +9,18 @@
 #include <algorithm>
 #include <future>
 #include <mutex>
+#include <vector>
+#include <unordered_map>
+#include <memory>
 
+#include <hipdnn_frontend.hpp>
+#include <hipdnn_backend.h>
+#include <hipdnn_data_sdk/flatbuffer_utilities/GraphWrapper.hpp>
 #include "morphizen/vaip.hpp"
+
 namespace hipdnn {
 using namespace vaip_core;
+
 class HipdnnCustomOp : public CustomOpImp {
 public:
   HipdnnCustomOp(std::shared_ptr<const PassContext> context,
@@ -25,7 +33,32 @@ private:
   virtual void Compute(const OrtApi* api,
                        OrtKernelContext* context) const override final;
 
+  // Graph loading and compilation helpers
+  void LoadAndCompileGraph();
+  void InitializeHeuristicDescriptor();
+  void InitializeEngineConfig();
+  void ExtractUIDsFromSerializedGraph(const std::vector<uint8_t>& buffer);
+
 private:
+  // Proto parameter
   HipdnnParamProto hipdnn_proto_;
+  
+  // hipDNN handle
+  hipdnnHandle_t handle_;
+  
+  // Backend descriptors (mimics Graph class internals)
+  std::unique_ptr<hipdnn_frontend::ScopedHipdnnBackendDescriptor> graphDesc_;
+  std::unique_ptr<hipdnn_frontend::ScopedHipdnnBackendDescriptor> engineHeuristicDesc_;
+  std::unique_ptr<hipdnn_frontend::ScopedHipdnnBackendDescriptor> engineConfigDesc_;
+  std::unique_ptr<hipdnn_frontend::ScopedHipdnnBackendDescriptor> executionPlanDesc_;
+  
+  // Execution resources
+  std::vector<char> workspace_;
+  
+  // UID mappings for variant pack construction
+  std::vector<int64_t> input_uids_;
+  std::vector<int64_t> output_uids_;
+  std::vector<std::vector<int64_t>> output_shapes_;
 };
+
 } // namespace hipdnn
