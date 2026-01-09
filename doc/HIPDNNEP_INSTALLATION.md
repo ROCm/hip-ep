@@ -113,6 +113,18 @@ After extracting TheRock, check if these configuration files need modification:
 
 **Example of hardcoded paths to remove:** All `B:/build/third-party/*` paths
 
+**Example diff to apply:**
+```diff
+  set_target_properties(hipdnn_data_sdk PROPERTIES
+    INTERFACE_COMPILE_FEATURES "cxx_std_17"
+-   INTERFACE_INCLUDE_DIRECTORIES "B:/build/third-party/llvm-project/install/include;B:/build/third-party/json/install/include;${_IMPORT_PREFIX}/include"
++   INTERFACE_INCLUDE_DIRECTORIES "${_IMPORT_PREFIX}/include"
+    INTERFACE_LINK_LIBRARIES "hip::host"
+  )
+```
+
+The key is to remove all absolute paths starting with `B:/build/` and keep only the relative `${_IMPORT_PREFIX}/include` path.
+
 #### File 3: nlohmann_json CMake Config
 
 **Path:** `C:\Develop\TheRock\share\cmake\nlohmann_json\nlohmann_jsonTargets.cmake`
