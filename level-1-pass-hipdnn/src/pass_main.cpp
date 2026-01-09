@@ -6,13 +6,11 @@
 #include "morphizen/env_config.hpp"
 #include "morphizen/vaip.hpp"
 #include "hipdnn.pb.h"
-#include "hipdnn_pattern_json.hpp"
 #include <filesystem>
+#include <fstream>
 #include <glog/logging.h>
-#include <hipdnn_backend.h>
 #include <hipdnn_frontend.hpp>
 #include <memory>
-#include <unordered_map>
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_HIPDNN, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_HIPDNN) >= n)
@@ -65,14 +63,31 @@ std::optional<hipdnn_frontend::DataType> GetComputeDataType(
   return std::nullopt;
 }
 
+// Save FlatBuffer to file
+void SaveGraphToFile(const flatbuffers::DetachedBuffer& buffer, 
+                     const std::string& filepath) {
+  std::ofstream file(filepath, std::ios::binary);
+  if (!file) {
+    throw std::runtime_error("Failed to open file for writing: " + filepath);
+  }
+  
+  file.write(reinterpret_cast<const char*>(buffer.data()), buffer.size());
+  file.close();
+  
+  if (!file.good()) {
+    throw std::runtime_error("Failed to write graph to file: " + filepath);
+  }
+}
+
 using TensorAttrPtr = std::shared_ptr<hipdnn_frontend::graph::TensorAttributes>;
 
-// Build and validate hipDNN graph for Conv operation
-bool BuildAndValidateGraph(
+// Build hipDNN graph and serialize it to file
+bool BuildAndSerializeGraph(
     const Node& conv_node,
     const NodeArgConstRef& input_ref,
     const NodeArgConstRef& weight_ref,
-    const NodeArgConstRef& output_ref) {
+    const NodeArgConstRef& output_ref,
+    std::string& out_filename) {
   using hipdnn_frontend::ConvolutionMode;
   using HipDNNGraph = hipdnn_frontend::graph::Graph;
   using hipdnn_frontend::graph::TensorAttributes;
@@ -83,8 +98,9 @@ bool BuildAndValidateGraph(
 
     // Create hipDNN graph
     auto graph = std::make_unique<HipDNNGraph>();
+    graph->set_name("Conv_" + node_arg_get_name(output_ref));
+    
     int64_t next_uid = 1;
-    std::unordered_map<std::string, TensorAttrPtr> symbol_table;
 
     // Get input shapes and types
     auto input_shape = node_arg_get_shape_i64(input_ref);
@@ -113,8 +129,7 @@ bool BuildAndValidateGraph(
         .set_data_type(input_dtype.value())
         .set_dim(*input_shape)
         .set_stride(ComputeStrides(*input_shape))
-        .set_is_virtual(false);
-    symbol_table[node_arg_get_name(input_ref)] = x_attr;
+        .set_is_virtual(false);  // Graph input
 
     // Create weight tensor attribute
     auto w_attr = std::make_shared<TensorAttributes>();
@@ -123,8 +138,7 @@ bool BuildAndValidateGraph(
         .set_data_type(weight_dtype.value())
         .set_dim(*weight_shape)
         .set_stride(ComputeStrides(*weight_shape))
-        .set_is_virtual(false);
-    symbol_table[node_arg_get_name(weight_ref)] = w_attr;
+        .set_is_virtual(false);  // Graph input
 
     // Extract Conv attributes
     auto pads = node_get_attr_ints(conv_node, "pads");
@@ -176,109 +190,116 @@ bool BuildAndValidateGraph(
         .set_data_type(output_dtype.value())
         .set_dim(*output_shape)
         .set_stride(ComputeStrides(*output_shape))
-        .set_is_virtual(false);
+        .set_is_virtual(false);  // Graph output
 
-    // Validate the graph by checking if output tensor was created successfully
-    if (!y_attr) {
-      MY_LOG(1) << "hipDNN graph validation failed: conv_fprop returned null";
-      return false;
-    }
-
-    MY_LOG(1) << "hipDNN graph validation succeeded";
+    // Serialize the graph
+    flatbuffers::DetachedBuffer buffer = graph->buildFlatbufferOperationGraph();
+    
+    // Generate unique filename
+    out_filename = "hipdnn_graph_" + node_arg_get_name(output_ref) + ".bin";
+    
+    // Save to file
+    SaveGraphToFile(buffer, out_filename);
+    
+    MY_LOG(1) << "Serialized graph to: " << out_filename 
+              << " (" << buffer.size() << " bytes)";
+    
     return true;
 
   } catch (const std::exception& ex) {
-    MY_LOG(1) << "Exception building hipDNN graph: " << ex.what();
+    MY_LOG(1) << "Exception building/serializing hipDNN graph: " << ex.what();
     return false;
   }
 }
 
 struct Level1HipDnn {
   Level1HipDnn(IPass& self) : self_{self} {}
-  std::unique_ptr<Rule> create_rule(IPass* self) {
-    std::shared_ptr<Pattern> pattern_ =
-        vaip_core::PatternBuilder().create_by_json(
-            std::string((const char*)hipdnn_json));
-    CHECK(pattern_ != nullptr) << "Pattern hipdnn not found";
-    return Rule::create_rule(
-        pattern_, [=](onnxruntime::Graph* ort_graph, binder_t& binder) -> bool {
-          auto input = vaip_cxx::NodeArgConstRef::from_node_arg(
-              *ort_graph, *binder["input"].node_arg);
-          auto output = vaip_cxx::NodeArgConstRef::from_node_arg(
-              *ort_graph, *binder["output"].node_arg);
-          auto conv_node = binder["hipdnn_op"].node;
-          
-          // Get Conv node inputs (input data and weight)
-          auto conv_inputs = node_get_inputs(*conv_node);
-          if (conv_inputs.size() < 2) {
-            MY_LOG(1) << "Conv node must have at least 2 inputs (data and weight)";
-            return false;
-          }
-          
-          // Validate Conv operation for hipDNN compatibility
-          auto input_data = vaip_cxx::NodeArgConstRef::from_node_arg(*ort_graph, *conv_inputs[0].node_arg);
-          auto weight_data = vaip_cxx::NodeArgConstRef::from_node_arg(*ort_graph, *conv_inputs[1].node_arg);
-          
-          bool graph_valid = BuildAndValidateGraph(
-              *conv_node, 
-              input_data,
-              weight_data,
-              output);
-          
-          if (!graph_valid) {
-            MY_LOG(1) << "hipDNN graph validation failed, skipping fusion";
-            return false;
-          }
-          
-          MY_LOG(1) << "hipDNN graph validation succeeded, proceeding with fusion";
-          auto unique_id = output.name();
-          auto [meta_def, fuse_error] =
-              self_.try_fuse(*ort_graph, unique_id, {input.name()}, {output.name()},
-                             {}, "HIPDNN");
-          if (meta_def == nullptr) {
-            MY_LOG(1) << "fuse error: " << fuse_error.comments;
-            return false;
-          } else {
-            MY_LOG(1) << "merge hipdnn operation";
-            auto hipdnn_param = hipdnn::HipdnnParamProto();
-            
-            // Set device and kernel type
-            hipdnn_param.set_device_id("0");
-            hipdnn_param.set_kernel_type("conv");
-            
-            // Extract Conv attributes from the node
-            hipdnn_param.set_op_type(node_op_type(*conv_node));
-            auto pads_attr = node_get_attr_ints(*conv_node, "pads");
-            if (!pads_attr.empty()) {
-              for (auto pad : pads_attr) {
-                hipdnn_param.add_pads(pad);
-              }
-            }
-            auto strides_attr = node_get_attr_ints(*conv_node, "strides");
-            if (!strides_attr.empty()) {
-              for (auto stride : strides_attr) {
-                hipdnn_param.add_strides(stride);
-              }
-            }
-            auto dilations_attr = node_get_attr_ints(*conv_node, "dilations");
-            if (!dilations_attr.empty()) {
-              for (auto dilation : dilations_attr) {
-                hipdnn_param.add_dilations(dilation);
-              }
-            }
-            auto group_attr = node_get_attr_int(*conv_node, "group");
-            hipdnn_param.set_group(group_attr);
-            
-            auto hipdnn_json_str = std::string();
-            auto status = google::protobuf::util::MessageToJsonString(
-                hipdnn_param, &hipdnn_json_str);
-            self->attach_meta_def_param(*meta_def, hipdnn_json_str.c_str());
-            self->fuse(*ort_graph, std::move(*meta_def));
-          }
-          return true; // return true if graph is modified.
-        });
+  
+  void process(IPass& self, Graph& ort_graph) {
+    // Iterate through all nodes looking for Conv operations
+    auto node_indices = graph_get_node_in_topoligical_order(ort_graph);
+    
+    for (auto node_idx : node_indices) {
+      auto node = VAIP_ORT_API(graph_get_node)(ort_graph, node_idx);
+      auto node_ref = NodeConstRef::from_node(ort_graph, *node);
+      
+      // Skip if not a Conv operation
+      if (node_op_type(*node) != "Conv") {
+        continue;
+      }
+      
+      MY_LOG(1) << "Found Conv node: " << node_ref;
+      
+      // Get Conv node inputs (input data and weight)
+      auto conv_inputs = node_get_inputs(*node);
+      if (conv_inputs.size() < 2) {
+        MY_LOG(1) << "Conv node must have at least 2 inputs (data and weight)";
+        continue;
+      }
+      
+      // Get Conv node outputs
+      auto conv_output_node_args = node_get_output_node_args(*node);
+      if (conv_output_node_args.size() != 1) {
+        MY_LOG(1) << "Conv node must have exactly 1 output";
+        continue;
+      }
+      
+      auto input_data = vaip_cxx::NodeArgConstRef::from_node_arg(ort_graph, *conv_inputs[0].node_arg);
+      auto weight_data = vaip_cxx::NodeArgConstRef::from_node_arg(ort_graph, *conv_inputs[1].node_arg);
+      auto output_data = vaip_cxx::NodeArgConstRef::from_node_arg(ort_graph, *conv_output_node_args[0]);
+      
+      // Build and serialize graph
+      std::string graph_filename;
+      bool success = BuildAndSerializeGraph(
+          *node, 
+          input_data,
+          weight_data,
+          output_data,
+          graph_filename);
+      
+      if (!success) {
+        MY_LOG(1) << "Failed to build/serialize graph, skipping fusion";
+        continue;
+      }
+      
+      MY_LOG(1) << "Graph serialization succeeded, proceeding with fusion";
+      
+      // Create fused node
+      auto unique_id = output_data.name();
+      auto [meta_def, fuse_error] =
+          self_.try_fuse(ort_graph, unique_id, 
+                        {input_data.name(), weight_data.name()}, 
+                        {output_data.name()},
+                        {}, "HIPDNN");
+      
+      if (meta_def == nullptr) {
+        MY_LOG(1) << "fuse error: " << fuse_error.comments;
+        continue;
+      }
+      
+      MY_LOG(1) << "Creating fused HIPDNN operation";
+      
+      // Create proto with only the graph filename
+      auto hipdnn_param = hipdnn::HipdnnParamProto();
+      hipdnn_param.set_graph_file_name(graph_filename);
+      
+      // Serialize proto to JSON
+      auto hipdnn_json_str = std::string();
+      auto status = google::protobuf::util::MessageToJsonString(
+          hipdnn_param, &hipdnn_json_str);
+      
+      if (!status.ok()) {
+        MY_LOG(1) << "Failed to serialize proto: " << status.ToString();
+        continue;
+      }
+      
+      // Attach parameter and fuse
+      self_.attach_meta_def_param(*meta_def, hipdnn_json_str.c_str());
+      self_.fuse(ort_graph, std::move(*meta_def));
+      
+      MY_LOG(1) << "Successfully fused Conv operation";
+    }
   }
-  void process(IPass& self, Graph& ort_graph) { create_rule(&self)->apply(&ort_graph); }
 
   IPass& self_;
 };

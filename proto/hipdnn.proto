@@ -3,14 +3,6 @@
 syntax = "proto3";
 package hipdnn;
 message HipdnnParamProto {
-  // HIP DNN specific parameters
-  string device_id = 1;
-  string kernel_type = 2;
-  
-  // Conv operation parameters
-  string op_type = 3;
-  repeated int64 pads = 4;
-  repeated int64 strides = 5;
-  repeated int64 dilations = 6;
-  int64 group = 7;
+  // File path to the serialized hipDNN graph
+  string graph_file_name = 1;
 }

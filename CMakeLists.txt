@@ -8,6 +8,12 @@ project(
   morphizen-hipdnn
   VERSION 1.0.0
   LANGUAGES C CXX)
+
+# Set MSVC runtime library to static to match pre-built dependencies
+if(MSVC)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/presets.cmake)
 add_subdirectory(proto)
