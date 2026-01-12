@@ -67,7 +67,7 @@ void update_cache_dir(PassContextImp& context) {
   *context.context_proto.mutable_config()->mutable_cache_dir() =
       cache_dir.u8string();
   if (context.cache_in_mem()) {
-    LOG(WARNING) << "skip update cache dir: in-mem mode";
+    LOG(INFO) << "skip update cache dir: in-mem mode";
     return;
   }
   if (!fs::exists(context.get_log_dir()) &&
