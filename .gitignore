@@ -1,11 +1,15 @@
 # Build directories
 build/
+build-*/
 bin/
 lib/
 *.exe
 *.dll
 *.so
 *.dylib
+
+# External project build directories
+external/*/build/
 
 # CMake
 CMakeCache.txt
