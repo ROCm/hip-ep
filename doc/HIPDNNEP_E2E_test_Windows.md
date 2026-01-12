@@ -330,9 +330,40 @@ Usage:
 
 ---
 
-## Phase 1: Build Original hipDNNEP
+## Phase 1: Build hipDNNEP
 
-### 2.1 Clone hipDNNEP Repository
+There are two ways to build hipDNNEP:
+
+### Option A: Build from morphizen-hipdnn Submodule (Recommended)
+
+If you're working with morphizen-hipdnn, hipDNNEP is included as a git submodule with all Windows patches already applied:
+
+```powershell
+Set-Location C:\Develop\m\Source\morphizen-hipdnn
+git submodule update --init --recursive
+
+# The submodule is at: external/hipDNNEP
+```
+
+Build using the submodule:
+```powershell
+$buildDir = "C:\Develop\m\build\morphizen-hipdnn-e2e"
+$srcDir = "C:\Develop\m\Source\morphizen-hipdnn\external\hipDNNEP"
+
+cmake -G Ninja -B $buildDir -S $srcDir `
+    -DCMAKE_BUILD_TYPE=Release `
+    -DCMAKE_CXX_COMPILER="C:/Program Files/LLVM/bin/clang++.exe" `
+    -DCMAKE_C_COMPILER="C:/Program Files/LLVM/bin/clang.exe" `
+    -DTHEROCK_DIST=C:/Develop/m/dist/therock `
+    -DONNXRUNTIME_ROOT=C:/Develop/m/local `
+    -DHIPDNN_EP_BUILD_TESTS=ON
+
+cmake --build $buildDir
+```
+
+### Option B: Clone Upstream Repository
+
+Clone the upstream repository (requires applying patches manually):
 
 ```powershell
 Set-Location C:\Develop\m\source
@@ -753,13 +784,14 @@ hipDNNEP includes 4 tests:
 
 ### Successful Build Output
 
+Using the submodule (Option A):
 ```
 -- Found HIP: C:/Develop/m/dist/therock
 -- Found iree-compile: C:/Users/.../Scripts/iree-compile.exe
 -- Found ONNXRuntime headers at: C:/Develop/m/local/include/onnxruntime
 -- Found ONNXRuntime library: C:/Develop/m/local/lib/onnxruntime.lib
 -- Configuring done
--- Build files have been written to: C:/Develop/m/build/hipDNNEP
+-- Build files have been written to: C:/Develop/m/build/morphizen-hipdnn-e2e
 
 [17/17] Linking CXX shared library hipdnn_ep.dll
 BUILD SUCCESSFUL!
@@ -768,7 +800,7 @@ BUILD SUCCESSFUL!
 ### Partial Test Pass (Expected with Current hipDNN)
 
 ```
-Test project C:/Develop/m/build/hipDNNEP
+Test project C:/Develop/m/build/morphizen-hipdnn-e2e
     Start 1: HipDNNEpLoadTest.RegisterEpLibrary
 1/4 Test #1: HipDNNEpLoadTest.RegisterEpLibrary ........   Passed
     Start 2: HipDNNEpLoadTest.GetEpDevices  
