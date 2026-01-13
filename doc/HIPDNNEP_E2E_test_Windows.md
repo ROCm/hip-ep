@@ -10,15 +10,159 @@ This document provides complete step-by-step instructions for building and testi
 
 ## Table of Contents
 
-1. [Prerequisites](#prerequisites)
-2. [Environment Setup](#environment-setup)
-3. [Phase 1: Build Original hipDNNEP](#phase-1-build-original-hipdnnep)
-4. [Phase 2: Build Morphizen + morphizen-hipdnn](#phase-2-build-morphizen--morphizen-hipdnn)
-5. [Phase 3: Testing and Validation](#phase-3-testing-and-validation)
-6. [Environment Variables Reference](#environment-variables-reference)
-7. [Troubleshooting](#troubleshooting)
-8. [Patches Reference](#patches-reference)
-9. [Quick Reference](#quick-reference)
+1. [Checking AMD GPU Hardware Information](#checking-amd-gpu-hardware-information)
+2. [Prerequisites](#prerequisites)
+3. [Environment Setup](#environment-setup)
+4. [Phase 1: Build Original hipDNNEP](#phase-1-build-original-hipdnnep)
+5. [Phase 2: Build Morphizen + morphizen-hipdnn](#phase-2-build-morphizen--morphizen-hipdnn)
+6. [Phase 3: Testing and Validation](#phase-3-testing-and-validation)
+7. [Environment Variables Reference](#environment-variables-reference)
+8. [Troubleshooting](#troubleshooting)
+9. [Patches Reference](#patches-reference)
+10. [Quick Reference](#quick-reference)
+
+---
+
+## Checking AMD GPU Hardware Information
+
+Before starting, verify your AMD GPU is properly detected. This section provides multiple methods to check GPU information with sample outputs.
+
+### Method 1: Windows PowerShell (No Dependencies)
+
+Basic GPU information using Windows Management Instrumentation:
+
+```powershell
+Get-CimInstance -ClassName Win32_VideoController | Select-Object Name, AdapterRAM, DriverVersion, Status, VideoProcessor
+```
+
+**Sample output**:
+```
+Name           : AMD Radeon PRO W7900
+AdapterRAM     : 4293918720
+DriverVersion  : 32.0.21037.1004
+Status         : OK
+VideoProcessor : AMD FirePro SDI (0x7448)
+```
+
+For detailed information:
+```powershell
+Get-CimInstance -ClassName Win32_VideoController | Format-List *
+```
+
+**Sample output** (AMD GPU section):
+```
+Caption                      : AMD Radeon PRO W7900
+Description                  : AMD Radeon PRO W7900
+Name                         : AMD Radeon PRO W7900
+Status                       : OK
+DeviceID                     : VideoController2
+PNPDeviceID                  : PCI\VEN_1002&DEV_7448&SUBSYS_0E0D1002&REV_00\6&28CF2CBF&0&00000019
+CurrentBitsPerPixel          : 32
+CurrentHorizontalResolution  : 1920
+CurrentVerticalResolution    : 1080
+CurrentRefreshRate           : 144
+MaxRefreshRate               : 144
+MinRefreshRate               : 48
+VideoProcessor               : AMD FirePro SDI (0x7448)
+AdapterCompatibility         : Advanced Micro Devices, Inc.
+AdapterDACType               : Internal DAC(400MHz)
+AdapterRAM                   : 4293918720
+DriverDate                   : 11/27/2025 4:00:00 PM
+DriverVersion                : 32.0.21037.1004
+InfFilename                  : oem2.inf
+InfSection                   : ati2mtag_Navi31
+InstalledDisplayDrivers      : C:\WINDOWS\System32\DriverStore\FileRepository\u0196663.inf_amd64_...\atidx9loader64.dll,...
+VideoModeDescription         : 1920 x 1080 x 4294967296 colors
+```
+
+### Method 2: GPU Architecture using amdgpu-arch (Clang/LLVM)
+
+After installing LLVM/Clang, use `amdgpu-arch` to get the GPU architecture identifier:
+
+```powershell
+# If installed via winget (default path)
+& "C:\Program Files\LLVM\bin\amdgpu-arch.exe"
+
+# Or if installed to custom path
+& "C:\Develop\m\dist\clang\bin\amdgpu-arch.exe"
+```
+
+**Sample output**:
+```
+gfx1100
+```
+
+This architecture string is used to select the correct TheRock SDK build. See [GFX Family table](#step-2-determine-gfx-family) for mapping.
+
+### Method 3: HIP Configuration (TheRock SDK)
+
+After installing TheRock, use `hipconfig` for comprehensive HIP/ROCm information:
+
+```powershell
+& "C:\Develop\m\dist\therock\bin\hipconfig.exe" --full
+```
+
+**Sample output**:
+```
+HIP version: 7.2.53150-56870acb4f
+
+==hipconfig
+HIP_PATH           :C:\Develop\m\dist\therock
+ROCM_PATH          :C:\Develop\m\dist\therock
+HIP_COMPILER       :clang
+HIP_PLATFORM       :amd
+HIP_RUNTIME        :rocclr
+CPP_CONFIG         :/
+
+==hip-clang
+HIP_CLANG_PATH     :C:\Develop\m\dist\therock\lib\llvm\bin
+
+AMD clang version 22.0.0git (https://github.com/ROCm/llvm-project.git ...)
+Target: x86_64-pc-windows-msvc
+Thread model: posix
+InstalledDir: C:\Develop\m\dist\therock\lib\llvm\bin
+
+hip-clang-cxxflags :
+ -O3
+hip-clang-ldflags :
+--driver-mode=g++ -O3 -fuse-ld=lld --ld-path="C:\Develop\m\dist\therock\lib\llvm\bin\lld-link.exe" --hip-link
+
+== Environment Variables
+PATH=C:\WINDOWS\system32;C:\WINDOWS;...
+
+== Windows Display Drivers
+win-9700
+Advanced Micro Devices, Inc. C:\WINDOWS\System32\DriverStore\FileRepository\... AMD Radeon PRO W7900
+Hostname      :
+```
+
+#### Quick HIP commands:
+
+```powershell
+# Check HIP platform
+& "C:\Develop\m\dist\therock\bin\hipconfig.exe" --platform
+# Output: amd
+
+# Check HIP version
+& "C:\Develop\m\dist\therock\bin\hipconfig.exe" --version
+# Output: 7.2.53150-56870acb4f
+
+# Check ROCm path
+& "C:\Develop\m\dist\therock\bin\hipconfig.exe" -rocmpath
+# Output: C:\Develop\m\dist\therock
+```
+
+### GPU Information Summary
+
+| Property | Value (Example) | How to Check |
+|----------|-----------------|--------------|
+| GPU Model | AMD Radeon PRO W7900 | PowerShell `Get-CimInstance` |
+| GPU Architecture | gfx1100 | `amdgpu-arch.exe` |
+| GFX Family | gfx110X-all | See [GFX Family table](#step-2-determine-gfx-family) |
+| VRAM | ~4 GB (reported) | PowerShell `Get-CimInstance` |
+| Driver Version | 32.0.21037.1004 | PowerShell `Get-CimInstance` |
+| HIP Version | 7.2.53150 | `hipconfig.exe --version` |
+| HIP Platform | amd | `hipconfig.exe --platform` |
 
 ---
 
