@@ -188,16 +188,18 @@ The git hash `56870acb4f` appears in both `ROCM_BUILD_INFO` and HIP version, con
 
 ### GPU Information Summary
 
-| Property | Value (Example) | How to Check |
-|----------|-----------------|--------------|
-| GPU Model | AMD Radeon PRO W7900 | PowerShell `Get-CimInstance` |
-| GPU Architecture | gfx1100 | `amdgpu-arch.exe` |
-| GFX Family | gfx110X-all | See [GFX Family table](#step-2-determine-gfx-family) |
-| VRAM | ~4 GB (reported) | PowerShell `Get-CimInstance` |
-| Driver Version | 32.0.21037.1004 | PowerShell `Get-CimInstance` |
-| TheRock Version | 7.11.0 | `Get-Content "$env:THEROCK_DIST\.info\version"` |
-| HIP Version | 7.2.53150 | `hipconfig.exe --version` |
-| HIP Platform | amd | `hipconfig.exe --platform` |
+| Property | Example 1 (W7900) | Example 2 (8050S) | How to Check |
+|----------|-------------------|-------------------|--------------|
+| GPU Model | AMD Radeon PRO W7900 | AMD Radeon(TM) 8050S Graphics | PowerShell `Get-CimInstance` |
+| GPU Architecture | gfx1100 | gfx1151 | `amdgpu-arch.exe` |
+| GFX Family | gfx110X-all | gfx115X-all | See [GFX Family table](#step-2-determine-gfx-family) |
+| Device ID | 0x7448 | 0x1586 | PowerShell `Get-CimInstance` |
+| VRAM (Windows) | ~4 GB | 512 MB (dynamic) | PowerShell `Get-CimInstance` |
+| VRAM (HIP) | N/A | 24.26 GB | `hipInfo.exe` |
+| Driver Version | 32.0.21037.1004 | 32.0.22029.9039 | PowerShell `Get-CimInstance` |
+| TheRock Version | 7.11.0 | 7.11.0 | `Get-Content "$env:THEROCK_DIST\.info\version"` |
+| HIP Version | 7.2.53150 | 7.2.53150-e5316dcbd9 | `hipconfig.exe --version` |
+| HIP Platform | amd | amd | `hipconfig.exe --platform` |
 
 ---
 
