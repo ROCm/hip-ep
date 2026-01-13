@@ -5,4 +5,8 @@ package hipdnn;
 message HipdnnParamProto {
   // File path to the serialized hipDNN graph
   string graph_file_name = 1;
+  
+  // Names and data file paths for constant initializers
+  repeated string constant_names = 2;
+  repeated string constant_data_files = 3;
 }
