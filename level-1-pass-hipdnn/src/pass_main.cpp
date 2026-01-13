@@ -141,8 +141,8 @@ static bool IsSupportedConv(const Node& node) {
     }
 
     // Check dilations - only [1,1] supported (no dilated convolutions)
-    auto dilations = node_get_attr_ints(node, "dilations");
-    if (!dilations.empty()) {
+    if (node_has_attr(node, "dilations")) {
+      auto dilations = node_get_attr_ints(node, "dilations");
       if (dilations.size() != 2 || dilations[0] != 1 || dilations[1] != 1) {
         return false;
       }
@@ -230,28 +230,43 @@ bool BuildAndSerializeGraph(
         .set_stride(ComputeStrides(*weight_shape))
         .set_is_virtual(false);  // Graph input
 
-    // Extract Conv attributes
-    auto pads = node_get_attr_ints(conv_node, "pads");
-    auto strides = node_get_attr_ints(conv_node, "strides");
-    auto dilations = node_get_attr_ints(conv_node, "dilations");
-
-    // Convert gsl::span to std::vector and normalize padding format
-    std::vector<int64_t> pads_vec(pads.begin(), pads.end());
-    std::vector<int64_t> strides_vec(strides.begin(), strides.end());
-    std::vector<int64_t> dilations_vec(dilations.begin(), dilations.end());
-
+    // Extract Conv attributes (all are optional, use defaults if not present)
+    
+    // Get pads (default: [0, 0, 0, 0])
+    std::vector<int64_t> pads_vec;
+    if (node_has_attr(conv_node, "pads")) {
+      auto pads = node_get_attr_ints(conv_node, "pads");
+      pads_vec.assign(pads.begin(), pads.end());
+    }
+    
     if (pads_vec.empty()) {
       pads_vec = {0, 0, 0, 0};
     } else if (pads_vec.size() == 2) {
+      // Expand [pad_h, pad_w] to [pad_h_begin, pad_w_begin, pad_h_end, pad_w_end]
       pads_vec = {pads_vec[0], pads_vec[1], pads_vec[0], pads_vec[1]};
     } else if (pads_vec.size() != 4) {
       MY_LOG(1) << "Invalid pads size: " << pads_vec.size();
       return false;
     }
 
+    // Get strides (default: [1, 1])
+    std::vector<int64_t> strides_vec;
+    if (node_has_attr(conv_node, "strides")) {
+      auto strides = node_get_attr_ints(conv_node, "strides");
+      strides_vec.assign(strides.begin(), strides.end());
+    }
+    
     if (strides_vec.empty()) {
       strides_vec = {1, 1};
     }
+
+    // Get dilations (default: [1, 1])
+    std::vector<int64_t> dilations_vec;
+    if (node_has_attr(conv_node, "dilations")) {
+      auto dilations = node_get_attr_ints(conv_node, "dilations");
+      dilations_vec.assign(dilations.begin(), dilations.end());
+    }
+    
     if (dilations_vec.empty()) {
       dilations_vec = {1, 1};
     }
