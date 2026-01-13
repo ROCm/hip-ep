@@ -10,7 +10,7 @@ if(NOT THEROCK_DIST)
 endif()
 
 # Add TheRock to CMAKE_PREFIX_PATH
-list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}/lib/cmake")
+list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}")
 
 # Third-party dependencies from TheRock (nlohmann-json is required by hipdnn_sdk)
 list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}/../../third-party/nlohmann-json/dist/share/cmake")
