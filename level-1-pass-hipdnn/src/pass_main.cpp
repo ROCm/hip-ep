@@ -13,6 +13,7 @@
 #include <memory>
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_HIPDNN, "0")
+DEF_ENV_PARAM(MORPHIZEN_MAX_FUSED_SUBGRAPH_NUM, "65535")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_HIPDNN) >= n)
 
 namespace {
@@ -311,8 +312,16 @@ struct Level1HipDnn {
   void process(IPass& self, Graph& ort_graph) {
     // Iterate through all nodes in reverse order looking for supported operations
     auto node_indices = graph_get_node_in_topoligical_order(ort_graph);
+
+    auto count_fused_subgraph = 0;
     
     for (auto it = node_indices.rbegin(); it != node_indices.rend(); ++it) {
+
+      if (count_fused_subgraph >= ENV_PARAM(MORPHIZEN_MAX_FUSED_SUBGRAPH_NUM)) {
+        MY_LOG(1) << "Max fused subgraph num reached, skipping";
+        break;
+      }
+
       auto node_idx = *it;
       auto node = VAIP_ORT_API(graph_get_node)(ort_graph, node_idx);
       auto node_ref = NodeConstRef::from_node(ort_graph, *node);
@@ -393,7 +402,10 @@ struct Level1HipDnn {
       self_.fuse(ort_graph, std::move(*meta_def));
       
       MY_LOG(1) << "Successfully fused Conv operation";
+
+      count_fused_subgraph++;
     }
+    MY_LOG(1) << "Total fused subgraph num: " << count_fused_subgraph;
   }
 
   IPass& self_;
