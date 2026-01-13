@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <thread>
 #include <unordered_set>
+#include <vaip/my_ort.h>
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_HIPDNN, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_HIPDNN) >= n)
@@ -58,6 +59,14 @@ HipdnnCustomOp::HipdnnCustomOp(std::shared_ptr<const PassContext> context,
 	
 	LOG(INFO) << "Graph file: " << hipdnn_proto_.graph_file_name();
 	
+	// Get constant initializer names from meta_def
+	auto constant_names = meta_def_->constant_initializers();
+	LOG(INFO) << "Constant initializers count: " << constant_names.size();
+	for (const auto& name : constant_names) {
+		LOG(INFO) << "  Constant: " << name;
+		constant_initializer_names_.push_back(name);
+	}
+	
 	// Create hipDNN handle
 	hipdnnStatus_t hipdnn_status = hipdnnCreate(&handle_);
 	if (hipdnn_status != HIPDNN_STATUS_SUCCESS) {
@@ -69,6 +78,28 @@ HipdnnCustomOp::HipdnnCustomOp(std::shared_ptr<const PassContext> context,
 	try {
 		LoadAndCompileGraph();
 		LOG(INFO) << "Graph compiled successfully";
+		
+		// Load constant data from files after graph is loaded (so we have constant_input_uids_)
+		LOG(INFO) << "About to load constant data: constant_names=" << constant_initializer_names_.size()
+		          << ", constant_uids=" << constant_input_uids_.size()
+		          << ", data_files=" << hipdnn_proto_.constant_data_files_size();
+		
+		if (constant_initializer_names_.empty()) {
+			LOG(INFO) << "No constant initializers to load";
+		} else if (constant_input_uids_.empty()) {
+			LOG(ERROR) << "CRITICAL: constant_input_uids_ is empty!";
+		} else if (hipdnn_proto_.constant_data_files_size() == 0) {
+			LOG(ERROR) << "CRITICAL: No constant data files specified in proto!";
+		} else {
+			try {
+				LOG(INFO) << "Calling LoadConstantData...";
+				LoadConstantData(nullptr);  // Don't need model anymore
+				LOG(INFO) << "Successfully loaded " << constant_data_.size() << " constant initializers";
+			} catch (const std::exception& ex) {
+				LOG(ERROR) << "Failed to load constant data: " << ex.what();
+				throw;
+			}
+		}
 	} catch (const std::exception& ex) {
 		LOG(FATAL) << "Failed to compile graph: " << ex.what();
 	}
@@ -259,6 +290,42 @@ void HipdnnCustomOp::InitializeEngineConfig() {
 	MY_LOG(1) << "Selected engine configuration for execution";
 }
 
+void HipdnnCustomOp::LoadConstantData(onnxruntime::Model* model) {
+	MY_LOG(1) << "=== Loading constant data from files ===";
+	
+	// Load constant data from files (not from model, since model may be NULL)
+	
+	// Load each constant initializer from file
+	for (int i = 0; i < hipdnn_proto_.constant_data_files_size(); ++i) {
+		const auto& data_file = hipdnn_proto_.constant_data_files(i);
+		const auto& const_name = hipdnn_proto_.constant_names(i);
+		
+		MY_LOG(1) << "Loading constant from file: " << data_file;
+		
+		// Read file
+		std::ifstream file(data_file, std::ios::binary | std::ios::ate);
+		if (!file) {
+			throw std::runtime_error("Failed to open constant data file: " + data_file);
+		}
+		
+		std::streamsize size = file.tellg();
+		file.seekg(0, std::ios::beg);
+		
+		std::vector<char> data(size);
+		if (!file.read(data.data(), size)) {
+			throw std::runtime_error("Failed to read constant data file: " + data_file);
+		}
+		
+		constant_data_.push_back(std::move(data));
+		
+		MY_LOG(1) << "  Loaded constant " << const_name 
+		          << " from " << data_file
+		          << " (" << size << " bytes)";
+	}
+	
+	MY_LOG(1) << "=== Constant data loading complete ===";
+}
+
 void HipdnnCustomOp::ExtractUIDsFromSerializedGraph(const std::vector<uint8_t>& buffer) {
 	using namespace hipdnn_plugin_sdk;
 	
@@ -316,8 +383,25 @@ void HipdnnCustomOp::ExtractUIDsFromSerializedGraph(const std::vector<uint8_t>& 
 				throw std::runtime_error("Output tensor missing dimensions");
 			}
 		} else {
-			// This is a graph input
+			// This is a graph input (could be runtime input or constant)
 			input_uids_.push_back(uid);
+		}
+	}
+	
+	// Identify which input UIDs correspond to constants
+	// Assuming the graph was built with inputs in order: [runtime_inputs..., constants...]
+	// The last N UIDs in input_uids_ correspond to constants
+	size_t num_constants = constant_initializer_names_.size();
+	if (num_constants > 0 && num_constants <= input_uids_.size()) {
+		// The last num_constants UIDs are for constant initializers
+		constant_input_uids_.assign(
+			input_uids_.end() - num_constants,
+			input_uids_.end()
+		);
+		
+		MY_LOG(1) << "Identified " << num_constants << " constant input UIDs";
+		for (size_t i = 0; i < constant_input_uids_.size(); ++i) {
+			MY_LOG(1) << "  Constant[" << i << "] UID=" << constant_input_uids_[i];
 		}
 	}
 	
@@ -345,15 +429,18 @@ void HipdnnCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const
 	Ort::KernelContext ctx(context);
 	auto num_inputs = ctx.GetInputCount();
 	auto num_outputs = ctx.GetOutputCount();
+	auto num_constants = constant_initializer_names_.size();
 	
-	MY_LOG(1) << "Executing hipDNN graph: "
-	          << "num_inputs " << num_inputs << ", "
-	          << "num_outputs " << num_outputs;
+	MY_LOG(1) << "=== HipdnnCustomOp::Compute START ===";
+	MY_LOG(1) << "Runtime inputs: " << num_inputs << ", outputs: " << num_outputs;
+	MY_LOG(1) << "Constants: " << num_constants;
+	MY_LOG(1) << "Graph expects: " << input_uids_.size() << " total inputs";
 	
-	// Validate input/output counts
-	if (num_inputs != input_uids_.size()) {
-		LOG(ERROR) << "Input count mismatch: expected " << input_uids_.size() 
-		           << ", got " << num_inputs;
+	// Validate: num_inputs + num_constants should equal graph inputs
+	if (num_inputs + num_constants != input_uids_.size()) {
+		LOG(ERROR) << "Input count mismatch: runtime(" << num_inputs
+		           << ") + constants(" << num_constants 
+		           << ") != graph_inputs(" << input_uids_.size() << ")";
 		return;
 	}
 	
@@ -366,16 +453,39 @@ void HipdnnCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const
 	// Build variant pack: UID → tensor pointer mapping
 	std::unordered_map<int64_t, void*> variant_pack;
 	
-	// Map inputs
-	for (size_t i = 0; i < input_uids_.size(); ++i) {
+	// Map runtime inputs (first num_inputs UIDs)
+	for (size_t i = 0; i < num_inputs; ++i) {
 		Ort::ConstValue input = ctx.GetInput(i);
 		auto tensor_info = input.GetTensorTypeAndShapeInfo();
 		auto shape = tensor_info.GetShape();
 		
-		MY_LOG(1) << "Input [" << i << "] UID=" << input_uids_[i] 
+		MY_LOG(1) << "Runtime Input [" << i << "] UID=" << input_uids_[i] 
 		          << " shape=" << shape_to_string(shape);
 		
 		variant_pack[input_uids_[i]] = const_cast<void*>(input.GetTensorRawData());
+	}
+	
+	// Map constant initializers (remaining UIDs, using pre-loaded data)
+	for (size_t i = 0; i < num_constants; ++i) {
+		size_t uid_idx = num_inputs + i;
+		if (uid_idx >= input_uids_.size()) {
+			LOG(ERROR) << "Constant UID index out of range: " << uid_idx;
+			return;
+		}
+		
+		if (i >= constant_data_.size()) {
+			LOG(ERROR) << "Constant data not available for index " << i;
+			return;
+		}
+		
+		int64_t uid = input_uids_[uid_idx];
+		void* data_ptr = const_cast<void*>(static_cast<const void*>(constant_data_[i].data()));
+		
+		MY_LOG(1) << "Constant [" << i << "] UID=" << uid
+		          << " (" << constant_initializer_names_[i] << ")"
+		          << " size=" << constant_data_[i].size() << " bytes";
+		
+		variant_pack[uid] = data_ptr;
 	}
 	
 	// Allocate and map outputs
@@ -466,6 +576,7 @@ void HipdnnCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const
 	}
 	
 	MY_LOG(1) << "Execution completed successfully";
+	MY_LOG(1) << "=== HipdnnCustomOp::Compute END ===";
 }
 
 } // namespace hipdnn

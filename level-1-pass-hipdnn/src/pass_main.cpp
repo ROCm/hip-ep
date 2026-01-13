@@ -384,12 +384,31 @@ struct Level1HipDnn {
       MY_LOG(1) << "Graph serialization succeeded, proceeding with fusion";
       
       // Create fused node
+      // Check if weight is a constant initializer in the original graph
+      bool weight_is_constant = weight_data.is_constant();
+      MY_LOG(1) << "Weight " << weight_data.name() << " is_constant=" << weight_is_constant;
+      
       auto unique_id = output_data.name();
+      std::vector<std::string> inputs_list;
+      std::vector<std::string> constants_list;
+      
+      if (weight_is_constant) {
+        // Weight is a constant, only pass data as runtime input
+        inputs_list = {input_data.name()};
+        constants_list = {weight_data.name()};
+        MY_LOG(1) << "Fusing with weight as constant initializer";
+      } else {
+        // Weight is a runtime input (shouldn't happen for conv, but handle it)
+        inputs_list = {input_data.name(), weight_data.name()};
+        constants_list = {};
+        MY_LOG(1) << "Fusing with weight as runtime input";
+      }
+      
       auto [meta_def, fuse_error] =
           self_.try_fuse(ort_graph, unique_id, 
-                        {input_data.name(), weight_data.name()}, 
+                        inputs_list,
                         {output_data.name()},
-                        {}, "HIPDNN");
+                        constants_list, "HIPDNN");
       
       if (meta_def == nullptr) {
         MY_LOG(1) << "fuse error: " << fuse_error.comments;
@@ -397,10 +416,37 @@ struct Level1HipDnn {
       }
       
       MY_LOG(1) << "Creating fused HIPDNN operation";
+      MY_LOG(1) << "  meta_def inputs: " << meta_def->inputs_size();
+      MY_LOG(1) << "  meta_def constants: " << meta_def->constant_initializers_size();
       
-      // Create proto with only the graph filename
+      // Create proto with graph filename
       auto hipdnn_param = hipdnn::HipdnnParamProto();
       hipdnn_param.set_graph_file_name(graph_filename);
+      
+      // Save constant initializer data to files
+      if (weight_is_constant) {
+        // Get weight data
+        auto& weight_tensor = node_arg_get_const_data_as_tensor(ort_graph, weight_data);
+        auto weight_raw = vaip_core::api()->tensor_proto_as_raw(ort_graph, weight_tensor);
+        
+        // Create weight data filename
+        std::string weight_filename = graph_filename + ".weight0.bin";
+        
+        // Write weight data to file
+        std::ofstream weight_file(weight_filename, std::ios::binary);
+        if (!weight_file) {
+          MY_LOG(1) << "Failed to create weight file: " << weight_filename;
+          continue;
+        }
+        weight_file.write(weight_raw.data(), static_cast<std::streamsize>(weight_raw.size()));
+        weight_file.close();
+        
+        MY_LOG(1) << "Saved weight data: " << weight_filename << " (" << weight_raw.size() << " bytes)";
+        
+        // Add to proto
+        hipdnn_param.add_constant_names(weight_data.name());
+        hipdnn_param.add_constant_data_files(weight_filename);
+      }
       
       // Serialize proto to JSON
       auto hipdnn_json_str = std::string();

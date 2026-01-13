@@ -38,6 +38,7 @@ private:
   void InitializeHeuristicDescriptor();
   void InitializeEngineConfig();
   void ExtractUIDsFromSerializedGraph(const std::vector<uint8_t>& buffer);
+  void LoadConstantData(onnxruntime::Model* model);
 
 private:
   // Proto parameter
@@ -56,9 +57,14 @@ private:
   std::vector<char> workspace_;
   
   // UID mappings for variant pack construction
-  std::vector<int64_t> input_uids_;
+  std::vector<int64_t> input_uids_;        // All graph inputs (runtime + constants)
   std::vector<int64_t> output_uids_;
   std::vector<std::vector<int64_t>> output_shapes_;
+  
+  // Constant initializer info
+  std::vector<std::string> constant_initializer_names_;
+  std::vector<int64_t> constant_input_uids_;  // UIDs of constant inputs in graph
+  std::vector<std::vector<char>> constant_data_;  // Actual constant data (one per constant)
 };
 
 } // namespace hipdnn
