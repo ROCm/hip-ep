@@ -309,12 +309,14 @@ struct Level1HipDnn {
   Level1HipDnn(IPass& self) : self_{self} {}
   
   void process(IPass& self, Graph& ort_graph) {
-    // Iterate through all nodes looking for supported operations
+    // Iterate through all nodes in reverse order looking for supported operations
     auto node_indices = graph_get_node_in_topoligical_order(ort_graph);
     
-    for (auto node_idx : node_indices) {
+    for (auto it = node_indices.rbegin(); it != node_indices.rend(); ++it) {
+      auto node_idx = *it;
       auto node = VAIP_ORT_API(graph_get_node)(ort_graph, node_idx);
       auto node_ref = NodeConstRef::from_node(ort_graph, *node);
+      MY_LOG(1) << "node_idx: " << node_idx << " node_name:" << node_ref.name();
       
       // Check if operation is supported
       if (!IsSupportedOp(*node)) {
