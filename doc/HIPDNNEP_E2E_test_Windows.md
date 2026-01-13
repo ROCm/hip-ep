@@ -152,6 +152,40 @@ Hostname      :
 # Output: C:\Develop\m\dist\therock
 ```
 
+### Method 4: Check TheRock Distribution Version
+
+TheRock includes a version file that shows the distribution version:
+
+```powershell
+# Check TheRock distribution version
+Get-Content "C:\Develop\m\dist\therock\.info\version"
+# Output: 7.11.0
+```
+
+For more detailed version information, check the ROCm version header:
+
+```powershell
+# Get ROCm build info (includes version and git hash)
+Select-String -Path "C:\Develop\m\dist\therock\include\rocm-core\rocm_version.h" -Pattern "ROCM_BUILD_INFO"
+# Output: #define ROCM_BUILD_INFO    "7.11.0.2-9999-56870acb4f"
+```
+
+#### Understanding Version Numbers
+
+TheRock uses **two different version schemes**:
+
+| Version | What It Is | Example |
+|---------|-----------|---------|
+| **TheRock Distribution Version** | Package version from `.info/version` | `7.11.0` |
+| **HIP Runtime Version** | HIP API version from `hipconfig --version` | `7.2.53150-56870acb4f` |
+| **Tarball Version** | Build version in filename | `7.10.0a20251103` |
+
+- **TheRock version** (e.g., `7.11.0`) = The distribution package version
+- **HIP version** (e.g., `7.2.53150`) = The HIP runtime component version inside TheRock
+- **Tarball suffix** (e.g., `7.10.0a20251103`) = Build identifier with date (the `a` indicates alpha/nightly)
+
+The git hash `56870acb4f` appears in both `ROCM_BUILD_INFO` and HIP version, confirming they're from the same source build.
+
 ### GPU Information Summary
 
 | Property | Value (Example) | How to Check |
@@ -161,6 +195,7 @@ Hostname      :
 | GFX Family | gfx110X-all | See [GFX Family table](#step-2-determine-gfx-family) |
 | VRAM | ~4 GB (reported) | PowerShell `Get-CimInstance` |
 | Driver Version | 32.0.21037.1004 | PowerShell `Get-CimInstance` |
+| TheRock Version | 7.11.0 | `Get-Content "$env:THEROCK_DIST\.info\version"` |
 | HIP Version | 7.2.53150 | `hipconfig.exe --version` |
 | HIP Platform | amd | `hipconfig.exe --platform` |
 
