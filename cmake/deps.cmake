@@ -85,4 +85,9 @@ endif()
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/version.txt" "${VERSION_INFO}")
 set(VAIP_VERSEION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
 set(VAIP_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/etc/vaip_config.json")
+
+# Force static linking for glog to avoid runtime library conflicts in Debug mode
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
+set(GLOG_BUILD_SHARED OFF CACHE BOOL "Build glog shared library" FORCE)
+
 FetchContent_MakeAvailable(morphizen)

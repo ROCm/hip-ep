@@ -22,17 +22,27 @@ list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}/lib/cmake")
 # Third-party dependencies from TheRock (nlohmann-json is required by hipdnn_sdk)
 list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}/../../third-party/nlohmann-json/dist/share/cmake")
 
-# Find hipDNN from TheRock
-find_package(hipdnn_frontend CONFIG REQUIRED)
-find_package(hipdnn_backend CONFIG REQUIRED)
-find_package(hipdnn_data_sdk CONFIG REQUIRED)
+# Find MIOpen from TheRock
+find_package(miopen REQUIRED CONFIG)
+find_package(hip REQUIRED CONFIG)
+find_package(nlohmann_json CONFIG REQUIRED)
+
+# Find hipDNN from TheRock (optional, for gradual migration)
+# find_package(hipdnn_frontend CONFIG)
+# find_package(hipdnn_backend CONFIG)
+# find_package(hipdnn_data_sdk CONFIG)
 
 find_package (glog CONFIG REQUIRED)
 # TODO: do we really need to depends on onnxruntime? it is only needed
 # at compile time.
 find_package (onnxruntime CONFIG REQUIRED)
 set(LIB_NAME morphizen-custom-op-hipdnn)
-add_library(${LIB_NAME} STATIC src/main.cpp src/custom_op.hpp src/custom_op.cpp)
+# Use MIOpen-based implementation (migrated directly in custom_op.cpp)
+add_library(${LIB_NAME} STATIC 
+  src/main.cpp 
+  src/custom_op.hpp 
+  src/custom_op.cpp
+)
 set_target_properties(${LIB_NAME} PROPERTIES FOLDER "hipdnn")
 target_include_directories(${LIB_NAME} PRIVATE 
   include
@@ -49,9 +59,13 @@ target_link_libraries(${LIB_NAME} PRIVATE
   hipdnn_proto
   glog::glog
   morphizen::morphizen-core-static
-  hipdnn_frontend
-  hipdnn_backend
-  hipdnn_data_sdk
+  MIOpen
+  hip::host
+  nlohmann_json::nlohmann_json
+  # Optional: Keep for gradual migration
+  # $<$<BOOL:${hipdnn_frontend_FOUND}>:hipdnn_frontend>
+  # $<$<BOOL:${hipdnn_backend_FOUND}>:hipdnn_backend>
+  # $<$<BOOL:${hipdnn_data_sdk_FOUND}>:hipdnn_data_sdk>
   )
 set_target_properties(${LIB_NAME} PROPERTIES
   OUTPUT_NAME "${LIB_NAME}")
