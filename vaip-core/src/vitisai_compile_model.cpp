@@ -1163,7 +1163,35 @@ restore_execution_providers_from_ep_context_model(
     }
   }
   CHECK(main_node) << " no main EPContext node";
+
+  auto user_cache_key = context->get_provider_option("cache_key");
+  if (!user_cache_key.has_value()) {
+    user_cache_key = context->get_provider_option("cacheKey");
+  }
+  if (user_cache_key.has_value() && !user_cache_key->empty()) {
+    LOG(WARNING)
+        << "User provided cache key '" << user_cache_key.value()
+        << "' in provider options. "
+        << "You should not provide a cache key when using EP context model.";
+  }
+
   store_cache_directory_from_main_node(*context, main_node.value());
+
+  auto ep_context_cache_key = context->get_context_proto().config().cache_key();
+  bool user_provided_different_cache_key =
+      user_cache_key.has_value() && !user_cache_key->empty() &&
+      user_cache_key.value() != ep_context_cache_key;
+
+  if (user_provided_different_cache_key) {
+    LOG(ERROR) << "When using EP context model, your cache key '"
+               << user_cache_key.value()
+               << "' is different from the one in the EP context model '"
+               << ep_context_cache_key
+               << "'. This is not allowed. Please remove the cache key from "
+                  "provider options ";
+    abort();
+  }
+
   context->update_pass_context_from_context_json_in_cache();
   return create_execution_providers_from_ep_context_nodes(context,
                                                           ep_context_nodes);
