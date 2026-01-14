@@ -1,6 +1,8 @@
 /*
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
+ * 
+ * MIOpen-based implementation (migrated from hipDNN)
  */
 
 #pragma once
@@ -13,14 +15,17 @@
 #include <unordered_map>
 #include <memory>
 
-#include <hipdnn_frontend.hpp>
-#include <hipdnn_backend.h>
-#include <hipdnn_data_sdk/flatbuffer_utilities/GraphWrapper.hpp>
+// MIOpen includes (replacing hipDNN)
+#include <miopen/miopen.h>
+#include <hip/hip_runtime.h>
+
 #include "morphizen/vaip.hpp"
 
 namespace hipdnn {
 using namespace vaip_core;
 
+/// @brief MIOpen-based custom operation implementation
+/// Migrated from hipDNN to direct MIOpen usage
 class HipdnnCustomOp : public CustomOpImp {
 public:
   HipdnnCustomOp(std::shared_ptr<const PassContext> context,
@@ -33,38 +38,55 @@ private:
   virtual void Compute(const OrtApi* api,
                        OrtKernelContext* context) const override final;
 
-  // Graph loading and compilation helpers
-  void LoadAndCompileGraph();
-  void InitializeHeuristicDescriptor();
-  void InitializeEngineConfig();
-  void ExtractUIDsFromSerializedGraph(const std::vector<uint8_t>& buffer);
-  void LoadConstantData(onnxruntime::Model* model);
+  // Build and compile using MIOpen
+  void BuildAndCompileMIOpen();
+  
+  // Helper to load metadata and constant data
+  void LoadGraphMetadata();
+  void LoadConstantData();
 
 private:
   // Proto parameter
   HipdnnParamProto hipdnn_proto_;
   
-  // hipDNN handle
-  hipdnnHandle_t handle_;
+  // MIOpen handle (per kernel)
+  miopenHandle_t miopen_handle_;
   
-  // Backend descriptors (mimics Graph class internals)
-  std::unique_ptr<hipdnn_frontend::ScopedHipdnnBackendDescriptor> graphDesc_;
-  std::unique_ptr<hipdnn_frontend::ScopedHipdnnBackendDescriptor> engineHeuristicDesc_;
-  std::unique_ptr<hipdnn_frontend::ScopedHipdnnBackendDescriptor> engineConfigDesc_;
-  std::unique_ptr<hipdnn_frontend::ScopedHipdnnBackendDescriptor> executionPlanDesc_;
+  // MIOpen descriptors for convolution
+  miopenTensorDescriptor_t x_desc_;  // Input
+  miopenTensorDescriptor_t w_desc_;  // Weights
+  miopenTensorDescriptor_t y_desc_;  // Output
+  miopenTensorDescriptor_t b_desc_;  // Bias (optional)
+  miopenConvolutionDescriptor_t conv_desc_;
   
-  // Execution resources
-  std::vector<char> workspace_;
+  // Convolution algorithm and workspace
+  miopenConvFwdAlgorithm_t conv_algo_;
+  size_t workspace_size_;
+  void* workspace_;
   
-  // UID mappings for variant pack construction
-  std::vector<int64_t> input_uids_;        // All graph inputs (runtime + constants)
-  std::vector<int64_t> output_uids_;
+  // Tensor shapes (stored at compile time)
+  std::vector<int64_t> x_shape_;
+  std::vector<int64_t> w_shape_;
+  std::vector<int64_t> y_shape_;
+  std::vector<int64_t> b_shape_;
+  
+  // Graph I/O info
+  size_t num_inputs_;
+  size_t num_outputs_;
   std::vector<std::vector<int64_t>> output_shapes_;
+  
+  // Bias support
+  bool has_bias_;
+  
+  // Data type
+  miopenDataType_t data_type_;
   
   // Constant initializer info
   std::vector<std::string> constant_initializer_names_;
-  std::vector<int64_t> constant_input_uids_;  // UIDs of constant inputs in graph
-  std::vector<std::vector<char>> constant_data_;  // Actual constant data (one per constant)
+  std::vector<std::vector<char>> constant_data_;
+  
+  // Device ID
+  int device_id_;
 };
 
 } // namespace hipdnn

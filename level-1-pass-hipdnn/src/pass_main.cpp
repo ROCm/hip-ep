@@ -1,6 +1,8 @@
 /*
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
+ * 
+ * MIOpen-based implementation (migrated from hipDNN)
  */
 #include "google/protobuf/util/json_util.h"
 #include "morphizen/env_config.hpp"
@@ -9,8 +11,8 @@
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
-#include <hipdnn_frontend.hpp>
 #include <memory>
+#include <nlohmann/json.hpp>
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_HIPDNN, "0")
 DEF_ENV_PARAM(MORPHIZEN_MAX_FUSED_SUBGRAPH_NUM, "65535")
@@ -21,73 +23,27 @@ using namespace vaip_core;
 using namespace vaip_cxx;
 
 //=============================================================================
-// Helper Functions
+// Helper Functions (MIOpen version)
 //=============================================================================
 
-// Helper function to compute strides from shape (NCHW layout)
-std::vector<int64_t> ComputeStrides(const std::vector<int64_t>& shape) {
-  std::vector<int64_t> strides(shape.size());
-  int64_t stride = 1;
-  for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
-    strides[i] = stride;
-    stride *= shape[i];
-  }
-  return strides;
-}
-
-// Convert ONNX data type to hipDNN data type
-std::optional<hipdnn_frontend::DataType> ToHipDNNDataType(int32_t onnx_dtype) {
-  using hipdnn_frontend::DataType;
-  // ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT = 1
-  // ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 = 10
-  switch (onnx_dtype) {
-    case 1:  // FLOAT
-      return DataType::FLOAT;
-    case 10: // FLOAT16
-      return DataType::HALF;
-    default:
-      return std::nullopt;
-  }
-}
-
-// Determine compute data type based on input data types
-std::optional<hipdnn_frontend::DataType> GetComputeDataType(
-    hipdnn_frontend::DataType x_dtype,
-    hipdnn_frontend::DataType w_dtype) {
-  using hipdnn_frontend::DataType;
-
-  // Both must be float types (FLOAT or HALF)
-  bool x_is_float = (x_dtype == DataType::FLOAT || x_dtype == DataType::HALF);
-  bool w_is_float = (w_dtype == DataType::FLOAT || w_dtype == DataType::HALF);
-
-  if (x_is_float && w_is_float) {
-    // Use float32 for compute when inputs are float types
-    return DataType::FLOAT;
-  }
-
-  return std::nullopt;
-}
-
-// Save FlatBuffer to file
-void SaveGraphToFile(const flatbuffers::DetachedBuffer& buffer, 
-                     const std::string& filepath) {
-  std::ofstream file(filepath, std::ios::binary);
+// Save JSON metadata to file
+void SaveMetadataToFile(const nlohmann::json& metadata, 
+                        const std::string& filepath) {
+  std::ofstream file(filepath);
   if (!file) {
     throw std::runtime_error("Failed to open file for writing: " + filepath);
   }
   
-  file.write(reinterpret_cast<const char*>(buffer.data()), buffer.size());
+  file << metadata.dump(2);  // Pretty print with 2-space indent
   file.close();
   
   if (!file.good()) {
-    throw std::runtime_error("Failed to write graph to file: " + filepath);
+    throw std::runtime_error("Failed to write metadata to file: " + filepath);
   }
 }
 
-using TensorAttrPtr = std::shared_ptr<hipdnn_frontend::graph::TensorAttributes>;
-
 //=============================================================================
-// Operation Support Checking (similar to ep.cc)
+// Operation Support Checking (MIOpen version)
 //=============================================================================
 
 // Check if a Conv node is supported
@@ -101,56 +57,47 @@ static bool IsSupportedConv(const Node& node) {
       return false;
     }
 
-    // Check data types - we support float and float16
-    auto x_dtype = node_arg_get_element_type(*inputs[0].node_arg);
-    auto w_dtype = node_arg_get_element_type(*inputs[1].node_arg);
-    auto y_dtype = node_arg_get_element_type(*outputs[0]);
-
-    bool supported_type =
-        (x_dtype == 1 || x_dtype == 10) &&  // FLOAT or FLOAT16
-        x_dtype == w_dtype && x_dtype == y_dtype;
-
-    if (!supported_type) {
+    // Check data types
+    auto x_type = node_arg_get_element_type(*inputs[0].node_arg);
+    auto w_type = node_arg_get_element_type(*inputs[1].node_arg);
+    
+    // Only support FLOAT (1) and FLOAT16 (10)
+    if ((x_type != 1 && x_type != 10) || (w_type != 1 && w_type != 10)) {
       return false;
     }
+    
+    // If bias present, check its type
+    if (inputs.size() >= 3) {
+      auto b_type = node_arg_get_element_type(*inputs[2].node_arg);
+      if (b_type != x_type) {
+        return false;  // Bias must match input type
+      }
+      
+      // Check bias shape - should be 1D
+      auto b_shape = node_arg_get_shape_i64(*inputs[2].node_arg);
+      if (!b_shape || b_shape->size() != 1) {
+        return false;
+      }
+    }
 
-    // Check if it's a 2D convolution (4D tensors: NCHW)
+    // Check shapes - need static shapes
     auto x_shape = node_arg_get_shape_i64(*inputs[0].node_arg);
     auto w_shape = node_arg_get_shape_i64(*inputs[1].node_arg);
-
-    if (!x_shape || !w_shape) {
-      return false;  // Dynamic shapes not supported yet
+    auto y_shape = node_arg_get_shape_i64(*outputs[0]);
+    
+    if (!x_shape || !w_shape || !y_shape) {
+      return false;  // Dynamic shapes not supported
     }
-
-    if (x_shape->size() != 4 || w_shape->size() != 4) {
-      return false;  // Only 2D conv supported
-    }
-
-    // Check auto_pad - only NOTSET supported (explicit padding)
-    if (node_has_attr(node, "auto_pad")) {
-      auto auto_pad = node_get_attr_string(node, "auto_pad");
-      if (auto_pad != "NOTSET") {
-        return false;
-      }
-    }
-
-    // Check group - only 1 supported (no grouped/depthwise convolutions)
-    auto group = node_get_attr_int_with_default(node, "group", 1);
-    if (group != 1) {
+    
+    // Check for 2D convolution (4D tensors: NCHW)
+    if (x_shape->size() != 4 || w_shape->size() != 4 || y_shape->size() != 4) {
       return false;
     }
-
-    // Check dilations - only [1,1] supported (no dilated convolutions)
-    if (node_has_attr(node, "dilations")) {
-      auto dilations = node_get_attr_ints(node, "dilations");
-      if (dilations.size() != 2 || dilations[0] != 1 || dilations[1] != 1) {
-        return false;
-      }
-    }
-
+    
     return true;
-
-  } catch (...) {
+    
+  } catch (const std::exception& ex) {
+    MY_LOG(1) << "Exception in IsSupportedConv: " << ex.what();
     return false;
   }
 }
@@ -168,151 +115,135 @@ static bool IsSupportedOp(const Node& node) {
 }
 
 //=============================================================================
-// Graph Building and Serialization
+// Metadata Generation (MIOpen version - replaces graph serialization)
 //=============================================================================
 
-// Build hipDNN graph and serialize it to file
-bool BuildAndSerializeGraph(
+// Generate Conv metadata and save to JSON file
+bool GenerateConvMetadata(
     const Node& conv_node,
     const NodeArgConstRef& input_ref,
     const NodeArgConstRef& weight_ref,
     const NodeArgConstRef& output_ref,
+    std::vector<std::string>& constant_names,
     std::string& out_filename) {
-  using hipdnn_frontend::ConvolutionMode;
-  using HipDNNGraph = hipdnn_frontend::graph::Graph;
-  using hipdnn_frontend::graph::TensorAttributes;
-  using hipdnn_frontend::graph::ConvFpropAttributes;
-
   try {
-    MY_LOG(1) << "Building hipDNN graph for Conv operation";
-
-    // Create hipDNN graph
-    auto graph = std::make_unique<HipDNNGraph>();
-    graph->set_name("Conv_" + node_arg_get_name(output_ref));
+    MY_LOG(1) << "Generating Conv metadata (MIOpen)";
     
-    int64_t next_uid = 1;
-
-    // Get input shapes and types
-    auto input_shape = node_arg_get_shape_i64(input_ref);
-    auto weight_shape = node_arg_get_shape_i64(weight_ref);
-    auto output_shape = node_arg_get_shape_i64(output_ref);
-
-    if (!input_shape || !weight_shape || !output_shape) {
-      MY_LOG(1) << "Cannot build graph: missing static shapes";
+    // Get shapes
+    auto x_shape = node_arg_get_shape_i64(input_ref);
+    auto w_shape = node_arg_get_shape_i64(weight_ref);
+    auto y_shape = node_arg_get_shape_i64(output_ref);
+    
+    if (!x_shape || !w_shape || !y_shape) {
+      MY_LOG(1) << "Missing shape information";
       return false;
     }
-
+    
     // Get data types
-    auto input_dtype = ToHipDNNDataType(node_arg_get_element_type(input_ref));
-    auto weight_dtype = ToHipDNNDataType(node_arg_get_element_type(weight_ref));
-    auto output_dtype = ToHipDNNDataType(node_arg_get_element_type(output_ref));
-
-    if (!input_dtype.has_value() || !weight_dtype.has_value() || !output_dtype.has_value()) {
-      MY_LOG(1) << "Cannot build graph: unsupported data types";
-      return false;
-    }
-
-    // Create input tensor attribute
-    auto x_attr = std::make_shared<TensorAttributes>();
-    x_attr->set_uid(next_uid++)
-        .set_name(node_arg_get_name(input_ref))
-        .set_data_type(input_dtype.value())
-        .set_dim(*input_shape)
-        .set_stride(ComputeStrides(*input_shape))
-        .set_is_virtual(false);  // Graph input
-
-    // Create weight tensor attribute
-    auto w_attr = std::make_shared<TensorAttributes>();
-    w_attr->set_uid(next_uid++)
-        .set_name(node_arg_get_name(weight_ref))
-        .set_data_type(weight_dtype.value())
-        .set_dim(*weight_shape)
-        .set_stride(ComputeStrides(*weight_shape))
-        .set_is_virtual(false);  // Graph input
-
-    // Extract Conv attributes (all are optional, use defaults if not present)
+    auto x_dtype = node_arg_get_element_type(input_ref);
+    auto w_dtype = node_arg_get_element_type(weight_ref);
+    auto y_dtype = node_arg_get_element_type(output_ref);
     
-    // Get pads (default: [0, 0, 0, 0])
+    // Get Conv attributes
     std::vector<int64_t> pads_vec;
+    std::vector<int64_t> strides_vec;
+    std::vector<int64_t> dilations_vec;
+    int64_t group = 1;
+    
     if (node_has_attr(conv_node, "pads")) {
       auto pads = node_get_attr_ints(conv_node, "pads");
       pads_vec.assign(pads.begin(), pads.end());
     }
-    
-    if (pads_vec.empty()) {
-      pads_vec = {0, 0, 0, 0};
-    } else if (pads_vec.size() == 2) {
-      // Expand [pad_h, pad_w] to [pad_h_begin, pad_w_begin, pad_h_end, pad_w_end]
-      pads_vec = {pads_vec[0], pads_vec[1], pads_vec[0], pads_vec[1]};
-    } else if (pads_vec.size() != 4) {
-      MY_LOG(1) << "Invalid pads size: " << pads_vec.size();
-      return false;
-    }
-
-    // Get strides (default: [1, 1])
-    std::vector<int64_t> strides_vec;
     if (node_has_attr(conv_node, "strides")) {
       auto strides = node_get_attr_ints(conv_node, "strides");
       strides_vec.assign(strides.begin(), strides.end());
+    }
+    if (node_has_attr(conv_node, "dilations")) {
+      auto dilations = node_get_attr_ints(conv_node, "dilations");
+      dilations_vec.assign(dilations.begin(), dilations.end());
+    }
+    if (node_has_attr(conv_node, "group")) {
+      group = node_get_attr_int(conv_node, "group");
+    }
+    
+    // Normalize defaults
+    if (pads_vec.empty()) {
+      pads_vec = {0, 0, 0, 0};
+    } else if (pads_vec.size() == 2) {
+      pads_vec = {pads_vec[0], pads_vec[1], pads_vec[0], pads_vec[1]};
     }
     
     if (strides_vec.empty()) {
       strides_vec = {1, 1};
     }
-
-    // Get dilations (default: [1, 1])
-    std::vector<int64_t> dilations_vec;
-    if (node_has_attr(conv_node, "dilations")) {
-      auto dilations = node_get_attr_ints(conv_node, "dilations");
-      dilations_vec.assign(dilations.begin(), dilations.end());
-    }
     
     if (dilations_vec.empty()) {
       dilations_vec = {1, 1};
     }
-
-    // Determine compute data type
-    auto compute_dtype = GetComputeDataType(input_dtype.value(), weight_dtype.value());
-    if (!compute_dtype.has_value()) {
-      MY_LOG(1) << "Cannot determine compute data type";
-      return false;
+    
+    // Check for bias (3rd input)
+    auto inputs = node_get_inputs(conv_node);
+    bool has_bias = inputs.size() >= 3;
+    std::vector<int64_t> b_shape_vec;
+    if (has_bias) {
+      auto b_shape = node_arg_get_shape_i64(*inputs[2].node_arg);
+      if (b_shape) {
+        b_shape_vec = *b_shape;
+      }
     }
-
-    // Create convolution attributes
-    ConvFpropAttributes conv_attrs;
-    conv_attrs.set_padding({pads_vec[0], pads_vec[1]})
-        .set_stride({strides_vec[0], strides_vec[1]})
-        .set_dilation({dilations_vec[0], dilations_vec[1]})
-        .set_convolution_mode(ConvolutionMode::CROSS_CORRELATION)
-        .set_compute_data_type(compute_dtype.value());
-
-    // Add convolution operation to graph and get output tensor
-    auto y_attr = graph->conv_fprop(x_attr, w_attr, conv_attrs);
     
-    // Set output properties
-    y_attr->set_uid(next_uid++)
-        .set_name(node_arg_get_name(output_ref))
-        .set_data_type(output_dtype.value())
-        .set_dim(*output_shape)
-        .set_stride(ComputeStrides(*output_shape))
-        .set_is_virtual(false);  // Graph output
-
-    // Serialize the graph
-    flatbuffers::DetachedBuffer buffer = graph->buildFlatbufferOperationGraph();
+    // Build JSON metadata (format expected by custom_op.cpp)
+    nlohmann::json metadata;
+    metadata["op_type"] = "Conv";
+    metadata["version"] = "miopen_1.0";
     
-    // Generate unique filename
-    out_filename = "hipdnn_graph_" + node_arg_get_name(output_ref) + ".bin";
+    // Shapes as arrays
+    metadata["input_shapes"] = nlohmann::json::array();
+    metadata["input_shapes"].push_back(*x_shape);
+    metadata["input_shapes"].push_back(*w_shape);
+    if (has_bias) {
+      metadata["input_shapes"].push_back(b_shape_vec);
+    }
     
-    // Save to file
-    SaveGraphToFile(buffer, out_filename);
+    metadata["output_shapes"] = nlohmann::json::array();
+    metadata["output_shapes"].push_back(*y_shape);
     
-    MY_LOG(1) << "Serialized graph to: " << out_filename 
-              << " (" << buffer.size() << " bytes)";
+    // Data types as arrays
+    metadata["input_data_types"] = nlohmann::json::array();
+    metadata["input_data_types"].push_back(x_dtype);
+    metadata["input_data_types"].push_back(w_dtype);
+    if (has_bias) {
+      metadata["input_data_types"].push_back(node_arg_get_element_type(*inputs[2].node_arg));
+    }
+    
+    metadata["output_data_types"] = nlohmann::json::array();
+    metadata["output_data_types"].push_back(y_dtype);
+    
+    // Conv attributes (directly at top level)
+    metadata["pads"] = pads_vec;
+    metadata["strides"] = strides_vec;
+    metadata["dilations"] = dilations_vec;
+    metadata["group"] = group;
+    metadata["has_bias"] = has_bias;
+    
+    // Store constant names for custom op
+    constant_names.push_back(node_arg_get_name(weight_ref));  // Weight
+    if (has_bias) {
+      constant_names.push_back(node_arg_get_name(*inputs[2].node_arg));  // Bias
+    }
+    
+    // Generate filename
+    out_filename = "hipdnn_meta_" + node_arg_get_name(output_ref) + ".json";
+    
+    // Save metadata
+    SaveMetadataToFile(metadata, out_filename);
+    
+    MY_LOG(1) << "Saved metadata to: " << out_filename;
     
     return true;
-
+    
   } catch (const std::exception& ex) {
-    MY_LOG(1) << "Exception building/serializing hipDNN graph: " << ex.what();
+    MY_LOG(1) << "Exception generating Conv metadata: " << ex.what();
     return false;
   }
 }
@@ -367,85 +298,102 @@ struct Level1HipDnn {
       auto weight_data = vaip_cxx::NodeArgConstRef::from_node_arg(ort_graph, *conv_inputs[1].node_arg);
       auto output_data = vaip_cxx::NodeArgConstRef::from_node_arg(ort_graph, *conv_output_node_args[0]);
       
-      // Build and serialize graph
-      std::string graph_filename;
-      bool success = BuildAndSerializeGraph(
+      // Generate metadata (MIOpen version)
+      std::string metadata_filename;
+      std::vector<std::string> constant_names;
+      bool success = GenerateConvMetadata(
           *node, 
           input_data,
           weight_data,
           output_data,
-          graph_filename);
+          constant_names,
+          metadata_filename);
       
       if (!success) {
-        MY_LOG(1) << "Failed to build/serialize graph, skipping fusion";
+        MY_LOG(1) << "Failed to generate metadata, skipping fusion";
         continue;
       }
       
-      MY_LOG(1) << "Graph serialization succeeded, proceeding with fusion";
+      MY_LOG(1) << "Metadata generation succeeded, proceeding with fusion";
+      
+      // Prepare constant data files
+      std::vector<std::string> constant_data_files;
+      std::filesystem::path meta_dir = std::filesystem::path(metadata_filename).parent_path();
+      
+      // Save weight constant data (always exists)
+      if (!constant_names.empty() && weight_data.is_constant()) {
+        const auto& const_name = constant_names[0];
+        auto& tensor = node_arg_get_const_data_as_tensor(ort_graph, weight_data);
+        auto raw_data = vaip_core::api()->tensor_proto_as_raw(ort_graph, tensor);
+        
+        std::string data_filename = "hipdnn_const_" + const_name + ".bin";
+        std::filesystem::path data_path = meta_dir / data_filename;
+        
+        std::ofstream file(data_path.string(), std::ios::binary);
+        if (file) {
+          file.write(raw_data.data(), static_cast<std::streamsize>(raw_data.size()));
+          file.close();
+          constant_data_files.push_back(data_path.string());
+          MY_LOG(1) << "Saved weight constant: " << data_path.string() 
+                    << " (" << raw_data.size() << " bytes)";
+        }
+      }
+      
+      // Save bias constant data (if exists)
+      if (constant_names.size() > 1 && conv_inputs.size() > 2) {
+        auto bias_node_arg = conv_inputs[2].node_arg;
+        if (bias_node_arg) {
+          auto bias_data = vaip_cxx::NodeArgConstRef::from_node_arg(ort_graph, *bias_node_arg);
+          if (bias_data.is_constant()) {
+            const auto& const_name = constant_names[1];
+            auto& tensor = node_arg_get_const_data_as_tensor(ort_graph, bias_data);
+            auto raw_data = vaip_core::api()->tensor_proto_as_raw(ort_graph, tensor);
+            
+            std::string data_filename = "hipdnn_const_" + const_name + ".bin";
+            std::filesystem::path data_path = meta_dir / data_filename;
+            
+            std::ofstream file(data_path.string(), std::ios::binary);
+            if (file) {
+              file.write(raw_data.data(), static_cast<std::streamsize>(raw_data.size()));
+              file.close();
+              constant_data_files.push_back(data_path.string());
+              MY_LOG(1) << "Saved bias constant: " << data_path.string() 
+                        << " (" << raw_data.size() << " bytes)";
+            }
+          }
+        }
+      }
       
       // Create fused node
-      // Check if weight is a constant initializer in the original graph
-      bool weight_is_constant = weight_data.is_constant();
-      MY_LOG(1) << "Weight " << weight_data.name() << " is_constant=" << weight_is_constant;
-      
       auto unique_id = output_data.name();
-      std::vector<std::string> inputs_list;
-      std::vector<std::string> constants_list;
-      
-      if (weight_is_constant) {
-        // Weight is a constant, only pass data as runtime input
-        inputs_list = {input_data.name()};
-        constants_list = {weight_data.name()};
-        MY_LOG(1) << "Fusing with weight as constant initializer";
-      } else {
-        // Weight is a runtime input (shouldn't happen for conv, but handle it)
-        inputs_list = {input_data.name(), weight_data.name()};
-        constants_list = {};
-        MY_LOG(1) << "Fusing with weight as runtime input";
-      }
+      std::vector<std::string> inputs_list = {input_data.name()};  // Only runtime input
       
       auto [meta_def, fuse_error] =
           self_.try_fuse(ort_graph, unique_id, 
                         inputs_list,
                         {output_data.name()},
-                        constants_list, "HIPDNN");
+                        constant_names,  // All constants
+                        "HIPDNN");
       
       if (meta_def == nullptr) {
         MY_LOG(1) << "fuse error: " << fuse_error.comments;
         continue;
       }
       
-      MY_LOG(1) << "Creating fused HIPDNN operation";
+      MY_LOG(1) << "Creating fused HIPDNN operation (MIOpen)";
       MY_LOG(1) << "  meta_def inputs: " << meta_def->inputs_size();
       MY_LOG(1) << "  meta_def constants: " << meta_def->constant_initializers_size();
       
-      // Create proto with graph filename
+      // Create proto with metadata filename
       auto hipdnn_param = hipdnn::HipdnnParamProto();
-      hipdnn_param.set_graph_file_name(graph_filename);
+      hipdnn_param.set_graph_file_name(metadata_filename);
       
-      // Save constant initializer data to files
-      if (weight_is_constant) {
-        // Get weight data
-        auto& weight_tensor = node_arg_get_const_data_as_tensor(ort_graph, weight_data);
-        auto weight_raw = vaip_core::api()->tensor_proto_as_raw(ort_graph, weight_tensor);
-        
-        // Create weight data filename
-        std::string weight_filename = graph_filename + ".weight0.bin";
-        
-        // Write weight data to file
-        std::ofstream weight_file(weight_filename, std::ios::binary);
-        if (!weight_file) {
-          MY_LOG(1) << "Failed to create weight file: " << weight_filename;
-          continue;
-        }
-        weight_file.write(weight_raw.data(), static_cast<std::streamsize>(weight_raw.size()));
-        weight_file.close();
-        
-        MY_LOG(1) << "Saved weight data: " << weight_filename << " (" << weight_raw.size() << " bytes)";
-        
-        // Add to proto
-        hipdnn_param.add_constant_names(weight_data.name());
-        hipdnn_param.add_constant_data_files(weight_filename);
+      for (const auto& name : constant_names) {
+        hipdnn_param.add_constant_names(name);
+      }
+      
+      for (const auto& file : constant_data_files) {
+        hipdnn_param.add_constant_data_files(file);
       }
       
       // Serialize proto to JSON
@@ -462,7 +410,7 @@ struct Level1HipDnn {
       self_.attach_meta_def_param(*meta_def, hipdnn_json_str.c_str());
       self_.fuse(ort_graph, std::move(*meta_def));
       
-      MY_LOG(1) << "Successfully fused Conv operation";
+      MY_LOG(1) << "Successfully fused Conv operation (MIOpen)";
 
       count_fused_subgraph++;
     }

@@ -15,20 +15,26 @@ list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}")
 # Third-party dependencies from TheRock (nlohmann-json is required by hipdnn_sdk)
 list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}/../../third-party/nlohmann-json/dist/share/cmake")
 
-# Find hipDNN from TheRock
-find_package(hipdnn_frontend CONFIG REQUIRED)
-find_package(hipdnn_backend CONFIG REQUIRED)
+# MIOpen-based pass: replaced hipDNN with nlohmann_json for metadata
+# Original: find_package(hipdnn_frontend CONFIG REQUIRED)
+# Original: find_package(hipdnn_backend CONFIG REQUIRED)
+
+# Find nlohmann_json for JSON metadata generation (MIOpen version)
+find_package(nlohmann_json CONFIG REQUIRED)
 
 find_package (glog CONFIG REQUIRED)
 include(cmake/generate_pattern_inc.cmake)
 set(LIB_NAME morphizen-level1-pass-hipdnn)
+# MIOpen version: pass_main.cpp now generates JSON metadata instead of hipDNN graphs
 add_library(${LIB_NAME} STATIC src/pass_main.cpp ${CMAKE_CURRENT_BINARY_DIR}/hipdnn_pattern_json.hpp)
 target_link_libraries(${LIB_NAME} PUBLIC
 	hipdnn_proto
 	morphizen::morphizen-core-static
 	glog::glog
-	hipdnn_frontend
-	hipdnn_backend
+	nlohmann_json::nlohmann_json
+	# MIOpen version: removed hipDNN dependencies
+	# Original: hipdnn_frontend
+	# Original: hipdnn_backend
 )
 target_include_directories(${LIB_NAME} PRIVATE
 	include

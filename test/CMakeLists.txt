@@ -1,3 +1,14 @@
+# Option to disable test_onnx_runner compilation
+option(BUILD_TEST_ONNX_RUNNER "Build test_onnx_runner executable" OFF)
+
+if(BUILD_TEST_ONNX_RUNNER)
+  message(STATUS "Building test_onnx_runner: ENABLED")
+else()
+  message(STATUS "Building test_onnx_runner: DISABLED")
+endif()
+
+if(BUILD_TEST_ONNX_RUNNER)
+
 if(NOT TARGET glog::glog)
     find_package(glog CONFIG REQUIRED)
 endif()
@@ -96,3 +107,5 @@ add_test(NAME test_deploy_ep_context_model
   WORKING_DIRECTORY ${morphizen_BINARY_DIR}/unit-test
 )
 set_tests_properties(test_deploy_ep_context_model PROPERTIES DEPENDS test_generate_ep_context_model)
+
+endif() # BUILD_TEST_ONNX_RUNNER
