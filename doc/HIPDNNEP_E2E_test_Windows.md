@@ -423,6 +423,165 @@ C:\Develop\m\dist\therock
 C:\Develop\m\dist\therock\lib\llvm\bin
 ```
 
+#### Step 6: Fix TheRock SDK Hardcoded Paths (IMPORTANT)
+
+TheRock SDK CMake config files may contain **hardcoded absolute paths** from the original build machine. These paths typically start with `B:/build/` and must be removed before using the SDK.
+
+##### Detect Hardcoded Paths
+
+Run this PowerShell command to find all files with hardcoded build paths:
+
+```powershell
+# Find all cmake files with hardcoded B:/build paths
+Get-ChildItem -Path "$env:THEROCK_DIST\lib\cmake" -Recurse -Filter "*.cmake" | 
+    Select-String -Pattern "B:/build" | 
+    Select-Object Path, LineNumber, Line
+```
+
+**Sample output showing affected files:**
+```
+Path                                                              LineNumber Line
+----                                                              ---------- ----
+C:\Develop\m\dist\therock\lib\cmake\hipdnn_frontend\..Targets.cmake       12   INTERFACE_INCLUDE_DIRECTORIES "B:/build/third-party/flatbuffers/dist/include;...
+C:\Develop\m\dist\therock\lib\cmake\hipdnn_backend\..Config.cmake         28   INTERFACE_INCLUDE_DIRECTORIES "B:/build/core/clr/dist/include;...
+C:\Develop\m\dist\therock\lib\cmake\hipdnn_data_sdk\..Targets.cmake       15   INTERFACE_INCLUDE_DIRECTORIES "B:/build/third-party/llvm-project/install/include;...
+```
+
+##### Files That Commonly Need Fixing
+
+| File | Hardcoded Path to Remove |
+|------|--------------------------|
+| `hipdnn_frontend/hipdnn_frontendTargets.cmake` | `B:/build/third-party/flatbuffers/dist/include` |
+| `hipdnn_backend/hipdnn_backendConfig.cmake` | `B:/build/core/clr/dist/include` |
+| `hipdnn_data_sdk/hipdnn_data_sdkTargets.cmake` | `B:/build/third-party/llvm-project/install/include;B:/build/third-party/json/install/include` |
+
+##### Example Fix: hipdnn_frontendTargets.cmake
+
+**File location**: `$THEROCK_DIST\lib\cmake\hipdnn_frontend\hipdnn_frontendTargets.cmake`
+
+**Before** (with hardcoded flatbuffers path):
+```cmake
+set_target_properties(hipdnn_frontend PROPERTIES
+  INTERFACE_COMPILE_FEATURES "cxx_std_17"
+  INTERFACE_INCLUDE_DIRECTORIES "B:/build/third-party/flatbuffers/dist/include;${_IMPORT_PREFIX}/include"
+  INTERFACE_LINK_LIBRARIES "hip::host;hipdnn_data_sdk"
+)
+```
+
+**After** (fixed - remove the B:/build path):
+```cmake
+set_target_properties(hipdnn_frontend PROPERTIES
+  INTERFACE_COMPILE_FEATURES "cxx_std_17"
+  INTERFACE_INCLUDE_DIRECTORIES "${_IMPORT_PREFIX}/include"
+  INTERFACE_LINK_LIBRARIES "hip::host;hipdnn_data_sdk"
+)
+```
+
+##### Example Fix: hipdnn_data_sdkTargets.cmake
+
+**File location**: `$THEROCK_DIST\lib\cmake\hipdnn_data_sdk\hipdnn_data_sdkTargets.cmake`
+
+**Before** (with multiple hardcoded paths):
+```cmake
+set_target_properties(hipdnn_data_sdk PROPERTIES
+  INTERFACE_COMPILE_FEATURES "cxx_std_17"
+  INTERFACE_INCLUDE_DIRECTORIES "B:/build/third-party/llvm-project/install/include;B:/build/third-party/json/install/include;${_IMPORT_PREFIX}/include"
+  INTERFACE_LINK_LIBRARIES "hip::host"
+)
+```
+
+**After** (fixed - remove all B:/build paths):
+```cmake
+set_target_properties(hipdnn_data_sdk PROPERTIES
+  INTERFACE_COMPILE_FEATURES "cxx_std_17"
+  INTERFACE_INCLUDE_DIRECTORIES "${_IMPORT_PREFIX}/include"
+  INTERFACE_LINK_LIBRARIES "hip::host"
+)
+```
+
+##### Example Fix: hipdnn_backendConfig.cmake
+
+**File location**: `$THEROCK_DIST\lib\cmake\hipdnn_backend\hipdnn_backendConfig.cmake`
+
+Look for any `INTERFACE_INCLUDE_DIRECTORIES` with `B:/build/core/clr/dist/include` and remove it, keeping only `${_IMPORT_PREFIX}/include`.
+
+##### Automated Fix Script
+
+Save this as `fix_therock_paths.ps1` and run it to automatically fix the hardcoded paths:
+
+```powershell
+# Fix TheRock SDK Hardcoded Paths
+# Usage: .\fix_therock_paths.ps1 -TherockDist "C:\Develop\m\dist\therock"
+
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$TherockDist
+)
+
+$cmakeDir = Join-Path $TherockDist "lib\cmake"
+
+if (-not (Test-Path $cmakeDir)) {
+    Write-Error "CMake directory not found: $cmakeDir"
+    exit 1
+}
+
+Write-Host "Scanning for hardcoded paths in: $cmakeDir" -ForegroundColor Yellow
+
+# Find all cmake files with B:/build paths
+$files = Get-ChildItem -Path $cmakeDir -Recurse -Filter "*.cmake" | 
+    Where-Object { (Get-Content $_.FullName -Raw) -match "B:/build" }
+
+if ($files.Count -eq 0) {
+    Write-Host "No hardcoded paths found. TheRock SDK is clean." -ForegroundColor Green
+    exit 0
+}
+
+Write-Host "Found $($files.Count) file(s) with hardcoded paths:" -ForegroundColor Yellow
+$files | ForEach-Object { Write-Host "  - $($_.FullName)" }
+
+foreach ($file in $files) {
+    Write-Host "`nProcessing: $($file.Name)" -ForegroundColor Cyan
+    
+    # Read file content
+    $content = Get-Content $file.FullName -Raw
+    
+    # Pattern: Remove B:/build paths from INTERFACE_INCLUDE_DIRECTORIES
+    # Matches: "B:/build/...;${_IMPORT_PREFIX}..." -> "${_IMPORT_PREFIX}..."
+    $pattern = '"B:/build[^"]*;(\$\{_IMPORT_PREFIX\}/include)"'
+    $replacement = '"$1"'
+    
+    $newContent = $content -replace $pattern, $replacement
+    
+    # Also handle case where B:/build path is the only remaining path after semicolon
+    $pattern2 = ';B:/build[^";]*'
+    $newContent = $newContent -replace $pattern2, ''
+    
+    # Handle case where B:/build is at the start followed by semicolon
+    $pattern3 = '"B:/build[^";]*;'
+    $newContent = $newContent -replace $pattern3, '"'
+    
+    if ($content -ne $newContent) {
+        # Create backup
+        $backupPath = "$($file.FullName).bak"
+        Copy-Item $file.FullName $backupPath -Force
+        Write-Host "  Created backup: $backupPath" -ForegroundColor Gray
+        
+        # Write fixed content
+        Set-Content $file.FullName $newContent -NoNewline
+        Write-Host "  Fixed: $($file.Name)" -ForegroundColor Green
+    } else {
+        Write-Host "  No changes needed" -ForegroundColor Gray
+    }
+}
+
+Write-Host "`nDone! Verify the fixes by running CMake configure again." -ForegroundColor Green
+```
+
+**Usage:**
+```powershell
+.\fix_therock_paths.ps1 -TherockDist "C:\Develop\m\dist\therock"
+```
+
 ### 1.6 Install IREE Compiler
 
 IREE (Intermediate Representation Execution Environment) is required by hipDNN backend for kernel code generation. There are two ways to install it:
@@ -947,6 +1106,44 @@ Copy-Item "$therockBin\amdhip64.dll" $testDir -Force -ErrorAction SilentlyContin
 - GPU kernel execution: ❌ Requires hipDNN engine plugins
 
 **Workaround**: Ensure hipDNN engine plugins are properly installed in `$THEROCK_DIST/bin/hipdnn_plugins/engines/`.
+
+### Issue 10: TheRock SDK Contains Hardcoded Build Paths
+
+**Error**:
+```
+CMake Error in level-1-pass-hipdnn/CMakeLists.txt:
+  Imported target "hipdnn_frontend" includes non-existent path
+    "B:/build/third-party/flatbuffers/dist/include"
+```
+
+**Cause**: TheRock SDK CMake configuration files contain hardcoded absolute paths from the original build machine (typically starting with `B:/build/`). These paths don't exist on your system.
+
+**Affected Files** (may vary by TheRock version):
+- `lib/cmake/hipdnn_frontend/hipdnn_frontendTargets.cmake`
+- `lib/cmake/hipdnn_backend/hipdnn_backendConfig.cmake`
+- `lib/cmake/hipdnn_data_sdk/hipdnn_data_sdkTargets.cmake`
+
+**Solution**: See [Step 6: Fix TheRock SDK Hardcoded Paths](#step-6-fix-therock-sdk-hardcoded-paths-important) in the Environment Setup section for detailed instructions and an automated fix script.
+
+**Quick Fix** (for the specific flatbuffers error):
+
+1. Open the file:
+   ```powershell
+   code "$env:THEROCK_DIST\lib\cmake\hipdnn_frontend\hipdnn_frontendTargets.cmake"
+   ```
+
+2. Find the line with `INTERFACE_INCLUDE_DIRECTORIES` that contains `B:/build/third-party/flatbuffers/dist/include`
+
+3. Remove the hardcoded path, keeping only `${_IMPORT_PREFIX}/include`:
+   ```cmake
+   # Before:
+   INTERFACE_INCLUDE_DIRECTORIES "B:/build/third-party/flatbuffers/dist/include;${_IMPORT_PREFIX}/include"
+   
+   # After:
+   INTERFACE_INCLUDE_DIRECTORIES "${_IMPORT_PREFIX}/include"
+   ```
+
+4. Save and re-run CMake configure.
 
 ---
 
