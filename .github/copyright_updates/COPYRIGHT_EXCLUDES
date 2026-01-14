@@ -1,0 +1,21 @@
+**/** @exclude
+
+cmake/** @include
+common/** @include
+custom-op-generic/** @include
+morphizen-utils/** @include
+mlir-imp/** @include
+graph-opt/** @include
+encryption/** @include
+onnx-grep/** @include
+onnx-ir-imp/** @include
+ort-bridge/** @include
+pattern-gen/** @include
+sample_pattern/** @include
+tar/** @include
+tools/** @include
+unit-test/** @include
+vaip-core/** @include
+vaip-ort-api-ext/** @include
+vaip_io/** @include
+vaip_pass_init/** @include
