@@ -380,72 +380,155 @@ void HipdnnCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const
     return;
   }
   
-  // Get input tensor (X) - always at index 0
+  // Calculate sizes
+  size_t element_size = (data_type_ == miopenHalf) ? sizeof(uint16_t) : sizeof(float);
+  size_t x_size = x_shape_[0] * x_shape_[1] * x_shape_[2] * x_shape_[3] * element_size;
+  size_t w_size = w_shape_[0] * w_shape_[1] * w_shape_[2] * w_shape_[3] * element_size;
+  size_t y_size = y_shape_[0] * y_shape_[1] * y_shape_[2] * y_shape_[3] * element_size;
+  size_t b_size = has_bias_ ? b_shape_[0] * element_size : 0;
+  
+  // Get CPU pointers from ONNX Runtime
   Ort::ConstValue x_tensor = ctx.GetInput(0);
-  const void* x_data = x_tensor.GetTensorRawData();
-  MY_LOG(1) << "Input X: " << shape_to_string(x_shape_);
-  
-  // Get weight tensor (W) - always at index 1
-  // Note: Weight may be a constant or output from previous op
   Ort::ConstValue w_tensor = ctx.GetInput(1);
-  const void* w_data = w_tensor.GetTensorRawData();
-  MY_LOG(1) << "Weight W: " << shape_to_string(w_shape_);
+  const void* x_cpu = x_tensor.GetTensorRawData();
+  const void* w_cpu = w_tensor.GetTensorRawData();
   
-  // Allocate output tensor (Y)
-  Ort::UnownedValue y_tensor = ctx.GetOutput(0, output_shapes_[0]);
-  void* y_data = y_tensor.GetTensorMutableRawData();
-  MY_LOG(1) << "Output Y: " << shape_to_string(y_shape_);
+  MY_LOG(1) << "Input X (CPU): " << shape_to_string(x_shape_);
+  MY_LOG(1) << "Weight W (CPU): " << shape_to_string(w_shape_);
   
-  // Set scaling factors
+  // Allocate GPU memory
+  void* x_gpu = nullptr;
+  void* w_gpu = nullptr;
+  void* y_gpu = nullptr;
+  void* b_gpu = nullptr;
+  
+  hip_err = hipMalloc(&x_gpu, x_size);
+  if (hip_err != hipSuccess) {
+    LOG(ERROR) << "Failed to allocate GPU memory for input: " << hip_err;
+    return;
+  }
+  
+  hip_err = hipMalloc(&w_gpu, w_size);
+  if (hip_err != hipSuccess) {
+    LOG(ERROR) << "Failed to allocate GPU memory for weight: " << hip_err;
+    hipFree(x_gpu);
+    return;
+  }
+  
+  hip_err = hipMalloc(&y_gpu, y_size);
+  if (hip_err != hipSuccess) {
+    LOG(ERROR) << "Failed to allocate GPU memory for output: " << hip_err;
+    hipFree(x_gpu);
+    hipFree(w_gpu);
+    return;
+  }
+  
+  MY_LOG(1) << "Allocated GPU memory: X=" << x_size << "B, W=" << w_size << "B, Y=" << y_size << "B";
+  
+  // Copy input and weight from CPU to GPU
+  hip_err = hipMemcpy(x_gpu, x_cpu, x_size, hipMemcpyHostToDevice);
+  if (hip_err != hipSuccess) {
+    LOG(ERROR) << "Failed to copy input to GPU: " << hip_err;
+    hipFree(x_gpu); hipFree(w_gpu); hipFree(y_gpu);
+    return;
+  }
+  
+  hip_err = hipMemcpy(w_gpu, w_cpu, w_size, hipMemcpyHostToDevice);
+  if (hip_err != hipSuccess) {
+    LOG(ERROR) << "Failed to copy weight to GPU: " << hip_err;
+    hipFree(x_gpu); hipFree(w_gpu); hipFree(y_gpu);
+    return;
+  }
+  
+  MY_LOG(1) << "Copied input and weight to GPU";
+  
+  // Execute convolution on GPU
   float alpha = 1.0f;
   float beta = 0.0f;
   
-  // Execute convolution
-  MIOPEN_CHECK(miopenConvolutionForward(
+  miopenStatus_t conv_status = miopenConvolutionForward(
       miopen_handle_,
       &alpha,
-      x_desc_, x_data,
-      w_desc_, w_data,
+      x_desc_, x_gpu,  // GPU memory
+      w_desc_, w_gpu,  // GPU memory
       conv_desc_,
       conv_algo_,
       &beta,
-      y_desc_, y_data,
-      workspace_, workspace_size_));
+      y_desc_, y_gpu,  // GPU memory
+      workspace_, workspace_size_);
   
-  MY_LOG(1) << "Convolution forward completed";
+  if (conv_status != miopenStatusSuccess) {
+    LOG(ERROR) << "miopenConvolutionForward failed: " << conv_status;
+    hipFree(x_gpu); hipFree(w_gpu); hipFree(y_gpu);
+    return;
+  }
+  
+  MY_LOG(1) << "Convolution forward completed on GPU";
   
   // Add bias if present (index 2)
   if (has_bias_ && num_inputs >= 3) {
     Ort::ConstValue b_tensor = ctx.GetInput(2);
-    const void* b_data = b_tensor.GetTensorRawData();
+    const void* b_cpu = b_tensor.GetTensorRawData();
     
-    MY_LOG(1) << "Adding bias";
+    // Allocate and copy bias to GPU
+    hip_err = hipMalloc(&b_gpu, b_size);
+    if (hip_err != hipSuccess) {
+      LOG(ERROR) << "Failed to allocate GPU memory for bias: " << hip_err;
+      hipFree(x_gpu); hipFree(w_gpu); hipFree(y_gpu);
+      return;
+    }
+    
+    hip_err = hipMemcpy(b_gpu, b_cpu, b_size, hipMemcpyHostToDevice);
+    if (hip_err != hipSuccess) {
+      LOG(ERROR) << "Failed to copy bias to GPU: " << hip_err;
+      hipFree(x_gpu); hipFree(w_gpu); hipFree(y_gpu); hipFree(b_gpu);
+      return;
+    }
+    
+    MY_LOG(1) << "Adding bias on GPU";
     
     // y = 1*y + 1*bias + 0*y = y + bias
     float alpha1 = 1.0f;
     float alpha2 = 1.0f;
     float beta_op = 0.0f;
     
-    miopenStatus_t status = miopenOpTensor(
+    miopenStatus_t bias_status = miopenOpTensor(
         miopen_handle_,
         miopenTensorOpAdd,
         &alpha1,
-        y_desc_,
-        y_data,
+        y_desc_, y_gpu,  // GPU memory
         &alpha2,
-        b_desc_,
-        b_data,
+        b_desc_, b_gpu,  // GPU memory
         &beta_op,
-        y_desc_,
-        y_data);
+        y_desc_, y_gpu); // GPU memory
     
-    if (status != miopenStatusSuccess) {
-      LOG(ERROR) << "miopenOpTensor failed: " << status;
+    if (bias_status != miopenStatusSuccess) {
+      LOG(ERROR) << "miopenOpTensor failed: " << bias_status;
+      hipFree(x_gpu); hipFree(w_gpu); hipFree(y_gpu); hipFree(b_gpu);
       return;
     }
     
-    MY_LOG(1) << "Bias addition completed";
+    hipFree(b_gpu);
+    MY_LOG(1) << "Bias addition completed on GPU";
   }
+  
+  // Copy result from GPU to CPU
+  Ort::UnownedValue y_tensor = ctx.GetOutput(0, output_shapes_[0]);
+  void* y_cpu = y_tensor.GetTensorMutableRawData();
+  
+  hip_err = hipMemcpy(y_cpu, y_gpu, y_size, hipMemcpyDeviceToHost);
+  if (hip_err != hipSuccess) {
+    LOG(ERROR) << "Failed to copy output to CPU: " << hip_err;
+    hipFree(x_gpu); hipFree(w_gpu); hipFree(y_gpu);
+    return;
+  }
+  
+  MY_LOG(1) << "Output copied to CPU (" << y_size << " bytes)";
+  
+  // Free GPU memory
+  hipFree(x_gpu);
+  hipFree(w_gpu);
+  hipFree(y_gpu);
   
   MY_LOG(1) << "=== HipdnnCustomOp::Compute END ===";
 }
