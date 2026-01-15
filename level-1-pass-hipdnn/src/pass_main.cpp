@@ -316,63 +316,47 @@ struct Level1HipDnn {
       
       MY_LOG(1) << "Metadata generation succeeded, proceeding with fusion";
       
-      // Prepare constant data files
-      std::vector<std::string> constant_data_files;
-      std::filesystem::path meta_dir = std::filesystem::path(metadata_filename).parent_path();
+      // Build inputs list - include ALL inputs (input, weight, bias)
+      // This handles both constant and dynamic weights/bias correctly
+      std::vector<std::string> inputs_list;
+      inputs_list.push_back(input_data.name());   // Input (always dynamic)
+      inputs_list.push_back(weight_data.name());  // Weight (may be constant or dynamic)
       
-      // Save weight constant data (always exists)
-      if (!constant_names.empty() && weight_data.is_constant()) {
-        const auto& const_name = constant_names[0];
-        auto& tensor = node_arg_get_const_data_as_tensor(ort_graph, weight_data);
-        auto raw_data = vaip_core::api()->tensor_proto_as_raw(ort_graph, tensor);
-        
-        std::string data_filename = "hipdnn_const_" + const_name + ".bin";
-        std::filesystem::path data_path = meta_dir / data_filename;
-        
-        std::ofstream file(data_path.string(), std::ios::binary);
-        if (file) {
-          file.write(raw_data.data(), static_cast<std::streamsize>(raw_data.size()));
-          file.close();
-          constant_data_files.push_back(data_path.string());
-          MY_LOG(1) << "Saved weight constant: " << data_path.string() 
-                    << " (" << raw_data.size() << " bytes)";
+      // Add bias if present
+      bool has_bias = conv_inputs.size() >= 3;
+      if (has_bias) {
+        auto bias_data = vaip_cxx::NodeArgConstRef::from_node_arg(ort_graph, *conv_inputs[2].node_arg);
+        inputs_list.push_back(bias_data.name());  // Bias (may be constant or dynamic)
+      }
+      
+      // Identify which inputs are actually constants (for ORT optimization)
+      // Note: constant_names is now a subset of inputs_list
+      std::vector<std::string> actual_constant_names;
+      if (weight_data.is_constant()) {
+        actual_constant_names.push_back(weight_data.name());
+        MY_LOG(1) << "Weight is a constant initializer";
+      } else {
+        MY_LOG(1) << "Weight is a dynamic tensor (output from previous op)";
+      }
+      
+      if (has_bias) {
+        auto bias_data = vaip_cxx::NodeArgConstRef::from_node_arg(ort_graph, *conv_inputs[2].node_arg);
+        if (bias_data.is_constant()) {
+          actual_constant_names.push_back(bias_data.name());
+          MY_LOG(1) << "Bias is a constant initializer";
+        } else {
+          MY_LOG(1) << "Bias is a dynamic tensor (output from previous op)";
         }
       }
       
-      // Save bias constant data (if exists)
-      if (constant_names.size() > 1 && conv_inputs.size() > 2) {
-        auto bias_node_arg = conv_inputs[2].node_arg;
-        if (bias_node_arg) {
-          auto bias_data = vaip_cxx::NodeArgConstRef::from_node_arg(ort_graph, *bias_node_arg);
-          if (bias_data.is_constant()) {
-            const auto& const_name = constant_names[1];
-            auto& tensor = node_arg_get_const_data_as_tensor(ort_graph, bias_data);
-            auto raw_data = vaip_core::api()->tensor_proto_as_raw(ort_graph, tensor);
-            
-            std::string data_filename = "hipdnn_const_" + const_name + ".bin";
-            std::filesystem::path data_path = meta_dir / data_filename;
-            
-            std::ofstream file(data_path.string(), std::ios::binary);
-            if (file) {
-              file.write(raw_data.data(), static_cast<std::streamsize>(raw_data.size()));
-              file.close();
-              constant_data_files.push_back(data_path.string());
-              MY_LOG(1) << "Saved bias constant: " << data_path.string() 
-                        << " (" << raw_data.size() << " bytes)";
-            }
-          }
-        }
-      }
-      
-      // Create fused node
+      // Create fused node with ALL inputs
       auto unique_id = output_data.name();
-      std::vector<std::string> inputs_list = {input_data.name()};  // Only runtime input
       
       auto [meta_def, fuse_error] =
           self_.try_fuse(ort_graph, unique_id, 
-                        inputs_list,
+                        inputs_list,              // ALL inputs (dynamic + constant)
                         {output_data.name()},
-                        constant_names,  // All constants
+                        actual_constant_names,    // Subset that are constants
                         "HIPDNN");
       
       if (meta_def == nullptr) {
@@ -384,17 +368,10 @@ struct Level1HipDnn {
       MY_LOG(1) << "  meta_def inputs: " << meta_def->inputs_size();
       MY_LOG(1) << "  meta_def constants: " << meta_def->constant_initializers_size();
       
-      // Create proto with metadata filename
+      // Create proto with metadata filename only
+      // No need to save constant data files - all inputs come via ctx.GetInput()
       auto hipdnn_param = hipdnn::HipdnnParamProto();
       hipdnn_param.set_graph_file_name(metadata_filename);
-      
-      for (const auto& name : constant_names) {
-        hipdnn_param.add_constant_names(name);
-      }
-      
-      for (const auto& file : constant_data_files) {
-        hipdnn_param.add_constant_data_files(file);
-      }
       
       // Serialize proto to JSON
       auto hipdnn_json_str = std::string();

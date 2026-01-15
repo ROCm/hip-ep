@@ -59,24 +59,6 @@ static miopenDataType_t ToMIOpenDataType(int32_t onnx_dtype) {
   }
 }
 
-// Helper to load constant data from file
-static std::vector<char> LoadConstantFromFile(const std::string& filepath) {
-  std::ifstream file(filepath, std::ios::binary | std::ios::ate);
-  if (!file) {
-    throw std::runtime_error("Failed to open constant data file: " + filepath);
-  }
-  
-  std::streamsize size = file.tellg();
-  file.seekg(0, std::ios::beg);
-  
-  std::vector<char> data(size);
-  if (!file.read(data.data(), size)) {
-    throw std::runtime_error("Failed to read constant data file: " + filepath);
-  }
-  
-  return data;
-}
-
 HipdnnCustomOp::HipdnnCustomOp(std::shared_ptr<const PassContext> context,
                                const std::shared_ptr<MetaDefProto>& meta_def,
                                onnxruntime::Model* model)
@@ -107,14 +89,6 @@ HipdnnCustomOp::HipdnnCustomOp(std::shared_ptr<const PassContext> context,
   
   LOG(INFO) << "Metadata file: " << hipdnn_proto_.graph_file_name();
   
-  // Get constant initializer names from meta_def
-  auto constant_names = meta_def_->constant_initializers();
-  LOG(INFO) << "Constant initializers count: " << constant_names.size();
-  for (const auto& name : constant_names) {
-    LOG(INFO) << "  Constant: " << name;
-    constant_initializer_names_.push_back(name);
-  }
-  
   // Create MIOpen handle
   MIOPEN_THROW_IF_ERROR(miopenCreate(&miopen_handle_));
   
@@ -129,14 +103,6 @@ HipdnnCustomOp::HipdnnCustomOp(std::shared_ptr<const PassContext> context,
   try {
     BuildAndCompileMIOpen();
     LOG(INFO) << "MIOpen kernel compiled successfully";
-    
-    // Load constant data from files
-    if (!constant_initializer_names_.empty() && 
-        hipdnn_proto_.constant_data_files_size() > 0) {
-      LoadConstantData();
-      LOG(INFO) << "Successfully loaded " << constant_data_.size() 
-                << " constant initializers";
-    }
   } catch (const std::exception& ex) {
     LOG(FATAL) << "Failed to compile MIOpen kernel: " << ex.what();
   }
@@ -251,9 +217,13 @@ void HipdnnCustomOp::BuildAndCompileMIOpen() {
       static_cast<int>(dilations[0]),
       static_cast<int>(dilations[1])));
   
-  // Get workspace size
+  // Get workspace size - NOTE: argument order is w_desc, x_desc (not x_desc, w_desc)
   MIOPEN_THROW_IF_ERROR(miopenConvolutionForwardGetWorkSpaceSize(
-      miopen_handle_, w_desc_, x_desc_, conv_desc_, y_desc_,
+      miopen_handle_,
+      w_desc_,
+      x_desc_,
+      conv_desc_,
+      y_desc_,
       &workspace_size_));
   
   MY_LOG(1) << "Workspace size: " << workspace_size_ << " bytes";
@@ -271,9 +241,14 @@ void HipdnnCustomOp::BuildAndCompileMIOpen() {
   void* temp_w = nullptr;
   void* temp_y = nullptr;
   
-  size_t x_size = x_shape_[0] * x_shape_[1] * x_shape_[2] * x_shape_[3] * sizeof(float);
-  size_t w_size = w_shape_[0] * w_shape_[1] * w_shape_[2] * w_shape_[3] * sizeof(float);
-  size_t y_size = y_shape_[0] * y_shape_[1] * y_shape_[2] * y_shape_[3] * sizeof(float);
+  // Calculate sizes based on actual data type
+  size_t element_size = (data_type_ == miopenHalf) ? sizeof(uint16_t) : sizeof(float);
+  size_t x_size = x_shape_[0] * x_shape_[1] * x_shape_[2] * x_shape_[3] * element_size;
+  size_t w_size = w_shape_[0] * w_shape_[1] * w_shape_[2] * w_shape_[3] * element_size;
+  size_t y_size = y_shape_[0] * y_shape_[1] * y_shape_[2] * y_shape_[3] * element_size;
+  
+  MY_LOG(1) << "Allocating temp buffers: x=" << x_size << " bytes, w=" << w_size 
+            << " bytes, y=" << y_size << " bytes (data_type=" << data_type_ << ")";
   
   hipError_t hip_err;
   hip_err = hipMalloc(&temp_x, x_size);
@@ -297,20 +272,24 @@ void HipdnnCustomOp::BuildAndCompileMIOpen() {
   // Find the best algorithm using miopenFindConvolutionForwardAlgorithm
   // This is required by MIOpen - it registers the invoker for later use
   MY_LOG(1) << "Finding best convolution algorithm...";
-  const int requestedAlgoCount = 1;
+  const int requestedAlgoCount = 4;
   int returnedAlgoCount = 0;
-  miopenConvAlgoPerf_t perfResults;
+  miopenConvAlgoPerf_t perfResults[4];
   
   miopenStatus_t find_status = miopenFindConvolutionForwardAlgorithm(
       miopen_handle_,
-      x_desc_, temp_x,
-      w_desc_, temp_w,
+      x_desc_,
+      temp_x,
+      w_desc_,
+      temp_w,
       conv_desc_,
-      y_desc_, temp_y,
+      y_desc_,
+      temp_y,
       requestedAlgoCount,
       &returnedAlgoCount,
-      &perfResults,
-      workspace_, workspace_size_,
+      perfResults,
+      workspace_,
+      workspace_size_,
       false);  // exhaustiveSearch = false for faster compilation
   
   // Free temporary buffers
@@ -321,29 +300,38 @@ void HipdnnCustomOp::BuildAndCompileMIOpen() {
   // Check result
   MIOPEN_THROW_IF_ERROR(find_status);
   
-  if (returnedAlgoCount > 0) {
-    conv_algo_ = perfResults.fwd_algo;
-    MY_LOG(1) << "Selected algorithm: " << conv_algo_ 
-              << " (time: " << perfResults.time << " ms, "
-              << "memory: " << perfResults.memory << " bytes)";
-  } else {
-    // Fallback to GEMM if find fails
-    conv_algo_ = miopenConvolutionFwdAlgoGEMM;
-    MY_LOG(1) << "Using fallback GEMM algorithm";
+  if (returnedAlgoCount == 0) {
+    throw std::runtime_error("No convolution algorithm found");
   }
+  
+  // Use the best algorithm found (first result)
+  conv_algo_ = perfResults[0].fwd_algo;
+  MY_LOG(1) << "Selected algorithm: " << conv_algo_ 
+            << ", time: " << perfResults[0].time << " ms";
   
   // If bias is present, create bias descriptor
   if (has_bias_) {
     MIOPEN_THROW_IF_ERROR(miopenCreateTensorDescriptor(&b_desc_));
     
-    // Bias shape is typically [1, C, 1, 1]
-    b_shape_ = {1, y_shape_[1], 1, 1};
-    MIOPEN_THROW_IF_ERROR(miopenSet4dTensorDescriptor(
-        b_desc_, data_type_,
-        static_cast<int>(b_shape_[0]),
-        static_cast<int>(b_shape_[1]),
-        static_cast<int>(b_shape_[2]),
-        static_cast<int>(b_shape_[3])));
+    // Get bias shape from metadata
+    if (j["input_shapes"].size() >= 3) {
+      auto b_shape_from_meta = j["input_shapes"][2].get<std::vector<int64_t>>();
+      b_shape_ = b_shape_from_meta;
+    } else {
+      // Fallback: use output channels as 1D
+      b_shape_ = {y_shape_[1]};
+    }
+    
+    // Bias is 1D [C], set as [1, C, 1, 1] with explicit strides for broadcasting
+    // CRITICAL: Use miopenSetTensorDescriptor with strides, not miopenSet4dTensorDescriptor
+    int b_dims[4] = {1, static_cast<int>(b_shape_[0]), 1, 1};
+    int b_strides[4] = {static_cast<int>(b_shape_[0]), 1, 1, 1};
+    
+    MIOPEN_THROW_IF_ERROR(miopenSetTensorDescriptor(
+        b_desc_, data_type_, 4, b_dims, b_strides));
+    
+    MY_LOG(1) << "Bias descriptor created: dims=[1," << b_shape_[0] 
+              << ",1,1], strides=[" << b_shape_[0] << ",1,1,1]";
   }
   
   // Setup output shapes for Compute
@@ -361,26 +349,6 @@ void HipdnnCustomOp::LoadGraphMetadata() {
   // This is now handled inside BuildAndCompileMIOpen
 }
 
-void HipdnnCustomOp::LoadConstantData() {
-  MY_LOG(1) << "=== Loading constant data from files ===";
-		
-  // Load each constant initializer from file
-  for (int i = 0; i < hipdnn_proto_.constant_data_files_size(); ++i) {
-    const auto& data_file = hipdnn_proto_.constant_data_files(i);
-    const auto& const_name = hipdnn_proto_.constant_names(i);
-    
-    MY_LOG(1) << "Loading constant from file: " << data_file;
-    
-    std::vector<char> data = LoadConstantFromFile(data_file);
-    constant_data_.push_back(std::move(data));
-    
-    MY_LOG(1) << "  Loaded constant " << const_name 
-              << " from " << data_file
-              << " (" << constant_data_.back().size() << " bytes)";
-  }
-  
-  MY_LOG(1) << "=== Constant data loading complete ===";
-}
 
 static std::string shape_to_string(const std::vector<int64_t>& shape) {
   std::ostringstream str;
@@ -399,14 +367,11 @@ static std::string shape_to_string(const std::vector<int64_t>& shape) {
 
 void HipdnnCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const {
   Ort::KernelContext ctx(context);
-  auto num_runtime_inputs = ctx.GetInputCount();
+  auto num_inputs = ctx.GetInputCount();
   auto num_outputs = ctx.GetOutputCount();
-  auto num_constants = constant_initializer_names_.size();
   
   MY_LOG(1) << "=== HipdnnCustomOp::Compute START (MIOpen) ===";
-  MY_LOG(1) << "Runtime inputs: " << num_runtime_inputs 
-            << ", outputs: " << num_outputs
-            << ", constants: " << num_constants;
+  MY_LOG(1) << "Total inputs: " << num_inputs << ", outputs: " << num_outputs;
   
   // Set device
   hipError_t hip_err = hipSetDevice(device_id_);
@@ -415,26 +380,20 @@ void HipdnnCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const
     return;
   }
   
-  // Get input tensor (X)
-  Ort::ConstValue input_tensor = ctx.GetInput(0);
-  const void* x_data = input_tensor.GetTensorRawData();
-  
+  // Get input tensor (X) - always at index 0
+  Ort::ConstValue x_tensor = ctx.GetInput(0);
+  const void* x_data = x_tensor.GetTensorRawData();
   MY_LOG(1) << "Input X: " << shape_to_string(x_shape_);
   
-  // Get weight tensor (W) - from constant data
-  if (constant_data_.empty()) {
-    LOG(ERROR) << "No constant data available for weights";
-    return;
-  }
-  const void* w_data = constant_data_[0].data();
-  
-  MY_LOG(1) << "Weight W: " << shape_to_string(w_shape_)
-            << " (" << constant_data_[0].size() << " bytes)";
+  // Get weight tensor (W) - always at index 1
+  // Note: Weight may be a constant or output from previous op
+  Ort::ConstValue w_tensor = ctx.GetInput(1);
+  const void* w_data = w_tensor.GetTensorRawData();
+  MY_LOG(1) << "Weight W: " << shape_to_string(w_shape_);
   
   // Allocate output tensor (Y)
-  Ort::UnownedValue output_tensor = ctx.GetOutput(0, output_shapes_[0]);
-  void* y_data = output_tensor.GetTensorMutableRawData();
-  
+  Ort::UnownedValue y_tensor = ctx.GetOutput(0, output_shapes_[0]);
+  void* y_data = y_tensor.GetTensorMutableRawData();
   MY_LOG(1) << "Output Y: " << shape_to_string(y_shape_);
   
   // Set scaling factors
@@ -455,30 +414,37 @@ void HipdnnCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const
   
   MY_LOG(1) << "Convolution forward completed";
   
-  // If bias is present, add it
-  if (has_bias_ && constant_data_.size() > 1) {
-    const void* b_data = constant_data_[1].data();
+  // Add bias if present (index 2)
+  if (has_bias_ && num_inputs >= 3) {
+    Ort::ConstValue b_tensor = ctx.GetInput(2);
+    const void* b_data = b_tensor.GetTensorRawData();
     
-    MY_LOG(1) << "Adding bias: " << shape_to_string(b_shape_)
-              << " (" << constant_data_[1].size() << " bytes)";
+    MY_LOG(1) << "Adding bias";
     
-    float alpha_bias = 1.0f;
-    float beta_bias = 1.0f;  // Accumulate with existing output
+    // y = 1*y + 1*bias + 0*y = y + bias
+    float alpha1 = 1.0f;
+    float alpha2 = 1.0f;
+    float beta_op = 0.0f;
     
-    MIOPEN_CHECK(miopenOpTensor(
+    miopenStatus_t status = miopenOpTensor(
         miopen_handle_,
         miopenTensorOpAdd,
-        &alpha_bias, y_desc_, y_data,  // Y (from conv)
-        &alpha_bias, b_desc_, b_data,  // Bias
-        &beta_bias, y_desc_, y_data));  // Y (output)
+        &alpha1,
+        y_desc_,
+        y_data,
+        &alpha2,
+        b_desc_,
+        b_data,
+        &beta_op,
+        y_desc_,
+        y_data);
+    
+    if (status != miopenStatusSuccess) {
+      LOG(ERROR) << "miopenOpTensor failed: " << status;
+      return;
+    }
     
     MY_LOG(1) << "Bias addition completed";
-  }
-  
-  // Synchronize to ensure completion (prevent driver timeout)
-  hip_err = hipDeviceSynchronize();
-  if (hip_err != hipSuccess) {
-    LOG(WARNING) << "hipDeviceSynchronize failed: " << hip_err;
   }
   
   MY_LOG(1) << "=== HipdnnCustomOp::Compute END ===";

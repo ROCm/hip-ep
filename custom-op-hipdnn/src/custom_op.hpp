@@ -41,9 +41,8 @@ private:
   // Build and compile using MIOpen
   void BuildAndCompileMIOpen();
   
-  // Helper to load metadata and constant data
+  // Helper to load metadata
   void LoadGraphMetadata();
-  void LoadConstantData();
 
 private:
   // Proto parameter
@@ -80,10 +79,6 @@ private:
   
   // Data type
   miopenDataType_t data_type_;
-  
-  // Constant initializer info
-  std::vector<std::string> constant_initializer_names_;
-  std::vector<std::vector<char>> constant_data_;
   
   // Device ID
   int device_id_;
