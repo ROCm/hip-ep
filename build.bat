@@ -53,6 +53,12 @@ set INCLUDE=%GSL_INCLUDE_DIR%;%INCLUDE%
 echo Added GSL include path: %GSL_INCLUDE_DIR%
 echo.
 
+REM Create missing natvis file for nlohmann_json (TheRock packaging issue)
+if not exist "%THEROCK_DIST%\nlohmann_json.natvis" (
+    echo Creating missing nlohmann_json.natvis file...
+    echo ^<?xml version="1.0" encoding="utf-8"?^>^<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010"^>^</AutoVisualizer^> > "%THEROCK_DIST%\nlohmann_json.natvis"
+)
+
 REM Configure with CMake using Ninja generator
 echo Configuring project with CMake using Ninja...
 cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -B C:/Develop/m/build/morphizen-hipdnn -S . -DCMAKE_INSTALL_PREFIX=C:/Develop/m/local -DTHEROCK_DIST=%THEROCK_DIST% %HIPDNN_PREFIX_PATH%
