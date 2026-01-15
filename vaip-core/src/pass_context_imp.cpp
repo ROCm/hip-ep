@@ -822,9 +822,9 @@ std::filesystem::path PassContextImp::xclbin_path_to_cache_files(
     std::vector<char> buffer = read_file_to_buffer(path);
     const_cast<PassContextImp*>(this)->write_file(filename, buffer);
   } else {
-    LOG(INFO) << "Xclbin path doesn't exist, are you running with cpu "
-                 "runner? Path: "
-              << path.string();
+    LOG_VERBOSE(2) << "Xclbin path doesn't exist, are you running with cpu "
+                      "runner? Path: "
+                   << path.string();
     return path;
   }
   return ret;
