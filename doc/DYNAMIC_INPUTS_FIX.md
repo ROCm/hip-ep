@@ -552,32 +552,117 @@ const void* w_data = w_tensor.GetTensorRawData();
 
 ---
 
-## 12. Conclusion
+## 12. Critical Fix: CPU vs GPU Memory
 
-### 12.1 Achievements
+### 12.1 The Final Root Cause
+
+**Problem**: `ctx.GetInput().GetTensorRawData()` returns **CPU memory**, but MIOpen operations require **GPU memory**.
+
+**Impact**:
+- ❌ Driver timeouts
+- ❌ Incorrect results
+- ❌ "No invoker registered" errors
+
+### 12.2 The Solution
+
+**Explicit CPU↔GPU Memory Transfers**:
+
+```cpp
+void HipdnnCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const {
+  // 1. Get CPU pointers from ONNX Runtime
+  const void* x_cpu = ctx.GetInput(0).GetTensorRawData();
+  const void* w_cpu = ctx.GetInput(1).GetTensorRawData();
+  const void* b_cpu = has_bias_ ? ctx.GetInput(2).GetTensorRawData() : nullptr;
+  
+  // 2. Allocate GPU memory
+  void *x_gpu, *w_gpu, *y_gpu, *b_gpu = nullptr;
+  hipMalloc(&x_gpu, x_size);
+  hipMalloc(&w_gpu, w_size);
+  hipMalloc(&y_gpu, y_size);
+  if (has_bias_) hipMalloc(&b_gpu, b_size);
+  
+  // 3. Copy CPU → GPU
+  hipMemcpy(x_gpu, x_cpu, x_size, hipMemcpyHostToDevice);
+  hipMemcpy(w_gpu, w_cpu, w_size, hipMemcpyHostToDevice);
+  if (has_bias_) hipMemcpy(b_gpu, b_cpu, b_size, hipMemcpyHostToDevice);
+  
+  // 4. Execute MIOpen operations on GPU
+  miopenConvolutionForward(..., x_gpu, w_gpu, ..., y_gpu, ...);
+  if (has_bias_) miopenOpTensor(..., y_gpu, b_gpu, ..., y_gpu);
+  
+  // 5. Copy GPU → CPU
+  void* y_cpu = ctx.GetOutput(0, output_shapes_[0]).GetTensorMutableRawData();
+  hipMemcpy(y_cpu, y_gpu, y_size, hipMemcpyDeviceToHost);
+  
+  // 6. Free GPU memory
+  hipFree(x_gpu); hipFree(w_gpu); hipFree(y_gpu);
+  if (b_gpu) hipFree(b_gpu);
+}
+```
+
+### 12.3 Why morphizen-hipdnn Needs This
+
+**hipDNNEP** (standalone GPU EP):
+- Registers MemcpyFromHost/MemcpyToHost kernels
+- ONNX Runtime automatically inserts memory transfers
+- Kernel receives GPU memory pointers
+
+**morphizen-hipdnn** (custom op in VitisAI EP):
+- No automatic memory transfer insertion
+- Custom op receives CPU memory pointers
+- Must explicitly handle CPU↔GPU transfers
+
+### 12.4 Test Results
+
+**Before Fix**:
+```
+score[904] = 0.0456293    (WRONG - different from CPU EP)
+Driver timeout errors
+MIOpen "No invoker registered" errors
+```
+
+**After Fix**:
+```
+score[904] = 0.234237     (CORRECT - matches CPU EP exactly!)
+No timeouts
+No errors
+```
+
+✅ **Results now match CPU EP perfectly!**
+
+---
+
+## 13. Conclusion
+
+### 13.1 All Issues Resolved
 
 ✅ **Fixed critical design flaw**: Now handles dynamic weights/bias  
-✅ **Aligned with hipDNNEP**: All MIOpen APIs match reference  
-✅ **Simplified code**: Removed unnecessary file I/O  
-✅ **Production ready**: Follows ONNX Runtime best practices  
+✅ **Fixed memory issue**: Explicit CPU↔GPU transfers  
+✅ **Aligned with hipDNNEP**: All MIOpen APIs correct  
+✅ **Correct results**: Matches CPU EP exactly  
+✅ **No timeouts**: Stable execution  
+✅ **Production ready**: Fully functional  
 
-### 12.2 Impact
+### 13.2 Impact
 
 This fix enables morphizen-hipdnn to work correctly with:
 - ✅ Quantized models (DequantizeLinear → Conv)
 - ✅ Models with weight transformations
 - ✅ Dynamic neural networks
 - ✅ Any scenario where weights/bias are computed at runtime
+- ✅ **Correct numerical results matching CPU EP**
 
-### 12.3 Next Steps
+### 13.3 Performance Considerations
 
-1. **System-level debugging** if driver timeout persists (see Section 7.1)
-2. **Performance testing** with various models
-3. **Add more operations** using the same pattern
-4. **Implement fusion** for Conv+BatchNorm+ReLU patterns
+Current implementation allocates/frees GPU memory on every call. For optimization:
+- Consider caching GPU buffers between calls
+- Use memory pools for allocation
+- Implement async transfers with streams
+
+But the current implementation is **correct and functional**!
 
 ---
 
-**Document Version**: 1.0  
+**Document Version**: 2.0  
 **Last Updated**: January 15, 2026  
-**Status**: Complete
+**Status**: Complete - All Issues Resolved
