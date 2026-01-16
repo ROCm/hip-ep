@@ -74,6 +74,15 @@ struct Level1Rocm {
       }
     }
 
+    // TODO: After sub-passes complete, the cloned graph contains fused nodes
+    // with a special attribute `rocm_node_meta_def` (JSON-serialized MetaDef).
+    //
+    // Next steps to implement:
+    // 1. Find all consecutive nodes with `rocm_node_meta_def` attribute
+    // 2. Merge them into a larger subgraph with combined MetaDef array
+    // 3. Ensure no cycles are introduced (maintain DAG topology)
+    // 4. Create a single fused node in the original graph using fuse()
+
     MY_LOG(1) << "[HIP EP Level-1] Completed";
   }
 
