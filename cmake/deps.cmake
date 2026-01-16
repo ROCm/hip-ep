@@ -87,6 +87,10 @@ if(morphizen_ENABLE_UNIT_TEST)
   enable_testing()
 endif()
 
+# Ensure ONNX uses dynamic runtime to match CMAKE_MSVC_RUNTIME_LIBRARY setting
+# This fixes the LNK2038 runtime library mismatch errors
+set(ONNX_USE_MSVC_STATIC_RUNTIME OFF CACHE BOOL "Use static MSVC runtime" FORCE)
+
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/version.txt" "${VERSION_INFO}")
 set(VAIP_VERSEION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
 set(VAIP_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/etc/vaip_config.json")
