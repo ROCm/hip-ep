@@ -205,7 +205,6 @@ cd C:\Develop\m\build\morphizen-rocm\bin
 set MORPHIZEN_DEBUG_ROCM=2
 set GLOG_logtostderr=1
 set GLOG_minloglevel=0
-set ORT_LOG_LEVEL=INFO
 ort_integration_test.exe --gtest_filter=OrtIntegrationTest.LoadVitisAIProvider
 ```
 
@@ -256,7 +255,6 @@ copy C:\Develop\m\Source\morphizen-rocm\test\conv_model.onnx .
 set MORPHIZEN_DEBUG_ROCM=2
 set GLOG_logtostderr=1
 set GLOG_minloglevel=0
-set ORT_LOG_LEVEL=VERBOSE
 ort_integration_test.exe --gtest_filter=OrtIntegrationTest.CPUProviderInference
 ```
 
