@@ -4,6 +4,48 @@
 **Build Commit:** 4518e4d6ea8ec129222ec8798aee12d3c91c61fb  
 **Platform:** Windows 11, Visual Studio 2022 (MSVC 19.50.35721.0)
 
+---
+
+## How to Reproduce
+
+### Prerequisites
+1. Build the project using `build.bat`
+2. Ensure TheRock ROCm SDK is installed at `C:\Develop\m\dist\therock`
+
+### Quick Test (Basic)
+```batch
+REM Set up environment
+set PATH=C:\Develop\m\dist\therock\bin;%PATH%
+
+REM Run Conv test
+C:\Develop\m\build\morphizen-rocm\bin\rocm_conv_test.exe
+
+REM Run GEMM test
+C:\Develop\m\build\morphizen-rocm\bin\rocm_gemm_test.exe
+```
+
+### Verbose Test (With Detailed Logging)
+```batch
+REM Conv test with MIOpen verbose logging
+set PATH=C:\Develop\m\dist\therock\bin;%PATH%
+set MIOPEN_ENABLE_LOGGING=1
+set MIOPEN_LOG_LEVEL=5
+C:\Develop\m\build\morphizen-rocm\bin\rocm_conv_test.exe --gtest_print_time=1
+
+REM GEMM test with hipBLASLt verbose logging
+set PATH=C:\Develop\m\dist\therock\bin;%PATH%
+set HIPBLASLT_LOG_MASK=0xFFFF
+C:\Develop\m\build\morphizen-rocm\bin\rocm_gemm_test.exe --gtest_print_time=1
+```
+
+### Using the Test Script
+```batch
+cd test
+run_test_with_therock.bat
+```
+
+---
+
 ## Summary
 
 | Test Suite | Tests Run | Passed | Failed | Skipped | Duration |
@@ -130,6 +172,137 @@ Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT16x16x16_SN_LDSB0_AFC1_...
 - **Library Path:** C:\Develop\m\dist\therock\bin\hipblaslt\library
 - **Algorithm Method:** Heuristic index-based selection
 - **Solution Index:** 1214
+
+## Test Design
+
+### Overview
+
+Both tests are designed to validate the ROCm libraries (MIOpen and hipBLASLt) directly without ONNX Runtime, ensuring the underlying GPU operations work correctly before integration with the VitisAI execution provider.
+
+**Source Files:**
+- `test/test_conv.cpp` - MIOpen convolution test
+- `test/test_gemm.cpp` - hipBLASLt GEMM test
+
+### Test Framework
+
+- **Framework:** Google Test (gtest)
+- **Pattern:** Direct API testing (not using ORT custom ops)
+- **Skip Condition:** Tests auto-skip if no AMD GPU is detected
+
+### 1. Conv Test Design (`RocmConvTest.MiopenDirectConv`)
+
+**Purpose:** Validate MIOpen convolution forward pass on the target GPU.
+
+**Test Flow:**
+```
+1. GPU Detection
+   └── hipGetDeviceCount() → Skip if no GPU
+
+2. MIOpen Initialization
+   ├── miopenCreate(&handle)
+   ├── hipStreamCreate(&stream)
+   └── miopenSetStream(handle, stream)
+
+3. Tensor Descriptor Setup
+   ├── Input:  [1, 3, 8, 8]  (NCHW)
+   ├── Weight: [16, 3, 3, 3] (KCRS)
+   └── Output: [1, 16, 8, 8]
+
+4. Convolution Descriptor
+   └── miopenInitConvolutionDescriptor(pad=1, stride=1, dilation=1)
+
+5. Memory Allocation
+   ├── hipMalloc for input, weight, output
+   └── Initialize with test values (input=1.0, weight=0.1)
+
+6. Algorithm Search
+   └── miopenFindConvolutionForwardAlgorithm(requestAlgoCount=4)
+
+7. Execute Convolution
+   └── miopenConvolutionForward(alpha=1.0, beta=0.0)
+
+8. Validation
+   ├── hipStreamSynchronize()
+   ├── Copy result to host
+   └── EXPECT_TRUE(output contains non-zero values)
+
+9. Cleanup
+   └── Free all resources
+```
+
+**Expected Output Calculation:**
+```
+Output[0] = sum over (C, R, S) of input[c, h+r-1, w+s-1] * weight[0, c, r, s]
+         = 3 channels × 3×3 kernel × 1.0 × 0.1
+         ≈ 1.2 (with padding considerations)
+```
+
+### 2. GEMM Test Design (`RocmGemmTest.HipBlasLtDirectGemm`)
+
+**Purpose:** Validate hipBLASLt matrix multiplication on the target GPU.
+
+**Test Flow:**
+```
+1. GPU Detection
+   └── hipGetDeviceCount() → Skip if no GPU
+
+2. hipBLASLt Initialization
+   ├── hipblasLtCreate(&handle)
+   └── hipStreamCreate(&stream)
+
+3. Matrix Layout Setup
+   ├── A: [64, 48] with ld=48 (row-major)
+   ├── B: [48, 32] with ld=32
+   ├── C: [64, 32] with ld=32
+   └── D: [64, 32] with ld=32
+
+4. Matmul Descriptor
+   ├── hipblasLtMatmulDescCreate(COMPUTE_32F)
+   └── Set transA=OP_N, transB=OP_N
+
+5. Algorithm Heuristics
+   ├── hipblasLtMatmulPreferenceCreate()
+   ├── Set max_workspace = 32 MB
+   └── hipblasLtMatmulAlgoGetHeuristic(requestAlgoCount=4)
+
+6. Memory Allocation
+   ├── hipMalloc for A, B, C, D, workspace
+   └── Initialize: A=1.0, B=1.0, C=0.0
+
+7. Execute GEMM
+   └── hipblasLtMatmul(D = alpha*A*B + beta*C)
+       where alpha=1.0, beta=0.0
+
+8. Validation
+   ├── hipStreamSynchronize()
+   ├── Copy D to host
+   └── EXPECT_NEAR(D[0], K, 1e-3)  // K=48
+
+9. Cleanup
+   └── Free all resources
+```
+
+**Expected Output Calculation:**
+```
+D[i,j] = sum over k of A[i,k] * B[k,j]
+       = sum of 48 ones × 1.0 × 1.0
+       = 48.0
+```
+
+### Test Data Strategy
+
+| Test | Input Values | Weight/B Values | Expected Output |
+|------|--------------|-----------------|-----------------|
+| Conv | All 1.0 | All 0.1 | ~1.2 at output[0] |
+| GEMM | All 1.0 | All 1.0 | K (48) at output[0] |
+
+### Error Handling
+
+- **GPU Not Found:** Tests use `GTEST_SKIP()` to gracefully skip
+- **API Failures:** Each API call is wrapped with `ASSERT_EQ()` for immediate failure
+- **Numerical Validation:** `EXPECT_NEAR()` with tolerance for floating-point comparison
+
+---
 
 ## Notes
 
