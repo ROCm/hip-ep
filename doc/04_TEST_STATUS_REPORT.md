@@ -103,6 +103,14 @@ run_test_with_therock.bat
 - Output shape: [1, 16, 8, 8]
 - Padding: 1, Stride: 1, Dilation: 1
 
+**Command to reproduce this log:**
+```batch
+set PATH=C:\Develop\m\dist\therock\bin;%PATH%
+set MIOPEN_ENABLE_LOGGING=1
+set MIOPEN_LOG_LEVEL=5
+C:\Develop\m\build\morphizen-rocm\bin\rocm_conv_test.exe
+```
+
 **Verbose Log:**
 ```
 MIOpen(HIP): Info [get_device_name] Raw device name: gfx1100
@@ -143,6 +151,13 @@ MIOpen(HIP): Info [ConvolutionForward] algo = 1, workspace = 0
 - Matrix D: 64 x 32 (float32)
 - Compute Type: COMPUTE_32F
 - Alpha: 1.0, Beta: 0.0
+
+**Command to reproduce this log:**
+```batch
+set PATH=C:\Develop\m\dist\therock\bin;%PATH%
+set HIPBLASLT_LOG_MASK=0xFFFF
+C:\Develop\m\build\morphizen-rocm\bin\rocm_gemm_test.exe
+```
 
 **Verbose Log:**
 ```
