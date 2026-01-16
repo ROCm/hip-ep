@@ -38,6 +38,30 @@ set HIPBLASLT_LOG_MASK=0xFFFF
 C:\Develop\m\build\morphizen-rocm\bin\rocm_gemm_test.exe --gtest_print_time=1
 ```
 
+### VitisAI EP Debug Logging (MY_LOG)
+The passes and custom ops use `MY_LOG(n)` macro controlled by environment variable:
+
+```batch
+REM Enable VitisAI EP ROCm debug logs
+set MORPHIZEN_DEBUG_ROCM=1   REM Basic logs (pattern match, pass start/end)
+set MORPHIZEN_DEBUG_ROCM=2   REM Verbose logs (node details, group connections)
+```
+
+**Log Levels:**
+| Level | Description | Example Messages |
+|-------|-------------|------------------|
+| 1 | Basic operations | `[HIP EP Level-1] Starting ROCm pass` |
+| 2 | Detailed debug | `[HIP EP Level-1] Found ROCm fused node: ...` |
+
+**Example with full logging:**
+```batch
+set PATH=C:\Develop\m\dist\therock\bin;%PATH%
+set MORPHIZEN_DEBUG_ROCM=2
+set MIOPEN_ENABLE_LOGGING=1
+set MIOPEN_LOG_LEVEL=5
+your_onnxruntime_test.exe
+```
+
 ### Using the Test Script
 ```batch
 cd test
