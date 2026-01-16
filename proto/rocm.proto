@@ -72,6 +72,14 @@ message ConvParamProto {
   
   // Spatial dimensions (2 for 2D conv, 3 for 3D conv)
   int32 spatial_dim = 31;
+  
+  // Weight tensor file (serialized binary data saved via open_file_for_write)
+  string weight_file_path = 32;    // Path to weight data file in cache
+  int64 weight_file_size = 33;     // Size of weight data in bytes
+  
+  // Bias tensor file (if has_bias is true)
+  string bias_file_path = 34;      // Path to bias data file in cache
+  int64 bias_file_size = 35;       // Size of bias data in bytes
 }
 
 // GEMM parameters (for hipBLASLt)

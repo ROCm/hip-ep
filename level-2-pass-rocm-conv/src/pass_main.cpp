@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 #include <glog/logging.h>
+#include <sstream>
+#include <iomanip>
 #include "google/protobuf/util/json_util.h"
 #include "morphizen/env_config.hpp"
 #include "morphizen/vaip.hpp"
@@ -13,10 +15,34 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_ROCM, "0")
 
 using namespace vaip_core;
 
+namespace {
+// Generate a unique filename for weight data
+std::string generate_unique_weight_filename(const std::string& node_name, 
+                                             const std::string& tensor_name) {
+  // Replace invalid filename characters
+  std::string sanitized_name = tensor_name;
+  for (auto& c : sanitized_name) {
+    if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || 
+        c == '"' || c == '<' || c == '>' || c == '|') {
+      c = '_';
+    }
+  }
+  return "rocm_conv_" + sanitized_name + ".bin";
+}
+
+// Helper to calculate output dimension: (input + 2*pad - dilation*(filter-1) - 1) / stride + 1
+int64_t calc_output_dim(int64_t input_dim, int64_t filter_dim, 
+                        int32_t pad, int32_t stride, int32_t dilation) {
+  int64_t effective_filter = dilation * (filter_dim - 1) + 1;
+  return (input_dim + 2 * pad - effective_filter) / stride + 1;
+}
+} // anonymous namespace
+
 /**
  * Level-2 Pass: Conv Pattern Matching (MIOpen)
  * 
  * Matches Conv patterns and replaces them with ROCm custom ops.
+ * Extracts weight tensors and saves them to pass context cache.
  */
 struct Level2RocmConv {
   Level2RocmConv(IPass& self) : self_{self} {}
@@ -47,62 +73,172 @@ struct Level2RocmConv {
           auto attrs = node_get_attributes(*conv_node);
           
           // Extract padding, stride, dilation from attributes
-          // (using safe defaults if not present)
-          conv_params->set_pad_h(1);
-          conv_params->set_pad_w(1);
-          conv_params->set_stride_h(1);
-          conv_params->set_stride_w(1);
-          conv_params->set_dilation_h(1);
-          conv_params->set_dilation_w(1);
-          conv_params->set_group_count(1);
+          int32_t pad_h = 1, pad_w = 1;
+          int32_t stride_h = 1, stride_w = 1;
+          int32_t dilation_h = 1, dilation_w = 1;
+          int32_t group_count = 1;
+          
+          // Try to get actual attributes from the Conv node
+          for (auto& attr : attrs) {
+            auto attr_name = VAIP_ORT_API(attr_proto_get_name)(*attr);
+            if (attr_name == "pads") {
+              auto pads = VAIP_ORT_API(attr_proto_get_ints)(*attr);
+              if (pads.size() >= 2) {
+                pad_h = static_cast<int32_t>(pads[0]);
+                pad_w = static_cast<int32_t>(pads[1]);
+              }
+            } else if (attr_name == "strides") {
+              auto strides = VAIP_ORT_API(attr_proto_get_ints)(*attr);
+              if (strides.size() >= 2) {
+                stride_h = static_cast<int32_t>(strides[0]);
+                stride_w = static_cast<int32_t>(strides[1]);
+              }
+            } else if (attr_name == "dilations") {
+              auto dilations = VAIP_ORT_API(attr_proto_get_ints)(*attr);
+              if (dilations.size() >= 2) {
+                dilation_h = static_cast<int32_t>(dilations[0]);
+                dilation_w = static_cast<int32_t>(dilations[1]);
+              }
+            } else if (attr_name == "group") {
+              group_count = static_cast<int32_t>(VAIP_ORT_API(attr_proto_get_int)(*attr));
+            }
+          }
+          
+          conv_params->set_pad_h(pad_h);
+          conv_params->set_pad_w(pad_w);
+          conv_params->set_stride_h(stride_h);
+          conv_params->set_stride_w(stride_w);
+          conv_params->set_dilation_h(dilation_h);
+          conv_params->set_dilation_w(dilation_w);
+          conv_params->set_group_count(group_count);
           conv_params->set_has_bias(has_bias);
           conv_params->set_alpha(1.0f);
           conv_params->set_beta(0.0f);
           conv_params->set_algorithm_index(-1);
           conv_params->set_exhaustive_search(false);
+          conv_params->set_spatial_dim(2);
 
           // Get input tensor shapes
           auto x_shape = node_arg_get_shape_i64(*input_X.node_arg);
           auto w_shape = node_arg_get_shape_i64(*input_W.node_arg);
           
+          int64_t batch_size = 1, in_channels = 3, in_height = 8, in_width = 8;
+          int64_t out_channels = 16, filter_height = 3, filter_width = 3;
+          
           if (x_shape && x_shape->size() == 4) {
-            conv_params->set_batch_size((*x_shape)[0]);
-            conv_params->set_in_channels((*x_shape)[1]);
-            conv_params->set_in_height((*x_shape)[2]);
-            conv_params->set_in_width((*x_shape)[3]);
+            batch_size = (*x_shape)[0];
+            in_channels = (*x_shape)[1];
+            in_height = (*x_shape)[2];
+            in_width = (*x_shape)[3];
+            conv_params->set_batch_size(batch_size);
+            conv_params->set_in_channels(in_channels);
+            conv_params->set_in_height(in_height);
+            conv_params->set_in_width(in_width);
           }
           
           if (w_shape && w_shape->size() == 4) {
-            conv_params->set_out_channels((*w_shape)[0]);
-            conv_params->set_filter_height((*w_shape)[2]);
-            conv_params->set_filter_width((*w_shape)[3]);
+            out_channels = (*w_shape)[0];
+            filter_height = (*w_shape)[2];
+            filter_width = (*w_shape)[3];
+            conv_params->set_out_channels(out_channels);
+            conv_params->set_filter_height(filter_height);
+            conv_params->set_filter_width(filter_width);
+          }
+          
+          // Calculate output dimensions
+          int64_t out_height = calc_output_dim(in_height, filter_height, pad_h, stride_h, dilation_h);
+          int64_t out_width = calc_output_dim(in_width, filter_width, pad_w, stride_w, dilation_w);
+          conv_params->set_out_height(out_height);
+          conv_params->set_out_width(out_width);
+          
+          MY_LOG(2) << "[ROCm Conv L2] Input shape: [" << batch_size << ", " << in_channels 
+                    << ", " << in_height << ", " << in_width << "]";
+          MY_LOG(2) << "[ROCm Conv L2] Weight shape: [" << out_channels << ", " << in_channels 
+                    << ", " << filter_height << ", " << filter_width << "]";
+          MY_LOG(2) << "[ROCm Conv L2] Output shape: [" << batch_size << ", " << out_channels 
+                    << ", " << out_height << ", " << out_width << "]";
+
+          // Extract and save weight tensor to cache
+          auto pass_context = self->get_context();
+          auto weight_name = node_arg_get_name(*input_W.node_arg);
+          
+          // Check if weight is a constant initializer
+          if (VAIP_ORT_API(node_arg_is_constant)(*graph, *input_W.node_arg)) {
+            auto weight_data = node_arg_get_const_data_as_floats(*graph, *input_W.node_arg);
+            size_t weight_bytes = weight_data.size() * sizeof(float);
+            
+            // Generate unique filename
+            std::string weight_filename = generate_unique_weight_filename("conv", weight_name);
+            
+            // Write weight data to cache using open_file_for_write
+            auto writer = pass_context->open_file_for_write(weight_filename);
+            if (writer) {
+              writer->fwrite(weight_data.data(), weight_bytes);
+              conv_params->set_weight_file_path(weight_filename);
+              conv_params->set_weight_file_size(static_cast<int64_t>(weight_bytes));
+              MY_LOG(1) << "[ROCm Conv L2] Saved weight to cache: " << weight_filename 
+                        << " (" << weight_bytes << " bytes)";
+            } else {
+              LOG(ERROR) << "[ROCm Conv L2] Failed to open weight file for write: " << weight_filename;
+            }
+          } else {
+            MY_LOG(1) << "[ROCm Conv L2] Weight is not a constant: " << weight_name;
+          }
+          
+          // Extract and save bias tensor if present
+          if (has_bias) {
+            auto* bias_node_arg = binder["input_B"].node_arg;
+            auto bias_name = node_arg_get_name(*bias_node_arg);
+            
+            if (VAIP_ORT_API(node_arg_is_constant)(*graph, *bias_node_arg)) {
+              auto bias_data = node_arg_get_const_data_as_floats(*graph, *bias_node_arg);
+              size_t bias_bytes = bias_data.size() * sizeof(float);
+              
+              std::string bias_filename = generate_unique_weight_filename("conv_bias", bias_name);
+              
+              auto writer = pass_context->open_file_for_write(bias_filename);
+              if (writer) {
+                writer->fwrite(bias_data.data(), bias_bytes);
+                conv_params->set_bias_file_path(bias_filename);
+                conv_params->set_bias_file_size(static_cast<int64_t>(bias_bytes));
+                MY_LOG(1) << "[ROCm Conv L2] Saved bias to cache: " << bias_filename 
+                          << " (" << bias_bytes << " bytes)";
+              } else {
+                LOG(ERROR) << "[ROCm Conv L2] Failed to open bias file for write: " << bias_filename;
+              }
+            }
           }
 
           // Store input/output names
           conv_params->add_input_names(node_arg_get_name(*input_X.node_arg));
-          conv_params->add_input_names(node_arg_get_name(*input_W.node_arg));
+          conv_params->add_input_names(weight_name);
           if (has_bias) {
             conv_params->add_input_names(node_arg_get_name(*binder["input_B"].node_arg));
           }
           conv_params->add_output_names(node_arg_get_name(*output.node_arg));
 
-          // Create fused op
+          // Create fused op - only pass activation as runtime input
+          // Weight and bias are constant initializers (saved to cache)
           std::vector<std::string> input_names;
           input_names.push_back(node_arg_get_name(*input_X.node_arg));
-          input_names.push_back(node_arg_get_name(*input_W.node_arg));
-          if (has_bias) {
-            input_names.push_back(node_arg_get_name(*binder["input_B"].node_arg));
-          }
+          // Don't add weight/bias as runtime inputs - they're cached
 
           std::vector<std::string> output_names;
           output_names.push_back(node_arg_get_name(*output.node_arg));
+
+          // Add weight and bias as constant initializers
+          std::vector<std::string> constant_initializers;
+          constant_initializers.push_back(weight_name);
+          if (has_bias) {
+            constant_initializers.push_back(node_arg_get_name(*binder["input_B"].node_arg));
+          }
 
           auto [meta_def, error] = self->try_fuse(
               *graph,
               "rocm_conv",
               input_names,
               output_names,
-              {},  // constant_initializers
+              constant_initializers,
               "ROCm_EP"
           );
 
@@ -111,7 +247,7 @@ struct Level2RocmConv {
             auto status = google::protobuf::util::MessageToJsonString(
                 rocm_param, &rocm_param_json);
             if (!status.ok()) {
-              MY_LOG(1) << "[ROCm Conv L2] Failed to serialize params: " << status.ToString();
+              LOG(ERROR) << "[ROCm Conv L2] Failed to serialize params: " << status.ToString();
               return false;
             }
             self->attach_meta_def_param(*meta_def, rocm_param_json.c_str());
