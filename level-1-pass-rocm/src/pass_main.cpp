@@ -5,8 +5,10 @@
 #include <vector>
 #include <memory>
 
+#include "google/protobuf/util/json_util.h"
 #include "morphizen/env_config.hpp"
 #include "morphizen/vaip.hpp"
+#include "rocm.pb.h"
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_ROCM, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_ROCM) >= n)
@@ -18,29 +20,54 @@ using namespace vaip_core;
  *
  * This pass serves as the entry point for ROCm-based operations.
  * It creates and runs Level-2 sub-passes (Conv, Gemm) for pattern matching.
- * 
- * TODO: When morphizen adds pass_rocm_param support to PassProto,
- * this pass will use pass_proto.pass_rocm_param().sub_pass() to 
- * dynamically configure sub-passes from vaip_config.json.
+ *
+ * Configuration via vaip_config.json pass_generic_param:
+ * {
+ *   "sub_pass_names": ["vaip-pass_level2_rocm_conv", "vaip-pass_level2_rocm_gemm"]
+ * }
  */
 struct Level1Rocm {
   Level1Rocm(IPass& self) : self_{self} {}
 
   void process(IPass& self, Graph& graph) {
     MY_LOG(1) << "[HIP EP Level-1] Starting ROCm pass";
-    
-    // TODO: Sub-pass orchestration when pass_rocm_param proto support is added:
-    // auto& pass_proto = self_.get_pass_proto();
-    // all_passes_ = IPass::create_passes(self_.get_context(), 
-    //                                    pass_proto.pass_rocm_param().sub_pass());
-    // IPass::run_passes(all_passes_, graph);
-    
-    // For now, Level-2 passes run separately in the pipeline via vaip_config.json
+
+    // Get pass configuration from pass_generic_param (JSON)
+    auto json_param = self_.get_pass_generic_param();
+    MY_LOG(1) << "[HIP EP Level-1] pass_generic_param: " << json_param;
+
+    // Parse the JSON to get sub-pass configuration
+    rocm::PassRocmConfigProto config;
+    auto status =
+        google::protobuf::util::JsonStringToMessage(json_param, &config);
+    if (!status.ok()) {
+      MY_LOG(1) << "[HIP EP Level-1] Failed to parse pass_generic_param: "
+                << status.ToString();
+      return;
+    }
+
+    // Create PassProto for each sub-pass and run them
+    for (const auto& sub_pass_name : config.sub_pass_names()) {
+      MY_LOG(1) << "[HIP EP Level-1] Creating sub-pass: " << sub_pass_name;
+
+      PassProto sub_pass_proto;
+      sub_pass_proto.set_plugin(sub_pass_name);
+      sub_pass_proto.set_name(sub_pass_name);
+
+      auto sub_pass =
+          IPass::create_pass(self_.get_context(), sub_pass_proto);
+      if (sub_pass) {
+        MY_LOG(1) << "[HIP EP Level-1] Running sub-pass: " << sub_pass_name;
+        std::vector<std::shared_ptr<IPass>> passes;
+        passes.push_back(std::move(sub_pass));
+        IPass::run_passes(passes, graph);
+      }
+    }
+
     MY_LOG(1) << "[HIP EP Level-1] Completed";
   }
 
   IPass& self_;
-  std::vector<std::shared_ptr<IPass>> all_passes_;
 };
 
 DEFINE_VAIP_PASS(Level1Rocm, vaip_pass_level1_rocm)

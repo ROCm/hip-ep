@@ -7,19 +7,11 @@
     {
       "name": "fuse_ROCm",
       "plugin": "vaip-pass_level1_rocm",
-      "passRocmParam": {
-        "subPass": [
-          {
-            "name": "rocm_conv",
-            "plugin": "vaip-pass_level2_rocm_conv"
-          },
-          {
-            "name": "rocm_gemm",
-            "plugin": "vaip-pass_level2_rocm_gemm"
-          }
-        ],
-        "maxWorkspaceSize": 67108864,
-        "enableExhaustiveSearch": false
+      "passGenericParam": {
+        "subPassNames": [
+          "vaip-pass_level2_rocm_conv",
+          "vaip-pass_level2_rocm_gemm"
+        ]
       }
     }
   ],
