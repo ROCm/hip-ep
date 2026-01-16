@@ -4,7 +4,7 @@
 #include <glog/logging.h>
 #include "morphizen/vaip.hpp"
 #include "rocm.pb.h"
-#include "conv_json.inc"
+#include "conv_pattern_json.hpp"
 
 using namespace vaip_core;
 

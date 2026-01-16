@@ -16,6 +16,13 @@ target_include_directories(${LIB_NAME} PRIVATE
 	include
 	${CMAKE_CURRENT_BINARY_DIR}
 )
+
+# HIP configuration for ROCm headers
+if(WIN32)
+  target_include_directories(${LIB_NAME} SYSTEM PRIVATE "${THEROCK_DIST}/include")
+  target_compile_definitions(${LIB_NAME} PRIVATE "__HIP_PLATFORM_AMD__=1")
+endif()
+
 target_compile_definitions(${LIB_NAME} PRIVATE -DOUTPUT_NAME="morphizen-level2-pass-rocm-gemm")
 target_link_libraries(${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${LIB_NAME}>")
 set_target_properties(${LIB_NAME} PROPERTIES

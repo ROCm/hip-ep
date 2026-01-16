@@ -14,8 +14,11 @@ RocmCustomOp::RocmCustomOp(
     : CustomOpImp(context, meta_def, model) {
   
   // Parse the generic_param to get RocmParamProto
-  if (!meta_def->generic_param().empty()) {
-    if (!rocm_proto_.ParseFromString(meta_def->generic_param())) {
+  // generic_param is a Map<string, string>, look for "rocm_param" key
+  const auto& params = meta_def->generic_param();
+  auto it = params.find("rocm_param");
+  if (it != params.end()) {
+    if (!rocm_proto_.ParseFromString(it->second)) {
       throw std::runtime_error("Failed to parse RocmParamProto");
     }
   }
@@ -64,16 +67,16 @@ void RocmCustomOp::ExecuteConv(const OrtApi* api, OrtKernelContext* context) con
   const auto& params = rocm_proto_.conv_params();
 
   // Get input tensors from ORT context
-  OrtValue* input_x = nullptr;
-  OrtValue* input_w = nullptr;
+  const OrtValue* input_x = nullptr;
+  const OrtValue* input_w = nullptr;
   api->KernelContext_GetInput(context, 0, &input_x);
   api->KernelContext_GetInput(context, 1, &input_w);
 
-  // Get tensor data pointers
+  // Get tensor data pointers (const_cast needed for legacy API)
   float* x_data = nullptr;
   float* w_data = nullptr;
-  api->GetTensorMutableData(input_x, (void**)&x_data);
-  api->GetTensorMutableData(input_w, (void**)&w_data);
+  api->GetTensorMutableData(const_cast<OrtValue*>(input_x), (void**)&x_data);
+  api->GetTensorMutableData(const_cast<OrtValue*>(input_w), (void**)&w_data);
 
   // Get output tensor
   std::vector<int64_t> output_shape = {
@@ -113,16 +116,16 @@ void RocmCustomOp::ExecuteGemm(const OrtApi* api, OrtKernelContext* context) con
   const auto& params = rocm_proto_.gemm_params();
 
   // Get input tensors from ORT context
-  OrtValue* input_a = nullptr;
-  OrtValue* input_b = nullptr;
+  const OrtValue* input_a = nullptr;
+  const OrtValue* input_b = nullptr;
   api->KernelContext_GetInput(context, 0, &input_a);
   api->KernelContext_GetInput(context, 1, &input_b);
 
-  // Get tensor data pointers
+  // Get tensor data pointers (const_cast needed for legacy API)
   float* a_data = nullptr;
   float* b_data = nullptr;
-  api->GetTensorMutableData(input_a, (void**)&a_data);
-  api->GetTensorMutableData(input_b, (void**)&b_data);
+  api->GetTensorMutableData(const_cast<OrtValue*>(input_a), (void**)&a_data);
+  api->GetTensorMutableData(const_cast<OrtValue*>(input_b), (void**)&b_data);
 
   // Get output tensor
   std::vector<int64_t> output_shape = {params.m(), params.n()};
