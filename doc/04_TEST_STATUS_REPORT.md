@@ -199,11 +199,35 @@ Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT16x16x16_SN_LDSB0_AFC1_...
 
 **Description:** Verifies that the VitisAI EP DLL is built and available.
 
-**Test Flow:**
+**Command to reproduce:**
+```batch
+cd C:\Develop\m\build\morphizen-rocm\bin
+ort_integration_test.exe --gtest_filter=OrtIntegrationTest.LoadVitisAIProvider
 ```
-1. Create ORT Env and SessionOptions
-2. Search for onnxruntime_vitisai_ep.dll in common paths
-3. Report if found
+
+**Test Log:**
+```
+ORT Integration Test for VitisAI ROCm EP
+
+To see MY_LOG output, set these environment variables:
+  set MORPHIZEN_DEBUG_ROCM=2
+  set GLOG_logtostderr=1
+  set GLOG_minloglevel=0
+
+[==========] Running 1 test from 1 test suite.
+[----------] 1 test from OrtIntegrationTest
+[ RUN      ] OrtIntegrationTest.LoadVitisAIProvider
+
+=== Environment Variables ===
+MORPHIZEN_DEBUG_ROCM: (not set)
+GLOG_logtostderr: (not set)
+
+[Test] Loading VitisAI Execution Provider...
+[Test] Found VitisAI EP at: onnxruntime_vitisai_ep.dll
+[       OK ] OrtIntegrationTest.LoadVitisAIProvider (86 ms)
+[----------] 1 test from OrtIntegrationTest (86 ms total)
+[==========] 1 test from 1 test suite ran. (86 ms total)
+[  PASSED  ] 1 test.
 ```
 
 **Results:**
@@ -221,23 +245,37 @@ Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT16x16x16_SN_LDSB0_AFC1_...
 - Input: X [1, 3, 8, 8] filled with 1.0
 - Output: Y [1, 16, 8, 8]
 
-**Test Flow:**
+**Command to reproduce:**
+```batch
+cd C:\Develop\m\build\morphizen-rocm\bin
+copy C:\Develop\m\Source\morphizen-rocm\test\conv_model.onnx .
+ort_integration_test.exe --gtest_filter=OrtIntegrationTest.CPUProviderInference
 ```
-1. Check Environment Variables
-   └── Report MORPHIZEN_DEBUG_ROCM, GLOG_logtostderr status
 
-2. Load ONNX Model
-   └── conv_model.onnx (Conv with random weights)
+**Test Log:**
+```
+ORT Integration Test for VitisAI ROCm EP
 
-3. Create ORT Session
-   └── CPU provider (default)
+[==========] Running 1 test from 1 test suite.
+[----------] 1 test from OrtIntegrationTest
+[ RUN      ] OrtIntegrationTest.CPUProviderInference
 
-4. Run Inference
-   ├── Input: all 1.0
-   └── Output: computed convolution
+=== Environment Variables ===
+MORPHIZEN_DEBUG_ROCM: (not set)
+GLOG_logtostderr: (not set)
 
-5. Validate
-   └── Check output contains non-zero values
+[Test] Testing CPU provider inference with conv model...
+[Test] Loading model: conv_model.onnx
+[Test] Input: X
+[Test] Output: Y
+[Test] Running inference...
+[Test] Output shape: [1, 16, 8, 8]
+[Test] Output[0]: -0.275499
+[Test] Inference completed successfully!
+[       OK ] OrtIntegrationTest.CPUProviderInference (11 ms)
+[----------] 1 test from OrtIntegrationTest (11 ms total)
+[==========] 1 test from 1 test suite ran. (11 ms total)
+[  PASSED  ] 1 test.
 ```
 
 **Results:**
