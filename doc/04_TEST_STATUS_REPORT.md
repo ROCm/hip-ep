@@ -199,9 +199,13 @@ Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT16x16x16_SN_LDSB0_AFC1_...
 
 **Description:** Verifies that the VitisAI EP DLL is built and available.
 
-**Command to reproduce:**
+**Command to reproduce (with all logs enabled):**
 ```batch
 cd C:\Develop\m\build\morphizen-rocm\bin
+set MORPHIZEN_DEBUG_ROCM=2
+set GLOG_logtostderr=1
+set GLOG_minloglevel=0
+set ORT_LOG_LEVEL=INFO
 ort_integration_test.exe --gtest_filter=OrtIntegrationTest.LoadVitisAIProvider
 ```
 
@@ -245,10 +249,14 @@ GLOG_logtostderr: (not set)
 - Input: X [1, 3, 8, 8] filled with 1.0
 - Output: Y [1, 16, 8, 8]
 
-**Command to reproduce:**
+**Command to reproduce (with all logs enabled):**
 ```batch
 cd C:\Develop\m\build\morphizen-rocm\bin
 copy C:\Develop\m\Source\morphizen-rocm\test\conv_model.onnx .
+set MORPHIZEN_DEBUG_ROCM=2
+set GLOG_logtostderr=1
+set GLOG_minloglevel=0
+set ORT_LOG_LEVEL=VERBOSE
 ort_integration_test.exe --gtest_filter=OrtIntegrationTest.CPUProviderInference
 ```
 
