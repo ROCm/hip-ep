@@ -3,6 +3,8 @@
 
 #include <hip/hip_runtime.h>
 #include <glog/logging.h>
+#include <vector>
+#include <memory>
 
 #include "morphizen/env_config.hpp"
 #include "morphizen/vaip.hpp"
@@ -19,12 +21,26 @@ using namespace vaip_core;
  * It:
  * 1. Checks AMD GPU availability
  * 2. Logs device information
- * 
- * Note: Level-2 sub-passes (Conv, Gemm) are registered separately
- * and will run as part of the normal pass pipeline.
+ * 3. Creates and runs Level-2 sub-passes (Conv, Gemm)
  */
 struct Level1Rocm {
   Level1Rocm(IPass& self) : self_{self} {}
+
+  void process_run_subpasses(Graph& graph) {
+    auto& pass_proto = self_.get_pass_proto();
+    
+    // Create Level-2 passes from config (subPass in passRocmParam)
+    all_passes_ = IPass::create_passes(
+        self_.get_context(),
+        pass_proto.pass_rocm_param().sub_pass());
+    
+    MY_LOG(1) << "[HIP EP Level-1] Created " << all_passes_.size() << " sub-passes";
+    
+    // Run all Level-2 passes (Conv, Gemm pattern matching)
+    IPass::run_passes(all_passes_, graph);
+    
+    MY_LOG(1) << "[HIP EP Level-1] Completed running sub-passes";
+  }
 
   void process(IPass& self, Graph& graph) {
     // 1. Check AMD GPU availability
@@ -49,9 +65,13 @@ struct Level1Rocm {
     }
 
     MY_LOG(1) << "[HIP EP Level-1] AMD GPU available, ROCm acceleration enabled";
+    
+    // 3. Run Level-2 sub-passes
+    process_run_subpasses(graph);
   }
 
   IPass& self_;
+  std::vector<std::shared_ptr<IPass>> all_passes_;
 };
 
 DEFINE_VAIP_PASS(Level1Rocm, vaip_pass_level1_rocm)
