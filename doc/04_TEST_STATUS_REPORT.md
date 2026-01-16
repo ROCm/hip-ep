@@ -81,8 +81,8 @@ run_test_with_therock.bat
 |------------|-----------|--------|--------|---------|----------|
 | RocmConvTest | 1 | 1 | 0 | 0 | 3513 ms |
 | RocmGemmTest | 1 | 1 | 0 | 0 | 234 ms |
-| OrtIntegrationTest | 3 | 3 | 0 | 0 | 102 ms |
-| **Total** | **6** | **6** | **0** | **0** | **3849 ms** |
+| OrtIntegrationTest | 3 | 2 | 0 | 1 | 123 ms |
+| **Total** | **6** | **5** | **0** | **1** | **3870 ms** |
 
 ## Hardware Configuration
 
@@ -292,7 +292,7 @@ GLOG_logtostderr: 1
 
 ---
 
-### 5. OrtIntegrationTest.VitisAIProviderInference ✅ PASSED
+### 5. OrtIntegrationTest.VitisAIProviderInference ⏭️ SKIPPED
 
 **Description:** Tests VitisAI EP integration with Level-1 ROCm pass configuration.
 
@@ -303,10 +303,12 @@ GLOG_logtostderr: 1
 
 **Prerequisites:**
 ```batch
-REM Copy required files to bin folder
+REM Copy test model to bin folder
 copy C:\Develop\m\Source\morphizen-rocm\test\conv_model.onnx C:\Develop\m\build\morphizen-rocm\bin\
-copy C:\Develop\m\Source\morphizen-rocm\etc\vaip_config.json C:\Develop\m\build\morphizen-rocm\bin\
 ```
+
+**Note:** The `vaip_config.json` is embedded into `onnxruntime_vitisai_ep.dll` at build time,
+so no external config file is needed. See CMake option: `VAIP_JSON_CONFIG_FILE`.
 
 **Command to reproduce (with all logs enabled):**
 ```batch
@@ -319,47 +321,31 @@ ort_integration_test.exe --gtest_filter=OrtIntegrationTest.VitisAIProviderInfere
 
 **Test Log:**
 ```
-ORT Integration Test for VitisAI HIP EP
-
-[==========] Running 1 test from 1 test suite.
-[----------] 1 test from OrtIntegrationTest
-[ RUN      ] OrtIntegrationTest.VitisAIProviderInference
-
-=== Environment Variables ===
-MORPHIZEN_DEBUG_ROCM: 2
-GLOG_logtostderr: 1
-
+[SetUp] VitisAI EP registered successfully from: onnxruntime_vitisai_ep.dll
+[SetUp] Model found at: ./conv_model.onnx
 [Test] Testing VitisAI EP with Level-1 ROCm pass...
-[Test] Loading model: conv_model.onnx
-[Test] Found VitisAI EP: onnxruntime_vitisai_ep.dll
-[Test] Found vaip_config.json: vaip_config.json
-[Test] Level-1 pass configuration:
-[Test]   - Pass: vaip-pass_level1_rocm
-[Test]   - Sub-passes: vaip-pass_level2_rocm_conv, vaip-pass_level2_rocm_gemm
-[Test] Creating ORT session...
-[Test] Input: X
-[Test] Output: Y
-[Test] Running inference...
-[Test] (When VitisAI EP is active, Level-1 pass will:
-[Test]  1. Invoke Level-2 sub-passes for pattern matching
-[Test]  2. Group matched Conv/Gemm nodes
-[Test]  3. Create ROCm fused nodes with custom ops)
-[Test] Output shape: [1, 16, 8, 8]
-[Test] Output[0]: -0.275499
-[Test] Inference completed successfully!
-[       OK ] OrtIntegrationTest.VitisAIProviderInference (1 ms)
-[----------] 1 test from OrtIntegrationTest (1 ms total)
-[==========] 1 test from 1 test suite ran. (1 ms total)
-[  PASSED  ] 1 test.
+[Test] CPU reference output[0]: -0.275499
+[Test] Found EP device: CPUExecutionProvider
+[Test] VitisAI EP V2 device API not yet implemented
+[Test] The EP was registered successfully, but doesn't expose V2 devices
+[Test] VitisAI EP configuration (embedded in DLL):
+[Test]   Level-1 pass: vaip-pass_level1_rocm
+[Test]   Level-2 sub-passes:
+[Test]     - vaip-pass_level2_rocm_conv
+[Test]     - vaip-pass_level2_rocm_gemm
+[  SKIPPED ] OrtIntegrationTest.VitisAIProviderInference (1 ms)
 ```
 
 **Results:**
-- Found VitisAI EP DLL: `onnxruntime_vitisai_ep.dll`
-- Found vaip_config.json: ✅
-- Level-1 pass configuration detected: `vaip-pass_level1_rocm`
-- Output: Y [1, 16, 8, 8]
-- Output[0]: -0.275499
+- VitisAI EP DLL registered: ✅ `onnxruntime_vitisai_ep.dll`
+- ORT 2.0 V2 Device API: ⏭️ Not yet implemented in VitisAI EP
+- Embedded config: `vaip_config.json` (built into DLL)
+- **Status:** Skipped (EP registered but V2 API pending)
 - **Duration:** 1 ms
+
+**Note:** The test is skipped because VitisAI EP doesn't yet expose devices via the 
+ORT 2.0 `GetEpDevices()` / `SessionOptionsAppendExecutionProvider_V2()` API.
+This is expected behavior and consistent with the reference test in morphizen-hipblaslt.
 
 **Level-1 Pass Architecture:**
 ```
