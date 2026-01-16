@@ -2,8 +2,8 @@
 // Licensed under the MIT License.
 
 #include <glog/logging.h>
-#include <vector>
 #include <memory>
+#include <vector>
 
 #include "google/protobuf/util/json_util.h"
 #include "morphizen/env_config.hpp"
@@ -20,6 +20,9 @@ using namespace vaip_core;
  *
  * This pass serves as the entry point for ROCm-based operations.
  * It creates and runs Level-2 sub-passes (Conv, Gemm) for pattern matching.
+ *
+ * The original graph is read-only, so we clone the model and run sub-passes
+ * on the cloned graph.
  *
  * Configuration via vaip_config.json pass_generic_param:
  * {
@@ -46,7 +49,15 @@ struct Level1Rocm {
       return;
     }
 
-    // Create PassProto for each sub-pass and run them
+    // Clone the model so we can modify the graph
+    // The original graph is read-only
+    auto& model = VAIP_ORT_API(graph_get_model)(graph);
+    auto cloned_model = vaip_core::model_clone(model, 64);
+    auto& cloned_graph = VAIP_ORT_API(model_main_graph)(*cloned_model);
+
+    MY_LOG(1) << "[ROCm EP Level-1] Cloned model for sub-pass processing";
+
+    // Create PassProto for each sub-pass and run them on cloned graph
     for (const auto& sub_pass_name : config.sub_pass_names()) {
       MY_LOG(1) << "[ROCm EP Level-1] Creating sub-pass: " << sub_pass_name;
 
@@ -54,13 +65,12 @@ struct Level1Rocm {
       sub_pass_proto.set_plugin(sub_pass_name);
       sub_pass_proto.set_name(sub_pass_name);
 
-      auto sub_pass =
-          IPass::create_pass(self_.get_context(), sub_pass_proto);
+      auto sub_pass = IPass::create_pass(self_.get_context(), sub_pass_proto);
       if (sub_pass) {
         MY_LOG(1) << "[ROCm EP Level-1] Running sub-pass: " << sub_pass_name;
         std::vector<std::shared_ptr<IPass>> passes;
         passes.push_back(std::move(sub_pass));
-        IPass::run_passes(passes, graph);
+        IPass::run_passes(passes, cloned_graph);
       }
     }
 
