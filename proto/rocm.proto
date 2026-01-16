@@ -147,6 +147,19 @@ message RocmParamProto {
   int64 ep_context_file_size = 5;
 }
 
+// Merged parameters from multiple ROCm operations
+// Used by Level-1 pass to combine consecutive fused nodes
+message RocmMergedParamProto {
+  // Array of individual operation parameters (in execution order)
+  repeated RocmParamProto rocm_params = 1;
+  
+  // Total number of operations in this merged node
+  int32 op_count = 2;
+  
+  // Whether implicit fusion is possible (all ops can share one stream)
+  bool implicit_fusion = 3;
+}
+
 // Pass configuration for ROCm Level-1 orchestrator
 // This defines sub-passes that the Level-1 pass will run
 message PassRocmConfigProto {
