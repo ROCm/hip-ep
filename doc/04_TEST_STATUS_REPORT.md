@@ -372,12 +372,27 @@ unknown file: error: SEH exception with code 0xc0000005 thrown in the test body.
 **What Requires AMD GPU:**
 | Component | Status | Details |
 |-----------|--------|---------|
-| HIP Runtime | ❌ | `hipStreamSynchronize()` crashes without GPU |
-| MIOpen Conv | ❌ | Requires GPU for kernel execution |
-| hipBLASLt GEMM | ❌ | Requires GPU for kernel execution |
+| HIP Runtime | ✅ | GPU detected and initialized successfully |
+| MIOpen Conv | ⚠️ | Custom op params not fully populated by pass |
+| hipBLASLt GEMM | ⚠️ | Custom op params not fully populated by pass |
 
-**Note:** The SEH exception occurs in the HIP runtime initialization. This is expected behavior
-when no AMD GPU is present. On a system with an AMD GPU (e.g., gfx1100), the test should pass completely.
+**Root Cause Analysis (2026-01-16):**
+
+The SEH exception (0xc0000005) was **NOT** caused by missing GPU hardware. The actual root causes were:
+
+1. **NULL Weight Tensor**: The fused VitisAI node only passes activation tensor (X) as runtime input. The weight tensor (W) is a constant initializer that should be extracted during pass execution and cached, but this wasn't implemented yet.
+
+2. **Invalid Output Shape**: The `conv_params` proto message wasn't properly populated by the Level-2 pass (out_height=0, out_width=0), causing a 0-sized tensor allocation.
+
+**Fixes Applied:**
+- Added null pointer checks for input tensors
+- Added validation for output shape dimensions before tensor allocation
+- Changed from SEH crash to proper `std::runtime_error` with descriptive message
+- Added `MY_LOG` debugging and `LOG(ERROR)` for actual errors
+
+**Next Steps:**
+- Level-2 passes need to properly populate conv_params/gemm_params
+- Weights should be extracted from initializers and cached during pass execution
 
 **Level-1 Pass Architecture:**
 ```
