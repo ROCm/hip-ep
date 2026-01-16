@@ -22,6 +22,11 @@ C:\Develop\m\build\morphizen-rocm\bin\rocm_conv_test.exe
 
 REM Run GEMM test
 C:\Develop\m\build\morphizen-rocm\bin\rocm_gemm_test.exe
+
+REM Run ORT Integration test (requires conv_model.onnx in bin folder)
+cd C:\Develop\m\build\morphizen-rocm\bin
+copy C:\Develop\m\Source\morphizen-rocm\test\conv_model.onnx .
+ort_integration_test.exe
 ```
 
 ### Verbose Test (With Detailed Logging)
