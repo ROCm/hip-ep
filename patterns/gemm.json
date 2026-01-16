@@ -1,0 +1,39 @@
+{
+  "patterns": [
+    {
+      "id": "input_A",
+      "wildcard": {}
+    },
+    {
+      "id": "input_B",
+      "wildcard": {}
+    },
+    {
+      "id": "input_C",
+      "wildcard": {}
+    },
+    {
+      "id": "output",
+      "isRoot": true,
+      "callNode": {
+        "opType": "Gemm",
+        "args": [
+          {
+            "name": "input_A"
+          },
+          {
+            "name": "input_B"
+          },
+          {
+            "name": "input_C"
+          }
+        ],
+        "optionalArgs": [
+          false,
+          false,
+          true
+        ]
+      }
+    }
+  ]
+}

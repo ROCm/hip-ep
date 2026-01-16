@@ -1,0 +1,36 @@
+{
+  "passes": [
+    {
+      "name": "init",
+      "plugin": "vaip-pass_init"
+    },
+    {
+      "name": "fuse_ROCm",
+      "plugin": "vaip-pass_level1_rocm",
+      "passRocmParam": {
+        "subPass": [
+          {
+            "name": "rocm_conv",
+            "plugin": "vaip-pass_level2_rocm_conv"
+          },
+          {
+            "name": "rocm_gemm",
+            "plugin": "vaip-pass_level2_rocm_gemm"
+          }
+        ],
+        "maxWorkspaceSize": 67108864,
+        "enableExhaustiveSearch": false
+      }
+    }
+  ],
+  "target": "ROCm_default",
+  "targets": [
+    {
+      "name": "ROCm_default",
+      "pass": [
+        "init",
+        "fuse_ROCm"
+      ]
+    }
+  ]
+}
