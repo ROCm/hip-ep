@@ -110,24 +110,70 @@ function union(parent, a, b):
 
 ### Why DAG Ensures No Cycles After Fusion
 
-When we merge a group of nodes into a single fused node:
+#### Formal Proof
 
-1. **External inputs** come from nodes outside the group (processed earlier in topo order)
-2. **External outputs** go to nodes outside the group (processed later in topo order)
-3. The fused node takes the topological position of the **last** node in the group
+**Theorem**: Fusing a connected group of nodes in a DAG produces a DAG.
 
-Since the original graph has no cycles, and we only merge nodes with direct data-flow edges, the resulting graph is still a DAG.
+**Proof**:
+
+Let:
+- G = original DAG
+- S = {n₁, n₂, ..., nₖ} = nodes being merged (ordered by topological position)
+- M = the merged node
+- topo(x) = topological position of node x in G
+
+**Key observations**:
+
+1. **Group is contiguous in topo order**: Since nodes in S are directly connected (each produces input for another), and G is a DAG, nodes in S form a contiguous segment in topological order.
+
+2. **M's topological position**: M takes the position of nₖ (the last node in S).
+
+3. **M's inputs come from BEFORE S**: 
+   - Any input to M was an input to some node n ∈ S, but not produced by any node in S
+   - Since G is a DAG: topo(input_producer) < topo(n₁) ≤ topo(M)
+
+4. **M's outputs go to AFTER S**:
+   - Any consumer of M's output was consuming from some node n ∈ S, but consumer ∉ S
+   - Since G is a DAG: topo(consumer) > topo(nₖ) = topo(M)
+
+**Conclusion**: All paths from M lead to nodes with strictly higher topological positions. All inputs to M come from nodes with strictly lower positions. Therefore, no cycle can include M. ∎
+
+#### Visual Example
 
 ```
-Original:      After Merging:
-  A → B → C      A → [Merged BC] → D
-      ↓   ↓              ↓
-      E   D              E
+Original:                After Fusion:
+  A                         A
+  ↓                         ↓
+  B ←── external input    [Merged B,C] ←── external input
+  ↓                         ↓
+  C                         D
+  ↓
+  D ←── external consumer
 
-The merged node [BC] still respects DAG property:
-- It receives from A
-- It outputs to D and E
-- No cycles introduced
+Topological positions:
+  A: 1                    A: 1
+  B: 2                    [Merged B,C]: 3  (takes C's position)
+  C: 3                    D: 4
+  D: 4
+
+No cycle possible: all edges go from lower to higher positions.
+```
+
+#### Edge Case: Diamond Pattern
+
+```
+Original:           After Fusion (if A,B,C,D all ROCm):
+    A                      X
+   ↙ ↘                      ↓
+  B   C               [Merged ABCD]
+   ↘ ↙                      ↓
+    D                      Y
+    ↓
+    Y
+
+M's inputs: from X (before A)
+M's outputs: to Y (after D)
+Still a DAG! ✓
 ```
 
 ## Example Walkthrough
