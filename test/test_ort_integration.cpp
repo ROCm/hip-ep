@@ -13,16 +13,37 @@
  */
 
 #include <gtest/gtest.h>
-#include <onnxruntime_cxx_api.h>
-#include <iostream>
 #include <vector>
 #include <cmath>
 #include <fstream>
+#include <iostream>
+
+#ifndef ORT_API_MANUAL_INIT
+#define ORT_API_MANUAL_INIT
+#endif
+#include <onnxruntime_cxx_api.h>
 
 #ifdef _WIN32
+#define NOMINMAX
 #include <windows.h>
+inline std::wstring ToWideString(const char* str) {
+  int len = MultiByteToWideChar(CP_UTF8, 0, str, -1, nullptr, 0);
+  std::wstring result(len - 1, 0);
+  MultiByteToWideChar(CP_UTF8, 0, str, -1, &result[0], len);
+  return result;
+}
+#endif
+
+#ifndef VITISAI_EP_LIB_PATH
+#ifdef _WIN32
+#define VITISAI_EP_LIB_PATH "onnxruntime_vitisai_ep.dll"
 #else
-#include <dlfcn.h>
+#define VITISAI_EP_LIB_PATH "./libonnxruntime_vitisai_ep.so"
+#endif
+#endif
+
+#ifndef CONV_TEST_MODEL_PATH
+#define CONV_TEST_MODEL_PATH "./conv_model.onnx"
 #endif
 
 // Check if a file exists
@@ -35,6 +56,7 @@ class OrtIntegrationTest : public ::testing::Test {
 protected:
   void SetUp() override {
     // Initialize ORT
+    Ort::InitApi(OrtGetApiBase()->GetApi(ORT_API_VERSION));
     env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "OrtIntegrationTest");
     
     // Print environment variable status for debugging
@@ -45,6 +67,35 @@ protected:
     std::cout << "MORPHIZEN_DEBUG_ROCM: " << (debug_level ? debug_level : "(not set)") << std::endl;
     std::cout << "GLOG_logtostderr: " << (glog_stderr ? glog_stderr : "(not set)") << std::endl;
     std::cout << "==============================\n" << std::endl;
+
+    // Register VitisAI EP
+    const char* lib_path_str = VITISAI_EP_LIB_PATH;
+#ifdef _WIN32
+    auto lib_path_w = ToWideString(lib_path_str);
+    OrtStatus* status = Ort::GetApi().RegisterExecutionProviderLibrary(
+        *env_, "VitisAI", lib_path_w.c_str());
+#else
+    OrtStatus* status = Ort::GetApi().RegisterExecutionProviderLibrary(
+        *env_, "VitisAI", lib_path_str);
+#endif
+
+    if (status != nullptr) {
+      std::string error_msg = Ort::GetApi().GetErrorMessage(status);
+      Ort::GetApi().ReleaseStatus(status);
+      ep_available_ = false;
+      std::cout << "[SetUp] VitisAI EP not available: " << error_msg << std::endl;
+    } else {
+      ep_available_ = true;
+      std::cout << "[SetUp] VitisAI EP registered successfully from: " << lib_path_str << std::endl;
+    }
+
+    // Check if model file exists
+    model_available_ = file_exists(CONV_TEST_MODEL_PATH);
+    if (!model_available_) {
+      std::cout << "[SetUp] Model not available at: " << CONV_TEST_MODEL_PATH << std::endl;
+    } else {
+      std::cout << "[SetUp] Model found at: " << CONV_TEST_MODEL_PATH << std::endl;
+    }
   }
 
   void TearDown() override {
@@ -52,111 +103,85 @@ protected:
   }
 
   std::unique_ptr<Ort::Env> env_;
+  bool ep_available_{false};
+  bool model_available_{false};
 };
 
 TEST_F(OrtIntegrationTest, LoadVitisAIProvider) {
   std::cout << "[Test] Loading VitisAI Execution Provider..." << std::endl;
   
-  Ort::SessionOptions session_options;
-  session_options.SetIntraOpNumThreads(1);
-  session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+  // The EP is registered via RegisterExecutionProviderLibrary
+  // Note: VitisAI EP may not yet expose devices via GetEpDevices() (ORT 2.0 API)
+  EXPECT_TRUE(ep_available_) << "VitisAI EP should be registered successfully";
   
-  // Try to load VitisAI EP
-  // The VitisAI EP is registered via the onnxruntime_vitisai_ep.dll
-  std::vector<std::string> ep_search_paths = {
-    "onnxruntime_vitisai_ep.dll",
-    "../bin/onnxruntime_vitisai_ep.dll",
-    "../../bin/onnxruntime_vitisai_ep.dll"
-  };
-  
-  bool ep_loaded = false;
-  for (const auto& path : ep_search_paths) {
-    if (file_exists(path)) {
-      std::cout << "[Test] Found VitisAI EP at: " << path << std::endl;
-      try {
-        // Note: The actual EP registration happens through ORT's provider loading mechanism
-        // For now, we just verify the DLL exists
-        ep_loaded = true;
+  if (ep_available_) {
+    // Try to get EP devices (ORT 2.0 API)
+    std::vector<Ort::ConstEpDevice> devices = env_->GetEpDevices();
+    std::cout << "[Test] Found " << devices.size() << " EP device(s)" << std::endl;
+    
+    for (const auto& device : devices) {
+      std::string ep_name = device.EpName();
+      std::cout << "[Test]   - EP device: " << ep_name << std::endl;
+    }
+    
+    // Check for VitisAI device
+    bool found_vitisai = false;
+    for (const auto& device : devices) {
+      std::string ep_name = device.EpName();
+      if (ep_name == "VitisAI" || ep_name == "VitisAIExecutionProvider") {
+        found_vitisai = true;
         break;
-      } catch (const std::exception& e) {
-        std::cout << "[Test] Failed to load EP from " << path << ": " << e.what() << std::endl;
       }
     }
+    
+    if (!found_vitisai) {
+      std::cout << "[Test] Note: VitisAI EP registered but not exposing V2 devices" << std::endl;
+      std::cout << "[Test] This is expected - ORT 2.0 device API may not be implemented yet" << std::endl;
+    }
+    
+    // Test passes if EP was registered (even if V2 API not implemented)
+    EXPECT_TRUE(ep_available_);
   }
-  
-  if (!ep_loaded) {
-    std::cout << "[Test] VitisAI EP DLL not found in search paths" << std::endl;
-    std::cout << "[Test] This test requires the VitisAI EP to be built and available" << std::endl;
-  }
-  
-  EXPECT_TRUE(true); // Basic test passes if we get here
 }
 
 TEST_F(OrtIntegrationTest, CPUProviderInference) {
   std::cout << "[Test] Testing CPU provider inference with conv model..." << std::endl;
   
-  // Check for conv model
-  std::string model_path = "conv_model.onnx";
-  if (!file_exists(model_path)) {
-    model_path = "../test/conv_model.onnx";
-  }
-  if (!file_exists(model_path)) {
-    model_path = "../../test/conv_model.onnx";
-  }
+  ASSERT_TRUE(model_available_) << "Conv model not found at: " << CONV_TEST_MODEL_PATH;
   
-  if (!file_exists(model_path)) {
-    std::cout << "[Test] Conv model not found, generating..." << std::endl;
-    // Skip if model not found - user needs to generate it
-    GTEST_SKIP() << "Conv model not found. Run: python test/gen_conv_model.py";
-  }
-  
-  std::cout << "[Test] Loading model: " << model_path << std::endl;
-  
+  // Model parameters (matches gen_conv_model.py)
+  const std::vector<int64_t> input_shape = {1, 3, 8, 8};
+  const size_t input_size = 1 * 3 * 8 * 8;
+
+  // Create input data (all 1.0)
+  std::vector<float> input_data(input_size, 1.0f);
+
   Ort::SessionOptions session_options;
   session_options.SetIntraOpNumThreads(1);
   
-  // Create session with CPU provider
-  // On Windows, ORT requires wide strings
 #ifdef _WIN32
-  std::wstring wide_path(model_path.begin(), model_path.end());
-  Ort::Session session(*env_, wide_path.c_str(), session_options);
+  auto model_path_w = ToWideString(CONV_TEST_MODEL_PATH);
+  Ort::Session session(*env_, model_path_w.c_str(), session_options);
 #else
-  Ort::Session session(*env_, model_path.c_str(), session_options);
+  Ort::Session session(*env_, CONV_TEST_MODEL_PATH, session_options);
 #endif
   
-  // Get input/output info
-  Ort::AllocatorWithDefaultOptions allocator;
-  
-  auto input_name = session.GetInputNameAllocated(0, allocator);
-  auto output_name = session.GetOutputNameAllocated(0, allocator);
-  
-  std::cout << "[Test] Input: " << input_name.get() << std::endl;
-  std::cout << "[Test] Output: " << output_name.get() << std::endl;
-  
-  // Create input tensor [1, 3, 8, 8]
-  std::vector<int64_t> input_shape = {1, 3, 8, 8};
-  std::vector<float> input_data(1 * 3 * 8 * 8, 1.0f);
-  
   auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-  auto input_tensor = Ort::Value::CreateTensor<float>(
-      memory_info, input_data.data(), input_data.size(),
-      input_shape.data(), input_shape.size());
-  
-  // Run inference
-  const char* input_names[] = {input_name.get()};
-  const char* output_names[] = {output_name.get()};
-  
-  std::cout << "[Test] Running inference..." << std::endl;
-  auto output_tensors = session.Run(
-      Ort::RunOptions{nullptr},
-      input_names, &input_tensor, 1,
-      output_names, 1);
-  
+  Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+      memory_info, input_data.data(), input_size, input_shape.data(), input_shape.size());
+
+  const char* input_names[] = {"X"};
+  const char* output_names[] = {"Y"};
+
+  std::cout << "[Test] Running CPU inference..." << std::endl;
+  auto output_tensors = session.Run(Ort::RunOptions{}, input_names, &input_tensor, 1, output_names, 1);
+
   ASSERT_EQ(output_tensors.size(), 1);
   
-  // Get output
   auto& output_tensor = output_tensors[0];
   auto output_shape = output_tensor.GetTensorTypeAndShapeInfo().GetShape();
+  size_t output_size = output_tensor.GetTensorTypeAndShapeInfo().GetElementCount();
+  const float* output_data = output_tensor.GetTensorData<float>();
   
   std::cout << "[Test] Output shape: [";
   for (size_t i = 0; i < output_shape.size(); ++i) {
@@ -164,170 +189,176 @@ TEST_F(OrtIntegrationTest, CPUProviderInference) {
     if (i < output_shape.size() - 1) std::cout << ", ";
   }
   std::cout << "]" << std::endl;
-  
-  float* output_data = output_tensor.GetTensorMutableData<float>();
   std::cout << "[Test] Output[0]: " << output_data[0] << std::endl;
-  
+
   // Verify output is not all zeros
   bool has_nonzero = false;
-  size_t total_elements = 1;
-  for (auto dim : output_shape) total_elements *= dim;
-  
-  for (size_t i = 0; i < total_elements && !has_nonzero; ++i) {
+  for (size_t i = 0; i < output_size && !has_nonzero; ++i) {
     if (std::abs(output_data[i]) > 1e-6f) {
       has_nonzero = true;
     }
   }
-  
+
   EXPECT_TRUE(has_nonzero) << "Output should contain non-zero values";
-  std::cout << "[Test] Inference completed successfully!" << std::endl;
+  std::cout << "[Test] CPU inference completed successfully!" << std::endl;
 }
 
-// VitisAI EP integration test - tests VitisAI EP with Level-1 pass
+// VitisAI EP integration test - tests with Level-1 ROCm pass
 TEST_F(OrtIntegrationTest, VitisAIProviderInference) {
   std::cout << "[Test] Testing VitisAI EP with Level-1 ROCm pass..." << std::endl;
   
-  // Check for conv model
-  std::string model_path = "conv_model.onnx";
-  if (!file_exists(model_path)) {
-    model_path = "../test/conv_model.onnx";
-  }
-  if (!file_exists(model_path)) {
-    model_path = "../../test/conv_model.onnx";
+  if (!ep_available_) {
+    GTEST_SKIP() << "VitisAI EP not available";
   }
   
-  if (!file_exists(model_path)) {
-    GTEST_SKIP() << "Conv model not found. Run: python test/gen_conv_model.py";
-  }
-  
-  std::cout << "[Test] Loading model: " << model_path << std::endl;
-  
-  // Check for VitisAI EP DLL
-  std::string ep_path = "onnxruntime_vitisai_ep.dll";
-  if (!file_exists(ep_path)) {
-    ep_path = "../bin/onnxruntime_vitisai_ep.dll";
-  }
-  if (!file_exists(ep_path)) {
-    std::cout << "[Test] VitisAI EP DLL not found, skipping" << std::endl;
-    GTEST_SKIP() << "VitisAI EP DLL not found";
-  }
-  
-  std::cout << "[Test] Found VitisAI EP: " << ep_path << std::endl;
-  
-  // Check for vaip_config.json - required for Level-1 pass
-  std::string config_path = "vaip_config.json";
-  std::vector<std::string> config_search_paths = {
-    "vaip_config.json",
-    "../etc/vaip_config.json",
-    "../../etc/vaip_config.json",
-    "../../../etc/vaip_config.json"
-  };
-  
-  bool has_config = false;
-  for (const auto& path : config_search_paths) {
-    if (file_exists(path)) {
-      config_path = path;
-      has_config = true;
-      break;
-    }
-  }
-  
-  if (has_config) {
-    std::cout << "[Test] Found vaip_config.json: " << config_path << std::endl;
-    std::cout << "[Test] Level-1 pass configuration:" << std::endl;
-    std::cout << "[Test]   - Pass: vaip-pass_level1_rocm" << std::endl;
-    std::cout << "[Test]   - Sub-passes: vaip-pass_level2_rocm_conv, vaip-pass_level2_rocm_gemm" << std::endl;
-  } else {
-    std::cout << "[Test] WARNING: vaip_config.json not found!" << std::endl;
-    std::cout << "[Test] Copy etc/vaip_config.json to bin folder for full EP integration" << std::endl;
-  }
-  
-  Ort::SessionOptions session_options;
-  session_options.SetIntraOpNumThreads(1);
-  session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-  
-  try {
-    std::cout << "[Test] Creating ORT session..." << std::endl;
-    
-    // Create session - VitisAI EP will be used if:
-    // 1. onnxruntime_vitisai_ep.dll is in PATH or current directory
-    // 2. vaip_config.json is found with Level-1 pass configured
-    // 3. VAIP_CONFIG environment variable points to config file
-    
+  ASSERT_TRUE(model_available_) << "Conv model not found at: " << CONV_TEST_MODEL_PATH;
+
+  // Model parameters (matches gen_conv_model.py)
+  const std::vector<int64_t> input_shape = {1, 3, 8, 8};
+  const size_t input_size = 1 * 3 * 8 * 8;
+
+  // Create input data (all 1.0)
+  std::vector<float> input_data(input_size, 1.0f);
+
+  // Run with CPU EP first to get reference output
+  std::vector<float> cpu_output;
+  {
+    Ort::SessionOptions session_options;
 #ifdef _WIN32
-    std::wstring wide_path(model_path.begin(), model_path.end());
-    Ort::Session session(*env_, wide_path.c_str(), session_options);
+    auto model_path_w = ToWideString(CONV_TEST_MODEL_PATH);
+    Ort::Session session(*env_, model_path_w.c_str(), session_options);
 #else
-    Ort::Session session(*env_, model_path.c_str(), session_options);
+    Ort::Session session(*env_, CONV_TEST_MODEL_PATH, session_options);
 #endif
-    
-    // Get input/output info
-    Ort::AllocatorWithDefaultOptions allocator;
-    auto input_name = session.GetInputNameAllocated(0, allocator);
-    auto output_name = session.GetOutputNameAllocated(0, allocator);
-    
-    std::cout << "[Test] Input: " << input_name.get() << std::endl;
-    std::cout << "[Test] Output: " << output_name.get() << std::endl;
-    
-    // Create input tensor [1, 3, 8, 8]
-    std::vector<int64_t> input_shape = {1, 3, 8, 8};
-    std::vector<float> input_data(1 * 3 * 8 * 8, 1.0f);
-    
+
     auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-    auto input_tensor = Ort::Value::CreateTensor<float>(
-        memory_info, input_data.data(), input_data.size(),
-        input_shape.data(), input_shape.size());
-    
-    // Run inference
-    const char* input_names[] = {input_name.get()};
-    const char* output_names[] = {output_name.get()};
-    
-    std::cout << "[Test] Running inference..." << std::endl;
-    std::cout << "[Test] (When VitisAI EP is active, Level-1 pass will:" << std::endl;
-    std::cout << "[Test]  1. Invoke Level-2 sub-passes for pattern matching" << std::endl;
-    std::cout << "[Test]  2. Group matched Conv/Gemm nodes" << std::endl;
-    std::cout << "[Test]  3. Create ROCm fused nodes with custom ops)" << std::endl;
-    
-    auto output_tensors = session.Run(
-        Ort::RunOptions{nullptr},
-        input_names, &input_tensor, 1,
-        output_names, 1);
-    
+    Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+        memory_info, input_data.data(), input_size, input_shape.data(), input_shape.size());
+
+    const char* input_names[] = {"X"};
+    const char* output_names[] = {"Y"};
+
+    auto output_tensors = session.Run(Ort::RunOptions{}, input_names, &input_tensor, 1, output_names, 1);
+
     ASSERT_EQ(output_tensors.size(), 1);
+    const float* output_data = output_tensors[0].GetTensorData<float>();
+    size_t output_size = output_tensors[0].GetTensorTypeAndShapeInfo().GetElementCount();
+    cpu_output.assign(output_data, output_data + output_size);
     
-    auto& output_tensor = output_tensors[0];
-    auto output_shape = output_tensor.GetTensorTypeAndShapeInfo().GetShape();
+    std::cout << "[Test] CPU reference output[0]: " << cpu_output[0] << std::endl;
+  }
+
+  // Try to run with VitisAI EP using ORT 2.0 API
+  {
+    // Get EP devices
+    std::vector<Ort::ConstEpDevice> devices = env_->GetEpDevices();
     
-    std::cout << "[Test] Output shape: [";
-    for (size_t i = 0; i < output_shape.size(); ++i) {
-      std::cout << output_shape[i];
-      if (i < output_shape.size() - 1) std::cout << ", ";
-    }
-    std::cout << "]" << std::endl;
-    
-    float* output_data = output_tensor.GetTensorMutableData<float>();
-    std::cout << "[Test] Output[0]: " << output_data[0] << std::endl;
-    
-    // Verify output
-    bool has_nonzero = false;
-    size_t total_elements = 1;
-    for (auto dim : output_shape) total_elements *= dim;
-    
-    for (size_t i = 0; i < total_elements && !has_nonzero; ++i) {
-      if (std::abs(output_data[i]) > 1e-6f) {
-        has_nonzero = true;
+    // Find VitisAI device
+    const OrtEpDevice* vitisai_device = nullptr;
+    for (const auto& device : devices) {
+      std::string ep_name = device.EpName();
+      std::cout << "[Test] Found EP device: " << ep_name << std::endl;
+      if (ep_name == "VitisAI" || ep_name == "VitisAIExecutionProvider") {
+        vitisai_device = static_cast<const OrtEpDevice*>(device);
+        break;
       }
     }
-    
-    EXPECT_TRUE(has_nonzero) << "Output should contain non-zero values";
-    std::cout << "[Test] Inference completed successfully!" << std::endl;
-    
-  } catch (const Ort::Exception& e) {
-    std::cout << "[Test] ORT Exception: " << e.what() << std::endl;
-    GTEST_SKIP() << "ORT Exception: " << e.what();
-  } catch (const std::exception& e) {
-    std::cout << "[Test] Exception: " << e.what() << std::endl;
-    GTEST_SKIP() << "Exception: " << e.what();
+
+    if (vitisai_device == nullptr) {
+      // ORT 2.0 V2 device API not implemented yet in VitisAI EP
+      // This is expected - skip with informative message
+      std::cout << "[Test] VitisAI EP V2 device API not yet implemented" << std::endl;
+      std::cout << "[Test] The EP was registered successfully, but doesn't expose V2 devices" << std::endl;
+      std::cout << "[Test] VitisAI EP configuration (embedded in DLL):" << std::endl;
+      std::cout << "[Test]   Level-1 pass: vaip-pass_level1_rocm" << std::endl;
+      std::cout << "[Test]   Level-2 sub-passes:" << std::endl;
+      std::cout << "[Test]     - vaip-pass_level2_rocm_conv" << std::endl;
+      std::cout << "[Test]     - vaip-pass_level2_rocm_gemm" << std::endl;
+      
+      GTEST_SKIP() << "VitisAI EP V2 device API not yet implemented (EP registered OK)";
+    }
+
+    Ort::SessionOptions session_options;
+
+    // Add VitisAI EP using V2 API
+    OrtStatus* status = Ort::GetApi().SessionOptionsAppendExecutionProvider_V2(
+        session_options, *env_, &vitisai_device, 1, nullptr, nullptr, 0);
+
+    if (status != nullptr) {
+      std::string error_msg = Ort::GetApi().GetErrorMessage(status);
+      Ort::GetApi().ReleaseStatus(status);
+      FAIL() << "Failed to add VitisAI EP: " << error_msg;
+    }
+
+    std::cout << "[Test] VitisAI EP configuration:" << std::endl;
+    std::cout << "[Test]   Level-1 pass: vaip-pass_level1_rocm (ROCm orchestration)" << std::endl;
+    std::cout << "[Test]   Level-2 sub-passes:" << std::endl;
+    std::cout << "[Test]     - vaip-pass_level2_rocm_conv (Conv pattern matching)" << std::endl;
+    std::cout << "[Test]     - vaip-pass_level2_rocm_gemm (Gemm pattern matching)" << std::endl;
+
+    std::cout << "[Test] Creating session with VitisAI EP (ROCm backend)..." << std::endl;
+
+    try {
+#ifdef _WIN32
+      auto model_path_w = ToWideString(CONV_TEST_MODEL_PATH);
+      Ort::Session session(*env_, model_path_w.c_str(), session_options);
+#else
+      Ort::Session session(*env_, CONV_TEST_MODEL_PATH, session_options);
+#endif
+      std::cout << "[Test] Session created successfully" << std::endl;
+
+      auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+      Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+          memory_info, input_data.data(), input_size, input_shape.data(), input_shape.size());
+
+      const char* input_names[] = {"X"};
+      const char* output_names[] = {"Y"};
+
+      std::cout << "[Test] Running VitisAI EP inference (MIOpen Conv backend)..." << std::endl;
+      auto output_tensors = session.Run(Ort::RunOptions{}, input_names, &input_tensor, 1, output_names, 1);
+      std::cout << "[Test] Inference completed" << std::endl;
+
+      ASSERT_EQ(output_tensors.size(), 1);
+      auto& output_tensor = output_tensors[0];
+      auto output_shape = output_tensor.GetTensorTypeAndShapeInfo().GetShape();
+      size_t output_size = output_tensor.GetTensorTypeAndShapeInfo().GetElementCount();
+      const float* output_data = output_tensor.GetTensorData<float>();
+
+      std::vector<float> gpu_output(output_data, output_data + output_size);
+
+      std::cout << "[Test] GPU output shape: [";
+      for (size_t i = 0; i < output_shape.size(); ++i) {
+        std::cout << output_shape[i];
+        if (i < output_shape.size() - 1) std::cout << ", ";
+      }
+      std::cout << "]" << std::endl;
+      std::cout << "[Test] GPU output[0]: " << gpu_output[0] << std::endl;
+      
+      // Compare outputs
+      ASSERT_EQ(cpu_output.size(), gpu_output.size()) << "Output size mismatch";
+
+      float max_diff = 0.0f;
+      for (size_t i = 0; i < cpu_output.size(); ++i) {
+        float diff = std::abs(cpu_output[i] - gpu_output[i]);
+        max_diff = std::max(max_diff, diff);
+        EXPECT_NEAR(cpu_output[i], gpu_output[i], 1e-4f)
+            << "Mismatch at index " << i << ": CPU=" << cpu_output[i] << ", GPU=" << gpu_output[i];
+      }
+
+      std::cout << "[Test] Max difference between CPU and GPU: " << max_diff << std::endl;
+      std::cout << "[Test] VitisAI EP inference verified successfully!" << std::endl;
+      
+    } catch (const Ort::Exception& ex) {
+      std::string error_msg = ex.what();
+      // Check if the error is due to missing backend
+      if (error_msg.find("No engine configurations available") != std::string::npos ||
+          error_msg.find("execution_plans failed") != std::string::npos) {
+        GTEST_SKIP() << "MIOpen backend not available. This is expected if ROCm is not "
+                     << "fully configured. Error: " << error_msg;
+      }
+      // Re-throw other exceptions
+      throw;
+    }
   }
 }
 
