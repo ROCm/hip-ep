@@ -1,0 +1,53 @@
+# Build outputs
+build/
+out/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.dll
+*.lib
+*.exe
+*.pdb
+*.obj
+*.o
+*.a
+
+# IDE
+.vs/
+.vscode/
+*.suo
+*.user
+*.sln
+*.vcxproj*
+.idea/
+
+# Generated files
+CMakePresets.json
+*_pb2.py
+*.pb.cc
+*.pb.h
+compile_commands.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+*.egg
+
+# Test outputs
+*.onnx
+*.dat
+test_output/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Logs
+*.log
