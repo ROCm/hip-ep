@@ -22,9 +22,12 @@ endif()
 
 message(STATUS "Building ROCm tests")
 
+# Find GTest for the tests
+find_package(GTest REQUIRED)
+
 # Conv test (MIOpen)
 add_executable(rocm_conv_test test_conv.cpp)
-target_link_libraries(rocm_conv_test PRIVATE MIOpen)
+target_link_libraries(rocm_conv_test PRIVATE MIOpen GTest::gtest GTest::gtest_main)
 if(WIN32)
   target_include_directories(rocm_conv_test SYSTEM PRIVATE "${THEROCK_DIST}/include")
   target_compile_definitions(rocm_conv_test PRIVATE "__HIP_PLATFORM_AMD__=1")
@@ -36,7 +39,7 @@ set_target_properties(rocm_conv_test PROPERTIES FOLDER "rocm-tests")
 
 # Gemm test (hipBLASLt)
 add_executable(rocm_gemm_test test_gemm.cpp)
-target_link_libraries(rocm_gemm_test PRIVATE hipblaslt::hipblaslt)
+target_link_libraries(rocm_gemm_test PRIVATE roc::hipblaslt GTest::gtest GTest::gtest_main)
 if(WIN32)
   target_include_directories(rocm_gemm_test SYSTEM PRIVATE "${THEROCK_DIST}/include")
   target_compile_definitions(rocm_gemm_test PRIVATE "__HIP_PLATFORM_AMD__=1")

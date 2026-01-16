@@ -4,7 +4,7 @@
 #include <glog/logging.h>
 #include "morphizen/vaip.hpp"
 #include "rocm.pb.h"
-#include "gemm_json.inc"
+#include "gemm_pattern_json.hpp"
 
 using namespace vaip_core;
 

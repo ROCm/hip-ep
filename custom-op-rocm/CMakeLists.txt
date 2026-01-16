@@ -50,7 +50,7 @@ target_compile_definitions(${LIB_NAME} PRIVATE "VAIP_CUSTOM_OP=1")
 
 # Link ROCm libraries
 target_link_libraries(${LIB_NAME} PRIVATE MIOpen)
-target_link_libraries(${LIB_NAME} PRIVATE hipblaslt::hipblaslt)
+target_link_libraries(${LIB_NAME} PRIVATE roc::hipblaslt)
 
 if(WIN32)
   # On Windows with MSVC, add HIP include directories manually
