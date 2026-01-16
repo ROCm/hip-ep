@@ -81,8 +81,8 @@ run_test_with_therock.bat
 |------------|-----------|--------|--------|---------|----------|
 | RocmConvTest | 1 | 1 | 0 | 0 | 3513 ms |
 | RocmGemmTest | 1 | 1 | 0 | 0 | 234 ms |
-| OrtIntegrationTest | 2 | 2 | 0 | 0 | 98 ms |
-| **Total** | **5** | **5** | **0** | **0** | **3845 ms** |
+| OrtIntegrationTest | 2 | 2 | 0 | 0 | 43 ms |
+| **Total** | **5** | **5** | **0** | **0** | **3790 ms** |
 
 ## Hardware Configuration
 
@@ -222,20 +222,20 @@ To see MY_LOG output, set these environment variables:
 [ RUN      ] OrtIntegrationTest.LoadVitisAIProvider
 
 === Environment Variables ===
-MORPHIZEN_DEBUG_ROCM: (not set)
-GLOG_logtostderr: (not set)
+MORPHIZEN_DEBUG_ROCM: 2
+GLOG_logtostderr: 1
 
 [Test] Loading VitisAI Execution Provider...
 [Test] Found VitisAI EP at: onnxruntime_vitisai_ep.dll
-[       OK ] OrtIntegrationTest.LoadVitisAIProvider (86 ms)
-[----------] 1 test from OrtIntegrationTest (86 ms total)
-[==========] 1 test from 1 test suite ran. (86 ms total)
+[       OK ] OrtIntegrationTest.LoadVitisAIProvider (38 ms)
+[----------] 1 test from OrtIntegrationTest (38 ms total)
+[==========] 1 test from 1 test suite ran. (38 ms total)
 [  PASSED  ] 1 test.
 ```
 
 **Results:**
 - Found VitisAI EP at: `onnxruntime_vitisai_ep.dll`
-- **Duration:** 86 ms
+- **Duration:** 38 ms
 
 ---
 
@@ -267,8 +267,8 @@ ORT Integration Test for VitisAI ROCm EP
 [ RUN      ] OrtIntegrationTest.CPUProviderInference
 
 === Environment Variables ===
-MORPHIZEN_DEBUG_ROCM: (not set)
-GLOG_logtostderr: (not set)
+MORPHIZEN_DEBUG_ROCM: 2
+GLOG_logtostderr: 1
 
 [Test] Testing CPU provider inference with conv model...
 [Test] Loading model: conv_model.onnx
@@ -278,9 +278,9 @@ GLOG_logtostderr: (not set)
 [Test] Output shape: [1, 16, 8, 8]
 [Test] Output[0]: -0.275499
 [Test] Inference completed successfully!
-[       OK ] OrtIntegrationTest.CPUProviderInference (11 ms)
-[----------] 1 test from OrtIntegrationTest (11 ms total)
-[==========] 1 test from 1 test suite ran. (11 ms total)
+[       OK ] OrtIntegrationTest.CPUProviderInference (4 ms)
+[----------] 1 test from OrtIntegrationTest (4 ms total)
+[==========] 1 test from 1 test suite ran. (4 ms total)
 [  PASSED  ] 1 test.
 ```
 
@@ -288,7 +288,7 @@ GLOG_logtostderr: (not set)
 - Input: X
 - Output: Y [1, 16, 8, 8]
 - Output[0]: -0.275499 (varies due to random weights)
-- **Duration:** 11 ms
+- **Duration:** 4 ms
 
 ---
 
