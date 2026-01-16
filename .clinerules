@@ -1,0 +1,65 @@
+# Cline Rules for morphizen-rocm
+
+## Project Overview
+This project combines MIOpen (convolution) and hipBLASLt (GEMM) into a unified ROCm Execution Provider for ONNX Runtime.
+
+## Shell Environment
+- PowerShell 5.1 (Desktop edition) is used
+- Do NOT use `&&` for command chaining (not supported in PowerShell 5.1)
+- Use `;` for sequential commands
+
+## Documentation Naming Convention
+- All documents in `doc/` directory must have a numeric prefix
+- Format: `NN_DOCUMENT_NAME.md` where NN is a two-digit number
+- Example: `01_DESIGN.md`, `02_BUILD.md`, `03_API_REFERENCE.md`
+- Numbers indicate reading order and logical progression
+- Keep documentation up to date when making changes to the codebase
+
+## Build Configuration
+Note: Repositories are typically cloned in `../../source`, so paths are relative to that structure.
+- Binary/build directory is located at `../../build/<project-name>` relative to the source directory
+- Installation directory is `../../local`
+
+## TheRock ROCm SDK
+- TheRock (Windows ROCm SDK) is installed at `C:\Develop\m\dist\therock`
+- Set `THEROCK_DIST` environment variable to point to the installation
+- Use Ninja generator for CMake builds (not Visual Studio generator)
+- Both MIOpen and hipBLASLt libraries are provided by TheRock
+
+## Architecture
+This project uses a Level-1/Level-2 pass architecture:
+- **Level-1 Pass** (`vaip-pass_level1_rocm`): Orchestrates sub-passes, checks GPU availability
+- **Level-2 Passes**: Pattern matching for specific operations
+  - `vaip-pass_level2_rocm_conv`: Conv pattern matching (MIOpen)
+  - `vaip-pass_level2_rocm_gemm`: Gemm pattern matching (hipBLASLt)
+- **Custom Op** (`custom-op-rocm`): Runtime execution with shared HIP stream
+
+## Shared HIP Context
+All custom ops share a single HIP stream for implicit operation fusion:
+- MIOpen operations use `miopenSetStream(handle, shared_stream)`
+- hipBLASLt operations pass stream to `hipblasLtMatmul(..., shared_stream)`
+- No explicit synchronization needed between operations on the same stream
+
+## Build Commands
+Use `build.bat` to build the project, which:
+1. Sets up TheRock environment
+2. Sets up MSVC environment (Visual Studio 2022)
+3. Sets GSL include path for ORT VitisAI headers
+4. Configures with CMake using Ninja generator
+5. Builds the project
+
+Alternative manual build:
+```cmd
+REM Set up environment
+set THEROCK_DIST=C:\Develop\m\dist\therock
+call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+
+REM Configure
+cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -B C:/Develop/m/build/morphizen-rocm -S . -DCMAKE_INSTALL_PREFIX=C:/Develop/m/local -DCMAKE_PREFIX_PATH=C:/Develop/m/local -DTHEROCK_DIST=%THEROCK_DIST%
+
+REM Build
+cmake --build C:/Develop/m/build/morphizen-rocm
+```
+
+## Repository
+- GitHub Enterprise: https://gitenterprise.xilinx.com/VitisAI/morphizen-rocm
