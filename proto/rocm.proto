@@ -146,3 +146,13 @@ message RocmParamProto {
   string ep_context_file_name = 4;
   int64 ep_context_file_size = 5;
 }
+
+// Pass configuration for ROCm Level-1 orchestrator
+// This defines sub-passes that the Level-1 pass will run
+message PassRocmConfigProto {
+  // List of sub-pass names to run (e.g., "vaip-pass_level2_rocm_conv", "vaip-pass_level2_rocm_gemm")
+  repeated string sub_pass_names = 1;
+  
+  // Whether to enable debug logging
+  bool debug = 2;
+}

@@ -106,13 +106,13 @@ struct Level2RocmConv {
           );
 
           if (meta_def) {
-            meta_def->set_generic_param(rocm_param.SerializeAsString());
+            self->attach_meta_def_param(*meta_def, rocm_param.SerializeAsString().c_str());
             self->fuse(*graph, std::move(*meta_def));
             MY_LOG(1) << "[ROCm Conv L2] Fused Conv pattern successfully";
             return true;
           }
           
-          MY_LOG(1) << "[ROCm Conv L2] Failed to fuse: " << error;
+          MY_LOG(1) << "[ROCm Conv L2] Failed to fuse: " << error.comments;
           return false;
         });
   }
