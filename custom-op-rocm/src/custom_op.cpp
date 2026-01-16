@@ -4,6 +4,7 @@
 #include "custom_op.hpp"
 #include <glog/logging.h>
 #include <stdexcept>
+#include "google/protobuf/util/json_util.h"
 #include "morphizen/env_config.hpp"
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_ROCM, "0")
@@ -17,14 +18,16 @@ RocmCustomOp::RocmCustomOp(
     onnxruntime::Model* model)
     : CustomOpImp(context, meta_def, model) {
   
-  // Parse the generic_param to get RocmParamProto
-  // generic_param is a Map<string, string>, look for "rocm_param" key
-  const auto& params = meta_def->generic_param();
-  auto it = params.find("rocm_param");
-  if (it != params.end()) {
-    if (!rocm_proto_.ParseFromString(it->second)) {
-      throw std::runtime_error("Failed to parse RocmParamProto");
-    }
+  // Get JSON params attached by the pass
+  auto rocm_json_str = get_meta_def_param();
+  MY_LOG(1) << "[ROCm CustomOp] Received JSON params: " << rocm_json_str;
+  
+  // Parse JSON to RocmParamProto
+  auto status = google::protobuf::util::JsonStringToMessage(
+      rocm_json_str, &rocm_proto_);
+  if (!status.ok()) {
+    MY_LOG(1) << "[ROCm CustomOp] Failed to parse JSON params: " << status.ToString();
+    throw std::runtime_error("Failed to parse RocmParamProto: " + status.ToString());
   }
 
   MY_LOG(1) << "[ROCm CustomOp] Created for op_type: " << rocm_proto_.op_type();

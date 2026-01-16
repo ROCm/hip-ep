@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <glog/logging.h>
+#include "google/protobuf/util/json_util.h"
 #include "morphizen/env_config.hpp"
 #include "morphizen/vaip.hpp"
 #include "rocm.pb.h"
@@ -66,7 +67,14 @@ struct Level2RocmGemm {
               *graph, "rocm_gemm", input_names, output_names, {}, "ROCm_EP");
 
           if (meta_def) {
-            self->attach_meta_def_param(*meta_def, rocm_param.SerializeAsString().c_str());
+            std::string rocm_param_json;
+            auto status = google::protobuf::util::MessageToJsonString(
+                rocm_param, &rocm_param_json);
+            if (!status.ok()) {
+              MY_LOG(1) << "[ROCm Gemm L2] Failed to serialize params: " << status.ToString();
+              return false;
+            }
+            self->attach_meta_def_param(*meta_def, rocm_param_json.c_str());
             self->fuse(*graph, std::move(*meta_def));
             MY_LOG(1) << "[ROCm Gemm L2] Fused Gemm pattern successfully";
             return true;

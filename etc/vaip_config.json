@@ -6,11 +6,11 @@
     },
     {
       "name": "fuse_ROCm",
-      "plugin": "vaip-pass_level1_rocm",
+      "plugin": "morphizen-level1-pass-rocm",
       "passGenericParam": {
         "subPassNames": [
-          "vaip-pass_level2_rocm_conv",
-          "vaip-pass_level2_rocm_gemm"
+          "morphizen-level2-pass-rocm-conv",
+          "morphizen-level2-pass-rocm-gemm"
         ]
       }
     }
@@ -23,6 +23,13 @@
         "init",
         "fuse_ROCm"
       ]
+    }
+  ],
+  "execution_providers": [
+    {
+      "name": "ROCm_EP",
+      "plugin": "morphizen-custom-op-rocm",
+      "disabled": false
     }
   ]
 }

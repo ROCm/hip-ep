@@ -429,10 +429,16 @@ struct Level1Rocm {
                          {}, "ROCm_EP");
 
       if (meta_def) {
-        // Serialize the merged params and attach to meta_def
-        std::string merged_params_str;
-        merged_params.SerializeToString(&merged_params_str);
-        self_.attach_meta_def_param(*meta_def, merged_params_str.c_str());
+      // Serialize the merged params to JSON and attach to meta_def
+      std::string merged_params_json;
+      auto status = google::protobuf::util::MessageToJsonString(
+          merged_params, &merged_params_json);
+      if (!status.ok()) {
+        MY_LOG(1) << "[HIP EP Level-1] Failed to serialize merged params: "
+                  << status.ToString();
+        continue;
+      }
+      self_.attach_meta_def_param(*meta_def, merged_params_json.c_str());
 
         // Create the fused node
         self_.fuse(graph, std::move(*meta_def));
