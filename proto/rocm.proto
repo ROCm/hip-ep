@@ -1,0 +1,148 @@
+// Copyright (C) 2023 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+syntax = "proto3";
+package rocm;
+
+// Convolution parameters (for MIOpen)
+// Computes: y = conv(x, w) + bias (optional)
+message ConvParamProto {
+  // Input tensor dimensions [N, C, H, W] for 2D convolution
+  int64 batch_size = 1;     // N - batch size
+  int64 in_channels = 2;    // C - input channels
+  int64 in_height = 3;      // H - input height
+  int64 in_width = 4;       // W - input width
+  
+  // Filter/Weight tensor dimensions [K, C, R, S]
+  int64 out_channels = 5;   // K - output channels (number of filters)
+  int64 filter_height = 6;  // R - filter height
+  int64 filter_width = 7;   // S - filter width
+  
+  // Output tensor dimensions [N, K, P, Q]
+  int64 out_height = 8;     // P - output height
+  int64 out_width = 9;      // Q - output width
+  
+  // Padding
+  int32 pad_h = 10;         // Padding height
+  int32 pad_w = 11;         // Padding width
+  
+  // Stride
+  int32 stride_h = 12;      // Stride height
+  int32 stride_w = 13;      // Stride width
+  
+  // Dilation
+  int32 dilation_h = 14;    // Dilation height
+  int32 dilation_w = 15;    // Dilation width
+  
+  // Group convolution
+  int32 group_count = 16;   // Group count (1 for standard conv, >1 for grouped/depthwise)
+  
+  // Convolution mode: "convolution", "transpose", "group", "depthwise"
+  string conv_mode = 17;
+  
+  // Data types (as string: "fp16", "fp32", "bf16", "int8", etc.)
+  string data_type_x = 18;  // Input data type
+  string data_type_w = 19;  // Weight data type  
+  string data_type_y = 20;  // Output data type
+  
+  // Scalar values (stored as floats, converted as needed)
+  float alpha = 21;         // Scaling factor for convolution result
+  float beta = 22;          // Scaling factor for output accumulation
+  
+  // Workspace size preference in bytes
+  int64 max_workspace_size = 23;
+  
+  // Input/output names for reference
+  repeated string input_names = 24;
+  repeated string output_names = 25;
+  
+  // EP context file info
+  string ep_context_file_name = 26;
+  int64 ep_context_file_size = 27;
+  
+  // Algorithm selection
+  // -1 for auto selection, 0-4 for specific algorithms:
+  // 0: GEMM, 1: Direct, 2: FFT, 3: Winograd, 5: ImplicitGEMM
+  int32 algorithm_index = 28;
+  
+  // Whether to perform exhaustive search for best algorithm
+  bool exhaustive_search = 29;
+  
+  // Whether this convolution has bias
+  bool has_bias = 30;
+  
+  // Spatial dimensions (2 for 2D conv, 3 for 3D conv)
+  int32 spatial_dim = 31;
+}
+
+// GEMM parameters (for hipBLASLt)
+// Computes: D = alpha * op(A) * op(B) + beta * C
+message GemmParamProto {
+  // Matrix dimensions
+  int64 m = 1;  // Rows of A, C, D
+  int64 n = 2;  // Cols of B, C, D
+  int64 k = 3;  // Cols of A, Rows of B
+  
+  // Batch count for batched GEMM
+  int64 batch_count = 4;
+  
+  // Leading dimensions (optional, defaults to M, K, M, M respectively)
+  int64 lda = 5;
+  int64 ldb = 6;
+  int64 ldc = 7;
+  int64 ldd = 8;
+  
+  // Strides for batched operations
+  int64 stride_a = 9;
+  int64 stride_b = 10;
+  int64 stride_c = 11;
+  int64 stride_d = 12;
+  
+  // Transpose operations (0 = No transpose, 1 = Transpose, 2 = Conjugate transpose)
+  int32 trans_a = 13;
+  int32 trans_b = 14;
+  
+  // Data types (as string: "fp16", "fp32", "bf16", "int8", etc.)
+  string data_type_a = 15;
+  string data_type_b = 16;
+  string data_type_c = 17;
+  string data_type_d = 18;
+  string compute_type = 19;  // Type used for computation accumulation
+  
+  // Scalar values (stored as floats, converted as needed)
+  float alpha = 20;
+  float beta = 21;
+  
+  // Epilogue type (default, bias, relu, gelu, etc.)
+  string epilogue = 22;
+  
+  // Workspace size preference in bytes
+  int64 max_workspace_size = 23;
+  
+  // Input/output names for reference
+  repeated string input_names = 24;
+  repeated string output_names = 25;
+  
+  // EP context file info
+  string ep_context_file_name = 26;
+  int64 ep_context_file_size = 27;
+  
+  // Algorithm index (-1 for heuristic selection)
+  int32 algorithm_index = 28;
+  
+  // Whether this GEMM has bias (C input)
+  bool has_bias = 29;
+}
+
+// Custom op parameters (stored in MetaDef)
+message RocmParamProto {
+  // Operation type: "conv" or "gemm"
+  string op_type = 1;
+  
+  // Operation-specific parameters (one of these will be populated)
+  ConvParamProto conv_params = 2;
+  GemmParamProto gemm_params = 3;
+  
+  // General metadata
+  string ep_context_file_name = 4;
+  int64 ep_context_file_size = 5;
+}
