@@ -51,3 +51,42 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Cline/AI assistant storage
+.cline_storage/
+.cline/
+
+# Additional IDE/editor files
+*.sublime-project
+*.sublime-workspace
+.project
+.cproject
+.settings/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.cache
+
+# Dependency directories (if any)
+node_modules/
+vendor/
+
+# Coverage reports
+coverage/
+*.gcov
+*.gcda
+*.gcno
+
+# Static analysis
+.clang-tidy
+.clang-format
+.cache/
+
+# Security - don't commit credentials
+*.pem
+*.key
+*.crt
+.env
+.env.*
