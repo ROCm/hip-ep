@@ -4,6 +4,10 @@
 #include "custom_op.hpp"
 #include <glog/logging.h>
 #include <stdexcept>
+#include "morphizen/env_config.hpp"
+
+DEF_ENV_PARAM(MORPHIZEN_DEBUG_ROCM, "0")
+#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_ROCM) >= n)
 
 namespace rocm_ep {
 
@@ -23,7 +27,7 @@ RocmCustomOp::RocmCustomOp(
     }
   }
 
-  LOG(INFO) << "[ROCm CustomOp] Created for op_type: " << rocm_proto_.op_type();
+  MY_LOG(1) << "[ROCm CustomOp] Created for op_type: " << rocm_proto_.op_type();
 }
 
 RocmCustomOp::~RocmCustomOp() {
@@ -58,7 +62,7 @@ void RocmCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const {
 }
 
 void RocmCustomOp::ExecuteConv(const OrtApi* api, OrtKernelContext* context) const {
-  LOG(INFO) << "[ROCm CustomOp] ExecuteConv (MIOpen)";
+  MY_LOG(1) << "[ROCm CustomOp] ExecuteConv (MIOpen)";
   
   auto& hip_ctx = HipContext::instance();
   auto miopen_handle = hip_ctx.miopen_handle();
@@ -103,11 +107,11 @@ void RocmCustomOp::ExecuteConv(const OrtApi* api, OrtKernelContext* context) con
   // 6. Synchronize stream
 
   hipStreamSynchronize(stream);
-  LOG(INFO) << "[ROCm CustomOp] Conv completed";
+  MY_LOG(2) << "[ROCm CustomOp] Conv completed";
 }
 
 void RocmCustomOp::ExecuteGemm(const OrtApi* api, OrtKernelContext* context) const {
-  LOG(INFO) << "[ROCm CustomOp] ExecuteGemm (hipBLASLt)";
+  MY_LOG(1) << "[ROCm CustomOp] ExecuteGemm (hipBLASLt)";
 
   auto& hip_ctx = HipContext::instance();
   auto blaslt_handle = hip_ctx.hipblaslt_handle();
@@ -147,7 +151,7 @@ void RocmCustomOp::ExecuteGemm(const OrtApi* api, OrtKernelContext* context) con
   // 6. Synchronize stream
 
   hipStreamSynchronize(stream);
-  LOG(INFO) << "[ROCm CustomOp] Gemm completed";
+  MY_LOG(2) << "[ROCm CustomOp] Gemm completed";
 }
 
 } // namespace rocm_ep
