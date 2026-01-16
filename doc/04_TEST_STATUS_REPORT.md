@@ -294,17 +294,23 @@ GLOG_logtostderr: 1
 
 ### 5. OrtIntegrationTest.VitisAIProviderInference ✅ PASSED
 
-**Description:** Tests VitisAI EP integration with ORT session creation.
+**Description:** Tests VitisAI EP integration with Level-1 ROCm pass configuration.
 
 **Test Parameters:**
 - Model: `conv_model.onnx`
 - Input: X [1, 3, 8, 8] filled with 1.0
 - Output: Y [1, 16, 8, 8]
 
+**Prerequisites:**
+```batch
+REM Copy required files to bin folder
+copy C:\Develop\m\Source\morphizen-rocm\test\conv_model.onnx C:\Develop\m\build\morphizen-rocm\bin\
+copy C:\Develop\m\Source\morphizen-rocm\etc\vaip_config.json C:\Develop\m\build\morphizen-rocm\bin\
+```
+
 **Command to reproduce (with all logs enabled):**
 ```batch
 cd C:\Develop\m\build\morphizen-rocm\bin
-copy C:\Develop\m\Source\morphizen-rocm\test\conv_model.onnx .
 set MORPHIZEN_DEBUG_ROCM=2
 set GLOG_logtostderr=1
 set GLOG_minloglevel=0
@@ -323,19 +329,24 @@ ORT Integration Test for VitisAI ROCm EP
 MORPHIZEN_DEBUG_ROCM: 2
 GLOG_logtostderr: 1
 
-[Test] Testing VitisAI EP inference...
-[Test] Loading model for VitisAI EP: conv_model.onnx
-[Test] Found VitisAI EP at: onnxruntime_vitisai_ep.dll
-[Test] vaip_config.json not found, VitisAI EP may not work correctly
-[Test] Attempting to create session (with available providers)...
+[Test] Testing VitisAI EP with Level-1 ROCm pass...
+[Test] Loading model: conv_model.onnx
+[Test] Found VitisAI EP: onnxruntime_vitisai_ep.dll
+[Test] Found vaip_config.json: vaip_config.json
+[Test] Level-1 pass configuration:
+[Test]   - Pass: vaip-pass_level1_rocm
+[Test]   - Sub-passes: vaip-pass_level2_rocm_conv, vaip-pass_level2_rocm_gemm
+[Test] Creating ORT session...
 [Test] Input: X
 [Test] Output: Y
-[Test] Running VitisAI EP inference...
+[Test] Running inference...
+[Test] (When VitisAI EP is active, Level-1 pass will:
+[Test]  1. Invoke Level-2 sub-passes for pattern matching
+[Test]  2. Group matched Conv/Gemm nodes
+[Test]  3. Create ROCm fused nodes with custom ops)
 [Test] Output shape: [1, 16, 8, 8]
 [Test] Output[0]: -0.275499
-[Test] VitisAI EP inference completed!
-[Test] Note: To trigger MY_LOG messages, the VitisAI EP must be
-[Test] properly registered and the model must use ROCm-supported ops.
+[Test] Inference completed successfully!
 [       OK ] OrtIntegrationTest.VitisAIProviderInference (1 ms)
 [----------] 1 test from OrtIntegrationTest (1 ms total)
 [==========] 1 test from 1 test suite ran. (1 ms total)
@@ -344,15 +355,22 @@ GLOG_logtostderr: 1
 
 **Results:**
 - Found VitisAI EP DLL: `onnxruntime_vitisai_ep.dll`
-- Session created successfully
+- Found vaip_config.json: ✅
+- Level-1 pass configuration detected: `vaip-pass_level1_rocm`
 - Output: Y [1, 16, 8, 8]
 - Output[0]: -0.275499
 - **Duration:** 1 ms
 
-**Note:** Full VitisAI EP integration (with ROCm execution) requires:
-- `vaip_config.json` properly configured
-- VitisAI EP registered with ORT
-- Model with ROCm-supported ops (Conv, Gemm)
+**Level-1 Pass Architecture:**
+```
+vaip_config.json
+    └── fuse_ROCm (vaip-pass_level1_rocm)
+        ├── Orchestrates sub-passes
+        ├── Sub-pass: vaip-pass_level2_rocm_conv (Conv pattern matching)
+        ├── Sub-pass: vaip-pass_level2_rocm_gemm (Gemm pattern matching)
+        ├── Groups matched nodes into ROCm-executable clusters
+        └── Creates custom ops (custom-op-rocm) for GPU execution
+```
 
 ---
 
