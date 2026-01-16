@@ -2,15 +2,21 @@
 # ** Copyright (C) 2023 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
-vai_add_library(
-  NAME
-  pass_level1_rocm
-  SRCS
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/pass_main.cpp
-  DEPS
-  rocm_proto
-)
+find_package(glog CONFIG REQUIRED)
 
-# Find HIP for GPU device queries
-find_package(hip REQUIRED)
-target_link_libraries(pass_level1_rocm PRIVATE hip::device)
+set(LIB_NAME morphizen-level1-pass-rocm)
+add_library(${LIB_NAME} STATIC src/pass_main.cpp)
+target_link_libraries(${LIB_NAME} PUBLIC
+	rocm_proto
+	morphizen::morphizen-core-static
+	glog::glog
+)
+target_include_directories(${LIB_NAME} PRIVATE
+	include
+	${CMAKE_CURRENT_BINARY_DIR}
+)
+target_compile_definitions(${LIB_NAME} PRIVATE -DOUTPUT_NAME="morphizen-level1-pass-rocm")
+target_link_libraries(${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${LIB_NAME}>")
+set_target_properties(${LIB_NAME} PROPERTIES
+	FOLDER "rocm"
+)
