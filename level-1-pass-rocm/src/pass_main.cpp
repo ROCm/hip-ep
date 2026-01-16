@@ -36,13 +36,21 @@ struct Level1Rocm {
   Level1Rocm(IPass& self) : self_{self} {}
 
   // Check if a node is a ROCm fused node (created by Level-2 passes)
+  // Fused nodes have:
+  // - Domain: "com.xilinx"
+  // - Op Type: "super_layer" (hardcoded by morphizen framework)
+  // - Output name contains the unique_id set during fusion (e.g., "rocm_conv_...", "rocm_gemm_...")
   bool is_rocm_fused_node(const Node& node) {
-    // Fused nodes use the "com.xilinx" domain with EP name in the op type
     auto domain = node_op_domain(node);
-    auto op_type = node_op_type(node);
-    return domain == "com.xilinx" &&
-           (op_type.find("rocm_conv") != std::string::npos ||
-            op_type.find("rocm_gemm") != std::string::npos);
+    if (domain != "com.xilinx") {
+      return false;
+    }
+    
+    // Check the output name which contains the unique_id
+    // Level-2 passes set unique_id as "rocm_conv_<output_name>" or "rocm_gemm_<output_name>"
+    auto output_name = node_get_first_output_name(node);
+    return output_name.find("rocm_conv") != std::string::npos ||
+           output_name.find("rocm_gemm") != std::string::npos;
   }
 
   // Get all ROCm fused nodes from the cloned graph in topological order
@@ -217,19 +225,20 @@ struct Level1Rocm {
     
     for (auto* node : group) {
       rocm::RocmParamProto param;
-      auto op_type = node_op_type(*node);
+      // Use output name which contains the unique_id (rocm_conv_... or rocm_gemm_...)
+      auto output_name = node_get_first_output_name(*node);
       
-      // Set op_type based on the fused node name
-      if (op_type.find("conv") != std::string::npos) {
+      // Set op_type based on the output name (contains unique_id from Level-2 pass)
+      if (output_name.find("rocm_conv") != std::string::npos) {
         param.set_op_type("conv");
-      } else if (op_type.find("gemm") != std::string::npos) {
+      } else if (output_name.find("rocm_gemm") != std::string::npos) {
         param.set_op_type("gemm");
       } else {
-        param.set_op_type(op_type);
+        param.set_op_type("unknown");
       }
       
       *merged.add_rocm_params() = param;
-      MY_LOG(2) << "[ROCm EP Level-1] Added node to merged group: " << op_type;
+      MY_LOG(2) << "[ROCm EP Level-1] Added node to merged group: " << output_name;
     }
 
     return merged;

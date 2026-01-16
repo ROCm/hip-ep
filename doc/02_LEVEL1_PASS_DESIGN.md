@@ -80,38 +80,50 @@ IPass::run_passes({sub_pass}, cloned_graph);
 
 ### Step 3: Finding ROCm Fused Nodes
 
-After sub-passes complete, the cloned graph contains fused nodes created by Level-2 passes. These nodes are identified by:
+After sub-passes complete, the cloned graph contains fused nodes created by Level-2 passes. These nodes are identified by the presence of a `rocm_meta_def` node attribute.
 
-- **Domain**: `com.xilinx`
-- **Op Type**: Contains `rocm_conv` or `rocm_gemm`
+#### Node Attribute Structure
+
+```
+Fused Node
+├── domain: "com.xilinx"
+├── op_type: "super_layer"  (hardcoded by morphizen framework)
+└── attributes:
+    └── rocm_meta_def: <serialized MetaDefProto>
+          ├── id, inputs[], outputs[], nodes[]
+          └── generic_param: <serialized RocmParamProto>
+                ├── op_type: "conv" | "gemm"
+                └── conv_params | gemm_params
+```
+
+#### Detection Logic
 
 ```cpp
 bool is_rocm_fused_node(const Node& node) {
-  auto domain = node_op_domain(node);
-  auto op_type = node_op_type(node);
-  return domain == "com.xilinx" &&
-         (op_type.find("rocm_conv") != std::string::npos ||
-          op_type.find("rocm_gemm") != std::string::npos);
+  // ROCm fused nodes have the rocm_meta_def attribute
+  // set by Level-2 passes
+  return node_get_attr(node, "rocm_meta_def") != nullptr;
 }
 ```
 
+**Note**: Level-2 passes set the `rocm_meta_def` attribute on each fused node they create. This attribute contains a serialized `MetaDefProto` which includes the operation parameters via `generic_param`.
+
 ### Step 4: Grouping Consecutive Nodes
 
-Nodes are grouped based on connectivity using a producer map:
-
-1. **Build Producer Map**: Map output tensor names to producing nodes
-2. **Find Connected Nodes**: Two nodes are connected if one produces an input for the other
-3. **Form Groups**: Use union-find approach to merge connected nodes
+ROCm fused nodes are grouped into **connected components** - nodes that can share a single HIP stream for implicit fusion. Two nodes are connected if one directly consumes the output of the other (no intermediate non-ROCm node between them).
 
 ```
-Graph: A → B → C → D → E
-       ↓       ↓
-       F       G
+Example: X → [Conv1] → T1 → [Conv2] → T2 → [ReLU_CPU] → T3 → [Gemm] → Y
 
-If A, B, D are ROCm nodes:
-- A and B are connected → Group 1: {A, B}
-- D is not connected to A or B → Group 2: {D}
+ROCm nodes: Conv1, Conv2, Gemm
+Non-ROCm: ReLU_CPU
+
+Groups formed:
+- Group 1: {Conv1, Conv2} - directly connected
+- Group 2: {Gemm}         - separated by ReLU_CPU
 ```
+
+For detailed algorithm description, see [03_GROUPING_ALGORITHM.md](03_GROUPING_ALGORITHM.md).
 
 ### Step 5: Collecting Inputs/Outputs
 
