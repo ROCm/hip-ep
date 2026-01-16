@@ -37,7 +37,7 @@ target_compile_options(${LIB_NAME} PRIVATE ${MORPHIZEN_COMPILER_OPTIONS})
 target_link_libraries(
   ${LIB_NAME}
   PRIVATE morphizen-utils
-  PUBLIC ZLIB::ZLIB glog::glog)
+  PUBLIC ZLIB::ZLIB glog::glog Microsoft.GSL::GSL)
 target_include_directories(${LIB_NAME}
                            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 if(${morphizen_ENABLE_UNIT_TEST})

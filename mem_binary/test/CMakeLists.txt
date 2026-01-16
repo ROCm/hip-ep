@@ -33,7 +33,7 @@ target_include_directories(${TEST_EXE_NAME}
                            PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../include")
 
 target_link_libraries(${TEST_EXE_NAME} PRIVATE GTest::gtest morphizen-utils
-                                               ZLIB::ZLIB glog::glog)
+                                               ZLIB::ZLIB glog::glog Microsoft.GSL::GSL)
 
 include(CTest)
 enable_testing()
