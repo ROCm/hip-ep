@@ -9,6 +9,7 @@
 #include <memory>
 #include <vector>
 #include <mutex>
+#include <glog/logging.h>
 
 #include "morphizen/vaip.hpp"
 #include "rocm.pb.h"
@@ -46,6 +47,11 @@ public:
     return hipblaslt_handle_;
   }
 
+  bool is_initialized() {
+    ensure_initialized();
+    return initialized_;
+  }
+
 private:
   HipContext() = default;
 
@@ -59,11 +65,76 @@ private:
 
   void ensure_initialized() {
     std::call_once(init_flag_, [this]() {
-      hipStreamCreate(&stream_);
-      miopenCreate(&miopen_handle_);
-      miopenSetStream(miopen_handle_, stream_);
-      hipblasLtCreate(&hipblaslt_handle_);
+      VLOG(2) << "[HipContext] ensure_initialized() starting...";
+      
+      // Check if HIP runtime is available
+      int device_count = 0;
+      hipError_t hip_err = hipGetDeviceCount(&device_count);
+      VLOG(2) << "[HipContext] hipGetDeviceCount returned: " << hip_err 
+              << " (" << hipGetErrorString(hip_err) << "), device_count=" << device_count;
+      
+      if (hip_err != hipSuccess || device_count == 0) {
+        LOG(ERROR) << "[HipContext] No AMD GPU detected! HIP error: " 
+                   << hipGetErrorString(hip_err);
+        initialized_ = false;
+        return;
+      }
+      
+      // Get device properties
+      hipDeviceProp_t props;
+      hip_err = hipGetDeviceProperties(&props, 0);
+      VLOG(2) << "[HipContext] hipGetDeviceProperties returned: " << hip_err;
+      if (hip_err == hipSuccess) {
+        LOG(INFO) << "[HipContext] GPU name: " << props.name 
+                  << ", gcnArchName: " << props.gcnArchName;
+      }
+      
+      // Create HIP stream
+      VLOG(2) << "[HipContext] Creating HIP stream...";
+      hip_err = hipStreamCreate(&stream_);
+      VLOG(2) << "[HipContext] hipStreamCreate returned: " << hip_err 
+              << ", stream=" << stream_;
+      if (hip_err != hipSuccess) {
+        LOG(ERROR) << "[HipContext] hipStreamCreate failed!";
+        initialized_ = false;
+        return;
+      }
+      
+      // Create MIOpen handle
+      VLOG(2) << "[HipContext] Creating MIOpen handle...";
+      miopenStatus_t miopen_status = miopenCreate(&miopen_handle_);
+      VLOG(2) << "[HipContext] miopenCreate returned: " << miopen_status 
+              << ", handle=" << miopen_handle_;
+      if (miopen_status != miopenStatusSuccess) {
+        LOG(ERROR) << "[HipContext] miopenCreate failed!";
+        hipStreamDestroy(stream_);
+        stream_ = nullptr;
+        initialized_ = false;
+        return;
+      }
+      
+      // Set MIOpen stream
+      VLOG(2) << "[HipContext] Setting MIOpen stream...";
+      miopen_status = miopenSetStream(miopen_handle_, stream_);
+      VLOG(2) << "[HipContext] miopenSetStream returned: " << miopen_status;
+      
+      // Create hipBLASLt handle
+      VLOG(2) << "[HipContext] Creating hipBLASLt handle...";
+      hipblasStatus_t blaslt_status = hipblasLtCreate(&hipblaslt_handle_);
+      VLOG(2) << "[HipContext] hipblasLtCreate returned: " << blaslt_status 
+              << ", handle=" << hipblaslt_handle_;
+      if (blaslt_status != HIPBLAS_STATUS_SUCCESS) {
+        LOG(ERROR) << "[HipContext] hipblasLtCreate failed!";
+        miopenDestroy(miopen_handle_);
+        miopen_handle_ = nullptr;
+        hipStreamDestroy(stream_);
+        stream_ = nullptr;
+        initialized_ = false;
+        return;
+      }
+      
       initialized_ = true;
+      LOG(INFO) << "[HipContext] HIP context initialized successfully!";
     });
   }
 
