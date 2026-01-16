@@ -49,47 +49,85 @@ bool are_connected(const Node& node_a, const Node& node_b,
 
 ## Algorithm
 
+### Key Insight: DAG Property
+
+Since ONNX graphs are **DAGs (Directed Acyclic Graphs)**, we can leverage topological order:
+
+1. Nodes are processed in topological order (producers before consumers)
+2. When we process a node, all its input producers have already been processed
+3. We can directly merge a node into its producer's group using Union-Find
+
+This avoids the O(N²) nested loop and gives us O(N α(N)) ≈ **O(N) time complexity**.
+
 ### Input
 - `R`: List of ROCm fused nodes (in topological order)
 
 ### Output
 - List of groups, where each group contains connected ROCm nodes
 
-### Pseudo-code
+### Pseudo-code (Union-Find Based)
 
 ```
 function find_groups(R):
+    // Union-Find data structure
+    parent = {}      // parent[node] = parent node (or self if root)
+    
+    for each node in R:
+        parent[node] = node  // Initialize: each node is its own group
+    
+    // Build map: output_name → node
     producer_map = build_producer_map(R)
-    assigned = {}      // Set of nodes already assigned to a group
-    groups = []        // Result: list of groups
     
-    for each node n in R:
-        if n in assigned:
-            continue
-        
-        // Start new group with BFS from n
-        group = []
-        queue = [n]
-        assigned.add(n)
-        
-        while queue not empty:
-            current = queue.pop_front()
-            group.append(current)
-            
-            // Find all connected ROCm nodes
-            for each other in R:
-                if other in assigned:
-                    continue
-                    
-                // Check both directions
-                if are_connected(current, other, producer_map) or
-                   are_connected(other, current, producer_map):
-                    queue.append(other)
-                    assigned.add(other)
-        
-        groups.append(group)
+    // Process in topological order
+    for each node in R:
+        for each input of node:
+            if input in producer_map:
+                producer = producer_map[input]
+                // Merge node's group with producer's group
+                union(parent, node, producer)
     
-    return groups
+    // Collect groups from Union-Find
+    groups = {}
+    for each node in R:
+        root = find(parent, node)
+        if root not in groups:
+            groups[root] = []
+        groups[root].append(node)
+    
+    return values(groups)
+
+function find(parent, node):
+    if parent[node] != node:
+        parent[node] = find(parent, parent[node])  // Path compression
+    return parent[node]
+
+function union(parent, a, b):
+    root_a = find(parent, a)
+    root_b = find(parent, b)
+    if root_a != root_b:
+        parent[root_a] = root_b  // Merge groups
+```
+
+### Why DAG Ensures No Cycles After Fusion
+
+When we merge a group of nodes into a single fused node:
+
+1. **External inputs** come from nodes outside the group (processed earlier in topo order)
+2. **External outputs** go to nodes outside the group (processed later in topo order)
+3. The fused node takes the topological position of the **last** node in the group
+
+Since the original graph has no cycles, and we only merge nodes with direct data-flow edges, the resulting graph is still a DAG.
+
+```
+Original:      After Merging:
+  A → B → C      A → [Merged BC] → D
+      ↓   ↓              ↓
+      E   D              E
+
+The merged node [BC] still respects DAG property:
+- It receives from A
+- It outputs to D and E
+- No cycles introduced
 ```
 
 ## Example Walkthrough
@@ -106,11 +144,20 @@ After Level-2 passes (Conv1, Conv2, Gemm are ROCm nodes; ReLU is CPU):
   X ─────→ [FusedConv1] ─→ T1 ─→ [FusedConv2] ─→ T2 ─→ [ReLU] ─→ T3 ─→ [FusedGemm] ─→ Y
 ```
 
-### Step-by-Step
+### Step-by-Step (Union-Find)
 
-1. **Identify ROCm nodes**: `R = [FusedConv1, FusedConv2, FusedGemm]`
+1. **Identify ROCm nodes**: `R = [FusedConv1, FusedConv2, FusedGemm]` (topological order)
 
-2. **Build Producer Map**:
+2. **Initialize Union-Find**:
+   ```
+   parent = {
+     FusedConv1 → FusedConv1,
+     FusedConv2 → FusedConv2,
+     FusedGemm  → FusedGemm
+   }
+   ```
+
+3. **Build Producer Map** (only ROCm nodes):
    ```
    producer_map = {
      "T1" → FusedConv1,
@@ -120,26 +167,24 @@ After Level-2 passes (Conv1, Conv2, Gemm are ROCm nodes; ReLU is CPU):
    ```
    Note: `T3` is NOT in the map (produced by ReLU, which is not in R)
 
-3. **Find Groups**:
+4. **Process nodes in topological order**:
 
-   - **Iteration 1**: Start with FusedConv1
-     - BFS from FusedConv1
-     - Check FusedConv2: `are_connected(FusedConv1, FusedConv2)?`
-       - FusedConv2's input T1 is in producer_map → FusedConv1 ✓
-     - Add FusedConv2 to queue
-     - Check FusedGemm: `are_connected(FusedConv1, FusedGemm)?`
-       - FusedGemm's inputs are T3, A, B - T3 not in producer_map (ReLU) ✗
-     - Process FusedConv2 from queue
-     - Check FusedGemm from FusedConv2: 
-       - FusedGemm's input T3 not produced by FusedConv2 ✗
-     - Queue empty → **Group 1: {FusedConv1, FusedConv2}**
+   - **FusedConv1**: No inputs from ROCm nodes (X, W1, B1 not in producer_map)
+   
+   - **FusedConv2**: Input T1 is in producer_map → FusedConv1
+     - `union(FusedConv2, FusedConv1)` → parent[FusedConv2] = FusedConv1
+   
+   - **FusedGemm**: Input T3 not in producer_map (produced by ReLU)
+     - No union operation
 
-   - **Iteration 2**: Start with FusedGemm (only unassigned node)
-     - BFS from FusedGemm
-     - All other nodes already assigned
-     - **Group 2: {FusedGemm}**
+5. **Collect groups**:
+   ```
+   find(FusedConv1) → FusedConv1  → Group: {FusedConv1, FusedConv2}
+   find(FusedConv2) → FusedConv1  
+   find(FusedGemm)  → FusedGemm   → Group: {FusedGemm}
+   ```
 
-4. **Result**: `[[FusedConv1, FusedConv2], [FusedGemm]]`
+6. **Result**: `[[FusedConv1, FusedConv2], [FusedGemm]]`
 
 ## Why Non-ROCm Nodes Act as Barriers
 
@@ -156,11 +201,12 @@ This forces a **synchronization point** - Conv1 and Conv2 cannot share the same 
 
 ## Complexity
 
-- **Time**: O(N²) where N is the number of ROCm nodes
-  - For each node, we check connectivity with all other nodes
-  - In practice, N is typically small (< 100 nodes)
+- **Time**: O(N × α(N)) ≈ O(N) where N is the number of ROCm nodes
+  - Single pass through nodes in topological order
+  - Union-Find with path compression: α(N) is the inverse Ackermann function, nearly constant
+  - Building producer map: O(N × M) where M is average outputs per node
 
-- **Space**: O(N) for the producer map and assigned set
+- **Space**: O(N) for the Union-Find parent map and producer map
 
 ## Implementation
 
