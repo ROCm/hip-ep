@@ -2,9 +2,13 @@
 // Licensed under the MIT License.
 
 #include <glog/logging.h>
+#include "morphizen/env_config.hpp"
 #include "morphizen/vaip.hpp"
 #include "rocm.pb.h"
 #include "gemm_pattern_json.hpp"
+
+DEF_ENV_PARAM(MORPHIZEN_DEBUG_ROCM, "0")
+#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_ROCM) >= n)
 
 using namespace vaip_core;
 
@@ -26,7 +30,7 @@ struct Level2RocmGemm {
           auto output = binder["output"];
           bool has_C = binder["input_C"].node_arg != nullptr;
 
-          LOG(INFO) << "[ROCm Gemm L2] Found Gemm pattern";
+          MY_LOG(1) << "[ROCm Gemm L2] Found Gemm pattern";
 
           rocm::RocmParamProto rocm_param;
           rocm_param.set_op_type("gemm");
@@ -64,17 +68,17 @@ struct Level2RocmGemm {
           if (meta_def) {
             meta_def->set_generic_param(rocm_param.SerializeAsString());
             self->fuse(*graph, std::move(*meta_def));
-            LOG(INFO) << "[ROCm Gemm L2] Fused Gemm pattern successfully";
+            MY_LOG(1) << "[ROCm Gemm L2] Fused Gemm pattern successfully";
             return true;
           }
           
-          LOG(WARNING) << "[ROCm Gemm L2] Failed to fuse: " << error;
+          MY_LOG(1) << "[ROCm Gemm L2] Failed to fuse: " << error;
           return false;
         });
   }
 
   void process(IPass& self, Graph& graph) {
-    LOG(INFO) << "[ROCm Gemm L2] Processing graph for Gemm patterns...";
+    MY_LOG(1) << "[ROCm Gemm L2] Processing graph for Gemm patterns...";
     create_rule(&self)->apply(&graph);
   }
 

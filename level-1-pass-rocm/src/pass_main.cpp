@@ -4,7 +4,11 @@
 #include <hip/hip_runtime.h>
 #include <glog/logging.h>
 
+#include "morphizen/env_config.hpp"
 #include "morphizen/vaip.hpp"
+
+DEF_ENV_PARAM(MORPHIZEN_DEBUG_ROCM, "0")
+#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_ROCM) >= n)
 
 using namespace vaip_core;
 
@@ -28,23 +32,23 @@ struct Level1Rocm {
     hipError_t err = hipGetDeviceCount(&device_count);
     
     if (err != hipSuccess || device_count == 0) {
-      LOG(WARNING) << "[HIP EP Level-1] No AMD GPU found, skipping ROCm passes";
-      LOG(WARNING) << "[HIP EP Level-1] hipGetDeviceCount error: " 
-                   << hipGetErrorString(err);
+      MY_LOG(1) << "[HIP EP Level-1] No AMD GPU found, skipping ROCm passes";
+      MY_LOG(1) << "[HIP EP Level-1] hipGetDeviceCount error: " 
+                << hipGetErrorString(err);
       return;
     }
 
     // 2. Log device info
     hipDeviceProp_t props;
     if (hipGetDeviceProperties(&props, 0) == hipSuccess) {
-      LOG(INFO) << "[HIP EP Level-1] Using device: " << props.name;
-      LOG(INFO) << "[HIP EP Level-1] Compute capability: " 
+      MY_LOG(1) << "[HIP EP Level-1] Using device: " << props.name;
+      MY_LOG(1) << "[HIP EP Level-1] Compute capability: " 
                 << props.major << "." << props.minor;
-      LOG(INFO) << "[HIP EP Level-1] Total memory: " 
+      MY_LOG(2) << "[HIP EP Level-1] Total memory: " 
                 << (props.totalGlobalMem / (1024 * 1024)) << " MB";
     }
 
-    LOG(INFO) << "[HIP EP Level-1] AMD GPU available, ROCm acceleration enabled";
+    MY_LOG(1) << "[HIP EP Level-1] AMD GPU available, ROCm acceleration enabled";
   }
 
   IPass& self_;
