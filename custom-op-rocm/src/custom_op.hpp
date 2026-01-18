@@ -8,26 +8,15 @@
 #include <hipblaslt/hipblaslt.h>
 #include <memory>
 #include <vector>
+#include <unordered_map>
 #include <mutex>
-#include <iostream>
-#include <cstdlib>
 #include <chrono>
 #include <thread>
-#include <atomic>
 #include <glog/logging.h>
 
 #include "morphizen/vaip.hpp"
 #include "morphizen/env_config.hpp"
 #include "rocm.pb.h"
-
-// Direct stdout debug logging macro (checks env var directly)
-#define HIP_DEBUG_LOG(msg) do { \
-  const char* debug_env = std::getenv("MORPHIZEN_DEBUG_ROCM"); \
-  int debug_level = debug_env ? std::atoi(debug_env) : 0; \
-  if (debug_level >= 1) { \
-    std::cout << "[HipContext] DEBUG: " << msg << std::endl << std::flush; \
-  } \
-} while(0)
 
 namespace rocm_ep {
 
@@ -141,99 +130,7 @@ private:
     }
   }
 
-  void ensure_initialized() {
-    std::call_once(init_flag_, [this]() {
-      HIP_DEBUG_LOG("ensure_initialized() starting...");
-      VLOG(2) << "[HipContext] ensure_initialized() starting...";
-      
-      // Check if HIP runtime is available
-      HIP_DEBUG_LOG("Calling hipGetDeviceCount...");
-      int device_count = 0;
-      hipError_t hip_err = hipGetDeviceCount(&device_count);
-      HIP_DEBUG_LOG("hipGetDeviceCount returned: " << hip_err << ", device_count=" << device_count);
-      VLOG(2) << "[HipContext] hipGetDeviceCount returned: " << hip_err 
-              << " (" << hipGetErrorString(hip_err) << "), device_count=" << device_count;
-      
-      if (hip_err != hipSuccess || device_count == 0) {
-        HIP_DEBUG_LOG("No AMD GPU detected!");
-        LOG(ERROR) << "[HipContext] No AMD GPU detected! HIP error: " 
-                   << hipGetErrorString(hip_err);
-        initialized_ = false;
-        return;
-      }
-      
-      // Get device properties
-      HIP_DEBUG_LOG("Calling hipGetDeviceProperties...");
-      hipDeviceProp_t props;
-      hip_err = hipGetDeviceProperties(&props, 0);
-      HIP_DEBUG_LOG("hipGetDeviceProperties returned: " << hip_err);
-      VLOG(2) << "[HipContext] hipGetDeviceProperties returned: " << hip_err;
-      if (hip_err == hipSuccess) {
-        HIP_DEBUG_LOG("GPU name: " << props.name << ", gcnArchName: " << props.gcnArchName);
-        LOG(INFO) << "[HipContext] GPU name: " << props.name 
-                  << ", gcnArchName: " << props.gcnArchName;
-      }
-      
-      // Create HIP stream
-      HIP_DEBUG_LOG("Creating HIP stream...");
-      VLOG(2) << "[HipContext] Creating HIP stream...";
-      hip_err = hipStreamCreate(&stream_);
-      HIP_DEBUG_LOG("hipStreamCreate returned: " << hip_err << ", stream=" << stream_);
-      VLOG(2) << "[HipContext] hipStreamCreate returned: " << hip_err 
-              << ", stream=" << stream_;
-      if (hip_err != hipSuccess) {
-        HIP_DEBUG_LOG("hipStreamCreate failed!");
-        LOG(ERROR) << "[HipContext] hipStreamCreate failed!";
-        initialized_ = false;
-        return;
-      }
-      
-      // Create MIOpen handle
-      HIP_DEBUG_LOG("Creating MIOpen handle...");
-      VLOG(2) << "[HipContext] Creating MIOpen handle...";
-      miopenStatus_t miopen_status = miopenCreate(&miopen_handle_);
-      HIP_DEBUG_LOG("miopenCreate returned: " << miopen_status << ", handle=" << miopen_handle_);
-      VLOG(2) << "[HipContext] miopenCreate returned: " << miopen_status 
-              << ", handle=" << miopen_handle_;
-      if (miopen_status != miopenStatusSuccess) {
-        HIP_DEBUG_LOG("miopenCreate failed!");
-        LOG(ERROR) << "[HipContext] miopenCreate failed!";
-        hipStreamDestroy(stream_);
-        stream_ = nullptr;
-        initialized_ = false;
-        return;
-      }
-      
-      // Set MIOpen stream
-      HIP_DEBUG_LOG("Setting MIOpen stream...");
-      VLOG(2) << "[HipContext] Setting MIOpen stream...";
-      miopen_status = miopenSetStream(miopen_handle_, stream_);
-      HIP_DEBUG_LOG("miopenSetStream returned: " << miopen_status);
-      VLOG(2) << "[HipContext] miopenSetStream returned: " << miopen_status;
-      
-      // Create hipBLASLt handle
-      HIP_DEBUG_LOG("Creating hipBLASLt handle...");
-      VLOG(2) << "[HipContext] Creating hipBLASLt handle...";
-      hipblasStatus_t blaslt_status = hipblasLtCreate(&hipblaslt_handle_);
-      HIP_DEBUG_LOG("hipblasLtCreate returned: " << blaslt_status << ", handle=" << hipblaslt_handle_);
-      VLOG(2) << "[HipContext] hipblasLtCreate returned: " << blaslt_status 
-              << ", handle=" << hipblaslt_handle_;
-      if (blaslt_status != HIPBLAS_STATUS_SUCCESS) {
-        HIP_DEBUG_LOG("hipblasLtCreate failed!");
-        LOG(ERROR) << "[HipContext] hipblasLtCreate failed!";
-        miopenDestroy(miopen_handle_);
-        miopen_handle_ = nullptr;
-        hipStreamDestroy(stream_);
-        stream_ = nullptr;
-        initialized_ = false;
-        return;
-      }
-      
-      initialized_ = true;
-      HIP_DEBUG_LOG("HIP context initialized successfully!");
-      LOG(INFO) << "[HipContext] HIP context initialized successfully!";
-    });
-  }
+  void ensure_initialized();
 
   std::once_flag init_flag_;
   bool initialized_ = false;
@@ -243,10 +140,48 @@ private:
 };
 
 /**
- * Unified ROCm Custom Op
+ * Per-node runtime data for subgraph execution
+ * Stores device buffers and descriptors for a single operation
+ */
+struct NodeRuntimeData {
+  // Output buffers for this node (indexed by output_index)
+  std::vector<float*> output_buffers;
+  std::vector<size_t> output_sizes;
+  
+  // Weight buffers (cached on GPU)
+  float* d_weight = nullptr;
+  float* d_bias = nullptr;
+  
+  // Host-side cached weight/bias data
+  std::vector<float> host_weight;
+  std::vector<float> host_bias;
+  
+  // Workspace for this node
+  void* workspace = nullptr;
+  size_t workspace_size = 0;
+  
+  ~NodeRuntimeData() {
+    for (auto* buf : output_buffers) {
+      if (buf) hipFree(buf);
+    }
+    if (d_weight) hipFree(d_weight);
+    if (d_bias) hipFree(d_bias);
+    if (workspace) hipFree(workspace);
+  }
+};
+
+/**
+ * Unified ROCm Custom Op for Subgraph Execution
  * 
- * Handles both Conv (MIOpen) and Gemm (hipBLASLt) operations
- * based on the op_type field in RocmParamProto.
+ * Executes a RocmSubgraphProto containing multiple operations
+ * (Conv, Gemm) on a shared HIP stream. Intermediate tensors
+ * stay on GPU, only external inputs/outputs are transferred.
+ * 
+ * Supports:
+ * - Multi-node subgraph execution
+ * - Topology-aware tensor routing (TensorRefProto)
+ * - Async overlapped D2H transfers (ExternalOutputProto)
+ * - Cached weights per node
  */
 class RocmCustomOp : public vaip_core::CustomOpImp {
 public:
@@ -259,41 +194,50 @@ public:
 private:
   void Compute(const OrtApi* api, OrtKernelContext* context) const override;
 
-  void ExecuteConv(const OrtApi* api, OrtKernelContext* context) const;
-  void ExecuteGemm(const OrtApi* api, OrtKernelContext* context) const;
+  // Subgraph execution phases
+  void UploadExternalInputs(const OrtApi* api, OrtKernelContext* context) const;
+  void ExecuteSubgraph(const OrtApi* api, OrtKernelContext* context) const;
+  void DownloadExternalOutputs(const OrtApi* api, OrtKernelContext* context) const;
+
+  // Node execution
+  void ExecuteNode(const rocm::RocmNodeProto& node) const;
+  void ExecuteConvNode(const rocm::ConvParamProto& params, 
+                       const std::vector<float*>& inputs,
+                       float* output) const;
+  void ExecuteGemmNode(const rocm::GemmParamProto& params,
+                       const std::vector<float*>& inputs,
+                       float* output) const;
+
+  // Tensor resolution
+  float* ResolveTensorRef(const rocm::TensorRefProto& ref) const;
+  size_t GetOutputSize(int32_t node_id, int32_t output_index) const;
+
+  // Initialization
+  void LoadAllWeights();
+  void LoadNodeWeights(int32_t node_id, const rocm::RocmParamProto& params);
+  void AllocateIntermediateBuffers();
 
 private:
-  void LoadCachedWeights();
+  // Subgraph definition (either single-node or multi-node)
+  rocm::RocmSubgraphProto subgraph_;
+  
+  // Fallback for single-node case (backward compatibility)
+  bool is_single_node_ = false;
+  rocm::RocmParamProto single_node_proto_;
 
-private:
-  rocm::RocmParamProto rocm_proto_;
+  // Per-node runtime data
+  mutable std::vector<std::unique_ptr<NodeRuntimeData>> node_data_;
 
-  // Host-side cached weight/bias data (loaded from pass context)
-  std::vector<float> host_weight_;
-  std::vector<float> host_bias_;
+  // External input buffers (name -> device pointer)
+  mutable std::unordered_map<std::string, float*> external_input_buffers_;
+  mutable std::unordered_map<std::string, size_t> external_input_sizes_;
 
-  // Cached device weights
-  mutable float* d_weight_ = nullptr;
-  mutable float* d_bias_ = nullptr;
-  mutable size_t weight_size_ = 0;
-  mutable size_t bias_size_ = 0;
-  mutable bool weights_cached_ = false;
+  // Output index mapping for ORT (output_name -> ORT output index)
+  std::unordered_map<std::string, size_t> output_name_to_index_;
 
-  // MIOpen descriptors (lazy initialized)
-  mutable miopenTensorDescriptor_t input_desc_ = nullptr;
-  mutable miopenTensorDescriptor_t weight_desc_ = nullptr;
-  mutable miopenTensorDescriptor_t output_desc_ = nullptr;
-  mutable miopenConvolutionDescriptor_t conv_desc_ = nullptr;
-
-  // hipBLASLt descriptors (lazy initialized)
-  mutable hipblasLtMatrixLayout_t layout_a_ = nullptr;
-  mutable hipblasLtMatrixLayout_t layout_b_ = nullptr;
-  mutable hipblasLtMatrixLayout_t layout_c_ = nullptr;
-  mutable hipblasLtMatmulDesc_t matmul_desc_ = nullptr;
-
-  // Workspace
-  mutable void* workspace_ = nullptr;
-  mutable size_t workspace_size_ = 0;
+  // Cached weights loaded flag
+  mutable bool weights_loaded_ = false;
+  mutable bool buffers_allocated_ = false;
 };
 
 } // namespace rocm_ep
