@@ -49,14 +49,12 @@ else()
 endif()
 set_target_properties(rocm_gemm_test PROPERTIES FOLDER "rocm-tests")
 
-# Timeout test (GPU timeout mechanism)
+# Timeout test (GPU timeout mechanism) - standalone test for WaitStreamWithTimeout
 add_executable(rocm_timeout_test test_timeout.cpp)
-target_link_libraries(rocm_timeout_test PRIVATE MIOpen glog::glog)
+target_link_libraries(rocm_timeout_test PRIVATE glog::glog)
+target_compile_features(rocm_timeout_test PRIVATE cxx_std_17)
 if(WIN32)
-  target_include_directories(rocm_timeout_test SYSTEM PRIVATE 
-    "${THEROCK_DIST}/include"
-    "${CMAKE_SOURCE_DIR}/../onnxruntime/include/onnxruntime/core/session"
-  )
+  target_include_directories(rocm_timeout_test SYSTEM PRIVATE "${THEROCK_DIST}/include")
   target_compile_definitions(rocm_timeout_test PRIVATE "__HIP_PLATFORM_AMD__=1")
   target_link_libraries(rocm_timeout_test PRIVATE "${THEROCK_DIST}/lib/amdhip64.lib")
 else()
