@@ -120,39 +120,69 @@ private:
 };
 ```
 
-### SessionResource: Type-Safe Context Accessor
+### SessionContextRegistry: Per-Session Context Manager
 
-To safely access session-scoped resources without pointer-key ABA problems:
+Since `PassContext` doesn't expose an `add_context_resource` API, we use a static registry
+to manage per-session `HipContext` instances:
 
 ```cpp
-template<typename T>
-class SessionResource {
+class SessionContextRegistry {
 public:
-  // Get or create resource for this session
-  static std::shared_ptr<T> get_or_create(PassContext& ctx) {
-    constexpr const char* key = "rocm_hip_context";  // Fixed key per type
+  static SessionContextRegistry& instance() {
+    static SessionContextRegistry registry;
+    return registry;
+  }
+  
+  std::shared_ptr<HipContext> get_or_create(const vaip_core::PassContext* ctx) {
+    std::lock_guard<std::mutex> lock(mutex_);
     
-    auto resource = ctx.get_context_resource(key);
-    if (resource) {
-      return std::static_pointer_cast<T>(resource);
+    // Cleanup expired entries first
+    cleanup_expired();
+    
+    auto it = contexts_.find(ctx);
+    if (it != contexts_.end()) {
+      auto locked = it->second.lock();
+      if (locked) {
+        return locked;  // Reuse existing context
+      }
     }
     
-    // First access in this session - create new context
-    auto new_resource = std::make_shared<T>();
-    // Note: add_context_resource may require PassContextImp access
-    return new_resource;
+    // Create new context for this session
+    auto new_context = std::make_shared<HipContext>();
+    contexts_[ctx] = new_context;  // Store as weak_ptr
+    return new_context;
   }
+  
+private:
+  void cleanup_expired() {
+    for (auto it = contexts_.begin(); it != contexts_.end(); ) {
+      if (it->second.expired()) {
+        it = contexts_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  
+  std::mutex mutex_;
+  std::unordered_map<const vaip_core::PassContext*, std::weak_ptr<HipContext>> contexts_;
 };
 
 // Usage in RocmCustomOp:
 class RocmCustomOp {
-  std::shared_ptr<HipContext> context_;
+  std::shared_ptr<HipContext> hip_context_;
   
-  RocmCustomOp(const IPass& pass) {
-    context_ = SessionResource<HipContext>::get_or_create(*pass.get_context());
+  RocmCustomOp(std::shared_ptr<const vaip_core::PassContext> context, ...) {
+    hip_context_ = SessionContextRegistry::instance().get_or_create(context.get());
   }
 };
 ```
+
+**Key design points:**
+- Uses `PassContext*` as key (stable for session lifetime)
+- Stores `weak_ptr` to allow cleanup when all CustomOps are destroyed
+- Thread-safe via mutex protection
+- Automatic cleanup of expired entries on next access
 
 ### Why Per-Session?
 

@@ -75,41 +75,36 @@ inline TimeoutStatus WaitStreamWithTimeout(hipStream_t stream, int timeout_ms) {
 }
 
 /**
- * Shared HIP Context Singleton
+ * Per-Session HIP Context
  * 
- * Provides a single shared HIP stream for all ROCm operations.
- * This enables implicit fusion between Conv and Gemm operations.
- * Includes timeout handling to prevent indefinite GPU waits.
+ * Each ORT session gets its own HipContext with:
+ * - Dedicated HIP stream for GPU operations
+ * - MIOpen handle with its own kernel cache
+ * - hipBLASLt handle for GEMM operations
+ * 
+ * This design enables:
+ * - Multiple ORT sessions running in parallel on GPU
+ * - Session isolation (no cross-session interference)
+ * - Automatic cleanup when session ends
+ * 
+ * Resources are created lazily on first use and destroyed when the
+ * session's PassContext is destroyed.
  */
 class HipContext {
 public:
-  static HipContext& instance() {
-    static HipContext ctx;
-    return ctx;
-  }
-
+  HipContext();
+  ~HipContext();
+  
+  // Non-copyable, non-movable (owns GPU resources)
   HipContext(const HipContext&) = delete;
   HipContext& operator=(const HipContext&) = delete;
+  HipContext(HipContext&&) = delete;
+  HipContext& operator=(HipContext&&) = delete;
 
-  hipStream_t stream() {
-    ensure_initialized();
-    return stream_;
-  }
-
-  miopenHandle_t miopen_handle() {
-    ensure_initialized();
-    return miopen_handle_;
-  }
-
-  hipblasLtHandle_t hipblaslt_handle() {
-    ensure_initialized();
-    return hipblaslt_handle_;
-  }
-
-  bool is_initialized() {
-    ensure_initialized();
-    return initialized_;
-  }
+  hipStream_t stream() const { return stream_; }
+  miopenHandle_t miopen_handle() const { return miopen_handle_; }
+  hipblasLtHandle_t hipblaslt_handle() const { return hipblaslt_handle_; }
+  bool is_initialized() const { return initialized_; }
 
   /**
    * Synchronize stream with timeout protection
@@ -117,31 +112,114 @@ public:
    * @param timeout_ms Timeout in milliseconds (0 = use default from env var)
    * @return TimeoutStatus indicating success, timeout, or error
    */
-  TimeoutStatus sync_stream_with_timeout(int timeout_ms = 0);
+  TimeoutStatus sync_stream_with_timeout(int timeout_ms = 0) const;
 
 private:
-  HipContext() = default;
-
-  ~HipContext() {
-    if (initialized_) {
-      hipblasLtDestroy(hipblaslt_handle_);
-      miopenDestroy(miopen_handle_);
-      hipStreamDestroy(stream_);
-    }
-  }
-
-  void ensure_initialized();
-
-  std::once_flag init_flag_;
   bool initialized_ = false;
   hipStream_t stream_ = nullptr;
   miopenHandle_t miopen_handle_ = nullptr;
   hipblasLtHandle_t hipblaslt_handle_ = nullptr;
+  mutable std::mutex algo_find_mutex_;  // For thread-safe algorithm search
+};
+
+/**
+ * SessionContextRegistry: Per-Session HipContext Manager
+ * 
+ * Manages HipContext instances keyed by PassContext address.
+ * Uses weak_ptr to track if any CustomOps are still using the context.
+ * 
+ * Lifecycle:
+ * - First CustomOp in a session calls get_or_create() -> creates HipContext
+ * - Subsequent CustomOps get the same shared_ptr
+ * - When all CustomOps are destroyed, weak_ptr expires
+ * - Registry cleanup happens on next access or explicitly
+ * 
+ * Note: Uses PassContext pointer as key. This is safe because:
+ * - PassContext lifetime >= CustomOp lifetime (ORT guarantees this)
+ * - We use shared_ptr so HipContext stays alive while any CustomOp uses it
+ */
+class SessionContextRegistry {
+public:
+  /**
+   * Get the singleton registry instance
+   */
+  static SessionContextRegistry& instance() {
+    static SessionContextRegistry registry;
+    return registry;
+  }
+  
+  /**
+   * Get or create HipContext for a session
+   * 
+   * @param ctx Pointer to PassContext (used as session identifier)
+   * @return Shared pointer to HipContext
+   */
+  std::shared_ptr<HipContext> get_or_create(const vaip_core::PassContext* ctx) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    // Cleanup expired entries first
+    cleanup_expired();
+    
+    auto it = contexts_.find(ctx);
+    if (it != contexts_.end()) {
+      auto locked = it->second.lock();
+      if (locked) {
+        LOG(INFO) << "[SessionContextRegistry] Reusing existing HipContext for session " 
+                  << static_cast<const void*>(ctx);
+        return locked;
+      }
+      // Entry exists but expired - will be replaced
+    }
+    
+    // Create new context for this session
+    auto new_context = std::make_shared<HipContext>();
+    contexts_[ctx] = new_context;
+    
+    LOG(INFO) << "[SessionContextRegistry] Created new HipContext for session " 
+              << static_cast<const void*>(ctx) 
+              << " (total active sessions: " << count_active() << ")";
+    
+    return new_context;
+  }
+  
+  /**
+   * Explicitly remove a session's context (called when session ends)
+   */
+  void remove(const vaip_core::PassContext* ctx) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    contexts_.erase(ctx);
+  }
+  
+private:
+  SessionContextRegistry() = default;
+  
+  void cleanup_expired() {
+    for (auto it = contexts_.begin(); it != contexts_.end(); ) {
+      if (it->second.expired()) {
+        LOG(INFO) << "[SessionContextRegistry] Cleaning up expired context for session " 
+                  << static_cast<const void*>(it->first);
+        it = contexts_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  
+  size_t count_active() const {
+    size_t count = 0;
+    for (const auto& [key, weak_ctx] : contexts_) {
+      if (!weak_ctx.expired()) ++count;
+    }
+    return count;
+  }
+  
+  std::mutex mutex_;
+  std::unordered_map<const vaip_core::PassContext*, std::weak_ptr<HipContext>> contexts_;
 };
 
 /**
  * Per-node runtime data for subgraph execution
- * Stores device buffers and descriptors for a single operation
+ * Stores device buffers, cached algorithms, and descriptors for a single operation
  */
 struct NodeRuntimeData {
   // Output buffers for this node (indexed by output_index)
@@ -159,6 +237,12 @@ struct NodeRuntimeData {
   // Workspace for this node
   void* workspace = nullptr;
   size_t workspace_size = 0;
+  
+  // Cached algorithm for conv operations
+  // Avoids expensive miopenFindConvolutionForwardAlgorithm() on each inference
+  bool conv_algo_cached = false;
+  miopenConvFwdAlgorithm_t cached_conv_algo = miopenConvolutionFwdAlgoGEMM;
+  size_t cached_conv_workspace_size = 0;
   
   ~NodeRuntimeData() {
     for (auto* buf : output_buffers) {
@@ -182,6 +266,7 @@ struct NodeRuntimeData {
  * - Topology-aware tensor routing (TensorRefProto)
  * - Async overlapped D2H transfers (ExternalOutputProto)
  * - Cached weights per node
+ * - Per-session HipContext for GPU parallelism between sessions
  */
 class RocmCustomOp : public vaip_core::CustomOpImp {
 public:
@@ -201,10 +286,12 @@ private:
 
   // Node execution
   void ExecuteNode(const rocm::RocmNodeProto& node) const;
-  void ExecuteConvNode(const rocm::ConvParamProto& params, 
+  void ExecuteConvNode(int32_t node_id,
+                       const rocm::ConvParamProto& params, 
                        const std::vector<float*>& inputs,
                        float* output) const;
-  void ExecuteGemmNode(const rocm::GemmParamProto& params,
+  void ExecuteGemmNode(int32_t node_id,
+                       const rocm::GemmParamProto& params,
                        const std::vector<float*>& inputs,
                        float* output) const;
 
@@ -218,6 +305,10 @@ private:
   void AllocateIntermediateBuffers();
 
 private:
+  // Per-session HIP context (stream + handles)
+  // All CustomOps in the same session share this context
+  std::shared_ptr<HipContext> hip_context_;
+  
   // Subgraph definition (either single-node or multi-node)
   rocm::RocmSubgraphProto subgraph_;
   
