@@ -120,30 +120,31 @@ private:
 };
 ```
 
-### SessionContextRegistry: Per-Session Context Manager
+### Per-Session Context via SessionContextRegistry
 
-Since `PassContext` doesn't expose an `add_context_resource` API, we use a static registry
-to manage per-session `HipContext` instances:
+Session-scoped `HipContext` sharing is implemented using a **process-global registry** 
+(`SessionContextRegistry`) that maps `PassContext*` to `shared_ptr<HipContext>`:
 
 ```cpp
+/**
+ * SessionContextRegistry: Per-Session HipContext Manager
+ * 
+ * Manages HipContext instances keyed by PassContext address.
+ * Uses weak_ptr to track if any CustomOps are still using the context.
+ */
 class SessionContextRegistry {
 public:
-  static SessionContextRegistry& instance() {
-    static SessionContextRegistry registry;
-    return registry;
-  }
+  static SessionContextRegistry& instance();
   
+  // Get or create HipContext for a session
   std::shared_ptr<HipContext> get_or_create(const vaip_core::PassContext* ctx) {
     std::lock_guard<std::mutex> lock(mutex_);
-    
-    // Cleanup expired entries first
-    cleanup_expired();
+    cleanup_expired();  // Remove stale entries
     
     auto it = contexts_.find(ctx);
     if (it != contexts_.end()) {
-      auto locked = it->second.lock();
-      if (locked) {
-        return locked;  // Reuse existing context
+      if (auto locked = it->second.lock()) {
+        return locked;  // Reuse existing
       }
     }
     
@@ -154,35 +155,22 @@ public:
   }
   
 private:
-  void cleanup_expired() {
-    for (auto it = contexts_.begin(); it != contexts_.end(); ) {
-      if (it->second.expired()) {
-        it = contexts_.erase(it);
-      } else {
-        ++it;
-      }
-    }
-  }
-  
   std::mutex mutex_;
-  std::unordered_map<const vaip_core::PassContext*, std::weak_ptr<HipContext>> contexts_;
+  std::unordered_map<const PassContext*, std::weak_ptr<HipContext>> contexts_;
 };
 
-// Usage in RocmCustomOp:
-class RocmCustomOp {
-  std::shared_ptr<HipContext> hip_context_;
-  
-  RocmCustomOp(std::shared_ptr<const vaip_core::PassContext> context, ...) {
-    hip_context_ = SessionContextRegistry::instance().get_or_create(context.get());
-  }
-};
+// In RocmCustomOp constructor:
+RocmCustomOp::RocmCustomOp(std::shared_ptr<const PassContext> context, ...) {
+  hip_context_ = SessionContextRegistry::instance().get_or_create(context.get());
+}
 ```
 
 **Key design points:**
-- Uses `PassContext*` as key (stable for session lifetime)
-- Stores `weak_ptr` to allow cleanup when all CustomOps are destroyed
-- Thread-safe via mutex protection
-- Automatic cleanup of expired entries on next access
+- **Process-global registry**: Singleton pattern for cross-session management
+- **PassContext pointer as key**: All CustomOps in the same session share the same PassContext pointer
+- **weak_ptr for cleanup**: When all CustomOps are destroyed, the HipContext is automatically cleaned up
+- **Thread-safe**: Mutex protects registry access
+- **No framework dependency**: Works without requiring changes to VitisAI PassContext API
 
 ### Why Per-Session?
 
@@ -201,31 +189,34 @@ class RocmCustomOp {
 │  ORT Session Created                                                │
 │       │                                                             │
 │       ▼                                                             │
-│  Level-1 Pass runs → RocmCustomOp instances created                 │
+│  Level-1 Pass runs (or cache hit) → RocmCustomOp instances created  │
 │       │                                                             │
 │       ▼                                                             │
-│  First RocmCustomOp::Compute() calls SessionResource::get_or_create │
+│  RocmCustomOp constructor calls SessionContextRegistry::get_or_create│
 │       │                                                             │
-│       ├─→ Checks PassContext for existing HipContext                │
-│       │   (not found - first access)                                │
+│       ├─→ Checks registry for existing HipContext (by PassContext*) │
+│       │   (not found - first CustomOp in session)                   │
 │       │                                                             │
 │       ├─→ Creates new HipContext                                    │
 │       │     ├─→ hipStreamCreate(&stream_)                           │
 │       │     ├─→ miopenCreate(&miopen_handle_)                       │
 │       │     └─→ hipblasLtCreate(&hipblaslt_handle_)                 │
 │       │                                                             │
-│       └─→ Stores in PassContext::pass_resources                     │
+│       └─→ Stores in registry as weak_ptr                            │
 │                                                                     │
 │  Subsequent CustomOps in same session:                              │
-│       SessionResource::get_or_create → Returns existing HipContext  │
+│       SessionContextRegistry::get_or_create → Returns existing      │
+│       HipContext (same PassContext* → same HipContext shared_ptr)   │
 │                                                                     │
-│  Session destroyed → PassContext destroyed                          │
+│  Session destroyed → All RocmCustomOp destructors called            │
 │       │                                                             │
-│       ▼ (shared_ptr ref count → 0)                                  │
+│       ▼ (shared_ptr ref count → 0, weak_ptr expires)                │
 │  ~HipContext()                                                      │
 │       ├─→ hipblasLtDestroy(hipblaslt_handle_)                       │
 │       ├─→ miopenDestroy(miopen_handle_)                             │
 │       └─→ hipStreamDestroy(stream_)                                 │
+│                                                                     │
+│  Next registry access → cleanup_expired() removes stale entry       │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -634,306 +625,34 @@ For true parallelism, would need:
 
 ### Per-Session Context (Current Design)
 
-The current implementation uses **per-session HipContext** stored in `PassContext::pass_resources`. This design:
+The current implementation uses **per-session HipContext** managed by a **process-global `SessionContextRegistry`**. This design:
 
 - ✅ Supports multiple ORT sessions running in parallel
 - ✅ Enables GPU-level parallelism via multiple streams
-- ✅ Automatically cleans up when session ends
+- ✅ Automatically cleans up when all CustomOps in a session are destroyed (via `weak_ptr`)
 - ✅ Provides isolation between sessions
+- ✅ Works regardless of whether Level-1 pass runs or cache hits
+
+**How it works:**
+1. `SessionContextRegistry` is a process-global singleton
+2. Each `RocmCustomOp` constructor calls `SessionContextRegistry::get_or_create(context.get())`
+3. Registry uses `PassContext*` pointer as the session key
+4. All CustomOps in the same session share the same `HipContext` via `shared_ptr`
+5. When all CustomOps are destroyed, `weak_ptr` expires and HipContext is cleaned up
 
 See "Per-Session HipContext Design" section above for implementation details.
 
 ### Why Singleton was Replaced (Historical)
 
-> **Note:** This section documents the original singleton design and explains why it was deprecated in favor of per-session contexts.
+> **Note:** The detailed singleton design history has been moved to [archive/SINGLETON_DESIGN_HISTORY.md](archive/SINGLETON_DESIGN_HISTORY.md).
 
-The original `HipContext` used a singleton pattern for the MIOpen handle. Here's the original rationale:
+In summary, the singleton pattern was replaced because it:
+- Did NOT support multiple ORT sessions running in parallel
+- Caused stream contention (all ops from all sessions queued to same stream)
+- Had sync interference (Session A's sync waited for Session B's ops)
+- Had potential MIOpen thread safety issues
 
-#### Benefits of Singleton
-
-**1. Handle Creation is Expensive**
-```cpp
-miopenCreate(&miopen_handle_);  // Can take 100-500ms first time
-```
-MIOpen handle creation involves:
-- HIP/CUDA context initialization
-- Kernel cache directory setup
-- Internal memory pool initialization
-- Database connection for find-db cache
-
-Creating a new handle per `Compute()` call would devastate performance.
-
-**2. Kernel Cache Per Handle**
-MIOpen maintains an internal algorithm cache per handle:
-```
-First  Conv(1,64,224,224) → Algorithm search runs (slow, ~10-100ms)
-Second Conv(1,64,224,224) → Cache hit (fast, <1ms)
-```
-If we created new handles, this cache would be lost.
-
-**3. Matches ORT Execution Model**
-ONNX Runtime typically calls `Compute()` sequentially for a given session. A single handle with shared stream provides implicit serialization without explicit locking.
-
-**4. Single GPU Target**
-The current design targets one AMD GPU per process. Singleton aligns with this constraint.
-
-#### Trade-offs and Limitations
-
-| Aspect | Singleton | Alternative (Pool/TLS) |
-|--------|-----------|------------------------|
-| Simplicity | ✅ Simple | ❌ More complex |
-| Kernel cache | ✅ Shared across ops | ⚠️ Per-handle cache |
-| Multi-GPU | ❌ Not supported | ✅ Per-device handles |
-| Multi-thread | ❌ Not thread-safe | ✅ Thread-local or mutex |
-| Memory | ✅ Minimal | ⚠️ N handles worth |
-
-#### Multiple ORT Sessions Scenario
-
-**Q: Is singleton good for multiple ORT sessions running in parallel?**
-
-**A: No, the current singleton design is NOT ideal for parallel sessions.** Here's why:
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│           Multiple Sessions with Shared Singleton (Current)            │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  Session A (Thread 1):         Session B (Thread 2):                   │
-│  ┌─────────────────┐           ┌─────────────────┐                     │
-│  │ CustomOp A1     │           │ CustomOp B1     │                     │
-│  │ CustomOp A2     │           │ CustomOp B2     │                     │
-│  └────────┬────────┘           └────────┬────────┘                     │
-│           │                             │                               │
-│           └──────────┬──────────────────┘                               │
-│                      ▼                                                  │
-│            ┌─────────────────────┐                                      │
-│            │  HipContext (Singleton)                                    │
-│            │  • stream_          │ ← Single stream for ALL ops          │
-│            │  • miopen_handle_   │                                      │
-│            └─────────────────────┘                                      │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-**Problems with current design under parallel sessions:**
-
-| Issue | Impact | Severity |
-|-------|--------|----------|
-| **Stream contention** | All ops from all sessions queue to same stream - no parallelism | ⚠️ Performance |
-| **Sync interference** | Session A's sync waits for Session B's ops too | ⚠️ Performance |
-| **MIOpen thread safety** | MIOpen handle may not be thread-safe for concurrent calls | ❌ Correctness |
-| **Algorithm caching** | `miopenFind*` may have race conditions if called concurrently | ❌ Correctness |
-
-**What happens in practice:**
-
-```
-Time →
-─────────────────────────────────────────────────────────────────────────
-
-Thread 1 (Session A):
-  Queue [A1_H2D] [A1_Conv] [A1_D2H] → sync_stream_with_timeout()
-                                                ↓
-                              Waits for ALL queued ops (including B's!)
-                                                ↓
-Thread 2 (Session B):
-  Queue [B1_H2D] [B1_Conv] [B1_D2H] → sync_stream_with_timeout()
-                                                ↓
-                              Also waits for ALL ops
-
-Stream: [A1_H2D] [A1_Conv] [A1_D2H] [B1_H2D] [B1_Conv] [B1_D2H]
-        └───────────────── All ops serialize on one stream ─────────┘
-```
-
-**Best solution for parallel sessions:**
-
-```cpp
-// Option 1: Per-session context (recommended for isolation)
-class RocmCustomOp {
-  std::shared_ptr<HipContext> context_;  // Per-instance, not singleton
-};
-
-// Option 2: Context pool with checkout/checkin
-class HipContextPool {
-  std::vector<std::unique_ptr<HipContext>> contexts_;
-  
-  ScopedContext acquire();  // Returns available context, blocks if none free
-};
-
-// Option 3: Thread-local contexts
-class HipContext {
-  static thread_local std::unique_ptr<HipContext> tl_context_;
-};
-```
-
-#### Can Per-Session Streams Enable Parallelism?
-
-**Q: If we create `hipStream_t` per ORT Session, can we benefit from multiple threads running in parallel?**
-
-**A: Yes! GPUs absolutely support multiple streams and can execute operations from different streams concurrently.** Here's the detailed explanation:
-
-##### GPU Multi-Stream Architecture
-
-Modern AMD GPUs have multiple execution units that can run concurrently:
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                      AMD GPU Execution Model                            │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐               │
-│  │   Stream A    │  │   Stream B    │  │   Stream C    │               │
-│  │  [Conv_A1]    │  │  [Conv_B1]    │  │  [Gemm_C1]    │               │
-│  │  [Conv_A2]    │  │  [Conv_B2]    │  │  [Gemm_C2]    │               │
-│  └───────┬───────┘  └───────┬───────┘  └───────┬───────┘               │
-│          │                  │                  │                        │
-│          └──────────────────┼──────────────────┘                        │
-│                             ▼                                           │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │                    GPU Hardware Scheduler                        │   │
-│  │  • Dispatches work units (wavefronts) to Compute Units          │   │
-│  │  • Can interleave work from multiple streams                    │   │
-│  │  • Manages resource allocation dynamically                       │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                             │                                           │
-│          ┌──────────────────┼──────────────────┐                        │
-│          ▼                  ▼                  ▼                        │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                  │
-│  │ Compute Unit │  │ Compute Unit │  │ Compute Unit │  ... (many CUs)  │
-│  │    (CU 0)    │  │    (CU 1)    │  │    (CU 2)    │                  │
-│  └──────────────┘  └──────────────┘  └──────────────┘                  │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-##### When Multiple Streams Benefit Performance
-
-| Scenario | Single Stream | Multiple Streams | Benefit |
-|----------|--------------|------------------|---------|
-| **GPU underutilized** (small batches) | Sequential | Concurrent | ✅ High |
-| **Memory transfers overlap compute** | Blocked | Overlapped | ✅ High |
-| **GPU fully loaded** (large batches) | 100% utilization | Still 100% | ❌ None |
-| **Different kernel types** (Conv + GEMM) | Sequential | Can overlap | ✅ Medium |
-
-##### Per-Session Streams in Practice
-
-```
-Time →
-─────────────────────────────────────────────────────────────────────────
-
-Single Stream (current):
-  Stream: [A_Conv1] [A_Conv2] [B_Conv1] [B_Conv2]
-          └───────────────── Sequential ─────────────────┘
-  
-  Total time: t(A_Conv1) + t(A_Conv2) + t(B_Conv1) + t(B_Conv2)
-
-Per-Session Streams (proposed):
-  Stream A: [A_Conv1] [A_Conv2]
-  Stream B:     [B_Conv1] [B_Conv2]    ← Can overlap!
-               └── Concurrent if GPU has capacity ──┘
-  
-  Total time: max(t(A), t(B))  ← Up to 2x faster!
-```
-
-##### Implementation for Per-Session Context
-
-```cpp
-class SessionContext {
-public:
-  SessionContext() {
-    hipStreamCreate(&stream_);
-    miopenCreate(&miopen_handle_);
-    miopenSetStream(miopen_handle_, stream_);
-    hipblasLtCreate(&hipblaslt_handle_);
-  }
-  
-  ~SessionContext() {
-    hipblasLtDestroy(hipblaslt_handle_);
-    miopenDestroy(miopen_handle_);
-    hipStreamDestroy(stream_);
-  }
-  
-  hipStream_t stream() { return stream_; }
-  miopenHandle_t miopen_handle() { return miopen_handle_; }
-  
-private:
-  hipStream_t stream_;
-  miopenHandle_t miopen_handle_;
-  hipblasLtHandle_t hipblaslt_handle_;
-};
-
-class RocmCustomOp {
-  // Each custom op gets its own context (or shares with session)
-  std::shared_ptr<SessionContext> context_;
-};
-```
-
-##### Considerations for Multi-Stream Design
-
-| Aspect | Benefit | Tradeoff |
-|--------|---------|----------|
-| **Concurrency** | Parallel execution on GPU | Requires GPU with spare capacity |
-| **Memory** | Isolated buffers per session | 2x GPU memory usage |
-| **Handles** | Independent kernel caches | Handle creation overhead × N |
-| **Complexity** | Clean isolation | More complex lifetime management |
-
-##### When Multi-Stream Actually Helps
-
-**High benefit scenarios:**
-- Small batch sizes (GPU not fully utilized by single inference)
-- Latency-sensitive applications (multiple small requests in parallel)
-- Mixed workloads (some sessions run Conv, others run GEMM)
-- Memory-bound kernels (H2D/D2H can overlap with compute)
-
-**Low benefit scenarios:**
-- Large batch sizes (single inference saturates GPU)
-- GPU memory limited (can't fit multiple model instances)
-- Compute-bound workloads (GPU at 100% utilization already)
-
-##### Practical Limits
-
-```
-Typical AMD GPU (RDNA3 / CDNA):
-  - 64-128 Compute Units
-  - 16GB - 96GB VRAM
-  
-  A single large convolution might use:
-  - 50-80% of CUs
-  - Significant memory bandwidth
-  
-  Practical concurrency:
-  - 2-4 small inferences can often run in parallel
-  - Large models (>8GB VRAM) limit to 1-2 concurrent sessions
-```
-
-##### Recommendation
-
-For maximum performance with multiple sessions:
-
-1. **Create per-session streams** - Enables GPU-level parallelism
-2. **Share MIOpen handles cautiously** - Or create per-session handles (safer but more memory)
-3. **Monitor GPU utilization** - Use `rocm-smi` to verify actual parallelism
-4. **Size appropriately** - Don't create more contexts than GPU can support
-
-#### When to Migrate Away from Singleton
-
-Consider changing the design when:
-1. **Multi-GPU support** is needed → Per-device context objects
-2. **ORT parallel executor** is used → Thread-local handles or mutex protection
-3. **Multiple ORT sessions** in same process need isolation → Handle pool or per-session context
-
-For now, the singleton is the right choice for a focused **single-session, single-GPU, sequential inference** implementation. If you need parallel sessions, the design should be updated to use one of the alternatives above.
-
-#### Current Design Constraints
-
-The current singleton implementation is suitable for:
-- ✅ Single ORT session per process
-- ✅ Sequential inference calls within that session
-- ✅ Single AMD GPU
-
-It is **NOT** suitable for:
-- ❌ Multiple ORT sessions running in parallel
-- ❌ ORT with parallel executor enabled
-- ❌ Multi-GPU setups
+The current per-session design addresses all these limitations.
 
 ### Why Cache Algorithm Search Results?
 

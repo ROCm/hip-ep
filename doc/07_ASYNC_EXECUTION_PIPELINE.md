@@ -199,65 +199,16 @@ Time →
 
 ## Memory Management
 
-### Tensor Buffer Categories
+> **Note:** For detailed GPU memory layout, buffer categories, and resource lifecycle, see [08_ROCM_RESOURCE_MANAGEMENT.md](08_ROCM_RESOURCE_MANAGEMENT.md).
 
-| Category | Source | Lifetime | GPU/Host |
-|----------|--------|----------|----------|
-| External Input | ORT context | Per-inference | Host → GPU |
-| External Output | ORT context | Per-inference | GPU → Host |
-| Intermediate | Internal pool | Per-inference | GPU only |
-| Weights | Cached | Model lifetime | GPU only |
-| Workspace | Shared pool | Per-op | GPU only |
+**Key buffer types for async execution:**
 
-### Intermediate Tensor Pool
-
-Intermediate tensors are tracked per-node:
-
-```cpp
-// Map: node_id → output_index → device buffer
-std::unordered_map<int32_t, std::vector<float*>> intermediate_tensors_;
-
-float* AllocateIntermediateBuffer(int32_t node_id, int32_t output_index) {
-  auto& node_outputs = intermediate_tensors_[node_id];
-  if (node_outputs.size() <= output_index) {
-    node_outputs.resize(output_index + 1, nullptr);
-  }
-  
-  size_t bytes = GetOutputSize(node_id, output_index);
-  if (node_outputs[output_index] == nullptr) {
-    hipMalloc(&node_outputs[output_index], bytes);
-  }
-  return node_outputs[output_index];
-}
-```
-
-### External Input Buffer Cache
-
-External input buffers are cached to avoid repeated allocations:
-
-```cpp
-// Map: tensor_name → device buffer
-std::unordered_map<std::string, float*> external_input_buffers_;
-std::unordered_map<std::string, size_t> external_input_sizes_;
-
-float* AllocateDeviceBuffer(const std::string& name, size_t bytes) {
-  auto it = external_input_buffers_.find(name);
-  if (it != external_input_buffers_.end() && 
-      external_input_sizes_[name] >= bytes) {
-    return it->second;  // Reuse existing buffer
-  }
-  
-  // Allocate new buffer (or resize)
-  if (it != external_input_buffers_.end()) {
-    hipFree(it->second);
-  }
-  float* d_ptr;
-  hipMalloc(&d_ptr, bytes);
-  external_input_buffers_[name] = d_ptr;
-  external_input_sizes_[name] = bytes;
-  return d_ptr;
-}
-```
+| Category | Role in Async Pipeline |
+|----------|------------------------|
+| External Input | H2D at start of pipeline |
+| External Output | D2H overlapped with compute |
+| Intermediate | GPU-only, enables fusion benefit |
+| Weights | Pre-loaded, no transfer overhead |
 
 ## Performance Considerations
 

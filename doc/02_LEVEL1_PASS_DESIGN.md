@@ -193,117 +193,18 @@ if (meta_def) {
 
 ## Data Structures
 
-### RocmSubgraphProto
+> **Note:** For detailed protobuf message definitions and design rationale, see [01_DESIGN.md §6.2 - Core Messages](01_DESIGN.md#62-core-messages).
 
-The main data structure representing a fused subgraph:
+The key data structures used by the Level-1 pass are:
 
-```protobuf
-message RocmSubgraphProto {
-  // Nodes in topological (execution) order
-  repeated RocmNodeProto nodes = 1;
-  
-  // External outputs with source node mappings
-  repeated ExternalOutputProto outputs = 2;
-}
-```
+| Message | Purpose |
+|---------|---------|
+| `RocmSubgraphProto` | Container for the complete fused subgraph |
+| `RocmNodeProto` | Single operation node with parameters and input references |
+| `TensorRefProto` | References inputs (external from ORT or internal from another node) |
+| `ExternalOutputProto` | Maps outputs back to ORT tensors for async D2H scheduling |
 
-### RocmNodeProto
-
-A single node in the subgraph:
-
-```protobuf
-message RocmNodeProto {
-  int32 node_id = 1;                      // Unique ID (0-indexed)
-  RocmParamProto params = 2;              // Operation parameters
-  repeated TensorRefProto inputs = 3;     // Input references
-  repeated string output_names = 4;       // Output tensor names
-}
-```
-
-### TensorRefProto
-
-Reference to a tensor input - either external or internal:
-
-```protobuf
-message TensorRefProto {
-  oneof source {
-    string external_name = 1;          // From ORT context
-    InternalTensorRefProto internal = 2; // From another node
-  }
-}
-
-message InternalTensorRefProto {
-  int32 producer_node_id = 1;  // Which node produces this
-  int32 output_index = 2;      // Which output (usually 0)
-}
-```
-
-### ExternalOutputProto
-
-Maps external outputs to their producing nodes:
-
-```protobuf
-message ExternalOutputProto {
-  string name = 1;                 // ORT output tensor name
-  int32 producer_node_id = 2;      // Which node produces it
-  int32 output_index = 3;          // Which output
-}
-```
-
-## Example: Conv → Conv Subgraph
-
-Consider this pattern: `X → Conv1 → Conv2 → Y`
-
-The Level-1 pass builds:
-
-```protobuf
-RocmSubgraphProto {
-  nodes: [
-    {
-      node_id: 0
-      params: { op_type: "conv", conv_params: {...weight_file, shapes...} }
-      inputs: [
-        { external_name: "X" }  // From ORT
-      ]
-      output_names: ["conv1_out"]
-    },
-    {
-      node_id: 1
-      params: { op_type: "conv", conv_params: {...weight_file, shapes...} }
-      inputs: [
-        { internal: { producer_node_id: 0, output_index: 0 } }  // From Conv1
-      ]
-      output_names: ["conv2_out"]
-    }
-  ]
-  outputs: [
-    { name: "Y", producer_node_id: 1, output_index: 0 }
-  ]
-}
-```
-
-## Benefits of RocmSubgraphProto Design
-
-1. **Explicit Topology**: The subgraph structure is explicitly represented with `TensorRefProto`
-2. **Type-Safe**: Uses `oneof` instead of sentinel values like `-1`
-3. **Async-Ready**: `ExternalOutputProto` mapping enables overlapped D2H transfers
-4. **Memory Optimization**: Intermediate tensors (internal references) stay on GPU
-5. **Extensible**: Easy to add new operation types
-
-## Async Execution Enabled by ExternalOutputProto
-
-The `ExternalOutputProto` mapping enables this optimization:
-
-```
-Time →
-┌───────────────────────────────────────────────────────────────────────────┐
-│ H2D(X) │ Conv1 │ Conv2 │ D2H(conv2_out) │ Gemm │ D2H(gemm_out) │ sync    │
-└───────────────────────────────────────────────────────────────────────────┘
-                         ↑                        ↑
-                         └── can overlap with Gemm execution!
-```
-
-When the custom op finishes executing node N, it checks if any `ExternalOutputProto` maps to that node and immediately issues `hipMemcpyAsync` for D2H transfer.
+For a complete subgraph example showing how these structures work together, see [01_DESIGN.md §6.3 - Subgraph Example](01_DESIGN.md#63-subgraph-example).
 
 ## Configuration
 
