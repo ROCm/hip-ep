@@ -15,6 +15,7 @@ Both libraries share a single HIP stream for implicit operation fusion.
 - **Unified EP Architecture**: Single execution provider supporting multiple operation types
 - **Level-1/Level-2 Pass System**: Modular pattern matching with orchestration
 - **Shared HIP Context**: Operations share the same GPU stream for implicit fusion
+- **GPU Timeout Protection**: Prevents indefinite hangs with configurable timeouts
 - **MIOpen Convolution**: Forward convolution with optional bias
 - **hipBLASLt GEMM**: Matrix multiplication with epilogue support
 
@@ -52,6 +53,12 @@ Both libraries share a single HIP stream for implicit operation fusion.
    ```batch
    cd morphizen-rocm
    build.bat
+   ```
+
+3. Configure GPU timeout (optional):
+   ```batch
+   REM Set timeout to 10 seconds (default is 5 seconds)
+   set MORPHIZEN_GPU_TIMEOUT_MS=10000
    ```
 
 ### Linux
@@ -112,8 +119,11 @@ morphizen-rocm/
 
 ## Documentation
 
-- [Design Document](doc/01_DESIGN.md) - Architecture and design details
-- [Build Instructions](doc/02_BUILD.md) - Detailed build guide
+- [01_DESIGN.md](doc/01_DESIGN.md) - Architecture and design details
+- [02_LEVEL1_PASS_DESIGN.md](doc/02_LEVEL1_PASS_DESIGN.md) - Level-1 pass implementation
+- [03_GROUPING_ALGORITHM.md](doc/03_GROUPING_ALGORITHM.md) - Pattern grouping algorithm
+- [04_TEST_STATUS_REPORT.md](doc/04_TEST_STATUS_REPORT.md) - Test status and results
+- [05_GPU_TIMEOUT_HANDLING.md](doc/05_GPU_TIMEOUT_HANDLING.md) - GPU timeout protection
 
 ## License
 

@@ -49,6 +49,21 @@ else()
 endif()
 set_target_properties(rocm_gemm_test PROPERTIES FOLDER "rocm-tests")
 
+# Timeout test (GPU timeout mechanism)
+add_executable(rocm_timeout_test test_timeout.cpp)
+target_link_libraries(rocm_timeout_test PRIVATE MIOpen glog::glog)
+if(WIN32)
+  target_include_directories(rocm_timeout_test SYSTEM PRIVATE 
+    "${THEROCK_DIST}/include"
+    "${CMAKE_SOURCE_DIR}/../onnxruntime/include/onnxruntime/core/session"
+  )
+  target_compile_definitions(rocm_timeout_test PRIVATE "__HIP_PLATFORM_AMD__=1")
+  target_link_libraries(rocm_timeout_test PRIVATE "${THEROCK_DIST}/lib/amdhip64.lib")
+else()
+  target_link_libraries(rocm_timeout_test PRIVATE hip::device)
+endif()
+set_target_properties(rocm_timeout_test PROPERTIES FOLDER "rocm-tests")
+
 # ORT Integration test (for VitisAI EP testing with MY_LOG)
 # This test links against ONNX Runtime and can trigger the passes/custom-ops
 
