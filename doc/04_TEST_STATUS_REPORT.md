@@ -201,12 +201,10 @@ Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT16x16x16_SN_LDSB0_AFC1_...
 
 **Description:** Verifies that the VitisAI EP DLL is built and available.
 
-**Command to reproduce (with all logs enabled):**
+**Command to reproduce (with debug logs):**
 ```batch
 cd C:\Develop\m\build\morphizen-rocm\bin
-set MORPHIZEN_DEBUG_ROCM=2
-set GLOG_logtostderr=1
-set GLOG_minloglevel=0
+set MORPHIZEN_DEBUG_ROCM=1
 ort_integration_test.exe --gtest_filter=OrtIntegrationTest.LoadVitisAIProvider
 ```
 
@@ -214,24 +212,20 @@ ort_integration_test.exe --gtest_filter=OrtIntegrationTest.LoadVitisAIProvider
 ```
 ORT Integration Test for VitisAI HIP EP
 
-To see MY_LOG output, set these environment variables:
-  set MORPHIZEN_DEBUG_ROCM=2
-  set GLOG_logtostderr=1
-  set GLOG_minloglevel=0
-
 [==========] Running 1 test from 1 test suite.
 [----------] 1 test from OrtIntegrationTest
 [ RUN      ] OrtIntegrationTest.LoadVitisAIProvider
 
 === Environment Variables ===
-MORPHIZEN_DEBUG_ROCM: 2
-GLOG_logtostderr: 1
+MORPHIZEN_DEBUG_ROCM: 1
 
 [Test] Loading VitisAI Execution Provider...
-[Test] Found VitisAI EP at: onnxruntime_vitisai_ep.dll
-[       OK ] OrtIntegrationTest.LoadVitisAIProvider (38 ms)
-[----------] 1 test from OrtIntegrationTest (38 ms total)
-[==========] 1 test from 1 test suite ran. (38 ms total)
+[Test] Found 2 EP device(s)
+[Test]   - EP device: CPUExecutionProvider
+[Test]   - EP device: VitisAI
+[       OK ] OrtIntegrationTest.LoadVitisAIProvider (247 ms)
+[----------] 1 test from OrtIntegrationTest (247 ms total)
+[==========] 1 test from 1 test suite ran. (247 ms total)
 [  PASSED  ] 1 test.
 ```
 
@@ -250,13 +244,11 @@ GLOG_logtostderr: 1
 - Input: X [1, 3, 8, 8] filled with 1.0
 - Output: Y [1, 16, 8, 8]
 
-**Command to reproduce (with all logs enabled):**
+**Command to reproduce (with debug logs):**
 ```batch
 cd C:\Develop\m\build\morphizen-rocm\bin
 copy C:\Develop\m\Source\morphizen-rocm\test\conv_model.onnx .
-set MORPHIZEN_DEBUG_ROCM=2
-set GLOG_logtostderr=1
-set GLOG_minloglevel=0
+set MORPHIZEN_DEBUG_ROCM=1
 ort_integration_test.exe --gtest_filter=OrtIntegrationTest.CPUProviderInference
 ```
 
@@ -270,7 +262,6 @@ ORT Integration Test for VitisAI HIP EP
 
 === Environment Variables ===
 MORPHIZEN_DEBUG_ROCM: 1
-GLOG_logtostderr: (not set)
 
 [I:onnxruntime:OrtIntegrationTest, utils.cc:467] Loading EP library: 00000248DF866C40 as a plugin
 [SetUp] VitisAI EP registered successfully from: onnxruntime_vitisai_ep.dll
@@ -348,7 +339,6 @@ ORT Integration Test for VitisAI HIP EP
 
 === Environment Variables ===
 MORPHIZEN_DEBUG_ROCM: 1
-GLOG_logtostderr: (not set)
 
 [I:onnxruntime:OrtIntegrationTest, device_discovery_common.cc:34] Discovered OrtHardwareDevice {vendor_id:0x1002, device_id:0x7448, vendor:Advanced Micro Devices, Inc., type:1, metadata: [Description=AMD Radeon PRO W7900, Discrete=1, DxgiAdapterNumber=0, DxgiHighPerformanceIndex=0, DxgiVideoMemory=49136 MB, LUID=56564, ]}
 [I:onnxruntime:OrtIntegrationTest, device_discovery_common.cc:34] Discovered OrtHardwareDevice {vendor_id:0x1022, device_id:0x0, vendor:AMD, type:0, metadata: [Description=AMD Ryzen 7 5800X 8-Core Processor, ]}
@@ -519,7 +509,6 @@ execution_providers:
 |----------|-------------|---------|
 | `MORPHIZEN_DEBUG_ROCM` | Log level (0=off, 1=basic, 2=verbose) | 0 |
 | `MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE` | Enable VitisAI device detection | 0 |
-| `GLOG_logtostderr` | Output glog to stderr | 0 |
 
 ---
 
@@ -544,9 +533,6 @@ REM Run an app that uses VitisAI EP
 your_app_with_vitisai_ep.exe
 ```
 
-**Note:** `GLOG_logtostderr` and `GLOG_minloglevel` have limited effect. The logs you see 
-(`[I:onnxruntime:...]`) are from ORT's internal logging, which uses glog as a backend 
-but is primarily controlled by `MORPHIZEN_DEBUG_ROCM`.
 
 ---
 
