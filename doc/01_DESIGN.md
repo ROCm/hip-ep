@@ -41,7 +41,7 @@ Combine both libraries into a single EP with:
 
 ### 2.1 High-Level Architecture
 
-<pre><code>┌─────────────────────────────────────────────────────────────────────────┐
+<pre style="font-family: 'Courier New', Consolas, monospace; line-height: 1.2;"><code>┌─────────────────────────────────────────────────────────────────────────┐
 │                           ONNX Runtime                                  │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
