@@ -3,6 +3,10 @@
 syntax = "proto3";
 package rocm;
 
+// ============================================================================
+// Operation Parameters (Conv, Gemm)
+// ============================================================================
+
 // Convolution parameters (for MIOpen)
 // Computes: y = conv(x, w) + bias (optional)
 message ConvParamProto {
@@ -139,9 +143,18 @@ message GemmParamProto {
   
   // Whether this GEMM has bias (C input)
   bool has_bias = 29;
+  
+  // Weight tensor file (B matrix for fused GEMM)
+  string weight_file_path = 30;    // Path to weight data file in cache
+  int64 weight_file_size = 31;     // Size of weight data in bytes
+  
+  // Bias tensor file (if has_bias is true)
+  string bias_file_path = 32;      // Path to bias data file in cache
+  int64 bias_file_size = 33;       // Size of bias data in bytes
 }
 
-// Custom op parameters (stored in MetaDef)
+// Single operation parameters (used by Level-2 passes)
+// When a single Conv or Gemm is fused, this is attached to MetaDef
 message RocmParamProto {
   // Operation type: "conv" or "gemm"
   string op_type = 1;
@@ -155,18 +168,80 @@ message RocmParamProto {
   int64 ep_context_file_size = 5;
 }
 
-// Merged parameters from multiple ROCm operations
-// Used by Level-1 pass to combine consecutive fused nodes
+// ============================================================================
+// Subgraph Representation (Tensor References and Topology)
+// ============================================================================
+
+// Reference to an output tensor from another node within the subgraph
+message InternalTensorRefProto {
+  int32 producer_node_id = 1;  // Which node produces this tensor (0-indexed)
+  int32 output_index = 2;      // Which output of that node (usually 0)
+}
+
+// Represents a tensor reference - either external (from ORT) or internal (from another node)
+// This enables tracking data flow within the subgraph
+message TensorRefProto {
+  oneof source {
+    string external_name = 1;          // Name of external input tensor (from ORT context)
+    InternalTensorRefProto internal = 2; // Reference to another node's output within subgraph
+  }
+}
+
+// A node in the subgraph execution plan
+// Represents a single operation (Conv or Gemm) with its input/output connections
+message RocmNodeProto {
+  int32 node_id = 1;                      // Unique ID within subgraph (0-indexed, topological order)
+  RocmParamProto params = 2;              // Operation parameters (conv/gemm)
+  repeated TensorRefProto inputs = 3;     // Input tensor references (external or internal)
+  repeated string output_names = 4;       // Output tensor names (for debugging/reference)
+}
+
+// Mapping of an external output to its source within the subgraph
+// This enables async D2H memory copy scheduling
+message ExternalOutputProto {
+  string name = 1;                 // External tensor name (ORT context output)
+  int32 producer_node_id = 2;      // Which node produces this tensor
+  int32 output_index = 3;          // Which output of that node (usually 0)
+}
+
+// ============================================================================
+// ROCm Subgraph (replaces RocmMergedParamProto)
+// ============================================================================
+
+// Represents a ROCm subgraph to be executed as a single fused operation
+// Contains the complete topology and execution plan for a group of operations
+//
+// Key design decisions:
+// - Nodes are stored in topological order for sequential execution
+// - TensorRefProto enables tracking whether inputs come from outside or inside the subgraph
+// - ExternalOutputProto enables async D2H copy scheduling
+// - Intermediate tensors (internal to subgraph) stay on GPU memory
+message RocmSubgraphProto {
+  // Nodes in topological (execution) order
+  // Each node has a unique node_id from 0 to N-1
+  repeated RocmNodeProto nodes = 1;
+  
+  // External outputs with their source node mappings
+  // These are the outputs consumed outside the subgraph or are graph outputs
+  // The mapping enables scheduling async D2H copies immediately after the producer completes
+  repeated ExternalOutputProto outputs = 2;
+}
+
+// ============================================================================
+// Legacy/Backward Compatibility (Deprecated - use RocmSubgraphProto)
+// ============================================================================
+
+// DEPRECATED: Use RocmSubgraphProto instead
+// This was the original merged parameters message that lacked topology information
 message RocmMergedParamProto {
-  // Array of individual operation parameters (in execution order)
   repeated RocmParamProto rocm_params = 1;
-  
-  // Total number of operations in this merged node
   int32 op_count = 2;
-  
-  // Whether implicit fusion is possible (all ops can share one stream)
   bool implicit_fusion = 3;
 }
+
+// ============================================================================
+// Pass Configuration
+// ============================================================================
 
 // Pass configuration for ROCm Level-1 orchestrator
 // This defines sub-passes that the Level-1 pass will run
