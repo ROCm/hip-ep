@@ -223,35 +223,48 @@ The `vaip_config.json` defines the execution order:
 
 ### 5.1 Design Goals
 
-- **Single HIP stream** for all operations
+- **Per-session HIP stream** for all operations within a session
 - **Lazy initialization** (only create resources when needed)
-- **Thread-safe** singleton pattern
-- **Automatic cleanup** on destruction
+- **Session-scoped lifetime** (resources cleaned up when session ends)
+- **Multi-session support** (each ORT session gets its own context)
 
 ### 5.2 Implementation
+
+Each ORT session gets its own `HipContext` via `SessionContextRegistry`:
 
 ```cpp
 class HipContext {
 public:
-  static HipContext& instance() {
-    static HipContext ctx;
-    return ctx;
+  HipContext() {
+    hipStreamCreate(&stream_);
+    miopenCreate(&miopen_handle_);
+    miopenSetStream(miopen_handle_, stream_);
+    hipblasLtCreate(&hipblaslt_handle_);
   }
   
-  hipStream_t stream();
-  miopenHandle_t miopen_handle();
-  hipblasLtHandle_t hipblaslt_handle();
+  ~HipContext() {
+    hipblasLtDestroy(hipblaslt_handle_);
+    miopenDestroy(miopen_handle_);
+    hipStreamDestroy(stream_);
+  }
+  
+  hipStream_t stream() { return stream_; }
+  miopenHandle_t miopen_handle() { return miopen_handle_; }
+  hipblasLtHandle_t hipblaslt_handle() { return hipblaslt_handle_; }
 
 private:
-  void ensure_initialized();
-  
-  std::once_flag init_flag_;
-  bool initialized_ = false;
   hipStream_t stream_ = nullptr;
   miopenHandle_t miopen_handle_ = nullptr;
   hipblasLtHandle_t hipblaslt_handle_ = nullptr;
 };
+
+// Each RocmCustomOp gets a shared_ptr to its session's HipContext
+class RocmCustomOp {
+  std::shared_ptr<HipContext> hip_context_;
+};
 ```
+
+> **Note:** For detailed resource lifecycle and multi-session architecture, see [08_ROCM_RESOURCE_MANAGEMENT.md](08_ROCM_RESOURCE_MANAGEMENT.md).
 
 ### 5.3 Implicit Fusion via Shared Stream
 
@@ -287,6 +300,52 @@ The proto design follows these principles:
 
 ### 6.2 Core Messages
 
+The subgraph representation uses four core protobuf messages that work together to describe the execution topology:
+
+| Message | Purpose |
+|---------|---------|
+| `RocmSubgraphProto` | The complete subgraph container |
+| `RocmNodeProto` | Represents a single operation node in the subgraph |
+| `TensorRefProto` | Tracks where a tensor comes from (external input or another node's output) |
+| `ExternalOutputProto` | Maps subgraph outputs back to ORT output tensors |
+
+These messages form a graph structure where:
+- `RocmSubgraphProto` contains a list of `RocmNodeProto` nodes in topological order
+- Each `RocmNodeProto` uses `TensorRefProto` to reference its inputs
+- `ExternalOutputProto` identifies which node outputs should be copied back to the host
+
+#### RocmSubgraphProto - Complete Subgraph
+
+```protobuf
+// Represents a ROCm subgraph to be executed as a single fused operation
+message RocmSubgraphProto {
+  repeated RocmNodeProto nodes = 1;           // Nodes in topological order
+  repeated ExternalOutputProto outputs = 2;  // External outputs with sources
+}
+```
+
+**Why this design?**
+- Top-level container that the custom op receives and executes
+- `nodes` in topological order ensures correct execution sequence
+- `outputs` list enables async D2H scheduling
+
+#### RocmNodeProto - Operation Node
+
+```protobuf
+// A node in the subgraph execution plan
+message RocmNodeProto {
+  int32 node_id = 1;                      // Unique ID (0-indexed, topological order)
+  RocmParamProto params = 2;              // Operation parameters (conv/gemm)
+  repeated TensorRefProto inputs = 3;     // Input tensor references
+  repeated string output_names = 4;       // Output names (for debugging)
+}
+```
+
+**Why this design?**
+- `node_id` enables references between nodes
+- `inputs` tracks exactly where each input comes from
+- `params` contains full operation parameters (shapes, weights, etc.)
+
 #### TensorRefProto - Tensor Source Tracking
 
 ```protobuf
@@ -311,23 +370,6 @@ message TensorRefProto {
 - Easy to extend (could add `constant` source type later)
 - Clean C++ code: `if (ref.has_external_name()) {...} else {...}`
 
-#### RocmNodeProto - Operation Node
-
-```protobuf
-// A node in the subgraph execution plan
-message RocmNodeProto {
-  int32 node_id = 1;                      // Unique ID (0-indexed, topological order)
-  RocmParamProto params = 2;              // Operation parameters (conv/gemm)
-  repeated TensorRefProto inputs = 3;     // Input tensor references
-  repeated string output_names = 4;       // Output names (for debugging)
-}
-```
-
-**Why this design?**
-- `node_id` enables references between nodes
-- `inputs` tracks exactly where each input comes from
-- `params` contains full operation parameters (shapes, weights, etc.)
-
 #### ExternalOutputProto - Output Mapping
 
 ```protobuf
@@ -343,16 +385,6 @@ message ExternalOutputProto {
 - Maps ORT outputs back to their producing nodes
 - Enables async D2H scheduling: when node N completes, immediately copy its external outputs
 - Allows overlapping D2H with subsequent GPU kernels
-
-#### RocmSubgraphProto - Complete Subgraph
-
-```protobuf
-// Represents a ROCm subgraph to be executed as a single fused operation
-message RocmSubgraphProto {
-  repeated RocmNodeProto nodes = 1;           // Nodes in topological order
-  repeated ExternalOutputProto outputs = 2;  // External outputs with sources
-}
-```
 
 ### 6.3 Subgraph Example
 
