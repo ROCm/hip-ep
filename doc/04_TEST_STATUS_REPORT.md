@@ -536,14 +536,17 @@ execution_providers:
 
 **To see MY_LOG messages:**
 ```batch
-REM Required environment variables
-set MORPHIZEN_DEBUG_ROCM=2
-set GLOG_logtostderr=1
-set GLOG_minloglevel=0
+REM Only MORPHIZEN_DEBUG_ROCM is required
+set MORPHIZEN_DEBUG_ROCM=1
+set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
 
 REM Run an app that uses VitisAI EP
 your_app_with_vitisai_ep.exe
 ```
+
+**Note:** `GLOG_logtostderr` and `GLOG_minloglevel` have limited effect. The logs you see 
+(`[I:onnxruntime:...]`) are from ORT's internal logging, which uses glog as a backend 
+but is primarily controlled by `MORPHIZEN_DEBUG_ROCM`.
 
 ---
 
