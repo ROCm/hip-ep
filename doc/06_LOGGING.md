@@ -215,6 +215,30 @@ When integrated with ORT, log messages appear with timestamps:
 
 ## Troubleshooting
 
+### Test Appears Stuck After Running
+
+If the integration test appears to hang or get stuck:
+
+1. **MIOpen algorithm search is slow on first run**
+   - The first convolution takes ~3-5 seconds due to JIT compilation
+   - Subsequent runs are faster due to caching
+   - This is normal behavior, wait for completion
+
+2. **Too many mismatch log messages**
+   - If CPU vs VitisAI EP outputs differ, each mismatch is logged
+   - The test now exits early after 5 mismatches to prevent log flood
+   - Look for: `[Test] FATAL: Too many mismatches`
+
+3. **Excessive debug logging**
+   - `MORPHIZEN_DEBUG_ROCM=2` generates many messages
+   - Use `MORPHIZEN_DEBUG_ROCM=1` for key events only
+   - Use `MORPHIZEN_DEBUG_ROCM=0` to disable debug logging
+
+4. **GPU timeout**
+   - Default timeout is 5 seconds per operation
+   - Increase with: `set MORPHIZEN_GPU_TIMEOUT_MS=30000` (30 seconds)
+   - If timeout occurs, look for: `[ROCm CustomOp] Conv operation TIMED OUT!`
+
 ### No MY_LOG Output
 
 1. **Check environment variable:**

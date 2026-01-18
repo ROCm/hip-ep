@@ -131,98 +131,50 @@ RocmCustomOp::~RocmCustomOp() {
 }
 
 void RocmCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const {
-  MY_LOG(2) << "[ROCm CustomOp] Compute() called";
-  
   const auto& op_type = rocm_proto_.op_type();
-  MY_LOG(2) << "[ROCm CustomOp] op_type = " << op_type;
+  MY_LOG(1) << "[ROCm CustomOp] Compute(" << op_type << ")";
 
   // Check if GPU is available before attempting execution
-  MY_LOG(2) << "[ROCm CustomOp] Checking HIP context initialization...";
   auto& hip_ctx = HipContext::instance();
-  MY_LOG(2) << "[ROCm CustomOp] Got HipContext instance, checking is_initialized()...";
   if (!hip_ctx.is_initialized()) {
-    MY_LOG(2) << "[ROCm CustomOp] HIP context NOT initialized!";
     LOG(ERROR) << "[ROCm CustomOp] HIP context not initialized - no AMD GPU available!";
     throw std::runtime_error("ROCm CustomOp: No AMD GPU available. HIP context initialization failed.");
   }
-  MY_LOG(2) << "[ROCm CustomOp] HIP context is initialized";
 
   if (op_type == "conv") {
-    MY_LOG(2) << "[ROCm CustomOp] Dispatching to ExecuteConv...";
     ExecuteConv(api, context);
   } else if (op_type == "gemm") {
-    MY_LOG(2) << "[ROCm CustomOp] Dispatching to ExecuteGemm...";
     ExecuteGemm(api, context);
   } else {
     LOG(ERROR) << "[ROCm CustomOp] Unknown op_type: " << op_type;
     throw std::runtime_error("Unknown op_type: " + op_type);
   }
-  MY_LOG(2) << "[ROCm CustomOp] Compute() completed";
 }
 
 void RocmCustomOp::ExecuteConv(const OrtApi* api, OrtKernelContext* context) const {
   MY_LOG(1) << "[ROCm CustomOp] ExecuteConv (MIOpen)";
-  MY_LOG(2) << "[ROCm CustomOp] ExecuteConv() starting...";
   
-  MY_LOG(2) << "[ROCm CustomOp] Getting HIP context...";
   auto& hip_ctx = HipContext::instance();
-  
-  MY_LOG(2) << "[ROCm CustomOp] Getting MIOpen handle...";
   auto miopen_handle = hip_ctx.miopen_handle();
-  MY_LOG(2) << "[ROCm CustomOp] MIOpen handle = " << miopen_handle;
-  
-  MY_LOG(2) << "[ROCm CustomOp] Getting HIP stream...";
   auto stream = hip_ctx.stream();
-  MY_LOG(2) << "[ROCm CustomOp] HIP stream = " << stream;
 
   const auto& params = rocm_proto_.conv_params();
-  MY_LOG(2) << "[ROCm CustomOp] Conv params - batch=" << params.batch_size()
-            << ", out_channels=" << params.out_channels()
-            << ", out_height=" << params.out_height()
-            << ", out_width=" << params.out_width();
+  MY_LOG(2) << "[ROCm CustomOp] Conv: batch=" << params.batch_size()
+            << ", C_in=" << params.in_channels() << ", C_out=" << params.out_channels()
+            << ", H=" << params.in_height() << "x" << params.in_width()
+            << " -> " << params.out_height() << "x" << params.out_width();
 
-  // Get input tensors from ORT context
-  MY_LOG(2) << "[ROCm CustomOp] Getting input tensors...";
-  
-  // Get number of inputs to understand what's available
-  size_t num_inputs = 0;
-  api->KernelContext_GetInputCount(context, &num_inputs);
-  MY_LOG(2) << "[ROCm CustomOp] Number of inputs: " << num_inputs;
-  
+  // Get input tensor from ORT context
   const OrtValue* input_x = nullptr;
   api->KernelContext_GetInput(context, 0, &input_x);
-  MY_LOG(2) << "[ROCm CustomOp] input_x = " << input_x;
-  
   if (input_x == nullptr) {
     LOG(ERROR) << "[ROCm CustomOp] input_x is NULL!";
     throw std::runtime_error("ROCm CustomOp: Input tensor X is NULL");
   }
 
-  // Note: In fused VitisAI nodes, weights are typically constant initializers
-  // that should be extracted during pass execution, not runtime inputs.
-  // For now, we check if a second input exists.
-  const OrtValue* input_w = nullptr;
-  if (num_inputs > 1) {
-    api->KernelContext_GetInput(context, 1, &input_w);
-    MY_LOG(2) << "[ROCm CustomOp] input_w = " << input_w;
-  } else {
-    MY_LOG(2) << "[ROCm CustomOp] No weight tensor as runtime input (expected for fused nodes)";
-    MY_LOG(2) << "[ROCm CustomOp] Weights should be cached from pass (not yet implemented)";
-    // TODO: Weights should be extracted from the initializers during pass execution
-    // and cached in this custom op. For now, we'll skip the actual computation.
-  }
-
-  // Get tensor data pointers (const_cast needed for legacy API)
-  MY_LOG(2) << "[ROCm CustomOp] Getting tensor data pointers...";
-  float* x_data = nullptr;
-  api->GetTensorMutableData(const_cast<OrtValue*>(input_x), (void**)&x_data);
-  MY_LOG(2) << "[ROCm CustomOp] x_data = " << x_data;
-  
-  float* w_data = nullptr;
-  if (input_w != nullptr) {
-    api->GetTensorMutableData(const_cast<OrtValue*>(input_w), (void**)&w_data);
-    MY_LOG(2) << "[ROCm CustomOp] w_data = " << w_data;
-  }
+  // Get CPU data pointer for input
+  float* h_input = nullptr;
+  api->GetTensorMutableData(const_cast<OrtValue*>(input_x), (void**)&h_input);
 
   // Get output tensor
   std::vector<int64_t> output_shape = {
@@ -232,207 +184,156 @@ void RocmCustomOp::ExecuteConv(const OrtApi* api, OrtKernelContext* context) con
     params.out_width()
   };
   
-  MY_LOG(2) << "[ROCm CustomOp] Requested output shape [" 
-            << output_shape[0] << ", " << output_shape[1] << ", "
-            << output_shape[2] << ", " << output_shape[3] << "]";
-  
-  // Validate output shape - if params weren't properly populated, skip computation
+  // Validate output shape
   if (output_shape[0] <= 0 || output_shape[1] <= 0 || 
       output_shape[2] <= 0 || output_shape[3] <= 0) {
-    LOG(ERROR) << "[ROCm CustomOp] Invalid output shape detected!";
-    LOG(ERROR) << "[ROCm CustomOp] conv_params were not properly populated by the pass.";
-    LOG(ERROR) << "[ROCm CustomOp] This is a pass configuration issue, not a runtime error.";
+    LOG(ERROR) << "[ROCm CustomOp] Invalid output shape!";
     throw std::runtime_error("ROCm CustomOp: Invalid output shape. Conv params not properly populated by pass.");
   }
   
-  MY_LOG(2) << "[ROCm CustomOp] Getting output tensor...";
   OrtValue* output = nullptr;
   api->KernelContext_GetOutput(context, 0, output_shape.data(), output_shape.size(), &output);
-  MY_LOG(2) << "[ROCm CustomOp] output = " << output;
-  
   if (output == nullptr) {
     LOG(ERROR) << "[ROCm CustomOp] output is NULL!";
     throw std::runtime_error("ROCm CustomOp: Failed to get output tensor");
   }
   
-  float* y_data = nullptr;
-  api->GetTensorMutableData(output, (void**)&y_data);
-  MY_LOG(2) << "[ROCm CustomOp] y_data = " << y_data;
+  float* h_output = nullptr;
+  api->GetTensorMutableData(output, (void**)&h_output);
 
-  // TODO: Full MIOpen convolution implementation
-  MY_LOG(2) << "[ROCm CustomOp] Starting MIOpen convolution execution...";
-  
-  // Check if we have cached weights
+  // Check cached weights
   if (host_weight_.empty()) {
     LOG(ERROR) << "[ROCm CustomOp] No cached weights available!";
-    LOG(ERROR) << "[ROCm CustomOp] Weights should have been loaded in LoadCachedWeights()";
     throw std::runtime_error("ROCm CustomOp Conv: No cached weights available");
   }
+
+  // Calculate tensor sizes
+  size_t input_size = static_cast<size_t>(params.batch_size()) * params.in_channels() * 
+                      params.in_height() * params.in_width();
+  size_t output_size = static_cast<size_t>(params.batch_size()) * params.out_channels() * 
+                       params.out_height() * params.out_width();
+  size_t input_bytes = input_size * sizeof(float);
+  size_t output_bytes = output_size * sizeof(float);
+  size_t weight_bytes = host_weight_.size() * sizeof(float);
+
+  MY_LOG(2) << "[ROCm CustomOp] Input: " << input_size << " floats (" << input_bytes << " bytes)";
+  MY_LOG(2) << "[ROCm CustomOp] Output: " << output_size << " floats (" << output_bytes << " bytes)";
+
+  // =========================================================================
+  // GPU Memory Management with Async Transfers
+  // =========================================================================
   
-  MY_LOG(2) << "[ROCm CustomOp] Using cached weights: " << host_weight_.size() << " floats";
+  // Allocate device input buffer (mutable, reallocate if needed)
+  static thread_local float* d_input = nullptr;
+  static thread_local size_t d_input_size = 0;
   
-  // 1. Upload weights to device (lazy initialization)
+  if (d_input == nullptr || d_input_size < input_bytes) {
+    if (d_input) hipFree(d_input);
+    hipError_t err = hipMalloc(&d_input, input_bytes);
+    if (err != hipSuccess) {
+      LOG(ERROR) << "[ROCm CustomOp] Failed to allocate device input: " << hipGetErrorString(err);
+      throw std::runtime_error("Failed to allocate device input memory");
+    }
+    d_input_size = input_bytes;
+    MY_LOG(1) << "[ROCm CustomOp] Allocated device input buffer: " << input_bytes << " bytes";
+  }
+
+  // Allocate device output buffer (mutable, reallocate if needed)
+  static thread_local float* d_output = nullptr;
+  static thread_local size_t d_output_size = 0;
+  
+  if (d_output == nullptr || d_output_size < output_bytes) {
+    if (d_output) hipFree(d_output);
+    hipError_t err = hipMalloc(&d_output, output_bytes);
+    if (err != hipSuccess) {
+      LOG(ERROR) << "[ROCm CustomOp] Failed to allocate device output: " << hipGetErrorString(err);
+      throw std::runtime_error("Failed to allocate device output memory");
+    }
+    d_output_size = output_bytes;
+    MY_LOG(1) << "[ROCm CustomOp] Allocated device output buffer: " << output_bytes << " bytes";
+  }
+
+  // Upload weights to device (lazy initialization - only once)
   if (d_weight_ == nullptr) {
-    MY_LOG(2) << "[ROCm CustomOp] Allocating and uploading weights to device...";
-    size_t weight_bytes = host_weight_.size() * sizeof(float);
     hipError_t err = hipMalloc(&d_weight_, weight_bytes);
     if (err != hipSuccess) {
-      LOG(ERROR) << "[ROCm CustomOp] Failed to allocate device weight memory: " << hipGetErrorString(err);
+      LOG(ERROR) << "[ROCm CustomOp] Failed to allocate device weight: " << hipGetErrorString(err);
       throw std::runtime_error("Failed to allocate device weight memory");
     }
-    
     err = hipMemcpyAsync(d_weight_, host_weight_.data(), weight_bytes, hipMemcpyHostToDevice, stream);
     if (err != hipSuccess) {
-      LOG(ERROR) << "[ROCm CustomOp] Failed to copy weights to device: " << hipGetErrorString(err);
+      LOG(ERROR) << "[ROCm CustomOp] Failed to upload weights: " << hipGetErrorString(err);
       throw std::runtime_error("Failed to copy weights to device");
     }
-    MY_LOG(1) << "[ROCm CustomOp] Uploaded " << weight_bytes << " bytes of weights to GPU";
+    MY_LOG(1) << "[ROCm CustomOp] Uploaded weights to GPU: " << weight_bytes << " bytes";
   }
   
-  // Upload bias if present
+  // Upload bias if present (lazy initialization)
   if (params.has_bias() && !host_bias_.empty() && d_bias_ == nullptr) {
-    MY_LOG(2) << "[ROCm CustomOp] Allocating and uploading bias to device...";
     size_t bias_bytes = host_bias_.size() * sizeof(float);
     hipError_t err = hipMalloc(&d_bias_, bias_bytes);
     if (err != hipSuccess) {
-      LOG(ERROR) << "[ROCm CustomOp] Failed to allocate device bias memory: " << hipGetErrorString(err);
+      LOG(ERROR) << "[ROCm CustomOp] Failed to allocate device bias: " << hipGetErrorString(err);
       throw std::runtime_error("Failed to allocate device bias memory");
     }
-    
     err = hipMemcpyAsync(d_bias_, host_bias_.data(), bias_bytes, hipMemcpyHostToDevice, stream);
     if (err != hipSuccess) {
-      LOG(ERROR) << "[ROCm CustomOp] Failed to copy bias to device: " << hipGetErrorString(err);
+      LOG(ERROR) << "[ROCm CustomOp] Failed to upload bias: " << hipGetErrorString(err);
       throw std::runtime_error("Failed to copy bias to device");
     }
-    MY_LOG(1) << "[ROCm CustomOp] Uploaded " << bias_bytes << " bytes of bias to GPU";
+    MY_LOG(1) << "[ROCm CustomOp] Uploaded bias to GPU: " << bias_bytes << " bytes";
   }
-  
-  // 2. Create tensor descriptors
-  MY_LOG(2) << "[ROCm CustomOp] Creating MIOpen tensor descriptors...";
-  
+
+  // =========================================================================
+  // Async Input Transfer: CPU -> GPU
+  // =========================================================================
+  MY_LOG(2) << "[ROCm CustomOp] Async copy input to GPU...";
+  hipError_t err = hipMemcpyAsync(d_input, h_input, input_bytes, hipMemcpyHostToDevice, stream);
+  if (err != hipSuccess) {
+    LOG(ERROR) << "[ROCm CustomOp] Failed to copy input to device: " << hipGetErrorString(err);
+    throw std::runtime_error("Failed to copy input to device");
+  }
+
+  // =========================================================================
+  // MIOpen Tensor Descriptors
+  // =========================================================================
   miopenTensorDescriptor_t input_desc, weight_desc, output_desc;
   miopenConvolutionDescriptor_t conv_desc;
   
-  miopenStatus_t status = miopenCreateTensorDescriptor(&input_desc);
-  if (status != miopenStatusSuccess) {
-    LOG(ERROR) << "[ROCm CustomOp] Failed to create input descriptor";
-    throw std::runtime_error("Failed to create input tensor descriptor");
-  }
+  miopenCreateTensorDescriptor(&input_desc);
+  miopenCreateTensorDescriptor(&weight_desc);
+  miopenCreateTensorDescriptor(&output_desc);
+  miopenCreateConvolutionDescriptor(&conv_desc);
+
+  miopenSet4dTensorDescriptor(input_desc, miopenFloat,
+                              params.batch_size(), params.in_channels(),
+                              params.in_height(), params.in_width());
   
-  status = miopenCreateTensorDescriptor(&weight_desc);
-  if (status != miopenStatusSuccess) {
-    miopenDestroyTensorDescriptor(input_desc);
-    LOG(ERROR) << "[ROCm CustomOp] Failed to create weight descriptor";
-    throw std::runtime_error("Failed to create weight tensor descriptor");
-  }
+  miopenSet4dTensorDescriptor(weight_desc, miopenFloat,
+                              params.out_channels(), params.in_channels(),
+                              params.filter_height(), params.filter_width());
   
-  status = miopenCreateTensorDescriptor(&output_desc);
-  if (status != miopenStatusSuccess) {
-    miopenDestroyTensorDescriptor(weight_desc);
-    miopenDestroyTensorDescriptor(input_desc);
-    LOG(ERROR) << "[ROCm CustomOp] Failed to create output descriptor";
-    throw std::runtime_error("Failed to create output tensor descriptor");
-  }
+  miopenSet4dTensorDescriptor(output_desc, miopenFloat,
+                              params.batch_size(), params.out_channels(),
+                              params.out_height(), params.out_width());
   
-  // Set tensor descriptors (NCHW layout)
-  status = miopenSet4dTensorDescriptor(input_desc, miopenFloat,
-                                       params.batch_size(), params.in_channels(),
-                                       params.in_height(), params.in_width());
-  if (status != miopenStatusSuccess) {
-    miopenDestroyTensorDescriptor(output_desc);
-    miopenDestroyTensorDescriptor(weight_desc);
-    miopenDestroyTensorDescriptor(input_desc);
-    LOG(ERROR) << "[ROCm CustomOp] Failed to set input descriptor";
-    throw std::runtime_error("Failed to set input tensor descriptor");
-  }
-  
-  status = miopenSet4dTensorDescriptor(weight_desc, miopenFloat,
-                                       params.out_channels(), params.in_channels(),
-                                       params.filter_height(), params.filter_width());
-  if (status != miopenStatusSuccess) {
-    miopenDestroyTensorDescriptor(output_desc);
-    miopenDestroyTensorDescriptor(weight_desc);
-    miopenDestroyTensorDescriptor(input_desc);
-    LOG(ERROR) << "[ROCm CustomOp] Failed to set weight descriptor";
-    throw std::runtime_error("Failed to set weight tensor descriptor");
-  }
-  
-  status = miopenSet4dTensorDescriptor(output_desc, miopenFloat,
-                                       params.batch_size(), params.out_channels(),
-                                       params.out_height(), params.out_width());
-  if (status != miopenStatusSuccess) {
-    miopenDestroyTensorDescriptor(output_desc);
-    miopenDestroyTensorDescriptor(weight_desc);
-    miopenDestroyTensorDescriptor(input_desc);
-    LOG(ERROR) << "[ROCm CustomOp] Failed to set output descriptor";
-    throw std::runtime_error("Failed to set output tensor descriptor");
-  }
-  
-  MY_LOG(2) << "[ROCm CustomOp] Input: [" << params.batch_size() << ", " << params.in_channels() 
-            << ", " << params.in_height() << ", " << params.in_width() << "]";
-  MY_LOG(2) << "[ROCm CustomOp] Weight: [" << params.out_channels() << ", " << params.in_channels() 
-            << ", " << params.filter_height() << ", " << params.filter_width() << "]";
-  MY_LOG(2) << "[ROCm CustomOp] Output: [" << params.batch_size() << ", " << params.out_channels() 
-            << ", " << params.out_height() << ", " << params.out_width() << "]";
-  
-  // 3. Create convolution descriptor
-  MY_LOG(2) << "[ROCm CustomOp] Creating convolution descriptor...";
-  
-  status = miopenCreateConvolutionDescriptor(&conv_desc);
-  if (status != miopenStatusSuccess) {
-    miopenDestroyTensorDescriptor(output_desc);
-    miopenDestroyTensorDescriptor(weight_desc);
-    miopenDestroyTensorDescriptor(input_desc);
-    LOG(ERROR) << "[ROCm CustomOp] Failed to create convolution descriptor";
-    throw std::runtime_error("Failed to create convolution descriptor");
-  }
-  
-  status = miopenInitConvolutionDescriptor(conv_desc,
-                                           miopenConvolution,
-                                           params.pad_h(), params.pad_w(),
-                                           params.stride_h(), params.stride_w(),
-                                           params.dilation_h(), params.dilation_w());
-  if (status != miopenStatusSuccess) {
-    miopenDestroyConvolutionDescriptor(conv_desc);
-    miopenDestroyTensorDescriptor(output_desc);
-    miopenDestroyTensorDescriptor(weight_desc);
-    miopenDestroyTensorDescriptor(input_desc);
-    LOG(ERROR) << "[ROCm CustomOp] Failed to initialize convolution descriptor";
-    throw std::runtime_error("Failed to initialize convolution descriptor");
-  }
-  
-  MY_LOG(2) << "[ROCm CustomOp] Conv params - pad=[" << params.pad_h() << "," << params.pad_w() 
-            << "], stride=[" << params.stride_h() << "," << params.stride_w() 
-            << "], dilation=[" << params.dilation_h() << "," << params.dilation_w() << "]";
-  
-  // 4. Find best algorithm and get workspace size
-  MY_LOG(2) << "[ROCm CustomOp] Finding convolution algorithm...";
-  
+  miopenInitConvolutionDescriptor(conv_desc, miopenConvolution,
+                                  params.pad_h(), params.pad_w(),
+                                  params.stride_h(), params.stride_w(),
+                                  params.dilation_h(), params.dilation_w());
+
+  // =========================================================================
+  // Get Workspace Size and Allocate
+  // =========================================================================
   size_t workspace_size = 0;
-  status = miopenConvolutionForwardGetWorkSpaceSize(miopen_handle, weight_desc, input_desc,
-                                                     conv_desc, output_desc, &workspace_size);
-  if (status != miopenStatusSuccess) {
-    miopenDestroyConvolutionDescriptor(conv_desc);
-    miopenDestroyTensorDescriptor(output_desc);
-    miopenDestroyTensorDescriptor(weight_desc);
-    miopenDestroyTensorDescriptor(input_desc);
-    LOG(ERROR) << "[ROCm CustomOp] Failed to get workspace size";
-    throw std::runtime_error("Failed to get workspace size");
-  }
+  miopenConvolutionForwardGetWorkSpaceSize(miopen_handle, weight_desc, input_desc,
+                                           conv_desc, output_desc, &workspace_size);
   
-  MY_LOG(2) << "[ROCm CustomOp] Workspace size: " << workspace_size << " bytes";
-  
-  // Allocate workspace if needed
   void* workspace_ptr = nullptr;
   if (workspace_size > 0) {
-    // Check if we need to reallocate workspace
     if (workspace_ == nullptr || workspace_size_ < workspace_size) {
-      if (workspace_) {
-        hipFree(workspace_);
-        workspace_ = nullptr;
-      }
-      
-      hipError_t err = hipMalloc(&workspace_, workspace_size);
+      if (workspace_) hipFree(workspace_);
+      err = hipMalloc(&workspace_, workspace_size);
       if (err != hipSuccess) {
         miopenDestroyConvolutionDescriptor(conv_desc);
         miopenDestroyTensorDescriptor(output_desc);
@@ -446,16 +347,20 @@ void RocmCustomOp::ExecuteConv(const OrtApi* api, OrtKernelContext* context) con
     }
     workspace_ptr = workspace_;
   }
-  
-  // Find algorithm
+
+  // =========================================================================
+  // Find Best Algorithm (uses GPU input/output buffers)
+  // =========================================================================
   miopenConvAlgoPerf_t perf_results[4];
   int algo_count = 0;
   
-  status = miopenFindConvolutionForwardAlgorithm(miopen_handle, input_desc, x_data,
-                                                  weight_desc, d_weight_,
-                                                  conv_desc, output_desc, y_data,
-                                                  4, &algo_count, perf_results,
-                                                  workspace_ptr, workspace_size, false);
+  miopenStatus_t status = miopenFindConvolutionForwardAlgorithm(
+      miopen_handle, input_desc, d_input,
+      weight_desc, d_weight_,
+      conv_desc, output_desc, d_output,
+      4, &algo_count, perf_results,
+      workspace_ptr, workspace_size, false);
+  
   if (status != miopenStatusSuccess || algo_count == 0) {
     miopenDestroyConvolutionDescriptor(conv_desc);
     miopenDestroyTensorDescriptor(output_desc);
@@ -465,21 +370,21 @@ void RocmCustomOp::ExecuteConv(const OrtApi* api, OrtKernelContext* context) con
     throw std::runtime_error("Failed to find convolution algorithm");
   }
   
-  MY_LOG(1) << "[ROCm CustomOp] Found " << algo_count << " algorithms, using best one";
-  MY_LOG(2) << "[ROCm CustomOp] Algorithm time: " << perf_results[0].time << " ms";
-  
-  // 5. Execute convolution
-  MY_LOG(2) << "[ROCm CustomOp] Executing miopenConvolutionForward...";
-  
+  MY_LOG(1) << "[ROCm CustomOp] Found " << algo_count << " algorithms, best time: " 
+            << perf_results[0].time << " ms";
+
+  // =========================================================================
+  // Execute Convolution (GPU -> GPU)
+  // =========================================================================
   float alpha = params.alpha();
   float beta = params.beta();
   
   status = miopenConvolutionForward(miopen_handle, &alpha,
-                                     input_desc, x_data,
-                                     weight_desc, d_weight_,
-                                     conv_desc, perf_results[0].fwd_algo, &beta,
-                                     output_desc, y_data,
-                                     workspace_ptr, workspace_size);
+                                    input_desc, d_input,
+                                    weight_desc, d_weight_,
+                                    conv_desc, perf_results[0].fwd_algo, &beta,
+                                    output_desc, d_output,
+                                    workspace_ptr, workspace_size);
   
   // Cleanup descriptors
   miopenDestroyConvolutionDescriptor(conv_desc);
@@ -492,146 +397,99 @@ void RocmCustomOp::ExecuteConv(const OrtApi* api, OrtKernelContext* context) con
     throw std::runtime_error("miopenConvolutionForward failed");
   }
   
-  MY_LOG(1) << "[ROCm CustomOp] Convolution executed successfully";
-  
-  // 6. Add bias if present (simple element-wise addition)
-  if (params.has_bias() && d_bias_ != nullptr) {
-    MY_LOG(2) << "[ROCm CustomOp] Adding bias...";
-    // TODO: Implement bias addition using HIP kernel or miopenConvolutionForwardBias
-    // For now, we'll skip bias addition as it requires additional implementation
-    MY_LOG(2) << "[ROCm CustomOp] Bias addition not yet implemented";
-  }
-  
-  // 7. Synchronize stream with timeout protection
+  MY_LOG(1) << "[ROCm CustomOp] Convolution executed on GPU";
 
-  MY_LOG(2) << "[ROCm CustomOp] Synchronizing stream with timeout protection...";
+  // =========================================================================
+  // Async Output Transfer: GPU -> CPU
+  // =========================================================================
+  MY_LOG(2) << "[ROCm CustomOp] Async copy output from GPU...";
+  err = hipMemcpyAsync(h_output, d_output, output_bytes, hipMemcpyDeviceToHost, stream);
+  if (err != hipSuccess) {
+    LOG(ERROR) << "[ROCm CustomOp] Failed to copy output from device: " << hipGetErrorString(err);
+    throw std::runtime_error("Failed to copy output from device");
+  }
+
+  // =========================================================================
+  // Synchronize Stream with Timeout Protection
+  // =========================================================================
+  MY_LOG(2) << "[ROCm CustomOp] Synchronizing stream...";
   auto timeout_status = hip_ctx.sync_stream_with_timeout();
   
   if (timeout_status == TimeoutStatus::TIMEOUT) {
     LOG(ERROR) << "[ROCm CustomOp] Conv operation TIMED OUT!";
-    LOG(ERROR) << "[ROCm CustomOp] This indicates a GPU hang or extremely slow operation.";
-    LOG(ERROR) << "[ROCm CustomOp] Adjust MORPHIZEN_GPU_TIMEOUT_MS if needed, or investigate GPU issues.";
     throw std::runtime_error("ROCm CustomOp Conv: GPU operation timed out");
   } else if (timeout_status == TimeoutStatus::ERROR) {
     LOG(ERROR) << "[ROCm CustomOp] Conv stream synchronization ERROR!";
     throw std::runtime_error("ROCm CustomOp Conv: Stream synchronization error");
   }
   
-  MY_LOG(2) << "[ROCm CustomOp] Stream synchronized successfully";
-  MY_LOG(2) << "[ROCm CustomOp] Conv completed";
-  MY_LOG(2) << "[ROCm CustomOp] ExecuteConv() completed";
+  MY_LOG(1) << "[ROCm CustomOp] Conv completed successfully";
 }
 
 void RocmCustomOp::ExecuteGemm(const OrtApi* api, OrtKernelContext* context) const {
   MY_LOG(1) << "[ROCm CustomOp] ExecuteGemm (hipBLASLt)";
-  MY_LOG(2) << "[ROCm CustomOp] ExecuteGemm() starting...";
-
-  MY_LOG(2) << "[ROCm CustomOp] Getting HIP context...";
+  
   auto& hip_ctx = HipContext::instance();
-  
-  MY_LOG(2) << "[ROCm CustomOp] Getting hipBLASLt handle...";
   auto blaslt_handle = hip_ctx.hipblaslt_handle();
-  MY_LOG(2) << "[ROCm CustomOp] hipBLASLt handle = " << blaslt_handle;
-  
-  MY_LOG(2) << "[ROCm CustomOp] Getting HIP stream...";
   auto stream = hip_ctx.stream();
-  MY_LOG(2) << "[ROCm CustomOp] HIP stream = " << stream;
 
   const auto& params = rocm_proto_.gemm_params();
   MY_LOG(2) << "[ROCm CustomOp] Gemm params - M=" << params.m()
-            << ", N=" << params.n()
-            << ", K=" << params.k();
+            << ", N=" << params.n() << ", K=" << params.k();
 
-  // Get input tensors from ORT context
-  MY_LOG(2) << "[ROCm CustomOp] Getting input tensors...";
-  
-  // Get number of inputs to understand what's available
-  size_t num_inputs = 0;
-  api->KernelContext_GetInputCount(context, &num_inputs);
-  MY_LOG(2) << "[ROCm CustomOp] Number of inputs: " << num_inputs;
-  
+  // Get input tensor from ORT context
   const OrtValue* input_a = nullptr;
   api->KernelContext_GetInput(context, 0, &input_a);
-  MY_LOG(2) << "[ROCm CustomOp] input_a = " << input_a;
-  
   if (input_a == nullptr) {
     LOG(ERROR) << "[ROCm CustomOp] input_a is NULL!";
     throw std::runtime_error("ROCm CustomOp: Input tensor A is NULL");
   }
-  
-  const OrtValue* input_b = nullptr;
-  if (num_inputs > 1) {
-    api->KernelContext_GetInput(context, 1, &input_b);
-    MY_LOG(2) << "[ROCm CustomOp] input_b = " << input_b;
-  } else {
-    MY_LOG(2) << "[ROCm CustomOp] No B tensor as runtime input (expected for fused nodes)";
-  }
 
-  // Get tensor data pointers (const_cast needed for legacy API)
-  MY_LOG(2) << "[ROCm CustomOp] Getting tensor data pointers...";
-  float* a_data = nullptr;
-  api->GetTensorMutableData(const_cast<OrtValue*>(input_a), (void**)&a_data);
-  MY_LOG(2) << "[ROCm CustomOp] a_data = " << a_data;
-  
-  float* b_data = nullptr;
-  if (input_b != nullptr) {
-    api->GetTensorMutableData(const_cast<OrtValue*>(input_b), (void**)&b_data);
-    MY_LOG(2) << "[ROCm CustomOp] b_data = " << b_data;
-  }
+  // Get CPU data pointer for input
+  float* h_a = nullptr;
+  api->GetTensorMutableData(const_cast<OrtValue*>(input_a), (void**)&h_a);
 
   // Get output tensor
   std::vector<int64_t> output_shape = {params.m(), params.n()};
   
-  MY_LOG(2) << "[ROCm CustomOp] Requested output shape [" 
-            << output_shape[0] << ", " << output_shape[1] << "]";
-  
   // Validate output shape
   if (output_shape[0] <= 0 || output_shape[1] <= 0) {
-    LOG(ERROR) << "[ROCm CustomOp] Invalid output shape detected!";
-    LOG(ERROR) << "[ROCm CustomOp] gemm_params were not properly populated by the pass.";
+    LOG(ERROR) << "[ROCm CustomOp] Invalid output shape!";
     throw std::runtime_error("ROCm CustomOp: Invalid output shape. Gemm params not properly populated by pass.");
   }
   
-  MY_LOG(2) << "[ROCm CustomOp] Getting output tensor...";
   OrtValue* output = nullptr;
   api->KernelContext_GetOutput(context, 0, output_shape.data(), output_shape.size(), &output);
-  MY_LOG(2) << "[ROCm CustomOp] output = " << output;
-  
   if (output == nullptr) {
     LOG(ERROR) << "[ROCm CustomOp] output is NULL!";
     throw std::runtime_error("ROCm CustomOp: Failed to get output tensor");
   }
   
-  float* d_data = nullptr;
-  api->GetTensorMutableData(output, (void**)&d_data);
-  MY_LOG(2) << "[ROCm CustomOp] d_data = " << d_data;
+  float* h_output = nullptr;
+  api->GetTensorMutableData(output, (void**)&h_output);
 
-  // TODO: Full hipBLASLt GEMM implementation
-  // For now, this is a placeholder showing the structure
-  
-  // 1. Create matrix layouts
-  // 2. Create matmul descriptor
-  // 3. Get heuristics for best algorithm
-  // 4. Allocate workspace
+  // TODO: Full hipBLASLt GEMM implementation with async transfers
+  // Similar to ExecuteConv:
+  // 1. Allocate device buffers for A, B, D
+  // 2. hipMemcpyAsync A from host to device
+  // 3. Create matrix layouts and matmul descriptor
+  // 4. Get algorithm heuristics
   // 5. Execute hipblasLtMatmul
-  // 6. Synchronize stream with timeout protection
+  // 6. hipMemcpyAsync D from device to host
+  // 7. Synchronize stream
 
-  MY_LOG(2) << "[ROCm CustomOp] Synchronizing stream with timeout protection...";
+  MY_LOG(2) << "[ROCm CustomOp] Synchronizing stream...";
   auto timeout_status = hip_ctx.sync_stream_with_timeout();
   
   if (timeout_status == TimeoutStatus::TIMEOUT) {
     LOG(ERROR) << "[ROCm CustomOp] Gemm operation TIMED OUT!";
-    LOG(ERROR) << "[ROCm CustomOp] This indicates a GPU hang or extremely slow operation.";
-    LOG(ERROR) << "[ROCm CustomOp] Adjust MORPHIZEN_GPU_TIMEOUT_MS if needed, or investigate GPU issues.";
     throw std::runtime_error("ROCm CustomOp Gemm: GPU operation timed out");
   } else if (timeout_status == TimeoutStatus::ERROR) {
     LOG(ERROR) << "[ROCm CustomOp] Gemm stream synchronization ERROR!";
     throw std::runtime_error("ROCm CustomOp Gemm: Stream synchronization error");
   }
 
-  MY_LOG(2) << "[ROCm CustomOp] Stream synchronized successfully";
-  MY_LOG(2) << "[ROCm CustomOp] Gemm completed";
-  MY_LOG(2) << "[ROCm CustomOp] ExecuteGemm() completed";
+  MY_LOG(1) << "[ROCm CustomOp] Gemm completed";
 }
 
 } // namespace hip_ep
