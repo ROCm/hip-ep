@@ -3,12 +3,23 @@
 
 #include "custom_op.hpp"
 #include <glog/logging.h>
+#include <iostream>
 #include <stdexcept>
 #include "google/protobuf/util/json_util.h"
 #include "morphizen/env_config.hpp"
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_ROCM, "0")
+DEF_ENV_PARAM(MORPHIZEN_GPU_TIMEOUT_MS, "5000")
+DEF_ENV_PARAM(MORPHIZEN_GPU_WATCHDOG_ENABLED, "1")
+
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_ROCM) >= n)
+
+// Debug output that always goes to stdout (bypasses glog buffering issues)
+#define DEBUG_LOG(msg) do { \
+  if (ENV_PARAM(MORPHIZEN_DEBUG_ROCM) >= 1) { \
+    std::cout << "[ROCm CustomOp] DEBUG: " << msg << std::endl << std::flush; \
+  } \
+} while(0)
 
 namespace rocm_ep {
 
@@ -18,8 +29,11 @@ RocmCustomOp::RocmCustomOp(
     onnxruntime::Model* model)
     : CustomOpImp(context, meta_def, model) {
   
+  DEBUG_LOG("Constructor called");
+  
   // Get JSON params attached by the pass
   auto rocm_json_str = get_meta_def_param();
+  DEBUG_LOG("Received JSON params: " << rocm_json_str);
   MY_LOG(1) << "[ROCm CustomOp] Received JSON params: " << rocm_json_str;
   
   // Parse JSON to RocmParamProto
@@ -31,6 +45,61 @@ RocmCustomOp::RocmCustomOp(
   }
 
   MY_LOG(1) << "[ROCm CustomOp] Created for op_type: " << rocm_proto_.op_type();
+  
+  // Load cached weights from PassContext
+  DEBUG_LOG("Loading cached weights...");
+  LoadCachedWeights();
+  DEBUG_LOG("Cached weights loaded successfully");
+}
+
+void RocmCustomOp::LoadCachedWeights() {
+  const auto& op_type = rocm_proto_.op_type();
+  auto pass_context = get_context();
+  
+  if (op_type == "conv") {
+    const auto& params = rocm_proto_.conv_params();
+    
+    // Load weight file
+    const auto& weight_file = params.weight_file_path();
+    if (!weight_file.empty()) {
+      int64_t weight_size = params.weight_file_size();
+      DEBUG_LOG("Loading conv weight from: " << weight_file << " (" << weight_size << " bytes)");
+      
+      auto reader = pass_context->open_file_for_read(weight_file);
+      if (reader) {
+        weight_size_ = static_cast<size_t>(weight_size);
+        host_weight_.resize(weight_size_ / sizeof(float));
+        reader->fread(host_weight_.data(), weight_size_);
+        MY_LOG(1) << "[ROCm CustomOp] Loaded weight: " << weight_file 
+                  << " (" << host_weight_.size() << " floats)";
+      } else {
+        LOG(ERROR) << "[ROCm CustomOp] Failed to open weight file: " << weight_file;
+      }
+    }
+    
+    // Load bias file if present
+    const auto& bias_file = params.bias_file_path();
+    if (!bias_file.empty() && params.has_bias()) {
+      int64_t bias_size = params.bias_file_size();
+      DEBUG_LOG("Loading conv bias from: " << bias_file << " (" << bias_size << " bytes)");
+      
+      auto reader = pass_context->open_file_for_read(bias_file);
+      if (reader) {
+        bias_size_ = static_cast<size_t>(bias_size);
+        host_bias_.resize(bias_size_ / sizeof(float));
+        reader->fread(host_bias_.data(), bias_size_);
+        MY_LOG(1) << "[ROCm CustomOp] Loaded bias: " << bias_file 
+                  << " (" << host_bias_.size() << " floats)";
+      } else {
+        LOG(ERROR) << "[ROCm CustomOp] Failed to open bias file: " << bias_file;
+      }
+    }
+  } else if (op_type == "gemm") {
+    // TODO: Load GEMM weights if needed (B matrix for fused GEMM)
+    MY_LOG(2) << "[ROCm CustomOp] GEMM weight loading not yet implemented";
+  }
+  
+  weights_cached_ = true;
 }
 
 RocmCustomOp::~RocmCustomOp() {
@@ -53,18 +122,24 @@ RocmCustomOp::~RocmCustomOp() {
 }
 
 void RocmCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const {
+  DEBUG_LOG("Compute() called");
   MY_LOG(2) << "[ROCm CustomOp] Compute() called";
   
   const auto& op_type = rocm_proto_.op_type();
+  DEBUG_LOG("op_type = " << op_type);
   MY_LOG(2) << "[ROCm CustomOp] op_type = " << op_type;
 
   // Check if GPU is available before attempting execution
+  DEBUG_LOG("Checking HIP context initialization...");
   MY_LOG(2) << "[ROCm CustomOp] Checking HIP context initialization...";
   auto& hip_ctx = HipContext::instance();
+  DEBUG_LOG("Got HipContext instance, checking is_initialized()...");
   if (!hip_ctx.is_initialized()) {
+    DEBUG_LOG("HIP context NOT initialized!");
     LOG(ERROR) << "[ROCm CustomOp] HIP context not initialized - no AMD GPU available!";
     throw std::runtime_error("ROCm CustomOp: No AMD GPU available. HIP context initialization failed.");
   }
+  DEBUG_LOG("HIP context is initialized");
   MY_LOG(2) << "[ROCm CustomOp] HIP context is initialized";
 
   if (op_type == "conv") {
@@ -187,13 +262,22 @@ void RocmCustomOp::ExecuteConv(const OrtApi* api, OrtKernelContext* context) con
   // 3. Find best algorithm
   // 4. Allocate workspace
   // 5. Execute miopenConvolutionForward
-  // 6. Synchronize stream
+  // 6. Synchronize stream with timeout protection
 
-  MY_LOG(2) << "[ROCm CustomOp] Calling hipStreamSynchronize...";
-  hipError_t sync_err = hipStreamSynchronize(stream);
-  MY_LOG(2) << "[ROCm CustomOp] hipStreamSynchronize returned: " << sync_err 
-            << " (" << hipGetErrorString(sync_err) << ")";
+  MY_LOG(2) << "[ROCm CustomOp] Synchronizing stream with timeout protection...";
+  auto timeout_status = hip_ctx.sync_stream_with_timeout();
   
+  if (timeout_status == TimeoutStatus::TIMEOUT) {
+    LOG(ERROR) << "[ROCm CustomOp] Conv operation TIMED OUT!";
+    LOG(ERROR) << "[ROCm CustomOp] This indicates a GPU hang or extremely slow operation.";
+    LOG(ERROR) << "[ROCm CustomOp] Adjust MORPHIZEN_GPU_TIMEOUT_MS if needed, or investigate GPU issues.";
+    throw std::runtime_error("ROCm CustomOp Conv: GPU operation timed out");
+  } else if (timeout_status == TimeoutStatus::ERROR) {
+    LOG(ERROR) << "[ROCm CustomOp] Conv stream synchronization ERROR!";
+    throw std::runtime_error("ROCm CustomOp Conv: Stream synchronization error");
+  }
+  
+  MY_LOG(2) << "[ROCm CustomOp] Stream synchronized successfully";
   MY_LOG(2) << "[ROCm CustomOp] Conv completed";
   MY_LOG(2) << "[ROCm CustomOp] ExecuteConv() completed";
 }
@@ -290,13 +374,22 @@ void RocmCustomOp::ExecuteGemm(const OrtApi* api, OrtKernelContext* context) con
   // 3. Get heuristics for best algorithm
   // 4. Allocate workspace
   // 5. Execute hipblasLtMatmul
-  // 6. Synchronize stream
+  // 6. Synchronize stream with timeout protection
 
-  MY_LOG(2) << "[ROCm CustomOp] Calling hipStreamSynchronize...";
-  hipError_t sync_err = hipStreamSynchronize(stream);
-  MY_LOG(2) << "[ROCm CustomOp] hipStreamSynchronize returned: " << sync_err 
-            << " (" << hipGetErrorString(sync_err) << ")";
+  MY_LOG(2) << "[ROCm CustomOp] Synchronizing stream with timeout protection...";
+  auto timeout_status = hip_ctx.sync_stream_with_timeout();
+  
+  if (timeout_status == TimeoutStatus::TIMEOUT) {
+    LOG(ERROR) << "[ROCm CustomOp] Gemm operation TIMED OUT!";
+    LOG(ERROR) << "[ROCm CustomOp] This indicates a GPU hang or extremely slow operation.";
+    LOG(ERROR) << "[ROCm CustomOp] Adjust MORPHIZEN_GPU_TIMEOUT_MS if needed, or investigate GPU issues.";
+    throw std::runtime_error("ROCm CustomOp Gemm: GPU operation timed out");
+  } else if (timeout_status == TimeoutStatus::ERROR) {
+    LOG(ERROR) << "[ROCm CustomOp] Gemm stream synchronization ERROR!";
+    throw std::runtime_error("ROCm CustomOp Gemm: Stream synchronization error");
+  }
 
+  MY_LOG(2) << "[ROCm CustomOp] Stream synchronized successfully";
   MY_LOG(2) << "[ROCm CustomOp] Gemm completed";
   MY_LOG(2) << "[ROCm CustomOp] ExecuteGemm() completed";
 }
