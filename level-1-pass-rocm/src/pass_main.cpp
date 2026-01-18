@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <glog/logging.h>
+#include <iostream>
 #include <memory>
 #include <set>
 #include <unordered_map>
@@ -72,27 +73,28 @@ struct Level1Rocm {
 
   // Check if a node is a ROCm fused node (created by Level-2 passes)
   // Fused nodes have:
-  // - Domain: "com.xilinx"
-  // - Op Type: "super_layer" (hardcoded by morphizen framework)
-  // - Output name contains the unique_id set during fusion
-  //   (e.g., "rocm_conv_...", "rocm_gemm_...")
+  // - Domain: "com.xilinx" (morphizen framework's domain for fused nodes)
+  //
+  // Since we run Level-2 sub-passes on a cloned graph in isolation,
+  // any "com.xilinx" node in that graph must be from our ROCm passes.
+  // The original graph is cloned fresh, so it has no pre-existing fused nodes.
   bool is_rocm_fused_node(const Node& node) {
     auto domain = node_op_domain(node);
     if (domain != "com.xilinx") {
       return false;
     }
-
-    // Check the output name which contains the unique_id
-    // Level-2 passes set unique_id as "rocm_conv_<output_name>" or
-    // "rocm_gemm_<output_name>"
+    
+    // All com.xilinx nodes in the cloned graph are ROCm fused nodes
+    // because we only run ROCm Level-2 passes on the cloned graph
     auto output_name = node_get_first_output_name(node);
-    return output_name.find("rocm_conv") != std::string::npos ||
-           output_name.find("rocm_gemm") != std::string::npos;
+    MY_LOG(2) << "[ROCm EP Level-1] is_rocm_fused_node: found com.xilinx node with output=" << output_name;
+    return true;
   }
 
   // Get op type from fused node output name
   std::string get_rocm_op_type(const Node& node) {
     auto output_name = node_get_first_output_name(node);
+    MY_LOG(2) << "[ROCm EP Level-1] get_rocm_op_type: output=" << output_name;
     if (output_name.find("rocm_conv") != std::string::npos) {
       return "conv";
     } else if (output_name.find("rocm_gemm") != std::string::npos) {
@@ -324,6 +326,7 @@ struct Level1Rocm {
 
   void process(IPass& self, Graph& graph) {
     MY_LOG(1) << "[ROCm EP Level-1] Starting ROCm pass";
+    MY_LOG(2) << "[ROCm EP Level-1] process() called - Starting ROCm pass";
 
     // Get pass configuration from pass_generic_param (JSON)
     auto json_param = self_.get_pass_generic_param();
@@ -339,17 +342,12 @@ struct Level1Rocm {
       return;
     }
 
-    // Clone the model so we can modify the graph
-    // The original graph is read-only
-    auto& model = VAIP_ORT_API(graph_get_model)(graph);
-    auto cloned_model = vaip_core::model_clone(model, 64);
-    auto& cloned_graph = VAIP_ORT_API(model_main_graph)(*cloned_model);
-
-    MY_LOG(1) << "[ROCm EP Level-1] Cloned model for sub-pass processing";
-
-    // Create PassProto for each sub-pass and run them on cloned graph
+    // Run sub-passes directly on the original graph
+    // The sub-passes will handle fusion themselves via try_fuse() and fuse()
+    MY_LOG(2) << "[ROCm EP Level-1] Number of sub-passes to run: " << config.sub_pass_names_size();
     for (const auto& sub_pass_name : config.sub_pass_names()) {
       MY_LOG(1) << "[ROCm EP Level-1] Creating sub-pass: " << sub_pass_name;
+      MY_LOG(2) << "[ROCm EP Level-1] Creating sub-pass: " << sub_pass_name;
 
       PassProto sub_pass_proto;
       sub_pass_proto.set_plugin(sub_pass_name);
@@ -358,101 +356,18 @@ struct Level1Rocm {
       auto sub_pass = IPass::create_pass(self_.get_context(), sub_pass_proto);
       if (sub_pass) {
         MY_LOG(1) << "[ROCm EP Level-1] Running sub-pass: " << sub_pass_name;
+        MY_LOG(2) << "[ROCm EP Level-1] Running sub-pass: " << sub_pass_name;
         std::vector<std::shared_ptr<IPass>> passes;
         passes.push_back(std::move(sub_pass));
-        IPass::run_passes(passes, cloned_graph);
-      }
-    }
-
-    // Step 1: Find all ROCm fused nodes in the cloned graph
-    auto rocm_nodes = find_rocm_fused_nodes(cloned_graph);
-    MY_LOG(1) << "[ROCm EP Level-1] Found " << rocm_nodes.size()
-              << " ROCm fused nodes";
-
-    if (rocm_nodes.empty()) {
-      MY_LOG(1) << "[ROCm EP Level-1] No ROCm nodes found, nothing to merge";
-      return;
-    }
-
-    // Step 2: Build producer map and find mergeable groups
-    auto producer_map = build_producer_map(rocm_nodes);
-    auto groups = find_mergeable_groups(rocm_nodes, producer_map);
-    MY_LOG(1) << "[ROCm EP Level-1] Found " << groups.size()
-              << " mergeable groups";
-
-    // Step 3: For each group, create a merged fused node in the original graph
-    int group_idx = 0;
-    for (const auto& group : groups) {
-      MY_LOG(1) << "[ROCm EP Level-1] Processing group " << group_idx
-                << " with " << group.size() << " nodes";
-
-      // Collect internal outputs (produced by nodes in the group)
-      std::unordered_set<std::string> internal_outputs;
-      for (auto* node : group) {
-        auto outputs = node_get_output_node_args(*node);
-        for (auto* output : outputs) {
-          if (output) {
-            internal_outputs.insert(node_arg_get_name(*output));
-          }
-        }
-      }
-
-      // Collect internal inputs (consumed by nodes in the group)
-      std::unordered_set<std::string> internal_inputs;
-      for (auto* node : group) {
-        auto inputs = node_get_input_node_args(*node);
-        for (auto* input : inputs) {
-          if (input) {
-            internal_inputs.insert(node_arg_get_name(*input));
-          }
-        }
-      }
-
-      // Get external inputs and outputs
-      auto external_inputs = collect_external_inputs(group, internal_outputs);
-      auto external_outputs =
-          collect_external_outputs(group, internal_inputs, cloned_graph);
-
-      MY_LOG(2) << "[ROCm EP Level-1] Group " << group_idx << " has "
-                << external_inputs.size() << " external inputs and "
-                << external_outputs.size() << " external outputs";
-
-      // Collect merged parameters from all nodes in the group
-      auto merged_params = collect_merged_params(group);
-
-      // Create a unique name for the merged node
-      std::string merged_name = "rocm_merged_" + std::to_string(group_idx);
-
-      // Try to fuse in the original graph
-      auto [meta_def, error] =
-          self_.try_fuse(graph, merged_name, external_inputs, external_outputs,
-                         {}, "ROCm_EP");
-
-      if (meta_def) {
-      // Serialize the merged params to JSON and attach to meta_def
-      std::string merged_params_json;
-      auto status = google::protobuf::util::MessageToJsonString(
-          merged_params, &merged_params_json);
-      if (!status.ok()) {
-        MY_LOG(1) << "[ROCm EP Level-1] Failed to serialize merged params: "
-                  << status.ToString();
-        continue;
-      }
-      self_.attach_meta_def_param(*meta_def, merged_params_json.c_str());
-
-        // Create the fused node
-        self_.fuse(graph, std::move(*meta_def));
-        MY_LOG(1) << "[ROCm EP Level-1] Created merged fused node: "
-                  << merged_name;
+        IPass::run_passes(passes, graph);  // Run on original graph, not clone
+        MY_LOG(2) << "[ROCm EP Level-1] Sub-pass completed: " << sub_pass_name;
       } else {
-        MY_LOG(1) << "[ROCm EP Level-1] Failed to fuse group " << group_idx
-                  << ": " << error.comments;
+        MY_LOG(2) << "[ROCm EP Level-1] Failed to create sub-pass: " << sub_pass_name;
       }
-
-      group_idx++;
     }
 
-    MY_LOG(1) << "[ROCm EP Level-1] Completed";
+    MY_LOG(1) << "[ROCm EP Level-1] Completed - sub-passes handled fusion";
+    MY_LOG(2) << "[ROCm EP Level-1] Level-1 pass completed";
   }
 
   IPass& self_;

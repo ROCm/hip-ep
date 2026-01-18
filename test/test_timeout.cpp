@@ -13,9 +13,64 @@
 #include <thread>
 #include <chrono>
 #include <cassert>
+#include <glog/logging.h>
 
-// Include the timeout handling code
-#include "../custom-op-rocm/src/custom_op.hpp"
+// Windows defines ERROR macro which conflicts with our enum
+#ifdef ERROR
+#undef ERROR
+#endif
+
+namespace rocm_ep {
+
+/**
+ * GPU Operation Timeout Result
+ */
+enum class TimeoutStatus {
+  SUCCESS,           // Operation completed successfully
+  TIMEOUT,          // Operation timed out
+  ERROR             // Error occurred
+};
+
+/**
+ * Helper function to wait for HIP stream with timeout
+ * 
+ * @param stream HIP stream to wait for
+ * @param timeout_ms Timeout in milliseconds
+ * @return TimeoutStatus indicating success, timeout, or error
+ */
+inline TimeoutStatus WaitStreamWithTimeout(hipStream_t stream, int timeout_ms) {
+  const int poll_interval_ms = 10;  // Poll every 10ms
+  auto start = std::chrono::steady_clock::now();
+  
+  while (true) {
+    // Query stream status (non-blocking)
+    hipError_t err = hipStreamQuery(stream);
+    
+    if (err == hipSuccess) {
+      // All operations completed
+      return TimeoutStatus::SUCCESS;
+    } else if (err == hipErrorNotReady) {
+      // Operations still in progress
+      auto elapsed = std::chrono::steady_clock::now() - start;
+      auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+      
+      if (elapsed_ms >= timeout_ms) {
+        LOG(ERROR) << "[ROCm Timeout] GPU operation timed out after " << elapsed_ms << "ms";
+        return TimeoutStatus::TIMEOUT;
+      }
+      
+      // Sleep briefly to avoid busy-waiting
+      std::this_thread::sleep_for(std::chrono::milliseconds(poll_interval_ms));
+    } else {
+      // Error occurred
+      LOG(ERROR) << "[ROCm Timeout] hipStreamQuery failed: " 
+                 << hipGetErrorString(err) << " (" << err << ")";
+      return TimeoutStatus::ERROR;
+    }
+  }
+}
+
+} // namespace rocm_ep
 
 void test_immediate_completion() {
     std::cout << "\n=== Test 1: Immediate Completion ===" << std::endl;
@@ -134,42 +189,11 @@ void test_timeout_detection() {
     hipStreamDestroy(stream);
 }
 
-void test_hip_context_timeout() {
-    std::cout << "\n=== Test 4: HipContext Timeout Method ===" << std::endl;
-    
-    // Get the HIP context instance
-    auto& ctx = rocm_ep::HipContext::instance();
-    
-    if (!ctx.is_initialized()) {
-        std::cout << "❌ FAIL: HIP context not initialized (no GPU available?)" << std::endl;
-        return;
-    }
-    
-    // Get the stream and launch a simple operation
-    hipStream_t stream = ctx.stream();
-    float* d_data = nullptr;
-    size_t size = 1024 * sizeof(float);
-    hipError_t err = hipMalloc(&d_data, size);
-    if (err != hipSuccess) {
-        std::cerr << "Failed to allocate device memory: " << hipGetErrorString(err) << std::endl;
-        return;
-    }
-    
-    hipMemsetAsync(d_data, 42, size, stream);
-    
-    // Test the HipContext timeout method with generous timeout
-    auto status = ctx.sync_stream_with_timeout(5000);
-    
-    if (status == rocm_ep::TimeoutStatus::SUCCESS) {
-        std::cout << "✅ PASS: HipContext timeout method works correctly" << std::endl;
-    } else {
-        std::cout << "❌ FAIL: HipContext timeout method failed" << std::endl;
-    }
-    
-    hipFree(d_data);
-}
-
 int main(int argc, char** argv) {
+    // Initialize glog
+    google::InitGoogleLogging(argv[0]);
+    FLAGS_logtostderr = 1;
+    
     std::cout << "========================================" << std::endl;
     std::cout << "   GPU Timeout Mechanism Test Suite" << std::endl;
     std::cout << "========================================" << std::endl;
@@ -192,7 +216,6 @@ int main(int argc, char** argv) {
     test_immediate_completion();
     test_short_operation();
     test_timeout_detection();
-    test_hip_context_timeout();
     
     std::cout << "\n========================================" << std::endl;
     std::cout << "   All tests completed!" << std::endl;

@@ -57,7 +57,8 @@ protected:
   void SetUp() override {
     // Initialize ORT
     Ort::InitApi(OrtGetApiBase()->GetApi(ORT_API_VERSION));
-    env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "OrtIntegrationTest");
+    // Use INFO level to see Level-1 pass logs (MY_LOG -> glog INFO)
+    env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_INFO, "OrtIntegrationTest");
     
     // Print environment variable status for debugging
     const char* debug_level = std::getenv("MORPHIZEN_DEBUG_ROCM");

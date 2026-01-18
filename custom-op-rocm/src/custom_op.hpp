@@ -31,9 +31,11 @@
 
 namespace rocm_ep {
 
-// Environment variables for timeout configuration
-DEF_ENV_PARAM(MORPHIZEN_GPU_TIMEOUT_MS, "5000")      // Default 5 second timeout
-DEF_ENV_PARAM(MORPHIZEN_GPU_WATCHDOG_ENABLED, "1")   // Enable watchdog by default
+// Environment variables for timeout configuration are defined in custom_op.cpp
+// They are declared here for reference:
+//   MORPHIZEN_GPU_TIMEOUT_MS - Default 5 second timeout (5000)
+//   MORPHIZEN_GPU_WATCHDOG_ENABLED - Enable watchdog by default (1)
+//   MORPHIZEN_DEBUG_ROCM - Debug logging level (0)
 
 /**
  * GPU Operation Timeout Result
@@ -126,20 +128,7 @@ public:
    * @param timeout_ms Timeout in milliseconds (0 = use default from env var)
    * @return TimeoutStatus indicating success, timeout, or error
    */
-  TimeoutStatus sync_stream_with_timeout(int timeout_ms = 0) {
-    ensure_initialized();
-    if (!initialized_) {
-      return TimeoutStatus::ERROR;
-    }
-    
-    // Use environment variable default if not specified
-    if (timeout_ms <= 0) {
-      timeout_ms = ENV_PARAM(MORPHIZEN_GPU_TIMEOUT_MS);
-    }
-    
-    LOG(INFO) << "[HipContext] Synchronizing stream with " << timeout_ms << "ms timeout...";
-    return WaitStreamWithTimeout(stream_, timeout_ms);
-  }
+  TimeoutStatus sync_stream_with_timeout(int timeout_ms = 0);
 
 private:
   HipContext() = default;

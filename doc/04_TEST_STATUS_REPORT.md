@@ -353,9 +353,9 @@ unknown file: error: SEH exception with code 0xc0000005 thrown in the test body.
 - Level-2 Sub-passes: ✅ `morphizen-level2-pass-rocm-conv`, `morphizen-level2-pass-rocm-gemm`
 - Custom Op registered: ✅ `vaip_custom_op_ROCm_EP`
 - ORT Session created: ✅ Fused nodes created successfully
-- GPU Execution: ❌ SEH exception (0xc0000005) - No AMD GPU hardware
-- **Status:** Partial Success (all framework components work, GPU hardware required)
-- **Duration:** 331 ms
+- GPU Execution: ⚠️ All zeros output - ExecuteConv is a placeholder (TODO)
+- **Status:** In Progress (GPU computation not yet implemented in custom op)
+- **Duration:** ~600 ms
 
 **What Works (Without GPU):**
 | Component | Status | Details |
