@@ -17,88 +17,109 @@ DEF_ENV_PARAM(MORPHIZEN_GPU_WATCHDOG_ENABLED, "1")
 namespace hip_ep {
 
 // ============================================================================
-// HipContext Implementation
+// HipContext Implementation (Per-Session)
 // ============================================================================
 
-void HipContext::ensure_initialized() {
-  std::call_once(init_flag_, [this]() {
-    MY_LOG(2) << "[HipContext] ensure_initialized() starting...";
-    
-    // Check if HIP runtime is available
-    MY_LOG(2) << "[HipContext] Calling hipGetDeviceCount...";
-    int device_count = 0;
-    hipError_t hip_err = hipGetDeviceCount(&device_count);
-    MY_LOG(2) << "[HipContext] hipGetDeviceCount returned: " << hip_err 
-              << " (" << hipGetErrorString(hip_err) << "), device_count=" << device_count;
-    
-    if (hip_err != hipSuccess || device_count == 0) {
-      LOG(ERROR) << "[HipContext] No AMD GPU detected! HIP error: " 
-                 << hipGetErrorString(hip_err);
-      initialized_ = false;
-      return;
-    }
-    
-    // Get device properties
-    MY_LOG(2) << "[HipContext] Calling hipGetDeviceProperties...";
-    hipDeviceProp_t props;
-    hip_err = hipGetDeviceProperties(&props, 0);
-    MY_LOG(2) << "[HipContext] hipGetDeviceProperties returned: " << hip_err;
-    if (hip_err == hipSuccess) {
-      MY_LOG(1) << "[HipContext] GPU name: " << props.name 
-                << ", gcnArchName: " << props.gcnArchName;
-    }
-    
-    // Create HIP stream
-    MY_LOG(2) << "[HipContext] Creating HIP stream...";
-    hip_err = hipStreamCreate(&stream_);
-    MY_LOG(2) << "[HipContext] hipStreamCreate returned: " << hip_err 
-              << ", stream=" << stream_;
-    if (hip_err != hipSuccess) {
-      LOG(ERROR) << "[HipContext] hipStreamCreate failed!";
-      initialized_ = false;
-      return;
-    }
-    
-    // Create MIOpen handle
-    MY_LOG(2) << "[HipContext] Creating MIOpen handle...";
-    miopenStatus_t miopen_status = miopenCreate(&miopen_handle_);
-    MY_LOG(2) << "[HipContext] miopenCreate returned: " << miopen_status 
-              << ", handle=" << miopen_handle_;
-    if (miopen_status != miopenStatusSuccess) {
-      LOG(ERROR) << "[HipContext] miopenCreate failed!";
-      hipStreamDestroy(stream_);
-      stream_ = nullptr;
-      initialized_ = false;
-      return;
-    }
-    
-    // Set MIOpen stream
-    MY_LOG(2) << "[HipContext] Setting MIOpen stream...";
-    miopen_status = miopenSetStream(miopen_handle_, stream_);
-    MY_LOG(2) << "[HipContext] miopenSetStream returned: " << miopen_status;
-    
-    // Create hipBLASLt handle
-    MY_LOG(2) << "[HipContext] Creating hipBLASLt handle...";
-    hipblasStatus_t blaslt_status = hipblasLtCreate(&hipblaslt_handle_);
-    MY_LOG(2) << "[HipContext] hipblasLtCreate returned: " << blaslt_status 
-              << ", handle=" << hipblaslt_handle_;
-    if (blaslt_status != HIPBLAS_STATUS_SUCCESS) {
-      LOG(ERROR) << "[HipContext] hipblasLtCreate failed!";
-      miopenDestroy(miopen_handle_);
-      miopen_handle_ = nullptr;
-      hipStreamDestroy(stream_);
-      stream_ = nullptr;
-      initialized_ = false;
-      return;
-    }
-    
-    initialized_ = true;
-    MY_LOG(1) << "[HipContext] HIP context initialized successfully!";
-  });
+HipContext::HipContext() {
+  MY_LOG(2) << "[HipContext] Constructor starting...";
+  
+  // Check if HIP runtime is available
+  MY_LOG(2) << "[HipContext] Calling hipGetDeviceCount...";
+  int device_count = 0;
+  hipError_t hip_err = hipGetDeviceCount(&device_count);
+  MY_LOG(2) << "[HipContext] hipGetDeviceCount returned: " << hip_err 
+            << " (" << hipGetErrorString(hip_err) << "), device_count=" << device_count;
+  
+  if (hip_err != hipSuccess || device_count == 0) {
+    LOG(ERROR) << "[HipContext] No AMD GPU detected! HIP error: " 
+               << hipGetErrorString(hip_err);
+    initialized_ = false;
+    return;
+  }
+  
+  // Get device properties
+  MY_LOG(2) << "[HipContext] Calling hipGetDeviceProperties...";
+  hipDeviceProp_t props;
+  hip_err = hipGetDeviceProperties(&props, 0);
+  MY_LOG(2) << "[HipContext] hipGetDeviceProperties returned: " << hip_err;
+  if (hip_err == hipSuccess) {
+    MY_LOG(1) << "[HipContext] GPU name: " << props.name 
+              << ", gcnArchName: " << props.gcnArchName;
+  }
+  
+  // Create HIP stream (dedicated stream for this session)
+  MY_LOG(2) << "[HipContext] Creating HIP stream...";
+  hip_err = hipStreamCreate(&stream_);
+  MY_LOG(2) << "[HipContext] hipStreamCreate returned: " << hip_err 
+            << ", stream=" << stream_;
+  if (hip_err != hipSuccess) {
+    LOG(ERROR) << "[HipContext] hipStreamCreate failed!";
+    initialized_ = false;
+    return;
+  }
+  
+  // Create MIOpen handle (dedicated handle for this session)
+  MY_LOG(2) << "[HipContext] Creating MIOpen handle...";
+  miopenStatus_t miopen_status = miopenCreate(&miopen_handle_);
+  MY_LOG(2) << "[HipContext] miopenCreate returned: " << miopen_status 
+            << ", handle=" << miopen_handle_;
+  if (miopen_status != miopenStatusSuccess) {
+    LOG(ERROR) << "[HipContext] miopenCreate failed!";
+    hipStreamDestroy(stream_);
+    stream_ = nullptr;
+    initialized_ = false;
+    return;
+  }
+  
+  // Associate MIOpen handle with this session's stream
+  MY_LOG(2) << "[HipContext] Setting MIOpen stream...";
+  miopen_status = miopenSetStream(miopen_handle_, stream_);
+  MY_LOG(2) << "[HipContext] miopenSetStream returned: " << miopen_status;
+  
+  // Create hipBLASLt handle (dedicated handle for this session)
+  MY_LOG(2) << "[HipContext] Creating hipBLASLt handle...";
+  hipblasStatus_t blaslt_status = hipblasLtCreate(&hipblaslt_handle_);
+  MY_LOG(2) << "[HipContext] hipblasLtCreate returned: " << blaslt_status 
+            << ", handle=" << hipblaslt_handle_;
+  if (blaslt_status != HIPBLAS_STATUS_SUCCESS) {
+    LOG(ERROR) << "[HipContext] hipblasLtCreate failed!";
+    miopenDestroy(miopen_handle_);
+    miopen_handle_ = nullptr;
+    hipStreamDestroy(stream_);
+    stream_ = nullptr;
+    initialized_ = false;
+    return;
+  }
+  
+  initialized_ = true;
+  MY_LOG(1) << "[HipContext] Per-session HIP context initialized successfully!";
 }
 
-TimeoutStatus HipContext::sync_stream_with_timeout(int timeout_ms) {
-  ensure_initialized();
+HipContext::~HipContext() {
+  MY_LOG(1) << "[HipContext] Destructor - cleaning up session resources...";
+  
+  if (hipblaslt_handle_) {
+    hipblasLtDestroy(hipblaslt_handle_);
+    hipblaslt_handle_ = nullptr;
+    MY_LOG(2) << "[HipContext] hipBLASLt handle destroyed";
+  }
+  
+  if (miopen_handle_) {
+    miopenDestroy(miopen_handle_);
+    miopen_handle_ = nullptr;
+    MY_LOG(2) << "[HipContext] MIOpen handle destroyed";
+  }
+  
+  if (stream_) {
+    hipStreamDestroy(stream_);
+    stream_ = nullptr;
+    MY_LOG(2) << "[HipContext] HIP stream destroyed";
+  }
+  
+  MY_LOG(1) << "[HipContext] Session resources cleaned up";
+}
+
+TimeoutStatus HipContext::sync_stream_with_timeout(int timeout_ms) const {
   if (!initialized_) {
     return TimeoutStatus::ERROR;
   }
@@ -123,6 +144,18 @@ RocmCustomOp::RocmCustomOp(
     : CustomOpImp(context, meta_def, model) {
   
   MY_LOG(2) << "[ROCm CustomOp] Constructor called";
+  
+  // Get or create per-session HipContext via registry
+  // All CustomOps in the same session share this context
+  hip_context_ = SessionContextRegistry::instance().get_or_create(context.get());
+  
+  if (!hip_context_ || !hip_context_->is_initialized()) {
+    LOG(ERROR) << "[ROCm CustomOp] Failed to initialize per-session HipContext";
+    throw std::runtime_error("Failed to initialize per-session HipContext");
+  }
+  
+  MY_LOG(1) << "[ROCm CustomOp] Using per-session HipContext (stream=" 
+            << hip_context_->stream() << ")";
   
   // Get JSON params attached by the pass
   auto json_str = get_meta_def_param();
@@ -219,6 +252,7 @@ RocmCustomOp::~RocmCustomOp() {
   external_input_buffers_.clear();
   
   // node_data_ cleanup is handled by unique_ptr destructors
+  // hip_context_ cleanup is handled by shared_ptr when session ends
   MY_LOG(2) << "[ROCm CustomOp] Destructor completed";
 }
 
@@ -325,8 +359,8 @@ void RocmCustomOp::LoadNodeWeights(int32_t node_id, const rocm::RocmParamProto& 
 void RocmCustomOp::AllocateIntermediateBuffers() {
   if (buffers_allocated_) return;
   
-  auto& hip_ctx = HipContext::instance();
-  auto stream = hip_ctx.stream();
+  // Use per-session stream
+  auto stream = hip_context_->stream();
   
   // Allocate output buffers for each node
   for (int i = 0; i < subgraph_.nodes_size(); ++i) {
@@ -445,10 +479,9 @@ float* RocmCustomOp::ResolveTensorRef(const rocm::TensorRefProto& ref) const {
 void RocmCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const {
   MY_LOG(1) << "[ROCm CustomOp] Compute() - " << subgraph_.nodes_size() << " nodes";
 
-  // Check if GPU is available
-  auto& hip_ctx = HipContext::instance();
-  if (!hip_ctx.is_initialized()) {
-    LOG(ERROR) << "[ROCm CustomOp] HIP context not initialized - no AMD GPU available!";
+  // Check if per-session HipContext is available
+  if (!hip_context_ || !hip_context_->is_initialized()) {
+    LOG(ERROR) << "[ROCm CustomOp] Per-session HipContext not available!";
     throw std::runtime_error("ROCm CustomOp: No AMD GPU available");
   }
 
@@ -464,9 +497,9 @@ void RocmCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const {
   // Phase 3: Download external outputs from GPU
   DownloadExternalOutputs(api, context);
 
-  // Phase 4: Synchronize with timeout
+  // Phase 4: Synchronize with timeout (uses per-session stream)
   MY_LOG(2) << "[ROCm CustomOp] Synchronizing stream...";
-  auto timeout_status = hip_ctx.sync_stream_with_timeout();
+  auto timeout_status = hip_context_->sync_stream_with_timeout();
   
   if (timeout_status == TimeoutStatus::TIMEOUT) {
     LOG(ERROR) << "[ROCm CustomOp] Subgraph execution TIMED OUT!";
@@ -480,8 +513,8 @@ void RocmCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const {
 }
 
 void RocmCustomOp::UploadExternalInputs(const OrtApi* api, OrtKernelContext* context) const {
-  auto& hip_ctx = HipContext::instance();
-  auto stream = hip_ctx.stream();
+  // Use per-session stream
+  auto stream = hip_context_->stream();
   
   // Collect unique external input names from all nodes
   std::set<std::string> external_inputs;
@@ -586,52 +619,40 @@ void RocmCustomOp::ExecuteNode(const rocm::RocmNodeProto& node) const {
   
   // Execute based on operation type
   if (params.op_type() == "conv") {
-    ExecuteConvNode(params.conv_params(), inputs, output);
+    ExecuteConvNode(node_id, params.conv_params(), inputs, output);
   } else if (params.op_type() == "gemm") {
-    ExecuteGemmNode(params.gemm_params(), inputs, output);
+    ExecuteGemmNode(node_id, params.gemm_params(), inputs, output);
   } else {
     LOG(ERROR) << "[ROCm CustomOp] Unknown op_type: " << params.op_type();
     throw std::runtime_error("Unknown operation type: " + params.op_type());
   }
 }
 
-void RocmCustomOp::ExecuteConvNode(const rocm::ConvParamProto& params, 
+void RocmCustomOp::ExecuteConvNode(int32_t node_id,
+                                    const rocm::ConvParamProto& params, 
                                     const std::vector<float*>& inputs,
                                     float* output) const {
-  MY_LOG(2) << "[ROCm CustomOp] ExecuteConvNode: batch=" << params.batch_size()
+  MY_LOG(2) << "[ROCm CustomOp] ExecuteConvNode[" << node_id << "]: batch=" << params.batch_size()
             << ", C_in=" << params.in_channels() << ", C_out=" << params.out_channels();
   
-  auto& hip_ctx = HipContext::instance();
-  auto miopen_handle = hip_ctx.miopen_handle();
-  auto stream = hip_ctx.stream();
+  // Use per-session handles
+  auto miopen_handle = hip_context_->miopen_handle();
+  auto stream = hip_context_->stream();
   
   float* d_input = inputs[0];
   
-  // Find node data for weights (we need to identify which node this is)
-  // For now, we'll find the matching node by conv params
-  NodeRuntimeData* node_data = nullptr;
-  for (int i = 0; i < subgraph_.nodes_size(); ++i) {
-    const auto& node = subgraph_.nodes(i);
-    if (node.params().op_type() == "conv") {
-      const auto& np = node.params().conv_params();
-      if (np.batch_size() == params.batch_size() &&
-          np.in_channels() == params.in_channels() &&
-          np.out_channels() == params.out_channels()) {
-        node_data = node_data_[i].get();
-        break;
-      }
-    }
-  }
+  // Get node data directly using node_id (no search needed)
+  auto& node_data = *node_data_[node_id];
   
-  if (!node_data || node_data->d_weight == nullptr) {
-    LOG(ERROR) << "[ROCm CustomOp] Conv weights not found";
+  if (node_data.d_weight == nullptr) {
+    LOG(ERROR) << "[ROCm CustomOp] Conv weights not found for node " << node_id;
     throw std::runtime_error("Conv weights not loaded");
   }
   
-  float* d_weight = node_data->d_weight;
-  float* d_bias = node_data->d_bias;
+  float* d_weight = node_data.d_weight;
+  float* d_bias = node_data.d_bias;
   
-  // Create MIOpen descriptors
+  // Create MIOpen descriptors (cheap, ~microseconds each)
   miopenTensorDescriptor_t input_desc, weight_desc, output_desc;
   miopenConvolutionDescriptor_t conv_desc;
   
@@ -657,117 +678,133 @@ void RocmCustomOp::ExecuteConvNode(const rocm::ConvParamProto& params,
                                   params.stride_h(), params.stride_w(),
                                   params.dilation_h(), params.dilation_w());
 
-  // Get workspace size
-  size_t workspace_size = 0;
-  miopenConvolutionForwardGetWorkSpaceSize(miopen_handle, weight_desc, input_desc,
-                                           conv_desc, output_desc, &workspace_size);
+  // Determine workspace size - use cached if available
+  size_t workspace_size = node_data.conv_algo_cached 
+                            ? node_data.cached_conv_workspace_size 
+                            : 0;
+  
+  // If not cached, query workspace size
+  if (!node_data.conv_algo_cached) {
+    miopenConvolutionForwardGetWorkSpaceSize(miopen_handle, weight_desc, input_desc,
+                                             conv_desc, output_desc, &workspace_size);
+  }
   
   // Allocate workspace if needed
   void* workspace_ptr = nullptr;
   if (workspace_size > 0) {
-    if (node_data->workspace == nullptr || node_data->workspace_size < workspace_size) {
-      if (node_data->workspace) hipFree(node_data->workspace);
-      hipMalloc(&node_data->workspace, workspace_size);
-      node_data->workspace_size = workspace_size;
+    if (node_data.workspace == nullptr || node_data.workspace_size < workspace_size) {
+      if (node_data.workspace) hipFree(node_data.workspace);
+      hipMalloc(&node_data.workspace, workspace_size);
+      node_data.workspace_size = workspace_size;
     }
-    workspace_ptr = node_data->workspace;
+    workspace_ptr = node_data.workspace;
   }
 
-  // Find best algorithm
-  miopenConvAlgoPerf_t perf_results[4];
-  int algo_count = 0;
+  miopenConvFwdAlgorithm_t algo;
   
-  miopenStatus_t status = miopenFindConvolutionForwardAlgorithm(
-      miopen_handle, input_desc, d_input,
-      weight_desc, d_weight,
-      conv_desc, output_desc, output,
-      4, &algo_count, perf_results,
-      workspace_ptr, workspace_size, false);
-  
-  if (status != miopenStatusSuccess || algo_count == 0) {
-    miopenDestroyConvolutionDescriptor(conv_desc);
-    miopenDestroyTensorDescriptor(output_desc);
-    miopenDestroyTensorDescriptor(weight_desc);
-    miopenDestroyTensorDescriptor(input_desc);
-    LOG(ERROR) << "[ROCm CustomOp] Failed to find convolution algorithm";
-    throw std::runtime_error("Failed to find convolution algorithm");
+  // Check if algorithm is cached
+  if (node_data.conv_algo_cached) {
+    // Use cached algorithm - skip expensive Find call
+    algo = node_data.cached_conv_algo;
+    MY_LOG(2) << "[ROCm CustomOp] Node " << node_id << ": Using cached algorithm";
+  } else {
+    // First call: Find best algorithm (expensive)
+    MY_LOG(1) << "[ROCm CustomOp] Node " << node_id << ": Searching for best algorithm...";
+    
+    miopenConvAlgoPerf_t perf_results[4];
+    int algo_count = 0;
+    
+    miopenStatus_t status = miopenFindConvolutionForwardAlgorithm(
+        miopen_handle, input_desc, d_input,
+        weight_desc, d_weight,
+        conv_desc, output_desc, output,
+        4, &algo_count, perf_results,
+        workspace_ptr, workspace_size, false);
+    
+    if (status != miopenStatusSuccess || algo_count == 0) {
+      miopenDestroyConvolutionDescriptor(conv_desc);
+      miopenDestroyTensorDescriptor(output_desc);
+      miopenDestroyTensorDescriptor(weight_desc);
+      miopenDestroyTensorDescriptor(input_desc);
+      LOG(ERROR) << "[ROCm CustomOp] Failed to find convolution algorithm for node " << node_id;
+      throw std::runtime_error("Failed to find convolution algorithm");
+    }
+    
+    // Cache the algorithm for subsequent calls
+    algo = perf_results[0].fwd_algo;
+    node_data.cached_conv_algo = algo;
+    node_data.cached_conv_workspace_size = perf_results[0].memory;
+    node_data.conv_algo_cached = true;
+    
+    MY_LOG(1) << "[ROCm CustomOp] Node " << node_id << ": Cached algorithm, "
+              << "found " << algo_count << " algorithms, best time: " 
+              << perf_results[0].time << " ms, workspace: " 
+              << perf_results[0].memory << " bytes";
   }
-  
-  MY_LOG(2) << "[ROCm CustomOp] Found " << algo_count << " algorithms, best time: " 
-            << perf_results[0].time << " ms";
 
-  // Execute convolution
+  // Execute convolution with selected algorithm
   float alpha = params.alpha();
   float beta = params.beta();
   
-  status = miopenConvolutionForward(miopen_handle, &alpha,
+  miopenStatus_t status = miopenConvolutionForward(miopen_handle, &alpha,
                                     input_desc, d_input,
                                     weight_desc, d_weight,
-                                    conv_desc, perf_results[0].fwd_algo, &beta,
+                                    conv_desc, algo, &beta,
                                     output_desc, output,
                                     workspace_ptr, workspace_size);
   
-  // Cleanup descriptors
+  // Cleanup descriptors (safe to destroy immediately - values copied to command buffer)
   miopenDestroyConvolutionDescriptor(conv_desc);
   miopenDestroyTensorDescriptor(output_desc);
   miopenDestroyTensorDescriptor(weight_desc);
   miopenDestroyTensorDescriptor(input_desc);
   
   if (status != miopenStatusSuccess) {
-    LOG(ERROR) << "[ROCm CustomOp] miopenConvolutionForward failed";
+    LOG(ERROR) << "[ROCm CustomOp] miopenConvolutionForward failed for node " << node_id;
     throw std::runtime_error("miopenConvolutionForward failed");
   }
   
-  MY_LOG(2) << "[ROCm CustomOp] Convolution executed successfully";
+  MY_LOG(2) << "[ROCm CustomOp] Node " << node_id << ": Convolution executed successfully";
 }
 
-void RocmCustomOp::ExecuteGemmNode(const rocm::GemmParamProto& params,
+void RocmCustomOp::ExecuteGemmNode(int32_t node_id,
+                                    const rocm::GemmParamProto& params,
                                     const std::vector<float*>& inputs,
                                     float* output) const {
-  MY_LOG(2) << "[ROCm CustomOp] ExecuteGemmNode: M=" << params.m()
+  MY_LOG(2) << "[ROCm CustomOp] ExecuteGemmNode[" << node_id << "]: M=" << params.m()
             << ", N=" << params.n() << ", K=" << params.k();
   
-  auto& hip_ctx = HipContext::instance();
-  auto blaslt_handle = hip_ctx.hipblaslt_handle();
-  auto stream = hip_ctx.stream();
+  // Use per-session handles
+  auto blaslt_handle = hip_context_->hipblaslt_handle();
+  auto stream = hip_context_->stream();
   
   float* d_a = inputs[0];
   
-  // Find node data for weights
-  NodeRuntimeData* node_data = nullptr;
-  for (int i = 0; i < subgraph_.nodes_size(); ++i) {
-    const auto& node = subgraph_.nodes(i);
-    if (node.params().op_type() == "gemm") {
-      const auto& np = node.params().gemm_params();
-      if (np.m() == params.m() && np.n() == params.n() && np.k() == params.k()) {
-        node_data = node_data_[i].get();
-        break;
-      }
-    }
-  }
+  // Get node data directly using node_id (no search needed)
+  auto& node_data = *node_data_[node_id];
   
-  if (!node_data || node_data->d_weight == nullptr) {
-    LOG(ERROR) << "[ROCm CustomOp] GEMM weights not found";
+  if (node_data.d_weight == nullptr) {
+    LOG(ERROR) << "[ROCm CustomOp] GEMM weights not found for node " << node_id;
     throw std::runtime_error("GEMM weights not loaded");
   }
   
-  float* d_b = node_data->d_weight;
-  float* d_c = node_data->d_bias;  // May be nullptr
+  float* d_b = node_data.d_weight;
+  float* d_c = node_data.d_bias;  // May be nullptr
   
-  // TODO: Full hipBLASLt implementation
-  // For now, log that we need to implement this
-  MY_LOG(1) << "[ROCm CustomOp] GEMM execution - hipBLASLt implementation pending";
+  // TODO: Full hipBLASLt implementation with algorithm caching
+  // Similar to conv, we would cache hipblasLtMatmulAlgo_t for subsequent calls
+  MY_LOG(1) << "[ROCm CustomOp] Node " << node_id << ": GEMM execution - hipBLASLt implementation pending";
   
   // Placeholder: zero output
   size_t output_bytes = static_cast<size_t>(params.m()) * params.n() * sizeof(float);
   hipMemsetAsync(output, 0, output_bytes, stream);
   
-  MY_LOG(2) << "[ROCm CustomOp] GEMM executed (placeholder)";
+  MY_LOG(2) << "[ROCm CustomOp] Node " << node_id << ": GEMM executed (placeholder)";
 }
 
 void RocmCustomOp::DownloadExternalOutputs(const OrtApi* api, OrtKernelContext* context) const {
-  auto& hip_ctx = HipContext::instance();
-  auto stream = hip_ctx.stream();
+  // Use per-session stream
+  auto stream = hip_context_->stream();
   
   // For each external output, copy from GPU to ORT output tensor
   for (int i = 0; i < subgraph_.outputs_size(); ++i) {
