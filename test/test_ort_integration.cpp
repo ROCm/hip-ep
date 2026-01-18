@@ -334,16 +334,48 @@ TEST_F(OrtIntegrationTest, VitisAIProviderInference) {
       }
       std::cout << "]" << std::endl;
       std::cout << "[Test] GPU output[0]: " << gpu_output[0] << std::endl;
+      std::cout << "[Test] CPU reference[0]: " << cpu_output[0] << std::endl;
       
-      // Compare outputs
+      // Compare outputs with early exit on excessive mismatches
       ASSERT_EQ(cpu_output.size(), gpu_output.size()) << "Output size mismatch";
 
+      const size_t MAX_MISMATCH_BEFORE_FATAL = 5;  // Exit after 5 mismatches
+      const float TOLERANCE = 1e-4f;
+      
       float max_diff = 0.0f;
+      size_t mismatch_count = 0;
+      size_t first_mismatch_idx = SIZE_MAX;
+      
       for (size_t i = 0; i < cpu_output.size(); ++i) {
         float diff = std::abs(cpu_output[i] - gpu_output[i]);
         max_diff = std::max(max_diff, diff);
-        EXPECT_NEAR(cpu_output[i], gpu_output[i], 1e-4f)
-            << "Mismatch at index " << i << ": CPU=" << cpu_output[i] << ", GPU=" << gpu_output[i];
+        
+        if (diff > TOLERANCE) {
+          if (mismatch_count < MAX_MISMATCH_BEFORE_FATAL) {
+            std::cout << "[Test] MISMATCH at index " << i << ": CPU=" << cpu_output[i] 
+                      << ", GPU=" << gpu_output[i] << ", diff=" << diff << std::endl;
+          }
+          if (first_mismatch_idx == SIZE_MAX) {
+            first_mismatch_idx = i;
+          }
+          mismatch_count++;
+          
+          if (mismatch_count >= MAX_MISMATCH_BEFORE_FATAL) {
+            std::cout << "[Test] FATAL: Too many mismatches (" << mismatch_count 
+                      << "+), first mismatch at index " << first_mismatch_idx << std::endl;
+            std::cout << "[Test] Max difference so far: " << max_diff << std::endl;
+            std::cout << "[Test] Stopping comparison early to avoid log flood." << std::endl;
+            FAIL() << "CPU vs VitisAI EP output mismatch: " << mismatch_count 
+                   << " elements differ by more than " << TOLERANCE;
+          }
+        }
+      }
+
+      if (mismatch_count > 0) {
+        std::cout << "[Test] Total mismatches: " << mismatch_count << " out of " 
+                  << cpu_output.size() << " elements" << std::endl;
+        std::cout << "[Test] Max difference: " << max_diff << std::endl;
+        FAIL() << "CPU vs VitisAI EP output has " << mismatch_count << " mismatches";
       }
 
       std::cout << "[Test] Max difference between CPU and GPU: " << max_diff << std::endl;
