@@ -61,5 +61,25 @@ REM Build
 cmake --build C:/Develop/m/build/morphizen-rocm
 ```
 
+## VitisAI EP Environment Variables
+When running tests with VitisAI EP, the following environment variables are used:
+
+### Required
+- **MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1**: Required to enable CPU device registration in VitisAI EP for the ORT 2.0 V2 device API. Without this, `GetEpDevices()` won't return VitisAI devices and the integration test will skip/fail.
+
+### Optional (Debug Only)
+- **MORPHIZEN_DEBUG_ROCM=2**: Enable debug logging from morphizen-rocm passes
+- **GLOG_logtostderr=1**: Enable glog output to stderr
+- **GLOG_minloglevel=0**: Show all glog messages (INFO and above)
+
+Example test command:
+```powershell
+$env:MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE = "1"
+$env:THEROCK_DIST = "C:\Develop\m\dist\therock"
+$env:PATH = "$env:THEROCK_DIST\bin;$env:PATH"
+cd C:\Develop\m\build\morphizen-rocm\bin
+.\ort_integration_test.exe
+```
+
 ## Repository
 - GitHub Enterprise: https://gitenterprise.xilinx.com/VitisAI/morphizen-rocm
