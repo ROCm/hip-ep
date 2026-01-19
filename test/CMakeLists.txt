@@ -68,9 +68,8 @@ set_target_properties(rocm_timeout_test PROPERTIES FOLDER "rocm-tests")
 # Check for ORT in the source tree (from parent project)
 set(ORT_SOURCE_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/../onnxruntime/include/onnxruntime/core/session")
 set(ORT_BUILD_LIB "${CMAKE_BINARY_DIR}/bin/onnxruntime.dll")
-# ORT import library is in the ORT build directory (C:/Develop/m/build/onnxruntime/Release)
-# The path from source dir to build dir goes up to m/ then to build/
-set(ORT_BUILD_IMPLIB "${CMAKE_SOURCE_DIR}/../../build/onnxruntime/Release/onnxruntime.lib")
+# ORT import library is in the installation directory (CMAKE_INSTALL_PREFIX/lib)
+set(ORT_BUILD_IMPLIB "${CMAKE_INSTALL_PREFIX}/lib/onnxruntime.lib")
 
 # Also check for pre-built ORT from install
 if(NOT EXISTS "${ORT_SOURCE_INCLUDE_DIR}/onnxruntime_cxx_api.h")
@@ -111,12 +110,14 @@ elseif(ORT_SOURCE_INCLUDE_DIR AND EXISTS "${ORT_BUILD_IMPLIB}")
   endif()
   set_target_properties(ort_integration_test PROPERTIES FOLDER "rocm-tests")
 elseif(ORT_SOURCE_INCLUDE_DIR)
-  # ORT headers found but no import lib - create test that will need DLL at runtime
-  message(STATUS "Building ORT integration test (headers only - needs DLL at runtime)")
+  # ORT headers found - use installation lib path
+  message(STATUS "Building ORT integration test (using installation lib)")
   message(STATUS "  ORT include: ${ORT_SOURCE_INCLUDE_DIR}")
+  message(STATUS "  ORT lib: ${ORT_BUILD_IMPLIB}")
   
   add_executable(ort_integration_test test_ort_integration.cpp)
   target_link_libraries(ort_integration_test PRIVATE
+    "${ORT_BUILD_IMPLIB}"
     GTest::gtest
     GTest::gtest_main
   )
@@ -124,9 +125,6 @@ elseif(ORT_SOURCE_INCLUDE_DIR)
   target_compile_features(ort_integration_test PRIVATE cxx_std_17)
   if(WIN32)
     target_compile_definitions(ort_integration_test PRIVATE "_CRT_SECURE_NO_WARNINGS")
-    # Link against the DLL in bin folder
-    target_link_directories(ort_integration_test PRIVATE "${CMAKE_BINARY_DIR}/bin")
-    target_link_libraries(ort_integration_test PRIVATE onnxruntime)
   endif()
   set_target_properties(ort_integration_test PROPERTIES FOLDER "rocm-tests")
 else()

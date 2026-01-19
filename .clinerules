@@ -26,9 +26,10 @@ This project combines MIOpen (convolution) and hipBLASLt (GEMM) into a unified R
 Note: Repositories are typically cloned in `../../source`, so paths are relative to that structure.
 - Binary/build directory is located at `../../build/<project-name>` relative to the source directory
 - Installation directory is `../../local`
+- Workspace supports both `C:/Develop/m` and `D:/Develop/m` locations
 
 ## TheRock ROCm SDK
-- TheRock (Windows ROCm SDK) is installed at `C:\Develop\m\dist\therock`
+- TheRock (Windows ROCm SDK) is installed at `C:\Develop\m\dist\therock` or `D:\Develop\m\dist\therock`
 - Set `THEROCK_DIST` environment variable to point to the installation
 - Use Ninja generator for CMake builds (not Visual Studio generator)
 - Both MIOpen and hipBLASLt libraries are provided by TheRock
@@ -49,23 +50,25 @@ All custom ops share a single HIP stream for implicit operation fusion:
 
 ## Build Commands
 Use `build.bat` to build the project, which:
-1. Sets up TheRock environment
-2. Sets up MSVC environment (Visual Studio 2022)
-3. Sets GSL include path for ORT VitisAI headers
-4. Configures with CMake using Ninja generator
-5. Builds the project
+1. Auto-detects workspace drive (C: or D:) from script location
+2. Sets up TheRock environment
+3. Sets up MSVC environment (Visual Studio 2022)
+4. Sets GSL include path for ORT VitisAI headers
+5. Configures with CMake using Ninja generator
+6. Builds the project
 
-Alternative manual build:
+Alternative manual build (adjust drive letter as needed):
 ```cmd
-REM Set up environment
-set THEROCK_DIST=C:\Develop\m\dist\therock
+REM Set up environment (use C: or D: as appropriate)
+set WORKSPACE_ROOT=C:/Develop/m
+set THEROCK_DIST=%WORKSPACE_ROOT%\dist\therock
 call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
 
 REM Configure
-cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -B C:/Develop/m/build/morphizen-rocm -S . -DCMAKE_INSTALL_PREFIX=C:/Develop/m/local -DCMAKE_PREFIX_PATH=C:/Develop/m/local -DTHEROCK_DIST=%THEROCK_DIST%
+cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -B %WORKSPACE_ROOT%/build/morphizen-rocm -S . -DCMAKE_INSTALL_PREFIX=%WORKSPACE_ROOT%/local -DCMAKE_PREFIX_PATH=%WORKSPACE_ROOT%/local -DTHEROCK_DIST=%THEROCK_DIST%
 
 REM Build
-cmake --build C:/Develop/m/build/morphizen-rocm
+cmake --build %WORKSPACE_ROOT%/build/morphizen-rocm
 ```
 
 ## VitisAI EP Environment Variables
@@ -79,7 +82,7 @@ When running tests with VitisAI EP, the following environment variables are used
 - **GLOG_logtostderr=1**: Enable glog output to stderr
 - **GLOG_minloglevel=0**: Show all glog messages (INFO and above)
 
-Example test command:
+Example test command (adjust drive letter C: or D: as needed):
 ```powershell
 $env:MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE = "1"
 $env:THEROCK_DIST = "C:\Develop\m\dist\therock"
