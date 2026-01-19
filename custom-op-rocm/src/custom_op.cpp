@@ -516,19 +516,15 @@ void RocmCustomOp::UploadExternalInputs(const OrtApi* api, OrtKernelContext* con
   // Use per-session stream
   auto stream = hip_context_->stream();
   
-  // Collect unique external input names from all nodes
-  std::set<std::string> external_inputs;
-  for (const auto& node : subgraph_.nodes()) {
-    for (const auto& input : node.inputs()) {
-      if (input.has_external_name()) {
-        external_inputs.insert(input.external_name());
-      }
-    }
-  }
+  // Use pre-computed external_inputs from proto (field 1)
+  // This eliminates runtime deduplication overhead - Level-1 pass already computed
+  // the unique set of external inputs during graph compilation
+  MY_LOG(2) << "[ROCm CustomOp] Phase 1: Uploading " << subgraph_.external_inputs_size() 
+            << " external inputs";
   
   // Upload each external input
-  size_t input_idx = 0;
-  for (const auto& name : external_inputs) {
+  for (int input_idx = 0; input_idx < subgraph_.external_inputs_size(); ++input_idx) {
+    const auto& name = subgraph_.external_inputs(input_idx);
     const OrtValue* ort_input = nullptr;
     api->KernelContext_GetInput(context, input_idx, &ort_input);
     if (ort_input == nullptr) {
@@ -577,17 +573,19 @@ void RocmCustomOp::UploadExternalInputs(const OrtApi* api, OrtKernelContext* con
     }
     MY_LOG(2) << "[ROCm CustomOp] Uploaded external input: " << name 
               << " (" << bytes << " bytes)";
-    
-    ++input_idx;
   }
+  
+  MY_LOG(2) << "[ROCm CustomOp] Phase 1 complete: all external inputs uploaded";
 }
 
 void RocmCustomOp::ExecuteSubgraph(const OrtApi* api, OrtKernelContext* context) const {
-  MY_LOG(2) << "[ROCm CustomOp] Executing " << subgraph_.nodes_size() << " nodes";
+  MY_LOG(2) << "[ROCm CustomOp] Phase 2: Executing " << subgraph_.nodes_size() << " nodes";
   
   for (const auto& node : subgraph_.nodes()) {
     ExecuteNode(node);
   }
+  
+  MY_LOG(2) << "[ROCm CustomOp] Phase 2 complete: all nodes executed";
 }
 
 void RocmCustomOp::ExecuteNode(const rocm::RocmNodeProto& node) const {
@@ -806,6 +804,9 @@ void RocmCustomOp::DownloadExternalOutputs(const OrtApi* api, OrtKernelContext* 
   // Use per-session stream
   auto stream = hip_context_->stream();
   
+  MY_LOG(2) << "[ROCm CustomOp] Phase 3: Downloading " << subgraph_.outputs_size() 
+            << " external outputs";
+  
   // For each external output, copy from GPU to ORT output tensor
   for (int i = 0; i < subgraph_.outputs_size(); ++i) {
     const auto& ext_output = subgraph_.outputs(i);
@@ -857,6 +858,8 @@ void RocmCustomOp::DownloadExternalOutputs(const OrtApi* api, OrtKernelContext* 
     MY_LOG(2) << "[ROCm CustomOp] Scheduled D2H for output: " << ext_output.name()
               << " (" << bytes << " bytes)";
   }
+  
+  MY_LOG(2) << "[ROCm CustomOp] Phase 3 complete: all outputs scheduled for download";
 }
 
 } // namespace rocm_ep

@@ -303,7 +303,7 @@ The subgraph representation uses four core protobuf messages that work together 
 
 | Message | Purpose |
 |---------|---------|
-| `RocmSubgraphProto` | The complete subgraph container |
+| `RocmSubgraphProto` | The complete subgraph container with pre-computed external inputs |
 | `RocmNodeProto` | Represents a single operation node in the subgraph |
 | `TensorRefProto` | Tracks where a tensor comes from (external input or another node's output) |
 | `ExternalOutputProto` | Maps subgraph outputs back to ORT output tensors |
@@ -318,15 +318,18 @@ These messages form a graph structure where:
 ```protobuf
 // Represents a ROCm subgraph to be executed as a single fused operation
 message RocmSubgraphProto {
-  repeated RocmNodeProto nodes = 1;           // Nodes in topological order
-  repeated ExternalOutputProto outputs = 2;  // External outputs with sources
+  repeated string external_inputs = 1;        // Pre-computed unique external input names
+  repeated RocmNodeProto nodes = 2;           // Nodes in topological order
+  repeated ExternalOutputProto outputs = 3;   // External outputs with sources
 }
 ```
 
 **Why this design?**
 - Top-level container that the custom op receives and executes
+- `external_inputs` pre-computed during Level-1 pass eliminates runtime deduplication
 - `nodes` in topological order ensures correct execution sequence
 - `outputs` list enables async D2H scheduling
+- Clean separation of phases: upload external inputs → execute nodes → download outputs
 
 #### RocmNodeProto - Operation Node
 
@@ -391,6 +394,7 @@ Consider this subgraph: `X → Conv1 → Conv2 → Y`
 
 ```protobuf
 RocmSubgraphProto {
+  external_inputs: ["X"]  // Pre-computed: all unique external inputs
   nodes: [
     RocmNodeProto {
       node_id: 0
@@ -414,6 +418,8 @@ RocmSubgraphProto {
   ]
 }
 ```
+
+**Note**: The `external_inputs` list is computed during the Level-1 pass by collecting all unique external input names from all nodes. This avoids redundant H2D copies at runtime if the same external input is referenced by multiple nodes.
 
 ### 6.4 Async Execution Pipeline
 
@@ -452,36 +458,40 @@ See [proto/rocm.proto](../proto/rocm.proto) for complete definitions of `ConvPar
 
 ### 7.1 Subgraph Executor
 
-The custom op receives a `RocmSubgraphProto` and executes all nodes:
+The custom op receives a `RocmSubgraphProto` and executes all nodes in three distinct phases:
 
 ```cpp
 void RocmCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const {
-  // 1. Upload external inputs to GPU (async)
-  for (const auto& node : subgraph_.nodes()) {
-    for (const auto& input : node.inputs()) {
-      if (input.has_external_name()) {
-        UploadExternalInput(input.external_name(), context);
-      }
-    }
+  // Phase 1: Upload all external inputs to GPU (async, pre-deduplicated)
+  // The external_inputs list is computed during Level-1 pass, ensuring
+  // each external input is uploaded exactly once even if referenced by multiple nodes
+  for (const auto& name : subgraph_.external_inputs()) {
+    UploadExternalInput(name, context);
   }
   
-  // 2. Execute nodes in topological order
+  // Phase 2: Execute nodes in topological order
   for (const auto& node : subgraph_.nodes()) {
     ExecuteNode(node);
     
-    // 3. Check if this node produces any external outputs
+    // Check if this node produces any external outputs
     for (const auto& output : subgraph_.outputs()) {
       if (output.producer_node_id() == node.node_id()) {
-        // Schedule async D2H copy
+        // Schedule async D2H copy (overlaps with subsequent node execution)
         ScheduleOutputCopy(output, context);
       }
     }
   }
   
-  // 4. Synchronize stream with timeout
+  // Phase 3: Synchronize stream with timeout
   SyncStreamWithTimeout();
 }
 ```
+
+**Design Benefits**:
+- **No redundant H2D copies**: Each external input uploaded exactly once
+- **Zero runtime overhead**: No set/map operations needed for deduplication
+- **Clean separation**: Upload → Execute → Download phases are clearly separated
+- **Async-friendly**: All H2D copies issued before execution, enabling overlap
 
 ### 7.2 Memory Management
 
