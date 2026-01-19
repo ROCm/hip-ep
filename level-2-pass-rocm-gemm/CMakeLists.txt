@@ -8,9 +8,7 @@ include(cmake/generate_pattern_inc.cmake)
 set(LIB_NAME morphizen-level2-pass-rocm-gemm)
 add_library(${LIB_NAME} STATIC src/pass_main.cpp ${CMAKE_CURRENT_BINARY_DIR}/gemm_pattern_json.hpp)
 target_link_libraries(${LIB_NAME} PUBLIC
-	rocm_proto
-	morphizen::morphizen-core-static
-	glog::glog
+	morphizen::rocm-pass-common
 )
 target_include_directories(${LIB_NAME} PRIVATE
 	include

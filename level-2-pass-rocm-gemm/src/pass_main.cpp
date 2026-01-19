@@ -1,15 +1,8 @@
 // Copyright (C) 2023 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-#include <glog/logging.h>
-#include "google/protobuf/util/json_util.h"
-#include "morphizen/env_config.hpp"
-#include "morphizen/vaip.hpp"
-#include "rocm.pb.h"
+#include "rocm_pass_utils.hpp"
 #include "gemm_pattern_json.hpp"
-
-DEF_ENV_PARAM(MORPHIZEN_DEBUG_ROCM, "0")
-#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_ROCM) >= n)
 
 using namespace vaip_core;
 
@@ -17,6 +10,8 @@ using namespace vaip_core;
  * Level-2 Pass: Gemm Pattern Matching (hipBLASLt)
  */
 struct Level2RocmGemm {
+  static constexpr const char* LOG_PREFIX = "[ROCm Gemm L2]";
+  
   Level2RocmGemm(IPass& self) : self_{self} {}
 
   std::unique_ptr<Rule> create_rule(IPass* self) {
@@ -31,7 +26,7 @@ struct Level2RocmGemm {
           auto output = binder["output"];
           bool has_C = binder["input_C"].node_arg != nullptr;
 
-          MY_LOG(1) << "[ROCm Gemm L2] Found Gemm pattern";
+          ROCM_LOG(1) << LOG_PREFIX << " Found Gemm pattern";
 
           rocm::RocmParamProto rocm_param;
           rocm_param.set_op_type("gemm");
@@ -63,30 +58,24 @@ struct Level2RocmGemm {
           std::vector<std::string> output_names;
           output_names.push_back(node_arg_get_name(*output.node_arg));
 
+          // Get output name for param file and fused node naming
+          std::string fused_output_name = node_arg_get_name(*output.node_arg);
+          
           auto [meta_def, error] = self->try_fuse(
               *graph, "rocm_gemm", input_names, output_names, {}, "ROCm_EP");
 
           if (meta_def) {
-            std::string rocm_param_json;
-            auto status = google::protobuf::util::MessageToJsonString(
-                rocm_param, &rocm_param_json);
-            if (!status.ok()) {
-              MY_LOG(1) << "[ROCm Gemm L2] Failed to serialize params: " << status.ToString();
-              return false;
-            }
-            self->attach_meta_def_param(*meta_def, rocm_param_json.c_str());
-            self->fuse(*graph, std::move(*meta_def));
-            MY_LOG(1) << "[ROCm Gemm L2] Fused Gemm pattern successfully";
-            return true;
+            return rocm_pass::finalize_level2_fuse(
+                self, *graph, *meta_def, rocm_param, fused_output_name, LOG_PREFIX);
           }
           
-          MY_LOG(1) << "[ROCm Gemm L2] Failed to fuse: " << error.comments;
+          ROCM_LOG(1) << LOG_PREFIX << " Failed to fuse: " << error.comments;
           return false;
         });
   }
 
   void process(IPass& self, Graph& graph) {
-    MY_LOG(1) << "[ROCm Gemm L2] Processing graph for Gemm patterns...";
+    ROCM_LOG(1) << LOG_PREFIX << " Processing graph for Gemm patterns...";
     create_rule(&self)->apply(&graph);
   }
 
