@@ -48,21 +48,68 @@ struct Level2RocmGemm {
             gemm_params->set_n((*b_shape)[b_shape->size() - 1]);
           }
 
+          // Extract and save weight tensor (B matrix) to cache
+          auto pass_context = self->get_context();
+          auto weight_name = node_arg_get_name(*input_B.node_arg);
+          
+          // Check if weight is a constant initializer
+          if (VAIP_ORT_API(node_arg_is_constant)(*graph, *input_B.node_arg)) {
+            auto weight_data = node_arg_get_const_data_as_floats(*graph, *input_B.node_arg);
+            std::string weight_filename = rocm_pass::generate_weight_filename("rocm_gemm", weight_name);
+            
+            if (rocm_pass::save_weight_to_cache(pass_context, weight_data, weight_filename, LOG_PREFIX)) {
+              gemm_params->set_weight_file_path(weight_filename);
+              gemm_params->set_weight_file_size(static_cast<int64_t>(weight_data.size() * sizeof(float)));
+            }
+          } else {
+            ROCM_LOG(1) << LOG_PREFIX << " Weight is not a constant: " << weight_name;
+          }
+          
+          // Extract and save bias tensor (C matrix) if present
+          if (has_C) {
+            auto* bias_node_arg = binder["input_C"].node_arg;
+            auto bias_name = node_arg_get_name(*bias_node_arg);
+            
+            if (VAIP_ORT_API(node_arg_is_constant)(*graph, *bias_node_arg)) {
+              auto bias_data = node_arg_get_const_data_as_floats(*graph, *bias_node_arg);
+              std::string bias_filename = rocm_pass::generate_weight_filename("rocm_gemm_bias", bias_name);
+              
+              if (rocm_pass::save_weight_to_cache(pass_context, bias_data, bias_filename, LOG_PREFIX)) {
+                gemm_params->set_bias_file_path(bias_filename);
+                gemm_params->set_bias_file_size(static_cast<int64_t>(bias_data.size() * sizeof(float)));
+              }
+            }
+          }
+
+          // Store input/output names
+          gemm_params->add_input_names(node_arg_get_name(*input_A.node_arg));
+          gemm_params->add_input_names(weight_name);
+          if (has_C) {
+            gemm_params->add_input_names(node_arg_get_name(*binder["input_C"].node_arg));
+          }
+          gemm_params->add_output_names(node_arg_get_name(*output.node_arg));
+
+          // Create fused op - only pass activation (A matrix) as runtime input
+          // Weight (B) and bias (C) are constant initializers (saved to cache)
           std::vector<std::string> input_names;
           input_names.push_back(node_arg_get_name(*input_A.node_arg));
-          input_names.push_back(node_arg_get_name(*input_B.node_arg));
-          if (has_C) {
-            input_names.push_back(node_arg_get_name(*binder["input_C"].node_arg));
-          }
+          // Don't add weight/bias as runtime inputs - they're cached
 
           std::vector<std::string> output_names;
           output_names.push_back(node_arg_get_name(*output.node_arg));
+
+          // Add weight and bias as constant initializers
+          std::vector<std::string> constant_initializers;
+          constant_initializers.push_back(weight_name);
+          if (has_C) {
+            constant_initializers.push_back(node_arg_get_name(*binder["input_C"].node_arg));
+          }
 
           // Get output name for param file and fused node naming
           std::string fused_output_name = node_arg_get_name(*output.node_arg);
           
           auto [meta_def, error] = self->try_fuse(
-              *graph, "rocm_gemm", input_names, output_names, {}, "ROCm_EP");
+              *graph, "rocm_gemm", input_names, output_names, constant_initializers, "ROCm_EP");
 
           if (meta_def) {
             return rocm_pass::finalize_level2_fuse(
