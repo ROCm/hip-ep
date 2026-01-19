@@ -244,6 +244,12 @@ struct NodeRuntimeData {
   miopenConvFwdAlgorithm_t cached_conv_algo = miopenConvolutionFwdAlgoGEMM;
   size_t cached_conv_workspace_size = 0;
   
+  // Cached algorithm for gemm operations
+  // Avoids expensive hipblasLtMatmulAlgoGetHeuristic() on each inference
+  bool gemm_algo_cached = false;
+  hipblasLtMatmulAlgo_t cached_gemm_algo;
+  size_t cached_gemm_workspace_size = 0;
+  
   ~NodeRuntimeData() {
     for (auto* buf : output_buffers) {
       if (buf) hipFree(buf);

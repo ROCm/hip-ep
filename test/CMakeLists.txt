@@ -62,6 +62,18 @@ else()
 endif()
 set_target_properties(rocm_timeout_test PROPERTIES FOLDER "rocm-tests")
 
+# Combined Conv and Gemm test (MIOpen + hipBLASLt)
+add_executable(rocm_conv_and_gemm_test test_conv_and_gemm.cpp)
+target_link_libraries(rocm_conv_and_gemm_test PRIVATE MIOpen roc::hipblaslt GTest::gtest GTest::gtest_main)
+if(WIN32)
+  target_include_directories(rocm_conv_and_gemm_test SYSTEM PRIVATE "${THEROCK_DIST}/include")
+  target_compile_definitions(rocm_conv_and_gemm_test PRIVATE "__HIP_PLATFORM_AMD__=1")
+  target_link_libraries(rocm_conv_and_gemm_test PRIVATE "${THEROCK_DIST}/lib/amdhip64.lib")
+else()
+  target_link_libraries(rocm_conv_and_gemm_test PRIVATE hip::device)
+endif()
+set_target_properties(rocm_conv_and_gemm_test PROPERTIES FOLDER "rocm-tests")
+
 # ORT Integration test (for VitisAI EP testing with MY_LOG)
 # This test links against ONNX Runtime and can trigger the passes/custom-ops
 

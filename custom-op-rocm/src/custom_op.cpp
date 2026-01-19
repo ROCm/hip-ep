@@ -789,15 +789,121 @@ void RocmCustomOp::ExecuteGemmNode(int32_t node_id,
   float* d_b = node_data.d_weight;
   float* d_c = node_data.d_bias;  // May be nullptr
   
-  // TODO: Full hipBLASLt implementation with algorithm caching
-  // Similar to conv, we would cache hipblasLtMatmulAlgo_t for subsequent calls
-  MY_LOG(1) << "[ROCm CustomOp] Node " << node_id << ": GEMM execution - hipBLASLt implementation pending";
+  int64_t M = params.m();
+  int64_t N = params.n();
+  int64_t K = params.k();
   
-  // Placeholder: zero output
-  size_t output_bytes = static_cast<size_t>(params.m()) * params.n() * sizeof(float);
-  hipMemsetAsync(output, 0, output_bytes, stream);
+  // Create matrix layouts
+  hipblasLtMatrixLayout_t layout_A, layout_B, layout_C, layout_D;
   
-  MY_LOG(2) << "[ROCm CustomOp] Node " << node_id << ": GEMM executed (placeholder)";
+  hipblasLtMatrixLayoutCreate(&layout_A, HIP_R_32F, M, K, K);
+  hipblasLtMatrixLayoutCreate(&layout_B, HIP_R_32F, K, N, N);
+  hipblasLtMatrixLayoutCreate(&layout_C, HIP_R_32F, M, N, N);
+  hipblasLtMatrixLayoutCreate(&layout_D, HIP_R_32F, M, N, N);
+  
+  // Create matmul descriptor
+  hipblasLtMatmulDesc_t matmul_desc;
+  hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F);
+  
+  hipblasOperation_t trans = HIPBLAS_OP_N;
+  hipblasLtMatmulDescSetAttribute(matmul_desc, HIPBLASLT_MATMUL_DESC_TRANSA,
+                                  &trans, sizeof(trans));
+  hipblasLtMatmulDescSetAttribute(matmul_desc, HIPBLASLT_MATMUL_DESC_TRANSB,
+                                  &trans, sizeof(trans));
+  
+  // Check if algorithm is cached
+  if (!node_data.gemm_algo_cached) {
+    // First call: Find best algorithm
+    MY_LOG(1) << "[ROCm CustomOp] Node " << node_id << ": Searching for best GEMM algorithm...";
+    
+    hipblasLtMatmulPreference_t pref;
+    hipblasLtMatmulPreferenceCreate(&pref);
+    
+    size_t max_workspace = 32 * 1024 * 1024;  // 32 MB
+    hipblasLtMatmulPreferenceSetAttribute(pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                          &max_workspace, sizeof(max_workspace));
+    
+    hipblasLtMatmulHeuristicResult_t results[4];
+    int returned = 0;
+    
+    hipblasStatus_t status = hipblasLtMatmulAlgoGetHeuristic(
+        blaslt_handle, matmul_desc,
+        layout_A, layout_B, layout_C, layout_D,
+        pref, 4, results, &returned);
+    
+    if (status == HIPBLAS_STATUS_SUCCESS && returned > 0) {
+      // Cache the best algorithm
+      node_data.cached_gemm_algo = results[0].algo;
+      node_data.cached_gemm_workspace_size = results[0].workspaceSize;
+      node_data.gemm_algo_cached = true;
+      
+      MY_LOG(1) << "[ROCm CustomOp] Node " << node_id << ": Cached GEMM algorithm, "
+                << "found " << returned << " algorithms, workspace: " 
+                << results[0].workspaceSize << " bytes";
+    } else {
+      MY_LOG(1) << "[ROCm CustomOp] Node " << node_id 
+                << ": No heuristic found, using default algorithm";
+      node_data.gemm_algo_cached = false;
+    }
+    
+    hipblasLtMatmulPreferenceDestroy(pref);
+  } else {
+    MY_LOG(2) << "[ROCm CustomOp] Node " << node_id << ": Using cached GEMM algorithm";
+  }
+  
+  // Allocate workspace if needed
+  void* workspace_ptr = nullptr;
+  size_t workspace_size = node_data.gemm_algo_cached ? node_data.cached_gemm_workspace_size : 0;
+  
+  if (workspace_size > 0) {
+    if (node_data.workspace == nullptr || node_data.workspace_size < workspace_size) {
+      if (node_data.workspace) hipFree(node_data.workspace);
+      hipMalloc(&node_data.workspace, workspace_size);
+      node_data.workspace_size = workspace_size;
+    }
+    workspace_ptr = node_data.workspace;
+  }
+  
+  // Execute GEMM: C = alpha * A * B + beta * C
+  float alpha = params.alpha();
+  float beta = params.beta();
+  
+  // If we have bias, copy it to output first (C matrix)
+  if (d_c != nullptr && beta != 0.0f) {
+    size_t output_bytes = static_cast<size_t>(M) * N * sizeof(float);
+    hipMemcpyAsync(output, d_c, output_bytes, hipMemcpyDeviceToDevice, stream);
+  }
+  
+  hipblasStatus_t status;
+  if (node_data.gemm_algo_cached) {
+    status = hipblasLtMatmul(blaslt_handle, matmul_desc, &alpha,
+                             d_a, layout_A, d_b, layout_B,
+                             &beta, output, layout_C,
+                             output, layout_D,
+                             &node_data.cached_gemm_algo,
+                             workspace_ptr, workspace_size, stream);
+  } else {
+    status = hipblasLtMatmul(blaslt_handle, matmul_desc, &alpha,
+                             d_a, layout_A, d_b, layout_B,
+                             &beta, output, layout_C,
+                             output, layout_D,
+                             nullptr, workspace_ptr, workspace_size, stream);
+  }
+  
+  // Cleanup descriptors
+  hipblasLtMatmulDescDestroy(matmul_desc);
+  hipblasLtMatrixLayoutDestroy(layout_D);
+  hipblasLtMatrixLayoutDestroy(layout_C);
+  hipblasLtMatrixLayoutDestroy(layout_B);
+  hipblasLtMatrixLayoutDestroy(layout_A);
+  
+  if (status != HIPBLAS_STATUS_SUCCESS) {
+    LOG(ERROR) << "[ROCm CustomOp] hipblasLtMatmul failed for node " << node_id 
+               << ", status: " << status;
+    throw std::runtime_error("hipblasLtMatmul failed");
+  }
+  
+  MY_LOG(2) << "[ROCm CustomOp] Node " << node_id << ": GEMM executed successfully";
 }
 
 void RocmCustomOp::DownloadExternalOutputs(const OrtApi* api, OrtKernelContext* context) const {
