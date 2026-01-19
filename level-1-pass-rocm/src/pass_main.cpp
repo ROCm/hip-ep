@@ -310,10 +310,18 @@ struct Level1Rocm {
   rocm::RocmSubgraphProto
   build_subgraph_proto(const std::vector<const Node*>& group,
                        const std::unordered_set<std::string>& internal_outputs,
+                       const std::vector<std::string>& external_inputs,
                        const std::vector<std::string>& external_outputs,
                        Graph& graph) {
     rocm::RocmSubgraphProto subgraph;
     auto pass_context = self_.get_context();
+    
+    // Pre-compute unique external inputs (field 1 in proto)
+    // This eliminates runtime deduplication overhead in custom op
+    for (const auto& input_name : external_inputs) {
+      subgraph.add_external_inputs(input_name);
+      MY_LOG(2) << "[HIP EP Level-1] Added external_input: " << input_name;
+    }
     
     // Map from output name to (node_id, output_index) for internal references
     std::unordered_map<std::string, std::pair<int32_t, int32_t>> output_producer_map;
@@ -499,8 +507,9 @@ struct Level1Rocm {
                 << ", external_outputs=" << external_outputs.size();
       
       // Build RocmSubgraphProto with complete topology
+      // Note: external_inputs is passed to be stored in proto for runtime use
       rocm::RocmSubgraphProto subgraph = build_subgraph_proto(
-          group, internal_outputs, external_outputs, graph);
+          group, internal_outputs, external_inputs, external_outputs, graph);
       
       MY_LOG(1) << "[HIP EP Level-1] Built subgraph with " 
                 << subgraph.nodes_size() << " nodes, "

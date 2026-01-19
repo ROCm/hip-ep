@@ -212,19 +212,25 @@ message ExternalOutputProto {
 // Contains the complete topology and execution plan for a group of operations
 //
 // Key design decisions:
+// - external_inputs pre-computed during Level-1 pass eliminates runtime deduplication
 // - Nodes are stored in topological order for sequential execution
 // - TensorRefProto enables tracking whether inputs come from outside or inside the subgraph
 // - ExternalOutputProto enables async D2H copy scheduling
 // - Intermediate tensors (internal to subgraph) stay on GPU memory
 message RocmSubgraphProto {
+  // Pre-computed unique external input names (computed during Level-1 pass)
+  // This eliminates runtime deduplication overhead - each external input
+  // is uploaded exactly once even if referenced by multiple nodes
+  repeated string external_inputs = 1;
+  
   // Nodes in topological (execution) order
   // Each node has a unique node_id from 0 to N-1
-  repeated RocmNodeProto nodes = 1;
+  repeated RocmNodeProto nodes = 2;
   
   // External outputs with their source node mappings
   // These are the outputs consumed outside the subgraph or are graph outputs
   // The mapping enables scheduling async D2H copies immediately after the producer completes
-  repeated ExternalOutputProto outputs = 2;
+  repeated ExternalOutputProto outputs = 3;
 }
 
 // ============================================================================
