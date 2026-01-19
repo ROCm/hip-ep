@@ -53,9 +53,10 @@ Use `build.bat` to build the project, which:
 1. Auto-detects workspace drive (C: or D:) from script location
 2. Sets up TheRock environment
 3. Sets up MSVC environment (Visual Studio 2022)
-4. Sets GSL include path for ORT VitisAI headers
+4. Creates missing natvis file for nlohmann_json (TheRock packaging workaround)
 5. Configures with CMake using Ninja generator
 6. Builds the project
+7. Installs the project
 
 Alternative manual build (adjust drive letter as needed):
 ```cmd
