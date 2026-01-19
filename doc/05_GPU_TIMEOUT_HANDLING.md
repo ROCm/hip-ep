@@ -236,6 +236,107 @@ set MORPHIZEN_GPU_TIMEOUT_MS=30000
 .\ort_integration_test.exe
 ```
 
+## Alternative Approaches Considered
+
+This section documents alternative approaches for stream synchronization with timeout, explaining why polling with `hipStreamQuery()` was chosen.
+
+### HIP/ROCm Synchronization APIs
+
+| API | Behavior | Timeout Support |
+|-----|----------|-----------------|
+| `hipStreamSynchronize(stream)` | Blocks until complete | ❌ No timeout |
+| `hipDeviceSynchronize()` | Blocks all streams | ❌ No timeout |
+| `hipStreamQuery(stream)` | Non-blocking check | Must poll |
+| `hipEventSynchronize(event)` | Wait for event | ❌ No timeout |
+| `hipEventQuery(event)` | Non-blocking check | Must poll |
+
+**Key Finding:** HIP does not provide a native "synchronize with timeout" API. This is consistent with CUDA, which also lacks this feature.
+
+### Alternative 1: Event-Based Polling
+
+Instead of querying the stream, we could record an event and poll the event:
+
+```cpp
+hipEventRecord(event, stream);
+while (hipEventQuery(event) == hipErrorNotReady) {
+  if (elapsed_ms >= timeout_ms) return TIMEOUT;
+  sleep(poll_interval_ms);
+}
+```
+
+**Verdict:** No advantage over stream query. Same polling overhead, slightly more code.
+
+### Alternative 2: HSA Signal with Timeout (Advanced)
+
+ROCm's underlying HSA (Heterogeneous System Architecture) API supports timeout:
+
+```cpp
+#include <hsa/hsa.h>
+
+hsa_signal_t signal;
+// ... create signal and associate with operation ...
+
+hsa_status_t status = hsa_signal_wait_scacquire(
+    signal, 
+    HSA_SIGNAL_CONDITION_EQ, 
+    0,                          // Expected value
+    timeout_ns,                 // Timeout in nanoseconds
+    HSA_WAIT_STATE_BLOCKED      // OS-level wait (efficient)
+);
+```
+
+**Advantages:**
+- Uses OS-level waiting (futex on Linux)
+- No CPU busy-polling
+- More power-efficient
+
+**Disadvantages:**
+- Mixes HIP and HSA abstraction levels
+- Requires additional signal management
+- More complex to implement correctly
+- Less portable across ROCm versions
+
+**Verdict:** Not implemented. Too complex for current needs, but could be considered for production optimization.
+
+### Alternative 3: Adaptive Polling Interval
+
+Start with fast polling, gradually slow down for long operations:
+
+```cpp
+int poll_interval_ms = 1;  // Start fast
+while (hipStreamQuery(stream) == hipErrorNotReady) {
+  if (elapsed_ms >= timeout_ms) return TIMEOUT;
+  sleep(poll_interval_ms);
+  poll_interval_ms = std::min(poll_interval_ms * 2, 50);  // Cap at 50ms
+}
+```
+
+**Advantages:**
+- Faster response for quick operations
+- Lower CPU overhead for long operations
+
+**Verdict:** Good enhancement for future. Current 10ms fixed interval is adequate.
+
+### Why Polling is Acceptable
+
+1. **Industry Standard**: Polling is the standard approach in CUDA/HIP for timeout handling
+2. **Low Overhead**: 10ms intervals mean ~100 polls/second, negligible CPU impact
+3. **Simple**: Easy to understand, debug, and maintain
+4. **Portable**: Works across all ROCm versions
+
+### Current Implementation
+
+Our polling approach is standard practice:
+
+```cpp
+const int poll_interval_ms = 10;  // Poll every 10ms
+while (true) {
+  if (hipStreamQuery(stream) == hipSuccess) return SUCCESS;
+  if (elapsed_ms >= timeout_ms) return TIMEOUT;
+  sleep(poll_interval_ms);
+}
+```
+
 ## Future Enhancements
 
 ### 1. Watchdog Thread (Phase 2)

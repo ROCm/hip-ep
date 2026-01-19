@@ -105,6 +105,15 @@ cd C:\Develop\m\build\morphizen-rocm\bin
   - Use morphizen wrappers: `node_op_domain()`, `node_get_attr_string()`, etc.
 
 ## Git Workflow for Pull Requests
+
+### ⚠️ PRE-FLIGHT CHECKLIST (MANDATORY before file modifications)
+**BEFORE using `write_to_file` or `replace_in_file`, ALWAYS:**
+1. Run `git branch` to check current branch
+2. If on `main` → run `git checkout -b <feature-branch-name>` FIRST
+3. NEVER modify files while on main branch
+4. Violation requires immediate revert and branch creation
+
+### Branch Rules
 - **ALWAYS create a branch BEFORE modifying any files**: 
   - When starting any task that modifies files, first check if you're on the `main` branch
   - If on `main` branch, create a feature branch BEFORE using write_to_file or replace_in_file
