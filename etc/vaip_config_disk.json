@@ -1,4 +1,8 @@
 {
+  "provider_options": {
+    "enable_cache_file_io_in_mem": "0",
+    "cache_dir": "rocm_cache"
+  },
   "passes": [
     {
       "name": "init",

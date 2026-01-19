@@ -112,8 +112,20 @@ cd C:\Develop\m\build\morphizen-rocm\bin
   - Commit messages should follow conventional commits format
 - **Create PR early**: Create a pull request as soon as possible with the initial plan
   - Include plan/design in PR description for discussion before implementation
-  - Use morphizen PR template format
   - This enables collaborative planning with the user
+- **No direct commits to `main` branch**: All changes require a pull request
+- **Update PR description on each push**: When pushing new commits, update the PR description to reflect the latest changes using `gh pr edit <number> --body-file <file>`
+- **PR Template**: Use the morphizen PR template format (see `../morphizen/.github/pull_request_template.md`):
+  ```markdown
+  # Summary of Changes
+  * Describe what this PR adds/changes/improves/fixes
+  
+  # Motivation
+  Describe why this request is needed/good/useful
+  
+  # Implementation
+  Explain implementation choices and what was tried
+  ```
 
 ## Repository
 - GitHub Enterprise: https://gitenterprise.xilinx.com/VitisAI/morphizen-rocm
