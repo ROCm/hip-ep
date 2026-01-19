@@ -458,40 +458,44 @@ See [proto/rocm.proto](../proto/rocm.proto) for complete definitions of `ConvPar
 
 ### 7.1 Subgraph Executor
 
-The custom op receives a `RocmSubgraphProto` and executes all nodes in three distinct phases:
+The custom op receives a `RocmSubgraphProto` and executes all nodes in four distinct phases:
 
 ```cpp
 void RocmCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const {
-  // Phase 1: Upload all external inputs to GPU (async, pre-deduplicated)
-  // The external_inputs list is computed during Level-1 pass, ensuring
-  // each external input is uploaded exactly once even if referenced by multiple nodes
-  for (const auto& name : subgraph_.external_inputs()) {
-    UploadExternalInput(name, context);
+  // Check per-session HipContext availability
+  if (!hip_context_ || !hip_context_->is_initialized()) {
+    throw std::runtime_error("ROCm CustomOp: No AMD GPU available");
   }
   
-  // Phase 2: Execute nodes in topological order
-  for (const auto& node : subgraph_.nodes()) {
-    ExecuteNode(node);
-    
-    // Check if this node produces any external outputs
-    for (const auto& output : subgraph_.outputs()) {
-      if (output.producer_node_id() == node.node_id()) {
-        // Schedule async D2H copy (overlaps with subsequent node execution)
-        ScheduleOutputCopy(output, context);
-      }
-    }
+  // Lazy initialization of intermediate buffers
+  AllocateIntermediateBuffers();
+
+  // Phase 1: Upload external inputs to GPU (async, pre-deduplicated)
+  // Uses subgraph_.external_inputs() computed during Level-1 pass
+  UploadExternalInputs(api, context);
+
+  // Phase 2: Execute subgraph nodes in topological order
+  ExecuteSubgraph(api, context);
+
+  // Phase 3: Download external outputs from GPU (async D2H)
+  DownloadExternalOutputs(api, context);
+
+  // Phase 4: Synchronize stream with timeout
+  auto timeout_status = hip_context_->sync_stream_with_timeout();
+  if (timeout_status == TimeoutStatus::TIMEOUT) {
+    throw std::runtime_error("ROCm CustomOp: GPU operation timed out");
+  } else if (timeout_status == TimeoutStatus::ERROR) {
+    throw std::runtime_error("ROCm CustomOp: Stream synchronization error");
   }
-  
-  // Phase 3: Synchronize stream with timeout
-  SyncStreamWithTimeout();
 }
 ```
 
 **Design Benefits**:
-- **No redundant H2D copies**: Each external input uploaded exactly once
+- **No redundant H2D copies**: Each external input uploaded exactly once (proto contains pre-deduplicated list)
 - **Zero runtime overhead**: No set/map operations needed for deduplication
-- **Clean separation**: Upload → Execute → Download phases are clearly separated
-- **Async-friendly**: All H2D copies issued before execution, enabling overlap
+- **Clean separation**: Upload → Execute → Download → Sync phases are clearly separated
+- **Per-session resources**: Each ORT session gets its own HipContext with dedicated stream
+- **Timeout protection**: GPU hangs are detected and reported as exceptions
 
 ### 7.2 Memory Management
 

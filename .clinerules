@@ -128,6 +128,7 @@ cd C:\Develop\m\build\morphizen-rocm\bin
   - Include plan/design in PR description for discussion before implementation
   - This enables collaborative planning with the user
 - **No direct commits to `main` branch**: All changes require a pull request
+- **NEVER push to `main` branch**: Use `git push` only on feature branches, never on main
 - **Update PR description on each push**: When pushing new commits, update the PR description to reflect the latest changes using `gh pr edit <number> --body-file <file>`
 - **PR Template**: Use the morphizen PR template format (see `../morphizen/.github/pull_request_template.md`):
   ```markdown
