@@ -1,35 +1,12 @@
 // Copyright (C) 2023 - 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-#include <glog/logging.h>
-#include <sstream>
-#include <iomanip>
-#include "google/protobuf/util/json_util.h"
-#include "morphizen/env_config.hpp"
-#include "morphizen/vaip.hpp"
-#include "rocm.pb.h"
+#include "rocm_pass_utils.hpp"
 #include "conv_pattern_json.hpp"
-
-DEF_ENV_PARAM(MORPHIZEN_DEBUG_ROCM, "0")
-#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_ROCM) >= n)
 
 using namespace vaip_core;
 
 namespace {
-// Generate a unique filename for weight data
-std::string generate_unique_weight_filename(const std::string& node_name, 
-                                             const std::string& tensor_name) {
-  // Replace invalid filename characters
-  std::string sanitized_name = tensor_name;
-  for (auto& c : sanitized_name) {
-    if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || 
-        c == '"' || c == '<' || c == '>' || c == '|') {
-      c = '_';
-    }
-  }
-  return "rocm_conv_" + sanitized_name + ".bin";
-}
-
 // Helper to calculate output dimension: (input + 2*pad - dilation*(filter-1) - 1) / stride + 1
 int64_t calc_output_dim(int64_t input_dim, int64_t filter_dim, 
                         int32_t pad, int32_t stride, int32_t dilation) {
@@ -45,6 +22,8 @@ int64_t calc_output_dim(int64_t input_dim, int64_t filter_dim,
  * Extracts weight tensors and saves them to pass context cache.
  */
 struct Level2RocmConv {
+  static constexpr const char* LOG_PREFIX = "[ROCm Conv L2]";
+  
   Level2RocmConv(IPass& self) : self_{self} {}
 
   std::unique_ptr<Rule> create_rule(IPass* self) {
@@ -60,7 +39,7 @@ struct Level2RocmConv {
           auto output = binder["output"];
           bool has_bias = binder["input_B"].node_arg != nullptr;
 
-          MY_LOG(1) << "[ROCm Conv L2] Found Conv pattern";
+          ROCM_LOG(1) << LOG_PREFIX << " Found Conv pattern";
 
           // Build RocmParamProto
           rocm::RocmParamProto rocm_param;
@@ -151,11 +130,11 @@ struct Level2RocmConv {
           conv_params->set_out_height(out_height);
           conv_params->set_out_width(out_width);
           
-          MY_LOG(2) << "[ROCm Conv L2] Input shape: [" << batch_size << ", " << in_channels 
+          ROCM_LOG(2) << LOG_PREFIX << " Input shape: [" << batch_size << ", " << in_channels 
                     << ", " << in_height << ", " << in_width << "]";
-          MY_LOG(2) << "[ROCm Conv L2] Weight shape: [" << out_channels << ", " << in_channels 
+          ROCM_LOG(2) << LOG_PREFIX << " Weight shape: [" << out_channels << ", " << in_channels 
                     << ", " << filter_height << ", " << filter_width << "]";
-          MY_LOG(2) << "[ROCm Conv L2] Output shape: [" << batch_size << ", " << out_channels 
+          ROCM_LOG(2) << LOG_PREFIX << " Output shape: [" << batch_size << ", " << out_channels 
                     << ", " << out_height << ", " << out_width << "]";
 
           // Extract and save weight tensor to cache
@@ -165,24 +144,14 @@ struct Level2RocmConv {
           // Check if weight is a constant initializer
           if (VAIP_ORT_API(node_arg_is_constant)(*graph, *input_W.node_arg)) {
             auto weight_data = node_arg_get_const_data_as_floats(*graph, *input_W.node_arg);
-            size_t weight_bytes = weight_data.size() * sizeof(float);
+            std::string weight_filename = rocm_pass::generate_weight_filename("rocm_conv", weight_name);
             
-            // Generate unique filename
-            std::string weight_filename = generate_unique_weight_filename("conv", weight_name);
-            
-            // Write weight data to cache using open_file_for_write
-            auto writer = pass_context->open_file_for_write(weight_filename);
-            if (writer) {
-              writer->fwrite(weight_data.data(), weight_bytes);
+            if (rocm_pass::save_weight_to_cache(pass_context, weight_data, weight_filename, LOG_PREFIX)) {
               conv_params->set_weight_file_path(weight_filename);
-              conv_params->set_weight_file_size(static_cast<int64_t>(weight_bytes));
-              MY_LOG(1) << "[ROCm Conv L2] Saved weight to cache: " << weight_filename 
-                        << " (" << weight_bytes << " bytes)";
-            } else {
-              LOG(ERROR) << "[ROCm Conv L2] Failed to open weight file for write: " << weight_filename;
+              conv_params->set_weight_file_size(static_cast<int64_t>(weight_data.size() * sizeof(float)));
             }
           } else {
-            MY_LOG(1) << "[ROCm Conv L2] Weight is not a constant: " << weight_name;
+            ROCM_LOG(1) << LOG_PREFIX << " Weight is not a constant: " << weight_name;
           }
           
           // Extract and save bias tensor if present
@@ -192,19 +161,11 @@ struct Level2RocmConv {
             
             if (VAIP_ORT_API(node_arg_is_constant)(*graph, *bias_node_arg)) {
               auto bias_data = node_arg_get_const_data_as_floats(*graph, *bias_node_arg);
-              size_t bias_bytes = bias_data.size() * sizeof(float);
+              std::string bias_filename = rocm_pass::generate_weight_filename("rocm_conv_bias", bias_name);
               
-              std::string bias_filename = generate_unique_weight_filename("conv_bias", bias_name);
-              
-              auto writer = pass_context->open_file_for_write(bias_filename);
-              if (writer) {
-                writer->fwrite(bias_data.data(), bias_bytes);
+              if (rocm_pass::save_weight_to_cache(pass_context, bias_data, bias_filename, LOG_PREFIX)) {
                 conv_params->set_bias_file_path(bias_filename);
-                conv_params->set_bias_file_size(static_cast<int64_t>(bias_bytes));
-                MY_LOG(1) << "[ROCm Conv L2] Saved bias to cache: " << bias_filename 
-                          << " (" << bias_bytes << " bytes)";
-              } else {
-                LOG(ERROR) << "[ROCm Conv L2] Failed to open bias file for write: " << bias_filename;
+                conv_params->set_bias_file_size(static_cast<int64_t>(bias_data.size() * sizeof(float)));
               }
             }
           }
@@ -233,6 +194,9 @@ struct Level2RocmConv {
             constant_initializers.push_back(node_arg_get_name(*binder["input_B"].node_arg));
           }
 
+          // Get the output name for naming the param file and fused node
+          std::string fused_output_name = node_arg_get_name(*output.node_arg);
+          
           auto [meta_def, error] = self->try_fuse(
               *graph,
               "rocm_conv",
@@ -243,26 +207,17 @@ struct Level2RocmConv {
           );
 
           if (meta_def) {
-            std::string rocm_param_json;
-            auto status = google::protobuf::util::MessageToJsonString(
-                rocm_param, &rocm_param_json);
-            if (!status.ok()) {
-              LOG(ERROR) << "[ROCm Conv L2] Failed to serialize params: " << status.ToString();
-              return false;
-            }
-            self->attach_meta_def_param(*meta_def, rocm_param_json.c_str());
-            self->fuse(*graph, std::move(*meta_def));
-            MY_LOG(1) << "[ROCm Conv L2] Fused Conv pattern successfully";
-            return true;
+            return rocm_pass::finalize_level2_fuse(
+                self, *graph, *meta_def, rocm_param, fused_output_name, LOG_PREFIX);
           }
           
-          MY_LOG(1) << "[ROCm Conv L2] Failed to fuse: " << error.comments;
+          ROCM_LOG(1) << LOG_PREFIX << " Failed to fuse: " << error.comments;
           return false;
         });
   }
 
   void process(IPass& self, Graph& graph) {
-    MY_LOG(1) << "[ROCm Conv L2] Processing graph for Conv patterns...";
+    ROCM_LOG(1) << LOG_PREFIX << " Processing graph for Conv patterns...";
     create_rule(&self)->apply(&graph);
   }
 

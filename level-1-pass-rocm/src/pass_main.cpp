@@ -12,6 +12,8 @@
 #include "google/protobuf/util/json_util.h"
 #include "morphizen/env_config.hpp"
 #include "morphizen/vaip.hpp"
+#include "morphizen/node.hpp"
+#include "morphizen/node_attr.hpp"
 #include "rocm.pb.h"
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_ROCM, "0")
@@ -71,23 +73,28 @@ struct Level1Rocm {
   // ROCm Node Detection
   //============================================================================
 
-  // Check if a node is a ROCm fused node (created by Level-2 passes)
-  // Fused nodes have:
+  // Check if a node is a ROCm fused node (created by Level-2 ROCm passes)
+  // Detection criteria:
   // - Domain: "com.xilinx" (morphizen framework's domain for fused nodes)
+  // - Has attribute: "rocm_param_file" (set by Level-2 ROCm passes)
   //
-  // Since we run Level-2 sub-passes on a cloned graph in isolation,
-  // any "com.xilinx" node in that graph must be from our ROCm passes.
-  // The original graph is cloned fresh, so it has no pre-existing fused nodes.
-  bool is_rocm_fused_node(const Node& node) {
-    auto domain = node_op_domain(node);
-    if (domain != "com.xilinx") {
+  // Level-2 passes add a node attribute using NodeAttributesBuilder::merge_into()
+  // after calling level_2_fuse(). Level-1 can detect this using NodeConstRef.has_attr().
+  bool is_rocm_fused_node(Graph& graph, const Node& node) {
+    // Use C++ style NodeConstRef API (cheap - just two pointer copies)
+    auto node_ref = vaip_cxx::NodeConstRef::from_node(graph, node);
+    
+    if (node_ref.op_domain() != "com.xilinx") {
       return false;
     }
     
-    // All com.xilinx nodes in the cloned graph are ROCm fused nodes
-    // because we only run ROCm Level-2 passes on the cloned graph
-    auto output_name = node_get_first_output_name(node);
-    MY_LOG(2) << "[HIP EP Level-1] is_rocm_fused_node: found com.xilinx node with output=" << output_name;
+    // Check for ROCm-specific attribute set by Level-2 passes
+    if (!node_ref.has_attr("rocm_param_file")) {
+      return false;
+    }
+    
+    MY_LOG(2) << "[HIP EP Level-1] is_rocm_fused_node: found ROCm node with output=" 
+              << node_get_first_output_name(node);
     return true;
   }
 
@@ -103,13 +110,13 @@ struct Level1Rocm {
     return "unknown";
   }
 
-  // Get all ROCm fused nodes from the cloned graph in topological order
+  // Get all ROCm fused nodes from the graph in topological order
   std::vector<const Node*> find_rocm_fused_nodes(Graph& graph) {
     std::vector<const Node*> rocm_nodes;
     auto all_nodes = graph_nodes(graph);
 
     for (auto* node : all_nodes) {
-      if (is_rocm_fused_node(*node)) {
+      if (is_rocm_fused_node(graph, *node)) {
         rocm_nodes.push_back(node);
         MY_LOG(2) << "[HIP EP Level-1] Found ROCm fused node: "
                   << node_get_first_output_name(*node) << " (op_type: "
@@ -291,37 +298,110 @@ struct Level1Rocm {
   }
 
   //============================================================================
-  // Merged Parameters Collection
+  // Build RocmSubgraphProto
   //
-  // The RocmMergedParamProto stores information about all operations in the
-  // merged group. The actual detailed parameters (ConvParamProto, GemmParamProto)
-  // are stored in each Level-2 fused node's MetaDef and will be extracted
-  // at custom op creation time.
+  // Creates a RocmSubgraphProto that represents the complete topology of the
+  // fused subgraph. This includes:
+  // - RocmNodeProto for each node with parameters and input references
+  // - TensorRefProto for internal (node-to-node) and external (from ORT) inputs
+  // - ExternalOutputProto for outputs that go to ORT
   //============================================================================
 
-  rocm::RocmMergedParamProto
-  collect_merged_params(const std::vector<const Node*>& group) {
-    rocm::RocmMergedParamProto merged;
-    merged.set_op_count(static_cast<int32_t>(group.size()));
-    merged.set_implicit_fusion(true); // All ops can share one HIP stream
-
-    for (auto* node : group) {
-      rocm::RocmParamProto param;
+  rocm::RocmSubgraphProto
+  build_subgraph_proto(const std::vector<const Node*>& group,
+                       const std::unordered_set<std::string>& internal_outputs,
+                       const std::vector<std::string>& external_outputs,
+                       Graph& graph) {
+    rocm::RocmSubgraphProto subgraph;
+    auto pass_context = self_.get_context();
+    
+    // Map from output name to (node_id, output_index) for internal references
+    std::unordered_map<std::string, std::pair<int32_t, int32_t>> output_producer_map;
+    
+    // Build nodes in topological order
+    for (int32_t i = 0; i < static_cast<int32_t>(group.size()); ++i) {
+      const Node* node = group[i];
       auto output_name = node_get_first_output_name(*node);
-
-      // Set op_type using the helper function
-      param.set_op_type(get_rocm_op_type(*node));
-
-      // Store the original output name for reference
-      // This helps the custom op locate the original parameters if needed
-      param.set_ep_context_file_name(output_name);
-
-      *merged.add_rocm_params() = param;
-      MY_LOG(2) << "[HIP EP Level-1] Added node to merged group: "
-                << output_name << " (op_type: " << param.op_type() << ")";
+      auto node_ref = vaip_cxx::NodeConstRef::from_node(graph, *node);
+      
+      rocm::RocmNodeProto* node_proto = subgraph.add_nodes();
+      node_proto->set_node_id(i);
+      
+      // Read params from cache file and set as node params
+      std::string param_filename;
+      if (node_ref.has_attr("rocm_param_file")) {
+        param_filename = node_ref.get_attr_string("rocm_param_file");
+      }
+      
+      if (!param_filename.empty()) {
+        auto reader = pass_context->open_file_for_read(param_filename);
+        if (reader) {
+          size_t file_size = reader->size();
+          std::string param_json(file_size, '\0');
+          reader->fread(&param_json[0], file_size);
+          
+          rocm::RocmParamProto rocm_param;
+          auto parse_status = google::protobuf::util::JsonStringToMessage(param_json, &rocm_param);
+          if (parse_status.ok()) {
+            rocm_param.set_ep_context_file_name(param_filename);
+            *node_proto->mutable_params() = rocm_param;
+            MY_LOG(2) << "[HIP EP Level-1] Node " << i << ": loaded params from " << param_filename;
+          } else {
+            LOG(WARNING) << "[HIP EP Level-1] Failed to parse param file: " << param_filename;
+          }
+        }
+      }
+      
+      // Build input references
+      auto inputs = node_get_input_node_args(*node);
+      for (auto* input : inputs) {
+        if (!input) continue;
+        auto input_name = node_arg_get_name(*input);
+        
+        rocm::TensorRefProto* input_ref = node_proto->add_inputs();
+        
+        auto it = output_producer_map.find(input_name);
+        if (it != output_producer_map.end()) {
+          // Internal reference - from another node in subgraph
+          auto* internal_ref = input_ref->mutable_internal();
+          internal_ref->set_producer_node_id(it->second.first);
+          internal_ref->set_output_index(it->second.second);
+          MY_LOG(2) << "[HIP EP Level-1] Node " << i << ": input " << input_name 
+                    << " -> internal(node=" << it->second.first 
+                    << ", out=" << it->second.second << ")";
+        } else {
+          // External reference - from outside subgraph
+          input_ref->set_external_name(input_name);
+          MY_LOG(2) << "[HIP EP Level-1] Node " << i << ": input " << input_name 
+                    << " -> external";
+        }
+      }
+      
+      // Register outputs for dependency tracking
+      auto outputs = node_get_output_node_args(*node);
+      for (int32_t j = 0; j < static_cast<int32_t>(outputs.size()); ++j) {
+        if (outputs[j]) {
+          auto out_name = node_arg_get_name(*outputs[j]);
+          output_producer_map[out_name] = {i, j};
+          node_proto->add_output_names(out_name);
+        }
+      }
     }
-
-    return merged;
+    
+    // Add external outputs with their source node mappings
+    for (const auto& ext_out_name : external_outputs) {
+      auto it = output_producer_map.find(ext_out_name);
+      if (it != output_producer_map.end()) {
+        rocm::ExternalOutputProto* ext_output = subgraph.add_outputs();
+        ext_output->set_name(ext_out_name);
+        ext_output->set_producer_node_id(it->second.first);
+        ext_output->set_output_index(it->second.second);
+        MY_LOG(2) << "[HIP EP Level-1] External output: " << ext_out_name 
+                  << " from node " << it->second.first;
+      }
+    }
+    
+    return subgraph;
   }
 
   void process(IPass& self, Graph& graph) {
@@ -342,12 +422,11 @@ struct Level1Rocm {
       return;
     }
 
-    // Run sub-passes directly on the original graph
-    // The sub-passes will handle fusion themselves via try_fuse() and fuse()
+    // Step 1: Run sub-passes on the graph
+    // Level-2 passes use level_2_fuse() which creates fused nodes but doesn't update context.json
     MY_LOG(2) << "[HIP EP Level-1] Number of sub-passes to run: " << config.sub_pass_names_size();
     for (const auto& sub_pass_name : config.sub_pass_names()) {
-      MY_LOG(1) << "[HIP EP Level-1] Creating sub-pass: " << sub_pass_name;
-      MY_LOG(2) << "[HIP EP Level-1] Creating sub-pass: " << sub_pass_name;
+      MY_LOG(1) << "[HIP EP Level-1] Running sub-pass: " << sub_pass_name;
 
       PassProto sub_pass_proto;
       sub_pass_proto.set_plugin(sub_pass_name);
@@ -355,19 +434,129 @@ struct Level1Rocm {
 
       auto sub_pass = IPass::create_pass(self_.get_context(), sub_pass_proto);
       if (sub_pass) {
-        MY_LOG(1) << "[HIP EP Level-1] Running sub-pass: " << sub_pass_name;
-        MY_LOG(2) << "[HIP EP Level-1] Running sub-pass: " << sub_pass_name;
         std::vector<std::shared_ptr<IPass>> passes;
         passes.push_back(std::move(sub_pass));
-        IPass::run_passes(passes, graph);  // Run on original graph, not clone
-        MY_LOG(2) << "[HIP EP Level-1] Sub-pass completed: " << sub_pass_name;
+        IPass::run_passes(passes, graph);
+        MY_LOG(1) << "[HIP EP Level-1] Sub-pass completed: " << sub_pass_name;
       } else {
-        MY_LOG(2) << "[HIP EP Level-1] Failed to create sub-pass: " << sub_pass_name;
+        LOG(WARNING) << "[HIP EP Level-1] Failed to create sub-pass: " << sub_pass_name;
       }
     }
 
-    MY_LOG(1) << "[HIP EP Level-1] Completed - sub-passes handled fusion";
-    MY_LOG(2) << "[HIP EP Level-1] Level-1 pass completed";
+    // Step 2: Find all ROCm fused nodes created by Level-2 passes
+    auto rocm_nodes = find_rocm_fused_nodes(graph);
+    MY_LOG(1) << "[HIP EP Level-1] Found " << rocm_nodes.size() << " ROCm fused nodes";
+    
+    if (rocm_nodes.empty()) {
+      MY_LOG(1) << "[HIP EP Level-1] No ROCm nodes to merge, pass completed";
+      return;
+    }
+
+    // Step 3: Build producer map and find mergeable groups
+    auto producer_map = build_producer_map(rocm_nodes);
+    auto groups = find_mergeable_groups(rocm_nodes, producer_map);
+    MY_LOG(1) << "[HIP EP Level-1] Found " << groups.size() << " mergeable groups";
+
+    // Step 4 & 5: Process each group - build merged params and call fuse()
+    auto pass_context = self_.get_context();
+    int group_index = 0;
+    
+    for (auto& group : groups) {
+      MY_LOG(1) << "[HIP EP Level-1] Processing group " << group_index 
+                << " with " << group.size() << " nodes";
+      
+      // Collect internal outputs (outputs produced within the group)
+      std::unordered_set<std::string> internal_outputs;
+      for (auto* node : group) {
+        auto outputs = node_get_output_node_args(*node);
+        for (auto* output : outputs) {
+          if (output) {
+            internal_outputs.insert(node_arg_get_name(*output));
+          }
+        }
+      }
+      
+      // Collect internal inputs (inputs consumed within the group)
+      std::unordered_set<std::string> internal_inputs;
+      for (auto* node : group) {
+        auto inputs = node_get_input_node_args(*node);
+        for (auto* input : inputs) {
+          if (input) {
+            auto name = node_arg_get_name(*input);
+            if (internal_outputs.count(name) > 0) {
+              internal_inputs.insert(name);
+            }
+          }
+        }
+      }
+      
+      // Collect external inputs and outputs
+      auto external_inputs = collect_external_inputs(group, internal_outputs);
+      auto external_outputs = collect_external_outputs(group, internal_inputs, graph);
+      
+      MY_LOG(2) << "[HIP EP Level-1] Group " << group_index 
+                << ": external_inputs=" << external_inputs.size()
+                << ", external_outputs=" << external_outputs.size();
+      
+      // Build RocmSubgraphProto with complete topology
+      rocm::RocmSubgraphProto subgraph = build_subgraph_proto(
+          group, internal_outputs, external_outputs, graph);
+      
+      MY_LOG(1) << "[HIP EP Level-1] Built subgraph with " 
+                << subgraph.nodes_size() << " nodes, "
+                << subgraph.outputs_size() << " external outputs";
+      
+      // Create merged fused node name
+      std::string merged_name = "rocm_subgraph_" + std::to_string(group_index);
+      
+      // Collect constant initializers from all nodes in the group
+      // For now, we don't merge constant initializers - they stay with their original nodes
+      std::vector<std::string> constant_initializers;
+      
+      // Try to fuse the merged group
+      auto [meta_def, error] = self_.try_fuse(
+          graph,
+          merged_name,
+          external_inputs,
+          external_outputs,
+          constant_initializers,
+          "ROCm_EP"
+      );
+      
+      if (meta_def) {
+        // Serialize RocmSubgraphProto to JSON
+        std::string subgraph_json;
+        auto serialize_status = google::protobuf::util::MessageToJsonString(
+            subgraph, &subgraph_json);
+        if (serialize_status.ok()) {
+          // Write subgraph to cache for troubleshooting
+          std::string subgraph_filename = "rocm_subgraph_" + merged_name + ".json";
+          auto writer = pass_context->open_file_for_write(subgraph_filename);
+          if (writer) {
+            writer->fwrite(subgraph_json.data(), subgraph_json.size());
+            MY_LOG(1) << "[HIP EP Level-1] Saved subgraph: " << subgraph_filename;
+          }
+          
+          // Attach subgraph JSON to meta_def (this is what custom_op receives)
+          self_.attach_meta_def_param(*meta_def, subgraph_json.c_str());
+        } else {
+          LOG(ERROR) << "[HIP EP Level-1] Failed to serialize subgraph: " 
+                     << serialize_status.ToString();
+        }
+        
+        // Call fuse() to create the merged node and update context.json
+        self_.fuse(graph, std::move(*meta_def));
+        MY_LOG(1) << "[HIP EP Level-1] Created merged fused node: " << merged_name
+                  << " with " << group.size() << " operations";
+      } else {
+        LOG(WARNING) << "[HIP EP Level-1] Failed to fuse group " << group_index 
+                     << ": " << error.comments;
+      }
+      
+      group_index++;
+    }
+
+    MY_LOG(1) << "[HIP EP Level-1] Pass completed - merged " << groups.size() << " groups";
   }
 
   IPass& self_;

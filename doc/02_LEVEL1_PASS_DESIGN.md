@@ -73,16 +73,68 @@ for (const auto& sub_pass_name : config.sub_pass_names()) {
 }
 ```
 
+**Important:** Level-2 passes use `level_2_fuse()` instead of `fuse()`. The key difference:
+- `fuse()`: Creates fused node AND updates `context.json`
+- `level_2_fuse()`: Creates fused node but does NOT update `context.json`
+
+Level-1 calls `fuse()` after merging subgraphs, ensuring only merged nodes are written to `context.json`.
+
+#### Level-2 to Level-1 Parameter Passing
+
+Level-2 passes store operation parameters using a hybrid approach:
+
+1. **Write params to cache file** (for troubleshooting):
+   ```cpp
+   std::string param_filename = "rocm_param_" + output_name + ".json";
+   auto writer = pass_context->open_file_for_write(param_filename);
+   writer->fwrite(rocm_param_json.data(), rocm_param_json.size());
+   ```
+
+2. **Add attribute to fused node** (for Level-1 to find):
+   ```cpp
+   const auto& fused_node = self->level_2_fuse(*graph, *meta_def);
+   
+   // const_cast is needed because level_2_fuse returns const Node&
+   Node& mutable_node = const_cast<Node&>(fused_node);
+   NodeAttributesBuilder attr_builder;
+   attr_builder.add("rocm_param_file", param_filename);
+   attr_builder.merge_into(mutable_node);
+   ```
+
+Level-1 retrieves params by:
+1. Finding nodes with `rocm_param_file` attribute using `NodeConstRef.has_attr()`
+2. Getting the param filename using `NodeConstRef.get_attr_string()`
+3. Reading the JSON file from cache and parsing into `RocmParamProto`
+
+This design enables:
+- **Debuggability**: Param JSON files can be inspected in the cache directory
+- **Traceability**: Each node's params are clearly linked via ONNX node attribute
+- **Consistency**: Same pattern as weight files (`weight_file_path` in params)
+
 ### Step 2: Finding ROCm Fused Nodes
 
-After sub-passes complete, the graph contains fused nodes created by Level-2 passes. These nodes are identified by domain `com.xilinx`:
+After sub-passes complete, the graph contains fused nodes created by Level-2 passes. These nodes are identified by:
+- Domain `com.xilinx` (morphizen framework's domain for fused nodes)
+- Having the `rocm_param_file` attribute (set by Level-2 ROCm passes)
 
 ```cpp
-bool is_rocm_fused_node(const Node& node) {
-  auto domain = node_op_domain(node);
-  return domain == "com.xilinx";
+bool is_rocm_fused_node(Graph& graph, const Node& node) {
+  auto node_ref = vaip_cxx::NodeConstRef::from_node(graph, node);
+  
+  if (node_ref.op_domain() != "com.xilinx") {
+    return false;
+  }
+  
+  // Check for ROCm-specific attribute set by Level-2 passes
+  if (!node_ref.has_attr("rocm_param_file")) {
+    return false;
+  }
+  
+  return true;
 }
 ```
+
+This two-criteria approach ensures we only match nodes from ROCm Level-2 passes, not nodes from other Level-1 passes (e.g., NPU, DPU) that also use the `com.xilinx` domain.
 
 ### Step 3: Grouping Consecutive Nodes (Union-Find)
 
