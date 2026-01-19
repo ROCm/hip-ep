@@ -11,6 +11,7 @@
 #include <vaip/dll_safe.h>
 
 #include "./tar_file.hpp"
+#include "logger_adapter.hpp"
 #include "morphizen/model.hpp"
 #include "morphizen/pass.hpp"
 #include "morphizen/pass_context.hpp"
@@ -188,8 +189,7 @@ public:
   mutable int suffix_counter = 0;
   std::unordered_map<std::string, std::shared_ptr<void>> pass_resources;
   // Logger integration - keep these alive for the duration of PassContext
-  std::shared_ptr<Ort::Logger> ort_logger_;
-  std::shared_ptr<LoggerAdapter> logger_adapter_;
+  std::unique_ptr<LoggerAdapter> logger_adapter_;
 
 public:
   ~PassContextImp();
@@ -377,8 +377,7 @@ private:
       const std::string& model_path, const Graph& onnx_graph,
       const std::vector<vaip_cxx::NodeConstRef>& ep_context_nodes,
       const onnxruntime::ProviderOptions& options,
-      std::shared_ptr<::Ort::Logger> logger,
-      std::shared_ptr<LoggerAdapter> logger_adapter);
+      std::unique_ptr<LoggerAdapter> logger_adapter);
   friend onnxruntime::Node*
   create_ep_context_node(vaip_core::ExecutionProviderConcrete* ep, int index);
   friend std::string

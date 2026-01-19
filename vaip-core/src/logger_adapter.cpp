@@ -9,26 +9,9 @@
 #include "onnxruntime_cxx_api.h"
 #include <cassert>
 namespace vaip_core {
-static std::weak_ptr<LoggerAdapter> g_the_current_logger;
 
-std::shared_ptr<LoggerAdapter>
-LoggerAdapter::create(const Ort::Logger& logger) {
-  std::shared_ptr<LoggerAdapter> ret;
-  if (g_the_current_logger.expired()) {
-    ret = std::make_shared<LoggerAdapter>(logger);
-    g_the_current_logger = ret;
-  }
-  ret = g_the_current_logger.lock();
-  assert(ret != nullptr);
-  return ret;
-}
-
-std::shared_ptr<LoggerAdapter> LoggerAdapter::get_current_logger() {
-  return g_the_current_logger.lock();
-}
-
-LoggerAdapter::LoggerAdapter(const Ort::Logger& logger)
-    : logger_(logger), FLAGS_logtostderr_(FLAGS_logtostderr),
+LoggerAdapter::LoggerAdapter(std::unique_ptr<Ort::Logger> logger)
+    : logger_(std::move(logger)), FLAGS_logtostderr_(FLAGS_logtostderr),
       FLAGS_logtostdout_(FLAGS_logtostdout),
       FLAGS_minloglevel_(FLAGS_minloglevel) {
   // Initialize the logger
@@ -42,7 +25,7 @@ LoggerAdapter::LoggerAdapter(const Ort::Logger& logger)
   if (!google::IsGoogleLoggingInitialized()) {
     google::InitGoogleLogging(onnxruntime::kVitisAIExecutionProvider);
   }
-  auto ort_logging_level = logger_.GetLoggingSeverityLevel();
+  auto ort_logging_level = logger_->GetLoggingSeverityLevel();
   switch (ort_logging_level) {
   case OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE:
     FLAGS_minloglevel = google::GLOG_INFO;
@@ -78,7 +61,7 @@ void LoggerAdapter::send(google::LogSeverity glog_severity,
                          const char* base_filename, int line,
                          const struct ::tm* /*tm_time*/, const char* message,
                          size_t message_len) {
-  auto ort_severity = logger_.GetLoggingSeverityLevel();
+  auto ort_severity = logger_->GetLoggingSeverityLevel();
 
   switch (glog_severity) {
   case google::GLOG_INFO:
@@ -94,7 +77,7 @@ void LoggerAdapter::send(google::LogSeverity glog_severity,
     ort_severity = OrtLoggingLevel::ORT_LOGGING_LEVEL_FATAL;
     break;
   default:
-    ort_severity = logger_.GetLoggingSeverityLevel();
+    ort_severity = logger_->GetLoggingSeverityLevel();
     break;
   }
   /*
@@ -128,6 +111,6 @@ void LoggerAdapter::send(google::LogSeverity glog_severity,
         '\0'; // remove trailing '\n', it is glog::message::data_.message_text_,
               // it should be safe to modify it.
   }
-  logger_.LogMessage(ort_severity, ort_filename, line, func_name, message);
+  logger_->LogMessage(ort_severity, ort_filename, line, func_name, message);
 }
 } // namespace vaip_core

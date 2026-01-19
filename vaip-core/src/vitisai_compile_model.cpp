@@ -466,16 +466,14 @@ std::shared_ptr<PassContextImp>
 initialize_context(const std::string& model_path, const Graph& onnx_graph,
                    const std::vector<vaip_cxx::NodeConstRef>& ep_context_nodes,
                    const onnxruntime::ProviderOptions& options,
-                   std::shared_ptr<Ort::Logger> logger,
-                   std::shared_ptr<LoggerAdapter> logger_adapter) {
+                   std::unique_ptr<LoggerAdapter> logger_adapter) {
 
   std::shared_ptr<PassContextImp> context =
       PassContextImp::create_pass_context(options);
 
   // Store logger and logger_adapter to prolong their lifetime
-  if (logger && logger_adapter) {
-    context->ort_logger_ = logger;
-    context->logger_adapter_ = logger_adapter;
+  if (logger_adapter) {
+    context->logger_adapter_ = std::move(logger_adapter);
   }
   // "session.model_external_initializers_file_folder_path/virtual_model.onnx
   // would be passed for in-mem model when this happen, a invalid path is
@@ -1392,15 +1390,14 @@ static void print_graph_input_and_output(const Graph& onnx_graph) {
 std::vector<std::unique_ptr<ExecutionProvider>> compile_onnx_model_3_internal(
     const std::string& model_path, const Graph& onnx_graph,
     const onnxruntime::ProviderOptions& options,
-    std::shared_ptr<Ort::Logger> logger,
-    std::shared_ptr<LoggerAdapter> logger_adapter,
+    std::unique_ptr<LoggerAdapter> logger_adapter,
     std::function<void(int, const char*)> set_ort_status) {
   print_graph_input_and_output(onnx_graph);
   static std::mutex mtx;
   std::lock_guard<std::mutex> t_lock(mtx);
   auto ep_context_nodes = get_ep_context_nodes(onnx_graph);
   auto context = initialize_context(model_path, onnx_graph, ep_context_nodes,
-                                    options, logger, logger_adapter);
+                                    options, std::move(logger_adapter));
   auto measture_compile_onnx_model_3 = context->measure("compile_onnx_model_3");
   // we cannot use get_cache_filename because cache might be a tar file in
   // memory instead of a physical directory.
@@ -1497,7 +1494,7 @@ compile_onnx_model_3(const std::string& model_path, const Graph& onnx_graph,
                      const onnxruntime::ProviderOptions& options,
                      std::function<void(int, const char*)> set_ort_status) {
   return compile_onnx_model_3_internal(model_path, onnx_graph, options, nullptr,
-                                       nullptr, set_ort_status);
+                                       set_ort_status);
 }
 
 thread_local const void* g_state = nullptr;

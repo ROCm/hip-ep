@@ -12,9 +12,7 @@ struct Logger;
 namespace vaip_core {
 class LoggerAdapter : public google::LogSink {
 public:
-  static std::shared_ptr<LoggerAdapter> get_current_logger();
-  static std::shared_ptr<LoggerAdapter> create(const Ort::Logger& logger);
-  LoggerAdapter(const Ort::Logger& logger);
+  LoggerAdapter(std::unique_ptr<Ort::Logger> logger);
   ~LoggerAdapter();
 
 private:
@@ -23,7 +21,7 @@ private:
             const char* message, size_t message_len) override final;
 
 private:
-  const Ort::Logger& logger_;
+  std::unique_ptr<Ort::Logger> logger_;
   const bool FLAGS_logtostderr_;
   const bool FLAGS_logtostdout_;
   const int FLAGS_minloglevel_;

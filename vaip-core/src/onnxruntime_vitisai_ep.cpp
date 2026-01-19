@@ -297,23 +297,23 @@ compile_onnx_model_vitisai_ep_v4(
     }
   };
 
-  std::shared_ptr<Ort::Logger> logger = nullptr;
-  std::shared_ptr<vaip_core::LoggerAdapter> logger_adapter = nullptr;
+  std::unique_ptr<vaip_core::LoggerAdapter> logger_adapter = nullptr;
 
   if (ENV_PARAM(DEBUG_LOG_LEVEL).empty()) {
     // Create logger and logger_adapter early to ensure they're available
     // They will be stored in PassContext to prolong their lifetime
-    logger = std::make_shared<Ort::Logger>(ort_logger);
-    logger_adapter = vaip_core::LoggerAdapter::create(*logger);
+    auto logger = std::make_unique<Ort::Logger>(ort_logger);
+    logger_adapter =
+        std::make_unique<vaip_core::LoggerAdapter>(std::move(logger));
   } else {
     SetGlogMinLogLevel(ENV_PARAM(DEBUG_LOG_LEVEL));
-    logger = nullptr;
     logger_adapter = nullptr;
   }
 
   return new std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>(
-      vaip_core::compile_onnx_model_3_internal(
-          model_path, graph, options, logger, logger_adapter, set_ort_status));
+      vaip_core::compile_onnx_model_3_internal(model_path, graph, options,
+                                               std::move(logger_adapter),
+                                               set_ort_status));
 }
 
 VAIP_DLL_SPEC

@@ -62,8 +62,7 @@ VAIP_DLL_SPEC std::vector<std::unique_ptr<ExecutionProvider>>
 compile_onnx_model_3_internal(
     const std::string& model_path, const Graph& onnx_graph,
     const onnxruntime::ProviderOptions& options,
-    std::shared_ptr<::Ort::Logger> logger = nullptr,
-    std::shared_ptr<LoggerAdapter> logger_adapter = nullptr,
+    std::unique_ptr<LoggerAdapter> logger_adapter = nullptr,
     std::function<void(int, const char*)> set_ort_status = nullptr);
 
 VAIP_DLL_SPEC void profiler_collect(std::vector<EventInfo>& api_events,
