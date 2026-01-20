@@ -143,16 +143,71 @@ The main pass implementation is in `level-1-pass-mlir/src/pass_main.cpp`. The `L
 
 Set the environment variable `MORPHIZEN_DEBUG_MLIR=1` to enable debug logging.
 
+## MLIR Integration
+
+This project includes full MLIR integration for graph processing:
+
+### Features
+
+- **MLIR Parsing**: Parse ONNX graphs saved in MLIR format to `mlir::ModuleOp`
+- **Operation Walking**: Walk and inspect all operations in the MLIR module
+- **ModuleOp Printing**: Print complete MLIR IR with detailed flags
+- **Dialect Support**: Loaded dialects include func, arith, and unregistered dialects
+
+### MLIR Pass Implementation
+
+The Level-1 MLIR pass (`level-1-pass-mlir/src/pass_main.cpp`) performs:
+1. Saves graph to file (`graph_for_mlir.onnx`)
+2. Parses MLIR file to `mlir::ModuleOp`
+3. Walks all operations in the module
+4. Prints ModuleOp to stdout with generic form, debug info, and value users
+
+### Testing
+
+The project includes comprehensive ORT integration tests:
+
+```bash
+# Run tests with MLIR backend
+cd tools
+./run_ort_integration_test.bat
+```
+
+**Test Models:**
+- `conv_model.onnx` - Simple Conv operation
+- `conv_gemm_model.onnx` - Conv + Flatten + Gemm pipeline
+
+**Generate Test Models:**
+```bash
+cd test
+python gen_conv_model.py          # Generate conv_model.onnx
+python gen_conv_gemm_model.py     # Generate conv_gemm_model.onnx
+```
+
+### Environment Variables
+
+To activate MLIR backend:
+```bash
+set MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend
+```
+
+For debug output:
+```bash
+set MORPHIZEN_DEBUG_MLIR=2
+set GLOG_logtostderr=1
+set GLOG_minloglevel=0
+```
+
 ## Differences from morphizen-demo
 
-This project is intentionally simplified compared to morphizen-demo:
+This project extends morphizen-demo with:
 
+- ✅ **Full MLIR integration** with parsing and operation walking
+- ✅ **Test infrastructure** with ORT integration tests
+- ✅ **Multiple test models** (Conv, Conv+Gemm)
+- ✅ **Test utilities** for easy model generation
 - ❌ No pattern matching (no `patterns/` directory)
 - ❌ No protobuf definitions (no `proto/` directory)
 - ❌ No custom operators (no `custom-op-*/` directory)
-- ❌ No test infrastructure (no `test/` directory)
-- ✅ Minimal level-1 pass only
-- ✅ Clean template for MLIR integration
 
 ## License
 

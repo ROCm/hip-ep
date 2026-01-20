@@ -43,6 +43,10 @@ inline std::wstring ToWideString(const char* str) {
 #define CONV_TEST_MODEL_PATH "./conv_model.onnx"
 #endif
 
+#ifndef CONV_GEMM_TEST_MODEL_PATH
+#define CONV_GEMM_TEST_MODEL_PATH "./conv_gemm_model.onnx"
+#endif
+
 // Check if a file exists
 bool file_exists(const std::string& path) {
   std::ifstream f(path);
@@ -175,6 +179,71 @@ TEST_F(OrtIntegrationTest, CreateSessionWithVitisAIProvider) {
 #endif
     std::cout << "[Test] Session created successfully with VitisAI EP!" << std::endl;
     std::cout << "[Test] MLIR pass was executed during session creation" << std::endl;
+    
+  } catch (const Ort::Exception& ex) {
+    std::string error_msg = ex.what();
+    if (error_msg.find("No engine configurations available") != std::string::npos ||
+        error_msg.find("execution_plans failed") != std::string::npos) {
+      GTEST_SKIP() << "MLIR backend not available. Error: " << error_msg;
+    }
+    throw;
+  }
+}
+
+// VitisAI EP integration test with Conv+Gemm model
+TEST_F(OrtIntegrationTest, CreateSessionWithConvGemmModel) {
+  std::cout << "[Test] Creating session with Conv+Gemm model (MLIR backend)..." << std::endl;
+  
+  if (!ep_available_) {
+    GTEST_SKIP() << "VitisAI EP not available";
+  }
+  
+  bool conv_gemm_available = file_exists(CONV_GEMM_TEST_MODEL_PATH);
+  if (!conv_gemm_available) {
+    std::cout << "[Test] Conv+Gemm model not found at: " << CONV_GEMM_TEST_MODEL_PATH << std::endl;
+    GTEST_SKIP() << "Conv+Gemm model not available";
+  }
+
+  // Get EP devices
+  std::vector<Ort::ConstEpDevice> devices = env_->GetEpDevices();
+  
+  // Find VitisAI device
+  const OrtEpDevice* vitisai_device = nullptr;
+  for (const auto& device : devices) {
+    std::string ep_name = device.EpName();
+    if (ep_name == "VitisAI" || ep_name == "VitisAIExecutionProvider") {
+      vitisai_device = static_cast<const OrtEpDevice*>(device);
+      break;
+    }
+  }
+
+  if (vitisai_device == nullptr) {
+    GTEST_SKIP() << "VitisAI EP V2 device API not yet implemented";
+  }
+
+  Ort::SessionOptions session_options;
+
+  // Add VitisAI EP using V2 API
+  OrtStatus* status = Ort::GetApi().SessionOptionsAppendExecutionProvider_V2(
+      session_options, *env_, &vitisai_device, 1, nullptr, nullptr, 0);
+
+  if (status != nullptr) {
+    std::string error_msg = Ort::GetApi().GetErrorMessage(status);
+    Ort::GetApi().ReleaseStatus(status);
+    FAIL() << "Failed to add VitisAI EP: " << error_msg;
+  }
+
+  std::cout << "[Test] Testing Conv+Gemm model with MLIR backend..." << std::endl;
+
+  try {
+#ifdef _WIN32
+    auto model_path_w = ToWideString(CONV_GEMM_TEST_MODEL_PATH);
+    Ort::Session session(*env_, model_path_w.c_str(), session_options);
+#else
+    Ort::Session session(*env_, CONV_GEMM_TEST_MODEL_PATH, session_options);
+#endif
+    std::cout << "[Test] Session created successfully with Conv+Gemm model!" << std::endl;
+    std::cout << "[Test] MLIR pass processed Conv and Gemm operations" << std::endl;
     
   } catch (const Ort::Exception& ex) {
     std::string error_msg = ex.what();

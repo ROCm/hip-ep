@@ -35,7 +35,7 @@ struct Level1MlirPass {
     // Save graph to file for MLIR processing
     MY_LOG(1) << "Saving graph to file...";
     auto graph_ref = vaip_cxx::GraphConstRef(graph);
-    std::string graph_file = "graph_for_mlir.onnx";
+    std::string graph_file = "graph_for_mlir.txt";
     graph_ref.save(graph_file);
     MY_LOG(1) << "Graph saved to file: " << graph_file;
     
