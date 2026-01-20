@@ -1,0 +1,19 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+find_package (glog CONFIG REQUIRED)
+set(LIB_NAME morphizen-level1-pass-mlir)
+add_library(${LIB_NAME} STATIC src/pass_main.cpp)
+target_link_libraries(${LIB_NAME} PUBLIC
+	morphizen::morphizen-core-static
+	glog::glog
+)
+target_include_directories(${LIB_NAME} PRIVATE
+	include
+)
+target_compile_definitions(${LIB_NAME} PRIVATE -DOUTPUT_NAME="morphizen-level1-pass-mlir")
+target_link_libraries(${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${LIB_NAME}>")
+set_target_properties(${LIB_NAME} PROPERTIES
+	FOLDER "mlir"
+)
