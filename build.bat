@@ -1,4 +1,5 @@
 @echo off
+setlocal enabledelayedexpansion
 echo ============================================================
 echo Building morphizen-rocm with Visual Studio 2022
 echo ============================================================
@@ -9,6 +10,11 @@ set SCRIPT_DIR=%~dp0
 set WORKSPACE_DRIVE=%SCRIPT_DIR:~0,2%
 set WORKSPACE_ROOT=%WORKSPACE_DRIVE%/Develop/m
 echo Detected workspace: %WORKSPACE_ROOT%
+echo.
+
+REM Check MLIR backend option (default: false)
+if not defined WITH_MLIR_BACKEND set WITH_MLIR_BACKEND=false
+echo MLIR Backend: %WITH_MLIR_BACKEND%
 echo.
 
 REM Set TheRock environment - check common locations
@@ -62,6 +68,14 @@ if not exist "%THEROCK_DIST%\nlohmann_json.natvis" (
     echo ^<?xml version="1.0" encoding="utf-8"?^>^<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010"^>^</AutoVisualizer^> > "%THEROCK_DIST%\nlohmann_json.natvis"
 )
 
+REM Set MLIR backend CMake option
+set MLIR_ENABLE_OPTION=
+if /I "%WITH_MLIR_BACKEND%"=="true" (
+    echo Enabling MLIR backend...
+    set "MLIR_ENABLE_OPTION=-Dmorphizen_ENABLE_MLIR_BACKEND=ON"
+    echo.
+)
+
 REM Configure with CMake using Ninja generator (skip if build.ninja exists for incremental build)
 REM Using dynamic runtime (MD) to match TheRock's protobuf library
 REM Enable ort-bridge for the new ORT API 2.0 support
@@ -71,7 +85,11 @@ if exist "%WORKSPACE_ROOT%\build\morphizen-rocm\build.ninja" (
     echo.
 ) else (
     echo Configuring project with CMake using Ninja...
-    cmake -G "Ninja" -DCMAKE_CXX_FLAGS="/EHsc" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -B %WORKSPACE_ROOT%/build/morphizen-rocm -S . -DCMAKE_INSTALL_PREFIX=%WORKSPACE_ROOT%/local -DCMAKE_PREFIX_PATH=%WORKSPACE_ROOT%/local -DTHEROCK_DIST=%THEROCK_DIST% -Dmorphizen_ENABLE_ORT_BRIDGE=ON
+    echo.
+    echo [DEBUG] CMake command:
+    echo cmake -G "Ninja" -DCMAKE_CXX_FLAGS="/EHsc /wd4996 /D_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -B %WORKSPACE_ROOT%/build/morphizen-rocm -S . -DCMAKE_INSTALL_PREFIX=%WORKSPACE_ROOT%/local -DCMAKE_PREFIX_PATH=%WORKSPACE_ROOT%/local -DTHEROCK_DIST=%THEROCK_DIST% -Dmorphizen_ENABLE_ORT_BRIDGE=ON !MLIR_ENABLE_OPTION!
+    echo.
+    cmake -G "Ninja" -DCMAKE_CXX_FLAGS="/EHsc /wd4996 /D_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -B %WORKSPACE_ROOT%/build/morphizen-rocm -S . -DCMAKE_INSTALL_PREFIX=%WORKSPACE_ROOT%/local -DCMAKE_PREFIX_PATH=%WORKSPACE_ROOT%/local -DTHEROCK_DIST=%THEROCK_DIST% -Dmorphizen_ENABLE_ORT_BRIDGE=ON !MLIR_ENABLE_OPTION!
     if errorlevel 1 (
         echo ERROR: CMake configuration failed
         exit /b 1
