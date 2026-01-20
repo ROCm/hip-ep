@@ -96,22 +96,32 @@ ModuleOp content:
 "builtin.module"() ({
   "func.func"() <{arg_attrs = [{onnx.name = "X"}], function_type = (tensor<1x3x8x8xf32>) -> tensor<1x32xf32>, res_attrs = [{onnx.name = "Y"}], sym_name = "main_graph"}> ({
   ^bb0(%arg0: tensor<1x3x8x8xf32> loc("graph_for_mlir.txt":2:25)):
-    // Conv operation
-    %2 = "onnx.None"() : () -> none
-    %3 = "arith.constant"() <{value = dense<...> : tensor<16x3x3x3xf32>}> : () -> tensor<16x3x3x3xf32>
-    %4 = "onnx.Conv"(%arg0, %3) {...} : (tensor<1x3x8x8xf32>, tensor<16x3x3x3xf32>) -> tensor<1x16x8x8xf32>
-    
-    // Flatten operation
-    %5 = "onnx.Flatten"(%4) {axis = 1 : si64} : (tensor<1x16x8x8xf32>) -> tensor<1x1024xf32>
-    
-    // Gemm operation
-    %6 = "arith.constant"() <{value = dense<...> : tensor<1024x32xf32>}> : () -> tensor<1024x32xf32>
-    %7 = "arith.constant"() <{value = dense<...> : tensor<32xf32>}> : () -> tensor<32xf32>
-    %8 = "onnx.Gemm"(%5, %6, %7) {...} : (tensor<1x1024xf32>, tensor<1024x32xf32>, tensor<32xf32>) -> tensor<1x32xf32>
-    
-    "func.return"(%8) : (tensor<1x32xf32>) -> ()
-  })
-})
+    // %arg0 is used by %7
+    %2 = "onnx.None"() : () -> none loc(#loc3) // unused
+    %3 = "arith.constant"() <{value = dense<"0xC3E826BE9F2E2A3E741F1E3EF36CE2BD59E1C0BDC0C85
+    ...
+    03B3E27E411BE8902973D9B889CBD57067C3DB9F43ABB53FB89BBC55B2FBEFD8988BDFDF95BBE"> : tensor<16x3x3x3xf32>}> {node.outputs = ["conv_W"]} : () -> tensor<16x3x3x3xf32> loc(#loc4) // user: %7
+    %4 = "arith.constant"() <{value = dense<[-3.25170637E-4, 0.00964353234, 0.0040634647, 0.0016936434, 6.89964625E-4, -0.0166026596, 0.00253633084, 0.0119747957, 0.00830241293, -0.00157928432, -0.00252645253, -0.00770437811, -0.00909734144, -0.00121259189, -0.0121498508, 0.0108894762]> : tensor<16xf32>}> {node.outputs = ["conv_B"]} : () -> tensor<16xf32> loc(#loc5) // user: %7
+    %5 = "arith.constant"() <{value = dense<"0x8AC4D83D1D252BBE3719943C4B...
+E42334FBE6FD988BE07BFBDBD06CA933D8773A93C5F23343C5393583D0E4B1DBCAE78163E1A11AABC909C46BDA380333DEFD34C3E"> : tensor<1024x32xf32>}> {node.outputs = ["gemm_W"]} : () -> tensor<1024x32xf32> loc(#loc6) // user: %9
+    %6 = "arith.constant"() <{value = dense<[-0.00801636278, 0.00159693952, -0.0198287982, -0.0181474295, -0.0051648831, 0.0108288312, 0.0107661653, -0.010928818, -0.0108411275, -0.00682422612, -0.0217364766, -0.0165685043, -0.0120319808, -7.307760e-03, 4.42200952E-4, -0.0018332341, -0.026518872, -0.00530720595, 0.00532240421, 0.00859209802, -0.00929858256, 0.00354494946, 0.00462811859, 0.00132805493, -0.00547127193, 0.00583023671, -0.0127776079, -0.00555261085, -0.00135363848, 0.0122126518, 0.0154392971, 0.0153057175]> : tensor<32xf32>}> {node.outputs = ["gemm_B"]} : () -> tensor<32xf32> loc(#loc7) // user: %9
+    %7 = "onnx.Conv"(%arg0, %3, %4) {auto_pad = "NOTSET", dilations = [1, 1], group = 1 : si64, kernel_shape = [3, 3], node.outputs = ["conv_out"], onnx_node_name = "conv", pads = [1, 1, 1, 1], strides = [1, 1]} : (tensor<1x3x8x8xf32>, tensor<16x3x3x3xf32>, tensor<16xf32>) -> tensor<1x16x8x8xf32> loc(#loc8) // user: %8
+    %8 = "onnx.Flatten"(%7) {axis = 1 : si64, node.outputs = ["flatten_out"], onnx_node_name = "flatten"} : (tensor<1x16x8x8xf32>) -> tensor<1x1024xf32> loc(#loc9) // user: %9
+    %9 = "onnx.Gemm"(%8, %5, %6) {alpha = 1.000000e+00 : f32, beta = 1.000000e+00 : f32, node.outputs = ["Y"], onnx_node_name = "gemm", transA = 0 : si64, transB = 0 : si64} : (tensor<1x1024xf32>, tensor<1024x32xf32>, tensor<32xf32>) -> tensor<1x32xf32> loc(#loc10) // user: %10
+    "func.return"(%9) : (tensor<1x32xf32>) -> () loc(#loc11) // id: %10
+  }) {onnx.graph.name = "resent50_by_vaip"} : () -> () loc(#loc1)
+}) : () -> () loc(#loc)
+#loc = loc("graph_for_mlir.txt":1:1)
+#loc1 = loc("graph_for_mlir.txt":2:3)
+#loc3 = loc("graph_for_mlir.txt":3:10)
+#loc4 = loc("graph_for_mlir.txt":4:12)
+#loc5 = loc("graph_for_mlir.txt":5:14)
+#loc6 = loc("graph_for_mlir.txt":6:14)
+#loc7 = loc("graph_for_mlir.txt":7:14)
+#loc8 = loc("graph_for_mlir.txt":8:10)
+#loc9 = loc("graph_for_mlir.txt":9:10)
+#loc10 = loc("graph_for_mlir.txt":10:10)
+#loc11 = loc("graph_for_mlir.txt":11:5)
 ```
 
 ## Verification
