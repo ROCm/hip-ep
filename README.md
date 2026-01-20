@@ -46,11 +46,13 @@ morphizen-mlir/
 
 ### Build Dependencies
 
-The build process requires the following dependencies:
+The build process requires the following dependencies to be built in order:
 
 1. **ONNXRuntime** (required - must be built first)
-2. **LLVM/MLIR** (automatically fetched via CMake FetchContent)
+2. **LLVM/MLIR** (required - must be built and installed before morphizen-mlir)
 3. **MorphiZen** (automatically fetched via CMake FetchContent)
+
+**Important:** LLVM/MLIR must be pre-built and installed using `build_llvm.bat` because MorphiZen's mlir-imp component uses `find_package(MLIR)` which requires `MLIRTargets.cmake` file that is only generated during the install phase.
 
 ### Step-by-Step Build Instructions
 
