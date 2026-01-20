@@ -68,23 +68,14 @@ else()
   FetchContent_MakeAvailable(llvm)
   
   message(STATUS "LLVM configured at: ${llvm_BINARY_DIR}")
-  
-  # Set MLIR_DIR to the correct location in the build tree
-  # MLIR's CMake config is in tools/mlir/cmake/modules/CMakeFiles
-  set(LLVM_DIR "${llvm_BINARY_DIR}/lib/cmake/llvm" CACHE PATH "Path to LLVM CMake files" FORCE)
-  set(MLIR_DIR "${llvm_BINARY_DIR}/tools/mlir/cmake/modules/CMakeFiles" CACHE PATH "Path to MLIR CMake files" FORCE)
-  
-  # Manually set MLIR_INCLUDE_DIRS since find_package(MLIR) might not set it correctly
-  # MLIR headers are in both source and build directories
-  set(MLIR_INCLUDE_DIRS 
-    "${llvm_SOURCE_DIR}/../mlir/include"
-    "${llvm_BINARY_DIR}/tools/mlir/include"
-    CACHE PATH "MLIR include directories" FORCE)
-  
-  message(STATUS "LLVM_DIR set to: ${LLVM_DIR}")
-  message(STATUS "MLIR_DIR set to: ${MLIR_DIR}")
-  message(STATUS "MLIR_INCLUDE_DIRS set to: ${MLIR_INCLUDE_DIRS}")
-  message(STATUS "LLVM/MLIR targets are now available via FetchContent")
+  message(FATAL_ERROR 
+    "LLVM/MLIR FetchContent is configured but not yet built and installed.\n"
+    "Please run build_llvm.bat first to build and install LLVM/MLIR to ../local\n"
+    "Then run build.bat again to build morphizen-mlir.\n"
+    "\n"
+    "Reason: MorphiZen's mlir-imp uses find_package(MLIR) which requires\n"
+    "MLIRTargets.cmake file that is only generated during 'cmake --install'.\n"
+    "FetchContent alone cannot provide this file.")
 endif()
 
 message(STATUS "LLVM/MLIR configuration complete")
