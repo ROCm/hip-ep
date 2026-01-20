@@ -2,16 +2,17 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+#include <glog/logging.h>
 #include "morphizen/env_config.hpp"
 #include "morphizen/vaip.hpp"
-#include <glog/logging.h>
+#include "morphizen/node.hpp"
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MLIR) >= n)
 
-namespace {
 using namespace vaip_core;
-using namespace vaip_cxx;
+
+namespace {
 
 struct Level1MlirPass {
   Level1MlirPass(IPass& self) : self_{self} {}
