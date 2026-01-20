@@ -20,11 +20,19 @@ morphizen-mlir/
 ├── level-1-pass-mlir/         # MLIR pass implementation
 │   ├── CMakeLists.txt         # Pass build configuration
 │   └── src/
-│       └── pass_main.cpp      # Main pass implementation
+│       └── pass_main.cpp      # Main pass implementation with MLIR parsing
+├── test/                       # Test infrastructure
+│   ├── CMakeLists.txt         # Test build configuration
+│   ├── test_ort_integration.cpp  # ORT integration tests
+│   ├── gen_conv_model.py      # Conv model generator
+│   └── gen_conv_gemm_model.py # Conv+Gemm model generator
+├── doc/                        # Documentation
+│   └── TESTING.md             # Testing guide with examples
 ├── etc/                        # Configuration files
 │   └── vaip_config.json       # VAIP pass configuration
-└── tools/                      # Build tools
-    └── initialize-cmake-preset.py  # CMake preset generator
+└── tools/                      # Build and test tools
+    ├── initialize-cmake-preset.py  # CMake preset generator
+    └── run_ort_integration_test.bat  # Test runner script
 ```
 
 ## Key Features
@@ -164,10 +172,11 @@ The Level-1 MLIR pass (`level-1-pass-mlir/src/pass_main.cpp`) performs:
 
 ### Testing
 
-The project includes comprehensive ORT integration tests:
+The project includes comprehensive ORT integration tests. For detailed testing instructions, see [doc/TESTING.md](doc/TESTING.md).
 
+**Quick Start:**
 ```bash
-# Run tests with MLIR backend
+# Run all tests with MLIR backend
 cd tools
 ./run_ort_integration_test.bat
 ```
@@ -182,6 +191,8 @@ cd test
 python gen_conv_model.py          # Generate conv_model.onnx
 python gen_conv_gemm_model.py     # Generate conv_gemm_model.onnx
 ```
+
+For complete testing documentation including expected ModuleOp output examples, see [doc/TESTING.md](doc/TESTING.md).
 
 ### Environment Variables
 
