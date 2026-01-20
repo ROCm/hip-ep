@@ -11,3 +11,4 @@ project(
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/presets.cmake)
 add_subdirectory(level-1-pass-mlir)
+add_subdirectory(test)
