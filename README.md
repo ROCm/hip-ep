@@ -73,11 +73,11 @@ ONNXRuntime must be built first as it's a core dependency:
 git clone https://github.com/Microsoft/onnxruntime.git
 cd onnxruntime
 
-# Build and install (Debug configuration)
-./build.bat --config Debug --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --cmake_extra_defines CMAKE_INSTALL_PREFIX=$PWD/../local
+# Build and install (Release configuration)
+./build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --cmake_extra_defines CMAKE_INSTALL_PREFIX=$PWD/../local
 
 # Install
-cmake --build ../build/onnxruntime/Debug/ --target install
+cmake --build ../build/onnxruntime/Release/ --target install
 ```
 
 #### Step 2: Build morphizen-mlir
@@ -108,8 +108,8 @@ cmake --install build
 ```bash
 # 1. Build ONNXRuntime (in parent directory)
 cd ../onnxruntime
-./build.bat --config Debug --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --cmake_extra_defines CMAKE_INSTALL_PREFIX=$PWD/../local
-cmake --build ../build/onnxruntime/Debug/ --target install
+./build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --cmake_extra_defines CMAKE_INSTALL_PREFIX=$PWD/../local
+cmake --build ../build/onnxruntime/Release/ --target install
 
 # 2. Build morphizen-mlir (LLVM/MLIR and MorphiZen will be auto-fetched)
 cd ../morphizen-mlir
