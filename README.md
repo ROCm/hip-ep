@@ -57,10 +57,10 @@ morphizen-mlir/
 The build process requires the following dependencies to be built in order:
 
 1. **ONNXRuntime** (required - must be built first)
-2. **LLVM/MLIR** (required - must be built and installed before morphizen-mlir)
+2. **LLVM/MLIR** (optional pre-build - can be auto-fetched via FetchContent or pre-built manually)
 3. **MorphiZen** (automatically fetched via CMake FetchContent)
 
-**Important:** LLVM/MLIR must be pre-built and installed using `build_llvm.bat` because MorphiZen's mlir-imp component uses `find_package(MLIR)` which requires `MLIRTargets.cmake` file that is only generated during the install phase.
+**Note:** LLVM/MLIR pre-build is optional. The build system will automatically fetch and build LLVM via FetchContent if not pre-installed. However, pre-building can save time on subsequent builds.
 
 ### Step-by-Step Build Instructions
 
@@ -118,20 +118,7 @@ cd ../morphizen-mlir
 
 ### Optional: Pre-build LLVM/MLIR
 
-If you want to pre-build LLVM/MLIR instead of using FetchContent (which can take several hours during the first build), you can use the provided script:
-
-```bash
-cd morphizen-mlir
-./build_llvm.bat
-```
-
-This will:
-- Clone LLVM project to `../llvm`
-- Checkout commit `f8cb7987c64dcffb72414a40560055cb717dbf74`
-- Build with Ninja
-- Install to `../local`
-
-The build system will automatically detect and use the pre-built LLVM if available.
+If you want to pre-build LLVM/MLIR instead of using FetchContent (which can take several hours during the first build), you can build it manually. The build system will automatically detect and use the pre-built LLVM if available in `../local`.
 
 ## Configuration
 
