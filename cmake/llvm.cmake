@@ -52,7 +52,8 @@ else()
     message(STATUS "LLVM SOURCE_DIR: ${LOCAL_LLVM}")
     FetchContent_Declare(
       llvm-project
-      SOURCE_DIR ${LOCAL_LLVM}/..)
+      SOURCE_DIR ${LOCAL_LLVM}/..
+      SOURCE_SUBDIR llvm)
   else()
     message(STATUS "Cannot find LLVM in local directories")
     message(STATUS "Fetching LLVM source from ${DEP_URL_llvm} @ ${DEP_SHA1_llvm}")
@@ -64,6 +65,7 @@ else()
       GIT_SUBMODULES_RECURSE
       DOWNLOAD_EXTRACT_TIMESTAMP TRUE
       EXCLUDE_FROM_ALL
+      SOURCE_SUBDIR llvm
     )
   endif()
   
@@ -79,8 +81,9 @@ else()
     "${llvm-project_SOURCE_DIR}/mlir/include"
     "${llvm-project_BINARY_DIR}/tools/mlir/include"
     CACHE PATH "MLIR include directories" FORCE)
+  # Note: In a subdirectory build, MLIR config files are in tools/mlir/cmake/modules/CMakeFiles/
   set(LLVM_DIR "${llvm-project_BINARY_DIR}/lib/cmake/llvm" CACHE PATH "" FORCE)
-  set(MLIR_DIR "${llvm-project_BINARY_DIR}/lib/cmake/mlir" CACHE PATH "" FORCE)
+  set(MLIR_DIR "${llvm-project_BINARY_DIR}/tools/mlir/cmake/modules/CMakeFiles" CACHE PATH "" FORCE)
   
   message(STATUS "LLVM source dir: ${llvm-project_SOURCE_DIR}")
   message(STATUS "LLVM binary dir: ${llvm-project_BINARY_DIR}")
