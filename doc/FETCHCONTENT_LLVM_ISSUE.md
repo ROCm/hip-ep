@@ -46,19 +46,20 @@ else()
 endif()
 ```
 
-### 2. Conditional find_package (level-1-pass-mlir/CMakeLists.txt)
+### 2. Using MLIR (level-1-pass-mlir/CMakeLists.txt)
 
 ```cmake
-# Only call find_package when using pre-installed LLVM
-# When using FetchContent, targets are already in CMake scope
-if(MORPHIZEN_LLVM_PREINSTALLED)
-  find_package(LLVM REQUIRED CONFIG)
-  find_package(MLIR REQUIRED CONFIG)
-endif()
+# find_package works for both pre-installed and FetchContent LLVM:
+# - Pre-installed: imports targets via MLIRTargets.cmake
+# - FetchContent: targets already exist, MLIRConfig.cmake skips import
+find_package(LLVM REQUIRED CONFIG)
+find_package(MLIR REQUIRED CONFIG)
 
 # MLIR targets work regardless of which approach is used
 target_link_libraries(${LIB_NAME} PUBLIC MLIRIR MLIRFuncDialect ...)
 ```
+
+**Note:** No conditional is needed! `find_package(MLIR)` works in both scenarios because LLVM's `MLIRConfig.cmake` is smart enough to skip importing targets when they already exist.
 
 ## Why find_package(MLIR) Works in MorphiZen
 
@@ -150,8 +151,8 @@ Initially, FetchContent LLVM didn't work because:
 
 The solution was to:
 1. Set `LLVM_INCLUDE_DIRS` and `MLIR_INCLUDE_DIRS` explicitly after FetchContent
-2. Use `MORPHIZEN_LLVM_PREINSTALLED` flag to conditionally call find_package
-3. Rely on LLVM's smart config files that skip imports when targets exist
+2. Rely on LLVM's smart config files that skip imports when targets already exist
+3. Call `find_package(LLVM/MLIR)` unconditionally - it works in both scenarios!
 
 ## Related Files
 
@@ -159,7 +160,7 @@ The solution was to:
 |------|---------|
 | `cmake/llvm.cmake` | LLVM detection and FetchContent logic |
 | `cmake/deps.cmake` | Includes llvm.cmake, enables MLIR backend |
-| `level-1-pass-mlir/CMakeLists.txt` | Conditional find_package example |
+| `level-1-pass-mlir/CMakeLists.txt` | Example of using find_package with FetchContent |
 | `build_llvm.bat` | Script to pre-build LLVM (optional) |
 
 ## References
