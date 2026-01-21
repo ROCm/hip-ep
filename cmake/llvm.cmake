@@ -81,6 +81,16 @@ else()
     "${llvm-project_SOURCE_DIR}/mlir/include"
     "${llvm-project_BINARY_DIR}/tools/mlir/include"
     CACHE PATH "MLIR include directories" FORCE)
+  
+  # Make include directories globally available for all targets
+  # This is necessary because subdirectory builds don't automatically propagate
+  # MLIR source includes to targets that use find_package(MLIR)
+  include_directories(SYSTEM
+    "${llvm-project_SOURCE_DIR}/llvm/include"
+    "${llvm-project_BINARY_DIR}/include"
+    "${llvm-project_SOURCE_DIR}/mlir/include"
+    "${llvm-project_BINARY_DIR}/tools/mlir/include")
+  
   # Note: In a subdirectory build, MLIR config files are in tools/mlir/cmake/modules/CMakeFiles/
   set(LLVM_DIR "${llvm-project_BINARY_DIR}/lib/cmake/llvm" CACHE PATH "" FORCE)
   set(MLIR_DIR "${llvm-project_BINARY_DIR}/tools/mlir/cmake/modules/CMakeFiles" CACHE PATH "" FORCE)
