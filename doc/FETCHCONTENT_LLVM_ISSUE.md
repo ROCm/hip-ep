@@ -110,7 +110,70 @@ execute_process(
 - LLVM's build system is not fully initialized yet
 - Error: `could not load cache`
 
-## Final Solution
+### Solution 4: Bypass find_package When Using FetchContent ✅
+
+**Key Insight:** The `find_package(MLIR CONFIG)` requirement for `MLIRTargets.cmake` only applies when MLIR is **imported from an external installation**. When LLVM/MLIR is built inline via FetchContent (which internally uses `add_subdirectory`), the MLIR targets are already defined directly in the CMake scope - no import is needed!
+
+**Implementation:**
+
+1. **cmake/llvm.cmake** - Use FetchContent and set a flag to indicate inline build:
+
+```cmake
+# Try to find pre-installed LLVM/MLIR first
+find_package(LLVM QUIET CONFIG)
+find_package(MLIR QUIET CONFIG)
+
+if(LLVM_FOUND AND MLIR_FOUND)
+  message(STATUS "Found pre-installed LLVM and MLIR")
+  set(MORPHIZEN_LLVM_PREINSTALLED ON CACHE BOOL "Using pre-installed LLVM" FORCE)
+else()
+  message(STATUS "LLVM/MLIR not found, will use FetchContent and build inline")
+  set(MORPHIZEN_LLVM_PREINSTALLED OFF CACHE BOOL "Using FetchContent LLVM" FORCE)
+  
+  FetchContent_Declare(llvm-project ...)
+  FetchContent_MakeAvailable(llvm-project)
+  
+  # Set include directories for downstream targets
+  set(LLVM_INCLUDE_DIRS 
+    "${llvm-project_SOURCE_DIR}/llvm/include"
+    "${llvm-project_BINARY_DIR}/include"
+    CACHE PATH "LLVM include directories" FORCE)
+  set(MLIR_INCLUDE_DIRS 
+    "${llvm-project_SOURCE_DIR}/mlir/include"
+    "${llvm-project_BINARY_DIR}/tools/mlir/include"
+    CACHE PATH "MLIR include directories" FORCE)
+endif()
+```
+
+2. **level-1-pass-mlir/CMakeLists.txt** - Conditionally call find_package:
+
+```cmake
+# Only use find_package for LLVM/MLIR when using pre-installed version
+# When using FetchContent, targets are already available in the CMake scope
+if(MORPHIZEN_LLVM_PREINSTALLED)
+  find_package(LLVM REQUIRED CONFIG)
+  find_package(MLIR REQUIRED CONFIG)
+endif()
+
+# MLIR targets (MLIRIR, MLIRFuncDialect, etc.) are available regardless
+target_link_libraries(${LIB_NAME} PUBLIC MLIRIR MLIRFuncDialect ...)
+```
+
+**Result:** ✅ Success
+- FetchContent downloads and configures LLVM/MLIR inline
+- MLIR targets are defined directly in CMake scope via `add_subdirectory`
+- No `MLIRTargets.cmake` needed because targets are not imported
+- `find_package` is skipped when using FetchContent
+- CMake configuration completes successfully
+
+**Why This Works:**
+
+| Scenario | find_package Needed? | Why |
+|----------|---------------------|-----|
+| Pre-installed LLVM | ✅ Yes | Targets must be imported from external installation |
+| FetchContent LLVM | ❌ No | Targets defined directly via add_subdirectory |
+
+## Alternative Solution
 
 ### ✅ Pre-build LLVM Using build_llvm.bat
 
@@ -271,17 +334,24 @@ This command only runs when executing `cmake --install`.
 
 ## Conclusion
 
-**FetchContent cannot fully replace pre-installed LLVM/MLIR** because:
+**FetchContent CAN fully replace pre-installed LLVM/MLIR** if you bypass `find_package`:
 
-1. ✅ FetchContent can configure and build LLVM
-2. ❌ FetchContent does not execute install step
-3. ❌ No install means no `*Targets.cmake` files
-4. ❌ `find_package(MLIR CONFIG)` requires these files
+1. ✅ FetchContent can configure and build LLVM inline
+2. ✅ When built inline, MLIR targets are defined directly in CMake scope
+3. ✅ No `*Targets.cmake` files needed for inline builds
+4. ✅ Skip `find_package(MLIR CONFIG)` when using FetchContent
 
-**Recommended Approach:**
-- Use `build_llvm.bat` to pre-build and install LLVM/MLIR
-- Detect installed LLVM in `cmake/llvm.cmake`
-- Provide clear error message if not found
+**Two Valid Approaches:**
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **FetchContent (Solution 4)** | No pre-build step, simpler setup | Longer initial cmake configure time |
+| **Pre-installed LLVM** | Faster cmake configure | Requires running build_llvm.bat first |
+
+**Recommended Implementation:**
+- Use `MORPHIZEN_LLVM_PREINSTALLED` flag to track which approach is used
+- Conditionally call `find_package(LLVM/MLIR)` only when using pre-installed version
+- Set `LLVM_INCLUDE_DIRS` and `MLIR_INCLUDE_DIRS` for both approaches
 
 ## Related Files
 

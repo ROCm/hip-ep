@@ -3,8 +3,14 @@
 # ** Licensed under the MIT License.
 ##
 find_package(glog CONFIG REQUIRED)
-find_package(LLVM REQUIRED CONFIG)
-find_package(MLIR REQUIRED CONFIG)
+
+# Only use find_package for LLVM/MLIR when using pre-installed version
+# When using FetchContent, targets are already available in the CMake scope
+# See doc/FETCHCONTENT_LLVM_ISSUE.md for detailed explanation
+if(MORPHIZEN_LLVM_PREINSTALLED)
+  find_package(LLVM REQUIRED CONFIG)
+  find_package(MLIR REQUIRED CONFIG)
+endif()
 
 set(LIB_NAME morphizen-level1-pass-mlir)
 add_library(${LIB_NAME} STATIC src/pass_main.cpp)
