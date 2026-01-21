@@ -31,11 +31,76 @@
 *.exe
 *.out
 *.app
+
+# Build directories
 /build/
+/build-*/
+/out/
+
+# CMake
 /.cache/
 /build.ninja/
 /compile_commands.json
-/tools/__pycache__/
 CMakePresets.json
-.venv
-.vscode
+CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+*.cmake.in
+
+# IDE and editor files
+.vscode/
+.vs/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.cproject
+.settings/
+*.user
+*.suo
+*.ncb
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.egg-info/
+.eggs/
+*.egg
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Tools
+/tools/__pycache__/
+
+# Logs
+*.log
+
+# AI/Cline storage
+.cline_storage/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Backup files
+*.bak
+*.backup
+*.orig
+*.tmp
