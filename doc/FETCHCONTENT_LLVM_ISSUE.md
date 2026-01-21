@@ -138,21 +138,65 @@ Then configure morphizen-mlir with:
 cmake -S . -B build -DCMAKE_PREFIX_PATH=../local
 ```
 
+## Critical: LLVM_DIR and MLIR_DIR Paths for FetchContent Builds
+
+When LLVM/MLIR is built as a subdirectory (via FetchContent or add_subdirectory), the config files are generated in **different locations** than installed builds. This is especially important for MLIR.
+
+### LLVM_DIR
+
+| Build Type | LLVMConfig.cmake Location |
+|------------|---------------------------|
+| **Installed LLVM** | `<prefix>/lib/cmake/llvm/LLVMConfig.cmake` |
+| **FetchContent/Subdirectory** | `<build>/_deps/llvm-project-build/lib/cmake/llvm/LLVMConfig.cmake` |
+
+**Good news:** LLVM uses the same relative path (`lib/cmake/llvm/`) in both cases, so `find_package(LLVM)` typically works without explicitly setting `LLVM_DIR`. CMake can find it via `CMAKE_PREFIX_PATH` or by searching common build patterns.
+
+### MLIR_DIR (The Tricky One)
+
+| Build Type | MLIRConfig.cmake Location |
+|------------|---------------------------|
+| **Installed LLVM** | `<prefix>/lib/cmake/mlir/MLIRConfig.cmake` |
+| **FetchContent/Subdirectory** | `<build>/_deps/llvm-project-build/tools/mlir/cmake/modules/CMakeFiles/MLIRConfig.cmake` |
+
+**Problem:** MLIR uses a completely different path in subdirectory builds (`tools/mlir/cmake/modules/CMakeFiles/`) vs installed builds (`lib/cmake/mlir/`). This causes `find_package(MLIR)` to fail unless you explicitly set `MLIR_DIR`.
+
+The cmake/llvm.cmake must set `MLIR_DIR` to the correct path for `find_package(MLIR)` to work:
+
+```cmake
+# After FetchContent_MakeAvailable(llvm-project)
+set(LLVM_DIR "${llvm-project_BINARY_DIR}/lib/cmake/llvm"
+    CACHE PATH "Path to LLVMConfig.cmake" FORCE)
+set(MLIR_DIR "${llvm-project_BINARY_DIR}/tools/mlir/cmake/modules/CMakeFiles"
+    CACHE PATH "Path to MLIRConfig.cmake" FORCE)
+```
+
+**Why MLIR_DIR is critical:** Without the correct `MLIR_DIR`, CMake's `find_package(MLIR)` will fail with:
+```
+Could not find a package configuration file provided by "MLIR"
+```
+
 ## Historical Note: The Original Problem
 
-Initially, FetchContent LLVM didn't work because:
+Initially, FetchContent LLVM didn't work because of several issues:
 
-1. **Error 1**: `find_package(MLIR)` couldn't find `MLIRTargets.cmake`
+1. **Error 1**: `find_package(MLIR)` couldn't find `MLIRConfig.cmake`
+   - For subdirectory builds, MLIRConfig.cmake is in `tools/mlir/cmake/modules/CMakeFiles/`
+   - For installed builds, it's in `lib/cmake/mlir/`
+   - The default search paths don't include the subdirectory build location
+
+2. **Error 2**: `find_package(MLIR)` couldn't find `MLIRTargets.cmake`
    - This file is only generated during `cmake --install`
    - FetchContent doesn't execute the install step
+   - However, when targets already exist (from subdirectory build), this file isn't needed
 
-2. **Error 2**: MLIR headers not found
+3. **Error 3**: MLIR headers not found
    - Missing MLIR source directory in include paths
 
 The solution was to:
-1. Set `LLVM_INCLUDE_DIRS` and `MLIR_INCLUDE_DIRS` explicitly after FetchContent
-2. Rely on LLVM's smart config files that skip imports when targets already exist
-3. Call `find_package(LLVM/MLIR)` unconditionally - it works in both scenarios!
+1. **Set `MLIR_DIR` to the correct subdirectory location** (`tools/mlir/cmake/modules/CMakeFiles`)
+2. Set `LLVM_INCLUDE_DIRS` and `MLIR_INCLUDE_DIRS` explicitly after FetchContent
+3. Rely on LLVM's smart config files that skip imports when targets already exist
+4. Call `find_package(LLVM/MLIR)` unconditionally - it works in both scenarios!
 
 ## Related Files
 
