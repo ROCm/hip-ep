@@ -9,12 +9,6 @@ vaip_add_remote_target(
   PATCH_FILES ${CMAKE_CURRENT_SOURCE_DIR}/patches/tar.h.force_align_1.patch
 )
 
-vaip_add_remote_target(
-  FILE ${CMAKE_CURRENT_BINARY_DIR}/xclbin.h
-  URL https://raw.githubusercontent.com/Xilinx/XRT/347acbd5e2b2d658ecd21d024547703fccc5572c/src/runtime_src/core/include/xclbin.h
-  EXPECTED_MD5 a3eb400c4836d01a59b7c5bb3ddd83e3
-)
-
 add_custom_command (
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/config_json_binary.hpp ${CMAKE_CURRENT_BINARY_DIR}/vaip_config.json
   COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../tools"
@@ -76,9 +70,6 @@ add_library(${LIB_NAME} STATIC
   src/node.cpp
   src/profile_utils.hpp
   src/profile_utils.cpp
-  ${CMAKE_CURRENT_BINARY_DIR}/xclbin.h
-  include/morphizen/xclbin_file.hpp
-  src/binary/xclbin_file.cpp
   src/util.cpp
   src/cache_dir.cpp
   src/cache_dir.hpp

@@ -42,7 +42,6 @@
 #include "./op_def.hpp"
 #include "./vaip_core.hpp"
 #include "./with_current_graph.hpp"
-#include "./xclbin_file.hpp"
 #include "./xir_ops.hpp"
 #include <vaip/my_ort.h>
 #include <vaip/vaip_ort_api.h>

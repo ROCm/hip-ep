@@ -25,7 +25,6 @@
 #include "morphizen/pass_context.hpp"
 #include "morphizen/util.hpp"
 #include "morphizen/weak.hpp"
-#include "morphizen/xclbin_file.hpp"
 #include <algorithm>
 #include <exception>
 #include <filesystem>
