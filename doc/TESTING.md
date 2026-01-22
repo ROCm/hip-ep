@@ -14,11 +14,8 @@ To run tests manually:
 # Set environment variable to activate MLIR backend
 set MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend
 
-# Navigate to test directory
-cd d:\Develop\m\morphizen-mlir\test
-
-# Run the test executable
-D:\Develop\m\build\morphizen-mlir\bin\ort_integration_test.exe
+# Run the test executable (from project root)
+..\build\morphizen-mlir\bin\ort_integration_test.exe
 ```
 
 ## Test Cases
@@ -164,7 +161,7 @@ Then run the test executable directly to see all debug output.
 ### Conv Model
 
 ```bash
-cd d:\Develop\m\morphizen-mlir\test
+cd test
 python gen_conv_model.py
 ```
 
@@ -173,7 +170,7 @@ This generates `conv_model.onnx` with a simple Conv operation.
 ### Conv+Gemm Model
 
 ```bash
-cd d:\Develop\m\morphizen-mlir\test
+cd test
 python gen_conv_gemm_model.py
 ```
 
@@ -186,7 +183,6 @@ This generates `conv_gemm_model.onnx` with Conv → Flatten → Gemm pipeline.
 If you see "Test executable not found", build the project first:
 
 ```bash
-cd d:\Develop\m\morphizen-mlir
 .\build.bat
 ```
 
@@ -216,12 +212,11 @@ For CI/CD pipelines, use:
 
 ```bash
 # Build
-cd d:\Develop\m\morphizen-mlir
 .\build.bat
 
 # Test - Set environment variable and run test executable
 set MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend
-D:\Develop\m\build\morphizen-mlir\bin\ort_integration_test.exe
+..\build\morphizen-mlir\bin\ort_integration_test.exe
 ```
 
 The test executable returns exit code 0 on success, non-zero on failure.
