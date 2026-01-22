@@ -16,7 +16,7 @@ morphizen-mlir/
 ├── .gitignore                  # Git ignore rules
 ├── cmake/                      # CMake modules
 │   ├── deps.cmake             # Dependency management
-│   └── presets.cmake          # CMake presets configuration
+│   └── llvm.cmake             # LLVM/MLIR configuration
 ├── level-1-pass-mlir/         # MLIR pass implementation
 │   ├── CMakeLists.txt         # Pass build configuration
 │   └── src/
@@ -28,11 +28,8 @@ morphizen-mlir/
 │   └── gen_conv_gemm_model.py # Conv+Gemm model generator
 ├── doc/                        # Documentation
 │   └── TESTING.md             # Testing guide with examples
-├── etc/                        # Configuration files
-│   └── vaip_config.json       # VAIP pass configuration
-└── tools/                      # Build and test tools
-    ├── initialize-cmake-preset.py  # CMake preset generator
-    └── run_ort_integration_test.bat  # Test runner script
+└── etc/                        # Configuration files
+    └── vaip_config.json       # VAIP pass configuration
 ```
 
 ## Key Features
@@ -160,9 +157,11 @@ The project includes comprehensive ORT integration tests. For detailed testing i
 
 **Quick Start:**
 ```bash
-# Run all tests with MLIR backend
-cd tools
-./run_ort_integration_test.bat
+# Set environment variable to activate MLIR backend
+set MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend
+
+# Run the test executable
+D:\Develop\m\build\morphizen-mlir\bin\ort_integration_test.exe
 ```
 
 **Test Models:**

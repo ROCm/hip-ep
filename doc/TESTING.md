@@ -6,24 +6,9 @@ This document describes how to run and verify the MLIR integration tests for the
 
 ## Running Tests
 
-### Quick Start
-
-Simply run the test script:
-
-```bash
-cd d:\Develop\m\morphizen-mlir\tools
-.\run_ort_integration_test.bat
-```
-
-This will:
-1. Set the required environment variable (`MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend`)
-2. Check for test executable and models
-3. Generate test models if needed
-4. Run all integration tests
-
 ### Manual Test Execution
 
-If you want to run tests manually:
+To run tests manually:
 
 ```bash
 # Set environment variable to activate MLIR backend
@@ -234,9 +219,9 @@ For CI/CD pipelines, use:
 cd d:\Develop\m\morphizen-mlir
 .\build.bat
 
-# Test
-cd tools
-.\run_ort_integration_test.bat
+# Test - Set environment variable and run test executable
+set MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend
+D:\Develop\m\build\morphizen-mlir\bin\ort_integration_test.exe
 ```
 
-The test script returns exit code 0 on success, non-zero on failure.
+The test executable returns exit code 0 on success, non-zero on failure.

@@ -39,12 +39,6 @@ if not exist "%WORKSPACE_ROOT%\local\lib\cmake\onnxruntime" (
     echo.
 )
 
-if not exist "%WORKSPACE_ROOT%\local\lib\cmake\llvm" (
-    echo WARNING: LLVM/MLIR not found in %WORKSPACE_ROOT%\local
-    echo Please build LLVM/MLIR first by running: build_llvm.bat
-    echo.
-)
-
 REM Configure with CMake using Ninja generator (skip if build.ninja exists for incremental build)
 if exist "%WORKSPACE_ROOT%\build\morphizen-mlir\build.ninja" (
     echo Skipping CMake configuration - build.ninja already exists
