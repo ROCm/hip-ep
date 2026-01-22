@@ -333,7 +333,6 @@ cc_library(
         "src/stat.hpp",
         "src/file_lock.hpp",
         "src/file_lock.cpp",
-        "src/transpose.cpp",
         "src/guess_reshape.cpp",
         "src/binary/config_reader.cpp",
         "src/vitisai_compile_model.cpp",
@@ -404,7 +403,6 @@ cc_library(
         "@onnxruntime//:onnxruntime_headers",
         "@protobuf",
         "@zlib",
-        "@eigen",
     ],
 )
 
@@ -436,7 +434,6 @@ cc_library(
         "include/morphizen/provider_option_keys.hpp",
         "include/morphizen/rewrite_rule.hpp",
         "include/morphizen/tensor_proto.hpp",
-        "include/morphizen/transpose.hpp",
         "include/morphizen/util.hpp",
         "include/morphizen/vaip.hpp",
         "include/morphizen/vaip_core.hpp",

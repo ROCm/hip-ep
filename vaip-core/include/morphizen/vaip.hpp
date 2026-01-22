@@ -57,7 +57,3 @@
 #if VAIP_USER == VAIP_USER__CUSTOM_OP || VAIP_USER == VAIP_USER__ORT_VITIS_AI_EP
 #  include "./custom_op_imp.hpp"
 #endif
-
-#if VAIP_USER == VAIP_USER__CUSTOM_OP || VAIP_USER == VAIP_USER__PASS
-#  include "./transpose.hpp"
-#endif

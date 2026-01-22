@@ -110,8 +110,6 @@ add_library(${LIB_NAME} STATIC
   src/stat.hpp
   src/file_lock.hpp
   src/file_lock.cpp
-  include/morphizen/transpose.hpp
-  src/transpose.cpp
   include/morphizen/guess_reshape.hpp
   src/guess_reshape.cpp
   include/morphizen/config_reader.hpp
@@ -177,7 +175,7 @@ target_include_directories(${LIB_NAME}
 
 set(MorphiZen_DEPS protobuf::libprotobuf
   vaip_io
-  glog::glog Eigen3::Eigen morphizen::encryption morphizen::mem_binary ZLIB::ZLIB Microsoft.GSL::GSL morphizen-utils vaip-ort-api-ext)
+  glog::glog morphizen::encryption morphizen::mem_binary ZLIB::ZLIB Microsoft.GSL::GSL morphizen-utils vaip-ort-api-ext)
 target_link_libraries(${LIB_NAME} PUBLIC ${MorphiZen_DEPS})
 target_compile_definitions(${LIB_NAME}
   PUBLIC
