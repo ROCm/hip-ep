@@ -27,11 +27,7 @@ struct Level1MlirPass {
   
   void process(IPass& self, Graph& graph) {
     MY_LOG(1) << "Level1MlirPass::process() called";
-    std::cout << "================================================= " << std::endl;
-    
-    auto nodes = graph_nodes(graph);
-    MY_LOG(1) << "Graph has " << nodes.size() << " nodes";
-    
+   
     // Save graph to file for MLIR processing
     MY_LOG(1) << "Saving graph to file...";
     auto graph_ref = vaip_cxx::GraphConstRef(graph);
@@ -57,14 +53,6 @@ struct Level1MlirPass {
       mlir::ModuleOp module = *moduleRef;
       MY_LOG(1) << "ModuleOp created, ready for MLIR transformations";
       
-      // Walk operations and print module
-      MY_LOG(1) << "Walking operations in module...";
-      int op_count = 0;
-      module.walk([&](mlir::Operation* op) {
-        op_count++;
-        MY_LOG(2) << "  Op #" << op_count << ": " << op->getName().getStringRef().str();
-      });
-      MY_LOG(1) << "Total operations in module: " << op_count;
       
       // Print module with detailed flags
       mlir::OpPrintingFlags flags;
