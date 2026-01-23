@@ -75,7 +75,7 @@ if(MORPHIZEN_CMAKE_LIST_TXT_IN_LOCAL_WORKING_DIR)
 else()
   FetchContent_Declare(
   morphizen
-  GIT_REPOSITORY git@gitenterprise.xilinx.com:VitisAI/MorphiZen
+  GIT_REPOSITORY https://github.com/ROCm/MorphiZen.git
   GIT_TAG main
   GIT_SUBMODULES "3rd-party/hash-library"
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
