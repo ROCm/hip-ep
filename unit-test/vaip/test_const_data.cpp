@@ -4,7 +4,9 @@
  */
 
 #include "test_environment.hpp"
-#include <boost/process.hpp>
+#ifdef MORPHIZEN_ENABLE_BOOST
+#  include <boost/process.hpp>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
@@ -17,6 +19,7 @@ const static std::filesystem::path TEST_CONSTANT_INITIALIZER_ONNX =
 class ConstDataTest : public ::testing::Test {
 public:
   template <typename F> void run_test(int line, F check) {
+#ifdef MORPHIZEN_ENABLE_BOOST
     auto test_constant_initializer_onnx =
         TEST_CWD / (std::string("test_constant_initializer_") +
                     std::to_string(line) + ".onnx")
@@ -33,6 +36,10 @@ public:
     graph = std::make_unique<vaip_cxx::GraphRef>(cloned_model->main_graph());
     graph->resolve();
     check();
+#else
+    GTEST_SKIP()
+        << "Boost::Process not available (morphizen_ENABLE_BOOST is OFF)";
+#endif
   }
 
 public:

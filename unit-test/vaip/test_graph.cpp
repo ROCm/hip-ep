@@ -5,7 +5,9 @@
 
 #include "morphizen/vaip.hpp"
 #include "test_environment.hpp"
-#include <boost/process.hpp>
+#ifdef MORPHIZEN_ENABLE_BOOST
+#  include <boost/process.hpp>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
@@ -82,9 +84,14 @@ TEST_F(GraphTest, LoadAndSave) {
                 << "\n";
     python_code << "onnx.checker.check_model(m)"
                 << "\n";
+#ifdef MORPHIZEN_ENABLE_BOOST
     auto exit_code =
         boost::process::system(PYTHON_EXE.u8string(), "-c", python_code.str());
     EXPECT_EQ(exit_code, 0) << "onnx.checker.check_model failed";
+#else
+    GTEST_SKIP()
+        << "Boost::Process not available (morphizen_ENABLE_BOOST is OFF)";
+#endif
   }
 }
 TEST_F(GraphTest, CloneAndSave) {
@@ -268,6 +275,7 @@ TEST_F(GraphTest, TryFuse) {
 }
 
 TEST_F(GraphTest, NewConstantInitializer) {
+#ifdef MORPHIZEN_ENABLE_BOOST
   auto SAMPLE_ONNX = CMAKE_CURRENT_BINARY_PATH / "sample.onnx";
   auto exit_code = boost::process::system(
       PYTHON_EXE.u8string(),
@@ -527,6 +535,10 @@ TEST_F(GraphTest, NewConstantInitializer) {
     graph.save(CMAKE_CURRENT_BINARY_PATH / "new_constant_initializer.onnx",
                "new_constant_initializer.dat", 128u);
   }
+#else
+  GTEST_SKIP()
+      << "Boost::Process not available (morphizen_ENABLE_BOOST is OFF)";
+#endif
 }
 
 TEST_F(GraphTest, VirtualFuse) {

@@ -6,7 +6,9 @@
 #include "../../vaip-core/src/tar_file.hpp"
 #include "test_environment.hpp"
 #include "vaip/dll_safe.h"
-#include <boost/process.hpp>
+#ifdef MORPHIZEN_ENABLE_BOOST
+#  include <boost/process.hpp>
+#endif
 #include <cerrno>
 #include <cstring>
 #include <fstream>
@@ -325,6 +327,7 @@ TEST(TarFileTest, WriteTo) {
     test_abc(*tar_file_obj);
   }
   //  run tar -tvf to check the result
+#ifdef MORPHIZEN_ENABLE_BOOST
   {
     auto tarFileName =
         CMAKE_CURRENT_BINARY_PATH / "written_by_tar_file_test_write_to.tar";
@@ -343,6 +346,10 @@ TEST(TarFileTest, WriteTo) {
           << "Failed to run tar command. Exit code: " << exit_code;
     }
   }
+#else
+  GTEST_SKIP()
+      << "Boost::Process not available (morphizen_ENABLE_BOOST is OFF)";
+#endif
   // frehs read.
   {
     LOG(INFO) << " =======================================";

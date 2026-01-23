@@ -57,28 +57,30 @@ if(morphizen_ENABLE_UNIT_TEST)
     )
     find_package(GTest REQUIRED)
   endif()
-  set(Boost_USE_STATIC_LIBS ON CACHE BOOL "use static Boost libraries")
-  set(Boost_USE_STATIC_RUNTIME ON CACHE BOOL "use static Boost runtime")
-  find_package(Boost CONFIG COMPONENTS process filesystem program_options QUIET)
-  if(TARGET Boost::headers)
-    # for old version of Boost, we don't have target Boost::process for some reasons.
-    get_target_property(TMP Boost::headers INTERFACE_INCLUDE_DIRECTORIES)
-    message(STATUS "found Boost::headers at ${TMP}")
-  else()
-    message(STATUS "cannot find_package(Boost::process), fetch it from ${DEP_URL_Boost}")
-    list(APPEND BOOST_INCLUDE_LIBRARIES "process" "program_options")
-    # disable Boost.Context execution context, there is a build error like MASM
-    set(BOOST_CONTEXT_NO_EXECUTION_CONTEXT ON CACHE BOOL "disable Boost.Context execution context")
-    FetchContent_Declare(
-      Boost
-      URL ${DEP_URL_Boost}
-      URL_MD5 ${DEP_SHA1_Boost}
-      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-      EXCLUDE_FROM_ALL
-      OVERRIDE_FIND_PACKAGE
-    )
-    #find_package(Boost REQUIRED COMPONENTS process)
-    fetchcontent_MakeAvailable(Boost)
+  if(morphizen_ENABLE_BOOST)
+    set(Boost_USE_STATIC_LIBS ON CACHE BOOL "use static Boost libraries")
+    set(Boost_USE_STATIC_RUNTIME ON CACHE BOOL "use static Boost runtime")
+    find_package(Boost CONFIG COMPONENTS process filesystem program_options QUIET)
+    if(TARGET Boost::headers)
+      # for old version of Boost, we don't have target Boost::process for some reasons.
+      get_target_property(TMP Boost::headers INTERFACE_INCLUDE_DIRECTORIES)
+      message(STATUS "found Boost::headers at ${TMP}")
+    else()
+      message(STATUS "cannot find_package(Boost::process), fetch it from ${DEP_URL_Boost}")
+      list(APPEND BOOST_INCLUDE_LIBRARIES "process" "program_options")
+      # disable Boost.Context execution context, there is a build error like MASM
+      set(BOOST_CONTEXT_NO_EXECUTION_CONTEXT ON CACHE BOOL "disable Boost.Context execution context")
+      FetchContent_Declare(
+        Boost
+        URL ${DEP_URL_Boost}
+        URL_MD5 ${DEP_SHA1_Boost}
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        EXCLUDE_FROM_ALL
+        OVERRIDE_FIND_PACKAGE
+      )
+      #find_package(Boost REQUIRED COMPONENTS process)
+      fetchcontent_MakeAvailable(Boost)
+    endif()
   endif()
 endif()
 

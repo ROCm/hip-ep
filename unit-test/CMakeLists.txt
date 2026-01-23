@@ -68,14 +68,18 @@ target_link_libraries(${TEST_EXE_NAME}
     $<LINK_LIBRARY:WHOLE_ARCHIVE,morphizen-pass-init>
 
 )
-if(TARGET Boost::process)
-  # boost 1.84 does have Boost::process, and dependencies is automatically managed.
-  target_link_libraries(${TEST_EXE_NAME} PRIVATE Boost::process)
-endif()
-if(TARGET Boost::headers)
-  target_link_libraries(${TEST_EXE_NAME} PRIVATE Boost::headers
-    # boost 1.79.0 needs to specify the lib explicitly
-    Boost::filesystem)
+if(morphizen_ENABLE_BOOST)
+  if(TARGET Boost::process)
+    # boost 1.84 does have Boost::process, and dependencies is automatically managed.
+    target_link_libraries(${TEST_EXE_NAME} PRIVATE Boost::process)
+  endif()
+  if(TARGET Boost::headers)
+    target_link_libraries(${TEST_EXE_NAME} PRIVATE Boost::headers
+      # boost 1.79.0 needs to specify the lib explicitly
+      Boost::filesystem)
+  endif()
+  # Define compile definition for conditional compilation in source files
+  target_compile_definitions(${TEST_EXE_NAME} PRIVATE MORPHIZEN_ENABLE_BOOST)
 endif()
 
 target_include_directories(

@@ -29,7 +29,6 @@ target_include_directories(${TEST_EXE_NAME}
 target_compile_definitions(${TEST_EXE_NAME} PRIVATE
   -DPYTHON_EXE_STR="$<TARGET_FILE:Python3::Interpreter>"
   -DTEST_CWD_STR="${CMAKE_CURRENT_BINARY_DIR}"
-  -DMORPHIZEN_TAR_EXE_STR="$<TARGET_FILE:morphizen-tar>"
   -DMORPHIZEN_VITISAI_EP_STR="$<TARGET_FILE:${morphizen_CORE_DYNAMIC_UNIQUE_ID}>"
   -DTEST_SRC_DIR_STR="${CMAKE_CURRENT_SOURCE_DIR}"
   # avoid warning message as below
@@ -40,6 +39,11 @@ target_compile_definitions(${TEST_EXE_NAME} PRIVATE
   -D_WIN32_WINNT=0x0601
   # from test point of view, ort-bridge can only see public onnx definitions in my_ort.h
 )
+if(morphizen_ENABLE_BOOST)
+  target_compile_definitions(${TEST_EXE_NAME} PRIVATE
+    MORPHIZEN_TAR_EXE_STR="$<TARGET_FILE:morphizen-tar>"
+  )
+endif()
 
 target_link_options(${TEST_EXE_NAME} PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_LINKER_OPTIONS}>"

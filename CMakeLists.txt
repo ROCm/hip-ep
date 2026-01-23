@@ -28,10 +28,15 @@ add_subdirectory(encryption)
 add_subdirectory(vaip-core)
 if(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC)
   # when morphzen-core-dyanmic is enabled, we can build graph-opt, otherwise we will get link errors.
-  add_subdirectory(graph-opt)
-  add_subdirectory(tar)
-  add_subdirectory(pattern-gen)
-  add_subdirectory(onnx-grep)
+  if(morphizen_ENABLE_BOOST)
+    # These executables depend on Boost library (primarily Boost::Process for subprocess execution).
+    # They are only built when morphizen_ENABLE_BOOST is ON to allow building a lightweight
+    # version of MorphiZen without Boost dependency when morphizen_ENABLE_BOOST is OFF.
+    add_subdirectory(graph-opt)
+    add_subdirectory(tar)
+    add_subdirectory(pattern-gen)
+    add_subdirectory(onnx-grep)
+  endif()
 endif(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC)
 
 add_subdirectory(vaip_pass_init)

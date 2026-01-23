@@ -36,6 +36,23 @@ option(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC "enable morphizen-core-dynamic or
 set(morphizen_ONNXRUNTIME_VITISAI_EP_TARGET ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET_DEFAULT} CACHE STRING "the name of target whose output name is onnxruntime_vitisai_ep")
 # enable morphizen unit test or not
 option(morphizen_ENABLE_UNIT_TEST "enable vaip unit test or not" ${morphizen_ENABLE_UNIT_TEST_DEFAULT})
+# enable Boost dependency for executables and unit tests
+# Default: ON (backward compatible - existing builds continue to work as before)
+# When ON: Enables Boost-dependent executables and Boost::Process unit tests (default behavior)
+# When OFF: Builds a lightweight version of MorphiZen without Boost dependency. The following will be disabled:
+#   - Executables: morphizen-tar, morphizen-graph-opt, morphizen-onnx-grep, morphizen-pattern-gen
+#   - Unit tests that use Boost::Process (tests in test_tar_file.cpp, test_graph.cpp, test_const_data.cpp)
+# Components depending on Boost:
+#   - Executables (require Boost::Process for subprocess execution):
+#     * morphizen-tar (tar/)
+#     * morphizen-graph-opt (graph-opt/)
+#     * morphizen-onnx-grep (onnx-grep/)
+#     * morphizen-pattern-gen (pattern-gen/)
+#   - Unit tests (require Boost::Process):
+#     * test_tar_file.cpp (unit-test/vaip/test_tar_file.cpp)
+#     * test_graph.cpp (unit-test/vaip/test_graph.cpp)
+#     * test_const_data.cpp (unit-test/vaip/test_const_data.cpp)
+option(morphizen_ENABLE_BOOST "enable Boost dependency for executables and unit tests" ON)
 #
 # to build MorphiZen, we need to download source code of onnxruntime
 # and build it along with MorphiZen
@@ -98,4 +115,5 @@ message(STATUS "  BUILD_PYTHON : ${BUILD_PYTHON}")
 message(STATUS "  morphizen_ENABLE_ORT_BRIDGE : ${morphizen_ENABLE_ORT_BRIDGE}")
 message(STATUS "  morphizen_ENABLE_ONNX_BACKEND : ${morphizen_ENABLE_ONNX_BACKEND}")
 message(STATUS "  morphizen_ENABLE_MLIR_BACKEND : ${morphizen_ENABLE_MLIR_BACKEND}")
+message(STATUS "  morphizen_ENABLE_BOOST : ${morphizen_ENABLE_BOOST}")
 message(STATUS "  morphizen_ENABLE_ONNX_SCHEMA_SUPPORT : ${morphizen_ENABLE_ONNX_SCHEMA_SUPPORT}")
