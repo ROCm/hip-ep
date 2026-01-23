@@ -75,6 +75,7 @@ private:
                                    bool force) const override final;
 
   virtual const PassProto& get_pass_proto() const override;
+  virtual std::string get_pass_generic_param() const override final;
   virtual std::vector<AttributeProtoPtr>&
   node_extra_attrs(const char* name) override;
 

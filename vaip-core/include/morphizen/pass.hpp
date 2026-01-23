@@ -242,6 +242,17 @@ public:
    */
   virtual const PassProto& get_pass_proto() const = 0;
 
+  /**
+   * @brief Retrieves the generic parameter for this pass as a JSON string.
+   *
+   * This function returns the pass_generic_param field from the PassProto
+   * as a JSON-formatted string. The pass_generic_param allows arbitrary
+   * parameters to be passed to any pass.
+   *
+   * @return A string representing the generic parameter in JSON format.
+   */
+  virtual std::string get_pass_generic_param() const = 0;
+
   /** @brief do not use this function. internal use only
    */
   virtual std::vector<AttributeProtoPtr>&

@@ -35,6 +35,7 @@
 syntax = "proto3";
 package vaip_core;
 import "version.proto";
+import "google/protobuf/struct.proto";
 
 message ConfigProto {
   repeated PassProto passes = 1;
@@ -124,6 +125,7 @@ message PassProto {
     PassVaimlConfigProto vaiml_config = 107; // config for vaiml_partition pass
     PassVaimlParamProto pass_vaiml_param = 108; // config for vaiml pass
     PassFusionParamProto pass_fusion_param = 109;
+    google.protobuf.Struct pass_generic_param = 110; // generic pass for any parameters
   }
 }
 

@@ -446,6 +446,16 @@ void Pass::dump_const_data(const char* name) const {
 }
 const PassProto& Pass::get_pass_proto() const { return pass_proto_; }
 
+std::string Pass::get_pass_generic_param() const {
+  auto json_str = std::string();
+  auto status = google::protobuf::util::MessageToJsonString(
+      pass_proto_.pass_generic_param(), &json_str);
+  if (!status.ok()) {
+    LOG(FATAL) << "failed to get pass_generic_param: " << status.ToString();
+  }
+  return json_str;
+}
+
 std::vector<AttributeProtoPtr>& Pass::node_extra_attrs(const char* name) {
   auto& node_extra_attrs = context_->node_extra_attrs;
   auto it = node_extra_attrs.find(std::string(name));
