@@ -100,6 +100,9 @@ if(morphizen_ENABLE_ORT_BRIDGE)
     message(FATAL_ERROR "When morphizen_ENABLE_ORT_BRIDGE is ON, at least one backend must be enabled: morphizen_ENABLE_ONNX_BACKEND or morphizen_ENABLE_MLIR_BACKEND")
   endif()
 endif()
+# enable ryzenai_bin_metadata submodule or not. when enabled, version resource files will be generated
+# for Windows binaries. when disabled, builds can proceed without the submodule.
+option(morphizen_ENABLE_RYZENAI_BIN_METADATA "enable ryzenai_bin_metadata submodule for version resource generation" ON)
 # print all options
 message(STATUS "MorphiZen OPTIONS:")
 message(STATUS "  morphizen_ONNXRUNTIME_VITISAI_EP_TARGET : ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET}")
@@ -117,3 +120,4 @@ message(STATUS "  morphizen_ENABLE_ONNX_BACKEND : ${morphizen_ENABLE_ONNX_BACKEN
 message(STATUS "  morphizen_ENABLE_MLIR_BACKEND : ${morphizen_ENABLE_MLIR_BACKEND}")
 message(STATUS "  morphizen_ENABLE_BOOST : ${morphizen_ENABLE_BOOST}")
 message(STATUS "  morphizen_ENABLE_ONNX_SCHEMA_SUPPORT : ${morphizen_ENABLE_ONNX_SCHEMA_SUPPORT}")
+message(STATUS "  morphizen_ENABLE_RYZENAI_BIN_METADATA : ${morphizen_ENABLE_RYZENAI_BIN_METADATA}")
