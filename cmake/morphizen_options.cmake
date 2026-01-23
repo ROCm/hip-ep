@@ -73,7 +73,16 @@ set(morphizen_OUTPUT_NAME "onnxruntime_vitisai_ep" CACHE STRING "Output name of 
 ## this option is used to trim vaip_config.json, we choose the original name for backward compatibility.
 option(TRIM_CONFIG "trim default vaip_config.json" "${TRIM_CONFIG_DEFAULT}")
 option(morphizen_ENABLE_ORT_BRIDGE "enable onnxruntime bridge" OFF)
+option(morphizen_ENABLE_ONNX_BACKEND "enable ONNX backend for ORT bridge" ON)
 option(morphizen_ENABLE_MLIR_BACKEND "enable MLIR as a backend of vaip_ort_api for ORT bridge" OFF)
+option(morphizen_ENABLE_ONNX_SCHEMA_SUPPORT "enable ONNX schema support for node_with_named_args feature in morphizen-core-static" ON)
+
+# Validate backend configuration when ORT bridge is enabled
+if(morphizen_ENABLE_ORT_BRIDGE)
+  if(NOT morphizen_ENABLE_ONNX_BACKEND AND NOT morphizen_ENABLE_MLIR_BACKEND)
+    message(FATAL_ERROR "When morphizen_ENABLE_ORT_BRIDGE is ON, at least one backend must be enabled: morphizen_ENABLE_ONNX_BACKEND or morphizen_ENABLE_MLIR_BACKEND")
+  endif()
+endif()
 # print all options
 message(STATUS "MorphiZen OPTIONS:")
 message(STATUS "  morphizen_ONNXRUNTIME_VITISAI_EP_TARGET : ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET}")
@@ -87,4 +96,6 @@ message(STATUS "  morphizen_OUTPUT_NAME : ${morphizen_OUTPUT_NAME}")
 message(STATUS "  TRIM_CONFIG : ${TRIM_CONFIG}")
 message(STATUS "  BUILD_PYTHON : ${BUILD_PYTHON}")
 message(STATUS "  morphizen_ENABLE_ORT_BRIDGE : ${morphizen_ENABLE_ORT_BRIDGE}")
+message(STATUS "  morphizen_ENABLE_ONNX_BACKEND : ${morphizen_ENABLE_ONNX_BACKEND}")
 message(STATUS "  morphizen_ENABLE_MLIR_BACKEND : ${morphizen_ENABLE_MLIR_BACKEND}")
+message(STATUS "  morphizen_ENABLE_ONNX_SCHEMA_SUPPORT : ${morphizen_ENABLE_ONNX_SCHEMA_SUPPORT}")

@@ -520,6 +520,8 @@ struct PatternBuilder {
                              const std::vector<std::shared_ptr<Pattern>>& args,
                              const std::vector<bool>& optional_args,
                              const std::string& op_domain = "");
+
+#if MORPHIZEN_HAS_ONNX_SCHEMA_SUPPORT
   /**
    * @brief Creates a node pattern using named arguments.
    *
@@ -548,11 +550,15 @@ struct PatternBuilder {
    * auto conv3 = builder.node_with_named_args("Conv", {{"X", input}, {"W",
    * weight}, {"B*", bias_pattern}});
    * @endcode
+   * @note Named argument matching needs ONNX schema to resolve argument names
+   * to positions. If you don't need this feature, use positional APIs (node2,
+   * node3) to avoid ONNX dependency.
    */
   VAIP_DLL_SPEC std::shared_ptr<Pattern> node_with_named_args(
       const std::string& op_type,
       const std::map<std::string, std::shared_ptr<Pattern>>& named_args,
       const std::string& op_domain = "");
+#endif // MORPHIZEN_HAS_ONNX_SCHEMA_SUPPORT
 
   /**
    * @brief Creates patterns for nodes with multiple outputs.

@@ -115,7 +115,6 @@ add_library(${LIB_NAME} STATIC
   include/morphizen/config_reader.hpp
   src/binary/config_reader.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/config_json_binary.hpp
-  src/binary/onnx_schema_json_binary.hpp
   src/vitisai_compile_model.cpp
   src/vaip_profile.cpp
   src/onnxruntime_vitisai_ep.cpp
@@ -130,9 +129,19 @@ add_library(${LIB_NAME} STATIC
   src/ep_shared_context_workspace.hpp
   include/morphizen/op_invoker.hpp
   src/op_invoker.cpp
-  include/morphizen/onnx_schema.hpp
-  src/onnx_schema.cpp
 )
+
+# ONNX schema files are needed for node_with_named_args feature.
+#      This feature allows pattern matching using argument names (e.g., {"X": input, "W": weight})
+#      instead of positions, making patterns more readable. The schema provides the mapping
+#      from names to positions. Users who don't need this feature can disable it to avoid ONNX dependency.
+if(morphizen_ENABLE_ONNX_SCHEMA_SUPPORT)
+  target_sources(${LIB_NAME} PRIVATE
+    src/binary/onnx_schema_json_binary.hpp
+    include/morphizen/onnx_schema.hpp
+    src/onnx_schema.cpp
+  )
+endif()
 add_library (morphizen::morphizen-core-static ALIAS morphizen-core-static)
 set_target_properties(${LIB_NAME} PROPERTIES FOLDER morphizen)
 if(MSVC)
@@ -201,11 +210,19 @@ if(BUILD_PYTHON)
   target_compile_definitions(${LIB_NAME} PRIVATE "ENABLE_PYTHON=1")
 endif(BUILD_PYTHON)
 
-# ONNX is special, we must not inherit ONNX_NAMESPAE definition
-set(onnx_targets onnx onnx_proto)
-foreach(tgt IN LISTS onnx_targets)
-    target_include_directories(${LIB_NAME} PRIVATE $<TARGET_PROPERTY:${tgt},INTERFACE_INCLUDE_DIRECTORIES>)
-    target_link_libraries(${LIB_NAME} PRIVATE $<TARGET_FILE:${tgt}>)
-    add_dependencies(${LIB_NAME} ${tgt})
-endforeach()
-target_compile_definitions(${LIB_NAME} PRIVATE ONNX_ML=1)
+# ONNX uses custom namespace "morphizen_onnx" to avoid conflicts with ORT's ONNX.
+# We link ONNX privately to prevent namespace pollution in dependent targets.
+if(morphizen_ENABLE_ONNX_SCHEMA_SUPPORT)
+  message(STATUS "ONNX schema support enabled, linking ONNX to morphizen-core-static")
+  set(onnx_targets onnx onnx_proto)
+  foreach(tgt IN LISTS onnx_targets)
+      target_include_directories(${LIB_NAME} PRIVATE $<TARGET_PROPERTY:${tgt},INTERFACE_INCLUDE_DIRECTORIES>)
+      target_link_libraries(${LIB_NAME} PRIVATE $<TARGET_FILE:${tgt}>)
+      add_dependencies(${LIB_NAME} ${tgt})
+  endforeach()
+  target_compile_definitions(${LIB_NAME} PRIVATE ONNX_ML=1)
+  target_compile_definitions(${LIB_NAME} PUBLIC MORPHIZEN_HAS_ONNX_SCHEMA_SUPPORT=1)
+else()
+  message(STATUS "ONNX schema support disabled in morphizen-core-static")
+  target_compile_definitions(${LIB_NAME} PUBLIC MORPHIZEN_HAS_ONNX_SCHEMA_SUPPORT=0)
+endif()

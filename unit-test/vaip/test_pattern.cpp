@@ -59,6 +59,7 @@ TEST_F(PatternTest, CommutableNode) {
       << "name must be " << match_node.value();
 }
 
+#if MORPHIZEN_HAS_ONNX_SCHEMA_SUPPORT
 TEST_F(PatternTest, NamedArgs) {
   auto model = vaip_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
@@ -92,6 +93,7 @@ TEST_F(PatternTest, NamedArgs) {
   EXPECT_EQ(match_node.value().name(), "Conv_18")
       << "name must be " << match_node.value();
 }
+#endif // MORPHIZEN_HAS_ONNX_SCHEMA_SUPPORT
 
 static std::shared_ptr<vaip_core::Pattern>
 save_and_load_pattern(std::shared_ptr<vaip_core::Pattern> pattern) {

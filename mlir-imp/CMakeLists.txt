@@ -60,8 +60,6 @@ target_link_libraries(${LIB_NAME}
   morphizen-utils
   vaip-ort-api-ext
   Microsoft.GSL::GSL
-  onnx
-  onnx_proto
   # OMBuilder
   MLIRIR
   MLIRArithDialect # for mlir::arith::ConstantOp

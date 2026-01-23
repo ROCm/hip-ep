@@ -12,9 +12,20 @@
 #include <morphizen/vaip.hpp>
 #include <string>
 #include <vaip/vaip_ort_api.h>
+
+// Determine default backend based on compile-time configuration
+#if MORPHIZEN_ENABLE_ONNX_BACKEND
+#  define MORPHIZEN_DEFAULT_BACKEND morphizen::kONNXIRBackend
+#elif MORPHIZEN_ENABLE_MLIR_BACKEND
+#  define MORPHIZEN_DEFAULT_BACKEND morphizen::kMLIRBackend
+#else
+#  error                                                                       \
+      "At least one backend must be enabled: MORPHIZEN_ENABLE_ONNX_BACKEND or MORPHIZEN_ENABLE_MLIR_BACKEND"
+#endif
+
 DEF_ENV_PARAM_2(MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND,
-                morphizen::kONNXIRBackend, // default to "onnx-ir-imp"
-                std::string)               // or "mlir-backend"
+                "", // default to empty string, will use compile-time default
+                std::string)
 
 namespace morphizen {
 // defined in onnx-ir-imp/src/vaip-ort-api.cpp
@@ -60,7 +71,12 @@ protected:
   void SetUp() override {
     // Enable verbose logging for API calls
     FLAGS_v = 3;
-    backend_ = ENV_PARAM(MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND);
+    auto env_backend = ENV_PARAM(MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND);
+    if (env_backend.empty()) {
+      backend_ = MORPHIZEN_DEFAULT_BACKEND;
+    } else {
+      backend_ = env_backend;
+    }
     // Get the original API
     original_api_ = const_cast<vaip_core::OrtApiForVaip*>(
         morphizen::get_global_vaip_ort_api(backend_.c_str()));

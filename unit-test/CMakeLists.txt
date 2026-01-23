@@ -36,7 +36,6 @@ add_executable(${TEST_EXE_NAME}
   vaip/test_mmap_file.cpp
   vaip/test_ep_shared_context_workspace.cpp
   vaip/test_op_invoker.cpp
-  vaip/test_onnx_schema.cpp
   ${MORPHIZEN_E2E_TESTS_PROTO_SRCS}
   ${MORPHIZEN_E2E_TESTS_PROTO_HDRS}
   morphizen-e2e-test/config.cpp
@@ -52,6 +51,12 @@ add_executable(${TEST_EXE_NAME}
   morphizen-e2e-test/morphizen-e2e-test-main.cpp
   ${ryzenai_version_rc_file}
 )
+
+# test_onnx_schema.cpp tests ONNX schema APIs which are only available when schema support is enabled
+if(morphizen_ENABLE_ONNX_SCHEMA_SUPPORT)
+  target_sources(${TEST_EXE_NAME} PRIVATE vaip/test_onnx_schema.cpp)
+endif()
+
 set_target_properties(${TEST_EXE_NAME} PROPERTIES FOLDER morphizen/unit-tests)
 find_package(onnxruntime REQUIRED)
 target_link_libraries(${TEST_EXE_NAME}
@@ -79,9 +84,15 @@ target_include_directories(
   ${CMAKE_CURRENT_BINARY_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}
-  target_include_directories(${LIB_NAME} PRIVATE $<TARGET_PROPERTY:onnx,INTERFACE_INCLUDE_DIRECTORIES>)
-  target_include_directories(${LIB_NAME} PRIVATE $<TARGET_PROPERTY:onnx_proto,INTERFACE_INCLUDE_DIRECTORIES>)
 )
+
+# ONNX headers needed for tests that use ONNX schema APIs (e.g., test_onnx_schema.cpp)
+if(morphizen_ENABLE_ONNX_SCHEMA_SUPPORT)
+  target_include_directories(${TEST_EXE_NAME} PRIVATE
+    $<TARGET_PROPERTY:onnx,INTERFACE_INCLUDE_DIRECTORIES>
+    $<TARGET_PROPERTY:onnx_proto,INTERFACE_INCLUDE_DIRECTORIES>
+  )
+endif()
 
 target_link_options(${TEST_EXE_NAME} PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_LINKER_OPTIONS}>"

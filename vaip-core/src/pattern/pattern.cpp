@@ -35,7 +35,9 @@ namespace py = pybind11;
 #include "./immutable_map.hpp"
 // NOTE: onnx-schema.hpp must be included last as it redefines ONNX_NAMESPACE
 // to morphizen_onnx to prevent naming conflicts.
-#include "morphizen/onnx_schema.hpp"
+#if MORPHIZEN_HAS_ONNX_SCHEMA_SUPPORT
+#  include "morphizen/onnx_schema.hpp"
+#endif
 namespace vaip_core {
 std::optional<vaip_cxx::NodeInput>
 Binder::create_vaip_cxx_node_input(NodeInput node_input) const {
@@ -403,6 +405,7 @@ std::shared_ptr<Pattern> PatternBuilder::node3_with_optional_domain(
   });
 }
 
+#if MORPHIZEN_HAS_ONNX_SCHEMA_SUPPORT
 std::shared_ptr<Pattern> PatternBuilder::node_with_named_args(
     const std::string& op_type,
     const std::map<std::string, std::shared_ptr<Pattern>>& named_args,
@@ -484,6 +487,7 @@ std::shared_ptr<Pattern> PatternBuilder::node_with_named_args(
 
   return node3_with_optional_domain(op_type, args, optional_args, op_domain);
 }
+#endif // MORPHIZEN_HAS_ONNX_SCHEMA_SUPPORT
 
 std::vector<std::shared_ptr<Pattern>>
 PatternBuilder::node_with_multiple_outputs(

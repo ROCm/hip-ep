@@ -210,24 +210,30 @@ if(NOT TARGET Python3::Interpreter)
 endif(NOT TARGET Python3::Interpreter)
 
 ## find_package(onnx)
-set(ONNX_USE_MSVC_STATIC_RUNTIME ON CACHE BOOL "use static onnx")
-set(ONNX_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
-set(BUILD_SHARED_LIBS OFF)
-## we have to create our own namespace to avoid name confliction with ORT
-set(ONNX_NAMESPACE "morphizen_onnx" CACHE STRING "onnx namespace")
-if(TARGET onnx::onnx)
-  get_target_property(TMP onnx::onnx INTERFACE_INCLUDE_DIRECTORIES)
-  message(STATUS "found onnx at ${TMP}")
+# Two independent features need ONNX: onnx-ir-imp backend and node_with_named_args pattern API
+# Download ONNX if either feature is enabled to avoid redundant downloads
+if(morphizen_ENABLE_ONNX_BACKEND OR morphizen_ENABLE_ONNX_SCHEMA_SUPPORT)
+  set(ONNX_USE_MSVC_STATIC_RUNTIME ON CACHE BOOL "use static onnx")
+  set(ONNX_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
+  set(BUILD_SHARED_LIBS OFF)
+  ## we have to create our own namespace to avoid name confliction with ORT
+  set(ONNX_NAMESPACE "morphizen_onnx" CACHE STRING "onnx namespace")
+  if(TARGET onnx::onnx)
+    get_target_property(TMP onnx::onnx INTERFACE_INCLUDE_DIRECTORIES)
+    message(STATUS "found onnx at ${TMP}")
+  else()
+    message(STATUS "cannot find_package(onnx), fetch it from ${DEP_URL_onnx}")
+    FetchContent_Declare(
+      onnx
+      URL ${DEP_URL_onnx}
+      URL_HASH SHA1=${DEP_SHA1_onnx}
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+      CMAKE_ARGS
+      EXCLUDE_FROM_ALL
+      OVERRIDE_FIND_PACKAGE)
+    find_package(onnx REQUIRED)
+  endif()
+  set(BUILD_SHARED_LIBS ${ONNX_BUILD_SHARED_LIBS})
 else()
-  message(STATUS "cannot find_package(onnx), fetch it from ${DEP_URL_onnx}")
-  FetchContent_Declare(
-    onnx
-    URL ${DEP_URL_onnx}
-    URL_HASH SHA1=${DEP_SHA1_onnx}
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    CMAKE_ARGS
-    EXCLUDE_FROM_ALL
-    OVERRIDE_FIND_PACKAGE)
-  find_package(onnx REQUIRED)
+  message(STATUS "ONNX backend is disabled, skipping ONNX find/fetch")
 endif()
-set(BUILD_SHARED_LIBS ${ONNX_BUILD_SHARED_LIBS})

@@ -37,10 +37,21 @@ TEST_F(CompileModel, T0) {
   // Note: Some dependencies may need to be properly configured
 
   // Load IR model from a file
+  // Use compile-time default backend, but allow override via environment
+  // variable
+#if MORPHIZEN_ENABLE_ONNX_BACKEND
   auto test_model_path = RESNET_50_PATH;
-  if (ENV_PARAM(MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND) ==
-      morphizen::kMLIRBackend) {
-    test_model_path = RESNET_50_MLIR_PATH;
+#elif MORPHIZEN_ENABLE_MLIR_BACKEND
+  auto test_model_path = RESNET_50_MLIR_PATH;
+#endif
+
+  auto env_backend = ENV_PARAM(MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND);
+  if (!env_backend.empty()) {
+    if (env_backend == morphizen::kMLIRBackend) {
+      test_model_path = RESNET_50_MLIR_PATH;
+    } else if (env_backend == morphizen::kONNXIRBackend) {
+      test_model_path = RESNET_50_PATH;
+    }
   }
   auto ir_model = VAIP_ORT_API(model_load)(test_model_path.u8string());
   ASSERT_TRUE(ir_model != nullptr)

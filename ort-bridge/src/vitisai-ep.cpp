@@ -13,9 +13,20 @@
 #include "morphizen/vaip.hpp"
 #include <google/protobuf/util/json_util.h>
 #include <set>
+
+// Determine default backend based on compile-time configuration
+#if MORPHIZEN_ENABLE_ONNX_BACKEND
+#  define MORPHIZEN_DEFAULT_BACKEND morphizen::kONNXIRBackend
+#elif MORPHIZEN_ENABLE_MLIR_BACKEND
+#  define MORPHIZEN_DEFAULT_BACKEND morphizen::kMLIRBackend
+#else
+#  error                                                                       \
+      "At least one backend must be enabled: MORPHIZEN_ENABLE_ONNX_BACKEND or MORPHIZEN_ENABLE_MLIR_BACKEND"
+#endif
+
 DEF_ENV_PARAM_2(MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND,
-                morphizen::kONNXIRBackend, // default to "onnx-ir-imp"
-                std::string)               // or "mlir-backend"
+                "", // default to empty string, will use compile-time default
+                std::string)
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_VITISAI_EP, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_VITISAI_EP) >= n)
 namespace morphizen {
@@ -284,11 +295,23 @@ OrtStatus* VitisAIEP::GetCapability(OrtGraphWrapper& graph_viewer,
     return nullptr;
   }
   // setup API environment
-  const char* backend_ir = morphizen::kONNXIRBackend;
-  if (ENV_PARAM(MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND) ==
-      morphizen::kMLIRBackend) {
-    backend_ir = morphizen::kMLIRBackend;
+  // Use compile-time default backend, but allow override via environment
+  // variable
+  const char* backend_ir = MORPHIZEN_DEFAULT_BACKEND;
+  auto env_backend = ENV_PARAM(MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND);
+  if (!env_backend.empty()) {
+    // Environment variable is set, use it to override the default
+    if (env_backend == morphizen::kMLIRBackend) {
+      backend_ir = morphizen::kMLIRBackend;
+    } else if (env_backend == morphizen::kONNXIRBackend) {
+      backend_ir = morphizen::kONNXIRBackend;
+    } else {
+      MY_LOG(1) << "Invalid backend specified in "
+                   "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND: "
+                << env_backend << ". Using default: " << backend_ir;
+    }
   }
+  MY_LOG(1) << "Using backend: " << backend_ir;
   auto with_new_api = setup_global_vaip_ort_api(backend_ir);
   //
   auto ir_model = ir_converter(*this, graph_viewer.get());
