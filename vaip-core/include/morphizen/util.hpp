@@ -51,6 +51,30 @@ VAIP_DLL_SPEC void eval_python_code(const std::string& code);
 #endif
 VAIP_DLL_SPEC std::filesystem::path get_vaip_path();
 
+#ifdef _WIN32
+#  include <cstdio>
+/**
+ * Creates a temporary file with POSIX delete semantics for crash-resilient
+ * cleanup.
+ *
+ * This function creates a temporary file using tmpfile_s() and then applies
+ * POSIX delete semantics, which moves the file to $Extend\$Deleted immediately.
+ * This ensures the file is automatically cleaned up on the next volume mount,
+ * even if the system crashes.
+ *
+ * The function gracefully falls back to standard tmpfile_s() behavior if:
+ * - POSIX delete is disabled via MORPHIZEN_ENABLE_POSIX_DELETE=0
+ * - The Windows version doesn't support POSIX delete (requires Windows 10
+ * 1809+)
+ * - Any error occurs during POSIX delete setup
+ *
+ * @return FILE* pointer to the temporary file, or nullptr on failure.
+ *         The FILE* remains fully functional regardless of whether POSIX delete
+ * was applied.
+ */
+VAIP_DLL_SPEC FILE* tmpfile_with_posix_delete();
+#endif // _WIN32
+
 /**
  * Converts a string from DOS/Windows format to Unix format.
  *

@@ -20,7 +20,8 @@
 #include <vector>
 
 namespace vaip_core {
-
+// Add forward declaration for a function in morphizen/util.cpp
+FILE* tmpfile_with_posix_delete();
 // imp
 struct TempFileHolder {
   TempFileHolder(std::shared_ptr<TempFile> file) : file_{file} {}
@@ -253,7 +254,16 @@ size_t TempFile::current_position() const { return ftell64(file_); }
 
 void TempFile::reset_position() { CHECK(fseek64(file_, 0, SEEK_SET) == 0); }
 
-TempFile::TempFile() : file_{tmpfile()} { CHECK(file_ != nullptr); }
+TempFile::TempFile()
+    : file_{
+#ifdef _WIN32
+          tmpfile_with_posix_delete()
+#else
+          tmpfile()
+#endif
+      } {
+  CHECK(file_ != nullptr);
+}
 TempFile::~TempFile() { fclose(file_); };
 
 std::pair<std::unique_ptr<IStreamReader>, size_t> TempFile::build_reader() {

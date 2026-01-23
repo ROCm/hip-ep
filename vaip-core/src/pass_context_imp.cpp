@@ -32,7 +32,6 @@
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE, "0")
 DEF_ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE, "1")
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY, "0")
-DEF_ENV_PARAM(MORPHIZEN_DELETE_TAR_FILE_ON_SESSION_CREATED, "1")
 DEF_ENV_PARAM(XLNX_ONNX_EP_VERBOSE, "0")
 #define LOG_VERBOSE(n)                                                         \
   LOG_IF(INFO, ENV_PARAM(XLNX_ONNX_EP_VERBOSE) >= n)                           \
@@ -78,9 +77,8 @@ read_file_to_buffer(const std::filesystem::path& path) {
 }
 static FILE* write_to_tmp_file(gsl::span<const char> data) {
 #if _WIN32
-  FILE* tmp_file = nullptr;
-  auto err = tmpfile_s(&tmp_file);
-  CHECK_EQ(err, 0) << "tmpfile_s error";
+  FILE* tmp_file = tmpfile_with_posix_delete();
+  CHECK(tmp_file != nullptr) << "tmpfile_with_posix_delete error";
 #else
   FILE* tmp_file = tmpfile();
   CHECK(tmp_file != nullptr) << "cannot create tmp file";
@@ -592,7 +590,11 @@ PassContextImp::open_file_for_write(const std::string& filename) {
       fclose(it->second);
       LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
           << "tmp file write: " << filename;
+#if _WIN32
+      tmp_file = tmpfile_with_posix_delete();
+#else
       tmp_file = tmpfile();
+#endif
       if (tmp_file == nullptr) {
         LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
             << " cannot create tmp file " << filename;
@@ -636,7 +638,11 @@ PassContextImp::open_file_for_write(const std::string& filename) {
   if (in_mem) {
     LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
         << "tmp file write: " << filename;
+#if _WIN32
+    tmp_file = tmpfile_with_posix_delete();
+#else
     tmp_file = tmpfile();
+#endif
     if (tmp_file == nullptr) {
       LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
           << "cannot create tmp file " << filename;
@@ -910,15 +916,19 @@ PassContextImp::measure(const std::string& label) {
 
 void PassContextImp::on_custom_op_create_end() {
   created_customop_count++;
+  LOG_VERBOSE(2) << "on_custom_op_create_end: " << created_customop_count
+                 << " of " << this->context_proto.meta_def_size();
   if (created_customop_count == this->context_proto.meta_def_size()) {
     for (auto iter : cache_files_) {
       fclose(iter.second);
     }
     cache_files_.clear();
-    if (delete_tar_file_on_session_created_ && tar_file_) {
-      if (ENV_PARAM(MORPHIZEN_DELETE_TAR_FILE_ON_SESSION_CREATED) == 1) {
-        tar_file_.reset();
-      }
+    bool is_embed_mode = tar_file_file_name_.empty();
+    LOG_VERBOSE(2) << "delete_flag=" << delete_tar_file_on_session_created_
+                   << ", tar_file_=" << (tar_file_.get() != nullptr)
+                   << ", is_embed_mode=" << is_embed_mode;
+    if (delete_tar_file_on_session_created_ && tar_file_ && !is_embed_mode) {
+      tar_file_.reset();
     }
   }
 }

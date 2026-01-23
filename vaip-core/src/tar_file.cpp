@@ -7,6 +7,7 @@
 #include "./file_stream.hpp"
 #include "./tar_header.hpp"
 #include "morphizen/env_config.hpp"
+#include "morphizen/util.hpp"
 #include <algorithm>
 #include <fstream>
 #include <glog/logging.h>
@@ -56,7 +57,11 @@ TarFile::create_from_path(const std::filesystem::path& path, bool enable_mmap) {
   return create_with_regular_stream();
 }
 std::unique_ptr<TarFile> TarFile::create() {
+#ifdef _WIN32
+  auto file = tmpfile_with_posix_delete();
+#else
   auto file = std::tmpfile();
+#endif
   CHECK(file != nullptr) << "cannot create a tmpfile";
   auto stream = std::unique_ptr<std::iostream>(new FileStream(file));
   if (!stream->good()) {
@@ -84,7 +89,11 @@ std::unique_ptr<TarFile> TarFile::create(const char* base, size_t size) {
 }
 std::unique_ptr<TarFile> TarFile::create(std::string&& buffer0) {
   std::unique_ptr<std::iostream> stream;
+#ifdef _WIN32
+  auto file = tmpfile_with_posix_delete();
+#else
   auto file = std::tmpfile();
+#endif
   // by default, the stream will be from a tmp file to decrease memory,
   // but if access to tmp is restricted, like web sandbox condition,
   // the stream should be from a memory buffer

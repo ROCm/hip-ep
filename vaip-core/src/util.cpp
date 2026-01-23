@@ -301,9 +301,8 @@ template <typename T> struct zlib {
   static std::vector<char_type> compress(gsl::span<const char_type> data,
                                          int /*level*/) {
 #if _WIN32
-    FILE* tmp_file = nullptr;
-    auto err = tmpfile_s(&tmp_file);
-    CHECK_EQ(err, 0) << "tmpfile_s error";
+    FILE* tmp_file = tmpfile_with_posix_delete();
+    CHECK(tmp_file != nullptr) << "tmpfile_with_posix_delete error";
     auto fd = _fileno(tmp_file);
 #else
     FILE* tmp_file = tmpfile();
@@ -331,9 +330,9 @@ template <typename T> struct zlib {
 
   static std::vector<char_type> uncompress(gsl::span<const char_type> data) {
 #if _WIN32
-    FILE* tmp_file = nullptr;
-    auto err = tmpfile_s(&tmp_file);
-    CHECK_EQ(err, 0) << "tmpfile_s error";
+    FILE* tmp_file = tmpfile_with_posix_delete();
+    CHECK(tmp_file != nullptr) << "tmpfile_with_posix_delete error";
+    int err = 0;
 #else
     FILE* tmp_file = tmpfile();
     CHECK(tmp_file != nullptr) << "cannot create tmp file";
