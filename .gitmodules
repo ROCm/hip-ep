@@ -2,3 +2,7 @@
 	path = 3rd-party/hash-library
 	url = https://github.com/stbrumme/hash-library.git
 	branch = main
+[submodule "3rd-party/ryzenai_bin_metadata"]
+	path = 3rd-party/ryzenai_bin_metadata
+	url = https://gitenterprise.xilinx.com/FaaSApps/ryzenai_bin_metadata.git
+	branch = main
