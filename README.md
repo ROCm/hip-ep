@@ -89,7 +89,7 @@ Once ONNXRuntime is built, you can build morphizen-mlir. LLVM/MLIR and MorphiZen
 **Option B: Manual CMake commands**
 ```bash
 # Generate CMake configuration
-cmake -DBUILD_SHARED_LIBS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -S . -B ../build/morphizen-mlir -DCMAKE_INSTALL_PREFIX=../local -DCMAKE_PREFIX_PATH=../local
+cmake -DBUILD_SHARED_LIBS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -S . -B ../build/morphizen-mlir -DCMAKE_INSTALL_PREFIX=../local -DCMAKE_PREFIX_PATH=../local
 
 # Build the project
 cmake --build ../build/morphizen-mlir --config Release --target install 
