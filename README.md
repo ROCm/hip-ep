@@ -177,88 +177,40 @@ The Level-1 MLIR pass (`level-1-pass-mlir/src/pass_main.cpp`) performs:
 
 ## Testing
 
-The project includes comprehensive ORT integration tests. For detailed testing instructions, see [doc/TESTING.md](doc/TESTING.md).
+This project includes ORT integration tests. For comprehensive testing instructions, troubleshooting, and expected output details, see [doc/TESTING.md](doc/TESTING.md).
 
-### Step 1: Generate Test Models
+### Quick Start
 
 ```bash
 # From onnx-hipdnn-ep directory
-cd test
-python gen_conv_model.py          # Generate conv_model.onnx
-python gen_conv_gemm_model.py     # Generate conv_gemm_model.onnx
-cd ..
-```
 
-### Step 2: Prepare Test Environment
-
-Copy test models and set PATH to include DLL locations:
-
-```bash
-# Copy test models to build output directory
-cp test/*.onnx ../build/onnx-hipdnn-ep/bin/Release/
-
-# Set PATH to include DLL locations
-# Windows CMD:
-set PATH=..\local\bin;..\build\onnx-hipdnn-ep\bin\Release;%PATH%
-
-# Or in Git Bash:
-export PATH="../local/bin:../build/onnx-hipdnn-ep/bin/Release:$PATH"
-```
-
-### Step 3: Run Tests
-
-```bash
-# Change to the test executable directory
-cd ../build/onnx-hipdnn-ep/bin/Release
-
-# Run the test executable
-./ort_integration_test.exe
-```
-
-### Expected Test Results
-
-```
-[==========] Running 3 tests from 1 test suite.
-[----------] 3 tests from OrtIntegrationTest
-[ RUN      ] OrtIntegrationTest.LoadVitisAIProvider
-[       OK ] OrtIntegrationTest.LoadVitisAIProvider
-[ RUN      ] OrtIntegrationTest.CreateSessionWithVitisAIProvider
-[       OK ] OrtIntegrationTest.CreateSessionWithVitisAIProvider
-[ RUN      ] OrtIntegrationTest.CreateSessionWithConvGemmModel
-[       OK ] OrtIntegrationTest.CreateSessionWithConvGemmModel
-[----------] 3 tests from OrtIntegrationTest
-[  PASSED  ] 3 tests.
-```
-
-### Quick Test Summary (from onnx-hipdnn-ep directory)
-
-```bash
-# Generate and copy models
+# 1. Generate test models
 cd test && python gen_conv_model.py && python gen_conv_gemm_model.py && cd ..
+
+# 2. Copy models to build output
 cp test/*.onnx ../build/onnx-hipdnn-ep/bin/Release/
 
-export PATH="../local/bin:../build/onnx-hipdnn-ep/bin/Release:$PATH"
+# 3. Set required environment variable (CRITICAL for testing)
+# Windows CMD:
+set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
 
-# Run tests
-cd ../build/onnx-hipdnn-ep/bin/Release
-./ort_integration_test.exe
+# Or Git Bash:
+export MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
+
+# 4. Run tests
+..\build\onnx-hipdnn-ep\bin\Release\ort_integration_test.exe
 ```
 
-### Test Models
+**Note:** The `MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1` environment variable is **required** for testing without NPU hardware. See [TESTING.md](doc/TESTING.md) for details.
 
-| Model | Description | Input Shape | Output Shape |
-|-------|-------------|-------------|--------------|
-| `conv_model.onnx` | Simple Conv operation | 1x3x8x8 | 1x16x8x8 |
-| `conv_gemm_model.onnx` | Conv + Flatten + Gemm | 1x3x8x8 | 1x32 |
+For comprehensive information including:
+- Test case descriptions
+- Expected MLIR output examples
+- Debug mode configuration
+- Troubleshooting guide
+- CI/CD integration
 
-### Environment Variables
-
-For debug output:
-```bash
-set MORPHIZEN_DEBUG_MLIR=2
-set GLOG_logtostderr=1
-set GLOG_minloglevel=0
-```
+See [doc/TESTING.md](doc/TESTING.md).
 
 ## Differences from morphizen-demo
 

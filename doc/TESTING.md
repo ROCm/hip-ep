@@ -8,15 +8,19 @@ This document describes how to run and verify the MLIR integration tests for the
 
 ### Manual Test Execution
 
-To run tests manually:
+To run tests manually from the `onnx-hipdnn-ep` directory:
 
 ```bash
-# Set environment variable to enable CPU device detection for testing
+# 1. Set environment variable to enable CPU device detection for testing
 # Note: MLIR backend is now enabled by default (MorphiZen PR #530)
 set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
 
-# Run the test executable (from project root)
-..\build\onnx-hipdnn-ep\bin\ort_integration_test.exe
+# 2. Optional: Set PATH if DLLs are not automatically found
+# This may be needed to locate onnxruntime.dll and other dependencies
+set PATH=..\local\bin;..\build\onnx-hipdnn-ep\bin\Release;%PATH%
+
+# 3. Run the test executable
+..\build\onnx-hipdnn-ep\bin\Release\ort_integration_test.exe
 ```
 
 **Required Environment Variables:**
@@ -24,6 +28,12 @@ set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE` | `0` | **Enables CPU device detection for testing** (see below) |
+
+**Optional Environment Variables:**
+
+| Variable | Purpose |
+|----------|---------|
+| `PATH` | May need to include `..\local\bin` and `..\build\onnx-hipdnn-ep\bin\Release` to find required DLLs |
 
 #### Why MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE is Required
 
@@ -256,7 +266,7 @@ For CI/CD pipelines, use:
 
 # Test - Set environment variable and run test executable
 set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
-..\build\onnx-hipdnn-ep\bin\ort_integration_test.exe
+..\build\onnx-hipdnn-ep\bin\Release\ort_integration_test.exe
 ```
 
 ### PowerShell Syntax
@@ -268,7 +278,7 @@ If running from PowerShell, use:
 $env:MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE="1"
 
 # Run the test executable
-..\build\onnx-hipdnn-ep\bin\ort_integration_test.exe
+..\build\onnx-hipdnn-ep\bin\Release\ort_integration_test.exe
 ```
 
 The test executable returns exit code 0 on success, non-zero on failure.
