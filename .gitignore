@@ -104,3 +104,9 @@ desktop.ini
 *.backup
 *.orig
 *.tmp
+
+# Test artifacts (generated during test execution)
+conv_model.onnx
+conv_gemm_model.onnx
+graph_for_mlir.txt
+vaip_init/

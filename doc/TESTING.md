@@ -11,11 +11,52 @@ This document describes how to run and verify the MLIR integration tests for the
 To run tests manually:
 
 ```bash
-# Set environment variable to activate MLIR backend
+# Set environment variables to activate MLIR backend and enable device detection
 set MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend
+set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
 
 # Run the test executable (from project root)
 ..\build\morphizen-mlir\bin\ort_integration_test.exe
+```
+
+**Required Environment Variables:**
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND` | (none) | Activates the MLIR backend for testing |
+| `MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE` | `0` | **Enables CPU device detection for testing** (see below) |
+
+#### Why MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE is Required
+
+The VitisAI Execution Provider is designed to run on **AMD NPU hardware** in production. However, for development and testing purposes, this environment variable enables a workaround:
+
+**Production Mode (default, ENV=0):**
+- VitisAI EP only accepts **NPU devices** with AMD vendor_id (0x1022)
+- Rejects CPU and GPU devices
+- Returns zero EP devices if no NPU is present
+- Tests will be skipped with "VitisAI EP V2 device API not yet implemented"
+
+**Test Mode (ENV=1):**
+- VitisAI EP accepts **CPU devices** for testing
+- Allows MLIR pass execution and session creation
+- Used for internal testing without NPU hardware
+- **Future:** GPU support is planned to be added
+
+**Implementation Note:**  
+This behavior is defined in `MorphiZen/ort-bridge/src/vitisai-ep-factory.cpp`:
+```cpp
+if (ENV_PARAM(MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE)) {
+  // only for internal test, we pretend to support CPU EP.
+  if (device_type != OrtHardwareDeviceType_CPU) {
+    continue;
+  }
+} else {
+  // Production: only NPU devices
+  if ((vendor_id != factory->vendor_id_) ||
+      (device_type != OrtHardwareDeviceType_NPU)) {
+    continue;
+  }
+}
 ```
 
 ## Test Cases
@@ -152,6 +193,7 @@ set MORPHIZEN_DEBUG_MLIR_GRAPH=2
 set GLOG_logtostderr=1
 set GLOG_minloglevel=0
 set MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend
+set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
 ```
 
 Then run the test executable directly to see all debug output.
@@ -214,9 +256,23 @@ For CI/CD pipelines, use:
 # Build
 .\build.bat
 
-# Test - Set environment variable and run test executable
+# Test - Set environment variables and run test executable
 set MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend
+set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
 ..\build\morphizen-mlir\bin\ort_integration_test.exe
+```
+
+### PowerShell Syntax
+
+If running from PowerShell, use:
+
+```powershell
+# Set environment variables
+$env:MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND="mlir-backend"
+$env:MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE="1"
+
+# Run the test executable
+C:\Develop\m\build\morphizen-mlir\bin\ort_integration_test.exe
 ```
 
 The test executable returns exit code 0 on success, non-zero on failure.
