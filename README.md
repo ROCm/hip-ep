@@ -110,41 +110,75 @@ The project includes a classification test executable that demonstrates ONNX mod
 
 #### Quick Start
 
-1. **Pull test data files** (Git LFS):
+1. **Pull ONNX model** (Git LFS):
    ```bash
    git lfs install
    git lfs pull
    ```
 
-2. **Build with classification test**:
+2. **Generate input binary**:
+   ```bash
+   cd test/data
+   python image_to_bin.py resnet50.jpg -o input.bin
+   cd ../..
+   ```
+
+3. **Build with classification test**:
    ```bash
    cmake -B build -DBUILD_TEST_CLASSIFICATION=ON
    cmake --build build --target test_classification --config Release
    ```
 
-3. **Run the test**:
+4. **Run the test**:
    ```bash
    # Windows
    set USE_ORT_API_2_0=1
    set DEBUG_LOG_LEVEL=info
-   .\build\test\Release\test_classification.exe -n test\data\pt_resnet50.onnx test\data\input_0.pb
+   .\build\test\Release\test_classification.exe test\data\pt_resnet50.onnx test\data\input.bin
    
    # Linux/macOS
    export USE_ORT_API_2_0=1
    export DEBUG_LOG_LEVEL=info
-   ./build/test/test_classification -n test/data/pt_resnet50.onnx test/data/input_0.pb
+   ./build/test/test_classification test/data/pt_resnet50.onnx test/data/input.bin
    ```
 
-For detailed instructions, see [test/README_CLASSIFICATION.md](test/README_CLASSIFICATION.md).
+#### Expected Output
+
+```
+================VitisAIExecutionProviderenable_ep = true
+HIP Library Path: C:\Windows\SYSTEM32\amdhip64_7.dll
+Running model...
+done
+batch_index: 0
+score[109]  =  0.997308     text: brain coral,,
+score[973]  =  0.00116773   text: coral reef,,
+score[5]    =  0.000909427  text: electric ray, crampfish, numbfish, torpedo,,
+score[397]  =  0.000158035  text: puffer, pufferfish, blowfish, globefish,,
+score[955]  =  0.000123078  text: jackfruit, jak, jack,,
+```
+
+For detailed instructions, see [doc/resnet50_e2e_test.md](doc/resnet50_e2e_test.md).
 
 #### Test Data
 
-Test data files are managed by Git LFS and located in `test/data/`:
-- `pt_resnet50.onnx` (102 MB) - ResNet50 ONNX model
-- `input_0.pb` (602 KB) - Test input data
-- `resnet50.jpg` (58 KB) - Test image
+Test data files are located in `test/data/`:
+- `pt_resnet50.onnx` (102 MB) - ResNet50 ONNX model (managed by Git LFS)
+- `resnet50.jpg` (58 KB) - Test image (managed by Git LFS)
+- `input.bin` (602 KB) - Generated input binary (created using image_to_bin.py)
 
-Run `git lfs pull` to download these files before testing.
+#### Image to Binary Tool
+
+The `image_to_bin.py` tool converts images to binary format for model inference:
+
+```bash
+# Basic usage
+python test/data/image_to_bin.py input.jpg -o output.bin
+
+# Custom size
+python test/data/image_to_bin.py input.jpg --size 256 256 -o output.bin
+```
+
+See [test/data/README_image_to_bin.md](test/data/README_image_to_bin.md) for more details.
 
 ## License
 
