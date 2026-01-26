@@ -87,15 +87,64 @@ In this project, we demonstrate how to integrate HIP DNN operations into the Mor
 - **custom-op-hipdnn**: Custom operator implementations using HIP
 - **proto**: Protocol buffer definitions
 - **test**: Test suite for validation
+  - **test_classification**: Classification test executable for ONNX models (see [test/README_CLASSIFICATION.md](test/README_CLASSIFICATION.md))
 
 ### Environment Variables
 
 To assist in debugging and enhance logging during execution, you can configure the following environment variables:
 
+- **`USE_ORT_API_2_0`**: Enable ONNX Runtime API 2.0 compatibility (set to 1)
 - **`XLNX_ONNX_EP_VERBOSE`**: Enables verbose logging for the Xilinx ONNX Execution Provider, providing detailed insights into its operations.
 - **`DEBUG_LOG_LEVEL`**: Sets the debug log level to control the granularity of logging output for troubleshooting purposes.
+- **`VITISAI_EP_JSON_CONFIG`**: Path to VitisAI EP configuration file
+- **`XLNX_USE_CACHE_DIR`**: Directory for cache storage
+- **`XLNX_USE_CACHE_KEY`**: Cache key for model compilation
 
 Adjust these variables as needed to streamline the debugging process.
+
+## Testing
+
+### Classification Test
+
+The project includes a classification test executable that demonstrates ONNX model inference with VitisAI EP support.
+
+#### Quick Start
+
+1. **Pull test data files** (Git LFS):
+   ```bash
+   git lfs install
+   git lfs pull
+   ```
+
+2. **Build with classification test**:
+   ```bash
+   cmake -B build -DBUILD_TEST_CLASSIFICATION=ON
+   cmake --build build --target test_classification --config Release
+   ```
+
+3. **Run the test**:
+   ```bash
+   # Windows
+   set USE_ORT_API_2_0=1
+   set DEBUG_LOG_LEVEL=info
+   .\build\test\Release\test_classification.exe -n test\data\pt_resnet50.onnx test\data\input_0.pb
+   
+   # Linux/macOS
+   export USE_ORT_API_2_0=1
+   export DEBUG_LOG_LEVEL=info
+   ./build/test/test_classification -n test/data/pt_resnet50.onnx test/data/input_0.pb
+   ```
+
+For detailed instructions, see [test/README_CLASSIFICATION.md](test/README_CLASSIFICATION.md).
+
+#### Test Data
+
+Test data files are managed by Git LFS and located in `test/data/`:
+- `pt_resnet50.onnx` (102 MB) - ResNet50 ONNX model
+- `input_0.pb` (602 KB) - Test input data
+- `resnet50.jpg` (58 KB) - Test image
+
+Run `git lfs pull` to download these files before testing.
 
 ## License
 
