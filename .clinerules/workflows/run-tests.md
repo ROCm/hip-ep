@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0.
 -->
 # Run Tests
 
-Run the ORT integration tests for the morphizen-mlir project.
+Run the ORT integration tests for the onnx-hipdnn-ep project.
 
 ## Prerequisites
 
@@ -29,7 +29,7 @@ This generates:
 ## Step 2: Copy Models to Build Output
 
 ```powershell
-Copy-Item test\*.onnx ..\build\morphizen-mlir\bin\Release\
+Copy-Item test\*.onnx ..\build\onnx-hipdnn-ep\bin\Release\
 ```
 
 ## Step 3: Set Required Environment Variables
@@ -56,7 +56,7 @@ $env:GLOG_minloglevel = "0"
 ## Step 4: Run Tests
 
 ```powershell
-..\build\morphizen-mlir\bin\Release\ort_integration_test.exe
+..\build\onnx-hipdnn-ep\bin\Release\ort_integration_test.exe
 ```
 
 ## Expected Output
@@ -105,7 +105,7 @@ Tests session creation with Conv+Gemm model (`conv_gemm_model.onnx`):
 **Error:** "Cannot find onnxruntime.dll"
 **Fix:** Add DLL paths to PATH:
 ```powershell
-$env:PATH = "..\local\bin;..\build\morphizen-mlir\bin\Release;$env:PATH"
+$env:PATH = "..\local\bin;..\build\onnx-hipdnn-ep\bin\Release;$env:PATH"
 ```
 
 ### Test Executable Not Found
@@ -119,13 +119,13 @@ From `onnx-hipdnn-ep` directory:
 ```powershell
 # Generate and copy models
 cd test; python gen_conv_model.py; python gen_conv_gemm_model.py; cd ..
-Copy-Item test\*.onnx ..\build\morphizen-mlir\bin\Release\
+Copy-Item test\*.onnx ..\build\onnx-hipdnn-ep\bin\Release\
 
 # Set environment variable
 $env:MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE = "1"
 
 # Run tests
-..\build\morphizen-mlir\bin\Release\ort_integration_test.exe
+..\build\onnx-hipdnn-ep\bin\Release\ort_integration_test.exe
 ```
 
 ## Additional Resources
