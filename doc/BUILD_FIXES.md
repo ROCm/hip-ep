@@ -1,6 +1,6 @@
-# Build Fixes for morphizen-hipdnn
+# Build Fixes for onnx-hipdnn-ep
 
-This document describes the fixes applied to successfully build the morphizen-hipdnn project with hipDNN integration on Windows.
+This document describes the fixes applied to successfully build the onnx-hipdnn-ep project with hipDNN integration on Windows.
 
 ## Date
 January 9, 2026
@@ -149,7 +149,7 @@ The successful build requires:
 
 To verify the build:
 ```batch
-cd C:\Develop\m\build\morphizen-hipdnn
+cd C:\Develop\m\build\onnx-hipdnn-ep
 ninja
 ```
 

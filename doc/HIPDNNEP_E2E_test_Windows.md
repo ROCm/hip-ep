@@ -1,6 +1,6 @@
-# hipDNNEP and morphizen-hipdnn Windows Build Guide
+# hipDNNEP and onnx-hipdnn-ep Windows Build Guide
 
-This document provides complete step-by-step instructions for building and testing hipDNNEP and morphizen-hipdnn on Windows with AMD ROCm GPU.
+This document provides complete step-by-step instructions for building and testing hipDNNEP and onnx-hipdnn-ep on Windows with AMD ROCm GPU.
 
 > **Note**: This is the Windows adaptation of `HIPDNNEP_E2E_test.md`. Key differences from Linux:
 > - No SSH required (local execution)
@@ -14,7 +14,7 @@ This document provides complete step-by-step instructions for building and testi
 2. [Prerequisites](#prerequisites)
 3. [Environment Setup](#environment-setup)
 4. [Phase 1: Build Original hipDNNEP](#phase-1-build-original-hipdnnep)
-5. [Phase 2: Build Morphizen + morphizen-hipdnn](#phase-2-build-morphizen--morphizen-hipdnn)
+5. [Phase 2: Build Morphizen + onnx-hipdnn-ep](#phase-2-build-morphizen--onnx-hipdnn-ep)
 6. [Phase 3: Testing and Validation](#phase-3-testing-and-validation)
 7. [Environment Variables Reference](#environment-variables-reference)
 8. [Troubleshooting](#troubleshooting)
@@ -233,12 +233,12 @@ C:\Develop\m\
 ├── source\           # Source code repositories
 │   ├── hipDNNEP\
 │   ├── MorphiZen\
-│   ├── morphizen-hipdnn\
+│   ├── onnx-hipdnn-ep\
 │   └── onnxruntime\
 ├── build\            # Build directories
 │   ├── hipDNNEP\
 │   ├── onnxruntime\
-│   └── morphizen-hipdnn\
+│   └── onnx-hipdnn-ep\
 ├── local\            # Installation prefix
 │   ├── bin\
 │   ├── lib\
@@ -651,7 +651,7 @@ if ($currentPath -notlike "*therock*") {
 
 Create `C:\Develop\m\setup_env.ps1`:
 ```powershell
-# Environment setup script for hipDNNEP and morphizen-hipdnn
+# Environment setup script for hipDNNEP and onnx-hipdnn-ep
 $env:THEROCK_DIST = "C:\Develop\m\dist\therock"
 $env:HIP_PLATFORM = "amd"
 $env:ONNXRUNTIME_ROOT = "C:\Develop\m\source\onnxruntime"
@@ -674,12 +674,12 @@ Usage:
 
 There are two ways to build hipDNNEP:
 
-### Option A: Build from morphizen-hipdnn Submodule (Recommended)
+### Option A: Build from onnx-hipdnn-ep Submodule (Recommended)
 
-If you're working with morphizen-hipdnn, hipDNNEP is included as a git submodule with all Windows patches already applied:
+If you're working with onnx-hipdnn-ep, hipDNNEP is included as a git submodule with all Windows patches already applied:
 
 ```powershell
-Set-Location C:\Develop\m\Source\morphizen-hipdnn
+Set-Location C:\Develop\m\Source\onnx-hipdnn-ep
 git submodule update --init --recursive
 
 # The submodule is at: external/hipDNNEP
@@ -687,8 +687,8 @@ git submodule update --init --recursive
 
 Build using the submodule:
 ```powershell
-$buildDir = "C:\Develop\m\build\morphizen-hipdnn-e2e"
-$srcDir = "C:\Develop\m\Source\morphizen-hipdnn\external\hipDNNEP"
+$buildDir = "C:\Develop\m\build\onnx-hipdnn-ep-e2e"
+$srcDir = "C:\Develop\m\Source\onnx-hipdnn-ep\external\hipDNNEP"
 
 cmake -G Ninja -B $buildDir -S $srcDir `
     -DCMAKE_BUILD_TYPE=Release `

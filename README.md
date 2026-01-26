@@ -2,11 +2,13 @@
 Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
-# MorphiZen HIP DNN
+# ONNX HIP DNN Execution Provider
 
 An implementation of HIP DNN operations in the MorphiZen framework.
 
 This project demonstrates the integration of HIP (Heterogeneous-compute Interface for Portability) DNN operations within the MorphiZen optimization framework for ONNX Runtime.
+
+> **Note**: This project was formerly known as `morphizen-hipdnn`. It has been renamed to `onnx-hipdnn-ep` to better reflect its role as an ONNX Runtime execution provider using HIP DNN. All references to the old name have been updated throughout the codebase.
 
 ---
 
@@ -49,29 +51,29 @@ This script is used to build the ONNX Runtime project with specific configuratio
 - `--skip_tests`: Skips the execution of tests after the build process.
 - `--cmake_extra_defines CMAKE_INSTALL_PREFIX=$PWD/../local`: Passes additional CMake definitions, setting the installation prefix to a local directory relative to the current working directory.
 
-#### Build morphizen-hipdnn
+#### Build onnx-hipdnn-ep
 
-#### Download morphizen and morphizen-hipdnn
+#### Download MorphiZen and onnx-hipdnn-ep
 
 ```bash
 cd workspace
-git clone git@gitenterprise.xilinx.com:VitisAI/morphizen-hipdnn.git
-git clone git@gitenterprise.xilinx.com:VitisAI/MorphiZen.git --recursive
+git clone https://github.com/ROCm/onnx-hipdnn-ep.git
+git clone https://github.com/ROCm/MorphiZen.git --recursive
 ```
 
 #### Configure and build
 
 ```bash
-cd morphizen-hipdnn
-cmake -DCMAKE_CXX_FLAGS="/EHsc" -B ../build/morphizen-hipdnn -S . -DCMAKE_INSTALL_PREFIX=$PWD/../local -DTHEROCK_DIST="/path/to/dist/therock" -DHIP_PLATFORM=amd
-cmake --build ../build/morphizen-hipdnn --config Debug --target install
+cd onnx-hipdnn-ep
+cmake -DCMAKE_CXX_FLAGS="/EHsc" -B ../build/onnx-hipdnn-ep -S . -DCMAKE_INSTALL_PREFIX=$PWD/../local -DTHEROCK_DIST="/path/to/dist/therock" -DHIP_PLATFORM=amd
+cmake --build ../build/onnx-hipdnn-ep --config Debug --target install
 ```
 
-This script demonstrates the steps to configure, build, and install the `morphizen-hipdnn` project.
+This script demonstrates the steps to configure, build, and install the `onnx-hipdnn-ep` project.
 
 Steps:
-1. Navigate to the `morphizen-hipdnn` directory.
-2. Run the `cmake` command to configure the project, specify the build directory (`../build/morphizen-hipdnn`), and set the installation prefix to a local directory.
+1. Navigate to the `onnx-hipdnn-ep` directory.
+2. Run the `cmake` command to configure the project, specify the build directory (`../build/onnx-hipdnn-ep`), and set the installation prefix to a local directory.
 3. Build the project in Debug configuration and install the resulting binaries to the specified installation directory.
 
 ## Project Design

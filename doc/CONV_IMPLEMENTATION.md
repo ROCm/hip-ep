@@ -1,6 +1,6 @@
 # Conv Node Support Implementation
 
-This document describes the implementation of Conv (Convolution) node support in the morphizen-hipdnn project, following the reference implementation from [hipDNNEP](https://github.com/MaheshRavishankar/hipDNNEP).
+This document describes the implementation of Conv (Convolution) node support in the onnx-hipdnn-ep project, following the reference implementation from [hipDNNEP](https://github.com/MaheshRavishankar/hipDNNEP).
 
 ## Overview
 

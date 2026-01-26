@@ -1,14 +1,14 @@
 # hipDNN Installation Guide for Windows
 
-This guide provides step-by-step instructions for installing hipDNN on Windows to enable full graph validation in morphizen-hipdnn.
+This guide provides step-by-step instructions for installing hipDNN on Windows to enable full graph validation in onnx-hipdnn-ep.
 
 ## Overview
 
-To build morphizen-hipdnn with complete hipDNN graph validation support, you need:
+To build onnx-hipdnn-ep with complete hipDNN graph validation support, you need:
 1. TheRock ROCm SDK (nightly tarball for Windows)
 2. Clang 20.x toolchain
 3. Build hipDNN from source
-4. Configure morphizen-hipdnn to use the installed hipDNN
+4. Configure onnx-hipdnn-ep to use the installed hipDNN
 
 ## Prerequisites
 
@@ -160,9 +160,9 @@ Download and extract Clang 20.x first (we'll use it to check GPU arch):
    - Libraries in `C:/Develop/m/local/hipdnn/lib`
    - CMake configs in `C:/Develop/m/local/hipdnn/lib/cmake/hipdnn_frontend` and `hipdnn_backend`
 
-### 6. Build morphizen-hipdnn with hipDNN
+### 6. Build onnx-hipdnn-ep with hipDNN
 
-Now that hipDNN is installed, configure and build morphizen-hipdnn:
+Now that hipDNN is installed, configure and build onnx-hipdnn-ep:
 
 1. **Set environment variables** (in your shell):
    ```cmd
@@ -172,7 +172,7 @@ Now that hipDNN is installed, configure and build morphizen-hipdnn:
 
 2. **Clean previous build**:
    ```powershell
-   Remove-Item -Recurse -Force C:\Develop\m\build\morphizen-hipdnn
+   Remove-Item -Recurse -Force C:\Develop\m\build\onnx-hipdnn-ep
    ```
 
 3. **Configure with hipDNN**:

@@ -1,15 +1,15 @@
 
 
-# hipDNNEP and morphizen-hipdnn Linux Build Guide
+# hipDNNEP and onnx-hipdnn-ep Linux Build Guide
 
-This document provides complete step-by-step instructions for building and testing hipDNNEP and morphizen-hipdnn on a Linux test server with AMD ROCm GPU.
+This document provides complete step-by-step instructions for building and testing hipDNNEP and onnx-hipdnn-ep on a Linux test server with AMD ROCm GPU.
 
 ## Table of Contents
 
 1. [Prerequisites](#prerequisites)
 2. [Environment Setup](#environment-setup)
 3. [Phase 1: Build Original hipDNNEP](#phase-1-build-original-hipdnnep)
-4. [Phase 2: Build Morphizen + morphizen-hipdnn](#phase-2-build-morphizen--morphizen-hipdnn)
+4. [Phase 2: Build Morphizen + onnx-hipdnn-ep](#phase-2-build-morphizen--onnx-hipdnn-ep)
 5. [Phase 3: Testing and Validation](#phase-3-testing-and-validation)
 6. [Environment Variables Reference](#environment-variables-reference)
 7. [Troubleshooting](#troubleshooting)
@@ -388,7 +388,7 @@ Total Test time (real) =   3.60 sec
 
 ---
 
-## Phase 2: Build Morphizen + morphizen-hipdnn
+## Phase 2: Build Morphizen + onnx-hipdnn-ep
 
 ### 3.1 Clone Morphizen
 
@@ -403,8 +403,8 @@ git clone https://github.com/Xilinx/MorphiZen.git --recursive
 
 ```bash
 cd $WORKSPACE_DIR
-git clone git@gitenterprise.xilinx.com:VitisAI/morphizen-hipdnn.git
-cd morphizen-hipdnn
+git clone https://github.com/ROCm/onnx-hipdnn-ep.git
+cd onnx-hipdnn-ep
 ```
 
 **Alternative** if using the MaheshRavishankar fork:
@@ -912,8 +912,8 @@ cmake --build $WORKSPACE_DIR/build/onnxruntime/Debug/ --target install
 
 # Clone repositories
 cd $WORKSPACE_DIR
-git clone https://github.com/Xilinx/MorphiZen.git --recursive
-git clone git@gitenterprise.xilinx.com:VitisAI/morphizen-hipdnn.git
+git clone https://github.com/ROCm/MorphiZen.git --recursive
+git clone https://github.com/ROCm/onnx-hipdnn-ep.git
 
 # Configure and build morphizen-hipdnn
 cd morphizen-hipdnn
