@@ -4,6 +4,37 @@
 
 The `test_classification` executable is a dedicated tool for testing ONNX classification models with the VitisAI Execution Provider in the morphizen-hipdnn project.
 
+## Getting Started
+
+### 1. Pull Test Data Files (Git LFS)
+
+The test data files are stored using Git LFS. Before building or running tests, you need to pull these files:
+
+```bash
+# Install Git LFS if not already installed
+git lfs install
+
+# Pull LFS files
+cd morphizen-hipdnn
+git lfs pull
+```
+
+This will download:
+- `test/data/pt_resnet50.onnx` (102 MB) - ResNet50 ONNX model
+- `test/data/input_0.pb` (602 KB) - Test input data
+- `test/data/resnet50.jpg` (58 KB) - Test image
+
+### 2. Verify Data Files
+
+```bash
+# Check if files were downloaded correctly
+ls -lh test/data/
+# Should show:
+# pt_resnet50.onnx    (~102 MB)
+# input_0.pb          (~602 KB)
+# resnet50.jpg        (~58 KB)
+```
+
 ## Building
 
 ### Enable in CMake
@@ -149,11 +180,95 @@ ctest -V
 
 ## Test Data Location
 
-By default, the test expects:
-- Model: `${CMAKE_SOURCE_DIR}/data/pt_resnet50.onnx`
-- Image: `${CMAKE_SOURCE_DIR}/data/resnet50.jpg`
+Test data files are located in `test/data/` directory:
+- Model: `test/data/pt_resnet50.onnx`
+- Input data: `test/data/input_0.pb`
+- Image: `test/data/resnet50.jpg`
 
-Ensure these files exist in the `data/` directory at the project root.
+These files are managed by Git LFS and will be automatically downloaded when you run `git lfs pull`.
+
+## Running Tests
+
+### Quick Test
+
+After building, you can quickly test the executable:
+
+```bash
+# Windows (PowerShell)
+cd morphizen-hipdnn
+$env:USE_ORT_API_2_0 = "1"
+$env:DEBUG_LOG_LEVEL = "info"
+.\build\test\Release\test_classification.exe -n test\data\pt_resnet50.onnx test\data\input_0.pb
+
+# Linux/macOS
+cd morphizen-hipdnn
+export USE_ORT_API_2_0=1
+export DEBUG_LOG_LEVEL=info
+./build/test/test_classification -n test/data/pt_resnet50.onnx test/data/input_0.pb
+```
+
+### Expected Output
+
+```
+=================VitisAIExecutionProviderenable_ep = false
+Using ORT API 2.0 create session with VitisAI EP, RegisterExecutionProviderLibrary: onnxruntime_vitisai_ep.dll ort_bridge_backend: onnx-ir-imp
+-----Selected EP device: VitisAIExecutionProvider from vendor: AMD
+Running model...
+done
+batch_index: 0
+score[904]  =  0.234237     text: window screen,
+score[556]  =  0.142072     text: fire screen, fireguard,
+score[828]  =  0.0407042    text: strainer,
+score[446]  =  0.0317005    text: binder, ring-binder,
+score[490]  =  0.0192273    text: chain mail, ring mail, mail, chain armor, chain armour, ring armor, ring armour,
+Unregistered EP library: onnxruntime_vitisai_ep.dll
+```
+
+### Running with CTest
+
+```bash
+# Run the classification test via CTest
+cd morphizen-hipdnn/build
+ctest -R test_classification_resnet50 -V
+
+# Run all tests
+ctest -V
+```
+
+### Step-by-Step Testing Guide
+
+1. **Pull test data** (first time only):
+   ```bash
+   git lfs pull
+   ```
+
+2. **Build the project**:
+   ```bash
+   cmake -B build -DBUILD_TEST_CLASSIFICATION=ON
+   cmake --build build --target test_classification --config Release
+   ```
+
+3. **Set environment variables**:
+   ```bash
+   # Windows
+   set USE_ORT_API_2_0=1
+   set DEBUG_LOG_LEVEL=info
+   
+   # Linux/macOS
+   export USE_ORT_API_2_0=1
+   export DEBUG_LOG_LEVEL=info
+   ```
+
+4. **Run the test**:
+   ```bash
+   # Windows
+   .\build\test\Release\test_classification.exe -n test\data\pt_resnet50.onnx test\data\input_0.pb
+   
+   # Linux/macOS
+   ./build/test/test_classification -n test/data/pt_resnet50.onnx test/data/input_0.pb
+   ```
+
+5. **Verify results**: Check that the output shows top-5 predictions with correct class IDs and confidence scores matching the expected output above.
 
 ## Notes
 
