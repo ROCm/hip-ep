@@ -36,9 +36,9 @@ python image_to_bin.py your_image.jpg -o input.bin --size 256 256
 
 For more details, see `test/data/README_image_to_bin.md`
 
-### 2. Pull Test Data Files (Git LFS) - Alternative Method
+### 2. Pull ONNX Model (Git LFS)
 
-The test data files are stored using Git LFS. Before building or running tests, you need to pull these files:
+The ONNX model is stored using Git LFS:
 
 ```bash
 # Install Git LFS if not already installed
@@ -51,19 +51,7 @@ git lfs pull
 
 This will download:
 - `test/data/pt_resnet50.onnx` (102 MB) - ResNet50 ONNX model
-- `test/data/input_0.pb` (602 KB) - Test input data
 - `test/data/resnet50.jpg` (58 KB) - Test image
-
-### 2. Verify Data Files
-
-```bash
-# Check if files were downloaded correctly
-ls -lh test/data/
-# Should show:
-# pt_resnet50.onnx    (~102 MB)
-# input_0.pb          (~602 KB)
-# resnet50.jpg        (~58 KB)
-```
 
 ## Building
 
@@ -166,34 +154,16 @@ The executable provides:
 ### Sample Output
 
 ```
-=== Classification Test ===
-Model: data/pt_resnet50.onnx
-Image: data/resnet50.jpg
-Top-K: 5
-
-Using VitisAI EP config: etc/vaip_config.json
-VitisAI EP: ENABLED
-
-Creating session...
-Session created in 1234 ms
-
-Model Info:
-  Input: input [1, 3, 224, 224]
-  Output: output [1, 1000]
-
-Loading image...
-
-Running inference...
-Inference completed in 5678 μs (5.678 ms)
-
-=== Top-5 Predictions ===
-1. golden_retriever (class 207) - confidence: 85.23%
-2. labrador_retriever (class 208) - confidence: 8.45%
-3. cocker_spaniel (class 219) - confidence: 3.12%
-4. irish_setter (class 212) - confidence: 1.89%
-5. english_setter (class 213) - confidence: 0.67%
-
-=== Test Complete ===
+================VitisAIExecutionProviderenable_ep = true
+HIP Library Path: C:\Windows\SYSTEM32\amdhip64_7.dll
+Running model...
+done
+batch_index: 0
+score[109]  =  0.997308     text: brain coral,,
+score[973]  =  0.00116773   text: coral reef,,
+score[5]    =  0.000909427  text: electric ray, crampfish, numbfish, torpedo,,
+score[397]  =  0.000158035  text: puffer, pufferfish, blowfish, globefish,,
+score[955]  =  0.000123078  text: jackfruit, jak, jack,,
 ```
 
 ## CTest Integration
@@ -211,11 +181,9 @@ ctest -V
 ## Test Data Location
 
 Test data files are located in `test/data/` directory:
-- Model: `test/data/pt_resnet50.onnx`
-- Input data: `test/data/input_0.pb`
-- Image: `test/data/resnet50.jpg`
-
-These files are managed by Git LFS and will be automatically downloaded when you run `git lfs pull`.
+- Model: `test/data/pt_resnet50.onnx` (managed by Git LFS)
+- Image: `test/data/resnet50.jpg` (managed by Git LFS)
+- Input binary: `test/data/input.bin` (generated using image_to_bin.py)
 
 ## Running the Classification Test
 
@@ -264,95 +232,11 @@ export DEBUG_LOG_LEVEL=info
 ./build/test/test_classification test/data/pt_resnet50.onnx test/data/input.bin
 ```
 
-## Running Tests (Legacy Method)
-
-### Quick Test
-
-After building, you can quickly test the executable:
-
-```bash
-# Windows (PowerShell)
-cd morphizen-hipdnn
-$env:USE_ORT_API_2_0 = "1"
-$env:DEBUG_LOG_LEVEL = "info"
-.\build\test\Release\test_classification.exe -n test\data\pt_resnet50.onnx test\data\input_0.pb
-
-# Linux/macOS
-cd morphizen-hipdnn
-export USE_ORT_API_2_0=1
-export DEBUG_LOG_LEVEL=info
-./build/test/test_classification -n test/data/pt_resnet50.onnx test/data/input_0.pb
-```
-
-### Expected Output
-
-```
-=================VitisAIExecutionProviderenable_ep = false
-Using ORT API 2.0 create session with VitisAI EP, RegisterExecutionProviderLibrary: onnxruntime_vitisai_ep.dll ort_bridge_backend: onnx-ir-imp
------Selected EP device: VitisAIExecutionProvider from vendor: AMD
-Running model...
-done
-batch_index: 0
-score[904]  =  0.234237     text: window screen,
-score[556]  =  0.142072     text: fire screen, fireguard,
-score[828]  =  0.0407042    text: strainer,
-score[446]  =  0.0317005    text: binder, ring-binder,
-score[490]  =  0.0192273    text: chain mail, ring mail, mail, chain armor, chain armour, ring armor, ring armour,
-Unregistered EP library: onnxruntime_vitisai_ep.dll
-```
-
-### Running with CTest
-
-```bash
-# Run the classification test via CTest
-cd morphizen-hipdnn/build
-ctest -R test_classification_resnet50 -V
-
-# Run all tests
-ctest -V
-```
-
-### Step-by-Step Testing Guide
-
-1. **Pull test data** (first time only):
-   ```bash
-   git lfs pull
-   ```
-
-2. **Build the project**:
-   ```bash
-   cmake -B build -DBUILD_TEST_CLASSIFICATION=ON
-   cmake --build build --target test_classification --config Release
-   ```
-
-3. **Set environment variables**:
-   ```bash
-   # Windows
-   set USE_ORT_API_2_0=1
-   set DEBUG_LOG_LEVEL=info
-   
-   # Linux/macOS
-   export USE_ORT_API_2_0=1
-   export DEBUG_LOG_LEVEL=info
-   ```
-
-4. **Run the test**:
-   ```bash
-   # Windows
-   .\build\test\Release\test_classification.exe -n test\data\pt_resnet50.onnx test\data\input_0.pb
-   
-   # Linux/macOS
-   ./build/test/test_classification -n test/data/pt_resnet50.onnx test/data/input_0.pb
-   ```
-
-5. **Verify results**: Check that the output shows top-5 predictions with correct class IDs and confidence scores matching the expected output above.
-
 ## Notes
 
-- The current implementation uses simple image preprocessing (normalization to [0,1])
-- For production use, you may need to implement proper image decoding, resizing, and model-specific preprocessing
+- Input binary files are generated using the Python tool with ImageNet standard preprocessing
 - The test supports any ONNX classification model with a single input and single output tensor
-- Confidence scores are displayed as percentages
+- Top predictions show class ID, label (if provided), and confidence score
 
 ## Troubleshooting
 
