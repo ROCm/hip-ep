@@ -853,7 +853,7 @@ Test project C:/Develop/m/build/hipDNNEP/RelWithDebInfo
 
 ---
 
-## Phase 2: Build Morphizen + morphizen-hipdnn
+## Phase 2: Build Morphizen + onnx-hipdnn-ep
 
 ### 3.1 Build ONNXRuntime with Vitis AI Support
 
@@ -881,55 +881,55 @@ Set-Location C:\Develop\m\source
 git clone https://github.com/Xilinx/MorphiZen.git --recursive
 ```
 
-### 3.3 Verify morphizen-hipdnn
+### 3.3 Verify onnx-hipdnn-ep
 
-If morphizen-hipdnn is the current working directory:
+If onnx-hipdnn-ep is the current working directory:
 ```powershell
-Set-Location C:\Develop\m\source\morphizen-hipdnn
+Set-Location C:\Develop\m\source\onnx-hipdnn-ep
 git submodule update --init --recursive
 ```
 
-### 3.4 Configure morphizen-hipdnn
+### 3.4 Configure onnx-hipdnn-ep
 
 ```powershell
-Set-Location C:\Develop\m\source\morphizen-hipdnn
+Set-Location C:\Develop\m\source\onnx-hipdnn-ep
 
 cmake -G Ninja `
     -DCMAKE_BUILD_TYPE=Debug `
     -DBUILD_SHARED_LIBS=OFF `
-    -B C:\Develop\m\build\morphizen-hipdnn `
+    -B C:\Develop\m\build\onnx-hipdnn-ep `
     -S . `
     -DCMAKE_INSTALL_PREFIX=C:/Develop/m/local `
     -DCMAKE_PREFIX_PATH="C:/Develop/m/dist/therock;C:/Develop/m/local"
 ```
 
-### 3.5 Build morphizen-hipdnn
+### 3.5 Build onnx-hipdnn-ep
 
 ```powershell
-cmake --build C:\Develop\m\build\morphizen-hipdnn --target install
+cmake --build C:\Develop\m\build\onnx-hipdnn-ep --target install
 ```
 
 ### 3.6 Verify Build
 
 ```powershell
 # Check built libraries
-Get-ChildItem C:\Develop\m\build\morphizen-hipdnn\level-1-pass-hipdnn\*.dll
-Get-ChildItem C:\Develop\m\build\morphizen-hipdnn\custom-op-hipdnn\*.dll
-Get-ChildItem C:\Develop\m\build\morphizen-hipdnn\test\*.exe
+Get-ChildItem C:\Develop\m\build\onnx-hipdnn-ep\level-1-pass-hipdnn\*.dll
+Get-ChildItem C:\Develop\m\build\onnx-hipdnn-ep\custom-op-hipdnn\*.dll
+Get-ChildItem C:\Develop\m\build\onnx-hipdnn-ep\test\*.exe
 ```
 
 ---
 
 ## Phase 3: Testing and Validation
 
-### 4.1 Run morphizen-hipdnn Tests
+### 4.1 Run onnx-hipdnn-ep Tests
 
 ```powershell
-Set-Location C:\Develop\m\build\morphizen-hipdnn
+Set-Location C:\Develop\m\build\onnx-hipdnn-ep
 ctest --output-on-failure
 ```
 
-### 4.2 Test Comparison: hipDNNEP vs morphizen-hipdnn
+### 4.2 Test Comparison: hipDNNEP vs onnx-hipdnn-ep
 
 #### Test 1: EP Registration (hipDNNEP)
 
@@ -1163,7 +1163,7 @@ Using the submodule (Option A):
 -- Found ONNXRuntime headers at: C:/Develop/m/local/include/onnxruntime
 -- Found ONNXRuntime library: C:/Develop/m/local/lib/onnxruntime.lib
 -- Configuring done
--- Build files have been written to: C:/Develop/m/build/morphizen-hipdnn-e2e
+-- Build files have been written to: C:/Develop/m/build/onnx-hipdnn-ep-e2e
 
 [17/17] Linking CXX shared library hipdnn_ep.dll
 BUILD SUCCESSFUL!
@@ -1172,7 +1172,7 @@ BUILD SUCCESSFUL!
 ### Partial Test Pass (Expected with Current hipDNN)
 
 ```
-Test project C:/Develop/m/build/morphizen-hipdnn-e2e
+Test project C:/Develop/m/build/onnx-hipdnn-ep-e2e
     Start 1: HipDNNEpLoadTest.RegisterEpLibrary
 1/4 Test #1: HipDNNEpLoadTest.RegisterEpLibrary ........   Passed
     Start 2: HipDNNEpLoadTest.GetEpDevices  
@@ -1362,7 +1362,7 @@ Set-Location C:\Develop\m\build\hipDNNEP\RelWithDebInfo
 ctest --output-on-failure
 
 # ============================================================================
-# PHASE 2: BUILD MORPHIZEN-HIPDNN
+# PHASE 2: BUILD onnx-hipdnn-ep
 # ============================================================================
 
 # Build ONNXRuntime with Vitis AI
@@ -1374,18 +1374,18 @@ cmake --build C:\Develop\m\build\onnxruntime-vitisai\Debug --target install
 Set-Location C:\Develop\m\source
 git clone https://github.com/Xilinx/MorphiZen.git --recursive
 
-# Build morphizen-hipdnn
-Set-Location C:\Develop\m\source\morphizen-hipdnn
-cmake -G Ninja -B C:\Develop\m\build\morphizen-hipdnn -S . `
+# Build onnx-hipdnn-ep
+Set-Location C:\Develop\m\source\onnx-hipdnn-ep
+cmake -G Ninja -B C:\Develop\m\build\onnx-hipdnn-ep -S . `
     -DCMAKE_BUILD_TYPE=Debug `
     -DBUILD_SHARED_LIBS=OFF `
     -DCMAKE_INSTALL_PREFIX=C:/Develop/m/local `
     -DCMAKE_PREFIX_PATH="C:/Develop/m/dist/therock;C:/Develop/m/local"
 
-cmake --build C:\Develop\m\build\morphizen-hipdnn --target install
+cmake --build C:\Develop\m\build\onnx-hipdnn-ep --target install
 
 # Run tests
-Set-Location C:\Develop\m\build\morphizen-hipdnn
+Set-Location C:\Develop\m\build\onnx-hipdnn-ep
 ctest --output-on-failure
 ```
 
@@ -1393,8 +1393,8 @@ ctest --output-on-failure
 
 ## Summary
 
-This guide provides complete instructions for building and testing hipDNNEP and morphizen-hipdnn on Windows:
+This guide provides complete instructions for building and testing hipDNNEP and onnx-hipdnn-ep on Windows:
 
 1. ✅ Environment setup with required tools (CMake, Ninja, Clang, TheRock)
 2. ✅ Building original hipDNNEP with required patches
-3. ✅ Building morphizen-hipdnn
+3. ✅ Building onnx-hipdnn-ep
