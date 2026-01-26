@@ -63,7 +63,7 @@ git clone git@gitenterprise.xilinx.com:VitisAI/MorphiZen.git --recursive
 
 ```bash
 cd morphizen-hipdnn
-cmake -DBUILD_SHARED_LIBS=OFF -B ../build/morphizen-hipdnn -S . -DCMAKE_INSTALL_PREFIX=$PWD/../local
+cmake -DCMAKE_CXX_FLAGS="/EHsc" -B ../build/morphizen-hipdnn -S . -DCMAKE_INSTALL_PREFIX=$PWD/../local -DTHEROCK_DIST="/path/to/dist/therock" -DHIP_PLATFORM=amd
 cmake --build ../build/morphizen-hipdnn --config Debug --target install
 ```
 
