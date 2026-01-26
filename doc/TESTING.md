@@ -1,8 +1,8 @@
-# Testing Guide for morphizen-mlir
+# Testing Guide for onnx-hipdnn-ep
 
 ## Overview
 
-This document describes how to run and verify the MLIR integration tests for the morphizen-mlir project.
+This document describes how to run and verify the MLIR integration tests for the onnx-hipdnn-ep project.
 
 ## Running Tests
 
@@ -16,7 +16,7 @@ To run tests manually:
 set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
 
 # Run the test executable (from project root)
-..\build\morphizen-mlir\bin\ort_integration_test.exe
+..\build\onnx-hipdnn-ep\bin\ort_integration_test.exe
 ```
 
 **Required Environment Variables:**
@@ -256,7 +256,7 @@ For CI/CD pipelines, use:
 
 # Test - Set environment variable and run test executable
 set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
-..\build\morphizen-mlir\bin\ort_integration_test.exe
+..\build\onnx-hipdnn-ep\bin\ort_integration_test.exe
 ```
 
 ### PowerShell Syntax
@@ -268,7 +268,7 @@ If running from PowerShell, use:
 $env:MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE="1"
 
 # Run the test executable
-C:\Develop\m\build\morphizen-mlir\bin\ort_integration_test.exe
+..\build\onnx-hipdnn-ep\bin\ort_integration_test.exe
 ```
 
 The test executable returns exit code 0 on success, non-zero on failure.
