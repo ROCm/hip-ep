@@ -1,7 +1,7 @@
 # Conv Node Support - Changes Summary
 
 ## Task
-Add Conv node support to morphizen-hipdnn project following the reference implementation from [hipDNNEP](https://github.com/MaheshRavishankar/hipDNNEP).
+Add Conv node support to onnx-hipdnn-ep project following the reference implementation from [hipDNNEP](https://github.com/MaheshRavishankar/hipDNNEP).
 
 ## Changes Made
 
@@ -115,8 +115,8 @@ Output Tensor
 
 The implementation closely follows the hipDNNEP reference:
 
-| Component | hipDNNEP | morphizen-hipdnn | Status |
-|-----------|----------|------------------|--------|
+| Component | hipDNNEP | onnx-hipdnn-ep | Status |
+|-----------|----------|----------------|--------|
 | Conv attribute extraction | `kernel.cc:AddConvNode()` | `pass_main.cpp` | ✅ Aligned |
 | Pads handling | Default `{0,0,0,0}` | Extracted from ONNX | ✅ Aligned |
 | Strides handling | Default `{1,1}` | Extracted from ONNX | ✅ Aligned |
