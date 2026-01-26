@@ -3,6 +3,9 @@
 # ** Licensed under the MIT License.
 ##
 include(FetchContent)
+
+# Include LLVM/MLIR configuration
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/llvm.cmake)
 function(vaip_add_version_info)
   set(options)
   set(oneValueArgs COMPONENT DIR)
