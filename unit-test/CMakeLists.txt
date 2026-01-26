@@ -106,7 +106,6 @@ target_compile_definitions(${TEST_EXE_NAME} PRIVATE
   -DONNX_NAMESPACE=onnx
   -DPYTHON_EXE_STR="$<TARGET_FILE:Python3::Interpreter>"
   -DTEST_CWD_STR="${CMAKE_CURRENT_BINARY_DIR}"
-  -DMORPHIZEN_TAR_EXE_STR="$<TARGET_FILE:morphizen-tar>"
   -DTEST_SRC_DIR_STR="${CMAKE_CURRENT_SOURCE_DIR}"
   # avoid warning message as below
   # Please define _WIN32_WINNT or _WIN32_WINDOWS appropriately. For example:
@@ -117,6 +116,12 @@ target_compile_definitions(${TEST_EXE_NAME} PRIVATE
   # for test onnx::OpSchema
   -DONNX_ML=1
   )
+
+if(morphizen_ENABLE_BOOST)
+  target_compile_definitions(${TEST_EXE_NAME} PRIVATE
+    -DMORPHIZEN_TAR_EXE_STR="$<TARGET_FILE:morphizen-tar>"
+  )
+endif()
 
 
 include(GoogleTest)
