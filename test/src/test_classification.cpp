@@ -186,7 +186,7 @@ void run_classification(const std::filesystem::path& model_path,
   std::cout << "=================" << kRegistrationName;
   std::cout << "enable_ep = " << (enable_ep ? "true" : "false") << std::endl;
   
-  Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "test_classification");
+  Ort::Env env(ORT_LOGGING_LEVEL_INFO, "test_classification");
   std::vector<Ort::ConstEpDevice> selected_devices = {};
   
   if (ENV_PARAM(USE_ORT_API_2_0)) {
