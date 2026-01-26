@@ -146,4 +146,4 @@ Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
 Write-Host "1. Restart your PowerShell session to use new environment variables" -ForegroundColor Yellow
 Write-Host "2. Follow the guide to build hipDNN (Section 5 in doc/HIPDNN_WINDOWS_SETUP.md)" -ForegroundColor Yellow
-Write-Host "3. Build morphizen-hipdnn (Section 6)" -ForegroundColor Yellow
+Write-Host "3. Build onnx-hipdnn-ep (Section 6)" -ForegroundColor Yellow

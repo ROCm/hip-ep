@@ -5,7 +5,7 @@ echo.
 echo MSVC environment configured successfully!
 echo.
 echo You can now run CMake commands:
-echo   cmake -DBUILD_SHARED_LIBS=OFF -B C:/Develop/m/build/morphizen-hipdnn -S . -DCMAKE_INSTALL_PREFIX=C:/Develop/m/local
-echo   cmake --build C:/Develop/m/build/morphizen-hipdnn --config Debug
+echo   cmake -DBUILD_SHARED_LIBS=OFF -B C:/Develop/m/build/onnx-hipdnn-ep -S . -DCMAKE_INSTALL_PREFIX=C:/Develop/m/local
+echo   cmake --build C:/Develop/m/build/onnx-hipdnn-ep --config Debug
 echo.
 cmd /k
