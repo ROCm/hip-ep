@@ -2,15 +2,15 @@
 Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the Apache License, Version 2.0.
 -->
-# Build morphizen-mlir Project
+# Build onnx-hipdnn-ep Project
 
-Please build the morphizen-mlir project and fix any build errors that occur.
+Please build the onnx-hipdnn-ep project and fix any build errors that occur.
 
 ## Build Settings (Remember these):
 - **Build Type**: Release (default)
 - **Generator**: Visual Studio 17 2022
 - **Architecture**: x64
-- **Build Directory**: `../build/morphizen-mlir`
+- **Build Directory**: `../build/onnx-hipdnn-ep`
 - **Install Prefix**: `../local`
 - **Working Directory**: `c:/Develop/m/Source/onnx-hipdnn-ep`
 
@@ -38,17 +38,17 @@ cd C:\Develop\m\Source\onnx-hipdnn-ep
 1. Configure the project:
    ```powershell
    cd C:\Develop\m\Source\onnx-hipdnn-ep
-   cmake -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -S . -B ..\build\morphizen-mlir -DCMAKE_INSTALL_PREFIX=..\local -DCMAKE_PREFIX_PATH=$PWD\..\local
+   cmake -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -S . -B ..\build\onnx-hipdnn-ep -DCMAKE_INSTALL_PREFIX=..\local -DCMAKE_PREFIX_PATH=$PWD\..\local
    ```
 
 2. Build the project:
    ```powershell
-   cmake --build ..\build\morphizen-mlir --config Release
+   cmake --build ..\build\onnx-hipdnn-ep --config Release
    ```
 
 ## Expected Outputs
 
-Build artifacts are located in `..\build\morphizen-mlir\bin\Release\`:
+Build artifacts are located in `..\build\onnx-hipdnn-ep\bin\Release\`:
 - `ort_integration_test.exe` - Integration test executable
 - `morphizen-level1-pass-mlir.dll` - MLIR pass plugin
 - Test model files (after running test generators)
@@ -66,7 +66,7 @@ Build artifacts are located in `..\build\morphizen-mlir\bin\Release\`:
 ### MSVC Environment Issues
 If build fails with missing standard headers, initialize MSVC environment:
 ```cmd
-cmd /c "call ""C:\msvsn2022\VC\Auxiliary\Build\vcvars64.bat"" && cd /d C:\Develop\m\Source\onnx-hipdnn-ep && cmake --build ""..\build\morphizen-mlir"" --config Release"
+cmd /c "call ""C:\msvsn2022\VC\Auxiliary\Build\vcvars64.bat"" && cd /d C:\Develop\m\Source\onnx-hipdnn-ep && cmake --build ""..\build\onnx-hipdnn-ep"" --config Release"
 ```
 
 ## Verifying Build Outputs
@@ -74,10 +74,10 @@ cmd /c "call ""C:\msvsn2022\VC\Auxiliary\Build\vcvars64.bat"" && cd /d C:\Develo
 Use PowerShell cmdlets (NOT CMD-style commands) to list build outputs:
 ```powershell
 # CORRECT - use Get-ChildItem
-Get-ChildItem "..\build\morphizen-mlir\bin\Release" -Name
+Get-ChildItem "..\build\onnx-hipdnn-ep\bin\Release" -Name
 
 # WRONG - do NOT use CMD-style dir /b
-# dir "..\build\morphizen-mlir\bin\Release" /b
+# dir "..\build\onnx-hipdnn-ep\bin\Release" /b
 ```
 
 ## Running Tests After Build
@@ -90,10 +90,10 @@ Quick test:
 cd test; python gen_conv_model.py; python gen_conv_gemm_model.py; cd ..
 
 # Copy models to build output
-Copy-Item test\*.onnx ..\build\morphizen-mlir\bin\Release\
+Copy-Item test\*.onnx ..\build\onnx-hipdnn-ep\bin\Release\
 
 # Set required environment variable
 $env:MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE = "1"
 
 # Run tests
-..\build\morphizen-mlir\bin\Release\ort_integration_test.exe
+..\build\onnx-hipdnn-ep\bin\Release\ort_integration_test.exe
