@@ -90,4 +90,12 @@ set(VAIP_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/etc/vaip_config.json")
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
 set(GLOG_BUILD_SHARED OFF CACHE BOOL "Build glog shared library" FORCE)
 
+# Enable ORT bridge and MLIR backend for morphizen
+set(morphizen_ENABLE_ORT_BRIDGE ON CACHE BOOL "Enable ORT bridge" FORCE)
+set(morphizen_ENABLE_MLIR_BACKEND ON CACHE BOOL "Enable MLIR backend" FORCE)
+set(morphizen_ENABLE_ONNX_BACKEND OFF CACHE BOOL "Enable ONNX backend" FORCE)
+set(morphizen_ENABLE_ONNX_SCHEMA_SUPPORT OFF CACHE BOOL "Enable ONNX schema support" FORCE)
+set(morphizen_ENABLE_RYZENAI_BIN_METADATA OFF CACHE BOOL "Disable ryzenai_bin_metadata submodule for version resource generation" FORCE)
+set(morphizen_ENABLE_BOOST OFF CACHE BOOL "Disable Boost dependency" FORCE)
+
 FetchContent_MakeAvailable(morphizen)
