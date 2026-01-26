@@ -117,6 +117,21 @@ cd $WORKSPACE_DIR
 
 ## Phase 1: Build Original hipDNNEP
 
+> **Note: This phase is OPTIONAL**
+> 
+> Phase 1 builds the original/upstream hipDNNEP to generate reference results for validation purposes.
+> 
+> **Skip Phase 1 if:**
+> - You only need the onnx-hipdnn-ep integration working (proceed to Phase 2)
+> - You trust the integration is correct and don't need validation
+> - You're time-constrained and just want the integrated version
+> 
+> **Complete Phase 1 if:**
+> - You're developing or debugging the onnx-hipdnn-ep integration
+> - You need to verify the integration produces correct results
+> - You want to run comparison tests between implementations (Phase 3, section 4.2)
+> - You're investigating a bug and need baseline results from the original implementation
+
 ### 2.1 Install GTest
 
 ```bash
@@ -399,7 +414,7 @@ git clone https://github.com/Xilinx/MorphiZen.git --recursive
 
 **Note**: The `--recursive` flag is important to clone all submodules.
 
-### 3.2 Clone morphizen-hipdnn
+### 3.2 Clone onnx-hipdnn-ep
 
 ```bash
 cd $WORKSPACE_DIR
@@ -409,7 +424,7 @@ cd onnx-hipdnn-ep
 
 **Alternative** if using the MaheshRavishankar fork:
 ```bash
-cd $WORKSPACE_DIR/morphizen-hipdnn/external
+cd $WORKSPACE_DIR/onnx-hipdnn-ep/external
 # The hipDNNEP submodule should already point to the correct repository
 # Update to specific commit if needed:
 cd hipDNNEP
@@ -417,9 +432,9 @@ git checkout de7921872f218a75e3f6de589a8ed4be9f08782
 cd ../..
 ```
 
-### 3.3 Build ONNXRuntime with Vitis AI Support (for morphizen-hipdnn)
+### 3.3 Build ONNXRuntime with Vitis AI Support (for onnx-hipdnn-ep)
 
-morphizen-hipdnn requires ONNXRuntime built with Vitis AI support.
+onnx-hipdnn-ep requires ONNXRuntime built with Vitis AI support.
 
 ```bash
 cd $WORKSPACE_DIR/onnxruntime
@@ -441,16 +456,16 @@ cmake --build $WORKSPACE_DIR/build/onnxruntime/Debug/ --target install
 
 This installs ONNXRuntime to `$WORKSPACE_DIR/local`.
 
-### 3.4 Configure morphizen-hipdnn
+### 3.4 Configure onnx-hipdnn-ep
 
 ```bash
-cd $WORKSPACE_DIR/morphizen-hipdnn
+cd $WORKSPACE_DIR/onnx-hipdnn-ep
 
 # Configure with CMake
 cmake -G "Ninja" \
   -DCMAKE_BUILD_TYPE=Debug \
   -DBUILD_SHARED_LIBS=OFF \
-  -B $WORKSPACE_DIR/build/morphizen-hipdnn \
+  -B $WORKSPACE_DIR/build/onnx-hipdnn-ep \
   -S . \
   -DCMAKE_INSTALL_PREFIX=$WORKSPACE_DIR/local \
   -DCMAKE_PREFIX_PATH="$THEROCK_DIST;$WORKSPACE_DIR/local"
@@ -461,10 +476,10 @@ cmake -G "Ninja" \
 - `-DCMAKE_INSTALL_PREFIX`: Where to install the built libraries
 - `-DBUILD_SHARED_LIBS=OFF`: Build static libraries
 
-### 3.5 Build morphizen-hipdnn
+### 3.5 Build onnx-hipdnn-ep
 
 ```bash
-cmake --build $WORKSPACE_DIR/build/morphizen-hipdnn --config Debug --target install
+cmake --build $WORKSPACE_DIR/build/onnx-hipdnn-ep --config Debug --target install
 ```
 
 This will:
@@ -474,33 +489,33 @@ This will:
 4. Build tests
 5. Install to `$WORKSPACE_DIR/local`
 
-### 3.6 Verify morphizen-hipdnn Build
+### 3.6 Verify onnx-hipdnn-ep Build
 
 Check that the key components are built:
 
 ```bash
 # Check level-1 pass library
-ls -lh $WORKSPACE_DIR/build/morphizen-hipdnn/level-1-pass-hipdnn/libvitis_ai_ep_level_1.so
+ls -lh $WORKSPACE_DIR/build/onnx-hipdnn-ep/level-1-pass-hipdnn/libvitis_ai_ep_level_1.so
 
 # Check custom op library
-ls -lh $WORKSPACE_DIR/build/morphizen-hipdnn/custom-op-hipdnn/libcustom_op_hipdnn.so
+ls -lh $WORKSPACE_DIR/build/onnx-hipdnn-ep/custom-op-hipdnn/libcustom_op_hipdnn.so
 
 # Check test executable
-ls -lh $WORKSPACE_DIR/build/morphizen-hipdnn/test/test_onnx_runner
+ls -lh $WORKSPACE_DIR/build/onnx-hipdnn-ep/test/test_onnx_runner
 ```
 
 ---
 
 ## Phase 3: Testing and Validation
 
-### 4.1 Run morphizen-hipdnn Tests
+### 4.1 Run onnx-hipdnn-ep Tests
 
 ```bash
-cd $WORKSPACE_DIR/build/morphizen-hipdnn
+cd $WORKSPACE_DIR/build/onnx-hipdnn-ep
 ctest --output-on-failure
 ```
 
-### 4.2 Test Comparison: hipDNNEP vs morphizen-hipdnn
+### 4.2 Test Comparison: hipDNNEP vs onnx-hipdnn-ep
 
 #### Test 1: EP Registration (hipDNNEP)
 
@@ -520,14 +535,14 @@ ctest --preset RelWithDebInfo -R BasicConv2D --output-on-failure
 
 Expected: Test should pass with Conv2D executing successfully on GPU.
 
-#### Test 3: morphizen-hipdnn Integration Test
+#### Test 3: onnx-hipdnn-ep Integration Test
 
 ```bash
-cd $WORKSPACE_DIR/build/morphizen-hipdnn
+cd $WORKSPACE_DIR/build/onnx-hipdnn-ep
 ./test/test_onnx_runner --help
 ```
 
-Run a Conv2D test through morphizen-hipdnn to verify integration:
+Run a Conv2D test through onnx-hipdnn-ep to verify integration:
 
 ```bash
 # Set environment for debugging
@@ -539,7 +554,7 @@ export MORPHIZEN_DEBUG_HIPDNN=1
 
 ### 4.3 Validation Checklist
 
-Verify the following functionality works in both hipDNNEP and morphizen-hipdnn:
+Verify the following functionality works in both hipDNNEP and onnx-hipdnn-ep:
 
 - [ ] EP library loads successfully
 - [ ] GPU devices are detected correctly
@@ -550,12 +565,12 @@ Verify the following functionality works in both hipDNNEP and morphizen-hipdnn:
 
 ### 4.4 Key Differences to Note
 
-Document any differences observed between original hipDNNEP and morphizen-hipdnn integration:
+Document any differences observed between original hipDNNEP and onnx-hipdnn-ep integration:
 
 1. **API differences**: Note any API changes in the integration layer
 2. **Performance**: Compare execution times for same operations
 3. **Error handling**: Note any differences in error messages or handling
-4. **Dependencies**: List additional dependencies required by morphizen-hipdnn
+4. **Dependencies**: List additional dependencies required by onnx-hipdnn-ep
 
 ---
 
@@ -593,7 +608,7 @@ Create a file `$WORKSPACE_DIR/setup_env.sh`:
 
 ```bash
 #!/bin/bash
-# Environment setup for hipDNNEP and morphizen-hipdnn development
+# Environment setup for hipDNNEP and onnx-hipdnn-ep development
 
 # Base workspace directory
 export WORKSPACE_DIR=$HOME/workspace
@@ -893,7 +908,7 @@ cmake --build --preset RelWithDebInfo
 ctest --preset RelWithDebInfo --output-on-failure
 
 # ============================================================================
-# BUILD MORPHIZEN + MORPHIZEN-HIPDNN
+# BUILD MORPHIZEN + ONNX-HIPDNN-EP
 # ============================================================================
 
 # Build ONNXRuntime with Vitis AI support
@@ -906,13 +921,13 @@ cd $WORKSPACE_DIR
 git clone ../MorphiZen --recursive
 git clone https://github.com/ROCm/onnx-hipdnn-ep.git
 
-# Configure and build morphizen-hipdnn
-cd morphizen-hipdnn
-cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=OFF -B $WORKSPACE_DIR/build/morphizen-hipdnn -S . -DCMAKE_INSTALL_PREFIX=$WORKSPACE_DIR/local -DCMAKE_PREFIX_PATH="$THEROCK_DIST;$WORKSPACE_DIR/local"
-cmake --build $WORKSPACE_DIR/build/morphizen-hipdnn --config Debug --target install
+# Configure and build onnx-hipdnn-ep
+cd onnx-hipdnn-ep
+cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=OFF -B $WORKSPACE_DIR/build/onnx-hipdnn-ep -S . -DCMAKE_INSTALL_PREFIX=$WORKSPACE_DIR/local -DCMAKE_PREFIX_PATH="$THEROCK_DIST;$WORKSPACE_DIR/local"
+cmake --build $WORKSPACE_DIR/build/onnx-hipdnn-ep --config Debug --target install
 
 # Run tests
-cd $WORKSPACE_DIR/build/morphizen-hipdnn
+cd $WORKSPACE_DIR/build/onnx-hipdnn-ep
 ctest --output-on-failure
 ```
 
@@ -951,7 +966,7 @@ $WORKSPACE_DIR/
 │   └── ...
 ├── MorphiZen/                # Morphizen framework
 │   └── ...
-├── morphizen-hipdnn/         # morphizen-hipdnn integration
+├── onnx-hipdnn-ep/           # onnx-hipdnn-ep integration
 │   ├── level-1-pass-hipdnn/
 │   ├── custom-op-hipdnn/
 │   ├── external/
@@ -962,7 +977,7 @@ $WORKSPACE_DIR/
 │   │   └── RelWithDebInfo/
 │   ├── onnxruntime/
 │   │   └── Debug/
-│   └── morphizen-hipdnn/
+│   └── onnx-hipdnn-ep/
 │       └── Debug/
 └── local/                    # Installation directory
     ├── bin/
@@ -979,7 +994,7 @@ $WORKSPACE_DIR/
 - [TheRock Releases](https://github.com/ROCm/TheRock/blob/main/RELEASES.md)
 - [ONNXRuntime GitHub](https://github.com/microsoft/onnxruntime)
 - [IREE Releases](https://github.com/iree-org/iree/releases)
-- [morphizen-hipdnn Documentation](../README.md)
+- [onnx-hipdnn-ep Documentation](../README.md)
 
 ---
 
@@ -988,7 +1003,7 @@ $WORKSPACE_DIR/
 This guide provides complete instructions for:
 
 1. ✅ Building original hipDNNEP from source with all dependencies
-2. ✅ Building morphizen-hipdnn with Morphizen framework integration
+2. ✅ Building onnx-hipdnn-ep with Morphizen framework integration
 3. ✅ Testing both implementations to verify functionality
 4. ✅ Comparing results to ensure compatibility
 
@@ -998,12 +1013,12 @@ This guide provides complete instructions for:
 - **Environment variables** must be set correctly for all builds
 - **Patches** are required to remove hardcoded paths from hipDNNEP
 - **Tests** verify that both implementations work correctly
-- **morphizen-hipdnn** integrates hipDNNEP as an execution provider for ONNX models
+- **onnx-hipdnn-ep** integrates hipDNNEP as an execution provider for ONNX models
 
 ### Next Steps
 
 After completing this guide:
-1. Run performance benchmarks comparing hipDNNEP and morphizen-hipdnn
+1. Run performance benchmarks comparing hipDNNEP and onnx-hipdnn-ep
 2. Test with various ONNX models to verify graph optimization passes
 3. Document any additional integration requirements for production use
 
@@ -1020,7 +1035,7 @@ For Windows builds, see [Windows Build Guide](windows_build_guide.md).
 #### CMake Configuration (Windows)
 
 ```
-PS C:\Develop\m\build\hipDNNEP> cmake "C:\Develop\m\Source\morphizen-hipdnn\external\hipDNNEP" -G Ninja ...
+PS C:\Develop\m\build\hipDNNEP> cmake "C:\Develop\m\Source\onnx-hipdnn-ep\external\hipDNNEP" -G Ninja ...
 
 -- The CXX compiler identification is Clang 21.1.8 with GNU-like command-line
 -- Detecting CXX compiler ABI info
