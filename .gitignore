@@ -43,4 +43,6 @@
 /.clwb
 /.idea
 /.cline_storage/
-/.clinerules/
+/.clinerules/*
+!/.clinerules/workflows/
+!/.clinerules/*.md
