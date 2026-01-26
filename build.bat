@@ -1,6 +1,6 @@
 @echo off
 echo ============================================================
-echo Building morphizen-hipdnn with Visual Studio 2022
+echo Building onnx-hipdnn-ep with Visual Studio 2022
 echo ============================================================
 echo.
 
@@ -48,7 +48,7 @@ if exist "C:\Develop\m\local\hipdnn\lib\cmake\hipdnn_frontend" (
 )
 
 REM Set GSL include path for ORT VitisAI headers
-set GSL_INCLUDE_DIR=C:\Develop\m\build\morphizen-hipdnn\_deps\microsoft.gsl-src\include
+set GSL_INCLUDE_DIR=C:\Develop\m\build\onnx-hipdnn-ep\_deps\microsoft.gsl-src\include
 set INCLUDE=%GSL_INCLUDE_DIR%;%INCLUDE%
 echo Added GSL include path: %GSL_INCLUDE_DIR%
 echo.
@@ -61,7 +61,7 @@ if not exist "%THEROCK_DIST%\nlohmann_json.natvis" (
 
 REM Configure with CMake using Ninja generator
 echo Configuring project with CMake using Ninja...
-cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -B C:/Develop/m/build/morphizen-hipdnn -S . -DCMAKE_INSTALL_PREFIX=C:/Develop/m/local -DTHEROCK_DIST=%THEROCK_DIST% %HIPDNN_PREFIX_PATH%
+cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -B C:/Develop/m/build/onnx-hipdnn-ep -S . -DCMAKE_INSTALL_PREFIX=C:/Develop/m/local -DTHEROCK_DIST=%THEROCK_DIST% %HIPDNN_PREFIX_PATH%
 if errorlevel 1 (
     echo ERROR: CMake configuration failed
     exit /b 1
@@ -70,7 +70,7 @@ echo.
 
 REM Build the project
 echo Building project...
-cmake --build C:/Develop/m/build/morphizen-hipdnn
+cmake --build C:/Develop/m/build/onnx-hipdnn-ep
 if errorlevel 1 (
     echo ERROR: Build failed
     exit /b 1
