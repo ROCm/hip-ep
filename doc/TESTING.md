@@ -11,8 +11,8 @@ This document describes how to run and verify the MLIR integration tests for the
 To run tests manually:
 
 ```bash
-# Set environment variables to activate MLIR backend and enable device detection
-set MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend
+# Set environment variable to enable CPU device detection for testing
+# Note: MLIR backend is now enabled by default (MorphiZen PR #530)
 set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
 
 # Run the test executable (from project root)
@@ -23,7 +23,6 @@ set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND` | (none) | Activates the MLIR backend for testing |
 | `MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE` | `0` | **Enables CPU device detection for testing** (see below) |
 
 #### Why MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE is Required
@@ -192,7 +191,6 @@ set MORPHIZEN_DEBUG_MLIR=2
 set MORPHIZEN_DEBUG_MLIR_GRAPH=2
 set GLOG_logtostderr=1
 set GLOG_minloglevel=0
-set MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend
 set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
 ```
 
@@ -235,9 +233,9 @@ The test script will automatically generate missing models. If generation fails,
 ### MLIR Parsing Fails
 
 If MLIR parsing fails, ensure:
-1. `MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend` is set
-2. The MLIR backend (mlir-imp) is properly built and linked
-3. All required MLIR dialects are loaded (func, arith)
+1. The MLIR backend (mlir-imp) is properly built and linked
+2. All required MLIR dialects are loaded (func, arith)
+3. Note: mlir-backend is now the default (MorphiZen PR #530), no environment variable needed
 
 ## Test Output Files
 
@@ -256,8 +254,7 @@ For CI/CD pipelines, use:
 # Build
 .\build.bat
 
-# Test - Set environment variables and run test executable
-set MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend
+# Test - Set environment variable and run test executable
 set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
 ..\build\morphizen-mlir\bin\ort_integration_test.exe
 ```
@@ -267,8 +264,7 @@ set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
 If running from PowerShell, use:
 
 ```powershell
-# Set environment variables
-$env:MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND="mlir-backend"
+# Set environment variable
 $env:MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE="1"
 
 # Run the test executable
