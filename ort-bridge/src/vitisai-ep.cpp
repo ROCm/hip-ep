@@ -24,8 +24,8 @@
       "At least one backend must be enabled: MORPHIZEN_ENABLE_ONNX_BACKEND or MORPHIZEN_ENABLE_MLIR_BACKEND"
 #endif
 
-DEF_ENV_PARAM_2(MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND,
-                "", // default to empty string, will use compile-time default
+DEF_ENV_PARAM_2(MORPHIZEN_ORT_BRIDGE_BACKEND,
+                MORPHIZEN_DEFAULT_BACKEND, // default depends on which backend is enabled
                 std::string)
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_VITISAI_EP, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_VITISAI_EP) >= n)
@@ -298,7 +298,7 @@ OrtStatus* VitisAIEP::GetCapability(OrtGraphWrapper& graph_viewer,
   // Use compile-time default backend, but allow override via environment
   // variable
   const char* backend_ir = MORPHIZEN_DEFAULT_BACKEND;
-  auto env_backend = ENV_PARAM(MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND);
+  auto env_backend = ENV_PARAM(MORPHIZEN_ORT_BRIDGE_BACKEND);
   if (!env_backend.empty()) {
     // Environment variable is set, use it to override the default
     if (env_backend == morphizen::kMLIRBackend) {
@@ -307,7 +307,7 @@ OrtStatus* VitisAIEP::GetCapability(OrtGraphWrapper& graph_viewer,
       backend_ir = morphizen::kONNXIRBackend;
     } else {
       MY_LOG(1) << "Invalid backend specified in "
-                   "MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND: "
+                   "MORPHIZEN_ORT_BRIDGE_BACKEND: "
                 << env_backend << ". Using default: " << backend_ir;
     }
   }

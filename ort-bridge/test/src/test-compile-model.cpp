@@ -45,7 +45,7 @@ TEST_F(CompileModel, T0) {
   auto test_model_path = RESNET_50_MLIR_PATH;
 #endif
 
-  auto env_backend = ENV_PARAM(MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND);
+  auto env_backend = ENV_PARAM(MORPHIZEN_ORT_BRIDGE_BACKEND);
   if (!env_backend.empty()) {
     if (env_backend == morphizen::kMLIRBackend) {
       test_model_path = RESNET_50_MLIR_PATH;

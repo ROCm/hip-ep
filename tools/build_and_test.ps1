@@ -35,5 +35,5 @@ Run ctest --test-dir "$Env:VAI_RT_BUILD_DIR/morphizen-demo" -C Debug --output-on
 Run ctest -j $jobs --test-dir "$Env:VAI_RT_BUILD_DIR/morphizen-demo" -C Debug --output-on-failure --timeout 600
 
 Write-Output "Run unittests with mlir-backend"
-$ENV:MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND="mlir-backend"
+$ENV:MORPHIZEN_ORT_BRIDGE_BACKEND="mlir-backend"
 Run ctest -j $jobs --test-dir "$Env:VAI_RT_BUILD_DIR/morphizen-demo" -C Debug --output-on-failure --timeout 600

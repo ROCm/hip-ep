@@ -23,9 +23,10 @@
       "At least one backend must be enabled: MORPHIZEN_ENABLE_ONNX_BACKEND or MORPHIZEN_ENABLE_MLIR_BACKEND"
 #endif
 
-DEF_ENV_PARAM_2(MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND,
-                "", // default to empty string, will use compile-time default
-                std::string)
+DEF_ENV_PARAM_2(
+    MORPHIZEN_ORT_BRIDGE_BACKEND,
+    MORPHIZEN_DEFAULT_BACKEND, // default depends on which backend is enabled
+    std::string)
 
 namespace morphizen {
 // defined in onnx-ir-imp/src/vaip-ort-api.cpp
@@ -71,7 +72,7 @@ protected:
   void SetUp() override {
     // Enable verbose logging for API calls
     FLAGS_v = 3;
-    auto env_backend = ENV_PARAM(MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND);
+    auto env_backend = ENV_PARAM(MORPHIZEN_ORT_BRIDGE_BACKEND);
     if (env_backend.empty()) {
       backend_ = MORPHIZEN_DEFAULT_BACKEND;
     } else {
