@@ -191,18 +191,18 @@ cd ..
 
 ### Step 2: Prepare Test Environment
 
-Copy required files to the test executable directory:
+Copy test models and set PATH to include DLL locations:
 
 ```bash
 # Copy test models to build output directory
 cp test/*.onnx ../build/morphizen-mlir/bin/Release/
 
-# Copy ORT runtime DLLs
-cp ../local/bin/onnxruntime.dll ../build/morphizen-mlir/bin/Release/
-cp ../local/bin/onnxruntime_providers_shared.dll ../build/morphizen-mlir/bin/Release/
+# Set PATH to include DLL locations
+# Windows CMD:
+set PATH=..\local\bin;..\build\morphizen-mlir\bin\Release;%PATH%
 
-# Copy VitisAI EP DLL with expected name
-cp ../build/morphizen-mlir/bin/Release/onnxruntime_vitisai_ep.dll ../build/morphizen-mlir/bin/Release/onnxruntime_providers_vitisai.dll
+# Or in Git Bash:
+export PATH="../local/bin:../build/morphizen-mlir/bin/Release:$PATH"
 ```
 
 ### Step 3: Run Tests
@@ -240,10 +240,7 @@ set MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend
 cd test && python gen_conv_model.py && python gen_conv_gemm_model.py && cd ..
 cp test/*.onnx ../build/morphizen-mlir/bin/Release/
 
-# Copy DLLs
-cp ../local/bin/onnxruntime.dll ../build/morphizen-mlir/bin/Release/
-cp ../local/bin/onnxruntime_providers_shared.dll ../build/morphizen-mlir/bin/Release/
-cp ../build/morphizen-mlir/bin/Release/onnxruntime_vitisai_ep.dll ../build/morphizen-mlir/bin/Release/onnxruntime_providers_vitisai.dll
+export PATH="../local/bin:../build/morphizen-mlir/bin/Release:$PATH"
 
 # Run tests
 cd ../build/morphizen-mlir/bin/Release
