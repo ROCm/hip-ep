@@ -12,7 +12,6 @@ To run tests manually from the `onnx-hipdnn-ep` directory:
 
 ```bash
 # 1. Set environment variable to enable CPU device detection for testing
-# Note: MLIR backend is now enabled by default (MorphiZen PR #530)
 set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
 
 # 2. Optional: Set PATH if DLLs are not automatically found
