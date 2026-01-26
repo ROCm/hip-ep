@@ -102,4 +102,9 @@ set(morphizen_ENABLE_ONNX_SCHEMA_SUPPORT OFF CACHE BOOL "Enable ONNX schema supp
 set(morphizen_ENABLE_RYZENAI_BIN_METADATA OFF CACHE BOOL "Disable ryzenai_bin_metadata submodule for version resource generation" FORCE)
 set(morphizen_ENABLE_BOOST OFF CACHE BOOL "Disable Boost dependency" FORCE)
 
+# Silence MLIR std::complex<APFloat> deprecation warning (MSVC)
+if(MSVC)
+  add_compile_definitions(_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING)
+endif()
+
 FetchContent_MakeAvailable(morphizen)

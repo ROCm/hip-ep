@@ -12,6 +12,8 @@ project(
 # Set MSVC runtime library to static to match pre-built dependencies
 if(MSVC)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  # Silence MLIR std::complex<APFloat> deprecation warning
+  add_compile_definitions(_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING)
 endif()
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
