@@ -211,9 +211,6 @@ export PATH="../local/bin:../build/morphizen-mlir/bin/Release:$PATH"
 # Change to the test executable directory
 cd ../build/morphizen-mlir/bin/Release
 
-# Set environment variable to activate MLIR backend
-set MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend
-
 # Run the test executable
 ./ort_integration_test.exe
 ```
@@ -244,7 +241,7 @@ export PATH="../local/bin:../build/morphizen-mlir/bin/Release:$PATH"
 
 # Run tests
 cd ../build/morphizen-mlir/bin/Release
-MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend ./ort_integration_test.exe
+./ort_integration_test.exe
 ```
 
 ### Test Models
