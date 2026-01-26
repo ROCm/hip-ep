@@ -6,7 +6,37 @@ The `test_classification` executable is a dedicated tool for testing ONNX classi
 
 ## Getting Started
 
-### 1. Pull Test Data Files (Git LFS)
+### 1. Generate Input Binary File (Recommended)
+
+You can generate a fresh `input.bin` file from any image using the provided Python tool:
+
+```bash
+# Navigate to test/data directory
+cd test/data
+
+# Generate input.bin from resnet50.jpg (or any other image)
+python image_to_bin.py resnet50.jpg -o input.bin
+
+# This creates input.bin with:
+# - Shape: (3, 224, 224) in NCHW format
+# - Dtype: float32
+# - Size: 602,112 bytes
+# - ImageNet standard normalization
+```
+
+**Alternative: Use custom image**
+```bash
+python image_to_bin.py your_image.jpg -o input.bin
+```
+
+**Alternative: Use custom size**
+```bash
+python image_to_bin.py your_image.jpg -o input.bin --size 256 256
+```
+
+For more details, see `test/data/README_image_to_bin.md`
+
+### 2. Pull Test Data Files (Git LFS) - Alternative Method
 
 The test data files are stored using Git LFS. Before building or running tests, you need to pull these files:
 
@@ -187,7 +217,54 @@ Test data files are located in `test/data/` directory:
 
 These files are managed by Git LFS and will be automatically downloaded when you run `git lfs pull`.
 
-## Running Tests
+## Running the Classification Test
+
+### Step 1: Generate Input Binary
+
+```bash
+cd test/data
+python image_to_bin.py resnet50.jpg -o input.bin
+cd ../..
+```
+
+### Step 2: Run test_classification
+
+After generating `input.bin`, run the classification test:
+
+```bash
+# Windows (PowerShell)
+.\build\test\Release\test_classification.exe test\data\pt_resnet50.onnx test\data\input.bin
+
+# Linux/macOS
+./build/test/test_classification test/data/pt_resnet50.onnx test/data/input.bin
+```
+
+### Complete Workflow Example
+
+```bash
+# 1. Generate input binary from image
+cd test/data
+python image_to_bin.py resnet50.jpg -o input.bin
+cd ../..
+
+# 2. Set environment variables (optional)
+# Windows
+set USE_ORT_API_2_0=1
+set DEBUG_LOG_LEVEL=info
+
+# Linux/macOS
+export USE_ORT_API_2_0=1
+export DEBUG_LOG_LEVEL=info
+
+# 3. Run classification test
+# Windows
+.\build\test\Release\test_classification.exe test\data\pt_resnet50.onnx test\data\input.bin
+
+# Linux/macOS
+./build/test/test_classification test/data/pt_resnet50.onnx test/data/input.bin
+```
+
+## Running Tests (Legacy Method)
 
 ### Quick Test
 
