@@ -295,6 +295,7 @@ message PassVaimlConfigProto {
   optional int32 batch_dimension = 53;
   optional bool wts_ext = 54;
   optional string shape_infer_json = 55;
+  optional string dynamic_modes = 56;
 
   optional bool supported_node_mode = 101;
   optional bool binary_module = 102;
