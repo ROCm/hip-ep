@@ -5,7 +5,7 @@
 cmake_minimum_required(VERSION 3.29)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 project(
-  morphizen-hipdnn
+  onnx-hipdnn-ep
   VERSION 1.0.0
   LANGUAGES C CXX)
 
