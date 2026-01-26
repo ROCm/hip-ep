@@ -212,18 +212,6 @@ For comprehensive information including:
 
 See [doc/TESTING.md](doc/TESTING.md).
 
-## Differences from morphizen-demo
-
-This project extends morphizen-demo with:
-
-- ✅ **Full MLIR integration** with parsing and operation walking
-- ✅ **Test infrastructure** with ORT integration tests
-- ✅ **Multiple test models** (Conv, Conv+Gemm)
-- ✅ **Test utilities** for easy model generation
-- ❌ No pattern matching (no `patterns/` directory)
-- ❌ No protobuf definitions (no `proto/` directory)
-- ❌ No custom operators (no `custom-op-*/` directory)
-
 ## License
 
 Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
