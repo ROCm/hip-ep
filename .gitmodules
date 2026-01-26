@@ -1,3 +1,0 @@
-[submodule "external/hipDNNEP"]
-	path = external/hipDNNEP
-	url = https://github.com/MaheshRavishankar/hipDNNEP
