@@ -4,5 +4,10 @@ Licensed under the MIT License.
 -->
 ## PowerShell
 
-- Do NOT use `&&` - not supported in older PowerShell
-- Use `;` to chain commands: `cd build; cmake ..`
+- Do NOT use `&&` - use `;` to chain: `cd build; cmake ..`
+- Append `; echo "=== DONE ==="` to detect command completion
+- Use `; if ($?) { echo "=== OK ===" } else { echo "=== FAIL ===" }` for status
+
+### If command appears hung:
+- Check VS Code terminal directly
+- Ctrl+C to cancel, then inform Cline

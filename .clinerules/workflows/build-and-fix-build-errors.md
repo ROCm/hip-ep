@@ -48,3 +48,25 @@ Please build the MorphiZen project and fix any build errors that occur.
 - Dependencies are automatically fetched via CMake FetchContent
 - Build output goes to `C:/Develop/m/build/morphizen.ninja/bin/`
 - The preset includes `morphizen_DEMO_DIR` and other configurations from CMakePresets.json
+
+## MSVC Environment Setup (IMPORTANT):
+If the build fails with errors like "Cannot open include file: 'cstddef'" or other missing standard headers, you need to initialize the Visual Studio environment first:
+
+```cmd
+cmd /c "call ""C:\msvsn2022\VC\Auxiliary\Build\vcvars64.bat"" && cd /d C:\Develop\m\source\MorphiZen && cmake --build ""C:/Develop/m/build/morphizen.ninja"" --config Debug --parallel"
+```
+
+This sets up the MSVC compiler environment including:
+- Standard library include paths
+- Windows SDK paths
+- Required compiler environment variables
+
+## Verifying Build Outputs:
+Use PowerShell cmdlets (NOT CMD-style commands) to list build outputs:
+```powershell
+# CORRECT - use Get-ChildItem
+Get-ChildItem "C:\Develop\m\build\morphizen.ninja\bin" -Name
+
+# WRONG - do NOT use CMD-style dir /b (causes errors in PowerShell)
+# dir "C:\Develop\m\build\morphizen.ninja\bin\" /b
+```

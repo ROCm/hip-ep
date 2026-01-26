@@ -110,24 +110,45 @@ For complex PRs requiring detailed analysis, expand with optional sections:
 - **Edge Cases:** List considered edge cases and how they're handled
 - **Testing Notes:** Checklist of test cases to verify
 
-## Step 5: Submit Review
+## Step 5: Check PR Authorship
 
-### Approve
+Before submitting a review, check if you are the PR author:
+
 ```bash
-gh pr review <PR_NUMBER> --approve --body "$(cat review_comment.md)"
+gh pr view <PR_NUMBER> --json author --jq '.author.login'
 ```
 
-### Request Changes
+**Important:** GitHub does not allow self-approval. If you are the PR author:
+- Use `gh pr comment` instead of `gh pr review --approve`
+- Or use the global `approve-my-pr` workflow with a separate token if self-approval is needed
+
+## Step 6: Submit Review
+
+### If NOT the PR author:
+
+#### Approve
 ```bash
-gh pr review <PR_NUMBER> --request-changes --body "$(cat review_comment.md)"
+gh pr review <PR_NUMBER> --approve --body-file review_comment.md
 ```
 
-### Comment Only
+#### Request Changes
 ```bash
-gh pr review <PR_NUMBER> --comment --body "$(cat review_comment.md)"
+gh pr review <PR_NUMBER> --request-changes --body-file review_comment.md
 ```
 
-## Step 6: Incremental Review (Optional)
+#### Comment Only
+```bash
+gh pr review <PR_NUMBER> --comment --body-file review_comment.md
+```
+
+### If you ARE the PR author:
+
+Post as a comment instead (self-approval is not allowed by GitHub):
+```bash
+gh pr comment <PR_NUMBER> --body-file review_comment.md
+```
+
+## Step 7: Incremental Review (Optional)
 
 If deeper investigation reveals additional findings, post a follow-up comment:
 

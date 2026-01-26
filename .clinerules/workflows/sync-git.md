@@ -187,6 +187,41 @@ If rebase changed history (force push with lease for safety):
 git push --force-with-lease origin <branch-name>
 ```
 
+### Step 10: Create or Update Pull Request
+
+If no PR exists for this branch, create one. **On Windows, use `--body-file` to avoid quoting issues:**
+
+1. Create a temporary file `pr_body.md` with the PR description:
+```markdown
+# Summary of Changes
+
+* <High-level description of what this request adds/changes/improves/fixes>
+
+Closes #<issue-number> (if applicable)
+
+# Motivation
+
+<Why this change is needed/useful>
+
+# Implementation
+
+<Any implementation details or design choices worth noting>
+```
+
+2. Create the PR using the file:
+```bash
+gh pr create --title "<type>: <brief description>" --body-file pr_body.md
+```
+
+3. Delete the temporary file after PR creation.
+
+To update an existing PR description:
+```bash
+gh pr edit <PR-number> --body-file pr_body.md
+```
+
+If a PR already exists, the push will automatically update it (no need to edit unless scope changed).
+
 ## Quick Workflow Summary
 
 For a typical commit and sync cycle:
@@ -207,12 +242,15 @@ git rebase origin/main
 
 # 5. Push
 git push origin <branch-name>
+
+# 6. Create PR (if not exists) - use --body-file on Windows to avoid quoting issues
+# First write PR body to pr_body.md, then:
+gh pr create --title "feat: your change description" --body-file pr_body.md
 ```
 
 ## After Pushing
 
-Consider:
-- Create a Pull Request if not already created: `gh pr create`
+If PR already exists:
 - Update PR description if scope changed significantly
 - Request review if ready: `gh pr ready`
 
