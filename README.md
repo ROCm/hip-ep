@@ -93,92 +93,43 @@ In this project, we demonstrate how to integrate HIP DNN operations into the Mor
 
 ### Environment Variables
 
-To assist in debugging and enhance logging during execution, you can configure the following environment variables:
+Essential HipDNN-specific environment variables:
 
-- **`USE_ORT_API_2_0`**: Enable ONNX Runtime API 2.0 compatibility (set to 1)
-- **`XLNX_ONNX_EP_VERBOSE`**: Enables verbose logging for the Xilinx ONNX Execution Provider, providing detailed insights into its operations.
-- **`DEBUG_LOG_LEVEL`**: Sets the debug log level to control the granularity of logging output for troubleshooting purposes.
-- **`VITISAI_EP_JSON_CONFIG`**: Path to VitisAI EP configuration file
-- **`XLNX_USE_CACHE_DIR`**: Directory for cache storage
-- **`XLNX_USE_CACHE_KEY`**: Cache key for model compilation
+- **`THEROCK_DIST`**: Path to TheRock SDK installation
+- **`HIP_PLATFORM`**: Set to `amd` for AMD GPU support
+- **`DEBUG_LOG_LEVEL`**: Set to `info` or `debug` for detailed logging
 
-Adjust these variables as needed to streamline the debugging process.
+For additional debugging variables and advanced configuration, see:
+- [Linux Build Guide](doc/linux_build_guide.md#environment-variables-reference)
+- [Windows Build Guide](doc/windows_build_guide.md#environment-variables-reference)
 
 ## Testing
 
-### Classification Test
+The project includes a ResNet50 classification test that demonstrates end-to-end ONNX model inference with HipDNN execution provider support.
 
-The project includes a classification test executable that demonstrates ONNX model inference with VitisAI EP support.
-
-#### Quick Start
-
-1. **Pull ONNX model** (Git LFS):
-   ```bash
-   git lfs install
-   git lfs pull
-   ```
-
-2. **Generate input binary**:
-   ```bash
-   cd test/data
-   python image_to_bin.py resnet50.jpg -o input.bin
-   cd ../..
-   ```
-
-3. **Build with classification test**:
-   ```bash
-   cmake -B build -DBUILD_TEST_CLASSIFICATION=ON
-   cmake --build build --target test_classification --config Release
-   ```
-
-4. **Run the test**:
-   ```bash
-   # Windows
-   set DEBUG_LOG_LEVEL=info
-   .\build\test\Release\test_classification.exe test\data\pt_resnet50.onnx test\data\input.bin
-   
-   # Linux/macOS
-   export DEBUG_LOG_LEVEL=info
-   ./build/test/test_classification test/data/pt_resnet50.onnx test/data/input.bin
-   ```
-
-#### Expected Output
-
-```
-================VitisAIExecutionProviderenable_ep = true
-HIP Library Path: C:\Windows\SYSTEM32\amdhip64_7.dll
-Running model...
-done
-batch_index: 0
-score[109]  =  0.997308     text: brain coral,,
-score[973]  =  0.00116773   text: coral reef,,
-score[5]    =  0.000909427  text: electric ray, crampfish, numbfish, torpedo,,
-score[397]  =  0.000158035  text: puffer, pufferfish, blowfish, globefish,,
-score[955]  =  0.000123078  text: jackfruit, jak, jack,,
-```
-
-For detailed instructions, see [doc/resnet50_e2e_test.md](doc/resnet50_e2e_test.md).
-
-#### Test Data
-
-Test data files are located in `test/data/`:
-- `pt_resnet50.onnx` (102 MB) - ResNet50 ONNX model (managed by Git LFS)
-- `resnet50.jpg` (58 KB) - Test image (managed by Git LFS)
-- `input.bin` (602 KB) - Generated input binary (created using image_to_bin.py)
-
-#### Image to Binary Tool
-
-The `image_to_bin.py` tool converts images to binary format for model inference:
+### Quick Test
 
 ```bash
-# Basic usage
-python test/data/image_to_bin.py input.jpg -o output.bin
+# Generate test input
+cd test/data && python image_to_bin.py resnet50.jpg -o input.bin && cd ../..
 
-# Custom size
-python test/data/image_to_bin.py input.jpg --size 256 256 -o output.bin
+# Build and run
+cmake -B build -DBUILD_TEST_CLASSIFICATION=ON
+cmake --build build --target test_classification --config Release
+./build/test/test_classification test/data/pt_resnet50.onnx test/data/input.bin
 ```
 
-See [test/data/README_image_to_bin.md](test/data/README_image_to_bin.md) for more details.
+### Documentation
+
+- **Complete Testing Guide**: [doc/resnet50_e2e_test.md](doc/resnet50_e2e_test.md)
+  - Detailed setup instructions
+  - Expected output and validation
+  - Command-line options
+  - Image preprocessing tool usage
+
+- **Platform-Specific Guides**:
+  - [Linux Build & Testing](doc/linux_build_guide.md)
+  - [Windows Build & Testing](doc/windows_build_guide.md)
 
 ## License
 
