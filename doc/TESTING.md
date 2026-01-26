@@ -8,15 +8,19 @@ This document describes how to run and verify the MLIR integration tests for the
 
 ### Manual Test Execution
 
-To run tests manually:
+To run tests manually from the `onnx-hipdnn-ep` directory:
 
 ```bash
-# Set environment variable to enable CPU device detection for testing
+# 1. Set environment variable to enable CPU device detection for testing
 # Note: MLIR backend is now enabled by default (MorphiZen PR #530)
 set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
 
-# Run the test executable (from project root)
-..\build\morphizen-mlir\bin\ort_integration_test.exe
+# 2. Optional: Set PATH if DLLs are not automatically found
+# This may be needed to locate onnxruntime.dll and other dependencies
+set PATH=..\local\bin;..\build\morphizen-mlir\bin\Release;%PATH%
+
+# 3. Run the test executable
+..\build\morphizen-mlir\bin\Release\ort_integration_test.exe
 ```
 
 **Required Environment Variables:**
@@ -24,6 +28,12 @@ set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE` | `0` | **Enables CPU device detection for testing** (see below) |
+
+**Optional Environment Variables:**
+
+| Variable | Purpose |
+|----------|---------|
+| `PATH` | May need to include `..\local\bin` and `..\build\morphizen-mlir\bin\Release` to find required DLLs |
 
 #### Why MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE is Required
 
