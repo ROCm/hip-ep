@@ -97,7 +97,6 @@ Essential HipDNN-specific environment variables:
 
 - **`THEROCK_DIST`**: Path to TheRock SDK installation
 - **`HIP_PLATFORM`**: Set to `amd` for AMD GPU support
-- **`DEBUG_LOG_LEVEL`**: Set to `info` or `debug` for detailed logging
 
 For additional debugging variables and advanced configuration, see:
 - [Linux Build Guide](doc/linux_build_guide.md#environment-variables-reference)

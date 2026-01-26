@@ -531,8 +531,7 @@ Run a Conv2D test through morphizen-hipdnn to verify integration:
 
 ```bash
 # Set environment for debugging
-export XLNX_ONNX_EP_VERBOSE=1
-export DEBUG_LOG_LEVEL=3
+export MORPHIZEN_DEBUG_HIPDNN=1
 
 # Run test (adjust based on available test models)
 ./test/test_onnx_runner <path_to_test_model.onnx>
@@ -584,12 +583,6 @@ export PATH=$WORKSPACE_DIR/iree/bin:$PATH
 ### Optional Debug Variables
 
 ```bash
-# Enable verbose logging for Xilinx ONNX EP
-export XLNX_ONNX_EP_VERBOSE=1
-
-# Set debug log level
-export DEBUG_LOG_LEVEL=3
-
 # Enable hipDNN debugging
 export MORPHIZEN_DEBUG_HIPDNN=1
 ```
@@ -617,8 +610,6 @@ export ONNXRUNTIME_ROOT=$WORKSPACE_DIR/onnxruntime
 export PATH=$WORKSPACE_DIR/iree/bin:$PATH
 
 # Optional: Debug logging
-# export XLNX_ONNX_EP_VERBOSE=1
-# export DEBUG_LOG_LEVEL=3
 # export MORPHIZEN_DEBUG_HIPDNN=1
 
 echo "Environment configured:"

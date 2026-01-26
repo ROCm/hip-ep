@@ -976,12 +976,6 @@ $env:PATH = "C:\Develop\m\dist\therock\bin;C:\Develop\m\dist\clang\bin;$env:PATH
 ### Optional Debug Variables
 
 ```powershell
-# Enable verbose logging for Xilinx ONNX EP
-$env:XLNX_ONNX_EP_VERBOSE = "1"
-
-# Set debug log level
-$env:DEBUG_LOG_LEVEL = "3"
-
 # Enable hipDNN debugging
 $env:MORPHIZEN_DEBUG_HIPDNN = "1"
 ```
