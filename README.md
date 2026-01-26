@@ -1,6 +1,6 @@
-# morphizen-mlir
+# onnx-hipdnn-ep
 
-A minimal MLIR integration project for the MorphiZen framework.
+A MLIR integration project for the MorphiZen framework.
 
 ## Overview
 
@@ -9,7 +9,7 @@ This project provides a level-1 MLIR pass for the MorphiZen/VAIP framework. It s
 ## Project Structure
 
 ```
-morphizen-mlir/
+onnx-hipdnn-ep/
 ├── CMakeLists.txt              # Root CMake configuration
 ├── README.md                   # This file
 ├── LICENSE                     # Apache 2.0 License
@@ -63,10 +63,10 @@ The build process requires the following dependencies to be built in order:
 ```
 workspace/
 ├── onnxruntime/           # ONNXRuntime source (cloned from GitHub)
-├── onnx-hipdnn-ep/        # This project (morphizen-mlir)
+├── onnx-hipdnn-ep/        # This project
 ├── build/
 │   ├── onnxruntime/       # ONNXRuntime build output
-│   └── morphizen-mlir/    # morphizen-mlir build output
+│   └── onnx-hipdnn-ep/    # onnx-hipdnn-ep build output
 └── local/                 # Installation prefix
     ├── bin/               # DLLs and executables
     ├── lib/               # Libraries
@@ -91,9 +91,9 @@ cd onnxruntime
 cmake --build ../build/onnxruntime/Release/ --target install
 ```
 
-#### Step 2: Build morphizen-mlir
+#### Step 2: Build onnx-hipdnn-ep
 
-Once ONNXRuntime is built, you can build morphizen-mlir. LLVM/MLIR and MorphiZen will be automatically fetched via CMake FetchContent:
+Once ONNXRuntime is built, you can build onnx-hipdnn-ep. LLVM/MLIR and MorphiZen will be automatically fetched via CMake FetchContent:
 
 **Option A: Using Visual Studio generator (recommended for Windows)**
 ```bash
@@ -103,12 +103,12 @@ cd onnx-hipdnn-ep
 cmake -G "Visual Studio 17 2022" -A x64 \
   -DBUILD_SHARED_LIBS=OFF \
   -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL \
-  -S . -B ../build/morphizen-mlir \
+  -S . -B ../build/onnx-hipdnn-ep \
   -DCMAKE_INSTALL_PREFIX=../local \
   -DCMAKE_PREFIX_PATH=$PWD/../local
 
 # Build
-cmake --build ../build/morphizen-mlir --config Release
+cmake --build ../build/onnx-hipdnn-ep --config Release
 ```
 
 **Option B: Using the build script**
@@ -128,10 +128,10 @@ cd onnxruntime
 ./build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --cmake_extra_defines CMAKE_INSTALL_PREFIX=$PWD/../local
 cmake --build ../build/onnxruntime/Release/ --target install
 
-# 2. Build morphizen-mlir (LLVM/MLIR and MorphiZen will be auto-fetched)
+# 2. Build onnx-hipdnn-ep (LLVM/MLIR and MorphiZen will be auto-fetched)
 cd ../onnx-hipdnn-ep
-cmake -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -S . -B ../build/morphizen-mlir -DCMAKE_INSTALL_PREFIX=../local -DCMAKE_PREFIX_PATH=$PWD/../local
-cmake --build ../build/morphizen-mlir --config Release
+cmake -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -S . -B ../build/onnx-hipdnn-ep -DCMAKE_INSTALL_PREFIX=../local -DCMAKE_PREFIX_PATH=$PWD/../local
+cmake --build ../build/onnx-hipdnn-ep --config Release
 ```
 
 ### Optional: Pre-build LLVM/MLIR
@@ -195,24 +195,21 @@ Copy test models and set PATH to include DLL locations:
 
 ```bash
 # Copy test models to build output directory
-cp test/*.onnx ../build/morphizen-mlir/bin/Release/
+cp test/*.onnx ../build/onnx-hipdnn-ep/bin/Release/
 
 # Set PATH to include DLL locations
 # Windows CMD:
-set PATH=..\local\bin;..\build\morphizen-mlir\bin\Release;%PATH%
+set PATH=..\local\bin;..\build\onnx-hipdnn-ep\bin\Release;%PATH%
 
 # Or in Git Bash:
-export PATH="../local/bin:../build/morphizen-mlir/bin/Release:$PATH"
+export PATH="../local/bin:../build/onnx-hipdnn-ep/bin/Release:$PATH"
 ```
 
 ### Step 3: Run Tests
 
 ```bash
 # Change to the test executable directory
-cd ../build/morphizen-mlir/bin/Release
-
-# Set environment variable to activate MLIR backend
-set MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend
+cd ../build/onnx-hipdnn-ep/bin/Release
 
 # Run the test executable
 ./ort_integration_test.exe
@@ -238,13 +235,13 @@ set MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend
 ```bash
 # Generate and copy models
 cd test && python gen_conv_model.py && python gen_conv_gemm_model.py && cd ..
-cp test/*.onnx ../build/morphizen-mlir/bin/Release/
+cp test/*.onnx ../build/onnx-hipdnn-ep/bin/Release/
 
-export PATH="../local/bin:../build/morphizen-mlir/bin/Release:$PATH"
+export PATH="../local/bin:../build/onnx-hipdnn-ep/bin/Release:$PATH"
 
 # Run tests
-cd ../build/morphizen-mlir/bin/Release
-MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend ./ort_integration_test.exe
+cd ../build/onnx-hipdnn-ep/bin/Release
+./ort_integration_test.exe
 ```
 
 ### Test Models
@@ -255,8 +252,6 @@ MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend ./ort_integration_test.exe
 | `conv_gemm_model.onnx` | Conv + Flatten + Gemm | 1x3x8x8 | 1x32 |
 
 ### Environment Variables
-
-The MLIR backend is now **enabled by default** in MorphiZen (as of PR #530), so you no longer need to set environment variables for basic usage.
 
 For debug output:
 ```bash
