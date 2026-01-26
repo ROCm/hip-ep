@@ -256,10 +256,7 @@ MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend ./ort_integration_test.exe
 
 ### Environment Variables
 
-To activate MLIR backend:
-```bash
-set MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend
-```
+The MLIR backend is now **enabled by default** in MorphiZen (as of PR #530), so you no longer need to set environment variables for basic usage.
 
 For debug output:
 ```bash
