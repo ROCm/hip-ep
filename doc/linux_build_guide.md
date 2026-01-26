@@ -1022,7 +1022,7 @@ After completing this guide:
 
 ## Windows Build Reference
 
-For Windows builds, see [HIPDNNEP_E2E_test_Windows.md](HIPDNNEP_E2E_test_Windows.md).
+For Windows builds, see [Windows Build Guide](windows_build_guide.md).
 
 ### Sample Windows Build Output
 

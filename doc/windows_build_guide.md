@@ -2,7 +2,7 @@
 
 This document provides complete step-by-step instructions for building and testing hipDNNEP and onnx-hipdnn-ep on Windows with AMD ROCm GPU.
 
-> **Note**: This is the Windows adaptation of `HIPDNNEP_E2E_test.md`. Key differences from Linux:
+> **Note**: This is the Windows adaptation of the Linux build guide. Key differences from Linux:
 > - No SSH required (local execution)
 > - PowerShell instead of bash
 > - winget instead of apt
