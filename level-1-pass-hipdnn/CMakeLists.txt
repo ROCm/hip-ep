@@ -39,7 +39,6 @@ target_link_libraries(${LIB_NAME} PUBLIC
 target_include_directories(${LIB_NAME} PRIVATE
 	include
 	${CMAKE_CURRENT_BINARY_DIR}
-	${CMAKE_CURRENT_SOURCE_DIR}/../external/hipDNNEP/include
 	${THEROCK_DIST}/include
 )
 target_compile_definitions(${LIB_NAME} PRIVATE 

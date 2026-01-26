@@ -46,7 +46,6 @@ add_library(${LIB_NAME} STATIC
 set_target_properties(${LIB_NAME} PROPERTIES FOLDER "hipdnn")
 target_include_directories(${LIB_NAME} PRIVATE 
   include
-  ${CMAKE_CURRENT_SOURCE_DIR}/../external/hipDNNEP/include
   ${THEROCK_DIST}/include
 )
 # TODO: remove VAIP_CUSTOM_OP=1
