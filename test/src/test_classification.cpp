@@ -50,7 +50,7 @@ DEF_ENV_PARAM_2(XLNX_ENABLE_EP_SHARED_CONTEXT, "", std::string);
 DEF_ENV_PARAM_2(ENABLE_CACHE_FILE_IO_IN_MEM, "", std::string);
 DEF_ENV_PARAM(USE_ORT_API_2_0, "1");
 DEF_ENV_PARAM_2(MORPHIZEN_VITISAI_EP, "onnxruntime_vitisai_ep.dll", std::string);
-DEF_ENV_PARAM_2(MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND, "mlir-backend", std::string);
+DEF_ENV_PARAM_2(MORPHIZEN_ORT_BRIDGE_BACKEND, "mlir-backend", std::string);
 DEF_ENV_PARAM_2(ORT_LOG_LEVEL, "error", std::string);
 DEF_ENV_PARAM_2(EP_KREGISTERATIONNAME, "VitisAIExecutionProvider", std::string);
 
@@ -199,7 +199,7 @@ void run_classification(const std::filesystem::path& model_path,
     std::cout << "Using ORT API 2.0 create session with VitisAI EP, "
                  "RegisterExecutionProviderLibrary: "
               << ENV_PARAM(MORPHIZEN_VITISAI_EP) << " ort_bridge_backend: " 
-              << ENV_PARAM(MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND) << std::endl;
+              << ENV_PARAM(MORPHIZEN_ORT_BRIDGE_BACKEND) << std::endl;
     auto status = Ort::GetApi().RegisterExecutionProviderLibrary(
         env, kRegistrationName.c_str(), library_path.c_str());
     CHECK(status == nullptr,
