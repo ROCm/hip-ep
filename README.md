@@ -87,7 +87,7 @@ In this project, we demonstrate how to integrate HIP DNN operations into the Mor
 - **custom-op-hipdnn**: Custom operator implementations using HIP
 - **proto**: Protocol buffer definitions
 - **test**: Test suite for validation
-  - **test_classification**: Classification test executable for ONNX models (see [test/README_CLASSIFICATION.md](test/README_CLASSIFICATION.md))
+  - **test_classification**: Classification test executable for ONNX models (see [doc/resnet50_e2e_test.md](doc/resnet50_e2e_test.md))
 
 ### Environment Variables
 
@@ -132,12 +132,10 @@ The project includes a classification test executable that demonstrates ONNX mod
 4. **Run the test**:
    ```bash
    # Windows
-   set USE_ORT_API_2_0=1
    set DEBUG_LOG_LEVEL=info
    .\build\test\Release\test_classification.exe test\data\pt_resnet50.onnx test\data\input.bin
    
    # Linux/macOS
-   export USE_ORT_API_2_0=1
    export DEBUG_LOG_LEVEL=info
    ./build/test/test_classification test/data/pt_resnet50.onnx test/data/input.bin
    ```
