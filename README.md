@@ -45,8 +45,7 @@ morphizen-mlir/
 
 - CMake 3.29 or later
 - Visual Studio 2022
-- Python 3
-- Ninja build system
+- Python 3 (with onnx package: `pip install onnx`)
 - Git
 
 ### Build Dependencies
@@ -55,9 +54,24 @@ The build process requires the following dependencies to be built in order:
 
 1. **ONNXRuntime** (required - must be built first)
 2. **LLVM/MLIR** (optional pre-build - can be auto-fetched via FetchContent or pre-built manually)
-3. **MorphiZen** (automatically fetched via CMake FetchContent)
+3. **MorphiZen** (automatically fetched via CMake FetchContent from ../MorphiZen)
 
 **Note:** LLVM/MLIR pre-build is optional. The build system will automatically fetch and build LLVM via FetchContent if not pre-installed. However, pre-building can save time on subsequent builds.
+
+### Recommended Directory Layout
+
+```
+workspace/
+├── onnxruntime/           # ONNXRuntime source (cloned from GitHub)
+├── onnx-hipdnn-ep/        # This project (morphizen-mlir)
+├── build/
+│   ├── onnxruntime/       # ONNXRuntime build output
+│   └── morphizen-mlir/    # morphizen-mlir build output
+└── local/                 # Installation prefix
+    ├── bin/               # DLLs and executables
+    ├── lib/               # Libraries
+    └── include/           # Headers
+```
 
 ### Step-by-Step Build Instructions
 
@@ -66,7 +80,7 @@ The build process requires the following dependencies to be built in order:
 ONNXRuntime must be built first as it's a core dependency:
 
 ```bash
-# Clone ONNXRuntime
+# Clone ONNXRuntime (from workspace root)
 git clone https://github.com/Microsoft/onnxruntime.git
 cd onnxruntime
 
@@ -81,33 +95,43 @@ cmake --build ../build/onnxruntime/Release/ --target install
 
 Once ONNXRuntime is built, you can build morphizen-mlir. LLVM/MLIR and MorphiZen will be automatically fetched via CMake FetchContent:
 
-**Option A: Using the build script (recommended)**
+**Option A: Using Visual Studio generator (recommended for Windows)**
+```bash
+cd onnx-hipdnn-ep
+
+# Configure with Visual Studio generator
+cmake -G "Visual Studio 17 2022" -A x64 \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL \
+  -S . -B ../build/morphizen-mlir \
+  -DCMAKE_INSTALL_PREFIX=../local \
+  -DCMAKE_PREFIX_PATH=$PWD/../local
+
+# Build
+cmake --build ../build/morphizen-mlir --config Release
+```
+
+**Option B: Using the build script**
 ```bash
 ./build.bat
 ```
 
-**Option B: Manual CMake commands**
-```bash
-# Generate CMake configuration
-cmake -DBUILD_SHARED_LIBS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -S . -B ../build/morphizen-mlir -DCMAKE_INSTALL_PREFIX=../local -DCMAKE_PREFIX_PATH=../local
-
-# Build the project
-cmake --build ../build/morphizen-mlir --config Release --target install 
-```
-
-**Note:** MorphiZen framework will be automatically fetched via CMake FetchContent during this step.
+**Note:** The first build will take a long time (1-3 hours) as LLVM/MLIR is fetched and compiled. Subsequent builds are much faster.
 
 ### Quick Build Summary
 
 ```bash
-# 1. Build ONNXRuntime (in parent directory)
-cd ../onnxruntime
+# From workspace root directory:
+
+# 1. Build ONNXRuntime
+cd onnxruntime
 ./build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --cmake_extra_defines CMAKE_INSTALL_PREFIX=$PWD/../local
 cmake --build ../build/onnxruntime/Release/ --target install
 
 # 2. Build morphizen-mlir (LLVM/MLIR and MorphiZen will be auto-fetched)
-cd ../morphizen-mlir
-./build.bat
+cd ../onnx-hipdnn-ep
+cmake -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -S . -B ../build/morphizen-mlir -DCMAKE_INSTALL_PREFIX=../local -DCMAKE_PREFIX_PATH=$PWD/../local
+cmake --build ../build/morphizen-mlir --config Release
 ```
 
 ### Optional: Pre-build LLVM/MLIR
@@ -151,31 +175,87 @@ The Level-1 MLIR pass (`level-1-pass-mlir/src/pass_main.cpp`) performs:
 3. Walks all operations in the module
 4. Prints ModuleOp to stdout with generic form, debug info, and value users
 
-### Testing
+## Testing
 
 The project includes comprehensive ORT integration tests. For detailed testing instructions, see [doc/TESTING.md](doc/TESTING.md).
 
-**Quick Start:**
+### Step 1: Generate Test Models
+
 ```bash
+# From onnx-hipdnn-ep directory
+cd test
+python gen_conv_model.py          # Generate conv_model.onnx
+python gen_conv_gemm_model.py     # Generate conv_gemm_model.onnx
+cd ..
+```
+
+### Step 2: Prepare Test Environment
+
+Copy required files to the test executable directory:
+
+```bash
+# Copy test models to build output directory
+cp test/*.onnx ../build/morphizen-mlir/bin/Release/
+
+# Copy ORT runtime DLLs
+cp ../local/bin/onnxruntime.dll ../build/morphizen-mlir/bin/Release/
+cp ../local/bin/onnxruntime_providers_shared.dll ../build/morphizen-mlir/bin/Release/
+
+# Copy VitisAI EP DLL with expected name
+cp ../build/morphizen-mlir/bin/Release/onnxruntime_vitisai_ep.dll ../build/morphizen-mlir/bin/Release/onnxruntime_providers_vitisai.dll
+```
+
+### Step 3: Run Tests
+
+```bash
+# Change to the test executable directory
+cd ../build/morphizen-mlir/bin/Release
+
 # Set environment variable to activate MLIR backend
 set MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend
 
 # Run the test executable
-D:\Develop\m\build\morphizen-mlir\bin\ort_integration_test.exe
+./ort_integration_test.exe
 ```
 
-**Test Models:**
-- `conv_model.onnx` - Simple Conv operation
-- `conv_gemm_model.onnx` - Conv + Flatten + Gemm pipeline
+### Expected Test Results
 
-**Generate Test Models:**
+```
+[==========] Running 3 tests from 1 test suite.
+[----------] 3 tests from OrtIntegrationTest
+[ RUN      ] OrtIntegrationTest.LoadVitisAIProvider
+[       OK ] OrtIntegrationTest.LoadVitisAIProvider
+[ RUN      ] OrtIntegrationTest.CreateSessionWithVitisAIProvider
+[       OK ] OrtIntegrationTest.CreateSessionWithVitisAIProvider
+[ RUN      ] OrtIntegrationTest.CreateSessionWithConvGemmModel
+[       OK ] OrtIntegrationTest.CreateSessionWithConvGemmModel
+[----------] 3 tests from OrtIntegrationTest
+[  PASSED  ] 3 tests.
+```
+
+### Quick Test Summary (from onnx-hipdnn-ep directory)
+
 ```bash
-cd test
-python gen_conv_model.py          # Generate conv_model.onnx
-python gen_conv_gemm_model.py     # Generate conv_gemm_model.onnx
+# Generate and copy models
+cd test && python gen_conv_model.py && python gen_conv_gemm_model.py && cd ..
+cp test/*.onnx ../build/morphizen-mlir/bin/Release/
+
+# Copy DLLs
+cp ../local/bin/onnxruntime.dll ../build/morphizen-mlir/bin/Release/
+cp ../local/bin/onnxruntime_providers_shared.dll ../build/morphizen-mlir/bin/Release/
+cp ../build/morphizen-mlir/bin/Release/onnxruntime_vitisai_ep.dll ../build/morphizen-mlir/bin/Release/onnxruntime_providers_vitisai.dll
+
+# Run tests
+cd ../build/morphizen-mlir/bin/Release
+MORPHIZEN_ORT_BRIDGE_UNITTEST_BACKEND=mlir-backend ./ort_integration_test.exe
 ```
 
-For complete testing documentation including expected ModuleOp output examples, see [doc/TESTING.md](doc/TESTING.md).
+### Test Models
+
+| Model | Description | Input Shape | Output Shape |
+|-------|-------------|-------------|--------------|
+| `conv_model.onnx` | Simple Conv operation | 1x3x8x8 | 1x16x8x8 |
+| `conv_gemm_model.onnx` | Conv + Flatten + Gemm | 1x3x8x8 | 1x32 |
 
 ### Environment Variables
 
