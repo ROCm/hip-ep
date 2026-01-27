@@ -59,10 +59,10 @@ If conflicts occur:
 
 ### Step 5: Push to Remote (Sync)
 
-After rebasing, push the updated branch to remote:
+After rebasing, push the updated branch to fork:
 
 ```bash
-git push --force-with-lease
+git push --force-with-lease fork
 ```
 
 Use `--force-with-lease` instead of `--force` for safety - it will fail if someone else pushed changes you don't have.
@@ -72,7 +72,7 @@ Use `--force-with-lease` instead of `--force` for safety - it will fail if someo
 For switching to a PR and syncing in one operation:
 
 ```powershell
-git stash push -m "WIP: auto-stash"; git fetch origin; gh pr checkout <PR_NUMBER>; git rebase origin/main; git push --force-with-lease
+git stash push -m "WIP: auto-stash"; git fetch origin; gh pr checkout <PR_NUMBER>; git rebase origin/main; git push --force-with-lease fork
 ```
 
 ## Check PR Status
@@ -106,8 +106,8 @@ git checkout main
 # Delete local branch
 git branch -d <branch-name>
 
-# Delete remote branch (if not auto-deleted)
-git push origin --delete <branch-name>
+# Delete remote branch from fork (if not auto-deleted)
+git push fork --delete <branch-name>
 
 # Prune stale remote-tracking refs
 git fetch --prune
