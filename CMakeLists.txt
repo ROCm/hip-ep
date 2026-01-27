@@ -13,20 +13,6 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/compiler_options.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/morphizen_options.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/extra_functions.cmake)
-# loads the functions precompile_version_rc and add_version_rc_to_listed_targets
-# Make ryzenai_bin_metadata submodule optional
-set(ryzenai_version_rc_file "" CACHE INTERNAL "Version resource file from ryzenai_bin_metadata")
-if(morphizen_ENABLE_RYZENAI_BIN_METADATA)
-  if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/3rd-party/ryzenai_bin_metadata)
-    list(APPEND CMAKE_MODULE_PATH
-      ${CMAKE_CURRENT_SOURCE_DIR}/3rd-party/ryzenai_bin_metadata
-    )
-    include(binMetaData)
-    binmetadata_precompile_version_rc(3rd-party/ryzenai_bin_metadata)
-  else()
-    message(WARNING "morphizen_ENABLE_RYZENAI_BIN_METADATA is ON but submodule 3rd-party/ryzenai_bin_metadata is not found. Version resource generation will be disabled.")
-  endif()
-endif()
 
 # Add utility library first (other projects may depend on it)
 add_subdirectory(morphizen-utils)
