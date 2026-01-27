@@ -131,6 +131,10 @@ For detailed step-by-step workflows, see `.clinerules/workflows/`:
 
 ---
 
+## Build Environment (Windows/Git Bash)
+
+**CRITICAL**: Source `tools/setup_msvc_env_bash.sh` in first Bash command OR use wrappers: `tools/cmake-msvc`, `tools/build-msvc` (auto-setup). See `doc/msvc-bash-setup.md`
+
 ## Critical Reminders
 
 - **Small, frequent commits** are preferred over large, infrequent ones

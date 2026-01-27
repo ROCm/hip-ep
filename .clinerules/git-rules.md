@@ -4,6 +4,17 @@ Licensed under the MIT License.
 -->
 # Git Workflow Rules
 
+## Quick Checklist
+
+- [ ] Check branch: `git branch --show-current`
+- [ ] Create feature branch if on main: `git checkout -b feature/<name>`
+- [ ] Make changes (no binaries, no temp files)
+- [ ] Stage specific files: `git add <file>` (avoid `git add -A`)
+- [ ] Verify no binaries: `git diff --cached --numstat`
+- [ ] Commit: `feat:`, `fix:`, `docs:`, etc.
+- [ ] Push to fork: `git push fork <branch>`
+- [ ] Create PR: `gh pr create`
+
 ## Branch Protection
 
 **NEVER** commit or push directly to `main` branch. Always use Pull Requests.
