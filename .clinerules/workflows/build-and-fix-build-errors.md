@@ -4,6 +4,32 @@ Licensed under the MIT License.
 -->
 Please build the MorphiZen project and fix any build errors that occur.
 
+## CRITICAL: MSVC Environment Setup for Bash
+
+**BEFORE ANY BUILD COMMAND in Git Bash**, you MUST set up MSVC environment:
+
+```bash
+source tools/setup_msvc_env_bash.sh
+```
+
+This is required for:
+- CMake configuration (detects compiler)
+- Building (cl.exe, link.exe)
+- Running tests
+
+**Pattern for first command**:
+```bash
+source tools/setup_msvc_env_bash.sh && cmake --preset "Morphizen Ninja"
+```
+
+Environment persists for all subsequent Bash commands in the session.
+
+**Alternative: Use wrapper scripts** (auto-setup):
+```bash
+tools/cmake-msvc --preset "Morphizen Ninja"
+tools/build-msvc "C:/Develop/m/build/morphizen.ninja" --config Debug --parallel
+```
+
 ## Build Settings (Remember these):
 - **Build Type**: Debug
 - **Environment Variables**:
@@ -13,6 +39,26 @@ Please build the MorphiZen project and fix any build errors that occur.
 - **CMake Preset**: "Morphizen Ninja"
 
 ## Build Steps:
+
+### For Git Bash (Recommended):
+
+1. Setup MSVC environment (FIRST COMMAND):
+   ```bash
+   source tools/setup_msvc_env_bash.sh
+   ```
+
+2. Configure with CMake preset:
+   ```bash
+   cmake --preset "Morphizen Ninja"
+   ```
+
+3. Build the project:
+   ```bash
+   cmake --build "C:/Develop/m/build/morphizen.ninja" --config Debug --parallel
+   ```
+
+### For PowerShell:
+
 1. Set environment variables:
    ```powershell
    $env:VAI_RT_WORKSPACE = "c:/Develop/m/source"
@@ -31,10 +77,12 @@ Please build the MorphiZen project and fix any build errors that occur.
    cmake --build "C:/Develop/m/build/morphizen.ninja" --config Debug --parallel
    ```
 
-4. If there are any build errors:
-   - Read the error messages
-   - Fix the errors in the source files
-   - Re-run the build command
+### Fixing Build Errors:
+
+If there are any build errors:
+- Read the error messages
+- Fix the errors in the source files
+- Re-run the build command
 
 ## Expected Outputs:
 - `onnxruntime_vitisai_ep.dll` - Main MorphiZen library
