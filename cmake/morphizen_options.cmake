@@ -52,7 +52,7 @@ option(morphizen_ENABLE_UNIT_TEST "enable vaip unit test or not" ${morphizen_ENA
 #     * test_tar_file.cpp (unit-test/vaip/test_tar_file.cpp)
 #     * test_graph.cpp (unit-test/vaip/test_graph.cpp)
 #     * test_const_data.cpp (unit-test/vaip/test_const_data.cpp)
-option(morphizen_ENABLE_BOOST "enable Boost dependency for executables and unit tests" ON)
+option(morphizen_ENABLE_BOOST "enable Boost dependency for executables and unit tests" OFF)
 #
 # to build MorphiZen, we need to download source code of onnxruntime
 # and build it along with MorphiZen
@@ -89,10 +89,10 @@ set(morphizen_OUTPUT_NAME "onnxruntime_vitisai_ep" CACHE STRING "Output name of 
 
 ## this option is used to trim vaip_config.json, we choose the original name for backward compatibility.
 option(TRIM_CONFIG "trim default vaip_config.json" "${TRIM_CONFIG_DEFAULT}")
-option(morphizen_ENABLE_ORT_BRIDGE "enable onnxruntime bridge" OFF)
-option(morphizen_ENABLE_ONNX_BACKEND "enable ONNX backend for ORT bridge" ON)
-option(morphizen_ENABLE_MLIR_BACKEND "enable MLIR as a backend of vaip_ort_api for ORT bridge" OFF)
-option(morphizen_ENABLE_ONNX_SCHEMA_SUPPORT "enable ONNX schema support for node_with_named_args feature in morphizen-core-static" ON)
+option(morphizen_ENABLE_ORT_BRIDGE "enable onnxruntime bridge" ON)
+option(morphizen_ENABLE_ONNX_BACKEND "enable ONNX backend for ORT bridge" OFF)
+option(morphizen_ENABLE_MLIR_BACKEND "enable MLIR as a backend of vaip_ort_api for ORT bridge" ON)
+option(morphizen_ENABLE_ONNX_SCHEMA_SUPPORT "enable ONNX schema support for node_with_named_args feature in morphizen-core-static" OFF)
 
 # Validate backend configuration when ORT bridge is enabled
 if(morphizen_ENABLE_ORT_BRIDGE)

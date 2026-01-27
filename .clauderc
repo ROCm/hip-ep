@@ -1,0 +1,736 @@
+<!--
+Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
+
+# MorphiZen Project Rules for Claude Code
+
+This file contains project-specific rules and workflows for Claude Code when working on the MorphiZen project.
+
+---
+
+## Git Workflow Rules
+
+### Branch Protection
+
+**NEVER** commit or push directly to `main` branch. Always use Pull Requests.
+
+### Required Workflow
+
+1. Create a feature branch from `main`
+2. Make changes on the feature branch
+3. **Commit and push frequently** - Small, incremental commits are preferred over large, infrequent ones
+4. Push the feature branch and create a Pull Request
+5. Wait for review and approval before merging
+
+### Before Any Git Push
+
+- Verify current branch: `git branch --show-current`
+- If on `main`, switch to a feature branch first
+- Never run `git push origin main`
+
+### Pull Request Description Updates
+
+Update PR description/title **when the scope, approach, or status of the work changes meaningfully** - not for every push.
+
+#### When to Update PR Description/Title:
+- **Scope changes** - The PR now covers more/different functionality than originally described
+- **Significant refactoring** - The approach has changed meaningfully
+- **Checklist updates** - Mark items as done or add new requirements
+- **Address review feedback** - Document how you responded to reviewer comments
+- **Ready for review** - When moving from Draft to Ready state
+
+#### When NOT to Update:
+- Small bug fixes within the same scope
+- Code style/formatting changes
+- Adding tests for existing functionality
+- Minor refactoring that doesn't change intent
+
+---
+
+## PowerShell Command Rules
+
+- Do NOT use `&&` - use `;` to chain: `cd build; cmake ..`
+- Append `; echo "=== DONE ==="` to detect command completion
+- Use `; if ($?) { echo "=== OK ===" } else { echo "=== FAIL ===" }` for status
+
+### If command appears hung:
+- Check VS Code terminal directly
+- Ctrl+C to cancel, then inform the user
+
+---
+
+## Build Configuration and Workflow
+
+### Build Settings (Remember these):
+- **Build Type**: Debug
+- **Environment Variables**:
+  - `VAI_RT_WORKSPACE=c:/Develop/m/source`
+  - `VAI_RT_BUILD_DIR=C:/Develop/m/build`
+  - `VAI_RT_PREFIX=C:/Develop/m/local`
+- **CMake Preset**: "Morphizen Ninja"
+
+### Build Steps:
+1. Set environment variables:
+   ```powershell
+   $env:VAI_RT_WORKSPACE = "c:/Develop/m/source"
+   $env:VAI_RT_BUILD_DIR = "C:/Develop/m/build"
+   $env:VAI_RT_PREFIX = "C:/Develop/m/local"
+   ```
+
+2. Configure with CMake preset:
+   ```powershell
+   cd C:\Develop\m\source\MorphiZen
+   cmake --preset "Morphizen Ninja"
+   ```
+
+3. Build the project:
+   ```powershell
+   cmake --build "C:/Develop/m/build/morphizen.ninja" --config Debug --parallel
+   ```
+
+4. If there are any build errors:
+   - Read the error messages
+   - Fix the errors in the source files
+   - Re-run the build command
+
+### Expected Outputs:
+- `onnxruntime_vitisai_ep.dll` - Main MorphiZen library
+- `morphizen-graph-opt.exe` - Graph optimization tool
+- `morphizen-unit-tests.exe` - Unit test executable
+- `ort-bridge-test.exe` - ORT bridge tests
+- Various other tools and libraries
+
+### Notes:
+- The project uses Ninja generator for faster builds
+- Dependencies are automatically fetched via CMake FetchContent
+- Build output goes to `C:/Develop/m/build/morphizen.ninja/bin/`
+- The preset includes `morphizen_DEMO_DIR` and other configurations from CMakePresets.json
+
+### MSVC Environment Setup (IMPORTANT):
+If the build fails with errors like "Cannot open include file: 'cstddef'" or other missing standard headers, you need to initialize the Visual Studio environment first:
+
+```cmd
+cmd /c "call ""C:\msvsn2022\VC\Auxiliary\Build\vcvars64.bat"" && cd /d C:\Develop\m\source\MorphiZen && cmake --build ""C:/Develop/m/build/morphizen.ninja"" --config Debug --parallel"
+```
+
+This sets up the MSVC compiler environment including:
+- Standard library include paths
+- Windows SDK paths
+- Required compiler environment variables
+
+### Verifying Build Outputs:
+Use PowerShell cmdlets (NOT CMD-style commands) to list build outputs:
+```powershell
+# CORRECT - use Get-ChildItem
+Get-ChildItem "C:\Develop\m\build\morphizen.ninja\bin" -Name
+
+# WRONG - do NOT use CMD-style dir /b (causes errors in PowerShell)
+# dir "C:\Develop\m\build\morphizen.ninja\bin\" /b
+```
+
+---
+
+## Git Commit and Sync Workflow
+
+### Prerequisites (One-time Setup)
+
+Before using this workflow, ensure pre-commit is set up:
+
+#### Install Dependencies
+```bash
+pip install -r requirements-lintrunner.txt
+```
+
+#### Install Pre-commit Hooks
+```bash
+pre-commit install
+```
+
+#### Initialize Lintrunner
+```bash
+lintrunner init
+```
+
+For more details, see [doc/pre-commit.md](doc/pre-commit.md).
+
+### Pre-flight Checks
+
+#### Step 1: Verify Current Branch
+
+**CRITICAL:** Never commit directly to `main` branch.
+
+```bash
+git branch --show-current
+```
+
+If on `main`, create or switch to a feature branch first:
+```bash
+git checkout -b feature/<descriptive-name>
+# or switch to existing branch
+git checkout <branch-name>
+```
+
+#### Step 2: Check Repository Status
+
+```bash
+git status
+```
+
+Review:
+- Staged changes (green)
+- Unstaged changes (red)
+- Untracked files
+
+### Commit Changes
+
+#### Step 3: Stage Changes
+
+Stage specific files:
+```bash
+git add <file1> <file2>
+```
+
+Stage all changes (use with caution):
+```bash
+git add -A
+```
+
+Interactive staging (recommended for selective commits):
+```bash
+git add -p
+```
+
+#### Step 4: Review Staged Changes
+
+```bash
+git diff --staged
+```
+
+Verify only intended changes are staged before committing.
+
+#### Step 5: Commit with Message
+
+```bash
+git commit -m "<type>: <brief description>"
+```
+
+Commit message conventions:
+- `feat:` - New feature
+- `fix:` - Bug fix
+- `docs:` - Documentation changes
+- `refactor:` - Code refactoring
+- `test:` - Adding or updating tests
+- `chore:` - Maintenance tasks
+- `style:` - Code style/formatting changes
+
+Examples:
+```bash
+git commit -m "feat: add new graph optimization pass"
+git commit -m "fix: resolve memory leak in plugin loader"
+git commit -m "docs: update README with build instructions"
+```
+
+### Sync with Remote
+
+#### Step 6: Fetch Remote Changes
+
+```bash
+git fetch origin
+```
+
+Check if there are upstream changes:
+```bash
+git log HEAD..origin/main --oneline
+```
+
+#### Step 7: Sync with Main Branch
+
+Option A - Rebase (preferred for cleaner history):
+```bash
+git fetch origin main
+git rebase origin/main
+```
+
+Option B - Merge:
+```bash
+git fetch origin main
+git merge origin/main
+```
+
+#### Step 8: Handle Conflicts (if any)
+
+If conflicts occur during rebase/merge:
+
+1. Check conflicting files:
+   ```bash
+   git status
+   ```
+
+2. Resolve conflicts in each file (look for `<<<<<<<`, `=======`, `>>>>>>>` markers)
+
+3. After resolving, stage the fixed files:
+   ```bash
+   git add <resolved-file>
+   ```
+
+4. Continue rebase/merge:
+   ```bash
+   git rebase --continue
+   # or
+   git merge --continue
+   ```
+
+5. If needed, abort and start over:
+   ```bash
+   git rebase --abort
+   # or
+   git merge --abort
+   ```
+
+#### Step 9: Push Changes
+
+Push to remote (feature branch):
+```bash
+git push origin <branch-name>
+```
+
+If branch doesn't exist on remote:
+```bash
+git push -u origin <branch-name>
+```
+
+If rebase changed history (force push with lease for safety):
+```bash
+git push --force-with-lease origin <branch-name>
+```
+
+#### Step 10: Create or Update Pull Request
+
+If no PR exists for this branch, create one. **On Windows, use `--body-file` to avoid quoting issues:**
+
+1. Create a temporary file `pr_body.md` with the PR description:
+```markdown
+# Summary of Changes
+
+* <High-level description of what this request adds/changes/improves/fixes>
+
+Closes #<issue-number> (if applicable)
+
+# Motivation
+
+<Why this change is needed/useful>
+
+# Implementation
+
+<Any implementation details or design choices worth noting>
+```
+
+2. Create the PR using the file:
+```bash
+gh pr create --title "<type>: <brief description>" --body-file pr_body.md
+```
+
+3. Delete the temporary file after PR creation.
+
+To update an existing PR description:
+```bash
+gh pr edit <PR-number> --body-file pr_body.md
+```
+
+If a PR already exists, the push will automatically update it (no need to edit unless scope changed).
+
+### Quick Workflow Summary
+
+For a typical commit and sync cycle:
+
+```bash
+# 1. Check branch (must NOT be main)
+git branch --show-current
+
+# 2. Stage changes
+git add -A
+
+# 3. Commit
+git commit -m "feat: your change description"
+
+# 4. Sync with main
+git fetch origin main
+git rebase origin/main
+
+# 5. Push
+git push origin <branch-name>
+
+# 6. Create PR (if not exists) - use --body-file on Windows to avoid quoting issues
+# First write PR body to pr_body.md, then:
+gh pr create --title "feat: your change description" --body-file pr_body.md
+```
+
+### Pre-commit Hook Behavior
+
+When you run `git commit`, pre-commit hooks run automatically and may:
+- Fix trailing whitespace and line endings
+- Add license headers to new files
+- Run lintrunner to apply code formatting patches
+
+**If hooks modify files**, the commit will fail. Simply re-stage the modified files and commit again:
+
+```bash
+git add -A
+git commit -m "your message"
+```
+
+#### Manual Pre-commit Commands
+
+Run hooks on all files (useful for first-time setup):
+```bash
+pre-commit run --all-files
+```
+
+Skip hooks if absolutely needed (use sparingly):
+```bash
+git commit --no-verify -m "message"
+```
+
+---
+
+## Switch to Main Branch Workflow
+
+Switch to the main branch and update it with the latest remote changes.
+
+### Step 1: Stash Local Changes (if any)
+
+If the working directory is dirty (has uncommitted changes), stash them first:
+
+```bash
+git stash push -m "WIP: stashed before switching to main"
+```
+
+### Step 2: Switch to Main Branch
+
+```bash
+git checkout main
+```
+
+### Step 3: Sync with Remote
+
+Fetch the latest changes and reset to match origin/main exactly:
+
+```bash
+git fetch origin main
+git reset --hard origin/main
+```
+
+This ensures your local main branch and working directory are in perfect sync with the remote, discarding any local-only commits on main.
+
+### Quick Command
+
+For stashing, switching, and syncing in one operation (PowerShell):
+
+```powershell
+git stash push -m "WIP: auto-stash"; git checkout main; git fetch origin main; git reset --hard origin/main
+```
+
+### When to Use
+
+- Before starting a new feature branch (to branch from latest main)
+- When you need to review the current state of main
+- After completing work on a feature branch and merging via PR
+
+### Restoring Stashed Changes
+
+After returning to your feature branch, restore stashed changes:
+
+```bash
+git checkout <your-branch>
+git stash pop
+```
+
+To list all stashes:
+
+```bash
+git stash list
+```
+
+---
+
+## Switch to Pull Request Branch Workflow
+
+Switch to a PR branch, rebase on latest main, and sync with remote.
+
+### Step 1: Check Current Branch
+
+First, identify what branch you're currently on:
+
+```bash
+git branch --show-current
+```
+
+- If already on the target PR branch → skip to Step 4 (fetch and rebase)
+- If on a different branch → continue to Step 2
+
+### Step 2: Check for Uncommitted Changes
+
+```bash
+git status --short
+```
+
+If there are uncommitted changes (output is not empty), stash them:
+
+```bash
+git stash push -m "WIP: stashed before switching to PR"
+```
+
+### Step 3: Fetch Latest and Checkout PR Branch
+
+Fetch all remote updates and checkout the PR:
+
+```bash
+git fetch origin
+gh pr checkout <PR_NUMBER>
+```
+
+The `gh pr checkout` command fetches the PR branch and switches to it in one step.
+
+### Step 4: Rebase on Latest Main
+
+Update the PR branch with the latest changes from main:
+
+```bash
+git fetch origin main
+git rebase origin/main
+```
+
+If conflicts occur:
+1. Resolve conflicts in each file
+2. Stage resolved files: `git add <file>`
+3. Continue rebase: `git rebase --continue`
+4. Or abort if needed: `git rebase --abort`
+
+### Step 5: Push to Remote (Sync)
+
+After rebasing, push the updated branch to remote:
+
+```bash
+git push --force-with-lease
+```
+
+Use `--force-with-lease` instead of `--force` for safety - it will fail if someone else pushed changes you don't have.
+
+### Quick Command (PowerShell)
+
+For switching to a PR and syncing in one operation:
+
+```powershell
+git stash push -m "WIP: auto-stash"; git fetch origin; gh pr checkout <PR_NUMBER>; git rebase origin/main; git push --force-with-lease
+```
+
+### Check PR Status
+
+View the current branch's PR status:
+
+```bash
+gh pr view --json state,merged,title
+```
+
+View a specific PR:
+
+```bash
+gh pr view <PR_NUMBER> --json state,merged,mergedAt
+```
+
+List your open PRs:
+
+```bash
+gh pr list --author @me --state open
+```
+
+### Clean Up After Merge
+
+After a PR is merged, delete the local and remote branches:
+
+```bash
+# Switch to main first
+git checkout main
+
+# Delete local branch
+git branch -d <branch-name>
+
+# Delete remote branch (if not auto-deleted)
+git push origin --delete <branch-name>
+
+# Prune stale remote-tracking refs
+git fetch --prune
+```
+
+---
+
+## Pull Request Review Workflow
+
+Review a GitHub pull request using the GitHub CLI (gh).
+
+### Step 1: Get PR Number
+
+Ask the user for the PR number to review, or extract it from context.
+
+### Step 2: Analyze the PR
+
+#### View PR Details
+```bash
+gh pr view <PR_NUMBER>
+```
+
+#### View the Diff
+```bash
+gh pr diff <PR_NUMBER>
+```
+
+#### Check CI Status
+```bash
+gh pr checks <PR_NUMBER>
+```
+
+#### View Files Changed
+```bash
+gh pr view <PR_NUMBER> --json files --jq '.files[].path'
+```
+
+#### View Commit Messages
+```bash
+gh pr view <PR_NUMBER> --json commits --jq '.commits[].messageHeadline'
+```
+
+#### Get Line Count Changes
+```bash
+gh pr view <PR_NUMBER> --json additions,deletions --jq '"+\(.additions) -\(.deletions)"'
+```
+
+### Step 3: Review the PR
+
+#### Review the Description
+Analyze the PR description for:
+- Clear explanation of what the PR does and why
+- Compliance with PR template (if applicable)
+- Links to related issues or documentation
+- Breaking changes or migration notes (if needed)
+
+If the description is incomplete or missing, offer to generate/update it:
+```bash
+gh pr edit <PR_NUMBER> --body "Your generated description here"
+```
+
+Generate a description based on:
+1. The diff output (what changed)
+2. Commit messages (`gh pr view <PR_NUMBER> --json commits --jq '.commits[].messageHeadline'`)
+3. The PR template from `.github/pull_request_template.md` (if exists)
+
+#### Review the Code
+Analyze the diff output and provide feedback on:
+- Code correctness
+- Best practices
+- Potential bugs or issues
+- Suggestions for improvement
+
+Read related files to understand the context:
+- Check how similar patterns are implemented elsewhere
+- Verify consistency with existing code
+- Look for potential side effects in related files
+
+### Step 4: Generate Review Comment
+
+Use the following template to generate a structured review comment:
+
+```markdown
+# Code Review - PR #<NUMBER>: <TITLE>
+
+## Summary
+[Brief overview of changes and purpose]
+
+## Changes
+- `file1.ext` - [description]
+- `file2.ext` - [description]
+
+## Findings
+
+### ✅ Strengths
+- [Strength 1]
+- [Strength 2]
+
+### 🔴 Issues (if any)
+- **[Critical/Medium/Low]:** [Issue and recommendation]
+
+## Verdict
+**Status:** ✅ APPROVED / ⚠️ CHANGES REQUESTED
+
+**Risk:** LOW/MEDIUM/HIGH
+
+[Brief closing statement]
+```
+
+For complex PRs requiring detailed analysis, expand with optional sections:
+- **Code Quality Table:** Score aspects like correctness, readability, testing (1-5 stars)
+- **Before/After:** Document specific behavior changes with impact
+- **Edge Cases:** List considered edge cases and how they're handled
+- **Testing Notes:** Checklist of test cases to verify
+
+### Step 5: Check PR Authorship
+
+Before submitting a review, check if you are the PR author:
+
+```bash
+gh pr view <PR_NUMBER> --json author --jq '.author.login'
+```
+
+**Important:** GitHub does not allow self-approval. If you are the PR author:
+- Use `gh pr comment` instead of `gh pr review --approve`
+- Or use the global `approve-my-pr` workflow with a separate token if self-approval is needed
+
+### Step 6: Submit Review
+
+#### If NOT the PR author:
+
+##### Approve
+```bash
+gh pr review <PR_NUMBER> --approve --body-file review_comment.md
+```
+
+##### Request Changes
+```bash
+gh pr review <PR_NUMBER> --request-changes --body-file review_comment.md
+```
+
+##### Comment Only
+```bash
+gh pr review <PR_NUMBER> --comment --body-file review_comment.md
+```
+
+#### If you ARE the PR author:
+
+Post as a comment instead (self-approval is not allowed by GitHub):
+```bash
+gh pr comment <PR_NUMBER> --body-file review_comment.md
+```
+
+### Step 7: Incremental Review (Optional)
+
+If deeper investigation reveals additional findings, post a follow-up comment using the incremental review template and:
+
+```bash
+gh pr comment <PR_NUMBER> --body "$(cat incremental_review.md)"
+```
+
+### Additional References
+
+- Full Guide: `doc/pr-review/README.md`
+- Command Reference: `doc/pr-review/QUICK_REFERENCE.md`
+
+---
+
+## Notes
+
+- **Small, frequent commits** are preferred over large, infrequent ones
+- Always verify you're on a feature branch before committing
+- Use `--force-with-lease` instead of `--force` for safer force pushes
+- Run tests before pushing when possible
+- Pre-commit hooks help maintain code quality - don't skip them without good reason
+- Enable "Automatically delete head branches" in GitHub repo settings to auto-clean merged branches

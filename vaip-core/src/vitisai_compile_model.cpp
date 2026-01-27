@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string>
+#include <sstream>
 #include <set>
 #include "morphizen/encryption.hpp"
 #include "core/session/onnxruntime_session_options_config_keys.h"
@@ -121,11 +122,6 @@ DEF_ENV_PARAM_2(XLNX_MD5_SIG_SKIP_OPS, "QuantizeLinear,DequantizeLinear",
 namespace py = pybind11;
 #endif
 using namespace onnxruntime;
-
-namespace google {
-int GetStackTrace(void** result, int max_depth, int skip_count);
-bool Symbolize(void* /*pc*/, char* /*out*/, size_t /*out_size*/);
-} // namespace google
 
 namespace vaip_core {
 static void save_protobuf_message(const fs::path& filename,
@@ -1299,24 +1295,20 @@ compile_onnx_model_internal(
 }
 
 static std::vector<std::string> GetStackTrace() {
-  std::vector<std::string> stack_strings;
+  // Use glog's public API instead of internal GetStackTrace(void**, int, int)
+  // google::GetStackTrace() returns a single string with the full stack trace
+  std::string stack_trace = google::GetStackTrace();
 
-  void* stack[32];
-  // +2 to exclude this function and compile_fatal_func.
-  const int depth =
-      google::GetStackTrace(stack, sizeof(stack) / sizeof(stack[0]), 2);
-  for (auto i = 0; i < depth; ++i) {
-    auto pc = stack[i];
-    const char* symbol = "(unknown)";
-    char symbolized[1024]; // Big enough for a sane symbol.
-    // Symbolizes the previous address of pc because pc may be in the
-    // next function.
-    if (google::Symbolize(reinterpret_cast<char*>(pc) - 1, symbolized,
-                          sizeof(symbolized))) {
-      symbol = symbolized;
+  // Split the stack trace string into individual lines
+  std::vector<std::string> stack_strings;
+  std::istringstream iss(stack_trace);
+  std::string line;
+  while (std::getline(iss, line)) {
+    if (!line.empty()) {
+      stack_strings.push_back(line);
     }
-    stack_strings.push_back(std::string(symbol));
   }
+
   return stack_strings;
 }
 

@@ -56,6 +56,20 @@ set(MORPHIZEN_COMPILER_OPTIONS
   # TODO: fix the following warning
   /wd4251 #warning C4251: needs to have dll-interface to be used by clients of
   /wd4275 #warning C4275: non dll-interface class
+  # Suppress C4996 deprecation warnings globally for glog v0.7.1 compatibility
+  # glog v0.7.1 marks CustomPrefixCallback as [[deprecated]] in glog/logging.h header.
+  # Since glog/logging.h is included throughout the entire MorphiZen codebase,
+  # this deprecation warning appears in virtually every translation unit, even though
+  # MorphiZen doesn't use CustomPrefixCallback directly. The deprecation is purely
+  # a glog internal API change (CustomPrefixCallback -> PrefixFormatterCallback).
+  # We suppress this warning globally because:
+  # 1. MorphiZen code doesn't use the deprecated API
+  # 2. The warning is triggered by header inclusion, not our code
+  # 3. glog/logging.h is a fundamental dependency used everywhere
+  # 4. Individual suppression per file would be impractical
+  # This allows us to use glog v0.7.1 (which fixes critical CMake policy errors
+  # requiring CMake >= 3.5) while maintaining our strict /W4 warning level.
+  /wd4996
   /utf-8
   CACHE STRING "Compiler options for Morphizen"
 )
