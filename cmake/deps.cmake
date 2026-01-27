@@ -85,6 +85,11 @@ if(morphizen_ENABLE_UNIT_TEST)
 endif()
 
 set(WITH_GFLAGS OFF CACHE BOOL "disable WITH_GFLAGS for glog")
+# Force glog to build as a static library and enable internal symbols
+# glog v0.7.1 GetStackTrace/Symbolize are internal APIs (GLOG_NO_EXPORT).
+# MorphiZen uses these internal APIs in vitisai_compile_model.cpp.
+# Building as static library with GLOG_STATIC_DEFINE makes these symbols available.
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build glog as static library")
 find_package(glog CONFIG QUIET)
 if(TARGET glog::glog)
   get_target_property(TMP glog::glog INTERFACE_INCLUDE_DIRECTORIES)
@@ -101,6 +106,13 @@ else()
   )
   find_package(glog REQUIRED)
 endif()
+# Add GLOG_STATIC_DEFINE to enable internal symbols for static linking
+# glog::glog is an alias, so we need to apply the definition to the actual target
+if(TARGET glog)
+  target_compile_definitions(glog INTERFACE GLOG_STATIC_DEFINE)
+endif()
+# Restore BUILD_SHARED_LIBS after glog configuration
+set(BUILD_SHARED_LIBS ON CACHE BOOL "Restore default shared library setting")
 
 
 # must use static zlib on windows,even if BUILD_SHARED_LIBS is undfined or OFF,
