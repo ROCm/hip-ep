@@ -33,6 +33,12 @@ Licensed under the MIT License.
 - If on `main`, switch to a feature branch first
 - Never run `git push origin main`
 
+## After PR Merge
+
+1. Switch to main: `git checkout main && git pull origin main`
+2. Delete branches: `git branch -D <feature> && git push fork --delete <feature>`
+3. Clean working directory: `git status` (must show "nothing to commit, working tree clean")
+
 ## Pull Request Description Updates
 
 Update PR description/title **when the scope, approach, or status of the work changes meaningfully** - not for every push.
