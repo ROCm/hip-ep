@@ -12,9 +12,81 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 
 ---
 
+## Prerequisites
+
+### System Requirements
+- Windows 10/11 with AMD GPU (ROCm support)
+- Visual Studio 2022 with C++ workload
+- CMake 3.29+
+- Git with Git Bash
+- Python 3.8+
+
+---
+
+## Directory Structure
+
+After completing the build instructions below, your workspace will have the following structure:
+
+```
+workspace/
+├── therock/                  # TheRock ROCm SDK (extracted from tarball)
+│   ├── bin/                  # Runtime DLLs (MIOpen.dll, hiprtc.dll, etc.)
+│   └── lib/llvm/bin/         # LLVM tools (amdgpu-arch.exe)
+├── onnxruntime/              # ONNX Runtime source code (git clone)
+├── build/
+│   ├── onnxruntime/          # ONNX Runtime build artifacts
+│   └── onnx-hipdnn-ep/       # onnx-hipdnn-ep build artifacts
+│       └── bin/Release/      # test_classification.exe, onnxruntime_vitisai_ep.dll
+├── local/                    # ONNX Runtime installation (CMAKE_PREFIX_PATH)
+│   ├── bin/                  # onnxruntime.dll
+│   └── lib/cmake/            # CMake configuration files
+└── onnx-hipdnn-ep/           # This project (git clone)
+    ├── test/data/            # Test data (pt_resnet50.onnx, input.bin)
+    └── etc/                  # Configuration files (vaip_config.json)
+```
+
+---
+
 ## Build Instructions
 
-### Build ONNXRuntime
+### Step 1: Setup TheRock ROCm SDK
+
+TheRock SDK provides HIP/ROCm runtime for Windows.
+
+**Download:** https://therock-nightly-tarball.s3.amazonaws.com/index.html
+
+1. **Determine your GPU architecture** (before downloading):
+
+   Open **Device Manager** → **Display adapters** to find your AMD GPU model, then select the matching GFX series:
+
+   | GPU Model | GFX Series | TheRock Tarball |
+   |-----------|------------|-----------------|
+   | Radeon RX 7900/7800/7700/7600 | gfx110X | `therock-dist-windows-gfx110X-all-*.tar.gz` |
+   | Radeon RX 6900/6800/6700/6600 | gfx103X | `therock-dist-windows-gfx103X-all-*.tar.gz` |
+   | Radeon 880M/780M (Strix Point) | gfx115X | `therock-dist-windows-gfx115X-all-*.tar.gz` |
+   | Radeon 890M (Strix Halo) | gfx120X | `therock-dist-windows-gfx120X-all-*.tar.gz` |
+
+2. **Create workspace and extract TheRock**:
+   ```bash
+   mkdir workspace
+   cd workspace
+   
+   # Extract TheRock tarball to workspace/therock
+   tar -xzf /path/to/therock-dist-windows-gfx115X-all-*.tar.gz
+   mv dist therock
+   ```
+
+3. **Verify installation**:
+   ```bash
+   # Verify GPU detection
+   ./therock/lib/llvm/bin/amdgpu-arch.exe
+   # Example output: gfx1150
+
+   # Verify HIP configuration
+   ./therock/bin/hipconfig.exe --full
+   ```
+
+### Step 2: Build ONNXRuntime
 
 To build ONNX Runtime, follow the [official documentation](https://onnxruntime.ai/docs/build/inferencing.html).
 
@@ -35,14 +107,14 @@ cd onnxruntime
 #### Build ONNX Runtime
 
 ```bash
-./build.bat --use_vitisai --config Debug --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --cmake_extra_defines CMAKE_INSTALL_PREFIX=$PWD/../local
-cmake --build ../build/onnxruntime/Debug/ --target install
+./build.bat --use_vitisai --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --cmake_extra_defines CMAKE_INSTALL_PREFIX=$PWD/../local
+cmake --build ../build/onnxruntime/Release/ --target install
 ```
 
 This script is used to build the ONNX Runtime project with specific configurations and options. Below is a breakdown of the command-line arguments used:
 
 - `--use_vitisai`: Enables the use of Vitis AI for acceleration.
-- `--config Debug`: Specifies the build configuration as Debug.
+- `--config Release`: Specifies the build configuration as Release.
 - `--build_shared_lib`: Builds the project as a shared library.
 - `--parallel`: Enables parallel compilation for faster build times.
 - `--compile_no_warning_as_error`: Prevents warnings from being treated as errors during compilation.
@@ -51,21 +123,30 @@ This script is used to build the ONNX Runtime project with specific configuratio
 - `--skip_tests`: Skips the execution of tests after the build process.
 - `--cmake_extra_defines CMAKE_INSTALL_PREFIX=$PWD/../local`: Passes additional CMake definitions, setting the installation prefix to a local directory relative to the current working directory.
 
-#### Build onnx-hipdnn-ep
+### Step 3: Build onnx-hipdnn-ep
 
-#### Download MorphiZen and onnx-hipdnn-ep
+#### Download onnx-hipdnn-ep
 
 ```bash
 cd workspace
 git clone https://github.com/ROCm/onnx-hipdnn-ep.git
-git clone https://github.com/ROCm/MorphiZen.git --recursive
 ```
 
 #### Configure and build
 
 ```bash
 cd onnx-hipdnn-ep
-cmake -DCMAKE_CXX_FLAGS="/EHsc" -B ../build/onnx-hipdnn-ep -S . -DCMAKE_INSTALL_PREFIX=$PWD/../local -DTHEROCK_DIST="/path/to/dist/therock" -DHIP_PLATFORM=amd
+cmake -G "Visual Studio 17 2022" -A x64 \
+  -B ../build/onnx-hipdnn-ep -S . \
+  -DTHEROCK_DIST=$PWD/../therock \
+  -DCMAKE_PREFIX_PATH=$PWD/../local \
+  -DONNXRUNTIME_SOURCE_TREE_DIR=$PWD/../onnxruntime \
+  -DHIP_PLATFORM=amd
+
+# Build Release version (recommended)
+cmake --build ../build/onnx-hipdnn-ep --config Release --target install
+
+# Or build Debug version
 cmake --build ../build/onnx-hipdnn-ep --config Debug --target install
 ```
 
