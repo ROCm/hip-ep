@@ -91,6 +91,8 @@ Update PR description/title **when the scope, approach, or status changes meanin
    cmake --build "../build/morphizen.ninja" --config Debug --parallel
    ```
 
+**For Git Bash Users**: Launch bash from an MSVC Developer Command Prompt before starting Claude Code to ensure the MSVC environment is available.
+
 ### Expected Outputs:
 - `onnxruntime_vitisai_ep.dll` - Main MorphiZen library
 - `morphizen-graph-opt.exe` - Graph optimization tool
@@ -131,14 +133,10 @@ For detailed step-by-step workflows, see `.clinerules/workflows/`:
 
 ---
 
-## Build Environment (Windows/Git Bash)
-
-**CRITICAL**: Source `tools/setup_msvc_env_bash.sh` in first Bash command OR use wrappers: `tools/cmake-msvc`, `tools/build-msvc` (auto-setup). See `doc/msvc-bash-setup.md`
-
 ## Critical Reminders
 
+- **Follow `.clinerules/git-rules.md`**: Verify feature branch before implementing and committing
 - **Small, frequent commits** are preferred over large, infrequent ones
-- Always verify you're on a feature branch before committing
 - Use `--force-with-lease` instead of `--force` for safer force pushes
 - Run tests before pushing when possible
 - Pre-commit hooks help maintain code quality - don't skip them without good reason

@@ -4,32 +4,6 @@ Licensed under the MIT License.
 -->
 Please build the MorphiZen project and fix any build errors that occur.
 
-## CRITICAL: MSVC Environment Setup for Bash
-
-**BEFORE ANY BUILD COMMAND in Git Bash**, you MUST set up MSVC environment:
-
-```bash
-source tools/setup_msvc_env_bash.sh
-```
-
-This is required for:
-- CMake configuration (detects compiler)
-- Building (cl.exe, link.exe)
-- Running tests
-
-**Pattern for first command**:
-```bash
-source tools/setup_msvc_env_bash.sh && cmake --preset "Morphizen Ninja"
-```
-
-Environment persists for all subsequent Bash commands in the session.
-
-**Alternative: Use wrapper scripts** (auto-setup):
-```bash
-tools/cmake-msvc --preset "Morphizen Ninja"
-tools/build-msvc "C:/Develop/m/build/morphizen.ninja" --config Debug --parallel
-```
-
 ## Build Settings (Remember these):
 - **Build Type**: Debug
 - **Environment Variables**:
@@ -40,42 +14,24 @@ tools/build-msvc "C:/Develop/m/build/morphizen.ninja" --config Debug --parallel
 
 ## Build Steps:
 
-### For Git Bash (Recommended):
-
-1. Setup MSVC environment (FIRST COMMAND):
-   ```bash
-   source tools/setup_msvc_env_bash.sh
-   ```
-
-2. Configure with CMake preset:
-   ```bash
-   cmake --preset "Morphizen Ninja"
-   ```
-
-3. Build the project:
-   ```bash
-   cmake --build "C:/Develop/m/build/morphizen.ninja" --config Debug --parallel
-   ```
-
-### For PowerShell:
-
 1. Set environment variables:
-   ```powershell
-   $env:VAI_RT_WORKSPACE = "c:/Develop/m/source"
-   $env:VAI_RT_BUILD_DIR = "C:/Develop/m/build"
-   $env:VAI_RT_PREFIX = "C:/Develop/m/local"
+   ```bash
+   export VAI_RT_WORKSPACE="c:/Develop/m/source"
+   export VAI_RT_BUILD_DIR="C:/Develop/m/build"
+   export VAI_RT_PREFIX="C:/Develop/m/local"
    ```
 
 2. Configure with CMake preset:
-   ```powershell
-   cd C:\Develop\m\source\MorphiZen
+   ```bash
    cmake --preset "Morphizen Ninja"
    ```
 
 3. Build the project:
-   ```powershell
+   ```bash
    cmake --build "C:/Develop/m/build/morphizen.ninja" --config Debug --parallel
    ```
+
+**Note**: For Git Bash users, ensure bash is launched from an MSVC Developer Command Prompt to inherit the MSVC environment.
 
 ### Fixing Build Errors:
 
@@ -96,18 +52,6 @@ If there are any build errors:
 - Dependencies are automatically fetched via CMake FetchContent
 - Build output goes to `C:/Develop/m/build/morphizen.ninja/bin/`
 - The preset includes `morphizen_DEMO_DIR` and other configurations from CMakePresets.json
-
-## MSVC Environment Setup (IMPORTANT):
-If the build fails with errors like "Cannot open include file: 'cstddef'" or other missing standard headers, you need to initialize the Visual Studio environment first:
-
-```cmd
-cmd /c "call ""C:\msvsn2022\VC\Auxiliary\Build\vcvars64.bat"" && cd /d C:\Develop\m\source\MorphiZen && cmake --build ""C:/Develop/m/build/morphizen.ninja"" --config Debug --parallel"
-```
-
-This sets up the MSVC compiler environment including:
-- Standard library include paths
-- Windows SDK paths
-- Required compiler environment variables
 
 ## Verifying Build Outputs:
 Use PowerShell cmdlets (NOT CMD-style commands) to list build outputs:
