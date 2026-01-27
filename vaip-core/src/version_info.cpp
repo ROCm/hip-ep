@@ -121,7 +121,6 @@ static std::string query_version_info(const char* value_name) {
 #endif
 
 // Version resource information from DLL
-// (3rd-party/ryzenai_bin_metadata/version.rc.in)
 const std::string get_dll_company_name() {
 #ifdef _WIN32
   return query_version_info("CompanyName");

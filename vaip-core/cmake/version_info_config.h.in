@@ -8,7 +8,7 @@
 
 #pragma once
 
-// Version information matching 3rd-party/ryzenai_bin_metadata/version.rc.in
+// Version information for AMD Ryzen AI
 // These values are populated by CMake during configuration
 
 #define RAI_DOTTED_VERSION "@RAI_DOTTED_VERSION@"
