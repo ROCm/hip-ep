@@ -174,17 +174,17 @@ If conflicts occur during rebase/merge:
 
 Push to remote (feature branch):
 ```bash
-git push origin <branch-name>
+git push fork <branch-name>
 ```
 
 If branch doesn't exist on remote:
 ```bash
-git push -u origin <branch-name>
+git push -u fork <branch-name>
 ```
 
 If rebase changed history (force push with lease for safety):
 ```bash
-git push --force-with-lease origin <branch-name>
+git push --force-with-lease fork <branch-name>
 ```
 
 ### Step 10: Create or Update Pull Request
@@ -241,7 +241,7 @@ git fetch origin main
 git rebase origin/main
 
 # 5. Push
-git push origin <branch-name>
+git push fork <branch-name>
 
 # 6. Create PR (if not exists) - use --body-file on Windows to avoid quoting issues
 # First write PR body to pr_body.md, then:
