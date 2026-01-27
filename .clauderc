@@ -11,6 +11,14 @@ This file contains project-specific rules and workflows for Claude Code when wor
 
 ## Git Workflow Rules
 
+### Fork and Remote Setup
+
+This project uses a fork-based workflow:
+- **`origin`**: Upstream repository (ROCm/MorphiZen) - read-only, fetch updates from here
+- **`fork`**: Your personal fork (e.g., wcy123/MorphiZen) - push your changes here
+
+**IMPORTANT**: Always push to `fork`, not `origin`. Pull requests are created from your fork's branch to the upstream repository.
+
 ### Branch Protection
 
 **NEVER** commit or push directly to `main` branch. Always use Pull Requests.
@@ -27,7 +35,8 @@ This file contains project-specific rules and workflows for Claude Code when wor
 
 - Verify current branch: `git branch --show-current`
 - If on `main`, switch to a feature branch first
-- Never run `git push origin main`
+- **Always push to `fork`**, not `origin`: `git push fork <branch-name>`
+- Never run `git push fork main` or `git push origin main`
 
 ### Pull Request Description Updates
 
@@ -64,29 +73,30 @@ Update PR description/title **when the scope, approach, or status of the work ch
 
 ### Build Settings (Remember these):
 - **Build Type**: Debug
+- **Build Directory**: `../build` (relative to source directory)
+- **Install Prefix**: `../local` (relative to source directory)
 - **Environment Variables**:
-  - `VAI_RT_WORKSPACE=c:/Develop/m/source`
-  - `VAI_RT_BUILD_DIR=C:/Develop/m/build`
-  - `VAI_RT_PREFIX=C:/Develop/m/local`
+  - `VAI_RT_WORKSPACE` - Parent of source directory (typically `../..` from MorphiZen)
+  - `VAI_RT_BUILD_DIR` - Build directory (typically `../build`)
+  - `VAI_RT_PREFIX` - Install prefix (typically `../local`)
 - **CMake Preset**: "Morphizen Ninja"
 
 ### Build Steps:
-1. Set environment variables:
+1. Set environment variables (from the MorphiZen source directory):
    ```powershell
-   $env:VAI_RT_WORKSPACE = "c:/Develop/m/source"
-   $env:VAI_RT_BUILD_DIR = "C:/Develop/m/build"
-   $env:VAI_RT_PREFIX = "C:/Develop/m/local"
+   $env:VAI_RT_WORKSPACE = (Resolve-Path "../..").Path
+   $env:VAI_RT_BUILD_DIR = (Resolve-Path "../build").Path
+   $env:VAI_RT_PREFIX = (Resolve-Path "../local").Path
    ```
 
 2. Configure with CMake preset:
    ```powershell
-   cd C:\Develop\m\source\MorphiZen
    cmake --preset "Morphizen Ninja"
    ```
 
 3. Build the project:
    ```powershell
-   cmake --build "C:/Develop/m/build/morphizen.ninja" --config Debug --parallel
+   cmake --build "../build/morphizen.ninja" --config Debug --parallel
    ```
 
 4. If there are any build errors:
@@ -104,14 +114,15 @@ Update PR description/title **when the scope, approach, or status of the work ch
 ### Notes:
 - The project uses Ninja generator for faster builds
 - Dependencies are automatically fetched via CMake FetchContent
-- Build output goes to `C:/Develop/m/build/morphizen.ninja/bin/`
+- Build output goes to `../build/morphizen.ninja/bin/` (relative to source directory)
 - The preset includes `morphizen_DEMO_DIR` and other configurations from CMakePresets.json
+- Build directory is outside the source tree to keep source clean
 
 ### MSVC Environment Setup (IMPORTANT):
 If the build fails with errors like "Cannot open include file: 'cstddef'" or other missing standard headers, you need to initialize the Visual Studio environment first:
 
 ```cmd
-cmd /c "call ""C:\msvsn2022\VC\Auxiliary\Build\vcvars64.bat"" && cd /d C:\Develop\m\source\MorphiZen && cmake --build ""C:/Develop/m/build/morphizen.ninja"" --config Debug --parallel"
+cmd /c "call ""C:\msvsn2022\VC\Auxiliary\Build\vcvars64.bat"" && cd /d %CD% && cmake --build ""../build/morphizen.ninja"" --config Debug --parallel"
 ```
 
 This sets up the MSVC compiler environment including:
@@ -122,11 +133,11 @@ This sets up the MSVC compiler environment including:
 ### Verifying Build Outputs:
 Use PowerShell cmdlets (NOT CMD-style commands) to list build outputs:
 ```powershell
-# CORRECT - use Get-ChildItem
-Get-ChildItem "C:\Develop\m\build\morphizen.ninja\bin" -Name
+# CORRECT - use Get-ChildItem with relative path
+Get-ChildItem "../build/morphizen.ninja/bin" -Name
 
 # WRONG - do NOT use CMD-style dir /b (causes errors in PowerShell)
-# dir "C:\Develop\m\build\morphizen.ninja\bin\" /b
+# dir "../build/morphizen.ninja/bin" /b
 ```
 
 ---
@@ -292,17 +303,17 @@ If conflicts occur during rebase/merge:
 
 Push to remote (feature branch):
 ```bash
-git push origin <branch-name>
+git push fork <branch-name>
 ```
 
 If branch doesn't exist on remote:
 ```bash
-git push -u origin <branch-name>
+git push -u fork <branch-name>
 ```
 
 If rebase changed history (force push with lease for safety):
 ```bash
-git push --force-with-lease origin <branch-name>
+git push --force-with-lease fork <branch-name>
 ```
 
 #### Step 10: Create or Update Pull Request
@@ -359,7 +370,7 @@ git fetch origin main
 git rebase origin/main
 
 # 5. Push
-git push origin <branch-name>
+git push fork <branch-name>
 
 # 6. Create PR (if not exists) - use --body-file on Windows to avoid quoting issues
 # First write PR body to pr_body.md, then:
@@ -509,10 +520,10 @@ If conflicts occur:
 
 ### Step 5: Push to Remote (Sync)
 
-After rebasing, push the updated branch to remote:
+After rebasing, push the updated branch to fork:
 
 ```bash
-git push --force-with-lease
+git push --force-with-lease fork
 ```
 
 Use `--force-with-lease` instead of `--force` for safety - it will fail if someone else pushed changes you don't have.
@@ -522,7 +533,7 @@ Use `--force-with-lease` instead of `--force` for safety - it will fail if someo
 For switching to a PR and syncing in one operation:
 
 ```powershell
-git stash push -m "WIP: auto-stash"; git fetch origin; gh pr checkout <PR_NUMBER>; git rebase origin/main; git push --force-with-lease
+git stash push -m "WIP: auto-stash"; git fetch origin; gh pr checkout <PR_NUMBER>; git rebase origin/main; git push --force-with-lease fork
 ```
 
 ### Check PR Status
@@ -556,8 +567,8 @@ git checkout main
 # Delete local branch
 git branch -d <branch-name>
 
-# Delete remote branch (if not auto-deleted)
-git push origin --delete <branch-name>
+# Delete remote branch from fork (if not auto-deleted)
+git push fork --delete <branch-name>
 
 # Prune stale remote-tracking refs
 git fetch --prune
