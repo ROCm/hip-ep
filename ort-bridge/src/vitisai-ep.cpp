@@ -24,9 +24,10 @@
       "At least one backend must be enabled: MORPHIZEN_ENABLE_ONNX_BACKEND or MORPHIZEN_ENABLE_MLIR_BACKEND"
 #endif
 
-DEF_ENV_PARAM_2(MORPHIZEN_ORT_BRIDGE_BACKEND,
-                MORPHIZEN_DEFAULT_BACKEND, // default depends on which backend is enabled
-                std::string)
+DEF_ENV_PARAM_2(
+    MORPHIZEN_ORT_BRIDGE_BACKEND,
+    MORPHIZEN_DEFAULT_BACKEND, // default depends on which backend is enabled
+    std::string)
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_VITISAI_EP, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_VITISAI_EP) >= n)
 namespace morphizen {

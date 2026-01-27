@@ -1,13 +1,4 @@
 # Configuration for lintrunner https://github.com/suo/lintrunner
-# You can install the dependencies and initialize with
-#
-# ```sh
-# pip install -r requirements-lintrunner.txt
-# lintrunner init
-# ```
-#
-# This will install lintrunner on your system and download all the necessary
-# dependencies to run linters locally.
 #
 # To format local changes:
 #
@@ -48,15 +39,6 @@ command = [
     '--config=pyproject.toml',
     '@{{PATHSFILE}}'
 ]
-init_command = [
-    'python',
-    '-m',
-    'lintrunner_adapters',
-    'run',
-    'pip_init',
-    '--dry-run={{DRYRUN}}',
-    '--requirement=requirements-lintrunner.txt',
-]
 is_formatter = true
 
 
@@ -79,15 +61,6 @@ command = [
     'ruff_format_linter',
     '--',
     '@{{PATHSFILE}}'
-]
-init_command = [
-    'python',
-    '-m',
-    'lintrunner_adapters',
-    'run',
-    'pip_init',
-    '--dry-run={{DRYRUN}}',
-    '--requirement=requirements-lintrunner.txt',
 ]
 is_formatter = true
 
@@ -124,14 +97,5 @@ command = [
     '--fallback',
     '--',
     '@{{PATHSFILE}}'
-]
-init_command = [
-    'python',
-    '-m',
-    'lintrunner_adapters',
-    'run',
-    'pip_init',
-    '--dry-run={{DRYRUN}}',
-    '--requirement=requirements-lintrunner.txt',
 ]
 is_formatter = true

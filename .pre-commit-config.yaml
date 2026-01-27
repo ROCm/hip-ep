@@ -21,13 +21,19 @@ repos:
     -   id: lintrunner
         name: lintrunner
         entry: lintrunner
-        language: system
+        language: python
+        additional_dependencies:
+          - lintrunner==0.12.7
+          - lintrunner-adapters==0.12.4
+          - ruff==0.11.9
+          - clang-format==16.0.1
         types: [file]
         args: [--apply-patches]
         require_serial: true
     -   id: licenseheaders
         name: licenseheaders
-        entry: python
-        args: [-m,licenseheaders,-t,./LICENSES/license.txt,-x,3rd-party/*,-s,./LICENSES/settings.json,-f]
-        language: system
+        entry: python -m licenseheaders
+        args: [-t,./LICENSES/license.txt,-x,3rd-party/*,-s,./LICENSES/settings.json,-f]
+        language: python
+        additional_dependencies: [licenseheaders==0.8.8]
         types: [file]
