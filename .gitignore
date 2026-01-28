@@ -48,6 +48,8 @@
 /.claude/
 !/.claude/settings.json
 !/.claude/README.md
+!/.claude/skills/
+!/.claude/skills/**
 /.cline_storage/
 /.clinerules/*
 !/.clinerules/workflows/
