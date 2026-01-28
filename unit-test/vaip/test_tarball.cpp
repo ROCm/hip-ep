@@ -125,46 +125,6 @@ static std::string generateRandomString(size_t length) {
   return randomString;
 }
 
-TEST_F(TarBallTest, CompressTest) {
-
-  auto data = generateRandomString(65536);
-  std::stringstream result;
-  {
-    std::stringstream data_ss;
-    data_ss << data;
-    auto reader = StringStreamReader(data_ss);
-    auto writer = StringStreamWriter(result);
-    compress(reader, writer, 1);
-    std::cout << "compress " << data.length()
-              << " byes in level=1, result_size = " << result.str().length()
-              << std::endl;
-  }
-  {
-    std::stringstream uncompressed_data_ss;
-    auto writer = StringStreamWriter(uncompressed_data_ss);
-    uncompress(StringStreamReader(result), writer);
-    ASSERT_TRUE(data == uncompressed_data_ss.str());
-  }
-
-  // test level=default
-  {
-    result = std::stringstream();
-    std::stringstream data_ss;
-    data_ss << data;
-    auto writer = StringStreamWriter(result);
-    compress(StringStreamReader(data_ss), writer);
-    std::cout << "compress " << data.length()
-              << " byes in level=9, result_size = " << result.str().length()
-              << std::endl;
-  }
-  {
-    std::stringstream uncompressed_data_ss;
-    auto writer = StringStreamWriter(uncompressed_data_ss);
-    uncompress(StringStreamReader(result), writer);
-    ASSERT_TRUE(data == uncompressed_data_ss.str());
-  }
-}
-
 TEST_F(TarBallTest, Encrypt_Test) {
   auto data = generateRandomString(65536);
   auto key = generateRandomString(32);

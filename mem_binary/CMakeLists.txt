@@ -9,6 +9,12 @@ project(
   VERSION 1.0.0
   LANGUAGES C CXX)
 
+find_package(ZLIB QUIET)
+set(ENABLE_COMPRESSION "0")
+if(TARGET ZLIB::ZLIB)
+  set(ENABLE_COMPRESSION "1")
+endif()
+
 set(MEM_BINARY_CONTENT_FILE mem_binary_file.hpp.inc)
 add_custom_command(
   OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${MEM_BINARY_CONTENT_FILE}"
@@ -16,6 +22,7 @@ add_custom_command(
     ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../tools"
     $<TARGET_FILE:Python3::Interpreter>
     ${CMAKE_CURRENT_SOURCE_DIR}/src/compress_binary.py
+    "${ENABLE_COMPRESSION}"
     "${CMAKE_CURRENT_BINARY_DIR}/${MEM_BINARY_CONTENT_FILE}"
     "${VAIP_EMBEDDED_RESOURCE_PATH}")
 
@@ -37,7 +44,13 @@ target_compile_options(${LIB_NAME} PRIVATE ${MORPHIZEN_COMPILER_OPTIONS})
 target_link_libraries(
   ${LIB_NAME}
   PRIVATE morphizen-utils
-  PUBLIC ZLIB::ZLIB glog::glog Microsoft.GSL::GSL)
+  PUBLIC glog::glog Microsoft.GSL::GSL)
+
+if(TARGET ZLIB::ZLIB)
+  target_link_libraries(${LIB_NAME} PRIVATE ZLIB::ZLIB)
+  target_compile_definitions(${LIB_NAME} PRIVATE ENABLE_COMPRESSION=1)
+endif()
+
 target_include_directories(${LIB_NAME}
                            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 if(${morphizen_ENABLE_UNIT_TEST})

@@ -110,42 +110,8 @@ VAIP_DLL_SPEC bool dump_binary(const std::filesystem::path& filename,
                                gsl::span<const int8_t> data);
 VAIP_DLL_SPEC bool dump_binary(const std::filesystem::path& filename,
                                gsl::span<const char> data);
-/**
- * Compresses the given data using a specified compression level.
- *
- * @param data The data to be compressed.
- * @param level The compression level (default is 9).
- * @return The compressed data as a vector of uint8_t.
- */
-VAIP_DLL_SPEC std::vector<uint8_t> compress(gsl::span<const uint8_t> data,
-                                            int level = 9);
-VAIP_DLL_SPEC std::vector<int8_t> compress(gsl::span<const int8_t> data,
-                                           int level = 9);
-VAIP_DLL_SPEC std::vector<char> compress(gsl::span<const char> data,
-                                         int level = 9);
-/**
- * @brief Uncompresses the given data.
- *
- * This function takes a span of uint8_t data and uncompresses it, returning the
- * uncompressed data as a std::vector<uint8_t>.
- *
- * @param data The data to be uncompressed.
- * @return The uncompressed data as a std::vector<uint8_t>.
- */
-VAIP_DLL_SPEC std::vector<uint8_t> uncompress(gsl::span<const uint8_t> data);
-VAIP_DLL_SPEC std::vector<int8_t> uncompress(gsl::span<const int8_t> data);
-VAIP_DLL_SPEC std::vector<char> uncompress(gsl::span<const char> data);
-
 unsigned int get_tid();
 unsigned int get_pid();
-
-VAIP_DLL_SPEC void compress(const IStreamReader& src, IStreamWriter& dst,
-                            int compress_level = 9);
-VAIP_DLL_SPEC std::unique_ptr<IStreamReader> compress(const IStreamReader& src,
-                                                      int compress_level = 9);
-VAIP_DLL_SPEC void uncompress(const IStreamReader& src, IStreamWriter& dst);
-VAIP_DLL_SPEC std::unique_ptr<IStreamReader>
-uncompress(const IStreamReader& src);
 
 VAIP_DLL_SPEC std::unique_ptr<IStreamReader>
 context_cache_files_to_tar_stream(class PassContext& context);

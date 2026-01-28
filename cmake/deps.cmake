@@ -116,52 +116,6 @@ endif()
 set(BUILD_SHARED_LIBS ON CACHE BOOL "Restore default shared library setting")
 
 
-# must use static zlib on windows,even if BUILD_SHARED_LIBS is undfined or OFF,
-# because we assume static msvc runtime is used
-# because file opened in one dll cannot be used in another dll
-# see unit-test PassContextTest.TestCompress
-# NOTE: BUILD_SHARED_LIBS might not be defined
-if(MSVC)
-  set(ZLIB_USE_STATIC_LIBS ON CACHE BOOL "use static zip")
-elseif(NOT ${BUILD_SHARED_LIBS})
-  set(ZLIB_USE_STATIC_LIBS OFF CACHE BOOL "use static zip")
-endif()
-find_package(ZLIB QUIET)
-if(TARGET ZLIB::ZLIB)
-  get_target_property(TMP ZLIB::ZLIB INTERFACE_INCLUDE_DIRECTORIES)
-  message(STATUS "found ZLIB at ${TMP}")
-else()
-  message(STATUS "cannot find_package(ZLIB), fetch it from ${DEP_URL_zlib}")
-  FetchContent_Declare(
-      ZLIB
-      GIT_REPOSITORY ${DEP_URL_zlib}
-      GIT_TAG ${DEP_SHA1_zlib}
-      GIT_SHALLOW TRUE
-      EXCLUDE_FROM_ALL
-      OVERRIDE_FIND_PACKAGE
-      PATCH_COMMAND
-          ${CMAKE_COMMAND} -E echo "Checking if patch is already applied..." &&
-          git apply --check "${CMAKE_CURRENT_SOURCE_DIR}/cmake/zlib.patch" -q &&
-          git apply "${CMAKE_CURRENT_SOURCE_DIR}/cmake/zlib.patch" ||
-          ${CMAKE_COMMAND} -E echo "Patch already applied or failed to apply"
-  )
-  find_package(ZLIB REQUIRED)
-  if(ZLIB_USE_STATIC_LIBS)
-    add_library(ZLIB::ZLIB ALIAS zlibstatic)
-    target_include_directories(zlibstatic PUBLIC ${zlib_SOURCE_DIR} ${zlib_BINARY_DIR})
-    set_target_properties(zlibstatic PROPERTIES FOLDER morphizen/deps)
-    message(STATUS "found static ZLIB at ${zlib_SOURCE_DIR} ${zlib_BINARY_DIR}")
-  else()
-    add_library(ZLIB::ZLIB ALIAS zlib)
-    target_include_directories(zlib PUBLIC ${zlib_SOURCE_DIR} ${zlib_BINARY_DIR})
-    set_target_properties(zlib PROPERTIES FOLDER morphizen/deps)
-    message(STATUS "found dynamic ZLIB at ${zlib_SOURCE_DIR} ${zlib_BINARY_DIR}")
-  endif()
-  # TODO: I don't know why, the following line does not work we have
-  # to set the include path explicitly in vaip_core_static
-
-  # target_link_directories(zlibstatic PUBLIC ${zlib_BINARY_DIR} ${zlib_SOURCE_DIR})
-endif()
 
 if(NOT CMAKE_MSVC_RUNTIME_LIBRARY)
   set(protobuf_MSVC_STATIC_RUNTIME OFF CACHE BOOL "use dynamic msvc runtime for protobuf by default, /MD")
@@ -171,7 +125,6 @@ else()
   set(protobuf_MSVC_STATIC_RUNTIME ON CACHE BOOL "use static msvc runtime for protobuf, /MT")
 endif()
 set(protobuf_BUILD_TESTS OFF CACHE BOOL "disable protobuf tests")
-# TODO: enable ZLIB
 set(protobuf_WITH_ZLIB OFF CACHE BOOL "disable zlib for protobuf")
 set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "disable protobuf build shared libs")
 set(protobuf_BUILD_EXAMPLES OFF CACHE BOOL "disable protobuf examples")

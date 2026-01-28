@@ -1023,46 +1023,6 @@ source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
 source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
 #end
 
-add_custom_target(morphizen-unit-test-PassContextTest.TestCompress.248
-    COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=PassContextTest.TestCompress
-    DEPENDS ${TEST_EXE_NAME}
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    )
-set_target_properties(morphizen-unit-test-PassContextTest.TestCompress.248 PROPERTIES
-    FOLDER "morphizen/unit-tests/cases/PassContextTest/TestCompress"
-    VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
-    VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
-    VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PassContextTest.TestCompress
-    )
-target_sources(morphizen-unit-test-PassContextTest.TestCompress.248 PRIVATE
-        # vaip/test_pass_context.cpp # line 248 don't add c++ file, otherwise `compile` does works
-        cmake/generate_gtest_targets_for_debugging.py
-        cmake/generated_gtest_targets.cmake
-)
-source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
-source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
-#end
-
-add_custom_target(morphizen-unit-test-PassContextTest.TestGzTar.263
-    COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=PassContextTest.TestGzTar
-    DEPENDS ${TEST_EXE_NAME}
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    )
-set_target_properties(morphizen-unit-test-PassContextTest.TestGzTar.263 PROPERTIES
-    FOLDER "morphizen/unit-tests/cases/PassContextTest/TestGzTar"
-    VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
-    VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
-    VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PassContextTest.TestGzTar
-    )
-target_sources(morphizen-unit-test-PassContextTest.TestGzTar.263 PRIVATE
-        # vaip/test_pass_context.cpp # line 263 don't add c++ file, otherwise `compile` does works
-        cmake/generate_gtest_targets_for_debugging.py
-        cmake/generated_gtest_targets.cmake
-)
-source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
-source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
-#end
-
 add_custom_target(morphizen-unit-test-PassContextConfigTest.Config.401
     COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=PassContextConfigTest.Config
     DEPENDS ${TEST_EXE_NAME}
@@ -1136,26 +1096,6 @@ set_target_properties(morphizen-unit-test-TarBallTest.TarTest.69 PROPERTIES
     )
 target_sources(morphizen-unit-test-TarBallTest.TarTest.69 PRIVATE
         # vaip/test_tarball.cpp # line 69 don't add c++ file, otherwise `compile` does works
-        cmake/generate_gtest_targets_for_debugging.py
-        cmake/generated_gtest_targets.cmake
-)
-source_group("CMake Files" FILES cmake/generated_gtest_targets.cmake)
-source_group("Python Codes" FILES cmake/generate_gtest_targets_for_debugging.py)
-#end
-
-add_custom_target(morphizen-unit-test-TarBallTest.CompressTest.128
-    COMMAND $<TARGET_FILE:${TEST_EXE_NAME}> --gtest_filter=TarBallTest.CompressTest
-    DEPENDS ${TEST_EXE_NAME}
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    )
-set_target_properties(morphizen-unit-test-TarBallTest.CompressTest.128 PROPERTIES
-    FOLDER "morphizen/unit-tests/cases/TarBallTest/CompressTest"
-    VS_DEBUGGER_COMMAND "$<TARGET_FILE:${TEST_EXE_NAME}>"
-    VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
-    VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TarBallTest.CompressTest
-    )
-target_sources(morphizen-unit-test-TarBallTest.CompressTest.128 PRIVATE
-        # vaip/test_tarball.cpp # line 128 don't add c++ file, otherwise `compile` does works
         cmake/generate_gtest_targets_for_debugging.py
         cmake/generated_gtest_targets.cmake
 )

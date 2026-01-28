@@ -11,19 +11,28 @@
 #include <iostream>
 #include <morphizen-utils/morphizen-utils.hpp>
 #include <morphizen-utils/vaip_plugin.hpp>
-#include <zlib.h>
+#ifdef ENABLE_COMPRESSION
+#  include <zlib.h>
+#endif
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MEM_XCLBIN, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MEM_XCLBIN) >= n)
 
 namespace vaip_core {
 struct CompressionInfo {
   const uint8_t* data;
+#ifdef ENABLE_COMPRESSION
   size_t compressed_size;
+#endif
   size_t origin_size;
+#ifdef ENABLE_COMPRESSION
   CompressionInfo(const uint8_t* d, size_t c, size_t o)
       : data(d), compressed_size(c), origin_size(o) {}
+#else
+  CompressionInfo(const uint8_t* d, size_t o) : data(d), origin_size(o) {}
+#endif
 };
 
+#ifdef ENABLE_COMPRESSION
 std::vector<char> uncompress(const uint8_t* byte, size_t compressed_size,
                              size_t origin_size) {
   std::vector<char> ret;
@@ -42,6 +51,7 @@ std::vector<char> uncompress(const uint8_t* byte, size_t compressed_size,
   inflateEnd(&infstream);
   return ret;
 }
+#endif
 #include "mem_binary_file.hpp.inc"
 std::vector<char> get_mem_binary(const std::string& filename) {
   auto span = get_mem_binary_span(filename);
@@ -64,6 +74,7 @@ get_mem_binary_span(const std::string& filename) {
   MY_LOG(1) << "  -- found mem_binary: " << filename
             << " from builtin inside morphizen";
   auto info = iter->second;
+#ifdef ENABLE_COMPRESSION
   if (info.compressed_size == 0) {
     return gsl::span<const char>(reinterpret_cast<const char*>(info.data),
                                  info.origin_size);
@@ -75,5 +86,9 @@ get_mem_binary_span(const std::string& filename) {
   const auto& data = store.find(filename)->second;
 
   return gsl::span<const char>(data.data(), data.size());
+#else
+  return gsl::span<const char>(reinterpret_cast<const char*>(info.data),
+                               info.origin_size);
+#endif
 }
 } // namespace vaip_core
