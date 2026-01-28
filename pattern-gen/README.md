@@ -6,10 +6,10 @@ Licensed under the MIT License.
 
 
 ```
-$BUILD/vaip/onnxruntime_vitisai_ep/onnx_pattern_gen env \
+$BUILD/vaip/onnxruntime_morphizen_ep/onnx_pattern_gen env \
  IGNORE_CONSTANT=1 \
  ENABLE_CONSTNAT_SHARING=0 \
- $BUILD/vaip/onnxruntime_vitisai_ep/onnx_pattern_gen \
+ $BUILD/vaip/onnxruntime_morphizen_ep/onnx_pattern_gen \
  -i value/Add_output_0_QuantizeLinear_Output \
  -i key/MatMul_output_0_QuantizeLinear_Output \
  -i query/Add_output_0_QuantizeLinear_Output \

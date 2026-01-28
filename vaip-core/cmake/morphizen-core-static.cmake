@@ -111,9 +111,9 @@ add_library(${LIB_NAME} STATIC
   include/morphizen/config_reader.hpp
   src/binary/config_reader.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/config_json_binary.hpp
-  src/vitisai_compile_model.cpp
+  src/morphizen_compile_model.cpp
   src/vaip_profile.cpp
-  src/onnxruntime_vitisai_ep.cpp
+  src/onnxruntime_morphizen_ep.cpp
   src/model_compatibility.cpp
   src/file_stream.hpp
   src/file_stream.cpp

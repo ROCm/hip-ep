@@ -5,31 +5,31 @@
 #pragma once
 #include "morphizen/vaip_ort.hpp"
 /**
- * @file onnxruntime_vitisai_ep.hpp
- * @brief Header file for the Vitis AI Execution Provider integration with ONNX
+ * @file onnxruntime_morphizen_ep.hpp
+ * @brief Header file for the MorphiZen Execution Provider integration with ONNX
  * Runtime.
  *
  * This file contains function declarations and macros for initializing,
- * deinitializing, and managing the Vitis AI Execution Provider within the ONNX
+ * deinitializing, and managing the MorphiZen Execution Provider within the ONNX
  * Runtime framework.
  * It includes functions for setting dynamic options, compiling ONNX models,
- * creating EP context nodes, and retrieving the Vitis AI EP version.
+ * creating EP context nodes, and retrieving the MorphiZen EP version.
  *
- * @note This header is part of the Vitis AI Execution Provider implementation
+ * @note This header is part of the MorphiZen Execution Provider implementation
  * and is intended for internal use within the ONNX Runtime framework.
  */
 
 extern "C" {
 /**
- * @brief Initializes the Vitis AI Execution Provider for ONNX Runtime.
+ * @brief Initializes the MorphiZen Execution Provider for ONNX Runtime.
  *
- * The `VitisAI_Provider::Initialize()` is invoked during
+ * The `MorphiZen_Provider::Initialize()` is invoked during
  * `session_options.AppendExecutionProvider_VitisAI(provider_options)`,
  * prior to session creation.
  * Called right after loading the shared library.
  *
  * Features:
- * - Initialize the global API in onnxruntime_vitisai_ep dll/so.
+ * - Initialize the global API in onnxruntime_morphizen_ep dll/so.
  * - Register custom operations
  *
  * @param api Pointer to the OrtApiForVaip instance.
@@ -37,44 +37,44 @@ extern "C" {
  * store custom operation domains.
  */
 VAIP_DLL_SPEC
-void initialize_onnxruntime_vitisai_ep(
+void initialize_onnxruntime_morphizen_ep(
     vaip_core::OrtApiForVaip* api, std::vector<OrtCustomOpDomain*>& ret_domain);
 
 /**
- * @brief Deinitializes the Vitis AI Execution Provider for ONNX Runtime.
+ * @brief Deinitializes the MorphiZen Execution Provider for ONNX Runtime.
  *
- * The `VitisAI_Provider::Shutdown()` is invoked during
+ * The `MorphiZen_Provider::Shutdown()` is invoked during
  * `ProviderLibrary::Unload()`,prior to unloading the shared library. It cleans
  * up any resources allocated during initialization.
  */
 VAIP_DLL_SPEC
-void deinitialize_onnxruntime_vitisai_ep();
+void deinitialize_onnxruntime_morphizen_ep();
 
 /**
  * @brief Called when InferenceSession::Run() started.
  * Enable user to set proformance mode for every session run.
  * Related to ORT #19521
  *
- * Called by `VitisAIExecutionProvider::OnRunStart()`.
+ * Called by `MorphiZenExecutionProvider::OnRunStart()`.
  *
  * @param eps Vector of unique pointers to ExecutionProvider instances.
  * @param state Pointer to the runtime state.
  * @param get_config_entry Function pointer to retrieve run_option entries.
  * @return Status code indicating success or failure.
  */
-VAIP_DLL_SPEC int vitisai_ep_on_run_start(
+VAIP_DLL_SPEC int morphizen_ep_on_run_start(
     const std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>& eps,
     const void* state,
     vaip_core::DllSafe<std::string> (*get_config_entry)(
         const void* state, const char* entry_name));
 
 /**
- * @brief Set DynamicOptions for the Vitis AI Execution Provider.
+ * @brief Set DynamicOptions for the MorphiZen Execution Provider.
  *
  * Called when InferenceSession::SetEpDynamicOptions() is called.
  * Related to ORT #22282
  *
- * Called by `VitisAIExecutionProvider::SetEpDynamicOptions()`.
+ * Called by `MorphiZenExecutionProvider::SetEpDynamicOptions()`.
  *
  * Valid options can be found in
  * `include\onnxruntime\core\session\onnxruntime_session_options_config_keys.h`
@@ -93,18 +93,18 @@ VAIP_DLL_SPEC int vitisai_ep_on_run_start(
  * @param kv_len Length of the key-value arrays.
  * @return Status code indicating success or failure.
  */
-VAIP_DLL_SPEC int vitisai_ep_set_ep_dynamic_options(
+VAIP_DLL_SPEC int morphizen_ep_set_ep_dynamic_options(
     const std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>& eps,
     const char* const* keys, const char* const* values, size_t kv_len);
 
 /**
- * @brief Compiles an ONNX model using the Vitis AI Execution Provider with
+ * @brief Compiles an ONNX model using the MorphiZen Execution Provider with
  * error handling.
  *
- * Called when VitisAIExecutionProvider::GetCapabilities() is called.
+ * Called when MorphiZenExecutionProvider::GetCapabilities() is called.
  * Throw an ONNXRuntime Error (ORT_THROW(STATUS)) if compile ONNX model error.
  *
- * Calleb by `VitisAIExecutionProvider::GetCapability()`.
+ * Calleb by `MorphiZenExecutionProvider::GetCapability()`.
  *
  * @param model_path Path to the ONNX model file.
  * @param graph Reference to the ONNX Runtime graph.
@@ -116,20 +116,20 @@ VAIP_DLL_SPEC int vitisai_ep_set_ep_dynamic_options(
  */
 VAIP_DLL_SPEC
 std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>*
-compile_onnx_model_vitisai_ep_with_error_handling(
+compile_onnx_model_morphizen_ep_with_error_handling(
     const std::string& model_path, const onnxruntime::Graph& graph,
     const onnxruntime::ProviderOptions& options, [[maybe_unused]] void* status,
     void (*func)(void*, int, const char*));
 
 /**
- * @brief Compiles an ONNX model using the Vitis AI Execution Provider with
+ * @brief Compiles an ONNX model using the MorphiZen Execution Provider with
  * specified options.
  *
- * If compile_onnx_model_vitisai_ep_with_error_handing not implements, will
+ * If compile_onnx_model_morphizen_ep_with_error_handing not implements, will
  * call this function. Not throw ONNXRuntime Error when compile ONNX model
  * error.
  *
- * Called by `VitisAIExecutionProvider::GetCapability()`.
+ * Called by `MorphiZenExecutionProvider::GetCapability()`.
  *
  * @param model_path Path to the ONNX model file.
  * @param graph Reference to the ONNX Runtime graph.
@@ -138,18 +138,18 @@ compile_onnx_model_vitisai_ep_with_error_handling(
  * instances.
  */
 VAIP_DLL_SPEC std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>*
-compile_onnx_model_vitisai_ep_with_options(
+compile_onnx_model_morphizen_ep_with_options(
     const std::string& model_path, const onnxruntime::Graph& graph,
     const onnxruntime::ProviderOptions& options);
 
 /**
- * @brief Compiles an ONNX model using the Vitis AI Execution Provider with
+ * @brief Compiles an ONNX model using the MorphiZen Execution Provider with
  * error handling and ORT logger integration (v4 API).
  *
  * This is the latest version of the compile API that integrates glog with
  * ORT's logging system, allowing users to control log levels through ORT APIs.
  *
- * Called by `VitisAIExecutionProvider::GetCapability()`.
+ * Called by `MorphiZenExecutionProvider::GetCapability()`.
  *
  * @param model_path Path to the ONNX model file.
  * @param graph Reference to the ONNX Runtime graph.
@@ -161,20 +161,20 @@ compile_onnx_model_vitisai_ep_with_options(
  * instances.
  */
 VAIP_DLL_SPEC std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>*
-compile_onnx_model_vitisai_ep_v4(const std::string& model_path,
-                                 const onnxruntime::Graph& graph,
-                                 const onnxruntime::ProviderOptions& options,
-                                 void* status,
-                                 void (*func)(void*, int, const char*),
-                                 const OrtLogger* ort_logger);
+compile_onnx_model_morphizen_ep_v4(const std::string& model_path,
+                                   const onnxruntime::Graph& graph,
+                                   const onnxruntime::ProviderOptions& options,
+                                   void* status,
+                                   void (*func)(void*, int, const char*),
+                                   const OrtLogger* ort_logger);
 
 /**
- * @brief Creates EPContxt Nodes for the Vitis AI Execution Provider.
+ * @brief Creates EPContxt Nodes for the MorphiZen Execution Provider.
  *
  * Called after compile onnx model when ep.context_enbale is set to 1.
  * The method is called after both `GetCapability()` and `Compile()`.
  *
- * Called by `VitisAIExecutionProvider::GetEpContextNodes()`.
+ * Called by `MorphiZenExecutionProvider::GetEpContextNodes()`.
  *
  * Enable Ep Context feature by sessin config option :
  * kOrtSessionOptionEpContextEnable = "ep.context_enable";
@@ -240,7 +240,7 @@ VAIP_DLL_SPEC const char* get_compiled_model_compatibility_info(
  * defined in the OrtCompiledModelCompatibility enum: UNSUPPORTED >
  * PREFER_RECOMPILATION > SUPPORTED_OPTIMAL > NOT_APPLICABLE.
  *
- * Called by both Old ABI (ort-bridge) and ORT Provider (vitisai).
+ * Called by both Old ABI (ort-bridge) and ORT Provider (morphizen).
  *
  * @param compatibility_info JSON string containing compatibility information.
  * @param devices Array of hardware devices for validation
@@ -263,7 +263,7 @@ VAIP_DLL_SPEC int validate_compiled_model_compatibility_info(
 /**
  * @brief Retrieves the VAIP version as a 32-bit unsigned integer.
  *
- * This function returns the version number of the VAIP (Vitis AI Execution
+ * This function returns the version number of the VAIP (MorphiZen Execution
  * Provider). in a packed 32-bit format. The version is encoded as follows:
  *
  * - Bits 31–24: Major version
@@ -282,7 +282,7 @@ VAIP_DLL_SPEC uint32_t vaip_get_version();
  * option used with `onnxruntime_pref_test.exe`.
  * The trace file can be opend with Chrome trace viewer (chrome://tracing).
  *
- * Called by `VitisAIExecutionProvider::GetProfiler()`.
+ * Called by `MorphiZenExecutionProvider::GetProfiler()`.
  *
  * EventInfo = std::tuple<std::string, // name
  *                            int,         // pid
@@ -298,15 +298,15 @@ void profiler_collect(std::vector<EventInfo>& api_events,
                       std::vector<EventInfo>& kernel_events);
 
 /**
- * @brief Retrieves the global API instance for Vitis AI Execution Provider.
+ * @brief Retrieves the global API instance for MorphiZen Execution Provider.
  * For multiple DLLs to use the same global_api for initialization.
  *
  * It is defined in vaip_ort_api.cpp
  *
- * The gloal_api initialized in onnxruntime_vitisai_eo.dll/so.
+ * The gloal_api initialized in onnxruntime_morphizen_eo.dll/so.
  * But the gloal_api not initalized in Morphizen tools (eg onnx_grep ,
  * pattern_gen) DLL/SO. so need get the gloal_api from
- * onnxruntime_vitisai_eo.dll/so and set it to Morphizen tools.
+ * onnxruntime_morphizen_eo.dll/so and set it to Morphizen tools.
  *
  * @return Pointer to the OrtApiForVaip instance.
  */
@@ -322,8 +322,8 @@ VAIP_DLL_SPEC const vaip_core::OrtApiForVaip* get_the_global_api_unsafe();
  * std::vector<std::unique_ptr<vaip_core::ExecutionProvider>> and deletes it.
  *
  * The std::vector<std::unique_ptr<ExecutionProvider>> created in
- * onnxruntime_vitisai_ep.dll cannot be deleted in
- * onnxruntime_providers_vitisai.dll
+ * onnxruntime_morphizen_ep.dll cannot be deleted in
+ * onnxruntime_providers_morphizen.dll
  *
  *
  * @return void* A function pointer to a deleter function for the specified

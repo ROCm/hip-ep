@@ -19,21 +19,21 @@ static void del_ctx_model(const std::filesystem::path& model_path) {
 
 struct HelloEpTest : public ::testing::Test {
   void SetUp() override {
-    // we must use the reserved name "VitisAIExecutionProvider" to register the
-    // EP library, otherwise the EP will be regarded as a non-cpu EP by the ONNX
-    // Runtime, and must implement a kernel for the "MemcopyFromHost" node.
+    // we must use the reserved name "MorphiZenExecutionProvider" to register
+    // the EP library, otherwise the EP will be regarded as a non-cpu EP by the
+    // ONNX Runtime, and must implement a kernel for the "MemcopyFromHost" node.
     // see `ProviderIsCpuBased` and `MemcpyTransformer::ApplyImpl` for more
     // details.
-    registration_name = "VitisAIExecutionProvider";
+    registration_name = "MorphiZenExecutionProvider";
     ort_env =
         std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "HelloEp.Test0");
     LOG(INFO) << "Registering EP library with name: " << registration_name
-              << " and library path: " << MORPHIZEN_VITISAI_EP.u8string();
-    ASSERT_TRUE(std::filesystem::exists(MORPHIZEN_VITISAI_EP))
-        << "EP library does not exist: " << MORPHIZEN_VITISAI_EP.u8string();
+              << " and library path: " << MORPHIZEN_MORPHIZEN_EP.u8string();
+    ASSERT_TRUE(std::filesystem::exists(MORPHIZEN_MORPHIZEN_EP))
+        << "EP library does not exist: " << MORPHIZEN_MORPHIZEN_EP.u8string();
     auto status = Ort::GetApi().RegisterExecutionProviderLibrary(
         *ort_env, registration_name.c_str(),
-        PathToString<ORTCHAR_T>()(MORPHIZEN_VITISAI_EP).c_str());
+        PathToString<ORTCHAR_T>()(MORPHIZEN_MORPHIZEN_EP).c_str());
     ASSERT_TRUE(status == nullptr)
         << "RegisterExecutionProviderLibrary failed: status = "
         << Ort::GetApi().GetErrorMessage(status);

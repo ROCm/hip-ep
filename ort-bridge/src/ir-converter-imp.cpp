@@ -9,7 +9,7 @@
 #include <morphizen-utils/morphizen-utils.hpp>
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_IR_CONVERTER, "0")
 DEF_ENV_PARAM_2(MORPHIZEN_DEBUG_IR_CONVERTER_OUTPUT_FILE,
-                "VitisAI-EP-IR-Converter.onnx", std::string)
+                "MorphiZen-EP-IR-Converter.onnx", std::string)
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_IR_CONVERTER) >= n)
 namespace morphizen {
 

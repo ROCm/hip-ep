@@ -10,7 +10,7 @@ $token = "$Env:MY_GHE_TOKEN"
 $branch = "$Env:MY_BRANCH"
 $body = "$Env:MY_BODY"
 $title = "$Env:MY_TITLE"
-$repoOwner = "VitisAI"
+$repoOwner = "MorphiZen"
 $repoName = "vaip"
 $baseBranch = "cp_dev"
 $apiUrl = "https://gitenterprise.xilinx.com/api/v3/repos/$repoOwner/$repoName/pulls"
@@ -29,7 +29,7 @@ function Get-ExistingPr {
         [string]$headBranch
     )
 
-    $prApiUrl = "${apiUrl}?base=${baseBranch}&head=VitisAI:${headBranch}"
+    $prApiUrl = "${apiUrl}?base=${baseBranch}&head=MorphiZen:${headBranch}"
     Write-Debug "Checking for existing PRs with base $baseBranch and head $headBranch..."
     Write-Debug "API URL: $prApiUrl"
     Write-Debug "API URL: $apiUrl"
@@ -62,7 +62,7 @@ if ($null -eq $existingPrs) {
     if ($Env:MORPHIZEN_PR_NUMBER) {
         Write-Host "Adding comment to MorphiZen PR #$($Env:MORPHIZEN_PR_NUMBER)..."
 
-        $morphizenCommentUrl = "https://gitenterprise.xilinx.com/api/v3/repos/VitisAI/MorphiZen/issues/$($Env:MORPHIZEN_PR_NUMBER)/comments"
+        $morphizenCommentUrl = "https://gitenterprise.xilinx.com/api/v3/repos/MorphiZen/MorphiZen/issues/$($Env:MORPHIZEN_PR_NUMBER)/comments"
 
         # Create comment text without emoji or special characters
         $commentText = "**VAIP Verification PR Created**" + "`n`n" + "Verification PR: " + $response.html_url + "`n`n" + "This PR will test the MorphiZen changes in the VAIP environment."

@@ -15,7 +15,7 @@
 #include <morphizen/vaip-ort-api-ext.hpp>
 #include <vaip/custom_op.h>
 #include <vaip/export.h>
-/// header file used by ort VITISAI execution providers.
+/// header file used by ort MORPHIZEN execution providers.
 
 using EventInfo = std::tuple<std::string, // name
                              int,         // pid

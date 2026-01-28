@@ -8,17 +8,17 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_version_header.cmake)
 generate_version_info_header()
 
 add_library(${morphizen_CORE_DYNAMIC_UNIQUE_ID} SHARED src/main.cpp ${ryzenai_version_rc_file})
-message(STATUS "create target ${morphizen_CORE_DYNAMIC_UNIQUE_ID} for onnxruntime_vitisai_ep.dll")
+message(STATUS "create target ${morphizen_CORE_DYNAMIC_UNIQUE_ID} for onnxruntime_morphizen_ep.dll")
 add_library (morphizen::${morphizen_CORE_DYNAMIC_UNIQUE_ID} ALIAS ${morphizen_CORE_DYNAMIC_UNIQUE_ID})
 set_target_properties(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PROPERTIES FOLDER morphizen)
-# set output name of ${morphizen_CORE_DYNAMIC_UNIQUE_ID}, it is required by VitisAI EP.
+# set output name of ${morphizen_CORE_DYNAMIC_UNIQUE_ID}, it is required by MorphiZen EP.
 set_target_properties(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PROPERTIES OUTPUT_NAME ${morphizen_OUTPUT_NAME})
 
 if(MSVC)
   if(morphizen_ENABLE_ORT_BRIDGE)
-    target_sources(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PRIVATE onnxruntime_vitisai_ep_with_ort_bridge.def)
+    target_sources(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PRIVATE onnxruntime_morphizen_ep_with_ort_bridge.def)
   else()
-    target_sources(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PRIVATE onnxruntime_vitisai_ep.def)
+    target_sources(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PRIVATE onnxruntime_morphizen_ep.def)
   endif()
 endif(MSVC)
 
@@ -29,8 +29,8 @@ endif(MSVC)
 # if we add the mark here, then, all targets dependes on
 # morphizen-core-static directly or indirectly, must be marked with
 # WHOLE_ARCHIVE. In stead, we manually maintain
-# onnxruntime_vitisai_ep.def file. tools/parse_cl_link_error.py is
-# used to parse the link error and update onnxruntime_vitisai_ep.def
+# onnxruntime_morphizen_ep.def file. tools/parse_cl_link_error.py is
+# used to parse the link error and update onnxruntime_morphizen_ep.def
 # automatically, see tools/parse_cl_link_error.py for more details.
 target_link_libraries(${morphizen_CORE_DYNAMIC_UNIQUE_ID}
   PRIVATE

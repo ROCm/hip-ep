@@ -393,58 +393,14 @@ static std::string get_model_signature(const Graph& onnx_graph) {
   return md5.getHash();
 }
 
-static std::pair<const std::string, const MepConfigTable*>
-find_signature_in_meptabel(const ConfigProto& proto,
-                           const std::string md5_file_base,
-                           const std::string md5_in_memory_a,
-                           const std::string md5_in_memory_b,
-                           int32_t node_count) {
-  for (auto& mep : proto.mep_table()) {
-    if (md5_in_memory_a == mep.md5sum_in_memory()) {
-      MY_LOG(1) << "find signature in meptable : "             //
-                << "model_name :  " << mep.model_name() << " " //
-                << "md5sum_in_memory : " << mep.md5sum_in_memory();
-      return std::make_pair(md5_in_memory_a, &mep);
-    }
-  }
-  for (auto& mep : proto.mep_table()) {
-    if (md5_in_memory_b == mep.md5sum_in_memory_with_io()) {
-      MY_LOG(1) << "find signature in meptable : "             //
-                << "model_name :  " << mep.model_name() << " " //
-                << "md5sum_in_memory_with_io : "
-                << mep.md5sum_in_memory_with_io()
-                << " model node_count : " << node_count
-                << " mep node_count : " << mep.node_count();
-      // Also match node count if it's specified in vaip_config.json
-      if ((!mep.has_node_count()) || (node_count == mep.node_count())) {
-        return std::make_pair(md5_in_memory_b, &mep);
-      }
-    }
-  }
-  for (auto& mep : proto.mep_table()) {
-    if (!md5_file_base.empty() && md5_file_base == mep.md5sum_on_disk()) {
-      MY_LOG(1) << "find signature in meptable : "             //
-                << "model_name :  " << mep.model_name() << " " //
-                << "md5sum_on_disk : " << mep.md5sum_on_disk();
-      return std::make_pair(md5_file_base, &mep);
-    }
-  }
-  MY_LOG(1) << "Can not find signature in meptable , use in memory signature "
-            << md5_in_memory_a;
-  return std::make_pair(md5_in_memory_a, nullptr);
-}
-static std::pair<const std::string, const MepConfigTable*>
-get_signature_with_meptable(const std::string& model_path,
-                            const Graph& onnx_graph, ConfigProto& proto) {
+static std::string get_signature(const std::string& model_path,
+                                 const Graph& onnx_graph, ConfigProto& proto) {
   auto md5_file_base =
       model_path.empty() ? "" : vaip_core::get_md5_of_file(model_path);
   auto md5_in_memory_a = get_model_signature(onnx_graph);
   auto md5_in_memory_b =
       get_model_signature_with_graph_inputs_and_outputs(onnx_graph);
 
-  *proto.mutable_onnx_md5_file() = md5_file_base;
-  *proto.mutable_onnx_md5_a() = md5_in_memory_a;
-  *proto.mutable_onnx_md5_b() = md5_in_memory_b;
   const auto& node_indices = graph_get_node_in_topoligical_order(onnx_graph);
   int32_t node_count = (int32_t)node_indices.size();
 
@@ -454,8 +410,7 @@ get_signature_with_meptable(const std::string& model_path,
   MY_LOG(1) << "Algorithm-B: based on graph inputs/outputs signature : "
             << md5_in_memory_b;
   MY_LOG(1) << "Algorithm-B: node count: " << node_count;
-  return find_signature_in_meptabel(proto, md5_file_base, md5_in_memory_a,
-                                    md5_in_memory_b, node_count);
+  return md5_in_memory_a;
 }
 
 std::shared_ptr<PassContextImp>
@@ -480,9 +435,8 @@ initialize_context(const std::string& model_path, const Graph& onnx_graph,
   }
   context->is_ep_context_model = !ep_context_nodes.empty();
   auto& model = graph_get_model(onnx_graph);
-  auto [md5, mep_table] =
-      get_signature_with_meptable(context->model_path.string(), onnx_graph,
-                                  *context->context_proto.mutable_config());
+  auto md5 = get_signature(context->model_path.string(), onnx_graph,
+                           *context->context_proto.mutable_config());
 
   if (!context->context_proto.config().cache_key().empty()) {
     MY_LOG(1) << "use cache key specified by user "
@@ -511,99 +465,11 @@ initialize_context(const std::string& model_path, const Graph& onnx_graph,
   // input/output-tensor names overall auto-mapping mechanism will be to use
   // Algorithm-A first, if that fails then use Algorithm-B to identify the
   // model/target
-  if (mep_table) {
-    context->mep_config_proto_ = std::make_unique<MepConfigTable>(*mep_table);
-    context->context_proto.mutable_config()->mutable_provider_options()->insert(
-        {"model_name", mep_table->model_name()});
-    std::string model_category = "";
-    if (mep_table->has_model_category()) {
-      model_category = mep_table->model_category();
-    }
-    context->context_proto.mutable_config()->mutable_provider_options()->insert(
-        {"model_category", model_category});
-
-    std::string model_variant = "";
-    if (mep_table->has_model_variant()) {
-      model_variant = mep_table->model_variant();
-    }
-    context->context_proto.mutable_config()->mutable_provider_options()->insert(
-        {"model_variant", model_variant});
-
-    std::string is_preemptible = "0";
-    if (mep_table->has_is_preemptible()) {
-      is_preemptible = mep_table->is_preemptible() ? "1" : "0";
-
-      context->context_proto.mutable_config()
-          ->mutable_provider_options()
-          ->insert({"is_preemptible", is_preemptible});
-    }
-
-    std::string dd_use_lazy_scratch_bo = "1";
-    if (mep_table->has_dd_use_lazy_scratch_bo()) {
-      dd_use_lazy_scratch_bo = mep_table->dd_use_lazy_scratch_bo() ? "1" : "0";
-    }
-
-    context->context_proto.mutable_config()->mutable_provider_options()->insert(
-        {"dd_use_lazy_scratch_bo", dd_use_lazy_scratch_bo});
-
-    std::string qos_priority = "";
-    if (mep_table->has_qos_priority()) {
-      qos_priority = mep_table->qos_priority();
-
-      context->context_proto.mutable_config()
-          ->mutable_provider_options()
-          ->insert({"qos_priority", qos_priority});
-    }
-
-    std::string perf_pref = "";
-    if (mep_table->has_perf_pref()) {
-      perf_pref = mep_table->perf_pref();
-
-      context->context_proto.mutable_config()
-          ->mutable_provider_options()
-          ->insert({"perf_pref", perf_pref});
-    }
-
-    auto qos_gen_params = mep_table->qos_generic_params();
-    for (const auto& pair : qos_gen_params) {
-      context->context_proto.mutable_config()
-          ->mutable_qos_provider_options()
-          ->insert({pair.first, pair.second});
-    }
-
-    std::string dd_use_lazy_const_bo = "0";
-    if (mep_table->has_dd_use_lazy_const_bo()) {
-      dd_use_lazy_const_bo = mep_table->dd_use_lazy_const_bo() ? "1" : "0";
-      context->context_proto.mutable_config()
-          ->mutable_provider_options()
-          ->insert({"dd_use_lazy_const_bo", dd_use_lazy_const_bo});
-    }
-
-    std::string dealloc_scratch_bo = "0";
-    if (mep_table->has_dd_dealloc_scratch_bo()) {
-      dealloc_scratch_bo = mep_table->dd_dealloc_scratch_bo() ? "1" : "0";
-      context->context_proto.mutable_config()
-          ->mutable_provider_options()
-          ->insert({"dd_dealloc_scratch_bo", dealloc_scratch_bo});
-    }
-
-    std::string constbo_sharing_key = "";
-    if (mep_table->has_constbo_sharing_key()) {
-      constbo_sharing_key = mep_table->constbo_sharing_key();
-      context->context_proto.mutable_config()
-          ->mutable_provider_options()
-          ->insert({"constbo_sharing_key", constbo_sharing_key});
-    }
-  }
   context->target_auto_discovery(model);
   if (!context->is_ep_context_model) {
     vaip_core::update_config_by_target(*context->context_proto.mutable_config(),
-                                       mep_table, context->target_proto_.get(),
-                                       context);
+                                       context->target_proto_.get(), context);
   }
-
-  auto onnx_path = model_path.empty() ? std::string("N/A") : model_path;
-  *context->context_proto.mutable_config()->mutable_onnx_path() = onnx_path;
 
   if (VAIP_ORT_API(model_has_meta_data)(model, "suffix_counter")) {
     context->suffix_counter =
@@ -820,7 +686,7 @@ create_ep_context_node(vaip_core::ExecutionProviderConcrete* ep, int index) {
   int64_t embed_mode =
       context.get_session_config("ep.context_embed_mode", "1") == "1" ? 1 : 0;
   attrs.add("embed_mode", embed_mode);
-  attrs.add("source", std::string("VitisAIExecutionProvider"));
+  attrs.add("source", std::string("MorphiZenExecutionProvider"));
   attrs.add("log_dir", context.get_log_dir().u8string());
   attrs.add("onnx_model_filename", context.model_path.u8string());
   attrs.add("partition_name", name);
@@ -965,7 +831,7 @@ get_ep_context_nodes(vaip_cxx::GraphConstRef onnx_graph) {
   for (auto node : nodes) {
     if (node.op_type() == "EPContext" && node.op_domain() == "com.microsoft") {
       if (node.has_attr("source") &&
-          node.get_attr_string("source") == "VitisAIExecutionProvider") {
+          node.get_attr_string("source") == "MorphiZenExecutionProvider") {
         ret.push_back(node);
       }
     }
@@ -1202,51 +1068,13 @@ static void dirty_hack_for_model_clone_external_data_threshold(
     }
   }
 }
-static bool is_compiling_on_non_npu_platform(PassContextImp& context) {
-  auto is_compiling_on_non_npu_platform_provider_option =
-      context.get_provider_option(kProviderOptionIsCompilingOnNonNpuPlatform);
-  if (is_compiling_on_non_npu_platform_provider_option) {
-    // it takes the precedence over the EP context enable option. this is only
-    // for internal use, for debugging and testing purpose.
-    return is_compiling_on_non_npu_platform_provider_option.value() == "1";
-  }
-  auto is_ep_context_enabled =
-      context.get_session_config(kOrtSessionOptionEpContextEnable, "0") == "1";
-  if (!is_ep_context_enabled) {
-    // if EP context is not enabled, it is not a compilation flow.
-    return false;
-  }
-  // TODO: vai-rt need to upgrade onnxruntime
-  static const char* kOrtSessionOptionsDisableModelCompile_local =
-      "session.disable_model_compile";
-  if (context.get_session_config(kOrtSessionOptionsDisableModelCompile_local,
-                                 "1") == "0") {
-    return true; // see also MicroSoft/Onnxruntime#24416
-  }
-#if defined(_WIN32)
-  std::filesystem::path xilinx_dll =
-      std::filesystem::path("C:\\Windows\\System32\\xrt_coreutil.dll");
-  if (!std::filesystem::exists(xilinx_dll)) {
-    return true; // assume compiling on non-npu platform if xrt_coreutil.dll
-                 // does not exist.
-  }
-#elif !defined(__aarch64__)
-  // If XILINX_XRT is not set on Linux, it's a compile only run
-  auto xilinx_xrt = getenv("XILINX_XRT");
-  if (xilinx_xrt == nullptr) {
-    return true; // assume compiling on non-npu platform if XILINX_XRT is not
-                 // set.
-  }
-#endif
-  return false;
-}
 static void log_stat_subgraph(const ContextProto& context_proto) {
   auto stat = std::map<std::string, int>{};
   for (auto& meta_def : context_proto.meta_def()) {
     stat[meta_def.device()]++;
   }
   // as per AIESW-11754 request, use LOG(INFO) instead of std::cout
-  LOG(INFO) << "[Vitis AI EP] No. of Subgraphs supported by Vitis AI EP:";
+  LOG(INFO) << "[MorphiZen EP] No. of Subgraphs supported by MorphiZen EP:";
   for (const auto& subgraph_stat : stat) {
     LOG(INFO) << std::setw(6) << subgraph_stat.first << std::setw(6)
               << subgraph_stat.second << " ";
@@ -1275,17 +1103,8 @@ compile_onnx_model_internal(
     measure_after_compile_onnx_model_2 =
         context->measure("after_compile_onnx_model_internal");
     ret.reserve(context->context_proto.meta_def_size());
-    auto enable_generic_custom_op = is_compiling_on_non_npu_platform(*context);
-    if (enable_generic_custom_op) {
-      LOG(INFO) << "detect running on Non-NPU platform, compilation only";
-    }
     for (auto& meta_def : *context->context_proto.mutable_meta_def()) {
       std::string device = meta_def.device();
-      if (enable_generic_custom_op) {
-        // ovewrite default device for offline compilation flow.
-        device = "GENERIC";
-        meta_def.set_fallback_cpu(false);
-      }
       auto plugin_name = std::string("vaip_custom_op_") + device;
       ret.emplace_back(
           ExecutionProviderConcrete::create(plugin_name, context, meta_def));
@@ -1295,21 +1114,8 @@ compile_onnx_model_internal(
 }
 
 static std::vector<std::string> GetStackTrace() {
-  // Use glog's public API instead of internal GetStackTrace(void**, int, int)
-  // google::GetStackTrace() returns a single string with the full stack trace
-  std::string stack_trace = google::GetStackTrace();
-
-  // Split the stack trace string into individual lines
-  std::vector<std::string> stack_strings;
-  std::istringstream iss(stack_trace);
-  std::string line;
-  while (std::getline(iss, line)) {
-    if (!line.empty()) {
-      stack_strings.push_back(line);
-    }
-  }
-
-  return stack_strings;
+  // Stack trace functionality disabled
+  return std::vector<std::string>();
 }
 
 struct GlogFatalException : public std::exception {
@@ -1356,7 +1162,7 @@ static void print_graph_input_and_output(const Graph& onnx_graph) {
   auto graph_inputs = graph_get_inputs(onnx_graph);
   auto graph_outputs = graph_get_outputs(onnx_graph);
 
-  LOG(INFO) << "Vitis AI EP Load ONNX Model Success";
+  LOG(INFO) << "MorphiZen EP Load ONNX Model Success";
   LOG(INFO) << "Graph Input Node Name/Shape (" << graph_inputs.size() << ")";
   for (auto& input : graph_inputs) {
     auto shape = node_arg_get_shape_i64(*input);
@@ -1472,7 +1278,7 @@ std::vector<std::unique_ptr<ExecutionProvider>> compile_onnx_model_3_internal(
       context->get_provider_option("vaip_disable_cpu_only_inference", "0");
   if (disable_cpu_only == "1") {
     if (is_cpu_only_inference(*context)) {
-      LOG(ERROR) << "[Vitis AI EP][DISABLE CPU ONLY] The model's NPU "
+      LOG(ERROR) << "[MorphiZen EP][DISABLE CPU ONLY] The model's NPU "
                     "offload is 0";
       abort();
     }
@@ -1493,7 +1299,7 @@ thread_local const void* g_state = nullptr;
 thread_local vaip_core::DllSafe<std::string> (*g_get_config_entry)(
     const void* state, const char* entry_name) = nullptr;
 
-int vitisai_ep_on_run_start(
+int morphizen_ep_on_run_start(
     const std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>& eps,
     const void* state,
     vaip_core::DllSafe<std::string> (*get_config_entry)(
@@ -1511,7 +1317,7 @@ int vitisai_ep_on_run_start(
   return 0;
 }
 
-int vitisai_ep_set_ep_dynamic_options(
+int morphizen_ep_set_ep_dynamic_options(
     const std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>& eps,
     const char* const* keys, const char* const* values, size_t kv_len) {
   if (eps.empty()) {
@@ -1533,17 +1339,17 @@ int vitisai_ep_set_ep_dynamic_options(
 }
 } // namespace vaip_core
 
-extern "C" VAIP_DLL_SPEC int vitisai_ep_on_run_start(
+extern "C" VAIP_DLL_SPEC int morphizen_ep_on_run_start(
     const std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>& eps,
     const void* state,
     vaip_core::DllSafe<std::string> (*get_config_entry)(
         const void* state, const char* entry_name)) {
-  return vaip_core::vitisai_ep_on_run_start(eps, state, get_config_entry);
+  return vaip_core::morphizen_ep_on_run_start(eps, state, get_config_entry);
 }
 
-extern "C" VAIP_DLL_SPEC int vitisai_ep_set_ep_dynamic_options(
+extern "C" VAIP_DLL_SPEC int morphizen_ep_set_ep_dynamic_options(
     const std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>& eps,
     const char* const* keys, const char* const* values, size_t kv_len) {
-  return vaip_core::vitisai_ep_set_ep_dynamic_options(eps, keys, values,
-                                                      kv_len);
+  return vaip_core::morphizen_ep_set_ep_dynamic_options(eps, keys, values,
+                                                        kv_len);
 }

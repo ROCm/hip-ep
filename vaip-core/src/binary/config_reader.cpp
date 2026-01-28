@@ -17,10 +17,7 @@
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_CONFIG_READER, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_CONFIG_READER) >= n)
-DEF_ENV_PARAM_2(XLNX_VART_FIRMWARE, "", std::string)
-DEF_ENV_PARAM(XLNX_ENABLE_BATCH, "0")
-DEF_ENV_PARAM(NUM_OF_DPU_RUNNERS, "1")
-DEF_ENV_PARAM_2(VAIP_CONFIG_PROVIDER_BACKEND, "onnxruntime_vitisai_ep",
+DEF_ENV_PARAM_2(VAIP_CONFIG_PROVIDER_BACKEND, "onnxruntime_morphizen_ep",
                 std::string)
 // this is actually provider options, for backward compatibility, we keep
 // this key in the root of the json.
@@ -28,7 +25,7 @@ static constexpr char kProviderOptions[] = "sessionOptions";
 static constexpr char kSessionConfig[] = "ort_session_config";
 static constexpr char kSessionOptionPtr[] = "session_options";
 static constexpr char kEpProviderOptionPrefix[] =
-    "ep.vitisaiexecutionprovider.";
+    "ep.morphizenexecutionprovider.";
 namespace vaip_core {
 
 namespace config_default {
@@ -92,37 +89,9 @@ get_protobuf_struct_from_config_file(const std::string& filename) {
   return config;
 }
 
-static void
-update_enable_batch(const onnxruntime::ProviderOptions& session_option) {
-  if (session_option.find("xlnx_enable_batch") != session_option.end()) {
-    std::string enable_batch = session_option.at("xlnx_enable_batch");
-    if (enable_batch == "1") {
-      ENV_PARAM(XLNX_ENABLE_BATCH) = 1;
-    } else if (enable_batch == "0") {
-      ENV_PARAM(XLNX_ENABLE_BATCH) = 0;
-    } else {
-      ENV_PARAM(XLNX_ENABLE_BATCH) = 1;
-    }
-  }
-}
+// Removed: update_enable_batch - NPU-specific xlnx_enable_batch option
 
-static void
-update_num_dpu_runners(const onnxruntime::ProviderOptions& session_option) {
-  int num_of_dpu_runners = 1;
-  if (session_option.find("num_of_dpu_runners") != session_option.end()) {
-    std::string str_of_dpu_runners = session_option.at("num_of_dpu_runners");
-    num_of_dpu_runners = atoi(str_of_dpu_runners.c_str());
-    if (num_of_dpu_runners <= 0 || num_of_dpu_runners > 8) {
-      return;
-    }
-    ENV_PARAM(NUM_OF_DPU_RUNNERS) = num_of_dpu_runners;
-#ifdef _WIN32
-    _putenv_s("NUM_OF_DPU_RUNNERS", std::to_string(num_of_dpu_runners).c_str());
-#else
-    setenv("NUM_OF_DPU_RUNNERS", std::to_string(num_of_dpu_runners).c_str(), 1);
-#endif
-  }
-}
+// Removed: update_num_dpu_runners - NPU-specific DPU runners configuration
 
 static void set_session_config(google::protobuf::Struct& ret,
                                const std::string& key,
@@ -132,7 +101,7 @@ static void set_session_config(google::protobuf::Struct& ret,
     MY_LOG(1) << "convert " << key << " to " << key2 << " and set "
               << "provider_options"
               << "[" << key2 << "]=\"" << value << "\"";
-    // The key is prefixed with "ep.vitisaiexecutionprovider."
+    // The key is prefixed with "ep.morphizenexecutionprovider."
     // Remove the prefix before setting the value.
     set_struct_value(ret, kProviderOptions, key2, value);
   } else {
@@ -169,8 +138,6 @@ static google::protobuf::Struct
 get_config_json(const onnxruntime::ProviderOptions& options) {
   google::protobuf::Struct ret;
   // update_log_level(options);
-  update_enable_batch(options);
-  update_num_dpu_runners(options);
   auto vaip_get_default_config_plugin =
       ::vaip_core::Plugin::get(ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND));
   const char* default_config = get_default_config();
@@ -242,20 +209,13 @@ get_config_json(const onnxruntime::ProviderOptions& options) {
       LOG(FATAL) << err_msg;
     }
   }
-  auto xclbin_in_config_file =
-      ret.fields().find("xclbin") != ret.fields().end();
   const std::string ort_session_config_prefix =
       std::string(kSessionConfig) + ".";
 
   for (const auto& entry : options) {
     MY_LOG(1) << "process provider_option[\"" << entry.first << "\"]= \""
               << entry.second << "\"";
-    if (entry.first == "xclbin" && xclbin_in_config_file) {
-      // FIXME: below comments might not be accurate.
-      //
-      // In the case where xclbin are (mistakenly) specified both in
-      // `ProviderOptions["config_file"]` and in `ProvidersOptions["xclbin"]`.
-    } else if (entry.first == kSessionOptionPtr) {
+    if (entry.first == kSessionOptionPtr) {
       // The key here is "session_options," and the value is a string that
       // points to the session_options object.
       restore_session_options(ret, entry.second);
@@ -291,8 +251,8 @@ get_environment_variables() {
 static const onnxruntime::ProviderOptions get_provider_option_from_env_variable(
     const onnxruntime::ProviderOptions& options) {
   // enumerate all environment variables and check if the variable name start
-  // with "VITISAI_EP_PROVIER_OPTION."
-  const std::string prefix = "VITISAI_EP_PROVIDER_OPTION_";
+  // with "MORPHIZEN_EP_PROVIER_OPTION."
+  const std::string prefix = "MORPHIZEN_EP_PROVIDER_OPTION_";
   onnxruntime::ProviderOptions ret = options;
   for (const auto& entry : get_environment_variables()) {
     if (entry.first.rfind(prefix, 0) == 0) {

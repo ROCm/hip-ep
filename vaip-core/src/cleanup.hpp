@@ -7,5 +7,5 @@
 #include <functional>
 #include <string>
 namespace vaip_core {
-void deinitialize_onnxruntime_vitisai_ep();
+void deinitialize_onnxruntime_morphizen_ep();
 } // namespace vaip_core

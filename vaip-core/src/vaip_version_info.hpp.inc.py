@@ -189,9 +189,9 @@ def get_version_info_for_rc():
         "MORPHIZEN_PRODUCT_MAJOR": 1,
         "MORPHIZEN_PRODUCT_MINOR": 0,
         "MORPHIZEN_PRODUCT_PATCH": 0,
-        "PRODUCT_DESCRIPTION": "ONNXRuntime VitisAI EP",
+        "PRODUCT_DESCRIPTION": "ONNXRuntime MorphiZen EP",
         "PRODUCT_NAME": "MorphiZen",
-        "morphizen_OUTPUT_NAME": "onnxruntime_vitisai_ep",
+        "morphizen_OUTPUT_NAME": "onnxruntime_morphizen_ep",
         **os.environ,
     }
 
@@ -211,12 +211,12 @@ def main(release_file):
                 {{"vai-rt", "{project_commit_id}", "{project_version_id}"}},
             """
             f_out.write(project_out)
-        ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR = os.environ.get(
-            "ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR", "N/A"
+        ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR = os.environ.get(
+            "ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR", "N/A"
         )
-        if ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR != "N/A":
+        if ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR != "N/A":
             ort_branch, ort_git_hash = get_dir_version_info(
-                ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR
+                ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR
             )
             project_out = f"""
                 {{"onnxruntime", "{ort_git_hash}", "{ort_branch}"}},

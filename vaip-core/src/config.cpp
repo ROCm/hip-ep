@@ -8,9 +8,6 @@
 #include <set>
 
 #include <glog/logging.h>
-#ifdef ENABLE_XRT
-#  include <version.h>
-#endif
 #ifdef _WIN32
 #  pragma warning(push)
 #  pragma warning(disable : 4251)
@@ -39,7 +36,6 @@
 DEF_ENV_PARAM(DEBUG_VAIP_CONFIG, "0")
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY, "0")
 DEF_ENV_PARAM(XLNX_ONNX_EP_VERBOSE, "0")
-DEF_ENV_PARAM_2(XLNX_VART_FIRMWARE, "", std::string)
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_VAIP_CONFIG) >= n)
 #define LOG_VERBOSE(n)                                                         \
   LOG_IF(INFO, ENV_PARAM(XLNX_ONNX_EP_VERBOSE) >= n)                           \
@@ -119,210 +115,31 @@ add_target_pass(ConfigProto& proto,
   }
 }
 
-static void update_target_compiler_atttr(ConfigProto& proto,
-                                         const TargetAttrProto& opts) {
-  // update:
-  // both change pass_dpu_param and all passproto in pass_vaiml_param
-  for (int i = 0; i < proto.passes_size(); ++i) {
-    PassProto* pass = proto.mutable_passes(i);
-    if (pass->has_pass_dpu_param()) {
-      auto attrs = pass->mutable_pass_dpu_param()->mutable_xcompiler_attrs();
-      for (const auto& pair : opts.xcompiler_attrs()) {
-        (*attrs)[pair.first] = pair.second;
-      }
-    }
-    if (proto.mutable_passes(i)->has_pass_vaiml_param()) {
-      auto pass_vaiml_param =
-          proto.mutable_passes(i)->mutable_pass_vaiml_param();
-      for (auto j = 0; j < pass_vaiml_param->sub_pass_size(); j++) {
+// Removed: update_target_compiler_atttr - depended on removed pass_dpu_param
+// and pass_vaiml_param fields
 
-        auto vaiml_sub_pass = pass_vaiml_param->mutable_sub_pass(j);
-        if (vaiml_sub_pass->has_pass_dpu_param()) {
-          auto attrs = vaiml_sub_pass->mutable_pass_dpu_param()
-                           ->mutable_xcompiler_attrs();
-          for (const auto& pair : opts.xcompiler_attrs()) {
-            (*attrs)[pair.first] = pair.second;
-          }
-        }
-      }
-    }
-  }
-}
+// Removed: update_target_attr - depended on removed target_opts field
 
-static void update_target_attr(ConfigProto& proto,
-                               const TargetProto* target_proto) {
-  auto session_option = proto.provider_options();
-  if (session_option.find("target_opts") != session_option.end()) {
-    std::string target_opts = session_option.at("target_opts");
-    auto options = google::protobuf::util::JsonParseOptions();
-    options.ignore_unknown_fields = true;
-    TargetAttrProto session_option_target_opts;
-    auto status = google::protobuf::util::JsonStringToMessage(
-        target_opts, &session_option_target_opts, options);
-    CHECK(status.ok()) << "cannot target_opts:" << target_opts;
+// Removed: update_xclbin - NPU-specific xclbin firmware handling
 
-    update_target_compiler_atttr(proto, session_option_target_opts);
-  } else if (target_proto->has_target_opts()) {
-    update_target_compiler_atttr(proto, target_proto->target_opts());
-  }
-}
+// Removed: update_hw_context_share - depended on removed share_hw_context field
 
-static void update_xclbin(ConfigProto& proto, const TargetProto* target_proto,
-                          std::shared_ptr<PassContext> ctx) {
-  std::string xclbin;
-  auto provider_option = ctx->get_all_provider_options();
-  if (provider_option.find("xclbin") != provider_option.end()) {
-    xclbin = provider_option.at("xclbin");
-  } else if (target_proto->has_xclbin()) {
-#ifdef _WIN32
-    const std::filesystem::path dir("C:\\Windows\\System32\\AMD");
-    auto full_path = dir / target_proto->xclbin();
-    xclbin = full_path.string();
-#else
-    xclbin = target_proto->xclbin();
-#endif
-  } else if (!ENV_PARAM(XLNX_VART_FIRMWARE).empty()) {
-    LOG_VERBOSE(1) << "XLNX_VART_FIRMWARE is deprecated";
-    xclbin = ENV_PARAM(XLNX_VART_FIRMWARE);
-  }
-  if (xclbin.empty()) {
-    return;
-  }
-  // now the session option has the real xclbin
-  // so, the custom op/pass can get the correct one
-  (*proto.mutable_provider_options())["xclbin"] = xclbin;
-  // only for Backward Compatibility ， will be deleted
-  // Note : writing back the xclbin from session option to PassDpuParam is
-  // generally not recommended, but this is a special case.
-  for (auto i = 0; i < proto.passes_size(); i++) {
-    // todo support more pass param, such as PassDodParam
-    if (proto.mutable_passes(i)->has_pass_dpu_param()) {
-      proto.mutable_passes(i)->mutable_pass_dpu_param()->set_xclbin(xclbin);
-    }
+// Removed: update_graph_engine_qos_priority - depended on removed
+// graph_engine_qos_priority field
 
-    if (proto.mutable_passes(i)->has_pass_vaiml_param()) {
-      auto len =
-          proto.mutable_passes(i)->mutable_pass_vaiml_param()->sub_pass_size();
-      for (auto j = 0; j < len; j++) {
-
-        auto sub_pass_proto = proto.mutable_passes(i)
-                                  ->mutable_pass_vaiml_param()
-                                  ->mutable_sub_pass(j);
-        if (sub_pass_proto->has_pass_dpu_param()) {
-          sub_pass_proto->mutable_pass_dpu_param()->set_xclbin(xclbin);
-        }
-      }
-    }
-  }
-
-  std::filesystem::path xclbin_path(xclbin);
-  if (std::filesystem::is_directory(xclbin_path)) {
-    std::string err_msg =
-        std::string{"xclbin is set to a directory: "} + xclbin;
-    throw std::runtime_error(err_msg);
-  }
-}
-
-static void update_hw_context_share(ConfigProto& proto,
-                                    const TargetProto* target_proto) {
-
-  auto session_option = proto.provider_options();
-
-  // highest priority: user config via session option explicitly
-  // second prioirty: the config in target proto, only work when user doesn't
-  // provide 'share_context' config.
-  constexpr char context_share_key[] = "share_context";
-
-  if (session_option.contains(context_share_key))
-    return;
-
-  if (target_proto->has_share_hw_context()) {
-    // share_context is of type bool.
-    auto share_context = target_proto->share_hw_context();
-    (*proto.mutable_provider_options())[context_share_key] =
-        std::to_string(share_context);
-  }
-}
-
-static void update_graph_engine_qos_priority(ConfigProto& proto,
-                                             const TargetProto* target_proto) {
-
-  auto session_option = proto.provider_options();
-
-  // highest priority: user config via session option explicitly
-  // second prioirty: the config in target proto, only work when user doesn't
-  // provide 'share_context' config.
-  constexpr char context_share_key[] = "priority";
-
-  if (session_option.contains(context_share_key))
-    return;
-
-  if (target_proto->has_graph_engine_qos_priority()) {
-    // share_context is of type int32.
-    auto qos_priority = target_proto->graph_engine_qos_priority();
-    (*proto.mutable_provider_options())[context_share_key] =
-        std::to_string(qos_priority);
-  }
-}
-
-void update_config_by_target(ConfigProto& proto, const MepConfigTable* mep,
+void update_config_by_target(ConfigProto& proto,
                              TargetProto* target_proto_in_pass_context,
                              std::shared_ptr<PassContext> ctx) {
   auto target = std::string();
-  auto xclbin = std::string();
 
   auto target_proto =
       get_target_proto(proto, target_proto_in_pass_context->name());
   CHECK(target_proto != nullptr)
       << "No valid target found: " << target << " logical error";
-  // update xclbin (mepcofig -> target)
-  if (mep != nullptr && mep->has_xclbin() && !mep->xclbin().empty()) {
-    target_proto->set_xclbin(mep->xclbin());
-  }
-  // update hw context sharing (mepconfig -> target)
-  if (mep != nullptr && mep->has_share_hw_context()) {
-    target_proto->set_share_hw_context(mep->share_hw_context());
-  }
 
-  if (mep != nullptr && mep->has_model_clone_threshold()) {
-    (*target_proto->mutable_provider_options())
-        ["XLNX_model_clone_external_data_threshold"] =
-            std::to_string(mep->model_clone_threshold());
-  }
-  // For non-shell models, the default for use_old_qdq is true
-  // For shell models, the default for use_old_qdq is false
-  bool use_old_qdq = true;
-  bool use_py3_round = false;
-  if (mep) {
-    use_old_qdq = false;
-    if (target_proto->has_old_qdq()) {
-      use_old_qdq = target_proto->old_qdq();
-    }
-  }
-  if (target_proto->has_old_qdq()) {
-    use_old_qdq = target_proto->old_qdq();
-  }
-  if (target_proto->has_py3_round()) {
-    use_py3_round = target_proto->py3_round();
-    auto iter = proto.provider_options().find("xlnx_enable_py3_round");
-    if (iter == proto.provider_options().end()) {
-      (*proto.mutable_provider_options())["xlnx_enable_py3_round"] =
-          std::to_string(use_py3_round);
-    }
-  }
-
-  auto iter = proto.provider_options().find("xlnx_enable_old_qdq");
-  if (iter == proto.provider_options().end()) {
-    (*proto.mutable_provider_options())["xlnx_enable_old_qdq"] =
-        std::to_string(use_old_qdq);
-  }
   std::unordered_map<std::string, PassProto> pass_map;
   remove_pass(proto, pass_map);
   add_target_pass(proto, pass_map, target_proto);
-  update_target_attr(proto, target_proto);
-  update_xclbin(proto, target_proto, ctx);
-  update_hw_context_share(proto, target_proto);
-  update_graph_engine_qos_priority(proto, target_proto);
   *target_proto_in_pass_context = *target_proto;
 }
 

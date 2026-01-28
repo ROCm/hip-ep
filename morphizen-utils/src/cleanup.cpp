@@ -25,7 +25,7 @@ void add_cleanup_function(const std::string& name,
 
 void cleanup_all() {
   // it is not safe to call glog() any longer
-  // deinitialize_onnxruntime_vitisai_ep might be called again.
+  // deinitialize_onnxruntime_morphizen_ep might be called again.
   MY_LOG(1) << "cleanup_all() called";
   auto& cleanups = get_cleanup_registry();
   for (auto& cleanup : cleanups) {

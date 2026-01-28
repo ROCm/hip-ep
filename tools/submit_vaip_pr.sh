@@ -9,7 +9,7 @@ W=$(cd $PROJECT_DIR/..; pwd)
 VAIP_DIR=$W/vaip
 
 if [ ! -d $VAIP_DIR ]; then
-    git clone git@gitenterprise.xilinx.com:VitisAI/vaip.git $VAIP_DIR
+    git clone git@gitenterprise.xilinx.com:MorphiZen/vaip.git $VAIP_DIR
 fi
 echo "sync vaip"
 (cd $VAIP_DIR; git fetch --all)
@@ -45,7 +45,7 @@ title="update morphizen from ${old_commit_id:0:8} to ${new_commit_id:0:8}"
 body=$(
     cd ../MorphiZen; echo "ChangeLog";
     env PAGER=cat git log --date=short --reverse --pretty=format:"- %h %s (by %an @ %ad)" $old_commit_id..$new_commit_id --date-order |
-        sed 's:#\([0-9]*\):VitisAI/MorphiZen#\1:g'
+        sed 's:#\([0-9]*\):MorphiZen/MorphiZen#\1:g'
     )
 msg=$(echo $title
       echo

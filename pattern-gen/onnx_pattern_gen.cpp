@@ -565,7 +565,7 @@ public:
         << " IGNORE_CONSTANT=" << ENV_PARAM(IGNORE_CONSTANT) << " \\\n"      //
         << " ENABLE_CONSTNAT_SHARING=" << ENV_PARAM(ENABLE_CONSTANT_SHARING) //
         << " \\\n"                                                           //
-        << " $BUILD/vaip/onnxruntime_vitisai_ep/onnx_pattern_gen \\\n";
+        << " $BUILD/vaip/onnxruntime_morphizen_ep/onnx_pattern_gen \\\n";
     for (auto& input : opt_inputs) {
       cxx_src_stream << " -i " << input << " \\\n";
     }
@@ -694,7 +694,7 @@ std::vector<vaip_cxx::NodeConstRef> get_nodes(vaip_cxx::GraphConstRef graph,
 // example usage:
 
 // clang-format off
-// $BUILD/vaip/onnxruntime_vitisai_ep/onnx_pattern_gen -i 38 -o 62 -f $BUILD/../vaip_regression/5/Resnet18_int.onnx
+// $BUILD/vaip/onnxruntime_morphizen_ep/onnx_pattern_gen -i 38 -o 62 -f $BUILD/../vaip_regression/5/Resnet18_int.onnx
 // clang-format on
 int main(int argc, char* argv[]) {
   Ort::InitApi();
@@ -762,7 +762,7 @@ int main(int argc, char* argv[]) {
     Ort::SessionOptions().AppendExecutionProvider_VitisAI();
     vaip_core::set_the_global_api(
         vaip_core::Plugin::invoke<vaip_core::OrtApiForVaip*>(
-            "onnxruntime_vitisai_ep", "get_the_global_api"));
+            "onnxruntime_morphizen_ep", "get_the_global_api"));
     // Check command line args
     CHECK_NE(opt_onnx_file, "")
         << " -f <model.onnx> is required. " << opt_onnx_file;

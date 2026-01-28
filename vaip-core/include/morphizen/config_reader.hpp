@@ -11,18 +11,10 @@
 #include <unordered_map>
 namespace vaip_core {
 /**
- * Precedence: "config_file" option > "xclbin" option > XLNX_VART_FIRMWARE
- * environment variable At least one of above must be provided.
+ * MorphiZen EP configuration reader.
  *
- * Please note XLNX_VART_FIRMWARE can be set as a directory. But this would
- * leads to ambiguity. So, at VAIP, this would be treated as not set!
- *
- * Graph engine could find xclbin without the user setting XLNX_VART_FIRMWARE.
- * But, VAIP could not determine which one is actually used. So there are a few
- * possible conflicts: 1 User set the XLNX_VART_FIRMWARE as a directory and VAIP
- * couldn't find the any config. 2 Graph engine automatically found a different
- * xclbin file which is conflicting with xclbin and config_file option.
- *
+ * Loads configuration from provider options, with "config_file" option
+ * taking precedence over embedded defaults.
  */
 std::string get_config_json_str(const onnxruntime::ProviderOptions& options);
 Ort::SessionOptions*

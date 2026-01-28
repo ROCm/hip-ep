@@ -14,7 +14,7 @@
 // #define DEFINE_SYMBOL(sym) sym,
 
 // static void_ptr_t reserved_symbols[] = {SYMBOLS(DEFINE_SYMBOL)};
-#include "morphizen/onnxruntime_vitisai_ep.hpp"
+#include "morphizen/onnxruntime_morphizen_ep.hpp"
 #include "./cleanup.hpp"
 #include "./logger_adapter.hpp"
 #include "./stat.hpp"
@@ -148,7 +148,7 @@ static OpHolder& get_global_op_holder() {
                                     []() { opholder_instance.reset(); });
 #endif
     /*vaip_core::StaticPluginRegister(
-        "onnxruntime_vitisai_ep", "morphizen_get_registered_custom_op",
+        "onnxruntime_morphizen_ep", "morphizen_get_registered_custom_op",
         (void*)local_morphizen_get_registered_custom_op);*/
   }
   return *opholder_instance;
@@ -219,16 +219,16 @@ static void intialize_op_defs(std::vector<OrtCustomOpDomain*>& ret_domain) {
 VAIP_DLL_SPEC
 const ::OrtCustomOp* morphizen_get_registered_custom_op(const char* domain,
                                                         const char* op_name) {
-  /* static auto plugin = vaip_core::Plugin::get("onnxruntime_vitisai_ep");
+  /* static auto plugin = vaip_core::Plugin::get("onnxruntime_morphizen_ep");
    static auto func =
        plugin->get_method<const ::OrtCustomOp*, const char*, const char*>(
            "morphizen_get_registered_custom_op");*/
   return get_global_op_holder().get_op(domain, op_name);
   // return func(domain.c_str(), op_name.c_str());
 }
-// The interface exported below is used by onnxruntime_providers_vitisai.so
+// The interface exported below is used by onnxruntime_providers_morphizen.so
 VAIP_DLL_SPEC
-void initialize_onnxruntime_vitisai_ep(
+void initialize_onnxruntime_morphizen_ep(
     vaip_core::OrtApiForVaip* api,
     std::vector<OrtCustomOpDomain*>& ret_domain) {
   vaip_core::set_the_global_api(api);
@@ -247,13 +247,13 @@ void initialize_onnxruntime_vitisai_ep(
 }
 
 VAIP_DLL_SPEC
-void deinitialize_onnxruntime_vitisai_ep() {
-  vaip_core::deinitialize_onnxruntime_vitisai_ep();
+void deinitialize_onnxruntime_morphizen_ep() {
+  vaip_core::deinitialize_onnxruntime_morphizen_ep();
 }
 
 VAIP_DLL_SPEC
 std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>*
-compile_onnx_model_vitisai_ep_with_options(
+compile_onnx_model_morphizen_ep_with_options(
     const std::string& model_path, const onnxruntime::Graph& graph,
     const onnxruntime::ProviderOptions& options) {
   update_log_level(options);
@@ -263,7 +263,7 @@ compile_onnx_model_vitisai_ep_with_options(
 
 VAIP_DLL_SPEC
 std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>*
-compile_onnx_model_vitisai_ep_with_error_handling(
+compile_onnx_model_morphizen_ep_with_error_handling(
     const std::string& model_path, const onnxruntime::Graph& graph,
     const onnxruntime::ProviderOptions& options, [[maybe_unused]] void* status,
     [[maybe_unused]] void (*func)(void*, int, const char*)) {
@@ -280,7 +280,7 @@ compile_onnx_model_vitisai_ep_with_error_handling(
 
 VAIP_DLL_SPEC
 std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>*
-compile_onnx_model_vitisai_ep_v4(
+compile_onnx_model_morphizen_ep_v4(
     const std::string& model_path, const onnxruntime::Graph& graph,
     const onnxruntime::ProviderOptions& options, [[maybe_unused]] void* status,
     [[maybe_unused]] void (*func)(void*, int, const char*),
@@ -351,9 +351,9 @@ BOOL WINAPI DllMain(HINSTANCE /*hinstDLL*/, // handle to DLL module
 
   case DLL_PROCESS_DETACH:
     // it is not safe to call glog() any longer
-    // deinitialize_onnxruntime_vitisai_ep might be called again.
+    // deinitialize_onnxruntime_morphizen_ep might be called again.
     vaip_core::VaipOrtApi2::cleanup_vaip();
-    deinitialize_onnxruntime_vitisai_ep();
+    deinitialize_onnxruntime_morphizen_ep();
     if (lpvReserved != nullptr) {
       break; // do not do cleanup if process termination scenario
     }

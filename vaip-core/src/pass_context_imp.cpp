@@ -165,25 +165,22 @@ template <typename T1, typename... T2>
 std::optional<std::string> PassContextImp::get_provider_option_with_priority(
     const T1& option_names) const {
   // priority order:
-  // 0. provider_option privded by user
+  // 0. provider_option provided by user
   // 1. provider_option in cache
-  // 1. context_proto,
-  // 2. mep_config_proto, from known models.
+  // 2. context_proto
   // 3. target_proto, from target discovery
   //    Target priority
   //        1. provider option
-  //        2. meptable
-  //        3. heuristic process or method:
-  //        4. default target in config file
+  //        2. heuristic process or method
+  //        3. default target in config file
   //
   //  4. default value
   return get_provider_option_impl(
       option_names,
-      &provider_option_origin_,                                             //
-      &provider_option_from_cache_,                                         //
-      &context_proto.config().provider_options(),                           //
-      mep_config_proto_ ? &mep_config_proto_->provider_options() : nullptr, //
-      target_proto_ ? &target_proto_->provider_options() : nullptr          //
+      &provider_option_origin_,                                    //
+      &provider_option_from_cache_,                                //
+      &context_proto.config().provider_options(),                  //
+      target_proto_ ? &target_proto_->provider_options() : nullptr //
   );
 }
 std::map<std::string, std::string>
@@ -191,11 +188,10 @@ PassContextImp::get_all_provider_options() const {
   auto ret = std::map<std::string, std::string>();
   get_all_provider_option_impl(
       ret,
-      &provider_option_origin_,                                             //
-      &provider_option_from_cache_,                                         //
-      &context_proto.config().provider_options(),                           //
-      mep_config_proto_ ? &mep_config_proto_->provider_options() : nullptr, //
-      target_proto_ ? &target_proto_->provider_options() : nullptr          //
+      &provider_option_origin_,                                    //
+      &provider_option_from_cache_,                                //
+      &context_proto.config().provider_options(),                  //
+      target_proto_ ? &target_proto_->provider_options() : nullptr //
   );
   return ret;
 }
@@ -446,7 +442,7 @@ std::filesystem::path PassContextImp::get_basename_of_ep_context_model() {
  * @brief Retrieves the basename of the EP context binary file.
  *
  * This function constructs the basename of the EP context binary file by
- * appending "_VITISAI.bin" to the basename of the EP context model.
+ * appending "_MORPHIZEN.bin" to the basename of the EP context model.
  *
  * @return std::filesystem::path The basename of the EP context binary file.
  */
@@ -456,7 +452,7 @@ std::filesystem::path PassContextImp::get_basename_of_ep_context_binary_file() {
     LOG(FATAL) << "get_basename_of_ep_context_model() returned empty path.";
   }
   return std::filesystem::u8path(ctx_model_basename.u8string() +
-                                 "_VITISAI.bin");
+                                 "_MORPHIZEN.bin");
 }
 
 std::optional<std::vector<char>>
@@ -1369,13 +1365,6 @@ void PassContextImp::print_version_info(const char* prefix) {
                                           config.provider_options().end())) {
     print_kv(3, "provider_options_in_config", kv);
   }
-  if (mep_config_proto_) {
-    for (auto& kv : std::map<std::string, std::string>(
-             mep_config_proto_->provider_options().begin(),
-             mep_config_proto_->provider_options().end())) {
-      print_kv(3, "provider_options_in_mep_table", kv);
-    }
-  }
   if (target_proto_) {
     for (auto& kv : std::map<std::string, std::string>(
              target_proto_->provider_options().begin(),
@@ -1451,23 +1440,6 @@ void PassContextImp::update_config_proto_root_field() {
   }
   if (auto target = get_provider_option_local({"target", "xlnx_target_name"})) {
     context_proto.mutable_config()->set_target(*target);
-  }
-  if (auto priority = get_provider_option_local({"priority"})) {
-    context_proto.mutable_config()->set_priority(*priority);
-  }
-  if (auto no_failsafe =
-          get_provider_option_local({"no_fail_safe", "noFailSafe"})) {
-    context_proto.mutable_config()->set_no_failsafe(*no_failsafe == "1");
-  }
-  if (auto enable_preemption = get_provider_option_local(
-          {"enable_preemption", "enablePreemption"})) {
-    context_proto.mutable_config()->set_enable_preemption(*enable_preemption ==
-                                                          "1");
-  }
-  if (auto max_spill_buffer_size = get_provider_option_local(
-          {"max_spill_buffer_size", "maxSpillBufferSize"})) {
-    context_proto.mutable_config()->set_max_spill_buffer_size(
-        std::stoull(*max_spill_buffer_size));
   }
 }
 template <typename T>
@@ -1572,21 +1544,6 @@ void PassContextImp::target_auto_discovery(const Model& model) {
           << "Target auto-discovery: target proto specified by end user: "
           << *target_specified_by_end_user;
       if (try_initialize_target_proto(*target_specified_by_end_user, true)) {
-        break;
-      }
-    }
-    // 2. `provider_options["target"]` not set, but `config_file` is set.
-    // try to find target proto from config file.
-    if (mep_config_proto_) {
-      auto& target_name = mep_config_proto_->target();
-      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
-          << "Target auto-discovery: target proto specified by MEP table: "
-          << target_name << "; MEP table = " << mep_config_proto_->model_name();
-      if (try_initialize_target_proto(target_name, true)) {
-        if (mep_config_proto_->has_xclbin()) {
-          // FIXME: we need to find xclbin in a proper way.
-          target_proto_->set_xclbin(mep_config_proto_->xclbin());
-        }
         break;
       }
     }

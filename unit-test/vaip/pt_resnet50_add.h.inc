@@ -2,7 +2,7 @@
 env \
  IGNORE_CONSTANT=1 \
  ENABLE_CONSTNAT_SHARING=1 \
- $BUILD/vaip/onnxruntime_vitisai_ep/onnx_pattern_gen \
+ $BUILD/vaip/onnxruntime_morphizen_ep/onnx_pattern_gen \
  -i 220 \
  -i 267 \
  -o 287 \

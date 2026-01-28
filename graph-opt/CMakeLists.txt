@@ -15,7 +15,7 @@ target_include_directories(${EXEC_NAME}
   ${CMAKE_CURRENT_SOURCE_DIR}/../common
 )
 target_link_libraries(${EXEC_NAME} PRIVATE
-  ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET}
+  ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET}
 	glog::glog
   onnxruntime::onnxruntime
   Boost::program_options)

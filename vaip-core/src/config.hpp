@@ -20,7 +20,7 @@
 
 namespace vaip_core {
 class PassContext;
-void update_config_by_target(ConfigProto& proto, const MepConfigTable* mep,
+void update_config_by_target(ConfigProto& proto,
                              TargetProto* target_proto_in_pass_context,
                              std::shared_ptr<PassContext> ctx);
 class Config {

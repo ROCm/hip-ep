@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 $morphizenDemoPath = "$Env:VAI_RT_WORKSPACE/morphizen-demo"
 if (-Not (Test-Path -Path $morphizenDemoPath)) {
     Write-Host "morphizen-demo Directory does not exist. Cloning the repository..."
-    git clone git@gitenterprise.xilinx.com:VitisAI/morphizen-demo.git --branch dev --single-branch --depth 1 $morphizenDemoPath
+    git clone git@gitenterprise.xilinx.com:MorphiZen/morphizen-demo.git --branch dev --single-branch --depth 1 $morphizenDemoPath
 }
 Write-Host "morphizen-demo Directory has exist. Using the latest commit..."
 $currentDirectory = Get-Location

@@ -27,7 +27,7 @@ target_include_directories(${TEST_EXE_NAME}
 target_compile_definitions(${TEST_EXE_NAME} PRIVATE
   -DPYTHON_EXE_STR="$<TARGET_FILE:Python3::Interpreter>"
   -DTEST_CWD_STR="${CMAKE_CURRENT_BINARY_DIR}"
-  -DMORPHIZEN_VITISAI_EP_STR="$<TARGET_FILE:${morphizen_CORE_DYNAMIC_UNIQUE_ID}>"
+  -DMORPHIZEN_MORPHIZEN_EP_STR="$<TARGET_FILE:${morphizen_CORE_DYNAMIC_UNIQUE_ID}>"
   -DTEST_SRC_DIR_STR="${CMAKE_CURRENT_SOURCE_DIR}"
   # avoid warning message as below
   # Please define _WIN32_WINNT or _WIN32_WINDOWS appropriately. For example:
@@ -54,15 +54,15 @@ target_link_libraries(${TEST_EXE_NAME}
     glog::glog
     morphizen-core-static
     vaip-ort-api-ext
-    $<GENEX_EVAL:$<TARGET_PROPERTY:${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET},LINK_LIBRARIES>>
+    $<GENEX_EVAL:$<TARGET_PROPERTY:${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET},LINK_LIBRARIES>>
 )
 # add debug flags and environment variables
 set(ENVS "")
-string(APPEND ENVS "\nMORPHIZEN_DEBUG_VITISAI_EP_FACTORY=1")
+string(APPEND ENVS "\nMORPHIZEN_DEBUG_MORPHIZEN_EP_FACTORY=1")
 string(APPEND ENVS "\nMORPHIZEN_DEBUG_ORT_EP_API=1")
 string(APPEND ENVS "\nDEBUG_LOG_LEVEL=info")
 string(APPEND ENVS "\nXLNX_ONNX_EP_VERBOSE=3")
-string(APPEND ENVS "\nMORPHIZEN_DEBUG_VITISAI_EP=1")
+string(APPEND ENVS "\nMORPHIZEN_DEBUG_MORPHIZEN_EP=1")
 string(APPEND ENVS "\nMORPHIZEN_DEBUG_IR_CONVERTER=5")
 string(APPEND ENVS "\nMORPHIZEN_DEBUG_IR_CONVERTER_OUTPUT_FILE=c:\\temp\\ir.onnx")
 

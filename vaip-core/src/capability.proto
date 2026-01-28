@@ -1,7 +1,7 @@
 // Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 /*
- *     The Xilinx Vitis AI Vaip in this distribution are provided under the
+ *     The Xilinx MorphiZen Vaip in this distribution are provided under the
  * following free and permissive binary-only license, but are not provided in
  * source code form.  While the following free and permissive license is similar
  * to the BSD open source license, it is NOT the BSD open source license nor
@@ -36,53 +36,7 @@ syntax = "proto3";
 import "google/protobuf/struct.proto";
 
 package vaip_core;
-message DataOperator{
-  bool is_pad = 1;
-  repeated int64 padding = 2;
-  bool is_layout_transform = 3;
-  repeated int64 order = 4;
-  bool fix2float = 5;
-  bool float2fix = 6;
-  int32 fix_point = 7;
-  bool quantize_linear = 8;
-  bool dequantize_linear = 9;
-  float scale = 10;
-  int64 zero_point = 11;
-}
 
-enum TensorBufferType{
-  UNKNOWN = 0;
-  ONNX_INPUT = 1;
-  ONNX_OUTPUT = 2;
-  XIR_INPUT = 3;
-  XIR_OUTPUT = 4;
-}
-message  TensorBufferParam{
-  TensorBufferType tb_type = 1;
-  string tensor_name = 2; // node_arg_name / xir_tensor_name
-  int32 onnx_index = 3;
-  repeated int64 onnx_shape = 4;
-
-}
-message MetaSchedule{
-  TensorBufferParam from_tb_param = 1 ;
-  TensorBufferParam to_tb_param = 2;
-  DataOperator op = 3;
-}
-
-message DpuParam{
-  string compiled_xmodel = 1;
-  string subgraph_name = 2;
-  repeated MetaSchedule input_schedule = 3;
-  repeated MetaSchedule output_schedule = 4;
-  string xclbin = 5; // here is fullpath for now , it is a contract between dpu pass and GE. Maybe GE does not care.
-  // string cache_dir = 5;
-  // string cache_key = 64;
-}
-
-message DdParam {
-  string xclbin = 1;
-}
 message StatProto {
   repeated DeviceStatProto device_stat = 1;
   repeated NodeStatProto node_stat = 2;
@@ -117,62 +71,6 @@ message DeviceStatProto {
   repeated string supported_op_type = 3;
 }
 
-message AsrParamShape {
-  repeated int64 shapes = 1;
-}
-
-message AsrParam{
-  repeated AsrParamShape input_shapes = 1;
-  repeated AsrParamShape output_shapes = 2;
-  bool output_zero_copy = 3;
-}
-
-message ConstInfo {
-  uint64 offset = 1;
-  uint64 size = 2;
-  repeated int64 shape= 3;
-  // same as TensorProto_DataType
-  int32 type = 4;
-}
-
-message VaimlParamShape {
-  repeated int64 shapes = 1;
-}
-
-message VaimlParam {
-  // Options to be passed from vaiml_pass_vaiml_partition to vaiml_cusom_op_vaiml
-  string vaiml_model_path = 1;
-  bool ai_analyzer_profiling = 2;
-  bool debug = 3;
-  string device_name = 4;
-  string output_type = 5;
-  repeated VaimlParamShape output_shapes = 6;
-  repeated VaimlParamShape input_shapes = 7;
-  bool override_batch_size = 8;
-  // 9 not used
-  int32 compile_flow = 10;
-  // 11 not used
-  map<string, ConstInfo> const_data_info = 12;
-  string op_type = 13;
-  string vaiml_unarchive_path = 14;
-  // 15 not used
-  string subgraph_name = 16;
-  string priority = 17;
-  repeated int64 seq_lens = 18;
-  bool enable_batch = 20;
-  string config_json = 22;
-  string runner_type = 23;
-  int32 device_batch_size = 24;
-  bool no_failsafe = 25;
-  repeated string input_names = 26;
-  repeated string output_names = 27;
-  bool enable_update_initializer = 28;
-  uint64 max_spill_buffer_size = 29;
-  bool enable_preemption = 30;
-}
-
-
-
 message MetaDefProto {
   string id = 1;
   repeated string inputs = 2;
@@ -181,12 +79,6 @@ message MetaDefProto {
   repeated string constant_initializers = 5;
   string device = 6; // vaip_custom_op_<device>
   map<string, string> generic_param = 7;
-  oneof device_param{
-    DpuParam dpu_param = 8;
-    AsrParam asr_param = 9;
-    DdParam dd_param = 10;
-    VaimlParam vaiml_param = 11;
-  }
   bool fallback_CPU = 12;
   google.protobuf.Struct param = 13;
   repeated int32 input_argument_indice = 14;

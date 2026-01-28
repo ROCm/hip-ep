@@ -269,7 +269,7 @@ TEST_F(GraphTest, TryFuse) {
   auto graph = model->main_graph();
   graph.resolve();
   auto [meta_def, error] =
-      graph.try_fuse("a_name", {"111"}, {"138"}, {}, "NPU");
+      graph.try_fuse("a_name", {"111"}, {"138"}, {}, "CUSTOM");
   ASSERT_TRUE(meta_def != nullptr) << error.comments;
   LOG(INFO) << " fused_node=" << meta_def->DebugString();
 }
@@ -546,7 +546,7 @@ TEST_F(GraphTest, VirtualFuse) {
   auto graph = model->main_graph();
   graph.resolve();
   auto [meta_def, error] =
-      graph.try_fuse("a_name", {"111"}, {"138"}, {}, "NPU");
+      graph.try_fuse("a_name", {"111"}, {"138"}, {}, "CUSTOM");
   ASSERT_TRUE(meta_def != nullptr) << error.comments;
   LOG(INFO) << " fused_node=" << meta_def->DebugString();
   auto subgraph = graph.virtual_fuse(*meta_def);

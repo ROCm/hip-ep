@@ -21,9 +21,9 @@ permissions:
   contents: read
 
 env:
-  VAI_RT_PREFIX: ${{ github.workspace }}/install
-  VAI_RT_BUILD_DIR: ${{ github.workspace }}/cmake-build
-  VAI_RT_WORKSPACE: ${{ github.workspace }}
+  MORPHIZEN_PREFIX: ${{ github.workspace }}/install
+  MORPHIZEN_BUILD_DIR: ${{ github.workspace }}/cmake-build
+  MORPHIZEN_WORKSPACE: ${{ github.workspace }}
   ONNXRUNTIME_VERSION: "1.23.2"
 
 jobs:
@@ -49,7 +49,7 @@ jobs:
         id: cache-ort
         uses: actions/cache@v4
         with:
-          path: ${{ env.VAI_RT_PREFIX }}
+          path: ${{ env.MORPHIZEN_PREFIX }}
           key: onnxruntime-win-x64-${{ env.ONNXRUNTIME_VERSION }}
 
       # Download pre-built ONNXRuntime if cache miss
@@ -64,18 +64,18 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile $zipFile
 
           # Extract to install directory
-          New-Item -ItemType Directory -Force -Path "${{ env.VAI_RT_PREFIX }}"
-          Expand-Archive -Path $zipFile -DestinationPath "${{ env.VAI_RT_PREFIX }}" -Force
+          New-Item -ItemType Directory -Force -Path "${{ env.MORPHIZEN_PREFIX }}"
+          Expand-Archive -Path $zipFile -DestinationPath "${{ env.MORPHIZEN_PREFIX }}" -Force
 
           # Move files from nested directory to install root
-          $extractedDir = "${{ env.VAI_RT_PREFIX }}/onnxruntime-win-x64-$ortVersion"
+          $extractedDir = "${{ env.MORPHIZEN_PREFIX }}/onnxruntime-win-x64-$ortVersion"
           if (Test-Path $extractedDir) {
-            Move-Item -Path "$extractedDir/*" -Destination "${{ env.VAI_RT_PREFIX }}/" -Force
+            Move-Item -Path "$extractedDir/*" -Destination "${{ env.MORPHIZEN_PREFIX }}/" -Force
             Remove-Item -Path $extractedDir -Force -Recurse
           }
 
           # Create CMake config file for find_package(onnxruntime)
-          $cmakeDir = "${{ env.VAI_RT_PREFIX }}/lib/cmake/onnxruntime"
+          $cmakeDir = "${{ env.MORPHIZEN_PREFIX }}/lib/cmake/onnxruntime"
           New-Item -ItemType Directory -Force -Path $cmakeDir
 
           $configContent = @"
@@ -98,25 +98,25 @@ jobs:
           $configContent | Out-File -FilePath "$cmakeDir/onnxruntimeConfig.cmake" -Encoding UTF8
 
           # List installed files
-          Get-ChildItem -Recurse "${{ env.VAI_RT_PREFIX }}"
+          Get-ChildItem -Recurse "${{ env.MORPHIZEN_PREFIX }}"
 
       # Build MorphiZen
       - name: CMake Configure
         shell: powershell
         run: |
-          cmake -B ${{ env.VAI_RT_BUILD_DIR }} -S . `
+          cmake -B ${{ env.MORPHIZEN_BUILD_DIR }} -S . `
             -Dmorphizen_ENABLE_ORT_BRIDGE=ON `
             -Dmorphizen_ENABLE_ONNX_BACKEND=ON `
             -Dmorphizen_ENABLE_MLIR_BACKEND=OFF `
             -Dmorphizen_ENABLE_UNIT_TEST=ON `
             "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" `
-            "-DCMAKE_PREFIX_PATH=${{ env.VAI_RT_PREFIX }}"
+            "-DCMAKE_PREFIX_PATH=${{ env.MORPHIZEN_PREFIX }}"
 
       - name: CMake Build
         run: |
-          cmake --build ${{ env.VAI_RT_BUILD_DIR }} --config Release --parallel
+          cmake --build ${{ env.MORPHIZEN_BUILD_DIR }} --config Release --parallel
 
       # TODO: Enable tests once runtime dependencies are properly configured
       # - name: Run Tests
       #   run: |
-      #     ctest --test-dir ${{ env.VAI_RT_BUILD_DIR }} -C Release --output-on-failure --timeout 600
+      #     ctest --test-dir ${{ env.MORPHIZEN_BUILD_DIR }} -C Release --output-on-failure --timeout 600

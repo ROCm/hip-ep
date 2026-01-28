@@ -11,10 +11,10 @@ add_library(ort-bridge
   src/ort-status-exception.cpp
   src/ort-graph-wrapper.hpp
   src/ort-graph-wrapper.cpp
-  src/vitisai-ep-factory.cpp
-  src/vitisai-ep-factory.hpp
-  src/vitisai-ep.hpp
-  src/vitisai-ep.cpp
+  src/morphizen-ep-factory.cpp
+  src/morphizen-ep-factory.hpp
+  src/morphizen-ep.hpp
+  src/morphizen-ep.cpp
   src/ir-converter.hpp
   src/ir-converter.cpp
   src/ir-converter-imp.hpp
@@ -41,6 +41,6 @@ target_link_libraries(ort-bridge
   morphizen-core-static
   protobuf::libprotobuf
 )
-if(TARGET ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET})
-  target_link_libraries(${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET} PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,ort-bridge>)
-endif(TARGET ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET})
+if(TARGET ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET})
+  target_link_libraries(${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET} PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,ort-bridge>)
+endif(TARGET ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET})

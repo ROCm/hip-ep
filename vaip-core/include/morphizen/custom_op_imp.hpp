@@ -56,14 +56,14 @@ struct CustomOp_compile_t {
 template <typename T, typename CustomOpImp>
 struct CustomOp_compile_t<
     T, CustomOpImp, std::void_t<decltype(std::declval<T&>().get_model())>> {
-  // this code is activated when VAIP_ORT_API_MAJOR >= 10 see VitisAI/vaip#3504
-  // for more details. T is ExecutionProviderImp always.
+  // this code is activated when VAIP_ORT_API_MAJOR >= 10 see
+  // MorphiZen/vaip#3504 for more details. T is ExecutionProviderImp always.
   // ExecutionProviderImp::get_mode() is added in VAIP_ORT_API_MAJOR >= 10
-  // see [VitisAI] Cache node subgraph when necessary (Onnxruntime#22073) for
+  // see [MorphiZen] Cache node subgraph when necessary (Onnxruntime#22073) for
   // details.
   //
-  // in VitisAIExecutionProvider::Compile(), we create the model object is fall
-  // back on CPU is enabled. as below.
+  // in MorphiZenExecutionProvider::Compile(), we create the model object is
+  // fall back on CPU is enabled. as below.
 
   // clang-format off
   /*
@@ -100,7 +100,7 @@ struct CustomOp_compile_t<
                      const std::shared_ptr<MetaDefProto>& meta_def) {
     if (meta_def->fallback_cpu()) {
       CHECK(model);
-      Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "VitisAI_VAIP_CustomOp");
+      Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "MorphiZen_VAIP_CustomOp");
       auto model_proto = api->model_to_proto(*model);
       auto mproto_string = api->model_proto_serialize_as_string(*model_proto);
       auto session =
@@ -188,7 +188,7 @@ public:
   How to use?
   1. After try_fuse, in meta_def, set_fallback_cpu(true)
   auto [meta_def, fuse_error] = self_.try_fuse(onnx_graph_,
-  subgraph->get_name(), inputs, outputs, {}, "DPU");
+  subgraph->get_name(), inputs, outputs, {}, "CUSTOM");
   meta_def->set_fallback_cpu(true);
   2. In custom_op.cpp, if you need to fall back to CPU, call ComputeCpu(api,
   context);

@@ -6,8 +6,8 @@
 #pragma once
 /// basically there are 3 types client if VAIP.
 ///
-/// 1. ORT VITISAI Execution Provider.
-///     USE_VITISAI is defined.
+/// 1. ORT MORPHIZEN Execution Provider.
+///     USE_MORPHIZEN is defined.
 /// 2. VAIP pass
 /// 3. Vaip Custom OP
 ///
@@ -18,7 +18,7 @@
 #define VAIP_USER__INTERNAL 4
 
 #ifndef VAIP_USER
-#  if defined(USE_VITISAI)
+#  if defined(USE_MORPHIZEN)
 #    define VAIP_USER VAIP_USER__ORT_VITIS_AI_EP
 #  elif defined(VAIP_CUSTOM_OP)
 #    define VAIP_USER VAIP_USER__CUSTOM_OP

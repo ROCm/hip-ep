@@ -6,7 +6,7 @@
 # Define your variables
 $ErrorActionPreference = "Stop"
 $token = "$Env:MY_GHE_TOKEN"
-$repoOwner = "VitisAI"
+$repoOwner = "MorphiZen"
 $repoName = "vaip"
 $apiUrl = "https://gitenterprise.xilinx.com/api/v3/repos/$repoOwner/$repoName/pulls"
 $apiUrl = "https://gitenterprise.xilinx.com/api/v3/repos/$repoOwner/$repoName/pulls?state=open"

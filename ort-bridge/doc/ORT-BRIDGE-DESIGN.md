@@ -6,7 +6,7 @@ Licensed under the MIT License.
 
 ## Overview
 
-The ORT (ONNX Runtime) Bridge in MorphiZen provides a type-safe, efficient interface between the VAIP (Vitis AI Platform) core and ONNXRuntime's graph representation. This bridge abstracts away direct ONNX Protocol Buffer manipulation and provides a more intuitive, performant API for graph analysis and transformation.
+The ORT (ONNX Runtime) Bridge in MorphiZen provides a type-safe, efficient interface between the VAIP (MorphiZen Platform) core and ONNXRuntime's graph representation. This bridge abstracts away direct ONNX Protocol Buffer manipulation and provides a more intuitive, performant API for graph analysis and transformation.
 
 This design document details the conceptual architecture and design decisions for the core classes: `Graph`, `Node`, `NodeIndex`, and `NodeArgIndex`.
 
