@@ -48,6 +48,21 @@ Licensed under the MIT License.
 6. Mark PR as "Ready for review" when complete
 7. Wait for review and approval before merging
 
+## Commit and PR Content Guidelines
+
+**DO NOT mention tools/AI in commits or PRs** - keep all messages professional and tool-agnostic.
+
+**Prohibited content:**
+- ❌ No "🤖 Generated with Claude Code" or similar footers in PR descriptions
+- ❌ No "Co-Authored-By: Claude" in commit messages
+- ❌ No mentions of AI assistants, LLMs, or automation tools
+- ❌ No tool-specific references in any commit or PR content
+
+**Correct approach:**
+- ✅ Write all commits and PRs as if authored by a human developer
+- ✅ Use standard professional language and formatting
+- ✅ Focus on what changed and why, not how it was created
+
 ## Before Any Git Push
 
 - Verify current branch: `git branch --show-current`
