@@ -1,72 +1,63 @@
 {
-  "hooks": [
-    {
-      "events": ["PreToolUse"],
-      "matchers": [
-        {
-          "toolName": "Write",
-          "pattern": ".*"
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": {
+          "tools": ["Write", "Edit"]
         },
-        {
-          "toolName": "Edit",
-          "pattern": ".*"
-        }
-      ],
-      "commands": [
-        {
-          "type": "command",
-          "command": "bash -c 'BRANCH=$(git branch --show-current 2>/dev/null); if [ \"$BRANCH\" = \"main\" ]; then echo \"=== CLAUDE CODE HOOK ERROR ===\"; echo \"STATUS: BLOCKED\"; echo \"REASON: Attempting to modify files while on main branch\"; echo \"REQUIRED_ACTION: git checkout -b feature/<descriptive-name>\"; echo \"EXPLANATION: Create a feature branch before making any file changes\"; echo \"REFERENCE: .clinerules/git-rules.md - Section: CRITICAL: Feature Branch FIRST\"; echo \"=============================\"; exit 1; fi; CHANGES=$(git status --porcelain 2>/dev/null | wc -l); if [ \"$CHANGES\" -gt 5 ]; then echo \"=== CLAUDE CODE HOOK REMINDER ===\"; echo \"STATUS: REMINDER\"; echo \"REASON: You have $CHANGES uncommitted file changes\"; echo \"SUGGESTED_ACTION: git add <files> && git commit -m \\\"<message>\\\"\"; echo \"EXPLANATION: Commit frequently - small, incremental commits are preferred\"; echo \"REFERENCE: .clinerules/git-rules.md - Section: Required Workflow step 5\"; echo \"NOTE: This is a reminder only - the file operation will proceed\"; echo \"=================================\"; fi'",
-          "timeout": 5
-        }
-      ]
-    },
-    {
-      "events": ["PreToolUse"],
-      "matchers": [
-        {
-          "toolName": "Bash",
-          "pattern": ".*git\\s+push.*"
-        }
-      ],
-      "commands": [
-        {
-          "type": "command",
-          "command": "bash -c 'BRANCH=$(git branch --show-current 2>/dev/null); if [ \"$BRANCH\" = \"main\" ]; then echo \"=== CLAUDE CODE HOOK ERROR ===\"; echo \"STATUS: BLOCKED\"; echo \"REASON: Attempting to push while on main branch\"; echo \"REQUIRED_ACTION: git checkout -b feature/<descriptive-name>\"; echo \"EXPLANATION: Never push to main branch. Create feature branch first.\"; echo \"REFERENCE: .clinerules/git-rules.md - Section: Branch Protection\"; echo \"=============================\"; exit 1; fi; if ! gh pr list --head \"$BRANCH\" --json number -q \".[0].number\" 2>/dev/null | grep -q .; then echo \"=== CLAUDE CODE HOOK REMINDER ===\"; echo \"STATUS: REMINDER\"; echo \"REASON: No PR exists for branch $BRANCH\"; echo \"SUGGESTED_ACTION: gh pr create --draft\"; echo \"EXPLANATION: Create draft PR early to make work visible to team\"; echo \"REFERENCE: .clinerules/git-rules.md - Section: Required Workflow step 4\"; echo \"NOTE: This is a reminder only - the push operation will proceed\"; echo \"=================================\"; fi'",
-          "timeout": 10
-        }
-      ]
-    },
-    {
-      "events": ["PreToolUse"],
-      "matchers": [
-        {
-          "toolName": "Bash",
-          "pattern": ".*git\\s+push\\s+origin.*"
-        }
-      ],
-      "commands": [
-        {
-          "type": "command",
-          "command": "bash -c 'echo \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PreToolUse\\\",\\\"permissionDecision\\\":\\\"ask\\\",\\\"permissionDecisionReason\\\":\\\"Pushing to origin instead of fork. Usually you should use: git push fork <branch>. Confirm to proceed?\\\"}}\"; exit 0'",
-          "timeout": 5
-        }
-      ]
-    },
-    {
-      "events": ["PreToolUse"],
-      "matchers": [
-        {
-          "toolName": "Bash",
-          "pattern": ".*git\\s+commit.*"
-        }
-      ],
-      "commands": [
-        {
-          "type": "command",
-          "command": "bash -c 'BRANCH=$(git branch --show-current 2>/dev/null); UNPUSHED=$(git log @{u}.. --oneline 2>/dev/null | wc -l); if [ \"$UNPUSHED\" -gt 0 ]; then echo \"=== CLAUDE CODE HOOK REMINDER ===\"; echo \"STATUS: REMINDER\"; echo \"REASON: You have $UNPUSHED unpushed commit(s) on branch $BRANCH\"; echo \"SUGGESTED_ACTION: git push fork $BRANCH\"; echo \"EXPLANATION: Push commits frequently to make work visible and backup progress\"; echo \"REFERENCE: .clinerules/git-rules.md - Section: Required Workflow step 5 - Commit and push frequently\"; echo \"NOTE: This is a reminder only - the commit will proceed\"; echo \"=================================\"; fi'",
-          "timeout": 5
-        }
-      ]
-    }
-  ]
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'BRANCH=$(git branch --show-current 2>/dev/null); if [ \"$BRANCH\" = \"main\" ]; then echo \"=== CLAUDE CODE HOOK ERROR ===\"; echo \"STATUS: BLOCKED\"; echo \"REASON: Attempting to modify files while on main branch\"; echo \"REQUIRED_ACTION: git checkout -b feature/<descriptive-name>\"; echo \"EXPLANATION: Create a feature branch before making any file changes\"; echo \"REFERENCE: .clinerules/git-rules.md - Section: CRITICAL: Feature Branch FIRST\"; echo \"=============================\"; exit 1; fi; CHANGES=$(git status --porcelain 2>/dev/null | wc -l); if [ \"$CHANGES\" -gt 5 ]; then echo \"=== CLAUDE CODE HOOK REMINDER ===\"; echo \"STATUS: REMINDER\"; echo \"REASON: You have $CHANGES uncommitted file changes\"; echo \"SUGGESTED_ACTION: git add <files> && git commit -m \\\"<message>\\\"\"; echo \"EXPLANATION: Commit frequently - small, incremental commits are preferred\"; echo \"REFERENCE: .clinerules/git-rules.md - Section: Required Workflow step 5\"; echo \"NOTE: This is a reminder only - the file operation will proceed\"; echo \"=================================\"; fi'",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": {
+          "tools": ["Bash"],
+          "parameters": {
+            "command": ".*git\\s+push.*"
+          }
+        },
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'BRANCH=$(git branch --show-current 2>/dev/null); if [ \"$BRANCH\" = \"main\" ]; then echo \"=== CLAUDE CODE HOOK ERROR ===\"; echo \"STATUS: BLOCKED\"; echo \"REASON: Attempting to push while on main branch\"; echo \"REQUIRED_ACTION: git checkout -b feature/<descriptive-name>\"; echo \"EXPLANATION: Never push to main branch. Create feature branch first.\"; echo \"REFERENCE: .clinerules/git-rules.md - Section: Branch Protection\"; echo \"=============================\"; exit 1; fi; if ! gh pr list --head \"$BRANCH\" --json number -q \".[0].number\" 2>/dev/null | grep -q .; then echo \"=== CLAUDE CODE HOOK REMINDER ===\"; echo \"STATUS: REMINDER\"; echo \"REASON: No PR exists for branch $BRANCH\"; echo \"SUGGESTED_ACTION: gh pr create --draft\"; echo \"EXPLANATION: Create draft PR early to make work visible to team\"; echo \"REFERENCE: .clinerules/git-rules.md - Section: Required Workflow step 4\"; echo \"NOTE: This is a reminder only - the push operation will proceed\"; echo \"=================================\"; fi'",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": {
+          "tools": ["Bash"],
+          "parameters": {
+            "command": ".*git\\s+push\\s+origin.*"
+          }
+        },
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'echo \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PreToolUse\\\",\\\"permissionDecision\\\":\\\"ask\\\",\\\"permissionDecisionReason\\\":\\\"Pushing to origin instead of fork. Usually you should use: git push fork <branch>. Confirm to proceed?\\\"}}\"; exit 0'",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": {
+          "tools": ["Bash"],
+          "parameters": {
+            "command": ".*git\\s+commit.*"
+          }
+        },
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'BRANCH=$(git branch --show-current 2>/dev/null); UNPUSHED=$(git log @{u}.. --oneline 2>/dev/null | wc -l); if [ \"$UNPUSHED\" -gt 0 ]; then echo \"=== CLAUDE CODE HOOK REMINDER ===\"; echo \"STATUS: REMINDER\"; echo \"REASON: You have $UNPUSHED unpushed commit(s) on branch $BRANCH\"; echo \"SUGGESTED_ACTION: git push fork $BRANCH\"; echo \"EXPLANATION: Push commits frequently to make work visible and backup progress\"; echo \"REFERENCE: .clinerules/git-rules.md - Section: Required Workflow step 5 - Commit and push frequently\"; echo \"NOTE: This is a reminder only - the commit will proceed\"; echo \"=================================\"; fi'",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
 }
