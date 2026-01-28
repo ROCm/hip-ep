@@ -23,7 +23,7 @@ cd ../..
 ## Expected Output
 
 ```
-================VitisAIExecutionProviderenable_ep = true
+================MorphiZenExecutionProviderenable_ep = true
 HIP Library Path: C:\Windows\SYSTEM32\amdhip64_7.dll
 Running model...
 done
@@ -38,7 +38,7 @@ score[955]  =  0.000123078  text: jackfruit, jak, jack,,
 ## Command-Line Options
 
 - `-k <num>` - Top-K results (default: 5)
-- `-n` - Disable VitisAI EP (CPU only)
+- `-n` - Disable Morphizen EP (CPU only)
 - `-p` - Enable profiler
 - `-l <file>` - Label file path
 - `-h` - Show help

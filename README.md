@@ -36,9 +36,8 @@ workspace/
 ├── build/
 │   ├── onnxruntime/          # ONNX Runtime build artifacts
 │   └── onnx-hipdnn-ep/       # onnx-hipdnn-ep build artifacts
-│       └── bin/Release/      # test_classification.exe, onnxruntime_vitisai_ep.dll
 ├── local/                    # ONNX Runtime installation (CMAKE_PREFIX_PATH)
-│   ├── bin/                  # onnxruntime.dll
+│   ├── bin/                  # onnxruntime.dll, onnxruntime_morphizen_ep.dll, test_classification.exe
 │   └── lib/cmake/            # CMake configuration files
 └── onnx-hipdnn-ep/           # This project (git clone)
     ├── test/data/            # Test data (pt_resnet50.onnx, input.bin)
@@ -107,13 +106,12 @@ cd onnxruntime
 #### Build ONNX Runtime
 
 ```bash
-./build.bat --use_vitisai --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --cmake_extra_defines CMAKE_INSTALL_PREFIX=$PWD/../local
+./build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --cmake_extra_defines CMAKE_INSTALL_PREFIX=$PWD/../local
 cmake --build ../build/onnxruntime/Release/ --target install
 ```
 
 This script is used to build the ONNX Runtime project with specific configurations and options. Below is a breakdown of the command-line arguments used:
 
-- `--use_vitisai`: Enables the use of Vitis AI for acceleration.
 - `--config Release`: Specifies the build configuration as Release.
 - `--build_shared_lib`: Builds the project as a shared library.
 - `--parallel`: Enables parallel compilation for faster build times.

@@ -860,18 +860,18 @@ Test project C:/Develop/m/build/hipDNNEP/RelWithDebInfo
 ```powershell
 Set-Location C:\Develop\m\source\onnxruntime
 
-.\build.bat --use_vitisai `
+.\build.bat `
     --config Debug `
     --build_shared_lib `
     --parallel `
     --compile_no_warning_as_error `
     --skip_submodule_sync `
-    --build_dir C:\Develop\m\build\onnxruntime-vitisai `
+    --build_dir C:\Develop\m\build\onnxruntime `
     --skip_tests `
     --cmake_extra_defines CMAKE_INSTALL_PREFIX=C:/Develop/m/local
 
 # Install
-cmake --build C:\Develop\m\build\onnxruntime-vitisai\Debug --target install
+cmake --build C:\Develop\m\build\onnxruntime\Debug --target install
 ```
 
 ### 3.2 Clone MorphiZen
@@ -1367,8 +1367,8 @@ ctest --output-on-failure
 
 # Build ONNXRuntime with Vitis AI
 Set-Location C:\Develop\m\source\onnxruntime
-.\build.bat --use_vitisai --config Debug --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir C:\Develop\m\build\onnxruntime-vitisai --skip_tests --cmake_extra_defines CMAKE_INSTALL_PREFIX=C:/Develop/m/local
-cmake --build C:\Develop\m\build\onnxruntime-vitisai\Debug --target install
+.\build.bat --config Debug --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir C:\Develop\m\build\onnxruntime --skip_tests --cmake_extra_defines CMAKE_INSTALL_PREFIX=C:/Develop/m/local
+cmake --build C:\Develop\m\build\onnxruntime\Debug --target install
 
 # Clone MorphiZen
 Set-Location C:\Develop\m\source
