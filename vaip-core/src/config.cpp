@@ -129,7 +129,7 @@ add_target_pass(ConfigProto& proto,
 
 void update_config_by_target(ConfigProto& proto,
                              TargetProto* target_proto_in_pass_context,
-                             std::shared_ptr<PassContext> ctx) {
+                             std::shared_ptr<PassContext> /*ctx*/) {
   auto target = std::string();
 
   auto target_proto =

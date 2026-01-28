@@ -75,6 +75,24 @@ Licensed under the MIT License.
 2. Delete branches: `git branch -D <feature> && git push fork --delete <feature>`
 3. Clean working directory: `git status` (must show "nothing to commit, working tree clean")
 
+## CI Checks Monitoring
+
+**CRITICAL: After PR is ready for review, actively monitor CI checks until all are green.**
+
+1. Check CI status: `gh pr view <number> --repo ROCm/MorphiZen --json statusCheckRollup`
+2. Monitor builds actively - don't leave PR with failing checks
+3. If any check fails:
+   - Review the failure logs
+   - Fix the issue locally
+   - Commit and push the fix
+   - Continue monitoring until all checks pass
+4. **Do not request review or expect merge until all CI checks are green**
+
+### Common CI Checks:
+- `pre-commit` - Code formatting and linting
+- `build-and-test-lnx` - Linux build and tests
+- `build-and-test-win` - Windows build and tests
+
 ## Pull Request Description Updates
 
 Update PR description/title **when the scope, approach, or status of the work changes meaningfully** - not for every push.
