@@ -2,9 +2,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": {
-          "tools": ["Write", "Edit"]
-        },
+        "matcher": "Write|Edit",
         "hooks": [
           {
             "type": "command",
@@ -14,12 +12,7 @@
         ]
       },
       {
-        "matcher": {
-          "tools": ["Bash"],
-          "parameters": {
-            "command": ".*git\\s+push.*"
-          }
-        },
+        "matcher": "Bash(.*git\\s+push.*)",
         "hooks": [
           {
             "type": "command",
@@ -29,12 +22,7 @@
         ]
       },
       {
-        "matcher": {
-          "tools": ["Bash"],
-          "parameters": {
-            "command": ".*git\\s+push\\s+origin.*"
-          }
-        },
+        "matcher": "Bash(.*git\\s+push\\s+origin.*)",
         "hooks": [
           {
             "type": "command",
@@ -44,12 +32,7 @@
         ]
       },
       {
-        "matcher": {
-          "tools": ["Bash"],
-          "parameters": {
-            "command": ".*git\\s+commit.*"
-          }
-        },
+        "matcher": "Bash(.*git\\s+commit.*)",
         "hooks": [
           {
             "type": "command",
