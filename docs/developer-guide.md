@@ -251,9 +251,27 @@ All dependencies install to `../../local`.
 
 Dependencies are cloned in the parent directory of the project (outside the project root), built in `../../build/<dependency-name>`, and installed to `../../local`.
 
+**IMPORTANT - Use Absolute Paths**:
+
+For reliable builds, compute absolute paths before running CMake commands:
+
+```bash
+# Run from Morphizen project directory
+# Compute absolute paths once
+LOCAL_DIR=$(cd ../../local && pwd)
+BUILD_DIR=$(cd ../.. && pwd)/build
+```
+
+Then use these variables in CMake commands:
+- `-DCMAKE_PREFIX_PATH="$LOCAL_DIR"` (absolute path, not `../../local`)
+- `-DCMAKE_INSTALL_PREFIX="$LOCAL_DIR"` (absolute path)
+
+Relative paths like `../../local` can fail depending on CMake's working directory.
+
 **Notes**:
 - These commands use Ninja generator if available (faster builds). If Ninja is not installed, remove the `-G Ninja` flag to use the default generator.
 - Shallow clones (`--depth 1`) are used to save time and disk space by only fetching recent commit history.
+- All commands assume you are in the Morphizen project directory
 
 #### 1. protobuf (v21.12)
 
@@ -261,18 +279,24 @@ Dependencies are cloned in the parent directory of the project (outside the proj
 # Clone protobuf in parent directory (if not already cloned)
 git clone --branch v21.12 --depth 1 https://github.com/protocolbuffers/protobuf.git ../protobuf
 
+# Compute absolute paths (recommended for reliability)
+LOCAL_DIR=$(cd ../../local && pwd)
+BUILD_DIR=$(cd ../.. && pwd)/build
+
 # Configure and build
-cmake -S ../protobuf -B ../../build/protobuf \
+cmake -S ../protobuf -B "$BUILD_DIR/protobuf" \
   -G Ninja \
   -DCMAKE_BUILD_TYPE=Debug \
   "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>" \
-  -DCMAKE_INSTALL_PREFIX=../../local \
+  "-DCMAKE_INSTALL_PREFIX=$LOCAL_DIR" \
   -Dprotobuf_BUILD_TESTS=OFF \
   -Dprotobuf_MSVC_STATIC_RUNTIME=ON
 
-cmake --build ../../build/protobuf --config Debug --parallel
-cmake --install ../../build/protobuf --config Debug
+cmake --build "$BUILD_DIR/protobuf" --config Debug --parallel
+cmake --install "$BUILD_DIR/protobuf" --config Debug
 ```
+
+**Note**: Other dependencies (gtest, glog, etc.) follow the same pattern. For brevity, they show relative paths below, but you can compute and use absolute paths the same way.
 
 #### 2. gtest (Google Test v1.15.0)
 
@@ -382,27 +406,32 @@ cmake --install ../../build/llvm --config Debug
 # Use --recursive for submodules, --depth 1 and --shallow-submodules for faster clone
 git clone --recursive --depth 1 --shallow-submodules https://github.com/microsoft/onnxruntime.git ../onnxruntime
 
+# Compute absolute paths (IMPORTANT - relative paths can fail)
+LOCAL_DIR=$(cd ../../local && pwd)
+BUILD_DIR=$(cd ../.. && pwd)/build
+
 # Configure and build
 # Windows: Add /bigobj flag to handle large object files
-cmake -S ../onnxruntime -B ../../build/onnxruntime \
+cmake -S ../onnxruntime -B "$BUILD_DIR/onnxruntime" \
   -G Ninja \
   -DCMAKE_BUILD_TYPE=Debug \
   "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>" \
-  -DCMAKE_INSTALL_PREFIX=../../local \
-  -DCMAKE_PREFIX_PATH=../../local \
+  "-DCMAKE_INSTALL_PREFIX=$LOCAL_DIR" \
+  "-DCMAKE_PREFIX_PATH=$LOCAL_DIR" \
   "-DCMAKE_CXX_FLAGS=/bigobj" \
   -Donnxruntime_BUILD_SHARED_LIB=ON \
   -Donnxruntime_BUILD_UNIT_TESTS=OFF \
   -Donnxruntime_USE_FULL_PROTOBUF=ON
 
-cmake --build ../../build/onnxruntime --config Debug --parallel
-cmake --install ../../build/onnxruntime --config Debug
+cmake --build "$BUILD_DIR/onnxruntime" --config Debug --parallel
+cmake --install "$BUILD_DIR/onnxruntime" --config Debug
 ```
 
 **Notes**:
 - ONNX Runtime depends on protobuf, so build protobuf first
 - The `/bigobj` flag is required on Windows to handle large object files
 - Unit tests are disabled for faster builds
+- **IMPORTANT**: Use absolute paths for CMAKE_PREFIX_PATH - relative paths can fail
 
 ### Dependency Checking
 
