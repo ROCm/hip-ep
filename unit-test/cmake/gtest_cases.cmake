@@ -627,32 +627,6 @@ set_target_properties(morphizen-unit-test-PassContextTest-TestEmptyFiles PROPERT
     )
 #end
 
-add_custom_target(morphizen-unit-test-PassContextTest-TestCompress
-    COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=PassContextTest.TestCompress
-    DEPENDS morphizen-unit-test
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    )
-set_target_properties(morphizen-unit-test-PassContextTest-TestCompress PROPERTIES
-    FOLDER "morphizen/unit-tests/PassContextTest/TestCompress"
-    VS_DEBUGGER_COMMAND "$<TARGET_FILE:morphizen-unit-test>"
-    VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
-    VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PassContextTest.TestCompress
-    )
-#end
-
-add_custom_target(morphizen-unit-test-PassContextTest-TestGzTar
-    COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=PassContextTest.TestGzTar
-    DEPENDS morphizen-unit-test
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    )
-set_target_properties(morphizen-unit-test-PassContextTest-TestGzTar PROPERTIES
-    FOLDER "morphizen/unit-tests/PassContextTest/TestGzTar"
-    VS_DEBUGGER_COMMAND "$<TARGET_FILE:morphizen-unit-test>"
-    VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
-    VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=PassContextTest.TestGzTar
-    )
-#end
-
 add_custom_target(morphizen-unit-test-NodeBuilderTest-SkipSimplifiedLayerNormalization
     COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=NodeBuilderTest.SkipSimplifiedLayerNormalization
     DEPENDS morphizen-unit-test
@@ -676,19 +650,6 @@ set_target_properties(morphizen-unit-test-TarBallTest-TarTest PROPERTIES
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:morphizen-unit-test>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TarBallTest.TarTest
-    )
-#end
-
-add_custom_target(morphizen-unit-test-TarBallTest-CompressTest
-    COMMAND $<TARGET_FILE:morphizen-unit-test> --gtest_filter=TarBallTest.CompressTest
-    DEPENDS morphizen-unit-test
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    )
-set_target_properties(morphizen-unit-test-TarBallTest-CompressTest PROPERTIES
-    FOLDER "morphizen/unit-tests/TarBallTest/CompressTest"
-    VS_DEBUGGER_COMMAND "$<TARGET_FILE:morphizen-unit-test>"
-    VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
-    VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TarBallTest.CompressTest
     )
 #end
 

@@ -28,10 +28,19 @@ def to_byte(filename):
     return ret_str, 0, origin_size
 
 
-def generate_map(embedded_resource_file):
+def get_compression_info(size, support_compression):
+    if not support_compression:
+        return ""
+    else:
+        return str(size) + ", "
+
+
+def generate_map(embedded_resource_file, support_compression):
     meta_info_list = []
     if os.path.isfile(embedded_resource_file):
-        print(f"-- load meta info from {embedded_resource_file}")
+        print(
+            f"-- load meta info from {embedded_resource_file} with {support_compression}"
+        )
         f = open(embedded_resource_file, "r", encoding="utf-8")
         meta_info_list = ast.literal_eval(f.read())
     else:
@@ -46,7 +55,7 @@ def generate_map(embedded_resource_file):
             meta_info["name"].replace("/", os.sep).replace("\\", os.sep)
         )
         filename = os.path.basename(normalized_rel_path)
-        compression = meta_info["compression"]
+        compression = meta_info["compression"] and support_compression
         print(f"-- add binary file {filename} with compression = {compression}")
         suffix = Path(filename).suffix
         variable_name = "_" + filename.split(suffix)[0].replace(".", "_")
@@ -70,8 +79,7 @@ def generate_map(embedded_resource_file):
             "CompressionInfo("
             + variable_name
             + ", "
-            + str(compressed_size)
-            + ", "
+            + get_compression_info(compressed_size, support_compression)
             + str(origin_size)
             + ")"
         )
@@ -81,12 +89,13 @@ def generate_map(embedded_resource_file):
 
 
 def main():
-    h_inc = sys.argv[1]
+    support_compression = sys.argv[1] == "1"
+    h_inc = sys.argv[2]
     embedded_resource_file = ""
-    if len(sys.argv) > 2:
-        embedded_resource_file = sys.argv[2]
+    if len(sys.argv) > 3:
+        embedded_resource_file = sys.argv[3]
     with open(h_inc, "w") as f:
-        f.write(generate_map(embedded_resource_file))
+        f.write(generate_map(embedded_resource_file, support_compression))
 
 
 if __name__ == "__main__":

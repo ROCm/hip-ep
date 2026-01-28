@@ -172,7 +172,6 @@ set(MorphiZen_DEPS
   glog::glog
   morphizen::encryption
   morphizen::mem_binary
-  ZLIB::ZLIB
   Microsoft.GSL::GSL
   morphizen-utils
   vaip-ort-api-ext

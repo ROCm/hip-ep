@@ -21,6 +21,7 @@ Run cmake -G Ninja -DBUILD_SHARED_LIBS=OFF `
     "-Dmorphizen_ENABLE_MLIR_BACKEND=ON" `
     "-DCMAKE_BUILD_TYPE=Debug" `
     "-DWIN24_BUILD=ON"  `
+    "-DZLIB_USE_STATIC_LIBS=ON" `
     --fresh
 
 $jobs = [Environment]::ProcessorCount

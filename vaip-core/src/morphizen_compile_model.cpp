@@ -48,7 +48,7 @@
 // to reduce the tmp files.  The `PassContextImp::tar_file_` is used
 // to store the cache files. It creates only one tmp file in disk or
 // open the ep context binary file directly.  limitation: it does not
-// when compression or encryption is enabled.
+// work when encryption is enabled.
 DEF_ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE, "1")
 DEF_ENV_PARAM_2(XLNX_ONNX_EP_REPORT_FILE, "", std::string)
 DEF_ENV_PARAM(XLNX_ENABLE_CACHE, "1")
@@ -59,7 +59,6 @@ DEF_ENV_PARAM_2(DEBUG_MD5_SIG, "", std::string)
 DEF_ENV_PARAM(DEBUG_VITIS_AI_EP, "1")
 DEF_ENV_PARAM(DEBUG_FILE_LOCK, "0")
 DEF_ENV_PARAM(DEBUG_EP_CONTEXT, "0")
-DEF_ENV_PARAM(XLNX_EP_CONTEXT_ENABLE_COMPRESSION, "0")
 DEF_ENV_PARAM(XLNX_ONNX_EP_DL_ANALYZER_PROFILING, "0")
 DEF_ENV_PARAM(XLNX_ONNX_EP_DL_ANALYZER_VISUALIZATION, "0")
 DEF_ENV_PARAM_2(XLNX_VAIML_LEVEL_1_NAME, "vaip-pass_vaiml_partition",
@@ -492,12 +491,6 @@ static void get_ep_cache_context_common(PassContextImp& context,
   auto measure_get_ep_cache_context_embed_mode =
       context.measure("get_ep_cache_context_common");
   auto reader = context_cache_files_to_tar_stream(context);
-  if (ENV_PARAM(XLNX_EP_CONTEXT_ENABLE_COMPRESSION)) {
-    auto measure_compression = context.measure("vaip_core::compress");
-    LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
-        << " start compressing ep context ";
-    reader = vaip_core::compress(*reader);
-  }
   auto encryption_key = context.context_proto.config().encryption_key();
   if (!encryption_key.empty()) {
     reader = stream_filter(
@@ -690,8 +683,6 @@ create_ep_context_node(vaip_core::ExecutionProviderConcrete* ep, int index) {
   attrs.add("log_dir", context.get_log_dir().u8string());
   attrs.add("onnx_model_filename", context.model_path.u8string());
   attrs.add("partition_name", name);
-  attrs.add("enable_compression",
-            (int64_t)ENV_PARAM(XLNX_EP_CONTEXT_ENABLE_COMPRESSION));
   bool enable_encryption =
       vaip_encryption::has_encryption_support() &&
       (!context.context_proto.config().encryption_key().empty());
@@ -898,7 +889,6 @@ static void
 store_cache_directory_from_main_node(PassContextImp& context,
                                      vaip_cxx::NodeConstRef main_node) {
   int64_t enable_encryption = main_node.get_attr_int("enable_encryption", 0);
-  int64_t enable_compression = main_node.get_attr_int("enable_compression", 0);
   int64_t ep_embed_mode = main_node.get_attr_int("embed_mode", 1);
   context.cache_file_use_cache_key_prefix_ =
       main_node.get_attr_int("cache_file_use_cache_key_prefix", 0) != 0;
@@ -919,7 +909,7 @@ store_cache_directory_from_main_node(PassContextImp& context,
   auto ep_context_size = ep_cache_context->size();
 
   if (ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE) //
-      && !enable_compression && !enable_encryption) {
+      && !enable_encryption) {
     context.create_tar_file_for_read(std::move(*ep_cache_context),
                                      ep_embed_mode != 0);
   } else {
@@ -953,10 +943,6 @@ store_cache_directory_from_main_node(PassContextImp& context,
           },
           encryption_key);
     }
-    if (enable_compression) {
-      ep_context_file = uncompress(*ep_context_file);
-    }
-
     context.tar_file_to_cache_files(*ep_context_file);
     LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
         << " extract memory cache files to  "
