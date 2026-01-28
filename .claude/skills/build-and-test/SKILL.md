@@ -59,9 +59,15 @@ See **[docs/developer-guide.md](../../../docs/developer-guide.md)** for:
 -DBUILD_SHARED_LIBS=OFF                                                    # Static linking
 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>        # Static runtime /MTd (Debug) or /MT (Release)
 -DCMAKE_BUILD_TYPE=Debug                                                   # Debug configuration
--DCMAKE_PREFIX_PATH=../../local                                            # Find dependencies
+-DCMAKE_PREFIX_PATH="$LOCAL_DIR"                                           # Find dependencies (use ABSOLUTE path)
 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON                                         # Generate compile_commands.json
 -Dmorphizen_ENABLE_UNIT_TEST=ON                                            # Enable unit tests
+```
+
+**IMPORTANT**: Always use absolute paths for `CMAKE_PREFIX_PATH`. Relative paths like `../../local` can fail depending on CMake's working directory. Compute the absolute path first:
+```bash
+LOCAL_DIR=$(cd ../../local && pwd)  # Compute absolute path from relative path
+-DCMAKE_PREFIX_PATH="$LOCAL_DIR"    # Use absolute path
 ```
 
 ## Command Templates
@@ -72,11 +78,14 @@ See **[docs/developer-guide.md](../../../docs/developer-guide.md)** for:
 # NOTE: CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>
 # This sets /MTd (static runtime) for Debug, /MT for Release
 
+# Compute absolute path for CMAKE_PREFIX_PATH (more reliable than relative path)
+LOCAL_DIR=$(cd ../../local && pwd)
+
 cmake -S . -B ../../build/$(basename $PWD) \
   -DBUILD_SHARED_LIBS=OFF \
   "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>" \
   -DCMAKE_BUILD_TYPE=Debug \
-  -DCMAKE_PREFIX_PATH=../../local \
+  "-DCMAKE_PREFIX_PATH=$LOCAL_DIR" \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
   -Dmorphizen_ENABLE_UNIT_TEST=ON \
   --fresh
@@ -104,33 +113,32 @@ ctest --test-dir ../../build/$(basename $PWD) -C Debug --output-on-failure --tim
 
 When this skill is invoked, follow these steps:
 
-### Step 0: Verify Git Workflow Compliance (CRITICAL)
+### Step 0: Git Workflow Check
 
-**BEFORE making ANY changes to code or files, enforce `.clinerules/git-rules.md`:**
+**Build operations** (configure, compile, test) **can run on any branch** - they don't modify source code.
+
+**Code modifications** (fixing errors, updating source files) **require a feature branch**:
 
 1. **Check current branch:**
    ```bash
    git branch --show-current
    ```
 
-2. **If on `main` branch:**
-   - **STOP immediately** - Do NOT proceed with any file changes
-   - Inform user: "You are on the `main` branch. Cannot make changes directly to main."
-   - Instruct user to create a feature branch: `git checkout -b feature/<descriptive-name>`
-   - Wait for user to create branch before proceeding
+2. **If build/test operations only:**
+   - Proceed on any branch (including `main`)
+   - No source code modifications
 
-3. **If on a feature branch:**
-   - Proceed to next steps
-   - Remember: Commit and push frequently with clear, professional commit messages
-   - No mentions of AI/tools in commits or PRs
-
-4. **When making changes during build/fix cycles:**
-   - After fixing build errors or making code changes, commit immediately
-   - Use descriptive commit messages: `fix:`, `feat:`, `refactor:`, etc.
+3. **If code changes are needed** (e.g., fixing build errors):
+   - **If on `main` branch:**
+     - Create feature branch first: `git checkout -b feature/<descriptive-name>`
+     - Then make code changes
+   - **If already on feature branch:**
+     - Proceed with changes
+   - Follow `.clinerules/git-rules.md` for commits and PRs
+   - Commit with descriptive messages: `fix:`, `feat:`, `refactor:`, etc.
    - Push to fork: `git push fork <branch-name>`
-   - Follow `.clinerules/git-rules.md` for all git operations
 
-**This step is MANDATORY before any file modifications.**
+**Summary**: Build freely on any branch. Create feature branch only when you need to modify source code.
 
 ### Step 1: Check MSVC Environment (Windows only - lightweight check)
 
@@ -156,34 +164,61 @@ On Windows, perform a quick check for the MSVC compiler environment:
 
 **Note**: Other tools (git, cmake, ninja) are NOT checked upfront - they will fail naturally with clear error messages if missing when their commands are executed.
 
-### Step 2: Check Dependencies
+### Step 2: Build Missing Dependencies
 
-1. **Check ONNX Runtime (REQUIRED - cannot be auto-fetched):**
-   - Check for: `../../local/lib/cmake/onnxruntime/*.cmake`
-   - If ONNX Runtime is missing:
-     - **STOP the build process**
-     - Inform user: "ONNX Runtime not found in ../../local. It MUST be built manually (cannot be auto-fetched by CMake)."
-     - Guide user: "See docs/developer-guide.md for ONNX Runtime build instructions."
-     - Remind: "Use: -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>"
-     - Do NOT proceed until ONNX Runtime is installed
+**Goal**: Automatically build missing dependencies to `../../local` before building MorphiZen.
 
-2. **Check other dependencies (optional - can be auto-fetched):**
-   - Check for CMake config files:
-     - LLVM: `../../local/lib/cmake/llvm/*.cmake`
-     - gtest: `../../local/lib/cmake/GTest/*.cmake`
-     - glog: `../../local/lib/cmake/glog/*.cmake`
-     - protobuf: `../../local/lib/cmake/protobuf/*.cmake`
+**For detailed manual build instructions, see [docs/developer-guide.md](../../../docs/developer-guide.md).**
 
-3. **If some optional dependencies are missing:**
-   - Inform user: "Some dependencies not found in ../../local. CMake will auto-fetch them (slower)."
-   - Suggest: "For faster builds, you can pre-build dependencies. See docs/developer-guide.md"
-   - Ask user: "Continue with auto-fetch or exit to pre-build dependencies?"
-     - If continue: Proceed to build (CMake will auto-fetch)
-     - If exit: Stop and guide them to docs/developer-guide.md
+**Automation strategy**:
 
-4. **If all dependencies are present (including ONNX Runtime):**
-   - Inform user: "All dependencies found in ../../local. Using pre-built dependencies for faster build."
-   - Proceed to build
+1. **Compute workspace paths** (from Morphizen directory):
+   ```bash
+   WORKSPACE=$(cd ../.. && pwd)
+   SOURCE_DIR="$WORKSPACE/source"
+   BUILD_DIR="$WORKSPACE/build"
+   LOCAL_DIR="$WORKSPACE/local"
+   ```
+
+2. **Check and build each dependency** in order:
+   - protobuf v21.12 (required first - others depend on it)
+   - gtest v1.15.0 (required)
+   - glog v0.7.1 (required)
+   - ONNX Runtime (required - see developer-guide.md for VitisAI build)
+
+3. **For each dependency**:
+   ```bash
+   # Check if already installed
+   ls "$LOCAL_DIR/lib/cmake/<dep>/*.cmake" 2>/dev/null
+
+   # If missing:
+   # - Clone to $SOURCE_DIR/<dep>
+   # - Build to $BUILD_DIR/<dep>
+   # - Install to $LOCAL_DIR
+   # - Use: -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>
+   # - Verify installation
+   ```
+
+4. **ONNX Runtime special handling**:
+   - Check if installed: `ls "$LOCAL_DIR/lib/cmake/onnxruntime/*.cmake"`
+   - If missing, stop and direct user to developer-guide.md
+   - ONNX Runtime requires VitisAI support (complex build)
+   - Cannot be auto-built reliably - requires manual build
+
+5. **LLVM**: Skip (let CMake auto-fetch) - very large, slow build
+
+**Common CMake flags** for all dependencies:
+```bash
+-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>
+-DCMAKE_BUILD_TYPE=Debug
+-DCMAKE_INSTALL_PREFIX="$LOCAL_DIR"
+```
+
+**See [docs/developer-guide.md](../../../docs/developer-guide.md) for**:
+- Complete build commands for each dependency
+- Version numbers and git clone URLs
+- Dependency-specific CMake options
+- Troubleshooting guidance
 
 ### Step 3: Determine Build Type
 
@@ -203,10 +238,18 @@ Automatically determine the build type based on the current state:
 
 ### Step 4: Execute Build
 
+**IMPORTANT**: Always use absolute CMAKE_PREFIX_PATH for reliable dependency discovery:
+
+```bash
+# Compute absolute path (do this before CMake commands)
+LOCAL_DIR=$(cd ../../local && pwd)
+```
+
 Based on the automatically determined build type from Step 3:
 
 1. **Clean build**:
-   - Run the "Clean Build" command template
+   - Compute absolute LOCAL_DIR path
+   - Run the "Clean Build" command template with `-DCMAKE_PREFIX_PATH="$LOCAL_DIR"`
    - Parse CMake output for configuration errors
    - Parse build output for compilation errors
    - Parse CTest output for test results
@@ -325,6 +368,39 @@ Verify outputs:
 ```bash
 ls ../../build/$(basename $PWD)/bin/
 ```
+
+## Known Issues
+
+### CTest Discovery Error
+
+**Symptom**:
+```
+Error loading "onnxruntime_providers_vitisai.dll" which is missing.
+CMake Error at GoogleTestAddTests.cmake:382 (message):
+  Error running test executable.
+```
+
+**Cause**: CTest's `gtest_discover_tests()` tries to run test executables during CMake configure phase to discover individual test cases. The test executable fails because it can't find a DLL dependency.
+
+**Impact**:
+- Does not affect the build (all targets build successfully)
+- Unit test executables are created correctly in `../../build/Morphizen/bin/`
+- Tests can be run manually without issues
+
+**Workaround**:
+1. Run tests manually:
+   ```bash
+   cd ../../build/$(basename $PWD)/bin
+   ./morphizen-unit-tests.exe
+   ./ort-bridge-test.exe
+   ```
+
+2. Or use CTest directly:
+   ```bash
+   ctest --test-dir ../../build/$(basename $PWD) -C Debug --verbose
+   ```
+
+**Status**: Pre-existing issue with test discovery, not caused by dependency building. Requires investigation into runtime DLL dependencies.
 
 ## Additional Notes
 
