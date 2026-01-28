@@ -4,16 +4,32 @@ Licensed under the MIT License.
 -->
 # Git Workflow Rules
 
+## CRITICAL: Feature Branch FIRST
+
+**Create feature branch AS EARLY AS POSSIBLE - immediately when starting work on a task:**
+
+1. Check current branch: `git branch --show-current`
+2. If on `main`, create feature branch **RIGHT NOW**: `git checkout -b feature/<name>`
+3. **ONLY THEN** start any work (reading code, planning, making changes, etc.)
+
+**Timing**: Don't wait until you're about to make the first file change. Create the branch immediately when you receive or start thinking about a task.
+
+**Enforcement**: The `.claude/settings.json` hooks will block file modifications on `main` branch, but create your branch FIRST to avoid interruptions.
+
+---
+
 ## Quick Checklist
 
 - [ ] Check branch: `git branch --show-current`
 - [ ] Create feature branch if on main: `git checkout -b feature/<name>`
-- [ ] Make changes (no binaries, no temp files)
+- [ ] Make initial changes (even small - plan, TODO, skeleton)
 - [ ] Stage specific files: `git add <file>` (avoid `git add -A`)
 - [ ] Verify no binaries: `git diff --cached --numstat`
-- [ ] Commit: `feat:`, `fix:`, `docs:`, etc.
+- [ ] Initial commit: `feat:`, `fix:`, `docs:`, etc.
 - [ ] Push to fork: `git push fork <branch>`
-- [ ] Create PR: `gh pr create`
+- [ ] **Create DRAFT PR immediately**: `gh pr create --draft`
+- [ ] Continue working, commit and push frequently
+- [ ] Mark as ready for review when complete
 
 ## Branch Protection
 
@@ -22,10 +38,15 @@ Licensed under the MIT License.
 ## Required Workflow
 
 1. Create a feature branch from `main`
-2. Make changes on the feature branch
-3. **Commit and push frequently** - Small, incremental commits are preferred over large, infrequent ones
-4. Push the feature branch and create a Pull Request
-5. Wait for review and approval before merging
+2. Make an initial commit (even small - plan, TODO, skeleton code)
+3. Push to fork: `git push fork <branch>`
+4. **Create DRAFT PR immediately** - `gh pr create --draft`
+   - Makes work visible to team early
+   - Allows early feedback and discussion
+   - Shows progress and intent
+5. Continue working: **Commit and push frequently** - Small, incremental commits are preferred
+6. Mark PR as "Ready for review" when complete
+7. Wait for review and approval before merging
 
 ## Before Any Git Push
 
