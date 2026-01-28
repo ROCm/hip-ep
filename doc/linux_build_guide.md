@@ -440,7 +440,7 @@ onnx-hipdnn-ep requires ONNXRuntime built with Vitis AI support.
 cd $WORKSPACE_DIR/onnxruntime
 
 # Build with Vitis AI support
-./build.sh --use_vitisai \
+./build.sh \
   --config Debug \
   --build_shared_lib \
   --parallel \
@@ -913,7 +913,7 @@ ctest --preset RelWithDebInfo --output-on-failure
 
 # Build ONNXRuntime with Vitis AI support
 cd $WORKSPACE_DIR/onnxruntime
-./build.sh --use_vitisai --config Debug --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir $WORKSPACE_DIR/build/onnxruntime --skip_tests --cmake_extra_defines CMAKE_INSTALL_PREFIX=$WORKSPACE_DIR/local
+./build.sh --config Debug --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir $WORKSPACE_DIR/build/onnxruntime --skip_tests --cmake_extra_defines CMAKE_INSTALL_PREFIX=$WORKSPACE_DIR/local
 cmake --build $WORKSPACE_DIR/build/onnxruntime/Debug/ --target install
 
 # Clone repositories
