@@ -131,6 +131,12 @@ gtest_discover_tests(${TEST_EXE_NAME}
   ${TEST_ENV}
 )
 if(MSVC)
+  # Copy required ONNX Runtime DLLs to test directory
+  # Note: onnxruntime_providers_vitisai.dll is NOT copied because this project
+  # focuses on the new ABI (onnxruntime_vitisai_ep.dll built by MorphiZen).
+  # The old ABI provider (onnxruntime_providers_vitisai.dll) is only available
+  # when ONNX Runtime is built with --use-vitisai flag, which is not required
+  # for MorphiZen development.
   add_custom_command(
     TARGET ${TEST_EXE_NAME}
     POST_BUILD
@@ -138,7 +144,6 @@ if(MSVC)
       ${CMAKE_COMMAND} -E copy_if_different
       $<TARGET_FILE:onnxruntime::onnxruntime>
       $<TARGET_FILE_DIR:onnxruntime::onnxruntime>/onnxruntime_providers_shared.dll
-      $<TARGET_FILE_DIR:onnxruntime::onnxruntime>/onnxruntime_providers_vitisai.dll
       $<TARGET_FILE_DIR:${TEST_EXE_NAME}>
   )
 endif(MSVC)

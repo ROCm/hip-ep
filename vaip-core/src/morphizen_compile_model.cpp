@@ -393,7 +393,8 @@ static std::string get_model_signature(const Graph& onnx_graph) {
 }
 
 static std::string get_signature(const std::string& model_path,
-                                 const Graph& onnx_graph, ConfigProto& proto) {
+                                 const Graph& onnx_graph,
+                                 ConfigProto& /*proto*/) {
   auto md5_file_base =
       model_path.empty() ? "" : vaip_core::get_md5_of_file(model_path);
   auto md5_in_memory_a = get_model_signature(onnx_graph);
