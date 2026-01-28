@@ -21,9 +21,9 @@ target_link_libraries(morphizen-pass-init PRIVATE morphizen-core-static)
 target_compile_definitions(morphizen-pass-init
   PRIVATE -DOUTPUT_NAME="vaip-pass_init")
 
-if(TARGET ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET})
-  target_link_libraries(${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET} PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,morphizen-pass-init>)
-endif(TARGET ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET})
+if(TARGET ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET})
+  target_link_libraries(${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET} PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,morphizen-pass-init>)
+endif(TARGET ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET})
 
 set_target_properties(morphizen-pass-init
   PROPERTIES

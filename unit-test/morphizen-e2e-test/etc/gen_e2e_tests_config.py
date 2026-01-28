@@ -27,7 +27,7 @@ single_session_gen_and_run_embed_ctx = {
                     "ep.context_file_path": "single_session_gen_and_run_embed_ctx.onnx",
                     "ep.shared_ep_context": "0",
                 },
-                "vitisai_ep_param": {
+                "morphizen_ep_param": {
                     "provider_options": {
                         "log_level": "info",
                         "enable_cache_file_io_in_mem": "1",
@@ -47,7 +47,7 @@ single_session_gen_and_run_embed_ctx = {
                 "session_configs": {
                     "ep.context_enable": "0",
                 },
-                "vitisai_ep_param": {
+                "morphizen_ep_param": {
                     "provider_options": {
                         "log_level": "info",
                         "enable_cache_file_io_in_mem": "1",
@@ -79,7 +79,7 @@ multiple_session_gen_and_run_embed_ctx = {
                     "ep.context_file_path": "multiple_session_gen_and_run_embed_ctx.onnx",
                     "ep.shared_ep_context": "0",
                 },
-                "vitisai_ep_param": {
+                "morphizen_ep_param": {
                     "provider_options": {
                         "log_level": "info",
                         "enable_cache_file_io_in_mem": "1",
@@ -106,7 +106,7 @@ multiple_session_gen_and_run_embed_ctx = {
                 "session_configs": {
                     "ep.context_enable": "0",
                 },
-                "vitisai_ep_param": {
+                "morphizen_ep_param": {
                     "provider_options": {
                         "log_level": "info",
                         "enable_cache_file_io_in_mem": "1",
@@ -137,7 +137,7 @@ single_session_gen_and_run_non_embed_no_prefix_ctx = {
                     "ep.context_embed_mode": "0",
                     "ep.context_file_path": "single_session_gen_and_run_non_embed_no_prefix_ctx.onnx",
                 },
-                "vitisai_ep_param": {
+                "morphizen_ep_param": {
                     "provider_options": {
                         "log_level": "info",
                         "use_cache_key_prefix": "0",
@@ -158,7 +158,7 @@ single_session_gen_and_run_non_embed_no_prefix_ctx = {
                 "session_configs": {
                     "ep.context_enable": "0",
                 },
-                "vitisai_ep_param": {
+                "morphizen_ep_param": {
                     "provider_options": {
                         "log_level": "info",
                         "enable_cache_file_io_in_mem": "1",
@@ -185,8 +185,8 @@ v2_single_session_gen_and_run_embed_ctx = {
         "ort_log_id": "morphizen_e2e_tests.v2_single_session_gen_and_run_embed_ctx",
         "registration": [
             {
-                "name": "VitisAIExecutionProvider",
-                "library": "onnxruntime_vitisai_ep.dll",
+                "name": "MorphiZenExecutionProvider",
+                "library": "onnxruntime_morphizen_ep.dll",
             },
         ],
         "session_options": [

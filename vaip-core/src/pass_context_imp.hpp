@@ -334,12 +334,12 @@ private:
   std::map<std::string, std::unique_ptr<MemoryFile>> mem_files_;
   std::function<std::optional<std::string>(std::string)> get_run_options_;
   std::shared_mutex rw_mutex_;
-  friend int vitisai_ep_on_run_start(
+  friend int morphizen_ep_on_run_start(
       const std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>& eps,
       const void* state,
       vaip_core::DllSafe<std::string> (*get_config_entry)(
           const void* state, const char* entry_name));
-  friend int vitisai_ep_set_ep_dynamic_options(
+  friend int morphizen_ep_set_ep_dynamic_options(
       const std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>& eps,
       const char* const* keys, const char* const* values, size_t kv_len);
   friend bool check_cache_hit(PassContextImp& context);
@@ -359,7 +359,6 @@ private:
   // this feature only tested when tar_file_ is not null.
   bool cache_file_use_cache_key_prefix_ = false;
   std::unique_ptr<TargetProto> target_proto_ = nullptr;
-  std::unique_ptr<MepConfigTable> mep_config_proto_ = nullptr;
   std::map<std::string, std::string> provider_option_origin_ = {};
   std::map<std::string, std::string> provider_option_from_cache_ = {};
   std::map<std::string, std::string> compiled_model_compatibility_info_ = {};

@@ -17,7 +17,7 @@ $VAIP_DIR = "$W\vaip"
 
 # Clone VAIP repository if it doesn't exist
 if (-Not (Test-Path $VAIP_DIR)) {
-    git clone git@gitenterprise.xilinx.com:VitisAI/vaip.git $VAIP_DIR
+    git clone git@gitenterprise.xilinx.com:MorphiZen/vaip.git $VAIP_DIR
 }
 Write-Host "Syncing VAIP repository"
 git -C $VAIP_DIR fetch origin ${Env:VAIP_REMOTE_BRANCH}
@@ -35,7 +35,7 @@ Write-Host "Old commit ID = $old_commit_id"
 
 # Get PR source repository URL and commit ID from API
 $headers = @{ 'Authorization' = "token $($Env:MY_GHE_TOKEN)" }
-$api_url = "https://gitenterprise.xilinx.com/api/v3/repos/VitisAI/MorphiZen/pulls/$($Env:MORPHIZEN_PR_NUMBER)"
+$api_url = "https://gitenterprise.xilinx.com/api/v3/repos/MorphiZen/MorphiZen/pulls/$($Env:MORPHIZEN_PR_NUMBER)"
 $pr_data = Invoke-RestMethod -Uri $api_url -Headers $headers
 $new_remote_url = $pr_data.head.repo.clone_url
 Write-Host "PR source remote url = $new_remote_url"
@@ -69,7 +69,7 @@ $change_log = git --git-dir="$PROJECT_DIR/.git" --work-tree="$PROJECT_DIR" log `
     --date=short --reverse `
     --pretty=format:"  - %h %s (by %an @ %ad)" "$old_commit_id..$new_commit_id" `
     --date-order |
-    ForEach-Object { $_ -replace "#(\d+)", "VitisAI/MorphiZen#`${1}" }
+    ForEach-Object { $_ -replace "#(\d+)", "MorphiZen/MorphiZen#`${1}" }
 $change_log = $change_log -join "`n"
 $change_log = $change_log -replace '"', '\"'
 $body = "Change Log`n`n$change_log`n`n"

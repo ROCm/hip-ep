@@ -2,7 +2,7 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#include "morphizen/onnxruntime_vitisai_ep.hpp"
+#include "morphizen/onnxruntime_morphizen_ep.hpp"
 #include "morphizen/pattern.hpp"
 #include "morphizen/vaip.hpp"
 #if _WIN32
@@ -15,8 +15,8 @@ typedef void* voidp;
 static struct {
   const char* name;
   void* symbol;
-} table[] = {{"deinitialize_onnxruntime_vitisai_ep",
-              (void*)deinitialize_onnxruntime_vitisai_ep},
+} table[] = {{"deinitialize_onnxruntime_morphizen_ep",
+              (void*)deinitialize_onnxruntime_morphizen_ep},
              {"vaip_get_version", (void*)vaip_get_version},
              {"vaip_core::Pattern::enable_trace",
               (void*)vaip_core::Pattern::enable_trace}};

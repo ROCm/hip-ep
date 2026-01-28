@@ -8,7 +8,7 @@ namespace vaip_core {
 /**
  * @brief Option key for specifying the target name.
  *
- * There are multiply compiler backends supported by VitisAI EP, some of them
+ * There are multiply compiler backends supported by MorphiZen EP, some of them
  * could work together to support a model. A set of predefined `TargetProto`
  * define how to compose these compiler backends, `target` is used to select
  * which `TargetProto` is in use.
@@ -47,23 +47,4 @@ static constexpr const char* kProviderOptionCacheDir = "cache_dir";
 static constexpr const char* kProviderOptionEpContextEnableMmap =
     "ep_context_enable_mmap";
 
-/**
- * @brief Option key indicating whether the compilation is occurring on a
- * non-NPU (Neural Processing Unit) platform.
- *
- * This constant can be used to check or specify if offline compilation on a
- * Non-NPU platform. It is for internal use only and should not be exposed to
- * end users.
- *
- * By default this option is not set, indicating that it enable auto
- * detection for non-NPU platforms.
- *
- * if auto detction is not appropriate for some reasons, developers can set it
- * to "0" to force it to compile and run on the target machine. Or set it to "1"
- * to force it to compile only on the host machine.
- *
- * Value: "is_compiling_on_non_npu_platform"
- */
-static constexpr const char* kProviderOptionIsCompilingOnNonNpuPlatform =
-    "is_compiling_on_non_npu_platform";
 } // namespace vaip_core

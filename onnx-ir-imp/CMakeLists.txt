@@ -71,6 +71,6 @@ target_link_libraries(${LIB_NAME}
   morphizen-utils
 )
 
-if(TARGET ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET})
-  target_link_libraries(${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET} PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,${LIB_NAME}>)
-endif(TARGET ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET})
+if(TARGET ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET})
+  target_link_libraries(${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET} PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,${LIB_NAME}>)
+endif(TARGET ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET})

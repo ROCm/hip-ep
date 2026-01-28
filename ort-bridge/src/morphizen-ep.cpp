@@ -2,13 +2,13 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#include "./vitisai-ep.hpp"
+#include "./morphizen-ep.hpp"
 #include "./ir-converter.hpp"
 #include "./ort-graph-wrapper.hpp"
 #include "./vaip-deps.hpp"
 #include "glog/logging.h"
 #include "morphizen-utils/morphizen-utils.hpp"
-#include "morphizen/onnxruntime_vitisai_ep.hpp"
+#include "morphizen/onnxruntime_morphizen_ep.hpp"
 #include "morphizen/vaip-ort-api-ext.hpp"
 #include "morphizen/vaip.hpp"
 #include <google/protobuf/util/json_util.h>
@@ -28,8 +28,8 @@ DEF_ENV_PARAM_2(
     MORPHIZEN_ORT_BRIDGE_BACKEND,
     MORPHIZEN_DEFAULT_BACKEND, // default depends on which backend is enabled
     std::string)
-DEF_ENV_PARAM(MORPHIZEN_DEBUG_VITISAI_EP, "0")
-#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_VITISAI_EP) >= n)
+DEF_ENV_PARAM(MORPHIZEN_DEBUG_MORPHIZEN_EP, "0")
+#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MORPHIZEN_EP) >= n)
 namespace morphizen {
 
 /**
@@ -45,10 +45,10 @@ static std::vector<const OrtNode*>
 get_supported_nodes(const vaip_core::ExecutionProvider& ep,
                     OrtGraphWrapper& graph_viewer);
 
-VitisAIEP::VitisAIEP(ApiPtrs apis, const std::string& name,
-                     const OrtKeyValuePairs* const* ep_metadata,
-                     const OrtSessionOptions& session_options,
-                     const OrtLogger& logger)
+MorphiZenEP::MorphiZenEP(ApiPtrs apis, const std::string& name,
+                         const OrtKeyValuePairs* const* ep_metadata,
+                         const OrtSessionOptions& session_options,
+                         const OrtLogger& logger)
     : ApiPtrs(apis), name_{name}, logger_{logger} {
   // Initialize the execution provider.
   auto status = ort_api.Logger_LogMessage(
@@ -84,9 +84,9 @@ VitisAIEP::VitisAIEP(ApiPtrs apis, const std::string& name,
       GetCompiledModelCompatibilityInfoImpl;
   ir_converter = morphizen::IRConverter::to_onnx_model;
 }
-VitisAIEP::~VitisAIEP() {}
+MorphiZenEP::~MorphiZenEP() {}
 
-void VitisAIEP::update_provider_options_from_session_config(
+void MorphiZenEP::update_provider_options_from_session_config(
     const OrtSessionOptions& session_options) {
   MY_LOG(2) << "Updating provider options from session configuration";
 
@@ -105,14 +105,15 @@ void VitisAIEP::update_provider_options_from_session_config(
     MY_LOG(2) << "Converting " << num_keys
               << " provider options from session config entries";
 
-    const std::string vitisai_ep_prefix = "ep.vitisaiexecutionprovider.";
+    const std::string morphizen_ep_prefix = "ep.morphizenexecutionprovider.";
     const std::string ort_session_prefix = "ort_session_config.";
     for (size_t i = 0; i < num_keys; ++i) {
       if (keys[i] != nullptr && values[i] != nullptr) {
         std::string key_str(keys[i]);
         std::string value_str(values[i]);
-        if (key_str.rfind(vitisai_ep_prefix, 0) == 0) {
-          std::string option_name = key_str.substr(vitisai_ep_prefix.length());
+        if (key_str.rfind(morphizen_ep_prefix, 0) == 0) {
+          std::string option_name =
+              key_str.substr(morphizen_ep_prefix.length());
           provider_options_[option_name] = value_str;
         } else {
           provider_options_[ort_session_prefix + key_str] = value_str;
@@ -141,8 +142,8 @@ void VitisAIEP::update_provider_options_from_session_config(
   //     "disable_model_compiles" // kOrtSessionOptionsDisableModelCompiles
   //     // Note: kOrtSessionOptionEpContextNodeNamePrefix is TODO
   //     // TODO : provider options set by end user.
-  //     // "ep.vitisaiexecutionprovider.enable_cache_file_io_in_mem"
-  //     // "ep.vitisaiexecutionprovider.target"
+  //     // "ep.morphizenexecutionprovider.enable_cache_file_io_in_mem"
+  //     // "ep.morphizenexecutionprovider.target"
   //     // ...
   // };
 
@@ -202,7 +203,7 @@ void VitisAIEP::update_provider_options_from_session_config(
   //           << " provider options from session configuration";
 }
 
-void VitisAIEP::update_provider_options_from_ep_metadata(
+void MorphiZenEP::update_provider_options_from_ep_metadata(
     const OrtKeyValuePairs* const* ep_metadata) {
   if (ep_metadata && *ep_metadata) {
     const char* const* keys = nullptr;
@@ -239,16 +240,16 @@ void VitisAIEP::update_provider_options_from_ep_metadata(
 }
 
 const char* ORT_API_CALL
-VitisAIEP::GetNameImpl(const OrtEp* this_ptr) noexcept {
-  const auto* ep = static_cast<const VitisAIEP*>(this_ptr);
+MorphiZenEP::GetNameImpl(const OrtEp* this_ptr) noexcept {
+  const auto* ep = static_cast<const MorphiZenEP*>(this_ptr);
   return ep->name_.c_str();
 }
 
-OrtStatus* ORT_API_CALL VitisAIEP::GetCapabilityImpl(
+OrtStatus* ORT_API_CALL MorphiZenEP::GetCapabilityImpl(
     OrtEp* this_ptr, const OrtGraph* graph,
     OrtEpGraphSupportInfo* graph_support_info) noexcept {
 
-  VitisAIEP* self = static_cast<VitisAIEP*>(this_ptr);
+  MorphiZenEP* self = static_cast<MorphiZenEP*>(this_ptr);
 
   if (self->ir_converter == nullptr) {
     MY_LOG(1) << " no available IR converter.";
@@ -260,24 +261,24 @@ OrtStatus* ORT_API_CALL VitisAIEP::GetCapabilityImpl(
   return nullptr;
 }
 
-OrtStatus* ORT_API_CALL VitisAIEP::CompileImpl(
+OrtStatus* ORT_API_CALL MorphiZenEP::CompileImpl(
     OrtEp* this_ptr, const OrtGraph** graphs, const OrtNode** fused_nodes,
     size_t count, OrtNodeComputeInfo** node_compute_infos,
     OrtNode** ep_context_nodes) noexcept {
-  VitisAIEP* self = static_cast<VitisAIEP*>(this_ptr);
+  MorphiZenEP* self = static_cast<MorphiZenEP*>(this_ptr);
   return self->Compile(graphs, fused_nodes, count, node_compute_infos,
                        ep_context_nodes);
 }
-void ORT_API_CALL VitisAIEP::ReleaseNodeComputeInfosImpl(
+void ORT_API_CALL MorphiZenEP::ReleaseNodeComputeInfosImpl(
     OrtEp* this_ptr, OrtNodeComputeInfo** node_compute_infos,
     size_t num_node_compute_infos) noexcept {
-  VitisAIEP* self = static_cast<VitisAIEP*>(this_ptr);
+  MorphiZenEP* self = static_cast<MorphiZenEP*>(this_ptr);
   self->ReleaseNodeComputeInfos(node_compute_infos, num_node_compute_infos);
 }
 
-const char* ORT_API_CALL VitisAIEP::GetCompiledModelCompatibilityInfoImpl(
+const char* ORT_API_CALL MorphiZenEP::GetCompiledModelCompatibilityInfoImpl(
     OrtEp* this_ptr, const OrtGraph* graph) noexcept {
-  VitisAIEP* self = static_cast<VitisAIEP*>(this_ptr);
+  MorphiZenEP* self = static_cast<MorphiZenEP*>(this_ptr);
   if (!self->execution_providers_ || (*self->execution_providers_)->empty()) {
     return nullptr;
   }
@@ -285,8 +286,9 @@ const char* ORT_API_CALL VitisAIEP::GetCompiledModelCompatibilityInfoImpl(
       (*self->execution_providers_).get(), graph);
 }
 
-OrtStatus* VitisAIEP::GetCapability(OrtGraphWrapper& graph_viewer,
-                                    OrtEpGraphSupportInfo& graph_support_info) {
+OrtStatus*
+MorphiZenEP::GetCapability(OrtGraphWrapper& graph_viewer,
+                           OrtEpGraphSupportInfo& graph_support_info) {
   auto is_subgraph = graph_viewer.is_subgraph();
   // TODO: ORT does not support Graph_IsSubgraph API yet, so we cannot check if
   // the graph is a subgraph.
@@ -320,7 +322,7 @@ OrtStatus* VitisAIEP::GetCapability(OrtGraphWrapper& graph_viewer,
   auto model_path = VAIP_ORT_API(get_model_path)(graph);
   OrtStatus* status = nullptr;
   execution_providers_ =
-      std::make_unique<my_ep_t>(compile_onnx_model_vitisai_ep_v4(
+      std::make_unique<my_ep_t>(compile_onnx_model_morphizen_ep_v4(
           model_path.u8string(), graph, provider_options_, (void*)&status,
           [](void* status, int code, const char* error_message) {
             OrtStatus** ort_status = static_cast<OrtStatus**>(status);
@@ -330,7 +332,7 @@ OrtStatus* VitisAIEP::GetCapability(OrtGraphWrapper& graph_viewer,
           &logger_));
 
   if (!execution_providers_) {
-    MY_LOG(1) << "Failed to compile ONNX model to Vitis AI EP.";
+    MY_LOG(1) << "Failed to compile ONNX model to MorphiZen EP.";
     return nullptr;
   }
   // iterator over the execution providers and set the graph support info
@@ -377,7 +379,7 @@ static void update_argument_indice(
     CHECK(found) << " cannot find index for meta_def_args[" << j
                  << "] =" << meta_def_name;
   }
-  if (ENV_PARAM(MORPHIZEN_DEBUG_VITISAI_EP) >= 1) {
+  if (ENV_PARAM(MORPHIZEN_DEBUG_MORPHIZEN_EP) >= 1) {
     for (size_t i = 0; i < size; ++i) {
       auto name = Ort::ConstValueInfo(node_value_infos[i]).GetName();
       LOG(INFO) << " fused_node[" << i << "] = " << name;
@@ -390,7 +392,7 @@ static void update_argument_indice(
     }
   }
 }
-void VitisAIEP::update_input_output_argument_indice(
+void MorphiZenEP::update_input_output_argument_indice(
     vaip_core::ExecutionProvider& ep, const OrtNode* node) {
   auto ep_ext = dynamic_cast<vaip_core::ExecutionProviderConcrete*>(&ep);
   CHECK(ep_ext != nullptr) << "Execution provider does not support "
@@ -411,15 +413,15 @@ void VitisAIEP::update_input_output_argument_indice(
   update_argument_indice(meta_def.outputs(),
                          meta_def.mutable_output_argument_indice(), outputs);
 }
-OrtStatus* VitisAIEP::Compile(const OrtGraph** graphs,
-                              const OrtNode** fused_nodes, size_t count,
-                              OrtNodeComputeInfo** node_compute_infos,
-                              OrtNode** ep_context_nodes) {
+OrtStatus* MorphiZenEP::Compile(const OrtGraph** graphs,
+                                const OrtNode** fused_nodes, size_t count,
+                                OrtNodeComputeInfo** node_compute_infos,
+                                OrtNode** ep_context_nodes) {
   CHECK(execution_providers_ != nullptr)
       << "Execution providers are not initialized.";
   CHECK_EQ((*execution_providers_)->size(), count)
       << "Number of execution providers does not match the count provided.";
-  MY_LOG(1) << "VitisAIEP::Compile called with " << count
+  MY_LOG(1) << "MorphiZenEP::Compile called with " << count
             << " execution providers.";
   throw_if_error(CreateEpContextNodes(fused_nodes, ep_context_nodes, count));
   for (auto index = 0u; index < count; ++index) {
@@ -442,24 +444,24 @@ OrtStatus* VitisAIEP::Compile(const OrtGraph** graphs,
   return nullptr;
 }
 OrtStatus*
-VitisAIEP::ReleaseNodeComputeInfos(OrtNodeComputeInfo** node_compute_infos,
-                                   size_t num_node_compute_infos) {
+MorphiZenEP::ReleaseNodeComputeInfos(OrtNodeComputeInfo** node_compute_infos,
+                                     size_t num_node_compute_infos) {
   for (auto i = 0u; i < num_node_compute_infos; ++i) {
-    delete static_cast<VitisAIEP_ComputeInfo*>(node_compute_infos[i]);
+    delete static_cast<MorphiZenEP_ComputeInfo*>(node_compute_infos[i]);
   }
   return nullptr;
 }
 
-OrtStatus* VitisAIEP::CompileSubgraph(const vaip_core::ExecutionProvider& ep,
-                                      const OrtGraph* graph,
-                                      const OrtNode* fused_node,
-                                      OrtNodeComputeInfo*& node_compute_info,
-                                      OrtNode*& ep_context_node) {
+OrtStatus* MorphiZenEP::CompileSubgraph(const vaip_core::ExecutionProvider& ep,
+                                        const OrtGraph* graph,
+                                        const OrtNode* fused_node,
+                                        OrtNodeComputeInfo*& node_compute_info,
+                                        OrtNode*& ep_context_node) {
   (void)graph;
   (void)fused_node;
   (void)ep_context_node; // TODO implement EP context.
   try {
-    MY_LOG(2) << "VitisAIEP::CompileSubgraph called for execution provider";
+    MY_LOG(2) << "MorphiZenEP::CompileSubgraph called for execution provider";
 
     // Validate input parameters
     if (!graph) {
@@ -473,32 +475,32 @@ OrtStatus* VitisAIEP::CompileSubgraph(const vaip_core::ExecutionProvider& ep,
       return Ort::GetApi().CreateStatus(ORT_INVALID_ARGUMENT,
                                         "Fused node parameter cannot be null");
     }
-    auto vitisai_node_compute_info = new VitisAIEP_ComputeInfo();
-    node_compute_info = vitisai_node_compute_info;
-    vitisai_node_compute_info->ort_version_supported = ORT_API_VERSION;
-    vitisai_node_compute_info->vitisai_ep =
+    auto morphizen_node_compute_info = new MorphiZenEP_ComputeInfo();
+    node_compute_info = morphizen_node_compute_info;
+    morphizen_node_compute_info->ort_version_supported = ORT_API_VERSION;
+    morphizen_node_compute_info->morphizen_ep =
         const_cast<vaip_core::ExecutionProvider*>(&ep);
-    vitisai_node_compute_info->CreateState =
+    morphizen_node_compute_info->CreateState =
         [](OrtNodeComputeInfo* this_ptr, OrtNodeComputeContext* compute_context,
            void** compute_state) -> OrtStatus* {
       (void)compute_context;
-      auto self = reinterpret_cast<VitisAIEP_ComputeInfo*>(this_ptr);
-      auto* p = self->vitisai_ep->compile().release();
+      auto self = reinterpret_cast<MorphiZenEP_ComputeInfo*>(this_ptr);
+      auto* p = self->morphizen_ep->compile().release();
       *compute_state = p;
       return nullptr;
     };
-    vitisai_node_compute_info->ReleaseState = [](OrtNodeComputeInfo* this_ptr,
-                                                 void* compute_state) -> void {
-      auto self = reinterpret_cast<VitisAIEP_ComputeInfo*>(this_ptr);
+    morphizen_node_compute_info->ReleaseState =
+        [](OrtNodeComputeInfo* this_ptr, void* compute_state) -> void {
+      auto self = reinterpret_cast<MorphiZenEP_ComputeInfo*>(this_ptr);
       (void)self;
       if (compute_state) {
         delete reinterpret_cast<vaip_core::CustomOp*>(compute_state);
       }
     };
-    vitisai_node_compute_info->Compute =
+    morphizen_node_compute_info->Compute =
         [](OrtNodeComputeInfo* this_ptr, void* compute_state,
            OrtKernelContext* kernel_context) -> OrtStatus* {
-      auto self = reinterpret_cast<VitisAIEP_ComputeInfo*>(this_ptr);
+      auto self = reinterpret_cast<MorphiZenEP_ComputeInfo*>(this_ptr);
       (void)self;
       reinterpret_cast<vaip_core::CustomOp*>(compute_state)
           ->Compute(&Ort::GetApi(), kernel_context);
@@ -539,17 +541,17 @@ vaip_names_are_contained_in_ort_names(std::set<std::string>& vaip_names,
                            return ort_names.count(name) > 0;
                          });
   if (!ret) {
-    MY_LOG(1) << "Not all VitisAI EP names are in ORT names: "
-              << "VitisAI EP names: " << join(vaip_names)
+    MY_LOG(1) << "Not all MorphiZen EP names are in ORT names: "
+              << "MorphiZen EP names: " << join(vaip_names)
               << ", ORT names: " << join(ort_names);
   } else {
-    MY_LOG(1) << "All VitisAI EP names are contained in ORT names: "
-              << "VitisAI EP names: " << join(vaip_names)
+    MY_LOG(1) << "All MorphiZen EP names are contained in ORT names: "
+              << "MorphiZen EP names: " << join(vaip_names)
               << ", ORT names: " << join(ort_names);
   }
   return ret;
 }
-OrtNode* VitisAIEP::convert_vaip_node_to_ort_node(
+OrtNode* MorphiZenEP::convert_vaip_node_to_ort_node(
     const OrtModelEditorApi* model_editor_api,
     const onnxruntime::Node* vaip_node, //
     const OrtNode* fused_node) const {
@@ -655,10 +657,10 @@ OrtNode* VitisAIEP::convert_vaip_node_to_ort_node(
                                          output_names_2.end());
   CHECK(
       vaip_names_are_contained_in_ort_names(vaip_input_names, ort_input_names))
-      << "VitisAI EP and ORT have different input names: ";
+      << "MorphiZen EP and ORT have different input names: ";
   CHECK(vaip_names_are_contained_in_ort_names(vaip_output_names,
                                               ort_output_names))
-      << "VitisAI EP and ORT have different output names: ";
+      << "MorphiZen EP and ORT have different output names: ";
   std::vector<const char*> input_names_c;
   std::vector<const char*> output_names_c;
   input_names_c.reserve(input_names_2.size());
@@ -683,9 +685,9 @@ OrtNode* VitisAIEP::convert_vaip_node_to_ort_node(
 
   return ort_added_node;
 }
-OrtStatus* VitisAIEP::CreateEpContextNodes(const OrtNode** fused_nodes,
-                                           OrtNode** ep_context_nodes,
-                                           size_t count) const {
+OrtStatus* MorphiZenEP::CreateEpContextNodes(const OrtNode** fused_nodes,
+                                             OrtNode** ep_context_nodes,
+                                             size_t count) const {
   if (!enable_ep_context_) {
     return nullptr;
   }
@@ -799,7 +801,7 @@ get_supported_nodes(const vaip_core::ExecutionProvider& ep,
   return supported_nodes;
 }
 
-OrtStatus* VitisAIEP::GetSessionConfigEntryOrDefault(
+OrtStatus* MorphiZenEP::GetSessionConfigEntryOrDefault(
     const OrtSessionOptions& session_options, const char* config_key,
     const std::string& default_val,
     /*out*/ std::string& config_val) {

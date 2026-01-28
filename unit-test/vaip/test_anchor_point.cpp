@@ -44,7 +44,7 @@ create(const std::filesystem::path& filename) {
   // AnchorPointProto::AnchorPointProto() is an inline function so that it is
   // created inside vaip_unit_test.exe,
   // google::protobuf::TextFormat::ParseFromString() is defined in
-  // onnxruntime_vitisai_ep.dll, and output->Clear() would throw an exception.
+  // onnxruntime_morphizen_ep.dll, and output->Clear() would throw an exception.
   //
   //
   auto anchor_point = vaip_core::AnchorPoint::create_proto();

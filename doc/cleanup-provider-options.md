@@ -41,7 +41,7 @@ it is removed. see jira:VAI-9685. and [pass_context_imp.cpp#L1177][s1]
 
 ## set when MEP table hit
 
-[see here](../vaip-core/src/vitisai_compile_model.cpp#L502)
+[see here](../vaip-core/src/morphizen_compile_model.cpp#L502)
 
 it is to be deprecated, see PR #159 #155
 

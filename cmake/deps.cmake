@@ -87,7 +87,7 @@ endif()
 set(WITH_GFLAGS OFF CACHE BOOL "disable WITH_GFLAGS for glog")
 # Force glog to build as a static library and enable internal symbols
 # glog v0.7.1 GetStackTrace/Symbolize are internal APIs (GLOG_NO_EXPORT).
-# MorphiZen uses these internal APIs in vitisai_compile_model.cpp.
+# MorphiZen uses these internal APIs in morphizen_compile_model.cpp.
 # Building as static library with GLOG_STATIC_DEFINE makes these symbols available.
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build glog as static library")
 find_package(glog CONFIG QUIET)

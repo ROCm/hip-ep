@@ -18,22 +18,22 @@ execute_process(
     RESULT_VARIABLE GIT_VERSION_FOUND
   )
 set(morphizen_CORE_DYNAMIC_UNIQUE_ID "morphizen-core-dynamic-${GIT_VERSION}" CACHE STRING "the unique name for morphizen-core-dynamic")
-if (TARGET onnxruntime_providers_vitisai)
+if (TARGET onnxruntime_providers_morphizen)
   set(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC_DEFAULT OFF)
   set(morphizen_WITH_VAIP_CONFIG_FILE_DEFAULT OFF)
   set(morphizen_ENABLE_UNIT_TEST_DEFAULT ON)
-  set(morphizen_ONNXRUNTIME_VITISAI_EP_TARGET_DEFAULT "onnxruntime_providers_vitisai")
+  set(morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET_DEFAULT "onnxruntime_providers_morphizen")
   set(TRIM_CONFIG_DEFAULT ON)
 else()
   set(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC_DEFAULT ON)
   set(morphizen_WITH_VAIP_CONFIG_FILE_DEFAULT ON)
   set(morphizen_ENABLE_UNIT_TEST_DEFAULT ON)
-  set(morphizen_ONNXRUNTIME_VITISAI_EP_TARGET_DEFAULT ${morphizen_CORE_DYNAMIC_UNIQUE_ID})
+  set(morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET_DEFAULT ${morphizen_CORE_DYNAMIC_UNIQUE_ID})
   set(TRIM_CONFIG_DEFAULT OFF)
 endif()
 option(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC "enable morphizen-core-dynamic or not" ${morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC_DEFAULT})
 
-set(morphizen_ONNXRUNTIME_VITISAI_EP_TARGET ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET_DEFAULT} CACHE STRING "the name of target whose output name is onnxruntime_vitisai_ep")
+set(morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET_DEFAULT} CACHE STRING "the name of target whose output name is onnxruntime_morphizen_ep")
 # enable morphizen unit test or not
 option(morphizen_ENABLE_UNIT_TEST "enable vaip unit test or not" ${morphizen_ENABLE_UNIT_TEST_DEFAULT})
 # enable Boost dependency for executables and unit tests
@@ -61,10 +61,10 @@ set(VAIP_EMBEDDED_RESOURCE_PATH "" CACHE PATH "Path to the meta info of embedded
 
 
 # morphizen_WITH_VAIP_CONFIG_FILE = ON if build with default vaip
-# config in morphizen-core-dynamic, i.e. onnxruntime_vitisai_ep.dll
+# config in morphizen-core-dynamic, i.e. onnxruntime_morphizen_ep.dll
 # morphizen_WITH_VAIP_CONFIG_FILE = OFF if morphizen is build as part
 # of onnxruntime, the default config is read from a plugin.
-option(morphizen_WITH_VAIP_CONFIG_FILE "build with default vaip config in morphizen-core-dynamic, i.e. onnxruntime_vitisai_ep.dll" ${morphizen_WITH_VAIP_CONFIG_FILE_DEFAULT})
+option(morphizen_WITH_VAIP_CONFIG_FILE "build with default vaip config in morphizen-core-dynamic, i.e. onnxruntime_morphizen_ep.dll" ${morphizen_WITH_VAIP_CONFIG_FILE_DEFAULT})
 #
 # it is possible to embed json files in the binary, assume the json files are in the directory
 set(VAIP_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/vaip-core/etc/vaip_config.json" CACHE FILEPATH "Path to the file containing vaip_config.json files")
@@ -80,7 +80,7 @@ set(VAIP_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/vaip-core/etc/vaip_config
 set(VAIP_VERSEION_INFO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/vaip-core/etc/version_info.txt" CACHE FILEPATH "Path to the file containing version_info.txt files")
 
 #
-set(morphizen_OUTPUT_NAME "onnxruntime_vitisai_ep" CACHE STRING "Output name of MorphiZen library")
+set(morphizen_OUTPUT_NAME "onnxruntime_vitisai_ep" CACHE STRING "Output name of MorphiZen library (using VitisAI name for ORT compatibility)")
 
 ## this option is used to trim vaip_config.json, we choose the original name for backward compatibility.
 option(TRIM_CONFIG "trim default vaip_config.json" "${TRIM_CONFIG_DEFAULT}")
@@ -97,7 +97,7 @@ if(morphizen_ENABLE_ORT_BRIDGE)
 endif()
 # print all options
 message(STATUS "MorphiZen OPTIONS:")
-message(STATUS "  morphizen_ONNXRUNTIME_VITISAI_EP_TARGET : ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET}")
+message(STATUS "  morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET : ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET}")
 message(STATUS "  morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC : ${morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC}")
 message(STATUS "  VAIP_EMBEDDED_RESOURCE_PATH : ${VAIP_EMBEDDED_RESOURCE_PATH}")
 message(STATUS "  morphizen_WITH_VAIP_CONFIG_FILE : ${morphizen_WITH_VAIP_CONFIG_FILE}")

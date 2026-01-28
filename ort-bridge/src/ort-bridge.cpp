@@ -2,7 +2,7 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#include "./vitisai-ep-factory.hpp"
+#include "./morphizen-ep-factory.hpp"
 #include "morphizen-utils/morphizen-utils.hpp"
 #include <glog/logging.h>
 #include <iostream>
@@ -26,7 +26,7 @@ OrtStatus* CreateEpFactories(const char* registration_name,
 
   // Factory could use registration_name or define its own EP name.
   std::unique_ptr<OrtEpFactory> factory =
-      std::make_unique<morphizen::VitisAiEpFactory>(
+      std::make_unique<morphizen::MorphiZenEpFactory>(
           registration_name, morphizen::ApiPtrs{*ort_api, *ort_ep_api},
           *default_logger);
 

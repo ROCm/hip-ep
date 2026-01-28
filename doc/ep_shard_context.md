@@ -42,9 +42,9 @@ By default, context is generated in embed mode. To enable non-embed mode, add th
 ```
 
 If it is non-embed mode, an EP context binary file would be also generated in same as the EP context model directory,
-The EP context binary file naming format is  `[EP context model name]_VITISAI.bin`.
+The EP context binary file naming format is  `[EP context model name]_MORPHIZEN.bin`.
 
-i.e. `resnet50_ep_ctx.onnx_VITISAI.bin` or `[ep.context_file_path]_VITISAI.bin` if ep.context_file_path set.
+i.e. `resnet50_ep_ctx.onnx_MORPHIZEN.bin` or `[ep.context_file_path]_MORPHIZEN.bin` if ep.context_file_path set.
 
 ### Example: EP Context Generation
 
@@ -64,7 +64,7 @@ The EP context model and EP context binary file will generated in the same direc
 ```
 A.onnx
 A_ctx.onnx
-A_ctx.onnx_VITISAI.bin
+A_ctx.onnx_MORPHIZEN.bin
 ```
 #### 3. Non-embed mode with specify `ep.context_file_path`
 **With a relative path:**
@@ -79,7 +79,7 @@ Resulting files (in current working directory):
 ```
 A.onnx
 ./test/A_rel_ctx.onnx
-./test/A_rel_ctx.onnx_VITISAI.bin
+./test/A_rel_ctx.onnx_MORPHIZEN.bin
 ```
 **With an absolute path:**
 
@@ -92,7 +92,7 @@ Resulting files:
 ```
 A.onnx
 C:\temp\A_abs_ctx.onnx
-C:\temp\A_abs_ctx.onnx_VITISAI.bin
+C:\temp\A_abs_ctx.onnx_MORPHIZEN.bin
 ```
 
 #### 4. Model loaded from memory
@@ -103,7 +103,7 @@ session_options.AddConfigEntry("ep.context_file_path", "C:\temp\A_ctx.onnx");
 Resulting files:
 ```
 C:\temp\A_ctx.onnx
-C:\temp\A_ctx.onnx_VITISAI.bin
+C:\temp\A_ctx.onnx_MORPHIZEN.bin
 ```
 
 ## Deploy EP context model
@@ -121,7 +121,7 @@ Both the context model and its associated binary are required, and must be locat
 The EP context binary file name is taked from the `ep_cache_context` attribute of the main `EPContext` node in the EP Context ONNX model.
 
 `A_ctx.onnx`
-`A_ctx.onnx_VITISAI.bin`
+`A_ctx.onnx_MORPHIZEN.bin`
 
 #### Non-embed mode with load ctx model from memory:
 
@@ -144,7 +144,7 @@ Enable shared context with:
   session_options.AddConfigEntry("ep.share_ep_contexts", "1");
 ```
 
-VitisAI EP would raises an exception if `ep.share_ep_contexts=1`
+MorphiZen EP would raises an exception if `ep.share_ep_contexts=1`
 however `ep.context_embed_mode=1`
 
 
@@ -176,25 +176,25 @@ generate context for D.onnx
 ep.stop_share_ep_contexts
 
 ```
-In the above case we when context cache is generated for `A.onnx`, the bin will be `A_ctx.onnx_VITISAI.bin`
-For the second call `A_ctx.onnx_VITISAI.bin` will be updated
+In the above case we when context cache is generated for `A.onnx`, the bin will be `A_ctx.onnx_MORPHIZEN.bin`
+For the second call `A_ctx.onnx_MORPHIZEN.bin` will be updated
 
-Then `C_ctx.onnx_VITISAI.bin` will be generated for `C.onnx` and then when `D.onnx` is called, `C_ctx.onnx_VITISAI.bin` will be updated
+Then `C_ctx.onnx_MORPHIZEN.bin` will be generated for `C.onnx` and then when `D.onnx` is called, `C_ctx.onnx_MORPHIZEN.bin` will be updated
 
 As results, the following files are generated.
 
 ```
 A_ctx.onnx
-A_ctx.onnx_VITISAI.bin
+A_ctx.onnx_MORPHIZEN.bin
 B_ctx.onnx
 
 C_ctx.onnx
-C_ctx.onnx_VITISAI.bin
+C_ctx.onnx_MORPHIZEN.bin
 D_ctx.onnx
 ```
 
-`A_ctx.onnx` and `B_ctx.onnx` share `A_ctx.onnx_VITISAI.bin`.
-`C_ctx.onnx` and `D_ctx.onnx` share `C_ctx.onnx_VITISAI.bin`.
+`A_ctx.onnx` and `B_ctx.onnx` share `A_ctx.onnx_MORPHIZEN.bin`.
+`C_ctx.onnx` and `D_ctx.onnx` share `C_ctx.onnx_MORPHIZEN.bin`.
 
 
 ### Example : Some compilicated use cases
@@ -219,13 +219,13 @@ options.add_session_config_entry("ep.context_enable", "1")
 options.add_session_config_entry("ep.context_embed_mode", "0")
 options.add_session_config_entry("ep.share_ep_contexts", "1")
 
-# open workspace `dir1`, shared binray file : dir1/A1_ctx.onnx_VITISAI.bin
+# open workspace `dir1`, shared binray file : dir1/A1_ctx.onnx_MORPHIZEN.bin
 create_ort_session("dir1/A1.onnx", options)
 # close workspace `dir1`, dir1/A1_ctx.onnx and dir2/A2_ctx.onnx as a group for shared weights.
 options.add_session_config_entry("ep.stop_share_ep_contexts", "1")
 create_ort_session("dir1/A2.onnx", options)
 
-# open workspace `dir1` , shared library file: dir1/B1_ctx.onnx_VITISAI.bin
+# open workspace `dir1` , shared library file: dir1/B1_ctx.onnx_MORPHIZEN.bin
 options.add_session_config_entry("ep.stop_share_ep_contexts", "0")
 create_ort_session("dir1/B1.onnx", options)
 create_ort_session("dir1/B2.onnx", options)
@@ -239,26 +239,26 @@ create_ort_session("dir2/B3.onnx", options)
 As results, the following files are generated.
 ```
 dir1/A1_ctx.onnx
-dir1/A1_ctx.onnx_VITISAI.bin
+dir1/A1_ctx.onnx_MORPHIZEN.bin
 dir1/A2_ctx.onnx
 dir1/B1_ctx.onnx
-dir1/B1_ctx.onnx_VITISAI.bin
+dir1/B1_ctx.onnx_MORPHIZEN.bin
 dir1/B2_ctx.onnx
 dir1/B3_ctx.onnx
 ```
-`dir1/A1_ctx.onnx` and `dir1/A2_ctx.onnx` share `dir1/A1_ctx.onnx_VITISAI.bin`.
-`dir1/B1_ctx.onnx`, `dir1/B2_ctx.onnx`  and `dir1/B3_ctx.onnx` share `dir1/B1_ctx.onnx_VITISAI.bin`.
+`dir1/A1_ctx.onnx` and `dir1/A2_ctx.onnx` share `dir1/A1_ctx.onnx_MORPHIZEN.bin`.
+`dir1/B1_ctx.onnx`, `dir1/B2_ctx.onnx`  and `dir1/B3_ctx.onnx` share `dir1/B1_ctx.onnx_MORPHIZEN.bin`.
 
 
 Others:
 ```
 if you want to share, all models must in the same directory or point output ep context model to workspace directory.
-dir1/A1.onnx -> dir1/A1_ctx.onnx dir1/A1_ctx.onnx_VITISAI.bin
-dir2/A1.onnx -> dir2/A1_ctx.onnx dir2/A1_ctx.onnx_VITISAI.bin
-dir1/A2.onnx -> dir1/A2_ctx.onnx dir1/A1_ctx.onnx_VITISAI.bin  : shared =1 stop=1
-dir2/A2.onnx -> dir2/A2_ctx.onnx dir2/A1_ctx.onnx_VITISAI.bin  : shared =1 stop=1
+dir1/A1.onnx -> dir1/A1_ctx.onnx dir1/A1_ctx.onnx_MORPHIZEN.bin
+dir2/A1.onnx -> dir2/A1_ctx.onnx dir2/A1_ctx.onnx_MORPHIZEN.bin
+dir1/A2.onnx -> dir1/A2_ctx.onnx dir1/A1_ctx.onnx_MORPHIZEN.bin  : shared =1 stop=1
+dir2/A2.onnx -> dir2/A2_ctx.onnx dir2/A1_ctx.onnx_MORPHIZEN.bin  : shared =1 stop=1
 
-dir1/B1.onnx -> dir1/B1_ctx.onnx dir1/B1_ctx.onnx_VITISAI.bin
+dir1/B1.onnx -> dir1/B1_ctx.onnx dir1/B1_ctx.onnx_MORPHIZEN.bin
 dir1/B2.onnx -> dir1/B2_ctx.onnx dir1/B1_ctx.onnx_VITSIAI.bin
 dir1/B3.onnx -> dir1/B3_ctx.onnx dir1/B1_ctx.onnx_VITSIAI.bin : shared=1 stop=1
 

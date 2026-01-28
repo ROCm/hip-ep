@@ -24,7 +24,7 @@ message E2ETestSessionOptionsProto {
     map<string, string> session_configs = 1;
     oneof ep_param{
         CPUEPParamProto cpu_ep_param = 2;
-        VitisAIEPParamProto vitisai_ep_param = 3;
+        MorphiZenEPParamProto morphizen_ep_param = 3;
         V2ParamProto v2_param = 4;
     }
     repeated E2ETestSessionProto session = 5; // session options for the test
@@ -33,7 +33,7 @@ message E2ETestSessionOptionsProto {
 message CPUEPParamProto {
 }
 
-message VitisAIEPParamProto {
+message MorphiZenEPParamProto {
     map<string, string> provider_options = 1;
 }
 message V2ParamProto {

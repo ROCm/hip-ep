@@ -12,7 +12,7 @@
 #include <memory>
 // Include VAIP core headers for API access
 #include "./test-coverage-wrapper.hpp"
-#include <morphizen/onnxruntime_vitisai_ep.hpp>
+#include <morphizen/onnxruntime_morphizen_ep.hpp>
 #include <vaip/vaip_ort_api.h>
 // Forward declarations for VAIP core functions
 namespace vaip_core {
@@ -65,7 +65,7 @@ TEST_F(CompileModel, T0) {
   provider_options["enable_cache_file_io_in_mem"] = "1";
   auto execution_providers = std::make_unique<vaip_core::DllSafe<
       std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>>>(
-      compile_onnx_model_vitisai_ep_with_error_handling(
+      compile_onnx_model_morphizen_ep_with_error_handling(
           model_path.u8string(), graph, provider_options, (void*)&status,
           [](void* status, int code, const char* error_message) {
             OrtStatus** ort_status = static_cast<OrtStatus**>(status);

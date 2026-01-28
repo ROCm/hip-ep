@@ -25,7 +25,7 @@ Using `tar_file_` because of the [mmap feature][136]. `tar_file_` is created upo
 
 `tar_file_->dump_to` is used to filling the EP context node attribute.
 
-#### vitisai_compile_model, the producer
+#### morphizen_compile_model, the producer
 
 There are two producers:
 

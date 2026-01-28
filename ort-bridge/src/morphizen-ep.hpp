@@ -6,19 +6,20 @@
 #include "./api-ptrs.hpp"
 #include "./ir-converter.hpp"
 #include "morphizen/vaip-ort-api-ext.hpp"
-#include "vaip/custom_op.h" // in onnxruntime/core/providers/vitisai/include
+#include "vaip/custom_op.h" // in onnxruntime/core/providers/morphizen/include
 
 namespace onnxruntime {
 struct OrtGraphWrapper;
 }
 namespace morphizen {
 
-class VitisAIEP : public OrtEp, ApiPtrs {
+class MorphiZenEP : public OrtEp, ApiPtrs {
 public:
-  VitisAIEP(ApiPtrs apis, const std::string& name,
-            const OrtKeyValuePairs* const* ep_metadata,
-            const OrtSessionOptions& session_options, const OrtLogger& logger);
-  ~VitisAIEP();
+  MorphiZenEP(ApiPtrs apis, const std::string& name,
+              const OrtKeyValuePairs* const* ep_metadata,
+              const OrtSessionOptions& session_options,
+              const OrtLogger& logger);
+  ~MorphiZenEP();
   static const char* ORT_API_CALL GetNameImpl(const OrtEp* this_ptr) noexcept;
 
   static OrtStatus* ORT_API_CALL
@@ -92,7 +93,8 @@ private:
   const OrtLogger& logger_;
   ModelUniquePtr (*ir_converter)(const ApiPtrs& api_ptrs,
                                  const OrtGraph& graph) = nullptr;
-  // copied from onnxruntime/core/providers/vitisai/vitisai_execution_provider.h
+  // copied from
+  // onnxruntime/core/providers/morphizen/morphizen_execution_provider.h
   using my_ep_t = vaip_core::DllSafe<
       std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>>;
   using my_ep_uptr_t = std::shared_ptr<my_ep_t>;
@@ -101,8 +103,8 @@ private:
   std::unordered_map<std::string, std::string> provider_options_;
   bool enable_ep_context_;
 };
-struct VitisAIEP_ComputeInfo : public OrtNodeComputeInfo {
-  vaip_core::ExecutionProvider* vitisai_ep =
-      nullptr; // Pointer to the VitisAIEP instance
+struct MorphiZenEP_ComputeInfo : public OrtNodeComputeInfo {
+  vaip_core::ExecutionProvider* morphizen_ep =
+      nullptr; // Pointer to the MorphiZenEP instance
 };
 } // namespace morphizen

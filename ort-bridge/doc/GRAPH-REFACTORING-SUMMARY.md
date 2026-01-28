@@ -23,7 +23,7 @@ Successfully refactored and separated the graph classes into dedicated files:
 
 ### 2. Updated All References
 - **ir-converter.hpp/cpp**: Updated all method signatures to use `OrtGraphWrapper`
-- **vitisai-ep.hpp/cpp**: Updated forward declarations and usage
+- **morphizen-ep.hpp/cpp**: Updated forward declarations and usage
 - **api-ptrs.hpp**: Updated forward declarations
 - **Documentation**: Updated ARRAY_LIFETIME_MANAGEMENT.md
 - **Tests**: Updated test file references
@@ -49,8 +49,8 @@ Successfully refactored and separated the graph classes into dedicated files:
 - `ort-bridge/src/graph.hpp/cpp` - New Graph class placeholder for in-memory operations
 - `ort-bridge/src/ir-converter.hpp` - Updated to use OrtGraphWrapper explicitly
 - `ort-bridge/src/ir-converter.cpp` - Updated all method signatures
-- `ort-bridge/src/vitisai-ep.hpp` - Updated forward declaration
-- `ort-bridge/src/vitisai-ep.cpp` - Updated usage and comments
+- `ort-bridge/src/morphizen-ep.hpp` - Updated forward declaration
+- `ort-bridge/src/morphizen-ep.cpp` - Updated usage and comments
 - `ort-bridge/src/api-ptrs.hpp` - Updated forward declarations
 - `ort-bridge/ort-bridge.cmake` - Updated to include both new files
 

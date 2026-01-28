@@ -4,5 +4,5 @@
  */
 #include "./cleanup.hpp"
 namespace vaip_core {
-void deinitialize_onnxruntime_vitisai_ep() { cleanup_all(); }
+void deinitialize_onnxruntime_morphizen_ep() { cleanup_all(); }
 } // namespace vaip_core

@@ -41,7 +41,7 @@ If there are any build errors:
 - Re-run the build command
 
 ## Expected Outputs:
-- `onnxruntime_vitisai_ep.dll` - Main MorphiZen library
+- `onnxruntime_morphizen_ep.dll` - Main MorphiZen library
 - `morphizen-graph-opt.exe` - Graph optimization tool
 - `morphizen-unit-tests.exe` - Unit test executable
 - `ort-bridge-test.exe` - ORT bridge tests

@@ -33,11 +33,12 @@
 *.out
 *.app
 /build/
-/build-test/
+/build-*/
 /.cache/
 /build.ninja/
 /compile_commands.json
 /config.log
+/*.log
 /tools/__pycache__/
 /.vscode/
 /MODULE.bazel.lock

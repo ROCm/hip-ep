@@ -5,9 +5,9 @@
 #pragma once
 #include "./api-ptrs.hpp"
 namespace morphizen {
-struct VitisAiEpFactory : OrtEpFactory, ApiPtrs {
-  VitisAiEpFactory(const char* ep_name, ApiPtrs apis,
-                   const OrtLogger& default_logger);
+struct MorphiZenEpFactory : OrtEpFactory, ApiPtrs {
+  MorphiZenEpFactory(const char* ep_name, ApiPtrs apis,
+                     const OrtLogger& default_logger);
 
   static const char* ORT_API_CALL
   GetNameImpl(const OrtEpFactory* this_ptr) noexcept;
@@ -41,9 +41,9 @@ struct VitisAiEpFactory : OrtEpFactory, ApiPtrs {
   //
   // COMPILE TIME (Development):
   // 1. Developer: model.compile(ep_context=True)
-  // 2. VitisAIEP processes model through backends (DPU, DD, etc.)
+  // 2. MorphiZenEP processes model through backends (DPU, DD, etc.)
   // 3. Each backend: PassContext::append_compiled_model_compatibility_info()
-  // 4. VitisAIEP::GetCompiledModelCompatibilityInfo() aggregates & serializes
+  // 4. MorphiZenEP::GetCompiledModelCompatibilityInfo() aggregates & serializes
   // to JSON
   // 5. ORT embeds JSON in EP context model file
   //

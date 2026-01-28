@@ -11,11 +11,12 @@
 // Define the constant directly instead of including internal ONNX Runtime
 // headers. This constant was originally in core/graph/constants.h (internal
 // header not available in installed ONNX Runtime packages). The string
-// "VitisAIExecutionProvider" is a stable EP identifier defined by ONNX Runtime
-// plugin EP specification and cannot change without breaking the plugin EP
-// mechanism.
+// "MorphiZenExecutionProvider" is a stable EP identifier defined by ONNX
+// Runtime plugin EP specification and cannot change without breaking the plugin
+// EP mechanism.
 namespace onnxruntime {
-constexpr const char* kVitisAIExecutionProvider = "VitisAIExecutionProvider";
+constexpr const char* kMorphiZenExecutionProvider =
+    "MorphiZenExecutionProvider";
 }
 
 namespace vaip_core {
@@ -33,7 +34,7 @@ LoggerAdapter::LoggerAdapter(std::unique_ptr<Ort::Logger> logger)
   google::SetLogDestination(google::GLOG_ERROR, "");
   google::SetLogDestination(google::GLOG_FATAL, "");
   if (!google::IsGoogleLoggingInitialized()) {
-    google::InitGoogleLogging(onnxruntime::kVitisAIExecutionProvider);
+    google::InitGoogleLogging(onnxruntime::kMorphiZenExecutionProvider);
   }
   auto ort_logging_level = logger_->GetLoggingSeverityLevel();
   switch (ort_logging_level) {

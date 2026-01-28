@@ -17,24 +17,24 @@ if(NOT TARGET onnxruntime::onnxruntime)
   message(STATUS "  Target: onnxruntime::onnxruntime")
 endif()
 
-# Search for VitisAI provider headers in vendored 3rd-party directory
+# Search for MorphiZen provider headers in vendored 3rd-party directory
 # (allows building without source tree)
-find_path(ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR
+find_path(ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR
   NAMES vaip/vaip_ort_api.h
   PATHS
-    "${CMAKE_CURRENT_SOURCE_DIR}/../3rd-party/onnxruntime-vitisai-headers"
-    "${CMAKE_SOURCE_DIR}/3rd-party/onnxruntime-vitisai-headers"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../3rd-party/onnxruntime-morphizen-headers"
+    "${CMAKE_SOURCE_DIR}/3rd-party/onnxruntime-morphizen-headers"
   NO_DEFAULT_PATH
   NO_CMAKE_FIND_ROOT_PATH
 )
 
-if(NOT ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR)
+if(NOT ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR)
   message(FATAL_ERROR "Cannot find vaip_ort_api.h. Searched in:\n"
-    "  - ${CMAKE_CURRENT_SOURCE_DIR}/../3rd-party/onnxruntime-vitisai-headers\n"
-    "  - ${CMAKE_SOURCE_DIR}/3rd-party/onnxruntime-vitisai-headers\n"
-    "Please ensure the vendored VitisAI headers are present.")
+    "  - ${CMAKE_CURRENT_SOURCE_DIR}/../3rd-party/onnxruntime-morphizen-headers\n"
+    "  - ${CMAKE_SOURCE_DIR}/3rd-party/onnxruntime-morphizen-headers\n"
+    "Please ensure the vendored MorphiZen headers are present.")
 else()
   # get directory of vaip_ort_api.h parent
-  get_filename_component(VAIP_ORT_API_DIR "${ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR}/.." DIRECTORY)
-  message(STATUS "ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR: ${ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR}")
+  get_filename_component(VAIP_ORT_API_DIR "${ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR}/.." DIRECTORY)
+  message(STATUS "ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR: ${ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR}")
 endif()

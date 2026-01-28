@@ -21,8 +21,8 @@ permissions:
   contents: read
 
 env:
-  VAI_RT_PREFIX: ${{ github.workspace }}/install
-  VAI_RT_BUILD_DIR: ${{ github.workspace }}/cmake-build
+  MORPHIZEN_PREFIX: ${{ github.workspace }}/install
+  MORPHIZEN_BUILD_DIR: ${{ github.workspace }}/cmake-build
   ONNXRUNTIME_VERSION: "1.23.2"
 
 jobs:
@@ -53,7 +53,7 @@ jobs:
         id: cache-ort
         uses: actions/cache@v4
         with:
-          path: ${{ env.VAI_RT_PREFIX }}
+          path: ${{ env.MORPHIZEN_PREFIX }}
           key: onnxruntime-linux-x64-${{ env.ONNXRUNTIME_VERSION }}
 
       # Download pre-built ONNXRuntime if cache miss
@@ -68,11 +68,11 @@ jobs:
           curl -L -o "$ARCHIVE" "$URL"
 
           # Extract to install directory
-          mkdir -p "${{ env.VAI_RT_PREFIX }}"
-          tar -xzf "$ARCHIVE" -C "${{ env.VAI_RT_PREFIX }}" --strip-components=1
+          mkdir -p "${{ env.MORPHIZEN_PREFIX }}"
+          tar -xzf "$ARCHIVE" -C "${{ env.MORPHIZEN_PREFIX }}" --strip-components=1
 
           # Create CMake config file for find_package(onnxruntime)
-          CMAKE_DIR="${{ env.VAI_RT_PREFIX }}/lib/cmake/onnxruntime"
+          CMAKE_DIR="${{ env.MORPHIZEN_PREFIX }}/lib/cmake/onnxruntime"
           mkdir -p "$CMAKE_DIR"
 
           cat > "$CMAKE_DIR/onnxruntimeConfig.cmake" << 'EOF'
@@ -91,32 +91,32 @@ jobs:
           EOF
 
           # List installed files
-          ls -la "${{ env.VAI_RT_PREFIX }}"
+          ls -la "${{ env.MORPHIZEN_PREFIX }}"
 
       - name: CMake Configure
         run: |
-          cmake -B ${{ env.VAI_RT_BUILD_DIR }} -S . \
+          cmake -B ${{ env.MORPHIZEN_BUILD_DIR }} -S . \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -Dmorphizen_ENABLE_ORT_BRIDGE=ON \
             -Dmorphizen_ENABLE_ONNX_BACKEND=ON \
             -Dmorphizen_ENABLE_MLIR_BACKEND=OFF \
             -Dmorphizen_ENABLE_UNIT_TEST=OFF \
-            -DCMAKE_PREFIX_PATH=${{ env.VAI_RT_PREFIX }}
+            -DCMAKE_PREFIX_PATH=${{ env.MORPHIZEN_PREFIX }}
 
       - name: CMake Build
         run: |
-          cmake --build ${{ env.VAI_RT_BUILD_DIR }}
+          cmake --build ${{ env.MORPHIZEN_BUILD_DIR }}
 
       - name: Verify Build Artifacts
         run: |
-          # Find the built library (location varies between Linux and Windows)
-          LIBRARY=$(find "${{ env.VAI_RT_BUILD_DIR }}" -name "libonnxruntime_vitisai_ep.so" 2>/dev/null | head -1)
+          # Find the built library (using VitisAI name for ORT compatibility)
+          LIBRARY=$(find "${{ env.MORPHIZEN_BUILD_DIR }}" -name "libonnxruntime_vitisai_ep.so" 2>/dev/null | head -1)
           if [ -n "$LIBRARY" ]; then
             echo "Build successful: $LIBRARY exists"
             ls -la "$LIBRARY"
           else
             echo "Build failed: libonnxruntime_vitisai_ep.so not found"
-            find "${{ env.VAI_RT_BUILD_DIR }}" -name "*.so" 2>/dev/null || true
+            find "${{ env.MORPHIZEN_BUILD_DIR }}" -name "*.so" 2>/dev/null || true
             exit 1
           fi

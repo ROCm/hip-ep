@@ -32,5 +32,5 @@ endif()
 #   DIRECTORY include/morphizen DESTINATION include)
 # install(
 #   DIRECTORY
-#   ${ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR}/vaip
+#   ${ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR}/vaip
 #   DESTINATION include)

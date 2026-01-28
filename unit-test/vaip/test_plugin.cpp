@@ -23,7 +23,7 @@ TEST(PluginTest, StaticHelloPlugin) {
   }
   if (0) {
     // disable this test, because we need to unload the
-    // onnxruntime_vitisai_ep.dll to cover this test.
+    // onnxruntime_morphizen_ep.dll to cover this test.
     auto plugin = vaip_core::Plugin::get("hello_plugin");
     ASSERT_TRUE(plugin == nullptr);
   }

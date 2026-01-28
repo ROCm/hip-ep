@@ -17,7 +17,7 @@ $VAIP_DIR = "$W\vaip"
 
 # Clone VAIP repository if it doesn't exist
 if (-Not (Test-Path $VAIP_DIR)) {
-    git clone git@gitenterprise.xilinx.com:VitisAI/vaip.git $VAIP_DIR
+    git clone git@gitenterprise.xilinx.com:MorphiZen/vaip.git $VAIP_DIR
 }
 Write-Host "Syncing VAIP repository"
 git -C $VAIP_DIR fetch origin ${Env:VAIP_REMOTE_BRANCH}
@@ -46,7 +46,7 @@ git --git-dir="$VAIP_DIR/.git" --work-tree="$VAIP_DIR" checkout --detach --force
 
 # Update deps.txt
 (git --git-dir="$VAIP_DIR/.git" --work-tree="$VAIP_DIR" show  "origin/${Env:VAIP_REMOTE_BRANCH}:cmake/deps.txt") `
-     -replace "(morphizen;https://gitenterprise\.xilinx\.com/VitisAI/MorphiZen\.git;)[a-f0-9]+", "`${1}$new_commit_id" |
+     -replace "(morphizen;https://gitenterprise\.xilinx\.com/MorphiZen/MorphiZen\.git;)[a-f0-9]+", "`${1}$new_commit_id" |
     Set-Content "$VAIP_DIR/cmake/deps.txt"
 
 git --git-dir="$VAIP_DIR/.git" --work-tree="$VAIP_DIR" diff cmake/deps.txt
@@ -58,7 +58,7 @@ $change_log = git --git-dir="$PROJECT_DIR/.git" --work-tree="$PROJECT_DIR" log `
     --date=short --reverse `
     --pretty=format:"  - %h %s (by %an @ %ad)" "$old_commit_id..$new_commit_id" `
     --date-order |
-    ForEach-Object { $_ -replace "#(\d+)", "VitisAI/MorphiZen#`${1}" }
+    ForEach-Object { $_ -replace "#(\d+)", "MorphiZen/MorphiZen#`${1}" }
 $change_log = $change_log -join "`n"
 $body = "Change Log`n`n$change_log`n`n"
 $msg = @"

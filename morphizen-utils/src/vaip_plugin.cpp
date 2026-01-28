@@ -235,7 +235,7 @@ extern "C" void morphizen_register_static_plugin(const char* name,
 
 void StaticPluginRegister::sync_static_plugin_into_module(
     const char* module_name) {
-  // this function try to sync with onnxruntime_vitisai_ep.dll
+  // this function try to sync with onnxruntime_morphizen_ep.dll
   auto morphizen_register_static_plugin_func =
       Plugin::get(module_name)
           ->get_method<void, const char*, const char*, void*>(

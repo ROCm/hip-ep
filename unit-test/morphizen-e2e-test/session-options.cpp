@@ -24,9 +24,9 @@ E2ETestSessionOptions::E2ETestSessionOptions(
                                          session_config.second.c_str());
   }
   // Append execution provider
-  if (proto_.has_vitisai_ep_param()) {
+  if (proto_.has_morphizen_ep_param()) {
     auto& provider_options_config =
-        proto_.vitisai_ep_param().provider_options();
+        proto_.morphizen_ep_param().provider_options();
     auto provider_options = std::unordered_map<std::string, std::string>(
         provider_options_config.begin(), provider_options_config.end());
     for (const auto& [key, value] : provider_options) {
