@@ -39,6 +39,10 @@ This project uses a fork-based workflow:
 - Never run `git push fork main` or `git push origin main`
 - Use `--force-with-lease` instead of `--force` for safer force pushes
 
+### Pull Request and Commit Message Guidelines
+
+**DO NOT mention tools/AI in commits or PRs** - keep all messages professional and tool-agnostic.
+
 ### Pull Request Description Updates
 
 Update PR description/title **when the scope, approach, or status changes meaningfully** - not for every push.
