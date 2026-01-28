@@ -11,6 +11,28 @@ This directory contains Claude Code configuration files for the MorphiZen projec
 - **`settings.json`** - Team-shared hook configuration (committed to git)
 - **`settings.local.json`** - Personal local settings (gitignored, optional)
 
+## Skills
+
+Team-shared Claude Code skills are located in `skills/`:
+
+- **`/go`** - Execute approved plans with `.clinerules/git-rules.md` enforcement
+  - Automatically invoked when user says "go", "/go", or "execute the plan"
+  - Ensures feature branch creation, conventional commits, draft PR creation, and CI monitoring
+  - See `skills/go/SKILL.md` for details
+
+- **`/status`** - Quick health check of git and PR status
+  - Automatically invoked when user says "status", "/status", or asks about current state
+  - Shows current branch, uncommitted changes, unpushed commits, and PR status
+  - Read-only operation, safe to run anytime
+  - See `skills/status/SKILL.md` for details
+
+- **`/update-branch`** - Update feature branch with latest upstream changes
+  - Automatically invoked when user says "update-branch", "/update-branch", or wants to sync with main
+  - Fetches from origin, rebases onto origin/main, force-pushes to fork
+  - Handles conflicts intelligently (auto-resolve safe cases, guide for complex conflicts)
+  - Safety checks: blocks on main branch, requires clean working directory
+  - See `skills/update-branch/SKILL.md` for details
+
 ## Hook Enforcement System
 
 The `settings.json` file contains PreToolUse hooks that enforce the git workflow rules defined in `.clinerules/git-rules.md`. These hooks run automatically before Claude Code executes certain tool operations.
