@@ -89,8 +89,13 @@ Update PR description/title **when the scope, approach, or status changes meanin
 1. Configure with CMake:
    ```bash
    cmake -S . -B ../../build/$(basename $PWD) \
+     -DBUILD_SHARED_LIBS=OFF \
+     "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded\$<\$<CONFIG:Debug>:Debug>" \
      -DCMAKE_BUILD_TYPE=Debug \
-     -DCMAKE_PREFIX_PATH=../../local
+     -DCMAKE_PREFIX_PATH=../../local \
+     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+     -Dmorphizen_ENABLE_ORT_BRIDGE=ON \
+     --fresh
    ```
 
 2. Build the project:
