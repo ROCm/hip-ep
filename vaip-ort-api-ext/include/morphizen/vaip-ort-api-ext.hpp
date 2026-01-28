@@ -13,9 +13,9 @@
 #  pragma GCC diagnostic ignored "-Wunused-variable"
 #  pragma GCC diagnostic ignored "-Wunused-but-set-variable"
 #endif
-#include <core/session/onnxruntime_c_api.h>
-#include <core/session/onnxruntime_cxx_api.h>
-#include <core/session/onnxruntime_lite_custom_op.h>
+#include <onnxruntime_c_api.h>
+#include <onnxruntime_cxx_api.h>
+#include <onnxruntime_lite_custom_op.h>
 #undef ORT_API_MANUAL_INIT
 
 #include <vaip/vaip_ort_api.h>

@@ -35,7 +35,7 @@
 #include <sstream>
 #include <set>
 #include "morphizen/encryption.hpp"
-#include "core/session/onnxruntime_session_options_config_keys.h"
+#include <onnxruntime_session_options_config_keys.h>
 #include "morphizen/mem_binary.hpp"
 #include "morphizen/config_reader.hpp"
 // clang-format on

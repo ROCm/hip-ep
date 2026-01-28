@@ -10,15 +10,15 @@ target_sources(${LIB_NAME} PUBLIC
   ${CMAKE_CURRENT_LIST_DIR}/include/morphizen/vaip-ort-api-ext.hpp
 )
 target_include_directories(${LIB_NAME} PUBLIC
-  $<BUILD_INTERFACE:${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime>
-  $<BUILD_INTERFACE:${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime/core/session>
   $<BUILD_INTERFACE:${VAIP_ORT_API_DIR}>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
 target_compile_features(${LIB_NAME} PUBLIC cxx_std_17)
 target_compile_options(${LIB_NAME} PRIVATE ${MORPHIZEN_COMPILER_OPTIONS})
-target_link_libraries(${LIB_NAME} PUBLIC
+target_link_libraries(${LIB_NAME}
+  PUBLIC
+  onnxruntime::onnxruntime
   Microsoft.GSL::GSL
   glog::glog
   PRIVATE

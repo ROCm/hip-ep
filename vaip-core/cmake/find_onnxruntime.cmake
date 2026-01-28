@@ -3,24 +3,36 @@
 # ** Licensed under the MIT License.
 ##
 
-# Search for VitisAI provider headers in multiple locations:
-# 1. Vendored headers in 3rd-party (allows building without source tree)
-# 2. ONNXRuntime source tree (for development with source)
+# Find installed ONNX Runtime package instead of using source tree.
+# The installed package provides onnxruntime::onnxruntime target with
+# include directories and libraries configured via INTERFACE properties.
+#
+# Targets should link against onnxruntime::onnxruntime directly:
+#   target_link_libraries(my_target PUBLIC onnxruntime::onnxruntime)
+# Include directories propagate automatically - no manual management needed.
+
+if(NOT TARGET onnxruntime::onnxruntime)
+  find_package(onnxruntime REQUIRED)
+  message(STATUS "ONNX Runtime found via find_package")
+  message(STATUS "  Target: onnxruntime::onnxruntime")
+endif()
+
+# Search for VitisAI provider headers in vendored 3rd-party directory
+# (allows building without source tree)
 find_path(ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR
   NAMES vaip/vaip_ort_api.h
   PATHS
+    "${CMAKE_CURRENT_SOURCE_DIR}/../3rd-party/onnxruntime-vitisai-headers"
     "${CMAKE_SOURCE_DIR}/3rd-party/onnxruntime-vitisai-headers"
-    "${ONNXRUNTIME_SOURCE_TREE_DIR}/onnxruntime/core/providers/vitisai/include"
-    "${onnxruntime_SOURCE_DIR}/../onnxruntime/core/providers/vitisai/include"
   NO_DEFAULT_PATH
   NO_CMAKE_FIND_ROOT_PATH
 )
 
 if(NOT ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR)
   message(FATAL_ERROR "Cannot find vaip_ort_api.h. Searched in:\n"
+    "  - ${CMAKE_CURRENT_SOURCE_DIR}/../3rd-party/onnxruntime-vitisai-headers\n"
     "  - ${CMAKE_SOURCE_DIR}/3rd-party/onnxruntime-vitisai-headers\n"
-    "  - ${ONNXRUNTIME_SOURCE_TREE_DIR}/onnxruntime/core/providers/vitisai/include\n"
-    "Either the vendored headers are missing or ONNXRuntime source tree is not available.")
+    "Please ensure the vendored VitisAI headers are present.")
 else()
   # get directory of vaip_ort_api.h parent
   get_filename_component(VAIP_ORT_API_DIR "${ORT_CORE_PROVIDERS_VITISAI_INCLUDE_DIR}/.." DIRECTORY)

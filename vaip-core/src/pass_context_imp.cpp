@@ -3,10 +3,10 @@
  * Licensed under the MIT License.
  */
 #define _CRT_SECURE_NO_WARNINGS
-#include "core/session/onnxruntime_session_options_config_keys.h"
 #include <fstream>
 #include <glog/logging.h>
 #include <google/protobuf/util/json_util.h>
+#include <onnxruntime_session_options_config_keys.h>
 #include <stdexcept>
 
 #ifdef _WIN32

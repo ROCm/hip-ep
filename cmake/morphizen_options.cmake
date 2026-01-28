@@ -54,11 +54,6 @@ option(morphizen_ENABLE_UNIT_TEST "enable vaip unit test or not" ${morphizen_ENA
 #     * test_const_data.cpp (unit-test/vaip/test_const_data.cpp)
 option(morphizen_ENABLE_BOOST "enable Boost dependency for executables and unit tests" OFF)
 #
-# to build MorphiZen, we need to download source code of onnxruntime
-# and build it along with MorphiZen
-#
-set(ONNXRUNTIME_SOURCE_TREE_DIR "${CMAKE_SOURCE_DIR}/../onnxruntime" CACHE PATH "Path to the root of the ONNX Runtime source tree")
-#
 # it is possible to emebed xclbin files in the binary, assume the xclbin files are in the directory
 #
 # the repo now is downloaded by default, do not use it unless set explicitly
@@ -105,7 +100,6 @@ message(STATUS "MorphiZen OPTIONS:")
 message(STATUS "  morphizen_ONNXRUNTIME_VITISAI_EP_TARGET : ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET}")
 message(STATUS "  morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC : ${morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC}")
 message(STATUS "  VAIP_EMBEDDED_RESOURCE_PATH : ${VAIP_EMBEDDED_RESOURCE_PATH}")
-message(STATUS "  ONNX_RUNTIME_SOURCE_TREE_DIR : ${ONNXRUNTIME_SOURCE_TREE_DIR}")
 message(STATUS "  morphizen_WITH_VAIP_CONFIG_FILE : ${morphizen_WITH_VAIP_CONFIG_FILE}")
 message(STATUS "  VAIP_JSON_CONFIG_FILE : ${VAIP_JSON_CONFIG_FILE}")
 message(STATUS "  VAIP_VERSEION_INFO_FILE : ${VAIP_VERSEION_INFO_FILE}")

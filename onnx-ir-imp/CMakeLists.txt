@@ -43,22 +43,6 @@ target_sources(${LIB_NAME}
 ## compile time dependency
 set(ORT_INC  "")
 list(APPEND ORT_INC
-  # TODO: it is not a good pratice, we should use
-  #      #include <core/session/onnxruntime_c_api.h>
-  # instead of
-  #      #include <onnxruntime_c_api.h>
-  #
-  # however, too many source code use the later, so we add it to search path
-  #
-  # if morphizen users need to use pre-installed version of morphizen,
-  # it should use the following in their CMakeLists.txt
-  #  #    find_package(onnxruntime CONFIG REQUIRED)
-  #    target_link_libraries (<YOUR-TARGET> PRIVATE morphizen::morphizen-core-static)
-  #
-  # then use #include <morphizen/onnxruntime_api.h> instread.
-  #
-  ${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime
-  ${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime/core/session
   ${VAIP_ORT_API_DIR}
 )
 set_source_files_properties(src/vaip-ort-api.cpp
@@ -79,6 +63,7 @@ target_compile_options(${LIB_NAME}
   ${MORPHIZEN_COMPILER_OPTIONS})
 target_link_libraries(${LIB_NAME}
   PRIVATE
+  onnxruntime::onnxruntime
   vaip-ort-api-ext
   Microsoft.GSL::GSL
   onnx
