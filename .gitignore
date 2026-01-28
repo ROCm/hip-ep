@@ -45,6 +45,8 @@
 /.clwb
 /.idea
 /.claude/
+!/.claude/settings.json
+!/.claude/README.md
 /.cline_storage/
 /.clinerules/*
 !/.clinerules/workflows/
