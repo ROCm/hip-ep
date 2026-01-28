@@ -157,23 +157,6 @@ target_include_directories(${LIB_NAME}
   PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
-  $<BUILD_INTERFACE:${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime>
-  # TODO: it is not a good pratice, we should use
-  #      #include <core/session/onnxruntime_c_api.h>
-  # instead of
-  #      #include <onnxruntime_c_api.h>
-  #
-  # however, too many source code use the later, so we add it to search path
-  #
-  # if morphizen users need to use pre-installed version of morphizen,
-  # it should use the following in their CMakeLists.txt
-  #
-  #    find_package(onnxruntime CONFIG REQUIRED)
-  #    target_link_libraries (<YOUR-TARGET> PRIVATE morphizen::morphizen-core-static)
-  #
-  # then use #include <morphizen/onnxruntime_api.h> instread.
-  #
-  $<BUILD_INTERFACE:${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime/core/session>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
   $<BUILD_INTERFACE:${VAIP_ORT_API_DIR}>
   PRIVATE
@@ -182,9 +165,22 @@ target_include_directories(${LIB_NAME}
   ${CMAKE_CURRENT_BINARY_DIR}  # For generated version_info_config.h
 )
 
-set(MorphiZen_DEPS protobuf::libprotobuf
+# Link against onnxruntime::onnxruntime target directly.
+# This automatically propagates include directories via INTERFACE_INCLUDE_DIRECTORIES,
+# eliminating the need for manual include directory management.
+# The target is provided by find_package(onnxruntime) from installed ONNX Runtime package.
+set(MorphiZen_DEPS
+  onnxruntime::onnxruntime
+  protobuf::libprotobuf
   vaip_io
-  glog::glog morphizen::encryption morphizen::mem_binary ZLIB::ZLIB Microsoft.GSL::GSL morphizen-utils vaip-ort-api-ext)
+  glog::glog
+  morphizen::encryption
+  morphizen::mem_binary
+  ZLIB::ZLIB
+  Microsoft.GSL::GSL
+  morphizen-utils
+  vaip-ort-api-ext
+)
 target_link_libraries(${LIB_NAME} PUBLIC ${MorphiZen_DEPS})
 target_compile_definitions(${LIB_NAME}
   PUBLIC

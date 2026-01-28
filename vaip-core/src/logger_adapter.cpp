@@ -5,9 +5,19 @@
 #define ORT_API_MANUAL_INIT
 //
 #include "./logger_adapter.hpp"
-#include "core/graph/constants.h"
 #include "onnxruntime_cxx_api.h"
 #include <cassert>
+
+// Define the constant directly instead of including internal ONNX Runtime
+// headers. This constant was originally in core/graph/constants.h (internal
+// header not available in installed ONNX Runtime packages). The string
+// "VitisAIExecutionProvider" is a stable EP identifier defined by ONNX Runtime
+// plugin EP specification and cannot change without breaking the plugin EP
+// mechanism.
+namespace onnxruntime {
+constexpr const char* kVitisAIExecutionProvider = "VitisAIExecutionProvider";
+}
+
 namespace vaip_core {
 
 LoggerAdapter::LoggerAdapter(std::unique_ptr<Ort::Logger> logger)

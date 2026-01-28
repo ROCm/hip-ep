@@ -21,8 +21,6 @@ add_executable(${TEST_EXE_NAME}
 
 target_include_directories(${TEST_EXE_NAME}
     PRIVATE
-    $<BUILD_INTERFACE:${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime>
-    $<BUILD_INTERFACE:${ONNXRUNTIME_SOURCE_TREE_DIR}/include/onnxruntime/core/session>
     $<BUILD_INTERFACE:${VAIP_ORT_API_DIR}>
     $<INSTALL_INTERFACE:../include>
 )
