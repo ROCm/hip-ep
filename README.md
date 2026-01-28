@@ -14,21 +14,33 @@ Licensed under the MIT License.
 - **Rewrite Rules**: Apply rule-based optimizations to enhance model inference and deployment.
 
 
+## Prerequisites
+
+- CMake 3.15 or higher
+- C++17 compatible compiler (GCC, Clang, or MSVC)
+- Git
+
 ## Installation
 
-Clone the repository:
+### Basic Build
+
+Clone the repository and build:
 
 ```bash
-# clone MorphiZen
+git clone ../MorphiZen
 cd MorphiZen
-git submodule upgrade --init
+git submodule update --init --recursive
 mkdir build
 cd build
 cmake ..
-cmake --build
+cmake --build .
 ```
 
-```
- cmake -DCMAKE_CONFIGURATION_TYPES=Release -B$BUILD/morphizen -S $W/MorphiZen/ -DCMAKE_INSTALL_PREFIX=$PREFIX --fresh '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>'
+### Windows MSVC Build
 
- ```
+For Windows with MSVC and static runtime linking:
+
+```bash
+cmake -DCMAKE_CONFIGURATION_TYPES=Release -B $BUILD/morphizen -S $W/MorphiZen/ -DCMAKE_INSTALL_PREFIX=$PREFIX --fresh '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>'
+cmake --build $BUILD/morphizen --config Release
+```
