@@ -78,32 +78,24 @@ Update PR description/title **when the scope, approach, or status changes meanin
 
 ## Build Configuration and Workflow
 
-### Build Settings (Remember these):
+### Build Settings:
+- **Build Directory**: `../../build/$(basename $PWD)` (project-specific build directory)
+- **Install Prefix**: `../../local` (shared install directory for dependencies)
 - **Build Type**: Debug
-- **Build Directory**: `../build` (relative to source directory)
-- **Install Prefix**: `../local` (relative to source directory)
-- **Environment Variables**:
-  - `VAI_RT_WORKSPACE` - Parent of source directory (typically `../..` from MorphiZen)
-  - `VAI_RT_BUILD_DIR` - Build directory (typically `../build`)
-  - `VAI_RT_PREFIX` - Install prefix (typically `../local`)
-- **CMake Preset**: "Morphizen Ninja"
+- **Dependencies**: ONNX Runtime and LLVM are pre-built and installed in `../../local`
 
 ### Build Steps:
-1. Set environment variables (from the MorphiZen source directory):
-   ```powershell
-   $env:VAI_RT_WORKSPACE = (Resolve-Path "../..").Path
-   $env:VAI_RT_BUILD_DIR = (Resolve-Path "../build").Path
-   $env:VAI_RT_PREFIX = (Resolve-Path "../local").Path
+
+1. Configure with CMake:
+   ```bash
+   cmake -S . -B ../../build/$(basename $PWD) \
+     -DCMAKE_BUILD_TYPE=Debug \
+     -DCMAKE_PREFIX_PATH=../../local
    ```
 
-2. Configure with CMake preset:
-   ```powershell
-   cmake --preset "Morphizen Ninja"
-   ```
-
-3. Build the project:
-   ```powershell
-   cmake --build "../build/morphizen.ninja" --config Debug --parallel
+2. Build the project:
+   ```bash
+   cmake --build ../../build/$(basename $PWD) --config Debug --parallel
    ```
 
 **For Git Bash Users**: Launch bash from an MSVC Developer Command Prompt before starting Claude Code to ensure the MSVC environment is available.
@@ -116,21 +108,19 @@ Update PR description/title **when the scope, approach, or status changes meanin
 - Various other tools and libraries
 
 ### MSVC Environment Setup (IMPORTANT):
-If the build fails with errors like "Cannot open include file: 'cstddef'" or other missing standard headers, you need to initialize the Visual Studio environment first:
+If the build fails with errors like "Cannot open include file: 'cstddef'" or other missing standard headers, you need to initialize the Visual Studio environment first.
 
-```cmd
-cmd /c "call ""C:\msvsn2022\VC\Auxiliary\Build\vcvars64.bat"" && cd /d %CD% && cmake --build ""../build/morphizen.ninja"" --config Debug --parallel"
+For bash:
+```bash
+cmd /c "call \"\"C:\\msvsn2022\\VC\\Auxiliary\\Build\\vcvars64.bat\"\" && cd /d %CD% && cmake --build \"\"../../build/$(basename $PWD)\"\" --config Debug --parallel"
 ```
 
 This sets up the MSVC compiler environment including standard library include paths, Windows SDK paths, and required compiler environment variables.
 
 ### Verifying Build Outputs:
-Use PowerShell cmdlets to list build outputs:
-```powershell
-# CORRECT - use Get-ChildItem with relative path
-Get-ChildItem "../build/morphizen.ninja/bin" -Name
-
-# WRONG - do NOT use CMD-style dir /b
+```bash
+# List executables and libraries
+ls ../../build/$(basename $PWD)/bin/
 ```
 
 ---
