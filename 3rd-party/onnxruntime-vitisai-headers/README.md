@@ -32,8 +32,6 @@ The following headers are vendored from ONNXRuntime:
 - `vaip_gsl.h` - Guidelines Support Library types
 - `vaip_ort_api.h` - Main VAIP ORT API header
 
-### XIR Ops Headers (vaip/xir_ops/)
-- `xir_ops_defs.h` - XIR operations definitions
 
 ## Updating Headers
 
@@ -50,8 +48,6 @@ If you need to update these headers to a newer ONNXRuntime version:
    cp onnxruntime/core/providers/vitisai/include/vaip/*.h \
       ../Morphizen/3rd-party/onnxruntime-vitisai-headers/vaip/
 
-   cp onnxruntime/core/providers/vitisai/include/vaip/xir_ops/*.h \
-      ../Morphizen/3rd-party/onnxruntime-vitisai-headers/vaip/xir_ops/
    ```
 
 3. Update this README with the new commit information:

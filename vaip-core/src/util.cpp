@@ -40,45 +40,6 @@ VAIP_DLL_SPEC std::unique_ptr<int> scale_to_fix_point(float scale) {
     return std::make_unique<int>();
 }
 
-std::string convert_to_xir_op_type(const std::string& domain,
-                                   const std::string& op_type) {
-  if (domain == "com.xilinx") {
-    if (op_type.size() >= 4u && op_type.substr(op_type.size() - 4u) == "_fix") {
-      return op_type.substr(0u, op_type.size() - 4u) + "-fix";
-    } else if (op_type == "transposed_conv2d") {
-      return "transposed-conv2d";
-    } else if (op_type == "transposed_conv3d") {
-      return "transposed-conv3d";
-    } else if (op_type == "leaky_relu") {
-      return "leaky-relu";
-    } else if (op_type == "depthwise_conv2d") {
-      return "depthwise-conv2d";
-    } else if (op_type == "depthwise_conv1d") {
-      return "depthwise-conv1d";
-    } else if (op_type == "hard_sigmoid") {
-      return "hard-sigmoid";
-    } else if (op_type == "hard_softmax") {
-      return "hard-softmax";
-    } else if (op_type == "pixel_shuffle") {
-      return "pixel-shuffle";
-    } else if (op_type == "quantize_linear") {
-      return "quantize-linear";
-    } else if (op_type == "dequantize_linear") {
-      return "dequantize-linear";
-    } else if (op_type == "quantize_linear_int8") {
-      return "quantize-linear-int8";
-    } else if (op_type == "quantize_linear_uint8") {
-      return "quantize-linear-uint8";
-    } else if (op_type == "dequantize_linear_int8") {
-      return "dequantize-linear-int8";
-    } else if (op_type == "dequantize_linear_uint8") {
-      return "dequantize_linear_uint8";
-    }
-    return op_type;
-  }
-  return domain + ":" + op_type;
-}
-
 static std::vector<std::string> split_path(const char* env_name) {
   std::string path;
 #ifdef _WIN32

@@ -32,7 +32,6 @@ add_executable(${TEST_EXE_NAME}
   vaip/test_tar_entry.cpp
   vaip/test_tar_file.cpp
   vaip/test_file_stream.cpp
-  vaip/test_op_def.cpp
   vaip/test_mmap_file.cpp
   vaip/test_ep_shared_context_workspace.cpp
   vaip/test_op_invoker.cpp
