@@ -35,9 +35,6 @@ template <typename T> std::string container_as_string(const T& container) {
   return str.str();
 }
 
-VAIP_DLL_SPEC std::string convert_to_xir_op_type(const std::string& domain,
-                                                 const std::string& op_type);
-
 std::string find_file_in_path(const std::string& file, const char* env_name,
                               bool required);
 std::string slurp(const char* filename);

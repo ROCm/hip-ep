@@ -18,7 +18,6 @@
 #include "./cleanup.hpp"
 #include "./logger_adapter.hpp"
 #include "./stat.hpp"
-#include "./xir_ops/xir_ops_defs.hpp"
 #include "morphizen/config_reader.hpp"
 #include "morphizen/env_config.hpp"
 #include "morphizen/onnxruntime_api.hpp"
@@ -67,7 +66,6 @@ update_log_level(const onnxruntime::ProviderOptions& session_option) {
   SetGlogMinLogLevel(log_level);
 }
 
-extern void* BuildInOPs__hook; // prevent xir_opes_defs.obj symbol gc
 extern "C" {
 class OpHolder {
   struct Opdef {
@@ -194,10 +192,6 @@ intialize_op_defs_old(std::vector<OrtCustomOpDomain*>& contrib_domains,
   vaip_core::get_vitis_ep_custom_ops().insert("com.microsoft::QuantizeLinear");
 }
 static void intialize_op_defs(std::vector<OrtCustomOpDomain*>& ret_domain) {
-  LOG_IF(INFO, BuildInOPs__hook == nullptr)
-      << " built in ops empty"; // don't modify it
-  // ret_domain.emplace_back(vaip_core::register_xir_ops());
-
   // This function is used to initialize the op_def_map
   typedef void (*register_ops_t)(void*, add_op_t);
   auto& op_holder = get_global_op_holder();
