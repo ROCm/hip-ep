@@ -68,4 +68,4 @@ target_link_libraries(${LIB_NAME} PRIVATE
   )
 set_target_properties(${LIB_NAME} PROPERTIES
   OUTPUT_NAME "${LIB_NAME}")
-target_link_libraries(${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${LIB_NAME}>")
+target_link_libraries(${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${LIB_NAME}>")

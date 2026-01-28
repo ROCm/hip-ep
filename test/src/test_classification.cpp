@@ -41,18 +41,17 @@ std::wstring_convert<convert_t, wchar_t> strconverter;
 
 #include "util/env_config.hpp"
 
-DEF_ENV_PARAM_2(VITISAI_EP_JSON_CONFIG, "", std::string);
+DEF_ENV_PARAM_2(MORPHIZEN_EP_JSON_CONFIG, "", std::string);
 DEF_ENV_PARAM_2(XLNX_USE_CACHE_KEY, "", std::string);
 DEF_ENV_PARAM_2(XLNX_USE_CACHE_DIR, "", std::string);
 DEF_ENV_PARAM(XLNX_ENABLE_CACHE_CONTEXT, "0");
 DEF_ENV_PARAM_2(CACHE_CONTEXT_EMBEDED_MODE, "1", std::string);
 DEF_ENV_PARAM_2(XLNX_ENABLE_EP_SHARED_CONTEXT, "", std::string);
 DEF_ENV_PARAM_2(ENABLE_CACHE_FILE_IO_IN_MEM, "", std::string);
-DEF_ENV_PARAM(USE_ORT_API_2_0, "1");
-DEF_ENV_PARAM_2(MORPHIZEN_VITISAI_EP, "onnxruntime_vitisai_ep.dll", std::string);
+DEF_ENV_PARAM_2(MORPHIZEN_EP_DLL, "onnxruntime_morphizen_ep.dll", std::string);
 DEF_ENV_PARAM_2(MORPHIZEN_ORT_BRIDGE_BACKEND, "mlir-backend", std::string);
 DEF_ENV_PARAM_2(ORT_LOG_LEVEL, "error", std::string);
-DEF_ENV_PARAM_2(EP_KREGISTERATIONNAME, "VitisAIExecutionProvider", std::string);
+DEF_ENV_PARAM_2(EP_KREGISTERATIONNAME, "MorphiZenExecutionProvider", std::string);
 
 #define CHECK(expr, msg)                                                       \
   do {                                                                         \
@@ -72,7 +71,7 @@ static void usage() {
   std::cout << "Usage: test_classification [options] <model.onnx> <input_file>\n"
             << "Options:\n"
             << "  -k <num>     Top-K results to display (default: 5)\n"
-            << "  -n           Disable VitisAI EP (use CPU)\n"
+            << "  -n           Disable MorphiZen EP (use CPU)\n"
             << "  -p           Enable ONNX profiler\n"
             << "  -l <file>    Label file (one label per line)\n"
             << "  -h           Show this help message\n"
@@ -189,33 +188,33 @@ void run_classification(const std::filesystem::path& model_path,
   Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "test_classification");
   std::vector<Ort::ConstEpDevice> selected_devices = {};
   
-  if (ENV_PARAM(USE_ORT_API_2_0)) {
-    auto library_path = std::filesystem::u8path(ENV_PARAM(MORPHIZEN_VITISAI_EP));
-    if (!std::filesystem::exists(library_path)) {
-      std::cerr << "Execution provider library not found: " << library_path
-                << std::endl;
-      abort();
-    }
-    std::cout << "Using ORT API 2.0 create session with VitisAI EP, "
-                 "RegisterExecutionProviderLibrary: "
-              << ENV_PARAM(MORPHIZEN_VITISAI_EP) << " ort_bridge_backend: " 
-              << ENV_PARAM(MORPHIZEN_ORT_BRIDGE_BACKEND) << std::endl;
-    auto status = Ort::GetApi().RegisterExecutionProviderLibrary(
-        env, kRegistrationName.c_str(), library_path.c_str());
-    CHECK(status == nullptr,
-          std::string("RegisterExecutionProviderLibrary failed: status = ") + 
-          Ort::GetApi().GetErrorMessage(status));
-
-    for (const auto& device : env.GetEpDevices()) {
-      if (device.EpName() == kRegistrationName) {
-        std::cout << "-----Selected EP device: " << device.EpName()
-                  << " from vendor: " << device.EpVendor() << std::endl;
-        selected_devices.emplace_back(device);
-      }
-    }
-    CHECK(!selected_devices.empty(),
-          "No devices found for EP: " + kRegistrationName);
+  
+  auto library_path = std::filesystem::u8path(ENV_PARAM(MORPHIZEN_EP_DLL));
+  if (!std::filesystem::exists(library_path)) {
+    std::cerr << "Execution provider library not found: " << library_path
+              << std::endl;
+    abort();
   }
+  std::cout << "Using ORT API 2.0 create session with MorphiZen EP, "
+             "RegisterExecutionProviderLibrary: "
+            << ENV_PARAM(MORPHIZEN_EP_DLL) << " ort_bridge_backend: " 
+            << ENV_PARAM(MORPHIZEN_ORT_BRIDGE_BACKEND) << std::endl;
+  auto status_0 = Ort::GetApi().RegisterExecutionProviderLibrary(
+      env, kRegistrationName.c_str(), library_path.c_str());
+  CHECK(status_0 == nullptr,
+        std::string("RegisterExecutionProviderLibrary failed: status = ") +
+        Ort::GetApi().GetErrorMessage(status_0));
+
+  for (const auto& device : env.GetEpDevices()) {
+    if (device.EpName() == kRegistrationName) {
+      std::cout << "-----Selected EP device: " << device.EpName()
+                << " from vendor: " << device.EpVendor() << std::endl;
+      selected_devices.emplace_back(device);
+    }
+  }
+  CHECK(!selected_devices.empty(),
+        "No devices found for EP: " + kRegistrationName);
+  
   
   Ort::SessionOptions session_options;
   session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
@@ -232,11 +231,11 @@ void run_classification(const std::filesystem::path& model_path,
   
   if (enable_ep) {
     std::unordered_map<std::string, std::string> provider_options;
-    
-    std::string config_file = ENV_PARAM(VITISAI_EP_JSON_CONFIG);
+
+    std::string config_file = ENV_PARAM(MORPHIZEN_EP_JSON_CONFIG);
     if (!config_file.empty()) {
       provider_options["config_file"] = config_file;
-      std::cout << "Using VitisAI EP config: " << config_file << std::endl;
+      std::cout << "Using MorphiZen EP config: " << config_file << std::endl;
     }
     
     if (!ENV_PARAM(XLNX_USE_CACHE_KEY).empty()) {
@@ -260,12 +259,10 @@ void run_classification(const std::filesystem::path& model_path,
       }
     }
     
-    if (ENV_PARAM(USE_ORT_API_2_0)) {
-      session_options.AppendExecutionProvider_V2(env, selected_devices,
+   
+    session_options.AppendExecutionProvider_V2(env, selected_devices,
                                                  provider_options);
-    } else {
-      session_options.AppendExecutionProvider_VitisAI(provider_options);
-    }
+    
   }
   
   std::unique_ptr<Ort::Session> session;
@@ -322,12 +319,12 @@ void run_classification(const std::filesystem::path& model_path,
     exit(-1);
   }
   
-  if (ENV_PARAM(USE_ORT_API_2_0)) {
-    auto status = (Ort::GetApi().UnregisterExecutionProviderLibrary(
-        env, kRegistrationName.c_str()));
-    (void)status;
-    std::cout << "Unregistered EP library: " << ENV_PARAM(MORPHIZEN_VITISAI_EP) << std::endl;
-  }
+  
+  auto status = (Ort::GetApi().UnregisterExecutionProviderLibrary(
+      env, kRegistrationName.c_str()));
+  (void)status;
+  std::cout << "Unregistered EP library: " << ENV_PARAM(MORPHIZEN_EP_DLL) << std::endl;
+  
 }
 
 int main(int argc, char* argv[]) {
