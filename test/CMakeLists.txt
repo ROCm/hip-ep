@@ -50,13 +50,11 @@ if(MSVC)
       ${CMAKE_COMMAND} -E echo "COPYING ..."
       $<TARGET_FILE:onnxruntime::onnxruntime>
       $<TARGET_FILE_DIR:onnxruntime::onnxruntime>/onnxruntime_providers_shared.dll
-      $<TARGET_FILE_DIR:onnxruntime::onnxruntime>/onnxruntime_providers_vitisai.dll
       $<TARGET_FILE_DIR:test_onnx_runner>
     COMMAND
       ${CMAKE_COMMAND} -E copy_if_different
       $<TARGET_FILE:onnxruntime::onnxruntime>
       $<TARGET_FILE_DIR:onnxruntime::onnxruntime>/onnxruntime_providers_shared.dll
-      $<TARGET_FILE_DIR:onnxruntime::onnxruntime>/onnxruntime_providers_vitisai.dll
       $<TARGET_FILE_DIR:test_onnx_runner>
   )
 endif(MSVC)
@@ -66,7 +64,7 @@ string(APPEND ENVS "\nMORPHIZEN_DEBUG_HIPDNN=1")
 string(APPEND ENVS "\nMORPHIZEN_DEBUG_PLUGIN=1")
 string(APPEND ENVS "\nMORPHIZEN_DEBUG_TAR_CACHE=1")
 string(APPEND ENVS "\nXLNX_ENABLE_EP_SHARED_CONTEXT=1")
-string(APPEND ENVS "\nVITISAI_EP_JSON_CONFIG=${CMAKE_SOURCE_DIR}/etc/vaip_config.json")
+string(APPEND ENVS "\nMORPHIZEN_EP_JSON_CONFIG=${CMAKE_SOURCE_DIR}/etc/vaip_config.json")
 string(APPEND ENVS "\nXLNX_USE_CACHE_DIR=C:/Temp/")
 string(APPEND ENVS "\nXLNX_USE_CACHE_KEY=onnx-hipdnn-ep")
 string(APPEND ENVS "\nCACHE_CONTEXT_EMBEDED_MODE=0")
@@ -82,7 +80,7 @@ set_target_properties(test_onnx_runner
       VS_DEBUGGER_COMMAND_ARGUMENTS "${morphizen_BINARY_DIR}/unit-test/pt_resnet50.onnx"
       VS_DEBUGGER_ENVIRONMENT "${ENVS}"
   )
-add_dependencies(test_onnx_runner ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET})
+add_dependencies(test_onnx_runner ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET})
 
 add_test(NAME test_generate_ep_context_model
   COMMAND ${CMAKE_COMMAND} -E env
@@ -92,7 +90,7 @@ add_test(NAME test_generate_ep_context_model
       "CACHE_CONTEXT_EMBEDED_MODE=0"
       "XLNX_ENABLE_EP_SHARED_CONTEXT=1"
       "XLNX_ENABLE_CACHE=0"
-      "VITISAI_EP_JSON_CONFIG=${CMAKE_SOURCE_DIR}/etc/vaip_config.json"
+      "MORPHIZEN_EP_JSON_CONFIG=${CMAKE_SOURCE_DIR}/etc/vaip_config.json"
       $<TARGET_FILE:test_onnx_runner>
       ${morphizen_BINARY_DIR}/unit-test/pt_resnet50.onnx
   WORKING_DIRECTORY ${morphizen_BINARY_DIR}/unit-test
@@ -110,7 +108,7 @@ add_test(NAME test_deploy_ep_context_model
   COMMAND ${CMAKE_COMMAND} -E env
         "DEBUG_LOG_LEVEL=info"
         "XLNX_ONNX_EP_VERBOSE=2"
-        "VITISAI_EP_JSON_CONFIG=${CMAKE_SOURCE_DIR}/etc/vaip_config.json"
+        "MORPHIZEN_EP_JSON_CONFIG=${CMAKE_SOURCE_DIR}/etc/vaip_config.json"
         $<TARGET_FILE:test_onnx_runner>
         ${morphizen_BINARY_DIR}/unit-test/pt_resnet50_ctx.onnx
   WORKING_DIRECTORY ${morphizen_BINARY_DIR}/unit-test
@@ -157,13 +155,11 @@ if(MSVC)
       ${CMAKE_COMMAND} -E echo "COPYING onnxruntime DLLs..."
       $<TARGET_FILE:onnxruntime::onnxruntime>
       $<TARGET_FILE_DIR:onnxruntime::onnxruntime>/onnxruntime_providers_shared.dll
-      $<TARGET_FILE_DIR:onnxruntime::onnxruntime>/onnxruntime_providers_vitisai.dll
       $<TARGET_FILE_DIR:test_classification>
     COMMAND
       ${CMAKE_COMMAND} -E copy_if_different
       $<TARGET_FILE:onnxruntime::onnxruntime>
       $<TARGET_FILE_DIR:onnxruntime::onnxruntime>/onnxruntime_providers_shared.dll
-      $<TARGET_FILE_DIR:onnxruntime::onnxruntime>/onnxruntime_providers_vitisai.dll
       $<TARGET_FILE_DIR:test_classification>
   )
 endif(MSVC)
@@ -174,7 +170,7 @@ string(APPEND CLASSIFICATION_ENVS "\nMORPHIZEN_DEBUG_HIPDNN=1")
 string(APPEND CLASSIFICATION_ENVS "\nMORPHIZEN_DEBUG_PLUGIN=1")
 string(APPEND CLASSIFICATION_ENVS "\nMORPHIZEN_DEBUG_TAR_CACHE=1")
 string(APPEND CLASSIFICATION_ENVS "\nXLNX_ENABLE_EP_SHARED_CONTEXT=1")
-string(APPEND CLASSIFICATION_ENVS "\nVITISAI_EP_JSON_CONFIG=${CMAKE_SOURCE_DIR}/etc/vaip_config.json")
+string(APPEND CLASSIFICATION_ENVS "\nMORPHIZEN_EP_JSON_CONFIG=${CMAKE_SOURCE_DIR}/etc/vaip_config.json")
 string(APPEND CLASSIFICATION_ENVS "\nXLNX_USE_CACHE_DIR=C:/Temp/")
 string(APPEND CLASSIFICATION_ENVS "\nXLNX_USE_CACHE_KEY=onnx-hipdnn-ep")
 string(APPEND CLASSIFICATION_ENVS "\nCACHE_CONTEXT_EMBEDED_MODE=0")
@@ -192,7 +188,7 @@ set_target_properties(test_classification
   VS_DEBUGGER_ENVIRONMENT "${CLASSIFICATION_ENVS}"
 )
 
-add_dependencies(test_classification ${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET})
+add_dependencies(test_classification ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET})
 
 # Add CTest for classification
 add_test(NAME test_classification_resnet50
@@ -204,7 +200,7 @@ add_test(NAME test_classification_resnet50
       "CACHE_CONTEXT_EMBEDED_MODE=0"
       "XLNX_ENABLE_EP_SHARED_CONTEXT=1"
       "XLNX_ENABLE_CACHE=0"
-      "VITISAI_EP_JSON_CONFIG=${CMAKE_SOURCE_DIR}/etc/vaip_config.json"
+      "MORPHIZEN_EP_JSON_CONFIG=${CMAKE_SOURCE_DIR}/etc/vaip_config.json"
       $<TARGET_FILE:test_classification>
       ${CMAKE_SOURCE_DIR}/data/pt_resnet50.onnx
       ${CMAKE_SOURCE_DIR}/data/resnet50.jpg

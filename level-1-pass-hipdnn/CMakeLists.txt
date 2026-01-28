@@ -46,7 +46,7 @@ target_compile_definitions(${LIB_NAME} PRIVATE
 	-D__HIP_PLATFORM_AMD__
 )
 target_compile_options(${LIB_NAME} PRIVATE /utf-8)
-target_link_libraries(${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${LIB_NAME}>")
+target_link_libraries(${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${LIB_NAME}>")
 set_target_properties(${LIB_NAME} PROPERTIES
 	FOLDER "hipdnn"
 )
