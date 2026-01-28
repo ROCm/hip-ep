@@ -102,6 +102,7 @@ else()
     URL_HASH SHA1=${DEP_SHA1_glog}
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     EXCLUDE_FROM_ALL
+    SYSTEM  # Treat glog headers as system headers to suppress warnings
     OVERRIDE_FIND_PACKAGE
   )
   find_package(glog REQUIRED)
@@ -174,6 +175,8 @@ set(protobuf_BUILD_TESTS OFF CACHE BOOL "disable protobuf tests")
 set(protobuf_WITH_ZLIB OFF CACHE BOOL "disable zlib for protobuf")
 set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "disable protobuf build shared libs")
 set(protobuf_BUILD_EXAMPLES OFF CACHE BOOL "disable protobuf examples")
+# Enable -fPIC for protobuf static lib to link into shared library on Linux
+set(CMAKE_POSITION_INDEPENDENT_CODE ON CACHE BOOL "enable PIC for protobuf")
 ## it is error-prone to use MODULE mode to find protobuf,
 ## Protobuf_USE_STATIC_LIBS must be defined.
 if(NOT Protobuf_FOUND)
@@ -191,6 +194,7 @@ else()
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     CMAKE_ARGS
     EXCLUDE_FROM_ALL
+    SYSTEM  # Treat protobuf headers as system headers to suppress warnings
     OVERRIDE_FIND_PACKAGE)
   find_package(Protobuf REQUIRED)
 endif()

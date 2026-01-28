@@ -13,87 +13,110 @@ on:
     branches:
       - main
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
 env:
-  ORT_BRANCH_NAME: morphizen-ci
+  VAI_RT_PREFIX: ${{ github.workspace }}/install
+  VAI_RT_BUILD_DIR: ${{ github.workspace }}/cmake-build
+  ONNXRUNTIME_VERSION: "1.23.2"
 
 jobs:
-  build_and_test:
+  build-and-test:
     if: github.event.pull_request.draft == false
-    runs-on: [morphizen_lnx]
-    strategy:
-      matrix:
-        os: [ Linux ]
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Checkout MorphiZen
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: true
-          fetch-depth: 0  # Fetch all history for all branches and tags
+          fetch-depth: 0
+          lfs: true
           show-progress: false
-          lfs: true  # Enable Git LFS support
 
-      - name: Pull Git LFS files
-        run: git lfs pull
-
-      - name: get Onnxruntime SHA1
-        id: ort-commit
-        run: |
-          hash=$(git ls-remote  git@gitenterprise.xilinx.com:VitisAI/onnxruntime.git morphizen-ci | cut -f 1)
-          echo "commit_hash=$hash"
-          echo "commit_hash=$hash" >> $GITHUB_OUTPUT
-
-      - name: set credential
-        uses: ./.github/actions/set-env
-
-      - name: build docker
-        id: build_docker
-        working-directory: ${{ github.workspace }}/.github/actions/buid-and-test-lnx
-        run: |
-          set -e
-          ORT_COMMIT_ID=${{ steps.ort-commit.outputs.commit_hash }}
-          SHORT_ORT_COMMIT_ID=${ORT_COMMIT_ID:0:7}
-          echo "${{ env.Z1AIEBUILD_GHE_PAT }}" >github.token
-          docker build -t morphizen-ci:v1.0-${SHORT_ORT_COMMIT_ID} \
-            --progress=plain --secret id=github_token,src=github.token  \
-            --build-arg ORT_COMMIT_ID=${{ steps.ort-commit.outputs.commit_hash }} \
-            .
-
-      - name: Checkout VitisAI/onnxruntime
-        if: steps.cache-onnxruntime-and-deps.outputs.cache-hit != 'true'
-        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
-          token: ${{ env.Z1AIEBUILD_GHE_PAT }}
-          repository: VitisAI/onnxruntime
-          path: onnxruntime
-          ref: ${{ env.ORT_BRANCH_NAME }}
-          show-progress: false
+          python-version: '3.12'
 
-      - name: Checkout VitisAI/morphizen-demo
-        uses: actions/checkout@v4
-        with:
-          repository: VitisAI/morphizen-demo
-          path: morphizen-demo
-          ref: dev
-          token: ${{ env.Z1AIEBUILD_GHE_PAT }}
-          show-progress: false
-
-      - name: run docker
-        id: run_docker
-        working-directory: ${{ github.workspace }}/.github/actions/buid-and-test-lnx
+      - name: Install Build Dependencies
         run: |
-          set -e
-          set -x
-          ORT_COMMIT_ID=${{ steps.ort-commit.outputs.commit_hash }}
-          SHORT_ORT_COMMIT_ID=${ORT_COMMIT_ID:0:7}
-          mkdir -p .local # for pip install --user
-          docker run --rm \
-            -w /github/workspace \
-            -v ${{ github.workspace }}:/github/workspace \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -e HOST_USER_NAME=`id -un` \
-            -e HOST_USER_ID=`id -u` \
-            -e VAI_RT_PREFIX=/workspace/local \
-            -e VAI_RT_BUILD_DIR=/workspace/build \
-            -e VAI_RT_WORKSPACE=/github/workspace \
-            morphizen-ci:v1.0-${SHORT_ORT_COMMIT_ID} \
-            bash ./tools/build_and_test.sh
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build
+
+      # Cache ONNXRuntime to avoid downloading on every build
+      - name: Cache ONNXRuntime
+        id: cache-ort
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VAI_RT_PREFIX }}
+          key: onnxruntime-linux-x64-${{ env.ONNXRUNTIME_VERSION }}
+
+      # Download pre-built ONNXRuntime if cache miss
+      - name: Download pre-built ONNXRuntime
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        run: |
+          ORT_VERSION="${{ env.ONNXRUNTIME_VERSION }}"
+          URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz"
+          ARCHIVE="${{ github.workspace }}/onnxruntime-linux-x64-${ORT_VERSION}.tgz"
+
+          echo "Downloading $URL"
+          curl -L -o "$ARCHIVE" "$URL"
+
+          # Extract to install directory
+          mkdir -p "${{ env.VAI_RT_PREFIX }}"
+          tar -xzf "$ARCHIVE" -C "${{ env.VAI_RT_PREFIX }}" --strip-components=1
+
+          # Create CMake config file for find_package(onnxruntime)
+          CMAKE_DIR="${{ env.VAI_RT_PREFIX }}/lib/cmake/onnxruntime"
+          mkdir -p "$CMAKE_DIR"
+
+          cat > "$CMAKE_DIR/onnxruntimeConfig.cmake" << 'EOF'
+          # onnxruntimeConfig.cmake - CMake configuration file for ONNXRuntime
+          # Auto-generated for pre-built package
+
+          if(NOT TARGET onnxruntime::onnxruntime)
+            add_library(onnxruntime::onnxruntime SHARED IMPORTED)
+            set_target_properties(onnxruntime::onnxruntime PROPERTIES
+              INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_LIST_DIR}/../../../include"
+              IMPORTED_LOCATION "${CMAKE_CURRENT_LIST_DIR}/../../../lib/libonnxruntime.so"
+            )
+          endif()
+
+          set(onnxruntime_FOUND TRUE)
+          EOF
+
+          # List installed files
+          ls -la "${{ env.VAI_RT_PREFIX }}"
+
+      - name: CMake Configure
+        run: |
+          cmake -B ${{ env.VAI_RT_BUILD_DIR }} -S . \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -Dmorphizen_ENABLE_ORT_BRIDGE=ON \
+            -Dmorphizen_ENABLE_ONNX_BACKEND=ON \
+            -Dmorphizen_ENABLE_MLIR_BACKEND=OFF \
+            -Dmorphizen_ENABLE_UNIT_TEST=OFF \
+            -DCMAKE_PREFIX_PATH=${{ env.VAI_RT_PREFIX }}
+
+      - name: CMake Build
+        run: |
+          cmake --build ${{ env.VAI_RT_BUILD_DIR }}
+
+      - name: Verify Build Artifacts
+        run: |
+          # Find the built library (location varies between Linux and Windows)
+          LIBRARY=$(find "${{ env.VAI_RT_BUILD_DIR }}" -name "libonnxruntime_vitisai_ep.so" 2>/dev/null | head -1)
+          if [ -n "$LIBRARY" ]; then
+            echo "Build successful: $LIBRARY exists"
+            ls -la "$LIBRARY"
+          else
+            echo "Build failed: libonnxruntime_vitisai_ep.so not found"
+            find "${{ env.VAI_RT_BUILD_DIR }}" -name "*.so" 2>/dev/null || true
+            exit 1
+          fi

@@ -4,13 +4,14 @@
  */
 #include "core/graph/contrib_ops/contrib_defs.h"
 
-#include "core/graph/onnx_protobuf.h"
+#include "onnx-deps.hpp"
 #include <cmath>
 
-#include "onnx/defs/shape_inference.h"
-#include "onnx/defs/tensor_proto_util.h"
+// From onnxruntime/core/graph/constants.h
+namespace onnxruntime {
+constexpr const char* kMSDomain = "com.microsoft";
+} // namespace onnxruntime
 
-#include "core/graph/constants.h"
 // Suppress a warning: global initializer calls a non-constexpr function
 // 'symbol' which is from ONNX_OPERATOR_SET_SCHEMA_EX macro and only happens in
 // debug build
