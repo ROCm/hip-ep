@@ -29,7 +29,7 @@ onnx-hipdnn-ep/
 ├── doc/                        # Documentation
 │   └── TESTING.md             # Testing guide with examples
 └── etc/                        # Configuration files
-    └── vaip_config.json       # VAIP pass configuration
+    └── morphizen_config.json  # MorphiZen pass configuration
 ```
 
 ## Key Features
@@ -139,7 +139,7 @@ If you want to pre-build LLVM/MLIR instead of using FetchContent (which can take
 
 ## Configuration
 
-The VAIP configuration is defined in `etc/vaip_config.json`:
+The MorphiZen configuration is defined in `etc/morphizen_config.json`:
 
 - **Pass Name**: `mlir-pass`
 - **Plugin**: `morphizen-level1-pass-mlir`
