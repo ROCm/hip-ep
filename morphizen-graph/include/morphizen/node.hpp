@@ -52,7 +52,7 @@ MORPHIZEN_DLL_SPEC const AttributeProto* node_get_attr(const Node& node,
 
 // Node attribute getters
 MORPHIZEN_DLL_SPEC int64_t node_get_attr_int(const Node& node,
-                                              const std::string& name);
+                                             const std::string& name);
 MORPHIZEN_DLL_SPEC gsl::span<const int64_t>
 node_get_attr_ints(const Node& node, const std::string& name);
 

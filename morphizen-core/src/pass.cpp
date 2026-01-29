@@ -15,9 +15,8 @@ void IPass::create_const(const Node& node, gsl::span<const char> data) {
   auto name = node_get_output_name(node);
   auto& arg = node_get_output_node_arg(node);
   auto shape = node_arg_get_shape_i64(arg);
-  CHECK(shape != nullptr)
-      << morphizen::node_arg_as_string_internal(arg)
-      << " shape absent";
+  CHECK(shape != nullptr) << morphizen::node_arg_as_string_internal(arg)
+                          << " shape absent";
   auto type = node_arg_get_element_type(arg);
   create_const(name.c_str(), data, *shape, type);
 }
@@ -26,9 +25,8 @@ void IPass::create_empty_const(const Node& node, size_t size) {
   auto name = node_get_output_name(node);
   auto& arg = node_get_output_node_arg(node);
   auto shape = node_arg_get_shape_i64(arg);
-  CHECK(shape != nullptr)
-      << morphizen::node_arg_as_string_internal(arg)
-      << " shape absent";
+  CHECK(shape != nullptr) << morphizen::node_arg_as_string_internal(arg)
+                          << " shape absent";
   auto type = node_arg_get_element_type(arg);
   create_empty_const(name.c_str(), size, *shape, type);
 }
@@ -37,9 +35,8 @@ void IPass::create_lazy_const(
     const std::function<void(gsl::span<char>)>& lazy) {
   auto& arg = node_get_output_node_arg(node);
   auto shape = node_arg_get_shape_i64(arg);
-  CHECK(shape != nullptr)
-      << morphizen::node_arg_as_string_internal(arg)
-      << " shape absent";
+  CHECK(shape != nullptr) << morphizen::node_arg_as_string_internal(arg)
+                          << " shape absent";
   auto type = node_arg_get_element_type(arg);
   create_lazy_const(node_get_output_name(node).c_str(), size, *shape, type,
                     lazy);
@@ -403,11 +400,9 @@ static std::vector<std::string> get_edge_node_arg_names(const Node* from,
       ret.push_back(node_arg_get_name(*arg));
     }
   }
-  CHECK(!ret.empty())
-      << "[try fuse failed] not exist a edge between "
-      << morphizen::node_as_string(*from)
-      << " and "
-      << morphizen::node_as_string(*to);
+  CHECK(!ret.empty()) << "[try fuse failed] not exist a edge between "
+                      << morphizen::node_as_string(*from) << " and "
+                      << morphizen::node_as_string(*to);
   return ret;
 }
 

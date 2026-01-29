@@ -19,7 +19,6 @@
 // Simple logging macro for graph operations
 #define MY_LOG(n) LOG(INFO)
 
-
 // Wrapper functions for tensor_proto_new calls
 // These forward to MORPHIZEN_ORT_API and handle f32/f64 naming differences
 namespace {
