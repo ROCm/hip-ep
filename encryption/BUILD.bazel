@@ -38,6 +38,5 @@ cc_library(
             "//conditions:default": [],
         }) + [
             "@glog",
-            "//vaip_io:vaip_io",
         ],
 )

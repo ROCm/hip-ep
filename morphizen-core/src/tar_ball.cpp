@@ -7,6 +7,8 @@
 #include <fstream>
 #include <glog/logging.h>
 #include <iostream>
+#include <morphizen/temp_file_stream.hpp>
+#include <morphizen/util.hpp>
 // clang-format off
 #define DIR void
 #ifdef _WIN32
@@ -90,13 +92,14 @@ int tar_checksum(block* header) {
 
   return 1;
 }
-int TarWriter::write(const IStreamReader& src, const std::string& name) {
-  auto pipe = std::make_shared<TempFile>();
-  stream_copy(src, *pipe->build_writer());
-  auto [reader, size] = pipe->build_reader();
-  return write_internal(*reader, name, size);
+int TarWriter::write(std::istream& src, const std::string& name) {
+  auto pipe = std::make_unique<TempFileStream>();
+  stream_copy(src, pipe->get_write_stream());
+
+  size_t size = pipe->get_size();
+  return write_internal(pipe->get_read_stream(), name, size);
 }
-int TarWriter::write_internal(const IStreamReader& src, const std::string& name,
+int TarWriter::write_internal(std::istream& src, const std::string& name,
                               size_t size) {
   const size_t BUFFER_SIZE = 512u;
   auto now = std::chrono::system_clock::now();
@@ -136,19 +139,20 @@ int TarWriter::write_internal(const IStreamReader& src, const std::string& name,
   }
   safe_sprintf(header.chksum, "%06o", checksum_value);
   header.chksum[7] = ' ';
-  auto t = tarball_.write(&block.buffer[0], sizeof(block));
-  CHECK(sizeof(block) == t)
-      << "failed to write header. name = " << name << " size = " << size;
+  tarball_.write(&block.buffer[0], sizeof(block));
+  CHECK(tarball_.good()) << "failed to write header. name = " << name
+                         << " size = " << size;
   if (name.size() >= sizeof(header.name)) {
     auto size_1 = name.size();
-    CHECK(size_1 == tarball_.write(name.data(), size_1))
-        << "failed to write data. name = " << name << " size = " << size_1;
+    tarball_.write(name.data(), size_1);
+    CHECK(tarball_.good()) << "failed to write data. name = " << name
+                           << " size = " << size_1;
     auto const padding_size{512u - static_cast<unsigned int>(size_1 % 512)};
     const char padding_data[512] = {0};
     if (padding_size != 512) {
-      CHECK(padding_size == tarball_.write(&padding_data[0], padding_size))
-          << "failed to write padding. name = " << name
-          << " size = " << padding_size;
+      tarball_.write(&padding_data[0], padding_size);
+      CHECK(tarball_.good()) << "failed to write padding. name = " << name
+                             << " size = " << padding_size;
     }
     // write header again
     my_strncpy(header.name, name.c_str(), sizeof(header.name));
@@ -161,49 +165,52 @@ int TarWriter::write_internal(const IStreamReader& src, const std::string& name,
     }
     safe_sprintf(header.chksum, "%06o", checksum_value_1);
     header.chksum[7] = ' ';
-    CHECK(sizeof(block) == tarball_.write(&block.buffer[0], sizeof(block)))
-        << "failed to write header. name = " << name << " size = " << size_1;
+    tarball_.write(&block.buffer[0], sizeof(block));
+    CHECK(tarball_.good()) << "failed to write header. name = " << name
+                           << " size = " << size_1;
   }
   if (size == 0) {
     return 0;
   }
   for (auto i = 0u; i < size; i += BUFFER_SIZE) {
-    auto buffer = src.read(BUFFER_SIZE);
-    CHECK(buffer.has_value()) << "failed to read file";
-    auto read_size = buffer->size();
-    CHECK(read_size > 0);
-    CHECK(read_size <= BUFFER_SIZE);
-    if (read_size < BUFFER_SIZE) {
-      buffer->resize(BUFFER_SIZE);
-      // buffer->resize() pad it automatically.
-      // auto padding_size =
-      //     BUFFER_SIZE - static_cast<unsigned int>(read_size % BUFFER_SIZE);
-      // memset(buffer->data() + read_size, 0, padding_size);
+    std::vector<char> buffer(BUFFER_SIZE, 0);
+    src.read(buffer.data(), BUFFER_SIZE);
+    auto read_size = src.gcount();
+
+    CHECK(read_size > 0) << "failed to read file";
+    CHECK(read_size <= static_cast<std::streamsize>(BUFFER_SIZE));
+
+    if (read_size < static_cast<std::streamsize>(BUFFER_SIZE)) {
+      // buffer is already zero-padded from initialization
       CHECK_GE(i + BUFFER_SIZE, size) << "must be the last trunk";
     }
-    CHECK_EQ(BUFFER_SIZE, buffer->size());
-    CHECK(tarball_.write((const char*)buffer->data(), buffer->size()))
-        << "failed to write data. name = " << name << " size = " << i;
+
+    tarball_.write(buffer.data(), BUFFER_SIZE);
+    CHECK(tarball_.good()) << "failed to write data. name = " << name
+                           << " size = " << i;
   }
   return 0;
 }
 TarWriter::~TarWriter() {
   // tar end
   const char padding_data[512] = {0};
-  CHECK(tarball_.write(padding_data, 512) == 512) << "dtor tarWriter failed.";
-  CHECK(tarball_.write(padding_data, 512) == 512) << "dtor tarWriter failed.";
+  tarball_.write(padding_data, 512);
+  CHECK(tarball_.good()) << "dtor tarWriter failed.";
+  tarball_.write(padding_data, 512);
+  CHECK(tarball_.good()) << "dtor tarWriter failed.";
 }
 
-int TarReader::read(IStreamWriterBuilder& dst_builder) {
+int TarReader::read(
+    std::function<std::ostream&(const std::string&)> dst_builder) {
   const size_t BUFFER_SIZE = 512u;
-  std::vector<char> buffer(BUFFER_SIZE, 0);
+  std::vector<char> header_buf(sizeof(block));
 
-  auto ret = tarball_.read(sizeof(block));
-  if (!ret.has_value()) {
-    return 0;
+  tarball_.read(header_buf.data(), sizeof(block));
+  if (tarball_.gcount() != sizeof(block)) {
+    return 0; // EOF or error
   }
-  CHECK(ret->size() == sizeof(block));
-  block* block = (union block*)(ret.value().data());
+
+  block* block = (union block*)(header_buf.data());
   auto check_ok = tar_checksum(block);
   if (check_ok != 1) {
     return 0;
@@ -212,44 +219,52 @@ int TarReader::read(IStreamWriterBuilder& dst_builder) {
   auto* header = &block->header;
   std::string filename(header->name);
   unsigned long size_ = 0u;
+
   if (header->typeflag == 'L') {
     size_ = std::stoul(header->size, nullptr, 8);
     filename.resize(size_);
-    ret = tarball_.read(size_);
-    CHECK(ret.has_value() && ret->size() == size_)
+    tarball_.read(filename.data(), size_);
+    CHECK(tarball_.gcount() == static_cast<std::streamsize>(size_))
         << "buffer overflow. size_=" << size_;
 
     auto const padding_size{512u - static_cast<unsigned int>(size_ % 512)};
     if (padding_size != 512) {
-      auto tmp_buffer = std::vector<char>(padding_size);
-      ret = tarball_.read(padding_size);
-      CHECK(ret.has_value() && ret->size() == padding_size)
+      std::vector<char> tmp_buffer(padding_size);
+      tarball_.read(tmp_buffer.data(), padding_size);
+      CHECK(tarball_.gcount() == static_cast<std::streamsize>(padding_size))
           << "buffer overflow. size_=" << size_;
     }
 
-    ret = tarball_.read(sizeof(block));
-    if (ret.has_value() && ret->size() != sizeof(block)) {
+    tarball_.read(header_buf.data(), sizeof(block));
+    if (tarball_.gcount() != sizeof(block)) {
       return 0;
     }
-    block = (union block*)(ret.value().data());
+    block = (union block*)(header_buf.data());
     auto check_ok_1 = tar_checksum(block);
     CHECK(check_ok_1) << "tallball not valid: checksum failed.";
     header = &block->header;
   }
+
   size_ = std::stoul(header->size, nullptr, 8);
-  auto dst = dst_builder.build(filename);
+  std::ostream& dst = dst_builder(filename);
+
   if (size_ == 0) {
     return 1;
   }
+
   for (auto i = 0u; i < size_; i += BUFFER_SIZE) {
-    ret = tarball_.read(BUFFER_SIZE);
-    CHECK(ret.has_value() && ret->size() == BUFFER_SIZE)
+    std::vector<char> buffer(BUFFER_SIZE);
+    tarball_.read(buffer.data(), BUFFER_SIZE);
+    size_t read_size = tarball_.gcount();
+
+    CHECK(read_size == BUFFER_SIZE)
         << "buffer overflow. name = " << filename << " size_ =" << size_
         << "bytes, read  " << i << "bytes";
+
     if (i + BUFFER_SIZE <= size_) {
-      dst->write(ret->data(), ret->size());
+      dst.write(buffer.data(), BUFFER_SIZE);
     } else {
-      dst->write(ret->data(), size_ % BUFFER_SIZE);
+      dst.write(buffer.data(), size_ % BUFFER_SIZE);
     }
   }
   return 1;

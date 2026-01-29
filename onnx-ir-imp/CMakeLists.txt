@@ -32,8 +32,8 @@ add_library(${LIB_NAME}
   src/staging-graph.cpp
   src/onnx-deps.hpp
   src/onnx-deps.cpp
-  src/vaip-ort-api.cpp
-  src/vaip-ort-api.hpp
+  src/morphizen-ort-api.cpp
+  src/morphizen-ort-api.hpp
 
   src/core/graph/contrib_ops/contrib_defs.cc
 )
@@ -45,7 +45,7 @@ set(ORT_INC  "")
 list(APPEND ORT_INC
   ${VAIP_ORT_API_DIR}
 )
-set_source_files_properties(src/vaip-ort-api.cpp
+set_source_files_properties(src/morphizen-ort-api.cpp
   PROPERTIES INCLUDE_DIRECTORIES "${ORT_INC}")
 
 

@@ -19,15 +19,16 @@
 #include "./cache_dir.hpp"
 #include "config.hpp"
 #include "ep_shared_context_workspace.hpp"
+#include "mem_stream_buffer.hpp"
 #include "morphizen/config_reader.hpp"
 #include "morphizen/env_config.hpp"
 #include "morphizen/mem_binary.hpp"
-#include "morphizen/morphizen_io.hpp"
 #include "morphizen/util.hpp"
 #include "morphizen/weak.hpp"
 #include "pass_context_imp.hpp"
 #include "profile_utils.hpp"
 #include "tar_ball.hpp"
+#include <map>
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE, "0")
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY, "0")
@@ -612,54 +613,47 @@ std::vector<std::string> PassContextImp::get_cache_file_names() const {
 std::vector<char> PassContextImp::cache_files_to_tar_mem() const {
   std::vector<char> ret;
   {
-    auto p = IStreamWriter::from_bytes(ret);
-    CHECK(cache_files_to_tar_file(*p)) << "ok";
+    MemoryOutputStreambuf membuf(ret);
+    std::ostream ostr(&membuf);
+    CHECK(cache_files_to_tar_file(ostr)) << "ok";
   }
   return ret;
 }
 
-bool PassContextImp::cache_files_to_tar_file(IStreamWriter& writer) const {
+bool PassContextImp::cache_files_to_tar_file(std::ostream& writer) const {
   TarWriter tar_writer(writer);
   auto file_names = get_cache_file_names();
   for (const auto& file_name : file_names) {
-    tar_writer.write(CacheFileStreamReader(open_file_for_read(file_name)),
-                     file_name);
+    CacheFileIstreamAdapter reader(open_file_for_read(file_name));
+    tar_writer.write(reader, file_name);
   }
   return true;
 }
 
-size_t CacheFileStreamWriter::write(const char* data, size_t size) {
-  auto write_size = writer_->fwrite(data, size);
-  CHECK_EQ((size_t)write_size, size);
-  return write_size;
-}
+bool PassContextImp::tar_file_to_cache_files(std::istream& src) {
+  TarReader tar_reader(src);
 
-std::unique_ptr<IStreamWriter>
-CacheFileStreamWriterBuilder::build(const std::string& filename) {
-  auto stream = context->open_file_for_write(filename);
-  CHECK(stream != nullptr) << "cannot open " << filename << " for write";
-  return std::make_unique<CacheFileStreamWriter>(std::move(stream));
-}
+  // Map to keep stream adapters alive
+  std::map<std::string, std::unique_ptr<CacheFileOstreamAdapter>> writers;
 
-std::optional<std::vector<char>>
-CacheFileStreamReader::read(size_t size_hint) const {
-  auto ret = std::vector<char>();
-  ret.resize(size_hint);
-  auto read_size = reader_->fread(&ret[0], size_hint);
-  if (read_size == 0) {
-    return std::nullopt;
-  } else {
-    ret.resize(read_size);
+  auto builder = [this,
+                  &writers](const std::string& filename) -> std::ostream& {
+    auto writer = this->open_file_for_write(filename);
+    CHECK(writer != nullptr) << "cannot open " << filename << " for write";
+
+    auto adapter = std::make_unique<CacheFileOstreamAdapter>(std::move(writer));
+    auto& stream_ref = *adapter;
+    writers[filename] = std::move(adapter);
+    return stream_ref;
+  };
+
+  for (;;) {
+    bool is_continue = tar_reader.read(builder);
+    if (!is_continue) {
+      break;
+    }
   }
-  return ret;
-}
-
-bool PassContextImp::tar_file_to_cache_files(IStreamReader& /*src*/) {
-  // This method is deprecated and no longer used.
-  // tar_file_ is always used directly, no need to extract to cache_files_.
-  LOG(FATAL)
-      << "tar_file_to_cache_files is deprecated and should not be called";
-  return false;
+  return true;
 }
 
 std::filesystem::path PassContextImp::xclbin_path_to_cache_files(

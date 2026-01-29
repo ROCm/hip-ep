@@ -3,11 +3,11 @@
  * Licensed under the MIT License.
  */
 #define _CRT_SECURE_NO_WARNINGS
-#include "../morphizen-core/src/file_stream.hpp"
 #include "morphizen/morphizen.hpp"
 #include <cstdio>
 #include <glog/logging.h>
 #include <gtest/gtest.h>
+#include <morphizen/file_stream.hpp>
 TEST(FileStreamTest, HelloWorld) {
   { // Test the FileBuf class
     FILE* file = std::fopen("test.txt", "w+");

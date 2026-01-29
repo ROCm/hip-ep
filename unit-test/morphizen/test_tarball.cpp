@@ -18,61 +18,12 @@
 // clang-format on
 
 using namespace morphizen;
-class StringStreamReader : public IStreamReader {
-public:
-  StringStreamReader(std::stringstream& data) : data_(data) {}
 
-private:
-  std::optional<std::vector<char>> read(size_t size_hint) const override final {
-    auto buffer = std::vector<char>(size_hint);
-    auto read_size = data_.read(buffer.data(), buffer.size()).gcount();
-    if (read_size == 0) {
-      return std::nullopt;
-    }
-    buffer.resize(read_size);
-    return buffer;
-  }
-
-private:
-  std::stringstream& data_;
-};
-
-class StringStreamWriter : public IStreamWriter {
-
-public:
-  StringStreamWriter(std::stringstream& data) : data_(data) {}
-  size_t write(const char* data, size_t size) override {
-    data_.write(data, size);
-    return size;
-  }
-
-private:
-  std::stringstream& data_;
-};
-
-class StringStreamWriteBulder : public IStreamWriterBuilder {
-public:
-  StringStreamWriteBulder(std::map<std::string, std::stringstream>& ss_map)
-      : ss_map_(ss_map) {}
-  std::unique_ptr<IStreamWriter> build(const std::string& name) override {
-    if (ss_map_.count(name) == 0) {
-      ss_map_[name] = std::stringstream();
-      return std::make_unique<StringStreamWriter>(ss_map_[name]);
-    }
-    return nullptr;
-  }
-
-private:
-  std::map<std::string, std::stringstream>& ss_map_;
-};
 class TarBallTest : public ::testing::Test {};
 TEST_F(TarBallTest, TarTest) {
   std::vector<std::string> test_strings = {"I am ss1", "I am ss2 ,123456",
                                            "I am ss3, 1234567890abcdef"};
   std::map<std::string, std::stringstream> ss_map;
-  ss_map["ss0"] = std::stringstream();
-  ss_map["ss1"] = std::stringstream();
-  ss_map["ss2"] = std::stringstream();
   ss_map["ss0"] << test_strings[0];
   ss_map["ss1"] << test_strings[1];
   ss_map["ss2"] << test_strings[2];
@@ -81,18 +32,21 @@ TEST_F(TarBallTest, TarTest) {
   // 1. create tarball
   std::stringstream tar_sstream;
   {
-    auto stream_writer = StringStreamWriter(tar_sstream);
-    TarWriter tar_writer(stream_writer);
+    TarWriter tar_writer(tar_sstream);
     for (auto it = ss_map.begin(); it != ss_map.end(); ++it) {
-      tar_writer.write(StringStreamReader(it->second), it->first);
+      tar_writer.write(it->second, it->first);
     }
     std::cout << "write tar file finish : " << tar_sstream.str() << std::endl;
   }
   // 2. untar
   {
-    StringStreamWriteBulder builder(ss_map_out);
-    auto stream_reader = StringStreamReader(tar_sstream);
-    TarReader tar_reader(stream_reader);
+    tar_sstream.seekg(0); // Reset to start
+    TarReader tar_reader(tar_sstream);
+
+    auto builder = [&ss_map_out](const std::string& name) -> std::ostream& {
+      return ss_map_out[name];
+    };
+
     for (;;) {
       bool iscontinue = tar_reader.read(builder);
       if (!iscontinue) {
@@ -131,18 +85,15 @@ TEST_F(TarBallTest, Encrypt_Test) {
   std::stringstream data_ss;
   data_ss << data;
   std::stringstream encrypted_str;
-  auto writer1 = StringStreamWriter(encrypted_str);
-  morphizen_encryption::aes_encryption(StringStreamReader(data_ss), writer1,
-                                       key);
+  morphizen_encryption::aes_encryption(data_ss, encrypted_str, key);
   // debug info
   std::cout << data.substr(0, 10) << " has been encrypt to "
             << encrypted_str.str().substr(0, 10) << std::endl;
 
+  encrypted_str.seekg(0); // Reset to start
   std::stringstream decrypted_str;
-  auto writer2 = StringStreamWriter(decrypted_str);
-  morphizen_encryption::aes_decryption(StringStreamReader(encrypted_str),
-                                       writer2, key);
-  std::cout << encrypted_str.str().substr(0, 10) << " has been encrypt to "
+  morphizen_encryption::aes_decryption(encrypted_str, decrypted_str, key);
+  std::cout << encrypted_str.str().substr(0, 10) << " has been decrypt to "
             << decrypted_str.str().substr(0, 10) << std::endl;
 
   ASSERT_TRUE(data == decrypted_str.str());

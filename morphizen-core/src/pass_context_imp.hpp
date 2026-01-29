@@ -13,7 +13,6 @@
 #include "./tar_file.hpp"
 #include "logger_adapter.hpp"
 #include "morphizen/model.hpp"
-#include "morphizen/morphizen_io.hpp"
 #include "morphizen/pass.hpp"
 #include "morphizen/pass_context.hpp"
 #include "morphizen/plugin.hpp"
@@ -116,41 +115,71 @@ private:
   MemoryFile* fp_;
 };
 
-class CacheFileStreamWriter : public IStreamWriter {
+// iostream adapters for CacheFile
+
+class CacheFileOstreambuf : public std::streambuf {
 public:
-  CacheFileStreamWriter(std::unique_ptr<CacheFileWriter>&& writer)
+  explicit CacheFileOstreambuf(std::unique_ptr<CacheFileWriter>&& writer)
       : writer_(std::move(writer)) {}
 
-private:
-  virtual size_t write(const char* data, size_t size) override final;
+protected:
+  int_type overflow(int_type c) override {
+    if (c != traits_type::eof()) {
+      char ch = static_cast<char>(c);
+      writer_->fwrite(&ch, 1);
+    }
+    return c;
+  }
+
+  std::streamsize xsputn(const char* s, std::streamsize n) override {
+    writer_->fwrite(s, n);
+    return n;
+  }
 
 private:
   std::unique_ptr<CacheFileWriter> writer_;
 };
 
-class CacheFileStreamWriterBuilder : public IStreamWriterBuilder {
+class CacheFileIstreambuf : public std::streambuf {
 public:
-  CacheFileStreamWriterBuilder(PassContext* ctx) : context(ctx) {}
-
-private:
-  virtual std::unique_ptr<IStreamWriter>
-  build(const std::string& filename) override final;
-
-private:
-  PassContext* context;
-};
-
-class CacheFileStreamReader : public IStreamReader {
-public:
-  CacheFileStreamReader(std::unique_ptr<CacheFileReader> reader)
+  explicit CacheFileIstreambuf(std::unique_ptr<CacheFileReader>&& reader)
       : reader_(std::move(reader)) {}
 
-private:
-  virtual std::optional<std::vector<char>>
-  read(size_t size_hint) const override final;
+protected:
+  int_type underflow() override {
+    if (gptr() == egptr()) {
+      buffer_.resize(4096);
+      auto read_size = reader_->fread(buffer_.data(), buffer_.size());
+      if (read_size == 0) {
+        return traits_type::eof();
+      }
+      setg(buffer_.data(), buffer_.data(), buffer_.data() + read_size);
+    }
+    return gptr() == egptr() ? traits_type::eof()
+                             : traits_type::to_int_type(*gptr());
+  }
 
 private:
   std::unique_ptr<CacheFileReader> reader_;
+  std::vector<char> buffer_;
+};
+
+class CacheFileOstreamAdapter : public std::ostream {
+public:
+  explicit CacheFileOstreamAdapter(std::unique_ptr<CacheFileWriter>&& writer)
+      : std::ostream(&buf_), buf_(std::move(writer)) {}
+
+private:
+  CacheFileOstreambuf buf_;
+};
+
+class CacheFileIstreamAdapter : public std::istream {
+public:
+  explicit CacheFileIstreamAdapter(std::unique_ptr<CacheFileReader>&& reader)
+      : std::istream(&buf_), buf_(std::move(reader)) {}
+
+private:
+  CacheFileIstreambuf buf_;
 };
 
 static void
@@ -297,8 +326,8 @@ public:
   virtual std::vector<char> cache_files_to_tar_mem() const override final;
 
   virtual bool
-  cache_files_to_tar_file(IStreamWriter& writer) const override final;
-  virtual bool tar_file_to_cache_files(class IStreamReader& src) override final;
+  cache_files_to_tar_file(std::ostream& writer) const override final;
+  virtual bool tar_file_to_cache_files(std::istream& src) override final;
 
   virtual std::shared_ptr<void>
   get_context_resource(const std::string& name) const override final;

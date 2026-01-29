@@ -3,7 +3,8 @@
  * Licensed under the MIT License.
  */
 #pragma once
-#include "morphizen/morphizen_io.hpp"
+#include <functional>
+#include <iosfwd>
 #include <string>
 
 #ifndef MORPHIZEN_DLL_SPEC
@@ -16,26 +17,25 @@
 namespace morphizen {
 class TarWriter {
 public:
-  TarWriter(IStreamWriter& tall_ball_writer) : tarball_(tall_ball_writer) {}
-  MORPHIZEN_DLL_SPEC int write(const IStreamReader& src,
-                               const std::string& name);
+  TarWriter(std::ostream& tall_ball_writer) : tarball_(tall_ball_writer) {}
+  MORPHIZEN_DLL_SPEC int write(std::istream& src, const std::string& name);
   MORPHIZEN_DLL_SPEC ~TarWriter();
 
 private:
-  int write_internal(const IStreamReader& src, const std::string& name,
-                     size_t size);
+  int write_internal(std::istream& src, const std::string& name, size_t size);
 
 private:
-  IStreamWriter& tarball_;
+  std::ostream& tarball_;
 };
 class TarReader {
 public:
-  TarReader(const IStreamReader& tall_ball_reader)
-      : tarball_(tall_ball_reader) {}
-  MORPHIZEN_DLL_SPEC int read(IStreamWriterBuilder& dst_builder);
+  TarReader(std::istream& tall_ball_reader) : tarball_(tall_ball_reader) {}
+  // Builder pattern: function returns ostream& for given filename
+  MORPHIZEN_DLL_SPEC int
+  read(std::function<std::ostream&(const std::string&)> dst_builder);
 
 private:
-  const IStreamReader& tarball_;
+  std::istream& tarball_;
 };
 } // namespace morphizen
 

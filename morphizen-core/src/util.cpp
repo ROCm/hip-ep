@@ -13,6 +13,7 @@
 #include <morphizen/morphizen_ort_api.h>
 
 #include "morphizen/env_config.hpp"
+#include "morphizen/temp_file_stream.hpp"
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -199,13 +200,23 @@ bool dump_binary(const std::filesystem::path& filename,
   return binary_io<char>::dump_binary(filename, data);
 }
 
-std::unique_ptr<IStreamReader>
+// Wrapper stream that owns the TempFileStream
+namespace {
+class TempFileIstream : public std::istream {
+public:
+  TempFileIstream(std::unique_ptr<TempFileStream> temp)
+      : std::istream(temp->get_read_stream().rdbuf()), temp_(std::move(temp)) {}
+
+private:
+  std::unique_ptr<TempFileStream> temp_;
+};
+} // namespace
+
+std::unique_ptr<std::istream>
 context_cache_files_to_tar_stream(PassContext& context) {
-  auto temp_file = std::make_shared<TempFile>();
-  auto writer = temp_file->build_writer();
-  context.cache_files_to_tar_file(*writer);
-  auto reader_and_size = temp_file->build_reader();
-  return std::move(reader_and_size.first);
+  auto temp_file = std::make_unique<TempFileStream>();
+  context.cache_files_to_tar_file(temp_file->get_write_stream());
+  return std::make_unique<TempFileIstream>(std::move(temp_file));
 }
 
 std::string get_md5_of_buffer(const char* buffer, size_t size) {

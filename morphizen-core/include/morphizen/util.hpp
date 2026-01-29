@@ -5,11 +5,14 @@
 
 #pragma once
 #include "morphizen/_sanity_check.hpp"
+#include "morphizen/temp_file_stream.hpp"
 #include <filesystem>
+#include <iostream>
+#include <memory>
 #include <morphizen/morphizen_gsl.h>
-#include <morphizen/morphizen_io.hpp>
 #include <morphizen/my_ort.h>
 #include <sstream>
+#include <vector>
 #ifdef _WIN32
 #  define fseek64 _fseeki64
 #  define ftell64 _ftelli64
@@ -114,7 +117,35 @@ MORPHIZEN_DLL_SPEC bool dump_binary(const std::filesystem::path& filename,
 unsigned int get_tid();
 unsigned int get_pid();
 
-MORPHIZEN_DLL_SPEC std::unique_ptr<IStreamReader>
+// Stream utility functions (replace vaip_io stream_copy and stream_filter)
+inline void stream_copy(std::istream& src, std::ostream& dst,
+                        size_t buffer_size = 8192) {
+  std::vector<char> buffer(buffer_size);
+  while (src.read(buffer.data(), buffer_size) || src.gcount() > 0) {
+    dst.write(buffer.data(), src.gcount());
+  }
+}
+
+// Helper class that owns TempFileStream and provides istream interface
+class TempFileStreamIstream : public std::istream {
+public:
+  explicit TempFileStreamIstream(std::unique_ptr<TempFileStream> temp)
+      : std::istream(temp->get_read_stream().rdbuf()), temp_(std::move(temp)) {}
+
+private:
+  std::unique_ptr<TempFileStream> temp_;
+};
+
+template <typename F, typename... Args>
+inline std::unique_ptr<std::istream>
+stream_filter(std::istream& src, const F& filter, Args&&... args) {
+  auto temp = std::make_unique<TempFileStream>();
+  filter(src, temp->get_write_stream(), std::forward<Args>(args)...);
+  temp->get_write_stream().flush();
+  return std::make_unique<TempFileStreamIstream>(std::move(temp));
+}
+
+MORPHIZEN_DLL_SPEC std::unique_ptr<std::istream>
 context_cache_files_to_tar_stream(class PassContext& context);
 
 // TODO: defined morphizen_compile_model.cpp
