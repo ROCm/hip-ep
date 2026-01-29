@@ -152,9 +152,6 @@ The VAIP configuration is defined in `etc/vaip_config.json`:
 
 The main pass implementation is in `level-1-pass-mlir/src/pass_main.cpp`. The `Level1MlirPass::process()` method is where you would add MLIR transformation logic.
 
-### Debug Logging
-
-Set the environment variable `MORPHIZEN_DEBUG_MLIR=1` to enable debug logging.
 
 ## MLIR Integration
 
@@ -190,18 +187,9 @@ cd test && python gen_conv_model.py && python gen_conv_gemm_model.py && cd ..
 # 2. Copy models to build output
 cp test/*.onnx ../build/onnx-hipdnn-ep/bin/Release/
 
-# 3. Set required environment variable (CRITICAL for testing)
-# Windows CMD:
-set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
-
-# Or Git Bash:
-export MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
-
-# 4. Run tests
+# 3. Run tests
 ..\build\onnx-hipdnn-ep\bin\Release\ort_integration_test.exe
 ```
-
-**Note:** The `MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1` environment variable is **required** for testing without NPU hardware. See [TESTING.md](doc/TESTING.md) for details.
 
 For comprehensive information including:
 - Test case descriptions

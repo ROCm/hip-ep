@@ -11,61 +11,19 @@ This document describes how to run and verify the MLIR integration tests for the
 To run tests manually from the `onnx-hipdnn-ep` directory:
 
 ```bash
-# 1. Set environment variable to enable CPU device detection for testing
-set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
-
-# 2. Optional: Set PATH if DLLs are not automatically found
+# Optional: Set PATH if DLLs are not automatically found
 # This may be needed to locate onnxruntime.dll and other dependencies
 set PATH=..\local\bin;..\build\onnx-hipdnn-ep\bin\Release;%PATH%
 
-# 3. Run the test executable
+# Run the test executable
 ..\build\onnx-hipdnn-ep\bin\Release\ort_integration_test.exe
 ```
-
-**Required Environment Variables:**
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE` | `0` | **Enables CPU device detection for testing** (see below) |
 
 **Optional Environment Variables:**
 
 | Variable | Purpose |
 |----------|---------|
 | `PATH` | May need to include `..\local\bin` and `..\build\onnx-hipdnn-ep\bin\Release` to find required DLLs |
-
-#### Why MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE is Required
-
-The VitisAI Execution Provider is designed to run on **AMD NPU hardware** in production. However, for development and testing purposes, this environment variable enables a workaround:
-
-**Production Mode (default, ENV=0):**
-- VitisAI EP only accepts **NPU devices** with AMD vendor_id (0x1022)
-- Rejects CPU and GPU devices
-- Returns zero EP devices if no NPU is present
-- Tests will be skipped with "VitisAI EP V2 device API not yet implemented"
-
-**Test Mode (ENV=1):**
-- VitisAI EP accepts **CPU devices** for testing
-- Allows MLIR pass execution and session creation
-- Used for internal testing without NPU hardware
-- **Future:** GPU support is planned to be added
-
-**Implementation Note:**  
-This behavior is defined in `MorphiZen/ort-bridge/src/vitisai-ep-factory.cpp`:
-```cpp
-if (ENV_PARAM(MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE)) {
-  // only for internal test, we pretend to support CPU EP.
-  if (device_type != OrtHardwareDeviceType_CPU) {
-    continue;
-  }
-} else {
-  // Production: only NPU devices
-  if ((vendor_id != factory->vendor_id_) ||
-      (device_type != OrtHardwareDeviceType_NPU)) {
-    continue;
-  }
-}
-```
 
 ## Test Cases
 
@@ -196,11 +154,8 @@ A successful test run should show:
 For detailed debug output, set additional environment variables before running tests:
 
 ```bash
-set MORPHIZEN_DEBUG_MLIR=2
-set MORPHIZEN_DEBUG_MLIR_GRAPH=2
 set GLOG_logtostderr=1
 set GLOG_minloglevel=0
-set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
 ```
 
 Then run the test executable directly to see all debug output.
@@ -263,8 +218,7 @@ For CI/CD pipelines, use:
 # Build
 .\build.bat
 
-# Test - Set environment variable and run test executable
-set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
+# Test - Run test executable
 ..\build\onnx-hipdnn-ep\bin\Release\ort_integration_test.exe
 ```
 
@@ -273,9 +227,6 @@ set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
 If running from PowerShell, use:
 
 ```powershell
-# Set environment variable
-$env:MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE="1"
-
 # Run the test executable
 ..\build\onnx-hipdnn-ep\bin\Release\ort_integration_test.exe
 ```

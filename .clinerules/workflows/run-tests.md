@@ -32,23 +32,11 @@ This generates:
 Copy-Item test\*.onnx ..\build\onnx-hipdnn-ep\bin\Release\
 ```
 
-## Step 3: Set Required Environment Variables
-
-**CRITICAL:** Set the environment variable to enable CPU device testing:
-
-```powershell
-$env:MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE = "1"
-```
-
-**Why this is required:** The VitisAI EP normally requires NPU hardware. This variable enables CPU device mode for testing without NPU.
-
-### Optional: Enable Debug Output
+## Step 3: Optional - Enable Debug Output
 
 For detailed debug information:
 
 ```powershell
-$env:MORPHIZEN_DEBUG_MLIR = "2"
-$env:MORPHIZEN_DEBUG_MLIR_GRAPH = "2"
 $env:GLOG_logtostderr = "1"
 $env:GLOG_minloglevel = "0"
 ```
@@ -97,10 +85,6 @@ Tests session creation with Conv+Gemm model (`conv_gemm_model.onnx`):
 **Error:** "Model file not found"
 **Fix:** Run Step 1 and Step 2 to generate and copy models
 
-### Tests Skipped
-**Error:** "VitisAI EP V2 device API not yet implemented"
-**Fix:** Set `MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1` environment variable (Step 3)
-
 ### DLL Not Found
 **Error:** "Cannot find onnxruntime.dll"
 **Fix:** Add DLL paths to PATH:
@@ -120,9 +104,6 @@ From `onnx-hipdnn-ep` directory:
 # Generate and copy models
 cd test; python gen_conv_model.py; python gen_conv_gemm_model.py; cd ..
 Copy-Item test\*.onnx ..\build\onnx-hipdnn-ep\bin\Release\
-
-# Set environment variable
-$env:MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE = "1"
 
 # Run tests
 ..\build\onnx-hipdnn-ep\bin\Release\ort_integration_test.exe

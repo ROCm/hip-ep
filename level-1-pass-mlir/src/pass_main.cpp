@@ -15,9 +15,6 @@
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 
-DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR, "0")
-#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MLIR) >= n)
-
 using namespace vaip_core;
 
 namespace {
@@ -26,17 +23,17 @@ struct Level1MlirPass {
   Level1MlirPass(IPass& self) : self_{self} {}
   
   void process(IPass& self, Graph& graph) {
-    MY_LOG(1) << "Level1MlirPass::process() called";
+    LOG(INFO) << "Level1MlirPass::process() called";
    
     // Save graph to file for MLIR processing
-    MY_LOG(1) << "Saving graph to file...";
+    LOG(INFO) << "Saving graph to file...";
     auto graph_ref = vaip_cxx::GraphConstRef(graph);
     std::string graph_file = "graph_for_mlir.txt";
     graph_ref.save(graph_file);
-    MY_LOG(1) << "Graph saved to file: " << graph_file;
+    LOG(INFO) << "Graph saved to file: " << graph_file;
     
     // Parse MLIR file to mlir::ModuleOp
-    MY_LOG(1) << "Parsing MLIR file to ModuleOp...";
+    LOG(INFO) << "Parsing MLIR file to ModuleOp...";
     mlir::MLIRContext context;
     context.loadDialect<mlir::func::FuncDialect>();
     context.loadDialect<mlir::arith::ArithDialect>();
@@ -45,13 +42,13 @@ struct Level1MlirPass {
     auto moduleRef = mlir::parseSourceFile<mlir::ModuleOp>(graph_file, &context);
     
     if (!moduleRef) {
-      MY_LOG(1) << "Failed to parse MLIR string to ModuleOp";
+      LOG(INFO) << "Failed to parse MLIR string to ModuleOp";
     } else {
-      MY_LOG(1) << "Successfully parsed MLIR string to ModuleOp";
+      LOG(INFO) << "Successfully parsed MLIR string to ModuleOp";
       
       // Get the module operation
       mlir::ModuleOp module = *moduleRef;
-      MY_LOG(1) << "ModuleOp created, ready for MLIR transformations";
+      LOG(INFO) << "ModuleOp created, ready for MLIR transformations";
       
       
       // Print module with detailed flags
