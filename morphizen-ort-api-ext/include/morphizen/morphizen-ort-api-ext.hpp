@@ -57,8 +57,8 @@ get_global_vaip_ort_api(const char* ir_backend_name);
 const morphizen::OrtApiForMorphizen* get_the_global_api_unsafe();
 const morphizen::OrtApiForMorphizen* get_global_vaip_ort_api();
 
-void set_the_global_api(morphizen::OrtApiForMorphizen* api);
-const morphizen::OrtApiForMorphizen* api();
+MORPHIZEN_DLL_SPEC void set_the_global_api(morphizen::OrtApiForMorphizen* api);
+MORPHIZEN_DLL_SPEC const morphizen::OrtApiForMorphizen* api();
 
 } // namespace morphizen
 
