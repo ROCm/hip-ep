@@ -61,7 +61,7 @@ MORPHIZEN_DLL_SPEC bool node_arg_exists(const NodeArg& node_arg) {
   return MORPHIZEN_ORT_API(node_arg_is_exists)(node_arg);
 }
 
-MORPHIZEN_DLL_SPEC std::string node_arg_as_string(const NodeArg& node_arg) {
+std::string node_arg_as_string_internal(const NodeArg& node_arg) {
   std::ostringstream str;
   if (node_arg_exists(node_arg)) {
     auto name = node_arg_get_name(node_arg);
