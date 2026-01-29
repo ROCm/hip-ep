@@ -54,10 +54,10 @@ Successful test run should show:
 ```
 [==========] Running 3 tests from 1 test suite.
 [----------] 3 tests from OrtIntegrationTest
-[ RUN      ] OrtIntegrationTest.LoadVitisAIProvider
-[       OK ] OrtIntegrationTest.LoadVitisAIProvider
-[ RUN      ] OrtIntegrationTest.CreateSessionWithVitisAIProvider
-[       OK ] OrtIntegrationTest.CreateSessionWithVitisAIProvider
+[ RUN      ] OrtIntegrationTest.LoadMorphiZenProvider
+[       OK ] OrtIntegrationTest.LoadMorphiZenProvider
+[ RUN      ] OrtIntegrationTest.CreateSessionWithMorphiZenProvider
+[       OK ] OrtIntegrationTest.CreateSessionWithMorphiZenProvider
 [ RUN      ] OrtIntegrationTest.CreateSessionWithConvGemmModel
 [       OK ] OrtIntegrationTest.CreateSessionWithConvGemmModel
 [----------] 3 tests from OrtIntegrationTest
@@ -66,10 +66,10 @@ Successful test run should show:
 
 ## Test Cases
 
-### 1. LoadVitisAIProvider
-Verifies VitisAI EP can be loaded and registered successfully.
+### 1. LoadMorphiZenProvider
+Verifies MorphiZen EP can be loaded and registered successfully.
 
-### 2. CreateSessionWithVitisAIProvider
+### 2. CreateSessionWithMorphiZenProvider
 Tests session creation with Conv model (`conv_model.onnx`):
 - Input: [1, 3, 8, 8]
 - Output: [1, 16, 8, 8]

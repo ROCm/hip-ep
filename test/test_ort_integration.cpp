@@ -2,8 +2,8 @@
 // Licensed under the MIT License.
 
 /**
- * ORT Integration Test for VitisAI EP with MLIR backend.
- * This test only creates a session with VitisAI EP to verify MLIR pass integration.
+ * ORT Integration Test for MorphiZen EP with MLIR backend.
+ * This test only creates a session with MorphiZen EP to verify MLIR pass integration.
  *
  * To see log output, set these environment variables before running:
  *   set GLOG_logtostderr=1
@@ -30,11 +30,11 @@ inline std::wstring ToWideString(const char* str) {
 }
 #endif
 
-#ifndef VITISAI_EP_LIB_PATH
+#ifndef MORPHIZEN_EP_LIB_PATH
 #ifdef _WIN32
-#define VITISAI_EP_LIB_PATH "onnxruntime_vitisai_ep.dll"
+#define MORPHIZEN_EP_LIB_PATH "onnxruntime_morphizen_ep.dll"
 #else
-#define VITISAI_EP_LIB_PATH "./libonnxruntime_vitisai_ep.so"
+#define MORPHIZEN_EP_LIB_PATH "./libonnxruntime_morphizen_ep.so"
 #endif
 #endif
 
@@ -69,25 +69,25 @@ protected:
     std::cout << "GLOG_minloglevel: " << (glog_minlevel ? glog_minlevel : "(not set)") << std::endl;
     std::cout << "==============================\n" << std::endl;
 
-    // Register VitisAI EP
-    const char* lib_path_str = VITISAI_EP_LIB_PATH;
+    // Register MorphiZen EP
+    const char* lib_path_str = MORPHIZEN_EP_LIB_PATH;
 #ifdef _WIN32
     auto lib_path_w = ToWideString(lib_path_str);
     OrtStatus* status = Ort::GetApi().RegisterExecutionProviderLibrary(
-        *env_, "VitisAI", lib_path_w.c_str());
+        *env_, "MorphiZen", lib_path_w.c_str());
 #else
     OrtStatus* status = Ort::GetApi().RegisterExecutionProviderLibrary(
-        *env_, "VitisAI", lib_path_str);
+        *env_, "MorphiZen", lib_path_str);
 #endif
 
     if (status != nullptr) {
       std::string error_msg = Ort::GetApi().GetErrorMessage(status);
       Ort::GetApi().ReleaseStatus(status);
       ep_available_ = false;
-      std::cout << "[SetUp] VitisAI EP not available: " << error_msg << std::endl;
+      std::cout << "[SetUp] MorphiZen EP not available: " << error_msg << std::endl;
     } else {
       ep_available_ = true;
-      std::cout << "[SetUp] VitisAI EP registered successfully from: " << lib_path_str << std::endl;
+      std::cout << "[SetUp] MorphiZen EP registered successfully from: " << lib_path_str << std::endl;
     }
 
     // Check if model file exists
@@ -108,10 +108,10 @@ protected:
   bool model_available_{false};
 };
 
-TEST_F(OrtIntegrationTest, LoadVitisAIProvider) {
-  std::cout << "[Test] Loading VitisAI Execution Provider..." << std::endl;
+TEST_F(OrtIntegrationTest, LoadMorphiZenProvider) {
+  std::cout << "[Test] Loading MorphiZen Execution Provider..." << std::endl;
   
-  EXPECT_TRUE(ep_available_) << "VitisAI EP should be registered successfully";
+  EXPECT_TRUE(ep_available_) << "MorphiZen EP should be registered successfully";
   
   if (ep_available_) {
     std::vector<Ort::ConstEpDevice> devices = env_->GetEpDevices();
@@ -124,12 +124,12 @@ TEST_F(OrtIntegrationTest, LoadVitisAIProvider) {
   }
 }
 
-// VitisAI EP integration test - only creates session to verify MLIR pass
-TEST_F(OrtIntegrationTest, CreateSessionWithVitisAIProvider) {
-  std::cout << "[Test] Creating session with VitisAI EP (MLIR backend)..." << std::endl;
+// MorphiZen EP integration test - only creates session to verify MLIR pass
+TEST_F(OrtIntegrationTest, CreateSessionWithMorphiZenProvider) {
+  std::cout << "[Test] Creating session with MorphiZen EP (MLIR backend)..." << std::endl;
   
   if (!ep_available_) {
-    GTEST_SKIP() << "VitisAI EP not available";
+    GTEST_SKIP() << "MorphiZen EP not available";
   }
   
   ASSERT_TRUE(model_available_) << "Conv model not found at: " << CONV_TEST_MODEL_PATH;
@@ -137,36 +137,36 @@ TEST_F(OrtIntegrationTest, CreateSessionWithVitisAIProvider) {
   // Get EP devices
   std::vector<Ort::ConstEpDevice> devices = env_->GetEpDevices();
   
-  // Find VitisAI device
-  const OrtEpDevice* vitisai_device = nullptr;
+  // Find MorphiZen device
+  const OrtEpDevice* morphizen_device = nullptr;
   for (const auto& device : devices) {
     std::string ep_name = device.EpName();
-    if (ep_name == "VitisAI" || ep_name == "VitisAIExecutionProvider") {
-      vitisai_device = static_cast<const OrtEpDevice*>(device);
+    if (ep_name == "MorphiZen" || ep_name == "MorphiZenExecutionProvider") {
+      morphizen_device = static_cast<const OrtEpDevice*>(device);
       break;
     }
   }
 
-  if (vitisai_device == nullptr) {
-    std::cout << "[Test] VitisAI EP V2 device API not yet implemented" << std::endl;
-    std::cout << "[Test] VitisAI EP configuration (embedded in DLL):" << std::endl;
+  if (morphizen_device == nullptr) {
+    std::cout << "[Test] MorphiZen EP V2 device API not yet implemented" << std::endl;
+    std::cout << "[Test] MorphiZen EP configuration (embedded in DLL):" << std::endl;
     std::cout << "[Test]   Level-1 pass: vaip-pass_level1_mlir" << std::endl;
-    GTEST_SKIP() << "VitisAI EP V2 device API not yet implemented (EP registered OK)";
+    GTEST_SKIP() << "MorphiZen EP V2 device API not yet implemented (EP registered OK)";
   }
 
   Ort::SessionOptions session_options;
 
-  // Add VitisAI EP using V2 API
+  // Add MorphiZen EP using V2 API
   OrtStatus* status = Ort::GetApi().SessionOptionsAppendExecutionProvider_V2(
-      session_options, *env_, &vitisai_device, 1, nullptr, nullptr, 0);
+      session_options, *env_, &morphizen_device, 1, nullptr, nullptr, 0);
 
   if (status != nullptr) {
     std::string error_msg = Ort::GetApi().GetErrorMessage(status);
     Ort::GetApi().ReleaseStatus(status);
-    FAIL() << "Failed to add VitisAI EP: " << error_msg;
+    FAIL() << "Failed to add MorphiZen EP: " << error_msg;
   }
 
-  std::cout << "[Test] VitisAI EP configuration:" << std::endl;
+  std::cout << "[Test] MorphiZen EP configuration:" << std::endl;
   std::cout << "[Test]   Level-1 pass: vaip-pass_level1_mlir (MLIR integration)" << std::endl;
 
   try {
@@ -176,7 +176,7 @@ TEST_F(OrtIntegrationTest, CreateSessionWithVitisAIProvider) {
 #else
     Ort::Session session(*env_, CONV_TEST_MODEL_PATH, session_options);
 #endif
-    std::cout << "[Test] Session created successfully with VitisAI EP!" << std::endl;
+    std::cout << "[Test] Session created successfully with MorphiZen EP!" << std::endl;
     std::cout << "[Test] MLIR pass was executed during session creation" << std::endl;
     
   } catch (const Ort::Exception& ex) {
@@ -189,12 +189,12 @@ TEST_F(OrtIntegrationTest, CreateSessionWithVitisAIProvider) {
   }
 }
 
-// VitisAI EP integration test with Conv+Gemm model
+// MorphiZen EP integration test with Conv+Gemm model
 TEST_F(OrtIntegrationTest, CreateSessionWithConvGemmModel) {
   std::cout << "[Test] Creating session with Conv+Gemm model (MLIR backend)..." << std::endl;
   
   if (!ep_available_) {
-    GTEST_SKIP() << "VitisAI EP not available";
+    GTEST_SKIP() << "MorphiZen EP not available";
   }
   
   bool conv_gemm_available = file_exists(CONV_GEMM_TEST_MODEL_PATH);
@@ -206,30 +206,30 @@ TEST_F(OrtIntegrationTest, CreateSessionWithConvGemmModel) {
   // Get EP devices
   std::vector<Ort::ConstEpDevice> devices = env_->GetEpDevices();
   
-  // Find VitisAI device
-  const OrtEpDevice* vitisai_device = nullptr;
+  // Find MorphiZen device
+  const OrtEpDevice* morphizen_device = nullptr;
   for (const auto& device : devices) {
     std::string ep_name = device.EpName();
-    if (ep_name == "VitisAI" || ep_name == "VitisAIExecutionProvider") {
-      vitisai_device = static_cast<const OrtEpDevice*>(device);
+    if (ep_name == "MorphiZen" || ep_name == "MorphiZenExecutionProvider") {
+      morphizen_device = static_cast<const OrtEpDevice*>(device);
       break;
     }
   }
 
-  if (vitisai_device == nullptr) {
-    GTEST_SKIP() << "VitisAI EP V2 device API not yet implemented";
+  if (morphizen_device == nullptr) {
+    GTEST_SKIP() << "MorphiZen EP V2 device API not yet implemented";
   }
 
   Ort::SessionOptions session_options;
 
-  // Add VitisAI EP using V2 API
+  // Add MorphiZen EP using V2 API
   OrtStatus* status = Ort::GetApi().SessionOptionsAppendExecutionProvider_V2(
-      session_options, *env_, &vitisai_device, 1, nullptr, nullptr, 0);
+      session_options, *env_, &morphizen_device, 1, nullptr, nullptr, 0);
 
   if (status != nullptr) {
     std::string error_msg = Ort::GetApi().GetErrorMessage(status);
     Ort::GetApi().ReleaseStatus(status);
-    FAIL() << "Failed to add VitisAI EP: " << error_msg;
+    FAIL() << "Failed to add MorphiZen EP: " << error_msg;
   }
 
   std::cout << "[Test] Testing Conv+Gemm model with MLIR backend..." << std::endl;
@@ -256,7 +256,7 @@ TEST_F(OrtIntegrationTest, CreateSessionWithConvGemmModel) {
 
 int main(int argc, char** argv) {
   std::cout << "\n========================================" << std::endl;
-  std::cout << "ORT Integration Test for VitisAI MLIR EP" << std::endl;
+  std::cout << "ORT Integration Test for MorphiZen MLIR EP" << std::endl;
   std::cout << "========================================\n" << std::endl;
   
   std::cout << "To see log output, set these environment variables:" << std::endl;
