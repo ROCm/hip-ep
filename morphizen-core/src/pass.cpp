@@ -16,7 +16,7 @@ void IPass::create_const(const Node& node, gsl::span<const char> data) {
   auto& arg = node_get_output_node_arg(node);
   auto shape = node_arg_get_shape_i64(arg);
   CHECK(shape != nullptr)
-      << morphizen_cxx::NodeArgConstRef::from_node_arg(graph_, arg).to_string()
+      << morphizen::node_arg_as_string_internal(arg)
       << " shape absent";
   auto type = node_arg_get_element_type(arg);
   create_const(name.c_str(), data, *shape, type);
@@ -27,7 +27,7 @@ void IPass::create_empty_const(const Node& node, size_t size) {
   auto& arg = node_get_output_node_arg(node);
   auto shape = node_arg_get_shape_i64(arg);
   CHECK(shape != nullptr)
-      << morphizen_cxx::NodeArgConstRef::from_node_arg(graph_, arg).to_string()
+      << morphizen::node_arg_as_string_internal(arg)
       << " shape absent";
   auto type = node_arg_get_element_type(arg);
   create_empty_const(name.c_str(), size, *shape, type);
@@ -38,7 +38,7 @@ void IPass::create_lazy_const(
   auto& arg = node_get_output_node_arg(node);
   auto shape = node_arg_get_shape_i64(arg);
   CHECK(shape != nullptr)
-      << morphizen_cxx::NodeArgConstRef::from_node_arg(graph_, arg).to_string()
+      << morphizen::node_arg_as_string_internal(arg)
       << " shape absent";
   auto type = node_arg_get_element_type(arg);
   create_lazy_const(node_get_output_name(node).c_str(), size, *shape, type,
@@ -405,9 +405,9 @@ static std::vector<std::string> get_edge_node_arg_names(const Node* from,
   }
   CHECK(!ret.empty())
       << "[try fuse failed] not exist a edge between "
-      << morphizen_cxx::NodeConstRef::from_node(graph_, *from).to_string()
+      << morphizen::node_as_string(*from)
       << " and "
-      << morphizen_cxx::NodeConstRef::from_node(graph_, *to).to_string();
+      << morphizen::node_as_string(*to);
   return ret;
 }
 
