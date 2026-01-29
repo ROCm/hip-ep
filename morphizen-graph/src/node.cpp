@@ -24,7 +24,7 @@ template <typename C> static std::string node_args_as_string_tmpl(const C& c) {
     if (arg == nullptr) { // optional output node_arg is nullptr
       str << "";
     } else {
-      str << node_arg_as_string(*arg);
+      str << node_arg_as_string_internal(*arg);
     }
     index = index + 1;
   }
@@ -44,7 +44,7 @@ static std::string node_outputs_as_string(const Node& node) {
   return node_args_as_string(node_get_output_node_args(node));
 }
 
-MORPHIZEN_DLL_SPEC std::string node_as_string(const Node& node) {
+std::string node_as_string(const Node& node) {
   std::ostringstream str;
   str << "@" << MORPHIZEN_ORT_API(node_get_index)(node) << " "
       << node_outputs_as_string(node) << " ";
@@ -58,7 +58,7 @@ MORPHIZEN_DLL_SPEC std::string node_as_string(const Node& node) {
   return str.str();
 }
 
-MORPHIZEN_DLL_SPEC std::vector<NodeInput> node_get_inputs(const Node& node) {
+std::vector<NodeInput> node_get_inputs(const Node& node) {
   return *MORPHIZEN_ORT_API(node_get_inputs_unsafe)(node);
 }
 
@@ -73,8 +73,7 @@ std::vector<const NodeArg*> node_get_input_node_args(const Node& node) {
 }
 
 // optional output return nullptr
-MORPHIZEN_DLL_SPEC std::vector<const NodeArg*>
-node_get_output_node_args(const Node& node) {
+std::vector<const NodeArg*> node_get_output_node_args(const Node& node) {
   return *MORPHIZEN_ORT_API(node_get_output_node_args_unsafe)(node);
 }
 const NodeArg& node_get_output_node_arg(const Node& node) {
@@ -84,8 +83,7 @@ const NodeArg& node_get_output_node_arg(const Node& node) {
   return *outputs[0];
 }
 
-MORPHIZEN_DLL_SPEC const NodeArg&
-node_get_first_output_node_arg(const Node& node) {
+const NodeArg& node_get_first_output_node_arg(const Node& node) {
   auto outputs = node_get_output_node_args(node);
   CHECK_GE(outputs.size(), 1u)
       << "at least 1 output needed: node=" << node_as_string(node);
@@ -124,8 +122,7 @@ const std::string& node_get_output_name(const Node& node) {
   return node_arg_get_name(output);
 }
 
-MORPHIZEN_DLL_SPEC const std::string&
-node_get_first_output_name(const Node& node) {
+const std::string& node_get_first_output_name(const Node& node) {
   const NodeArg& output = node_get_first_output_node_arg(node);
   return node_arg_get_name(output);
 }
@@ -277,12 +274,12 @@ size_t NodeConstRef::index() const {
   return MORPHIZEN_ORT_API(node_get_index)(*this);
 }
 std::vector<std::optional<NodeArgConstRef>> NodeConstRef::inputs() const {
-  auto input_node_args = morphizen::node_get_input_node_args(*this);
+  // Get input node args directly using MORPHIZEN_ORT_API
+  auto node_input = *MORPHIZEN_ORT_API(node_get_inputs_unsafe)(*this);
   std::vector<std::optional<NodeArgConstRef>> ret;
-  ret.reserve(input_node_args.size());
-  int index = 0;
-  for (auto& arg : input_node_args) {
-
+  ret.reserve(node_input.size());
+  for (auto ni : node_input) {
+    auto arg = ni.node_arg;
     if (arg != nullptr && morphizen::node_arg_exists(*arg)) {
       ret.push_back(NodeArgConstRef(this->graph(), *arg));
     } else {
@@ -290,9 +287,11 @@ std::vector<std::optional<NodeArgConstRef>> NodeConstRef::inputs() const {
       // represent optional input. we are not sure yet which way is used.
       ret.push_back(std::nullopt);
     }
-    index = index + 1;
   }
   return ret;
+}
+std::vector<morphizen::NodeInput> NodeConstRef::inputs_as_node_input() const {
+  return *MORPHIZEN_ORT_API(node_get_inputs_unsafe)(*this);
 }
 const std::string& NodeConstRef::name() const {
   return MORPHIZEN_ORT_API(node_get_name)(*this);
@@ -305,7 +304,47 @@ const std::string& NodeConstRef::op_domain() const {
   return MORPHIZEN_ORT_API(node_op_domain)(*this);
 }
 std::string NodeConstRef::to_string() const {
-  return morphizen::node_as_string(*this);
+  std::ostringstream str;
+  str << "@" << MORPHIZEN_ORT_API(node_get_index)(*this) << " ";
+  // outputs
+  auto output_node_args =
+      *MORPHIZEN_ORT_API(node_get_output_node_args_unsafe)(*this);
+  str << "[";
+  for (size_t i = 0; i < output_node_args.size(); ++i) {
+    if (i != 0) {
+      str << ",";
+    }
+    if (output_node_args[i] == nullptr) {
+      str << "";
+    } else {
+      str << morphizen::node_arg_as_string_internal(*output_node_args[i]);
+    }
+  }
+  str << "] ";
+
+  auto domain = MORPHIZEN_ORT_API(node_op_domain)(*this);
+  auto op_type = MORPHIZEN_ORT_API(node_op_type)(*this);
+  if (!domain.empty()) {
+    str << domain << "::";
+  }
+  str << op_type << " ";
+
+  // inputs
+  auto node_input = *MORPHIZEN_ORT_API(node_get_inputs_unsafe)(*this);
+  str << "[";
+  for (size_t i = 0; i < node_input.size(); ++i) {
+    if (i != 0) {
+      str << ",";
+    }
+    auto arg = node_input[i].node_arg;
+    if (arg == nullptr) {
+      str << "";
+    } else {
+      str << morphizen::node_arg_as_string_internal(*arg);
+    }
+  }
+  str << "]";
+  return str.str();
 }
 bool NodeConstRef::has_attr(const std::string& name) const {
   return morphizen::node_has_attr(*this, name);
@@ -382,10 +421,10 @@ std::vector<std::string> NodeConstRef::get_attr_strings(
   return morphizen::node_get_attr_strings(*this, name);
 }
 std::vector<std::optional<NodeArgConstRef>> NodeConstRef::outputs() const {
-  auto output_node_args = morphizen::node_get_output_node_args(*this);
+  auto output_node_args =
+      *MORPHIZEN_ORT_API(node_get_output_node_args_unsafe)(*this);
   auto ret = std::vector<std::optional<NodeArgConstRef>>();
   ret.reserve(output_node_args.size());
-  int index = 0;
   for (auto& arg : output_node_args) {
     // in ORT, output could be nullptr, represent optional output.
     if (arg == nullptr) {
@@ -393,9 +432,14 @@ std::vector<std::optional<NodeArgConstRef>> NodeConstRef::outputs() const {
     } else {
       ret.push_back(NodeArgConstRef(this->graph(), *arg));
     }
-    index = index + 1;
   }
   return ret;
+}
+const morphizen::NodeArg& NodeConstRef::first_output_node_arg() const {
+  auto outputs = *MORPHIZEN_ORT_API(node_get_output_node_args_unsafe)(*this);
+  CHECK_GE(outputs.size(), 1u)
+      << "at least 1 output needed: node=" << this->to_string();
+  return *outputs[0];
 }
 GraphConstRef NodeConstRef::get_function_body() const {
   auto& func_body = MORPHIZEN_ORT_API(node_get_function_body)(*this);

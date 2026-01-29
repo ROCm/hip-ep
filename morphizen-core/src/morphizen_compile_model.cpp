@@ -908,15 +908,15 @@ store_cache_directory_from_main_node(PassContextImp& context,
           "enable_encryption is set, but encryption_key is empty");
     }
 
-    std::unique_ptr<IStreamReader> encrypted_src =
-        IStreamReader::from_bytes(ep_cache_context->data(), ep_context_size);
-    auto decrypted_dst = std::make_shared<TempFile>();
-    auto writer = decrypted_dst->build_writer();
+    // Create input stream from encrypted data
+    std::istringstream encrypted_src(
+        std::string(ep_cache_context->data(), ep_context_size),
+        std::ios::binary);
 
-    // Decrypt into temp file
+    // Decrypt using stream_filter (returns std::unique_ptr<std::istream>)
     auto decrypted_reader = stream_filter(
-        *encrypted_src,
-        [](const IStreamReader& src, IStreamWriter& dst,
+        encrypted_src,
+        [](std::istream& src, std::ostream& dst,
            const std::string& encryption_key) {
           morphizen_encryption::aes_decryption(src, dst, encryption_key);
         },
@@ -924,9 +924,11 @@ store_cache_directory_from_main_node(PassContextImp& context,
 
     // Read decrypted data into buffer
     std::vector<char> decrypted_buffer;
-    while (auto chunk = decrypted_reader->read()) {
-      decrypted_buffer.insert(decrypted_buffer.end(), chunk->begin(),
-                              chunk->end());
+    char read_buffer[8192];
+    while (decrypted_reader->read(read_buffer, sizeof(read_buffer)) ||
+           decrypted_reader->gcount() > 0) {
+      decrypted_buffer.insert(decrypted_buffer.end(), read_buffer,
+                              read_buffer + decrypted_reader->gcount());
     }
 
     LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
