@@ -159,6 +159,15 @@ public:
   std::vector<std::optional<NodeArgConstRef>> inputs() const;
 
   /**
+   * @brief Returns node inputs as NodeInput structs for compatibility.
+   * @return std::vector<NodeInput> A vector of NodeInput structs.
+   *
+   * This method provides compatibility with code that expects NodeInput structs.
+   * NodeInput contains {Node* producer, NodeArg* node_arg} for each input.
+   */
+  std::vector<morphizen::NodeInput> inputs_as_node_input() const;
+
+  /**
    * @brief Gets the index of the node within the graph.
    * @return int The index of the node.
    *
@@ -304,7 +313,15 @@ public:
   std::vector<std::optional<NodeArgConstRef>> outputs() const;
 
   /**
-/  *@brief Return the function body of the node.
+   * @brief Gets the first output NodeArg of the node.
+   * @return const morphizen::NodeArg& Reference to the first output NodeArg.
+   *
+   * Checks that the node has at least one output. Throws if no outputs exist.
+   */
+  const morphizen::NodeArg& first_output_node_arg() const;
+
+  /**
+   *@brief Return the function body of the node.
    *@return GraphConstRef The function body of the node.
    */
   GraphConstRef get_function_body() const;
