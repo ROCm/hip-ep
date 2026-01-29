@@ -35,18 +35,6 @@
 namespace morphizen {
 
 MORPHIZEN_DLL_SPEC bool node_arg_exists(const NodeArg& node_arg);
-MORPHIZEN_DLL_SPEC const std::string&
-node_arg_get_name(const NodeArg& node_arg);
-MORPHIZEN_DLL_SPEC std::string node_arg_as_string(const NodeArg& node_arg);
-MORPHIZEN_DLL_SPEC std::unique_ptr<std::vector<int64_t>>
-node_arg_get_shape_i64(const NodeArg& node_arg);
-MORPHIZEN_DLL_SPEC std::unique_ptr<std::vector<std::string>>
-node_arg_get_denotation(const NodeArg& node_arg);
-MORPHIZEN_DLL_SPEC int node_arg_get_element_type(const NodeArg& node_arg);
-MORPHIZEN_DLL_SPEC bool node_arg_is_unknown_shape(const NodeArg& node_arg);
-MORPHIZEN_DLL_SPEC bool node_arg_is_scalar(const NodeArg& node_arg);
-MORPHIZEN_DLL_SPEC bool node_arg_is_zero_shape(const NodeArg& node_arg);
-MORPHIZEN_DLL_SPEC bool node_arg_is_dynamic_shape(const NodeArg& node_arg);
 MORPHIZEN_DLL_SPEC const TensorProto&
 node_arg_get_const_data_as_tensor(const Graph& graph, const NodeArg& node_arg);
 MORPHIZEN_DLL_SPEC float
@@ -99,6 +87,9 @@ MORPHIZEN_DLL_SPEC bool node_arg_is_constant(const Graph& graph,
 MORPHIZEN_DLL_SPEC NodeArg& node_arg_new(Graph& graph, const std::string& name,
                                          const std::vector<int64_t>* shape,
                                          int element_type);
+
+// Internal helper function (not exported) - used by C++ wrapper inline methods
+std::string node_arg_as_string_internal(const NodeArg& node_arg);
 
 } // namespace morphizen
 namespace morphizen_cxx {
@@ -161,7 +152,7 @@ public:
    *
    * @return A string representation of the NodeArg.
    * */
-  std::string to_string() const { return morphizen::node_arg_as_string(self_); }
+  std::string to_string() const { return morphizen::node_arg_as_string_internal(self_); }
   /**
    * @brief Checks if the node argument is a graph input.
    *

@@ -31,68 +31,23 @@
 #include <optional>
 #include <vector>
 namespace morphizen {
-MORPHIZEN_DLL_SPEC std::vector<NodeInput> node_get_inputs(const Node& node);
 std::vector<const NodeArg*> node_get_input_node_args(const Node& node);
-MORPHIZEN_DLL_SPEC const NodeArg& node_get_output_node_arg(const Node& node);
-MORPHIZEN_DLL_SPEC std::vector<const NodeArg*>
-node_get_output_node_args(const Node& node);
 std::vector<const AttributeProto*> node_get_attributes(const Node& node);
 MORPHIZEN_DLL_SPEC const NodeAttributes&
 node_get_attributes_ref(const Node& node);
 std::vector<int64_t> node_get_output_shape(const Node& node, int index);
-MORPHIZEN_DLL_SPEC std::string node_as_string(const Node& node);
 
 MORPHIZEN_DLL_SPEC const std::string& node_get_output_name(const Node& node);
-MORPHIZEN_DLL_SPEC const NodeArg&
-node_get_first_output_node_arg(const Node& node);
-MORPHIZEN_DLL_SPEC const std::string&
-node_get_first_output_name(const Node& node);
 MORPHIZEN_DLL_SPEC bool node_is_op(const Node& node, const std::string& op_type,
                                    const std::string& domain);
 MORPHIZEN_DLL_SPEC int node_get_output_element_type(const Node& node);
-MORPHIZEN_DLL_SPEC bool node_has_attr(const Node& node,
-                                      const std::string& name);
 MORPHIZEN_DLL_SPEC const AttributeProto* node_get_attr(const Node& node,
                                                        const std::string& name);
 
-MORPHIZEN_DLL_SPEC int64_t node_get_attr_int(const Node& node,
-                                             const std::string& name);
-MORPHIZEN_DLL_SPEC int64_t node_get_attr_int_with_default(
-    const Node& node, const std::string& name, int64_t default_value);
-MORPHIZEN_DLL_SPEC float node_get_attr_float(const Node& node,
-                                             const std::string& name);
-MORPHIZEN_DLL_SPEC float
-node_get_attr_float_with_default(const Node& node, const std::string& name,
-                                 float default_value);
-MORPHIZEN_DLL_SPEC gsl::span<const int64_t>
-node_get_attr_ints(const Node& node, const std::string& name);
-MORPHIZEN_DLL_SPEC gsl::span<const float>
-node_get_attr_floats(const Node& node, const std::string& name);
-MORPHIZEN_DLL_SPEC const std::string&
-node_get_attr_string(const Node& node, const std::string& name);
-MORPHIZEN_DLL_SPEC std::vector<std::string>
-node_get_attr_strings(const Node& node, const std::string& name);
-MORPHIZEN_DLL_SPEC const std::string&
-node_get_attr_string_with_default(const Node& node, const std::string& name,
-                                  const std::string& default_value);
-
-MORPHIZEN_DLL_SPEC const TensorProto&
-node_get_attr_tensor(const Node& node, const std::string& name);
-MORPHIZEN_DLL_SPEC morphizen::DllSafe<std::string>
-node_release_attr_string(const Node& node, const std::string& name);
 MORPHIZEN_DLL_SPEC const AttributeProto*
 node_attributes_get(const NodeAttributes& attributes, const std::string& name);
 
-MORPHIZEN_DLL_SPEC const std::string& node_op_type(const Node& node);
-MORPHIZEN_DLL_SPEC const std::string& node_op_domain(const Node& node);
 MORPHIZEN_DLL_SPEC NodeAttributesPtr node_clone_attributes(const Node& node);
-
-/** @brief Get the index of a node in the graph
- *
- * @param node The node to query
- * @return The node's index in the graph
- */
-MORPHIZEN_DLL_SPEC size_t node_get_index(const Node& node);
 
 } // namespace morphizen
 
