@@ -181,9 +181,14 @@ cd test && python gen_conv_model.py && python gen_conv_gemm_model.py
 
 # 2. Copy models to build output
 copy /Y *.onnx ..\..\build\onnx-hipdnn-ep\bin\Release\
+or
+cp *.onnx ../../build/onnx-hipdnn-ep/bin/Release/
 
 # 3. Run tests
 cd ..\..\build\onnx-hipdnn-ep\bin\Release\
+or
+cd ../../build/onnx-hipdnn-ep/bin/Release/
+
 ort_integration_test.exe
 ```
 
