@@ -132,6 +132,8 @@ git clone https://github.com/ROCm/onnx-hipdnn-ep.git
 
 #### Configure and build
 
+**Using Bash (Git Bash on Windows):**
+
 ```bash
 cd onnx-hipdnn-ep
 export THEROCK_DIST=$PWD/../therock
@@ -139,22 +141,41 @@ cmake \
   -B ../build/onnx-hipdnn-ep -S . \
   -DTHEROCK_DIST=$THEROCK_DIST \
   -DCMAKE_PREFIX_PATH=$PWD/../local \
-  -DONNXRUNTIME_SOURCE_TREE_DIR=$PWD/../onnxruntime \
+  -DCMAKE_INSTALL_PREFIX=$PWD/../local \
   -DHIP_PLATFORM=amd
 
 # Build Release version (recommended)
 cmake --build ../build/onnx-hipdnn-ep --config Release --target install --parallel
-
-# Or build Debug version
-cmake --build ../build/onnx-hipdnn-ep --config Debug --target install --parallel
 ```
 
-This script demonstrates the steps to configure, build, and install the `onnx-hipdnn-ep` project.
+**Using PowerShell:**
 
-Steps:
-1. Navigate to the `onnx-hipdnn-ep` directory.
-2. Run the `cmake` command to configure the project, specify the build directory (`../build/onnx-hipdnn-ep`), and set the installation prefix to a local directory.
-3. Build the project in Debug configuration and install the resulting binaries to the specified installation directory.
+```powershell
+cd onnx-hipdnn-ep
+$env:THEROCK_DIST = "$PWD\..\therock"
+$env:HIP_PLATFORM = "amd"
+
+cmake -B ..\build\onnx-hipdnn-ep -S . `
+  -DTHEROCK_DIST="$env:THEROCK_DIST" `
+  -DCMAKE_PREFIX_PATH="$PWD\..\local" `
+  -DCMAKE_INSTALL_PREFIX="$PWD\..\local" `
+  -DHIP_PLATFORM=amd
+
+# Build Release version (recommended)
+cmake --build ..\build\onnx-hipdnn-ep --config Release --target install --parallel
+```
+
+#### CMake Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `THEROCK_DIST` | (required) | Path to TheRock ROCm SDK installation |
+| `CMAKE_PREFIX_PATH` | - | Path to ONNX Runtime installation (for find_package) |
+| `CMAKE_INSTALL_PREFIX` | - | Installation directory for built artifacts |
+| `HIP_PLATFORM` | `amd` | HIP platform (use `amd` for AMD GPUs) |
+| `BUILD_TEST_CLASSIFICATION` | `ON` | Build the ResNet50 classification test executable |
+
+> **Note**: `BUILD_TEST_CLASSIFICATION` is enabled by default. Set to `OFF` if you only need the EP library without test executables.
 
 ## Project Design
 
@@ -188,15 +209,34 @@ The project includes a ResNet50 classification test that demonstrates end-to-end
 
 ### Quick Test
 
-```bash
-# Generate test input
-cd test/data && python image_to_bin.py resnet50.jpg -o input.bin && cd ../..
+**1. Generate test input (requires Python with PIL/numpy):**
 
-# Build and run
-cmake -B build -DBUILD_TEST_CLASSIFICATION=ON
-cmake --build build --target test_classification --config Release
-export PATH="$THEROCK_DIST/bin;$PATH"
-./build/test/test_classification test/data/pt_resnet50.onnx test/data/input.bin
+```bash
+pip install pillow numpy  # if not already installed
+cd test/data
+python image_to_bin.py resnet50.jpg -o input.bin
+cd ../..
+```
+
+**2. Run the classification test:**
+
+```bash
+# Ensure TheRock DLLs are in PATH
+export PATH="$THEROCK_DIST/bin:$PATH"
+
+# Run from build directory (after cmake --build --target install)
+./build/onnx-hipdnn-ep/bin/Release/test_classification.exe \
+  test/data/pt_resnet50.onnx \
+  test/data/input.bin
+```
+
+**Expected output:**
+```
+batch_index: 0
+score[109]  =  0.997308     text: brain coral,,
+score[973]  =  0.00116773   text: coral reef,,
+score[5]    =  0.000909427  text: electric ray, crampfish, numbfish, torpedo,,
+...
 ```
 
 ### Documentation
