@@ -58,8 +58,8 @@ PatternGraphOutput::match_uncached(const onnxruntime::Graph& graph,
     // Verify node_input matches this specific graph output
     if (node_input.node_arg != graph_output_arg) {
       MATCH_FAILED << " unmatched node args "
-                   << node_arg_as_string(*node_input.node_arg) << " and "
-                   << node_arg_as_string(*graph_output_arg);
+                   << morphizen_cxx::NodeArgConstRef::from_node_arg(graph, *node_input.node_arg).to_string() << " and "
+                   << morphizen_cxx::NodeArgConstRef::from_node_arg(graph, *graph_output_arg).to_string();
       return nullptr;
     }
   }
@@ -72,7 +72,7 @@ PatternGraphOutput::match_uncached(const onnxruntime::Graph& graph,
         std::find_if(graph_output_args.begin(), graph_output_args.end(),
                      [&](const NodeArg* arg) -> bool {
                        return (arg && node_arg_exists(*arg) &&
-                               node_arg_get_name(*arg) == graph_output_name);
+                               morphizen_cxx::NodeArgConstRef::from_node_arg(graph, *arg).name() == graph_output_name);
                      });
 
     // Verify output with this name exists
@@ -85,8 +85,8 @@ PatternGraphOutput::match_uncached(const onnxruntime::Graph& graph,
     // Verify node_input matches the found output
     if (node_input.node_arg != *it) {
       MATCH_FAILED << " unmatched node args "
-                   << node_arg_as_string(*node_input.node_arg) << " and "
-                   << node_arg_as_string(**it);
+                   << morphizen_cxx::NodeArgConstRef::from_node_arg(graph, *node_input.node_arg).to_string() << " and "
+                   << morphizen_cxx::NodeArgConstRef::from_node_arg(graph, **it).to_string();
       return nullptr;
     }
   }
@@ -101,7 +101,7 @@ PatternGraphOutput::match_uncached(const onnxruntime::Graph& graph,
 
     // Verify node_input is in the graph outputs list
     if (it == graph_output_args.end()) {
-      MATCH_FAILED << node_arg_as_string(*node_input.node_arg)
+      MATCH_FAILED << morphizen_cxx::NodeArgConstRef::from_node_arg(graph, *node_input.node_arg).to_string()
                    << " unmatched with any graph output ";
       return nullptr;
     }

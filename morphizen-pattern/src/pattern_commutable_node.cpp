@@ -30,22 +30,24 @@ PatternCommutableNode::match_uncached(const onnxruntime::Graph& graph,
                                       const NodeInput& node_input,
                                       const BinderBuilder& binder) const {
   if (node_input.node == nullptr) {
-    MATCH_FAILED << " not a node: " << node_arg_as_string(*node_input.node_arg);
+    auto node_arg_ref = morphizen_cxx::NodeArgConstRef::from_node_arg(graph, *node_input.node_arg);
+    MATCH_FAILED << " not a node: " << node_arg_ref.to_string();
     return nullptr;
   }
   const auto& node = *node_input.node;
-  auto domain = normalize_domain(node_op_domain(node));
-  auto op_type = node_op_type(node);
+  auto node_ref = morphizen_cxx::NodeConstRef::from_node(graph, node);
+  auto domain = normalize_domain(node_ref.op_domain());
+  auto op_type = node_ref.op_type();
   if (domain != this->op_domain_ || op_type != this->op_type_) {
     MATCH_FAILED << " expect node_type is " << this->op_domain_ << ":"
                  << this->op_type_ << " actually node type is " << domain << ":"
-                 << op_type << node_as_string(node);
+                 << op_type << node_ref.to_string();
     return nullptr;
   }
-  auto inputs = node_get_inputs(node);
+  auto inputs = node_ref.inputs_as_node_input();
   if (inputs.size() != 2) {
     MATCH_FAILED << " expect 2 inputs, actually " << inputs.size()
-                 << node_as_string(node);
+                 << node_ref.to_string();
     return nullptr;
   }
   const auto ret0 = binder.add(this->get_id(), node_input);
