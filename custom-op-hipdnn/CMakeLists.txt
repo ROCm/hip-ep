@@ -48,9 +48,7 @@ target_include_directories(${LIB_NAME} PRIVATE
   include
   ${THEROCK_DIST}/include
 )
-# TODO: remove VAIP_CUSTOM_OP=1
 target_compile_definitions(${LIB_NAME} PRIVATE 
-  "VAIP_CUSTOM_OP=1"
   "__HIP_PLATFORM_AMD__"
 )
 target_compile_options(${LIB_NAME} PRIVATE /utf-8)

@@ -19,10 +19,11 @@
 #include <miopen/miopen.h>
 #include <hip/hip_runtime.h>
 
-#include "morphizen/vaip.hpp"
+#define VAIP_CUSTOM_OP
+#include "morphizen/morphizen.hpp"
 
 namespace hipdnn {
-using namespace vaip_core;
+using namespace morphizen;
 
 /// @brief MIOpen-based custom operation implementation
 /// Migrated from hipDNN to direct MIOpen usage

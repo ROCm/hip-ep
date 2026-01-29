@@ -10,7 +10,6 @@
 #include <glog/logging.h>
 #include <sstream>
 #include <fstream>
-#include <morphizen/vaip.hpp>
 #include <morphizen/env_config.hpp>
 #include "./custom_op.hpp"
 #include "google/protobuf/util/json_util.h"
@@ -18,7 +17,7 @@
 #include <filesystem>
 #include <thread>
 #include <unordered_set>
-#include <vaip/my_ort.h>
+#include <morphizen/my_ort.h>
 #include <nlohmann/json.hpp>
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_HIPDNN, "0")
