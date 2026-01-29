@@ -80,8 +80,7 @@ std::vector<const NodeArg*> node_get_input_node_args(const Node& node) {
 }
 
 // optional output return nullptr
-static std::vector<const NodeArg*>
-node_get_output_node_args(const Node& node) {
+static std::vector<const NodeArg*> node_get_output_node_args(const Node& node) {
   return *MORPHIZEN_ORT_API(node_get_output_node_args_unsafe)(node);
 }
 const NodeArg& node_get_output_node_arg(const Node& node) {
@@ -91,8 +90,7 @@ const NodeArg& node_get_output_node_arg(const Node& node) {
   return *outputs[0];
 }
 
-static const NodeArg&
-node_get_first_output_node_arg(const Node& node) {
+static const NodeArg& node_get_first_output_node_arg(const Node& node) {
   auto outputs = node_get_output_node_args(node);
   CHECK_GE(outputs.size(), 1u)
       << "at least 1 output needed: node=" << node_as_string(node);
@@ -131,8 +129,7 @@ const std::string& node_get_output_name(const Node& node) {
   return node_arg_get_name(output);
 }
 
-static const std::string&
-node_get_first_output_name(const Node& node) {
+static const std::string& node_get_first_output_name(const Node& node) {
   const NodeArg& output = node_get_first_output_node_arg(node);
   return node_arg_get_name(output);
 }
@@ -317,7 +314,8 @@ std::string NodeConstRef::to_string() const {
   std::ostringstream str;
   str << "@" << MORPHIZEN_ORT_API(node_get_index)(*this) << " ";
   // outputs
-  auto output_node_args = *MORPHIZEN_ORT_API(node_get_output_node_args_unsafe)(*this);
+  auto output_node_args =
+      *MORPHIZEN_ORT_API(node_get_output_node_args_unsafe)(*this);
   str << "[";
   for (size_t i = 0; i < output_node_args.size(); ++i) {
     if (i != 0) {
@@ -430,7 +428,8 @@ std::vector<std::string> NodeConstRef::get_attr_strings(
   return morphizen::node_get_attr_strings(*this, name);
 }
 std::vector<std::optional<NodeArgConstRef>> NodeConstRef::outputs() const {
-  auto output_node_args = *MORPHIZEN_ORT_API(node_get_output_node_args_unsafe)(*this);
+  auto output_node_args =
+      *MORPHIZEN_ORT_API(node_get_output_node_args_unsafe)(*this);
   auto ret = std::vector<std::optional<NodeArgConstRef>>();
   ret.reserve(output_node_args.size());
   for (auto& arg : output_node_args) {

@@ -163,7 +163,9 @@ public:
    *
    * @return A string representation of the NodeArg.
    * */
-  std::string to_string() const { return morphizen::node_arg_as_string_internal(self_); }
+  std::string to_string() const {
+    return morphizen::node_arg_as_string_internal(self_);
+  }
   /**
    * @brief Checks if the node argument is a graph input.
    *

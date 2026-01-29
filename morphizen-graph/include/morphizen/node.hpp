@@ -117,8 +117,9 @@ public:
    * @brief Returns node inputs as NodeInput structs for compatibility.
    * @return std::vector<NodeInput> A vector of NodeInput structs.
    *
-   * This method provides compatibility with code that expects NodeInput structs.
-   * NodeInput contains {Node* producer, NodeArg* node_arg} for each input.
+   * This method provides compatibility with code that expects NodeInput
+   * structs. NodeInput contains {Node* producer, NodeArg* node_arg} for each
+   * input.
    */
   std::vector<morphizen::NodeInput> inputs_as_node_input() const;
 

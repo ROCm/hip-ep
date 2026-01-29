@@ -32,8 +32,12 @@ PatternSequence::match_uncached(const onnxruntime::Graph& graph1,
     MY_LOG(1) << "MATCH FAIL. ID=" << get_id()
               << ", the first pattern does not matched: "
               << (node_input.node != nullptr
-                      ? morphizen_cxx::NodeConstRef::from_node(graph, *node_input.node).to_string()
-                      : morphizen_cxx::NodeArgConstRef::from_node_arg(graph, *node_input.node_arg).to_string());
+                      ? morphizen_cxx::NodeConstRef::from_node(graph,
+                                                               *node_input.node)
+                            .to_string()
+                      : morphizen_cxx::NodeArgConstRef::from_node_arg(
+                            graph, *node_input.node_arg)
+                            .to_string());
     return nullptr;
   }
   auto nodes = graph.nodes();
@@ -83,8 +87,12 @@ PatternSequence::match_uncached(const onnxruntime::Graph& graph1,
   }
   MY_LOG(1) << "MATCH OK. ID=" << get_id() << ", sequence matched: "
             << (node_input.node != nullptr
-                    ? morphizen_cxx::NodeConstRef::from_node(graph, *node_input.node).to_string()
-                    : morphizen_cxx::NodeArgConstRef::from_node_arg(graph, *node_input.node_arg).to_string());
+                    ? morphizen_cxx::NodeConstRef::from_node(graph,
+                                                             *node_input.node)
+                          .to_string()
+                    : morphizen_cxx::NodeArgConstRef::from_node_arg(
+                          graph, *node_input.node_arg)
+                          .to_string());
   return ret;
 }
 
