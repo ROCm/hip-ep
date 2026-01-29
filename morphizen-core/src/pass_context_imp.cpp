@@ -30,7 +30,6 @@
 #include "tar_ball.hpp"
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE, "0")
-DEF_ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE, "1")
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY, "0")
 DEF_ENV_PARAM(XLNX_ONNX_EP_VERBOSE, "0")
 #define LOG_VERBOSE(n)                                                         \
@@ -238,12 +237,11 @@ PassContextImp::get_provider_option(const std::string& option_name,
 }
 
 bool PassContextImp::cache_in_mem() const {
-  return this->get_provider_option("enable_cache_file_io_in_mem", "1") == "1";
+  // Cache is always in memory (using tmpfile() via tar_file_)
+  return true;
 }
 PassContextImp::~PassContextImp() {
-  for (auto iter : cache_files_) {
-    fclose(iter.second);
-  }
+  // No cleanup needed - tar_file_ and mem_files_ clean themselves up
 }
 
 int64_t PassContextImp::get_provider_option_i64(const std::string& option_name,
@@ -467,70 +465,23 @@ PassContextImp::read_file_u8(const std::string& filename) const {
 
 std::unique_ptr<CacheFileReader>
 PassContextImp::open_file_for_read(const std::string& filename) const {
+  // Primary path: use tar_file_ if available
   if (tar_file_) {
     return open_file_for_read_with_tar_file(filename);
   }
 
-  std::unique_ptr<CacheFileReader> ret = nullptr;
-  auto in_mem = cache_in_mem();
-  auto& cace_files =
-      const_cast<std::remove_cv_t<decltype(cache_files_)&>>(cache_files_);
-  auto it = cace_files.find(filename);
-  if (it != cace_files.end()) {
-    if (in_mem) {
-      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-          << "tmp file opened: " << filename;
-      ret = std::unique_ptr<CacheFileReader>(
-          new CacheFileReaderImp(in_mem, filename, it->second));
-    } else {
-#ifdef _WIN32
-      FILE* fp =
-          _wfreopen((get_log_dir() / filename).c_str(), L"rb+", it->second);
-#else
-      FILE* fp =
-          std::freopen((get_log_dir() / filename).c_str(), "rb+", it->second);
-#endif //  _WIN32
-      if (fp == nullptr) {
-        LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-            << " cannot freopen " << filename;
-      } else {
-        it->second = fp;
-        ret = std::unique_ptr<CacheFileReader>(
-            new CacheFileReaderImp(in_mem, filename, it->second));
-      }
-    }
-    return ret;
-  }
-
-  // memory
+  // Fallback: mem_files_ only (when tmpfile() failed during write)
   auto mem_it = mem_files_.find(filename);
   if (mem_it != mem_files_.end()) {
     LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-        << "memory read: " << filename;
+        << "Reading from mem_files_: " << filename;
     return std::unique_ptr<CacheFileReader>(
         new MemoryFileReaderImp(filename, mem_it->second.get()));
   }
 
-  if (!in_mem) {
-#ifdef _WIN32
-    FILE* fp = _wfopen((get_log_dir() / filename).c_str(), L"rb+");
-#else
-    FILE* fp = std::fopen((get_log_dir() / filename).c_str(), "rb+");
-#endif //  _WIN32
-    if (fp == nullptr) {
-      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-          << " cannot freopen " << filename;
-    } else {
-      cace_files[filename] = fp;
-      ret = std::unique_ptr<CacheFileReader>(
-          new CacheFileReaderImp(in_mem, filename, fp));
-    }
-  } else {
-    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-        << "tmp file open failed: cannot found " << filename
-        << ". try to use write_file_for_write before reading.";
-  }
-  return ret;
+  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+      << "File not found: " << filename;
+  return nullptr;
 }
 
 std::unique_ptr<CacheFileReader>
@@ -571,123 +522,30 @@ PassContextImp::open_file_for_write_with_tar_file(
 }
 std::unique_ptr<CacheFileWriter>
 PassContextImp::open_file_for_write(const std::string& filename) {
-  // tar file
+  // Primary path: use tar_file_ if available
   if (tar_file_) {
     return open_file_for_write_with_tar_file(filename);
   }
 
-  // exist cache file
-  std::unique_ptr<CacheFileWriter> ret = nullptr;
-  auto it = cache_files_.find(filename);
-  FILE* tmp_file = nullptr;
-  auto in_mem = cache_in_mem();
-  if (it != cache_files_.end()) {
-    if (in_mem) {
-      fclose(it->second);
-      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-          << "tmp file write: " << filename;
-#if _WIN32
-      tmp_file = tmpfile_with_posix_delete();
-#else
-      tmp_file = tmpfile();
-#endif
-      if (tmp_file == nullptr) {
-        LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-            << " cannot create tmp file " << filename;
-      } else {
-        it->second = tmp_file;
-        ret = std::unique_ptr<CacheFileWriter>(
-            new CacheFileWriterImp(in_mem, filename, it->second));
-      }
-    } else {
-#ifdef _WIN32
-      FILE* fp =
-          _wfreopen((get_log_dir() / filename).c_str(), L"wb+", it->second);
-#else
-      FILE* fp =
-          std::freopen((get_log_dir() / filename).c_str(), "wb+", it->second);
-#endif //  _WIN32
-      if (fp == nullptr) {
-        LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-            << " cannot freopen " << filename;
-      } else {
-        it->second = fp;
-        ret = std::unique_ptr<CacheFileWriter>(
-            new CacheFileWriterImp(in_mem, filename, fp));
-      }
-    }
-    return ret;
-  }
-
-  // exist memory file
+  // Fallback: mem_files_ only (when tar_file_ not available)
   auto mem_it = mem_files_.find(filename);
   if (mem_it != mem_files_.end()) {
+    // Recreate memory file for writing
     auto mem_file = std::make_unique<MemoryFile>();
     mem_it->second = std::move(mem_file);
     LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-        << "memory write: " << filename;
+        << "Writing to existing mem_files_: " << filename;
     return std::unique_ptr<CacheFileWriter>(
         new MemoryFileWriterImp(filename, mem_it->second.get()));
   }
 
-  // new cache or memory file
-  if (in_mem) {
-    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-        << "tmp file write: " << filename;
-#if _WIN32
-    tmp_file = tmpfile_with_posix_delete();
-#else
-    tmp_file = tmpfile();
-#endif
-    if (tmp_file == nullptr) {
-      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-          << "cannot create tmp file " << filename;
-      // store in memory
-      auto mem_file = std::make_unique<MemoryFile>();
-      mem_files_[filename] = std::move(mem_file);
-      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-          << "memory file write: " << filename;
-      ret = std::unique_ptr<CacheFileWriter>(
-          new MemoryFileWriterImp(filename, mem_files_[filename].get()));
-    } else {
-      cache_files_[filename] = tmp_file;
-      this->context_proto.add_cache_files(filename);
-      ret = std::unique_ptr<CacheFileWriter>(
-          new CacheFileWriterImp(in_mem, filename, tmp_file));
-    }
-  } else {
-    std::filesystem::path tmp_dir = (get_log_dir() / filename).parent_path();
-    if (!std::filesystem::exists(tmp_dir)) {
-      std::filesystem::create_directories(tmp_dir);
-    }
-#ifdef _WIN32
-    int fd;
-    errno_t err = _wsopen_s(&fd, (get_log_dir() / filename).c_str(),
-                            _O_CREAT | _O_RDWR | _O_BINARY | _O_TRUNC,
-                            _SH_DENYNO,            // Share mode
-                            _S_IREAD | _S_IWRITE); // User read/write only
-    if (err == 0 && fd != -1) {
-      tmp_file = _fdopen(fd, "wb+");
-      if (tmp_file == nullptr) {
-        _close(fd); // Close fd if fdopen fails
-      }
-    } else {
-      tmp_file = nullptr;
-    }
-#else
-    tmp_file = std::fopen((get_log_dir() / filename).c_str(), "wb+");
-#endif //  _WIN32
-    if (tmp_file == nullptr) {
-      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-          << " fopen failed. " << filename;
-    } else {
-      cache_files_[filename] = tmp_file;
-      this->context_proto.add_cache_files(filename);
-      ret = std::unique_ptr<CacheFileWriter>(
-          new CacheFileWriterImp(in_mem, filename, tmp_file));
-    }
-  }
-  return ret;
+  // Create new memory file
+  auto mem_file = std::make_unique<MemoryFile>();
+  mem_files_[filename] = std::move(mem_file);
+  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+      << "Writing to new mem_files_: " << filename;
+  return std::unique_ptr<CacheFileWriter>(
+      new MemoryFileWriterImp(filename, mem_files_[filename].get()));
 }
 
 bool write_to_cache_files(std::map<std::string, FILE*>& cache_files,
@@ -717,14 +575,9 @@ bool PassContextImp::write_file(const std::string& filename,
 }
 
 void PassContextImp::restore_cache_files() {
-  if (tar_file_) {
-    // special optimization
-    // TODO replace;
-  } else {
-    for (const auto& str : this->context_proto.cache_files()) {
-      open_file_for_read(str);
-    }
-  }
+  // No longer needed with tar_file_ - this is a no-op
+  // Cache files are loaded directly via tar_file_ or mem_files_
+  LOG_VERBOSE(2) << "restore_cache_files: no-op with tar_file_";
 }
 
 bool PassContextImp::has_cache_file(const std::string& filename1) const {
@@ -735,14 +588,24 @@ bool PassContextImp::has_cache_file(const std::string& filename1) const {
   if (tar_file_) {
     return tar_file_->has_file(filename);
   }
-  return cache_files_.find(filename1) != cache_files_.end();
+  return mem_files_.find(filename1) != mem_files_.end();
 }
 
 std::vector<std::string> PassContextImp::get_cache_file_names() const {
   auto ret = std::vector<std::string>{};
-  ret.reserve(cache_files_.size());
-  for (const auto& files : cache_files_) {
-    ret.push_back(files.first);
+  if (tar_file_) {
+    const auto& entries = tar_file_->entries();
+    ret.reserve(entries.size());
+    for (const auto& entry : entries) {
+      if (entry && !entry->is_symlink()) {
+        ret.push_back(entry->path());
+      }
+    }
+  } else {
+    ret.reserve(mem_files_.size());
+    for (const auto& [name, _] : mem_files_) {
+      ret.push_back(name);
+    }
   }
   return ret;
 }
@@ -791,16 +654,12 @@ CacheFileStreamReader::read(size_t size_hint) const {
   return ret;
 }
 
-bool PassContextImp::tar_file_to_cache_files(IStreamReader& src) {
-  TarReader tar_reader(src);
-  CacheFileStreamWriterBuilder build(this);
-  for (;;) {
-    bool is_continue = tar_reader.read(build);
-    if (!is_continue) {
-      break;
-    }
-  }
-  return true;
+bool PassContextImp::tar_file_to_cache_files(IStreamReader& /*src*/) {
+  // This method is deprecated and no longer used.
+  // tar_file_ is always used directly, no need to extract to cache_files_.
+  LOG(FATAL)
+      << "tar_file_to_cache_files is deprecated and should not be called";
+  return false;
 }
 
 std::filesystem::path PassContextImp::xclbin_path_to_cache_files(
@@ -808,12 +667,9 @@ std::filesystem::path PassContextImp::xclbin_path_to_cache_files(
   auto filename = path.filename().u8string();
   auto ret = get_log_dir() / filename;
 
-  bool in_mem = cache_in_mem();
   std::error_code ec;
-  // already done
-  if (in_mem && has_cache_file(filename)) {
-    return ret;
-  } else if ((!in_mem) && std::filesystem::is_regular_file(ret, ec)) {
+  // already done - check if file exists in cache
+  if (has_cache_file(filename)) {
     return ret;
   }
 
@@ -915,10 +771,6 @@ void PassContextImp::on_custom_op_create_end() {
   LOG_VERBOSE(2) << "on_custom_op_create_end: " << created_customop_count
                  << " of " << this->context_proto.meta_def_size();
   if (created_customop_count == this->context_proto.meta_def_size()) {
-    for (auto iter : cache_files_) {
-      fclose(iter.second);
-    }
-    cache_files_.clear();
     bool is_embed_mode = tar_file_file_name_.empty();
     LOG_VERBOSE(2) << "delete_flag=" << delete_tar_file_on_session_created_
                    << ", tar_file_=" << (tar_file_.get() != nullptr)
@@ -1175,33 +1027,18 @@ std::size_t MemoryFileWriterImp::fwrite(const void* buffer,
 }
 
 void PassContextImp::maybe_create_tar_file_for_write() {
-  if (ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE) != 1) {
-    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-        << "MORPHIZEN_FEATURE_USE_TAR_FILE=1, disabled by user explicily";
-    return;
-  }
   auto is_shared_context_enabled =
       get_session_config(kOrtSessionOptionShareEpContexts, "0") == "1";
   auto is_stop_shared_context =
       get_session_config(kOrtSessionOptionStopShareEpContexts, "0") == "1";
-  auto is_encryption_enabled = !context_proto.config().encryption_key().empty();
   auto is_ep_context_enabled =
       get_session_config(kOrtSessionOptionEpContextEnable, "0") == "1";
   auto is_ep_context_embed_mode =
       get_session_config(kOrtSessionOptionEpContextEmbedMode, "1") == "1";
 
-  if (is_encryption_enabled) {
-    // TODO: remove this, after tar_file_ also supports encryption.
-    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-        << "TODO: tar_file_ does not support encryption yet, "
-           "please use a different cache file format.";
-    return;
-  }
-  if (cache_in_mem() == false) {
-    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-        << "no need to create create tar file for write";
-    return;
-  }
+  // Note: Encryption is handled at serialization boundaries (when
+  // saving/loading EP context), not within tar_file_ itself. The tar archive
+  // can be created regardless of encryption settings.
   if (!is_ep_context_enabled) {
     LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
         << "ep.context is not enabled, no need to create tar file for write";
@@ -1246,6 +1083,7 @@ void PassContextImp::maybe_create_tar_file_for_write() {
         << "cache_key should be empty when using tar file";
     tar_file_ = TarFile::create(std::move(stream));
   } else {
+    // Embed mode: create tar_file_ from tmpfile() (always in-memory)
     tar_file_file_name_.clear();
     tar_file_ = TarFile::create();
     CHECK(tar_file_ != nullptr)

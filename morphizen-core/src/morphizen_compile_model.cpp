@@ -40,16 +40,6 @@
 #include "morphizen/config_reader.hpp"
 // clang-format on
 
-// this is an experimental feature. When this feature is enabled, the
-// `PassContextImp::cache_files_` is not used. Instead, the
-// `PassContextImp::tar_file_` is used.  The
-// `PassContextImp::cache_files_` is used to store the cache files. It
-// creates too many tmp files in disk, per VAI-10873 request, we need
-// to reduce the tmp files.  The `PassContextImp::tar_file_` is used
-// to store the cache files. It creates only one tmp file in disk or
-// open the ep context binary file directly.  limitation: it does not
-// work when encryption is enabled.
-DEF_ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE, "1")
 DEF_ENV_PARAM_2(XLNX_ONNX_EP_REPORT_FILE, "", std::string)
 DEF_ENV_PARAM(XLNX_ENABLE_CACHE, "1")
 DEF_ENV_PARAM(XLNX_ENABLE_SKIP_FATAL, "1")
@@ -263,13 +253,7 @@ bool check_cache_hit(PassContextImp& context) {
         std::move(prebuild_ep_context_in_mem));
     return true;
   }
-  auto cache_in_mem = context.cache_in_mem();
-  if (cache_in_mem) {
-    return false;
-  }
-  if (ENV_PARAM(XLNX_ENABLE_CACHE)) {
-    return check_cache_exist(context) && cache_valid(context);
-  }
+  // No file-based cache - always miss for non-prebuild scenarios
   return false;
 }
 
@@ -911,45 +895,47 @@ store_cache_directory_from_main_node(PassContextImp& context,
 #endif
   auto ep_context_size = ep_cache_context->size();
 
-  if (ENV_PARAM(MORPHIZEN_FEATURE_USE_TAR_FILE) //
-      && !enable_encryption) {
+  // Always use tar_file_, decrypt if needed
+  if (enable_encryption) {
+    // Decrypt the encrypted tar data first
+    auto encryption_key = context.context_proto.config().encryption_key();
+    if (encryption_key.empty()) {
+      throw morphizen_encryption::EncryptionError(
+          "enable_encryption is set, but encryption_key is empty");
+    }
+
+    std::unique_ptr<IStreamReader> encrypted_src =
+        IStreamReader::from_bytes(ep_cache_context->data(), ep_context_size);
+    auto decrypted_dst = std::make_shared<TempFile>();
+    auto writer = decrypted_dst->build_writer();
+
+    // Decrypt into temp file
+    auto decrypted_reader = stream_filter(
+        *encrypted_src,
+        [](const IStreamReader& src, IStreamWriter& dst,
+           const std::string& encryption_key) {
+          morphizen_encryption::aes_decryption(src, dst, encryption_key);
+        },
+        encryption_key);
+
+    // Read decrypted data into buffer
+    std::vector<char> decrypted_buffer;
+    while (auto chunk = decrypted_reader->read()) {
+      decrypted_buffer.insert(decrypted_buffer.end(), chunk->begin(),
+                              chunk->end());
+    }
+
+    LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
+        << "Decrypted ep context: " << decrypted_buffer.size() << " bytes";
+
+    // Load decrypted tar data into tar_file_
+    context.create_tar_file_for_read(
+        std::string(decrypted_buffer.begin(), decrypted_buffer.end()),
+        ep_embed_mode != 0);
+  } else {
+    // No encryption: Load tar data directly
     context.create_tar_file_for_read(std::move(*ep_cache_context),
                                      ep_embed_mode != 0);
-  } else {
-    std::unique_ptr<IStreamReader> ep_context_file;
-    auto context_holder = std::make_shared<TempFile>();
-    if (ep_embed_mode) {
-      std::unique_ptr<IStreamReader> src =
-          IStreamReader::from_bytes(ep_cache_context->data(), ep_context_size);
-      auto dst = context_holder->build_writer();
-      stream_copy(*src, *dst);
-      std::tie(ep_context_file, ep_context_size) =
-          context_holder->build_reader();
-      LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
-          << "embed mode = 1, load ep context " << ep_context_size << " bytes";
-    } else {
-      auto ep_context_binary_file = context.get_dir_of_ep_context_model() /
-                                    std::filesystem::u8path(*ep_cache_context);
-      ep_context_file = IStreamReader::from_path(ep_context_binary_file);
-    }
-    if (enable_encryption) {
-      auto encryption_key = context.context_proto.config().encryption_key();
-      if (encryption_key.empty()) {
-        throw morphizen_encryption::EncryptionError(
-            "enable_encryption is set, but encryption_key is empty");
-      }
-      ep_context_file = stream_filter(
-          *ep_context_file,
-          [](const IStreamReader& src, IStreamWriter& dst,
-             const std::string& encryption_key) {
-            morphizen_encryption::aes_decryption(src, dst, encryption_key);
-          },
-          encryption_key);
-    }
-    context.tar_file_to_cache_files(*ep_context_file);
-    LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
-        << " extract memory cache files to  "
-        << context.get_log_dir().u8string();
   }
 }
 
@@ -1186,15 +1172,7 @@ std::vector<std::unique_ptr<ExecutionProvider>> compile_onnx_model_3_internal(
   auto context = initialize_context(model_path, onnx_graph, ep_context_nodes,
                                     options, std::move(logger_adapter));
   auto measture_compile_onnx_model_3 = context->measure("compile_onnx_model_3");
-  // we cannot use get_cache_filename because cache might be a tar file in
-  // memory instead of a physical directory.
-  bool in_mem = context->cache_in_mem();
-  std::unique_ptr<WithFileLock> lock;
-  if (!in_mem) {
-    lock = std::make_unique<WithFileLock>(
-        (context->get_log_dir() / ".lock").u8string().c_str());
-  }
-  (void)lock;
+  // Cache is always in memory (tar_file_), no file lock needed
   auto p_cpu_usage = CreateICPUUsage();
   std::vector<std::unique_ptr<ExecutionProvider>> ret{};
   if (ENV_PARAM(XLNX_ENABLE_SKIP_FATAL)) {
