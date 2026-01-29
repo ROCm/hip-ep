@@ -100,7 +100,7 @@ PatternCommutableNode::match_uncached(const onnxruntime::Graph& graph,
                  << " arg1=" << arg1_->get_id() << " arg2=" << arg2_->get_id();
   } else {
     MY_LOG(1) << "MATCH OK. ID=" << get_id()
-              << ", node=" << node_as_string(node);
+              << ", node=" << node_ref.to_string();
   }
   return ret;
 }

@@ -55,14 +55,14 @@ PatternNode::match_uncached(const onnxruntime::Graph& graph,
   if (inputs_size > args_size) {
     MATCH_FAILED << " too many inputs. expect num of args is " << args_size
                  << " actual input size  is " << inputs_size
-                 << "; node=" << node_as_string(node);
+                 << "; node=" << node_ref.to_string();
     return nullptr;
   }
 
   if (node_input.node_arg != &node_ref.first_output_node_arg()) {
     MATCH_FAILED << "  PatternNode treats Node as single output, please use "
                     "node_with_multiple_outputs to deal with multiple outputs"
-                 << "; node=" << node_as_string(node);
+                 << "; node=" << node_ref.to_string();
     return nullptr;
   }
 

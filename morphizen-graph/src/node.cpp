@@ -13,6 +13,13 @@
 
 namespace morphizen {
 
+// Internal helper functions (not exported in headers)
+static std::string node_as_string(const Node& node);
+static std::vector<const NodeArg*> node_get_output_node_args(const Node& node);
+static std::vector<NodeInput> node_get_inputs(const Node& node);
+static const NodeArg& node_get_first_output_node_arg(const Node& node);
+static const std::string& node_get_first_output_name(const Node& node);
+
 template <typename C> static std::string node_args_as_string_tmpl(const C& c) {
   int index = 0;
   std::ostringstream str;
@@ -24,7 +31,7 @@ template <typename C> static std::string node_args_as_string_tmpl(const C& c) {
     if (arg == nullptr) { // optional output node_arg is nullptr
       str << "";
     } else {
-      str << node_arg_as_string(*arg);
+      str << node_arg_as_string_internal(*arg);
     }
     index = index + 1;
   }
@@ -44,7 +51,7 @@ static std::string node_outputs_as_string(const Node& node) {
   return node_args_as_string(node_get_output_node_args(node));
 }
 
-MORPHIZEN_DLL_SPEC std::string node_as_string(const Node& node) {
+static std::string node_as_string(const Node& node) {
   std::ostringstream str;
   str << "@" << MORPHIZEN_ORT_API(node_get_index)(node) << " "
       << node_outputs_as_string(node) << " ";
@@ -58,7 +65,7 @@ MORPHIZEN_DLL_SPEC std::string node_as_string(const Node& node) {
   return str.str();
 }
 
-MORPHIZEN_DLL_SPEC std::vector<NodeInput> node_get_inputs(const Node& node) {
+static std::vector<NodeInput> node_get_inputs(const Node& node) {
   return *MORPHIZEN_ORT_API(node_get_inputs_unsafe)(node);
 }
 
@@ -73,7 +80,7 @@ std::vector<const NodeArg*> node_get_input_node_args(const Node& node) {
 }
 
 // optional output return nullptr
-MORPHIZEN_DLL_SPEC std::vector<const NodeArg*>
+static std::vector<const NodeArg*>
 node_get_output_node_args(const Node& node) {
   return *MORPHIZEN_ORT_API(node_get_output_node_args_unsafe)(node);
 }
@@ -84,7 +91,7 @@ const NodeArg& node_get_output_node_arg(const Node& node) {
   return *outputs[0];
 }
 
-MORPHIZEN_DLL_SPEC const NodeArg&
+static const NodeArg&
 node_get_first_output_node_arg(const Node& node) {
   auto outputs = node_get_output_node_args(node);
   CHECK_GE(outputs.size(), 1u)
@@ -124,7 +131,7 @@ const std::string& node_get_output_name(const Node& node) {
   return node_arg_get_name(output);
 }
 
-MORPHIZEN_DLL_SPEC const std::string&
+static const std::string&
 node_get_first_output_name(const Node& node) {
   const NodeArg& output = node_get_first_output_node_arg(node);
   return node_arg_get_name(output);
@@ -319,7 +326,7 @@ std::string NodeConstRef::to_string() const {
     if (output_node_args[i] == nullptr) {
       str << "";
     } else {
-      str << morphizen::node_arg_as_string(*output_node_args[i]);
+      str << morphizen::node_arg_as_string_internal(*output_node_args[i]);
     }
   }
   str << "] ";
@@ -342,7 +349,7 @@ std::string NodeConstRef::to_string() const {
     if (arg == nullptr) {
       str << "";
     } else {
-      str << morphizen::node_arg_as_string(*arg);
+      str << morphizen::node_arg_as_string_internal(*arg);
     }
   }
   str << "]";

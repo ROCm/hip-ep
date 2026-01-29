@@ -37,16 +37,16 @@ BinderBuilderPtr PatternOr::match_uncached(const onnxruntime::Graph& graph,
     if (ret) {
       MY_LOG(1) << "MATCH OK. ID=" << get_id() << " " << index << "/" << size
                 << " OK "
-                << ", node=" << node_input_as_string(node_input);
+                << ", node=" << node_input_as_string(graph, node_input);
       return ret->add(this->get_id(), node_input);
     } else {
       MATCH_FAILED << " " << index << "/" << size
-                   << ", node=" << node_input_as_string(node_input);
+                   << ", node=" << node_input_as_string(graph, node_input);
     }
     index = index + 1;
   }
   MATCH_FAILED << " ALL FAIL "
-               << ", node=" << node_input_as_string(node_input);
+               << ", node=" << node_input_as_string(graph, node_input);
   return nullptr;
 }
 
