@@ -8,7 +8,7 @@ Please build the onnx-hipdnn-ep project and fix any build errors that occur.
 
 ## Build Settings (Remember these):
 - **Build Type**: Release (default)
-- **Generator**: Visual Studio 17 2022
+- **Generator**: Visual Studio 17 2022|Visual Studio 18 2026
 - **Architecture**: x64
 - **Build Directory**: `../build/onnx-hipdnn-ep`
 - **Install Prefix**: `../local`
@@ -38,7 +38,7 @@ cd C:\Develop\m\Source\onnx-hipdnn-ep
 1. Configure the project:
    ```powershell
    cd C:\Develop\m\Source\onnx-hipdnn-ep
-   cmake -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -S . -B ..\build\onnx-hipdnn-ep -DCMAKE_INSTALL_PREFIX=..\local -DCMAKE_PREFIX_PATH=$PWD\..\local
+   cmake -DBUILD_SHARED_LIBS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -S . -B ..\build\onnx-hipdnn-ep -DCMAKE_INSTALL_PREFIX=..\local -DCMAKE_PREFIX_PATH=$PWD\..\local
    ```
 
 2. Build the project:
