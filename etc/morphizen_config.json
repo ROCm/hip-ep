@@ -1,0 +1,28 @@
+{
+  "passes": [
+    {
+      "name": "init",
+      "plugin": "morphizen-pass-init"
+    },
+    {
+      "name": "mlir-pass",
+      "plugin": "morphizen-level1-pass-mlir"
+    }
+  ],
+  "target": "mlir-target",
+  "targets": [
+    {
+      "name": "mlir-target",
+      "pass": [
+        "init",
+        "mlir-pass"
+      ],
+      "provider_options": {
+        "pass.init.enable_dump": "1",
+        "pass.init.directory": "vaip_init",
+        "pass.init.filename": "init-graph-for-mlir.onnx",
+        "XLNX_model_clone_external_data_threshold": "17179869184"
+      }
+    }
+  ]
+}
