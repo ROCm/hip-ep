@@ -181,13 +181,14 @@ This project includes ORT integration tests. For comprehensive testing instructi
 # From onnx-hipdnn-ep directory
 
 # 1. Generate test models
-cd test && python gen_conv_model.py && python gen_conv_gemm_model.py && cd ..
+cd test && python gen_conv_model.py && python gen_conv_gemm_model.py
 
 # 2. Copy models to build output
-cp test/*.onnx ../build/onnx-hipdnn-ep/bin/Release/
+copy /Y *.onnx ..\..\build\onnx-hipdnn-ep\bin\Release\
 
 # 3. Run tests
-..\build\onnx-hipdnn-ep\bin\Release\ort_integration_test.exe
+cd ..\..\build\onnx-hipdnn-ep\bin\Release\
+ort_integration_test.exe
 ```
 
 For comprehensive information including:
