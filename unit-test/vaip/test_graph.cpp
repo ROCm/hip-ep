@@ -254,7 +254,7 @@ TEST_F(GraphTest, Fuse) {
   meta_def.add_constant_initializers("137");
   meta_def.add_constant_initializers("module_2.bias");
   meta_def.add_constant_initializers("module_2.weight");
-  auto node = graph.fuse(meta_def);
+  auto node = vaip_cxx::graph_fuse(graph, meta_def);
   LOG(INFO) << " fused_node=" << node;
   // FIXME: support save subgrahp
   // the saved graph cannot be read by Netron.
@@ -269,7 +269,7 @@ TEST_F(GraphTest, TryFuse) {
   auto graph = model->main_graph();
   graph.resolve();
   auto [meta_def, error] =
-      graph.try_fuse("a_name", {"111"}, {"138"}, {}, "CUSTOM");
+      vaip_cxx::graph_try_fuse(graph, "a_name", {"111"}, {"138"}, {}, "CUSTOM");
   ASSERT_TRUE(meta_def != nullptr) << error.comments;
   LOG(INFO) << " fused_node=" << meta_def->DebugString();
 }
@@ -499,7 +499,7 @@ TEST_F(GraphTest, NewConstantInitializer) {
     pass_proto->set_plugin("vaip-pass_init");
     pass_proto->set_name("GraphTest.NewConstantInitializer");
     auto pass = vaip_core::IPass::create_pass(context, *pass_proto);
-    auto newly_added_node = graph.node_builder(*pass)
+    auto newly_added_node = vaip_cxx::graph_node_builder(graph, *pass)
                                 .set_input_node_args_ex({
                                     input_node_arg.value(),
                                     new_i8,
@@ -546,10 +546,10 @@ TEST_F(GraphTest, VirtualFuse) {
   auto graph = model->main_graph();
   graph.resolve();
   auto [meta_def, error] =
-      graph.try_fuse("a_name", {"111"}, {"138"}, {}, "CUSTOM");
+      vaip_cxx::graph_try_fuse(graph, "a_name", {"111"}, {"138"}, {}, "CUSTOM");
   ASSERT_TRUE(meta_def != nullptr) << error.comments;
   LOG(INFO) << " fused_node=" << meta_def->DebugString();
-  auto subgraph = graph.virtual_fuse(*meta_def);
+  auto subgraph = vaip_cxx::graph_virtual_fuse(graph, *meta_def);
   for (auto node : subgraph.nodes()) {
     LOG(INFO) << " node = " << node;
   }

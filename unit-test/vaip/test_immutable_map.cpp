@@ -10,7 +10,7 @@
 #include <gtest/gtest.h>
 #include <limits>
 //
-#include "../vaip-core/src/pattern/immutable_map.hpp"
+#include "../../morphizen-pattern/src/immutable_map.hpp"
 
 using namespace vaip_core::immutable_map;
 class ImmutableMapTest : public ::testing::Test {

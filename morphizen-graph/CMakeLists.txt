@@ -61,10 +61,13 @@ target_compile_features(morphizen-graph PUBLIC cxx_std_17)
 
 # Build as internal code (VAIP_EXPORT_DLL=1) even though it's a static library
 # Use PRIVATE for VAIP_EXPORT_DLL so consumers don't inherit the export flag
-# Use PUBLIC for VAIP_USE_DLL so consumers know we're in DLL mode
+# Use PUBLIC for VAIP_USE_DLL=0 to indicate static library (no dllimport/dllexport)
 target_compile_definitions(morphizen-graph
-    PUBLIC "-DVAIP_USE_DLL=1"
-    PRIVATE "-DVAIP_EXPORT_DLL=1"
+    PUBLIC
+        "-DVAIP_USE_DLL=0"
+        "-DONNX_NAMESPACE=onnx"
+    PRIVATE
+        "-DVAIP_EXPORT_DLL=1"
 )
 
 set_target_properties(morphizen-graph PROPERTIES FOLDER morphizen)

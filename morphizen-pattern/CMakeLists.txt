@@ -99,7 +99,10 @@ target_compile_options(morphizen-pattern PRIVATE ${MORPHIZEN_COMPILER_OPTIONS})
 target_compile_features(morphizen-pattern PUBLIC cxx_std_17)
 
 target_compile_definitions(morphizen-pattern
-    PUBLIC "-DVAIP_USE_DLL=1"
-    PRIVATE "-DVAIP_EXPORT_DLL=1")
+    PUBLIC
+        "-DVAIP_USE_DLL=0"
+        "-DONNX_NAMESPACE=onnx"
+    PRIVATE
+        "-DVAIP_EXPORT_DLL=1")
 
 set_target_properties(morphizen-pattern PROPERTIES FOLDER morphizen)
