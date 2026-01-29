@@ -14,6 +14,7 @@ cd ../..
 
 ```bash
 # Windows
+export PATH="$THEROCK_DIST/bin;$PATH"
 .\build\test\Release\test_classification.exe test\data\pt_resnet50.onnx test\data\input.bin
 
 # Linux/macOS

@@ -34,7 +34,7 @@ function(vaip_add_version_info)
 endfunction()
 
 set(VERSION_LIST
-    morphizen-hipdnn=morphizen-hipdnn)
+    onnx-hipdnn-ep=onnx-hipdnn-ep)
 set(VERSION_INFO "")
 foreach(COMP_PAIR IN LISTS VERSION_LIST)
   string(FIND "${COMP_PAIR}" "=" pos)

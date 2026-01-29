@@ -134,9 +134,10 @@ git clone https://github.com/ROCm/onnx-hipdnn-ep.git
 
 ```bash
 cd onnx-hipdnn-ep
-cmake -G "Visual Studio 17 2022" -A x64 \
+export THEROCK_DIST=$PWD/../therock
+cmake \
   -B ../build/onnx-hipdnn-ep -S . \
-  -DTHEROCK_DIST=$PWD/../therock \
+  -DTHEROCK_DIST=$THEROCK_DIST \
   -DCMAKE_PREFIX_PATH=$PWD/../local \
   -DONNXRUNTIME_SOURCE_TREE_DIR=$PWD/../onnxruntime \
   -DHIP_PLATFORM=amd
@@ -194,6 +195,7 @@ cd test/data && python image_to_bin.py resnet50.jpg -o input.bin && cd ../..
 # Build and run
 cmake -B build -DBUILD_TEST_CLASSIFICATION=ON
 cmake --build build --target test_classification --config Release
+export PATH="$THEROCK_DIST/bin;$PATH"
 ./build/test/test_classification test/data/pt_resnet50.onnx test/data/input.bin
 ```
 
