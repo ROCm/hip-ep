@@ -5,8 +5,7 @@
  * ORT Integration Test for VitisAI EP with MLIR backend.
  * This test only creates a session with VitisAI EP to verify MLIR pass integration.
  *
- * To see MY_LOG output, set these environment variables before running:
- *   set MORPHIZEN_DEBUG_MLIR=2
+ * To see log output, set these environment variables before running:
  *   set GLOG_logtostderr=1
  *   set GLOG_minloglevel=0
  */
@@ -62,12 +61,12 @@ protected:
     env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_INFO, "OrtIntegrationTest");
     
     // Print environment variable status for debugging
-    const char* debug_level = std::getenv("MORPHIZEN_DEBUG_MLIR");
     const char* glog_stderr = std::getenv("GLOG_logtostderr");
+    const char* glog_minlevel = std::getenv("GLOG_minloglevel");
     
     std::cout << "\n=== Environment Variables ===" << std::endl;
-    std::cout << "MORPHIZEN_DEBUG_MLIR: " << (debug_level ? debug_level : "(not set)") << std::endl;
     std::cout << "GLOG_logtostderr: " << (glog_stderr ? glog_stderr : "(not set)") << std::endl;
+    std::cout << "GLOG_minloglevel: " << (glog_minlevel ? glog_minlevel : "(not set)") << std::endl;
     std::cout << "==============================\n" << std::endl;
 
     // Register VitisAI EP
@@ -260,8 +259,7 @@ int main(int argc, char** argv) {
   std::cout << "ORT Integration Test for VitisAI MLIR EP" << std::endl;
   std::cout << "========================================\n" << std::endl;
   
-  std::cout << "To see MY_LOG output, set these environment variables:" << std::endl;
-  std::cout << "  set MORPHIZEN_DEBUG_MLIR=2" << std::endl;
+  std::cout << "To see log output, set these environment variables:" << std::endl;
   std::cout << "  set GLOG_logtostderr=1" << std::endl;
   std::cout << "  set GLOG_minloglevel=0" << std::endl;
   std::cout << std::endl;

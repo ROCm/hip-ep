@@ -92,8 +92,5 @@ cd test; python gen_conv_model.py; python gen_conv_gemm_model.py; cd ..
 # Copy models to build output
 Copy-Item test\*.onnx ..\build\onnx-hipdnn-ep\bin\Release\
 
-# Set required environment variable
-$env:MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE = "1"
-
 # Run tests
 ..\build\onnx-hipdnn-ep\bin\Release\ort_integration_test.exe
