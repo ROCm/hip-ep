@@ -3,7 +3,7 @@
 # ** Licensed under the MIT License.
 ##
 
-message(STATUS "Configuring LLVM/MLIR for morphizen-hipdnn")
+message(STATUS "Configuring LLVM/MLIR for onnx-hipdnn-ep")
 
 # LLVM configuration options
 set(LLVM_ENABLE_PROJECTS "mlir" CACHE STRING "LLVM projects to build")
