@@ -37,12 +37,31 @@ MORPHIZEN_DLL_SPEC const NodeAttributes&
 node_get_attributes_ref(const Node& node);
 std::vector<int64_t> node_get_output_shape(const Node& node, int index);
 
+// Node input/output accessors
+std::vector<NodeInput> node_get_inputs(const Node& node);
+const NodeArg& node_get_output_node_arg(const Node& node);
+std::vector<const NodeArg*> node_get_output_node_args(const Node& node);
+const std::string& node_get_first_output_name(const Node& node);
+
 MORPHIZEN_DLL_SPEC const std::string& node_get_output_name(const Node& node);
 MORPHIZEN_DLL_SPEC bool node_is_op(const Node& node, const std::string& op_type,
                                    const std::string& domain);
 MORPHIZEN_DLL_SPEC int node_get_output_element_type(const Node& node);
 MORPHIZEN_DLL_SPEC const AttributeProto* node_get_attr(const Node& node,
                                                        const std::string& name);
+
+// Node attribute getters
+MORPHIZEN_DLL_SPEC int64_t node_get_attr_int(const Node& node,
+                                              const std::string& name);
+MORPHIZEN_DLL_SPEC gsl::span<const int64_t>
+node_get_attr_ints(const Node& node, const std::string& name);
+
+// Node string representation
+std::string node_as_string(const Node& node);
+
+// Node op type and domain
+MORPHIZEN_DLL_SPEC const std::string& node_op_type(const Node& node);
+MORPHIZEN_DLL_SPEC const std::string& node_op_domain(const Node& node);
 
 MORPHIZEN_DLL_SPEC const AttributeProto*
 node_attributes_get(const NodeAttributes& attributes, const std::string& name);

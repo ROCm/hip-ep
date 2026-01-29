@@ -13,12 +13,6 @@
 
 namespace morphizen {
 
-// Internal helper functions (not exported in headers)
-static std::string node_as_string(const Node& node);
-static std::vector<const NodeArg*> node_get_output_node_args(const Node& node);
-static std::vector<NodeInput> node_get_inputs(const Node& node);
-static const NodeArg& node_get_first_output_node_arg(const Node& node);
-static const std::string& node_get_first_output_name(const Node& node);
 
 template <typename C> static std::string node_args_as_string_tmpl(const C& c) {
   int index = 0;
@@ -51,7 +45,7 @@ static std::string node_outputs_as_string(const Node& node) {
   return node_args_as_string(node_get_output_node_args(node));
 }
 
-static std::string node_as_string(const Node& node) {
+std::string node_as_string(const Node& node) {
   std::ostringstream str;
   str << "@" << MORPHIZEN_ORT_API(node_get_index)(node) << " "
       << node_outputs_as_string(node) << " ";
@@ -65,7 +59,7 @@ static std::string node_as_string(const Node& node) {
   return str.str();
 }
 
-static std::vector<NodeInput> node_get_inputs(const Node& node) {
+std::vector<NodeInput> node_get_inputs(const Node& node) {
   return *MORPHIZEN_ORT_API(node_get_inputs_unsafe)(node);
 }
 
@@ -80,7 +74,7 @@ std::vector<const NodeArg*> node_get_input_node_args(const Node& node) {
 }
 
 // optional output return nullptr
-static std::vector<const NodeArg*> node_get_output_node_args(const Node& node) {
+std::vector<const NodeArg*> node_get_output_node_args(const Node& node) {
   return *MORPHIZEN_ORT_API(node_get_output_node_args_unsafe)(node);
 }
 const NodeArg& node_get_output_node_arg(const Node& node) {
@@ -90,7 +84,7 @@ const NodeArg& node_get_output_node_arg(const Node& node) {
   return *outputs[0];
 }
 
-static const NodeArg& node_get_first_output_node_arg(const Node& node) {
+const NodeArg& node_get_first_output_node_arg(const Node& node) {
   auto outputs = node_get_output_node_args(node);
   CHECK_GE(outputs.size(), 1u)
       << "at least 1 output needed: node=" << node_as_string(node);
@@ -129,7 +123,7 @@ const std::string& node_get_output_name(const Node& node) {
   return node_arg_get_name(output);
 }
 
-static const std::string& node_get_first_output_name(const Node& node) {
+const std::string& node_get_first_output_name(const Node& node) {
   const NodeArg& output = node_get_first_output_node_arg(node);
   return node_arg_get_name(output);
 }
