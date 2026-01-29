@@ -6,7 +6,7 @@
  */
 #include "google/protobuf/util/json_util.h"
 #include "morphizen/env_config.hpp"
-#include "morphizen/vaip.hpp"
+#include "morphizen/morphizen.hpp"
 #include "hipdnn.pb.h"
 #include <filesystem>
 #include <fstream>
@@ -19,8 +19,8 @@ DEF_ENV_PARAM(MORPHIZEN_MAX_FUSED_SUBGRAPH_NUM, "65535")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_HIPDNN) >= n)
 
 namespace {
-using namespace vaip_core;
-using namespace vaip_cxx;
+using namespace morphizen;
+using namespace morphizen_cxx;
 
 //=============================================================================
 // Helper Functions (MIOpen version)
@@ -269,7 +269,7 @@ struct Level1HipDnn {
       }
 
       auto node_idx = *it;
-      auto node = VAIP_ORT_API(graph_get_node)(ort_graph, node_idx);
+      auto node = MORPHIZEN_ORT_API(graph_get_node)(ort_graph, node_idx);
       auto node_ref = NodeConstRef::from_node(ort_graph, *node);
       MY_LOG(1) << "node_idx: " << node_idx << " node_name:" << node_ref.name();
       
@@ -294,9 +294,9 @@ struct Level1HipDnn {
         continue;
       }
       
-      auto input_data = vaip_cxx::NodeArgConstRef::from_node_arg(ort_graph, *conv_inputs[0].node_arg);
-      auto weight_data = vaip_cxx::NodeArgConstRef::from_node_arg(ort_graph, *conv_inputs[1].node_arg);
-      auto output_data = vaip_cxx::NodeArgConstRef::from_node_arg(ort_graph, *conv_output_node_args[0]);
+      auto input_data = NodeArgConstRef::from_node_arg(ort_graph, *conv_inputs[0].node_arg);
+      auto weight_data = NodeArgConstRef::from_node_arg(ort_graph, *conv_inputs[1].node_arg);
+      auto output_data = NodeArgConstRef::from_node_arg(ort_graph, *conv_output_node_args[0]);
       
       // Generate metadata (MIOpen version)
       std::string metadata_filename;
@@ -325,7 +325,7 @@ struct Level1HipDnn {
       // Add bias if present
       bool has_bias = conv_inputs.size() >= 3;
       if (has_bias) {
-        auto bias_data = vaip_cxx::NodeArgConstRef::from_node_arg(ort_graph, *conv_inputs[2].node_arg);
+        auto bias_data = NodeArgConstRef::from_node_arg(ort_graph, *conv_inputs[2].node_arg);
         inputs_list.push_back(bias_data.name());  // Bias (may be constant or dynamic)
       }
       
@@ -340,7 +340,7 @@ struct Level1HipDnn {
       }
       
       if (has_bias) {
-        auto bias_data = vaip_cxx::NodeArgConstRef::from_node_arg(ort_graph, *conv_inputs[2].node_arg);
+        auto bias_data = NodeArgConstRef::from_node_arg(ort_graph, *conv_inputs[2].node_arg);
         if (bias_data.is_constant()) {
           actual_constant_names.push_back(bias_data.name());
           MY_LOG(1) << "Bias is a constant initializer";
