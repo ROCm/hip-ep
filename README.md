@@ -177,6 +177,7 @@ This project includes ORT integration tests. For comprehensive testing instructi
 # From onnx-hipdnn-ep directory
 
 # 1. Generate test models
+pip install onnx  （If your environment don't have onnx）
 cd test && python gen_conv_model.py && python gen_conv_gemm_model.py
 
 # 2. Copy models to build output
