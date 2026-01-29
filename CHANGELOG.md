@@ -12,7 +12,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Created migration guide (`docs/MIGRATION_v19_to_v20.md`) for v19→v20 upgrade path
 - Added CHANGELOG.md to track project changes
 
 ## [20.0.0] - 2025-01-29
@@ -20,8 +19,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### BREAKING CHANGES
 
 This release systematically renames all "vaip" symbols to "morphizen" throughout the codebase. This is a **major breaking change** requiring recompilation of all dependent code.
-
-**See `docs/MIGRATION_v19_to_v20.md` for detailed migration instructions.**
 
 ### Changed
 

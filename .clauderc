@@ -205,20 +205,17 @@ ls ../../build/$(basename $PWD)/bin/
 
 ## Detailed Workflows
 
-For detailed step-by-step workflows, see `.clinerules/workflows/`:
+For detailed step-by-step workflows, see `docs/workflows/`:
 
-- **`sync-git.md`** - Commit changes and sync with remote repository
-- **`switch-to-main.md`** - Switch to main branch and update with latest changes
-- **`switch-to-pr.md`** - Switch to a PR branch, rebase, and sync
-- **`check-pr-merged.md`** - Check if PR is merged and cleanup branches
-- **`review-pr.md`** - Review pull requests using GitHub CLI
-- **`build-and-fix-build-errors.md`** - Build troubleshooting and error fixing
+- **`git-workflow.md`** - Git branch strategy, commits, and syncing with remote
+- **`pr-workflow.md`** - Pull request creation, review, and cleanup
+- **`build-workflow.md`** - Build troubleshooting and error fixing
 
 ---
 
 ## Critical Reminders
 
-- **Follow `.clinerules/git-rules.md`**: Verify feature branch before implementing and committing
+- **Follow `docs/workflows/git-workflow.md`**: Verify feature branch before implementing and committing
 - **Small, frequent commits** are preferred over large, infrequent ones
 - Use `--force-with-lease` instead of `--force` for safer force pushes
 - Run tests before pushing when possible

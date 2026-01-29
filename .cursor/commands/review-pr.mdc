@@ -40,6 +40,5 @@ tools/pr-review/submit_review.ps1 <PR_NUMBER> <approve|changes|comment>
 
 ## Documentation
 
-- Quick Start: `doc/pr-review/START_HERE.md`
-- Full Guide: `doc/pr-review/README.md`
-- Command Reference: `doc/pr-review/QUICK_REFERENCE.md`
+- PR Workflow Guide: `docs/workflows/pr-workflow.md`
+- Git Workflow: `docs/workflows/git-workflow.md`

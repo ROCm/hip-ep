@@ -52,5 +52,4 @@
 !/.claude/skills/**
 /.cline_storage/
 /.clinerules/*
-!/.clinerules/workflows/
 !/.clinerules/*.md
