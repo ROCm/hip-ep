@@ -4,7 +4,7 @@ A MLIR integration project for the MorphiZen framework.
 
 ## Overview
 
-This project provides a level-1 MLIR pass for the MorphiZen/VAIP framework. It serves as a template for MLIR-based graph transformations without pattern matching or protobuf dependencies.
+This project provides a level-1 MLIR pass for the MorphiZen framework. It serves as a template for MLIR-based graph transformations without pattern matching or protobuf dependencies.
 
 ## Project Structure
 
@@ -35,7 +35,7 @@ onnx-hipdnn-ep/
 ## Key Features
 
 - **Minimal Design**: No pattern matching, no protobuf dependencies
-- **Level-1 Pass**: Simple VAIP pass structure for MLIR integration
+- **Level-1 Pass**: Simple MorphiZen pass structure for MLIR integration
 - **Clean Architecture**: Based on morphizen-demo but simplified
 - **Ready for Extension**: Template for adding MLIR-based transformations
 
