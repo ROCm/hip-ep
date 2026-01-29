@@ -4,13 +4,9 @@
  */
 
 #pragma once
+#include <iosfwd>
 #include <stdexcept>
 #include <string>
-
-namespace morphizen {
-class IStreamReader;
-class IStreamWriter;
-} // namespace morphizen
 
 namespace morphizen_encryption {
 
@@ -22,8 +18,8 @@ public:
 };
 
 int has_encryption_support();
-void aes_encryption(const morphizen::IStreamReader& src,
-                    morphizen::IStreamWriter& dst, const std::string& key);
-void aes_decryption(const morphizen::IStreamReader& src,
-                    morphizen::IStreamWriter& dst, const std::string& key);
+void aes_encryption(std::istream& src, std::ostream& dst,
+                    const std::string& key);
+void aes_decryption(std::istream& src, std::ostream& dst,
+                    const std::string& key);
 } // namespace morphizen_encryption

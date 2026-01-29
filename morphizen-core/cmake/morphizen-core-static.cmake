@@ -88,8 +88,10 @@ add_library(${LIB_NAME} STATIC
   src/profile.cpp
   src/onnxruntime_morphizen_ep.cpp
   src/model_compatibility.cpp
-  src/file_stream.hpp
+  include/morphizen/file_stream.hpp
   src/file_stream.cpp
+  include/morphizen/temp_file_stream.hpp
+  src/temp_file_stream.cpp
   src/cleanup.hpp
   src/cleanup.cpp
   src/logger_adapter.hpp
@@ -141,7 +143,6 @@ target_include_directories(${LIB_NAME}
 set(MorphiZen_DEPS
   onnxruntime::onnxruntime
   protobuf::libprotobuf
-  vaip_io
   glog::glog
   morphizen::encryption
   morphizen::mem_binary

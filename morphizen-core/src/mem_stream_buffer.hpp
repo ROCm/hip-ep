@@ -108,4 +108,30 @@ private:
   // a buffer can be used by multiple streams
   std::shared_ptr<MemBuffer<T>> buffer_;
 };
+
+/**
+ * Write-only streambuf for std::vector<char>.
+ * Replaces IStreamWriter::from_bytes().
+ */
+class MemoryOutputStreambuf : public std::streambuf {
+public:
+  explicit MemoryOutputStreambuf(std::vector<char>& buffer) : buffer_(buffer) {}
+
+protected:
+  int_type overflow(int_type c) override {
+    if (c != traits_type::eof()) {
+      buffer_.push_back(static_cast<char>(c));
+    }
+    return c;
+  }
+
+  std::streamsize xsputn(const char* s, std::streamsize n) override {
+    buffer_.insert(buffer_.end(), s, s + n);
+    return n;
+  }
+
+private:
+  std::vector<char>& buffer_;
+};
+
 } // namespace morphizen

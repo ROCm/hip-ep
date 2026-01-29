@@ -5,11 +5,11 @@
 
 #pragma once
 
-#include "morphizen/morphizen_io.hpp"
 #include "morphizen/pass_context.pb.h"
 
 #include <filesystem>
 #include <gsl/span>
+#include <iosfwd>
 #include <memory>
 #include <optional>
 
@@ -290,7 +290,7 @@ public:
    * @return True if the tar file was successfully created, false otherwise.
    *
    */
-  virtual bool cache_files_to_tar_file(IStreamWriter& writer) const = 0;
+  virtual bool cache_files_to_tar_file(std::ostream& writer) const = 0;
   /**
    * @brief Creates a in-memory tar file from in-memory cache files
    *
@@ -310,7 +310,7 @@ public:
    * otherwise.
    *
    */
-  virtual bool tar_file_to_cache_files(class IStreamReader& src) = 0;
+  virtual bool tar_file_to_cache_files(std::istream& src) = 0;
   /**
    * @brief Creates a new instance of PassContext.
    *

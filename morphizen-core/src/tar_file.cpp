@@ -4,13 +4,13 @@
  */
 #define _CRT_SECURE_NO_WARNINGS
 #include "./tar_file.hpp"
-#include "./file_stream.hpp"
 #include "./tar_header.hpp"
 #include "morphizen/env_config.hpp"
 #include "morphizen/util.hpp"
 #include <algorithm>
 #include <fstream>
 #include <glog/logging.h>
+#include <morphizen/file_stream.hpp>
 DEF_ENV_PARAM(MORPHIZEN_ENABLE_TAR_MMAP, "1")
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE) >= n)

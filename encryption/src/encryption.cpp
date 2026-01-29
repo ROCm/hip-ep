@@ -4,17 +4,18 @@
  */
 
 #include "morphizen/encryption.hpp"
+#include <algorithm>
+#include <array>
+#include <glog/logging.h>
+#include <iostream>
 #include <memory>
+#include <vector>
 #ifdef WITH_OPENSSL
 #  include <openssl/aes.h>
 #  include <openssl/conf.h>
 #  include <openssl/err.h>
 #  include <openssl/evp.h>
 #endif
-#include "morphizen/morphizen_io.hpp"
-#include <algorithm>
-#include <array>
-#include <glog/logging.h>
 namespace morphizen_encryption {
 int has_encryption_support() {
 #ifdef WITH_OPENSSL
@@ -24,8 +25,7 @@ int has_encryption_support() {
 #endif
 }
 
-void aes_encryption(const morphizen::IStreamReader& src,
-                    morphizen::IStreamWriter& dst,
+void aes_encryption(std::istream& src, std::ostream& dst,
                     [[maybe_unused]] const std::string& key) {
 #ifdef WITH_OPENSSL
   // key
@@ -48,39 +48,49 @@ void aes_encryption(const morphizen::IStreamReader& src,
 
   if (1 != EVP_EncryptInit_ex(ctx, EVP_aes_256_ecb(), NULL,
                               (const unsigned char*)aes_256_key.data(), NULL)) {
+    EVP_CIPHER_CTX_free(ctx);
     throw EncryptionError("encryption initialization failed");
   }
+
   int len = 0;
   char buffer_out[READ_SIZE] = {0};
-  auto data_in = src.read(READ_SIZE);
-  while (data_in.has_value() && data_in->size() != 0) {
+  std::vector<char> buffer_in(READ_SIZE);
+
+  while (src.read(buffer_in.data(), READ_SIZE) || src.gcount() > 0) {
+    size_t read_size = src.gcount();
+    if (read_size == 0)
+      break;
+
     if (1 != EVP_EncryptUpdate(ctx, (unsigned char*)buffer_out, &len,
-                               (const unsigned char*)data_in.value().data(),
-                               (int)data_in->size())) {
+                               (const unsigned char*)buffer_in.data(),
+                               (int)read_size)) {
+      EVP_CIPHER_CTX_free(ctx);
       throw EncryptionError("encryption update failed");
     }
     dst.write(buffer_out, len);
-    data_in = src.read(READ_SIZE);
+    if (!dst.good()) {
+      EVP_CIPHER_CTX_free(ctx);
+      throw EncryptionError("write failed");
+    }
   }
+
   char evp_cipher_block[AES_BLOCK_SIZE];
   if (1 != EVP_EncryptFinal_ex(ctx, (unsigned char*)evp_cipher_block, &len)) {
+    EVP_CIPHER_CTX_free(ctx);
     throw EncryptionError("encryption finalization failed");
   }
   dst.write(evp_cipher_block, len);
   EVP_CIPHER_CTX_free(ctx);
-  return;
 #else
   LOG(WARNING) << "Since OpenSSL was not enabled during compilation, the "
                   "encryption feature will be disabled.";
-  for (auto buf = src.read(1024); buf; buf = src.read(1024)) {
-    auto write_size = dst.write(buf->data(), buf->size());
-    CHECK_EQ(write_size, buf->size());
+  char buffer[1024];
+  while (src.read(buffer, 1024) || src.gcount() > 0) {
+    dst.write(buffer, src.gcount());
   }
-  return;
 #endif
 }
-void aes_decryption(const morphizen::IStreamReader& src,
-                    morphizen::IStreamWriter& dst,
+void aes_decryption(std::istream& src, std::ostream& dst,
                     [[maybe_unused]] const std::string& key) {
 #ifdef WITH_OPENSSL
   // key
@@ -103,37 +113,47 @@ void aes_decryption(const morphizen::IStreamReader& src,
 
   if (1 != EVP_DecryptInit_ex(ctx, EVP_aes_256_ecb(), NULL,
                               (const unsigned char*)aes_256_key.data(), NULL)) {
+    EVP_CIPHER_CTX_free(ctx);
     throw EncryptionError("decryption initialization failed");
   }
+
   char buffer_out[READ_SIZE] = {0};
   int len = 0;
-  auto data_in = src.read(READ_SIZE);
-  while (data_in.has_value() && data_in->size() != 0) {
+  std::vector<char> buffer_in(READ_SIZE);
+
+  while (src.read(buffer_in.data(), READ_SIZE) || src.gcount() > 0) {
+    size_t read_size = src.gcount();
+    if (read_size == 0)
+      break;
+
     if (1 != EVP_DecryptUpdate(ctx, (unsigned char*)buffer_out, &len,
-                               (const unsigned char*)data_in.value().data(),
-                               (int)data_in->size())) {
+                               (const unsigned char*)buffer_in.data(),
+                               (int)read_size)) {
+      EVP_CIPHER_CTX_free(ctx);
       throw EncryptionError("decryption update failed");
     }
     dst.write(buffer_out, len);
-    data_in = src.read(READ_SIZE);
+    if (!dst.good()) {
+      EVP_CIPHER_CTX_free(ctx);
+      throw EncryptionError("write failed");
+    }
   }
-  char evp_cipher_block[AES_BLOCK_SIZE];
 
+  char evp_cipher_block[AES_BLOCK_SIZE];
   if (1 != EVP_DecryptFinal_ex(ctx, (unsigned char*)evp_cipher_block, &len)) {
+    EVP_CIPHER_CTX_free(ctx);
     throw EncryptionError("decryption finalization failed, maybe the "
                           "encryption key is incorrect.");
   }
   dst.write(evp_cipher_block, len);
   EVP_CIPHER_CTX_free(ctx);
-  return;
 #else
   LOG(WARNING) << "Since OpenSSL was not enabled during compilation, the "
                   "encryption feature will be disabled.";
-  for (auto buf = src.read(1024); buf; buf = src.read(1024)) {
-    auto write_size = dst.write(buf->data(), buf->size());
-    CHECK_EQ(write_size, buf->size());
+  char buffer[1024];
+  while (src.read(buffer, 1024) || src.gcount() > 0) {
+    dst.write(buffer, src.gcount());
   }
-  return;
 #endif
 }
 } // namespace morphizen_encryption

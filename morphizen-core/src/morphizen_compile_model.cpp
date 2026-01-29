@@ -474,22 +474,25 @@ std::shared_ptr<PassContextImp> initialize_context(
   return context;
 }
 static void get_ep_cache_context_common(PassContextImp& context,
-                                        IStreamWriter& dst) {
+                                        std::ostream& dst) {
   auto measure_get_ep_cache_context_embed_mode =
       context.measure("get_ep_cache_context_common");
-  auto reader = context_cache_files_to_tar_stream(context);
+  auto reader_temp = context_cache_files_to_tar_stream(context);
+  std::istream& reader = *reader_temp;
+
   auto encryption_key = context.context_proto.config().encryption_key();
   if (!encryption_key.empty()) {
-    reader = stream_filter(
-        *reader,
-        [](const IStreamReader& src, IStreamWriter& dst,
+    auto filtered = stream_filter(
+        reader,
+        [](std::istream& src, std::ostream& dst,
            const std::string& encryption_key) {
           morphizen_encryption::aes_encryption(src, dst, encryption_key);
         },
         encryption_key);
+    stream_copy(*filtered, dst);
+  } else {
+    stream_copy(reader, dst);
   }
-  stream_copy(*reader, dst);
-  return;
 }
 
 std::string get_ep_cache_context_embed_mode(PassContextImp& context) {
@@ -503,8 +506,9 @@ std::string get_ep_cache_context_embed_mode(PassContextImp& context) {
     return out;
   } else {
     std::vector<char> out;
-    auto dst = IStreamWriter::from_bytes(out); // TODO: add from_string.
-    get_ep_cache_context_common(context, *dst);
+    MemoryOutputStreambuf membuf(out);
+    std::ostream dst(&membuf);
+    get_ep_cache_context_common(context, dst);
     LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
         << "embed mode = 1, load cache directory  to tar memory " << out.size()
         << " bytes";
@@ -527,9 +531,9 @@ static std::string get_ep_cache_context_nonembed_mode(PassContextImp& context) {
     OrtSessionOptionEpContextFilePath_binay =
         context.get_dir_of_ep_context_model() /
         context.get_basename_of_ep_context_binary_file();
-    auto dst =
-        IStreamWriter::from_path(OrtSessionOptionEpContextFilePath_binay);
-    get_ep_cache_context_common(context, *dst);
+    std::ofstream dst(OrtSessionOptionEpContextFilePath_binay,
+                      std::ios::binary);
+    get_ep_cache_context_common(context, dst);
   }
   CHECK(OrtSessionOptionEpContextFilePath_binay.has_filename())
       << "OrtSessionOptionEpContextFilePath_binay has no filename";

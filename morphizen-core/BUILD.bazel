@@ -392,7 +392,6 @@ cc_library(
         "//encryption",
         "//morphizen-utils:morphizen_utils",
         "//vaip-ort-api-ext",
-        "//vaip_io",
         "//3rd-party:hash-library",
         "@glog",
         "@gsl",

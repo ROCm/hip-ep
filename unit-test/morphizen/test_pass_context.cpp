@@ -67,9 +67,9 @@ TEST_F(PassContextTest, ReadFileTest) {
     // Assert that the content of the file matches the expected content
     ASSERT_EQ(std::string(readResult->data(), readResult->size()), fileContent);
   }
-  auto tar_file_stream = morphizen::IStreamWriter::from_path(
-      CMAKE_CURRENT_BINARY_PATH / "ReadFileTest.tar");
-  passContext->cache_files_to_tar_file(*tar_file_stream);
+  std::ofstream tar_file_stream(CMAKE_CURRENT_BINARY_PATH / "ReadFileTest.tar",
+                                std::ios::binary);
+  passContext->cache_files_to_tar_file(tar_file_stream);
   // { // read it back from another pass context object.
   //   passContext->tar_file_to_cache_files(CMAKE_CURRENT_BINARY_PATH /
   //                                        "ReadFileTest.tar");
@@ -142,9 +142,9 @@ TEST_F(PassContextTest, TestEmptyFiles) {
         passContext->write_file(filename, gsl::make_span(fileContent));
 
     ASSERT_TRUE(writeResult);
-    auto tar_file_stream = morphizen::IStreamWriter::from_path(
-        CMAKE_CURRENT_BINARY_PATH / "TestEmptyFiles.tar");
-    passContext->cache_files_to_tar_file(*tar_file_stream);
+    std::ofstream tar_file_stream(
+        CMAKE_CURRENT_BINARY_PATH / "TestEmptyFiles.tar", std::ios::binary);
+    passContext->cache_files_to_tar_file(tar_file_stream);
     buffer = passContext->cache_files_to_tar_mem();
   }
   {

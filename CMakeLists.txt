@@ -16,7 +16,6 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/extra_functions.cmake)
 
 # Add utility library first (other projects may depend on it)
 add_subdirectory(morphizen-utils)
-add_subdirectory(morphizen-io)
 add_subdirectory(mem_binary)
 add_subdirectory(encryption)
 add_subdirectory(morphizen-ort-api-ext)

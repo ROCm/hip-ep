@@ -18,13 +18,9 @@ add_library(
 add_library(morphizen::encryption ALIAS ${LIB_NAME})
 set_target_properties(${LIB_NAME} PROPERTIES FOLDER morphizen/encryption)
 target_include_directories(${LIB_NAME}
-  PRIVATE
-    # compile time dependency on morphizen_io.hpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../morphizen-core/include
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
-target_link_libraries(${LIB_NAME} PUBLIC vaip_io)
 
 target_compile_options(${LIB_NAME} PRIVATE ${MORPHIZEN_COMPILER_OPTIONS})
 if(TARGET OpenSSL::SSL)
