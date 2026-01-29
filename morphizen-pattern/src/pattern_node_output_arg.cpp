@@ -39,7 +39,7 @@ PatternNodeOutputArg::match_uncached(const onnxruntime::Graph& graph,
   auto output_args_vec = node_ref.outputs();
   std::vector<const morphizen::NodeArg*> output_args;
   for (auto& opt_arg : output_args_vec) {
-    output_args.push_back(opt_arg.has_value() ? &opt_arg.value() : nullptr);
+    output_args.push_back(opt_arg.has_value() ? &(static_cast<const morphizen::NodeArg&>(opt_arg.value())) : nullptr);
   }
   CHECK_GE(output_args.size(), 1u)
       << "at least 1 output needed: node=" << node_ref.to_string();

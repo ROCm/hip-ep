@@ -19,6 +19,12 @@
 // Simple logging macro for graph operations
 #define MY_LOG(n) LOG(INFO)
 
+namespace morphizen {
+// Forward declarations for internal helper functions defined in node.cpp
+std::string node_as_string(const Node& node);
+std::vector<const NodeArg*> node_get_output_node_args(const Node& node);
+} // namespace morphizen
+
 // Wrapper functions for tensor_proto_new calls
 // These forward to MORPHIZEN_ORT_API and handle f32/f64 naming differences
 namespace {

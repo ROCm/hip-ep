@@ -48,6 +48,8 @@ graph_add_node(Graph& graph, const std::string& name,
 
 MORPHIZEN_DLL_SPEC std::vector<const NodeArg*>
 node_inputs_2_node_args(const std::vector<NodeInput>& inputs);
+MORPHIZEN_DLL_SPEC std::vector<const NodeArg*>
+graph_get_outputs(const Graph& graph);
 MORPHIZEN_DLL_SPEC void graph_set_name(Graph& graph, const std::string& name);
 
 // NOTE: NodeBuilder has been moved to vaip-core (node_builder.hpp)

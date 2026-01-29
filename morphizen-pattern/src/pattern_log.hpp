@@ -12,11 +12,11 @@
 #define MY_LOG(n) LOG(INFO)
 #define MATCH_FAILED MY_LOG(1) << "MATCH FAILED. ID=" << get_id() << ";"
 namespace morphizen {
-[[maybe_unused]] static std::string node_input_as_string(const NodeInput& ni) {
+[[maybe_unused]] static std::string node_input_as_string(const Graph& graph, const NodeInput& ni) {
   if (ni.node) {
-    return node_as_string(*ni.node);
+    return morphizen_cxx::NodeConstRef::from_node(graph, *ni.node).to_string();
   } else if (ni.node_arg) {
-    return node_arg_as_string(*ni.node_arg);
+    return morphizen_cxx::NodeArgConstRef::from_node_arg(graph, *ni.node_arg).to_string();
   }
   return "nil";
 }

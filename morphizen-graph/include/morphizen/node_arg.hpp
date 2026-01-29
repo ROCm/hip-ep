@@ -35,6 +35,17 @@
 namespace morphizen {
 
 MORPHIZEN_DLL_SPEC bool node_arg_exists(const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC const std::string&
+node_arg_get_name(const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC std::unique_ptr<std::vector<int64_t>>
+node_arg_get_shape_i64(const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC std::unique_ptr<std::vector<std::string>>
+node_arg_get_denotation(const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC int node_arg_get_element_type(const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC bool node_arg_is_unknown_shape(const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC bool node_arg_is_scalar(const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC bool node_arg_is_zero_shape(const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC bool node_arg_is_dynamic_shape(const NodeArg& node_arg);
 MORPHIZEN_DLL_SPEC const TensorProto&
 node_arg_get_const_data_as_tensor(const Graph& graph, const NodeArg& node_arg);
 MORPHIZEN_DLL_SPEC float
