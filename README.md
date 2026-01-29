@@ -143,10 +143,10 @@ cmake \
   -DHIP_PLATFORM=amd
 
 # Build Release version (recommended)
-cmake --build ../build/onnx-hipdnn-ep --config Release --target install
+cmake --build ../build/onnx-hipdnn-ep --config Release --target install --parallel
 
 # Or build Debug version
-cmake --build ../build/onnx-hipdnn-ep --config Debug --target install
+cmake --build ../build/onnx-hipdnn-ep --config Debug --target install --parallel
 ```
 
 This script demonstrates the steps to configure, build, and install the `onnx-hipdnn-ep` project.
