@@ -100,8 +100,7 @@ Once ONNXRuntime is built, you can build onnx-hipdnn-ep. LLVM/MLIR and MorphiZen
 cd onnx-hipdnn-ep
 
 # Configure with Visual Studio generator
-cmake -G "Visual Studio 17 2022" -A x64 \
-  -DBUILD_SHARED_LIBS=OFF \
+cmake -DBUILD_SHARED_LIBS=OFF \
   -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL \
   -S . -B ../build/onnx-hipdnn-ep \
   -DCMAKE_INSTALL_PREFIX=../local \
@@ -130,8 +129,8 @@ cmake --build ../build/onnxruntime/Release/ --target install
 
 # 2. Build onnx-hipdnn-ep (LLVM/MLIR and MorphiZen will be auto-fetched)
 cd ../onnx-hipdnn-ep
-cmake -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -S . -B ../build/onnx-hipdnn-ep -DCMAKE_INSTALL_PREFIX=../local -DCMAKE_PREFIX_PATH=$PWD/../local
-cmake --build ../build/onnx-hipdnn-ep --config Release
+cmake -A x64 -DBUILD_SHARED_LIBS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -S . -B ../build/onnx-hipdnn-ep -DCMAKE_INSTALL_PREFIX=../local -DCMAKE_PREFIX_PATH=$PWD/../local
+cmake --build ../build/onnx-hipdnn-ep --config Release --parallel
 ```
 
 ### Optional: Pre-build LLVM/MLIR
