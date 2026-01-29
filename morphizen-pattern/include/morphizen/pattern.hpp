@@ -51,10 +51,10 @@
  * matching, such as node inputs and argument handling.
  */
 #pragma once
-#include "./_sanity_check.hpp"
-#include "graph.hpp"
-#include "node.hpp"
-#include "node_input.hpp"
+#include "morphizen/_sanity_check.hpp"
+#include "morphizen/graph.hpp"
+#include "morphizen/node.hpp"
+#include "morphizen/node_input.hpp"
 #include <functional>
 #include <initializer_list>
 #include <map>

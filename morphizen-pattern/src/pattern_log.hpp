@@ -3,12 +3,13 @@
  * Licensed under the MIT License.
  */
 #pragma once
-#include "morphizen/env_config.hpp"
 #include "morphizen/node.hpp"
 #include "morphizen/node_arg.hpp"
 #include <glog/logging.h>
-DEF_ENV_PARAM(DEBUG_VAIP_PATTERN, "0")
-#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_VAIP_PATTERN) >= n)
+
+// Simple logging for pattern matching (debug level can be controlled via glog
+// flags)
+#define MY_LOG(n) LOG(INFO)
 #define MATCH_FAILED MY_LOG(1) << "MATCH FAILED. ID=" << get_id() << ";"
 namespace vaip_core {
 [[maybe_unused]] static std::string node_input_as_string(const NodeInput& ni) {

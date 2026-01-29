@@ -8,7 +8,6 @@ set(PROTO_FILES
   src/capability.proto
   src/pass_context.proto
   src/version.proto
-  src/pattern.proto
   src/model_compatibility.proto
 )
 set(PROTO_SRCS "")

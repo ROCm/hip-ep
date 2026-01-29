@@ -3,16 +3,7 @@
  * Licensed under the MIT License.
  */
 
-// env_config.hpp must be included before pass.hpp
-// otherwise it is an error, in pass_context.hpp
-//
-// return ::morphizen::env_config_helper<
-//     decltype(env_name::value)>::from_string(p);
-//
-// we cannot add env_config.hpp into vaip.hpp, otherwise macro
-// ENV_PARAM conflicts with vart
 #include "morphizen/node_input.hpp"
-#include "morphizen/env_config.hpp"
 #include <cstdint>
 
 namespace vaip_cxx {

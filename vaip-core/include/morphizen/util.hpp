@@ -4,7 +4,7 @@
  */
 
 #pragma once
-#include "./_sanity_check.hpp"
+#include "morphizen/_sanity_check.hpp"
 #include <filesystem>
 #include <morphizen/vaip_io.hpp>
 #include <sstream>

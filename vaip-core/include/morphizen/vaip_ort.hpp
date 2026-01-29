@@ -4,7 +4,7 @@
  */
 
 #pragma once
-#include "./_sanity_check.hpp"
+#include "morphizen/_sanity_check.hpp"
 #if __has_include(<filesystem>)  && __cplusplus > 201700
 #  include <filesystem>
 #else

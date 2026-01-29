@@ -75,7 +75,8 @@ create_action_from_node_action(IPass::node_action_t node_action) {
       (
           graph, leaf_nodes, nullptr,
           [&](const Node* node) {
-            auto node_idx = VAIP_ORT_API(node_get_index)(*node);
+            auto node_ref = vaip_cxx::NodeConstRef::from_node(graph, *node);
+            auto node_idx = node_ref.index();
             modified = node_action(self, graph, *node);
             if (modified) {
               match_idx = (int)node_idx;
@@ -89,13 +90,13 @@ create_action_from_node_action(IPass::node_action_t node_action) {
 #else
       try {
         auto leaf_nodes = graph_get_output_nodes(graph);
-        VAIP_ORT_API(graph_reverse_dfs_from)
-        (
+        vaip_core::graph_reverse_dfs_from_multi(
             graph,   //
-            leaf_nodes,
+            gsl::make_span(leaf_nodes),
             nullptr, //
             [&](const Node* node) {
-              auto node_idx = VAIP_ORT_API(node_get_index)(*node);
+              auto node_ref = vaip_cxx::NodeConstRef::from_node(graph, *node);
+              auto node_idx = node_ref.index();
               modified = node_action(self, graph, *node);
               if (modified) {
                 match_idx = (int)node_idx;
@@ -254,14 +255,14 @@ void Pass::maybe_dump_onnx(int action_index, const Graph& graph) const {
   if (!std::filesystem::exists(basedir)) {
     std::filesystem::create_directories(basedir);
   }
-  VAIP_ORT_API(graph_save)
-  (graph, filepath.u8string(), dat_filepath,
+  auto graph_ref = vaip_cxx::GraphConstRef(graph);
+  graph_ref.save(filepath, dat_filepath,
 #if VAIP_ORT_API_MAJOR >= 7
-   // `mode_clone` is already optimized so that constant intializers are
-   // shared with the original graph.
-   std::numeric_limits<size_t>::max()
+                 // `mode_clone` is already optimized so that constant
+                 // intializers are shared with the original graph.
+                 std::numeric_limits<size_t>::max()
 #else
-   128u
+                 128u
 #endif
   );
 }
@@ -481,14 +482,18 @@ const Node& Pass::level_2_fuse(Graph& graph, const MetaDefProto& meta_def) {
                                meta_def.constant_initializers().end()};
   auto nodes = std::vector<size_t>();
   nodes.reserve(meta_def.nodes_size());
+  auto graph_ref = vaip_cxx::GraphConstRef(graph);
   for (auto& first_node_arg_name : meta_def.nodes()) {
-    auto node =
-        VAIP_ORT_API(graph_producer_node)(graph, first_node_arg_name); //
-    CHECK(node != nullptr) << "cannot find node: " << first_node_arg_name;
-    nodes.push_back(VAIP_ORT_API(node_get_index)(*node));
+    auto node_arg_opt = graph_ref.find_node_arg(first_node_arg_name);
+    CHECK(node_arg_opt.has_value())
+        << "cannot find node arg: " << first_node_arg_name;
+    auto node_opt = node_arg_opt.value().find_producer();
+    CHECK(node_opt.has_value())
+        << "cannot find producer node: " << first_node_arg_name;
+    nodes.push_back(node_opt.value().index());
   }
-  const Node& ret = VAIP_ORT_API(graph_fuse)(
-      graph, name, op_type, nodes, inputs, outputs, constant_initializers);
+  const Node& ret = vaip_core::graph_fuse(graph, name, op_type, nodes, inputs,
+                                          outputs, constant_initializers);
   graph_resolve(graph);
   return ret;
 }
@@ -518,14 +523,14 @@ MetaDefProto& Pass::fuse(Graph& graph, const std::string& name,
   for (auto& constant_initializer : constant_initializers) {
     meta_def->add_constant_initializers(constant_initializer);
   }
+  auto graph_ref = vaip_cxx::GraphConstRef(graph);
   for (auto n : nodes) {
-    auto node = VAIP_ORT_API(graph_get_node)(graph, n);
-    CHECK(node != nullptr) << "cannot find node: " << n;
-    meta_def->add_nodes(node_get_first_output_name(*node));
+    auto node_ref = graph_ref.node(n);
+    meta_def->add_nodes(node_get_first_output_name(*node_ref.ptr()));
   }
   meta_def->set_device(device);
-  VAIP_ORT_API(graph_fuse)
-  (graph, name, op_type, nodes, inputs, outputs, constant_initializers);
+  vaip_core::graph_fuse(graph, name, op_type, nodes, inputs, outputs,
+                        constant_initializers);
   return *meta_def;
 }
 

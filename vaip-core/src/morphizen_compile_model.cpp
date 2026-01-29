@@ -284,8 +284,8 @@ void compile_onnx_model_2(std::shared_ptr<PassContextImp> context,
     if (po_threshold) {
       threshold = std::stoll(po_threshold.value());
     }
-    auto cloned_model = model_clone(model, threshold);
-    auto& cloned_graph = VAIP_ORT_API(model_main_graph)(*cloned_model);
+    auto cloned_model = vaip_core::model_clone(model, threshold);
+    auto& cloned_graph = vaip_core::model_main_graph(*cloned_model);
     auto deferred_collect =
         std::shared_ptr<void>(nullptr, [context, &onnx_graph](void* /*p*/) {
           collect_stat_and_dump(*context, onnx_graph);
@@ -364,26 +364,27 @@ get_model_signature_with_graph_inputs_and_outputs(const Graph& onnx_graph) {
 
 static std::string get_model_signature(const Graph& onnx_graph) {
   auto md5 = MD5Sig(".data");
-  for (auto node_idx : graph_get_node_in_topoligical_order(onnx_graph)) {
+  auto graph_ref = vaip_cxx::GraphConstRef(onnx_graph);
+  for (auto node_idx :
+       vaip_core::graph_get_node_in_topoligical_order(onnx_graph)) {
     auto node = VAIP_ORT_API(graph_get_node)(onnx_graph, node_idx);
-    auto op_type = node_op_type(*node);
+    CHECK(node != nullptr) << "node_idx " << node_idx;
+    auto node_ref = vaip_cxx::NodeConstRef::from_node(onnx_graph, *node);
+    auto op_type = node_ref.op_type();
     const auto& skip_op = ENV_PARAM(XLNX_MD5_SIG_SKIP_OPS);
     if (std::find(skip_op.begin(), skip_op.end(), op_type) != skip_op.end()) {
       continue;
     }
-    CHECK(node != nullptr) << "node_idx " << node_idx << " ";
-    auto output = node_get_output_node_args(*node);
-    for (auto& node_arg : output) {
-      if (node_arg == nullptr) {
+    auto output = node_ref.outputs();
+    for (auto& node_arg_opt : output) {
+      if (!node_arg_opt.has_value()) {
         continue;
       }
-      if (!node_arg_exists(*node_arg)) {
-        continue;
-      }
-      auto node_arg_name = node_arg_get_name(*node_arg);
+      auto& node_arg = node_arg_opt.value();
+      auto node_arg_name = node_arg.name();
       md5.add(node_arg_name.data(), node_arg_name.size());
 
-      auto shape = node_arg_get_shape_i64(*node_arg);
+      auto shape = node_arg.shape();
       if (shape && !shape->empty()) {
         md5.add(shape->data(), shape->size() * sizeof(shape->at(0)));
       }
@@ -441,9 +442,9 @@ initialize_context(const std::string& model_path, const Graph& onnx_graph,
   if (!context->context_proto.config().cache_key().empty()) {
     MY_LOG(1) << "use cache key specified by user "
               << context->context_proto.config().cache_key();
-  } else if (VAIP_ORT_API(model_has_meta_data)(model, "vaip_model_md5sum")) {
+  } else if (vaip_cxx::ModelConstRef(model).has_metadata("vaip_model_md5sum")) {
     auto new_cache_key =
-        *VAIP_ORT_API(model_get_meta_data)(model, "vaip_model_md5sum");
+        vaip_cxx::ModelConstRef(model).get_metadata("vaip_model_md5sum");
     MY_LOG(1) << "use cache key in meta-data " << new_cache_key;
     *context->context_proto.mutable_config()->mutable_cache_key() =
         new_cache_key;
@@ -471,9 +472,9 @@ initialize_context(const std::string& model_path, const Graph& onnx_graph,
                                        context->target_proto_.get(), context);
   }
 
-  if (VAIP_ORT_API(model_has_meta_data)(model, "suffix_counter")) {
-    context->suffix_counter =
-        std::stoi(*VAIP_ORT_API(model_get_meta_data)(model, "suffix_counter"));
+  if (vaip_cxx::ModelConstRef(model).has_metadata("suffix_counter")) {
+    context->suffix_counter = std::stoi(
+        vaip_cxx::ModelConstRef(model).get_metadata("suffix_counter"));
   }
   update_cache_dir(*context);
   // DANGER!

@@ -26,22 +26,26 @@
 #    define VAIP_USER VAIP_USER__PASS
 #  endif
 #endif
-#include "./provider_option_keys.hpp"
+#include "morphizen/provider_option_keys.hpp"
 #if VAIP_USER == VAIP_USER__PASS
-#  include "./graph.hpp"
-#  include "./guess_reshape.hpp"
-#  include "./model.hpp"
-#  include "./node_arg.hpp"
-#  include "./pass.hpp"
-#  include "./rewrite_rule.hpp"
+#  include "morphizen/graph.hpp"
+#  include "morphizen/graph_extensions.hpp"
+#  include "morphizen/guess_reshape.hpp"
+#  include "morphizen/model.hpp"
+#  include "morphizen/node_arg.hpp"
+#  include "morphizen/node_builder.hpp"
+#  include "morphizen/pass.hpp"
+#  if MORPHIZEN_HAS_PATTERN_MATCHING
+#    include "morphizen/rewrite_rule.hpp"
+#  endif
 #  include "./tensor_proto.hpp"
 #  include "./util.hpp"
 #  include "./vaip_plugin.hpp"
 #endif
 
-#include "./op_def.hpp"
-#include "./vaip_core.hpp"
-#include "./with_current_graph.hpp"
+#include "morphizen/op_def.hpp"
+#include "morphizen/vaip_core.hpp"
+#include "morphizen/with_current_graph.hpp"
 #include <vaip/my_ort.h>
 #include <vaip/vaip_ort_api.h>
 #if VAIP_USER == VAIP_USER__ORT_VITIS_AI_EP

@@ -32,6 +32,10 @@ endif(MSVC)
 # onnxruntime_morphizen_ep.def file. tools/parse_cl_link_error.py is
 # used to parse the link error and update onnxruntime_morphizen_ep.def
 # automatically, see tools/parse_cl_link_error.py for more details.
+#
+# morphizen-graph and morphizen-pattern are already linked transitively
+# through morphizen-core-static, so we don't link them directly here
+# to avoid "link item occurred with different features" errors.
 target_link_libraries(${morphizen_CORE_DYNAMIC_UNIQUE_ID}
   PRIVATE
   morphizen-core-static

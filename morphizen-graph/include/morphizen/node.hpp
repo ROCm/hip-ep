@@ -3,6 +3,25 @@
  * Licensed under the MIT License.
  */
 
+/// @file node.hpp
+/// @brief C++ wrapper utilities for node operations over VAIP_ORT_API
+///
+/// This file provides C++ wrappers for node-related operations in the
+/// computational graph. A node represents an operator/operation in the
+/// graph (e.g., Conv, Relu, MatMul).
+///
+/// All operations are forwarded to the active backend implementation via
+/// the VAIP_ORT_API function pointer table.
+///
+/// Example:
+/// @code
+///   const Node& node = ...;
+///   std::string op = node_op_type(node);           // Get operation type
+///   auto inputs = node_get_inputs(node);            // Get input nodes
+///   auto attrs = node_get_attributes_ref(node);     // Get node attributes
+///   bool is_conv = node_is_op(node, "Conv", "");   // Check if Conv op
+/// @endcode
+
 #pragma once
 #include "./_sanity_check.hpp"
 #include "./node_arg.hpp"
@@ -64,6 +83,14 @@ node_attributes_get(const NodeAttributes& attributes, const std::string& name);
 VAIP_DLL_SPEC const std::string& node_op_type(const Node& node);
 VAIP_DLL_SPEC const std::string& node_op_domain(const Node& node);
 VAIP_DLL_SPEC NodeAttributesPtr node_clone_attributes(const Node& node);
+
+/** @brief Get the index of a node in the graph
+ *
+ * @param node The node to query
+ * @return The node's index in the graph
+ */
+VAIP_DLL_SPEC size_t node_get_index(const Node& node);
+
 } // namespace vaip_core
 
 namespace vaip_cxx {

@@ -4,17 +4,17 @@
  */
 
 #pragma once
-#include "./_sanity_check.hpp"
-#include "./node_attr.hpp"
+#include "morphizen/_sanity_check.hpp"
 #include "morphizen/node.hpp"
 #include "morphizen/node_arg.hpp"
+#include "morphizen/node_attr.hpp"
 #include <type_traits>
 #include <vaip/my_ort.h>
 #include <vaip/vaip_ort_api.h>
 #ifdef _WIN32
 #  pragma warning(push, 0)
 #endif
-#include "./pass_context.hpp"
+#include "morphizen/pass_context.hpp"
 #ifdef _WIN32
 #  pragma warning(pop)
 #endif

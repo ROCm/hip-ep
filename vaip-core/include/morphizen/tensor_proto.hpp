@@ -10,7 +10,7 @@
  */
 
 #pragma once
-#include "./_sanity_check.hpp"
+#include "morphizen/_sanity_check.hpp"
 #include <filesystem>
 #include <sstream>
 #include <vaip/my_ort.h>

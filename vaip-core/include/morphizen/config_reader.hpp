@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#include "./vaip.hpp"
+#include "morphizen/vaip.hpp"
 #include "onnxruntime_api.hpp"
 #include <cstdint>
 #include <string>

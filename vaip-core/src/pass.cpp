@@ -16,7 +16,7 @@ void IPass::create_const(const Node& node, gsl::span<const char> data) {
   auto& arg = node_get_output_node_arg(node);
   auto shape = node_arg_get_shape_i64(arg);
   CHECK(shape != nullptr) << node_arg_as_string(arg) << " shape absent";
-  auto type = VAIP_ORT_API(node_arg_get_element_type)(arg);
+  auto type = node_arg_get_element_type(arg);
   create_const(name.c_str(), data, *shape, type);
 }
 
@@ -25,7 +25,7 @@ void IPass::create_empty_const(const Node& node, size_t size) {
   auto& arg = node_get_output_node_arg(node);
   auto shape = node_arg_get_shape_i64(arg);
   CHECK(shape != nullptr) << node_arg_as_string(arg) << " shape absent";
-  auto type = VAIP_ORT_API(node_arg_get_element_type)(arg);
+  auto type = node_arg_get_element_type(arg);
   create_empty_const(name.c_str(), size, *shape, type);
 }
 void IPass::create_lazy_const(
@@ -34,7 +34,7 @@ void IPass::create_lazy_const(
   auto& arg = node_get_output_node_arg(node);
   auto shape = node_arg_get_shape_i64(arg);
   CHECK(shape != nullptr) << node_arg_as_string(arg) << " shape absent";
-  auto type = VAIP_ORT_API(node_arg_get_element_type)(arg);
+  auto type = node_arg_get_element_type(arg);
   create_lazy_const(node_get_output_name(node).c_str(), size, *shape, type,
                     lazy);
 }
@@ -110,8 +110,12 @@ static bool node_arg_is_graph_input(const Graph& graph,
 }
 static bool node_arg_is_initializer(const Graph& graph,
                                     const std::string& node_arg_name) {
-  auto all_initializer = VAIP_ORT_API(graph_get_all_initialized_tensors)(graph);
-  return all_initializer.count(node_arg_name) > 0;
+  auto graph_ref = vaip_cxx::GraphConstRef(graph);
+  auto all_initializer = graph_ref.constant_initializers();
+  return std::any_of(all_initializer.begin(), all_initializer.end(),
+                     [&node_arg_name](const auto& init) {
+                       return init.name() == node_arg_name;
+                     });
 }
 
 // return values are Node found by node_arg name and the node_arg names
@@ -130,8 +134,16 @@ node_arg_names_to_nodes(const Graph& graph,
   std::stringstream ss;
   auto ret = std::vector<const Node*>();
   ret.reserve(node_arg_names.size());
+  auto graph_ref = vaip_cxx::GraphConstRef(graph);
   for (auto& onnx_node_arg_name : node_arg_names) {
-    auto deq = VAIP_ORT_API(graph_producer_node)(graph, onnx_node_arg_name);
+    auto node_arg_opt = graph_ref.find_node_arg(onnx_node_arg_name);
+    const Node* deq = nullptr;
+    if (node_arg_opt.has_value()) {
+      auto producer_opt = node_arg_opt.value().find_producer();
+      if (producer_opt.has_value()) {
+        deq = producer_opt.value().ptr();
+      }
+    }
     // NOTE: todo: potentially deq could be nullptr if node_arg is a
     // constant initializer or graph inputs.
     if (deq == nullptr) {
@@ -166,8 +178,13 @@ node_args_names_to_node_arg(const Graph& graph,
                             const std::vector<const NodeArg*>& graph_inputs,
                             const std::vector<std::string>& input_names) {
   std::unordered_set<const NodeArg*> ret;
+  auto graph_ref = vaip_cxx::GraphConstRef(graph);
   for (const auto& input_name : input_names) {
-    auto node_arg = VAIP_ORT_API(graph_get_node_arg)(graph, input_name);
+    auto node_arg_opt = graph_ref.find_node_arg(input_name);
+    if (!node_arg_opt.has_value()) {
+      continue;
+    }
+    auto node_arg = node_arg_opt.value().ptr();
     bool intersection = false;
     for (auto graph_input : graph_inputs) {
       intersection = intersection || graph_input == node_arg;
@@ -219,13 +236,21 @@ calculate_arguments(const Graph& graph, const Node& input_node,
   auto ret = std::vector<std::string>();
   auto args = node_get_input_node_args(input_node);
   auto graph_inputs = graph_get_inputs(graph);
+  auto graph_ref = vaip_cxx::GraphConstRef(graph);
   for (auto arg : args) {
     if (!node_arg_exists(*arg)) {
       // testcase : hrnet_w18_small, optional node input
       continue;
     }
     auto& arg_name = node_arg_get_name(*arg);
-    auto producer = VAIP_ORT_API(graph_producer_node)(graph, arg_name);
+    auto node_arg_opt = graph_ref.find_node_arg(arg_name);
+    const Node* producer = nullptr;
+    if (node_arg_opt.has_value()) {
+      auto producer_opt = node_arg_opt.value().find_producer();
+      if (producer_opt.has_value()) {
+        producer = producer_opt.value().ptr();
+      }
+    }
     auto num_of_external_in_edges = 0;
     auto is_graph_input = std::find(graph_inputs.begin(), graph_inputs.end(),
                                     arg) != graph_inputs.end();
@@ -293,12 +318,11 @@ check_loop(const Graph& graph, const std::vector<const Node*>& input_nodes,
   for (auto input_node : input_nodes) {
     map_route[input_node] = {input_node};
   }
-  VAIP_ORT_API(graph_reverse_dfs_from)
-  (
+  vaip_core::graph_reverse_dfs_from_multi(
       // we start traval from inputs_nodes, and if we found any one of
       // input nodes depends on one of output nodes topolocially, then
       // a loop is detected.
-      graph, input_nodes,
+      graph, gsl::make_span(input_nodes),
       [&output_nodes, &ret, &map_route,
        &maybe_loop_path](const Node* current_node) mutable {
         auto hit_output = std::find(output_nodes.begin(), output_nodes.end(),
@@ -404,11 +428,10 @@ static std::vector<const Node*> graph_get_isolated_nodes(const Graph& graph) {
     }
   }
 
-  VAIP_ORT_API(graph_reverse_dfs_from)
-  (
-      graph,      //
-      leaf_nodes, //
-      nullptr,    //
+  vaip_core::graph_reverse_dfs_from_multi(
+      graph,                      //
+      gsl::make_span(leaf_nodes), //
+      nullptr,                    //
       [&all_nodes](const Node* n) mutable {
         all_nodes.erase(std::remove(all_nodes.begin(), all_nodes.end(), n),
                         all_nodes.end());
@@ -456,9 +479,8 @@ IPass_try_fuse(const Graph& graph, const std::string& name,
     return not_node_input;
   };
   auto hit_ceiling = false;
-  VAIP_ORT_API(graph_reverse_dfs_from)
-  (
-      graph, output_nodes,
+  vaip_core::graph_reverse_dfs_from_multi(
+      graph, gsl::make_span(output_nodes),
       [&body_nodes, &graph, &constant_initializers, &hit_ceiling,
        &trasverse_out_of_bound](const Node* node1) {
         if (!hit_ceiling) {
@@ -474,9 +496,12 @@ IPass_try_fuse(const Graph& graph, const std::string& name,
             // test case 18,  Resize_496, The second input to resize is
             // optional
             hit_ceiling = hit_ceiling || trasverse_out_of_bound(node_arg);
-            if (VAIP_ORT_API(node_arg_is_exists)(*node_arg) &&
-                VAIP_ORT_API(node_arg_is_constant)(graph, *node_arg)) {
-              constant_initializers.insert(node_arg_get_name(*node_arg));
+            if (node_arg_exists(*node_arg)) {
+              auto node_arg_ref =
+                  vaip_cxx::NodeArgConstRef::from_node_arg(graph, *node_arg);
+              if (node_arg_ref.is_constant()) {
+                constant_initializers.insert(node_arg_get_name(*node_arg));
+              }
             }
           }
         }

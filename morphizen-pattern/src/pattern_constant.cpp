@@ -5,7 +5,6 @@
 
 #include "./pattern_constant.hpp"
 #include <sstream>
-#include <vaip/vaip_ort_api.h>
 
 #include "./pattern_log.hpp"
 #include "morphizen/node.hpp"
@@ -35,12 +34,11 @@ PatternConstant::match_uncached(const onnxruntime::Graph& graph,
                                 const BinderBuilder& binder) const {
   auto ret = BinderBuilderPtr();
   if (node_input.node != nullptr) {
-    if (VAIP_ORT_API(node_op_type)(*node_input.node) == "Constant") {
+    if (node_op_type(*node_input.node) == "Constant") {
       ret = binder.add(this->get_id(), node_input);
     }
   } else {
-    bool is_constant =
-        VAIP_ORT_API(node_arg_is_constant)(graph, *node_input.node_arg);
+    bool is_constant = node_arg_is_constant(graph, *node_input.node_arg);
     if (is_constant) {
       ret = binder.add(this->get_id(), node_input);
     }

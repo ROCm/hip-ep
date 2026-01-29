@@ -9,6 +9,7 @@
 #include <glog/logging.h>
 
 #include "morphizen/graph.hpp"
+#include "morphizen/pass_context.hpp"
 #include <vaip/vaip_ort_api.h>
 
 #include "morphizen/env_config.hpp"

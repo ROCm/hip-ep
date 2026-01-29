@@ -123,16 +123,22 @@ int main(int argc, char* argv[]) {
       vaip_core::Pattern::enable_trace(1);
     }
     auto model = vaip_core::model_load(std::filesystem::path(file).u8string());
-    auto& graph = VAIP_ORT_API(model_main_graph)(*model);
+    auto model_ref = vaip_cxx::ModelConstRef(*model);
+    auto graph_ref = model_ref.main_graph();
+    auto& graph = graph_ref;
     vaip_core::graph_resolve(graph, true);
     if (!node_arg.empty()) {
-      auto node_found = VAIP_ORT_API(graph_producer_node)(graph, node_arg);
-      CHECK(node_found != nullptr)
+      auto node_arg_opt = graph_ref.find_node_arg(node_arg);
+      CHECK(node_arg_opt.has_value())
           << "cannot find node arg. node_arg=" << node_arg;
+      auto node_found = node_arg_opt.value().find_producer();
+      CHECK(node_found.has_value())
+          << "cannot find producer node for node_arg=" << node_arg;
     }
     for (auto index : vaip_core::graph_get_node_in_topoligical_order(graph)) {
-      auto node = VAIP_ORT_API(graph_get_node)(graph, index);
-      CHECK(node != nullptr);
+      auto node_opt = graph_ref.find_node(index);
+      CHECK(node_opt.has_value());
+      auto node = node_opt.value().ptr();
       auto this_node_arg_name = vaip_core::node_get_first_output_name(*node);
       // node_arg.empty() means user does not specify `-n` for
       // tracing, we try to search for all possible matched node.

@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 #pragma once
-#include "./vaip_ort.hpp"
+#include "morphizen/vaip_ort.hpp"
 #include <iostream>
 #include <vaip/vaip_ort_api.h>
 namespace vaip_core {

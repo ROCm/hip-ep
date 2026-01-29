@@ -3,9 +3,26 @@
  * Licensed under the MIT License.
  */
 
+/// @file graph.hpp
+/// @brief C++ wrapper utilities for graph operations over VAIP_ORT_API
+///
+/// This file provides C++ wrappers over the VAIP_ORT_API interface,
+/// offering type-safe, RAII-friendly graph manipulation APIs that work
+/// with any backend (onnx-ir-imp, mlir-imp, etc.).
+///
+/// The wrappers encapsulate the low-level function pointer interface
+/// and provide a clean C++ object model for:
+/// - Graph manipulation (GraphRef, GraphConstRef)
+/// - Node operations (via node.hpp)
+/// - NodeArg handling (via node_arg.hpp)
+/// - Node building (NodeBuilder for high-level construction)
+///
+/// All operations are forwarded to the active backend implementation
+/// via the VAIP_ORT_API function pointer table, allowing runtime
+/// backend selection while maintaining a consistent API.
+
 #pragma once
 #include "./_sanity_check.hpp"
-#include "./anchor_point.hpp"
 #include "./node.hpp"
 #include "./node_arg.hpp"
 #include "./node_attr.hpp"
@@ -15,6 +32,7 @@
 #include <optional>
 #include <vaip/my_ort.h>
 #include <vaip/vaip_gsl.h>
+
 namespace vaip_core {
 
 #ifndef VAIP_USE_DEPRECATED_API
@@ -31,291 +49,10 @@ graph_add_node(Graph& graph, const std::string& name,
 VAIP_DLL_SPEC std::vector<const NodeArg*>
 node_inputs_2_node_args(const std::vector<NodeInput>& inputs);
 VAIP_DLL_SPEC void graph_set_name(Graph& graph, const std::string& name);
-/**
- * @brief The NodeBuilder class is responsible for building nodes in a graph.
- *
- * The NodeBuilder class provides methods for constructing nodes with various
- * properties, such as operation type, input nodes, attributes, shape, and data
- * type. It also supports adding multiple outputs and optional outputs.
- */
-struct NodeBuilder {
-public:
-  /**
-   * @brief Constructs a NodeBuilder object.
-   *
-   * @param graph The graph to which the node belongs.
-   * @param pass The pass to which the node belongs.
-   */
-  VAIP_DLL_SPEC explicit NodeBuilder(Graph& graph, IPass& pass);
 
-  /**
-   * @brief Builds and returns the constructed node.
-   *
-   * @return The constructed node.
-   */
-  VAIP_DLL_SPEC const Node& build();
-
-  /**
-   * @brief Builds and returns the constructed node as a constant reference.
-   *
-   * @return The constructed node as a constant reference.
-   */
-  VAIP_DLL_SPEC vaip_cxx::NodeConstRef build_ex();
-
-  /**
-   * @brief Clones the given node and sets it as the current node being built.
-   *
-   * @param node The node to clone.
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder& clone_node(const Node& node);
-
-  /**
-   * @brief Clones the operation type of the given node and sets it as the
-   * current node being built.
-   *
-   * @param node The node from which to clone the operation type.
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder& clone_op_type(const Node& node);
-
-  /**
-   * @brief Sets the operation type of the current node being built.
-   *
-   * @param op_type The operation type.
-   * @param domain The domain of the operation type (default: "com.xilinx").
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder&
-  set_op_type(const std::string& op_type,
-              const std::string& domain = "com.xilinx");
-
-  /**
-   * @brief Clones the inputs of the given node and sets them as the inputs of
-   * the current node being built.
-   *
-   * @param node The node from which to clone the inputs.
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder& clone_inputs(const Node& node);
-
-  /**
-   * @brief Sets the input nodes of the current node being built.
-   *
-   * @param input_nodes The input nodes.
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder&
-  set_input_nodes(const std::vector<const Node*>& input_nodes);
-
-  /**
-   * @brief Sets the input node arguments of the current node being built.
-   *
-   * @param input_args The input node arguments.
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder&
-  set_input_node_args(const std::vector<const NodeArg*>& input_args);
-
-  /**
-   * @brief Sets the input node arguments for the NodeBuilder.
-   *
-   * This function sets the input node arguments for the NodeBuilder. The input
-   * arguments are provided as a vector of NodeArgConstRef objects.
-   *
-   * @param input_args The vector of NodeArgConstRef objects representing the
-   * input node arguments.
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder& set_input_node_args_ex(
-      const std::vector<vaip_cxx::NodeArgConstRef>& input_args);
-  /**
-   * @brief Appends the given node as an input to the current node being built.
-   *
-   * @param node The node to append as an input.
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder& append_input(const Node& node);
-
-  /**
-   * @brief Clones the attributes of the given node and sets them as the
-   * attributes of the current node being built.
-   *
-   * @param node The node from which to clone the attributes.
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder& clone_attrs(const Node& node);
-
-  /**
-   * @brief Returns the NodeAttributesBuilder object for modifying the
-   * attributes of the current node being built.
-   *
-   * @return The NodeAttributesBuilder object.
-   */
-  VAIP_DLL_SPEC NodeAttributesBuilder& get_attrs_builder();
-
-  /**
-   * @brief Clones the shape of the given node and sets it as the shape of the
-   * current node being built.
-   *
-   * @param node The node from which to clone the shape.
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder& clone_shape(const Node& node);
-
-  /**
-   * @brief Sets the shape of the current node being built.
-   *
-   * @param shape The shape of the node.
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder& set_shape(const gsl::span<const int64_t>& shape);
-
-  /**
-   * @brief Clones the shape of the given node argument and sets it as the shape
-   * of the current node being built.
-   *
-   * @param node_arg The node argument from which to clone the shape.
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder& clone_shape(const NodeArg& node_arg);
-
-  /**
-   * @brief Clones the data type of the given node and sets it as the data type
-   * of the current node being built.
-   *
-   * @param node The node from which to clone the data type.
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder& clone_data_type(const Node& node);
-
-  /**
-   * @brief Clones the data type of the given node argument and sets it as the
-   * data type of the current node being built.
-   *
-   * @param node_arg The node argument from which to clone the data type.
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder& clone_data_type(const NodeArg& node);
-
-  /**
-   * @brief Sets the data type of the current node being built.
-   *
-   * @param data_type The data type.
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder& set_data_type(const std::string& data_type);
-
-  /**
-   * @brief Sets the anchor point of the current node being built to the given
-   * node.
-   *
-   * @param node The node to set as the anchor point.
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder& set_anchor_point1(const Node& node);
-
-  /**
-   * @brief Sets the anchor point of the current node being built to the given
-   * node argument.
-   *
-   * @param node_arg The node argument to set as the anchor point.
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder& set_anchor_point1(const NodeArg& node);
-
-  /**
-   * @brief Sets the anchor point of the current node being built to the given
-   * node argument and description.
-   *
-   * @param node_arg The node argument to set as the anchor point.
-   * @param description The description of the anchor point.
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder&
-  set_anchor_point2(const NodeArg& node_arg,
-                    const AnchorPoint::Description& description);
-
-  /**
-   * @brief Sets the anchor point of the current node being built to the given
-   * node, description, and shape.
-   *
-   * @param node_arg The node argument to set as the anchor point.
-   * @param description The description of the anchor point.
-   * @param shape The shape of the anchor point.
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder&
-  set_anchor_point3(const NodeArg& node_arg,
-                    const AnchorPoint::Description& description,
-                    const std::vector<int64_t>& shape);
-
-  /**
-   * @brief Sets the anchor point of the current node being built to the given
-   * node, description, shape, and data type.
-   *
-   * @param node_arg The node argument to set as the anchor point.
-   * @param description The description of the anchor point.
-   * @param shape The shape of the anchor point.
-   * @param data_type The data type of the anchor point.
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder& set_anchor_point4(
-      const NodeArg& node_arg, const AnchorPoint::Description& description,
-      const std::vector<int64_t>& shape, const std::string& data_type);
-
-  /**
-   * @brief Adds an attribute with the given name and value to the current node
-   * being built.
-   *
-   * @tparam T The type of the attribute value.
-   * @param name The name of the attribute.
-   * @param value The value of the attribute.
-   * @return A reference to the NodeBuilder object.
-   */
-  template <typename T> NodeBuilder& add(const std::string& name, T&& value) {
-    if (name == "data_type" || name == "shape") {
-      assert(false &&
-             "data_type and shape are deprecated, please use set_anchor_point, "
-             "clone_shape, set_shape, clone_data_type, set_data_type instead");
-    }
-    attrs_builder_.add(name, std::forward<T>(value));
-    return *this;
-  }
-
-  /**
-   * @brief Adds an output to the current node being built.
-   *
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder& add_output();
-
-  /**
-   * @brief Skips the optional output of the current node being built.
-   *
-   * @return A reference to the NodeBuilder object.
-   */
-  VAIP_DLL_SPEC NodeBuilder& skip_optional_output();
-
-private:
-  Graph& graph_;
-  IPass* pass_;
-  std::string op_type_;
-  std::string description_;
-  std::vector<const NodeArg*> input_args_;
-  NodeAttributesPtr attrs_;
-  NodeAttributesBuilder attrs_builder_;
-  std::string domain_;
-  size_t num_of_outputs_ = 1u;
-  std::vector<std::vector<int64_t>> shape_;
-  std::vector<std::string> data_type_;
-  std::vector<std::unique_ptr<AnchorPoint>> anchor_point_;
-  std::vector<std::optional<vaip_cxx::NodeArgConstRef>> anchor_node_arg_;
-  // Cache producer nodes
-  // After node addition in MLIR, original nodes become inaccessible via
-  // graph_producer_node
-  std::vector<std::optional<vaip_cxx::NodeConstRef>> anchor_producer_node_;
-};
+// NOTE: NodeBuilder has been moved to vaip-core (node_builder.hpp)
+// It depends on IPass and AnchorPoint which are high-level vaip-core concepts.
+// This file contains only low-level graph wrappers over VAIP_ORT_API.
 
 const Model& graph_get_model(const Graph& graph);
 std::vector<const Node*> graph_nodes(const Graph& graph);
@@ -394,19 +131,147 @@ VAIP_DLL_SPEC void graph_gc(Graph& graph);
  */
 VAIP_DLL_SPEC void graph_resolve(Graph& graph, bool force = false);
 
-/** @brief replace a node arg.
+// NOTE: graph_replace_node_arg has been moved to vaip-core
+// It depends on IPass which is a vaip-core type
+
+/** @brief Get the producer node of a node argument
  *
- *  this function searchese for all consumers of node arg `from`, and
- *  make these consumers use `to` instead of `from`, it changes the
- *  topological structure of a graph and potentially introduces cyclic
- *  dependency. `graph_resolve` is invoked afterward, `graph_resolve`
- *  throw an exception if a cyclic dependency is detected.
+ * @param graph The graph to query
+ * @param node_arg_name Name of the node argument
+ * @return Pointer to the producer node, or nullptr if not found
  *
- *  @note this function is not stable. please use it with caution.
+ * Returns the node that produces the given node argument as output.
  */
-VAIP_DLL_SPEC void graph_replace_node_arg(const Graph& graph, const IPass& pass,
-                                          const NodeArg& from,
-                                          const NodeArg& to);
+VAIP_DLL_SPEC const Node* graph_producer_node(const Graph& graph,
+                                              const std::string& node_arg_name);
+
+/** @brief Get a node argument by name
+ *
+ * @param graph The graph to query
+ * @param name Name of the node argument
+ * @return Pointer to the node argument, or nullptr if not found
+ */
+VAIP_DLL_SPEC const NodeArg* graph_get_node_arg(const Graph& graph,
+                                                const std::string& name);
+
+/** @brief Get the name of a graph
+ *
+ * @param graph The graph to query
+ * @return The graph name
+ */
+VAIP_DLL_SPEC const std::string& graph_get_name(const Graph& graph);
+
+/** @brief Perform reverse DFS traversal from a node
+ *
+ * @param graph The graph to traverse
+ * @param node_index Starting node index
+ * @param enter Callback invoked when entering a node (return false to skip
+ * subtree)
+ * @param leave Callback invoked when leaving a node
+ * @param comp Comparator for traversal order (optional)
+ * @param subgraph_sensitive Whether to respect subgraph boundaries
+ *
+ * Traverses the graph in reverse DFS order starting from the given node.
+ */
+VAIP_DLL_SPEC void graph_reverse_dfs_from(
+    const Graph& graph, size_t node_index,
+    const std::function<bool(const Node*)>& enter,
+    const std::function<void(const Node*)>& leave,
+    const std::function<bool(const Node*, const Node*)>& comp = nullptr,
+    bool subgraph_sensitive = false);
+
+/** @brief Perform reverse DFS traversal from multiple nodes
+ *
+ * @param graph The graph to traverse
+ * @param from Starting nodes (multiple)
+ * @param enter Callback invoked when entering a node
+ * @param leave Callback invoked when leaving a node (optional)
+ * @param stop Callback to determine if traversal should stop along an edge
+ *
+ * Traverses the graph in reverse DFS order starting from multiple nodes.
+ * This is a low-level wrapper used by vaip-core for fusion analysis.
+ */
+VAIP_DLL_SPEC void graph_reverse_dfs_from_multi(
+    const Graph& graph, gsl::span<const Node* const> from,
+    const std::function<void(const Node*)>& enter,
+    const std::function<void(const Node*)>& leave,
+    const std::function<bool(const Node*, const Node*)>& stop);
+
+/** @brief Fuse nodes in the graph
+ *
+ * @param graph The graph to modify
+ * @param name Name for the fused node
+ * @param op_type Operation type for the fused node
+ * @param nodes Nodes to fuse
+ * @param inputs Input node arguments
+ * @param outputs Output node arguments
+ * @param attributes Node attributes (optional)
+ *
+ * Fuses multiple nodes into a single node, typically used for optimization.
+ */
+VAIP_DLL_SPEC void
+graph_fuse(Graph& graph, const std::string& name, const std::string& op_type,
+           const std::vector<const Node*>& nodes,
+           const std::vector<std::string>& inputs,
+           const std::vector<std::string>& outputs,
+           const std::vector<std::string>& constant_initializers = {});
+
+/** @brief Fuse nodes in the graph (low-level wrapper)
+ *
+ * @param graph The graph to modify
+ * @param name Name for the fused node
+ * @param op_type Operation type for the fused node
+ * @param nodes Node indices to fuse
+ * @param inputs Input node argument names
+ * @param outputs Output node argument names
+ * @param constant_initializers Constant initializer names
+ * @return Reference to the newly created fused node
+ *
+ * This is a low-level wrapper that takes node indices instead of node pointers.
+ * It directly wraps VAIP_ORT_API(graph_fuse) for use by vaip-core.
+ */
+VAIP_DLL_SPEC Node&
+graph_fuse(Graph& graph, const std::string& name, const std::string& op_type,
+           const std::vector<size_t>& nodes,
+           const std::vector<std::string>& inputs,
+           const std::vector<std::string>& outputs,
+           const std::vector<std::string>& constant_initializers);
+
+// Model operations (wrappers for model-level VAIP_ORT_API calls)
+// These allow vaip-core's Model class to use morphizen-graph wrappers
+// instead of calling VAIP_ORT_API directly
+
+/** @brief Get the main graph from a model
+ *
+ * @param model The model to query
+ * @return Reference to the main graph
+ */
+VAIP_DLL_SPEC Graph& model_main_graph(Model& model);
+
+/** @brief Get metadata from a model
+ *
+ * @param model The model to query
+ * @param key Metadata key
+ * @return Metadata value
+ */
+VAIP_DLL_SPEC const std::string& model_get_meta_data(const Model& model,
+                                                     const std::string& key);
+
+/** @brief Check if model has metadata
+ *
+ * @param model The model to query
+ * @param key Metadata key to check
+ * @return true if metadata exists, false otherwise
+ */
+VAIP_DLL_SPEC bool model_has_meta_data(const Model& model,
+                                       const std::string& key);
+
+/** @brief Clone a model
+ *
+ * @param model The model to clone
+ * @return Pointer to the cloned model
+ */
+VAIP_DLL_SPEC Model* model_clone(const Model& model);
 
 } // namespace vaip_core
 
@@ -572,40 +437,8 @@ public:
    * optional if not found.
    */
   std::optional<NodeArgConstRef> find_node_arg(const std::string& name) const;
-  /**
-   * Tries to fuse the specified operation into the graph.
-   *
-   * @param name The name of the operation to fuse.
-   * @param inputs The names of the input tensors.
-   * @param outputs The names of the output tensors.
-   * @param constant_initializers The names of the constant initializers.
-   * @param device The device to execute the fused operation on.
-   * @return A pair containing a unique pointer to the fused operation's
-   * metadata definition, i.e. MetaDefProto and an error code indicating the
-   * result of the fusion attempt.
-   *
-   * If MetaDefProto is nullptr, vaip_core::TryFuseError contains more details
-   * about why it is failed.
-   *
-   * MetaDefProto can be passed to GraphRef::fuse() to change the actual graph.
-   *
-   */
-  std::pair<std::unique_ptr<vaip_core::MetaDefProto>, vaip_core::TryFuseError>
-  try_fuse(const std::string& name, const std::vector<std::string>& inputs,
-           const std::vector<std::string>& outputs,
-           const std::vector<std::string>& constant_initializers,
-           const std::string& device) const;
-  /**
-   * @brief Fuses the subgraph based on the given meta definition.
-   *
-   * This function takes a `MetaDefProto` object as input and fuses the subgraph
-   * based on the provided meta definition. The fused subgraph is returned as a
-   * `Subgraph` object.
-   *
-   * @param meta_def The meta definition used for fusing the subgraph.
-   * @return The fused subgraph as a `Subgraph` object.
-   */
-  Subgraph virtual_fuse(const vaip_core::MetaDefProto& meta_def) const;
+  // NOTE: try_fuse and virtual_fuse have been moved to vaip-core
+  // They depend on MetaDefProto and TryFuseError which are vaip-core types
   /**
    * @brief Converts the graph to a string representation, for debugging purpose
    *
@@ -614,6 +447,27 @@ public:
   std::string to_string() const;
   VAIP_DLL_SPEC friend std::ostream& operator<<(std::ostream& os,
                                                 const GraphConstRef& graph);
+
+  /**
+   * @brief Performs reverse DFS traversal from a node
+   *
+   * @param node_index Starting node index
+   * @param enter Callback invoked when entering a node (return false to skip
+   * subtree)
+   * @param leave Callback invoked when leaving a node
+   * @param comp Comparator for traversal order (optional)
+   * @param subgraph_sensitive Whether to respect subgraph boundaries
+   *
+   * Traverses the graph in reverse DFS order starting from the given node.
+   * This is useful for walking dependencies backwards from a node.
+   */
+  void reverse_dfs_from(
+      size_t node_index,
+      const std::function<bool(const vaip_core::Node*)>& enter,
+      const std::function<void(const vaip_core::Node*)>& leave,
+      const std::function<bool(const vaip_core::Node*, const vaip_core::Node*)>&
+          comp = nullptr,
+      bool subgraph_sensitive = false) const;
 
 protected:
   /**
@@ -701,25 +555,8 @@ public:
    */
   bool resolve(bool force = false);
 
-  /**
-   * Fuses the given `meta_def` into a `NodeRef`.
-   *
-   * @param meta_def The `MetaDefProto` to fuse.
-   * @return The fused `NodeRef`.
-   *
-   * MetaDefProto is a protobuf message that represents a subgraph in the graph.
-   */
-  NodeRef fuse(const vaip_core::MetaDefProto& meta_def);
-  /**
-   * @brief Creates a NodeBuilder object.
-   *
-   * This function creates and returns a NodeBuilder object, which is used to
-   * build nodes in the graph.
-   *
-   * @param pass The pass object to use for building the node.
-   * @return The created NodeBuilder object.
-   */
-  vaip_core::NodeBuilder node_builder(vaip_core::IPass& pass);
+  // NOTE: fuse and node_builder have been moved to vaip-core
+  // They depend on MetaDefProto and IPass which are vaip-core types
   /** @brief save a graph to a file
    * this function is not a const member function, because when
    * `filter_out_special_tensor` is true, the constant initializers might be
@@ -1107,20 +944,19 @@ public:
 };
 class Subgraph {
 public:
-  const std::vector<NodeArgConstRef>& inputs() const { return inputs_; }
-  const std::vector<NodeArgConstRef>& outputs() const { return outputs_; }
-  const std::vector<NodeConstRef>& nodes() const { return nodes_; }
-  const std::vector<NodeArgConstRef>& constant_initializers() const {
-    return constant_initializers_;
-  }
-
-private:
   Subgraph(const std::vector<NodeArgConstRef>& inputs,
            const std::vector<NodeArgConstRef>& outputs,
            const std::vector<NodeConstRef>& nodes,
            const std::vector<NodeArgConstRef>& constant_initializers)
       : inputs_(inputs), outputs_(outputs), nodes_(nodes),
         constant_initializers_(constant_initializers) {}
+
+  const std::vector<NodeArgConstRef>& inputs() const { return inputs_; }
+  const std::vector<NodeArgConstRef>& outputs() const { return outputs_; }
+  const std::vector<NodeConstRef>& nodes() const { return nodes_; }
+  const std::vector<NodeArgConstRef>& constant_initializers() const {
+    return constant_initializers_;
+  }
 
   friend class GraphConstRef;
 

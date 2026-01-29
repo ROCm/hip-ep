@@ -2,16 +2,34 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-/**
- * @file node_input.hpp
- * @brief a node input represent a node argument
- * @date 2022-02-24
- *
- * An input could potentially be one of following
- * 1. a node output
- * 2. a constant initializer
- * 3. a graph input
- */
+/// @file node_input.hpp
+/// @brief NodeInput abstraction for pattern matching and graph traversal
+///
+/// This file provides the NodeInput class, which represents a node input
+/// in the computational graph. NodeInput combines a NodeArg (the value) with
+/// an optional Node (the producer), making it useful for:
+/// - Pattern matching (tracking matched nodes and their outputs)
+/// - Graph traversal (following data dependencies)
+/// - Input classification
+///
+/// An input could potentially be one of the following:
+/// 1. A node output (has both NodeArg and producer Node)
+/// 2. A constant initializer (has NodeArg but no producer Node)
+/// 3. A graph input (has NodeArg but no producer Node)
+///
+/// All operations work with any backend via the VAIP_ORT_API abstraction.
+///
+/// Example:
+/// @code
+///   NodeInput input = ...;
+///   NodeArgConstRef arg = input.as_node_arg();  // Get the value
+///   auto node = input.as_node();                 // Get producer (optional)
+///   if (node) {
+///     // Input is produced by a node
+///   } else {
+///     // Input is an initializer or graph input
+///   }
+/// @endcode
 #pragma once
 #include "./_sanity_check.hpp"
 #include "./graph.hpp"

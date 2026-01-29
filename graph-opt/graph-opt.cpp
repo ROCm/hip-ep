@@ -113,16 +113,17 @@ int main(int argc, char* argv[]) {
     }
 
     auto model = vaip_core::model_load(opt_input_file);
-    auto& graph = VAIP_ORT_API(model_main_graph)(*model);
+    auto model_ref = vaip_cxx::ModelConstRef(*model);
+    auto graph_ref = model_ref.main_graph();
+    auto& graph = graph_ref;
     graph_resolve(graph);
 
     IPass::run_passes(passes, graph);
 
     if (!opt_output_file.empty()) {
       LOG(INFO) << "write output file to " << opt_output_file;
-      VAIP_ORT_API(graph_save)
-      (graph, opt_output_file, opt_output_file + ".dat",
-       (std::numeric_limits<size_t>::max)());
+      graph_ref.save(opt_output_file, opt_output_file + ".dat",
+                     (std::numeric_limits<size_t>::max)());
     }
     if (!opt_output_txt_file.empty()) {
       LOG(INFO) << "write output file to " << opt_output_txt_file;

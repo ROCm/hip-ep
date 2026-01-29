@@ -9,6 +9,7 @@
 
 #include "morphizen/model.hpp"
 #include <glog/logging.h>
+#include <vaip/vaip_ort_api.h>
 
 namespace morphizen {
 
