@@ -57,8 +57,6 @@ MORPHIZEN_DLL_SPEC void graph_set_name(Graph& graph, const std::string& name);
 const Model& graph_get_model(const Graph& graph);
 std::vector<const Node*> graph_nodes(const Graph& graph);
 std::vector<const NodeArg*> graph_get_inputs(const Graph& graph);
-MORPHIZEN_DLL_SPEC std::vector<const NodeArg*>
-graph_get_outputs(const Graph& graph);
 MORPHIZEN_DLL_SPEC std::vector<const Node*>
 graph_get_output_nodes(const Graph& graph);
 
