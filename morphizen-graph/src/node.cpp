@@ -13,7 +13,6 @@
 
 namespace morphizen {
 
-
 template <typename C> static std::string node_args_as_string_tmpl(const C& c) {
   int index = 0;
   std::ostringstream str;
