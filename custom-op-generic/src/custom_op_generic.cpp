@@ -13,7 +13,7 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_CUSTOM_OP_GENERIC, "0")
 
 namespace morphizen {
 namespace custom_op_generic {
-using namespace vaip_core;
+using namespace morphizen;
 MyCustomOp::MyCustomOp(std::shared_ptr<const PassContext> context,
                        const std::shared_ptr<MetaDefProto>& meta_def,
                        onnxruntime::Model* model)

@@ -32,9 +32,9 @@ ModelUniquePtr IRConverterImp::to_onnx_model(const ApiPtrs& api_ptrs,
     MY_LOG(3) << "Add opset: " << domain << " with version: " << version;
   }
   auto model = ModelUniquePtr(
-      VAIP_ORT_API(create_empty_model)(model_path, opset_imports),
+      MORPHIZEN_ORT_API(create_empty_model)(model_path, opset_imports),
       [](onnxruntime::Model* model) {
-        VAIP_ORT_API(model_delete)
+        MORPHIZEN_ORT_API(model_delete)
         (model);
       });
   IRConverterImp converter(api_ptrs, graph);
@@ -42,10 +42,10 @@ ModelUniquePtr IRConverterImp::to_onnx_model(const ApiPtrs& api_ptrs,
   return model;
 }
 
-OrtStatus* IRConverterImp::convert_to_model(vaip_core::Model& model) const {
+OrtStatus* IRConverterImp::convert_to_model(morphizen::Model& model) const {
   // This is a stub implementation. Replace with actual conversion logic.
   MY_LOG(1) << "graph name =" << graph_.name();
-  auto& main_graph = VAIP_ORT_API(model_main_graph)(model);
+  auto& main_graph = MORPHIZEN_ORT_API(model_main_graph)(model);
 
   throw_if_error(convert_metadata(main_graph, model));
   throw_if_error(convert_graph(main_graph));
@@ -55,8 +55,8 @@ OrtStatus* IRConverterImp::convert_to_model(vaip_core::Model& model) const {
 
   return nullptr;
 }
-OrtStatus* IRConverterImp::convert_metadata(vaip_core::Graph& /*graph*/,
-                                            vaip_core::Model& model) const {
+OrtStatus* IRConverterImp::convert_metadata(morphizen::Graph& /*graph*/,
+                                            morphizen::Model& model) const {
   Ort::AllocatorWithDefaultOptions allocator;
   auto metadata = graph_.get_model_metadata();
   auto customized_keys = metadata.GetCustomMetadataMapKeysAllocated(allocator);
@@ -65,13 +65,13 @@ OrtStatus* IRConverterImp::convert_metadata(vaip_core::Graph& /*graph*/,
         metadata.LookupCustomMetadataMapAllocated(key.get(), allocator);
     auto cxx_key = std::string(key.get());
     auto cxx_value = std::string(value.get());
-    VAIP_ORT_API(model_set_meta_data)(model, cxx_key, cxx_value);
+    MORPHIZEN_ORT_API(model_set_meta_data)(model, cxx_key, cxx_value);
   }
   return nullptr;
 }
 
 void IRConverterImp::save_model_for_debugging(
-    const vaip_core::Model& model) const {
+    const morphizen::Model& model) const {
   // Save converted model to file if debug level > 4 and output file is
   // specified
   if (ENV_PARAM(MORPHIZEN_DEBUG_IR_CONVERTER) > 4) {
@@ -79,9 +79,9 @@ void IRConverterImp::save_model_for_debugging(
         ENV_PARAM(MORPHIZEN_DEBUG_IR_CONVERTER_OUTPUT_FILE);
     if (!output_file.empty()) {
       MY_LOG(4) << "Saving converted ONNX model to: " << output_file;
-      auto& main_graph =
-          VAIP_ORT_API(model_main_graph)(const_cast<vaip_core::Model&>(model));
-      VAIP_ORT_API(graph_save)
+      auto& main_graph = MORPHIZEN_ORT_API(model_main_graph)(
+          const_cast<morphizen::Model&>(model));
+      MORPHIZEN_ORT_API(graph_save)
       (main_graph, output_file, output_file + ".dat",
        std::numeric_limits<size_t>::max());
     } else {
@@ -92,10 +92,10 @@ void IRConverterImp::save_model_for_debugging(
   }
 }
 
-OrtStatus* IRConverterImp::convert_graph(vaip_core::Graph& graph) const {
+OrtStatus* IRConverterImp::convert_graph(morphizen::Graph& graph) const {
   MY_LOG(2) << "Converting ORT graph '" << graph_.name() << "' to ONNX graph";
   // Set basic graph properties
-  VAIP_ORT_API(graph_set_name)(graph, graph_.name());
+  MORPHIZEN_ORT_API(graph_set_name)(graph, graph_.name());
   // throw_if_error(convert_nodes(graph, graph_proto));
   // - Converting inputs
   throw_if_error(convert_graph_inputs(graph));
@@ -106,35 +106,35 @@ OrtStatus* IRConverterImp::convert_graph(vaip_core::Graph& graph) const {
   // - Converting outputs
   throw_if_error(convert_graph_outputs(graph));
   // - Resolve the graph
-  VAIP_ORT_API(graph_resolve)(graph, true);
+  MORPHIZEN_ORT_API(graph_resolve)(graph, true);
   MY_LOG(2) << "Graph conversion completed";
   return nullptr;
 }
 
-OrtStatus* IRConverterImp::convert_graph_inputs(vaip_core::Graph& graph) const {
+OrtStatus* IRConverterImp::convert_graph_inputs(morphizen::Graph& graph) const {
   MY_LOG(2) << "Converting graph inputs to ONNX format";
   // Get inputs from the ORT graph
   auto inputs = graph_.inputs();
-  auto new_inputs = std::vector<vaip_core::NodeArg*>();
+  auto new_inputs = std::vector<morphizen::NodeArg*>();
   new_inputs.reserve(inputs.size());
   for (const OrtValueInfo* input : inputs) {
     // Create ValueInfo wrapper for the input
     auto value_info =
         Ort::ConstValueInfo(input); // Create ONNX ValueInfoProto for the input
-    vaip_core::NodeArg* node_arg = nullptr;
+    morphizen::NodeArg* node_arg = nullptr;
     throw_if_error(convert_value_info_proto(value_info, graph, &node_arg));
     CHECK(node_arg != nullptr);
     new_inputs.push_back(node_arg);
     MY_LOG(3) << "Added input: " << value_info.GetName();
   }
-  VAIP_ORT_API(graph_set_inputs)(graph, new_inputs);
+  MORPHIZEN_ORT_API(graph_set_inputs)(graph, new_inputs);
   MY_LOG(2) << "Converted " << inputs.size() << " inputs";
   return nullptr;
 }
 
-std::vector<vaip_core::NodeArg*>
-IRConverterImp::guess_missing_output(std::vector<vaip_core::NodeArg*> outputs,
-                                     vaip_core::Graph& graph) const {
+std::vector<morphizen::NodeArg*>
+IRConverterImp::guess_missing_output(std::vector<morphizen::NodeArg*> outputs,
+                                     morphizen::Graph& graph) const {
 
   auto nodes = graph_.nodes();
   // collect all inputs
@@ -166,7 +166,7 @@ IRConverterImp::guess_missing_output(std::vector<vaip_core::NodeArg*> outputs,
         if (all_inputs.count(output) == 0) {
           // Create ValueInfo wrapper for the output
           auto value_info = Ort::ConstValueInfo(output);
-          vaip_core::NodeArg* node_arg = nullptr;
+          morphizen::NodeArg* node_arg = nullptr;
           throw_if_error(
               convert_value_info_proto(value_info, graph, &node_arg));
           CHECK(node_arg != nullptr);
@@ -183,17 +183,17 @@ IRConverterImp::guess_missing_output(std::vector<vaip_core::NodeArg*> outputs,
 }
 
 OrtStatus*
-IRConverterImp::convert_graph_outputs(vaip_core::Graph& graph) const {
+IRConverterImp::convert_graph_outputs(morphizen::Graph& graph) const {
   MY_LOG(2) << "Converting graph outputs to ONNX format";
   // Get outputs from the ORT graph
   auto outputs = graph_.outputs();
-  auto new_outputs = std::vector<vaip_core::NodeArg*>();
+  auto new_outputs = std::vector<morphizen::NodeArg*>();
   new_outputs.reserve(outputs.size());
   for (const OrtValueInfo* output : outputs) {
     // Create ValueInfo wrapper for the output
     auto value_info = Ort::ConstValueInfo(
         output); // Create ONNX ValueInfoProto for the output
-    vaip_core::NodeArg* node_arg = nullptr;
+    morphizen::NodeArg* node_arg = nullptr;
     throw_if_error(convert_value_info_proto(value_info, graph, &node_arg));
     CHECK(node_arg != nullptr);
     new_outputs.push_back(node_arg);
@@ -202,13 +202,13 @@ IRConverterImp::convert_graph_outputs(vaip_core::Graph& graph) const {
   // guess output
   new_outputs = guess_missing_output(new_outputs, graph);
 
-  VAIP_ORT_API(graph_set_outputs)(graph, new_outputs);
+  MORPHIZEN_ORT_API(graph_set_outputs)(graph, new_outputs);
   MY_LOG(2) << "Converted " << outputs.size() << " outputs";
   return nullptr;
 }
 
 OrtStatus*
-IRConverterImp::convert_graph_initializers(vaip_core::Graph& graph) const {
+IRConverterImp::convert_graph_initializers(morphizen::Graph& graph) const {
   MY_LOG(2) << "Converting graph initializers to ONNX format";
   // Get initializers from the ORT graph
   auto initializers = graph_.initializers();
@@ -248,24 +248,24 @@ IRConverterImp::convert_graph_initializers(vaip_core::Graph& graph) const {
     // std::string external_data_location =
     //     "#" + std::to_string(reinterpret_cast<uintptr_t>(tensor_data));
     // auto offset = 0u;
-    // auto tensor_proto = std::unique_ptr<vaip_core::TensorProto,
-    //                                     void (*)(vaip_core::TensorProto*)>(
-    //     VAIP_ORT_API_EXT(tensor_proto_new_with_external_data)(
+    // auto tensor_proto = std::unique_ptr<morphizen::TensorProto,
+    //                                     void (*)(morphizen::TensorProto*)>(
+    //     MORPHIZEN_ORT_API_EXT(tensor_proto_new_with_external_data)(
     //         value_info.Name(), shape, element_type, external_data_location,
     //         data_size, offset),
-    //     [](vaip_core::TensorProto* p) {
-    //       VAIP_ORT_API(tensor_proto_delete)(p);
+    //     [](morphizen::TensorProto* p) {
+    //       MORPHIZEN_ORT_API(tensor_proto_delete)(p);
     //     });
 
-    auto tensor_proto = std::unique_ptr<vaip_core::TensorProto,
-                                        void (*)(vaip_core::TensorProto*)>(
-        VAIP_ORT_API_EXT(tensor_proto_new_raw_data)(
+    auto tensor_proto = std::unique_ptr<morphizen::TensorProto,
+                                        void (*)(morphizen::TensorProto*)>(
+        MORPHIZEN_ORT_API_EXT(tensor_proto_new_raw_data)(
             value_info.GetName(), shape, element_type, tensor_data, data_size),
-        [](vaip_core::TensorProto* p) {
-          VAIP_ORT_API(tensor_proto_delete)(p);
+        [](morphizen::TensorProto* p) {
+          MORPHIZEN_ORT_API(tensor_proto_delete)(p);
         });
 
-    VAIP_ORT_API(graph_add_initialized_tensor)(graph, *tensor_proto);
+    MORPHIZEN_ORT_API(graph_add_initialized_tensor)(graph, *tensor_proto);
     MY_LOG(3) << "Added initializer: " << value_info.GetName();
   }
 
@@ -274,8 +274,8 @@ IRConverterImp::convert_graph_initializers(vaip_core::Graph& graph) const {
 }
 OrtStatus*
 IRConverterImp::convert_value_info_proto(const Ort::ConstValueInfo& value_info,
-                                         vaip_core::Graph& graph,
-                                         vaip_core::NodeArg** node_arg) const {
+                                         morphizen::Graph& graph,
+                                         morphizen::NodeArg** node_arg) const {
   MY_LOG(3) << "Converting ORT ValueInfo to ONNX ValueInfoProto";
   // Get type information and convert it
   auto type_info = value_info.TypeInfo();
@@ -283,11 +283,12 @@ IRConverterImp::convert_value_info_proto(const Ort::ConstValueInfo& value_info,
   auto name = value_info.GetName();
   int element_type = 0; // Placeholder for element type
   throw_if_error(convert_type_proto(type_info, &element_type, &shape));
-  auto existing_node_arg = VAIP_ORT_API(graph_get_node_arg)(graph, name);
+  auto existing_node_arg = MORPHIZEN_ORT_API(graph_get_node_arg)(graph, name);
   if (existing_node_arg) {
-    *node_arg = const_cast<vaip_core::NodeArg*>(existing_node_arg);
+    *node_arg = const_cast<morphizen::NodeArg*>(existing_node_arg);
   } else {
-    *node_arg = &VAIP_ORT_API(node_arg_new)(graph, name, &shape, element_type);
+    *node_arg =
+        &MORPHIZEN_ORT_API(node_arg_new)(graph, name, &shape, element_type);
   }
   return nullptr;
 };
@@ -447,7 +448,7 @@ static std::vector<std::string> get_attr_value_strings(const OrtApi& ort_api,
   }
 }
 
-OrtStatus* IRConverterImp::convert_graph_nodes(vaip_core::Graph& graph) const {
+OrtStatus* IRConverterImp::convert_graph_nodes(morphizen::Graph& graph) const {
   MY_LOG(2) << "Converting graph nodes to ONNX format";
   // Get nodes from the ORT graph
   auto nodes = graph_.nodes();
@@ -476,20 +477,20 @@ OrtStatus* IRConverterImp::convert_graph_nodes(vaip_core::Graph& graph) const {
     description = ""; // Default to empty string if not available
     throw_if_error(ort_api.Node_GetDomain(node, &domain));
     throw_if_error(ort_api.Node_GetId(node, &node_id));
-    auto node_inputs = std::vector<const vaip_core::NodeArg*>();
+    auto node_inputs = std::vector<const morphizen::NodeArg*>();
     node_inputs.reserve(inputs.size());
     for (auto input : inputs) {
-      vaip_core::NodeArg* node_arg = nullptr;
+      morphizen::NodeArg* node_arg = nullptr;
       if (input != nullptr) { // input == nullptr mean optionsl argument.
         throw_if_error(convert_value_info_proto(Ort::ConstValueInfo(input),
                                                 graph, &node_arg));
       }
       node_inputs.push_back(node_arg);
     }
-    auto node_outputs = std::vector<const vaip_core::NodeArg*>();
+    auto node_outputs = std::vector<const morphizen::NodeArg*>();
     node_outputs.reserve(outputs.size());
     for (auto output : outputs) {
-      vaip_core::NodeArg* node_arg = nullptr;
+      morphizen::NodeArg* node_arg = nullptr;
       if (output != nullptr) { // output == nullptr mean optionsl argument.
         throw_if_error(convert_value_info_proto(Ort::ConstValueInfo(output),
                                                 graph, &node_arg));
@@ -498,10 +499,10 @@ OrtStatus* IRConverterImp::convert_graph_nodes(vaip_core::Graph& graph) const {
     }
 
     auto node_attributes =
-        std::unique_ptr<vaip_core::NodeAttributes,
-                        void (*)(vaip_core::NodeAttributes*)>(
-            VAIP_ORT_API(node_attributes_new)(),
-            ::vaip_core::api()->node_attributes_delete);
+        std::unique_ptr<morphizen::NodeAttributes,
+                        void (*)(morphizen::NodeAttributes*)>(
+            MORPHIZEN_ORT_API(node_attributes_new)(),
+            ::morphizen::api()->node_attributes_delete);
 
     std::vector<const OrtOpAttr*> api_node_attributes;
     size_t num_of_attributes = 0;
@@ -522,54 +523,56 @@ OrtStatus* IRConverterImp::convert_graph_nodes(vaip_core::Graph& graph) const {
         auto value = get_attr_value_int(ort_api, attr);
         MY_LOG(3) << "Attribute " << attr_name << " is of type INT with value "
                   << value;
-        auto new_attr = VAIP_ORT_API(attr_proto_new_int)(attr_name, value);
-        VAIP_ORT_API(node_attributes_add)
+        auto new_attr = MORPHIZEN_ORT_API(attr_proto_new_int)(attr_name, value);
+        MORPHIZEN_ORT_API(node_attributes_add)
         (*node_attributes, std::move(*new_attr));
-        VAIP_ORT_API(attr_proto_delete)(new_attr);
+        MORPHIZEN_ORT_API(attr_proto_delete)(new_attr);
         break;
       }
       case OrtOpAttrType::ORT_OP_ATTR_INTS: {
-        auto new_attr = VAIP_ORT_API(attr_proto_new_ints)(
+        auto new_attr = MORPHIZEN_ORT_API(attr_proto_new_ints)(
             attr_name, get_attr_value_ints(ort_api, attr));
-        VAIP_ORT_API(node_attributes_add)
+        MORPHIZEN_ORT_API(node_attributes_add)
         (*node_attributes, std::move(*new_attr));
-        VAIP_ORT_API(attr_proto_delete)(new_attr);
+        MORPHIZEN_ORT_API(attr_proto_delete)(new_attr);
         break;
       }
       case OrtOpAttrType::ORT_OP_ATTR_FLOAT: {
         auto value = get_attr_value_float(ort_api, attr);
         MY_LOG(3) << "Attribute " << attr_name
                   << " is of type FLOAT with value " << value;
-        auto new_attr = VAIP_ORT_API(attr_proto_new_float)(attr_name, value);
-        VAIP_ORT_API(node_attributes_add)
+        auto new_attr =
+            MORPHIZEN_ORT_API(attr_proto_new_float)(attr_name, value);
+        MORPHIZEN_ORT_API(node_attributes_add)
         (*node_attributes, std::move(*new_attr));
-        VAIP_ORT_API(attr_proto_delete)(new_attr);
+        MORPHIZEN_ORT_API(attr_proto_delete)(new_attr);
         break;
       }
       case OrtOpAttrType::ORT_OP_ATTR_FLOATS: {
-        auto new_attr = VAIP_ORT_API(attr_proto_new_floats)(
+        auto new_attr = MORPHIZEN_ORT_API(attr_proto_new_floats)(
             attr_name, get_attr_value_floats(ort_api, attr));
-        VAIP_ORT_API(node_attributes_add)
+        MORPHIZEN_ORT_API(node_attributes_add)
         (*node_attributes, std::move(*new_attr));
-        VAIP_ORT_API(attr_proto_delete)(new_attr);
+        MORPHIZEN_ORT_API(attr_proto_delete)(new_attr);
         break;
       }
       case OrtOpAttrType::ORT_OP_ATTR_STRING: {
         auto value = get_attr_value_string(ort_api, attr);
         MY_LOG(3) << "Attribute " << attr_name
                   << " is of type STRING with value " << value;
-        auto new_attr = VAIP_ORT_API(attr_proto_new_string)(attr_name, value);
-        VAIP_ORT_API(node_attributes_add)
+        auto new_attr =
+            MORPHIZEN_ORT_API(attr_proto_new_string)(attr_name, value);
+        MORPHIZEN_ORT_API(node_attributes_add)
         (*node_attributes, std::move(*new_attr));
-        VAIP_ORT_API(attr_proto_delete)(new_attr);
+        MORPHIZEN_ORT_API(attr_proto_delete)(new_attr);
         break;
       }
       case OrtOpAttrType::ORT_OP_ATTR_STRINGS: {
-        auto new_attr = VAIP_ORT_API(attr_proto_new_strings)(
+        auto new_attr = MORPHIZEN_ORT_API(attr_proto_new_strings)(
             attr_name, get_attr_value_strings(ort_api, attr));
-        VAIP_ORT_API(node_attributes_add)
+        MORPHIZEN_ORT_API(node_attributes_add)
         (*node_attributes, std::move(*new_attr));
-        VAIP_ORT_API(attr_proto_delete)(new_attr);
+        MORPHIZEN_ORT_API(attr_proto_delete)(new_attr);
         break;
       }
       default: {
@@ -582,7 +585,7 @@ OrtStatus* IRConverterImp::convert_graph_nodes(vaip_core::Graph& graph) const {
       }
     }
 
-    VAIP_ORT_API(graph_add_node)
+    MORPHIZEN_ORT_API(graph_add_node)
     (graph, name, op_type, description, node_inputs, node_outputs,
      *node_attributes, domain);
     MY_LOG(3) << "Added node: " << name << " (op_type: " << op_type << ")";

@@ -13,7 +13,7 @@
 // clang-format on
 
 namespace po = boost::program_options;
-using namespace vaip_core;
+using namespace morphizen;
 using namespace std;
 
 // Validate file path to mitigate path traversal risks
@@ -103,7 +103,7 @@ int main(int argc, char* argv[]) {
     }
 
     auto protos = std::vector<std::unique_ptr<PassProto>>{};
-    auto passes = std::vector<std::shared_ptr<vaip_core::IPass>>{};
+    auto passes = std::vector<std::shared_ptr<morphizen::IPass>>{};
     for (auto& opt_pass_i : opt_pass) {
       protos.emplace_back(std::make_unique<PassProto>());
       auto& pass_proto = *protos.back();
@@ -112,8 +112,8 @@ int main(int argc, char* argv[]) {
       passes.emplace_back(IPass::create_pass(context, pass_proto));
     }
 
-    auto model = vaip_core::model_load(opt_input_file);
-    auto model_ref = vaip_cxx::ModelConstRef(*model);
+    auto model = morphizen::model_load(opt_input_file);
+    auto model_ref = morphizen_cxx::ModelConstRef(*model);
     auto graph_ref = model_ref.main_graph();
     auto& graph = graph_ref;
     graph_resolve(graph);
@@ -127,7 +127,7 @@ int main(int argc, char* argv[]) {
     }
     if (!opt_output_txt_file.empty()) {
       LOG(INFO) << "write output file to " << opt_output_txt_file;
-      vaip_core::dump_graph(graph, opt_output_txt_file);
+      morphizen::dump_graph(graph, opt_output_txt_file);
     }
   } catch (const std::exception& e) {
     std::cerr << "exception occurs : " << e.what() << "\n";

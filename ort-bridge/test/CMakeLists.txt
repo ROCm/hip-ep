@@ -11,7 +11,7 @@ add_executable(${TEST_EXE_NAME}
   src/test-hello-ep.cpp
   src/test-compile-model.cpp
   src/test-coverage-wrapper.cpp
-  src/test-vaip-ort-implementation.cpp
+  src/test-morphizen-ort-implementation.cpp
   # test-ort-array-span.cpp
   # test-graph-classes.cpp
   src/test-coverage-wrapper.hpp
@@ -53,7 +53,7 @@ target_link_libraries(${TEST_EXE_NAME}
     onnxruntime::onnxruntime
     glog::glog
     morphizen-core-static
-    vaip-ort-api-ext
+    morphizen-ort-api-ext
     $<GENEX_EVAL:$<TARGET_PROPERTY:${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET},LINK_LIBRARIES>>
 )
 # add debug flags and environment variables

@@ -4,13 +4,13 @@
  */
 #pragma once
 #define VAIP_CUSTOM_OP // TODO: remove it
-#include "morphizen/vaip.hpp"
+#include "morphizen/morphizen.hpp"
 
 namespace morphizen {
 namespace custom_op_generic {
-using namespace vaip_core;
+using namespace morphizen;
 
-class MyCustomOp : public ::vaip_core::CustomOpImp {
+class MyCustomOp : public ::morphizen::CustomOpImp {
 public:
   MyCustomOp(std::shared_ptr<const PassContext> context,
              const std::shared_ptr<MetaDefProto>& meta_def,

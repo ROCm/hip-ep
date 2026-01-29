@@ -13,7 +13,7 @@
 #include "./pattern_log.hpp"
 #include "morphizen/pattern.pb.h"
 
-namespace vaip_core {
+namespace morphizen {
 
 PatternNodeOutputArg::PatternNodeOutputArg(
     int id, std::shared_ptr<Pattern> node_pattern, size_t output_arg_index)
@@ -94,4 +94,4 @@ void PatternNodeOutputArg::dump_to_proto_imp(RootPatternProto& pattern_proto,
   proto->set_output_arg_index(output_arg_index_);
 }
 
-} // namespace vaip_core
+} // namespace morphizen

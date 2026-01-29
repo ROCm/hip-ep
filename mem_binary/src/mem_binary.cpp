@@ -10,14 +10,14 @@
 #include <glog/logging.h>
 #include <iostream>
 #include <morphizen-utils/morphizen-utils.hpp>
-#include <morphizen-utils/vaip_plugin.hpp>
+#include <morphizen-utils/morphizen_plugin.hpp>
 #ifdef ENABLE_COMPRESSION
 #  include <zlib.h>
 #endif
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MEM_XCLBIN, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MEM_XCLBIN) >= n)
 
-namespace vaip_core {
+namespace morphizen {
 struct CompressionInfo {
   const uint8_t* data;
 #ifdef ENABLE_COMPRESSION
@@ -91,4 +91,4 @@ get_mem_binary_span(const std::string& filename) {
                                info.origin_size);
 #endif
 }
-} // namespace vaip_core
+} // namespace morphizen

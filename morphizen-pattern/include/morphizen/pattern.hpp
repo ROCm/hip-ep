@@ -24,7 +24,7 @@
  * PatternBuilder allows for more complex pattern constructions.
  *
  * @code
- * vaip_core::PatternBuilder builder;
+ * morphizen::PatternBuilder builder;
  * auto pattern = builder.create_by_json("{...JSON representation of the
  * pattern...}");
  * @endcode
@@ -59,9 +59,9 @@
 #include <initializer_list>
 #include <map>
 #include <memory>
+#include <morphizen/my_ort.h>
 #include <unordered_map>
-#include <vaip/my_ort.h>
-namespace vaip_core {
+namespace morphizen {
 class RootPatternProto;
 class PatternProto;
 /**
@@ -74,7 +74,7 @@ class PatternProto;
  * based on their indices or pattern names. It is used in pattern matching
  * operations to bind node inputs to specific indices or names.
  */
-class VAIP_DLL_SPEC Binder {
+class MORPHIZEN_DLL_SPEC Binder {
 
 private:
   Binder() = delete;
@@ -99,7 +99,7 @@ public:
     }
     return ret;
   }
-  std::optional<vaip_cxx::NodeInput> operator()(size_t pattern_id) const;
+  std::optional<morphizen_cxx::NodeInput> operator()(size_t pattern_id) const;
 
   /**
    * Retrieves the Node Name associated with the given pattern key.
@@ -136,7 +136,7 @@ public:
     return it == name_to_ids_->end() ? NodeInput{nullptr, nullptr}
                                      : (*this)[it->second];
   }
-  std::optional<vaip_cxx::NodeInput>
+  std::optional<morphizen_cxx::NodeInput>
   operator()(const std::string& pattern_name) const;
   /**
    * Returns an iterator pointing to the beginning of the map.
@@ -168,15 +168,15 @@ private:
   explicit Binder(
       std::map<int, NodeInput>&& store,
       std::shared_ptr<std::unordered_map<std::string, int>> name_to_ids,
-      vaip_cxx::GraphConstRef graph)
+      morphizen_cxx::GraphConstRef graph)
       : store_(store), name_to_ids_(name_to_ids), graph_{graph} {}
-  std::optional<vaip_cxx::NodeInput>
+  std::optional<morphizen_cxx::NodeInput>
   create_vaip_cxx_node_input(NodeInput node_input) const;
 
 private:
   std::map<int, NodeInput> store_;
   std::shared_ptr<std::unordered_map<std::string, int>> name_to_ids_;
-  vaip_cxx::GraphConstRef graph_;
+  morphizen_cxx::GraphConstRef graph_;
   friend class BinderBuilder;
 };
 using binder_t = Binder;
@@ -192,7 +192,7 @@ public:
   ~BinderBuilder();
 
 private:
-  BinderBuilder(const void* map, vaip_cxx::GraphConstRef graph)
+  BinderBuilder(const void* map, morphizen_cxx::GraphConstRef graph)
       : map_{map}, graph_{graph} {};
   BinderBuilder() = delete;
   binder_ptr_t build(
@@ -215,7 +215,7 @@ private:
 
 private:
   const void* map_;
-  vaip_cxx::GraphConstRef graph_;
+  morphizen_cxx::GraphConstRef graph_;
 };
 
 /**
@@ -252,7 +252,7 @@ public:
    *
    * @param n The trace level to enable.
    */
-  VAIP_DLL_SPEC static void enable_trace(int n);
+  MORPHIZEN_DLL_SPEC static void enable_trace(int n);
 
   /**
    * @brief Gets the ID of the pattern.
@@ -274,28 +274,28 @@ public:
    * @return A `binder_ptr_t` object representing the match result. It is
    * nullptr if pattern is not matched.
    */
-  VAIP_DLL_SPEC binder_ptr_t match(const onnxruntime::Graph& graph,
-                                   const onnxruntime::Node& node) const;
+  MORPHIZEN_DLL_SPEC binder_ptr_t match(const onnxruntime::Graph& graph,
+                                        const onnxruntime::Node& node) const;
   /**
    * @brief Matches the pattern against a NodeConstRef.
    * @param node The node to match against.
    * @return A `binder_ptr_t` object representing the match result. It is
    * nullptr if pattern is not matched.
    */
-  VAIP_DLL_SPEC binder_ptr_t match(vaip_cxx::NodeConstRef node) const;
+  MORPHIZEN_DLL_SPEC binder_ptr_t match(morphizen_cxx::NodeConstRef node) const;
 
   /**
    * Converts the object to a binary representation.
    *
    * @return A vector of characters representing the binary data.
    */
-  VAIP_DLL_SPEC std::string to_binary() const;
+  MORPHIZEN_DLL_SPEC std::string to_binary() const;
   /**
    * Converts the object to a JSON representation.
    *
    * @return A string representing the JSON data.
    */
-  VAIP_DLL_SPEC std::string to_json() const;
+  MORPHIZEN_DLL_SPEC std::string to_json() const;
 
   /**
    * Extarct all the ops name present in pattern using recursion
@@ -304,7 +304,7 @@ public:
    *
    * @note it is only used by PatternInfo in vaip. TODO: to be clarified.
    */
-  VAIP_DLL_SPEC std::vector<std::string> get_ops_list_name() const;
+  MORPHIZEN_DLL_SPEC std::vector<std::string> get_ops_list_name() const;
 
 protected:
   /**
@@ -410,7 +410,7 @@ struct PatternBuilder {
   /**
    * @brief Constructs a new PatternBuilder object.
    */
-  VAIP_DLL_SPEC PatternBuilder();
+  MORPHIZEN_DLL_SPEC PatternBuilder();
 
   /**
    * @brief Creates a pattern from a JSON string.
@@ -418,7 +418,7 @@ struct PatternBuilder {
    * @param pattern The JSON string representing the pattern.
    * @return std::shared_ptr<Pattern> The created pattern.
    */
-  VAIP_DLL_SPEC std::shared_ptr<Pattern>
+  MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
   create_by_json(const std::string& pattern);
 
   /**
@@ -427,7 +427,7 @@ struct PatternBuilder {
    * @param pattern The Python string representing the pattern.
    * @return std::shared_ptr<Pattern> The created pattern.
    */
-  VAIP_DLL_SPEC std::shared_ptr<Pattern>
+  MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
   create_by_py(const std::string& pattern);
 
   /**
@@ -440,15 +440,15 @@ struct PatternBuilder {
    * @param size The size of the binary data in bytes.
    * @return A shared pointer to the created Pattern object.
    */
-  VAIP_DLL_SPEC std::shared_ptr<Pattern> create_from_binary(const char* data,
-                                                            size_t size);
+  MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
+  create_from_binary(const char* data, size_t size);
 
   /**
    * @brief Creates a wildcard pattern.
    *
    * @return std::shared_ptr<Pattern> The created wildcard pattern.
    */
-  VAIP_DLL_SPEC std::shared_ptr<Pattern> wildcard();
+  MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern> wildcard();
 
   /**
    * @brief Creates a node pattern with two arguments.
@@ -458,7 +458,7 @@ struct PatternBuilder {
    * @param args The vector of arguments for the node.
    * @return std::shared_ptr<Pattern> The created node pattern.
    */
-  VAIP_DLL_SPEC std::shared_ptr<Pattern>
+  MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
   node2(const std::string& op_type_and_domain,
         const std::vector<std::shared_ptr<Pattern>>& args);
 
@@ -480,11 +480,11 @@ struct PatternBuilder {
    * object that can be used for graph pattern matching and transformation
    * operations
    *
-   * @note This is a DLL-exported function (VAIP_DLL_SPEC) making it available
-   * across module boundaries
+   * @note This is a DLL-exported function (MORPHIZEN_DLL_SPEC) making it
+   * available across module boundaries
    * @see Pattern class for more details on pattern matching capabilities
    */
-  VAIP_DLL_SPEC std::shared_ptr<Pattern>
+  MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
   node2_with_optional_domain(const std::string& op_type,
                              const std::vector<std::shared_ptr<Pattern>>& args,
                              const std::string& op_domain = "");
@@ -498,7 +498,7 @@ struct PatternBuilder {
    * optional.
    * @return std::shared_ptr<Pattern> The created node pattern.
    */
-  VAIP_DLL_SPEC std::shared_ptr<Pattern>
+  MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
   node3(const std::string& op_type_and_domain,
         const std::vector<std::shared_ptr<Pattern>>& args,
         const std::vector<bool>& optional_args);
@@ -515,7 +515,7 @@ struct PatternBuilder {
    * @return std::shared_ptr<Pattern> A shared pointer to the created Pattern
    * node
    */
-  VAIP_DLL_SPEC std::shared_ptr<Pattern>
+  MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
   node3_with_optional_domain(const std::string& op_type,
                              const std::vector<std::shared_ptr<Pattern>>& args,
                              const std::vector<bool>& optional_args,
@@ -554,7 +554,7 @@ struct PatternBuilder {
    * to positions. If you don't need this feature, use positional APIs (node2,
    * node3) to avoid ONNX dependency.
    */
-  VAIP_DLL_SPEC std::shared_ptr<Pattern> node_with_named_args(
+  MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern> node_with_named_args(
       const std::string& op_type,
       const std::map<std::string, std::shared_ptr<Pattern>>& named_args,
       const std::string& op_domain = "");
@@ -588,7 +588,7 @@ struct PatternBuilder {
    *
    * Example usage:
    * @code
-   * vaip_core::PatternBuilder builder;
+   * morphizen::PatternBuilder builder;
    *
    * // Create input patterns
    * auto input = builder.wildcard();
@@ -620,7 +620,7 @@ struct PatternBuilder {
    * }
    * @endcode
    */
-  VAIP_DLL_SPEC std::vector<std::shared_ptr<Pattern>>
+  MORPHIZEN_DLL_SPEC std::vector<std::shared_ptr<Pattern>>
   node_with_multiple_outputs(const std::string& op_type,
                              const std::vector<std::shared_ptr<Pattern>>& args,
                              const std::vector<bool>& optional_args,
@@ -659,7 +659,7 @@ struct PatternBuilder {
    *     P1 is recommended.
    *
    */
-  VAIP_DLL_SPEC std::shared_ptr<Pattern>
+  MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
   commutable_node(const std::string& op_type, std::shared_ptr<Pattern> arg1,
                   std::shared_ptr<Pattern> arg2);
   /**
@@ -670,7 +670,7 @@ struct PatternBuilder {
    * @return std::shared_ptr<Pattern> The created pattern.
    * @exprimental DO NOT USE THIS METHOD
    */
-  VAIP_DLL_SPEC std::shared_ptr<Pattern>
+  MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
   Or(const std::vector<std::shared_ptr<Pattern>>& args);
 
   /**
@@ -678,14 +678,14 @@ struct PatternBuilder {
    *
    * @return std::shared_ptr<Pattern> The created constant pattern.
    */
-  VAIP_DLL_SPEC std::shared_ptr<Pattern> constant();
+  MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern> constant();
 
   /**
    * @brief Creates a graph input pattern.
    *
    * @return std::shared_ptr<Pattern> The created graph input pattern.
    */
-  VAIP_DLL_SPEC std::shared_ptr<Pattern> graph_input();
+  MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern> graph_input();
 
   /**
    * @brief Creates a pattern that matches a node used as any graph output.
@@ -703,7 +703,7 @@ struct PatternBuilder {
    *
    * Example usage:
    * @code
-   * vaip_core::PatternBuilder builder;
+   * morphizen::PatternBuilder builder;
    *
    * // Match any Softmax node that is used as a graph output
    * auto softmax_input = builder.wildcard();
@@ -721,7 +721,7 @@ struct PatternBuilder {
    * @note This is useful for identifying nodes that produce final results,
    * which often have different optimization or preservation requirements.
    */
-  VAIP_DLL_SPEC std::shared_ptr<Pattern>
+  MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
   is_graph_output(const std::shared_ptr<Pattern>& arg);
 
   /**
@@ -742,7 +742,7 @@ struct PatternBuilder {
    *
    * Example usage:
    * @code
-   * vaip_core::PatternBuilder builder;
+   * morphizen::PatternBuilder builder;
    *
    * // Suppose a graph has multiple outputs: [output0, output1, output2]
    * // Match a Conv node that specifically produces the second graph output
@@ -763,7 +763,7 @@ struct PatternBuilder {
    * @note Useful when you need to handle specific outputs differently, such as
    * applying different quantization schemes to different outputs.
    */
-  VAIP_DLL_SPEC std::shared_ptr<Pattern>
+  MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
   is_graph_output(const std::shared_ptr<Pattern>& arg,
                   size_t graph_output_index);
 
@@ -785,7 +785,7 @@ struct PatternBuilder {
    *
    * Example usage:
    * @code
-   * vaip_core::PatternBuilder builder;
+   * morphizen::PatternBuilder builder;
    *
    * // Match a Sigmoid node that produces a graph output named "probabilities"
    * auto sigmoid_input = builder.wildcard();
@@ -805,7 +805,7 @@ struct PatternBuilder {
    * @note This is the most robust method when working with models that have
    * well-defined output names, as it's immune to changes in output ordering.
    */
-  VAIP_DLL_SPEC std::shared_ptr<Pattern>
+  MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
   is_graph_output(const std::shared_ptr<Pattern>& arg,
                   const std::string& graph_output_name);
 
@@ -840,7 +840,7 @@ struct PatternBuilder {
    * So we can see that this function is rather slow potentially, especially
    * when a graph contains many nodes and the patterns are too many also.
    */
-  VAIP_DLL_SPEC std::shared_ptr<Pattern>
+  MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
   sequence(gsl::span<const std::shared_ptr<Pattern>> patterns);
   /**
    * @brief Creates an XIR constant operation pattern.
@@ -849,7 +849,7 @@ struct PatternBuilder {
    * pattern.
    * @exprimental DO NOT USE THIS METHOD
    */
-  VAIP_DLL_SPEC std::shared_ptr<Pattern> xir_const_op();
+  MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern> xir_const_op();
 
   /**
    * @brief Binds a pattern to a name.
@@ -857,8 +857,8 @@ struct PatternBuilder {
    * @param name The name to bind the pattern to.
    * @param pat The pattern to be bound.
    */
-  VAIP_DLL_SPEC void bind(const std::string& name,
-                          const std::shared_ptr<Pattern>& pat);
+  MORPHIZEN_DLL_SPEC void bind(const std::string& name,
+                               const std::shared_ptr<Pattern>& pat);
 
   /**
    * @brief Gets the ID of a pattern by its name.
@@ -866,7 +866,7 @@ struct PatternBuilder {
    * @param name The name of the pattern.
    * @return int The ID of the pattern.
    */
-  VAIP_DLL_SPEC int get_id(const std::string& name) const;
+  MORPHIZEN_DLL_SPEC int get_id(const std::string& name) const;
 
   /**
    * @brief Gets a pattern by its name.
@@ -874,7 +874,7 @@ struct PatternBuilder {
    * @param name The name of the pattern.
    * @return std::shared_ptr<Pattern> The pattern with the specified name.
    */
-  VAIP_DLL_SPEC std::shared_ptr<Pattern>
+  MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
   get_pattern(const std::string& name) const;
 
   /**
@@ -883,7 +883,7 @@ struct PatternBuilder {
    * @param id The ID of the pattern.
    * @return std::shared_ptr<Pattern> The pattern with the specified ID.
    */
-  VAIP_DLL_SPEC std::shared_ptr<Pattern> get_pattern(int id) const;
+  MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern> get_pattern(int id) const;
 
   /**
    * @brief Gets the bindings of patterns.
@@ -935,4 +935,4 @@ private:
 
   friend struct PatternBuilderHelper;
 };
-} // namespace vaip_core
+} // namespace morphizen

@@ -18,6 +18,38 @@ Licensed under the MIT License.
 
 ---
 
+## Resuming Work: Check Context First
+
+**Before starting work (especially when resuming from previous sessions):**
+
+1. **Check current branch:**
+   ```bash
+   git branch --show-current
+   ```
+
+2. **Look for existing PR branches:**
+   ```bash
+   git branch -a | grep feature/
+   ```
+   - Verify if a PR branch already exists for this task
+   - Check if there's an active PR: `gh pr list --repo ROCm/MorphiZen`
+
+3. **Read existing plan files:**
+   - Check `~/.claude/plans/` for active plans related to current work
+   - Understand the context and which branch should be used
+
+4. **When uncertain, ask user:**
+   - If multiple branches exist or context is unclear
+   - Ask: "Which branch should I use for this task?"
+   - Prevents creating duplicate branches for the same work
+
+**Why this matters:**
+- Prevents accidentally working on wrong branch
+- Avoids creating duplicate branches for the same task
+- Ensures continuity when resuming work across sessions
+
+---
+
 ## Quick Checklist
 
 - [ ] Check branch: `git branch --show-current`

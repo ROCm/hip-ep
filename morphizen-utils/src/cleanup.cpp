@@ -11,7 +11,7 @@
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_DEINITIALIZE, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_DEINITIALIZE) >= n)
 
-namespace vaip_core {
+namespace morphizen {
 std::vector<std::pair<std::string, std::function<void()>>>&
 get_cleanup_registry() {
   static std::vector<std::pair<std::string, std::function<void()>>> g_at_exits;
@@ -39,4 +39,4 @@ void cleanup_all() {
   // after glog is deconstructed it is not safe to call MY_LOG any longer
   ENV_PARAM(MORPHIZEN_DEBUG_DEINITIALIZE) = 0;
 }
-} // namespace vaip_core
+} // namespace morphizen

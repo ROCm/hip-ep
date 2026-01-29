@@ -4,7 +4,8 @@
  */
 
 /// @file node_arg.hpp
-/// @brief C++ wrapper utilities for node argument operations over VAIP_ORT_API
+/// @brief C++ wrapper utilities for node argument operations over
+/// MORPHIZEN_ORT_API
 ///
 /// This file provides C++ wrappers for NodeArg-related operations. A NodeArg
 /// represents a value/tensor in the computational graph (inputs and outputs
@@ -15,7 +16,7 @@
 /// - Optional constant data (for initializers)
 ///
 /// All operations are forwarded to the active backend implementation via
-/// the VAIP_ORT_API function pointer table.
+/// the MORPHIZEN_ORT_API function pointer table.
 ///
 /// Example:
 /// @code
@@ -27,64 +28,65 @@
 /// @endcode
 
 #pragma once
+#include <morphizen/morphizen_gsl.h>
+#include <morphizen/my_ort.h>
 #include <optional>
 #include <ostream>
-#include <vaip/my_ort.h>
-#include <vaip/vaip_gsl.h>
-namespace vaip_core {
+namespace morphizen {
 
-VAIP_DLL_SPEC bool node_arg_exists(const NodeArg& node_arg);
-VAIP_DLL_SPEC const std::string& node_arg_get_name(const NodeArg& node_arg);
-VAIP_DLL_SPEC std::string node_arg_as_string(const NodeArg& node_arg);
-VAIP_DLL_SPEC std::unique_ptr<std::vector<int64_t>>
+MORPHIZEN_DLL_SPEC bool node_arg_exists(const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC const std::string&
+node_arg_get_name(const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC std::string node_arg_as_string(const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC std::unique_ptr<std::vector<int64_t>>
 node_arg_get_shape_i64(const NodeArg& node_arg);
-VAIP_DLL_SPEC std::unique_ptr<std::vector<std::string>>
+MORPHIZEN_DLL_SPEC std::unique_ptr<std::vector<std::string>>
 node_arg_get_denotation(const NodeArg& node_arg);
-VAIP_DLL_SPEC int node_arg_get_element_type(const NodeArg& node_arg);
-VAIP_DLL_SPEC bool node_arg_is_unknown_shape(const NodeArg& node_arg);
-VAIP_DLL_SPEC bool node_arg_is_scalar(const NodeArg& node_arg);
-VAIP_DLL_SPEC bool node_arg_is_zero_shape(const NodeArg& node_arg);
-VAIP_DLL_SPEC bool node_arg_is_dynamic_shape(const NodeArg& node_arg);
-VAIP_DLL_SPEC const TensorProto&
+MORPHIZEN_DLL_SPEC int node_arg_get_element_type(const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC bool node_arg_is_unknown_shape(const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC bool node_arg_is_scalar(const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC bool node_arg_is_zero_shape(const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC bool node_arg_is_dynamic_shape(const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC const TensorProto&
 node_arg_get_const_data_as_tensor(const Graph& graph, const NodeArg& node_arg);
-VAIP_DLL_SPEC float node_arg_get_const_data_as_float(const Graph& graph,
-                                                     const NodeArg& node_arg);
-VAIP_DLL_SPEC uint8_t node_arg_get_const_data_as_u8(const Graph& graph,
-                                                    const NodeArg& node_arg);
-VAIP_DLL_SPEC int8_t node_arg_get_const_data_as_i8(const Graph& graph,
-                                                   const NodeArg& node_arg);
-VAIP_DLL_SPEC int32_t node_arg_get_const_data_as_i32(const Graph& graph,
-                                                     const NodeArg& node_arg);
-VAIP_DLL_SPEC uint16_t node_arg_get_const_data_as_u16(const Graph& graph,
-                                                      const NodeArg& node_arg);
-VAIP_DLL_SPEC int16_t node_arg_get_const_data_as_bf16(const Graph& graph,
-                                                      const NodeArg& node_arg);
-VAIP_DLL_SPEC int16_t node_arg_get_const_data_as_fp16(const Graph& graph,
-                                                      const NodeArg& node_arg);
-VAIP_DLL_SPEC gsl::span<const uint8_t>
+MORPHIZEN_DLL_SPEC float
+node_arg_get_const_data_as_float(const Graph& graph, const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC uint8_t
+node_arg_get_const_data_as_u8(const Graph& graph, const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC int8_t
+node_arg_get_const_data_as_i8(const Graph& graph, const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC int32_t
+node_arg_get_const_data_as_i32(const Graph& graph, const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC uint16_t
+node_arg_get_const_data_as_u16(const Graph& graph, const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC int16_t
+node_arg_get_const_data_as_bf16(const Graph& graph, const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC int16_t
+node_arg_get_const_data_as_fp16(const Graph& graph, const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC gsl::span<const uint8_t>
 node_arg_get_const_data_as_u4s(const Graph& graph, const NodeArg& node_arg);
-VAIP_DLL_SPEC gsl::span<const int8_t>
+MORPHIZEN_DLL_SPEC gsl::span<const int8_t>
 node_arg_get_const_data_as_i4s(const Graph& graph, const NodeArg& node_arg);
-VAIP_DLL_SPEC gsl::span<const uint8_t>
+MORPHIZEN_DLL_SPEC gsl::span<const uint8_t>
 node_arg_get_const_data_as_u8s(const Graph& graph, const NodeArg& node_arg);
-VAIP_DLL_SPEC gsl::span<const int8_t>
+MORPHIZEN_DLL_SPEC gsl::span<const int8_t>
 node_arg_get_const_data_as_i8s(const Graph& graph, const NodeArg& node_arg);
-VAIP_DLL_SPEC gsl::span<const uint16_t>
+MORPHIZEN_DLL_SPEC gsl::span<const uint16_t>
 node_arg_get_const_data_as_u16s(const Graph& graph, const NodeArg& node_arg);
-VAIP_DLL_SPEC gsl::span<const int16_t>
+MORPHIZEN_DLL_SPEC gsl::span<const int16_t>
 node_arg_get_const_data_as_i16s(const Graph& graph, const NodeArg& node_arg);
-VAIP_DLL_SPEC gsl::span<const float>
+MORPHIZEN_DLL_SPEC gsl::span<const float>
 node_arg_get_const_data_as_floats(const Graph& graph, const NodeArg& node_arg);
-VAIP_DLL_SPEC gsl::span<const int32_t>
+MORPHIZEN_DLL_SPEC gsl::span<const int32_t>
 node_arg_get_const_data_as_i32s(const Graph& graph, const NodeArg& node_arg);
-VAIP_DLL_SPEC gsl::span<const int64_t>
+MORPHIZEN_DLL_SPEC gsl::span<const int64_t>
 node_arg_get_const_data_as_i64s(const Graph& graph, const NodeArg& node_arg);
-VAIP_DLL_SPEC gsl::span<const int16_t>
+MORPHIZEN_DLL_SPEC gsl::span<const int16_t>
 node_arg_get_const_data_as_bf16s(const Graph& graph, const NodeArg& node_arg);
-VAIP_DLL_SPEC gsl::span<const int16_t>
+MORPHIZEN_DLL_SPEC gsl::span<const int16_t>
 node_arg_get_const_data_as_fp16s(const Graph& graph, const NodeArg& node_arg);
-VAIP_DLL_SPEC bool node_arg_is_constant(const Graph& graph,
-                                        const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC bool node_arg_is_constant(const Graph& graph,
+                                             const NodeArg& node_arg);
 
 /** @brief Create a new node argument in the graph
  *
@@ -94,12 +96,12 @@ VAIP_DLL_SPEC bool node_arg_is_constant(const Graph& graph,
  * @param element_type Data type of the tensor
  * @return Reference to the created node argument
  */
-VAIP_DLL_SPEC NodeArg& node_arg_new(Graph& graph, const std::string& name,
-                                    const std::vector<int64_t>* shape,
-                                    int element_type);
+MORPHIZEN_DLL_SPEC NodeArg& node_arg_new(Graph& graph, const std::string& name,
+                                         const std::vector<int64_t>* shape,
+                                         int element_type);
 
-} // namespace vaip_core
-namespace vaip_cxx {
+} // namespace morphizen
+namespace morphizen_cxx {
 // on Linux, friend class declaration is not enough, we need forward
 // declaration.
 
@@ -117,29 +119,29 @@ using fp16_t = int16_t;
  * shape, element type, etc. It also provides methods to convert the NodeArg to
  * a string representation and retrieve constant data.
  */
-class VAIP_DLL_SPEC NodeArgConstRef {
+class MORPHIZEN_DLL_SPEC NodeArgConstRef {
   friend class GraphConstRef;
   friend class NodeConstRef;
   friend class NodeInput;
 
 protected:
-  NodeArgConstRef(const vaip_core::Graph& graph, const vaip_core::NodeArg& self)
+  NodeArgConstRef(const morphizen::Graph& graph, const morphizen::NodeArg& self)
       : graph_{graph}, self_{self} {}
 
 public:
-  static NodeArgConstRef from_node_arg(const vaip_core::Graph& graph,
-                                       const vaip_core::NodeArg& self) {
+  static NodeArgConstRef from_node_arg(const morphizen::Graph& graph,
+                                       const morphizen::NodeArg& self) {
     return NodeArgConstRef{graph, self};
   }
-  operator const vaip_core::NodeArg&() const { return self_; }
-  const vaip_core::NodeArg* ptr() const { return &self_; }
+  operator const morphizen::NodeArg&() const { return self_; }
+  const morphizen::NodeArg* ptr() const { return &self_; }
   /**
    * @brief Gets the name of the NodeArg.
    *
    * @return The name of the NodeArg.
    * */
   const std::string& name() const {
-    return vaip_core::node_arg_get_name(self_);
+    return morphizen::node_arg_get_name(self_);
   }
   /**
    * @brief Overloads the equality operator for comparing two NodeArgConstRef
@@ -159,7 +161,7 @@ public:
    *
    * @return A string representation of the NodeArg.
    * */
-  std::string to_string() const { return vaip_core::node_arg_as_string(self_); }
+  std::string to_string() const { return morphizen::node_arg_as_string(self_); }
   /**
    * @brief Checks if the node argument is a graph input.
    *
@@ -178,7 +180,7 @@ public:
    * @return A vector of integers representing the shape of the NodeArg.
    * */
   std::unique_ptr<std::vector<int64_t>> shape() const {
-    return vaip_core::node_arg_get_shape_i64(self_);
+    return morphizen::node_arg_get_shape_i64(self_);
   }
   /**
    * @brief Gets the denotation of the NodeArg.
@@ -186,7 +188,7 @@ public:
    * @return A vector of strings representing the denotation of the NodeArg.
    * */
   std::unique_ptr<std::vector<std::string>> denotation() const {
-    return vaip_core::node_arg_get_denotation(self_);
+    return morphizen::node_arg_get_denotation(self_);
   }
   /**
    * Gets the element type of the node argument.
@@ -214,7 +216,7 @@ public:
    * 17: FLOAT32
    */
   int element_type() const {
-    return vaip_core::node_arg_get_element_type(self_);
+    return morphizen::node_arg_get_element_type(self_);
   }
   /**
    * Checks if the shape of the node argument is unknown.
@@ -222,21 +224,21 @@ public:
    * @return True if the shape is unknown, false otherwise.
    */
   bool is_unknown_shape() const {
-    return vaip_core::node_arg_is_unknown_shape(self_);
+    return morphizen::node_arg_is_unknown_shape(self_);
   }
   /**
    * Checks if the node argument is a scalar.
    *
    * @return True if the node argument is a scalar, false otherwise.
    */
-  bool is_scalar() const { return vaip_core::node_arg_is_scalar(self_); }
+  bool is_scalar() const { return morphizen::node_arg_is_scalar(self_); }
   /**
    * Checks if the shape of the node argument is zero.
    *
    * @return True if the shape is zero, false otherwise.
    */
   bool is_zero_shape() const {
-    return vaip_core::node_arg_is_zero_shape(self_);
+    return morphizen::node_arg_is_zero_shape(self_);
   }
   /**
    * Checks if the shape of the node argument is dynamic.
@@ -244,7 +246,7 @@ public:
    * @return True if the shape is dynamic, false otherwise.
    */
   bool is_dynamic_shape() const {
-    return vaip_core::node_arg_is_dynamic_shape(self_);
+    return morphizen::node_arg_is_dynamic_shape(self_);
   }
   /**
    * Checks if the node argument is constant.
@@ -252,7 +254,7 @@ public:
    * @return True if the node argument is constant, false otherwise.
    */
   bool is_constant() const {
-    return vaip_core::node_arg_is_constant(graph_, self_);
+    return morphizen::node_arg_is_constant(graph_, self_);
   }
   /**
    * Finds the consumers of the current node arg.
@@ -498,14 +500,14 @@ public:
   }
 
 private:
-  const vaip_core::Graph& graph_;
-  const vaip_core::NodeArg& self_;
+  const morphizen::Graph& graph_;
+  const morphizen::NodeArg& self_;
 };
-class VAIP_DLL_SPEC NodeArgRef : public NodeArgConstRef {
+class MORPHIZEN_DLL_SPEC NodeArgRef : public NodeArgConstRef {
   friend class GraphRef;
 
 private:
-  NodeArgRef(vaip_core::Graph& graph, vaip_core::NodeArg& self)
+  NodeArgRef(morphizen::Graph& graph, morphizen::NodeArg& self)
       : NodeArgConstRef{graph, self} {}
 };
-} // namespace vaip_cxx
+} // namespace morphizen_cxx

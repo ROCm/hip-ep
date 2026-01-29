@@ -5,25 +5,27 @@
 
 #pragma once
 #include "./_sanity_check.hpp"
-#include <vaip/my_ort.h>
-namespace vaip_core {
+#include <morphizen/my_ort.h>
+namespace morphizen {
 class NodeAttr {
 public:
-  VAIP_DLL_SPEC NodeAttr(const std::string& name, int64_t value);
-  VAIP_DLL_SPEC NodeAttr(const std::string& name, float value);
-  VAIP_DLL_SPEC NodeAttr(const std::string& name, const std::string& value);
-  VAIP_DLL_SPEC NodeAttr(const std::string& name, const TensorProto& value);
+  MORPHIZEN_DLL_SPEC NodeAttr(const std::string& name, int64_t value);
+  MORPHIZEN_DLL_SPEC NodeAttr(const std::string& name, float value);
+  MORPHIZEN_DLL_SPEC NodeAttr(const std::string& name,
+                              const std::string& value);
+  MORPHIZEN_DLL_SPEC NodeAttr(const std::string& name,
+                              const TensorProto& value);
 
-  VAIP_DLL_SPEC NodeAttr(const std::string& name,
-                         const std::vector<int64_t>& value);
-  VAIP_DLL_SPEC NodeAttr(const std::string& name,
-                         const std::vector<float>& value);
-  VAIP_DLL_SPEC NodeAttr(const std::string& name,
-                         const std::vector<std::string>& value);
-  VAIP_DLL_SPEC NodeAttr(const std::string& name, AttributeProtoPtr ptr);
+  MORPHIZEN_DLL_SPEC NodeAttr(const std::string& name,
+                              const std::vector<int64_t>& value);
+  MORPHIZEN_DLL_SPEC NodeAttr(const std::string& name,
+                              const std::vector<float>& value);
+  MORPHIZEN_DLL_SPEC NodeAttr(const std::string& name,
+                              const std::vector<std::string>& value);
+  MORPHIZEN_DLL_SPEC NodeAttr(const std::string& name, AttributeProtoPtr ptr);
 
-  VAIP_DLL_SPEC AttributeProto& get();
-  VAIP_DLL_SPEC const AttributeProto& get() const;
+  MORPHIZEN_DLL_SPEC AttributeProto& get();
+  MORPHIZEN_DLL_SPEC const AttributeProto& get() const;
 
 private:
   AttributeProtoPtr attribute_proto_;
@@ -31,17 +33,17 @@ private:
 
 class NodeAttributesBuilder {
 public:
-  VAIP_DLL_SPEC explicit NodeAttributesBuilder(size_t capacity = 10);
-  VAIP_DLL_SPEC
+  MORPHIZEN_DLL_SPEC explicit NodeAttributesBuilder(size_t capacity = 10);
+  MORPHIZEN_DLL_SPEC
   NodeAttributesBuilder(const NodeAttributesBuilder&) = delete;
-  VAIP_DLL_SPEC
+  MORPHIZEN_DLL_SPEC
   NodeAttributesBuilder(NodeAttributesBuilder&&) = default;
   /// after build, all attrs_ are cleared.
-  VAIP_DLL_SPEC NodeAttributesPtr build();
+  MORPHIZEN_DLL_SPEC NodeAttributesPtr build();
   /// for efficiency reason, after merge_into, all attrs_ are
   /// moved.
-  VAIP_DLL_SPEC void merge_into(Node& node);
-  VAIP_DLL_SPEC void merge_into(NodeAttributes& attrs);
+  MORPHIZEN_DLL_SPEC void merge_into(Node& node);
+  MORPHIZEN_DLL_SPEC void merge_into(NodeAttributes& attrs);
   template <typename T>
   NodeAttributesBuilder& add(const std::string& name, T&& value) {
     attrs_.emplace_back(name, std::forward<T>(value));
@@ -59,7 +61,8 @@ private:
 };
 std::string attr_proto_as_string(const AttributeProto& attr);
 std::string data_type_to_string(int elem_type);
-VAIP_DLL_SPEC AttributeProtoPtr attr_proto_clone(const AttributeProto& attr);
-VAIP_DLL_SPEC AttributeProtoPtr
+MORPHIZEN_DLL_SPEC AttributeProtoPtr
+attr_proto_clone(const AttributeProto& attr);
+MORPHIZEN_DLL_SPEC AttributeProtoPtr
 attr_proto_new_ints(const std::string& name, const std::vector<int64_t>& attr);
-} // namespace vaip_core
+} // namespace morphizen

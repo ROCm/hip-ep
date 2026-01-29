@@ -25,7 +25,7 @@ foreach(PROTO_FILE ${PROTO_FILES})
     COMMAND protobuf::protoc
     ARGS
       --proto_path=${protobuf_SOURCE_DIR}/src
-      --cpp_out=dllexport_decl=VAIP_DLL_SPEC:${CMAKE_CURRENT_BINARY_DIR}/morphizen
+      --cpp_out=dllexport_decl=MORPHIZEN_DLL_SPEC:${CMAKE_CURRENT_BINARY_DIR}/morphizen
       -I ${CMAKE_CURRENT_SOURCE_DIR}/proto
       ${CMAKE_CURRENT_SOURCE_DIR}/${PROTO_FILE}
     DEPENDS ${PROTO_FILE})
@@ -34,17 +34,17 @@ foreach(PROTO_FILE ${PROTO_FILES})
 endforeach(PROTO_FILE ${PROTO_FILES})
 
 if(MSVC)
-  set(VAIP_DLL_SPEC "__declspec(dllexport)")
+  set(MORPHIZEN_DLL_SPEC "__declspec(dllexport)")
   set_source_files_properties(
     ${PROTO_SRCS}
-    PROPERTIES COMPILE_DEFINITIONS "VAIP_DLL_SPEC=${VAIP_DLL_SPEC}"
+    PROPERTIES COMPILE_DEFINITIONS "MORPHIZEN_DLL_SPEC=${MORPHIZEN_DLL_SPEC}"
     COMPILE_FLAGS "/w")
 else(MSVC)
   set_source_files_properties(
     ${PROTO_SRCS}
     PROPERTIES
     COMPILE_DEFINITIONS
-    "VAIP_DLL_SPEC=__attribute__((visibility(\"default\")))"
+    "MORPHIZEN_DLL_SPEC=__attribute__((visibility(\"default\")))"
     COMPILE_FLAGS
     "-Wno-unused-variable -Wno-conversion")
 endif(MSVC)

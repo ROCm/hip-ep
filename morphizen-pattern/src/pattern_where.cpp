@@ -5,7 +5,7 @@
 
 #include "./pattern_where.hpp"
 
-namespace vaip_core {
+namespace morphizen {
 PatternWhere::PatternWhere(
     std::unique_ptr<Pattern> pattern,
     std::function<bool(const NodeInput&)> condition_on_node_input)
@@ -33,4 +33,4 @@ PatternWhere::match_uncached(const onnxruntime::Graph& graph,
   }
   return nullptr;
 }
-} // namespace vaip_core
+} // namespace morphizen

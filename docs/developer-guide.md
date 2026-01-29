@@ -318,6 +318,8 @@ cmake --install ../../build/googletest --config Debug
 
 #### 3. glog (Google Logging v0.7.1)
 
+**CRITICAL**: glog MUST be built as a **static library** (not DLL) with `-DBUILD_SHARED_LIBS=OFF`.
+
 ```bash
 # Clone glog in parent directory (if not already cloned)
 git clone --branch v0.7.1 --depth 1 https://github.com/google/glog.git ../glog
@@ -328,11 +330,14 @@ cmake -S ../glog -B ../../build/glog \
   -DCMAKE_BUILD_TYPE=Debug \
   "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>" \
   -DCMAKE_INSTALL_PREFIX=../../local \
+  -DBUILD_SHARED_LIBS=OFF \
   -DBUILD_TESTING=OFF
 
 cmake --build ../../build/glog --config Debug --parallel
 cmake --install ../../build/glog --config Debug
 ```
+
+**Verification**: After install, you should see `glogd.lib` (static library) installed, NOT `glogd.dll`. If you see a DLL, the build is incorrect - rebuild with `-DBUILD_SHARED_LIBS=OFF`.
 
 #### 4. gsl (Microsoft GSL v4.0.0)
 

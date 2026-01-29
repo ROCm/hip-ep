@@ -7,7 +7,7 @@
 #include <regex>
 
 #include "morphizen/pattern.hpp"
-namespace vaip_core {
+namespace morphizen {
 
 class PatternOr : public Pattern {
 public:
@@ -23,4 +23,4 @@ private:
 private:
   std::vector<std::shared_ptr<Pattern>> or_patterns_;
 };
-} // namespace vaip_core
+} // namespace morphizen

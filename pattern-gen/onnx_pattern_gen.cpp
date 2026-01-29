@@ -49,7 +49,7 @@ DEF_ENV_PARAM(ENABLE_CONSTANT_SHARING, "0")
 // clang-format on
 
 namespace {
-using namespace vaip_core;
+using namespace morphizen;
 struct NodePattern {
 public:
   NodePattern(const NodeInput& node_input, const std::string& hint,
@@ -176,7 +176,7 @@ public:
     auto shape_ptr = node_arg_get_shape_i64(*ni.node_arg);
     auto shape = shape_ptr == nullptr
                      ? std::string("N/A")
-                     : vaip_core::container_as_string(*shape_ptr);
+                     : morphizen::container_as_string(*shape_ptr);
     auto type = std::to_string(node_arg_get_element_type(*ni.node_arg));
     auto node_arg_name = node_arg_get_name(*ni.node_arg);
     auto op_type =
@@ -313,7 +313,7 @@ public:
    * @return A shared pointer to the last node pattern in the collection.
    */
   std::shared_ptr<NodePattern>
-  build_nodes(std::vector<vaip_cxx::NodeConstRef> nodes) {
+  build_nodes(std::vector<morphizen_cxx::NodeConstRef> nodes) {
     for (auto node : nodes) {
       build_node(node);
     }
@@ -495,11 +495,12 @@ public:
    * @param graph The graph to perform pattern matching on.
    * @param output The output node of the graph to start pattern matching from.
    */
-  std::shared_ptr<vaip_core::Pattern>
-  test(vaip_cxx::GraphConstRef graph, const std::vector<std::string>& outputs) {
-    auto patterns = std::vector<std::shared_ptr<vaip_core::Pattern>>{};
+  std::shared_ptr<morphizen::Pattern>
+  test(morphizen_cxx::GraphConstRef graph,
+       const std::vector<std::string>& outputs) {
+    auto patterns = std::vector<std::shared_ptr<morphizen::Pattern>>{};
     patterns.reserve(outputs.size());
-    auto first_node = std::optional<vaip_cxx::NodeConstRef>();
+    auto first_node = std::optional<morphizen_cxx::NodeConstRef>();
     for (auto output : outputs) {
       auto node = graph.find_node(output);
       CHECK(node != std::nullopt)
@@ -519,7 +520,7 @@ public:
       std::cout << "- Matching pattern "
                    "---------------------------------------------------"
                 << std::endl;
-      vaip_core::Pattern::enable_trace(1);
+      morphizen::Pattern::enable_trace(1);
       auto match = root_pattern->match(graph, *node);
       patterns.push_back(root_pattern);
       CHECK(match != nullptr)
@@ -532,7 +533,7 @@ public:
       std::cout << "---------------------------------------------------"
                 << std::endl;
     }
-    auto ret = std::shared_ptr<vaip_core::Pattern>();
+    auto ret = std::shared_ptr<morphizen::Pattern>();
     if (patterns.size() > 1) {
       std::cout << "- Test Multiple output patterns: " << std::endl;
       auto seq = builder_.sequence(patterns);
@@ -631,7 +632,7 @@ public:
     LOG(INFO) << "write generated mermaid diagram to " << inc;
   }
 
-  void dump_subgraph_to_onnx(vaip_cxx::GraphRef& graph_ref,
+  void dump_subgraph_to_onnx(morphizen_cxx::GraphRef& graph_ref,
                              const std::vector<std::string>& opt_inputs,
                              const std::vector<std::string>& opt_outputs,
                              const std::string& out_onnx) {
@@ -673,9 +674,9 @@ private:
  * the search criteria.
  */
 template <typename T>
-std::vector<vaip_cxx::NodeConstRef> get_nodes(vaip_cxx::GraphConstRef graph,
-                                              const T& node_output_names) {
-  std::vector<vaip_cxx::NodeConstRef> nodes;
+std::vector<morphizen_cxx::NodeConstRef>
+get_nodes(morphizen_cxx::GraphConstRef graph, const T& node_output_names) {
+  std::vector<morphizen_cxx::NodeConstRef> nodes;
   nodes.reserve(node_output_names.size());
   for (auto it = node_output_names.rbegin(); it != node_output_names.rend();
        ++it) {
@@ -760,8 +761,8 @@ int main(int argc, char* argv[]) {
     // intialize the main function.
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "onnx_pattern_gen");
     Ort::SessionOptions().AppendExecutionProvider_VitisAI();
-    vaip_core::set_the_global_api(
-        vaip_core::Plugin::invoke<vaip_core::OrtApiForVaip*>(
+    morphizen::set_the_global_api(
+        morphizen::Plugin::invoke<morphizen::OrtApiForVaip*>(
             "onnxruntime_morphizen_ep", "get_the_global_api"));
     // Check command line args
     CHECK_NE(opt_onnx_file, "")
@@ -770,7 +771,7 @@ int main(int argc, char* argv[]) {
     CHECK_GE(opt_outputs.size(), 1) << " -o <output> is required";
 
     // Load model
-    auto model = vaip_cxx::Model::load(opt_onnx_file);
+    auto model = morphizen_cxx::Model::load(opt_onnx_file);
     auto graph = model->main_graph();
     graph.resolve();
     auto [meta_def, error] = graph.try_fuse("onnx_pattern_gen", opt_inputs,

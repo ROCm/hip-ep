@@ -6,14 +6,16 @@
 #include <glog/logging.h>
 
 #include "morphizen/node_attr.hpp"
-#include <vaip/vaip_ort_api.h>
+#include <morphizen/morphizen_ort_api.h>
 
-namespace vaip_core {
-VAIP_DLL_SPEC void AttributeProtoDeleter::operator()(AttributeProto* p) const {
-  VAIP_ORT_API(attr_proto_delete)(p);
+namespace morphizen {
+MORPHIZEN_DLL_SPEC void
+AttributeProtoDeleter::operator()(AttributeProto* p) const {
+  MORPHIZEN_ORT_API(attr_proto_delete)(p);
 }
-VAIP_DLL_SPEC void NodeAttributesDeleter::operator()(NodeAttributes* p) const {
-  VAIP_ORT_API(node_attributes_delete)(p);
+MORPHIZEN_DLL_SPEC void
+NodeAttributesDeleter::operator()(NodeAttributes* p) const {
+  MORPHIZEN_ORT_API(node_attributes_delete)(p);
 }
 std::string attr_proto_as_string(const AttributeProto& /*attr*/) {
   return "TODO";
@@ -67,31 +69,32 @@ std::string data_type_to_string(int elem_type) {
 }
 
 NodeAttr::NodeAttr(const std::string& name, int64_t value)
-    : attribute_proto_{
-          AttributeProtoPtr(VAIP_ORT_API(attr_proto_new_int)(name, value))} {}
+    : attribute_proto_{AttributeProtoPtr(
+          MORPHIZEN_ORT_API(attr_proto_new_int)(name, value))} {}
 
 NodeAttr::NodeAttr(const std::string& name, float value)
-    : attribute_proto_{VAIP_ORT_API(attr_proto_new_float)(name, value)} {}
+    : attribute_proto_{MORPHIZEN_ORT_API(attr_proto_new_float)(name, value)} {}
 
 NodeAttr::NodeAttr(const std::string& name, const std::string& value)
-    : attribute_proto_{VAIP_ORT_API(attr_proto_new_string)(name, value)} {}
+    : attribute_proto_{MORPHIZEN_ORT_API(attr_proto_new_string)(name, value)} {}
 
 NodeAttr::NodeAttr(const std::string& name, const TensorProto& value)
-    : attribute_proto_{VAIP_ORT_API(attr_proto_new_tensor)(name, value)} {}
+    : attribute_proto_{MORPHIZEN_ORT_API(attr_proto_new_tensor)(name, value)} {}
 
 NodeAttr::NodeAttr(const std::string& name, const std::vector<int64_t>& value)
-    : attribute_proto_{VAIP_ORT_API(attr_proto_new_ints)(name, value)} {}
+    : attribute_proto_{MORPHIZEN_ORT_API(attr_proto_new_ints)(name, value)} {}
 
 NodeAttr::NodeAttr(const std::string& name, const std::vector<float>& value)
-    : attribute_proto_{VAIP_ORT_API(attr_proto_new_floats)(name, value)} {}
+    : attribute_proto_{MORPHIZEN_ORT_API(attr_proto_new_floats)(name, value)} {}
 
 NodeAttr::NodeAttr(const std::string& name,
                    const std::vector<std::string>& value)
-    : attribute_proto_{VAIP_ORT_API(attr_proto_new_strings)(name, value)} {}
+    : attribute_proto_{MORPHIZEN_ORT_API(attr_proto_new_strings)(name, value)} {
+}
 
 NodeAttr::NodeAttr(const std::string& name, AttributeProtoPtr ptr)
     : attribute_proto_{std::move(ptr)} {
-  VAIP_ORT_API(attr_proto_set_name)(attribute_proto_.get(), name);
+  MORPHIZEN_ORT_API(attr_proto_set_name)(attribute_proto_.get(), name);
 }
 
 AttributeProto& NodeAttr::get() { return *attribute_proto_; }
@@ -102,32 +105,33 @@ NodeAttributesBuilder::NodeAttributesBuilder(size_t capacity) : attrs_{} {
 }
 
 NodeAttributesPtr NodeAttributesBuilder::build() {
-  auto ret = NodeAttributesPtr(VAIP_ORT_API(node_attributes_new)());
+  auto ret = NodeAttributesPtr(MORPHIZEN_ORT_API(node_attributes_new)());
   for (auto& node_attr : attrs_) {
     AttributeProto& attr_proto = node_attr.get();
-    VAIP_ORT_API(node_attributes_add)(*ret, std::move(attr_proto));
+    MORPHIZEN_ORT_API(node_attributes_add)(*ret, std::move(attr_proto));
   }
   attrs_.clear();
   return ret;
 }
 
 void NodeAttributesBuilder::merge_into(Node& node) {
-  merge_into(VAIP_ORT_API(node_get_attributes)(node));
+  merge_into(MORPHIZEN_ORT_API(node_get_attributes)(node));
 }
 
 void NodeAttributesBuilder::merge_into(NodeAttributes& attrs) {
   for (auto& attr : attrs_) {
     AttributeProto& attr_proto = attr.get();
-    VAIP_ORT_API(node_attributes_add)(attrs, std::move(attr_proto));
+    MORPHIZEN_ORT_API(node_attributes_add)(attrs, std::move(attr_proto));
   }
 }
-VAIP_DLL_SPEC AttributeProtoPtr attr_proto_clone(const AttributeProto& attr) {
-  return AttributeProtoPtr(VAIP_ORT_API(attr_proto_clone)(attr));
+MORPHIZEN_DLL_SPEC AttributeProtoPtr
+attr_proto_clone(const AttributeProto& attr) {
+  return AttributeProtoPtr(MORPHIZEN_ORT_API(attr_proto_clone)(attr));
 }
 
-VAIP_DLL_SPEC AttributeProtoPtr attr_proto_new_ints(
+MORPHIZEN_DLL_SPEC AttributeProtoPtr attr_proto_new_ints(
     const std::string& name, const std::vector<int64_t>& value) {
-  return AttributeProtoPtr(VAIP_ORT_API(attr_proto_new_ints)(name, value));
+  return AttributeProtoPtr(MORPHIZEN_ORT_API(attr_proto_new_ints)(name, value));
 }
 
-} // namespace vaip_core
+} // namespace morphizen

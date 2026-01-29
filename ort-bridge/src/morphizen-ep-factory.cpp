@@ -2,12 +2,12 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#include "morphizen/vaip.hpp"
+#include "morphizen/morphizen.hpp"
 
 #include "./morphizen-ep-factory.hpp"
 #include "./morphizen-ep.hpp"
 #include "morphizen-utils/morphizen-utils.hpp"
-#include "morphizen-utils/vaip_plugin.hpp"
+#include "morphizen-utils/morphizen_plugin.hpp"
 #include "morphizen/onnxruntime_morphizen_ep.hpp"
 #include <glog/logging.h>
 #include <google/protobuf/util/json_util.h>

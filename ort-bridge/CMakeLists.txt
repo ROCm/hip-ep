@@ -2,7 +2,7 @@
 # ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
-include(${CMAKE_CURRENT_SOURCE_DIR}/../vaip-core/cmake/find_onnxruntime.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../morphizen-core/cmake/find_onnxruntime.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/check-ort-version.cmake)
 
 # Compile-time backend selection: C++ code needs to know which backends are available

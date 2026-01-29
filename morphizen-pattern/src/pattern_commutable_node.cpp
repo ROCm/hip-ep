@@ -9,7 +9,7 @@
 #include "morphizen/node.hpp"
 #include "morphizen/node_arg.hpp"
 
-namespace vaip_core {
+namespace morphizen {
 PatternCommutableNode::PatternCommutableNode(
     int id, const std::string& op_type, const std::string& op_domain,
     const std::shared_ptr<Pattern>& arg1, const std::shared_ptr<Pattern>& arg2)
@@ -118,4 +118,4 @@ void PatternCommutableNode::fill_ops_name(
   arg2_->fill_ops_name(list_of_ops_name);
   list_of_ops_name.emplace_back("CommutableNode -> " + this->op_type_);
 }
-} // namespace vaip_core
+} // namespace morphizen

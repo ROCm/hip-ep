@@ -13,20 +13,20 @@
 #include <cstdint>
 #include <glog/logging.h>
 #include <limits>
-#include <vaip/my_ort.h>
-#include <vaip/vaip_ort_api.h>
+#include <morphizen/morphizen_ort_api.h>
+#include <morphizen/my_ort.h>
 
 // Simple logging macro for graph operations
 #define MY_LOG(n) LOG(INFO)
 
 // Wrapper functions for tensor_proto_new calls
-// These forward to VAIP_ORT_API and handle f32/f64 naming differences
+// These forward to MORPHIZEN_ORT_API and handle f32/f64 naming differences
 namespace {
 #define DEFINE_TENSOR_PROTO_NEW_WRAPPER(type, cxx_type)                        \
-  inline vaip_core::TensorProto* tensor_proto_new_##type(                      \
+  inline morphizen::TensorProto* tensor_proto_new_##type(                      \
       const std::string& name, const std::vector<int64_t>& shape,              \
       const std::vector<cxx_type>& data) {                                     \
-    return VAIP_ORT_API(tensor_proto_new_##type)(name, shape, data);           \
+    return MORPHIZEN_ORT_API(tensor_proto_new_##type)(name, shape, data);      \
   }
 
 DEFINE_TENSOR_PROTO_NEW_WRAPPER(i8, int8_t)
@@ -38,62 +38,62 @@ DEFINE_TENSOR_PROTO_NEW_WRAPPER(u32, uint32_t)
 DEFINE_TENSOR_PROTO_NEW_WRAPPER(i64, int64_t)
 DEFINE_TENSOR_PROTO_NEW_WRAPPER(u64, uint64_t)
 
-// bf16/fp16 use int16_t in VAIP_ORT_API
-inline vaip_core::TensorProto*
+// bf16/fp16 use int16_t in MORPHIZEN_ORT_API
+inline morphizen::TensorProto*
 tensor_proto_new_bf16(const std::string& name,
                       const std::vector<int64_t>& shape,
                       const std::vector<int16_t>& data) {
-  return VAIP_ORT_API(tensor_proto_new_bf16)(name, shape, data);
+  return MORPHIZEN_ORT_API(tensor_proto_new_bf16)(name, shape, data);
 }
 
-inline vaip_core::TensorProto*
+inline morphizen::TensorProto*
 tensor_proto_new_fp16(const std::string& name,
                       const std::vector<int64_t>& shape,
                       const std::vector<int16_t>& data) {
-  return VAIP_ORT_API(tensor_proto_new_fp16)(name, shape, data);
+  return MORPHIZEN_ORT_API(tensor_proto_new_fp16)(name, shape, data);
 }
 
-// Special cases: VAIP_ORT_API uses "floats"/"doubles", not "f32"/"f64"
-inline vaip_core::TensorProto*
+// Special cases: MORPHIZEN_ORT_API uses "floats"/"doubles", not "f32"/"f64"
+inline morphizen::TensorProto*
 tensor_proto_new_f32(const std::string& name, const std::vector<int64_t>& shape,
                      const std::vector<float>& data) {
-  return VAIP_ORT_API(tensor_proto_new_floats)(name, shape, data);
+  return MORPHIZEN_ORT_API(tensor_proto_new_floats)(name, shape, data);
 }
 
-inline vaip_core::TensorProto*
+inline morphizen::TensorProto*
 tensor_proto_new_f64(const std::string& name, const std::vector<int64_t>& shape,
                      const std::vector<double>& data) {
-  return VAIP_ORT_API(tensor_proto_new_doubles)(name, shape, data);
+  return MORPHIZEN_ORT_API(tensor_proto_new_doubles)(name, shape, data);
 }
 
 // Additional types used in REVERT_MEM_TAG_DEF
-#if VAIP_ORT_API_MAJOR >= 13
+#if MORPHIZEN_ORT_API_MAJOR >= 13
 DEFINE_TENSOR_PROTO_NEW_WRAPPER(i4, int8_t)
 DEFINE_TENSOR_PROTO_NEW_WRAPPER(u4, uint8_t)
 #endif
 
-#if VAIP_ORT_API_MAJOR >= 19
+#if MORPHIZEN_ORT_API_MAJOR >= 19
 DEFINE_TENSOR_PROTO_NEW_WRAPPER(bool, uint8_t)
 #endif
 
 #undef DEFINE_TENSOR_PROTO_NEW_WRAPPER
 } // namespace
 
-namespace vaip_core {
+namespace morphizen {
 
-VAIP_DLL_SPEC Node&
+MORPHIZEN_DLL_SPEC Node&
 graph_add_node(Graph& graph, const std::string& name,
                const std::string& op_type, const std::string& description,
                const std::vector<const NodeArg*>& input_args,
                const std::vector<const NodeArg*>& output_args,
                NodeAttributesPtr attributes, const std::string& domain) {
-  auto& ret = VAIP_ORT_API(graph_add_node)(graph, name, op_type, description,
-                                           input_args, output_args,
-                                           *attributes.get(), domain);
+  auto& ret = MORPHIZEN_ORT_API(graph_add_node)(
+      graph, name, op_type, description, input_args, output_args,
+      *attributes.get(), domain);
   return ret;
 }
 
-VAIP_DLL_SPEC std::vector<const NodeArg*>
+MORPHIZEN_DLL_SPEC std::vector<const NodeArg*>
 node_inputs_2_node_args(const std::vector<NodeInput>& inputs) {
   auto input_args = std::vector<const NodeArg*>();
   input_args.resize(inputs.size());
@@ -104,17 +104,18 @@ node_inputs_2_node_args(const std::vector<NodeInput>& inputs) {
 }
 
 void graph_set_name(Graph& graph, const std::string& name) {
-  VAIP_ORT_API(graph_set_name)(graph, name.c_str());
+  MORPHIZEN_ORT_API(graph_set_name)(graph, name.c_str());
 }
 
-VAIP_DLL_SPEC std::vector<const Node*>
+MORPHIZEN_DLL_SPEC std::vector<const Node*>
 graph_get_output_nodes(const Graph& graph) {
   auto graph_outputs = graph_get_outputs(graph);
   auto leaf_nodes = std::vector<const Node*>();
   leaf_nodes.reserve(graph_outputs.size());
   for (auto& o : graph_outputs) {
     if (o) {
-      auto n = VAIP_ORT_API(graph_producer_node)(graph, node_arg_get_name(*o));
+      auto n =
+          MORPHIZEN_ORT_API(graph_producer_node)(graph, node_arg_get_name(*o));
       if (n != nullptr) {
         leaf_nodes.push_back(n);
       }
@@ -141,7 +142,7 @@ void graph_gc(Graph& graph) {
       leaf_nodes.push_back(n);
     }
   }
-  VAIP_ORT_API(graph_reverse_dfs_from)
+  MORPHIZEN_ORT_API(graph_reverse_dfs_from)
   (
       graph,      //
       leaf_nodes, //
@@ -157,44 +158,44 @@ void graph_gc(Graph& graph) {
   for (auto it = all_nodes.rbegin(); it != all_nodes.rend(); ++it) {
     auto n = *it;
     MY_LOG(1) << "\tremove " << node_as_string(*n);
-    VAIP_ORT_API(graph_remove_node)(graph, {n, nullptr});
+    MORPHIZEN_ORT_API(graph_remove_node)(graph, {n, nullptr});
   }
 }
 
-VAIP_DLL_SPEC void graph_resolve(Graph& graph, bool force) {
-  auto status = VAIP_ORT_API(graph_resolve)(graph, force);
+MORPHIZEN_DLL_SPEC void graph_resolve(Graph& graph, bool force) {
+  auto status = MORPHIZEN_ORT_API(graph_resolve)(graph, force);
   CHECK(status == 0) << " resolve error: " << status;
   return;
 }
 
 const Model& graph_get_model(const Graph& graph) {
-  return VAIP_ORT_API(graph_get_model)(graph);
+  return MORPHIZEN_ORT_API(graph_get_model)(graph);
 }
 
 std::vector<const Node*> graph_nodes(const Graph& graph) {
-  return *VAIP_ORT_API(graph_nodes_unsafe)(graph);
+  return *MORPHIZEN_ORT_API(graph_nodes_unsafe)(graph);
 }
 
 std::vector<const NodeArg*> graph_get_inputs(const Graph& graph) {
-  return *VAIP_ORT_API(graph_get_inputs_unsafe)(graph);
+  return *MORPHIZEN_ORT_API(graph_get_inputs_unsafe)(graph);
 }
 
-VAIP_DLL_SPEC std::vector<const NodeArg*>
+MORPHIZEN_DLL_SPEC std::vector<const NodeArg*>
 graph_get_outputs(const Graph& graph) {
-  return *VAIP_ORT_API(graph_get_outputs_unsafe)(graph);
+  return *MORPHIZEN_ORT_API(graph_get_outputs_unsafe)(graph);
 }
 
-VAIP_DLL_SPEC std::vector<size_t>
+MORPHIZEN_DLL_SPEC std::vector<size_t>
 graph_get_node_in_topoligical_order(const Graph& graph) {
   std::vector<size_t> ret;
   auto output_nodes = graph_get_output_nodes(graph);
-  VAIP_ORT_API(graph_reverse_dfs_from)
+  MORPHIZEN_ORT_API(graph_reverse_dfs_from)
   (
       graph,        //
       output_nodes, // leaf nodes, output
       nullptr,      // enter
       [&ret](const Node* n) mutable {
-        ret.push_back(VAIP_ORT_API(node_get_index)(*n));
+        ret.push_back(MORPHIZEN_ORT_API(node_get_index)(*n));
       }, //
       nullptr);
   return ret;
@@ -208,8 +209,8 @@ extern std::string node_args_as_string(
     const std::vector<const NodeArg*>& args); /* defined in node.cpp */
 static std::string graph_as_string_subgraph(const Graph& graph, int level) {
   std::ostringstream str;
-  str << indent(level) << "graph[name=" << VAIP_ORT_API(graph_get_name)(graph)
-      << "] = {";
+  str << indent(level)
+      << "graph[name=" << MORPHIZEN_ORT_API(graph_get_name)(graph) << "] = {";
   str << "\n"
       << indent(level + 1)
       << "inputs = " << node_args_as_string(graph_get_inputs(graph)) << "\n"
@@ -217,7 +218,7 @@ static std::string graph_as_string_subgraph(const Graph& graph, int level) {
       << "outputs=" << node_args_as_string(graph_get_outputs(graph));
   auto nodes = graph_get_node_in_topoligical_order(graph);
   for (auto node_idx : nodes) {
-    auto node = VAIP_ORT_API(graph_get_node)(graph, node_idx);
+    auto node = MORPHIZEN_ORT_API(graph_get_node)(graph, node_idx);
     if (node == nullptr) { // should never goes here
       str << "\n" << indent(level + 1) << "null";
 
@@ -225,11 +226,11 @@ static std::string graph_as_string_subgraph(const Graph& graph, int level) {
       str << "\n"
           << indent(level + 1) << " [" << node_idx << "]"
           << node_as_string(*node);
-      auto is_fused = VAIP_ORT_API(node_type_is_fused)(*node);
+      auto is_fused = MORPHIZEN_ORT_API(node_type_is_fused)(*node);
       if (is_fused) {
         str << "\n"
             << graph_as_string_subgraph(
-                   VAIP_ORT_API(node_get_function_body)(*node), level + 1);
+                   MORPHIZEN_ORT_API(node_get_function_body)(*node), level + 1);
       }
     }
   }
@@ -243,7 +244,8 @@ std::string graph_as_string(const Graph& graph) {
 
 std::vector<const Node*>
 graph_get_consumer_nodes(const Graph& graph, const std::string& node_arg_name) {
-  return *VAIP_ORT_API(graph_get_consumer_nodes_unsafe)(graph, node_arg_name);
+  return *MORPHIZEN_ORT_API(graph_get_consumer_nodes_unsafe)(graph,
+                                                             node_arg_name);
 }
 
 // graph_replace_node_arg has been moved to vaip-core
@@ -251,15 +253,15 @@ graph_get_consumer_nodes(const Graph& graph, const std::string& node_arg_name) {
 
 const Node* graph_producer_node(const Graph& graph,
                                 const std::string& node_arg_name) {
-  return VAIP_ORT_API(graph_producer_node)(graph, node_arg_name);
+  return MORPHIZEN_ORT_API(graph_producer_node)(graph, node_arg_name);
 }
 
 const NodeArg* graph_get_node_arg(const Graph& graph, const std::string& name) {
-  return VAIP_ORT_API(graph_get_node_arg)(graph, name);
+  return MORPHIZEN_ORT_API(graph_get_node_arg)(graph, name);
 }
 
 const std::string& graph_get_name(const Graph& graph) {
-  return VAIP_ORT_API(graph_get_name)(graph);
+  return MORPHIZEN_ORT_API(graph_get_name)(graph);
 }
 
 void graph_reverse_dfs_from(
@@ -268,7 +270,7 @@ void graph_reverse_dfs_from(
     const std::function<void(const Node*)>& leave,
     const std::function<bool(const Node*, const Node*)>& comp,
     bool subgraph_sensitive) {
-  auto node = VAIP_ORT_API(graph_get_node)(graph, node_index);
+  auto node = MORPHIZEN_ORT_API(graph_get_node)(graph, node_index);
   std::vector<const Node*> nodes = {node};
   auto stop = [](const Node*, const Node*) { return false; };
   // Wrap leave callback to convert void return to bool
@@ -277,7 +279,7 @@ void graph_reverse_dfs_from(
     return false; // Return value doesn't matter for leave
   };
   // Use graph_reverse_dfs_from_preemp which has bool returns for enter/leave
-  VAIP_ORT_API(graph_reverse_dfs_from_preemp)
+  MORPHIZEN_ORT_API(graph_reverse_dfs_from_preemp)
   (graph, gsl::make_span(nodes), enter, leave_wrapper, comp, stop);
 }
 
@@ -286,7 +288,8 @@ void graph_reverse_dfs_from_multi(
     const std::function<void(const Node*)>& enter,
     const std::function<void(const Node*)>& leave,
     const std::function<bool(const Node*, const Node*)>& stop) {
-  // Wrap callbacks to match VAIP_ORT_API signature (which expects bool returns)
+  // Wrap callbacks to match MORPHIZEN_ORT_API signature (which expects bool
+  // returns)
   auto enter_wrapper =
       enter ? std::function<bool(const Node*)>([&enter](const Node* n) -> bool {
         enter(n);
@@ -301,7 +304,7 @@ void graph_reverse_dfs_from_multi(
       })
             : std::function<bool(const Node*)>(nullptr);
 
-  VAIP_ORT_API(graph_reverse_dfs_from_preemp)
+  MORPHIZEN_ORT_API(graph_reverse_dfs_from_preemp)
   (graph, from, enter_wrapper, leave_wrapper, nullptr, stop);
 }
 
@@ -315,9 +318,9 @@ void graph_fuse(Graph& graph, const std::string& name,
   std::vector<size_t> node_indices;
   node_indices.reserve(nodes.size());
   for (const auto* node : nodes) {
-    node_indices.push_back(VAIP_ORT_API(node_get_index)(*node));
+    node_indices.push_back(MORPHIZEN_ORT_API(node_get_index)(*node));
   }
-  VAIP_ORT_API(graph_fuse)
+  MORPHIZEN_ORT_API(graph_fuse)
   (graph, name, op_type, node_indices, inputs, outputs, constant_initializers);
 }
 
@@ -326,43 +329,44 @@ Node& graph_fuse(Graph& graph, const std::string& name,
                  const std::vector<std::string>& inputs,
                  const std::vector<std::string>& outputs,
                  const std::vector<std::string>& constant_initializers) {
-  return VAIP_ORT_API(graph_fuse)(graph, name, op_type, nodes, inputs, outputs,
-                                  constant_initializers);
+  return MORPHIZEN_ORT_API(graph_fuse)(graph, name, op_type, nodes, inputs,
+                                       outputs, constant_initializers);
 }
 
 // Model operations
 Graph& model_main_graph(Model& model) {
-  return VAIP_ORT_API(model_main_graph)(model);
+  return MORPHIZEN_ORT_API(model_main_graph)(model);
 }
 
 const std::string& model_get_meta_data(const Model& model,
                                        const std::string& key) {
-  return *VAIP_ORT_API(model_get_meta_data)(model, key);
+  return *MORPHIZEN_ORT_API(model_get_meta_data)(model, key);
 }
 
 bool model_has_meta_data(const Model& model, const std::string& key) {
-  return VAIP_ORT_API(model_has_meta_data)(model, key);
+  return MORPHIZEN_ORT_API(model_has_meta_data)(model, key);
 }
 
 Model* model_clone(const Model& model) {
   // Use max int64_t as threshold to keep all data inline (no external file)
-  return VAIP_ORT_API(model_clone)(model, std::numeric_limits<int64_t>::max());
+  return MORPHIZEN_ORT_API(model_clone)(model,
+                                        std::numeric_limits<int64_t>::max());
 }
 
-} // namespace vaip_core
+} // namespace morphizen
 
-namespace vaip_cxx {
+namespace morphizen_cxx {
 const std::string& GraphConstRef::name() const {
-  return VAIP_ORT_API(graph_get_name)(*this);
+  return MORPHIZEN_ORT_API(graph_get_name)(*this);
 }
 GraphConstRef::~GraphConstRef() {}
 
 const std::filesystem::path& GraphConstRef::model_path() const {
-  return VAIP_ORT_API(get_model_path)(*this);
+  return MORPHIZEN_ORT_API(get_model_path)(*this);
 }
 
 std::vector<NodeArgConstRef> GraphConstRef::inputs() const {
-  auto inputs = VAIP_ORT_API(graph_get_inputs_unsafe)(*this);
+  auto inputs = MORPHIZEN_ORT_API(graph_get_inputs_unsafe)(*this);
   auto ret = std::vector<NodeArgConstRef>();
   ret.reserve(inputs->size());
   for (auto i = 0u; i < inputs->size(); ++i) {
@@ -374,7 +378,7 @@ std::vector<NodeArgConstRef> GraphConstRef::inputs() const {
   return ret;
 }
 std::vector<NodeArgConstRef> GraphConstRef::outputs() const {
-  auto outputs = VAIP_ORT_API(graph_get_outputs_unsafe)(*this);
+  auto outputs = MORPHIZEN_ORT_API(graph_get_outputs_unsafe)(*this);
   auto ret = std::vector<NodeArgConstRef>();
   ret.reserve(outputs->size());
   for (auto i = 0u; i < outputs->size(); ++i) {
@@ -386,22 +390,23 @@ std::vector<NodeArgConstRef> GraphConstRef::outputs() const {
   return ret;
 }
 std::vector<NodeArgConstRef> GraphConstRef::constant_initializers() const {
-  auto& initializers = VAIP_ORT_API(graph_get_all_initialized_tensors)(*this);
+  auto& initializers =
+      MORPHIZEN_ORT_API(graph_get_all_initialized_tensors)(*this);
   auto ret = std::vector<NodeArgConstRef>();
   ret.reserve(initializers.size());
   for (auto constant : initializers) {
     auto& name = constant.first;
-    auto node_arg = VAIP_ORT_API(graph_get_node_arg)(*this, name);
+    auto node_arg = MORPHIZEN_ORT_API(graph_get_node_arg)(*this, name);
     CHECK(node_arg != nullptr) << "cannot get node arg: name=" << name;
     auto node_arg_2 =
-        NodeArgConstRef(graph_, const_cast<vaip_core::NodeArg&>(*node_arg));
+        NodeArgConstRef(graph_, const_cast<morphizen::NodeArg&>(*node_arg));
     ret.push_back(node_arg_2);
   }
   return ret;
 }
 
 std::vector<NodeConstRef> GraphConstRef::nodes() const {
-  auto nodes = vaip_core::graph_nodes(*this);
+  auto nodes = morphizen::graph_nodes(*this);
   auto ret = std::vector<NodeConstRef>();
   ret.reserve(nodes.size());
   for (auto i = 0u; i < nodes.size(); ++i) {
@@ -414,20 +419,20 @@ std::vector<NodeConstRef> GraphConstRef::nodes() const {
 }
 
 void GraphConstRef::save(const std::filesystem::path& file_path) const {
-  VAIP_ORT_API(graph_save)
+  MORPHIZEN_ORT_API(graph_save)
   (*this, file_path.u8string(), "", std::numeric_limits<size_t>::max());
 }
 
 void GraphConstRef::save(const std::filesystem::path& file_path,
                          const std::filesystem::path& external_data_file,
                          size_t threshold) const {
-  VAIP_ORT_API(graph_save)
+  MORPHIZEN_ORT_API(graph_save)
   (*this, file_path.u8string(), external_data_file.u8string(), threshold);
 }
 
-vaip_core::DllSafe<std::string> GraphConstRef::save_string() const {
-#if VAIP_ORT_API_MAJOR >= 18
-  return VAIP_ORT_API(graph_save_string)(*this);
+morphizen::DllSafe<std::string> GraphConstRef::save_string() const {
+#if MORPHIZEN_ORT_API_MAJOR >= 18
+  return MORPHIZEN_ORT_API(graph_save_string)(*this);
 #else
   LOG(FATAL) << "graph_save_string is not supported in this version of ORT";
 #endif
@@ -435,7 +440,7 @@ vaip_core::DllSafe<std::string> GraphConstRef::save_string() const {
 
 std::optional<NodeArgConstRef>
 GraphConstRef::find_node_arg(const std::string& name) const {
-  auto node_arg = VAIP_ORT_API(graph_get_node_arg)(*this, name);
+  auto node_arg = MORPHIZEN_ORT_API(graph_get_node_arg)(*this, name);
   if (node_arg != nullptr) {
     return NodeArgConstRef(graph_, *node_arg);
   } else {
@@ -445,7 +450,7 @@ GraphConstRef::find_node_arg(const std::string& name) const {
 
 std::vector<NodeConstRef>
 GraphConstRef::find_consumers(const std::string& name) const {
-  auto consumers = vaip_core::graph_get_consumer_nodes(*this, name);
+  auto consumers = morphizen::graph_get_consumer_nodes(*this, name);
   auto ret = std::vector<NodeConstRef>();
   ret.reserve(consumers.size());
   for (auto i = 0u; i < consumers.size(); ++i) {
@@ -461,7 +466,7 @@ GraphConstRef::find_consumers(const std::string& name) const {
 }
 std::optional<NodeConstRef>
 GraphConstRef::find_node(const std::string& name) const {
-  auto node = VAIP_ORT_API(graph_producer_node)(graph_, name);
+  auto node = MORPHIZEN_ORT_API(graph_producer_node)(graph_, name);
   if (node == nullptr) {
     return std::nullopt;
   }
@@ -471,17 +476,17 @@ GraphConstRef::find_node(const std::string& name) const {
 // try_fuse and virtual_fuse have been moved to vaip-core
 // They depend on MetaDefProto and TryFuseError which are vaip-core types
 NodeConstRef GraphConstRef::node(size_t index) const {
-  auto node = VAIP_ORT_API(graph_get_node)(*this, index);
+  auto node = MORPHIZEN_ORT_API(graph_get_node)(*this, index);
   CHECK(node != nullptr) << "cannot get node: index=" << index;
   return NodeConstRef(graph_, *node);
 }
 
 std::vector<NodeConstRef> GraphConstRef::nodes_in_topological_order() const {
-  auto node_indices = vaip_core::graph_get_node_in_topoligical_order(*this);
+  auto node_indices = morphizen::graph_get_node_in_topoligical_order(*this);
   auto ret = std::vector<NodeConstRef>();
   ret.reserve(node_indices.size());
   for (auto i : node_indices) {
-    auto node = VAIP_ORT_API(graph_get_node)(*this, i);
+    auto node = MORPHIZEN_ORT_API(graph_get_node)(*this, i);
     CHECK(node != nullptr);
     ret.push_back(NodeConstRef(graph_, *node));
   }
@@ -489,34 +494,34 @@ std::vector<NodeConstRef> GraphConstRef::nodes_in_topological_order() const {
 }
 
 std::string GraphConstRef::to_string() const {
-  return vaip_core::graph_as_string(*this);
+  return morphizen::graph_as_string(*this);
 }
 std::ostream& operator<<(std::ostream& os, const GraphConstRef& graph) {
   return os << graph.to_string();
 }
 
 void GraphConstRef::reverse_dfs_from(
-    size_t node_index, const std::function<bool(const vaip_core::Node*)>& enter,
-    const std::function<void(const vaip_core::Node*)>& leave,
-    const std::function<bool(const vaip_core::Node*, const vaip_core::Node*)>&
+    size_t node_index, const std::function<bool(const morphizen::Node*)>& enter,
+    const std::function<void(const morphizen::Node*)>& leave,
+    const std::function<bool(const morphizen::Node*, const morphizen::Node*)>&
         comp,
     bool subgraph_sensitive) const {
-  vaip_core::graph_reverse_dfs_from(*this, node_index, enter, leave, comp,
+  morphizen::graph_reverse_dfs_from(*this, node_index, enter, leave, comp,
                                     subgraph_sensitive);
 }
 
-GraphRef::GraphRef(vaip_core::Graph& graph) : GraphConstRef(graph) {}
+GraphRef::GraphRef(morphizen::Graph& graph) : GraphConstRef(graph) {}
 
 GraphRef::~GraphRef() {}
 void GraphRef::set_name(const std::string& name) {
-  vaip_core::graph_set_name(*this, name);
+  morphizen::graph_set_name(*this, name);
 }
 bool GraphRef::resolve(bool force) {
-  return VAIP_ORT_API(graph_resolve)(*this, force) == 0;
+  return MORPHIZEN_ORT_API(graph_resolve)(*this, force) == 0;
 }
 // GraphRef::fuse and GraphRef::node_builder have been moved to vaip-core
 // They depend on MetaDefProto and NodeBuilder which are vaip-core types
-void GraphRef::gc() { vaip_core::graph_gc(*this); }
+void GraphRef::gc() { morphizen::graph_gc(*this); }
 
 static std::string
 graph_ref_generate_unique_constant_initializer_name(const GraphConstRef& graph,
@@ -539,8 +544,8 @@ graph_ref_generate_unique_constant_initializer_name(const GraphConstRef& graph,
     auto name =                                                                \
         graph_ref_generate_unique_constant_initializer_name(*this, name_hint); \
     auto tensor = tensor_proto_new_##type(name, shape, values);                \
-    VAIP_ORT_API(graph_add_initialized_tensor)(*this, *tensor);                \
-    auto& newly_create_node_arg = VAIP_ORT_API(node_arg_new)(                  \
+    MORPHIZEN_ORT_API(graph_add_initialized_tensor)(*this, *tensor);           \
+    auto& newly_create_node_arg = MORPHIZEN_ORT_API(node_arg_new)(             \
         *this, name, &shape,                                                   \
         ONNX_NAMESPACE::TensorProto_DataType_##tensor_data_type);              \
     return NodeArgRef(*this, newly_create_node_arg);                           \
@@ -568,8 +573,8 @@ VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(fp16, fp16_t, FLOAT16)
     auto name =                                                                \
         graph_ref_generate_unique_constant_initializer_name(*this, name_hint); \
     auto tensor = tensor_proto_new_##type(name, shape, values);                \
-    VAIP_ORT_API(graph_add_initialized_tensor)(*this, *tensor);                \
-    auto& newly_create_node_arg = VAIP_ORT_API(node_arg_new)(                  \
+    MORPHIZEN_ORT_API(graph_add_initialized_tensor)(*this, *tensor);           \
+    auto& newly_create_node_arg = MORPHIZEN_ORT_API(node_arg_new)(             \
         *this, name, &shape,                                                   \
         ONNX_NAMESPACE::TensorProto_DataType_##tensor_data_type);              \
     return NodeArgRef(*this, newly_create_node_arg);                           \
@@ -590,51 +595,51 @@ VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(bf16, bf16_t, BFLOAT16)
 VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(fp16, fp16_t, FLOAT16)
 
 void GraphRef::set_inputs(const std::vector<NodeArgConstRef>& inputs) {
-  auto inputs_ptr = std::vector<const vaip_core::NodeArg*>();
+  auto inputs_ptr = std::vector<const morphizen::NodeArg*>();
   inputs_ptr.reserve(inputs.size());
   for (auto& input : inputs) {
     inputs_ptr.push_back(input.ptr());
   }
-  VAIP_ORT_API(graph_set_inputs)(*this, inputs_ptr);
+  MORPHIZEN_ORT_API(graph_set_inputs)(*this, inputs_ptr);
 }
 void GraphRef::set_outputs(const std::vector<NodeArgConstRef>& outputs) {
-  auto outputs_ptr = std::vector<const vaip_core::NodeArg*>();
+  auto outputs_ptr = std::vector<const morphizen::NodeArg*>();
   outputs_ptr.reserve(outputs.size());
   for (auto& output : outputs) {
     outputs_ptr.push_back(output.ptr());
   }
-  VAIP_ORT_API(graph_set_outputs)(*this, outputs_ptr);
+  MORPHIZEN_ORT_API(graph_set_outputs)(*this, outputs_ptr);
 }
 NodeArgConstRef
 GraphRef::new_node_arg(const std::string& name,
                        const std::vector<int64_t>& shape,
                        ONNX_NAMESPACE::TensorProto_DataType data_type) {
   return NodeArgConstRef::from_node_arg(
-      self(), VAIP_ORT_API(node_arg_new)(*this, name, &shape, data_type));
+      self(), MORPHIZEN_ORT_API(node_arg_new)(*this, name, &shape, data_type));
 }
 NodeArgConstRef
 GraphRef::new_node_arg(const std::string& name,
                        ONNX_NAMESPACE::TensorProto_DataType data_type) {
   return NodeArgConstRef::from_node_arg(
-      self(), VAIP_ORT_API(node_arg_new)(*this, name, nullptr, data_type));
+      self(), MORPHIZEN_ORT_API(node_arg_new)(*this, name, nullptr, data_type));
 }
 NodeRef
 GraphRef::add_node(const std::string& name, const std::string& op_domain,
                    const std::string& op_type, const std::string& description,
                    const std::vector<std::optional<NodeArgConstRef>>& inputs,
                    const std::vector<std::optional<NodeArgConstRef>>& outputs,
-                   vaip_core::NodeAttributesPtr attributes) {
-  auto inputs_ptr = std::vector<const vaip_core::NodeArg*>();
+                   morphizen::NodeAttributesPtr attributes) {
+  auto inputs_ptr = std::vector<const morphizen::NodeArg*>();
   inputs_ptr.reserve(inputs.size());
   // in onnxruntime, the node_arg with an empty name is used to
   // represent the optional node arg.
-  auto the_optional_arg = VAIP_ORT_API(graph_get_node_arg)(*this, "");
+  auto the_optional_arg = MORPHIZEN_ORT_API(graph_get_node_arg)(*this, "");
   if (the_optional_arg == nullptr) {
     auto shape = std::vector<int64_t>{};
-    the_optional_arg = &VAIP_ORT_API(node_arg_new)(
+    the_optional_arg = &MORPHIZEN_ORT_API(node_arg_new)(
         *this, "", &shape, ONNX_NAMESPACE::TensorProto_DataType_FLOAT);
   }
-  for (auto& input : inputs) { // namespace vaip_cxx
+  for (auto& input : inputs) { // namespace morphizen_cxx
     if (input) {
       inputs_ptr.push_back(input->ptr());
     } else {
@@ -642,7 +647,7 @@ GraphRef::add_node(const std::string& name, const std::string& op_domain,
     }
   }
 
-  auto outputs_ptr = std::vector<const vaip_core::NodeArg*>();
+  auto outputs_ptr = std::vector<const morphizen::NodeArg*>();
   outputs_ptr.reserve(outputs.size());
   for (auto& output : outputs) {
     if (output) {
@@ -652,7 +657,7 @@ GraphRef::add_node(const std::string& name, const std::string& op_domain,
     }
   }
 
-  auto& new_node = VAIP_ORT_API(graph_add_node)(
+  auto& new_node = MORPHIZEN_ORT_API(graph_add_node)(
       *this, name, op_type, description, inputs_ptr, outputs_ptr,
       *attributes.get(), op_domain);
   return NodeRef(*this, new_node);
@@ -669,7 +674,7 @@ void GraphRef::mut_save(const std::filesystem::path& file_path,
   save(file_path, external_data_file, threshold);
 }
 
-vaip_core::DllSafe<std::string>
+morphizen::DllSafe<std::string>
 GraphRef::mut_save_string(bool filter_out_special_tensor) {
   if (filter_out_special_tensor) {
     prune_special_tensor_proto();
@@ -680,10 +685,10 @@ GraphRef::mut_save_string(bool filter_out_special_tensor) {
   return save_string();
 }
 
-#if VAIP_ORT_API_MAJOR >= 7
+#if MORPHIZEN_ORT_API_MAJOR >= 7
 static GraphConstRef get_original_graph(const std::string& ptr) {
   uintptr_t ptr1 = std::stoull(ptr);
-  return *reinterpret_cast<vaip_core::Graph*>(ptr1);
+  return *reinterpret_cast<morphizen::Graph*>(ptr1);
 }
 #endif
 void revert_mem_tag_tensor(GraphRef target_graph, const std::string& name,
@@ -699,7 +704,7 @@ void revert_mem_tag_tensor(GraphRef target_graph, const std::string& name,
     auto values = std::vector<cxx_type>(beg, end);                             \
     auto tensor =                                                              \
         tensor_proto_new_##type(name, shape.get() ? *shape : empty, values);   \
-    VAIP_ORT_API(graph_add_initialized_tensor)(target_graph, *tensor);         \
+    MORPHIZEN_ORT_API(graph_add_initialized_tensor)(target_graph, *tensor);    \
     break;                                                                     \
   }
   switch (element_type) {
@@ -711,11 +716,11 @@ void revert_mem_tag_tensor(GraphRef target_graph, const std::string& name,
     REVERT_MEM_TAG_DEF(u32, uint32_t, UINT32)
     REVERT_MEM_TAG_DEF(i64, int64_t, INT64)
     REVERT_MEM_TAG_DEF(u64, uint64_t, UINT64)
-#if VAIP_ORT_API_MAJOR >= 13
+#if MORPHIZEN_ORT_API_MAJOR >= 13
     REVERT_MEM_TAG_DEF(i4, int8_t, INT4)
     REVERT_MEM_TAG_DEF(u4, uint8_t, UINT4)
 #endif
-#if VAIP_ORT_API_MAJOR >= 19
+#if MORPHIZEN_ORT_API_MAJOR >= 19
     REVERT_MEM_TAG_DEF(bool, uint8_t, BOOL)
 #endif
     REVERT_MEM_TAG_DEF(f32, float, FLOAT)
@@ -735,7 +740,7 @@ static void prune_special_tensor_proto_for_graph(GraphRef target_graph,
   size_t size = 0;
   size_t offset = 0;
   size_t checksum = 0;
-  int external_data = VAIP_ORT_API(node_arg_external_location)(
+  int external_data = MORPHIZEN_ORT_API(node_arg_external_location)(
       original_graph, node_arg, location, offset, size, checksum);
   CHECK_LE(location.size(), 1024)
       << "External data location is too long: " << location.size();
@@ -744,24 +749,24 @@ static void prune_special_tensor_proto_for_graph(GraphRef target_graph,
     prune_special_tensor_proto_for_graph(target_graph, new_original_graph,
                                          node_arg);
   } else if (!is_first_call) {
-    auto& original_tensor = vaip_core::node_arg_get_const_data_as_tensor(
+    auto& original_tensor = morphizen::node_arg_get_const_data_as_tensor(
         original_graph, node_arg /*hopefully, only node arg name is used.*/);
     if (external_data && !location.empty() && (location.front() == '*')) {
-      VAIP_ORT_API(graph_remove_initialized_tensor)
+      MORPHIZEN_ORT_API(graph_remove_initialized_tensor)
       (target_graph, node_arg.name());
       revert_mem_tag_tensor(target_graph, node_arg.name(),
                             node_arg.element_type(), node_arg.shape(), offset,
                             size);
     } else {
-      VAIP_ORT_API(graph_remove_initialized_tensor)
+      MORPHIZEN_ORT_API(graph_remove_initialized_tensor)
       (target_graph, node_arg.name());
-      VAIP_ORT_API(graph_add_initialized_tensor)
+      MORPHIZEN_ORT_API(graph_add_initialized_tensor)
       (target_graph, original_tensor);
     }
   }
 }
 void GraphRef::prune_special_tensor_proto() {
-#if VAIP_ORT_API_MAJOR >= 7
+#if MORPHIZEN_ORT_API_MAJOR >= 7
 
   auto all = constant_initializers();
   for (auto node_arg : all) {
@@ -769,4 +774,4 @@ void GraphRef::prune_special_tensor_proto() {
   }
 #endif
 }
-} // namespace vaip_cxx
+} // namespace morphizen_cxx

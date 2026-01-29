@@ -18,7 +18,7 @@
 #include <memory>
 #include <utility>
 
-namespace vaip_core {
+namespace morphizen {
 namespace immutable_map {
 template <typename Key, typename T, typename Compare> class ImmutableMap;
 
@@ -273,4 +273,4 @@ private:
   const size_type size_;
 };
 } // namespace immutable_map
-} // namespace vaip_core
+} // namespace morphizen

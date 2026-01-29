@@ -13,7 +13,7 @@
 
 #include "./pattern_log.hpp"
 #include "morphizen/pattern.pb.h"
-namespace vaip_core {
+namespace morphizen {
 PatternNode::PatternNode(int id, const std::string& op_type,
                          const std::string& op_domain,
                          std::vector<std::shared_ptr<Pattern>> args,
@@ -128,4 +128,4 @@ void PatternNode::fill_ops_name(
   }
   list_of_ops_name.emplace_back(this->op_type_);
 }
-} // namespace vaip_core
+} // namespace morphizen

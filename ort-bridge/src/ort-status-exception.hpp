@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 #pragma once
-#include "./morphizen/vaip-ort-api-ext.hpp"
+#include "./morphizen/morphizen-ort-api-ext.hpp"
 #include <exception>
 namespace morphizen {
 

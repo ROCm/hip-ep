@@ -9,9 +9,9 @@
 #include <map>
 #include <memory>
 #include <morphizen-utils/morphizen-utils.hpp>
-#include <morphizen/vaip.hpp>
+#include <morphizen/morphizen.hpp>
+#include <morphizen/morphizen_ort_api.h>
 #include <string>
-#include <vaip/vaip_ort_api.h>
 
 // Determine default backend based on compile-time configuration
 #if MORPHIZEN_ENABLE_ONNX_BACKEND
@@ -30,29 +30,30 @@ DEF_ENV_PARAM_2(
 
 namespace morphizen {
 // defined in onnx-ir-imp/src/vaip-ort-api.cpp
-const vaip_core::OrtApiForVaip*
+const morphizen::OrtApiForMorphizen*
 get_global_vaip_ort_api(const char* ir_backend_name);
 
 namespace test {
 
 /**
- * @brief Create a test coverage wrapper for OrtApiForVaip
+ * @brief Create a test coverage wrapper for OrtApiForMorphizen
  *
  * This function creates a wrapper implementation that logs API calls
  * and delegates to the original API for test coverage purposes.
  *
- * @param original_api The original OrtApiForVaip instance to wrap
- * @return OrtApiForVaip* Wrapped API instance for testing
+ * @param original_api The original OrtApiForMorphizen instance to wrap
+ * @return OrtApiForMorphizen* Wrapped API instance for testing
  */
-vaip_core::OrtApiForVaip*
-get_vaip_ort_api_for_coverage_test(vaip_core::OrtApiForVaip* original_api);
+morphizen::OrtApiForMorphizen*
+get_vaip_ort_api_for_coverage_test(morphizen::OrtApiForMorphizen* original_api);
 
 /**
  * @brief Delete the test coverage wrapper
  *
  * @param wrapped_api The wrapped API instance to delete
  */
-void delete_vaip_ort_api_coverage_test(vaip_core::OrtApiForVaip* wrapped_api);
+void delete_vaip_ort_api_coverage_test(
+    morphizen::OrtApiForMorphizen* wrapped_api);
 
 /**
  * @brief Get current API call statistics
@@ -79,12 +80,12 @@ protected:
       backend_ = env_backend;
     }
     // Get the original API
-    original_api_ = const_cast<vaip_core::OrtApiForVaip*>(
+    original_api_ = const_cast<morphizen::OrtApiForMorphizen*>(
         morphizen::get_global_vaip_ort_api(backend_.c_str()));
     // Create the coverage wrapper
     wrapped_api_ = get_vaip_ort_api_for_coverage_test(original_api_);
     ASSERT_NE(wrapped_api_, nullptr);
-    vaip_core::set_the_global_api(wrapped_api_);
+    morphizen::set_the_global_api(wrapped_api_);
   }
 
   void TearDown() override {
@@ -96,8 +97,8 @@ protected:
   }
 
   std::string backend_;
-  vaip_core::OrtApiForVaip* original_api_ = nullptr;
-  vaip_core::OrtApiForVaip* wrapped_api_ = nullptr;
+  morphizen::OrtApiForMorphizen* original_api_ = nullptr;
+  morphizen::OrtApiForMorphizen* wrapped_api_ = nullptr;
 };
 } // namespace test
 } // namespace morphizen

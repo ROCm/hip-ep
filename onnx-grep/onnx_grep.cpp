@@ -123,7 +123,7 @@ int main(int argc, char* argv[]) {
       vaip_core::Pattern::enable_trace(1);
     }
     auto model = vaip_core::model_load(std::filesystem::path(file).u8string());
-    auto model_ref = vaip_cxx::ModelConstRef(*model);
+    auto model_ref = morphizen_cxx::ModelConstRef(*model);
     auto graph_ref = model_ref.main_graph();
     auto& graph = graph_ref;
     vaip_core::graph_resolve(graph, true);

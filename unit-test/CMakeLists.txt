@@ -13,28 +13,28 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/env.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/morphizen-e2e-test/cmake/proto.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/morphizen-e2e-test/cmake/gen-e2e-tests-config.cmake)
 
-## add a new test for class vaip_cxx::Model
+## add a new test for class morphizen_cxx::Model
 set(TEST_EXE_NAME morphizen-unit-tests)
 add_executable(${TEST_EXE_NAME}
   test_environment.hpp
   morphizen_unit_test_main.cpp
-  vaip/test_config.cpp
-  vaip/test_model.cpp
-  vaip/test_graph.cpp
-  vaip/test_const_data.cpp
-  vaip/test_anchor_point.cpp
-  vaip/test_immutable_map.cpp
-  vaip/test_pattern.cpp
-  vaip/test_pass_context.cpp
-  vaip/test_node_builder.cpp
-  vaip/test_tarball.cpp
-  vaip/test_plugin.cpp
-  vaip/test_tar_entry.cpp
-  vaip/test_tar_file.cpp
-  vaip/test_file_stream.cpp
-  vaip/test_mmap_file.cpp
-  vaip/test_ep_shared_context_workspace.cpp
-  vaip/test_op_invoker.cpp
+  morphizen/test_config.cpp
+  morphizen/test_model.cpp
+  morphizen/test_graph.cpp
+  morphizen/test_const_data.cpp
+  morphizen/test_anchor_point.cpp
+  morphizen/test_immutable_map.cpp
+  morphizen/test_pattern.cpp
+  morphizen/test_pass_context.cpp
+  morphizen/test_node_builder.cpp
+  morphizen/test_tarball.cpp
+  morphizen/test_plugin.cpp
+  morphizen/test_tar_entry.cpp
+  morphizen/test_tar_file.cpp
+  morphizen/test_file_stream.cpp
+  morphizen/test_mmap_file.cpp
+  morphizen/test_ep_shared_context_workspace.cpp
+  morphizen/test_op_invoker.cpp
   ${MORPHIZEN_E2E_TESTS_PROTO_SRCS}
   ${MORPHIZEN_E2E_TESTS_PROTO_HDRS}
   morphizen-e2e-test/config.cpp
@@ -53,7 +53,7 @@ add_executable(${TEST_EXE_NAME}
 
 # test_onnx_schema.cpp tests ONNX schema APIs which are only available when schema support is enabled
 if(morphizen_ENABLE_ONNX_SCHEMA_SUPPORT)
-  target_sources(${TEST_EXE_NAME} PRIVATE vaip/test_onnx_schema.cpp)
+  target_sources(${TEST_EXE_NAME} PRIVATE morphizen/test_onnx_schema.cpp)
 endif()
 
 set_target_properties(${TEST_EXE_NAME} PROPERTIES FOLDER morphizen/unit-tests)
@@ -159,7 +159,7 @@ add_dependencies(${TEST_EXE_NAME} morphizen_e2e_tests_generate_env_config)
 
 
 ## for test hello_plugin test
-add_library(hello_plugin_dll SHARED vaip/hello_plugin.cpp ${ryzenai_version_rc_file})
+add_library(hello_plugin_dll SHARED morphizen/hello_plugin.cpp ${ryzenai_version_rc_file})
 install(
  TARGETS hello_plugin_dll
  RUNTIME DESTINATION bin

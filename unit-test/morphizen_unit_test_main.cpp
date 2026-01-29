@@ -20,9 +20,9 @@
 #    include <crtdbg.h>
 #  endif
 #endif
-#include "morphizen/vaip.hpp"
+#include "morphizen/morphizen.hpp"
 template <typename... Args> void* morphizen_main_cmd(Args... args) {
-  auto ep_dll = vaip_core::Plugin::get("onnxruntime_morphizen_ep");
+  auto ep_dll = morphizen::Plugin::get("onnxruntime_morphizen_ep");
   if (ep_dll == nullptr) {
     LOG(ERROR) << "Failed to load MorphiZen EP";
     return nullptr;
@@ -88,12 +88,12 @@ int main(int argc, const char* argv[]) {
   {
     auto env =
         std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "vaip_unit_test");
-    /* vaip_core::StaticPluginRegister::sync_static_plugin_into_module(
+    /* morphizen::StaticPluginRegister::sync_static_plugin_into_module(
         "onnxruntime_morphizen_ep");
         */
     Ort::SessionOptions().AppendExecutionProvider_VitisAI();
-    vaip_core::set_the_global_api(
-        vaip_core::Plugin::invoke<vaip_core::OrtApiForVaip*>(
+    morphizen::set_the_global_api(
+        morphizen::Plugin::invoke<morphizen::OrtApiForMorphizen*>(
             "onnxruntime_morphizen_ep", "get_the_global_api"));
     testing::InitGoogleTest(&argc, (char**)argv);
     if (arg_get(argc, argv, "--gtest_list_test_cases")) {

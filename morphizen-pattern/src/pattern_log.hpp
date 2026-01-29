@@ -11,7 +11,7 @@
 // flags)
 #define MY_LOG(n) LOG(INFO)
 #define MATCH_FAILED MY_LOG(1) << "MATCH FAILED. ID=" << get_id() << ";"
-namespace vaip_core {
+namespace morphizen {
 [[maybe_unused]] static std::string node_input_as_string(const NodeInput& ni) {
   if (ni.node) {
     return node_as_string(*ni.node);
@@ -23,4 +23,4 @@ namespace vaip_core {
 inline std::string normalize_domain(const std::string& domain) {
   return (domain == "ai.onnx") || (domain == "onnx") ? "" : domain;
 }
-} // namespace vaip_core
+} // namespace morphizen

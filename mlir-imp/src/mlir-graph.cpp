@@ -677,7 +677,7 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
   // operation's result
 
   // For now, return a placeholder - in a real implementation this would
-  // be converted to a proper vaip_core::Node representation
+  // be converted to a proper morphizen::Node representation
   // This requires more infrastructure to map MLIR operations to Node objects
   MY_LOG(1) << "Added MLIR node: " << name << " (" << op_type << ")";
   staging_nodes_.insert(op);

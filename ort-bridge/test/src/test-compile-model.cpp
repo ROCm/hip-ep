@@ -4,7 +4,7 @@
  */
 #include "../../../unit-test/morphizen-e2e-test/wide-string.hpp"
 #include "./test-environment.hpp"
-#include "morphizen/vaip-ort-api-ext.hpp"
+#include "morphizen/morphizen-ort-api-ext.hpp"
 #include "onnxruntime_cxx_api.h"
 #include "gtest/gtest.h"
 #include <filesystem>
@@ -12,14 +12,14 @@
 #include <memory>
 // Include VAIP core headers for API access
 #include "./test-coverage-wrapper.hpp"
+#include <morphizen/morphizen_ort_api.h>
 #include <morphizen/onnxruntime_morphizen_ep.hpp>
-#include <vaip/vaip_ort_api.h>
-// Forward declarations for VAIP core functions
-namespace vaip_core {
-struct OrtApiForVaip;
-OrtApiForVaip* get_the_global_api_unsafe();
-void set_the_global_api(OrtApiForVaip* api);
-} // namespace vaip_core
+// Forward declarations for MorphiZen core functions
+namespace morphizen {
+struct OrtApiForMorphizen;
+const OrtApiForMorphizen* get_the_global_api_unsafe();
+void set_the_global_api(OrtApiForMorphizen* api);
+} // namespace morphizen
 
 struct CompileModel : public ::morphizen::test::TestCoverageWrapperTest {
   void SetUp() override {
@@ -53,18 +53,18 @@ TEST_F(CompileModel, T0) {
       test_model_path = RESNET_50_PATH;
     }
   }
-  auto ir_model = VAIP_ORT_API(model_load)(test_model_path.u8string());
+  auto ir_model = MORPHIZEN_ORT_API(model_load)(test_model_path.u8string());
   ASSERT_TRUE(ir_model != nullptr)
       << "Failed to load IR model from file: " << test_model_path;
   // Get graph and model path
 
-  auto& graph = VAIP_ORT_API(model_main_graph)(*ir_model);
-  auto model_path = VAIP_ORT_API(get_model_path)(graph);
+  auto& graph = MORPHIZEN_ORT_API(model_main_graph)(*ir_model);
+  auto model_path = MORPHIZEN_ORT_API(get_model_path)(graph);
   OrtStatus* status = nullptr;
   auto provider_options = std::unordered_map<std::string, std::string>{};
   provider_options["enable_cache_file_io_in_mem"] = "1";
-  auto execution_providers = std::make_unique<vaip_core::DllSafe<
-      std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>>>(
+  auto execution_providers = std::make_unique<morphizen::DllSafe<
+      std::vector<std::unique_ptr<morphizen::ExecutionProvider>>>>(
       compile_onnx_model_morphizen_ep_with_error_handling(
           model_path.u8string(), graph, provider_options, (void*)&status,
           [](void* status, int code, const char* error_message) {

@@ -9,7 +9,7 @@
 
 #include <optional>
 
-namespace vaip_core {
+namespace morphizen {
 
 class PatternNodeOutputArg : public Pattern {
 public:
@@ -32,4 +32,4 @@ private:
   std::shared_ptr<Pattern> node_pattern_;
   size_t output_arg_index_;
 };
-} // namespace vaip_core
+} // namespace morphizen

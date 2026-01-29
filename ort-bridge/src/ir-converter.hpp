@@ -4,7 +4,7 @@
  */
 #pragma once
 #include "./api-ptrs.hpp"
-#include "./morphizen/vaip-ort-api-ext.hpp"
+#include "./morphizen/morphizen-ort-api-ext.hpp"
 namespace morphizen {
 using GraphUniquePtr =
     std::unique_ptr<onnxruntime::Graph, void (*)(onnxruntime::Graph*)>;

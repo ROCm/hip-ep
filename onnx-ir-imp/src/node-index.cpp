@@ -211,7 +211,7 @@ std::string NodeIndex::to_string() const {
 }
 
 const void* NodeIndex::to_vaip_core_node_ptr() const {
-  // Convert NodeIndex to vaip_core::Node pointer
+  // Convert NodeIndex to morphizen::Node pointer
   return reinterpret_cast<const void*>(static_cast<uintptr_t>(value_));
 }
 

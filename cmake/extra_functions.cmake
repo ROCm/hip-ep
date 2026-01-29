@@ -2,16 +2,16 @@
 # ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
-function(vaip_add_remote_target)
+function(morphizen_add_remote_target)
   set(options)
   set(oneValueArgs TARGET FILE URL EXPECTED_MD5)
   set(multiValueArgs PATCH_FILES)
   cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
   if(NOT ARG_FILE)
-    message(FATAL_ERROR "vaip_add_remote_target: FILE not specified")
+    message(FATAL_ERROR "morphizen_add_remote_target: FILE not specified")
   endif()
   if(NOT ARG_URL)
-    message(FATAL_ERROR "vaip_add_remote_target: URL not specified")
+    message(FATAL_ERROR "morphizen_add_remote_target: URL not specified")
   endif()
   if(ARG_PATCH_FILES)
     find_package(Patch REQUIRED)

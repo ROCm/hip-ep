@@ -4,26 +4,26 @@
 ##
 set(FETCHCONTENT_QUIET TRUE CACHE BOOL "enable fetchcontent quiet")
 include(FetchContent)
-file(STRINGS ${CMAKE_CURRENT_LIST_DIR}/deps.txt VAIP_DEPS_LIST)
-file(READ "${CMAKE_CURRENT_LIST_DIR}/dep.h.inc.in" VAIP_DEP_H_INC_IN)
-set(VAIP_DEP_H_INC "")
-foreach(VAIP_DEP IN LISTS VAIP_DEPS_LIST)
+file(STRINGS ${CMAKE_CURRENT_LIST_DIR}/deps.txt MORPHIZEN_DEPS_LIST)
+file(READ "${CMAKE_CURRENT_LIST_DIR}/dep.h.inc.in" MORPHIZEN_DEP_H_INC_IN)
+set(MORPHIZEN_DEP_H_INC "")
+foreach(MORPHIZEN_DEP IN LISTS MORPHIZEN_DEPS_LIST)
   # Lines start with "#" are comments
-  if(NOT VAIP_DEP MATCHES "^#")
-    message(STATUS "VAIP_DEP = ${VAIP_DEP}")
+  if(NOT MORPHIZEN_DEP MATCHES "^#")
+    message(STATUS "MORPHIZEN_DEP = ${MORPHIZEN_DEP}")
     # The first column is name
-    list(POP_FRONT VAIP_DEP VAIP_DEP_NAME)
+    list(POP_FRONT MORPHIZEN_DEP MORPHIZEN_DEP_NAME)
     # The second column is URL
     # The URL below may be a local file path or an HTTPS URL
-    list(POP_FRONT VAIP_DEP VAIP_DEP_URL)
-    set(DEP_URL_${VAIP_DEP_NAME} ${VAIP_DEP_URL})
+    list(POP_FRONT MORPHIZEN_DEP MORPHIZEN_DEP_URL)
+    set(DEP_URL_${MORPHIZEN_DEP_NAME} ${MORPHIZEN_DEP_URL})
     # The third column is SHA1 hash value
-    set(DEP_SHA1_${VAIP_DEP_NAME} ${VAIP_DEP})
-    string(CONFIGURE "${VAIP_DEP_H_INC_IN}" _tmp @ONLY)
-    string(APPEND VAIP_DEP_H_INC "${_tmp}")
+    set(DEP_SHA1_${MORPHIZEN_DEP_NAME} ${MORPHIZEN_DEP})
+    string(CONFIGURE "${MORPHIZEN_DEP_H_INC_IN}" _tmp @ONLY)
+    string(APPEND MORPHIZEN_DEP_H_INC "${_tmp}")
   endif()
 endforeach()
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/vaip_deps.inc.h" "${VAIP_DEP_H_INC}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/morphizen_deps.inc.h" "${MORPHIZEN_DEP_H_INC}")
 
 find_package(Microsoft.GSL QUIET)
 if(NOT TARGET Microsoft.GSL::GSL)
@@ -85,6 +85,9 @@ if(morphizen_ENABLE_UNIT_TEST)
 endif()
 
 set(WITH_GFLAGS OFF CACHE BOOL "disable WITH_GFLAGS for glog")
+# Save current BUILD_TESTING value and disable it for glog
+set(_SAVED_BUILD_TESTING ${BUILD_TESTING})
+set(BUILD_TESTING OFF CACHE BOOL "disable glog tests to avoid runtime library mismatch" FORCE)
 # Force glog to build as a static library and enable internal symbols
 # glog v0.7.1 GetStackTrace/Symbolize are internal APIs (GLOG_NO_EXPORT).
 # MorphiZen uses these internal APIs in morphizen_compile_model.cpp.
@@ -112,8 +115,12 @@ endif()
 if(TARGET glog)
   target_compile_definitions(glog INTERFACE GLOG_STATIC_DEFINE)
 endif()
-# Restore BUILD_SHARED_LIBS after glog configuration
+# Restore BUILD_SHARED_LIBS and BUILD_TESTING after glog configuration
 set(BUILD_SHARED_LIBS ON CACHE BOOL "Restore default shared library setting")
+if(DEFINED _SAVED_BUILD_TESTING)
+  set(BUILD_TESTING ${_SAVED_BUILD_TESTING} CACHE BOOL "Restore BUILD_TESTING to previous value" FORCE)
+  unset(_SAVED_BUILD_TESTING)
+endif()
 
 
 

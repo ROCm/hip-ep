@@ -6,7 +6,7 @@
 #pragma once
 
 #include "morphizen/pattern.hpp"
-namespace vaip_core {
+namespace morphizen {
 
 class PatternSequence : public Pattern {
 public:
@@ -23,4 +23,4 @@ private:
 private:
   std::vector<std::shared_ptr<Pattern>> patterns_;
 };
-} // namespace vaip_core
+} // namespace morphizen
