@@ -95,7 +95,7 @@ cmake --build ../build/onnxruntime/Release/ --target install
 
 Once ONNXRuntime is built, you can build onnx-hipdnn-ep. LLVM/MLIR and MorphiZen will be automatically fetched via CMake FetchContent:
 
-**Option A: Using Visual Studio generator (recommended for Windows)**
+**Using Visual Studio generator (recommended for Windows)**
 ```bash
 cd onnx-hipdnn-ep
 
@@ -110,10 +110,6 @@ cmake -DBUILD_SHARED_LIBS=OFF \
 cmake --build ../build/onnx-hipdnn-ep --config Release
 ```
 
-**Option B: Using the build script**
-```bash
-./build.bat
-```
 
 **Note:** The first build will take a long time (1-3 hours) as LLVM/MLIR is fetched and compiled. Subsequent builds are much faster.
 
