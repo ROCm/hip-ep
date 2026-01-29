@@ -107,4 +107,7 @@ if(MSVC)
   add_compile_definitions(_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING)
 endif()
 
+# Override the output name to use onnxruntime_morphizen_ep instead of onnxruntime_vitisai_ep
+set(morphizen_OUTPUT_NAME "onnxruntime_morphizen_ep" CACHE STRING "Output name of MorphiZen library" FORCE)
+
 FetchContent_MakeAvailable(morphizen)
