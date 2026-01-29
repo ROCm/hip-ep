@@ -32,6 +32,7 @@
 #  include "morphizen/graph_extensions.hpp"
 #  include "morphizen/guess_reshape.hpp"
 #  include "morphizen/model.hpp"
+#  include "morphizen/node.hpp"
 #  include "morphizen/node_arg.hpp"
 #  include "morphizen/node_builder.hpp"
 #  include "morphizen/pass.hpp"
