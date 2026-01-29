@@ -329,8 +329,6 @@ public:
   virtual void disable_delete_tar_file_in_session_created() override final;
 
 private:
-  // use std::map to keep filename ordered.
-  std::map<std::string, FILE*> cache_files_;
   std::map<std::string, std::unique_ptr<MemoryFile>> mem_files_;
   std::function<std::optional<std::string>(std::string)> get_run_options_;
   std::shared_mutex rw_mutex_;

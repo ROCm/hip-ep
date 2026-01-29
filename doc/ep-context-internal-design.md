@@ -29,13 +29,13 @@ Using `tar_file_` because of the [mmap feature][136]. `tar_file_` is created upo
 
 There are two producers:
 
-   1. `cache_files_`, current regular flow.
+   1. `tar_file_`, unified storage mechanism for all scenarios.
    2. `prebuilt_ep_context=1`, the PR.
 
 
 #### create_ep_context, the consumer
 
-  1. Uses `cache_files_` or `tar_file_`, depending on whether `tar_file_ == nullptr` or not.
+  1. Uses `tar_file_` for all scenarios. Falls back to `mem_files_` only when tmpfile() fails.
 
 ## Deploy EP Context Model
 
@@ -69,7 +69,7 @@ TODO:
 
 ### Embed Mode
 
-  1. Uses `cache_files_`, to be fixed.
+  1. Uses `tar_file_` for all cache storage.
 
 ### "ep.share_ep_contexts" = 1
 
@@ -81,7 +81,13 @@ TODO:
 
 ## Compression or Encryption is Enabled
 
-  Uses `cache_files_`, to be deprecated. Needs more effort, low priority.
+Uses `tar_file_` for all storage scenarios. Encryption and compression are handled at serialization boundaries (when saving/loading EP context), not within tar_file_ itself.
+
+When encryption is enabled:
+- During save: tar stream is encrypted using `vaip_encryption::aes_encryption`
+- During load: encrypted stream is decrypted using `vaip_encryption::aes_decryption`, then loaded into tar_file_
+
+This approach keeps tar_file_ simple while supporting encryption transparently.
 
 [136]: #136 (mmap)
 [44]: #44 (shared ep context)

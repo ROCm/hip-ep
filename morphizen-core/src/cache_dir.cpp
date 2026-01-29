@@ -66,15 +66,7 @@ void update_cache_dir(PassContextImp& context) {
       cache_dir / fs::u8path(context.context_proto.config().cache_key());
   *context.context_proto.mutable_config()->mutable_cache_dir() =
       cache_dir.u8string();
-  if (context.cache_in_mem()) {
-    LOG(INFO) << "skip update cache dir: in-mem mode";
-    return;
-  }
-  if (!fs::exists(context.get_log_dir()) &&
-      !fs::create_directories(context.get_log_dir())) {
-    LOG(WARNING) << "cannot create cache directory: dir="
-                 << context.get_log_dir();
-  }
+  // Cache is always in memory, skip creating cache directory
 }
 
 } // namespace morphizen
