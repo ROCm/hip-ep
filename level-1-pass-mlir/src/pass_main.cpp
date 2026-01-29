@@ -4,7 +4,7 @@
  */
 #include <glog/logging.h>
 #include "morphizen/env_config.hpp"
-#include "morphizen/vaip.hpp"
+#include "morphizen/morphizen.hpp"
 
 // MLIR includes
 #include "mlir/IR/MLIRContext.h"
@@ -15,7 +15,8 @@
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 
-using namespace vaip_core;
+using namespace morphizen;
+using namespace morphizen_cxx;
 
 namespace {
 
@@ -27,7 +28,7 @@ struct Level1MlirPass {
    
     // Save graph to file for MLIR processing
     LOG(INFO) << "Saving graph to file...";
-    auto graph_ref = vaip_cxx::GraphConstRef(graph);
+    auto graph_ref = GraphConstRef(graph);
     std::string graph_file = "graph_for_mlir.txt";
     graph_ref.save(graph_file);
     LOG(INFO) << "Graph saved to file: " << graph_file;
