@@ -12,7 +12,26 @@
 #include <glog/logging.h>
 #include <google/protobuf/util/json_util.h>
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MORPHIZEN_EP_FACTORY, "0")
-DEF_ENV_PARAM(MORPHIZEN_MORPHIZEN_EP_ENABLE_CPU_DEVICE, "0")
+//  Why MORPHIZEN_EP_ENABLE_CPU_DEVICE is Required
+//  The Morphizen Execution Provider is designed to run on **AMD NPU hardware**
+//  in production. However, for development and testing purposes, this
+//  environment
+// variable enables a workaround:
+// **Production Mode (default, ENV=0):**
+// - Morphizen EP only accepts **NPU devices** with AMD vendor_id (0x1022)
+// - Rejects CPU and GPU devices
+// - Returns zero EP devices if no NPU is present
+// - Tests will be skipped with "Morphizen EP V2 device API not yet implemented"
+//
+// **Test Mode (ENV=1):**
+// - Morphizen EP accepts **CPU devices** for testing
+// - Allows MLIR pass execution and session creation
+// - Used for internal testing without NPU hardware
+// - **Future:** GPU support is planned to be added
+//
+// currently, this is mainly used in our internal test environments to allow the
+// execution of tests that verify the MLIR pass integration
+DEF_ENV_PARAM(MORPHIZEN_EP_ENABLE_CPU_DEVICE, "1")
 #define MY_LOG(n)                                                              \
   LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MORPHIZEN_EP_FACTORY) >= n)
 namespace morphizen {
@@ -79,7 +98,7 @@ OrtStatus* ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
         factory->ort_api.HardwareDevice_Type(hardware_device);
     static constexpr std::uint32_t hardware_vendor_id{0x1022};
 
-    if (ENV_PARAM(MORPHIZEN_MORPHIZEN_EP_ENABLE_CPU_DEVICE)) {
+    if (ENV_PARAM(MORPHIZEN_EP_ENABLE_CPU_DEVICE)) {
       // only for internal test, we pretend to support CPU EP.
       if (device_type != OrtHardwareDeviceType_CPU) {
         continue;
