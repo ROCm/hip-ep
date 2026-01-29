@@ -5,8 +5,8 @@
 #pragma once
 #include "./api-ptrs.hpp"
 #include "./ir-converter.hpp"
-#include "morphizen/vaip-ort-api-ext.hpp"
-#include "vaip/custom_op.h" // in onnxruntime/core/providers/morphizen/include
+#include "morphizen/custom_op.h" // in onnxruntime/core/providers/morphizen/include
+#include "morphizen/morphizen-ort-api-ext.hpp"
 
 namespace onnxruntime {
 struct OrtGraphWrapper;
@@ -54,7 +54,7 @@ private:
    * @param ep_context_node Output parameter for EP context node
    * @return OrtStatus indicating success or failure
    */
-  OrtStatus* CompileSubgraph(const vaip_core::ExecutionProvider& ep,
+  OrtStatus* CompileSubgraph(const morphizen::ExecutionProvider& ep,
                              const OrtGraph* graph, const OrtNode* fused_node,
                              OrtNodeComputeInfo*& node_compute_info,
                              OrtNode*& ep_context_node);
@@ -62,9 +62,9 @@ private:
                                   OrtNode** ep_context_nodes,
                                   size_t count) const;
   OrtNode*
-  convert_vaip_node_to_ort_node(const OrtModelEditorApi* model_editor_api,
-                                const onnxruntime::Node* vaip_node,
-                                const OrtNode* ort_node) const;
+  convert_morphizen_node_to_ort_node(const OrtModelEditorApi* model_editor_api,
+                                     const onnxruntime::Node* vaip_node,
+                                     const OrtNode* ort_node) const;
   /**
    * @brief Update provider options from ORT session configuration
    * @param session_options The ORT session options containing configuration
@@ -85,7 +85,7 @@ private:
                                  const char* config_key,
                                  const std::string& default_val,
                                  /*out*/ std::string& config_val);
-  void update_input_output_argument_indice(vaip_core::ExecutionProvider& ep,
+  void update_input_output_argument_indice(morphizen::ExecutionProvider& ep,
                                            const OrtNode* fused_node);
 
 private:
@@ -95,8 +95,8 @@ private:
                                  const OrtGraph& graph) = nullptr;
   // copied from
   // onnxruntime/core/providers/morphizen/morphizen_execution_provider.h
-  using my_ep_t = vaip_core::DllSafe<
-      std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>>;
+  using my_ep_t = morphizen::DllSafe<
+      std::vector<std::unique_ptr<morphizen::ExecutionProvider>>>;
   using my_ep_uptr_t = std::shared_ptr<my_ep_t>;
   // we have to hide the implementation by forward declaration.
   mutable my_ep_uptr_t execution_providers_;
@@ -104,7 +104,7 @@ private:
   bool enable_ep_context_;
 };
 struct MorphiZenEP_ComputeInfo : public OrtNodeComputeInfo {
-  vaip_core::ExecutionProvider* morphizen_ep =
+  morphizen::ExecutionProvider* morphizen_ep =
       nullptr; // Pointer to the MorphiZenEP instance
 };
 } // namespace morphizen

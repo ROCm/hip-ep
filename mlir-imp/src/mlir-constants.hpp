@@ -27,7 +27,7 @@ namespace mlir_impl {
 //===----------------------------------------------------------------------===//
 // clang-format on
 
-// Not all mlir::Operation* are vaip_core::Node*;
+// Not all mlir::Operation* are morphizen::Node*;
 // `arith.constant` and `func.return` are special cases.
 
 // MLIR/ONNX attribute name constants to avoid typos

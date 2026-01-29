@@ -16,14 +16,11 @@ add_library(
   src/encryption.cpp
   )
 add_library(morphizen::encryption ALIAS ${LIB_NAME})
-## add an alias to keep it compatible with VAIP
-add_library(vaip::encryption ALIAS ${LIB_NAME})
 set_target_properties(${LIB_NAME} PROPERTIES FOLDER morphizen/encryption)
 target_include_directories(${LIB_NAME}
   PRIVATE
-    # compile time dependency on vaip_io.hpp
-    # todo: use std::ostream and std::istream instead of vaip_io.hpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../vaip-core/include
+    # compile time dependency on morphizen_io.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../morphizen-core/include
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )

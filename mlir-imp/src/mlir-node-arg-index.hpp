@@ -41,7 +41,7 @@ public:
                      // GraphProto_.output
   };
   // from_vaip_core_node_arg_ptr is used to create a MLIRNodeArgIndex from a
-  // vaip_core::NodeArg pointer, which is used in the ORT C API
+  // morphizen::NodeArg pointer, which is used in the ORT C API
   static MLIRNodeArgIndex from_vaip_core_node_arg_ptr(const void* ptr);
 
 public:

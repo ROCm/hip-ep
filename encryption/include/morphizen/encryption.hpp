@@ -7,12 +7,12 @@
 #include <stdexcept>
 #include <string>
 
-namespace vaip_core {
+namespace morphizen {
 class IStreamReader;
 class IStreamWriter;
-} // namespace vaip_core
+} // namespace morphizen
 
-namespace vaip_encryption {
+namespace morphizen_encryption {
 
 // Exception class for encryption/decryption errors
 class EncryptionError : public std::runtime_error {
@@ -22,8 +22,8 @@ public:
 };
 
 int has_encryption_support();
-void aes_encryption(const vaip_core::IStreamReader& src,
-                    vaip_core::IStreamWriter& dst, const std::string& key);
-void aes_decryption(const vaip_core::IStreamReader& src,
-                    vaip_core::IStreamWriter& dst, const std::string& key);
-} // namespace vaip_encryption
+void aes_encryption(const morphizen::IStreamReader& src,
+                    morphizen::IStreamWriter& dst, const std::string& key);
+void aes_decryption(const morphizen::IStreamReader& src,
+                    morphizen::IStreamWriter& dst, const std::string& key);
+} // namespace morphizen_encryption

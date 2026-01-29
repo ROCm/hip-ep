@@ -58,7 +58,7 @@ Licensed under the MIT License.
 └─────────────────────────────────────────────────────────────┘
                            ↓
 ┌─────────────────────────────────────────────────────────────┐
-│ Layer 4: Framework Core (vaip-core)                        │
+│ Layer 4: Framework Core (morphizen-core)                        │
 │  - Pass management and execution                           │
 │  - Graph compilation and optimization                      │
 │  - Model and tensor handling                               │
@@ -73,7 +73,7 @@ Licensed under the MIT License.
 └─────────────────────────────────────────────────────────────┘
                            ↓
 ┌─────────────────────────────────────────────────────────────┐
-│ Layer 2: Backend Abstraction (vaip-ort-api-ext)           │
+│ Layer 2: Backend Abstraction (morphizen-ort-api-ext)      │
 │  - 111 function pointers for graph operations             │
 │  - Runtime backend selection                              │
 └─────────────────────────────────────────────────────────────┘
@@ -88,14 +88,14 @@ Licensed under the MIT License.
                            ↓
 ┌─────────────────────────────────────────────────────────────┐
 │ Layer 0: Foundation Libraries                              │
-│  vaip_io, mem_binary, encryption, morphizen-utils         │
+│  morphizen-io, mem_binary, encryption, morphizen-utils         │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ### 2.2 Design Principles
 
 1. **Backend Independence**
-   - All graph operations go through `VAIP_ORT_API` abstraction layer
+   - All graph operations go through `MORPHIZEN_ORT_API` abstraction layer
    - Runtime backend selection via environment variables
    - Multiple backends can coexist (ONNX and MLIR)
 
@@ -124,7 +124,7 @@ Licensed under the MIT License.
 #### 3.1.1 morphizen-graph (Graph Wrappers)
 
 **Location**: `morphizen-graph/`
-**Purpose**: Type-safe C++ wrappers over VAIP_ORT_API for low-level graph operations
+**Purpose**: Type-safe C++ wrappers over MORPHIZEN_ORT_API for low-level graph operations
 
 **Key Classes**:
 - `Graph`, `GraphRef`, `GraphConstRef` - Graph manipulation
@@ -143,13 +143,13 @@ include/morphizen/
 └── node_input.hpp     # Input abstraction
 ```
 
-**Dependencies**: `vaip-ort-api-ext` (PUBLIC), `glog::glog` (PRIVATE)
+**Dependencies**: `morphizen-ort-api-ext` (PUBLIC), `glog::glog` (PRIVATE)
 **Build Artifact**: Static library `morphizen-graph`
 
 **Key Features**:
 - ~4,000 lines of C++ code
-- Single point of VAIP_ORT_API calls
-- Backend-independent (works with any VAIP_ORT_API implementation)
+- Single point of MORPHIZEN_ORT_API calls
+- Backend-independent (works with any MORPHIZEN_ORT_API implementation)
 - RAII and type-safe wrappers
 
 **Example Usage**:
@@ -228,9 +228,9 @@ if (pattern->match(graph, node)) {
 
 ---
 
-#### 3.1.3 vaip-core (Framework Core)
+#### 3.1.3 morphizen-core (Framework Core)
 
-**Location**: `vaip-core/`
+**Location**: `morphizen-core/`
 **Purpose**: Core framework providing pass system, model/graph interfaces, and ORT integration
 
 **Key Components**:
@@ -253,7 +253,7 @@ include/morphizen/
 ```
 
 **Dependencies (morphizen-core-static)**:
-- PUBLIC: `onnxruntime::onnxruntime`, `protobuf::libprotobuf`, `vaip_io`, `glog::glog`, `morphizen::encryption`, `morphizen::mem_binary`, `morphizen-utils`, `vaip-ort-api-ext`, `morphizen::morphizen-graph`
+- PUBLIC: `onnxruntime::onnxruntime`, `protobuf::libprotobuf`, `morphizen-io`, `glog::glog`, `morphizen::encryption`, `morphizen::mem_binary`, `morphizen-utils`, `morphizen-ort-api-ext`, `morphizen::morphizen-graph`
 - Conditional: `morphizen::morphizen-pattern` (if enabled)
 
 **Build Artifacts**:
@@ -288,7 +288,7 @@ include/morphizen-utils/
 ├── env_config.hpp        # Environment parameters
 ├── weak_refs.hpp         # Weak reference patterns
 ├── parse_value.hpp       # String parsing
-├── vaip_plugin.hpp       # Plugin loading
+├── morphizen_plugin.hpp  # Plugin loading
 └── cleanup.hpp           # Resource cleanup
 ```
 
@@ -307,10 +307,10 @@ int debug = ENV_PARAM(DEBUG_MODE);
 
 ---
 
-#### 3.2.2 vaip-ort-api-ext (ORT API Extension)
+#### 3.2.2 morphizen-ort-api-ext (ORT API Extension)
 
-**Location**: `vaip-ort-api-ext/`
-**Purpose**: Defines VAIP_ORT_API interface - abstraction layer for graph operations across backends
+**Location**: `morphizen-ort-api-ext/`
+**Purpose**: Defines MORPHIZEN_ORT_API interface - abstraction layer for graph operations across backends
 
 **Key Interface**:
 - Defines 111+ function pointers for graph operations
@@ -327,20 +327,20 @@ int debug = ENV_PARAM(DEBUG_MODE);
 | Attributes | `attr_proto_new_*`, `attr_proto_get_*` (int, float, string, tensor) |
 | Tensor Handling | `tensor_proto_new_*` (floats, ints, doubles, fp16, bf16, booleans) |
 
-**Public Headers**: `include/morphizen/vaip-ort-api-ext.hpp`
+**Public Headers**: `include/morphizen/morphizen-ort-api-ext.hpp`
 
 **Dependencies**: `onnxruntime::onnxruntime`, `Microsoft.GSL::GSL`, `glog::glog` (PUBLIC)
 
-**Build Artifact**: Static library `vaip-ort-api-ext`
+**Build Artifact**: Static library `morphizen-ort-api-ext`
 
 ---
 
 #### 3.2.3 Other Foundation Libraries
 
-**vaip_io**
+**morphizen-io**
 - **Purpose**: Stream I/O utilities
 - **Dependencies**: `glog::glog`
-- **Build Artifact**: Static library `vaip_io`
+- **Build Artifact**: Static library `morphizen-io`
 
 **mem_binary**
 - **Purpose**: Packs files directly into library at build time with optional compression
@@ -388,16 +388,16 @@ extern "C" OrtStatus* CreateEpFactories(
 #### 3.3.2 onnx-ir-imp (ONNX IR Backend)
 
 **Location**: `onnx-ir-imp/`
-**Purpose**: ONNX-based implementation of VAIP_ORT_API interface
+**Purpose**: ONNX-based implementation of MORPHIZEN_ORT_API interface
 
 **Key Components**:
 - `model.hpp/.cpp` - ONNX model implementation
 - `graph.hpp/.cpp` - Graph representation
 - `node.hpp/.cpp` - Node operations
 - `node-arg.hpp/.cpp` - NodeArg operations
-- `vaip-ort-api.cpp` - API implementation
+- `morphizen-ort-api.cpp` - API implementation
 
-**Dependencies**: `onnxruntime::onnxruntime`, `vaip-ort-api-ext`, `onnx`, `onnx_proto`
+**Dependencies**: `onnxruntime::onnxruntime`, `morphizen-ort-api-ext`, `onnx`, `onnx_proto`
 
 **Build Artifact**: Static library `onnx-ir`
 
@@ -408,14 +408,14 @@ extern "C" OrtStatus* CreateEpFactories(
 #### 3.3.3 mlir-imp (MLIR Backend)
 
 **Location**: `mlir-imp/`
-**Purpose**: MLIR-based implementation of VAIP_ORT_API interface
+**Purpose**: MLIR-based implementation of MORPHIZEN_ORT_API interface
 
 **Key Components**:
 - `mlir-context-manager.hpp/.cpp` - MLIR context management
 - `mlir-model.hpp/.cpp` - MLIR module representation
 - `mlir-graph.hpp/.cpp` - Graph using MLIR blocks
 - `mlir-node.hpp/.cpp` - MLIR operation representation
-- `vaip-ort-api.cpp` - API bridge implementation
+- `morphizen-ort-api.cpp` - API bridge implementation
 
 **MLIR Representation**:
 ```
@@ -426,7 +426,7 @@ MLIRModel
       └── mlir::Block (graph operations)
 ```
 
-**Dependencies**: `MLIR`, `LLVM` libraries, `vaip-ort-api-ext`, `morphizen-utils`
+**Dependencies**: `MLIR`, `LLVM` libraries, `morphizen-ort-api-ext`, `morphizen-utils`
 
 **Build Artifact**: Static library `mlir-imp`
 
@@ -439,7 +439,7 @@ MLIRModel
 #### 3.4.1 graph-opt (Graph Optimization Tool)
 
 **Location**: `graph-opt/`
-**Purpose**: Tool for developing and testing VAIP passes
+**Purpose**: Tool for developing and testing MorphiZen passes
 
 **Usage**:
 ```bash
@@ -506,12 +506,12 @@ morphizen-pattern-gen -f <model.onnx> -i <input> -o <output> \
 
 ### 3.5 Pass Plugins
 
-#### 3.5.1 vaip-pass-init (Initialization Pass)
+#### 3.5.1 morphizen-pass-init (Initialization Pass)
 
-**Location**: `vaip_pass_init/`
+**Location**: `morphizen-pass-init/`
 **Purpose**: Basic initialization pass for graph setup and preparation
 
-**Build Artifact**: Static library `vaip-pass_init`
+**Build Artifact**: Static library `morphizen-pass_init`
 **Linking**: Linked with WHOLE_ARCHIVE to morphizen-core-dynamic
 
 ---
@@ -588,7 +588,7 @@ CreateEpImpl() → MorphiZenEP instance
     ↓
 GetCapabilityImpl(graph)
     ├─ Setup backend API via setup_global_vaip_ort_api()
-    ├─ Convert ORT graph to VAIP model via IRConverter
+    ├─ Convert ORT graph to MorphiZen model via IRConverter
     ├─ Call compile_onnx_model_morphizen_ep_v4()
     ├─ Identify supported nodes via get_supported_nodes()
     └─ Add nodes to fuse via EpGraphSupportInfo_AddNodesToFuse()
@@ -646,7 +646,7 @@ Optimized Graph Output
 ```
 
 **Pass Execution**:
-1. **Pass Creation**: `IPass::create_passes()` loads configured passes from `vaip_config.json`
+1. **Pass Creation**: `IPass::create_passes()` loads configured passes from `morphizen_config.json`
 2. **Graph Traversal**: Each pass iterates through nodes via `graph_get_nodes()`
 3. **Pattern Matching**: For each node, match against patterns using `Pattern::match()`
 4. **Conditional Transformation**: If pattern matches and conditions met, apply transformation
@@ -918,7 +918,7 @@ Both backends are interchangeable through runtime selection.
 
 **Static Libraries**:
 - `morphizen-graph`, `morphizen-pattern`, `morphizen-utils`
-- `vaip-ort-api-ext`, `vaip_io`, `mem_binary`, `morphizen-encryption`
+- `morphizen-ort-api-ext`, `morphizen-io`, `mem_binary`, `morphizen-encryption`
 - `morphizen-core-static`
 - `onnx-ir`, `mlir-imp`, `ort-bridge`
 
@@ -961,7 +961,7 @@ extern "C" void register_my_pass() {
 }
 ```
 
-3. **Configure in vaip_config.json**:
+3. **Configure in morphizen_config.json**:
 ```json
 {
   "passes": [
@@ -1051,10 +1051,10 @@ morphizen/
 ├── pattern-gen/            # Pattern generation tool
 ├── tar/                    # TAR utility
 ├── unit-test/              # Unit tests
-├── vaip-core/              # Framework core
-├── vaip-ort-api-ext/       # ORT API extension
-├── vaip_io/                # I/O utilities
-└── vaip_pass_init/         # Initialization pass
+├── morphizen-core/         # Framework core
+├── morphizen-ort-api-ext/  # ORT API extension
+├── morphizen-io/           # I/O utilities
+└── morphizen-pass-init/    # Initialization pass
 ```
 
 ### 10.2 Key File Locations
@@ -1062,9 +1062,9 @@ morphizen/
 **Component Headers**:
 - `morphizen-graph/include/morphizen/*.hpp` - Graph wrappers
 - `morphizen-pattern/include/morphizen/pattern.hpp` - Pattern matching
-- `vaip-core/include/morphizen/*.hpp` - Framework APIs
-- `vaip-ort-api-ext/include/morphizen/vaip-ort-api-ext.hpp` - API abstraction
-- `3rd-party/onnxruntime-morphizen-headers/vaip/vaip_ort_api.h` - C interface
+- `morphizen-core/include/morphizen/*.hpp` - Framework APIs
+- `morphizen-ort-api-ext/include/morphizen/morphizen-ort-api-ext.hpp` - API abstraction
+- `3rd-party/onnxruntime-morphizen-headers/morphizen/morphizen_ort_api.h` - C interface
 
 **Documentation**:
 - `morphizen-graph/README.md` - Graph wrapper overview
@@ -1085,9 +1085,9 @@ morphizen/
 
 **EP**: Execution Provider - plugin interface for hardware acceleration in ORT
 
-**VAIP**: Versatile AI Inference Pipeline - MorphiZen's internal framework name
+**MorphiZen**: Versatile AI Inference Pipeline - MorphiZen's internal framework name
 
-**VAIP_ORT_API**: Function pointer interface abstracting graph operations (111 functions)
+**MORPHIZEN_ORT_API**: Function pointer interface abstracting graph operations (111 functions)
 
 **Pass**: Modular graph transformation component implementing IPass interface
 

@@ -14,7 +14,7 @@
 #include "./pattern_log.hpp"
 #include "morphizen/pattern.pb.h"
 
-namespace vaip_core {
+namespace morphizen {
 
 PatternGraphOutput::PatternGraphOutput(int id, std::shared_ptr<Pattern> arg)
     : Pattern(id), arg_(arg) {}
@@ -147,4 +147,4 @@ void PatternGraphOutput::dump_to_proto_imp(RootPatternProto& pattern_proto,
   }
 }
 
-} // namespace vaip_core
+} // namespace morphizen

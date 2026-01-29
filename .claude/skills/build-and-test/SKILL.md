@@ -402,6 +402,41 @@ CMake Error at GoogleTestAddTests.cmake:382 (message):
 
 **Status**: Pre-existing issue with test discovery, not caused by dependency building. Requires investigation into runtime DLL dependencies.
 
+### Glog Dependency Issues
+
+**Symptoms**:
+```
+error LNK2038: mismatch detected for 'RuntimeLibrary': value 'MTd_StaticDebug' doesn't match value 'MDd_DynamicDebug' in glog_dcheck.obj
+error LNK2005: symbol already defined in libcmt.lib
+```
+
+**Cause**: When CMake auto-fetches glog, it may build glog's own tests with the wrong runtime library (`/MDd` instead of `/MTd`), even if glog itself is configured correctly.
+
+**Solution - Option 1 (Recommended)**: Pre-build glog as static library
+
+```bash
+# Clone and build glog with correct settings (see developer-guide.md)
+git clone --branch v0.7.1 --depth 1 https://github.com/google/glog.git ../glog
+
+cmake -S ../glog -B ../../build/glog \
+  -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug \
+  "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>" \
+  -DCMAKE_INSTALL_PREFIX=../../local \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DBUILD_TESTING=OFF
+
+cmake --build ../../build/glog --config Debug --parallel
+cmake --install ../../build/glog --config Debug
+
+# Verify: Should see glogd.lib (NOT glogd.dll)
+ls ../../local/lib/glogd.lib
+```
+
+**CRITICAL**: Must use `-DBUILD_SHARED_LIBS=OFF` to build as static library. If you see `glogd.dll` after install, rebuild with this flag.
+
+**Solution - Option 2**: The `cmake/deps.cmake` file has been updated to disable glog tests when auto-fetching, which should prevent this issue in future builds.
+
 ## Additional Notes
 
 - **Parallel builds**: `--parallel` flag uses all available CPU cores

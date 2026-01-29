@@ -7,7 +7,7 @@
 #include <regex>
 
 #include "morphizen/pattern.hpp"
-namespace vaip_core {
+namespace morphizen {
 
 class PatternWhere : public Pattern {
 public:
@@ -27,4 +27,4 @@ private:
   std::unique_ptr<Pattern> pattern_;
   std::function<bool(const NodeInput&)> condition_on_node_input_;
 };
-} // namespace vaip_core
+} // namespace morphizen

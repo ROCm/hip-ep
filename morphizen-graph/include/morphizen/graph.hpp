@@ -4,9 +4,9 @@
  */
 
 /// @file graph.hpp
-/// @brief C++ wrapper utilities for graph operations over VAIP_ORT_API
+/// @brief C++ wrapper utilities for graph operations over MORPHIZEN_ORT_API
 ///
-/// This file provides C++ wrappers over the VAIP_ORT_API interface,
+/// This file provides C++ wrappers over the MORPHIZEN_ORT_API interface,
 /// offering type-safe, RAII-friendly graph manipulation APIs that work
 /// with any backend (onnx-ir-imp, mlir-imp, etc.).
 ///
@@ -18,7 +18,7 @@
 /// - Node building (NodeBuilder for high-level construction)
 ///
 /// All operations are forwarded to the active backend implementation
-/// via the VAIP_ORT_API function pointer table, allowing runtime
+/// via the MORPHIZEN_ORT_API function pointer table, allowing runtime
 /// backend selection while maintaining a consistent API.
 
 #pragma once
@@ -29,36 +29,37 @@
 #include <cassert>
 #include <filesystem>
 #include <functional>
+#include <morphizen/morphizen_gsl.h>
+#include <morphizen/my_ort.h>
 #include <optional>
-#include <vaip/my_ort.h>
-#include <vaip/vaip_gsl.h>
 
-namespace vaip_core {
+namespace morphizen {
 
 #ifndef VAIP_USE_DEPRECATED_API
 [[deprecated("This API will be removed in the future release version. Please "
              "use NodeBuilder instread.")]]
 #endif
-VAIP_DLL_SPEC Node&
+MORPHIZEN_DLL_SPEC Node&
 graph_add_node(Graph& graph, const std::string& name,
                const std::string& op_type, const std::string& description,
                const std::vector<const NodeArg*>& input_args,
                const std::vector<const NodeArg*>& output_args,
                NodeAttributesPtr attributes, const std::string& domain);
 
-VAIP_DLL_SPEC std::vector<const NodeArg*>
+MORPHIZEN_DLL_SPEC std::vector<const NodeArg*>
 node_inputs_2_node_args(const std::vector<NodeInput>& inputs);
-VAIP_DLL_SPEC void graph_set_name(Graph& graph, const std::string& name);
+MORPHIZEN_DLL_SPEC void graph_set_name(Graph& graph, const std::string& name);
 
 // NOTE: NodeBuilder has been moved to vaip-core (node_builder.hpp)
 // It depends on IPass and AnchorPoint which are high-level vaip-core concepts.
-// This file contains only low-level graph wrappers over VAIP_ORT_API.
+// This file contains only low-level graph wrappers over MORPHIZEN_ORT_API.
 
 const Model& graph_get_model(const Graph& graph);
 std::vector<const Node*> graph_nodes(const Graph& graph);
 std::vector<const NodeArg*> graph_get_inputs(const Graph& graph);
-VAIP_DLL_SPEC std::vector<const NodeArg*> graph_get_outputs(const Graph& graph);
-VAIP_DLL_SPEC std::vector<const Node*>
+MORPHIZEN_DLL_SPEC std::vector<const NodeArg*>
+graph_get_outputs(const Graph& graph);
+MORPHIZEN_DLL_SPEC std::vector<const Node*>
 graph_get_output_nodes(const Graph& graph);
 
 /** @brief get indices of all nodes in topoligial order
@@ -71,13 +72,13 @@ graph_get_output_nodes(const Graph& graph);
  *
  *    auto nodes = graph_get_node_in_topoligical_order(graph);
  *    for (auto node_idx : nodes) {
- *        auto node = VAIP_ORT_API(graph_get_node)(graph, node_idx);
+ *        auto node = MORPHIZEN_ORT_API(graph_get_node)(graph, node_idx);
  *        if (node == nullptr) { // should never goes here
  *             cout << node_as_string(*node);
  *        }
  *    }
  */
-VAIP_DLL_SPEC std::vector<size_t>
+MORPHIZEN_DLL_SPEC std::vector<size_t>
 graph_get_node_in_topoligical_order(const Graph& graph);
 
 /** @brief dump a graph as a string for debugging purpose
@@ -93,7 +94,7 @@ graph_get_node_in_topoligical_order(const Graph& graph);
  *  2. it contains shape information.
  *
  */
-VAIP_DLL_SPEC std::string graph_as_string(const Graph& graph);
+MORPHIZEN_DLL_SPEC std::string graph_as_string(const Graph& graph);
 std::vector<const Node*>
 graph_get_consumer_nodes(const Graph& graph, const std::string& node_arg_name);
 
@@ -108,7 +109,7 @@ graph_get_consumer_nodes(const Graph& graph, const std::string& node_arg_name);
  *  Sometime it is useful to disable gc for troubleshooting.
  *
  */
-VAIP_DLL_SPEC void graph_gc(Graph& graph);
+MORPHIZEN_DLL_SPEC void graph_gc(Graph& graph);
 
 /** @brief rebuild graph data structure.
  *
@@ -121,7 +122,7 @@ VAIP_DLL_SPEC void graph_gc(Graph& graph);
  *     1. shape infer
  *     2. build edge/node relationship
  *
- *  After invoke VAIP_ORT_API(add_node) or VAIP_ORT_API(remove_node),
+ *  After invoke MORPHIZEN_ORT_API(add_node) or MORPHIZEN_ORT_API(remove_node),
  *  the internal data structure becomes invalid, sometimes,
  *  `graph_get_consumer_nodes` or other funtions cannot return proper
  *  values until we inoke `graph_resolve`.
@@ -129,7 +130,7 @@ VAIP_DLL_SPEC void graph_gc(Graph& graph);
  *  `Pass::apply(...)` and `Pass::fuse` invoke `graph_resolve`.
  *
  */
-VAIP_DLL_SPEC void graph_resolve(Graph& graph, bool force = false);
+MORPHIZEN_DLL_SPEC void graph_resolve(Graph& graph, bool force = false);
 
 // NOTE: graph_replace_node_arg has been moved to vaip-core
 // It depends on IPass which is a vaip-core type
@@ -142,8 +143,8 @@ VAIP_DLL_SPEC void graph_resolve(Graph& graph, bool force = false);
  *
  * Returns the node that produces the given node argument as output.
  */
-VAIP_DLL_SPEC const Node* graph_producer_node(const Graph& graph,
-                                              const std::string& node_arg_name);
+MORPHIZEN_DLL_SPEC const Node*
+graph_producer_node(const Graph& graph, const std::string& node_arg_name);
 
 /** @brief Get a node argument by name
  *
@@ -151,15 +152,15 @@ VAIP_DLL_SPEC const Node* graph_producer_node(const Graph& graph,
  * @param name Name of the node argument
  * @return Pointer to the node argument, or nullptr if not found
  */
-VAIP_DLL_SPEC const NodeArg* graph_get_node_arg(const Graph& graph,
-                                                const std::string& name);
+MORPHIZEN_DLL_SPEC const NodeArg* graph_get_node_arg(const Graph& graph,
+                                                     const std::string& name);
 
 /** @brief Get the name of a graph
  *
  * @param graph The graph to query
  * @return The graph name
  */
-VAIP_DLL_SPEC const std::string& graph_get_name(const Graph& graph);
+MORPHIZEN_DLL_SPEC const std::string& graph_get_name(const Graph& graph);
 
 /** @brief Perform reverse DFS traversal from a node
  *
@@ -173,7 +174,7 @@ VAIP_DLL_SPEC const std::string& graph_get_name(const Graph& graph);
  *
  * Traverses the graph in reverse DFS order starting from the given node.
  */
-VAIP_DLL_SPEC void graph_reverse_dfs_from(
+MORPHIZEN_DLL_SPEC void graph_reverse_dfs_from(
     const Graph& graph, size_t node_index,
     const std::function<bool(const Node*)>& enter,
     const std::function<void(const Node*)>& leave,
@@ -191,7 +192,7 @@ VAIP_DLL_SPEC void graph_reverse_dfs_from(
  * Traverses the graph in reverse DFS order starting from multiple nodes.
  * This is a low-level wrapper used by vaip-core for fusion analysis.
  */
-VAIP_DLL_SPEC void graph_reverse_dfs_from_multi(
+MORPHIZEN_DLL_SPEC void graph_reverse_dfs_from_multi(
     const Graph& graph, gsl::span<const Node* const> from,
     const std::function<void(const Node*)>& enter,
     const std::function<void(const Node*)>& leave,
@@ -209,7 +210,7 @@ VAIP_DLL_SPEC void graph_reverse_dfs_from_multi(
  *
  * Fuses multiple nodes into a single node, typically used for optimization.
  */
-VAIP_DLL_SPEC void
+MORPHIZEN_DLL_SPEC void
 graph_fuse(Graph& graph, const std::string& name, const std::string& op_type,
            const std::vector<const Node*>& nodes,
            const std::vector<std::string>& inputs,
@@ -228,25 +229,25 @@ graph_fuse(Graph& graph, const std::string& name, const std::string& op_type,
  * @return Reference to the newly created fused node
  *
  * This is a low-level wrapper that takes node indices instead of node pointers.
- * It directly wraps VAIP_ORT_API(graph_fuse) for use by vaip-core.
+ * It directly wraps MORPHIZEN_ORT_API(graph_fuse) for use by vaip-core.
  */
-VAIP_DLL_SPEC Node&
+MORPHIZEN_DLL_SPEC Node&
 graph_fuse(Graph& graph, const std::string& name, const std::string& op_type,
            const std::vector<size_t>& nodes,
            const std::vector<std::string>& inputs,
            const std::vector<std::string>& outputs,
            const std::vector<std::string>& constant_initializers);
 
-// Model operations (wrappers for model-level VAIP_ORT_API calls)
+// Model operations (wrappers for model-level MORPHIZEN_ORT_API calls)
 // These allow vaip-core's Model class to use morphizen-graph wrappers
-// instead of calling VAIP_ORT_API directly
+// instead of calling MORPHIZEN_ORT_API directly
 
 /** @brief Get the main graph from a model
  *
  * @param model The model to query
  * @return Reference to the main graph
  */
-VAIP_DLL_SPEC Graph& model_main_graph(Model& model);
+MORPHIZEN_DLL_SPEC Graph& model_main_graph(Model& model);
 
 /** @brief Get metadata from a model
  *
@@ -254,8 +255,8 @@ VAIP_DLL_SPEC Graph& model_main_graph(Model& model);
  * @param key Metadata key
  * @return Metadata value
  */
-VAIP_DLL_SPEC const std::string& model_get_meta_data(const Model& model,
-                                                     const std::string& key);
+MORPHIZEN_DLL_SPEC const std::string&
+model_get_meta_data(const Model& model, const std::string& key);
 
 /** @brief Check if model has metadata
  *
@@ -263,19 +264,19 @@ VAIP_DLL_SPEC const std::string& model_get_meta_data(const Model& model,
  * @param key Metadata key to check
  * @return true if metadata exists, false otherwise
  */
-VAIP_DLL_SPEC bool model_has_meta_data(const Model& model,
-                                       const std::string& key);
+MORPHIZEN_DLL_SPEC bool model_has_meta_data(const Model& model,
+                                            const std::string& key);
 
 /** @brief Clone a model
  *
  * @param model The model to clone
  * @return Pointer to the cloned model
  */
-VAIP_DLL_SPEC Model* model_clone(const Model& model);
+MORPHIZEN_DLL_SPEC Model* model_clone(const Model& model);
 
-} // namespace vaip_core
+} // namespace morphizen
 
-namespace vaip_cxx {
+namespace morphizen_cxx {
 class Subgraph;
 class NodeRef;
 /**
@@ -284,14 +285,14 @@ class NodeRef;
  * CopyConstructiable and MoveConstructiable, so that for example it can be put
  * into a vector.
  */
-class VAIP_DLL_SPEC GraphConstRef {
+class MORPHIZEN_DLL_SPEC GraphConstRef {
 public:
   /**
    * @brief Constructs a `GraphConstRef` object.
    *
-   * @param graph The underlying `vaip_core::Graph` object.
+   * @param graph The underlying `morphizen::Graph` object.
    */
-  GraphConstRef(const vaip_core::Graph& graph) : graph_(graph) {}
+  GraphConstRef(const morphizen::Graph& graph) : graph_(graph) {}
 
   /**
    * @brief Destroys the `GraphConstRef` object.
@@ -389,7 +390,7 @@ public:
    * @brief Save the graph to a string.
    *
    */
-  vaip_core::DllSafe<std::string> save_string() const;
+  morphizen::DllSafe<std::string> save_string() const;
   /**
    * @brief Retrieves a constant reference to the node at the specified index.
    *
@@ -445,8 +446,8 @@ public:
    * @return The string representation of the graph.
    */
   std::string to_string() const;
-  VAIP_DLL_SPEC friend std::ostream& operator<<(std::ostream& os,
-                                                const GraphConstRef& graph);
+  MORPHIZEN_DLL_SPEC friend std::ostream&
+  operator<<(std::ostream& os, const GraphConstRef& graph);
 
   /**
    * @brief Performs reverse DFS traversal from a node
@@ -463,9 +464,9 @@ public:
    */
   void reverse_dfs_from(
       size_t node_index,
-      const std::function<bool(const vaip_core::Node*)>& enter,
-      const std::function<void(const vaip_core::Node*)>& leave,
-      const std::function<bool(const vaip_core::Node*, const vaip_core::Node*)>&
+      const std::function<bool(const morphizen::Node*)>& enter,
+      const std::function<void(const morphizen::Node*)>& leave,
+      const std::function<bool(const morphizen::Node*, const morphizen::Node*)>&
           comp = nullptr,
       bool subgraph_sensitive = false) const;
 
@@ -480,7 +481,7 @@ protected:
   onnxruntime::Graph& self() { return const_cast<onnxruntime::Graph&>(graph_); }
 
 private:
-  const vaip_core::Graph& graph_;
+  const morphizen::Graph& graph_;
 };
 /**
  * @brief A mutable version of GraphConstRef
@@ -494,14 +495,14 @@ private:
  * not own any resources. It is safe to copy and move. it is more like a
  * reference.
  */
-class VAIP_DLL_SPEC GraphRef : public GraphConstRef {
+class MORPHIZEN_DLL_SPEC GraphRef : public GraphConstRef {
 public:
   /**
    * @brief Constructs a `Graph` object.
    *
    * @param graph The underlying `onnxruntime::Graph` object.
    */
-  GraphRef(vaip_core::Graph& graph);
+  GraphRef(morphizen::Graph& graph);
 
   /**
    * @brief Destroys the `Graph` object.
@@ -573,7 +574,7 @@ public:
    * replaced with the regular tensor proto, i.e. revert the optimization of
    * model clone, i.e. no weights sharing.
    */
-  vaip_core::DllSafe<std::string>
+  morphizen::DllSafe<std::string>
   mut_save_string(bool filter_out_special_tensor);
   /**
    * @brief Performs garbage collection.
@@ -936,7 +937,7 @@ public:
                    const std::string& op_type, const std::string& description,
                    const std::vector<std::optional<NodeArgConstRef>>& inputs,
                    const std::vector<std::optional<NodeArgConstRef>>& outputs,
-                   vaip_core::NodeAttributesPtr attributes);
+                   morphizen::NodeAttributesPtr attributes);
 
   /** prune_special_tensor_proto
    */
@@ -966,4 +967,4 @@ private:
   const std::vector<NodeConstRef> nodes_;
   const std::vector<NodeArgConstRef> constant_initializers_;
 };
-} // namespace vaip_cxx
+} // namespace morphizen_cxx

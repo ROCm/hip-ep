@@ -23,7 +23,7 @@ add_library(ort-bridge
 
 target_include_directories(ort-bridge
   PRIVATE
-  $<BUILD_INTERFACE:${VAIP_ORT_API_DIR}>
+  $<BUILD_INTERFACE:${MORPHIZEN_ORT_API_DIR}>
   $<INSTALL_INTERFACE:include>
 )
 
@@ -37,7 +37,7 @@ target_compile_options(ort-bridge
 target_link_libraries(ort-bridge
   PRIVATE
   onnxruntime::onnxruntime
-  vaip-ort-api-ext
+  morphizen-ort-api-ext
   morphizen-core-static
   protobuf::libprotobuf
 )

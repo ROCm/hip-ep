@@ -8,7 +8,7 @@
 #include "morphizen/node.hpp"
 #include "morphizen/node_arg.hpp"
 #include "morphizen/pattern.pb.h"
-namespace vaip_core {
+namespace morphizen {
 PatternWildcard::PatternWildcard(int id) : Pattern(id) {}
 PatternWildcard::~PatternWildcard() {}
 std::string PatternWildcard::debug_string() const {
@@ -33,4 +33,4 @@ void PatternWildcard::dump_to_proto_imp(RootPatternProto& /*pattern_proto*/,
                                         PatternProto& this_proto) const {
   this_proto.mutable_wildcard();
 }
-} // namespace vaip_core
+} // namespace morphizen

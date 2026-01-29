@@ -50,7 +50,7 @@ target_include_directories(morphizen-graph
 # Dependencies
 target_link_libraries(morphizen-graph
     PUBLIC
-        vaip-ort-api-ext  # VAIP_ORT_API interface
+        morphizen-ort-api-ext  # MORPHIZEN_ORT_API interface
     PRIVATE
         glog::glog
 )
@@ -61,7 +61,7 @@ target_compile_features(morphizen-graph PUBLIC cxx_std_17)
 
 # Build as internal code (VAIP_EXPORT_DLL=1) even though it's a static library
 # Use PRIVATE for VAIP_EXPORT_DLL so consumers don't inherit the export flag
-# Use PUBLIC for VAIP_USE_DLL=0 to indicate static library (no dllimport/dllexport)
+# Use PUBLIC for VAIP_USE_DLL=0 to indicate static library
 target_compile_definitions(morphizen-graph
     PUBLIC
         "-DVAIP_USE_DLL=0"

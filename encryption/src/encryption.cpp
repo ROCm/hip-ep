@@ -11,11 +11,11 @@
 #  include <openssl/err.h>
 #  include <openssl/evp.h>
 #endif
-#include "morphizen/vaip_io.hpp"
+#include "morphizen/morphizen_io.hpp"
 #include <algorithm>
 #include <array>
 #include <glog/logging.h>
-namespace vaip_encryption {
+namespace morphizen_encryption {
 int has_encryption_support() {
 #ifdef WITH_OPENSSL
   return 1;
@@ -24,8 +24,8 @@ int has_encryption_support() {
 #endif
 }
 
-void aes_encryption(const vaip_core::IStreamReader& src,
-                    vaip_core::IStreamWriter& dst,
+void aes_encryption(const morphizen::IStreamReader& src,
+                    morphizen::IStreamWriter& dst,
                     [[maybe_unused]] const std::string& key) {
 #ifdef WITH_OPENSSL
   // key
@@ -79,8 +79,8 @@ void aes_encryption(const vaip_core::IStreamReader& src,
   return;
 #endif
 }
-void aes_decryption(const vaip_core::IStreamReader& src,
-                    vaip_core::IStreamWriter& dst,
+void aes_decryption(const morphizen::IStreamReader& src,
+                    morphizen::IStreamWriter& dst,
                     [[maybe_unused]] const std::string& key) {
 #ifdef WITH_OPENSSL
   // key
@@ -136,4 +136,4 @@ void aes_decryption(const vaip_core::IStreamReader& src,
   return;
 #endif
 }
-} // namespace vaip_encryption
+} // namespace morphizen_encryption

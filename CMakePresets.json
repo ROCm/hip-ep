@@ -22,7 +22,7 @@
                 "CMAKE_PREFIX_PATH": "${sourceDir}/../../local",
                 "morphizen_ENABLE_ORT_BRIDGE": "ON",
                 "morphizen_DEMO_DIR": "${sourceDir}/../morphizen-demo",
-                "VAIP_JSON_CONFIG_FILE": "${sourceDir}/../morphizen-demo/etc/vaip_config.json",
+                "MORPHIZEN_JSON_CONFIG_FILE": "${sourceDir}/../morphizen-demo/etc/morphizen_config.json",
                 "morphizen_ENABLE_MLIR_BACKEND": "ON"
             }
         },
@@ -45,7 +45,7 @@
                 "CMAKE_PREFIX_PATH": "${sourceDir}/../../local",
                 "morphizen_ENABLE_ORT_BRIDGE": "ON",
                 "morphizen_DEMO_DIR": "${sourceDir}/morphizen-demo",
-                "VAIP_JSON_CONFIG_FILE": "${sourceDir}/morphizen-demo/etc/vaip_config.json",
+                "MORPHIZEN_JSON_CONFIG_FILE": "${sourceDir}/morphizen-demo/etc/morphizen_config.json",
                 "morphizen_ENABLE_MLIR_BACKEND": "ON"
             }
         }

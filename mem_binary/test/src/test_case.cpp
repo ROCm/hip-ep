@@ -7,10 +7,10 @@
 #include <string>
 
 TEST(MemBinarytest, CheckFileExists) {
-  EXPECT_EQ(vaip_core::get_mem_binary_span("sample.bin").has_value(), true);
-  EXPECT_EQ(vaip_core::get_mem_binary_span("no_such_file.bin").has_value(),
+  EXPECT_EQ(morphizen::get_mem_binary_span("sample.bin").has_value(), true);
+  EXPECT_EQ(morphizen::get_mem_binary_span("no_such_file.bin").has_value(),
             false);
-  auto content = vaip_core::get_mem_binary_span("sample.bin");
+  auto content = morphizen::get_mem_binary_span("sample.bin");
   std::string s(content->data(), content->size());
   s.erase(std::remove(s.begin(), s.end(), '\r'), s.end());
   EXPECT_EQ(s, "some magic\n");

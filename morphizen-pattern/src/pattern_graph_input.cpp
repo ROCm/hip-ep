@@ -11,7 +11,7 @@
 #include "./pattern_log.hpp"
 #include "morphizen/pattern.pb.h"
 
-namespace vaip_core {
+namespace morphizen {
 PatternGraphInput::PatternGraphInput(int id) : Pattern(id) {}
 PatternGraphInput::~PatternGraphInput() {}
 
@@ -58,4 +58,4 @@ void PatternGraphInput::dump_to_proto_imp(RootPatternProto& /*pattern_proto*/,
                                           PatternProto& this_proto) const {
   this_proto.mutable_graph_input();
 }
-} // namespace vaip_core
+} // namespace morphizen

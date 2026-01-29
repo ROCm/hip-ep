@@ -31,7 +31,7 @@ add_library(${LIB_NAME}
   src/mlir-graph-id.cpp
   src/mlir-node-arg-index.hpp
   src/mlir-node-arg-index.cpp
-  src/vaip-ort-api.cpp
+  src/morphizen-ort-api.cpp
   src/mlir-node.hpp
   src/mlir-node.cpp
 )
@@ -58,7 +58,7 @@ target_compile_options(${LIB_NAME}
 target_link_libraries(${LIB_NAME}
   PRIVATE
   morphizen-utils
-  vaip-ort-api-ext
+  morphizen-ort-api-ext
   Microsoft.GSL::GSL
   # OMBuilder
   MLIRIR

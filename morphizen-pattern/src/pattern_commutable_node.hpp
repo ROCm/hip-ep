@@ -4,7 +4,7 @@
  */
 #include "morphizen/pattern.hpp"
 
-namespace vaip_core {
+namespace morphizen {
 
 class PatternCommutableNode : public Pattern {
 public:
@@ -28,4 +28,4 @@ private:
   const std::shared_ptr<Pattern> arg1_;
   const std::shared_ptr<Pattern> arg2_;
 };
-} // namespace vaip_core
+} // namespace morphizen

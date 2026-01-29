@@ -14,19 +14,19 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-include(${CMAKE_CURRENT_SOURCE_DIR}/../vaip-core/cmake/find_onnxruntime.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../morphizen-core/cmake/find_onnxruntime.cmake)
 
 # Library source files
 set(MORPHIZEN_UTILS_SOURCES
     src/env_config.cpp
-    src/vaip_plugin.cpp
+    src/morphizen_plugin.cpp
     src/cleanup.cpp
 )
 
 if(WIN32)
-  list(APPEND MORPHIZEN_UTILS_SOURCES src/vaip_plugin_win.cpp)
+  list(APPEND MORPHIZEN_UTILS_SOURCES src/morphizen_plugin_win.cpp)
 else()
-  list(APPEND MORPHIZEN_UTILS_SOURCES src/vaip_plugin_lnx.cpp)
+  list(APPEND MORPHIZEN_UTILS_SOURCES src/morphizen_plugin_lnx.cpp)
 endif()
 # Library header files
 set(MORPHIZEN_UTILS_HEADERS
@@ -34,7 +34,7 @@ set(MORPHIZEN_UTILS_HEADERS
     include/morphizen-utils/env_config.hpp
     include/morphizen-utils/weak_refs.hpp
     include/morphizen-utils/parse_value.hpp
-    include/morphizen-utils/vaip_plugin.hpp
+    include/morphizen-utils/morphizen_plugin.hpp
     include/morphizen-utils/cleanup.hpp
 )
 
@@ -53,7 +53,7 @@ target_include_directories(morphizen-utils
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
-        $<BUILD_INTERFACE:${VAIP_ORT_API_DIR}>
+        $<BUILD_INTERFACE:${MORPHIZEN_ORT_API_DIR}>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
 )

@@ -37,18 +37,20 @@ namespace py = pybind11;
 #if MORPHIZEN_HAS_ONNX_SCHEMA_SUPPORT
 #  include "morphizen/onnx_schema.hpp"
 #endif
-namespace vaip_core {
-std::optional<vaip_cxx::NodeInput>
+namespace morphizen {
+std::optional<morphizen_cxx::NodeInput>
 Binder::create_vaip_cxx_node_input(NodeInput node_input) const {
   if (node_input.node_arg == nullptr) {
     return std::nullopt;
   }
-  return vaip_cxx::NodeInput{graph_, *node_input.node_arg, node_input.node};
+  return morphizen_cxx::NodeInput{graph_, *node_input.node_arg,
+                                  node_input.node};
 }
-std::optional<vaip_cxx::NodeInput> Binder::operator()(size_t pattern_id) const {
+std::optional<morphizen_cxx::NodeInput>
+Binder::operator()(size_t pattern_id) const {
   return create_vaip_cxx_node_input((*this)[pattern_id]);
 }
-std::optional<vaip_cxx::NodeInput>
+std::optional<morphizen_cxx::NodeInput>
 Binder::operator()(const std::string& pattern_name) const {
   return create_vaip_cxx_node_input((*this)[pattern_name]);
 }
@@ -103,7 +105,7 @@ binder_ptr_t Pattern::match(const onnxruntime::Graph& graph,
 
   return nullptr;
 }
-binder_ptr_t Pattern::match(vaip_cxx::NodeConstRef node) const {
+binder_ptr_t Pattern::match(morphizen_cxx::NodeConstRef node) const {
   return match(node.graph(), node);
 }
 
@@ -227,12 +229,12 @@ struct PatternBuilderHelper {
 
   static std::shared_ptr<Pattern>
   build_arg(PatternBuilder* self,
-            const vaip_core::PatternCallNodeArgProto& arg);
+            const morphizen::PatternCallNodeArgProto& arg);
 
   static std::vector<std::shared_ptr<Pattern>>
   build_args(PatternBuilder* self,
              const google::protobuf::RepeatedPtrField<
-                 vaip_core::PatternCallNodeArgProto>& args);
+                 morphizen::PatternCallNodeArgProto>& args);
 };
 
 std::shared_ptr<Pattern>
@@ -295,7 +297,7 @@ PatternBuilderHelper::create(PatternBuilder* self,
 
 std::shared_ptr<Pattern>
 PatternBuilderHelper::build_arg(PatternBuilder* self,
-                                const vaip_core::PatternCallNodeArgProto& arg) {
+                                const morphizen::PatternCallNodeArgProto& arg) {
   auto ret = std::shared_ptr<Pattern>();
   switch (arg.arg_case()) {
   case PatternCallNodeArgProto::kName:
@@ -313,7 +315,7 @@ PatternBuilderHelper::build_arg(PatternBuilder* self,
 
 std::vector<std::shared_ptr<Pattern>> PatternBuilderHelper::build_args(
     PatternBuilder* self, const google::protobuf::RepeatedPtrField<
-                              vaip_core::PatternCallNodeArgProto>& args) {
+                              morphizen::PatternCallNodeArgProto>& args) {
   auto ret = std::vector<std::shared_ptr<Pattern>>{};
   ret.reserve(args.size());
   for (auto& arg : args) {
@@ -678,4 +680,4 @@ BinderBuilderPtr BinderBuilder::clone() const {
   return BinderBuilderPtr(new BinderBuilder(new Map(map), graph_));
 }
 
-} // namespace vaip_core
+} // namespace morphizen

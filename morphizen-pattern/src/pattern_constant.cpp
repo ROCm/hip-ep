@@ -11,7 +11,7 @@
 #include "morphizen/node_arg.hpp"
 #include "morphizen/pattern.pb.h"
 
-namespace vaip_core {
+namespace morphizen {
 PatternConstant::PatternConstant(int id) : Pattern(id) {}
 PatternConstant::~PatternConstant() {}
 std::string PatternConstant::debug_string() const {
@@ -60,4 +60,4 @@ void PatternConstant::dump_to_proto_imp(RootPatternProto& /*pattern_proto*/,
                                         PatternProto& this_proto) const {
   this_proto.mutable_constant();
 }
-} // namespace vaip_core
+} // namespace morphizen

@@ -7,7 +7,7 @@
 
 #include "morphizen/pattern.hpp"
 
-namespace vaip_core {
+namespace morphizen {
 
 class PatternGraphOutput : public Pattern {
 public:
@@ -34,4 +34,4 @@ private:
   std::optional<size_t> graph_output_index_;
   std::optional<std::string> graph_output_name_;
 };
-} // namespace vaip_core
+} // namespace morphizen

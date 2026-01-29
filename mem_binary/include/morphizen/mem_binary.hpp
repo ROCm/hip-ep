@@ -4,14 +4,14 @@
  */
 #pragma once
 #include <filesystem>
+#include <morphizen/morphizen_gsl.h>
 #include <optional>
 #include <string>
-#include <vaip/vaip_gsl.h>
 #include <vector>
-namespace vaip_core {
+namespace morphizen {
 std::vector<char> get_mem_binary(const std::string& filename);
 bool has_mem_binary(const std::string& filename);
 std::optional<gsl::span<const char>>
 get_mem_binary_span(const std::string& filename);
 
-} // namespace vaip_core
+} // namespace morphizen

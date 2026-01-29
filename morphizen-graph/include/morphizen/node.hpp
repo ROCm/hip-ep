@@ -4,14 +4,14 @@
  */
 
 /// @file node.hpp
-/// @brief C++ wrapper utilities for node operations over VAIP_ORT_API
+/// @brief C++ wrapper utilities for node operations over MORPHIZEN_ORT_API
 ///
 /// This file provides C++ wrappers for node-related operations in the
 /// computational graph. A node represents an operator/operation in the
 /// graph (e.g., Conv, Relu, MatMul).
 ///
 /// All operations are forwarded to the active backend implementation via
-/// the VAIP_ORT_API function pointer table.
+/// the MORPHIZEN_ORT_API function pointer table.
 ///
 /// Example:
 /// @code
@@ -25,75 +25,78 @@
 #pragma once
 #include "./_sanity_check.hpp"
 #include "./node_arg.hpp"
+#include <morphizen/dll_safe.h>
+#include <morphizen/morphizen_gsl.h>
+#include <morphizen/my_ort.h>
 #include <optional>
-#include <vaip/dll_safe.h>
-#include <vaip/my_ort.h>
-#include <vaip/vaip_gsl.h>
 #include <vector>
-namespace vaip_core {
-VAIP_DLL_SPEC std::vector<NodeInput> node_get_inputs(const Node& node);
+namespace morphizen {
+MORPHIZEN_DLL_SPEC std::vector<NodeInput> node_get_inputs(const Node& node);
 std::vector<const NodeArg*> node_get_input_node_args(const Node& node);
-VAIP_DLL_SPEC const NodeArg& node_get_output_node_arg(const Node& node);
-VAIP_DLL_SPEC std::vector<const NodeArg*>
+MORPHIZEN_DLL_SPEC const NodeArg& node_get_output_node_arg(const Node& node);
+MORPHIZEN_DLL_SPEC std::vector<const NodeArg*>
 node_get_output_node_args(const Node& node);
 std::vector<const AttributeProto*> node_get_attributes(const Node& node);
-VAIP_DLL_SPEC const NodeAttributes& node_get_attributes_ref(const Node& node);
+MORPHIZEN_DLL_SPEC const NodeAttributes&
+node_get_attributes_ref(const Node& node);
 std::vector<int64_t> node_get_output_shape(const Node& node, int index);
-VAIP_DLL_SPEC std::string node_as_string(const Node& node);
+MORPHIZEN_DLL_SPEC std::string node_as_string(const Node& node);
 
-VAIP_DLL_SPEC const std::string& node_get_output_name(const Node& node);
-VAIP_DLL_SPEC const NodeArg& node_get_first_output_node_arg(const Node& node);
-VAIP_DLL_SPEC const std::string& node_get_first_output_name(const Node& node);
-VAIP_DLL_SPEC bool node_is_op(const Node& node, const std::string& op_type,
-                              const std::string& domain);
-VAIP_DLL_SPEC int node_get_output_element_type(const Node& node);
-VAIP_DLL_SPEC bool node_has_attr(const Node& node, const std::string& name);
-VAIP_DLL_SPEC const AttributeProto* node_get_attr(const Node& node,
-                                                  const std::string& name);
+MORPHIZEN_DLL_SPEC const std::string& node_get_output_name(const Node& node);
+MORPHIZEN_DLL_SPEC const NodeArg&
+node_get_first_output_node_arg(const Node& node);
+MORPHIZEN_DLL_SPEC const std::string&
+node_get_first_output_name(const Node& node);
+MORPHIZEN_DLL_SPEC bool node_is_op(const Node& node, const std::string& op_type,
+                                   const std::string& domain);
+MORPHIZEN_DLL_SPEC int node_get_output_element_type(const Node& node);
+MORPHIZEN_DLL_SPEC bool node_has_attr(const Node& node,
+                                      const std::string& name);
+MORPHIZEN_DLL_SPEC const AttributeProto* node_get_attr(const Node& node,
+                                                       const std::string& name);
 
-VAIP_DLL_SPEC int64_t node_get_attr_int(const Node& node,
-                                        const std::string& name);
-VAIP_DLL_SPEC int64_t node_get_attr_int_with_default(const Node& node,
-                                                     const std::string& name,
-                                                     int64_t default_value);
-VAIP_DLL_SPEC float node_get_attr_float(const Node& node,
-                                        const std::string& name);
-VAIP_DLL_SPEC float node_get_attr_float_with_default(const Node& node,
-                                                     const std::string& name,
-                                                     float default_value);
-VAIP_DLL_SPEC gsl::span<const int64_t>
+MORPHIZEN_DLL_SPEC int64_t node_get_attr_int(const Node& node,
+                                             const std::string& name);
+MORPHIZEN_DLL_SPEC int64_t node_get_attr_int_with_default(
+    const Node& node, const std::string& name, int64_t default_value);
+MORPHIZEN_DLL_SPEC float node_get_attr_float(const Node& node,
+                                             const std::string& name);
+MORPHIZEN_DLL_SPEC float
+node_get_attr_float_with_default(const Node& node, const std::string& name,
+                                 float default_value);
+MORPHIZEN_DLL_SPEC gsl::span<const int64_t>
 node_get_attr_ints(const Node& node, const std::string& name);
-VAIP_DLL_SPEC gsl::span<const float>
+MORPHIZEN_DLL_SPEC gsl::span<const float>
 node_get_attr_floats(const Node& node, const std::string& name);
-VAIP_DLL_SPEC const std::string& node_get_attr_string(const Node& node,
-                                                      const std::string& name);
-VAIP_DLL_SPEC std::vector<std::string>
+MORPHIZEN_DLL_SPEC const std::string&
+node_get_attr_string(const Node& node, const std::string& name);
+MORPHIZEN_DLL_SPEC std::vector<std::string>
 node_get_attr_strings(const Node& node, const std::string& name);
-VAIP_DLL_SPEC const std::string&
+MORPHIZEN_DLL_SPEC const std::string&
 node_get_attr_string_with_default(const Node& node, const std::string& name,
                                   const std::string& default_value);
 
-VAIP_DLL_SPEC const TensorProto& node_get_attr_tensor(const Node& node,
-                                                      const std::string& name);
-VAIP_DLL_SPEC vaip_core::DllSafe<std::string>
+MORPHIZEN_DLL_SPEC const TensorProto&
+node_get_attr_tensor(const Node& node, const std::string& name);
+MORPHIZEN_DLL_SPEC morphizen::DllSafe<std::string>
 node_release_attr_string(const Node& node, const std::string& name);
-VAIP_DLL_SPEC const AttributeProto*
+MORPHIZEN_DLL_SPEC const AttributeProto*
 node_attributes_get(const NodeAttributes& attributes, const std::string& name);
 
-VAIP_DLL_SPEC const std::string& node_op_type(const Node& node);
-VAIP_DLL_SPEC const std::string& node_op_domain(const Node& node);
-VAIP_DLL_SPEC NodeAttributesPtr node_clone_attributes(const Node& node);
+MORPHIZEN_DLL_SPEC const std::string& node_op_type(const Node& node);
+MORPHIZEN_DLL_SPEC const std::string& node_op_domain(const Node& node);
+MORPHIZEN_DLL_SPEC NodeAttributesPtr node_clone_attributes(const Node& node);
 
 /** @brief Get the index of a node in the graph
  *
  * @param node The node to query
  * @return The node's index in the graph
  */
-VAIP_DLL_SPEC size_t node_get_index(const Node& node);
+MORPHIZEN_DLL_SPEC size_t node_get_index(const Node& node);
 
-} // namespace vaip_core
+} // namespace morphizen
 
-namespace vaip_cxx {
+namespace morphizen_cxx {
 class NodeInput;
 /**
  * @class NodeConstRef
@@ -106,14 +109,14 @@ class NodeInput;
  * to its underlying type, and obtain a string representation for output
  * purposes.
  */
-class VAIP_DLL_SPEC NodeConstRef {
+class MORPHIZEN_DLL_SPEC NodeConstRef {
   friend class GraphConstRef;
   friend class NodeArgConstRef;
   friend class NodeInput;
 
 public:
-  static NodeConstRef from_node(const vaip_core::Graph& graph,
-                                const vaip_core::Node& node) {
+  static NodeConstRef from_node(const morphizen::Graph& graph,
+                                const morphizen::Node& node) {
     return NodeConstRef(graph, node);
   }
 
@@ -283,7 +286,7 @@ public:
   const std::string& get_attr_string(const std::string& name,
                                      const std::string& default_value) const;
 
-  vaip_core::DllSafe<std::string>
+  morphizen::DllSafe<std::string>
   release_attr_string(const std::string& name) const;
 
   std::vector<std::string> get_attr_strings(const std::string& name) const;
@@ -307,26 +310,26 @@ public:
   GraphConstRef get_function_body() const;
 
   /**
-   * @brief Type conversion operator to const vaip_core::Node&.
+   * @brief Type conversion operator to const morphizen::Node&.
    * Allows instances of NodeConstRef to be implicitly converted to a constant
-   * reference of vaip_core::Node, providing read-only access to the underlying
+   * reference of morphizen::Node, providing read-only access to the underlying
    * node.
-   * @return const vaip_core::Node& A constant reference to the underlying
-   * vaip_core::Node object.
+   * @return const morphizen::Node& A constant reference to the underlying
+   * morphizen::Node object.
    */
-  operator const vaip_core::Node&() const { return *self_; }
+  operator const morphizen::Node&() const { return *self_; }
   /**
-   * Returns a pointer to the underlying `vaip_core::Node` object.
+   * Returns a pointer to the underlying `morphizen::Node` object.
    *
-   * @return A const pointer to the `vaip_core::Node` object.
+   * @return A const pointer to the `morphizen::Node` object.
    */
-  const vaip_core::Node* ptr() const { return self_; }
+  const morphizen::Node* ptr() const { return self_; }
   /**
    * Returns a reference to the graph associated with this node.
    *
    * @return A const reference to the graph.
    */
-  const vaip_core::Graph& graph() const { return *graph_; }
+  const morphizen::Graph& graph() const { return *graph_; }
   /**
    * @brief Converts the node's state or relevant information into a string
    * representation. Useful for debugging, logging, or any scenario where a
@@ -343,40 +346,40 @@ public:
    * @return std::ostream& The output stream, enabling the chaining of output
    * operations.
    */
-  VAIP_DLL_SPEC friend std::ostream& operator<<(std::ostream& os,
-                                                const NodeConstRef& ref);
+  MORPHIZEN_DLL_SPEC friend std::ostream& operator<<(std::ostream& os,
+                                                     const NodeConstRef& ref);
 
 protected:
-  NodeConstRef(const vaip_core::Graph& graph, const vaip_core::Node& self)
+  NodeConstRef(const morphizen::Graph& graph, const morphizen::Node& self)
       : graph_{&graph}, self_{&self} {}
 
 protected:
-  const vaip_core::Graph* graph_;
-  const vaip_core::Node* self_;
+  const morphizen::Graph* graph_;
+  const morphizen::Node* self_;
 };
 class NodeRef : public NodeConstRef {
   friend class GraphRef;
   friend class NodeArgRef;
 
 public:
-  static NodeRef from_node(vaip_core::Graph& graph, vaip_core::Node& node) {
+  static NodeRef from_node(morphizen::Graph& graph, morphizen::Node& node) {
     return NodeRef(graph, node);
   }
-  operator vaip_core::Node&() const {
-    return const_cast<vaip_core::Node&>(*self_);
+  operator morphizen::Node&() const {
+    return const_cast<morphizen::Node&>(*self_);
   }
   /**
-   * Returns a pointer to the underlying `vaip_core::Node` object.
+   * Returns a pointer to the underlying `morphizen::Node` object.
    *
-   * @return A const pointer to the `vaip_core::Node` object.
+   * @return A const pointer to the `morphizen::Node` object.
    */
-  vaip_core::Node* ptr() { return &(operator vaip_core::Node&()); }
+  morphizen::Node* ptr() { return &(operator morphizen::Node&()); }
 
 private:
-  NodeRef(vaip_core::Graph& graph, vaip_core::Node& self)
+  NodeRef(morphizen::Graph& graph, morphizen::Node& self)
       : NodeConstRef(graph, self) {}
-  vaip_core::Graph& graph() {
-    return const_cast<vaip_core::Graph&>(this->graph());
+  morphizen::Graph& graph() {
+    return const_cast<morphizen::Graph&>(this->graph());
   }
 };
-} // namespace vaip_cxx
+} // namespace morphizen_cxx

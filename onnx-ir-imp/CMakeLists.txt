@@ -2,7 +2,7 @@
 # ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
-include(${CMAKE_CURRENT_SOURCE_DIR}/../vaip-core/cmake/find_onnxruntime.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../morphizen-core/cmake/find_onnxruntime.cmake)
 
 
 set(LIB_NAME onnx-ir)
@@ -64,7 +64,7 @@ target_compile_options(${LIB_NAME}
 target_link_libraries(${LIB_NAME}
   PRIVATE
   onnxruntime::onnxruntime
-  vaip-ort-api-ext
+  morphizen-ort-api-ext
   Microsoft.GSL::GSL
   onnx
   onnx_proto

@@ -14,10 +14,10 @@ namespace morphizen {
 namespace test {
 
 /**
- * @brief Get the complete list of all API function names in OrtApiForVaip
+ * @brief Get the complete list of all API function names in OrtApiForMorphizen
  *
  * This function returns a comprehensive list of all ~108 API functions
- * defined in the OrtApiForVaip structure, organized by category.
+ * defined in the OrtApiForMorphizen structure, organized by category.
  *
  * @return std::vector<std::string> Complete list of API function names
  */
@@ -84,7 +84,7 @@ inline std::vector<std::string> get_all_vaip_ort_api_functions() {
         "graph_remove_initialized_tensor", "graph_reverse_dfs_from_preemp",
         "graph_set_name", "graph_infer_shapes_from_filepath",
         "graph_to_graph_proto", "graph_proto_delete",
-#if VAIP_ORT_API_MAJOR >= 18
+#if MORPHIZEN_ORT_API_MAJOR >= 18
         "graph_save_string",
 #endif
         "graph_infer_shapes"
@@ -117,9 +117,9 @@ get_vaip_ort_api_by_category() {
         "graph_remove_node",
         "graph_add_node",
         "graph_save",
-#if VAIP_ORT_API_MAJOR >= 18
+#if MORPHIZEN_ORT_API_MAJOR >= 18
         "graph_save_string",
-#endif // VAIP_ORT_API_MAJOR >= 18
+#endif // MORPHIZEN_ORT_API_MAJOR >= 18
         "graph_fuse",
         "graph_resolve",
         "graph_get_consumer_nodes_unsafe",

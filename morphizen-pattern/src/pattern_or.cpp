@@ -7,7 +7,7 @@
 
 #include "./pattern_log.hpp"
 
-namespace vaip_core {
+namespace morphizen {
 PatternOr::PatternOr(int id, std::vector<std::shared_ptr<Pattern>> args)
     : Pattern(id), or_patterns_(std::move(args)) {}
 PatternOr::~PatternOr() {}
@@ -50,4 +50,4 @@ BinderBuilderPtr PatternOr::match_uncached(const onnxruntime::Graph& graph,
   return nullptr;
 }
 
-} // namespace vaip_core
+} // namespace morphizen

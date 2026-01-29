@@ -7,7 +7,7 @@
 #include "./pattern_log.hpp"
 #include "morphizen/node.hpp"
 #include "morphizen/node_arg.hpp"
-namespace vaip_core {
+namespace morphizen {
 PatternSequence::PatternSequence(
     int id, gsl::span<const std::shared_ptr<Pattern>> patterns)
     : Pattern(id), patterns_{patterns.begin(), patterns.end()} {
@@ -26,7 +26,7 @@ BinderBuilderPtr
 PatternSequence::match_uncached(const onnxruntime::Graph& graph1,
                                 const NodeInput& node_input,
                                 const BinderBuilder& binder) const {
-  auto graph = vaip_cxx::GraphConstRef(graph1);
+  auto graph = morphizen_cxx::GraphConstRef(graph1);
   auto ret = patterns_.front()->match_cached(graph, node_input, binder);
   if (ret == nullptr) {
     MY_LOG(1) << "MATCH FAIL. ID=" << get_id()
@@ -39,11 +39,11 @@ PatternSequence::match_uncached(const onnxruntime::Graph& graph1,
   auto nodes = graph.nodes();
   auto patter_size = patterns_.size();
   for (size_t i = 1; i < patter_size; ++i) {
-    auto result_i = vaip_core::BinderBuilderPtr();
+    auto result_i = morphizen::BinderBuilderPtr();
     MY_LOG(1) << "PatternSequence try to match pattern"    //
               << "[" << i << " of " << patter_size << "] " //
               << "in all other nodes.\n";
-    auto mached_node = std::optional<vaip_cxx::NodeConstRef>();
+    auto mached_node = std::optional<morphizen_cxx::NodeConstRef>();
     for (auto j = 0u; j < nodes.size(); ++j) {
       auto node = nodes[j];
       for (auto output_node_arg : node.outputs()) {
@@ -51,7 +51,7 @@ PatternSequence::match_uncached(const onnxruntime::Graph& graph1,
           continue;
         }
         auto node_input_1 =
-            vaip_core::NodeInput{node.ptr(), output_node_arg->ptr()};
+            morphizen::NodeInput{node.ptr(), output_node_arg->ptr()};
         result_i = patterns_[i]->match_cached(graph, node_input_1, *ret);
         if (result_i != nullptr) {
           mached_node = node;
@@ -88,4 +88,4 @@ PatternSequence::match_uncached(const onnxruntime::Graph& graph1,
   return ret;
 }
 
-} // namespace vaip_core
+} // namespace morphizen

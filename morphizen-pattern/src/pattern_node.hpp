@@ -7,7 +7,7 @@
 #include <regex>
 
 #include "morphizen/pattern.hpp"
-namespace vaip_core {
+namespace morphizen {
 
 class PatternNode : public Pattern {
 public:
@@ -34,4 +34,4 @@ private:
   std::vector<std::shared_ptr<Pattern>> args_;
   std::vector<bool> is_args_optional_;
 };
-} // namespace vaip_core
+} // namespace morphizen

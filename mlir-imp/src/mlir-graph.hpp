@@ -13,7 +13,7 @@
 #include "mlir/IR/Block.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/Value.h"
-#include "morphizen/vaip-ort-api-ext.hpp"
+#include "morphizen/morphizen-ort-api-ext.hpp"
 #include "llvm/ADT/SmallVector.h"
 #include <filesystem>
 #include <functional>

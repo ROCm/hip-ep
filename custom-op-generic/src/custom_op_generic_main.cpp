@@ -6,18 +6,18 @@
 #include <glog/logging.h>
 
 #include "./custom_op_generic.hpp"
-#include "morphizen/vaip.hpp"
+#include "morphizen/morphizen.hpp"
 
-static vaip_core::ExecutionProvider* create_execution_provider_imp(
-    std::shared_ptr<const vaip_core::PassContext>& context,
-    const vaip_core::MetaDefProto& meta_def) {
-  return new vaip_core::ExecutionProviderImp<
+static morphizen::ExecutionProvider* create_execution_provider_imp(
+    std::shared_ptr<const morphizen::PassContext>& context,
+    const morphizen::MetaDefProto& meta_def) {
+  return new morphizen::ExecutionProviderImp<
       morphizen::custom_op_generic::MyCustomOp>(context, meta_def);
 }
 
 namespace {
 // TODO: do we need to rename ::vaip_core to ::morphizen?
-static ::vaip_core::StaticPluginRegister
+static ::morphizen::StaticPluginRegister
     __register("vaip_custom_op_GENERIC", "create_execution_provider",
                (void*)&create_execution_provider_imp);
 } // namespace

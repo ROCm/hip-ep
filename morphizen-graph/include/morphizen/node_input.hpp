@@ -17,7 +17,7 @@
 /// 2. A constant initializer (has NodeArg but no producer Node)
 /// 3. A graph input (has NodeArg but no producer Node)
 ///
-/// All operations work with any backend via the VAIP_ORT_API abstraction.
+/// All operations work with any backend via the MORPHIZEN_ORT_API abstraction.
 ///
 /// Example:
 /// @code
@@ -38,22 +38,22 @@
 #include <optional>
 #include <ostream>
 #include <string>
-namespace vaip_core {
+namespace morphizen {
 class Binder;
 }
 /**
- * @brief The namespace vaip_cxx contains classes and functions related to the
- * VAIP library in C++.
+ * @brief The namespace morphizen_cxx contains classes and functions related to
+ * the VAIP library in C++.
  */
-namespace vaip_cxx {
+namespace morphizen_cxx {
 /**
  * @brief The NodeInput class represents an input to a node in a graph.
  *
  * It provides methods to access information about the input, such as the
  * associated node argument and the graph it belongs to.
  */
-class VAIP_DLL_SPEC NodeInput {
-  friend class vaip_core::Binder;
+class MORPHIZEN_DLL_SPEC NodeInput {
+  friend class morphizen::Binder;
 
 private:
   /**
@@ -63,8 +63,8 @@ private:
    * @param node_arg The node argument associated with the input.
    * @param node The node that the input is connected to.
    */
-  NodeInput(const GraphConstRef graph, const vaip_core::NodeArg& node_arg,
-            const vaip_core::Node* node);
+  NodeInput(const GraphConstRef graph, const morphizen::NodeArg& node_arg,
+            const morphizen::Node* node);
 
 public:
   /**
@@ -108,4 +108,4 @@ private:
   std::optional<NodeConstRef>
       node_;                 // The node that the input is connected to, if any.
 };
-} // namespace vaip_cxx
+} // namespace morphizen_cxx

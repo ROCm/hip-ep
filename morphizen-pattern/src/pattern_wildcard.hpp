@@ -7,7 +7,7 @@
 #include <regex>
 
 #include "morphizen/pattern.hpp"
-namespace vaip_core {
+namespace morphizen {
 
 class PatternWildcard : public Pattern {
 public:
@@ -22,4 +22,4 @@ private:
   virtual void dump_to_proto_imp(RootPatternProto& pattern_proto,
                                  PatternProto& this_proto) const override final;
 };
-} // namespace vaip_core
+} // namespace morphizen
