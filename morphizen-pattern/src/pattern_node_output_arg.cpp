@@ -28,15 +28,25 @@ PatternNodeOutputArg::match_uncached(const onnxruntime::Graph& graph,
                                      const BinderBuilder& binder) const {
   // Step 1: Verify this is an output of a node (has a producer)
   if (node_input.node == nullptr) {
-    MATCH_FAILED << " not a node: " << node_arg_as_string(*node_input.node_arg);
+    auto node_arg_ref = morphizen_cxx::NodeArgConstRef::from_node_arg(
+        graph, *node_input.node_arg);
+    MATCH_FAILED << " not a node: " << node_arg_ref.to_string();
     return nullptr;
   }
 
   // Step 2: Get the producer node and its outputs
   auto& node = *node_input.node;
-  auto output_args = node_get_output_node_args(node);
+  auto node_ref = morphizen_cxx::NodeConstRef::from_node(graph, node);
+  auto output_args_vec = node_ref.outputs();
+  std::vector<const morphizen::NodeArg*> output_args;
+  for (auto& opt_arg : output_args_vec) {
+    output_args.push_back(
+        opt_arg.has_value()
+            ? &(static_cast<const morphizen::NodeArg&>(opt_arg.value()))
+            : nullptr);
+  }
   CHECK_GE(output_args.size(), 1u)
-      << "at least 1 output needed: node=" << node_as_string(node);
+      << "at least 1 output needed: node=" << node_ref.to_string();
 
   // Step 3: validate output index
   // Step 3a: Check bounds
@@ -57,9 +67,12 @@ PatternNodeOutputArg::match_uncached(const onnxruntime::Graph& graph,
   // Step 3c: Verify node_input matches this specific output
   // This is the KEY constraint - ensures we match the right output
   if (node_input.node_arg != output_arg) {
-    MATCH_FAILED << " unmatched node args "
-                 << node_arg_as_string(*node_input.node_arg) << " and "
-                 << node_arg_as_string(*output_arg);
+    auto node_arg_ref1 = morphizen_cxx::NodeArgConstRef::from_node_arg(
+        graph, *node_input.node_arg);
+    auto node_arg_ref2 =
+        morphizen_cxx::NodeArgConstRef::from_node_arg(graph, *output_arg);
+    MATCH_FAILED << " unmatched node args " << node_arg_ref1.to_string()
+                 << " and " << node_arg_ref2.to_string();
     return nullptr;
   }
 

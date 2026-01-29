@@ -139,7 +139,8 @@ int main(int argc, char* argv[]) {
       auto node_opt = graph_ref.find_node(index);
       CHECK(node_opt.has_value());
       auto node = node_opt.value().ptr();
-      auto this_node_arg_name = vaip_core::node_get_first_output_name(*node);
+      auto node_ref = node_opt.value();
+      auto this_node_arg_name = morphizen::node_arg_get_name(node_ref.first_output_node_arg());
       // node_arg.empty() means user does not specify `-n` for
       // tracing, we try to search for all possible matched node.
       //
@@ -148,11 +149,12 @@ int main(int argc, char* argv[]) {
       if (node_arg.empty() || (this_node_arg_name == node_arg)) {
         auto bind = p->match(graph, *node);
         if (bind != nullptr) {
-          LOG(INFO) << "find node: " << vaip_core::node_as_string(*node);
+          LOG(INFO) << "find node: " << node_ref.to_string();
           if (opt_verbose) {
             for (auto ni : *bind) {
+              auto node_arg_ref = morphizen_cxx::NodeArgConstRef::from_node_arg(graph, *ni.second.node_arg);
               LOG(INFO) << "pattern id: " << ni.first << " node_arg: "
-                        << vaip_core::node_arg_as_string(*ni.second.node_arg);
+                        << node_arg_ref.to_string();
             }
           }
         }

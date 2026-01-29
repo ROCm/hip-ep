@@ -20,13 +20,17 @@ std::string PatternWildcard::debug_string() const {
 }
 
 BinderBuilderPtr
-PatternWildcard::match_uncached(const onnxruntime::Graph& /*graph*/,
+PatternWildcard::match_uncached(const onnxruntime::Graph& graph,
                                 const NodeInput& node_input,
                                 const BinderBuilder& binder) const {
   MY_LOG(1) << "MATCH OK. ID=" << get_id() << ", wildcard matched: "
             << (node_input.node != nullptr
-                    ? node_as_string(*node_input.node)
-                    : node_arg_as_string(*node_input.node_arg));
+                    ? morphizen_cxx::NodeConstRef::from_node(graph,
+                                                             *node_input.node)
+                          .to_string()
+                    : morphizen_cxx::NodeArgConstRef::from_node_arg(
+                          graph, *node_input.node_arg)
+                          .to_string());
   return binder.add(this->get_id(), node_input);
 }
 void PatternWildcard::dump_to_proto_imp(RootPatternProto& /*pattern_proto*/,

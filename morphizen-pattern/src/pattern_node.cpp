@@ -34,33 +34,36 @@ PatternNode::match_uncached(const onnxruntime::Graph& graph,
                             const NodeInput& node_input,
                             const BinderBuilder& binder) const {
   if (node_input.node == nullptr) {
-    MATCH_FAILED << " not a node: " << node_arg_as_string(*node_input.node_arg);
+    auto node_arg_ref = morphizen_cxx::NodeArgConstRef::from_node_arg(
+        graph, *node_input.node_arg);
+    MATCH_FAILED << " not a node: " << node_arg_ref.to_string();
     return nullptr;
   }
   auto& node = *node_input.node;
-  auto domain = normalize_domain(node_op_domain(node));
-  auto op_type = node_op_type(node);
+  auto node_ref = morphizen_cxx::NodeConstRef::from_node(graph, node);
+  auto domain = normalize_domain(node_ref.op_domain());
+  auto op_type = node_ref.op_type();
   if (domain != this->op_domain_ || op_type != this->op_type_) {
     MATCH_FAILED << " expect node_type is " << this->op_domain_ << ":"
                  << this->op_type_ << " actually node type is " << domain << ":"
-                 << op_type << node_as_string(node);
+                 << op_type << node_ref.to_string();
     return nullptr;
   }
-  auto inputs = node_get_inputs(node);
+  auto inputs = node_ref.inputs_as_node_input();
   auto inputs_size = inputs.size();
   auto args_size = args_.size();
   // you can not match a node with three inputs but two arguments
   if (inputs_size > args_size) {
     MATCH_FAILED << " too many inputs. expect num of args is " << args_size
                  << " actual input size  is " << inputs_size
-                 << "; node=" << node_as_string(node);
+                 << "; node=" << node_ref.to_string();
     return nullptr;
   }
 
-  if (node_input.node_arg != &node_get_first_output_node_arg(node)) {
+  if (node_input.node_arg != &node_ref.first_output_node_arg()) {
     MATCH_FAILED << "  PatternNode treats Node as single output, please use "
                     "node_with_multiple_outputs to deal with multiple outputs"
-                 << "; node=" << node_as_string(node);
+                 << "; node=" << node_ref.to_string();
     return nullptr;
   }
 
@@ -88,7 +91,7 @@ PatternNode::match_uncached(const onnxruntime::Graph& graph,
       return nullptr;
     }
   }
-  MY_LOG(1) << "MATCH OK. ID=" << get_id() << ", node=" << node_as_string(node);
+  MY_LOG(1) << "MATCH OK. ID=" << get_id() << ", node=" << node_ref.to_string();
   return ret;
 }
 

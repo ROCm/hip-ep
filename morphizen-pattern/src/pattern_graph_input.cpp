@@ -44,13 +44,21 @@ PatternGraphInput::match_uncached(const onnxruntime::Graph& graph,
   if (ret == nullptr) {
     MATCH_FAILED << "not a graph input: "
                  << (node_input.node != nullptr
-                         ? node_as_string(*node_input.node)
-                         : node_arg_as_string(*node_input.node_arg));
+                         ? morphizen_cxx::NodeConstRef::from_node(
+                               graph, *node_input.node)
+                               .to_string()
+                         : morphizen_cxx::NodeArgConstRef::from_node_arg(
+                               graph, *node_input.node_arg)
+                               .to_string());
   } else {
     MY_LOG(1) << "MATCH OK. ID=" << get_id() << ", graph input matched."
               << (node_input.node != nullptr
-                      ? node_as_string(*node_input.node)
-                      : node_arg_as_string(*node_input.node_arg));
+                      ? morphizen_cxx::NodeConstRef::from_node(graph,
+                                                               *node_input.node)
+                            .to_string()
+                      : morphizen_cxx::NodeArgConstRef::from_node_arg(
+                            graph, *node_input.node_arg)
+                            .to_string());
   }
   return ret;
 }
