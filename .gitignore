@@ -58,3 +58,11 @@ __pycache__/
 *.a
 *.lib
 *.pdb
+
+# Test data (generated)
+test/data/input.bin
+test/data/*_ctx.onnx
+test/data/*_ctx.onnx_*.bin
+
+# Claude Code local settings
+.claude/settings.local.json
