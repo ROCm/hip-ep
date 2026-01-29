@@ -29,10 +29,10 @@ set PATH=..\local\bin;..\build\onnx-hipdnn-ep\bin\Release;%PATH%
 
 The test suite includes 3 test cases:
 
-### 1. LoadVitisAIProvider
-Verifies that the VitisAI Execution Provider can be loaded and registered successfully.
+### 1. LoadMorphiZenProvider
+Verifies that the MorphiZen Execution Provider can be loaded and registered successfully.
 
-### 2. CreateSessionWithVitisAIProvider (Conv Model)
+### 2. CreateSessionWithMorphiZenProvider (Conv Model)
 Tests session creation with a simple Conv operation model.
 
 **Model:** `conv_model.onnx`
@@ -119,14 +119,14 @@ E42334FBE6FD988BE07BFBDBD06CA933D8773A93C5F23343C5393583D0E4B1DBCAE78163E1A11AAB
 
 A successful test run should show:
 
-1. **VitisAI EP Registration:**
+1. **MorphiZen EP Registration:**
    ```
-   [SetUp] VitisAI EP registered successfully from: onnxruntime_vitisai_ep.dll
+   [SetUp] MorphiZen EP registered successfully from: onnxruntime_morphizen_ep.dll
    ```
 
 2. **Session Creation:**
    ```
-   [Test] Session created successfully with VitisAI EP!
+   [Test] Session created successfully with MorphiZen EP!
    [Test] MLIR pass was executed during session creation
    ```
 
