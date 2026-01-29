@@ -30,7 +30,8 @@ PatternCommutableNode::match_uncached(const onnxruntime::Graph& graph,
                                       const NodeInput& node_input,
                                       const BinderBuilder& binder) const {
   if (node_input.node == nullptr) {
-    auto node_arg_ref = morphizen_cxx::NodeArgConstRef::from_node_arg(graph, *node_input.node_arg);
+    auto node_arg_ref = morphizen_cxx::NodeArgConstRef::from_node_arg(
+        graph, *node_input.node_arg);
     MATCH_FAILED << " not a node: " << node_arg_ref.to_string();
     return nullptr;
   }

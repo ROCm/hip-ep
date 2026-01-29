@@ -15,7 +15,9 @@ void IPass::create_const(const Node& node, gsl::span<const char> data) {
   auto name = node_get_output_name(node);
   auto& arg = node_get_output_node_arg(node);
   auto shape = node_arg_get_shape_i64(arg);
-  CHECK(shape != nullptr) << morphizen_cxx::NodeArgConstRef::from_node_arg(graph_, arg).to_string() << " shape absent";
+  CHECK(shape != nullptr)
+      << morphizen_cxx::NodeArgConstRef::from_node_arg(graph_, arg).to_string()
+      << " shape absent";
   auto type = node_arg_get_element_type(arg);
   create_const(name.c_str(), data, *shape, type);
 }
@@ -24,7 +26,9 @@ void IPass::create_empty_const(const Node& node, size_t size) {
   auto name = node_get_output_name(node);
   auto& arg = node_get_output_node_arg(node);
   auto shape = node_arg_get_shape_i64(arg);
-  CHECK(shape != nullptr) << morphizen_cxx::NodeArgConstRef::from_node_arg(graph_, arg).to_string() << " shape absent";
+  CHECK(shape != nullptr)
+      << morphizen_cxx::NodeArgConstRef::from_node_arg(graph_, arg).to_string()
+      << " shape absent";
   auto type = node_arg_get_element_type(arg);
   create_empty_const(name.c_str(), size, *shape, type);
 }
@@ -33,7 +37,9 @@ void IPass::create_lazy_const(
     const std::function<void(gsl::span<char>)>& lazy) {
   auto& arg = node_get_output_node_arg(node);
   auto shape = node_arg_get_shape_i64(arg);
-  CHECK(shape != nullptr) << morphizen_cxx::NodeArgConstRef::from_node_arg(graph_, arg).to_string() << " shape absent";
+  CHECK(shape != nullptr)
+      << morphizen_cxx::NodeArgConstRef::from_node_arg(graph_, arg).to_string()
+      << " shape absent";
   auto type = node_arg_get_element_type(arg);
   create_lazy_const(node_get_output_name(node).c_str(), size, *shape, type,
                     lazy);
@@ -332,8 +338,10 @@ check_loop(const Graph& graph, const std::vector<const Node*>& input_nodes,
           auto route = map_route[current_node];
           for (size_t i = 0; i < route.size(); i++) {
             auto node = route[i];
-            auto node_ref = morphizen_cxx::NodeConstRef::from_node(graph, *node);
-            maybe_loop_path.push_back(morphizen::node_arg_get_name(node_ref.first_output_node_arg()));
+            auto node_ref =
+                morphizen_cxx::NodeConstRef::from_node(graph, *node);
+            maybe_loop_path.push_back(
+                morphizen::node_arg_get_name(node_ref.first_output_node_arg()));
           }
         }
       },
@@ -342,7 +350,8 @@ check_loop(const Graph& graph, const std::vector<const Node*>& input_nodes,
         // There may exist multiple paths and we only find one of them
         // ,because we only care if has connection
         CHECK(map_route.find(from) != map_route.end())
-            << "path not exists:" << morphizen_cxx::NodeConstRef::from_node(graph, *from).to_string();
+            << "path not exists:"
+            << morphizen_cxx::NodeConstRef::from_node(graph, *from).to_string();
         if (map_route.find(to) == map_route.end()) {
           auto route = map_route[from];
           route.push_back(to);
@@ -394,9 +403,11 @@ static std::vector<std::string> get_edge_node_arg_names(const Node* from,
       ret.push_back(node_arg_get_name(*arg));
     }
   }
-  CHECK(!ret.empty()) << "[try fuse failed] not exist a edge between "
-                      << morphizen_cxx::NodeConstRef::from_node(graph_, *from).to_string() << " and "
-                      << morphizen_cxx::NodeConstRef::from_node(graph_, *to).to_string();
+  CHECK(!ret.empty())
+      << "[try fuse failed] not exist a edge between "
+      << morphizen_cxx::NodeConstRef::from_node(graph_, *from).to_string()
+      << " and "
+      << morphizen_cxx::NodeConstRef::from_node(graph_, *to).to_string();
   return ret;
 }
 

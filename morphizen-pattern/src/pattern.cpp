@@ -97,9 +97,11 @@ binder_ptr_t Pattern::match(const onnxruntime::Graph& graph,
   auto node_ref = morphizen_cxx::NodeConstRef::from_node(graph, node);
   auto outputs = node_ref.outputs();
   for (auto i = 0u; i < outputs.size(); ++i) {
-    if (!outputs[i].has_value()) continue; // Skip optional outputs
+    if (!outputs[i].has_value())
+      continue; // Skip optional outputs
     auto init = BinderBuilderPtr(new BinderBuilder(new Map(), graph));
-    const morphizen::NodeArg* output_arg = &(static_cast<const morphizen::NodeArg&>(outputs[i].value()));
+    const morphizen::NodeArg* output_arg =
+        &(static_cast<const morphizen::NodeArg&>(outputs[i].value()));
     auto ret = this->match_cached(graph, {&node, output_arg}, *init);
     if (ret != nullptr) {
       return ret->build(name_to_ids_);
@@ -123,12 +125,13 @@ BinderBuilderPtr Pattern::match_cached(const onnxruntime::Graph& graph,
         matched_node_input.node_arg == node_input.node_arg) {
       ret = binder.clone();
     } else {
-      auto matched_arg_ref = morphizen_cxx::NodeArgConstRef::from_node_arg(graph, *matched_node_input.node_arg);
-      auto node_arg_ref = morphizen_cxx::NodeArgConstRef::from_node_arg(graph, *node_input.node_arg);
+      auto matched_arg_ref = morphizen_cxx::NodeArgConstRef::from_node_arg(
+          graph, *matched_node_input.node_arg);
+      auto node_arg_ref = morphizen_cxx::NodeArgConstRef::from_node_arg(
+          graph, *node_input.node_arg);
       MATCH_FAILED << "MATCH cache failed."
                    << "pattern[id=" << get_id() << "]"
-                   << " matched node_arg{"
-                   << matched_arg_ref.to_string() << "}"
+                   << " matched node_arg{" << matched_arg_ref.to_string() << "}"
                    << " it cannot matched the other node_arg{"
                    << node_arg_ref.to_string() << "}";
       ret = nullptr;
