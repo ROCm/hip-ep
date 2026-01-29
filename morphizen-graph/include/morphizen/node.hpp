@@ -49,6 +49,8 @@ MORPHIZEN_DLL_SPEC bool node_is_op(const Node& node, const std::string& op_type,
 MORPHIZEN_DLL_SPEC int node_get_output_element_type(const Node& node);
 MORPHIZEN_DLL_SPEC const AttributeProto* node_get_attr(const Node& node,
                                                        const std::string& name);
+MORPHIZEN_DLL_SPEC bool node_has_attr(const Node& node,
+                                      const std::string& name);
 
 // Node attribute getters
 MORPHIZEN_DLL_SPEC int64_t node_get_attr_int(const Node& node,
