@@ -546,7 +546,7 @@ MorphiZen functions as an **ONNX Runtime Execution Provider (EP)** through a dua
 **Device Detection**:
 - Vendor ID: 0x1022 (AMD)
 - Device Type: NPU (Neural Processing Unit)
-- Fallback: CPU (controlled by `MORPHIZEN_MORPHIZEN_EP_ENABLE_CPU_DEVICE`)
+- Fallback: CPU (controlled by `MORPHIZEN_EP_ENABLE_CPU_DEVICE`)
 
 **Factory Pattern**:
 ```

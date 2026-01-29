@@ -28,7 +28,7 @@ $jobs = [Environment]::ProcessorCount
 
 Run ninja -C "$Env:VAI_RT_BUILD_DIR/morphizen-demo" -j $jobs install
 
-$ENV:MORPHIZEN_MORPHIZEN_EP_ENABLE_CPU_DEVICE="1"
+$ENV:MORPHIZEN_EP_ENABLE_CPU_DEVICE="1"
 $ENV:ENABLE_CACHE_FILE_IO_IN_MEM="1"  # for stable CI tests
 # print current timestamp
 Write-Output "current timestamp: $(Get-Date)"
