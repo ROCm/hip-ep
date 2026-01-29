@@ -7,7 +7,6 @@
 #include <sstream>
 
 #include "morphizen/graph.hpp"
-#include <vaip/vaip_ort_api.h>
 
 #include "./pattern_log.hpp"
 #include "morphizen/pattern.pb.h"

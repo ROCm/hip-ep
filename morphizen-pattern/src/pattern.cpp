@@ -11,7 +11,6 @@
 #include <google/protobuf/util/json_util.h>
 #include <memory>
 #include <numeric>
-#include <vaip/vaip_ort_api.h>
 
 #include "./pattern_commutable_node.hpp"
 #include "./pattern_constant.hpp"
@@ -26,7 +25,7 @@
 #include "./pattern_wildcard.hpp"
 #include "morphizen/node.hpp"
 #include "morphizen/node_arg.hpp"
-#include "morphizen/util.hpp"
+
 #ifdef ENABLE_PYTHON
 #  include <pybind11/embed.h>
 #  include <pybind11/pybind11.h>
@@ -55,7 +54,37 @@ Binder::operator()(const std::string& pattern_name) const {
 }
 
 using Map = immutable_map::ImmutableMap<int, NodeInput>;
-void Pattern::enable_trace(int n) { ENV_PARAM(DEBUG_VAIP_PATTERN) = n; }
+
+// Design Decision: Pattern::enable_trace() is a no-op
+//
+// Rationale:
+// During component extraction, we chose to keep morphizen-pattern independent
+// with minimal dependencies. The original enable_trace() relied on env_config
+// from vaip-core, which would create a dependency we're trying to avoid.
+//
+// Tradeoffs Considered:
+// 1. Add morphizen-utils dependency for ENV_PARAM:
+//    - Pro: Restores dynamic trace level control
+//    - Con: Adds dependency, contradicts extraction goals
+// 2. Use std::getenv() directly:
+//    - Pro: No dependencies, simple
+//    - Con: Less robust than ENV_PARAM, platform-specific
+// 3. Make it a no-op (CHOSEN):
+//    - Pro: Zero dependencies, simpler build graph
+//    - Con: Lost runtime trace control
+//
+// Decision: Keep as no-op because:
+// - Component independence is more valuable than this debug feature
+// - MY_LOG is always-on in pattern_log.hpp (users still have logging)
+// - Trace control is a development/debug feature, not core functionality
+// - Users can still use glog's VLOG if they need filtered logging
+//
+// Alternative for users who need trace control:
+// - Set GLOG_v environment variable to control glog verbosity
+// - Use custom build with modified pattern_log.hpp
+void Pattern::enable_trace(int n) {
+  (void)n; // Parameter kept for API compatibility
+}
 Pattern::Pattern(int id) : id_{id} {}
 Pattern::~Pattern() {}
 

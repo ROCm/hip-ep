@@ -38,6 +38,8 @@ add_library(${LIB_NAME} STATIC
   src/anchor_point_imp.cpp
   src/anchor_point_imp.hpp
   include/morphizen/anchor_point.hpp
+  include/morphizen/node_builder.hpp
+  src/node_builder.cpp
   src/pass_imp.hpp
   src/pass_imp.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/tar.h
@@ -54,20 +56,14 @@ add_library(${LIB_NAME} STATIC
   src/mem_stream_buffer.hpp
   include/morphizen/pass.hpp
   src/pass.cpp
+  include/morphizen/rewrite_rule.hpp
+  src/rewrite_rule.cpp
   include/morphizen/model.hpp
   src/model.cpp
-  include/morphizen/graph.hpp
-  src/graph.cpp
-  include/morphizen/node_attr.hpp
-  src/node_attr.cpp
-  include/morphizen/node_arg.hpp
-  src/node_arg.cpp
   include/morphizen/tensor_proto.hpp
   src/tensor_proto.cpp
-  include/morphizen/node_input.hpp
-  src/node_input.cpp
-  include/morphizen/node.hpp
-  src/node.cpp
+  src/node_arg_const_data.cpp
+  src/morphizen_graph_impl.cpp
   src/profile_utils.hpp
   src/profile_utils.cpp
   src/util.cpp
@@ -77,31 +73,10 @@ add_library(${LIB_NAME} STATIC
   src/config.hpp
   src/config.cpp
   src/custom_op.cpp
-  include/morphizen/pattern.hpp
-  src/pattern/pattern.cpp
-  src/pattern/pattern_node.cpp
-  src/pattern/pattern_node.hpp
-  src/pattern/pattern_commutable_node.cpp
-  src/pattern/pattern_commutable_node.hpp
-  src/pattern/pattern_or.cpp
-  src/pattern/pattern_or.hpp
-  src/pattern/pattern_wildcard.cpp
-  src/pattern/pattern_wildcard.hpp
-  src/pattern/pattern_commutable_node.hpp
-  src/pattern/pattern_sequence.cpp
-  src/pattern/pattern_sequence.hpp
-  src/pattern/pattern_constant.cpp
-  src/pattern/pattern_constant.hpp
-  src/pattern/pattern_graph_input.cpp
-  src/pattern/pattern_graph_input.hpp
-  src/pattern/pattern_where.cpp
-  src/pattern/pattern_where.hpp
-  src/pattern/pattern_node_output_arg.cpp
-  src/pattern/pattern_node_output_arg.hpp
-  src/pattern/pattern_graph_output.cpp
-  src/pattern/pattern_graph_output.hpp
   include/morphizen/rewrite_rule.hpp
   src/rewrite_rule.cpp
+  src/node_arg_const_data.cpp
+  src/morphizen_graph_impl.cpp
   src/stat.cpp
   src/stat.hpp
   src/file_lock.hpp
@@ -175,7 +150,16 @@ set(MorphiZen_DEPS
   Microsoft.GSL::GSL
   morphizen-utils
   vaip-ort-api-ext
+  morphizen::morphizen-graph
 )
+
+# Conditional pattern matching support
+if(morphizen_ENABLE_PATTERN_MATCHING)
+  list(APPEND MorphiZen_DEPS morphizen::morphizen-pattern)
+  target_compile_definitions(${LIB_NAME} PUBLIC MORPHIZEN_HAS_PATTERN_MATCHING=1)
+else()
+  target_compile_definitions(${LIB_NAME} PUBLIC MORPHIZEN_HAS_PATTERN_MATCHING=0)
+endif()
 target_link_libraries(${LIB_NAME} PUBLIC ${MorphiZen_DEPS})
 target_compile_definitions(${LIB_NAME}
   PUBLIC

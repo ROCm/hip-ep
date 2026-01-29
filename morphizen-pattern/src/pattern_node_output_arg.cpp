@@ -9,8 +9,6 @@
 
 #include "morphizen/node.hpp"
 #include "morphizen/node_arg.hpp"
-#include "morphizen/util.hpp"
-#include <vaip/vaip_ort_api.h>
 
 #include "./pattern_log.hpp"
 #include "morphizen/pattern.pb.h"

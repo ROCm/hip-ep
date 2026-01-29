@@ -3,6 +3,29 @@
  * Licensed under the MIT License.
  */
 
+/// @file node_arg.hpp
+/// @brief C++ wrapper utilities for node argument operations over VAIP_ORT_API
+///
+/// This file provides C++ wrappers for NodeArg-related operations. A NodeArg
+/// represents a value/tensor in the computational graph (inputs and outputs
+/// of nodes). Each NodeArg has:
+/// - A unique name
+/// - Type information (element type)
+/// - Shape information (dimensions)
+/// - Optional constant data (for initializers)
+///
+/// All operations are forwarded to the active backend implementation via
+/// the VAIP_ORT_API function pointer table.
+///
+/// Example:
+/// @code
+///   const NodeArg& arg = ...;
+///   std::string name = node_arg_get_name(arg);         // Get name
+///   int elem_type = node_arg_get_element_type(arg);    // Get element type
+///   auto shape = node_arg_get_shape_i64(arg);          // Get shape
+///   bool is_dynamic = node_arg_is_dynamic_shape(arg);  // Check if dynamic
+/// @endcode
+
 #pragma once
 #include <optional>
 #include <ostream>
@@ -62,6 +85,19 @@ VAIP_DLL_SPEC gsl::span<const int16_t>
 node_arg_get_const_data_as_fp16s(const Graph& graph, const NodeArg& node_arg);
 VAIP_DLL_SPEC bool node_arg_is_constant(const Graph& graph,
                                         const NodeArg& node_arg);
+
+/** @brief Create a new node argument in the graph
+ *
+ * @param graph The graph to add the node argument to
+ * @param name Name of the node argument
+ * @param shape Shape of the tensor (nullptr for unknown shape)
+ * @param element_type Data type of the tensor
+ * @return Reference to the created node argument
+ */
+VAIP_DLL_SPEC NodeArg& node_arg_new(Graph& graph, const std::string& name,
+                                    const std::vector<int64_t>* shape,
+                                    int element_type);
+
 } // namespace vaip_core
 namespace vaip_cxx {
 // on Linux, friend class declaration is not enough, we need forward

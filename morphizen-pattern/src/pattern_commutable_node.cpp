@@ -6,6 +6,8 @@
 #include "./pattern_commutable_node.hpp"
 #include "./pattern_log.hpp"
 #include "morphizen/graph.hpp"
+#include "morphizen/node.hpp"
+#include "morphizen/node_arg.hpp"
 
 namespace vaip_core {
 PatternCommutableNode::PatternCommutableNode(
@@ -32,8 +34,8 @@ PatternCommutableNode::match_uncached(const onnxruntime::Graph& graph,
     return nullptr;
   }
   const auto& node = *node_input.node;
-  auto domain = normalize_domain(VAIP_ORT_API(node_op_domain)(node));
-  auto op_type = VAIP_ORT_API(node_op_type)(node);
+  auto domain = normalize_domain(node_op_domain(node));
+  auto op_type = node_op_type(node);
   if (domain != this->op_domain_ || op_type != this->op_type_) {
     MATCH_FAILED << " expect node_type is " << this->op_domain_ << ":"
                  << this->op_type_ << " actually node type is " << domain << ":"

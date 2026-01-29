@@ -33,8 +33,7 @@ VAIP_DLL_SPEC ModelPtr model_clone(const Model& model,
 }
 VAIP_DLL_SPEC void ModelDeleter::operator()(Model* model) const {
   MY_LOG(1) << "destroy model(" << ((void*)model) << ") "
-            << VAIP_ORT_API(graph_get_name)(
-                   VAIP_ORT_API(model_main_graph)(*model));
+            << graph_get_name(model_main_graph(*model));
   VAIP_ORT_API(model_delete)(model);
 }
 } // namespace vaip_core
@@ -42,14 +41,14 @@ VAIP_DLL_SPEC void ModelDeleter::operator()(Model* model) const {
 namespace vaip_cxx {
 ModelConstRef::ModelConstRef(const vaip_core::Model& model) : self_(model) {}
 const std::string& ModelConstRef::name() const {
-  return VAIP_ORT_API(graph_get_name)(
-      VAIP_ORT_API(model_main_graph)(const_cast<onnxruntime::Model&>(self_)));
+  return vaip_core::graph_get_name(
+      vaip_core::model_main_graph(const_cast<vaip_core::Model&>(self_)));
 }
 std::string ModelConstRef::get_metadata(const std::string& name) const {
-  return *VAIP_ORT_API(model_get_meta_data)(self_, name);
+  return vaip_core::model_get_meta_data(self_, name);
 }
 bool ModelConstRef::has_metadata(const std::string& name) const {
-  return VAIP_ORT_API(model_has_meta_data)(self_, name);
+  return vaip_core::model_has_meta_data(self_, name);
 }
 std::unique_ptr<Model>
 ModelConstRef::clone(int64_t external_data_threshold) const {
@@ -79,11 +78,11 @@ Model& Model::set_metadata(const std::string& name, const std::string& value) {
 }
 
 GraphRef Model::main_graph() {
-  return GraphRef(VAIP_ORT_API(model_main_graph)(*self_));
+  return GraphRef(vaip_core::model_main_graph(*self_));
 }
 GraphConstRef ModelConstRef::main_graph() const {
   return GraphConstRef(
-      VAIP_ORT_API(model_main_graph)(const_cast<onnxruntime::Model&>(self_)));
+      vaip_core::model_main_graph(const_cast<vaip_core::Model&>(self_)));
 }
 std::filesystem::path ModelConstRef::model_path() const {
   return VAIP_ORT_API(get_model_path)(main_graph());

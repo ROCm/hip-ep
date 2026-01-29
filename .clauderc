@@ -9,6 +9,79 @@ This file contains project-specific rules and workflows for Claude Code when wor
 
 ---
 
+## ⚠️ CRITICAL: READ THIS FILE FIRST ⚠️
+
+**BEFORE performing ANY of the following operations, you MUST read this entire file:**
+- Building the project (`cmake`, `make`, `ninja`, etc.)
+- Running tests
+- Installing dependencies
+- Any compilation or linking tasks
+
+**DO NOT use default build commands or guess configurations. Follow the exact commands specified in the "Build Configuration and Workflow" section below.**
+
+---
+
+## Build Configuration and Workflow
+
+**⚠️ MANDATORY: Use these exact commands for building and testing - DO NOT improvise or use different paths/options.**
+
+### Build Settings:
+- **Build Directory**: `../../build/$(basename $PWD)` (project-specific build directory)
+- **Install Prefix**: `../../local` (shared install directory for dependencies)
+- **Build Type**: Debug
+- **Dependencies**: ONNX Runtime and LLVM are pre-built and installed in `../../local`
+
+### Build Steps:
+
+1. **Configure with CMake** (REQUIRED - use this exact command):
+   ```bash
+   cmake -S . -B ../../build/$(basename $PWD) \
+     -DBUILD_SHARED_LIBS=OFF \
+     "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded\$<\$<CONFIG:Debug>:Debug>" \
+     -DCMAKE_BUILD_TYPE=Debug \
+     -DCMAKE_PREFIX_PATH=../../local \
+     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+     -Dmorphizen_ENABLE_ORT_BRIDGE=ON \
+     --fresh
+   ```
+
+2. **Build the project** (use this exact command):
+   ```bash
+   cmake --build ../../build/$(basename $PWD) --config Debug --parallel
+   ```
+
+3. **Run tests** (after successful build):
+   ```bash
+   ../../build/$(basename $PWD)/bin/morphizen-unit-tests.exe
+   ```
+
+**For Git Bash Users**: Launch bash from an MSVC Developer Command Prompt before starting Claude Code to ensure the MSVC environment is available.
+
+### Expected Outputs:
+- `onnxruntime_vitisai_ep.dll` - Main MorphiZen library
+- `morphizen-graph-opt.exe` - Graph optimization tool
+- `morphizen-unit-tests.exe` - Unit test executable
+- `ort-bridge-test.exe` - ORT bridge tests
+- Various other tools and libraries
+
+### MSVC Environment Setup (IMPORTANT):
+If the build fails with errors like "Cannot open include file: 'cstddef'" or other missing standard headers, you need to initialize the Visual Studio environment first.
+
+For bash:
+```bash
+cmd /c "call \"\"C:\\msvsn2022\\VC\\Auxiliary\\Build\\vcvars64.bat\"\" && cd /d %CD% && cmake --build \"\"../../build/$(basename $PWD)\"\" --config Debug --parallel"
+```
+
+This sets up the MSVC compiler environment including standard library include paths, Windows SDK paths, and required compiler environment variables.
+
+### Verifying Build Outputs:
+```bash
+# List executables and libraries
+ls ../../build/$(basename $PWD)/bin/
+```
+
+---
+
 ## Git Workflow Rules
 
 ### Fork and Remote Setup

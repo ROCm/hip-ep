@@ -16,3 +16,5 @@ EXPORTS
     CreateEpFactories
     ReleaseEpFactory
     ??_7PassProto@vaip_core@@6B@
+    ?apply@BaseRule@vaip_core@@QEAAXPEAUGraph@onnxruntime@@@Z
+    ?create_rule@Rule@vaip_core@@SA?AV?$unique_ptr@VRule@vaip_core@@U?$default_delete@VRule@vaip_core@@@std@@@std@@V?$shared_ptr@VPattern@vaip_core@@@4@AEBV?$function@$$A6A_NPEAUGraph@onnxruntime@@AEAVBinder@vaip_core@@@Z@4@@Z

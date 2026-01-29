@@ -4,7 +4,7 @@
  */
 
 #pragma once
-#include "./_sanity_check.hpp"
+#include "morphizen/_sanity_check.hpp"
 #include <vaip/my_ort.h>
 #include <vaip/vaip_gsl.h>
 #ifdef _WIN32
@@ -14,7 +14,7 @@
 #ifdef _WIN32
 #  pragma warning(pop)
 #endif
-#include "./pass.hpp"
+#include "morphizen/pass.hpp"
 #include <memory>
 namespace vaip_core {
 class AnchorPoint {

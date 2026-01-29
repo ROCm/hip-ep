@@ -160,9 +160,10 @@ std::unique_ptr<AnchorPoint> AnchorPoint::alias1(const IPass& pass,
 
 static int get_fix_point(const Graph& graph, const Node& node) {
   // node type  only support  `DequantizeLinear` and `QuantizeLinear`
-  auto op_type = VAIP_ORT_API(node_op_type)(node);
+  auto node_ref = vaip_cxx::NodeConstRef::from_node(graph, node);
+  auto op_type = node_ref.op_type();
   CHECK(op_type == "DequantizeLinear" || op_type == "QuantizeLinear");
-  auto inputs = node_get_input_node_args(node);
+  auto inputs = node_ref.inputs();
   CHECK_GE(inputs.size(), 2);
   auto scale = node_arg_get_const_data_as_float(graph, *inputs[1]);
   auto retp = scale_to_fix_point(scale);
@@ -172,9 +173,10 @@ static int get_fix_point(const Graph& graph, const Node& node) {
 
 static float get_scale(const Graph& graph, const Node& node) {
   // node type  only support  `VitisDequantizeLinear` and `VitisQuantizeLinear`
-  auto op_type = VAIP_ORT_API(node_op_type)(node);
+  auto node_ref = vaip_cxx::NodeConstRef::from_node(graph, node);
+  auto op_type = node_ref.op_type();
   CHECK(op_type == "VitisDequantizeLinear" || op_type == "VitisQuantizeLinear");
-  auto inputs = node_get_input_node_args(node);
+  auto inputs = node_ref.inputs();
   CHECK_GE(inputs.size(), 2);
   auto scale = node_arg_get_const_data_as_float(graph, *inputs[1]);
   return scale;
@@ -182,15 +184,18 @@ static float get_scale(const Graph& graph, const Node& node) {
 
 static int get_zero_point(const Graph& graph, const Node& node) {
   // node type  only support  `VitisDequantizeLinear` and `VitisQuantizeLinear`
-  auto op_type = VAIP_ORT_API(node_op_type)(node);
+  auto node_ref = vaip_cxx::NodeConstRef::from_node(graph, node);
+  auto op_type = node_ref.op_type();
   CHECK(op_type == "VitisDequantizeLinear" || op_type == "VitisQuantizeLinear");
-  auto inputs = node_get_input_node_args(node);
+  auto inputs = node_ref.inputs();
   CHECK_GE(inputs.size(), 3);
-  auto data_type = VAIP_ORT_API(node_arg_get_element_type)(*inputs[2]);
+  CHECK(inputs[2].has_value());
+  auto data_type = inputs[2].value().element_type();
   int zero_point = 0;
   switch (data_type) {
   case onnx::TensorProto_DataType_BFLOAT16:
-    zero_point = (int)(node_arg_get_const_data_as_bf16(graph, *inputs[2]));
+    zero_point =
+        (int)(node_arg_get_const_data_as_bf16(graph, inputs[2].value()));
     break;
   default:
     // TODO
@@ -217,7 +222,8 @@ AnchorPoint::create_from_siso_path(const IPass& pass, const Graph& graph,
   auto part = std::vector<AnchorPointProto>();
   for (auto i = 1u; i < path.size(); ++i) {
     auto& n = *path[i];
-    auto op_type = VAIP_ORT_API(node_op_type)(n);
+    auto node_ref = vaip_cxx::NodeConstRef::from_node(graph, n);
+    auto op_type = node_ref.op_type();
     if (op_type == "DequantizeLinear" || op_type == "QuantizeLinear") {
       // NOTE: float2fix is the reverse op of "DequantizeLinear"
       // NOTE: fix2float is the reverse op of "QuantizeLinear"

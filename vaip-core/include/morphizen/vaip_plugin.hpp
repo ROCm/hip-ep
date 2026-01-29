@@ -4,5 +4,5 @@
  */
 
 #pragma once
-#include "./_sanity_check.hpp"
 #include "morphizen-utils/vaip_plugin.hpp"
+#include "morphizen/_sanity_check.hpp"

@@ -6,10 +6,10 @@
 #include "morphizen/node.hpp"
 #include "morphizen/graph.hpp"
 #include "morphizen/node_arg.hpp"
-#include "morphizen/vaip_core.hpp"
 #include <glog/logging.h>
 #include <limits>
 #include <vaip/my_ort.h>
+#include <vaip/vaip_ort_api.h>
 
 namespace vaip_core {
 
@@ -231,7 +231,7 @@ VAIP_DLL_SPEC vaip_core::DllSafe<std::string>
 node_release_attr_string(const Node& node, const std::string& name) {
   auto const_attr = node_attributes_get(node_get_attributes_ref(node), name);
   CHECK(const_attr != nullptr);
-  return VaipOrtApi2::attr_proto_release_string(
+  return VAIP_ORT_API(attr_proto_release_string)(
       const_cast<AttributeProto*>(const_attr));
 }
 
@@ -262,6 +262,11 @@ VAIP_DLL_SPEC NodeAttributesPtr node_clone_attributes(const Node& node) {
   }
   return ret;
 }
+
+size_t node_get_index(const Node& node) {
+  return VAIP_ORT_API(node_get_index)(node);
+}
+
 } // namespace vaip_core
 
 namespace vaip_cxx {

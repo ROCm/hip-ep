@@ -4,9 +4,9 @@
  */
 
 #pragma once
-#include "./pass_context.hpp"
-#include "./vaip_plugin.hpp"
 #include "morphizen/capability.pb.h"
+#include "morphizen/pass_context.hpp"
+#include "morphizen/vaip_plugin.hpp"
 #include "onnxruntime_api.hpp"
 #include <filesystem>
 #include <vaip/custom_op.h>

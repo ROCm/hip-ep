@@ -74,8 +74,9 @@ AnchorPoint::find_anchor_point(IPass& pass, const Graph& graph,
                                const std::string& name) {
   auto ret = find_anchor_point(pass, name);
   if (ret == nullptr) {
-    auto node_arg = VAIP_ORT_API(graph_get_node_arg)(graph, name);
-    if (node_arg != nullptr) {
+    auto graph_ref = vaip_cxx::GraphConstRef(graph);
+    auto node_arg_opt = graph_ref.find_node_arg(name);
+    if (node_arg_opt.has_value()) {
       auto proto = AnchorPointProto();
       proto.set_op_type(AnchorPoint::IDENTITY_OP);
       proto.set_origin_node(name);

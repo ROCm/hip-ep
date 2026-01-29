@@ -4,8 +4,8 @@
  */
 
 #pragma once
-#include "./_sanity_check.hpp"
-#include "./pattern.hpp"
+#include "morphizen/_sanity_check.hpp"
+#include "morphizen/pattern.hpp"
 
 namespace vaip_core {
 class BaseRule {

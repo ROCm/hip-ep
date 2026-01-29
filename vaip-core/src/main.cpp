@@ -3,7 +3,9 @@
  * Licensed under the MIT License.
  */
 #include "morphizen/onnxruntime_morphizen_ep.hpp"
-#include "morphizen/pattern.hpp"
+#if MORPHIZEN_HAS_PATTERN_MATCHING
+#  include "morphizen/pattern.hpp"
+#endif
 #include "morphizen/vaip.hpp"
 #if _WIN32
 #  ifdef _DEBUG
@@ -17,9 +19,13 @@ static struct {
   void* symbol;
 } table[] = {{"deinitialize_onnxruntime_morphizen_ep",
               (void*)deinitialize_onnxruntime_morphizen_ep},
-             {"vaip_get_version", (void*)vaip_get_version},
+             {"vaip_get_version", (void*)vaip_get_version}
+#if MORPHIZEN_HAS_PATTERN_MATCHING
+             ,
              {"vaip_core::Pattern::enable_trace",
-              (void*)vaip_core::Pattern::enable_trace}};
+              (void*)vaip_core::Pattern::enable_trace}
+#endif
+};
 
 static void* lookup_symbol(const char* name) {
   for (int i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {

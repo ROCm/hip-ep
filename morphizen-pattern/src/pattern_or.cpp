@@ -6,7 +6,7 @@
 #include "./pattern_or.hpp"
 
 #include "./pattern_log.hpp"
-#include "morphizen/util.hpp"
+
 namespace vaip_core {
 PatternOr::PatternOr(int id, std::vector<std::shared_ptr<Pattern>> args)
     : Pattern(id), or_patterns_(std::move(args)) {}
