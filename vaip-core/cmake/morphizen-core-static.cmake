@@ -63,7 +63,6 @@ add_library(${LIB_NAME} STATIC
   include/morphizen/tensor_proto.hpp
   src/tensor_proto.cpp
   src/node_arg_const_data.cpp
-  src/morphizen_graph_impl.cpp
   src/profile_utils.hpp
   src/profile_utils.cpp
   src/util.cpp
@@ -76,7 +75,6 @@ add_library(${LIB_NAME} STATIC
   include/morphizen/rewrite_rule.hpp
   src/rewrite_rule.cpp
   src/node_arg_const_data.cpp
-  src/morphizen_graph_impl.cpp
   src/stat.cpp
   src/stat.hpp
   src/file_lock.hpp
@@ -165,7 +163,7 @@ target_compile_definitions(${LIB_NAME}
   PUBLIC
   "-DONNX_NAMESPACE=onnx"
   PRIVATE
-    "-DVAIP_USE_DLL=1"
+    # Note: VAIP_USE_DLL is inherited from morphizen-graph (PUBLIC VAIP_USE_DLL=0)
     "-DVAIP_EXPORT_DLL=1"
     "-DHAVE_VERSION_INFO_CONFIG=1"  # Enable generated version header
   )

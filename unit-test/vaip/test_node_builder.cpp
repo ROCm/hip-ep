@@ -51,7 +51,7 @@ TEST_F(NodeBuilderTest, SkipSimplifiedLayerNormalization) {
   ASSERT_TRUE(!node_1_outputs[1].has_value());
   ASSERT_TRUE(!node_1_outputs[2].has_value());
   ASSERT_TRUE(node_1_outputs[3].has_value());
-  auto builder = graph.node_builder(*pass);
+  auto builder = vaip_cxx::graph_node_builder(graph, *pass);
 
   auto newly_node = builder.clone_inputs(node_0.value())
                         .clone_op_type(node_1.value())
