@@ -231,13 +231,13 @@ MORPHIZEN_DLL_SPEC FILE* tmpfile_with_posix_delete() {
   return tmp_file; // Return FILE* with POSIX delete applied
 }
 
-MORPHIZEN_DLL_SPEC std::filesystem::path get_vaip_path() {
+MORPHIZEN_DLL_SPEC std::filesystem::path get_morphizen_path() {
   wchar_t path[MAX_PATH];
   HMODULE hm = NULL;
 
   if (GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                        (LPCSTR)&get_vaip_path, &hm) == 0) {
+                        (LPCSTR)&get_morphizen_path, &hm) == 0) {
     int ret = GetLastError();
     LOG(ERROR) << "GetModuleHandle failed, error = " << ret;
     return {};

@@ -175,8 +175,8 @@ node_arg_get_const_data_as_tensor(const Graph& graph, const NodeArg& node_arg) {
 }
 
 // NOTE: node_arg_get_const_data_as_* functions moved to
-// vaip-core/src/node_arg_const_data.cpp These high-level functions depend on
-// tensor_proto (vaip-core component)
+// morphizen-core/src/node_arg_const_data.cpp These high-level functions depend
+// on tensor_proto (morphizen-core component)
 
 bool node_arg_is_constant(const Graph& graph, const NodeArg& node_arg) {
   return MORPHIZEN_ORT_API(node_arg_is_constant)(graph, node_arg);
@@ -208,7 +208,7 @@ std::optional<NodeConstRef> NodeArgConstRef::find_producer() const {
 }
 
 // NOTE: NodeArgConstRef::const_data_as_* methods moved to
-// vaip-core/src/node_arg_const_data.cpp These methods depend on
+// morphizen-core/src/node_arg_const_data.cpp These methods depend on
 // node_arg_get_const_data_as_* and tensor_proto functions
 
 } // namespace morphizen_cxx

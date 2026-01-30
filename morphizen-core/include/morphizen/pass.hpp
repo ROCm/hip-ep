@@ -63,8 +63,8 @@ public:
    *
    *  @param context the Context object shared among all passes.
    *  @param pass_proto pass configuration, pass_proto.plugin is the
-   *  name of the shared library, e.g "vaip-pass_merge_fix", see
-   *  `vaip_config.json` for more examples.
+   *  name of the shared library, e.g "morphizen-pass_merge_fix", see
+   *  `morphizen_config.json` for more examples.
    *
    */
   MORPHIZEN_DLL_SPEC static std::unique_ptr<IPass>
@@ -372,7 +372,7 @@ create_action_from_node_action(IPass::node_action_t node_action);
 IPass::action_t create_xmodel_process_graph(IPass::action_t action);
 } // namespace morphizen
 
-#define DEFINE_VAIP_PASS(cls, id)                                              \
+#define DEFINE_MORPHIZEN_PASS(cls, id)                                         \
   static ::morphizen::PassInfo* morphizen_pass_info() {                        \
     return ProcessorPassInfo<cls>::pass_info();                                \
   }                                                                            \

@@ -45,7 +45,7 @@ def generate_map(embedded_resource_file, support_compression):
         meta_info_list = ast.literal_eval(f.read())
     else:
         print(
-            "-- embbed resource file not found, please set -DVAIP_EMBEDDED_RESOURCE_PATH=<>"
+            "-- embbed resource file not found, please set -DMORPHIZEN_EMBEDDED_RESOURCE_PATH=<>"
         )
     data_str = ""
     map_str = "static std::unordered_map<std::string, CompressionInfo> binary_map = {"

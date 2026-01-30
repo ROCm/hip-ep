@@ -82,7 +82,7 @@ split_anchor_point(const AnchorPointProto& anchor_point_proto) {
 static std::string get_name_suffix(int suffix) {
   auto ret = std::string("");
   if (suffix != 0) {
-    ret = ret + "_vaip_" + std::to_string(suffix);
+    ret = ret + "_morphizen_" + std::to_string(suffix);
   }
   return ret;
 }
@@ -152,7 +152,7 @@ std::unique_ptr<AnchorPoint> AnchorPoint::alias1(const IPass& pass,
                                                  const std::string& new_name) {
   auto ret = find_anchor_point(const_cast<IPass&>(pass), graph, origin_name);
   // possible cause: tensor_name_remove_xir_suffix returned an invalid name that
-  // is not ended with _vaip_\d+
+  // is not ended with _morphizen_\d+
   CHECK(ret != nullptr) << "origin_name = " << origin_name;
   const_cast<AnchorPointProto&>(ret->get_proto()).set_name(new_name);
   return ret;
@@ -235,7 +235,7 @@ AnchorPoint::create_from_siso_path(const IPass& pass, const Graph& graph,
           get_fix_point(graph, n));
       part.emplace_back(std::move(proto));
     } else if (op_type == "Transpose") {
-      // test case: edgenext_small_rw 9df0a329,see vaip#1231
+      // test case: edgenext_small_rw 9df0a329,see morphizen#1231
       auto perm = node_get_attr_ints(n, "perm");
       auto anchor_point_name = node_get_output_name(*path[i - 1]);
       auto proto = new_anchor_point_proto(pass, anchor_point_name, "transpose");

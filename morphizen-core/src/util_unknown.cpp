@@ -5,5 +5,5 @@
 
 #include "morphizen/util.hpp"
 namespace morphizen {
-MORPHIZEN_DLL_SPEC std::filesystem::path get_vaip_path() { return {}; }
+MORPHIZEN_DLL_SPEC std::filesystem::path get_morphizen_path() { return {}; }
 } // namespace morphizen

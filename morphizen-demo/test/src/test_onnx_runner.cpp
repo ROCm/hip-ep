@@ -37,7 +37,7 @@ DEF_ENV_PARAM_2(CACHE_CONTEXT_EMBEDED_MODE, "1", std::string);
 DEF_ENV_PARAM_2(WORKLOAD_TYPE, "Default", std::string);
 DEF_ENV_PARAM_2(CACHE_CONTEXT_FILE_PATH, "", std::string);
 DEF_ENV_PARAM_2(ENABLE_CACHE_FILE_IO_IN_MEM, "", std::string);
-DEF_ENV_PARAM_2(XLNX_CONFIG_TARGET_NAME, "", std::string); // used by vaip
+DEF_ENV_PARAM_2(XLNX_CONFIG_TARGET_NAME, "", std::string); // used by morphizen
 DEF_ENV_PARAM(XLNX_USE_MEMORY_MODEL, "0");
 DEF_ENV_PARAM_2(XLNX_USE_CACHE_KEY, "", std::string);
 DEF_ENV_PARAM_2(XLNX_USE_CACHE_DIR, "", std::string);

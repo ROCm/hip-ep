@@ -4,7 +4,7 @@
  */
 
 // High-level NodeArg const data extraction functions
-// These functions depend on tensor_proto which is a vaip-core component
+// These functions depend on tensor_proto which is a morphizen-core component
 
 #include "morphizen/node_arg.hpp"
 #include "morphizen/tensor_proto.hpp"

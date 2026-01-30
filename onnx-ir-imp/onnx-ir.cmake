@@ -19,8 +19,8 @@ add_library(${LIB_NAME}
   src/node-index.hpp
   src/node-arg-index.hpp
   src/node-arg-index.cpp
-  src/vaip-ort-api.cpp
-  src/vaip-ort-api.hpp
+  src/morphizen-ort-api.cpp
+  src/morphizen-ort-api.hpp
   src/onnx-deps.hpp
   src/onnx-deps.cpp
 )

@@ -23,7 +23,7 @@ class MLIRNodeArg;
  *
  * This class provides a wrapper around MLIR's NamedAttribute, allowing
  * easy access to attribute names and values while maintaining compatibility
- * with the VAIP ORT API. It supports both owned and unowned MLIR contexts.
+ * with the MorphiZen ORT API. It supports both owned and unowned MLIR contexts.
  */
 class MLIRNamedAttribute : public mlir::NamedAttribute {
 public:

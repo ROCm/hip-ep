@@ -51,7 +51,7 @@ Pattern matching library for ONNX computational graphs.
 │  - Action callbacks                          │
 │                                              │
 │  Uses morphizen-graph wrappers               │
-│  (NOT VAIP_ORT_API directly)                │
+│  (NOT MORPHIZEN_ORT_API directly)           │
 │  ↓                                           │
 └──────────────────────────────────────────────┘
          │
@@ -74,7 +74,7 @@ Pattern matching library for ONNX computational graphs.
 ```cpp
 #include <morphizen/pattern.hpp>
 
-using namespace vaip_core;
+using namespace morphizen;
 
 // Create a simple pattern to match Conv → Relu sequence
 auto pattern = PatternBuilder()
@@ -143,7 +143,7 @@ cmake -Dmorphizen_ENABLE_PATTERN_MATCHING=OFF ..
 
 When disabled:
 - `morphizen-pattern` component is not built
-- `vaip-core` has `MORPHIZEN_HAS_PATTERN_MATCHING=0`
+- `morphizen-core` has `MORPHIZEN_HAS_PATTERN_MATCHING=0`
 - Pattern-dependent features are excluded
 
 ## Size
@@ -176,7 +176,7 @@ During component extraction, we deliberately made `Pattern::enable_trace()` a no
 
 **Rationale:**
 
-The original implementation relied on `env_config` from vaip-core, which would create a circular dependency. We considered three alternatives:
+The original implementation relied on `env_config` from morphizen-core, which would create a circular dependency. We considered three alternatives:
 
 1. **Add morphizen-utils dependency** (for ENV_PARAM)
    - ❌ Contradicts extraction goal of minimal dependencies

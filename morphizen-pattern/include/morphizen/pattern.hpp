@@ -171,7 +171,7 @@ private:
       morphizen_cxx::GraphConstRef graph)
       : store_(store), name_to_ids_(name_to_ids), graph_{graph} {}
   std::optional<morphizen_cxx::NodeInput>
-  create_vaip_cxx_node_input(NodeInput node_input) const;
+  create_morphizen_cxx_node_input(NodeInput node_input) const;
 
 private:
   std::map<int, NodeInput> store_;

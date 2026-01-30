@@ -59,7 +59,7 @@ def main():
     )
     with open("config_json_binary.hpp", "a") as f:
         f.write(
-            f"static bool with_default_vaip_config = {1 if enable_default_config else 0};\n"
+            f"static bool with_default_morphizen_config = {1 if enable_default_config else 0};\n"
         )
 
 

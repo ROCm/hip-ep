@@ -6,19 +6,19 @@ Licensed under the MIT License.
 
 
 ```
-$BUILD/vaip/onnxruntime_morphizen_ep/onnx_pattern_gen env \
+$BUILD/morphizen/onnxruntime_morphizen_ep/onnx_pattern_gen env \
  IGNORE_CONSTANT=1 \
  ENABLE_CONSTNAT_SHARING=0 \
- $BUILD/vaip/onnxruntime_morphizen_ep/onnx_pattern_gen \
+ $BUILD/morphizen/onnxruntime_morphizen_ep/onnx_pattern_gen \
  -i value/Add_output_0_QuantizeLinear_Output \
  -i key/MatMul_output_0_QuantizeLinear_Output \
  -i query/Add_output_0_QuantizeLinear_Output \
  -i Mul_output_0_convert_QuantizeLinear_Output \
  -o Reshape_4_output_0_QuantizeLinear_Output \
- -f vaip/.cache/acd89c9415eba62a3623a3af2e7e8227/onnx.onnx\
- -c ../../vaip_pattern_zoo/src/QMHAGRPB_0.h.inc
- -m ../../vaip_pattern_zoo/src/QMHAGRPB_0.mmd
- -j ../../vaip_pattern_zoo/src/QMHAGRPB_0.json
+ -f morphizen/.cache/acd89c9415eba62a3623a3af2e7e8227/onnx.onnx\
+ -c ../../morphizen_pattern_zoo/src/QMHAGRPB_0.h.inc
+ -m ../../morphizen_pattern_zoo/src/QMHAGRPB_0.mmd
+ -j ../../morphizen_pattern_zoo/src/QMHAGRPB_0.json
  ```
 
  1. `IGNORE_CONSTANT` when it is 0, constant initializers are not

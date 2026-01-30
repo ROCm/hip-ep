@@ -18,7 +18,7 @@ def get_escape_json_str(path):
         return ret
 
 
-# takes root directory of vaip repo as argument
+# takes root directory of morphizen repo as argument
 def main():
     print(get_escape_json_str(sys.argv[1]))
 

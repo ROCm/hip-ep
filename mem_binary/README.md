@@ -4,12 +4,12 @@ Licensed under the MIT License.
 -->
 ## Embedded Resource (Mem_Binary)
 
-The Mem_Binary feature is enabled by defining the CMake variable `VAIP_EMBEDDED_RESOURCE_PATH`.
+The Mem_Binary feature is enabled by defining the CMake variable `MORPHIZEN_EMBEDDED_RESOURCE_PATH`.
 If this variable is not defined, the feature is disabled.
 
 ## Overview
 
-When enabled, all files specified in `VAIP_EMBEDDED_RESOURCE_PATH` are packed directly into the library at build time.
+When enabled, all files specified in `MORPHIZEN_EMBEDDED_RESOURCE_PATH` are packed directly into the library at build time.
 
 ## Resource Definition Format
 

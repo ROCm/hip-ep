@@ -356,9 +356,10 @@ public:
    * that describes special requirements, limitations, or metadata associated
    * with the compiled model for a given backend.
    *
-   * @param backend_name The name of the backend (e.g., "vaip-pass_level1_dpu",
-   * "vaip-pass_level1_dd_cxx", "vaip-pass_vaiml_partition") to which the
-   * compatibility information applies.
+   * @param backend_name The name of the backend (e.g.,
+   * "morphizen-pass_level1_dpu", "morphizen-pass_level1_dd_cxx",
+   * "morphizen-pass_vaiml_partition") to which the compatibility information
+   * applies.
    *
    * @param compatibility_info A string containing the compatibility details or
    * metadata for the specified backend.

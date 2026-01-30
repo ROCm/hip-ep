@@ -4,10 +4,10 @@
  */
 
 // NOTE: MLIR implementatio
-// the_mlir_instance_of_vaip_ort_api.graph_get_inputs_unsafe = This provides an
-// MLIR-based implementation of the same API interface used by the ONNX
-// implementation, allowing MLIR dialects to be used as an alternative IR
-// representation for VAIP passes.
+// the_mlir_instance_of_morphizen_ort_api.graph_get_inputs_unsafe = This
+// provides an MLIR-based implementation of the same API interface used by the
+// ONNX implementation, allowing MLIR dialects to be used as an alternative IR
+// representation for MorphiZen passes.
 #undef ONNX_NAMESPACE
 #define ONNX_NAMESPACE onnx
 #include "morphizen/morphizen-ort-api-ext.hpp"
@@ -72,7 +72,7 @@ morphizen::TensorProto* tensor_proto_new_with_raw_data_mlir(
 }
 
 // Initialize the global API instance with MLIR implementations
-VaipOrtApiExt the_mlir_instance_of_vaip_ort_api;
+MorphizenOrtApiExt the_mlir_instance_of_morphizen_ort_api;
 
 // Static initialization function to populate the API structure with MLIR
 // implementations
@@ -82,29 +82,29 @@ static void initialize_mlir_api() {
     return;
 
   // Version and magic fields for compatibility checking
-  the_mlir_instance_of_vaip_ort_api.magic =
+  the_mlir_instance_of_morphizen_ort_api.magic =
       0x50494156; // 'VAIP' in little endian
-  the_mlir_instance_of_vaip_ort_api.major = MORPHIZEN_ORT_API_MAJOR;
-  the_mlir_instance_of_vaip_ort_api.minor = MORPHIZEN_ORT_API_MINOR;
-  the_mlir_instance_of_vaip_ort_api.patch = MORPHIZEN_ORT_API_PATCH;
+  the_mlir_instance_of_morphizen_ort_api.major = MORPHIZEN_ORT_API_MAJOR;
+  the_mlir_instance_of_morphizen_ort_api.minor = MORPHIZEN_ORT_API_MINOR;
+  the_mlir_instance_of_morphizen_ort_api.patch = MORPHIZEN_ORT_API_PATCH;
 
   // Core pointers
-  the_mlir_instance_of_vaip_ort_api.host_ =
+  the_mlir_instance_of_morphizen_ort_api.host_ =
       (onnxruntime::ProviderHost*)(void*)1; // Not used in MLIR implementation
 #ifdef ORT_API_VERSION
-  the_mlir_instance_of_vaip_ort_api.ort_api_ = &Ort::GetApi();
+  the_mlir_instance_of_morphizen_ort_api.ort_api_ = &Ort::GetApi();
 #else
-  the_mlir_instance_of_vaip_ort_api.ort_api_ = nullptr;
+  the_mlir_instance_of_morphizen_ort_api.ort_api_ = nullptr;
 #endif
 
   // Model API functions [0-6]
-  the_mlir_instance_of_vaip_ort_api.model_load =
+  the_mlir_instance_of_morphizen_ort_api.model_load =
       [](const std::string& file) -> morphizen::Model* {
     auto model = mlir_impl::MLIRModel::load(file);
     return reinterpret_cast<morphizen::Model*>(model.release());
   };
 
-  the_mlir_instance_of_vaip_ort_api.model_delete =
+  the_mlir_instance_of_morphizen_ort_api.model_delete =
       [](morphizen::Model* model) -> void {
     if (model) {
       auto* mlir_model = reinterpret_cast<mlir_impl::MLIRModel*>(model);
@@ -112,7 +112,7 @@ static void initialize_mlir_api() {
     }
   };
 
-  the_mlir_instance_of_vaip_ort_api.model_clone =
+  the_mlir_instance_of_morphizen_ort_api.model_clone =
       [](const morphizen::Model& model,
          int64_t external_data_threshold) -> morphizen::Model* {
     auto* mlir_model = reinterpret_cast<const mlir_impl::MLIRModel*>(&model);
@@ -120,20 +120,20 @@ static void initialize_mlir_api() {
     return reinterpret_cast<morphizen::Model*>(cloned_model.release());
   };
 
-  the_mlir_instance_of_vaip_ort_api.model_main_graph =
+  the_mlir_instance_of_morphizen_ort_api.model_main_graph =
       [](morphizen::Model& model) -> morphizen::Graph& {
     auto* mlir_model = reinterpret_cast<mlir_impl::MLIRModel*>(&model);
     return reinterpret_cast<morphizen::Graph&>(mlir_model->main_graph());
   };
 
-  the_mlir_instance_of_vaip_ort_api.model_set_meta_data =
+  the_mlir_instance_of_morphizen_ort_api.model_set_meta_data =
       [](morphizen::Model& model, const std::string& key,
          const std::string& value) -> void {
     auto* mlir_model = reinterpret_cast<mlir_impl::MLIRModel*>(&model);
     mlir_model->set_metadata_prop(key, value);
   };
 
-  the_mlir_instance_of_vaip_ort_api.model_get_meta_data =
+  the_mlir_instance_of_morphizen_ort_api.model_get_meta_data =
       [](const morphizen::Model& model,
          const std::string& key) -> morphizen::DllSafe<std::string> {
     auto* mlir_model = reinterpret_cast<const mlir_impl::MLIRModel*>(&model);
@@ -141,32 +141,32 @@ static void initialize_mlir_api() {
     return morphizen::DllSafe<std::string>(new std::string(std::move(value)));
   };
 
-  the_mlir_instance_of_vaip_ort_api.model_has_meta_data =
+  the_mlir_instance_of_morphizen_ort_api.model_has_meta_data =
       [](const morphizen::Model& model, const std::string& key) -> int {
     auto* mlir_model = reinterpret_cast<const mlir_impl::MLIRModel*>(&model);
     return mlir_model->has_metadata_prop(key) ? 1 : 0;
   };
 
   // Graph API functions [7-23] - Basic implementations
-  the_mlir_instance_of_vaip_ort_api.graph_get_name =
+  the_mlir_instance_of_morphizen_ort_api.graph_get_name =
       [](const morphizen::Graph& graph) -> const std::string& {
     auto* mlir_graph = reinterpret_cast<const mlir_impl::MLIRGraph*>(&graph);
     return mlir_graph->get_name();
   };
 
-  the_mlir_instance_of_vaip_ort_api.graph_set_name =
+  the_mlir_instance_of_morphizen_ort_api.graph_set_name =
       [](morphizen::Graph& graph, const char* name) -> void {
     auto* mlir_graph = reinterpret_cast<mlir_impl::MLIRGraph*>(&graph);
     mlir_graph->set_name(name);
   };
 
-  the_mlir_instance_of_vaip_ort_api.graph_get_model =
+  the_mlir_instance_of_morphizen_ort_api.graph_get_model =
       [](const morphizen::Graph& graph) -> const morphizen::Model& {
     auto* mlir_graph = reinterpret_cast<const mlir_impl::MLIRGraph*>(&graph);
     return reinterpret_cast<const morphizen::Model&>(mlir_graph->get_model());
   };
 
-  the_mlir_instance_of_vaip_ort_api.graph_nodes_unsafe =
+  the_mlir_instance_of_morphizen_ort_api.graph_nodes_unsafe =
       [](const morphizen::Graph& graph)
       -> morphizen::DllSafe<std::vector<const morphizen::Node*>> {
     auto* mlir_graph = reinterpret_cast<const mlir_impl::MLIRGraph*>(&graph);
@@ -179,7 +179,7 @@ static void initialize_mlir_api() {
     return morphizen::DllSafe<std::vector<const morphizen::Node*>>(result);
   };
 
-  the_mlir_instance_of_vaip_ort_api.graph_get_inputs_unsafe =
+  the_mlir_instance_of_morphizen_ort_api.graph_get_inputs_unsafe =
       [](const morphizen::Graph& graph)
       -> morphizen::DllSafe<std::vector<const morphizen::NodeArg*>> {
     auto* mlir_graph = reinterpret_cast<const mlir_impl::MLIRGraph*>(&graph);
@@ -189,12 +189,12 @@ static void initialize_mlir_api() {
     result->reserve(inputs.size());
     for (const auto& value : inputs) {
       result->push_back(reinterpret_cast<const morphizen::NodeArg*>(
-          value.to_vaip_core_node_arg_ptr()));
+          value.to_morphizen_core_node_arg_ptr()));
     }
     return morphizen::DllSafe<std::vector<const morphizen::NodeArg*>>(result);
   };
 
-  the_mlir_instance_of_vaip_ort_api.graph_get_outputs_unsafe =
+  the_mlir_instance_of_morphizen_ort_api.graph_get_outputs_unsafe =
       [](const morphizen::Graph& graph)
       -> morphizen::DllSafe<std::vector<const morphizen::NodeArg*>> {
     auto* mlir_graph = reinterpret_cast<const mlir_impl::MLIRGraph*>(&graph);
@@ -204,12 +204,12 @@ static void initialize_mlir_api() {
     result->reserve(outputs.size());
     for (const auto& value : outputs) {
       result->push_back(reinterpret_cast<const morphizen::NodeArg*>(
-          value.to_vaip_core_node_arg_ptr()));
+          value.to_morphizen_core_node_arg_ptr()));
     }
     return morphizen::DllSafe<std::vector<const morphizen::NodeArg*>>(result);
   };
 
-  the_mlir_instance_of_vaip_ort_api.graph_set_outputs =
+  the_mlir_instance_of_morphizen_ort_api.graph_set_outputs =
       [](morphizen::Graph& graph,
          gsl::span<const morphizen::NodeArg* const> outputs) -> void {
     auto* mlir_graph = reinterpret_cast<mlir_impl::MLIRGraph*>(&graph);
@@ -220,13 +220,14 @@ static void initialize_mlir_api() {
     for (const auto* nodeArg : outputs) {
       // Convert NodeArg* to MLIRNodeArgIndex using the raw pointer constructor
       auto node_arg_index =
-          mlir_impl::MLIRNodeArgIndex::from_vaip_core_node_arg_ptr(nodeArg);
+          mlir_impl::MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(
+              nodeArg);
       mlir_outputs.push_back(node_arg_index);
     }
     mlir_graph->set_outputs(mlir_outputs);
   };
 
-  the_mlir_instance_of_vaip_ort_api.graph_set_inputs =
+  the_mlir_instance_of_morphizen_ort_api.graph_set_inputs =
       [](morphizen::Graph& graph,
          gsl::span<const morphizen::NodeArg* const> inputs) -> void {
     auto* mlir_graph = reinterpret_cast<mlir_impl::MLIRGraph*>(&graph);
@@ -237,13 +238,14 @@ static void initialize_mlir_api() {
     for (const auto* nodeArg : inputs) {
       // Convert NodeArg* back to mlir::Value
       auto node_arg_index =
-          mlir_impl::MLIRNodeArgIndex::from_vaip_core_node_arg_ptr(nodeArg);
+          mlir_impl::MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(
+              nodeArg);
       mlir_inputs.push_back(node_arg_index);
     }
     mlir_graph->set_inputs(mlir_inputs);
   };
 
-  the_mlir_instance_of_vaip_ort_api.create_empty_model =
+  the_mlir_instance_of_morphizen_ort_api.create_empty_model =
       [](const std::filesystem::path& path,
          const std::vector<std::pair<std::string, int64_t>>& opset)
       -> morphizen::Model* {
@@ -253,14 +255,14 @@ static void initialize_mlir_api() {
 
   // Tensor proto API functions - implemented using MLIRTensor with helper
   // function
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_new_floats =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_new_floats =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<float>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data_mlir(
         name, shape, data.data(), data.size() * sizeof(float), 1); // FLOAT = 1
   };
 
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_new_i64 =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_new_i64 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<int64_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data_mlir(name, shape, data.data(),
@@ -268,7 +270,7 @@ static void initialize_mlir_api() {
                                                7); // INT64 = 7
   };
 
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_new_i32 =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_new_i32 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<int32_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data_mlir(name, shape, data.data(),
@@ -276,7 +278,7 @@ static void initialize_mlir_api() {
                                                6); // INT32 = 6
   };
 
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_new_i8 =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_new_i8 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<int8_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data_mlir(
@@ -284,7 +286,7 @@ static void initialize_mlir_api() {
   };
 
   // Additional tensor functions
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_new_doubles =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_new_doubles =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<double>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data_mlir(name, shape, data.data(),
@@ -292,7 +294,7 @@ static void initialize_mlir_api() {
                                                11); // DOUBLE = 11
   };
 
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_new_u8 =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_new_u8 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<uint8_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data_mlir(name, shape, data.data(),
@@ -300,7 +302,7 @@ static void initialize_mlir_api() {
                                                2); // UINT8 = 2
   };
 
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_new_u32 =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_new_u32 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<uint32_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data_mlir(name, shape, data.data(),
@@ -308,7 +310,7 @@ static void initialize_mlir_api() {
                                                12); // UINT32 = 12
   };
 
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_new_u64 =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_new_u64 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<uint64_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data_mlir(name, shape, data.data(),
@@ -316,7 +318,7 @@ static void initialize_mlir_api() {
                                                13); // UINT64 = 13
   };
 
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_new_i16 =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_new_i16 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<int16_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data_mlir(name, shape, data.data(),
@@ -324,7 +326,7 @@ static void initialize_mlir_api() {
                                                5); // INT16 = 5
   };
 
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_new_u16 =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_new_u16 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<uint16_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data_mlir(name, shape, data.data(),
@@ -332,7 +334,7 @@ static void initialize_mlir_api() {
                                                4); // UINT16 = 4
   };
 
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_new_fp16 =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_new_fp16 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<int16_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data_mlir(name, shape, data.data(),
@@ -340,7 +342,7 @@ static void initialize_mlir_api() {
                                                10); // FLOAT16 = 10
   };
 
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_new_bf16 =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_new_bf16 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<int16_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data_mlir(name, shape, data.data(),
@@ -350,7 +352,7 @@ static void initialize_mlir_api() {
 
 // Additional tensor proto functions for 4-bit types
 #if MORPHIZEN_ORT_API_MAJOR >= 19
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_new_bool =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_new_bool =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<uint8_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data_mlir(name, shape, data.data(),
@@ -359,7 +361,7 @@ static void initialize_mlir_api() {
   };
 #endif // MORPHIZEN_ORT_API_MAJOR >= 19
 
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_new_i4 =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_new_i4 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<int8_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data_mlir(name, shape, data.data(),
@@ -367,7 +369,7 @@ static void initialize_mlir_api() {
                                                22); // INT4 = 22
   };
 
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_new_u4 =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_new_u4 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<uint8_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data_mlir(name, shape, data.data(),
@@ -376,7 +378,7 @@ static void initialize_mlir_api() {
   };
 
   // Tensor creation with external data
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_new_with_external_data =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_new_with_external_data =
       [](const std::string& name, const std::vector<int64_t>& shape,
          int element_type, const std::string& external_data_file, size_t size,
          size_t offset) -> morphizen::TensorProto* {
@@ -398,7 +400,7 @@ static void initialize_mlir_api() {
   };
 
   // Tensor creation with raw data
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_new_raw_data =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_new_raw_data =
       [](const std::string& name, const std::vector<int64_t>& shape,
          int element_type, const void* data,
          size_t size) -> morphizen::TensorProto* {
@@ -407,7 +409,7 @@ static void initialize_mlir_api() {
   };
 
   // Tensor info functions - using direct casting
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_get_shape_unsafe =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_get_shape_unsafe =
       [](const morphizen::TensorProto& tensor_proto)
       -> morphizen::DllSafe<std::vector<int64_t>> {
     // Direct cast TensorProto to MLIRTensor
@@ -420,7 +422,7 @@ static void initialize_mlir_api() {
     return morphizen::DllSafe<std::vector<int64_t>>(result.release());
   };
 
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_data_type =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_data_type =
       [](const morphizen::TensorProto& tensor_proto) -> int {
     auto* mlir_tensor =
         reinterpret_cast<const morphizen::mlir_impl::MLIRTensor*>(
@@ -428,7 +430,7 @@ static void initialize_mlir_api() {
     return mlir_tensor->getElementType();
   };
 
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_get_name =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_get_name =
       [](const morphizen::TensorProto& tensor_proto) -> const std::string& {
     auto* mlir_tensor =
         reinterpret_cast<const morphizen::mlir_impl::MLIRTensor*>(
@@ -436,7 +438,7 @@ static void initialize_mlir_api() {
     return mlir_tensor->getName();
   };
 
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_raw_data_size =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_raw_data_size =
       [](const morphizen::TensorProto& tensor_proto) -> size_t {
     auto* mlir_tensor =
         reinterpret_cast<const morphizen::mlir_impl::MLIRTensor*>(
@@ -444,7 +446,7 @@ static void initialize_mlir_api() {
     return mlir_tensor->getDataSize();
   };
 
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_as_raw =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_as_raw =
       [](const morphizen::Graph& /*graph*/,
          const morphizen::TensorProto& tensor_proto) -> gsl::span<const char> {
     auto* mlir_tensor =
@@ -455,7 +457,7 @@ static void initialize_mlir_api() {
     return gsl::span<const char>(reinterpret_cast<const char*>(data), size);
   };
 
-  the_mlir_instance_of_vaip_ort_api.tensor_proto_delete =
+  the_mlir_instance_of_morphizen_ort_api.tensor_proto_delete =
       [](morphizen::TensorProto* tp) -> void {
     if (tp) {
       // Direct cast and delete as MLIRTensor
@@ -466,12 +468,12 @@ static void initialize_mlir_api() {
   };
 
   // Library info functions
-  the_mlir_instance_of_vaip_ort_api.get_lib_id =
+  the_mlir_instance_of_morphizen_ort_api.get_lib_id =
       []() -> morphizen::DllSafe<std::string> {
     return morphizen::DllSafe<std::string>(new std::string("v1.0.0"));
   };
 
-  the_mlir_instance_of_vaip_ort_api.get_lib_name =
+  the_mlir_instance_of_morphizen_ort_api.get_lib_name =
       []() -> morphizen::DllSafe<std::string> {
     return morphizen::DllSafe<std::string>(
         new std::string("morphizen-mlir-imp"));
@@ -479,7 +481,7 @@ static void initialize_mlir_api() {
 
   // Initialize remaining function pointers to nullptr for now
   // These would be implemented as needed for MLIR-specific functionality
-  the_mlir_instance_of_vaip_ort_api.graph_get_node =
+  the_mlir_instance_of_morphizen_ort_api.graph_get_node =
       [](const morphizen::Graph& graph,
          size_t index) -> const morphizen::Node* {
     auto* mlir_graph = reinterpret_cast<const mlir_impl::MLIRGraph*>(&graph);
@@ -487,14 +489,14 @@ static void initialize_mlir_api() {
     return reinterpret_cast<const morphizen::Node*>(op);
   };
 
-  the_mlir_instance_of_vaip_ort_api.graph_producer_node =
+  the_mlir_instance_of_morphizen_ort_api.graph_producer_node =
       [](const morphizen::Graph& graph,
          const std::string& node_arg_name) -> const morphizen::Node* {
     auto* mlir_graph = reinterpret_cast<const mlir_impl::MLIRGraph*>(&graph);
     auto* op = mlir_graph->producer_node(node_arg_name);
     return reinterpret_cast<const morphizen::Node*>(op);
   };
-  the_mlir_instance_of_vaip_ort_api.graph_get_node_arg =
+  the_mlir_instance_of_morphizen_ort_api.graph_get_node_arg =
       [](const morphizen::Graph& graph,
          const std::string& name) -> const morphizen::NodeArg* {
     auto* mlir_graph = reinterpret_cast<const mlir_impl::MLIRGraph*>(&graph);
@@ -503,17 +505,17 @@ static void initialize_mlir_api() {
       return nullptr;
     }
     return reinterpret_cast<const morphizen::NodeArg*>(
-        node_arg_index.to_vaip_core_node_arg_ptr());
+        node_arg_index.to_morphizen_core_node_arg_ptr());
   };
 
-  the_mlir_instance_of_vaip_ort_api.graph_get_all_initialized_tensors =
+  the_mlir_instance_of_morphizen_ort_api.graph_get_all_initialized_tensors =
       [](const morphizen::Graph& graph)
       -> const morphizen::InitializedTensorSet& {
     auto* mlir_graph = reinterpret_cast<const mlir_impl::MLIRGraph*>(&graph);
     return reinterpret_cast<const morphizen::InitializedTensorSet&>(
         mlir_graph->get_all_initialized_tensors());
   };
-  the_mlir_instance_of_vaip_ort_api.graph_remove_node =
+  the_mlir_instance_of_morphizen_ort_api.graph_remove_node =
       [](morphizen::Graph& graph,
          const morphizen::NodeInput& node_input) -> void {
     auto* mlir_graph = reinterpret_cast<mlir_impl::MLIRGraph*>(&graph);
@@ -530,7 +532,7 @@ static void initialize_mlir_api() {
 
     mlir_graph->remove_node(op);
   };
-  the_mlir_instance_of_vaip_ort_api.graph_add_node =
+  the_mlir_instance_of_morphizen_ort_api.graph_add_node =
       [](morphizen::Graph& graph, const std::string& name,
          const std::string& op_type, const std::string& description,
          const std::vector<const morphizen::NodeArg*>& input_args,
@@ -545,7 +547,8 @@ static void initialize_mlir_api() {
     for (const auto* nodeArg : input_args) {
       // Convert NodeArg* to MLIRNodeArgIndex using the raw pointer constructor
       auto node_arg_index =
-          mlir_impl::MLIRNodeArgIndex::from_vaip_core_node_arg_ptr(nodeArg);
+          mlir_impl::MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(
+              nodeArg);
       mlir_input_args.push_back(node_arg_index);
     }
 
@@ -555,7 +558,8 @@ static void initialize_mlir_api() {
     for (const auto* nodeArg : output_args) {
       // Convert NodeArg* to MLIRNodeArgIndex using the raw pointer constructor
       auto node_arg_index =
-          mlir_impl::MLIRNodeArgIndex::from_vaip_core_node_arg_ptr(nodeArg);
+          mlir_impl::MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(
+              nodeArg);
       mlir_output_args.push_back(node_arg_index);
     }
 
@@ -573,14 +577,14 @@ static void initialize_mlir_api() {
     const morphizen::Node* node = reinterpret_cast<const morphizen::Node*>(op);
     return *const_cast<morphizen::Node*>(node);
   };
-  the_mlir_instance_of_vaip_ort_api.graph_save =
+  the_mlir_instance_of_morphizen_ort_api.graph_save =
       [](const morphizen::Graph& graph, const std::string& filename,
          const std::string& dat_filename,
          size_t external_data_threshold) -> void {
     auto* mlir_graph = reinterpret_cast<const mlir_impl::MLIRGraph*>(&graph);
     mlir_graph->save(filename, dat_filename, external_data_threshold);
   };
-  the_mlir_instance_of_vaip_ort_api.graph_fuse =
+  the_mlir_instance_of_morphizen_ort_api.graph_fuse =
       [](morphizen::Graph& graph, const std::string& name,
          const std::string& op_type, const std::vector<size_t>& nodes,
          const std::vector<std::string>& inputs,
@@ -613,13 +617,13 @@ static void initialize_mlir_api() {
     return *reinterpret_cast<morphizen::Node*>(fused_op);
   };
 
-  the_mlir_instance_of_vaip_ort_api.graph_resolve = [](morphizen::Graph& graph,
-                                                       bool force) -> int {
+  the_mlir_instance_of_morphizen_ort_api.graph_resolve =
+      [](morphizen::Graph& graph, bool force) -> int {
     auto* mlir_graph = reinterpret_cast<mlir_impl::MLIRGraph*>(&graph);
     return mlir_graph->resolve(force);
   };
 
-  the_mlir_instance_of_vaip_ort_api.graph_get_consumer_nodes_unsafe =
+  the_mlir_instance_of_morphizen_ort_api.graph_get_consumer_nodes_unsafe =
       [](const morphizen::Graph& graph, const std::string& node_arg_name)
       -> morphizen::DllSafe<std::vector<const morphizen::Node*>> {
     auto* mlir_graph = reinterpret_cast<const mlir_impl::MLIRGraph*>(&graph);
@@ -631,7 +635,7 @@ static void initialize_mlir_api() {
         std::move(consumer_ops));
   };
 
-  the_mlir_instance_of_vaip_ort_api.graph_reverse_dfs_from =
+  the_mlir_instance_of_morphizen_ort_api.graph_reverse_dfs_from =
       [](const morphizen::Graph& graph,
          gsl::span<const morphizen::Node* const> from,
          const std::function<void(const morphizen::Node*)>& enter,
@@ -680,7 +684,7 @@ static void initialize_mlir_api() {
   };
 
   // Additional graph API functions
-  the_mlir_instance_of_vaip_ort_api.graph_add_initialized_tensor =
+  the_mlir_instance_of_morphizen_ort_api.graph_add_initialized_tensor =
       [](morphizen::Graph& graph,
          const morphizen::TensorProto& tensor) -> void {
     auto* mlir_graph = reinterpret_cast<mlir_impl::MLIRGraph*>(&graph);
@@ -694,7 +698,7 @@ static void initialize_mlir_api() {
   };
 
   // Node API functions - to be implemented as needed
-  the_mlir_instance_of_vaip_ort_api.node_get_name =
+  the_mlir_instance_of_morphizen_ort_api.node_get_name =
       [](const morphizen::Node& node) -> const std::string& {
     auto mlir_node = mlir_impl::MLIRNode(reinterpret_cast<mlir::Operation*>(
         const_cast<morphizen::Node*>(&node)));
@@ -703,7 +707,7 @@ static void initialize_mlir_api() {
     return name_cache;
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_description =
+  the_mlir_instance_of_morphizen_ort_api.node_description =
       [](const morphizen::Node& node) -> const std::string& {
     auto mlir_node = mlir_impl::MLIRNode(reinterpret_cast<mlir::Operation*>(
         const_cast<morphizen::Node*>(&node)));
@@ -712,12 +716,12 @@ static void initialize_mlir_api() {
     return description_cache;
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_get_index =
+  the_mlir_instance_of_morphizen_ort_api.node_get_index =
       [](const morphizen::Node& node) -> size_t {
     return reinterpret_cast<size_t>(&node);
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_op_type =
+  the_mlir_instance_of_morphizen_ort_api.node_op_type =
       [](const morphizen::Node& node) -> const std::string& {
     auto op = mlir_impl::MLIRNode(reinterpret_cast<mlir::Operation*>(
         const_cast<morphizen::Node*>(&node)));
@@ -726,7 +730,7 @@ static void initialize_mlir_api() {
     return op_type_str;
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_op_domain =
+  the_mlir_instance_of_morphizen_ort_api.node_op_domain =
       [](const morphizen::Node& node) -> const std::string& {
     auto op = mlir_impl::MLIRNode(reinterpret_cast<mlir::Operation*>(
         const_cast<morphizen::Node*>(&node)));
@@ -735,7 +739,7 @@ static void initialize_mlir_api() {
     return domain_str;
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_get_inputs_unsafe =
+  the_mlir_instance_of_morphizen_ort_api.node_get_inputs_unsafe =
       [](const morphizen::Node& node)
       -> morphizen::DllSafe<std::vector<morphizen::NodeInput>> {
     auto result = new std::vector<morphizen::NodeInput>();
@@ -750,16 +754,17 @@ static void initialize_mlir_api() {
 
     for (const auto& MLIRNodeArgIndex : inputNodeArgs) {
       // Convert MLIRNodeArgIndex to NodeInput
-      result->push_back({reinterpret_cast<const morphizen::Node*>(
-                             MLIRNodeArgIndex.get_producer_node()),
-                         reinterpret_cast<const morphizen::NodeArg*>(
-                             MLIRNodeArgIndex.to_vaip_core_node_arg_ptr())});
+      result->push_back(
+          {reinterpret_cast<const morphizen::Node*>(
+               MLIRNodeArgIndex.get_producer_node()),
+           reinterpret_cast<const morphizen::NodeArg*>(
+               MLIRNodeArgIndex.to_morphizen_core_node_arg_ptr())});
     }
 
     return morphizen::DllSafe<std::vector<morphizen::NodeInput>>(result);
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_get_output_node_args_unsafe =
+  the_mlir_instance_of_morphizen_ort_api.node_get_output_node_args_unsafe =
       [](const morphizen::Node& node)
       -> morphizen::DllSafe<std::vector<const morphizen::NodeArg*>> {
     auto result = new std::vector<const morphizen::NodeArg*>();
@@ -775,19 +780,19 @@ static void initialize_mlir_api() {
     for (const auto& MLIRNodeArgIndex : outputNodeArgs) {
       // Convert MLIRNodeArgIndex to NodeArg*
       auto nodeArg = reinterpret_cast<const morphizen::NodeArg*>(
-          MLIRNodeArgIndex.to_vaip_core_node_arg_ptr());
+          MLIRNodeArgIndex.to_morphizen_core_node_arg_ptr());
       result->push_back(nodeArg);
     }
 
     return morphizen::DllSafe<std::vector<const morphizen::NodeArg*>>(result);
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_get_attributes =
+  the_mlir_instance_of_morphizen_ort_api.node_get_attributes =
       [](morphizen::Node& node) -> morphizen::NodeAttributes& {
     return reinterpret_cast<morphizen::NodeAttributes&>(node);
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_get_function_body =
+  the_mlir_instance_of_morphizen_ort_api.node_get_function_body =
       [](const morphizen::Node& node) -> const morphizen::Graph& {
     // Create MLIRNode wrapper to access function body functionality
     auto mlir_node = mlir_impl::MLIRNode(reinterpret_cast<mlir::Operation*>(
@@ -796,7 +801,7 @@ static void initialize_mlir_api() {
         mlir_node.getFunctionBody());
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_type_is_fused =
+  the_mlir_instance_of_morphizen_ort_api.node_type_is_fused =
       [](const morphizen::Node& node) -> bool {
     // Create MLIRNode wrapper for convenient access to fused node checking
     auto mlir_node = mlir_impl::MLIRNode(reinterpret_cast<mlir::Operation*>(
@@ -808,21 +813,21 @@ static void initialize_mlir_api() {
   };
 
   // NodeAttributes API functions - MLIR implementation
-  the_mlir_instance_of_vaip_ort_api.node_attributes_new =
+  the_mlir_instance_of_morphizen_ort_api.node_attributes_new =
       []() -> morphizen::NodeAttributes* {
     // Create a new MLIRNodeAttributes with owned context
     auto* mlir_attrs = mlir_impl::MLIRNodeAttributes::Create();
     return reinterpret_cast<morphizen::NodeAttributes*>(mlir_attrs);
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_attributes_delete =
+  the_mlir_instance_of_morphizen_ort_api.node_attributes_delete =
       [](morphizen::NodeAttributes* p) -> void {
     if (p) {
       // reinterpret_cast<mlir::Operation*>(p);
     }
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_attributes_add =
+  the_mlir_instance_of_morphizen_ort_api.node_attributes_add =
       [](morphizen::NodeAttributes& attrs,
          morphizen::AttributeProto&& attr_proto) -> void {
     auto mlir_node_attrs = mlir_impl::MLIRNodeAttributes(
@@ -834,7 +839,7 @@ static void initialize_mlir_api() {
     mlir_node_attrs.add(*mlir_named_attr);
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_attributes_get =
+  the_mlir_instance_of_morphizen_ort_api.node_attributes_get =
       [](const morphizen::NodeAttributes& p,
          const std::string& name) -> const morphizen::AttributeProto* {
     auto mlir_attrs =
@@ -847,7 +852,7 @@ static void initialize_mlir_api() {
     return nullptr;
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_attributes_get_keys =
+  the_mlir_instance_of_morphizen_ort_api.node_attributes_get_keys =
       [](morphizen::NodeAttributes& p)
       -> morphizen::DllSafe<std::vector<std::string>> {
     auto mlir_attrs =
@@ -857,31 +862,34 @@ static void initialize_mlir_api() {
   };
 
   // NodeArg API functions - to be implemented as needed
-  the_mlir_instance_of_vaip_ort_api.node_arg_get_name_unsafe =
+  the_mlir_instance_of_morphizen_ort_api.node_arg_get_name_unsafe =
       [](const morphizen::NodeArg& node_arg) -> const std::string& {
-    return mlir_impl::MLIRNodeArgIndex::from_vaip_core_node_arg_ptr(&node_arg)
+    return mlir_impl::MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(
+               &node_arg)
         .get_name();
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_arg_is_exists =
+  the_mlir_instance_of_morphizen_ort_api.node_arg_is_exists =
       [](const morphizen::NodeArg& node_arg) -> bool {
     // Convert the morphizen::NodeArg reference to MLIRNodeArgIndex
     auto node_arg_index =
-        mlir_impl::MLIRNodeArgIndex::from_vaip_core_node_arg_ptr(&node_arg);
+        mlir_impl::MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(
+            &node_arg);
     // Check if the node argument exists using validity check
     return node_arg_index.is_valid();
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_arg_is_constant =
+  the_mlir_instance_of_morphizen_ort_api.node_arg_is_constant =
       [](const morphizen::Graph& /*graph*/,
          const morphizen::NodeArg& node_arg) -> bool {
     // Convert the morphizen::NodeArg reference to MLIRNodeArgIndex
     auto node_arg_index =
-        mlir_impl::MLIRNodeArgIndex::from_vaip_core_node_arg_ptr(&node_arg);
+        mlir_impl::MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(
+            &node_arg);
     return node_arg_index.is_constant();
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_arg_clone =
+  the_mlir_instance_of_morphizen_ort_api.node_arg_clone =
       [](morphizen::Graph& graph, const morphizen::NodeArg& node_arg,
          const std::string& name) -> morphizen::NodeArg& {
     auto* mlir_graph = reinterpret_cast<mlir_impl::MLIRGraph*>(&graph);
@@ -894,7 +902,7 @@ static void initialize_mlir_api() {
     return *const_cast<morphizen::NodeArg*>(&node_arg);
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_arg_new =
+  the_mlir_instance_of_morphizen_ort_api.node_arg_new =
       [](morphizen::Graph& graph, const std::string& name,
          const std::vector<int64_t>* shape,
          int element_type) -> morphizen::NodeArg& {
@@ -911,16 +919,17 @@ static void initialize_mlir_api() {
 
     // Convert MLIRNodeArgIndex back to NodeArg* for the API
     const auto* node_arg_ptr = static_cast<const morphizen::NodeArg*>(
-        MLIRNodeArgIndex.to_vaip_core_node_arg_ptr());
+        MLIRNodeArgIndex.to_morphizen_core_node_arg_ptr());
     return *const_cast<morphizen::NodeArg*>(node_arg_ptr);
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_arg_get_shape_i64_unsafe =
+  the_mlir_instance_of_morphizen_ort_api.node_arg_get_shape_i64_unsafe =
       [](const morphizen::NodeArg& node_arg)
       -> morphizen::DllSafe<std::vector<int64_t>> {
     // Convert the morphizen::NodeArg reference to MLIRNodeArgIndex
     auto node_arg_index =
-        mlir_impl::MLIRNodeArgIndex::from_vaip_core_node_arg_ptr(&node_arg);
+        mlir_impl::MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(
+            &node_arg);
 
     // Use the get_shape_i64_unsafe() member function to get the shape
     auto& shape = node_arg_index.get_shape_i64();
@@ -929,7 +938,7 @@ static void initialize_mlir_api() {
     return morphizen::DllSafe<std::vector<int64_t>>(vec_shape);
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_arg_get_denotation_unsafe =
+  the_mlir_instance_of_morphizen_ort_api.node_arg_get_denotation_unsafe =
       [](const morphizen::NodeArg& /*node_arg*/)
       -> morphizen::DllSafe<std::vector<std::string>> {
     //"node_arg_get_denotation_unsafe not implemented in MLIR backend"
@@ -937,22 +946,24 @@ static void initialize_mlir_api() {
         std::vector<std::string>{});
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_arg_set_shape_i64 =
+  the_mlir_instance_of_morphizen_ort_api.node_arg_set_shape_i64 =
       [](const morphizen::NodeArg& node_arg,
          const std::vector<int64_t>& shape) -> void {
     // Convert the morphizen::NodeArg reference to MLIRNodeArgIndex
     auto node_arg_index =
-        mlir_impl::MLIRNodeArgIndex::from_vaip_core_node_arg_ptr(&node_arg);
+        mlir_impl::MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(
+            &node_arg);
     node_arg_index.set_shape_i64(
         llvm::SmallVector<int64_t, 4>(shape.begin(), shape.end()));
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_arg_set_denotation =
+  the_mlir_instance_of_morphizen_ort_api.node_arg_set_denotation =
       [](const morphizen::NodeArg& node_arg,
          const std::vector<std::string>& denotation) -> void {
     // Convert the morphizen::NodeArg reference to MLIRNodeArgIndex
     auto node_arg_index =
-        mlir_impl::MLIRNodeArgIndex::from_vaip_core_node_arg_ptr(&node_arg);
+        mlir_impl::MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(
+            &node_arg);
     // TODO: Implement denotation setting for MLIR NodeArg
     LOG(WARNING) << "node_arg_set_denotation not implemented in MLIR backend, "
                     "denotation size: "
@@ -960,35 +971,38 @@ static void initialize_mlir_api() {
     (void)node_arg_index; // Suppress unused parameter warning
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_arg_get_element_type =
+  the_mlir_instance_of_morphizen_ort_api.node_arg_get_element_type =
       [](const morphizen::NodeArg& node_arg) -> int {
     // Convert the morphizen::NodeArg reference to MLIRNodeArgIndex
     auto node_arg_index =
-        mlir_impl::MLIRNodeArgIndex::from_vaip_core_node_arg_ptr(&node_arg);
+        mlir_impl::MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(
+            &node_arg);
     // Delegate to MLIRNodeArgIndex implementation which calls
     // MLIRNodeArg::getElementType()
     return node_arg_index.get_element_type();
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_arg_set_element_type =
+  the_mlir_instance_of_morphizen_ort_api.node_arg_set_element_type =
       [](morphizen::NodeArg& node_arg, int data_type) -> void {
     // Convert the morphizen::NodeArg reference to MLIRNodeArgIndex
     auto node_arg_index =
-        mlir_impl::MLIRNodeArgIndex::from_vaip_core_node_arg_ptr(&node_arg);
+        mlir_impl::MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(
+            &node_arg);
     node_arg_index.set_element_type(data_type);
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_arg_get_const_data_as_tensor =
+  the_mlir_instance_of_morphizen_ort_api.node_arg_get_const_data_as_tensor =
       [](const morphizen::Graph& /* graph*/,
          const morphizen::NodeArg& node_arg) -> const morphizen::TensorProto& {
     // auto* mlir_graph = reinterpret_cast<const mlir_impl::MLIRGraph*>(&graph);
     auto node_arg_index =
-        mlir_impl::MLIRNodeArgIndex::from_vaip_core_node_arg_ptr(&node_arg);
+        mlir_impl::MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(
+            &node_arg);
     return reinterpret_cast<const morphizen::TensorProto&>(
         node_arg_index.get_const_data_as_tensor());
   };
 
-  the_mlir_instance_of_vaip_ort_api.node_arg_external_location =
+  the_mlir_instance_of_morphizen_ort_api.node_arg_external_location =
       [](const morphizen::Graph& /*graph*/,
          const morphizen::NodeArg& /*node_arg*/, std::string& /*file*/,
          size_t& /*offset*/, size_t& /*size*/, size_t& /*checksum*/) -> int {
@@ -997,7 +1011,7 @@ static void initialize_mlir_api() {
   };
 
   // AttributeProto API functions - implemented using MLIRNamedAttribute
-  the_mlir_instance_of_vaip_ort_api.attr_proto_new_ints =
+  the_mlir_instance_of_morphizen_ort_api.attr_proto_new_ints =
       [](const std::string& name,
          const std::vector<int64_t>& data) -> morphizen::AttributeProto* {
     // Create MLIRNamedAttribute using factory method
@@ -1009,7 +1023,7 @@ static void initialize_mlir_api() {
         mlir_named_attr.release());
   };
 
-  the_mlir_instance_of_vaip_ort_api.attr_proto_new_floats =
+  the_mlir_instance_of_morphizen_ort_api.attr_proto_new_floats =
       [](const std::string& name,
          const std::vector<float>& data) -> morphizen::AttributeProto* {
     auto mlir_named_attr =
@@ -1018,7 +1032,7 @@ static void initialize_mlir_api() {
         mlir_named_attr.release());
   };
 
-  the_mlir_instance_of_vaip_ort_api.attr_proto_new_strings =
+  the_mlir_instance_of_morphizen_ort_api.attr_proto_new_strings =
       [](const std::string& name,
          const std::vector<std::string>& data) -> morphizen::AttributeProto* {
     auto mlir_named_attr =
@@ -1027,7 +1041,7 @@ static void initialize_mlir_api() {
         mlir_named_attr.release());
   };
 
-  the_mlir_instance_of_vaip_ort_api.attr_proto_new_int =
+  the_mlir_instance_of_morphizen_ort_api.attr_proto_new_int =
       [](const std::string& name, int64_t value) -> morphizen::AttributeProto* {
     auto mlir_named_attr =
         mlir_impl::MLIRNamedAttribute::create_int(name, value);
@@ -1035,7 +1049,7 @@ static void initialize_mlir_api() {
         mlir_named_attr.release());
   };
 
-  the_mlir_instance_of_vaip_ort_api.attr_proto_new_float =
+  the_mlir_instance_of_morphizen_ort_api.attr_proto_new_float =
       [](const std::string& name, float value) -> morphizen::AttributeProto* {
     auto mlir_named_attr =
         mlir_impl::MLIRNamedAttribute::create_float(name, value);
@@ -1043,7 +1057,7 @@ static void initialize_mlir_api() {
         mlir_named_attr.release());
   };
 
-  the_mlir_instance_of_vaip_ort_api.attr_proto_new_string =
+  the_mlir_instance_of_morphizen_ort_api.attr_proto_new_string =
       [](const std::string& name,
          const std::string& value) -> morphizen::AttributeProto* {
     auto mlir_named_attr =
@@ -1052,7 +1066,7 @@ static void initialize_mlir_api() {
         mlir_named_attr.release());
   };
 
-  the_mlir_instance_of_vaip_ort_api.attr_proto_new_tensor =
+  the_mlir_instance_of_morphizen_ort_api.attr_proto_new_tensor =
       [](const std::string& name,
          const morphizen::TensorProto& value) -> morphizen::AttributeProto* {
     // Convert morphizen::TensorProto to MLIRNodeArg (which is MLIRTensor)
@@ -1065,7 +1079,7 @@ static void initialize_mlir_api() {
         mlir_named_attr.release());
   };
 
-  the_mlir_instance_of_vaip_ort_api.attr_proto_delete =
+  the_mlir_instance_of_morphizen_ort_api.attr_proto_delete =
       [](morphizen::AttributeProto* attr) -> void {
     if (attr) {
       auto* mlir_named_attr = reinterpret_cast<mlir::NamedAttribute*>(attr);
@@ -1073,7 +1087,7 @@ static void initialize_mlir_api() {
     }
   };
 
-  the_mlir_instance_of_vaip_ort_api.attr_proto_get_name =
+  the_mlir_instance_of_morphizen_ort_api.attr_proto_get_name =
       [](const morphizen::AttributeProto& attr) -> const std::string& {
     auto* mlir_named_attr =
         reinterpret_cast<const mlir::NamedAttribute*>(&attr);
@@ -1082,7 +1096,7 @@ static void initialize_mlir_api() {
     return attr_name_cache;
   };
 
-  the_mlir_instance_of_vaip_ort_api.attr_proto_get_type =
+  the_mlir_instance_of_morphizen_ort_api.attr_proto_get_type =
       [](const morphizen::AttributeProto& attr) -> int {
     // Return the MLIR attribute type mapped to ONNX attribute type constants
     // This is simplified - in a real implementation you'd need proper type
@@ -1091,39 +1105,39 @@ static void initialize_mlir_api() {
         ->get_onnx_type();
   };
 
-  the_mlir_instance_of_vaip_ort_api.attr_proto_set_name =
+  the_mlir_instance_of_morphizen_ort_api.attr_proto_set_name =
       [](morphizen::AttributeProto* attr, const std::string& name) -> void {
     reinterpret_cast<mlir_impl::MLIRNamedAttribute*>(attr)->set_name(name);
   };
 
-  the_mlir_instance_of_vaip_ort_api.attr_proto_clone =
+  the_mlir_instance_of_morphizen_ort_api.attr_proto_clone =
       [](const morphizen::AttributeProto& attr) -> morphizen::AttributeProto* {
     auto* p = reinterpret_cast<const mlir::NamedAttribute*>(&attr);
     return reinterpret_cast<morphizen::AttributeProto*>(
         new mlir::NamedAttribute(p->getName(), p->getValue()));
   };
-  the_mlir_instance_of_vaip_ort_api.attr_proto_get_int =
+  the_mlir_instance_of_morphizen_ort_api.attr_proto_get_int =
       [](const morphizen::AttributeProto& attr) -> int64_t {
     auto* p = reinterpret_cast<const mlir_impl::MLIRNamedAttribute*>(&attr);
     return p->get_int();
   };
-  the_mlir_instance_of_vaip_ort_api.attr_proto_get_float =
+  the_mlir_instance_of_morphizen_ort_api.attr_proto_get_float =
       [](const morphizen::AttributeProto& attr) -> float {
     auto* p = reinterpret_cast<const mlir_impl::MLIRNamedAttribute*>(&attr);
     return static_cast<float>(p->get_float());
   };
-  the_mlir_instance_of_vaip_ort_api.attr_proto_get_string =
+  the_mlir_instance_of_morphizen_ort_api.attr_proto_get_string =
       [](const morphizen::AttributeProto& attr) -> const std::string& {
     auto* p = reinterpret_cast<const mlir_impl::MLIRNamedAttribute*>(&attr);
     return p->get_string();
   };
-  the_mlir_instance_of_vaip_ort_api.attr_proto_get_tensor =
+  the_mlir_instance_of_morphizen_ort_api.attr_proto_get_tensor =
       [](const morphizen::AttributeProto& attr)
       -> const morphizen::TensorProto& {
     auto* p = reinterpret_cast<const mlir_impl::MLIRNamedAttribute*>(&attr);
     return *reinterpret_cast<const morphizen::TensorProto*>(p->get_tensor());
   };
-  the_mlir_instance_of_vaip_ort_api.attr_proto_get_ints =
+  the_mlir_instance_of_morphizen_ort_api.attr_proto_get_ints =
       [](const morphizen::AttributeProto& attr) -> gsl::span<const int64_t> {
     // Static queue to store res with maximum length of 20
     static thread_local std::deque<std::vector<int64_t>> res_queue;
@@ -1137,29 +1151,29 @@ static void initialize_mlir_api() {
             ->get_ints());
     return res_queue.back();
   };
-  the_mlir_instance_of_vaip_ort_api.attr_proto_get_floats =
+  the_mlir_instance_of_morphizen_ort_api.attr_proto_get_floats =
       [](const morphizen::AttributeProto& attr) -> gsl::span<const float> {
     return reinterpret_cast<const mlir_impl::MLIRNamedAttribute*>(&attr)
         ->get_floats();
   };
-  the_mlir_instance_of_vaip_ort_api.attr_proto_get_strings =
+  the_mlir_instance_of_morphizen_ort_api.attr_proto_get_strings =
       [](const morphizen::AttributeProto& attr) -> std::vector<std::string> {
     return reinterpret_cast<const mlir_impl::MLIRNamedAttribute*>(&attr)
         ->get_strings();
   };
-  the_mlir_instance_of_vaip_ort_api.attr_proto_release_string =
+  the_mlir_instance_of_morphizen_ort_api.attr_proto_release_string =
       [](morphizen::AttributeProto* attr) -> morphizen::DllSafe<std::string> {
     return morphizen::DllSafe<std::string>(
         reinterpret_cast<mlir_impl::MLIRNamedAttribute*>(attr)->get_string());
   };
 
-  the_mlir_instance_of_vaip_ort_api.graph_remove_initialized_tensor =
+  the_mlir_instance_of_morphizen_ort_api.graph_remove_initialized_tensor =
       [](morphizen::Graph& graph, const std::string& tensor_name) -> void {
     auto* mlir_graph = reinterpret_cast<mlir_impl::MLIRGraph*>(&graph);
     mlir_graph->remove_initialized_tensor(tensor_name);
   };
 
-  the_mlir_instance_of_vaip_ort_api.graph_reverse_dfs_from_preemp =
+  the_mlir_instance_of_morphizen_ort_api.graph_reverse_dfs_from_preemp =
       [](const morphizen::Graph& graph,
          gsl::span<const morphizen::Node* const> from,
          const std::function<bool(const morphizen::Node*)>& enter,
@@ -1213,7 +1227,7 @@ static void initialize_mlir_api() {
         mlir_leave, mlir_comp, mlir_stop);
   };
 
-  the_mlir_instance_of_vaip_ort_api.graph_infer_shapes_from_filepath =
+  the_mlir_instance_of_morphizen_ort_api.graph_infer_shapes_from_filepath =
       [](const std::string& model_path, const std::string& save_path) -> void {
     // TODO: Implement shape inference from file paths in MLIR backend
     LOG(WARNING)
@@ -1222,26 +1236,26 @@ static void initialize_mlir_api() {
     (void)save_path; // Suppress unused parameter warnings
   };
 
-  the_mlir_instance_of_vaip_ort_api.graph_to_graph_proto =
+  the_mlir_instance_of_morphizen_ort_api.graph_to_graph_proto =
       [](const morphizen::Graph& graph) -> morphizen::GraphProto* {
     auto* mlir_graph = const_cast<mlir_impl::MLIRGraph*>(
         reinterpret_cast<const mlir_impl::MLIRGraph*>(&graph));
     return reinterpret_cast<morphizen::GraphProto*>(mlir_graph);
   };
 
-  the_mlir_instance_of_vaip_ort_api.graph_proto_delete =
+  the_mlir_instance_of_morphizen_ort_api.graph_proto_delete =
       [](morphizen::GraphProto* /* p */) -> void {
     // do nothing, ~MLIRGraph release itself
   };
 
-  the_mlir_instance_of_vaip_ort_api.graph_infer_shapes =
+  the_mlir_instance_of_morphizen_ort_api.graph_infer_shapes =
       [](morphizen::ModelProto& model_proto) -> void {
     // TODO: Implement shape inference in MLIR backend
     LOG(WARNING) << "graph_infer_shapes not implemented in MLIR backend";
     (void)model_proto; // Suppress unused parameter warning
   };
 #if MORPHIZEN_ORT_API_MAJOR >= 18
-  the_mlir_instance_of_vaip_ort_api.graph_save_string =
+  the_mlir_instance_of_morphizen_ort_api.graph_save_string =
       [](const morphizen::Graph& graph) -> morphizen::DllSafe<std::string> {
     // TODO: Implement graph string serialization in MLIR backend
     LOG(WARNING) << "graph_save_string not implemented in MLIR backend";
@@ -1251,7 +1265,7 @@ static void initialize_mlir_api() {
   };
 #endif // MORPHIZEN_ORT_API_MAJOR >= 18
 
-  the_mlir_instance_of_vaip_ort_api.get_model_path =
+  the_mlir_instance_of_morphizen_ort_api.get_model_path =
       [](const morphizen::Graph& graph) -> const std::filesystem::path& {
     auto mlir_graph = reinterpret_cast<const mlir_impl::MLIRGraph*>(&graph);
     auto& model = mlir_graph->get_model();
@@ -1262,7 +1276,7 @@ static void initialize_mlir_api() {
     return model_path;
   };
 
-  the_mlir_instance_of_vaip_ort_api.session_option_configuration =
+  the_mlir_instance_of_morphizen_ort_api.session_option_configuration =
       [](void* mmap, void* session_option,
          void (*push)(void* mmap, const char* name,
                       const char* value)) -> void {
@@ -1274,25 +1288,25 @@ static void initialize_mlir_api() {
     (void)push; // Suppress unused parameter warnings
   };
 
-  the_mlir_instance_of_vaip_ort_api.model_to_proto =
+  the_mlir_instance_of_morphizen_ort_api.model_to_proto =
       [](morphizen::Model& model) -> morphizen::ModelProto* {
     auto* mlir_model = reinterpret_cast<mlir_impl::MLIRModel*>(&model);
     return reinterpret_cast<morphizen::ModelProto*>(mlir_model);
   };
 
-  the_mlir_instance_of_vaip_ort_api.model_proto_serialize_as_string =
+  the_mlir_instance_of_morphizen_ort_api.model_proto_serialize_as_string =
       [](morphizen::ModelProto& model_proto)
       -> morphizen::DllSafe<std::string> {
     auto* mlir_model = reinterpret_cast<mlir_impl::MLIRModel*>(&model_proto);
     return morphizen::DllSafe<std::string>(mlir_model->serialize_as_string());
   };
 
-  the_mlir_instance_of_vaip_ort_api.model_proto_delete =
+  the_mlir_instance_of_morphizen_ort_api.model_proto_delete =
       [](morphizen::ModelProto* /* p*/) -> void {
     // do nothing, ~MLIRModel release itself
   };
 
-  the_mlir_instance_of_vaip_ort_api.is_profiling_enabled =
+  the_mlir_instance_of_morphizen_ort_api.is_profiling_enabled =
       [](void* session_options) -> bool {
     // TODO: Implement profiling status check in MLIR backend
     LOG(WARNING) << "is_profiling_enabled not implemented in MLIR backend";
@@ -1305,23 +1319,24 @@ static void initialize_mlir_api() {
 }
 
 // Public API to get the MLIR implementation
-extern "C" VaipOrtApiExt* get_vaip_ort_api_mlir() {
+extern "C" MorphizenOrtApiExt* get_morphizen_ort_api_mlir() {
   initialize_mlir_api();
-  return &the_mlir_instance_of_vaip_ort_api;
+  return &the_mlir_instance_of_morphizen_ort_api;
 }
 
 } // namespace morphizen
 
 // Function for plugin registration with proper naming
 namespace {
-const morphizen::OrtApiForMorphizen* morphizen_mlir_imp_get_vaip_ort_api() {
+const morphizen::OrtApiForMorphizen*
+morphizen_mlir_imp_get_morphizen_ort_api() {
   return reinterpret_cast<const morphizen::OrtApiForMorphizen*>(
-      morphizen::get_vaip_ort_api_mlir());
+      morphizen::get_morphizen_ort_api_mlir());
 }
 
 static ::morphizen::StaticPluginRegister
-    __register(morphizen::kMLIRBackend, "vaip_ort_api_imp",
-               (void*)&morphizen_mlir_imp_get_vaip_ort_api);
+    __register(morphizen::kMLIRBackend, "morphizen_ort_api_imp",
+               (void*)&morphizen_mlir_imp_get_morphizen_ort_api);
 } // namespace
 
 // Factory function for creating MLIR-based models

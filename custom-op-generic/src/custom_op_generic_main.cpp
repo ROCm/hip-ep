@@ -16,8 +16,7 @@ static morphizen::ExecutionProvider* create_execution_provider_imp(
 }
 
 namespace {
-// TODO: do we need to rename ::vaip_core to ::morphizen?
 static ::morphizen::StaticPluginRegister
-    __register("vaip_custom_op_GENERIC", "create_execution_provider",
+    __register("morphizen_custom_op_GENERIC", "create_execution_provider",
                (void*)&create_execution_provider_imp);
 } // namespace

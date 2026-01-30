@@ -4,11 +4,11 @@ Licensed under the MIT License.
 -->
 # morphizen-graph
 
-C++ wrapper utilities for graph operations over VAIP_ORT_API interface.
+C++ wrapper utilities for graph operations over MORPHIZEN_ORT_API interface.
 
 ## Overview
 
-`morphizen-graph` provides clean, type-safe C++ wrappers over the VAIP_ORT_API function pointer interface. This component encapsulates low-level graph operations and provides a modern C++ object model for working with ONNX computational graphs.
+`morphizen-graph` provides clean, type-safe C++ wrappers over the MORPHIZEN_ORT_API function pointer interface. This component encapsulates low-level graph operations and provides a modern C++ object model for working with ONNX computational graphs.
 
 ## Features
 
@@ -17,7 +17,7 @@ C++ wrapper utilities for graph operations over VAIP_ORT_API interface.
 - **NodeArg Operations**: `NodeArg`, `NodeArgRef` classes for tensor values
 - **NodeInput**: Abstraction combining NodeArg with optional producer Node
 - **NodeAttr**: Node attribute handling
-- **NodeBuilder**: High-level API for constructing nodes (requires IPass from vaip-core)
+- **NodeBuilder**: High-level API for constructing nodes (requires IPass from morphizen-core)
 
 ## Architecture
 
@@ -33,14 +33,14 @@ C++ wrapper utilities for graph operations over VAIP_ORT_API interface.
 │  - NodeAttr, NodeAttributesBuilder   │
 │  - NodeBuilder (high-level)          │
 │                                      │
-│  Calls VAIP_ORT_API internally       │
+│  Calls MORPHIZEN_ORT_API internally       │
 │  ↓                                   │
 └──────────────────────────────────────┘
          │
          ↓
 ┌──────────────────────────────────────┐
-│      vaip-ort-api-ext                │
-│      VAIP_ORT_API interface          │
+│      morphizen-ort-api-ext                │
+│      MORPHIZEN_ORT_API interface          │
 │      (111 function pointers)         │
 └──────────────────────────────────────┘
          │
@@ -53,7 +53,7 @@ C++ wrapper utilities for graph operations over VAIP_ORT_API interface.
 
 ## Dependencies
 
-- **PUBLIC**: `vaip-ort-api-ext` - VAIP_ORT_API interface
+- **PUBLIC**: `morphizen-ort-api-ext` - MORPHIZEN_ORT_API interface
 - **PRIVATE**: `glog::glog` - Logging
 
 ## Usage
@@ -82,7 +82,7 @@ int elem_type = node_arg_get_element_type(arg);
 auto shape = node_arg_get_shape_i64(arg);
 ```
 
-### Building Nodes (requires vaip-core for IPass)
+### Building Nodes (requires morphizen-core for IPass)
 
 ```cpp
 #include <morphizen/graph.hpp>
@@ -100,13 +100,13 @@ NodeBuilder(graph, pass)
 
 ## Backend Independence
 
-All operations in `morphizen-graph` work with any backend through the VAIP_ORT_API abstraction layer. The active backend is selected at runtime via the `MORPHIZEN_ORT_BRIDGE_BACKEND` environment variable.
+All operations in `morphizen-graph` work with any backend through the MORPHIZEN_ORT_API abstraction layer. The active backend is selected at runtime via the `MORPHIZEN_ORT_BRIDGE_BACKEND` environment variable.
 
 ## Size
 
 - ~4,000 lines of code
-- Single point of VAIP_ORT_API calls
-- No external dependencies beyond vaip-ort-api-ext
+- Single point of MORPHIZEN_ORT_API calls
+- No external dependencies beyond morphizen-ort-api-ext
 
 ## Building
 

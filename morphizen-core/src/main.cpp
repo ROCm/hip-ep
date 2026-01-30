@@ -63,7 +63,8 @@ extern "C" MORPHIZEN_DLL_SPEC void* morphizen_main(int argc, char* argv[]) {
     return nullptr;
   } else if (cmd == "disable_crt_diag") {
     return disable_crt_diag();
-  } else if (cmd == "get_global_vaip_ort_api") {
+  } else if (cmd == "get_global_morphizen_ort_api" ||
+             cmd == "get_global_vaip_ort_api") {
     return (void*)morphizen::api();
   } else if (cmd == "symbol") {
     return lookup_symbol(argv[1]);

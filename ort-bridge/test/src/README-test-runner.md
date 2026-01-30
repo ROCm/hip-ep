@@ -9,20 +9,20 @@ Licensed under the MIT License.
 
 /**
  * @file test-runner-example.md
- * @brief Example of how to run the comprehensive VAIP ORT API tests
+ * @brief Example of how to run the comprehensive MorphiZen ORT API tests
  *
  * This file demonstrates how to run and analyze the comprehensive test suite
- * for the VAIP ORT API implementation.
+ * for the MorphiZen ORT API implementation.
  */
 
-# VAIP ORT API Test Suite
+# MorphiZen ORT API Test Suite
 
 ## Overview
 
 The comprehensive test suite includes the following test classes and files:
 
 1. **`TestCoverageWrapperTest`** - Base test class with coverage wrapper setup
-2. **`VaipOrtApiTest`** - Comprehensive API tests derived from the base class
+2. **`MorphizenOrtApiTest`** - Comprehensive API tests derived from the base class
 3. **Coverage Analysis Tools** - Helpers for analyzing API coverage
 
 ## Test Categories
@@ -66,14 +66,14 @@ The comprehensive test suite includes the following test classes and files:
 # Run all tests
 ./ort-bridge-test
 
-# Run only VAIP ORT API tests
-./ort-bridge-test --gtest_filter="VaipOrtApiTest.*"
+# Run only MorphiZen ORT API tests
+./ort-bridge-test --gtest_filter="MorphizenOrtApiTest.*"
 
 # Run specific test category
-./ort-bridge-test --gtest_filter="VaipOrtApiTest.ModelLoadAndDelete"
+./ort-bridge-test --gtest_filter="MorphizenOrtApiTest.ModelLoadAndDelete"
 
 # Run with verbose logging
-./ort-bridge-test --gtest_filter="VaipOrtApiTest.*" --v=3
+./ort-bridge-test --gtest_filter="MorphizenOrtApiTest.*" --v=3
 ```
 
 ### CMake/CTest
@@ -89,7 +89,7 @@ ctest -R "ort-bridge-test" -V
 The tests will output a comprehensive coverage report showing:
 
 ```
-=== VAIP ORT API Coverage Report ===
+=== MorphiZen ORT API Coverage Report ===
 Total unique APIs called: 87
 API Coverage: 82.3% (87/109)
 
@@ -170,7 +170,7 @@ These can be used for:
 
 To add new test cases:
 
-1. **Add new test methods** to `VaipOrtApiTest` class
+1. **Add new test methods** to `MorphizenOrtApiTest` class
 2. **Update API lists** in `test-api-coverage-checker.hpp` if new APIs are added
 3. **Follow naming conventions** for test methods
 4. **Use the coverage wrapper** to ensure calls are logged and counted
@@ -187,10 +187,10 @@ To add new test cases:
 ## Example Usage in Your Tests
 
 ```cpp
-class MyApiTest : public VaipOrtApiTest {
+class MyApiTest : public MorphizenOrtApiTest {
 protected:
   void SetUp() override {
-    VaipOrtApiTest::SetUp();
+    MorphizenOrtApiTest::SetUp();
     // Your custom setup
   }
 };

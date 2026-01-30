@@ -48,17 +48,17 @@ def get_escape_json_str(path):
 
 
 def main(args):
-    vaip_config_path = args.in_vaip_config_json
+    morphizen_config_path = args.in_morphizen_config_json
     is_trim_config = args.is_trim_config.upper() in ["ON", "TRUE", "YES"]
     enable_default_config = args.enable_default_config.upper() in ["ON", "TRUE"]
     # open file
-    f = open(vaip_config_path, "r", encoding="utf-8")
+    f = open(morphizen_config_path, "r", encoding="utf-8")
     config = json.load(f)
 
     if is_trim_config:
         get_trimmed_config(config)
     # output file
-    with open(args.out_vaip_config_json, "w") as f:
+    with open(args.out_morphizen_config_json, "w") as f:
         if enable_default_config:
             json.dump(config, f, indent=4)
         else:
@@ -67,32 +67,34 @@ def main(args):
     xxd.main(
         [
             "--output",
-            args.vaip_config_binary_hpp,
+            args.morphizen_config_binary_hpp,
             "--column",
             "16",
             "--var",
             "config",
-            args.out_vaip_config_json,
+            args.out_morphizen_config_json,
         ]
     )
-    with open(args.vaip_config_binary_hpp, "a") as f:
+    with open(args.morphizen_config_binary_hpp, "a") as f:
         f.write(
-            f"static bool with_default_vaip_config = {1 if enable_default_config else 0};\n"
+            f"static bool with_default_morphizen_config = {1 if enable_default_config else 0};\n"
         )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="generate vaip_config_binary.hpp and vaip_config.json"
+        description="generate morphizen_config_binary.hpp and morphizen_config.json"
     )
     parser.add_argument(
-        "--vaip_config_binary_hpp", type=str, help="vaip_config_binary.hpp save"
+        "--morphizen_config_binary_hpp",
+        type=str,
+        help="morphizen_config_binary.hpp save",
     )
     parser.add_argument(
-        "--out_vaip_config_json", type=str, help="vaip_config.json to save"
+        "--out_morphizen_config_json", type=str, help="morphizen_config.json to save"
     )
     parser.add_argument(
-        "--in_vaip_config_json", type=str, help="vaip_config.json to read"
+        "--in_morphizen_config_json", type=str, help="morphizen_config.json to read"
     )
     parser.add_argument(
         "--is_trim_config",
@@ -106,7 +108,7 @@ if __name__ == "__main__":
         type=str,
         choices=["ON", "OFF"],
         default="ON",
-        help="Whether to enable default vaip config (default: ON)",
+        help="Whether to enable default morphizen config (default: ON)",
     )
     args = parser.parse_args(args=sys.argv[1:])
     main(args)

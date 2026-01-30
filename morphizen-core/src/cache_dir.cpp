@@ -40,7 +40,7 @@ static fs::path default_cache_directory() {
 #else
       fs::path("/tmp");
 #endif
-  return tmp_dir / get_user_name() / "vaip" / ".cache";
+  return tmp_dir / get_user_name() / "morphizen" / ".cache";
 }
 
 bool file_exists(const fs::path& filename) { return fs::exists(filename); }

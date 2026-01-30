@@ -39,7 +39,7 @@ namespace py = pybind11;
 #endif
 namespace morphizen {
 std::optional<morphizen_cxx::NodeInput>
-Binder::create_vaip_cxx_node_input(NodeInput node_input) const {
+Binder::create_morphizen_cxx_node_input(NodeInput node_input) const {
   if (node_input.node_arg == nullptr) {
     return std::nullopt;
   }
@@ -48,11 +48,11 @@ Binder::create_vaip_cxx_node_input(NodeInput node_input) const {
 }
 std::optional<morphizen_cxx::NodeInput>
 Binder::operator()(size_t pattern_id) const {
-  return create_vaip_cxx_node_input((*this)[pattern_id]);
+  return create_morphizen_cxx_node_input((*this)[pattern_id]);
 }
 std::optional<morphizen_cxx::NodeInput>
 Binder::operator()(const std::string& pattern_name) const {
-  return create_vaip_cxx_node_input((*this)[pattern_name]);
+  return create_morphizen_cxx_node_input((*this)[pattern_name]);
 }
 
 using Map = immutable_map::ImmutableMap<int, NodeInput>;

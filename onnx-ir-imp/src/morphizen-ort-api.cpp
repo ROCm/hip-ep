@@ -65,7 +65,7 @@ tensor_proto_new_with_raw_data(const std::string& name,
 }
 
 // Initialize the global API instance with dummy implementations
-VaipOrtApiExt the_instance_of_vaip_ort_api;
+MorphizenOrtApiExt the_instance_of_vaip_ort_api;
 
 // Static initialization function to populate the API structure
 static void initialize_dummy_api() {

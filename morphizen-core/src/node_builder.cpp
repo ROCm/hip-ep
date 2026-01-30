@@ -471,8 +471,8 @@ void graph_replace_node_arg(const Graph& graph, const IPass& pass,
 
 namespace morphizen_cxx {
 
-// Free functions that extend graph functionality with vaip-core types
-// Declarations are in vaip-core/include/morphizen/graph_extensions.hpp
+// Free functions that extend graph functionality with morphizen-core types
+// Declarations are in morphizen-core/include/morphizen/graph_extensions.hpp
 
 morphizen::NodeBuilder graph_node_builder(morphizen_cxx::GraphRef& graph,
                                           morphizen::IPass& pass) {

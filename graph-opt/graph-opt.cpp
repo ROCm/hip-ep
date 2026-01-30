@@ -9,7 +9,7 @@
 #include <glog/logging.h>
 #include <boost/program_options.hpp>
 #include "onnxruntime_cxx_api.h"
-#include "morphizen/vaip.hpp"
+#include "morphizen/morphizen.hpp"
 // clang-format on
 
 namespace po = boost::program_options;

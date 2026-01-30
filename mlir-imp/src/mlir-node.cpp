@@ -60,7 +60,7 @@ std::vector<MLIRNodeArgIndex> MLIRNode::getInputNodeArgs() const {
       inputs.reserve(arrayAttr.size());
       for (auto attr : arrayAttr) {
         if (auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(attr)) {
-          inputs.push_back(MLIRNodeArgIndex::from_vaip_core_node_arg_ptr(
+          inputs.push_back(MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(
               reinterpret_cast<const void*>(intAttr.getInt())));
         }
       }
@@ -79,7 +79,7 @@ std::vector<MLIRNodeArgIndex> MLIRNode::getOutputNodeArgs() const {
       outputs.reserve(arrayAttr.size());
       for (auto attr : arrayAttr) {
         if (auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(attr)) {
-          outputs.push_back(MLIRNodeArgIndex::from_vaip_core_node_arg_ptr(
+          outputs.push_back(MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(
               reinterpret_cast<const void*>(intAttr.getInt())));
         }
       }

@@ -262,9 +262,9 @@ MORPHIZEN_DLL_SPEC int validate_compiled_model_compatibility_info(
     size_t num_devices, int* model_compatibility);
 
 /**
- * @brief Retrieves the VAIP version as a 32-bit unsigned integer.
+ * @brief Retrieves the MorphiZen version as a 32-bit unsigned integer.
  *
- * This function returns the version number of the VAIP (MorphiZen Execution
+ * This function returns the version number of the MorphiZen ( Execution
  * Provider). in a packed 32-bit format. The version is encoded as follows:
  *
  * - Bits 31–24: Major version

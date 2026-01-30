@@ -21,7 +21,7 @@ add_executable(${TEST_EXE_NAME}
 
 target_include_directories(${TEST_EXE_NAME}
     PRIVATE
-    $<BUILD_INTERFACE:${VAIP_ORT_API_DIR}>
+    $<BUILD_INTERFACE:${MORPHIZEN_ORT_API_DIR}>
     $<INSTALL_INTERFACE:../include>
 )
 target_compile_definitions(${TEST_EXE_NAME} PRIVATE

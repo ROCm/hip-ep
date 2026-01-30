@@ -281,7 +281,7 @@ constexpr bool DEBUG_TAR = false;
     }                                                                          \
   } while (0)
 
-namespace vaip_tar {
+namespace morphizen_tar {
 template <typename T> T getNextMultiple(T num, T size) {
   if (size <= 0)
     return num;
@@ -520,4 +520,4 @@ int TarEntry::rename(const std::string& name) {
 
 TarEntry::TarEntry(std::vector<char>&& datas) { this->datas = datas; }
 
-} // namespace vaip_tar
+} // namespace morphizen_tar

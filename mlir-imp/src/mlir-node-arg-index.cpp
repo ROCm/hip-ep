@@ -52,7 +52,7 @@ MLIRNodeArgIndex MLIRNodeArgIndex::graph_output(unsigned int index,
 }
 
 MLIRNodeArgIndex
-MLIRNodeArgIndex::from_vaip_core_node_arg_ptr(const void* ptr) {
+MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(const void* ptr) {
   auto ret = MLIRNodeArgIndex::invalid();
   if (ptr == nullptr) {
     return ret; // Return invalid index if pointer is null
@@ -177,13 +177,13 @@ std::string MLIRNodeArgIndex::to_string() const {
          std::to_string(graph_id.get_index()) + "]";
 }
 
-const void* MLIRNodeArgIndex::to_vaip_core_node_arg_ptr() const {
+const void* MLIRNodeArgIndex::to_morphizen_core_node_arg_ptr() const {
   // TODO: Implement proper conversion
   if (!exists()) {
     return nullptr;
   }
   // Convert the value back to a pointer
-  // This reverses the mapping done in from_vaip_core_node_arg_ptr
+  // This reverses the mapping done in from_morphizen_core_node_arg_ptr
   return reinterpret_cast<const void*>(static_cast<uintptr_t>(value_));
 }
 const MLIRNodeArg& MLIRNodeArgIndex::get_node_arg() const {

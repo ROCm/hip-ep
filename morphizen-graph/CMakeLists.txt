@@ -59,15 +59,15 @@ target_link_libraries(morphizen-graph
 target_compile_options(morphizen-graph PRIVATE ${MORPHIZEN_COMPILER_OPTIONS})
 target_compile_features(morphizen-graph PUBLIC cxx_std_17)
 
-# Build as internal code (VAIP_EXPORT_DLL=1) even though it's a static library
-# Use PRIVATE for VAIP_EXPORT_DLL so consumers don't inherit the export flag
-# Use PUBLIC for VAIP_USE_DLL=0 to indicate static library
+# Build as internal code (MORPHIZEN_EXPORT_DLL=1) even though it's a static library
+# Use PRIVATE for MORPHIZEN_EXPORT_DLL so consumers don't inherit the export flag
+# Use PUBLIC for MORPHIZEN_USE_DLL=0 to indicate static library
 target_compile_definitions(morphizen-graph
     PUBLIC
-        "-DVAIP_USE_DLL=0"
+        "-DMORPHIZEN_USE_DLL=0"
         "-DONNX_NAMESPACE=onnx"
     PRIVATE
-        "-DVAIP_EXPORT_DLL=1"
+        "-DMORPHIZEN_EXPORT_DLL=1"
 )
 
 set_target_properties(morphizen-graph PROPERTIES FOLDER morphizen)

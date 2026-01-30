@@ -28,7 +28,7 @@ namespace onnxruntime {
 using ProviderOptions = std::unordered_map<std::string, std::string>;
 }
 
-// Forward declarations for logger types (outside vaip_core namespace)
+// Forward declarations for logger types
 namespace Ort {
 struct Logger;
 }
@@ -37,7 +37,7 @@ namespace morphizen {
 class PassContextImp;
 class LoggerAdapter;
 
-using vaip_error_report_func = void (*)(
+using morphizen_error_report_func = void (*)(
     void*, int, const char*); // should be same as morphizen::error_report_func,
                               // for compile issue we  defined it
 
@@ -49,7 +49,7 @@ MORPHIZEN_DLL_SPEC std::vector<std::unique_ptr<ExecutionProvider>>
 compile_onnx_model_5(const std::filesystem::path& model_path,
                      const Graph& graph,
                      const onnxruntime::ProviderOptions& options, void* status,
-                     vaip_error_report_func func);
+                     morphizen_error_report_func func);
 
 MORPHIZEN_DLL_SPEC std::vector<std::unique_ptr<ExecutionProvider>>
 compile_onnx_model_3(

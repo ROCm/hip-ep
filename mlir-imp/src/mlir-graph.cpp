@@ -270,9 +270,9 @@ void MLIRGraph::maintain_morphizen_attributes() {
       llvm::SmallVector<mlir::Attribute> inputIndexes;
       for (mlir::Value operand : op->getOperands()) {
         auto value_name = extract_value_name(operand);
-        inputIndexes.push_back(
-            builder.getI64IntegerAttr(reinterpret_cast<int64_t>(
-                get_node_arg_index(value_name).to_vaip_core_node_arg_ptr())));
+        inputIndexes.push_back(builder.getI64IntegerAttr(
+            reinterpret_cast<int64_t>(get_node_arg_index(value_name)
+                                          .to_morphizen_core_node_arg_ptr())));
       }
 
       op->setAttr(attr_names::MORPHIZEN_NODE_INPUTS,
@@ -282,9 +282,9 @@ void MLIRGraph::maintain_morphizen_attributes() {
       llvm::SmallVector<mlir::Attribute> outputIndexes;
       for (auto result : op->getResults()) {
         auto value_name = extract_value_name(result);
-        outputIndexes.push_back(
-            builder.getI64IntegerAttr(reinterpret_cast<int64_t>(
-                get_node_arg_index(value_name).to_vaip_core_node_arg_ptr())));
+        outputIndexes.push_back(builder.getI64IntegerAttr(
+            reinterpret_cast<int64_t>(get_node_arg_index(value_name)
+                                          .to_morphizen_core_node_arg_ptr())));
       }
 
       op->setAttr(attr_names::MORPHIZEN_NODE_OUTPUTS,
@@ -629,7 +629,7 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
     llvm::SmallVector<mlir::Attribute> inputIndexes;
     for (const auto& input : input_args) {
       inputIndexes.push_back(builder.getI64IntegerAttr(
-          reinterpret_cast<int64_t>(input.to_vaip_core_node_arg_ptr())));
+          reinterpret_cast<int64_t>(input.to_morphizen_core_node_arg_ptr())));
     }
     op->setAttr(attr_names::MORPHIZEN_NODE_INPUTS,
                 builder.getArrayAttr(inputIndexes));
@@ -637,7 +637,7 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
     llvm::SmallVector<mlir::Attribute> outputIndexes;
     for (const auto& output : output_args) {
       outputIndexes.push_back(builder.getI64IntegerAttr(
-          reinterpret_cast<int64_t>(output.to_vaip_core_node_arg_ptr())));
+          reinterpret_cast<int64_t>(output.to_morphizen_core_node_arg_ptr())));
     }
     op->setAttr(attr_names::MORPHIZEN_NODE_OUTPUTS,
                 builder.getArrayAttr(outputIndexes));
@@ -1314,15 +1314,15 @@ mlir::Operation* MLIRGraph::create_func_call(
       attr_names::MORPHIZEN_NODE_INPUTS,
       rewriter.getArrayAttr(llvm::to_vector(
           llvm::map_range(inputs, [&](const auto& input) -> mlir::Attribute {
-            return rewriter.getI64IntegerAttr(
-                reinterpret_cast<int64_t>(input.to_vaip_core_node_arg_ptr()));
+            return rewriter.getI64IntegerAttr(reinterpret_cast<int64_t>(
+                input.to_morphizen_core_node_arg_ptr()));
           }))));
   fuse_node->setAttr(
       attr_names::MORPHIZEN_NODE_OUTPUTS,
       rewriter.getArrayAttr(llvm::to_vector(
           llvm::map_range(outputs, [&](const auto& output) -> mlir::Attribute {
-            return rewriter.getI64IntegerAttr(
-                reinterpret_cast<int64_t>(output.to_vaip_core_node_arg_ptr()));
+            return rewriter.getI64IntegerAttr(reinterpret_cast<int64_t>(
+                output.to_morphizen_core_node_arg_ptr()));
           }))));
 
   for (const auto& [output, result] :

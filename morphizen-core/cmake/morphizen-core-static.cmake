@@ -164,8 +164,8 @@ target_compile_definitions(${LIB_NAME}
   PUBLIC
   "-DONNX_NAMESPACE=onnx"
   PRIVATE
-    # Note: VAIP_USE_DLL is inherited from morphizen-graph for DLL export control
-    "-DVAIP_EXPORT_DLL=1"
+    # Note: MORPHIZEN_USE_DLL is inherited from morphizen-graph for DLL export control
+    "-DMORPHIZEN_EXPORT_DLL=1"
     "-DHAVE_VERSION_INFO_CONFIG=1"  # Enable generated version header
   )
 target_compile_features(morphizen-core-static PUBLIC cxx_std_17)

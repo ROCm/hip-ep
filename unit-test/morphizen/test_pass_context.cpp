@@ -524,8 +524,8 @@ TEST_F(PassContextConfigTest,
 // "99_vaip_centralized_target_discovery", the plugin is ordered alphabetically
 // by name so it is probably the laster resort.
 //
-// we must register this along with a pass or custom op, vaip::core is not build
-// with WHOLE_ARCHIVE enabled. it would be removed by linker if not used.
+// we must register this along with a pass or custom op, morphizen::core is not
+// build with WHOLE_ARCHIVE enabled. it would be removed by linker if not used.
 static std::string get_meta(const onnxruntime::Model& model,
                             const std::string& key) {
   if (MORPHIZEN_ORT_API(model_has_meta_data)(model, key))
