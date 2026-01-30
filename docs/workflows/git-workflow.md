@@ -29,8 +29,6 @@ Licensed under the MIT License.
 
 **Timing**: Create branch immediately when starting a task, not when making first file change.
 
-**Enforcement**: `.claude/settings.json` hooks block modifications on `main` branch.
-
 ---
 
 ## Resuming Work: Check Context First
@@ -89,6 +87,14 @@ Licensed under the MIT License.
 - [ ] Wait for review and approval before merging
 
 See [git-workflow-reference.md](git-workflow-reference.md) for detailed commit/sync procedures.
+
+## Commit Timing
+
+**Commit immediately after modifying files. Do NOT verify build/tests first.**
+
+1. Modify files
+2. `git add <files>` + `git commit -m "type: description"` + `git push fork <branch>`
+
 
 ## Branch Protection
 
