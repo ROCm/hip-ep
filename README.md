@@ -73,8 +73,6 @@ TheRock SDK provides HIP/ROCm runtime for Windows.
    # Extract TheRock tarball to workspace/therock and move to /c/dist/therock/
    mkdir therock
    tar -xzf /path/to/therock-dist-windows-gfx115X-all-*.tar.gz -C therock
-   mkdir /c/dist/
-   mv therock /c/dist/therock/
    ```
 
 3. **Verify installation**:
