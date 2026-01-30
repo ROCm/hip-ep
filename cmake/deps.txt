@@ -1,0 +1,8 @@
+##
+##  Copyright (C) 2023 – 2025 Advanced Micro Devices, Inc. All rights reserved.
+##  Licensed under the MIT License.
+##
+## morphizen-hipdnn dependencies
+## Format: name;url;sha1_or_git_tag
+llvm;https://github.com/llvm/llvm-project.git;f8cb7987c64dcffb72414a40560055cb717dbf74
+morphizen;../MorphiZen;ee97f468e3b9f65d798ea58a89780cbfb3de87f3
