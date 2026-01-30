@@ -75,7 +75,7 @@ static void initialize_dummy_api() {
 
   // Version and magic fields for compatibility checking
   the_instance_of_morphizen_ort_api.magic =
-      0x50494156; // 'VAIP' in little endian
+      0x50494156; // Binary format compatibility identifier
   the_instance_of_morphizen_ort_api.major = MORPHIZEN_ORT_API_MAJOR;
   the_instance_of_morphizen_ort_api.minor = MORPHIZEN_ORT_API_MINOR;
   the_instance_of_morphizen_ort_api.patch = MORPHIZEN_ORT_API_PATCH;

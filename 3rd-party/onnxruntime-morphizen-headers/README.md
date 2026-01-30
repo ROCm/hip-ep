@@ -9,7 +9,7 @@ MorphiZen requires the VitisAI provider headers to build, but ONNXRuntime does n
 ## Source Information
 
 **ONNXRuntime Repository**: https://github.com/microsoft/onnxruntime
-**Source Path**: `onnxruntime/core/providers/vitisai/include/vaip/`
+**Source Path**: `onnxruntime/core/providers/vitisai/include/morphizen/`
 **Commit Hash**: bf267a61cc3921746c74fa368cf7471789e74b34
 **Commit Date**: 2026-01-11 16:16:47 +0000
 **Commit Message**: skip eigen sha1 check
@@ -40,8 +40,8 @@ If you need to update these headers to a newer ONNXRuntime version:
 
 2. Copy the updated headers:
    ```bash
-   cp onnxruntime/core/providers/vitisai/include/vaip/*.h \
-      ../Morphizen/3rd-party/onnxruntime-vitisai-headers/vaip/
+   cp onnxruntime/core/providers/vitisai/include/morphizen/*.h \
+      ../Morphizen/3rd-party/onnxruntime-morphizen-headers/morphizen/
 
    ```
 
