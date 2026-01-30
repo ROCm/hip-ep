@@ -18,9 +18,9 @@ set(LLVM_DISABLE_ASSEMBLY_FILES OFF CACHE BOOL "disable assembly")
 set(ZLIB_USE_STATIC_LIBS ON CACHE BOOL "Use static zlib")
 set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "Enable zstd compression")
 
-# LLVM commit hash
-set(DEP_SHA1_llvm "f8cb7987c64dcffb72414a40560055cb717dbf74")
-set(DEP_URL_llvm "https://github.com/llvm/llvm-project.git")
+# LLVM commit hash and URL are now managed in deps.txt
+# These variables are set by deps.cmake parsing logic
+# DEP_URL_llvm and DEP_TAG_llvm are defined from deps.txt
 
 
 # Try to find pre-installed LLVM/MLIR first
@@ -57,12 +57,12 @@ else()
       SOURCE_SUBDIR llvm)
   else()
     message(STATUS "Cannot find LLVM in local directories")
-    message(STATUS "Fetching LLVM source from ${DEP_URL_llvm} @ ${DEP_SHA1_llvm}")
+    message(STATUS "Fetching LLVM source from deps.txt: ${DEP_URL_llvm} @ ${DEP_TAG_llvm}")
     message(STATUS "WARNING: This will download and build LLVM, which may take a long time")
     FetchContent_Declare(
       llvm-project
       GIT_REPOSITORY ${DEP_URL_llvm}
-      GIT_TAG ${DEP_SHA1_llvm}
+      GIT_TAG ${DEP_TAG_llvm}
       GIT_SUBMODULES_RECURSE
       DOWNLOAD_EXTRACT_TIMESTAMP TRUE
       EXCLUDE_FROM_ALL
