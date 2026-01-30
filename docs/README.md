@@ -31,6 +31,7 @@ Welcome to the MorphiZen documentation! This guide will help you navigate the av
 - **[Pre-commit Setup](technical/pre-commit.md)** - Code quality hooks and linters
 
 ### Workflows
+- **[Project Backlog](project/backlog.md)** - Issue tracking and roadmap
 - **[Git Workflow](workflows/git-workflow.md)** - Critical rules and quick reference
 - **[Git Workflow Reference](workflows/git-workflow-reference.md)** - Detailed step-by-step git procedures
 - **[Build Workflow](workflows/build-workflow.md)** - CMake build system and configurations
@@ -61,6 +62,7 @@ See individual component documentation in their respective directories:
 - **Want to build MorphiZen?** → [Developer Guide - Installation](developer-guide.md#installation)
 - **Need to understand the architecture?** → [Architecture Guide](architecture.md)
 - **Looking for component docs?** → See component directories above (morphizen-graph/, morphizen-pattern/, etc.)
+- **Planning or tracking work?** → [Project Backlog](project/backlog.md)
 - **Reviewing a PR?** → [PR Workflow - Reviewing](workflows/pr-workflow.md#reviewing-a-pull-request)
 - **Git workflow questions?** → [Git Workflow](workflows/git-workflow.md)
 - **How to run tests?** → [Developer Guide - Testing](developer-guide.md#testing)
