@@ -361,7 +361,7 @@ NodeArgIndex NodeArgIndex::graph_output(unsigned int index, GraphId graph_id) {
   return NodeArgIndex(index, Type::GRAPH_OUTPUT, graph_id);
 }
 
-NodeArgIndex NodeArgIndex::from_vaip_core_node_arg_ptr(const void* ptr) {
+NodeArgIndex NodeArgIndex::from_morphizen_core_node_arg_ptr(const void* ptr) {
   auto ret = NodeArgIndex::invalid();
   if (ptr == nullptr) {
     return ret; // Return invalid index if pointer is null
@@ -401,12 +401,12 @@ NodeIndex NodeArgIndex::get_producer_node() const {
   return NodeIndex::invalid();
 }
 
-const void* NodeArgIndex::to_vaip_core_node_arg_ptr() const {
+const void* NodeArgIndex::to_morphizen_core_node_arg_ptr() const {
   if (!exists()) {
     return nullptr;
   }
   // Convert the value back to a pointer
-  // This reverses the mapping done in from_vaip_core_node_arg_ptr
+  // This reverses the mapping done in from_morphizen_core_node_arg_ptr
   return reinterpret_cast<const void*>(static_cast<uintptr_t>(value_));
 }
 const morphizen_onnx::ValueInfoProto& NodeArgIndex::get_value_info() const {

@@ -274,7 +274,7 @@ Graph::fuse(const std::string& name, const std::string& op_type,
       google::protobuf::RepeatedPtrField<morphizen_onnx::NodeProto>();
   auto nodes_set = std::set<size_t>();
   for (auto node_index : nodes) {
-    auto ni = NodeIndex::from_vaip_core_node_index(node_index);
+    auto ni = NodeIndex::from_morphizen_core_node_index(node_index);
     CHECK_EQ(ni.get_graph_id().get_raw(), get_graph_id().get_raw())
         << " invalid reference";
     nodes_set.insert(ni.get_index());
@@ -365,7 +365,7 @@ Graph::fuse(const std::string& name, const std::string& op_type,
     output_arg->CopyFrom(get_node_arg(output).get_value_info());
   }
   for (auto node_index : nodes) {
-    auto ni = NodeIndex::from_vaip_core_node_index(node_index);
+    auto ni = NodeIndex::from_morphizen_core_node_index(node_index);
     auto output_node_args = ni.get_output_node_args();
     for (auto node_arg : output_node_args) {
       auto& value_info = node_arg.get_value_info();

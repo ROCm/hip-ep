@@ -156,8 +156,8 @@ static void initialize_dummy_api() {
     result->reserve(node_indices.size());
     for (const auto& node_idx : node_indices) {
       // Get the Node from the NodeIndex using the helper method
-      const auto* node =
-          static_cast<const morphizen::Node*>(node_idx.to_vaip_core_node_ptr());
+      const auto* node = static_cast<const morphizen::Node*>(
+          node_idx.to_morphizen_core_node_ptr());
       result->push_back(reinterpret_cast<const morphizen::Node*>(node));
     }
     return morphizen::DllSafe<std::vector<const morphizen::Node*>>(result);
@@ -173,7 +173,7 @@ static void initialize_dummy_api() {
       // Convert NodeArgIndex back to morphizen::NodeArg* using the conversion
       // method
       const auto* node_arg_ptr = static_cast<const morphizen::NodeArg*>(
-          input_idx.to_vaip_core_node_arg_ptr());
+          input_idx.to_morphizen_core_node_arg_ptr());
       result->push_back(static_cast<const morphizen::NodeArg*>(node_arg_ptr));
     }
     return morphizen::DllSafe<std::vector<const morphizen::NodeArg*>>(result);
@@ -189,7 +189,7 @@ static void initialize_dummy_api() {
       // Convert NodeArgIndex back to morphizen::NodeArg* using the conversion
       // method
       const auto* node_arg_ptr = static_cast<const morphizen::NodeArg*>(
-          output_idx.to_vaip_core_node_arg_ptr());
+          output_idx.to_morphizen_core_node_arg_ptr());
       result->push_back(static_cast<const morphizen::NodeArg*>(node_arg_ptr));
     }
     return morphizen::DllSafe<std::vector<const morphizen::NodeArg*>>(result);
@@ -202,7 +202,7 @@ static void initialize_dummy_api() {
     std::vector<NodeArgIndex> converted_outputs;
     converted_outputs.reserve(outputs.size());
     for (auto* output : outputs) {
-      auto node_arg = NodeArgIndex::from_vaip_core_node_arg_ptr(output);
+      auto node_arg = NodeArgIndex::from_morphizen_core_node_arg_ptr(output);
       CHECK(node_arg.is_valid(*morphizen_graph))
           << "NodeArgIndex is not valid in graph_set_outputs"
           << node_arg.to_string()
@@ -216,7 +216,7 @@ static void initialize_dummy_api() {
       [](const morphizen::Graph& graph,
          size_t index) -> const morphizen::Node* {
     auto* morphizen_graph = reinterpret_cast<const morphizen::Graph*>(&graph);
-    auto node_index = NodeIndex::from_vaip_core_node_index(index);
+    auto node_index = NodeIndex::from_morphizen_core_node_index(index);
     auto graph_id = morphizen_graph->get_graph_id();
     if (!node_index.is_valid(*morphizen_graph)) {
       LOG(ERROR) << "Invalid NodeIndex: " << node_index.to_string()
@@ -224,14 +224,15 @@ static void initialize_dummy_api() {
       return nullptr;
     }
     return static_cast<const morphizen::Node*>(
-        node_index.to_vaip_core_node_ptr());
+        node_index.to_morphizen_core_node_ptr());
   };
   the_instance_of_vaip_ort_api.graph_producer_node =
       [](const morphizen::Graph& graph,
          const std::string& node_arg_name) -> const morphizen::Node* {
     auto* morphizen_graph = reinterpret_cast<const morphizen::Graph*>(&graph);
     const auto& result = morphizen_graph->producer_node(node_arg_name);
-    return static_cast<const morphizen::Node*>(result.to_vaip_core_node_ptr());
+    return static_cast<const morphizen::Node*>(
+        result.to_morphizen_core_node_ptr());
   };
   the_instance_of_vaip_ort_api.graph_get_node_arg =
       [](const morphizen::Graph& graph,
@@ -239,7 +240,7 @@ static void initialize_dummy_api() {
     auto* morphizen_graph = reinterpret_cast<const morphizen::Graph*>(&graph);
     const auto& result = morphizen_graph->get_node_arg(name);
     return static_cast<const morphizen::NodeArg*>(
-        result.to_vaip_core_node_arg_ptr());
+        result.to_morphizen_core_node_arg_ptr());
   };
   the_instance_of_vaip_ort_api.graph_get_all_initialized_tensors =
       [](const morphizen::Graph& graph)
@@ -255,7 +256,7 @@ static void initialize_dummy_api() {
     auto* morphizen_graph = reinterpret_cast<morphizen::Graph*>(&graph);
 
     morphizen_graph->remove_node(
-        NodeIndex::from_vaip_core_node_ptr(node_input.node));
+        NodeIndex::from_morphizen_core_node_ptr(node_input.node));
   };
   the_instance_of_vaip_ort_api.graph_add_node =
       [](morphizen::Graph& graph, const std::string& name,
@@ -271,7 +272,7 @@ static void initialize_dummy_api() {
     converted_inputs.reserve(input_args.size());
     for (auto* arg : input_args) {
       converted_inputs.push_back(
-          NodeArgIndex::from_vaip_core_node_arg_ptr(arg));
+          NodeArgIndex::from_morphizen_core_node_arg_ptr(arg));
     }
 
     // Convert output args
@@ -279,7 +280,7 @@ static void initialize_dummy_api() {
     converted_outputs.reserve(output_args.size());
     for (auto* arg : output_args) {
       converted_outputs.push_back(
-          NodeArgIndex::from_vaip_core_node_arg_ptr(arg));
+          NodeArgIndex::from_morphizen_core_node_arg_ptr(arg));
     }
 
     // Convert attributes
@@ -291,8 +292,8 @@ static void initialize_dummy_api() {
     NodeIndex result =
         morphizen_graph->add_node(name, op_type, description, converted_inputs,
                                   converted_outputs, attrs_field, domain);
-    return *const_cast<morphizen::Node*>(
-        static_cast<const morphizen::Node*>(result.to_vaip_core_node_ptr()));
+    return *const_cast<morphizen::Node*>(static_cast<const morphizen::Node*>(
+        result.to_morphizen_core_node_ptr()));
   };
 
   the_instance_of_vaip_ort_api.graph_save =
@@ -324,7 +325,7 @@ static void initialize_dummy_api() {
     auto node_index = morphizen_graph->fuse(name, op_type, nodes, inputs,
                                             outputs, constant_initializers);
     return *const_cast<morphizen::Node*>(static_cast<const morphizen::Node*>(
-        node_index.to_vaip_core_node_ptr()));
+        node_index.to_morphizen_core_node_ptr()));
   };
 
   the_instance_of_vaip_ort_api.graph_resolve = [](morphizen::Graph& graph,
@@ -341,8 +342,8 @@ static void initialize_dummy_api() {
     result->reserve(node_indices.size());
     for (const auto& node_idx : node_indices) {
       // Get the Node from the NodeIndex using the helper method
-      const auto* node =
-          static_cast<const morphizen::Node*>(node_idx.to_vaip_core_node_ptr());
+      const auto* node = static_cast<const morphizen::Node*>(
+          node_idx.to_morphizen_core_node_ptr());
       result->push_back(reinterpret_cast<const morphizen::Node*>(node));
     }
     return morphizen::DllSafe<std::vector<const morphizen::Node*>>(result);
@@ -362,7 +363,7 @@ static void initialize_dummy_api() {
     node_indices.reserve(from.size());
     for (const auto* node : from) {
       CHECK(node != nullptr) << "Node pointer is null in reverse_dfs_from";
-      auto node_index = NodeIndex::from_vaip_core_node_ptr(node);
+      auto node_index = NodeIndex::from_morphizen_core_node_ptr(node);
       CHECK(node_index.is_valid(*morphizen_graph))
           << "NodeIndex is not valid in reverse_dfs_from: "
           << node_index.to_string()
@@ -373,14 +374,14 @@ static void initialize_dummy_api() {
     // Create wrapper functions that convert NodeIndex back to morphizen::Node*
     auto enter_wrapper = enter ? [&enter](const NodeIndex& node_index) -> bool {
       enter(static_cast<const morphizen::Node*>(
-          node_index.to_vaip_core_node_ptr()));
+          node_index.to_morphizen_core_node_ptr()));
       return false;
     }
     : std::function<bool(const NodeIndex&)>();
 
     auto leave_wrapper = leave ? [&leave](const NodeIndex& node_index) -> bool {
       const auto* node_ptr = static_cast<const morphizen::Node*>(
-          node_index.to_vaip_core_node_ptr());
+          node_index.to_morphizen_core_node_ptr());
       leave(node_ptr);
       return false;
     }
@@ -388,10 +389,10 @@ static void initialize_dummy_api() {
 
     auto stop_wrapper = stop
         ? [&stop](const NodeIndex& from_idx, const NodeIndex& to_idx) -> bool {
-      const auto* from_ptr =
-          static_cast<const morphizen::Node*>(from_idx.to_vaip_core_node_ptr());
-      const auto* to_ptr =
-          static_cast<const morphizen::Node*>(to_idx.to_vaip_core_node_ptr());
+      const auto* from_ptr = static_cast<const morphizen::Node*>(
+          from_idx.to_morphizen_core_node_ptr());
+      const auto* to_ptr = static_cast<const morphizen::Node*>(
+          to_idx.to_morphizen_core_node_ptr());
       return stop(from_ptr, to_ptr);
     }
     : std::function<bool(const NodeIndex&, const NodeIndex&)>{};
@@ -406,13 +407,13 @@ static void initialize_dummy_api() {
   the_instance_of_vaip_ort_api.node_get_name =
       [](const morphizen::Node& node) -> const std::string& {
     // Convert morphizen::Node to NodeIndex and get the node name
-    auto node_index = NodeIndex::from_vaip_core_node_ptr(&node);
+    auto node_index = NodeIndex::from_morphizen_core_node_ptr(&node);
     return node_index.get_name();
   };
   the_instance_of_vaip_ort_api.node_description =
       [](const morphizen::Node& node) -> const std::string& {
     // Convert morphizen::Node to NodeIndex and get the description
-    auto node_index = NodeIndex::from_vaip_core_node_ptr(&node);
+    auto node_index = NodeIndex::from_morphizen_core_node_ptr(&node);
     return node_index.get_description();
   };
   the_instance_of_vaip_ort_api.node_get_index =
@@ -422,20 +423,20 @@ static void initialize_dummy_api() {
   the_instance_of_vaip_ort_api.node_op_type =
       [](const morphizen::Node& node) -> const std::string& {
     // Convert morphizen::Node to NodeIndex and get the op type
-    auto node_index = NodeIndex::from_vaip_core_node_ptr(&node);
+    auto node_index = NodeIndex::from_morphizen_core_node_ptr(&node);
     return node_index.get_node_op_type();
   };
 
   the_instance_of_vaip_ort_api.node_op_domain =
       [](const morphizen::Node& node) -> const std::string& {
     // Convert morphizen::Node to NodeIndex and get the op domain
-    auto node_index = NodeIndex::from_vaip_core_node_ptr(&node);
+    auto node_index = NodeIndex::from_morphizen_core_node_ptr(&node);
     return node_index.get_node_op_domain();
   };
   the_instance_of_vaip_ort_api.node_get_inputs_unsafe =
       [](const morphizen::Node& node)
       -> morphizen::DllSafe<std::vector<morphizen::NodeInput>> {
-    auto node_index = NodeIndex::from_vaip_core_node_ptr(&node);
+    auto node_index = NodeIndex::from_morphizen_core_node_ptr(&node);
     auto input_nodes_args = node_index.get_input_node_args();
     auto result = std::vector<morphizen::NodeInput>();
     result.reserve(input_nodes_args.size());
@@ -446,13 +447,14 @@ static void initialize_dummy_api() {
       } else {
         auto input_node =
             input_arg.get_producer_node(); // Returns NodeIndex by value
-        auto vaip_core_node_ptr = input_node.is_valid()
-                                      ? static_cast<const morphizen::Node*>(
-                                            input_node.to_vaip_core_node_ptr())
-                                      : nullptr;
+        auto vaip_core_node_ptr =
+            input_node.is_valid() ? static_cast<const morphizen::Node*>(
+                                        input_node.to_morphizen_core_node_ptr())
+                                  : nullptr;
         result.push_back(morphizen::NodeInput{
-            vaip_core_node_ptr, static_cast<const morphizen::NodeArg*>(
-                                    input_arg.to_vaip_core_node_arg_ptr())});
+            vaip_core_node_ptr,
+            static_cast<const morphizen::NodeArg*>(
+                input_arg.to_morphizen_core_node_arg_ptr())});
       }
     }
     return morphizen::DllSafe<std::vector<morphizen::NodeInput>>(result);
@@ -460,7 +462,7 @@ static void initialize_dummy_api() {
   the_instance_of_vaip_ort_api.node_get_output_node_args_unsafe =
       [](const morphizen::Node& node)
       -> morphizen::DllSafe<std::vector<const morphizen::NodeArg*>> {
-    auto node_index = NodeIndex::from_vaip_core_node_ptr(&node);
+    auto node_index = NodeIndex::from_morphizen_core_node_ptr(&node);
     auto& output_node_args =
         node_index.get_output_node_args(); // Get outputs as NodeArgIndex
     // optimize this API impl (ref PR#362)
@@ -474,7 +476,7 @@ static void initialize_dummy_api() {
 
   the_instance_of_vaip_ort_api.node_get_attributes =
       [](morphizen::Node& node) -> morphizen::NodeAttributes& {
-    auto morphizen_node_index = NodeIndex::from_vaip_core_node_ptr(&node);
+    auto morphizen_node_index = NodeIndex::from_morphizen_core_node_ptr(&node);
     auto result = morphizen_node_index.get_attributes();
     CHECK(result != nullptr)
         << "NodeIndex::node_get_attributes() returned nullptr";
@@ -484,7 +486,7 @@ static void initialize_dummy_api() {
 
   the_instance_of_vaip_ort_api.node_get_function_body =
       [](const morphizen::Node& node) -> const morphizen::Graph& {
-    auto morphizen_node_index = NodeIndex::from_vaip_core_node_ptr(&node);
+    auto morphizen_node_index = NodeIndex::from_morphizen_core_node_ptr(&node);
 
     return *reinterpret_cast<const morphizen::Graph*>(
         morphizen_node_index.get_function_body());
@@ -493,7 +495,7 @@ static void initialize_dummy_api() {
   the_instance_of_vaip_ort_api.node_type_is_fused =
       [](const morphizen::Node& node) -> bool {
     // Convert morphizen::Node to NodeIndex and check if it is fused
-    auto node_index = NodeIndex::from_vaip_core_node_ptr(&node);
+    auto node_index = NodeIndex::from_morphizen_core_node_ptr(&node);
     // Use the is_fused() member function to check if the node is fused
     return node_index.is_fused_node();
   };
@@ -508,7 +510,8 @@ static void initialize_dummy_api() {
   the_instance_of_vaip_ort_api.node_arg_get_name_unsafe =
       [](const morphizen::NodeArg& node_arg) -> const std::string& {
     // Convert the morphizen::NodeArg reference to NodeArgIndex
-    auto node_arg_index = NodeArgIndex::from_vaip_core_node_arg_ptr(&node_arg);
+    auto node_arg_index =
+        NodeArgIndex::from_morphizen_core_node_arg_ptr(&node_arg);
     // Use the get_name_unsafe() member function to get the name
     const std::string* name = node_arg_index.get_name_unsafe();
     CHECK(name != nullptr)
@@ -518,7 +521,8 @@ static void initialize_dummy_api() {
   the_instance_of_vaip_ort_api.node_arg_is_exists =
       [](const morphizen::NodeArg& node_arg) -> bool {
     // Convert the morphizen::NodeArg reference to NodeArgIndex
-    auto node_arg_index = NodeArgIndex::from_vaip_core_node_arg_ptr(&node_arg);
+    auto node_arg_index =
+        NodeArgIndex::from_morphizen_core_node_arg_ptr(&node_arg);
     // Use the exists() member function to check if the node argument exists
     return node_arg_index.exists();
   };
@@ -526,7 +530,8 @@ static void initialize_dummy_api() {
   the_instance_of_vaip_ort_api.node_arg_is_constant =
       [](const morphizen::Graph& /*graph*/,
          const morphizen::NodeArg& node_arg) -> bool {
-    auto node_arg_index = NodeArgIndex::from_vaip_core_node_arg_ptr(&node_arg);
+    auto node_arg_index =
+        NodeArgIndex::from_morphizen_core_node_arg_ptr(&node_arg);
     return node_arg_index.is_valid_initializer();
   };
   the_instance_of_vaip_ort_api.node_arg_clone =
@@ -548,7 +553,7 @@ static void initialize_dummy_api() {
     auto node_arg_index =
         morphizen_graph->node_arg_new(name, shape, element_type);
     const auto* node_arg_ptr = static_cast<const morphizen::NodeArg*>(
-        node_arg_index.to_vaip_core_node_arg_ptr());
+        node_arg_index.to_morphizen_core_node_arg_ptr());
     return *const_cast<morphizen::NodeArg*>(node_arg_ptr);
   };
 
@@ -556,7 +561,8 @@ static void initialize_dummy_api() {
       [](const morphizen::NodeArg& node_arg)
       -> morphizen::DllSafe<std::vector<int64_t>> {
     // convert the morphizen::NodeArg reference to NodeArgIndex
-    auto node_arg_index = NodeArgIndex::from_vaip_core_node_arg_ptr(&node_arg);
+    auto node_arg_index =
+        NodeArgIndex::from_morphizen_core_node_arg_ptr(&node_arg);
     // Use the get_shape_i64_unsafe() member function to get the shape
     auto shape = node_arg_index.get_shape_i64_unsafe();
     // Return the shape wrapped in DllSafe
@@ -567,7 +573,8 @@ static void initialize_dummy_api() {
       [](const morphizen::NodeArg& node_arg)
       -> morphizen::DllSafe<std::vector<std::string>> {
     // convert the morphizen::NodeArg reference to NodeArgIndex
-    auto node_arg_index = NodeArgIndex::from_vaip_core_node_arg_ptr(&node_arg);
+    auto node_arg_index =
+        NodeArgIndex::from_morphizen_core_node_arg_ptr(&node_arg);
     // Use the get_denotation_unsafe() member function to get the denotation
     auto denotation = node_arg_index.get_denotation_unsafe();
     // Return the denotation wrapped in DllSafe
@@ -581,7 +588,8 @@ static void initialize_dummy_api() {
       [](const morphizen::NodeArg& node_arg,
          const std::vector<int64_t>& shape) -> void {
     // convert the morphizen::NodeArg reference to NodeArgIndex
-    auto node_arg_index = NodeArgIndex::from_vaip_core_node_arg_ptr(&node_arg);
+    auto node_arg_index =
+        NodeArgIndex::from_morphizen_core_node_arg_ptr(&node_arg);
     // Use the set_shape_i64() member function to set the shape
     node_arg_index.set_shape_i64(shape);
   };
@@ -590,14 +598,16 @@ static void initialize_dummy_api() {
       [](const morphizen::NodeArg& node_arg,
          const std::vector<std::string>& denotation) -> void {
     // convert the morphizen::NodeArg reference to NodeArgIndex
-    auto node_arg_index = NodeArgIndex::from_vaip_core_node_arg_ptr(&node_arg);
+    auto node_arg_index =
+        NodeArgIndex::from_morphizen_core_node_arg_ptr(&node_arg);
     // Use the set_denotation() member function to set the denotation
     node_arg_index.set_denotation(denotation);
   };
 
   the_instance_of_vaip_ort_api.node_arg_get_element_type =
       [](const morphizen::NodeArg& node_arg) -> int {
-    auto node_arg_index = NodeArgIndex::from_vaip_core_node_arg_ptr(&node_arg);
+    auto node_arg_index =
+        NodeArgIndex::from_morphizen_core_node_arg_ptr(&node_arg);
     return node_arg_index.get_element_type();
   };
 
@@ -611,7 +621,7 @@ static void initialize_dummy_api() {
          const morphizen::NodeArg& node_arg) -> const morphizen::TensorProto& {
     auto* morphizen_graph = reinterpret_cast<const morphizen::Graph*>(&graph);
     auto morphizen_node_arg =
-        NodeArgIndex::from_vaip_core_node_arg_ptr(&node_arg);
+        NodeArgIndex::from_morphizen_core_node_arg_ptr(&node_arg);
 
     auto tensor_ptr =
         morphizen_node_arg.get_const_data_as_tensor(*morphizen_graph);
@@ -1131,7 +1141,7 @@ static void initialize_dummy_api() {
     for (const auto* input : inputs) {
       CHECK(input != nullptr)
           << "Input NodeArg pointer is null in graph_set_inputs";
-      auto input_index = NodeArgIndex::from_vaip_core_node_arg_ptr(input);
+      auto input_index = NodeArgIndex::from_morphizen_core_node_arg_ptr(input);
       morphizen_inputs.push_back(input_index);
     }
     morphizen_graph->set_inputs(morphizen_inputs);
@@ -1141,7 +1151,8 @@ static void initialize_dummy_api() {
       [](const morphizen::Graph& /*graph*/, const morphizen::NodeArg& node_arg,
          std::string& file, size_t& offset, size_t& size,
          size_t& checksum) -> int {
-    auto node_arg_index = NodeArgIndex::from_vaip_core_node_arg_ptr(&node_arg);
+    auto node_arg_index =
+        NodeArgIndex::from_morphizen_core_node_arg_ptr(&node_arg);
     return node_arg_index.external_location(file, offset, size, checksum);
   };
 
@@ -1262,23 +1273,23 @@ static void initialize_dummy_api() {
     morphizen_from.reserve(from.size());
     for (const auto* node_ptr : from) {
       morphizen_from.push_back(
-          morphizen::NodeIndex::from_vaip_core_node_ptr(node_ptr));
+          morphizen::NodeIndex::from_morphizen_core_node_ptr(node_ptr));
     }
 
     // Create wrapper functions that convert between NodeIndex and
     // morphizen::Node*
     auto morphizen_enter =
         enter ? [&enter](const morphizen::NodeIndex& node_idx) -> bool {
-      const auto* node_ptr =
-          static_cast<const morphizen::Node*>(node_idx.to_vaip_core_node_ptr());
+      const auto* node_ptr = static_cast<const morphizen::Node*>(
+          node_idx.to_morphizen_core_node_ptr());
       return enter(node_ptr);
     }
     : std::function<bool(const morphizen::NodeIndex&)>();
 
     auto morphizen_leave =
         leave ? [&leave](const morphizen::NodeIndex& node_idx) -> bool {
-      const auto* node_ptr =
-          static_cast<const morphizen::Node*>(node_idx.to_vaip_core_node_ptr());
+      const auto* node_ptr = static_cast<const morphizen::Node*>(
+          node_idx.to_morphizen_core_node_ptr());
       return leave(node_ptr);
     }
     : std::function<bool(const morphizen::NodeIndex&)>();
@@ -1286,10 +1297,10 @@ static void initialize_dummy_api() {
     auto morphizen_comp =
         comp ? [&comp](const morphizen::NodeIndex& from_idx,
                        const morphizen::NodeIndex& to_idx) -> bool {
-      const auto* from_ptr =
-          static_cast<const morphizen::Node*>(from_idx.to_vaip_core_node_ptr());
-      const auto* to_ptr =
-          static_cast<const morphizen::Node*>(to_idx.to_vaip_core_node_ptr());
+      const auto* from_ptr = static_cast<const morphizen::Node*>(
+          from_idx.to_morphizen_core_node_ptr());
+      const auto* to_ptr = static_cast<const morphizen::Node*>(
+          to_idx.to_morphizen_core_node_ptr());
       return comp(from_ptr, to_ptr);
     }
     : std::function<bool(const morphizen::NodeIndex&,
@@ -1298,10 +1309,10 @@ static void initialize_dummy_api() {
     auto morphizen_stop =
         stop ? [&stop](const morphizen::NodeIndex& from_idx,
                        const morphizen::NodeIndex& to_idx) -> bool {
-      const auto* from_ptr =
-          static_cast<const morphizen::Node*>(from_idx.to_vaip_core_node_ptr());
-      const auto* to_ptr =
-          static_cast<const morphizen::Node*>(to_idx.to_vaip_core_node_ptr());
+      const auto* from_ptr = static_cast<const morphizen::Node*>(
+          from_idx.to_morphizen_core_node_ptr());
+      const auto* to_ptr = static_cast<const morphizen::Node*>(
+          to_idx.to_morphizen_core_node_ptr());
       return stop(from_ptr, to_ptr);
     }
     : std::function<bool(const morphizen::NodeIndex&,
