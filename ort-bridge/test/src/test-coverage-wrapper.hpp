@@ -31,7 +31,7 @@ DEF_ENV_PARAM_2(
 namespace morphizen {
 // defined in onnx-ir-imp/src/vaip-ort-api.cpp
 const morphizen::OrtApiForMorphizen*
-get_global_vaip_ort_api(const char* ir_backend_name);
+get_global_morphizen_ort_api(const char* ir_backend_name);
 
 namespace test {
 
@@ -44,15 +44,15 @@ namespace test {
  * @param original_api The original OrtApiForMorphizen instance to wrap
  * @return OrtApiForMorphizen* Wrapped API instance for testing
  */
-morphizen::OrtApiForMorphizen*
-get_vaip_ort_api_for_coverage_test(morphizen::OrtApiForMorphizen* original_api);
+morphizen::OrtApiForMorphizen* get_morphizen_ort_api_for_coverage_test(
+    morphizen::OrtApiForMorphizen* original_api);
 
 /**
  * @brief Delete the test coverage wrapper
  *
  * @param wrapped_api The wrapped API instance to delete
  */
-void delete_vaip_ort_api_coverage_test(
+void delete_morphizen_ort_api_coverage_test(
     morphizen::OrtApiForMorphizen* wrapped_api);
 
 /**
@@ -61,12 +61,12 @@ void delete_vaip_ort_api_coverage_test(
  * @return std::map<std::string, size_t> Map of API function names to call
  * counts
  */
-std::map<std::string, size_t> get_vaip_ort_api_call_statistics();
+std::map<std::string, size_t> get_morphizen_ort_api_call_statistics();
 
 /**
  * @brief Reset API call statistics
  */
-void reset_vaip_ort_api_call_statistics();
+void reset_morphizen_ort_api_call_statistics();
 
 class TestCoverageWrapperTest : public ::testing::Test {
 protected:
@@ -81,9 +81,9 @@ protected:
     }
     // Get the original API
     original_api_ = const_cast<morphizen::OrtApiForMorphizen*>(
-        morphizen::get_global_vaip_ort_api(backend_.c_str()));
+        morphizen::get_global_morphizen_ort_api(backend_.c_str()));
     // Create the coverage wrapper
-    wrapped_api_ = get_vaip_ort_api_for_coverage_test(original_api_);
+    wrapped_api_ = get_morphizen_ort_api_for_coverage_test(original_api_);
     ASSERT_NE(wrapped_api_, nullptr);
     morphizen::set_the_global_api(wrapped_api_);
   }
@@ -91,7 +91,7 @@ protected:
   void TearDown() override {
     // Clean up the wrapper and print statistics
     if (wrapped_api_) {
-      delete_vaip_ort_api_coverage_test(wrapped_api_);
+      delete_morphizen_ort_api_coverage_test(wrapped_api_);
       wrapped_api_ = nullptr;
     }
   }

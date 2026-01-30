@@ -65,7 +65,7 @@ tensor_proto_new_with_raw_data(const std::string& name,
 }
 
 // Initialize the global API instance with dummy implementations
-MorphizenOrtApiExt the_instance_of_vaip_ort_api;
+MorphizenOrtApiExt the_instance_of_morphizen_ort_api;
 
 // Static initialization function to populate the API structure
 static void initialize_dummy_api() {
@@ -74,26 +74,27 @@ static void initialize_dummy_api() {
     return;
 
   // Version and magic fields for compatibility checking
-  the_instance_of_vaip_ort_api.magic = 0x50494156; // 'VAIP' in little endian
-  the_instance_of_vaip_ort_api.major = MORPHIZEN_ORT_API_MAJOR;
-  the_instance_of_vaip_ort_api.minor = MORPHIZEN_ORT_API_MINOR;
-  the_instance_of_vaip_ort_api.patch = MORPHIZEN_ORT_API_PATCH;
+  the_instance_of_morphizen_ort_api.magic =
+      0x50494156; // 'VAIP' in little endian
+  the_instance_of_morphizen_ort_api.major = MORPHIZEN_ORT_API_MAJOR;
+  the_instance_of_morphizen_ort_api.minor = MORPHIZEN_ORT_API_MINOR;
+  the_instance_of_morphizen_ort_api.patch = MORPHIZEN_ORT_API_PATCH;
 
   // Core pointers
-  the_instance_of_vaip_ort_api.host_ =
+  the_instance_of_morphizen_ort_api.host_ =
       (onnxruntime::ProviderHost*)(void*)1; // it is not in-use
 #ifdef ORT_API_VERSION
-  the_instance_of_vaip_ort_api.ort_api_ = &Ort::GetApi();
+  the_instance_of_morphizen_ort_api.ort_api_ = &Ort::GetApi();
 #else
-  the_instance_of_vaip_ort_api.ort_api_ = nullptr;
+  the_instance_of_morphizen_ort_api.ort_api_ = nullptr;
 #endif // Model API functions [0-6]
-  the_instance_of_vaip_ort_api.model_load =
+  the_instance_of_morphizen_ort_api.model_load =
       [](const std::string& file) -> morphizen::Model* {
     auto model = morphizen::Model::load(file);
     return reinterpret_cast<morphizen::Model*>(model.release());
   };
 
-  the_instance_of_vaip_ort_api.model_delete =
+  the_instance_of_morphizen_ort_api.model_delete =
       [](morphizen::Model* model) -> void {
     if (model) {
       auto* morphizen_model = reinterpret_cast<morphizen::Model*>(model);
@@ -101,28 +102,28 @@ static void initialize_dummy_api() {
     }
   };
 
-  the_instance_of_vaip_ort_api.model_clone =
+  the_instance_of_morphizen_ort_api.model_clone =
       [](const morphizen::Model& model,
          int64_t external_data_threshold) -> morphizen::Model* {
     auto* morphizen_model = reinterpret_cast<const morphizen::Model*>(&model);
     auto cloned_model = morphizen_model->clone(external_data_threshold);
     return reinterpret_cast<morphizen::Model*>(cloned_model.release());
   };
-  the_instance_of_vaip_ort_api.model_main_graph =
+  the_instance_of_morphizen_ort_api.model_main_graph =
       [](morphizen::Model& model) -> morphizen::Graph& {
     auto morphizen_model = reinterpret_cast<morphizen::Model*>(&model);
     return const_cast<morphizen::Graph&>(
         *reinterpret_cast<const morphizen::Graph*>(
             &morphizen_model->main_graph()));
   };
-  the_instance_of_vaip_ort_api.model_set_meta_data =
+  the_instance_of_morphizen_ort_api.model_set_meta_data =
       [](morphizen::Model& model, const std::string& key,
          const std::string& value) -> void {
     auto* morphizen_model = reinterpret_cast<morphizen::Model*>(&model);
     morphizen_model->set_metadata_prop(key, value);
   };
 
-  the_instance_of_vaip_ort_api.model_get_meta_data =
+  the_instance_of_morphizen_ort_api.model_get_meta_data =
       [](const morphizen::Model& model,
          const std::string& key) -> morphizen::DllSafe<std::string> {
     auto* morphizen_model = reinterpret_cast<const morphizen::Model*>(&model);
@@ -130,24 +131,24 @@ static void initialize_dummy_api() {
     return morphizen::DllSafe<std::string>(new std::string(std::move(value)));
   };
 
-  the_instance_of_vaip_ort_api.model_has_meta_data =
+  the_instance_of_morphizen_ort_api.model_has_meta_data =
       [](const morphizen::Model& model, const std::string& key) -> int {
     auto* morphizen_model = reinterpret_cast<const morphizen::Model*>(&model);
     return morphizen_model->has_metadata_prop(key) ? 1 : 0;
   };
   // Graph API functions [7-23]
-  the_instance_of_vaip_ort_api.graph_get_name =
+  the_instance_of_morphizen_ort_api.graph_get_name =
       [](const morphizen::Graph& graph) -> const std::string& {
     auto* morphizen_graph = reinterpret_cast<const morphizen::Graph*>(&graph);
     return morphizen_graph->get_name();
   };
 
-  the_instance_of_vaip_ort_api.graph_get_model =
+  the_instance_of_morphizen_ort_api.graph_get_model =
       [](const morphizen::Graph& graph) -> const morphizen::Model& {
     return *reinterpret_cast<const morphizen::Model*>(
         &reinterpret_cast<const morphizen::Graph*>(&graph)->get_model());
   };
-  the_instance_of_vaip_ort_api.graph_nodes_unsafe =
+  the_instance_of_morphizen_ort_api.graph_nodes_unsafe =
       [](const morphizen::Graph& graph)
       -> morphizen::DllSafe<std::vector<const morphizen::Node*>> {
     auto* morphizen_graph = reinterpret_cast<const morphizen::Graph*>(&graph);
@@ -162,7 +163,7 @@ static void initialize_dummy_api() {
     }
     return morphizen::DllSafe<std::vector<const morphizen::Node*>>(result);
   };
-  the_instance_of_vaip_ort_api.graph_get_inputs_unsafe =
+  the_instance_of_morphizen_ort_api.graph_get_inputs_unsafe =
       [](const morphizen::Graph& graph)
       -> morphizen::DllSafe<std::vector<const morphizen::NodeArg*>> {
     auto* morphizen_graph = reinterpret_cast<const morphizen::Graph*>(&graph);
@@ -178,7 +179,7 @@ static void initialize_dummy_api() {
     }
     return morphizen::DllSafe<std::vector<const morphizen::NodeArg*>>(result);
   };
-  the_instance_of_vaip_ort_api.graph_get_outputs_unsafe =
+  the_instance_of_morphizen_ort_api.graph_get_outputs_unsafe =
       [](const morphizen::Graph& graph)
       -> morphizen::DllSafe<std::vector<const morphizen::NodeArg*>> {
     auto* morphizen_graph = reinterpret_cast<const morphizen::Graph*>(&graph);
@@ -194,7 +195,7 @@ static void initialize_dummy_api() {
     }
     return morphizen::DllSafe<std::vector<const morphizen::NodeArg*>>(result);
   };
-  the_instance_of_vaip_ort_api.graph_set_outputs =
+  the_instance_of_morphizen_ort_api.graph_set_outputs =
       [](morphizen::Graph& graph,
          gsl::span<const morphizen::NodeArg* const> outputs) -> void {
     auto* morphizen_graph = reinterpret_cast<morphizen::Graph*>(&graph);
@@ -212,7 +213,7 @@ static void initialize_dummy_api() {
     morphizen_graph->set_outputs(
         gsl::span<const NodeArgIndex>(converted_outputs));
   };
-  the_instance_of_vaip_ort_api.graph_get_node =
+  the_instance_of_morphizen_ort_api.graph_get_node =
       [](const morphizen::Graph& graph,
          size_t index) -> const morphizen::Node* {
     auto* morphizen_graph = reinterpret_cast<const morphizen::Graph*>(&graph);
@@ -226,7 +227,7 @@ static void initialize_dummy_api() {
     return static_cast<const morphizen::Node*>(
         node_index.to_morphizen_core_node_ptr());
   };
-  the_instance_of_vaip_ort_api.graph_producer_node =
+  the_instance_of_morphizen_ort_api.graph_producer_node =
       [](const morphizen::Graph& graph,
          const std::string& node_arg_name) -> const morphizen::Node* {
     auto* morphizen_graph = reinterpret_cast<const morphizen::Graph*>(&graph);
@@ -234,7 +235,7 @@ static void initialize_dummy_api() {
     return static_cast<const morphizen::Node*>(
         result.to_morphizen_core_node_ptr());
   };
-  the_instance_of_vaip_ort_api.graph_get_node_arg =
+  the_instance_of_morphizen_ort_api.graph_get_node_arg =
       [](const morphizen::Graph& graph,
          const std::string& name) -> const morphizen::NodeArg* {
     auto* morphizen_graph = reinterpret_cast<const morphizen::Graph*>(&graph);
@@ -242,7 +243,7 @@ static void initialize_dummy_api() {
     return static_cast<const morphizen::NodeArg*>(
         result.to_morphizen_core_node_arg_ptr());
   };
-  the_instance_of_vaip_ort_api.graph_get_all_initialized_tensors =
+  the_instance_of_morphizen_ort_api.graph_get_all_initialized_tensors =
       [](const morphizen::Graph& graph)
       -> const morphizen::InitializedTensorSet& {
     auto* morphizen_graph = reinterpret_cast<const morphizen::Graph*>(&graph);
@@ -250,7 +251,7 @@ static void initialize_dummy_api() {
     return reinterpret_cast<const morphizen::InitializedTensorSet&>(result);
   };
 
-  the_instance_of_vaip_ort_api.graph_remove_node =
+  the_instance_of_morphizen_ort_api.graph_remove_node =
       [](morphizen::Graph& graph,
          const morphizen::NodeInput& node_input) -> void {
     auto* morphizen_graph = reinterpret_cast<morphizen::Graph*>(&graph);
@@ -258,7 +259,7 @@ static void initialize_dummy_api() {
     morphizen_graph->remove_node(
         NodeIndex::from_morphizen_core_node_ptr(node_input.node));
   };
-  the_instance_of_vaip_ort_api.graph_add_node =
+  the_instance_of_morphizen_ort_api.graph_add_node =
       [](morphizen::Graph& graph, const std::string& name,
          const std::string& op_type, const std::string& description,
          const std::vector<const morphizen::NodeArg*>& input_args,
@@ -296,7 +297,7 @@ static void initialize_dummy_api() {
         result.to_morphizen_core_node_ptr()));
   };
 
-  the_instance_of_vaip_ort_api.graph_save =
+  the_instance_of_morphizen_ort_api.graph_save =
       [](const morphizen::Graph& graph, const std::string& filename,
          const std::string& dat_filename,
          size_t external_data_threshold) -> void {
@@ -305,7 +306,7 @@ static void initialize_dummy_api() {
   };
 
 #if MORPHIZEN_ORT_API_MAJOR >= 18
-  the_instance_of_vaip_ort_api.graph_save_string =
+  the_instance_of_morphizen_ort_api.graph_save_string =
       [](const morphizen::Graph& graph) -> morphizen::DllSafe<std::string> {
     auto* morphizen_graph = reinterpret_cast<const morphizen::Graph*>(&graph);
     auto model_string = morphizen_graph->save_string();
@@ -314,7 +315,7 @@ static void initialize_dummy_api() {
   };
 #endif // MORPHIZEN_ORT_API_MAJOR >= 18
 
-  the_instance_of_vaip_ort_api.graph_fuse =
+  the_instance_of_morphizen_ort_api.graph_fuse =
       [](morphizen::Graph& graph, const std::string& name,
          const std::string& op_type, const std::vector<size_t>& nodes,
          const std::vector<std::string>& inputs,
@@ -328,12 +329,12 @@ static void initialize_dummy_api() {
         node_index.to_morphizen_core_node_ptr()));
   };
 
-  the_instance_of_vaip_ort_api.graph_resolve = [](morphizen::Graph& graph,
-                                                  bool force) -> int {
+  the_instance_of_morphizen_ort_api.graph_resolve = [](morphizen::Graph& graph,
+                                                       bool force) -> int {
     auto* morphizen_graph = reinterpret_cast<morphizen::Graph*>(&graph);
     return morphizen_graph->resolve(force);
   };
-  the_instance_of_vaip_ort_api.graph_get_consumer_nodes_unsafe =
+  the_instance_of_morphizen_ort_api.graph_get_consumer_nodes_unsafe =
       [](const morphizen::Graph& graph, const std::string& node_arg_name)
       -> morphizen::DllSafe<std::vector<const morphizen::Node*>> {
     auto* morphizen_graph = reinterpret_cast<const morphizen::Graph*>(&graph);
@@ -348,7 +349,7 @@ static void initialize_dummy_api() {
     }
     return morphizen::DllSafe<std::vector<const morphizen::Node*>>(result);
   };
-  the_instance_of_vaip_ort_api.graph_reverse_dfs_from =
+  the_instance_of_morphizen_ort_api.graph_reverse_dfs_from =
       [](const morphizen::Graph& graph,
          gsl::span<const morphizen::Node* const> from,
          const std::function<void(const morphizen::Node*)>& enter,
@@ -404,36 +405,36 @@ static void initialize_dummy_api() {
         nullptr, stop_wrapper, include_staging_graph);
   };
   // Node API functions [24-33]
-  the_instance_of_vaip_ort_api.node_get_name =
+  the_instance_of_morphizen_ort_api.node_get_name =
       [](const morphizen::Node& node) -> const std::string& {
     // Convert morphizen::Node to NodeIndex and get the node name
     auto node_index = NodeIndex::from_morphizen_core_node_ptr(&node);
     return node_index.get_name();
   };
-  the_instance_of_vaip_ort_api.node_description =
+  the_instance_of_morphizen_ort_api.node_description =
       [](const morphizen::Node& node) -> const std::string& {
     // Convert morphizen::Node to NodeIndex and get the description
     auto node_index = NodeIndex::from_morphizen_core_node_ptr(&node);
     return node_index.get_description();
   };
-  the_instance_of_vaip_ort_api.node_get_index =
+  the_instance_of_morphizen_ort_api.node_get_index =
       [](const morphizen::Node& node) -> size_t {
     return reinterpret_cast<size_t>(&node);
   };
-  the_instance_of_vaip_ort_api.node_op_type =
+  the_instance_of_morphizen_ort_api.node_op_type =
       [](const morphizen::Node& node) -> const std::string& {
     // Convert morphizen::Node to NodeIndex and get the op type
     auto node_index = NodeIndex::from_morphizen_core_node_ptr(&node);
     return node_index.get_node_op_type();
   };
 
-  the_instance_of_vaip_ort_api.node_op_domain =
+  the_instance_of_morphizen_ort_api.node_op_domain =
       [](const morphizen::Node& node) -> const std::string& {
     // Convert morphizen::Node to NodeIndex and get the op domain
     auto node_index = NodeIndex::from_morphizen_core_node_ptr(&node);
     return node_index.get_node_op_domain();
   };
-  the_instance_of_vaip_ort_api.node_get_inputs_unsafe =
+  the_instance_of_morphizen_ort_api.node_get_inputs_unsafe =
       [](const morphizen::Node& node)
       -> morphizen::DllSafe<std::vector<morphizen::NodeInput>> {
     auto node_index = NodeIndex::from_morphizen_core_node_ptr(&node);
@@ -459,7 +460,7 @@ static void initialize_dummy_api() {
     }
     return morphizen::DllSafe<std::vector<morphizen::NodeInput>>(result);
   };
-  the_instance_of_vaip_ort_api.node_get_output_node_args_unsafe =
+  the_instance_of_morphizen_ort_api.node_get_output_node_args_unsafe =
       [](const morphizen::Node& node)
       -> morphizen::DllSafe<std::vector<const morphizen::NodeArg*>> {
     auto node_index = NodeIndex::from_morphizen_core_node_ptr(&node);
@@ -474,7 +475,7 @@ static void initialize_dummy_api() {
         std::move(ret));
   };
 
-  the_instance_of_vaip_ort_api.node_get_attributes =
+  the_instance_of_morphizen_ort_api.node_get_attributes =
       [](morphizen::Node& node) -> morphizen::NodeAttributes& {
     auto morphizen_node_index = NodeIndex::from_morphizen_core_node_ptr(&node);
     auto result = morphizen_node_index.get_attributes();
@@ -484,7 +485,7 @@ static void initialize_dummy_api() {
         *reinterpret_cast<const morphizen::NodeAttributes*>(result));
   };
 
-  the_instance_of_vaip_ort_api.node_get_function_body =
+  the_instance_of_morphizen_ort_api.node_get_function_body =
       [](const morphizen::Node& node) -> const morphizen::Graph& {
     auto morphizen_node_index = NodeIndex::from_morphizen_core_node_ptr(&node);
 
@@ -492,7 +493,7 @@ static void initialize_dummy_api() {
         morphizen_node_index.get_function_body());
   };
 
-  the_instance_of_vaip_ort_api.node_type_is_fused =
+  the_instance_of_morphizen_ort_api.node_type_is_fused =
       [](const morphizen::Node& node) -> bool {
     // Convert morphizen::Node to NodeIndex and check if it is fused
     auto node_index = NodeIndex::from_morphizen_core_node_ptr(&node);
@@ -507,7 +508,7 @@ static void initialize_dummy_api() {
   // to nullptr and add them as needed
 
   // NodeArg API functions [34-45]
-  the_instance_of_vaip_ort_api.node_arg_get_name_unsafe =
+  the_instance_of_morphizen_ort_api.node_arg_get_name_unsafe =
       [](const morphizen::NodeArg& node_arg) -> const std::string& {
     // Convert the morphizen::NodeArg reference to NodeArgIndex
     auto node_arg_index =
@@ -518,7 +519,7 @@ static void initialize_dummy_api() {
         << "NodeArgIndex::get_name_unsafe() returned nullptr";
     return *name;
   };
-  the_instance_of_vaip_ort_api.node_arg_is_exists =
+  the_instance_of_morphizen_ort_api.node_arg_is_exists =
       [](const morphizen::NodeArg& node_arg) -> bool {
     // Convert the morphizen::NodeArg reference to NodeArgIndex
     auto node_arg_index =
@@ -527,14 +528,14 @@ static void initialize_dummy_api() {
     return node_arg_index.exists();
   };
 
-  the_instance_of_vaip_ort_api.node_arg_is_constant =
+  the_instance_of_morphizen_ort_api.node_arg_is_constant =
       [](const morphizen::Graph& /*graph*/,
          const morphizen::NodeArg& node_arg) -> bool {
     auto node_arg_index =
         NodeArgIndex::from_morphizen_core_node_arg_ptr(&node_arg);
     return node_arg_index.is_valid_initializer();
   };
-  the_instance_of_vaip_ort_api.node_arg_clone =
+  the_instance_of_morphizen_ort_api.node_arg_clone =
       [](morphizen::Graph& graph, const morphizen::NodeArg& node_arg,
          const std::string& name) -> morphizen::NodeArg& {
     auto* morphizen_graph = reinterpret_cast<morphizen::Graph*>(&graph);
@@ -545,7 +546,7 @@ static void initialize_dummy_api() {
     return *reinterpret_cast<morphizen::NodeArg*>(cloned_arg);
   };
 
-  the_instance_of_vaip_ort_api.node_arg_new =
+  the_instance_of_morphizen_ort_api.node_arg_new =
       [](morphizen::Graph& graph, const std::string& name,
          const std::vector<int64_t>* shape,
          int element_type) -> morphizen::NodeArg& {
@@ -557,7 +558,7 @@ static void initialize_dummy_api() {
     return *const_cast<morphizen::NodeArg*>(node_arg_ptr);
   };
 
-  the_instance_of_vaip_ort_api.node_arg_get_shape_i64_unsafe =
+  the_instance_of_morphizen_ort_api.node_arg_get_shape_i64_unsafe =
       [](const morphizen::NodeArg& node_arg)
       -> morphizen::DllSafe<std::vector<int64_t>> {
     // convert the morphizen::NodeArg reference to NodeArgIndex
@@ -569,7 +570,7 @@ static void initialize_dummy_api() {
     return morphizen::DllSafe<std::vector<int64_t>>(shape);
   };
 
-  the_instance_of_vaip_ort_api.node_arg_get_denotation_unsafe =
+  the_instance_of_morphizen_ort_api.node_arg_get_denotation_unsafe =
       [](const morphizen::NodeArg& node_arg)
       -> morphizen::DllSafe<std::vector<std::string>> {
     // convert the morphizen::NodeArg reference to NodeArgIndex
@@ -584,7 +585,7 @@ static void initialize_dummy_api() {
     return morphizen::DllSafe<std::vector<std::string>>(denotation);
   };
   // for graph inputs only (batch size)
-  the_instance_of_vaip_ort_api.node_arg_set_shape_i64 =
+  the_instance_of_morphizen_ort_api.node_arg_set_shape_i64 =
       [](const morphizen::NodeArg& node_arg,
          const std::vector<int64_t>& shape) -> void {
     // convert the morphizen::NodeArg reference to NodeArgIndex
@@ -594,7 +595,7 @@ static void initialize_dummy_api() {
     node_arg_index.set_shape_i64(shape);
   };
 
-  the_instance_of_vaip_ort_api.node_arg_set_denotation =
+  the_instance_of_morphizen_ort_api.node_arg_set_denotation =
       [](const morphizen::NodeArg& node_arg,
          const std::vector<std::string>& denotation) -> void {
     // convert the morphizen::NodeArg reference to NodeArgIndex
@@ -604,19 +605,19 @@ static void initialize_dummy_api() {
     node_arg_index.set_denotation(denotation);
   };
 
-  the_instance_of_vaip_ort_api.node_arg_get_element_type =
+  the_instance_of_morphizen_ort_api.node_arg_get_element_type =
       [](const morphizen::NodeArg& node_arg) -> int {
     auto node_arg_index =
         NodeArgIndex::from_morphizen_core_node_arg_ptr(&node_arg);
     return node_arg_index.get_element_type();
   };
 
-  the_instance_of_vaip_ort_api.node_arg_set_element_type =
+  the_instance_of_morphizen_ort_api.node_arg_set_element_type =
       [](morphizen::NodeArg& /*node_arg*/, int /*data_type*/) -> void {
     // WARNING: this function is not in use.
     LOG(FATAL) << "node_arg_set_element_type is not implemented yet";
   };
-  the_instance_of_vaip_ort_api.node_arg_get_const_data_as_tensor =
+  the_instance_of_morphizen_ort_api.node_arg_get_const_data_as_tensor =
       [](const morphizen::Graph& graph,
          const morphizen::NodeArg& node_arg) -> const morphizen::TensorProto& {
     auto* morphizen_graph = reinterpret_cast<const morphizen::Graph*>(&graph);
@@ -629,14 +630,14 @@ static void initialize_dummy_api() {
   };
 
   // NodeAttributes API functions [46-50]
-  the_instance_of_vaip_ort_api.node_attributes_new =
+  the_instance_of_morphizen_ort_api.node_attributes_new =
       []() -> morphizen::NodeAttributes* {
     auto* attrs = new google::protobuf::RepeatedPtrField<
         morphizen_onnx::AttributeProto>();
     return reinterpret_cast<morphizen::NodeAttributes*>(attrs);
   };
 
-  the_instance_of_vaip_ort_api.node_attributes_delete =
+  the_instance_of_morphizen_ort_api.node_attributes_delete =
       [](morphizen::NodeAttributes* p) -> void {
     if (p) {
       auto* attrs = reinterpret_cast<
@@ -646,7 +647,7 @@ static void initialize_dummy_api() {
     }
   };
 
-  the_instance_of_vaip_ort_api.node_attributes_add =
+  the_instance_of_morphizen_ort_api.node_attributes_add =
       [](morphizen::NodeAttributes& p,
          morphizen::AttributeProto&& attr) -> void {
     auto* attrs = reinterpret_cast<
@@ -669,7 +670,7 @@ static void initialize_dummy_api() {
     }
   };
 
-  the_instance_of_vaip_ort_api.node_attributes_get =
+  the_instance_of_morphizen_ort_api.node_attributes_get =
       [](const morphizen::NodeAttributes& p,
          const std::string& name) -> const morphizen::AttributeProto* {
     auto* attrs = reinterpret_cast<const google::protobuf::RepeatedPtrField<
@@ -682,7 +683,7 @@ static void initialize_dummy_api() {
     return nullptr;
   };
 
-  the_instance_of_vaip_ort_api.node_attributes_get_keys =
+  the_instance_of_morphizen_ort_api.node_attributes_get_keys =
       [](morphizen::NodeAttributes& p)
       -> morphizen::DllSafe<std::vector<std::string>> {
     auto* attrs = reinterpret_cast<
@@ -698,7 +699,7 @@ static void initialize_dummy_api() {
   };
 
   // AttributeProto API functions [51-69]
-  the_instance_of_vaip_ort_api.attr_proto_delete =
+  the_instance_of_morphizen_ort_api.attr_proto_delete =
       [](morphizen::AttributeProto* attr) -> void {
     if (attr) {
       auto* morphizen_attr =
@@ -707,7 +708,7 @@ static void initialize_dummy_api() {
     }
   };
 
-  the_instance_of_vaip_ort_api.attr_proto_clone =
+  the_instance_of_morphizen_ort_api.attr_proto_clone =
       [](const morphizen::AttributeProto& attr) -> morphizen::AttributeProto* {
     auto* morphizen_attr =
         reinterpret_cast<const morphizen_onnx::AttributeProto*>(&attr);
@@ -715,28 +716,28 @@ static void initialize_dummy_api() {
     return reinterpret_cast<morphizen::AttributeProto*>(cloned_attr);
   };
 
-  the_instance_of_vaip_ort_api.attr_proto_get_name =
+  the_instance_of_morphizen_ort_api.attr_proto_get_name =
       [](const morphizen::AttributeProto& attr) -> const std::string& {
     auto* morphizen_attr =
         reinterpret_cast<const morphizen_onnx::AttributeProto*>(&attr);
     return morphizen_attr->name();
   };
 
-  the_instance_of_vaip_ort_api.attr_proto_get_type =
+  the_instance_of_morphizen_ort_api.attr_proto_get_type =
       [](const morphizen::AttributeProto& attr) -> int {
     auto* morphizen_attr =
         reinterpret_cast<const morphizen_onnx::AttributeProto*>(&attr);
     return morphizen_attr->type();
   };
 
-  the_instance_of_vaip_ort_api.attr_proto_set_name =
+  the_instance_of_morphizen_ort_api.attr_proto_set_name =
       [](morphizen::AttributeProto* attr, const std::string& name) -> void {
     auto* morphizen_attr =
         reinterpret_cast<morphizen_onnx::AttributeProto*>(attr);
     morphizen_attr->set_name(name);
   };
 
-  the_instance_of_vaip_ort_api.attr_proto_new_int =
+  the_instance_of_morphizen_ort_api.attr_proto_new_int =
       [](const std::string& name, int64_t value) -> morphizen::AttributeProto* {
     auto* attr = new morphizen_onnx::AttributeProto();
     attr->set_name(name);
@@ -745,7 +746,7 @@ static void initialize_dummy_api() {
     return reinterpret_cast<morphizen::AttributeProto*>(attr);
   };
 
-  the_instance_of_vaip_ort_api.attr_proto_new_float =
+  the_instance_of_morphizen_ort_api.attr_proto_new_float =
       [](const std::string& name, float value) -> morphizen::AttributeProto* {
     auto* attr = new morphizen_onnx::AttributeProto();
     attr->set_name(name);
@@ -754,7 +755,7 @@ static void initialize_dummy_api() {
     return reinterpret_cast<morphizen::AttributeProto*>(attr);
   };
 
-  the_instance_of_vaip_ort_api.attr_proto_new_string =
+  the_instance_of_morphizen_ort_api.attr_proto_new_string =
       [](const std::string& name,
          const std::string& value) -> morphizen::AttributeProto* {
     auto* attr = new morphizen_onnx::AttributeProto();
@@ -764,7 +765,7 @@ static void initialize_dummy_api() {
     return reinterpret_cast<morphizen::AttributeProto*>(attr);
   };
 
-  the_instance_of_vaip_ort_api.attr_proto_new_tensor =
+  the_instance_of_morphizen_ort_api.attr_proto_new_tensor =
       [](const std::string& name,
          const morphizen::TensorProto& value) -> morphizen::AttributeProto* {
     auto* attr = new morphizen_onnx::AttributeProto();
@@ -776,7 +777,7 @@ static void initialize_dummy_api() {
     return reinterpret_cast<morphizen::AttributeProto*>(attr);
   };
 
-  the_instance_of_vaip_ort_api.attr_proto_new_ints =
+  the_instance_of_morphizen_ort_api.attr_proto_new_ints =
       [](const std::string& name,
          const std::vector<int64_t>& value) -> morphizen::AttributeProto* {
     auto* attr = new morphizen_onnx::AttributeProto();
@@ -788,7 +789,7 @@ static void initialize_dummy_api() {
     return reinterpret_cast<morphizen::AttributeProto*>(attr);
   };
 
-  the_instance_of_vaip_ort_api.attr_proto_new_floats =
+  the_instance_of_morphizen_ort_api.attr_proto_new_floats =
       [](const std::string& name,
          const std::vector<float>& value) -> morphizen::AttributeProto* {
     auto* attr = new morphizen_onnx::AttributeProto();
@@ -800,7 +801,7 @@ static void initialize_dummy_api() {
     return reinterpret_cast<morphizen::AttributeProto*>(attr);
   };
 
-  the_instance_of_vaip_ort_api.attr_proto_new_strings =
+  the_instance_of_morphizen_ort_api.attr_proto_new_strings =
       [](const std::string& name,
          const std::vector<std::string>& value) -> morphizen::AttributeProto* {
     auto* attr = new morphizen_onnx::AttributeProto();
@@ -812,7 +813,7 @@ static void initialize_dummy_api() {
     return reinterpret_cast<morphizen::AttributeProto*>(attr);
   };
 
-  the_instance_of_vaip_ort_api.attr_proto_get_int =
+  the_instance_of_morphizen_ort_api.attr_proto_get_int =
       [](const morphizen::AttributeProto& attr) -> int64_t {
     auto* morphizen_attr =
         reinterpret_cast<const morphizen_onnx::AttributeProto*>(&attr);
@@ -822,7 +823,7 @@ static void initialize_dummy_api() {
     return morphizen_attr->i();
   };
 
-  the_instance_of_vaip_ort_api.attr_proto_get_float =
+  the_instance_of_morphizen_ort_api.attr_proto_get_float =
       [](const morphizen::AttributeProto& attr) -> float {
     auto* morphizen_attr =
         reinterpret_cast<const morphizen_onnx::AttributeProto*>(&attr);
@@ -832,7 +833,7 @@ static void initialize_dummy_api() {
     return morphizen_attr->f();
   };
 
-  the_instance_of_vaip_ort_api.attr_proto_get_string =
+  the_instance_of_morphizen_ort_api.attr_proto_get_string =
       [](const morphizen::AttributeProto& attr) -> const std::string& {
     auto* morphizen_attr =
         reinterpret_cast<const morphizen_onnx::AttributeProto*>(&attr);
@@ -841,7 +842,7 @@ static void initialize_dummy_api() {
     CHECK_EQ(morphizen_attr->type(), morphizen_onnx::AttributeProto::STRING);
     return morphizen_attr->s();
   };
-  the_instance_of_vaip_ort_api.attr_proto_get_tensor =
+  the_instance_of_morphizen_ort_api.attr_proto_get_tensor =
       [](const morphizen::AttributeProto& attr)
       -> const morphizen::TensorProto& {
     auto* morphizen_attr =
@@ -853,7 +854,7 @@ static void initialize_dummy_api() {
         &morphizen_attr->t());
   };
 
-  the_instance_of_vaip_ort_api.attr_proto_get_ints =
+  the_instance_of_morphizen_ort_api.attr_proto_get_ints =
       [](const morphizen::AttributeProto& attr) -> gsl::span<const int64_t> {
     auto* morphizen_attr =
         reinterpret_cast<const morphizen_onnx::AttributeProto*>(&attr);
@@ -863,7 +864,7 @@ static void initialize_dummy_api() {
     return gsl::span<const int64_t>(morphizen_attr->ints());
   };
 
-  the_instance_of_vaip_ort_api.attr_proto_get_floats =
+  the_instance_of_morphizen_ort_api.attr_proto_get_floats =
       [](const morphizen::AttributeProto& attr) -> gsl::span<const float> {
     auto* morphizen_attr =
         reinterpret_cast<const morphizen_onnx::AttributeProto*>(&attr);
@@ -873,7 +874,7 @@ static void initialize_dummy_api() {
     return gsl::span<const float>(morphizen_attr->floats());
   };
 
-  the_instance_of_vaip_ort_api.attr_proto_get_strings =
+  the_instance_of_morphizen_ort_api.attr_proto_get_strings =
       [](const morphizen::AttributeProto& attr) -> std::vector<std::string> {
     auto* morphizen_attr =
         reinterpret_cast<const morphizen_onnx::AttributeProto*>(&attr);
@@ -885,7 +886,7 @@ static void initialize_dummy_api() {
   };
 
   // TensorProto API functions [70-89]
-  the_instance_of_vaip_ort_api.tensor_proto_delete =
+  the_instance_of_morphizen_ort_api.tensor_proto_delete =
       [](morphizen::TensorProto* tp) -> void {
     if (tp) {
       auto* morphizen_tensor =
@@ -894,7 +895,7 @@ static void initialize_dummy_api() {
     }
   };
 
-  the_instance_of_vaip_ort_api.tensor_proto_get_shape_unsafe =
+  the_instance_of_morphizen_ort_api.tensor_proto_get_shape_unsafe =
       [](const morphizen::TensorProto& tensor_proto)
       -> morphizen::DllSafe<std::vector<int64_t>> {
     auto* morphizen_tensor =
@@ -907,14 +908,14 @@ static void initialize_dummy_api() {
     return morphizen::DllSafe<std::vector<int64_t>>(shape.release());
   };
 
-  the_instance_of_vaip_ort_api.tensor_proto_data_type =
+  the_instance_of_morphizen_ort_api.tensor_proto_data_type =
       [](const morphizen::TensorProto& tensor_proto) -> int {
     auto* morphizen_tensor =
         reinterpret_cast<const morphizen_onnx::TensorProto*>(&tensor_proto);
     return morphizen_tensor->data_type();
   };
 
-  the_instance_of_vaip_ort_api.tensor_proto_new_floats =
+  the_instance_of_morphizen_ort_api.tensor_proto_new_floats =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<float>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data(
@@ -924,7 +925,7 @@ static void initialize_dummy_api() {
         1); // FLOAT = 1
   };
 
-  the_instance_of_vaip_ort_api.tensor_proto_new_i64 =
+  the_instance_of_morphizen_ort_api.tensor_proto_new_i64 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<int64_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data(
@@ -934,7 +935,7 @@ static void initialize_dummy_api() {
         7); // INT64 = 7
   };
 
-  the_instance_of_vaip_ort_api.tensor_proto_new_i32 =
+  the_instance_of_morphizen_ort_api.tensor_proto_new_i32 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<int32_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data(
@@ -944,7 +945,7 @@ static void initialize_dummy_api() {
         6); // INT32 = 6
   };
 
-  the_instance_of_vaip_ort_api.tensor_proto_new_i8 =
+  the_instance_of_morphizen_ort_api.tensor_proto_new_i8 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<int8_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data(
@@ -954,21 +955,21 @@ static void initialize_dummy_api() {
         3); // INT8 = 3
   };
 
-  the_instance_of_vaip_ort_api.tensor_proto_get_name =
+  the_instance_of_morphizen_ort_api.tensor_proto_get_name =
       [](const morphizen::TensorProto& tensor_proto) -> const std::string& {
     auto* morphizen_tensor =
         reinterpret_cast<const morphizen_onnx::TensorProto*>(&tensor_proto);
     return morphizen_tensor->name();
   };
 
-  the_instance_of_vaip_ort_api.tensor_proto_raw_data_size =
+  the_instance_of_morphizen_ort_api.tensor_proto_raw_data_size =
       [](const morphizen::TensorProto& tensor_proto) -> size_t {
     auto* morphizen_tensor =
         reinterpret_cast<const morphizen_onnx::TensorProto*>(&tensor_proto);
     return morphizen_tensor->raw_data().size();
   };
 
-  the_instance_of_vaip_ort_api.tensor_proto_as_raw =
+  the_instance_of_morphizen_ort_api.tensor_proto_as_raw =
       [](const morphizen::Graph& /*graph*/,
          const morphizen::TensorProto& tensor_proto) -> gsl::span<const char> {
     auto* morphizen_tensor =
@@ -978,18 +979,18 @@ static void initialize_dummy_api() {
   };
 
   // Library info functions [80-81]
-  the_instance_of_vaip_ort_api.get_lib_id =
+  the_instance_of_morphizen_ort_api.get_lib_id =
       []() -> morphizen::DllSafe<std::string> {
     return morphizen::DllSafe<std::string>(new std::string("v1.0.0"));
   };
 
-  the_instance_of_vaip_ort_api.get_lib_name =
+  the_instance_of_morphizen_ort_api.get_lib_name =
       []() -> morphizen::DllSafe<std::string> {
     return morphizen::DllSafe<std::string>(
         new std::string("morphizen-onnx-imp"));
   };
   // Additional new API functions [82+]
-  the_instance_of_vaip_ort_api.graph_add_initialized_tensor =
+  the_instance_of_morphizen_ort_api.graph_add_initialized_tensor =
       [](morphizen::Graph& graph,
          const morphizen::TensorProto& tensor) -> void {
     auto* morphizen_graph = reinterpret_cast<morphizen::Graph*>(&graph);
@@ -997,7 +998,7 @@ static void initialize_dummy_api() {
         *reinterpret_cast<const morphizen_onnx::TensorProto*>(&tensor));
   };
 
-  the_instance_of_vaip_ort_api.tensor_proto_new_doubles =
+  the_instance_of_morphizen_ort_api.tensor_proto_new_doubles =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<double>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data(
@@ -1007,7 +1008,7 @@ static void initialize_dummy_api() {
         11); // DOUBLE = 11
   };
 
-  the_instance_of_vaip_ort_api.tensor_proto_new_i16 =
+  the_instance_of_morphizen_ort_api.tensor_proto_new_i16 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<int16_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data(
@@ -1017,7 +1018,7 @@ static void initialize_dummy_api() {
         5); // INT16 = 5
   };
 
-  the_instance_of_vaip_ort_api.tensor_proto_new_u16 =
+  the_instance_of_morphizen_ort_api.tensor_proto_new_u16 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<uint16_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data(
@@ -1027,7 +1028,7 @@ static void initialize_dummy_api() {
         4); // UINT16 = 4
   };
 
-  the_instance_of_vaip_ort_api.tensor_proto_new_u32 =
+  the_instance_of_morphizen_ort_api.tensor_proto_new_u32 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<uint32_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data(
@@ -1037,7 +1038,7 @@ static void initialize_dummy_api() {
         12); // UINT32 = 12
   };
 
-  the_instance_of_vaip_ort_api.tensor_proto_new_u8 =
+  the_instance_of_morphizen_ort_api.tensor_proto_new_u8 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<uint8_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data(
@@ -1047,7 +1048,7 @@ static void initialize_dummy_api() {
         2); // UINT8 = 2
   };
 
-  the_instance_of_vaip_ort_api.tensor_proto_new_u64 =
+  the_instance_of_morphizen_ort_api.tensor_proto_new_u64 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<uint64_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data(
@@ -1057,7 +1058,7 @@ static void initialize_dummy_api() {
         13); // UINT64 = 13
   };
 
-  the_instance_of_vaip_ort_api.tensor_proto_new_fp16 =
+  the_instance_of_morphizen_ort_api.tensor_proto_new_fp16 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<int16_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data(
@@ -1067,7 +1068,7 @@ static void initialize_dummy_api() {
         10); // FLOAT16 = 10
   };
 
-  the_instance_of_vaip_ort_api.tensor_proto_new_bf16 =
+  the_instance_of_morphizen_ort_api.tensor_proto_new_bf16 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<int16_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data(
@@ -1077,13 +1078,13 @@ static void initialize_dummy_api() {
         16); // BFLOAT16 = 16
   };
 
-  the_instance_of_vaip_ort_api.get_model_path =
+  the_instance_of_morphizen_ort_api.get_model_path =
       [](const morphizen::Graph& graph) -> const std::filesystem::path& {
     auto morphizen_graph = reinterpret_cast<const morphizen::Graph*>(&graph);
     return morphizen_graph->get_model_path();
   };
 
-  the_instance_of_vaip_ort_api.create_empty_model =
+  the_instance_of_morphizen_ort_api.create_empty_model =
       [](const std::filesystem::path& path,
          const std::vector<std::pair<std::string, int64_t>>& opset)
       -> morphizen::Model* {
@@ -1132,7 +1133,7 @@ static void initialize_dummy_api() {
     // Release ownership and return as morphizen::Model*
     return reinterpret_cast<morphizen::Model*>(model.release());
   };
-  the_instance_of_vaip_ort_api.graph_set_inputs =
+  the_instance_of_morphizen_ort_api.graph_set_inputs =
       [](morphizen::Graph& graph,
          gsl::span<const morphizen::NodeArg* const> inputs) -> void {
     auto* morphizen_graph = reinterpret_cast<morphizen::Graph*>(&graph);
@@ -1147,7 +1148,7 @@ static void initialize_dummy_api() {
     morphizen_graph->set_inputs(morphizen_inputs);
   };
 
-  the_instance_of_vaip_ort_api.node_arg_external_location =
+  the_instance_of_morphizen_ort_api.node_arg_external_location =
       [](const morphizen::Graph& /*graph*/, const morphizen::NodeArg& node_arg,
          std::string& file, size_t& offset, size_t& size,
          size_t& checksum) -> int {
@@ -1156,14 +1157,14 @@ static void initialize_dummy_api() {
     return node_arg_index.external_location(file, offset, size, checksum);
   };
 
-  the_instance_of_vaip_ort_api.session_option_configuration =
+  the_instance_of_morphizen_ort_api.session_option_configuration =
       [](void* /*mmap*/, void* /*session_option*/,
          void (* /*push*/)(void* /*mmap*/, const char* /*name*/,
                            const char* /*value*/)) -> void {
     // this function is not used in the new ABI flow.
     LOG(WARNING) << "session_option_configuration is not implemented yet";
   };
-  the_instance_of_vaip_ort_api.model_to_proto =
+  the_instance_of_morphizen_ort_api.model_to_proto =
       [](morphizen::Model& model) -> morphizen::ModelProto* {
     auto* morphizen_model = reinterpret_cast<morphizen::Model*>(&model);
     // Return the ModelProto newly created from the morphizen::Model
@@ -1173,7 +1174,7 @@ static void initialize_dummy_api() {
             new morphizen_onnx::ModelProto(morphizen_model->model_proto())));
   };
 
-  the_instance_of_vaip_ort_api.model_proto_serialize_as_string =
+  the_instance_of_morphizen_ort_api.model_proto_serialize_as_string =
       [](morphizen::ModelProto& model_proto)
       -> morphizen::DllSafe<std::string> {
     auto* morphizen_model_proto =
@@ -1188,7 +1189,7 @@ static void initialize_dummy_api() {
         serialized.release()); // Transfer ownership to DllSafe
   };
 
-  the_instance_of_vaip_ort_api.model_proto_delete =
+  the_instance_of_morphizen_ort_api.model_proto_delete =
       [](morphizen::ModelProto* p) -> void {
     if (p) {
       auto* morphizen_model_proto =
@@ -1197,7 +1198,7 @@ static void initialize_dummy_api() {
     }
   };
 
-  the_instance_of_vaip_ort_api.attr_proto_release_string =
+  the_instance_of_morphizen_ort_api.attr_proto_release_string =
       [](morphizen::AttributeProto* attr) -> morphizen::DllSafe<std::string> {
     auto* morphizen_attr =
         reinterpret_cast<morphizen_onnx::AttributeProto*>(attr);
@@ -1206,14 +1207,14 @@ static void initialize_dummy_api() {
     return morphizen::DllSafe<std::string>(morphizen_attr->release_s());
   };
 
-  the_instance_of_vaip_ort_api.is_profiling_enabled =
+  the_instance_of_morphizen_ort_api.is_profiling_enabled =
       [](void* /*session_options*/) -> bool {
     // this function is not in use.
     LOG(WARNING) << "is_profiling_enabled is not implemented yet";
     return false;
   };
 #if MORPHIZEN_ORT_API_MAJOR >= 19
-  the_instance_of_vaip_ort_api.tensor_proto_new_bool =
+  the_instance_of_morphizen_ort_api.tensor_proto_new_bool =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<uint8_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data(
@@ -1224,7 +1225,7 @@ static void initialize_dummy_api() {
   };
 #endif      // MORPHIZEN_ORT_API_MAJOR >= 19
 
-  the_instance_of_vaip_ort_api.tensor_proto_new_i4 =
+  the_instance_of_morphizen_ort_api.tensor_proto_new_i4 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<int8_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data(
@@ -1234,7 +1235,7 @@ static void initialize_dummy_api() {
         22); // INT4 = 22
   };
 
-  the_instance_of_vaip_ort_api.tensor_proto_new_u4 =
+  the_instance_of_morphizen_ort_api.tensor_proto_new_u4 =
       [](const std::string& name, const std::vector<int64_t>& shape,
          const std::vector<uint8_t>& data) -> morphizen::TensorProto* {
     return tensor_proto_new_with_raw_data(
@@ -1251,12 +1252,12 @@ static void initialize_dummy_api() {
   // in vaip pass, create-const-op, we need to remove original initializer
   // otherwise ORT graph resolver will fail because of duplicated node arg
   // names.
-  the_instance_of_vaip_ort_api.graph_remove_initialized_tensor =
+  the_instance_of_morphizen_ort_api.graph_remove_initialized_tensor =
       [](morphizen::Graph& graph, const std::string& tensor_name) -> void {
     auto* morphizen_graph = reinterpret_cast<morphizen::Graph*>(&graph);
     morphizen_graph->remove_initialized_tensor(tensor_name);
   };
-  the_instance_of_vaip_ort_api.graph_reverse_dfs_from_preemp =
+  the_instance_of_morphizen_ort_api.graph_reverse_dfs_from_preemp =
       [](const morphizen::Graph& graph,
          gsl::span<const morphizen::Node* const> from,
          const std::function<bool(const morphizen::Node*)>& enter,
@@ -1326,25 +1327,25 @@ static void initialize_dummy_api() {
         morphizen_leave, morphizen_comp, morphizen_stop, include_staging_graph);
   };
 
-  the_instance_of_vaip_ort_api.graph_set_name = [](morphizen::Graph& graph,
-                                                   const char* name) -> void {
+  the_instance_of_morphizen_ort_api.graph_set_name =
+      [](morphizen::Graph& graph, const char* name) -> void {
     auto* morphizen_graph = reinterpret_cast<morphizen::Graph*>(&graph);
     morphizen_graph->set_graph_name(name);
   };
 
-  the_instance_of_vaip_ort_api.graph_infer_shapes_from_filepath =
+  the_instance_of_morphizen_ort_api.graph_infer_shapes_from_filepath =
       [](const std::string& m, const std::string& save_path) -> void {
     morphizen_onnx::shape_inference::InferShapes(m, save_path);
   };
 
-  the_instance_of_vaip_ort_api.graph_to_graph_proto =
+  the_instance_of_morphizen_ort_api.graph_to_graph_proto =
       [](const morphizen::Graph& graph) -> morphizen::GraphProto* {
     // WARNING: this function is not in use.
     auto* morphizen_graph = reinterpret_cast<const morphizen::Graph*>(&graph);
     return reinterpret_cast<morphizen::GraphProto*>(
         new morphizen_onnx::GraphProto(morphizen_graph->get_graph_proto()));
   };
-  the_instance_of_vaip_ort_api.graph_proto_delete =
+  the_instance_of_morphizen_ort_api.graph_proto_delete =
       [](morphizen::GraphProto* p) -> void {
     // WARNING: this function is not in use.
     auto morphizen_graph_proto =
@@ -1354,14 +1355,14 @@ static void initialize_dummy_api() {
     }
   };
 
-  the_instance_of_vaip_ort_api.graph_infer_shapes =
+  the_instance_of_morphizen_ort_api.graph_infer_shapes =
       [](morphizen::ModelProto& m) -> void {
     auto* morphizen_model_proto =
         reinterpret_cast<morphizen_onnx::ModelProto*>(&m);
     morphizen_onnx::shape_inference::InferShapes(*morphizen_model_proto);
   };
 
-  the_instance_of_vaip_ort_api.tensor_proto_new_with_external_data =
+  the_instance_of_morphizen_ort_api.tensor_proto_new_with_external_data =
       [](const std::string& name, const std::vector<int64_t>& shape,
          int element_type, const std::string& external_data_file, size_t size,
          size_t offset) -> morphizen::TensorProto* {
@@ -1387,7 +1388,7 @@ static void initialize_dummy_api() {
     length_entry->set_value(std::to_string(size));
     return reinterpret_cast<morphizen::TensorProto*>(tensor_proto);
   };
-  the_instance_of_vaip_ort_api.tensor_proto_new_raw_data =
+  the_instance_of_morphizen_ort_api.tensor_proto_new_raw_data =
       [](const std::string& name,           //
          const std::vector<int64_t>& shape, //
          int element_type,                  //
@@ -1411,7 +1412,7 @@ static void initialize_dummy_api() {
 namespace onnx_ir_imp {
 const morphizen::OrtApiForMorphizen* get_vaip_ort_api() {
   initialize_dummy_api();
-  return &the_instance_of_vaip_ort_api;
+  return &the_instance_of_morphizen_ort_api;
 }
 } // namespace onnx_ir_imp
 } // namespace morphizen

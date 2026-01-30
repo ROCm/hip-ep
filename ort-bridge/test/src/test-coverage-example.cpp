@@ -39,7 +39,7 @@ TEST_F(TestCoverageWrapperTest, ApiCallCoverage) {
 
 TEST_F(TestCoverageWrapperTest, MultipleApiCalls) {
   // Reset statistics before testing
-  reset_vaip_ort_api_call_statistics();
+  reset_morphizen_ort_api_call_statistics();
 
   // Test calling the same API multiple times to verify counting
   for (int i = 0; i < 5; ++i) {
@@ -48,7 +48,7 @@ TEST_F(TestCoverageWrapperTest, MultipleApiCalls) {
   }
 
   // Check the statistics programmatically
-  auto stats = get_vaip_ort_api_call_statistics();
+  auto stats = get_morphizen_ort_api_call_statistics();
   EXPECT_EQ(stats["get_lib_id"], 5);
 
   LOG(INFO) << "get_lib_id was called " << stats["get_lib_id"] << " times";
@@ -56,7 +56,7 @@ TEST_F(TestCoverageWrapperTest, MultipleApiCalls) {
 
 TEST_F(TestCoverageWrapperTest, StatisticsAccuracy) {
   // Reset statistics
-  reset_vaip_ort_api_call_statistics();
+  reset_morphizen_ort_api_call_statistics();
 
   // Call different APIs a known number of times
   wrapped_api_->get_lib_id();   // 1 call
@@ -64,7 +64,7 @@ TEST_F(TestCoverageWrapperTest, StatisticsAccuracy) {
   wrapped_api_->get_lib_id();   // 2nd call
 
   // Verify statistics
-  auto stats = get_vaip_ort_api_call_statistics();
+  auto stats = get_morphizen_ort_api_call_statistics();
   EXPECT_EQ(stats["get_lib_id"], 2);
   EXPECT_EQ(stats["get_lib_name"], 1);
 

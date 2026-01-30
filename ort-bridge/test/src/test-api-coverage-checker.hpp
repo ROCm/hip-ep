@@ -21,7 +21,7 @@ namespace test {
  *
  * @return std::vector<std::string> Complete list of API function names
  */
-inline std::vector<std::string> get_all_vaip_ort_api_functions() {
+inline std::vector<std::string> get_all_morphizen_ort_api_functions() {
   return {
     // Model APIs [0-6]
     "model_load", "model_delete", "model_clone", "model_main_graph",
@@ -98,7 +98,7 @@ inline std::vector<std::string> get_all_vaip_ort_api_functions() {
  * category
  */
 inline std::map<std::string, std::vector<std::string>>
-get_vaip_ort_api_by_category() {
+get_morphizen_ort_api_by_category() {
   return {
       {"Model",
        {"model_load", "model_delete", "model_clone", "model_main_graph",
@@ -186,7 +186,7 @@ get_vaip_ort_api_by_category() {
  */
 inline std::pair<double, std::set<std::string>>
 check_api_coverage(const std::map<std::string, size_t>& call_stats) {
-  auto all_apis = get_all_vaip_ort_api_functions();
+  auto all_apis = get_all_morphizen_ort_api_functions();
   std::set<std::string> all_api_set(all_apis.begin(), all_apis.end());
   std::set<std::string> called_api_set;
 

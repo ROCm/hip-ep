@@ -31,13 +31,13 @@ std::string vec_to_string(const std::vector<int64_t>& vec) {
  * Test fixture specifically for testing VAIP ORT API implementation
  * through the coverage wrapper
  */
-class VaipOrtApiTest : public TestCoverageWrapperTest {
+class MorphizenOrtApiTest : public TestCoverageWrapperTest {
 protected:
   void SetUp() override {
     TestCoverageWrapperTest::SetUp();
 
     // Reset statistics at the beginning of the overall test
-    reset_vaip_ort_api_call_statistics();
+    reset_morphizen_ort_api_call_statistics();
 
     // Log that we're starting a fresh test suite
     LOG(INFO) << "Starting comprehensive test suite with clean statistics";
@@ -46,7 +46,7 @@ protected:
   void TearDown() override {
     // Log final statistics for the entire test suite
 
-    auto stats = get_vaip_ort_api_call_statistics();
+    auto stats = get_morphizen_ort_api_call_statistics();
     LOG(INFO) << "Test suite completed with " << stats.size()
               << " different API calls made total";
 
@@ -90,8 +90,8 @@ protected:
 // Test Execution Strategy - Sequential Member Function Calls
 // ============================================================================
 // All individual test components are implemented as private member functions
-// of the VaipOrtApiTest class. The main TEST_F(VaipOrtApiTest, TestAll)
-// function calls them in a specific sequential order, ensuring:
+// of the MorphizenOrtApiTest class. The main TEST_F(MorphizenOrtApiTest,
+// TestAll) function calls them in a specific sequential order, ensuring:
 // 1. Predictable execution order
 // 2. Single test execution context
 // 3. Cumulative API coverage tracking
@@ -123,7 +123,7 @@ protected:
 // Test Isolation Verification (Run First)
 // ============================================================================
 
-void VaipOrtApiTest::Test01_TestIsolationVerification() {
+void MorphizenOrtApiTest::Test01_TestIsolationVerification() {
   // Make a few API calls
   auto lib_id = wrapped_api_->get_lib_id();
   auto lib_name = wrapped_api_->get_lib_name();
@@ -141,7 +141,7 @@ void VaipOrtApiTest::Test01_TestIsolationVerification() {
   LOG(INFO) << "Test suite initialization verification passed";
 }
 
-void VaipOrtApiTest::Test02_TestIsolationVerificationSecond() {
+void MorphizenOrtApiTest::Test02_TestIsolationVerificationSecond() {
   // This test makes different API calls to build up coverage
 
   // Make different API calls than the previous test
@@ -163,7 +163,7 @@ void VaipOrtApiTest::Test02_TestIsolationVerificationSecond() {
 // Model API Tests [0-6]
 // ============================================================================
 
-void VaipOrtApiTest::Test03_ModelLoadAndDelete() {
+void MorphizenOrtApiTest::Test03_ModelLoadAndDelete() {
   // Test model_load and model_delete
   // Note: These tests may require actual model files to work properly
   // For now, we test the API wrapper functionality
@@ -191,7 +191,7 @@ void VaipOrtApiTest::Test03_ModelLoadAndDelete() {
   LOG(INFO) << "Test03 Model load and delete operations tested";
 }
 
-void VaipOrtApiTest::Test04_ModelMetaDataOperations() {
+void MorphizenOrtApiTest::Test04_ModelMetaDataOperations() {
   // Test model metadata operations
   // These will likely require a valid model, so we'll test the wrapper call
   try {
@@ -226,7 +226,7 @@ void VaipOrtApiTest::Test04_ModelMetaDataOperations() {
 // Graph API Tests [7-23]
 // ============================================================================
 
-void VaipOrtApiTest::Test05_GraphBasicOperations() {
+void MorphizenOrtApiTest::Test05_GraphBasicOperations() {
   try {
     if (!simple_conv_relu_model_) {
       Test07_create_simple_conv_relu_model();
@@ -324,7 +324,7 @@ void VaipOrtApiTest::Test05_GraphBasicOperations() {
   LOG(INFO) << "Test05 Graph basic operations test passed";
 }
 
-void VaipOrtApiTest::Test06_GraphAdvancedOperations() {
+void MorphizenOrtApiTest::Test06_GraphAdvancedOperations() {
   try {
     auto test_model_path = RESNET_50_PATH;
     if (backend_ == morphizen::kMLIRBackend) {
@@ -462,7 +462,7 @@ void VaipOrtApiTest::Test06_GraphAdvancedOperations() {
 // Node API Tests [24-33]
 // ============================================================================
 
-void VaipOrtApiTest::Test08_NodeOperations() {
+void MorphizenOrtApiTest::Test08_NodeOperations() {
   try {
     if (!simple_conv_relu_model_) {
       LOG(INFO) << "No model available for fuse test, creating one first...";
@@ -513,7 +513,7 @@ void VaipOrtApiTest::Test08_NodeOperations() {
 // NodeArg API Tests [34-45]
 // ============================================================================
 
-void VaipOrtApiTest::Test09_NodeArgOperations() {
+void MorphizenOrtApiTest::Test09_NodeArgOperations() {
   try {
     std::filesystem::path temp_path =
         std::filesystem::temp_directory_path() / "test_nodeargs.onnx";
@@ -594,7 +594,7 @@ void VaipOrtApiTest::Test09_NodeArgOperations() {
 // NodeAttributes API Tests [46-50]
 // ============================================================================
 
-void VaipOrtApiTest::Test10_NodeAttributesOperations() {
+void MorphizenOrtApiTest::Test10_NodeAttributesOperations() {
   // Test NodeAttributes operations
   auto* attrs = wrapped_api_->node_attributes_new();
   ASSERT_NE(attrs, nullptr);
@@ -631,7 +631,7 @@ void VaipOrtApiTest::Test10_NodeAttributesOperations() {
 // AttributeProto API Tests [51-69]
 // ============================================================================
 
-void VaipOrtApiTest::Test11_AttributeProtoOperations() {
+void MorphizenOrtApiTest::Test11_AttributeProtoOperations() {
   // Test various attribute creation and manipulation
   {
     // Test integer attributes
@@ -773,7 +773,7 @@ void VaipOrtApiTest::Test11_AttributeProtoOperations() {
 // TensorProto API Tests [70-89, 100-101]
 // ============================================================================
 
-void VaipOrtApiTest::Test12_TensorProtoOperations() {
+void MorphizenOrtApiTest::Test12_TensorProtoOperations() {
   // Test various tensor creation and manipulation
   std::vector<int64_t> shape = {2, 3};
 
@@ -950,8 +950,8 @@ void VaipOrtApiTest::Test12_TensorProtoOperations() {
 // ============================================================================
 // Extended API Tests [80-108]
 // ============================================================================
-void VaipOrtApiTest::Test13_ExtendedApiOperations() { // Test library
-                                                      // identification
+void MorphizenOrtApiTest::Test13_ExtendedApiOperations() { // Test library
+                                                           // identification
   // Test library identification
   auto lib_id = wrapped_api_->get_lib_id();
   auto lib_name = wrapped_api_->get_lib_name();
@@ -1011,7 +1011,7 @@ void VaipOrtApiTest::Test13_ExtendedApiOperations() { // Test library
   }
 }
 
-void VaipOrtApiTest::Test14_GraphTensorOperations() {
+void MorphizenOrtApiTest::Test14_GraphTensorOperations() {
   try {
     std::filesystem::path temp_path =
         std::filesystem::temp_directory_path() / "test_tensors.onnx";
@@ -1044,7 +1044,7 @@ void VaipOrtApiTest::Test14_GraphTensorOperations() {
   }
 }
 
-void VaipOrtApiTest::Test15_ShapeInferenceOperations() {
+void MorphizenOrtApiTest::Test15_ShapeInferenceOperations() {
   // try {
   //   // Test shape inference from file path
   //   std::filesystem::path temp_path =
@@ -1066,7 +1066,7 @@ void VaipOrtApiTest::Test15_ShapeInferenceOperations() {
 // Graph Fuse Operations Test
 // ============================================================================
 
-void VaipOrtApiTest::Test16_GraphFuseOperations() {
+void MorphizenOrtApiTest::Test16_GraphFuseOperations() {
   LOG(INFO) << "=== Test16: Graph Fuse Operations ===";
 
   try {
@@ -1157,7 +1157,7 @@ void VaipOrtApiTest::Test16_GraphFuseOperations() {
 // Graph Node Removal Operations Test
 // ============================================================================
 
-void VaipOrtApiTest::Test17_GraphNodeRemovalOperations() {
+void MorphizenOrtApiTest::Test17_GraphNodeRemovalOperations() {
   LOG(INFO) << "=== Test17: Graph Node Removal Operations ===";
 
   try {
@@ -1247,7 +1247,7 @@ void VaipOrtApiTest::Test17_GraphNodeRemovalOperations() {
 // Missing APIs Coverage Test
 // ============================================================================
 
-void VaipOrtApiTest::Test18_MissingApisCoverage() {
+void MorphizenOrtApiTest::Test18_MissingApisCoverage() {
   LOG(INFO) << "=== Test18: Missing APIs Coverage ===";
 
   try {
@@ -1445,7 +1445,7 @@ void VaipOrtApiTest::Test18_MissingApisCoverage() {
   }
 }
 
-void VaipOrtApiTest::Test19_add_sin_op_before_relu_op() {
+void MorphizenOrtApiTest::Test19_add_sin_op_before_relu_op() {
   LOG(INFO) << "=== Test19: Add Sin->Cos operations before ReLU ===";
 
   try {
@@ -1613,7 +1613,7 @@ void VaipOrtApiTest::Test19_add_sin_op_before_relu_op() {
   }
 }
 
-void VaipOrtApiTest::Test20_conv_relu_fuse_conv2d_nchw() {
+void MorphizenOrtApiTest::Test20_conv_relu_fuse_conv2d_nchw() {
   LOG(INFO) << "=== Test20: Conv-ReLU Fuse com.xilinx:conv2d_nchw ===";
   try {
     // ensure we have a model to work with
@@ -1766,7 +1766,7 @@ void VaipOrtApiTest::Test20_conv_relu_fuse_conv2d_nchw() {
   LOG(INFO) << "Test20_conv_relu_fuse_conv2d_nchw completed successfully";
 }
 
-void VaipOrtApiTest::Test21_fuse_relu_q() {
+void MorphizenOrtApiTest::Test21_fuse_relu_q() {
   try {
     auto test_model_path = RESNET_50_PATH;
     if (backend_ == morphizen::kMLIRBackend) {
@@ -1796,7 +1796,7 @@ void VaipOrtApiTest::Test21_fuse_relu_q() {
         morphizen::PassContext::create();
     auto pass_proto = std::make_unique<morphizen::PassProto>();
     pass_proto->set_plugin("vaip-pass_init");
-    pass_proto->set_name("VaipOrtApiTest::Test21_fuse_relu_q");
+    pass_proto->set_name("MorphizenOrtApiTest::Test21_fuse_relu_q");
     auto pass = morphizen::IPass::create_pass(pass_context, *pass_proto);
 
     int fuse_count = 0;
@@ -1886,7 +1886,7 @@ void VaipOrtApiTest::Test21_fuse_relu_q() {
   LOG(INFO) << "Test21_fuse_relu_q completed successfully";
 }
 
-void VaipOrtApiTest::Test22_create_initializer_node_arg() {
+void MorphizenOrtApiTest::Test22_create_initializer_node_arg() {
   try {
     std::filesystem::path temp_path =
         std::filesystem::temp_directory_path() / "test_new_initializer.onnx";
@@ -1916,7 +1916,7 @@ void VaipOrtApiTest::Test22_create_initializer_node_arg() {
   }
 }
 
-void VaipOrtApiTest::Test23_try_fuse_and_fuse() {
+void MorphizenOrtApiTest::Test23_try_fuse_and_fuse() {
   LOG(INFO) << "===== Starting Test23_try_fuse_and_fuse";
   try {
     if (!simple_conv_relu_model_) {
@@ -1954,7 +1954,7 @@ void VaipOrtApiTest::Test23_try_fuse_and_fuse() {
           morphizen::PassContext::create();
       auto pass_proto = std::make_unique<morphizen::PassProto>();
       pass_proto->set_plugin("vaip-pass_init");
-      pass_proto->set_name("VaipOrtApiTest::Test21_fuse_relu_q");
+      pass_proto->set_name("MorphizenOrtApiTest::Test21_fuse_relu_q");
       auto pass = morphizen::IPass::create_pass(pass_context, *pass_proto);
 
       auto conv_inputs = wrapped_api_->node_get_inputs_unsafe(*node);
@@ -2012,7 +2012,7 @@ void VaipOrtApiTest::Test23_try_fuse_and_fuse() {
   }
 }
 
-void VaipOrtApiTest::Test24_convert_initializer_to_const_op() {
+void MorphizenOrtApiTest::Test24_convert_initializer_to_const_op() {
   LOG(INFO) << "=== Test24: Convert Initializer to Const Op ===";
 
   try {
@@ -2179,16 +2179,16 @@ void VaipOrtApiTest::Test24_convert_initializer_to_const_op() {
 // Comprehensive Coverage Test
 // ============================================================================
 
-void VaipOrtApiTest::ComprehensiveCoverageReport() {
+void MorphizenOrtApiTest::ComprehensiveCoverageReport() {
   // IMPORTANT: This test only shows statistics for APIs called within this
   // specific test. Each test has isolated statistics due to
-  // reset_vaip_ort_api_call_statistics() in SetUp(). This is CORRECT behavior
-  // for test isolation - prevents test interference.
+  // reset_morphizen_ort_api_call_statistics() in SetUp(). This is CORRECT
+  // behavior for test isolation - prevents test interference.
   //
   // To see cumulative coverage across all tests, run with VLOG=1 to see
   // per-test breakdowns.
 
-  auto stats = get_vaip_ort_api_call_statistics();
+  auto stats = get_morphizen_ort_api_call_statistics();
 
   LOG(INFO) << "=== VAIP ORT API Coverage Report (Current Test Only) ===";
   LOG(INFO) << "APIs called in current test: " << stats.size();
@@ -2198,7 +2198,7 @@ void VaipOrtApiTest::ComprehensiveCoverageReport() {
 
   LOG(INFO) << "API Coverage: " << std::fixed << std::setprecision(1)
             << coverage_percent << "% (" << (stats.size()) << "/"
-            << get_all_vaip_ort_api_functions().size() << ")";
+            << get_all_morphizen_ort_api_functions().size() << ")";
 
   if (!missing_apis.empty()) {
     LOG(INFO) << "=== Missing APIs (" << missing_apis.size() << ") ===";
@@ -2208,7 +2208,7 @@ void VaipOrtApiTest::ComprehensiveCoverageReport() {
   }
 
   // Count APIs by category using the helper
-  auto api_categories = get_vaip_ort_api_by_category();
+  auto api_categories = get_morphizen_ort_api_by_category();
   for (const auto& [category, api_list] : api_categories) {
     size_t called_in_category = 0;
     for (const auto& api : api_list) {
@@ -2262,21 +2262,21 @@ void VaipOrtApiTest::ComprehensiveCoverageReport() {
       << "Too few API categories have coverage";
 }
 
-void VaipOrtApiTest::DeleteSimpleConvReluModel() {
+void MorphizenOrtApiTest::DeleteSimpleConvReluModel() {
   if (simple_conv_relu_model_) {
     wrapped_api_->model_delete(simple_conv_relu_model_);
   }
 }
 
-void VaipOrtApiTest::DetailedCoverageAnalysis() {
+void MorphizenOrtApiTest::DetailedCoverageAnalysis() {
   // Analyze coverage in detail and provide recommendations
-  auto stats = get_vaip_ort_api_call_statistics();
+  auto stats = get_morphizen_ort_api_call_statistics();
   auto [coverage_percent, missing_apis] = check_api_coverage(stats);
 
   LOG(INFO) << "=== Detailed Coverage Analysis ===";
 
   // Categorize missing APIs
-  auto api_categories = get_vaip_ort_api_by_category();
+  auto api_categories = get_morphizen_ort_api_by_category();
   std::map<std::string, std::vector<std::string>> missing_by_category;
 
   for (const auto& missing_api : missing_apis) {
@@ -2314,7 +2314,7 @@ void VaipOrtApiTest::DetailedCoverageAnalysis() {
   // Record coverage for CI/CD tracking
   LOG(INFO) << "COVERAGE_METRIC: " << std::fixed << std::setprecision(2)
             << coverage_percent;
-  LOG(INFO) << "TOTAL_APIS: " << get_all_vaip_ort_api_functions().size();
+  LOG(INFO) << "TOTAL_APIS: " << get_all_morphizen_ort_api_functions().size();
   LOG(INFO) << "COVERED_APIS: " << (stats.size());
   LOG(INFO) << "MISSING_APIS: " << missing_apis.size();
 }
@@ -2323,7 +2323,7 @@ void VaipOrtApiTest::DetailedCoverageAnalysis() {
 // Model Creation Test - Conv+ReLU Pattern
 // ============================================================================
 
-void VaipOrtApiTest::Test07_create_simple_conv_relu_model() {
+void MorphizenOrtApiTest::Test07_create_simple_conv_relu_model() {
   LOG(INFO) << "=== Test07: Creating Simple Conv+ReLU Model ===";
 
   try {
@@ -2523,7 +2523,7 @@ void VaipOrtApiTest::Test07_create_simple_conv_relu_model() {
 // Main Test Entry Point - Runs All Tests Sequentially
 // ============================================================================
 
-TEST_F(VaipOrtApiTest, TestAll) {
+TEST_F(MorphizenOrtApiTest, TestAll) {
   LOG(INFO) << "=== Starting Sequential Test Execution ===";
 
   std::string enable_unittest =
