@@ -58,8 +58,8 @@ set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "Enable zstd compression")
 # DEP_URL_llvm and DEP_TAG_llvm are defined from deps.txt
 
 # Try to find pre-installed LLVM/MLIR first
-find_package(LLVM QUIET CONFIG)
-find_package(MLIR QUIET CONFIG)
+#find_package(LLVM QUIET CONFIG)
+#find_package(MLIR QUIET CONFIG)
 
 if(LLVM_FOUND AND MLIR_FOUND)
   message(STATUS "Found pre-installed LLVM and MLIR")
