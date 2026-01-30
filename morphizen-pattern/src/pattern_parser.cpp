@@ -99,6 +99,9 @@ Parser<std::vector<std::shared_ptr<Pattern>>> Parser<T>::parse_args() {
   auto c = parse_skip_whitespace().peek();
 
   auto p1 = parse_pattern();
+  // TODO: Incomplete implementation - return empty result for now
+  return Parser<std::vector<std::shared_ptr<Pattern>>>(
+      std::vector<std::shared_ptr<Pattern>>{}, pos_);
 }
 template <typename T>
 Parser<std::unique_ptr<Pattern>> Parser<T>::parse_pattern() {

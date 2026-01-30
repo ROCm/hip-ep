@@ -47,7 +47,6 @@ message ContextProto {
   repeated MetaDefProto meta_def = 1;
   ConfigProto config = 3;
   map<string, AnchorPointProto> origin_nodes = 4;
-  map<string, ConstDataInfo> const_data_info = 5;
   map<string, int32> fix_info = 6;
   map<string, int32> device_subgraph_count = 7; // only used for fused dpu
   repeated string stacks = 8;
@@ -122,11 +121,3 @@ message CPUUsageProto {
   float avg_cpu_util = 1; // %
   float mem_peak_working_set_size = 2; // MBs
 };
-
-message ConstDataInfo {
-  uint64 offset = 1;
-  uint64 size = 2;
-  repeated int64 shape= 3;
-  // same as TensorProto_DataType
-  int32 type = 4;
-}

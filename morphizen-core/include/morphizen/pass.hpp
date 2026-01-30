@@ -149,95 +149,7 @@ public:
                                          int count) = 0;
   /** @brief do not use this function. internal use only
    */
-  virtual void create_const(const char* name, gsl::span<const char> data,
-                            const std::vector<int64_t>& shape, int type) = 0;
-  /** @brief do not use this function. internal use only
-   */
-  void create_const(const Node& node, gsl::span<const char> data);
-  /** @brief do not use this function. internal use only
-   */
-  virtual void create_empty_const(const char* name, size_t size,
-                                  const std::vector<int64_t>& shape,
-                                  int type) = 0;
-  /** @brief do not use this function. internal use only
-   */
-  inline void create_empty_const(const Node& node, size_t size);
-  /** @brief do not use this function. internal use only
-   */
-  virtual void
-  create_lazy_const(const char* name, size_t size,
-                    const std::vector<int64_t>& shape, int type,
-                    const std::function<void(gsl::span<char>)>& lazy) = 0;
-  /** @brief do not use this function. internal use only
-   */
-  void create_lazy_const(const Node& node, size_t size,
-                         const std::function<void(gsl::span<char>)>& lazy);
-  /** @brief do not use this function. internal use only
-   */
-  virtual void create_const_alias(const char* alias_name, const char* name) = 0;
-  /** @brief do not use this function. internal use only
-   */
-  inline void create_const_alias(const Node& new_node, const Node& origin) {
-    auto alias = node_get_output_name(new_node);
-    auto name = node_get_output_name(origin);
-    create_const_alias(alias.c_str(), name.c_str());
-  }
-  /** @brief do not use this function. internal use only
-   */
-  virtual bool has_const(const char* name) const = 0;
-  /** @brief do not use this function. internal use only
-   */
-  virtual ConstDataInfo get_const_info(const char* name) const = 0;
-  // eval lazy function after we invoke get_const_data_ptr.
-  /** @brief do not use this function. internal use only
-   */
-  virtual void* get_const_data_ptr(const char* name, bool force) const = 0;
-  template <typename T> inline gsl::span<T> get_const_data(const char* name) {
-    auto info = get_const_info(name);
-    auto ptr = get_const_data_ptr(name, true /*force*/);
-    return gsl::span<T>(reinterpret_cast<T*>(ptr), info.size() / sizeof(T));
-  }
-  /** @brief do not use this function. internal use only
-   */
-  template <typename T> inline gsl::span<T> get_const_data(const Node& node) {
-    auto name = node_get_output_name(node);
-    return get_const_data<T>(name.c_str());
-  }
-  /** @brief do not use this function. internal use only
-   */
-  inline std::vector<int64_t> get_const_data_shape(const Node& node) {
-    auto name = node_get_output_name(node);
-    auto info = get_const_info(name.c_str());
-    return std::vector<int64_t>{info.shape().begin(), info.shape().end()};
-  }
-  /** @brief do not use this function. internal use only
-   */
-  template <typename T>
-  inline gsl::span<T> get_const_data(const NodeArg& node_arg) {
-    auto name = node_arg_get_name(node_arg);
-    return get_const_data<T>(name.c_str());
-  }
-  /** @brief do not use this function. internal use only
-   */
-  template <typename T>
-  inline std::vector<T> const_data_into(const NodeArg& node_arg);
-  /** @brief do not use this function. internal use only
-   */
-  inline std::vector<int64_t> get_const_data_shape(const NodeArg& node_arg) {
-    auto name = node_arg_get_name(node_arg);
-    auto info = get_const_info(name.c_str());
-    return std::vector<int64_t>{info.shape().begin(), info.shape().end()};
-  }
-
-  /** @brief do not use this function. internal use only
-   */
   virtual void dump_fix_info(const char* name) const = 0;
-  /** @brief do not use this function. internal use only
-   */
-  virtual void dump_const_info(const char* name) const = 0;
-  /** @brief do not use this function. internal use only
-   */
-  virtual void dump_const_data(const char* name) const = 0;
   /** @brief do not use this function. internal use only
    */
   virtual const PassProto& get_pass_proto() const = 0;
@@ -330,8 +242,6 @@ IPass_try_fuse(const Graph& graph, const std::string& name,
                const std::vector<std::string>& outputs,
                const std::vector<std::string>& constant_initializers1,
                const std::string& device);
-template <>
-std::vector<int64_t> IPass::const_data_into<int64_t>(const NodeArg& node_arg);
 
 struct PassInfo {
   typedef union {

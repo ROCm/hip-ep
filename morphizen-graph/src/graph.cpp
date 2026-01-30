@@ -270,6 +270,7 @@ void graph_reverse_dfs_from(
     const std::function<void(const Node*)>& leave,
     const std::function<bool(const Node*, const Node*)>& comp,
     bool subgraph_sensitive) {
+  (void)subgraph_sensitive; // unused parameter
   auto node = MORPHIZEN_ORT_API(graph_get_node)(graph, node_index);
   std::vector<const Node*> nodes = {node};
   auto stop = [](const Node*, const Node*) { return false; };
