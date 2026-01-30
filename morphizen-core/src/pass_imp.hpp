@@ -54,25 +54,6 @@ private:
   virtual int get_fix_info(const char* name) const override final;
   virtual bool has_fix_info(const char* name) const override final;
   virtual void dump_fix_info(const char* filename) const override final;
-  virtual void dump_const_info(const char* name) const override final;
-  virtual void dump_const_data(const char* name) const override final;
-  virtual void create_const(const char* name, gsl::span<const char> data,
-                            const std::vector<int64_t>& shape,
-                            int type) override final;
-  virtual void create_empty_const(const char* name, size_t size,
-                                  const std::vector<int64_t>& shape,
-                                  int type) override final;
-  virtual void create_lazy_const(
-      const char* name, size_t size, const std::vector<int64_t>& shape,
-      int type,
-      const std::function<void(gsl::span<char>)>& lazy) override final;
-
-  virtual void create_const_alias(const char* alias_name,
-                                  const char* name) override final;
-  virtual bool has_const(const char* name) const override final;
-  virtual ConstDataInfo get_const_info(const char* name) const override final;
-  virtual void* get_const_data_ptr(const char* name,
-                                   bool force) const override final;
 
   virtual const PassProto& get_pass_proto() const override;
   virtual std::string get_pass_generic_param() const override final;

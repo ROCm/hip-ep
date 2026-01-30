@@ -24,7 +24,7 @@ void set_vitis_ep_custom_ops(const std::set<std::string>&);
 } // namespace morphizen
 
 #ifndef _WIN32
-#  include <vaip/export.h>
+#  include <morphizen/export.h>
 #  define DEFINE_VAIP_OPDEF(cls, id)                                           \
     extern "C" MORPHIZEN_PASS_ENTRY morphizen::OpDefInfo*                      \
     morphizen_op_def_info() {                                                  \

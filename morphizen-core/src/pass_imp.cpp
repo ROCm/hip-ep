@@ -324,129 +324,6 @@ void Pass::dump_fix_info(const char* filename) const {
   }
 }
 
-void Pass::create_const(const char* name, gsl::span<const char> data,
-                        const std::vector<int64_t>& shape, int type) {
-  size_t offset = 0u;
-  if (data.empty()) {
-    // see model 1, it is strange that a Resize(x, roi "1985" , ...)
-    // where roi has zero data size.
-    offset = 0u;
-  } else {
-    offset = context_->const_data_.size();
-  }
-  context_->const_data_.insert(context_->const_data_.end(), data.begin(),
-                               data.end());
-  auto const_data = ConstDataInfo();
-  const_data.set_offset(offset);
-  const_data.set_size(data.size());
-  const_data.mutable_shape()->Assign(shape.begin(), shape.end());
-  const_data.set_type(type);
-  context_->context_proto.mutable_const_data_info()->insert(
-      google::protobuf::MapPair<std::string, ConstDataInfo>{std::string(name),
-                                                            const_data});
-}
-
-void Pass::create_empty_const(const char* name, size_t size,
-                              const std::vector<int64_t>& shape, int type) {
-  CHECK_NE(size, 0u);
-  auto const_data = ConstDataInfo();
-  const_data.set_offset(context_->const_data_.size());
-  const_data.set_size(size);
-  const_data.mutable_shape()->Assign(shape.begin(), shape.end());
-  const_data.set_type(type);
-  context_->const_data_.resize(context_->const_data_.size() + size);
-  context_->context_proto.mutable_const_data_info()->insert(
-      google::protobuf::MapPair<std::string, ConstDataInfo>{std::string(name),
-                                                            const_data});
-}
-
-void Pass::create_lazy_const(const char* name, size_t size,
-                             const std::vector<int64_t>& shape, int type,
-                             const std::function<void(gsl::span<char>)>& lazy) {
-  CHECK_NE(size, 0u);
-  create_empty_const(name, size, shape, type);
-  context_->const_lazy_[name] =
-      std::make_shared<std::function<void(gsl::span<char>)>>(lazy);
-}
-
-void Pass::create_const_alias(const char* alias_name, const char* name) {
-  auto it = context_->context_proto.const_data_info().find(name);
-  CHECK(it != context_->context_proto.const_data_info().end())
-      << "cannot find const info " << name;
-  context_->context_proto.mutable_const_data_info()->insert(
-      google::protobuf::MapPair<std::string, ConstDataInfo>{
-          std::string(alias_name), it->second});
-  auto it_lazy = context_->const_lazy_.find(name);
-  if (it_lazy != context_->const_lazy_.end()) {
-    context_->const_lazy_[alias_name] = it_lazy->second;
-  }
-}
-
-bool Pass::has_const(const char* name) const {
-  auto it = context_->context_proto.const_data_info().find(name);
-  return it != context_->context_proto.const_data_info().end();
-}
-
-ConstDataInfo Pass::get_const_info(const char* name) const {
-  auto it = context_->context_proto.const_data_info().find(name);
-  CHECK(it != context_->context_proto.const_data_info().end())
-      << "cannot find const info " << name;
-  return it->second;
-}
-
-void* Pass::get_const_data_ptr(const char* name, bool force) const {
-  auto data_info = get_const_info(name);
-  auto ret = &context_->const_data_[data_info.offset()];
-  if (force) {
-    auto lazy_it = context_->const_lazy_.find(name);
-    if (lazy_it != context_->const_lazy_.end()) {
-      if (*lazy_it->second) {
-        (*lazy_it->second)(gsl::span<char>(ret, data_info.size()));
-        (*lazy_it->second) = nullptr;
-      }
-    }
-  }
-  return ret;
-}
-
-void Pass::dump_const_info(const char* filename) const {
-  auto fullname = get_log_path() / std::string(filename);
-  auto stream = std::ofstream(fullname, std::ios_base::trunc);
-  LOG(INFO) << "save const info to " << fullname.u8string();
-  auto is_lazy = [this](const std::string& name) {
-    auto it = context_->const_lazy_.find(name);
-    auto ret = std::string();
-    if (it == context_->const_lazy_.end()) {
-      ret = "eager";
-    } else {
-      if (*it->second) {
-        ret = "lazy";
-      } else {
-        ret = "evaluated";
-      }
-    }
-    return ret;
-  };
-  for (auto& i : context_->context_proto.const_data_info()) {
-    stream << i.first << "\t" << i.second.offset() << "\t" << i.second.size()
-           << "\t" << i.second.type() << "\t" << is_lazy(i.first) << "\n";
-  }
-}
-void Pass::dump_const_data(const char* name) const {
-  auto fullname = get_log_path() / std::string(name);
-  if (context_->const_data_.empty()) {
-    LOG(INFO) << "no constant data. cancel saving const info to "
-              << fullname.u8string();
-  } else {
-    auto stream =
-        std::ofstream(fullname, std::ios_base::trunc | std::ios_base::binary);
-    LOG(INFO) << "save const info to " << fullname.u8string();
-    CHECK(stream.write(&context_->const_data_[0], context_->const_data_.size())
-              .good())
-        << " write failure";
-  }
-  return;
-}
 const PassProto& Pass::get_pass_proto() const { return pass_proto_; }
 
 std::string Pass::get_pass_generic_param() const {
@@ -614,28 +491,11 @@ static void load_context_json(PassContextImp& context) {
   load_protobuf_message(get_cache_file_name(context, "context.json"),
                         context.context_proto);
 }
-static void load_context_const_bin(PassContextImp& context) {
-  auto const_data_file = get_cache_file_name(context, "const.bin");
-  std::ifstream const_data_stream(const_data_file, std::ios::binary);
-  if (!const_data_stream.good()) {
-    return;
-  }
-  const_data_stream.seekg(0, std::ios_base::end);
-  CHECK(const_data_stream.good()) << "cannot seek " << const_data_file;
-  auto size = const_data_stream.tellg();
-  const_data_stream.seekg(0, std::ios_base::beg);
-  CHECK(const_data_stream.good()) << "cannot rewind " << const_data_file;
-  context.const_data_.resize(size);
-  CHECK(const_data_stream.read(&context.const_data_[0], size).good())
-      << "read fail " << const_data_file << " size=" << size;
-}
-
 MORPHIZEN_DLL_SPEC std::shared_ptr<PassContext>
 load_context(const std::filesystem::path& cache_dir) {
   auto context = std::make_shared<morphizen::PassContextImp>();
   context->pass_context_log_dir_ = cache_dir;
   load_context_json(*context);
-  load_context_const_bin(*context);
   return context;
 }
 std::string Pass::seq_num_as_string() const {

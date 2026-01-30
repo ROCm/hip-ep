@@ -202,9 +202,6 @@ public:
   create_pass_context(const onnxruntime::ProviderOptions& options);
 
 public:
-  std::vector<char> const_data_;
-  std::map<std::string, std::shared_ptr<std::function<void(gsl::span<char>)>>>
-      const_lazy_;
   std::filesystem::path pass_context_log_dir_;
   std::map<std::string, std::vector<AttributeProtoPtr>> node_extra_attrs;
   std::deque<IPass*> current_pass_stack;

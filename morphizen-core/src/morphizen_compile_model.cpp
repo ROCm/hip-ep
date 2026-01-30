@@ -129,13 +129,6 @@ static void save_protobuf_message(const fs::path& filename,
   }
 }
 
-static void load_protobuf_message(const fs::path& filename,
-                                  google::protobuf::Message& msg) {
-  auto json_str = slurp(filename);
-  auto status = google::protobuf::util::JsonStringToMessage(json_str, &msg);
-  CHECK(status.ok()) << "cannot parse json string:" << json_str;
-}
-
 static void load_protobuf_message_2(const fs::path& filename,
                                     google::protobuf::Message& msg) {
   auto json_str = slurp_if_exists(filename);
@@ -203,38 +196,6 @@ void read_cache(std::shared_ptr<PassContextImp> context) {
   context->update_pass_context_from_context_json_in_cache();
 }
 
-static std::string get_commit(const AllVersionInfoProto& proto,
-                              const std::string& name) {
-  for (const auto& iter : proto.version_infos()) {
-    if (iter.package_name() == name) {
-      return iter.commit();
-    }
-  }
-  return ""; // if a commit is absent in both version info, we assume it matched
-}
-
-static bool cache_valid(const PassContextImp& context) {
-  ContextProto proto;
-  load_protobuf_message(get_cache_file_name(context, "context.json"), proto);
-  auto& code_versions = context.get_config_proto().version();
-  auto& cache_versions = proto.config().version();
-  std::vector<std::string> package_name = {"xcompiler", "vaip"};
-  for (const auto& name : package_name) {
-    auto code_package_version = get_commit(code_versions, name);
-    auto cache_package_version = get_commit(cache_versions, name);
-    if (code_package_version != cache_package_version) {
-      LOG(WARNING) << name << "'s versions mistached: " << code_package_version
-                   << " at code and " << cache_package_version << " at cache";
-      return true;
-    }
-  }
-  return true;
-}
-
-static bool check_cache_exist(const PassContextImp& context) {
-  fs::path cache_file = get_cache_file_name(context, "context.json");
-  return file_exists(cache_file);
-}
 bool check_cache_hit(PassContextImp& context) {
   auto measure_check_cache_hit = context.measure("check_cache_hit");
   auto prebuild_cache_context_name =

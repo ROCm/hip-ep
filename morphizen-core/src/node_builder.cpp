@@ -112,9 +112,15 @@ const Node& NodeBuilder::build() {
     }
   }
   auto name_with_suffix = anchor_point_[0]->get_proto().name();
+  // Suppress deprecation warning: graph_add_node is marked deprecated but is
+  // intentionally used here. The NodeBuilder class provides the recommended
+  // interface, but internally it still needs to call graph_add_node.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
   auto& newly_added_node = graph_add_node(
       graph_, std::string("morphizen_node_") + name_with_suffix, op_type_,
       description_, input_args_, output_args, std::move(attrs_), domain_);
+#pragma GCC diagnostic pop
 
   if (domain_ == "com.xilinx") {
     if (num_of_outputs_ == 1u) {
