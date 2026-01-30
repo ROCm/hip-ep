@@ -1,8 +1,8 @@
-           {"@VAIP_DEP_NAME@",
+           {"@MORPHIZEN_DEP_NAME@",
             []() -> const std::string {
             // return the git commit id
-              return "@VAIP_DEP@";
+              return "@MORPHIZEN_DEP@";
             },
             []() -> const std::string {
             // the url as lib id
-            return "@VAIP_DEP_NAME@"; }},
+            return "@MORPHIZEN_DEP_NAME@"; }},

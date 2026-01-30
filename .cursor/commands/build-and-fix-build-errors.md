@@ -10,12 +10,11 @@ Please build the MorphiZen project and fix any build errors that occur.
   - `VAI_RT_WORKSPACE=c:/Develop/m/source`
   - `VAI_RT_BUILD_DIR=C:/Develop/m/build`
   - `VAI_RT_PREFIX=C:/Develop/m/local`
-- **CMake Preset**: "Morphizen Ninja"
 
 ## Build Steps:
-1. Configure with CMake preset (includes MSVC environment setup):
+1. Configure with CMake (includes MSVC environment setup):
    ```powershell
-   cmd /c "C:\msvsn2022\VC\Auxiliary\Build\vcvarsall.bat x64 && set VAI_RT_WORKSPACE=c:/Develop/m/source && set VAI_RT_BUILD_DIR=C:/Develop/m/build && set VAI_RT_PREFIX=C:/Develop/m/local && cd C:\Develop\m\source\MorphiZen && cmake --preset ""Morphizen Ninja"" -DCMAKE_BUILD_TYPE=Debug"
+   cmd /c "C:\msvsn2022\VC\Auxiliary\Build\vcvarsall.bat x64 && set VAI_RT_WORKSPACE=c:/Develop/m/source && set VAI_RT_BUILD_DIR=C:/Develop/m/build && set VAI_RT_PREFIX=C:/Develop/m/local && cd C:\Develop\m\source\MorphiZen && cmake -G Ninja -B ../../build/morphizen.ninja -S . -DCMAKE_BUILD_TYPE=Debug -DCMAKE_MSVC_RUNTIME_LIBRARY=""MultiThreaded$<$<CONFIG:Debug>:Debug>"" -Dmorphizen_ENABLE_UNIT_TEST=ON -Dmorphizen_ENABLE_ORT_BRIDGE=ON -Dmorphizen_ENABLE_MLIR_BACKEND=ON -DCMAKE_PREFIX_PATH=../../local"
    ```
 
 2. Build the project (includes MSVC environment setup):
@@ -71,4 +70,3 @@ Please build the MorphiZen project and fix any build errors that occur.
 - The project uses Ninja generator for faster builds
 - Dependencies are automatically fetched via CMake FetchContent
 - Build output goes to `C:/Develop/m/build/morphizen.ninja/bin/`
-- The preset includes `morphizen_DEMO_DIR` and other configurations from CMakePresets.json

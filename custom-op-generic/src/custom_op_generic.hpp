@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 #pragma once
-#define VAIP_CUSTOM_OP // TODO: remove it
+#define MORPHIZEN_CUSTOM_OP // TODO: remove it
 #include "morphizen/morphizen.hpp"
 
 namespace morphizen {

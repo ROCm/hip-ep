@@ -17,7 +17,7 @@
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_CONFIG_READER, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_CONFIG_READER) >= n)
-DEF_ENV_PARAM_2(VAIP_CONFIG_PROVIDER_BACKEND, "onnxruntime_morphizen_ep",
+DEF_ENV_PARAM_2(MORPHIZEN_CONFIG_PROVIDER_BACKEND, "onnxruntime_morphizen_ep",
                 std::string)
 // this is actually provider options, for backward compatibility, we keep
 // this key in the root of the json.
@@ -139,25 +139,26 @@ get_config_json(const onnxruntime::ProviderOptions& options) {
   google::protobuf::Struct ret;
   // update_log_level(options);
   auto morphizen_get_default_config_plugin =
-      ::morphizen::Plugin::get(ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND));
+      ::morphizen::Plugin::get(ENV_PARAM(MORPHIZEN_CONFIG_PROVIDER_BACKEND));
   const char* default_config = get_default_config();
   if (default_config == nullptr) {
     if (morphizen_get_default_config_plugin) {
-      MY_LOG(1) << "found plugin: " << ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND);
+      MY_LOG(1) << "found plugin: "
+                << ENV_PARAM(MORPHIZEN_CONFIG_PROVIDER_BACKEND);
       auto morphizen_get_default_config =
           morphizen_get_default_config_plugin->get_method<const char*>(
               "morphizen_get_default_config");
       if (morphizen_get_default_config) {
         MY_LOG(1) << "found symbol: morphizen_get_default_config from "
-                  << ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND);
+                  << ENV_PARAM(MORPHIZEN_CONFIG_PROVIDER_BACKEND);
         default_config = morphizen_get_default_config();
       } else {
         MY_LOG(1) << "cannot found symbol: morphizen_get_default_config from "
-                  << ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND);
+                  << ENV_PARAM(MORPHIZEN_CONFIG_PROVIDER_BACKEND);
       }
     } else {
       MY_LOG(1) << "cannot found plugin: "
-                << ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND)
+                << ENV_PARAM(MORPHIZEN_CONFIG_PROVIDER_BACKEND)
                 << " fall back to builtin default";
     }
   }

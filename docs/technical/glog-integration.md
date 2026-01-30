@@ -53,7 +53,7 @@ No special configuration is required for Linux and macOS as bash is available by
 
 glog is currently used in the following source files:
 
-- `morphizen-utils/src/vaip_plugin.cpp`
+- `morphizen-utils/src/morphizen_plugin.cpp`
 - `morphizen-utils/src/cleanup.cpp`
 
 ### Include Order

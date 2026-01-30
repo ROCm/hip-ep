@@ -59,6 +59,6 @@
 #endif
 
 #if MORPHIZEN_USER == MORPHIZEN_USER__CUSTOM_OP ||                             \
-    VAIP_USER == VAIP_USER__ORT_VITIS_AI_EP
+    MORPHIZEN_USER == MORPHIZEN_USER__ORT_VITIS_AI_EP
 #  include "./custom_op_imp.hpp"
 #endif

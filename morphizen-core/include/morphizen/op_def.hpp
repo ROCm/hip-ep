@@ -25,7 +25,7 @@ void set_vitis_ep_custom_ops(const std::set<std::string>&);
 
 #ifndef _WIN32
 #  include <morphizen/export.h>
-#  define DEFINE_VAIP_OPDEF(cls, id)                                           \
+#  define DEFINE_MORPHIZEN_OPDEF(cls, id)                                      \
     extern "C" MORPHIZEN_PASS_ENTRY morphizen::OpDefInfo*                      \
     morphizen_op_def_info() {                                                  \
       return ProcessorOpDefInfo<cls>::op_fef_info();                           \
@@ -34,7 +34,7 @@ void set_vitis_ep_custom_ops(const std::set<std::string>&);
     void* /* a hook var*/ id##__hook = nullptr;                                \
     }
 #else
-#  define DEFINE_VAIP_OPDEF(cls, id)                                           \
+#  define DEFINE_MORPHIZEN_OPDEF(cls, id)                                      \
     static ::morphizen::OpDefInfo* morphizen_op_def_info() {                   \
       return ProcessorOpDefInfo<cls>::op_fef_info();                           \
     }                                                                          \

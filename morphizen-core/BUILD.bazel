@@ -40,7 +40,7 @@ genrule(
 
 # This gives us:
 # - **Modularity**: Each proto can be built independently
-# - **Convenience**: The `vaip_protos` target for when you need all of them
+# - **Convenience**: Proto targets available when you need them
 # - **Performance**: Better parallelization and caching
 # - **Maintainability**: Clear separation of concerns
 
@@ -265,7 +265,6 @@ cc_library(
         "src/version_info.cpp",
         "src/version_info.hpp",
         # Core implementation files
-        "src/vaip_ort_api.cpp",
         "src/pass_context_imp.hpp",
         "src/pass_context_imp.cpp",
         "src/anchor_point.cpp",
@@ -332,7 +331,6 @@ cc_library(
         "src/guess_reshape.cpp",
         "src/binary/config_reader.cpp",
         "src/vitisai_compile_model.cpp",
-        "src/vaip_profile.cpp",
         "src/onnxruntime_vitisai_ep.cpp",
         "src/file_stream.hpp",
         "src/file_stream.cpp",
@@ -432,7 +430,6 @@ cc_library(
         "include/morphizen/util.hpp",
         "include/morphizen/morphizen.hpp",
         "include/morphizen/morphizen_core.hpp",
-        "include/morphizen/vaip_ort.hpp",
         "include/morphizen/plugin.hpp",
         "include/morphizen/weak.hpp",
         "include/morphizen/with_current_graph.hpp",

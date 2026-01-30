@@ -10,7 +10,6 @@ Please build the MorphiZen project and fix any build errors that occur.
   - `VAI_RT_WORKSPACE=c:/Develop/m/source`
   - `VAI_RT_BUILD_DIR=C:/Develop/m/build`
   - `VAI_RT_PREFIX=C:/Develop/m/local`
-- **CMake Preset**: "Morphizen Ninja"
 
 ## Build Steps:
 
@@ -21,9 +20,15 @@ Please build the MorphiZen project and fix any build errors that occur.
    export VAI_RT_PREFIX="C:/Develop/m/local"
    ```
 
-2. Configure with CMake preset:
+2. Configure with CMake:
    ```bash
-   cmake --preset "Morphizen Ninja"
+   cmake -G Ninja -B ../../build/morphizen.ninja -S . \
+     -DCMAKE_BUILD_TYPE=Debug \
+     -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded$<$<CONFIG:Debug>:Debug>" \
+     -Dmorphizen_ENABLE_UNIT_TEST=ON \
+     -Dmorphizen_ENABLE_ORT_BRIDGE=ON \
+     -Dmorphizen_ENABLE_MLIR_BACKEND=ON \
+     -DCMAKE_PREFIX_PATH=../../local
    ```
 
 3. Build the project:
@@ -51,7 +56,6 @@ If there are any build errors:
 - The project uses Ninja generator for faster builds
 - Dependencies are automatically fetched via CMake FetchContent
 - Build output goes to `C:/Develop/m/build/morphizen.ninja/bin/`
-- The preset includes `morphizen_DEMO_DIR` and other configurations from CMakePresets.json
 
 ## Verifying Build Outputs:
 Use PowerShell cmdlets (NOT CMD-style commands) to list build outputs:

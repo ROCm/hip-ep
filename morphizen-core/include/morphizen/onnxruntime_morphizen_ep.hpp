@@ -302,7 +302,7 @@ void profiler_collect(std::vector<EventInfo>& api_events,
  * @brief Retrieves the global API instance for MorphiZen Execution Provider.
  * For multiple DLLs to use the same global_api for initialization.
  *
- * It is defined in vaip_ort_api.cpp
+ * It is defined in morphizen-ort-api.cpp
  *
  * The gloal_api initialized in onnxruntime_morphizen_eo.dll/so.
  * But the gloal_api not initalized in Morphizen tools (eg onnx_grep ,

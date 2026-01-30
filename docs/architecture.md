@@ -587,7 +587,7 @@ CreateEpFactories() [ort-bridge]
 CreateEpImpl() → MorphiZenEP instance
     ↓
 GetCapabilityImpl(graph)
-    ├─ Setup backend API via setup_global_vaip_ort_api()
+    ├─ Setup backend API via setup_global_morphizen_ort_api()
     ├─ Convert ORT graph to MorphiZen model via IRConverter
     ├─ Call compile_onnx_model_morphizen_ep_v4()
     ├─ Identify supported nodes via get_supported_nodes()
@@ -618,7 +618,7 @@ CompileImpl(graphs, fused_nodes, count)
 ### 4.5 Custom Operation Registration
 
 Two registration mechanisms:
-1. **Legacy**: `vaip_op_def_info()` (deprecated, memory leak warning)
+1. **Legacy**: `vaip_op_def_info()` (VAIP-era, deprecated, memory leak warning)
 2. **Modern**: `morphizen_register_ops()` callback function
 
 Supports multiple domains (e.g., "com.xilinx", "com.microsoft")
