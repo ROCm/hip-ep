@@ -809,7 +809,7 @@ morphizen::OrtApiForMorphizen* get_morphizen_ort_api_for_coverage_test(
   g_wrapped_api->tensor_proto_new_bool = wrapped_tensor_proto_new_bool;
 #endif // MORPHIZEN_ORT_API_MAJOR >= 19
 
-  LOG(INFO) << "Created VAIP ORT API test coverage wrapper with "
+  LOG(INFO) << "Created MorphiZen ORT API test coverage wrapper with "
             << sizeof(morphizen::OrtApiForMorphizen) << " bytes";
   return g_wrapped_api.get();
 }
@@ -817,7 +817,7 @@ morphizen::OrtApiForMorphizen* get_morphizen_ort_api_for_coverage_test(
 void delete_morphizen_ort_api_coverage_test(
     morphizen::OrtApiForMorphizen* wrapped_api) {
   if (wrapped_api == g_wrapped_api.get()) {
-    LOG(INFO) << "Deleting VAIP ORT API test coverage wrapper";
+    LOG(INFO) << "Deleting MorphiZen ORT API test coverage wrapper";
     LOG(INFO) << "API call statistics:";
     for (const auto& [api_name, count] : g_api_call_counts) {
       LOG(INFO) << "  " << api_name << ": " << count << " calls";

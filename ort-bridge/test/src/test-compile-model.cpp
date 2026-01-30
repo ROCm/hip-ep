@@ -10,7 +10,7 @@
 #include <filesystem>
 #include <glog/logging.h>
 #include <memory>
-// Include VAIP core headers for API access
+// Include MorphiZen core headers for API access
 #include "./test-coverage-wrapper.hpp"
 #include <morphizen/morphizen_ort_api.h>
 #include <morphizen/onnxruntime_morphizen_ep.hpp>

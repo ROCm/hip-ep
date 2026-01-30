@@ -28,7 +28,7 @@ std::string vec_to_string(const std::vector<int64_t>& vec) {
   return oss.str();
 }
 /**
- * Test fixture specifically for testing VAIP ORT API implementation
+ * Test fixture specifically for testing MorphiZen ORT API implementation
  * through the coverage wrapper
  */
 class MorphizenOrtApiTest : public TestCoverageWrapperTest {
@@ -2190,7 +2190,7 @@ void MorphizenOrtApiTest::ComprehensiveCoverageReport() {
 
   auto stats = get_morphizen_ort_api_call_statistics();
 
-  LOG(INFO) << "=== VAIP ORT API Coverage Report (Current Test Only) ===";
+  LOG(INFO) << "=== MorphiZen ORT API Coverage Report (Current Test Only) ===";
   LOG(INFO) << "APIs called in current test: " << stats.size();
 
   // Use the coverage checker to get detailed analysis

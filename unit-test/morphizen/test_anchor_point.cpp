@@ -100,7 +100,7 @@ TEST_F(TestAnchorPoint, Append) {
   std::shared_ptr<PassContext> context = PassContext::create();
   auto pass_proto = PassProto();
   pass_proto.set_name("test");
-  pass_proto.set_plugin("vaip-pass_init");
+  pass_proto.set_plugin("morphizen-pass_init");
   auto pass = IPass::create_pass(context, pass_proto);
   test_append(*pass, "case0.prototxt", "case1.prototxt");
 }

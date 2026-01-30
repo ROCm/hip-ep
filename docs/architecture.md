@@ -851,9 +851,9 @@ auto& context = MLIRContextManager::getInstance().getContext();
 
 ### 7.4 MLIR-ORT API Bridge
 
-The MLIR backend implements the same `VaipOrtApiExt` interface as ONNX-IR:
+The MLIR backend implements the same `MorphizenOrtApiExt` interface as ONNX-IR:
 ```
-VaipOrtApiExt (111 function pointers)
+MorphizenOrtApiExt (111 function pointers)
     ↑
     ├─ onnx-ir-imp (ONNX Protocol Buffer backend)
     └─ mlir-imp (MLIR IR backend)
