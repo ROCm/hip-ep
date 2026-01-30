@@ -46,7 +46,7 @@ template <typename T> static std::string get_readable_path(const T& entry) {
 }
 static int list_tar(const char* file) {
   auto tar_path = std::filesystem::u8path(file);
-  auto tar_file_obj = vaip_core::TarFile::create_from_path(tar_path);
+  auto tar_file_obj = morphizen::TarFile::create_from_path(tar_path);
   if (tar_file_obj == nullptr) {
     std::cerr << "Failed to open tar file: " << file << std::endl;
     return 1;
@@ -89,7 +89,7 @@ static int list_header_tar(const char* file) {
   auto tar_path = std::filesystem::u8path(file);
   auto stream =
       std::make_unique<std::fstream>(tar_path, std::ios::binary | std::ios::in);
-  auto entry = vaip_core::TarHeader::read_header(*stream);
+  auto entry = morphizen::TarHeader::read_header(*stream);
   auto width = 12;
   std::cout << std::right                       // Align fields to the right
             << std::setw(width) << "size"       // Set width for "Size"
@@ -116,7 +116,7 @@ static int list_header_tar(const char* file) {
               << std::setw(0) // File path
               << (" " + name) // path info
               << std::endl;
-    entry = vaip_core::TarHeader::read_header(*stream);
+    entry = morphizen::TarHeader::read_header(*stream);
   }
   stream->clear();
   cout << "read end at " << stream->tellg() << endl;

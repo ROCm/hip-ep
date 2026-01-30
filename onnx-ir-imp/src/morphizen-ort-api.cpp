@@ -448,12 +448,12 @@ static void initialize_dummy_api() {
       } else {
         auto input_node =
             input_arg.get_producer_node(); // Returns NodeIndex by value
-        auto vaip_core_node_ptr =
+        auto morphizen_core_node_ptr =
             input_node.is_valid() ? static_cast<const morphizen::Node*>(
                                         input_node.to_morphizen_core_node_ptr())
                                   : nullptr;
         result.push_back(morphizen::NodeInput{
-            vaip_core_node_ptr,
+            morphizen_core_node_ptr,
             static_cast<const morphizen::NodeArg*>(
                 input_arg.to_morphizen_core_node_arg_ptr())});
       }
@@ -1410,7 +1410,7 @@ static void initialize_dummy_api() {
 }
 
 namespace onnx_ir_imp {
-const morphizen::OrtApiForMorphizen* get_vaip_ort_api() {
+const morphizen::OrtApiForMorphizen* get_morphizen_ort_api() {
   initialize_dummy_api();
   return &the_instance_of_morphizen_ort_api;
 }
@@ -1423,12 +1423,13 @@ void RegisterContribSchemas();
 }
 } // namespace onnxruntime
 namespace {
-const morphizen::OrtApiForMorphizen* morphizen_onnx_ir_imp_get_vaip_ort_api() {
+const morphizen::OrtApiForMorphizen*
+morphizen_onnx_ir_imp_get_morphizen_ort_api() {
   onnxruntime::contrib::RegisterContribSchemas();
-  return morphizen::onnx_ir_imp::get_vaip_ort_api();
+  return morphizen::onnx_ir_imp::get_morphizen_ort_api();
 }
 
 static ::morphizen::StaticPluginRegister
-    __register(morphizen::kONNXIRBackend, "vaip_ort_api_imp",
-               (void*)&morphizen_onnx_ir_imp_get_vaip_ort_api);
+    __register(morphizen::kONNXIRBackend, "morphizen_ort_api_imp",
+               (void*)&morphizen_onnx_ir_imp_get_morphizen_ort_api);
 } // namespace

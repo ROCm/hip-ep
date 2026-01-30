@@ -15,7 +15,7 @@
 #include <boost/program_options.hpp>
 #define ORT_API_MANUAL_INIT 1
 #include "onnxruntime_cxx_api.h"
-#include "morphizen/vaip.hpp"
+#include "morphizen/morphizen.hpp"
 #include "morphizen/env_config.hpp"
 
 namespace po = boost::program_options;
@@ -566,7 +566,7 @@ public:
         << " IGNORE_CONSTANT=" << ENV_PARAM(IGNORE_CONSTANT) << " \\\n"      //
         << " ENABLE_CONSTNAT_SHARING=" << ENV_PARAM(ENABLE_CONSTANT_SHARING) //
         << " \\\n"                                                           //
-        << " $BUILD/vaip/onnxruntime_morphizen_ep/onnx_pattern_gen \\\n";
+        << " $BUILD/morphizen/onnxruntime_morphizen_ep/onnx_pattern_gen \\\n";
     for (auto& input : opt_inputs) {
       cxx_src_stream << " -i " << input << " \\\n";
     }
@@ -588,9 +588,10 @@ public:
       cxx_src_stream << "ret = " << vector_node_patterns_.back()->cxx_name_
                      << ";" << std::endl;
     } else {
-      cxx_src_stream << "ret = "
-                        "builder.sequence(std::vector<std::shared_ptr<vaip_"
-                        "core::Pattern>>{";
+      cxx_src_stream
+          << "ret = "
+             "builder.sequence(std::vector<std::shared_ptr<morphizen_"
+             "core::Pattern>>{";
       for (auto output : opt_outputs) {
         cxx_src_stream << map_node_patterns_.at(output)->cxx_name_ << ",";
       }
@@ -695,7 +696,7 @@ get_nodes(morphizen_cxx::GraphConstRef graph, const T& node_output_names) {
 // example usage:
 
 // clang-format off
-// $BUILD/vaip/onnxruntime_morphizen_ep/onnx_pattern_gen -i 38 -o 62 -f $BUILD/../vaip_regression/5/Resnet18_int.onnx
+// $BUILD/morphizen/onnxruntime_morphizen_ep/onnx_pattern_gen -i 38 -o 62 -f $BUILD/../morphizen_regression/5/Resnet18_int.onnx
 // clang-format on
 int main(int argc, char* argv[]) {
   Ort::InitApi();
