@@ -87,7 +87,7 @@ public:
    * @return NodeIndex corresponding to the legacy pointer
    * @note Used for backward compatibility with existing VAIP core APIs
    */
-  static NodeIndex from_vaip_core_node_ptr(const void* ptr);
+  static NodeIndex from_morphizen_core_node_ptr(const void* ptr);
 
   /**
    * @brief Create NodeIndex from legacy VAIP core node index
@@ -96,7 +96,7 @@ public:
    * @note Used for backward compatibility with existing VAIP core APIs that use
    * size_t indices
    */
-  static NodeIndex from_vaip_core_node_index(size_t index);
+  static NodeIndex from_morphizen_core_node_index(size_t index);
 
   /**
    * @brief Create an invalid NodeIndex
@@ -187,7 +187,7 @@ public:
    * @return void pointer compatible with legacy VAIP core APIs
    * @note Used for backward compatibility
    */
-  const void* to_vaip_core_node_ptr() const;
+  const void* to_morphizen_core_node_ptr() const;
 
   // === Node Property Access ===
   /**

@@ -210,12 +210,12 @@ std::string NodeIndex::to_string() const {
   return oss.str();
 }
 
-const void* NodeIndex::to_vaip_core_node_ptr() const {
+const void* NodeIndex::to_morphizen_core_node_ptr() const {
   // Convert NodeIndex to morphizen::Node pointer
   return reinterpret_cast<const void*>(static_cast<uintptr_t>(value_));
 }
 
-NodeIndex NodeIndex::from_vaip_core_node_ptr(const void* ptr) {
+NodeIndex NodeIndex::from_morphizen_core_node_ptr(const void* ptr) {
   auto ret = NodeIndex::invalid();
   if (ptr == nullptr) {
     return ret;
@@ -224,7 +224,7 @@ NodeIndex NodeIndex::from_vaip_core_node_ptr(const void* ptr) {
   return ret;
 }
 
-NodeIndex NodeIndex::from_vaip_core_node_index(size_t index) {
+NodeIndex NodeIndex::from_morphizen_core_node_index(size_t index) {
   static_assert(sizeof(size_t) == sizeof(value_),
                 "size_t must be 64-bit to match NodeIndex value_ field");
 
