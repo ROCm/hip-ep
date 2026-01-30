@@ -136,6 +136,7 @@ git clone https://github.com/ROCm/onnx-hipdnn-ep.git
 
 #### Known Issue 
 1.nlohmann_json Package Not Found ❌
+```
 Error Message:
 ```CMake Error: Could not find a package configuration file provided by "nlohmann_json"```
 Root Cause:
@@ -145,6 +146,7 @@ File Path: ```$PWD/../therock/share/cmake/nlohmann_json//nlohmann_jsonTargets.cm
 Modifications:
 Open file and find ```set_target_properties(nlohmann_json::nlohmann_json ...)```
 Remove the ```INTERFACE_SOURCES``` line (if it exists)
+```
 
 
 **Using Bash (Git Bash on Windows):**
