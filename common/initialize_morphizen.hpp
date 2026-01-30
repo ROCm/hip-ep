@@ -22,8 +22,3 @@ void initialize_morphizen() {
     std::cerr << "exception occurs : " << e.what() << "\n";
   }
 }
-
-// Deprecated VAIP alias for backward compatibility
-[[deprecated("Use initialize_morphizen()")]] inline void initialize_vaip() {
-  initialize_morphizen();
-}

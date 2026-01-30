@@ -29,20 +29,6 @@ uint32_t get_morphizen_version_major();
 uint32_t get_morphizen_version_minor();
 uint32_t get_morphizen_version_patch();
 
-// Deprecated VAIP aliases for backward compatibility
-[[deprecated("Use get_morphizen_version_major()")]] inline uint32_t
-get_vaip_version_major() {
-  return get_morphizen_version_major();
-}
-[[deprecated("Use get_morphizen_version_minor()")]] inline uint32_t
-get_vaip_version_minor() {
-  return get_morphizen_version_minor();
-}
-[[deprecated("Use get_vaip_version_patch()")]] inline uint32_t
-get_vaip_version_patch() {
-  return get_morphizen_version_patch();
-}
-
 struct MorphizenOrtApiExt : public morphizen::OrtApiForMorphizen {
   morphizen::TensorProto* (*tensor_proto_new_with_external_data)(
       const std::string& name,           //
@@ -60,10 +46,6 @@ struct MorphizenOrtApiExt : public morphizen::OrtApiForMorphizen {
       size_t size);
 };
 
-// Deprecated VAIP alias for backward compatibility
-using VaipOrtApiExt [[deprecated("Use MorphizenOrtApiExt")]] =
-    MorphizenOrtApiExt;
-
 /**
  * @brief Create and initialize the MorphiZen ORT API
  * @return an opaque pointer which restore api.
@@ -74,19 +56,6 @@ const morphizen::OrtApiForMorphizen*
 get_global_morphizen_ort_api(const char* ir_backend_name);
 
 const morphizen::OrtApiForMorphizen* get_the_global_api_unsafe();
-
-// Deprecated VAIP aliases for backward compatibility
-[[deprecated(
-    "Use setup_global_morphizen_ort_api()")]] inline std::shared_ptr<void>
-setup_global_vaip_ort_api(const char* backend_ir) {
-  return setup_global_morphizen_ort_api(backend_ir);
-}
-
-[[deprecated("Use get_global_morphizen_ort_api()")]] inline const morphizen::
-    OrtApiForMorphizen*
-    get_global_vaip_ort_api(const char* ir_backend_name) {
-  return get_global_morphizen_ort_api(ir_backend_name);
-}
 
 MORPHIZEN_DLL_SPEC void set_the_global_api(morphizen::OrtApiForMorphizen* api);
 MORPHIZEN_DLL_SPEC const morphizen::OrtApiForMorphizen* api();

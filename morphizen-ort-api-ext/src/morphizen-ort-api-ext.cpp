@@ -64,9 +64,10 @@ MORPHIZEN_DLL_SPEC void set_the_global_api(OrtApiForMorphizen* api) {
     return;
   }
   uint32_t onnx_major_version = 1;
-  const char* magic = "VAIP";
+  const char magic[4] = {0x56, 0x41, 0x49,
+                         0x50}; // Binary format identifier bytes
   bool cmp =
-      std::strncmp(reinterpret_cast<char*>(&api->magic), magic, strlen(magic));
+      std::strncmp(reinterpret_cast<char*>(&api->magic), magic, sizeof(magic));
   if (cmp == 0) {
     onnx_major_version = api->major;
   } else {

@@ -24,7 +24,6 @@ xcompiler;1e457e0;1e457e0
 graph-engine;096ffbdc269785faef8d6de374daecb357a51abf;096ffbdc269785faef8d6de374daecb357a51abf
 vairt;6c6d3a53d1b92d574bd62a3b3f927fefa9cbb6e4;6c6d3a53d1b92d574bd62a3b3f927fefa9cbb6e4
 onnxruntime;v1.20.1;v1.20.1
-vaip_xclbin;1ec6e20;1ec6e20
 openssl;openssl-3.1.2;openssl-3.1.2
 morphizen;dev;dev
 testcases;ce49c67cde57c1ba7245e22f4d0655005b1b0e43;ce49c67cde57c1ba7245e22f4d0655005b1b0e43

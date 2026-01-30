@@ -15,7 +15,3 @@ sample_pattern/** @include
 tar/** @include
 tools/** @include
 unit-test/** @include
-vaip-core/** @include
-vaip-ort-api-ext/** @include
-vaip_io/** @include
-vaip_pass_init/** @include

@@ -20,9 +20,9 @@
 # here is an example how to use the script:
 #
 #   % cd $W/MorphiZen/
-#   % git checkout vaip-core/onnxruntime_vionnxruntime_morphizen_ep.def # restore the def file to the original state
+#   % git checkout morphizen-core/onnxruntime_vionnxruntime_morphizen_ep.def # restore the def file to the original state
 #   % p=$BUILD/MorphiZen/build; set -o pipefail; cmake --build $p -j56 --config Debug  | tee c:/temp/error.log && cmake --install $p --config Debug
-#   % python parse_cl_link_error.py c:/temp/error.log $W/MorphiZen/vaip-core/onnxruntime_vionnxruntime_morphizen_ep.def
+#   % python parse_cl_link_error.py c:/temp/error.log $W/MorphiZen/morphizen-core/onnxruntime_vionnxruntime_morphizen_ep.def
 #
 import re
 import argparse
