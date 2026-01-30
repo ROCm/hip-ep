@@ -31,7 +31,8 @@ Welcome to the MorphiZen documentation! This guide will help you navigate the av
 - **[Pre-commit Setup](technical/pre-commit.md)** - Code quality hooks and linters
 
 ### Workflows
-- **[Git Workflow](workflows/git-workflow.md)** - Branch strategy, commits, and syncing
+- **[Git Workflow](workflows/git-workflow.md)** - Critical rules and quick reference
+- **[Git Workflow Reference](workflows/git-workflow-reference.md)** - Detailed step-by-step git procedures
 - **[Build Workflow](workflows/build-workflow.md)** - CMake build system and configurations
 - **[PR Workflow](workflows/pr-workflow.md)** - Pull request creation, review, and cleanup
 
