@@ -15,6 +15,6 @@ static morphizen::ExecutionProvider* create_execution_provider_imp(
 
 namespace {
 static ::morphizen::StaticPluginRegister
-    __register("vaip_custom_op_HIPDNN", "create_execution_provider",
+    __register("morphizen_custom_op_HIPDNN", "create_execution_provider",
                (void*)&create_execution_provider_imp);
 } // namespace

@@ -398,4 +398,4 @@ struct Level1HipDnn {
 };
 } // namespace
 
-DEFINE_VAIP_PASS(Level1HipDnn, vaip_pass_level1_hipdnn)
+DEFINE_MORPHIZEN_PASS(Level1HipDnn, morphizen_pass_level1_hipdnn)
