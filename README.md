@@ -105,6 +105,8 @@ cd onnxruntime
 
 #### Build ONNX Runtime
 
+If you use "Visual Studio 18 2026", upgrade cmake to >=v4.2, for example v4.2.3, then add --cmake_generator "Visual Studio 18 2026" in the following command.
+
 ```bash
 ./build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --cmake_extra_defines CMAKE_INSTALL_PREFIX=$PWD/../local
 cmake --build ../build/onnxruntime/Release/ --target install
