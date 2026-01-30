@@ -76,19 +76,18 @@ else()
   FetchContent_Declare(
   morphizen
   GIT_REPOSITORY ../MorphiZen
-  GIT_TAG main
+  GIT_TAG ee97f468e3b9f65d798ea58a89780cbfb3de87f3
   GIT_SUBMODULES "3rd-party/hash-library"
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
   )
 endif()
-set(morphizen_ENABLE_UNIT_TEST ON CACHE BOOL "enable vaip unit test or not")
+set(morphizen_ENABLE_UNIT_TEST ON CACHE BOOL "enable morphizen unit test or not")
 if(morphizen_ENABLE_UNIT_TEST)
   include(CTest)
   enable_testing()
 endif()
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/version.txt" "${VERSION_INFO}")
-set(VAIP_VERSEION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
-set(VAIP_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/etc/vaip_config.json")
+set(MORPHIZEN_VERSION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
 
 # Force static linking for glog to avoid runtime library conflicts in Debug mode
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
