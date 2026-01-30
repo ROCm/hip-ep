@@ -49,7 +49,7 @@ struct TryFuseError {
   std::vector<std::string> return_values;
 };
 
-struct VaipOnnxError {
+struct MorphizenOnnxError {
   int err_code;
   std::string err_msg;
 };

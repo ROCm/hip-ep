@@ -315,7 +315,7 @@ MorphiZenEP::GetCapability(OrtGraphWrapper& graph_viewer,
     }
   }
   MY_LOG(1) << "Using backend: " << backend_ir;
-  auto with_new_api = setup_global_vaip_ort_api(backend_ir);
+  auto with_new_api = setup_global_morphizen_ort_api(backend_ir);
   //
   auto ir_model = ir_converter(*this, graph_viewer.get());
   auto& graph = MORPHIZEN_ORT_API(model_main_graph)(*ir_model);
@@ -522,9 +522,8 @@ OrtStatus* MorphiZenEP::CompileSubgraph(const morphizen::ExecutionProvider& ep,
   }
 }
 
-static bool
-vaip_names_are_contained_in_ort_names(std::set<std::string>& vaip_names,
-                                      std::set<std::string>& ort_names) {
+static bool morphizen_names_are_contained_in_ort_names(
+    std::set<std::string>& morphizen_names, std::set<std::string>& ort_names) {
   auto join = [](const auto& set) {
     std::ostringstream oss;
     for (const auto& name : set) {
@@ -535,49 +534,50 @@ vaip_names_are_contained_in_ort_names(std::set<std::string>& vaip_names,
     }
     return oss.str();
   };
-  // Check if all vaip_names are contained in ort_names
-  auto ret = std::all_of(vaip_names.begin(), vaip_names.end(),
+  // Check if all morphizen_names are contained in ort_names
+  auto ret = std::all_of(morphizen_names.begin(), morphizen_names.end(),
                          [&ort_names](const std::string& name) {
                            return ort_names.count(name) > 0;
                          });
   if (!ret) {
     MY_LOG(1) << "Not all MorphiZen EP names are in ORT names: "
-              << "MorphiZen EP names: " << join(vaip_names)
+              << "MorphiZen EP names: " << join(morphizen_names)
               << ", ORT names: " << join(ort_names);
   } else {
     MY_LOG(1) << "All MorphiZen EP names are contained in ORT names: "
-              << "MorphiZen EP names: " << join(vaip_names)
+              << "MorphiZen EP names: " << join(morphizen_names)
               << ", ORT names: " << join(ort_names);
   }
   return ret;
 }
 OrtNode* MorphiZenEP::convert_morphizen_node_to_ort_node(
     const OrtModelEditorApi* model_editor_api,
-    const onnxruntime::Node* vaip_node, //
+    const onnxruntime::Node* morphizen_node, //
     const OrtNode* fused_node) const {
-  if (!vaip_node) {
+  if (!morphizen_node) {
     return nullptr;
   }
-  auto input_node_args = MORPHIZEN_ORT_API(node_get_inputs_unsafe)(*vaip_node);
+  auto input_node_args =
+      MORPHIZEN_ORT_API(node_get_inputs_unsafe)(*morphizen_node);
   auto output_node_args =
-      MORPHIZEN_ORT_API(node_get_output_node_args_unsafe)(*vaip_node);
+      MORPHIZEN_ORT_API(node_get_output_node_args_unsafe)(*morphizen_node);
   std::vector<std::string> input_names;
-  std::set<std::string> vaip_input_names;
+  std::set<std::string> morphizen_input_names;
   for (const auto& arg : *input_node_args) {
     auto name = MORPHIZEN_ORT_API(node_arg_get_name_unsafe)(*arg.node_arg);
     input_names.push_back(name);
-    vaip_input_names.insert(name);
+    morphizen_input_names.insert(name);
   }
   std::vector<std::string> output_names;
-  std::set<std::string> vaip_output_names;
+  std::set<std::string> morphizen_output_names;
   output_names.reserve(output_node_args->size());
   for (const auto& arg : *output_node_args) {
     auto name = MORPHIZEN_ORT_API(node_arg_get_name_unsafe)(*arg);
     output_names.push_back(name);
-    vaip_output_names.insert(name);
+    morphizen_output_names.insert(name);
   }
-  auto& vaip_attributes = MORPHIZEN_ORT_API(node_get_attributes)(
-      const_cast<onnxruntime::Node&>(*vaip_node));
+  auto& morphizen_attributes = MORPHIZEN_ORT_API(node_get_attributes)(
+      const_cast<onnxruntime::Node&>(*morphizen_node));
   auto attributes = std::unique_ptr<std::vector<OrtOpAttr*>,
                                     void (*)(std::vector<OrtOpAttr*>*)>(
       new std::vector<OrtOpAttr*>(), [](std::vector<OrtOpAttr*>* ptr) {
@@ -586,10 +586,11 @@ OrtNode* MorphiZenEP::convert_morphizen_node_to_ort_node(
         }
         delete ptr;
       });
-  auto keys = MORPHIZEN_ORT_API(node_attributes_get_keys)(vaip_attributes);
+  auto keys = MORPHIZEN_ORT_API(node_attributes_get_keys)(morphizen_attributes);
   attributes->reserve(keys->size());
   for (const auto& name : *keys) {
-    auto proto1 = MORPHIZEN_ORT_API(node_attributes_get)(vaip_attributes, name);
+    auto proto1 =
+        MORPHIZEN_ORT_API(node_attributes_get)(morphizen_attributes, name);
     CHECK(proto1 != nullptr) << "Attribute proto is null for name: " << name;
     auto& proto = *proto1;
     auto type = MORPHIZEN_ORT_API(attr_proto_get_type)(proto);
@@ -621,8 +622,8 @@ OrtNode* MorphiZenEP::convert_morphizen_node_to_ort_node(
   }
 
   // Create the ORT node using the model editor API
-  auto op_type = MORPHIZEN_ORT_API(node_op_type)(*vaip_node);
-  auto domain = MORPHIZEN_ORT_API(node_op_domain)(*vaip_node);
+  auto op_type = MORPHIZEN_ORT_API(node_op_type)(*morphizen_node);
+  auto domain = MORPHIZEN_ORT_API(node_op_domain)(*morphizen_node);
 
   // NOTE: we must use the fused_node name, see graph_partitioner.cc:898
   const char* ort_node_name = nullptr;
@@ -655,11 +656,11 @@ OrtNode* MorphiZenEP::convert_morphizen_node_to_ort_node(
                                         input_names_2.end());
   std::set<std::string> ort_output_names(output_names_2.begin(),
                                          output_names_2.end());
-  CHECK(
-      vaip_names_are_contained_in_ort_names(vaip_input_names, ort_input_names))
+  CHECK(morphizen_names_are_contained_in_ort_names(morphizen_input_names,
+                                                   ort_input_names))
       << "MorphiZen EP and ORT have different input names: ";
-  CHECK(vaip_names_are_contained_in_ort_names(vaip_output_names,
-                                              ort_output_names))
+  CHECK(morphizen_names_are_contained_in_ort_names(morphizen_output_names,
+                                                   ort_output_names))
       << "MorphiZen EP and ORT have different output names: ";
   std::vector<const char*> input_names_c;
   std::vector<const char*> output_names_c;
@@ -691,15 +692,16 @@ OrtStatus* MorphiZenEP::CreateEpContextNodes(const OrtNode** fused_nodes,
   if (!enable_ep_context_) {
     return nullptr;
   }
-  morphizen::DllSafe<std::vector<onnxruntime::Node*>> vaip_ep_context_nodes;
-  auto error_code =
-      create_ep_context_nodes(**execution_providers_, &vaip_ep_context_nodes);
+  morphizen::DllSafe<std::vector<onnxruntime::Node*>>
+      morphizen_ep_context_nodes;
+  auto error_code = create_ep_context_nodes(**execution_providers_,
+                                            &morphizen_ep_context_nodes);
 
   if (error_code != 0) {
     MY_LOG(1) << "Failed to create EP context nodes, error code: "
               << error_code;
   }
-  CHECK_EQ(count, vaip_ep_context_nodes->size())
+  CHECK_EQ(count, morphizen_ep_context_nodes->size())
       << "Count of EP context nodes does not match the expected count";
 
   const OrtModelEditorApi* model_editor_api = ort_api.GetModelEditorApi();
@@ -707,9 +709,9 @@ OrtStatus* MorphiZenEP::CreateEpContextNodes(const OrtNode** fused_nodes,
     LOG(ERROR) << "Model editor API is not available";
     return ort_api.CreateStatus(ORT_FAIL, "Model editor API is not available");
   }
-  for (size_t i = 0; i < count && i < vaip_ep_context_nodes->size(); ++i) {
+  for (size_t i = 0; i < count && i < morphizen_ep_context_nodes->size(); ++i) {
     ep_context_nodes[i] = convert_morphizen_node_to_ort_node(
-        model_editor_api, (*vaip_ep_context_nodes)[i], fused_nodes[i]);
+        model_editor_api, (*morphizen_ep_context_nodes)[i], fused_nodes[i]);
   }
   return nullptr;
 }

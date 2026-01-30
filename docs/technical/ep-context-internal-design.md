@@ -84,8 +84,8 @@ TODO:
 Uses `tar_file_` for all storage scenarios. Encryption and compression are handled at serialization boundaries (when saving/loading EP context), not within tar_file_ itself.
 
 When encryption is enabled:
-- During save: tar stream is encrypted using `vaip_encryption::aes_encryption`
-- During load: encrypted stream is decrypted using `vaip_encryption::aes_decryption`, then loaded into tar_file_
+- During save: tar stream is encrypted using `morphizen_encryption::aes_encryption`
+- During load: encrypted stream is decrypted using `morphizen_encryption::aes_decryption`, then loaded into tar_file_
 
 This approach keeps tar_file_ simple while supporting encryption transparently.
 

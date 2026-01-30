@@ -20,11 +20,11 @@ it is saved, and now it is supported by PR #209
 
 ```c++
 auto session_options = Ort::SessionOptions();
-auto provider_options = std::unordered_map<std::string, std::string>{{"config", "vaip_config.json"}};
+auto provider_options = std::unordered_map<std::string, std::string>{{"config", "morphizen_config.json"}};
 session_options.AppendExecutionProvider_VitisAI(options);
 ```
 
-the content of `vaip_config.json`
+the content of `morphizen_config.json`
 
 ```json
 {

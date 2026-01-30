@@ -21,4 +21,4 @@ EP auto target discovery with the following priorities.
 
 4. `target` in the json config file.
     - It is a fatal error if target is not valid, a list of valid target names are printed and abort abnormally, because end users are expected to know the target they want to use.
-    - `target` is now considered as a mandatory field in the default vaip config, and it must be set to a valid target name.
+    - `target` is now considered as a mandatory field in the default morphizen config, and it must be set to a valid target name.

@@ -53,7 +53,11 @@ If you need to update these headers to a newer ONNXRuntime version:
 4. Test the build to ensure compatibility:
    ```bash
    cd ../Morphizen
-   cmake --preset "Morphizen Ninja"
+   cmake -G Ninja -B ../build/morphizen.ninja -S . \
+     -DCMAKE_BUILD_TYPE=Debug \
+     -Dmorphizen_ENABLE_UNIT_TEST=ON \
+     -Dmorphizen_ENABLE_ORT_BRIDGE=ON \
+     -Dmorphizen_ENABLE_MLIR_BACKEND=ON
    cmake --build "../build/morphizen.ninja" --config Debug
    ```
 

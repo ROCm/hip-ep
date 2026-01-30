@@ -126,15 +126,15 @@ public:
  * @code
  * DEF_ENV_PARAM_2(YOUR_PROVIDER_OPTION_NAME, "<default-value>", int64_t)
  * int64_t value =
- *    VAIP_PROVIDER_OPTION(*pass.get_context(), YOUR_PROVIDER_OPTION_NAME)
+ *    MORPHIZEN_PROVIDER_OPTION(*pass.get_context(), YOUR_PROVIDER_OPTION_NAME)
  *
  * DEF_ENV_PARAM_2(YOUR_BOOLEN_OPTION, "ON", bool)
  * bool value =
- *    VAIP_PROVIDER_OPTION(*pass.get_context(), YOUR_BOOLEN_OPTION)
+ *    MORPHIZEN_PROVIDER_OPTION(*pass.get_context(), YOUR_BOOLEN_OPTION)
  *
  * DEF_ENV_PARAM(YOUR_INT_OPTION, "100") // int value
  * int value =
- *    VAIP_PROVIDER_OPTION(*pass.get_context(), YOUT_INT_OPTION)
+ *    MORPHIZEN_PROVIDER_OPTION(*pass.get_context(), YOUT_INT_OPTION)
  * @endcode
  *
  * now we can use environment variable as the default value of a
@@ -148,7 +148,7 @@ public:
  * @param param_name The name of the parameter to retrieve.
  * @return The value of the provider option.
  */
-#define VAIP_PROVIDER_OPTION(context, param_name)                              \
+#define MORPHIZEN_PROVIDER_OPTION(context, param_name)                         \
   ((context).get_provier_option_with_class<ENV_PARAM_##param_name>())
 
   /**
