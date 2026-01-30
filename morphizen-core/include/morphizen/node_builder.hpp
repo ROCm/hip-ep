@@ -19,8 +19,8 @@ namespace morphizen {
  * type. It also supports adding multiple outputs and optional outputs.
  *
  * This is a high-level convenience API that depends on IPass and AnchorPoint,
- * which are vaip-core concepts. It uses the morphizen-graph wrappers internally
- * but provides a fluent API for node construction.
+ * which are morphizen-core concepts. It uses the morphizen-graph wrappers
+ * internally but provides a fluent API for node construction.
  */
 struct NodeBuilder {
 public:

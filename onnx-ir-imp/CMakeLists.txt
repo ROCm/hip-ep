@@ -43,7 +43,7 @@ target_sources(${LIB_NAME}
 ## compile time dependency
 set(ORT_INC  "")
 list(APPEND ORT_INC
-  ${VAIP_ORT_API_DIR}
+  ${MORPHIZEN_ORT_API_DIR}
 )
 set_source_files_properties(src/morphizen-ort-api.cpp
   PROPERTIES INCLUDE_DIRECTORIES "${ORT_INC}")

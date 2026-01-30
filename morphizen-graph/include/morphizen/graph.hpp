@@ -52,9 +52,10 @@ MORPHIZEN_DLL_SPEC std::vector<const NodeArg*>
 graph_get_outputs(const Graph& graph);
 MORPHIZEN_DLL_SPEC void graph_set_name(Graph& graph, const std::string& name);
 
-// NOTE: NodeBuilder has been moved to vaip-core (node_builder.hpp)
-// It depends on IPass and AnchorPoint which are high-level vaip-core concepts.
-// This file contains only low-level graph wrappers over MORPHIZEN_ORT_API.
+// NOTE: NodeBuilder has been moved to morphizen-core (node_builder.hpp)
+// It depends on IPass and AnchorPoint which are high-level morphizen-core
+// concepts. This file contains only low-level graph wrappers over
+// MORPHIZEN_ORT_API.
 
 const Model& graph_get_model(const Graph& graph);
 std::vector<const Node*> graph_nodes(const Graph& graph);
@@ -103,7 +104,7 @@ graph_get_consumer_nodes(const Graph& graph, const std::string& node_arg_name);
  *  @param graph
  *
  *  usuaully a pass writer does not need to invoke this function
- *  explicitly, in vaip_config.json, we can set `enableGc=true` to
+ *  explicitly, in morphizen_config.json, we can set `enableGc=true` to
  *  automatically apply garbage collection.
  *
  *  Sometime it is useful to disable gc for troubleshooting.
@@ -132,8 +133,8 @@ MORPHIZEN_DLL_SPEC void graph_gc(Graph& graph);
  */
 MORPHIZEN_DLL_SPEC void graph_resolve(Graph& graph, bool force = false);
 
-// NOTE: graph_replace_node_arg has been moved to vaip-core
-// It depends on IPass which is a vaip-core type
+// NOTE: graph_replace_node_arg has been moved to morphizen-core
+// It depends on IPass which is a morphizen-core type
 
 /** @brief Get the producer node of a node argument
  *
@@ -190,7 +191,7 @@ MORPHIZEN_DLL_SPEC void graph_reverse_dfs_from(
  * @param stop Callback to determine if traversal should stop along an edge
  *
  * Traverses the graph in reverse DFS order starting from multiple nodes.
- * This is a low-level wrapper used by vaip-core for fusion analysis.
+ * This is a low-level wrapper used by morphizen-core for fusion analysis.
  */
 MORPHIZEN_DLL_SPEC void graph_reverse_dfs_from_multi(
     const Graph& graph, gsl::span<const Node* const> from,
@@ -229,7 +230,7 @@ graph_fuse(Graph& graph, const std::string& name, const std::string& op_type,
  * @return Reference to the newly created fused node
  *
  * This is a low-level wrapper that takes node indices instead of node pointers.
- * It directly wraps MORPHIZEN_ORT_API(graph_fuse) for use by vaip-core.
+ * It directly wraps MORPHIZEN_ORT_API(graph_fuse) for use by morphizen-core.
  */
 MORPHIZEN_DLL_SPEC Node&
 graph_fuse(Graph& graph, const std::string& name, const std::string& op_type,
@@ -239,7 +240,7 @@ graph_fuse(Graph& graph, const std::string& name, const std::string& op_type,
            const std::vector<std::string>& constant_initializers);
 
 // Model operations (wrappers for model-level MORPHIZEN_ORT_API calls)
-// These allow vaip-core's Model class to use morphizen-graph wrappers
+// These allow morphizen-core's Model class to use morphizen-graph wrappers
 // instead of calling MORPHIZEN_ORT_API directly
 
 /** @brief Get the main graph from a model
@@ -438,8 +439,8 @@ public:
    * optional if not found.
    */
   std::optional<NodeArgConstRef> find_node_arg(const std::string& name) const;
-  // NOTE: try_fuse and virtual_fuse have been moved to vaip-core
-  // They depend on MetaDefProto and TryFuseError which are vaip-core types
+  // NOTE: try_fuse and virtual_fuse have been moved to morphizen-core
+  // They depend on MetaDefProto and TryFuseError which are morphizen-core types
   /**
    * @brief Converts the graph to a string representation, for debugging purpose
    *
@@ -556,8 +557,8 @@ public:
    */
   bool resolve(bool force = false);
 
-  // NOTE: fuse and node_builder have been moved to vaip-core
-  // They depend on MetaDefProto and IPass which are vaip-core types
+  // NOTE: fuse and node_builder have been moved to morphizen-core
+  // They depend on MetaDefProto and IPass which are morphizen-core types
   /** @brief save a graph to a file
    * this function is not a const member function, because when
    * `filter_out_special_tensor` is true, the constant initializers might be

@@ -1,9 +1,9 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
 cc_library(
-    name = "vaip-ort-api-ext",
-    srcs = ["src/vaip-ort-api-ext.cpp"],
-    hdrs = ["include/morphizen/vaip-ort-api-ext.hpp"],
+    name = "morphizen-ort-api-ext",
+    srcs = ["src/morphizen-ort-api-ext.cpp"],
+    hdrs = ["include/morphizen/morphizen-ort-api-ext.hpp"],
     copts = select({
         "@bazel_tools//src/conditions:windows": [
             "/wd4251",  # class needs to have dll-interface warnings from ONNXRuntime

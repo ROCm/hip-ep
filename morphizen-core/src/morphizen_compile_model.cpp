@@ -51,7 +51,7 @@ DEF_ENV_PARAM(DEBUG_FILE_LOCK, "0")
 DEF_ENV_PARAM(DEBUG_EP_CONTEXT, "0")
 DEF_ENV_PARAM(XLNX_ONNX_EP_DL_ANALYZER_PROFILING, "0")
 DEF_ENV_PARAM(XLNX_ONNX_EP_DL_ANALYZER_VISUALIZATION, "0")
-DEF_ENV_PARAM_2(XLNX_VAIML_LEVEL_1_NAME, "vaip-pass_vaiml_partition",
+DEF_ENV_PARAM_2(XLNX_VAIML_LEVEL_1_NAME, "morphizen-pass_vaiml_partition",
                 std::string)
 
 #ifdef _WIN32
@@ -388,9 +388,9 @@ std::shared_ptr<PassContextImp> initialize_context(
     MY_LOG(1) << "use cache key specified by user "
               << context->context_proto.config().cache_key();
   } else if (morphizen_cxx::ModelConstRef(model).has_metadata(
-                 "vaip_model_md5sum")) {
-    auto new_cache_key =
-        morphizen_cxx::ModelConstRef(model).get_metadata("vaip_model_md5sum");
+                 "morphizen_model_md5sum")) {
+    auto new_cache_key = morphizen_cxx::ModelConstRef(model).get_metadata(
+        "morphizen_model_md5sum");
     MY_LOG(1) << "use cache key in meta-data " << new_cache_key;
     *context->context_proto.mutable_config()->mutable_cache_key() =
         new_cache_key;
@@ -425,7 +425,7 @@ std::shared_ptr<PassContextImp> initialize_context(
   update_cache_dir(*context);
   // DANGER!
   Model& mutable_model = const_cast<Model&>(model);
-  model_set_meta_data(mutable_model, "vaip_log_dir",
+  model_set_meta_data(mutable_model, "morphizen_log_dir",
                       context->get_log_dir().u8string());
   // log version of binary
   context->print_version_info("EXEC VERSION: ");
@@ -935,7 +935,7 @@ create_execution_providers_from_ep_context_nodes(
     auto& meta_def = *context->context_proto.mutable_meta_def(meta_def_index);
     update_meta_def_from_ep_node(node, meta_def);
     auto device = meta_def.device();
-    auto plugin_name = std::string("vaip_custom_op_") + device;
+    auto plugin_name = std::string("morphizen_custom_op_") + device;
     ret.emplace_back(
         ExecutionProviderConcrete::create(plugin_name, context, meta_def));
   }
@@ -1047,7 +1047,7 @@ compile_onnx_model_internal(
     ret.reserve(context->context_proto.meta_def_size());
     for (auto& meta_def : *context->context_proto.mutable_meta_def()) {
       std::string device = meta_def.device();
-      auto plugin_name = std::string("vaip_custom_op_") + device;
+      auto plugin_name = std::string("morphizen_custom_op_") + device;
       ret.emplace_back(
           ExecutionProviderConcrete::create(plugin_name, context, meta_def));
     }
@@ -1165,11 +1165,12 @@ std::vector<std::unique_ptr<ExecutionProvider>> compile_onnx_model_3_internal(
     (void)e; // suppress unused variable
     if (ENV_PARAM(XLNX_ENABLE_SKIP_FATAL)) {
       LOG(INFO) << " catch pybind11 exception, skip this subgraph:  maybe not "
-                   "found vaip python module";
+                   "found morphizen python module";
     } else {
-      LOG(INFO) << " catch pybind11 exception, maybe not found vaip python "
-                   "module , please throw detail message for "
-                   "developer";
+      LOG(INFO)
+          << " catch pybind11 exception, maybe not found morphizen python "
+             "module , please throw detail message for "
+             "developer";
       abort();
     }
   }
@@ -1209,7 +1210,7 @@ std::vector<std::unique_ptr<ExecutionProvider>> compile_onnx_model_3_internal(
 
   print_device_subgraph(*context);
   auto disable_cpu_only =
-      context->get_provider_option("vaip_disable_cpu_only_inference", "0");
+      context->get_provider_option("morphizen_disable_cpu_only_inference", "0");
   if (disable_cpu_only == "1") {
     if (is_cpu_only_inference(*context)) {
       LOG(ERROR) << "[MorphiZen EP][DISABLE CPU ONLY] The model's NPU "

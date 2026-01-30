@@ -35,7 +35,7 @@ option(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC "enable morphizen-core-dynamic or
 
 set(morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET_DEFAULT} CACHE STRING "the name of target whose output name is onnxruntime_morphizen_ep")
 # enable morphizen unit test or not
-option(morphizen_ENABLE_UNIT_TEST "enable vaip unit test or not" ${morphizen_ENABLE_UNIT_TEST_DEFAULT})
+option(morphizen_ENABLE_UNIT_TEST "enable morphizen unit test or not" ${morphizen_ENABLE_UNIT_TEST_DEFAULT})
 # enable Boost dependency for executables and unit tests
 # Default: ON (backward compatible - existing builds continue to work as before)
 # When ON: Enables Boost-dependent executables and Boost::Process unit tests (default behavior)
@@ -49,9 +49,9 @@ option(morphizen_ENABLE_UNIT_TEST "enable vaip unit test or not" ${morphizen_ENA
 #     * morphizen-onnx-grep (onnx-grep/)
 #     * morphizen-pattern-gen (pattern-gen/)
 #   - Unit tests (require Boost::Process):
-#     * test_tar_file.cpp (unit-test/vaip/test_tar_file.cpp)
-#     * test_graph.cpp (unit-test/vaip/test_graph.cpp)
-#     * test_const_data.cpp (unit-test/vaip/test_const_data.cpp)
+#     * test_tar_file.cpp (unit-test/morphizen/test_tar_file.cpp)
+#     * test_graph.cpp (unit-test/morphizen/test_graph.cpp)
+#     * test_const_data.cpp (unit-test/morphizen/test_const_data.cpp)
 option(morphizen_ENABLE_BOOST "enable Boost dependency for executables and unit tests" OFF)
 #
 # it is possible to emebed xclbin files in the binary, assume the xclbin files are in the directory
@@ -64,7 +64,7 @@ set(MORPHIZEN_EMBEDDED_RESOURCE_PATH "" CACHE PATH "Path to the meta info of emb
 # config in morphizen-core-dynamic, i.e. onnxruntime_morphizen_ep.dll
 # morphizen_WITH_MORPHIZEN_CONFIG_FILE = OFF if morphizen is built as part
 # of onnxruntime, the default config is read from a plugin.
-option(morphizen_WITH_MORPHIZEN_CONFIG_FILE "build with default vaip config in morphizen-core-dynamic, i.e. onnxruntime_morphizen_ep.dll" ${morphizen_WITH_MORPHIZEN_CONFIG_FILE_DEFAULT})
+option(morphizen_WITH_MORPHIZEN_CONFIG_FILE "build with default morphizen config in morphizen-core-dynamic, i.e. onnxruntime_morphizen_ep.dll" ${morphizen_WITH_MORPHIZEN_CONFIG_FILE_DEFAULT})
 #
 # it is possible to embed json files in the binary, assume the json files are in the directory
 set(MORPHIZEN_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/morphizen-core/etc/morphizen_config.json" CACHE FILEPATH "Path to the file containing morphizen_config.json files")

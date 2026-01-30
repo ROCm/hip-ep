@@ -134,7 +134,7 @@ graph LR
 
 ### Function: `tmpfile_with_posix_delete()`
 
-This is the core function that implements the POSIX delete mechanism, located in `vaip-core/src/util_mswin.cpp`.
+This is the core function that implements the POSIX delete mechanism, located in `morphizen-core/src/util_mswin.cpp`.
 
 #### Step 1: Create the Temporary File
 

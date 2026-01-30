@@ -18,8 +18,8 @@ MorphiZen requires the VitisAI provider headers to build, but ONNXRuntime does n
 
 The following headers are vendored from ONNXRuntime:
 
-### Main Headers (vaip/)
-- `_sanity_check.h` - Sanity checks for VAIP
+### Main Headers (morphizen/)
+- `_sanity_check.h` - Sanity checks for MorphiZen
 - `capability.h` - Capability definitions
 - `custom_op.h` - Custom operator support
 - `dll_safe.h` - DLL-safe data structures
@@ -29,8 +29,8 @@ The following headers are vendored from ONNXRuntime:
 - `my_ort.h` - ORT API wrappers
 - `node.h` - Node utilities
 - `node_arg.h` - Node argument utilities
-- `vaip_gsl.h` - Guidelines Support Library types
-- `vaip_ort_api.h` - Main VAIP ORT API header
+- `morphizen_gsl.h` - Guidelines Support Library types
+- `morphizen_ort_api.h` - Main MorphiZen ORT API header
 
 
 ## Updating Headers

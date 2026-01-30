@@ -11,9 +11,10 @@
 namespace morphizen {
 const std::string get_lib_name();
 const std::string get_lib_id();
-uint32_t get_vaip_version_major();
-uint32_t get_vaip_version_minor();
-uint32_t get_vaip_version_patch();
+uint32_t get_morphizen_version_major();
+uint32_t get_morphizen_version_minor();
+uint32_t get_morphizen_version_patch();
+
 extern "C" uint32_t morphizen_get_version();
 
 // Additional version info from DLL resource (matching version.rc.in)

@@ -41,7 +41,7 @@ it is removed. see jira:VAI-9685. and [pass_context_imp.cpp#L1177][s1]
 
 ## set when MEP table hit
 
-[see here](../vaip-core/src/morphizen_compile_model.cpp#L502)
+[see here](../morphizen-core/src/morphizen_compile_model.cpp#L502)
 
 it is to be deprecated, see PR #159 #155
 
@@ -54,7 +54,7 @@ it is to be deprecated, see PR #159 #155
 
 # set when TargetProto hit
 
-[see here]()../vaip-core/src/config.cpp#L307-L308)
+[see here]()../morphizen-core/src/config.cpp#L307-L308)
 
 It is to be deprecated, see PR #159 #155
 
@@ -63,4 +63,4 @@ It is to be deprecated, see PR #159 #155
 * `xclbin`
 
 
-[s1]: ../vaip-core/src/pass_context_imp.cpp#L1177
+[s1]: ../morphizen-core/src/pass_context_imp.cpp#L1177

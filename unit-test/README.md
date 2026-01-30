@@ -20,8 +20,8 @@ Licensed under the MIT License.
 
 
 ```
-ctest --test-dir $BUILD/vaip/unit-test -N
-ctest --test-dir $BUILD/vaip/unit-test --show-only
+ctest --test-dir $BUILD/morphizen/unit-test -N
+ctest --test-dir $BUILD/morphizen/unit-test --show-only
 ```
 
 
@@ -29,8 +29,8 @@ ctest --test-dir $BUILD/vaip/unit-test --show-only
 # to run a single test
 
 ```
-ctest --test-dir $BUILD/vaip/unit-test -R TesOnnxRunner.Main --verbose
-ctest --test-dir $BUILD/vaip/unit-test --tests-regex TesOnnxRunner.Main --verbose
+ctest --test-dir $BUILD/morphizen/unit-test -R TesOnnxRunner.Main --verbose
+ctest --test-dir $BUILD/morphizen/unit-test --tests-regex TesOnnxRunner.Main --verbose
 ```
 
 it is important to add `--verbose` otherwise we cannot see any console log.

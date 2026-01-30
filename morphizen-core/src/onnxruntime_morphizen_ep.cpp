@@ -158,7 +158,7 @@ static void
 intialize_op_defs_old(std::vector<OrtCustomOpDomain*>& contrib_domains,
                       std::vector<OrtCustomOpDomain*>& ret_domain) {
   // This function is used to initialize the op_def_map
-  typedef morphizen::OpDefInfo* (*vaip_op_def_info_t)();
+  typedef morphizen::OpDefInfo* (*morphizen_op_def_info_t)();
   auto op_def_info_ptrs =
       morphizen::Plugin::get_all_symbols("morphizen_op_def_info");
   for (const auto& op_def_into_ptr : op_def_info_ptrs) {
@@ -166,7 +166,7 @@ intialize_op_defs_old(std::vector<OrtCustomOpDomain*>& contrib_domains,
         << " morphizen_op_def_info() is depreated, please update plugin \""
         << op_def_into_ptr.first << "\", there is potential memory leak";
     auto op_def_info_func =
-        reinterpret_cast<vaip_op_def_info_t>(op_def_into_ptr.second);
+        reinterpret_cast<morphizen_op_def_info_t>(op_def_into_ptr.second);
     auto op_def_info = op_def_info_func();
     std::vector<Ort::CustomOpDomain> domains;
     op_def_info->get_domains(domains);

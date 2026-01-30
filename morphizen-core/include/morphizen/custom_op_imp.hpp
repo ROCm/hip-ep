@@ -57,10 +57,10 @@ template <typename T, typename CustomOpImp>
 struct CustomOp_compile_t<
     T, CustomOpImp, std::void_t<decltype(std::declval<T&>().get_model())>> {
   // this code is activated when MORPHIZEN_ORT_API_MAJOR >= 10 see
-  // MorphiZen/vaip#3504 for more details. T is ExecutionProviderImp always.
-  // ExecutionProviderImp::get_mode() is added in MORPHIZEN_ORT_API_MAJOR >= 10
-  // see [MorphiZen] Cache node subgraph when necessary (Onnxruntime#22073) for
-  // details.
+  // MorphiZen/morphizen#3504 for more details. T is ExecutionProviderImp
+  // always. ExecutionProviderImp::get_mode() is added in
+  // MORPHIZEN_ORT_API_MAJOR >= 10 see [MorphiZen] Cache node subgraph when
+  // necessary (Onnxruntime#22073) for details.
   //
   // in MorphiZenExecutionProvider::Compile(), we create the model object is
   // fall back on CPU is enabled. as below.

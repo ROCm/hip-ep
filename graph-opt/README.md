@@ -5,11 +5,11 @@ Licensed under the MIT License.
 
 
 ## morphizen-graph-opt
-`morphizen-graph-opt` is a useful tool for developing VAIP passes to optimize graph
+`morphizen-graph-opt` is a useful tool for developing morphizen passes to optimize graph
 
 ### Usage :
 ```
- morphizen-graph-opt.exe -i <input_onnx_model> -o <output_onnx_model> -t <output_txt_file> -p <vaip-pass_1> [vaip-pass_2 ...] [-h]
+ morphizen-graph-opt.exe -i <input_onnx_model> -o <output_onnx_model> -t <output_txt_file> -p <morphizen-pass_1> [morphizen-pass_2 ...] [-h]
 ```
 `-i` <input_onnx_model> : input onnx model file
 
@@ -17,13 +17,13 @@ Licensed under the MIT License.
 
 `-t` <output_txt_file> :  output model to txt file
 
-`-p` <vaip-pass_1> [vaip-pass_2 ...] : pass list
+`-p` <morphizen-pass_1> [morphizen-pass_2 ...] : pass list
 
 `-h` help
 
 
-### Sample with vaip-pass_init
+### Sample with morphizen-pass_init
 ```
-morphizen-graph-opt.exe -i pt_reset50.onnx -o pt_reset50_opt.onnx -p vaip-pass_init
+morphizen-graph-opt.exe -i pt_reset50.onnx -o pt_reset50_opt.onnx -p morphizen-pass_init
 
 ```

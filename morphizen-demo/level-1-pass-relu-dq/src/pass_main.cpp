@@ -78,4 +78,4 @@ struct Level1Dummy {
 };
 } // namespace
 
-DEFINE_VAIP_PASS(Level1Dummy, vaip_pass_level1_dummy)
+DEFINE_MORPHIZEN_PASS(Level1Dummy, morphizen_pass_level1_dummy)

@@ -4,18 +4,18 @@
  */
 
 #pragma once
-#ifndef VAIP_EXPORT_DLL
-#  define VAIP_EXPORT_DLL 0
+#ifndef MORPHIZEN_EXPORT_DLL
+#  define MORPHIZEN_EXPORT_DLL 0
 #endif
-#ifndef VAIP_USER
-#  define VAIP_USER 4
+#ifndef MORPHIZEN_USER
+#  define MORPHIZEN_USER 4
 #endif
 
-#if VAIP_EXPORT_DLL == 1
+#if MORPHIZEN_EXPORT_DLL == 1
 // ok to include by internal cpp files.
 #else
-#  if VAIP_USER == 1 || VAIP_USER == 2 || VAIP_USER == 3
+#  if MORPHIZEN_USER == 1 || MORPHIZEN_USER == 2 || MORPHIZEN_USER == 3
 #  else
-#    error "please include vaip/vaip.hpp first"
+#    error "please include morphizen/morphizen.hpp first"
 #  endif
 #endif

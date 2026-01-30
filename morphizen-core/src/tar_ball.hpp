@@ -43,7 +43,7 @@ private:
 #include <iostream>
 #include <memory>
 #include <vector>
-namespace vaip_tar {
+namespace morphizen_tar {
 class TarEntry : public std::enable_shared_from_this<TarEntry> {
 public:
   static std::shared_ptr<TarEntry> create_from_mem(std::vector<char>&&);
@@ -81,4 +81,4 @@ private:
   std::filesystem::path file_path;
   std::vector<std::shared_ptr<TarEntry>> entries;
 };
-} // namespace vaip_tar
+} // namespace morphizen_tar

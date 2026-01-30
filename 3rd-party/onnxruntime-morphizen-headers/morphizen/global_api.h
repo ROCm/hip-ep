@@ -7,9 +7,9 @@
 #include "core/framework/execution_provider.h"
 #include "core/framework/provider_options.h"
 #include "core/session/onnxruntime_cxx_api.h"
-#include "vaip/custom_op.h"
-#include "vaip/dll_safe.h"
-#include "vaip/my_ort.h"
+#include "morphizen/custom_op.h"
+#include "morphizen/dll_safe.h"
+#include "morphizen/my_ort.h"
 #include <memory>
 #include <optional>
 void initialize_vitisai_ep();

@@ -2,8 +2,8 @@
 // Licensed under the MIT License.
 
 #pragma once
-#include "vaip/dll_safe.h"
-#include "vaip/my_ort.h"
+#include "morphizen/dll_safe.h"
+#include "morphizen/my_ort.h"
 namespace vaip {
 using namespace onnxruntime;
 

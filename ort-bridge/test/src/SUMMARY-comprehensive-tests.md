@@ -2,18 +2,18 @@
 Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
-# Comprehensive VAIP ORT API Test Suite
+# Comprehensive MorphiZen ORT API Test Suite
 
 ## Overview
 
-I have successfully implemented a comprehensive test suite for testing all APIs defined in `vaip_core::OrtApiForVaip*`. The implementation consists of multiple components that work together to provide thorough API coverage and detailed analysis.
+I have successfully implemented a comprehensive test suite for testing all APIs defined in `vaip_core::OrtApiForMorphizen*`. The implementation consists of multiple components that work together to provide thorough API coverage and detailed analysis.
 
 ## Implementation Components
 
 ### 1. Test Infrastructure Files
 
 #### `test-coverage-wrapper.hpp` & `test-coverage-wrapper.cpp`
-- **Purpose**: Implements a complete wrapper for all ~108 OrtApiForVaip functions
+- **Purpose**: Implements a complete wrapper for all ~108 OrtApiForMorphizen functions
 - **Features**:
   - Logs every API call with VLOG(2)
   - Counts the number of times each API is called
@@ -59,60 +59,60 @@ I have successfully implemented a comprehensive test suite for testing all APIs 
 
 ### 1. Model API Tests (7 functions)
 ```cpp
-TEST_F(VaipOrtApiTest, ModelLoadAndDelete)
-TEST_F(VaipOrtApiTest, ModelMetaDataOperations)
+TEST_F(MorphizenOrtApiTest, ModelLoadAndDelete)
+TEST_F(MorphizenOrtApiTest, ModelMetaDataOperations)
 ```
 **Covered APIs**: `model_load`, `model_delete`, `model_clone`, `model_main_graph`, `model_set_meta_data`, `model_get_meta_data`, `model_has_meta_data`
 
 ### 2. Graph API Tests (17+ functions)
 ```cpp
-TEST_F(VaipOrtApiTest, GraphBasicOperations)
-TEST_F(VaipOrtApiTest, GraphAdvancedOperations)
-TEST_F(VaipOrtApiTest, GraphTensorOperations)
+TEST_F(MorphizenOrtApiTest, GraphBasicOperations)
+TEST_F(MorphizenOrtApiTest, GraphAdvancedOperations)
+TEST_F(MorphizenOrtApiTest, GraphTensorOperations)
 ```
 **Covered APIs**: `graph_get_name`, `graph_nodes_unsafe`, `graph_get_inputs_unsafe`, `graph_reverse_dfs_from`, `graph_add_initialized_tensor`, etc.
 
 ### 3. Node API Tests (10 functions)
 ```cpp
-TEST_F(VaipOrtApiTest, NodeOperations)
+TEST_F(MorphizenOrtApiTest, NodeOperations)
 ```
 **Covered APIs**: `node_get_name`, `node_description`, `node_get_index`, `node_op_type`, `node_get_inputs_unsafe`, etc.
 
 ### 4. NodeArg API Tests (12+ functions)
 ```cpp
-TEST_F(VaipOrtApiTest, NodeArgOperations)
+TEST_F(MorphizenOrtApiTest, NodeArgOperations)
 ```
 **Covered APIs**: `node_arg_get_name_unsafe`, `node_arg_new`, `node_arg_clone`, `node_arg_get_shape_i64_unsafe`, `node_arg_set_shape_i64`, etc.
 
 ### 5. NodeAttributes API Tests (5 functions)
 ```cpp
-TEST_F(VaipOrtApiTest, NodeAttributesOperations)
+TEST_F(MorphizenOrtApiTest, NodeAttributesOperations)
 ```
 **Covered APIs**: `node_attributes_new`, `node_attributes_delete`, `node_attributes_add`, `node_attributes_get`, `node_attributes_get_keys`
 
 ### 6. AttributeProto API Tests (19 functions)
 ```cpp
-TEST_F(VaipOrtApiTest, AttributeProtoOperations)
+TEST_F(MorphizenOrtApiTest, AttributeProtoOperations)
 ```
 **Covered APIs**: `attr_proto_new_int`, `attr_proto_new_float`, `attr_proto_new_string`, `attr_proto_get_ints`, `attr_proto_clone`, etc.
 
 ### 7. TensorProto API Tests (20+ functions)
 ```cpp
-TEST_F(VaipOrtApiTest, TensorProtoOperations)
+TEST_F(MorphizenOrtApiTest, TensorProtoOperations)
 ```
 **Covered APIs**: All tensor creation functions (`tensor_proto_new_floats`, `tensor_proto_new_i64`, `tensor_proto_new_u8`, `tensor_proto_new_fp16`, etc.)
 
 ### 8. Extended API Tests (20+ functions)
 ```cpp
-TEST_F(VaipOrtApiTest, ExtendedApiOperations)
-TEST_F(VaipOrtApiTest, ShapeInferenceOperations)
+TEST_F(MorphizenOrtApiTest, ExtendedApiOperations)
+TEST_F(MorphizenOrtApiTest, ShapeInferenceOperations)
 ```
 **Covered APIs**: `get_lib_id`, `get_lib_name`, `model_to_proto`, `graph_infer_shapes`, `create_empty_model`, etc.
 
 ### 9. Coverage Analysis Tests
 ```cpp
-TEST_F(VaipOrtApiTest, ComprehensiveCoverageReport)
-TEST_F(VaipOrtApiTest, DetailedCoverageAnalysis)
+TEST_F(MorphizenOrtApiTest, ComprehensiveCoverageReport)
+TEST_F(MorphizenOrtApiTest, DetailedCoverageAnalysis)
 ```
 **Features**: Provides detailed coverage metrics, missing API analysis, and recommendations
 
@@ -144,12 +144,12 @@ TEST_F(VaipOrtApiTest, DetailedCoverageAnalysis)
 
 ### Running All Tests
 ```bash
-./ort-bridge-test --gtest_filter="VaipOrtApiTest.*" --v=3
+./ort-bridge-test --gtest_filter="MorphizenOrtApiTest.*" --v=3
 ```
 
 ### Coverage Analysis Output
 ```
-=== VAIP ORT API Coverage Report ===
+=== MorphiZen ORT API Coverage Report ===
 API Coverage: 85.2% (92/108)
 Model APIs: 6/7 (85.7%)
 Graph APIs: 19/23 (82.6%)
@@ -229,4 +229,4 @@ add_executable(ort-bridge-test
 15. **Test15_ComprehensiveCoverageReport** - Coverage summary report
 16. **Test16_DetailedCoverageAnalysis** - Detailed coverage analysis
 
-This comprehensive test suite provides thorough coverage of the VAIP ORT API implementation with detailed reporting, making it an invaluable tool for ensuring API quality and catching regressions.
+This comprehensive test suite provides thorough coverage of the MorphiZen ORT API implementation with detailed reporting, making it an invaluable tool for ensuring API quality and catching regressions.

@@ -50,7 +50,7 @@ MORPHIZEN_DLL_SPEC std::unique_ptr<int> scale_to_fix_point(float scale);
 MORPHIZEN_DLL_SPEC std::shared_ptr<void> init_interpreter();
 MORPHIZEN_DLL_SPEC void eval_python_code(const std::string& code);
 #endif
-MORPHIZEN_DLL_SPEC std::filesystem::path get_vaip_path();
+MORPHIZEN_DLL_SPEC std::filesystem::path get_morphizen_path();
 
 #ifdef _WIN32
 #  include <cstdio>

@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 #pragma once
 #include "./node.h"
-#include "vaip/my_ort.h"
+#include "morphizen/my_ort.h"
 #include <functional>
 #include <gsl/gsl>
 namespace vaip {

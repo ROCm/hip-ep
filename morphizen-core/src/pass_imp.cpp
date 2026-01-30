@@ -509,8 +509,8 @@ std::filesystem::path Pass::get_dump_file_name(size_t action_index,
                                                const std::string& ext) const {
   auto index_s = seq_num_as_string();
   return context_->get_log_dir() /
-         (std::string("vaip.") + index_s + "." + name() + //
-          ".action_" + std::to_string(action_index) +     //
+         (std::string("morphizen.") + index_s + "." + name() + //
+          ".action_" + std::to_string(action_index) +          //
           ext);
 }
 } // namespace morphizen

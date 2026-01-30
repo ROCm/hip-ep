@@ -3,7 +3,7 @@
 #pragma once
 
 #include "core/providers/shared_library/provider_api.h"
-#include "vaip/custom_op.h"
+#include "morphizen/custom_op.h"
 namespace vaip {
 using namespace ::onnxruntime;
 std::unique_ptr<ComputeCapability>

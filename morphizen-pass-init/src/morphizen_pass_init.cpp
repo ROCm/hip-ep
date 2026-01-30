@@ -29,7 +29,7 @@ struct InitPass {
       auto onnx_file_path =
           log_dir_path / std::filesystem::u8path(onnx_file_name);
       auto onnx_file_data_path = log_dir_path / "onnx.dat";
-      morphizen_cxx::GraphRef(graph).set_name("resent50_by_vaip");
+      morphizen_cxx::GraphRef(graph).set_name("resent50_by_morphizen");
 
       morphizen_cxx::GraphConstRef(graph).save(
           onnx_file_path, onnx_file_data_path,
@@ -41,4 +41,4 @@ struct InitPass {
   }
 };
 
-DEFINE_VAIP_PASS(InitPass, vaip_pass_init)
+DEFINE_MORPHIZEN_PASS(InitPass, morphizen_pass_init)

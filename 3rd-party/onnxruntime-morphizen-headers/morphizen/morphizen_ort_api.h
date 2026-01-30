@@ -17,8 +17,8 @@ namespace morphizen {
 #define MORPHIZEN_ORT_API_MINOR (0u)
 #define MORPHIZEN_ORT_API_PATCH (0u)
 struct OrtApiForMorphizen {
-  uint32_t magic; // 'VAIP' or something else to make sure the following field
-                  // are not garbage.
+  uint32_t magic; // 'MRPZ' (MoRPhiZen) or magic value to verify the following
+                  // fields are not garbage.
   uint32_t major; // bump this field changes that are not backward compatible or
                   // that represent a change in direction for the project
   uint32_t minor; // bump this field for adding new features without breaking

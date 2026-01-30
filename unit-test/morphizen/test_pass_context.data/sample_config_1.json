@@ -27,7 +27,7 @@
     "passes": [
         {
             "name": "init",
-            "plugin": "vaip-pass_init"
+            "plugin": "morphizen-pass_init"
         },
         {
             "name": "fuse-rele-dq",
@@ -50,7 +50,7 @@
                 "k3": "value3_in_target_proto",
                 "k4": "value4_in_target_proto",
                 "pass.init.enable_dump": "1",
-                "pass.init.directory": "vaip_init",
+                "pass.init.directory": "morphizen_init",
                 "pass.init.filename": "init-graph-for-requ-dq.onnx",
                 "XLNX_model_clone_external_data_threshold": "17179869184"
             }

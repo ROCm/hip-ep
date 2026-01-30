@@ -40,9 +40,9 @@ public:
     GRAPH_OUTPUT = 4 // Represents a graph output, index to
                      // GraphProto_.output
   };
-  // from_vaip_core_node_arg_ptr is used to create a MLIRNodeArgIndex from a
-  // morphizen::NodeArg pointer, which is used in the ORT C API
-  static MLIRNodeArgIndex from_vaip_core_node_arg_ptr(const void* ptr);
+  // from_morphizen_core_node_arg_ptr is used to create a MLIRNodeArgIndex from
+  // a morphizen::NodeArg pointer, which is used in the ORT C API
+  static MLIRNodeArgIndex from_morphizen_core_node_arg_ptr(const void* ptr);
 
 public:
   // Default constructor
@@ -125,7 +125,7 @@ public:
   static MLIRNodeArgIndex graph_output(unsigned int index, GraphId graph_id);
 
   // Conversion method
-  const void* to_vaip_core_node_arg_ptr() const;
+  const void* to_morphizen_core_node_arg_ptr() const;
 
 private:
   union {

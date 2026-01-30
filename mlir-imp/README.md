@@ -20,7 +20,7 @@ This directory contains the MLIR-based implementation of the VAIP ORT API bridge
 
 1. **Modular Design**: Classes are split into separate header and implementation files for better maintainability
 2. **MLIR Integration**: Uses MLIR's `ModuleOp` and `Block` for IR representation
-3. **API Compatibility**: Implements the same `VaipOrtApiExt` interface as the ONNX version
+3. **API Compatibility**: Implements the same `MorphizenOrtApiExt` interface as the ONNX version
 4. **Context Management**: Proper MLIR context setup with dialect loading
 
 ## Usage
@@ -28,7 +28,7 @@ This directory contains the MLIR-based implementation of the VAIP ORT API bridge
 The implementation provides a factory function `get_vaip_ort_api_mlir()` that returns the MLIR-specific API implementation:
 
 ```cpp
-extern "C" VaipOrtApiExt* get_vaip_ort_api_mlir();
+extern "C" MorphizenOrtApiExt* get_vaip_ort_api_mlir();
 ```
 
 ## Implementation Status

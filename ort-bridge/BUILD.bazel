@@ -25,7 +25,7 @@ cc_library(
         "src/vitisai-ep.hpp",
         "src/ir-converter.hpp",
         "src/ir-converter-imp.hpp",
-        "src/vaip-deps.hpp",
+        "src/morphizen-deps.hpp",
     ],
     copts = select({
         "@bazel_tools//src/conditions:windows": [
@@ -42,8 +42,8 @@ cc_library(
         ],
     }),
     defines = [
-        "VAIP_USER=1",
-        "VAIP_USER__ORT_VITIS_AI_EP",
+        "MORPHIZEN_USER=1",
+        "MORPHIZEN_USER__ORT_VITIS_AI_EP",
     ],
     includes = [
         "src",
@@ -51,10 +51,10 @@ cc_library(
     linkstatic = True,
     visibility = ["//visibility:public"],
     deps = [
-        "//vaip-ort-api-ext:vaip-ort-api-ext",
+        "//morphizen-ort-api-ext",
         "//morphizen-utils:morphizen_utils",
         "//onnx-ir-imp:onnx_ir_imp",  # For ModelUniquePtr and ONNX model types
-        "//vaip-core:morphizen-core-static",  # Complete vaip-core library
+        "//morphizen-core:morphizen-core-static",  # Complete morphizen-core library
         "@glog",
         "@gsl",
         "@onnx//:onnx",  # ONNX C++ library

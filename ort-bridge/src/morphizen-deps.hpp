@@ -4,5 +4,5 @@
  */
 #pragma once
 
-#define VAIP_USER 1 // VAIP_USER__ORT_VITIS_AI_EP
+#define MORPHIZEN_USER 1 // MORPHIZEN_USER__ORT_VITIS_AI_EP
 #include <morphizen/onnxruntime_morphizen_ep.hpp>

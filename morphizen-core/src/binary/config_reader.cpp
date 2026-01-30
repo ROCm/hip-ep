@@ -33,10 +33,10 @@ namespace config_default {
 }
 
 static const char* get_default_config() {
-  // `with_default_vaip_config` and `config` are generated
+  // `with_default_morphizen_config` and `config` are generated
   // automatically by
   // ${CMAKE_CURRENT_SOURCE_DIR}/src/xclbin/config_json_binary.hpp.py
-  if (config_default::with_default_vaip_config) {
+  if (config_default::with_default_morphizen_config) {
     return (const char*)&config_default::config[0];
   }
   return nullptr;
@@ -138,21 +138,21 @@ static google::protobuf::Struct
 get_config_json(const onnxruntime::ProviderOptions& options) {
   google::protobuf::Struct ret;
   // update_log_level(options);
-  auto vaip_get_default_config_plugin =
+  auto morphizen_get_default_config_plugin =
       ::morphizen::Plugin::get(ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND));
   const char* default_config = get_default_config();
   if (default_config == nullptr) {
-    if (vaip_get_default_config_plugin) {
+    if (morphizen_get_default_config_plugin) {
       MY_LOG(1) << "found plugin: " << ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND);
-      auto vaip_get_default_config =
-          vaip_get_default_config_plugin->get_method<const char*>(
-              "vaip_get_default_config");
-      if (vaip_get_default_config) {
-        MY_LOG(1) << "found symbol: vaip_get_default_config from "
+      auto morphizen_get_default_config =
+          morphizen_get_default_config_plugin->get_method<const char*>(
+              "morphizen_get_default_config");
+      if (morphizen_get_default_config) {
+        MY_LOG(1) << "found symbol: morphizen_get_default_config from "
                   << ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND);
-        default_config = vaip_get_default_config();
+        default_config = morphizen_get_default_config();
       } else {
-        MY_LOG(1) << "cannot found symbol: vaip_get_default_config from "
+        MY_LOG(1) << "cannot found symbol: morphizen_get_default_config from "
                   << ENV_PARAM(VAIP_CONFIG_PROVIDER_BACKEND);
       }
     } else {

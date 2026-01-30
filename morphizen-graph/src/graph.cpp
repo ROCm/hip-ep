@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-// NOTE: NodeBuilder has been moved to vaip-core (node_builder.cpp)
+// NOTE: NodeBuilder has been moved to morphizen-core (node_builder.cpp)
 // This file now contains only low-level graph wrapper functions.
 
 #include "morphizen/graph.hpp"
@@ -248,8 +248,8 @@ graph_get_consumer_nodes(const Graph& graph, const std::string& node_arg_name) {
                                                              node_arg_name);
 }
 
-// graph_replace_node_arg has been moved to vaip-core
-// It depends on NodeBuilder which is now in vaip-core
+// graph_replace_node_arg has been moved to morphizen-core
+// It depends on NodeBuilder which is now in morphizen-core
 
 const Node* graph_producer_node(const Graph& graph,
                                 const std::string& node_arg_name) {
@@ -474,8 +474,8 @@ GraphConstRef::find_node(const std::string& name) const {
   return NodeConstRef(graph_, *node);
 }
 
-// try_fuse and virtual_fuse have been moved to vaip-core
-// They depend on MetaDefProto and TryFuseError which are vaip-core types
+// try_fuse and virtual_fuse have been moved to morphizen-core
+// They depend on MetaDefProto and TryFuseError which are morphizen-core types
 NodeConstRef GraphConstRef::node(size_t index) const {
   auto node = MORPHIZEN_ORT_API(graph_get_node)(*this, index);
   CHECK(node != nullptr) << "cannot get node: index=" << index;
@@ -520,8 +520,8 @@ void GraphRef::set_name(const std::string& name) {
 bool GraphRef::resolve(bool force) {
   return MORPHIZEN_ORT_API(graph_resolve)(*this, force) == 0;
 }
-// GraphRef::fuse and GraphRef::node_builder have been moved to vaip-core
-// They depend on MetaDefProto and NodeBuilder which are vaip-core types
+// GraphRef::fuse and GraphRef::node_builder have been moved to morphizen-core
+// They depend on MetaDefProto and NodeBuilder which are morphizen-core types
 void GraphRef::gc() { morphizen::graph_gc(*this); }
 
 static std::string
@@ -529,15 +529,15 @@ graph_ref_generate_unique_constant_initializer_name(const GraphConstRef& graph,
                                                     const std::string& prefix) {
   auto name = std::string();
   if (prefix.empty()) {
-    name = std::string("vaip_constant_initializer_") +
+    name = std::string("morphizen_constant_initializer_") +
            std::to_string(graph.constant_initializers().size());
   } else {
     name = prefix;
   }
   return name;
 }
-#define VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(type, cxx_type,               \
-                                                 tensor_data_type)             \
+#define MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(type, cxx_type,          \
+                                                      tensor_data_type)        \
   NodeArgRef GraphRef::new_constant_initializer_##type(                        \
       cxx_type value, const std::string& name_hint) {                          \
     const std::vector<int64_t> shape = {};                                     \
@@ -552,21 +552,21 @@ graph_ref_generate_unique_constant_initializer_name(const GraphConstRef& graph,
     return NodeArgRef(*this, newly_create_node_arg);                           \
   }
 
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(i8, int8_t, INT8)
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(u8, uint8_t, UINT8)
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(i16, int16_t, INT16)
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(u16, uint16_t, UINT16)
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(i32, int32_t, INT32)
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(u32, uint32_t, UINT32)
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(i64, int64_t, INT64)
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(u64, uint64_t, UINT64)
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(f32, float, FLOAT)
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(f64, double, DOUBLE)
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(bf16, bf16_t, BFLOAT16)
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(fp16, fp16_t, FLOAT16)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(i8, int8_t, INT8)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(u8, uint8_t, UINT8)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(i16, int16_t, INT16)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(u16, uint16_t, UINT16)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(i32, int32_t, INT32)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(u32, uint32_t, UINT32)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(i64, int64_t, INT64)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(u64, uint64_t, UINT64)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(f32, float, FLOAT)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(f64, double, DOUBLE)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(bf16, bf16_t, BFLOAT16)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(fp16, fp16_t, FLOAT16)
 
-#define VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(type, cxx_type,          \
-                                                      tensor_data_type)        \
+#define MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(type, cxx_type,     \
+                                                           tensor_data_type)   \
   NodeArgRef GraphRef::new_constant_initializer_##type##_span(                 \
       gsl::span<const cxx_type> values_span,                                   \
       const std::vector<int64_t>& shape, const std::string& name_hint) {       \
@@ -581,19 +581,19 @@ VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(fp16, fp16_t, FLOAT16)
     return NodeArgRef(*this, newly_create_node_arg);                           \
   }
 
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(i8, int8_t, INT8)
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(u8, uint8_t, UINT8)
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(i16, int16_t, INT16)
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(u16, uint16_t, UINT16)
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(i32, int32_t, INT32)
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(u32, uint32_t, UINT32)
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(i64, int64_t, INT64)
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(u64, uint64_t, UINT64)
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(f32, float, FLOAT)
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(f64, double, DOUBLE)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(i8, int8_t, INT8)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(u8, uint8_t, UINT8)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(i16, int16_t, INT16)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(u16, uint16_t, UINT16)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(i32, int32_t, INT32)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(u32, uint32_t, UINT32)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(i64, int64_t, INT64)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(u64, uint64_t, UINT64)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(f32, float, FLOAT)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(f64, double, DOUBLE)
 
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(bf16, bf16_t, BFLOAT16)
-VAIP_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(fp16, fp16_t, FLOAT16)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(bf16, bf16_t, BFLOAT16)
+MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(fp16, fp16_t, FLOAT16)
 
 void GraphRef::set_inputs(const std::vector<NodeArgConstRef>& inputs) {
   auto inputs_ptr = std::vector<const morphizen::NodeArg*>();

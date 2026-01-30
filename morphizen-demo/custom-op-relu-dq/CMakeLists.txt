@@ -18,8 +18,7 @@ set(LIB_NAME morphizen-custom-op-relu-dq)
 add_library(${LIB_NAME} STATIC src/main.cpp src/custom_op.hpp src/custom_op.cpp)
 set_target_properties(${LIB_NAME} PROPERTIES FOLDER "relu-dq")
 target_include_directories(${LIB_NAME} PRIVATE include)
-# TODO: remove VAIP_CUSTOM_OP=1
-target_compile_definitions(${LIB_NAME} PRIVATE "VAIP_CUSTOM_OP=1")
+target_compile_definitions(${LIB_NAME} PRIVATE "MORPHIZEN_CUSTOM_OP=1")
 target_link_libraries(${LIB_NAME} PRIVATE
   relu_dq_proto
   glog::glog

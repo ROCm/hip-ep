@@ -18,8 +18,8 @@ class NodeBuilder;
 
 namespace morphizen_cxx {
 
-// Extensions to GraphConstRef that depend on vaip-core types
-// These are implemented in vaip-core/src/node_builder.cpp
+// Extensions to morphizen-core types
+// These are implemented in morphizen-core/src/node_builder.cpp
 
 /**
  * @brief Try to fuse operation nodes into a custom operation node.

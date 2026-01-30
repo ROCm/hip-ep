@@ -25,9 +25,9 @@
 namespace morphizen {
 const std::string get_lib_name() {
   const auto ret = std::string{"morphizen"} + "." +
-                   std::to_string(get_vaip_version_major()) + "." +
-                   std::to_string(get_vaip_version_minor()) + "." +
-                   std::to_string(get_vaip_version_patch());
+                   std::to_string(get_morphizen_version_major()) + "." +
+                   std::to_string(get_morphizen_version_minor()) + "." +
+                   std::to_string(get_morphizen_version_patch());
   return ret;
 }
 
@@ -40,7 +40,7 @@ const std::string get_lib_id() {
 // duplicate symbols when linking both morphizen-ort-api-ext.lib and
 // morphizen-core-static.lib
 #if 0
-unsigned int get_vaip_version_major() {
+unsigned int get_morphizen_version_major() {
 #  ifdef MORPHIZEN_ORT_API_MAJOR
   return MORPHIZEN_ORT_API_MAJOR;
 #  else
@@ -48,7 +48,7 @@ unsigned int get_vaip_version_major() {
 #  endif
 }
 
-unsigned int get_vaip_version_minor() {
+unsigned int get_morphizen_version_minor() {
 #  ifdef MORPHIZEN_ORT_API_MINOR
   return MORPHIZEN_ORT_API_MINOR;
 #  else
@@ -56,7 +56,7 @@ unsigned int get_vaip_version_minor() {
 #  endif
 }
 
-unsigned int get_vaip_version_patch() {
+unsigned int get_morphizen_version_patch() {
 #  ifdef MORPHIZEN_ORT_API_PATCH
   return MORPHIZEN_ORT_API_PATCH;
 #  else
@@ -66,8 +66,9 @@ unsigned int get_vaip_version_patch() {
 #endif
 
 extern "C" uint32_t morphizen_get_version() {
-  return (get_vaip_version_major() << 24) | (get_vaip_version_minor() << 16) |
-         (get_vaip_version_patch() << 8);
+  return (get_morphizen_version_major() << 24) |
+         (get_morphizen_version_minor() << 16) |
+         (get_morphizen_version_patch() << 8);
 }
 
 #ifdef _WIN32
@@ -195,9 +196,9 @@ extern "C" const char* morphizen_get_build_info() {
     using version_vec_tuple =
         std::vector<std::tuple<std::string, std::string, std::string>>;
     str << "\t"
-        << "MORPHIZEN_ORT_API: " << morphizen::get_vaip_version_major() << "."
-        << morphizen::get_vaip_version_minor() << "."
-        << morphizen::get_vaip_version_patch() << "\n";
+        << "MORPHIZEN_ORT_API: " << morphizen::get_morphizen_version_major()
+        << "." << morphizen::get_morphizen_version_minor() << "."
+        << morphizen::get_morphizen_version_patch() << "\n";
     str << "\tBUILD: " << PROJECT_GIT_COMMIT_ID << "\n";
     for (auto& info : version_vec_tuple{
 #include "morphizen_version_info.hpp.inc"

@@ -1,8 +1,0 @@
-{
-  "passes": [
-    {
-      "name": "init",
-      "plugin": "vaip-pass_init"
-    }
-  ]
-}

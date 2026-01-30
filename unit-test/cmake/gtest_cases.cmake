@@ -754,7 +754,7 @@ set_target_properties(morphizen-unit-test-TarFileTest-WriteTo PROPERTIES
     VS_DEBUGGER_COMMAND "$<TARGET_FILE:morphizen-unit-test>"
     VS_DEBUGGER_WORKING_DIRECTORY "$(ProjectDir)"
     VS_DEBUGGER_COMMAND_ARGUMENTS  --gtest_filter=TarFileTest.WriteTo1
-    SOURCES vaip/test_graph.cpp
+    SOURCES morphizen/test_graph.cpp
   )
 
 #end

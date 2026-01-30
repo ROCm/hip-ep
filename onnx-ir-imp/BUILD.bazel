@@ -57,7 +57,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//morphizen-utils:morphizen_utils",
-        "//vaip-ort-api-ext",
+        "//morphizen-ort-api-ext",
         "@onnx",  # ONNX headers-only target
     ],
 )

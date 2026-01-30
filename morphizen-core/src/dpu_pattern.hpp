@@ -4,7 +4,7 @@
  */
 
 #pragma once
-namespace vaip {
+namespace morphizen {
 struct SimpleConvPattern {
   std::shared_ptr<Pattern> input_;
   std::shared_ptr<Pattern> weight_fix_;
@@ -14,4 +14,4 @@ struct SimpleConvPattern {
   std::shared_ptr<Pattern> end_fix_;
 };
 
-} // namespace vaip
+} // namespace morphizen

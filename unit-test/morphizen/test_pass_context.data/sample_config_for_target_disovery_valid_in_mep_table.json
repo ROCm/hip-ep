@@ -2,7 +2,7 @@
     "passes": [
         {
             "name": "init",
-            "plugin": "vaip-pass_init"
+            "plugin": "morphizen-pass_init"
         },
         {
             "name": "fuse-rele-dq",
