@@ -14,7 +14,7 @@
  * - **Performance**: 64-bit compact representation for cache efficiency
  * - **Safety**: Graph-aware indexing prevents cross-graph reference errors
  * - **Usability**: Rich API for accessing node properties and relationships
- * - **Compatibility**: Support for legacy VAIP core integration
+ * - **Compatibility**: Support for legacy morphizen core integration
  *
  * Key Design Principles:
  * - Zero-cost abstractions: No heap allocation, minimal overhead
@@ -82,19 +82,19 @@ public:
   // === Static Factory Methods ===
 
   /**
-   * @brief Create NodeIndex from legacy VAIP core node pointer
-   * @param ptr Legacy void pointer from VAIP core system
+   * @brief Create NodeIndex from legacy morphizen core node pointer
+   * @param ptr Legacy void pointer from morphizen core system
    * @return NodeIndex corresponding to the legacy pointer
-   * @note Used for backward compatibility with existing VAIP core APIs
+   * @note Used for backward compatibility with existing morphizen core APIs
    */
   static NodeIndex from_morphizen_core_node_ptr(const void* ptr);
 
   /**
-   * @brief Create NodeIndex from legacy VAIP core node index
-   * @param index Legacy size_t index from VAIP core system
+   * @brief Create NodeIndex from legacy morphizen core node index
+   * @param index Legacy size_t index from morphizen core system
    * @return NodeIndex corresponding to the legacy index
-   * @note Used for backward compatibility with existing VAIP core APIs that use
-   * size_t indices
+   * @note Used for backward compatibility with existing morphizen core APIs
+   * that use size_t indices
    */
   static NodeIndex from_morphizen_core_node_index(size_t index);
 
@@ -183,8 +183,8 @@ public:
   // === Legacy Compatibility ===
 
   /**
-   * @brief Convert to legacy VAIP core node pointer
-   * @return void pointer compatible with legacy VAIP core APIs
+   * @brief Convert to legacy morphizen core node pointer
+   * @return void pointer compatible with legacy morphizen core APIs
    * @note Used for backward compatibility
    */
   const void* to_morphizen_core_node_ptr() const;

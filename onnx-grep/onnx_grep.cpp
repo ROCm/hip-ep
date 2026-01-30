@@ -9,7 +9,7 @@
 #include <boost/program_options.hpp>
 #define ORT_API_MANUAL_INIT 1
 #include "onnxruntime_cxx_api.h"
-#include "morphizen/vaip.hpp"
+#include "morphizen/morphizen.hpp"
 
 namespace po = boost::program_options;
 
@@ -48,18 +48,18 @@ static bool endsWith(const std::string &fullString, const std::string &ending) {
   }
 }
 
-static std::shared_ptr<vaip_core::Pattern> get_pattern(const std::string& file) {
-    auto builder = vaip_core::PatternBuilder ();
-    auto ret = std::shared_ptr<vaip_core::Pattern>();
+static std::shared_ptr<morphizen::Pattern> get_pattern(const std::string& file) {
+    auto builder = morphizen::PatternBuilder ();
+    auto ret = std::shared_ptr<morphizen::Pattern>();
   // see test_conv_pattern.py as an example
   if (endsWith(file, std::string(".py"))) {
 #ifdef ENABLE_PYTHON
-      ret =  builder.create_by_py(vaip_core::slurp(file));
+      ret =  builder.create_by_py(morphizen::slurp(file));
 #else
     throw std::runtime_error("Unsupported pattern data type");
 #endif
   } else if (endsWith(file, std::string(".json"))) {
-      ret =  builder.create_by_json(vaip_core::slurp(file));
+      ret =  builder.create_by_json(morphizen::slurp(file));
   } else {
       LOG(ERROR) << "cannot pattern " << file << ", pattern file only support json and python file";
   }
@@ -105,8 +105,8 @@ int main(int argc, char* argv[]) {
 
     Ort::Env env(ORT_LOGGING_LEVEL_ERROR, "onnx_grep");
     Ort::SessionOptions().AppendExecutionProvider_VitisAI();
-         vaip_core::set_the_global_api(
-          vaip_core::Plugin::invoke<vaip_core::OrtApiForVaip*>(
+         morphizen::set_the_global_api(
+          morphizen::Plugin::invoke<morphizen::OrtApiForVaip*>(
               "onnxruntime_morphizen_ep", "get_the_global_api"));
     CHECK_NE(file, "");
 
@@ -120,13 +120,13 @@ int main(int argc, char* argv[]) {
       std::cout << "pattern is " << p->debug_string() << std::endl;
     }
     if (!node_arg.empty()) {
-      vaip_core::Pattern::enable_trace(1);
+      morphizen::Pattern::enable_trace(1);
     }
-    auto model = vaip_core::model_load(std::filesystem::path(file).u8string());
+    auto model = morphizen::model_load(std::filesystem::path(file).u8string());
     auto model_ref = morphizen_cxx::ModelConstRef(*model);
     auto graph_ref = model_ref.main_graph();
     auto& graph = graph_ref;
-    vaip_core::graph_resolve(graph, true);
+    morphizen::graph_resolve(graph, true);
     if (!node_arg.empty()) {
       auto node_arg_opt = graph_ref.find_node_arg(node_arg);
       CHECK(node_arg_opt.has_value())
@@ -135,7 +135,7 @@ int main(int argc, char* argv[]) {
       CHECK(node_found.has_value())
           << "cannot find producer node for node_arg=" << node_arg;
     }
-    for (auto index : vaip_core::graph_get_node_in_topoligical_order(graph)) {
+    for (auto index : morphizen::graph_get_node_in_topoligical_order(graph)) {
       auto node_opt = graph_ref.find_node(index);
       CHECK(node_opt.has_value());
       auto node = node_opt.value().ptr();
