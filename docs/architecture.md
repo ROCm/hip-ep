@@ -618,7 +618,7 @@ CompileImpl(graphs, fused_nodes, count)
 ### 4.5 Custom Operation Registration
 
 Two registration mechanisms:
-1. **Legacy**: `vaip_op_def_info()` (VAIP-era, deprecated, memory leak warning)
+1. **Legacy**: `morphizen_op_def_info()` (deprecated, memory leak warning)
 2. **Modern**: `morphizen_register_ops()` callback function
 
 Supports multiple domains (e.g., "com.xilinx", "com.microsoft")

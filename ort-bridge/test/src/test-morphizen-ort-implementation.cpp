@@ -1795,7 +1795,7 @@ void MorphizenOrtApiTest::Test21_fuse_relu_q() {
     std::shared_ptr<morphizen::PassContext> pass_context =
         morphizen::PassContext::create();
     auto pass_proto = std::make_unique<morphizen::PassProto>();
-    pass_proto->set_plugin("vaip-pass_init");
+    pass_proto->set_plugin("morphizen-pass_init");
     pass_proto->set_name("MorphizenOrtApiTest::Test21_fuse_relu_q");
     auto pass = morphizen::IPass::create_pass(pass_context, *pass_proto);
 
@@ -1953,7 +1953,7 @@ void MorphizenOrtApiTest::Test23_try_fuse_and_fuse() {
       std::shared_ptr<morphizen::PassContext> pass_context =
           morphizen::PassContext::create();
       auto pass_proto = std::make_unique<morphizen::PassProto>();
-      pass_proto->set_plugin("vaip-pass_init");
+      pass_proto->set_plugin("morphizen-pass_init");
       pass_proto->set_name("MorphizenOrtApiTest::Test21_fuse_relu_q");
       auto pass = morphizen::IPass::create_pass(pass_context, *pass_proto);
 

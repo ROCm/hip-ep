@@ -116,7 +116,7 @@ public:
   // to be removed.
   // clang-format off
 /*
-vaip_pass_graph_output_add_node/src/graph_output_add_node.cpp:71:            MORPHIZEN_ORT_API(node_arg_clone)(*graph, *output.node_arg, name);
+morphizen_pass_graph_output_add_node/src/graph_output_add_node.cpp:71:            MORPHIZEN_ORT_API(node_arg_clone)(*graph, *output.node_arg, name);
 */
   // clang-format on
   void* node_arg_clone(const NodeArg& node_arg, const std::string& name) const;

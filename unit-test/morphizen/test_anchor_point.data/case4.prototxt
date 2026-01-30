@@ -29,13 +29,13 @@
 # LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
 # NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
 # EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
-  name: "111_vaip_483"
+  name: "111_morphizen_483"
   op_type: "float2fix"
   next {
-    name: "111_vaip_484"
+    name: "111_morphizen_484"
     op_type: "transpose"
     next {
-      name: "111_vaip_485"
+      name: "111_morphizen_485"
       op_type: "fix2float"
       origin_node: "111"
       pass: "fuse_DPU"

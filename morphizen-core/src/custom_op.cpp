@@ -43,7 +43,7 @@ struct CustomOp_InitSession_t<
                        const std::shared_ptr<MetaDefProto>& meta_def) {
     if (meta_def->fallback_cpu()) {
       CHECK(model);
-      Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "MorphiZen_VAIP_CustomOp");
+      Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "MorphiZen_CustomOp");
       auto model_proto = api->model_to_proto(*model);
       auto mproto_string = api->model_proto_serialize_as_string(*model_proto);
       auto session =

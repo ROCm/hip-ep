@@ -7,7 +7,7 @@
  * @brief Usage Guide for pattern.hpp
  *
  * Overview:
- * This file is part of the VAIP library, focusing on pattern matching and
+ * This file is part of the MorphiZen library, focusing on pattern matching and
  * manipulation within computational graphs. It provides mechanisms to define,
  * build, and match patterns against nodes in a graph.
  *
@@ -302,7 +302,7 @@ public:
    *
    * @return A vector of all ops name.
    *
-   * @note it is only used by PatternInfo in vaip. TODO: to be clarified.
+   * @note it is only used by PatternInfo in morphizen. TODO: to be clarified.
    */
   MORPHIZEN_DLL_SPEC std::vector<std::string> get_ops_list_name() const;
 

@@ -17,7 +17,7 @@ class GraphTest : public ::testing::Test {};
 TEST_F(GraphTest, LoadAndSave) {
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
-  graph.set_name("resent50_by_vaip");
+  graph.set_name("resent50_by_morphizen");
   graph.resolve();
   LOG(INFO) << "model: " << graph.name() << " is loaded" << std::endl;
   auto inputs = graph.inputs();
@@ -75,7 +75,7 @@ TEST_F(GraphTest, LoadAndSave) {
     auto model_1 = morphizen_cxx::Model::load(resnet50_file);
     auto graph_1 = model_1->main_graph();
     if (morphizen::MorphizenOrtApi2::has_graph_set_name) {
-      EXPECT_EQ(graph_1.name(), "resent50_by_vaip");
+      EXPECT_EQ(graph_1.name(), "resent50_by_morphizen");
     }
     std::ostringstream python_code;
     python_code << "import onnx"
@@ -279,7 +279,7 @@ TEST_F(GraphTest, NewConstantInitializer) {
   auto SAMPLE_ONNX = CMAKE_CURRENT_BINARY_PATH / "sample.onnx";
   auto exit_code = boost::process::system(
       PYTHON_EXE.u8string(),
-      (TEST_SRC_DIR / "vaip" / "create_sample_onnx_model.py").u8string(),
+      (TEST_SRC_DIR / "morphizen" / "create_sample_onnx_model.py").u8string(),
       SAMPLE_ONNX.u8string());
   ASSERT_TRUE(exit_code == 0) << "Failed to generate test file";
   LOG(INFO) << "LOADING " << (SAMPLE_ONNX) << std::endl;
@@ -496,7 +496,7 @@ TEST_F(GraphTest, NewConstantInitializer) {
       morphizen::PassContext::create();
   if (1) {
     auto pass_proto = std::make_unique<morphizen::PassProto>();
-    pass_proto->set_plugin("vaip-pass_init");
+    pass_proto->set_plugin("morphizen-pass_init");
     pass_proto->set_name("GraphTest.NewConstantInitializer");
     auto pass = morphizen::IPass::create_pass(context, *pass_proto);
     auto newly_added_node = morphizen_cxx::graph_node_builder(graph, *pass)

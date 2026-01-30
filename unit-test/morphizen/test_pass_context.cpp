@@ -381,9 +381,9 @@ TEST_F(PassContextConfigTest, Config) {
 
 TEST_F(PassContextConfigTest, ProviderOptions) {
   std::string cache_key = "33ad2fe7c4a7b71e55f5cbd9c0569bb4";
-  auto config_file = CMAKE_CURRENT_SOURCE_PATH / "vaip" /
+  auto config_file = CMAKE_CURRENT_SOURCE_PATH / "morphizen" /
                      "test_pass_context.data" / "sample_config_1.json";
-  auto context_json = CMAKE_CURRENT_SOURCE_PATH / "vaip" /
+  auto context_json = CMAKE_CURRENT_SOURCE_PATH / "morphizen" /
                       "test_pass_context.data" / "sample_context_1.json";
   CreateContext(onnxruntime::ProviderOptions{
       {"k0", "value0_in_provider_option"},
@@ -450,7 +450,7 @@ TEST_F(PassContextConfigTest, TargetInConfigFileNotValidTarget) {
   try {
     CreateContext(onnxruntime::ProviderOptions{
         {"config_file",
-         (CMAKE_CURRENT_SOURCE_PATH / "vaip" / "test_pass_context.data" /
+         (CMAKE_CURRENT_SOURCE_PATH / "morphizen" / "test_pass_context.data" /
           "sample_config_for_target_disovery_not_valid_target.json")
              .u8string()},
     });
@@ -466,7 +466,7 @@ TEST_F(PassContextConfigTest, TargetInConfigFileNotValidTarget) {
 TEST_F(PassContextConfigTest, TargetInConfigFileValidTarget) {
   CreateContext(onnxruntime::ProviderOptions{
       {"config_file",
-       (CMAKE_CURRENT_SOURCE_PATH / "vaip" / "test_pass_context.data" /
+       (CMAKE_CURRENT_SOURCE_PATH / "morphizen" / "test_pass_context.data" /
         "sample_config_for_target_disovery_valid_target.json")
            .u8string()},
   });
@@ -478,7 +478,7 @@ TEST_F(PassContextConfigTest, TargetInConfigFileValidTarget) {
 TEST_F(PassContextConfigTest, TargetInMepTableValidTarget) {
   CreateContext(onnxruntime::ProviderOptions{
       {"config_file",
-       (CMAKE_CURRENT_SOURCE_PATH / "vaip" / "test_pass_context.data" /
+       (CMAKE_CURRENT_SOURCE_PATH / "morphizen" / "test_pass_context.data" /
         "sample_config_for_target_disovery_valid_in_mep_table.json")
            .u8string()},
   });
@@ -521,8 +521,8 @@ TEST_F(PassContextConfigTest,
       passContext_->get_provider_option("dummy_provier_option_for_test");
   ASSERT_EQ(dummy_option, "auto-discovery-hit");
 }
-// "99_vaip_centralized_target_discovery", the plugin is ordered alphabetically
-// by name so it is probably the laster resort.
+// "99_morphizen_centralized_target_discovery", the plugin is ordered
+// alphabetically by name so it is probably the laster resort.
 //
 // we must register this along with a pass or custom op, morphizen::core is not
 // build with WHOLE_ARCHIVE enabled. it would be removed by linker if not used.

@@ -62,7 +62,7 @@ using Map = immutable_map::ImmutableMap<int, NodeInput>;
 // Rationale:
 // During component extraction, we chose to keep morphizen-pattern independent
 // with minimal dependencies. The original enable_trace() relied on env_config
-// from vaip-core, which would create a dependency we're trying to avoid.
+// from morphizen-core, which would create a dependency we're trying to avoid.
 //
 // Tradeoffs Considered:
 // 1. Add morphizen-utils dependency for ENV_PARAM:

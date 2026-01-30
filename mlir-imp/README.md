@@ -2,9 +2,9 @@
 Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
-# MLIR Implementation of VAIP ORT API
+# MLIR Implementation of MorphiZen ORT API
 
-This directory contains the MLIR-based implementation of the VAIP ORT API bridge, providing an alternative IR representation to the ONNX-based implementation.
+This directory contains the MLIR-based implementation of the MorphiZen ORT API bridge, providing an alternative IR representation to the ONNX-based implementation.
 
 ## File Structure
 
@@ -12,7 +12,7 @@ This directory contains the MLIR-based implementation of the VAIP ORT API bridge
 - `mlir-context-manager.hpp/.cpp` - MLIR context singleton management
 - `mlir-model.hpp/.cpp` - MLIR-based model implementation using `mlir::ModuleOp`
 - `mlir-graph.hpp/.cpp` - Graph representation using MLIR blocks
-- `vaip-ort-api.cpp` - Main API bridge implementation and function pointer initialization
+- `morphizen-ort-api.cpp` - Main API bridge implementation and function pointer initialization
 
 **Note**: All header files are private implementation details and are located in the `src/` directory alongside their corresponding `.cpp` files.
 
@@ -25,10 +25,10 @@ This directory contains the MLIR-based implementation of the VAIP ORT API bridge
 
 ## Usage
 
-The implementation provides a factory function `get_vaip_ort_api_mlir()` that returns the MLIR-specific API implementation:
+The implementation provides a factory function `get_morphizen_ort_api_mlir()` that returns the MLIR-specific API implementation:
 
 ```cpp
-extern "C" MorphizenOrtApiExt* get_vaip_ort_api_mlir();
+extern "C" MorphizenOrtApiExt* get_morphizen_ort_api_mlir();
 ```
 
 ## Implementation Status
@@ -50,4 +50,4 @@ Include the CMakeLists-additions.txt content in your main CMakeLists.txt file to
 2. Add proper MLIR operation traversal and manipulation
 3. Implement MLIR-native tensor representations
 4. Add MLIR dialect-specific optimizations
-5. Extend with custom MLIR dialects for VAIP operations
+5. Extend with custom MLIR dialects for MorphiZen operations

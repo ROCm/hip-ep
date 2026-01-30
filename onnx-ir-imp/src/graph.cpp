@@ -524,11 +524,11 @@ void Graph::set_outputs(gsl::span<const NodeArgIndex> outputs) const {
 }
 void Graph::remove_initialized_tensor(const std::string& tensor_name) const {
   // it is only used by
-  // vaip_vaiml_common/graph_update_initializer.cpp:56:
+  // morphizen_vaiml_common/graph_update_initializer.cpp:56:
   // actually `MORPHIZEN_ORT_API(graph_remove_node)(graph, {nullptr,
   // node_arg});` is the same thing, but it is obscured and to be deprecacted.
   //
-  // in vaip pass, create-const-op, we need to remove original initializer
+  // in morphizen pass, create-const-op, we need to remove original initializer
   // otherwise ORT graph resolver will fail because of duplicated node arg
   // names.
   auto get_node_arg_local = [this](const std::string& name) -> NodeArgIndex {
@@ -589,7 +589,7 @@ void* Graph::node_arg_clone(const NodeArg& node_arg,
   // to be removed.
   // clang-format off
 /*
-vaip_pass_graph_output_add_node/src/graph_output_add_node.cpp:71:            MORPHIZEN_ORT_API(node_arg_clone)(*graph, *output.node_arg, name);
+morphizen_pass_graph_output_add_node/src/graph_output_add_node.cpp:71:            MORPHIZEN_ORT_API(node_arg_clone)(*graph, *output.node_arg, name);
 */
  LOG(FATAL) << "not implemented yet, please use staging graph to clone node arg";
   // clang-format on

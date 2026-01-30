@@ -24,9 +24,9 @@ set_target_properties(${EXEC_NAME} PROPERTIES FOLDER morphizen/tools)
 install(TARGETS ${EXEC_NAME} DESTINATION bin)
 
 # if(morphizen_ENABLE_UNIT_TEST)
-#   add_test(NAME ${EXEC_NAME}_test COMMAND $<TARGET_FILE:${EXEC_NAME}> -i ${CMAKE_CURRENT_BINARY_DIR}/../unit-test/pt_resnet50.onnx -p vaip-pass_init)
+#   add_test(NAME ${EXEC_NAME}_test COMMAND $<TARGET_FILE:${EXEC_NAME}> -i ${CMAKE_CURRENT_BINARY_DIR}/../unit-test/pt_resnet50.onnx -p morphizen-pass_init)
 # endif()
 
 # originally morphizen-graph-opt is callled `voe_py_pass`, to minimize
-# changes at vaip side we add an alias here.
+# changes at morphizen side we add an alias here.
 add_executable (voe_py_pass ALIAS ${EXEC_NAME})

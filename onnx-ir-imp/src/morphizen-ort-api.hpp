@@ -4,7 +4,7 @@
  */
 #pragma once
 namespace morphizen {
-namespace imp {
-const morphizen::OrtApiForMorphizen* get_vaip_ort_api();
+namespace onnx_ir_imp {
+const morphizen::OrtApiForMorphizen* get_morphizen_ort_api();
 }
 } // namespace morphizen

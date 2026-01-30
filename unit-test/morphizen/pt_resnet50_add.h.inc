@@ -2,12 +2,12 @@
 env \
  IGNORE_CONSTANT=1 \
  ENABLE_CONSTNAT_SHARING=1 \
- $BUILD/vaip/onnxruntime_morphizen_ep/onnx_pattern_gen \
+ $BUILD/morphizen/onnxruntime_morphizen_ep/onnx_pattern_gen \
  -i 220 \
  -i 267 \
  -o 287 \
  -f /workspace/test_onnx_runner/data/pt_resnet50.onnx\
- -c /workspace/vaip/unit-test/vaip/src/pt_resnet50_add.h.inc
+ -c /workspace/morphizen/unit-test/morphizen/src/pt_resnet50_add.h.inc
 */
 auto constant_0 = builder.constant(); //  id = 0  node_arg_name = module_17.bias
 builder.bind("module_17.bias",constant_0);

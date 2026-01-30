@@ -29,7 +29,7 @@ DEF_ENV_PARAM_2(
     std::string)
 
 namespace morphizen {
-// defined in onnx-ir-imp/src/vaip-ort-api.cpp
+// defined in onnx-ir-imp/src/morphizen-ort-api.cpp
 const morphizen::OrtApiForMorphizen*
 get_global_morphizen_ort_api(const char* ir_backend_name);
 

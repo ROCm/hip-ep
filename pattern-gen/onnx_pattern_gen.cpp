@@ -763,7 +763,7 @@ int main(int argc, char* argv[]) {
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "onnx_pattern_gen");
     Ort::SessionOptions().AppendExecutionProvider_VitisAI();
     morphizen::set_the_global_api(
-        morphizen::Plugin::invoke<morphizen::OrtApiForVaip*>(
+        morphizen::Plugin::invoke<morphizen::OrtApiForMorphizen*>(
             "onnxruntime_morphizen_ep", "get_the_global_api"));
     // Check command line args
     CHECK_NE(opt_onnx_file, "")

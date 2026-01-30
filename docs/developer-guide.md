@@ -44,6 +44,9 @@ winget install Kitware.CMake
 winget install Ninja-build.Ninja
 winget install Python.Python.3.11
 
+# After installing Python, install pre-commit (from regular PowerShell):
+pip install pre-commit
+
 # Note: Visual Studio must be installed manually (see below)
 # Download from: https://visualstudio.microsoft.com/downloads/
 ```
@@ -64,6 +67,9 @@ Then install all tools:
 ```powershell
 # Open PowerShell as Administrator and run:
 choco install git cmake ninja python -y
+
+# After installing Python, install pre-commit (from regular PowerShell):
+pip install pre-commit
 
 # Note: Visual Studio must be installed manually (see below)
 ```
@@ -190,9 +196,46 @@ sudo yum install python3 python3-pip
 python --version
 ```
 
-**Note**: Python is optional and only needed for certain build features or tools.
+**Note**: Python is required for pre-commit hooks (see Code Formatting section below).
 
-### 6. Additional Tools (Windows)
+### 6. Pre-commit Hooks (REQUIRED for Contributors)
+
+**Purpose**: Pre-commit hooks automatically format code and run linters before each commit to ensure CI checks pass.
+
+**Installation**:
+```bash
+# Install pre-commit
+pip install pre-commit
+
+# Install the git hooks (run from project root)
+pre-commit install
+```
+
+**IMPORTANT - Do NOT Install clang-format Manually**:
+Pre-commit manages all formatting tools (clang-format, lintrunner, ruff) in an isolated environment with versions pinned in `.pre-commit-config.yaml`. **Never install or run these tools manually** - pre-commit handles everything automatically.
+
+**Usage**:
+```bash
+# Pre-commit runs automatically on 'git commit'
+# To manually format all files:
+pre-commit run --all-files
+
+# To manually format only staged files:
+pre-commit run
+```
+
+**How It Works**:
+- Pre-commit reads `.pre-commit-config.yaml` which pins exact tool versions (e.g., clang-format 16.0.1)
+- It creates an isolated Python environment with these exact versions
+- Your local formatting will always match CI because both use the same pinned versions
+- No version conflicts or "works on my machine" issues
+
+**Troubleshooting**:
+- If pre-commit fails: `pre-commit clean` then `pre-commit install` to reset
+- If hooks don't run on commit: Check that `.git/hooks/pre-commit` exists
+- **Never run `clang-format` directly** - always use `pre-commit run`
+
+### 7. Additional Tools (Windows)
 
 **wget (for downloading archives):**
 - Download from [https://eternallybored.org/misc/wget/](https://eternallybored.org/misc/wget/)

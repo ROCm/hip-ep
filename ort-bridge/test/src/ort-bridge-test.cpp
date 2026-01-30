@@ -69,8 +69,8 @@ int main(int argc, const char* argv[]) {
 
   auto ret = 0;
   {
-    auto env =
-        std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "vaip_unit_test");
+    auto env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR,
+                                          "morphizen_unit_test");
 
     ret = RUN_ALL_TESTS();
   }

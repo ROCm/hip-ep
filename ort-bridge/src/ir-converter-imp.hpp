@@ -26,7 +26,7 @@ public:
   OrtStatus* convert_graph_inputs(morphizen::Graph& graph) const;
   OrtStatus* convert_graph_outputs(morphizen::Graph& graph) const;
   OrtStatus* convert_graph_initializers(morphizen::Graph& graph) const;
-  OrtStatus* convert_graph_nodes(morphizen::Graph& vaip_graph) const;
+  OrtStatus* convert_graph_nodes(morphizen::Graph& morphizen_graph) const;
 
   OrtStatus* convert_value_info_proto(const Ort::ConstValueInfo& value_info,
                                       morphizen::Graph& graph,
