@@ -20,15 +20,10 @@ The following headers are vendored from ONNXRuntime:
 
 ### Main Headers (morphizen/)
 - `_sanity_check.h` - Sanity checks for MorphiZen
-- `capability.h` - Capability definitions
 - `custom_op.h` - Custom operator support
 - `dll_safe.h` - DLL-safe data structures
 - `export.h` - DLL export macros
-- `global_api.h` - Global API functions
-- `graph.h` - Graph utilities
 - `my_ort.h` - ORT API wrappers
-- `node.h` - Node utilities
-- `node_arg.h` - Node argument utilities
 - `morphizen_gsl.h` - Guidelines Support Library types
 - `morphizen_ort_api.h` - Main MorphiZen ORT API header
 
