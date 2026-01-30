@@ -6,6 +6,41 @@ include(FetchContent)
 
 # Include LLVM/MLIR configuration
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/llvm.cmake)
+
+# Read and parse deps.txt for dependency version management
+file(STRINGS ${CMAKE_CURRENT_LIST_DIR}/deps.txt MORPHIZEN_DEPS_LIST)
+file(READ "${CMAKE_CURRENT_LIST_DIR}/dep.h.inc.in" MORPHIZEN_DEP_H_INC_IN)
+set(MORPHIZEN_DEP_H_INC "")
+
+foreach(MORPHIZEN_DEP IN LISTS MORPHIZEN_DEPS_LIST)
+  # Lines start with "#" are comments
+  if(NOT MORPHIZEN_DEP MATCHES "^#")
+    message(STATUS "MORPHIZEN_DEP = ${MORPHIZEN_DEP}")
+    # The first column is name
+    list(POP_FRONT MORPHIZEN_DEP MORPHIZEN_DEP_NAME)
+    # The second column is URL
+    list(POP_FRONT MORPHIZEN_DEP MORPHIZEN_DEP_URL)
+    set(DEP_URL_${MORPHIZEN_DEP_NAME} ${MORPHIZEN_DEP_URL})
+    # The third column is SHA1 hash value or Git tag
+    set(DEP_TAG_${MORPHIZEN_DEP_NAME} ${MORPHIZEN_DEP})
+    
+    # Determine if this is a Git repository
+    if(MORPHIZEN_DEP_URL MATCHES "\\.git$")
+      set(DEP_IS_GIT_${MORPHIZEN_DEP_NAME} TRUE)
+      message(STATUS "  -> Git repository: ${MORPHIZEN_DEP_URL} @ ${MORPHIZEN_DEP}")
+    else()
+      set(DEP_IS_GIT_${MORPHIZEN_DEP_NAME} FALSE)
+      set(DEP_SHA1_${MORPHIZEN_DEP_NAME} ${MORPHIZEN_DEP})
+      message(STATUS "  -> Archive: ${MORPHIZEN_DEP_URL} (SHA1: ${MORPHIZEN_DEP})")
+    endif()
+    
+    string(CONFIGURE "${MORPHIZEN_DEP_H_INC_IN}" _tmp @ONLY)
+    string(APPEND MORPHIZEN_DEP_H_INC "${_tmp}")
+  endif()
+endforeach()
+
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/morphizen_deps.inc.h" "${MORPHIZEN_DEP_H_INC}")
+
 function(vaip_add_version_info)
   set(options)
   set(oneValueArgs COMPONENT DIR)
@@ -73,10 +108,11 @@ if(MORPHIZEN_CMAKE_LIST_TXT_IN_LOCAL_WORKING_DIR)
    morphizen
    SOURCE_DIR ${MORPHIZEN_CMAKE_LIST_TXT_IN_LOCAL_WORKING_DIR})
 else()
+  message(STATUS "Fetching morphizen from deps.txt: ${DEP_URL_morphizen} @ ${DEP_TAG_morphizen}")
   FetchContent_Declare(
   morphizen
-  GIT_REPOSITORY ../MorphiZen
-  GIT_TAG ee97f468e3b9f65d798ea58a89780cbfb3de87f3
+  GIT_REPOSITORY ${DEP_URL_morphizen}
+  GIT_TAG ${DEP_TAG_morphizen}
   GIT_SUBMODULES "3rd-party/hash-library"
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
   )
