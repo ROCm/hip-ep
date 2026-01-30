@@ -108,7 +108,7 @@ cd onnxruntime
 If you use "Visual Studio 18 2026", upgrade cmake to >=v4.2, for example v4.2.3, then add `--cmake_generator "Visual Studio 18 2026"` in the following command.
 
 ```bash
-./build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --cmake_extra_defines CMAKE_INSTALL_PREFIX=$PWD/../local
+./build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --cmake_extra_defines CMAKE_INSTALL_PREFIX=$PWD/../local --disable_memleak_checker
 cmake --build ../build/onnxruntime/Release/ --target install
 ```
 
@@ -142,7 +142,7 @@ CMake Error: Could not find a package configuration file provided by "nlohmann_j
 Root Cause:
 TheRock SDK's nlohmann_json CMake configuration file contains problematic INTERFACE_SOURCES attribute.
 Solution: ✅
-File Path: $PWD/../therock/share/cmake/nlohmann_json//nlohmann_jsonTargets.cmake
+File Path: $PWD/../therock/share/cmake/nlohmann_json/nlohmann_jsonTargets.cmake
 Modifications:
 Open file and find set_target_properties(nlohmann_json::nlohmann_json ...)
 Remove the INTERFACE_SOURCES line (if it exists)
