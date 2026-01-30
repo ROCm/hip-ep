@@ -34,7 +34,7 @@ function(vaip_add_version_info)
 endfunction()
 
 set(VERSION_LIST
-    morphizen-mlir=morphizen-mlir)
+    onnx-hipdnn-ep=onnx-hipdnn-ep)
 set(VERSION_INFO "")
 foreach(COMP_PAIR IN LISTS VERSION_LIST)
   string(FIND "${COMP_PAIR}" "=" pos)
@@ -76,7 +76,7 @@ else()
   FetchContent_Declare(
   morphizen
   GIT_REPOSITORY ../MorphiZen
-  GIT_TAG main
+  GIT_TAG ee97f468e3b9f65d798ea58a89780cbfb3de87f3
   GIT_SUBMODULES "3rd-party/hash-library"
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
   )

@@ -73,4 +73,4 @@ struct Level1MlirPass {
 
 } // namespace
 
-DEFINE_VAIP_PASS(Level1MlirPass, vaip_pass_level1_mlir)
+DEFINE_MORPHIZEN_PASS(Level1MlirPass, morphizen_pass_level1_mlir)
