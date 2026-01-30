@@ -139,6 +139,39 @@ See [git-workflow-reference.md](git-workflow-reference.md) for detailed commit/s
 - `build-and-test-lnx` - Linux build and tests
 - `build-and-test-win` - Windows build and tests
 
+**Note**: If checks fail due to main branch advancing, see "Keeping PR Updated with Main" below.
+
+## Keeping PR Updated with Main
+
+**When origin/main advances while your PR is in review:**
+
+1. Fetch and check:
+   ```bash
+   git fetch origin main
+   git log HEAD..origin/main --oneline
+   ```
+
+2. Update branch:
+   ```bash
+   git rebase origin/main
+   ```
+
+3. Resolve conflicts (see Step 8 in Committing workflow below)
+
+4. Force push:
+   ```bash
+   git push --force-with-lease fork <branch-name>
+   ```
+
+5. Monitor CI checks - they will re-run
+
+**When to update:**
+- When GitHub shows branch is out-of-date
+- Before requesting final review if main has advanced
+- When reviewers request it
+- If CI checks fail due to main branch changes
+- Before merge (if required by policy)
+
 ## Pull Request Description Updates
 
 Update PR description/title **when the scope, approach, or status of the work changes meaningfully** - not for every push.
