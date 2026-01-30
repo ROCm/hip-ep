@@ -63,7 +63,7 @@ private:
                                   size_t count) const;
   OrtNode*
   convert_morphizen_node_to_ort_node(const OrtModelEditorApi* model_editor_api,
-                                     const onnxruntime::Node* vaip_node,
+                                     const onnxruntime::Node* morphizen_node,
                                      const OrtNode* ort_node) const;
   /**
    * @brief Update provider options from ORT session configuration

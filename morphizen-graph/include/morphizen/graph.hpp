@@ -35,7 +35,7 @@
 
 namespace morphizen {
 
-#ifndef VAIP_USE_DEPRECATED_API
+#ifndef MORPHIZEN_USE_DEPRECATED_API
 [[deprecated("This API will be removed in the future release version. Please "
              "use NodeBuilder instread.")]]
 #endif

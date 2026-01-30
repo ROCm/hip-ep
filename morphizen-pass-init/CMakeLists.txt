@@ -16,7 +16,7 @@ set_target_properties (morphizen-pass-init
   OUTPUT_NAME morphizen-pass-init)
 add_library (morphizen::pass-init ALIAS morphizen-pass-init)
 target_link_libraries(morphizen-pass-init PRIVATE morphizen-core-static)
-# TODO: vaip pass naming convention: vaip-<pass_a_b_c>
+# TODO: morphizen pass naming convention: morphizen-<pass_a_b_c>
 # overwrite the default OUTPUT_NAME in morphizen_add_library
 target_compile_definitions(morphizen-pass-init
   PRIVATE -DOUTPUT_NAME="morphizen-pass-init")

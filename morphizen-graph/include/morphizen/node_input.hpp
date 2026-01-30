@@ -43,7 +43,7 @@ class Binder;
 }
 /**
  * @brief The namespace morphizen_cxx contains classes and functions related to
- * the VAIP library in C++.
+ * the MorphiZen library in C++.
  */
 namespace morphizen_cxx {
 /**

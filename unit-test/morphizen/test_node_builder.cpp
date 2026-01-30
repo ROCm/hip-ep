@@ -14,7 +14,7 @@ class NodeBuilderTest : public ::testing::Test {};
 
 TEST_F(NodeBuilderTest, SkipSimplifiedLayerNormalization) {
   auto output_dir = CMAKE_CURRENT_BINARY_PATH;
-  auto onnx_file = output_dir / ".." / ".." / ".." / "vaip_regression" /
+  auto onnx_file = output_dir / ".." / ".." / ".." / "morphizen_regression" /
                    "llama2-7b-int4-gs128-asym-mha" / "model.onnx";
   onnx_file.make_preferred();
   if (!std::filesystem::exists(onnx_file)) {
@@ -30,7 +30,7 @@ TEST_F(NodeBuilderTest, SkipSimplifiedLayerNormalization) {
       morphizen::PassContext::create();
 
   auto pass_proto = std::make_unique<morphizen::PassProto>();
-  pass_proto->set_plugin("vaip-pass_init");
+  pass_proto->set_plugin("morphizen-pass_init");
   pass_proto->set_name("NodeBuilderTest.SkipSimplifiedLayerNormalization");
   auto pass = morphizen::IPass::create_pass(context, *pass_proto);
 

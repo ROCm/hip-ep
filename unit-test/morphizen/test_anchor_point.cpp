@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 #include <exception>
-// must include glog/logging before vaip.hpp
+// must include glog/logging before morphizen.hpp
 #include <glog/logging.h>
 //
 #include "./test_environment.hpp"
@@ -42,7 +42,7 @@ create(const std::filesystem::path& filename) {
   //    auto anchor_point = std::make_unique<AnchorPointProto>();
   //
   // AnchorPointProto::AnchorPointProto() is an inline function so that it is
-  // created inside vaip_unit_test.exe,
+  // created inside morphizen_unit_test.exe,
   // google::protobuf::TextFormat::ParseFromString() is defined in
   // onnxruntime_morphizen_ep.dll, and output->Clear() would throw an exception.
   //
@@ -83,7 +83,7 @@ public:
     std::shared_ptr<PassContext> context = PassContext::create();
     auto pass_proto = PassProto();
     pass_proto.set_name("test");
-    pass_proto.set_plugin("vaip-pass_init");
+    pass_proto.set_plugin("morphizen-pass_init");
     auto pass = IPass::create_pass(context, pass_proto);
     test_optimize1(*pass, cwd / file);
   }

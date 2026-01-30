@@ -178,7 +178,7 @@ To add new test cases:
 
 ## Best Practices
 
-1. **Reset statistics** at the beginning of each test with `reset_vaip_ort_api_call_statistics()`
+1. **Reset statistics** at the beginning of each test with `reset_morphizen_ort_api_call_statistics()`
 2. **Check coverage** after major test sections to verify expected API calls were made
 3. **Use try-catch blocks** around operations that may fail without proper setup
 4. **Log informative messages** to help with debugging and analysis
@@ -196,13 +196,13 @@ protected:
 };
 
 TEST_F(MyApiTest, MySpecificOperation) {
-  reset_vaip_ort_api_call_statistics();
+  reset_morphizen_ort_api_call_statistics();
 
   // Perform your operations using wrapped_api_
   auto result = wrapped_api_->some_operation();
 
   // Verify the API was called
-  auto stats = get_vaip_ort_api_call_statistics();
+  auto stats = get_morphizen_ort_api_call_statistics();
   EXPECT_GT(stats["some_operation"], 0);
 }
 ```

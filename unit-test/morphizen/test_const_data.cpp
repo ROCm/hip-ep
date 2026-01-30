@@ -26,7 +26,8 @@ public:
                        .c_str();
     auto exit_code = boost::process::system(
         PYTHON_EXE.u8string(),
-        (TEST_SRC_DIR / "vaip" / "test_constant_initializer.py").u8string(),
+        (TEST_SRC_DIR / "morphizen" / "test_constant_initializer.py")
+            .u8string(),
         test_constant_initializer_onnx.u8string());
     ASSERT_TRUE(exit_code == 0) << "Failed to generate test file";
     ASSERT_TRUE(std::filesystem::exists(test_constant_initializer_onnx));

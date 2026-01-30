@@ -106,7 +106,7 @@ int main(int argc, char* argv[]) {
     Ort::Env env(ORT_LOGGING_LEVEL_ERROR, "onnx_grep");
     Ort::SessionOptions().AppendExecutionProvider_VitisAI();
          morphizen::set_the_global_api(
-          morphizen::Plugin::invoke<morphizen::OrtApiForVaip*>(
+          morphizen::Plugin::invoke<morphizen::OrtApiForMorphizen*>(
               "onnxruntime_morphizen_ep", "get_the_global_api"));
     CHECK_NE(file, "");
 

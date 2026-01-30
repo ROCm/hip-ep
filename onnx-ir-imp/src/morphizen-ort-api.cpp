@@ -1245,11 +1245,11 @@ static void initialize_dummy_api() {
         21); // UINT4 = 21
   };
   // it is only used by
-  // vaip_vaiml_common/graph_update_initializer.cpp:56:
+  // morphizen_vaiml_common/graph_update_initializer.cpp:56:
   // actually `MORPHIZEN_ORT_API(graph_remove_node)(graph, {nullptr,
   // node_arg});` is the same thing, but it is obscured and to be deprecacted.
   //
-  // in vaip pass, create-const-op, we need to remove original initializer
+  // in morphizen pass, create-const-op, we need to remove original initializer
   // otherwise ORT graph resolver will fail because of duplicated node arg
   // names.
   the_instance_of_morphizen_ort_api.graph_remove_initialized_tensor =

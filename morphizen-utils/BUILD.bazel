@@ -3,12 +3,12 @@ cc_library(
     srcs = glob([
         "src/*.cpp",
     ], exclude = [
-        "src/vaip_plugin_lnx.cpp",  # Platform-specific, handled below
-        "src/vaip_plugin_win.cpp",  # Platform-specific, handled below
+        "src/morphizen_plugin_lnx.cpp",  # Platform-specific, handled below
+        "src/morphizen_plugin_win.cpp",  # Platform-specific, handled below
     ]) + select({
-        "@bazel_tools//src/conditions:windows": ["src/vaip_plugin_win.cpp"],
-        "@bazel_tools//src/conditions:linux_x86_64": ["src/vaip_plugin_lnx.cpp"],
-        "@bazel_tools//src/conditions:darwin": ["src/vaip_plugin_lnx.cpp"],  # Use lnx version for macOS
+        "@bazel_tools//src/conditions:windows": ["src/morphizen_plugin_win.cpp"],
+        "@bazel_tools//src/conditions:linux_x86_64": ["src/morphizen_plugin_lnx.cpp"],
+        "@bazel_tools//src/conditions:darwin": ["src/morphizen_plugin_lnx.cpp"],  # Use lnx version for macOS
         "//conditions:default": [],
     }),
     hdrs = glob(["include/morphizen-utils/*.hpp"]),

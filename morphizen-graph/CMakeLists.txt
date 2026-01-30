@@ -5,7 +5,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(morphizen-graph
     VERSION 1.0.0
-    DESCRIPTION "C++ graph wrapper utilities over VAIP_ORT_API"
+    DESCRIPTION "C++ graph wrapper utilities over MORPHIZEN_ORT_API"
     LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)

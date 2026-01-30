@@ -19,6 +19,8 @@ Licensed under the MIT License.
 - CMake 3.15 or higher
 - C++17 compatible compiler (GCC, Clang, or MSVC)
 - Git
+- Python 3.8+ (for pre-commit hooks)
+- **Pre-commit hooks** (required for contributors) - See [Developer Setup](#developer-setup) below
 
 ## Installation
 
@@ -30,6 +32,14 @@ Clone the repository and build:
 git clone https://github.com/ROCm/MorphiZen.git
 cd MorphiZen
 git submodule update --init --recursive
+
+# For contributors: Set up pre-commit hooks (required)
+# Windows:
+scripts/setup-dev-env.ps1
+# Linux/Mac:
+scripts/setup-dev-env.sh
+
+# Build
 mkdir build
 cd build
 cmake ..
@@ -45,11 +55,29 @@ cmake -DCMAKE_CONFIGURATION_TYPES=Release -B $BUILD/morphizen -S $W/MorphiZen/ -
 cmake --build $BUILD/morphizen --config Release
 ```
 
+## Developer Setup
+
+**For Contributors**: Before making changes, set up pre-commit hooks to ensure your code passes CI checks:
+
+```bash
+# Windows (PowerShell):
+scripts/setup-dev-env.ps1
+
+# Linux/Mac:
+scripts/setup-dev-env.sh
+```
+
+This installs pre-commit hooks that automatically run code formatters and linters before each commit.
+
+**Important**: Pre-commit manages all formatting tools (clang-format, lintrunner, etc.) in an isolated environment. Never install or run these tools manually - pre-commit handles everything.
+
+See [Developer Guide - Pre-commit Hooks](docs/developer-guide.md#6-pre-commit-hooks-required-for-contributors) for details.
+
 ## Documentation
 
 - **[Quick Start](docs/developer-guide.md#installation)** - Get up and running
 - **[Architecture Guide](docs/architecture.md)** - System design and components
-- **[Developer Guide](docs/developer-guide.md)** - Contributing to MorphiZen
+- **[Developer Guide](docs/developer-guide.md)** - Contributing to MorphiZen (includes pre-commit setup)
 - **[Documentation Index](docs/)** - Complete documentation navigation
 - **[Git Workflow](docs/workflows/git-workflow.md)** - Branch strategy and commits
 - **[Build Workflow](docs/workflows/build-workflow.md)** - Build system details
