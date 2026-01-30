@@ -134,23 +134,16 @@ git clone https://github.com/ROCm/onnx-hipdnn-ep.git
 
 #### Configure and build
 
-Known Issue 1:nlohmann_json Package Not Found ❌
-
+#### Known Issue 
+1.nlohmann_json Package Not Found ❌
 Error Message:
-
 ```CMake Error: Could not find a package configuration file provided by "nlohmann_json"```
-
 Root Cause:
 TheRock SDK's nlohmann_json CMake configuration file contains problematic ```INTERFACE_SOURCES``` attribute.
-
 Solution: ✅
-
 File Path: ```$PWD/../therock/share/cmake/nlohmann_json//nlohmann_jsonTargets.cmake```
-
 Modifications:
-
 Open file and find ```set_target_properties(nlohmann_json::nlohmann_json ...)```
-
 Remove the ```INTERFACE_SOURCES``` line (if it exists)
 
 
