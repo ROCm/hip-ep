@@ -37,7 +37,7 @@ namespace morphizen {
 
 #ifndef MORPHIZEN_USE_DEPRECATED_API
 [[deprecated("This API will be removed in the future release version. Please "
-             "use NodeBuilder instread.")]]
+             "use NodeBuilder instead.")]]
 #endif
 MORPHIZEN_DLL_SPEC Node&
 graph_add_node(Graph& graph, const std::string& name,

@@ -26,8 +26,8 @@
 static int g_sequence_no = 0;
 DEF_ENV_PARAM(ENABLE_SAVE_GRAPH_TXT, "0")
 DEF_ENV_PARAM(ENABLE_SAVE_ONNX_MODEL, "0")
-DEF_ENV_PARAM(DEBUG_VAIP_PASS, "0")
-#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_VAIP_PASS) >= n)
+DEF_ENV_PARAM(DEBUG_MORPHIZEN_PASS, "0")
+#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_MORPHIZEN_PASS) >= n)
 
 namespace morphizen {
 
@@ -142,11 +142,11 @@ Pass::Pass(std::shared_ptr<PassContextImp> context, const PassProto& pass_proto,
   for (auto i = 0u; i < pass_info.size; ++i) {
     this->add_action(pass_info.get_action(i));
   }
-  LOG_IF(INFO, ENV_PARAM(DEBUG_VAIP_PASS))
+  LOG_IF(INFO, ENV_PARAM(DEBUG_MORPHIZEN_PASS))
       << "pass is created: " << (void*)this << " name=" << this->name();
 }
 Pass::~Pass() {
-  LOG_IF(INFO, ENV_PARAM(DEBUG_VAIP_PASS))
+  LOG_IF(INFO, ENV_PARAM(DEBUG_MORPHIZEN_PASS))
       << "pass is decontructed: " << (void*)this << " name=" << this->name();
 }
 void Pass::apply(Graph& graph_old) {
