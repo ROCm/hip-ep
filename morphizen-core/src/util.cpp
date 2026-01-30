@@ -23,8 +23,8 @@
 namespace py = pybind11;
 #endif
 
-DEF_ENV_PARAM(DEBUG_VAIP_UTIL, "0")
-#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_VAIP_UTIL) >= n)
+DEF_ENV_PARAM(DEBUG_MORPHIZEN_UTIL, "0")
+#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_MORPHIZEN_UTIL) >= n)
 
 namespace morphizen {
 MORPHIZEN_DLL_SPEC void dump_graph(const Graph& graph,

@@ -117,7 +117,7 @@ MORPHIZEN_DLL_SPEC bool dump_binary(const std::filesystem::path& filename,
 unsigned int get_tid();
 unsigned int get_pid();
 
-// Stream utility functions (replace morphizen_io stream_copy and stream_filter)
+// Stream utility functions (for copying and filtering streams)
 inline void stream_copy(std::istream& src, std::ostream& dst,
                         size_t buffer_size = 8192) {
   std::vector<char> buffer(buffer_size);

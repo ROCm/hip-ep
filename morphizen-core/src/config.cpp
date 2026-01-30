@@ -33,10 +33,10 @@
 #include "version_info.hpp"
 #include <morphizen/morphizen_ort_api.h>
 
-DEF_ENV_PARAM(DEBUG_VAIP_CONFIG, "0")
+DEF_ENV_PARAM(DEBUG_MORPHIZEN_CONFIG, "0")
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY, "0")
 DEF_ENV_PARAM(XLNX_ONNX_EP_VERBOSE, "0")
-#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_VAIP_CONFIG) >= n)
+#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_MORPHIZEN_CONFIG) >= n)
 #define LOG_VERBOSE(n)                                                         \
   LOG_IF(INFO, ENV_PARAM(XLNX_ONNX_EP_VERBOSE) >= n)                           \
       << "[XLNX_ONNX_EP_VERBOSE] "

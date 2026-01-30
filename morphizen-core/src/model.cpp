@@ -11,8 +11,8 @@
 
 #include "morphizen/env_config.hpp"
 #include <morphizen/morphizen_ort_api.h>
-DEF_ENV_PARAM(DEBUG_VAIP_MODEL, "0")
-#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_VAIP_MODEL) >= n)
+DEF_ENV_PARAM(DEBUG_MORPHIZEN_MODEL, "0")
+#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_MORPHIZEN_MODEL) >= n)
 namespace morphizen {
 MORPHIZEN_DLL_SPEC ModelPtr model_load(const std::string& filename) {
   return ModelPtr(MORPHIZEN_ORT_API(model_load)(filename));
