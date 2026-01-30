@@ -23,7 +23,7 @@ static std::map<std::string, size_t> g_api_call_counts;
 #define LOG_API_CALL(name)                                                     \
   do {                                                                         \
     g_api_call_counts[#name]++;                                                \
-    VLOG_IF(2, 0) << "VAIP API Call: " << #name                                \
+    VLOG_IF(2, 0) << "MorphiZen API Call: " << #name                           \
                   << " (count: " << g_api_call_counts[#name] << ")";           \
   } while (0)
 
@@ -651,7 +651,7 @@ void wrapped_graph_infer_shapes(morphizen::ModelProto& m) {
 
 } // anonymous namespace
 
-morphizen::OrtApiForMorphizen* get_vaip_ort_api_for_coverage_test(
+morphizen::OrtApiForMorphizen* get_morphizen_ort_api_for_coverage_test(
     morphizen::OrtApiForMorphizen* original_api) {
   if (!original_api) {
     LOG(ERROR) << "Original API is null, cannot create wrapper";
@@ -814,7 +814,7 @@ morphizen::OrtApiForMorphizen* get_vaip_ort_api_for_coverage_test(
   return g_wrapped_api.get();
 }
 
-void delete_vaip_ort_api_coverage_test(
+void delete_morphizen_ort_api_coverage_test(
     morphizen::OrtApiForMorphizen* wrapped_api) {
   if (wrapped_api == g_wrapped_api.get()) {
     LOG(INFO) << "Deleting VAIP ORT API test coverage wrapper";
@@ -828,11 +828,11 @@ void delete_vaip_ort_api_coverage_test(
   }
 }
 
-std::map<std::string, size_t> get_vaip_ort_api_call_statistics() {
+std::map<std::string, size_t> get_morphizen_ort_api_call_statistics() {
   return g_api_call_counts;
 }
 
-void reset_vaip_ort_api_call_statistics() { g_api_call_counts.clear(); }
+void reset_morphizen_ort_api_call_statistics() { g_api_call_counts.clear(); }
 
 } // namespace test
 } // namespace morphizen
