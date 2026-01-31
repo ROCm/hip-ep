@@ -221,7 +221,7 @@ std::string MLIRModel::serialize_as_string() const {
   }
 
   getModule().print(stream, flags);
-  return std::move(result);
+  return result;
 }
 
 } // namespace mlir_impl

@@ -181,10 +181,10 @@ MorphiZenEpFactory::ValidateCompiledModelCompatibilityInfoImpl(
     _In_reads_(num_devices) const OrtHardwareDevice* const* devices,
     _In_ size_t num_devices, _In_ const char* compatibility_info,
     _Out_ OrtCompiledModelCompatibility* model_compatibility) noexcept {
-  auto* factory = static_cast<MorphiZenEpFactory*>(this_ptr);
-
+  // Note: this_ptr (MorphiZenEpFactory*) is not currently used for validation
   // Empty eps pointer since validation is based on compatibility_info and
   // devices eps may be used in future for EP-specific validation
+  (void)this_ptr; // Suppress unused parameter warning
   int compatibility_result = 0;
   int status = validate_compiled_model_compatibility_info(
       nullptr, // eps - not available in factory context

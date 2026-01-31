@@ -5,15 +5,8 @@
 #pragma once
 #include <functional>
 #include <iosfwd>
+#include <morphizen/export.h>
 #include <string>
-
-#ifndef MORPHIZEN_DLL_SPEC
-#  if defined(_WIN32) || defined(_WIN64)
-#    define MORPHIZEN_DLL_SPEC __declspec(dllexport)
-#  else
-#    define MORPHIZEN_DLL_SPEC __attribute__((visibility("default")))
-#  endif
-#endif
 namespace morphizen {
 class TarWriter {
 public:

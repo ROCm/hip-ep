@@ -96,13 +96,20 @@ if(BUILD_PYTHON)
 endif()
 
 target_compile_options(morphizen-pattern PRIVATE ${MORPHIZEN_COMPILER_OPTIONS})
+# Disable C4946: Protobuf uses opaque type pattern with reinterpret_cast by design.
+# Opaque types (MessageLite <-> concrete proto types) are intentionally cast using
+# reinterpret_cast because they have the same memory layout but no inheritance relationship.
+# This is a valid use case where C4946 is a false positive.
+if(MSVC)
+    target_compile_options(morphizen-pattern PRIVATE /wd4946)
+endif()
 target_compile_features(morphizen-pattern PUBLIC cxx_std_17)
 
 target_compile_definitions(morphizen-pattern
     PUBLIC
-        "-DMORPHIZEN_USE_DLL=0"
         "-DONNX_NAMESPACE=onnx"
     PRIVATE
+        "-DMORPHIZEN_USE_DLL=0"  # Static library, no DLL export/import
         "-DMORPHIZEN_EXPORT_DLL=1")
 
 set_target_properties(morphizen-pattern PROPERTIES FOLDER morphizen)

@@ -34,6 +34,13 @@ target_compile_features(ort-bridge
 target_compile_options(ort-bridge
   PRIVATE
   ${MORPHIZEN_COMPILER_OPTIONS})
+# Disable C4946: ONNXRuntime uses opaque type pattern with reinterpret_cast by design.
+# Opaque types (OrtNodeComputeInfo <-> MorphiZenEP_ComputeInfo) are intentionally cast
+# using reinterpret_cast for C API compatibility. This is a valid use case where C4946
+# is a false positive.
+if(MSVC)
+  target_compile_options(ort-bridge PRIVATE /wd4946)
+endif()
 target_link_libraries(ort-bridge
   PRIVATE
   onnxruntime::onnxruntime
