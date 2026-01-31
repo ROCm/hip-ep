@@ -175,6 +175,13 @@ else(MSVC)
   target_compile_options(morphizen-core-static PUBLIC "-fPIC")
 endif(MSVC)
 target_compile_options(morphizen-core-static PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${MORPHIZEN_COMPILER_OPTIONS}>")
+# Disable C4946: Protobuf uses opaque type pattern with reinterpret_cast by design.
+# Opaque types (MessageLite <-> concrete proto types) are intentionally cast using
+# reinterpret_cast because they have the same memory layout but no inheritance relationship.
+# This is a valid use case where C4946 is a false positive.
+if(MSVC)
+  target_compile_options(morphizen-core-static PRIVATE /wd4946)
+endif()
 if(WIN24_BUILD)
   target_compile_definitions(${LIB_NAME} PUBLIC "-DWIN24_BUILD=ON")
 endif()

@@ -82,7 +82,6 @@ static std::string GetFilePathFromHandle(HANDLE h) {
   DWORD required_size =
       GetFinalPathNameByHandleW(h, nullptr, 0, VOLUME_NAME_DOS);
   if (required_size == 0) {
-    DWORD error = GetLastError();
     return "<failed to get path: " + GetLastErrorAsString() + ">";
   }
 

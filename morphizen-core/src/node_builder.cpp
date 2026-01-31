@@ -115,12 +115,23 @@ const Node& NodeBuilder::build() {
   // Suppress deprecation warning: graph_add_node is marked deprecated but is
   // intentionally used here. The NodeBuilder class provides the recommended
   // interface, but internally it still needs to call graph_add_node.
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#ifdef __GNUC__
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+#ifdef _MSC_VER
+#  pragma warning(push)
+#  pragma warning(disable : 4996) // deprecated declaration
+#endif
   auto& newly_added_node = graph_add_node(
       graph_, std::string("morphizen_node_") + name_with_suffix, op_type_,
       description_, input_args_, output_args, std::move(attrs_), domain_);
-#pragma GCC diagnostic pop
+#ifdef __GNUC__
+#  pragma GCC diagnostic pop
+#endif
+#ifdef _MSC_VER
+#  pragma warning(pop)
+#endif
 
   if (domain_ == "com.xilinx") {
     if (num_of_outputs_ == 1u) {

@@ -52,10 +52,16 @@ set(MORPHIZEN_COMPILER_OPTIONS
   /sdl # Security Development Lifecycle
   /MP # build with multiple processes
   /W4
+  /WX # treat warnings as errors (matches Linux -Werror)
   /EHsc
   # Enable additional warnings to match Linux strictness (-Wextra equivalent)
   /w14505 # unreferenced local function has been removed (matches -Wunused-function)
   /w14189 # local variable is initialized but not referenced (matches -Wunused-but-set-variable)
+  /w14456 # declaration hides previous local declaration
+  /w14457 # declaration hides function parameter
+  /w14458 # declaration hides class member
+  /w14459 # declaration hides global declaration
+  /w14946 # reinterpret_cast used between related classes (helps catch aliasing issues)
   # TODO: fix the following warning
   /wd4251 #warning C4251: needs to have dll-interface to be used by clients of
   /wd4275 #warning C4275: non dll-interface class
@@ -77,9 +83,7 @@ set(MORPHIZEN_COMPILER_OPTIONS
   CACHE STRING "Compiler options for Morphizen"
 )
 
-if (WIN32 AND CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
-  list(APPEND MORPHIZEN_COMPILER_OPTIONS /WX) # enable warning as error for x64
-endif()
+# /WX is now enabled for all platforms in MORPHIZEN_COMPILER_OPTIONS above
 
 set(MORPHIZEN_LINKER_OPTIONS
   # `/DEBUG`: This option instructs the linker to generate debug

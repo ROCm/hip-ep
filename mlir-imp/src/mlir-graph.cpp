@@ -1037,7 +1037,6 @@ int MLIRGraph::resolve(bool force) {
 
   // For MLIR, we typically always run optimization passes when resolving
   // since MLIR is designed to be optimized incrementally, for now
-  (void*)force;
 
   // Perform MLIR-specific graph validation and consistency checks
   try {

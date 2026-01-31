@@ -290,6 +290,29 @@ All dependencies install to `../../local`.
 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>
 ```
 
+## Building MorphiZen
+
+### Unit Tests (Disabled by Default)
+
+**Default behavior**: Unit tests are disabled by default (`morphizen_ENABLE_UNIT_TEST=OFF`) to reduce build time for end-users.
+
+**For developers**:
+- Use the `/build-and-test` skill which automatically enables unit tests
+- Or manually enable when configuring: `-Dmorphizen_ENABLE_UNIT_TEST=ON`
+
+**For CI**: Unit tests are always enabled in CI workflows to ensure code quality.
+
+**Example manual build with unit tests**:
+```bash
+LOCAL_DIR=$(cd ../../local && pwd)
+cmake -S . -B ../../build/morphizen \
+  -DCMAKE_BUILD_TYPE=Debug \
+  "-DCMAKE_PREFIX_PATH=$LOCAL_DIR" \
+  -Dmorphizen_ENABLE_UNIT_TEST=ON
+cmake --build ../../build/morphizen --config Debug --parallel
+ctest --test-dir ../../build/morphizen -C Debug --output-on-failure
+```
+
 ### Build Instructions for Each Dependency
 
 Dependencies are cloned in the parent directory of the project (outside the project root), built in `../../build/<dependency-name>`, and installed to `../../local`.

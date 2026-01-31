@@ -13,7 +13,7 @@ namespace morphizen {
 class MetaDefProto;
 struct TryFuseError;
 class IPass;
-class NodeBuilder;
+struct NodeBuilder;
 } // namespace morphizen
 
 namespace morphizen_cxx {

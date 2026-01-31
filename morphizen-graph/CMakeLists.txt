@@ -60,13 +60,13 @@ target_compile_options(morphizen-graph PRIVATE ${MORPHIZEN_COMPILER_OPTIONS})
 target_compile_features(morphizen-graph PUBLIC cxx_std_17)
 
 # Build as internal code (MORPHIZEN_EXPORT_DLL=1) even though it's a static library
-# Use PRIVATE for MORPHIZEN_EXPORT_DLL so consumers don't inherit the export flag
-# Use PUBLIC for MORPHIZEN_USE_DLL=0 to indicate static library
+# Use PRIVATE for both MORPHIZEN_EXPORT_DLL and MORPHIZEN_USE_DLL
+# Consumers decide for themselves whether they're building DLL or static
 target_compile_definitions(morphizen-graph
     PUBLIC
-        "-DMORPHIZEN_USE_DLL=0"
         "-DONNX_NAMESPACE=onnx"
     PRIVATE
+        "-DMORPHIZEN_USE_DLL=0"
         "-DMORPHIZEN_EXPORT_DLL=1"
 )
 

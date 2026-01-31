@@ -41,4 +41,10 @@ set_target_properties(relu_dq_proto
 
 if(NOT MSVC)
   target_compile_options(relu_dq_proto PUBLIC "-fPIC")
+else()
+  # Disable C4946: Protobuf uses opaque type pattern with reinterpret_cast by design.
+  # Opaque types (MessageLite <-> concrete proto types) are intentionally cast using
+  # reinterpret_cast because they have the same memory layout but no inheritance relationship.
+  # This is a valid use case where C4946 is a false positive.
+  target_compile_options(relu_dq_proto PRIVATE /wd4946)
 endif(NOT MSVC)
