@@ -33,7 +33,7 @@ env:
 
 jobs:
   build-and-test:
-    if: github.event.pull_request.draft == false
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: windows-latest
     steps:
       - name: Checkout MorphiZen
