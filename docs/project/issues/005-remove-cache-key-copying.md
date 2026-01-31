@@ -12,6 +12,7 @@ Licensed under the MIT License.
 - **Created:** 2026-01-30
 - **Updated:** 2026-01-30 (Solution designed after discussion)
 - **Dependencies:** Should be done after or with Issue #003
+- **Strategic Goal:** Immutable ConfigProto
 
 ## Description
 
@@ -174,10 +175,6 @@ if (auto cache_key = get_provider_option_local({"cache_key", "cacheKey"})) {
 - [ ] Cache loading works (cache_key restored from context.json)
 - [ ] No separate cache_key_ member variable added
 
-## Plans
-
-_No plans yet - solution to be designed later._
-
 ## Sessions
 
 ### 2026-01-30: Initial Creation
@@ -249,10 +246,6 @@ A1_ctx.onnx_MORPHIZEN.bin (shared tar file)
 
 - **Issue #003:** Remove ConfigProto from ContextProto - this issue should be coordinated with #003
 - **Issue #006:** Remove cache_dir entirely - cache_files is another issue to address later
-
-## Related PRs
-
-_None yet._
 
 ## Notes
 

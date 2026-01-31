@@ -2,9 +2,47 @@
 Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
-# clean up provider options
+# Provider Options Cleanup
 
-# sources of provider options.
+**Status:** Current state documentation (will be simplified after Issues #003, #008, #009, #013)
+
+## Overview
+
+This document describes the current complexity of provider_options aggregation from multiple sources, and the plan to simplify it.
+
+**Current problem:** provider_options comes from 4 different sources, creating pollution and inconsistent state issues.
+
+**Future state (after cleanup):** Single source (user-provided options only).
+
+---
+
+## The Inconsistent State Problem
+
+**Fundamental issue with current design:**
+
+```
+Cached COMPILATION done with OLD provider_options
+BUT we swap in NEW provider_options after loading cache
+→ INCONSISTENT STATE: compiled binary doesn't match current options!
+```
+
+**Example scenario:**
+1. User compiles: `A.onnx` + `{target: "NPU"}` → `A_ctx.onnx` (compiled for NPU)
+2. User deploys: Load `A_ctx.onnx` with `{target: "CPU"}`
+3. Current design swaps options: binary says NPU, options say CPU
+4. Can't recompile (original `A.onnx` is gone in EP context deployment)
+
+**Why this exists:**
+- ConfigProto is persisted with cache (Issue #003)
+- Multiple injection points pollute provider_options (Issues #008, #009)
+- Swapping tries to preserve user's current options (Issue #013)
+- `provider_option_from_cache_` tracks this complexity
+
+**Fix:** Issues #003, #008, #009, #013 eliminate this problem.
+
+---
+
+## Current Sources of provider_options
 
 ## explicitly set by end users
 
@@ -64,3 +102,208 @@ It is to be deprecated, see PR #159 #155
 
 
 [s1]: ../morphizen-core/src/pass_context_imp.cpp#L1177
+
+---
+
+## Future State (After Issues #003, #008, #009, #013)
+
+### Simplified Architecture
+
+**After cleanup, provider_options will have TWO user sources:**
+
+1. ✅ **User (direct API)** - `provider_option_origin_` - Explicit via AppendExecutionProvider
+2. ✅ **User (config file)** - `config_.provider_options()` - Via morphizen_config.json
+
+**Priority:** Direct API overrides config file (standard pattern)
+
+**Removed sources:**
+3. ❌ **From cache** (Issue #003) - ConfigProto not persisted
+4. ❌ **MEP table injection** (Issue #008) - MEP table removed
+5. ❌ **TargetProto injection** (Issue #009) - Target injection removed
+
+---
+
+### Rationale: Why Two User Sources?
+
+**Why config file is needed:**
+
+Setting many provider options via direct API is tedious and error-prone:
+
+```cpp
+// Without config file - tedious to repeat for every session
+auto opts = std::unordered_map<std::string, std::string>{
+  {"cache_dir", "/path/to/cache"},
+  {"target", "NPU"},
+  {"xclbin", "/path/to/xclbin"},
+  {"enable_profiling", "1"},
+  {"log_level", "3"},
+  // ... many more options
+};
+session_options.AppendExecutionProvider_VitisAI(opts);
+```
+
+Config file solves this:
+
+```cpp
+// With config file - convenient, reusable defaults
+auto opts = std::unordered_map<std::string, std::string>{
+  {"config", "morphizen_config.json"}  // All defaults in one place
+};
+session_options.AppendExecutionProvider_VitisAI(opts);
+```
+
+**Benefits of config file:**
+- ✅ **Convenience** - Avoid repeating many options
+- ✅ **Reusability** - Same config across multiple sessions/models
+- ✅ **Maintainability** - Update options in one place
+- ✅ **Version control** - Check config file into repository
+- ✅ **Environment-specific** - Different configs for dev/test/prod
+
+**Why direct API needs to override config file:**
+
+Different sessions may need different settings even with same base config:
+
+```cpp
+// Base config file: morphizen_config.json
+// {
+//   "provider_options": {
+//     "cache_dir": "/shared/cache",
+//     "target": "NPU",
+//     "log_level": "1"
+//   }
+// }
+
+// Session 1: Use defaults from config file
+auto opts1 = std::unordered_map<std::string, std::string>{
+  {"config", "morphizen_config.json"}
+};
+
+// Session 2: Override specific options (e.g., enable debugging)
+auto opts2 = std::unordered_map<std::string, std::string>{
+  {"config", "morphizen_config.json"},
+  {"log_level", "3"}  // Override for this session only - enable verbose logging
+};
+
+// Session 3: Override target (e.g., testing CPU fallback)
+auto opts3 = std::unordered_map<std::string, std::string>{
+  {"config", "morphizen_config.json"},
+  {"target", "CPU"}  // Override for this session only - test CPU mode
+};
+```
+
+**Benefits of direct API override:**
+- ✅ **Flexibility** - Per-session customization without changing config file
+- ✅ **Testing** - Override specific options for debugging/testing
+- ✅ **Runtime decisions** - Change options based on runtime conditions
+- ✅ **Temporary overrides** - Test different settings without modifying shared config
+- ✅ **Standard pattern** - Like command-line args override config files
+
+**Implementation: Priority via std::map::insert()**
+
+```cpp
+get_all_provider_options() const {
+  auto ret = std::map<std::string, std::string>();
+  // insert() only inserts if key doesn't exist
+  // First source (direct API) has highest priority
+  for (auto& kv : provider_option_origin_) {
+    ret.insert(kv);  // Direct API values inserted first
+  }
+  for (auto& kv : config_.provider_options()) {
+    ret.insert(kv);  // Config file values inserted only if key not already present
+  }
+  return ret;
+}
+```
+
+**Debugging: All sources logged (pass_context_imp.cpp:1188-1213)**
+
+Users can see exactly where each value came from:
+
+```
+provider_option_from_origin: log_level = 3         # Direct API
+provider_options_in_config: log_level = 1          # Config file
+provider_options_in_config: cache_dir = /shared    # Config file only
+provider_option: log_level = 3                     # Final (direct API won)
+provider_option: cache_dir = /shared               # Final (from config)
+```
+
+---
+
+### Simplified Code
+
+```cpp
+// Future: pass_context_imp.cpp
+class PassContextImp {
+  ConfigProto config_;                              // Runtime-only (has provider_options from config file)
+  std::map<std::string, std::string> provider_option_origin_;  // User (direct API)
+
+  // Obsolete members REMOVED:
+  // std::map<std::string, std::string> provider_option_from_cache_;  // DELETED
+  // (target_proto_->provider_options() gone - Issue #009)
+
+  // Simplified method - two user sources only
+  get_all_provider_options() const {
+    auto ret = std::map<std::string, std::string>();
+    get_all_provider_option_impl(
+        ret,
+        &provider_option_origin_,      // User (direct API) - highest priority
+        &config_.provider_options()    // User (config file) - lower priority
+    );
+    return ret;
+  }
+};
+```
+
+### Benefits After Cleanup
+
+1. ✅ **No inconsistent state** - No swapping, no cached options to conflict with current
+2. ✅ **Clear user sources only** - Both sources are user-controlled (direct API + config file)
+3. ✅ **Simpler code** - 2 sources instead of 4
+4. ✅ **Standard priority pattern** - Direct API overrides config file (like CLI overrides config)
+5. ✅ **No pollution** - No automatic injection from MEP/Target
+6. ✅ **Well logged** - All sources printed separately (easy to debug)
+
+### Migration Path
+
+**Step 1:** Issue #003 - ConfigProto runtime-only
+- Eliminates: provider_option_from_cache_, context proto source
+- Eliminates: Swapping after cache load
+
+**Step 2:** Issue #008 - Remove MEP table
+- Eliminates: Model-specific option injection
+
+**Step 3:** Issue #009 - Remove TargetProto injection
+- Eliminates: Target-specific option injection
+
+**Step 4:** Issue #013 - Cleanup
+- Remove obsolete code (provider_option_from_cache_)
+- Simplify get_all_provider_options()
+- Update this documentation
+
+### Pragmatic Note
+
+We recognize that this is an imperfect world:
+- Can't categorize every option as "compilation" vs "runtime"
+- `get_provider_option()` is fundamental API used everywhere
+- MEP Table and TargetProto served real purposes in the past
+
+**The goal is simpler, not perfect:**
+- One source (user)
+- No swapping
+- No inconsistent state
+- Clear documentation
+
+---
+
+## Related Issues
+
+- **Issue #003:** Remove ConfigProto from ContextProto (make it runtime-only)
+- **Issue #008:** Remove MEP table injection
+- **Issue #009:** Remove TargetProto injection
+- **Issue #013:** Cleanup provider_options aggregation and swapping
+
+## References
+
+- `docs/project/issues/013-provider-options-aggregation.md` - Full problem analysis
+- `docs/technical/ep_shard_context.md` - EP context design (why can't recompile)
+- `docs/technical/provider-options-session-configs-mixing.md` - Related mixing problem

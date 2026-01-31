@@ -229,10 +229,6 @@ grep -r "xclbin_path_to_cache_files\|read_xclbin" morphizen-core/include/ --incl
 - Clear indication to remove the calls
 - No silent breakage
 
-## Plans
-
-_No plans needed - straightforward removal (delete functions, update docs)._
-
 ## Sessions
 
 ### 2026-01-30: Issue Created as Placeholder

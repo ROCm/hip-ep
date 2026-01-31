@@ -180,10 +180,6 @@ PassContextImp::open_file_for_write(const std::string& filename) {
 
 **Total: 3 days**
 
-## Plans
-
-_No plans yet._
-
 ## Sessions
 
 ### 2026-01-30: Root Cause Identified

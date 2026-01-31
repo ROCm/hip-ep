@@ -7,20 +7,22 @@ Licensed under the MIT License.
 ## Metadata
 - **Status:** BACKLOG
 - **Priority:** HIGH
-- **Type:** Architecture / Security / Refactoring
+- **Type:** Architecture / Refactoring
 - **Owner:** TBD
 - **Created:** 2026-01-30
+- **Updated:** 2026-01-31 (Removed encryption_key work - moved to #004)
+- **Dependencies:** Issues #004, #012 (ConfigProto must be clean before removal)
 - **Strategic Goal:** Immutable ConfigProto that is never persisted
 
 ## Description
 
-Remove `ConfigProto` from `ContextProto` entirely and make it a runtime-only member of `PassContextImp`. Also remove `encryption_key` field from ConfigProto - read it directly from provider_options when needed.
+Remove `ConfigProto` field from `ContextProto` entirely and make it a runtime-only member of `PassContextImp`.
 
 **Architectural Issue:** ConfigProto is INPUT (configuration), ContextProto should only contain OUTPUT (compilation results). Mixing input with output violates semantic clarity.
 
-**Security Issue:** Having encryption_key in ConfigProto creates risk of accidental leakage, even though it's never actually needed there - just read from provider_options when encrypting/decrypting.
+**Design Goal:** ConfigProto should be runtime-only, never persisted to EP context.
 
-**Design Goal:** ConfigProto should be immutable and never persisted to EP context.
+**Part of strategic objective:** This issue is a major architectural step toward achieving immutable ConfigProto across the codebase.
 
 ## Problem
 
@@ -48,76 +50,25 @@ message ContextProto {
      - provider_options: execution settings
    - **Mixing input with output violates single responsibility principle**
 
-2. **Security Risk: encryption_key Leakage**
-   - ConfigProto contains `encryption_key` (field 6)
-   - Currently protected by fragile pattern: `clear_encryption_key()` before serialization
-   - Requires remembering to clear it (pass_context_imp.cpp:709)
-   - Easy to forget in new serialization paths
-   - Proto dumps/debugging could leak key
-
-3. **Current Mitigation (Fragile):**
-   ```cpp
-   // pass_context_imp.cpp:706-740
-   void PassContextImp::save_context_json() const {
-     ContextProto proto;
-     proto.CopyFrom(this->context_proto);
-     proto.mutable_config()->clear_encryption_key();  // Must remember this!
-     // ... serialize entire ContextProto including config ...
-   }
-   ```
-
-4. **Violates User's Strategic Goal:**
+2. **Violates Strategic Goal:**
    - Goal: "Immutable ConfigProto which should not be persisted"
    - Current: ConfigProto IS in ContextProto which IS persisted
    - ConfigProto should be runtime-only input, never saved to EP context
 
-5. **Why ConfigProto Doesn't Belong in Persistent Context:**
+3. **Why ConfigProto Doesn't Belong in Persistent Context:**
    - EP context = compiled model state (for session reuse)
    - ConfigProto = how to compile (not part of the compiled result)
    - Persisting ConfigProto is like saving compiler flags in a .exe file
    - Session creation doesn't need original config, just the compiled MetaDefProto
 
+4. **Causes Mutation Problems:**
+   - ConfigProto persistence forces swapping (Issues #012, #013)
+   - Runtime input (session_configs, provider_options) must be restored after cache load
+   - These mutations exist only because ConfigProto is persisted
+
 ## Solution
 
-**Two-part refactoring:**
-1. Remove `encryption_key` from ConfigProto (read from provider_options instead)
-2. Remove `ConfigProto` from `ContextProto` (make it runtime-only)
-
-### Part 1: Remove encryption_key from ConfigProto
-
-**No RuntimeConfig structure needed** - encryption_key is already in provider_options, just read it directly when needed.
-
-**Remove from ConfigProto (config.proto):**
-```protobuf
-message ConfigProto {
-  repeated PassProto passes = 1;
-  string cache_dir = 2;
-  string cache_key = 3;
-  AllVersionInfoProto version = 4;
-  // REMOVED: string encryption_key = 6;
-  reserved 6;
-  reserved "encryption_key";
-  map<string, string> provider_options = 8;
-  // ...
-}
-```
-
-**Read directly from provider_options when needed:**
-```cpp
-// During encryption (morphizen_compile_model.cpp:444)
-auto encryption_key = context.get_provider_option("encryption_key", "");
-if (!encryption_key.empty()) {
-  encrypt_data(data, encryption_key);
-}
-
-// During decryption (morphizen_compile_model.cpp:899)
-auto encryption_key = context.get_provider_option("encryption_key", "");
-if (!encryption_key.empty()) {
-  decrypt_data(data, encryption_key);
-}
-```
-
-### Part 2: Remove ConfigProto from ContextProto
+Remove `ConfigProto` field from `ContextProto` and make it a runtime-only member of `PassContextImp`.
 
 **Remove from ContextProto (pass_context.proto):**
 ```protobuf
@@ -136,56 +87,47 @@ message ContextProto {
 ```cpp
 class PassContextImp : public PassContext {
   ContextProto context_proto;  // Persistent OUTPUT only (MetaDefProto, events, etc.)
-  ConfigProto config_;         // Runtime INPUT (never serialized, no encryption_key field)
+  ConfigProto config_;         // Runtime INPUT (never serialized)
 
   // Accessor
   const ConfigProto& get_config() const { return config_; }
-
-  // No encryption_key member - read from provider_options when needed
 };
 ```
 
-### Migration Path
+### Implementation Steps
 
-**Phase 1: Remove encryption_key from ConfigProto**
-1. Update encryption/decryption code to read from provider_options directly:
-   - `morphizen_compile_model.cpp:444` - encryption
-   - `morphizen_compile_model.cpp:899` - decryption
-2. Remove encryption_key field from config.proto (reserve field 6)
-3. Regenerate proto C++ code
-4. Remove clear_encryption_key() calls (no longer needed - field doesn't exist)
-
-**Phase 2: Move ConfigProto Out of ContextProto**
 1. Add config_ member to PassContextImp
-2. Update all `context_proto.config()` calls to `get_config()` or `config_`
-3. Update initialization to populate config_ (not context_proto.config)
-4. Remove config field from pass_context.proto (reserve field 3)
-5. Update save_context_json() - serializes ContextProto without config
+2. Find all access points to context_proto.config():
+   ```bash
+   grep -r "context_proto.*config()" morphizen-core/src/
+   grep -r "context_proto.*mutable_config()" morphizen-core/src/
+   ```
+3. Update each access point:
+   - Read access: `context_proto.config()` → `config_` or `get_config()`
+   - Write access: `context_proto.mutable_config()` → `config_`
+4. Update initialization logic to populate config_ directly
+5. Remove config field from pass_context.proto (reserve field 3)
+6. Regenerate proto C++ code
+7. Update save_context_json() to serialize ContextProto (now without config)
+8. Verify no compilation errors
 
 **Result:**
 - ContextProto only contains compilation results (immutable output)
-- ConfigProto is runtime-only input (never persisted, no encryption_key field)
-- encryption_key read from provider_options when needed (used only twice)
-- Impossible to accidentally serialize config or encryption_key
+- ConfigProto is runtime-only input (never persisted)
+- Impossible to accidentally serialize ConfigProto
 
 ## Benefits
 
 **Architecture:**
 - ✅ **Clear Semantic Separation**: Input (ConfigProto) vs Output (ContextProto)
-- ✅ **Achieves Strategic Goal**: Immutable ConfigProto that is never persisted
+- ✅ **Advances Strategic Goal**: Major step toward immutable ConfigProto
 - ✅ **Single Responsibility**: ContextProto only contains compilation results
 - ✅ **Self-Documenting**: Structure clearly shows what gets persisted vs runtime-only
 
-**Security:**
-- ✅ **Impossible to leak encryption_key**: Not in any persistable proto
-- ✅ **Impossible to leak ConfigProto**: Not in ContextProto
-- ✅ **No fragile clear() calls needed**: Can't serialize what doesn't exist
-- ✅ **Proto dumps/logs automatically safe**: No secrets in persistable structures
-
 **Design Quality:**
-- ✅ **Fail-Safe**: New serialization paths can't leak config or secrets
+- ✅ **Fail-Safe**: New serialization paths can't leak ConfigProto
 - ✅ **Less Cognitive Load**: Don't need to track what to clear before save
-- ✅ **Future-Proof**: Runtime-only data has clear home (config_, runtime_config_)
+- ✅ **Future-Proof**: Runtime-only data has clear home (config_)
 - ✅ **Easier Testing**: Can verify ContextProto never contains config in unit tests
 
 **Maintainability:**
@@ -193,47 +135,38 @@ class PassContextImp : public PassContext {
 - ✅ **Prevents Mistakes**: Can't accidentally include config in EP context
 - ✅ **Cleaner Code**: No more clearing fields before serialization
 
+**Enables Other Improvements:**
+- ✅ **Eliminates Swapping**: Issues #012, #013 resolved (no cache persistence of config)
+- ✅ **Clean Foundation**: ConfigProto mutations (#004, #012, #014, #015) easier to address
+
 ## Acceptance Criteria
 
-**Part 1: Remove encryption_key from ConfigProto**
-- [ ] Encryption code reads from provider_options (morphizen_compile_model.cpp:444)
-- [ ] Decryption code reads from provider_options (morphizen_compile_model.cpp:899)
-- [ ] encryption_key removed from config.proto (field 6 reserved)
-- [ ] Proto regenerated, code compiles
-- [ ] clear_encryption_key() calls removed (lines 709, 142, 244)
-- [ ] No regressions in encryption/decryption functionality
+**Prerequisites (must complete first):**
+- [ ] Issue #004 completed (encryption_key removed from ConfigProto)
+- [ ] Issue #012 completed (session_configs removed from ConfigProto)
+- [ ] ConfigProto is clean (no fields that need swapping or special handling)
 
-**Part 2: ConfigProto Out of ContextProto**
-- [ ] PassContextImp has config_ member (ConfigProto, no encryption_key field)
+**Implementation:**
+- [ ] PassContextImp has config_ member (ConfigProto)
 - [ ] All config access updated to use config_ instead of context_proto.config()
 - [ ] config field removed from pass_context.proto (field 3 reserved)
 - [ ] save_context_json() serializes ContextProto without config
 - [ ] Proto regenerated, code compiles
 
-**Verification**
-- [ ] Unit tests verify encryption_key never serialized
+**Verification:**
 - [ ] Unit tests verify ConfigProto never in serialized ContextProto
 - [ ] All existing tests pass (no regressions)
-- [ ] EP context save/load works correctly with encryption
+- [ ] EP context save/load works correctly
+- [ ] Cache load no longer requires swapping (Issues #012, #013 resolved)
 
 ## Implementation Plan
 
-### Phase 1: Remove encryption_key from ConfigProto (1 day)
+### Prerequisites
+- Complete Issues #004, #012 (remove encryption_key, session_configs from ConfigProto)
+- ConfigProto is clean and ready for architectural change
 
-1. Update encryption code to read from provider_options:
-   - `morphizen_compile_model.cpp:444` - change to `context.get_provider_option("encryption_key", "")`
-   - `morphizen_compile_model.cpp:899` - change to `context.get_provider_option("encryption_key", "")`
-2. Remove encryption_key from config.proto (reserve field 6)
-3. Regenerate proto C++ code
-4. Remove clear_encryption_key() calls:
-   - `pass_context_imp.cpp:709` - in save_context_json()
-   - `pass_context_imp.cpp:142` - if exists
-   - `pass_context_imp.cpp:244` - if exists
-5. Test: encryption/decryption still works
+### Phase 1: Code Migration (1 day)
 
-### Phase 2: Move ConfigProto Out of ContextProto (2 days)
-
-**Day 1: Code Migration**
 1. Add config_ member to PassContextImp
 2. Find all access points to context_proto.config():
    ```bash
@@ -245,19 +178,18 @@ class PassContextImp : public PassContext {
    - Write access: `context_proto.mutable_config()` → `config_`
 4. Update initialization logic to populate config_ directly
 
-**Day 2: Proto Changes**
+### Phase 2: Proto Changes (1 day)
+
 1. Remove config field from pass_context.proto (reserve field 3)
 2. Regenerate proto C++ code
 3. Update save_context_json() to serialize ContextProto (now without config)
-4. Remove clear_encryption_key() calls (lines 709, 142, 244)
-5. Verify no compilation errors
+4. Verify no compilation errors
 
 ### Phase 3: Testing & Validation (1 day)
 
 1. **Unit tests:**
-   - Verify encryption_key never appears in serialized ContextProto
    - Verify ConfigProto never appears in serialized ContextProto
-   - Test encryption/decryption with runtime_config_
+   - Verify swapping no longer occurs (Issues #012, #013 resolved)
 
 2. **Integration tests:**
    - Test EP context save (embed mode and non-embed mode)
@@ -266,18 +198,13 @@ class PassContextImp : public PassContext {
 
 3. **Regression tests:**
    - All existing unit tests pass
-   - Encrypted EP context models work correctly
    - Cache files work correctly
 
 4. **Verification:**
-   - Inspect saved context.json - should NOT contain config or encryption_key
+   - Inspect saved context.json - should NOT contain config
    - Verify ContextProto only contains: meta_def, origin_nodes, events, cache_files
 
-**Total Estimate: 4 days**
-
-## Plans
-
-_No plans yet._
+**Total Estimate: 3 days**
 
 ## Sessions
 
@@ -299,57 +226,49 @@ _No plans yet._
 - Mixing input with output violates semantic clarity
 
 **Final scope:**
-1. Move encryption_key to RuntimeConfig (security)
-2. Remove ConfigProto from ContextProto entirely (architecture)
-3. Make ConfigProto runtime-only member of PassContextImp
+1. Remove ConfigProto from ContextProto entirely (architecture)
+2. Make ConfigProto runtime-only member of PassContextImp
 
 **Recommendation agreed:** Remove ConfigProto from ContextProto completely (fail-safe design) rather than just excluding during serialization (fragile pattern).
 
-### 2026-01-30: Simplified - No RuntimeConfig Needed
+### 2026-01-31: Scope Clarified - Focus Only on ContextProto Removal
 
-**While discussing Issue #004:**
+**Strategic clarification:**
+- Issue #003 is ONE step toward final goal: Immutable ConfigProto
+- #003 should focus ONLY on removing ConfigProto from ContextProto
+- Other mutations (encryption_key, session_configs) addressed in separate issues
 
-**User question:** "do you think we need to create member variable for encryption key in PassContextImp?"
+**Updated scope:**
+- Remove ConfigProto field from pass_context.proto
+- Make ConfigProto runtime-only member of PassContextImp
+- Prerequisites: Issues #004, #012 (clean ConfigProto first)
 
-**Analysis:**
-- encryption_key is already in provider_options (source of truth)
-- Used only twice: encryption (line 444) and decryption (line 899)
-- Not performance-critical
-- No need to cache or duplicate
-
-**Decision: No RuntimeConfig structure needed**
-- Just remove encryption_key from ConfigProto proto (reserve field 6)
-- Read directly from provider_options when needed
-- Simpler solution, less code, no new structure
-
-**User confirmed:** "yes, it is correct. come back to your question. do you think we can totally remove the `std::string encryption_key;`"
-
-**Answer:** YES - totally remove encryption_key field from ConfigProto proto.
-
-**Updated approach:**
-- Issue #003: Remove encryption_key from proto + remove ConfigProto from ContextProto
-- Issue #004: Remove copying logic + update usage to read from provider_options
-- No RuntimeConfig, no member variable, just read when needed
-
-## Related PRs
-
-_None yet._
+**Dependency order:**
+1. Clean provider_options (#008, #009)
+2. Clean ConfigProto fields (#004, #012)
+3. Architectural change (#003) ← THIS ISSUE
 
 ## Notes
 
-### Part of Larger Refactoring Goal
+### Part of Strategic Goal: Immutable ConfigProto
 
-**User's Strategic Vision:** Immutable ConfigProto that is never persisted
-- ConfigProto is INPUT - should be runtime-only, never saved
+**This issue is a major architectural step** toward the overarching strategic goal of achieving immutable ConfigProto across the codebase.
+
+**Strategic Vision:**
+- ConfigProto is INPUT - should be runtime-only, never persisted
 - ContextProto is OUTPUT - should only contain compilation results
 - Clear separation makes serialization inherently safe
-- Prevents accidental leakage of configuration or secrets
+- ConfigProto created once, never mutated after construction
 
-**This Issue: Complete Implementation**
-- Remove encryption_key from ConfigProto proto (read from provider_options instead)
-- Move ConfigProto out of ContextProto (make it runtime-only member)
-- ContextProto becomes pure output container (MetaDefProto, events, etc.)
-- Achieves the full strategic goal with simplest approach (no RuntimeConfig needed)
+**This Issue's Role:**
+- Remove ConfigProto field from ContextProto (make it runtime-only)
+- Eliminates accidental persistence of configuration
+- Enables other improvements (eliminates swapping in #012, #013)
+
+**Related Issues Toward Immutability:**
+- **Prerequisites:** #004 (remove encryption_key), #012 (remove session_configs)
+- **Enabled by this:** #012, #013 (swapping eliminated), #005 (cache_key to ContextProto)
+- **Other mutations:** #007 (target), #014 (pass registration), #015 (version info)
 
 ### What Should ContextProto Contain?
 
@@ -421,3 +340,13 @@ message ContextProto {
 - Breaking change for existing serialized EP contexts (acceptable for this refactoring)
 
 **Migration note:** Existing saved EP context models (context.json) will need regeneration after this change, as the wire format for ContextProto changes.
+
+### Related ConfigProto Mutation Issues
+
+**Mutations resolved by this issue:**
+- Issue #012: session_configs swapping (eliminated when ConfigProto not persisted)
+- Issue #013: provider_options swapping (eliminated when ConfigProto not persisted)
+
+**Mutations requiring separate fixes:**
+- Issue #014: Dynamic pass registration (design flaw needing architectural redesign)
+- Issue #015: Configuration initialization (version info belongs in ContextProto)

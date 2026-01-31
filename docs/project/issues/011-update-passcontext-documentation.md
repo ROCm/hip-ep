@@ -135,10 +135,6 @@ This is documentation-only cleanup:
 - No behavior changes
 - Safe documentation update
 
-## Plans
-
-_No plans needed - simple documentation update._
-
 ## Sessions
 
 ### 2026-01-30: Issue Created After PassContext API Evaluation
@@ -194,14 +190,6 @@ The ASCII art shows:
 **Decision:** Remove or update ASCII art to reflect current implementation.
 
 **Recommendation:** Remove ASCII art entirely (Option A) - simpler and less maintenance.
-
-## Related PRs
-
-_None yet._
-
-## Related Branches
-
-_None yet._
 
 ## Notes
 
