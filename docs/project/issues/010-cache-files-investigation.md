@@ -193,10 +193,6 @@ message ContextProto {
 - Old binaries reading new proto: Field is missing, ignored safely
 - New binaries reading old proto: Field is present but ignored (not read)
 
-## Plans
-
-_No plans yet - investigation needed first._
-
 ## Sessions
 
 ### 2026-01-30: Issue Created as Placeholder
@@ -322,14 +318,6 @@ cache_files is **DEAD CODE**:
 - tar_file_ system is the actual implementation, cache_files is vestigial
 - No breaking changes (proto field never read, function is no-op)
 - Cleaner codebase, less confusion
-
-## Related PRs
-
-_None yet._
-
-## Related Branches
-
-_None yet._
 
 ## Notes
 

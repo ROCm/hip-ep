@@ -12,6 +12,7 @@ Licensed under the MIT License.
 - **Created:** 2026-01-30
 - **Updated:** 2026-01-30 (Solution designed after deep discussion)
 - **Dependencies:** Coordinated with Issue #003 (ConfigProto immutability)
+- **Strategic Goal:** Immutable ConfigProto
 
 ## Description
 
@@ -272,10 +273,6 @@ Add sections:
 - ✅ No ownership management (raw pointer simpler than unique_ptr)
 - ✅ Documentation matches implementation
 
-## Plans
-
-_No plans yet - solution to be designed later._
-
 ## Sessions
 
 ### 2026-01-30: Issue Identified
@@ -366,17 +363,14 @@ _No plans yet - solution to be designed later._
 4. target_proto_ as raw pointer (no ownership)
 5. Update documentation as part of this issue
 
-## Related PRs
-
-_None yet._
-
 ## Notes
 
 ### Current Code Locations
 
 **Copying logic (to be removed):**
 - `pass_context_imp.cpp:1251-1276` - update_config_proto_root_field() function
-- `pass_context_imp.cpp:1273-1275` - target copying
+- `pass_context_imp.cpp:1273-1275` - target copying from provider_options into ConfigProto
+- `config.cpp:143` - TargetProto copying into target_proto_ member (`*target_proto_in_pass_context = *target_proto;`)
 
 **target_proto_ member:**
 - `pass_context_imp.hpp:385` - Currently `unique_ptr<TargetProto>`, change to `const TargetProto*`

@@ -160,14 +160,6 @@ Currently, mmap is only available in non-embed mode where tar files are persiste
 2. Measure read latency: mmap vs FileStream for various tar sizes
 3. Measure session creation time with mmap enabled
 
-## Plans
-
-_No plans yet._
-
-## Sessions
-
-_No sessions yet._
-
 ## Sub-tasks
 
 - [ ] Research HANDLE lifetime management when extracted from FILE*
@@ -179,14 +171,6 @@ _No sessions yet._
 - [ ] Write unit tests for embed mode mmap
 - [ ] Measure memory consumption before/after
 - [ ] Update documentation
-
-## Related PRs
-
-_None yet._
-
-## Related Branches
-
-_None yet._
 
 ## Notes
 

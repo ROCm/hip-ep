@@ -182,10 +182,6 @@ static std::string get_nodes(PassContextImp& context) {
 - [ ] ~200-300 lines of dead code removed
 - [ ] Documentation updated
 
-## Plans
-
-_No plans yet - solution to be designed later._
-
 ## Sessions
 
 ### 2026-01-30: Initial Creation
@@ -223,10 +219,6 @@ _No plans yet - solution to be designed later._
 ## Related Issues
 
 - **Issue #001:** Add mmap Support for Embed Mode - discusses EP context unified cache format
-
-## Related PRs
-
-_None yet._
 
 ## Notes
 

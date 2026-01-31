@@ -35,6 +35,150 @@ git show <commit-hash>:docs/project/issues/NNN-name.md
 
 ---
 
+## Issue Granularity Philosophy
+
+**Why split complex tasks into smaller issues?**
+
+Complex tasks should be decomposed into focused, actionable issues. This approach:
+
+- ✅ **Reduces cognitive load** - Each issue has clear, bounded scope
+- ✅ **Enables efficient implementation** - Complete in one or few sessions
+- ✅ **Facilitates better discussions** - Focus on one design problem at a time
+- ✅ **Manages risk** - Small changes, easier to review and rollback
+- ✅ **Clarifies dependencies** - Real dependencies emerge as you work through issues
+- ✅ **Shows progress** - Check off issues one by one
+- ✅ **Enables collaboration** - Other developers can pick up specific issues
+- ✅ **Works better with AI assistants** - Claude Code can focus deeply on one problem
+
+**When to create a new issue:**
+- Problem is complex and has multiple sub-problems
+- Solution requires multiple design decisions
+- Different parts can be implemented independently
+- Implementation would take multiple sessions
+
+**When to expand existing issue:**
+- Direct extension of existing scope
+- Same root cause, same solution approach
+- Cannot be separated without losing context
+
+**Example decomposition:**
+- ❌ BAD: One issue "Fix ConfigProto Mutability" (too broad)
+- ✅ GOOD: Issues #003-#015 each addressing specific mutation categories
+
+**This granularity makes working with Claude Code more effective:**
+- Claude can create focused plans for each issue
+- Less chance of missing edge cases in large plans
+- Implementation steps are manageable
+- You maintain control of overall architecture
+
+---
+
+## Issue Quality Best Practices
+
+**Keep issues lean and meaningful - avoid "empty talking".**
+
+### ✅ DO: Write High-Quality Issues
+
+**1. Only include sections with actual content:**
+- ❌ Don't add "Plans: _No plans yet_"
+- ❌ Don't add "Sessions: _To be filled in_"
+- ❌ Don't add "Related PRs: _None yet_"
+- ✅ Add Plans/Sessions/PRs sections ONLY when they have real content
+
+**2. Make Notes section add value:**
+- ❌ "Part of ConfigProto mutation analysis" (obvious from title)
+- ❌ "This is a design flaw" (already stated in Description)
+- ✅ Explain root cause, relationships to other issues, or design trade-offs
+- ✅ Provide context NOT already in Description/Problem/Solution
+
+**3. Write specific, concrete content:**
+- ❌ Vague: "This needs to be fixed"
+- ✅ Specific: "Swapping exists because ConfigProto is INPUT but persisted in ContextProto (OUTPUT)"
+- ❌ Generic: "Should be discussed"
+- ✅ Actionable: "Three possible solutions: (1) X, (2) Y, (3) Z"
+
+**4. Use Evidence section effectively:**
+- ✅ List exact code locations: `file.cpp:123 - What happens here`
+- ✅ Helps reviewers verify the problem exists
+- ✅ Makes implementation easier to scope
+
+### ❌ DON'T: Add Noise
+
+**Empty placeholders waste space:**
+```markdown
+## Plans
+_No plans yet._
+
+## Sessions
+_To be filled in during implementation discussions._
+
+## Related PRs
+_None yet._
+```
+**Just delete these sections!** Add them later when you have content.
+
+**Obvious statements waste time:**
+```markdown
+## Notes
+This is part of the cache cleanup effort.
+```
+If the issue title says "cache cleanup", don't repeat it in Notes.
+
+### Template Usage
+
+**When creating a new issue from TEMPLATE.md:**
+
+1. **Copy the template** to `NNN-name.md`
+2. **Fill in required sections:** Metadata, Description, Problem, Solution, Evidence
+3. **Delete optional sections** that you don't have content for yet:
+   - If no plans exist, delete Plans section
+   - If no sessions yet, delete Sessions section
+   - If no PRs yet, delete Related PRs section
+   - If Notes would just repeat Description, delete Notes section
+4. **Add optional sections later** when you have meaningful content
+
+**Result:** Clean, focused issues with only valuable information.
+
+### Examples
+
+**Bad Issue (empty talking):**
+```markdown
+## Description
+Need to fix the cache system.
+
+## Plans
+_No plans yet._
+
+## Sessions
+_To be filled in._
+
+## Notes
+Part of cache cleanup.
+```
+
+**Good Issue (meaningful content):**
+```markdown
+## Description
+Remove cache_dir entirely - obsolete disk-based cache system (~200-300 LOC).
+
+## Problem
+cache_dir was designed for disk-based caching, but new tar_file_ system
+makes it obsolete. All cache operations now use tar_file_ directly.
+
+## Solution
+Remove all cache_dir code: get_log_dir(), cache_dir proto field, copying logic.
+
+## Evidence
+- cache_dir.cpp:67 - cache_dir computation (to be removed)
+- pass_context_imp.cpp:1266 - cache_dir copying (to be removed)
+
+## Notes
+After removal, xclbin functions (Issue #009) will break - they call get_log_dir().
+Coordinate removal or do #009 first.
+```
+
+---
+
 ## Active Issues
 
 _(Issues currently being worked on - link to detailed files)_
@@ -75,6 +219,15 @@ _(Lower priority, not scheduled - link to detailed files)_
 - [Issue #009: TargetProto Provider Options Injection Cleanup](issues/009-targetproto-provider-options-injection-cleanup.md) - Remove xclbin API functions (dead code, NPU-specific)
 - [Issue #010: Remove cache_files - Dead Code](issues/010-cache-files-investigation.md) - Remove cache_files proto field and restore_cache_files() (dead code, never read)
 - [Issue #011: Update PassContext Header Documentation](issues/011-update-passcontext-documentation.md) - Remove outdated ASCII art diagram (references non-existent cache_files_to_dir and dir_to_cache_files)
+- [Issue #012: session_configs Swapping](issues/012-session-configs-swapping.md) - Resolved by #003 (ConfigProto runtime-only)
+- [Issue #013: provider_options Aggregation](issues/013-provider-options-aggregation.md) - Related to #003, #008, #009
+- [Issue #014: Dynamic Pass Registration](issues/014-dynamic-pass-registration.md) - Design flaw needing architectural redesign
+- [Issue #015: Configuration Initialization](issues/015-configuration-initialization.md) - Move version info to ContextProto
+- [Issue #016: Remove dirty_hack_for_model_clone_external_data_threshold](issues/016-model-clone-threshold-hack.md) - Eliminate global state mutation for model clone threshold
+- [Issue #017: Remove update_config_by_target()](issues/017-remove-update-config-by-target.md) - Remove obsolete function after #007 and #014 complete
+- [Issue #018: Make ConfigProto const Member](issues/018-make-configproto-const.md) - Enforce immutability at compile-time (final step after all mutations eliminated)
+- [Issue #019: Refactor initialize_context()](issues/019-refactor-initialize-context.md) - God function cleanup - extract cache_key computation, reduce complexity
+- [Issue #020: Remove suffix_counter Dead Code](issues/020-remove-suffix-counter-dead-code.md) - Remove dead code reading metadata that's never written (4 lines)
 
 ---
 
@@ -122,8 +275,17 @@ When asked to complete an issue, Claude will automatically:
 When creating new issues, Claude will:
 1. Determine next issue number
 2. Copy TEMPLATE.md to new numbered file
-3. Fill in metadata and description
-4. Add link to backlog.md
+3. Fill in all required sections: Metadata, Description, Problem, Solution, Evidence
+4. **Delete empty optional sections** (Plans/Sessions/PRs if no content yet)
+5. Only include Notes section if it adds value beyond Description/Problem
+6. Add link to backlog.md
+
+**Quality checklist for new issues:**
+- ✅ Concrete problem statement with code evidence
+- ✅ Clear solution with benefits and approach
+- ✅ No "No plans yet" or "To be filled in" placeholders
+- ✅ Notes add context not found elsewhere, or section deleted
+- ✅ Only meaningful content, no empty talking
 
 ---
 
@@ -165,3 +327,4 @@ This backlog system provides:
 - ✅ Complements existing git/PR workflows
 - ✅ Human and Claude can both maintain it
 - ✅ Clean starting point (templates, no pre-filled content)
+- ✅ High quality standards (no empty talking, only meaningful content)

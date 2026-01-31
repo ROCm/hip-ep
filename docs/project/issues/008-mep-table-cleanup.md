@@ -232,10 +232,6 @@ MEP table feature has been removed entirely. See Issue #008.
 
 **This is a reversible decision** - removing now doesn't prevent adding back later with more information.
 
-## Plans
-
-_No plans needed - straightforward cleanup (verify removal, update docs)._
-
 ## Sessions
 
 ### 2026-01-30: Issue Created as Placeholder
