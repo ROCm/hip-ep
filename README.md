@@ -131,8 +131,8 @@ cmake --build ../build/onnxruntime/Release/ --target install
 
 # 2. Build onnx-hipdnn-ep (LLVM/MLIR and MorphiZen will be auto-fetched)
 cd ../onnx-hipdnn-ep
-cmake -A x64 -DBUILD_SHARED_LIBS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -S . -B ../build/onnx-hipdnn-ep -DCMAKE_INSTALL_PREFIX=../local -DCMAKE_PREFIX_PATH=$PWD/../local
-cmake --build ../build/onnx-hipdnn-ep --config Release --parallel
+cmake -DBUILD_SHARED_LIBS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -S . -B ../build/onnx-hipdnn-ep -DCMAKE_INSTALL_PREFIX=../local -DCMAKE_PREFIX_PATH=$PWD/../local
+cmake --build ../build/onnx-hipdnn-ep --config Release
 ```
 
 ### Optional: Pre-build LLVM/MLIR
@@ -196,7 +196,7 @@ cd ..\..\build\onnx-hipdnn-ep\bin\Release\
 or
 cd ../../build/onnx-hipdnn-ep/bin/Release/
 
-ort_integration_test.exe
+./ort_integration_test.exe
 ```
 
 For comprehensive information including:
