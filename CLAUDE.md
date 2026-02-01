@@ -79,6 +79,13 @@ cmd /c "call \"\"C:\\msvsn2022\\VC\\Auxiliary\\Build\\vcvars64.bat\"\" && cd /d 
 4. Push: `git push fork <branch>`
 5. PR: `gh pr create --draft` (IMMEDIATELY after first push, auto-create if no PR exists)
 
+**CRITICAL - Before Marking PR Ready**:
+Before marking PR ready for review, MUST run pre-commit to fix formatting issues:
+```bash
+pre-commit run --all-files
+```
+If pre-commit makes changes (formatting, linting), commit and push them BEFORE marking PR ready. This prevents CI pre-commit check failures.
+
 **PR Operations** (fork-based workflow):
 - ❌ `gh pr view` (fails - branch not in origin)
 - ✅ `gh pr view <number>` (most reliable)
@@ -112,6 +119,27 @@ cmd /c "call \"\"C:\\msvsn2022\\VC\\Auxiliary\\Build\\vcvars64.bat\"\" && cd /d 
 ## Docs
 
 `docs/architecture.md`, `docs/developer-guide.md`, `docs/workflows/git-workflow.md`, `docs/workflows/build-workflow.md`, `docs/workflows/pr-workflow.md`, `ort-bridge/doc/ORT-BRIDGE-DESIGN.md`
+
+## Project Backlog
+
+**CRITICAL**: When completing an issue, MUST update backlog BEFORE marking PR ready.
+
+**Timing:**
+- Update backlog AFTER implementation done (code complete, tests pass)
+- Update backlog BEFORE marking PR ready for review
+- DO NOT update when starting work (issue file needed during implementation)
+- DO NOT update when CI passes (only when implementation done)
+
+**Steps (on feature branch):**
+1. Edit backlog.md - move issue to "Recently Completed" with PR number
+2. Delete issue file: `git rm docs/project/issues/042-*.md`
+3. Commit: `git commit -m "docs: complete issue #042"`
+4. Push to fork
+5. Mark PR ready for review
+
+This ensures single-PR workflow (code + backlog updates together).
+
+See `docs/project/backlog.md` and `docs/project/CONTRIBUTING.md`.
 
 ## Dependencies
 
