@@ -41,6 +41,7 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 - [Issue #018: Make ConfigProto const Member](issues/018-make-configproto-const.md) - Enforce immutability at compile-time
 - [Issue #019: Refactor initialize_context()](issues/019-refactor-initialize-context.md) - God function cleanup
 - [Issue #020: Remove suffix_counter Dead Code](issues/020-remove-suffix-counter-dead-code.md) - Remove dead code
+- [Issue #021: Remove cache_file_use_cache_key_prefix_](issues/021-clean-up-cache-file-use-cache-key-prefix.md) - Always use prefix, remove flag
 
 ---
 
