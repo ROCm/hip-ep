@@ -136,6 +136,8 @@ if rc == 0 and pr_json:
         prs = json.loads(pr_json)
         if prs and len(prs) > 0:
             pr_json = json.dumps(prs[0])
+        else:
+            pr_json = None
     except json.JSONDecodeError:
         pr_json = None
 
