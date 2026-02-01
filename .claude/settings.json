@@ -29,7 +29,7 @@
           {
             "type": "command",
             "command": "python .claude/hooks/pre-bash.py",
-            "timeout": 5
+            "timeout": 60
           }
         ]
       }
