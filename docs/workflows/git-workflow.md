@@ -75,12 +75,18 @@ Licensed under the MIT License.
 - [ ] Stage specific files: `git add <file>` (avoid `git add -A`)
 - [ ] Verify no binaries: `git diff --cached --numstat`
 - [ ] Commit with convention: `feat:`, `fix:`, `docs:`, etc.
-- [ ] Push to fork: `git push fork <branch>`
+- [ ] **First push**: `git push -u fork <branch>` (sets upstream tracking)
+- [ ] **Subsequent pushes**: `git push fork <branch>`
 - [ ] **Create DRAFT PR immediately**: `gh pr create --draft`
   - Makes work visible to team early
   - Allows early feedback and discussion
   - Shows progress and intent
 - [ ] Continue working, commit and push frequently (small, incremental commits preferred)
+
+**Why `-u` flag on first push?**
+- Configures upstream tracking branch (shows commits ahead/behind in status)
+- Enables `git pull` without specifying remote/branch
+- Prevents "⚠️ Commits: no remote tracking" warnings
 
 **After completion:**
 - [ ] Mark PR as ready for review

@@ -23,6 +23,19 @@ def get_current_branch():
         return "<branch>"
 
 
+def has_upstream_tracking():
+    """Check if current branch has upstream tracking configured."""
+    try:
+        subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "@{upstream}"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+
 def main():
     try:
         # Read the tool input JSON from stdin
@@ -38,14 +51,20 @@ def main():
                 response = {
                     "hookSpecificOutput": {
                         "hookEventName": "PostToolUse",
-                        "additionalContext": "⚠️ WARNING: You committed on 'main' branch!\n\nThis violates the git workflow. You should:\n1. Undo this commit: git reset --soft HEAD~1\n2. Create feature branch: git checkout -b feature/<name>\n3. Re-commit: git commit -m \"...\"\n4. Push: git push fork feature/<name>\n\nSee docs/workflows/git-workflow.md",
+                        "additionalContext": "⚠️ WARNING: You committed on 'main' branch!\n\nThis violates the git workflow. You should:\n1. Undo this commit: git reset --soft HEAD~1\n2. Create feature branch: git checkout -b feature/<name>\n3. Re-commit: git commit -m \"...\"\n4. Push: git push -u fork feature/<name>\n\nSee docs/workflows/git-workflow.md",
                     }
                 }
             else:
+                # Check if upstream tracking is configured
+                if has_upstream_tracking():
+                    push_cmd = f"git push fork {branch}"
+                else:
+                    push_cmd = f"git push -u fork {branch}"
+
                 response = {
                     "hookSpecificOutput": {
                         "hookEventName": "PostToolUse",
-                        "additionalContext": f"PUSH REMINDER: Commit completed. Now push to fork:\ngit push fork {branch}",
+                        "additionalContext": f"PUSH REMINDER: Commit completed. Now push to fork:\n{push_cmd}",
                     }
                 }
 
