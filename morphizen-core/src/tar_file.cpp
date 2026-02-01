@@ -62,12 +62,27 @@ std::unique_ptr<TarFile> TarFile::create() {
 #else
   auto file = std::tmpfile();
 #endif
-  CHECK(file != nullptr) << "cannot create a tmpfile";
-  auto stream = std::unique_ptr<std::iostream>(new FileStream(file));
-  if (!stream->good()) {
-    MY_LOG(1) << "Failed to create a temporary file for TarFile";
+
+  std::unique_ptr<std::iostream> stream;
+
+  if (file) {
+    // Success: Use tmpfile (disk-backed, lower memory usage)
+    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+        << "create a tar file from temp file";
+    stream = std::make_unique<FileStream>(file);
+  } else {
+    // Fallback: Use stringstream for sandbox/restricted environments
+    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+        << "tmpfile() failed, using in-memory stringstream";
+    stream = std::make_unique<std::stringstream>(std::ios::binary |
+                                                 std::ios::in | std::ios::out);
+  }
+
+  if (!stream || !stream->good()) {
+    MY_LOG(1) << "Failed to create stream for TarFile";
     return nullptr;
   }
+
   return create(std::move(stream));
 }
 std::unique_ptr<TarFile> TarFile::create(std::vector<char>&& buffer) {

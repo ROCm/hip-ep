@@ -84,36 +84,6 @@ private:
   std::string name_;
   std::unique_ptr<std::ostream> stream_;
 };
-using MemoryFile = std::stringstream;
-class MemoryFileReaderImp : public CacheFileReader {
-public:
-  MemoryFileReaderImp(const std::string& filename, MemoryFile* fp);
-  virtual ~MemoryFileReaderImp();
-
-private:
-  size_t size() const override final;
-  void rewind() const override final;
-  virtual std::size_t fread(void* buffer,
-                            std::size_t size) const override final;
-
-private:
-  const std::string name_;
-  size_t size_ = 0;
-  MemoryFile* fp_;
-};
-class MemoryFileWriterImp : public CacheFileWriter {
-public:
-  MemoryFileWriterImp(const std::string& fileanme, MemoryFile* fp);
-  virtual ~MemoryFileWriterImp();
-
-private:
-  virtual std::size_t fwrite(const void* buffer,
-                             std::size_t size) const override final;
-
-private:
-  const std::string name_;
-  MemoryFile* fp_;
-};
 
 // iostream adapters for CacheFile
 
@@ -355,7 +325,6 @@ public:
   virtual void disable_delete_tar_file_in_session_created() override final;
 
 private:
-  std::map<std::string, std::unique_ptr<MemoryFile>> mem_files_;
   std::function<std::optional<std::string>(std::string)> get_run_options_;
   std::shared_mutex rw_mutex_;
   friend int morphizen_ep_on_run_start(
