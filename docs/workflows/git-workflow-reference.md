@@ -105,7 +105,7 @@ pre-commit install
 lintrunner init
 ```
 
-For more details, see [pre-commit.md](../technical/pre-commit.md).
+For more details, see the [Pre-commit Hook Behavior](#pre-commit-hook-behavior) section below.
 
 ### Pre-flight Checks
 
@@ -332,6 +332,19 @@ If PR already exists:
 - Request review if ready: `gh pr ready`
 
 ### Pre-commit Hook Behavior
+
+#### Installation (One-time Setup)
+
+Install dependencies and initialize:
+```bash
+python -m pip install -r requirements-lintrunner.txt
+pre-commit install
+lintrunner init
+```
+
+See https://pre-commit.com/#repository-local-hooks for more details.
+
+#### Hook Behavior
 
 When you run `git commit`, pre-commit hooks run automatically and may:
 - Fix trailing whitespace and line endings

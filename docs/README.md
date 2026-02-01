@@ -21,14 +21,13 @@ Welcome to the MorphiZen documentation! This guide will help you navigate the av
 
 ### Technical Deep-Dives
 - **[Temporary File Handling](technical/tmpfile-posix-delete.md)** - POSIX file deletion patterns
-- **[EP Shared Context](technical/ep-context-internal-design.md)** - Execution provider context management
-- **[EP Shared Context Details](technical/ep_shard_context.md)** - Additional context implementation details
+- **[EP Context](technical/ep-context.md)** - Execution provider context generation, deployment, and internal design
 - **[glog Integration](technical/glog-integration.md)** - Logging framework integration
 - **[ORT ETW Tracing](technical/enable-ort-etw-trace-and-logs.md)** - Event tracing and logging
 - **[Cleanup Provider Options](technical/cleanup-provider-options.md)** - Provider cleanup patterns
 - **[Excluded Packages](technical/excluded-packages.md)** - Package exclusion documentation
 - **[Target Auto Discovery](technical/target-auto-discovery.md)** - CMake target discovery
-- **[Pre-commit Setup](technical/pre-commit.md)** - Code quality hooks and linters
+- **[Pre-commit Setup](workflows/git-workflow-reference.md#pre-commit-hook-behavior)** - Code quality hooks and linters
 
 ### Workflows
 - **[Project Backlog](project/backlog.md)** - Issue tracking and roadmap
