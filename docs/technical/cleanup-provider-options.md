@@ -49,7 +49,7 @@ BUT we swap in NEW provider_options after loading cache
 ```c++
 auto session_options = Ort::SessionOptions();
 auto provider_options = std::unordered_map<std::string, std::string>{{"cache_key", "a-sample-cache-key"}};
-session_options.AppendExecutionProvider_VitisAI(options);
+session_options.AppendExecutionProvider_MorphiZen(options);
 ```
 
 it is saved, and now it is supported by PR #209
@@ -59,7 +59,7 @@ it is saved, and now it is supported by PR #209
 ```c++
 auto session_options = Ort::SessionOptions();
 auto provider_options = std::unordered_map<std::string, std::string>{{"config", "morphizen_config.json"}};
-session_options.AppendExecutionProvider_VitisAI(options);
+session_options.AppendExecutionProvider_MorphiZen(options);
 ```
 
 the content of `morphizen_config.json`
@@ -92,7 +92,7 @@ it is to be deprecated, see PR #159 #155
 
 # set when TargetProto hit
 
-[see here]()../morphizen-core/src/config.cpp#L307-L308)
+[see here](../../morphizen-core/src/config.cpp#L307-L308)
 
 It is to be deprecated, see PR #159 #155
 

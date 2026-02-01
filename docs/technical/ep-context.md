@@ -2,12 +2,18 @@
 Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
-# EP context design
+# EP Context Documentation
+
+This document covers both the user-facing configuration and deployment of EP (Execution Provider) context models, as well as the internal design and implementation details.
 
 For more details, refer to the official documentation:
 https://onnxruntime.ai/docs/execution-providers/EP-Context-Design.html
 
-## Generate EP context
+---
+
+## User Guide
+
+### Generate EP Context
 
 ```c++
   auto session_options = Ort::SessionOptions();
@@ -46,27 +52,27 @@ The EP context binary file naming format is  `[EP context model name]_MORPHIZEN.
 
 i.e. `resnet50_ep_ctx.onnx_MORPHIZEN.bin` or `[ep.context_file_path]_MORPHIZEN.bin` if ep.context_file_path set.
 
-### Example: EP Context Generation
+#### Example: EP Context Generation
 
 Assume the `current working directory` contains:
 ```
 A.onnx
 ```
 
-#### 1. Embed mode (default)
+##### 1. Embed mode (default)
 The EP context model will generated in the same directory as the input ONNX model.
 ```
 A.onnx
 A_ctx.onnx
 ```
-#### 2. Non-embed mode
+##### 2. Non-embed mode
 The EP context model and EP context binary file will generated in the same directory as the input ONNX model.
 ```
 A.onnx
 A_ctx.onnx
 A_ctx.onnx_MORPHIZEN.bin
 ```
-#### 3. Non-embed mode with specify `ep.context_file_path`
+##### 3. Non-embed mode with specify `ep.context_file_path`
 **With a relative path:**
 
 When `ep.context_file_path` is set to a relative path , the EP context model will be generated at the
@@ -95,7 +101,7 @@ C:\temp\A_abs_ctx.onnx
 C:\temp\A_abs_ctx.onnx_MORPHIZEN.bin
 ```
 
-#### 4. Model loaded from memory
+##### 4. Model loaded from memory
 When the model is loaded from memory, you must specify `ep.context_file_path`.
 ```C++
 session_options.AddConfigEntry("ep.context_file_path", "C:\temp\A_ctx.onnx");
@@ -106,24 +112,24 @@ C:\temp\A_ctx.onnx
 C:\temp\A_ctx.onnx_MORPHIZEN.bin
 ```
 
-## Deploy EP context model
+### Deploy EP Context Model
 
 ```c++
   auto session_options = Ort::SessionOptions();
 ```
 When deploying an EP context model, ensure the necessary files are prepared based on the mode:
-#### Embed mode:
+##### Embed mode:
 Only the context model file is required:
 `A_ctx.onnx`
 
-#### Non-embed mode:
+##### Non-embed mode:
 Both the context model and its associated binary are required, and must be located in the same directory.
 The EP context binary file name is taked from the `ep_cache_context` attribute of the main `EPContext` node in the EP Context ONNX model.
 
 `A_ctx.onnx`
 `A_ctx.onnx_MORPHIZEN.bin`
 
-#### Non-embed mode with load ctx model from memory:
+##### Non-embed mode with load ctx model from memory:
 
 When the EP context model (in non-embed mode) is loaded from memory,
 if `ep.context_file_path` is set, the binary file will be loaded from the directory specified by this path.
@@ -131,7 +137,7 @@ otherwise,  the binary file will be loaded from the current working directory.
 The binary file name is specified in the `ep_cache_context` attribute of the `EPContext` node within the EP Context ONNX model.
 
 
-## Shared EP context binary
+### Shared EP Context Binary
 
 One or more EP context model can share a same EP context binary
 file. It is only applicable for non-embed model.
@@ -155,7 +161,7 @@ It is recommended to place ONNX models from the same group in the same directory
 According [Implementation Guidelines for EPContext Model Generation with Weight Sharing][guide]
 
 
-### Example: Shared EP Context
+#### Example: Shared EP Context
 Given models:
 ```
 A.onnx
@@ -197,7 +203,7 @@ D_ctx.onnx
 `C_ctx.onnx` and `D_ctx.onnx` share `C_ctx.onnx_MORPHIZEN.bin`.
 
 
-### Example : Some compilicated use cases
+#### Example : Some compilicated use cases
 
 Given models
 ```
@@ -267,5 +273,96 @@ dir2/A2.onnx -> dir1/A2_ctx.onnx dir1/A1_ctx.onnx_VITISIA.bin : ep.config_file_p
 dir3/A3.onnx -> dir1/A3_ctx.onnx dir1/A1_ctx.onnx_VITISIA.bin : ep.config_file_path = dir2/A3_ctx.onnx  shared=1 stop=1
 ```
 
-
 [guide]:https://onnxruntime.ai/docs/execution-providers/EP-Context-Design.html#implementation-guidelines-for-epcontext-model-generation-with-weight-sharing_
+
+---
+
+## Internal Design
+
+The EP context is becoming more and more complex because we keep adding new features:
+
+1. Encryption
+2. Compression
+3. mmap [PR #136][136]
+4. Shared EP context [PR #44][44]
+5. Prebuilt EP context [PR #238][238]
+
+### Generate EP Context Model
+
+#### Non-embed Mode
+
+Using `tar_file_` because of the [mmap feature][136]. `tar_file_` is created upon the EP context binary file; we don't need any extra operations.
+
+#### Embed Mode
+
+Using `tar_file_` because of the [mmap feature][136]. `tar_file_` is created upon `std::tmpfile`.
+
+`tar_file_->dump_to` is used to filling the EP context node attribute.
+
+##### morphizen_compile_model, the producer
+
+There are two producers:
+
+   1. `tar_file_`, unified storage mechanism for all scenarios.
+   2. `prebuilt_ep_context=1`, the PR.
+
+
+##### create_ep_context, the consumer
+
+  1. Uses `tar_file_` for all scenarios. Falls back to `mem_files_` only when tmpfile() fails.
+
+### Deploy EP Context Model
+
+#### Non-embed Mode
+
+  1. Uses `tar_file_` because of the [mmap feature][136].
+
+#### Embed Mode
+
+  1. Uses `tar_file_`, depending on `cache_file_use_cache_key_prefix_`.
+
+TODO:
+  1. Add `TarFile::to_memory()` return.
+  2. `MemStream` does not support write.
+
+### Prebuilt EP Context
+
+#### Non-embed Mode
+
+  1. Uses `tar_file_` because of the [mmap feature][136].
+
+#### Embed Mode
+
+  1. Uses `tar_file_`. DO NOT USE IT.
+
+### Deploy EP Context Model
+
+#### Non-embed Mode
+
+  1. Uses `tar_file_` because of the [mmap feature][136].
+
+#### Embed Mode
+
+  1. Uses `tar_file_` for all cache storage.
+
+#### "ep.share_ep_contexts" = 1
+
+`cache_file_use_cache_key_prefix_ = 1`; otherwise, `cache_file_use_cache_key_prefix_ = 0`.
+
+`cache_file_use_cache_key_prefix_` is only meaningful when `tar_file_` is in use.
+
+`cache_file_use_cache_key_prefix_ = 1`
+
+### Compression or Encryption is Enabled
+
+Uses `tar_file_` for all storage scenarios. Encryption and compression are handled at serialization boundaries (when saving/loading EP context), not within tar_file_ itself.
+
+When encryption is enabled:
+- During save: tar stream is encrypted using `vaip_encryption::aes_encryption`
+- During load: encrypted stream is decrypted using `vaip_encryption::aes_decryption`, then loaded into tar_file_
+
+This approach keeps tar_file_ simple while supporting encryption transparently.
+
+[136]: #136 (mmap)
+[44]: #44 (shared ep context)
+[238]: #238 (prebuilt ep context)
