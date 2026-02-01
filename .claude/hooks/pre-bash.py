@@ -48,7 +48,10 @@ def main():
     try:
         # Read the tool input JSON from stdin
         input_data = json.load(sys.stdin)
-        command = input_data.get("command", "")
+
+        # Extract command from tool_input (correct JSON structure)
+        tool_input = input_data.get("tool_input", {})
+        command = tool_input.get("command", "")
 
         # Rule 1: Block git push origin (origin is read-only)
         if re.search(r"git\s+push\s+origin", command):
@@ -62,14 +65,49 @@ def main():
             print(json.dumps(response, indent=2))
             return 0
 
-        # Rule 2: Block commits on main branch
+        # Rule 2: Auto-run pre-commit before git commit
         if re.search(r"git\s+commit", command):
+            # Run pre-commit on staged files to auto-fix formatting
+            try:
+                result = subprocess.run(
+                    ["pre-commit", "run"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                # If pre-commit failed (made changes or found issues), block commit
+                if result.returncode != 0:
+                    response = {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": f'BLOCKED: Pre-commit hooks made changes or found issues.\n\nPre-commit output:\n{result.stdout}\n\nThe files have been auto-fixed. Stage the changes and commit again:\n  git add -u\n  git commit -m "..."\n\nSee docs/pre-commit-setup.md',
+                        }
+                    }
+                    print(json.dumps(response, indent=2))
+                    return 0
+            except FileNotFoundError:
+                # pre-commit not installed - continue with commit
+                pass
+            except subprocess.TimeoutExpired:
+                # pre-commit timeout - block to prevent issues
+                response = {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": "BLOCKED: Pre-commit hook timed out after 30 seconds.\n\nThis may indicate:\n- Large number of files to check\n- Network issues downloading tools\n\nTry running manually:\n  pre-commit run\n\nThen commit again.",
+                    }
+                }
+                print(json.dumps(response, indent=2))
+                return 0
+
+            # Rule 3: Block commits on main branch
             branch = get_current_branch()
             if branch == "main":
                 response = {
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
-                        "permissionDecision": "block",
+                        "permissionDecision": "deny",
                         "permissionDecisionReason": "BLOCKED: Cannot commit on 'main' branch.\n\nWorkflow violation: You must work on a feature branch.\n\n1. Sync main: git checkout main && git pull origin main\n2. Create feature branch: git checkout -b feature/<name>\n3. Then commit your changes\n\nSee docs/workflows/git-workflow.md for details.",
                     }
                 }
@@ -81,7 +119,7 @@ def main():
                 response = {
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
-                        "permissionDecision": "block",
+                        "permissionDecision": "deny",
                         "permissionDecisionReason": "BLOCKED: Commit message contains AI/tool mentions.\n\nProhibited content:\n- No 'Co-Authored-By: Claude' or similar\n- No 'Generated with Claude Code' footers\n- No AI assistant, LLM, or automation tool mentions\n- No tool-specific references\n\nWrite commits as if authored by a human developer.\nSee docs/workflows/git-workflow.md section 'Commit and PR Content Guidelines'.",
                     }
                 }
@@ -107,7 +145,7 @@ def main():
                 response = {
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
-                        "permissionDecision": "block",
+                        "permissionDecision": "deny",
                         "permissionDecisionReason": "BLOCKED: Cannot push from 'main' branch.\n\nWorkflow violation: All changes must go through Pull Requests.\n\n1. Create feature branch: git checkout -b feature/<name>\n2. Make your changes\n3. Push to fork: git push fork <branch>\n4. Create PR: gh pr create --draft\n\nSee docs/workflows/git-workflow.md for details.",
                     }
                 }

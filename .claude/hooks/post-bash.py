@@ -71,6 +71,37 @@ def main():
             print(json.dumps(response, indent=2))
             return 0
 
+        # After git push, provide reminders
+        if re.search(r"git\s+push\s+fork\s+", command):
+            branch = get_current_branch()
+            messages = []
+
+            # First push (with -u) - remind to create PR
+            if re.search(r"-u|--set-upstream", command) and branch != "main":
+                messages.append(
+                    "💡 REMINDER: Create a draft PR immediately:\ngh pr create --draft\n\nThis makes your work visible to the team early.\nSee docs/workflows/git-workflow.md"
+                )
+
+            # Push without -u and no tracking - warn
+            elif (
+                not re.search(r"-u|--set-upstream", command)
+                and branch != "main"
+                and not has_upstream_tracking()
+            ):
+                messages.append(
+                    f"⚠️ WARNING: Pushed without setting upstream tracking!\n\nFix it now:\ngit branch --set-upstream-to=fork/{branch}\n\nNext time use: git push -u fork {branch}"
+                )
+
+            if messages:
+                response = {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PostToolUse",
+                        "additionalContext": "\n\n".join(messages),
+                    }
+                }
+                print(json.dumps(response, indent=2))
+                return 0
+
     except json.JSONDecodeError:
         pass
     except Exception:
