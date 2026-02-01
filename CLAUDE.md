@@ -76,8 +76,9 @@ cmd /c "call \"\"C:\\msvsn2022\\VC\\Auxiliary\\Build\\vcvars64.bat\"\" && cd /d 
 1. Sync: `git checkout main && git pull origin main`
 2. Branch: `git checkout -b feature/<name>` (BEFORE changes)
 3. Commit: After file changes, BEFORE testing
-4. Push: `git push fork <branch>`
-5. PR: `gh pr create --draft` (IMMEDIATELY after first push, auto-create if no PR exists)
+4. First Push: `git push -u fork <branch>` (sets upstream tracking)
+5. Subsequent Pushes: `git push fork <branch>`
+6. PR: `gh pr create --draft` (IMMEDIATELY after first push, auto-create if no PR exists)
 
 **CRITICAL - Before Marking PR Ready**:
 Before marking PR ready for review, MUST run pre-commit to fix formatting issues:
