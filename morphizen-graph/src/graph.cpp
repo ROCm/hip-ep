@@ -107,6 +107,28 @@ void graph_set_name(Graph& graph, const std::string& name) {
   MORPHIZEN_ORT_API(graph_set_name)(graph, name.c_str());
 }
 
+MORPHIZEN_DLL_SPEC void
+graph_add_initialized_tensor(Graph& graph, const TensorProto& tensor) {
+  MORPHIZEN_ORT_API(graph_add_initialized_tensor)(graph, tensor);
+}
+
+MORPHIZEN_DLL_SPEC void graph_set_inputs(Graph& graph,
+                                         const std::vector<NodeArg*>& inputs) {
+  MORPHIZEN_ORT_API(graph_set_inputs)(graph, inputs);
+}
+
+MORPHIZEN_DLL_SPEC void
+graph_set_outputs(Graph& graph, const std::vector<NodeArg*>& outputs) {
+  MORPHIZEN_ORT_API(graph_set_outputs)(graph, outputs);
+}
+
+MORPHIZEN_DLL_SPEC void graph_save(Graph& graph, const std::string& model_path,
+                                   const std::string& external_data_path,
+                                   size_t threshold) {
+  MORPHIZEN_ORT_API(graph_save)
+  (graph, model_path, external_data_path, threshold);
+}
+
 MORPHIZEN_DLL_SPEC std::vector<const Node*>
 graph_get_output_nodes(const Graph& graph) {
   auto graph_outputs = graph_get_outputs(graph);

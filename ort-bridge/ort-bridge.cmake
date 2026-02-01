@@ -44,7 +44,8 @@ endif()
 target_link_libraries(ort-bridge
   PRIVATE
   onnxruntime::onnxruntime
-  morphizen-ort-api-ext
+  morphizen::morphizen-graph  # ir-converter-imp.cpp uses graph wrappers
+  morphizen-ort-api-ext  # Still needed by other components, also transitive via morphizen-graph
   morphizen-core-static
   protobuf::libprotobuf
 )

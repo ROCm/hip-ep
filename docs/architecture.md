@@ -12,9 +12,10 @@ Licensed under the MIT License.
 - [3. Component Catalog](#3-component-catalog)
   - [3.1 Core Components](#31-core-components)
   - [3.2 Foundation Libraries](#32-foundation-libraries)
-  - [3.3 Backend Implementations](#33-backend-implementations)
-  - [3.4 Tools and Executables](#34-tools-and-executables)
-  - [3.5 Pass Plugins](#35-pass-plugins)
+  - [3.3 ORT Bridge Layer](#33-ort-bridge-layer)
+  - [3.4 Backend Implementations](#34-backend-implementations)
+  - [3.5 Tools and Executables](#35-tools-and-executables)
+  - [3.6 Pass Plugins](#36-pass-plugins)
 - [4. ONNX Runtime Integration](#4-onnx-runtime-integration)
 - [5. Graph Optimization Pipeline](#5-graph-optimization-pipeline)
 - [6. Compilation Flow](#6-compilation-flow)
@@ -53,43 +54,71 @@ Licensed under the MIT License.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ Layer 5: Applications & Tools                               │
-│  graph-opt, onnx-grep, pattern-gen, tar                    │
-└─────────────────────────────────────────────────────────────┘
+│ Layer 7: External Runtime                                  │
+│   ONNX Runtime (loads MorphiZen as Execution Provider)     │
+└──────────────────────────┬──────────────────────────────────┘
                            ↓
 ┌─────────────────────────────────────────────────────────────┐
-│ Layer 4: Framework Core (morphizen-core)                        │
-│  - Pass management and execution                           │
-│  - Graph compilation and optimization                      │
-│  - Model and tensor handling                               │
-└─────────────────────────────────────────────────────────────┘
+│ Layer 6: ORT Bridge (ort-bridge)                           │
+│   - ONNX Runtime Execution Provider API implementation     │
+│   - MorphiZenEP, MorphiZenEpFactory                        │
+│   - IRConverter: OrtGraph → onnxruntime::Model            │
+└──────────────────────────┬──────────────────────────────────┘
                            ↓
 ┌─────────────────────────────────────────────────────────────┐
-│ Layer 3: Graph Manipulation & Pattern Matching             │
-│  ┌─────────────────┐         ┌──────────────────────────┐  │
-│  │ morphizen-graph │         │ morphizen-pattern        │  │
-│  │ Graph wrappers  │         │ Pattern matching (12)    │  │
-│  └─────────────────┘         └──────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-                           ↓
-┌─────────────────────────────────────────────────────────────┐
-│ Layer 2: Backend Abstraction (morphizen-ort-api-ext)      │
-│  - 111 function pointers for graph operations             │
-│  - Runtime backend selection                              │
-└─────────────────────────────────────────────────────────────┘
-                           ↓
-┌─────────────────────────────────────────────────────────────┐
-│ Layer 1: Backend Implementations                           │
-│  ┌──────────┐    ┌──────────┐    ┌──────────────────┐     │
-│  │ ONNX IR  │    │   MLIR   │    │  ORT Execution   │     │
-│  │ Backend  │    │ Backend  │    │  Provider Bridge │     │
-│  └──────────┘    └──────────┘    └──────────────────┘     │
-└─────────────────────────────────────────────────────────────┘
-                           ↓
-┌─────────────────────────────────────────────────────────────┐
-│ Layer 0: Foundation Libraries                              │
-│  morphizen-io, mem_binary, encryption, morphizen-utils         │
-└─────────────────────────────────────────────────────────────┘
+│ Layer 5: Framework Core (morphizen-core)                   │
+│   - Pass management and execution                          │
+│   - ExecutionProvider abstraction                          │
+│   - CustomOp kernel execution                              │
+└──────────┬─────────────────────────────┬────────────────────┘
+           │                             │
+           │ (depends on both)           │
+           ↓                             ↓
+┌──────────────────────────┐   ┌──────────────────────────────┐
+│ Layer 4:                 │   │ Layer 3:                     │
+│ Pattern Matching         │   │ Graph Wrappers               │
+│ (morphizen-pattern)      │   │ (morphizen-graph)            │
+│                          │   │                              │
+│ - 12 pattern types       │   │ - C++ wrappers over          │
+│ - RewriteRule framework  │   │   MORPHIZEN_ORT_API          │
+│ - Uses graph wrappers    │   │ - Graph, Node, NodeArg       │
+│   ONLY                   │   │ - ONLY layer calling         │
+│ - NO direct              │   │   MORPHIZEN_ORT_API          │
+│   MORPHIZEN_ORT_API      │   │                              │
+└────────┬─────────────────┘   └──────────┬───────────────────┘
+         │                                │
+         │    PUBLIC dependency           │
+         └───────────────────────────────►│
+                                          ↓
+                        ┌─────────────────────────────────────┐
+                        │ Layer 2:                            │
+                        │ Backend Abstraction                 │
+                        │ (morphizen-ort-api-ext)             │
+                        │                                     │
+                        │ - 111 function pointers             │
+                        │ - Runtime backend selection         │
+                        │ - setup_global_vaip_ort_api()       │
+                        └──────────┬──────────────────────────┘
+                                   ↓
+                        ┌─────────────────────────────────────┐
+                        │ Layer 1:                            │
+                        │ Backend Implementations             │
+                        │                                     │
+                        │  ┌──────────┐    ┌──────────┐       │
+                        │  │ ONNX IR  │    │  MLIR    │       │
+                        │  │ Backend  │    │ Backend  │       │
+                        │  │(onnx-ir- │    │(mlir-imp)│       │
+                        │  │  imp)    │    │          │       │
+                        │  └──────────┘    └──────────┘       │
+                        └──────────┬──────────────────────────┘
+                                   ↓
+                        ┌─────────────────────────────────────┐
+                        │ Layer 0:                            │
+                        │ Foundation Libraries                │
+                        │                                     │
+                        │ mem_binary, encryption,             │
+                        │ morphizen-utils                     │
+                        └─────────────────────────────────────┘
 ```
 
 ### 2.2 Design Principles
@@ -121,10 +150,12 @@ Licensed under the MIT License.
 
 ### 3.1 Core Components
 
-#### 3.1.1 morphizen-graph (Graph Wrappers)
+#### 3.1.1 morphizen-graph (Graph Wrappers - Layer 3)
 
 **Location**: `morphizen-graph/`
 **Purpose**: Type-safe C++ wrappers over MORPHIZEN_ORT_API for low-level graph operations
+
+**Architectural Position**: Layer 3 - **ONLY layer that directly calls MORPHIZEN_ORT_API**. All higher layers (morphizen-pattern, morphizen-core, ort-bridge) MUST use these wrappers instead of calling MORPHIZEN_ORT_API directly.
 
 **Key Classes**:
 - `Graph`, `GraphRef`, `GraphConstRef` - Graph manipulation
@@ -169,10 +200,12 @@ for (const auto* node : nodes) {
 
 ---
 
-#### 3.1.2 morphizen-pattern (Pattern Matching)
+#### 3.1.2 morphizen-pattern (Pattern Matching - Layer 4)
 
 **Location**: `morphizen-pattern/`
 **Purpose**: Powerful pattern matching system for identifying and transforming subgraphs
+
+**Architectural Position**: Layer 4 - Uses morphizen-graph wrappers ONLY. Does NOT directly call MORPHIZEN_ORT_API. Has PUBLIC dependency on morphizen::morphizen-graph.
 
 **Key Classes**:
 - `Pattern` - Base pattern class with 12 subtypes
@@ -228,10 +261,12 @@ if (pattern->match(graph, node)) {
 
 ---
 
-#### 3.1.3 morphizen-core (Framework Core)
+#### 3.1.3 morphizen-core (Framework Core - Layer 5)
 
 **Location**: `morphizen-core/`
 **Purpose**: Core framework providing pass system, model/graph interfaces, and ORT integration
+
+**Architectural Position**: Layer 5 - Depends on both morphizen-graph (Layer 3) and morphizen-pattern (Layer 4). Orchestrates compilation workflow and executes passes.
 
 **Key Components**:
 - **morphizen-core-static**: Compilation models, pass execution, configuration
@@ -253,7 +288,7 @@ include/morphizen/
 ```
 
 **Dependencies (morphizen-core-static)**:
-- PUBLIC: `onnxruntime::onnxruntime`, `protobuf::libprotobuf`, `morphizen-io`, `glog::glog`, `morphizen::encryption`, `morphizen::mem_binary`, `morphizen-utils`, `morphizen-ort-api-ext`, `morphizen::morphizen-graph`
+- PUBLIC: `onnxruntime::onnxruntime`, `protobuf::libprotobuf`, `glog::glog`, `morphizen::encryption`, `morphizen::mem_binary`, `morphizen-utils`, `morphizen-ort-api-ext`, `morphizen::morphizen-graph`
 - Conditional: `morphizen::morphizen-pattern` (if enabled)
 
 **Build Artifacts**:
@@ -337,11 +372,6 @@ int debug = ENV_PARAM(DEBUG_MODE);
 
 #### 3.2.3 Other Foundation Libraries
 
-**morphizen-io**
-- **Purpose**: Stream I/O utilities
-- **Dependencies**: `glog::glog`
-- **Build Artifact**: Static library `morphizen-io`
-
 **mem_binary**
 - **Purpose**: Packs files directly into library at build time with optional compression
 - **Features**: Binary embedding, zlib compression, runtime decompression
@@ -355,23 +385,33 @@ int debug = ENV_PARAM(DEBUG_MODE);
 
 ---
 
-### 3.3 Backend Implementations
+### 3.3 ORT Bridge Layer
 
-#### 3.3.1 ort-bridge (ORT Execution Provider Bridge)
+#### 3.3.1 ort-bridge (ONNX Runtime Execution Provider Implementation)
 
 **Location**: `ort-bridge/`
-**Purpose**: Bridges MorphiZen to ORT as an execution provider
+**Purpose**: Top-layer bridge implementing ONNX Runtime's Execution Provider API, serving as the entry point from ONNX Runtime into MorphiZen
+
+**Architectural Position**: Layer 6 - sits between ONNX Runtime (Layer 7) and morphizen-core (Layer 5)
+
+**Key Responsibilities**:
+- Implements ORT Execution Provider v1 API (`OrtEp`, `OrtEpFactory` interfaces)
+- Converts ORT graph representations to MorphiZen internal format
+- Orchestrates compilation workflow via morphizen-core APIs
+- Manages execution lifecycle (model partitioning, kernel execution)
+- Selects backend implementation (onnx-ir-imp or mlir-imp) at runtime
 
 **Key Components**:
-- `ort-bridge.cpp` - Main bridge implementation
-- `morphizen-ep.hpp/.cpp` - Execution provider implementation
-- `morphizen-ep-factory.hpp/.cpp` - EP factory
-- `ir-converter.hpp/.cpp` - IR conversion
-- `ort-graph-wrapper.hpp/.cpp` - ORT graph wrapping
+- `ort-bridge.cpp` - EP registration and lifecycle
+- `morphizen-ep.hpp/.cpp` - `OrtEp` interface implementation
+- `morphizen-ep-factory.hpp/.cpp` - `OrtEpFactory` implementation
+- `ir-converter.hpp/.cpp` - `OrtGraph` → `onnxruntime::Model` conversion
+- `ir-converter-imp.cpp` - Uses morphizen-graph wrappers (NO direct MORPHIZEN_ORT_API calls)
+- `ort-graph-wrapper.hpp/.cpp` - Wraps ORT C API graph objects
 
 **Entry Points**:
 ```cpp
-// Modern ORT API
+// ORT Execution Provider v1 API
 extern "C" OrtStatus* CreateEpFactories(
     const char* registration_name,
     const OrtApiBase* ort_api_base,
@@ -381,11 +421,29 @@ extern "C" OrtStatus* CreateEpFactories(
     size_t* num_factories);
 ```
 
-**Configuration**: Compile-time backend selection (ONNX or MLIR backend required)
+**Dependencies**:
+- `morphizen::morphizen-graph` (PUBLIC) - Uses graph wrappers exclusively
+- `morphizen-core-static` (PRIVATE) - Orchestration and pass execution
+- `onnxruntime::onnxruntime` (PRIVATE) - ORT EP API
+- `protobuf::libprotobuf` (PRIVATE)
+
+**Compilation Flow**:
+1. ONNX Runtime calls `CreateEpFactories()` during session creation
+2. ORT queries capability via `MorphiZenEP::GetCapability()`
+3. `IRConverter` converts `OrtGraph` → `onnxruntime::Model` using morphizen-graph wrappers
+4. Calls `setup_global_vaip_ort_api(backend_ir)` to select backend
+5. Invokes `compile_onnx_model_morphizen_ep_v4()` from morphizen-core
+6. morphizen-core executes passes using selected backend (onnx-ir-imp or mlir-imp)
+
+**Important**: ort-bridge does NOT implement MORPHIZEN_ORT_API - it USES morphizen-graph wrappers to abstract backend operations. The backend selection (`setup_global_vaip_ort_api()`) is its primary architectural contribution.
+
+**Configuration**: Compile-time backend availability via `MORPHIZEN_ENABLE_ONNX_BACKEND` and `MORPHIZEN_ENABLE_MLIR_BACKEND`
 
 ---
 
-#### 3.3.2 onnx-ir-imp (ONNX IR Backend)
+### 3.4 Backend Implementations
+
+#### 3.4.1 onnx-ir-imp (ONNX IR Backend)
 
 **Location**: `onnx-ir-imp/`
 **Purpose**: ONNX-based implementation of MORPHIZEN_ORT_API interface
@@ -405,7 +463,7 @@ extern "C" OrtStatus* CreateEpFactories(
 
 ---
 
-#### 3.3.3 mlir-imp (MLIR Backend)
+#### 3.4.2 mlir-imp (MLIR Backend)
 
 **Location**: `mlir-imp/`
 **Purpose**: MLIR-based implementation of MORPHIZEN_ORT_API interface
@@ -434,9 +492,9 @@ MLIRModel
 
 ---
 
-### 3.4 Tools and Executables
+### 3.5 Tools and Executables
 
-#### 3.4.1 graph-opt (Graph Optimization Tool)
+#### 3.5.1 graph-opt (Graph Optimization Tool)
 
 **Location**: `graph-opt/`
 **Purpose**: Tool for developing and testing MorphiZen passes
@@ -457,7 +515,7 @@ morphizen-graph-opt -i <input.onnx> -o <output.onnx> -t <output.txt> -p <pass1> 
 
 ---
 
-#### 3.4.2 onnx-grep (Pattern Matching Debugger)
+#### 3.5.2 onnx-grep (Pattern Matching Debugger)
 
 **Location**: `onnx-grep/`
 **Purpose**: Debugging tool for testing pattern matching
@@ -478,7 +536,7 @@ morphizen-onnx-grep -f <model.onnx> -p <pattern_file> [-n <node_arg>] [-v]
 
 ---
 
-#### 3.4.3 pattern-gen (Pattern Generation Tool)
+#### 3.5.3 pattern-gen (Pattern Generation Tool)
 
 **Location**: `pattern-gen/`
 **Purpose**: Generate pattern definitions from sample ONNX models
@@ -494,7 +552,7 @@ morphizen-pattern-gen -f <model.onnx> -i <input> -o <output> \
 
 ---
 
-#### 3.4.4 tar (TAR Utility)
+#### 3.5.4 tar (TAR Utility)
 
 **Location**: `tar/`
 **Purpose**: Utility for handling TAR archives used in MorphiZen caching
@@ -504,9 +562,9 @@ morphizen-pattern-gen -f <model.onnx> -i <input> -o <output> \
 
 ---
 
-### 3.5 Pass Plugins
+### 3.6 Pass Plugins
 
-#### 3.5.1 morphizen-pass-init (Initialization Pass)
+#### 3.6.1 morphizen-pass-init (Initialization Pass)
 
 **Location**: `morphizen-pass-init/`
 **Purpose**: Basic initialization pass for graph setup and preparation
@@ -516,7 +574,7 @@ morphizen-pattern-gen -f <model.onnx> -i <input> -o <output> \
 
 ---
 
-#### 3.5.2 custom-op-generic (Generic Custom Operators)
+#### 3.6.2 custom-op-generic (Generic Custom Operators)
 
 **Location**: `custom-op-generic/`
 **Purpose**: Generic custom operator implementation framework
@@ -729,33 +787,57 @@ struct BasicRule : public Rule {
 ### 6.1 End-to-End Pipeline
 
 ```
-Step 1: Model Loading
-    ONNX Model (.onnx)
+Step 0: ONNX Runtime Session Creation (Layer 7)
+    User creates InferenceSession with MorphiZen EP
         ↓
-    Load via onnxruntime::Model
+    ORT loads onnxruntime_vitisai_ep.dll
         ↓
-    Create Graph wrapper (morphizen::Graph or MLIRModel)
+    Calls CreateEpFactories() in ort-bridge
+        ↓
+    Creates MorphiZenEpFactory and MorphiZenEP instances
 
-Step 2: PassContext Setup
+Step 1: Model Capability Query (Layer 6 - ort-bridge)
+    ORT calls MorphiZenEP::GetCapability(graph)
+        ↓
+    IRConverter: OrtGraph → onnxruntime::Model (using morphizen-graph wrappers)
+        ↓
+    setup_global_vaip_ort_api(backend_ir)  # Select onnx-ir-imp or mlir-imp
+        ↓
+    compile_onnx_model_morphizen_ep_v4()  # Enter Layer 5 (morphizen-core)
+        ↓
+    morphizen-core identifies supported nodes
+        ↓
+    Return to ort-bridge which reports capability to ORT
+
+Step 2: Graph Compilation (Layer 5 - morphizen-core)
+    morphizen-core receives partitioned graph from ort-bridge
+        ↓
+    Load ONNX Model via selected backend (onnx-ir-imp or mlir-imp)
+        ↓
+    Create Graph wrapper (morphizen::Graph from Layer 3)
+
+Step 3: PassContext Setup
     Config → PassContext creation
         ├─ Cache directory initialization
         ├─ Provider options loading
         ├─ Session config parsing
         └─ Logging setup
 
-Step 3: Graph Optimization Passes
-    For each configured pass plugin:
+Step 4: Graph Optimization Passes (Layers 3-4)
+    morphizen-core iterates through configured pass plugins:
         ↓
     IPass::create_pass(context, pass_proto)
         ↓
     Pass::execute()
+        ├─ Uses morphizen-pattern (Layer 4) for pattern matching
+        ├─ Uses morphizen-graph (Layer 3) for graph manipulation
         ├─ For each node in graph:
-        │   ├─ Pattern matching
+        │   ├─ Pattern matching (Layer 4)
         │   ├─ Condition checking
-        │   └─ Apply transformation
-        └─ Graph modification (in-place)
+        │   └─ Apply transformation (Layer 3 wrappers)
+        └─ Graph modification (in-place via Layer 3)
 
-Step 4: Graph Transformations
+Step 5: Graph Transformations
     Pattern-based transformations include:
         • Operator Fusion
         • Quantization
@@ -764,15 +846,15 @@ Step 4: Graph Transformations
         • Constant Folding
         • Custom Operator Mapping
 
-Step 5: MLIR Compilation (Optional)
+Step 6: MLIR Compilation (Optional - Layer 1 Backend)
     If MLIR backend enabled:
         ↓
     Convert optimized graph to MLIR
-        ├─ Create MLIRModel
+        ├─ Create MLIRModel (mlir-imp backend)
         ├─ Build func::FuncOp from nodes
         └─ Register dialects and transformations
 
-Step 6: Execution Provider Selection
+Step 7: Execution Provider Selection
     compile_onnx_model_3_internal()
         ├─ Create ExecutionProvider instances
         ├─ Assign nodes to providers
