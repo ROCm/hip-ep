@@ -163,6 +163,44 @@ MORPHIZEN_DLL_SPEC const NodeArg* graph_get_node_arg(const Graph& graph,
  */
 MORPHIZEN_DLL_SPEC const std::string& graph_get_name(const Graph& graph);
 
+/** @brief Add an initialized tensor to the graph
+ *
+ * @param graph The graph to modify
+ * @param tensor The tensor proto to add as an initializer
+ *
+ * Adds a tensor as a constant initializer to the graph. This is used to add
+ * constant weights and parameters to the model.
+ */
+MORPHIZEN_DLL_SPEC void graph_add_initialized_tensor(Graph& graph,
+                                                     const TensorProto& tensor);
+
+/** @brief Set graph inputs
+ *
+ * @param graph The graph to modify
+ * @param inputs Vector of node arguments to set as graph inputs
+ */
+MORPHIZEN_DLL_SPEC void graph_set_inputs(Graph& graph,
+                                         const std::vector<NodeArg*>& inputs);
+
+/** @brief Set graph outputs
+ *
+ * @param graph The graph to modify
+ * @param outputs Vector of node arguments to set as graph outputs
+ */
+MORPHIZEN_DLL_SPEC void graph_set_outputs(Graph& graph,
+                                          const std::vector<NodeArg*>& outputs);
+
+/** @brief Save graph to file
+ *
+ * @param graph The graph to save
+ * @param model_path Path to save the model file
+ * @param external_data_path Path for external data file
+ * @param threshold Threshold for external data
+ */
+MORPHIZEN_DLL_SPEC void graph_save(Graph& graph, const std::string& model_path,
+                                   const std::string& external_data_path,
+                                   size_t threshold);
+
 /** @brief Perform reverse DFS traversal from a node
  *
  * @param graph The graph to traverse

@@ -2,11 +2,15 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+#define MORPHIZEN_USER 1
 #include "./ir-converter-imp.hpp"
 #include "./ort-graph-wrapper.hpp"
 #include <fstream>
 #include <glog/logging.h>
 #include <morphizen-utils/morphizen-utils.hpp>
+#include <morphizen/graph.hpp>
+#include <morphizen/morphizen-ort-api-ext.hpp>
+#include <morphizen/node_attr.hpp>
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_IR_CONVERTER, "0")
 DEF_ENV_PARAM_2(MORPHIZEN_DEBUG_IR_CONVERTER_OUTPUT_FILE,
                 "MorphiZen-EP-IR-Converter.onnx", std::string)
@@ -31,11 +35,11 @@ ModelUniquePtr IRConverterImp::to_onnx_model(const ApiPtrs& api_ptrs,
     opset_imports.emplace_back(domain, (int64_t)version);
     MY_LOG(3) << "Add opset: " << domain << " with version: " << version;
   }
+  // Use MORPHIZEN_ORT_API for model creation
   auto model = ModelUniquePtr(
       MORPHIZEN_ORT_API(create_empty_model)(model_path, opset_imports),
       [](onnxruntime::Model* model) {
-        MORPHIZEN_ORT_API(model_delete)
-        (model);
+        MORPHIZEN_ORT_API(model_delete)(model);
       });
   IRConverterImp converter(api_ptrs, graph);
   converter.throw_if_error(converter.convert_to_model(*model.get()));
@@ -81,9 +85,8 @@ void IRConverterImp::save_model_for_debugging(
       MY_LOG(4) << "Saving converted ONNX model to: " << output_file;
       auto& main_graph = MORPHIZEN_ORT_API(model_main_graph)(
           const_cast<morphizen::Model&>(model));
-      MORPHIZEN_ORT_API(graph_save)
-      (main_graph, output_file, output_file + ".dat",
-       std::numeric_limits<size_t>::max());
+      morphizen::graph_save(main_graph, output_file, output_file + ".dat",
+                            std::numeric_limits<size_t>::max());
     } else {
       MY_LOG(4)
           << "Debug level > 4 but no output file specified. Set "
@@ -95,7 +98,7 @@ void IRConverterImp::save_model_for_debugging(
 OrtStatus* IRConverterImp::convert_graph(morphizen::Graph& graph) const {
   MY_LOG(2) << "Converting ORT graph '" << graph_.name() << "' to ONNX graph";
   // Set basic graph properties
-  MORPHIZEN_ORT_API(graph_set_name)(graph, graph_.name());
+  morphizen::graph_set_name(graph, graph_.name());
   // throw_if_error(convert_nodes(graph, graph_proto));
   // - Converting inputs
   throw_if_error(convert_graph_inputs(graph));
@@ -106,7 +109,7 @@ OrtStatus* IRConverterImp::convert_graph(morphizen::Graph& graph) const {
   // - Converting outputs
   throw_if_error(convert_graph_outputs(graph));
   // - Resolve the graph
-  MORPHIZEN_ORT_API(graph_resolve)(graph, true);
+  morphizen::graph_resolve(graph, true);
   MY_LOG(2) << "Graph conversion completed";
   return nullptr;
 }
@@ -127,7 +130,7 @@ OrtStatus* IRConverterImp::convert_graph_inputs(morphizen::Graph& graph) const {
     new_inputs.push_back(node_arg);
     MY_LOG(3) << "Added input: " << value_info.GetName();
   }
-  MORPHIZEN_ORT_API(graph_set_inputs)(graph, new_inputs);
+  morphizen::graph_set_inputs(graph, new_inputs);
   MY_LOG(2) << "Converted " << inputs.size() << " inputs";
   return nullptr;
 }
@@ -202,7 +205,7 @@ IRConverterImp::convert_graph_outputs(morphizen::Graph& graph) const {
   // guess output
   new_outputs = guess_missing_output(new_outputs, graph);
 
-  MORPHIZEN_ORT_API(graph_set_outputs)(graph, new_outputs);
+  morphizen::graph_set_outputs(graph, new_outputs);
   MY_LOG(2) << "Converted " << outputs.size() << " outputs";
   return nullptr;
 }
@@ -257,15 +260,11 @@ IRConverterImp::convert_graph_initializers(morphizen::Graph& graph) const {
     //       MORPHIZEN_ORT_API(tensor_proto_delete)(p);
     //     });
 
-    auto tensor_proto = std::unique_ptr<morphizen::TensorProto,
-                                        void (*)(morphizen::TensorProto*)>(
-        MORPHIZEN_ORT_API_EXT(tensor_proto_new_raw_data)(
-            value_info.GetName(), shape, element_type, tensor_data, data_size),
-        [](morphizen::TensorProto* p) {
-          MORPHIZEN_ORT_API(tensor_proto_delete)(p);
-        });
+    auto* tensor_proto = MORPHIZEN_ORT_API_EXT(tensor_proto_new_raw_data)(
+        value_info.GetName(), shape, element_type, tensor_data, data_size);
 
-    MORPHIZEN_ORT_API(graph_add_initialized_tensor)(graph, *tensor_proto);
+    morphizen::graph_add_initialized_tensor(graph, *tensor_proto);
+    MORPHIZEN_ORT_API(tensor_proto_delete)(tensor_proto);
     MY_LOG(3) << "Added initializer: " << value_info.GetName();
   }
 
@@ -283,12 +282,11 @@ IRConverterImp::convert_value_info_proto(const Ort::ConstValueInfo& value_info,
   auto name = value_info.GetName();
   int element_type = 0; // Placeholder for element type
   throw_if_error(convert_type_proto(type_info, &element_type, &shape));
-  auto existing_node_arg = MORPHIZEN_ORT_API(graph_get_node_arg)(graph, name);
+  auto existing_node_arg = morphizen::graph_get_node_arg(graph, name);
   if (existing_node_arg) {
     *node_arg = const_cast<morphizen::NodeArg*>(existing_node_arg);
   } else {
-    *node_arg =
-        &MORPHIZEN_ORT_API(node_arg_new)(graph, name, &shape, element_type);
+    *node_arg = &morphizen::node_arg_new(graph, name, &shape, element_type);
   }
   return nullptr;
 };
@@ -498,11 +496,7 @@ OrtStatus* IRConverterImp::convert_graph_nodes(morphizen::Graph& graph) const {
       node_outputs.push_back(node_arg);
     }
 
-    auto node_attributes =
-        std::unique_ptr<morphizen::NodeAttributes,
-                        void (*)(morphizen::NodeAttributes*)>(
-            MORPHIZEN_ORT_API(node_attributes_new)(),
-            ::morphizen::api()->node_attributes_delete);
+    morphizen::NodeAttributesBuilder attrs_builder;
 
     std::vector<const OrtOpAttr*> api_node_attributes;
     size_t num_of_attributes = 0;
@@ -523,56 +517,33 @@ OrtStatus* IRConverterImp::convert_graph_nodes(morphizen::Graph& graph) const {
         auto value = get_attr_value_int(ort_api, attr);
         MY_LOG(3) << "Attribute " << attr_name << " is of type INT with value "
                   << value;
-        auto new_attr = MORPHIZEN_ORT_API(attr_proto_new_int)(attr_name, value);
-        MORPHIZEN_ORT_API(node_attributes_add)
-        (*node_attributes, std::move(*new_attr));
-        MORPHIZEN_ORT_API(attr_proto_delete)(new_attr);
+        attrs_builder.add(attr_name, value);
         break;
       }
       case OrtOpAttrType::ORT_OP_ATTR_INTS: {
-        auto new_attr = MORPHIZEN_ORT_API(attr_proto_new_ints)(
-            attr_name, get_attr_value_ints(ort_api, attr));
-        MORPHIZEN_ORT_API(node_attributes_add)
-        (*node_attributes, std::move(*new_attr));
-        MORPHIZEN_ORT_API(attr_proto_delete)(new_attr);
+        attrs_builder.add(attr_name, get_attr_value_ints(ort_api, attr));
         break;
       }
       case OrtOpAttrType::ORT_OP_ATTR_FLOAT: {
         auto value = get_attr_value_float(ort_api, attr);
         MY_LOG(3) << "Attribute " << attr_name
                   << " is of type FLOAT with value " << value;
-        auto new_attr =
-            MORPHIZEN_ORT_API(attr_proto_new_float)(attr_name, value);
-        MORPHIZEN_ORT_API(node_attributes_add)
-        (*node_attributes, std::move(*new_attr));
-        MORPHIZEN_ORT_API(attr_proto_delete)(new_attr);
+        attrs_builder.add(attr_name, value);
         break;
       }
       case OrtOpAttrType::ORT_OP_ATTR_FLOATS: {
-        auto new_attr = MORPHIZEN_ORT_API(attr_proto_new_floats)(
-            attr_name, get_attr_value_floats(ort_api, attr));
-        MORPHIZEN_ORT_API(node_attributes_add)
-        (*node_attributes, std::move(*new_attr));
-        MORPHIZEN_ORT_API(attr_proto_delete)(new_attr);
+        attrs_builder.add(attr_name, get_attr_value_floats(ort_api, attr));
         break;
       }
       case OrtOpAttrType::ORT_OP_ATTR_STRING: {
         auto value = get_attr_value_string(ort_api, attr);
         MY_LOG(3) << "Attribute " << attr_name
                   << " is of type STRING with value " << value;
-        auto new_attr =
-            MORPHIZEN_ORT_API(attr_proto_new_string)(attr_name, value);
-        MORPHIZEN_ORT_API(node_attributes_add)
-        (*node_attributes, std::move(*new_attr));
-        MORPHIZEN_ORT_API(attr_proto_delete)(new_attr);
+        attrs_builder.add(attr_name, value);
         break;
       }
       case OrtOpAttrType::ORT_OP_ATTR_STRINGS: {
-        auto new_attr = MORPHIZEN_ORT_API(attr_proto_new_strings)(
-            attr_name, get_attr_value_strings(ort_api, attr));
-        MORPHIZEN_ORT_API(node_attributes_add)
-        (*node_attributes, std::move(*new_attr));
-        MORPHIZEN_ORT_API(attr_proto_delete)(new_attr);
+        attrs_builder.add(attr_name, get_attr_value_strings(ort_api, attr));
         break;
       }
       default: {
@@ -585,9 +556,21 @@ OrtStatus* IRConverterImp::convert_graph_nodes(morphizen::Graph& graph) const {
       }
     }
 
-    MORPHIZEN_ORT_API(graph_add_node)
-    (graph, name, op_type, description, node_inputs, node_outputs,
-     *node_attributes, domain);
+    auto node_attributes = attrs_builder.build();
+#ifdef _MSC_VER
+#  pragma warning(push)
+#  pragma warning(disable : 4996) // deprecated declaration
+#else
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    morphizen::graph_add_node(graph, name, op_type, description, node_inputs,
+                              node_outputs, std::move(node_attributes), domain);
+#ifdef _MSC_VER
+#  pragma warning(pop)
+#else
+#  pragma GCC diagnostic pop
+#endif
     MY_LOG(3) << "Added node: " << name << " (op_type: " << op_type << ")";
   }
 
