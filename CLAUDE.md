@@ -70,12 +70,14 @@ cmd /c "call \"\"C:\\msvsn2022\\VC\\Auxiliary\\Build\\vcvars64.bat\"\" && cd /d 
 
 **Push Policy**: After creating commits, ALWAYS push to fork immediately unless the user says otherwise.
 
+**Auto-PR Policy**: After successfully pushing to fork, IMMEDIATELY check if a PR exists for the branch. If not, create a draft PR automatically with `gh pr create --draft`.
+
 **Required Steps**:
 1. Sync: `git checkout main && git pull origin main`
 2. Branch: `git checkout -b feature/<name>` (BEFORE changes)
 3. Commit: After file changes, BEFORE testing
 4. Push: `git push fork <branch>`
-5. PR: `gh pr create --draft` (after first push)
+5. PR: `gh pr create --draft` (IMMEDIATELY after first push, auto-create if no PR exists)
 
 **PR Operations** (fork-based workflow):
 - ❌ `gh pr view` (fails - branch not in origin)
