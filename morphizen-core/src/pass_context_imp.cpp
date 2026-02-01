@@ -242,7 +242,7 @@ bool PassContextImp::cache_in_mem() const {
   return true;
 }
 PassContextImp::~PassContextImp() {
-  // No cleanup needed - tar_file_ and mem_files_ clean themselves up
+  // No cleanup needed - tar_file_ cleans itself up
 }
 
 int64_t PassContextImp::get_provider_option_i64(const std::string& option_name,
@@ -466,23 +466,8 @@ PassContextImp::read_file_u8(const std::string& filename) const {
 
 std::unique_ptr<CacheFileReader>
 PassContextImp::open_file_for_read(const std::string& filename) const {
-  // Primary path: use tar_file_ if available
-  if (tar_file_) {
-    return open_file_for_read_with_tar_file(filename);
-  }
-
-  // Fallback: mem_files_ only (when tmpfile() failed during write)
-  auto mem_it = mem_files_.find(filename);
-  if (mem_it != mem_files_.end()) {
-    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-        << "Reading from mem_files_: " << filename;
-    return std::unique_ptr<CacheFileReader>(
-        new MemoryFileReaderImp(filename, mem_it->second.get()));
-  }
-
-  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-      << "File not found: " << filename;
-  return nullptr;
+  CHECK(tar_file_ != nullptr) << "tar_file_ should always exist";
+  return open_file_for_read_with_tar_file(filename);
 }
 
 std::unique_ptr<CacheFileReader>
@@ -523,30 +508,8 @@ PassContextImp::open_file_for_write_with_tar_file(
 }
 std::unique_ptr<CacheFileWriter>
 PassContextImp::open_file_for_write(const std::string& filename) {
-  // Primary path: use tar_file_ if available
-  if (tar_file_) {
-    return open_file_for_write_with_tar_file(filename);
-  }
-
-  // Fallback: mem_files_ only (when tar_file_ not available)
-  auto mem_it = mem_files_.find(filename);
-  if (mem_it != mem_files_.end()) {
-    // Recreate memory file for writing
-    auto mem_file = std::make_unique<MemoryFile>();
-    mem_it->second = std::move(mem_file);
-    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-        << "Writing to existing mem_files_: " << filename;
-    return std::unique_ptr<CacheFileWriter>(
-        new MemoryFileWriterImp(filename, mem_it->second.get()));
-  }
-
-  // Create new memory file
-  auto mem_file = std::make_unique<MemoryFile>();
-  mem_files_[filename] = std::move(mem_file);
-  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-      << "Writing to new mem_files_: " << filename;
-  return std::unique_ptr<CacheFileWriter>(
-      new MemoryFileWriterImp(filename, mem_files_[filename].get()));
+  CHECK(tar_file_ != nullptr) << "tar_file_ should always exist";
+  return open_file_for_write_with_tar_file(filename);
 }
 
 bool write_to_cache_files(std::map<std::string, FILE*>& cache_files,
@@ -577,7 +540,7 @@ bool PassContextImp::write_file(const std::string& filename,
 
 void PassContextImp::restore_cache_files() {
   // No longer needed with tar_file_ - this is a no-op
-  // Cache files are loaded directly via tar_file_ or mem_files_
+  // Cache files are loaded directly via tar_file_
   LOG_VERBOSE(2) << "restore_cache_files: no-op with tar_file_";
 }
 
@@ -586,26 +549,18 @@ bool PassContextImp::has_cache_file(const std::string& filename1) const {
   if (cache_file_use_cache_key_prefix_) {
     filename = get_config_proto().cache_key() + "/" + filename1;
   }
-  if (tar_file_) {
-    return tar_file_->has_file(filename);
-  }
-  return mem_files_.find(filename1) != mem_files_.end();
+  CHECK(tar_file_ != nullptr) << "tar_file_ should always exist";
+  return tar_file_->has_file(filename);
 }
 
 std::vector<std::string> PassContextImp::get_cache_file_names() const {
+  CHECK(tar_file_ != nullptr) << "tar_file_ should always exist";
   auto ret = std::vector<std::string>{};
-  if (tar_file_) {
-    const auto& entries = tar_file_->entries();
-    ret.reserve(entries.size());
-    for (const auto& entry : entries) {
-      if (entry && !entry->is_symlink()) {
-        ret.push_back(entry->path());
-      }
-    }
-  } else {
-    ret.reserve(mem_files_.size());
-    for (const auto& [name, _] : mem_files_) {
-      ret.push_back(name);
+  const auto& entries = tar_file_->entries();
+  ret.reserve(entries.size());
+  for (const auto& entry : entries) {
+    if (entry && !entry->is_symlink()) {
+      ret.push_back(entry->path());
     }
   }
   return ret;
@@ -966,60 +921,6 @@ std::size_t CacheFileWriterStreamImp::fwrite(const void* buffer,
   return ret;
 }
 
-MemoryFileReaderImp::MemoryFileReaderImp(const std::string& filename,
-                                         MemoryFile* fp)
-    : CacheFileReader(), name_{filename}, fp_{fp} {
-  fp_->seekg(0, fp_->end);
-  size_ = fp_->tellg();
-  fp_->seekg(0, fp_->beg);
-  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-      << "memory file reader " << filename << ", size " << size_;
-}
-MemoryFileReaderImp::~MemoryFileReaderImp() {
-  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-      << "destroy memory file reader " << name_;
-}
-std::size_t MemoryFileReaderImp::fread(void* buffer, std::size_t size) const {
-  if (size == 0 || !buffer)
-    return 0;
-  CHECK(!fp_->read(static_cast<char*>(buffer), size).bad())
-      << "failed to read memory file " << name_;
-  auto ret = fp_->gcount();
-  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE) >= 2)
-      << "read " << name_ << " " << ret << " bytes "
-      << " size_ =" << size_;
-  return ret;
-}
-size_t MemoryFileReaderImp::size() const { return size_; }
-void MemoryFileReaderImp::rewind() const {
-  CHECK(!fp_->seekg(0, fp_->beg).fail())
-      << "failed to seek to the beginning of the memory file";
-}
-
-MemoryFileWriterImp::MemoryFileWriterImp(const std::string& filename,
-                                         MemoryFile* fp)
-    : CacheFileWriter(), name_{filename}, fp_{fp} {
-  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-      << "memory file writer " << filename;
-}
-MemoryFileWriterImp::~MemoryFileWriterImp() {
-  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-      << "destroy memory file writer " << name_;
-  fp_->flush();
-}
-std::size_t MemoryFileWriterImp::fwrite(const void* buffer,
-                                        std::size_t size) const {
-  if (size == 0 || !buffer)
-    return 0;
-  auto pos = fp_->tellp();
-  CHECK(!fp_->write(static_cast<const char*>(buffer), size).bad())
-      << "failed to write memory file " << name_;
-  auto ret = fp_->tellp() - pos;
-  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE) >= 2)
-      << "memory file write " << ret << "bytes into " << name_;
-  return ret;
-}
-
 void PassContextImp::maybe_create_tar_file_for_write() {
   auto is_shared_context_enabled =
       get_session_config(kOrtSessionOptionShareEpContexts, "0") == "1";
@@ -1030,20 +931,32 @@ void PassContextImp::maybe_create_tar_file_for_write() {
   auto is_ep_context_embed_mode =
       get_session_config(kOrtSessionOptionEpContextEmbedMode, "1") == "1";
 
-  // Note: Encryption is handled at serialization boundaries (when
-  // saving/loading EP context), not within tar_file_ itself. The tar archive
-  // can be created regardless of encryption settings.
+  // Note: Cache files serve TWO purposes:
+  // 1. Inter-pass communication (Level 1 passes, custom ops) - ALWAYS needed
+  // 2. EP context persistence (external save) - Only when enabled
+  //
+  // We ALWAYS create tar_file_ for cache storage (purpose #1).
+  // The EP context flag only controls WHERE to persist (external file vs
+  // in-memory/discard).
   if (!is_ep_context_enabled) {
+    // EP disabled: Create in-memory tar (discarded after session)
+    // Used for inter-pass communication only, not persisted
     LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-        << "ep.context is not enabled, no need to create tar file for write";
+        << "EP context disabled, creating tmpfile/in-memory tar for cache";
+    tar_file_file_name_.clear();
+    tar_file_ = TarFile::create();
+    CHECK(tar_file_ != nullptr)
+        << "Failed to create tar file for cache (EP context disabled)";
+    cache_file_use_cache_key_prefix_ = false;
     return;
   }
+
+  // EP enabled: Persist to external file or embed in model
   LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-      << "now, create tar file for write for ep context";
-  // the tar_file_ is created upon the follow
-  // 1. std::tmpfile(), i.e. TarFile::create(), for embed mode.
-  // 2. ep_context_binary_file.
+      << "EP context enabled, creating tar file for external persistence";
+
   if (!is_ep_context_embed_mode) {
+    // Non-embed mode: Create persistent external file
     auto ep_context_binary_file = get_dir_of_ep_context_model() /
                                   get_basename_of_ep_context_binary_file();
     LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
@@ -1077,13 +990,14 @@ void PassContextImp::maybe_create_tar_file_for_write() {
         << "cache_key should be empty when using tar file";
     tar_file_ = TarFile::create(std::move(stream));
   } else {
-    // Embed mode: create tar_file_ from tmpfile() (always in-memory)
+    // Embed mode: Create tmpfile (serialized to model later)
     tar_file_file_name_.clear();
     tar_file_ = TarFile::create();
     CHECK(tar_file_ != nullptr)
-        << " create a tar file for write in embed mode, but tar_file_ is "
-           "nullptr";
+        << "Failed to create tar file for write in embed mode";
   }
+
+  // Cache key prefix configuration
   if (is_shared_context_enabled) {
     // for shared ep context, we must enable file prefix.
     cache_file_use_cache_key_prefix_ = true;
