@@ -131,7 +131,7 @@ Error build_operation_graph(hipdnnHandle_t handle) {
 **File:** `proto/hipdnn.proto`
 
 ```protobuf
-// Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 syntax = "proto3";
 package hipdnn;

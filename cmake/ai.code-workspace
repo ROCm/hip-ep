@@ -1,0 +1,20 @@
+{
+	"folders": [
+		{
+			"path": "C:/Users/Administrator/Downloads/ai"
+		},
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../test_onnx_runner"
+		},
+		{
+			"path": "../../morphizen-mlir"
+		},
+		{
+			"path": "../../MorphiZen"
+		}
+	],
+	"settings": {}
+}
