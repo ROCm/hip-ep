@@ -281,6 +281,7 @@ private:
   void update_pass_context_from_context_json_in_cache();
   void create_tar_file_for_prebuild_cache(std::vector<char>&& buffer);
   void update_config_proto_root_field();
+  std::string get_cache_filename(const std::string& filename) const;
   void target_auto_discovery(const Model& model);
   std::unique_ptr<TargetProto>
   find_target_proto(const std::string& target_name);
@@ -359,12 +360,6 @@ private:
   std::unique_ptr<TarFile> tar_file_ = nullptr;
   bool delete_tar_file_on_session_created_ = true;
   std::filesystem::path tar_file_file_name_;
-  // cache_file_use_cache_key_prefix_ is only enabled for shared ep context is
-  // enabled.
-  // when this feature is enabled, open_file_for_read and
-  // open_file_for_write, the file name will be prefixed with cache_key_prefix_.
-  // this feature only tested when tar_file_ is not null.
-  bool cache_file_use_cache_key_prefix_ = false;
   std::unique_ptr<TargetProto> target_proto_ = nullptr;
   std::map<std::string, std::string> provider_option_origin_ = {};
   std::map<std::string, std::string> provider_option_from_cache_ = {};

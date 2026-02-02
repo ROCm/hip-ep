@@ -617,8 +617,7 @@ create_ep_context_node(morphizen::ExecutionProviderConcrete* ep, int index) {
       morphizen_encryption::has_encryption_support() &&
       (!context.get_provider_option("encryption_key", "").empty());
   attrs.add("enable_encryption", (int64_t)enable_encryption);
-  attrs.add("cache_file_use_cache_key_prefix",
-            (int64_t)context.cache_file_use_cache_key_prefix_);
+  // Always use cache_key prefix - only store the prefix itself
   attrs.add("cache_file_prefix", context.get_config_proto().cache_key());
   auto& version_infos = context.get_config_proto().version();
   for (const auto& version_info : version_infos.version_infos()) {
@@ -820,17 +819,11 @@ store_cache_directory_from_main_node(PassContextImp& context,
                                      morphizen_cxx::NodeConstRef main_node) {
   int64_t enable_encryption = main_node.get_attr_int("enable_encryption", 0);
   int64_t ep_embed_mode = main_node.get_attr_int("embed_mode", 1);
-  context.cache_file_use_cache_key_prefix_ =
-      main_node.get_attr_int("cache_file_use_cache_key_prefix", 0) != 0;
-  *context.config_.mutable_cache_key() =
-      main_node.get_attr_string("cache_file_prefix", "");
-  if (context.cache_file_use_cache_key_prefix_) {
-    CHECK_NE(context.config_.cache_key(), "")
-        << "cache_key "
-        << "should not be empty when cache_file_use_cache_key_prefix_ is set "
-           "to "
-           "true";
-  }
+  // Always use cache_key prefix - validate it exists
+  auto loaded_cache_key = main_node.get_attr_string("cache_file_prefix", "");
+  CHECK(!loaded_cache_key.empty())
+      << "EP context node must have non-empty cache_file_prefix attribute";
+  *context.config_.mutable_cache_key() = loaded_cache_key;
 #if MORPHIZEN_ORT_API_MAJOR >= 12
   auto ep_cache_context = main_node.release_attr_string("ep_cache_context");
 #else
