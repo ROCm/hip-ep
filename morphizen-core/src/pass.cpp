@@ -11,28 +11,6 @@
 #include <utility>
 namespace morphizen {
 
-void IPass::copy_fix_info(const std::string& from, const std::string& to) {
-  copy_fix_info(from.c_str(), to.c_str());
-}
-
-void IPass::copy_fix_info(const Node& from_node, const Node& to_node) {
-  auto from_name = node_get_output_name(from_node);
-  auto to_name = node_get_output_name(to_node);
-  copy_fix_info(from_name, to_name);
-}
-
-void IPass::copy_fix_info(const char* from, const char* to) {
-  if (has_fix_info(from)) {
-    auto fix_info = get_fix_info(from);
-    set_fix_info(to, fix_info);
-  } else {
-    LOG(FATAL) << "cannot find fix info: "
-               << "from " << from << " " //
-               << "to " << to << " "     //
-        ;
-  }
-}
-
 IPass::action_t PassInfo::get_action(size_t index) const {
   CHECK_LT(index, this->size);
   auto ret = IPass::action_t();
