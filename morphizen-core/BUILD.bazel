@@ -296,8 +296,6 @@ cc_library(
         "src/binary/mem_binary.cpp",
         "src/binary/xclbin_file.cpp",
         "src/util.cpp",
-        "src/cache_dir.cpp",
-        "src/cache_dir.hpp",
         "src/config.hpp",
         "src/config.cpp",
         "src/custom_op.cpp",

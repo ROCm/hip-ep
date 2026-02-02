@@ -48,7 +48,6 @@ int main(int argc, char* argv[]) {
         "input,i", po::value<std::string>(), "input onnx model file")(
         "output,o", po::value<std::string>(), "output onnx model file")(
         "output-txt,t", po::value<std::string>(), "output model to txt file")(
-        "cache,c", po::value<std::string>(), "cache file")(
         "pass,p", po::value<std::vector<std::string>>()->multitoken(),
         "pass list (can be specified multiple times)");
 
@@ -70,8 +69,6 @@ int main(int argc, char* argv[]) {
     auto opt_output_txt_file = vm.count("output-txt")
                                    ? vm["output-txt"].as<std::string>()
                                    : std::string();
-    auto opt_cache =
-        vm.count("cache") ? vm["cache"].as<std::string>() : std::string();
     auto opt_pass = vm.count("pass") ? vm["pass"].as<std::vector<std::string>>()
                                      : std::vector<std::string>();
 
@@ -85,9 +82,6 @@ int main(int argc, char* argv[]) {
     if (!validate_path(opt_output_txt_file, "output-txt")) {
       return 1;
     }
-    if (!validate_path(opt_cache, "cache")) {
-      return 1;
-    }
 
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "morphizen-graph-opt");
     try {
@@ -98,9 +92,6 @@ int main(int argc, char* argv[]) {
     }
 
     std::shared_ptr<PassContext> context = PassContext::create();
-    if (!opt_cache.empty()) {
-      context = load_context(opt_cache);
-    }
 
     auto protos = std::vector<std::unique_ptr<PassProto>>{};
     auto passes = std::vector<std::shared_ptr<morphizen::IPass>>{};

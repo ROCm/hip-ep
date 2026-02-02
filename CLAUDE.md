@@ -21,9 +21,11 @@ Guidance for Claude Code when working with this repository.
 
 **Configure**:
 ```bash
+# CRITICAL: CMAKE_PREFIX_PATH must be absolute path (relative paths fail)
+LOCAL_DIR=$(cd ../../local && pwd)
 cmake -S . -B ../../build/$(basename $PWD) -DBUILD_SHARED_LIBS=OFF \
   "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded\$<\$<CONFIG:Debug>:Debug>" \
-  -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH=../../local \
+  -DCMAKE_BUILD_TYPE=Debug "-DCMAKE_PREFIX_PATH=$LOCAL_DIR" \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
   -Dmorphizen_ENABLE_UNIT_TEST=ON --fresh
 ```

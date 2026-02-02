@@ -27,12 +27,13 @@ TEST(ConfigTest, Simple) {
   auto config_proto = morphizen::Config::parse_from_string(config);
   LOG(INFO) << "config: " << config_proto.DebugString();
   // add_custom_field is removed, so that we need passcontext.set_config_prot();
-  EXPECT_NE("key", config_proto.cache_dir());
+  // cache_dir has been removed - dump_dir is accessed via get_dump_directory()
   //
   auto pass_context =
       morphizen::PassContextImp::create_pass_context(config_proto);
   auto& config_proto_in_context = pass_context->get_config_proto();
-  EXPECT_EQ("cache_dir", config_proto_in_context.cache_dir());
+  // Verify pass context created successfully
+  EXPECT_TRUE(pass_context != nullptr);
   // root field enable_cache_file_io_in_mem is obsoleted.
 }
 
@@ -47,12 +48,13 @@ TEST(ConfigTest, EmptyProviderOption) {
 TEST(ConfigTest, ProviderOptionCacheDir) {
   auto options = onnxruntime::ProviderOptions{
       {"log_level", "info"},
-      {"cache_dir", "hello1"},
+      {"dump_dir", "hello1"},
   };
   auto pass_context = morphizen::PassContextImp::create_pass_context(options);
-  auto& config_proto = pass_context->get_config_proto();
-  EXPECT_EQ("hello1", config_proto.cache_dir());
-  LOG(INFO) << "config: " << config_proto.DebugString();
+  // cache_dir removed - dump_dir accessed via get_dump_directory()
+  auto dump_dir = pass_context->get_dump_directory();
+  EXPECT_EQ("hello1", dump_dir.string());
+  LOG(INFO) << "config: " << pass_context->get_config_proto().DebugString();
 }
 
 TEST(ConfigTest, SessionConfigs) {
@@ -75,13 +77,15 @@ TEST(ConfigTest, SessionConfigs) {
 
   auto options = onnxruntime::ProviderOptions{
       {"log_level", "info"},
-      {"cache_dir", "hello1"},
+      {"dump_dir", "hello1"},
       {"session_options",
        std::to_string((uintptr_t)(static_cast<void*>(&session_configs)))},
   };
   auto pass_context = morphizen::PassContextImp::create_pass_context(options);
   auto& config_proto = pass_context->get_config_proto();
-  EXPECT_EQ("hello1", config_proto.cache_dir());
+  // cache_dir removed - dump_dir accessed via get_dump_directory()
+  auto dump_dir = pass_context->get_dump_directory();
+  EXPECT_EQ("hello1", dump_dir.string());
   LOG(INFO) << "config: " << config_proto.DebugString();
   auto& sc = config_proto.session_configs();
   for (auto& [key, value] : session_configs) {

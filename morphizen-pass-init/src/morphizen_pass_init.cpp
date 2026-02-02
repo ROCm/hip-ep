@@ -16,9 +16,10 @@ struct InitPass {
     if (ENV_PARAM(XLNX_ENABLE_DUMP_ONNX_MODEL) ||
         self.get_context()->get_provider_option("pass.init.enable_dump", "0") ==
             "1") {
-      auto default_log_dir = self.get_log_path().u8string();
+      auto default_dump_dir =
+          self.get_context()->get_dump_directory().u8string();
       auto log_dir = self.get_context()->get_provider_option(
-          "pass.init.directory", default_log_dir);
+          "pass.init.directory", default_dump_dir);
       auto log_dir_path = std::filesystem::u8path(log_dir);
       if (!std::filesystem::exists(log_dir_path)) {
         std::filesystem::create_directories(log_dir_path);

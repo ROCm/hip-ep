@@ -18,6 +18,20 @@ Quick summary:
 5. Continue working, commit and push frequently
 6. Mark as ready for review when complete
 
+**PR Title Convention for Backlog Issues:**
+
+When creating PRs for backlog issues, ALWAYS include the issue number in the title:
+
+- ✅ CORRECT: `Issue #006: Remove legacy cache_dir system (~220-280 LOC)`
+- ❌ WRONG: `Remove legacy cache_dir system (~220-280 LOC)`
+
+Example:
+```bash
+gh pr create --draft --title "Issue #006: Remove legacy cache_dir system" --body "..."
+```
+
+This ensures PRs are easily linked to their corresponding issues in docs/project/backlog.md.
+
 ## Switching to a PR Branch
 
 ### Quick Check: Current Branch

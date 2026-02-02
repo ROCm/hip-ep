@@ -30,8 +30,8 @@ protected:
   void SetUp() override {
     // Set up any necessary resources before each test
     passContext = morphizen::PassContext::create();
-    dynamic_cast<morphizen::PassContextImp*>(passContext.get())
-        ->pass_context_log_dir_ = CMAKE_CURRENT_BINARY_PATH;
+    // pass_context_log_dir_ removed - dump directory now accessed via
+    // get_dump_directory()
   }
 
   void TearDown() override {
@@ -368,15 +368,15 @@ TEST_F(PassContextConfigTest, Config) {
   auto cache_dir = CMAKE_CURRENT_BINARY_PATH / "c1";
   std::string cache_key =
       "33ad2fe7c4a7b71e55f5cbd9c0569bb4"; // use graph io based memory md5value.
-  auto log_dir = cache_dir / cache_key;
+  auto dump_dir = cache_dir / cache_key;
   CreateContext(onnxruntime::ProviderOptions{
-      {"cacheDir", cache_dir.u8string()},
+      {"dump_dir", cache_dir.u8string()},
   });
-  ASSERT_EQ(passContext_->get_log_dir(), log_dir);
+  ASSERT_EQ(passContext_->get_dump_directory(), dump_dir);
   CreateContext(onnxruntime::ProviderOptions{
-      {"cache_dir", cache_dir.u8string()},
+      {"dump_dir", cache_dir.u8string()},
   });
-  ASSERT_EQ(passContext_->get_log_dir(), log_dir);
+  ASSERT_EQ(passContext_->get_dump_directory(), dump_dir);
 }
 
 TEST_F(PassContextConfigTest, ProviderOptions) {
@@ -405,7 +405,7 @@ TEST_F(PassContextConfigTest, ProviderOptions) {
             "value3_in_target_proto");
   EXPECT_EQ(passContext_->get_provider_option("k4", "value4_in_code"),
             "value4_in_target_proto");
-  EXPECT_EQ(passContext_->get_log_dir(),
+  EXPECT_EQ(passContext_->get_dump_directory(),
             std::filesystem::path("cache_dir_in_provider_option") /
                 "cache_key_in_provider_option");
   auto all_provider_options = passContext_->get_all_provider_options();

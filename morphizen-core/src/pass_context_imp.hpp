@@ -172,13 +172,11 @@ public:
   create_pass_context(const onnxruntime::ProviderOptions& options);
 
 public:
-  std::filesystem::path pass_context_log_dir_;
   std::map<std::string, std::vector<AttributeProtoPtr>> node_extra_attrs;
   std::deque<IPass*> current_pass_stack;
   ContextProto context_proto;
   ConfigProto config_; // Runtime-only INPUT (never serialized)
   bool is_ep_context_model = false;
-  bool cache_dir_set = false;
   std::filesystem::path model_path;
   std::unique_ptr<morphizen_cxx::Model> ep_context_model_;
   std::chrono::time_point<std::chrono::steady_clock> start_ =
@@ -191,7 +189,25 @@ public:
 public:
   ~PassContextImp();
   int allocate_suffix() const;
-  virtual const std::filesystem::path& get_log_dir() const override final;
+
+  /**
+   * @brief Returns the directory path for debugging and troubleshooting dumps.
+   *
+   * This directory is used ONLY for debugging output files such as graph dumps
+   * (.txt, .onnx), fix info, and diagnostic reports. It is NOT used for cache
+   * persistence (which uses EP context tar-based cache).
+   *
+   * The dump directory can be overridden via the 'dump_dir' provider option.
+   * Otherwise, defaults to: temp/morphizen_dumps/<cache_key>
+   *
+   * Directory is created on-demand when dump operations are performed.
+   *
+   * @return The directory path where dump files should be written.
+   *
+   * @note This replaces the legacy get_log_dir() for dump operations.
+   * @see maybe_dump_txt(), maybe_dump_onnx(), dump_fix_info()
+   */
+  virtual std::filesystem::path get_dump_directory() const override final;
   virtual std::optional<std::string>
   get_provider_option(const std::string& option_name) const override final;
   virtual std::optional<std::string>
@@ -299,8 +315,6 @@ public:
 
   virtual std::shared_ptr<void>
   get_context_resource(const std::string& name) const override final;
-  virtual std::filesystem::path xclbin_path_to_cache_files(
-      const std::filesystem::path& path) const override final;
   virtual std::optional<std::vector<char>>
   read_xclbin(const std::filesystem::path& path) const override final;
   virtual std::unique_ptr<PassContextTimer>

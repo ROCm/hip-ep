@@ -76,14 +76,6 @@ public:
 public:
   virtual ~PassContext() = default;
   /**
-   * @brief Gets the directory path where log files are stored.
-   *
-   * @return The directory path where log files are stored.
-   *
-   * This directory is the cache directory.
-   */
-  virtual const std::filesystem::path& get_log_dir() const = 0;
-  /**
    * Retrieves the value of a provider option based on the given option name.
    *
    * @param option_name The name of the option to retrieve.
@@ -233,6 +225,19 @@ public:
 
   virtual std::filesystem::path get_model_path() const = 0;
   /**
+   * @brief Returns the directory path for debugging and troubleshooting dumps.
+   *
+   * This directory is used ONLY for debugging output files such as graph dumps
+   * (.txt, .onnx), fix info, and diagnostic reports. It is NOT used for cache
+   * persistence (which uses EP context tar-based cache).
+   *
+   * The dump directory can be overridden via the 'dump_dir' provider option.
+   * Otherwise, defaults to: temp/morphizen_dumps/<cache_key>
+   *
+   * @return The directory path where dump files should be written.
+   */
+  virtual std::filesystem::path get_dump_directory() const = 0;
+  /**
    * @brief Reads in-memory cache files into bytes
    *
    * @param filename The name of the file to be read.
@@ -318,14 +323,6 @@ public:
    */
   MORPHIZEN_DLL_SPEC static std::unique_ptr<PassContext> create();
 
-  /**
-   * @brief Dump xclbin to cache directory if not exists. Return the dumped
-   * xclbin path
-   *
-   * @return The xclbin path.
-   */
-  virtual std::filesystem::path
-  xclbin_path_to_cache_files(const std::filesystem::path& path) const = 0;
   /**
    * @brief Reads an xclbin file from the specified path.
    *

@@ -9,7 +9,6 @@
 #include <glog/logging.h>
 ///
 
-#include "./cache_dir.hpp"
 #include "./config.hpp"
 #include "./profile_utils.hpp"
 #include "morphizen/env_config.hpp"
@@ -277,18 +276,9 @@ void Pass::maybe_gc(Graph& graph) const {
 
 void* Pass::get_state() { return state_.get(); }
 
-std::filesystem::path
-Pass::get_cache_file_name(const std::string& filename) const {
-  return morphizen::get_cache_file_name(*context_, filename);
-}
-
 const ConfigProto& Pass::get_config_proto() const { return context_->config_; }
 std::map<std::string, std::string> Pass::get_all_provider_options() const {
   return context_->get_all_provider_options();
-}
-
-const std::filesystem::path& Pass::get_log_path() const {
-  return context_->get_log_dir();
 }
 
 void Pass::add_subgraph_device_count(const std::string& device, int count) {
@@ -447,29 +437,6 @@ IPass::run_passes(std::vector<std::shared_ptr<IPass>> passes, Graph& graph) {
   Pass::run_all_passes(passes, graph);
 }
 
-static void load_protobuf_message(const fs::path& filename,
-                                  google::protobuf::Message& msg) {
-  auto json_str = slurp(filename);
-  if (json_str.empty()) {
-    return;
-  }
-  auto status = google::protobuf::util::JsonStringToMessage(json_str, &msg);
-  CHECK(status.ok()) << "cannot parse json string: filename=" << filename
-                     << " json=\"" << json_str << "\"";
-}
-
-static void load_context_json(PassContextImp& context) {
-  context.context_proto.Clear();
-  load_protobuf_message(get_cache_file_name(context, "context.json"),
-                        context.context_proto);
-}
-MORPHIZEN_DLL_SPEC std::shared_ptr<PassContext>
-load_context(const std::filesystem::path& cache_dir) {
-  auto context = std::make_shared<morphizen::PassContextImp>();
-  context->pass_context_log_dir_ = cache_dir;
-  load_context_json(*context);
-  return context;
-}
 std::string Pass::seq_num_as_string() const {
   auto index_s = std::to_string(sequence_no_);
   std::string::size_type n_zero = 4u;
@@ -480,7 +447,11 @@ std::string Pass::seq_num_as_string() const {
 std::filesystem::path Pass::get_dump_file_name(size_t action_index,
                                                const std::string& ext) const {
   auto index_s = seq_num_as_string();
-  return context_->get_log_dir() /
+  // TODO: Dump directory (temp/morphizen_dumps/cache_key) is used ONLY for
+  // debugging/troubleshooting output files. It is NOT a cache directory.
+  // Cache persistence uses EP context tar-based system (tar_file_).
+  // See Issue #006 for historical context about cache_dir removal.
+  return context_->get_dump_directory() /
          (std::string("morphizen.") + index_s + "." + name() + //
           ".action_" + std::to_string(action_index) +          //
           ext);

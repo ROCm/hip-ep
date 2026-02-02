@@ -25,7 +25,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 - [Issue #001: Add mmap Support for Embed Mode](issues/001-mmap-support-for-embed-mode.md) - Feature to enable memory-mapped file access for EP context embed mode
 - [Issue #004: Remove encryption_key Copying](issues/004-remove-encryption-key-copying.md) - Remove encryption_key copying, read from provider_options directly
 - [Issue #005: Move cache_key to ContextProto](issues/005-remove-cache-key-copying.md) - Move cache_key from ConfigProto to ContextProto
-- [Issue #006: Remove cache_dir Entirely](issues/006-remove-cache-dir-copying.md) - Remove legacy disk-based cache system (~200-300 LOC)
 - [Issue #007: Clean Up Target with Two-Path Architecture](issues/007-remove-target-copying.md) - Remove target copying, two-path architecture
 - [Issue #009: TargetProto Provider Options Injection Cleanup](issues/009-targetproto-provider-options-injection-cleanup.md) - Remove xclbin API functions
 - [Issue #010: Remove cache_files - Dead Code](issues/010-cache-files-investigation.md) - Remove cache_files proto field and restore_cache_files()
@@ -49,6 +48,7 @@ _(Max 5 items, detailed files deleted)_
 
 - **Issue #022: Remove fix_info Dead Code** - PR #81 - Remove unused fix_info proto field and API methods (~73 LOC)
 - **Issue #008: MEP Table Cleanup** - PR #76 - Removed MEP table runtime code, documentation, and test code
+- **Issue #006:** Remove cache_dir Entirely - PR #80 - Remove legacy disk-based cache system (~200 LOC)
 - **Issue #003:** Remove ConfigProto from ContextProto - PR #77
 - **Issue #002:** Remove mem_files_ - Always Create tar_file_ for Cache - PR #67
 - **Issue #020: Remove suffix_counter Dead Code** - PR #75 - Remove dead code that reads suffix_counter from model metadata (never written)
@@ -66,6 +66,15 @@ When implementation is done (code complete, tests pass), update the backlog befo
 5. Mark PR ready for review
 
 Keep max 5 in "Recently Completed". When adding #6, delete oldest.
+
+**CRITICAL: PR Title Must Include Issue Number**
+
+When creating PRs for backlog issues, ALWAYS include the issue number in the PR title:
+
+- ✅ CORRECT: `Issue #006: Remove legacy cache_dir system (~220-280 LOC)`
+- ❌ WRONG: `Remove legacy cache_dir system (~220-280 LOC)`
+
+This ensures PR is easily linked to the issue and makes tracking easier.
 
 ---
 
