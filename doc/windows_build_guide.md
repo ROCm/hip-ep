@@ -1,6 +1,6 @@
-# hipDNNEP and onnx-hipdnn-ep Windows Build Guide
+# onnx-hipdnn-ep Windows Build Guide
 
-This document provides complete step-by-step instructions for building and testing hipDNNEP and onnx-hipdnn-ep on Windows with AMD ROCm GPU.
+This document provides complete step-by-step instructions for building and testing onnx-hipdnn-ep on Windows with AMD ROCm GPU.
 
 > **Note**: This is the Windows adaptation of the Linux build guide. Key differences from Linux:
 > - No SSH required (local execution)
@@ -13,13 +13,12 @@ This document provides complete step-by-step instructions for building and testi
 1. [Checking AMD GPU Hardware Information](#checking-amd-gpu-hardware-information)
 2. [Prerequisites](#prerequisites)
 3. [Environment Setup](#environment-setup)
-4. [Phase 1: Build Original hipDNNEP](#phase-1-build-original-hipdnnep)
+4. [Phase 1: Build ONNXRuntime](#phase-1-build-onnxruntime)
 5. [Phase 2: Build Morphizen + onnx-hipdnn-ep](#phase-2-build-morphizen--onnx-hipdnn-ep)
 6. [Phase 3: Testing and Validation](#phase-3-testing-and-validation)
 7. [Environment Variables Reference](#environment-variables-reference)
 8. [Troubleshooting](#troubleshooting)
-9. [Patches Reference](#patches-reference)
-10. [Quick Reference](#quick-reference)
+9. [Quick Reference](#quick-reference)
 
 ---
 
@@ -221,7 +220,6 @@ The git hash `56870acb4f` appears in both `ROCM_BUILD_INFO` and HIP version, con
 | Ninja | 1.11.1+ | Build system |
 | Git | 2.x+ | Version control |
 | Visual Studio 2022 | Community+ | C++ compiler (for some components) |
-| Clang | 20.x | Required for hipDNNEP (MSVC incompatible) |
 | Python | 3.x | Build scripts |
 
 ### Directory Structure
@@ -231,12 +229,10 @@ This guide uses the following directory structure:
 ```
 C:\Develop\m\
 ├── source\           # Source code repositories
-│   ├── hipDNNEP\
 │   ├── MorphiZen\
 │   ├── onnx-hipdnn-ep\
 │   └── onnxruntime\
 ├── build\            # Build directories
-│   ├── hipDNNEP\
 │   ├── onnxruntime\
 │   └── onnx-hipdnn-ep\
 ├── local\            # Installation prefix
@@ -245,8 +241,7 @@ C:\Develop\m\
 │   └── include\
 └── dist\             # External tools (read-only/downloaded)
     ├── clang\        # Clang 20.x
-    ├── therock\      # TheRock SDK
-    └── iree\         # IREE Compiler (if separate)
+    └── therock\      # TheRock SDK
 ```
 
 ---
@@ -312,9 +307,7 @@ New-Item -ItemType Directory -Force -Path @(
     "C:\Develop\m\source",
     "C:\Develop\m\build",
     "C:\Develop\m\local",
-    "C:\Develop\m\dist\clang",
     "C:\Develop\m\dist\therock",
-    "C:\Develop\m\dist\iree"
 )
 ```
 
@@ -352,7 +345,7 @@ This installs LLVM to `C:\Program Files\LLVM`. **Restart your terminal** to refr
 
 ### 1.5 Install TheRock SDK (Windows)
 
-TheRock provides HIP, hipDNN, IREE, and other ROCm components.
+TheRock provides HIP, hipDNN, and other ROCm components.
 
 #### Step 1: Determine Your GPU Architecture
 
@@ -582,44 +575,6 @@ Write-Host "`nDone! Verify the fixes by running CMake configure again." -Foregro
 .\fix_therock_paths.ps1 -TherockDist "C:\Develop\m\dist\therock"
 ```
 
-### 1.6 Install IREE Compiler
-
-IREE (Intermediate Representation Execution Environment) is required by hipDNN backend for kernel code generation. There are two ways to install it:
-
-#### Option A: Check if included in TheRock
-
-```powershell
-& "C:\Develop\m\dist\therock\bin\iree-compile.exe" --version
-```
-
-If this works, IREE is already included in your TheRock distribution.
-
-#### Option B: Install via pip (Recommended)
-
-IREE is now distributed as Python wheels, which is the easiest installation method:
-
-```powershell
-# Install IREE compiler via pip
-python -m pip install iree-base-compiler --upgrade
-
-# Verify installation - check Scripts directory
-& "$env:LOCALAPPDATA\Programs\Python\Python312\Scripts\iree-compile.exe" --version
-```
-
-This installs `iree-compile.exe` to your Python Scripts directory.
-
-**Important**: Add the Python Scripts directory to your PATH for CMake to find it:
-```powershell
-$env:PATH = "$env:LOCALAPPDATA\Programs\Python\Python312\Scripts;$env:PATH"
-```
-
-#### Option C: Download standalone release
-
-1. Visit: https://github.com/iree-org/iree/releases
-2. Download `iree-dist-*-windows-x86_64.tar.xz`
-3. Extract to `C:\Develop\m\dist\iree`
-4. Add to PATH: `$env:PATH = "C:\Develop\m\dist\iree\bin;$env:PATH"`
-
 ### 1.7 Set Environment Variables
 
 #### Option A: Set for Current Session Only
@@ -647,215 +602,13 @@ if ($currentPath -notlike "*therock*") {
 }
 ```
 
-#### Option C: Use Setup Script
-
-Create `C:\Develop\m\setup_env.ps1`:
-```powershell
-# Environment setup script for hipDNNEP and onnx-hipdnn-ep
-$env:THEROCK_DIST = "C:\Develop\m\dist\therock"
-$env:HIP_PLATFORM = "amd"
-$env:ONNXRUNTIME_ROOT = "C:\Develop\m\source\onnxruntime"
-$env:PATH = "C:\Develop\m\dist\therock\bin;C:\Develop\m\dist\clang\bin;$env:PATH"
-
-Write-Host "Environment configured:" -ForegroundColor Green
-Write-Host "  THEROCK_DIST = $env:THEROCK_DIST"
-Write-Host "  HIP_PLATFORM = $env:HIP_PLATFORM"
-Write-Host "  ONNXRUNTIME_ROOT = $env:ONNXRUNTIME_ROOT"
-```
-
-Usage:
-```powershell
-. C:\Develop\m\setup_env.ps1
-```
-
 ---
 
-## Phase 1: Build hipDNNEP
+## Phase 1: Build ONNXRuntime
 
-There are two ways to build hipDNNEP:
+### Build ONNXRuntime
 
-### Option A: Build from onnx-hipdnn-ep Submodule (Recommended)
-
-If you're working with onnx-hipdnn-ep, hipDNNEP is included as a git submodule with all Windows patches already applied:
-
-```powershell
-Set-Location C:\Develop\m\Source\onnx-hipdnn-ep
-git submodule update --init --recursive
-
-# The submodule is at: external/hipDNNEP
-```
-
-Build using the submodule:
-```powershell
-$buildDir = "C:\Develop\m\build\onnx-hipdnn-ep-e2e"
-$srcDir = "C:\Develop\m\Source\onnx-hipdnn-ep\external\hipDNNEP"
-
-cmake -G Ninja -B $buildDir -S $srcDir `
-    -DCMAKE_BUILD_TYPE=Release `
-    -DCMAKE_CXX_COMPILER="C:/Program Files/LLVM/bin/clang++.exe" `
-    -DCMAKE_C_COMPILER="C:/Program Files/LLVM/bin/clang.exe" `
-    -DTHEROCK_DIST=C:/Develop/m/dist/therock `
-    -DONNXRUNTIME_ROOT=C:/Develop/m/local `
-    -DHIPDNN_EP_BUILD_TESTS=ON
-
-cmake --build $buildDir
-```
-
-### Option B: Clone Upstream Repository
-
-Clone the upstream repository (requires applying patches manually):
-
-```powershell
-Set-Location C:\Develop\m\source
-git clone https://github.com/MaheshRavishankar/hipDNNEP.git
-Set-Location hipDNNEP
-git checkout de7921872f218a75e3f6de589a8ed4be9f08782
-```
-
-### 2.2 Apply Required Patches
-
-The original hipDNNEP contains hardcoded Linux paths that need to be patched.
-
-#### Patch 1: Remove Hardcoded Paths from CMakePresets.json
-
-**Diff** (see [Patches Reference](#patch-1-cmakepresetsjson) for details):
-```diff
---- a/CMakePresets.json
-+++ b/CMakePresets.json
-@@ -14,8 +14,6 @@
-       "installDir": "${sourceDir}/../install/hipDNNEP/${presetName}",
-       "cacheVariables": {
-         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
--        "THEROCK_DIST": "/home/mahesh/TheRock/build/MaheshRelWithDebInfo/dist/rocm",
--        "ONNXRUNTIME_ROOT": "/home/mahesh/onnxruntime/onnxruntime",
-         "HIP_PLATFORM": "amd"
-       }
-     },
-```
-
-**Apply manually** by editing `CMakePresets.json`:
-```powershell
-# Open in editor
-code CMakePresets.json
-# Remove the two lines with hardcoded paths
-```
-
-#### Patch 2: Fix ONNXRuntime Library Path for Windows
-
-**Diff**:
-```diff
---- a/test/CMakeLists.txt
-+++ b/test/CMakeLists.txt
-@@ -15,7 +15,7 @@ if(NOT GTest_FOUND)
- endif()
- 
- # ONNXRuntime library for testing
--set(ONNXRUNTIME_LIB_DIR "${ONNXRUNTIME_ROOT}/build/RelWithDebInfo" CACHE PATH "ONNXRuntime library directory")
-+set(ONNXRUNTIME_LIB_DIR "${ONNXRUNTIME_ROOT}/build/Windows/RelWithDebInfo" CACHE PATH "ONNXRuntime library directory")
-```
-
-**Apply manually**:
-```powershell
-# Open in editor
-code test/CMakeLists.txt
-# Change line 18: Replace "build/RelWithDebInfo" with "build/Windows/RelWithDebInfo"
-```
-
-### 2.3 Build ONNXRuntime
-
-```powershell
-Set-Location C:\Develop\m\source
-git clone https://github.com/microsoft/onnxruntime.git
-Set-Location onnxruntime
-
-# Build with RelWithDebInfo configuration
-.\build.bat --config RelWithDebInfo `
-    --build_shared_lib `
-    --parallel `
-    --compile_no_warning_as_error `
-    --skip_submodule_sync `
-    --build_dir C:\Develop\m\build\onnxruntime
-```
-
-Set environment variable:
-```powershell
-$env:ONNXRUNTIME_ROOT = "C:\Develop\m\source\onnxruntime"
-```
-
-### 2.4 Configure hipDNNEP
-
-```powershell
-Set-Location C:\Develop\m\source\hipDNNEP
-
-# Configure with Clang (MSVC incompatible with TheRock headers)
-# Use the Clang path matching your installation:
-#   - winget: "C:/Program Files/LLVM/bin/clang++.exe"
-#   - custom: "C:/Develop/m/dist/clang/bin/clang++.exe"
-
-cmake -G Ninja `
-    -B C:\Develop\m\build\hipDNNEP\RelWithDebInfo `
-    -S . `
-    -DCMAKE_BUILD_TYPE=RelWithDebInfo `
-    -DCMAKE_CXX_COMPILER="C:/Program Files/LLVM/bin/clang++.exe" `
-    -DTHEROCK_DIST=C:/Develop/m/dist/therock `
-    -DONNXRUNTIME_ROOT=C:/Develop/m/source/onnxruntime `
-    -DCMAKE_PREFIX_PATH="C:/Develop/m/dist/therock"
-```
-
-### 2.5 Build hipDNNEP
-
-```powershell
-cmake --build C:\Develop\m\build\hipDNNEP\RelWithDebInfo
-```
-
-Expected output: `[12/12] Linking CXX executable test/hipdnn_ep_tests.exe`
-
-### 2.6 Prepare Test Environment
-
-Copy required DLLs to test directory:
-```powershell
-$buildDir = "C:\Develop\m\build\hipDNNEP\RelWithDebInfo"
-$testDir = "$buildDir\test"
-
-# Copy hipdnn_ep.dll
-Copy-Item "$buildDir\hipdnn_ep.dll" $testDir -Force
-
-# Copy onnxruntime.dll
-$ortDll = "C:\Develop\m\build\onnxruntime\Windows\RelWithDebInfo\RelWithDebInfo\onnxruntime.dll"
-if (Test-Path $ortDll) {
-    Copy-Item $ortDll $testDir -Force
-}
-```
-
-### 2.7 Run hipDNNEP Tests
-
-```powershell
-Set-Location C:\Develop\m\build\hipDNNEP\RelWithDebInfo
-ctest --output-on-failure
-```
-
-Expected output:
-```
-Test project C:/Develop/m/build/hipDNNEP/RelWithDebInfo
-    Start 1: HipDNNEpLoadTest.RegisterEpLibrary
-1/4 Test #1: HipDNNEpLoadTest.RegisterEpLibrary ........   Passed
-    Start 2: HipDNNEpLoadTest.GetEpDevices
-2/4 Test #2: HipDNNEpLoadTest.GetEpDevices .............   Passed
-    Start 3: HipDNNConvTest.BasicConv2D
-3/4 Test #3: HipDNNConvTest.BasicConv2D ................   Passed
-    Start 4: HipDNNConvTest.ReferenceConvCorrectness
-4/4 Test #4: HipDNNConvTest.ReferenceConvCorrectness ...   Passed
-
-100% tests passed, 0 tests failed out of 4
-```
-
-✅ **Phase 1 Complete**: Original hipDNNEP is now built and tested successfully.
-
----
-
-## Phase 2: Build Morphizen + onnx-hipdnn-ep
-
-### 3.1 Build ONNXRuntime with Vitis AI Support
+### Build ONNXRuntime with Vitis AI Support
 
 ```powershell
 Set-Location C:\Develop\m\source\onnxruntime
@@ -874,14 +627,18 @@ Set-Location C:\Develop\m\source\onnxruntime
 cmake --build C:\Develop\m\build\onnxruntime\Debug --target install
 ```
 
-### 3.2 Clone MorphiZen
+---
+
+## Phase 2: Build Morphizen + onnx-hipdnn-ep
+
+### 3.1 Clone MorphiZen
 
 ```powershell
 Set-Location C:\Develop\m\source
 git clone https://github.com/Xilinx/MorphiZen.git --recursive
 ```
 
-### 3.3 Verify onnx-hipdnn-ep
+### 3.2 Verify onnx-hipdnn-ep
 
 If onnx-hipdnn-ep is the current working directory:
 ```powershell
@@ -889,7 +646,7 @@ Set-Location C:\Develop\m\source\onnx-hipdnn-ep
 git submodule update --init --recursive
 ```
 
-### 3.4 Configure onnx-hipdnn-ep
+### 3.3 Configure onnx-hipdnn-ep
 
 ```powershell
 Set-Location C:\Develop\m\source\onnx-hipdnn-ep
@@ -903,13 +660,13 @@ cmake -G Ninja `
     -DCMAKE_PREFIX_PATH="C:/Develop/m/dist/therock;C:/Develop/m/local"
 ```
 
-### 3.5 Build onnx-hipdnn-ep
+### 3.4 Build onnx-hipdnn-ep
 
 ```powershell
 cmake --build C:\Develop\m\build\onnx-hipdnn-ep --target install
 ```
 
-### 3.6 Verify Build
+### 3.5 Verify Build
 
 ```powershell
 # Check built libraries
@@ -929,23 +686,7 @@ Set-Location C:\Develop\m\build\onnx-hipdnn-ep
 ctest --output-on-failure
 ```
 
-### 4.2 Test Comparison: hipDNNEP vs onnx-hipdnn-ep
-
-#### Test 1: EP Registration (hipDNNEP)
-
-```powershell
-Set-Location C:\Develop\m\build\hipDNNEP\RelWithDebInfo
-ctest -R RegisterEpLibrary --output-on-failure
-```
-
-#### Test 2: Conv2D Operations (hipDNNEP)
-
-```powershell
-Set-Location C:\Develop\m\build\hipDNNEP\RelWithDebInfo
-ctest -R BasicConv2D --output-on-failure
-```
-
-### 4.3 Validation Checklist
+### 4.2 Validation Checklist
 
 - [ ] EP library loads successfully
 - [ ] GPU devices are detected correctly
@@ -1009,20 +750,7 @@ $env:THEROCK_DIST = "C:\Develop\m\dist\therock"
 $env:PATH = "$env:THEROCK_DIST\bin;$env:PATH"
 ```
 
-### Issue 3: iree-compile Not Found
-
-**Error**: `iree-compile not found in PATH`
-
-**Solution**:
-```powershell
-# Check if IREE is in TheRock
-Test-Path "C:\Develop\m\dist\therock\bin\iree-compile.exe"
-
-# If not, download separately and add to PATH
-$env:PATH = "C:\Develop\m\dist\iree\bin;$env:PATH"
-```
-
-### Issue 4: MSVC Compilation Errors with TheRock Headers
+### Issue 3: MSVC Compilation Errors with TheRock Headers
 
 **Error**: Various MSVC-incompatible syntax errors
 
@@ -1033,7 +761,7 @@ cmake -G Ninja `
     ...
 ```
 
-### Issue 5: Tests Not Building
+### Issue 4: Tests Not Building
 
 **Warning**: `ONNXRuntime library not found`
 
@@ -1044,7 +772,7 @@ cmake -G Ninja `
 # To:   "${ONNXRUNTIME_ROOT}/build/Windows/RelWithDebInfo"
 ```
 
-### Issue 6: GPU Not Detected
+### Issue 5: GPU Not Detected
 
 **Error**: `No GPU devices found`
 
@@ -1059,7 +787,7 @@ cmake -G Ninja `
 $env:HIP_PLATFORM = "amd"
 ```
 
-### Issue 7: Unexpected HIP_PLATFORM Error
+### Issue 6: Unexpected HIP_PLATFORM Error
 
 **Error**: `CMake Error at hip-config.cmake: Unexpected HIP_PLATFORM:`
 
@@ -1073,35 +801,7 @@ Or pass it as a CMake variable:
 cmake ... -DHIP_PLATFORM=amd
 ```
 
-### Issue 8: hipdnn_backend.dll Missing at Runtime
-
-**Error**: `Error loading "hipdnn_ep.dll" which depends on "hipdnn_backend.dll" which is missing`
-
-**Solution**: Copy TheRock DLLs to the test directory:
-```powershell
-$buildDir = "C:\Develop\m\build\hipDNNEP\RelWithDebInfo"
-$testDir = "$buildDir\test"
-$therockBin = "C:\Develop\m\dist\therock\bin"
-
-Copy-Item "$therockBin\hipdnn_backend.dll" $testDir -Force
-Copy-Item "$therockBin\amdhip64.dll" $testDir -Force -ErrorAction SilentlyContinue
-```
-
-### Issue 9: hipDNN create_execution_plans Failed
-
-**Error**: `hipDNN create_execution_plans failed: No engine configurations available for the graph`
-
-**Explanation**: This error occurs when the hipDNN backend cannot find suitable GPU kernels for the requested operation. This is typically a hipDNN engine configuration issue, not a hipDNNEP issue.
-
-**Current Status**: The core hipDNNEP integration with ONNX Runtime is working correctly:
-- EP registration: ✅ Working
-- Device detection: ✅ Working
-- Backend availability: ✅ Working
-- GPU kernel execution: ❌ Requires hipDNN engine plugins
-
-**Workaround**: Ensure hipDNN engine plugins are properly installed in `$THEROCK_DIST/bin/hipdnn_plugins/engines/`.
-
-### Issue 10: TheRock SDK Contains Hardcoded Build Paths
+### Issue 7: TheRock SDK Contains Hardcoded Build Paths
 
 **Error**:
 ```
@@ -1141,165 +841,6 @@ CMake Error in level-1-pass-hipdnn/CMakeLists.txt:
 
 ---
 
-## Expected Test Results
-
-### Test Suite Overview
-
-hipDNNEP includes 4 tests:
-
-| Test | Description | Status |
-|------|-------------|--------|
-| `HipDNNEpLoadTest.RegisterEpLibrary` | EP loads and registers with ORT | ✅ Should Pass |
-| `HipDNNEpLoadTest.GetEpDevices` | HipDNN device is detected | ✅ Should Pass |
-| `HipDNNConvTest.BasicConv2D` | GPU convolution execution | ⚠️ May fail (backend config) |
-| `HipDNNConvTest.ReferenceConvCorrectness` | Reference implementation | ✅ Should Pass |
-
-### Successful Build Output
-
-Using the submodule (Option A):
-```
--- Found HIP: C:/Develop/m/dist/therock
--- Found iree-compile: C:/Users/.../Scripts/iree-compile.exe
--- Found ONNXRuntime headers at: C:/Develop/m/local/include/onnxruntime
--- Found ONNXRuntime library: C:/Develop/m/local/lib/onnxruntime.lib
--- Configuring done
--- Build files have been written to: C:/Develop/m/build/onnx-hipdnn-ep-e2e
-
-[17/17] Linking CXX shared library hipdnn_ep.dll
-BUILD SUCCESSFUL!
-```
-
-### Partial Test Pass (Expected with Current hipDNN)
-
-```
-Test project C:/Develop/m/build/onnx-hipdnn-ep-e2e
-    Start 1: HipDNNEpLoadTest.RegisterEpLibrary
-1/4 Test #1: HipDNNEpLoadTest.RegisterEpLibrary ........   Passed
-    Start 2: HipDNNEpLoadTest.GetEpDevices  
-2/4 Test #2: HipDNNEpLoadTest.GetEpDevices .............   Passed
-    Start 3: HipDNNConvTest.BasicConv2D
-3/4 Test #3: HipDNNConvTest.BasicConv2D ................   Failed (backend)
-    Start 4: HipDNNConvTest.ReferenceConvCorrectness
-4/4 Test #4: HipDNNConvTest.ReferenceConvCorrectness ...   Passed
-
-75% tests passed, 1 tests failed out of 4
-```
-
-**Note**: 75% pass rate with `BasicConv2D` failure is expected. The core hipDNNEP integration is working correctly. The Conv2D execution failure is due to hipDNN backend engine configuration, not the ONNX Runtime execution provider.
-
----
-
-## Patches Reference
-
-### Patch 1: CMakePresets.json
-
-**File**: `CMakePresets.json`
-
-**Purpose**: Remove hardcoded Linux paths from the author's environment.
-
-**Diff**:
-```diff
---- a/CMakePresets.json
-+++ b/CMakePresets.json
-@@ -14,8 +14,6 @@
-       "installDir": "${sourceDir}/../install/hipDNNEP/${presetName}",
-       "cacheVariables": {
-         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
--        "THEROCK_DIST": "/home/mahesh/TheRock/build/MaheshRelWithDebInfo/dist/rocm",
--        "ONNXRUNTIME_ROOT": "/home/mahesh/onnxruntime/onnxruntime",
-         "HIP_PLATFORM": "amd"
-       }
-     },
-```
-
-**After modification**, the `cacheVariables` section should look like:
-```json
-"cacheVariables": {
-  "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-  "HIP_PLATFORM": "amd"
-}
-```
-
-### Patch 2: CMakeLists.txt - ONNXRuntime Include Path
-
-**File**: `CMakeLists.txt`
-
-**Purpose**: Support both ORT source layout and installed layout for headers.
-
-**Problem**: The original code only looks for headers at `include/onnxruntime/core/session/` (source layout), but installed ORT has headers at `include/onnxruntime/` (flat layout).
-
-**Diff**:
-```diff
---- a/CMakeLists.txt
-+++ b/CMakeLists.txt
-@@ -40,12 +40,21 @@
- if(NOT ONNXRUNTIME_ROOT)
-   message(FATAL_ERROR "ONNXRUNTIME_ROOT must be specified...")
- endif()
- 
--set(ONNXRUNTIME_INCLUDE_DIR "${ONNXRUNTIME_ROOT}/include/onnxruntime/core/session")
--
--# Verify ONNXRuntime headers exist
--if(NOT EXISTS "${ONNXRUNTIME_INCLUDE_DIR}/onnxruntime_c_api.h")
--  message(FATAL_ERROR "ONNXRuntime headers not found at ${ONNXRUNTIME_INCLUDE_DIR}")
-+# Try source layout first: include/onnxruntime/core/session/
-+set(ONNXRUNTIME_INCLUDE_DIR "${ONNXRUNTIME_ROOT}/include/onnxruntime/core/session")
-+if(NOT EXISTS "${ONNXRUNTIME_INCLUDE_DIR}/onnxruntime_c_api.h")
-+  # Try installed layout: include/onnxruntime/
-+  set(ONNXRUNTIME_INCLUDE_DIR "${ONNXRUNTIME_ROOT}/include/onnxruntime")
-+  if(NOT EXISTS "${ONNXRUNTIME_INCLUDE_DIR}/onnxruntime_c_api.h")
-+    message(FATAL_ERROR "ONNXRuntime headers not found. Tried:\n"
-+                        "  - ${ONNXRUNTIME_ROOT}/include/onnxruntime/core/session/\n"
-+                        "  - ${ONNXRUNTIME_ROOT}/include/onnxruntime/")
-+  endif()
- endif()
-+message(STATUS "Found ONNXRuntime headers at: ${ONNXRUNTIME_INCLUDE_DIR}")
-```
-
-### Patch 3: test/CMakeLists.txt - ONNXRuntime Library Path
-
-**File**: `test/CMakeLists.txt`
-
-**Purpose**: Support multiple ONNXRuntime library locations (source build vs installed).
-
-**Diff**:
-```diff
---- a/test/CMakeLists.txt
-+++ b/test/CMakeLists.txt
-@@ -16,12 +16,22 @@
- 
- # ONNXRuntime library for testing
--set(ONNXRUNTIME_LIB_DIR "${ONNXRUNTIME_ROOT}/build/RelWithDebInfo" CACHE PATH "ONNXRuntime library directory")
-+set(ONNXRUNTIME_LIB_DIR "${ONNXRUNTIME_ROOT}/build/RelWithDebInfo" CACHE PATH "...")
- 
- find_library(ONNXRUNTIME_LIB onnxruntime
--  HINTS ${ONNXRUNTIME_LIB_DIR}
-+  HINTS
-+    ${ONNXRUNTIME_LIB_DIR}
-+    "${ONNXRUNTIME_ROOT}/lib"
-+    "${ONNXRUNTIME_ROOT}/bin"
-+    "${ONNXRUNTIME_ROOT}/build/Windows/RelWithDebInfo/RelWithDebInfo"
- )
- 
- if(NOT ONNXRUNTIME_LIB)
--  message(WARNING "ONNXRuntime library not found at ${ONNXRUNTIME_LIB_DIR}...")
-+  message(WARNING "ONNXRuntime library not found. Tried:\n"
-+                  "  - ${ONNXRUNTIME_LIB_DIR}\n"
-+                  "  - ${ONNXRUNTIME_ROOT}/lib\n"
-+                  "  - ${ONNXRUNTIME_ROOT}/bin\n"
-+                  "  - ${ONNXRUNTIME_ROOT}/build/Windows/RelWithDebInfo/RelWithDebInfo\n"
-+                  "Tests will not be built.")
-   return()
- endif()
-+message(STATUS "Found ONNXRuntime library: ${ONNXRUNTIME_LIB}")
-```
-
-**Note**: This allows hipDNNEP to work with both:
-- ORT source builds: `build/Windows/RelWithDebInfo/`
-- ORT installed prefix: `lib/` or `bin/`
-
----
-
 ## Quick Reference
 
 ### Complete Command Sequence (PowerShell)
@@ -1330,7 +871,7 @@ $env:HIP_PLATFORM = "amd"
 $env:PATH = "$env:THEROCK_DIST\bin;C:\Develop\m\dist\clang\bin;$env:PATH"
 
 # ============================================================================
-# PHASE 1: BUILD HIPDNNEP
+# PHASE 1: BUILD ONNXRuntime
 # ============================================================================
 
 # Clone and build ONNXRuntime
@@ -1339,27 +880,6 @@ git clone https://github.com/microsoft/onnxruntime.git
 Set-Location onnxruntime
 .\build.bat --config RelWithDebInfo --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir C:\Develop\m\build\onnxruntime
 
-$env:ONNXRUNTIME_ROOT = "C:\Develop\m\source\onnxruntime"
-
-# Clone hipDNNEP
-Set-Location C:\Develop\m\source
-git clone https://github.com/MaheshRavishankar/hipDNNEP.git
-Set-Location hipDNNEP
-git checkout de7921872f218a75e3f6de589a8ed4be9f08782
-
-# Apply patches (see Patches Reference section)
-# Then configure and build (adjust Clang path if needed):
-cmake -G Ninja -B C:\Develop\m\build\hipDNNEP\RelWithDebInfo -S . `
-    -DCMAKE_BUILD_TYPE=RelWithDebInfo `
-    -DCMAKE_CXX_COMPILER="C:/Program Files/LLVM/bin/clang++.exe" `
-    -DTHEROCK_DIST=C:/Develop/m/dist/therock `
-    -DONNXRUNTIME_ROOT=C:/Develop/m/source/onnxruntime
-
-cmake --build C:\Develop\m\build\hipDNNEP\RelWithDebInfo
-
-# Run tests
-Set-Location C:\Develop\m\build\hipDNNEP\RelWithDebInfo
-ctest --output-on-failure
 
 # ============================================================================
 # PHASE 2: BUILD onnx-hipdnn-ep
@@ -1393,8 +913,8 @@ ctest --output-on-failure
 
 ## Summary
 
-This guide provides complete instructions for building and testing hipDNNEP and onnx-hipdnn-ep on Windows:
+This guide provides complete instructions for building and testing  onnx-hipdnn-ep on Windows:
 
 1. ✅ Environment setup with required tools (CMake, Ninja, Clang, TheRock)
-2. ✅ Building original hipDNNEP with required patches
+2. ✅ Building ONNXRuntime with required patches
 3. ✅ Building onnx-hipdnn-ep

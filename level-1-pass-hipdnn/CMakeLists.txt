@@ -23,10 +23,10 @@ list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}/../../third-party/nlohmann-json/d
 find_package(nlohmann_json CONFIG REQUIRED)
 
 find_package (glog CONFIG REQUIRED)
-include(cmake/generate_pattern_inc.cmake)
+
 set(LIB_NAME morphizen-level1-pass-hipdnn)
 # MIOpen version: pass_main.cpp now generates JSON metadata instead of hipDNN graphs
-add_library(${LIB_NAME} STATIC src/pass_main.cpp ${CMAKE_CURRENT_BINARY_DIR}/hipdnn_pattern_json.hpp)
+add_library(${LIB_NAME} STATIC src/pass_main.cpp)
 target_link_libraries(${LIB_NAME} PUBLIC
 	hipdnn_proto
 	morphizen::morphizen-core-static

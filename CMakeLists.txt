@@ -17,7 +17,6 @@ if(MSVC)
 endif()
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
-include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/presets.cmake)
 add_subdirectory(proto)
 add_subdirectory(level-1-pass-hipdnn)
 add_subdirectory(custom-op-hipdnn)
