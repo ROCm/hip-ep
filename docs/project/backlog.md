@@ -27,7 +27,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 - [Issue #005: Move cache_key to ContextProto](issues/005-remove-cache-key-copying.md) - Move cache_key from ConfigProto to ContextProto
 - [Issue #007: Clean Up Target with Two-Path Architecture](issues/007-remove-target-copying.md) - Remove target copying, two-path architecture
 - [Issue #009: TargetProto Provider Options Injection Cleanup](issues/009-targetproto-provider-options-injection-cleanup.md) - Remove xclbin API functions
-- [Issue #010: Remove cache_files - Dead Code](issues/010-cache-files-investigation.md) - Remove cache_files proto field and restore_cache_files()
 - [Issue #012: session_configs Swapping](issues/012-session-configs-swapping.md) - Resolved by #003
 - [Issue #013: provider_options Aggregation](issues/013-provider-options-aggregation.md) - Related to #003, #008, #009
 - [Issue #014: Dynamic Pass Registration](issues/014-dynamic-pass-registration.md) - Design flaw needing architectural redesign
@@ -43,14 +42,13 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
 ## Recently Completed
 
-_(Max 5 items, detailed files deleted)_
+_(Max 5 items, deleted files deleted)_
 
+- **Issue #010: Remove cache_files Dead Code** - PR #84 - Remove unused cache_files proto field and restore_cache_files() no-op function (~17 LOC)
 - **Issue #011: Update PassContext Header Documentation** - PR #83 - Remove outdated ASCII art, replace with accurate tar_file_ API documentation
 - **Issue #022: Remove fix_info Dead Code** - PR #81 - Remove unused fix_info proto field and API methods (~73 LOC)
 - **Issue #008: MEP Table Cleanup** - PR #76 - Removed MEP table runtime code, documentation, and test code
 - **Issue #006:** Remove cache_dir Entirely - PR #80 - Remove legacy disk-based cache system (~200 LOC)
-- **Issue #003:** Remove ConfigProto from ContextProto - PR #77
-- **Issue #002:** Remove mem_files_ - Always Create tar_file_ for Cache - PR #67
 
 ---
 

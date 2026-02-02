@@ -538,12 +538,6 @@ bool PassContextImp::write_file(const std::string& filename,
   return ret;
 }
 
-void PassContextImp::restore_cache_files() {
-  // No longer needed with tar_file_ - this is a no-op
-  // Cache files are loaded directly via tar_file_
-  LOG_VERBOSE(2) << "restore_cache_files: no-op with tar_file_";
-}
-
 bool PassContextImp::has_cache_file(const std::string& filename1) const {
   auto filename = filename1;
   if (cache_file_use_cache_key_prefix_) {
@@ -635,11 +629,6 @@ void PassContextImp::save_context_json() const {
   proto.CopyFrom(this->context_proto);
   // NO config manipulation - config not in ContextProto anymore!
   try {
-    if (std::find(proto.mutable_cache_files()->begin(),
-                  proto.mutable_cache_files()->end(),
-                  "context.json") == proto.mutable_cache_files()->end()) {
-      proto.add_cache_files("context.json");
-    }
     // When the GENERIC device is used, set fallback_cpu to true. When
     // inferencing a cached model, either from the cache directory or the EP
     // cache context file, we should not enable fallback_cpu. Otherwise, a
@@ -1119,7 +1108,6 @@ void PassContextImp::update_pass_context_from_context_json_in_cache() {
       << "cannot read context.json from ep context";
   auto context_context_json_text = dos2unix(*context_context_json);
   pass_context_update_context_json(context_context_json_text);
-  restore_cache_files();
 }
 void PassContextImp::update_config_proto_root_field() {
   // ADD_CUSTOM_FIELD∆

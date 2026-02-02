@@ -248,11 +248,6 @@ public:
                           gsl::span<const char> data) = 0;
 
   /**
-   * restore cache_files_ from saved file
-   */
-  virtual void restore_cache_files() = 0;
-
-  /**
    * @brief Checks if a cache file with the given filename exists.
    *
    * @param filename The name of the cache file to check.

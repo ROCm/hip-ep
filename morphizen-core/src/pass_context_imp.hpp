@@ -304,7 +304,6 @@ public:
   open_file_for_write_with_tar_file(const std::string& filename);
   virtual bool write_file(const std::string& filename,
                           gsl::span<const char> data) override final;
-  virtual void restore_cache_files() override final;
   virtual bool has_cache_file(const std::string& filename) const override final;
   virtual std::vector<std::string> get_cache_file_names() const override final;
   virtual std::vector<char> cache_files_to_tar_mem() const override final;
