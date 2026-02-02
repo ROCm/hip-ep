@@ -15,8 +15,9 @@ onnx-hipdnn-ep/
 ├── LICENSE                     # Apache 2.0 License
 ├── .gitignore                  # Git ignore rules
 ├── cmake/                      # CMake modules
+│   ├── dep.h.inc.in           # Dependency header template
 │   ├── deps.cmake             # Dependency management
-│   └── llvm.cmake             # LLVM/MLIR configuration
+│   └── deps.txt               # Dependency list
 ├── level-1-pass-mlir/         # MLIR pass implementation
 │   ├── CMakeLists.txt         # Pass build configuration
 │   └── src/
@@ -43,7 +44,7 @@ onnx-hipdnn-ep/
 
 ### Prerequisites
 
-- CMake 3.29 or later
+- CMake 3.28 or later
 - Visual Studio 2022
 - Python 3 (with onnx package: `pip install onnx`)
 - Git
@@ -210,6 +211,6 @@ See [doc/TESTING.md](doc/TESTING.md).
 
 ## License
 
-Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 Licensed under the Apache License, Version 2.0. See LICENSE file for details.

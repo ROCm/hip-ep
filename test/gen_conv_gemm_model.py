@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (C) 2023 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 
 """Generate a combined Conv + Gemm ONNX model for testing."""
