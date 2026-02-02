@@ -55,7 +55,8 @@ message ContextProto {
   repeated EventProto events = 9;
   repeated CPUUsageProto cpu_usage = 10;
   map<string, SubgraphProto> subgraph_metadefs = 11;
-  repeated string cache_files = 12;
+  reserved 12;
+  reserved "cache_files";
 }
 /*
 {
