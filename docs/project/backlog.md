@@ -37,6 +37,7 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 - [Issue #024: Remove Legacy Compile Entry Points](issues/024-remove-legacy-compile-entry-points.md) - Remove unused compile_onnx_model_morphizen_ep_with_options and with_error_handling (~50 LOC)
 - [Issue #025: MLIR Graph Binary Serialization](issues/025-mlir-graph-binary-serialization.md) - Change MLIR graph save format from text (.mlir) to binary bytecode (.mlirbc)
 - [Issue #026: MLIR Model Export API](issues/026-mlir-model-export-api.md) - Add model_save_mlir() API to export Model pointer to MLIR file (MLIR backend only)
+- [Issue #027: Eliminate C-Style APIs from morphizen-graph](issues/027-eliminate-c-style-apis-from-morphizen-graph.md) - Complete C++ wrapper migration by eliminating 28 C-style free functions
 
 ---
 
