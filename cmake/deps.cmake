@@ -59,16 +59,20 @@ set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "Enable zstd compression")
 # DEP_URL_llvm and DEP_TAG_llvm are defined from deps.txt
 
 
-# Try to find pre-installed LLVM/MLIR first
-#find_package(LLVM QUIET CONFIG)
-#find_package(MLIR QUIET CONFIG)
+# Try to find MLIR first (MLIR implies LLVM exists)
+# This prevents importing incomplete LLVM installations (e.g., LLVM without MLIR)
+find_package(MLIR QUIET CONFIG)
 
-if(LLVM_FOUND AND MLIR_FOUND)
+if(MLIR_FOUND)
+  # MLIR found, now find LLVM (which must exist if MLIR exists)
+  find_package(LLVM REQUIRED CONFIG)
   message(STATUS "Found pre-installed LLVM and MLIR")
   message(STATUS "LLVM_DIR: ${LLVM_DIR}")
   message(STATUS "MLIR_DIR: ${MLIR_DIR}")
   set(MORPHIZEN_LLVM_PREINSTALLED ON CACHE BOOL "Using pre-installed LLVM" FORCE)
 else()
+  # MLIR not found, build LLVM+MLIR from source
+  # Do NOT call find_package(LLVM) to avoid importing incomplete LLVM installations
   message(STATUS "LLVM/MLIR not found in CMAKE_PREFIX_PATH, will use FetchContent and build inline")
   set(MORPHIZEN_LLVM_PREINSTALLED OFF CACHE BOOL "Using FetchContent LLVM" FORCE)
   
