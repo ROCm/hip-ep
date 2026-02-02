@@ -18,6 +18,8 @@
 using namespace morphizen;
 using namespace morphizen_cxx;
 
+DEF_ENV_PARAM(MLIR_SHOW_WITH_DEBUG_INFO, "0")
+
 namespace {
 
 struct Level1MlirPass {
@@ -54,9 +56,11 @@ struct Level1MlirPass {
       
       // Print module with detailed flags
       mlir::OpPrintingFlags flags;
-      flags.printGenericOpForm();
-      flags.enableDebugInfo();
-      flags.printValueUsers();
+      if(ENV_PARAM(MLIR_SHOW_WITH_DEBUG_INFO)){
+        flags.printGenericOpForm();
+        flags.enableDebugInfo();
+        flags.printValueUsers();
+      }
       std::cout << "ModuleOp content:" << std::endl;
       module.print(llvm::outs(), flags);
       std::cout << std::endl;
