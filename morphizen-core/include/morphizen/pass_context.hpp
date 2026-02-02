@@ -5,7 +5,15 @@
 
 #pragma once
 
+#ifdef _WIN32
+#  pragma warning(push)
+#  pragma warning(disable : 4946) // reinterpret_cast between related classes in
+                                  // protobuf
+#endif
 #include "morphizen/pass_context.pb.h"
+#ifdef _WIN32
+#  pragma warning(pop)
+#endif
 
 #include <filesystem>
 #include <gsl/span>

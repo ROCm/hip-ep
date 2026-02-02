@@ -23,7 +23,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for issue quality guidelines.
 See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
 - [Issue #001: Add mmap Support for Embed Mode](issues/001-mmap-support-for-embed-mode.md) - Feature to enable memory-mapped file access for EP context embed mode
-- [Issue #004: Remove encryption_key Copying](issues/004-remove-encryption-key-copying.md) - Remove encryption_key copying, read from provider_options directly
 - [Issue #005: Move cache_key to ContextProto](issues/005-remove-cache-key-copying.md) - Move cache_key from ConfigProto to ContextProto
 - [Issue #007: Clean Up Target with Two-Path Architecture](issues/007-remove-target-copying.md) - Remove target copying, two-path architecture
 - [Issue #009: TargetProto Provider Options Injection Cleanup](issues/009-targetproto-provider-options-injection-cleanup.md) - Remove xclbin API functions
@@ -44,11 +43,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
 _(Max 5 items, deleted files deleted)_
 
+- **Issue #004: Remove encryption_key Copying** - PR #82 - Removed encryption_key from ConfigProto, read from provider_options (security improvement)
 - **Issue #010: Remove cache_files Dead Code** - PR #84 - Remove unused cache_files proto field and restore_cache_files() no-op function (~17 LOC)
 - **Issue #011: Update PassContext Header Documentation** - PR #83 - Remove outdated ASCII art, replace with accurate tar_file_ API documentation
 - **Issue #022: Remove fix_info Dead Code** - PR #81 - Remove unused fix_info proto field and API methods (~73 LOC)
 - **Issue #008: MEP Table Cleanup** - PR #76 - Removed MEP table runtime code, documentation, and test code
-- **Issue #006:** Remove cache_dir Entirely - PR #80 - Remove legacy disk-based cache system (~200 LOC)
 
 ---
 

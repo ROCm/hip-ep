@@ -12,6 +12,8 @@
 #  pragma warning(push)
 #  pragma warning(disable : 4251)
 #  pragma warning(disable : 4275)
+#  pragma warning(disable : 4946) // reinterpret_cast between related classes in
+                                  // protobuf
 #endif
 #include "morphizen/config.pb.h"
 #ifdef _WIN32
