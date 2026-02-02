@@ -9,21 +9,6 @@
         "cache_key": "cache_key_in_config",
         "log_level": "info"
     },
-    "mepTable": [
-        {
-            "modelName": "PSA",
-            "md5sumOnDisk": "3f97582a85b8ae1be41127f326bbf9b2",
-            "md5sumInMemory": "d41d8cd98f00b204e9800998ecf8427e",
-            "target": "relu-dq-target",
-            "xclbin": "abc_in_mep_table.xclbin",
-            "provider_options": {
-                "k0": "value0_in_mep_table",
-                "k1": "value1_in_mep_table",
-                "k2": "value2_in_mep_table",
-                "k3": "value3_in_mep_table"
-            }
-        }
-    ],
     "passes": [
         {
             "name": "init",

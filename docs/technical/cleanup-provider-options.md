@@ -77,18 +77,21 @@ the content of `morphizen_config.json`
 
 it is removed. see jira:VAI-9685. and [pass_context_imp.cpp#L1177][s1]
 
-## set when MEP table hit
+## ~~set when MEP table hit~~ REMOVED
 
-[see here](../morphizen-core/src/morphizen_compile_model.cpp#L502)
+MEP table feature has been removed entirely. See Issue #008.
 
-it is to be deprecated, see PR #159 #155
+**Why removed:**
+- Doesn't scale (maintenance burden for thousands of models)
+- Fragile (MD5-based identification breaks with model modifications)
+- GPU requirements unclear (too early to commit to this approach)
+- High testing/validation burden for each entry
 
-* `model_name`
-* `model_category`
-* `model_variant`
-* `is_preemptible`
-* `dd_use_lazy_scratch_bo`
-* `qos_priority`
+**Alternatives:**
+- Use smart defaults for common scenarios
+- Users set provider_options explicitly when needed via API or config file
+- Consult documentation for model-specific best practices
+- Runtime heuristics can adapt automatically based on model characteristics
 
 # set when TargetProto hit
 
