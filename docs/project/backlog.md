@@ -23,8 +23,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for issue quality guidelines.
 See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
 - [Issue #001: Add mmap Support for Embed Mode](issues/001-mmap-support-for-embed-mode.md) - Feature to enable memory-mapped file access for EP context embed mode
-- [Issue #003: Remove ConfigProto from ContextProto](issues/003-separate-runtime-config-from-persistent-config.md) - Remove ConfigProto from ContextProto, make it runtime-only immutable member
-- [Issue #004: Remove encryption_key Copying](issues/004-remove-encryption-key-copying.md) - Remove encryption_key copying, read from provider_options directly (depends on #003)
+- [Issue #004: Remove encryption_key Copying](issues/004-remove-encryption-key-copying.md) - Remove encryption_key copying, read from provider_options directly
 - [Issue #005: Move cache_key to ContextProto](issues/005-remove-cache-key-copying.md) - Move cache_key from ConfigProto to ContextProto
 - [Issue #006: Remove cache_dir Entirely](issues/006-remove-cache-dir-copying.md) - Remove legacy disk-based cache system (~200-300 LOC)
 - [Issue #007: Clean Up Target with Two-Path Architecture](issues/007-remove-target-copying.md) - Remove target copying, two-path architecture
@@ -48,6 +47,7 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
 _(Max 5 items, detailed files deleted)_
 
+- **Issue #003:** Remove ConfigProto from ContextProto - PR #77
 - **Issue #002:** Remove mem_files_ - Always Create tar_file_ for Cache - PR #67
 - **Issue #020: Remove suffix_counter Dead Code** - PR #75 - Remove dead code that reads suffix_counter from model metadata (never written)
 

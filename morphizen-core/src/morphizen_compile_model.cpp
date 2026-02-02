@@ -239,12 +239,11 @@ void compile_onnx_model_2(std::shared_ptr<PassContextImp> context,
   } else {
     MY_LOG(1) << "==== cache hit ====";
   }
-  auto encryption_key = context->context_proto.config().encryption_key();
-  auto session_configs = context->context_proto.config().session_configs();
+  auto encryption_key = context->config_.encryption_key();
+  auto session_configs = context->config_.session_configs();
   read_cache(context);
-  context->context_proto.mutable_config()->set_encryption_key(encryption_key);
-  auto session_configs_in_cache =
-      context->context_proto.mutable_config()->mutable_session_configs();
+  context->config_.set_encryption_key(encryption_key);
+  auto session_configs_in_cache = context->config_.mutable_session_configs();
   session_configs_in_cache->swap(session_configs);
 }
 
@@ -381,31 +380,28 @@ std::shared_ptr<PassContextImp> initialize_context(
   }
   context->is_ep_context_model = !ep_context_nodes.empty();
   auto& model = graph_get_model(onnx_graph);
-  auto md5 = get_signature(context->model_path.string(), onnx_graph,
-                           *context->context_proto.mutable_config());
+  auto md5 =
+      get_signature(context->model_path.string(), onnx_graph, context->config_);
 
-  if (!context->context_proto.config().cache_key().empty()) {
+  if (!context->config_.cache_key().empty()) {
     MY_LOG(1) << "use cache key specified by user "
-              << context->context_proto.config().cache_key();
+              << context->config_.cache_key();
   } else if (morphizen_cxx::ModelConstRef(model).has_metadata(
                  "morphizen_model_md5sum")) {
     auto new_cache_key = morphizen_cxx::ModelConstRef(model).get_metadata(
         "morphizen_model_md5sum");
     MY_LOG(1) << "use cache key in meta-data " << new_cache_key;
-    *context->context_proto.mutable_config()->mutable_cache_key() =
-        new_cache_key;
+    *context->config_.mutable_cache_key() = new_cache_key;
   } else if (ENV_PARAM(XLNX_ENABLE_FILE_BASED_CACHE_KEY) &&
              (!context->model_path.empty())) {
     auto new_cache_key =
         morphizen::get_md5_of_file(context->model_path.string());
     MY_LOG(1) << "use cache key on-disk " << new_cache_key;
-    *context->context_proto.mutable_config()->mutable_cache_key() =
-        new_cache_key;
+    *context->config_.mutable_cache_key() = new_cache_key;
   } else {
     auto new_cache_key = md5;
     LOG_VERBOSE(1) << "use cache key in memory signature " << new_cache_key;
-    *context->context_proto.mutable_config()->mutable_cache_key() =
-        new_cache_key;
+    *context->config_.mutable_cache_key() = new_cache_key;
   }
   // Algorithm-A : based on names of node-args tensor0-names of
   // topologically ordered model-graph Algorithm-B : based on
@@ -414,7 +410,7 @@ std::shared_ptr<PassContextImp> initialize_context(
   // model/target
   context->target_auto_discovery(model);
   if (!context->is_ep_context_model) {
-    morphizen::update_config_by_target(*context->context_proto.mutable_config(),
+    morphizen::update_config_by_target(context->config_,
                                        context->target_proto_.get(), context);
   }
 
@@ -437,7 +433,7 @@ static void get_ep_cache_context_common(PassContextImp& context,
   auto reader_temp = context_cache_files_to_tar_stream(context);
   std::istream& reader = *reader_temp;
 
-  auto encryption_key = context.context_proto.config().encryption_key();
+  auto encryption_key = context.config_.encryption_key();
   if (!encryption_key.empty()) {
     auto filtered = stream_filter(
         reader,
@@ -631,9 +627,8 @@ create_ep_context_node(morphizen::ExecutionProviderConcrete* ep, int index) {
   attrs.add("log_dir", context.get_log_dir().u8string());
   attrs.add("onnx_model_filename", context.model_path.u8string());
   attrs.add("partition_name", name);
-  bool enable_encryption =
-      morphizen_encryption::has_encryption_support() &&
-      (!context.context_proto.config().encryption_key().empty());
+  bool enable_encryption = morphizen_encryption::has_encryption_support() &&
+                           (!context.config_.encryption_key().empty());
   attrs.add("enable_encryption", (int64_t)enable_encryption);
   attrs.add("cache_file_use_cache_key_prefix",
             (int64_t)context.cache_file_use_cache_key_prefix_);
@@ -840,10 +835,10 @@ store_cache_directory_from_main_node(PassContextImp& context,
   int64_t ep_embed_mode = main_node.get_attr_int("embed_mode", 1);
   context.cache_file_use_cache_key_prefix_ =
       main_node.get_attr_int("cache_file_use_cache_key_prefix", 0) != 0;
-  *context.get_context_proto().mutable_config()->mutable_cache_key() =
+  *context.config_.mutable_cache_key() =
       main_node.get_attr_string("cache_file_prefix", "");
   if (context.cache_file_use_cache_key_prefix_) {
-    CHECK_NE(context.get_context_proto().config().cache_key(), "")
+    CHECK_NE(context.config_.cache_key(), "")
         << "cache_key "
         << "should not be empty when cache_file_use_cache_key_prefix_ is set "
            "to "
@@ -859,7 +854,7 @@ store_cache_directory_from_main_node(PassContextImp& context,
   // Always use tar_file_, decrypt if needed
   if (enable_encryption) {
     // Decrypt the encrypted tar data first
-    auto encryption_key = context.context_proto.config().encryption_key();
+    auto encryption_key = context.config_.encryption_key();
     if (encryption_key.empty()) {
       throw morphizen_encryption::EncryptionError(
           "enable_encryption is set, but encryption_key is empty");
@@ -975,7 +970,7 @@ restore_execution_providers_from_ep_context_model(
 
   store_cache_directory_from_main_node(*context, main_node.value());
 
-  auto ep_context_cache_key = context->get_context_proto().config().cache_key();
+  auto ep_context_cache_key = context->config_.cache_key();
   bool user_provided_different_cache_key =
       user_cache_key.has_value() && !user_cache_key->empty() &&
       user_cache_key.value() != ep_context_cache_key;

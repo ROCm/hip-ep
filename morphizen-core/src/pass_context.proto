@@ -45,7 +45,8 @@ message SubgraphProto {
 
 message ContextProto {
   repeated MetaDefProto meta_def = 1;
-  ConfigProto config = 3;
+  reserved 3;
+  reserved "config";
   map<string, AnchorPointProto> origin_nodes = 4;
   map<string, int32> fix_info = 6;
   map<string, int32> device_subgraph_count = 7; // only used for fused dpu
