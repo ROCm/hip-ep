@@ -40,6 +40,7 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 - [Issue #019: Refactor initialize_context()](issues/019-refactor-initialize-context.md) - God function cleanup
 - [Issue #021: Remove cache_file_use_cache_key_prefix_](issues/021-clean-up-cache-file-use-cache-key-prefix.md) - Always use prefix, remove flag
 - [Issue #022: Remove fix_info Dead Code](issues/022-remove-fix-info-dead-code.md) - Remove unused fix_info proto field and API methods
+- [Issue #023: Migrate v1 to v2 Execution Provider API](issues/023-migrate-v1-to-v2-execution-provider-api.md) - **CRITICAL** - Migrate from AppendExecutionProvider_VitisAI to AppendExecutionProvider_V2 for MLIR backend
 
 ---
 

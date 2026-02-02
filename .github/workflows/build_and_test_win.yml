@@ -315,7 +315,12 @@ jobs:
         run: |
           ninja -C ${{ env.MORPHIZEN_BUILD_DIR }}
 
-      # TODO: Enable tests once runtime dependencies are properly configured
-      # - name: Run Tests
-      #   run: |
-      #     ctest --test-dir ${{ env.MORPHIZEN_BUILD_DIR }} -C Release --output-on-failure --timeout 600
+      # Run tests - some tests require the EP plugin which is not yet available (Issue #022)
+      # Tests that don't require the EP will pass, tests that do will fail gracefully
+      # Using continue-on-error until Issue #022 is resolved
+      - name: Run Tests
+        continue-on-error: true
+        shell: cmd
+        run: |
+          cd ${{ env.MORPHIZEN_BUILD_DIR }}
+          ctest -C Release --output-on-failure --timeout 120 -j4
