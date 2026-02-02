@@ -30,7 +30,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 - [Issue #013: provider_options Aggregation](issues/013-provider-options-aggregation.md) - Related to #003, #008, #009
 - [Issue #014: Dynamic Pass Registration](issues/014-dynamic-pass-registration.md) - Design flaw needing architectural redesign
 - [Issue #015: Configuration Initialization](issues/015-configuration-initialization.md) - Move version info to ContextProto
-- [Issue #016: Remove dirty_hack_for_model_clone_external_data_threshold](issues/016-model-clone-threshold-hack.md) - Eliminate global state mutation
 - [Issue #017: Remove update_config_by_target()](issues/017-remove-update-config-by-target.md) - Remove obsolete function after #007 and #014
 - [Issue #018: Make ConfigProto const Member](issues/018-make-configproto-const.md) - Enforce immutability at compile-time
 - [Issue #019: Refactor initialize_context()](issues/019-refactor-initialize-context.md) - God function cleanup
@@ -43,11 +42,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
 _(Max 5 items, deleted files deleted)_
 
+- **Issue #016: Remove dirty_hack_for_model_clone_external_data_threshold** - PR #85
 - **Issue #004: Remove encryption_key Copying** - PR #82 - Removed encryption_key from ConfigProto, read from provider_options (security improvement)
 - **Issue #010: Remove cache_files Dead Code** - PR #84 - Remove unused cache_files proto field and restore_cache_files() no-op function (~17 LOC)
 - **Issue #011: Update PassContext Header Documentation** - PR #83 - Remove outdated ASCII art, replace with accurate tar_file_ API documentation
 - **Issue #022: Remove fix_info Dead Code** - PR #81 - Remove unused fix_info proto field and API methods (~73 LOC)
-- **Issue #008: MEP Table Cleanup** - PR #76 - Removed MEP table runtime code, documentation, and test code
 
 ---
 

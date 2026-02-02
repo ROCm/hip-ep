@@ -193,17 +193,34 @@ bool check_cache_hit(PassContextImp& context) {
   return false;
 }
 
+static int64_t compute_model_clone_threshold(const ConfigProto& config_proto,
+                                             PassContext* context) {
+  // Check provider option first (user override)
+  auto po_threshold =
+      context->get_provider_option("XLNX_model_clone_external_data_threshold");
+  if (po_threshold) {
+    return std::stoll(po_threshold.value());
+  }
+
+  // Check if VAIML plugin is enabled - VAIML needs all constants cloned
+  // (effectively disables the optimization by using very large threshold)
+  for (auto& pass : config_proto.passes()) {
+    if (pass.plugin() == ENV_PARAM(XLNX_VAIML_LEVEL_1_NAME)) {
+      return 17179869184; // Large threshold for VAIML
+    }
+  }
+
+  // Default from ENV_PARAM
+  return ENV_PARAM(XLNX_model_clone_external_data_threshold);
+}
+
 void compile_onnx_model_2(std::shared_ptr<PassContextImp> context,
                           const Graph& onnx_graph) {
   bool cache_hit = check_cache_hit(*context);
   if (!cache_hit) {
     auto& model = graph_get_model(onnx_graph);
-    int64_t threshold = ENV_PARAM(XLNX_model_clone_external_data_threshold);
-    auto po_threshold = context->get_provider_option(
-        "XLNX_model_clone_external_data_threshold");
-    if (po_threshold) {
-      threshold = std::stoll(po_threshold.value());
-    }
+    int64_t threshold = compute_model_clone_threshold(
+        context->get_config_proto(), context.get());
     auto cloned_model = morphizen::model_clone(model, threshold);
     auto& cloned_graph = morphizen::model_main_graph(*cloned_model);
     auto deferred_collect =
@@ -959,18 +976,6 @@ restore_execution_providers_from_ep_context_model(
   return create_execution_providers_from_ep_context_nodes(context,
                                                           ep_context_nodes);
 }
-static void dirty_hack_for_model_clone_external_data_threshold(
-    const ConfigProto& config_proto) {
-  //  check each pass in passes, if vaiml plugin is eanbled , disable the
-  //  optimization for model clone.
-  for (auto& pass : config_proto.passes()) {
-    if (pass.plugin() == ENV_PARAM(XLNX_VAIML_LEVEL_1_NAME)) {
-      // effective disable the optimization for model clone.
-      ENV_PARAM(XLNX_model_clone_external_data_threshold) = 17179869184;
-      break;
-    }
-  }
-}
 static void log_stat_subgraph(const ContextProto& context_proto) {
   auto stat = std::map<std::string, int>{};
   for (auto& meta_def : context_proto.meta_def()) {
@@ -998,8 +1003,6 @@ compile_onnx_model_internal(
                                                             ep_context_nodes);
     log_stat_subgraph(context->get_context_proto());
   } else {
-    dirty_hack_for_model_clone_external_data_threshold(
-        context->get_config_proto());
     auto measure_before_compile_onnx_model_2 =
         context->measure("before_compile_onnx_model_internal");
     compile_onnx_model_2(context, onnx_graph);
