@@ -39,7 +39,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 - [Issue #018: Make ConfigProto const Member](issues/018-make-configproto-const.md) - Enforce immutability at compile-time
 - [Issue #019: Refactor initialize_context()](issues/019-refactor-initialize-context.md) - God function cleanup
 - [Issue #021: Remove cache_file_use_cache_key_prefix_](issues/021-clean-up-cache-file-use-cache-key-prefix.md) - Always use prefix, remove flag
-- [Issue #022: Remove fix_info Dead Code](issues/022-remove-fix-info-dead-code.md) - Remove unused fix_info proto field and API methods
 - [Issue #023: Migrate v1 to v2 Execution Provider API](issues/023-migrate-v1-to-v2-execution-provider-api.md) - **CRITICAL** - Migrate from AppendExecutionProvider_VitisAI to AppendExecutionProvider_V2 for MLIR backend
 
 ---
@@ -48,6 +47,7 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
 _(Max 5 items, detailed files deleted)_
 
+- **Issue #022: Remove fix_info Dead Code** - PR #81 - Remove unused fix_info proto field and API methods (~73 LOC)
 - **Issue #008: MEP Table Cleanup** - PR #76 - Removed MEP table runtime code, documentation, and test code
 - **Issue #003:** Remove ConfigProto from ContextProto - PR #77
 - **Issue #002:** Remove mem_files_ - Always Create tar_file_ for Cache - PR #67

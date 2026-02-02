@@ -87,6 +87,13 @@ pre-commit run --all-files
 ```
 If pre-commit makes changes (formatting, linting), commit and push them BEFORE marking PR ready. This prevents CI pre-commit check failures.
 
+**PR Title Format**:
+- **For backlog issues**: `Issue #NNN: <type>: <description>`
+  - Example: `Issue #022: refactor: remove fix_info dead code`
+  - Example: `Issue #023: feat: migrate v1 to v2 execution provider API`
+- **For new features/other work**: `<type>: <description>` (no issue number)
+  - Example: `feat: add new optimization pass`
+
 **PR Operations** (fork-based workflow):
 - ❌ `gh pr view` (fails - branch not in origin)
 - ✅ `gh pr view <number>` (most reliable)

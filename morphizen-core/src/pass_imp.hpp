@@ -50,10 +50,6 @@ private:
   virtual const std::filesystem::path& get_log_path() const override final;
   virtual void add_subgraph_device_count(const std::string& device,
                                          int count) override final;
-  virtual void set_fix_info(const char* name, int fix_pos) override final;
-  virtual int get_fix_info(const char* name) const override final;
-  virtual bool has_fix_info(const char* name) const override final;
-  virtual void dump_fix_info(const char* filename) const override final;
 
   virtual const PassProto& get_pass_proto() const override;
   virtual std::string get_pass_generic_param() const override final;

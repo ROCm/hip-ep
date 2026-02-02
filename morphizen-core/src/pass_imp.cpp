@@ -296,32 +296,6 @@ void Pass::add_subgraph_device_count(const std::string& device, int count) {
       google::protobuf::MapPair<std::string, int>{device, count});
 }
 
-void Pass::set_fix_info(const char* name, int fix_pos) {
-  context_->context_proto.mutable_fix_info()->insert(
-      google::protobuf::MapPair<std::string, int>{std::string(name), fix_pos});
-}
-
-int Pass::get_fix_info(const char* name) const {
-  auto it = context_->context_proto.fix_info().find(name);
-  CHECK(it != context_->context_proto.fix_info().end())
-      << "cannot find fix info";
-  return it->second;
-}
-
-bool Pass::has_fix_info(const char* name) const {
-  auto it = context_->context_proto.fix_info().find(name);
-  return it != context_->context_proto.fix_info().end();
-}
-
-void Pass::dump_fix_info(const char* filename) const {
-  auto fullname = get_log_path() / std::string(filename);
-  auto stream = std::ofstream(fullname, std::ios_base::trunc);
-  LOG(INFO) << "save fix info to " << fullname.u8string();
-  for (auto& i : context_->context_proto.fix_info()) {
-    stream << i.second << "\t" << i.first << "\n";
-  }
-}
-
 const PassProto& Pass::get_pass_proto() const { return pass_proto_; }
 
 std::string Pass::get_pass_generic_param() const {

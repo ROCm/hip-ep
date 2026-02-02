@@ -136,20 +136,8 @@ public:
 
   /** @brief do not use this function. internal use only
    */
-  virtual void set_fix_info(const char* name, int fix_pos) = 0;
-  /** @brief do not use this function. internal use only
-   */
-  virtual int get_fix_info(const char* name) const = 0;
-  /** @brief do not use this function. internal use only
-   */
-  virtual bool has_fix_info(const char* name) const = 0;
-  /** @brief do not use this function. internal use only
-   */
   virtual void add_subgraph_device_count(const std::string& device,
                                          int count) = 0;
-  /** @brief do not use this function. internal use only
-   */
-  virtual void dump_fix_info(const char* name) const = 0;
   /** @brief do not use this function. internal use only
    */
   virtual const PassProto& get_pass_proto() const = 0;
@@ -227,14 +215,6 @@ public:
    */
   virtual void add_context_resource(const std::string& name,
                                     std::shared_ptr<void> resource) = 0;
-
-public:
-  MORPHIZEN_DLL_SPEC
-  void copy_fix_info(const Node& from_node, const Node& to_node);
-  MORPHIZEN_DLL_SPEC
-  void copy_fix_info(const std::string& from, const std::string& to);
-  MORPHIZEN_DLL_SPEC
-  void copy_fix_info(const char* from, const char* to);
 };
 MORPHIZEN_DLL_SPEC std::pair<std::unique_ptr<MetaDefProto>, TryFuseError>
 IPass_try_fuse(const Graph& graph, const std::string& name,
