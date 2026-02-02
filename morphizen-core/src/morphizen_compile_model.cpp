@@ -128,8 +128,9 @@ static void save_protobuf_message(const fs::path& filename,
   }
 }
 
-static inline void remove_encryption(ConfigProto& proto) {
-  proto.clear_encryption_key();
+static inline void remove_encryption(ConfigProto& /*proto*/) {
+  // encryption_key removed from ConfigProto (Issue #004)
+  // Now read from provider_options directly when needed
 }
 
 static void print_device_subgraph(const PassContextImp& context) {
@@ -213,10 +214,9 @@ void compile_onnx_model_2(std::shared_ptr<PassContextImp> context,
   } else {
     MY_LOG(1) << "==== cache hit ====";
   }
-  auto encryption_key = context->config_.encryption_key();
+  auto encryption_key = context->get_provider_option("encryption_key", "");
   auto session_configs = context->config_.session_configs();
   read_cache(context);
-  context->config_.set_encryption_key(encryption_key);
   auto session_configs_in_cache = context->config_.mutable_session_configs();
   session_configs_in_cache->swap(session_configs);
 }
@@ -402,7 +402,7 @@ static void get_ep_cache_context_common(PassContextImp& context,
   auto reader_temp = context_cache_files_to_tar_stream(context);
   std::istream& reader = *reader_temp;
 
-  auto encryption_key = context.config_.encryption_key();
+  auto encryption_key = context.get_provider_option("encryption_key", "");
   if (!encryption_key.empty()) {
     auto filtered = stream_filter(
         reader,
@@ -596,8 +596,9 @@ create_ep_context_node(morphizen::ExecutionProviderConcrete* ep, int index) {
   attrs.add("dump_dir", context.get_dump_directory().u8string());
   attrs.add("onnx_model_filename", context.model_path.u8string());
   attrs.add("partition_name", name);
-  bool enable_encryption = morphizen_encryption::has_encryption_support() &&
-                           (!context.config_.encryption_key().empty());
+  bool enable_encryption =
+      morphizen_encryption::has_encryption_support() &&
+      (!context.get_provider_option("encryption_key", "").empty());
   attrs.add("enable_encryption", (int64_t)enable_encryption);
   attrs.add("cache_file_use_cache_key_prefix",
             (int64_t)context.cache_file_use_cache_key_prefix_);
@@ -823,7 +824,7 @@ store_cache_directory_from_main_node(PassContextImp& context,
   // Always use tar_file_, decrypt if needed
   if (enable_encryption) {
     // Decrypt the encrypted tar data first
-    auto encryption_key = context.config_.encryption_key();
+    auto encryption_key = context.get_provider_option("encryption_key", "");
     if (encryption_key.empty()) {
       throw morphizen_encryption::EncryptionError(
           "enable_encryption is set, but encryption_key is empty");

@@ -4,7 +4,15 @@
  */
 
 #pragma once
+#ifdef _WIN32
+#  pragma warning(push)
+#  pragma warning(disable : 4946) // reinterpret_cast between related classes in
+                                  // protobuf
+#endif
 #include "morphizen/capability.pb.h"
+#ifdef _WIN32
+#  pragma warning(pop)
+#endif
 #include "morphizen/pass_context.hpp"
 #include "morphizen/plugin.hpp"
 #include "onnxruntime_api.hpp"

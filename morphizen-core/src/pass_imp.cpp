@@ -47,7 +47,7 @@ void IPass::attach_meta_def_param(MetaDefProto& meta_def,
 
 static bool can_be_dumped(const std::shared_ptr<PassContext>& proto) {
   static bool warned = false;
-  bool can_be_dumped = proto->get_config_proto().encryption_key() == "";
+  bool can_be_dumped = proto->get_provider_option("encryption_key", "") == "";
   if (!can_be_dumped && warned == false) {
     LOG(WARNING) << "dumping is not allowed when encryption enabled";
     warned = true;

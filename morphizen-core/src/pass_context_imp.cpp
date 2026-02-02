@@ -1124,10 +1124,9 @@ void PassContextImp::update_config_proto_root_field() {
   if (auto cache_key = get_provider_option_local({"cache_key", "cacheKey"})) {
     config_.set_cache_key(*cache_key);
   }
-  if (auto encryption_key =
-          get_provider_option_local({"encryption_key", "encryptionKey"})) {
-    config_.set_encryption_key(*encryption_key);
-  }
+  // cache_dir removed by Issue #006 (PR #80)
+  // encryption_key removed - now read from provider_options directly (Issue
+  // #004)
   if (auto target = get_provider_option_local({"target", "xlnx_target_name"})) {
     config_.set_target(*target);
   }
