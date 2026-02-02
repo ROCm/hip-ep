@@ -282,9 +282,7 @@ Pass::get_cache_file_name(const std::string& filename) const {
   return morphizen::get_cache_file_name(*context_, filename);
 }
 
-const ConfigProto& Pass::get_config_proto() const {
-  return context_->context_proto.config();
-}
+const ConfigProto& Pass::get_config_proto() const { return context_->config_; }
 std::map<std::string, std::string> Pass::get_all_provider_options() const {
   return context_->get_all_provider_options();
 }
@@ -450,7 +448,7 @@ IPass::create_pass(std::shared_ptr<PassContext> context,
   auto context_ptr =
       std::dynamic_pointer_cast<morphizen::PassContextImp>(context);
   CHECK(context_ptr != nullptr);
-  auto pass_proto = context_ptr->context_proto.mutable_config()->add_passes();
+  auto pass_proto = context_ptr->config_.add_passes();
   pass_proto->set_name("annonymous_pass");
   pass_proto->set_plugin("<annonymous_plugin>");
   return std::make_unique<Pass>(context_ptr, *pass_proto, pass_info);

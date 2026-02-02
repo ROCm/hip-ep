@@ -54,7 +54,7 @@ fs::path get_cache_file_name(const PassContext& context,
 void update_cache_dir(PassContextImp& context) {
   auto cache_dir = fs::path(ENV_PARAM(XLNX_CACHE_DIR));
   // use json config first.
-  auto config_cache_dir = context.context_proto.config().cache_dir();
+  auto config_cache_dir = context.config_.cache_dir();
   if (!config_cache_dir.empty()) {
     cache_dir = fs::u8path(config_cache_dir);
   }
@@ -63,9 +63,8 @@ void update_cache_dir(PassContextImp& context) {
   }
 
   context.pass_context_log_dir_ =
-      cache_dir / fs::u8path(context.context_proto.config().cache_key());
-  *context.context_proto.mutable_config()->mutable_cache_dir() =
-      cache_dir.u8string();
+      cache_dir / fs::u8path(context.config_.cache_key());
+  *context.config_.mutable_cache_dir() = cache_dir.u8string();
   // Cache is always in memory, skip creating cache directory
 }
 

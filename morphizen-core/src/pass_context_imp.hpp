@@ -176,6 +176,7 @@ public:
   std::map<std::string, std::vector<AttributeProtoPtr>> node_extra_attrs;
   std::deque<IPass*> current_pass_stack;
   ContextProto context_proto;
+  ConfigProto config_; // Runtime-only INPUT (never serialized)
   bool is_ep_context_model = false;
   bool cache_dir_set = false;
   std::filesystem::path model_path;

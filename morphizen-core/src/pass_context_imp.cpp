@@ -103,7 +103,7 @@ PassContextImp::create_pass_context(const ConfigProto& config_proto1) {
   auto config_proto = ConfigProto(config_proto1);
   Config::add_version_info(config_proto);
   ret->cache_dir_set = (config_proto.cache_dir().size() > 0);
-  ret->context_proto.mutable_config()->Swap(&config_proto);
+  ret->config_.Swap(&config_proto);
   ret->update_config_proto_root_field();
   return ret;
 }
@@ -179,7 +179,7 @@ std::optional<std::string> PassContextImp::get_provider_option_with_priority(
       option_names,
       &provider_option_origin_,                                    //
       &provider_option_from_cache_,                                //
-      &context_proto.config().provider_options(),                  //
+      &config_.provider_options(),                                 //
       target_proto_ ? &target_proto_->provider_options() : nullptr //
   );
 }
@@ -190,7 +190,7 @@ PassContextImp::get_all_provider_options() const {
       ret,
       &provider_option_origin_,                                    //
       &provider_option_from_cache_,                                //
-      &context_proto.config().provider_options(),                  //
+      &config_.provider_options(),                                 //
       target_proto_ ? &target_proto_->provider_options() : nullptr //
   );
   return ret;
@@ -220,7 +220,7 @@ PassContextImp::get_provider_option(const std::string& option_name) const {
 }
 std::optional<std::string>
 PassContextImp::get_session_config(const std::string& option_name) const {
-  const auto& config = context_proto.config();
+  const auto& config = config_;
   auto it = config.session_configs().find(option_name);
   if (it != config.session_configs().end()) {
     return it->second;
@@ -651,9 +651,7 @@ PassContextImp::read_xclbin(const std::filesystem::path& path) const {
   return ret;
 }
 
-const ConfigProto& PassContextImp::get_config_proto() const {
-  return context_proto.config();
-}
+const ConfigProto& PassContextImp::get_config_proto() const { return config_; }
 const ContextProto& PassContextImp::get_context_proto() const {
   return context_proto;
 }
@@ -661,11 +659,7 @@ ContextProto& PassContextImp::get_context_proto() { return context_proto; }
 void PassContextImp::save_context_json() const {
   ContextProto proto;
   proto.CopyFrom(this->context_proto);
-  proto.mutable_config()->clear_encryption_key();
-  auto all_provider_options = get_all_provider_options();
-  proto.mutable_config()->mutable_provider_options()->clear();
-  proto.mutable_config()->mutable_provider_options()->insert(
-      all_provider_options.begin(), all_provider_options.end());
+  // NO config manipulation - config not in ContextProto anymore!
   try {
     if (std::find(proto.mutable_cache_files()->begin(),
                   proto.mutable_cache_files()->end(),
@@ -1137,18 +1131,10 @@ void PassContextImp::pass_context_update_context_json(
 
   CHECK(status.ok()) << "cannot parse json string:" << status.message()
                      << &json_str[0];
-  // save cached provider options
-  provider_option_from_cache_.insert(
-      context_proto_in_cache.config().provider_options().begin(),
-      context_proto_in_cache.config().provider_options().end());
+  // Note: Old cache files with config field in ContextProto are not supported
+  // after this refactoring (breaking change). The config field is now
+  // runtime-only.
   this->context_proto.Swap(&context_proto_in_cache);
-  auto& context_proto_origin =
-      context_proto_in_cache; // give it a new name after swap.
-  // restore session options
-  this->context_proto.mutable_config()->mutable_session_configs()->swap(
-      *context_proto_origin.mutable_config()->mutable_session_configs());
-  this->context_proto.mutable_config()->mutable_provider_options()->swap(
-      *context_proto_origin.mutable_config()->mutable_provider_options());
   this->update_config_proto_root_field();
   // update_cache_dir(*this);
   print_version_info("CACHE VERSION: ");
@@ -1175,17 +1161,17 @@ void PassContextImp::update_config_proto_root_field() {
     return this->get_provider_option_with_priority(names);
   };
   if (auto cache_key = get_provider_option_local({"cache_key", "cacheKey"})) {
-    context_proto.mutable_config()->set_cache_key(*cache_key);
+    config_.set_cache_key(*cache_key);
   }
   if (auto cache_dir = get_provider_option_local({"cache_dir", "cacheDir"})) {
-    context_proto.mutable_config()->set_cache_dir(*cache_dir);
+    config_.set_cache_dir(*cache_dir);
   }
   if (auto encryption_key =
           get_provider_option_local({"encryption_key", "encryptionKey"})) {
-    context_proto.mutable_config()->set_encryption_key(*encryption_key);
+    config_.set_encryption_key(*encryption_key);
   }
   if (auto target = get_provider_option_local({"target", "xlnx_target_name"})) {
-    context_proto.mutable_config()->set_target(*target);
+    config_.set_target(*target);
   }
 }
 template <typename T>
@@ -1200,7 +1186,7 @@ get_provider_option_internal(const std::string& name, const T& options) {
 
 std::unique_ptr<TargetProto>
 PassContextImp::find_target_proto(const std::string& target_name) {
-  auto& targets = context_proto.config().targets();
+  auto& targets = config_.targets();
   auto it = std::find_if(targets.begin(), targets.end(),
                          [&target_name](const TargetProto& target) {
                            return target.name() == target_name;
@@ -1216,7 +1202,7 @@ PassContextImp::find_target_proto(const std::string& target_name) {
 std::string PassContextImp::get_valid_target_names() {
   std::ostringstream valid_names;
   int c = 0;
-  auto& targets = context_proto.config().targets();
+  auto& targets = config_.targets();
 
   for (const auto& target : targets) {
     if (c++ > 0) {
@@ -1301,8 +1287,7 @@ void PassContextImp::target_auto_discovery(const Model& model) {
       // means that the source code is not consistent with the built-in
       // config file, and the built-in config file is regarded as the
       // part source code.
-      auto discoveried_target_name =
-          discover_target(context_proto.config(), model);
+      auto discoveried_target_name = discover_target(config_, model);
       if (discoveried_target_name.has_value()) {
         if (try_initialize_target_proto(*discoveried_target_name, true)) {
           LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
@@ -1313,7 +1298,7 @@ void PassContextImp::target_auto_discovery(const Model& model) {
       }
     }
     { // 4. default target in config file
-      auto& target_name = context_proto.config().target();
+      auto& target_name = config_.target();
       LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
           << "Target auto-discovery: target proto specified by config file: "
           << target_name;
