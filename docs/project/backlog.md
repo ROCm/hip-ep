@@ -40,7 +40,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 - [Issue #017: Remove update_config_by_target()](issues/017-remove-update-config-by-target.md) - Remove obsolete function after #007 and #014
 - [Issue #018: Make ConfigProto const Member](issues/018-make-configproto-const.md) - Enforce immutability at compile-time
 - [Issue #019: Refactor initialize_context()](issues/019-refactor-initialize-context.md) - God function cleanup
-- [Issue #020: Remove suffix_counter Dead Code](issues/020-remove-suffix-counter-dead-code.md) - Remove dead code
 - [Issue #021: Remove cache_file_use_cache_key_prefix_](issues/021-clean-up-cache-file-use-cache-key-prefix.md) - Always use prefix, remove flag
 
 ---
@@ -50,6 +49,7 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 _(Max 5 items, detailed files deleted)_
 
 - **Issue #002:** Remove mem_files_ - Always Create tar_file_ for Cache - PR #67
+- **Issue #020: Remove suffix_counter Dead Code** - PR #75 - Remove dead code that reads suffix_counter from model metadata (never written)
 
 ---
 

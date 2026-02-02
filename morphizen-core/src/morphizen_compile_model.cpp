@@ -418,10 +418,6 @@ std::shared_ptr<PassContextImp> initialize_context(
                                        context->target_proto_.get(), context);
   }
 
-  if (morphizen_cxx::ModelConstRef(model).has_metadata("suffix_counter")) {
-    context->suffix_counter = std::stoi(
-        morphizen_cxx::ModelConstRef(model).get_metadata("suffix_counter"));
-  }
   update_cache_dir(*context);
   // DANGER!
   Model& mutable_model = const_cast<Model&>(model);
