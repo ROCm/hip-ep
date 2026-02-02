@@ -1,5 +1,5 @@
 ##
-# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
 message(STATUS "Checking if file exists: ${VAR_FILE}")
