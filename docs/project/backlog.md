@@ -34,6 +34,7 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 - [Issue #018: Make ConfigProto const Member](issues/018-make-configproto-const.md) - Enforce immutability at compile-time
 - [Issue #019: Refactor initialize_context()](issues/019-refactor-initialize-context.md) - God function cleanup
 - [Issue #023: Migrate v1 to v2 Execution Provider API](issues/023-migrate-v1-to-v2-execution-provider-api.md) - **CRITICAL** - Migrate from AppendExecutionProvider_VitisAI to AppendExecutionProvider_V2 for MLIR backend
+- [Issue #024: Remove Legacy Compile Entry Points](issues/024-remove-legacy-compile-entry-points.md) - Remove unused compile_onnx_model_morphizen_ep_with_options and with_error_handling (~50 LOC)
 
 ---
 
