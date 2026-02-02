@@ -402,7 +402,7 @@ TEST_F(PassContextConfigTest, ProviderOptions) {
   EXPECT_EQ(passContext_->get_provider_option("k2", "value2_in_code"),
             "value2_in_config");
   EXPECT_EQ(passContext_->get_provider_option("k3", "value3_in_code"),
-            "value3_in_mep_table");
+            "value3_in_target_proto");
   EXPECT_EQ(passContext_->get_provider_option("k4", "value4_in_code"),
             "value4_in_target_proto");
   EXPECT_EQ(passContext_->get_log_dir(),
@@ -412,7 +412,7 @@ TEST_F(PassContextConfigTest, ProviderOptions) {
   EXPECT_EQ(all_provider_options["k0"], "value0_in_provider_option");
   EXPECT_EQ(all_provider_options["k1"], "value1_in_context.json");
   EXPECT_EQ(all_provider_options["k2"], "value2_in_config");
-  EXPECT_EQ(all_provider_options["k3"], "value3_in_mep_table");
+  EXPECT_EQ(all_provider_options["k3"], "value3_in_target_proto");
   EXPECT_EQ(all_provider_options["k4"], "value4_in_target_proto");
   for (auto& kv : all_provider_options) {
     auto& [k, v] = kv;
@@ -475,52 +475,6 @@ TEST_F(PassContextConfigTest, TargetInConfigFileValidTarget) {
   ASSERT_EQ(dummy_option, "bingo");
 }
 
-TEST_F(PassContextConfigTest, TargetInMepTableValidTarget) {
-  CreateContext(onnxruntime::ProviderOptions{
-      {"config_file",
-       (CMAKE_CURRENT_SOURCE_PATH / "morphizen" / "test_pass_context.data" /
-        "sample_config_for_target_disovery_valid_in_mep_table.json")
-           .u8string()},
-  });
-  auto dummy_option =
-      passContext_->get_provider_option("dummy_provier_option_for_test");
-  ASSERT_EQ(dummy_option, "mep-target-hit-in-sampel-config");
-}
-
-TEST_F(PassContextConfigTest, TargetInMepTableValidTarget_builtin_config) {
-  CreateContext(onnxruntime::ProviderOptions{});
-  auto dummy_option =
-      passContext_->get_provider_option("dummy_provier_option_for_test");
-  ASSERT_EQ(dummy_option, "mep-target-hit");
-}
-
-TEST_F(PassContextConfigTest,
-       TargetInMepTableValidTarget_builtin_config_auto_disvoery) {
-  // first we need to modify model inputs and outputs to make mep table miss.
-  auto graph = model_->main_graph();
-
-  auto rename_inputs = [this](morphizen_cxx::NodeArgConstRef old)
-      -> morphizen_cxx::NodeArgConstRef {
-    auto graph = model_->main_graph();
-    return graph.new_node_arg(
-        old.name() + "_new_name", *old.shape(),
-        (ONNX_NAMESPACE::TensorProto_DataType)old.element_type());
-  };
-  auto old_inputs = model_->main_graph().inputs();
-
-  auto inputs = std::vector<morphizen_cxx::NodeArgConstRef>{};
-  for (auto& old_input : old_inputs) {
-    auto new_input = rename_inputs(old_input);
-    inputs.push_back(new_input);
-  }
-  model_->main_graph().set_inputs(inputs);
-  model_->set_metadata("relu_dq_target_name",
-                       "relu_dq_target_by_auto_discovery");
-  CreateContext(onnxruntime::ProviderOptions{});
-  auto dummy_option =
-      passContext_->get_provider_option("dummy_provier_option_for_test");
-  ASSERT_EQ(dummy_option, "auto-discovery-hit");
-}
 // "99_morphizen_centralized_target_discovery", the plugin is ordered
 // alphabetically by name so it is probably the laster resort.
 //
