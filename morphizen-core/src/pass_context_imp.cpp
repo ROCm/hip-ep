@@ -16,7 +16,6 @@
 #  include <sys/stat.h>
 #endif
 
-#include "./cache_dir.hpp"
 #include "config.hpp"
 #include "ep_shared_context_workspace.hpp"
 #include "mem_stream_buffer.hpp"
@@ -63,18 +62,6 @@ static MemUsageProto convert_to_chrome_event(const MemUsageProto& mem_usage) {
   }
   return ret;
 }
-static std::vector<char>
-read_file_to_buffer(const std::filesystem::path& path) {
-  std::ifstream is(path, std::ios::binary);
-  CHECK(is.good());
-  CHECK(is.seekg(0, std::ios_base::end).good());
-  auto size = is.tellg();
-  CHECK_NE(size, -1);
-  CHECK(is.seekg(0, std::ios_base::beg).good());
-  auto buffer = std::vector<char>((size_t)size);
-  CHECK(is.read(buffer.data(), size).good());
-  return buffer;
-}
 static FILE* write_to_tmp_file(gsl::span<const char> data) {
 #if _WIN32
   FILE* tmp_file = tmpfile_with_posix_delete();
@@ -102,7 +89,6 @@ PassContextImp::create_pass_context(const ConfigProto& config_proto1) {
   auto ret = std::make_unique<PassContextImp>();
   auto config_proto = ConfigProto(config_proto1);
   Config::add_version_info(config_proto);
-  ret->cache_dir_set = (config_proto.cache_dir().size() > 0);
   ret->config_.Swap(&config_proto);
   ret->update_config_proto_root_field();
   return ret;
@@ -131,8 +117,22 @@ PassContextImp::WithPass PassContextImp::with_current_pass(IPass& pass) {
   return WithPass(*this, pass);
 }
 
-const std::filesystem::path& PassContextImp::get_log_dir() const {
-  return pass_context_log_dir_;
+std::filesystem::path PassContextImp::get_dump_directory() const {
+  // Check provider option override first
+  auto dump_dir_option = get_provider_option("dump_dir", "");
+  if (!dump_dir_option.empty()) {
+    return std::filesystem::path(dump_dir_option);
+  }
+
+  // Default: temp/morphizen_dumps/cache_key
+  auto temp_dir =
+#ifdef _WIN32
+      std::filesystem::path("C:\\temp");
+#else
+      std::filesystem::path("/tmp");
+#endif
+
+  return temp_dir / "morphizen_dumps" / get_config_proto().cache_key();
 }
 
 template <typename T1, typename T2>
@@ -611,32 +611,6 @@ bool PassContextImp::tar_file_to_cache_files(std::istream& src) {
   return true;
 }
 
-std::filesystem::path PassContextImp::xclbin_path_to_cache_files(
-    const std::filesystem::path& path) const {
-  auto filename = path.filename().u8string();
-  auto ret = get_log_dir() / filename;
-
-  std::error_code ec;
-  // already done - check if file exists in cache
-  if (has_cache_file(filename)) {
-    return ret;
-  }
-
-  std::optional<gsl::span<const char>> span = get_mem_binary_span(filename);
-  if (span.has_value()) {
-    const_cast<PassContextImp*>(this)->write_file(filename, *span);
-  } else if (std::filesystem::is_regular_file(path, ec)) {
-    std::vector<char> buffer = read_file_to_buffer(path);
-    const_cast<PassContextImp*>(this)->write_file(filename, buffer);
-  } else {
-    LOG_VERBOSE(2) << "Xclbin path doesn't exist, are you running with cpu "
-                      "runner? Path: "
-                   << path.string();
-    return path;
-  }
-  return ret;
-}
-
 std::optional<std::vector<char>>
 PassContextImp::read_xclbin(const std::filesystem::path& path) const {
 
@@ -1090,9 +1064,8 @@ void PassContextImp::print_version_info(const char* prefix) {
                          << "******";
     }
   };
-  LOG_VERBOSE(1) << prefix << "cache_dir: " << config.cache_dir();
   LOG_VERBOSE(1) << prefix << "cache_key: " << config.cache_key();
-  LOG_VERBOSE(1) << prefix << "log_dir: " << get_log_dir();
+  LOG_VERBOSE(1) << prefix << "dump_dir: " << get_dump_directory();
   for (auto& kv : provider_option_origin_) {
     print_kv(3, "provider_option_from_origin", kv);
   }
@@ -1162,9 +1135,6 @@ void PassContextImp::update_config_proto_root_field() {
   };
   if (auto cache_key = get_provider_option_local({"cache_key", "cacheKey"})) {
     config_.set_cache_key(*cache_key);
-  }
-  if (auto cache_dir = get_provider_option_local({"cache_dir", "cacheDir"})) {
-    config_.set_cache_dir(*cache_dir);
   }
   if (auto encryption_key =
           get_provider_option_local({"encryption_key", "encryptionKey"})) {

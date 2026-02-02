@@ -39,7 +39,8 @@ import "google/protobuf/struct.proto";
 
 message ConfigProto {
   repeated PassProto passes = 1;
-  string cache_dir = 2;
+  reserved 2;
+  reserved "cache_dir";
   string cache_key = 3;
   AllVersionInfoProto version = 4;
   string encryption_key = 6;

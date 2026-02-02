@@ -66,8 +66,6 @@ add_library(${LIB_NAME} STATIC
   src/profile_utils.hpp
   src/profile_utils.cpp
   src/util.cpp
-  src/cache_dir.cpp
-  src/cache_dir.hpp
   ${CMAKE_CURRENT_BINARY_DIR}/morphizen_version_info.hpp.inc
   src/config.hpp
   src/config.cpp

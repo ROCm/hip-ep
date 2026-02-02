@@ -34,9 +34,6 @@ using namespace onnxruntime;
  *
  */
 
-MORPHIZEN_DLL_SPEC std::shared_ptr<PassContext>
-load_context(const std::filesystem::path& cache_dir);
-
 /** @brief For troubleshooting Pass:fuse / Pass::try_fuse error.
  *
  *  @sa Pass::fuse Pass::try_fuse
@@ -127,12 +124,9 @@ public:
   /** @brief do not use this function. internal use only
    */
   virtual void* get_state() = 0;
-  virtual std::filesystem::path
-  get_cache_file_name(const std::string& filename) const = 0;
   virtual const ConfigProto& get_config_proto() const = 0;
   virtual std::map<std::string, std::string>
   get_all_provider_options() const = 0;
-  virtual const std::filesystem::path& get_log_path() const = 0;
 
   /** @brief do not use this function. internal use only
    */

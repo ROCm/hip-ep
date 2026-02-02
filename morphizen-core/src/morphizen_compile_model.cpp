@@ -9,7 +9,6 @@
 #include <glog/logging.h>
 
 #include <hash-library/md5.h>
-#include "./cache_dir.hpp"
 #include "./config.hpp"
 #include "./file_lock.hpp"
 #include "./logger_adapter.hpp"
@@ -129,28 +128,12 @@ static void save_protobuf_message(const fs::path& filename,
   }
 }
 
-static void load_protobuf_message_2(const fs::path& filename,
-                                    google::protobuf::Message& msg) {
-  auto json_str = slurp_if_exists(filename);
-  if (!json_str.empty()) {
-    auto status = google::protobuf::util::JsonStringToMessage(json_str, &msg);
-    CHECK(status.ok()) << "cannot parse json string:" << json_str;
-  }
-}
-
 static inline void remove_encryption(ConfigProto& proto) {
   proto.clear_encryption_key();
 }
 
 static void print_device_subgraph(const PassContextImp& context) {
   LOG_VERBOSE(2) << "dpu subgraph: " << context.context_proto.meta_def_size();
-}
-
-static ContextProto load_context_json_2(PassContextImp& context) {
-  ContextProto ctxProto;
-  load_protobuf_message_2(get_cache_file_name(context, "context_dod.json"),
-                          ctxProto);
-  return ctxProto;
 }
 
 static void
@@ -160,19 +143,15 @@ collect_stat_and_dump(const PassContextImp& context,
     auto filename = ENV_PARAM(XLNX_ONNX_EP_REPORT_FILE);
     collect_stat(onnx_graph, context.context_proto);
     if (!filename.empty()) {
-      save_protobuf_message(get_cache_file_name(context, filename),
-                            get_stat_proto());
+      auto dump_dir = context.get_dump_directory();
+      if (!std::filesystem::exists(dump_dir)) {
+        std::filesystem::create_directories(dump_dir);
+      }
+      save_protobuf_message(dump_dir / filename, get_stat_proto());
     }
     clean_stat();
   } catch (const std::exception& e) {
     std::cerr << "exception occurs : " << e.what() << "\n";
-  }
-}
-
-static void update_primary_context(std::shared_ptr<PassContextImp> context) {
-  auto second_proto = load_context_json_2(*context);
-  for (const auto& meta_def : second_proto.meta_def()) {
-    context->context_proto.mutable_meta_def()->Add()->CopyFrom(meta_def);
   }
 }
 
@@ -184,11 +163,6 @@ static void update_cache(std::shared_ptr<PassContextImp> context,
   auto passes =
       IPass::create_passes(context, context->get_config_proto().passes());
   IPass::run_passes(passes, graph);
-  // ##########
-  // Workaround for Shell model compiler
-  // Need to load meta_def from secondary json and merge with context.json
-  // ##########
-  update_primary_context(context);
 }
 
 void read_cache(std::shared_ptr<PassContextImp> context) {
@@ -414,11 +388,6 @@ std::shared_ptr<PassContextImp> initialize_context(
                                        context->target_proto_.get(), context);
   }
 
-  update_cache_dir(*context);
-  // DANGER!
-  Model& mutable_model = const_cast<Model&>(model);
-  model_set_meta_data(mutable_model, "morphizen_log_dir",
-                      context->get_log_dir().u8string());
   // log version of binary
   context->print_version_info("EXEC VERSION: ");
   if (!context->is_ep_context_model) {
@@ -624,7 +593,7 @@ create_ep_context_node(morphizen::ExecutionProviderConcrete* ep, int index) {
       context.get_session_config("ep.context_embed_mode", "1") == "1" ? 1 : 0;
   attrs.add("embed_mode", embed_mode);
   attrs.add("source", std::string("MorphiZenExecutionProvider"));
-  attrs.add("log_dir", context.get_log_dir().u8string());
+  attrs.add("dump_dir", context.get_dump_directory().u8string());
   attrs.add("onnx_model_filename", context.model_path.u8string());
   attrs.add("partition_name", name);
   bool enable_encryption = morphizen_encryption::has_encryption_support() &&
