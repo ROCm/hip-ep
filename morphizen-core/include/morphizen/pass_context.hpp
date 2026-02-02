@@ -17,31 +17,11 @@ namespace morphizen {
 // The reason PassContext exists is that PassContext has a longer life cycle
 // than Pass. The Pass will be destoryed after model is compiled but some info
 // is still needed for custom op.
-// clang-format off
-/**
-
-
-
-                              write_file     read_file
-
-                                   │           ▲
-                                   │           │
-       cache_files_to_tar_mem      │           │     tar_file_to_cache_files
-                                   ▼           │
-   ┌─────────┐    ◄──────     ┌────────────────┴─────┐   ◄────── ┌─────────┐
-   │ tar mem │                │   memory cache files │           │ tar file│
-   └─────────┘    ──────►     └──────────────────────┘   ──────► └─────────┘
-
-       tar_mem_to_cache_files     │            ▲   cache_files_to_tar_file
-                                  │            │
-                                  │            │
-                                  │            │
-                                  ▼            │
-                    cache_files_to_dir        dir_to_cache_files
-
-
-*/
-// clang-format on
+//
+// PassContext provides access to cached compilation artifacts via tar_file_
+// system. Use cache_files_to_tar_mem() to export cache,
+// tar_file_to_cache_files() to import. Use write_file() and read_file_*() for
+// individual files.
 class PassContextTimer {
 public:
   PassContextTimer();
