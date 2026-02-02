@@ -319,7 +319,7 @@ There are two producers:
 
 #### Embed Mode
 
-  1. Uses `tar_file_`, depending on `cache_file_use_cache_key_prefix_`.
+  1. Uses `tar_file_` with cache_key prefix for file isolation.
 
 TODO:
   1. Add `TarFile::to_memory()` return.
@@ -347,11 +347,7 @@ TODO:
 
 #### "ep.share_ep_contexts" = 1
 
-`cache_file_use_cache_key_prefix_ = 1`; otherwise, `cache_file_use_cache_key_prefix_ = 0`.
-
-`cache_file_use_cache_key_prefix_` is only meaningful when `tar_file_` is in use.
-
-`cache_file_use_cache_key_prefix_ = 1`
+All cache files are stored with cache_key prefix for proper isolation when `tar_file_` is in use. This ensures multiple EP contexts can safely share the same tar archive.
 
 ### Compression or Encryption is Enabled
 

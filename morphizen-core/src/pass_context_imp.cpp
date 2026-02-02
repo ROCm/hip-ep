@@ -470,12 +470,17 @@ PassContextImp::open_file_for_read(const std::string& filename) const {
   return open_file_for_read_with_tar_file(filename);
 }
 
+std::string
+PassContextImp::get_cache_filename(const std::string& filename) const {
+  auto cache_key = get_config_proto().cache_key();
+  CHECK(!cache_key.empty()) << "cache_key required for cache file operations";
+  return cache_key + "/" + filename;
+}
+
 std::unique_ptr<CacheFileReader>
 PassContextImp::open_file_for_read_with_tar_file(
     const std::string& filename1) const {
-  auto prefix = get_config_proto().cache_key();
-  auto filename =
-      cache_file_use_cache_key_prefix_ ? prefix + "/" + filename1 : filename1;
+  auto filename = get_cache_filename(filename1);
   CHECK(tar_file_ != nullptr) << "tar_file_ is nullptr";
   auto stream = tar_file_->open_for_read(filename);
   if (stream == nullptr) {
@@ -491,9 +496,7 @@ PassContextImp::open_file_for_read_with_tar_file(
 std::unique_ptr<CacheFileWriter>
 PassContextImp::open_file_for_write_with_tar_file(
     const std::string& filename1) {
-  auto prefix = get_config_proto().cache_key();
-  auto filename =
-      cache_file_use_cache_key_prefix_ ? prefix + "/" + filename1 : filename1;
+  auto filename = get_cache_filename(filename1);
   CHECK(tar_file_ != nullptr) << "tar_file_ is nullptr";
   auto stream = tar_file_->open_for_write(filename);
   if (stream == nullptr) {
@@ -539,10 +542,7 @@ bool PassContextImp::write_file(const std::string& filename,
 }
 
 bool PassContextImp::has_cache_file(const std::string& filename1) const {
-  auto filename = filename1;
-  if (cache_file_use_cache_key_prefix_) {
-    filename = get_config_proto().cache_key() + "/" + filename1;
-  }
+  auto filename = get_cache_filename(filename1);
   CHECK(tar_file_ != nullptr) << "tar_file_ should always exist";
   return tar_file_->has_file(filename);
 }
@@ -904,7 +904,6 @@ void PassContextImp::maybe_create_tar_file_for_write() {
     tar_file_ = TarFile::create();
     CHECK(tar_file_ != nullptr)
         << "Failed to create tar file for cache (EP context disabled)";
-    cache_file_use_cache_key_prefix_ = false;
     return;
   }
 
@@ -956,13 +955,7 @@ void PassContextImp::maybe_create_tar_file_for_write() {
 
   // Cache key prefix configuration
   if (is_shared_context_enabled) {
-    // for shared ep context, we must enable file prefix.
-    cache_file_use_cache_key_prefix_ = true;
-  } else {
-    // for non-shared ep context, we can use cache_key_prefix or not, it is
-    // and we prefer to enable it.
-    cache_file_use_cache_key_prefix_ =
-        get_provider_option("use_cache_key_prefix", "1") == "1";
+    // Always use cache_key prefix for consistent behavior
   }
 }
 void PassContextImp::create_tar_file_for_read(std::string&& ep_context_binary,
@@ -1027,16 +1020,12 @@ void PassContextImp::create_tar_file_for_prebuild_cache(
       tar_file_file_name_ = binary_file_path;
     }
   }
-  if (tar_file_->has_file("context.json")) {
-    cache_file_use_cache_key_prefix_ = false;
-  } else {
-    cache_file_use_cache_key_prefix_ = true;
-    auto prefix = get_config_proto().cache_key();
-    CHECK(tar_file_->has_file(prefix + "/context.json"))
-        << "tar file does not have context.json, cache_key_prefix is "
-           "enabled, but context.json is not found in the tar file, please "
-           "check prebuild ep context generation";
-  }
+  // Always use cache_key prefix - verify context.json exists with prefix
+  auto prefix = get_config_proto().cache_key();
+  CHECK(!prefix.empty()) << "cache_key required for prebuild cache";
+  CHECK(tar_file_->has_file(prefix + "/context.json"))
+      << "tar file does not have " << prefix << "/context.json, "
+      << "please check prebuild ep context generation";
 }
 void PassContextImp::print_version_info(const char* prefix) {
   auto& config = get_config_proto();
