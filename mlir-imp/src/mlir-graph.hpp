@@ -95,6 +95,8 @@ public:
   void save(const std::string& filename, const std::string& dat_filename,
             size_t external_data_threshold) const;
 
+  std::string save_string() const;
+
   // Graph resolution - ensures graph is in consistent state
   int resolve(bool force);
 

@@ -805,11 +805,37 @@ void MLIRGraph::save(const std::string& filename,
 
   MY_LOG(1) << "Saving MLIR graph to file: " << filename;
 
+  // Get serialized string
+  std::string mlir_string = save_string();
+  if (mlir_string.empty()) {
+    LOG(ERROR) << "Failed to serialize MLIR graph";
+    return;
+  }
+
+  // Write to file
+  std::error_code error_code;
+  llvm::raw_fd_ostream output(filename, error_code);
+  if (error_code) {
+    LOG(ERROR) << "Failed to open file for writing: " << filename << " - "
+               << error_code.message();
+    return;
+  }
+
+  output << mlir_string;
+  output.close();
+
+  MY_LOG(1) << "Successfully saved MLIR graph to: " << filename;
+}
+
+std::string MLIRGraph::save_string() const {
+  MY_LOG(1) << "Serializing MLIR graph to string";
+
   // Get the parent module containing this function
   mlir::ModuleOp module = func_->getParentOfType<mlir::ModuleOp>();
   if (!module) {
-    LOG(ERROR) << "Cannot save graph: function is not contained in a module";
-    return;
+    LOG(ERROR)
+        << "Cannot serialize graph: function is not contained in a module";
+    return "";
   }
 
   // Temporarily backup and remove internal morphizen attributes before saving
@@ -846,16 +872,9 @@ void MLIRGraph::save(const std::string& filename,
     }
   });
 
-  // Open the output file
-  std::error_code error_code;
-  llvm::raw_fd_ostream output(filename, error_code);
-  if (error_code) {
-    LOG(ERROR) << "Failed to open file for writing: " << filename << " - "
-               << error_code.message();
-    return;
-  }
-
-  // Print the MLIR module to the file
+  // Serialize the MLIR module to a string
+  std::string result;
+  llvm::raw_string_ostream stream(result);
   mlir::OpPrintingFlags flags;
   if (ENV_PARAM(MORPHIZEN_MLIR_SAVE_WITH_GENERIC)) {
     flags.printGenericOpForm();
@@ -864,8 +883,8 @@ void MLIRGraph::save(const std::string& filename,
     flags.enableDebugInfo();
     flags.printValueUsers();
   }
-  module.print(output, flags);
-  output.close();
+  module.print(stream, flags);
+  stream.flush();
 
   // Restore the backed up morphizen attributes
   for (const auto& backup : backups) {
@@ -878,9 +897,11 @@ void MLIRGraph::save(const std::string& filename,
     }
   }
 
-  MY_LOG(1) << "Successfully saved MLIR graph to: " << filename << " (restored "
+  MY_LOG(1) << "Successfully serialized MLIR graph to string (restored "
             << backups.size() << " operations with morphizen attributes)";
+  return result;
 }
+
 const MLIRNodeArg*
 MLIRGraph::get_node_arg(MLIRNodeArgIndex node_arg_index) const {
   if (!node_arg_index.is_valid())
