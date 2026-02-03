@@ -15,22 +15,22 @@ onnx-hipdnn-ep/
 ├── LICENSE                     # Apache 2.0 License
 ├── .gitignore                  # Git ignore rules
 ├── cmake/                      # CMake modules
-│   ├── dep.h.inc.in           # Dependency header template
-│   ├── deps.cmake             # Dependency management
-│   └── deps.txt               # Dependency list
-├── level-1-pass-mlir/         # MLIR pass implementation
-│   ├── CMakeLists.txt         # Pass build configuration
+│   └── deps.cmake              # Dependency management
+├── 3rd-party/                  # Third-party dependencies
+│   └── morphizen/              # MorphiZen (git submodule)
+├── level-1-pass-mlir/          # MLIR pass implementation
+│   ├── CMakeLists.txt          # Pass build configuration
 │   └── src/
-│       └── pass_main.cpp      # Main pass implementation with MLIR parsing
+│       └── pass_main.cpp       # Main pass implementation with MLIR parsing
 ├── test/                       # Test infrastructure
-│   ├── CMakeLists.txt         # Test build configuration
+│   ├── CMakeLists.txt          # Test build configuration
 │   ├── test_ort_integration.cpp  # ORT integration tests
-│   ├── gen_conv_model.py      # Conv model generator
-│   └── gen_conv_gemm_model.py # Conv+Gemm model generator
+│   ├── gen_conv_model.py       # Conv model generator
+│   └── gen_conv_gemm_model.py  # Conv+Gemm model generator
 ├── doc/                        # Documentation
-│   └── TESTING.md             # Testing guide with examples
+│   └── TESTING.md              # Testing guide with examples
 └── etc/                        # Configuration files
-    └── morphizen_config.json  # MorphiZen pass configuration
+    └── morphizen_config.json   # MorphiZen pass configuration
 ```
 
 ## Key Features
@@ -51,11 +51,11 @@ onnx-hipdnn-ep/
 
 ### Build Dependencies
 
-The build process requires the following dependencies to be built in order:
+The build process requires the following dependencies:
 
 1. **ONNXRuntime** (required - must be built first)
 2. **LLVM/MLIR** (optional pre-build - can be auto-fetched via FetchContent or pre-built manually)
-3. **MorphiZen** (automatically fetched via CMake FetchContent from https://github.com/ROCm/MorphiZen.git)
+3. **MorphiZen** (git submodule at `3rd-party/morphizen`)
 
 **Note:** LLVM/MLIR pre-build is optional. The build system will automatically fetch and build LLVM via FetchContent if not pre-installed. However, pre-building can save time on subsequent builds.
 
@@ -97,7 +97,12 @@ cmake --build ../build/onnxruntime/Release/ --target install
 
 #### Step 2: Build onnx-hipdnn-ep
 
-Once ONNXRuntime is built, you can build onnx-hipdnn-ep. LLVM/MLIR and MorphiZen will be automatically fetched via CMake FetchContent:
+Once ONNXRuntime is built, you can build onnx-hipdnn-ep. First initialize the git submodules:
+
+```bash
+cd onnx-hipdnn-ep
+git submodule update --init --recursive
+```
 
 **Using Visual Studio generator (recommended for Windows)**
 ```bash
@@ -130,8 +135,9 @@ If you use "Visual Studio 18 2026", upgrade cmake to >=v4.2, for example v4.2.3,
 ./build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --cmake_extra_defines CMAKE_INSTALL_PREFIX=$PWD/../local --disable_memleak_checker
 cmake --build ../build/onnxruntime/Release/ --target install
 
-# 2. Build onnx-hipdnn-ep (LLVM/MLIR and MorphiZen will be auto-fetched)
+# 2. Build onnx-hipdnn-ep
 cd ../onnx-hipdnn-ep
+git submodule update --init --recursive
 cmake -DBUILD_SHARED_LIBS=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -S . -B ../build/onnx-hipdnn-ep -DCMAKE_INSTALL_PREFIX=../local -DCMAKE_PREFIX_PATH=$PWD/../local
 cmake --build ../build/onnx-hipdnn-ep --config Release
 ```

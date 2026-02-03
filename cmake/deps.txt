@@ -1,7 +1,0 @@
-##  Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
-##  Licensed under the MIT License.
-##
-## morphizen-mlir dependencies
-## Format: name;url;sha1_or_git_tag
-llvm;https://github.com/llvm/llvm-project.git;f8cb7987c64dcffb72414a40560055cb717dbf74
-morphizen;https://github.com/ROCm/MorphiZen.git;ee97f468e3b9f65d798ea58a89780cbfb3de87f3
