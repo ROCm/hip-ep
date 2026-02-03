@@ -13,9 +13,7 @@
 #include <unordered_map>
 #include <exception>
 #include <boost/program_options.hpp>
-#define ORT_API_MANUAL_INIT 1
-#include "onnxruntime_cxx_api.h"
-#include "morphizen/morphizen.hpp"
+#include "morphizen/vaip.hpp"
 #include "morphizen/env_config.hpp"
 
 namespace po = boost::program_options;
@@ -699,7 +697,6 @@ get_nodes(morphizen_cxx::GraphConstRef graph, const T& node_output_names) {
 // $BUILD/morphizen/onnxruntime_morphizen_ep/onnx_pattern_gen -i 38 -o 62 -f $BUILD/../morphizen_regression/5/Resnet18_int.onnx
 // clang-format on
 int main(int argc, char* argv[]) {
-  Ort::InitApi();
   try {
     // Define command line options
     po::options_description desc("Allowed options");
@@ -759,12 +756,6 @@ int main(int argc, char* argv[]) {
       return 1;
     }
 
-    // intialize the main function.
-    Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "onnx_pattern_gen");
-    Ort::SessionOptions().AppendExecutionProvider_VitisAI();
-    morphizen::set_the_global_api(
-        morphizen::Plugin::invoke<morphizen::OrtApiForMorphizen*>(
-            "onnxruntime_morphizen_ep", "get_the_global_api"));
     // Check command line args
     CHECK_NE(opt_onnx_file, "")
         << " -f <model.onnx> is required. " << opt_onnx_file;

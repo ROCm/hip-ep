@@ -8,8 +8,7 @@
 #include <limits>
 #include <glog/logging.h>
 #include <boost/program_options.hpp>
-#include "onnxruntime_cxx_api.h"
-#include "morphizen/morphizen.hpp"
+#include "morphizen/vaip.hpp"
 // clang-format on
 
 namespace po = boost::program_options;
@@ -80,14 +79,6 @@ int main(int argc, char* argv[]) {
       return 1;
     }
     if (!validate_path(opt_output_txt_file, "output-txt")) {
-      return 1;
-    }
-
-    Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "morphizen-graph-opt");
-    try {
-      Ort::SessionOptions().AppendExecutionProvider_VitisAI();
-    } catch (const std::exception& e) {
-      std::cerr << "exception occurs : " << e.what() << "\n";
       return 1;
     }
 

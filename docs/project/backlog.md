@@ -33,7 +33,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 - [Issue #017: Remove update_config_by_target()](issues/017-remove-update-config-by-target.md) - Remove obsolete function after #007 and #014
 - [Issue #018: Make ConfigProto const Member](issues/018-make-configproto-const.md) - Enforce immutability at compile-time
 - [Issue #019: Refactor initialize_context()](issues/019-refactor-initialize-context.md) - God function cleanup
-- [Issue #023: Migrate v1 to v2 Execution Provider API](issues/023-migrate-v1-to-v2-execution-provider-api.md) - **CRITICAL** - Migrate from AppendExecutionProvider_VitisAI to AppendExecutionProvider_V2 for MLIR backend
 - [Issue #024: Remove Legacy Compile Entry Points](issues/024-remove-legacy-compile-entry-points.md) - Remove unused compile_onnx_model_morphizen_ep_with_options and with_error_handling (~50 LOC)
 - [Issue #025: MLIR Graph Binary Serialization](issues/025-mlir-graph-binary-serialization.md) - Change MLIR graph save format from text (.mlir) to binary bytecode (.mlirbc)
 - [Issue #026: MLIR Model Export API](issues/026-mlir-model-export-api.md) - Add model_save_mlir() API to export Model pointer to MLIR file (MLIR backend only)
@@ -45,6 +44,7 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
 _(Max 5 items, deleted files deleted)_
 
+- **Issue #023: Migrate v1 to v2 Execution Provider API** - PR #TBD - Migrated from AppendExecutionProvider_VitisAI to AppendExecutionProvider_V2, deleted unused common/initialize_morphizen.hpp
 - **Issue #021: Remove cache_file_use_cache_key_prefix_** - PR #87 - Always use cache_key prefix, remove flag (~20-25 LOC)
 - **Issue #016: Remove dirty_hack_for_model_clone_external_data_threshold** - PR #85
 - **Issue #004: Remove encryption_key Copying** - PR #82 - Removed encryption_key from ConfigProto, read from provider_options (security improvement)

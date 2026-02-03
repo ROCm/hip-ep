@@ -12,8 +12,8 @@
 #  pragma GCC diagnostic ignored "-Wunused-variable"
 #  pragma GCC diagnostic ignored "-Wunused-but-set-variable"
 #endif
+#include <filesystem>
 #include <glog/logging.h>
-#define ORT_API_MANUAL_INIT 1
 #include <onnxruntime_cxx_api.h>
 #if _WIN32
 #  ifdef _DEBUG
@@ -22,7 +22,7 @@
 #endif
 #include "morphizen/morphizen.hpp"
 template <typename... Args> void* morphizen_main_cmd(Args... args) {
-  auto ep_dll = morphizen::Plugin::get("onnxruntime_morphizen_ep");
+  auto ep_dll = morphizen::Plugin::get("onnxruntime_vitisai_ep");
   if (ep_dll == nullptr) {
     LOG(ERROR) << "Failed to load MorphiZen EP";
     return nullptr;
@@ -67,7 +67,6 @@ bool arg_get(int argc, const char* argv[], const char* name) {
 }
 
 int main(int argc, const char* argv[]) {
-  Ort::InitApi();
 #if _WIN32
 #  ifdef _DEBUG
   auto env_ci = getenv("CI");
@@ -86,15 +85,6 @@ int main(int argc, const char* argv[]) {
 #endif
   auto ret = 0;
   {
-    auto env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR,
-                                          "morphizen_unit_test");
-    /* morphizen::StaticPluginRegister::sync_static_plugin_into_module(
-        "onnxruntime_morphizen_ep");
-        */
-    Ort::SessionOptions().AppendExecutionProvider_VitisAI();
-    morphizen::set_the_global_api(
-        morphizen::Plugin::invoke<morphizen::OrtApiForMorphizen*>(
-            "onnxruntime_morphizen_ep", "get_the_global_api"));
     testing::InitGoogleTest(&argc, (char**)argv);
     if (arg_get(argc, argv, "--gtest_list_test_cases")) {
       std::cout << "List all test cases:" << std::endl;
@@ -102,6 +92,14 @@ int main(int argc, const char* argv[]) {
       return 0;
     }
 
+    Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "morphizen_unit_test");
+#ifdef _WIN32
+    auto library_path = std::filesystem::path("onnxruntime_vitisai_ep.dll");
+#else
+    auto library_path = std::filesystem::path("libonnxruntime_vitisai_ep.so");
+#endif
+    env.RegisterExecutionProviderLibrary("MorphiZenExecutionProvider",
+                                         library_path);
     ret = RUN_ALL_TESTS();
   }
   if (ret == 0) {

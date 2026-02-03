@@ -23,10 +23,13 @@ extern "C" {
 /**
  * @brief Initializes the MorphiZen Execution Provider for ONNX Runtime.
  *
- * The `MorphiZen_Provider::Initialize()` is invoked during
- * `session_options.AppendExecutionProvider_VitisAI(provider_options)`,
- * prior to session creation.
- * Called right after loading the shared library.
+ * The `MorphiZen_Provider::Initialize()` is invoked during EP registration
+ * using the Plugin EP V2 API:
+ * `Ort::GetApi().RegisterExecutionProviderLibrary(env,
+ * "MorphiZenExecutionProvider", "onnxruntime_vitisai_ep.dll")` followed by
+ * `session_options.AppendExecutionProvider_V2(env, selected_devices,
+ * provider_options)`, prior to session creation. Called right after loading the
+ * shared library.
  *
  * Features:
  * - Initialize the global API in onnxruntime_morphizen_ep dll/so.
@@ -324,8 +327,8 @@ get_the_global_api_unsafe();
  * std::vector<std::unique_ptr<morphizen::ExecutionProvider>> and deletes it.
  *
  * The std::vector<std::unique_ptr<ExecutionProvider>> created in
- * onnxruntime_morphizen_ep.dll cannot be deleted in
- * onnxruntime_providers_morphizen.dll
+ * onnxruntime_vitisai_ep.dll cannot be deleted in
+ * onnxruntime_providers_vitisai.dll
  *
  *
  * @return void* A function pointer to a deleter function for the specified

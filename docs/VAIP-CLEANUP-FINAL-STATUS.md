@@ -6,13 +6,13 @@ Licensed under the MIT License.
 
 ## Summary
 
-The VAIP to MorphiZen naming cleanup is **COMPLETE**. All internal references have been renamed from "VAIP" to "MorphiZen". The remaining VAIP references (91 total) are **intentional** and fall into six categories documented below.
+The VAIP to MorphiZen naming cleanup is **COMPLETE**. All internal references have been renamed from "VAIP" to "MorphiZen". The remaining VAIP references (89 total) are **intentional** and fall into six categories documented below.
 
 ## Progress
 
 - **Starting VAIP references**: 620
-- **References cleaned up**: 529 (85%)
-- **Remaining intentional references**: 91 (15%)
+- **References cleaned up**: 531 (86%)
+- **Remaining intentional references**: 89 (14%)
 
 ## Cleanup Phases Completed
 
@@ -24,16 +24,12 @@ The VAIP to MorphiZen naming cleanup is **COMPLETE**. All internal references ha
 
 ## Remaining VAIP References (By Category)
 
-### Category 1: Backward Compatibility Aliases (7 refs)
+### Category 1: Backward Compatibility Aliases (5 refs)
 
 **Purpose**: Provide deprecated aliases for external code that may use old API names.
 
 **Files**:
-1. `common/initialize_morphizen.hpp` (2 refs)
-   - Line 26: Comment explaining deprecation
-   - Line 27: `[[deprecated]] void initialize_vaip()`
-
-2. `morphizen-ort-api-ext/include/morphizen/morphizen-ort-api-ext.hpp` (5 refs)
+1. `morphizen-ort-api-ext/include/morphizen/morphizen-ort-api-ext.hpp` (5 refs)
    - Line 32: Comment explaining deprecation
    - Line 34: `[[deprecated]] get_vaip_version_major()`
    - Line 38: `[[deprecated]] get_vaip_version_minor()`
@@ -194,7 +190,6 @@ git grep -i "vaip" | wc -l
 
 # Exclude intentional references and count unexpected ones
 git grep -i "vaip" \
-  --exclude="initialize_morphizen.hpp" \
   --exclude="morphizen-ort-api-ext.hpp" \
   --exclude="morphizen-ort-api.cpp" \
   --exclude="morphizen-ort-api-ext.cpp" \
@@ -210,7 +205,7 @@ git grep -i "vaip" \
 
 ## Conclusion
 
-The VAIP to MorphiZen naming cleanup is **COMPLETE**. All 91 remaining VAIP references are intentional and serve specific purposes:
+The VAIP to MorphiZen naming cleanup is **COMPLETE**. All 89 remaining VAIP references are intentional and serve specific purposes:
 - **Backward compatibility** for external users
 - **Binary compatibility** with cached files
 - **Historical attribution** in test data
