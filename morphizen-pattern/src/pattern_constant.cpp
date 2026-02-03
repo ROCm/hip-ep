@@ -9,7 +9,17 @@
 #include "./pattern_log.hpp"
 #include "morphizen/node.hpp"
 #include "morphizen/node_arg.hpp"
+
+#ifdef _MSC_VER
+#  pragma warning(push)
+#  pragma warning(disable : 4946)
+#endif
+
 #include "morphizen/pattern.pb.h"
+
+#ifdef _MSC_VER
+#  pragma warning(pop)
+#endif
 
 namespace morphizen {
 PatternConstant::PatternConstant(int id) : Pattern(id) {}

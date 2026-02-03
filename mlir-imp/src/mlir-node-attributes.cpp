@@ -61,11 +61,11 @@ MLIRNodeAttributes::get_mlir_attribute(const std::string& name) const {
   auto attrs = (*this)->getAttrs();
   for (auto it = attrs.begin(); it != attrs.end(); it++) {
     if (it->getName().str() == name) {
-      return reinterpret_cast<const MLIRNamedAttribute&>(*it);
+      return static_cast<const MLIRNamedAttribute&>(*it);
     }
   }
   CHECK(0) << "Should check whether it contains name: " << name;
-  return reinterpret_cast<const MLIRNamedAttribute&>(*attrs.begin());
+  return static_cast<const MLIRNamedAttribute&>(*attrs.begin());
 }
 
 mlir::DictionaryAttr MLIRNodeAttributes::get_mlir_dictionary() const {

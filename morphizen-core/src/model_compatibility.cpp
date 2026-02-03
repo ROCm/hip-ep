@@ -6,7 +6,14 @@
 
 #include "morphizen/custom_op_imp.hpp"
 #include "morphizen/env_config.hpp"
+#ifdef _MSC_VER
+#  pragma warning(push)
+#  pragma warning(disable : 4946)
+#endif
 #include "morphizen/model_compatibility.pb.h"
+#ifdef _MSC_VER
+#  pragma warning(pop)
+#endif
 #include "morphizen/onnxruntime_morphizen_ep.hpp"
 #include "morphizen/plugin.hpp"
 #include <glog/logging.h>

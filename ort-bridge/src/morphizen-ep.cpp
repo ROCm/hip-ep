@@ -484,25 +484,25 @@ OrtStatus* MorphiZenEP::CompileSubgraph(const morphizen::ExecutionProvider& ep,
         [](OrtNodeComputeInfo* this_ptr, OrtNodeComputeContext* compute_context,
            void** compute_state) -> OrtStatus* {
       (void)compute_context;
-      auto self = reinterpret_cast<MorphiZenEP_ComputeInfo*>(this_ptr);
+      auto self = static_cast<MorphiZenEP_ComputeInfo*>(this_ptr);
       auto* p = self->morphizen_ep->compile().release();
       *compute_state = p;
       return nullptr;
     };
     morphizen_node_compute_info->ReleaseState =
         [](OrtNodeComputeInfo* this_ptr, void* compute_state) -> void {
-      auto self = reinterpret_cast<MorphiZenEP_ComputeInfo*>(this_ptr);
+      auto self = static_cast<MorphiZenEP_ComputeInfo*>(this_ptr);
       (void)self;
       if (compute_state) {
-        delete reinterpret_cast<morphizen::CustomOp*>(compute_state);
+        delete static_cast<morphizen::CustomOp*>(compute_state);
       }
     };
     morphizen_node_compute_info->Compute =
         [](OrtNodeComputeInfo* this_ptr, void* compute_state,
            OrtKernelContext* kernel_context) -> OrtStatus* {
-      auto self = reinterpret_cast<MorphiZenEP_ComputeInfo*>(this_ptr);
+      auto self = static_cast<MorphiZenEP_ComputeInfo*>(this_ptr);
       (void)self;
-      reinterpret_cast<morphizen::CustomOp*>(compute_state)
+      static_cast<morphizen::CustomOp*>(compute_state)
           ->Compute(&Ort::GetApi(), kernel_context);
       return nullptr;
     };

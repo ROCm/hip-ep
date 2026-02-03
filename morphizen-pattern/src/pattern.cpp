@@ -4,7 +4,18 @@
  */
 
 #include "morphizen/pattern.hpp"
+
+#ifdef _MSC_VER
+#  pragma warning(push)
+#  pragma warning(disable : 4946)
+#endif
+
 #include "morphizen/pattern.pb.h"
+
+#ifdef _MSC_VER
+#  pragma warning(pop)
+#endif
+
 #include <algorithm>
 #include <bitset>
 #include <glog/logging.h>
