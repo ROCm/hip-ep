@@ -1,5 +1,5 @@
 ##
-# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
 include(FetchContent)
@@ -44,13 +44,13 @@ message(STATUS "Configuring LLVM/MLIR for onnx-hipdnn-ep")
 set(LLVM_ENABLE_PROJECTS "mlir" CACHE STRING "LLVM projects to build")
 set(LLVM_TARGETS_TO_BUILD "host" CACHE STRING "LLVM targets to build")
 set(LLVM_ENABLE_ASSERTIONS ON CACHE BOOL "Enable LLVM assertions")
-set(LLVM_ENABLE_RTTI ON CACHE BOOL "Enable RTTI in LLVM")
+set(LLVM_ENABLE_RTTI OFF CACHE BOOL "Enable RTTI in LLVM")
 set(LLVM_ENABLE_LIBEDIT OFF CACHE BOOL "Enable libedit in LLVM")
 set(LLVM_BUILD_TOOLS ON CACHE BOOL "Build LLVM tools")
 set(LLVM_INSTALL_UTILS ON CACHE BOOL "Install LLVM utilities")
 set(LLVM_INCLUDE_TESTS ON CACHE BOOL "Build LLVM tests")
 set(LLVM_DISABLE_ASSEMBLY_FILES OFF CACHE BOOL "disable assembly")
-set(ZLIB_USE_STATIC_LIBS ON CACHE BOOL "Use static zlib")
+set(ZLIB_USE_STATIC_LIBS OFF CACHE BOOL "Use static zlib")
 set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "Enable zstd compression")
 
 # LLVM commit hash and URL are now managed in deps.txt

@@ -1,5 +1,5 @@
 <!--
-Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
 # ONNX HIP DNN Execution Provider
@@ -271,5 +271,5 @@ score[5]    =  0.000909427  text: electric ray, crampfish, numbfish, torpedo,,
 
 ## License
 
-Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.

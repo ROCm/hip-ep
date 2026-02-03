@@ -36,7 +36,6 @@ The initial implementation passed Conv operation parameters through the protocol
 
 This approach:
 - ✅ Simplifies the architecture - only filename is passed
-- ✅ Uses operation support checking (similar to hipDNNEP)
 - ✅ Centralizes graph creation logic in the pass
 - ✅ Enables debugging - serialized graphs can be inspected
 - ✅ Scales easily - same mechanism for all operations
@@ -132,7 +131,7 @@ Error build_operation_graph(hipdnnHandle_t handle) {
 **File:** `proto/hipdnn.proto`
 
 ```protobuf
-// Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 syntax = "proto3";
 package hipdnn;
@@ -900,10 +899,8 @@ TEST(HipDNNIntegration, EndToEnd) {
 
 ### 10.2 Benefits
 
-1. **Cleaner Architecture**: Follows hipDNNEP patterns
-2. **Better Separation**: Support checking, graph building, serialization are separate
-3. **Easier Extension**: Adding operations only requires new `IsSupportedXXX()` and `AddXXXNode()`
-4. **Consistent with Reference**: Matches `external/hipDNNEP` implementation patterns
+1. **Better Separation**: Support checking, graph building, serialization are separate
+2. **Easier Extension**: Adding operations only requires new `IsSupportedXXX()` and `AddXXXNode()`
 
 ---
 
@@ -911,8 +908,6 @@ TEST(HipDNNIntegration, EndToEnd) {
 
 - **hipDNN Frontend**: `c:/Develop/TheRock/include/hipdnn/frontend/hipdnn_frontend/Graph.hpp`
 - **GraphWrapper**: `c:/Develop/TheRock/include/hipdnn/data_sdk/hipdnn_data_sdk/flatbuffer_utilities/GraphWrapper.hpp`
-- **hipDNNEP Kernel**: `external/hipDNNEP/src/kernel.cc` - Symbol table pattern
-- **hipDNNEP EP**: `external/hipDNNEP/src/ep.cc` - Operation support checking
 - **Level-1 Pass**: `level-1-pass-hipdnn/src/pass_main.cpp`
 - **Custom Op**: `custom-op-hipdnn/src/custom_op.cpp`
 

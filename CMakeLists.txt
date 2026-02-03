@@ -1,5 +1,5 @@
 ##
-# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
 cmake_minimum_required(VERSION 3.29)
@@ -17,7 +17,6 @@ if(MSVC)
 endif()
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
-include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/presets.cmake)
 add_subdirectory(proto)
 add_subdirectory(level-1-pass-hipdnn)
 add_subdirectory(custom-op-hipdnn)
