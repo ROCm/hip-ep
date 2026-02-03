@@ -49,6 +49,7 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 - [Issue #037: Remove Dead Code from TarFile](issues/037-remove-tarfile-dead-code.md) - Remove unused rename_symlink/rename_existing_entry functions (dead since April 2025)
 - [Issue #038: Document Lazy Symlink Resolution const_cast](issues/038-document-lazy-symlink-const-cast.md) - Add comprehensive documentation explaining intentional const_cast for write-once lazy initialization
 - [Issue #039: Fix Typos and Outdated Comments in TarFile](issues/039-fix-tarfile-typos-and-outdated-comments.md) - Fix outdated renaming comment, typos, incorrect FIXME, and remove unused parameter
+- [Issue #040: Remove Legacy tar_ball.cpp/hpp Re-Serialization](issues/040-remove-legacy-tar-ball-reserialization.md) - Remove ~750 lines of legacy TarWriter/TarReader code that wastefully re-serializes tar data
 
 ---
 
