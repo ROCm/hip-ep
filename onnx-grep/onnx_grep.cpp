@@ -7,9 +7,7 @@
 #include <exception>
 #include <limits>
 #include <boost/program_options.hpp>
-#define ORT_API_MANUAL_INIT 1
-#include "onnxruntime_cxx_api.h"
-#include "morphizen/morphizen.hpp"
+#include "morphizen/vaip.hpp"
 
 namespace po = boost::program_options;
 
@@ -67,7 +65,6 @@ static std::shared_ptr<morphizen::Pattern> get_pattern(const std::string& file) 
 }
 
 int main(int argc, char* argv[]) {
-  Ort::InitApi();
   std::cout << "- ONNX Grep utility ..." << std::endl;
   try {
     // Define command line options
@@ -103,11 +100,6 @@ int main(int argc, char* argv[]) {
       return 1;
     }
 
-    Ort::Env env(ORT_LOGGING_LEVEL_ERROR, "onnx_grep");
-    Ort::SessionOptions().AppendExecutionProvider_VitisAI();
-         morphizen::set_the_global_api(
-          morphizen::Plugin::invoke<morphizen::OrtApiForMorphizen*>(
-              "onnxruntime_morphizen_ep", "get_the_global_api"));
     CHECK_NE(file, "");
 
     auto p = get_pattern(pattern);

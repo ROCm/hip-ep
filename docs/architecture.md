@@ -638,7 +638,11 @@ class MorphiZenEP : public OrtEp {
 ```
 User Code
     ↓
-session_options.AppendExecutionProvider_VitisAI(options)
+// Register EP library using ORT API 2.0
+Ort::GetApi().RegisterExecutionProviderLibrary(env, "MorphiZenExecutionProvider", "onnxruntime_vitisai_ep.dll")
+    ↓
+// Get EP devices and append using V2 API
+session_options.AppendExecutionProvider_V2(env, selected_devices, options)
     ↓
 CreateEpFactories() [ort-bridge]
     ↓
@@ -1115,7 +1119,6 @@ morphizen/
 │   ├── hash-library/       # Hash library (git submodule)
 │   └── onnxruntime-morphizen-headers/  # ORT headers
 ├── cmake/                  # CMake configuration files
-├── common/                 # Shared headers
 ├── custom-op-generic/      # Generic custom operators
 ├── docs/                   # Documentation
 │   ├── architecture.md     # This document

@@ -186,7 +186,7 @@ v2_single_session_gen_and_run_embed_ctx = {
         "registration": [
             {
                 "name": "MorphiZenExecutionProvider",
-                "library": "onnxruntime_morphizen_ep.dll",
+                "library": "onnxruntime_vitisai_ep.dll",
             },
         ],
         "session_options": [

@@ -67,6 +67,12 @@ target_link_libraries(${TEST_EXE_NAME}
     $<LINK_LIBRARY:WHOLE_ARCHIVE,morphizen-pass-init>
 
 )
+
+if(morphizen_ENABLE_MLIR_BACKEND)
+  target_link_libraries(${TEST_EXE_NAME} PRIVATE $<LINK_LIBRARY:WHOLE_ARCHIVE,mlir-imp>)
+  target_compile_definitions(${TEST_EXE_NAME} PRIVATE MORPHIZEN_ENABLE_MLIR_BACKEND=1)
+endif()
+
 if(morphizen_ENABLE_BOOST)
   if(TARGET Boost::process)
     # boost 1.84 does have Boost::process, and dependencies is automatically managed.

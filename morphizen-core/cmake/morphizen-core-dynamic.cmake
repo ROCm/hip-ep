@@ -8,7 +8,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_version_header.cmake)
 generate_version_info_header()
 
 add_library(${morphizen_CORE_DYNAMIC_UNIQUE_ID} SHARED src/main.cpp ${ryzenai_version_rc_file})
-message(STATUS "create target ${morphizen_CORE_DYNAMIC_UNIQUE_ID} for onnxruntime_morphizen_ep.dll")
+message(STATUS "create target ${morphizen_CORE_DYNAMIC_UNIQUE_ID} for onnxruntime_vitisai_ep.dll")
 add_library (morphizen::${morphizen_CORE_DYNAMIC_UNIQUE_ID} ALIAS ${morphizen_CORE_DYNAMIC_UNIQUE_ID})
 set_target_properties(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PROPERTIES FOLDER morphizen)
 # set output name of ${morphizen_CORE_DYNAMIC_UNIQUE_ID}, it is required by MorphiZen EP.

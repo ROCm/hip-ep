@@ -23,7 +23,7 @@ TEST(PluginTest, StaticHelloPlugin) {
   }
   if (0) {
     // disable this test, because we need to unload the
-    // onnxruntime_morphizen_ep.dll to cover this test.
+    // onnxruntime_vitisai_ep.dll to cover this test.
     auto plugin = morphizen::Plugin::get("hello_plugin");
     ASSERT_TRUE(plugin == nullptr);
   }

@@ -47,9 +47,26 @@ BUT we swap in NEW provider_options after loading cache
 ## explicitly set by end users
 
 ```c++
+Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "test_onnx_runner");
+
+// Register EP library using ORT API 2.0
+const std::string kRegistrationName = "MorphiZenExecutionProvider";
+auto library_path = std::filesystem::u8path("onnxruntime_vitisai_ep.dll");
+auto status = Ort::GetApi().RegisterExecutionProviderLibrary(
+    env, kRegistrationName.c_str(), library_path.c_str());
+
+// Get EP devices
+std::vector<Ort::ConstEpDevice> selected_devices;
+for (const auto& device : env.GetEpDevices()) {
+    if (device.EpName() == kRegistrationName) {
+        selected_devices.emplace_back(device);
+    }
+}
+
+// Set provider options and append EP
 auto session_options = Ort::SessionOptions();
 auto provider_options = std::unordered_map<std::string, std::string>{{"cache_key", "a-sample-cache-key"}};
-session_options.AppendExecutionProvider_MorphiZen(options);
+session_options.AppendExecutionProvider_V2(env, selected_devices, provider_options);
 ```
 
 it is saved, and now it is supported by PR #209
@@ -57,9 +74,26 @@ it is saved, and now it is supported by PR #209
 ## set by config file
 
 ```c++
+Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "test_onnx_runner");
+
+// Register EP library using ORT API 2.0
+const std::string kRegistrationName = "MorphiZenExecutionProvider";
+auto library_path = std::filesystem::u8path("onnxruntime_vitisai_ep.dll");
+auto status = Ort::GetApi().RegisterExecutionProviderLibrary(
+    env, kRegistrationName.c_str(), library_path.c_str());
+
+// Get EP devices
+std::vector<Ort::ConstEpDevice> selected_devices;
+for (const auto& device : env.GetEpDevices()) {
+    if (device.EpName() == kRegistrationName) {
+        selected_devices.emplace_back(device);
+    }
+}
+
+// Set provider options and append EP
 auto session_options = Ort::SessionOptions();
 auto provider_options = std::unordered_map<std::string, std::string>{{"config", "morphizen_config.json"}};
-session_options.AppendExecutionProvider_MorphiZen(options);
+session_options.AppendExecutionProvider_V2(env, selected_devices, provider_options);
 ```
 
 the content of `morphizen_config.json`

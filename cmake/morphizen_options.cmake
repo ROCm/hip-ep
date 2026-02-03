@@ -61,10 +61,10 @@ set(MORPHIZEN_EMBEDDED_RESOURCE_PATH "" CACHE PATH "Path to the meta info of emb
 
 
 # morphizen_WITH_MORPHIZEN_CONFIG_FILE = ON if build with default
-# config in morphizen-core-dynamic, i.e. onnxruntime_morphizen_ep.dll
+# config in morphizen-core-dynamic, i.e. onnxruntime_vitisai_ep.dll
 # morphizen_WITH_MORPHIZEN_CONFIG_FILE = OFF if morphizen is built as part
 # of onnxruntime, the default config is read from a plugin.
-option(morphizen_WITH_MORPHIZEN_CONFIG_FILE "build with default morphizen config in morphizen-core-dynamic, i.e. onnxruntime_morphizen_ep.dll" ${morphizen_WITH_MORPHIZEN_CONFIG_FILE_DEFAULT})
+option(morphizen_WITH_MORPHIZEN_CONFIG_FILE "build with default morphizen config in morphizen-core-dynamic, i.e. onnxruntime_vitisai_ep.dll" ${morphizen_WITH_MORPHIZEN_CONFIG_FILE_DEFAULT})
 #
 # it is possible to embed json files in the binary, assume the json files are in the directory
 set(MORPHIZEN_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/morphizen-core/etc/morphizen_config.json" CACHE FILEPATH "Path to the file containing morphizen_config.json files")
