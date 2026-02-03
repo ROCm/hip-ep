@@ -19,7 +19,7 @@
 #include <miopen/miopen.h>
 #include <hip/hip_runtime.h>
 
-#define VAIP_CUSTOM_OP
+#define MORPHIZEN_USER 3
 #include "morphizen/morphizen.hpp"
 
 namespace hipdnn {
