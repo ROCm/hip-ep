@@ -5,7 +5,7 @@
 
 message(STATUS "Building MLIR tests")
 
-# Find GTest for the tests
+# GTest is provided by MorphiZen's FetchContent with OVERRIDE_FIND_PACKAGE
 find_package(GTest REQUIRED)
 
 # ORT Integration test (for MorphiZen EP testing with MLIR pass)
