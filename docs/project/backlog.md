@@ -37,6 +37,15 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 - [Issue #025: MLIR Graph Binary Serialization](issues/025-mlir-graph-binary-serialization.md) - Change MLIR graph save format from text (.mlir) to binary bytecode (.mlirbc)
 - [Issue #026: MLIR Model Export API](issues/026-mlir-model-export-api.md) - Add model_save_mlir() API to export Model pointer to MLIR file (MLIR backend only)
 - [Issue #027: Eliminate C-Style APIs from morphizen-graph](issues/027-eliminate-c-style-apis-from-morphizen-graph.md) - Complete C++ wrapper migration by eliminating 28 C-style free functions
+- [Issue #028: MLIR Backend Test Model Support](issues/028-mlir-backend-test-model-support.md) - Provide MLIR format test models for 23 unit tests (ModelTest, GraphTest, PatternTest, PassContextConfigTest)
+- [Issue #029: PassContext tar_file_ Initialization Missing](issues/029-passcontext-tarfile-initialization.md) - Fix tar_file_ nullptr in PassContextTest (3 tests)
+- [Issue #030: morphizen-pass_init Plugin Loading Failure](issues/030-morphizen-pass-init-plugin-loading.md) - Fix plugin loading failure affecting 7 tests (TestAnchorPoint, MorphizenOrtApiTest)
+- [Issue #031: Target Auto-Discovery Failure Causes Compilation Errors](issues/031-target-auto-discovery-failure.md) - Fix empty target string causing compilation failures (2 tests)
+- [Issue #032: EP Context Model Generation Failure in E2E Tests](issues/032-ep-context-model-generation-failure.md) - Fix "Unable to compile any nodes" causing 4 E2E tests to fail
+- [Issue #033: EP Duplicate Registration in V2 API Test](issues/033-ep-duplicate-registration.md) - Handle duplicate EP registration in V2 API test
+- [Issue #034: MLIR Backend Shape Nullptr Check Failure](issues/034-mlir-shape-nullptr-check-failure.md) - Fix shape nullptr and LLVM casting failures (2 tests)
+- [Issue #035: ConstDataTest Suite Skipped - Missing Boost::Process Support](issues/035-constdatatest-boost-dependency.md) - Enable 16 ConstDataTest tests without Boost dependency
+- [Issue #036: Other Boost-Dependent Tests Skipped](issues/036-boost-dependent-tests-skipped.md) - Enable GraphTest.NewConstantInitializer and TarFileTest.WriteTo without Boost
 
 ---
 

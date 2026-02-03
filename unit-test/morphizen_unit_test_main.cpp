@@ -20,6 +20,7 @@
 #    include <crtdbg.h>
 #  endif
 #endif
+#include "morphizen/morphizen-ort-api-ext.hpp"
 #include "morphizen/morphizen.hpp"
 template <typename... Args> void* morphizen_main_cmd(Args... args) {
   auto ep_dll = morphizen::Plugin::get("onnxruntime_vitisai_ep");
@@ -100,6 +101,17 @@ int main(int argc, const char* argv[]) {
 #endif
     env.RegisterExecutionProviderLibrary("MorphiZenExecutionProvider",
                                          library_path);
+
+    // Initialize the global MorphiZen ORT API for unit tests
+    // This is required for tests that directly use MorphiZen APIs without
+    // going through the EP registration path (which normally handles this)
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+    morphizen::setup_global_morphizen_ort_api(morphizen::kMLIRBackend);
+    LOG(INFO) << "Global MorphiZen ORT API initialized with MLIR backend";
+#else
+    morphizen::setup_global_morphizen_ort_api(morphizen::kONNXIRBackend);
+    LOG(INFO) << "Global MorphiZen ORT API initialized with ONNX-IR backend";
+#endif
     ret = RUN_ALL_TESTS();
   }
   if (ret == 0) {

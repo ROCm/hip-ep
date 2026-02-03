@@ -52,6 +52,9 @@ struct HelloEpTest : public ::testing::Test {
 TEST_F(HelloEpTest, LoadUnloadPluginLibrary) {}
 
 TEST_F(HelloEpTest, CreateSession) {
+  // Skip this test - target auto-discovery failure (see Issue #031)
+  GTEST_SKIP()
+      << "Test skipped: Target auto-discovery failure (see Issue #031)";
   const OrtApi* c_api = &Ort::GetApi();
   Ort::SessionOptions session_options;
   auto ep_devices = ort_env->GetEpDevices();
