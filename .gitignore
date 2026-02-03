@@ -48,3 +48,4 @@
 /.cline_storage/
 /.clinerules/*
 !/.clinerules/*.md
+/.claude/settings.local.json

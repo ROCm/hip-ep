@@ -65,6 +65,20 @@ public:
    * @return A unique pointer to the created TarFile instance.
    */
   static std::unique_ptr<TarFile> create(std::string&& buffer);
+
+  /**
+   * @brief Creates a TarFile instance from a DllSafe buffer with mmap control.
+   *
+   * This function initializes and returns a unique pointer to a TarFile
+   * object, which represents the tar file created from the provided DllSafe
+   * buffer. Allows explicit control over memory mapping for embed mode.
+   *
+   * @param buffer A DllSafe object containing the tar file data.
+   * @param enable_mmap If true, attempt to use memory mapping for reads
+   * @return A unique pointer to the created TarFile instance.
+   */
+  static std::unique_ptr<TarFile> create(std::string&& buffer,
+                                         bool enable_mmap);
   /**
    * @brief Creates a TarFile instance from raw data.
    *
