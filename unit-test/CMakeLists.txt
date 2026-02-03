@@ -33,6 +33,7 @@ add_executable(${TEST_EXE_NAME}
   morphizen/test_tar_file.cpp
   morphizen/test_file_stream.cpp
   morphizen/test_mmap_file.cpp
+  morphizen/test_mmap_tmphandle.cpp
   morphizen/test_ep_shared_context_workspace.cpp
   morphizen/test_op_invoker.cpp
   ${MORPHIZEN_E2E_TESTS_PROTO_SRCS}

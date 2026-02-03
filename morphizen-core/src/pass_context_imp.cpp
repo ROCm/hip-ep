@@ -960,6 +960,10 @@ void PassContextImp::maybe_create_tar_file_for_write() {
 }
 void PassContextImp::create_tar_file_for_read(std::string&& ep_context_binary,
                                               bool embed_mode) {
+  // Check provider option for mmap enablement (applies to both modes)
+  bool enable_mmap =
+      get_provider_option(kProviderOptionEpContextEnableMmap, "1") == "1";
+
   if (!embed_mode) {
     // non-embed mode: To ensure the mmap functionality, the non-embed mode does
     // not delete the tar file.
@@ -975,13 +979,12 @@ void PassContextImp::create_tar_file_for_read(std::string&& ep_context_binary,
       LOG(FATAL) << "ep context binary does not exist at path: "
                  << ep_context_binary_file;
     }
-    tar_file_ = TarFile::create_from_path(
-        ep_context_binary_file,
-        get_provider_option(kProviderOptionEpContextEnableMmap, "1") == "1");
+    tar_file_ = TarFile::create_from_path(ep_context_binary_file, enable_mmap);
     CHECK(tar_file_ != nullptr)
         << "failed to open ep context file " << ep_context_binary_file;
   } else {
-    tar_file_ = TarFile::create(std::move(ep_context_binary));
+    // embed mode: create from buffer with mmap support
+    tar_file_ = TarFile::create(std::move(ep_context_binary), enable_mmap);
   }
 }
 

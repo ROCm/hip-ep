@@ -4,6 +4,9 @@
  */
 #define _CRT_SECURE_NO_WARNINGS
 #include "./tar_file.hpp"
+#ifdef _WIN32
+#  include "./mmap_file_tmphandle_win.hpp"
+#endif
 #include "./tar_header.hpp"
 #include "morphizen/env_config.hpp"
 #include "morphizen/util.hpp"
@@ -102,7 +105,8 @@ std::unique_ptr<TarFile> TarFile::create(const char* base, size_t size) {
       << " create a tar file from memory " << (void*)base << " " << size;
   return create(std::move(stream));
 }
-std::unique_ptr<TarFile> TarFile::create(std::string&& buffer0) {
+std::unique_ptr<TarFile> TarFile::create(std::string&& buffer0,
+                                         bool enable_mmap) {
   std::unique_ptr<std::iostream> stream;
 #ifdef _WIN32
   auto file = tmpfile_with_posix_delete();
@@ -117,11 +121,51 @@ std::unique_ptr<TarFile> TarFile::create(std::string&& buffer0) {
         << " create a tar file from temp file";
     auto r = fwrite(buffer0.data(), 1, buffer0.size(), file);
     CHECK_EQ(r, buffer0.size()) << "write error";
+    fflush(file); // Ensure data is written before mmap
     r = fseek(file, 0, SEEK_SET);
     CHECK_EQ(r, 0);
     auto pos = ftell(file);
     MY_LOG(1) << " pos=" << pos;
+
+    // Try to create memory-mapped stream for better performance
+    // Two-level control (intentional, do not simplify):
+    // 1. enable_mmap: User preference via provider option
+    // (ep_context_enable_mmap)
+    // 2. ENV_PARAM: Global override for debugging/compatibility
+    // This is consistent with create_from_path() behavior
+    bool use_mmap = enable_mmap && (ENV_PARAM(MORPHIZEN_ENABLE_TAR_MMAP) != 0);
+#ifdef _WIN32
+    // Windows: try mmap via MemFileTmpHandle
+    if (use_mmap) {
+      try {
+        auto mem_file = MemFileTmpHandle::create(file);
+        if (mem_file != nullptr) {
+          LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
+              << "created memory-mapped stream from tmpfile (embed mode)";
+          auto base = mem_file->base();
+          auto size = mem_file->size();
+          stream = std::make_unique<MemStream<MemFile>>(
+              MemBuffer<MemFile>::create(base, size, std::move(mem_file)));
+          // Safe to close FILE* - mmap keeps data accessible
+          fclose(file);
+        } else {
+          MY_LOG(1) << "mmap creation failed, falling back to FileStream";
+          stream = std::make_unique<FileStream>(file);
+        }
+      } catch (const std::exception& e) {
+        MY_LOG(1) << "mmap creation exception: " << e.what()
+                  << ", falling back to FileStream";
+        stream = std::make_unique<FileStream>(file);
+      }
+    } else {
+      // mmap disabled, use regular FileStream
+      stream = std::make_unique<FileStream>(file);
+    }
+#else
+    // Non-Windows: MemFileTmpHandle not implemented, always use FileStream
+    (void)use_mmap; // Suppress unused variable warning
     stream = std::make_unique<FileStream>(file);
+#endif
   } else {
     LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
         << " create a tar file from memory buffer";
@@ -138,6 +182,11 @@ std::unique_ptr<TarFile> TarFile::create(std::string&& buffer0) {
   }
 
   return create(std::move(stream));
+}
+
+std::unique_ptr<TarFile> TarFile::create(std::string&& buffer0) {
+  // Default behavior: enable mmap based on ENV_PARAM
+  return create(std::move(buffer0), true);
 }
 TarFile::TarFile(PrivateTag, std::unique_ptr<std::iostream>&& stream)
     : stream_(std::move(stream)),

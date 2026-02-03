@@ -117,6 +117,8 @@ if(MSVC)
   target_sources(${LIB_NAME} PRIVATE
     src/mmap_file_win.hpp
     src/mmap_file_win.cpp
+    src/mmap_file_tmphandle_win.hpp
+    src/mmap_file_tmphandle_win.cpp
     src/util_mswin.cpp)
 else(MSVC)
   target_sources(${LIB_NAME} PRIVATE
