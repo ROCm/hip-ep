@@ -1347,7 +1347,7 @@ extern "C" MorphizenOrtApiExt* get_morphizen_ort_api_mlir() {
 namespace {
 const morphizen::OrtApiForMorphizen*
 morphizen_mlir_imp_get_morphizen_ort_api() {
-  return reinterpret_cast<const morphizen::OrtApiForMorphizen*>(
+  return static_cast<const morphizen::OrtApiForMorphizen*>(
       morphizen::get_morphizen_ort_api_mlir());
 }
 

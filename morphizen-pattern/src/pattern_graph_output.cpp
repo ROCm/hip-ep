@@ -12,7 +12,17 @@
 #include "morphizen/node_arg.hpp"
 
 #include "./pattern_log.hpp"
+
+#ifdef _MSC_VER
+#  pragma warning(push)
+#  pragma warning(disable : 4946)
+#endif
+
 #include "morphizen/pattern.pb.h"
+
+#ifdef _MSC_VER
+#  pragma warning(pop)
+#endif
 
 namespace morphizen {
 
