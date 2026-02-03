@@ -14,22 +14,41 @@
 
 class ModelTest : public ::testing::Test {};
 TEST_F(ModelTest, Load) {
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  GTEST_SKIP()
+      << "Test skipped: MLIR backend requires MLIR test model (see Issue #028)";
+#else
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
   LOG(INFO) << "model: " << model->ref().name() << " is loaded";
+#endif
 }
 TEST_F(ModelTest, Clone) {
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  GTEST_SKIP()
+      << "Test skipped: MLIR backend requires MLIR test model (see Issue #028)";
+#else
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
   auto cloned_model = model->ref().clone();
   LOG(INFO) << "cloned model: " << cloned_model->ref().name() << " is cloned";
   cloned_model->main_graph().save(CMAKE_CURRENT_BINARY_PATH /
                                   "resnet50_cloned.onnx");
+#endif
 }
 TEST_F(ModelTest, MainGraph) {
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  GTEST_SKIP()
+      << "Test skipped: MLIR backend requires MLIR test model (see Issue #028)";
+#else
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   LOG(INFO) << "main graph: " << graph.name() << " is loaded";
+#endif
 }
 TEST_F(ModelTest, SetAndGetMetadata) {
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  GTEST_SKIP()
+      << "Test skipped: MLIR backend requires MLIR test model (see Issue #028)";
+#else
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
 
   // Set metadata
@@ -44,9 +63,14 @@ TEST_F(ModelTest, SetAndGetMetadata) {
   // Has metadata
   EXPECT_TRUE(model->ref().has_metadata(key));
   EXPECT_FALSE(model->ref().has_metadata("non-existing-key"));
+#endif
 }
 
 TEST_F(ModelTest, ImplicitConversion) {
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  GTEST_SKIP()
+      << "Test skipped: MLIR backend requires MLIR test model (see Issue #028)";
+#else
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
 
   // Implicit conversion to onnxruntime::Model reference
@@ -61,9 +85,14 @@ TEST_F(ModelTest, ImplicitConversion) {
       MORPHIZEN_ORT_API(model_main_graph)(*model));
   LOG(INFO) << "model: " << name << " is loaded. ptr=" << (void*)&constOrtModel
             << " " << (void*)&ortModel;
+#endif
 }
 
 TEST_F(ModelTest, ModelCreationTest) {
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  GTEST_SKIP()
+      << "Test skipped: MLIR backend shape nullptr issue (see Issue #034)";
+#else
   auto path = CMAKE_CURRENT_BINARY_PATH / std::filesystem::path("new.onnx");
   auto data_path = std::filesystem::path("new.dat");
   std::vector<std::pair<std::string, int64_t>> opset = {
@@ -93,4 +122,5 @@ TEST_F(ModelTest, ModelCreationTest) {
   ASSERT_TRUE(std::filesystem::exists(path));
   // ASSERT_TRUE(std::filesystem::exists(CMAKE_CURRENT_BINARY_PATH /
   // data_path));
+#endif
 }

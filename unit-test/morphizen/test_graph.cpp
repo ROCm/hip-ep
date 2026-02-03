@@ -15,6 +15,10 @@
 #include <limits>
 class GraphTest : public ::testing::Test {};
 TEST_F(GraphTest, LoadAndSave) {
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  GTEST_SKIP()
+      << "Test skipped: MLIR backend requires MLIR test model (see Issue #028)";
+#else
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.set_name("resent50_by_morphizen");
@@ -84,17 +88,22 @@ TEST_F(GraphTest, LoadAndSave) {
                 << "\n";
     python_code << "onnx.checker.check_model(m)"
                 << "\n";
-#ifdef MORPHIZEN_ENABLE_BOOST
+#  ifdef MORPHIZEN_ENABLE_BOOST
     auto exit_code =
         boost::process::system(PYTHON_EXE.u8string(), "-c", python_code.str());
     EXPECT_EQ(exit_code, 0) << "onnx.checker.check_model failed";
-#else
+#  else
     GTEST_SKIP()
         << "Boost::Process not available (morphizen_ENABLE_BOOST is OFF)";
-#endif
+#  endif
   }
+#endif
 }
 TEST_F(GraphTest, CloneAndSave) {
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  GTEST_SKIP()
+      << "Test skipped: MLIR backend requires MLIR test model (see Issue #028)";
+#else
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
   auto cloned_model = model->ref().clone();
   auto main_graph = cloned_model->main_graph();
@@ -104,8 +113,13 @@ TEST_F(GraphTest, CloneAndSave) {
   auto filter_out_special_tensor = true;
   main_graph.mut_save(resnet50_file.u8string(), "resnet50_for_mut_save.dat",
                       128u, filter_out_special_tensor);
+#endif
 }
 TEST_F(GraphTest, FindNodeArgGraphInput) {
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  GTEST_SKIP()
+      << "Test skipped: MLIR backend requires MLIR test model (see Issue #028)";
+#else
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.resolve();
@@ -124,9 +138,13 @@ TEST_F(GraphTest, FindNodeArgGraphInput) {
   auto shape = nodeArg.shape();
   EXPECT_TRUE(shape != nullptr);
   EXPECT_EQ(*shape, std::vector<int64_t>({1, 3, 224, 224}));
+#endif
 }
 TEST_F(GraphTest, FindNodeArgGraphOutput) {
-
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  GTEST_SKIP()
+      << "Test skipped: MLIR backend requires MLIR test model (see Issue #028)";
+#else
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.resolve();
@@ -145,10 +163,14 @@ TEST_F(GraphTest, FindNodeArgGraphOutput) {
   auto shape = nodeArg.shape();
   EXPECT_TRUE(shape != nullptr);
   EXPECT_EQ(*shape, std::vector<int64_t>({1, 1000}));
+#endif
 }
 
 TEST_F(GraphTest, NodesInTopologicalOrder) {
-
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  GTEST_SKIP()
+      << "Test skipped: MLIR backend requires MLIR test model (see Issue #028)";
+#else
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.resolve();
@@ -175,10 +197,14 @@ TEST_F(GraphTest, NodesInTopologicalOrder) {
       }
     }
   }
+#endif
 }
 
 TEST_F(GraphTest, NodeIndex) {
-
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  GTEST_SKIP()
+      << "Test skipped: MLIR backend requires MLIR test model (see Issue #028)";
+#else
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.resolve();
@@ -190,9 +216,13 @@ TEST_F(GraphTest, NodeIndex) {
   EXPECT_EQ(op_type, "Gemm");
   auto op_domain = node.value().op_domain();
   EXPECT_EQ(op_domain, "");
+#endif
 }
 TEST_F(GraphTest, FindConsumers) {
-
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  GTEST_SKIP()
+      << "Test skipped: MLIR backend requires MLIR test model (see Issue #028)";
+#else
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.resolve();
@@ -203,10 +233,14 @@ TEST_F(GraphTest, FindConsumers) {
   auto nodes = nodeArg.find_consumers();
   EXPECT_EQ(nodes.size(), 1u);
   LOG(INFO) << "consumers is " << nodes[0];
+#endif
 }
 
 TEST_F(GraphTest, NodeArgFindProducer) {
-
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  GTEST_SKIP()
+      << "Test skipped: MLIR backend requires MLIR test model (see Issue #028)";
+#else
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.resolve();
@@ -216,9 +250,13 @@ TEST_F(GraphTest, NodeArgFindProducer) {
   auto node = node_arg.value().find_producer();
   ASSERT_TRUE(node.has_value());
   LOG(INFO) << "found node's producer: " << node.value();
+#endif
 }
 TEST_F(GraphTest, Fuse) {
-
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  GTEST_SKIP()
+      << "Test skipped: MLIR backend requires MLIR test model (see Issue #028)";
+#else
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.resolve();
@@ -261,10 +299,14 @@ TEST_F(GraphTest, Fuse) {
   // graph.save("C:\\temp\\a.onnx", "C:\\temp\\a.dat", 128u);
   LOG(INFO) << "fused node: " << node << std::endl;
   LOG(INFO) << "graph after fuse: " << graph << std::endl;
+#endif
 }
 
 TEST_F(GraphTest, TryFuse) {
-
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  GTEST_SKIP()
+      << "Test skipped: MLIR backend requires MLIR test model (see Issue #028)";
+#else
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.resolve();
@@ -272,6 +314,7 @@ TEST_F(GraphTest, TryFuse) {
       graph, "a_name", {"111"}, {"138"}, {}, "CUSTOM");
   ASSERT_TRUE(meta_def != nullptr) << error.comments;
   LOG(INFO) << " fused_node=" << meta_def->DebugString();
+#endif
 }
 
 TEST_F(GraphTest, NewConstantInitializer) {
@@ -542,6 +585,10 @@ TEST_F(GraphTest, NewConstantInitializer) {
 }
 
 TEST_F(GraphTest, VirtualFuse) {
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  GTEST_SKIP()
+      << "Test skipped: MLIR backend requires MLIR test model (see Issue #028)";
+#else
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.resolve();
@@ -554,4 +601,5 @@ TEST_F(GraphTest, VirtualFuse) {
     LOG(INFO) << " node = " << node;
   }
   EXPECT_TRUE(true);
+#endif
 }

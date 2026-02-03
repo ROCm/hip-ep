@@ -33,6 +33,10 @@ get_commutable_add_pattern() {
 }
 
 TEST_F(PatternTest, CommutableNode) {
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  GTEST_SKIP()
+      << "Test skipped: MLIR backend requires MLIR test model (see Issue #028)";
+#else
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.resolve();
@@ -57,6 +61,7 @@ TEST_F(PatternTest, CommutableNode) {
   LOG(INFO) << "matched node" << match_node.value();
   EXPECT_EQ(match_node.value().name(), "Add_178")
       << "name must be " << match_node.value();
+#endif
 }
 
 #if MORPHIZEN_HAS_ONNX_SCHEMA_SUPPORT
@@ -337,36 +342,11 @@ TEST_F(PatternTest, MultipleOutputs) {
   }
 }
 
-/*
-TEST_F(PatternTest, SequenceNode) {
-  auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
-  auto graph = model->main_graph();
-  graph.resolve();
-  auto node_arg_name = std::string("287");
-  auto node = graph.find_node(node_arg_name);
-  ASSERT_TRUE(node.has_value()) << "cannot find node " << node_arg_name;
-  auto [add, add0, add1] = get_sequence_pattern();
-  auto binder = add->match(node.value());
-  morphizen::Pattern::enable_trace(1);
-  EXPECT_TRUE(binder != nullptr) << "cannot match the pattern";
-  auto binder0 = add0->match(node.value());
-  EXPECT_TRUE(binder0 != nullptr) << "cannot match the pattern";
-  auto binder1 = add1->match(node.value());
-  EXPECT_TRUE(binder1 != nullptr) << "cannot match the pattern";
-  auto match_node_input = (*binder0)("Add0");
-  ASSERT_TRUE(match_node_input.has_value());
-  LOG(INFO) << "matched node arg: " << match_node_input.value();
-  EXPECT_EQ(match_node_input.value().as_node_arg().name(), "287")
-      << "name must be " << match_node_input.value();
-  auto match_node = match_node_input.value().as_node();
-  ASSERT_TRUE(match_node.has_value());
-  LOG(INFO) << "matched node" << match_node.value();
-  EXPECT_EQ(match_node.value().name(), "Add_178")
-      << "name must be " << match_node.value();
-}
-*/
-
 TEST_F(PatternTest, LoadSaveBinary) {
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  GTEST_SKIP()
+      << "Test skipped: MLIR backend requires MLIR test model (see Issue #028)";
+#else
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.resolve();
@@ -375,7 +355,7 @@ TEST_F(PatternTest, LoadSaveBinary) {
 
   auto ret = std::shared_ptr<morphizen::Pattern>();
   morphizen::PatternBuilder builder;
-#include "pt_resnet50_add.h.inc"
+#  include "pt_resnet50_add.h.inc"
   builder.bind("Add", ret);
   auto encoded_pattern = ret->to_binary();
   auto new_ret = morphizen::PatternBuilder().create_from_binary(
@@ -390,4 +370,5 @@ TEST_F(PatternTest, LoadSaveBinary) {
   //
   auto binder2 = new_ret->match(node.value());
   EXPECT_TRUE(binder2 != nullptr) << "cannot match the pattern";
+#endif
 }
