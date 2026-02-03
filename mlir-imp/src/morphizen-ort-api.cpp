@@ -1274,11 +1274,10 @@ static void initialize_mlir_api() {
 #if MORPHIZEN_ORT_API_MAJOR >= 18
   the_mlir_instance_of_morphizen_ort_api.graph_save_string =
       [](const morphizen::Graph& graph) -> morphizen::DllSafe<std::string> {
-    // TODO: Implement graph string serialization in MLIR backend
-    LOG(WARNING) << "graph_save_string not implemented in MLIR backend";
-    (void)graph; // Suppress unused parameter warning
+    auto* mlir_graph = reinterpret_cast<const mlir_impl::MLIRGraph*>(&graph);
+    auto graph_string = mlir_graph->save_string();
     return morphizen::DllSafe<std::string>(
-        new std::string("graph_save_string not implemented in MLIR backend"));
+        new std::string(std::move(graph_string)));
   };
 #endif // MORPHIZEN_ORT_API_MAJOR >= 18
 
