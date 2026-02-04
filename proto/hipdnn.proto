@@ -7,6 +7,19 @@ message TensorShape {
   repeated int64 dims = 1;
 }
 
+// Conv operation attributes
+message ConvAttributes {
+  repeated int64 pads = 1;
+  repeated int64 strides = 2;
+  repeated int64 dilations = 3;
+  int64 group = 4;
+  bool has_bias = 5;
+}
+
+// Future: Add more operation attributes here
+// message GemmAttributes { ... }
+// message MatMulAttributes { ... }
+
 message HipdnnParamProto {
   string op_type = 1;
   string version = 2;
@@ -19,10 +32,10 @@ message HipdnnParamProto {
   repeated int32 input_data_types = 5;
   repeated int32 output_data_types = 6;
   
-  // Conv attributes
-  repeated int64 pads = 7;
-  repeated int64 strides = 8;
-  repeated int64 dilations = 9;
-  int64 group = 10;
-  bool has_bias = 11;
+  // Operation-specific attributes (extensible via oneof)
+  oneof node_attrs {
+    ConvAttributes conv_attrs = 7;
+    // Future: GemmAttributes gemm_attrs = 8;
+    // Future: MatMulAttributes matmul_attrs = 9;
+  }
 }

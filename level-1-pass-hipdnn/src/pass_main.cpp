@@ -200,12 +200,13 @@ bool GenerateConvMetadata(
     // Output data types
     out_proto.add_output_data_types(y_dtype);
     
-    // Conv attributes
-    for (auto p : pads_vec) out_proto.add_pads(p);
-    for (auto s : strides_vec) out_proto.add_strides(s);
-    for (auto d : dilations_vec) out_proto.add_dilations(d);
-    out_proto.set_group(group);
-    out_proto.set_has_bias(has_bias);
+    // Conv attributes (using oneof node_attrs)
+    auto* conv_attrs = out_proto.mutable_conv_attrs();
+    for (auto p : pads_vec) conv_attrs->add_pads(p);
+    for (auto s : strides_vec) conv_attrs->add_strides(s);
+    for (auto d : dilations_vec) conv_attrs->add_dilations(d);
+    conv_attrs->set_group(group);
+    conv_attrs->set_has_bias(has_bias);
     
     // Store constant names for custom op
     constant_names.push_back(node_arg_get_name(weight_ref));  // Weight
