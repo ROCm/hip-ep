@@ -46,7 +46,7 @@ set(LIB_NAME morphizen-custom-op-rocm)
 add_library(${LIB_NAME} STATIC src/main.cpp src/custom_op.hpp src/custom_op.cpp)
 set_target_properties(${LIB_NAME} PROPERTIES FOLDER "rocm")
 target_include_directories(${LIB_NAME} PRIVATE include)
-target_compile_definitions(${LIB_NAME} PRIVATE "VAIP_CUSTOM_OP=1")
+target_compile_definitions(${LIB_NAME} PRIVATE "MORPHIZEN_CUSTOM_OP=1")
 
 # Link ROCm libraries
 target_link_libraries(${LIB_NAME} PRIVATE MIOpen)
@@ -70,4 +70,4 @@ target_link_libraries(${LIB_NAME} PRIVATE
 )
 set_target_properties(${LIB_NAME} PROPERTIES
   OUTPUT_NAME "${LIB_NAME}")
-target_link_libraries(${morphizen_ONNXRUNTIME_VITISAI_EP_TARGET} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${LIB_NAME}>")
+target_link_libraries(${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${LIB_NAME}>")

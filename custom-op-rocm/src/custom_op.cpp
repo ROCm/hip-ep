@@ -138,8 +138,8 @@ TimeoutStatus HipContext::sync_stream_with_timeout(int timeout_ms) const {
 // ============================================================================
 
 RocmCustomOp::RocmCustomOp(
-    std::shared_ptr<const vaip_core::PassContext> context,
-    const std::shared_ptr<vaip_core::MetaDefProto>& meta_def,
+    std::shared_ptr<const PassContext> context,
+    const std::shared_ptr<MetaDefProto>& meta_def,
     onnxruntime::Model* model)
     : CustomOpImp(context, meta_def, model) {
   
@@ -214,6 +214,16 @@ RocmCustomOp::RocmCustomOp(
       if (gemm_params.input_names_size() > 0) {
         input_ref->set_external_name(gemm_params.input_names(0));
       }
+    } else if (single_node_proto_.op_type() == "matmul") {
+      const auto& matmul_params = single_node_proto_.matmul_params();
+      if (matmul_params.input_names_size() > 0) {
+        input_ref->set_external_name(matmul_params.input_names(0));
+      }
+      // If B is not constant, add it as second external input
+      if (!matmul_params.b_is_constant() && matmul_params.input_names_size() > 1) {
+        auto* input_b_ref = node->add_inputs();
+        input_b_ref->set_external_name(matmul_params.input_names(1));
+      }
     }
     
     // Add external output
@@ -227,6 +237,11 @@ RocmCustomOp::RocmCustomOp(
       const auto& gemm_params = single_node_proto_.gemm_params();
       if (gemm_params.output_names_size() > 0) {
         ext_output->set_name(gemm_params.output_names(0));
+      }
+    } else if (single_node_proto_.op_type() == "matmul") {
+      const auto& matmul_params = single_node_proto_.matmul_params();
+      if (matmul_params.output_names_size() > 0) {
+        ext_output->set_name(matmul_params.output_names(0));
       }
     }
     ext_output->set_producer_node_id(0);
@@ -353,6 +368,29 @@ void RocmCustomOp::LoadNodeWeights(int32_t node_id, const rocm::RocmParamProto& 
                    << ": Failed to open bias file: " << bias_file;
       }
     }
+  } else if (op_type == "matmul") {
+    const auto& matmul_params = params.matmul_params();
+    
+    // Load weight file (B matrix) if it's a constant
+    if (matmul_params.b_is_constant()) {
+      const auto& weight_file = matmul_params.weight_file_path();
+      if (!weight_file.empty()) {
+        int64_t weight_size = matmul_params.weight_file_size();
+        MY_LOG(2) << "[ROCm CustomOp] Node " << node_id << ": Loading matmul weight from: " 
+                  << weight_file << " (" << weight_size << " bytes)";
+        
+        auto reader = pass_context->open_file_for_read(weight_file);
+        if (reader) {
+          data.host_weight.resize(weight_size / sizeof(float));
+          reader->fread(data.host_weight.data(), weight_size);
+          MY_LOG(1) << "[ROCm CustomOp] Node " << node_id << ": Loaded weight: " 
+                    << data.host_weight.size() << " floats";
+        } else {
+          LOG(ERROR) << "[ROCm CustomOp] Node " << node_id 
+                     << ": Failed to open weight file: " << weight_file;
+        }
+      }
+    }
   }
 }
 
@@ -440,6 +478,14 @@ size_t RocmCustomOp::GetOutputSize(int32_t node_id, int32_t output_index) const 
     size_t output_elements = static_cast<size_t>(gemm_params.m()) * gemm_params.n();
     if (gemm_params.batch_count() > 1) {
       output_elements *= gemm_params.batch_count();
+    }
+    return output_elements * sizeof(float);
+  } else if (params.op_type() == "matmul") {
+    const auto& matmul_params = params.matmul_params();
+    // Output shape: [..., M, N]
+    size_t output_elements = static_cast<size_t>(matmul_params.m()) * matmul_params.n();
+    if (matmul_params.batch_count() > 1) {
+      output_elements *= matmul_params.batch_count();
     }
     return output_elements * sizeof(float);
   }
@@ -595,15 +641,28 @@ void RocmCustomOp::ExecuteNode(const rocm::RocmNodeProto& node) const {
   MY_LOG(2) << "[ROCm CustomOp] Executing node " << node_id 
             << " (op_type: " << params.op_type() << ")";
   
-  // Gather input pointers
+  // Gather input pointers and log input references
   std::vector<float*> inputs;
-  for (const auto& input_ref : node.inputs()) {
+  for (int i = 0; i < node.inputs_size(); ++i) {
+    const auto& input_ref = node.inputs(i);
     float* ptr = ResolveTensorRef(input_ref);
     if (ptr == nullptr) {
       LOG(ERROR) << "[ROCm CustomOp] Failed to resolve input for node " << node_id;
       throw std::runtime_error("Failed to resolve tensor reference");
     }
     inputs.push_back(ptr);
+    
+    // Debug: print input reference info
+    if (ENV_PARAM(MORPHIZEN_DEBUG_ROCM) >= 2) {
+      std::string ref_info;
+      if (input_ref.has_external_name()) {
+        ref_info = "external:" + input_ref.external_name();
+      } else if (input_ref.has_internal()) {
+        ref_info = "internal:node" + std::to_string(input_ref.internal().producer_node_id()) +
+                   "_out" + std::to_string(input_ref.internal().output_index());
+      }
+      MY_LOG(1) << "[ROCm CustomOp] Node " << node_id << " input[" << i << "]: " << ref_info;
+    }
   }
   
   // Get output buffer
@@ -620,6 +679,8 @@ void RocmCustomOp::ExecuteNode(const rocm::RocmNodeProto& node) const {
     ExecuteConvNode(node_id, params.conv_params(), inputs, output);
   } else if (params.op_type() == "gemm") {
     ExecuteGemmNode(node_id, params.gemm_params(), inputs, output);
+  } else if (params.op_type() == "matmul") {
+    ExecuteMatmulNode(node_id, params.matmul_params(), inputs, output);
   } else {
     LOG(ERROR) << "[ROCm CustomOp] Unknown op_type: " << params.op_type();
     throw std::runtime_error("Unknown operation type: " + params.op_type());
@@ -906,6 +967,210 @@ void RocmCustomOp::ExecuteGemmNode(int32_t node_id,
   MY_LOG(2) << "[ROCm CustomOp] Node " << node_id << ": GEMM executed successfully";
 }
 
+void RocmCustomOp::ExecuteMatmulNode(int32_t node_id,
+                                      const rocm::MatmulParamProto& params,
+                                      const std::vector<float*>& inputs,
+                                      float* output) const {
+  MY_LOG(1) << "[ROCm CustomOp] ExecuteMatmulNode[" << node_id << "]: M=" << params.m()
+            << ", K=" << params.k() << ", N=" << params.n() 
+            << ", batch=" << params.batch_count()
+            << ", b_is_constant=" << params.b_is_constant()
+            << ", inputs.size()=" << inputs.size();
+  
+  // Use per-session handles
+  auto blaslt_handle = hip_context_->hipblaslt_handle();
+  auto stream = hip_context_->stream();
+  
+  float* d_a = inputs[0];  // A matrix (always runtime input)
+  
+  // Get B matrix - either from cached weight or runtime input
+  float* d_b = nullptr;
+  auto& node_data = *node_data_[node_id];
+  
+  if (params.b_is_constant()) {
+    // B is a constant weight
+    if (node_data.d_weight == nullptr) {
+      LOG(ERROR) << "[ROCm CustomOp] MatMul weights not found for node " << node_id;
+      throw std::runtime_error("MatMul weights not loaded");
+    }
+    d_b = node_data.d_weight;
+  } else {
+    // B is a runtime input
+    if (inputs.size() < 2) {
+      LOG(ERROR) << "[ROCm CustomOp] MatMul requires 2 runtime inputs when B is not constant";
+      throw std::runtime_error("MatMul missing B matrix input");
+    }
+    d_b = inputs[1];
+  }
+  
+  int64_t M = params.m();
+  int64_t K = params.k();
+  int64_t N = params.n();
+  int64_t batch_count = params.batch_count();
+  
+  // hipBLASLt uses column-major layout, but ONNX data is row-major.
+  // To compute C = A * B (row-major), we use the identity:
+  //   C^T = B^T * A^T (column-major)
+  // Since row-major C is the same as column-major C^T, we compute:
+  //   D = B * A with transposed dimensions
+  //
+  // Original: A[M,K] @ B[K,N] = D[M,N] (row-major)
+  // hipBLAS:  B'[N,K] @ A'[K,M] = D'[N,M] (column-major)
+  // where X' means X viewed as column-major (which is X^T in row-major)
+  //
+  // So we swap A and B, and the result D'[N,M] in column-major is D[M,N] in row-major
+  
+  hipblasLtMatrixLayout_t layout_A, layout_B, layout_D;
+  
+  // For hipBLAS column-major: we pass B as "A" and A as "B"
+  // B is [K, N] in row-major, viewed as [N, K] in column-major, ld = N
+  // A is [M, K] in row-major, viewed as [K, M] in column-major, ld = K
+  // D is [M, N] in row-major, viewed as [N, M] in column-major, ld = N
+  hipblasLtMatrixLayoutCreate(&layout_B, HIP_R_32F, N, K, N);  // "A" for hipBLAS: [N, K], ld=N
+  hipblasLtMatrixLayoutCreate(&layout_A, HIP_R_32F, K, M, K);  // "B" for hipBLAS: [K, M], ld=K
+  hipblasLtMatrixLayoutCreate(&layout_D, HIP_R_32F, N, M, N);  // "D" for hipBLAS: [N, M], ld=N
+  
+  // Set batch count and strides if batched
+  if (batch_count > 1) {
+    int64_t stride_a = M * K;  // Original A is [batch, M, K], stride = M*K
+    int64_t stride_b = K * N;  // Original B is [batch, K, N], stride = K*N
+    int64_t stride_d = M * N;  // D is [batch, M, N], stride = M*N
+    
+    // Note: Since we swap A and B in the matmul call, we also swap the strides:
+    // - layout_B is used for d_b (original B), so it gets stride_b
+    // - layout_A is used for d_a (original A), so it gets stride_a
+    hipblasLtMatrixLayoutSetAttribute(layout_B, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
+                                      &batch_count, sizeof(batch_count));
+    hipblasLtMatrixLayoutSetAttribute(layout_B, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,
+                                      &stride_b, sizeof(stride_b));
+    
+    hipblasLtMatrixLayoutSetAttribute(layout_A, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
+                                      &batch_count, sizeof(batch_count));
+    hipblasLtMatrixLayoutSetAttribute(layout_A, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,
+                                      &stride_a, sizeof(stride_a));
+    
+    hipblasLtMatrixLayoutSetAttribute(layout_D, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
+                                      &batch_count, sizeof(batch_count));
+    hipblasLtMatrixLayoutSetAttribute(layout_D, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,
+                                      &stride_d, sizeof(stride_d));
+  }
+  
+  // Create matmul descriptor - no transpose needed since we're swapping A and B
+  hipblasLtMatmulDesc_t matmul_desc;
+  hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F);
+  
+  hipblasOperation_t trans = HIPBLAS_OP_N;
+  hipblasLtMatmulDescSetAttribute(matmul_desc, HIPBLASLT_MATMUL_DESC_TRANSA,
+                                  &trans, sizeof(trans));
+  hipblasLtMatmulDescSetAttribute(matmul_desc, HIPBLASLT_MATMUL_DESC_TRANSB,
+                                  &trans, sizeof(trans));
+  
+  // Check if algorithm is cached
+  if (!node_data.gemm_algo_cached) {
+    // First call: Find best algorithm
+    MY_LOG(1) << "[ROCm CustomOp] Node " << node_id << ": Searching for best MatMul algorithm...";
+    
+    hipblasLtMatmulPreference_t pref;
+    hipblasLtMatmulPreferenceCreate(&pref);
+    
+    size_t max_workspace = 32 * 1024 * 1024;  // 32 MB
+    hipblasLtMatmulPreferenceSetAttribute(pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                          &max_workspace, sizeof(max_workspace));
+    
+    hipblasLtMatmulHeuristicResult_t results[4];
+    int returned = 0;
+    
+    // Swap layout_B and layout_A to match the swapped matmul call
+    hipblasStatus_t status = hipblasLtMatmulAlgoGetHeuristic(
+        blaslt_handle, matmul_desc,
+        layout_B, layout_A, layout_D, layout_D,
+        pref, 4, results, &returned);
+    
+    if (status == HIPBLAS_STATUS_SUCCESS && returned > 0) {
+      // Cache the best algorithm
+      node_data.cached_gemm_algo = results[0].algo;
+      node_data.cached_gemm_workspace_size = results[0].workspaceSize;
+      node_data.gemm_algo_cached = true;
+      
+      MY_LOG(1) << "[ROCm CustomOp] Node " << node_id << ": Cached MatMul algorithm, "
+                << "found " << returned << " algorithms, workspace: " 
+                << results[0].workspaceSize << " bytes";
+    } else {
+      MY_LOG(1) << "[ROCm CustomOp] Node " << node_id 
+                << ": No heuristic found, using default algorithm";
+      node_data.gemm_algo_cached = false;
+    }
+    
+    hipblasLtMatmulPreferenceDestroy(pref);
+  } else {
+    MY_LOG(2) << "[ROCm CustomOp] Node " << node_id << ": Using cached MatMul algorithm";
+  }
+  
+  // Allocate workspace if needed
+  void* workspace_ptr = nullptr;
+  size_t workspace_size = node_data.gemm_algo_cached ? node_data.cached_gemm_workspace_size : 0;
+  
+  if (workspace_size > 0) {
+    if (node_data.workspace == nullptr || node_data.workspace_size < workspace_size) {
+      if (node_data.workspace) hipFree(node_data.workspace);
+      hipMalloc(&node_data.workspace, workspace_size);
+      node_data.workspace_size = workspace_size;
+    }
+    workspace_ptr = node_data.workspace;
+  }
+  
+  // Execute MatMul: D = A * B (alpha=1.0, beta=0.0)
+  // Note: We swap A and B to handle row-major to column-major conversion
+  // hipBLAS computes: D' = B' * A' which gives us row-major D = A * B
+  float alpha = 1.0f;
+  float beta = 0.0f;
+  
+  hipblasStatus_t status;
+  if (node_data.gemm_algo_cached) {
+    // Swap d_b and d_a: pass B as first matrix, A as second
+    status = hipblasLtMatmul(blaslt_handle, matmul_desc, &alpha,
+                             d_b, layout_B, d_a, layout_A,
+                             &beta, output, layout_D,
+                             output, layout_D,
+                             &node_data.cached_gemm_algo,
+                             workspace_ptr, workspace_size, stream);
+  } else {
+    status = hipblasLtMatmul(blaslt_handle, matmul_desc, &alpha,
+                             d_b, layout_B, d_a, layout_A,
+                             &beta, output, layout_D,
+                             output, layout_D,
+                             nullptr, workspace_ptr, workspace_size, stream);
+  }
+  
+  // Cleanup descriptors
+  hipblasLtMatmulDescDestroy(matmul_desc);
+  hipblasLtMatrixLayoutDestroy(layout_D);
+  hipblasLtMatrixLayoutDestroy(layout_B);
+  hipblasLtMatrixLayoutDestroy(layout_A);
+  
+  if (status != HIPBLAS_STATUS_SUCCESS) {
+    LOG(ERROR) << "[ROCm CustomOp] hipblasLtMatmul failed for node " << node_id 
+               << ", status: " << status;
+    throw std::runtime_error("hipblasLtMatmul failed");
+  }
+  
+  // Debug: Print first few values of input A, B, and output
+  if (ENV_PARAM(MORPHIZEN_DEBUG_ROCM) >= 2) {
+    hipStreamSynchronize(stream);
+    std::vector<float> debug_a(5), debug_b(5), debug_out(5);
+    hipMemcpy(debug_a.data(), d_a, 5 * sizeof(float), hipMemcpyDeviceToHost);
+    hipMemcpy(debug_b.data(), d_b, 5 * sizeof(float), hipMemcpyDeviceToHost);
+    hipMemcpy(debug_out.data(), output, 5 * sizeof(float), hipMemcpyDeviceToHost);
+    
+    MY_LOG(1) << "[ROCm CustomOp] Node " << node_id << " DEBUG:"
+              << " A[0:5]=[" << debug_a[0] << "," << debug_a[1] << "," << debug_a[2] << "," << debug_a[3] << "," << debug_a[4] << "]"
+              << " B[0:5]=[" << debug_b[0] << "," << debug_b[1] << "," << debug_b[2] << "," << debug_b[3] << "," << debug_b[4] << "]"
+              << " Out[0:5]=[" << debug_out[0] << "," << debug_out[1] << "," << debug_out[2] << "," << debug_out[3] << "," << debug_out[4] << "]";
+  }
+  
+  MY_LOG(2) << "[ROCm CustomOp] Node " << node_id << ": MatMul executed successfully";
+}
+
 void RocmCustomOp::DownloadExternalOutputs(const OrtApi* api, OrtKernelContext* context) const {
   // Use per-session stream
   auto stream = hip_context_->stream();
@@ -940,6 +1205,21 @@ void RocmCustomOp::DownloadExternalOutputs(const OrtApi* api, OrtKernelContext* 
     } else if (params.op_type() == "gemm") {
       const auto& gemm_params = params.gemm_params();
       output_shape = {gemm_params.m(), gemm_params.n()};
+    } else if (params.op_type() == "matmul") {
+      const auto& matmul_params = params.matmul_params();
+      // Use stored output shape if available
+      if (matmul_params.shape_y_size() > 0) {
+        for (int j = 0; j < matmul_params.shape_y_size(); ++j) {
+          output_shape.push_back(matmul_params.shape_y(j));
+        }
+      } else {
+        // Fallback to [batch, M, N]
+        if (matmul_params.batch_count() > 1) {
+          output_shape.push_back(matmul_params.batch_count());
+        }
+        output_shape.push_back(matmul_params.m());
+        output_shape.push_back(matmul_params.n());
+      }
     }
     
     // Get ORT output tensor

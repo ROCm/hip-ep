@@ -17,9 +17,8 @@ add_subdirectory(rocm-pass-common)
 add_subdirectory(level-1-pass-rocm)
 add_subdirectory(level-2-pass-rocm-conv)
 add_subdirectory(level-2-pass-rocm-gemm)
+add_subdirectory(level-2-pass-rocm-matmul)
 add_subdirectory(custom-op-rocm)
 
-# Add test directory if unit tests are enabled
-if(morphizen_ENABLE_UNIT_TEST)
-  add_subdirectory(test)
-endif()
+# Add test directory (test_gqa can be built independently)
+add_subdirectory(test)

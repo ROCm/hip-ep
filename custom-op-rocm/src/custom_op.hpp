@@ -14,11 +14,12 @@
 #include <thread>
 #include <glog/logging.h>
 
-#include "morphizen/vaip.hpp"
+#include "morphizen/morphizen.hpp"
 #include "morphizen/env_config.hpp"
 #include "rocm.pb.h"
 
 namespace rocm_ep {
+using namespace morphizen;
 
 // Environment variables for timeout configuration are defined in custom_op.cpp
 // They are declared here for reference:
@@ -154,7 +155,7 @@ public:
    * @param ctx Pointer to PassContext (used as session identifier)
    * @return Shared pointer to HipContext
    */
-  std::shared_ptr<HipContext> get_or_create(const vaip_core::PassContext* ctx) {
+  std::shared_ptr<HipContext> get_or_create(const PassContext* ctx) {
     std::lock_guard<std::mutex> lock(mutex_);
     
     // Cleanup expired entries first
@@ -185,7 +186,7 @@ public:
   /**
    * Explicitly remove a session's context (called when session ends)
    */
-  void remove(const vaip_core::PassContext* ctx) {
+  void remove(const PassContext* ctx) {
     std::lock_guard<std::mutex> lock(mutex_);
     contexts_.erase(ctx);
   }
@@ -214,7 +215,7 @@ private:
   }
   
   std::mutex mutex_;
-  std::unordered_map<const vaip_core::PassContext*, std::weak_ptr<HipContext>> contexts_;
+  std::unordered_map<const PassContext*, std::weak_ptr<HipContext>> contexts_;
 };
 
 /**
@@ -274,10 +275,10 @@ struct NodeRuntimeData {
  * - Cached weights per node
  * - Per-session HipContext for GPU parallelism between sessions
  */
-class RocmCustomOp : public vaip_core::CustomOpImp {
+class RocmCustomOp : public CustomOpImp {
 public:
-  RocmCustomOp(std::shared_ptr<const vaip_core::PassContext> context,
-               const std::shared_ptr<vaip_core::MetaDefProto>& meta_def,
+  RocmCustomOp(std::shared_ptr<const PassContext> context,
+               const std::shared_ptr<MetaDefProto>& meta_def,
                onnxruntime::Model* model);
 
   virtual ~RocmCustomOp();
@@ -300,6 +301,10 @@ private:
                        const rocm::GemmParamProto& params,
                        const std::vector<float*>& inputs,
                        float* output) const;
+  void ExecuteMatmulNode(int32_t node_id,
+                         const rocm::MatmulParamProto& params,
+                         const std::vector<float*>& inputs,
+                         float* output) const;
 
   // Tensor resolution
   float* ResolveTensorRef(const rocm::TensorRefProto& ref) const;

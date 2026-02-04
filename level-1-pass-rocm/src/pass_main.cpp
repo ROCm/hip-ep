@@ -11,15 +11,16 @@
 
 #include "google/protobuf/util/json_util.h"
 #include "morphizen/env_config.hpp"
-#include "morphizen/vaip.hpp"
+#include "morphizen/morphizen.hpp"
 #include "morphizen/node.hpp"
 #include "morphizen/node_attr.hpp"
 #include "rocm.pb.h"
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_ROCM, "0")
+DEF_ENV_PARAM(MORPHIZEN_ROCM_NO_MERGE, "0")  // Set to 1 to create one subgraph per node
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_ROCM) >= n)
 
-using namespace vaip_core;
+using namespace morphizen;
 
 /**
  * Level-1 Pass: ROCm Orchestrator
@@ -82,19 +83,32 @@ struct Level1Rocm {
   // after calling level_2_fuse(). Level-1 can detect this using NodeConstRef.has_attr().
   bool is_rocm_fused_node(Graph& graph, const Node& node) {
     // Use C++ style NodeConstRef API (cheap - just two pointer copies)
-    auto node_ref = vaip_cxx::NodeConstRef::from_node(graph, node);
+    auto node_ref = morphizen_cxx::NodeConstRef::from_node(graph, node);
     
-    if (node_ref.op_domain() != "com.xilinx") {
+    auto domain = node_ref.op_domain();
+    auto op_type = node_ref.op_type();
+    auto output_name = node_get_first_output_name(node);
+    
+    MY_LOG(2) << "[ROCm EP Level-1] Checking node: output=" << output_name
+              << ", domain=" << domain << ", op_type=" << op_type;
+    
+    // Fused nodes created by level_2_fuse() have:
+    // - op_type = "call" (morphizen's internal fused op type)
+    // - rocm_param_file attribute set by Level-2 passes
+    // Note: domain may be empty for level_2_fuse() created nodes
+    if (op_type != "call") {
       return false;
     }
     
     // Check for ROCm-specific attribute set by Level-2 passes
     if (!node_ref.has_attr("rocm_param_file")) {
+      MY_LOG(2) << "[ROCm EP Level-1] Node " << output_name 
+                << " is call but missing rocm_param_file attr";
       return false;
     }
     
-    MY_LOG(2) << "[ROCm EP Level-1] is_rocm_fused_node: found ROCm node with output=" 
-              << node_get_first_output_name(node);
+    MY_LOG(1) << "[ROCm EP Level-1] is_rocm_fused_node: found ROCm node with output=" 
+              << output_name;
     return true;
   }
 
@@ -106,6 +120,8 @@ struct Level1Rocm {
       return "conv";
     } else if (output_name.find("rocm_gemm") != std::string::npos) {
       return "gemm";
+    } else if (output_name.find("rocm_matmul") != std::string::npos) {
+      return "matmul";
     }
     return "unknown";
   }
@@ -167,6 +183,17 @@ struct Level1Rocm {
       return {};
     }
 
+    // If NO_MERGE is set, each node becomes its own group (one subgraph per node)
+    if (ENV_PARAM(MORPHIZEN_ROCM_NO_MERGE)) {
+      MY_LOG(1) << "[ROCm EP Level-1] NO_MERGE mode: creating one subgraph per node";
+      std::vector<std::vector<const Node*>> groups;
+      groups.reserve(rocm_nodes.size());
+      for (auto* node : rocm_nodes) {
+        groups.push_back({node});
+      }
+      return groups;
+    }
+
     // Initialize Union-Find: each node is its own group initially
     std::unordered_map<const Node*, const Node*> parent;
     for (auto* node : rocm_nodes) {
@@ -211,24 +238,30 @@ struct Level1Rocm {
   }
 
   // Collect external inputs (inputs that come from outside the group)
+  // IMPORTANT: Preserve the original input order from the ONNX graph!
+  // Using std::set would sort alphabetically which breaks the mapping between
+  // ONNX Runtime's input indices and our external_input_buffers_.
   std::vector<std::string>
   collect_external_inputs(const std::vector<const Node*>& group,
                           const std::unordered_set<std::string>& internal_outputs) {
-    std::set<std::string> inputs_ordered; // Use set for ordering
+    std::vector<std::string> inputs_ordered;
+    std::unordered_set<std::string> seen;  // For deduplication
+    
     for (auto* node : group) {
       auto inputs = node_get_input_node_args(*node);
       for (auto* input : inputs) {
         if (input) {
           auto name = node_arg_get_name(*input);
           // Only include if it's not produced by another node in the group
-          if (internal_outputs.count(name) == 0) {
-            inputs_ordered.insert(name);
+          // and we haven't seen it yet (deduplication while preserving order)
+          if (internal_outputs.count(name) == 0 && seen.count(name) == 0) {
+            inputs_ordered.push_back(name);
+            seen.insert(name);
           }
         }
       }
     }
-    return std::vector<std::string>(inputs_ordered.begin(),
-                                    inputs_ordered.end());
+    return inputs_ordered;
   }
 
   //============================================================================
@@ -330,7 +363,7 @@ struct Level1Rocm {
     for (int32_t i = 0; i < static_cast<int32_t>(group.size()); ++i) {
       const Node* node = group[i];
       auto output_name = node_get_first_output_name(*node);
-      auto node_ref = vaip_cxx::NodeConstRef::from_node(graph, *node);
+      auto node_ref = morphizen_cxx::NodeConstRef::from_node(graph, *node);
       
       rocm::RocmNodeProto* node_proto = subgraph.add_nodes();
       node_proto->set_node_id(i);
@@ -571,4 +604,4 @@ struct Level1Rocm {
   IPass& self_;
 };
 
-DEFINE_VAIP_PASS(Level1Rocm, vaip_pass_level1_rocm)
+DEFINE_MORPHIZEN_PASS(Level1Rocm, morphizen_pass_level1_rocm)
