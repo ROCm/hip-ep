@@ -40,6 +40,7 @@ workspace/
 │   ├── bin/                  # onnxruntime.dll, onnxruntime_morphizen_ep.dll, test_classification.exe
 │   └── lib/cmake/            # CMake configuration files
 └── onnx-hipdnn-ep/           # This project (git clone)
+    ├── 3rd-party/morphizen/  # MorphiZen framework (git submodule)
     ├── test/data/            # Test data (pt_resnet50.onnx, input.bin)
     └── etc/                  # Configuration files (vaip_config.json)
 ```
@@ -129,8 +130,14 @@ This script is used to build the ONNX Runtime project with specific configuratio
 
 ```bash
 cd workspace
-git clone https://github.com/ROCm/onnx-hipdnn-ep.git
+git clone --recursive https://github.com/ROCm/onnx-hipdnn-ep.git
 ```
+
+> **Note**: The `--recursive` flag is required to clone the `3rd-party/morphizen` submodule. If you already cloned without it, run:
+> ```bash
+> cd onnx-hipdnn-ep
+> git submodule update --init --recursive
+> ```
 
 #### Configure and build
 
