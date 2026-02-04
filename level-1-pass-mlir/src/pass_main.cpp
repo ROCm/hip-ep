@@ -18,7 +18,7 @@
 using namespace morphizen;
 using namespace morphizen_cxx;
 
-DEF_ENV_PARAM(MLIR_SHOW_WITH_DEBUG_INFO, "0")
+DEF_ENV_PARAM(MLIR_PRINT_WITH_VERBOSE, "0")
 
 namespace {
 
@@ -28,35 +28,28 @@ struct Level1MlirPass {
   void process(IPass& self, Graph& graph) {
     LOG(INFO) << "Level1MlirPass::process() called";
    
-    // Save graph to file for MLIR processing
-    LOG(INFO) << "Saving graph to file...";
     auto graph_ref = GraphConstRef(graph);
-    std::string graph_file = "graph_for_mlir.txt";
-    graph_ref.save(graph_file);
-    LOG(INFO) << "Graph saved to file: " << graph_file;
+    auto graph_string = graph_ref.save_string();
+    LOG(INFO) << "Graph serialized to string, size: " << graph_string->size();
     
-    // Parse MLIR file to mlir::ModuleOp
-    LOG(INFO) << "Parsing MLIR file to ModuleOp...";
+    // Parse MLIR string to mlir::ModuleOp
+    LOG(INFO) << "Parsing MLIR string to ModuleOp...";
     mlir::MLIRContext context;
     context.loadDialect<mlir::func::FuncDialect>();
     context.loadDialect<mlir::arith::ArithDialect>();
     context.allowUnregisteredDialects();
     
-    auto moduleRef = mlir::parseSourceFile<mlir::ModuleOp>(graph_file, &context);
+    auto moduleRef = mlir::parseSourceString<mlir::ModuleOp>(*graph_string, &context);
     
     if (!moduleRef) {
       LOG(INFO) << "Failed to parse MLIR string to ModuleOp";
     } else {
-      LOG(INFO) << "Successfully parsed MLIR string to ModuleOp";
-      
       // Get the module operation
       mlir::ModuleOp module = *moduleRef;
-      LOG(INFO) << "ModuleOp created, ready for MLIR transformations";
-      
-      
+     
       // Print module with detailed flags
       mlir::OpPrintingFlags flags;
-      if(ENV_PARAM(MLIR_SHOW_WITH_DEBUG_INFO)){
+      if(ENV_PARAM(MLIR_PRINT_WITH_VERBOSE)){
         flags.printGenericOpForm();
         flags.enableDebugInfo();
         flags.printValueUsers();
