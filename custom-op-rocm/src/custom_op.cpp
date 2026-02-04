@@ -7,10 +7,12 @@
 #include <set>
 #include "google/protobuf/util/json_util.h"
 #include "morphizen/env_config.hpp"
+#include "rocm_kernels.h"
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_ROCM, "0")
 DEF_ENV_PARAM(MORPHIZEN_GPU_TIMEOUT_MS, "5000")
 DEF_ENV_PARAM(MORPHIZEN_GPU_WATCHDOG_ENABLED, "1")
+DEF_ENV_PARAM(MORPHIZEN_DRY_RUN, "0")  // Set to 1 to skip GPU execution for debugging
 
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_ROCM) >= n)
 
@@ -488,6 +490,26 @@ size_t RocmCustomOp::GetOutputSize(int32_t node_id, int32_t output_index) const 
       output_elements *= matmul_params.batch_count();
     }
     return output_elements * sizeof(float);
+  } else if (params.op_type() == "mul") {
+    const auto& mul_params = params.mul_params();
+    // Output size matches the larger input (A)
+    return mul_params.size_a() * sizeof(float);
+  } else if (params.op_type() == "softmax") {
+    const auto& softmax_params = params.softmax_params();
+    // Softmax preserves shape: batch * dim
+    return softmax_params.batch() * softmax_params.dim() * sizeof(float);
+  } else if (params.op_type() == "reshape") {
+    const auto& reshape_params = params.reshape_params();
+    // Reshape preserves total size
+    return reshape_params.total_size() * sizeof(float);
+  } else if (params.op_type() == "transpose") {
+    const auto& transpose_params = params.transpose_params();
+    // Transpose preserves total size
+    return transpose_params.total_size() * sizeof(float);
+  } else if (params.op_type() == "tile") {
+    const auto& tile_params = params.tile_params();
+    // Tile expands size
+    return tile_params.out_size() * sizeof(float);
   }
   
   return 0;
@@ -674,6 +696,29 @@ void RocmCustomOp::ExecuteNode(const rocm::RocmNodeProto& node) const {
     throw std::runtime_error("No output buffer allocated");
   }
   
+  // Dry run mode: skip actual GPU execution, but initialize output with zeros
+  // This prevents uninitialized data from causing crashes in downstream ops
+  if (ENV_PARAM(MORPHIZEN_DRY_RUN) >= 1) {
+    size_t output_size = GetOutputSize(node_id, 0);
+    MY_LOG(0) << "[ROCm CustomOp DRY RUN] Node " << node_id 
+              << " op_type=" << params.op_type() 
+              << " inputs=" << inputs.size()
+              << " output_size=" << output_size
+              << " output_ptr=" << (void*)output
+              << " SKIPPED (dry run mode)";
+    
+    // Initialize output with zeros to provide valid data for subsequent ops
+    // We can't copy input->output because tile/broadcast ops have larger outputs
+    if (output != nullptr && output_size > 0) {
+      auto stream = hip_context_->stream();
+      hipError_t err = hipMemsetAsync(output, 0, output_size, stream);
+      if (err != hipSuccess) {
+        MY_LOG(0) << "[ROCm CustomOp DRY RUN] hipMemsetAsync failed: " << hipGetErrorString(err);
+      }
+    }
+    return;
+  }
+  
   // Execute based on operation type
   if (params.op_type() == "conv") {
     ExecuteConvNode(node_id, params.conv_params(), inputs, output);
@@ -681,6 +726,16 @@ void RocmCustomOp::ExecuteNode(const rocm::RocmNodeProto& node) const {
     ExecuteGemmNode(node_id, params.gemm_params(), inputs, output);
   } else if (params.op_type() == "matmul") {
     ExecuteMatmulNode(node_id, params.matmul_params(), inputs, output);
+  } else if (params.op_type() == "mul") {
+    ExecuteMulNode(node_id, params.mul_params(), inputs, output);
+  } else if (params.op_type() == "softmax") {
+    ExecuteSoftmaxNode(node_id, params.softmax_params(), inputs, output);
+  } else if (params.op_type() == "reshape") {
+    ExecuteReshapeNode(node_id, params.reshape_params(), inputs, output);
+  } else if (params.op_type() == "transpose") {
+    ExecuteTransposeNode(node_id, params.transpose_params(), inputs, output);
+  } else if (params.op_type() == "tile") {
+    ExecuteTileNode(node_id, params.tile_params(), inputs, output);
   } else {
     LOG(ERROR) << "[ROCm CustomOp] Unknown op_type: " << params.op_type();
     throw std::runtime_error("Unknown operation type: " + params.op_type());
@@ -1171,6 +1226,120 @@ void RocmCustomOp::ExecuteMatmulNode(int32_t node_id,
   MY_LOG(2) << "[ROCm CustomOp] Node " << node_id << ": MatMul executed successfully";
 }
 
+//============================================================================
+// New Op Execute Functions (using rocm_kernels library)
+//============================================================================
+
+void RocmCustomOp::ExecuteMulNode(int32_t node_id,
+                                   const rocm::MulParamProto& params,
+                                   const std::vector<float*>& inputs,
+                                   float* output) const {
+  MY_LOG(2) << "[ROCm CustomOp] ExecuteMulNode[" << node_id << "]: size_a=" << params.size_a()
+            << ", size_b=" << params.size_b() << ", b_is_scalar=" << params.b_is_scalar();
+  
+  auto stream = hip_context_->stream();
+  const float* d_a = inputs[0];
+  
+  if (params.b_is_scalar() && params.b_is_constant()) {
+    // Use scalar multiplication
+    rocm_kernels::mul_scalar(d_a, params.scalar_value(), output, params.size_a(), stream);
+  } else {
+    // Use element-wise multiplication
+    const float* d_b = inputs.size() > 1 ? inputs[1] : nullptr;
+    if (d_b == nullptr) {
+      LOG(ERROR) << "[ROCm CustomOp] Mul requires 2 inputs when B is not scalar constant";
+      throw std::runtime_error("Mul missing B input");
+    }
+    rocm_kernels::mul_elementwise(d_a, d_b, output, params.size_a(), params.size_b(), stream);
+  }
+  
+  MY_LOG(2) << "[ROCm CustomOp] Node " << node_id << ": Mul executed successfully";
+}
+
+void RocmCustomOp::ExecuteSoftmaxNode(int32_t node_id,
+                                       const rocm::SoftmaxParamProto& params,
+                                       const std::vector<float*>& inputs,
+                                       float* output) const {
+  MY_LOG(2) << "[ROCm CustomOp] ExecuteSoftmaxNode[" << node_id << "]: batch=" << params.batch()
+            << ", dim=" << params.dim() << ", axis=" << params.axis();
+  
+  auto stream = hip_context_->stream();
+  const float* d_input = inputs[0];
+  
+  rocm_kernels::softmax(d_input, output, params.batch(), params.dim(), stream);
+  
+  MY_LOG(2) << "[ROCm CustomOp] Node " << node_id << ": Softmax executed successfully";
+}
+
+void RocmCustomOp::ExecuteReshapeNode(int32_t node_id,
+                                       const rocm::ReshapeParamProto& params,
+                                       const std::vector<float*>& inputs,
+                                       float* output) const {
+  MY_LOG(2) << "[ROCm CustomOp] ExecuteReshapeNode[" << node_id << "]: total_size=" << params.total_size();
+  
+  auto stream = hip_context_->stream();
+  const float* d_input = inputs[0];
+  
+  // Reshape is typically zero-copy, but we need to copy if input != output
+  if (d_input != output) {
+    rocm_kernels::reshape_copy(d_input, output, params.total_size(), stream);
+  }
+  
+  MY_LOG(2) << "[ROCm CustomOp] Node " << node_id << ": Reshape executed successfully";
+}
+
+void RocmCustomOp::ExecuteTransposeNode(int32_t node_id,
+                                         const rocm::TransposeParamProto& params,
+                                         const std::vector<float*>& inputs,
+                                         float* output) const {
+  MY_LOG(2) << "[ROCm CustomOp] ExecuteTransposeNode[" << node_id << "]: total_size=" << params.total_size()
+            << ", ndim=" << params.ndim() << ", is_0213=" << params.is_0213();
+  
+  auto stream = hip_context_->stream();
+  const float* d_input = inputs[0];
+  
+  if (params.is_0213() && params.ndim() == 4) {
+    // Use optimized [0,2,1,3] transpose
+    int64_t n = params.shape_in(0);
+    int64_t a = params.shape_in(1);
+    int64_t b = params.shape_in(2);
+    int64_t c = params.shape_in(3);
+    rocm_kernels::transpose_0213(d_input, output, n, a, b, c, stream);
+  } else {
+    // Use general transpose
+    std::vector<int64_t> in_shape(params.shape_in().begin(), params.shape_in().end());
+    std::vector<int64_t> out_shape(params.shape_out().begin(), params.shape_out().end());
+    std::vector<int32_t> perm(params.perm().begin(), params.perm().end());
+    
+    rocm_kernels::transpose(d_input, output, 
+                            in_shape.data(), out_shape.data(),
+                            perm.data(), params.ndim(),
+                            params.total_size(), stream);
+  }
+  
+  MY_LOG(2) << "[ROCm CustomOp] Node " << node_id << ": Transpose executed successfully";
+}
+
+void RocmCustomOp::ExecuteTileNode(int32_t node_id,
+                                    const rocm::TileParamProto& params,
+                                    const std::vector<float*>& inputs,
+                                    float* output) const {
+  MY_LOG(2) << "[ROCm CustomOp] ExecuteTileNode[" << node_id << "]: in_size=" << params.in_size()
+            << ", out_size=" << params.out_size() << ", ndim=" << params.ndim();
+  
+  auto stream = hip_context_->stream();
+  const float* d_input = inputs[0];
+  
+  std::vector<int64_t> in_shape(params.shape_in().begin(), params.shape_in().end());
+  std::vector<int64_t> repeats(params.repeats().begin(), params.repeats().end());
+  
+  rocm_kernels::tile(d_input, output, 
+                     in_shape.data(), repeats.data(),
+                     params.ndim(), params.in_size(), params.out_size(), stream);
+  
+  MY_LOG(2) << "[ROCm CustomOp] Node " << node_id << ": Tile executed successfully";
+}
+
 void RocmCustomOp::DownloadExternalOutputs(const OrtApi* api, OrtKernelContext* context) const {
   // Use per-session stream
   auto stream = hip_context_->stream();
@@ -1219,6 +1388,31 @@ void RocmCustomOp::DownloadExternalOutputs(const OrtApi* api, OrtKernelContext* 
         }
         output_shape.push_back(matmul_params.m());
         output_shape.push_back(matmul_params.n());
+      }
+    } else if (params.op_type() == "mul") {
+      const auto& mul_params = params.mul_params();
+      for (int j = 0; j < mul_params.shape_y_size(); ++j) {
+        output_shape.push_back(mul_params.shape_y(j));
+      }
+    } else if (params.op_type() == "softmax") {
+      const auto& softmax_params = params.softmax_params();
+      for (int j = 0; j < softmax_params.shape_size(); ++j) {
+        output_shape.push_back(softmax_params.shape(j));
+      }
+    } else if (params.op_type() == "reshape") {
+      const auto& reshape_params = params.reshape_params();
+      for (int j = 0; j < reshape_params.shape_out_size(); ++j) {
+        output_shape.push_back(reshape_params.shape_out(j));
+      }
+    } else if (params.op_type() == "transpose") {
+      const auto& transpose_params = params.transpose_params();
+      for (int j = 0; j < transpose_params.shape_out_size(); ++j) {
+        output_shape.push_back(transpose_params.shape_out(j));
+      }
+    } else if (params.op_type() == "tile") {
+      const auto& tile_params = params.tile_params();
+      for (int j = 0; j < tile_params.shape_out_size(); ++j) {
+        output_shape.push_back(tile_params.shape_out(j));
       }
     }
     

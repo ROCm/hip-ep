@@ -205,16 +205,121 @@ message MatmulParamProto {
   bool b_is_constant = 25;
 }
 
+// ============================================================================
+// Element-wise and Data Movement Operations
+// ============================================================================
+
+// Mul (Element-wise Multiplication) parameters
+// Computes: output = a * b (with broadcasting support)
+message MulParamProto {
+  // Input sizes
+  int64 size_a = 1;           // Total elements in A
+  int64 size_b = 2;           // Total elements in B (may be smaller for broadcasting)
+  
+  // Shape information
+  repeated int64 shape_a = 3;  // Shape of input A
+  repeated int64 shape_b = 4;  // Shape of input B
+  repeated int64 shape_y = 5;  // Shape of output Y
+  
+  // Scalar optimization
+  bool b_is_scalar = 6;        // True if B is a single value
+  bool b_is_constant = 7;      // True if B is a constant initializer
+  float scalar_value = 8;      // Value if B is a scalar constant
+  
+  // Input/output names
+  repeated string input_names = 9;
+  repeated string output_names = 10;
+}
+
+// Softmax parameters
+// Computes: softmax(x)_i = exp(x_i - max(x)) / sum(exp(x - max(x)))
+message SoftmaxParamProto {
+  // Dimensions
+  int64 batch = 1;            // Product of all dims except axis dim
+  int64 dim = 2;              // Size of softmax dimension
+  int32 axis = 3;             // Axis to apply softmax (default -1)
+  
+  // Shape information
+  repeated int64 shape = 4;   // Full input/output shape
+  
+  // Input/output names
+  repeated string input_names = 5;
+  repeated string output_names = 6;
+}
+
+// Reshape parameters
+// Computes: output = reshape(input, new_shape)
+// Note: Reshape is typically zero-copy when data is contiguous
+message ReshapeParamProto {
+  // Total element count (must be same for input and output)
+  int64 total_size = 1;
+  
+  // Shape information
+  repeated int64 shape_in = 2;   // Input shape
+  repeated int64 shape_out = 3;  // Output shape
+  
+  // Input/output names
+  repeated string input_names = 4;
+  repeated string output_names = 5;
+}
+
+// Transpose parameters
+// Computes: output = transpose(input, perm)
+message TransposeParamProto {
+  // Dimensions
+  int64 total_size = 1;        // Total number of elements
+  int32 ndim = 2;              // Number of dimensions
+  
+  // Permutation array (e.g., [0, 2, 1, 3] for common attention pattern)
+  repeated int32 perm = 3;
+  
+  // Shape information
+  repeated int64 shape_in = 4;   // Input shape
+  repeated int64 shape_out = 5;  // Output shape
+  
+  // Optimization hints
+  bool is_0213 = 6;            // True if perm is [0, 2, 1, 3] (common in attention)
+  
+  // Input/output names
+  repeated string input_names = 7;
+  repeated string output_names = 8;
+}
+
+// Tile parameters
+// Computes: output = tile(input, repeats)
+message TileParamProto {
+  // Sizes
+  int64 in_size = 1;           // Total input elements
+  int64 out_size = 2;          // Total output elements
+  int32 ndim = 3;              // Number of dimensions
+  
+  // Repeat counts for each dimension
+  repeated int64 repeats = 4;
+  
+  // Shape information
+  repeated int64 shape_in = 5;   // Input shape
+  repeated int64 shape_out = 6;  // Output shape
+  
+  // Input/output names
+  repeated string input_names = 7;
+  repeated string output_names = 8;
+}
+
 // Single operation parameters (used by Level-2 passes)
-// When a single Conv, Gemm, or MatMul is fused, this is attached to MetaDef
+// When a single operation is fused, this is attached to MetaDef
 message RocmParamProto {
-  // Operation type: "conv", "gemm", or "matmul"
+  // Operation type: "conv", "gemm", "matmul", "mul", "softmax", "reshape", "transpose", "tile"
   string op_type = 1;
   
   // Operation-specific parameters (one of these will be populated)
   ConvParamProto conv_params = 2;
   GemmParamProto gemm_params = 3;
   MatmulParamProto matmul_params = 6;
+  MulParamProto mul_params = 7;
+  SoftmaxParamProto softmax_params = 8;
+  ReshapeParamProto reshape_params = 9;
+  TransposeParamProto transpose_params = 10;
+  TileParamProto tile_params = 11;
   
   // General metadata
   string ep_context_file_name = 4;

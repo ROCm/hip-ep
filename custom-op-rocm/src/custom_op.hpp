@@ -305,6 +305,28 @@ private:
                          const rocm::MatmulParamProto& params,
                          const std::vector<float*>& inputs,
                          float* output) const;
+  
+  // New ops execution (using rocm_kernels library)
+  void ExecuteMulNode(int32_t node_id,
+                      const rocm::MulParamProto& params,
+                      const std::vector<float*>& inputs,
+                      float* output) const;
+  void ExecuteSoftmaxNode(int32_t node_id,
+                          const rocm::SoftmaxParamProto& params,
+                          const std::vector<float*>& inputs,
+                          float* output) const;
+  void ExecuteReshapeNode(int32_t node_id,
+                          const rocm::ReshapeParamProto& params,
+                          const std::vector<float*>& inputs,
+                          float* output) const;
+  void ExecuteTransposeNode(int32_t node_id,
+                            const rocm::TransposeParamProto& params,
+                            const std::vector<float*>& inputs,
+                            float* output) const;
+  void ExecuteTileNode(int32_t node_id,
+                       const rocm::TileParamProto& params,
+                       const std::vector<float*>& inputs,
+                       float* output) const;
 
   // Tensor resolution
   float* ResolveTensorRef(const rocm::TensorRefProto& ref) const;
