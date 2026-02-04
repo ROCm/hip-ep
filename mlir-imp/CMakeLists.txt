@@ -44,6 +44,11 @@ target_include_directories(${LIB_NAME}
   src
   #${ONNX_MLIR_SOURCE_TREE}
   # ${ONNX_MLIR_BINARY_DIR}
+)
+
+# Mark LLVM/MLIR headers as SYSTEM to suppress third-party library warnings
+target_include_directories(${LIB_NAME}
+  SYSTEM PRIVATE
   ${LLVM_INCLUDE_DIRS}
   ${MLIR_INCLUDE_DIRS}
 )
