@@ -86,9 +86,8 @@ static std::string msg_to_json_string(const google::protobuf::Message& msg) {
 }
 std::unique_ptr<PassContextImp>
 PassContextImp::create_pass_context(const ConfigProto& config_proto1) {
-  auto ret = std::make_unique<PassContextImp>();
-  auto config_proto = ConfigProto(config_proto1);
-  ret->config_.Swap(&config_proto);
+  auto ret = std::make_unique<PassContextImp>(PrivateTag{},
+                                              ConfigProto(config_proto1));
   Config::add_version_info(ret->context_proto);
   ret->update_config_proto_root_field();
   return ret;

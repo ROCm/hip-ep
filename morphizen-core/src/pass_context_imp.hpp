@@ -172,11 +172,22 @@ public:
       const onnxruntime::ProviderOptions& options,
       const std::map<std::string, std::string>& session_configs);
 
+  // Private tag pattern - see docs/technical/privatetag-factory-pattern.md
+  struct PrivateTag {};
+
+  // Default constructor for PassContext::create()
+  PassContextImp() : config_(ConfigProto()) {}
+
+  // Constructor with private tag - allows make_unique in factory methods
+  explicit PassContextImp(PrivateTag, ConfigProto config)
+      : config_(std::move(config)) {}
+
+private:
 public:
   std::map<std::string, std::vector<AttributeProtoPtr>> node_extra_attrs;
   std::deque<IPass*> current_pass_stack;
   ContextProto context_proto;
-  ConfigProto config_; // Runtime-only INPUT (never serialized)
+  const ConfigProto config_; // Runtime-only INPUT (never serialized, immutable)
   bool is_ep_context_model = false;
   std::filesystem::path model_path;
   std::unique_ptr<morphizen_cxx::Model> ep_context_model_;
