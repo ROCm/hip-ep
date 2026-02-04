@@ -288,11 +288,11 @@ private:
   void update_config_proto_root_field();
   std::string get_cache_filename(const std::string& filename) const;
   void target_auto_discovery(const Model& model);
-  std::unique_ptr<TargetProto>
-  find_target_proto(const std::string& target_name);
+  const TargetProto* find_target_proto(const std::string& target_name);
   bool try_initialize_target_proto(const std::string& target_name,
                                    bool thorow_if_not_found);
   std::string get_valid_target_names();
+  bool has_user_config_file() const;
 
 public:
   virtual std::filesystem::path get_model_path() const override final;
@@ -365,7 +365,7 @@ private:
   std::unique_ptr<TarFile> tar_file_ = nullptr;
   bool delete_tar_file_on_session_created_ = true;
   std::filesystem::path tar_file_file_name_;
-  std::unique_ptr<TargetProto> target_proto_ = nullptr;
+  const TargetProto* target_proto_ = nullptr;
   std::map<std::string, std::string> provider_option_origin_ = {};
   std::map<std::string, std::string> provider_option_from_cache_ = {};
   std::map<std::string, std::string> compiled_model_compatibility_info_ = {};

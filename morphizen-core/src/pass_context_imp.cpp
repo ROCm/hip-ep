@@ -1145,9 +1145,7 @@ void PassContextImp::update_config_proto_root_field() {
   // cache_dir removed by Issue #006 (PR #80)
   // encryption_key removed - now read from provider_options directly (Issue
   // #004)
-  if (auto target = get_provider_option_local({"target", "xlnx_target_name"})) {
-    config_.set_target(*target);
-  }
+  // target copying removed by Issue #007 - ConfigProto.target is immutable
 }
 template <typename T>
 static std::optional<std::string>
@@ -1159,7 +1157,7 @@ get_provider_option_internal(const std::string& name, const T& options) {
   return std::nullopt;
 }
 
-std::unique_ptr<TargetProto>
+const TargetProto*
 PassContextImp::find_target_proto(const std::string& target_name) {
   auto& targets = config_.targets();
   auto it = std::find_if(targets.begin(), targets.end(),
@@ -1169,9 +1167,9 @@ PassContextImp::find_target_proto(const std::string& target_name) {
   if (it != targets.end()) {
     LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
         << "Found target proto for target: " << target_name;
-    return std::make_unique<TargetProto>(*it);
+    return &(*it); // Return raw pointer to element in ConfigProto
   }
-  return nullptr; // not found
+  return nullptr;  // not found
 }
 
 std::string PassContextImp::get_valid_target_names() {
@@ -1187,6 +1185,13 @@ std::string PassContextImp::get_valid_target_names() {
   }
   return valid_names.str();
 }
+
+bool PassContextImp::has_user_config_file() const {
+  return get_provider_option_internal(kProviderOptionConfigFile,
+                                      provider_option_origin_)
+      .has_value();
+}
+
 bool PassContextImp::try_initialize_target_proto(const std::string& target_name,
                                                  bool thorow_if_not_found) {
   target_proto_ = find_target_proto(target_name);
@@ -1240,48 +1245,63 @@ static std::optional<std::string> discover_target(const ConfigProto& proto,
   return std::nullopt;
 }
 void PassContextImp::target_auto_discovery(const Model& model) {
+  bool using_builtin_config = !has_user_config_file();
+
+  // Priority 1: User explicit override (both paths)
   auto target_specified_by_end_user = get_provider_option_internal(
       kProviderOptionTarget, provider_option_origin_);
-  auto config_file = get_provider_option_internal(kProviderOptionConfigFile,
-                                                  provider_option_origin_);
-  do {
-    // 1. `provider_options["target"]` set explicitly by users
-    if (target_specified_by_end_user) {
-      LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
-          << "Target auto-discovery: target proto specified by end user: "
-          << *target_specified_by_end_user;
-      if (try_initialize_target_proto(*target_specified_by_end_user, true)) {
-        break;
+  if (target_specified_by_end_user) {
+    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
+        << "Target specified by user: " << *target_specified_by_end_user;
+    if (!try_initialize_target_proto(*target_specified_by_end_user, true)) {
+      // try_initialize_target_proto already throws if not found
+      return;
+    }
+    return;
+  }
+
+  if (using_builtin_config) {
+    // Path A: Built-in config - auto-discovery REQUIRED
+    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
+        << "Using built-in config - attempting auto-discovery";
+
+    auto discovered_target_name = discover_target(config_, model);
+    if (discovered_target_name.has_value()) {
+      if (try_initialize_target_proto(*discovered_target_name, false)) {
+        LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
+            << "Auto-discovery: detected target: " << *discovered_target_name;
+        return;
       }
     }
-    {
-      // 3. auto target discovery
-      //
-      // - when the build-in config file is used, the plugin must return
-      // a valid target name, otherwise it is a fatal error, because it
-      // means that the source code is not consistent with the built-in
-      // config file, and the built-in config file is regarded as the
-      // part source code.
-      auto discoveried_target_name = discover_target(config_, model);
-      if (discoveried_target_name.has_value()) {
-        if (try_initialize_target_proto(*discoveried_target_name, true)) {
-          LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
-              << "Target auto-discovery: target proto discovered: "
-              << *discoveried_target_name;
-          break;
-        }
-      }
-    }
-    { // 4. default target in config file
-      auto& target_name = config_.target();
+
+    // Priority 3: Fallback to built-in ConfigProto.target
+    auto& target_name = config_.target();
+    if (!target_name.empty()) {
       LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
-          << "Target auto-discovery: target proto specified by config file: "
+          << "Auto-discovery failed, using built-in config default: "
           << target_name;
       if (try_initialize_target_proto(target_name, true)) {
-        break;
+        return;
       }
     }
-  } while (0);
+
+    // Fatal error - built-in config MUST have working auto-discovery or default
+    throw std::runtime_error("Auto-discovery failed with built-in config and "
+                             "no default target - this is a fatal error");
+
+  } else {
+    // Path B: User config file - use config target directly (no auto-discovery)
+    auto& target_name = config_.target();
+    if (target_name.empty()) {
+      throw std::invalid_argument("User config file must specify target field");
+    }
+    LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
+        << "Using target from user config file: " << target_name;
+    if (!try_initialize_target_proto(target_name, true)) {
+      // try_initialize_target_proto already throws if not found
+      return;
+    }
+  }
 }
 
 void PassContextImp::append_compiled_model_compatibility_info(
