@@ -81,21 +81,10 @@ void Config::add_version_info(ContextProto& proto) {
 
 const ConfigProto& Config::config_proto() const { return config_proto_; }
 
-static TargetProto* get_target_proto(ConfigProto& proto,
-                                     const std::string& target_name) {
-  TargetProto* ret = nullptr;
-  for (auto& target : *proto.mutable_targets()) {
-    if (target.name() == target_name) {
-      ret = &target;
-      break;
-    }
-  }
-  return ret;
-}
-
-// Removed: remove_pass() - obsolete after Issue #014 (compute_effective_passes)
-// Removed: add_target_pass() - obsolete after Issue #014
-// (compute_effective_passes)
+// Removed: get_target_proto() - only caller (update_config_by_target) removed
+// in Issue #017 Removed: remove_pass() - obsolete after Issue #014
+// (compute_effective_passes) Removed: add_target_pass() - obsolete after Issue
+// #014 (compute_effective_passes)
 
 // Removed: update_target_compiler_atttr - depended on removed pass_dpu_param
 // and pass_vaiml_param fields
@@ -108,25 +97,6 @@ static TargetProto* get_target_proto(ConfigProto& proto,
 
 // Removed: update_graph_engine_qos_priority - depended on removed
 // graph_engine_qos_priority field
-
-void update_config_by_target(ConfigProto& proto,
-                             TargetProto* target_proto_in_pass_context,
-                             std::shared_ptr<PassContext> /*ctx*/) {
-  auto target = std::string();
-
-  auto target_proto =
-      get_target_proto(proto, target_proto_in_pass_context->name());
-  CHECK(target_proto != nullptr)
-      << "No valid target found: " << target << " logical error";
-
-  // NOTE: Pass mutations removed - compute_effective_passes() handles pass
-  // selection now Lines 141-142 commented out as part of Issue #014 (Dynamic
-  // Pass Registration) This function will be removed entirely in Issue #017
-  // std::unordered_map<std::string, PassProto> pass_map;
-  // remove_pass(proto, pass_map);
-  // add_target_pass(proto, pass_map, target_proto);
-  *target_proto_in_pass_context = *target_proto;
-}
 
 void Config::merge_config_proto(ConfigProto& config_proto,
                                 const char* json_config) {
