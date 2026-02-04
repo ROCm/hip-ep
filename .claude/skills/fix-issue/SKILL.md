@@ -32,7 +32,7 @@ Display top recommendation with metadata. User can request more options or selec
 
 ## Phase 2: Workspace Setup
 
-Run `setup-workspace.sh <issue_num>` to:
+Run `setup-workspace.py <issue_num>` to:
 - Check prerequisites (on main, no uncommitted changes)
 - Sync main branch
 - Create feature branch
@@ -46,11 +46,111 @@ Read issue and plan files, display context to user.
 
 ---
 
+## Phase 2.5: Plan Detection & Revision
+
+### Step 2.5.1: Detect plan files
+
+Find all plan files for the issue:
+```bash
+PLAN_FILES=$(ls docs/project/plans/${ISSUE_NUM}-*.md 2>/dev/null || echo "")
+```
+
+Count plans and read each one.
+
+### Step 2.5.2: Display plan information
+
+Show plan status to user:
+
+**If no plans found:**
+```
+⚠️ Implementation Plan: No detailed plan found
+   You'll need to design the implementation approach yourself
+```
+
+**If one plan found:**
+```
+📋 Implementation Plan: ✅ Detailed plan available
+   Location: docs/project/plans/027-eliminate-c-style-apis-migration-plan.md
+   Steps: [count from reading file]
+```
+
+**If multiple plans found:**
+```
+📋 Implementation Plans: 2 plans found
+   - docs/project/plans/027-migration-plan.md
+   - docs/project/plans/027-alternative-approach.md
+```
+
+### Step 2.5.3: Check for multi-PR patterns
+
+Read each plan file and search for patterns indicating multiple PRs:
+- "PR 1:", "PR 2:", "PR #1", "PR #2"
+- "create new PR", "create another PR", "create draft PR" (but not in setup context)
+- "git checkout -b" (creating new branches)
+- "gh pr create" (after initial setup)
+- "Phase 1 PR", "Phase 2 PR", "subsequent PR", "follow-up PR"
+- "first pull request", "second pull request"
+
+### Step 2.5.4: Revise multi-PR plans
+
+**If multi-PR patterns detected:**
+
+1. Show user:
+   ```
+   ⚠️ Plan suggests multiple PRs. Revising to single-PR approach...
+   ```
+
+2. For each plan file:
+   - Read entire content
+   - Edit to consolidate:
+     - Remove "create new PR" instructions
+     - Change "PR 1: Do X, PR 2: Do Y" to "Step 1: Do X, Step 2: Do Y"
+     - Add note at top: "NOTE: All work completed in single PR #[PR_NUMBER]"
+     - Convert multi-PR phases to sequential steps
+   - Use Edit tool to update plan file
+
+3. Commit revised plans:
+   ```bash
+   git add docs/project/plans/${ISSUE_NUM}-*.md
+   git commit -m "docs: revise plans for single-PR workflow (issue #${ISSUE_NUM})"
+   git push fork "$BRANCH_NAME"
+   ```
+
+4. Show user:
+   ```
+   ✅ Plans revised for single-PR execution
+      All implementation will happen in PR #[PR_NUMBER]
+   ```
+
+**If no multi-PR patterns:**
+   ```
+   ℹ️  Plan follows single-PR approach
+   ```
+
+---
+
 ## Phase 3: Implementation
+
+**CRITICAL: Single-PR Enforcement**
+
+All work happens in the branch and PR created in Phase 2.
+
+❌ NEVER run: `gh pr create`, `git checkout -b`
+✅ ALLOWED: Edit/Write files, build/test, `git add/commit/push fork <branch>`
+
+If plan mentions creating PRs: SKIP that instruction and continue.
+
+---
 
 ### Step 3.1: Ask user
 
-Offer auto-implement (AI follows plan), manual (user implements), or cancel.
+Display summary:
+```
+📋 Ready for Implementation
+Plans: X file(s) | PR #XXX | Branch: feature/issue-XXX-...
+```
+
+Offer: auto-implement, manual, or cancel.
 
 ### Step 3.2: If YES - Auto-implement
 
