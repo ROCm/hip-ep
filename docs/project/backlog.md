@@ -50,7 +50,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 - [Issue #034: MLIR Backend Shape Nullptr Check Failure](issues/034-mlir-shape-nullptr-check-failure.md) - Fix shape nullptr and LLVM casting failures (2 tests)
 - [Issue #035: ConstDataTest Suite Skipped - Missing Boost::Process Support](issues/035-constdatatest-boost-dependency.md) - Enable 16 ConstDataTest tests without Boost dependency
 - [Issue #036: Other Boost-Dependent Tests Skipped](issues/036-boost-dependent-tests-skipped.md) - Enable GraphTest.NewConstantInitializer and TarFileTest.WriteTo without Boost
-- [Issue #037: Remove Dead Code from TarFile](issues/037-remove-tarfile-dead-code.md) - Remove unused rename_symlink/rename_existing_entry functions (dead since April 2025)
 - [Issue #038: Document Lazy Symlink Resolution const_cast](issues/038-document-lazy-symlink-const-cast.md) - Add comprehensive documentation explaining intentional const_cast for write-once lazy initialization
 - [Issue #039: Fix Typos and Outdated Comments in TarFile](issues/039-fix-tarfile-typos-and-outdated-comments.md) - Fix outdated renaming comment, typos, incorrect FIXME, and remove unused parameter
 - [Issue #040: Remove Legacy tar_ball.cpp/hpp Re-Serialization](issues/040-remove-legacy-tar-ball-reserialization.md) - Remove ~750 lines of legacy TarWriter/TarReader code that wastefully re-serializes tar data
@@ -72,11 +71,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
 _(Max 5 items, deleted files deleted)_
 
+- **Issue #037: Remove Dead Code from TarFile** - PR #113 - Removed unused rename_symlink/rename_existing_entry functions (~60 LOC, eliminated 4 const_cast violations)
 - **Issue #041: Remove Duplicate friend Declaration in TarEntryInputStream** - PR #114 - Removed duplicate friend class declaration (trivial 1-line cleanup)
 - **Issue #043: Fix /create-issue Skill - Prevent Implementation During Discussion** - PR #107 - Added explicit rules to prevent AI from implementing work during issue creation (should only create documentation)
 - **Issue #045: Add Approval Workflow to /create-issue Skill** - PR #107 - Added 5-step workflow (Explore→Discuss→Summarize→Approve→Create) with plan detail options
 - **Issue #046: Update Dependencies After Each Issue in /create-issue** - PR #107 - Added automatic dependency tracking to update Quick dependencies and issue metadata after creating each issue
-- **Issue #049: Add Sub-topic Breakdown Workflow to /create-issue** - PR #107 - Added structured workflow for breaking down complex topics into manageable sub-topics with automatic task creation
 
 ---
 
