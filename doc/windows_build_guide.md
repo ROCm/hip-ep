@@ -231,6 +231,7 @@ C:\Develop\m\
 ├── source\           # Source code repositories
 │   ├── MorphiZen\
 │   ├── onnx-hipdnn-ep\
+│   │   └── 3rd-party\morphizen\  # MorphiZen framework (git submodule)
 │   └── onnxruntime\
 ├── build\            # Build directories
 │   ├── onnxruntime\
@@ -638,13 +639,18 @@ Set-Location C:\Develop\m\source
 git clone https://github.com/Xilinx/MorphiZen.git --recursive
 ```
 
-### 3.2 Verify onnx-hipdnn-ep
+### 3.2 Clone onnx-hipdnn-ep
 
-If onnx-hipdnn-ep is the current working directory:
 ```powershell
-Set-Location C:\Develop\m\source\onnx-hipdnn-ep
-git submodule update --init --recursive
+Set-Location C:\Develop\m\source
+git clone --recursive https://github.com/ROCm/onnx-hipdnn-ep.git
 ```
+
+> **Note**: The `--recursive` flag is required to clone the `3rd-party/morphizen` submodule. If you already cloned without it, run:
+> ```powershell
+> Set-Location C:\Develop\m\source\onnx-hipdnn-ep
+> git submodule update --init --recursive
+> ```
 
 ### 3.3 Configure onnx-hipdnn-ep
 
@@ -893,6 +899,9 @@ cmake --build C:\Develop\m\build\onnxruntime\Debug --target install
 # Clone MorphiZen
 Set-Location C:\Develop\m\source
 git clone https://github.com/Xilinx/MorphiZen.git --recursive
+
+# Clone onnx-hipdnn-ep (with submodule)
+git clone --recursive https://github.com/ROCm/onnx-hipdnn-ep.git
 
 # Build onnx-hipdnn-ep
 Set-Location C:\Develop\m\source\onnx-hipdnn-ep
