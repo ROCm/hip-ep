@@ -30,7 +30,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for issue quality guidelines.
 See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
 - [Issue #001: Add mmap Support for Embed Mode](issues/001-mmap-support-for-embed-mode.md) - Feature to enable memory-mapped file access for EP context embed mode
-- [Issue #007: Clean Up Target with Two-Path Architecture](issues/007-remove-target-copying.md) - Remove target copying, two-path architecture
 - [Issue #009: TargetProto Provider Options Injection Cleanup](issues/009-targetproto-provider-options-injection-cleanup.md) - Remove xclbin API functions
 - [Issue #012: session_configs Swapping](issues/012-session-configs-swapping.md) - Resolved by #003
 - [Issue #013: provider_options Aggregation](issues/013-provider-options-aggregation.md) - Related to #003, #008, #009

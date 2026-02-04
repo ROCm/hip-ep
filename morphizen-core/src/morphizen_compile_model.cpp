@@ -401,8 +401,9 @@ std::shared_ptr<PassContextImp> initialize_context(
   // model/target
   context->target_auto_discovery(model);
   if (!context->is_ep_context_model) {
-    morphizen::update_config_by_target(context->config_,
-                                       context->target_proto_.get(), context);
+    morphizen::update_config_by_target(
+        context->config_, const_cast<TargetProto*>(context->target_proto_),
+        context);
   }
 
   // log version of binary
