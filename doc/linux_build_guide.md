@@ -224,9 +224,14 @@ git clone https://github.com/Xilinx/MorphiZen.git --recursive
 
 ```bash
 cd $WORKSPACE_DIR
-git clone https://github.com/ROCm/onnx-hipdnn-ep.git
+git clone --recursive https://github.com/ROCm/onnx-hipdnn-ep.git
 cd onnx-hipdnn-ep
 ```
+
+> **Note**: The `--recursive` flag is required to clone the `3rd-party/morphizen` submodule. If you already cloned without it, run:
+> ```bash
+> git submodule update --init --recursive
+> ```
 
 ### 3.3 Configure onnx-hipdnn-ep
 
@@ -549,7 +554,7 @@ cmake --build $WORKSPACE_DIR/build/onnxruntime/Debug/ --target install
 # Clone repositories
 cd $WORKSPACE_DIR
 git clone https://github.com/ROCm/MorphiZen.git --recursive
-git clone https://github.com/ROCm/onnx-hipdnn-ep.git
+git clone --recursive https://github.com/ROCm/onnx-hipdnn-ep.git
 
 # Configure and build onnx-hipdnn-ep
 cd onnx-hipdnn-ep
@@ -589,6 +594,7 @@ $WORKSPACE_DIR/
 ├── MorphiZen/                # Morphizen framework
 │   └── ...
 ├── onnx-hipdnn-ep/           # onnx-hipdnn-ep integration
+│   ├── 3rd-party/morphizen/  # MorphiZen framework (git submodule)
 │   ├── level-1-pass-hipdnn/
 │   ├── custom-op-hipdnn/
 │   └── ...
