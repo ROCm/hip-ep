@@ -4,7 +4,8 @@
 #include "rocm_pass_utils.hpp"
 #include "conv_pattern_json.hpp"
 
-using namespace vaip_core;
+using namespace morphizen;
+using namespace morphizen_cxx;
 
 namespace {
 // Helper to calculate output dimension: (input + 2*pad - dilation*(filter-1) - 1) / stride + 1
@@ -13,8 +14,6 @@ int64_t calc_output_dim(int64_t input_dim, int64_t filter_dim,
   int64_t effective_filter = dilation * (filter_dim - 1) + 1;
   return (input_dim + 2 * pad - effective_filter) / stride + 1;
 }
-} // anonymous namespace
-
 /**
  * Level-2 Pass: Conv Pattern Matching (MIOpen)
  * 
@@ -47,40 +46,39 @@ struct Level2RocmConv {
           
           auto* conv_params = rocm_param.mutable_conv_params();
           
-          // Get Conv attributes from the matched node
+          // Get Conv attributes from the matched node using new API
           auto* conv_node = output.node;
-          auto attrs = node_get_attributes(*conv_node);
           
           // Extract padding, stride, dilation from attributes
-          int32_t pad_h = 1, pad_w = 1;
+          int32_t pad_h = 0, pad_w = 0;
           int32_t stride_h = 1, stride_w = 1;
           int32_t dilation_h = 1, dilation_w = 1;
           int32_t group_count = 1;
           
-          // Try to get actual attributes from the Conv node
-          for (auto& attr : attrs) {
-            auto attr_name = VAIP_ORT_API(attr_proto_get_name)(*attr);
-            if (attr_name == "pads") {
-              auto pads = VAIP_ORT_API(attr_proto_get_ints)(*attr);
-              if (pads.size() >= 2) {
-                pad_h = static_cast<int32_t>(pads[0]);
-                pad_w = static_cast<int32_t>(pads[1]);
-              }
-            } else if (attr_name == "strides") {
-              auto strides = VAIP_ORT_API(attr_proto_get_ints)(*attr);
-              if (strides.size() >= 2) {
-                stride_h = static_cast<int32_t>(strides[0]);
-                stride_w = static_cast<int32_t>(strides[1]);
-              }
-            } else if (attr_name == "dilations") {
-              auto dilations = VAIP_ORT_API(attr_proto_get_ints)(*attr);
-              if (dilations.size() >= 2) {
-                dilation_h = static_cast<int32_t>(dilations[0]);
-                dilation_w = static_cast<int32_t>(dilations[1]);
-              }
-            } else if (attr_name == "group") {
-              group_count = static_cast<int32_t>(VAIP_ORT_API(attr_proto_get_int)(*attr));
+          // Use new morphizen API to get attributes
+          if (node_has_attr(*conv_node, "pads")) {
+            auto pads = node_get_attr_ints(*conv_node, "pads");
+            if (pads.size() >= 2) {
+              pad_h = static_cast<int32_t>(pads[0]);
+              pad_w = static_cast<int32_t>(pads[1]);
             }
+          }
+          if (node_has_attr(*conv_node, "strides")) {
+            auto strides = node_get_attr_ints(*conv_node, "strides");
+            if (strides.size() >= 2) {
+              stride_h = static_cast<int32_t>(strides[0]);
+              stride_w = static_cast<int32_t>(strides[1]);
+            }
+          }
+          if (node_has_attr(*conv_node, "dilations")) {
+            auto dilations = node_get_attr_ints(*conv_node, "dilations");
+            if (dilations.size() >= 2) {
+              dilation_h = static_cast<int32_t>(dilations[0]);
+              dilation_w = static_cast<int32_t>(dilations[1]);
+            }
+          }
+          if (node_has_attr(*conv_node, "group")) {
+            group_count = static_cast<int32_t>(node_get_attr_int(*conv_node, "group"));
           }
           
           conv_params->set_pad_h(pad_h);
@@ -139,10 +137,11 @@ struct Level2RocmConv {
 
           // Extract and save weight tensor to cache
           auto pass_context = self->get_context();
+          auto weight_ref = NodeArgConstRef::from_node_arg(*graph, *input_W.node_arg);
           auto weight_name = node_arg_get_name(*input_W.node_arg);
           
-          // Check if weight is a constant initializer
-          if (VAIP_ORT_API(node_arg_is_constant)(*graph, *input_W.node_arg)) {
+          // Check if weight is a constant initializer using new API
+          if (weight_ref.is_constant()) {
             auto weight_data = node_arg_get_const_data_as_floats(*graph, *input_W.node_arg);
             std::string weight_filename = rocm_pass::generate_weight_filename("rocm_conv", weight_name);
             
@@ -157,9 +156,10 @@ struct Level2RocmConv {
           // Extract and save bias tensor if present
           if (has_bias) {
             auto* bias_node_arg = binder["input_B"].node_arg;
+            auto bias_ref = NodeArgConstRef::from_node_arg(*graph, *bias_node_arg);
             auto bias_name = node_arg_get_name(*bias_node_arg);
             
-            if (VAIP_ORT_API(node_arg_is_constant)(*graph, *bias_node_arg)) {
+            if (bias_ref.is_constant()) {
               auto bias_data = node_arg_get_const_data_as_floats(*graph, *bias_node_arg);
               std::string bias_filename = rocm_pass::generate_weight_filename("rocm_conv_bias", bias_name);
               
@@ -223,5 +223,6 @@ struct Level2RocmConv {
 
   IPass& self_;
 };
+} // namespace
 
-DEFINE_VAIP_PASS(Level2RocmConv, vaip_pass_level2_rocm_conv)
+DEFINE_MORPHIZEN_PASS(Level2RocmConv, morphizen_pass_level2_rocm_conv)

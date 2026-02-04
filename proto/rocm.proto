@@ -153,15 +153,68 @@ message GemmParamProto {
   int64 bias_file_size = 33;       // Size of bias data in bytes
 }
 
+// MatMul parameters (for hipBLASLt)
+// Computes: Y = A @ B (matrix multiplication)
+// Unlike Gemm, MatMul has no alpha/beta scalars and supports batched operations natively
+message MatmulParamProto {
+  // Matrix dimensions (for the innermost 2D matmul)
+  int64 m = 1;  // Rows of A (last 2nd dim)
+  int64 n = 2;  // Cols of B (last dim)
+  int64 k = 3;  // Cols of A / Rows of B (last dim of A / last 2nd dim of B)
+  
+  // Batch dimensions (product of all dimensions except last 2)
+  int64 batch_count = 4;
+  
+  // Leading dimensions
+  int64 lda = 5;
+  int64 ldb = 6;
+  int64 ldd = 7;
+  
+  // Strides for batched operations
+  int64 stride_a = 8;
+  int64 stride_b = 9;
+  int64 stride_d = 10;
+  
+  // Data types (as string: "fp16", "fp32", "bf16", etc.)
+  string data_type_a = 11;
+  string data_type_b = 12;
+  string data_type_d = 13;
+  string compute_type = 14;
+  
+  // Input/output names for reference
+  repeated string input_names = 15;
+  repeated string output_names = 16;
+  
+  // EP context file info
+  string ep_context_file_name = 17;
+  int64 ep_context_file_size = 18;
+  
+  // Algorithm index (-1 for heuristic selection)
+  int32 algorithm_index = 19;
+  
+  // Weight tensor file (B matrix if constant)
+  string weight_file_path = 20;
+  int64 weight_file_size = 21;
+  
+  // Full shape information for multi-dimensional matmul
+  repeated int64 shape_a = 22;  // Full shape of input A
+  repeated int64 shape_b = 23;  // Full shape of input B
+  repeated int64 shape_y = 24;  // Full shape of output Y
+  
+  // Whether B is a constant (weight)
+  bool b_is_constant = 25;
+}
+
 // Single operation parameters (used by Level-2 passes)
-// When a single Conv or Gemm is fused, this is attached to MetaDef
+// When a single Conv, Gemm, or MatMul is fused, this is attached to MetaDef
 message RocmParamProto {
-  // Operation type: "conv" or "gemm"
+  // Operation type: "conv", "gemm", or "matmul"
   string op_type = 1;
   
   // Operation-specific parameters (one of these will be populated)
   ConvParamProto conv_params = 2;
   GemmParamProto gemm_params = 3;
+  MatmulParamProto matmul_params = 6;
   
   // General metadata
   string ep_context_file_name = 4;

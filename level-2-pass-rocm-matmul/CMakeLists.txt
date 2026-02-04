@@ -5,8 +5,8 @@
 find_package(glog CONFIG REQUIRED)
 include(cmake/generate_pattern_inc.cmake)
 
-set(LIB_NAME morphizen-level2-pass-rocm-conv)
-add_library(${LIB_NAME} STATIC src/pass_main.cpp ${CMAKE_CURRENT_BINARY_DIR}/conv_pattern_json.hpp)
+set(LIB_NAME morphizen-level2-pass-rocm-matmul)
+add_library(${LIB_NAME} STATIC src/pass_main.cpp ${CMAKE_CURRENT_BINARY_DIR}/matmul_pattern_json.hpp)
 target_link_libraries(${LIB_NAME} PUBLIC
 	morphizen::rocm-pass-common
 )
@@ -21,8 +21,8 @@ if(WIN32)
   target_compile_definitions(${LIB_NAME} PRIVATE "__HIP_PLATFORM_AMD__=1")
 endif()
 
-target_compile_definitions(${LIB_NAME} PRIVATE -DOUTPUT_NAME="morphizen-level2-pass-rocm-conv")
+target_compile_definitions(${LIB_NAME} PRIVATE -DOUTPUT_NAME="morphizen-level2-pass-rocm-matmul")
 target_link_libraries(${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,${LIB_NAME}>")
 set_target_properties(${LIB_NAME} PROPERTIES
-	FOLDER "rocm-conv"
+	FOLDER "rocm-matmul"
 )

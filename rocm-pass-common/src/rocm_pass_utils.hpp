@@ -7,7 +7,7 @@
 #include <string>
 #include "google/protobuf/util/json_util.h"
 #include "morphizen/env_config.hpp"
-#include "morphizen/vaip.hpp"
+#include "morphizen/morphizen.hpp"
 #include "morphizen/node_attr.hpp"
 #include "rocm.pb.h"
 
@@ -56,9 +56,9 @@ inline std::string generate_weight_filename(const std::string& prefix,
  * @return true if fusion succeeded, false otherwise
  */
 inline bool finalize_level2_fuse(
-    vaip_core::IPass* self,
-    vaip_core::Graph& graph,
-    vaip_core::MetaDefProto& meta_def,
+    morphizen::IPass* self,
+    morphizen::Graph& graph,
+    morphizen::MetaDefProto& meta_def,
     const rocm::RocmParamProto& rocm_param,
     const std::string& output_name,
     const std::string& log_prefix) {
@@ -92,8 +92,8 @@ inline bool finalize_level2_fuse(
 
   // Add node attribute to mark this as ROCm fused node
   // const_cast is needed because level_2_fuse returns const Node&
-  vaip_core::Node& mutable_node = const_cast<vaip_core::Node&>(fused_node);
-  vaip_core::NodeAttributesBuilder attr_builder;
+  morphizen::Node& mutable_node = const_cast<morphizen::Node&>(fused_node);
+  morphizen::NodeAttributesBuilder attr_builder;
   attr_builder.add("rocm_param_file", param_filename);
   attr_builder.merge_into(mutable_node);
 
@@ -112,7 +112,7 @@ inline bool finalize_level2_fuse(
  * @return true if write succeeded, false otherwise
  */
 inline bool save_weight_to_cache(
-    const std::shared_ptr<vaip_core::PassContext>& pass_context,
+    const std::shared_ptr<morphizen::PassContext>& pass_context,
     const gsl::span<const float>& weight_data,
     const std::string& filename,
     const std::string& log_prefix) {

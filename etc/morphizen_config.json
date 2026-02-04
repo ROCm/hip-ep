@@ -1,0 +1,34 @@
+{
+  "passes": [
+    {
+      "name": "init",
+      "plugin": "morphizen-pass-init"
+    },
+    {
+      "name": "fuse_ROCm",
+      "plugin": "morphizen-level1-pass-rocm",
+      "passGenericParam": {
+        "subPassNames": [
+          "morphizen-level2-pass-rocm-conv",
+          "morphizen-level2-pass-rocm-gemm",
+          "morphizen-level2-pass-rocm-matmul"
+        ]
+      }
+    }
+  ],
+  "target": "ROCm_default",
+  "targets": [
+    {
+      "name": "ROCm_default",
+      "pass": [
+        "init",
+        "fuse_ROCm"
+      ],
+      "provider_options": {
+        "pass.init.enable_dump": "1",
+        "pass.init.directory": "morphizen_init",
+        "pass.init.filename": "init-graph-for-rocm.onnx"
+      }
+    }
+  ]
+}

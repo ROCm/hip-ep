@@ -4,7 +4,8 @@
 #include "rocm_pass_utils.hpp"
 #include "gemm_pattern_json.hpp"
 
-using namespace vaip_core;
+using namespace morphizen;
+using namespace morphizen_cxx;
 
 /**
  * Level-2 Pass: Gemm Pattern Matching (hipBLASLt)
@@ -50,10 +51,11 @@ struct Level2RocmGemm {
 
           // Extract and save weight tensor (B matrix) to cache
           auto pass_context = self->get_context();
+          auto weight_ref = NodeArgConstRef::from_node_arg(*graph, *input_B.node_arg);
           auto weight_name = node_arg_get_name(*input_B.node_arg);
           
-          // Check if weight is a constant initializer
-          if (VAIP_ORT_API(node_arg_is_constant)(*graph, *input_B.node_arg)) {
+          // Check if weight is a constant initializer using new API
+          if (weight_ref.is_constant()) {
             auto weight_data = node_arg_get_const_data_as_floats(*graph, *input_B.node_arg);
             std::string weight_filename = rocm_pass::generate_weight_filename("rocm_gemm", weight_name);
             
@@ -68,9 +70,10 @@ struct Level2RocmGemm {
           // Extract and save bias tensor (C matrix) if present
           if (has_C) {
             auto* bias_node_arg = binder["input_C"].node_arg;
+            auto bias_ref = NodeArgConstRef::from_node_arg(*graph, *bias_node_arg);
             auto bias_name = node_arg_get_name(*bias_node_arg);
             
-            if (VAIP_ORT_API(node_arg_is_constant)(*graph, *bias_node_arg)) {
+            if (bias_ref.is_constant()) {
               auto bias_data = node_arg_get_const_data_as_floats(*graph, *bias_node_arg);
               std::string bias_filename = rocm_pass::generate_weight_filename("rocm_gemm_bias", bias_name);
               
@@ -129,4 +132,4 @@ struct Level2RocmGemm {
   IPass& self_;
 };
 
-DEFINE_VAIP_PASS(Level2RocmGemm, vaip_pass_level2_rocm_gemm)
+DEFINE_MORPHIZEN_PASS(Level2RocmGemm, morphizen_pass_level2_rocm_gemm)
