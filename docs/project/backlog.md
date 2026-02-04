@@ -19,9 +19,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for issue quality guidelines.
 - **#003 influences #005, #007** - Should coordinate
 - **#006 relates to #009, #010, #011** - Cache cleanup group
 - **#008 is independent**
-- **#046 relates to #043, #045** - All improve /create-issue skill
 - **#047 relates to #044** - Both improve TarFile deduplication code
-- **#049 relates to #043, #045, #046** - All improve /create-issue skill
 - **#052 relates to #050, #051** - All improve TarFile implementation quality
 - **#053 relates to #052** - Documents architecture that #052 will modify
 - **#054 relates to #050, #055** - All reduce TarFile public API surface
@@ -59,13 +57,9 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 - [Issue #040: Remove Legacy tar_ball.cpp/hpp Re-Serialization](issues/040-remove-legacy-tar-ball-reserialization.md) - Remove ~750 lines of legacy TarWriter/TarReader code that wastefully re-serializes tar data
 - [Issue #041: Remove Duplicate friend Declaration in TarEntryInputStream](issues/041-remove-duplicate-friend-declaration.md) - Remove duplicate friend class declaration (trivial 1-line fix)
 - [Issue #042: Document PrivateTag Factory Pattern](issues/042-document-privatetag-factory-pattern.md) - Add technical documentation and update code comment for PrivateTag pattern
-- [Issue #043: Fix /create-issue Skill - Prevent Implementation During Discussion](issues/043-fix-create-issue-implementation-during-discussion.md) - Fix skill to only create issue documentation, not implement the work; ask questions one-by-one
 - [Issue #044: Use Standard Erase-Remove Idiom in TarFile](issues/044-use-erase-remove-idiom-in-tarfile.md) - Replace verbose erase-remove pattern with standard C++ idiom (remove unnecessary if check)
-- [Issue #045: Add Approval Workflow to /create-issue Skill](issues/045-add-approval-workflow-to-create-issue.md) - Add 5-step workflow (Explore→Discuss→Summarize→Approve→Create) with plan detail options
-- [Issue #046: Update Dependencies After Each Issue in /create-issue](issues/046-update-dependencies-after-each-issue-in-create-issue.md) - Add automatic dependency tracking to update Quick dependencies and issue metadata after creating each issue
 - [Issue #047: Extract Duplicate Entry Deduplication Logic in TarFile](issues/047-extract-duplicate-entry-deduplication-logic.md) - Extract duplicated deduplication logic from add_regular_entry/add_symlink_entry into helper function
 - [Issue #048: Extract Platform-Specific tmpfile Helper Function](issues/048-extract-platform-specific-tmpfile-helper.md) - Extract duplicated platform-specific tmpfile creation code into reusable helper function
-- [Issue #049: Add Sub-topic Breakdown Workflow to /create-issue](issues/049-add-subtopic-breakdown-workflow-to-create-issue.md) - Add structured workflow for breaking down complex topics into manageable sub-topics with automatic task creation
 - [Issue #050: Standardize TarFile Factory Method Naming](issues/050-standardize-tarfile-factory-method-naming.md) - Rename factory methods to follow consistent "create_from_X" pattern for better discoverability
 - [Issue #051: Document Complex TarFile Factory Methods](issues/051-document-complex-tarfile-factory-methods.md) - Add comprehensive comments explaining mmap strategy, platform differences, and fallback logic in complex factory methods
 - [Issue #052: Replace TarFile mem_stream_ Member with Helper Function](issues/052-replace-tarfile-memstream-member-with-helper.md) - Replace redundant mem_stream_ cached member with inline get_mem_stream() helper function
@@ -80,12 +74,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
 _(Max 5 items, deleted files deleted)_
 
+- **Issue #043: Fix /create-issue Skill - Prevent Implementation During Discussion** - PR #107 - Added explicit rules to prevent AI from implementing work during issue creation (should only create documentation)
+- **Issue #045: Add Approval Workflow to /create-issue Skill** - PR #107 - Added 5-step workflow (Explore→Discuss→Summarize→Approve→Create) with plan detail options
+- **Issue #046: Update Dependencies After Each Issue in /create-issue** - PR #107 - Added automatic dependency tracking to update Quick dependencies and issue metadata after creating each issue
+- **Issue #049: Add Sub-topic Breakdown Workflow to /create-issue** - PR #107 - Added structured workflow for breaking down complex topics into manageable sub-topics with automatic task creation
 - **Issue #015: Move version info to ContextProto** - PR #105 - Moved AllVersionInfoProto from ConfigProto to ContextProto (version metadata belongs in persisted ContextProto, not runtime-only ConfigProto)
-- **Issue #005: Move cache_key to ContextProto** - PR #102 - Moved cache_key from ConfigProto to ContextProto (cache metadata belongs in persisted ContextProto, not runtime-only ConfigProto)
-- **Issue #023: Migrate v1 to v2 Execution Provider API** - PR #TBD - Migrated from AppendExecutionProvider_VitisAI to AppendExecutionProvider_V2, deleted unused common/initialize_morphizen.hpp
-- **Issue #021: Remove cache_file_use_cache_key_prefix_** - PR #87 - Always use cache_key prefix, remove flag (~20-25 LOC)
-- **Issue #016: Remove dirty_hack_for_model_clone_external_data_threshold** - PR #85
-- **Issue #004: Remove encryption_key Copying** - PR #82 - Removed encryption_key from ConfigProto, read from provider_options (security improvement)
 
 ---
 
