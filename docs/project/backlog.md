@@ -54,7 +54,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 - [Issue #038: Document Lazy Symlink Resolution const_cast](issues/038-document-lazy-symlink-const-cast.md) - Add comprehensive documentation explaining intentional const_cast for write-once lazy initialization
 - [Issue #039: Fix Typos and Outdated Comments in TarFile](issues/039-fix-tarfile-typos-and-outdated-comments.md) - Fix outdated renaming comment, typos, incorrect FIXME, and remove unused parameter
 - [Issue #040: Remove Legacy tar_ball.cpp/hpp Re-Serialization](issues/040-remove-legacy-tar-ball-reserialization.md) - Remove ~750 lines of legacy TarWriter/TarReader code that wastefully re-serializes tar data
-- [Issue #041: Remove Duplicate friend Declaration in TarEntryInputStream](issues/041-remove-duplicate-friend-declaration.md) - Remove duplicate friend class declaration (trivial 1-line fix)
 - [Issue #042: Document PrivateTag Factory Pattern](issues/042-document-privatetag-factory-pattern.md) - Add technical documentation and update code comment for PrivateTag pattern
 - [Issue #044: Use Standard Erase-Remove Idiom in TarFile](issues/044-use-erase-remove-idiom-in-tarfile.md) - Replace verbose erase-remove pattern with standard C++ idiom (remove unnecessary if check)
 - [Issue #047: Extract Duplicate Entry Deduplication Logic in TarFile](issues/047-extract-duplicate-entry-deduplication-logic.md) - Extract duplicated deduplication logic from add_regular_entry/add_symlink_entry into helper function
@@ -73,11 +72,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
 _(Max 5 items, deleted files deleted)_
 
+- **Issue #041: Remove Duplicate friend Declaration in TarEntryInputStream** - PR #114 - Removed duplicate friend class declaration (trivial 1-line cleanup)
 - **Issue #043: Fix /create-issue Skill - Prevent Implementation During Discussion** - PR #107 - Added explicit rules to prevent AI from implementing work during issue creation (should only create documentation)
 - **Issue #045: Add Approval Workflow to /create-issue Skill** - PR #107 - Added 5-step workflow (Explore→Discuss→Summarize→Approve→Create) with plan detail options
 - **Issue #046: Update Dependencies After Each Issue in /create-issue** - PR #107 - Added automatic dependency tracking to update Quick dependencies and issue metadata after creating each issue
 - **Issue #049: Add Sub-topic Breakdown Workflow to /create-issue** - PR #107 - Added structured workflow for breaking down complex topics into manageable sub-topics with automatic task creation
-- **Issue #015: Move version info to ContextProto** - PR #105 - Moved AllVersionInfoProto from ConfigProto to ContextProto (version metadata belongs in persisted ContextProto, not runtime-only ConfigProto)
 
 ---
 

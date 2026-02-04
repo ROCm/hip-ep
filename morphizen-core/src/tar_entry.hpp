@@ -120,7 +120,6 @@ private:
   std::unique_ptr<TarEntryInputStreamBuffer> buf_;
   MemStream<MemFile>* mem_buf_;
   friend class TarFile;
-  friend class TarFile;
 };
 // TarEntryOutputStream is used to write a tar entry to a tar file.
 class TarEntryOutputStream : public std::ostream {
