@@ -8,11 +8,8 @@
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
 #include "hipdnn.pb.h"
-#include <filesystem>
-#include <fstream>
 #include <glog/logging.h>
 #include <memory>
-#include <nlohmann/json.hpp>
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_HIPDNN, "0")
 DEF_ENV_PARAM(MORPHIZEN_MAX_FUSED_SUBGRAPH_NUM, "65535")
@@ -21,26 +18,6 @@ DEF_ENV_PARAM(MORPHIZEN_MAX_FUSED_SUBGRAPH_NUM, "65535")
 namespace {
 using namespace morphizen;
 using namespace morphizen_cxx;
-
-//=============================================================================
-// Helper Functions (MIOpen version)
-//=============================================================================
-
-// Save JSON metadata to file
-void SaveMetadataToFile(const nlohmann::json& metadata, 
-                        const std::string& filepath) {
-  std::ofstream file(filepath);
-  if (!file) {
-    throw std::runtime_error("Failed to open file for writing: " + filepath);
-  }
-  
-  file << metadata.dump(2);  // Pretty print with 2-space indent
-  file.close();
-  
-  if (!file.good()) {
-    throw std::runtime_error("Failed to write metadata to file: " + filepath);
-  }
-}
 
 //=============================================================================
 // Operation Support Checking (MIOpen version)
@@ -118,14 +95,21 @@ static bool IsSupportedOp(const Node& node) {
 // Metadata Generation (MIOpen version - replaces graph serialization)
 //=============================================================================
 
-// Generate Conv metadata and save to JSON file
+// Helper to add shape to proto
+void AddShapeToProto(hipdnn::TensorShape* shape_proto, const std::vector<int64_t>& shape) {
+  for (auto dim : shape) {
+    shape_proto->add_dims(dim);
+  }
+}
+
+// Generate Conv metadata directly into proto
 bool GenerateConvMetadata(
     const Node& conv_node,
     const NodeArgConstRef& input_ref,
     const NodeArgConstRef& weight_ref,
     const NodeArgConstRef& output_ref,
     std::vector<std::string>& constant_names,
-    std::string& out_filename) {
+    hipdnn::HipdnnParamProto& out_proto) {
   try {
     MY_LOG(1) << "Generating Conv metadata (MIOpen)";
     
@@ -192,39 +176,36 @@ bool GenerateConvMetadata(
       }
     }
     
-    // Build JSON metadata (format expected by custom_op.cpp)
-    nlohmann::json metadata;
-    metadata["op_type"] = "Conv";
-    metadata["version"] = "miopen_1.0";
+    // Build proto directly
+    out_proto.set_op_type("Conv");
+    out_proto.set_version("miopen_1.0");
     
-    // Shapes as arrays
-    metadata["input_shapes"] = nlohmann::json::array();
-    metadata["input_shapes"].push_back(*x_shape);
-    metadata["input_shapes"].push_back(*w_shape);
+    // Input shapes
+    AddShapeToProto(out_proto.add_input_shapes(), *x_shape);
+    AddShapeToProto(out_proto.add_input_shapes(), *w_shape);
     if (has_bias) {
-      metadata["input_shapes"].push_back(b_shape_vec);
+      AddShapeToProto(out_proto.add_input_shapes(), b_shape_vec);
     }
     
-    metadata["output_shapes"] = nlohmann::json::array();
-    metadata["output_shapes"].push_back(*y_shape);
+    // Output shapes
+    AddShapeToProto(out_proto.add_output_shapes(), *y_shape);
     
-    // Data types as arrays
-    metadata["input_data_types"] = nlohmann::json::array();
-    metadata["input_data_types"].push_back(x_dtype);
-    metadata["input_data_types"].push_back(w_dtype);
+    // Input data types
+    out_proto.add_input_data_types(x_dtype);
+    out_proto.add_input_data_types(w_dtype);
     if (has_bias) {
-      metadata["input_data_types"].push_back(node_arg_get_element_type(*inputs[2].node_arg));
+      out_proto.add_input_data_types(node_arg_get_element_type(*inputs[2].node_arg));
     }
     
-    metadata["output_data_types"] = nlohmann::json::array();
-    metadata["output_data_types"].push_back(y_dtype);
+    // Output data types
+    out_proto.add_output_data_types(y_dtype);
     
-    // Conv attributes (directly at top level)
-    metadata["pads"] = pads_vec;
-    metadata["strides"] = strides_vec;
-    metadata["dilations"] = dilations_vec;
-    metadata["group"] = group;
-    metadata["has_bias"] = has_bias;
+    // Conv attributes
+    for (auto p : pads_vec) out_proto.add_pads(p);
+    for (auto s : strides_vec) out_proto.add_strides(s);
+    for (auto d : dilations_vec) out_proto.add_dilations(d);
+    out_proto.set_group(group);
+    out_proto.set_has_bias(has_bias);
     
     // Store constant names for custom op
     constant_names.push_back(node_arg_get_name(weight_ref));  // Weight
@@ -232,13 +213,7 @@ bool GenerateConvMetadata(
       constant_names.push_back(node_arg_get_name(*inputs[2].node_arg));  // Bias
     }
     
-    // Generate filename
-    out_filename = "hipdnn_meta_" + node_arg_get_name(output_ref) + ".json";
-    
-    // Save metadata
-    SaveMetadataToFile(metadata, out_filename);
-    
-    MY_LOG(1) << "Saved metadata to: " << out_filename;
+    MY_LOG(1) << "Generated Conv metadata proto";
     
     return true;
     
@@ -298,8 +273,8 @@ struct Level1HipDnn {
       auto weight_data = NodeArgConstRef::from_node_arg(ort_graph, *conv_inputs[1].node_arg);
       auto output_data = NodeArgConstRef::from_node_arg(ort_graph, *conv_output_node_args[0]);
       
-      // Generate metadata (MIOpen version)
-      std::string metadata_filename;
+      // Generate metadata directly into proto
+      hipdnn::HipdnnParamProto hipdnn_param;
       std::vector<std::string> constant_names;
       bool success = GenerateConvMetadata(
           *node, 
@@ -307,7 +282,7 @@ struct Level1HipDnn {
           weight_data,
           output_data,
           constant_names,
-          metadata_filename);
+          hipdnn_param);
       
       if (!success) {
         MY_LOG(1) << "Failed to generate metadata, skipping fusion";
@@ -368,12 +343,7 @@ struct Level1HipDnn {
       MY_LOG(1) << "  meta_def inputs: " << meta_def->inputs_size();
       MY_LOG(1) << "  meta_def constants: " << meta_def->constant_initializers_size();
       
-      // Create proto with metadata filename only
-      // No need to save constant data files - all inputs come via ctx.GetInput()
-      auto hipdnn_param = hipdnn::HipdnnParamProto();
-      hipdnn_param.set_graph_file_name(metadata_filename);
-      
-      // Serialize proto to JSON
+      // Serialize proto to JSON (proto already populated by GenerateConvMetadata)
       auto hipdnn_json_str = std::string();
       auto status = google::protobuf::util::MessageToJsonString(
           hipdnn_param, &hipdnn_json_str);
