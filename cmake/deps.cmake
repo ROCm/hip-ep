@@ -4,39 +4,6 @@
 ##
 include(FetchContent)
 
-# Read and parse deps.txt for dependency version management
-file(STRINGS ${CMAKE_CURRENT_LIST_DIR}/deps.txt MORPHIZEN_DEPS_LIST)
-file(READ "${CMAKE_CURRENT_LIST_DIR}/dep.h.inc.in" MORPHIZEN_DEP_H_INC_IN)
-set(MORPHIZEN_DEP_H_INC "")
-
-foreach(MORPHIZEN_DEP IN LISTS MORPHIZEN_DEPS_LIST)
-  # Lines start with "#" are comments
-  if(NOT MORPHIZEN_DEP MATCHES "^#")
-    message(STATUS "MORPHIZEN_DEP = ${MORPHIZEN_DEP}")
-    # The first column is name
-    list(POP_FRONT MORPHIZEN_DEP MORPHIZEN_DEP_NAME)
-    # The second column is URL
-    list(POP_FRONT MORPHIZEN_DEP MORPHIZEN_DEP_URL)
-    set(DEP_URL_${MORPHIZEN_DEP_NAME} ${MORPHIZEN_DEP_URL})
-    # The third column is SHA1 hash value or Git tag
-    set(DEP_TAG_${MORPHIZEN_DEP_NAME} ${MORPHIZEN_DEP})
-    
-    # Determine if this is a Git repository
-    if(MORPHIZEN_DEP_URL MATCHES "\\.git$")
-      set(DEP_IS_GIT_${MORPHIZEN_DEP_NAME} TRUE)
-      message(STATUS "  -> Git repository: ${MORPHIZEN_DEP_URL} @ ${MORPHIZEN_DEP}")
-    else()
-      set(DEP_IS_GIT_${MORPHIZEN_DEP_NAME} FALSE)
-      set(DEP_SHA1_${MORPHIZEN_DEP_NAME} ${MORPHIZEN_DEP})
-      message(STATUS "  -> Archive: ${MORPHIZEN_DEP_URL} (SHA1: ${MORPHIZEN_DEP})")
-    endif()
-    
-    string(CONFIGURE "${MORPHIZEN_DEP_H_INC_IN}" _tmp @ONLY)
-    string(APPEND MORPHIZEN_DEP_H_INC "${_tmp}")
-  endif()
-endforeach()
-
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/morphizen_deps.inc.h" "${MORPHIZEN_DEP_H_INC}")
 
 message(STATUS "Configuring LLVM/MLIR for onnx-hipdnn-ep")
 
@@ -44,29 +11,29 @@ message(STATUS "Configuring LLVM/MLIR for onnx-hipdnn-ep")
 set(LLVM_ENABLE_PROJECTS "mlir" CACHE STRING "LLVM projects to build")
 set(LLVM_TARGETS_TO_BUILD "host" CACHE STRING "LLVM targets to build")
 set(LLVM_ENABLE_ASSERTIONS ON CACHE BOOL "Enable LLVM assertions")
-set(LLVM_ENABLE_RTTI OFF CACHE BOOL "Enable RTTI in LLVM")
+set(LLVM_ENABLE_RTTI OFF CACHE BOOL "Disable RTTI in LLVM")
 set(LLVM_ENABLE_LIBEDIT OFF CACHE BOOL "Enable libedit in LLVM")
 set(LLVM_BUILD_TOOLS ON CACHE BOOL "Build LLVM tools")
-set(LLVM_INSTALL_UTILS ON CACHE BOOL "Install LLVM utilities")
-set(LLVM_INCLUDE_TESTS ON CACHE BOOL "Build LLVM tests")
+set(LLVM_INSTALL_UTILS OFF CACHE BOOL "Install LLVM utilities")
+set(LLVM_INCLUDE_TESTS OFF CACHE BOOL "Build LLVM tests")
 set(LLVM_DISABLE_ASSEMBLY_FILES OFF CACHE BOOL "disable assembly")
-set(ZLIB_USE_STATIC_LIBS OFF CACHE BOOL "Use static zlib")
+set(LLVM_ENABLE_ZLIB OFF CACHE BOOL "Enable zlib compression")
 set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "Enable zstd compression")
 
-# LLVM commit hash and URL are now managed in deps.txt
-# These variables are set by deps.cmake parsing logic
-# DEP_URL_llvm and DEP_TAG_llvm are defined from deps.txt
+# Try to find MLIR first (MLIR implies LLVM exists)
+# This prevents importing incomplete LLVM installations (e.g., LLVM without MLIR)
+find_package(MLIR QUIET CONFIG)
 
-# Try to find pre-installed LLVM/MLIR first
-#find_package(LLVM QUIET CONFIG)
-#find_package(MLIR QUIET CONFIG)
-
-if(LLVM_FOUND AND MLIR_FOUND)
+if(MLIR_FOUND)
+  # MLIR found, now find LLVM (which must exist if MLIR exists)
+  find_package(LLVM REQUIRED CONFIG)
   message(STATUS "Found pre-installed LLVM and MLIR")
   message(STATUS "LLVM_DIR: ${LLVM_DIR}")
   message(STATUS "MLIR_DIR: ${MLIR_DIR}")
   set(MORPHIZEN_LLVM_PREINSTALLED ON CACHE BOOL "Using pre-installed LLVM" FORCE)
 else()
+  # MLIR not found, build LLVM+MLIR from source
+  # Do NOT call find_package(LLVM) to avoid importing incomplete LLVM installations
   message(STATUS "LLVM/MLIR not found in CMAKE_PREFIX_PATH, will use FetchContent and build inline")
   set(MORPHIZEN_LLVM_PREINSTALLED OFF CACHE BOOL "Using FetchContent LLVM" FORCE)
   
@@ -88,15 +55,16 @@ else()
     FetchContent_Declare(
       llvm-project
       SOURCE_DIR ${LOCAL_LLVM}/..
+      EXCLUDE_FROM_ALL
       SOURCE_SUBDIR llvm)
   else()
     message(STATUS "Cannot find LLVM in local directories")
-    message(STATUS "Fetching LLVM source from deps.txt: ${DEP_URL_llvm} @ ${DEP_TAG_llvm}")
+    message(STATUS "Fetching LLVM source from GitHub")
     message(STATUS "WARNING: This will download and build LLVM, which may take a long time")
     FetchContent_Declare(
       llvm-project
-      GIT_REPOSITORY ${DEP_URL_llvm}
-      GIT_TAG ${DEP_TAG_llvm}
+      GIT_REPOSITORY https://github.com/llvm/llvm-project.git
+      GIT_TAG f8cb7987c64dcffb72414a40560055cb717dbf74
       GIT_SUBMODULES_RECURSE
       DOWNLOAD_EXTRACT_TIMESTAMP TRUE
       EXCLUDE_FROM_ALL
@@ -140,6 +108,7 @@ endif()
 
 message(STATUS "LLVM/MLIR configuration complete")
 
+# Function to get git version info for a component
 function(vaip_add_version_info)
   set(options)
   set(oneValueArgs COMPONENT DIR)
@@ -167,6 +136,7 @@ function(vaip_add_version_info)
   message(STATUS "FindPackage Version info: ${ARG_COMPONENT}=${TMP_GIT_COMMIT} ${TMP_VERSION}")
 endfunction()
 
+# Collect version info for onnx-hipdnn-ep
 set(VERSION_LIST
     onnx-hipdnn-ep=onnx-hipdnn-ep)
 set(VERSION_INFO "")
@@ -175,7 +145,7 @@ foreach(COMP_PAIR IN LISTS VERSION_LIST)
   string(SUBSTRING "${COMP_PAIR}" 0 ${pos} COMP)
   math(EXPR COMP_BEG "${pos} + 1")
   string(SUBSTRING "${COMP_PAIR}" ${COMP_BEG} -1 DIR)
-  set(BUILD_DIR "${CMAKE_SOURCE_DIR}/../${DIR}/") # already built source dir
+  set(BUILD_DIR "${CMAKE_SOURCE_DIR}/../${DIR}/")
 
   string(TOLOWER COMP ${COMP})
   set(FETCH_SRC_DIR "${${COMP}_SOURCE_DIR}")
@@ -192,58 +162,27 @@ foreach(COMP_PAIR IN LISTS VERSION_LIST)
   unset(COMP_GIT_COMMIT)
   unset(COMP_VERSION)
 endforeach()
-## if morphizen source is checked out from git in the parent directory, we use the working directory from there.
-find_path(MORPHIZEN_CMAKE_LIST_TXT_IN_LOCAL_WORKING_DIR
-  NAMES CMakeLists.txt
-  PATHS "${CMAKE_SOURCE_DIR}/../morphizen"
-  "${CMAKE_SOURCE_DIR}/../MorphiZen"
-  # for CI checker, MorphiZen is checkout by default in the parent directory
-  "${CMAKE_SOURCE_DIR}/.."
-  NO_DEFAULT_PATH)
-if(MORPHIZEN_CMAKE_LIST_TXT_IN_LOCAL_WORKING_DIR)
-  message(STATUS "found morphizen source in local working directory")
-  message(STATUS "MorphiZen SOURCE_DIR ${MORPHIZEN_CMAKE_LIST_TXT_IN_LOCAL_WORKING_DIR}")
-  FetchContent_Declare(
-   morphizen
-   SOURCE_DIR ${MORPHIZEN_CMAKE_LIST_TXT_IN_LOCAL_WORKING_DIR})
-else()
-  message(STATUS "Fetching morphizen from deps.txt: ${DEP_URL_morphizen} @ ${DEP_TAG_morphizen}")
-  FetchContent_Declare(
-  morphizen
-  GIT_REPOSITORY ${DEP_URL_morphizen}
-  GIT_TAG ${DEP_TAG_morphizen}
-  GIT_SUBMODULES "3rd-party/hash-library"
-  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-  )
+
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/version.txt" "${VERSION_INFO}")
+set(MORPHIZEN_VERSION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
+
+## Use morphizen from git submodule
+if(NOT EXISTS "${CMAKE_SOURCE_DIR}/3rd-party/morphizen/CMakeLists.txt")
+  message(FATAL_ERROR "MorphiZen submodule not found. Run: git submodule update --init --recursive")
 endif()
+message(STATUS "Using MorphiZen from git submodule: 3rd-party/morphizen")
+
 set(morphizen_ENABLE_UNIT_TEST ON CACHE BOOL "enable morphizen unit test or not")
 if(morphizen_ENABLE_UNIT_TEST)
   include(CTest)
   enable_testing()
 endif()
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/version.txt" "${VERSION_INFO}")
-set(MORPHIZEN_VERSION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
 
-# Force static linking for glog to avoid runtime library conflicts in Debug mode
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
-set(GLOG_BUILD_SHARED OFF CACHE BOOL "Build glog shared library" FORCE)
+set(MORPHIZEN_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/etc/morphizen_config.json")
 
-# Enable ORT bridge and MLIR backend for morphizen
-set(morphizen_ENABLE_ORT_BRIDGE ON CACHE BOOL "Enable ORT bridge" FORCE)
-set(morphizen_ENABLE_MLIR_BACKEND ON CACHE BOOL "Enable MLIR backend" FORCE)
-set(morphizen_ENABLE_ONNX_BACKEND OFF CACHE BOOL "Enable ONNX backend" FORCE)
-set(morphizen_ENABLE_ONNX_SCHEMA_SUPPORT OFF CACHE BOOL "Enable ONNX schema support" FORCE)
-set(morphizen_ENABLE_RYZENAI_BIN_METADATA OFF CACHE BOOL "Disable ryzenai_bin_metadata submodule for version resource generation" FORCE)
-set(morphizen_ENABLE_BOOST OFF CACHE BOOL "Disable Boost dependency" FORCE)
-set(morphizen_OUTPUT_NAME "onnxruntime_morphizen_ep" CACHE STRING "Set output name of Morphizen Library" FORCE)
-set(MORPHIZEN_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/etc/morphizen_config.json" CACHE FILEPATH "Path to morphizen config file" FORCE)
-
-# Silence MLIR std::complex<APFloat> deprecation warning (MSVC)
-if(MSVC)
-  add_compile_definitions(_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING)
-endif()
-
-# Override the output name to use onnxruntime_morphizen_ep instead of onnxruntime_vitisai_ep
+# MorphiZen options (only non-default values)
+set(morphizen_ENABLE_RYZENAI_BIN_METADATA OFF CACHE BOOL "Disable ryzenai_bin_metadata submodule" FORCE)
 set(morphizen_OUTPUT_NAME "onnxruntime_morphizen_ep" CACHE STRING "Output name of MorphiZen library" FORCE)
 
-FetchContent_MakeAvailable(morphizen)
+# Add morphizen subdirectory (after all options are set)
+add_subdirectory(3rd-party/morphizen)
