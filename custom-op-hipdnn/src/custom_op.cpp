@@ -149,11 +149,15 @@ void HipdnnCustomOp::BuildAndCompileMIOpen() {
   w_shape_ = ProtoShapeToVector(hipdnn_proto_.input_shapes(1));
   y_shape_ = ProtoShapeToVector(hipdnn_proto_.output_shapes(0));
   
-  // Extract convolution parameters from proto
-  std::vector<int64_t> pads(hipdnn_proto_.pads().begin(), hipdnn_proto_.pads().end());
-  std::vector<int64_t> strides(hipdnn_proto_.strides().begin(), hipdnn_proto_.strides().end());
-  std::vector<int64_t> dilations(hipdnn_proto_.dilations().begin(), hipdnn_proto_.dilations().end());
-  has_bias_ = hipdnn_proto_.has_bias();
+  // Extract convolution parameters from proto (using oneof node_attrs)
+  if (!hipdnn_proto_.has_conv_attrs()) {
+    throw std::runtime_error("Missing conv_attrs in proto for Conv operation");
+  }
+  const auto& conv_attrs = hipdnn_proto_.conv_attrs();
+  std::vector<int64_t> pads(conv_attrs.pads().begin(), conv_attrs.pads().end());
+  std::vector<int64_t> strides(conv_attrs.strides().begin(), conv_attrs.strides().end());
+  std::vector<int64_t> dilations(conv_attrs.dilations().begin(), conv_attrs.dilations().end());
+  has_bias_ = conv_attrs.has_bias();
   
   // Extract data types from proto
   if (hipdnn_proto_.input_data_types_size() < 1) {
