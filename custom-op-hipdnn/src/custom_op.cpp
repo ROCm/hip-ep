@@ -9,16 +9,13 @@
 
 #include <glog/logging.h>
 #include <sstream>
-#include <fstream>
 #include <morphizen/env_config.hpp>
 #include "./custom_op.hpp"
 #include "google/protobuf/util/json_util.h"
 #include <cstdlib>
-#include <filesystem>
 #include <thread>
 #include <unordered_set>
 #include <morphizen/my_ort.h>
-#include <nlohmann/json.hpp>
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_HIPDNN, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_HIPDNN) >= n)
@@ -86,7 +83,7 @@ HipdnnCustomOp::HipdnnCustomOp(std::shared_ptr<const PassContext> context,
     return;
   }
   
-  LOG(INFO) << "Metadata file: " << hipdnn_proto_.graph_file_name();
+  MY_LOG(1) << "Proto op_type: " << hipdnn_proto_.op_type();
   
   // Create MIOpen handle
   MIOPEN_THROW_IF_ERROR(miopenCreate(&miopen_handle_));
@@ -128,46 +125,41 @@ HipdnnCustomOp::~HipdnnCustomOp() {
   }
 }
 
+// Helper to convert proto TensorShape to vector
+static std::vector<int64_t> ProtoShapeToVector(const hipdnn::TensorShape& shape) {
+  return std::vector<int64_t>(shape.dims().begin(), shape.dims().end());
+}
+
 void HipdnnCustomOp::BuildAndCompileMIOpen() {
   MY_LOG(1) << "=== Building MIOpen kernel ===";
   
-  // Load JSON metadata from file
-  std::string metadata_file = hipdnn_proto_.graph_file_name();
-  std::ifstream file(metadata_file);
-  if (!file) {
-    throw std::runtime_error("Failed to open metadata file: " + metadata_file);
-  }
-  
-  nlohmann::json j;
-  try {
-    file >> j;
-  } catch (const std::exception& ex) {
-    throw std::runtime_error("Failed to parse JSON metadata: " + 
-                             std::string(ex.what()));
-  }
-  
-  MY_LOG(1) << "Loaded metadata from: " << metadata_file;
-  
-  // Extract metadata
-  std::string op_type = j["op_type"];
+  // Read metadata directly from proto
+  const std::string& op_type = hipdnn_proto_.op_type();
   if (op_type != "Conv") {
     throw std::runtime_error("Unsupported operation type: " + op_type);
   }
   
-  // Extract shapes
-  x_shape_ = j["input_shapes"][0].get<std::vector<int64_t>>();
-  w_shape_ = j["input_shapes"][1].get<std::vector<int64_t>>();
-  y_shape_ = j["output_shapes"][0].get<std::vector<int64_t>>();
+  MY_LOG(1) << "Op type: " << op_type << ", version: " << hipdnn_proto_.version();
   
-  // Extract convolution parameters
-  std::vector<int64_t> pads = j["pads"].get<std::vector<int64_t>>();
-  std::vector<int64_t> strides = j["strides"].get<std::vector<int64_t>>();
-  std::vector<int64_t> dilations = j["dilations"].get<std::vector<int64_t>>();
-  has_bias_ = j["has_bias"];
+  // Extract shapes from proto
+  if (hipdnn_proto_.input_shapes_size() < 2 || hipdnn_proto_.output_shapes_size() < 1) {
+    throw std::runtime_error("Missing required shapes in proto");
+  }
+  x_shape_ = ProtoShapeToVector(hipdnn_proto_.input_shapes(0));
+  w_shape_ = ProtoShapeToVector(hipdnn_proto_.input_shapes(1));
+  y_shape_ = ProtoShapeToVector(hipdnn_proto_.output_shapes(0));
   
-  // Extract data types
-  std::vector<int> input_dtypes = j["input_data_types"].get<std::vector<int>>();
-  data_type_ = ToMIOpenDataType(input_dtypes[0]);
+  // Extract convolution parameters from proto
+  std::vector<int64_t> pads(hipdnn_proto_.pads().begin(), hipdnn_proto_.pads().end());
+  std::vector<int64_t> strides(hipdnn_proto_.strides().begin(), hipdnn_proto_.strides().end());
+  std::vector<int64_t> dilations(hipdnn_proto_.dilations().begin(), hipdnn_proto_.dilations().end());
+  has_bias_ = hipdnn_proto_.has_bias();
+  
+  // Extract data types from proto
+  if (hipdnn_proto_.input_data_types_size() < 1) {
+    throw std::runtime_error("Missing input data types in proto");
+  }
+  data_type_ = ToMIOpenDataType(hipdnn_proto_.input_data_types(0));
   
   MY_LOG(1) << "Op: " << op_type
             << ", X=" << x_shape_.size() << "D"
@@ -312,10 +304,9 @@ void HipdnnCustomOp::BuildAndCompileMIOpen() {
   if (has_bias_) {
     MIOPEN_THROW_IF_ERROR(miopenCreateTensorDescriptor(&b_desc_));
     
-    // Get bias shape from metadata
-    if (j["input_shapes"].size() >= 3) {
-      auto b_shape_from_meta = j["input_shapes"][2].get<std::vector<int64_t>>();
-      b_shape_ = b_shape_from_meta;
+    // Get bias shape from proto
+    if (hipdnn_proto_.input_shapes_size() >= 3) {
+      b_shape_ = ProtoShapeToVector(hipdnn_proto_.input_shapes(2));
     } else {
       // Fallback: use output channels as 1D
       b_shape_ = {y_shape_[1]};
