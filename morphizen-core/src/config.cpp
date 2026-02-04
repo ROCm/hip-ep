@@ -56,7 +56,7 @@ Config::Config(const std::string& file) {
   MY_LOG(1) << "text = " << text;
 }
 
-void Config::add_version_info(ConfigProto& proto,
+void Config::add_version_info(ContextProto& proto,
                               const std::string& package_name,
                               const std::string& commit_id,
                               const std::string& version_id) {
@@ -68,7 +68,7 @@ void Config::add_version_info(ConfigProto& proto,
   return;
 }
 
-void Config::add_version_info(ConfigProto& proto) {
+void Config::add_version_info(ContextProto& proto) {
   using version_vec_tuple =
       std::vector<std::tuple<std::string, std::string, std::string>>;
   for (auto& info : version_vec_tuple{

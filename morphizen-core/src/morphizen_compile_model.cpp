@@ -619,7 +619,7 @@ create_ep_context_node(morphizen::ExecutionProviderConcrete* ep, int index) {
   attrs.add("enable_encryption", (int64_t)enable_encryption);
   // Always use cache_key prefix - only store the prefix itself
   attrs.add("cache_file_prefix", context.get_context_proto().cache_key());
-  auto& version_infos = context.get_config_proto().version();
+  auto& version_infos = context.get_context_proto().version();
   for (const auto& version_info : version_infos.version_infos()) {
     auto lib_name = "version_of_" + version_info.package_name();
     attrs.add(lib_name, version_info.version());

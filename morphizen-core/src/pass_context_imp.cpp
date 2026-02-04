@@ -88,8 +88,8 @@ std::unique_ptr<PassContextImp>
 PassContextImp::create_pass_context(const ConfigProto& config_proto1) {
   auto ret = std::make_unique<PassContextImp>();
   auto config_proto = ConfigProto(config_proto1);
-  Config::add_version_info(config_proto);
   ret->config_.Swap(&config_proto);
+  Config::add_version_info(ret->context_proto);
   ret->update_config_proto_root_field();
   return ret;
 }
@@ -1031,8 +1031,8 @@ void PassContextImp::create_tar_file_for_prebuild_cache(
       << "please check prebuild ep context generation";
 }
 void PassContextImp::print_version_info(const char* prefix) {
-  auto& config = get_config_proto();
-  for (auto version_info : config.version().version_infos()) {
+  auto& context = get_context_proto();
+  for (auto version_info : context.version().version_infos()) {
     LOG_VERBOSE(1) << prefix << version_info.package_name() << " ("
                    << version_info.version() << ") :" + version_info.commit();
   }
@@ -1055,8 +1055,8 @@ void PassContextImp::print_version_info(const char* prefix) {
   }
   for (auto& kv :
        // print sorted keys
-       std::map<std::string, std::string>(config.provider_options().begin(),
-                                          config.provider_options().end())) {
+       std::map<std::string, std::string>(config_.provider_options().begin(),
+                                          config_.provider_options().end())) {
     print_kv(3, "provider_options_in_config", kv);
   }
   if (target_proto_) {
@@ -1066,7 +1066,7 @@ void PassContextImp::print_version_info(const char* prefix) {
       print_kv(3, "provider_options_in_target_proto", kv);
     }
   }
-  for (auto& kv : config.session_configs()) {
+  for (auto& kv : config_.session_configs()) {
     LOG_VERBOSE(3) << "session_config: " << kv.first << " = " << kv.second;
   }
   auto all_po = get_all_provider_options();

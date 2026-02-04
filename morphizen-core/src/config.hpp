@@ -16,6 +16,7 @@
                                   // protobuf
 #endif
 #include "morphizen/config.pb.h"
+#include "morphizen/pass_context.pb.h"
 #ifdef _WIN32
 #  pragma warning(pop)
 #endif
@@ -31,8 +32,8 @@ public:
   static ConfigProto parse_from_string(const char* string);
   static void merge_config_proto(ConfigProto& config_proto,
                                  const char* json_config);
-  static void add_version_info(ConfigProto& config_proto);
-  static void add_version_info(ConfigProto& config_proto,
+  static void add_version_info(ContextProto& context_proto);
+  static void add_version_info(ContextProto& context_proto,
                                const std::string& package_name,
                                const std::string& commit_id,
                                const std::string& version_id);
