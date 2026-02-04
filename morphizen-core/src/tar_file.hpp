@@ -115,9 +115,10 @@ public:
   //
   // there could be many streams already opened for read.
   //
-  // if the filename already exists, the orinal entry will be renamed to a wired
-  // invisiable name,
-  // TODO: check if tar file header support delete flag.
+  // If the filename already exists, a new entry is appended to the tar file.
+  // When reading, the last entry with a given name takes precedence (standard
+  // TAR semantics). The tar file is append-only; existing entries are never
+  // modified.
   //
   // after the stream is closed, a new entries is append to the tar stream_.
   //
