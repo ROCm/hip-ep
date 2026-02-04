@@ -23,9 +23,6 @@
 
 namespace morphizen {
 class PassContext;
-void update_config_by_target(ConfigProto& proto,
-                             TargetProto* target_proto_in_pass_context,
-                             std::shared_ptr<PassContext> ctx);
 class Config {
 public:
   MORPHIZEN_DLL_SPEC
