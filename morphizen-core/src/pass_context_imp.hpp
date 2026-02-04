@@ -243,6 +243,11 @@ public:
   virtual std::map<std::string, std::string>
   get_all_provider_options() const override final;
 
+  // Compute the effective pass list for compilation.
+  // Combines ConfigProto.passes library with target-based selection.
+  // Returns local vector - passes are not stored as member variable.
+  std::vector<PassProto> compute_effective_passes() const;
+
 private:
   template <typename T1, typename T2>
   std::optional<std::string>

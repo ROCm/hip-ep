@@ -38,6 +38,9 @@ import "version.proto";
 import "google/protobuf/struct.proto";
 
 message ConfigProto {
+  // Library of all available passes.
+  // At runtime, target selection (TargetProto.pass) determines which passes to execute.
+  // This field is immutable after initialization - never use add_passes() at runtime.
   repeated PassProto passes = 1;
   reserved 2;
   reserved "cache_dir";

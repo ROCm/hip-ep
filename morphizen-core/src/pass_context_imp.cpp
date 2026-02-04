@@ -196,6 +196,32 @@ PassContextImp::get_all_provider_options() const {
   return ret;
 }
 
+std::vector<PassProto> PassContextImp::compute_effective_passes() const {
+  std::vector<PassProto> result;
+
+  // Build pass library map from ConfigProto.passes
+  std::unordered_map<std::string, PassProto> pass_map;
+  for (const auto& pass : config_.passes()) {
+    pass_map[pass.name()] = pass;
+  }
+
+  // Target-based pass selection
+  if (target_proto_) {
+    for (const auto& pass_name : target_proto_->pass()) {
+      auto iter = pass_map.find(pass_name);
+      CHECK(iter != pass_map.end())
+          << "Pass not found in library: " << pass_name;
+      result.push_back(iter->second);
+    }
+  }
+
+  // Note: Anonymous plugin passes are handled differently via
+  // IPass::create_pass() which now creates PassProto locally without mutating
+  // ConfigProto
+
+  return result;
+}
+
 template <typename T>
 void PassContextImp::get_all_provider_option_impl(
     std::map<std::string, std::string>& ret, const T& provider_options) const {

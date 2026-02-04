@@ -93,27 +93,9 @@ static TargetProto* get_target_proto(ConfigProto& proto,
   return ret;
 }
 
-static void remove_pass(ConfigProto& proto,
-                        std::unordered_map<std::string, PassProto>& pass_map) {
-  while (!proto.passes().empty()) {
-    auto& pass = proto.passes(proto.passes_size() - 1);
-    std::string name = pass.name();
-    pass_map[name] = pass;
-    proto.mutable_passes()->RemoveLast();
-  }
-}
-
-static void
-add_target_pass(ConfigProto& proto,
-                const std::unordered_map<std::string, PassProto>& pass_map,
-                const TargetProto* target_proto) {
-  for (auto pass : target_proto->pass()) {
-    auto iter = pass_map.find(pass);
-    CHECK(iter != pass_map.end()) << "Pass not found: " << pass;
-    auto new_pass = proto.add_passes();
-    new_pass->CopyFrom(iter->second);
-  }
-}
+// Removed: remove_pass() - obsolete after Issue #014 (compute_effective_passes)
+// Removed: add_target_pass() - obsolete after Issue #014
+// (compute_effective_passes)
 
 // Removed: update_target_compiler_atttr - depended on removed pass_dpu_param
 // and pass_vaiml_param fields
@@ -137,9 +119,12 @@ void update_config_by_target(ConfigProto& proto,
   CHECK(target_proto != nullptr)
       << "No valid target found: " << target << " logical error";
 
-  std::unordered_map<std::string, PassProto> pass_map;
-  remove_pass(proto, pass_map);
-  add_target_pass(proto, pass_map, target_proto);
+  // NOTE: Pass mutations removed - compute_effective_passes() handles pass
+  // selection now Lines 141-142 commented out as part of Issue #014 (Dynamic
+  // Pass Registration) This function will be removed entirely in Issue #017
+  // std::unordered_map<std::string, PassProto> pass_map;
+  // remove_pass(proto, pass_map);
+  // add_target_pass(proto, pass_map, target_proto);
   *target_proto_in_pass_context = *target_proto;
 }
 

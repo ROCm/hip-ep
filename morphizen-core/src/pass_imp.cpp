@@ -412,18 +412,19 @@ IPass::create_pass(std::shared_ptr<PassContext> context,
   auto context_ptr =
       std::dynamic_pointer_cast<morphizen::PassContextImp>(context);
   CHECK(context_ptr != nullptr);
-  auto pass_proto = context_ptr->config_.add_passes();
-  pass_proto->set_name("annonymous_pass");
-  pass_proto->set_plugin("<annonymous_plugin>");
-  return std::make_unique<Pass>(context_ptr, *pass_proto, pass_info);
+  // Build PassProto locally without mutating ConfigProto
+  PassProto pass_proto;
+  pass_proto.set_name("annonymous_pass");
+  pass_proto.set_plugin("<annonymous_plugin>");
+  return std::make_unique<Pass>(context_ptr, pass_proto, pass_info);
 }
 
-std::vector<std::shared_ptr<IPass>> IPass::create_passes(
-    std::shared_ptr<PassContext> context,
-    const google::protobuf::RepeatedPtrField<PassProto>& passes) {
+std::vector<std::shared_ptr<IPass>>
+IPass::create_passes(std::shared_ptr<PassContext> context,
+                     const std::vector<PassProto>& passes) {
   auto ret = std::vector<std::shared_ptr<IPass>>();
   ret.reserve(passes.size());
-  for (auto& pass_proto : passes) {
+  for (const auto& pass_proto : passes) {
     if (pass_proto.disabled()) {
       continue;
     }
