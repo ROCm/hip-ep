@@ -257,8 +257,10 @@ compile_onnx_model_morphizen_ep_with_options(
     const std::string& model_path, const onnxruntime::Graph& graph,
     const onnxruntime::ProviderOptions& options) {
   update_log_level(options);
+  std::map<std::string, std::string> empty_session_configs;
   return new std::vector<std::unique_ptr<morphizen::ExecutionProvider>>(
-      morphizen::compile_onnx_model_3(model_path, graph, options, nullptr));
+      morphizen::compile_onnx_model_3(model_path, graph, options,
+                                      empty_session_configs, nullptr));
 }
 
 MORPHIZEN_DLL_SPEC
@@ -273,16 +275,19 @@ compile_onnx_model_morphizen_ep_with_error_handling(
       func(status, error_code, error_message);
     }
   };
+  std::map<std::string, std::string> empty_session_configs;
   return new std::vector<std::unique_ptr<morphizen::ExecutionProvider>>(
       morphizen::compile_onnx_model_3(model_path, graph, options,
-                                      set_ort_status));
+                                      empty_session_configs, set_ort_status));
 }
 
 MORPHIZEN_DLL_SPEC
 std::vector<std::unique_ptr<morphizen::ExecutionProvider>>*
 compile_onnx_model_morphizen_ep_v4(
     const std::string& model_path, const onnxruntime::Graph& graph,
-    const onnxruntime::ProviderOptions& options, [[maybe_unused]] void* status,
+    const onnxruntime::ProviderOptions& options,
+    const std::map<std::string, std::string>& session_configs,
+    [[maybe_unused]] void* status,
     [[maybe_unused]] void (*func)(void*, int, const char*),
     const OrtLogger* ort_logger) {
   auto set_ort_status = [&](int error_code, const char* error_message) {
@@ -305,9 +310,9 @@ compile_onnx_model_morphizen_ep_v4(
   }
 
   return new std::vector<std::unique_ptr<morphizen::ExecutionProvider>>(
-      morphizen::compile_onnx_model_3_internal(model_path, graph, options,
-                                               std::move(logger_adapter),
-                                               set_ort_status));
+      morphizen::compile_onnx_model_3_internal(
+          model_path, graph, options, session_configs,
+          std::move(logger_adapter), set_ort_status));
 }
 
 MORPHIZEN_DLL_SPEC

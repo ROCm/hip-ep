@@ -7,6 +7,7 @@
 #include "./ir-converter.hpp"
 #include "morphizen/custom_op.h" // in onnxruntime/core/providers/morphizen/include
 #include "morphizen/morphizen-ort-api-ext.hpp"
+#include <map>
 
 namespace onnxruntime {
 struct OrtGraphWrapper;
@@ -101,6 +102,7 @@ private:
   // we have to hide the implementation by forward declaration.
   mutable my_ep_uptr_t execution_providers_;
   std::unordered_map<std::string, std::string> provider_options_;
+  std::map<std::string, std::string> session_configs_;
   bool enable_ep_context_;
 };
 struct MorphiZenEP_ComputeInfo : public OrtNodeComputeInfo {

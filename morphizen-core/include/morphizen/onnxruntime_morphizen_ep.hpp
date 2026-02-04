@@ -165,12 +165,11 @@ compile_onnx_model_morphizen_ep_with_options(
  * instances.
  */
 MORPHIZEN_DLL_SPEC std::vector<std::unique_ptr<morphizen::ExecutionProvider>>*
-compile_onnx_model_morphizen_ep_v4(const std::string& model_path,
-                                   const onnxruntime::Graph& graph,
-                                   const onnxruntime::ProviderOptions& options,
-                                   void* status,
-                                   void (*func)(void*, int, const char*),
-                                   const OrtLogger* ort_logger);
+compile_onnx_model_morphizen_ep_v4(
+    const std::string& model_path, const onnxruntime::Graph& graph,
+    const onnxruntime::ProviderOptions& options,
+    const std::map<std::string, std::string>& session_configs, void* status,
+    void (*func)(void*, int, const char*), const OrtLogger* ort_logger);
 
 /**
  * @brief Creates EPContxt Nodes for the MorphiZen Execution Provider.

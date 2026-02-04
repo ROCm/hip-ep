@@ -88,7 +88,8 @@ MorphiZenEP::~MorphiZenEP() {}
 
 void MorphiZenEP::update_provider_options_from_session_config(
     const OrtSessionOptions& session_options) {
-  MY_LOG(2) << "Updating provider options from session configuration";
+  MY_LOG(2) << "Extracting provider options and session configs from session "
+               "configuration";
 
   {
     OrtKeyValuePairs* kvps = nullptr;
@@ -102,21 +103,21 @@ void MorphiZenEP::update_provider_options_from_session_config(
     // Get keys and values from the config entries
     ort_api.GetKeyValuePairs(config_entries.get(), &keys, &values, &num_keys);
 
-    MY_LOG(2) << "Converting " << num_keys
-              << " provider options from session config entries";
+    MY_LOG(2) << "Processing " << num_keys << " config entries";
 
     const std::string morphizen_ep_prefix = "ep.morphizenexecutionprovider.";
-    const std::string ort_session_prefix = "ort_session_config.";
     for (size_t i = 0; i < num_keys; ++i) {
       if (keys[i] != nullptr && values[i] != nullptr) {
         std::string key_str(keys[i]);
         std::string value_str(values[i]);
         if (key_str.rfind(morphizen_ep_prefix, 0) == 0) {
+          // EP-specific options go to provider_options
           std::string option_name =
               key_str.substr(morphizen_ep_prefix.length());
           provider_options_[option_name] = value_str;
         } else {
-          provider_options_[ort_session_prefix + key_str] = value_str;
+          // Session configs stored separately (no prefix)
+          session_configs_[key_str] = value_str;
         }
       } else {
         MY_LOG(2) << "Skipping null key or value at index " << i
@@ -126,8 +127,8 @@ void MorphiZenEP::update_provider_options_from_session_config(
     }
 
     MY_LOG(2) << "Successfully processed " << num_keys
-              << " session config entries. Total provider options: "
-              << provider_options_.size();
+              << " entries. Provider options: " << provider_options_.size()
+              << ", Session configs: " << session_configs_.size();
   }
   // // List of session config keys that should be copied to provider options
   // // These control EP context behavior and optimization settings
@@ -323,7 +324,8 @@ MorphiZenEP::GetCapability(OrtGraphWrapper& graph_viewer,
   OrtStatus* status = nullptr;
   execution_providers_ =
       std::make_unique<my_ep_t>(compile_onnx_model_morphizen_ep_v4(
-          model_path.u8string(), graph, provider_options_, (void*)&status,
+          model_path.u8string(), graph, provider_options_, session_configs_,
+          (void*)&status,
           [](void* status, int code, const char* error_message) {
             OrtStatus** ort_status = static_cast<OrtStatus**>(status);
             *ort_status =

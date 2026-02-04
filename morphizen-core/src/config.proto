@@ -53,7 +53,8 @@ message ConfigProto {
   map<string, string> provider_options = 8;
   repeated TargetProto targets = 11; // if this is empty, run all passes
   string target = 12; // default proto, comma seperated
-  map<string, string> session_configs = 13 [json_name = "ort_session_config"];
+  reserved 13;
+  reserved "session_configs";
 }
 
 message TargetProto {
