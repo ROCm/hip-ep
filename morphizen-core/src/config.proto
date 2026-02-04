@@ -41,7 +41,8 @@ message ConfigProto {
   repeated PassProto passes = 1;
   reserved 2;
   reserved "cache_dir";
-  string cache_key = 3;
+  reserved 3;  // cache_key moved to ContextProto (Issue #005)
+  reserved "cache_key";
   AllVersionInfoProto version = 4;
   reserved 6;  // encryption_key removed - read from provider_options (Issue #004)
   reserved "encryption_key";

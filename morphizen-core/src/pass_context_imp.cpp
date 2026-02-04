@@ -132,7 +132,7 @@ std::filesystem::path PassContextImp::get_dump_directory() const {
       std::filesystem::path("/tmp");
 #endif
 
-  return temp_dir / "morphizen_dumps" / get_config_proto().cache_key();
+  return temp_dir / "morphizen_dumps" / get_context_proto().cache_key();
 }
 
 template <typename T1, typename T2>
@@ -472,7 +472,7 @@ PassContextImp::open_file_for_read(const std::string& filename) const {
 
 std::string
 PassContextImp::get_cache_filename(const std::string& filename) const {
-  auto cache_key = get_config_proto().cache_key();
+  auto cache_key = get_context_proto().cache_key();
   CHECK(!cache_key.empty()) << "cache_key required for cache file operations";
   return cache_key + "/" + filename;
 }
@@ -942,7 +942,7 @@ void PassContextImp::maybe_create_tar_file_for_write() {
 
     CHECK(stream->is_open())
         << "failed to open ep context file " << ep_context_binary_file;
-    CHECK(!get_config_proto().cache_key().empty())
+    CHECK(!get_context_proto().cache_key().empty())
         << "cache_key should be empty when using tar file";
     tar_file_ = TarFile::create(std::move(stream));
   } else {
@@ -1024,7 +1024,7 @@ void PassContextImp::create_tar_file_for_prebuild_cache(
     }
   }
   // Always use cache_key prefix - verify context.json exists with prefix
-  auto prefix = get_config_proto().cache_key();
+  auto prefix = get_context_proto().cache_key();
   CHECK(!prefix.empty()) << "cache_key required for prebuild cache";
   CHECK(tar_file_->has_file(prefix + "/context.json"))
       << "tar file does not have " << prefix << "/context.json, "
@@ -1045,7 +1045,7 @@ void PassContextImp::print_version_info(const char* prefix) {
                          << "******";
     }
   };
-  LOG_VERBOSE(1) << prefix << "cache_key: " << config.cache_key();
+  LOG_VERBOSE(1) << prefix << "cache_key: " << get_context_proto().cache_key();
   LOG_VERBOSE(1) << prefix << "dump_dir: " << get_dump_directory();
   for (auto& kv : provider_option_origin_) {
     print_kv(3, "provider_option_from_origin", kv);
@@ -1114,7 +1114,7 @@ void PassContextImp::update_config_proto_root_field() {
     return this->get_provider_option_with_priority(names);
   };
   if (auto cache_key = get_provider_option_local({"cache_key", "cacheKey"})) {
-    config_.set_cache_key(*cache_key);
+    context_proto.set_cache_key(*cache_key);
   }
   // cache_dir removed by Issue #006 (PR #80)
   // encryption_key removed - now read from provider_options directly (Issue
