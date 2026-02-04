@@ -19,6 +19,15 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for issue quality guidelines.
 - **#003 influences #005, #007** - Should coordinate
 - **#006 relates to #009, #010, #011** - Cache cleanup group
 - **#008 is independent**
+- **#046 relates to #043, #045** - All improve /create-issue skill
+- **#047 relates to #044** - Both improve TarFile deduplication code
+- **#049 relates to #043, #045, #046** - All improve /create-issue skill
+- **#052 relates to #050, #051** - All improve TarFile implementation quality
+- **#053 relates to #052** - Documents architecture that #052 will modify
+- **#054 relates to #050, #055** - All reduce TarFile public API surface
+- **#055 relates to #054, #050** - All reduce TarFile public API surface
+- **#056 relates to #051** - Both improve TarFile documentation quality
+- **#054 relates to #050** - Both reduce TarFile public API surface
 
 See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
@@ -48,6 +57,22 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 - [Issue #038: Document Lazy Symlink Resolution const_cast](issues/038-document-lazy-symlink-const-cast.md) - Add comprehensive documentation explaining intentional const_cast for write-once lazy initialization
 - [Issue #039: Fix Typos and Outdated Comments in TarFile](issues/039-fix-tarfile-typos-and-outdated-comments.md) - Fix outdated renaming comment, typos, incorrect FIXME, and remove unused parameter
 - [Issue #040: Remove Legacy tar_ball.cpp/hpp Re-Serialization](issues/040-remove-legacy-tar-ball-reserialization.md) - Remove ~750 lines of legacy TarWriter/TarReader code that wastefully re-serializes tar data
+- [Issue #041: Remove Duplicate friend Declaration in TarEntryInputStream](issues/041-remove-duplicate-friend-declaration.md) - Remove duplicate friend class declaration (trivial 1-line fix)
+- [Issue #042: Document PrivateTag Factory Pattern](issues/042-document-privatetag-factory-pattern.md) - Add technical documentation and update code comment for PrivateTag pattern
+- [Issue #043: Fix /create-issue Skill - Prevent Implementation During Discussion](issues/043-fix-create-issue-implementation-during-discussion.md) - Fix skill to only create issue documentation, not implement the work; ask questions one-by-one
+- [Issue #044: Use Standard Erase-Remove Idiom in TarFile](issues/044-use-erase-remove-idiom-in-tarfile.md) - Replace verbose erase-remove pattern with standard C++ idiom (remove unnecessary if check)
+- [Issue #045: Add Approval Workflow to /create-issue Skill](issues/045-add-approval-workflow-to-create-issue.md) - Add 5-step workflow (Explore→Discuss→Summarize→Approve→Create) with plan detail options
+- [Issue #046: Update Dependencies After Each Issue in /create-issue](issues/046-update-dependencies-after-each-issue-in-create-issue.md) - Add automatic dependency tracking to update Quick dependencies and issue metadata after creating each issue
+- [Issue #047: Extract Duplicate Entry Deduplication Logic in TarFile](issues/047-extract-duplicate-entry-deduplication-logic.md) - Extract duplicated deduplication logic from add_regular_entry/add_symlink_entry into helper function
+- [Issue #048: Extract Platform-Specific tmpfile Helper Function](issues/048-extract-platform-specific-tmpfile-helper.md) - Extract duplicated platform-specific tmpfile creation code into reusable helper function
+- [Issue #049: Add Sub-topic Breakdown Workflow to /create-issue](issues/049-add-subtopic-breakdown-workflow-to-create-issue.md) - Add structured workflow for breaking down complex topics into manageable sub-topics with automatic task creation
+- [Issue #050: Standardize TarFile Factory Method Naming](issues/050-standardize-tarfile-factory-method-naming.md) - Rename factory methods to follow consistent "create_from_X" pattern for better discoverability
+- [Issue #051: Document Complex TarFile Factory Methods](issues/051-document-complex-tarfile-factory-methods.md) - Add comprehensive comments explaining mmap strategy, platform differences, and fallback logic in complex factory methods
+- [Issue #052: Replace TarFile mem_stream_ Member with Helper Function](issues/052-replace-tarfile-memstream-member-with-helper.md) - Replace redundant mem_stream_ cached member with inline get_mem_stream() helper function
+- [Issue #053: Document TAR Streaming Architecture](issues/053-document-tar-streaming-architecture.md) - Create technical documentation explaining stream ownership, buffering mechanism, mmap access, and thread-safety
+- [Issue #054: Eliminate Dangerous Un-Owned Buffer Factory Method](issues/054-eliminate-dangerous-unowned-buffer-factory-method.md) - Remove test-only create(const char*, size_t) factory method that requires caller-managed lifetime
+- [Issue #055: Remove Non-Const entries() Overload from TarFile](issues/055-remove-non-const-entries-overload.md) - Remove unused non-const entries() accessor to enforce read-only access
+- [Issue #056: Add Comprehensive Documentation to TarFile Class](issues/056-add-comprehensive-documentation-to-tarfile.md) - Add class-level docs, document 4 undocumented methods, fix outdated open_for_write() comments
 
 ---
 

@@ -95,7 +95,8 @@ public:
   static std::unique_ptr<TarFile> create(const char* data, size_t size);
 
 private:
-  struct PrivateTag {}; // for std::make_unique
+  struct PrivateTag {
+  }; // PrivateTag pattern - see docs/technical/privatetag-factory-pattern.md
 public:
   TarFile(PrivateTag, std::unique_ptr<std::iostream>&& stream);
 
