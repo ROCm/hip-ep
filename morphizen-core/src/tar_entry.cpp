@@ -62,23 +62,6 @@ std::streambuf::pos_type TarEntryInputStreamBuffer::block_end_pos() const {
 bool TarEntryInputStreamBuffer::is_symlink() const {
   return real_path_.has_value();
 }
-bool TarEntryInputStreamBuffer::rename_symlink(const std::string& new_name,
-                                               pos_type data_begin_pos,
-                                               pos_type data_end_pos) {
-  if (real_path_) {
-    const_cast<std::optional<std::string>&>(real_path_) = new_name;
-    const_cast<pos_type&>(data_begin_pos_) = data_begin_pos;
-    const_cast<pos_type&>(data_end_pos_) = data_end_pos;
-    const_cast<pos_type&>(buffer_pos_) = data_begin_pos;
-    setg(buffer_.data(), buffer_.data(), buffer_.data());
-    return true;
-  }
-  MY_LOG(1) << " rename_symlink failed. "            //
-            << " entry " << this->to_string() << " " //
-            << " is not a symblink."                 //
-            << " new_name=" << new_name;
-  return false;
-}
 std::string TarEntryInputStreamBuffer::to_string() const {
   std::ostringstream ret;
   ret << "TarEntryInputStreamBuffer{"
@@ -217,12 +200,6 @@ std::string TarEntryInputStream::md5() {
   }
   this->clear();
   return ret.getHash();
-}
-
-bool TarEntryInputStream::rename_symlink(
-    const std::string& new_name, pos_type data_begin_pos,
-    pos_type data_end_pos) { // rename the symlink
-  return buf_->rename_symlink(new_name, data_begin_pos, data_end_pos);
 }
 
 void* TarEntryInputStream::mmap() {
@@ -472,28 +449,6 @@ void TarEntryOutputStream::add_padding_block_for_4k(TarFile& tar_file,
   sym_header.write_header(*tar_file.stream_);
 }
 
-void TarEntryOutputStream::rename_existing_entry(
-    TarEntryInputStream& data_entry, TarEntryInputStream& prev_entry) {
-  MY_LOG(1) << " rename existing entry " << prev_entry.to_string() << " to "
-            << data_entry.to_string();
-  auto old_entry = prev_entry.to_string();
-  prev_entry.rename_symlink(data_entry.path(), data_entry.data_begin_pos(),
-                            data_entry.data_end_pos());
-  auto header = TarHeader(prev_entry.path(), 0);
-  header.set_link_name(data_entry.path());
-  auto original_pos = tellp();
-  CHECK(seekp(prev_entry.block_begin_pos()).good());
-  header.write_header(*this);
-  CHECK(seekp(original_pos).good())
-      << "seekp failed. original_pos=" << original_pos
-      << " prev_entry.block_begin_pos()=" << prev_entry.block_begin_pos();
-  if (!this->good()) {
-    MY_LOG(1) << "write symbol header failed. name=" << name_;
-  } else {
-    MY_LOG(1) << " old entry " << old_entry << " renamed to "
-              << prev_entry.to_string() << " stream_pos=" << tellp();
-  }
-}
 TarEntryOutputStream::~TarEntryOutputStream() {
   tar_file_.is_writing_ = false;
   auto md5 = get_content_check_sum();

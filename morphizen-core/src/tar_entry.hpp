@@ -25,8 +25,6 @@ public:
   MORPHIZEN_DLL_SPEC std::streambuf::pos_type block_begin_pos() const;
   MORPHIZEN_DLL_SPEC std::streambuf::pos_type block_end_pos() const;
   MORPHIZEN_DLL_SPEC bool is_symlink() const;
-  bool rename_symlink(const std::string& new_name, pos_type data_begin_pos,
-                      pos_type data_end_pos);
   // starting point of real data
   // size of real data
   MORPHIZEN_DLL_SPEC size_t size() const;
@@ -102,8 +100,6 @@ public:
   MORPHIZEN_DLL_SPEC std::streambuf::pos_type block_begin_pos() const;
   MORPHIZEN_DLL_SPEC std::streambuf::pos_type block_end_pos() const;
   MORPHIZEN_DLL_SPEC bool is_symlink() const;
-  bool rename_symlink(const std::string& new_name, pos_type data_begin_pos,
-                      pos_type data_end_pos);
   /**
    * @brief Computes the MD5 checksum of the content.
    *
@@ -152,8 +148,6 @@ private:
                                  const std::string& name);
   static void add_padding_block_for_4k(class TarFile& tar_file,
                                        const std::string& name, int block_idx);
-  void rename_existing_entry(TarEntryInputStream& data_entry,
-                             TarEntryInputStream& prev_entry);
 
 private:
   const std::string name_; // name of the entry
