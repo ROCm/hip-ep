@@ -122,6 +122,16 @@ struct Level1Rocm {
       return "gemm";
     } else if (output_name.find("rocm_matmul") != std::string::npos) {
       return "matmul";
+    } else if (output_name.find("rocm_mul") != std::string::npos) {
+      return "mul";
+    } else if (output_name.find("rocm_softmax") != std::string::npos) {
+      return "softmax";
+    } else if (output_name.find("rocm_reshape") != std::string::npos) {
+      return "reshape";
+    } else if (output_name.find("rocm_transpose") != std::string::npos) {
+      return "transpose";
+    } else if (output_name.find("rocm_tile") != std::string::npos) {
+      return "tile";
     }
     return "unknown";
   }

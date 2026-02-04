@@ -63,6 +63,12 @@ else()
   target_link_libraries(${LIB_NAME} PRIVATE hip::device)
 endif()
 
+# Link HIP kernels library
+target_link_libraries(${LIB_NAME} PRIVATE rocm-kernels)
+target_include_directories(${LIB_NAME} PRIVATE 
+  ${CMAKE_SOURCE_DIR}/kernels/include
+)
+
 target_link_libraries(${LIB_NAME} PRIVATE
   rocm_proto
   glog::glog
