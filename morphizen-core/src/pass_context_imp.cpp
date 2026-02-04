@@ -94,7 +94,8 @@ PassContextImp::create_pass_context(const ConfigProto& config_proto1) {
   return ret;
 }
 std::unique_ptr<PassContextImp> PassContextImp::create_pass_context(
-    const onnxruntime::ProviderOptions& options) {
+    const onnxruntime::ProviderOptions& options,
+    const std::map<std::string, std::string>& session_configs) {
   auto json_config_string = get_config_json_str(options);
   const char* json_config = json_config_string.c_str();
   auto config_proto = ConfigProto();
@@ -103,6 +104,7 @@ std::unique_ptr<PassContextImp> PassContextImp::create_pass_context(
   }
   auto ret = create_pass_context(config_proto);
   ret->provider_option_origin_.insert(options.begin(), options.end());
+  ret->session_configs_.insert(session_configs.begin(), session_configs.end());
   ret->update_config_proto_root_field();
   return ret;
 }
@@ -246,9 +248,8 @@ PassContextImp::get_provider_option(const std::string& option_name) const {
 }
 std::optional<std::string>
 PassContextImp::get_session_config(const std::string& option_name) const {
-  const auto& config = config_;
-  auto it = config.session_configs().find(option_name);
-  if (it != config.session_configs().end()) {
+  auto it = session_configs_.find(option_name);
+  if (it != session_configs_.end()) {
     return it->second;
   }
   return std::nullopt;
@@ -1092,7 +1093,7 @@ void PassContextImp::print_version_info(const char* prefix) {
       print_kv(3, "provider_options_in_target_proto", kv);
     }
   }
-  for (auto& kv : config_.session_configs()) {
+  for (auto& kv : session_configs_) {
     LOG_VERBOSE(3) << "session_config: " << kv.first << " = " << kv.second;
   }
   auto all_po = get_all_provider_options();

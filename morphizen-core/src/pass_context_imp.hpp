@@ -168,8 +168,9 @@ class PassContextImp : public PassContext {
 public:
   static std::unique_ptr<PassContextImp>
   create_pass_context(const ConfigProto& config);
-  static std::unique_ptr<PassContextImp>
-  create_pass_context(const onnxruntime::ProviderOptions& options);
+  static std::unique_ptr<PassContextImp> create_pass_context(
+      const onnxruntime::ProviderOptions& options,
+      const std::map<std::string, std::string>& session_configs);
 
 public:
   std::map<std::string, std::vector<AttributeProtoPtr>> node_extra_attrs;
@@ -369,6 +370,7 @@ private:
   std::map<std::string, std::string> provider_option_origin_ = {};
   std::map<std::string, std::string> provider_option_from_cache_ = {};
   std::map<std::string, std::string> compiled_model_compatibility_info_ = {};
+  std::map<std::string, std::string> session_configs_ = {};
 
 private:
 #if defined(__GNUC__)
@@ -383,6 +385,7 @@ private:
       const std::string& model_path, const Graph& onnx_graph,
       const std::vector<morphizen_cxx::NodeConstRef>& ep_context_nodes,
       const onnxruntime::ProviderOptions& options,
+      const std::map<std::string, std::string>& session_configs,
       std::unique_ptr<LoggerAdapter> logger_adapter);
   friend onnxruntime::Node*
   create_ep_context_node(morphizen::ExecutionProviderConcrete* ep, int index);

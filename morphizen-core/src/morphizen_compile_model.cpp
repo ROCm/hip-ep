@@ -232,10 +232,7 @@ void compile_onnx_model_2(std::shared_ptr<PassContextImp> context,
     MY_LOG(1) << "==== cache hit ====";
   }
   auto encryption_key = context->get_provider_option("encryption_key", "");
-  auto session_configs = context->config_.session_configs();
   read_cache(context);
-  auto session_configs_in_cache = context->config_.mutable_session_configs();
-  session_configs_in_cache->swap(session_configs);
 }
 
 static std::string get_dump_md5_file(const std::string& suffix) {
@@ -353,10 +350,11 @@ std::shared_ptr<PassContextImp> initialize_context(
     const std::string& model_path, const Graph& onnx_graph,
     const std::vector<morphizen_cxx::NodeConstRef>& ep_context_nodes,
     const onnxruntime::ProviderOptions& options,
+    const std::map<std::string, std::string>& session_configs,
     std::unique_ptr<LoggerAdapter> logger_adapter) {
 
   std::shared_ptr<PassContextImp> context =
-      PassContextImp::create_pass_context(options);
+      PassContextImp::create_pass_context(options, session_configs);
 
   // Store logger and logger_adapter to prolong their lifetime
   if (logger_adapter) {
@@ -1083,14 +1081,16 @@ static void print_graph_input_and_output(const Graph& onnx_graph) {
 std::vector<std::unique_ptr<ExecutionProvider>> compile_onnx_model_3_internal(
     const std::string& model_path, const Graph& onnx_graph,
     const onnxruntime::ProviderOptions& options,
+    const std::map<std::string, std::string>& session_configs,
     std::unique_ptr<LoggerAdapter> logger_adapter,
     std::function<void(int, const char*)> set_ort_status) {
   print_graph_input_and_output(onnx_graph);
   static std::mutex mtx;
   std::lock_guard<std::mutex> t_lock(mtx);
   auto ep_context_nodes = get_ep_context_nodes(onnx_graph);
-  auto context = initialize_context(model_path, onnx_graph, ep_context_nodes,
-                                    options, std::move(logger_adapter));
+  auto context =
+      initialize_context(model_path, onnx_graph, ep_context_nodes, options,
+                         session_configs, std::move(logger_adapter));
   auto measture_compile_onnx_model_3 = context->measure("compile_onnx_model_3");
   // Cache is always in memory (tar_file_), no file lock needed
   auto p_cpu_usage = CreateICPUUsage();
@@ -1178,8 +1178,10 @@ std::vector<std::unique_ptr<ExecutionProvider>> compile_onnx_model_3_internal(
 std::vector<std::unique_ptr<ExecutionProvider>>
 compile_onnx_model_3(const std::string& model_path, const Graph& onnx_graph,
                      const onnxruntime::ProviderOptions& options,
+                     const std::map<std::string, std::string>& session_configs,
                      std::function<void(int, const char*)> set_ort_status) {
-  return compile_onnx_model_3_internal(model_path, onnx_graph, options, nullptr,
+  return compile_onnx_model_3_internal(model_path, onnx_graph, options,
+                                       session_configs, nullptr,
                                        set_ort_status);
 }
 

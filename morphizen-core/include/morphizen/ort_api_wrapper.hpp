@@ -12,6 +12,7 @@
 #endif
 
 #include <functional>
+#include <map>
 #include <morphizen/custom_op.h>
 #include <morphizen/export.h>
 #include <morphizen/morphizen-ort-api-ext.hpp>
@@ -55,6 +56,7 @@ MORPHIZEN_DLL_SPEC std::vector<std::unique_ptr<ExecutionProvider>>
 compile_onnx_model_3(
     const std::string& model_path, const Graph& graph,
     const onnxruntime::ProviderOptions& options,
+    const std::map<std::string, std::string>& session_configs,
     std::function<void(int, const char*)> set_ort_status = nullptr);
 
 // Internal version that accepts logger_adapter for lifetime management
@@ -62,6 +64,7 @@ MORPHIZEN_DLL_SPEC std::vector<std::unique_ptr<ExecutionProvider>>
 compile_onnx_model_3_internal(
     const std::string& model_path, const Graph& onnx_graph,
     const onnxruntime::ProviderOptions& options,
+    const std::map<std::string, std::string>& session_configs,
     std::unique_ptr<LoggerAdapter> logger_adapter = nullptr,
     std::function<void(int, const char*)> set_ort_status = nullptr);
 

@@ -50,7 +50,9 @@ TEST(ConfigTest, ProviderOptionCacheDir) {
       {"log_level", "info"},
       {"dump_dir", "hello1"},
   };
-  auto pass_context = morphizen::PassContextImp::create_pass_context(options);
+  std::map<std::string, std::string> empty_session_configs;
+  auto pass_context = morphizen::PassContextImp::create_pass_context(
+      options, empty_session_configs);
   // cache_dir removed - dump_dir accessed via get_dump_directory()
   auto dump_dir = pass_context->get_dump_directory();
   EXPECT_EQ("hello1", dump_dir.string());
@@ -81,18 +83,19 @@ TEST(ConfigTest, SessionConfigs) {
       {"session_options",
        std::to_string((uintptr_t)(static_cast<void*>(&session_configs)))},
   };
-  auto pass_context = morphizen::PassContextImp::create_pass_context(options);
+  auto pass_context =
+      morphizen::PassContextImp::create_pass_context(options, session_configs);
   auto& config_proto = pass_context->get_config_proto();
   // cache_dir removed - dump_dir accessed via get_dump_directory()
   auto dump_dir = pass_context->get_dump_directory();
   EXPECT_EQ("hello1", dump_dir.string());
   LOG(INFO) << "config: " << config_proto.DebugString();
-  auto& sc = config_proto.session_configs();
+  // Session configs now passed separately and accessed via get_session_config()
   for (auto& [key, value] : session_configs) {
     LOG(INFO) << "session_configs: " << key << " = " << value;
-    auto it = sc.find(key);
-    ASSERT_NE(it, sc.end());
-    EXPECT_EQ(value, it->second);
+    auto sc_value = pass_context->get_session_config(key);
+    ASSERT_TRUE(sc_value.has_value());
+    EXPECT_EQ(value, sc_value.value());
   }
   api->session_option_configuration = old_session_option_configuration;
 }
