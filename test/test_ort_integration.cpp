@@ -14,9 +14,6 @@
 #include <fstream>
 #include <iostream>
 
-#ifndef ORT_API_MANUAL_INIT
-#define ORT_API_MANUAL_INIT
-#endif
 #include <onnxruntime_cxx_api.h>
 
 #ifdef _WIN32
@@ -55,8 +52,6 @@ bool file_exists(const std::string& path) {
 class OrtIntegrationTest : public ::testing::Test {
 protected:
   void SetUp() override {
-    // Initialize ORT
-    Ort::InitApi(OrtGetApiBase()->GetApi(ORT_API_VERSION));
     // Use INFO level to see Level-1 pass logs (MY_LOG -> glog INFO)
     env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_INFO, "OrtIntegrationTest");
     
