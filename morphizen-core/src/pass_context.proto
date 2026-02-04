@@ -57,6 +57,7 @@ message ContextProto {
   map<string, SubgraphProto> subgraph_metadefs = 11;
   reserved 12;
   reserved "cache_files";
+  string cache_key = 13; // Cache namespace prefix for shared context scenarios
 }
 /*
 {

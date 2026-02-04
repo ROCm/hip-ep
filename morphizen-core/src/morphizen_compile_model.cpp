@@ -374,25 +374,25 @@ std::shared_ptr<PassContextImp> initialize_context(
   auto md5 =
       get_signature(context->model_path.string(), onnx_graph, context->config_);
 
-  if (!context->config_.cache_key().empty()) {
+  if (!context->context_proto.cache_key().empty()) {
     MY_LOG(1) << "use cache key specified by user "
-              << context->config_.cache_key();
+              << context->context_proto.cache_key();
   } else if (morphizen_cxx::ModelConstRef(model).has_metadata(
                  "morphizen_model_md5sum")) {
     auto new_cache_key = morphizen_cxx::ModelConstRef(model).get_metadata(
         "morphizen_model_md5sum");
     MY_LOG(1) << "use cache key in meta-data " << new_cache_key;
-    *context->config_.mutable_cache_key() = new_cache_key;
+    *context->context_proto.mutable_cache_key() = new_cache_key;
   } else if (ENV_PARAM(XLNX_ENABLE_FILE_BASED_CACHE_KEY) &&
              (!context->model_path.empty())) {
     auto new_cache_key =
         morphizen::get_md5_of_file(context->model_path.string());
     MY_LOG(1) << "use cache key on-disk " << new_cache_key;
-    *context->config_.mutable_cache_key() = new_cache_key;
+    *context->context_proto.mutable_cache_key() = new_cache_key;
   } else {
     auto new_cache_key = md5;
     LOG_VERBOSE(1) << "use cache key in memory signature " << new_cache_key;
-    *context->config_.mutable_cache_key() = new_cache_key;
+    *context->context_proto.mutable_cache_key() = new_cache_key;
   }
   // Algorithm-A : based on names of node-args tensor0-names of
   // topologically ordered model-graph Algorithm-B : based on
@@ -618,7 +618,7 @@ create_ep_context_node(morphizen::ExecutionProviderConcrete* ep, int index) {
       (!context.get_provider_option("encryption_key", "").empty());
   attrs.add("enable_encryption", (int64_t)enable_encryption);
   // Always use cache_key prefix - only store the prefix itself
-  attrs.add("cache_file_prefix", context.get_config_proto().cache_key());
+  attrs.add("cache_file_prefix", context.get_context_proto().cache_key());
   auto& version_infos = context.get_config_proto().version();
   for (const auto& version_info : version_infos.version_infos()) {
     auto lib_name = "version_of_" + version_info.package_name();
@@ -823,7 +823,7 @@ store_cache_directory_from_main_node(PassContextImp& context,
   auto loaded_cache_key = main_node.get_attr_string("cache_file_prefix", "");
   CHECK(!loaded_cache_key.empty())
       << "EP context node must have non-empty cache_file_prefix attribute";
-  *context.config_.mutable_cache_key() = loaded_cache_key;
+  *context.context_proto.mutable_cache_key() = loaded_cache_key;
 #if MORPHIZEN_ORT_API_MAJOR >= 12
   auto ep_cache_context = main_node.release_attr_string("ep_cache_context");
 #else
@@ -950,7 +950,7 @@ restore_execution_providers_from_ep_context_model(
 
   store_cache_directory_from_main_node(*context, main_node.value());
 
-  auto ep_context_cache_key = context->config_.cache_key();
+  auto ep_context_cache_key = context->context_proto.cache_key();
   bool user_provided_different_cache_key =
       user_cache_key.has_value() && !user_cache_key->empty() &&
       user_cache_key.value() != ep_context_cache_key;
