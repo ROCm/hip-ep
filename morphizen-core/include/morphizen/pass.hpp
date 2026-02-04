@@ -77,7 +77,7 @@ public:
    */
   static std::vector<std::shared_ptr<IPass>>
   create_passes(std::shared_ptr<PassContext> context,
-                const google::protobuf::RepeatedPtrField<PassProto>& passes);
+                const std::vector<PassProto>& passes);
   /** @brief create a concrete pass object from `PassInfo`
    *
    *  @param context the Context object shared among all passes.

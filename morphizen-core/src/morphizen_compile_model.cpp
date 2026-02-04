@@ -161,8 +161,8 @@ static void update_cache(std::shared_ptr<PassContextImp> context,
   auto deferred_write = std::shared_ptr<void>(
       nullptr, [context](void* /*p*/) { context->save_context_json(); });
   auto measure_update_cache = context->measure("update_cache");
-  auto passes =
-      IPass::create_passes(context, context->get_config_proto().passes());
+  auto effective_passes = context->compute_effective_passes();
+  auto passes = IPass::create_passes(context, effective_passes);
   IPass::run_passes(passes, graph);
 }
 
