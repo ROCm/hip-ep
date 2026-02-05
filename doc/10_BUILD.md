@@ -331,8 +331,7 @@ Located in `etc/`:
 
 | File | Description |
 |------|-------------|
-| `vaip_config.json` | VitisAI EP configuration |
-| `vaip_config_disk.json` | Disk-based configuration variant |
+| `morphizen_config.json` | Morphizen EP pass configuration |
 
 ## Troubleshooting
 

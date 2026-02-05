@@ -304,7 +304,7 @@ REM Enable VitisAI device detection (required)
 set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
 ```
 
-**Note:** The `vaip_config.json` is embedded into `onnxruntime_vitisai_ep.dll` at build time,
+**Note:** The `morphizen_config.json` is embedded into the EP DLL at build time,
 so no external config file is needed. See CMake option: `VAIP_JSON_CONFIG_FILE`.
 
 **Command to reproduce (with all logs enabled):**
@@ -471,7 +471,7 @@ MORPHIZEN_DEBUG_ROCM: 1
 
 **Level-1 Pass Architecture:**
 ```
-vaip_config.json (embedded in DLL)
+morphizen_config.json (embedded in DLL)
     └── fuse_ROCm (morphizen-level1-pass-rocm)
         ├── Orchestrates sub-passes via passGenericParam.subPassNames
         ├── Sub-pass: morphizen-level2-pass-rocm-conv (Conv pattern matching)

@@ -52,7 +52,7 @@ The Level-1 ROCm pass (`vaip-pass_level1_rocm`) serves as the orchestrator for R
 
 ### Step 1: Running Sub-Passes
 
-Sub-passes are configured via `pass_generic_param` in `vaip_config.json`:
+Sub-passes are configured via `pass_generic_param` in `morphizen_config.json`:
 
 ```json
 {
@@ -260,7 +260,7 @@ For a complete subgraph example showing how these structures work together, see 
 
 ## Configuration
 
-### vaip_config.json
+### morphizen_config.json
 
 ```json
 {
