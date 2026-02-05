@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+#
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
+#
 
 """Generate a combined Conv + Gemm ONNX model for testing."""
 
@@ -24,31 +26,31 @@ def create_conv_gemm_model(
 ):
     """
     Create a model with Conv followed by Gemm.
-    
+
     Pipeline:
     Input [batch, in_channels, height, width]
       -> Conv -> [batch, out_channels, out_h, out_w]
       -> Flatten -> [batch, out_channels * out_h * out_w]
       -> Gemm -> [batch, gemm_n]
     """
-    
+
     # Input tensor
-    X = helper.make_tensor_value_info('X', TensorProto.FLOAT, 
+    X = helper.make_tensor_value_info('X', TensorProto.FLOAT,
                                        [batch_size, in_channels, height, width])
-    
+
     # Conv weight (initializer)
     conv_W_shape = [out_channels, in_channels, kernel_size, kernel_size]
     conv_W_data = np.random.randn(*conv_W_shape).astype(np.float32) * 0.1
     conv_W = helper.make_tensor('conv_W', TensorProto.FLOAT, conv_W_shape, conv_W_data.flatten())
-    
+
     # Conv bias (optional)
     conv_B_data = np.random.randn(out_channels).astype(np.float32) * 0.01
     conv_B = helper.make_tensor('conv_B', TensorProto.FLOAT, [out_channels], conv_B_data.flatten())
-    
+
     # Compute conv output shape
     out_height = (height + 2 * padding - kernel_size) // stride + 1
     out_width = (width + 2 * padding - kernel_size) // stride + 1
-    
+
     # Conv node
     conv_node = helper.make_node(
         'Conv',
@@ -60,7 +62,7 @@ def create_conv_gemm_model(
         strides=[stride, stride],
         dilations=[1, 1],
     )
-    
+
     # Flatten node (reshape conv output for gemm)
     flatten_shape = [batch_size, out_channels * out_height * out_width]
     flatten_node = helper.make_node(
@@ -70,17 +72,17 @@ def create_conv_gemm_model(
         name='flatten',
         axis=1
     )
-    
+
     # Gemm weight (initializer)
     gemm_k = out_channels * out_height * out_width
     gemm_W_shape = [gemm_k, gemm_n]
     gemm_W_data = np.random.randn(*gemm_W_shape).astype(np.float32) * 0.1
     gemm_W = helper.make_tensor('gemm_W', TensorProto.FLOAT, gemm_W_shape, gemm_W_data.flatten())
-    
+
     # Gemm bias (optional)
     gemm_B_data = np.random.randn(gemm_n).astype(np.float32) * 0.01
     gemm_B = helper.make_tensor('gemm_B', TensorProto.FLOAT, [gemm_n], gemm_B_data.flatten())
-    
+
     # Gemm node
     gemm_node = helper.make_node(
         'Gemm',
@@ -92,10 +94,10 @@ def create_conv_gemm_model(
         transA=0,
         transB=0,
     )
-    
+
     # Output tensor
     Y = helper.make_tensor_value_info('Y', TensorProto.FLOAT, [batch_size, gemm_n])
-    
+
     # Graph
     graph = helper.make_graph(
         [conv_node, flatten_node, gemm_node],
@@ -104,14 +106,14 @@ def create_conv_gemm_model(
         [Y],
         [conv_W, conv_B, gemm_W, gemm_B]
     )
-    
+
     # Model
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
     model.ir_version = 8
-    
+
     # Add metadata
     model.doc_string = "Combined Conv + Gemm model for ROCm testing"
-    
+
     # Save
     onnx.save(model, output_path)
     print(f"Saved model to {output_path}")
@@ -123,7 +125,7 @@ def create_conv_gemm_model(
     print(f"  -> Flatten output: [{batch_size}, {gemm_k}]")
     print(f"  -> Gemm (K={gemm_k}, N={gemm_n})")
     print(f"  -> Output Y: [{batch_size}, {gemm_n}]")
-    
+
     return output_path
 
 
@@ -140,9 +142,9 @@ if __name__ == "__main__":
     parser.add_argument("--stride", type=int, default=1, help="Conv stride")
     parser.add_argument("--gemm-n", type=int, default=32, help="Gemm output dimension N")
     parser.add_argument("--output", type=str, default="conv_gemm_model.onnx", help="Output file")
-    
+
     args = parser.parse_args()
-    
+
     create_conv_gemm_model(
         batch_size=args.batch,
         in_channels=args.in_channels,

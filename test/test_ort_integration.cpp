@@ -1,5 +1,7 @@
-// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
-// Licensed under the MIT License.
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
 
 /**
  * ORT Integration Test for MorphiZen EP with MLIR backend.
@@ -54,11 +56,11 @@ protected:
   void SetUp() override {
     // Use INFO level to see Level-1 pass logs (MY_LOG -> glog INFO)
     env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_INFO, "OrtIntegrationTest");
-    
+
     // Print environment variable status for debugging
     const char* glog_stderr = std::getenv("GLOG_logtostderr");
     const char* glog_minlevel = std::getenv("GLOG_minloglevel");
-    
+
     std::cout << "\n=== Environment Variables ===" << std::endl;
     std::cout << "GLOG_logtostderr: " << (glog_stderr ? glog_stderr : "(not set)") << std::endl;
     std::cout << "GLOG_minloglevel: " << (glog_minlevel ? glog_minlevel : "(not set)") << std::endl;
@@ -105,13 +107,13 @@ protected:
 
 TEST_F(OrtIntegrationTest, LoadMorphiZenProvider) {
   std::cout << "[Test] Loading MorphiZen Execution Provider..." << std::endl;
-  
+
   EXPECT_TRUE(ep_available_) << "MorphiZen EP should be registered successfully";
-  
+
   if (ep_available_) {
     std::vector<Ort::ConstEpDevice> devices = env_->GetEpDevices();
     std::cout << "[Test] Found " << devices.size() << " EP device(s)" << std::endl;
-    
+
     for (const auto& device : devices) {
       std::string ep_name = device.EpName();
       std::cout << "[Test]   - EP device: " << ep_name << std::endl;
@@ -122,16 +124,16 @@ TEST_F(OrtIntegrationTest, LoadMorphiZenProvider) {
 // MorphiZen EP integration test - only creates session to verify MLIR pass
 TEST_F(OrtIntegrationTest, CreateSessionWithMorphiZenProvider) {
   std::cout << "[Test] Creating session with MorphiZen EP (MLIR backend)..." << std::endl;
-  
+
   if (!ep_available_) {
     GTEST_SKIP() << "MorphiZen EP not available";
   }
-  
+
   ASSERT_TRUE(model_available_) << "Conv model not found at: " << CONV_TEST_MODEL_PATH;
 
   // Get EP devices
   std::vector<Ort::ConstEpDevice> devices = env_->GetEpDevices();
-  
+
   // Find MorphiZen device
   const OrtEpDevice* morphizen_device = nullptr;
   for (const auto& device : devices) {
@@ -173,7 +175,7 @@ TEST_F(OrtIntegrationTest, CreateSessionWithMorphiZenProvider) {
 #endif
     std::cout << "[Test] Session created successfully with MorphiZen EP!" << std::endl;
     std::cout << "[Test] MLIR pass was executed during session creation" << std::endl;
-    
+
   } catch (const Ort::Exception& ex) {
     std::string error_msg = ex.what();
     if (error_msg.find("No engine configurations available") != std::string::npos ||
@@ -187,11 +189,11 @@ TEST_F(OrtIntegrationTest, CreateSessionWithMorphiZenProvider) {
 // MorphiZen EP integration test with Conv+Gemm model
 TEST_F(OrtIntegrationTest, CreateSessionWithConvGemmModel) {
   std::cout << "[Test] Creating session with Conv+Gemm model (MLIR backend)..." << std::endl;
-  
+
   if (!ep_available_) {
     GTEST_SKIP() << "MorphiZen EP not available";
   }
-  
+
   bool conv_gemm_available = file_exists(CONV_GEMM_TEST_MODEL_PATH);
   if (!conv_gemm_available) {
     std::cout << "[Test] Conv+Gemm model not found at: " << CONV_GEMM_TEST_MODEL_PATH << std::endl;
@@ -200,7 +202,7 @@ TEST_F(OrtIntegrationTest, CreateSessionWithConvGemmModel) {
 
   // Get EP devices
   std::vector<Ort::ConstEpDevice> devices = env_->GetEpDevices();
-  
+
   // Find MorphiZen device
   const OrtEpDevice* morphizen_device = nullptr;
   for (const auto& device : devices) {
@@ -238,7 +240,7 @@ TEST_F(OrtIntegrationTest, CreateSessionWithConvGemmModel) {
 #endif
     std::cout << "[Test] Session created successfully with Conv+Gemm model!" << std::endl;
     std::cout << "[Test] MLIR pass processed Conv and Gemm operations" << std::endl;
-    
+
   } catch (const Ort::Exception& ex) {
     std::string error_msg = ex.what();
     if (error_msg.find("No engine configurations available") != std::string::npos ||
@@ -253,12 +255,12 @@ int main(int argc, char** argv) {
   std::cout << "\n========================================" << std::endl;
   std::cout << "ORT Integration Test for MorphiZen MLIR EP" << std::endl;
   std::cout << "========================================\n" << std::endl;
-  
+
   std::cout << "To see log output, set these environment variables:" << std::endl;
   std::cout << "  set GLOG_logtostderr=1" << std::endl;
   std::cout << "  set GLOG_minloglevel=0" << std::endl;
   std::cout << std::endl;
-  
+
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
