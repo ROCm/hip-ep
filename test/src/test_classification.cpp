@@ -39,7 +39,7 @@ DEF_ENV_PARAM_2(XLNX_ENABLE_EP_SHARED_CONTEXT, "", std::string);
 DEF_ENV_PARAM_2(ENABLE_CACHE_FILE_IO_IN_MEM, "", std::string);
 DEF_ENV_PARAM_2(MORPHIZEN_EP_DLL, "onnxruntime_morphizen_ep.dll", std::string);
 DEF_ENV_PARAM_2(MORPHIZEN_ORT_BRIDGE_BACKEND, "mlir-backend", std::string);
-DEF_ENV_PARAM_2(ORT_LOG_LEVEL, "error", std::string);
+DEF_ENV_PARAM_2(ORT_LOG_LEVEL, "warning", std::string);
 DEF_ENV_PARAM_2(EP_KREGISTERATIONNAME, "MorphiZenExecutionProvider",
                 std::string);
 
@@ -172,7 +172,16 @@ void run_classification(const std::filesystem::path &model_path,
   std::cout << "=================" << kRegistrationName;
   std::cout << "enable_ep = " << (enable_ep ? "true" : "false") << std::endl;
 
-  Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "test_classification");
+  OrtLoggingLevel ort_log_level = ORT_LOGGING_LEVEL_WARNING;
+  std::string debug_log_level = ENV_PARAM(ORT_LOG_LEVEL);
+  if (debug_log_level == "info") {
+    ort_log_level = ORT_LOGGING_LEVEL_INFO;
+  } else if (debug_log_level == "warning") {
+    ort_log_level = ORT_LOGGING_LEVEL_WARNING;
+  } else if (debug_log_level == "error") {
+    ort_log_level = ORT_LOGGING_LEVEL_ERROR;
+  }
+  Ort::Env env(ort_log_level, "test_classification");
   std::vector<Ort::ConstEpDevice> selected_devices = {};
 
   auto library_path = std::filesystem::u8path(ENV_PARAM(MORPHIZEN_EP_DLL));
