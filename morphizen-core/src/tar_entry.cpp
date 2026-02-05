@@ -407,8 +407,7 @@ void TarEntryOutputStream::add_symlink_for_existing_entry(
                               sym_header.block_end_pos());
 }
 
-// FIXME , the param "name" is not used
-void TarEntryOutputStream::add_1024_padding(const std::string& /*name*/) {
+void TarEntryOutputStream::add_1024_padding() {
   // write 1024 bytes of zeros at the end of the file
   std::string zeros(1024, '\0');
   this->write(zeros.data(), zeros.size());
@@ -465,11 +464,11 @@ TarEntryOutputStream::~TarEntryOutputStream() {
     // TAR file is designed to be append only, so we need to add a new entry for
     // the later entry wins if the file name is the same.
     add_entry_for_new_data(md5.value());
-    add_1024_padding(name_);
+    add_1024_padding();
   } else if (same_data_exists && !same_path_exists) {
     // this is the second case for shared data, but different file name.
     add_symlink_for_existing_entry(md5.value());
-    add_1024_padding(name_);
+    add_1024_padding();
   } else if (same_data_exists && same_path_exists) {
     // this is the third case for shared data and same file name.
     // we do nothing more than write 1024 bytes of zeros at the end.
@@ -478,14 +477,14 @@ TarEntryOutputStream::~TarEntryOutputStream() {
               << " prev_entry_for_md5=" << prev_entry_for_md5->to_string()
               << " prev_entry_for_path=" << prev_entry_for_path->to_string();
     CHECK(seekp(begin_pos_ - std::streampos(512)).good());
-    add_1024_padding(name_);
+    add_1024_padding();
   } else if (!same_data_exists && same_path_exists) {
     // this is the fourth case for different data and same file name.
     // we need to rename the old entry to a new name.
     // TAR is append only, append the new entry to the end of the file.
     // this is as same as the first case.
     add_entry_for_new_data(md5.value());
-    add_1024_padding(name_);
+    add_1024_padding();
   } else {
     CHECK(false) << "never goes here. this is a bug. "       //
                  << " same_data_exists=" << same_data_exists //
