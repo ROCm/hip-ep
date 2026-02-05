@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes how to enable MLIR backend support in morphizen-rocm. The MLIR backend requires LLVM with MLIR enabled, which is not included in TheRock ROCm SDK and must be built separately.
+This document describes how to enable MLIR backend support in onnx-hipdnn-ep. The MLIR backend requires LLVM with MLIR enabled, which is not included in TheRock ROCm SDK and must be built separately.
 
 ## Quick Start
 
@@ -11,14 +11,14 @@ This document describes how to enable MLIR backend support in morphizen-rocm. Th
 The easiest way to build with MLIR backend:
 
 ```batch
-cd d:\Develop\m\morphizen-rocm
+cd d:\Develop\m\onnx-hipdnn-ep
 build_with_mlir_backend.bat
 ```
 
 This script will:
 1. Check if LLVM/MLIR is already installed
 2. Build LLVM/MLIR if needed (takes several hours on first run)
-3. Build morphizen-rocm with MLIR backend enabled
+3. Build onnx-hipdnn-ep with MLIR backend enabled
 
 ### Option 2: Manual Build
 
@@ -26,10 +26,10 @@ If you prefer manual control:
 
 ```batch
 # Step 1: Build LLVM/MLIR (one-time setup, takes several hours)
-cd d:\Develop\m\morphizen-rocm
+cd d:\Develop\m\onnx-hipdnn-ep
 build_llvm.bat
 
-# Step 2: Build morphizen-rocm with MLIR backend
+# Step 2: Build onnx-hipdnn-ep with MLIR backend
 set WITH_MLIR_BACKEND=true
 build.bat
 ```
@@ -39,7 +39,7 @@ build.bat
 To build without MLIR backend (default behavior):
 
 ```batch
-cd d:\Develop\m\morphizen-rocm
+cd d:\Develop\m\onnx-hipdnn-ep
 build.bat
 ```
 
@@ -79,7 +79,7 @@ Builds LLVM with MLIR support and installs it to `%WORKSPACE_ROOT%/local`.
 
 ### build.bat
 
-Main build script for morphizen-rocm with MLIR backend support.
+Main build script for onnx-hipdnn-ep with MLIR backend support.
 
 **Environment Variables:**
 - `WITH_MLIR_BACKEND` - Set to `true` to enable MLIR backend (default: `false`)
@@ -110,7 +110,7 @@ build_with_mlir_backend.bat
 ### clean_build_with_mlir.bat
 
 Performs a clean build with MLIR backend enabled:
-1. Removes the morphizen-rocm build directory
+1. Removes the onnx-hipdnn-ep build directory
 2. Builds with `WITH_MLIR_BACKEND=true`
 
 **Usage:**
@@ -123,7 +123,7 @@ clean_build_with_mlir.bat
 ### Dependency Flow
 
 ```
-morphizen-rocm (WITH_MLIR_BACKEND=true)
+onnx-hipdnn-ep (WITH_MLIR_BACKEND=true)
     ↓
 CMAKE_PREFIX_PATH=%WORKSPACE_ROOT%/local
     ↓
@@ -138,14 +138,14 @@ MorphiZen CMake enables MLIR backend
 ```
 D:/Develop/m/
 ├── llvm/                          # LLVM source (cloned by build_llvm.bat)
-├── morphizen-rocm/                # morphizen-rocm source
+├── onnx-hipdnn-ep/                # onnx-hipdnn-ep source
 │   ├── build.bat                  # Main build script
 │   ├── build_llvm.bat             # LLVM/MLIR build script
 │   ├── build_with_mlir_backend.bat # All-in-one script
 │   └── clean_build_with_mlir.bat  # Clean build helper
 ├── build/
 │   ├── llvm/                      # LLVM build directory
-│   └── morphizen-rocm/            # morphizen-rocm build directory
+│   └── onnx-hipdnn-ep/            # onnx-hipdnn-ep build directory
 └── local/                         # Installation directory
     ├── bin/                       # Executables
     ├── lib/
@@ -197,8 +197,8 @@ To force CMake to reconfigure (useful after changing options):
 # For LLVM
 del D:\Develop\m\build\llvm\build.ninja
 
-# For morphizen-rocm
-del D:\Develop\m\build\morphizen-rocm\build.ninja
+# For onnx-hipdnn-ep
+del D:\Develop\m\build\onnx-hipdnn-ep\build.ninja
 ```
 
 ## Technical Details
@@ -235,7 +235,7 @@ Therefore, MLIR must be built separately.
 
 ## Best Practices
 
-1. **Build LLVM/MLIR once**: The build takes several hours, so build it once and reuse it for multiple morphizen-rocm builds.
+1. **Build LLVM/MLIR once**: The build takes several hours, so build it once and reuse it for multiple onnx-hipdnn-ep builds.
 
 2. **Use incremental builds**: Don't delete the build directory unless necessary. Both scripts support incremental compilation.
 
@@ -247,7 +247,7 @@ Therefore, MLIR must be built separately.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WITH_MLIR_BACKEND` | `false` | Enable MLIR backend in morphizen-rocm build |
+| `WITH_MLIR_BACKEND` | `false` | Enable MLIR backend in onnx-hipdnn-ep build |
 | `LLVM_DIR` | (auto-detected) | Custom LLVM installation path (optional) |
 | `MLIR_DIR` | (auto-detected) | Custom MLIR installation path (optional) |
 
@@ -263,13 +263,13 @@ Installation directory: D:/Develop/m/local
 LLVM installed to: D:/Develop/m/local/lib/cmake/llvm
 MLIR installed to: D:/Develop/m/local/lib/cmake/mlir
 
-You can now build morphizen-rocm with MLIR backend enabled:
+You can now build onnx-hipdnn-ep with MLIR backend enabled:
   set WITH_MLIR_BACKEND=true
   build.bat
 ============================================================
 ```
 
-### Successful morphizen-rocm Build with MLIR
+### Successful onnx-hipdnn-ep Build with MLIR
 
 ```
 -- MorphiZen OPTIONS:

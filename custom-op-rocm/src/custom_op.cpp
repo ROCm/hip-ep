@@ -496,8 +496,12 @@ size_t RocmCustomOp::GetOutputSize(int32_t node_id, int32_t output_index) const 
     return mul_params.size_a() * sizeof(float);
   } else if (params.op_type() == "softmax") {
     const auto& softmax_params = params.softmax_params();
-    // Softmax preserves shape: batch * dim
-    return softmax_params.batch() * softmax_params.dim() * sizeof(float);
+    // Softmax preserves shape - compute total from shape dimensions
+    int64_t total = 1;
+    for (int i = 0; i < softmax_params.shape_size(); ++i) {
+      total *= softmax_params.shape(i);
+    }
+    return total * sizeof(float);
   } else if (params.op_type() == "reshape") {
     const auto& reshape_params = params.reshape_params();
     // Reshape preserves total size
@@ -1300,13 +1304,34 @@ void RocmCustomOp::ExecuteSoftmaxNode(int32_t node_id,
                                        const rocm::SoftmaxParamProto& params,
                                        const std::vector<float*>& inputs,
                                        float* output) const {
-  MY_LOG(2) << "[ROCm CustomOp] ExecuteSoftmaxNode[" << node_id << "]: batch=" << params.batch()
-            << ", dim=" << params.dim() << ", axis=" << params.axis();
-  
   auto stream = hip_context_->stream();
   const float* d_input = inputs[0];
   
-  rocm_kernels::softmax(d_input, output, params.batch(), params.dim(), stream);
+  // Calculate outer_size, axis_size, and inner_size from shape and axis
+  int64_t axis = params.axis();
+  int64_t ndim = params.shape_size();
+  
+  // Compute outer_size = product of shape[0:axis]
+  int64_t outer_size = 1;
+  for (int64_t i = 0; i < axis; ++i) {
+    outer_size *= params.shape(i);
+  }
+  
+  // axis_size = shape[axis]
+  int64_t axis_size = params.shape(axis);
+  
+  // inner_size = product of shape[axis+1:]
+  int64_t inner_size = 1;
+  for (int64_t i = axis + 1; i < ndim; ++i) {
+    inner_size *= params.shape(i);
+  }
+  
+  MY_LOG(2) << "[ROCm CustomOp] ExecuteSoftmaxNode[" << node_id << "]: "
+            << "outer_size=" << outer_size << ", axis_size=" << axis_size 
+            << ", inner_size=" << inner_size << ", axis=" << axis;
+  
+  // Use softmax_3d which handles both 2D (inner_size=1) and 3D cases
+  rocm_kernels::softmax_3d(d_input, output, axis_size, inner_size, outer_size, stream);
   
   MY_LOG(2) << "[ROCm CustomOp] Node " << node_id << ": Softmax executed successfully";
 }

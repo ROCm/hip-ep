@@ -177,7 +177,7 @@ else()
   FetchContent_Declare(
   morphizen
   GIT_REPOSITORY ../MorphiZen
-  GIT_TAG ee97f468e3b9f65d798ea58a89780cbfb3de87f3
+  GIT_TAG 54f804e85c57ed484ef40835291092e19ca6182b
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
   )
 endif()

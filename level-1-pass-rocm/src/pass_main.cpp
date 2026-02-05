@@ -17,7 +17,7 @@
 #include "rocm.pb.h"
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_ROCM, "0")
-DEF_ENV_PARAM(MORPHIZEN_ROCM_NO_MERGE, "0")  // Set to 1 to create one subgraph per node
+DEF_ENV_PARAM(MORPHIZEN_ROCM_MERGE_NODES, "0")  // Set to 1 to merge connected nodes into one subgraph
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_ROCM) >= n)
 
 using namespace morphizen;
@@ -77,6 +77,7 @@ struct Level1Rocm {
   // Check if a node is a ROCm fused node (created by Level-2 ROCm passes)
   // Detection criteria:
   // - Domain: "com.xilinx" (morphizen framework's domain for fused nodes)
+  // - Op type: "not_used_op" (created by level_2_fuse())
   // - Has attribute: "rocm_param_file" (set by Level-2 ROCm passes)
   //
   // Level-2 passes add a node attribute using NodeAttributesBuilder::merge_into()
@@ -93,17 +94,21 @@ struct Level1Rocm {
               << ", domain=" << domain << ", op_type=" << op_type;
     
     // Fused nodes created by level_2_fuse() have:
-    // - op_type = "call" (morphizen's internal fused op type)
+    // - domain = "com.xilinx" (morphizen's domain for fused ops)
+    // - op_type = "not_used_op" (level_2_fuse placeholder op type)
     // - rocm_param_file attribute set by Level-2 passes
-    // Note: domain may be empty for level_2_fuse() created nodes
-    if (op_type != "call") {
+    // Note: We check for "com.xilinx" domain OR "not_used_op" op_type for flexibility
+    bool is_fused_op = (domain == "com.xilinx" && op_type == "not_used_op") ||
+                       (op_type == "call");
+    
+    if (!is_fused_op) {
       return false;
     }
     
     // Check for ROCm-specific attribute set by Level-2 passes
     if (!node_ref.has_attr("rocm_param_file")) {
       MY_LOG(2) << "[HIP EP Level-1] Node " << output_name 
-                << " is call but missing rocm_param_file attr";
+                << " is fused op but missing rocm_param_file attr";
       return false;
     }
     
@@ -193,9 +198,10 @@ struct Level1Rocm {
       return {};
     }
 
-    // If NO_MERGE is set, each node becomes its own group (one subgraph per node)
-    if (ENV_PARAM(MORPHIZEN_ROCM_NO_MERGE)) {
-      MY_LOG(1) << "[HIP EP Level-1] NO_MERGE mode: creating one subgraph per node";
+    // Default: each node becomes its own group (one subgraph per node)
+    // This gives better granularity for debugging and profiling
+    if (!ENV_PARAM(MORPHIZEN_ROCM_MERGE_NODES)) {
+      MY_LOG(1) << "[HIP EP Level-1] Single-node mode: creating one subgraph per node";
       std::vector<std::vector<const Node*>> groups;
       groups.reserve(rocm_nodes.size());
       for (auto* node : rocm_nodes) {
@@ -203,6 +209,9 @@ struct Level1Rocm {
       }
       return groups;
     }
+
+    // MERGE_NODES mode: merge connected nodes into larger subgraphs
+    MY_LOG(1) << "[HIP EP Level-1] Merge mode: grouping connected nodes";
 
     // Initialize Union-Find: each node is its own group initially
     std::unordered_map<const Node*, const Node*> parent;

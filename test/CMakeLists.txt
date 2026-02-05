@@ -4,10 +4,10 @@
 ##
 
 #=============================================================================
-# Standalone mode: Build only test_gqa without morphizen-rocm dependencies
+# Standalone mode: Build only test_gqa without onnx-hipdnn-ep dependencies
 # Usage: cmake -B build -S . -DCMAKE_PREFIX_PATH=".../local" -DSTANDALONE_BUILD=ON
 #=============================================================================
-option(STANDALONE_BUILD "Build test_gqa standalone (no morphizen-rocm)" OFF)
+option(STANDALONE_BUILD "Build test_gqa standalone (no onnx-hipdnn-ep)" OFF)
 
 if(STANDALONE_BUILD)
   cmake_minimum_required(VERSION 3.20)
@@ -117,6 +117,57 @@ else()
 endif()
 
 #=============================================================================
+# model_verifier executable for CPU vs GPU output comparison
+#=============================================================================
+option(BUILD_MODEL_VERIFIER "Build model_verifier executable" ON)
+
+if(BUILD_MODEL_VERIFIER)
+  message(STATUS "Building model_verifier: ENABLED")
+  
+  if(TARGET onnxruntime::onnxruntime OR ORT_LIB)
+    add_executable(model_verifier model_verifier.cpp)
+    
+    if(TARGET onnxruntime::onnxruntime)
+      target_link_libraries(model_verifier PRIVATE onnxruntime::onnxruntime)
+    else()
+      target_link_libraries(model_verifier PRIVATE ${ORT_LIB})
+      target_include_directories(model_verifier PRIVATE ${ORT_INCLUDE_DIR})
+    endif()
+    
+    # Also link with ORT from source tree if available
+    if(ORT_SOURCE_INCLUDE_DIR)
+      target_include_directories(model_verifier PRIVATE "${ORT_SOURCE_INCLUDE_DIR}")
+    endif()
+    
+    target_compile_features(model_verifier PRIVATE cxx_std_17)
+    
+    if(WIN32)
+      target_compile_definitions(model_verifier PRIVATE "_CRT_SECURE_NO_WARNINGS")
+      
+      # Copy ORT DLLs to output directory
+      if(TARGET onnxruntime::onnxruntime)
+        add_custom_command(
+          TARGET model_verifier POST_BUILD
+          COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:onnxruntime::onnxruntime>
+            $<TARGET_FILE_DIR:model_verifier>
+        )
+      endif()
+    endif()
+    
+    set_target_properties(model_verifier PROPERTIES FOLDER "verification-tests")
+    
+    install(TARGETS model_verifier RUNTIME DESTINATION bin)
+    
+    message(STATUS "model_verifier configured successfully")
+  else()
+    message(STATUS "ONNX Runtime not found, skipping model_verifier")
+  endif()
+else()
+  message(STATUS "Building model_verifier: DISABLED")
+endif()
+
+#=============================================================================
 # ROCm tests (require ROCm libraries)
 #=============================================================================
 
@@ -221,7 +272,7 @@ if(TARGET onnxruntime)
   endif()
   set_target_properties(ort_integration_test PROPERTIES FOLDER "rocm-tests")
 elseif(ORT_SOURCE_INCLUDE_DIR AND EXISTS "${ORT_BUILD_IMPLIB}")
-  # Use ORT from build output (common case when building morphizen-rocm)
+  # Use ORT from build output (common case when building onnx-hipdnn-ep)
   message(STATUS "Building ORT integration test (using build output)")
   message(STATUS "  ORT include: ${ORT_SOURCE_INCLUDE_DIR}")
   message(STATUS "  ORT lib: ${ORT_BUILD_IMPLIB}")

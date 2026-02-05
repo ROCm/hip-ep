@@ -19,10 +19,10 @@ echo   MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=%MORPHIZEN_VITISAI_EP_ENABLE_CPU_D
 echo.
 
 REM Copy test model if needed
-if not exist "C:\Develop\m\build\morphizen-rocm\bin\conv_model.onnx" (
+if not exist "C:\Develop\m\build\onnx-hipdnn-ep\bin\conv_model.onnx" (
     echo Copying test model...
-    copy "test\conv_model.onnx" "C:\Develop\m\build\morphizen-rocm\bin\" >nul 2>&1
+    copy "test\conv_model.onnx" "C:\Develop\m\build\onnx-hipdnn-ep\bin\" >nul 2>&1
 )
 
-cd C:\Develop\m\build\morphizen-rocm\bin
+cd C:\Develop\m\build\onnx-hipdnn-ep\bin
 ort_integration_test.exe --gtest_filter=OrtIntegrationTest.VitisAIProviderInference

@@ -18,14 +18,14 @@ REM Set up environment
 set PATH=C:\Develop\m\dist\therock\bin;%PATH%
 
 REM Run Conv test
-C:\Develop\m\build\morphizen-rocm\bin\rocm_conv_test.exe
+C:\Develop\m\build\onnx-hipdnn-ep\bin\rocm_conv_test.exe
 
 REM Run GEMM test
-C:\Develop\m\build\morphizen-rocm\bin\rocm_gemm_test.exe
+C:\Develop\m\build\onnx-hipdnn-ep\bin\rocm_gemm_test.exe
 
 REM Run ORT Integration test (requires conv_model.onnx in bin folder)
-cd C:\Develop\m\build\morphizen-rocm\bin
-copy C:\Develop\m\Source\morphizen-rocm\test\conv_model.onnx .
+cd C:\Develop\m\build\onnx-hipdnn-ep\bin
+copy C:\Develop\m\Source\onnx-hipdnn-ep\test\conv_model.onnx .
 ort_integration_test.exe
 ```
 
@@ -35,12 +35,12 @@ REM Conv test with MIOpen verbose logging
 set PATH=C:\Develop\m\dist\therock\bin;%PATH%
 set MIOPEN_ENABLE_LOGGING=1
 set MIOPEN_LOG_LEVEL=5
-C:\Develop\m\build\morphizen-rocm\bin\rocm_conv_test.exe --gtest_print_time=1
+C:\Develop\m\build\onnx-hipdnn-ep\bin\rocm_conv_test.exe --gtest_print_time=1
 
 REM GEMM test with hipBLASLt verbose logging
 set PATH=C:\Develop\m\dist\therock\bin;%PATH%
 set HIPBLASLT_LOG_MASK=0xFFFF
-C:\Develop\m\build\morphizen-rocm\bin\rocm_gemm_test.exe --gtest_print_time=1
+C:\Develop\m\build\onnx-hipdnn-ep\bin\rocm_gemm_test.exe --gtest_print_time=1
 ```
 
 ### VitisAI EP Debug Logging (MY_LOG)
@@ -110,7 +110,7 @@ run_test_with_therock.bat
 set PATH=C:\Develop\m\dist\therock\bin;%PATH%
 set MIOPEN_ENABLE_LOGGING=1
 set MIOPEN_LOG_LEVEL=5
-C:\Develop\m\build\morphizen-rocm\bin\rocm_conv_test.exe
+C:\Develop\m\build\onnx-hipdnn-ep\bin\rocm_conv_test.exe
 ```
 
 **Verbose Log:**
@@ -158,7 +158,7 @@ MIOpen(HIP): Info [ConvolutionForward] algo = 1, workspace = 0
 ```batch
 set PATH=C:\Develop\m\dist\therock\bin;%PATH%
 set HIPBLASLT_LOG_MASK=0xFFFF
-C:\Develop\m\build\morphizen-rocm\bin\rocm_gemm_test.exe
+C:\Develop\m\build\onnx-hipdnn-ep\bin\rocm_gemm_test.exe
 ```
 
 **Verbose Log:**
@@ -203,7 +203,7 @@ Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT16x16x16_SN_LDSB0_AFC1_...
 
 **Command to reproduce (with debug logs):**
 ```batch
-cd C:\Develop\m\build\morphizen-rocm\bin
+cd C:\Develop\m\build\onnx-hipdnn-ep\bin
 set MORPHIZEN_DEBUG_ROCM=1
 ort_integration_test.exe --gtest_filter=OrtIntegrationTest.LoadVitisAIProvider
 ```
@@ -249,8 +249,8 @@ that test #5 (`VitisAIProviderInference`) compares against to verify GPU correct
 
 **Command to reproduce:**
 ```batch
-cd C:\Develop\m\build\morphizen-rocm\bin
-copy C:\Develop\m\Source\morphizen-rocm\test\conv_model.onnx .
+cd C:\Develop\m\build\onnx-hipdnn-ep\bin
+copy C:\Develop\m\Source\onnx-hipdnn-ep\test\conv_model.onnx .
 ort_integration_test.exe --gtest_filter=OrtIntegrationTest.CPUProviderInference
 ```
 
@@ -298,7 +298,7 @@ ORT Integration Test for VitisAI HIP EP
 **Prerequisites:**
 ```batch
 REM Copy test model to bin folder
-copy C:\Develop\m\Source\morphizen-rocm\test\conv_model.onnx C:\Develop\m\build\morphizen-rocm\bin\
+copy C:\Develop\m\Source\onnx-hipdnn-ep\test\conv_model.onnx C:\Develop\m\build\onnx-hipdnn-ep\bin\
 
 REM Enable VitisAI device detection (required)
 set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
@@ -309,7 +309,7 @@ so no external config file is needed. See CMake option: `VAIP_JSON_CONFIG_FILE`.
 
 **Command to reproduce (with all logs enabled):**
 ```batch
-cd C:\Develop\m\build\morphizen-rocm\bin
+cd C:\Develop\m\build\onnx-hipdnn-ep\bin
 set PATH=C:\Develop\m\dist\therock\bin;%PATH%
 set MORPHIZEN_DEBUG_ROCM=1
 set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1

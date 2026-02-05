@@ -10,7 +10,7 @@ echo.
 
 REM Step 1: Generate the ONNX model
 echo [Step 1/3] Generating ONNX test model...
-python d:\Develop\m\morphizen-rocm\test\gen_conv_gemm_model.py --output test_conv_gemm.onnx
+python d:\Develop\m\onnx-hipdnn-ep\test\gen_conv_gemm_model.py --output test_conv_gemm.onnx
 if errorlevel 1 (
     echo ERROR: Failed to generate ONNX model
     exit /b 1

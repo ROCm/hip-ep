@@ -2,7 +2,7 @@
 echo ============================================================
 echo Incremental Build (uses existing CMake cache)
 echo ============================================================
-cmake --build C:/Develop/m/build/morphizen-rocm
+cmake --build C:/Develop/m/build/onnx-hipdnn-ep
 if %errorlevel% neq 0 (
     echo Build FAILED!
     exit /b %errorlevel%

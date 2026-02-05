@@ -8,7 +8,7 @@ setlocal enabledelayedexpansion
 
 REM Configuration
 set THEROCK_DIST=C:\Develop\m\dist\therock
-set BUILD_DIR=C:\Develop\m\build\morphizen-rocm
+set BUILD_DIR=C:\Develop\m\build\onnx-hipdnn-ep
 
 REM Check TheRock installation
 if not exist "%THEROCK_DIST%\bin" (
