@@ -166,8 +166,7 @@ onnx-hipdnn-ep/
 └── doc/
     ├── 01_DESIGN.md                      # This document
     ├── 02_LEVEL1_PASS_DESIGN.md          # Level-1 pass details
-    ├── 03_GROUPING_ALGORITHM.md          # Union-Find grouping
-    └── ...                               # Other documentation
+    └── 03_BUILD.md                       # Build instructions
 ```
 
 ---
@@ -258,7 +257,7 @@ class RocmCustomOp {
 };
 ```
 
-> **Note:** For detailed resource lifecycle and multi-session architecture, see [08_ROCM_RESOURCE_MANAGEMENT.md](08_ROCM_RESOURCE_MANAGEMENT.md).
+> **Note:** Each custom op instance maintains its own HipContext for resource isolation.
 
 ### 5.3 Implicit Fusion via Shared Stream
 

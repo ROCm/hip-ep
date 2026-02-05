@@ -511,13 +511,9 @@ After successfully building onnx-hipdnn-ep:
 
 1. Review [01_DESIGN.md](01_DESIGN.md) for architecture overview
 2. See [02_LEVEL1_PASS_DESIGN.md](02_LEVEL1_PASS_DESIGN.md) for Level-1 pass design
-3. Check [06_LOGGING.md](06_LOGGING.md) for debugging capabilities
-4. Refer to [09_TROUBLESHOOTING.md](09_TROUBLESHOOTING.md) for runtime issues
 
 ## See Also
 
 - [01_DESIGN.md](01_DESIGN.md) - Architecture and design overview
 - [02_LEVEL1_PASS_DESIGN.md](02_LEVEL1_PASS_DESIGN.md) - Level-1 pass implementation
-- [06_LOGGING.md](06_LOGGING.md) - Logging system
-- [09_TROUBLESHOOTING.md](09_TROUBLESHOOTING.md) - Runtime troubleshooting
 - [README.md](../README.md) - Project overview
