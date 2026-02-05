@@ -7,8 +7,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(rocm-kernels LANGUAGES CXX)
 
-# Get the THEROCK_DIST path
-set(THEROCK_DIST "" CACHE PATH "TheRock distribution path")
+# THEROCK_DIST is defined in root CMakeLists.txt
 
 # Include HIP utilities for building .hip files
 include(${CMAKE_SOURCE_DIR}/cmake/hip_utils.cmake)

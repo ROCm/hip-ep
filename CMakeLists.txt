@@ -26,6 +26,29 @@ project(
   VERSION 1.0.0
   LANGUAGES C CXX)
 
+# ==============================================================================
+# TheRock ROCm SDK Configuration
+# ==============================================================================
+# THEROCK_DIST points to the TheRock ROCm SDK installation directory.
+# It can be set via:
+#   1. CMake cache variable: -DTHEROCK_DIST=/path/to/therock
+#   2. Environment variable: THEROCK_DIST=/path/to/therock
+# ==============================================================================
+set(THEROCK_DIST "" CACHE PATH "TheRock ROCm SDK distribution path")
+if(NOT THEROCK_DIST AND DEFINED ENV{THEROCK_DIST})
+  set(THEROCK_DIST "$ENV{THEROCK_DIST}")
+endif()
+
+# Strip any trailing whitespace from THEROCK_DIST
+if(THEROCK_DIST)
+  string(STRIP "${THEROCK_DIST}" THEROCK_DIST)
+  message(STATUS "[onnx-hipdnn-ep] THEROCK_DIST: ${THEROCK_DIST}")
+
+  # Add to CMAKE_PREFIX_PATH for find_package
+  list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}")
+  list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}/lib/cmake")
+endif()
+
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
 
 # HIP kernels library (compiled with hipcc on Windows, CMake HIP on Linux)
