@@ -177,14 +177,16 @@ def get_pr_status(pr_number):
         return None
 
 
-def check_if_merged(branch):
-    """Check if branch is merged using git."""
-    # Fetch latest
-    run_command("git fetch origin main", check=False)
-
-    # Check if our commits are in origin/main
-    result = run_command(f"git log origin/main..{branch}", check=False)
-    return result == ""  # Empty means all commits are in main
+def check_if_merged(pr_number):
+    """Check if PR is merged using GitHub API."""
+    output = run_command(f"gh pr view {pr_number} --json state,mergedAt", check=False)
+    if not output:
+        return False
+    try:
+        data = json.loads(output)
+        return data.get("state") == "MERGED"
+    except json.JSONDecodeError:
+        return False
 
 
 def run_precommit_fix(branch):
@@ -291,8 +293,8 @@ def main():
         cycle_count += 1
         print(f"[Cycle {cycle_count}] Checking status...")
 
-        # Check if merged using git
-        if check_if_merged(current_branch):
+        # Check if merged using GitHub API
+        if check_if_merged(pr_number):
             print(f"✅ PR #{pr_number} merged successfully!")
             cleanup_after_merge(current_branch)
             print("STATUS:CLEANUP_COMPLETE")
