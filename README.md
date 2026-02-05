@@ -324,6 +324,18 @@ cmake --build ..\build\onnx-hipdnn-ep --config Release --target install --parall
 
 ## Testing
 
+### Run Sample Test show call MIOpen/hipBLASLt/HIP custom kernel/...
+
+```bash
+# Set environment
+export PATH="$THEROCK_DIST/bin:$PATH"
+
+# Run test
+cd ../build/onnx-hipdnn-ep/bin/Release/
+python ../../../../onnx-hipdnn-ep/test/gen_sample_model.py
+./ort_integration_test.exe
+```
+
 ### Run GQA Test
 
 ```bash
@@ -331,6 +343,7 @@ cmake --build ..\build\onnx-hipdnn-ep --config Release --target install --parall
 export PATH="$THEROCK_DIST/bin:$PATH"
 
 # Run test
+cd /path/to/onnx-hipdnn-ep
 cd ../local/bin
 ./test_gqa.exe ../../onnx-hipdnn-ep/test/models/gqa_layer_00.onnx
 ```
