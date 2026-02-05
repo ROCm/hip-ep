@@ -2,8 +2,8 @@
 // Licensed under the MIT License.
 
 /**
- * ORT Integration Test for VitisAI EP with ROCm backend.
- * This test uses ONNX Runtime with VitisAI Execution Provider to verify
+ * ORT Integration Test for Morphizen EP with ROCm backend.
+ * This test uses ONNX Runtime with Morphizen Execution Provider to verify
  * the complete pipeline including passes and custom ops (where MY_LOG is used).
  *
  * To see MY_LOG output, set these environment variables before running:
@@ -13,14 +13,10 @@
  */
 
 #include <gtest/gtest.h>
-#include <vector>
 #include <cmath>
 #include <fstream>
 #include <iostream>
 
-#ifndef ORT_API_MANUAL_INIT
-#define ORT_API_MANUAL_INIT
-#endif
 #include <onnxruntime_cxx_api.h>
 
 #ifdef _WIN32
@@ -34,16 +30,16 @@ inline std::wstring ToWideString(const char* str) {
 }
 #endif
 
-#ifndef VITISAI_EP_LIB_PATH
+#ifndef MORPHIZEN_EP_LIB_PATH
 #ifdef _WIN32
-#define VITISAI_EP_LIB_PATH "onnxruntime_vitisai_ep.dll"
+#define MORPHIZEN_EP_LIB_PATH "onnxruntime_morphizen_ep.dll"
 #else
-#define VITISAI_EP_LIB_PATH "./libonnxruntime_vitisai_ep.so"
+#define MORPHIZEN_EP_LIB_PATH "./libonnxruntime_morphizen_ep.so"
 #endif
 #endif
 
 #ifndef CONV_TEST_MODEL_PATH
-#define CONV_TEST_MODEL_PATH "./conv_model.onnx"
+#define CONV_TEST_MODEL_PATH "./sample.onnx"
 #endif
 
 // Check if a file exists
@@ -55,39 +51,27 @@ bool file_exists(const std::string& path) {
 class OrtIntegrationTest : public ::testing::Test {
 protected:
   void SetUp() override {
-    // Initialize ORT
-    Ort::InitApi(OrtGetApiBase()->GetApi(ORT_API_VERSION));
-    // Use INFO level to see Level-1 pass logs (MY_LOG -> glog INFO)
     env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_INFO, "OrtIntegrationTest");
     
-    // Print environment variable status for debugging
-    const char* debug_level = std::getenv("MORPHIZEN_DEBUG_ROCM");
-    const char* glog_stderr = std::getenv("GLOG_logtostderr");
-    
-    std::cout << "\n=== Environment Variables ===" << std::endl;
-    std::cout << "MORPHIZEN_DEBUG_ROCM: " << (debug_level ? debug_level : "(not set)") << std::endl;
-    std::cout << "GLOG_logtostderr: " << (glog_stderr ? glog_stderr : "(not set)") << std::endl;
-    std::cout << "==============================\n" << std::endl;
-
-    // Register VitisAI EP
-    const char* lib_path_str = VITISAI_EP_LIB_PATH;
+    // Register Morphizen EP
+    const char* lib_path_str = MORPHIZEN_EP_LIB_PATH;
 #ifdef _WIN32
     auto lib_path_w = ToWideString(lib_path_str);
     OrtStatus* status = Ort::GetApi().RegisterExecutionProviderLibrary(
-        *env_, "VitisAI", lib_path_w.c_str());
+        *env_, "MorphiZen", lib_path_w.c_str());
 #else
     OrtStatus* status = Ort::GetApi().RegisterExecutionProviderLibrary(
-        *env_, "VitisAI", lib_path_str);
+        *env_, "MorphiZen", lib_path_str);
 #endif
 
     if (status != nullptr) {
       std::string error_msg = Ort::GetApi().GetErrorMessage(status);
       Ort::GetApi().ReleaseStatus(status);
       ep_available_ = false;
-      std::cout << "[SetUp] VitisAI EP not available: " << error_msg << std::endl;
+      std::cout << "[SetUp] MorphiZen EP not available: " << error_msg << std::endl;
     } else {
       ep_available_ = true;
-      std::cout << "[SetUp] VitisAI EP registered successfully from: " << lib_path_str << std::endl;
+      std::cout << "[SetUp] MorphiZen EP registered successfully from: " << lib_path_str << std::endl;
     }
 
     // Check if model file exists
@@ -108,15 +92,12 @@ protected:
   bool model_available_{false};
 };
 
-TEST_F(OrtIntegrationTest, LoadVitisAIProvider) {
-  std::cout << "[Test] Loading VitisAI Execution Provider..." << std::endl;
+TEST_F(OrtIntegrationTest, LoadMorphiZenProvider) {
+  std::cout << "[Test] Loading MorphiZen Execution Provider..." << std::endl;
   
-  // The EP is registered via RegisterExecutionProviderLibrary
-  // Note: VitisAI EP may not yet expose devices via GetEpDevices() (ORT 2.0 API)
-  EXPECT_TRUE(ep_available_) << "VitisAI EP should be registered successfully";
+  EXPECT_TRUE(ep_available_) << "MorphiZen EP should be registered successfully";
   
   if (ep_available_) {
-    // Try to get EP devices (ORT 2.0 API)
     std::vector<Ort::ConstEpDevice> devices = env_->GetEpDevices();
     std::cout << "[Test] Found " << devices.size() << " EP device(s)" << std::endl;
     
@@ -125,18 +106,18 @@ TEST_F(OrtIntegrationTest, LoadVitisAIProvider) {
       std::cout << "[Test]   - EP device: " << ep_name << std::endl;
     }
     
-    // Check for VitisAI device
-    bool found_vitisai = false;
+    // Check for Morphizen device
+    bool found_morphizen = false;
     for (const auto& device : devices) {
       std::string ep_name = device.EpName();
-      if (ep_name == "VitisAI" || ep_name == "VitisAIExecutionProvider") {
-        found_vitisai = true;
+      if (ep_name == "MorphiZen" || ep_name == "MorphiZenExecutionProvider") {
+        found_morphizen = true;
         break;
       }
     }
     
-    if (!found_vitisai) {
-      std::cout << "[Test] Note: VitisAI EP registered but not exposing V2 devices" << std::endl;
+    if (!found_morphizen) {
+      std::cout << "[Test] Note: MorphiZen EP registered but not exposing V2 devices" << std::endl;
       std::cout << "[Test] This is expected - ORT 2.0 device API may not be implemented yet" << std::endl;
     }
     
@@ -204,12 +185,12 @@ TEST_F(OrtIntegrationTest, CPUProviderInference) {
   std::cout << "[Test] CPU inference completed successfully!" << std::endl;
 }
 
-// VitisAI EP integration test - tests with Level-1 ROCm pass
-TEST_F(OrtIntegrationTest, VitisAIProviderInference) {
-  std::cout << "[Test] Testing VitisAI EP with Level-1 ROCm pass..." << std::endl;
+// Morphizen EP integration test - tests with Level-1 ROCm pass
+TEST_F(OrtIntegrationTest, MorphiZenProviderInference) {
+  std::cout << "[Test] Testing MorphiZen EP with Level-1 ROCm pass..." << std::endl;
   
   if (!ep_available_) {
-    GTEST_SKIP() << "VitisAI EP not available";
+    GTEST_SKIP() << "MorphiZen EP not available";
   }
   
   ASSERT_TRUE(model_available_) << "Conv model not found at: " << CONV_TEST_MODEL_PATH;
@@ -249,55 +230,42 @@ TEST_F(OrtIntegrationTest, VitisAIProviderInference) {
     std::cout << "[Test] CPU reference output[0]: " << cpu_output[0] << std::endl;
   }
 
-  // Try to run with VitisAI EP using ORT 2.0 API
+  // Try to run with Morphizen EP using ORT 2.0 API
   {
     // Get EP devices
     std::vector<Ort::ConstEpDevice> devices = env_->GetEpDevices();
     
-    // Find VitisAI device
-    const OrtEpDevice* vitisai_device = nullptr;
+    // Find Morphizen device
+    const OrtEpDevice* morphizen_device = nullptr;
     for (const auto& device : devices) {
       std::string ep_name = device.EpName();
       std::cout << "[Test] Found EP device: " << ep_name << std::endl;
-      if (ep_name == "VitisAI" || ep_name == "VitisAIExecutionProvider") {
-        vitisai_device = static_cast<const OrtEpDevice*>(device);
+      if (ep_name == "MorphiZen" || ep_name == "MorphiZenExecutionProvider") {
+        morphizen_device = static_cast<const OrtEpDevice*>(device);
         break;
       }
     }
 
-    if (vitisai_device == nullptr) {
-      // ORT 2.0 V2 device API not implemented yet in VitisAI EP
+    if (morphizen_device == nullptr) {
+      // ORT 2.0 V2 device API not implemented yet in Morphizen EP
       // This is expected - skip with informative message
-      std::cout << "[Test] VitisAI EP V2 device API not yet implemented" << std::endl;
+      std::cout << "[Test] MorphiZen EP V2 device API not yet implemented" << std::endl;
       std::cout << "[Test] The EP was registered successfully, but doesn't expose V2 devices" << std::endl;
-      std::cout << "[Test] VitisAI EP configuration (embedded in DLL):" << std::endl;
-      std::cout << "[Test]   Level-1 pass: vaip-pass_level1_rocm" << std::endl;
-      std::cout << "[Test]   Level-2 sub-passes:" << std::endl;
-      std::cout << "[Test]     - vaip-pass_level2_rocm_conv" << std::endl;
-      std::cout << "[Test]     - vaip-pass_level2_rocm_gemm" << std::endl;
       
-      GTEST_SKIP() << "VitisAI EP V2 device API not yet implemented (EP registered OK)";
+      GTEST_SKIP() << "Morphizen EP V2 device API not yet implemented (EP registered OK)";
     }
 
     Ort::SessionOptions session_options;
 
-    // Add VitisAI EP using V2 API
+    // Add Morphizen EP using V2 API
     OrtStatus* status = Ort::GetApi().SessionOptionsAppendExecutionProvider_V2(
-        session_options, *env_, &vitisai_device, 1, nullptr, nullptr, 0);
+        session_options, *env_, &morphizen_device, 1, nullptr, nullptr, 0);
 
     if (status != nullptr) {
       std::string error_msg = Ort::GetApi().GetErrorMessage(status);
       Ort::GetApi().ReleaseStatus(status);
-      FAIL() << "Failed to add VitisAI EP: " << error_msg;
+      FAIL() << "Failed to add Morphizen EP: " << error_msg;
     }
-
-    std::cout << "[Test] VitisAI EP configuration:" << std::endl;
-    std::cout << "[Test]   Level-1 pass: vaip-pass_level1_rocm (ROCm orchestration)" << std::endl;
-    std::cout << "[Test]   Level-2 sub-passes:" << std::endl;
-    std::cout << "[Test]     - vaip-pass_level2_rocm_conv (Conv pattern matching)" << std::endl;
-    std::cout << "[Test]     - vaip-pass_level2_rocm_gemm (Gemm pattern matching)" << std::endl;
-
-    std::cout << "[Test] Creating session with VitisAI EP (ROCm backend)..." << std::endl;
 
     try {
 #ifdef _WIN32
@@ -315,7 +283,7 @@ TEST_F(OrtIntegrationTest, VitisAIProviderInference) {
       const char* input_names[] = {"X"};
       const char* output_names[] = {"Y"};
 
-      std::cout << "[Test] Running VitisAI EP inference (MIOpen Conv backend)..." << std::endl;
+      std::cout << "[Test] Running Morphizen EP inference (MIOpen Conv backend)..." << std::endl;
       auto output_tensors = session.Run(Ort::RunOptions{}, input_names, &input_tensor, 1, output_names, 1);
       std::cout << "[Test] Inference completed" << std::endl;
 
@@ -365,7 +333,7 @@ TEST_F(OrtIntegrationTest, VitisAIProviderInference) {
                       << "+), first mismatch at index " << first_mismatch_idx << std::endl;
             std::cout << "[Test] Max difference so far: " << max_diff << std::endl;
             std::cout << "[Test] Stopping comparison early to avoid log flood." << std::endl;
-            FAIL() << "CPU vs VitisAI EP output mismatch: " << mismatch_count 
+            FAIL() << "CPU vs Morphizen EP output mismatch: " << mismatch_count 
                    << " elements differ by more than " << TOLERANCE;
           }
         }
@@ -375,11 +343,11 @@ TEST_F(OrtIntegrationTest, VitisAIProviderInference) {
         std::cout << "[Test] Total mismatches: " << mismatch_count << " out of " 
                   << cpu_output.size() << " elements" << std::endl;
         std::cout << "[Test] Max difference: " << max_diff << std::endl;
-        FAIL() << "CPU vs VitisAI EP output has " << mismatch_count << " mismatches";
+        FAIL() << "CPU vs Morphizen EP output has " << mismatch_count << " mismatches";
       }
 
       std::cout << "[Test] Max difference between CPU and GPU: " << max_diff << std::endl;
-      std::cout << "[Test] VitisAI EP inference verified successfully!" << std::endl;
+      std::cout << "[Test] Morphizen EP inference verified successfully!" << std::endl;
       
     } catch (const Ort::Exception& ex) {
       std::string error_msg = ex.what();
@@ -397,7 +365,7 @@ TEST_F(OrtIntegrationTest, VitisAIProviderInference) {
 
 int main(int argc, char** argv) {
   std::cout << "\n========================================" << std::endl;
-  std::cout << "ORT Integration Test for VitisAI ROCm EP" << std::endl;
+  std::cout << "ORT Integration Test for Morphizen ROCm EP" << std::endl;
   std::cout << "========================================\n" << std::endl;
   
   std::cout << "To see MY_LOG output, set these environment variables:" << std::endl;

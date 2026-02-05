@@ -9,6 +9,25 @@
 namespace rocm_kernels {
 
 //============================================================================
+// Bias Addition (for Conv)
+//============================================================================
+
+/**
+ * Add bias to Conv output (broadcast along spatial dimensions)
+ * For NCHW format: output[n,c,h,w] += bias[c]
+ * 
+ * @param data Input/Output tensor [N, C, H, W] (in-place operation)
+ * @param bias Bias tensor [C] (on device)
+ * @param batch Batch size (N)
+ * @param channels Number of channels (C)
+ * @param spatial_size H * W
+ * @param stream HIP stream
+ */
+void add_bias_nchw(float* data, const float* bias,
+                   int64_t batch, int64_t channels, int64_t spatial_size,
+                   hipStream_t stream);
+
+//============================================================================
 // Mul (Element-wise Multiplication)
 //============================================================================
 

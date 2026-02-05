@@ -78,9 +78,10 @@ set(DEP_TAG_llvm "f8cb7987c64dcffb72414a40560055cb717dbf74")
 # Try to find pre-installed LLVM/MLIR first
 # Note: Commented out to avoid using incomplete MLIR from previous builds
 #find_package(LLVM QUIET CONFIG)
-#find_package(MLIR QUIET CONFIG)
+find_package(MLIR QUIET CONFIG)
 
-if(LLVM_FOUND AND MLIR_FOUND)
+if(MLIR_FOUND)
+  find_package(LLVM REQUIRED CONFIG)
   message(STATUS "Found pre-installed LLVM and MLIR")
   message(STATUS "LLVM_DIR: ${LLVM_DIR}")
   message(STATUS "MLIR_DIR: ${MLIR_DIR}")
@@ -107,6 +108,7 @@ else()
     FetchContent_Declare(
       llvm-project
       SOURCE_DIR ${LOCAL_LLVM}/..
+      EXCLUDE_FROM_ALL
       SOURCE_SUBDIR llvm)
   else()
     message(STATUS "Cannot find LLVM in local directories")
