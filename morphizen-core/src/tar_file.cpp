@@ -300,20 +300,19 @@ TarFile::add_regular_entry(const std::string& path, // name of the entry
                            std::streambuf::pos_type block_begin_pos,
                            std::streambuf::pos_type block_end_pos) {
   // erase the old entry if found
-  auto it = std::remove_if(
-      entries_.begin(), entries_.end(), [&path](const auto& entry) {
-        auto ret = entry->path() == path;
-        if (ret) {
-          MY_LOG(1)
-              << " add_symlink_entry: duplicated entry found, remove old entry "
-              << entry->to_string() //
-              ;
-        }
-        return ret;
-      });
-  if (it != entries_.end()) {
-    entries_.erase(it, entries_.end());
-  }
+  entries_.erase(
+      std::remove_if(entries_.begin(), entries_.end(),
+                     [&path](const auto& entry) {
+                       auto ret = entry->path() == path;
+                       if (ret) {
+                         MY_LOG(1) << " add_symlink_entry: duplicated entry "
+                                      "found, remove old entry "
+                                   << entry->to_string() //
+                             ;
+                       }
+                       return ret;
+                     }),
+      entries_.end());
 
   auto ret = add_entry(path, std::nullopt, data_begin_pos, data_end_pos,
                        block_begin_pos, block_end_pos);
@@ -359,21 +358,19 @@ TarFile::add_symlink_entry(const std::string& symlink_name,
                            std::streambuf::pos_type block_begin_pos,
                            std::streambuf::pos_type block_end_pos) {
   // erase the old entry if found
-  auto it = std::remove_if(
-      entries_.begin(), entries_.end(), [&symlink_name](const auto& entry) {
-        auto ret = entry->path() == symlink_name;
-        if (ret) {
-          MY_LOG(1)
-              << " add_symlink_entry: duplicated entry found, remove old entry "
-              << entry->to_string() //
-              ;
-        }
-        return ret;
-      });
-  if (it != entries_.end()) {
-
-    entries_.erase(it, entries_.end());
-  }
+  entries_.erase(
+      std::remove_if(entries_.begin(), entries_.end(),
+                     [&symlink_name](const auto& entry) {
+                       auto ret = entry->path() == symlink_name;
+                       if (ret) {
+                         MY_LOG(1) << " add_symlink_entry: duplicated entry "
+                                      "found, remove old entry "
+                                   << entry->to_string() //
+                             ;
+                       }
+                       return ret;
+                     }),
+      entries_.end());
   TarEntryInputStream* ret = nullptr;
   auto real_entry = find_real_entry(real_path_name);
   if (real_entry) {
