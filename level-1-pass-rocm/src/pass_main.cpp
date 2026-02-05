@@ -39,7 +39,6 @@ using namespace morphizen;
  * }
  *
  * See doc/02_LEVEL1_PASS_DESIGN.md for architecture overview.
- * See doc/03_GROUPING_ALGORITHM.md for the Union-Find grouping algorithm.
  */
 struct Level1Rocm {
   Level1Rocm(IPass& self) : self_{self} {}
@@ -187,7 +186,7 @@ struct Level1Rocm {
   // Time complexity: O(N × α(N)) ≈ O(N) where N is the number of ROCm nodes
   // Space complexity: O(N) for parent map and producer map
   //
-  // See doc/03_GROUPING_ALGORITHM.md for detailed algorithm description.
+  // Union-Find algorithm groups connected ROCm nodes efficiently.
   //============================================================================
 
   std::vector<std::vector<const Node*>>
