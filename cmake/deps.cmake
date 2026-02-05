@@ -4,6 +4,7 @@
 ##
 include(FetchContent)
 
+# Function to get git version info for a component
 function(vaip_add_version_info)
   set(options)
   set(oneValueArgs COMPONENT DIR)
@@ -31,15 +32,16 @@ function(vaip_add_version_info)
   message(STATUS "FindPackage Version info: ${ARG_COMPONENT}=${TMP_GIT_COMMIT} ${TMP_VERSION}")
 endfunction()
 
+# Collect version info for onnx-hipdnn-ep
 set(VERSION_LIST
-    morphizen-rocm=morphizen-rocm)
+    onnx-hipdnn-ep=onnx-hipdnn-ep)
 set(VERSION_INFO "")
 foreach(COMP_PAIR IN LISTS VERSION_LIST)
   string(FIND "${COMP_PAIR}" "=" pos)
   string(SUBSTRING "${COMP_PAIR}" 0 ${pos} COMP)
   math(EXPR COMP_BEG "${pos} + 1")
   string(SUBSTRING "${COMP_PAIR}" ${COMP_BEG} -1 DIR)
-  set(BUILD_DIR "${CMAKE_SOURCE_DIR}/../${DIR}/") # already built source dir
+  set(BUILD_DIR "${CMAKE_SOURCE_DIR}/../${DIR}/")
 
   string(TOLOWER COMP ${COMP})
   set(FETCH_SRC_DIR "${${COMP}_SOURCE_DIR}")
@@ -57,8 +59,11 @@ foreach(COMP_PAIR IN LISTS VERSION_LIST)
   unset(COMP_VERSION)
 endforeach()
 
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/version.txt" "${VERSION_INFO}")
+set(MORPHIZEN_VERSION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
+
 # LLVM configuration options (same as onnx-hipdnn-ep)
-message(STATUS "Configuring LLVM/MLIR for morphizen-rocm")
+message(STATUS "Configuring LLVM/MLIR for onnx-hipdnn-ep")
 set(LLVM_ENABLE_PROJECTS "mlir" CACHE STRING "LLVM projects to build")
 set(LLVM_TARGETS_TO_BUILD "host" CACHE STRING "LLVM targets to build")
 set(LLVM_ENABLE_ASSERTIONS ON CACHE BOOL "Enable LLVM assertions")
@@ -158,29 +163,11 @@ endif()
 
 message(STATUS "LLVM/MLIR configuration complete")
 
-## if morphizen source is checked out from git in the parent directory, we use the working directory from there.
-find_path(MORPHIZEN_CMAKE_LIST_TXT_IN_LOCAL_WORKING_DIR
-  NAMES CMakeLists.txt
-  PATHS "${CMAKE_SOURCE_DIR}/../morphizen"
-  "${CMAKE_SOURCE_DIR}/../MorphiZen"
-  # for CI checker, MorphiZen is checkout by default in the parent directory
-  "${CMAKE_SOURCE_DIR}/.."
-  NO_DEFAULT_PATH)
-
-if(MORPHIZEN_CMAKE_LIST_TXT_IN_LOCAL_WORKING_DIR)
-  message(STATUS "found morphizen source in local working directory")
-  message(STATUS "MorphiZen SOURCE_DIR ${MORPHIZEN_CMAKE_LIST_TXT_IN_LOCAL_WORKING_DIR}")
-  FetchContent_Declare(
-   morphizen
-   SOURCE_DIR ${MORPHIZEN_CMAKE_LIST_TXT_IN_LOCAL_WORKING_DIR})
-else()
-  FetchContent_Declare(
-  morphizen
-  GIT_REPOSITORY https://github.com/ROCm/MorphiZen.git
-  GIT_TAG 54f804e85c57ed484ef40835291092e19ca6182b
-  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-  )
+## Use morphizen from git submodule
+if(NOT EXISTS "${CMAKE_SOURCE_DIR}/3rd-party/morphizen/CMakeLists.txt")
+  message(FATAL_ERROR "MorphiZen submodule not found. Run: git submodule update --init --recursive")
 endif()
+message(STATUS "Using MorphiZen from git submodule: 3rd-party/morphizen")
 
 set(morphizen_ENABLE_UNIT_TEST ON CACHE BOOL "enable morphizen unit test or not")
 if(morphizen_ENABLE_UNIT_TEST)
@@ -210,7 +197,8 @@ endif()
 # Ensure ONNX uses dynamic runtime to match CMAKE_MSVC_RUNTIME_LIBRARY setting
 set(ONNX_USE_MSVC_STATIC_RUNTIME OFF CACHE BOOL "Use static MSVC runtime" FORCE)
 
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/version.txt" "${VERSION_INFO}")
 set(VAIP_VERSEION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
 set(VAIP_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/etc/vaip_config.json")
-FetchContent_MakeAvailable(morphizen)
+
+# Add morphizen subdirectory (after all options are set)
+add_subdirectory(3rd-party/morphizen)
