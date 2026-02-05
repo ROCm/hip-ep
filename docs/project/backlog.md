@@ -70,15 +70,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 See **[completed-issues.md](completed-issues.md)** for full archive of all completed issues.
 
 **Recent (last 5):**
+- #060 (PR #130) - Remove IPass& from Pass Constructor
 - #039 (PR #129) - Fix TarFile Typos and Unused Parameter
-- #047 (PR #126) - Extract Entry Deduplication Logic
-- #044 (PR #124) - Use Erase-Remove Idiom in TarFile
 - #057 (PR #127) - MLIR Metadata API - Fix dangling reference in model_get_meta_data
-- #028 (PR #110) - MLIR Backend Test Model Support - Enabled 23 unit tests with MLIR format model
 - #047 (PR #126) - Extract Entry Deduplication Logic
 - #044 (PR #124) - Use Erase-Remove Idiom in TarFile
-- #028 (PR #110) - MLIR Backend Test Model Support - Enabled 23 unit tests with MLIR format model
-- #027 (PR #118) - Eliminate C-Style APIs from morphizen-graph
 
 ---
 
