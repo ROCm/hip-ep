@@ -296,9 +296,9 @@ Key libraries in `D:\Develop\m\build\onnx-hipdnn-ep\`:
 |---------|-------------|
 | `onnxruntime_vitisai_ep.dll` | MorphiZen VitisAI EP dynamic library |
 | `morphizen-custom-op-rocm.lib` | ROCm custom operator (MIOpen + hipBLASLt) |
-| `vaip-pass_level1_rocm.lib` | Level-1 orchestration pass |
-| `vaip-pass_level2_rocm_conv.lib` | Level-2 Conv pattern matching pass |
-| `vaip-pass_level2_rocm_gemm.lib` | Level-2 Gemm pattern matching pass |
+| `morphizen-pass_level1_rocm.lib` | Level-1 orchestration pass |
+| `morphizen-pass_level2_rocm_conv.lib` | Level-2 Conv pattern matching pass |
+| `morphizen-pass_level2_rocm_gemm.lib` | Level-2 Gemm pattern matching pass |
 | `rocm_proto.lib` | Protocol buffer definitions |
 
 ### Pattern Files

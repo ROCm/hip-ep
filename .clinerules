@@ -69,10 +69,10 @@ cmake -DHIP_ARCHITECTURES=gfx1151 ...
 
 ## Architecture
 This project uses a Level-1/Level-2 pass architecture:
-- **Level-1 Pass** (`vaip-pass_level1_rocm`): Orchestrates sub-passes, checks GPU availability
+- **Level-1 Pass** (`morphizen-pass_level1_rocm`): Orchestrates sub-passes, checks GPU availability
 - **Level-2 Passes**: Pattern matching for specific operations
-  - `vaip-pass_level2_rocm_conv`: Conv pattern matching (MIOpen)
-  - `vaip-pass_level2_rocm_gemm`: Gemm pattern matching (hipBLASLt)
+  - `morphizen-pass_level2_rocm_conv`: Conv pattern matching (MIOpen)
+  - `morphizen-pass_level2_rocm_gemm`: Gemm pattern matching (hipBLASLt)
 - **Custom Op** (`custom-op-rocm`): Runtime execution with shared HIP stream
 
 ## Shared HIP Context
@@ -121,17 +121,17 @@ cd C:\Develop\m\build\onnx-hipdnn-ep\bin
 
 ## Morphizen Source Code
 - Morphizen source code is located at `../morphizen`
-- Key headers are in `../morphizen/vaip-core/include/morphizen/`
+- Key headers are in `../morphizen/morphizen-core/include/morphizen/`
 - Important files for pass development:
   - `pass.hpp` - IPass interface, fuse(), level_2_fuse(), add_context_resource()
   - `pass_context.hpp` - PassContext for cache files and shared resources
   - `node.hpp` - Node API for accessing attributes
   - `node_attr.hpp` - NodeAttr for creating string/int/float attributes
 - **Before using Node/Graph APIs**, reference `node.hpp` and `graph.hpp` for available APIs
-  - Prefer C++ style wrappers (`vaip_cxx::NodeConstRef`, `vaip_cxx::GraphConstRef`)
+  - Prefer C++ style wrappers (`morphizen_cxx::NodeConstRef`, `morphizen_cxx::GraphConstRef`)
   - These wrappers are cheap (just pointer copies, no heap allocation)
   - Example: `node_ref.has_attr("name")`, `node_ref.op_domain()`, `node_ref.get_attr_string("name")`
-- **DO NOT use ONNX API directly** - use morphizen/vaip_core wrappers instead
+- **DO NOT use ONNX API directly** - use morphizen/morphizen_core wrappers instead
   - Do not use ONNX protobuf methods like `attr.name()`, `attr.s()`, `node.op_type()`
   - Use morphizen wrappers: `node_op_domain()`, `node_get_attr_string()`, etc.
 

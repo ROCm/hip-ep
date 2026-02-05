@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Level-1 ROCm pass (`vaip-pass_level1_rocm`) serves as the orchestrator for ROCm-based graph optimizations. It coordinates Level-2 sub-passes that perform pattern matching for specific operations (Conv, Gemm), then groups consecutive fused nodes and builds a `RocmSubgraphProto` that represents the complete topology for efficient execution on AMD GPUs.
+The Level-1 ROCm pass (`morphizen-pass_level1_rocm`) serves as the orchestrator for ROCm-based graph optimizations. It coordinates Level-2 sub-passes that perform pattern matching for specific operations (Conv, Gemm), then groups consecutive fused nodes and builds a `RocmSubgraphProto` that represents the complete topology for efficient execution on AMD GPUs.
 
 ## Architecture
 
@@ -56,7 +56,7 @@ Sub-passes are configured via `pass_generic_param` in `morphizen_config.json`:
 
 ```json
 {
-  "sub_pass_names": ["vaip-pass_level2_rocm_conv", "vaip-pass_level2_rocm_gemm"]
+  "sub_pass_names": ["morphizen-pass_level2_rocm_conv", "morphizen-pass_level2_rocm_gemm"]
 }
 ```
 
@@ -119,7 +119,7 @@ After sub-passes complete, the graph contains fused nodes created by Level-2 pas
 
 ```cpp
 bool is_rocm_fused_node(Graph& graph, const Node& node) {
-  auto node_ref = vaip_cxx::NodeConstRef::from_node(graph, node);
+  auto node_ref = morphizen_cxx::NodeConstRef::from_node(graph, node);
   
   if (node_ref.op_domain() != "com.xilinx") {
     return false;
@@ -264,9 +264,9 @@ For a complete subgraph example showing how these structures work together, see 
 
 ```json
 {
-  "name": "vaip-pass_level1_rocm",
-  "plugin": "vaip-pass_level1_rocm",
-  "pass_generic_param": "{\"sub_pass_names\": [\"vaip-pass_level2_rocm_conv\", \"vaip-pass_level2_rocm_gemm\"]}"
+  "name": "morphizen-pass_level1_rocm",
+  "plugin": "morphizen-pass_level1_rocm",
+  "pass_generic_param": "{\"sub_pass_names\": [\"morphizen-pass_level2_rocm_conv\", \"morphizen-pass_level2_rocm_gemm\"]}"
 }
 ```
 
@@ -287,8 +287,8 @@ Example output:
 
 ```
 [HIP EP Level-1] Starting ROCm pass
-[HIP EP Level-1] Running sub-pass: vaip-pass_level2_rocm_conv
-[HIP EP Level-1] Running sub-pass: vaip-pass_level2_rocm_gemm
+[HIP EP Level-1] Running sub-pass: morphizen-pass_level2_rocm_conv
+[HIP EP Level-1] Running sub-pass: morphizen-pass_level2_rocm_gemm
 [HIP EP Level-1] Found 3 ROCm fused nodes
 [HIP EP Level-1] Found 2 mergeable groups
 [HIP EP Level-1] Group 0: 2 nodes (Conv1, Conv2)

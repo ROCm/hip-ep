@@ -33,9 +33,9 @@ using namespace morphizen;
  * The original graph is read-only, so we clone the model and run sub-passes
  * on the cloned graph.
  *
- * Configuration via morphizen_config.json passGenericParam:
+ * Configuration via morphizen_config.json pass_generic_param:
  * {
- *   "sub_pass_names": ["vaip-pass_level2_rocm_conv", "vaip-pass_level2_rocm_gemm"]
+ *   "sub_pass_names": ["morphizen-pass_level2_rocm_conv", "morphizen-pass_level2_rocm_gemm"]
  * }
  *
  * See doc/02_LEVEL1_PASS_DESIGN.md for architecture overview.

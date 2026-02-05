@@ -8,7 +8,7 @@
 /**
  * Custom Op Registration Entry Point
  * 
- * This file registers the ROCm custom op with VAIP.
+ * This file registers the ROCm custom op with MorphiZen.
  * The plugin name must match what's in morphizen_config.json execution_providers section.
  */
 

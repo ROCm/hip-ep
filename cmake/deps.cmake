@@ -5,7 +5,7 @@
 include(FetchContent)
 
 # Function to get git version info for a component
-function(vaip_add_version_info)
+function(morphizen_add_version_info)
   set(options)
   set(oneValueArgs COMPONENT DIR)
   set(multiValueArgs)
@@ -46,9 +46,9 @@ foreach(COMP_PAIR IN LISTS VERSION_LIST)
   string(TOLOWER COMP ${COMP})
   set(FETCH_SRC_DIR "${${COMP}_SOURCE_DIR}")
   if(EXISTS "${FETCH_SRC_DIR}" AND IS_DIRECTORY "${FETCH_SRC_DIR}")
-    vaip_add_version_info(COMPONENT ${COMP} DIR ${FETCH_SRC_DIR})
+    morphizen_add_version_info(COMPONENT ${COMP} DIR ${FETCH_SRC_DIR})
   elseif(EXISTS ${BUILD_DIR} AND IS_DIRECTORY ${BUILD_DIR})
-    vaip_add_version_info(COMPONENT ${COMP} DIR ${BUILD_DIR})
+    morphizen_add_version_info(COMPONENT ${COMP} DIR ${BUILD_DIR})
   endif()
   if (NOT DEFINED COMP_GIT_COMMIT OR NOT DEFINED COMP_VERSION)
     set(COMP_GIT_COMMIT "N/A")
@@ -197,8 +197,8 @@ endif()
 # Ensure ONNX uses dynamic runtime to match CMAKE_MSVC_RUNTIME_LIBRARY setting
 set(ONNX_USE_MSVC_STATIC_RUNTIME OFF CACHE BOOL "Use static MSVC runtime" FORCE)
 
-set(VAIP_VERSEION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
-set(VAIP_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/etc/morphizen_config.json")
+set(MORPHIZEN_VERSEION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
+set(MORPHIZEN_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/etc/morphizen_config.json")
 
 # Add morphizen subdirectory (after all options are set)
 add_subdirectory(3rd-party/morphizen)
