@@ -2,26 +2,26 @@
 #include "mlir/InitAllDialects.h"
 #include "mlir/InitAllPasses.h"
 
-// // 1. Include YOUR custom headers
-// #include "HipDnnDialect.h"      // Defines the "hipdnn" dialect
-// #include "HipDnnPasses.h"       // Defines the "convert-hipdnn-to-llvm" pass
+// Include custom HIP dialect headers
+#include "HipDialect.h"      // Defines the "hip" dialect
+#include "HipPasses.h"       // Defines the "convert-hip-to-llvm" pass
 
 int main(int argc, char **argv) {
   // A. Create a Dialect Registry
   mlir::DialectRegistry registry;
   
   // B. Register Standard Dialects (so you can use func, scf, etc.)
-  //registerAllDialects(registry);
+  mlir::registerAllDialects(registry);
 
-  // C. Register YOUR Custom Dialect
-  //registry.insert<hipdnn::HipDnnDialect>();
+  // C. Register HIP Custom Dialect
+  registry.insert<mlir::hip::HipDialect>();
 
   // D. Register Standard Passes
-  //registerAllPasses();
+  mlir::registerAllPasses();
 
-  // E. Register YOUR Custom Pass (The "script" we discussed)
-  // This allows you to run: --convert-hipdnn-to-llvm
-  //hipdnn::registerHipDnnPasses();
+  // E. Register HIP Custom Passes
+  // This allows you to run: --convert-hip-to-llvm
+  mlir::hip::registerHipPasses();
 
   // F. Run the tool (Just like mlir-opt)
   return mlir::asMainReturnCode(
