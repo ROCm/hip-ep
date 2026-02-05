@@ -45,13 +45,18 @@
 #   gfx1100 - Radeon RX 7900 series (Navi 31)
 #   gfx1102 - Radeon RX 7600 series (Navi 33)
 #   gfx1103 - Radeon 780M/760M iGPU (Phoenix APU)
-#   gfx1151 - Radeon PRO W7000 series
+#   gfx1150, gfx1151 - Radeon 880M/780M (Strix Point)
 #   gfx90a  - MI200 series (CDNA2)
 #   gfx942  - MI300 series (CDNA3)
 #
-# To find your GPU architecture:
-#   Windows: %THEROCK_DIST%\bin\rocminfo.exe | findstr gfx
-#   Linux:   rocminfo | grep gfx
+# To find your GPU architecture (TheRock SDK):
+#   Method 1 (recommended): amdgpu-arch - outputs just the architecture
+#     Windows: %THEROCK_DIST%\lib\llvm\bin\amdgpu-arch.exe
+#     Linux:   $THEROCK_DIST/lib/llvm/bin/amdgpu-arch
+#
+#   Method 2: hipInfo - look for gcnArchName field
+#     Windows: %THEROCK_DIST%\bin\hipInfo.exe | findstr gcnArchName
+#     Linux:   $THEROCK_DIST/bin/hipInfo | grep gcnArchName
 #
 # Example usage:
 #   cmake -DHIP_ARCHITECTURES=gfx1151 <build_dir>
