@@ -127,15 +127,15 @@ MEP table feature has been removed entirely. See Issue #008.
 - Consult documentation for model-specific best practices
 - Runtime heuristics can adapt automatically based on model characteristics
 
-# set when TargetProto hit
+# ~~set when TargetProto hit~~ REMOVED (Issue #009)
 
-[see here](../../morphizen-core/src/config.cpp#L307-L308)
+All NPU-specific TargetProto features removed entirely:
 
-It is to be deprecated, see PR #159 #155
+* `xlnx_enable_py3_round` - Xilinx quantization rounding (NPU-specific)
+* `xlnx_enable_old_qdq` - Legacy QDQ handling (NPU-specific)
+* `xclbin` - FPGA firmware files (NPU-specific)
 
-* `xlnx_enable_py3_round`
-* `xlnx_enable_old_qdq`
-* `xclbin`
+Not needed for GPU project.
 
 
 [s1]: ../morphizen-core/src/pass_context_imp.cpp#L1177

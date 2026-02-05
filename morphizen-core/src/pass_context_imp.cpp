@@ -630,21 +630,6 @@ bool PassContextImp::tar_file_to_cache_files(std::istream& src) {
   }
   return true;
 }
-
-std::optional<std::vector<char>>
-PassContextImp::read_xclbin(const std::filesystem::path& path) const {
-
-  std::optional<std::vector<char>> ret;
-  auto reader = open_file_for_read(path.filename().u8string());
-  if (!reader) {
-    return ret;
-  }
-
-  ret = std::vector<char>(reader->size());
-  reader->fread(ret->data(), reader->size());
-  return ret;
-}
-
 const ConfigProto& PassContextImp::get_config_proto() const { return config_; }
 const ContextProto& PassContextImp::get_context_proto() const {
   return context_proto;
