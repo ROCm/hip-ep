@@ -599,6 +599,12 @@ Is the topic complex?
 
 ---
 
+## Phase 0: Pre-Selection Sync
+
+Ensure on main branch with no uncommitted changes, then sync local main with origin/main via `git pull origin main`.
+
+---
+
 ## Phase 1: Initialize Exploration Session
 
 ### Step 1: Check Prerequisites
