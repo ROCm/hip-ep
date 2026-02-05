@@ -1,4 +1,4 @@
-// Copyright (C) 2023 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 syntax = "proto3";
 package rocm;
@@ -15,72 +15,72 @@ message ConvParamProto {
   int64 in_channels = 2;    // C - input channels
   int64 in_height = 3;      // H - input height
   int64 in_width = 4;       // W - input width
-  
+
   // Filter/Weight tensor dimensions [K, C, R, S]
   int64 out_channels = 5;   // K - output channels (number of filters)
   int64 filter_height = 6;  // R - filter height
   int64 filter_width = 7;   // S - filter width
-  
+
   // Output tensor dimensions [N, K, P, Q]
   int64 out_height = 8;     // P - output height
   int64 out_width = 9;      // Q - output width
-  
+
   // Padding
   int32 pad_h = 10;         // Padding height
   int32 pad_w = 11;         // Padding width
-  
+
   // Stride
   int32 stride_h = 12;      // Stride height
   int32 stride_w = 13;      // Stride width
-  
+
   // Dilation
   int32 dilation_h = 14;    // Dilation height
   int32 dilation_w = 15;    // Dilation width
-  
+
   // Group convolution
   int32 group_count = 16;   // Group count (1 for standard conv, >1 for grouped/depthwise)
-  
+
   // Convolution mode: "convolution", "transpose", "group", "depthwise"
   string conv_mode = 17;
-  
+
   // Data types (as string: "fp16", "fp32", "bf16", "int8", etc.)
   string data_type_x = 18;  // Input data type
-  string data_type_w = 19;  // Weight data type  
+  string data_type_w = 19;  // Weight data type
   string data_type_y = 20;  // Output data type
-  
+
   // Scalar values (stored as floats, converted as needed)
   float alpha = 21;         // Scaling factor for convolution result
   float beta = 22;          // Scaling factor for output accumulation
-  
+
   // Workspace size preference in bytes
   int64 max_workspace_size = 23;
-  
+
   // Input/output names for reference
   repeated string input_names = 24;
   repeated string output_names = 25;
-  
+
   // EP context file info
   string ep_context_file_name = 26;
   int64 ep_context_file_size = 27;
-  
+
   // Algorithm selection
   // -1 for auto selection, 0-4 for specific algorithms:
   // 0: GEMM, 1: Direct, 2: FFT, 3: Winograd, 5: ImplicitGEMM
   int32 algorithm_index = 28;
-  
+
   // Whether to perform exhaustive search for best algorithm
   bool exhaustive_search = 29;
-  
+
   // Whether this convolution has bias
   bool has_bias = 30;
-  
+
   // Spatial dimensions (2 for 2D conv, 3 for 3D conv)
   int32 spatial_dim = 31;
-  
+
   // Weight tensor file (serialized binary data saved via open_file_for_write)
   string weight_file_path = 32;    // Path to weight data file in cache
   int64 weight_file_size = 33;     // Size of weight data in bytes
-  
+
   // Bias tensor file (if has_bias is true)
   string bias_file_path = 34;      // Path to bias data file in cache
   int64 bias_file_size = 35;       // Size of bias data in bytes
@@ -93,61 +93,61 @@ message GemmParamProto {
   int64 m = 1;  // Rows of A, C, D
   int64 n = 2;  // Cols of B, C, D
   int64 k = 3;  // Cols of A, Rows of B
-  
+
   // Batch count for batched GEMM
   int64 batch_count = 4;
-  
+
   // Leading dimensions (optional, defaults to M, K, M, M respectively)
   int64 lda = 5;
   int64 ldb = 6;
   int64 ldc = 7;
   int64 ldd = 8;
-  
+
   // Strides for batched operations
   int64 stride_a = 9;
   int64 stride_b = 10;
   int64 stride_c = 11;
   int64 stride_d = 12;
-  
+
   // Transpose operations (0 = No transpose, 1 = Transpose, 2 = Conjugate transpose)
   int32 trans_a = 13;
   int32 trans_b = 14;
-  
+
   // Data types (as string: "fp16", "fp32", "bf16", "int8", etc.)
   string data_type_a = 15;
   string data_type_b = 16;
   string data_type_c = 17;
   string data_type_d = 18;
   string compute_type = 19;  // Type used for computation accumulation
-  
+
   // Scalar values (stored as floats, converted as needed)
   float alpha = 20;
   float beta = 21;
-  
+
   // Epilogue type (default, bias, relu, gelu, etc.)
   string epilogue = 22;
-  
+
   // Workspace size preference in bytes
   int64 max_workspace_size = 23;
-  
+
   // Input/output names for reference
   repeated string input_names = 24;
   repeated string output_names = 25;
-  
+
   // EP context file info
   string ep_context_file_name = 26;
   int64 ep_context_file_size = 27;
-  
+
   // Algorithm index (-1 for heuristic selection)
   int32 algorithm_index = 28;
-  
+
   // Whether this GEMM has bias (C input)
   bool has_bias = 29;
-  
+
   // Weight tensor file (B matrix for fused GEMM)
   string weight_file_path = 30;    // Path to weight data file in cache
   int64 weight_file_size = 31;     // Size of weight data in bytes
-  
+
   // Bias tensor file (if has_bias is true)
   string bias_file_path = 32;      // Path to bias data file in cache
   int64 bias_file_size = 33;       // Size of bias data in bytes
@@ -161,46 +161,46 @@ message MatmulParamProto {
   int64 m = 1;  // Rows of A (last 2nd dim)
   int64 n = 2;  // Cols of B (last dim)
   int64 k = 3;  // Cols of A / Rows of B (last dim of A / last 2nd dim of B)
-  
+
   // Batch dimensions (product of all dimensions except last 2)
   int64 batch_count = 4;
-  
+
   // Leading dimensions
   int64 lda = 5;
   int64 ldb = 6;
   int64 ldd = 7;
-  
+
   // Strides for batched operations
   int64 stride_a = 8;
   int64 stride_b = 9;
   int64 stride_d = 10;
-  
+
   // Data types (as string: "fp16", "fp32", "bf16", etc.)
   string data_type_a = 11;
   string data_type_b = 12;
   string data_type_d = 13;
   string compute_type = 14;
-  
+
   // Input/output names for reference
   repeated string input_names = 15;
   repeated string output_names = 16;
-  
+
   // EP context file info
   string ep_context_file_name = 17;
   int64 ep_context_file_size = 18;
-  
+
   // Algorithm index (-1 for heuristic selection)
   int32 algorithm_index = 19;
-  
+
   // Weight tensor file (B matrix if constant)
   string weight_file_path = 20;
   int64 weight_file_size = 21;
-  
+
   // Full shape information for multi-dimensional matmul
   repeated int64 shape_a = 22;  // Full shape of input A
   repeated int64 shape_b = 23;  // Full shape of input B
   repeated int64 shape_y = 24;  // Full shape of output Y
-  
+
   // Whether B is a constant (weight)
   bool b_is_constant = 25;
 }
@@ -215,17 +215,17 @@ message MulParamProto {
   // Input sizes
   int64 size_a = 1;           // Total elements in A
   int64 size_b = 2;           // Total elements in B (may be smaller for broadcasting)
-  
+
   // Shape information
   repeated int64 shape_a = 3;  // Shape of input A
   repeated int64 shape_b = 4;  // Shape of input B
   repeated int64 shape_y = 5;  // Shape of output Y
-  
+
   // Scalar optimization
   bool b_is_scalar = 6;        // True if B is a single value
   bool b_is_constant = 7;      // True if B is a constant initializer
   float scalar_value = 8;      // Value if B is a scalar constant
-  
+
   // Input/output names
   repeated string input_names = 9;
   repeated string output_names = 10;
@@ -238,10 +238,10 @@ message SoftmaxParamProto {
   int64 batch = 1;            // Product of all dims except axis dim
   int64 dim = 2;              // Size of softmax dimension
   int32 axis = 3;             // Axis to apply softmax (default -1)
-  
+
   // Shape information
   repeated int64 shape = 4;   // Full input/output shape
-  
+
   // Input/output names
   repeated string input_names = 5;
   repeated string output_names = 6;
@@ -253,11 +253,11 @@ message SoftmaxParamProto {
 message ReshapeParamProto {
   // Total element count (must be same for input and output)
   int64 total_size = 1;
-  
+
   // Shape information
   repeated int64 shape_in = 2;   // Input shape
   repeated int64 shape_out = 3;  // Output shape
-  
+
   // Input/output names
   repeated string input_names = 4;
   repeated string output_names = 5;
@@ -269,17 +269,17 @@ message TransposeParamProto {
   // Dimensions
   int64 total_size = 1;        // Total number of elements
   int32 ndim = 2;              // Number of dimensions
-  
+
   // Permutation array (e.g., [0, 2, 1, 3] for common attention pattern)
   repeated int32 perm = 3;
-  
+
   // Shape information
   repeated int64 shape_in = 4;   // Input shape
   repeated int64 shape_out = 5;  // Output shape
-  
+
   // Optimization hints
   bool is_0213 = 6;            // True if perm is [0, 2, 1, 3] (common in attention)
-  
+
   // Input/output names
   repeated string input_names = 7;
   repeated string output_names = 8;
@@ -292,14 +292,14 @@ message TileParamProto {
   int64 in_size = 1;           // Total input elements
   int64 out_size = 2;          // Total output elements
   int32 ndim = 3;              // Number of dimensions
-  
+
   // Repeat counts for each dimension
   repeated int64 repeats = 4;
-  
+
   // Shape information
   repeated int64 shape_in = 5;   // Input shape
   repeated int64 shape_out = 6;  // Output shape
-  
+
   // Input/output names
   repeated string input_names = 7;
   repeated string output_names = 8;
@@ -310,7 +310,7 @@ message TileParamProto {
 message RocmParamProto {
   // Operation type: "conv", "gemm", "matmul", "mul", "softmax", "reshape", "transpose", "tile"
   string op_type = 1;
-  
+
   // Operation-specific parameters (one of these will be populated)
   ConvParamProto conv_params = 2;
   GemmParamProto gemm_params = 3;
@@ -320,7 +320,7 @@ message RocmParamProto {
   ReshapeParamProto reshape_params = 9;
   TransposeParamProto transpose_params = 10;
   TileParamProto tile_params = 11;
-  
+
   // General metadata
   string ep_context_file_name = 4;
   int64 ep_context_file_size = 5;
@@ -380,11 +380,11 @@ message RocmSubgraphProto {
   // This eliminates runtime deduplication overhead - each external input
   // is uploaded exactly once even if referenced by multiple nodes
   repeated string external_inputs = 1;
-  
+
   // Nodes in topological (execution) order
   // Each node has a unique node_id from 0 to N-1
   repeated RocmNodeProto nodes = 2;
-  
+
   // External outputs with their source node mappings
   // These are the outputs consumed outside the subgraph or are graph outputs
   // The mapping enables scheduling async D2H copies immediately after the producer completes
@@ -412,7 +412,7 @@ message RocmMergedParamProto {
 message PassRocmConfigProto {
   // List of sub-pass names to run (e.g., "morphizen-pass_level2_rocm_conv", "morphizen-pass_level2_rocm_gemm")
   repeated string sub_pass_names = 1;
-  
+
   // Whether to enable debug logging
   bool debug = 2;
 }

@@ -1,5 +1,5 @@
 ##
-# ** Copyright (C) 2023 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
 cmake_minimum_required(VERSION 3.29)

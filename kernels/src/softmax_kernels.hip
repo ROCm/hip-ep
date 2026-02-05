@@ -29,7 +29,7 @@ __global__ void softmax_kernel_2d(
     T* output,
     int64_t axis_size,
     int64_t outer_size) {
-  
+
   int64_t outer_idx = blockIdx.x;
   if (outer_idx >= outer_size) return;
 
@@ -39,7 +39,7 @@ __global__ void softmax_kernel_2d(
   // Step 1: Find max for numerical stability (parallel reduction)
   __shared__ float shared_max[256];
   float thread_max = -FLT_MAX;
-  
+
   for (int i = threadIdx.x; i < axis_size; i += blockDim.x) {
     float val = static_cast<float>(row_input[i]);
     thread_max = fmaxf(thread_max, val);
@@ -50,7 +50,7 @@ __global__ void softmax_kernel_2d(
   // Reduce to find global max
   for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
     if (threadIdx.x < stride) {
-      shared_max[threadIdx.x] = fmaxf(shared_max[threadIdx.x], 
+      shared_max[threadIdx.x] = fmaxf(shared_max[threadIdx.x],
                                        shared_max[threadIdx.x + stride]);
     }
     __syncthreads();
@@ -60,7 +60,7 @@ __global__ void softmax_kernel_2d(
   // Step 2: Compute sum of exp(x - max) using DOUBLE precision for accumulation
   __shared__ double shared_sum[256];
   double thread_sum = 0.0;
-  
+
   for (int i = threadIdx.x; i < axis_size; i += blockDim.x) {
     double val = exp(static_cast<double>(row_input[i]) - static_cast<double>(max_val));
     thread_sum += val;
@@ -94,11 +94,11 @@ __global__ void softmax_kernel_3d(
     int64_t axis_size,
     int64_t inner_size,
     int64_t outer_size) {
-  
+
   int64_t idx = blockIdx.x;
   int64_t outer_idx = idx / inner_size;
   int64_t inner_idx = idx % inner_size;
-  
+
   if (outer_idx >= outer_size || inner_idx >= inner_size) return;
 
   // Step 1: Find max for numerical stability
@@ -147,7 +147,7 @@ void launch_softmax_2d_f32(
     int64_t axis_size,
     int64_t outer_size,
     hipStream_t stream) {
-  
+
   int threads = 256;
   if (axis_size < 256) {
     threads = 1;
@@ -165,7 +165,7 @@ void launch_softmax_3d_f32(
     int64_t inner_size,
     int64_t outer_size,
     hipStream_t stream) {
-  
+
   int blocks = static_cast<int>(outer_size * inner_size);
   rocm_ep::softmax_kernel_3d<float><<<blocks, 1, 0, stream>>>(
       input, output, axis_size, inner_size, outer_size);
@@ -177,7 +177,7 @@ void launch_softmax_f32(
     int64_t batch,
     int64_t dim,
     hipStream_t stream) {
-  
+
   launch_softmax_2d_f32(input, output, dim, batch, stream);
 }
 

@@ -145,7 +145,7 @@ cd C:\Develop\m\build\onnx-hipdnn-ep\bin
 4. Violation requires immediate revert and branch creation
 
 ### Branch Rules
-- **ALWAYS create a branch BEFORE modifying any files**: 
+- **ALWAYS create a branch BEFORE modifying any files**:
   - When starting any task that modifies files, first check if you're on the `main` branch
   - If on `main` branch, create a feature branch BEFORE using write_to_file or replace_in_file
   - Use `git checkout -b <branch-name>` before making any changes
@@ -165,10 +165,10 @@ cd C:\Develop\m\build\onnx-hipdnn-ep\bin
   ```markdown
   # Summary of Changes
   * Describe what this PR adds/changes/improves/fixes
-  
+
   # Motivation
   Describe why this request is needed/good/useful
-  
+
   # Implementation
   Explain implementation choices and what was tried
   ```

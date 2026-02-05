@@ -26,28 +26,28 @@ __global__ void elementwise_mul_kernel(
     int64_t size_out,
     int64_t size_a,
     int64_t size_b) {
-  
+
   int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= size_out) return;
 
   // Broadcasting logic
   if (size_a == size_out && size_b == 1) {
     // B is scalar
-    output[idx] = static_cast<T>(static_cast<float>(input_a[idx]) * 
+    output[idx] = static_cast<T>(static_cast<float>(input_a[idx]) *
                                   static_cast<float>(input_b[0]));
   } else if (size_a == 1 && size_b == size_out) {
     // A is scalar
-    output[idx] = static_cast<T>(static_cast<float>(input_a[0]) * 
+    output[idx] = static_cast<T>(static_cast<float>(input_a[0]) *
                                   static_cast<float>(input_b[idx]));
   } else if (size_a == size_out && size_b == size_out) {
     // Same shape
-    output[idx] = static_cast<T>(static_cast<float>(input_a[idx]) * 
+    output[idx] = static_cast<T>(static_cast<float>(input_a[idx]) *
                                   static_cast<float>(input_b[idx]));
   } else {
     // General broadcasting using modulo
     int64_t idx_a = (size_a == 1) ? 0 : (idx % size_a);
     int64_t idx_b = (size_b == 1) ? 0 : (idx % size_b);
-    output[idx] = static_cast<T>(static_cast<float>(input_a[idx_a]) * 
+    output[idx] = static_cast<T>(static_cast<float>(input_a[idx_a]) *
                                   static_cast<float>(input_b[idx_b]));
   }
 }
@@ -59,7 +59,7 @@ __global__ void mul_scalar_kernel(
     T scalar,
     T* output,
     int64_t size) {
-  
+
   int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (idx >= size) return;
   output[idx] = input[idx] * scalar;
@@ -88,7 +88,7 @@ void launch_mul_f32(
     int64_t size_a,
     int64_t size_b,
     hipStream_t stream) {
-  
+
   int threads = 256;
   int blocks = static_cast<int>((size_out + threads - 1) / threads);
   rocm_ep::elementwise_mul_kernel<float><<<blocks, threads, 0, stream>>>(
@@ -101,7 +101,7 @@ void launch_mul_scalar_f32(
     float* output,
     int64_t size,
     hipStream_t stream) {
-  
+
   int threads = 256;
   int blocks = static_cast<int>((size + threads - 1) / threads);
   rocm_ep::mul_scalar_kernel<float><<<blocks, threads, 0, stream>>>(
@@ -115,7 +115,7 @@ void launch_mul_elementwise_f32(
     int64_t total_size,
     int64_t b_size,
     hipStream_t stream) {
-  
+
   launch_mul_f32(a, b, output, total_size, total_size, b_size, stream);
 }
 

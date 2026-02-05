@@ -1,5 +1,5 @@
 ##
-# ** Copyright (C) 2023 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
 
@@ -15,16 +15,16 @@ if(STANDALONE_BUILD)
   set(CMAKE_CXX_STANDARD 17)
   set(CMAKE_CXX_STANDARD_REQUIRED ON)
   set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-  
+
   # Find ONNX Runtime
   find_package(onnxruntime CONFIG REQUIRED)
-  
+
   add_executable(test_gqa test_gqa.cpp)
   target_link_libraries(test_gqa PRIVATE onnxruntime::onnxruntime)
-  
+
   if(WIN32)
     target_compile_definitions(test_gqa PRIVATE "_CRT_SECURE_NO_WARNINGS")
-    
+
     # Copy ORT DLLs to output directory
     add_custom_command(
       TARGET test_gqa POST_BUILD
@@ -33,7 +33,7 @@ if(STANDALONE_BUILD)
         $<TARGET_FILE_DIR:test_gqa>
     )
   endif()
-  
+
   install(TARGETS test_gqa RUNTIME DESTINATION bin)
   message(STATUS "Standalone test_gqa configured successfully")
   return()
@@ -46,18 +46,18 @@ option(BUILD_TEST_GQA "Build test_gqa executable" ON)
 
 if(BUILD_TEST_GQA)
   message(STATUS "Building test_gqa: ENABLED")
-  
+
   # Find ONNX Runtime
   find_package(onnxruntime CONFIG QUIET)
-  
+
   # Also check for ORT in the source tree
   set(ORT_SOURCE_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/../onnxruntime/include/onnxruntime/core/session")
   set(ORT_BUILD_IMPLIB "${CMAKE_INSTALL_PREFIX}/lib/onnxruntime.lib")
-  
+
   if(NOT EXISTS "${ORT_SOURCE_INCLUDE_DIR}/onnxruntime_cxx_api.h")
     set(ORT_SOURCE_INCLUDE_DIR "")
   endif()
-  
+
   # Try to find pre-installed ORT if not found via config
   if(NOT TARGET onnxruntime::onnxruntime)
     find_path(ORT_INCLUDE_DIR onnxruntime_cxx_api.h
@@ -72,27 +72,27 @@ if(BUILD_TEST_GQA)
         $ENV{ONNXRUNTIME_ROOT}/lib
     )
   endif()
-  
+
   if(TARGET onnxruntime::onnxruntime OR ORT_LIB)
     add_executable(test_gqa test_gqa.cpp)
-    
+
     if(TARGET onnxruntime::onnxruntime)
       target_link_libraries(test_gqa PRIVATE onnxruntime::onnxruntime)
     else()
       target_link_libraries(test_gqa PRIVATE ${ORT_LIB})
       target_include_directories(test_gqa PRIVATE ${ORT_INCLUDE_DIR})
     endif()
-    
+
     # Also link with ORT from source tree if available
     if(ORT_SOURCE_INCLUDE_DIR)
       target_include_directories(test_gqa PRIVATE "${ORT_SOURCE_INCLUDE_DIR}")
     endif()
-    
+
     target_compile_features(test_gqa PRIVATE cxx_std_17)
-    
+
     if(WIN32)
       target_compile_definitions(test_gqa PRIVATE "_CRT_SECURE_NO_WARNINGS")
-      
+
       # Copy ORT DLLs to output directory
       if(TARGET onnxruntime::onnxruntime)
         add_custom_command(
@@ -103,11 +103,11 @@ if(BUILD_TEST_GQA)
         )
       endif()
     endif()
-    
+
     set_target_properties(test_gqa PROPERTIES FOLDER "gqa-tests")
-    
+
     install(TARGETS test_gqa RUNTIME DESTINATION bin)
-    
+
     message(STATUS "test_gqa configured successfully")
   else()
     message(STATUS "ONNX Runtime not found, skipping test_gqa")
@@ -123,27 +123,27 @@ option(BUILD_MODEL_VERIFIER "Build model_verifier executable" ON)
 
 if(BUILD_MODEL_VERIFIER)
   message(STATUS "Building model_verifier: ENABLED")
-  
+
   if(TARGET onnxruntime::onnxruntime OR ORT_LIB)
     add_executable(model_verifier model_verifier.cpp)
-    
+
     if(TARGET onnxruntime::onnxruntime)
       target_link_libraries(model_verifier PRIVATE onnxruntime::onnxruntime)
     else()
       target_link_libraries(model_verifier PRIVATE ${ORT_LIB})
       target_include_directories(model_verifier PRIVATE ${ORT_INCLUDE_DIR})
     endif()
-    
+
     # Also link with ORT from source tree if available
     if(ORT_SOURCE_INCLUDE_DIR)
       target_include_directories(model_verifier PRIVATE "${ORT_SOURCE_INCLUDE_DIR}")
     endif()
-    
+
     target_compile_features(model_verifier PRIVATE cxx_std_17)
-    
+
     if(WIN32)
       target_compile_definitions(model_verifier PRIVATE "_CRT_SECURE_NO_WARNINGS")
-      
+
       # Copy ORT DLLs to output directory
       if(TARGET onnxruntime::onnxruntime)
         add_custom_command(
@@ -154,11 +154,11 @@ if(BUILD_MODEL_VERIFIER)
         )
       endif()
     endif()
-    
+
     set_target_properties(model_verifier PROPERTIES FOLDER "verification-tests")
-    
+
     install(TARGETS model_verifier RUNTIME DESTINATION bin)
-    
+
     message(STATUS "model_verifier configured successfully")
   else()
     message(STATUS "ONNX Runtime not found, skipping model_verifier")
@@ -240,7 +240,7 @@ elseif(ORT_SOURCE_INCLUDE_DIR AND EXISTS "${ORT_BUILD_IMPLIB}")
   message(STATUS "Building ORT integration test (using build output)")
   message(STATUS "  ORT include: ${ORT_SOURCE_INCLUDE_DIR}")
   message(STATUS "  ORT lib: ${ORT_BUILD_IMPLIB}")
-  
+
   add_executable(ort_integration_test test_ort_integration.cpp)
   target_link_libraries(ort_integration_test PRIVATE
     "${ORT_BUILD_IMPLIB}"
@@ -258,7 +258,7 @@ elseif(ORT_SOURCE_INCLUDE_DIR)
   message(STATUS "Building ORT integration test (using installation lib)")
   message(STATUS "  ORT include: ${ORT_SOURCE_INCLUDE_DIR}")
   message(STATUS "  ORT lib: ${ORT_BUILD_IMPLIB}")
-  
+
   add_executable(ort_integration_test test_ort_integration.cpp)
   target_link_libraries(ort_integration_test PRIVATE
     "${ORT_BUILD_IMPLIB}"
@@ -284,12 +284,12 @@ else()
       ${CMAKE_PREFIX_PATH}/lib
       $ENV{ONNXRUNTIME_ROOT}/lib
   )
-  
+
   if(ORT_INCLUDE_DIR AND ORT_LIB)
     message(STATUS "Building standalone ORT integration test")
     message(STATUS "  ORT include: ${ORT_INCLUDE_DIR}")
     message(STATUS "  ORT lib: ${ORT_LIB}")
-    
+
     add_executable(ort_integration_test test_ort_integration.cpp)
     target_link_libraries(ort_integration_test PRIVATE
       ${ORT_LIB}

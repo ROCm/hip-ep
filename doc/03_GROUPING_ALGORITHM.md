@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # Node Grouping Algorithm
 
 This document describes the algorithm used by the Level-1 ROCm pass to group consecutive fused nodes for merging.
@@ -71,13 +75,13 @@ This avoids the O(N²) nested loop and gives us O(N α(N)) ≈ **O(N) time compl
 function find_groups(R):
     // Union-Find data structure
     parent = {}      // parent[node] = parent node (or self if root)
-    
+
     for each node in R:
         parent[node] = node  // Initialize: each node is its own group
-    
+
     // Build map: output_name → node
     producer_map = build_producer_map(R)
-    
+
     // Process in topological order
     for each node in R:
         for each input of node:
@@ -85,7 +89,7 @@ function find_groups(R):
                 producer = producer_map[input]
                 // Merge node's group with producer's group
                 union(parent, node, producer)
-    
+
     // Collect groups from Union-Find
     groups = {}
     for each node in R:
@@ -93,7 +97,7 @@ function find_groups(R):
         if root not in groups:
             groups[root] = []
         groups[root].append(node)
-    
+
     return values(groups)
 
 function find(parent, node):
@@ -128,7 +132,7 @@ Let:
 
 2. **M's topological position**: M takes the position of nₖ (the last node in S).
 
-3. **M's inputs come from BEFORE S**: 
+3. **M's inputs come from BEFORE S**:
    - Any input to M was an input to some node n ∈ S, but not produced by any node in S
    - Since G is a DAG: topo(input_producer) < topo(n1) ≤ topo(M)
 
@@ -216,10 +220,10 @@ After Level-2 passes (Conv1, Conv2, Gemm are ROCm nodes; ReLU is CPU):
 4. **Process nodes in topological order**:
 
    - **FusedConv1**: No inputs from ROCm nodes (X, W1, B1 not in producer_map)
-   
+
    - **FusedConv2**: Input T1 is in producer_map → FusedConv1
      - `union(FusedConv2, FusedConv1)` → parent[FusedConv2] = FusedConv1
-   
+
    - **FusedGemm**: Input T3 not in producer_map (produced by ReLU)
      - No union operation
 
