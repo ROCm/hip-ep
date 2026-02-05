@@ -108,13 +108,13 @@ Frees device memory previously allocated with `hip.alloc`.
 ## Type System
 
 ### `!hip.handle`
-An opaque type representing a HIP runtime handle. Lowered to `i8*` (pointer to i8) in LLVM.
+An opaque type representing a HIP runtime handle. Lowered to `!llvm.ptr` (opaque pointer type in address space 0) in LLVM.
 
 ## Pass Pipeline
 
 The `--convert-hip-to-llvm` pass performs the following conversions:
 
-1. **Type Conversion**: `!hip.handle` → `!llvm.ptr` (i8*)
+1. **Type Conversion**: `!hip.handle` → `!llvm.ptr` (opaque pointer type in address space 0)
 2. **Operation Lowering**: Each HIP operation is converted to LLVM function calls
 3. **Function Declaration**: Required HIP runtime functions are declared in the module
 
