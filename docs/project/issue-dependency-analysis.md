@@ -434,7 +434,7 @@ These groups can be worked on in parallel:
 
 ## Notes
 
-- **Completed issues removed**: 24 issues completed and removed from this analysis (001, 003, 004, 005, 006, 007, 008, 010, 011, 012, 014, 015, 016, 017, 018, 021, 022, 025, 028, 037, 041, 057, 058, 059)
-- **Active issues**: 28 issues remain in backlog
+- **Completed issues removed**: 25 issues completed and removed from this analysis (001, 003, 004, 005, 006, 007, 008, 009, 010, 011, 012, 014, 015, 016, 017, 018, 021, 022, 025, 028, 037, 039, 041, 057, 058, 059, 060)
+- **Active issues**: 27 issues remain in backlog
 - **ConfigProto immutability**: Already achieved through completed issues
 - **Next major milestone**: V2 API Migration (#024) + Multi-Target Support (#026)

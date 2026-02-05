@@ -26,11 +26,10 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 | # | Title | Pri | Est | Group | Blocked | Files |
 |---|-------|-----|-----|-------|---------|-------|
 | [#001](issues/001-mmap-support-for-embed-mode.md) | Add mmap Support | M | 3h | Feature | - | mmap_file.cpp/tar_file.cpp |
-| [#012](issues/012-session-configs-swapping.md) | session_configs Swapping | H | 2h | Config/Context | - | pass_context_imp.cpp/config.proto |
 | [#013](issues/013-provider-options-aggregation.md) | provider_options Aggregation | M | 1h | Provider Options | - | pass_context_imp.cpp |
 | [#014](issues/014-dynamic-pass-registration.md) | Dynamic Pass Registration | M | 1h | Config/Context | - | pass_imp.cpp/config.cpp |
 | [#017](issues/017-remove-update-config-by-target.md) | Remove update_config_by_target | L | 15m | Config/Context | - | config.cpp |
-| [#018](issues/018-make-configproto-const.md) | Make ConfigProto const | L | 15m | Config/Context | #012/#013/#017 | pass_context_imp.hpp |
+| [#018](issues/018-make-configproto-const.md) | Make ConfigProto const | L | 15m | Config/Context | #013/#017 | pass_context_imp.hpp |
 | [#019](issues/019-refactor-initialize-context.md) | Refactor initialize_context | L | 2h | Config/Context | - | morphizen_compile_model.cpp |
 | [#024](issues/024-remove-legacy-compile-entry-points.md) | Remove Legacy Compile API | M | 1h | Legacy Cleanup | - | onnxruntime_morphizen_ep.hpp/.cpp |
 | [#026](issues/026-mlir-model-export-api.md) | MLIR Model Export API | M | 1h | MLIR Features | - | morphizen-ort-api-ext.hpp/mlir-model.cpp |
@@ -72,8 +71,8 @@ See **[completed-issues.md](completed-issues.md)** for full archive of all compl
 - #060 (PR #130) - Remove IPass& from Pass Constructor
 - #039 (PR #129) - Fix TarFile Typos and Unused Parameter
 - #009 (PR #131) - TargetProto Provider Options Injection Cleanup
+- #012 (PR #111) - Remove session_configs from ConfigProto
 - #057 (PR #127) - MLIR Metadata API - Fix dangling reference in model_get_meta_data
-- #047 (PR #126) - Extract Entry Deduplication Logic
 
 ---
 
