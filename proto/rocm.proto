@@ -410,7 +410,7 @@ message RocmMergedParamProto {
 // Pass configuration for ROCm Level-1 orchestrator
 // This defines sub-passes that the Level-1 pass will run
 message PassRocmConfigProto {
-  // List of sub-pass names to run (e.g., "vaip-pass_level2_rocm_conv", "vaip-pass_level2_rocm_gemm")
+  // List of sub-pass names to run (e.g., "morphizen-pass_level2_rocm_conv", "morphizen-pass_level2_rocm_gemm")
   repeated string sub_pass_names = 1;
   
   // Whether to enable debug logging

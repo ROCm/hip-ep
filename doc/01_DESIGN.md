@@ -46,10 +46,10 @@ Combine both libraries into a single EP with:
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │                    VitisAI EP (VAIP)                             │   │
+│  │                    MorphiZen EP                                   │   │
 │  │                                                                  │   │
 │  │  ┌──────────────────────────────────────────────────────────┐   │   │
-│  │  │              Level-1 Pass: vaip-pass_level1_rocm          │   │   │
+│  │  │              Level-1 Pass: morphizen-pass_level1_rocm     │   │   │
 │  │  │  • Checks AMD GPU availability                            │   │   │
 │  │  │  • Initializes shared HIP context                         │   │   │
 │  │  │  • Orchestrates Level-2 sub-passes                        │   │   │
@@ -98,9 +98,9 @@ Combine both libraries into a single EP with:
 
 | Component | Plugin Name | Description |
 |-----------|-------------|-------------|
-| Level-1 Pass | `vaip-pass_level1_rocm` | Orchestrates sub-passes, builds subgraph |
-| Level-2 Conv Pass | `vaip-pass_level2_rocm_conv` | Conv pattern matching |
-| Level-2 Gemm Pass | `vaip-pass_level2_rocm_gemm` | Gemm pattern matching |
+| Level-1 Pass | `morphizen-pass_level1_rocm` | Orchestrates sub-passes, builds subgraph |
+| Level-2 Conv Pass | `morphizen-pass_level2_rocm_conv` | Conv pattern matching |
+| Level-2 Gemm Pass | `morphizen-pass_level2_rocm_gemm` | Gemm pattern matching |
 | Custom Op | `custom-op-rocm` | Subgraph runtime execution |
 
 ---
@@ -127,19 +127,19 @@ onnx-hipdnn-ep/
 │   ├── conv.json                         # Conv pattern definition
 │   └── gemm.json                         # Gemm pattern definition
 │
-├── level-1-pass-rocm/                    # → vaip-pass_level1_rocm.dll
+├── level-1-pass-rocm/                    # → morphizen-pass_level1_rocm.dll
 │   ├── CMakeLists.txt
 │   └── src/
 │       └── pass_main.cpp                 # Level-1 orchestrator
 │
-├── level-2-pass-rocm-conv/               # → vaip-pass_level2_rocm_conv.dll
+├── level-2-pass-rocm-conv/               # → morphizen-pass_level2_rocm_conv.dll
 │   ├── CMakeLists.txt
 │   ├── cmake/
 │   │   └── generate_pattern_inc.cmake
 │   └── src/
 │       └── pass_main.cpp                 # Conv pattern matching
 │
-├── level-2-pass-rocm-gemm/               # → vaip-pass_level2_rocm_gemm.dll
+├── level-2-pass-rocm-gemm/               # → morphizen-pass_level2_rocm_gemm.dll
 │   ├── CMakeLists.txt
 │   ├── cmake/
 │   │   └── generate_pattern_inc.cmake
@@ -175,7 +175,7 @@ onnx-hipdnn-ep/
 
 ### 4.1 Level-1 Pass: Orchestrator
 
-The Level-1 pass (`vaip-pass_level1_rocm`) serves as the main entry point and orchestrator:
+The Level-1 pass (`morphizen-pass_level1_rocm`) serves as the main entry point and orchestrator:
 
 1. Checks AMD GPU availability
 2. Runs Level-2 sub-passes for pattern matching
@@ -199,12 +199,12 @@ The `morphizen_config.json` defines the execution order:
   "passes": [
     {
       "name": "init",
-      "plugin": "vaip-pass_init"
+      "plugin": "morphizen-pass_init"
     },
     {
       "name": "fuse_ROCm",
-      "plugin": "vaip-pass_level1_rocm",
-      "pass_generic_param": "{\"sub_pass_names\": [\"vaip-pass_level2_rocm_conv\", \"vaip-pass_level2_rocm_gemm\"]}"
+      "plugin": "morphizen-pass_level1_rocm",
+      "pass_generic_param": "{\"sub_pass_names\": [\"morphizen-pass_level2_rocm_conv\", \"morphizen-pass_level2_rocm_gemm\"]}"
     }
   ]
 }
