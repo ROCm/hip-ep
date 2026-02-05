@@ -122,13 +122,17 @@ Update PR title (format: `Issue #NNN: <type>: <description>`) and body using `gh
 
 ### Step 4.3: Update backlog and cleanup
 
-Read backlog.md, move issue to "Recently Completed" section with PR number (keep max 5).
-
-Run `finalize-issue.sh <issue_num> <pr_number> <updated_backlog_content>` to:
-- Update backlog.md
-- Delete issue and plan files
-- Commit with pre-commit enforcement
-- Push to fork
+1. Edit `completed-issues.md` - add row to current month table: #, Author, PR, Commit, Date, Title
+2. Edit `backlog.md`:
+   - Remove from backlog table
+   - Remove from "Quick dependencies" (if referenced)
+   - Update "Recent (last 5)" list (prepend, keep max 5)
+   - Update "Blocked" columns in other issues (if they reference this issue)
+3. `git rm docs/project/issues/NNN-*.md`
+4. `git rm docs/project/plans/NNN-*.md` (if exists)
+5. Pre-commit retry loop: `while ! pre-commit run; do git add -u; done`
+6. `git commit -m "docs: complete issue #NNN"`
+7. `git push fork <branch>`
 
 ### Step 4.4: Show summary
 
