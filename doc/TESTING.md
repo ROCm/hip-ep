@@ -153,17 +153,6 @@ A successful test run should show:
    [  PASSED  ] 3 tests.
    ```
 
-## Debug Mode
-
-For detailed debug output, set additional environment variables before running tests:
-
-```bash
-set GLOG_logtostderr=1
-set GLOG_minloglevel=0
-```
-
-Then run the test executable directly to see all debug output.
-
 ## Generating Test Models
 
 ### Conv Model
