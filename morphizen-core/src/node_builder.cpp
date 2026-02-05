@@ -450,7 +450,14 @@ void graph_replace_node_arg(const Graph& graph, const IPass& pass,
       << "mismatch data type between from and to nodeargs";
 
   auto from_nodearg_name = node_arg_get_name(from);
-  auto consumers = graph_get_consumer_nodes(graph, from_nodearg_name);
+  auto consumers_cxx =
+      morphizen_cxx::GraphConstRef(graph).find_consumers(from_nodearg_name);
+  // Convert to raw pointers for the loop
+  auto consumers = std::vector<const Node*>();
+  consumers.reserve(consumers_cxx.size());
+  for (auto& c : consumers_cxx) {
+    consumers.push_back(c.ptr());
+  }
 
   for (auto consumer : consumers) {
     auto inputs = node_get_inputs(*consumer);
@@ -474,7 +481,7 @@ void graph_replace_node_arg(const Graph& graph, const IPass& pass,
         .set_anchor_point1(*consumer)
         .build();
   }
-  graph_resolve(const_cast<Graph&>(graph));
+  morphizen_cxx::GraphRef(const_cast<Graph&>(graph)).resolve();
   return;
 }
 
@@ -531,23 +538,21 @@ graph_virtual_fuse(const morphizen_cxx::GraphConstRef& graph,
   }
   nodes.reserve(node_indice.size());
   std::vector<size_t> ret;
-  auto output_nodes = std::vector<const onnxruntime::Node*>();
+  auto output_nodes = std::vector<NodeConstRef>();
   output_nodes.reserve(outputs.size());
   for (auto& output : outputs) {
-    output_nodes.push_back(output.find_producer().value().ptr());
+    output_nodes.push_back(output.find_producer().value());
   }
-  morphizen::graph_reverse_dfs_from_multi(
-      graph,                        //
+  graph.reverse_dfs_from_multi(
       gsl::make_span(output_nodes), // leaf nodes, output
       nullptr,                      // enter
-      [&ret, &graph, &nodes](const onnxruntime::Node* n) mutable {
-        nodes.push_back(NodeConstRef::from_node(graph, *n));
-      }, //
-      [&node_indice, &graph](const onnxruntime::Node* /*from*/,
-                             const onnxruntime::Node* to) -> bool {
-        auto in_body =
-            node_indice.find(NodeConstRef::from_node(graph, *to).index()) !=
-            node_indice.end();
+      [&nodes](NodeConstRef n) mutable {
+        nodes.push_back(n);
+        return false; // leave callback return value
+      },              //
+      nullptr,        // comp
+      [&node_indice](NodeConstRef /*from*/, NodeConstRef to) -> bool {
+        auto in_body = node_indice.find(to.index()) != node_indice.end();
         bool stop = !in_body;
         return stop;
       });

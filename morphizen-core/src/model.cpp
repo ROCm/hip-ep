@@ -34,8 +34,9 @@ MORPHIZEN_DLL_SPEC ModelPtr model_clone(const Model& model,
 #endif
 }
 MORPHIZEN_DLL_SPEC void ModelDeleter::operator()(Model* model) const {
+  auto& main_graph = model_main_graph(*model);
   MY_LOG(1) << "destroy model(" << ((void*)model) << ") "
-            << graph_get_name(model_main_graph(*model));
+            << morphizen_cxx::GraphConstRef(main_graph).name();
   MORPHIZEN_ORT_API(model_delete)(model);
 }
 } // namespace morphizen
@@ -43,8 +44,9 @@ MORPHIZEN_DLL_SPEC void ModelDeleter::operator()(Model* model) const {
 namespace morphizen_cxx {
 ModelConstRef::ModelConstRef(const morphizen::Model& model) : self_(model) {}
 const std::string& ModelConstRef::name() const {
-  return morphizen::graph_get_name(
-      morphizen::model_main_graph(const_cast<morphizen::Model&>(self_)));
+  auto& main_graph =
+      morphizen::model_main_graph(const_cast<morphizen::Model&>(self_));
+  return morphizen_cxx::GraphConstRef(main_graph).name();
 }
 std::string ModelConstRef::get_metadata(const std::string& name) const {
   return morphizen::model_get_meta_data(self_, name);

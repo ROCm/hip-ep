@@ -44,7 +44,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 | [#019](issues/019-refactor-initialize-context.md) | Refactor initialize_context | L | 2h | Config/Context | #005/#006/#017 | morphizen_compile_model.cpp |
 | [#024](issues/024-remove-legacy-compile-entry-points.md) | Remove Legacy Compile API | M | 1h | Legacy Cleanup | - | onnxruntime_morphizen_ep.hpp/.cpp |
 | [#026](issues/026-mlir-model-export-api.md) | MLIR Model Export API | M | 1h | MLIR Features | - | morphizen-ort-api-ext.hpp/mlir-model.cpp |
-| [#027](issues/027-eliminate-c-style-apis-from-morphizen-graph.md) | Eliminate C-Style APIs | M | 3h+ | Legacy Cleanup | - | graph.hpp/pass.cpp/node_builder.cpp |
 | [#028](issues/028-mlir-backend-test-model-support.md) | ResNet50 MLIR Test Model | H | 1h | MLIR Testing | - | test_environment.hpp/mlir-model.cpp |
 | [#029](issues/029-passcontext-tarfile-initialization.md) | PassContext tarfile Init | M | 1h | Test Infrastructure | - | test_pass_context.cpp/pass_context_imp.cpp |
 | [#030](issues/030-morphizen-pass-init-plugin-loading.md) | morphizen-pass_init Plugin | M | 1h | Test Infrastructure | - | pass_imp.cpp/CMakeLists.txt |
@@ -82,6 +81,7 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
 _(Max 5 items, deleted files deleted)_
 
+- **Issue #027: Eliminate C-Style APIs from morphizen-graph** - PR #118 - Migrated all production code to C++ wrappers (GraphRef/GraphConstRef/ModelConstRef), added missing wrapper methods, eliminated ~100 lines of raw pointer conversions
 - **Issue #025: MLIR Graph Binary Serialization** - PR #112 - Changed MLIR graph save format from text (.mlir) to binary bytecode using mlir::writeBytecodeToFile()
 - **Issue #057: Optimize backlog.md Format for AI Parsing** - PR #115 - Converted backlog to table format (52% token reduction), added metadata columns for efficient issue selection
 - **Issue #058: Create /fix-issue Skill - Complete Workflow Automation** - PR #115 - Added skill for complete workflow automation (Phases 1-8: selection, workspace setup, implementation, finalization)

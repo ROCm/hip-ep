@@ -32,10 +32,10 @@ IPass::action_t PassInfo::get_action(size_t index) const {
 
 static bool node_arg_is_graph_input(const Graph& graph,
                                     const std::string& node_arg_name) {
-  auto graph_inputs = graph_get_inputs(graph);
+  auto graph_inputs = morphizen_cxx::GraphConstRef(graph).inputs();
   bool ret = std::any_of(graph_inputs.begin(), graph_inputs.end(),
-                         [&node_arg_name](const NodeArg* node_arg) -> bool {
-                           return node_arg_get_name(*node_arg) == node_arg_name;
+                         [&node_arg_name](const auto& node_arg) -> bool {
+                           return node_arg.name() == node_arg_name;
                          });
   return ret;
 }
@@ -104,24 +104,25 @@ node_arg_names_to_nodes(const Graph& graph,
   return std::make_pair(ret, std::string(ss.str()));
 }
 
-static std::unordered_set<const NodeArg*>
-node_args_names_to_node_arg(const Graph& graph,
-                            const std::vector<const NodeArg*>& graph_inputs,
-                            const std::vector<std::string>& input_names) {
-  std::unordered_set<const NodeArg*> ret;
+static std::vector<morphizen_cxx::NodeArgConstRef> node_args_names_to_node_arg(
+    const Graph& graph,
+    const std::vector<morphizen_cxx::NodeArgConstRef>& graph_inputs,
+    const std::vector<std::string>& input_names) {
+  std::vector<morphizen_cxx::NodeArgConstRef> ret;
   auto graph_ref = morphizen_cxx::GraphConstRef(graph);
   for (const auto& input_name : input_names) {
     auto node_arg_opt = graph_ref.find_node_arg(input_name);
     if (!node_arg_opt.has_value()) {
       continue;
     }
-    auto node_arg = node_arg_opt.value().ptr();
+    auto& node_arg_ref = node_arg_opt.value();
+    // Check if this node arg is in graph_inputs
     bool intersection = false;
-    for (auto graph_input : graph_inputs) {
-      intersection = intersection || graph_input == node_arg;
+    for (const auto& graph_input : graph_inputs) {
+      intersection = intersection || graph_input.ptr() == node_arg_ref.ptr();
     }
     if (intersection) {
-      ret.insert(node_arg);
+      ret.push_back(node_arg_ref);
     }
   }
   return ret;
@@ -132,22 +133,26 @@ calculate_return_values(const Graph& graph, const Node& output_node,
                         const std::vector<const Node*>& body_nodes) {
   auto ret = std::vector<std::string>();
   auto args = node_get_output_node_args(output_node);
-  auto graph_outputs = graph_get_outputs(graph);
+  auto graph_outputs = morphizen_cxx::GraphConstRef(graph).outputs();
   for (auto arg : args) {
     if (arg == nullptr) {
       // for optional outputs
       continue;
     }
     auto& arg_name = node_arg_get_name(*arg);
-    auto consumers = graph_get_consumer_nodes(graph, arg_name);
+    auto consumers =
+        morphizen_cxx::GraphConstRef(graph).find_consumers(arg_name);
     auto num_of_external_out_edges = 0;
-    auto is_graph_output = std::find(graph_outputs.begin(), graph_outputs.end(),
-                                     arg) != graph_outputs.end();
+    // Check if this arg is a graph output
+    auto is_graph_output =
+        std::any_of(graph_outputs.begin(), graph_outputs.end(),
+                    [arg](const auto& out) { return out.ptr() == arg; });
     if (is_graph_output) {
       num_of_external_out_edges = num_of_external_out_edges + 1;
     }
-    for (auto c : consumers) {
-      auto found = std::find(body_nodes.begin(), body_nodes.end(), c) !=
+    // Check if consumers are outside body_nodes
+    for (auto& c : consumers) {
+      auto found = std::find(body_nodes.begin(), body_nodes.end(), c.ptr()) !=
                    body_nodes.end();
       if (!found) {
         num_of_external_out_edges = num_of_external_out_edges + 1;
@@ -166,8 +171,8 @@ calculate_arguments(const Graph& graph, const Node& input_node,
                     const std::set<std::string>& initializers) {
   auto ret = std::vector<std::string>();
   auto args = node_get_input_node_args(input_node);
-  auto graph_inputs = graph_get_inputs(graph);
   auto graph_ref = morphizen_cxx::GraphConstRef(graph);
+  auto graph_inputs = graph_ref.inputs();
   for (auto arg : args) {
     if (!node_arg_exists(*arg)) {
       // testcase : hrnet_w18_small, optional node input
@@ -183,8 +188,9 @@ calculate_arguments(const Graph& graph, const Node& input_node,
       }
     }
     auto num_of_external_in_edges = 0;
-    auto is_graph_input = std::find(graph_inputs.begin(), graph_inputs.end(),
-                                    arg) != graph_inputs.end();
+    auto is_graph_input =
+        std::any_of(graph_inputs.begin(), graph_inputs.end(),
+                    [arg](const auto& inp) { return inp.ptr() == arg; });
     if (is_graph_input) {
       num_of_external_in_edges = num_of_external_in_edges + 1;
     }
@@ -243,24 +249,35 @@ check_loop(const Graph& graph, const std::vector<const Node*>& input_nodes,
            const std::vector<const Node*>& output_nodes) {
   auto ret = false;
   std::vector<std::string> maybe_loop_path;
-  // key : any node in graph
+  // key : node pointer
   // value : path from one of `input_nodes` to the `key`
   std::unordered_map<const Node*, std::vector<const Node*>> map_route;
   for (auto input_node : input_nodes) {
     map_route[input_node] = {input_node};
   }
-  morphizen::graph_reverse_dfs_from_multi(
+
+  // Convert raw pointers to NodeConstRef
+  auto graph_ref = morphizen_cxx::GraphConstRef(graph);
+  auto input_nodes_cxx = std::vector<morphizen_cxx::NodeConstRef>();
+  input_nodes_cxx.reserve(input_nodes.size());
+  for (auto* n : input_nodes) {
+    input_nodes_cxx.push_back(
+        morphizen_cxx::NodeConstRef::from_node(graph, *n));
+  }
+
+  graph_ref.reverse_dfs_from_multi(
       // we start traval from inputs_nodes, and if we found any one of
       // input nodes depends on one of output nodes topolocially, then
       // a loop is detected.
-      graph, gsl::make_span(input_nodes),
-      [&graph, &output_nodes, &ret, &map_route,
-       &maybe_loop_path](const Node* current_node) mutable {
+      gsl::make_span(input_nodes_cxx),
+      nullptr, // enter
+      [&output_nodes, &ret, &map_route, &graph,
+       &maybe_loop_path](morphizen_cxx::NodeConstRef current_node) mutable {
         auto hit_output = std::find(output_nodes.begin(), output_nodes.end(),
-                                    current_node) != output_nodes.end();
+                                    current_node.ptr()) != output_nodes.end();
         if (hit_output) {
           ret = true;
-          auto route = map_route[current_node];
+          auto route = map_route[current_node.ptr()];
           for (size_t i = 0; i < route.size(); i++) {
             auto node = route[i];
             auto node_ref =
@@ -269,18 +286,19 @@ check_loop(const Graph& graph, const std::vector<const Node*>& input_nodes,
                 morphizen::node_arg_get_name(node_ref.first_output_node_arg()));
           }
         }
+        return false; // leave callback return value
       },
-      nullptr,
-      [&graph, &ret, &map_route](const Node* from, const Node* to) -> bool {
+      nullptr,        // comp
+      [&ret, &map_route](morphizen_cxx::NodeConstRef from,
+                         morphizen_cxx::NodeConstRef to) -> bool {
         // There may exist multiple paths and we only find one of them
         // ,because we only care if has connection
-        CHECK(map_route.find(from) != map_route.end())
-            << "path not exists:"
-            << morphizen_cxx::NodeConstRef::from_node(graph, *from).to_string();
-        if (map_route.find(to) == map_route.end()) {
-          auto route = map_route[from];
-          route.push_back(to);
-          map_route[to] = route;
+        CHECK(map_route.find(from.ptr()) != map_route.end())
+            << "path not exists:" << from.to_string();
+        if (map_route.find(to.ptr()) == map_route.end()) {
+          auto route = map_route[from.ptr()];
+          route.push_back(to.ptr());
+          map_route[to.ptr()] = route;
         }
         // break if loop is detected. return true,
         // graph_reverse_dfs_from should terminate travel.
@@ -344,35 +362,54 @@ static bool is_subset(const std::vector<std::string>& subset,
   }
   return true;
 }
-static std::vector<const Node*> graph_get_isolated_nodes(const Graph& graph) {
-  std::vector<const Node*> leaf_nodes;
-  auto all_nodes = graph_nodes(graph);
-  auto graph_outputs = graph_get_outputs(graph);
-  leaf_nodes.reserve(graph_outputs.size());
-  for (auto n : all_nodes) {
-    CHECK(n != nullptr);
-    auto node_outputs = node_get_output_node_args(*n);
-    auto found = std::any_of(node_outputs.begin(), node_outputs.end(),
-                             [&graph_outputs](const NodeArg* x) {
-                               return std::find(graph_outputs.begin(),
-                                                graph_outputs.end(),
-                                                x) != graph_outputs.end();
-                             });
+static std::vector<morphizen_cxx::NodeConstRef>
+graph_get_isolated_nodes(const Graph& graph) {
+  auto graph_ref = morphizen_cxx::GraphConstRef(graph);
+  auto all_nodes = graph_ref.nodes();
+  auto graph_outputs = graph_ref.outputs();
+
+  // Find leaf nodes (nodes that produce graph outputs)
+  std::vector<const Node*> leaf_nodes_raw;
+  leaf_nodes_raw.reserve(graph_outputs.size());
+  for (auto& n : all_nodes) {
+    auto node_outputs = node_get_output_node_args(*n.ptr());
+    auto found = std::any_of(
+        node_outputs.begin(), node_outputs.end(),
+        [&graph_outputs](const NodeArg* x) {
+          return std::any_of(graph_outputs.begin(), graph_outputs.end(),
+                             [x](const auto& out) { return out.ptr() == x; });
+        });
     if (found) {
-      leaf_nodes.push_back(n);
+      leaf_nodes_raw.push_back(n.ptr());
     }
   }
 
-  morphizen::graph_reverse_dfs_from_multi(
-      graph,                      //
-      gsl::make_span(leaf_nodes), //
-      nullptr,                    //
-      [&all_nodes](const Node* n) mutable {
-        all_nodes.erase(std::remove(all_nodes.begin(), all_nodes.end(), n),
-                        all_nodes.end());
-      }, //
-      nullptr);
-  return all_nodes;
+  // Convert leaf_nodes to NodeConstRef for DFS
+  std::vector<morphizen_cxx::NodeConstRef> leaf_nodes_cxx;
+  leaf_nodes_cxx.reserve(leaf_nodes_raw.size());
+  for (auto* n : leaf_nodes_raw) {
+    leaf_nodes_cxx.push_back(morphizen_cxx::NodeConstRef::from_node(graph, *n));
+  }
+
+  // Remove reachable nodes via DFS
+  std::vector<morphizen_cxx::NodeConstRef> result =
+      all_nodes;                      // Start with all nodes
+  morphizen_cxx::GraphConstRef(graph).reverse_dfs_from_multi(
+      gsl::make_span(leaf_nodes_cxx), //
+      nullptr,                        //
+      [&result](morphizen_cxx::NodeConstRef n) mutable {
+        result.erase(
+            std::remove_if(result.begin(), result.end(),
+                           [&n](const morphizen_cxx::NodeConstRef& node) {
+                             return node.index() == n.index();
+                           }),
+            result.end());
+        return false; // leave callback return value
+      },              //
+      nullptr,        // comp
+      nullptr);       // stop
+
+  return result;
 }
 
 MORPHIZEN_DLL_SPEC
@@ -402,26 +439,39 @@ IPass_try_fuse(const Graph& graph, const std::string& name,
       node_arg_names_to_nodes(graph, inputs, true /* allow node not found*/);
   auto [output_nodes, find_output_nodes_msg] =
       node_arg_names_to_nodes(graph, outputs, false /* node must be found */);
-  auto graph_inputs = graph_get_inputs(graph);
+  auto graph_inputs = morphizen_cxx::GraphConstRef(graph).inputs();
   auto node_inputs = node_args_names_to_node_arg(graph, graph_inputs, inputs);
   auto trasverse_out_of_bound = [&graph_inputs,
                                  &node_inputs](const NodeArg* node_arg) {
-    auto iter = std::find(graph_inputs.begin(), graph_inputs.end(), node_arg);
+    // Check if node_arg is in graph_inputs
+    auto iter = std::find_if(
+        graph_inputs.begin(), graph_inputs.end(),
+        [node_arg](const auto& inp) { return inp.ptr() == node_arg; });
     if (iter == graph_inputs.end()) {
       return false;
     }
-    bool not_node_input = node_inputs.find(*iter) == node_inputs.end();
+    // Check if it's NOT in node_inputs
+    bool not_node_input = std::none_of(
+        node_inputs.begin(), node_inputs.end(),
+        [node_arg](const auto& inp) { return inp.ptr() == node_arg; });
     return not_node_input;
   };
+  // Convert output_nodes to NodeConstRef for DFS
+  auto output_nodes_cxx = std::vector<morphizen_cxx::NodeConstRef>();
+  output_nodes_cxx.reserve(output_nodes.size());
+  for (auto* n : output_nodes) {
+    output_nodes_cxx.push_back(
+        morphizen_cxx::NodeConstRef::from_node(graph, *n));
+  }
   auto hit_ceiling = false;
-  morphizen::graph_reverse_dfs_from_multi(
-      graph, gsl::make_span(output_nodes),
+  morphizen_cxx::GraphConstRef(graph).reverse_dfs_from_multi(
+      gsl::make_span(output_nodes_cxx),
+      nullptr, // enter
       [&body_nodes, &graph, &constant_initializers, &hit_ceiling,
-       &trasverse_out_of_bound](const Node* node1) {
+       &trasverse_out_of_bound](morphizen_cxx::NodeConstRef node1) {
         if (!hit_ceiling) {
-          CHECK(node1 != nullptr);
-          body_nodes.push_back(node1);
-          auto node_args = node_get_input_node_args(*node1);
+          body_nodes.push_back(node1.ptr());
+          auto node_args = node_get_input_node_args(*node1.ptr());
           for (auto node_arg : node_args) {
             if (node_arg == nullptr) {
               // node_arg == nullptr mean optionsl argument.
@@ -440,11 +490,14 @@ IPass_try_fuse(const Graph& graph, const std::string& name,
             }
           }
         }
+        return false; // leave callback return value
       },
-      nullptr,
-      [&inputs](const Node* from, const Node* to) -> bool {
+      nullptr,        // comp
+      [&inputs](morphizen_cxx::NodeConstRef from,
+                morphizen_cxx::NodeConstRef to) -> bool {
         // input_nodes.contains(to);
-        auto edge_node_arg_names = get_edge_node_arg_names(from, to);
+        auto edge_node_arg_names =
+            get_edge_node_arg_names(from.ptr(), to.ptr());
         // The condition for stopping the traversal is the edges all included
         // inputs.
         return is_subset(edge_node_arg_names, inputs);
@@ -465,10 +518,10 @@ IPass_try_fuse(const Graph& graph, const std::string& name,
   // body_nodes.
   // TODO : now only support one layer of isolated node
   auto isolated_nodes = graph_get_isolated_nodes(graph);
-  for (auto island : isolated_nodes) {
+  for (auto& island : isolated_nodes) {
     // island node's all input node in body_nodes => is_body
     auto is_body = true;
-    auto node_inputs_1 = node_get_inputs(*island);
+    auto node_inputs_1 = node_get_inputs(*island.ptr());
     for (auto& input : node_inputs_1) {
       if (input.node != nullptr &&
           std::find(body_nodes.begin(), body_nodes.end(), input.node) ==
@@ -478,7 +531,7 @@ IPass_try_fuse(const Graph& graph, const std::string& name,
       }
     }
     if (is_body) {
-      body_nodes.push_back(island);
+      body_nodes.push_back(island.ptr());
       // insert island's initalizers input args
       for (auto input : node_inputs_1) {
         if (input.node == nullptr) {
