@@ -8,9 +8,8 @@
  * This test only creates a session with MorphiZen EP to verify MLIR pass
  * integration.
  *
- * To see log output, set these environment variables before running:
- *   set GLOG_logtostderr=1
- *   set GLOG_minloglevel=0
+ * Log level is controlled by the ORT logging level parameter passed to
+ * Ort::Env constructor (e.g., ORT_LOGGING_LEVEL_INFO).
  */
 
 #include <fstream>
@@ -55,20 +54,9 @@ bool file_exists(const std::string &path) {
 class OrtIntegrationTest : public ::testing::Test {
 protected:
   void SetUp() override {
-    // Use INFO level to see Level-1 pass logs (MY_LOG -> glog INFO)
-    env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_INFO,
+    // Use INFO level to see Level-1 pass logs
+    env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING,
                                       "OrtIntegrationTest");
-
-    // Print environment variable status for debugging
-    const char *glog_stderr = std::getenv("GLOG_logtostderr");
-    const char *glog_minlevel = std::getenv("GLOG_minloglevel");
-
-    std::cout << "\n=== Environment Variables ===" << std::endl;
-    std::cout << "GLOG_logtostderr: "
-              << (glog_stderr ? glog_stderr : "(not set)") << std::endl;
-    std::cout << "GLOG_minloglevel: "
-              << (glog_minlevel ? glog_minlevel : "(not set)") << std::endl;
-    std::cout << "==============================\n" << std::endl;
 
     // Register MorphiZen EP
     const char *lib_path_str = MORPHIZEN_EP_LIB_PATH;
@@ -278,12 +266,6 @@ int main(int argc, char **argv) {
   std::cout << "\n========================================" << std::endl;
   std::cout << "ORT Integration Test for MorphiZen MLIR EP" << std::endl;
   std::cout << "========================================\n" << std::endl;
-
-  std::cout << "To see log output, set these environment variables:"
-            << std::endl;
-  std::cout << "  set GLOG_logtostderr=1" << std::endl;
-  std::cout << "  set GLOG_minloglevel=0" << std::endl;
-  std::cout << std::endl;
 
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
