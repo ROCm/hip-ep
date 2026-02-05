@@ -166,7 +166,7 @@ onnx-hipdnn-ep/
 └── doc/
     ├── 01_DESIGN.md                      # This document
     ├── 02_LEVEL1_PASS_DESIGN.md          # Level-1 pass details
-    └── 03_BUILD.md                       # Build instructions
+    └── 03_GROUPING_ALGORITHM.md          # Node grouping algorithm
 ```
 
 ---

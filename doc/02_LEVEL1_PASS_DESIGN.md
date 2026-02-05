@@ -303,7 +303,7 @@ Example output:
 ## See Also
 
 - [01_DESIGN.md](01_DESIGN.md) - Overall project design
-- [03_BUILD.md](03_BUILD.md) - Build instructions
+- [03_GROUPING_ALGORITHM.md](03_GROUPING_ALGORITHM.md) - Node grouping algorithm
 - [Level-2 Conv Pass](../level-2-pass-rocm-conv/) - Conv pattern matching
 - [Level-2 Gemm Pass](../level-2-pass-rocm-gemm/) - Gemm pattern matching
 - [Custom Op](../custom-op-rocm/) - Subgraph execution
