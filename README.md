@@ -1,14 +1,14 @@
-# onnx-hipdnn-ep
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
+# ONNX HIP DNN Execution Provider
 
-Unified ROCm Execution Provider for ONNX Runtime - GPU-accelerated operations using AMD's MIOpen and hipBLASLt libraries.
+An implementation of HIP DNN operations in the MorphiZen framework.
 
-## Overview
+This project demonstrates the integration of HIP (Heterogeneous-compute Interface for Portability) DNN operations within the MorphiZen optimization framework for ONNX Runtime.
 
-This project implements a custom execution provider for ONNX Runtime that offloads operations to AMD GPUs using ROCm libraries. It combines the functionality of:
-- **MIOpen**: Optimized convolution operations
-- **hipBLASLt**: High-performance GEMM (matrix multiplication)
-
-Both libraries share a single HIP stream for implicit operation fusion.
+---
 
 ## Features
 
@@ -20,130 +20,44 @@ Both libraries share a single HIP stream for implicit operation fusion.
 - **hipBLASLt GEMM**: Matrix multiplication with epilogue support
 - **Custom HIP Kernels**: Softmax, Tile, Transpose, Mul, Reshape operations
 
+---
+
 ## Supported Operations
 
 | Operation | Library | Status |
 |-----------|---------|--------|
-| Conv (2D) | MIOpen | ✅ Implemented |
-| Conv + Bias | MIOpen | ✅ Implemented |
-| Gemm | hipBLASLt | ✅ Implemented |
-| Gemm + Bias | hipBLASLt | ✅ Implemented |
-| MatMul | hipBLASLt | ✅ Implemented |
-| Softmax | HIP Kernel | ✅ Implemented |
-| Tile | HIP Kernel | ✅ Implemented |
-| Transpose | HIP Kernel | ✅ Implemented |
-| Mul | HIP Kernel | ✅ Implemented |
-| Reshape | HIP Kernel | ✅ Implemented |
+| Conv (2D) | MIOpen | Implemented |
+| Conv + Bias | MIOpen | Implemented |
+| Gemm | hipBLASLt | Implemented |
+| Gemm + Bias | hipBLASLt | Implemented |
+| MatMul | rocBLAS | Implemented |
+| Mul | HIPRTC | Implemented |
+| Softmax | HIPRTC | Implemented |
+| Reshape | HIP Memory | Implemented |
+| Transpose | HIPRTC | Implemented |
+| Tile | HIPRTC | Implemented |
 
-## Prerequisites
+---
 
-- Windows 10/11 or Linux
-- AMD GPU with ROCm support (e.g., gfx1100, gfx1103, gfx1151)
-- TheRock ROCm SDK (Windows) or ROCm (Linux)
-- Visual Studio 2022 (Windows)
-- CMake 3.29+
-- Ninja build system
-- Python 3.x
-- Git (for fetching dependencies)
+## Project Design
 
-## Quick Start
+### Components
 
-### Windows
+- **level-1-pass-rocm**: Level-1 orchestrator pass for ROCm operations
+- **level-2-pass-rocm-conv**: Level-2 Conv pass (MIOpen)
+- **level-2-pass-rocm-gemm**: Level-2 Gemm pass (hipBLASLt)
+- **level-2-pass-rocm-matmul**: Level-2 MatMul pass (rocBLAS)
+- **level-2-pass-rocm-mul**: Level-2 Mul pass (HIPRTC)
+- **level-2-pass-rocm-softmax**: Level-2 Softmax pass (HIPRTC)
+- **level-2-pass-rocm-reshape**: Level-2 Reshape pass
+- **level-2-pass-rocm-transpose**: Level-2 Transpose pass (HIPRTC)
+- **level-2-pass-rocm-tile**: Level-2 Tile pass (HIPRTC)
+- **custom-op-rocm**: Custom operator implementations using HIP
+- **kernels**: GPU kernel implementations (HIPRTC)
+- **proto**: Protocol buffer definitions
+- **test**: Test suite for validation
 
-1. **Install TheRock ROCm SDK:**
-   ```batch
-   REM Download from https://therock-nightly-tarball.s3.amazonaws.com/index.html
-   REM Choose the version matching your GPU architecture (e.g., gfx1151)
-   REM Extract to D:\Develop\m\dist\therock (or C:\Develop\m\dist\therock)
-   set THEROCK_DIST=D:\Develop\m\dist\therock
-   ```
-
-2. **Build the project (default architecture):**
-   ```batch
-   cd onnx-hipdnn-ep
-   build.bat
-   ```
-
-3. **Build with specific GPU architecture:**
-   
-   For AMD GPUs, you must specify the correct architecture. Common architectures:
-   - `gfx1100` - Radeon RX 7900 series
-   - `gfx1103` - Radeon 780M/760M (iGPU)
-   - `gfx1151` - Radeon PRO W7000 series
-   
-   ```batch
-   REM Method 1: Set environment variable before build
-   set HIP_ARCHITECTURES=gfx1151
-   build.bat
-   
-   REM Method 2: Direct CMake configuration
-   cmake -DHIP_ARCHITECTURES=gfx1151 -B build -S .
-   cmake --build build
-   ```
-
-4. **Configure GPU timeout (optional):**
-   ```batch
-   REM Set timeout to 10 seconds (default is 5 seconds)
-   set MORPHIZEN_GPU_TIMEOUT_MS=10000
-   ```
-
-### Linux
-
-```bash
-# Set up ROCm environment
-export THEROCK_DIST=/opt/rocm
-
-# Build with specific GPU architecture
-mkdir build && cd build
-cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DHIP_ARCHITECTURES=gfx1100 ..
-cmake --build .
-```
-
-## GPU Architecture Selection
-
-**Important:** The HIP kernels must be compiled for your specific GPU architecture. Using the wrong architecture will result in runtime crashes (access violation errors).
-
-To find your GPU architecture:
-```batch
-REM On Windows with TheRock
-%THEROCK_DIST%\bin\rocminfo.exe | findstr "gfx"
-
-REM On Linux
-rocminfo | grep gfx
-```
-
-Set the architecture during CMake configuration:
-```batch
-cmake -DHIP_ARCHITECTURES=gfx1151 <build_dir>
-```
-
-For incremental builds after changing architecture:
-```batch
-REM Reconfigure with new architecture
-cmake -DHIP_ARCHITECTURES=gfx1151 <build_dir>
-
-REM Rebuild kernels and relink
-cmake --build <build_dir>
-```
-
-## Project Structure
-
-```
-onnx-hipdnn-ep/
-├── cmake/                          # CMake configuration
-├── level-1-pass-rocm/             # Level-1 pass (orchestrator)
-├── level-2-pass-rocm-conv/        # Level-2 Conv pass (MIOpen)
-├── level-2-pass-rocm-gemm/        # Level-2 Gemm pass (hipBLASLt)
-├── custom-op-rocm/                # Runtime custom op
-├── proto/                         # Protobuf definitions
-├── patterns/                      # ONNX patterns
-├── test/                          # Tests
-├── doc/                           # Documentation
-├── etc/                           # Configuration
-└── tools/                         # Build tools
-```
-
-## Architecture
+### Architecture
 
 ```
                     ┌─────────────────────────────┐
@@ -152,109 +66,258 @@ onnx-hipdnn-ep/
                     │  • Orchestrates sub-passes  │
                     └─────────────┬───────────────┘
                                   │
-                    ┌─────────────┴───────────────┐
-                    │                             │
-              ┌─────▼─────┐               ┌───────▼─────┐
-              │ Level-2   │               │ Level-2     │
-              │ Conv Pass │               │ Gemm Pass   │
-              │ (MIOpen)  │               │ (hipBLASLt) │
-              └─────┬─────┘               └──────┬──────┘
-                    │                            │
-                    └────────────┬───────────────┘
-                                 ▼
+          ┌───────────────────────┼───────────────────────┐
+          │           │           │           │           │
+    ┌─────▼─────┐ ┌───▼───┐ ┌─────▼─────┐ ┌───▼───┐ ┌─────▼─────┐
+    │ Level-2   │ │Level-2│ │ Level-2   │ │Level-2│ │ Level-2   │
+    │ Conv Pass │ │ Gemm  │ │ MatMul    │ │ Mul   │ │ Softmax   │
+    │ (MIOpen)  │ │(hBLT) │ │ (rocBLAS) │ │(HIPRTC│ │ (HIPRTC)  │
+    └─────┬─────┘ └───┬───┘ └─────┬─────┘ └───┬───┘ └─────┬─────┘
+          │           │           │           │           │
+          └───────────┴───────────┼───────────┴───────────┘
+                                  ▼
                     ┌─────────────────────────────┐
                     │     Custom Op (ROCm)        │
                     │  • Shared HIP stream        │
                     │  • ConvExecutor             │
                     │  • GemmExecutor             │
+                    │  • HIPRTC Kernels           │
                     └─────────────────────────────┘
 ```
 
-## Testing
+---
 
-After building, you can verify the installation with the included test tools.
+## Prerequisites
+
+### System Requirements
+- Windows 10/11 with AMD GPU (ROCm support)
+- Visual Studio 2022 with C++ workload
+- CMake 3.29+
+- Git with Git Bash
+- Python 3.8+
+
+---
+
+## Directory Structure
+
+After completing the build instructions below, your workspace will have the following structure:
+
+```
+workspace/
+├── therock/                  # TheRock ROCm SDK (extracted from tarball)
+│   ├── bin/                  # Runtime DLLs (MIOpen.dll, hiprtc.dll, etc.)
+│   └── lib/llvm/bin/         # LLVM tools (amdgpu-arch.exe)
+├── onnxruntime/              # ONNX Runtime source code (git clone)
+├── build/
+│   ├── onnxruntime/          # ONNX Runtime build artifacts
+│   └── onnx-hipdnn-ep/       # onnx-hipdnn-ep build artifacts
+├── local/                    # ONNX Runtime installation (CMAKE_PREFIX_PATH)
+│   ├── bin/                  # onnxruntime.dll, onnxruntime_morphizen_ep.dll, test_gqa.exe
+│   └── lib/cmake/            # CMake configuration files
+└── onnx-hipdnn-ep/           # This project (git clone)
+    ├── 3rd-party/morphizen/  # MorphiZen framework (git submodule)
+    ├── test/test_models/     # Test models (gqa_layer_00.onnx)
+    └── etc/                  # Configuration files (morphizen_config.json)
+```
+
+---
+
+## Build Instructions
+
+### Step 1: Setup TheRock ROCm SDK
+
+TheRock SDK provides HIP/ROCm runtime for Windows.
+
+**Download:** https://therock-nightly-tarball.s3.amazonaws.com/index.html
+
+1. **Determine your GPU architecture** (before downloading):
+
+   Open **Device Manager** → **Display adapters** to find your AMD GPU model, then select the matching GFX series:
+
+   | GPU Model | GFX Series | TheRock Tarball |
+   |-----------|------------|-----------------|
+   | Radeon RX 7900/7800/7700/7600 | gfx110X | `therock-dist-windows-gfx110X-all-*.tar.gz` |
+   | Radeon RX 6900/6800/6700/6600 | gfx103X | `therock-dist-windows-gfx103X-all-*.tar.gz` |
+   | Radeon 880M/780M (Strix Point) | gfx115X | `therock-dist-windows-gfx115X-all-*.tar.gz` |
+   | Radeon 890M (Strix Halo) | gfx120X | `therock-dist-windows-gfx120X-all-*.tar.gz` |
+
+2. **Create workspace and extract TheRock**:
+   ```bash
+   mkdir workspace
+   cd workspace
+
+   # Extract TheRock tarball to workspace/therock
+   mkdir therock
+   tar -xzf /path/to/therock-dist-windows-gfx115X-all-*.tar.gz -C therock
+   ```
+
+3. **Verify installation**:
+   ```bash
+   # Verify GPU detection
+   ./therock/lib/llvm/bin/amdgpu-arch.exe
+   # Example output: gfx1150
+
+   # Verify HIP configuration
+   ./therock/bin/hipconfig.exe --full
+   ```
+
+### Step 2: Build ONNXRuntime
+
+To build ONNX Runtime, follow the [official documentation](https://onnxruntime.ai/docs/build/inferencing.html).
+
+It is recommended to use Git Bash. The commands below have only been tested in Git Bash.
+
+#### Download onnxruntime
+
+```bash
+cd workspace
+git clone https://github.com/Microsoft/onnxruntime.git
+cd onnxruntime
+```
+
+#### Build ONNX Runtime
+
+```bash
+./build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --cmake_extra_defines CMAKE_INSTALL_PREFIX=$PWD/../local --disable_memleak_checker
+cmake --build ../build/onnxruntime/Release/ --target install
+```
+
+### Step 3: Build onnx-hipdnn-ep
+
+#### Download onnx-hipdnn-ep
+
+```bash
+cd workspace
+git clone --recursive https://github.com/ROCm/onnx-hipdnn-ep.git
+```
+
+> **Note**: The `--recursive` flag is required to clone the `3rd-party/morphizen` submodule. If you already cloned without it, run:
+> ```bash
+> cd onnx-hipdnn-ep
+> git submodule update --init --recursive
+> ```
+
+#### Known Issue
+
+**nlohmann_json Package Not Found**
+
+```
+Error Message:
+CMake Error: Could not find a package configuration file provided by "nlohmann_json"
+
+Root Cause:
+TheRock SDK's nlohmann_json CMake configuration file contains problematic INTERFACE_SOURCES attribute.
+
+Solution:
+File Path: $PWD/../therock/share/cmake/nlohmann_json/nlohmann_jsonTargets.cmake
+Modifications:
+Open file and find set_target_properties(nlohmann_json::nlohmann_json ...)
+Remove the INTERFACE_SOURCES line (if it exists)
+```
+
+#### Configure and build
+
+**Using Bash (Git Bash on Windows):**
+
+```bash
+cd onnx-hipdnn-ep
+export THEROCK_DIST=$PWD/../therock
+cmake \
+  -B ../build/onnx-hipdnn-ep -S . \
+  -DTHEROCK_DIST=$THEROCK_DIST \
+  -DCMAKE_PREFIX_PATH=$PWD/../local \
+  -DCMAKE_INSTALL_PREFIX=$PWD/../local \
+  -DHIP_PLATFORM=amd
+
+# Build Release version (recommended)
+cmake --build ../build/onnx-hipdnn-ep --config Release --target install --parallel
+```
+
+**Using PowerShell:**
+
+```powershell
+cd onnx-hipdnn-ep
+$env:THEROCK_DIST = "$PWD\..\therock"
+$env:HIP_PLATFORM = "amd"
+
+cmake -B ..\build\onnx-hipdnn-ep -S . `
+  -DTHEROCK_DIST="$env:THEROCK_DIST" `
+  -DCMAKE_PREFIX_PATH="$PWD\..\local" `
+  -DCMAKE_INSTALL_PREFIX="$PWD\..\local" `
+  -DHIP_PLATFORM=amd
+
+# Build Release version (recommended)
+cmake --build ..\build\onnx-hipdnn-ep --config Release --target install --parallel
+```
+
+#### CMake Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `THEROCK_DIST` | (required) | Path to TheRock ROCm SDK installation |
+| `CMAKE_PREFIX_PATH` | - | Path to ONNX Runtime installation (for find_package) |
+| `CMAKE_INSTALL_PREFIX` | - | Installation directory for built artifacts |
+| `HIP_PLATFORM` | `amd` | HIP platform (use `amd` for AMD GPUs) |
+
+---
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `THEROCK_DIST` | Path to TheRock SDK installation |
+| `HIP_PLATFORM` | Set to `amd` for AMD GPU support |
+| `MORPHIZEN_DEBUG_ROCM` | Debug level (1=basic, 2=verbose) |
+| `MORPHIZEN_ROCM_NO_MERGE` | Disable subgraph merging (1=enabled) |
+| `MORPHIZEN_DRY_RUN` | Dry run mode without GPU execution (1=enabled) |
+| `MORPHIZEN_EP_JSON_CONFIG` | Path to custom morphizen_config.json |
+
+---
+
+## Testing
 
 ### Run GQA Test
 
-```batch
-REM Set environment
-set THEROCK_DIST=D:\Develop\m\dist\therock
-set PATH=%THEROCK_DIST%\bin;%PATH%
-set MORPHIZEN_EP_DLL=D:\Develop\m\local\bin\onnxruntime_morphizen_ep.dll
+```bash
+# Set environment
+export PATH="$THEROCK_DIST/bin:$PATH"
+export MORPHIZEN_DEBUG_ROCM=1
+export MORPHIZEN_ROCM_NO_MERGE=1
 
-REM Run test
-test_gqa.exe <model.onnx>
-
-REM With options
-test_gqa.exe -b 1 -s 128 -i 10 -v <model.onnx>
+# Run test
+cd ../local/bin
+./test_gqa.exe ../../onnx-hipdnn-ep/test/test_models/gqa_layer_00.onnx -w 1 -i 1
 ```
 
-### Model Verification (CPU vs GPU comparison)
+```powershell
+# Set environment
+$env:PATH = "$env:THEROCK_DIST\bin;$env:PATH"
+$env:MORPHIZEN_DEBUG_ROCM = "1"
+$env:MORPHIZEN_ROCM_NO_MERGE = "1"
 
-```batch
-REM Verify model outputs match between CPU and GPU
-model_verifier.exe <model.onnx>
-
-REM With custom tolerance
-model_verifier.exe -t 0.01 <model.onnx>
+# Run test
+cd ..\local\bin
+.\test_gqa.exe ..\..\onnx-hipdnn-ep\test\test_models\gqa_layer_00.onnx -w 1 -i 1
 ```
 
-### Test Options
+### Benchmark Results
 
-| Option | Description |
-|--------|-------------|
-| `-b <size>` | Batch size (default: 1) |
-| `-s <len>` | Sequence length (default: 128) |
-| `-i <num>` | Number of iterations (default: 10) |
-| `-w <num>` | Warmup iterations (default: 3) |
-| `-t <val>` | Tolerance for verification (default: 0.1) |
-| `-v` | Verbose output |
-| `-n` | Disable EP (CPU only) |
-
-## Troubleshooting
-
-### Access Violation (0xC0000005) in hipLaunchKernel
-
-This error typically means the HIP kernels were compiled for a different GPU architecture than your hardware.
-
-**Solution:** Rebuild with the correct `HIP_ARCHITECTURES`:
-```batch
-cmake -DHIP_ARCHITECTURES=<your_arch> <build_dir>
-cmake --build <build_dir>
+```
+=== Benchmark Results ===
+  Iterations: 1
+  Mean latency: 53.50 ms
+  Std dev: 0.00 ms
+  Min latency: 53.50 ms
+  Max latency: 53.50 ms
+  Median: 53.50 ms
+  P90: 53.50 ms
+  P99: 53.50 ms
+  Throughput: 18.69 infer/sec
 ```
 
-### TheRock ROCm SDK not found
-
-The build script checks these locations:
-- `D:\Develop\m\dist\therock`
-- `C:\Develop\m\dist\therock`
-- `C:\dist\therock`
-
-Set `THEROCK_DIST` environment variable if your SDK is elsewhere.
-
-### GitHub Authentication Error (SAML SSO)
-
-If you see "The 'ROCm' organization has enabled or enforced SAML SSO", re-authorize Git Credential Manager:
-```batch
-git credential-manager github login
-```
-
-## Documentation
-
-- [01_DESIGN.md](doc/01_DESIGN.md) - Architecture and design details
-- [02_LEVEL1_PASS_DESIGN.md](doc/02_LEVEL1_PASS_DESIGN.md) - Level-1 pass implementation
-- [03_GROUPING_ALGORITHM.md](doc/03_GROUPING_ALGORITHM.md) - Pattern grouping algorithm
-- [04_TEST_STATUS_REPORT.md](doc/04_TEST_STATUS_REPORT.md) - Test status and results
-- [05_GPU_TIMEOUT_HANDLING.md](doc/05_GPU_TIMEOUT_HANDLING.md) - GPU timeout protection
-- [10_BUILD.md](doc/10_BUILD.md) - Detailed build instructions
+---
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
-
-## References
-
-- [MIOpen Documentation](https://rocm.docs.amd.com/projects/MIOpen/en/latest/)
-- [hipBLASLt Documentation](https://rocm.docs.amd.com/projects/hipBLASLt/en/latest/)
-- [ROCm Documentation](https://rocm.docs.amd.com/)
-- [ONNX Runtime](https://onnxruntime.ai/)
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
