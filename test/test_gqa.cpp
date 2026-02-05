@@ -141,8 +141,22 @@ public:
     std::cout << "EP context: " << (config_.enable_ep_context ? "yes" : "no") << std::endl;
     std::cout << std::endl;
     
+    // Determine log level from environment variable ORT_LOG_LEVEL
+    OrtLoggingLevel ort_log_level = ORT_LOGGING_LEVEL_WARNING;
+    const char* log_level_env = std::getenv("ORT_LOG_LEVEL");
+    if (log_level_env != nullptr) {
+      std::string log_level_str(log_level_env);
+      if (log_level_str == "info") {
+        ort_log_level = ORT_LOGGING_LEVEL_INFO;
+      } else if (log_level_str == "warning") {
+        ort_log_level = ORT_LOGGING_LEVEL_WARNING;
+      } else if (log_level_str == "error") {
+        ort_log_level = ORT_LOGGING_LEVEL_ERROR;
+      }
+    }
+    
     // Create ONNX Runtime environment
-    env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "test_gqa");
+    env_ = std::make_unique<Ort::Env>(ort_log_level, "test_gqa");
     
     // Register MorphiZen EP if enabled
     if (config_.enable_ep) {

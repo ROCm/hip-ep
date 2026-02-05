@@ -12,6 +12,7 @@
  *   set GLOG_minloglevel=0
  */
 
+#include <cstdlib>
 #include <gtest/gtest.h>
 #include <cmath>
 #include <fstream>
@@ -51,7 +52,20 @@ bool file_exists(const std::string& path) {
 class OrtIntegrationTest : public ::testing::Test {
 protected:
   void SetUp() override {
-    env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_INFO, "OrtIntegrationTest");
+    // Determine log level from environment variable ORT_LOG_LEVEL
+    OrtLoggingLevel ort_log_level = ORT_LOGGING_LEVEL_WARNING;
+    const char* log_level_env = std::getenv("ORT_LOG_LEVEL");
+    if (log_level_env != nullptr) {
+      std::string log_level_str(log_level_env);
+      if (log_level_str == "info") {
+        ort_log_level = ORT_LOGGING_LEVEL_INFO;
+      } else if (log_level_str == "warning") {
+        ort_log_level = ORT_LOGGING_LEVEL_WARNING;
+      } else if (log_level_str == "error") {
+        ort_log_level = ORT_LOGGING_LEVEL_ERROR;
+      }
+    }
+    env_ = std::make_unique<Ort::Env>(ort_log_level, "OrtIntegrationTest");
     
     // Register Morphizen EP
     const char* lib_path_str = MORPHIZEN_EP_LIB_PATH;

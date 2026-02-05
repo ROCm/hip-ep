@@ -239,7 +239,21 @@ int main(int argc, char** argv) {
   
   // Initialize ORT C++ API
   Ort::InitApi(OrtGetApiBase()->GetApi(ORT_API_VERSION));
-  Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "ModelVerifier");
+  
+  // Determine log level from environment variable ORT_LOG_LEVEL
+  OrtLoggingLevel ort_log_level = ORT_LOGGING_LEVEL_WARNING;
+  const char* log_level_env = std::getenv("ORT_LOG_LEVEL");
+  if (log_level_env != nullptr) {
+    std::string log_level_str(log_level_env);
+    if (log_level_str == "info") {
+      ort_log_level = ORT_LOGGING_LEVEL_INFO;
+    } else if (log_level_str == "warning") {
+      ort_log_level = ORT_LOGGING_LEVEL_WARNING;
+    } else if (log_level_str == "error") {
+      ort_log_level = ORT_LOGGING_LEVEL_ERROR;
+    }
+  }
+  Ort::Env env(ort_log_level, "ModelVerifier");
   
   // Register HipDNN EP using C++ API
   const char* lib_path = HIPDNN_EP_LIB_PATH;
