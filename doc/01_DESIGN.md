@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # onnx-hipdnn-ep Design Document
 
 ## 1. Overview
@@ -234,13 +238,13 @@ public:
     miopenSetStream(miopen_handle_, stream_);
     hipblasLtCreate(&hipblaslt_handle_);
   }
-  
+
   ~HipContext() {
     hipblasLtDestroy(hipblaslt_handle_);
     miopenDestroy(miopen_handle_);
     hipStreamDestroy(stream_);
   }
-  
+
   hipStream_t stream() { return stream_; }
   miopenHandle_t miopen_handle() { return miopen_handle_; }
   hipblasLtHandle_t hipblaslt_handle() { return hipblaslt_handle_; }
@@ -460,7 +464,7 @@ void RocmCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const {
   if (!hip_context_ || !hip_context_->is_initialized()) {
     throw std::runtime_error("ROCm CustomOp: No AMD GPU available");
   }
-  
+
   // Lazy initialization of intermediate buffers
   AllocateIntermediateBuffers();
 

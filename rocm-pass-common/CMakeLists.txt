@@ -1,5 +1,7 @@
-# Copyright (C) 2023 - 2026 Advanced Micro Devices, Inc. All rights reserved.
-# Licensed under the MIT License.
+##
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
 
 # rocm-pass-common: Shared utilities for ROCm Level-2 passes
 # This is a header-only library that provides common functionality

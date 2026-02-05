@@ -25,15 +25,15 @@ __global__ void add_bias_nchw_kernel(
     int64_t channels,
     int64_t spatial_size,
     int64_t total_size) {
-  
+
   int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (idx >= total_size) return;
-  
+
   // For NCHW: idx = n * (C * H * W) + c * (H * W) + hw
   // We need to extract c from idx
   int64_t chw = channels * spatial_size;
   int64_t c = (idx % chw) / spatial_size;
-  
+
   data[idx] += bias[c];
 }
 
@@ -58,7 +58,7 @@ void launch_add_bias_nchw_f32(
     int64_t spatial_size,
     int64_t total_size,
     hipStream_t stream) {
-  
+
   int threads = 256;
   int blocks = static_cast<int>((total_size + threads - 1) / threads);
   hip_ep::add_bias_nchw_kernel<float><<<blocks, threads, 0, stream>>>(

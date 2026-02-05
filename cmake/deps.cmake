@@ -1,5 +1,5 @@
 ##
-# ** Copyright (C) 2023 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
 include(FetchContent)
@@ -94,7 +94,7 @@ if(MLIR_FOUND)
 else()
   message(STATUS "LLVM/MLIR not found in CMAKE_PREFIX_PATH, will use FetchContent and build inline")
   set(MORPHIZEN_LLVM_PREINSTALLED OFF CACHE BOOL "Using FetchContent LLVM" FORCE)
-  
+
   # Try to find LLVM in local directories first
   find_path(LOCAL_LLVM
     NAMES CMakeLists.txt
@@ -106,7 +106,7 @@ else()
     "${CMAKE_SOURCE_DIR}/llvm-project/llvm"
     "${CMAKE_SOURCE_DIR}/3rd-party/llvm-project/llvm"
     NO_DEFAULT_PATH)
-  
+
   if(LOCAL_LLVM)
     message(STATUS "Found LLVM source in local working directory")
     message(STATUS "LLVM SOURCE_DIR: ${LOCAL_LLVM}")
@@ -129,30 +129,30 @@ else()
       SOURCE_SUBDIR llvm
     )
   endif()
-  
+
   # Make LLVM available - this adds LLVM as a subdirectory
   FetchContent_MakeAvailable(llvm-project)
-  
+
   # Set include directories for downstream targets
-  set(LLVM_INCLUDE_DIRS 
+  set(LLVM_INCLUDE_DIRS
     "${llvm-project_SOURCE_DIR}/llvm/include"
     "${llvm-project_BINARY_DIR}/include"
     CACHE PATH "LLVM include directories" FORCE)
-  set(MLIR_INCLUDE_DIRS 
+  set(MLIR_INCLUDE_DIRS
     "${llvm-project_SOURCE_DIR}/mlir/include"
     "${llvm-project_BINARY_DIR}/tools/mlir/include"
     CACHE PATH "MLIR include directories" FORCE)
-  
+
   # Make include directories globally available for all targets
   include_directories(SYSTEM
     "${llvm-project_SOURCE_DIR}/llvm/include"
     "${llvm-project_BINARY_DIR}/include"
     "${llvm-project_SOURCE_DIR}/mlir/include"
     "${llvm-project_BINARY_DIR}/tools/mlir/include")
-  
+
   set(LLVM_DIR "${llvm-project_BINARY_DIR}/lib/cmake/llvm" CACHE PATH "" FORCE)
   set(MLIR_DIR "${llvm-project_BINARY_DIR}/tools/mlir/cmake/modules/CMakeFiles" CACHE PATH "" FORCE)
-  
+
   message(STATUS "LLVM source dir: ${llvm-project_SOURCE_DIR}")
   message(STATUS "LLVM binary dir: ${llvm-project_BINARY_DIR}")
   message(STATUS "LLVM_INCLUDE_DIRS: ${LLVM_INCLUDE_DIRS}")

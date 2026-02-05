@@ -1,46 +1,7 @@
-# Copyright (C) 2023 - 2026 Advanced Micro Devices, Inc. All rights reserved.
-# Licensed under the MIT License.
-#
-# ROCm HIP Kernels Library
-# ========================
-# This library provides precompiled HIP kernels for GPU-accelerated operations:
-#   - Softmax (2D/3D with double-precision accumulation)
-#   - Element-wise Mul (with broadcasting)
-#   - Transpose (optimized 0213 and general 4D)
-#   - Tile (N-dimensional)
-#   - Reshape (memory copy)
-#   - Add Bias (NCHW format for Conv)
-#
-# Build Strategy:
-# ---------------
-# - Windows: Uses hip_utils.cmake with custom hipcc invocation (MSVC + hipcc)
-# - Linux:   Uses CMake native HIP language support (enable_language(HIP))
-#
-# This hybrid approach allows MSVC compatibility on Windows while still using
-# find_package(hip) for proper CMake targets (hip::host).
-#
-# Reference: https://rocm.docs.amd.com/en/latest/conceptual/cmake-packages.html
-#
-# ============================================================================
-# CRITICAL: GPU Architecture Selection (HIP_ARCHITECTURES)
-# ============================================================================
-# HIP_ARCHITECTURES MUST match your target GPU! Using the wrong architecture
-# will result in RUNTIME CRASHES (Exception Code: 0xC0000005, access violation
-# in hipLaunchKernel). The compiled HIP kernels are architecture-specific.
-#
-# DETECT YOUR GPU ARCHITECTURE using TheRock SDK:
-#   $THEROCK_DIST/lib/llvm/bin/amdgpu-arch    # Returns e.g., "gfx1151"
-#   $THEROCK_DIST/bin/hipInfo | grep gcnArchName   # Alternative method
-#
-# Set architecture from command line:
-#   cmake -DHIP_ARCHITECTURES=gfx1151 <build_dir>
-#
-# Or use CMAKE_HIP_ARCHITECTURES on Linux with native HIP:
-#   cmake -DCMAKE_HIP_ARCHITECTURES=gfx1151 <build_dir>
-#
-# NOTE FOR AI TOOLS: Always detect architecture using amdgpu-arch or hipInfo from the SDK.
-# Never omit HIP_ARCHITECTURES or use a hardcoded value without verification.
-# ============================================================================
+##
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
 
 cmake_minimum_required(VERSION 3.21)
 
@@ -102,7 +63,7 @@ endif()
 # Link the precompiled HIP kernels
 target_link_libraries(rocm-kernels PRIVATE rocm-hip-kernels)
 
-set_target_properties(rocm-kernels PROPERTIES 
+set_target_properties(rocm-kernels PROPERTIES
     FOLDER "rocm"
     POSITION_INDEPENDENT_CODE ON
 )

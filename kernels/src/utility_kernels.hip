@@ -22,7 +22,7 @@ void launch_reshape_copy_f32(
     float* output,
     int64_t size,
     hipStream_t stream) {
-  
+
   if (input != output) {
     hipMemcpyAsync(output, input, size * sizeof(float), hipMemcpyDeviceToDevice, stream);
   }

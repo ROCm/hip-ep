@@ -1,65 +1,7 @@
-# HIP Utilities for CMake
-# ==============================================================================
-#
-# CMake Native HIP Support vs This Module:
-# ----------------------------------------
-# CMake 3.21+ has native HIP language support (project(... LANGUAGES HIP)),
-# but on Windows it requires using Clang for ALL languages (C, C++, HIP).
-# This causes issues when mixing with MSVC-compiled dependencies.
-#
-# Reference: https://rocm.docs.amd.com/en/latest/conceptual/cmake-packages.html
-#
-# This module provides a hybrid solution:
-#   - Windows: Custom hipcc invocation for .hip files, MSVC for C/C++
-#   - Linux: Uses CMake native HIP language support
-#
-# Both platforms use find_package(hip) for standard CMake targets (hip::host).
-#
-# ==============================================================================
-#
-# Requirements:
-#   - HIP_PATH environment variable or CMake variable set to ROCm installation
-#   - HIP_ARCHITECTURES set by developer (no auto-detection)
-#
-# Functions provided:
-#   hip_add_executable(target source1.hip ... [OPTIONS])
-#   hip_add_library(target STATIC|SHARED source1.hip ... [OPTIONS])
-#
-# Options for hip_add_executable/hip_add_library:
-#   INCLUDE_DIRECTORIES - Additional include directories
-#   COMPILE_OPTIONS     - Additional compiler flags
-#   LINK_LIBRARIES      - Libraries to link
-#   DEPENDS             - Additional dependencies
-#
-# Configuration variables:
-#   HIP_PATH          - ROCm installation path (auto-detected from THEROCK_DIST)
-#   HIP_ARCHITECTURES - GPU targets (e.g., "gfx1100;gfx1151")
-#   HIP_COMPILE_OPTIONS - Global compile options for HIP sources
-#
-# GPU Architecture Selection (HIP_ARCHITECTURES):
-# ------------------------------------------------
-# CRITICAL: You must set HIP_ARCHITECTURES to match your target GPU.
-# Using the wrong architecture will cause runtime crashes (access violation).
-#
-# Common architectures:
-#   gfx1100 - Radeon RX 7900 series (Navi 31)
-#   gfx1102 - Radeon RX 7600 series (Navi 33)
-#   gfx1103 - Radeon 780M/760M iGPU (Phoenix APU)
-#   gfx1150, gfx1151 - Radeon 880M/780M (Strix Point)
-#   gfx90a  - MI200 series (CDNA2)
-#   gfx942  - MI300 series (CDNA3)
-#
-# To find your GPU architecture (TheRock SDK):
-#   Method 1 (recommended): amdgpu-arch - outputs just the architecture
-#     Windows: %THEROCK_DIST%\lib\llvm\bin\amdgpu-arch.exe
-#     Linux:   $THEROCK_DIST/lib/llvm/bin/amdgpu-arch
-#
-#   Method 2: hipInfo - look for gcnArchName field
-#     Windows: %THEROCK_DIST%\bin\hipInfo.exe | findstr gcnArchName
-#     Linux:   $THEROCK_DIST/bin/hipInfo | grep gcnArchName
-#
-# Example usage:
-#   cmake -DHIP_ARCHITECTURES=gfx1151 <build_dir>
+##
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
 
 cmake_minimum_required(VERSION 3.18)
 
@@ -91,7 +33,7 @@ if(NOT DEFINED HIP_PATH)
 endif()
 
 # GPU architectures - must be set by developer
-set(HIP_ARCHITECTURES "" CACHE STRING 
+set(HIP_ARCHITECTURES "" CACHE STRING
     "Target GPU architectures (e.g., gfx1100;gfx1102). Required for HIP compilation.")
 
 # Global compile options
@@ -116,7 +58,7 @@ find_package(hip QUIET)
 
 if(WIN32)
     # Find hipcc compiler (needed for .hip device code compilation)
-    find_program(HIPCC_EXECUTABLE 
+    find_program(HIPCC_EXECUTABLE
         NAMES hipcc.exe hipcc hipcc.bat
         PATHS "${HIP_PATH}/bin"
         NO_DEFAULT_PATH
@@ -124,12 +66,12 @@ if(WIN32)
     if(NOT HIPCC_EXECUTABLE)
         message(FATAL_ERROR "Could not find hipcc in ${HIP_PATH}/bin")
     endif()
-    
+
     # Set paths (used as fallback if hip::host not available)
     set(HIP_INCLUDE_DIR "${HIP_PATH}/include")
     set(HIP_LIBRARY_DIR "${HIP_PATH}/lib")
     set(HIP_RUNTIME_LIBRARY "${HIP_LIBRARY_DIR}/amdhip64.lib")
-    
+
     message(STATUS "[hip_utils] HIP_PATH: ${HIP_PATH}")
     message(STATUS "[hip_utils] hipcc: ${HIPCC_EXECUTABLE}")
     message(STATUS "[hip_utils] HIP_ARCHITECTURES: ${HIP_ARCHITECTURES}")
@@ -144,9 +86,9 @@ else()
     if(NOT hip_FOUND)
         find_package(hip REQUIRED)
     endif()
-    
+
     set(HIP_INCLUDE_DIR "${hip_INCLUDE_DIRS}")
-    
+
     message(STATUS "[hip_utils] Found HIP: ${hip_VERSION}")
     message(STATUS "[hip_utils] HIP_ARCHITECTURES: ${HIP_ARCHITECTURES}")
 endif()
@@ -202,44 +144,44 @@ endfunction()
 #------------------------------------------------------------------------------
 function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS OUTPUT_OBJS)
     _hip_get_arch_flags(arch_flags)
-    
+
     # Build include flags
     set(include_flags "")
     list(APPEND include_flags "-I${HIP_INCLUDE_DIR}")
     foreach(dir ${INCLUDE_DIRS})
         list(APPEND include_flags "-I${dir}")
     endforeach()
-    
+
     # MSVC ABI compatibility flags
     set(abi_flags
         -fms-extensions
         -fms-compatibility
         -fexceptions
     )
-    
+
     # Warning suppression flags
     set(warning_flags
         -Wno-ignored-attributes
     )
-    
+
     # Check if multi-config generator
     _hip_is_multi_config(is_multi)
-    
+
     if(is_multi)
         # Multi-config generator: use generator expressions for per-config objects
         set(obj_dir "${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}_hip_objs/$<CONFIG>")
-        
+
         # Create directories for each config at configure time
         foreach(config Debug Release RelWithDebInfo MinSizeRel)
             file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}_hip_objs/${config}")
         endforeach()
-        
+
         set(obj_files "")
         foreach(source ${HIP_SOURCES})
             get_filename_component(source_name ${source} NAME_WE)
             get_filename_component(source_abs ${source} ABSOLUTE)
             set(output_obj "${obj_dir}/${source_name}.obj")
-            
+
             # Use generator expressions for config-specific flags
             add_custom_command(
                 OUTPUT ${output_obj}
@@ -271,15 +213,15 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
         # Single-config generator: use CMAKE_BUILD_TYPE
         set(obj_dir "${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}_hip_objs")
         file(MAKE_DIRECTORY ${obj_dir})
-        
+
         _hip_get_build_flags(build_flags)
-        
+
         set(obj_files "")
         foreach(source ${HIP_SOURCES})
             get_filename_component(source_name ${source} NAME_WE)
             get_filename_component(source_abs ${source} ABSOLUTE)
             set(output_obj "${obj_dir}/${source_name}.obj")
-            
+
             add_custom_command(
                 OUTPUT ${output_obj}
                 COMMAND ${HIPCC_EXECUTABLE}
@@ -299,7 +241,7 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
             list(APPEND obj_files ${output_obj})
         endforeach()
     endif()
-    
+
     set(${OUTPUT_OBJS} ${obj_files} PARENT_SCOPE)
 endfunction()
 
@@ -316,16 +258,16 @@ endfunction()
 #   )
 #------------------------------------------------------------------------------
 function(hip_add_executable TARGET_NAME)
-    cmake_parse_arguments(ARG "" "" 
+    cmake_parse_arguments(ARG "" ""
         "INCLUDE_DIRECTORIES;COMPILE_OPTIONS;LINK_LIBRARIES;DEPENDS" ${ARGN})
-    
+
     # Remaining arguments are source files
     set(sources ${ARG_UNPARSED_ARGUMENTS})
-    
+
     if(NOT sources)
         message(FATAL_ERROR "hip_add_executable: No source files provided for ${TARGET_NAME}")
     endif()
-    
+
     if(WIN32)
         # Build CRT flags based on CMAKE_MSVC_RUNTIME_LIBRARY
         # Default to MultiThreadedDLL (/MD) if not specified
@@ -342,17 +284,17 @@ function(hip_add_executable TARGET_NAME)
             # Default to dynamic CRT (/MD)
             list(APPEND crt_flags -D_DLL -D_MT "-Xclang" "--dependent-lib=msvcrt")
         endif()
-        
+
         # Combine user options with CRT flags
         set(all_compile_opts ${ARG_COMPILE_OPTIONS} ${crt_flags})
-        
+
         # Compile HIP sources with hipcc
-        _hip_compile_sources(${TARGET_NAME} "${sources}" 
+        _hip_compile_sources(${TARGET_NAME} "${sources}"
             "${ARG_INCLUDE_DIRECTORIES}" "${all_compile_opts}" hip_objs)
-        
+
         # Create custom target for HIP compilation
         add_custom_target(${TARGET_NAME}_hip_compile DEPENDS ${hip_objs})
-        
+
         # Create executable (empty source, objects added)
         # We need at least one source for add_executable, use a dummy or the objects
         file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}_dummy.cpp" "// Auto-generated\n")
@@ -363,30 +305,30 @@ function(hip_add_executable TARGET_NAME)
         # Linux: Use CMake HIP language support
         add_executable(${TARGET_NAME} ${sources})
         set_source_files_properties(${sources} PROPERTIES LANGUAGE HIP)
-        
+
         # Set architectures
         if(HIP_ARCHITECTURES)
             set_target_properties(${TARGET_NAME} PROPERTIES
                 HIP_ARCHITECTURES "${HIP_ARCHITECTURES}"
             )
         endif()
-        
+
         # Warning suppression flags
         target_compile_options(${TARGET_NAME} PRIVATE $<$<COMPILE_LANGUAGE:HIP>:-Wno-ignored-attributes>)
     endif()
-    
+
     # Link HIP runtime
     target_link_libraries(${TARGET_NAME} PRIVATE hip::host)
-    
+
     # Apply user-specified options
     if(ARG_INCLUDE_DIRECTORIES)
         target_include_directories(${TARGET_NAME} PRIVATE ${ARG_INCLUDE_DIRECTORIES})
     endif()
-    
+
     if(ARG_LINK_LIBRARIES)
         target_link_libraries(${TARGET_NAME} PRIVATE ${ARG_LINK_LIBRARIES})
     endif()
-    
+
     if(ARG_DEPENDS)
         add_dependencies(${TARGET_NAME} ${ARG_DEPENDS})
     endif()
@@ -405,23 +347,23 @@ endfunction()
 #   )
 #------------------------------------------------------------------------------
 function(hip_add_library TARGET_NAME)
-    cmake_parse_arguments(ARG "STATIC;SHARED" "" 
+    cmake_parse_arguments(ARG "STATIC;SHARED" ""
         "INCLUDE_DIRECTORIES;COMPILE_OPTIONS;LINK_LIBRARIES;DEPENDS" ${ARGN})
-    
+
     # Determine library type
     if(ARG_SHARED)
         set(lib_type SHARED)
     else()
         set(lib_type STATIC)
     endif()
-    
+
     # Remaining arguments are source files
     set(sources ${ARG_UNPARSED_ARGUMENTS})
-    
+
     if(NOT sources)
         message(FATAL_ERROR "hip_add_library: No source files provided for ${TARGET_NAME}")
     endif()
-    
+
     if(WIN32)
         # Build CRT flags based on CMAKE_MSVC_RUNTIME_LIBRARY
         # Default to MultiThreadedDLL (/MD) if not specified
@@ -438,23 +380,23 @@ function(hip_add_library TARGET_NAME)
             # Default to dynamic CRT (/MD)
             list(APPEND crt_flags -D_DLL -D_MT "-Xclang" "--dependent-lib=msvcrt")
         endif()
-        
+
         # Combine user options with CRT flags
         set(all_compile_opts ${ARG_COMPILE_OPTIONS} ${crt_flags})
-        
+
         # Compile HIP sources with hipcc
-        _hip_compile_sources(${TARGET_NAME} "${sources}" 
+        _hip_compile_sources(${TARGET_NAME} "${sources}"
             "${ARG_INCLUDE_DIRECTORIES}" "${all_compile_opts}" hip_objs)
-        
+
         # Create custom target for HIP compilation
         add_custom_target(${TARGET_NAME}_hip_compile DEPENDS ${hip_objs})
-        
+
         # For shared libraries, we need a dummy C++ file to ensure proper CRT linkage
         # The hipcc-compiled objects don't bring in CRT initialization
         if(ARG_SHARED)
-            file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}_dummy.cpp" 
+            file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}_dummy.cpp"
                 "// Auto-generated dummy source for CRT initialization\n")
-            add_library(${TARGET_NAME} ${lib_type} 
+            add_library(${TARGET_NAME} ${lib_type}
                 "${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}_dummy.cpp" ${hip_objs})
         else()
             add_library(${TARGET_NAME} ${lib_type} ${hip_objs})
@@ -465,30 +407,30 @@ function(hip_add_library TARGET_NAME)
         # Linux: Use CMake HIP language support
         add_library(${TARGET_NAME} ${lib_type} ${sources})
         set_source_files_properties(${sources} PROPERTIES LANGUAGE HIP)
-        
+
         # Set architectures
         if(HIP_ARCHITECTURES)
             set_target_properties(${TARGET_NAME} PROPERTIES
                 HIP_ARCHITECTURES "${HIP_ARCHITECTURES}"
             )
         endif()
-        
+
         # Warning suppression flags
         target_compile_options(${TARGET_NAME} PRIVATE $<$<COMPILE_LANGUAGE:HIP>:-Wno-ignored-attributes>)
     endif()
-    
+
     # Propagate HIP settings to dependents
     target_link_libraries(${TARGET_NAME} PUBLIC hip::host)
-    
+
     # Apply user-specified options
     if(ARG_INCLUDE_DIRECTORIES)
         target_include_directories(${TARGET_NAME} PUBLIC ${ARG_INCLUDE_DIRECTORIES})
     endif()
-    
+
     if(ARG_LINK_LIBRARIES)
         target_link_libraries(${TARGET_NAME} PUBLIC ${ARG_LINK_LIBRARIES})
     endif()
-    
+
     if(ARG_DEPENDS)
         add_dependencies(${TARGET_NAME} ${ARG_DEPENDS})
     endif()

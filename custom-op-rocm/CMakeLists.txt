@@ -1,5 +1,5 @@
 ##
-# ** Copyright (C) 2023 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
 
@@ -65,7 +65,7 @@ endif()
 
 # Link HIP kernels library
 target_link_libraries(${LIB_NAME} PRIVATE rocm-kernels)
-target_include_directories(${LIB_NAME} PRIVATE 
+target_include_directories(${LIB_NAME} PRIVATE
   ${CMAKE_SOURCE_DIR}/kernels/include
 )
 
