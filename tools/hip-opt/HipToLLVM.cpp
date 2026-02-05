@@ -17,6 +17,7 @@
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -167,6 +168,11 @@ struct ConvertHipToLLVMPass
   StringRef getArgument() const final { return "convert-hip-to-llvm"; }
   StringRef getDescription() const final {
     return "Convert HIP dialect to LLVM dialect";
+  }
+
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registry.insert<LLVM::LLVMDialect>();
+    registry.insert<memref::MemRefDialect>();
   }
 
   void runOnOperation() override {
