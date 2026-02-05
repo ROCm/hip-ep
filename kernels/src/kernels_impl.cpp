@@ -191,6 +191,25 @@ extern "C" __global__ void mul_scalar_kernel(
 }
 )";
 
+// Add bias kernel for Conv (NCHW format)
+static const char* add_bias_src = R"(
+extern "C" __global__ void add_bias_nchw_kernel(
+    float* data,
+    const float* __restrict__ bias,
+    long long channels, long long spatial_size, long long total_size)
+{
+    long long idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total_size) return;
+    
+    // For NCHW: idx = n * (C * H * W) + c * (H * W) + hw
+    // We need to extract c from idx
+    long long chw = channels * spatial_size;
+    long long c = (idx % chw) / spatial_size;
+    
+    data[idx] += bias[c];
+}
+)";
+
 // Softmax kernel (numerically stable, single block per batch)
 static const char* softmax_src = R"(
 extern "C" __global__ void softmax_kernel(
@@ -242,6 +261,7 @@ static KernelCache tile_5d_cache;
 static KernelCache mul_elementwise_cache;
 static KernelCache mul_scalar_cache;
 static KernelCache softmax_cache;
+static KernelCache add_bias_cache;
 
 static bool compile_kernel(const char* src, const char* kernel_name, KernelCache& cache) {
     std::lock_guard<std::mutex> lock(kernel_cache_mutex);
@@ -287,6 +307,27 @@ static bool compile_kernel(const char* src, const char* kernel_name, KernelCache
 }
 
 namespace rocm_kernels {
+
+//============================================================================
+// Add Bias Implementation (for Conv)
+//============================================================================
+
+void add_bias_nchw(float* data, const float* bias,
+                   int64_t batch, int64_t channels, int64_t spatial_size,
+                   hipStream_t stream) {
+    if (!compile_kernel(add_bias_src, "add_bias_nchw_kernel", add_bias_cache)) {
+        // Fallback: do nothing (bias not added)
+        return;
+    }
+    
+    int64_t total_size = batch * channels * spatial_size;
+    int blockSize = 256;
+    int gridSize = (total_size + blockSize - 1) / blockSize;
+    
+    void* args[] = {(void*)&data, (void*)&bias, (void*)&channels, (void*)&spatial_size, (void*)&total_size};
+    hipModuleLaunchKernel(add_bias_cache.func, gridSize, 1, 1, blockSize, 1, 1,
+                          0, stream, args, nullptr);
+}
 
 //============================================================================
 // Mul Implementation
