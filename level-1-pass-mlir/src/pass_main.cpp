@@ -2,16 +2,16 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#include <glog/logging.h>
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
+#include <glog/logging.h>
 
 // MLIR includes
-#include "mlir/IR/MLIRContext.h"
-#include "mlir/IR/BuiltinOps.h"
-#include "mlir/Parser/Parser.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/MLIRContext.h"
+#include "mlir/Parser/Parser.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -23,9 +23,9 @@ DEF_ENV_PARAM(MLIR_PRINT_WITH_VERBOSE, "0")
 namespace {
 
 struct Level1MlirPass {
-  Level1MlirPass(IPass& self) : self_{self} {}
+  Level1MlirPass(IPass &self) : self_{self} {}
 
-  void process(IPass& self, Graph& graph) {
+  void process(IPass &self, Graph &graph) {
     LOG(INFO) << "Level1MlirPass::process() called";
 
     auto graph_ref = GraphConstRef(graph);
@@ -39,7 +39,8 @@ struct Level1MlirPass {
     context.loadDialect<mlir::arith::ArithDialect>();
     context.allowUnregisteredDialects();
 
-    auto moduleRef = mlir::parseSourceString<mlir::ModuleOp>(*graph_string, &context);
+    auto moduleRef =
+        mlir::parseSourceString<mlir::ModuleOp>(*graph_string, &context);
 
     if (!moduleRef) {
       LOG(INFO) << "Failed to parse MLIR string to ModuleOp";
@@ -49,7 +50,7 @@ struct Level1MlirPass {
 
       // Print module with detailed flags
       mlir::OpPrintingFlags flags;
-      if(ENV_PARAM(MLIR_PRINT_WITH_VERBOSE)){
+      if (ENV_PARAM(MLIR_PRINT_WITH_VERBOSE)) {
         flags.printGenericOpForm();
         flags.enableDebugInfo();
         flags.printValueUsers();
@@ -65,7 +66,7 @@ struct Level1MlirPass {
     }
   }
 
-  IPass& self_;
+  IPass &self_;
 };
 
 } // namespace
