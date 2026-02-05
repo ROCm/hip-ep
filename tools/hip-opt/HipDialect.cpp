@@ -7,7 +7,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "HipDialect.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "llvm/ADT/TypeSwitch.h"
 
 using namespace mlir;
 using namespace mlir::hip;
@@ -24,3 +26,10 @@ void HipDialect::initialize() {
 #include "HipOps.cpp.inc"
       >();
 }
+
+// Type and op class implementations (parse/print/verify, TypeIDs)
+#define GET_TYPEDEF_CLASSES
+#include "HipTypes.cpp.inc"
+
+#define GET_OP_CLASSES
+#include "HipOps.cpp.inc"

@@ -69,7 +69,7 @@ add_dependencies(hip-opt
 # Link LLVM components
 llvm_map_components_to_libnames(llvm_libs Support Core)
 
-# Link against MLIR libraries
+# Link against MLIR libraries (no RegisterAll*; we register dialects explicitly)
 target_link_libraries(hip-opt PRIVATE
   MLIROptLib
   MLIRSupport
@@ -78,9 +78,11 @@ target_link_libraries(hip-opt PRIVATE
   MLIRPass
   MLIRTransforms
   MLIRAnalysis
+  MLIRArithDialect
+  MLIRFuncDialect
+  MLIRMemRefDialect
   MLIRLLVMDialect
   MLIRLLVMCommonConversion
-  MLIRFuncDialect
   MLIRTransformUtils
   ${llvm_libs}
 )
