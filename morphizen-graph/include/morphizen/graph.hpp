@@ -48,8 +48,10 @@ graph_add_node(Graph& graph, const std::string& name,
 
 MORPHIZEN_DLL_SPEC std::vector<const NodeArg*>
 node_inputs_2_node_args(const std::vector<NodeInput>& inputs);
+
 MORPHIZEN_DLL_SPEC std::vector<const NodeArg*>
 graph_get_outputs(const Graph& graph);
+
 MORPHIZEN_DLL_SPEC void graph_set_name(Graph& graph, const std::string& name);
 
 // NOTE: NodeBuilder has been moved to morphizen-core (node_builder.hpp)
@@ -58,8 +60,11 @@ MORPHIZEN_DLL_SPEC void graph_set_name(Graph& graph, const std::string& name);
 // MORPHIZEN_ORT_API.
 
 const Model& graph_get_model(const Graph& graph);
+
 std::vector<const Node*> graph_nodes(const Graph& graph);
+
 std::vector<const NodeArg*> graph_get_inputs(const Graph& graph);
+
 MORPHIZEN_DLL_SPEC std::vector<const Node*>
 graph_get_output_nodes(const Graph& graph);
 
@@ -96,6 +101,7 @@ graph_get_node_in_topoligical_order(const Graph& graph);
  *
  */
 MORPHIZEN_DLL_SPEC std::string graph_as_string(const Graph& graph);
+
 std::vector<const Node*>
 graph_get_consumer_nodes(const Graph& graph, const std::string& node_arg_name);
 
@@ -489,6 +495,23 @@ public:
   operator<<(std::ostream& os, const GraphConstRef& graph);
 
   /**
+   * @brief Gets the model that contains this graph
+   *
+   * @return Reference to the model
+   */
+  const morphizen::Model& model() const;
+
+  /**
+   * @brief Gets the output nodes of the graph
+   *
+   * @return Vector of nodes that produce graph outputs
+   *
+   * Returns the nodes that produce the graph's output node arguments.
+   * Useful for identifying leaf nodes in the computation graph.
+   */
+  std::vector<NodeConstRef> output_nodes() const;
+
+  /**
    * @brief Performs reverse DFS traversal from a node
    *
    * @param node_index Starting node index
@@ -508,6 +531,23 @@ public:
       const std::function<bool(const morphizen::Node*, const morphizen::Node*)>&
           comp = nullptr,
       bool subgraph_sensitive = false) const;
+
+  /**
+   * @brief Performs reverse DFS traversal from multiple nodes
+   *
+   * @param nodes Vector of starting nodes
+   * @param enter Callback invoked when entering a node (return false to skip
+   * subtree)
+   * @param leave Callback invoked when leaving a node
+   * @param comp Comparator for traversal order (optional)
+   * @param stop Stop condition (return true to stop traversal)
+   */
+  void reverse_dfs_from_multi(
+      gsl::span<const NodeConstRef> nodes,
+      const std::function<bool(NodeConstRef)>& enter,
+      const std::function<bool(NodeConstRef)>& leave,
+      const std::function<bool(NodeConstRef, NodeConstRef)>& comp,
+      const std::function<bool(NodeConstRef, NodeConstRef)>& stop) const;
 
 protected:
   /**
@@ -981,6 +1021,27 @@ public:
   /** prune_special_tensor_proto
    */
   void prune_special_tensor_proto();
+
+  /**
+   * @brief Sets the graph inputs
+   *
+   * @param inputs Vector of node arguments to set as graph inputs
+   */
+  void set_inputs(const std::vector<morphizen::NodeArg*>& inputs);
+
+  /**
+   * @brief Sets the graph outputs
+   *
+   * @param outputs Vector of node arguments to set as graph outputs
+   */
+  void set_outputs(const std::vector<morphizen::NodeArg*>& outputs);
+
+  /**
+   * @brief Adds an initialized tensor to the graph
+   *
+   * @param tensor The tensor proto to add as an initializer
+   */
+  void add_initialized_tensor(const morphizen::TensorProto& tensor);
 };
 class Subgraph {
 public:

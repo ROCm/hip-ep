@@ -85,8 +85,9 @@ void IRConverterImp::save_model_for_debugging(
       MY_LOG(4) << "Saving converted ONNX model to: " << output_file;
       auto& main_graph = MORPHIZEN_ORT_API(model_main_graph)(
           const_cast<morphizen::Model&>(model));
-      morphizen::graph_save(main_graph, output_file, output_file + ".dat",
-                            std::numeric_limits<size_t>::max());
+      morphizen_cxx::GraphConstRef(main_graph)
+          .save(output_file, output_file + ".dat",
+                std::numeric_limits<size_t>::max());
     } else {
       MY_LOG(4)
           << "Debug level > 4 but no output file specified. Set "
@@ -98,7 +99,7 @@ void IRConverterImp::save_model_for_debugging(
 OrtStatus* IRConverterImp::convert_graph(morphizen::Graph& graph) const {
   MY_LOG(2) << "Converting ORT graph '" << graph_.name() << "' to ONNX graph";
   // Set basic graph properties
-  morphizen::graph_set_name(graph, graph_.name());
+  morphizen_cxx::GraphRef(graph).set_name(graph_.name());
   // throw_if_error(convert_nodes(graph, graph_proto));
   // - Converting inputs
   throw_if_error(convert_graph_inputs(graph));
@@ -109,7 +110,7 @@ OrtStatus* IRConverterImp::convert_graph(morphizen::Graph& graph) const {
   // - Converting outputs
   throw_if_error(convert_graph_outputs(graph));
   // - Resolve the graph
-  morphizen::graph_resolve(graph, true);
+  morphizen_cxx::GraphRef(graph).resolve(true);
   MY_LOG(2) << "Graph conversion completed";
   return nullptr;
 }
@@ -130,7 +131,7 @@ OrtStatus* IRConverterImp::convert_graph_inputs(morphizen::Graph& graph) const {
     new_inputs.push_back(node_arg);
     MY_LOG(3) << "Added input: " << value_info.GetName();
   }
-  morphizen::graph_set_inputs(graph, new_inputs);
+  morphizen_cxx::GraphRef(graph).set_inputs(new_inputs);
   MY_LOG(2) << "Converted " << inputs.size() << " inputs";
   return nullptr;
 }
@@ -205,7 +206,7 @@ IRConverterImp::convert_graph_outputs(morphizen::Graph& graph) const {
   // guess output
   new_outputs = guess_missing_output(new_outputs, graph);
 
-  morphizen::graph_set_outputs(graph, new_outputs);
+  morphizen_cxx::GraphRef(graph).set_outputs(new_outputs);
   MY_LOG(2) << "Converted " << outputs.size() << " outputs";
   return nullptr;
 }
@@ -263,7 +264,7 @@ IRConverterImp::convert_graph_initializers(morphizen::Graph& graph) const {
     auto* tensor_proto = MORPHIZEN_ORT_API_EXT(tensor_proto_new_raw_data)(
         value_info.GetName(), shape, element_type, tensor_data, data_size);
 
-    morphizen::graph_add_initialized_tensor(graph, *tensor_proto);
+    morphizen_cxx::GraphRef(graph).add_initialized_tensor(*tensor_proto);
     MORPHIZEN_ORT_API(tensor_proto_delete)(tensor_proto);
     MY_LOG(3) << "Added initializer: " << value_info.GetName();
   }
@@ -282,9 +283,11 @@ IRConverterImp::convert_value_info_proto(const Ort::ConstValueInfo& value_info,
   auto name = value_info.GetName();
   int element_type = 0; // Placeholder for element type
   throw_if_error(convert_type_proto(type_info, &element_type, &shape));
-  auto existing_node_arg = morphizen::graph_get_node_arg(graph, name);
-  if (existing_node_arg) {
-    *node_arg = const_cast<morphizen::NodeArg*>(existing_node_arg);
+  auto existing_node_arg_opt =
+      morphizen_cxx::GraphConstRef(graph).find_node_arg(name);
+  if (existing_node_arg_opt.has_value()) {
+    *node_arg =
+        const_cast<morphizen::NodeArg*>(existing_node_arg_opt.value().ptr());
   } else {
     *node_arg = &morphizen::node_arg_new(graph, name, &shape, element_type);
   }

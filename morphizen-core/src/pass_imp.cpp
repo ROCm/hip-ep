@@ -69,7 +69,13 @@ create_action_from_node_action(IPass::node_action_t node_action) {
       modified = false;
       match_idx = -1;
 #if MORPHIZEN_ORT_API_MAJOR >= 14
-      auto leaf_nodes = graph_get_output_nodes(graph);
+      auto leaf_nodes_cxx = morphizen_cxx::GraphConstRef(graph).output_nodes();
+      // Convert to raw pointers for the API
+      auto leaf_nodes = std::vector<const Node*>();
+      leaf_nodes.reserve(leaf_nodes_cxx.size());
+      for (auto& n : leaf_nodes_cxx) {
+        leaf_nodes.push_back(n.ptr());
+      }
       MORPHIZEN_ORT_API(graph_reverse_dfs_from_preemp)
       (
           graph, leaf_nodes, nullptr,
@@ -89,24 +95,25 @@ create_action_from_node_action(IPass::node_action_t node_action) {
           });
 #else
       try {
-        auto leaf_nodes = graph_get_output_nodes(graph);
-        morphizen::graph_reverse_dfs_from_multi(
-            graph,   //
-            gsl::make_span(leaf_nodes),
+        auto leaf_nodes_cxx =
+            morphizen_cxx::GraphConstRef(graph).output_nodes();
+        morphizen_cxx::GraphConstRef(graph).reverse_dfs_from_multi(
+            gsl::make_span(leaf_nodes_cxx),
             nullptr, //
-            [&](const Node* node) {
-              auto node_ref =
-                  morphizen_cxx::NodeConstRef::from_node(graph, *node);
-              auto node_idx = node_ref.index();
-              modified = node_action(self, graph, *node);
+            [&](morphizen_cxx::NodeConstRef node) {
+              auto node_idx = node.index();
+              modified = node_action(self, graph, *node.ptr());
               if (modified) {
                 match_idx = (int)node_idx;
               }
               if (modified) {
                 throw BreakOnModifed{1};
               }
-            }, //
-            [&modified](const Node* /*from*/, const Node* /*to*/) {
+              return false; // leave callback return value
+            },              //
+            nullptr,        // comp
+            [&modified](morphizen_cxx::NodeConstRef /*from*/,
+                        morphizen_cxx::NodeConstRef /*to*/) {
               return modified;
             });
       } catch ([[maybe_unused]] BreakOnModifed break_on_modifed) {
@@ -159,10 +166,10 @@ void Pass::apply(Graph& graph_old) {
     graph =
         (Graph*)get_context()->get_context_resource("__current_graph").get();
     maybe_dump_txt(action_index, *graph);
-    graph_resolve(*graph);
+    morphizen_cxx::GraphRef(*graph).resolve();
     maybe_dump_txt(action_index + 100, *graph);
     maybe_gc(*graph);
-    graph_resolve(*graph);
+    morphizen_cxx::GraphRef(*graph).resolve();
     maybe_dump_onnx(action_index, *graph);
     action_index = action_index + 1;
   }
@@ -270,7 +277,7 @@ void Pass::maybe_dump_onnx(int action_index, const Graph& graph) const {
 
 void Pass::maybe_gc(Graph& graph) const {
   if (pass_proto_.enable_gc()) {
-    graph_gc(graph);
+    morphizen_cxx::GraphRef(graph).gc();
   }
 }
 
@@ -335,7 +342,7 @@ const Node& Pass::level_2_fuse(Graph& graph, const MetaDefProto& meta_def) {
   }
   const Node& ret = morphizen::graph_fuse(graph, name, op_type, nodes, inputs,
                                           outputs, constant_initializers);
-  graph_resolve(graph);
+  morphizen_cxx::GraphRef(graph).resolve();
   return ret;
 }
 

@@ -131,16 +131,13 @@ MORPHIZEN_DLL_SPEC void graph_save(Graph& graph, const std::string& model_path,
 
 MORPHIZEN_DLL_SPEC std::vector<const Node*>
 graph_get_output_nodes(const Graph& graph) {
-  auto graph_outputs = graph_get_outputs(graph);
+  auto graph_outputs = morphizen_cxx::GraphConstRef(graph).outputs();
   auto leaf_nodes = std::vector<const Node*>();
   leaf_nodes.reserve(graph_outputs.size());
   for (auto& o : graph_outputs) {
-    if (o) {
-      auto n =
-          MORPHIZEN_ORT_API(graph_producer_node)(graph, node_arg_get_name(*o));
-      if (n != nullptr) {
-        leaf_nodes.push_back(n);
-      }
+    auto n = MORPHIZEN_ORT_API(graph_producer_node)(graph, o.name());
+    if (n != nullptr) {
+      leaf_nodes.push_back(n);
     }
   }
   return leaf_nodes;
@@ -148,18 +145,24 @@ graph_get_output_nodes(const Graph& graph) {
 
 void graph_gc(Graph& graph) {
   std::vector<const Node*> leaf_nodes;
-  auto all_nodes = graph_nodes(graph);
-  auto graph_outputs = graph_get_outputs(graph);
+  auto graph_ref = morphizen_cxx::GraphConstRef(graph);
+  auto all_nodes_cxx = graph_ref.nodes();
+  auto all_nodes = std::vector<const Node*>();
+  all_nodes.reserve(all_nodes_cxx.size());
+  for (auto& n : all_nodes_cxx) {
+    all_nodes.push_back(n.ptr());
+  }
+  auto graph_outputs = graph_ref.outputs();
   leaf_nodes.reserve(graph_outputs.size());
   for (auto n : all_nodes) {
     CHECK(n != nullptr);
     auto node_outputs = node_get_output_node_args(*n);
-    auto found = std::any_of(node_outputs.begin(), node_outputs.end(),
-                             [&graph_outputs](const NodeArg* x) {
-                               return std::find(graph_outputs.begin(),
-                                                graph_outputs.end(),
-                                                x) != graph_outputs.end();
-                             });
+    auto found = std::any_of(
+        node_outputs.begin(), node_outputs.end(),
+        [&graph_outputs](const NodeArg* x) {
+          return std::any_of(graph_outputs.begin(), graph_outputs.end(),
+                             [x](const auto& out) { return out.ptr() == x; });
+        });
     if (found) {
       leaf_nodes.push_back(n);
     }
@@ -227,17 +230,36 @@ static std::string indent(int level) {
   return std::string((size_t)(level * 4), ' ');
 }
 
-extern std::string node_args_as_string(
-    const std::vector<const NodeArg*>& args); /* defined in node.cpp */
+extern std::string node_arg_as_string_internal(const NodeArg& node_arg);
+
+// Helper to convert C++ wrapper vector to string without raw pointer conversion
+static std::string node_args_as_string_cxx(
+    const std::vector<morphizen_cxx::NodeArgConstRef>& args) {
+  int index = 0;
+  std::ostringstream str;
+  str << "[";
+  for (auto& arg : args) {
+    if (index != 0) {
+      str << ",";
+    }
+    // Use implicit conversion operator to get const NodeArg& reference
+    str << node_arg_as_string_internal(arg);
+    index = index + 1;
+  }
+  str << "]";
+  return str.str();
+}
+
 static std::string graph_as_string_subgraph(const Graph& graph, int level) {
   std::ostringstream str;
-  str << indent(level)
-      << "graph[name=" << MORPHIZEN_ORT_API(graph_get_name)(graph) << "] = {";
+  auto graph_ref = morphizen_cxx::GraphConstRef(graph);
+  str << indent(level) << "graph[name=" << graph_ref.name() << "] = {";
+
   str << "\n"
       << indent(level + 1)
-      << "inputs = " << node_args_as_string(graph_get_inputs(graph)) << "\n"
+      << "inputs = " << node_args_as_string_cxx(graph_ref.inputs()) << "\n"
       << indent(level + 1)
-      << "outputs=" << node_args_as_string(graph_get_outputs(graph));
+      << "outputs=" << node_args_as_string_cxx(graph_ref.outputs());
   auto nodes = graph_get_node_in_topoligical_order(graph);
   for (auto node_idx : nodes) {
     auto node = MORPHIZEN_ORT_API(graph_get_node)(graph, node_idx);
@@ -516,6 +538,23 @@ std::vector<NodeConstRef> GraphConstRef::nodes_in_topological_order() const {
   return ret;
 }
 
+const morphizen::Model& GraphConstRef::model() const {
+  return morphizen::graph_get_model(*this);
+}
+
+std::vector<NodeConstRef> GraphConstRef::output_nodes() const {
+  auto graph_outputs = this->outputs();
+  auto ret = std::vector<NodeConstRef>();
+  ret.reserve(graph_outputs.size());
+  for (auto& output : graph_outputs) {
+    auto producer = this->find_node(output.name());
+    if (producer.has_value()) {
+      ret.push_back(producer.value());
+    }
+  }
+  return ret;
+}
+
 std::string GraphConstRef::to_string() const {
   return morphizen::graph_as_string(*this);
 }
@@ -545,6 +584,62 @@ bool GraphRef::resolve(bool force) {
 // GraphRef::fuse and GraphRef::node_builder have been moved to morphizen-core
 // They depend on MetaDefProto and NodeBuilder which are morphizen-core types
 void GraphRef::gc() { morphizen::graph_gc(*this); }
+
+void GraphRef::set_inputs(const std::vector<morphizen::NodeArg*>& inputs) {
+  morphizen::graph_set_inputs(*this, inputs);
+}
+
+void GraphRef::set_outputs(const std::vector<morphizen::NodeArg*>& outputs) {
+  morphizen::graph_set_outputs(*this, outputs);
+}
+
+void GraphRef::add_initialized_tensor(const morphizen::TensorProto& tensor) {
+  morphizen::graph_add_initialized_tensor(*this, tensor);
+}
+
+void GraphConstRef::reverse_dfs_from_multi(
+    gsl::span<const NodeConstRef> nodes,
+    const std::function<bool(NodeConstRef)>& enter,
+    const std::function<bool(NodeConstRef)>& leave,
+    const std::function<bool(NodeConstRef, NodeConstRef)>& comp,
+    const std::function<bool(NodeConstRef, NodeConstRef)>& stop) const {
+  // Convert NodeConstRef vector to raw pointers for C-style API
+  auto nodes_raw = std::vector<const morphizen::Node*>();
+  nodes_raw.reserve(nodes.size());
+  for (auto& n : nodes) {
+    nodes_raw.push_back(n.ptr());
+  }
+
+  // Wrap C++ wrapper callbacks to raw pointer callbacks for C-style API
+  auto enter_void = enter
+                        ? std::function<void(const morphizen::Node*)>(
+                              [&enter, this](const morphizen::Node* n) {
+                                enter(NodeConstRef::from_node(*this, *n));
+                              })
+                        : std::function<void(const morphizen::Node*)>(nullptr);
+  auto leave_void = leave
+                        ? std::function<void(const morphizen::Node*)>(
+                              [&leave, this](const morphizen::Node* n) {
+                                leave(NodeConstRef::from_node(*this, *n));
+                              })
+                        : std::function<void(const morphizen::Node*)>(nullptr);
+  auto stop_raw =
+      stop
+          ? std::function<bool(const morphizen::Node*, const morphizen::Node*)>(
+                [&stop, this](const morphizen::Node* from,
+                              const morphizen::Node* to) {
+                  return stop(NodeConstRef::from_node(*this, *from),
+                              NodeConstRef::from_node(*this, *to));
+                })
+          : std::function<bool(const morphizen::Node*, const morphizen::Node*)>(
+                nullptr);
+
+  // Note: comp parameter is ignored as C-style API doesn't support it
+  (void)comp;
+
+  morphizen::graph_reverse_dfs_from_multi(*this, gsl::make_span(nodes_raw),
+                                          enter_void, leave_void, stop_raw);
+}
 
 static std::string
 graph_ref_generate_unique_constant_initializer_name(const GraphConstRef& graph,

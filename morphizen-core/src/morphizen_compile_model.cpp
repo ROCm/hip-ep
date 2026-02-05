@@ -218,7 +218,7 @@ void compile_onnx_model_2(std::shared_ptr<PassContextImp> context,
                           const Graph& onnx_graph) {
   bool cache_hit = check_cache_hit(*context);
   if (!cache_hit) {
-    auto& model = graph_get_model(onnx_graph);
+    auto& model = morphizen_cxx::GraphConstRef(onnx_graph).model();
     int64_t threshold = compute_model_clone_threshold(
         context->get_config_proto(), context.get());
     auto cloned_model = morphizen::model_clone(model, threshold);
@@ -271,22 +271,22 @@ public:
 static std::string
 get_model_signature_with_graph_inputs_and_outputs(const Graph& onnx_graph) {
   auto md5 = MD5Sig("_with_io.data");
-  auto inputs = graph_get_inputs(onnx_graph);
+  auto inputs = morphizen_cxx::GraphConstRef(onnx_graph).inputs();
   for (auto& input : inputs) {
-    auto input_name = node_arg_get_name(*input);
+    auto input_name = input.name();
     md5.add(input_name.data(), input_name.size());
 
-    auto shape = node_arg_get_shape_i64(*input);
+    auto shape = node_arg_get_shape_i64(*input.ptr());
     if (shape && !shape->empty()) {
       md5.add(shape->data(), shape->size() * sizeof(shape->at(0)));
     }
   }
-  auto outputs = graph_get_outputs(onnx_graph);
+  auto outputs = morphizen_cxx::GraphConstRef(onnx_graph).outputs();
   for (auto& output : outputs) {
-    auto output_name = node_arg_get_name(*output);
+    auto output_name = output.name();
     md5.add(output_name.data(), output_name.size());
 
-    auto shape = node_arg_get_shape_i64(*output);
+    auto shape = output.shape();
     if (shape && !shape->empty()) {
       md5.add(shape->data(), shape->size() * sizeof(shape->at(0)));
     }
@@ -297,11 +297,7 @@ get_model_signature_with_graph_inputs_and_outputs(const Graph& onnx_graph) {
 static std::string get_model_signature(const Graph& onnx_graph) {
   auto md5 = MD5Sig(".data");
   auto graph_ref = morphizen_cxx::GraphConstRef(onnx_graph);
-  for (auto node_idx :
-       morphizen::graph_get_node_in_topoligical_order(onnx_graph)) {
-    auto node = MORPHIZEN_ORT_API(graph_get_node)(onnx_graph, node_idx);
-    CHECK(node != nullptr) << "node_idx " << node_idx;
-    auto node_ref = morphizen_cxx::NodeConstRef::from_node(onnx_graph, *node);
+  for (auto& node_ref : graph_ref.nodes_in_topological_order()) {
     auto op_type = node_ref.op_type();
     const auto& skip_op = ENV_PARAM(XLNX_MD5_SIG_SKIP_OPS);
     if (std::find(skip_op.begin(), skip_op.end(), op_type) != skip_op.end()) {
@@ -334,8 +330,9 @@ static std::string get_signature(const std::string& model_path,
   auto md5_in_memory_b =
       get_model_signature_with_graph_inputs_and_outputs(onnx_graph);
 
-  const auto& node_indices = graph_get_node_in_topoligical_order(onnx_graph);
-  int32_t node_count = (int32_t)node_indices.size();
+  auto nodes_topo =
+      morphizen_cxx::GraphConstRef(onnx_graph).nodes_in_topological_order();
+  int32_t node_count = (int32_t)nodes_topo.size();
 
   MY_LOG(1) << "File base signature : " << md5_file_base;
   MY_LOG(1) << "Algorithm-A: based on topologically ordered signature : "
@@ -368,7 +365,7 @@ std::shared_ptr<PassContextImp> initialize_context(
     context->model_path = model_path;
   }
   context->is_ep_context_model = !ep_context_nodes.empty();
-  auto& model = graph_get_model(onnx_graph);
+  auto& model = morphizen_cxx::GraphConstRef(onnx_graph).model();
   auto md5 =
       get_signature(context->model_path.string(), onnx_graph, context->config_);
 
@@ -1052,28 +1049,27 @@ static void print_graph_input_and_output(const Graph& onnx_graph) {
   _setmaxstdio(8192);
 #endif
 
-  auto graph_inputs = graph_get_inputs(onnx_graph);
-  auto graph_outputs = graph_get_outputs(onnx_graph);
+  auto graph_ref = morphizen_cxx::GraphConstRef(onnx_graph);
+  auto graph_inputs = graph_ref.inputs();
+  auto graph_outputs = graph_ref.outputs();
 
   LOG(INFO) << "MorphiZen EP Load ONNX Model Success";
   LOG(INFO) << "Graph Input Node Name/Shape (" << graph_inputs.size() << ")";
   for (auto& input : graph_inputs) {
-    auto shape = node_arg_get_shape_i64(*input);
+    auto shape = input.shape();
     if (shape != nullptr) {
-      LOG(INFO) << "\t " << node_arg_get_name(*input) << " : "
-                << *(shape.get());
+      LOG(INFO) << "\t " << input.name() << " : " << *(shape.get());
     } else {
-      LOG(INFO) << "\t " << node_arg_get_name(*input) << " : []";
+      LOG(INFO) << "\t " << input.name() << " : []";
     }
   }
   LOG(INFO) << "Graph Output Node Name/Shape (" << graph_outputs.size() << ")";
   for (auto& output : graph_outputs) {
-    auto shape = node_arg_get_shape_i64(*output);
+    auto shape = output.shape();
     if (shape != nullptr) {
-      LOG(INFO) << "\t " << node_arg_get_name(*output) << " : "
-                << *(shape.get());
+      LOG(INFO) << "\t " << output.name() << " : " << *(shape.get());
     } else {
-      LOG(INFO) << "\t " << node_arg_get_name(*output) << " : []";
+      LOG(INFO) << "\t " << output.name() << " : []";
     }
   }
 }

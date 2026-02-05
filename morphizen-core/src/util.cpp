@@ -30,7 +30,7 @@ namespace morphizen {
 MORPHIZEN_DLL_SPEC void dump_graph(const Graph& graph,
                                    const std::string& filename) {
   std::ofstream out(filename);
-  auto text = graph_as_string(graph);
+  auto text = morphizen_cxx::GraphConstRef(graph).to_string();
   out << text;
   out.close();
 }
