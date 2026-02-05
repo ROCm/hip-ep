@@ -8,7 +8,6 @@ Licensed under the MIT License.
 - Status: BACKLOG
 - Priority: MEDIUM
 - Type: Tech Debt / Refactoring / Architecture
-- Created: 2026-01-31
 - Updated: 2026-01-31 (Solution designed after discussion)
 - Related: Issue #003 (ConfigProto immutability)
 - Strategic Goal: Immutable ConfigProto

@@ -8,7 +8,6 @@ Licensed under the MIT License.
 - Status: BACKLOG
 - Priority: HIGH
 - Type: Tech Debt / Refactoring
-- Created: 2026-01-31
 - Updated: 2026-01-31 (Scope expanded - remove session_configs field from ConfigProto)
 - Dependencies: Issues #008, #009 (need clean provider_options first)
 - Blocks: Issue #003 (ConfigProto must be clean before architectural change)

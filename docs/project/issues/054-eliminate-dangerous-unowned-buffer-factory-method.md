@@ -7,7 +7,6 @@ Licensed under the MIT License.
 ## Metadata
 - **Type:** Refactoring
 - **Priority:** LOW
-- **Created:** 2026-02-04
 - **Dependencies:** None
 
 ## Description

@@ -241,6 +241,11 @@ def enable_auto_merge(pr_number):
 
 
 def main():
+    # Fix Python output buffering for background execution
+    # Without this, print() output doesn't appear in output file until script exits
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+
     # Auto-detect PR from current branch
     current_branch = get_current_branch()
     if not current_branch:

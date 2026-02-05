@@ -8,8 +8,6 @@ Licensed under the MIT License.
 - **Status:** BACKLOG
 - **Priority:** MEDIUM
 - **Type:** Tech Debt / Refactoring
-- **Owner:** TBD
-- **Created:** 2026-02-02
 - **Dependencies:** None
 - **Related:** #006, #010, #022 (legacy code cleanup issues)
 

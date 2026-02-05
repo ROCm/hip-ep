@@ -18,34 +18,43 @@ Autonomously resolve merge conflicts and CI failures until PR merges, then clean
 
 ## Phase 0: PR Finalization
 
-**Run BEFORE monitoring** - finalizes PR from DRAFT to READY with complete documentation.
+**Run BEFORE monitoring** - Requires PR to be marked READY first. Finalizes PR documentation (backlog updates, file cleanup).
 
-1. **Read issue file** - understand context
+1. **Validate PR status** - Check if PR is already marked ready for review
+   ```bash
+   gh pr view {PR_NUM} --json isDraft
+   ```
+   - If `isDraft: true`: Exit with friendly reminder "PR is still in draft. Please review your implementation and mark it ready for review first: `gh pr ready {PR_NUM}`"
+   - If `isDraft: false`: Proceed with finalization
+   - Note: monitor-pr.py also validates this, but checking early provides immediate feedback
 
-2. **Craft PR title** - `gh pr edit {PR_NUM} --title "Issue #{N}: {type}: {desc}"`
+2. **Read issue file** - understand context
 
-3. **Write PR description** - create summary, problem, solution, changes
+3. **Craft PR title** - `gh pr edit {PR_NUM} --title "Issue #{N}: {type}: {desc}"`
 
-4. **Update completed-issues.md:**
+4. **Write PR description** - create summary, problem, solution, changes
+
+5. **Update completed-issues.md:**
    - Add entry to top of current month's table
    - Format: `| #{NUM} | {AUTHOR} | #{PR} | {COMMIT} | {DATE} | {TITLE} |`
 
-5. **Update backlog.md:**
+6. **Update backlog.md:**
    - Add to "Recent (last 5)" compact list
    - Remove oldest if >5
    - Delete from active backlog table
    - Remove from "Quick dependencies" section
 
-6. **Delete files:**
+7. **Update issue-dependency-analysis.md:**
+   - Remove all references to `#{NUM}`
+
+8. **Delete files:**
    - `git rm docs/project/issues/{NUM}-*.md`
    - `git rm docs/project/plans/{NUM}-*.md` (if exists)
 
-7. **Commit and push:**
-   - `git add docs/project/backlog.md docs/project/completed-issues.md`
+9. **Commit and push:**
+   - `git add docs/project/backlog.md docs/project/completed-issues.md docs/project/issue-dependency-analysis.md`
    - `git commit -m "docs: complete issue #{NUM}"`
    - `git push fork {BRANCH}`
-
-8. **Mark ready:** `gh pr ready {PR_NUM}`
 
 **Proceed to Main Loop.**
 

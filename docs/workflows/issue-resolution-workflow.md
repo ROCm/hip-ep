@@ -21,6 +21,32 @@ The issue resolution workflow integrates three skills to automate the complete j
 - Reduces manual repetition (backlog updates, PR formatting, CI monitoring)
 - Clear separation: exploration, implementation, finalization
 
+## Workflow Diagram
+
+```
+┌─────────────────────┐
+│   /create-issue     │ → Issues documented in separate doc PR
+└─────────────────────┘
+          ↓
+┌─────────────────────┐
+│    /fix-issue       │ → Creates feature branch + DRAFT PR
+└─────────────────────┘   Implements solution
+          ↓               Commits + pushes
+┌─────────────────────┐
+│   Author Review     │ → Reviews implementation (PR still DRAFT)
+│   (Phase 3)         │   Tests locally
+└─────────────────────┘   Validates quality
+          ↓
+    gh pr ready {PR}     ← **Author marks READY (approval gate)**
+          ↓
+┌─────────────────────┐
+│   /resolve-ci       │ → Validates PR is READY (rejects if DRAFT)
+│   (Phase 4)         │   Finalizes backlog/docs
+└─────────────────────┘   Monitors CI, auto-fixes
+          ↓               Handles conflicts/failures
+      MERGED             Auto-merges when approved + CI passes
+```
+
 ---
 
 ## Phase 1: Issue Discovery & Documentation
@@ -97,7 +123,7 @@ The issue resolution workflow integrates three skills to automate the complete j
 2. Check code quality, logic, adherence to plan
 3. Test locally if needed
 4. Decide:
-   - ✅ Approve → Proceed to Phase 4 (`/resolve-ci`)
+   - ✅ Approve → Mark PR ready: `gh pr ready {PR_NUM}`, then proceed to Phase 4 (`/resolve-ci`)
    - ❌ Request changes → Continue working on branch, push updates
    - ⏸️  Defer → Leave draft PR for later
 
@@ -105,7 +131,7 @@ The issue resolution workflow integrates three skills to automate the complete j
 - Verify implementation correctness
 - Ensure code quality and maintainability
 - Catch issues before CI runs
-- Final check before marking PR ready
+- Final check before proceeding with `/resolve-ci`
 
 ---
 
@@ -118,14 +144,14 @@ The issue resolution workflow integrates three skills to automate the complete j
 **Workflow:**
 
 ### Phase 0: PR Finalization
-1. Read issue file for context
-2. Craft PR title: `Issue #NNN: <type>: <description>`
-3. Write PR description (problem, solution, changes)
-4. Update `completed-issues.md` (add to current month)
-5. Update `backlog.md` (move to "Recent" list, remove from active)
-6. Delete issue/plan files
-7. Commit and push documentation updates
-8. Mark PR ready for review
+1. Validate PR is ready (exit with reminder if still draft)
+2. Read issue file for context
+3. Craft PR title: `Issue #NNN: <type>: <description>`
+4. Write PR description (problem, solution, changes)
+5. Update `completed-issues.md` (add to current month)
+6. Update `backlog.md` (move to "Recent" list, remove from active)
+7. Delete issue/plan files
+8. Commit and push documentation updates
 
 ### Phase 1-2: Monitor CI
 - Script polls CI status every 30 seconds (no token cost)

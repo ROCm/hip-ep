@@ -8,7 +8,6 @@ Licensed under the MIT License.
 - **Type:** Bug
 - **Priority:** HIGH
 - **Status:** OPEN
-- **Created:** 2026-02-04
 - **Dependencies:** Issue #028
 - **Discovered from:** Issue #028 test enablement
 

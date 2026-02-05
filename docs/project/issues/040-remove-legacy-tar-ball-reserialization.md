@@ -7,7 +7,6 @@ Licensed under the MIT License.
 ## Metadata
 - **Type:** Tech Debt / Refactoring
 - **Priority:** MEDIUM
-- **Created:** 2026-02-02
 - **Dependencies:** None
 
 ## Description
