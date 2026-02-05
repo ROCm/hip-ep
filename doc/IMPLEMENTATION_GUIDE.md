@@ -1,7 +1,11 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # HipDNN Implementation Guide
 
-**Version:** 2.0  
-**Date:** January 10, 2026  
+**Version:** 2.0
+**Date:** January 10, 2026
 **Author:** Morphizen HipDNN Team
 
 ## Table of Contents
@@ -377,10 +381,10 @@ bool BuildAndSerializeGraph(
   try {
     // Create hipDNN graph
     auto graph = std::make_unique<Graph>();
-    
+
     auto output_ref = NodeArgConstRef::from_node_arg(ort_graph, *graph_outputs[0]);
     graph->set_name("Graph_" + node_arg_get_name(output_ref));
-    
+
     int64_t next_uid = 1;
     std::unordered_map<std::string, TensorAttrPtr> symbol_table;
     std::vector<int64_t> input_uids;
@@ -402,9 +406,9 @@ bool BuildAndSerializeGraph(
     auto subgraph_nodes = node_get_inputs(fused_node);
     for (const auto& input : subgraph_nodes) {
       if (!input.node) continue;
-      
+
       const Node& node = *input.node;
-      
+
       // Look up input TensorAttributes from symbol table
       auto node_inputs = node_get_inputs(node);
       std::vector<TensorAttrPtr> input_attrs;
@@ -450,7 +454,7 @@ bool BuildAndSerializeGraph(
       std::string name = node_arg_get_name(output_ref);
       auto it = symbol_table.find(name);
       if (it == symbol_table.end()) return false;
-      
+
       it->second->set_is_virtual(false);
       output_uids.push_back(it->second->get_uid());
     }
@@ -459,7 +463,7 @@ bool BuildAndSerializeGraph(
     flatbuffers::DetachedBuffer buffer = graph->buildFlatbufferOperationGraph();
     out_filename = "hipdnn_graph_" + node_arg_get_name(output_ref) + ".bin";
     SaveGraphToFile(buffer, out_filename);
-    
+
     return true;
   } catch (const std::exception& ex) {
     MY_LOG(1) << "Exception building/serializing hipDNN graph: " << ex.what();
@@ -474,22 +478,22 @@ bool BuildAndSerializeGraph(
 struct Level1HipDnn {
   void process(IPass& self, Graph& ort_graph) {
     auto node_indices = graph_get_node_in_topoligical_order(ort_graph);
-    
+
     for (auto node_idx : node_indices) {
       auto node = VAIP_ORT_API(graph_get_node)(ort_graph, node_idx);
-      
+
       // Check if operation is supported
       if (!IsSupportedOp(*node)) {
         continue;
       }
-      
+
       std::string op_type = node_op_type(*node);
       MY_LOG(1) << "Found supported " << op_type << " node";
-      
+
       // Get inputs and outputs
       auto node_inputs = node_get_inputs(*node);
       auto node_outputs = node_get_output_node_args(*node);
-      
+
       // Build names for fusion
       std::vector<std::string> input_names, output_names;
       for (const auto& input : node_inputs) {
@@ -500,22 +504,22 @@ struct Level1HipDnn {
         auto output_ref = NodeArgConstRef::from_node_arg(ort_graph, *output);
         output_names.push_back(node_arg_get_name(output_ref));
       }
-      
+
       // Build and serialize graph
       std::string graph_filename;
       if (!BuildAndSerializeGraph(ort_graph, *node, node_inputs, node_outputs, graph_filename)) {
         continue;
       }
-      
+
       // Fuse and attach proto
       auto [meta_def, fuse_error] =
           self_.try_fuse(ort_graph, output_names[0], input_names, output_names, {}, "HIPDNN");
-      
+
       if (meta_def == nullptr) continue;
-      
+
       auto hipdnn_param = hipdnn::HipdnnParamProto();
       hipdnn_param.set_graph_file_name(graph_filename);
-      
+
       auto hipdnn_json_str = std::string();
       google::protobuf::util::MessageToJsonString(hipdnn_param, &hipdnn_json_str);
       self_.attach_meta_def_param(*meta_def, hipdnn_json_str.c_str());
@@ -558,7 +562,7 @@ public:
 
 private:
   void Compute(const OrtApi* api, OrtKernelContext* context) const override;
-  
+
   void LoadAndCompileGraph();
   void InitializeHeuristicDescriptor();
   void InitializeEngineConfig();
@@ -567,13 +571,13 @@ private:
 private:
   HipdnnParamProto hipdnn_proto_;
   hipdnnHandle_t handle_;
-  
+
   // Backend descriptors (mimics Graph class internals)
   std::unique_ptr<ScopedHipdnnBackendDescriptor> graphDesc_;
   std::unique_ptr<ScopedHipdnnBackendDescriptor> engineHeuristicDesc_;
   std::unique_ptr<ScopedHipdnnBackendDescriptor> engineConfigDesc_;
   std::unique_ptr<ScopedHipdnnBackendDescriptor> executionPlanDesc_;
-  
+
   std::vector<char> workspace_;
   std::vector<int64_t> input_uids_;
   std::vector<int64_t> output_uids_;
@@ -588,10 +592,10 @@ HipdnnCustomOp::HipdnnCustomOp(...) : CustomOpImp(context, meta_def, model), han
   // Parse proto to get graph filename
   auto hipdnn_json_str = get_meta_def_param();
   google::protobuf::util::JsonStringToMessage(hipdnn_json_str, &hipdnn_proto_);
-  
+
   // Create hipDNN handle
   hipdnnCreate(&handle_);
-  
+
   // Load and compile the graph
   LoadAndCompileGraph();
 }
@@ -603,33 +607,33 @@ HipdnnCustomOp::HipdnnCustomOp(...) : CustomOpImp(context, meta_def, model), han
 void HipdnnCustomOp::LoadAndCompileGraph() {
   // Load serialized graph
   std::vector<uint8_t> buffer = LoadGraphFromFile(hipdnn_proto_.graph_file_name());
-  
+
   // Create graph descriptor from buffer
   graphDesc_ = std::make_unique<ScopedHipdnnBackendDescriptor>(buffer.data(), buffer.size());
-  
-  hipdnnBackend()->backendSetAttribute(graphDesc_->get(), 
+
+  hipdnnBackend()->backendSetAttribute(graphDesc_->get(),
       HIPDNN_ATTR_OPERATIONGRAPH_HANDLE, HIPDNN_TYPE_HANDLE, 1, &handle_);
   hipdnnBackend()->backendFinalize(graphDesc_->get());
-  
+
   // Create execution plans
   InitializeHeuristicDescriptor();
   InitializeEngineConfig();
-  
+
   // Build execution plan
   executionPlanDesc_ = std::make_unique<ScopedHipdnnBackendDescriptor>(
       HIPDNN_BACKEND_EXECUTION_PLAN_DESCRIPTOR);
   hipdnnBackend()->backendSetAttribute(executionPlanDesc_->get(),
-      HIPDNN_ATTR_EXECUTION_PLAN_ENGINE_CONFIG, HIPDNN_TYPE_BACKEND_DESCRIPTOR, 
+      HIPDNN_ATTR_EXECUTION_PLAN_ENGINE_CONFIG, HIPDNN_TYPE_BACKEND_DESCRIPTOR,
       1, &engineConfigDesc_->get());
   hipdnnBackend()->backendFinalize(executionPlanDesc_->get());
-  
+
   // Get workspace size
   int64_t workspace_size = 0;
   hipdnnBackend()->backendGetAttribute(executionPlanDesc_->get(),
-      HIPDNN_ATTR_EXECUTION_PLAN_WORKSPACE_SIZE, HIPDNN_TYPE_INT64, 
+      HIPDNN_ATTR_EXECUTION_PLAN_WORKSPACE_SIZE, HIPDNN_TYPE_INT64,
       1, nullptr, &workspace_size);
   if (workspace_size > 0) workspace_.resize(workspace_size);
-  
+
   // Extract UIDs
   ExtractUIDsFromSerializedGraph(buffer);
 }
@@ -647,15 +651,15 @@ static std::vector<uint8_t> LoadGraphFromFile(const std::string& filepath) {
   if (!file) {
     throw std::runtime_error("Failed to open file for reading: " + filepath);
   }
-  
+
   std::streamsize size = file.tellg();
   file.seekg(0, std::ios::beg);
-  
+
   std::vector<uint8_t> buffer(size);
   if (!file.read(reinterpret_cast<char*>(buffer.data()), size)) {
     throw std::runtime_error("Failed to read graph from file: " + filepath);
   }
-  
+
   return buffer;
 }
 ```
@@ -663,16 +667,16 @@ static std::vector<uint8_t> LoadGraphFromFile(const std::string& filepath) {
 ### 6.2 Saving Graph to File
 
 ```cpp
-void SaveGraphToFile(const flatbuffers::DetachedBuffer& buffer, 
+void SaveGraphToFile(const flatbuffers::DetachedBuffer& buffer,
                      const std::string& filepath) {
   std::ofstream file(filepath, std::ios::binary);
   if (!file) {
     throw std::runtime_error("Failed to open file for writing: " + filepath);
   }
-  
+
   file.write(reinterpret_cast<const char*>(buffer.data()), buffer.size());
   file.close();
-  
+
   if (!file.good()) {
     throw std::runtime_error("Failed to write graph to file: " + filepath);
   }
@@ -692,20 +696,20 @@ UIDs (Unique Identifiers) map ONNX Runtime tensors to hipDNN graph tensors durin
 ```cpp
 void HipdnnCustomOp::ExtractUIDsFromSerializedGraph(const std::vector<uint8_t>& buffer) {
   using namespace hipdnn_plugin_sdk;
-  
+
   GraphWrapper graphWrapper(buffer.data(), buffer.size());
   if (!graphWrapper.isValid()) {
     throw std::runtime_error("Invalid serialized graph");
   }
-  
+
   // Get tensor map: UID → TensorAttributes
   auto tensorMap = graphWrapper.getTensorMap();
-  
+
   // Build set of output UIDs by examining node attributes
   std::unordered_set<int64_t> outputUids;
   for (uint32_t i = 0; i < graphWrapper.nodeCount(); ++i) {
     auto& node = graphWrapper.getNode(i);
-    
+
     if (node.attributes_type() == hipdnn_data_sdk::data_objects::NodeAttributes::ConvolutionFwdAttributes) {
       auto* conv_attrs = node.attributes_as_ConvolutionFwdAttributes();
       if (conv_attrs) {
@@ -713,7 +717,7 @@ void HipdnnCustomOp::ExtractUIDsFromSerializedGraph(const std::vector<uint8_t>& 
       }
     }
   }
-  
+
   // Classify non-virtual tensors as inputs or outputs
   std::vector<std::pair<int64_t, const hipdnn_data_sdk::data_objects::TensorAttributes*>> sortedTensors;
   for (const auto& [uid, tensor] : tensorMap) {
@@ -721,11 +725,11 @@ void HipdnnCustomOp::ExtractUIDsFromSerializedGraph(const std::vector<uint8_t>& 
       sortedTensors.push_back({uid, tensor});
     }
   }
-  
+
   // Sort by UID
   std::sort(sortedTensors.begin(), sortedTensors.end(),
             [](const auto& a, const auto& b) { return a.first < b.first; });
-  
+
   // Classify as inputs or outputs
   for (const auto& [uid, tensor] : sortedTensors) {
     if (outputUids.count(uid) > 0) {
@@ -747,20 +751,20 @@ void HipdnnCustomOp::ExtractUIDsFromSerializedGraph(const std::vector<uint8_t>& 
 ```cpp
 void HipdnnCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const {
   Ort::KernelContext ctx(context);
-  
+
   // Build variant pack: UID → tensor pointer mapping
   std::unordered_map<int64_t, void*> variant_pack;
-  
+
   for (size_t i = 0; i < input_uids_.size(); ++i) {
     Ort::ConstValue input = ctx.GetInput(i);
     variant_pack[input_uids_[i]] = const_cast<void*>(input.GetTensorRawData());
   }
-  
+
   for (size_t i = 0; i < output_uids_.size(); ++i) {
     Ort::UnownedValue output = ctx.GetOutput(i, output_shapes_[i]);
     variant_pack[output_uids_[i]] = output.GetTensorMutableRawData();
   }
-  
+
   // Convert to arrays
   std::vector<int64_t> keys;
   std::vector<void*> values;
@@ -768,24 +772,24 @@ void HipdnnCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const
     keys.push_back(key);
     values.push_back(value);
   }
-  
+
   // Create and execute variant pack
   auto variantPackDesc = std::make_unique<ScopedHipdnnBackendDescriptor>(
       HIPDNN_BACKEND_VARIANT_PACK_DESCRIPTOR);
-  
+
   hipdnnBackend()->backendSetAttribute(variantPackDesc->get(),
       HIPDNN_ATTR_VARIANT_PACK_DATA_POINTERS, HIPDNN_TYPE_VOID_PTR,
       static_cast<int64_t>(values.size()), values.data());
-  
+
   hipdnnBackend()->backendSetAttribute(variantPackDesc->get(),
       HIPDNN_ATTR_VARIANT_PACK_UNIQUE_IDS, HIPDNN_TYPE_INT64,
       static_cast<int64_t>(keys.size()), keys.data());
-  
-  void* workspace_ptr = workspace_.empty() ? nullptr : 
+
+  void* workspace_ptr = workspace_.empty() ? nullptr :
                         const_cast<void*>(static_cast<const void*>(workspace_.data()));
   hipdnnBackend()->backendSetAttribute(variantPackDesc->get(),
       HIPDNN_ATTR_VARIANT_PACK_WORKSPACE, HIPDNN_TYPE_VOID_PTR, 1, &workspace_ptr);
-  
+
   hipdnnBackend()->backendFinalize(variantPackDesc->get());
   hipdnnBackend()->backendExecute(handle_, executionPlanDesc_->get(), variantPackDesc->get());
 }
@@ -822,9 +826,9 @@ bool AddBatchNormNode(
     const Node& node,
     const std::vector<TensorAttrPtr>& input_attrs,
     TensorAttrPtr& output_attr) {
-  
+
   // Extract attributes and call graph.batch_norm()
-  output_attr = graph.batch_norm(input_attrs[0], input_attrs[1], 
+  output_attr = graph.batch_norm(input_attrs[0], input_attrs[1],
                                   input_attrs[2], bn_attrs);
   return true;
 }
@@ -875,10 +879,10 @@ TEST(HipDNNPass, GraphSerialization) {
 TEST(HipDNNIntegration, EndToEnd) {
   auto model = LoadONNXModel("test_model.onnx");
   RunLevel1Pass(model);
-  
+
   auto session = CreateSession(model);
   auto output = session.Run(input_data);
-  
+
   CompareWithReference(output, expected_output);
 }
 ```

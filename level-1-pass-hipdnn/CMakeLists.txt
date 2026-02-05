@@ -41,7 +41,7 @@ target_include_directories(${LIB_NAME} PRIVATE
 	${CMAKE_CURRENT_BINARY_DIR}
 	${THEROCK_DIST}/include
 )
-target_compile_definitions(${LIB_NAME} PRIVATE 
+target_compile_definitions(${LIB_NAME} PRIVATE
 	-DOUTPUT_NAME="morphizen-level1-pass-hipdnn"
 	-D__HIP_PLATFORM_AMD__
 )

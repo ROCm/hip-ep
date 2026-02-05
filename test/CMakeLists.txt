@@ -1,3 +1,8 @@
+##
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
 # Option to build test_classification executable
 option(BUILD_TEST_CLASSIFICATION "Build test_classification executable" ON)
 

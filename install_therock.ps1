@@ -1,3 +1,8 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+
 # TheRock and hipDNN Installation Script for Windows
 #
 # NOTE: This is a ONE-TIME SETUP SCRIPT for initial installation.
@@ -36,7 +41,7 @@ if (Test-Path "$clangPath\bin\amdgpu-arch.exe") {
     Write-Host "  3. Extract to: $clangPath" -ForegroundColor Yellow
     Write-Host ""
     Read-Host "Press Enter after installing Clang to continue"
-    
+
     if (-not (Test-Path "$clangPath\bin\amdgpu-arch.exe")) {
         Write-Host "[ERROR] Clang still not found at $clangPath" -ForegroundColor Red
         exit 1
@@ -67,7 +72,7 @@ $gfxFamily = switch -Regex ($GpuArch) {
     '^gfx110[0-3]$' { "gfx110X-all" }
     '^gfx115[0-2]$' { "gfx115X-all" }
     '^gfx120[0-1]$' { "gfx120X-all" }
-    default { 
+    default {
         Write-Host "[ERROR] Unknown GPU architecture: $GpuArch" -ForegroundColor Red
         exit 1
     }
@@ -91,7 +96,7 @@ if (Test-Path "$therockPath\bin\hipconfig.exe") {
     Write-Host "  tar -xzf therock-dist-windows-$gfxFamily-*.tar.gz -C $TargetDir" -ForegroundColor Cyan
     Write-Host ""
     Read-Host "Press Enter after extracting TheRock to continue"
-    
+
     if (-not (Test-Path "$therockPath\bin\hipconfig.exe")) {
         Write-Host "[ERROR] TheRock still not found at $therockPath" -ForegroundColor Red
         exit 1

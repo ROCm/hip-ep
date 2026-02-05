@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # Image to Binary Converter
 
 Simple image to binary conversion tool for ONNX model inference.

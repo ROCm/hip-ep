@@ -70,7 +70,7 @@ TheRock SDK provides HIP/ROCm runtime for Windows.
    ```bash
    mkdir workspace
    cd workspace
-   
+
    # Extract TheRock tarball to workspace/therock and move to /c/dist/therock/
    mkdir therock
    tar -xzf /path/to/therock-dist-windows-gfx115X-all-*.tar.gz -C therock
@@ -141,7 +141,7 @@ git clone --recursive https://github.com/ROCm/onnx-hipdnn-ep.git
 
 #### Configure and build
 
-#### Known Issue 
+#### Known Issue
 1.nlohmann_json Package Not Found ❌
 ```
 Error Message:

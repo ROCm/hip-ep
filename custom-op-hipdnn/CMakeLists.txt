@@ -38,17 +38,17 @@ find_package (glog CONFIG REQUIRED)
 find_package (onnxruntime CONFIG REQUIRED)
 set(LIB_NAME morphizen-custom-op-hipdnn)
 # Use MIOpen-based implementation (migrated directly in custom_op.cpp)
-add_library(${LIB_NAME} STATIC 
-  src/main.cpp 
-  src/custom_op.hpp 
+add_library(${LIB_NAME} STATIC
+  src/main.cpp
+  src/custom_op.hpp
   src/custom_op.cpp
 )
 set_target_properties(${LIB_NAME} PROPERTIES FOLDER "hipdnn")
-target_include_directories(${LIB_NAME} PRIVATE 
+target_include_directories(${LIB_NAME} PRIVATE
   include
   ${THEROCK_DIST}/include
 )
-target_compile_definitions(${LIB_NAME} PRIVATE 
+target_compile_definitions(${LIB_NAME} PRIVATE
   "__HIP_PLATFORM_AMD__"
 )
 target_compile_options(${LIB_NAME} PRIVATE /utf-8)
