@@ -171,13 +171,7 @@ endif()
 # ROCm tests (require ROCm libraries)
 #=============================================================================
 
-# ROCm libraries configuration
-set(THEROCK_DIST "" CACHE PATH "TheRock distribution path")
-
-if(THEROCK_DIST)
-  list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}")
-  list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}/lib/cmake")
-endif()
+# THEROCK_DIST and CMAKE_PREFIX_PATH are configured in root CMakeLists.txt
 
 find_package(hip QUIET)
 find_package(miopen QUIET)
