@@ -32,17 +32,6 @@
 #   $THEROCK_DIST/lib/llvm/bin/amdgpu-arch    # Returns e.g., "gfx1151"
 #   $THEROCK_DIST/bin/hipInfo | grep gcnArchName   # Alternative method
 #
-# Common AMD GPU architectures:
-#   - gfx1100: Radeon RX 7900 XTX/XT (Navi 31)
-#   - gfx1101: Radeon RX 7800/7700 (Navi 32)
-#   - gfx1102: Radeon RX 7600 (Navi 33)
-#   - gfx1103: Radeon 780M/760M integrated (Phoenix)
-#   - gfx1150: Radeon 880M (Strix Point)
-#   - gfx1151: Radeon 880M/780M (Strix Point variants)
-#   - gfx1030: Radeon RX 6900/6800 (Navi 21)
-#   - gfx90a:  MI200 series (CDNA2)
-#   - gfx942:  MI300 series (CDNA3)
-#
 # Set architecture from command line:
 #   cmake -DHIP_ARCHITECTURES=gfx1151 <build_dir>
 #
