@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # hipDNN Graph API Guide
 
 ## Overview
@@ -160,17 +164,17 @@ flatbuffers::DetachedBuffer serialized = graph->buildFlatbufferOperationGraph();
 // Save to file
 #include <fstream>
 
-void SaveGraphToFile(const flatbuffers::DetachedBuffer& buffer, 
+void SaveGraphToFile(const flatbuffers::DetachedBuffer& buffer,
                      const std::string& filepath) {
     std::ofstream file(filepath, std::ios::binary);
     if (!file) {
         throw std::runtime_error("Failed to open file for writing");
     }
-    
-    file.write(reinterpret_cast<const char*>(buffer.data()), 
+
+    file.write(reinterpret_cast<const char*>(buffer.data()),
                buffer.size());
     file.close();
-    
+
     if (!file.good()) {
         throw std::runtime_error("Failed to write graph to file");
     }
@@ -216,15 +220,15 @@ std::vector<uint8_t> LoadGraphFromFile(const std::string& filepath) {
     if (!file) {
         throw std::runtime_error("Failed to open file for reading");
     }
-    
+
     std::streamsize size = file.tellg();
     file.seekg(0, std::ios::beg);
-    
+
     std::vector<uint8_t> buffer(size);
     if (!file.read(reinterpret_cast<char*>(buffer.data()), size)) {
         throw std::runtime_error("Failed to read graph from file");
     }
-    
+
     return buffer;
 }
 ```
@@ -239,7 +243,7 @@ auto buffer = LoadGraphFromFile("graph.bin");
 
 // Create backend descriptor from serialized data
 auto graphDesc = std::make_unique<ScopedHipdnnBackendDescriptor>(
-    buffer.data(), 
+    buffer.data(),
     buffer.size()
 );
 
@@ -317,20 +321,20 @@ class Kernel {
 public:
     Kernel(const OrtApi& ort_api, const OrtLogger& logger, hipdnnHandle_t handle)
         : ort_api_(ort_api), logger_(logger), handle_(handle) {}
-    
+
     OrtStatus* BuildAndCompile(Ort::ConstGraph ort_graph) {
         try {
             // Create hipDNN graph
             graph_ = std::make_unique<hipdnn_frontend::graph::Graph>();
-            
+
             // Build graph structure from ORT graph
             RETURN_IF_ERROR(BuildGraphStructure(ort_graph));
-            
+
             // Compile the graph
             RETURN_IF_ERROR(CompileGraph());
-            
+
         } catch (const std::exception& ex) {
-            RETURN_ERROR(ort_api_, ORT_EP_FAIL, 
+            RETURN_ERROR(ort_api_, ORT_EP_FAIL,
                         "Exception building hipDNN graph: " << ex.what());
         }
         return nullptr;
@@ -339,58 +343,58 @@ public:
 private:
     OrtStatus* CompileGraph() {
         using hipdnn_frontend::HeuristicMode;
-        
+
         // Step 1: Validate graph
         auto error = graph_->validate();
         if (error.is_bad()) {
-            RETURN_ERROR(ort_api_, ORT_EP_FAIL, 
+            RETURN_ERROR(ort_api_, ORT_EP_FAIL,
                         "Graph validation failed: " << error.get_message());
         }
-        
+
         // Step 2: Build operation graph
         error = graph_->build_operation_graph(handle_);
         if (error.is_bad()) {
-            RETURN_ERROR(ort_api_, ORT_EP_FAIL, 
+            RETURN_ERROR(ort_api_, ORT_EP_FAIL,
                         "build_operation_graph failed: " << error.get_message());
         }
-        
+
         // Step 3: Create execution plans
         error = graph_->create_execution_plans({HeuristicMode::FALLBACK});
         if (error.is_bad()) {
-            RETURN_ERROR(ort_api_, ORT_EP_FAIL, 
+            RETURN_ERROR(ort_api_, ORT_EP_FAIL,
                         "create_execution_plans failed: " << error.get_message());
         }
-        
+
         // Step 4: Check device support
         error = graph_->check_support();
         if (error.is_bad()) {
-            RETURN_ERROR(ort_api_, ORT_EP_FAIL, 
+            RETURN_ERROR(ort_api_, ORT_EP_FAIL,
                         "check_support failed: " << error.get_message());
         }
-        
+
         // Step 5: Build execution plans
         error = graph_->build_plans();
         if (error.is_bad()) {
-            RETURN_ERROR(ort_api_, ORT_EP_FAIL, 
+            RETURN_ERROR(ort_api_, ORT_EP_FAIL,
                         "build_plans failed: " << error.get_message());
         }
-        
+
         // Step 6: Get workspace size
         int64_t workspace_size = 0;
         error = graph_->get_workspace_size(workspace_size);
         if (error.is_bad()) {
-            RETURN_ERROR(ort_api_, ORT_EP_FAIL, 
+            RETURN_ERROR(ort_api_, ORT_EP_FAIL,
                         "get_workspace_size failed: " << error.get_message());
         }
-        
+
         // Allocate workspace if needed
         if (workspace_size > 0) {
             workspace_.resize(workspace_size);
         }
-        
+
         return nullptr;
     }
-    
+
     hipdnnHandle_t handle_;
     std::unique_ptr<hipdnn_frontend::graph::Graph> graph_;
     std::vector<char> workspace_;
@@ -434,33 +438,33 @@ Execute the compiled kernel with a variant pack mapping UIDs to data pointers:
 ```cpp
 OrtStatus* Execute(OrtKernelContext* kernel_ctx) {
     Ort::KernelContext context(kernel_ctx);
-    
+
     // Build variant pack: UID → data pointer
     std::unordered_map<int64_t, void*> variant_pack;
-    
+
     // Map inputs
     for (size_t i = 0; i < input_uids_.size(); ++i) {
         Ort::ConstValue input = context.GetInput(i);
-        variant_pack[input_uids_[i]] = 
+        variant_pack[input_uids_[i]] =
             const_cast<void*>(input.GetTensorRawData());
     }
-    
+
     // Allocate and map outputs
     for (size_t i = 0; i < output_uids_.size(); ++i) {
         Ort::UnownedValue output = context.GetOutput(i, output_shapes_[i]);
-        variant_pack[output_uids_[i]] = 
+        variant_pack[output_uids_[i]] =
             output.GetTensorMutableRawData();
     }
-    
+
     // Execute
     void* workspace_ptr = workspace_.empty() ? nullptr : workspace_.data();
     auto error = graph_->execute(handle_, variant_pack, workspace_ptr);
-    
+
     if (error.is_bad()) {
-        RETURN_ERROR(ort_api_, ORT_EP_FAIL, 
+        RETURN_ERROR(ort_api_, ORT_EP_FAIL,
                     "Execute failed: " << error.get_message());
     }
-    
+
     return nullptr;
 }
 ```
@@ -484,17 +488,17 @@ public:
     ConvKernel() {
         hipdnnCreate(&handle_);
     }
-    
+
     ~ConvKernel() {
         if (handle_) {
             hipdnnDestroy(handle_);
         }
     }
-    
+
     void BuildGraph() {
         graph_ = std::make_unique<Graph>();
         graph_->set_name("SimpleConv2D");
-        
+
         // Input: 1x3x224x224
         auto x = std::make_shared<TensorAttributes>();
         x->set_uid(1)
@@ -504,7 +508,7 @@ public:
          .set_stride({150528, 50176, 224, 1})
          .set_is_virtual(false);
         input_uids_.push_back(1);
-        
+
         // Weights: 64x3x3x3
         auto w = std::make_shared<TensorAttributes>();
         w->set_uid(2)
@@ -514,7 +518,7 @@ public:
          .set_stride({27, 9, 3, 1})
          .set_is_virtual(false);
         input_uids_.push_back(2);
-        
+
         // Convolution
         ConvFpropAttributes conv_attrs;
         conv_attrs.set_padding({1, 1})
@@ -522,7 +526,7 @@ public:
                   .set_dilation({1, 1})
                   .set_convolution_mode(ConvolutionMode::CROSS_CORRELATION)
                   .set_compute_data_type(DataType::FLOAT);
-        
+
         auto y = graph_->conv_fprop(x, w, conv_attrs);
         y->set_is_virtual(false)
          .set_name("output")
@@ -532,40 +536,40 @@ public:
         output_uids_.push_back(y->get_uid());
         output_shapes_.push_back({1, 64, 224, 224});
     }
-    
+
     void Compile() {
         using hipdnn_frontend::HeuristicMode;
-        
+
         auto error = graph_->validate();
         if (error.is_bad()) throw std::runtime_error(error.get_message());
-        
+
         error = graph_->build_operation_graph(handle_);
         if (error.is_bad()) throw std::runtime_error(error.get_message());
-        
+
         error = graph_->create_execution_plans({HeuristicMode::FALLBACK});
         if (error.is_bad()) throw std::runtime_error(error.get_message());
-        
+
         error = graph_->check_support();
         if (error.is_bad()) throw std::runtime_error(error.get_message());
-        
+
         error = graph_->build_plans();
         if (error.is_bad()) throw std::runtime_error(error.get_message());
-        
+
         int64_t workspace_size = 0;
         error = graph_->get_workspace_size(workspace_size);
         if (error.is_bad()) throw std::runtime_error(error.get_message());
-        
+
         if (workspace_size > 0) {
             workspace_.resize(workspace_size);
         }
     }
-    
+
     void Execute(void* input_data, void* weight_data, void* output_data) {
         std::unordered_map<int64_t, void*> variant_pack;
         variant_pack[input_uids_[0]] = input_data;   // Input
         variant_pack[input_uids_[1]] = weight_data;  // Weights
         variant_pack[output_uids_[0]] = output_data; // Output
-        
+
         void* workspace_ptr = workspace_.empty() ? nullptr : workspace_.data();
         auto error = graph_->execute(handle_, variant_pack, workspace_ptr);
         if (error.is_bad()) {
@@ -585,19 +589,19 @@ private:
 // Usage
 int main() {
     ConvKernel kernel;
-    
+
     // Build and compile
     kernel.BuildGraph();
     kernel.Compile();
-    
+
     // Allocate device memory (pseudo-code)
     void* d_input = allocate_device_memory(1 * 3 * 224 * 224 * sizeof(float));
     void* d_weights = allocate_device_memory(64 * 3 * 3 * 3 * sizeof(float));
     void* d_output = allocate_device_memory(1 * 64 * 224 * 224 * sizeof(float));
-    
+
     // Execute
     kernel.Execute(d_input, d_weights, d_output);
-    
+
     return 0;
 }
 ```
@@ -664,6 +668,6 @@ Potential improvements to consider:
 
 ---
 
-**Document Version**: 1.0  
-**Last Updated**: January 9, 2026  
+**Document Version**: 1.0
+**Last Updated**: January 9, 2026
 **Author**: hipDNNEP Development Team

@@ -1,8 +1,6 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
- * 
- * MIOpen-based implementation (migrated from hipDNN)
  */
 // clang-format off
 #include "morphizen/onnxruntime_api.hpp"
@@ -71,30 +69,30 @@ HipdnnCustomOp::HipdnnCustomOp(std::shared_ptr<const PassContext> context,
       has_bias_(false),
       data_type_(miopenFloat),
       device_id_(0) {
-  
+
   MY_LOG(1) << "HipdnnCustomOp constructor (MIOpen version)";
-  
+
   // Parse proto
   auto hipdnn_json_str = get_meta_def_param();
   auto status = google::protobuf::util::JsonStringToMessage(hipdnn_json_str, &hipdnn_proto_);
-  
+
   if (!status.ok()) {
     LOG(FATAL) << "Failed to parse hipdnn_json_str: " << status.ToString();
     return;
   }
-  
+
   MY_LOG(1) << "Proto op_type: " << hipdnn_proto_.op_type();
-  
+
   // Create MIOpen handle
   MIOPEN_THROW_IF_ERROR(miopenCreate(&miopen_handle_));
-  
+
   // Get device ID
   hipError_t hip_err = hipGetDevice(&device_id_);
   if (hip_err != hipSuccess) {
     LOG(WARNING) << "Failed to get HIP device, using device 0";
     device_id_ = 0;
   }
-  
+
   // Build and compile using MIOpen
   try {
     BuildAndCompileMIOpen();
@@ -110,14 +108,14 @@ HipdnnCustomOp::~HipdnnCustomOp() {
     hipFree(workspace_);
     workspace_ = nullptr;
   }
-  
+
   // Destroy descriptors
   if (x_desc_) miopenDestroyTensorDescriptor(x_desc_);
   if (w_desc_) miopenDestroyTensorDescriptor(w_desc_);
   if (y_desc_) miopenDestroyTensorDescriptor(y_desc_);
   if (b_desc_) miopenDestroyTensorDescriptor(b_desc_);
   if (conv_desc_) miopenDestroyConvolutionDescriptor(conv_desc_);
-  
+
   // Destroy MIOpen handle
   if (miopen_handle_) {
     miopenDestroy(miopen_handle_);
@@ -132,15 +130,15 @@ static std::vector<int64_t> ProtoShapeToVector(const hipdnn::TensorShape& shape)
 
 void HipdnnCustomOp::BuildAndCompileMIOpen() {
   MY_LOG(1) << "=== Building MIOpen kernel ===";
-  
+
   // Read metadata directly from proto
   const std::string& op_type = hipdnn_proto_.op_type();
   if (op_type != "Conv") {
     throw std::runtime_error("Unsupported operation type: " + op_type);
   }
-  
+
   MY_LOG(1) << "Op type: " << op_type << ", version: " << hipdnn_proto_.version();
-  
+
   // Extract shapes from proto
   if (hipdnn_proto_.input_shapes_size() < 2 || hipdnn_proto_.output_shapes_size() < 1) {
     throw std::runtime_error("Missing required shapes in proto");
@@ -148,7 +146,7 @@ void HipdnnCustomOp::BuildAndCompileMIOpen() {
   x_shape_ = ProtoShapeToVector(hipdnn_proto_.input_shapes(0));
   w_shape_ = ProtoShapeToVector(hipdnn_proto_.input_shapes(1));
   y_shape_ = ProtoShapeToVector(hipdnn_proto_.output_shapes(0));
-  
+
   // Extract convolution parameters from proto (using oneof node_attrs)
   if (!hipdnn_proto_.has_conv_attrs()) {
     throw std::runtime_error("Missing conv_attrs in proto for Conv operation");
@@ -158,25 +156,25 @@ void HipdnnCustomOp::BuildAndCompileMIOpen() {
   std::vector<int64_t> strides(conv_attrs.strides().begin(), conv_attrs.strides().end());
   std::vector<int64_t> dilations(conv_attrs.dilations().begin(), conv_attrs.dilations().end());
   has_bias_ = conv_attrs.has_bias();
-  
+
   // Extract data types from proto
   if (hipdnn_proto_.input_data_types_size() < 1) {
     throw std::runtime_error("Missing input data types in proto");
   }
   data_type_ = ToMIOpenDataType(hipdnn_proto_.input_data_types(0));
-  
+
   MY_LOG(1) << "Op: " << op_type
             << ", X=" << x_shape_.size() << "D"
             << ", W=" << w_shape_.size() << "D"
             << ", Y=" << y_shape_.size() << "D"
             << ", has_bias=" << has_bias_;
-  
+
   // Create MIOpen descriptors
   MIOPEN_THROW_IF_ERROR(miopenCreateTensorDescriptor(&x_desc_));
   MIOPEN_THROW_IF_ERROR(miopenCreateTensorDescriptor(&w_desc_));
   MIOPEN_THROW_IF_ERROR(miopenCreateTensorDescriptor(&y_desc_));
   MIOPEN_THROW_IF_ERROR(miopenCreateConvolutionDescriptor(&conv_desc_));
-  
+
   // Set input tensor descriptor
   MIOPEN_THROW_IF_ERROR(miopenSet4dTensorDescriptor(
       x_desc_, data_type_,
@@ -184,7 +182,7 @@ void HipdnnCustomOp::BuildAndCompileMIOpen() {
       static_cast<int>(x_shape_[1]),
       static_cast<int>(x_shape_[2]),
       static_cast<int>(x_shape_[3])));
-  
+
   // Set weight tensor descriptor
   MIOPEN_THROW_IF_ERROR(miopenSet4dTensorDescriptor(
       w_desc_, data_type_,
@@ -192,7 +190,7 @@ void HipdnnCustomOp::BuildAndCompileMIOpen() {
       static_cast<int>(w_shape_[1]),
       static_cast<int>(w_shape_[2]),
       static_cast<int>(w_shape_[3])));
-  
+
   // Set output tensor descriptor
   MIOPEN_THROW_IF_ERROR(miopenSet4dTensorDescriptor(
       y_desc_, data_type_,
@@ -200,7 +198,7 @@ void HipdnnCustomOp::BuildAndCompileMIOpen() {
       static_cast<int>(y_shape_[1]),
       static_cast<int>(y_shape_[2]),
       static_cast<int>(y_shape_[3])));
-  
+
   // Set convolution descriptor
   MIOPEN_THROW_IF_ERROR(miopenInitConvolutionDescriptor(
       conv_desc_,
@@ -211,7 +209,7 @@ void HipdnnCustomOp::BuildAndCompileMIOpen() {
       static_cast<int>(strides[1]),
       static_cast<int>(dilations[0]),
       static_cast<int>(dilations[1])));
-  
+
   // Get workspace size - NOTE: argument order is w_desc, x_desc (not x_desc, w_desc)
   MIOPEN_THROW_IF_ERROR(miopenConvolutionForwardGetWorkSpaceSize(
       miopen_handle_,
@@ -220,9 +218,9 @@ void HipdnnCustomOp::BuildAndCompileMIOpen() {
       conv_desc_,
       y_desc_,
       &workspace_size_));
-  
+
   MY_LOG(1) << "Workspace size: " << workspace_size_ << " bytes";
-  
+
   // Allocate workspace
   if (workspace_size_ > 0) {
     hipError_t hip_err = hipMalloc(&workspace_, workspace_size_);
@@ -230,47 +228,47 @@ void HipdnnCustomOp::BuildAndCompileMIOpen() {
       throw std::runtime_error("Failed to allocate workspace");
     }
   }
-  
+
   // Allocate temporary buffers for algorithm finding
   void* temp_x = nullptr;
   void* temp_w = nullptr;
   void* temp_y = nullptr;
-  
+
   // Calculate sizes based on actual data type
   size_t element_size = (data_type_ == miopenHalf) ? sizeof(uint16_t) : sizeof(float);
   size_t x_size = x_shape_[0] * x_shape_[1] * x_shape_[2] * x_shape_[3] * element_size;
   size_t w_size = w_shape_[0] * w_shape_[1] * w_shape_[2] * w_shape_[3] * element_size;
   size_t y_size = y_shape_[0] * y_shape_[1] * y_shape_[2] * y_shape_[3] * element_size;
-  
-  MY_LOG(1) << "Allocating temp buffers: x=" << x_size << " bytes, w=" << w_size 
+
+  MY_LOG(1) << "Allocating temp buffers: x=" << x_size << " bytes, w=" << w_size
             << " bytes, y=" << y_size << " bytes (data_type=" << data_type_ << ")";
-  
+
   hipError_t hip_err;
   hip_err = hipMalloc(&temp_x, x_size);
   if (hip_err != hipSuccess) {
     throw std::runtime_error("Failed to allocate temp input buffer");
   }
-  
+
   hip_err = hipMalloc(&temp_w, w_size);
   if (hip_err != hipSuccess) {
     hipFree(temp_x);
     throw std::runtime_error("Failed to allocate temp weight buffer");
   }
-  
+
   hip_err = hipMalloc(&temp_y, y_size);
   if (hip_err != hipSuccess) {
     hipFree(temp_x);
     hipFree(temp_w);
     throw std::runtime_error("Failed to allocate temp output buffer");
   }
-  
+
   // Find the best algorithm using miopenFindConvolutionForwardAlgorithm
   // This is required by MIOpen - it registers the invoker for later use
   MY_LOG(1) << "Finding best convolution algorithm...";
   const int requestedAlgoCount = 4;
   int returnedAlgoCount = 0;
   miopenConvAlgoPerf_t perfResults[4];
-  
+
   miopenStatus_t find_status = miopenFindConvolutionForwardAlgorithm(
       miopen_handle_,
       x_desc_,
@@ -286,28 +284,28 @@ void HipdnnCustomOp::BuildAndCompileMIOpen() {
       workspace_,
       workspace_size_,
       false);  // exhaustiveSearch = false for faster compilation
-  
+
   // Free temporary buffers
   hipFree(temp_x);
   hipFree(temp_w);
   hipFree(temp_y);
-  
+
   // Check result
   MIOPEN_THROW_IF_ERROR(find_status);
-  
+
   if (returnedAlgoCount == 0) {
     throw std::runtime_error("No convolution algorithm found");
   }
-  
+
   // Use the best algorithm found (first result)
   conv_algo_ = perfResults[0].fwd_algo;
-  MY_LOG(1) << "Selected algorithm: " << conv_algo_ 
+  MY_LOG(1) << "Selected algorithm: " << conv_algo_
             << ", time: " << perfResults[0].time << " ms";
-  
+
   // If bias is present, create bias descriptor
   if (has_bias_) {
     MIOPEN_THROW_IF_ERROR(miopenCreateTensorDescriptor(&b_desc_));
-    
+
     // Get bias shape from proto
     if (hipdnn_proto_.input_shapes_size() >= 3) {
       b_shape_ = ProtoShapeToVector(hipdnn_proto_.input_shapes(2));
@@ -315,27 +313,27 @@ void HipdnnCustomOp::BuildAndCompileMIOpen() {
       // Fallback: use output channels as 1D
       b_shape_ = {y_shape_[1]};
     }
-    
+
     // Bias is 1D [C], set as [1, C, 1, 1] with explicit strides for broadcasting
     // CRITICAL: Use miopenSetTensorDescriptor with strides, not miopenSet4dTensorDescriptor
     int b_dims[4] = {1, static_cast<int>(b_shape_[0]), 1, 1};
     int b_strides[4] = {static_cast<int>(b_shape_[0]), 1, 1, 1};
-    
+
     MIOPEN_THROW_IF_ERROR(miopenSetTensorDescriptor(
         b_desc_, data_type_, 4, b_dims, b_strides));
-    
-    MY_LOG(1) << "Bias descriptor created: dims=[1," << b_shape_[0] 
+
+    MY_LOG(1) << "Bias descriptor created: dims=[1," << b_shape_[0]
               << ",1,1], strides=[" << b_shape_[0] << ",1,1,1]";
   }
-  
+
   // Setup output shapes for Compute
   output_shapes_.clear();
   output_shapes_.push_back(y_shape_);
-  
+
   // Setup num_inputs and num_outputs
   num_inputs_ = has_bias_ ? 3 : 2;  // input + weight + optional bias
   num_outputs_ = 1;
-  
+
   MY_LOG(1) << "=== MIOpen kernel build complete ===";
 }
 
@@ -363,52 +361,52 @@ void HipdnnCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const
   Ort::KernelContext ctx(context);
   auto num_inputs = ctx.GetInputCount();
   auto num_outputs = ctx.GetOutputCount();
-  
+
   MY_LOG(1) << "=== HipdnnCustomOp::Compute START (MIOpen) ===";
   MY_LOG(1) << "Total inputs: " << num_inputs << ", outputs: " << num_outputs;
-  
+
   // Set device
   hipError_t hip_err = hipSetDevice(device_id_);
   if (hip_err != hipSuccess) {
     LOG(ERROR) << "Failed to set HIP device: " << device_id_;
     return;
   }
-  
+
   // Calculate sizes
   size_t element_size = (data_type_ == miopenHalf) ? sizeof(uint16_t) : sizeof(float);
   size_t x_size = x_shape_[0] * x_shape_[1] * x_shape_[2] * x_shape_[3] * element_size;
   size_t w_size = w_shape_[0] * w_shape_[1] * w_shape_[2] * w_shape_[3] * element_size;
   size_t y_size = y_shape_[0] * y_shape_[1] * y_shape_[2] * y_shape_[3] * element_size;
   size_t b_size = has_bias_ ? b_shape_[0] * element_size : 0;
-  
+
   // Get CPU pointers from ONNX Runtime
   Ort::ConstValue x_tensor = ctx.GetInput(0);
   Ort::ConstValue w_tensor = ctx.GetInput(1);
   const void* x_cpu = x_tensor.GetTensorRawData();
   const void* w_cpu = w_tensor.GetTensorRawData();
-  
+
   MY_LOG(1) << "Input X (CPU): " << shape_to_string(x_shape_);
   MY_LOG(1) << "Weight W (CPU): " << shape_to_string(w_shape_);
-  
+
   // Allocate GPU memory
   void* x_gpu = nullptr;
   void* w_gpu = nullptr;
   void* y_gpu = nullptr;
   void* b_gpu = nullptr;
-  
+
   hip_err = hipMalloc(&x_gpu, x_size);
   if (hip_err != hipSuccess) {
     LOG(ERROR) << "Failed to allocate GPU memory for input: " << hip_err;
     return;
   }
-  
+
   hip_err = hipMalloc(&w_gpu, w_size);
   if (hip_err != hipSuccess) {
     LOG(ERROR) << "Failed to allocate GPU memory for weight: " << hip_err;
     hipFree(x_gpu);
     return;
   }
-  
+
   hip_err = hipMalloc(&y_gpu, y_size);
   if (hip_err != hipSuccess) {
     LOG(ERROR) << "Failed to allocate GPU memory for output: " << hip_err;
@@ -416,9 +414,9 @@ void HipdnnCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const
     hipFree(w_gpu);
     return;
   }
-  
+
   MY_LOG(1) << "Allocated GPU memory: X=" << x_size << "B, W=" << w_size << "B, Y=" << y_size << "B";
-  
+
   // Copy input and weight from CPU to GPU
   hip_err = hipMemcpy(x_gpu, x_cpu, x_size, hipMemcpyHostToDevice);
   if (hip_err != hipSuccess) {
@@ -426,20 +424,20 @@ void HipdnnCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const
     hipFree(x_gpu); hipFree(w_gpu); hipFree(y_gpu);
     return;
   }
-  
+
   hip_err = hipMemcpy(w_gpu, w_cpu, w_size, hipMemcpyHostToDevice);
   if (hip_err != hipSuccess) {
     LOG(ERROR) << "Failed to copy weight to GPU: " << hip_err;
     hipFree(x_gpu); hipFree(w_gpu); hipFree(y_gpu);
     return;
   }
-  
+
   MY_LOG(1) << "Copied input and weight to GPU";
-  
+
   // Execute convolution on GPU
   float alpha = 1.0f;
   float beta = 0.0f;
-  
+
   miopenStatus_t conv_status = miopenConvolutionForward(
       miopen_handle_,
       &alpha,
@@ -450,20 +448,20 @@ void HipdnnCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const
       &beta,
       y_desc_, y_gpu,  // GPU memory
       workspace_, workspace_size_);
-  
+
   if (conv_status != miopenStatusSuccess) {
     LOG(ERROR) << "miopenConvolutionForward failed: " << conv_status;
     hipFree(x_gpu); hipFree(w_gpu); hipFree(y_gpu);
     return;
   }
-  
+
   MY_LOG(1) << "Convolution forward completed on GPU";
-  
+
   // Add bias if present (index 2)
   if (has_bias_ && num_inputs >= 3) {
     Ort::ConstValue b_tensor = ctx.GetInput(2);
     const void* b_cpu = b_tensor.GetTensorRawData();
-    
+
     // Allocate and copy bias to GPU
     hip_err = hipMalloc(&b_gpu, b_size);
     if (hip_err != hipSuccess) {
@@ -471,21 +469,21 @@ void HipdnnCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const
       hipFree(x_gpu); hipFree(w_gpu); hipFree(y_gpu);
       return;
     }
-    
+
     hip_err = hipMemcpy(b_gpu, b_cpu, b_size, hipMemcpyHostToDevice);
     if (hip_err != hipSuccess) {
       LOG(ERROR) << "Failed to copy bias to GPU: " << hip_err;
       hipFree(x_gpu); hipFree(w_gpu); hipFree(y_gpu); hipFree(b_gpu);
       return;
     }
-    
+
     MY_LOG(1) << "Adding bias on GPU";
-    
+
     // y = 1*y + 1*bias + 0*y = y + bias
     float alpha1 = 1.0f;
     float alpha2 = 1.0f;
     float beta_op = 0.0f;
-    
+
     miopenStatus_t bias_status = miopenOpTensor(
         miopen_handle_,
         miopenTensorOpAdd,
@@ -495,35 +493,35 @@ void HipdnnCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const
         b_desc_, b_gpu,  // GPU memory
         &beta_op,
         y_desc_, y_gpu); // GPU memory
-    
+
     if (bias_status != miopenStatusSuccess) {
       LOG(ERROR) << "miopenOpTensor failed: " << bias_status;
       hipFree(x_gpu); hipFree(w_gpu); hipFree(y_gpu); hipFree(b_gpu);
       return;
     }
-    
+
     hipFree(b_gpu);
     MY_LOG(1) << "Bias addition completed on GPU";
   }
-  
+
   // Copy result from GPU to CPU
   Ort::UnownedValue y_tensor = ctx.GetOutput(0, output_shapes_[0]);
   void* y_cpu = y_tensor.GetTensorMutableRawData();
-  
+
   hip_err = hipMemcpy(y_cpu, y_gpu, y_size, hipMemcpyDeviceToHost);
   if (hip_err != hipSuccess) {
     LOG(ERROR) << "Failed to copy output to CPU: " << hip_err;
     hipFree(x_gpu); hipFree(w_gpu); hipFree(y_gpu);
     return;
   }
-  
+
   MY_LOG(1) << "Output copied to CPU (" << y_size << " bytes)";
-  
+
   // Free GPU memory
   hipFree(x_gpu);
   hipFree(w_gpu);
   hipFree(y_gpu);
-  
+
   MY_LOG(1) << "=== HipdnnCustomOp::Compute END ===";
 }
 

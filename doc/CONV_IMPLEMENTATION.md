@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # Conv Node Support Implementation
 
 This document describes the implementation of Conv (Convolution) node support in the onnx-hipdnn-ep project, following the reference implementation from [hipDNNEP](https://github.com/MaheshRavishankar/hipDNNEP).
@@ -19,7 +23,7 @@ message HipdnnParamProto {
   // HIP DNN specific parameters
   string device_id = 1;
   string kernel_type = 2;
-  
+
   // Conv operation parameters
   string op_type = 3;
   repeated int64 pads = 4;
@@ -83,12 +87,12 @@ Updated Compute method to handle Conv operations:
 if (hipdnn_proto_.op_type() == "Conv") {
   MY_LOG(1) << "Conv operation detected";
   // Log pads, strides, dilations, group
-  
+
   // TODO: Implement actual hipDNN Conv execution
   // 1. Create hipDNN graph with Conv operation using captured parameters
   // 2. Build and compile the graph
   // 3. Execute with variant pack mapping tensors to device memory
-  
+
   // Placeholder implementation
   auto in_base = ctx.GetInput(idx).GetTensorData<float>();
   auto out_base = output_tensor.GetTensorMutableData<float>();
@@ -114,7 +118,7 @@ OrtStatus* AddConvNode(
   std::vector<int64_t> pads = GetIntsAttrOrDefault(node, "pads", {0, 0, 0, 0});
   std::vector<int64_t> strides = GetIntsAttrOrDefault(node, "strides", {1, 1});
   std::vector<int64_t> dilations = GetIntsAttrOrDefault(node, "dilations", {1, 1});
-  
+
   // Create convolution attributes
   ConvFpropAttributes conv_attrs;
   conv_attrs.set_padding({pads[0], pads[1]})
@@ -122,7 +126,7 @@ OrtStatus* AddConvNode(
       .set_dilation({dilations[0], dilations[1]})
       .set_convolution_mode(ConvolutionMode::CROSS_CORRELATION)
       .set_compute_data_type(compute_dtype.value());
-  
+
   // Add convolution to graph
   output_attr = graph.conv_fprop(x_attr, w_attr, conv_attrs);
 }
@@ -151,19 +155,19 @@ The current implementation provides the infrastructure for Conv support. To comp
    if (hipdnn_proto_.op_type() == "Conv") {
      // Create hipDNN graph
      auto graph = std::make_unique<hipdnn_frontend::graph::Graph>();
-     
+
      // Create tensor attributes for inputs
      auto x_attr = CreateTensorAttr(input_tensor_0);
      auto w_attr = CreateTensorAttr(input_tensor_1);
-     
+
      // Create Conv operation
      ConvFpropAttributes conv_attrs;
      conv_attrs.set_padding({pads[0], pads[1]})
                .set_stride({strides[0], strides[1]})
                .set_dilation({dilations[0], dilations[1]});
-     
+
      auto y_attr = graph->conv_fprop(x_attr, w_attr, conv_attrs);
-     
+
      // Build, compile, and execute
      graph->validate();
      graph->build_operation_graph(handle);

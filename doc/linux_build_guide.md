@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # onnx-hipdnn-ep Linux Build Guide
 
 This document provides complete step-by-step instructions for building and testing onnx-hipdnn-ep on a Linux test server with AMD ROCm GPU.
@@ -672,7 +676,7 @@ $env:PATH = "C:\Program Files\LLVM\bin;$env:THEROCK_PATH\bin;$env:PATH"
 
 ---
 
-**Last Updated**: 2026-01-11  
-**Build Environment**: Linux with AMD ROCm GPU, Windows 11 with AMD GPU  
-**Tested On**: AMD Radeon RX 9070 XT (gfx1201), AMD Radeon (gfx1100)  
+**Last Updated**: 2026-01-11
+**Build Environment**: Linux with AMD ROCm GPU, Windows 11 with AMD GPU
+**Tested On**: AMD Radeon RX 9070 XT (gfx1201), AMD Radeon (gfx1100)
 **Build Tools**: CMake 3.28.3+/4.2.1, Ninja 1.11.1+/1.13.2, Clang 21.1.8

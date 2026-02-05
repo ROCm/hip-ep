@@ -23,15 +23,15 @@ message ConvAttributes {
 message HipdnnParamProto {
   string op_type = 1;
   string version = 2;
-  
+
   // Shapes
   repeated TensorShape input_shapes = 3;
   repeated TensorShape output_shapes = 4;
-  
+
   // Data types (ONNX element types)
   repeated int32 input_data_types = 5;
   repeated int32 output_data_types = 6;
-  
+
   // Operation-specific attributes (extensible via oneof)
   oneof node_attrs {
     ConvAttributes conv_attrs = 7;

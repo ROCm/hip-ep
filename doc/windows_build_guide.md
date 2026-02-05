@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # onnx-hipdnn-ep Windows Build Guide
 
 This document provides complete step-by-step instructions for building and testing onnx-hipdnn-ep on Windows with AMD ROCm GPU.
@@ -427,8 +431,8 @@ Run this PowerShell command to find all files with hardcoded build paths:
 
 ```powershell
 # Find all cmake files with hardcoded B:/build paths
-Get-ChildItem -Path "$env:THEROCK_DIST\lib\cmake" -Recurse -Filter "*.cmake" | 
-    Select-String -Pattern "B:/build" | 
+Get-ChildItem -Path "$env:THEROCK_DIST\lib\cmake" -Recurse -Filter "*.cmake" |
+    Select-String -Pattern "B:/build" |
     Select-Object Path, LineNumber, Line
 ```
 
@@ -522,7 +526,7 @@ if (-not (Test-Path $cmakeDir)) {
 Write-Host "Scanning for hardcoded paths in: $cmakeDir" -ForegroundColor Yellow
 
 # Find all cmake files with B:/build paths
-$files = Get-ChildItem -Path $cmakeDir -Recurse -Filter "*.cmake" | 
+$files = Get-ChildItem -Path $cmakeDir -Recurse -Filter "*.cmake" |
     Where-Object { (Get-Content $_.FullName -Raw) -match "B:/build" }
 
 if ($files.Count -eq 0) {
@@ -535,31 +539,31 @@ $files | ForEach-Object { Write-Host "  - $($_.FullName)" }
 
 foreach ($file in $files) {
     Write-Host "`nProcessing: $($file.Name)" -ForegroundColor Cyan
-    
+
     # Read file content
     $content = Get-Content $file.FullName -Raw
-    
+
     # Pattern: Remove B:/build paths from INTERFACE_INCLUDE_DIRECTORIES
     # Matches: "B:/build/...;${_IMPORT_PREFIX}..." -> "${_IMPORT_PREFIX}..."
     $pattern = '"B:/build[^"]*;(\$\{_IMPORT_PREFIX\}/include)"'
     $replacement = '"$1"'
-    
+
     $newContent = $content -replace $pattern, $replacement
-    
+
     # Also handle case where B:/build path is the only remaining path after semicolon
     $pattern2 = ';B:/build[^";]*'
     $newContent = $newContent -replace $pattern2, ''
-    
+
     # Handle case where B:/build is at the start followed by semicolon
     $pattern3 = '"B:/build[^";]*;'
     $newContent = $newContent -replace $pattern3, '"'
-    
+
     if ($content -ne $newContent) {
         # Create backup
         $backupPath = "$($file.FullName).bak"
         Copy-Item $file.FullName $backupPath -Force
         Write-Host "  Created backup: $backupPath" -ForegroundColor Gray
-        
+
         # Write fixed content
         Set-Content $file.FullName $newContent -NoNewline
         Write-Host "  Fixed: $($file.Name)" -ForegroundColor Green
@@ -838,7 +842,7 @@ CMake Error in level-1-pass-hipdnn/CMakeLists.txt:
    ```cmake
    # Before:
    INTERFACE_INCLUDE_DIRECTORIES "B:/build/third-party/flatbuffers/dist/include;${_IMPORT_PREFIX}/include"
-   
+
    # After:
    INTERFACE_INCLUDE_DIRECTORIES "${_IMPORT_PREFIX}/include"
    ```
