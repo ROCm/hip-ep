@@ -383,8 +383,8 @@ Graph& model_main_graph(Model& model) {
   return MORPHIZEN_ORT_API(model_main_graph)(model);
 }
 
-const std::string& model_get_meta_data(const Model& model,
-                                       const std::string& key) {
+std::string model_get_meta_data(const Model& model, const std::string& key) {
+  // Return by value to avoid dangling reference from temporary DllSafe<string>
   return *MORPHIZEN_ORT_API(model_get_meta_data)(model, key);
 }
 

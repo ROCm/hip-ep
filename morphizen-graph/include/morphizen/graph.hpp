@@ -298,10 +298,10 @@ MORPHIZEN_DLL_SPEC Graph& model_main_graph(Model& model);
  *
  * @param model The model to query
  * @param key Metadata key
- * @return Metadata value
+ * @return Metadata value (returned by value to avoid dangling reference)
  */
-MORPHIZEN_DLL_SPEC const std::string&
-model_get_meta_data(const Model& model, const std::string& key);
+MORPHIZEN_DLL_SPEC std::string model_get_meta_data(const Model& model,
+                                                   const std::string& key);
 
 /** @brief Check if model has metadata
  *

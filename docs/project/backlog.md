@@ -55,7 +55,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 | [#054](issues/054-eliminate-dangerous-unowned-buffer-factory-method.md) | Eliminate Unowned Buffer | L | 15m | TarFile Cleanup | - | tar_file.hpp/.cpp/test_tar_file.cpp |
 | [#055](issues/055-remove-non-const-entries-overload.md) | Remove Non-Const entries | L | 15m | TarFile Cleanup | - | tar_file.hpp |
 | [#056](issues/056-add-comprehensive-documentation-to-tarfile.md) | Add TarFile Docs | M | 2h | TarFile Docs | - | tar_file.hpp |
-| [#057](issues/057-mlir-backend-metadata-api-not-implemented.md) | MLIR Metadata API | M | 1h | MLIR Testing | - | mlir-model.cpp |
 | [#058](issues/058-mlir-test-model-node-names-mismatch.md) | MLIR Node Names Mismatch | M | 1h | MLIR Testing | - | test_model.cpp/mlir-model.cpp |
 
 **Legend:**
@@ -72,11 +71,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 See **[completed-issues.md](completed-issues.md)** for full archive of all completed issues.
 
 **Recent (last 5):**
+- #057 (PR #127) - MLIR Metadata API - Fix dangling reference in model_get_meta_data
 - #047 (PR #126) - Extract Entry Deduplication Logic
 - #044 (PR #124) - Use Erase-Remove Idiom in TarFile
 - #028 (PR #110) - MLIR Backend Test Model Support - Enabled 23 unit tests with MLIR format model
 - #027 (PR #118) - Eliminate C-Style APIs from morphizen-graph
-- #007 (PR #108) - Remove Target Copying - Two-Path Architecture
 
 ---
 
