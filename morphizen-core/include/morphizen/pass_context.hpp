@@ -305,15 +305,6 @@ public:
    * @return A unique pointer to the newly created PassContext object.
    */
   MORPHIZEN_DLL_SPEC static std::unique_ptr<PassContext> create();
-
-  /**
-   * @brief Reads an xclbin file from the specified path.
-   *
-   * @param path The path to the xclbin file.
-   * @return A span of const char representing the contents of the xclbin file.
-   */
-  virtual std::optional<std::vector<char>>
-  read_xclbin(const std::filesystem::path& path) const = 0;
   /**
    * @brief collect time for profiling.
    */

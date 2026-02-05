@@ -332,8 +332,6 @@ public:
 
   virtual std::shared_ptr<void>
   get_context_resource(const std::string& name) const override final;
-  virtual std::optional<std::vector<char>>
-  read_xclbin(const std::filesystem::path& path) const override final;
   virtual std::unique_ptr<PassContextTimer>
   measure(const std::string& label) override final;
   virtual void on_custom_op_create_end() override final;
