@@ -14,122 +14,115 @@ allowed-tools: [Bash, Read, Grep, Glob, Edit, Write, AskUserQuestion]
 
 Autonomously resolve merge conflicts and CI failures until PR merges, then clean up workspace.
 
+---
+
+## Phase 0: PR Finalization
+
+**Run BEFORE monitoring** - finalizes PR from DRAFT to READY with complete documentation.
+
+1. **Read issue file** - understand context
+
+2. **Craft PR title** - `gh pr edit {PR_NUM} --title "Issue #{N}: {type}: {desc}"`
+
+3. **Write PR description** - create summary, problem, solution, changes
+
+4. **Update completed-issues.md:**
+   - Add entry to top of current month's table
+   - Format: `| #{NUM} | {AUTHOR} | #{PR} | {COMMIT} | {DATE} | {TITLE} |`
+
+5. **Update backlog.md:**
+   - Add to "Recent (last 5)" compact list
+   - Remove oldest if >5
+   - Delete from active backlog table
+   - Remove from "Quick dependencies" section
+
+6. **Delete files:**
+   - `git rm docs/project/issues/{NUM}-*.md`
+   - `git rm docs/project/plans/{NUM}-*.md` (if exists)
+
+7. **Commit and push:**
+   - `git add docs/project/backlog.md docs/project/completed-issues.md`
+   - `git commit -m "docs: complete issue #{NUM}"`
+   - `git push fork {BRANCH}`
+
+8. **Mark ready:** `gh pr ready {PR_NUM}`
+
+**Proceed to Main Loop.**
+
+---
+
 ## Main Loop
 
-1. Launch monitor-pr.py
-2. If error → stop
-3. Parse status → execute phase → repeat until merged
+**Script runs autonomously, returns status when intervention needed:**
+
+```bash
+python .claude/skills/resolve-ci/monitor-pr.py --attempt 1
+```
+
+**Timeout:** 10 min. Retry up to 6 attempts (1 hour). After attempt 6: inform user "CI still running, check GitHub".
+
+**Status codes:**
+
+**STATUS:FORK_CONFLICT** - conflict with fork/branch, resolve and re-run
+
+**STATUS:BASE_CONFLICT** - conflict with origin/main, resolve and re-run
+
+**STATUS:NEEDS_FIX_CI** - complex CI failure, fix and re-run
+
+**STATUS:AUTO_MERGE_FAILED** - inform user "Check PR settings"
+
+**STATUS:CLEANUP_COMPLETE** - done!
 
 ---
 
-## Phase 2: Conflict Resolution (Linear History)
+## Conflict Resolution
 
-When script returns `STATUS:NEEDS_FIX_CONFLICTS`:
+When `STATUS:FORK_CONFLICT` or `STATUS:BASE_CONFLICT`:
 
-**Rebase onto latest main:**
-```bash
-git fetch origin main
-git rebase origin/main  # Linear history - replays commits on top of main
-```
+1. **List conflicts:**
+   ```bash
+   git diff --name-only --diff-filter=U
+   ```
 
-**Analyze conflicts:**
-```bash
-git diff --name-only --diff-filter=U
-Read <conflicting_file>
-```
+2. **Read conflicting files** - use Read tool
 
-**Resolve intelligently:**
-- Simple patterns (whitespace, imports) → auto-merge
-- Complex logic conflicts → analyze context and choose best resolution
-- Too complex → mark as stuck, ask user
+3. **Resolve conflicts:**
+   - Simple (whitespace/imports) → auto-merge with Edit tool
+   - Complex → analyze and resolve intelligently
+   - Too complex → AskUserQuestion
 
-**Apply and continue rebase:**
-```bash
-Edit <conflicting_file>  # Remove conflict markers
-git add <conflicting_file>
-git rebase --continue  # Continue rebase (may have more conflicts if multiple commits)
-```
-
-**Push (force required since history rewritten):**
-```bash
-git push fork "$CURRENT_BRANCH" --force-with-lease  # Safer than --force
-```
-
-Then restart monitoring script.
+4. **Complete rebase:**
+   ```bash
+   git add <conflicting_file>
+   git rebase --continue
+   git push fork "{BRANCH_NAME}" --force-with-lease
+   ```
 
 ---
 
-## Phase 3: CI Failure Resolution
+## CI Failure Resolution
 
-When script returns `STATUS:NEEDS_FIX_CI` (complex failures only - pre-commit handled in bash):
+When `STATUS:NEEDS_FIX_CI`:
 
-**Fetch logs:**
-```bash
-RUN_ID=$(gh run list --branch "$CURRENT_BRANCH" --limit 1 --json databaseId --jq '.[0].databaseId')
-gh run view $RUN_ID --log-failed > /tmp/ci_logs.txt
-Read /tmp/ci_logs.txt
-```
+1. **Get CI logs:**
+   ```bash
+   RUN_ID=$(gh run list --branch "{BRANCH_NAME}" --limit 1 --json databaseId | python -c "import sys, json; print(json.load(sys.stdin)[0]['databaseId'])")
+   gh run view $RUN_ID --log-failed > /tmp/ci_logs.txt
+   ```
 
-**Categorize:**
-- Build failures → extract error location, read code, fix syntax/types/includes
-- Test failures → read test + implementation, fix logic bugs
-- Other → analyze and attempt fix
+2. **Read logs** - use Read tool on /tmp/ci_logs.txt
 
-**Fix build errors:**
-```bash
-Read <file_with_error>
-Edit <file>  # Fix the issue
-cmake --build ../../build/$(basename $PWD) --config Debug --parallel  # Verify
-git add <file>
-git commit -m "fix: resolve build error in <file>"
-git push fork "$CURRENT_BRANCH"
-```
+3. **Categorize and fix:**
+   - Build errors → fix syntax/types/includes
+   - Test failures → fix logic bugs
+   - Other → analyze and resolve
 
-**Fix test failures:**
-```bash
-Read test_file.cpp
-Read implementation_file.cpp
-Edit <file>  # Fix logic bug
-../../build/$(basename $PWD)/bin/morphizen-unit-tests.exe --gtest_filter="<test_name>"  # Verify
-git add <file>
-git commit -m "fix: resolve test failure in <test_name>"
-git push fork "$CURRENT_BRANCH"
-```
+4. **Verify fix (if build error):**
+   ```bash
+   cmake --build ../../build/$(basename $PWD) --config Debug --parallel
+   ```
 
-Then restart monitoring script.
-
----
-
-## Phase 4: Stuck Detection
-
-**Track attempts:**
-- Same error 3 times → stuck
-- 7 total attempts → stuck
-- Critical errors (git push failure, broken CMake) → stuck
-
-**Ask user when stuck:**
-```
-❌ Stuck on error (tried 3 approaches):
-[error details]
-
-What should I do?
-- retry: Try current approach again
-- different: Try different approach (you describe)
-- skip: Continue monitoring, ignore this
-- manual: Exit, you'll fix manually
-```
-
----
-
-## Phase 5: Cleanup After Merge
-
-When script returns `STATUS:MERGED`:
-
-```bash
-git checkout main
-git pull origin main
-git branch -d "$CURRENT_BRANCH"
-git push fork --delete "$CURRENT_BRANCH"
-```
-
-Done!
+5. **Commit and push:**
+   ```bash
+   git add <file> && git commit -m "fix: ..." && git push fork "{BRANCH_NAME}"
+   ```

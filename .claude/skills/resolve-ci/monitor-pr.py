@@ -5,9 +5,11 @@
 #
 
 """
-PR monitoring script for /resolve-ci skill
-Monitors PR status every 30 seconds and auto-fixes common issues
-Only returns to skill when complex issues need intelligent analysis
+Complete PR lifecycle orchestrator for /resolve-ci skill
+1. Updates branch (sync fork, rebase main) - detects conflicts
+2. Monitors CI status every 30 seconds - auto-fixes pre-commit
+3. Cleans up after merge - switches to main, deletes branches
+Returns to AI only when intelligent intervention needed
 """
 
 import subprocess
@@ -15,10 +17,18 @@ import json
 import time
 import sys
 import os
+import argparse
 
 # Fix Windows console encoding for emojis
 if os.name == "nt":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+# Parse command-line arguments
+parser = argparse.ArgumentParser(description="Monitor PR for /resolve-ci skill")
+parser.add_argument(
+    "--attempt", type=int, default=1, help="Retry attempt number (default: 1)"
+)
+args = parser.parse_args()
 
 
 def run_command(cmd, check=True):
@@ -39,6 +49,106 @@ def get_current_branch():
     return run_command("git branch --show-current")
 
 
+def update_branch(branch):
+    """Update branch: sync fork and rebase main. Returns (success, status)."""
+    print("🔄 Phase 1: Updating branch...")
+    print("")
+
+    # Step 1: Sync with upstream fork branch
+    print("📥 Step 1: Syncing with fork branch...")
+    run_command(f'git fetch fork "{branch}"')
+
+    result = subprocess.run(
+        f'git rebase "fork/{branch}"',
+        shell=True,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        print("⚠️  Conflicts with upstream fork branch detected")
+        print("STATUS:FORK_CONFLICT")
+        return False, "FORK_CONFLICT"
+
+    print("✅ Synced with fork")
+    print("")
+
+    # Step 2: Rebase onto origin/main
+    print("📥 Step 2: Rebasing onto origin/main...")
+    run_command("git fetch origin main")
+
+    result = subprocess.run(
+        "git rebase origin/main",
+        shell=True,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        print("⚠️  Conflicts with base branch detected")
+        print("STATUS:BASE_CONFLICT")
+        return False, "BASE_CONFLICT"
+
+    print("✅ Rebased onto main")
+    print("")
+
+    # Push
+    print("📤 Pushing updated branch...")
+    result = subprocess.run(
+        f'git push fork "{branch}" --force-with-lease',
+        shell=True,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        print("❌ Failed to push")
+        print(result.stderr)
+        return False, "PUSH_FAILED"
+
+    print("✅ Branch updated successfully")
+    print("")
+    return True, "UPDATED"
+
+
+def cleanup_after_merge(branch):
+    """Cleanup: switch to main, pull, delete branches."""
+    print("")
+    print("🧹 Phase 3: Cleaning up after merge...")
+    print("")
+
+    # Don't delete main
+    if branch == "main":
+        print("ℹ️  Already on main branch - nothing to clean up")
+        return
+
+    # Switch to main
+    print("📥 Switching to main branch...")
+    run_command("git checkout main")
+    print("✅ Switched to main")
+    print("")
+
+    # Pull latest
+    print("📥 Pulling latest from origin/main...")
+    run_command("git pull origin main")
+    print("✅ Main branch updated")
+    print("")
+
+    # Delete local branch
+    print(f"🗑️  Deleting local branch: {branch}...")
+    run_command(f'git branch -d "{branch}"')
+    print("✅ Local branch deleted")
+    print("")
+
+    # Delete remote branch
+    print(f"🗑️  Deleting remote branch: {branch}...")
+    run_command(f'git push fork --delete "{branch}"')
+    print("✅ Remote branch deleted")
+    print("")
+
+    print("🎉 Cleanup complete!")
+
+
 def get_pr_info(branch):
     """Get PR info for current branch."""
     output = run_command(
@@ -56,7 +166,7 @@ def get_pr_info(branch):
 def get_pr_status(pr_number):
     """Get detailed PR status."""
     output = run_command(
-        f"gh pr view {pr_number} --json mergeable,statusCheckRollup,autoMergeRequest,mergedAt",
+        f"gh pr view {pr_number} --json statusCheckRollup,autoMergeRequest",
         check=False,
     )
     if not output:
@@ -65,6 +175,16 @@ def get_pr_status(pr_number):
         return json.loads(output)
     except json.JSONDecodeError:
         return None
+
+
+def check_if_merged(branch):
+    """Check if branch is merged using git."""
+    # Fetch latest
+    run_command("git fetch origin main", check=False)
+
+    # Check if our commits are in origin/main
+    result = run_command(f"git log origin/main..{branch}", check=False)
+    return result == ""  # Empty means all commits are in main
 
 
 def run_precommit_fix(branch):
@@ -111,7 +231,7 @@ def enable_auto_merge(pr_number):
 
     if result.returncode == 0:
         print("✅ Auto-merge enabled successfully")
-        print("   Continuing to monitor for cascade conflicts...")
+        print("   Continuing to monitor for merge...")
         return True
     else:
         print("❌ Failed to enable auto-merge")
@@ -149,33 +269,40 @@ def main():
 
     print(f"✅ Found PR #{pr_number} (OPEN, ready for review)")
     print("")
-    print("🔍 Starting monitoring loop...")
+
+    # Phase 1: Update branch (upfront, before monitoring)
+    success, status = update_branch(current_branch)
+    if not success:
+        # Conflict detected - return to AI for resolution
+        sys.exit(0)
+
+    # Phase 2: Monitor CI until merged
+    if args.attempt > 1:
+        print(
+            f"🔍 Phase 2: Starting monitoring loop (Attempt {args.attempt}/6, 10-minute timeout)..."
+        )
+    else:
+        print("🔍 Phase 2: Starting monitoring loop (10-minute timeout)...")
     print("")
 
     cycle_count = 0
 
     while True:
         cycle_count += 1
-        print(f"[Cycle {cycle_count}] Checking PR status...")
+        print(f"[Cycle {cycle_count}] Checking status...")
 
-        # Get PR status
+        # Check if merged using git
+        if check_if_merged(current_branch):
+            print(f"✅ PR #{pr_number} merged successfully!")
+            cleanup_after_merge(current_branch)
+            print("STATUS:CLEANUP_COMPLETE")
+            sys.exit(0)
+
+        # Get PR CI status from GitHub
         pr_data = get_pr_status(pr_number)
         if not pr_data:
             print("❌ Failed to fetch PR data")
             sys.exit(1)
-
-        # Check if merged
-        if pr_data.get("mergedAt"):
-            print(f"✅ PR #{pr_number} merged successfully!")
-            print("STATUS:MERGED")
-            sys.exit(0)
-
-        # Check mergeable status
-        mergeable = pr_data.get("mergeable")
-        if mergeable == "CONFLICTING":
-            print("⚠️  Merge conflicts detected")
-            print("STATUS:NEEDS_FIX_CONFLICTS")
-            sys.exit(0)
 
         # Check CI status
         status_checks = pr_data.get("statusCheckRollup", [])

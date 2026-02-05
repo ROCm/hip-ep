@@ -11,6 +11,59 @@ import sys
 import json
 import subprocess
 import re
+import os
+import shlex
+
+# Whitelist of allowed text file extensions
+TEXT_EXTENSIONS = {
+    # Source code
+    ".cpp",
+    ".hpp",
+    ".h",
+    ".c",
+    ".cc",
+    ".cxx",
+    ".hxx",
+    ".py",
+    ".pyx",
+    ".pxd",
+    ".sh",
+    ".bash",
+    ".zsh",
+    # Config
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".xml",
+    ".proto",
+    ".cmake",
+    ".in",
+    # Documentation
+    ".md",
+    ".txt",
+    ".rst",
+    ".adoc",
+    ".tex",
+    # Web
+    ".html",
+    ".htm",
+    ".css",
+    ".js",
+    ".ts",
+    # Data
+    ".csv",
+    ".tsv",
+    ".log",
+    # Build/Git
+    ".gitignore",
+    ".gitattributes",
+    ".clang-format",
+    ".clang-tidy",
+}
 
 
 def get_current_branch():
@@ -23,25 +76,98 @@ def get_current_branch():
         return None
 
 
-def check_ai_mentions(command):
+def check_ai_mentions(parts):
     """Check if commit message contains AI/tool mentions."""
-    # Extract commit message from command
-    match = re.search(r'-m\s+["\'](.+?)["\']', command, re.DOTALL)
-    if match:
-        message = match.group(1)
-        ai_patterns = [
-            r"co-authored-by:\s*claude",
-            r"generated\s+with\s+claude",
-            r"claude\s+code",
-            r"🤖",
-            r"\bai\b",
-            r"\bllm\b",
-            r"automation\s+tool",
-        ]
-        for pattern in ai_patterns:
-            if re.search(pattern, message, re.IGNORECASE):
-                return True
+    # Find -m flag and extract message from parsed parts
+    message = None
+    for i, part in enumerate(parts):
+        if part == "-m" and i + 1 < len(parts):
+            message = parts[i + 1]
+            break
+
+    if not message:
+        return False
+
+    ai_patterns = [
+        r"co-authored-by:\s*claude",
+        r"generated\s+with\s+claude",
+        r"claude\s+code",
+        r"🤖",
+        r"\bai\b",
+        r"\bllm\b",
+        r"automation\s+tool",
+    ]
+    for pattern in ai_patterns:
+        if re.search(pattern, message, re.IGNORECASE):
+            return True
     return False
+
+
+def is_binary_content(filepath):
+    """Check if file contains binary content (null bytes)."""
+    try:
+        with open(filepath, "rb") as f:
+            chunk = f.read(1024)  # Read first 1KB
+            return b"\x00" in chunk  # Null bytes indicate binary
+    except (IOError, OSError):
+        return False
+
+
+def check_files_for_binaries(paths):
+    """Check if any paths are binaries. Returns (is_safe, error_message)."""
+    blocked_files = []
+
+    for path in paths:
+        # Check for wildcards
+        if "*" in path or "?" in path:
+            return False, f"Wildcards not allowed: {path}"
+
+        # Check if directory
+        if os.path.isdir(path):
+            return False, f"Directories not allowed: {path}/"
+
+        # Check if file exists
+        if not os.path.isfile(path):
+            # File doesn't exist yet (might be in .gitignore or deleted)
+            # Let git handle this case
+            continue
+
+        # Check extension against whitelist
+        ext = os.path.splitext(path)[1].lower()
+
+        # Special case: files without extension (README, LICENSE, Makefile, etc.)
+        if not ext:
+            # Check if filename is known text file
+            basename = os.path.basename(path)
+            if basename in {
+                "README",
+                "LICENSE",
+                "Makefile",
+                "Dockerfile",
+                "CMakeLists.txt",
+            }:
+                continue  # Allowed
+            # Unknown no-extension file - check content
+            if is_binary_content(path):
+                blocked_files.append(path)
+            continue
+
+        # Check whitelist
+        if ext in TEXT_EXTENSIONS:
+            continue  # Allowed
+
+        # Unknown extension - check content
+        if is_binary_content(path):
+            blocked_files.append(path)
+
+    if blocked_files:
+        files_list = "\n".join(f"  - {f}" for f in blocked_files)
+        return (
+            False,
+            f"Binary files detected:\n{files_list}\n\nUse Git LFS for binary files.",
+        )
+
+    return True, ""
 
 
 def main():
@@ -53,8 +179,32 @@ def main():
         tool_input = input_data.get("tool_input", {})
         command = tool_input.get("command", "")
 
+        # Parse command with shlex for consistent handling
+        try:
+            parts = shlex.split(command)
+        except ValueError:
+            # shlex parsing failed - complex quoting, reject for safety
+            response = {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": "BLOCKED: Cannot parse command (complex quoting).\n\nPlease simplify the command.",
+                }
+            }
+            print(json.dumps(response, indent=2))
+            return 0
+
+        # Check if it's a git command
+        if not parts or parts[0] != "git":
+            return 0  # Not a git command, allow
+
+        if len(parts) < 2:
+            return 0  # Just "git" with no subcommand, allow
+
+        git_subcommand = parts[1]
+
         # Rule 1: Block git push origin (origin is read-only)
-        if re.search(r"git\s+push\s+origin", command):
+        if git_subcommand == "push" and len(parts) >= 3 and parts[2] == "origin":
             response = {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
@@ -66,7 +216,7 @@ def main():
             return 0
 
         # Rule 2: Auto-run pre-commit before git commit
-        if re.search(r"git\s+commit", command):
+        if git_subcommand == "commit":
             # Run pre-commit on staged files to auto-fix formatting
             try:
                 result = subprocess.run(
@@ -114,8 +264,8 @@ def main():
                 print(json.dumps(response, indent=2))
                 return 0
 
-            # Rule 3: Check for AI/tool mentions in commit messages
-            if check_ai_mentions(command):
+            # Rule 3.5: Check for AI/tool mentions in commit messages
+            if check_ai_mentions(parts):
                 response = {
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
@@ -126,20 +276,54 @@ def main():
                 print(json.dumps(response, indent=2))
                 return 0
 
-        # Rule 4: Warn about git add -A or git add . (prefer specific files)
-        if re.search(r"git\s+add\s+(-A|\.)\s*$", command):
-            response = {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "ask",
-                    "permissionDecisionReason": "WARNING: Using 'git add -A' or 'git add .' is discouraged.\n\nThis can accidentally stage:\n- Sensitive files (.env, credentials)\n- Large binaries\n- Unintended changes\n\nPreferred: git add <specific-files>\n\nDo you still want to proceed?",
+        # Rule 4: Block git add -A or git add . (changed from warn to block)
+        if git_subcommand == "add" and len(parts) >= 3:
+            # Check if last argument is -A or .
+            last_arg = parts[-1]
+            if last_arg == "-A" or last_arg == ".":
+                response = {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": "BLOCKED: Cannot use 'git add -A' or 'git add .'.\n\nThis can accidentally stage:\n- Binary files\n- Sensitive files (.env, credentials)\n- Unintended changes\n\nUse explicit file names:\n  git add file1.cpp file2.hpp\n\nOr to update already-tracked files:\n  git add -u\n\nSee docs/workflows/git-workflow.md",
+                    }
                 }
-            }
-            print(json.dumps(response, indent=2))
-            return 0
+                print(json.dumps(response, indent=2))
+                return 0
+
+        # Rule 4.5: Check for binary files in git add (whitelist approach)
+        if git_subcommand == "add":
+            # Skip if it's -u (update tracked files only - safe)
+            if "-u" in parts:
+                return 0  # Allow -u
+
+            # Extract paths (skip 'git' and 'add')
+            paths = []
+            for i, part in enumerate(parts):
+                if i < 2:  # Skip 'git' and 'add'
+                    continue
+                if part.startswith("-"):  # Skip flags
+                    continue
+                paths.append(part)
+
+            if not paths:
+                return 0  # No files to check
+
+            # Check paths for binaries
+            is_safe, error_msg = check_files_for_binaries(paths)
+            if not is_safe:
+                response = {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": f'BLOCKED: {error_msg}\n\nOnly text files are allowed in the repository.\n\nFor binary files:\n1. Add file to .gitignore\n2. Use Git LFS: git lfs track "*.png"\n\nFor legitimate text files with unusual extensions:\n1. Add extension to TEXT_EXTENSIONS whitelist in .claude/hooks/pre-bash.py\n\nSee docs/workflows/git-workflow.md',
+                    }
+                }
+                print(json.dumps(response, indent=2))
+                return 0
 
         # Rule 5: Block push on main branch
-        if re.search(r"git\s+push", command):
+        if git_subcommand == "push":
             branch = get_current_branch()
             if branch == "main":
                 response = {
