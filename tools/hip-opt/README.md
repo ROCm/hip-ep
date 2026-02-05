@@ -23,10 +23,22 @@ These operations are lowered to LLVM IR function calls that interface with the H
 
 ## Building
 
+Build LLVM and MLIR first (e.g. from `C:\local\llvm-project`):
+
+```bash
+cd C:\local\llvm-project
+cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_PROJECTS=mlir -DLLVM_TARGETS_TO_BUILD=host
+cmake --build build
+```
+
+Then build hip-opt. If LLVM is at `C:\local\llvm-project`, CMake will auto-detect the build under `C:\local\llvm-project\build`:
+
 ```bash
 mkdir build
 cd build
 cmake .. -DLLVM_DIR=/path/to/llvm/lib/cmake/llvm -DMLIR_DIR=/path/to/llvm/lib/cmake/mlir
+# On Windows with LLVM at C:\local\llvm-project (built in build/):
+# cmake .. -DLLVM_DIR=C:/local/llvm-project/build/lib/cmake/llvm -DMLIR_DIR=C:/local/llvm-project/build/lib/cmake/mlir
 cmake --build .
 ```
 
