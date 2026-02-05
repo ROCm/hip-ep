@@ -153,11 +153,15 @@ TheRock SDK provides HIP/ROCm runtime for Windows.
 
 3. **Verify installation**:
    ```bash
-   # Verify GPU detection
+   # Verify GPU architecture detection (IMPORTANT: note this value for build!)
    ./therock/lib/llvm/bin/amdgpu-arch.exe
-   # Example output: gfx1150
+   # Example output: gfx1151
 
-   # Verify HIP configuration
+   # Alternative: hipInfo shows architecture as 'gcnArchName'
+   ./therock/bin/hipInfo.exe | grep gcnArchName
+   # Example output: gcnArchName: gfx1151
+
+   # Verify HIP configuration (version, paths, compiler)
    ./therock/bin/hipconfig.exe --full
    ```
 
@@ -215,6 +219,38 @@ Open file and find set_target_properties(nlohmann_json::nlohmann_json ...)
 Remove the INTERFACE_SOURCES line (if it exists)
 ```
 
+#### Detect HIP Architecture (CRITICAL)
+
+> **⚠️ IMPORTANT FOR DEVELOPERS AND AI TOOLS:**
+> You **MUST** set `HIP_ARCHITECTURES` to match your GPU. Failure to do so will result in
+> runtime errors like `Exception Code: 0xC0000005` (Access Violation) in `hipLaunchKernel`.
+> The HIP kernels are compiled for a specific GPU architecture; mismatched architectures
+> cause kernel launch failures at runtime.
+
+**Detect your GPU architecture using the SDK:**
+
+```bash
+# Using amdgpu-arch from TheRock SDK (recommended - outputs just the arch)
+$THEROCK_DIST/lib/llvm/bin/amdgpu-arch
+# Example output: gfx1151
+
+# Alternative: Using hipInfo (look for gcnArchName)
+$THEROCK_DIST/bin/hipInfo | grep gcnArchName
+# Example output: gcnArchName: gfx1151
+```
+
+**Common HIP architectures:**
+
+| GPU Model | Architecture |
+|-----------|--------------|
+| Radeon RX 7900 XTX/XT | gfx1100 |
+| Radeon RX 7800/7700 | gfx1101, gfx1102 |
+| Radeon RX 7600 | gfx1102 |
+| Radeon RX 6900/6800 | gfx1030 |
+| Radeon RX 6700/6600 | gfx1031, gfx1032 |
+| Radeon 890M (Strix Halo) | gfx1201 |
+| Radeon 880M/780M (Strix Point) | gfx1150, gfx1151 |
+
 #### Configure and build
 
 **Using Bash (Git Bash on Windows):**
@@ -222,12 +258,18 @@ Remove the INTERFACE_SOURCES line (if it exists)
 ```bash
 cd onnx-hipdnn-ep
 export THEROCK_DIST=$PWD/../therock
+
+# CRITICAL: Detect and set HIP architecture
+export HIP_ARCH=$($THEROCK_DIST/lib/llvm/bin/amdgpu-arch)
+echo "Detected HIP architecture: $HIP_ARCH"
+
 cmake \
   -B ../build/onnx-hipdnn-ep -S . \
   -DTHEROCK_DIST=$THEROCK_DIST \
   -DCMAKE_PREFIX_PATH=$PWD/../local \
   -DCMAKE_INSTALL_PREFIX=$PWD/../local \
-  -DHIP_PLATFORM=amd
+  -DHIP_PLATFORM=amd \
+  -DHIP_ARCHITECTURES=$HIP_ARCH
 
 # Build Release version (recommended)
 cmake --build ../build/onnx-hipdnn-ep --config Release --target install --parallel
@@ -240,11 +282,16 @@ cd onnx-hipdnn-ep
 $env:THEROCK_DIST = "$PWD\..\therock"
 $env:HIP_PLATFORM = "amd"
 
+# CRITICAL: Detect and set HIP architecture
+$HIP_ARCH = & "$env:THEROCK_DIST\lib\llvm\bin\amdgpu-arch.exe"
+Write-Host "Detected HIP architecture: $HIP_ARCH"
+
 cmake -B ..\build\onnx-hipdnn-ep -S . `
   -DTHEROCK_DIST="$env:THEROCK_DIST" `
   -DCMAKE_PREFIX_PATH="$PWD\..\local" `
   -DCMAKE_INSTALL_PREFIX="$PWD\..\local" `
-  -DHIP_PLATFORM=amd
+  -DHIP_PLATFORM=amd `
+  -DHIP_ARCHITECTURES=$HIP_ARCH
 
 # Build Release version (recommended)
 cmake --build ..\build\onnx-hipdnn-ep --config Release --target install --parallel
@@ -258,6 +305,7 @@ cmake --build ..\build\onnx-hipdnn-ep --config Release --target install --parall
 | `CMAKE_PREFIX_PATH` | - | Path to ONNX Runtime installation (for find_package) |
 | `CMAKE_INSTALL_PREFIX` | - | Installation directory for built artifacts |
 | `HIP_PLATFORM` | `amd` | HIP platform (use `amd` for AMD GPUs) |
+| `HIP_ARCHITECTURES` | **(required)** | GPU architecture (e.g., `gfx1151`). **MUST match your GPU!** Detect using `$THEROCK_DIST/lib/llvm/bin/amdgpu-arch`. Mismatched architectures cause runtime crashes. |
 
 ---
 
@@ -314,6 +362,51 @@ cd ..\local\bin
   P99: 53.50 ms
   Throughput: 18.69 infer/sec
 ```
+
+---
+
+## Troubleshooting
+
+### Runtime Crash: Access Violation in hipLaunchKernel
+
+**Symptoms:**
+```
+Exception Code: 0xC0000005
+hipLaunchKernel() + 0x871F0 byte(s)
+```
+
+**Cause:** HIP kernels were compiled for a different GPU architecture than the one you're running on.
+
+**Solution:**
+1. Detect your GPU architecture:
+   ```bash
+   $THEROCK_DIST/lib/llvm/bin/amdgpu-arch
+   ```
+2. Rebuild with the correct architecture:
+   ```bash
+   cmake -B ../build/onnx-hipdnn-ep -DHIP_ARCHITECTURES=<your-arch>
+   cmake --build ../build/onnx-hipdnn-ep --config Release
+   ```
+
+> **Note for AI Tools:** When building this project, always detect the HIP architecture
+> using `amdgpu-arch` from the TheRock SDK and pass it via `-DHIP_ARCHITECTURES=<arch>`.
+> Never omit this option or use a hardcoded default.
+
+### MLIR Configuration Error: MLIRTargets.cmake Not Found
+
+**Symptoms:**
+```
+CMake Error: include could not find requested file: MLIRTargets.cmake
+```
+
+**Cause:** Corrupted CMake cache after partial build or reconfiguration.
+
+**Solution:**
+1. Clear the LLVM build cache:
+   ```bash
+   rm -rf ../build/onnx-hipdnn-ep/_deps/llvm-project-*
+   ```
+2. Reconfigure and rebuild.
 
 ---
 
