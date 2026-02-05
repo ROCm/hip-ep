@@ -1,5 +1,5 @@
 ##
-# ** Copyright (C) 2023 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
 
@@ -16,7 +16,7 @@ find_package(onnxruntime QUIET)
 
 if(TARGET onnxruntime::onnxruntime)
   message(STATUS "Building ORT integration test (using onnxruntime::onnxruntime target)")
-  
+
   add_executable(ort_integration_test test_ort_integration.cpp)
   target_link_libraries(ort_integration_test PRIVATE
     onnxruntime::onnxruntime

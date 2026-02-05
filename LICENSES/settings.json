@@ -1,0 +1,509 @@
+{
+    "bat": {
+        "blockCommentEndPattern": null,
+        "blockCommentStartPattern": null,
+        "extensions": [
+            ".bat"
+        ],
+        "headerEndLine": "::\n",
+        "headerLinePrefix": ":: ",
+        "headerLineSuffix": null,
+        "headerStartLine": "::\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*::"
+    },
+    "c": {
+        "blockCommentEndPattern": "\\*/\\s*$",
+        "blockCommentStartPattern": "^\\s*/\\*",
+        "extensions": [
+            ".c",
+            ".cc",
+            ".h"
+        ],
+        "headerEndLine": " */\n",
+        "headerLinePrefix": " * ",
+        "headerLineSuffix": null,
+        "headerStartLine": "/*\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*//"
+    },
+    "cmake": {
+        "blockCommentEndPattern": "\\]\\]\\s*$",
+        "blockCommentStartPattern": "^\\s*#\\[\\[",
+        "extensions": [
+            ".cmake"
+        ],
+        "filenames": [
+            "CMakeLists.txt"
+        ],
+        "headerEndLine": "##\n",
+        "headerLinePrefix": "# ** ",
+        "headerLineSuffix": null,
+        "headerStartLine": "##\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "\\s*#"
+    },
+    "cpp": {
+        "blockCommentEndPattern": "\\*/\\s*$",
+        "blockCommentStartPattern": "^\\s*/\\*",
+        "extensions": [
+            ".cpp",
+            ".hpp",
+            ".cxx",
+            ".hxx",
+            ".ixx"
+        ],
+        "headerEndLine": " */\n",
+        "headerLinePrefix": " * ",
+        "headerLineSuffix": null,
+        "headerStartLine": "/*\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*//"
+    },
+    "csharp": {
+        "blockCommentEndPattern": "\\*/\\s*$",
+        "blockCommentStartPattern": "^\\s*/\\*",
+        "extensions": [
+            ".cs",
+            ".csx"
+        ],
+        "headerEndLine": " */\n",
+        "headerLinePrefix": " * ",
+        "headerLineSuffix": null,
+        "headerStartLine": "/*\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*//"
+    },
+    "css": {
+        "blockCommentEndPattern": "\\*/\\s*$",
+        "blockCommentStartPattern": "^\\s*/\\*",
+        "extensions": [
+            ".css",
+            ".scss",
+            ".sass"
+        ],
+        "headerEndLine": "*/\n",
+        "headerLinePrefix": null,
+        "headerLineSuffix": null,
+        "headerStartLine": "/*\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": null
+    },
+    "d": {
+        "blockCommentEndPattern": "\\*/\\s*$",
+        "blockCommentStartPattern": "^\\s*/\\*",
+        "extensions": [
+            ".d"
+        ],
+        "headerEndLine": " */\n",
+        "headerLinePrefix": " * ",
+        "headerLineSuffix": null,
+        "headerStartLine": "/*\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*//"
+    },
+    "docker": {
+        "blockCommentEndPattern": null,
+        "blockCommentStartPattern": null,
+        "extensions": [
+            ".dockerfile"
+        ],
+        "filenames": [
+            "Dockerfile"
+        ],
+        "headerEndLine": "##\n",
+        "headerLinePrefix": "## ",
+        "headerLineSuffix": null,
+        "headerStartLine": "##\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*#"
+    },
+    "erlang": {
+        "blockCommentEndPattern": null,
+        "blockCommentStartPattern": null,
+        "extensions": [
+            ".erl",
+            ".src",
+            ".config",
+            ".schema"
+        ],
+        "headerEndLine": "%%\n%% %CopyrightEnd%\n\n",
+        "headerLinePrefix": "%% ",
+        "headerLineSuffix": null,
+        "headerStartLine": "%% -*- erlang -*-\n%% %CopyrightBegin%\n%%\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": null
+    },
+    "go": {
+        "blockCommentEndPattern": "\\*/\\s*$",
+        "blockCommentStartPattern": "^\\s*/\\*",
+        "extensions": [
+            ".go"
+        ],
+        "headerEndLine": " */\n",
+        "headerLinePrefix": " * ",
+        "headerLineSuffix": null,
+        "headerStartLine": "/*\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*//"
+    },
+    "groovy": {
+        "blockCommentEndPattern": "\\*/\\s*$",
+        "blockCommentStartPattern": "^\\s*/\\*",
+        "extensions": [
+            ".groovy"
+        ],
+        "headerEndLine": " */\n",
+        "headerLinePrefix": " * ",
+        "headerLineSuffix": null,
+        "headerStartLine": "/*\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*//"
+    },
+    "html": {
+        "blockCommentEndPattern": "-->\\s*$",
+        "blockCommentStartPattern": "^\\s*<!--",
+        "extensions": [
+            ".html"
+        ],
+        "headerEndLine": "-->\n",
+        "headerLinePrefix": "-- ",
+        "headerLineSuffix": null,
+        "headerStartLine": "<!--\n",
+        "keepFirst": "^\\s*<\\!DOCTYPE.*>",
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": null
+    },
+    "java": {
+        "blockCommentEndPattern": "\\*/\\s*$",
+        "blockCommentStartPattern": "^\\s*/\\*",
+        "extensions": [
+            ".java",
+            ".jape"
+        ],
+        "headerEndLine": " */\n",
+        "headerLinePrefix": " * ",
+        "headerLineSuffix": null,
+        "headerStartLine": "/*\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*//"
+    },
+    "javascript": {
+        "blockCommentEndPattern": "\\*/\\s*$",
+        "blockCommentStartPattern": "^\\s*/\\*",
+        "extensions": [
+            ".js",
+            ".js",
+            ".cjs",
+            ".mjs"
+        ],
+        "headerEndLine": " */\n",
+        "headerLinePrefix": " * ",
+        "headerLineSuffix": null,
+        "headerStartLine": "/*\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*//"
+    },
+    "kotlin": {
+        "blockCommentEndPattern": "\\*/\\s*$",
+        "blockCommentStartPattern": "^\\s*/\\*",
+        "extensions": [
+            ".kt",
+            ".kts",
+            ".ktm"
+        ],
+        "headerEndLine": " */\n",
+        "headerLinePrefix": " * ",
+        "headerLineSuffix": null,
+        "headerStartLine": "/*\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*//"
+    },
+    "markdown": {
+        "blockCommentEndPattern": "-->\\s*$",
+        "blockCommentStartPattern": "^\\s*<!--",
+        "extensions": [
+            ".md"
+        ],
+        "headerEndLine": "-->\n",
+        "headerLinePrefix": "",
+        "headerLineSuffix": null,
+        "headerStartLine": "<!--\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": null
+    },
+    "objective-c": {
+        "blockCommentEndPattern": "\\*/\\s*$",
+        "blockCommentStartPattern": "^\\s*/\\*",
+        "extensions": [
+            ".m",
+            ".mm",
+            ".M"
+        ],
+        "headerEndLine": " */\n",
+        "headerLinePrefix": " * ",
+        "headerLineSuffix": null,
+        "headerStartLine": "/*\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*//"
+    },
+    "perl": {
+        "blockCommentEndPattern": null,
+        "blockCommentStartPattern": null,
+        "extensions": [
+            ".pl"
+        ],
+        "headerEndLine": "##\n",
+        "headerLinePrefix": "## ",
+        "headerLineSuffix": null,
+        "headerStartLine": "##\n",
+        "keepFirst": "^#!|^# -\\*-",
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*#"
+    },
+    "php": {
+        "blockCommentEndPattern": "\\*/\\s*$",
+        "blockCommentStartPattern": "^\\s*/\\*",
+        "extensions": [
+            ".php,.phtml,.php3,.php4,.php5,.php7,.phps,.php-s,.pht,.phar"
+        ],
+        "headerEndLine": " */\n",
+        "headerLinePrefix": " * ",
+        "headerLineSuffix": null,
+        "headerStartLine": "/*\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*//"
+    },
+    "proto": {
+        "blockCommentEndPattern": null,
+        "blockCommentStartPattern": null,
+        "extensions": [
+            ".proto"
+        ],
+        "headerEndLine": null,
+        "headerLinePrefix": "// ",
+        "headerLineSuffix": null,
+        "headerStartLine": null,
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*//"
+    },
+    "python": {
+        "blockCommentEndPattern": null,
+        "blockCommentStartPattern": null,
+        "extensions": [
+            ".py"
+        ],
+        "headerEndLine": "#\n",
+        "headerLinePrefix": "# ",
+        "headerLineSuffix": null,
+        "headerStartLine": "#\n",
+        "keepFirst": "^#!|^# +pylint|^# +-\\*-|^# +coding|^# +encoding|^# +type|^# +flake8",
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*#"
+    },
+    "robot": {
+        "blockCommentEndPattern": null,
+        "blockCommentStartPattern": null,
+        "extensions": [
+            ".robot"
+        ],
+        "headerEndLine": null,
+        "headerLinePrefix": "# ",
+        "headerLineSuffix": null,
+        "headerStartLine": null,
+        "keepFirst": "^#!|^# +pylint|^# +-\\*-|^# +coding|^# +encoding",
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*#"
+    },
+    "ruby": {
+        "blockCommentEndPattern": "^=end",
+        "blockCommentStartPattern": "^=begin",
+        "extensions": [
+            ".rb"
+        ],
+        "headerEndLine": "##\n",
+        "headerLinePrefix": "## ",
+        "headerLineSuffix": null,
+        "headerStartLine": "##\n",
+        "keepFirst": "^#!",
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*#"
+    },
+    "rust": {
+        "blockCommentEndPattern": "\\*/\\s*$",
+        "blockCommentStartPattern": "^\\s*/\\*",
+        "extensions": [
+            ".rs"
+        ],
+        "headerEndLine": " */\n",
+        "headerLinePrefix": " * ",
+        "headerLineSuffix": null,
+        "headerStartLine": "/*\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*//"
+    },
+    "scala": {
+        "blockCommentEndPattern": "\\*/\\s*$",
+        "blockCommentStartPattern": "^\\s*/\\*",
+        "extensions": [
+            ".scala"
+        ],
+        "headerEndLine": " */\n",
+        "headerLinePrefix": " * ",
+        "headerLineSuffix": null,
+        "headerStartLine": "/*\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*//"
+    },
+    "script": {
+        "blockCommentEndPattern": null,
+        "blockCommentStartPattern": null,
+        "extensions": [
+            ".sh",
+            ".csh",
+            ".pl",
+            ".ps1"
+        ],
+        "headerEndLine": "##\n",
+        "headerLinePrefix": "## ",
+        "headerLineSuffix": null,
+        "headerStartLine": "##\n",
+        "keepFirst": "^#!|^# -\\*-",
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*#"
+    },
+    "sql": {
+        "blockCommentEndPattern": null,
+        "blockCommentStartPattern": null,
+        "extensions": [
+            ".sql"
+        ],
+        "headerEndLine": "--\n",
+        "headerLinePrefix": "-- ",
+        "headerLineSuffix": null,
+        "headerStartLine": "--\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*--"
+    },
+    "swift": {
+        "blockCommentEndPattern": "\\*/\\s*$",
+        "blockCommentStartPattern": "^\\s*/\\*",
+        "extensions": [
+            ".swift"
+        ],
+        "headerEndLine": " */\n",
+        "headerLinePrefix": " * ",
+        "headerLineSuffix": null,
+        "headerStartLine": "/*\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*//"
+    },
+    "terraform": {
+        "blockCommentEndPattern": null,
+        "blockCommentStartPattern": null,
+        "extensions": [
+            ".tf"
+        ],
+        "headerEndLine": "##\n",
+        "headerLinePrefix": "## ",
+        "headerLineSuffix": null,
+        "headerStartLine": "##\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*#"
+    },
+    "typescript": {
+        "blockCommentEndPattern": "\\*/\\s*$",
+        "blockCommentStartPattern": "^\\s*/\\*",
+        "extensions": [
+            ".ts",
+            ".tsx"
+        ],
+        "headerEndLine": " */\n",
+        "headerLinePrefix": " * ",
+        "headerLineSuffix": null,
+        "headerStartLine": "/*\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*//"
+    },
+    "vb": {
+        "blockCommentEndPattern": null,
+        "blockCommentStartPattern": null,
+        "extensions": [
+            ".vb"
+        ],
+        "headerEndLine": null,
+        "headerLinePrefix": "' ",
+        "headerLineSuffix": null,
+        "headerStartLine": null,
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*\\'"
+    },
+    "xml": {
+        "blockCommentEndPattern": "-->\\s*$",
+        "blockCommentStartPattern": "^\\s*<!--",
+        "extensions": [
+            ".xml"
+        ],
+        "headerEndLine": "  -->\n",
+        "headerLinePrefix": "-- ",
+        "headerLineSuffix": null,
+        "headerStartLine": "<!--\n",
+        "keepFirst": "^\\s*<\\?xml.*\\?>",
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": null
+    },
+    "yaml": {
+        "blockCommentEndPattern": null,
+        "blockCommentStartPattern": null,
+        "extensions": [
+            ".yaml",
+            ".yml"
+        ],
+        "headerEndLine": "##\n",
+        "headerLinePrefix": "## ",
+        "headerLineSuffix": null,
+        "headerStartLine": "##\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*#"
+    },
+    "zig": {
+        "blockCommentEndPattern": null,
+        "blockCommentStartPattern": null,
+        "extensions": [
+            ".zig"
+        ],
+        "headerEndLine": "//!\n",
+        "headerLinePrefix": "//! ",
+        "headerLineSuffix": null,
+        "headerStartLine": "//!\n",
+        "keepFirst": null,
+        "lineCommentEndPattern": null,
+        "lineCommentStartPattern": "^\\s*//"
+    }
+}
