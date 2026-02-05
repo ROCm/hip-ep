@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # Level-1 ROCm Pass Design
 
 ## Overview
@@ -93,7 +97,7 @@ Level-2 passes store operation parameters using a hybrid approach:
 2. **Add attribute to fused node** (for Level-1 to find):
    ```cpp
    const auto& fused_node = self->level_2_fuse(*graph, *meta_def);
-   
+
    // const_cast is needed because level_2_fuse returns const Node&
    Node& mutable_node = const_cast<Node&>(fused_node);
    NodeAttributesBuilder attr_builder;
@@ -120,16 +124,16 @@ After sub-passes complete, the graph contains fused nodes created by Level-2 pas
 ```cpp
 bool is_rocm_fused_node(Graph& graph, const Node& node) {
   auto node_ref = morphizen_cxx::NodeConstRef::from_node(graph, node);
-  
+
   if (node_ref.op_domain() != "com.xilinx") {
     return false;
   }
-  
+
   // Check for ROCm-specific attribute set by Level-2 passes
   if (!node_ref.has_attr("rocm_param_file")) {
     return false;
   }
-  
+
   return true;
 }
 ```
@@ -161,29 +165,29 @@ For each group, build a `RocmSubgraphProto` with complete topology:
 RocmSubgraphProto build_subgraph(
     const std::vector<const Node*>& group,
     Graph& graph) {
-  
+
   RocmSubgraphProto subgraph;
-  
+
   // Map from original node to new node_id
   std::unordered_map<const Node*, int32_t> node_id_map;
   std::unordered_map<std::string, std::pair<int32_t, int32_t>> output_producer_map;
-  
+
   // Build nodes in topological order
   for (int32_t i = 0; i < group.size(); ++i) {
     const Node* node = group[i];
     node_id_map[node] = i;
-    
+
     RocmNodeProto* node_proto = subgraph.add_nodes();
     node_proto->set_node_id(i);
-    
+
     // Copy operation parameters
     *node_proto->mutable_params() = get_rocm_params(*node);
-    
+
     // Build input references
     for (auto* input : node_get_input_node_args(*node)) {
       TensorRefProto* input_ref = node_proto->add_inputs();
       auto input_name = node_arg_get_name(*input);
-      
+
       auto it = output_producer_map.find(input_name);
       if (it != output_producer_map.end()) {
         // Internal reference - from another node in subgraph
@@ -195,7 +199,7 @@ RocmSubgraphProto build_subgraph(
         input_ref->set_external_name(input_name);
       }
     }
-    
+
     // Register outputs for dependency tracking
     auto outputs = node_get_output_node_args(*node);
     for (int32_t j = 0; j < outputs.size(); ++j) {
@@ -204,7 +208,7 @@ RocmSubgraphProto build_subgraph(
       node_proto->add_output_names(output_name);
     }
   }
-  
+
   // Identify external outputs
   auto external_output_names = collect_external_outputs(group, graph);
   for (const auto& name : external_output_names) {
@@ -216,7 +220,7 @@ RocmSubgraphProto build_subgraph(
       ext_output->set_output_index(it->second.second);
     }
   }
-  
+
   return subgraph;
 }
 ```
