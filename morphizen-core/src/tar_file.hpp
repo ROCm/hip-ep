@@ -120,10 +120,10 @@ public:
   // TAR semantics). The tar file is append-only; existing entries are never
   // modified.
   //
-  // after the stream is closed, a new entries is append to the tar stream_.
+  // after the stream is closed, a new entry is appended to the tar stream_.
   //
   // there are 1024 zero bytes at the end of the tar file, which is used to
-  // indidcate the end of the tar file. it should be also available after the
+  // indicate the end of the tar file. it should be also available after the
   // ostream is closed. so that when stream_ is closed, the tar file is still
   // valid.
   //

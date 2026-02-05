@@ -142,7 +142,7 @@ private:
   TarEntryInputStream* find_prev_entry_for_path(const std::string& name);
   TarEntryInputStream& add_entry_for_new_data(const std::string& md5);
   void add_symlink_for_existing_entry(const std::string& md5);
-  void add_1024_padding(const std::string& name);
+  void add_1024_padding();
   static void maybe_add_4k_align(class TarFile& tar_file,
                                  const std::string& name);
   static void add_padding_block_for_4k(class TarFile& tar_file,

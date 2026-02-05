@@ -44,7 +44,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 | [#035](issues/035-constdatatest-boost-dependency.md) | ConstDataTest Boost Dep | L | 1h | Test Infrastructure | - | test_const_data.cpp/CMakeLists.txt |
 | [#036](issues/036-boost-dependent-tests-skipped.md) | Boost-Dependent Tests | L | 1h | Test Infrastructure | - | test_graph.cpp/test_tar_file.cpp |
 | [#038](issues/038-document-lazy-symlink-const-cast.md) | Document Lazy Symlink | L | 30m | TarFile Docs | - | tar_file.cpp/tar_entry.hpp |
-| [#039](issues/039-fix-tarfile-typos-and-outdated-comments.md) | Fix TarFile Typos | L | 15m | TarFile Docs | - | tar_file.hpp/tar_entry.cpp |
 | [#040](issues/040-remove-legacy-tar-ball-reserialization.md) | Remove tar_ball Reserial | M | 2h | TarFile Refactor | - | tar_ball.cpp/.hpp/util.cpp |
 | [#042](issues/042-document-privatetag-factory-pattern.md) | Document PrivateTag | L | 30m | TarFile Docs | - | tar_file.hpp/privatetag-doc.md |
 | [#048](issues/048-extract-platform-specific-tmpfile-helper.md) | Extract tmpfile Helper | L | 30m | TarFile Refactor | - | util.hpp/tar_file.cpp/temp_file_stream.cpp |
@@ -71,7 +70,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 See **[completed-issues.md](completed-issues.md)** for full archive of all completed issues.
 
 **Recent (last 5):**
+- #039 (PR #129) - Fix TarFile Typos and Unused Parameter
+- #047 (PR #126) - Extract Entry Deduplication Logic
+- #044 (PR #124) - Use Erase-Remove Idiom in TarFile
 - #057 (PR #127) - MLIR Metadata API - Fix dangling reference in model_get_meta_data
+- #028 (PR #110) - MLIR Backend Test Model Support - Enabled 23 unit tests with MLIR format model
 - #047 (PR #126) - Extract Entry Deduplication Logic
 - #044 (PR #124) - Use Erase-Remove Idiom in TarFile
 - #028 (PR #110) - MLIR Backend Test Model Support - Enabled 23 unit tests with MLIR format model
