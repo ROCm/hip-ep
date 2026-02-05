@@ -15,7 +15,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for issue quality guidelines.
 ## Backlog
 
 **Quick dependencies:**
-- **#047 relates to #044** - Both improve TarFile deduplication code
 - **#052 relates to #050, #051** - All improve TarFile implementation quality
 - **#053 relates to #052** - Documents architecture that #052 will modify
 - **#054 relates to #050, #055** - All reduce TarFile public API surface
@@ -48,8 +47,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 | [#039](issues/039-fix-tarfile-typos-and-outdated-comments.md) | Fix TarFile Typos | L | 15m | TarFile Docs | - | tar_file.hpp/tar_entry.cpp |
 | [#040](issues/040-remove-legacy-tar-ball-reserialization.md) | Remove tar_ball Reserial | M | 2h | TarFile Refactor | - | tar_ball.cpp/.hpp/util.cpp |
 | [#042](issues/042-document-privatetag-factory-pattern.md) | Document PrivateTag | L | 30m | TarFile Docs | - | tar_file.hpp/privatetag-doc.md |
-| [#044](issues/044-use-erase-remove-idiom-in-tarfile.md) | Use Erase-Remove Idiom | L | 15m | TarFile Cleanup | - | tar_file.cpp |
-| [#047](issues/047-extract-duplicate-entry-deduplication-logic.md) | Extract Entry Dedup Logic | M | 30m | TarFile Refactor | #044 | tar_file.cpp/.hpp |
 | [#048](issues/048-extract-platform-specific-tmpfile-helper.md) | Extract tmpfile Helper | L | 30m | TarFile Refactor | - | util.hpp/tar_file.cpp/temp_file_stream.cpp |
 | [#050](issues/050-standardize-tarfile-factory-method-naming.md) | Standardize Factory Naming | M | 1h | TarFile Refactor | - | tar_file.hpp/.cpp |
 | [#051](issues/051-document-complex-tarfile-factory-methods.md) | Document Factory Methods | M | 1h | TarFile Docs | - | tar_file.cpp |
@@ -75,11 +72,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 See **[completed-issues.md](completed-issues.md)** for full archive of all completed issues.
 
 **Recent (last 5):**
+- #047 (PR #126) - Extract Entry Deduplication Logic
+- #044 (PR #124) - Use Erase-Remove Idiom in TarFile
 - #028 (PR #110) - MLIR Backend Test Model Support - Enabled 23 unit tests with MLIR format model
 - #027 (PR #118) - Eliminate C-Style APIs from morphizen-graph
 - #007 (PR #108) - Remove Target Copying - Two-Path Architecture
-- #059 (PR #115) - /resolve-ci Skill - Autonomous CI Resolution
-- #058 (PR #115) - /fix-issue Skill - Complete Workflow Automation
 
 ---
 

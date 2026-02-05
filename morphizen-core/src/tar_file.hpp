@@ -160,6 +160,16 @@ public:
   bool dump_to(char* data, size_t size) const;
 
 private:
+  /// Adds a regular file entry to the tar archive.
+  /// Removes any existing entry with the same path (TAR last-wins semantics).
+  /// Regular entries store actual file data at specified positions in the tar
+  /// stream.
+  /// @param path - Entry path in the archive
+  /// @param data_begin_pos - Start position of file data in tar stream
+  /// @param data_end_pos - End position of file data in tar stream
+  /// @param block_begin_pos - Start position of tar block (including header)
+  /// @param block_end_pos - End position of tar block (including padding)
+  /// @return Reference to the created entry input stream
   TarEntryInputStream&
   add_regular_entry(const std::string& path, // path of the entry
                     std::streambuf::pos_type data_begin_pos,
@@ -167,6 +177,16 @@ private:
                     std::streambuf::pos_type block_begin_pos,
                     std::streambuf::pos_type block_end_pos);
 
+  /// Adds a symlink entry to the tar archive.
+  /// Removes any existing entry with the same path (TAR last-wins semantics).
+  /// Symlinks point to another entry; this method resolves the target via
+  /// find_real_entry(). If the target is not found, creates a symlink with
+  /// invalid positions (-1) for lazy resolution.
+  /// @param symlink_name - Symlink path in the archive
+  /// @param real_path_name - Target path that the symlink points to
+  /// @param block_begin_pos - Start position of tar block (including header)
+  /// @param block_end_pos - End position of tar block (including padding)
+  /// @return Pointer to the created entry input stream, or nullptr on failure
   TarEntryInputStream*
   add_symlink_entry(const std::string& symlink_name,
                     const std::string& real_path_name,
@@ -206,6 +226,11 @@ private:
                                  std::streambuf::pos_type block_end_pos);
 
 private:
+  /// Removes any existing entry with the given path (TAR last-wins semantics).
+  /// Uses standard erase-remove idiom.
+  /// @param path - Entry path to remove duplicates for
+  void remove_duplicate_entry(const std::string& path);
+
   std::shared_ptr<std::iostream> stream_;
   // it is nullptr if stream_ is not a
   // memory map file. it is stream_.get() if

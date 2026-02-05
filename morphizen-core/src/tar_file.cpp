@@ -293,26 +293,23 @@ TarFile::open_for_write(const std::string& filename) {
   }
   return TarEntryOutputStream::create(*this, filename);
 }
+
+void TarFile::remove_duplicate_entry(const std::string& path) {
+  entries_.erase(std::remove_if(entries_.begin(), entries_.end(),
+                                [&path](const auto& entry) {
+                                  return entry->path() == path;
+                                }),
+                 entries_.end());
+}
+
 TarEntryInputStream&
 TarFile::add_regular_entry(const std::string& path, // name of the entry
                            std::streambuf::pos_type data_begin_pos,
                            std::streambuf::pos_type data_end_pos,
                            std::streambuf::pos_type block_begin_pos,
                            std::streambuf::pos_type block_end_pos) {
-  // erase the old entry if found
-  entries_.erase(
-      std::remove_if(entries_.begin(), entries_.end(),
-                     [&path](const auto& entry) {
-                       auto ret = entry->path() == path;
-                       if (ret) {
-                         MY_LOG(1) << " add_symlink_entry: duplicated entry "
-                                      "found, remove old entry "
-                                   << entry->to_string() //
-                             ;
-                       }
-                       return ret;
-                     }),
-      entries_.end());
+  // Remove any existing entry with the same path (TAR last-wins semantics)
+  remove_duplicate_entry(path);
 
   auto ret = add_entry(path, std::nullopt, data_begin_pos, data_end_pos,
                        block_begin_pos, block_end_pos);
@@ -357,20 +354,9 @@ TarFile::add_symlink_entry(const std::string& symlink_name,
                            const std::string& real_path_name,
                            std::streambuf::pos_type block_begin_pos,
                            std::streambuf::pos_type block_end_pos) {
-  // erase the old entry if found
-  entries_.erase(
-      std::remove_if(entries_.begin(), entries_.end(),
-                     [&symlink_name](const auto& entry) {
-                       auto ret = entry->path() == symlink_name;
-                       if (ret) {
-                         MY_LOG(1) << " add_symlink_entry: duplicated entry "
-                                      "found, remove old entry "
-                                   << entry->to_string() //
-                             ;
-                       }
-                       return ret;
-                     }),
-      entries_.end());
+  // Remove any existing entry with the same path (TAR last-wins semantics)
+  remove_duplicate_entry(symlink_name);
+
   TarEntryInputStream* ret = nullptr;
   auto real_entry = find_real_entry(real_path_name);
   if (real_entry) {
