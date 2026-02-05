@@ -8,8 +8,6 @@ Licensed under the MIT License.
 - **Status:** BACKLOG
 - **Priority:** LOW
 - **Type:** Tech Debt / Refactoring
-- **Owner:** TBD
-- **Created:** 2026-01-31
 - **Dependencies:** Issue #007, Issue #014 (must complete first)
 - **Strategic Goal:** Immutable ConfigProto
 

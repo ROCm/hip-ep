@@ -7,7 +7,6 @@ Licensed under the MIT License.
 ## Metadata
 - **Type:** Documentation
 - **Priority:** MEDIUM
-- **Created:** 2026-02-04
 - **Dependencies:** None
 
 ## Description

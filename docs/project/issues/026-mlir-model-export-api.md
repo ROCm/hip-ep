@@ -8,8 +8,6 @@ Licensed under the MIT License.
 - **Status:** BACKLOG
 - **Priority:** MEDIUM
 - **Type:** Feature
-- **Owner:** TBD
-- **Created:** 2026-02-02
 - **Dependencies:** None
 - **Related:** #025
 

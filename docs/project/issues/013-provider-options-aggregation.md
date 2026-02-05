@@ -8,7 +8,6 @@ Licensed under the MIT License.
 - Status: BACKLOG
 - Priority: MEDIUM
 - Type: Tech Debt / Refactoring / Cleanup
-- Created: 2026-01-31
 - Updated: 2026-01-31 (Clarified as cleanup task after discussion)
 - Dependencies: Issues #003 (ConfigProto runtime-only), #008 (MEP removal), #009 (TargetProto injection removal)
 - Strategic Goal: Immutable ConfigProto

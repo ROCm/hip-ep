@@ -7,7 +7,6 @@ Licensed under the MIT License.
 ## Metadata
 - **Type:** Bug
 - **Priority:** MEDIUM
-- **Created:** 2026-02-03
 - **Dependencies:** #028, #030, #031 (potentially related)
 
 ## Description

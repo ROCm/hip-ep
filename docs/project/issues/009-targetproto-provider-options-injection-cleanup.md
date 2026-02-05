@@ -8,8 +8,6 @@ Licensed under the MIT License.
 - **Status:** BACKLOG
 - **Priority:** LOW
 - **Type:** Tech Debt / Cleanup
-- **Owner:** TBD
-- **Created:** 2026-01-30
 - **Updated:** 2026-01-30 (Decision made - remove NPU-specific features entirely)
 - **Dependencies:** Related to Issue #006 (cache_dir removal - xclbin functions use get_log_dir())
 

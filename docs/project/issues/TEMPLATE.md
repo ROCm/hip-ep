@@ -7,7 +7,6 @@ Licensed under the MIT License.
 ## Metadata
 - **Type:** [Feature | Bug | Refactoring | Architecture | Documentation]
 - **Priority:** [CRITICAL | HIGH | MEDIUM | LOW]
-- **Created:** YYYY-MM-DD
 - **Dependencies:** [Issue numbers that must complete first, or None]
 
 ## Description
