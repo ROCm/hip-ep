@@ -74,10 +74,11 @@ target_link_libraries(${LIB_NAME}
   Microsoft.GSL::GSL
   # OMBuilder
   MLIRIR
-  MLIRArithDialect # for mlir::arith::ConstantOp
-  MLIRFuncDialect # for mlir::Func::
-  MLIRParser      # for mlir::parseSourceFile
-  MLIRSupport     # for MLIR support utilities
+  MLIRArithDialect    # for mlir::arith::ConstantOp
+  MLIRFuncDialect     # for mlir::Func::
+  MLIRParser          # for mlir::parseSourceFile
+  MLIRBytecodeWriter  # for mlir::writeBytecodeToFile
+  MLIRSupport         # for MLIR support utilities
 )
 
 if(TARGET ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET})

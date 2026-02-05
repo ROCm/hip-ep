@@ -43,7 +43,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 | [#018](issues/018-make-configproto-const.md) | Make ConfigProto const | L | 15m | Config/Context | #004-#017 | pass_context_imp.hpp |
 | [#019](issues/019-refactor-initialize-context.md) | Refactor initialize_context | L | 2h | Config/Context | #005/#006/#017 | morphizen_compile_model.cpp |
 | [#024](issues/024-remove-legacy-compile-entry-points.md) | Remove Legacy Compile API | M | 1h | Legacy Cleanup | - | onnxruntime_morphizen_ep.hpp/.cpp |
-| [#025](issues/025-mlir-graph-binary-serialization.md) | MLIR Graph Binary Serial | M | 1h | MLIR Features | - | mlir-graph.cpp/mlir-model.cpp |
 | [#026](issues/026-mlir-model-export-api.md) | MLIR Model Export API | M | 1h | MLIR Features | - | morphizen-ort-api-ext.hpp/mlir-model.cpp |
 | [#027](issues/027-eliminate-c-style-apis-from-morphizen-graph.md) | Eliminate C-Style APIs | M | 3h+ | Legacy Cleanup | - | graph.hpp/pass.cpp/node_builder.cpp |
 | [#028](issues/028-mlir-backend-test-model-support.md) | ResNet50 MLIR Test Model | H | 1h | MLIR Testing | - | test_environment.hpp/mlir-model.cpp |
@@ -83,11 +82,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
 _(Max 5 items, deleted files deleted)_
 
+- **Issue #025: MLIR Graph Binary Serialization** - PR #112 - Changed MLIR graph save format from text (.mlir) to binary bytecode using mlir::writeBytecodeToFile()
 - **Issue #057: Optimize backlog.md Format for AI Parsing** - PR #115 - Converted backlog to table format (52% token reduction), added metadata columns for efficient issue selection
 - **Issue #058: Create /fix-issue Skill - Complete Workflow Automation** - PR #115 - Added skill for complete workflow automation (Phases 1-8: selection, workspace setup, implementation, finalization)
 - **Issue #059: Create /resolve-ci Skill - Autonomous Conflict and CI Failure Resolution** - PR #115 - Added autonomous monitoring loop (every 30s) to resolve conflicts and CI failures until PR merges
 - **Issue #037: Remove Dead Code from TarFile** - PR #113 - Removed unused rename_symlink/rename_existing_entry functions (~60 LOC, eliminated 4 const_cast violations)
-- **Issue #041: Remove Duplicate friend Declaration in TarEntryInputStream** - PR #114 - Removed duplicate friend class declaration (trivial 1-line cleanup)
 
 ---
 

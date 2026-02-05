@@ -13,6 +13,7 @@
 #include "mlir-model.hpp"
 #include "mlir-named-attribute.hpp"
 #include "mlir-node-attributes.hpp"
+#include "mlir/Bytecode/BytecodeWriter.h"  // for writeBytecodeToFile
 #include "mlir/Dialect/Arith/IR/Arith.h"   // for ConstantOp
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h" // for EmptyOp
@@ -30,8 +31,6 @@
 #include <system_error>               // for std::error_code
 #include <unordered_set>              // for std::unordered_set
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_GRAPH, "0")
-DEF_ENV_PARAM(MORPHIZEN_MLIR_SAVE_WITH_GENERIC, "0")
-DEF_ENV_PARAM(MORPHIZEN_MLIR_SAVE_WITH_DEBUG_INFO, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MLIR_GRAPH) >= n)
 namespace morphizen {
 namespace mlir_impl {
@@ -872,18 +871,25 @@ std::string MLIRGraph::save_string() const {
     }
   });
 
-  // Serialize the MLIR module to a string
+  // Serialize the MLIR module to bytecode (binary format)
   std::string result;
   llvm::raw_string_ostream stream(result);
-  mlir::OpPrintingFlags flags;
-  if (ENV_PARAM(MORPHIZEN_MLIR_SAVE_WITH_GENERIC)) {
-    flags.printGenericOpForm();
+  mlir::BytecodeWriterConfig config;
+  if (failed(mlir::writeBytecodeToFile(module, stream, config))) {
+    LOG(ERROR) << "Failed to write MLIR bytecode";
+    // Restore the backed up morphizen attributes before returning
+    for (const auto& backup : backups) {
+      if (backup.inputsAttr) {
+        backup.op->setAttr(attr_names::MORPHIZEN_NODE_INPUTS,
+                           backup.inputsAttr);
+      }
+      if (backup.outputsAttr) {
+        backup.op->setAttr(attr_names::MORPHIZEN_NODE_OUTPUTS,
+                           backup.outputsAttr);
+      }
+    }
+    return "";
   }
-  if (ENV_PARAM(MORPHIZEN_MLIR_SAVE_WITH_DEBUG_INFO)) {
-    flags.enableDebugInfo();
-    flags.printValueUsers();
-  }
-  module.print(stream, flags);
   stream.flush();
 
   // Restore the backed up morphizen attributes
