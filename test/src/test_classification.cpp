@@ -172,7 +172,7 @@ void run_classification(const std::filesystem::path &model_path,
   std::cout << "=================" << kRegistrationName;
   std::cout << "enable_ep = " << (enable_ep ? "true" : "false") << std::endl;
 
-  Ort::Env env(ORT_LOGGING_LEVEL_INFO, "test_classification");
+  Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "test_classification");
   std::vector<Ort::ConstEpDevice> selected_devices = {};
 
   auto library_path = std::filesystem::u8path(ENV_PARAM(MORPHIZEN_EP_DLL));
