@@ -116,7 +116,7 @@ workspace/
 │   └── lib/cmake/            # CMake configuration files
 └── onnx-hipdnn-ep/           # This project (git clone)
     ├── 3rd-party/morphizen/  # MorphiZen framework (git submodule)
-    ├── test/test_models/     # Test models (gqa_layer_00.onnx)
+    ├── test/models/     # Test models (gqa_layer_00.onnx)
     └── etc/                  # Configuration files (morphizen_config.json)
 ```
 
@@ -316,7 +316,7 @@ cmake --build ..\build\onnx-hipdnn-ep --config Release --target install --parall
 | `THEROCK_DIST` | Path to TheRock SDK installation |
 | `HIP_PLATFORM` | Set to `amd` for AMD GPU support |
 | `MORPHIZEN_DEBUG_ROCM` | Debug level (1=basic, 2=verbose) |
-| `MORPHIZEN_ROCM_NO_MERGE` | Disable subgraph merging (1=enabled) |
+| `MORPHIZEN_ROCM_EN_LVL1_MERGE` | Enable Level-1 subgraph merging (1=enabled) |
 | `MORPHIZEN_DRY_RUN` | Dry run mode without GPU execution (1=enabled) |
 | `MORPHIZEN_EP_JSON_CONFIG` | Path to custom morphizen_config.json |
 
@@ -330,22 +330,22 @@ cmake --build ..\build\onnx-hipdnn-ep --config Release --target install --parall
 # Set environment
 export PATH="$THEROCK_DIST/bin:$PATH"
 export MORPHIZEN_DEBUG_ROCM=1
-export MORPHIZEN_ROCM_NO_MERGE=1
+export MORPHIZEN_ROCM_EN_LVL1_MERGE=1
 
 # Run test
 cd ../local/bin
-./test_gqa.exe ../../onnx-hipdnn-ep/test/test_models/gqa_layer_00.onnx -w 1 -i 1
+./test_gqa.exe ../../onnx-hipdnn-ep/test/models/gqa_layer_00.onnx
 ```
 
 ```powershell
 # Set environment
 $env:PATH = "$env:THEROCK_DIST\bin;$env:PATH"
 $env:MORPHIZEN_DEBUG_ROCM = "1"
-$env:MORPHIZEN_ROCM_NO_MERGE = "1"
+$env:MORPHIZEN_ROCM_EN_LVL1_MERGE = "1"
 
 # Run test
 cd ..\local\bin
-.\test_gqa.exe ..\..\onnx-hipdnn-ep\test\test_models\gqa_layer_00.onnx -w 1 -i 1
+.\test_gqa.exe ..\..\onnx-hipdnn-ep\test\models\gqa_layer_00.onnx
 ```
 
 ### Benchmark Results

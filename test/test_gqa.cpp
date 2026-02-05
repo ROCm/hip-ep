@@ -52,6 +52,7 @@ static void usage() {
             << "  -i <iterations>   Number of iterations (default: 10)\n"
             << "  -w <warmup>       Warmup iterations (default: 3)\n"
             << "  -n                Disable MorphiZen EP (use CPU only)\n"
+            << "  -e                Enable EP context caching\n"
             << "  -p                Enable ONNX profiler\n"
             << "  -v                Verbose output\n"
             << "  -h                Show this help message\n"
@@ -65,9 +66,10 @@ static void usage() {
 struct GQAConfig {
   int batch_size = 1;
   int seq_len = 128;
-  int iterations = 10;
-  int warmup = 3;
+  int iterations = 1;
+  int warmup = 1;
   bool enable_ep = true;
+  bool enable_ep_context = false;
   bool enable_profiler = false;
   bool verbose = false;
 };
@@ -136,6 +138,7 @@ public:
     std::cout << "Iterations: " << config_.iterations << std::endl;
     std::cout << "Warmup: " << config_.warmup << std::endl;
     std::cout << "EP enabled: " << (config_.enable_ep ? "yes" : "no") << std::endl;
+    std::cout << "EP context: " << (config_.enable_ep_context ? "yes" : "no") << std::endl;
     std::cout << std::endl;
     
     // Create ONNX Runtime environment
@@ -190,6 +193,18 @@ public:
         if (!config_file.empty()) {
           provider_options["config_file"] = config_file;
           std::cout << "Using config: " << config_file << std::endl;
+        }
+        
+        // Enable EP context caching if requested
+        if (config_.enable_ep_context) {
+          session_options.AddConfigEntry("ep.context_enable", "1");
+          std::string embed_mode = get_env("CACHE_CONTEXT_EMBEDED_MODE", "1");
+          session_options.AddConfigEntry("ep.context_embed_mode", embed_mode.c_str());
+          std::string share_ep_contexts = get_env("XLNX_ENABLE_EP_SHARED_CONTEXT", "");
+          if (!share_ep_contexts.empty()) {
+            session_options.AddConfigEntry("ep.share_ep_contexts", share_ep_contexts.c_str());
+          }
+          std::cout << "EP context caching enabled (embed_mode=" << embed_mode << ")" << std::endl;
         }
         
         session_options.AppendExecutionProvider_V2(*env_, selected_devices, provider_options);
@@ -530,6 +545,8 @@ int main(int argc, char* argv[]) {
       config.warmup = std::stoi(argv[++i]);
     } else if (arg == "-n") {
       config.enable_ep = false;
+    } else if (arg == "-e") {
+      config.enable_ep_context = true;
     } else if (arg == "-p") {
       config.enable_profiler = true;
     } else if (arg == "-v") {
