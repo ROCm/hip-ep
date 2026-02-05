@@ -34,6 +34,39 @@ Note: Repositories are typically cloned in `../../source`, so paths are relative
 - Use Ninja generator for CMake builds (not Visual Studio generator)
 - Both MIOpen and hipBLASLt libraries are provided by TheRock
 
+## CRITICAL: HIP Architecture Detection
+**⚠️ ALWAYS set HIP_ARCHITECTURES when building!** Failure to do so causes runtime crashes.
+
+**Detect GPU architecture using the SDK:**
+```bash
+# Method 1: amdgpu-arch (recommended - outputs just the arch)
+$THEROCK_DIST/lib/llvm/bin/amdgpu-arch
+# Example output: gfx1151
+
+# Method 2: hipInfo (look for gcnArchName field)
+$THEROCK_DIST/bin/hipInfo | grep gcnArchName
+# Example output: gcnArchName: gfx1151
+```
+
+**Then pass it to CMake:**
+```bash
+cmake -DHIP_ARCHITECTURES=gfx1151 ...
+```
+
+**Why this matters:**
+- HIP kernels are compiled for a specific GPU architecture at build time
+- If the architecture doesn't match your GPU, you get runtime crashes:
+  `Exception Code: 0xC0000005` (Access Violation in hipLaunchKernel)
+- There is NO automatic detection - you MUST specify the architecture explicitly
+
+**Common architectures:**
+| GPU | Architecture |
+|-----|--------------|
+| RX 7900 XTX/XT | gfx1100 |
+| RX 7600 | gfx1102 |
+| Radeon 780M/880M | gfx1150, gfx1151 |
+| RX 6900/6800 | gfx1030 |
+
 ## Architecture
 This project uses a Level-1/Level-2 pass architecture:
 - **Level-1 Pass** (`vaip-pass_level1_rocm`): Orchestrates sub-passes, checks GPU availability
@@ -63,10 +96,13 @@ Alternative manual build (adjust drive letter as needed):
 REM Set up environment (use C: or D: as appropriate)
 set WORKSPACE_ROOT=C:/Develop/m
 set THEROCK_DIST=%WORKSPACE_ROOT%\dist\therock
-call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
 
-REM Configure
-cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -B %WORKSPACE_ROOT%/build/onnx-hipdnn-ep -S . -DCMAKE_INSTALL_PREFIX=%WORKSPACE_ROOT%/local -DCMAKE_PREFIX_PATH=%WORKSPACE_ROOT%/local -DTHEROCK_DIST=%THEROCK_DIST%
+REM Detect GPU architecture (use output in HIP_ARCHITECTURES below)
+%THEROCK_DIST%\lib\llvm\bin\amdgpu-arch.exe
+
+REM Configure (replace gfx1151 with your detected GPU architecture!)
+cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -B %WORKSPACE_ROOT%/build/onnx-hipdnn-ep -S . -DCMAKE_INSTALL_PREFIX=%WORKSPACE_ROOT%/local -DCMAKE_PREFIX_PATH=%WORKSPACE_ROOT%/local -DTHEROCK_DIST=%THEROCK_DIST% -DHIP_ARCHITECTURES=gfx1151
 
 REM Build
 cmake --build %WORKSPACE_ROOT%/build/onnx-hipdnn-ep
