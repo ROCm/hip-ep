@@ -27,7 +27,6 @@ project(
   LANGUAGES C CXX)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
-include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/presets.cmake)
 
 # HIP kernels library (compiled with hipcc on Windows, CMake HIP on Linux)
 add_subdirectory(kernels)

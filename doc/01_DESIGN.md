@@ -118,7 +118,7 @@ onnx-hipdnn-ep/
 │
 ├── cmake/
 │   ├── deps.cmake                        # MorphiZen dependency fetch
-│   └── presets.cmake                     # CMake presets generation
+│   └── hip_utils.cmake                   # HIP compilation utilities
 │
 ├── proto/
 │   ├── CMakeLists.txt                    # Protobuf build config
@@ -172,7 +172,9 @@ onnx-hipdnn-ep/
 │   └── ...                               # Other documentation
 │
 └── tools/
-    └── initialize-cmake-preset.py        # CMake preset generator
+    ├── rebuild.bat                       # Incremental build script
+    ├── rebuild_and_test.bat              # Build and run tests
+    └── test_vitisai.bat                  # VitisAI EP test script
 ```
 
 ---
