@@ -34,9 +34,9 @@ get_commutable_add_pattern() {
 
 TEST_F(PatternTest, CommutableNode) {
 #ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
-  GTEST_SKIP()
-      << "Test skipped: MLIR backend requires MLIR test model (see Issue #028)";
-#else
+  // TODO(Issue #058): MLIR model node names differ from ONNX
+  GTEST_SKIP() << "MLIR backend: node names mismatch (Issue #058)";
+#endif
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.resolve();
@@ -61,7 +61,6 @@ TEST_F(PatternTest, CommutableNode) {
   LOG(INFO) << "matched node" << match_node.value();
   EXPECT_EQ(match_node.value().name(), "Add_178")
       << "name must be " << match_node.value();
-#endif
 }
 
 #if MORPHIZEN_HAS_ONNX_SCHEMA_SUPPORT
@@ -344,9 +343,9 @@ TEST_F(PatternTest, MultipleOutputs) {
 
 TEST_F(PatternTest, LoadSaveBinary) {
 #ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
-  GTEST_SKIP()
-      << "Test skipped: MLIR backend requires MLIR test model (see Issue #028)";
-#else
+  // TODO(Issue #058): MLIR model node names differ from ONNX
+  GTEST_SKIP() << "MLIR backend: node names mismatch (Issue #058)";
+#endif
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
   auto graph = model->main_graph();
   graph.resolve();
@@ -355,7 +354,7 @@ TEST_F(PatternTest, LoadSaveBinary) {
 
   auto ret = std::shared_ptr<morphizen::Pattern>();
   morphizen::PatternBuilder builder;
-#  include "pt_resnet50_add.h.inc"
+#include "pt_resnet50_add.h.inc"
   builder.bind("Add", ret);
   auto encoded_pattern = ret->to_binary();
   auto new_ret = morphizen::PatternBuilder().create_from_binary(
@@ -370,5 +369,4 @@ TEST_F(PatternTest, LoadSaveBinary) {
   //
   auto binder2 = new_ret->match(node.value());
   EXPECT_TRUE(binder2 != nullptr) << "cannot match the pattern";
-#endif
 }

@@ -184,6 +184,20 @@ add_custom_command(
   COMMENT "Copying pt_resnet50.onnx to test build directory"
 )
 
+if(morphizen_ENABLE_MLIR_BACKEND)
+  if(EXISTS ${RESNET_50_MLIR_PATH})
+    add_custom_command(
+      TARGET ${TEST_EXE_NAME} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${RESNET_50_MLIR_PATH}
+        ${CMAKE_CURRENT_BINARY_DIR}/pt_resnet50.onnx.mlir
+      COMMENT "Copying pt_resnet50.onnx.mlir to test build directory (MLIR backend)"
+    )
+  else()
+    message(WARNING "MLIR backend enabled but MLIR test model not found: ${RESNET_50_MLIR_PATH}")
+  endif()
+endif()
+
 add_dependencies(${TEST_EXE_NAME}
   tgt_pt_resnet50.onnx
   tgt_sample_src_tar

@@ -146,13 +146,8 @@ namespace morphizen {
 class PassContextConfigTest : public ::testing::Test {
 protected:
   void SetUp() override {
-#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
-    GTEST_SKIP() << "Test skipped: MLIR backend requires MLIR test model (see "
-                    "Issue #028)";
-#else
     model_ = morphizen_cxx::Model::load(RESNET_50_PATH);
     // Set up any necessary resources before each test
-#endif
   }
   void CreateContext(onnxruntime::ProviderOptions provider_options) {
     std::map<std::string, std::string> empty_session_configs;
@@ -196,6 +191,10 @@ protected:
 } // namespace morphizen
 using namespace morphizen;
 TEST_F(PassContextConfigTest, Config) {
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  // TODO(Issue #058): MLIR model node names differ from ONNX
+  GTEST_SKIP() << "MLIR backend: node names mismatch (Issue #058)";
+#endif
   auto cache_dir = CMAKE_CURRENT_BINARY_PATH / "c1";
   std::string cache_key =
       "33ad2fe7c4a7b71e55f5cbd9c0569bb4"; // use graph io based memory md5value.
@@ -211,6 +210,10 @@ TEST_F(PassContextConfigTest, Config) {
 }
 
 TEST_F(PassContextConfigTest, ProviderOptions) {
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  // TODO(Issue #058): MLIR model node names differ from ONNX
+  GTEST_SKIP() << "MLIR backend: node names mismatch (Issue #058)";
+#endif
   std::string cache_key = "33ad2fe7c4a7b71e55f5cbd9c0569bb4";
   auto config_file = CMAKE_CURRENT_SOURCE_PATH / "morphizen" /
                      "test_pass_context.data" / "sample_config_1.json";
@@ -268,6 +271,10 @@ TEST_F(PassContextConfigTest, TargetSpecifiedByEndUserNotValid) {
 }
 
 TEST_F(PassContextConfigTest, TargetSpecifiedByEndUserValid) {
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+  // TODO(Issue #058): MLIR model node names differ from ONNX
+  GTEST_SKIP() << "MLIR backend: node names mismatch (Issue #058)";
+#endif
   CreateContext(onnxruntime::ProviderOptions{
       {"target", "dummy-target"},
   });

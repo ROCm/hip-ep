@@ -10,16 +10,20 @@ TEST(MMapfileTest, create) {
 #ifdef _WIN32
   auto RESNET_50_PATH_MMAP =
       RESNET_50_PATH.parent_path() / "MMapfileTest.create";
-  std::filesystem::copy_file(
-      RESNET_50_PATH, RESNET_50_PATH_MMAP,
-      std::filesystem::copy_options::overwrite_existing |
-          std::filesystem::copy_options::update_existing);
+  // Fix: Remove target file first to ensure clean copy in CI cache environment
+  std::filesystem::remove(RESNET_50_PATH_MMAP);
+
+  // Get expected size from source file before copying
+  auto expected_size = std::filesystem::file_size(RESNET_50_PATH);
+  std::filesystem::copy_file(RESNET_50_PATH, RESNET_50_PATH_MMAP);
+
   auto mmap_file = morphizen::MemFile::create(RESNET_50_PATH_MMAP);
   ASSERT_TRUE(mmap_file) << "Failed to create MMapFile object";
   auto mmap_file_obj = std::move(mmap_file);
   ASSERT_TRUE(mmap_file_obj->base() != nullptr)
-      << "MMapFile base should be nullptr";
-  ASSERT_EQ(mmap_file_obj->size(), 102196389) << "MMapFile size should be 0";
+      << "MMapFile base should not be nullptr";
+  ASSERT_EQ(mmap_file_obj->size(), expected_size)
+      << "MMapFile size should match source file size";
 #endif
 }
 template <typename T> static void show_entry(const T& entry) {
@@ -33,10 +37,9 @@ TEST(MMapfileTest, CreateTar) {
   auto tarFileName1 = CMAKE_CURRENT_BINARY_PATH / "sample.src.tar";
   auto tarFileName2 =
       CMAKE_CURRENT_BINARY_PATH / "sample.src.tar.MMapfileTest.CreateTar";
-  std::filesystem::copy_file(
-      tarFileName1, tarFileName2,
-      std::filesystem::copy_options::overwrite_existing |
-          std::filesystem::copy_options::update_existing);
+  // Fix: Remove update_existing to ensure file is always overwritten
+  std::filesystem::copy_file(tarFileName1, tarFileName2,
+                             std::filesystem::copy_options::overwrite_existing);
   auto tar_file_obj = morphizen::TarFile::create_from_path(tarFileName2);
   ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
   for (auto& entry : tar_file_obj->entries()) {
@@ -52,10 +55,9 @@ TEST(MMapfileTest, CreateTarNoMMap) {
   auto tarFileName1 = CMAKE_CURRENT_BINARY_PATH / "sample.src.tar";
   auto tarFileName2 =
       CMAKE_CURRENT_BINARY_PATH / "sample.src.tar.MMapfileTest.CreateTarNoMMap";
-  std::filesystem::copy_file(
-      tarFileName1, tarFileName2,
-      std::filesystem::copy_options::overwrite_existing |
-          std::filesystem::copy_options::update_existing);
+  // Fix: Remove update_existing to ensure file is always overwritten
+  std::filesystem::copy_file(tarFileName1, tarFileName2,
+                             std::filesystem::copy_options::overwrite_existing);
   auto tar_file_obj =
       morphizen::TarFile::create_from_path(tarFileName2, false /*enable mmap*/);
   ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
