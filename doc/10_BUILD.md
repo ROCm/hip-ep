@@ -460,13 +460,7 @@ set PATH=%THEROCK_DIST%\bin;%PATH%
 
 ### Test Models
 
-Generate test models using the provided Python scripts:
-
-```cmd
-cd D:\onnx-hipdnn-ep\source\onnx-hipdnn-ep\test
-python gen_conv_model.py
-python gen_gemm_model.py
-```
+Test models can be generated using the `gen_sample_model.py` script or use the pre-built models in the `test/models/` directory.
 
 ## Development Tips
 

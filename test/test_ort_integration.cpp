@@ -145,7 +145,7 @@ TEST_F(OrtIntegrationTest, CPUProviderInference) {
   
   ASSERT_TRUE(model_available_) << "Conv model not found at: " << CONV_TEST_MODEL_PATH;
   
-  // Model parameters (matches gen_conv_model.py)
+  // Model parameters for conv test
   const std::vector<int64_t> input_shape = {1, 3, 8, 8};
   const size_t input_size = 1 * 3 * 8 * 8;
 
@@ -209,7 +209,7 @@ TEST_F(OrtIntegrationTest, MorphiZenProviderInference) {
   
   ASSERT_TRUE(model_available_) << "Conv model not found at: " << CONV_TEST_MODEL_PATH;
 
-  // Model parameters (matches gen_conv_model.py)
+  // Model parameters for conv test
   const std::vector<int64_t> input_shape = {1, 3, 8, 8};
   const size_t input_size = 1 * 3 * 8 * 8;
 

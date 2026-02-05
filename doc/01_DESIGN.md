@@ -156,11 +156,10 @@ onnx-hipdnn-ep/
 │
 ├── test/
 │   ├── CMakeLists.txt
-│   ├── test_conv.cpp                     # Conv unit tests
-│   ├── test_gemm.cpp                     # Gemm unit tests
-│   ├── gen_conv_model.py                 # Conv model generator
-│   ├── gen_gemm_model.py                 # Gemm model generator
-│   └── run_test_with_therock.bat         # Test runner script
+│   ├── test_gqa.cpp                      # GQA layer tests
+│   ├── test_timeout.cpp                  # GPU timeout tests
+│   ├── model_verifier.cpp                # CPU vs GPU comparison tool
+│   └── test_ort_integration.cpp          # ORT integration tests
 │
 ├── etc/
 │   └── morphizen_config.json             # Pass configuration
@@ -581,19 +580,13 @@ cmake --build C:/Develop/m/build/onnx-hipdnn-ep
 
 ### 10.1 Unit Tests
 
-- **test_conv.cpp**: Tests MIOpen Conv execution
-- **test_gemm.cpp**: Tests hipBLASLt Gemm execution
+- **test_gqa.cpp**: Tests GQA (Grouped Query Attention) layer execution
 - **test_timeout.cpp**: Tests GPU timeout handling
 
 ### 10.2 Integration Tests
 
-Test the full pipeline: model loading → pass execution → subgraph execution
-
-### 10.3 Model Generators
-
-Python scripts to generate test ONNX models:
-- `gen_conv_model.py`: Creates Conv models
-- `gen_gemm_model.py`: Creates Gemm models
+- **test_ort_integration.cpp**: Tests the full pipeline with ONNX Runtime
+- **model_verifier.cpp**: Compares CPU vs GPU inference results
 
 ---
 

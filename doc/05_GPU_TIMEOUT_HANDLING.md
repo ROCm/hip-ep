@@ -404,7 +404,6 @@ For historical context on the implementation, see `doc/archive/IMPLEMENTATION_SU
 **Testing:**
 - `test/test_timeout.cpp` - Comprehensive test suite
 - `test/CMakeLists.txt` - Build configuration
-- `test/run_timeout_test.bat` - Test runner script
 
 **Documentation:**
 - `README.md` - Updated with timeout feature
