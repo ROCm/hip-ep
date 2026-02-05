@@ -1,0 +1,18 @@
+#ifndef HIP_DIALECT
+#define HIP_DIALECT
+
+include "mlir/IR/OpBase.td"
+include "mlir/IR/DialectBase.td"
+
+def Hip_Dialect : Dialect {
+  let name = "hip";
+  let summary = "HIP runtime dialect";
+  let description = [{
+    A dialect for HIP (Heterogeneous-compute Interface for Portability) operations.
+    Provides operations for memory management and runtime handle operations.
+  }];
+  let cppNamespace = "::mlir::hip";
+  let useDefaultTypePrinterParser = 1;
+}
+
+#endif // HIP_DIALECT
