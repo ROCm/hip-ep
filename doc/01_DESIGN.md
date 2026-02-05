@@ -111,7 +111,6 @@ Combine both libraries into a single EP with:
 onnx-hipdnn-ep/
 ├── .clinerules                           # Cline development rules
 ├── .gitignore                            # Git ignore patterns
-├── build.bat                             # Windows build script
 ├── CMakeLists.txt                        # Root CMake configuration
 ├── LICENSE                               # MIT License
 ├── README.md                             # Project overview
@@ -558,21 +557,27 @@ void RocmCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const {
 
 ## 9. Build System
 
-### 9.1 Build Script (build.bat)
+### 9.1 Building with CMake
 
-```batch
-@echo off
-REM Set TheRock environment
-set THEROCK_DIST=C:\Develop\m\dist\therock
-set HIP_PLATFORM=amd
+```bash
+# Set environment
+export THEROCK_DIST=/path/to/therock
+export HIP_ARCHITECTURES=$(${THEROCK_DIST}/lib/llvm/bin/amdgpu-arch)
 
-REM Set up MSVC
-call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+# Configure
+cmake -G Ninja -B build -S . \
+  -DTHEROCK_DIST=$THEROCK_DIST \
+  -DCMAKE_PREFIX_PATH=$PWD/../local \
+  -DCMAKE_INSTALL_PREFIX=$PWD/../local \
+  -DHIP_PLATFORM=amd \
+  -DHIP_ARCHITECTURES=$HIP_ARCHITECTURES \
+  -DCMAKE_BUILD_TYPE=Release
 
-REM Configure and build
-cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Debug -B C:/Develop/m/build/onnx-hipdnn-ep -S .
-cmake --build C:/Develop/m/build/onnx-hipdnn-ep
+# Build
+cmake --build build --config Release
 ```
+
+See `README.md` for detailed build instructions.
 
 ---
 

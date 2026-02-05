@@ -150,9 +150,8 @@ $env:MORPHIZEN_GPU_TIMEOUT_MS = "10000"
 set MORPHIZEN_GPU_TIMEOUT_MS=10000
 ```
 
-**In build.bat or test scripts:**
+**In test scripts:**
 ```batch
-@echo off
 set MORPHIZEN_GPU_TIMEOUT_MS=15000
 .\ort_integration_test.exe
 ```

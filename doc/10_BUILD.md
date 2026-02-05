@@ -76,11 +76,11 @@ The HIP kernels must be compiled for your specific GPU architecture. Using the w
 
 **Setting the architecture:**
 ```powershell
-# Option 1: Environment variable (before running build.bat)
-$env:HIP_ARCHITECTURES = "gfx1151"
+# Detect architecture
+$env:HIP_ARCHITECTURES = & "$env:THEROCK_DIST\lib\llvm\bin\amdgpu-arch.exe"
 
-# Option 2: CMake command line
-cmake -DHIP_ARCHITECTURES=gfx1151 <build_dir>
+# Pass to CMake
+cmake -DHIP_ARCHITECTURES=$env:HIP_ARCHITECTURES <build_dir>
 ```
 
 ### 8. ONNX Runtime Source (Required)
@@ -112,7 +112,7 @@ D:\Develop\m\              # Or C:\Develop\m\
     └── therock\           # TheRock SDK
 ```
 
-**Note:** The build script automatically detects whether you're on C: or D: drive and adjusts paths accordingly.
+**Note:** Adjust paths according to your installation location.
 
 ## Building ONNX Runtime (Required First)
 
@@ -195,26 +195,11 @@ cmake ..\..
 
 This will generate the necessary configuration files without a full build.
 
-## Quick Build (Windows)
+## Building onnx-hipdnn-ep
 
 **Prerequisites:** Ensure you have built ONNX Runtime first (see "Building ONNX Runtime" section above).
 
-The simplest way to build is using the provided `build.bat` script:
-
-```cmd
-cd D:\onnx-hipdnn-ep\source\onnx-hipdnn-ep
-build.bat
-```
-
-This script will:
-1. Detect the current drive (C: or D:) and set paths accordingly
-2. Set up TheRock environment (checking multiple common locations)
-3. Initialize MSVC environment (supports both VS 2022 and VS 18 paths)
-4. Patch MorphiZen to skip tools that require ONNX Runtime
-5. Configure with CMake using Ninja generator
-6. Build all targets
-
-## Manual Build
+## Build Steps
 
 ### Step 1: Set Up Environment
 
@@ -346,17 +331,16 @@ Ensure TheRock is installed in one of these locations or set `THEROCK_DIST` manu
 
 ### Error: "Visual Studio 2022 not found"
 
-The build script checks:
-1. `C:\Program Files\Microsoft Visual Studio\2022\Community\`
-2. `C:\Program Files\Microsoft Visual Studio\18\Community\`
-
-If your Visual Studio is in a different location, modify `build.bat` accordingly.
+Ensure Visual Studio 2022 is installed and run vcvarsall.bat to set up the environment:
+```cmd
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+```
 
 ### Error: "Could NOT find Boost" or "Could NOT find onnxruntime"
 
-This occurs if MorphiZen tries to build tools (graph-opt, tar, pattern-gen, onnx-grep) that require these dependencies. The `build.bat` script automatically patches MorphiZen's CMakeLists.txt to skip these tools.
+This occurs if MorphiZen tries to build tools (graph-opt, tar, pattern-gen, onnx-grep) that require these dependencies.
 
-If building manually, ensure you add the patch step:
+You may need to patch MorphiZen's CMakeLists.txt to skip these tools:
 ```powershell
 $content = Get-Content '..\MorphiZen\CMakeLists.txt'
 $content = $content -replace 'add_subdirectory\(graph-opt\)', '#add_subdirectory(graph-opt)'
@@ -396,7 +380,7 @@ Then reconfigure.
 
 ### Build is Slow
 
-- Use Ninja generator (already default in build.bat)
+- Use Ninja generator: `cmake -G Ninja ...`
 - Use `-j N` to specify parallel jobs: `cmake --build . -j 16`
 - Use an SSD for the build directory
 - Close other applications to free up RAM for parallel compilation
@@ -428,7 +412,7 @@ This error may occur if you're trying to build components that require a fully b
    .\build.bat --config Release --cmake_generator Ninja --use_vitisai --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ..\build\onnxruntime --skip_tests
    ```
 
-2. **Use the build script's automatic patching**: The `build.bat` script automatically disables components that require ONNX Runtime's CMake config (graph-opt, tar, pattern-gen, onnx-grep).
+2. **Patch MorphiZen CMakeLists.txt**: Disable components that require ONNX Runtime's CMake config (graph-opt, tar, pattern-gen, onnx-grep).
 
 3. **Set ONNX Runtime install path**:
    ```cmd
@@ -468,18 +452,15 @@ Test models can be generated using the `gen_sample_model.py` script or use the p
 
 After the first successful build, subsequent builds are much faster:
 ```cmd
-cd D:\onnx-hipdnn-ep\source\onnx-hipdnn-ep
-.\build.bat
+cmake --build D:\Develop\m\build\onnx-hipdnn-ep --config Release
 ```
-
-The script skips CMake configuration if `build.ninja` already exists.
 
 ### Force Reconfiguration
 
-To force CMake reconfiguration:
+To force CMake reconfiguration, delete the cache and reconfigure:
 ```cmd
-del D:\Develop\m\build\onnx-hipdnn-ep\build.ninja
-.\build.bat
+del D:\Develop\m\build\onnx-hipdnn-ep\CMakeCache.txt
+cmake -G Ninja -B D:\Develop\m\build\onnx-hipdnn-ep -S . [options...]
 ```
 
 ### Rebuild Single Target
@@ -519,8 +500,9 @@ REM Clean build
 rmdir /s /q D:\Develop\m\build\onnx-hipdnn-ep
 
 REM Configure and build
-cd D:\onnx-hipdnn-ep\source\onnx-hipdnn-ep
-.\build.bat
+cd D:\Develop\m\source\onnx-hipdnn-ep
+cmake -G Ninja -B ..\build\onnx-hipdnn-ep -S . -DTHEROCK_DIST=%THEROCK_DIST% -DHIP_ARCHITECTURES=gfx1151 -DCMAKE_BUILD_TYPE=Release
+cmake --build ..\build\onnx-hipdnn-ep --config Release
 ```
 
 ## Next Steps
