@@ -16,9 +16,47 @@ add_definitions(${LLVM_DEFINITIONS_LIST})
 # Include directories
 include_directories(${LLVM_INCLUDE_DIRS})
 include_directories(${MLIR_INCLUDE_DIRS})
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+include_directories(${CMAKE_CURRENT_BINARY_DIR})
+
+# Add LLVM TableGen function
+list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
+list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
+include(TableGen)
+include(AddLLVM)
+include(AddMLIR)
+
+# Generate dialect definition
+set(LLVM_TARGET_DEFINITIONS HipDialect.td)
+mlir_tablegen(HipDialect.h.inc -gen-dialect-decls -dialect=hip)
+mlir_tablegen(HipDialect.cpp.inc -gen-dialect-defs -dialect=hip)
+add_public_tablegen_target(HipDialectIncGen)
+
+# Generate type definitions
+set(LLVM_TARGET_DEFINITIONS HipTypes.td)
+mlir_tablegen(HipTypes.h.inc -gen-typedef-decls -typedefs-dialect=hip)
+mlir_tablegen(HipTypes.cpp.inc -gen-typedef-defs -typedefs-dialect=hip)
+add_public_tablegen_target(HipTypesIncGen)
+
+# Generate operation definitions
+set(LLVM_TARGET_DEFINITIONS HipOps.td)
+mlir_tablegen(HipOps.h.inc -gen-op-decls)
+mlir_tablegen(HipOps.cpp.inc -gen-op-defs)
+add_public_tablegen_target(HipOpsIncGen)
 
 # Add the executable
-add_executable(hip-opt hip-opt.cpp)
+add_executable(hip-opt 
+  hip-opt.cpp
+  HipDialect.cpp
+  HipToLLVM.cpp
+)
+
+# Add dependencies on TableGen targets
+add_dependencies(hip-opt 
+  HipDialectIncGen
+  HipTypesIncGen
+  HipOpsIncGen
+)
 
 # Link LLVM components
 llvm_map_components_to_libnames(llvm_libs Support Core)
@@ -32,6 +70,10 @@ target_link_libraries(hip-opt PRIVATE
   MLIRPass
   MLIRTransforms
   MLIRAnalysis
+  MLIRLLVMDialect
+  MLIRLLVMCommonConversion
+  MLIRFuncDialect
+  MLIRTransformUtils
   ${llvm_libs}
 )
 
