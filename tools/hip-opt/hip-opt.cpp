@@ -1,29 +1,22 @@
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
-#include "mlir/InitAllDialects.h"
-#include "mlir/InitAllPasses.h"
+#include "mlir/IR/BuiltinDialect.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 
-// Include custom HIP dialect headers
-#include "HipDialect.h"      // Defines the "hip" dialect
-#include "HipPasses.h"       // Defines the "convert-hip-to-llvm" pass
+#include "HipDialect.h"
+#include "HipPasses.h"
 
 int main(int argc, char **argv) {
-  // A. Create a Dialect Registry
   mlir::DialectRegistry registry;
-  
-  // B. Register Standard Dialects (so you can use func, scf, etc.)
-  mlir::registerAllDialects(registry);
-
-  // C. Register HIP Custom Dialect
+  registry.insert<mlir::BuiltinDialect>();
+  registry.insert<mlir::arith::ArithDialect>();
+  registry.insert<mlir::func::FuncDialect>();
+  registry.insert<mlir::memref::MemRefDialect>();
   registry.insert<mlir::hip::HipDialect>();
 
-  // D. Register Standard Passes
-  mlir::registerAllPasses();
-
-  // E. Register HIP Custom Passes
-  // This allows you to run: --convert-hip-to-llvm
   mlir::hip::registerHipPasses();
 
-  // F. Run the tool (Just like mlir-opt)
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "hip-opt: custom compiler driver\n", registry));
 }
