@@ -329,8 +329,6 @@ cmake --build ..\build\onnx-hipdnn-ep --config Release --target install --parall
 ```bash
 # Set environment
 export PATH="$THEROCK_DIST/bin:$PATH"
-export MORPHIZEN_DEBUG_ROCM=1
-export MORPHIZEN_ROCM_EN_LVL1_MERGE=1
 
 # Run test
 cd ../local/bin
@@ -340,8 +338,6 @@ cd ../local/bin
 ```powershell
 # Set environment
 $env:PATH = "$env:THEROCK_DIST\bin;$env:PATH"
-$env:MORPHIZEN_DEBUG_ROCM = "1"
-$env:MORPHIZEN_ROCM_EN_LVL1_MERGE = "1"
 
 # Run test
 cd ..\local\bin
