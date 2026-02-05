@@ -21,7 +21,7 @@ def Hip_CreateHandleOp : Hip_Op<"create_handle", []> {
   }];
   
   let results = (outs Hip_HandleType:$handle);
-  let assemblyFormat = "attr-dict `:` type($handle)";
+  let assemblyFormat = "`(` `)` attr-dict `:` type($handle)";
 }
 
 def Hip_DestroyHandleOp : Hip_Op<"destroy_handle", []> {
