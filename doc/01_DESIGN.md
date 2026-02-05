@@ -165,16 +165,11 @@ onnx-hipdnn-ep/
 ├── etc/
 │   └── morphizen_config.json             # Pass configuration
 │
-├── doc/
-│   ├── 01_DESIGN.md                      # This document
-│   ├── 02_LEVEL1_PASS_DESIGN.md          # Level-1 pass details
-│   ├── 03_GROUPING_ALGORITHM.md          # Union-Find grouping
-│   └── ...                               # Other documentation
-│
-└── tools/
-    ├── rebuild.bat                       # Incremental build script
-    ├── rebuild_and_test.bat              # Build and run tests
-    └── test_vitisai.bat                  # VitisAI EP test script
+└── doc/
+    ├── 01_DESIGN.md                      # This document
+    ├── 02_LEVEL1_PASS_DESIGN.md          # Level-1 pass details
+    ├── 03_GROUPING_ALGORITHM.md          # Union-Find grouping
+    └── ...                               # Other documentation
 ```
 
 ---
