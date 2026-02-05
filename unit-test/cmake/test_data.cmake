@@ -8,6 +8,8 @@ if(NOT EXISTS ${RESNET_50_ONNX_PATH})
 endif()
 # Create a target that depends on the local file
 add_custom_target(tgt_pt_resnet50.onnx DEPENDS ${RESNET_50_ONNX_PATH})
+
+set(RESNET_50_MLIR_PATH "${CMAKE_SOURCE_DIR}/ort-bridge/test/src/pt_resnet50.onnx.mlir")
 set_target_properties(tgt_pt_resnet50.onnx PROPERTIES FOLDER morphizen/unit-tests/data)
 
 add_custom_target(tgt_sample_src_tar

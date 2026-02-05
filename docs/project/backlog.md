@@ -36,7 +36,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 | [#019](issues/019-refactor-initialize-context.md) | Refactor initialize_context | L | 2h | Config/Context | - | morphizen_compile_model.cpp |
 | [#024](issues/024-remove-legacy-compile-entry-points.md) | Remove Legacy Compile API | M | 1h | Legacy Cleanup | - | onnxruntime_morphizen_ep.hpp/.cpp |
 | [#026](issues/026-mlir-model-export-api.md) | MLIR Model Export API | M | 1h | MLIR Features | - | morphizen-ort-api-ext.hpp/mlir-model.cpp |
-| [#028](issues/028-mlir-backend-test-model-support.md) | ResNet50 MLIR Test Model | H | 1h | MLIR Testing | - | test_environment.hpp/mlir-model.cpp |
 | [#029](issues/029-passcontext-tarfile-initialization.md) | PassContext tarfile Init | M | 1h | Test Infrastructure | - | test_pass_context.cpp/pass_context_imp.cpp |
 | [#030](issues/030-morphizen-pass-init-plugin-loading.md) | morphizen-pass_init Plugin | M | 1h | Test Infrastructure | - | pass_imp.cpp/CMakeLists.txt |
 | [#031](issues/031-target-auto-discovery-failure.md) | Target Auto-Discovery Fail | M | 1h | Test Infrastructure | - | pass_context_imp.cpp/test-hello-ep.cpp |
@@ -59,6 +58,8 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 | [#054](issues/054-eliminate-dangerous-unowned-buffer-factory-method.md) | Eliminate Unowned Buffer | L | 15m | TarFile Cleanup | - | tar_file.hpp/.cpp/test_tar_file.cpp |
 | [#055](issues/055-remove-non-const-entries-overload.md) | Remove Non-Const entries | L | 15m | TarFile Cleanup | - | tar_file.hpp |
 | [#056](issues/056-add-comprehensive-documentation-to-tarfile.md) | Add TarFile Docs | M | 2h | TarFile Docs | - | tar_file.hpp |
+| [#057](issues/057-mlir-backend-metadata-api-not-implemented.md) | MLIR Metadata API | M | 1h | MLIR Testing | - | mlir-model.cpp |
+| [#058](issues/058-mlir-test-model-node-names-mismatch.md) | MLIR Node Names Mismatch | M | 1h | MLIR Testing | - | test_model.cpp/mlir-model.cpp |
 
 **Legend:**
 - **Pri**: Priority (C=Critical, H=High, M=Medium, L=Low)
@@ -74,11 +75,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 See **[completed-issues.md](completed-issues.md)** for full archive of all completed issues.
 
 **Recent (last 5):**
+- #028 (PR #110) - MLIR Backend Test Model Support - Enabled 23 unit tests with MLIR format model
 - #027 (PR #118) - Eliminate C-Style APIs from morphizen-graph
 - #007 (PR #108) - Remove Target Copying - Two-Path Architecture
 - #059 (PR #115) - /resolve-ci Skill - Autonomous CI Resolution
 - #058 (PR #115) - /fix-issue Skill - Complete Workflow Automation
-- #057 (PR #115) - Backlog Format Optimization for AI Parsing
 
 ---
 
