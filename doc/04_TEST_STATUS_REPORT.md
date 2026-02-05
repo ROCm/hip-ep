@@ -9,8 +9,8 @@
 ## How to Reproduce
 
 ### Prerequisites
-1. Build the project using `build.bat`
-2. Ensure TheRock ROCm SDK is installed at `C:\Develop\m\dist\therock`
+1. Build the project using CMake (see README.md for instructions)
+2. Ensure TheRock ROCm SDK is installed and `THEROCK_DIST` is set
 
 ### Quick Test (Basic)
 ```batch
