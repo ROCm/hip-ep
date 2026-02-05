@@ -6,11 +6,11 @@ Licensed under the MIT License.
 
 ## Overview
 
-This document analyzes all 20 backlog issues, identifies their groupings, dependencies, and blocking relationships.
+This document analyzes the 28 active backlog issues, identifies their groupings, dependencies, and blocking relationships.
 
 **Created:** 2026-01-30
-**Updated:** 2026-01-31 (added issues #012-#020)
-**Status:** Current as of issue #020
+**Updated:** 2026-02-05
+**Status:** Current as of 28 active issues
 
 ---
 
@@ -19,524 +19,257 @@ This document analyzes all 20 backlog issues, identifies their groupings, depend
 ### Group A: Core Config/Context Refactoring
 *Foundational changes to ConfigProto and ContextProto separation*
 
-- **#003**: Remove ConfigProto from ContextProto
-- **#004**: Remove encryption_key Copying
-- **#005**: Move cache_key to ContextProto
-- **#007**: Clean Up Target with Two-Path Architecture
-- **#012**: session_configs Swapping (resolved by #003)
-- **#013**: provider_options Aggregation (cleanup after #003, #008, #009)
-- **#014**: Dynamic Pass Registration (ConfigProto immutability)
-- **#015**: Configuration Initialization (move version info to ContextProto)
-- **#017**: Remove update_config_by_target() (cleanup after #007 and #014)
-- **#018**: Make ConfigProto const Member (final enforcement after all mutations eliminated)
+- **#013**: provider_options Aggregation (cleanup after prerequisite issues complete)
 - **#019**: Refactor initialize_context() (god function cleanup - optional quality improvement)
 
-### Group B: Cache System Cleanup
-*Removing obsolete cache_dir system and dead code*
+### Group B: Migration & API Evolution
+*Major architectural transitions*
 
-- **#002**: Remove mem_files_ - Always Create tar_file_
-- **#006**: Remove cache_dir Entirely
-- **#010**: Remove cache_files - Dead Code
-- **#011**: Update PassContext Header Documentation
+- **#024**: V1 to V2 Execution Provider API Migration
+- **#026**: Multi-Target Support Refactoring
+- **#027**: Deprecate Single-Target Methods
 
-### Group C: Provider Options Cleanup
-*Removing NPU-specific and obsolete provider_options injection*
+### Group C: Pattern System Enhancements
+*Pattern matching and graph rewriting improvements*
 
-- **#008**: MEP Table Cleanup
+- **#029**: Named Patterns Support
+- **#030**: Node Deduplication Pattern
+- **#031**: Pattern Composition Support
+- **#032**: Pattern Debugging Tools
+- **#033**: Constant Folding Pattern
+- **#034**: Reshape Elimination Pattern
+- **#035**: Add/Sub with Zero Optimization Pattern
+- **#036**: Mul/Div by One Optimization Pattern
+
+### Group D: Code Quality & Testing
+*Code cleanup, maintainability, and test improvements*
+
 - **#009**: TargetProto Provider Options Injection Cleanup
+- **#038**: Improve Unit Test Coverage
+- **#039**: Add Integration Tests
+- **#040**: Refactor Graph Builder API
+- **#042**: Performance Profiling Infrastructure
+- **#044**: Error Handling Improvements
+- **#047**: Logging System Refactoring
+- **#048**: Memory Management Improvements
+- **#050**: CI/CD Pipeline Enhancements
+- **#051**: Documentation Generation Automation
+- **#052**: Static Analysis Integration
+- **#053**: Fuzzing Infrastructure
+- **#054**: Benchmark Suite
+- **#055**: Code Coverage Reporting
+- **#056**: Performance Regression Detection
 
-### Group D: Global State Cleanup
-*Eliminating global state mutations and improving testability*
+### Group E: New Features
+*New capabilities and functionality*
 
-- **#016**: Remove dirty_hack_for_model_clone_external_data_threshold
-
-### Group E: Feature Addition
-*New functionality*
-
-- **#001**: Add mmap Support for Embed Mode
-
-### Group F: General Code Cleanup
-*Independent cleanup - dead code removal, code quality improvements*
-
-- **#020**: Remove suffix_counter Dead Code (never written, always false condition)
-
----
-
-## Dependency Graph
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                      FOUNDATIONAL                            │
-│                                                              │
-│  ┌──────────────────────────────────────────────────┐       │
-│  │ #003: Remove ConfigProto from ContextProto       │       │
-│  │       (Make ConfigProto runtime-only)            │       │
-│  └──────────────┬───────────────────────────────────┘       │
-│                 │                                            │
-│                 │ BLOCKS (must complete first)               │
-│                 │                                            │
-│  ┌──────────────▼───────────────────────────────────┐       │
-│  │ #004: Remove encryption_key Copying              │       │
-│  │       (encryption_key won't exist in proto)      │       │
-│  └──────────────────────────────────────────────────┘       │
-│                                                              │
-│                 │ INFLUENCES (should coordinate)             │
-│                 │                                            │
-│  ┌──────────────▼───────────────────────────────────┐       │
-│  │ #005: Move cache_key to ContextProto             │       │
-│  │       (cache_key needs persistence)              │       │
-│  └──────────────────────────────────────────────────┘       │
-│                                                              │
-│                 │ INFLUENCES (ConfigProto immutability)      │
-│                 │                                            │
-│  ┌──────────────▼───────────────────────────────────┐       │
-│  │ #007: Target Two-Path Architecture               │       │
-│  │       (ConfigProto readonly design)              │       │
-│  └──────────────────────────────────────────────────┘       │
-│                                                              │
-│                 │ RESOLVES (ConfigProto runtime-only)        │
-│                 │                                            │
-│  ┌──────────────▼───────────────────────────────────┐       │
-│  │ #012: session_configs Swapping                   │       │
-│  │       (no separate work - resolved by #003)      │       │
-│  └──────────────────────────────────────────────────┘       │
-│                                                              │
-│                 │ RELATED (ConfigProto immutability)         │
-│                 │                                            │
-│  ┌──────────────▼───────────────────────────────────┐       │
-│  │ #014: Dynamic Pass Registration                  │       │
-│  │       (compute passes on-demand)                 │       │
-│  └──────────────────────────────────────────────────┘       │
-│                                                              │
-│  ┌──────────────────────────────────────────────────┐       │
-│  │ #015: Configuration Initialization               │       │
-│  │       (move version info to ContextProto)        │       │
-│  └──────────────────────────────────────────────────┘       │
-│                                                              │
-│                 │ DEPENDS ON (#007 AND #014)                 │
-│                 │                                            │
-│  ┌──────────────▼───────────────────────────────────┐       │
-│  │ #017: Remove update_config_by_target()           │       │
-│  │       (cleanup after #007 and #014)              │       │
-│  └──────────────┬───────────────────────────────────┘       │
-│                 │                                            │
-│                 │ DEPENDS ON (ALL mutations eliminated)      │
-│                 │ (#004, #005, #007, #014, #015, #017)      │
-│                 │                                            │
-│  ┌──────────────▼───────────────────────────────────┐       │
-│  │ #018: Make ConfigProto const Member              │       │
-│  │       (final enforcement - compile-time)         │       │
-│  └──────────────────────────────────────────────────┘       │
-└──────────────────────────────────────────────────────────────┘
-
-
-┌──────────────────────────────────────────────────────────────┐
-│                    CACHE CLEANUP                             │
-│                                                              │
-│  ┌──────────────────────────────────────────────────┐       │
-│  │ #006: Remove cache_dir Entirely                  │       │
-│  │       (~200-300 LOC obsolete system)             │       │
-│  └──────────────┬───────────────────────────────────┘       │
-│                 │                                            │
-│                 │ RELATED (uses get_log_dir from cache_dir)  │
-│                 │                                            │
-│  ┌──────────────▼───────────────────────────────────┐       │
-│  │ #009: Remove xclbin API                          │       │
-│  │       (calls get_log_dir, will break after #006) │       │
-│  └──────────────────────────────────────────────────┘       │
-│                                                              │
-│                 │ RELATED (cache_files from old system)      │
-│                 │                                            │
-│  ┌──────────────▼───────────────────────────────────┐       │
-│  │ #010: Remove cache_files Proto Field             │       │
-│  │       (dead code from cache_dir era)             │       │
-│  └──────────────────────────────────────────────────┘       │
-│                                                              │
-│                 │ RELATED (docs reference cache_dir)         │
-│                 │                                            │
-│  ┌──────────────▼───────────────────────────────────┐       │
-│  │ #011: Update PassContext Documentation           │       │
-│  │       (remove outdated ASCII art)                │       │
-│  └──────────────────────────────────────────────────┘       │
-│                                                              │
-│  ┌──────────────────────────────────────────────────┐       │
-│  │ #002: Remove mem_files_                          │       │
-│  │       (always create tar_file_)                  │       │
-│  └──────────────────────────────────────────────────┘       │
-│                 │                                            │
-│                 │ ENABLES (better tar_file_ foundation)      │
-│                 │                                            │
-│  ┌──────────────▼───────────────────────────────────┐       │
-│  │ #001: Add mmap Support for Embed Mode            │       │
-│  │       (enhance tar_file_ with mmap)              │       │
-│  └──────────────────────────────────────────────────┘       │
-└──────────────────────────────────────────────────────────────┘
-
-
-┌──────────────────────────────────────────────────────────────┐
-│              PROVIDER OPTIONS CLEANUP                        │
-│                                                              │
-│  ┌──────────────────────────────────────────────────┐       │
-│  │ #008: Remove MEP Table                           │       │
-│  │       (NPU-specific, doesn't scale)              │       │
-│  └──────────────┬───────────────────────────────────┘       │
-│                 │                                            │
-│  ┌──────────────▼───────────────────────────────────┐       │
-│  │ #009: Remove xclbin API                          │       │
-│  │       (NPU-specific, dead code)                  │       │
-│  └──────────────┬───────────────────────────────────┘       │
-│                 │                                            │
-│                 │ DEPENDS ON (#003, #008, #009)              │
-│                 │                                            │
-│  ┌──────────────▼───────────────────────────────────┐       │
-│  │ #013: provider_options Aggregation               │       │
-│  │       (cleanup after prerequisites complete)     │       │
-│  └──────────────────────────────────────────────────┘       │
-└──────────────────────────────────────────────────────────────┘
-
-
-┌──────────────────────────────────────────────────────────────┐
-│              GLOBAL STATE CLEANUP                            │
-│                                                              │
-│  ┌──────────────────────────────────────────────────┐       │
-│  │ #016: Remove dirty_hack_for_model_clone_threshold│       │
-│  │       (eliminate global state mutation)          │       │
-│  └──────────────────────────────────────────────────┘       │
-│                                                              │
-│  INDEPENDENT - can be done anytime                           │
-│  RELATED to #014 (both involve pass-dependent config)        │
-└──────────────────────────────────────────────────────────────┘
-
-
-┌──────────────────────────────────────────────────────────────┐
-│              GENERAL CODE CLEANUP                            │
-│                                                              │
-│  ┌──────────────────────────────────────────────────┐       │
-│  │ #020: Remove suffix_counter Dead Code            │       │
-│  │       (read metadata never written)              │       │
-│  └──────────────────────────────────────────────────┘       │
-│                                                              │
-│  INDEPENDENT - can be done anytime                           │
-│  RELATED to #019 (both simplify initialize_context)          │
-└──────────────────────────────────────────────────────────────┘
-```
+- **#013**: provider_options Aggregation (also a cleanup task)
 
 ---
 
-## Blocking Relationships
+## Dependency Relationships
 
-### Critical Path (Must Complete in Order)
+### Active Dependencies
 
-**#003 → #004** (Hard Block)
-- **Issue #004 BLOCKED by #003**
-- Reason: encryption_key field won't exist in ConfigProto proto after #003
-- #004 explicitly states: "Dependencies: Issue #003 (must complete first)"
-- Cannot remove encryption_key copying until ConfigProto is removed from ContextProto
+**#013: provider_options Aggregation**
+- **Status**: Ready to implement (prerequisite issues #003, #008, #009 completed)
+- **Previous blockers**: Issue #003 (completed), Issue #008 (completed), Issue #009 (in cleanup)
+- **Description**: Cleanup task to remove obsolete provider_option_from_cache_ and simplify get_all_provider_options()
+- **Impact**: Simplifies provider options flow after Config/Context separation
 
-### Coordination Required (Should Work Together)
+**#019: Refactor initialize_context()**
+- **Status**: Optional quality improvement
+- **Previous blockers**: Issue #005 (completed), Issue #017 (completed)
+- **Description**: Extract cache_key computation logic (~23 lines → separate function) to reduce god function complexity
+- **Benefits**: Better testability, clearer code, easier maintenance
+- **Note**: Not required for ConfigProto immutability (already achieved), purely for code quality
 
-**#003 ⇄ #005** (Soft Dependency)
-- **Should coordinate or do #005 after #003**
-- Reason: cache_key currently in ConfigProto, needs to move to ContextProto
-- #005 states: "Dependencies: Should be done after or with Issue #003"
-- After #003, ConfigProto won't be persisted → cache_key loses persistence → must move
+**#024: V1 to V2 Execution Provider API Migration**
+- **Influences**: #026, #027 (multi-target support depends on V2 API patterns)
+- **Description**: Major migration from deprecated V1 API to modern V2 API
+- **Impact**: Foundation for future multi-target capabilities
 
-**#003 ⇄ #007** (Design Coordination)
-- **Should coordinate** (ConfigProto immutability)
-- Reason: Both issues assume ConfigProto becomes immutable/runtime-only
-- #007 states: "Dependencies: Coordinated with Issue #003 (ConfigProto immutability)"
-- #007's design depends on ConfigProto being readonly
+**#026: Multi-Target Support Refactoring**
+- **Related to**: #024 (V2 API provides better patterns for multi-target)
+- **Related to**: #027 (deprecation cleanup follows multi-target design)
+- **Description**: Support multiple compilation targets in single session
 
-**#003 → #012** (Resolves)
-- **#012 automatically resolved by #003**
-- Reason: session_configs swapping exists because ConfigProto is persisted
-- After #003, ConfigProto is runtime-only → no swapping needed
-- #012 is a design discussion issue, not a separate implementation
+**#027: Deprecate Single-Target Methods**
+- **Follows**: #026 (deprecate old methods after new multi-target API ready)
+- **Description**: Clean up legacy single-target API after multi-target support added
 
-**#003, #008, #009 → #013** (Prerequisites)
-- **#013 depends on #003, #008, #009 completing first**
-- Reason: #013 is cleanup task after prerequisites eliminate sources
-- After #003: No swapping needed
-- After #008: MEP table source gone
-- After #009: TargetProto injection source gone
-- Then #013: Remove obsolete code (provider_option_from_cache_, etc.)
+**Pattern System Issues (#029-#036)**
+- **Group dependency**: All pattern issues can be worked on in parallel
+- **Shared foundation**: morphizen-pattern/ module (~2.2K LOC, 12 pattern types)
+- **Common testing**: All require unit tests in pattern system
 
-**#007, #014 → #017** (Prerequisites)
-- **#017 depends on BOTH #007 AND #014 completing first**
-- Reason: update_config_by_target() does two things resolved by these issues
-- After #007: TargetProto copying eliminated (raw pointer)
-- After #014: Dynamic pass registration eliminated (compute_effective_passes)
-- Then #017: Remove obsolete update_config_by_target() function (becomes empty)
-
-**#004, #005, #007, #014, #015, #017 → #018** (Final Enforcement)
-- **#018 depends on ALL mutation-fixing issues completing first**
-- Reason: Making config_ const requires zero mutations to ConfigProto
-- After #004: encryption_key mutations eliminated
-- After #005: cache_key mutations eliminated
-- After #007: target mutations eliminated
-- After #014: pass mutations eliminated
-- After #015: version info mutations eliminated
-- After #017: update_config_by_target() removed
-- Then #018: Make config_ const (compile-time enforcement of immutability)
-
-### Related (No Blocking, But Connected)
-
-**#006 → #009** (Related, Not Blocking)
-- **#009 related to #006** (xclbin uses cache_dir)
-- Reason: xclbin functions call `get_log_dir()` from obsolete cache_dir system
-- #009 states: "Dependencies: Related to Issue #006 (cache_dir removal)"
-- #009 notes: "After Issue #006, get_log_dir() will be removed"
-- **Not blocking** - #009 can be done before #006 (removes dead code anyway)
-- **Cleaner together** - Both remove obsolete cache_dir remnants
-
-**#006 → #010** (Related)
-- **#010 related to #006** (cache_files from old system)
-- Reason: cache_files proto field is dead code from cache_dir era
-- Both remove remnants of obsolete disk-based cache system
-
-**#006 → #011** (Related)
-- **#011 related to #006** (docs reference cache_dir)
-- Reason: ASCII art shows cache_files_to_dir (doesn't exist, legacy from cache_dir)
-- Documentation cleanup after cache_dir removal
-
-**#002 → #001** (Enables)
-- **#001 enabled by #002** (better tar_file_ foundation)
-- Reason: #002 ensures tar_file_ always created, #001 adds mmap to tar_file_
-- #001 works on tar_file_ system that #002 improves
-- **Not blocking** - #001 can be done without #002
-- **Better with #002** - Simpler tar_file_ logic makes mmap easier
-
-**#003 ⇄ #014** (Related)
-- **#014 related to #003** (ConfigProto immutability goal)
-- Reason: #014 eliminates ConfigProto mutations from dynamic pass registration
-- Both work toward immutable ConfigProto
-- **Not blocking** - #014 can be done independently
-
-**#003 ⇄ #015** (Related)
-- **#015 related to #003** (moving things out of ConfigProto)
-- Reason: #015 moves version info from ConfigProto to ContextProto
-- Similar pattern to other fields moving out of ConfigProto
-- **Not blocking** - #015 can be done independently
-
-**#014 ⇄ #016** (Related)
-- **#016 related to #014** (pass-dependent configuration)
-- Reason: Both involve configuration that depends on passes
-- #014: Pass selection at runtime (compute effective passes)
-- #016: Threshold based on passes (compute threshold)
-- **Pattern:** Configuration depending on passes should be computed, not mutated globally
-
-**#007, #014 → #017** (Cleanup After)
-- **#017 is cleanup after both #007 and #014** (removes obsolete function)
-- Reason: update_config_by_target() becomes empty after prerequisites
-- #007 eliminates TargetProto copying (line 143)
-- #014 eliminates dynamic pass registration (lines 141-142)
-- #017 removes the now-empty function (simple deletion)
-
-**#005, #017 → #019** (Optional Quality Improvement)
-- **#019 related to #005 and #017** (code quality refactoring)
-- Reason: initialize_context() is cleaner after #005 and #017 complete
-- After #005: cache_key mutations move to ContextProto (clearer logic)
-- After #017: update_config_by_target() removed (~15 lines shorter)
-- Then #019: Extract cache_key computation, reduce complexity
-- **Not blocking** - #019 is optional quality improvement
-- **Not required for immutable ConfigProto** - ConfigProto will be immutable without #019
-- **Benefits:** Better testability, clearer code, easier maintenance
-
-**#019 ⇄ #020** (Related - Both Simplify initialize_context)
-- **#020 related to #019** (both cleanup initialize_context)
-- Reason: Both issues simplify initialize_context() function
-- #019: Extract cache_key computation (~23 lines → separate function)
-- #020: Remove suffix_counter dead code (4 lines → delete)
-- Together: initialize_context() becomes ~26 lines (was ~52 after #005, #006, #017)
-- **Independent** - Can be done in any order or separately
-- **Benefits:** Cleaner, simpler, more maintainable initialize_context()
+**Testing & Infrastructure Issues (#038-#056)**
+- **Mostly independent**: Can be worked on in parallel
+- **Some coordination**:
+  - #038, #039 (unit tests, integration tests - share test infrastructure)
+  - #050, #052, #053, #055, #056 (CI/CD pipeline enhancements - coordinate for CI config)
+  - #042, #054, #056 (performance testing - share benchmark infrastructure)
 
 ---
 
 ## Recommended Implementation Order
 
-### Phase 1: Foundational Refactoring (Config/Context Separation)
+### Phase 1: Cleanup from Previous Work
 
-**Priority: HIGH** - Unblocks other issues
+**Priority: HIGH** - Complete unfinished cleanup
 
-1. **#003: Remove ConfigProto from ContextProto** ⚠️ **START HERE**
-   - Foundational change
-   - Blocks #004, influences #005 and #007
-   - Medium complexity
+1. **#009: TargetProto Provider Options Injection Cleanup**
+   - NPU-specific, dead code removal
+   - Simple cleanup task
+   - Time: ~1-2 hours
 
-2. **#005: Move cache_key to ContextProto** (immediately after #003)
-   - Must move cache_key before it loses persistence
-   - Related to #003 changes
+2. **#013: provider_options Aggregation Cleanup**
+   - Remove obsolete code after Config/Context separation
+   - Prerequisites completed (#003, #008, #009)
+   - Time: ~1-2 hours
 
-3. **#004: Remove encryption_key Copying** (after #003)
-   - Blocked by #003
-   - Simple cleanup once #003 done
+3. **#019: Refactor initialize_context()** (optional)
+   - Extract cache_key computation
+   - Code quality improvement
+   - Time: ~2-3 hours
 
-4. **#007: Clean Up Target with Two-Path Architecture** (after #003)
-   - Benefits from ConfigProto immutability from #003
-   - Medium complexity, comprehensive redesign
+### Phase 2: API Migration & Multi-Target Support
 
-5. **#012: session_configs Swapping** (automatically resolved by #003)
-   - No separate implementation needed
-   - Resolved when #003 makes ConfigProto runtime-only
+**Priority: HIGH** - Foundation for future features
 
-6. **#015: Configuration Initialization** (can be done with or after #003)
-   - Move version info from ConfigProto to ContextProto
-   - Simple refactoring, related to #003 cleanup
+4. **#024: V1 to V2 Execution Provider API Migration**
+   - Major architectural migration
+   - Blocks/influences multi-target work
+   - Time: ~2-3 days
 
-7. **#014: Dynamic Pass Registration** (independent, related to #003 goal)
-   - Architectural redesign
-   - Compute effective passes on-demand
-   - Can be done in parallel with other Phase 1 issues
+5. **#026: Multi-Target Support Refactoring**
+   - After or with #024 (V2 API patterns help)
+   - Major architectural enhancement
+   - Time: ~3-5 days
 
-8. **#017: Remove update_config_by_target()** (after #007 AND #014)
-   - Simple cleanup (15 minutes)
-   - Remove obsolete function
-   - Must wait for both #007 and #014 to complete
+6. **#027: Deprecate Single-Target Methods**
+   - After #026 (cleanup old API)
+   - Simple deprecation + documentation
+   - Time: ~1 day
 
-9. **#018: Make ConfigProto const Member** (after ALL mutations eliminated)
-   - Final enforcement (5 minutes)
-   - Change config_ to const config_
-   - Must wait for #004, #005, #007, #014, #015, #017 to complete
-   - Compile-time verification of immutability
+### Phase 3: Pattern System Enhancements
 
-### Phase 2: Cache System Cleanup
+**Priority: MEDIUM** - Optimization capabilities
 
-**Priority: MEDIUM** - Tech debt cleanup, no blockers
+Can be worked on in parallel:
 
-Can be done in parallel with Phase 1 (except items coordinating with #003):
+7. **#029: Named Patterns Support**
+   - Foundation for pattern composition
+   - Time: ~2-3 days
 
-10. **#006: Remove cache_dir Entirely** (independent)
-   - Large cleanup (~200-300 LOC)
-   - Enables cleaner #009, #010, #011
+8. **#030: Node Deduplication Pattern**
+   - Optimization pattern
+   - Time: ~1-2 days
 
-11. **#009: Remove xclbin API** (after or with #006)
-    - Related to #006 (uses get_log_dir)
-    - Can be done before #006, but cleaner after
+9. **#031: Pattern Composition Support**
+   - After #029 (uses named patterns)
+   - Advanced pattern features
+   - Time: ~2-3 days
 
-12. **#010: Remove cache_files Proto Field** (after or with #006)
-    - Dead code from cache_dir era
-    - Simple removal
+10. **#032: Pattern Debugging Tools**
+    - Developer tooling
+    - Time: ~2-3 days
 
-13. **#011: Update PassContext Documentation** (after #006)
-    - Documentation cleanup
-    - References cache_dir in ASCII art
+11. **#033: Constant Folding Pattern**
+    - Optimization pattern
+    - Time: ~2-3 days
 
-14. **#002: Remove mem_files_** (independent)
-    - Improve tar_file_ system
-    - Medium complexity (needs TarFile error handling fix)
+12. **#034: Reshape Elimination Pattern**
+    - Optimization pattern
+    - Time: ~1-2 days
 
-### Phase 3: Provider Options Cleanup
+13. **#035: Add/Sub with Zero Optimization Pattern**
+    - Simple optimization pattern
+    - Time: ~1 day
 
-**Priority: MEDIUM** - After Phase 1 prerequisites
+14. **#036: Mul/Div by One Optimization Pattern**
+    - Simple optimization pattern
+    - Time: ~1 day
 
-15. **#008: Remove MEP Table** (independent)
-    - NPU-specific, doesn't scale
-    - Simple removal, docs update
+### Phase 4: Testing & Quality Infrastructure
 
-16. **#009: Remove xclbin API** (if not done in Phase 2)
-    - NPU-specific, dead code
-    - Simple removal
+**Priority: MEDIUM to HIGH** - Foundation for reliability
 
-17. **#013: provider_options Aggregation Cleanup** (after #003, #008, #009)
-    - Remove obsolete code after prerequisites
-    - Remove provider_option_from_cache_
-    - Simplify get_all_provider_options()
+Can be worked on in parallel, some coordination needed:
 
-### Phase 4: Global State Cleanup
+15. **#038: Improve Unit Test Coverage**
+    - Ongoing effort
+    - Target: >80% coverage
+    - Time: Ongoing
 
-**Priority: MEDIUM** - Independent refactoring
+16. **#039: Add Integration Tests**
+    - E2E testing infrastructure
+    - Time: ~3-5 days
 
-18. **#016: Remove dirty_hack_for_model_clone_external_data_threshold** (independent)
-    - Eliminate global state mutation
-    - Compute threshold as pure function
-    - Related to #014 (pass-dependent configuration)
+17. **#040: Refactor Graph Builder API**
+    - Code quality improvement
+    - Time: ~2-3 days
 
-### Phase 5: Feature Addition
+18. **#044: Error Handling Improvements**
+    - Code quality/robustness
+    - Time: ~2-3 days
 
-**Priority: LOW** - Enhancement, not cleanup
+19. **#047: Logging System Refactoring**
+    - Infrastructure improvement
+    - Time: ~2-3 days
 
-19. **#001: Add mmap Support for Embed Mode** (optional, after #002)
-    - New feature, not tech debt
-    - Benefits from #002 (better tar_file_ foundation)
-    - Lower priority than cleanups
+20. **#048: Memory Management Improvements**
+    - Performance/reliability
+    - Time: ~3-5 days
 
----
+### Phase 5: CI/CD & DevOps Infrastructure
 
-## Summary of Blocking Relationships
+**Priority: MEDIUM** - Developer productivity
 
-### Hard Blocks (Must Complete First)
+Coordinate for CI configuration changes:
 
-- **#003 blocks #004** - encryption_key won't exist in proto after #003
+21. **#050: CI/CD Pipeline Enhancements**
+    - Foundation for other CI features
+    - Time: ~2-3 days
 
-### Soft Dependencies (Should Coordinate)
+22. **#051: Documentation Generation Automation**
+    - Developer tooling
+    - Time: ~1-2 days
 
-- **#003 influences #005** - cache_key needs new home after ConfigProto removal
-- **#003 influences #007** - target design assumes ConfigProto immutability
-- **#003 resolves #012** - session_configs swapping eliminated when ConfigProto runtime-only
-- **#003, #008, #009 → #013** - provider_options cleanup depends on these completing first
-- **#007, #014 → #017** - update_config_by_target() removal depends on both completing first
+23. **#052: Static Analysis Integration**
+    - Code quality automation
+    - Coordinate with #050 (CI integration)
+    - Time: ~2-3 days
 
-### Related (Cleaner Together, Not Blocking)
+24. **#053: Fuzzing Infrastructure**
+    - Testing infrastructure
+    - Coordinate with #050 (CI integration)
+    - Time: ~3-5 days
 
-- **#006 relates to #009** - xclbin uses cache_dir's get_log_dir()
-- **#006 relates to #010** - cache_files from cache_dir era
-- **#006 relates to #011** - docs reference cache_dir functions
-- **#002 enables #001** - better tar_file_ makes mmap easier
-- **#003 relates to #014** - both work toward ConfigProto immutability
-- **#003 relates to #015** - moving things out of ConfigProto
-- **#014 relates to #016** - both involve pass-dependent configuration
-- **#007, #014 → #017** - update_config_by_target() cleanup after prerequisites
+25. **#055: Code Coverage Reporting**
+    - Testing infrastructure
+    - Coordinate with #050 (CI integration)
+    - Time: ~1-2 days
 
-### Independent (No Dependencies)
+### Phase 6: Performance Infrastructure
 
-- **#008** - MEP table removal (independent)
-- **#002** - mem_files_ removal (independent, but enables #001)
-- **#006** - cache_dir removal (independent, but cleanups follow)
-- **#001** - mmap feature (independent, but benefits from #002)
-- **#014** - Dynamic pass registration (independent, related to #003 goal)
-- **#015** - Configuration initialization (independent, related to #003)
-- **#016** - Model clone threshold hack (independent, related to #014)
+**Priority: MEDIUM** - Performance monitoring
 
----
+Coordinate for shared benchmark infrastructure:
 
-## Risk Analysis
+26. **#042: Performance Profiling Infrastructure**
+    - Foundation for performance work
+    - Time: ~3-5 days
 
-### High Risk (Breaks Others if Not Coordinated)
+27. **#054: Benchmark Suite**
+    - Performance testing
+    - Related to #042 (profiling)
+    - Time: ~3-5 days
 
-- **#003** - Foundational change, affects #004, #005, #007
-  - Risk: Breaking encryption_key, cache_key, target logic
-  - Mitigation: Complete #003 first, then do #004, #005, #007
-
-### Medium Risk (Large Changes)
-
-- **#006** - Removes ~200-300 LOC
-  - Risk: Breaking get_log_dir() callers
-  - Mitigation: Search for all get_log_dir() usage before removal
-
-- **#007** - Major redesign (two-path architecture)
-  - Risk: Breaking target auto-discovery
-  - Mitigation: Comprehensive testing, update docs
-
-- **#002** - Fixing TarFile error handling
-  - Risk: tmpfile() failures not handled
-  - Mitigation: Add proper error handling before removing mem_files_
-
-- **#014** - Dynamic pass registration redesign
-  - Risk: Breaking pass selection logic
-  - Mitigation: Comprehensive testing, ensure compute_effective_passes() handles all cases
-
-### Low Risk (Simple Removals)
-
-- **#004** - Simple removal (after #003)
-- **#008** - Simple removal (MEP table)
-- **#009** - Simple removal (xclbin dead code)
-- **#010** - Simple removal (cache_files dead code)
-- **#011** - Documentation only
-- **#012** - No implementation (resolved by #003)
-- **#013** - Simple cleanup after prerequisites (remove obsolete code)
-- **#015** - Simple move (version info to ContextProto)
-- **#016** - Refactor function to pure function (testable, low risk)
+28. **#056: Performance Regression Detection**
+    - CI integration for performance
+    - Depends on #042, #054, coordinate with #050
+    - Time: ~2-3 days
 
 ---
 
@@ -544,37 +277,76 @@ Can be done in parallel with Phase 1 (except items coordinating with #003):
 
 These groups can be worked on in parallel:
 
-**Track 1: Config/Context Refactoring** (sequential within track)
-- #003 → #004, #005, #007, #012 (resolved), #014, #015
-- #007, #014 → #017 (cleanup after both complete)
-- #004, #005, #007, #014, #015, #017 → #018 (final enforcement after ALL mutations eliminated)
-- #013 (cleanup after #003, #008, #009)
+**Track 1: Cleanup & API Migration** (sequential within track)
+- #009 → #013 → #019 (optional)
+- #024 → #026 → #027
 
-**Track 2: Cache System Cleanup** (mostly parallel)
-- #006, #002 (independent)
-- #009, #010, #011 (after or with #006)
+**Track 2: Pattern System** (mostly parallel, some coordination)
+- #029 (foundation for composition)
+- #030, #032, #033, #034, #035, #036 (parallel)
+- #031 (after #029 - uses named patterns)
 
-**Track 3: Provider Options Cleanup** (parallel)
-- #008 (independent)
-- #009 (if not in Track 2)
+**Track 3: Testing Infrastructure** (parallel, some coordination)
+- #038 (ongoing)
+- #039, #040, #044, #047, #048 (parallel)
 
-**Track 4: Global State Cleanup** (parallel)
-- #016 (independent)
+**Track 4: CI/CD & DevOps** (parallel, coordinate for CI config)
+- #050 (foundation - do first)
+- #051, #052, #053, #055 (parallel, integrate with #050)
 
-**Track 5: Feature** (independent)
-- #001 (anytime, better after #002)
+**Track 5: Performance** (sequential, coordinate for shared infrastructure)
+- #042 (foundation - profiling)
+- #054 (benchmarks - uses #042)
+- #056 (regression detection - depends on #042, #054, integrates with #050)
 
 **Maximum parallelism:**
-- Start #003 (Track 1 - foundational)
-- Simultaneously start #006 + #002 (Track 2 - independent)
-- Simultaneously start #008 (Track 3 - independent)
-- Simultaneously start #016 (Track 4 - independent)
-- After #003 completes → #004, #005, #007, #014, #015 (Track 1 continues)
-- After #007 + #014 complete → #017 (Track 1 cleanup)
-- After #004 + #005 + #007 + #014 + #015 + #017 complete → #018 (Track 1 final enforcement)
-- After #003 + #008 + #009 complete → #013 (Track 1 cleanup)
-- After #006 completes → #009, #010, #011 (Track 2 continues)
-- After #002 completes → #001 (Track 5 - optional)
+- **Week 1-2**: Start Track 1 (#009, #013), Track 3 (#038, #039, #040), Track 4 (#050)
+- **Week 3-4**: Continue Track 1 (#019, #024), start Track 2 (#029, #030, #033, #034), continue Track 3 (#044, #047)
+- **Week 5-6**: Continue Track 1 (#026, #027), Track 2 (#031, #032, #035, #036), Track 4 (#051, #052, #053, #055)
+- **Week 7-8**: Track 3 (#048), Track 5 (#042, #054, #056)
+
+---
+
+## Risk Analysis
+
+### High Risk (Major Architectural Changes)
+
+- **#024: V1 to V2 API Migration**
+  - Risk: Breaking existing integrations, API compatibility
+  - Mitigation: Comprehensive testing, backward compatibility layer, staged rollout
+
+- **#026: Multi-Target Support**
+  - Risk: Breaking single-target assumptions throughout codebase
+  - Mitigation: Feature flag, extensive testing, documentation
+
+- **#048: Memory Management Improvements**
+  - Risk: Memory leaks, use-after-free, performance regression
+  - Mitigation: Extensive testing, sanitizers, benchmark comparisons
+
+### Medium Risk (Significant Changes)
+
+- **#040: Graph Builder API Refactoring**
+  - Risk: Breaking existing graph construction code
+  - Mitigation: Deprecation period, migration guide
+
+- **#047: Logging System Refactoring**
+  - Risk: Breaking existing log consumers
+  - Mitigation: Backward compatibility, staged migration
+
+- **#053: Fuzzing Infrastructure**
+  - Risk: CI instability from fuzz testing
+  - Mitigation: Separate CI job, timeout controls
+
+### Low Risk (Incremental Improvements)
+
+- **#009**: Simple removal (dead code)
+- **#013**: Simple cleanup (after prerequisites completed)
+- **#019**: Optional refactoring (no functional changes)
+- **#027**: Deprecation (doesn't remove functionality)
+- **#029-#036**: Pattern additions (additive, not breaking)
+- **#038, #039**: Testing improvements (low risk)
+- **#042, #054, #056**: Performance tooling (observability, not functional changes)
+- **#050, #051, #052, #055**: CI/DevOps improvements (infrastructure only)
 
 ---
 
@@ -582,70 +354,91 @@ These groups can be worked on in parallel:
 
 ### By Phase
 
-**Phase 1 Complete:** 9 issues (Config/Context separation done)
-- #003, #004, #005, #007, #012 (resolved), #014, #015, #017, #018
-- Unblocks: #004, #013, #017, #018, enables cleaner #005, #007, #015
-- Final result: ConfigProto immutable (compile-time enforced)
+**Phase 1 Complete:** 3 issues (Cleanup from previous work)
+- #009, #013, #019
+- Benefits: Cleaner codebase, simpler provider options, better initialize_context()
 
-**Phase 2 Complete:** 5 issues (Cache system cleaned up)
-- #006, #009, #010, #011, #002
-- Benefits: ~300+ LOC removed, cleaner tar_file_ system
+**Phase 2 Complete:** 3 issues (API Migration & Multi-Target)
+- #024, #026, #027
+- Benefits: Modern API, multi-target support, cleaner single-target deprecation
 
-**Phase 3 Complete:** 3 issues (Provider options cleaned up)
-- #008, #009, #013
-- Benefits: Simpler provider_options flow
+**Phase 3 Complete:** 8 issues (Pattern System)
+- #029, #030, #031, #032, #033, #034, #035, #036
+- Benefits: More powerful optimization patterns, better debugging, pattern composition
 
-**Phase 4 Complete:** 1 issue (Global state cleanup)
-- #016
-- Benefits: No global state mutations, better testability
+**Phase 4 Complete:** 6 issues (Testing & Quality)
+- #038, #039, #040, #044, #047, #048
+- Benefits: Higher test coverage, integration tests, better error handling, improved logging
 
-**Phase 5 Complete:** 1 issue (Feature added)
-- #001
-- Benefits: Better memory efficiency for embed mode
+**Phase 5 Complete:** 5 issues (CI/CD & DevOps)
+- #050, #051, #052, #053, #055
+- Benefits: Better CI pipeline, automated docs, static analysis, fuzzing, coverage reporting
 
-**Total:** 18 issues (includes #012 which is resolved by #003)
+**Phase 6 Complete:** 3 issues (Performance)
+- #042, #054, #056
+- Benefits: Performance profiling tools, benchmark suite, regression detection
 
-### By Lines of Code Removed
+**Total:** 28 active issues
 
-- **#006**: ~200-300 LOC (cache_dir)
-- **#002**: ~200 LOC (mem_files_)
-- **#009**: ~40 LOC (xclbin API)
-- **#010**: ~15 LOC (cache_files + restore function)
-- **#004**: ~10 LOC (encryption_key copying)
-- **#008**: Variable (MEP table, docs update)
-- **#011**: ASCII art removal (docs only)
-- **#012**: No code changes (resolved by #003)
-- **#013**: ~20 LOC (provider_option_from_cache_, swapping logic)
-- **#014**: Refactoring (not deletion - replace mutations with compute)
-- **#015**: ~10 LOC (move, not delete - version info to ContextProto)
-- **#016**: ~10 LOC (replace dirty hack with pure function)
-- **#017**: ~15 LOC (remove obsolete update_config_by_target function)
-- **#018**: ~1 LOC (add const keyword - enforcement, not cleanup)
+### Impact Summary
 
-**Estimated total cleanup:** ~565+ LOC removed/refactored + compile-time enforcement
+**Code Quality:**
+- Cleaner APIs (#024, #026, #027, #040)
+- Better error handling (#044)
+- Improved logging (#047)
+- Memory improvements (#048)
+
+**Testing:**
+- Higher unit test coverage (#038)
+- Integration testing (#039)
+- Fuzzing (#053)
+- Coverage reporting (#055)
+
+**Performance:**
+- Profiling infrastructure (#042)
+- Benchmark suite (#054)
+- Regression detection (#056)
+
+**Developer Productivity:**
+- Pattern debugging (#032)
+- Documentation automation (#051)
+- Static analysis (#052)
+- CI/CD improvements (#050)
+
+**Optimization Capabilities:**
+- 8 new/enhanced pattern types (#029-#036)
+- Pattern composition (#031)
 
 ---
 
 ## Next Steps
 
-1. **Confirm priority**: Should we start with #003 (foundational) or work on independent issues?
-2. **Resource allocation**: Can we work on multiple tracks in parallel?
-3. **Create plans**: Enter plan mode for chosen issue(s)?
+1. **Immediate actions**: Complete Phase 1 cleanup (#009, #013, #019)
+2. **Short-term planning**: Start Phase 2 API migration (#024, #026, #027)
+3. **Medium-term planning**: Parallel work on Pattern System (Phase 3) and Testing (Phase 4)
+4. **Long-term planning**: Infrastructure improvements (Phases 5-6)
 
-**Recommendations:**
+**Recommended approach:**
 
-**Foundational approach (sequential):**
-- Start with **#003** (Remove ConfigProto from ContextProto)
-- Unblocks: #004, #012 (auto-resolved), #013
-- Influences: #005, #007, #015
+**Quick wins (start immediately):**
+- #009 (TargetProto cleanup - 1-2 hours)
+- #013 (provider_options cleanup - 1-2 hours)
+- #035, #036 (simple optimization patterns - 1 day each)
 
-**Parallel approach (maximum throughput):**
-- **Track 1:** #003 (foundational)
-- **Track 2:** #006 (largest cleanup ~200-300 LOC) + #002
-- **Track 3:** #008 (independent)
-- **Track 4:** #014 + #016 (independent, architectural improvements)
+**High-impact (plan carefully):**
+- #024 (V1 to V2 migration - major architectural change)
+- #026 (Multi-target support - major feature)
+- #038, #039 (testing infrastructure - foundation for reliability)
 
-**Quick wins (independent, low risk):**
-- #015 (Configuration Initialization - simple move)
-- #016 (Model Clone Threshold - refactor to pure function)
-- #008 (MEP Table - simple removal)
+**Infrastructure (parallel track):**
+- #050 (CI/CD pipeline - enables other DevOps work)
+- #042 (Performance profiling - enables performance work)
+
+---
+
+## Notes
+
+- **Completed issues removed**: 24 issues completed and removed from this analysis (001, 003, 004, 005, 006, 007, 008, 010, 011, 012, 014, 015, 016, 017, 018, 021, 022, 025, 028, 037, 041, 057, 058, 059)
+- **Active issues**: 28 issues remain in backlog
+- **ConfigProto immutability**: Already achieved through completed issues
+- **Next major milestone**: V2 API Migration (#024) + Multi-Target Support (#026)
