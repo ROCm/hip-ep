@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.20)
 project(hip-opt)
 
+# Optional: use LLVM/MLIR from a build tree at C:/local/llvm-project
+if(NOT LLVM_DIR AND EXISTS "C:/local/llvm-project/build/lib/cmake/llvm/LLVMConfig.cmake")
+  set(LLVM_DIR "C:/local/llvm-project/build/lib/cmake/llvm")
+endif()
+if(NOT MLIR_DIR AND EXISTS "C:/local/llvm-project/build/lib/cmake/mlir/MLIRConfig.cmake")
+  set(MLIR_DIR "C:/local/llvm-project/build/lib/cmake/mlir")
+endif()
+
 # Find LLVM using LLVM_DIR
 find_package(LLVM REQUIRED CONFIG)
 find_package(MLIR REQUIRED CONFIG)
