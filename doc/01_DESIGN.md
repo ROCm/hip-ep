@@ -1,10 +1,10 @@
-# morphizen-rocm Design Document
+# onnx-hipdnn-ep Design Document
 
 ## 1. Overview
 
 ### 1.1 Purpose
 
-**morphizen-rocm** is a unified ROCm Execution Provider for ONNX Runtime that combines:
+**onnx-hipdnn-ep** is a unified ROCm Execution Provider for ONNX Runtime that combines:
 - **MIOpen**: AMD's optimized library for convolution operations
 - **hipBLASLt**: AMD's high-performance library for GEMM (matrix multiplication)
 
@@ -108,7 +108,7 @@ Combine both libraries into a single EP with:
 ## 3. Project Structure
 
 ```
-morphizen-rocm/
+onnx-hipdnn-ep/
 ├── .clinerules                           # Cline development rules
 ├── .gitignore                            # Git ignore patterns
 ├── build.bat                             # Windows build script
@@ -574,8 +574,8 @@ REM Set up MSVC
 call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
 
 REM Configure and build
-cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Debug -B C:/Develop/m/build/morphizen-rocm -S .
-cmake --build C:/Develop/m/build/morphizen-rocm
+cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Debug -B C:/Develop/m/build/onnx-hipdnn-ep -S .
+cmake --build C:/Develop/m/build/onnx-hipdnn-ep
 ```
 
 ---

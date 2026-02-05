@@ -96,7 +96,7 @@ $env:THEROCK_DIST = "C:\Develop\m\dist\therock"
 $env:PATH = "$env:THEROCK_DIST\bin;$env:PATH"
 
 # Enable disk cache
-$env:VITISAI_EP_PROVIDER_OPTION_config_file = "C:\Develop\m\Source\morphizen-rocm\etc\vaip_config_disk.json"
+$env:VITISAI_EP_PROVIDER_OPTION_config_file = "C:\Develop\m\Source\onnx-hipdnn-ep\etc\vaip_config_disk.json"
 $env:XLNX_ENABLE_CACHE = "0"
 
 # Enable debug logging
@@ -104,7 +104,7 @@ $env:MORPHIZEN_DEBUG_ROCM = "2"
 $env:GLOG_logtostderr = "1"
 
 # Run test
-cd C:\Develop\m\build\morphizen-rocm\bin
+cd C:\Develop\m\build\onnx-hipdnn-ep\bin
 .\ort_integration_test.exe --gtest_filter=*VitisAI*
 
 # Inspect generated files

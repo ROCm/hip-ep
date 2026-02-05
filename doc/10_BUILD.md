@@ -1,6 +1,6 @@
-# Building morphizen-rocm
+# Building onnx-hipdnn-ep
 
-This document provides detailed instructions for building the morphizen-rocm project on Windows with Visual Studio.
+This document provides detailed instructions for building the onnx-hipdnn-ep project on Windows with Visual Studio.
 
 ## Prerequisites
 
@@ -49,9 +49,41 @@ For GPU acceleration with MIOpen and hipBLASLt, install TheRock:
    $env:THEROCK_DIST = "C:\dist\therock"
    ```
 
-**Note:** TheRock is required for morphizen-rocm as it provides MIOpen and hipBLASLt libraries.
+**Note:** TheRock is required for onnx-hipdnn-ep as it provides MIOpen and hipBLASLt libraries.
 
-### 7. ONNX Runtime Source (Required)
+**Important:** Choose the TheRock build that matches your GPU architecture (e.g., `therock-dist-windows-gfx1151-*.tar.gz` for gfx1151 GPUs).
+
+### 7. GPU Architecture (HIP_ARCHITECTURES)
+
+The HIP kernels must be compiled for your specific GPU architecture. Using the wrong architecture will result in runtime crashes.
+
+**Finding your GPU architecture:**
+```powershell
+# Using rocminfo from TheRock
+& "$env:THEROCK_DIST\bin\rocminfo.exe" | Select-String "gfx"
+```
+
+**Common AMD GPU architectures:**
+
+| Architecture | GPUs |
+|--------------|------|
+| `gfx1100` | Radeon RX 7900 XTX/XT (Navi 31) |
+| `gfx1102` | Radeon RX 7600 (Navi 33) |
+| `gfx1103` | Radeon 780M/760M iGPU (Phoenix) |
+| `gfx1151` | Radeon PRO W7000 series |
+| `gfx90a` | MI200 series (CDNA2) |
+| `gfx942` | MI300 series (CDNA3) |
+
+**Setting the architecture:**
+```powershell
+# Option 1: Environment variable (before running build.bat)
+$env:HIP_ARCHITECTURES = "gfx1151"
+
+# Option 2: CMake command line
+cmake -DHIP_ARCHITECTURES=gfx1151 <build_dir>
+```
+
+### 8. ONNX Runtime Source (Required)
 
 ONNX Runtime source code is required for headers and API definitions:
 
@@ -60,7 +92,7 @@ cd D:\Develop\m\source
 git clone --recursive https://github.com/microsoft/onnxruntime.git
 ```
 
-**Note:** You must build ONNX Runtime before building morphizen-rocm. See the "Building ONNX Runtime" section below.
+**Note:** You must build ONNX Runtime before building onnx-hipdnn-ep. See the "Building ONNX Runtime" section below.
 
 ## Directory Structure
 
@@ -69,11 +101,11 @@ The recommended directory structure is:
 ```
 D:\Develop\m\              # Or C:\Develop\m\
 ├── source\
-│   ├── morphizen-rocm\    # This project
+│   ├── onnx-hipdnn-ep\    # This project
 │   ├── MorphiZen\         # MorphiZen framework (auto-fetched if not present)
 │   └── onnxruntime\       # ONNX Runtime source (REQUIRED - clone and build first)
 ├── build\
-│   ├── morphizen-rocm\    # morphizen-rocm build output
+│   ├── onnx-hipdnn-ep\    # onnx-hipdnn-ep build output
 │   └── onnxruntime\       # ONNX Runtime build output
 ├── local\                 # Install prefix
 └── dist\
@@ -84,7 +116,7 @@ D:\Develop\m\              # Or C:\Develop\m\
 
 ## Building ONNX Runtime (Required First)
 
-Before building morphizen-rocm, you need to build ONNX Runtime first, as morphizen-rocm depends on ONNX Runtime headers and may require the built libraries for some components.
+Before building onnx-hipdnn-ep, you need to build ONNX Runtime first, as onnx-hipdnn-ep depends on ONNX Runtime headers and may require the built libraries for some components.
 
 ### Step 1: Clone ONNX Runtime (if not already cloned)
 
@@ -96,7 +128,7 @@ cd onnxruntime
 
 ### Step 2: Build ONNX Runtime (Release Configuration)
 
-For a Release build with VitisAI EP support (required for morphizen-rocm):
+For a Release build with VitisAI EP support (required for onnx-hipdnn-ep):
 
 ```cmd
 REM Set up Visual Studio environment
@@ -118,7 +150,7 @@ REM Build ONNX Runtime with VitisAI EP in Release mode using Ninja (this will ta
 **Important Options:**
 - `--config Release` - Build in Release mode (optimized, recommended for production)
 - `--cmake_generator Ninja` - Use Ninja build system (faster than Visual Studio, recommended)
-- `--use_vitisai` - Enable VitisAI Execution Provider (required for morphizen-rocm)
+- `--use_vitisai` - Enable VitisAI Execution Provider (required for onnx-hipdnn-ep)
 - `--build_shared_lib` - Build onnxruntime.dll
 - `--parallel` - Enable parallel compilation
 - `--compile_no_warning_as_error` - Don't treat warnings as errors
@@ -135,7 +167,7 @@ REM Build ONNX Runtime with VitisAI EP in Release mode using Ninja (this will ta
 
 ### Step 3: Install ONNX Runtime (Required)
 
-After building ONNX Runtime, you must install it so that morphizen-rocm can find the CMake configuration files:
+After building ONNX Runtime, you must install it so that onnx-hipdnn-ep can find the CMake configuration files:
 
 ```cmd
 cd D:\Develop\m\source\build\onnxruntime\Release
@@ -146,9 +178,9 @@ This will install:
 - Headers to `D:\Develop\m\local\include\onnxruntime\`
 - Libraries to `D:\Develop\m\local\lib\`
 - DLLs to `D:\Develop\m\local\bin\`
-- **CMake config** to `D:\Develop\m\local\lib\cmake\onnxruntime\` (required for morphizen-rocm)
+- **CMake config** to `D:\Develop\m\local\lib\cmake\onnxruntime\` (required for onnx-hipdnn-ep)
 
-**Note:** This step is required before building morphizen-rocm.
+**Note:** This step is required before building onnx-hipdnn-ep.
 
 ### Alternative: Minimal Build
 
@@ -170,7 +202,7 @@ This will generate the necessary configuration files without a full build.
 The simplest way to build is using the provided `build.bat` script:
 
 ```cmd
-cd D:\morphizen-rocm\source\morphizen-rocm
+cd D:\onnx-hipdnn-ep\source\onnx-hipdnn-ep
 build.bat
 ```
 
@@ -208,7 +240,7 @@ cmake -G "Ninja" ^
   -DBUILD_SHARED_LIBS=OFF ^
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ^
   -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL ^
-  -B D:\Develop\m\build\morphizen-rocm ^
+  -B D:\Develop\m\build\onnx-hipdnn-ep ^
   -S . ^
   -DCMAKE_INSTALL_PREFIX=D:\Develop\m\local ^
   -DCMAKE_PREFIX_PATH=D:\Develop\m\local ^
@@ -225,13 +257,13 @@ cmake -G "Ninja" ^
 ### Step 4: Build
 
 ```cmd
-cmake --build D:\Develop\m\build\morphizen-rocm
+cmake --build D:\Develop\m\build\onnx-hipdnn-ep
 ```
 
 ### Step 5: Install (Optional)
 
 ```cmd
-cmake --install D:\Develop\m\build\morphizen-rocm
+cmake --install D:\Develop\m\build\onnx-hipdnn-ep
 ```
 
 ## Build Options
@@ -258,7 +290,7 @@ cmake -G "Ninja" ^
   -DBUILD_SHARED_LIBS=OFF ^
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ^
   -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebugDLL ^
-  -B D:\Develop\m\build\morphizen-rocm ^
+  -B D:\Develop\m\build\onnx-hipdnn-ep ^
   -S . ^
   -DCMAKE_INSTALL_PREFIX=D:\Develop\m\local ^
   -DCMAKE_PREFIX_PATH=D:\Develop\m\local ^
@@ -273,7 +305,7 @@ After a successful build, you'll find:
 
 ### Libraries
 
-Key libraries in `D:\Develop\m\build\morphizen-rocm\`:
+Key libraries in `D:\Develop\m\build\onnx-hipdnn-ep\`:
 
 | Library | Description |
 |---------|-------------|
@@ -352,13 +384,13 @@ Ensure `CMAKE_MSVC_RUNTIME_LIBRARY` matches across all dependencies:
 - Release builds: Use `MultiThreadedDLL` (/MD)
 - Debug builds: Use `MultiThreadedDebugDLL` (/MDd)
 
-Note: morphizen-rocm uses **dynamic runtime** (/MD) to match TheRock's protobuf library, unlike morphizen-hipblaslt which uses static runtime (/MT).
+Note: onnx-hipdnn-ep uses **dynamic runtime** (/MD) to match TheRock's protobuf library, unlike morphizen-hipblaslt which uses static runtime (/MT).
 
 ### Error: "CMake source path mismatch"
 
 This occurs when the build directory has a cached configuration from a different source location. Clean the build directory:
 ```cmd
-rmdir /s /q D:\Develop\m\build\morphizen-rocm
+rmdir /s /q D:\Develop\m\build\onnx-hipdnn-ep
 ```
 
 Then reconfigure.
@@ -411,7 +443,7 @@ This error may occur if you're trying to build components that require a fully b
 After building, you can run integration tests with the VitisAI EP:
 
 ```cmd
-cd D:\Develop\m\build\morphizen-rocm\bin
+cd D:\Develop\m\build\onnx-hipdnn-ep\bin
 set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
 set THEROCK_DIST=C:\dist\therock
 set PATH=%THEROCK_DIST%\bin;%PATH%
@@ -432,7 +464,7 @@ set PATH=%THEROCK_DIST%\bin;%PATH%
 Generate test models using the provided Python scripts:
 
 ```cmd
-cd D:\morphizen-rocm\source\morphizen-rocm\test
+cd D:\onnx-hipdnn-ep\source\onnx-hipdnn-ep\test
 python gen_conv_model.py
 python gen_gemm_model.py
 ```
@@ -443,7 +475,7 @@ python gen_gemm_model.py
 
 After the first successful build, subsequent builds are much faster:
 ```cmd
-cd D:\morphizen-rocm\source\morphizen-rocm
+cd D:\onnx-hipdnn-ep\source\onnx-hipdnn-ep
 .\build.bat
 ```
 
@@ -453,32 +485,32 @@ The script skips CMake configuration if `build.ninja` already exists.
 
 To force CMake reconfiguration:
 ```cmd
-del D:\Develop\m\build\morphizen-rocm\build.ninja
+del D:\Develop\m\build\onnx-hipdnn-ep\build.ninja
 .\build.bat
 ```
 
 ### Rebuild Single Target
 
 ```cmd
-cmake --build D:\Develop\m\build\morphizen-rocm --target morphizen-custom-op-rocm
+cmake --build D:\Develop\m\build\onnx-hipdnn-ep --target morphizen-custom-op-rocm
 ```
 
 ### Clean Build
 
 ```cmd
-cmake --build D:\Develop\m\build\morphizen-rocm --target clean
+cmake --build D:\Develop\m\build\onnx-hipdnn-ep --target clean
 ```
 
 ### Enable Verbose Output
 
 ```cmd
-cmake --build D:\Develop\m\build\morphizen-rocm -v
+cmake --build D:\Develop\m\build\onnx-hipdnn-ep -v
 ```
 
 ### View Build Targets
 
 ```cmd
-cmake --build D:\Develop\m\build\morphizen-rocm --target help
+cmake --build D:\Develop\m\build\onnx-hipdnn-ep --target help
 ```
 
 ## Continuous Integration
@@ -491,16 +523,16 @@ set THEROCK_DIST=C:\dist\therock
 call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
 
 REM Clean build
-rmdir /s /q D:\Develop\m\build\morphizen-rocm
+rmdir /s /q D:\Develop\m\build\onnx-hipdnn-ep
 
 REM Configure and build
-cd D:\morphizen-rocm\source\morphizen-rocm
+cd D:\onnx-hipdnn-ep\source\onnx-hipdnn-ep
 .\build.bat
 ```
 
 ## Next Steps
 
-After successfully building morphizen-rocm:
+After successfully building onnx-hipdnn-ep:
 
 1. Review [01_DESIGN.md](01_DESIGN.md) for architecture overview
 2. See [02_LEVEL1_PASS_DESIGN.md](02_LEVEL1_PASS_DESIGN.md) for Level-1 pass design

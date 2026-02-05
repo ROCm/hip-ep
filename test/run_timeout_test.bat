@@ -30,7 +30,7 @@ echo GPU Timeout: %MORPHIZEN_GPU_TIMEOUT_MS%ms
 echo.
 
 REM Find the test executable
-set BUILD_DIR=C:\Develop\m\build\morphizen-rocm
+set BUILD_DIR=C:\Develop\m\build\onnx-hipdnn-ep
 set TEST_EXE=%BUILD_DIR%\test\rocm_timeout_test.exe
 
 if not exist "%TEST_EXE%" (

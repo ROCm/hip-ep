@@ -1,4 +1,4 @@
-#p Cline Rules for morphizen-rocm
+#p Cline Rules for onnx-hipdnn-ep
 
 ## Project Overview
 This project combines MIOpen (convolution) and hipBLASLt (GEMM) into a unified ROCm Execution Provider for ONNX Runtime.
@@ -66,10 +66,10 @@ set THEROCK_DIST=%WORKSPACE_ROOT%\dist\therock
 call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
 
 REM Configure
-cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -B %WORKSPACE_ROOT%/build/morphizen-rocm -S . -DCMAKE_INSTALL_PREFIX=%WORKSPACE_ROOT%/local -DCMAKE_PREFIX_PATH=%WORKSPACE_ROOT%/local -DTHEROCK_DIST=%THEROCK_DIST%
+cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -B %WORKSPACE_ROOT%/build/onnx-hipdnn-ep -S . -DCMAKE_INSTALL_PREFIX=%WORKSPACE_ROOT%/local -DCMAKE_PREFIX_PATH=%WORKSPACE_ROOT%/local -DTHEROCK_DIST=%THEROCK_DIST%
 
 REM Build
-cmake --build %WORKSPACE_ROOT%/build/morphizen-rocm
+cmake --build %WORKSPACE_ROOT%/build/onnx-hipdnn-ep
 ```
 
 ## VitisAI EP Environment Variables
@@ -79,7 +79,7 @@ When running tests with VitisAI EP, the following environment variables are used
 - **MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1**: Required to enable CPU device registration in VitisAI EP for the ORT 2.0 V2 device API. Without this, `GetEpDevices()` won't return VitisAI devices and the integration test will skip/fail.
 
 ### Optional (Debug Only)
-- **MORPHIZEN_DEBUG_ROCM=2**: Enable debug logging from morphizen-rocm passes
+- **MORPHIZEN_DEBUG_ROCM=2**: Enable debug logging from onnx-hipdnn-ep passes
 - **GLOG_logtostderr=1**: Enable glog output to stderr
 - **GLOG_minloglevel=0**: Show all glog messages (INFO and above)
 
@@ -88,7 +88,7 @@ Example test command (adjust drive letter C: or D: as needed):
 $env:MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE = "1"
 $env:THEROCK_DIST = "C:\Develop\m\dist\therock"
 $env:PATH = "$env:THEROCK_DIST\bin;$env:PATH"
-cd C:\Develop\m\build\morphizen-rocm\bin
+cd C:\Develop\m\build\onnx-hipdnn-ep\bin
 .\ort_integration_test.exe
 ```
 
@@ -147,6 +147,6 @@ cd C:\Develop\m\build\morphizen-rocm\bin
   ```
 
 ## Repository
-- GitHub Enterprise: https://gitenterprise.xilinx.com/VitisAI/morphizen-rocm
+- GitHub Enterprise: https://gitenterprise.xilinx.com/VitisAI/onnx-hipdnn-ep
 - Use `gh` command for GitHub CLI operations (e.g., `gh pr create`, `gh pr list`)
 - GHE host: `gitenterprise.xilinx.com`

@@ -12,21 +12,8 @@ set WORKSPACE_ROOT=%WORKSPACE_DRIVE%/Develop/m
 echo Detected workspace: %WORKSPACE_ROOT%
 echo.
 
-REM Check MLIR backend option (default: false)
-if not defined WITH_MLIR_BACKEND set WITH_MLIR_BACKEND=false
-echo MLIR Backend: %WITH_MLIR_BACKEND%
-
-REM Check HIP_ARCHITECTURES (GPU target architecture)
-REM IMPORTANT: Set this to match your GPU. Common values:
-REM   gfx1100 - Radeon RX 7900 series
-REM   gfx1103 - Radeon 780M/760M iGPU
-REM   gfx1151 - Radeon PRO W7000 series
-if not defined HIP_ARCHITECTURES (
-    echo HIP_ARCHITECTURES: not set ^(will use default gfx1103^)
-    echo   To set: set HIP_ARCHITECTURES=gfx1151 ^(before running build.bat^)
-) else (
-    echo HIP_ARCHITECTURES: %HIP_ARCHITECTURES%
-)
+REM Backend options (ONNX backend enabled by default, MLIR backend disabled)
+echo Backend: ONNX (MLIR disabled)
 echo.
 
 REM Set TheRock environment - check common locations
@@ -80,19 +67,8 @@ if not exist "%THEROCK_DIST%\nlohmann_json.natvis" (
     echo ^<?xml version="1.0" encoding="utf-8"?^>^<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010"^>^</AutoVisualizer^> > "%THEROCK_DIST%\nlohmann_json.natvis"
 )
 
-REM Set MLIR backend CMake option
-set MLIR_ENABLE_OPTION=
-if /I "%WITH_MLIR_BACKEND%"=="true" (
-    echo Enabling MLIR backend...
-    set "MLIR_ENABLE_OPTION=-Dmorphizen_ENABLE_MLIR_BACKEND=ON"
-    echo.
-)
-
-REM Set HIP architectures CMake option
-set HIP_ARCH_OPTION=
-if defined HIP_ARCHITECTURES (
-    set "HIP_ARCH_OPTION=-DHIP_ARCHITECTURES=%HIP_ARCHITECTURES%"
-)
+REM Set backend CMake options (ONNX backend enabled, MLIR backend disabled)
+set BACKEND_OPTIONS=-Dmorphizen_ENABLE_ONNX_BACKEND=ON -Dmorphizen_ENABLE_MLIR_BACKEND=OFF
 
 REM Configure with CMake using Ninja generator (skip if build.ninja exists for incremental build)
 REM Using dynamic runtime (MD) to match TheRock's protobuf library
@@ -104,7 +80,10 @@ if exist "%WORKSPACE_ROOT%\build\onnx-hipdnn-ep\build.ninja" (
 ) else (
     echo Configuring project with CMake using Ninja...
     echo.
-    cmake -G "Ninja" -DCMAKE_CXX_FLAGS="/EHsc /wd4996 /D_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -B %WORKSPACE_ROOT%/build/onnx-hipdnn-ep -S . -DCMAKE_INSTALL_PREFIX=%WORKSPACE_ROOT%/local -DCMAKE_PREFIX_PATH=%WORKSPACE_ROOT%/local -DTHEROCK_DIST=%THEROCK_DIST% -Dmorphizen_ENABLE_ORT_BRIDGE=ON !MLIR_ENABLE_OPTION! !HIP_ARCH_OPTION!
+    echo [DEBUG] CMake command:
+    echo cmake -G "Ninja" -DCMAKE_CXX_FLAGS="/EHsc /wd4996 /wd4946 /D_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -B %WORKSPACE_ROOT%/build/onnx-hipdnn-ep -S . -DCMAKE_INSTALL_PREFIX=%WORKSPACE_ROOT%/local -DCMAKE_PREFIX_PATH=%WORKSPACE_ROOT%/local -DTHEROCK_DIST=%THEROCK_DIST% -Dmorphizen_ENABLE_ORT_BRIDGE=ON %BACKEND_OPTIONS%
+    echo.
+    cmake -G "Ninja" -DCMAKE_CXX_FLAGS="/EHsc /wd4996 /wd4946 /D_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -B %WORKSPACE_ROOT%/build/onnx-hipdnn-ep -S . -DCMAKE_INSTALL_PREFIX=%WORKSPACE_ROOT%/local -DCMAKE_PREFIX_PATH=%WORKSPACE_ROOT%/local -DTHEROCK_DIST=%THEROCK_DIST% -Dmorphizen_ENABLE_ORT_BRIDGE=ON %BACKEND_OPTIONS%
     if errorlevel 1 (
         echo ERROR: CMake configuration failed
         exit /b 1
@@ -140,20 +119,5 @@ echo.
 
 echo ============================================================
 echo Build and install completed successfully!
-echo ============================================================
-echo.
 echo Installation directory: %WORKSPACE_ROOT%/local
-echo.
-echo Key outputs:
-echo   - onnxruntime_morphizen_ep.dll  (ROCm Execution Provider)
-echo   - test_gqa.exe              (GQA layer benchmark)
-echo   - model_verifier.exe        (CPU vs GPU verification)
-echo.
-echo To test:
-echo   set THEROCK_DIST=%THEROCK_DIST%
-echo   set PATH=%%THEROCK_DIST%%\bin;%%PATH%%
-echo   set MORPHIZEN_EP_DLL=%WORKSPACE_ROOT%/local/bin/onnxruntime_morphizen_ep.dll
-echo   test_gqa.exe ^<model.onnx^>
-echo.
-echo For more information, see doc\10_BUILD.md
 echo ============================================================

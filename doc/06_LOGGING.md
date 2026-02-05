@@ -1,8 +1,8 @@
-# Logging in morphizen-rocm
+# Logging in onnx-hipdnn-ep
 
 ## Overview
 
-This document describes the logging infrastructure used in morphizen-rocm, including how to enable debug output, the logging hierarchy, and integration with ONNX Runtime's logging system.
+This document describes the logging infrastructure used in onnx-hipdnn-ep, including how to enable debug output, the logging hierarchy, and integration with ONNX Runtime's logging system.
 
 ## MY_LOG Macro
 
@@ -59,7 +59,7 @@ Enables the VitisAI EP CPU device. Without this setting, the VitisAI Execution P
 **Required for:**
 - Running Level-1 and Level-2 passes
 - Executing custom ops (Conv, Gemm)
-- Seeing MY_LOG debug output from morphizen-rocm code
+- Seeing MY_LOG debug output from onnx-hipdnn-ep code
 
 ```cmd
 REM REQUIRED for passes to run
@@ -304,7 +304,7 @@ Run the integration test with debug enabled:
 ```cmd
 set MORPHIZEN_DEBUG_ROCM=2
 set MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1
-cd C:\Develop\m\build\morphizen-rocm\bin
+cd C:\Develop\m\build\onnx-hipdnn-ep\bin
 ort_integration_test.exe
 ```
 

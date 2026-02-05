@@ -1,7 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
 echo ============================================================
-echo Building LLVM with MLIR for morphizen-rocm
+echo Building LLVM with MLIR for onnx-hipdnn-ep
 echo ============================================================
 echo.
 
@@ -56,7 +56,7 @@ if errorlevel 1 (
 )
 echo.
 
-REM Return to morphizen-rocm directory
+REM Return to onnx-hipdnn-ep directory
 cd /d "%SCRIPT_DIR%"
 
 REM Configure LLVM with CMake (skip if build.ninja exists for incremental build)
@@ -113,7 +113,7 @@ echo.
 echo LLVM installed to: %WORKSPACE_ROOT%/local/lib/cmake/llvm
 echo MLIR installed to: %WORKSPACE_ROOT%/local/lib/cmake/mlir
 echo.
-echo You can now build morphizen-rocm with MLIR backend enabled:
+echo You can now build onnx-hipdnn-ep with MLIR backend enabled:
 echo   set WITH_MLIR_BACKEND=true
 echo   build.bat
 echo ============================================================

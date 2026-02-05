@@ -1,6 +1,6 @@
 @echo off
 echo ============================================================
-echo Building morphizen-rocm with MLIR backend
+echo Building onnx-hipdnn-ep with MLIR backend
 echo ============================================================
 echo.
 
@@ -23,7 +23,7 @@ if not exist "%~dp0..\local\lib\cmake\mlir" (
     echo.
 )
 
-REM Build morphizen-rocm with MLIR backend enabled
-echo Step 2: Building morphizen-rocm with MLIR backend...
+REM Build onnx-hipdnn-ep with MLIR backend enabled
+echo Step 2: Building onnx-hipdnn-ep with MLIR backend...
 set WITH_MLIR_BACKEND=true
 call build.bat

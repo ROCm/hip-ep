@@ -2,13 +2,13 @@
 echo Performing clean build with MLIR backend enabled...
 echo.
 
-REM Change to the morphizen-rocm directory
+REM Change to the onnx-hipdnn-ep directory
 cd /d "%~dp0"
 
 REM Clean the build directory
 echo Cleaning build directory...
-if exist "D:\Develop\m\build\morphizen-rocm" (
-    rmdir /s /q "D:\Develop\m\build\morphizen-rocm"
+if exist "D:\Develop\m\build\onnx-hipdnn-ep" (
+    rmdir /s /q "D:\Develop\m\build\onnx-hipdnn-ep"
     echo Build directory cleaned.
 ) else (
     echo Build directory does not exist, skipping clean.

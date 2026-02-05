@@ -3,7 +3,7 @@
 # Licensed under the MIT License.
 
 """
-Generate CMakePresets.json for morphizen-rocm project.
+Generate CMakePresets.json for onnx-hipdnn-ep project.
 """
 
 import os
