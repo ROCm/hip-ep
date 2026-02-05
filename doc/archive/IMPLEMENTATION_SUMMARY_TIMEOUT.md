@@ -50,10 +50,7 @@ Implemented comprehensive timeout protection to prevent future occurrences.
 5. **`test/CMakeLists.txt`**
    - Added build configuration for `rocm_timeout_test`
 
-6. **`test/run_timeout_test.bat`** (NEW)
-   - Convenience script to run timeout tests
-
-7. **`README.md`**
+6. **`README.md`**
    - Added "GPU Timeout Protection" to features list
    - Added timeout configuration to Quick Start
    - Updated documentation links
@@ -110,8 +107,8 @@ REM Run your test
 Run the timeout test:
 
 ```batch
-cd test
-.\run_timeout_test.bat
+cd build\bin
+rocm_timeout_test.exe
 ```
 
 Expected output:
