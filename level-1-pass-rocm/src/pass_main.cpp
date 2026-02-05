@@ -33,7 +33,7 @@ using namespace morphizen;
  * The original graph is read-only, so we clone the model and run sub-passes
  * on the cloned graph.
  *
- * Configuration via vaip_config.json pass_generic_param:
+ * Configuration via morphizen_config.json passGenericParam:
  * {
  *   "sub_pass_names": ["vaip-pass_level2_rocm_conv", "vaip-pass_level2_rocm_gemm"]
  * }

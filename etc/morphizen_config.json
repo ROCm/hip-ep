@@ -30,7 +30,7 @@
         "fuse_ROCm"
       ],
       "provider_options": {
-        "pass.init.enable_dump": "1",
+        "pass.init.enable_dump": "0",
         "pass.init.directory": "morphizen_init",
         "pass.init.filename": "init-graph-for-rocm.onnx"
       }

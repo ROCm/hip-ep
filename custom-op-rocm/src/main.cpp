@@ -9,7 +9,7 @@
  * Custom Op Registration Entry Point
  * 
  * This file registers the ROCm custom op with VAIP.
- * The plugin name must match what's in vaip_config.json execution_providers section.
+ * The plugin name must match what's in morphizen_config.json execution_providers section.
  */
 
 static morphizen::ExecutionProvider* create_execution_provider_imp(

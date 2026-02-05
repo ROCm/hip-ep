@@ -163,7 +163,7 @@ onnx-hipdnn-ep/
 │   └── run_test_with_therock.bat         # Test runner script
 │
 ├── etc/
-│   └── vaip_config.json                  # Pass configuration
+│   └── morphizen_config.json             # Pass configuration
 │
 ├── doc/
 │   ├── 01_DESIGN.md                      # This document
@@ -200,7 +200,7 @@ Each Level-2 pass handles pattern matching for a specific operation type:
 
 ### 4.3 Pass Execution Order
 
-The `vaip_config.json` defines the execution order:
+The `morphizen_config.json` defines the execution order:
 
 ```json
 {

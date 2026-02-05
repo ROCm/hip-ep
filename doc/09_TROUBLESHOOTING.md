@@ -6,13 +6,13 @@ When debugging compilation passes, use disk cache to inspect generated files on 
 
 ### Prerequisites
 
-The disk cache config file is located at `etc/vaip_config_disk.json`.
+The configuration file is located at `etc/morphizen_config.json`.
 
 ### Enable Disk Cache
 
 ```powershell
 # Set the config file path
-$env:VITISAI_EP_PROVIDER_OPTION_config_file = "C:\path\to\etc\vaip_config_disk.json"
+$env:VITISAI_EP_PROVIDER_OPTION_config_file = "C:\path\to\etc\morphizen_config.json"
 
 # IMPORTANT: Disable cache hit detection to force recompilation
 $env:XLNX_ENABLE_CACHE = "0"
@@ -25,7 +25,7 @@ $env:XLNX_ENABLE_CACHE = "0"
 
 | Variable | Description |
 |----------|-------------|
-| `VITISAI_EP_PROVIDER_OPTION_config_file` | Path to custom config file (e.g., `etc/vaip_config_disk.json`) |
+| `VITISAI_EP_PROVIDER_OPTION_config_file` | Path to custom config file (e.g., `etc/morphizen_config.json`) |
 | `XLNX_ENABLE_CACHE=0` | **Required for debugging**: Disables cache hit detection, forces recompilation every run |
 | `XLNX_CACHE_DIR` | Override cache directory location |
 
@@ -96,7 +96,7 @@ $env:THEROCK_DIST = "C:\Develop\m\dist\therock"
 $env:PATH = "$env:THEROCK_DIST\bin;$env:PATH"
 
 # Enable disk cache
-$env:VITISAI_EP_PROVIDER_OPTION_config_file = "C:\Develop\m\Source\onnx-hipdnn-ep\etc\vaip_config_disk.json"
+$env:VITISAI_EP_PROVIDER_OPTION_config_file = "C:\Develop\m\Source\onnx-hipdnn-ep\etc\morphizen_config.json"
 $env:XLNX_ENABLE_CACHE = "0"
 
 # Enable debug logging
@@ -127,9 +127,9 @@ $env:XLNX_ENABLE_CACHE = "0"
 
 **Symptom**: No `rocm_cache` directory created, log shows "skip update cache dir: in-mem mode"
 
-**Solution**: Use the disk cache config file:
+**Solution**: Use the config file:
 ```powershell
-$env:VITISAI_EP_PROVIDER_OPTION_config_file = "path/to/vaip_config_disk.json"
+$env:VITISAI_EP_PROVIDER_OPTION_config_file = "path/to/morphizen_config.json"
 ```
 
 ### Pass Not Executing
