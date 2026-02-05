@@ -36,7 +36,30 @@ Display top recommendation with metadata. User can request more options or selec
 
 ---
 
-## Phase 2: Workspace Setup
+## Phase 2: Review and Confirm
+
+### Step 2.1: Read issue and plans
+
+Read issue file and find plans: `docs/project/plans/${ISSUE_NUM}-*.md`.
+
+### Step 2.2: Display full context
+
+Show complete issue content:
+- Issue metadata (number, title, type, priority)
+- Problem description
+- Proposed solution
+- Files to be changed
+- Plans status: None / Single plan (show filename and summary) / Multiple plans (list all with summaries)
+
+### Step 2.3: Ask user to proceed
+
+After showing full context, offer: Proceed / Cancel.
+
+If user cancels, exit without creating workspace.
+
+---
+
+## Phase 3: Workspace Setup
 
 Run `setup-workspace.py <issue_num>` to:
 - Check prerequisites (on main, no uncommitted changes)
@@ -48,28 +71,19 @@ Run `setup-workspace.py <issue_num>` to:
 - Create draft PR
 - Return workspace info (branch, PR number, issue details)
 
-Read issue and plan files, display context to user.
+---
+
+## Phase 3.5: Plan Revision
+
+If multi-PR patterns detected in plans, revise to single-PR approach, commit, and push.
 
 ---
 
-## Phase 2.5: Plan Revision
-
-Find plans: `docs/project/plans/${ISSUE_NUM}-*.md`. Display count and status to user.
-
-If multi-PR patterns detected (analyze content for: multiple PR mentions, new branch creation, subsequent PR instructions):
-- Edit plans to consolidate into single-PR approach
-- Add note at top: "NOTE: All work completed in single PR #[PR_NUMBER]"
-- Convert multi-PR phases to sequential steps
-- Commit: `git commit -m "docs: revise plans for single-PR workflow (issue #${ISSUE_NUM})"`
-- Push to fork
-
----
-
-## Phase 3: Implementation
+## Phase 4: Implementation
 
 **CRITICAL: Single-PR Enforcement**
 
-All work happens in the branch and PR created in Phase 2.
+All work happens in the branch and PR created in Phase 3.
 
 ❌ NEVER run: `gh pr create`, `git checkout -b`
 ✅ ALLOWED: Edit/Write files, build/test, `git add/commit/push fork <branch>`
@@ -78,17 +92,11 @@ If plan mentions creating PRs: SKIP that instruction and continue.
 
 ---
 
-### Step 3.1: Ask user
+### Step 4.1: Ask user
 
-Display summary:
-```
-📋 Ready for Implementation
-Plans: X file(s) | PR #XXX | Branch: feature/issue-XXX-...
-```
+Offer: Auto-implement / Manual / Cancel.
 
-Offer: auto-implement, manual, or cancel.
-
-### Step 3.2: If YES - Auto-implement
+### Step 4.2: If YES - Auto-implement
 
 Read plan, execute implementation steps using Edit/Write tools.
 
@@ -96,13 +104,13 @@ Build and test. If failures occur, offer: fix attempt, continue anyway, or cance
 
 Commit with validation (no AI mentions), run pre-commit, push to fork.
 
-### Step 3.3: If NO - Manual implementation
+### Step 4.3: If NO - Manual implementation
 
 Exit skill. User implements manually, then runs `/fix-issue --finalize #NNN` to complete.
 
 ---
 
-## Phase 4-8: Finalization
+## Phase 5-8: Finalization
 
 ### Step 4.1: Generate PR body
 
