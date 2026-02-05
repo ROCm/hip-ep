@@ -17,7 +17,7 @@
 #include "rocm.pb.h"
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_ROCM, "0")
-DEF_ENV_PARAM(MORPHIZEN_ROCM_MERGE_NODES, "0")  // Set to 1 to merge connected nodes into one subgraph
+DEF_ENV_PARAM(MORPHIZEN_ROCM_EN_LVL1_MERGE, "0")  // Set to 1 to enable Level-1 subgraph merging
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_ROCM) >= n)
 
 using namespace morphizen;
@@ -200,7 +200,7 @@ struct Level1Rocm {
 
     // Default: each node becomes its own group (one subgraph per node)
     // This gives better granularity for debugging and profiling
-    if (!ENV_PARAM(MORPHIZEN_ROCM_MERGE_NODES)) {
+    if (!ENV_PARAM(MORPHIZEN_ROCM_EN_LVL1_MERGE)) {
       MY_LOG(1) << "[ROCm EP Level-1] Single-node mode: creating one subgraph per node";
       std::vector<std::vector<const Node*>> groups;
       groups.reserve(rocm_nodes.size());

@@ -40,6 +40,7 @@ dist/
 
 # Test outputs
 *.onnx
+!test/models/*.onnx
 *.dat
 test_output/
 
