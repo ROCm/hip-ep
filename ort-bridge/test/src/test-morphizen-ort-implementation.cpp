@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 #include <iomanip>
 #include <morphizen-utils/morphizen-utils.hpp>
+#include <numeric>
 #include <vector>
 DEF_ENV_PARAM_2(MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE, "", std::string)
 

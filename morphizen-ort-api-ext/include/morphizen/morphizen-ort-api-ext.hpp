@@ -3,20 +3,6 @@
  * Licensed under the MIT License.
  */
 #pragma once
-#ifndef ORT_API_MANUAL_INIT
-#  define ORT_API_MANUAL_INIT 1
-#endif
-#ifdef __GNUC__
-#  pragma GCC diagnostic ignored "-Wpedantic"
-#  pragma GCC diagnostic ignored "-Wconversion"
-#  pragma GCC diagnostic ignored "-Wsign-compare"
-#  pragma GCC diagnostic ignored "-Wunused-variable"
-#  pragma GCC diagnostic ignored "-Wunused-but-set-variable"
-#endif
-#include <onnxruntime_c_api.h>
-#include <onnxruntime_cxx_api.h>
-#include <onnxruntime_lite_custom_op.h>
-#undef ORT_API_MANUAL_INIT
 
 #include <morphizen/morphizen_ort_api.h>
 

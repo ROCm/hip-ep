@@ -11,6 +11,7 @@
 #include <morphizen/graph.hpp>
 #include <morphizen/morphizen-ort-api-ext.hpp>
 #include <morphizen/node_attr.hpp>
+#include <unordered_set>
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_IR_CONVERTER, "0")
 DEF_ENV_PARAM_2(MORPHIZEN_DEBUG_IR_CONVERTER_OUTPUT_FILE,
                 "MorphiZen-EP-IR-Converter.onnx", std::string)

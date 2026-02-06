@@ -4,6 +4,7 @@
  */
 #include "./morphizen-ep-factory.hpp"
 #include "morphizen-utils/morphizen-utils.hpp"
+#include "morphizen/onnxruntime_api.hpp"
 #include <glog/logging.h>
 #include <iostream>
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_ORT_EP_API, "0")

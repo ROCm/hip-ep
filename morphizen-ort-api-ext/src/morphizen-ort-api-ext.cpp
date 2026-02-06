@@ -17,6 +17,11 @@
 #if defined(_WIN32)
 #  pragma warning(pop)
 #endif
+#ifndef ORT_API_MANUAL_INIT
+#  define ORT_API_MANUAL_INIT 1
+#endif
+#include <onnxruntime_cxx_api.h>
+#undef ORT_API_MANUAL_INIT
 //
 #include "morphizen/morphizen-ort-api-ext.hpp"
 //

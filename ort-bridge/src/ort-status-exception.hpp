@@ -5,6 +5,7 @@
 #pragma once
 #include "./morphizen/morphizen-ort-api-ext.hpp"
 #include <exception>
+#include <onnxruntime_c_api.h>
 namespace morphizen {
 
 struct OrtStatusException : public std::exception {

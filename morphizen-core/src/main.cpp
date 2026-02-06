@@ -28,7 +28,7 @@ static struct {
 };
 
 static void* lookup_symbol(const char* name) {
-  for (int i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
+  for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
     if (strcmp(name, table[i].name) == 0) {
       return table[i].symbol;
     }
@@ -57,7 +57,7 @@ extern "C" MORPHIZEN_DLL_SPEC void* morphizen_main(int argc, char* argv[]) {
   auto cmd = std::string(argv[0]);
   if (cmd == "help") {
     std::cout << "Available commands:" << std::endl;
-    for (int i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
+    for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
       std::cout << table[i].name << std::endl;
     }
     return nullptr;

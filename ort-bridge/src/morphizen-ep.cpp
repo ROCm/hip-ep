@@ -366,8 +366,8 @@ static void update_argument_indice(
   CHECK_LE(meta_def_args.size(), node_value_infos.size());
   argument_indices->Clear();
   argument_indices->Reserve(meta_def_args.size());
-  auto size = meta_def_args.size();
-  for (size_t j = 0; j < size; ++j) {
+  int size = meta_def_args.size();
+  for (int j = 0; j < size; ++j) {
     auto& meta_def_name = meta_def_args[(int)j];
     bool found = false;
     for (size_t i = 0; i < node_value_infos.size(); ++i) {
@@ -382,14 +382,14 @@ static void update_argument_indice(
                  << "] =" << meta_def_name;
   }
   if (ENV_PARAM(MORPHIZEN_DEBUG_MORPHIZEN_EP) >= 1) {
-    for (size_t i = 0; i < size; ++i) {
+    for (int i = 0; i < size; ++i) {
       auto name = Ort::ConstValueInfo(node_value_infos[i]).GetName();
       LOG(INFO) << " fused_node[" << i << "] = " << name;
     }
-    for (size_t i = 0; i < size; ++i) {
-      auto index = (*argument_indices)[(int)i];
+    for (int i = 0; i < size; ++i) {
+      auto index = (*argument_indices)[i];
       auto name = Ort::ConstValueInfo(node_value_infos[index]).GetName();
-      LOG(INFO) << "meta_def_args[" << i << "] = " << meta_def_args[(int)i]
+      LOG(INFO) << "meta_def_args[" << i << "] = " << meta_def_args[i]
                 << " => fused[" << index << "] " << name;
     }
   }
