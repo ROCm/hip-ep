@@ -1,6 +1,5 @@
 LIBRARY onnxruntime_morphizen_ep
 EXPORTS
-    compile_onnx_model_morphizen_ep_with_options
     compile_onnx_model_morphizen_ep_v4
     create_ep_context_nodes
     deinitialize_onnxruntime_morphizen_ep

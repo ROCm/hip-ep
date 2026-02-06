@@ -102,55 +102,9 @@ MORPHIZEN_DLL_SPEC int morphizen_ep_set_ep_dynamic_options(
     const char* const* keys, const char* const* values, size_t kv_len);
 
 /**
- * @brief Compiles an ONNX model using the MorphiZen Execution Provider with
- * error handling.
+ * @brief Compiles an ONNX model using the MorphiZen Execution Provider.
  *
- * Called when MorphiZenExecutionProvider::GetCapabilities() is called.
- * Throw an ONNXRuntime Error (ORT_THROW(STATUS)) if compile ONNX model error.
- *
- * Calleb by `MorphiZenExecutionProvider::GetCapability()`.
- *
- * @param model_path Path to the ONNX model file.
- * @param graph Reference to the ONNX Runtime graph.
- * @param options Provider options for compilation.
- * @param status Pointer to a status object for error handling.
- * @param func Callback function for error handling.
- * @return Pointer to a vector of unique pointers to ExecutionProvider
- * instances.
- */
-MORPHIZEN_DLL_SPEC
-std::vector<std::unique_ptr<morphizen::ExecutionProvider>>*
-compile_onnx_model_morphizen_ep_with_error_handling(
-    const std::string& model_path, const onnxruntime::Graph& graph,
-    const onnxruntime::ProviderOptions& options, [[maybe_unused]] void* status,
-    void (*func)(void*, int, const char*));
-
-/**
- * @brief Compiles an ONNX model using the MorphiZen Execution Provider with
- * specified options.
- *
- * If compile_onnx_model_morphizen_ep_with_error_handing not implements, will
- * call this function. Not throw ONNXRuntime Error when compile ONNX model
- * error.
- *
- * Called by `MorphiZenExecutionProvider::GetCapability()`.
- *
- * @param model_path Path to the ONNX model file.
- * @param graph Reference to the ONNX Runtime graph.
- * @param options Provider options for compilation.
- * @return Pointer to a vector of unique pointers to ExecutionProvider
- * instances.
- */
-MORPHIZEN_DLL_SPEC std::vector<std::unique_ptr<morphizen::ExecutionProvider>>*
-compile_onnx_model_morphizen_ep_with_options(
-    const std::string& model_path, const onnxruntime::Graph& graph,
-    const onnxruntime::ProviderOptions& options);
-
-/**
- * @brief Compiles an ONNX model using the MorphiZen Execution Provider with
- * error handling and ORT logger integration (v4 API).
- *
- * This is the latest version of the compile API that integrates glog with
+ * This is the primary API for ONNX model compilation that integrates glog with
  * ORT's logging system, allowing users to control log levels through ORT APIs.
  *
  * Called by `MorphiZenExecutionProvider::GetCapability()`.
@@ -158,6 +112,7 @@ compile_onnx_model_morphizen_ep_with_options(
  * @param model_path Path to the ONNX model file.
  * @param graph Reference to the ONNX Runtime graph.
  * @param options Provider options for compilation.
+ * @param session_configs Session configuration options.
  * @param status Pointer to a status object for error handling.
  * @param func Callback function for error handling.
  * @param ort_logger Pointer to ORT logger for log integration.
