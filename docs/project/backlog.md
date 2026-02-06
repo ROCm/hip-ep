@@ -44,6 +44,7 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 | [#053](issues/053-document-tar-streaming-architecture.md) | Document TAR Streaming | M | 2h | TarFile Docs | - | tar-streaming-architecture.md |
 | [#055](issues/055-remove-non-const-entries-overload.md) | Remove Non-Const entries | L | 15m | TarFile Cleanup | - | tar_file.hpp |
 | [#056](issues/056-add-comprehensive-documentation-to-tarfile.md) | Add TarFile Docs | M | 2h | TarFile Docs | - | tar_file.hpp |
+| [#059](issues/059-component-organization-guidelines.md) | Component Organization Guidelines | M | 2h | Documentation | - | component-organization-guidelines.md |
 
 **Legend:**
 - **Pri**: Priority (C=Critical, H=High, M=Medium, L=Low)
