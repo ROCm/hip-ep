@@ -25,11 +25,7 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
 | # | Title | Pri | Est | Group | Blocked | Files |
 |---|-------|-----|-----|-------|---------|-------|
-| [#001](issues/001-mmap-support-for-embed-mode.md) | Add mmap Support | M | 3h | Feature | - | mmap_file.cpp/tar_file.cpp |
 | [#013](issues/013-provider-options-aggregation.md) | provider_options Aggregation | M | 1h | Provider Options | - | pass_context_imp.cpp |
-| [#014](issues/014-dynamic-pass-registration.md) | Dynamic Pass Registration | M | 1h | Config/Context | - | pass_imp.cpp/config.cpp |
-| [#017](issues/017-remove-update-config-by-target.md) | Remove update_config_by_target | L | 15m | Config/Context | - | config.cpp |
-| [#018](issues/018-make-configproto-const.md) | Make ConfigProto const | L | 15m | Config/Context | #013/#017 | pass_context_imp.hpp |
 | [#019](issues/019-refactor-initialize-context.md) | Refactor initialize_context | L | 2h | Config/Context | - | morphizen_compile_model.cpp |
 | [#024](issues/024-remove-legacy-compile-entry-points.md) | Remove Legacy Compile API | M | 1h | Legacy Cleanup | - | onnxruntime_morphizen_ep.hpp/.cpp |
 | [#026](issues/026-mlir-model-export-api.md) | MLIR Model Export API | M | 1h | MLIR Features | - | morphizen-ort-api-ext.hpp/mlir-model.cpp |
@@ -52,7 +48,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 | [#054](issues/054-eliminate-dangerous-unowned-buffer-factory-method.md) | Eliminate Unowned Buffer | L | 15m | TarFile Cleanup | - | tar_file.hpp/.cpp/test_tar_file.cpp |
 | [#055](issues/055-remove-non-const-entries-overload.md) | Remove Non-Const entries | L | 15m | TarFile Cleanup | - | tar_file.hpp |
 | [#056](issues/056-add-comprehensive-documentation-to-tarfile.md) | Add TarFile Docs | M | 2h | TarFile Docs | - | tar_file.hpp |
-| [#058](issues/058-mlir-test-model-node-names-mismatch.md) | MLIR Node Names Mismatch | M | 1h | MLIR Testing | - | test_model.cpp/mlir-model.cpp |
 
 **Legend:**
 - **Pri**: Priority (C=Critical, H=High, M=Medium, L=Low)
