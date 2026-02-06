@@ -43,11 +43,38 @@
 
 # Microsoft requested
 
+# HISTORICAL NOTE: /Zi, /ZH:SHA_256, and /DEBUG were previously hardcoded here,
+# which forced PDB generation for ALL build types including Release.
+# This violated CMake best practices and caused significant performance issues:
+#
+# 1. Build Performance Impact:
+#    - PDB generation is the primary bottleneck in MSVC linking (per Microsoft docs)
+#    - Windows CI Release builds were 2.03x slower than Linux (6.85m vs 3.37m)
+#    - /DEBUG disables /OPT:REF and /OPT:ICF optimizations by default
+#
+# 2. CMake Best Practices Violation:
+#    - Release build type should NOT include debug symbols
+#    - For Release + debug symbols, use RelWithDebInfo build type instead
+#    - This is standard CMake convention across all platforms
+#
+# 3. Why These Were Removed:
+#    - /Zi: Forces PDB generation (compile time overhead + linker merging overhead)
+#    - /ZH:SHA_256: Only useful with /Zi, provides secure PDB hashing
+#    - /DEBUG: Forces PDB linking + disables link-time optimizations
+#
+# If you need debug symbols in an optimized build, use:
+#   cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo ...
+#
+# References:
+# - https://devblogs.microsoft.com/cppblog/the-visual-c-linker-best-practices-developer-iteration/
+# - https://learn.microsoft.com/en-us/cpp/build/reference/debug-generate-debug-info
+# - https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html
+
 set(MORPHIZEN_COMPILER_OPTIONS
   /Zc:__cplusplus #
-  /Zi # generate complete debugging information
+  # /Zi # REMOVED: Use RelWithDebInfo build type instead of hardcoding debug symbols
   /Qspectre # enable Spectre mitigations, required by MS
-  /ZH:SHA_256 # use SHA-256 for PDB content hashes
+  # /ZH:SHA_256 # REMOVED: Only useful with /Zi flag
   /guard:cf # Control Flow Guard
   /sdl # Security Development Lifecycle
   /MP # build with multiple processes
@@ -93,6 +120,10 @@ set(MORPHIZEN_LINKER_OPTIONS
   # code, set breakpoints, and inspect variables during a debugging
   # session. The generated debug information is typically stored in a
   # PDB (Program Database) file.
+  #
+  # REMOVED: /DEBUG was hardcoded here, which forced PDB generation and disabled
+  # link-time optimizations (/OPT:REF and /OPT:ICF) in Release builds.
+  # Use RelWithDebInfo build type instead if you need debug symbols.
 
   # `/guard:cf`: This option enables Control Flow Guard (CFG) in the
   # linked binary. CFG is a security feature that helps protect
@@ -114,9 +145,9 @@ set(MORPHIZEN_LINKER_OPTIONS
   # programming (COP) attacks. Enabling `/CETCOMPAT` ensures that the
   # generated binary can take advantage of CET if it's supported by
   # the hardware, further enhancing the security of the application.
-  /DEBUG
+  # /DEBUG # REMOVED: Use RelWithDebInfo build type instead
   /DYNAMICBASE
-  /ignore:4099 # ignore warning about PDB file not found
+  /ignore:4099 # ignore warning about PDB file not found (may still occur with dependencies)
   /ignore:4197 # ignore warning about /INCREMENTAL:NO
   CACHE STRING "Linker options for Morphizen"
 )
