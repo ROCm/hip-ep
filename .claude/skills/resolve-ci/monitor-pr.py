@@ -28,6 +28,12 @@ parser = argparse.ArgumentParser(description="Monitor PR for /resolve-ci skill")
 parser.add_argument(
     "--attempt", type=int, default=1, help="Retry attempt number (default: 1)"
 )
+parser.add_argument(
+    "--pr-number",
+    type=int,
+    default=None,
+    help="PR number (optional, auto-detected from branch if not provided)",
+)
 args = parser.parse_args()
 
 
@@ -276,6 +282,14 @@ def main():
 
     print(f"✅ Found PR #{pr_number} (OPEN, ready for review)")
     print("")
+
+    # Validate if --pr-number was explicitly provided
+    if args.pr_number and args.pr_number != pr_number:
+        print(
+            f"⚠️  Warning: Provided PR #{args.pr_number} doesn't match detected PR #{pr_number}"
+        )
+        print(f"Using auto-detected PR #{pr_number} from branch {current_branch}")
+        print("")
 
     # Phase 1: Update branch (upfront, before monitoring)
     success, status = update_branch(current_branch)
