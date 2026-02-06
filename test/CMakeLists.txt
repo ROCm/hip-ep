@@ -299,3 +299,8 @@ else()
     message(STATUS "ONNX Runtime not found, skipping ORT integration test")
   endif()
 endif()
+
+# Install ort_integration_test if it was built
+if(TARGET ort_integration_test)
+  install(TARGETS ort_integration_test RUNTIME DESTINATION bin)
+endif()
