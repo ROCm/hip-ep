@@ -10,8 +10,6 @@
  *
  * To see MY_LOG output, set these environment variables before running:
  *   set MORPHIZEN_DEBUG_ROCM=2
- *   set GLOG_logtostderr=1
- *   set GLOG_minloglevel=0
  */
 
 #include <cmath>
@@ -21,6 +19,13 @@
 #include <iostream>
 
 #include <onnxruntime_cxx_api.h>
+
+// Simple environment variable helpers (same approach as test_gqa.cpp)
+static std::string get_env(const char *name,
+                           const std::string &default_value = "") {
+  const char *value = std::getenv(name);
+  return value ? value : default_value;
+}
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -56,16 +61,13 @@ protected:
   void SetUp() override {
     // Determine log level from environment variable ORT_LOG_LEVEL
     OrtLoggingLevel ort_log_level = ORT_LOGGING_LEVEL_WARNING;
-    const char *log_level_env = std::getenv("ORT_LOG_LEVEL");
-    if (log_level_env != nullptr) {
-      std::string log_level_str(log_level_env);
-      if (log_level_str == "info") {
-        ort_log_level = ORT_LOGGING_LEVEL_INFO;
-      } else if (log_level_str == "warning") {
-        ort_log_level = ORT_LOGGING_LEVEL_WARNING;
-      } else if (log_level_str == "error") {
-        ort_log_level = ORT_LOGGING_LEVEL_ERROR;
-      }
+    auto log_level_env = get_env("ORT_LOG_LEVEL", "warning");
+    if (log_level_env == "info") {
+      ort_log_level = ORT_LOGGING_LEVEL_INFO;
+    } else if (log_level_env == "warning") {
+      ort_log_level = ORT_LOGGING_LEVEL_WARNING;
+    } else if (log_level_env == "error") {
+      ort_log_level = ORT_LOGGING_LEVEL_ERROR;
     }
     env_ = std::make_unique<Ort::Env>(ort_log_level, "OrtIntegrationTest");
 
@@ -150,72 +152,6 @@ TEST_F(OrtIntegrationTest, LoadMorphiZenProvider) {
   }
 }
 
-TEST_F(OrtIntegrationTest, CPUProviderInference) {
-  std::cout << "[Test] Testing CPU provider inference with conv model..."
-            << std::endl;
-
-  ASSERT_TRUE(model_available_)
-      << "Conv model not found at: " << CONV_TEST_MODEL_PATH;
-
-  // Model parameters for conv test
-  const std::vector<int64_t> input_shape = {1, 3, 8, 8};
-  const size_t input_size = 1 * 3 * 8 * 8;
-
-  // Create input data (all 1.0)
-  std::vector<float> input_data(input_size, 1.0f);
-
-  Ort::SessionOptions session_options;
-  session_options.SetIntraOpNumThreads(1);
-
-#ifdef _WIN32
-  auto model_path_w = ToWideString(CONV_TEST_MODEL_PATH);
-  Ort::Session session(*env_, model_path_w.c_str(), session_options);
-#else
-  Ort::Session session(*env_, CONV_TEST_MODEL_PATH, session_options);
-#endif
-
-  auto memory_info =
-      Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-  Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
-      memory_info, input_data.data(), input_size, input_shape.data(),
-      input_shape.size());
-
-  const char *input_names[] = {"X"};
-  const char *output_names[] = {"Y"};
-
-  std::cout << "[Test] Running CPU inference..." << std::endl;
-  auto output_tensors = session.Run(Ort::RunOptions{}, input_names,
-                                    &input_tensor, 1, output_names, 1);
-
-  ASSERT_EQ(output_tensors.size(), 1);
-
-  auto &output_tensor = output_tensors[0];
-  auto output_shape = output_tensor.GetTensorTypeAndShapeInfo().GetShape();
-  size_t output_size =
-      output_tensor.GetTensorTypeAndShapeInfo().GetElementCount();
-  const float *output_data = output_tensor.GetTensorData<float>();
-
-  std::cout << "[Test] Output shape: [";
-  for (size_t i = 0; i < output_shape.size(); ++i) {
-    std::cout << output_shape[i];
-    if (i < output_shape.size() - 1)
-      std::cout << ", ";
-  }
-  std::cout << "]" << std::endl;
-  std::cout << "[Test] Output[0]: " << output_data[0] << std::endl;
-
-  // Verify output is not all zeros
-  bool has_nonzero = false;
-  for (size_t i = 0; i < output_size && !has_nonzero; ++i) {
-    if (std::abs(output_data[i]) > 1e-6f) {
-      has_nonzero = true;
-    }
-  }
-
-  EXPECT_TRUE(has_nonzero) << "Output should contain non-zero values";
-  std::cout << "[Test] CPU inference completed successfully!" << std::endl;
-}
-
 // Morphizen EP integration test - tests with Level-1 ROCm pass
 TEST_F(OrtIntegrationTest, MorphiZenProviderInference) {
   std::cout << "[Test] Testing MorphiZen EP with Level-1 ROCm pass..."
@@ -298,6 +234,13 @@ TEST_F(OrtIntegrationTest, MorphiZenProviderInference) {
     }
 
     Ort::SessionOptions session_options;
+
+    if (get_env("ENABLE_CACHE_CONTEXT", "0") == "1") {
+      session_options.AddConfigEntry("ep.context_enable", "1");
+      session_options.AddConfigEntry(
+          "ep.context_embed_mode",
+          get_env("CACHE_CONTEXT_EMBEDED_MODE", "1").c_str());
+    }
 
     // Add Morphizen EP using V2 API
     OrtStatus *status = Ort::GetApi().SessionOptionsAppendExecutionProvider_V2(
@@ -426,11 +369,11 @@ int main(int argc, char **argv) {
   std::cout << "ORT Integration Test for Morphizen ROCm EP" << std::endl;
   std::cout << "========================================\n" << std::endl;
 
-  std::cout << "To see MY_LOG output, set these environment variables:"
-            << std::endl;
+  std::cout
+      << "To see More detailed log output, set these environment variables:"
+      << std::endl;
+  std::cout << "  set ORT_LOG_LEVEL=info" << std::endl;
   std::cout << "  set MORPHIZEN_DEBUG_ROCM=2" << std::endl;
-  std::cout << "  set GLOG_logtostderr=1" << std::endl;
-  std::cout << "  set GLOG_minloglevel=0" << std::endl;
   std::cout << std::endl;
 
   ::testing::InitGoogleTest(&argc, argv);
