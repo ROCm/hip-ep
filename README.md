@@ -324,55 +324,7 @@ cmake --build ..\build\onnx-hipdnn-ep --config Release --target install --parall
 
 ## Testing
 
-### Run Sample Test show call MIOpen/hipBLASLt/HIP custom kernel/...
-
-```bash
-# Set environment
-export PATH="$THEROCK_DIST/bin:$PATH"
-
-# Run test
-cd ../build/onnx-hipdnn-ep/bin/Release/
-python ../../../../onnx-hipdnn-ep/test/gen_sample_model.py
-./ort_integration_test.exe
-```
-
-### Run GQA Test
-
-```bash
-# Set environment
-export PATH="$THEROCK_DIST/bin:$PATH"
-
-# Run test
-cd /path/to/onnx-hipdnn-ep
-cd ../local/bin
-./test_gqa.exe ../../onnx-hipdnn-ep/test/models/gqa_layer_00.onnx
-```
-
-```powershell
-# Set environment
-$env:PATH = "$env:THEROCK_DIST\bin;$env:PATH"
-
-# Run test
-cd ..\local\bin
-.\test_gqa.exe ..\..\onnx-hipdnn-ep\test\models\gqa_layer_00.onnx
-```
-
-### Benchmark Results
-
-```
-=== Benchmark Results ===
-  Iterations: 1
-  Mean latency: 53.50 ms
-  Std dev: 0.00 ms
-  Min latency: 53.50 ms
-  Max latency: 53.50 ms
-  Median: 53.50 ms
-  P90: 53.50 ms
-  P99: 53.50 ms
-  Throughput: 18.69 infer/sec
-```
-
-### Run ORT Integration Unit Test
+### Test case 1: Run ORT Integration Unit Test
 
 Tests MIOpen Conv, hipBLASLt Gemm, and basic operations:
 
@@ -412,6 +364,43 @@ python ..\..\onnx-hipdnn-ep\test\gen_sample_model.py
 If you set `ENABLE_CACHE_CONTEXT=1`, an EP context model (`sample_ctx.onnx`) will be generated in the same directory as `sample.onnx`. This cached model contains pre-compiled graph optimizations and can be loaded directly for faster startup in subsequent runs.
 
 > **Note:** You must delete `sample_ctx.onnx` before re-running the test if you want to regenerate it.
+
+
+### Test case 2: Run GQA Test
+
+```bash
+# Set environment
+export PATH="$THEROCK_DIST/bin:$PATH"
+
+# Run test
+cd /path/to/onnx-hipdnn-ep
+cd ../local/bin
+./test_gqa.exe ../../onnx-hipdnn-ep/test/models/gqa_layer_00.onnx
+```
+
+```powershell
+# Set environment
+$env:PATH = "$env:THEROCK_DIST\bin;$env:PATH"
+
+# Run test
+cd ..\local\bin
+.\test_gqa.exe ..\..\onnx-hipdnn-ep\test\models\gqa_layer_00.onnx
+```
+
+### Benchmark Results
+
+```
+=== Benchmark Results ===
+  Iterations: 1
+  Mean latency: 53.50 ms
+  Std dev: 0.00 ms
+  Min latency: 53.50 ms
+  Max latency: 53.50 ms
+  Median: 53.50 ms
+  P90: 53.50 ms
+  P99: 53.50 ms
+  Throughput: 18.69 infer/sec
+```
 
 ---
 
