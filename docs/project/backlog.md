@@ -60,12 +60,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 See **[completed-issues.md](completed-issues.md)** for full archive of all completed issues.
 
 **Recent (last 5):**
+- #059 (PR #145) - Replace tar.h Download with POSIX Implementation
 - #054 (PR #142) - Eliminate Dangerous Un-Owned Buffer Factory Method
 - #024 (PR #141) - Remove Legacy Compile Entry Points
 - #060 (PR #130) - Remove IPass& from Pass Constructor
 - #039 (PR #129) - Fix TarFile Typos and Unused Parameter
-- #009 (PR #131) - TargetProto Provider Options Injection Cleanup
-- #012 (PR #111) - Remove session_configs from ConfigProto
 
 ---
 
