@@ -12,6 +12,7 @@ Chronological archive of all completed backlog issues (newest first).
 
 | # | Author | PR | Commit | Date | Title |
 |---|--------|----|----|------|-------|
+| #054 | wcy123 | #142 | 7f7d9c3 | 02-06 TBD | Eliminate Dangerous Un-Owned Buffer Factory Method |
 | #009 | wcy123 | #131 | 28102b8 | 02-05 10:30 +0 | TargetProto Provider Options Injection Cleanup |
 | #060 | wcy123 | #130 | 4cd91fa | 02-05 10:22 +0 | Remove IPass& from Pass Constructor |
 | #027 | wcy123 | #118 | 8b79d52 | 02-05 04:09 +0 | Eliminate C-Style APIs from morphizen-graph |
