@@ -372,6 +372,46 @@ cd ..\local\bin
   Throughput: 18.69 infer/sec
 ```
 
+### Run ORT Integration Unit Test
+
+Tests MIOpen Conv, hipBLASLt Gemm, and basic operations:
+
+```bash
+cd ../build/onnx-hipdnn-ep/bin/Release
+# Set environment
+export PATH="$THEROCK_DIST/bin:$PATH"
+export ENABLE_CACHE_CONTEXT=1 # optional , 1:generate EP Context model
+
+# Generate sample model and run test
+python ../../../../onnx-hipdnn-ep/test/gen_sample_model.py
+./ort_integration_test.exe
+
+```
+
+```powershell
+cd ..\build\onnx-hipdnn-ep\bin\Release
+# Set environment
+$env:PATH = "$env:THEROCK_DIST\bin;$env:PATH"
+$env:ENABLE_CACHE_CONTEXT = "1" # optional , 1:generate EP Context model
+
+# Generate sample model and run test
+python ..\..\..\..\onnx-hipdnn-ep\test\gen_sample_model.py
+.\ort_integration_test.exe
+```
+
+**Expected Output:**
+```
+[==========] Running 2 tests from 1 test suite.
+[ RUN      ] OrtIntegrationTest.LoadMorphiZenProvider
+[       OK ] OrtIntegrationTest.LoadMorphiZenProvider (234 ms)
+[ RUN      ] OrtIntegrationTest.MorphiZenProviderInference
+[Test] Max difference between CPU and GPU: 2.98023e-07
+[       OK ] OrtIntegrationTest.MorphiZenProviderInference (343 ms)
+[  PASSED  ] 2 tests.
+```
+If you set `ENABLE_CACHE_CONTEXT=1`, an EP context model (`sample_ctx.onnx`) will be generated in the same directory as `sample.onnx` and `ort_integration_test.exe`. This cached model contains pre-compiled graph optimizations and can be loaded directly for faster startup in subsequent runs.
+> **Note:** You must delete `sample_ctx.onnx` before re-running the test if you want to regenerate it.
+
 ---
 
 ## Troubleshooting
