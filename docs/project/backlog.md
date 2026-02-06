@@ -19,6 +19,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for issue quality guidelines.
 - **#053 relates to #052** - Documents architecture that #052 will modify
 - **#055 relates to #050** - All reduce TarFile public API surface
 - **#056 relates to #051** - Both improve TarFile documentation quality
+- **#060 relates to #059** - Implements two-tier utilities pattern from guidelines
 
 See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
@@ -45,6 +46,7 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 | [#055](issues/055-remove-non-const-entries-overload.md) | Remove Non-Const entries | L | 15m | TarFile Cleanup | - | tar_file.hpp |
 | [#056](issues/056-add-comprehensive-documentation-to-tarfile.md) | Add TarFile Docs | M | 2h | TarFile Docs | - | tar_file.hpp |
 | [#059](issues/059-component-organization-guidelines.md) | Component Organization Guidelines | M | 2h | Documentation | - | component-organization-guidelines.md |
+| [#060](issues/060-create-morphizen-foundation.md) | Create morphizen-foundation | M | 4h | Architecture | - | morphizen-foundation/* |
 
 **Legend:**
 - **Pri**: Priority (C=Critical, H=High, M=Medium, L=Low)
