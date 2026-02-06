@@ -26,7 +26,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 |---|-------|-----|-----|-------|---------|-------|
 | [#013](issues/013-provider-options-aggregation.md) | provider_options Aggregation | M | 1h | Provider Options | - | pass_context_imp.cpp |
 | [#019](issues/019-refactor-initialize-context.md) | Refactor initialize_context | L | 2h | Config/Context | - | morphizen_compile_model.cpp |
-| [#024](issues/024-remove-legacy-compile-entry-points.md) | Remove Legacy Compile API | M | 1h | Legacy Cleanup | - | onnxruntime_morphizen_ep.hpp/.cpp |
 | [#026](issues/026-mlir-model-export-api.md) | MLIR Model Export API | M | 1h | MLIR Features | - | morphizen-ort-api-ext.hpp/mlir-model.cpp |
 | [#029](issues/029-passcontext-tarfile-initialization.md) | PassContext tarfile Init | M | 1h | Test Infrastructure | - | test_pass_context.cpp/pass_context_imp.cpp |
 | [#030](issues/030-morphizen-pass-init-plugin-loading.md) | morphizen-pass_init Plugin | M | 1h | Test Infrastructure | - | pass_imp.cpp/CMakeLists.txt |
@@ -62,6 +61,7 @@ See **[completed-issues.md](completed-issues.md)** for full archive of all compl
 
 **Recent (last 5):**
 - #054 (PR #142) - Eliminate Dangerous Un-Owned Buffer Factory Method
+- #024 (PR #141) - Remove Legacy Compile Entry Points
 - #060 (PR #130) - Remove IPass& from Pass Constructor
 - #039 (PR #129) - Fix TarFile Typos and Unused Parameter
 - #009 (PR #131) - TargetProto Provider Options Injection Cleanup

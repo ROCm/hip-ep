@@ -66,15 +66,18 @@ TEST_F(CompileModel, T0) {
   OrtStatus* status = nullptr;
   auto provider_options = std::unordered_map<std::string, std::string>{};
   provider_options["enable_cache_file_io_in_mem"] = "1";
+  auto session_configs = std::map<std::string, std::string>{};
   auto execution_providers = std::make_unique<morphizen::DllSafe<
       std::vector<std::unique_ptr<morphizen::ExecutionProvider>>>>(
-      compile_onnx_model_morphizen_ep_with_error_handling(
-          model_path.u8string(), graph, provider_options, (void*)&status,
+      compile_onnx_model_morphizen_ep_v4(
+          model_path.u8string(), graph, provider_options, session_configs,
+          (void*)&status,
           [](void* status, int code, const char* error_message) {
             OrtStatus** ort_status = static_cast<OrtStatus**>(status);
             *ort_status =
                 Ort::GetApi().CreateStatus((OrtErrorCode)code, error_message);
-          }));
+          },
+          nullptr));
   // Test compilation (basic validation)
   // OrtStatus* status = nullptr;
   // TODO: Add proper compilation logic when EP implementation is available

@@ -54,18 +54,6 @@ static void SetGlogMinLogLevel(const std::string& log_level) {
   }
 }
 
-static void
-update_log_level(const onnxruntime::ProviderOptions& session_option) {
-  std::string log_level = "error";
-  if (!ENV_PARAM(DEBUG_LOG_LEVEL).empty()) {
-    log_level = ENV_PARAM(DEBUG_LOG_LEVEL);
-  }
-  if (session_option.find("log_level") != session_option.end()) {
-    log_level = session_option.at("log_level");
-  }
-  SetGlogMinLogLevel(log_level);
-}
-
 extern "C" {
 class OpHolder {
   struct Opdef {
@@ -249,36 +237,6 @@ void initialize_onnxruntime_morphizen_ep(
 MORPHIZEN_DLL_SPEC
 void deinitialize_onnxruntime_morphizen_ep() {
   morphizen::deinitialize_onnxruntime_morphizen_ep();
-}
-
-MORPHIZEN_DLL_SPEC
-std::vector<std::unique_ptr<morphizen::ExecutionProvider>>*
-compile_onnx_model_morphizen_ep_with_options(
-    const std::string& model_path, const onnxruntime::Graph& graph,
-    const onnxruntime::ProviderOptions& options) {
-  update_log_level(options);
-  std::map<std::string, std::string> empty_session_configs;
-  return new std::vector<std::unique_ptr<morphizen::ExecutionProvider>>(
-      morphizen::compile_onnx_model_3(model_path, graph, options,
-                                      empty_session_configs, nullptr));
-}
-
-MORPHIZEN_DLL_SPEC
-std::vector<std::unique_ptr<morphizen::ExecutionProvider>>*
-compile_onnx_model_morphizen_ep_with_error_handling(
-    const std::string& model_path, const onnxruntime::Graph& graph,
-    const onnxruntime::ProviderOptions& options, [[maybe_unused]] void* status,
-    [[maybe_unused]] void (*func)(void*, int, const char*)) {
-  update_log_level(options);
-  auto set_ort_status = [&](int error_code, const char* error_message) {
-    if (func != nullptr) {
-      func(status, error_code, error_message);
-    }
-  };
-  std::map<std::string, std::string> empty_session_configs;
-  return new std::vector<std::unique_ptr<morphizen::ExecutionProvider>>(
-      morphizen::compile_onnx_model_3(model_path, graph, options,
-                                      empty_session_configs, set_ort_status));
 }
 
 MORPHIZEN_DLL_SPEC
