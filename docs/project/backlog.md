@@ -31,7 +31,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 | [#030](issues/030-morphizen-pass-init-plugin-loading.md) | morphizen-pass_init Plugin | M | 1h | Test Infrastructure | - | pass_imp.cpp/CMakeLists.txt |
 | [#031](issues/031-target-auto-discovery-failure.md) | Target Auto-Discovery Fail | M | 1h | Test Infrastructure | - | pass_context_imp.cpp/test-hello-ep.cpp |
 | [#032](issues/032-ep-context-model-generation-failure.md) | EP Context Model Gen Fail | M | 2h | Test Infrastructure | #030/#031 | graph_partitioner/session.cpp |
-| [#033](issues/033-ep-duplicate-registration.md) | EP Duplicate Registration | M | 30m | Test Infrastructure | - | morphizen_unit_test_main.cpp/env.cpp |
 | [#034](issues/034-mlir-shape-nullptr-check-failure.md) | MLIR Shape Nullptr Check | M | 1h | MLIR Testing | - | mlir-graph.cpp/Casting.h |
 | [#035](issues/035-constdatatest-boost-dependency.md) | ConstDataTest Boost Dep | L | 1h | Test Infrastructure | - | test_const_data.cpp/CMakeLists.txt |
 | [#036](issues/036-boost-dependent-tests-skipped.md) | Boost-Dependent Tests | L | 1h | Test Infrastructure | - | test_graph.cpp/test_tar_file.cpp |
@@ -60,11 +59,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 See **[completed-issues.md](completed-issues.md)** for full archive of all completed issues.
 
 **Recent (last 5):**
+- #033 (PR #144) - EP Duplicate Registration Fix
 - #059 (PR #145) - Replace tar.h Download with POSIX Implementation
 - #054 (PR #142) - Eliminate Dangerous Un-Owned Buffer Factory Method
 - #024 (PR #141) - Remove Legacy Compile Entry Points
 - #060 (PR #130) - Remove IPass& from Pass Constructor
-- #039 (PR #129) - Fix TarFile Typos and Unused Parameter
 
 ---
 

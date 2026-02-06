@@ -1215,7 +1215,7 @@ int morphizen_ep_set_ep_dynamic_options(
       dynamic_cast<morphizen::PassContextImp*>(ep->get_context().get());
   CHECK(p_context != nullptr);
   std::lock_guard<std::mutex> lock(p_context->ep_dynamic_options_lock);
-  for (auto i = 0; i < kv_len; i++) {
+  for (size_t i = 0; i < kv_len; i++) {
     auto key = std::string(keys[i]);
     auto value = std::string(values[i]);
     if (key == "ep.dynamic.workload_type")

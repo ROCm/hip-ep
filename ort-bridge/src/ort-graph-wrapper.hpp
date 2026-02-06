@@ -4,6 +4,7 @@
  */
 #pragma once
 #include "./api-ptrs.hpp"
+#include "morphizen/onnxruntime_api.hpp"
 #include <gsl/gsl>
 #include <map>
 #include <string>

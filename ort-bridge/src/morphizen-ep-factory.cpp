@@ -96,7 +96,7 @@ OrtStatus* ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
         factory->ort_api.HardwareDevice_VendorId(hardware_device);
     const OrtHardwareDeviceType device_type =
         factory->ort_api.HardwareDevice_Type(hardware_device);
-    static constexpr std::uint32_t hardware_vendor_id{0x1022};
+    // static constexpr std::uint32_t hardware_vendor_id{0x1022};
 
     if (ENV_PARAM(MORPHIZEN_EP_ENABLE_CPU_DEVICE)) {
       // only for internal test, we pretend to support CPU EP.

@@ -4,6 +4,7 @@
  */
 #pragma once
 #include "morphizen/ort_api_wrapper.hpp"
+#include <onnxruntime_c_api.h>
 /**
  * @file onnxruntime_morphizen_ep.hpp
  * @brief Header file for the MorphiZen Execution Provider integration with ONNX

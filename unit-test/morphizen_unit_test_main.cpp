@@ -5,24 +5,15 @@
 #define _CRT_SECURE_NO_WARNINGS 1
 #include <gtest/gtest.h>
 
-#ifdef __GNUC__
-#  pragma GCC diagnostic ignored "-Wpedantic"
-#  pragma GCC diagnostic ignored "-Wconversion"
-#  pragma GCC diagnostic ignored "-Wsign-compare"
-#  pragma GCC diagnostic ignored "-Wunused-variable"
-#  pragma GCC diagnostic ignored "-Wunused-but-set-variable"
-#endif
-#include <filesystem>
 #include <glog/logging.h>
-#define ORT_API_MANUAL_INIT 1
 #include <onnxruntime_cxx_api.h>
 #if _WIN32
 #  ifdef _DEBUG
 #    include <crtdbg.h>
 #  endif
 #endif
+#include "morphizen-utils/morphizen_plugin.hpp"
 #include "morphizen/morphizen-ort-api-ext.hpp"
-#include "morphizen/morphizen.hpp"
 template <typename... Args> void* morphizen_main_cmd(Args... args) {
   auto ep_dll = morphizen::Plugin::get("onnxruntime_vitisai_ep");
   if (ep_dll == nullptr) {
@@ -69,7 +60,6 @@ bool arg_get(int argc, const char* argv[], const char* name) {
 }
 
 int main(int argc, const char* argv[]) {
-  Ort::InitApi();
 #if _WIN32
 #  ifdef _DEBUG
   auto env_ci = getenv("CI");
@@ -94,15 +84,6 @@ int main(int argc, const char* argv[]) {
       show_test_case();
       return 0;
     }
-
-    Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "morphizen_unit_test");
-#ifdef _WIN32
-    auto library_path = std::filesystem::path("onnxruntime_vitisai_ep.dll");
-#else
-    auto library_path = std::filesystem::path("libonnxruntime_vitisai_ep.so");
-#endif
-    env.RegisterExecutionProviderLibrary("MorphiZenExecutionProvider",
-                                         library_path);
 
     // Initialize the global MorphiZen ORT API for unit tests
     // This is required for tests that directly use MorphiZen APIs without
