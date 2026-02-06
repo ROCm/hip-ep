@@ -25,6 +25,8 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
 | # | Title | Pri | Est | Group | Blocked | Files |
 |---|-------|-----|-----|-------|---------|-------|
+| [#062](issues/062-cleanup-root-config-files.md) | Clean Up Root Config Files | L | 5-10m | Project Organization | - | pyproject.toml, .gitignore, .gitignore.pr-review |
+| [#061](issues/061-reorganize-tools-directory.md) | Reorganize tools/ Directory | M | 2-3h | Project Organization | - | tools/, scripts/, cmake/, BUILD.bazel, CI workflows |
 | [#013](issues/013-provider-options-aggregation.md) | provider_options Aggregation | M | 1h | Provider Options | - | pass_context_imp.cpp |
 | [#019](issues/019-refactor-initialize-context.md) | Refactor initialize_context | L | 2h | Config/Context | - | morphizen_compile_model.cpp |
 | [#026](issues/026-mlir-model-export-api.md) | MLIR Model Export API | M | 1h | MLIR Features | - | morphizen-ort-api-ext.hpp/mlir-model.cpp |
