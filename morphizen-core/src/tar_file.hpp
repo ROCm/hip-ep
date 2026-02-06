@@ -79,20 +79,6 @@ public:
    */
   static std::unique_ptr<TarFile> create(std::string&& buffer,
                                          bool enable_mmap);
-  /**
-   * @brief Creates a TarFile instance from raw data.
-   *
-   * This function initializes and returns a unique pointer to a TarFile
-   * object, which represents the tar file created from the provided raw data
-   * and size.
-   *
-   * the caller need to ensure `data` and `size` lifetime is long enough
-   *
-   * @param data Pointer to the raw data buffer containing the tar file data.
-   * @param size The size of the raw data buffer.
-   * @return A unique pointer to the created TarFile instance.
-   */
-  static std::unique_ptr<TarFile> create(const char* data, size_t size);
 
 private:
   struct PrivateTag {

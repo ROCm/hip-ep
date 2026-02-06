@@ -98,13 +98,6 @@ std::unique_ptr<TarFile> TarFile::create(std::vector<char>&& buffer) {
       << " create a tar file from memory " << (void*)base << " " << size;
   return create(std::move(stream));
 }
-std::unique_ptr<TarFile> TarFile::create(const char* base, size_t size) {
-  auto stream = std::make_unique<MemStream<int>>(
-      MemBuffer<int>::create(base, size, std::unique_ptr<int>()));
-  LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-      << " create a tar file from memory " << (void*)base << " " << size;
-  return create(std::move(stream));
-}
 std::unique_ptr<TarFile> TarFile::create(std::string&& buffer0,
                                          bool enable_mmap) {
   std::unique_ptr<std::iostream> stream;
