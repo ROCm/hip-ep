@@ -97,18 +97,12 @@ def main():
     with open(issue_file, "r", encoding="utf-8") as f:
         content = f.read()
 
-    if "- **Started:**" in content:
+    if "Started:" in content:
         print("⚠️  Issue already has Started date - skipping")
     else:
-        # Find the Created line and add Started after it
-        lines = content.split("\n")
-        for i, line in enumerate(lines):
-            if line.startswith("- **Created:**"):
-                lines.insert(i + 1, f"- **Started:** {today}")
-                break
-
-        with open(issue_file, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
+        # Append Started date to end of file
+        with open(issue_file, "a", encoding="utf-8") as f:
+            f.write(f"\nStarted: {today}\n")
 
         print(f"✅ Added Started date: {today}")
 
