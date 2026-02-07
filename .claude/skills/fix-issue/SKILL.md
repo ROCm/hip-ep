@@ -4,7 +4,7 @@ Licensed under the MIT License.
 -->
 ---
 name: fix-issue
-description: Complete workflow automation for fixing backlog issues (selection, implementation, finalization)
+description: Complete workflow automation for fixing backlog issues (selection, workspace setup, implementation)
 allowed-tools: [Bash, Read, Grep, Glob, Edit, Write, AskUserQuestion]
 ---
 
@@ -12,7 +12,9 @@ allowed-tools: [Bash, Read, Grep, Glob, Edit, Write, AskUserQuestion]
 
 ## Purpose
 
-Automate the complete workflow for fixing backlog issues from selection to finalization, eliminating repetitive manual steps while enforcing git-workflow.md rules.
+Automate issue selection, workspace setup, and implementation for backlog issues, eliminating repetitive manual steps while enforcing git-workflow.md rules.
+
+**Scope:** Phase 2 of issue resolution workflow (selection → implementation). After /fix-issue completes, author reviews the implementation, then runs /resolve-ci for finalization and CI monitoring.
 
 ---
 
@@ -106,40 +108,27 @@ Commit with validation (no AI mentions), run pre-commit, push to fork.
 
 ### Step 4.3: If NO - Manual implementation
 
-Exit skill. User implements manually, then runs `/fix-issue --finalize #NNN` to complete.
+Exit skill. User implements manually on the feature branch.
 
 ---
 
-## Phase 5-8: Finalization
+## Next Steps: Author Review (Phase 3)
 
-### Step 4.1: Generate PR body
+After /fix-issue completes (auto or manual implementation):
 
-Read issue and plan files. Extract Description, Problem, Solution sections. Collect changed files and commit history. Generate comprehensive PR body combining issue context with implementation results.
+1. **Author reviews the draft PR:**
+   - Check code quality, logic, adherence to plan
+   - Test locally if needed
+   - Verify implementation correctness
 
-### Step 4.2: Update PR
+2. **Author marks PR ready:**
+   ```bash
+   gh pr ready <PR_NUMBER>
+   ```
 
-Update PR title (format: `Issue #NNN: <type>: <description>`) and body using `gh pr edit`.
+3. **Run /resolve-ci for finalization and CI monitoring:**
+   - Finalizes PR (updates backlog, deletes issue files, crafts PR description)
+   - Monitors CI, handles conflicts/failures
+   - Auto-merges when approved + CI passes
 
-### Step 4.3: Update backlog and cleanup
-
-1. Edit `completed-issues.md` - add row to current month table: #, Author, PR, Commit, Date, Title
-2. Edit `backlog.md`:
-   - Remove from backlog table
-   - Remove from "Quick dependencies" (if referenced)
-   - Update "Recent (last 5)" list (prepend, keep max 5)
-   - Update "Blocked" columns in other issues (if they reference this issue)
-3. `git rm docs/project/issues/NNN-*.md`
-4. `git rm docs/project/plans/NNN-*.md` (if exists)
-5. Pre-commit retry loop: `while ! pre-commit run; do git add -u; done`
-6. `git commit -m "docs: complete issue #NNN"`
-7. `git push fork <branch>`
-
-### Step 4.4: Show summary
-
-Display completed work summary with changed files, commits, and PR status. Remind user PR is DRAFT and needs review before marking ready.
-
----
-
-## Resumption Support
-
-Use `/fix-issue --finalize #NNN` to skip to Phase 4-8 (finalization only).
+See `docs/workflows/issue-resolution-workflow.md` for complete workflow.
