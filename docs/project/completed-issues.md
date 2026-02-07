@@ -12,6 +12,7 @@ Chronological archive of all completed backlog issues (newest first).
 
 | # | Author | PR | Commit | Date | Title |
 |---|--------|----|----|------|-------|
+| #062 | wcy123 | #152 | TBD | 02-07 | Clean Up Root Config Files |
 | #033 | zhenzew | #144 | e39978a | 02-06 12:00 +8 | EP Duplicate Registration Fix |
 | #059 | wcy123 | #145 | 0a78674 | 02-06 | Replace tar.h Download with POSIX Implementation |
 | #054 | wcy123 | #142 | 7f7d9c3 | 02-06 TBD | Eliminate Dangerous Un-Owned Buffer Factory Method |

@@ -27,9 +27,7 @@ if sys.platform == "win32":
 
 def run(cmd, capture=False, check=True):
     """Run a shell command and optionally capture output."""
-    result = subprocess.run(
-        cmd, shell=True, capture_output=capture, text=True, check=check
-    )
+    result = subprocess.run(cmd, shell=True, capture_output=capture, text=True, check=check)
     if capture:
         return result.stdout.strip()
     return result.returncode == 0

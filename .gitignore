@@ -49,3 +49,6 @@
 /.clinerules/*
 !/.clinerules/*.md
 /.claude/settings.local.json
+
+# PR Review Toolkit
+pr*_review.md
