@@ -25,7 +25,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
 | # | Title | Pri | Est | Group | Blocked | Files |
 |---|-------|-----|-----|-------|---------|-------|
-| [#062](issues/062-cleanup-root-config-files.md) | Clean Up Root Config Files | L | 5-10m | Project Organization | - | pyproject.toml, .gitignore, .gitignore.pr-review |
 | [#061](issues/061-reorganize-tools-directory.md) | Reorganize tools/ Directory | M | 2-3h | Project Organization | - | tools/, scripts/, cmake/, BUILD.bazel, CI workflows |
 | [#013](issues/013-provider-options-aggregation.md) | provider_options Aggregation | M | 1h | Provider Options | - | pass_context_imp.cpp |
 | [#019](issues/019-refactor-initialize-context.md) | Refactor initialize_context | L | 2h | Config/Context | - | morphizen_compile_model.cpp |
@@ -64,11 +63,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 See **[completed-issues.md](completed-issues.md)** for full archive of all completed issues.
 
 **Recent (last 5):**
+- #062 (PR #152) - Clean Up Root Config Files
 - #033 (PR #144) - EP Duplicate Registration Fix
 - #059 (PR #145) - Replace tar.h Download with POSIX Implementation
 - #054 (PR #142) - Eliminate Dangerous Un-Owned Buffer Factory Method
 - #024 (PR #141) - Remove Legacy Compile Entry Points
-- #060 (PR #130) - Remove IPass& from Pass Constructor
 
 ---
 

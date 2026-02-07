@@ -33,13 +33,9 @@ pattern = r"^(.+)\s*:\s*error\s*(LNK\d+):\s*unresolved\s*external\s*symbol\s*\"(
 
 def main():
     # parse command line arguments
-    parser = argparse.ArgumentParser(
-        description="Parse the error message from the linker"
-    )
+    parser = argparse.ArgumentParser(description="Parse the error message from the linker")
     parser.add_argument("file", help="The error log message from the linker")
-    parser.add_argument(
-        "def_file", help="The def file to be used to resolve the symbols"
-    )
+    parser.add_argument("def_file", help="The def file to be used to resolve the symbols")
     args = parser.parse_args()
     print(f"error log file = {args.file}")
     print(f"def_file = {args.def_file}")
