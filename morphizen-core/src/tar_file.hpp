@@ -89,8 +89,6 @@ public:
   MORPHIZEN_DLL_SPEC
   bool has_file(const std::string& filename) const;
   MORPHIZEN_DLL_SPEC
-  std::vector<std::unique_ptr<TarEntryInputStream>>& entries();
-  MORPHIZEN_DLL_SPEC
   const std::vector<std::unique_ptr<TarEntryInputStream>>& entries() const;
   // user must not close this stream.
   // stream->close() is a noop.

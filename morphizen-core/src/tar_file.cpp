@@ -235,9 +235,6 @@ bool TarFile::dump_to(char* data, size_t size) const {
   return true;
 }
 
-std::vector<std::unique_ptr<TarEntryInputStream>>& TarFile::entries() {
-  return entries_;
-}
 const std::vector<std::unique_ptr<TarEntryInputStream>>&
 TarFile::entries() const {
   return entries_;
