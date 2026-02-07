@@ -5,11 +5,50 @@
 #
 
 """
-Complete PR lifecycle orchestrator for /resolve-ci skill
-1. Updates branch (sync fork, rebase main) - detects conflicts
-2. Monitors CI status every 30 seconds - auto-fixes pre-commit
-3. Cleans up after merge - switches to main, deletes branches
-Returns to AI only when intelligent intervention needed
+PR Monitoring and Conflict Resolution Script for /resolve-ci Skill
+
+OVERVIEW:
+This script autonomously monitors a PR until it merges, handling common failures
+without AI intervention. It runs in a loop with 30-second polling intervals,
+exiting only when intelligent intervention is needed or the PR merges.
+
+KEY DESIGN DECISIONS:
+
+1. UPDATE BRANCH ON EVERY CYCLE
+   - Keeps branch current with origin/main throughout monitoring
+   - Prevents "branch behind" issues when other PRs merge during monitoring
+   - Git rebase is a no-op if already up-to-date (very fast)
+   - Relies on git, not `gh`, for conflict detection (simpler, more reliable)
+
+2. TWO TYPES OF CONFLICTS DETECTED
+   - FORK_CONFLICT: Local branch conflicts with fork/branch (rare: someone else pushed)
+   - BASE_CONFLICT: Local branch conflicts with origin/main (common: other PRs merged)
+   Both handled via git rebase, exit with status code for AI to resolve
+
+3. AUTO-FIX PRE-COMMIT FAILURES
+   - Pre-commit failures (formatting) are mechanical, safe to auto-fix
+   - Run pre-commit, commit changes, push to fork
+   - Complex CI failures (build/test) require AI analysis
+
+4. TOKEN EFFICIENCY
+   - Python script polls GitHub API (no AI token cost)
+   - Only returns to AI when intelligent intervention needed
+   - Status codes tell AI what happened: conflicts, CI failures, auto-merge issues
+
+WORKFLOW:
+  Loop every 30 seconds:
+    1. Update branch (rebase onto origin/main) → Exit if conflicts
+    2. Check if PR merged → Cleanup and exit
+    3. Check CI status → Auto-fix pre-commit, exit if complex failures
+    4. Enable auto-merge when CI passes
+    5. Wait 30 seconds
+
+EXIT STATUS CODES:
+  - STATUS:FORK_CONFLICT - Conflict with fork branch (AI resolves)
+  - STATUS:BASE_CONFLICT - Conflict with origin/main (AI resolves)
+  - STATUS:NEEDS_FIX_CI - Complex CI failure (AI analyzes logs)
+  - STATUS:AUTO_MERGE_FAILED - Auto-merge permission issue (user checks settings)
+  - STATUS:CLEANUP_COMPLETE - PR merged, branches cleaned up (success!)
 """
 
 import subprocess
@@ -54,11 +93,36 @@ def get_current_branch():
 
 
 def update_branch(branch):
-    """Update branch: sync fork and rebase main. Returns (success, status)."""
-    print("🔄 Phase 1: Updating branch...")
+    """
+    Update branch: sync with fork, rebase onto origin/main, push if needed.
+
+    Returns: (success: bool, remote_updated: bool, status: str)
+    - success: True if no intervention needed, False if AI/user help required
+    - remote_updated: True if remote was pushed (CI restarts), False if unchanged
+    - status: "UPDATED" | "UP_TO_DATE" | "FORK_CONFLICT" | "BASE_CONFLICT" | "PUSH_FAILED"
+
+    This handles TWO types of conflicts via git rebase:
+    1. FORK_CONFLICT: Local branch diverged from fork/branch
+       - Rare case: someone else pushed to the same feature branch
+       - Detected by: git rebase fork/branch failure
+    2. BASE_CONFLICT: Local branch conflicts with origin/main
+       - Common case: other PRs merged to main while we're waiting
+       - Detected by: git rebase origin/main failure
+
+    WHY USE GIT INSTEAD OF `gh`:
+    - Git rebase directly detects conflicts (simple, reliable)
+    - `gh pr view --json mergeStateStatus` is indirect and complex
+    - Git is the source of truth for branch relationships
+
+    WHY RETURN remote_updated:
+    - If remote pushed → CI restarts → should break loop and restart monitoring
+    - If unchanged → CI still running on same commit → continue checking CI status
+    """
+    print("🔄 Updating branch...")
     print("")
 
     # Step 1: Sync with upstream fork branch
+    # WHY: Ensure we have latest commits from fork (handles FORK_CONFLICT)
     print("📥 Step 1: Syncing with fork branch...")
     run_command(f'git fetch fork "{branch}"')
 
@@ -70,14 +134,26 @@ def update_branch(branch):
     )
 
     if result.returncode != 0:
+        # FORK_CONFLICT: Someone else pushed to our feature branch
         print("⚠️  Conflicts with upstream fork branch detected")
         print("STATUS:FORK_CONFLICT")
-        return False, "FORK_CONFLICT"
+        # Return: (success=False: needs AI help, remote_updated=False: remote not changed, status=FORK_CONFLICT)
+        return False, False, "FORK_CONFLICT"
 
     print("✅ Synced with fork")
     print("")
 
+    # Capture HEAD before rebasing onto main
+    # WHY: We need to know if rebase actually changed anything
+    # If no changes → no need to push → CI doesn't restart
+    old_head = run_command("git rev-parse HEAD")
+    if not old_head:
+        print("❌ Failed to get current HEAD")
+        sys.exit(1)
+
     # Step 2: Rebase onto origin/main
+    # WHY: Keep branch current with main (handles BASE_CONFLICT)
+    # This is the KEY operation that prevents "branch behind" infinite loops
     print("📥 Step 2: Rebasing onto origin/main...")
     run_command("git fetch origin main")
 
@@ -89,14 +165,37 @@ def update_branch(branch):
     )
 
     if result.returncode != 0:
+        # BASE_CONFLICT: Branch conflicts with origin/main
+        # Common when other PRs merge while we're waiting for CI
         print("⚠️  Conflicts with base branch detected")
         print("STATUS:BASE_CONFLICT")
-        return False, "BASE_CONFLICT"
+        # Return: (success=False: needs AI help, remote_updated=False: remote not changed, status=BASE_CONFLICT)
+        return False, False, "BASE_CONFLICT"
 
     print("✅ Rebased onto main")
     print("")
 
-    # Push
+    # Check if HEAD moved (rebase changed anything)
+    new_head = run_command("git rev-parse HEAD")
+    if not new_head:
+        print("❌ Failed to get current HEAD after rebase")
+        sys.exit(1)
+
+    if old_head == new_head:
+        # Branch was already up-to-date, nothing changed
+        # WHY NOT PUSH: No point pushing if nothing changed
+        # WHY IMPORTANT: Tells monitoring loop CI is still running on same commit
+        print("✅ Branch already up-to-date")
+        print("")
+        # Return: (success=True: no conflicts, remote_updated=False: no push needed, status=UP_TO_DATE)
+        # Monitoring loop will fall through to check current CI status
+        return True, False, "UP_TO_DATE"
+
+    # HEAD moved - we have new commits after rebasing
+    # Push rebased branch to fork
+    # WHY --force-with-lease: After rebase, history changed (force needed)
+    # But --force-with-lease is safer than --force: fails if someone else
+    # pushed to fork/branch since our last fetch (prevents overwriting work)
     print("📤 Pushing updated branch...")
     result = subprocess.run(
         f'git push fork "{branch}" --force-with-lease',
@@ -106,13 +205,22 @@ def update_branch(branch):
     )
 
     if result.returncode != 0:
+        # PUSH_FAILED: Corner case (network issue, auth problem, or race condition)
+        # WHY return False: Need AI/user intervention to diagnose
+        # WHY remote_updated=False: Remote was NOT updated despite local changes
         print("❌ Failed to push")
         print(result.stderr)
-        return False, "PUSH_FAILED"
+        print("STATUS:PUSH_FAILED")
+        # Return: (success=False: needs AI/user help, remote_updated=False: push failed, status=PUSH_FAILED)
+        # Monitoring loop will exit and return to AI
+        return False, False, "PUSH_FAILED"
 
     print("✅ Branch updated successfully")
     print("")
-    return True, "UPDATED"
+    # Return: (success=True: no conflicts, remote_updated=True: pushed to fork, status=UPDATED)
+    # WHY remote_updated=True: We pushed, CI will restart on new commit
+    # Monitoring loop will continue (restart) to wait for CI to start on new commit
+    return True, True, "UPDATED"
 
 
 def cleanup_after_merge(branch):
@@ -283,17 +391,11 @@ def main():
         print(f"Using auto-detected PR #{pr_number} from branch {current_branch}")
         print("")
 
-    # Phase 1: Update branch (upfront, before monitoring)
-    success, status = update_branch(current_branch)
-    if not success:
-        # Conflict detected - return to AI for resolution
-        sys.exit(0)
-
-    # Phase 2: Monitor CI until merged
+    # Start monitoring loop
     if args.attempt > 1:
-        print(f"🔍 Phase 2: Starting monitoring loop (Attempt {args.attempt}/6, 10-minute timeout)...")
+        print(f"🔍 Starting monitoring loop (Attempt {args.attempt}/6)...")
     else:
-        print("🔍 Phase 2: Starting monitoring loop (10-minute timeout)...")
+        print("🔍 Starting monitoring loop...")
     print("")
 
     cycle_count = 0
@@ -301,6 +403,33 @@ def main():
     while True:
         cycle_count += 1
         print(f"[Cycle {cycle_count}] Checking status...")
+
+        # CRITICAL: Update branch on every cycle
+        # WHY: When another PR merges to main during monitoring, our branch falls
+        # behind and GitHub won't auto-merge. By rebasing on every cycle, we stay
+        # current. Git rebase is a no-op if already up-to-date (very fast).
+        # This prevents the infinite loop bug where we wait forever for a merge
+        # that will never happen because branch is behind.
+        success, remote_updated, _ = update_branch(current_branch)
+
+        if not success:
+            # Conflict or push failed - needs AI/user intervention
+            # STATUS already printed by update_branch (FORK_CONFLICT, BASE_CONFLICT, or PUSH_FAILED)
+            # WHY exit: Can't proceed until conflicts resolved or push issue fixed
+            sys.exit(0)
+
+        if remote_updated:
+            # Remote branch was pushed - CI will restart on new commit
+            # WHY continue: Need to restart monitoring from top, give CI time to start
+            # Don't check current CI status - it's for old commit, will be stale
+            print("⏳ Waiting 30 seconds for CI to start on updated branch...")
+            print("")
+            time.sleep(30)
+            continue
+
+        # Branch was already up-to-date (UP_TO_DATE status)
+        # WHY fall through: CI is still running on current commit
+        # Check CI status in this same iteration
 
         # Check if merged using GitHub API
         if check_if_merged(pr_number):
@@ -330,7 +459,10 @@ def main():
             for check in failed_checks:
                 print(f"  - {check.get('name')}: {check.get('conclusion')}")
 
-            # Check if it's a pre-commit failure (auto-fixable)
+            # Auto-fix pre-commit failures (mechanical, safe)
+            # WHY: Pre-commit failures are just formatting issues. We can safely
+            # run the formatter, commit, and push without AI intervention.
+            # Complex failures (build errors, test failures) need AI analysis.
             precommit_failed = any(
                 check.get("name") == "pre-commit" and check.get("conclusion") == "FAILURE" for check in status_checks
             )
@@ -341,6 +473,7 @@ def main():
                 continue
 
             # Complex CI failure - needs intelligent analysis
+            # Return to AI for log analysis and fix
             print("STATUS:NEEDS_FIX_CI")
             sys.exit(0)
 
@@ -352,20 +485,26 @@ def main():
             for check in pending_checks:
                 print(f"  - {check.get('name')}: {check.get('status')}")
         else:
-            # All checks passed, enable auto-merge if not already
+            # All checks passed - enable auto-merge if not already enabled
+            # WHY AUTO-MERGE: Once CI passes and branch is up-to-date, GitHub can
+            # auto-merge when maintainer approves. This eliminates manual clicking.
             auto_merge_enabled = pr_data.get("autoMergeRequest") is not None
 
             if not auto_merge_enabled:
                 if enable_auto_merge(pr_number):
-                    # Auto-merge enabled, continue monitoring
+                    # Auto-merge enabled, continue monitoring for merge
                     pass
                 else:
+                    # Auto-merge failed (likely permissions issue)
+                    # Return to AI so user can check repository settings
                     print("STATUS:AUTO_MERGE_FAILED")
                     sys.exit(0)
             else:
                 print("✅ All checks passed - auto-merge enabled, waiting for merge...")
 
         # Wait 30 seconds before next check
+        # WHY 30 SECONDS: Balance between responsiveness and API rate limits
+        # GitHub has rate limits, and CI checks typically take minutes, not seconds
         print("⏳ Waiting 30 seconds before next check...")
         print("")
         time.sleep(30)

@@ -104,13 +104,13 @@ The issue resolution workflow integrates three skills to automate the complete j
 ### Step 4: Implement
 - Offer: Auto-implement / Manual / Cancel
 - **Auto-implement:** Read plan, execute steps, build, test, commit, push
-- **Manual:** User implements, runs `/fix-issue --finalize #NNN` later
+- **Manual:** Exit skill. User implements on feature branch, commits and pushes. When done, proceed to Phase 3 (Author Review).
 
 **Output:**
 - Feature branch with implementation commits
 - Draft PR (not ready for review yet)
 
-**When done:** Implementation is complete, PR is DRAFT. Author review needed before finalization.
+**When done:** Implementation is complete, PR is DRAFT. Proceed to Phase 3 for author review before finalization.
 
 ---
 
@@ -229,8 +229,7 @@ The issue resolution workflow integrates three skills to automate the complete j
 - During `/resolve-ci` CI failures → **AI analyzes logs** and fixes, or asks for help
 
 **Resumption:**
-- `/fix-issue --finalize #NNN` - Skip to finalization if manually implemented
-- `/resolve-ci` - Can retry after fixing conflicts/failures externally
+- `/resolve-ci` - Can retry after fixing conflicts/failures externally, or run on any ready PR to finalize and monitor
 
 ---
 
