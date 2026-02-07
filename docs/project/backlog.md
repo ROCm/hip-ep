@@ -17,7 +17,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for issue quality guidelines.
 **Quick dependencies:**
 - **#052 relates to #050, #051** - All improve TarFile implementation quality
 - **#053 relates to #052** - Documents architecture that #052 will modify
-- **#055 relates to #050** - All reduce TarFile public API surface
 - **#056 relates to #051** - Both improve TarFile documentation quality
 - **#060 relates to #059** - Implements two-tier utilities pattern from guidelines
 
@@ -45,7 +44,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 | [#051](issues/051-document-complex-tarfile-factory-methods.md) | Document Factory Methods | M | 1h | TarFile Docs | - | tar_file.cpp |
 | [#052](issues/052-eliminate-redundant-cached-stream-pointers.md) | Eliminate Redundant Cached Stream Pointers | L | 1h | TarFile Refactor | - | tar_file.hpp/.cpp/tar_entry.hpp/.cpp |
 | [#053](issues/053-document-tar-streaming-architecture.md) | Document TAR Streaming | M | 2h | TarFile Docs | - | tar-streaming-architecture.md |
-| [#055](issues/055-remove-non-const-entries-overload.md) | Remove Non-Const entries | L | 15m | TarFile Cleanup | - | tar_file.hpp |
 | [#056](issues/056-add-comprehensive-documentation-to-tarfile.md) | Add TarFile Docs | M | 2h | TarFile Docs | - | tar_file.hpp |
 | [#059](issues/059-component-organization-guidelines.md) | Component Organization Guidelines | M | 2h | Documentation | - | component-organization-guidelines.md |
 | [#060](issues/060-create-morphizen-foundation.md) | Create morphizen-foundation | M | 4h | Architecture | - | morphizen-foundation/* |
@@ -64,11 +62,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 See **[completed-issues.md](completed-issues.md)** for full archive of all completed issues.
 
 **Recent (last 5):**
+- #055 (PR #153) - Remove Non-Const entries() Overload from TarFile
 - #062 (PR #152) - Clean Up Root Config Files
 - #033 (PR #144) - EP Duplicate Registration Fix
 - #059 (PR #145) - Replace tar.h Download with POSIX Implementation
 - #054 (PR #142) - Eliminate Dangerous Un-Owned Buffer Factory Method
-- #024 (PR #141) - Remove Legacy Compile Entry Points
 
 ---
 
