@@ -61,7 +61,7 @@ If user cancels, exit without creating workspace.
 
 ## Phase 3: Workspace Setup
 
-Run `setup-workspace.py <issue_num>` to:
+Run `python .claude/skills/fix-issue/setup-workspace.py <issue_num>` to:
 - Check prerequisites (on main, no uncommitted changes)
 - Sync main branch
 - Create feature branch
