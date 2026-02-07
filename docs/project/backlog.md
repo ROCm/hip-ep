@@ -25,6 +25,7 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
 | # | Title | Pri | Est | Group | Blocked | Files |
 |---|-------|-----|-----|-------|---------|-------|
+| [#063](issues/063-fix-fix-issue-skill-bugs.md) | Fix /fix-issue Skill Bugs | M | 30m | Skills | - | setup-workspace.py |
 | [#061](issues/061-reorganize-tools-directory.md) | Reorganize tools/ Directory | M | 2-3h | Project Organization | - | tools/, scripts/, cmake/, BUILD.bazel, CI workflows |
 | [#013](issues/013-provider-options-aggregation.md) | provider_options Aggregation | M | 1h | Provider Options | - | pass_context_imp.cpp |
 | [#019](issues/019-refactor-initialize-context.md) | Refactor initialize_context | L | 2h | Config/Context | - | morphizen_compile_model.cpp |
