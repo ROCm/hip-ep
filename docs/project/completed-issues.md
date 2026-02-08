@@ -12,6 +12,7 @@ Chronological archive of all completed backlog issues (newest first).
 
 | # | Author | PR | Commit | Date | Title |
 |---|--------|----|----|------|-------|
+| #063 | wcy123 | #154 | 72a6686 | 02-07 | Fix /fix-issue Skill Bugs |
 | #055 | wcy123 | #153 | c7ff9db | 02-07 | Remove Non-Const entries() Overload from TarFile |
 | #062 | wcy123 | #152 | TBD | 02-07 | Clean Up Root Config Files |
 | #033 | zhenzew | #144 | e39978a | 02-06 12:00 +8 | EP Duplicate Registration Fix |
