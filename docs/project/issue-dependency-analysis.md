@@ -15,7 +15,6 @@ This document analyzes the 28 active backlog issues, identifies their groupings,
 ### Group A: Core Config/Context Refactoring
 *Foundational changes to ConfigProto and ContextProto separation*
 
-- **#013**: provider_options Aggregation (cleanup after prerequisite issues complete)
 - **#019**: Refactor initialize_context() (god function cleanup - optional quality improvement)
 
 ### Group B: Migration & API Evolution
@@ -59,7 +58,6 @@ This document analyzes the 28 active backlog issues, identifies their groupings,
 ### Group E: New Features
 *New capabilities and functionality*
 
-- **#013**: provider_options Aggregation (also a cleanup task)
 
 ---
 
@@ -274,7 +272,7 @@ Coordinate for shared benchmark infrastructure:
 These groups can be worked on in parallel:
 
 **Track 1: Cleanup & API Migration** (sequential within track)
-- #009 → #013 → #019 (optional)
+- #009 → → #019 (optional)
 - #024 → #026 → #027
 
 **Track 2: Pattern System** (mostly parallel, some coordination)
@@ -296,7 +294,7 @@ These groups can be worked on in parallel:
 - #056 (regression detection - depends on #042, #054, integrates with #050)
 
 **Maximum parallelism:**
-- **Week 1-2**: Start Track 1 (#009, #013), Track 3 (#038, #039, #040), Track 4 (#050)
+- **Week 1-2**: Start Track 1 (#009), Track 3 (#038, #039, #040), Track 4 (#050)
 - **Week 3-4**: Continue Track 1 (#019, #024), start Track 2 (#029, #030, #033, #034), continue Track 3 (#044, #047)
 - **Week 5-6**: Continue Track 1 (#026, #027), Track 2 (#031, #032, #035, #036), Track 4 (#051, #052, #053, #055)
 - **Week 7-8**: Track 3 (#048), Track 5 (#042, #054, #056)
@@ -336,7 +334,6 @@ These groups can be worked on in parallel:
 ### Low Risk (Incremental Improvements)
 
 - **#009**: Simple removal (dead code)
-- **#013**: Simple cleanup (after prerequisites completed)
 - **#019**: Optional refactoring (no functional changes)
 - **#027**: Deprecation (doesn't remove functionality)
 - **#029-#036**: Pattern additions (additive, not breaking)
@@ -351,7 +348,7 @@ These groups can be worked on in parallel:
 ### By Phase
 
 **Phase 1 Complete:** 3 issues (Cleanup from previous work)
-- #009, #013, #019
+- #009, #019
 - Benefits: Cleaner codebase, simpler provider options, better initialize_context()
 
 **Phase 2 Complete:** 3 issues (API Migration & Multi-Target)
@@ -409,7 +406,7 @@ These groups can be worked on in parallel:
 
 ## Next Steps
 
-1. **Immediate actions**: Complete Phase 1 cleanup (#009, #013, #019)
+1. **Immediate actions**: Complete Phase 1 cleanup (#009, #019)
 2. **Short-term planning**: Start Phase 2 API migration (#024, #026, #027)
 3. **Medium-term planning**: Parallel work on Pattern System (Phase 3) and Testing (Phase 4)
 4. **Long-term planning**: Infrastructure improvements (Phases 5-6)
@@ -418,7 +415,7 @@ These groups can be worked on in parallel:
 
 **Quick wins (start immediately):**
 - #009 (TargetProto cleanup - 1-2 hours)
-- #013 (provider_options cleanup - 1-2 hours)
+- (provider_options cleanup - 1-2 hours)
 - #035, #036 (simple optimization patterns - 1 day each)
 
 **High-impact (plan carefully):**

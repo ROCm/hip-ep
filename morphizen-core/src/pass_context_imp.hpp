@@ -377,7 +377,6 @@ private:
   std::filesystem::path tar_file_file_name_;
   const TargetProto* target_proto_ = nullptr;
   std::map<std::string, std::string> provider_option_origin_ = {};
-  std::map<std::string, std::string> provider_option_from_cache_ = {};
   std::map<std::string, std::string> compiled_model_compatibility_info_ = {};
   std::map<std::string, std::string> session_configs_ = {};
 
