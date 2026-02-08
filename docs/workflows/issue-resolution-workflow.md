@@ -104,13 +104,33 @@ The issue resolution workflow integrates three skills to automate the complete j
 ### Step 4: Implement
 - Offer: Auto-implement / Manual / Cancel
 - **Auto-implement:** Read plan, execute steps, build, test, commit, push
-- **Manual:** Exit skill. User implements on feature branch, commits and pushes. When done, proceed to Phase 3 (Author Review).
+- **Manual:** Exit skill. User implements on feature branch, commits and pushes. When done, proceed to Step 5 (Finalization).
+
+### Step 5: Finalize PR and Backlog
+After implementation is complete (auto or manual):
+
+1. **Craft PR title and body:**
+   - Remove `[WIP]` from title, add proper type
+   - Write comprehensive PR body from issue context
+   - Use `gh pr edit` to update
+
+2. **Update backlog documentation:**
+   - Add to completed-issues.md (current month table)
+   - Update backlog.md (move to "Recent (last 5)", remove from active)
+   - Delete issue and plan files
+
+3. **Commit and push:**
+   - `git commit -m "docs: complete issue #NNN"`
+   - `git push fork {branch}`
+
+4. **PR remains DRAFT** - awaiting author review
 
 **Output:**
 - Feature branch with implementation commits
-- Draft PR (not ready for review yet)
+- Draft PR with finalized title/body
+- Backlog updated and documented
 
-**When done:** Implementation is complete, PR is DRAFT. Proceed to Phase 3 for author review before finalization.
+**When done:** Implementation and finalization complete, PR is DRAFT. Proceed to Phase 3 for author review.
 
 ---
 
@@ -135,25 +155,24 @@ The issue resolution workflow integrates three skills to automate the complete j
 
 ---
 
-## Phase 4: Finalization & CI
+## Phase 4: CI Monitoring & Merge
 
 **Skill:** `/resolve-ci`
 
-**Purpose:** Finalize PR, monitor CI, handle failures, merge when ready.
+**Purpose:** Monitor CI, handle failures, merge when ready.
+
+**Prerequisites:**
+- Implementation complete (done in Phase 2)
+- Finalization complete (done in Phase 2, Step 5)
+- PR marked ready: `gh pr ready {PR_NUM}`
 
 **Workflow:**
 
-### Phase 0: PR Finalization
-1. Validate PR is ready (exit with reminder if still draft)
-2. Read issue file for context
-3. Craft PR title: `Issue #NNN: <type>: <description>`
-4. Write PR description (problem, solution, changes)
-5. Update `completed-issues.md` (add to current month)
-6. Update `backlog.md` (move to "Recent" list, remove from active)
-7. Delete issue/plan files
-8. Commit and push documentation updates
+### Validation
+1. Check PR is ready (not draft) - exit if still draft
+2. Check PR is finalized (no `[WIP]` in title) - exit if not finalized
 
-### Phase 1-2: Monitor CI
+### Monitor CI
 - Script polls CI status every 30 seconds (no token cost)
 - Auto-fix pre-commit failures (run formatter, commit, push)
 - Return to AI only when intervention needed:
@@ -162,11 +181,11 @@ The issue resolution workflow integrates three skills to automate the complete j
   - **STATUS:NEEDS_FIX_CI** - Build/test failures
   - **STATUS:AUTO_MERGE_FAILED** - Permission issue
 
-### Phase 3: Enable auto-merge
+### Enable auto-merge
 - When all CI checks pass, enable auto-merge (squash)
 - GitHub will merge automatically when approved
 
-### Phase 4: Cleanup
+### Cleanup
 - After merge detected:
   - Switch to main branch
   - Pull latest from origin/main

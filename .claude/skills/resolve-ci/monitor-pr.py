@@ -263,7 +263,7 @@ def cleanup_after_merge(branch):
 
 def get_pr_info(branch):
     """Get PR info for current branch."""
-    output = run_command(f'gh pr list --head "{branch}" --json number,state,isDraft', check=False)
+    output = run_command(f'gh pr list --head "{branch}" --json number,state,isDraft,title', check=False)
     if not output:
         return None
     try:
@@ -271,6 +271,14 @@ def get_pr_info(branch):
         return prs[0] if prs else None
     except (json.JSONDecodeError, IndexError):
         return None
+
+
+def extract_issue_number(pr_title):
+    """Extract issue number from PR title like 'Issue #038: ...'"""
+    import re
+
+    match = re.match(r"Issue\s+#(\d+)", pr_title)
+    return match.group(1) if match else None
 
 
 def get_pr_status(pr_number):
@@ -370,16 +378,38 @@ def main():
     pr_number = pr_info.get("number")
     pr_state = pr_info.get("state")
     is_draft = pr_info.get("isDraft")
+    pr_title = pr_info.get("title", "")
 
     # Validate PR is open
     if pr_state != "OPEN":
         print(f"ℹ️  PR #{pr_number} is {pr_state} (not OPEN)")
         sys.exit(0)
 
-    # Validate PR is not draft
+    # Check 1: Validate PR is not draft
     if is_draft:
         print(f"❌ PR #{pr_number} is still DRAFT")
         print(f"Mark it ready for review first: gh pr ready {pr_number}")
+        print("STATUS:NEEDS_READY")
+        sys.exit(1)
+
+    # Check 2: Validate PR is finalized (title updated from [WIP])
+    if "[WIP]" in pr_title:
+        issue_num = extract_issue_number(pr_title)
+        print(f"❌ PR #{pr_number} needs finalization")
+        print(f"Title still contains [WIP]: {pr_title}")
+        print("")
+        print("AI must complete Phase 0 finalization:")
+        print(f"1. Read issue #{issue_num} file for context")
+        print("2. Craft PR title (remove [WIP], add proper type)")
+        print("3. Write comprehensive PR body from issue + implementation")
+        print("4. Update completed-issues.md, backlog.md")
+        print("5. Delete issue/plan files")
+        print(f'6. Commit "docs: complete issue #{issue_num}" and push')
+        print("7. Re-run monitor-pr.py")
+        print("")
+        print("STATUS:NEEDS_FINALIZATION")
+        print(f"PR_NUMBER:{pr_number}")
+        print(f"ISSUE_NUMBER:{issue_num}")
         sys.exit(1)
 
     print(f"✅ Found PR #{pr_number} (OPEN, ready for review)")

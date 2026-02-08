@@ -34,7 +34,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 | [#034](issues/034-mlir-shape-nullptr-check-failure.md) | MLIR Shape Nullptr Check | M | 1h | MLIR Testing | - | mlir-graph.cpp/Casting.h |
 | [#035](issues/035-constdatatest-boost-dependency.md) | ConstDataTest Boost Dep | L | 1h | Test Infrastructure | - | test_const_data.cpp/CMakeLists.txt |
 | [#036](issues/036-boost-dependent-tests-skipped.md) | Boost-Dependent Tests | L | 1h | Test Infrastructure | - | test_graph.cpp/test_tar_file.cpp |
-| [#038](issues/038-document-lazy-symlink-const-cast.md) | Document Lazy Symlink | L | 30m | TarFile Docs | - | tar_file.cpp/tar_entry.hpp |
 | [#040](issues/040-remove-legacy-tar-ball-reserialization.md) | Remove tar_ball Reserial | M | 2h | TarFile Refactor | - | tar_ball.cpp/.hpp/util.cpp |
 | [#042](issues/042-document-privatetag-factory-pattern.md) | Document PrivateTag | L | 30m | TarFile Docs | - | tar_file.hpp/privatetag-doc.md |
 | [#048](issues/048-extract-platform-specific-tmpfile-helper.md) | Extract tmpfile Helper | L | 30m | TarFile Refactor | - | util.hpp/tar_file.cpp/temp_file_stream.cpp |
@@ -60,11 +59,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 See **[completed-issues.md](completed-issues.md)** for full archive of all completed issues.
 
 **Recent (last 5):**
+- #038 (PR #159) - Document Lazy Symlink Resolution const_cast
 - #013 (PR #158) - Remove Obsolete provider_option_from_cache_
 - #063 (PR #154) - Fix /fix-issue Skill Bugs
 - #055 (PR #153) - Remove Non-Const entries() Overload from TarFile
 - #062 (PR #152) - Clean Up Root Config Files
-- #033 (PR #144) - EP Duplicate Registration Fix
 
 ---
 

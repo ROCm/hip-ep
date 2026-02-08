@@ -112,22 +112,71 @@ Exit skill. User implements manually on the feature branch.
 
 ---
 
+## Phase 5: Finalization
+
+After implementation is complete (auto or manual), finalize the PR and backlog:
+
+### Step 5.1: Craft PR title and body
+
+1. **Read issue and plan files** for context
+2. **Update PR title** - Remove `[WIP]`, add proper type:
+   - Format: `Issue #NNN: <type>: <description>`
+   - Example: `Issue #038: docs: document lazy symlink resolution const_cast`
+   - Use `gh pr edit {PR_NUM} --title "..."`
+
+3. **Write comprehensive PR body** from issue context:
+   - Read issue file and plan files
+   - Create sections: Summary, Problem, Context, Solution, Benefits, Changes
+   - Include implementation details and rationale
+   - Use `gh pr edit {PR_NUM} --body "..."`
+
+### Step 5.2: Update backlog
+
+1. **Update completed-issues.md:**
+   - Add entry to top of current month's table
+   - Format: `| #NNN | {AUTHOR} | #PR | TBD | {DATE} | {TITLE} |`
+   - Use `TBD` for commit hash (updated after merge)
+
+2. **Update backlog.md:**
+   - Add to "Recent (last 5)" list (prepend, remove oldest if >5)
+   - Remove from active backlog table
+   - Remove from "Quick dependencies" section if referenced
+
+3. **Delete files:**
+   - `git rm docs/project/issues/{NNN}-*.md`
+   - `git rm docs/project/plans/{NNN}-*.md` (if exists)
+
+4. **Commit and push:**
+   - `git add docs/project/backlog.md docs/project/completed-issues.md`
+   - `git commit -m "docs: complete issue #NNN"`
+   - `git push fork {BRANCH}`
+
+### Step 5.3: Exit with reminder
+
+**PR remains DRAFT** - User must review before marking ready.
+
+Remind user:
+- Review implementation in PR #NNN
+- When satisfied, mark ready: `gh pr ready {PR_NUM}`
+- Then run `/resolve-ci` to monitor CI and auto-merge
+
+---
+
 ## Next Steps: Author Review (Phase 3)
 
-After /fix-issue completes (auto or manual implementation):
+After /fix-issue completes:
 
 1. **Author reviews the draft PR:**
    - Check code quality, logic, adherence to plan
+   - Verify PR title/body are accurate
    - Test locally if needed
-   - Verify implementation correctness
 
 2. **Author marks PR ready:**
    ```bash
    gh pr ready <PR_NUMBER>
    ```
 
-3. **Run /resolve-ci for finalization and CI monitoring:**
-   - Finalizes PR (updates backlog, deletes issue files, crafts PR description)
+3. **Run /resolve-ci for CI monitoring:**
    - Monitors CI, handles conflicts/failures
    - Auto-merges when approved + CI passes
 
