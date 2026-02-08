@@ -167,19 +167,17 @@ std::optional<std::string> PassContextImp::get_provider_option_with_priority(
     const T1& option_names) const {
   // priority order:
   // 0. provider_option provided by user
-  // 1. provider_option in cache
-  // 2. context_proto
-  // 3. target_proto, from target discovery
+  // 1. context_proto
+  // 2. target_proto, from target discovery
   //    Target priority
   //        1. provider option
   //        2. heuristic process or method
   //        3. default target in config file
   //
-  //  4. default value
+  //  3. default value
   return get_provider_option_impl(
       option_names,
       &provider_option_origin_,                                    //
-      &provider_option_from_cache_,                                //
       &config_.provider_options(),                                 //
       target_proto_ ? &target_proto_->provider_options() : nullptr //
   );
@@ -190,7 +188,6 @@ PassContextImp::get_all_provider_options() const {
   get_all_provider_option_impl(
       ret,
       &provider_option_origin_,                                    //
-      &provider_option_from_cache_,                                //
       &config_.provider_options(),                                 //
       target_proto_ ? &target_proto_->provider_options() : nullptr //
   );
@@ -1060,9 +1057,6 @@ void PassContextImp::print_version_info(const char* prefix) {
   LOG_VERBOSE(1) << prefix << "dump_dir: " << get_dump_directory();
   for (auto& kv : provider_option_origin_) {
     print_kv(3, "provider_option_from_origin", kv);
-  }
-  for (auto& kv : provider_option_from_cache_) {
-    print_kv(3, "provider_options_from_cache", kv);
   }
   for (auto& kv :
        // print sorted keys

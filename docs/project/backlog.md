@@ -25,7 +25,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 | # | Title | Pri | Est | Group | Blocked | Files |
 |---|-------|-----|-----|-------|---------|-------|
 | [#061](issues/061-reorganize-tools-directory.md) | Reorganize tools/ Directory | M | 2-3h | Project Organization | - | tools/, scripts/, cmake/, BUILD.bazel, CI workflows |
-| [#013](issues/013-provider-options-aggregation.md) | provider_options Aggregation | M | 1h | Provider Options | - | pass_context_imp.cpp |
 | [#019](issues/019-refactor-initialize-context.md) | Refactor initialize_context | L | 2h | Config/Context | - | morphizen_compile_model.cpp |
 | [#026](issues/026-mlir-model-export-api.md) | MLIR Model Export API | M | 1h | MLIR Features | - | morphizen-ort-api-ext.hpp/mlir-model.cpp |
 | [#029](issues/029-passcontext-tarfile-initialization.md) | PassContext tarfile Init | M | 1h | Test Infrastructure | - | test_pass_context.cpp/pass_context_imp.cpp |
@@ -61,11 +60,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 See **[completed-issues.md](completed-issues.md)** for full archive of all completed issues.
 
 **Recent (last 5):**
+- #013 (PR #158) - Remove Obsolete provider_option_from_cache_
 - #063 (PR #154) - Fix /fix-issue Skill Bugs
 - #055 (PR #153) - Remove Non-Const entries() Overload from TarFile
 - #062 (PR #152) - Clean Up Root Config Files
 - #033 (PR #144) - EP Duplicate Registration Fix
-- #059 (PR #145) - Replace tar.h Download with POSIX Implementation
 
 ---
 

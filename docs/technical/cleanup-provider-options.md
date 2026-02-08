@@ -4,21 +4,21 @@ Licensed under the MIT License.
 -->
 # Provider Options Cleanup
 
-**Status:** Current state documentation (will be simplified after Issues #003, #008, #009, #013)
+**Status:** ✅ Cleanup complete (Issues #003, #008, #009, #013 all completed)
 
 ## Overview
 
 This document describes the current complexity of provider_options aggregation from multiple sources, and the plan to simplify it.
 
-**Current problem:** provider_options comes from 4 different sources, creating pollution and inconsistent state issues.
+**Original problem:** provider_options came from 4 different sources, creating pollution and inconsistent state issues.
 
-**Future state (after cleanup):** Single source (user-provided options only).
+**Current state (after cleanup):** Simplified to 3 sources - 2 user sources + target defaults.
 
 ---
 
-## The Inconsistent State Problem
+## The Inconsistent State Problem (RESOLVED)
 
-**Fundamental issue with current design:**
+**Original problem:**
 
 ```
 Cached COMPILATION done with OLD provider_options
@@ -29,16 +29,21 @@ BUT we swap in NEW provider_options after loading cache
 **Example scenario:**
 1. User compiles: `A.onnx` + `{target: "NPU"}` → `A_ctx.onnx` (compiled for NPU)
 2. User deploys: Load `A_ctx.onnx` with `{target: "CPU"}`
-3. Current design swaps options: binary says NPU, options say CPU
+3. Old design swapped options: binary says NPU, options say CPU
 4. Can't recompile (original `A.onnx` is gone in EP context deployment)
 
-**Why this exists:**
-- ConfigProto is persisted with cache (Issue #003)
-- Multiple injection points pollute provider_options (Issues #008, #009)
-- Swapping tries to preserve user's current options (Issue #013)
-- `provider_option_from_cache_` tracks this complexity
+**Why this existed:**
+- ConfigProto was persisted with cache (Issue #003 - FIXED)
+- Multiple injection points polluted provider_options (Issues #008, #009 - FIXED)
+- Swapping tried to preserve user's current options (Issue #013 - FIXED)
+- `provider_option_from_cache_` tracked this complexity (Issue #013 - REMOVED)
 
-**Fix:** Issues #003, #008, #009, #013 eliminate this problem.
+**Resolution:** Issues #003, #008, #009, #013 eliminated this problem.
+- ✅ ConfigProto is runtime-only (not persisted)
+- ✅ No more swapping logic
+- ✅ `provider_option_from_cache_` removed
+- ✅ MEP table injection removed
+- ✅ Simplified to 3 sources (2 user + target)
 
 ---
 
@@ -142,21 +147,21 @@ Not needed for GPU project.
 
 ---
 
-## Future State (After Issues #003, #008, #009, #013)
+## Current State (After Issues #003, #008, #009, #013)
 
 ### Simplified Architecture
 
-**After cleanup, provider_options will have TWO user sources:**
+**Current provider_options sources (3 total):**
 
 1. ✅ **User (direct API)** - `provider_option_origin_` - Explicit via AppendExecutionProvider
 2. ✅ **User (config file)** - `config_.provider_options()` - Via morphizen_config.json
+3. ✅ **Target defaults** - `target_proto_->provider_options()` - Target-specific defaults (still present)
 
-**Priority:** Direct API overrides config file (standard pattern)
+**Priority:** Direct API > Config file > Target defaults (standard pattern)
 
 **Removed sources:**
-3. ❌ **From cache** (Issue #003) - ConfigProto not persisted
-4. ❌ **MEP table injection** (Issue #008) - MEP table removed
-5. ❌ **TargetProto injection** (Issue #009) - Target injection removed
+4. ❌ **From cache** (Issue #003, #013) - ConfigProto not persisted, provider_option_from_cache_ removed
+5. ❌ **MEP table injection** (Issue #008) - MEP table removed
 
 ---
 
@@ -269,22 +274,23 @@ provider_option: cache_dir = /shared               # Final (from config)
 ### Simplified Code
 
 ```cpp
-// Future: pass_context_imp.cpp
+// Current: pass_context_imp.cpp (after Issue #013)
 class PassContextImp {
   ConfigProto config_;                              // Runtime-only (has provider_options from config file)
   std::map<std::string, std::string> provider_option_origin_;  // User (direct API)
+  const TargetProto* target_proto_;                 // Target defaults
 
   // Obsolete members REMOVED:
-  // std::map<std::string, std::string> provider_option_from_cache_;  // DELETED
-  // (target_proto_->provider_options() gone - Issue #009)
+  // std::map<std::string, std::string> provider_option_from_cache_;  // DELETED (Issue #013)
 
-  // Simplified method - two user sources only
+  // Simplified method - 3 sources (was 4)
   get_all_provider_options() const {
     auto ret = std::map<std::string, std::string>();
     get_all_provider_option_impl(
         ret,
-        &provider_option_origin_,      // User (direct API) - highest priority
-        &config_.provider_options()    // User (config file) - lower priority
+        &provider_option_origin_,                                    // User (direct API) - highest priority
+        &config_.provider_options(),                                 // User (config file) - medium priority
+        target_proto_ ? &target_proto_->provider_options() : nullptr // Target defaults - lowest priority
     );
     return ret;
   }
@@ -294,28 +300,30 @@ class PassContextImp {
 ### Benefits After Cleanup
 
 1. ✅ **No inconsistent state** - No swapping, no cached options to conflict with current
-2. ✅ **Clear user sources only** - Both sources are user-controlled (direct API + config file)
-3. ✅ **Simpler code** - 2 sources instead of 4
-4. ✅ **Standard priority pattern** - Direct API overrides config file (like CLI overrides config)
-5. ✅ **No pollution** - No automatic injection from MEP/Target
+2. ✅ **Clear sources** - 2 user-controlled sources (direct API + config file) + 1 target defaults
+3. ✅ **Simpler code** - 3 sources instead of 4 (removed cache)
+4. ✅ **Standard priority pattern** - Direct API > Config file > Target (like CLI overrides config)
+5. ✅ **No pollution** - No automatic injection from MEP table or cache
 6. ✅ **Well logged** - All sources printed separately (easy to debug)
+7. ✅ **No cache complexity** - provider_option_from_cache_ removed entirely
 
-### Migration Path
+### Migration Path (COMPLETED)
 
-**Step 1:** Issue #003 - ConfigProto runtime-only
-- Eliminates: provider_option_from_cache_, context proto source
-- Eliminates: Swapping after cache load
+**Step 1:** Issue #003 - ConfigProto runtime-only ✅ DONE
+- Eliminated: provider_option_from_cache_ population, context proto source
+- Eliminated: Swapping after cache load
 
-**Step 2:** Issue #008 - Remove MEP table
-- Eliminates: Model-specific option injection
+**Step 2:** Issue #008 - Remove MEP table ✅ DONE
+- Eliminated: Model-specific option injection
 
-**Step 3:** Issue #009 - Remove TargetProto injection
-- Eliminates: Target-specific option injection
+**Step 3:** Issue #009 - Remove NPU-specific xclbin API ✅ DONE
+- Eliminated: NPU-specific TargetProto features (xclbin, xlnx_* options)
+- Note: target_proto_->provider_options() still exists for target defaults
 
-**Step 4:** Issue #013 - Cleanup
-- Remove obsolete code (provider_option_from_cache_)
-- Simplify get_all_provider_options()
-- Update this documentation
+**Step 4:** Issue #013 - Cleanup ✅ DONE
+- Removed: provider_option_from_cache_ member variable
+- Simplified: get_all_provider_options() (3 sources instead of 4)
+- Updated: This documentation
 
 ### Pragmatic Note
 
