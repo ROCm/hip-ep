@@ -244,6 +244,32 @@ TarEntryInputStream* TarFile::open_for_read(const std::string& filename) {
   for (auto& entry : entries_) {
     if (entry->path() == filename) {
       if (entry->data_begin_pos() == std::streampos(-1)) {
+        // ================================================================
+        // LAZY SYMLINK RESOLUTION - Write-Once Initialization
+        // ================================================================
+        //
+        // CONTEXT: Symlinks can appear in TAR before their targets:
+        //   Entry 1: a.txt -> _data/hash123  (symlink, target unknown)
+        //   Entry 2: _data/hash123           (target appears later)
+        //
+        // DESIGN: Entries created with sentinel -1, resolved on first access.
+        //
+        // SAFETY: This const_cast is intentional and safe because:
+        // 1. Write-once: Only modifies from sentinel -1 to real value
+        // 2. Happens exactly once per entry (checked before modification)
+        // 3. Members declared const prevents accidental modification elsewhere
+        // 4. Alternative (mutable) would lose compiler protection
+        //
+        // WHY LAZY? Performance - avoid resolving all symlinks upfront.
+        // Eager resolution would require second pass or fail on forward refs.
+        //
+        // TRADE-OFF: Technically undefined behavior per C++ standard, but:
+        // - Controlled: Only one code path modifies
+        // - Necessary: Design requires forward symlink support
+        // - Safe in practice: No observed issues, write-once semantics
+        //
+        // See Issue #038 for full discussion and alternatives.
+        // ================================================================
         auto real_entry = find_real_entry(filename);
         if (!real_entry) {
           MY_LOG(1) << " open_for_read: entry \"" << entry->to_string()
@@ -251,11 +277,11 @@ TarEntryInputStream* TarFile::open_for_read(const std::string& filename) {
           return nullptr;
         }
         const_cast<std::streampos&>(entry->buf_->data_begin_pos_) =
-            real_entry->data_begin_pos(); // set the data begin pos
+            real_entry->data_begin_pos();
         const_cast<std::streampos&>(entry->buf_->data_end_pos_) =
-            real_entry->data_end_pos();   // set the data begin pos
+            real_entry->data_end_pos();
         const_cast<std::streampos&>(entry->buf_->buffer_pos_) =
-            real_entry->data_begin_pos(); // set the data begin pos
+            real_entry->data_begin_pos();
         return entry.get();
       }
       entry->clear();

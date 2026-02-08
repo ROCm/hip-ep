@@ -12,51 +12,36 @@ allowed-tools: [Bash, Read, Grep, Glob, Edit, Write, AskUserQuestion]
 
 ## Purpose
 
-Autonomously resolve merge conflicts and CI failures until PR merges, then clean up workspace.
+Monitor CI and handle failures until PR merges, then clean up workspace.
+
+**Does not do finalization** - PR title/body/backlog updates are done by /fix-issue.
 
 ---
 
-## Phase 0: PR Finalization
+## Prerequisites
 
-**Run BEFORE monitoring** - Requires PR to be marked READY first. Finalizes PR documentation (backlog updates, file cleanup).
+Before running /resolve-ci:
+1. ✅ Implementation complete (code done, committed, pushed)
+2. ✅ **Finalization complete** (PR title/body updated, backlog updated) - done by /fix-issue
+3. ✅ PR marked ready for review: `gh pr ready {PR_NUM}`
 
-1. **Validate PR status** - Check if PR is already marked ready for review
-   ```bash
-   gh pr view {PR_NUM} --json isDraft
-   ```
-   - If `isDraft: true`: Exit with friendly reminder "PR is still in draft. Please review your implementation and mark it ready for review first: `gh pr ready {PR_NUM}`"
-   - If `isDraft: false`: Proceed with finalization
-   - Note: monitor-pr.py also validates this, but checking early provides immediate feedback
+## Workflow
 
-2. **Read issue file** - understand context
+Call monitor-pr.py. It validates prerequisites then monitors CI.
 
-3. **Craft PR title** - `gh pr edit {PR_NUM} --title "Issue #{N}: {type}: {desc}"`
+### Validation by monitor-pr.py
 
-4. **Write PR description** - create summary, problem, solution, changes
+The script checks:
 
-5. **Update completed-issues.md:**
-   - Add entry to top of current month's table
-   - Format: `| #{NUM} | {AUTHOR} | #{PR} | {COMMIT} | {DATE} | {TITLE} |`
+1. **PR is marked ready** (not draft)
+   - If draft → `STATUS:NEEDS_READY`
+   - Exit with message: "Mark ready first: `gh pr ready {PR_NUM}`"
 
-6. **Update backlog.md:**
-   - Add to "Recent (last 5)" compact list
-   - Remove oldest if >5
-   - Delete from active backlog table
-   - Remove from "Quick dependencies" section
+2. **PR is finalized** (title doesn't contain `[WIP]`)
+   - If still has `[WIP]` → `STATUS:NEEDS_FINALIZATION`
+   - Exit with message: "Run /fix-issue to complete finalization first"
 
-7. **Update issue-dependency-analysis.md:**
-   - Remove all references to `#{NUM}`
-
-8. **Delete files:**
-   - `git rm docs/project/issues/{NUM}-*.md`
-   - `git rm docs/project/plans/{NUM}-*.md` (if exists)
-
-9. **Commit and push:**
-   - `git add docs/project/backlog.md docs/project/completed-issues.md docs/project/issue-dependency-analysis.md`
-   - `git commit -m "docs: complete issue #{NUM}"`
-   - `git push fork {BRANCH}`
-
-**Proceed to Main Loop.**
+If both checks pass, proceed to monitoring loop.
 
 ---
 

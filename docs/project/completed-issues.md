@@ -12,6 +12,7 @@ Chronological archive of all completed backlog issues (newest first).
 
 | # | Author | PR | Commit | Date | Title |
 |---|--------|----|----|------|-------|
+| #038 | wcy123 | #159 | TBD | 02-08 | Document Lazy Symlink Resolution const_cast |
 | #013 | wcy123 | #158 | aefc7d2 | 02-08 | Remove Obsolete provider_option_from_cache_ |
 | #063 | wcy123 | #154 | 72a6686 | 02-07 | Fix /fix-issue Skill Bugs |
 | #055 | wcy123 | #153 | c7ff9db | 02-07 | Remove Non-Const entries() Overload from TarFile |
