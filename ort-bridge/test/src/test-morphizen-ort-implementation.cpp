@@ -70,7 +70,6 @@ protected:
   void Test12_TensorProtoOperations();
   void Test13_ExtendedApiOperations();
   void Test14_GraphTensorOperations();
-  void Test15_ShapeInferenceOperations();
   void Test16_GraphFuseOperations();
   void Test17_GraphNodeRemovalOperations();
   void Test18_MissingApisCoverage();
@@ -113,7 +112,6 @@ protected:
 // 12. Test12_TensorProtoOperations() - Tensor proto operations
 // 13. Test13_ExtendedApiOperations() - Extended API operations
 // 14. Test14_GraphTensorOperations() - Graph tensor operations
-// 15. Test15_ShapeInferenceOperations() - Shape inference operations
 // 16. Test16_GraphFuseOperations() - Graph fusion operations
 // 17. Test17_GraphNodeRemovalOperations() - Graph node removal operations
 // 18. Test18_MissingApisCoverage() - Coverage for remaining missing APIs
@@ -1043,24 +1041,6 @@ void MorphizenOrtApiTest::Test14_GraphTensorOperations() {
   } catch (...) {
     LOG(INFO) << "Graph tensor operations tested";
   }
-}
-
-void MorphizenOrtApiTest::Test15_ShapeInferenceOperations() {
-  // try {
-  //   // Test shape inference from file path
-  //   std::filesystem::path temp_path =
-  //       std::filesystem::temp_directory_path() / "test_inference.onnx";
-  //   std::string save_path =
-  //       (std::filesystem::temp_directory_path() /
-  //       "test_inference_output.onnx")
-  //           .string();
-
-  //  // This will likely fail without actual models
-  //  // wrapped_api_->graph_infer_shapes_from_filepath(temp_path.string(),
-  //  //                                               save_path);
-  //} catch (...) {
-  //  LOG(INFO) << "Shape inference operations tested";
-  //}
 }
 
 // ============================================================================
@@ -2666,15 +2646,6 @@ TEST_F(MorphizenOrtApiTest, TestAll) {
     ASSERT_NO_FATAL_FAILURE(Test14_GraphTensorOperations());
     if (HasFailure()) {
       LOG(ERROR) << "Test14_GraphTensorOperations failed, stopping execution";
-      return;
-    }
-  }
-  if (enable_test_all || enable_unittest == "15") {
-    LOG(INFO) << "Running Test15_ShapeInferenceOperations...";
-    ASSERT_NO_FATAL_FAILURE(Test15_ShapeInferenceOperations());
-    if (HasFailure()) {
-      LOG(ERROR)
-          << "Test15_ShapeInferenceOperations failed, stopping execution";
       return;
     }
   }
