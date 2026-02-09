@@ -2,13 +2,6 @@
 # ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
-morphizen_add_remote_target(
-  FILE ${CMAKE_CURRENT_BINARY_DIR}/tar.h
-  URL https://raw.githubusercontent.com/freebsd/freebsd-src/refs/heads/stable/12/bin/pax/tar.h
-  EXPECTED_MD5 eab89f86c63edb8e9dec2ea8faf5ebe2
-  PATCH_FILES ${CMAKE_CURRENT_SOURCE_DIR}/patches/tar.h.force_align_1.patch
-)
-
 add_custom_command (
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/config_json_binary.hpp ${CMAKE_CURRENT_BINARY_DIR}/morphizen_config.json
   COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../cmake/scripts"
@@ -42,9 +35,6 @@ add_library(${LIB_NAME} STATIC
   src/node_builder.cpp
   src/pass_imp.hpp
   src/pass_imp.cpp
-  ${CMAKE_CURRENT_BINARY_DIR}/tar.h
-  src/tar_ball.cpp
-  src/tar_ball.hpp
   src/tar_file.cpp
   src/tar_file.hpp
   src/tar_header.hpp
