@@ -24,7 +24,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
 | # | Title | Pri | Est | Group | Blocked | Files |
 |---|-------|-----|-----|-------|---------|-------|
-| [#061](issues/061-reorganize-tools-directory.md) | Reorganize tools/ Directory | M | 2-3h | Project Organization | - | tools/, scripts/, cmake/, BUILD.bazel, CI workflows |
 | [#019](issues/019-refactor-initialize-context.md) | Refactor initialize_context | L | 2h | Config/Context | - | morphizen_compile_model.cpp |
 | [#026](issues/026-mlir-model-export-api.md) | MLIR Model Export API | M | 1h | MLIR Features | - | morphizen-ort-api-ext.hpp/mlir-model.cpp |
 | [#029](issues/029-passcontext-tarfile-initialization.md) | PassContext tarfile Init | M | 1h | Test Infrastructure | - | test_pass_context.cpp/pass_context_imp.cpp |
@@ -57,11 +56,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 See **[completed-issues.md](completed-issues.md)** for full archive of all completed issues.
 
 **Recent (last 5):**
+- #061 (PR #163) - Reorganize tools/ Directory Structure
 - #050 (PR #162) - Standardize TarFile Factory Method Naming
 - #042 (PR #100) - Document PrivateTag Factory Pattern
 - #038 (PR #159) - Document Lazy Symlink Resolution const_cast
 - #013 (PR #158) - Remove Obsolete provider_option_from_cache_
-- #063 (PR #154) - Fix /fix-issue Skill Bugs
 
 ---
 

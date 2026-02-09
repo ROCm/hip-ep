@@ -12,6 +12,7 @@ Chronological archive of all completed backlog issues (newest first).
 
 | # | Author | PR | Commit | Date | Title |
 |---|--------|----|----|------|-------|
+| #061 | wcy123 | #163 | TBD | 02-09 | Reorganize tools/ Directory Structure |
 | #050 | wcy123 | #162 | TBD | 02-09 | Standardize TarFile Factory Method Naming |
 | #042 | wcy123 | #100 | 6f25dd0 | 02-04 | Document PrivateTag Factory Pattern |
 | #038 | wcy123 | #159 | TBD | 02-08 | Document Lazy Symlink Resolution const_cast |

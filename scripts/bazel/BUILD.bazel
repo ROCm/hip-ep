@@ -1,3 +1,8 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
 load("@rules_python//python:defs.bzl", "py_binary")
 
 py_binary(
@@ -8,10 +13,10 @@ py_binary(
         "@my_pip_deps//patch",
     ],
 )
-py_library(
+
+py_binary(
     name = "xxd",
-    srcs = ["xxd.py"],
+    srcs = ["//cmake/scripts:xxd.py"],
+    main = "//cmake/scripts:xxd.py",
     visibility = ["//visibility:public"],
 )
-
-# exports_files(["collect_pb.bzl"])
