@@ -370,7 +370,7 @@ TEST(TarFileTest, WriteTo) {
 TEST(TarFileTest, MemoryTar) {
   // Helper to create buffer with tar data
   auto create_buf = []() {
-    auto tar_file_obj = morphizen::TarFile::create();
+    auto tar_file_obj = morphizen::TarFile::create_from_tmpfile();
     CHECK(tar_file_obj) << "Failed to create TarFile object";
     test_abc(*tar_file_obj);
     auto size = tar_file_obj->current_size();
@@ -384,7 +384,7 @@ TEST(TarFileTest, MemoryTar) {
     LOG(INFO) << " ==========================================================";
     LOG(INFO) << " ======  start a fresh write and check to tmpfile =========";
     LOG(INFO) << " ==========================================================";
-    auto tar_file_obj = morphizen::TarFile::create();
+    auto tar_file_obj = morphizen::TarFile::create_from_tmpfile();
     ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
     test_abc(*tar_file_obj);
     check_abc(*tar_file_obj);
@@ -397,7 +397,7 @@ TEST(TarFileTest, MemoryTar) {
     LOG(INFO) << " ======  start a fresh read on vector buffer ==============";
     LOG(INFO) << " ==========================================================";
     auto buf = create_buf();
-    auto tar_file_obj = morphizen::TarFile::create(std::move(buf));
+    auto tar_file_obj = morphizen::TarFile::create_from_buffer(std::move(buf));
     ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
     check_abc(*tar_file_obj);
     LOG(INFO) << " =======================================";
@@ -411,7 +411,8 @@ TEST(TarFileTest, MemoryTar) {
     LOG(INFO) << " ==========================================================";
     auto buf = create_buf();
     std::string new_buf(buf.begin(), buf.end());
-    auto tar_file_obj = morphizen::TarFile::create(std::move(new_buf));
+    auto tar_file_obj =
+        morphizen::TarFile::create_from_buffer(std::move(new_buf));
     ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
     check_abc(*tar_file_obj);
     LOG(INFO) << " =======================================";
@@ -423,7 +424,7 @@ TEST(TarFileTest, MemoryTar) {
     LOG(INFO) << " ======  start a fresh read on owned buffer ===============";
     LOG(INFO) << " ==========================================================";
     auto buf = create_buf();
-    auto tar_file_obj = morphizen::TarFile::create(std::move(buf));
+    auto tar_file_obj = morphizen::TarFile::create_from_buffer(std::move(buf));
     ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
     check_abc(*tar_file_obj);
     LOG(INFO) << " =======================================";

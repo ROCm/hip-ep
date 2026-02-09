@@ -36,7 +36,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 | [#036](issues/036-boost-dependent-tests-skipped.md) | Boost-Dependent Tests | L | 1h | Test Infrastructure | - | test_graph.cpp/test_tar_file.cpp |
 | [#040](issues/040-remove-legacy-tar-ball-reserialization.md) | Remove tar_ball Reserial | M | 2h | TarFile Refactor | - | tar_ball.cpp/.hpp/util.cpp |
 | [#048](issues/048-extract-platform-specific-tmpfile-helper.md) | Extract tmpfile Helper | L | 30m | TarFile Refactor | - | util.hpp/tar_file.cpp/temp_file_stream.cpp |
-| [#050](issues/050-standardize-tarfile-factory-method-naming.md) | Standardize Factory Naming | M | 1h | TarFile Refactor | - | tar_file.hpp/.cpp |
 | [#051](issues/051-document-complex-tarfile-factory-methods.md) | Document Factory Methods | M | 1h | TarFile Docs | - | tar_file.cpp |
 | [#052](issues/052-eliminate-redundant-cached-stream-pointers.md) | Eliminate Redundant Cached Stream Pointers | L | 1h | TarFile Refactor | - | tar_file.hpp/.cpp/tar_entry.hpp/.cpp |
 | [#053](issues/053-document-tar-streaming-architecture.md) | Document TAR Streaming | M | 2h | TarFile Docs | - | tar-streaming-architecture.md |
@@ -58,11 +57,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 See **[completed-issues.md](completed-issues.md)** for full archive of all completed issues.
 
 **Recent (last 5):**
+- #050 (PR #162) - Standardize TarFile Factory Method Naming
 - #042 (PR #100) - Document PrivateTag Factory Pattern
 - #038 (PR #159) - Document Lazy Symlink Resolution const_cast
 - #013 (PR #158) - Remove Obsolete provider_option_from_cache_
 - #063 (PR #154) - Fix /fix-issue Skill Bugs
-- #055 (PR #153) - Remove Non-Const entries() Overload from TarFile
 
 ---
 
