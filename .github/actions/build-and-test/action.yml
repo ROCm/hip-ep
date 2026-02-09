@@ -75,5 +75,5 @@ runs:
     - name: build and test
       run: |
         echo "build and test morphizen-demo..."
-        . ${{ github.workspace }}/tools/build_and_test.ps1
+        . ${{ github.workspace }}/scripts/build/build_and_test.ps1
       shell: powershell

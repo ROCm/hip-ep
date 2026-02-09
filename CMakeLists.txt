@@ -30,10 +30,10 @@ if(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC)
     # These executables depend on Boost library (primarily Boost::Process for subprocess execution).
     # They are only built when morphizen_ENABLE_BOOST is ON to allow building a lightweight
     # version of MorphiZen without Boost dependency when morphizen_ENABLE_BOOST is OFF.
-    add_subdirectory(graph-opt)
-    add_subdirectory(tar)
-    add_subdirectory(pattern-gen)
-    add_subdirectory(onnx-grep)
+    add_subdirectory(tools/graph-opt)
+    add_subdirectory(tools/tar)
+    add_subdirectory(tools/pattern-gen)
+    add_subdirectory(tools/onnx-grep)
   endif()
 endif(morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC)
 

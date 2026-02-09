@@ -5,7 +5,7 @@
 
 load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_library")
-load("//tools:collect_pb.bzl", "collect_pb")
+load("//scripts/bazel:collect_pb.bzl", "collect_pb")
 load("@rules_proto//proto:defs.bzl", "proto_library")
 load("@rules_python//python:defs.bzl", "py_binary")
 
@@ -201,8 +201,8 @@ genrule(
     ],
     outs = ["tar.h"],
     # Use the hello binary to generate the tar.h file
-    cmd = "$(location //tools:patch_wrapper) $(location patches/tar.h.force_align_1.patch) $(location @freebsd_tar_h//file) $(@D) -- --debug -v -p1 -d $(@D)",
-    tools = ["//tools:patch_wrapper"],
+    cmd = "$(location //scripts/bazel:patch_wrapper) $(location patches/tar.h.force_align_1.patch) $(location @freebsd_tar_h//file) $(@D) -- --debug -v -p1 -d $(@D)",
+    tools = ["//scripts/bazel:patch_wrapper"],
     visibility = ["//visibility:public"],
 )
 
@@ -226,7 +226,7 @@ py_binary(
     ],
     main = "src/binary/config_json_binary.hpp.bazel.py",
     deps = [
-        "//tools:xxd",
+        "//scripts/bazel:xxd",
     ],
 )
 

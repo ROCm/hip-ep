@@ -19,7 +19,7 @@ set(MEM_BINARY_CONTENT_FILE mem_binary_file.hpp.inc)
 add_custom_command(
   OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${MEM_BINARY_CONTENT_FILE}"
   COMMAND
-    ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../tools"
+    ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../cmake/scripts"
     $<TARGET_FILE:Python3::Interpreter>
     ${CMAKE_CURRENT_SOURCE_DIR}/src/compress_binary.py
     "${ENABLE_COMPRESSION}"

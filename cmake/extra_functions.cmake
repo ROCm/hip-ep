@@ -49,10 +49,10 @@ function(morphizen_add_python_target)
     COMMAND
       ${CMAKE_COMMAND} -E echo " -- Running $<TARGET_FILE:Python3::Interpreter> ${ARG_SCRIPT} ${ARG_ARGS}"
     COMMAND
-      ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../tools"
+      ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../cmake/scripts"
       $<TARGET_FILE:Python3::Interpreter> -m pip install --user numpy onnx
     COMMAND
-      ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../tools"
+      ${CMAKE_COMMAND} -E env "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../cmake/scripts"
       $<TARGET_FILE:Python3::Interpreter> ${ARG_SCRIPT} ${ARG_ARGS}
     DEPENDS ${ARG_SCRIPT} ${ARG_DEPENDS}
   )

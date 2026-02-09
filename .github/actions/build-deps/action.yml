@@ -72,7 +72,7 @@ runs:
       shell: powershell
       run: |
           echo "build and install onnxrutime and deps.."
-          . ${{ github.workspace}}/tools/build_ort_and_deps.ps1
+          . ${{ github.workspace}}/scripts/build/build_ort_and_deps.ps1
 
     - name: Get llvm-project repo URL and SHA1
       id: llvm-commit
@@ -105,4 +105,4 @@ runs:
       shell: powershell
       run: |
           echo "build and install llvm.."
-          . ${{ github.workspace}}/tools/build_llvm.ps1
+          . ${{ github.workspace}}/scripts/build/build_llvm.ps1
