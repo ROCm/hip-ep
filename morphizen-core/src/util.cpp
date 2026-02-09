@@ -10,6 +10,7 @@
 
 #include "morphizen/graph.hpp"
 #include "morphizen/pass_context.hpp"
+#include "pass_context_imp.hpp"
 #include <morphizen/morphizen_ort_api.h>
 
 #include "morphizen/env_config.hpp"
@@ -214,9 +215,15 @@ private:
 
 std::unique_ptr<std::istream>
 context_cache_files_to_tar_stream(PassContext& context) {
-  auto temp_file = std::make_unique<TempFileStream>();
-  context.cache_files_to_tar_file(temp_file->get_write_stream());
-  return std::make_unique<TempFileIstream>(std::move(temp_file));
+  auto& ctx_imp = dynamic_cast<PassContextImp&>(context);
+  CHECK(ctx_imp.tar_file_ != nullptr) << "tar_file_ should exist";
+
+  auto size = ctx_imp.tar_file_->current_size();
+  auto buffer = std::make_shared<std::string>(size, '\0');
+  CHECK(ctx_imp.tar_file_->dump_to(buffer->data(), size))
+      << "failed to dump tar file";
+
+  return std::make_unique<std::istringstream>(*buffer, std::ios::binary);
 }
 
 std::string get_md5_of_buffer(const char* buffer, size_t size) {

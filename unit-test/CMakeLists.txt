@@ -27,7 +27,6 @@ add_executable(${TEST_EXE_NAME}
   morphizen/test_pattern.cpp
   morphizen/test_pass_context.cpp
   morphizen/test_node_builder.cpp
-  morphizen/test_tarball.cpp
   morphizen/test_plugin.cpp
   morphizen/test_tar_entry.cpp
   morphizen/test_tar_file.cpp

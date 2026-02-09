@@ -324,11 +324,6 @@ public:
                           gsl::span<const char> data) override final;
   virtual bool has_cache_file(const std::string& filename) const override final;
   virtual std::vector<std::string> get_cache_file_names() const override final;
-  virtual std::vector<char> cache_files_to_tar_mem() const override final;
-
-  virtual bool
-  cache_files_to_tar_file(std::ostream& writer) const override final;
-  virtual bool tar_file_to_cache_files(std::istream& src) override final;
 
   virtual std::shared_ptr<void>
   get_context_resource(const std::string& name) const override final;
@@ -411,6 +406,8 @@ private:
       std::shared_ptr<PassContextImp> context,
       std::vector<morphizen_cxx::NodeConstRef> ep_context_nodes);
   friend std::string get_ep_cache_context_embed_mode(PassContextImp& context);
+  friend std::unique_ptr<std::istream>
+  context_cache_files_to_tar_stream(PassContext& context);
   friend class PassContextConfigTest; // for unit test.
 #if defined(__GNUC__)
 #  pragma GCC diagnostic pop

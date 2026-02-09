@@ -12,6 +12,7 @@ Chronological archive of all completed backlog issues (newest first).
 
 | # | Author | PR | Commit | Date | Title |
 |---|--------|----|----|------|-------|
+| #040 | mingyueliuh | #165 | TBD | 02-09 | Remove Legacy tar_ball Re-Serialization |
 | #061 | wcy123 | #163 | TBD | 02-09 | Reorganize tools/ Directory Structure |
 | #050 | wcy123 | #162 | TBD | 02-09 | Standardize TarFile Factory Method Naming |
 | #042 | wcy123 | #100 | 6f25dd0 | 02-04 | Document PrivateTag Factory Pattern |

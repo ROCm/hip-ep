@@ -27,9 +27,7 @@ namespace morphizen {
 // is still needed for custom op.
 //
 // PassContext provides access to cached compilation artifacts via tar_file_
-// system. Use cache_files_to_tar_mem() to export cache,
-// tar_file_to_cache_files() to import. Use write_file() and read_file_*() for
-// individual files.
+// system. Use write_file() and read_file_*() for individual files.
 class PassContextTimer {
 public:
   PassContextTimer();
@@ -271,34 +269,6 @@ public:
    */
   virtual std::vector<std::string> get_cache_file_names() const = 0;
 
-  /**
-   * @brief Creates a tar file from in-memory cache files
-   *
-   * @param tar_file The path to the tar file.
-   * @return True if the tar file was successfully created, false otherwise.
-   *
-   */
-  virtual bool cache_files_to_tar_file(std::ostream& writer) const = 0;
-  /**
-   * @brief Creates a in-memory tar file from in-memory cache files
-   *
-   * @return A std::vector<char> representing the tar file.
-   *
-   */
-
-  virtual std::vector<char> cache_files_to_tar_mem() const = 0;
-
-  /**
-   * @brief Loads a in-memory tar file save its content into in-memory cache
-   * files
-   *
-   * @param data A pointer to the data containing the tar ball.
-   * @param size The size of the data in bytes.
-   * @return True if the in-memory cache files successfully created, false
-   * otherwise.
-   *
-   */
-  virtual bool tar_file_to_cache_files(std::istream& src) = 0;
   /**
    * @brief Creates a new instance of PassContext.
    *

@@ -3,7 +3,6 @@
  * Licensed under the MIT License.
  */
 #pragma once
-#include "tar.h"
 #include <array>
 #include <iostream>
 #include <memory>
@@ -11,6 +10,37 @@
 #include <optional>
 #include <streambuf>
 #include <vector>
+
+// TAR header structure definitions (from POSIX ustar format)
+#define TNMSZ 100
+#define CHK_LEN 8
+#define TPFSZ 155
+
+#if defined(_WIN32)
+#  define PACKED(x) __declspec(align(x))
+#else
+#  define PACKED(x) __attribute__((packed, aligned(x)))
+#endif
+
+typedef struct PACKED(1) {
+  char name[TNMSZ];     // name of entry
+  char mode[8];         // mode
+  char uid[8];          // uid
+  char gid[8];          // gid
+  char size[12];        // size
+  char mtime[12];       // modification time
+  char chksum[CHK_LEN]; // checksum
+  char typeflag;        // type of file
+  char linkname[TNMSZ]; // linked to name
+  char magic[6];        // ustar magic "ustar\0"
+  char version[2];      // ustar version "00"
+  char uname[32];       // user name
+  char gname[32];       // group name
+  char devmajor[8];     // major device number
+  char devminor[8];     // minor device number
+  char prefix[TPFSZ];   // prefix for long names
+} HD_USTAR;
+
 namespace morphizen {
 template <typename T> static T round_up_to_block_size(T size) {
   T x511 = 511;

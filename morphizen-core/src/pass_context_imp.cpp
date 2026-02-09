@@ -26,7 +26,6 @@
 #include "morphizen/weak.hpp"
 #include "pass_context_imp.hpp"
 #include "profile_utils.hpp"
-#include "tar_ball.hpp"
 #include <map>
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE, "0")
@@ -581,51 +580,6 @@ std::vector<std::string> PassContextImp::get_cache_file_names() const {
     }
   }
   return ret;
-}
-std::vector<char> PassContextImp::cache_files_to_tar_mem() const {
-  std::vector<char> ret;
-  {
-    MemoryOutputStreambuf membuf(ret);
-    std::ostream ostr(&membuf);
-    CHECK(cache_files_to_tar_file(ostr)) << "ok";
-  }
-  return ret;
-}
-
-bool PassContextImp::cache_files_to_tar_file(std::ostream& writer) const {
-  TarWriter tar_writer(writer);
-  auto file_names = get_cache_file_names();
-  for (const auto& file_name : file_names) {
-    CacheFileIstreamAdapter reader(open_file_for_read(file_name));
-    tar_writer.write(reader, file_name);
-  }
-  return true;
-}
-
-bool PassContextImp::tar_file_to_cache_files(std::istream& src) {
-  TarReader tar_reader(src);
-
-  // Map to keep stream adapters alive
-  std::map<std::string, std::unique_ptr<CacheFileOstreamAdapter>> writers;
-
-  auto builder = [this,
-                  &writers](const std::string& filename) -> std::ostream& {
-    auto writer = this->open_file_for_write(filename);
-    CHECK(writer != nullptr) << "cannot open " << filename << " for write";
-
-    auto adapter = std::make_unique<CacheFileOstreamAdapter>(std::move(writer));
-    auto& stream_ref = *adapter;
-    writers[filename] = std::move(adapter);
-    return stream_ref;
-  };
-
-  for (;;) {
-    bool is_continue = tar_reader.read(builder);
-    if (!is_continue) {
-      break;
-    }
-  }
-  return true;
 }
 const ConfigProto& PassContextImp::get_config_proto() const { return config_; }
 const ContextProto& PassContextImp::get_context_proto() const {

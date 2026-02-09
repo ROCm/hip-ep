@@ -33,7 +33,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 | [#034](issues/034-mlir-shape-nullptr-check-failure.md) | MLIR Shape Nullptr Check | M | 1h | MLIR Testing | - | mlir-graph.cpp/Casting.h |
 | [#035](issues/035-constdatatest-boost-dependency.md) | ConstDataTest Boost Dep | L | 1h | Test Infrastructure | - | test_const_data.cpp/CMakeLists.txt |
 | [#036](issues/036-boost-dependent-tests-skipped.md) | Boost-Dependent Tests | L | 1h | Test Infrastructure | - | test_graph.cpp/test_tar_file.cpp |
-| [#040](issues/040-remove-legacy-tar-ball-reserialization.md) | Remove tar_ball Reserial | M | 2h | TarFile Refactor | - | tar_ball.cpp/.hpp/util.cpp |
 | [#048](issues/048-extract-platform-specific-tmpfile-helper.md) | Extract tmpfile Helper | L | 30m | TarFile Refactor | - | util.hpp/tar_file.cpp/temp_file_stream.cpp |
 | [#051](issues/051-document-complex-tarfile-factory-methods.md) | Document Factory Methods | M | 1h | TarFile Docs | - | tar_file.cpp |
 | [#052](issues/052-eliminate-redundant-cached-stream-pointers.md) | Eliminate Redundant Cached Stream Pointers | L | 1h | TarFile Refactor | - | tar_file.hpp/.cpp/tar_entry.hpp/.cpp |
@@ -57,11 +56,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 See **[completed-issues.md](completed-issues.md)** for full archive of all completed issues.
 
 **Recent (last 5):**
+- #040 (PR #165) - Remove Legacy tar_ball Re-Serialization
 - #061 (PR #163) - Reorganize tools/ Directory Structure
 - #050 (PR #162) - Standardize TarFile Factory Method Naming
 - #042 (PR #100) - Document PrivateTag Factory Pattern
 - #038 (PR #159) - Document Lazy Symlink Resolution const_cast
-- #013 (PR #158) - Remove Obsolete provider_option_from_cache_
 
 ---
 
