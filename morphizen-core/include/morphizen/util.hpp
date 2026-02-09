@@ -76,6 +76,19 @@ MORPHIZEN_DLL_SPEC std::filesystem::path get_morphizen_path();
 MORPHIZEN_DLL_SPEC FILE* tmpfile_with_posix_delete();
 #endif // _WIN32
 
+/// Creates a temporary file using platform-specific tmpfile implementation.
+/// On Windows, uses tmpfile_with_posix_delete() for better cleanup behavior.
+/// On other platforms, uses standard std::tmpfile().
+/// @return FILE* pointer to temporary file, or nullptr on failure.
+///         Callers MUST check for nullptr and handle errors appropriately.
+inline FILE* create_tmpfile() {
+#ifdef _WIN32
+  return tmpfile_with_posix_delete();
+#else
+  return std::tmpfile();
+#endif
+}
+
 /**
  * Converts a string from DOS/Windows format to Unix format.
  *

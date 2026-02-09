@@ -9,11 +9,7 @@
 namespace morphizen {
 
 TempFileStream::TempFileStream() {
-#ifdef _WIN32
-  FILE* file = tmpfile_with_posix_delete();
-#else
-  FILE* file = tmpfile();
-#endif
+  FILE* file = create_tmpfile();
   CHECK(file != nullptr) << "Failed to create temporary file";
 
   // FileStream takes ownership and will close file in destructor

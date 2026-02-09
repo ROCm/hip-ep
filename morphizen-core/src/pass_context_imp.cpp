@@ -62,13 +62,8 @@ static MemUsageProto convert_to_chrome_event(const MemUsageProto& mem_usage) {
   return ret;
 }
 static FILE* write_to_tmp_file(gsl::span<const char> data) {
-#if _WIN32
-  FILE* tmp_file = tmpfile_with_posix_delete();
-  CHECK(tmp_file != nullptr) << "tmpfile_with_posix_delete error";
-#else
-  FILE* tmp_file = tmpfile();
-  CHECK(tmp_file != nullptr) << "cannot create tmp file";
-#endif
+  FILE* tmp_file = create_tmpfile();
+  CHECK(tmp_file != nullptr) << "tmpfile creation error";
   auto write_size = std::fwrite(data.data(), 1, data.size(), tmp_file);
   CHECK_EQ((size_t)write_size, data.size());
   return tmp_file;

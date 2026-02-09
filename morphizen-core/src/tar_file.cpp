@@ -60,11 +60,7 @@ TarFile::create_from_path(const std::filesystem::path& path, bool enable_mmap) {
   return create_with_regular_stream();
 }
 std::unique_ptr<TarFile> TarFile::create_from_tmpfile() {
-#ifdef _WIN32
-  auto file = tmpfile_with_posix_delete();
-#else
-  auto file = std::tmpfile();
-#endif
+  auto file = create_tmpfile();
 
   std::unique_ptr<std::iostream> stream;
 
@@ -102,11 +98,7 @@ TarFile::create_from_buffer(std::vector<char>&& buffer) {
 std::unique_ptr<TarFile> TarFile::create_from_buffer(std::string&& buffer0,
                                                      bool enable_mmap) {
   std::unique_ptr<std::iostream> stream;
-#ifdef _WIN32
-  auto file = tmpfile_with_posix_delete();
-#else
-  auto file = std::tmpfile();
-#endif
+  auto file = create_tmpfile();
   // by default, the stream will be from a tmp file to decrease memory,
   // but if access to tmp is restricted, like web sandbox condition,
   // the stream should be from a memory buffer
