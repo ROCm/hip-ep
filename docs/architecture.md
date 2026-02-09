@@ -361,6 +361,9 @@ int debug = ENV_PARAM(DEBUG_MODE);
 | Node Arguments | `node_arg_get_name`, `node_arg_get_shape`, `node_arg_set_shape` |
 | Attributes | `attr_proto_new_*`, `attr_proto_get_*` (int, float, string, tensor) |
 | Tensor Handling | `tensor_proto_new_*` (floats, ints, doubles, fp16, bf16, booleans) |
+| Shape Inference (Deprecated) | `graph_infer_shapes_from_filepath`, `graph_infer_shapes` - planned for deprecation |
+
+**Note on Shape Inference APIs**: The `graph_infer_shapes_from_filepath` and `graph_infer_shapes` functions are planned for deprecation as they do not align with execution provider architectural responsibilities. See Section 4.6 for details.
 
 **Public Headers**: `include/morphizen/morphizen-ort-api-ext.hpp`
 
@@ -684,6 +687,60 @@ Two registration mechanisms:
 2. **Modern**: `morphizen_register_ops()` callback function
 
 Supports multiple domains (e.g., "com.xilinx", "com.microsoft")
+
+### 4.6 Shape Inference and Input Requirements
+
+**Design Principle**: MorphiZen is an ONNX Runtime Execution Provider (EP) that relies on ORT to provide fully analyzed graphs. Shape inference is not part of MorphiZen's responsibilities as an EP.
+
+#### 4.6.1 ORT's Responsibilities
+
+Before passing graphs to MorphiZen, ONNX Runtime performs:
+
+1. **Shape Inference**: ORT analyzes the model and infers shape information for all tensors
+   - Static shapes: Concrete dimensions (e.g., `[1, 3, 224, 224]`)
+   - Dynamic shapes: Symbolic dimensions represented as `-1` (e.g., `[batch, 3, 224, 224]` → `[-1, 3, 224, 224]`)
+
+2. **Constant Propagation**: ORT performs constant folding and propagation as part of its optimization pipeline
+
+3. **Read-Only Contract**: Graphs provided to the EP contain complete shape and constant information
+
+#### 4.6.2 MorphiZen's Position
+
+**Shape inference is NOT part of MORPHIZEN_ORT_API and is NOT a MorphiZen-level feature.**
+
+This design reflects the appropriate separation of concerns:
+- **ORT's domain**: Graph analysis, shape inference, constant folding, optimization
+- **MorphiZen's domain**: Pattern matching, graph transformations, hardware-specific optimizations, execution
+
+#### 4.6.3 Compiler Backend Considerations
+
+Some compiler backends (hardware-specific compilation targets using MorphiZen) have requested shape inference capabilities. However:
+
+1. **Architectural Boundary**: If a compiler backend requires shape inference after its own transformations, that is the compiler backend's responsibility to implement, not MorphiZen's.
+
+2. **Implementation Challenges**: Shape inference is difficult to support at the MorphiZen level due to:
+   - Custom ONNX domains (e.g., `com.xilinx`, `com.microsoft`)
+   - Custom operators with domain-specific shape inference rules
+   - Ongoing maintenance burden as ONNX evolves
+
+3. **Alternative Approach**: Compiler backends needing shape inference should implement it independently using appropriate mechanisms for their target compilation framework.
+
+#### 4.6.4 Deprecated APIs
+
+The following MORPHIZEN_ORT_API functions are planned for deprecation as they do not align with EP architectural responsibilities:
+
+- `graph_infer_shapes_from_filepath(model_path, save_path)` - Performs shape inference on model file
+- `graph_infer_shapes(model_proto)` - Performs shape inference on model proto
+
+**Migration Path**: Code relying on these functions should:
+1. Ensure models are processed through ORT's standard pipeline (which includes shape inference)
+2. If shape inference is needed after custom transformations, implement it at the compiler backend level using appropriate tools for the target IR
+
+**Current Status**:
+- ONNX backend (`onnx-ir-imp`): Implements these functions using ONNX's shape inference library
+- MLIR backend (`mlir-imp`): Placeholder implementation (logs warning)
+
+These implementations exist for backward compatibility but are not recommended for new code.
 
 ---
 
