@@ -105,7 +105,6 @@ TEST_F(MorphizenOrtApiTest, TensorProtoOperations)
 ### 8. Extended API Tests (20+ functions)
 ```cpp
 TEST_F(MorphizenOrtApiTest, ExtendedApiOperations)
-TEST_F(MorphizenOrtApiTest, ShapeInferenceOperations)
 ```
 **Covered APIs**: `get_lib_id`, `get_lib_name`, `model_to_proto`, `graph_infer_shapes`, `create_empty_model`, etc.
 
@@ -225,7 +224,6 @@ add_executable(ort-bridge-test
 11. **Test11_TensorProtoOperations** - Tensor proto operations
 12. **Test12_ExtendedApiOperations** - Extended API operations
 13. **Test13_GraphTensorOperations** - Graph tensor operations
-14. **Test14_ShapeInferenceOperations** - Shape inference operations
 15. **Test15_ComprehensiveCoverageReport** - Coverage summary report
 16. **Test16_DetailedCoverageAnalysis** - Detailed coverage analysis
 

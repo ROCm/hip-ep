@@ -625,13 +625,12 @@ public:
    *
    * @note before a graph is properly resolved, some functions like
    * get_consumers get_producer topological_sorted_nodes() are not functional.
-   * It  is a heavy calculation includes
+   * It is a heavy calculation that includes:
    *
-   * 1. Shape inference
-   * 2. Build edge/node relationship
-   * 3. clean up all internal data structure and rebuild everything from
-   * sratch.
-   * 4. Others
+   * 1. Build edge/node relationship
+   * 2. Clean up all internal data structure and rebuild everything from
+   * scratch.
+   * 3. Other backend-specific internal operations
    */
   bool resolve(bool force = false);
 

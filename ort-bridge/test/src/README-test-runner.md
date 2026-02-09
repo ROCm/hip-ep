@@ -53,7 +53,6 @@ The comprehensive test suite includes the following test classes and files:
 ### Extended API Tests
 - `ExtendedApiOperations` - Tests library info, proto operations
 - `GraphTensorOperations` - Tests graph-level tensor operations
-- `ShapeInferenceOperations` - Tests shape inference functionality
 
 ### Coverage Analysis Tests
 - `ComprehensiveCoverageReport` - Analyzes and reports API coverage
