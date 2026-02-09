@@ -909,7 +909,7 @@ void PassContextImp::maybe_create_tar_file_for_write() {
     LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
         << "EP context disabled, creating tmpfile/in-memory tar for cache";
     tar_file_file_name_.clear();
-    tar_file_ = TarFile::create();
+    tar_file_ = TarFile::create_from_tmpfile();
     CHECK(tar_file_ != nullptr)
         << "Failed to create tar file for cache (EP context disabled)";
     return;
@@ -956,7 +956,7 @@ void PassContextImp::maybe_create_tar_file_for_write() {
   } else {
     // Embed mode: Create tmpfile (serialized to model later)
     tar_file_file_name_.clear();
-    tar_file_ = TarFile::create();
+    tar_file_ = TarFile::create_from_tmpfile();
     CHECK(tar_file_ != nullptr)
         << "Failed to create tar file for write in embed mode";
   }
@@ -992,7 +992,8 @@ void PassContextImp::create_tar_file_for_read(std::string&& ep_context_binary,
         << "failed to open ep context file " << ep_context_binary_file;
   } else {
     // embed mode: create from buffer with mmap support
-    tar_file_ = TarFile::create(std::move(ep_context_binary), enable_mmap);
+    tar_file_ =
+        TarFile::create_from_buffer(std::move(ep_context_binary), enable_mmap);
   }
 }
 
@@ -1006,12 +1007,12 @@ void PassContextImp::create_tar_file_for_prebuild_cache(
   if (!is_ep_context_enabled) {
     // when ep.context is not enabled, we don't need to worry to much about
     // how to save tar_file_
-    tar_file_ = TarFile::create(std::move(buffer));
+    tar_file_ = TarFile::create_from_buffer(std::move(buffer));
     CHECK(tar_file_ != nullptr) << " create a tar file from memory ";
   } else {
     if (is_ep_context_embed_mode) {
       // for embeded mode, it works similar to is_ep_context_enable = false;
-      tar_file_ = TarFile::create(std::move(buffer));
+      tar_file_ = TarFile::create_from_buffer(std::move(buffer));
       CHECK(tar_file_ != nullptr) << " create a tar file from memory ";
     } else {
       auto binary_file_path = get_dir_of_ep_context_model() /

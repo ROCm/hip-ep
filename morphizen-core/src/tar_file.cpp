@@ -59,7 +59,7 @@ TarFile::create_from_path(const std::filesystem::path& path, bool enable_mmap) {
   }
   return create_with_regular_stream();
 }
-std::unique_ptr<TarFile> TarFile::create() {
+std::unique_ptr<TarFile> TarFile::create_from_tmpfile() {
 #ifdef _WIN32
   auto file = tmpfile_with_posix_delete();
 #else
@@ -88,7 +88,8 @@ std::unique_ptr<TarFile> TarFile::create() {
 
   return create(std::move(stream));
 }
-std::unique_ptr<TarFile> TarFile::create(std::vector<char>&& buffer) {
+std::unique_ptr<TarFile>
+TarFile::create_from_buffer(std::vector<char>&& buffer) {
   auto owner = std::make_unique<std::vector<char>>(std::move(buffer));
   auto base = owner->data();
   auto size = owner->size();
@@ -98,8 +99,8 @@ std::unique_ptr<TarFile> TarFile::create(std::vector<char>&& buffer) {
       << " create a tar file from memory " << (void*)base << " " << size;
   return create(std::move(stream));
 }
-std::unique_ptr<TarFile> TarFile::create(std::string&& buffer0,
-                                         bool enable_mmap) {
+std::unique_ptr<TarFile> TarFile::create_from_buffer(std::string&& buffer0,
+                                                     bool enable_mmap) {
   std::unique_ptr<std::iostream> stream;
 #ifdef _WIN32
   auto file = tmpfile_with_posix_delete();
@@ -177,10 +178,6 @@ std::unique_ptr<TarFile> TarFile::create(std::string&& buffer0,
   return create(std::move(stream));
 }
 
-std::unique_ptr<TarFile> TarFile::create(std::string&& buffer0) {
-  // Default behavior: enable mmap based on ENV_PARAM
-  return create(std::move(buffer0), true);
-}
 TarFile::TarFile(PrivateTag, std::unique_ptr<std::iostream>&& stream)
     : stream_(std::move(stream)),
       mem_stream_{dynamic_cast<decltype(mem_stream_)>(stream_.get())} {
