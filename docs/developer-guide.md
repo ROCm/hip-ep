@@ -459,7 +459,7 @@ cmake -S ../llvm-project/llvm -B ../../build/llvm \
   -DCMAKE_BUILD_TYPE=Debug \
   "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>" \
   -DCMAKE_INSTALL_PREFIX=../../local \
-  -DLLVM_ENABLE_PROJECTS="clang" \
+  -DLLVM_ENABLE_PROJECTS="mlir" \
   -DLLVM_TARGETS_TO_BUILD="X86" \
   -DLLVM_INCLUDE_TESTS=OFF \
   -DLLVM_INCLUDE_EXAMPLES=OFF

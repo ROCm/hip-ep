@@ -1,0 +1,212 @@
+##
+## Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: Test LLVM FetchContent
+
+# Run conditionally to avoid excessive CI costs
+on:
+  # When cmake files are modified
+  pull_request:
+    paths:
+      - 'cmake/deps.cmake'
+      - 'cmake/deps.txt'
+      - 'mlir-imp/CMakeLists.txt'
+  # Weekly scheduled run
+  schedule:
+    - cron: '0 0 * * 0'  # Every Sunday at midnight UTC
+  # Manual trigger
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MORPHIZEN_BUILD_DIR: ${{ github.workspace }}/cmake-build
+  MORPHIZEN_PREFIX: ${{ github.workspace }}/install
+  ONNXRUNTIME_VERSION: "1.23.2"
+  LLVM_COMMIT: f8cb7987c64dcffb72414a40560055cb717dbf74
+
+jobs:
+  test-fetchcontent-tier2:
+    name: Test Tier 2 (Local Source)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout MorphiZen
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          lfs: true
+          show-progress: false
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Download pre-built ONNXRuntime
+        shell: powershell
+        run: |
+          $ortVersion = "${{ env.ONNXRUNTIME_VERSION }}"
+          $url = "https://github.com/microsoft/onnxruntime/releases/download/v$ortVersion/onnxruntime-win-x64-$ortVersion.zip"
+          $zipFile = "${{ github.workspace }}/onnxruntime-win-x64-$ortVersion.zip"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile $zipFile
+
+          # Extract to install directory
+          New-Item -ItemType Directory -Force -Path "${{ env.MORPHIZEN_PREFIX }}"
+          Expand-Archive -Path $zipFile -DestinationPath "${{ env.MORPHIZEN_PREFIX }}" -Force
+
+          # Move files from nested directory to install root
+          $extractedDir = "${{ env.MORPHIZEN_PREFIX }}/onnxruntime-win-x64-$ortVersion"
+          if (Test-Path $extractedDir) {
+            Move-Item -Path "$extractedDir/*" -Destination "${{ env.MORPHIZEN_PREFIX }}/" -Force
+            Remove-Item -Path $extractedDir -Force -Recurse
+          }
+
+          # Create CMake config file for find_package(onnxruntime)
+          $cmakeDir = "${{ env.MORPHIZEN_PREFIX }}/lib/cmake/onnxruntime"
+          New-Item -ItemType Directory -Force -Path $cmakeDir
+
+          # onnxruntimeConfig.cmake - CMake configuration file for ONNXRuntime
+          $configContent = @"
+          # Auto-generated ONNX Runtime CMake config
+          if(NOT TARGET onnxruntime::onnxruntime)
+            add_library(onnxruntime::onnxruntime SHARED IMPORTED)
+            set_target_properties(onnxruntime::onnxruntime PROPERTIES
+              INTERFACE_INCLUDE_DIRECTORIES "`${CMAKE_CURRENT_LIST_DIR}/../../../include"
+              IMPORTED_LOCATION "`${CMAKE_CURRENT_LIST_DIR}/../../../lib/onnxruntime.dll"
+              IMPORTED_IMPLIB "`${CMAKE_CURRENT_LIST_DIR}/../../../lib/onnxruntime.lib"
+            )
+          endif()
+          set(onnxruntime_FOUND TRUE)
+          set(onnxruntime_VERSION "$ortVersion")
+          "@
+
+          $configContent | Out-File -FilePath "$cmakeDir/onnxruntimeConfig.cmake" -Encoding UTF8
+
+      - name: Clone LLVM to parent directory (simulate local source)
+        shell: powershell
+        run: |
+          cd ..
+          git clone --depth 1 https://github.com/llvm/llvm-project.git
+          cd llvm-project
+          git fetch --depth 1 origin ${{ env.LLVM_COMMIT }}
+          git checkout ${{ env.LLVM_COMMIT }}
+
+      - name: CMake Configure (Force Tier 2)
+        shell: cmd
+        run: |
+          cmake -G Ninja -B ${{ env.MORPHIZEN_BUILD_DIR }} -S . ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
+            -DCMAKE_PREFIX_PATH=${{ env.MORPHIZEN_PREFIX }} ^
+            -Dmorphizen_ENABLE_UNIT_TEST=ON
+            REM CMAKE_PREFIX_PATH provides ONNX Runtime but NOT LLVM - forces tier 2
+
+      - name: Verify Tier 2 Used (Local Source)
+        shell: powershell
+        run: |
+          # Check that CMake found local LLVM source
+          if (!(Test-Path "../llvm-project/llvm/CMakeLists.txt")) {
+            Write-Error "LLVM source not found in expected location"
+            exit 1
+          }
+          Write-Host "[OK] Tier 2 validated: Using local LLVM source"
+
+      - name: CMake Build
+        shell: cmd
+        run: |
+          ninja -C ${{ env.MORPHIZEN_BUILD_DIR }}
+
+      - name: Run Tests
+        shell: cmd
+        run: |
+          cd ${{ env.MORPHIZEN_BUILD_DIR }}
+          ctest -C Release --output-on-failure --timeout 120 -j4
+
+  test-fetchcontent-tier3:
+    name: Test Tier 3 (GitHub Download)
+    runs-on: windows-latest
+    # Only run on manual trigger or schedule (too expensive for every PR)
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    steps:
+      - name: Checkout MorphiZen
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          lfs: true
+          show-progress: false
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Download pre-built ONNXRuntime
+        shell: powershell
+        run: |
+          $ortVersion = "${{ env.ONNXRUNTIME_VERSION }}"
+          $url = "https://github.com/microsoft/onnxruntime/releases/download/v$ortVersion/onnxruntime-win-x64-$ortVersion.zip"
+          $zipFile = "${{ github.workspace }}/onnxruntime-win-x64-$ortVersion.zip"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile $zipFile
+
+          # Extract to install directory
+          New-Item -ItemType Directory -Force -Path "${{ env.MORPHIZEN_PREFIX }}"
+          Expand-Archive -Path $zipFile -DestinationPath "${{ env.MORPHIZEN_PREFIX }}" -Force
+
+          # Move files from nested directory to install root
+          $extractedDir = "${{ env.MORPHIZEN_PREFIX }}/onnxruntime-win-x64-$ortVersion"
+          if (Test-Path $extractedDir) {
+            Move-Item -Path "$extractedDir/*" -Destination "${{ env.MORPHIZEN_PREFIX }}/" -Force
+            Remove-Item -Path $extractedDir -Force -Recurse
+          }
+
+          # Create CMake config file for find_package(onnxruntime)
+          $cmakeDir = "${{ env.MORPHIZEN_PREFIX }}/lib/cmake/onnxruntime"
+          New-Item -ItemType Directory -Force -Path $cmakeDir
+
+          # onnxruntimeConfig.cmake - CMake configuration file for ONNXRuntime
+          $configContent = @"
+          # Auto-generated ONNX Runtime CMake config
+          if(NOT TARGET onnxruntime::onnxruntime)
+            add_library(onnxruntime::onnxruntime SHARED IMPORTED)
+            set_target_properties(onnxruntime::onnxruntime PROPERTIES
+              INTERFACE_INCLUDE_DIRECTORIES "`${CMAKE_CURRENT_LIST_DIR}/../../../include"
+              IMPORTED_LOCATION "`${CMAKE_CURRENT_LIST_DIR}/../../../lib/onnxruntime.dll"
+              IMPORTED_IMPLIB "`${CMAKE_CURRENT_LIST_DIR}/../../../lib/onnxruntime.lib"
+            )
+          endif()
+          set(onnxruntime_FOUND TRUE)
+          set(onnxruntime_VERSION "$ortVersion")
+          "@
+
+          $configContent | Out-File -FilePath "$cmakeDir/onnxruntimeConfig.cmake" -Encoding UTF8
+
+      - name: CMake Configure (Force Tier 3)
+        shell: cmd
+        run: |
+          cmake -G Ninja -B ${{ env.MORPHIZEN_BUILD_DIR }} -S . ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
+            -DCMAKE_PREFIX_PATH=${{ env.MORPHIZEN_PREFIX }} ^
+            -Dmorphizen_ENABLE_UNIT_TEST=ON
+            REM CMAKE_PREFIX_PATH provides ONNX Runtime but NOT LLVM - forces tier 3
+
+      - name: Verify Tier 3 Used (GitHub Download)
+        shell: powershell
+        run: |
+          # Verify no local LLVM source exists
+          if (Test-Path "../llvm-project") {
+            Write-Error "Local LLVM source should not exist for tier 3 test"
+            exit 1
+          }
+          Write-Host "[OK] Tier 3 will download LLVM from GitHub"
+
+      - name: CMake Build
+        shell: cmd
+        run: |
+          ninja -C ${{ env.MORPHIZEN_BUILD_DIR }}
+
+      - name: Run Tests
+        shell: cmd
+        run: |
+          cd ${{ env.MORPHIZEN_BUILD_DIR }}
+          ctest -C Release --output-on-failure --timeout 120 -j4

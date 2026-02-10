@@ -154,4 +154,6 @@ See `docs/project/backlog.md` and `docs/project/CONTRIBUTING.md`.
 ## Dependencies
 
 **Required**: ONNX Runtime (pre-built, `../../local`)
-**Optional**: LLVM/MLIR, Protobuf, GTest, Boost (for tools)
+**Required when morphizen_ENABLE_MLIR_BACKEND=ON (auto-fetched if not found)**: LLVM/MLIR
+**Optional (auto-fetched if not found)**: Protobuf, GTest
+**Optional**: Boost (for tools only)

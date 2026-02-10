@@ -215,3 +215,112 @@ if(morphizen_ENABLE_ONNX_BACKEND OR morphizen_ENABLE_ONNX_SCHEMA_SUPPORT)
 else()
   message(STATUS "ONNX backend is disabled, skipping ONNX find/fetch")
 endif()
+
+##
+## LLVM/MLIR dependency (when morphizen_ENABLE_MLIR_BACKEND=ON)
+## Three-tier fallback: pre-installed → local source → GitHub download
+## Based on proven morphizen-mlir pattern
+##
+if(morphizen_ENABLE_MLIR_BACKEND)
+  message(STATUS "Configuring LLVM/MLIR for MorphiZen")
+
+  # LLVM configuration options (applied when building from source)
+  set(LLVM_ENABLE_PROJECTS "mlir" CACHE STRING "LLVM projects to build")
+  set(LLVM_TARGETS_TO_BUILD "host" CACHE STRING "LLVM targets to build")
+  set(LLVM_ENABLE_ASSERTIONS ON CACHE BOOL "Enable LLVM assertions")
+  set(LLVM_ENABLE_RTTI OFF CACHE BOOL "Disable RTTI in LLVM")
+  set(LLVM_ENABLE_LIBEDIT OFF CACHE BOOL "Disable libedit in LLVM")
+  set(LLVM_BUILD_TOOLS ON CACHE BOOL "Build LLVM tools")
+  set(LLVM_INSTALL_UTILS OFF CACHE BOOL "Install LLVM utilities")
+  set(LLVM_INCLUDE_TESTS OFF CACHE BOOL "Build LLVM tests")
+  set(LLVM_DISABLE_ASSEMBLY_FILES OFF CACHE BOOL "disable assembly")
+  set(LLVM_ENABLE_ZLIB OFF CACHE BOOL "Enable zlib compression")
+  set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "Enable zstd compression")
+
+  # Tier 1: Try to find pre-installed MLIR/LLVM first
+  # MLIR implies LLVM exists (prevents incomplete LLVM installations)
+  find_package(MLIR QUIET CONFIG)
+
+  if(MLIR_FOUND)
+    # MLIR found, now find LLVM (which must exist if MLIR exists)
+    find_package(LLVM REQUIRED CONFIG)
+    message(STATUS "Found pre-installed LLVM and MLIR")
+    message(STATUS "LLVM_DIR: ${LLVM_DIR}")
+    message(STATUS "MLIR_DIR: ${MLIR_DIR}")
+    set(MORPHIZEN_LLVM_PREINSTALLED ON CACHE BOOL "Using pre-installed LLVM" FORCE)
+  else()
+    # MLIR not found, try local source or download
+    # Do NOT call find_package(LLVM) to avoid importing incomplete installations
+    message(STATUS "LLVM/MLIR not found in CMAKE_PREFIX_PATH, will use FetchContent")
+    set(MORPHIZEN_LLVM_PREINSTALLED OFF CACHE BOOL "Using FetchContent LLVM" FORCE)
+
+    # Tier 2: Try to find LLVM source in local directories
+    find_path(LOCAL_LLVM
+      NAMES CMakeLists.txt
+      PATHS
+        "${CMAKE_SOURCE_DIR}/../llvm-project/llvm"
+        "${CMAKE_SOURCE_DIR}/llvm-project/llvm"
+        "${CMAKE_SOURCE_DIR}/3rd-party/llvm-project/llvm"
+      NO_DEFAULT_PATH)
+
+    if(LOCAL_LLVM)
+      # Found local LLVM source
+      message(STATUS "Found LLVM source in local directory")
+      message(STATUS "LLVM SOURCE_DIR: ${LOCAL_LLVM}")
+      FetchContent_Declare(
+        llvm-project
+        SOURCE_DIR ${LOCAL_LLVM}/..
+        EXCLUDE_FROM_ALL
+        SOURCE_SUBDIR llvm)
+    else()
+      # Tier 3: Download LLVM from GitHub
+      message(STATUS "Cannot find LLVM in local directories")
+      message(STATUS "Fetching LLVM source from GitHub")
+      message(STATUS "WARNING: This will download and build LLVM (~20GB, 30-60 min)")
+      FetchContent_Declare(
+        llvm-project
+        GIT_REPOSITORY ${DEP_URL_llvm}
+        GIT_TAG ${DEP_SHA1_llvm}
+        GIT_SUBMODULES_RECURSE
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        EXCLUDE_FROM_ALL
+        SOURCE_SUBDIR llvm
+      )
+    endif()
+
+    # Make LLVM available - this adds LLVM as a subdirectory
+    FetchContent_MakeAvailable(llvm-project)
+
+    # Set include directories for downstream targets
+    set(LLVM_INCLUDE_DIRS
+      "${llvm-project_SOURCE_DIR}/llvm/include"
+      "${llvm-project_BINARY_DIR}/include"
+      CACHE PATH "LLVM include directories" FORCE)
+    set(MLIR_INCLUDE_DIRS
+      "${llvm-project_SOURCE_DIR}/mlir/include"
+      "${llvm-project_BINARY_DIR}/tools/mlir/include"
+      CACHE PATH "MLIR include directories" FORCE)
+
+    # Make include directories globally available for all targets
+    # This is necessary because subdirectory builds don't automatically propagate
+    # MLIR source includes to targets that use find_package(MLIR)
+    include_directories(SYSTEM
+      "${llvm-project_SOURCE_DIR}/llvm/include"
+      "${llvm-project_BINARY_DIR}/include"
+      "${llvm-project_SOURCE_DIR}/mlir/include"
+      "${llvm-project_BINARY_DIR}/tools/mlir/include")
+
+    # Note: In a subdirectory build, MLIR config files are in tools/mlir/cmake/modules/CMakeFiles/
+    set(LLVM_DIR "${llvm-project_BINARY_DIR}/lib/cmake/llvm" CACHE PATH "" FORCE)
+    set(MLIR_DIR "${llvm-project_BINARY_DIR}/tools/mlir/cmake/modules/CMakeFiles" CACHE PATH "" FORCE)
+
+    message(STATUS "LLVM source dir: ${llvm-project_SOURCE_DIR}")
+    message(STATUS "LLVM binary dir: ${llvm-project_BINARY_DIR}")
+    message(STATUS "LLVM_INCLUDE_DIRS: ${LLVM_INCLUDE_DIRS}")
+    message(STATUS "MLIR_INCLUDE_DIRS: ${MLIR_INCLUDE_DIRS}")
+    message(STATUS "LLVM_DIR: ${LLVM_DIR}")
+    message(STATUS "MLIR_DIR: ${MLIR_DIR}")
+  endif()
+
+  message(STATUS "LLVM/MLIR configuration complete")
+endif()
