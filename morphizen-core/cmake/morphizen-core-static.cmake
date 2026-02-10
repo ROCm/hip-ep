@@ -63,8 +63,6 @@ add_library(${LIB_NAME} STATIC
   include/morphizen/rewrite_rule.hpp
   src/rewrite_rule.cpp
   src/node_arg_const_data.cpp
-  src/stat.cpp
-  src/stat.hpp
   src/file_lock.hpp
   src/file_lock.cpp
   include/morphizen/guess_reshape.hpp

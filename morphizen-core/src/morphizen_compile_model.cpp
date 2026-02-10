@@ -13,7 +13,6 @@
 #include "./file_lock.hpp"
 #include "./logger_adapter.hpp"
 #include "./pass_imp.hpp"
-#include "./stat.hpp"
 #include "./version_info.hpp"
 #include "profile_utils.hpp"
 #include "morphizen/morphizen.hpp"
@@ -112,21 +111,6 @@ namespace py = pybind11;
 using namespace onnxruntime;
 
 namespace morphizen {
-static void save_protobuf_message(const fs::path& filename,
-                                  const google::protobuf::Message& msg) {
-  try {
-    google::protobuf::util::JsonPrintOptions options;
-    options.add_whitespace = true;
-    auto json_str = std::string();
-    auto status =
-        google::protobuf::util::MessageToJsonString(msg, &json_str, options);
-    CHECK(status.ok()) << "cannot write json string:" << msg.DebugString();
-    CHECK(std::ofstream(filename).write(&json_str[0], json_str.size()).good())
-        << "failed to write " << filename;
-  } catch (const std::exception& e) {
-    std::cerr << "exception occurs : " << e.what() << "\n";
-  }
-}
 
 static inline void remove_encryption(ConfigProto& /*proto*/) {
   // encryption_key removed from ConfigProto (Issue #004)
@@ -135,25 +119,6 @@ static inline void remove_encryption(ConfigProto& /*proto*/) {
 
 static void print_device_subgraph(const PassContextImp& context) {
   LOG_VERBOSE(2) << "dpu subgraph: " << context.context_proto.meta_def_size();
-}
-
-static void
-collect_stat_and_dump(const PassContextImp& context,
-                      const onnxruntime::Graph& onnx_graph) noexcept {
-  try {
-    auto filename = ENV_PARAM(XLNX_ONNX_EP_REPORT_FILE);
-    collect_stat(onnx_graph, context.context_proto);
-    if (!filename.empty()) {
-      auto dump_dir = context.get_dump_directory();
-      if (!std::filesystem::exists(dump_dir)) {
-        std::filesystem::create_directories(dump_dir);
-      }
-      save_protobuf_message(dump_dir / filename, get_stat_proto());
-    }
-    clean_stat();
-  } catch (const std::exception& e) {
-    std::cerr << "exception occurs : " << e.what() << "\n";
-  }
 }
 
 static void update_cache(std::shared_ptr<PassContextImp> context,
@@ -223,10 +188,6 @@ void compile_onnx_model_2(std::shared_ptr<PassContextImp> context,
         context->get_config_proto(), context.get());
     auto cloned_model = morphizen::model_clone(model, threshold);
     auto& cloned_graph = morphizen::model_main_graph(*cloned_model);
-    auto deferred_collect =
-        std::shared_ptr<void>(nullptr, [context, &onnx_graph](void* /*p*/) {
-          collect_stat_and_dump(*context, onnx_graph);
-        });
     update_cache(context, cloned_graph);
   } else {
     MY_LOG(1) << "==== cache hit ====";

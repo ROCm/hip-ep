@@ -17,7 +17,6 @@
 #include "morphizen/onnxruntime_morphizen_ep.hpp"
 #include "./cleanup.hpp"
 #include "./logger_adapter.hpp"
-#include "./stat.hpp"
 #include "morphizen/config_reader.hpp"
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
@@ -88,8 +87,6 @@ public:
       // Do we allow duplicates? -> Yes, see opdef_main.cpp
       // do nothing
     }
-    morphizen::get_vitis_ep_custom_ops().insert(domain + ":" + custom_op_name);
-
     all_ops_.push_back({domain, op, deleter});
 
     if (domains.count(domain) == 0) {
@@ -173,11 +170,6 @@ intialize_op_defs_old(std::vector<OrtCustomOpDomain*>& contrib_domains,
   //    vitis_ep_custom_ops.insert(domain->domain_ + "::" + op->GetName(op));
   //  }
   //}
-  morphizen::get_vitis_ep_custom_ops().insert("::DequantizeLinear");
-  morphizen::get_vitis_ep_custom_ops().insert("::QuantizeLinear");
-  morphizen::get_vitis_ep_custom_ops().insert(
-      "com.microsoft::DequantizeLinear");
-  morphizen::get_vitis_ep_custom_ops().insert("com.microsoft::QuantizeLinear");
 }
 static void intialize_op_defs(std::vector<OrtCustomOpDomain*>& ret_domain) {
   // This function is used to initialize the op_def_map
