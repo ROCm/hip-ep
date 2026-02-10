@@ -322,8 +322,6 @@ cc_library(
         "src/pattern/pattern_parser.cpp",
         "src/rewrite_rule.cpp",
         # Utility files
-        "src/stat.cpp",
-        "src/stat.hpp",
         "src/file_lock.hpp",
         "src/file_lock.cpp",
         "src/guess_reshape.cpp",

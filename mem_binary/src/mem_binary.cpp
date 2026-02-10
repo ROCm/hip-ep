@@ -10,7 +10,6 @@
 #include <glog/logging.h>
 #include <iostream>
 #include <morphizen-utils/morphizen-utils.hpp>
-#include <morphizen-utils/morphizen_plugin.hpp>
 #ifdef ENABLE_COMPRESSION
 #  include <zlib.h>
 #endif
