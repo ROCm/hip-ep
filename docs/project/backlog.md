@@ -39,7 +39,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 | [#056](issues/056-add-comprehensive-documentation-to-tarfile.md) | Add TarFile Docs | M | 2h | TarFile Docs | - | tar_file.hpp |
 | [#059](issues/059-component-organization-guidelines.md) | Component Organization Guidelines | M | 2h | Documentation | - | component-organization-guidelines.md |
 | [#060](issues/060-create-morphizen-foundation.md) | Create morphizen-foundation | M | 4h | Architecture | - | morphizen-foundation/* |
-| [#061](issues/061-windows-ci-msbuild-generator-compatibility.md) | Windows CI MSBuild Compatibility | M | 1h | CI/Testing | - | build_and_test_win_msbuild.yml |
 
 **Legend:**
 - **Pri**: Priority (C=Critical, H=High, M=Medium, L=Low)
@@ -55,11 +54,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 See **[completed-issues.md](completed-issues.md)** for full archive of all completed issues.
 
 **Recent (last 5):**
+- #061 (PR #173) - Windows CI MSBuild Generator Compatibility
 - #064 (PR #170) - Enable LLVM/MLIR Smart Fallback with Auto-Fetch
 - #061 (PR #168) - Remove Misleading Shape Inference Code
 - #048 (PR #166) - Extract Platform-Specific tmpfile Helper
 - #040 (PR #165) - Remove Legacy tar_ball Re-Serialization
-- #061 (PR #163) - Reorganize tools/ Directory Structure
 
 ---
 

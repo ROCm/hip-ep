@@ -12,6 +12,7 @@ Chronological archive of all completed backlog issues (newest first).
 
 | # | Author | PR | Commit | Date | Title |
 |---|--------|----|----|------|-------|
+| #061 | zhenzew | #173 | TBD | 02-10 | Windows CI MSBuild Generator Compatibility |
 | #064 | mingyueliuh | #170 | TBD | 02-10 | Enable LLVM/MLIR Smart Fallback with Auto-Fetch |
 | #061 | wcy123 | #168 | TBD | 02-09 | Remove Misleading Shape Inference Code |
 | #048 | mingyueliuh | #166 | TBD | 02-09 | Extract Platform-Specific tmpfile Helper |
