@@ -39,6 +39,7 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 | [#056](issues/056-add-comprehensive-documentation-to-tarfile.md) | Add TarFile Docs | M | 2h | TarFile Docs | - | tar_file.hpp |
 | [#059](issues/059-component-organization-guidelines.md) | Component Organization Guidelines | M | 2h | Documentation | - | component-organization-guidelines.md |
 | [#060](issues/060-create-morphizen-foundation.md) | Create morphizen-foundation | M | 4h | Architecture | - | morphizen-foundation/* |
+| [#064](issues/064-enable-llvm-mlir-smart-fallback.md) | Enable LLVM/MLIR Smart Fallback | M | 3h | Build System | - | cmake/deps.cmake/mlir-imp/CMakeLists.txt |
 
 **Legend:**
 - **Pri**: Priority (C=Critical, H=High, M=Medium, L=Low)
