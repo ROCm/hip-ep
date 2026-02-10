@@ -62,107 +62,6 @@ endforeach()
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/version.txt" "${VERSION_INFO}")
 set(MORPHIZEN_VERSION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
 
-# LLVM configuration options (same as onnx-hipdnn-ep)
-message(STATUS "Configuring LLVM/MLIR for onnx-hipdnn-ep")
-set(LLVM_ENABLE_PROJECTS "mlir" CACHE STRING "LLVM projects to build")
-set(LLVM_TARGETS_TO_BUILD "host" CACHE STRING "LLVM targets to build")
-set(LLVM_ENABLE_ASSERTIONS ON CACHE BOOL "Enable LLVM assertions")
-set(LLVM_ENABLE_RTTI ON CACHE BOOL "Enable RTTI in LLVM")
-set(LLVM_ENABLE_LIBEDIT OFF CACHE BOOL "Enable libedit in LLVM")
-set(LLVM_BUILD_TOOLS ON CACHE BOOL "Build LLVM tools")
-set(LLVM_INSTALL_UTILS ON CACHE BOOL "Install LLVM utilities")
-set(LLVM_INCLUDE_TESTS ON CACHE BOOL "Build LLVM tests")
-set(LLVM_DISABLE_ASSEMBLY_FILES OFF CACHE BOOL "disable assembly")
-set(ZLIB_USE_STATIC_LIBS ON CACHE BOOL "Use static zlib")
-set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "Enable zstd compression")
-
-# LLVM commit hash (same as onnx-hipdnn-ep)
-set(DEP_URL_llvm "https://github.com/llvm/llvm-project.git")
-set(DEP_TAG_llvm "f8cb7987c64dcffb72414a40560055cb717dbf74")
-
-# Try to find pre-installed LLVM/MLIR first
-# Note: Commented out to avoid using incomplete MLIR from previous builds
-#find_package(LLVM QUIET CONFIG)
-find_package(MLIR QUIET CONFIG)
-
-if(MLIR_FOUND)
-  find_package(LLVM REQUIRED CONFIG)
-  message(STATUS "Found pre-installed LLVM and MLIR")
-  message(STATUS "LLVM_DIR: ${LLVM_DIR}")
-  message(STATUS "MLIR_DIR: ${MLIR_DIR}")
-  set(MORPHIZEN_LLVM_PREINSTALLED ON CACHE BOOL "Using pre-installed LLVM" FORCE)
-else()
-  message(STATUS "LLVM/MLIR not found in CMAKE_PREFIX_PATH, will use FetchContent and build inline")
-  set(MORPHIZEN_LLVM_PREINSTALLED OFF CACHE BOOL "Using FetchContent LLVM" FORCE)
-
-  # Try to find LLVM in local directories first
-  find_path(LOCAL_LLVM
-    NAMES CMakeLists.txt
-    PATHS
-    "${CMAKE_SOURCE_DIR}/../llvm/llvm"
-    "${CMAKE_SOURCE_DIR}/llvm/llvm"
-    "${CMAKE_SOURCE_DIR}/3rd-party/llvm/llvm"
-    "${CMAKE_SOURCE_DIR}/../llvm-project/llvm"
-    "${CMAKE_SOURCE_DIR}/llvm-project/llvm"
-    "${CMAKE_SOURCE_DIR}/3rd-party/llvm-project/llvm"
-    NO_DEFAULT_PATH)
-
-  if(LOCAL_LLVM)
-    message(STATUS "Found LLVM source in local working directory")
-    message(STATUS "LLVM SOURCE_DIR: ${LOCAL_LLVM}")
-    FetchContent_Declare(
-      llvm-project
-      SOURCE_DIR ${LOCAL_LLVM}/..
-      EXCLUDE_FROM_ALL
-      SOURCE_SUBDIR llvm)
-  else()
-    message(STATUS "Cannot find LLVM in local directories")
-    message(STATUS "Fetching LLVM source from: ${DEP_URL_llvm} @ ${DEP_TAG_llvm}")
-    message(STATUS "WARNING: This will download and build LLVM, which may take a long time")
-    FetchContent_Declare(
-      llvm-project
-      GIT_REPOSITORY ${DEP_URL_llvm}
-      GIT_TAG ${DEP_TAG_llvm}
-      GIT_SUBMODULES_RECURSE
-      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-      EXCLUDE_FROM_ALL
-      SOURCE_SUBDIR llvm
-    )
-  endif()
-
-  # Make LLVM available - this adds LLVM as a subdirectory
-  FetchContent_MakeAvailable(llvm-project)
-
-  # Set include directories for downstream targets
-  set(LLVM_INCLUDE_DIRS
-    "${llvm-project_SOURCE_DIR}/llvm/include"
-    "${llvm-project_BINARY_DIR}/include"
-    CACHE PATH "LLVM include directories" FORCE)
-  set(MLIR_INCLUDE_DIRS
-    "${llvm-project_SOURCE_DIR}/mlir/include"
-    "${llvm-project_BINARY_DIR}/tools/mlir/include"
-    CACHE PATH "MLIR include directories" FORCE)
-
-  # Make include directories globally available for all targets
-  include_directories(SYSTEM
-    "${llvm-project_SOURCE_DIR}/llvm/include"
-    "${llvm-project_BINARY_DIR}/include"
-    "${llvm-project_SOURCE_DIR}/mlir/include"
-    "${llvm-project_BINARY_DIR}/tools/mlir/include")
-
-  set(LLVM_DIR "${llvm-project_BINARY_DIR}/lib/cmake/llvm" CACHE PATH "" FORCE)
-  set(MLIR_DIR "${llvm-project_BINARY_DIR}/tools/mlir/cmake/modules/CMakeFiles" CACHE PATH "" FORCE)
-
-  message(STATUS "LLVM source dir: ${llvm-project_SOURCE_DIR}")
-  message(STATUS "LLVM binary dir: ${llvm-project_BINARY_DIR}")
-  message(STATUS "LLVM_INCLUDE_DIRS: ${LLVM_INCLUDE_DIRS}")
-  message(STATUS "MLIR_INCLUDE_DIRS: ${MLIR_INCLUDE_DIRS}")
-  message(STATUS "LLVM_DIR: ${LLVM_DIR}")
-  message(STATUS "MLIR_DIR: ${MLIR_DIR}")
-endif()
-
-message(STATUS "LLVM/MLIR configuration complete")
-
 ## Use morphizen from git submodule
 if(NOT EXISTS "${CMAKE_SOURCE_DIR}/3rd-party/morphizen/CMakeLists.txt")
   message(FATAL_ERROR "MorphiZen submodule not found. Run: git submodule update --init --recursive")
@@ -181,7 +80,7 @@ set(GLOG_BUILD_SHARED OFF CACHE BOOL "Build glog shared library" FORCE)
 
 # Enable ORT bridge and MLIR backend (same as onnx-hipdnn-ep)
 set(morphizen_ENABLE_ORT_BRIDGE ON CACHE BOOL "Enable ORT bridge" FORCE)
-set(morphizen_ENABLE_MLIR_BACKEND ON CACHE BOOL "Enable MLIR backend" FORCE)
+option(morphizen_ENABLE_MLIR_BACKEND "Enable MLIR backend in MorphiZen" ON)
 set(morphizen_ENABLE_ONNX_BACKEND OFF CACHE BOOL "Enable ONNX backend" FORCE)
 set(morphizen_ENABLE_ONNX_SCHEMA_SUPPORT OFF CACHE BOOL "Enable ONNX schema support" FORCE)
 set(morphizen_ENABLE_RYZENAI_BIN_METADATA OFF CACHE BOOL "Disable ryzenai_bin_metadata" FORCE)
