@@ -34,10 +34,6 @@ TEST_F(ModelTest, MainGraph) {
 }
 
 TEST_F(ModelTest, SetAndGetMetadata) {
-#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
-  // TODO(Issue #057): MLIR backend metadata API not implemented
-  GTEST_SKIP() << "MLIR backend: metadata API not implemented (Issue #057)";
-#endif
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
 
   // Set metadata
