@@ -1,0 +1,179 @@
+#p Cline Rules for onnx-hipdnn-ep
+
+## Project Overview
+This project combines MIOpen (convolution) and hipBLASLt (GEMM) into a unified ROCm Execution Provider for ONNX Runtime.
+
+## Shell Environment
+- PowerShell 5.1 (Desktop edition) is used
+- Do NOT use `&&` for command chaining (not supported in PowerShell 5.1)
+- Use `;` for sequential commands
+
+## Documentation Naming Convention
+- All documents in `doc/` directory must have a numeric prefix
+- Format: `NN_DOCUMENT_NAME.md` where NN is a two-digit number
+- Example: `01_DESIGN.md`, `02_BUILD.md`, `03_API_REFERENCE.md`
+- Numbers indicate reading order and logical progression
+- Keep documentation up to date when making changes to the codebase
+
+## Design Document Rules
+- **Always discuss and finalize the design document BEFORE implementation**
+- **Changes to design documents require user confirmation first**
+- Implementation must comply with the design documents
+- If implementation requires a design change, discuss and get approval before modifying docs
+- Use the design document as the single source of truth for architecture decisions
+
+## Build Configuration
+Note: Repositories are typically cloned in `../../source`, so paths are relative to that structure.
+- Binary/build directory is located at `../../build/<project-name>` relative to the source directory
+- Installation directory is `../../local`
+- Workspace supports both `C:/Develop/m` and `D:/Develop/m` locations
+
+## TheRock ROCm SDK
+- TheRock (Windows ROCm SDK) is installed at `C:\Develop\m\dist\therock` or `D:\Develop\m\dist\therock`
+- Set `THEROCK_DIST` environment variable to point to the installation
+- Use Ninja generator for CMake builds (not Visual Studio generator)
+- Both MIOpen and hipBLASLt libraries are provided by TheRock
+
+## CRITICAL: HIP Architecture Detection
+**⚠️ ALWAYS set HIP_ARCHITECTURES when building!** Failure to do so causes runtime crashes.
+
+**Detect GPU architecture using the SDK:**
+```bash
+# Method 1: amdgpu-arch (recommended - outputs just the arch)
+$THEROCK_DIST/lib/llvm/bin/amdgpu-arch
+# Example output: gfx1151
+
+# Method 2: hipInfo (look for gcnArchName field)
+$THEROCK_DIST/bin/hipInfo | grep gcnArchName
+# Example output: gcnArchName: gfx1151
+```
+
+**Then pass it to CMake:**
+```bash
+cmake -DHIP_ARCHITECTURES=gfx1151 ...
+```
+
+**Why this matters:**
+- HIP kernels are compiled for a specific GPU architecture at build time
+- If the architecture doesn't match your GPU, you get runtime crashes:
+  `Exception Code: 0xC0000005` (Access Violation in hipLaunchKernel)
+- There is NO automatic detection - you MUST specify the architecture explicitly
+
+**Common architectures:**
+| GPU | Architecture |
+|-----|--------------|
+| RX 7900 XTX/XT | gfx1100 |
+| RX 7600 | gfx1102 |
+| Radeon 780M/880M | gfx1150, gfx1151 |
+| RX 6900/6800 | gfx1030 |
+
+## Architecture
+This project uses a Level-1/Level-2 pass architecture:
+- **Level-1 Pass** (`morphizen-pass_level1_rocm`): Orchestrates sub-passes, checks GPU availability
+- **Level-2 Passes**: Pattern matching for specific operations
+  - `morphizen-pass_level2_rocm_conv`: Conv pattern matching (MIOpen)
+  - `morphizen-pass_level2_rocm_gemm`: Gemm pattern matching (hipBLASLt)
+- **Custom Op** (`custom-op-rocm`): Runtime execution with shared HIP stream
+
+## Shared HIP Context
+All custom ops share a single HIP stream for implicit operation fusion:
+- MIOpen operations use `miopenSetStream(handle, shared_stream)`
+- hipBLASLt operations pass stream to `hipblasLtMatmul(..., shared_stream)`
+- No explicit synchronization needed between operations on the same stream
+
+## Build Commands
+Build the project using CMake (adjust drive letter as needed):
+```cmd
+REM Set up environment (use C: or D: as appropriate)
+set WORKSPACE_ROOT=C:/Develop/m
+set THEROCK_DIST=%WORKSPACE_ROOT%\dist\therock
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+
+REM Detect GPU architecture (use output in HIP_ARCHITECTURES below)
+%THEROCK_DIST%\lib\llvm\bin\amdgpu-arch.exe
+
+REM Configure (replace gfx1151 with your detected GPU architecture!)
+cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -B %WORKSPACE_ROOT%/build/onnx-hipdnn-ep -S . -DCMAKE_INSTALL_PREFIX=%WORKSPACE_ROOT%/local -DCMAKE_PREFIX_PATH=%WORKSPACE_ROOT%/local -DTHEROCK_DIST=%THEROCK_DIST% -DHIP_ARCHITECTURES=gfx1151
+
+REM Build
+cmake --build %WORKSPACE_ROOT%/build/onnx-hipdnn-ep
+```
+
+## VitisAI EP Environment Variables
+When running tests with VitisAI EP, the following environment variables are used:
+
+### Required
+- **MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1**: Required to enable CPU device registration in VitisAI EP for the ORT 2.0 V2 device API. Without this, `GetEpDevices()` won't return VitisAI devices and the integration test will skip/fail.
+
+### Optional (Debug Only)
+- **MORPHIZEN_DEBUG_ROCM=2**: Enable debug logging from onnx-hipdnn-ep passes
+- **GLOG_logtostderr=1**: Enable glog output to stderr
+- **GLOG_minloglevel=0**: Show all glog messages (INFO and above)
+
+Example test command (adjust drive letter C: or D: as needed):
+```powershell
+$env:MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE = "1"
+$env:THEROCK_DIST = "C:\Develop\m\dist\therock"
+$env:PATH = "$env:THEROCK_DIST\bin;$env:PATH"
+cd C:\Develop\m\build\onnx-hipdnn-ep\bin
+.\ort_integration_test.exe
+```
+
+## Morphizen Source Code
+- Morphizen source code is located at `../morphizen`
+- Key headers are in `../morphizen/morphizen-core/include/morphizen/`
+- Important files for pass development:
+  - `pass.hpp` - IPass interface, fuse(), level_2_fuse(), add_context_resource()
+  - `pass_context.hpp` - PassContext for cache files and shared resources
+  - `node.hpp` - Node API for accessing attributes
+  - `node_attr.hpp` - NodeAttr for creating string/int/float attributes
+- **Before using Node/Graph APIs**, reference `node.hpp` and `graph.hpp` for available APIs
+  - Prefer C++ style wrappers (`morphizen_cxx::NodeConstRef`, `morphizen_cxx::GraphConstRef`)
+  - These wrappers are cheap (just pointer copies, no heap allocation)
+  - Example: `node_ref.has_attr("name")`, `node_ref.op_domain()`, `node_ref.get_attr_string("name")`
+- **DO NOT use ONNX API directly** - use morphizen/morphizen_core wrappers instead
+  - Do not use ONNX protobuf methods like `attr.name()`, `attr.s()`, `node.op_type()`
+  - Use morphizen wrappers: `node_op_domain()`, `node_get_attr_string()`, etc.
+
+## Git Workflow for Pull Requests
+
+### ⚠️ PRE-FLIGHT CHECKLIST (MANDATORY before file modifications)
+**BEFORE using `write_to_file` or `replace_in_file`, ALWAYS:**
+1. Run `git branch` to check current branch
+2. If on `main` → run `git checkout -b <feature-branch-name>` FIRST
+3. NEVER modify files while on main branch
+4. Violation requires immediate revert and branch creation
+
+### Branch Rules
+- **ALWAYS create a branch BEFORE modifying any files**:
+  - When starting any task that modifies files, first check if you're on the `main` branch
+  - If on `main` branch, create a feature branch BEFORE using write_to_file or replace_in_file
+  - Use `git checkout -b <branch-name>` before making any changes
+  - Never use write_to_file or replace_in_file while on the `main` branch
+- When working on a feature branch for a pull request:
+  - Commit changes frequently (after each logical unit of work)
+  - Push to remote after each commit (`git push`)
+  - This ensures work is backed up and visible for review
+  - Commit messages should follow conventional commits format
+- **Create PR early**: Create a pull request as soon as possible with the initial plan
+  - Include plan/design in PR description for discussion before implementation
+  - This enables collaborative planning with the user
+- **No direct commits to `main` branch**: All changes require a pull request
+- **NEVER push to `main` branch**: Use `git push` only on feature branches, never on main
+- **Update PR description on each push**: When pushing new commits, update the PR description to reflect the latest changes using `gh pr edit <number> --body-file <file>`
+- **PR Template**: Use the morphizen PR template format (see `../morphizen/.github/pull_request_template.md`):
+  ```markdown
+  # Summary of Changes
+  * Describe what this PR adds/changes/improves/fixes
+
+  # Motivation
+  Describe why this request is needed/good/useful
+
+  # Implementation
+  Explain implementation choices and what was tried
+  ```
+
+## Repository
+- GitHub Enterprise: https://gitenterprise.xilinx.com/VitisAI/onnx-hipdnn-ep
+- Use `gh` command for GitHub CLI operations (e.g., `gh pr create`, `gh pr list`)
+- GHE host: `gitenterprise.xilinx.com`

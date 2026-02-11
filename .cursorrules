@@ -1,0 +1,61 @@
+# Cursor Rules for onnx-hipdnn-ep
+
+## CRITICAL: HIP Architecture Detection
+
+When building this project, you MUST set `HIP_ARCHITECTURES` to match the target GPU.
+Failure to do so will cause runtime crashes (Access Violation in hipLaunchKernel).
+
+### How to Detect GPU Architecture
+
+Use one of these tools from the TheRock SDK:
+
+```bash
+# Method 1: amdgpu-arch (recommended - outputs just the arch)
+$THEROCK_DIST/lib/llvm/bin/amdgpu-arch
+# Example output: gfx1151
+
+# Method 2: hipInfo (look for gcnArchName field)
+$THEROCK_DIST/bin/hipInfo | grep gcnArchName
+# Example output: gcnArchName: gfx1151
+```
+
+### CMake Configuration
+
+ALWAYS include `-DHIP_ARCHITECTURES=<detected-arch>` when configuring:
+
+```bash
+cmake -B ../build/onnx-hipdnn-ep -S . \
+  -DTHEROCK_DIST=$THEROCK_DIST \
+  -DCMAKE_PREFIX_PATH=$PWD/../local \
+  -DCMAKE_INSTALL_PREFIX=$PWD/../local \
+  -DHIP_PLATFORM=amd \
+  -DHIP_ARCHITECTURES=gfx1151  # <-- CRITICAL: Use detected value!
+```
+
+### Common GPU Architectures
+
+| GPU Model | Architecture |
+|-----------|--------------|
+| Radeon RX 7900 XTX/XT | gfx1100 |
+| Radeon RX 7800/7700 | gfx1101, gfx1102 |
+| Radeon RX 7600 | gfx1102 |
+| Radeon 880M/780M (Strix Point) | gfx1150, gfx1151 |
+| Radeon RX 6900/6800 | gfx1030 |
+
+### What Happens If You Forget
+
+If HIP_ARCHITECTURES is not set or mismatched:
+- Build may succeed, but runtime will CRASH
+- Error: `Exception Code: 0xC0000005` in `hipLaunchKernel`
+- HIP kernels are compiled for a specific architecture and cannot run on mismatched GPUs
+
+## Build Environment
+
+- Use Visual Studio 2022 Developer Command Prompt or PowerShell with VS DevShell
+- Use Ninja generator (not Visual Studio generator)
+- THEROCK_DIST must point to TheRock ROCm SDK installation
+
+## Shell Notes
+
+- PowerShell 5.1: Do NOT use `&&` for command chaining (use `;` instead)
+- Git Bash: `&&` works normally
