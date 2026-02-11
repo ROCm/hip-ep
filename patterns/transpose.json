@@ -1,0 +1,23 @@
+{
+  "patterns": [
+    {
+      "id": "input",
+      "wildcard": {}
+    },
+    {
+      "id": "output",
+      "isRoot": true,
+      "callNode": {
+        "opType": "Transpose",
+        "args": [
+          {
+            "name": "input"
+          }
+        ],
+        "optionalArgs": [
+          false
+        ]
+      }
+    }
+  ]
+}

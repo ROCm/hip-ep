@@ -1,0 +1,31 @@
+{
+  "patterns": [
+    {
+      "id": "input",
+      "wildcard": {}
+    },
+    {
+      "id": "repeats",
+      "wildcard": {}
+    },
+    {
+      "id": "output",
+      "isRoot": true,
+      "callNode": {
+        "opType": "Tile",
+        "args": [
+          {
+            "name": "input"
+          },
+          {
+            "name": "repeats"
+          }
+        ],
+        "optionalArgs": [
+          false,
+          false
+        ]
+      }
+    }
+  ]
+}

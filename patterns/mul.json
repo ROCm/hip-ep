@@ -1,0 +1,31 @@
+{
+  "patterns": [
+    {
+      "id": "input_A",
+      "wildcard": {}
+    },
+    {
+      "id": "input_B",
+      "wildcard": {}
+    },
+    {
+      "id": "output",
+      "isRoot": true,
+      "callNode": {
+        "opType": "Mul",
+        "args": [
+          {
+            "name": "input_A"
+          },
+          {
+            "name": "input_B"
+          }
+        ],
+        "optionalArgs": [
+          false,
+          false
+        ]
+      }
+    }
+  ]
+}
