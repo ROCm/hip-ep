@@ -108,6 +108,9 @@ workspace/
 │   ├── bin/                  # Runtime DLLs (MIOpen.dll, hiprtc.dll, etc.)
 │   └── lib/llvm/bin/         # LLVM tools (amdgpu-arch.exe)
 ├── onnxruntime/              # ONNX Runtime source code (git clone)
+├── rocm-libraries/           # ROCm Libraries (sparse checkout, see below)
+│   └── projects/
+│       └── composablekernel/ # Composable Kernel source (CK_ROOT)
 ├── build/
 │   ├── onnxruntime/          # ONNX Runtime build artifacts
 │   └── onnx-hipdnn-ep/       # onnx-hipdnn-ep build artifacts
@@ -116,7 +119,7 @@ workspace/
 │   └── lib/cmake/            # CMake configuration files
 └── onnx-hipdnn-ep/           # This project (git clone)
     ├── 3rd-party/morphizen/  # MorphiZen framework (git submodule)
-    ├── test/models/     # Test models (gqa_layer_00.onnx)
+    ├── test/models/          # Test models (gqa_layer_00.onnx)
     └── etc/                  # Configuration files (morphizen_config.json)
 ```
 
@@ -186,7 +189,50 @@ cd onnxruntime
 cmake --build ../build/onnxruntime/Release/ --target install
 ```
 
-### Step 3: Build onnx-hipdnn-ep
+### Step 3: Clone Composable Kernel (CK)
+
+This project depends on [Composable Kernel](https://github.com/ROCm/rocm-libraries/tree/develop/projects/composablekernel) from the ROCm Libraries monorepo. Since the full monorepo is very large, we use **git sparse checkout** to download only the `projects/composablekernel` directory.
+
+**Using Bash (Git Bash on Windows):**
+
+```bash
+cd workspace
+
+git clone --no-checkout --depth 1 --filter=blob:none \
+  -b develop https://github.com/ROCm/rocm-libraries.git
+
+cd rocm-libraries
+git sparse-checkout init --cone
+git sparse-checkout set projects/composablekernel
+git checkout develop
+cd ..
+```
+
+**Using PowerShell:**
+
+```powershell
+cd workspace
+
+git clone --no-checkout --depth 1 --filter=blob:none `
+  -b develop https://github.com/ROCm/rocm-libraries.git
+
+cd rocm-libraries
+git sparse-checkout init --cone
+git sparse-checkout set projects/composablekernel
+git checkout develop
+cd ..
+```
+
+After this, only `projects/composablekernel` (and top-level files) will be present in the `rocm-libraries` directory. You can verify with:
+
+```bash
+git -C rocm-libraries sparse-checkout list
+# Expected output: projects/composablekernel
+```
+
+> **Note:** The `--depth 1 --filter=blob:none` flags create a shallow partial clone, keeping the download size minimal. If you need full history for development, omit these flags.
+
+### Step 4: Build onnx-hipdnn-ep
 
 #### Download onnx-hipdnn-ep
 
@@ -258,6 +304,7 @@ $THEROCK_DIST/bin/hipInfo | grep gcnArchName
 ```bash
 cd onnx-hipdnn-ep
 export THEROCK_DIST=$PWD/../therock
+export CK_ROOT=$PWD/../rocm-libraries/projects/composablekernel
 
 # CRITICAL: Detect and set HIP architecture
 export HIP_ARCH=$($THEROCK_DIST/lib/llvm/bin/amdgpu-arch)
@@ -266,6 +313,7 @@ echo "Detected HIP architecture: $HIP_ARCH"
 cmake \
   -B ../build/onnx-hipdnn-ep -S . \
   -DTHEROCK_DIST=$THEROCK_DIST \
+  -DCK_ROOT=$CK_ROOT \
   -DCMAKE_PREFIX_PATH=$PWD/../local \
   -DCMAKE_INSTALL_PREFIX=$PWD/../local \
   -DHIP_PLATFORM=amd \
@@ -281,6 +329,7 @@ cmake --build ../build/onnx-hipdnn-ep --config Release --target install --parall
 cd onnx-hipdnn-ep
 $env:THEROCK_DIST = "$PWD\..\therock"
 $env:HIP_PLATFORM = "amd"
+$CK_ROOT = "$PWD\..\rocm-libraries\projects\composablekernel"
 
 # CRITICAL: Detect and set HIP architecture
 $HIP_ARCH = & "$env:THEROCK_DIST\lib\llvm\bin\amdgpu-arch.exe"
@@ -288,6 +337,7 @@ Write-Host "Detected HIP architecture: $HIP_ARCH"
 
 cmake -B ..\build\onnx-hipdnn-ep -S . `
   -DTHEROCK_DIST="$env:THEROCK_DIST" `
+  -DCK_ROOT="$CK_ROOT" `
   -DCMAKE_PREFIX_PATH="$PWD\..\local" `
   -DCMAKE_INSTALL_PREFIX="$PWD\..\local" `
   -DHIP_PLATFORM=amd `
@@ -302,6 +352,7 @@ cmake --build ..\build\onnx-hipdnn-ep --config Release --target install --parall
 | Option | Default | Description |
 |--------|---------|-------------|
 | `THEROCK_DIST` | (required) | Path to TheRock ROCm SDK installation |
+| `CK_ROOT` | - | Path to Composable Kernel source root (e.g., `rocm-libraries/projects/composablekernel`). Can also be set via `CK_ROOT` environment variable. |
 | `CMAKE_PREFIX_PATH` | - | Path to ONNX Runtime installation (for find_package) |
 | `CMAKE_INSTALL_PREFIX` | - | Installation directory for built artifacts |
 | `HIP_PLATFORM` | `amd` | HIP platform (use `amd` for AMD GPUs) |
@@ -314,6 +365,7 @@ cmake --build ..\build\onnx-hipdnn-ep --config Release --target install --parall
 | Variable | Description |
 |----------|-------------|
 | `THEROCK_DIST` | Path to TheRock SDK installation |
+| `CK_ROOT` | Path to Composable Kernel source root (alternative to CMake `-DCK_ROOT=`) |
 | `HIP_PLATFORM` | Set to `amd` for AMD GPU support |
 | `MORPHIZEN_DEBUG_ROCM` | Debug level (1=basic, 2=verbose) |
 | `MORPHIZEN_ROCM_EN_LVL1_MERGE` | Enable Level-1 subgraph merging (1=enabled) |

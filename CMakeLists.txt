@@ -49,6 +49,34 @@ if(THEROCK_DIST)
   list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}/lib/cmake")
 endif()
 
+# ==============================================================================
+# Composable Kernel (CK) Configuration
+# ==============================================================================
+# CK_ROOT points to the root of the Composable Kernel source tree
+# (i.e., the projects/composablekernel directory inside rocm-libraries).
+# It can be set via:
+#   1. CMake cache variable: -DCK_ROOT=/path/to/composablekernel
+#   2. Environment variable: CK_ROOT=/path/to/composablekernel
+#
+# See README.md for instructions on how to clone rocm-libraries with
+# sparse checkout so that only Composable Kernel is downloaded.
+# ==============================================================================
+set(CK_ROOT "" CACHE PATH "Path to Composable Kernel source root (projects/composablekernel)")
+if(NOT CK_ROOT AND DEFINED ENV{CK_ROOT})
+  set(CK_ROOT "$ENV{CK_ROOT}")
+endif()
+
+if(CK_ROOT)
+  string(STRIP "${CK_ROOT}" CK_ROOT)
+  if(NOT EXISTS "${CK_ROOT}/CMakeLists.txt")
+    message(FATAL_ERROR
+      "[onnx-hipdnn-ep] CK_ROOT is set to '${CK_ROOT}' but no CMakeLists.txt "
+      "was found there. Please verify the path points to the Composable Kernel "
+      "source root (e.g., rocm-libraries/projects/composablekernel).")
+  endif()
+  message(STATUS "[onnx-hipdnn-ep] CK_ROOT: ${CK_ROOT}")
+endif()
+
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
 
 # HIP kernels library (compiled with hipcc on Windows, CMake HIP on Linux)
