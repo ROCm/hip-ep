@@ -23,7 +23,7 @@ permissions:
 env:
   MORPHIZEN_PREFIX: ${{ github.workspace }}/install
   MORPHIZEN_BUILD_DIR: ${{ github.workspace }}/cmake-build
-  ONNXRUNTIME_VERSION: "1.23.2"
+  ONNXRUNTIME_VERSION: "1.24.1"
   LLVM_COMMIT: "f8cb7987c64dcffb72414a40560055cb717dbf74"
   PROTOBUF_VERSION: "v21.12"
   GTEST_VERSION: "v1.15.0"

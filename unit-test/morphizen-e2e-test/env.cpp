@@ -5,6 +5,7 @@
 #include "./env.hpp"
 #include "./wide-string.hpp"
 #include <glog/logging.h>
+#define ORT_API_MANUAL_INIT 1
 #include <onnxruntime_cxx_api.h>
 #include <unordered_set>
 

@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include <glog/logging.h>
+#define ORT_API_MANUAL_INIT 1
 #include <onnxruntime_cxx_api.h>
 #if _WIN32
 #  ifdef _DEBUG
@@ -84,6 +85,7 @@ int main(int argc, const char* argv[]) {
       show_test_case();
       return 0;
     }
+    Ort::InitApi();
 
     // Initialize the global MorphiZen ORT API for unit tests
     // This is required for tests that directly use MorphiZen APIs without

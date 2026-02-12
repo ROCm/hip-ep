@@ -5,6 +5,7 @@
 #include "../../../unit-test/morphizen-e2e-test/wide-string.hpp"
 #include "./test-environment.hpp"
 #include "morphizen/morphizen-ort-api-ext.hpp"
+#define ORT_API_MANUAL_INIT 1
 #include "onnxruntime_cxx_api.h"
 #include "gtest/gtest.h"
 #include <filesystem>
