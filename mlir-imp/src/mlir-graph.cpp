@@ -582,6 +582,14 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
         builder.setInsertionPointAfter(latestInputOp);
       }
     }
+
+    // Ensure insertion point is after the none_ operation to maintain SSA
+    // dominance. When all inputs are function arguments (graph inputs) and some
+    // operands use none_->getResult(0), the node must be placed after none_.
+    if (none_ && (!latestInputOp || latestInputOp == none_ ||
+                  latestInputOp->isBeforeInBlock(none_))) {
+      builder.setInsertionPointAfter(none_);
+    }
   }
 
   // Convert MLIRNodeArgIndex to mlir::Value for input arguments
