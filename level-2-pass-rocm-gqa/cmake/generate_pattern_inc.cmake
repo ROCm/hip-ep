@@ -1,3 +1,7 @@
+##
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_custom_command (
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/gqa_pattern_json.hpp
