@@ -31,6 +31,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Gemm | hipBLASLt | Implemented |
 | Gemm + Bias | hipBLASLt | Implemented |
 | MatMul | rocBLAS | Implemented |
+| GQA (GroupQueryAttention) | Custom HIP Kernel | Implemented |
 | Mul | HIPRTC | Implemented |
 | Softmax | HIPRTC | Implemented |
 | Reshape | HIP Memory | Implemented |
@@ -52,8 +53,9 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 - **level-2-pass-rocm-reshape**: Level-2 Reshape pass
 - **level-2-pass-rocm-transpose**: Level-2 Transpose pass (HIPRTC)
 - **level-2-pass-rocm-tile**: Level-2 Tile pass (HIPRTC)
+- **level-2-pass-rocm-gqa**: Level-2 GQA pass (GroupQueryAttention)
 - **custom-op-rocm**: Custom operator implementations using HIP
-- **kernels**: GPU kernel implementations (HIPRTC)
+- **kernels**: GPU kernel implementations (HIPRTC + FMHA). See [doc/04_FMHA_GQA_IMPLEMENTATION.md](doc/04_FMHA_GQA_IMPLEMENTATION.md) for GQA/FMHA details.
 - **proto**: Protocol buffer definitions
 - **test**: Test suite for validation
 
@@ -352,7 +354,7 @@ cmake --build ..\build\onnx-hipdnn-ep --config Release --target install --parall
 | Option | Default | Description |
 |--------|---------|-------------|
 | `THEROCK_DIST` | (required) | Path to TheRock ROCm SDK installation |
-| `CK_ROOT` | - | Path to Composable Kernel source root (e.g., `rocm-libraries/projects/composablekernel`). Can also be set via `CK_ROOT` environment variable. |
+| `CK_ROOT` | (optional) | Path to Composable Kernel source root (e.g., `rocm-libraries/projects/composablekernel`). Enables CK Tile naive\_attention\_fwd as an alternative FMHA backend. When not set, only the custom portable FMHA kernel is available (recommended for RDNA3). Can also be set via `CK_ROOT` environment variable. |
 | `CMAKE_PREFIX_PATH` | - | Path to ONNX Runtime installation (for find_package) |
 | `CMAKE_INSTALL_PREFIX` | - | Installation directory for built artifacts |
 | `HIP_PLATFORM` | `amd` | HIP platform (use `amd` for AMD GPUs) |
@@ -367,6 +369,7 @@ cmake --build ..\build\onnx-hipdnn-ep --config Release --target install --parall
 | `THEROCK_DIST` | Path to TheRock SDK installation |
 | `CK_ROOT` | Path to Composable Kernel source root (alternative to CMake `-DCK_ROOT=`) |
 | `HIP_PLATFORM` | Set to `amd` for AMD GPU support |
+| `FMHA_USE_CK_NAIVE` | Set to `1` to use CK Tile's `naive_attention_fwd` instead of the custom portable kernel for FMHA/GQA. Only effective when built with `CK_ROOT`. See [doc/04_FMHA_GQA_IMPLEMENTATION.md](doc/04_FMHA_GQA_IMPLEMENTATION.md) for details. |
 | `MORPHIZEN_DEBUG_ROCM` | Debug level (1=basic, 2=verbose) |
 | `MORPHIZEN_ROCM_EN_LVL1_MERGE` | Enable Level-1 subgraph merging (1=enabled) |
 | `MORPHIZEN_DRY_RUN` | Dry run mode without GPU execution (1=enabled) |
@@ -453,6 +456,84 @@ cd ..\local\bin
   P99: 53.50 ms
   Throughput: 18.69 infer/sec
 ```
+
+### Test case 3: Run GQA Model Verifier
+
+The model verifier compares CPU and GPU inference results for GQA models. It is
+the primary tool for validating FMHA accuracy.
+
+```bash
+# Set environment
+export PATH="$THEROCK_DIST/bin:$PATH"
+
+# Run with prefill model (seqlen_q=255)
+cd ../build/onnx-hipdnn-ep/bin
+./model_verifier /path/to/gqa_prefill.onnx
+
+# Run with decode model (seqlen_q=1)
+./model_verifier /path/to/gqa_decode.onnx
+```
+
+```powershell
+# Set environment
+$env:PATH = "$env:THEROCK_DIST\bin;$env:PATH"
+
+# Run with prefill model
+cd ..\build\onnx-hipdnn-ep\bin
+.\model_verifier.exe C:\path\to\gqa_prefill.onnx
+
+# Run with decode model
+.\model_verifier.exe C:\path\to\gqa_decode.onnx
+```
+
+**Expected Output (default portable kernel):**
+```
+[FMHA] Using custom portable kernel (default). Set FMHA_USE_CK_NAIVE=1 to use CK Tile.
+[Portable Prefill] batch=1, nhead_q=32, nhead_k=8, seqlen_q=255, seqlen_k=255, hdim=128, ...
+  Max difference: 0.000977
+  [PASS] All elements within tolerance
+```
+
+#### Reproducing RDNA3 CK Tile Accuracy Issues
+
+If the project was built with `CK_ROOT`, you can reproduce the known CK Tile
+accuracy issues on RDNA3 (wave32) hardware by setting `FMHA_USE_CK_NAIVE=1`:
+
+```bash
+# Test CK Tile decode (shows ~0.048 max diff due to cross_wave_reduce bug)
+FMHA_USE_CK_NAIVE=1 ./model_verifier /path/to/gqa_decode.onnx
+
+# Test CK Tile prefill (FAILS — no causal masking support, ~1.67 max diff)
+FMHA_USE_CK_NAIVE=1 ./model_verifier /path/to/gqa_prefill.onnx
+```
+
+```powershell
+# Test CK Tile decode
+$env:FMHA_USE_CK_NAIVE = "1"
+.\model_verifier.exe C:\path\to\gqa_decode.onnx
+
+# Test CK Tile prefill (FAILS)
+.\model_verifier.exe C:\path\to\gqa_prefill.onnx
+
+# Reset to default portable kernel
+Remove-Item Env:\FMHA_USE_CK_NAIVE
+```
+
+**Expected results on RDNA3 with `FMHA_USE_CK_NAIVE=1`:**
+
+| Model | Max Diff | Result | Root Cause |
+|-------|----------|--------|------------|
+| Prefill | ~1.67 | **FAIL** | No causal masking in CK naive |
+| Decode | ~0.048 | PASS (reduced accuracy) | `cross_wave_reduce` hardcodes wave64 |
+
+Compare with default portable kernel (both PASS with max diff < 0.001).
+
+> **Note:** These accuracy issues are specific to RDNA3's native wave32 architecture.
+> On CDNA GPUs (MI-series, wave64), CK Tile's naive_attention_fwd should produce
+> correct results for the decode path.
+
+For detailed technical analysis of the root cause, see
+[doc/04_FMHA_GQA_IMPLEMENTATION.md](doc/04_FMHA_GQA_IMPLEMENTATION.md).
 
 ---
 

@@ -305,10 +305,34 @@ message TileParamProto {
   repeated string output_names = 8;
 }
 
+// GQA (Grouped Query Attention) parameters
+// Implements com.microsoft.GroupQueryAttention using CK Tile FMHA kernels
+message GqaParamProto {
+  // Attention configuration
+  int32 num_heads = 1;        // Number of query heads (e.g., 32 for Llama-3.1-8B)
+  int32 kv_num_heads = 2;     // Number of key/value heads (e.g., 8 for Llama-3.1-8B)
+  int32 head_size = 3;        // Head dimension (e.g., 128)
+  float scale = 4;            // Attention scale factor (typically 1/sqrt(head_size))
+
+  // Input shapes (from graph analysis)
+  repeated int64 query_shape = 5;        // [B, S, num_heads * head_size]
+  repeated int64 key_shape = 6;          // [B, S, kv_num_heads * head_size]
+  repeated int64 past_key_shape = 7;     // [B, kv_num_heads, past_seqlen, head_size] (BNSH)
+
+  // Output shapes
+  repeated int64 output_shape = 8;       // [B, S, num_heads * head_size]
+  repeated int64 present_key_shape = 9;  // [B, kv_num_heads, total_seqlen, head_size] (BNSH)
+  repeated int64 present_value_shape = 10; // [B, kv_num_heads, total_seqlen, head_size] (BNSH)
+
+  // Number of inputs/outputs actually used
+  int32 num_inputs = 11;      // Number of inputs (7 for our test models)
+  int32 num_outputs = 12;     // Number of outputs (3: output, present_key, present_value)
+}
+
 // Single operation parameters (used by Level-2 passes)
 // When a single operation is fused, this is attached to MetaDef
 message RocmParamProto {
-  // Operation type: "conv", "gemm", "matmul", "mul", "softmax", "reshape", "transpose", "tile"
+  // Operation type: "conv", "gemm", "matmul", "mul", "softmax", "reshape", "transpose", "tile", "gqa"
   string op_type = 1;
 
   // Operation-specific parameters (one of these will be populated)
@@ -320,6 +344,7 @@ message RocmParamProto {
   ReshapeParamProto reshape_params = 9;
   TransposeParamProto transpose_params = 10;
   TileParamProto tile_params = 11;
+  GqaParamProto gqa_params = 12;
 
   // General metadata
   string ep_context_file_name = 4;

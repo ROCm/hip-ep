@@ -1,0 +1,78 @@
+{
+  "patterns": [
+    {
+      "id": "query",
+      "wildcard": {}
+    },
+    {
+      "id": "key",
+      "wildcard": {}
+    },
+    {
+      "id": "value",
+      "wildcard": {}
+    },
+    {
+      "id": "past_key",
+      "wildcard": {}
+    },
+    {
+      "id": "past_value",
+      "wildcard": {}
+    },
+    {
+      "id": "seqlens_k",
+      "wildcard": {}
+    },
+    {
+      "id": "total_sequence_length",
+      "wildcard": {}
+    },
+    {
+      "id": "cos_cache",
+      "wildcard": {}
+    },
+    {
+      "id": "sin_cache",
+      "wildcard": {}
+    },
+    {
+      "id": "position_ids",
+      "wildcard": {}
+    },
+    {
+      "id": "attention_bias",
+      "wildcard": {}
+    },
+    {
+      "id": "head_sink",
+      "wildcard": {}
+    },
+    {
+      "id": "output",
+      "isRoot": true,
+      "callNode": {
+        "opType": "GroupQueryAttention",
+        "opDomain": "com.microsoft",
+        "args": [
+          { "name": "query" },
+          { "name": "key" },
+          { "name": "value" },
+          { "name": "past_key" },
+          { "name": "past_value" },
+          { "name": "seqlens_k" },
+          { "name": "total_sequence_length" },
+          { "name": "cos_cache" },
+          { "name": "sin_cache" },
+          { "name": "position_ids" },
+          { "name": "attention_bias" },
+          { "name": "head_sink" }
+        ],
+        "optionalArgs": [
+          false, true, true, true, true, false, false,
+          true, true, true, true, true
+        ]
+      }
+    }
+  ]
+}

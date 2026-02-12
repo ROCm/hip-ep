@@ -333,6 +333,10 @@ private:
   void ExecuteTileNode(int32_t node_id, const rocm::TileParamProto &params,
                        const std::vector<float *> &inputs, float *output) const;
 
+  // GQA (Grouped Query Attention) using CK Tile FMHA kernels
+  void ExecuteGQANode(int32_t node_id, const rocm::GqaParamProto &params,
+                      const std::vector<float *> &inputs) const;
+
   // Tensor resolution
   float *ResolveTensorRef(const rocm::TensorRefProto &ref) const;
   size_t GetOutputSize(int32_t node_id, int32_t output_index) const;
