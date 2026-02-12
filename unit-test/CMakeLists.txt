@@ -35,6 +35,7 @@ add_executable(${TEST_EXE_NAME}
   morphizen/test_mmap_tmphandle.cpp
   morphizen/test_ep_shared_context_workspace.cpp
   morphizen/test_op_invoker.cpp
+  morphizen/test_mlir_ssa_dominance.cpp
   ${MORPHIZEN_E2E_TESTS_PROTO_SRCS}
   ${MORPHIZEN_E2E_TESTS_PROTO_HDRS}
   morphizen-e2e-test/config.cpp
