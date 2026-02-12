@@ -16,7 +16,8 @@
           "morphizen-level2-pass-rocm-transpose",
           "morphizen-level2-pass-rocm-tile",
           "morphizen-level2-pass-rocm-mul",
-          "morphizen-level2-pass-rocm-softmax"
+          "morphizen-level2-pass-rocm-softmax",
+          "morphizen-level2-pass-rocm-gqa"
         ]
       }
     }

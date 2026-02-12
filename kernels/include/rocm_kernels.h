@@ -80,6 +80,36 @@ void launch_tile_nd_f32(const float *input, float *output,
 void launch_reshape_copy_f32(const float *input, float *output, int64_t size,
                              hipStream_t stream);
 
+//--- FMHA (Flash Multi-Head Attention) kernels ---
+
+/**
+ * Forward FMHA with causal masking for GQA (Grouped Query Attention).
+ * Handles both prefill (multi-token) and decode (single-token) cases.
+ *
+ * Causal mask (bottom-right): Q[i] attends to K[j] where
+ *   j <= i + (seqlen_k - seqlen_q)
+ *
+ * @param stream      HIP stream
+ * @param q_ptr       Q tensor [B, nhead_q, seqlen_q, hdim] (fp16)
+ * @param k_ptr       K tensor [B, nhead_k, seqlen_k, hdim] (fp16)
+ * @param v_ptr       V tensor [B, nhead_k, seqlen_k, hdim] (fp16)
+ * @param o_ptr       O tensor [B, nhead_q, seqlen_q, hdim] (fp16, output)
+ * @param batch       Batch size
+ * @param nhead_q     Number of query heads
+ * @param nhead_k     Number of KV heads (nhead_q must be divisible by nhead_k)
+ * @param seqlen_q    Query sequence length
+ * @param seqlen_k    Key sequence length (total including past)
+ * @param hdim        Head dimension (e.g., 64, 96, 128)
+ * @param scale       Attention scale factor (typically 1/sqrt(hdim))
+ * @return            hipSuccess on success, error code on failure
+ */
+hipError_t launch_fmha_fwd_fp16_causal(hipStream_t stream, const void *q_ptr,
+                                       const void *k_ptr, const void *v_ptr,
+                                       void *o_ptr, int32_t batch,
+                                       int32_t nhead_q, int32_t nhead_k,
+                                       int32_t seqlen_q, int32_t seqlen_k,
+                                       int32_t hdim, float scale);
+
 } // extern "C"
 
 //============================================================================

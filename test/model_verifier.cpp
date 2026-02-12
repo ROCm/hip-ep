@@ -22,7 +22,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -65,6 +67,14 @@ struct Config {
   bool verbose = false;
 };
 
+// Per-element diff entry for top-N tracking
+struct DiffEntry {
+  size_t idx;
+  float cpu_val;
+  float gpu_val;
+  float diff;
+};
+
 // Statistics
 struct ComparisonStats {
   float max_diff = 0.0f;
@@ -77,6 +87,7 @@ struct ComparisonStats {
   size_t total_elements = 0;
   size_t nan_count = 0;
   size_t inf_count = 0;
+  std::vector<DiffEntry> top_diffs; // Top N largest differences
 };
 
 void print_usage(const char *prog_name) {
@@ -145,6 +156,7 @@ ComparisonStats compare_outputs(const std::vector<float> &cpu,
     return stats;
   }
 
+  constexpr size_t TOP_N = 20;
   std::vector<float> diffs(cpu.size());
   float sum_diff = 0.0f;
 
@@ -175,6 +187,22 @@ ComparisonStats compare_outputs(const std::vector<float> &cpu,
                   << ", GPU=" << gpu[i] << ", diff=" << diff << std::endl;
       }
     }
+
+    // Maintain top-N largest diffs (insertion sort into small vector)
+    if (stats.top_diffs.size() < TOP_N || diff > stats.top_diffs.back().diff) {
+      DiffEntry entry{i, cpu[i], gpu[i], diff};
+      if (stats.top_diffs.size() >= TOP_N)
+        stats.top_diffs.back() = entry;
+      else
+        stats.top_diffs.push_back(entry);
+      // Bubble up to maintain descending order
+      for (size_t j = stats.top_diffs.size() - 1; j > 0; --j) {
+        if (stats.top_diffs[j].diff > stats.top_diffs[j - 1].diff)
+          std::swap(stats.top_diffs[j], stats.top_diffs[j - 1]);
+        else
+          break;
+      }
+    }
   }
 
   stats.mean_diff = sum_diff / cpu.size();
@@ -190,7 +218,8 @@ ComparisonStats compare_outputs(const std::vector<float> &cpu,
   return stats;
 }
 
-void print_stats(const ComparisonStats &stats, float tolerance) {
+void print_stats(const ComparisonStats &stats, float tolerance,
+                 const std::vector<float> &cpu, const std::vector<float> &gpu) {
   std::cout << "\n=== Comparison Statistics ===" << std::endl;
   std::cout << std::fixed << std::setprecision(6);
   std::cout << "  Total elements:     " << stats.total_elements << std::endl;
@@ -211,6 +240,44 @@ void print_stats(const ComparisonStats &stats, float tolerance) {
     std::cout << "  WARNING: Inf values: " << stats.inf_count << std::endl;
   }
 
+  // Print top-20 largest differences
+  if (!stats.top_diffs.empty()) {
+    std::cout << "\n=== Top " << stats.top_diffs.size()
+              << " Largest Differences ===" << std::endl;
+    std::cout << "  " << std::setw(8) << "Index"
+              << "  " << std::setw(12) << "CPU"
+              << "  " << std::setw(12) << "GPU"
+              << "  " << std::setw(12) << "Diff" << std::endl;
+    std::cout << "  " << std::string(50, '-') << std::endl;
+    for (const auto &d : stats.top_diffs) {
+      std::cout << "  " << std::setw(8) << d.idx << "  " << std::setw(12)
+                << d.cpu_val << "  " << std::setw(12) << d.gpu_val << "  "
+                << std::setw(12) << d.diff << std::endl;
+    }
+  }
+
+  // Print a window of values around the max diff index
+  if (stats.total_elements > 0 && !cpu.empty() && !gpu.empty()) {
+    std::cout << "\n=== Values Around Max Diff (index " << stats.max_diff_idx
+              << ") ===" << std::endl;
+    std::cout << "  " << std::setw(8) << "Index"
+              << "  " << std::setw(12) << "CPU"
+              << "  " << std::setw(12) << "GPU"
+              << "  " << std::setw(12) << "Diff" << std::endl;
+    std::cout << "  " << std::string(50, '-') << std::endl;
+    int64_t center = static_cast<int64_t>(stats.max_diff_idx);
+    int64_t start = std::max(int64_t(0), center - 5);
+    int64_t end =
+        std::min(static_cast<int64_t>(stats.total_elements), center + 6);
+    for (int64_t i = start; i < end; ++i) {
+      float diff = std::abs(cpu[i] - gpu[i]);
+      std::cout << (static_cast<size_t>(i) == stats.max_diff_idx ? "  >" : "  ")
+                << std::setw(7) << i << "  " << std::setw(12) << cpu[i] << "  "
+                << std::setw(12) << gpu[i] << "  " << std::setw(12) << diff
+                << std::endl;
+    }
+  }
+
   std::cout << "\n=== Result ===" << std::endl;
   if (stats.mismatch_count == 0 && stats.nan_count == 0 &&
       stats.inf_count == 0) {
@@ -220,6 +287,113 @@ void print_stats(const ComparisonStats &stats, float tolerance) {
     std::cout << "  [FAIL] " << stats.mismatch_count
               << " elements exceed tolerance" << std::endl;
   }
+}
+
+// Helper: convert fp16 (uint16_t) to float32
+inline float fp16_to_float(uint16_t h) {
+  uint32_t sign = (h >> 15) & 0x1;
+  uint32_t exponent = (h >> 10) & 0x1f;
+  uint32_t mantissa = h & 0x3ff;
+
+  uint32_t f;
+  if (exponent == 0) {
+    if (mantissa == 0) {
+      f = sign << 31; // +/- zero
+    } else {
+      // Subnormal fp16 -> normal fp32
+      exponent = 1;
+      while (!(mantissa & 0x400)) {
+        mantissa <<= 1;
+        exponent--;
+      }
+      mantissa &= 0x3ff;
+      f = (sign << 31) | ((exponent + 127 - 15) << 23) | (mantissa << 13);
+    }
+  } else if (exponent == 31) {
+    // Inf or NaN
+    f = (sign << 31) | 0x7f800000 | (mantissa << 13);
+  } else {
+    f = (sign << 31) | ((exponent + 127 - 15) << 23) | (mantissa << 13);
+  }
+
+  float result;
+  std::memcpy(&result, &f, sizeof(float));
+  return result;
+}
+
+// Helper: convert float32 to fp16 (uint16_t) with rounding
+inline uint16_t float_to_fp16(float value) {
+  uint32_t f;
+  std::memcpy(&f, &value, sizeof(float));
+
+  uint32_t sign = (f >> 31) & 0x1;
+  int32_t exponent = ((f >> 23) & 0xff) - 127;
+  uint32_t mantissa = f & 0x7fffff;
+
+  uint16_t h;
+  if (exponent > 15) {
+    h = (sign << 15) | 0x7c00; // Inf
+  } else if (exponent > -15) {
+    h = (sign << 15) | ((exponent + 15) << 10) | (mantissa >> 13);
+  } else {
+    h = (sign << 15); // Zero (flush subnormals)
+  }
+  return h;
+}
+
+// Helper: get element type name string
+std::string elem_type_name(ONNXTensorElementDataType type) {
+  switch (type) {
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+    return "float32";
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+    return "float16";
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+    return "int32";
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+    return "int64";
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+    return "uint8";
+  default:
+    return "type_" + std::to_string(static_cast<int>(type));
+  }
+}
+
+// Helper: extract output tensor data as float vector (handles fp16 conversion)
+std::vector<float> extract_output_as_float(const Ort::Value &tensor) {
+  auto type_info = tensor.GetTensorTypeAndShapeInfo();
+  auto elem_type = type_info.GetElementType();
+  size_t count = type_info.GetElementCount();
+
+  std::vector<float> result(count);
+
+  if (elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    const float *data = tensor.GetTensorData<float>();
+    std::copy(data, data + count, result.begin());
+  } else if (elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+    const uint16_t *data = tensor.GetTensorData<uint16_t>();
+    for (size_t i = 0; i < count; ++i) {
+      result[i] = fp16_to_float(data[i]);
+    }
+  } else if (elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+    const int32_t *data = tensor.GetTensorData<int32_t>();
+    for (size_t i = 0; i < count; ++i) {
+      result[i] = static_cast<float>(data[i]);
+    }
+  } else if (elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+    const int64_t *data = tensor.GetTensorData<int64_t>();
+    for (size_t i = 0; i < count; ++i) {
+      result[i] = static_cast<float>(data[i]);
+    }
+  } else {
+    std::cerr << "WARNING: Unsupported output type "
+              << static_cast<int>(elem_type) << ", treating as float"
+              << std::endl;
+    const float *data = tensor.GetTensorData<float>();
+    std::copy(data, data + count, result.begin());
+  }
+
+  return result;
 }
 
 int main(int argc, char **argv) {
@@ -306,14 +480,22 @@ int main(int argc, char **argv) {
   std::cout << "Model inputs:  " << num_inputs << std::endl;
   std::cout << "Model outputs: " << num_outputs << std::endl;
 
-  // Prepare inputs
+  // Prepare inputs (supports mixed data types: float32, float16, int32)
   std::vector<std::string> input_names;
   std::vector<std::vector<int64_t>> input_shapes;
-  std::vector<std::vector<float>> input_data;
+  std::vector<ONNXTensorElementDataType> input_types;
+
+  // Raw byte storage for each input (supports any data type)
+  std::vector<std::vector<uint8_t>> input_raw_data;
+  // Element counts for each input
+  std::vector<size_t> input_elem_counts;
 
   std::mt19937 rng(config.seed);
-  std::normal_distribution<float> dist(0.0f, 1.0f);
+  std::normal_distribution<float> dist(0.0f,
+                                       0.5f); // Smaller range for fp16 safety
+  std::uniform_int_distribution<int32_t> int_dist(0, 255);
 
+  // First pass: collect all input metadata to determine GQA-specific values
   std::cout << "\n--- Input Information ---" << std::endl;
   for (size_t i = 0; i < num_inputs; ++i) {
     auto name = cpu_session.GetInputNameAllocated(i, allocator);
@@ -322,32 +504,135 @@ int main(int argc, char **argv) {
     auto type_info = cpu_session.GetInputTypeInfo(i);
     auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
     auto shape = tensor_info.GetShape();
+    auto elem_type = tensor_info.GetElementType();
+    input_types.push_back(elem_type);
 
-    // Handle dynamic dimensions
+    // Handle dynamic dimensions:
+    // - Negative dims (symbolic) -> default to 1
+    // - Zero dims are VALID and preserved (e.g., [1, 8, 0, 128] for empty KV
+    // cache)
     for (auto &dim : shape) {
       if (dim < 0)
-        dim = 1; // Default dynamic dims to 1
+        dim = 1; // Default symbolic dims to 1
+      // NOTE: dim == 0 is intentionally preserved (zero-sized tensor)
     }
     input_shapes.push_back(shape);
 
-    // Calculate size and generate random data
+    // Calculate element count (may be 0 for zero-sized dims)
     size_t size = 1;
     for (auto d : shape)
       size *= static_cast<size_t>(d);
-
-    std::vector<float> data(size);
-    for (size_t j = 0; j < size; ++j) {
-      data[j] = dist(rng);
-    }
-    input_data.push_back(data);
+    input_elem_counts.push_back(size);
 
     std::cout << "  Input " << i << ": " << input_names[i] << " "
-              << shape_to_string(shape) << " (" << size << " elements)"
-              << std::endl;
+              << shape_to_string(shape) << " " << elem_type_name(elem_type)
+              << " (" << size << " elements)" << std::endl;
   }
 
-  // Get output names
+  // Detect GQA-specific inputs and derive proper values:
+  // - past_key shape [B, nhead_k, past_seqlen, hdim] -> past_seq_len
+  // - query shape [B, seqlen_q, hidden] -> current query seq_len
+  int64_t past_seq_len = 0;
+  int64_t query_seq_len = 1; // default
+  for (size_t i = 0; i < num_inputs; ++i) {
+    const auto &name = input_names[i];
+    const auto &shape = input_shapes[i];
+    if (name.find("past_key") != std::string::npos && shape.size() >= 3) {
+      past_seq_len = shape[2]; // [B, nhead, past_seqlen, hdim]
+    }
+    if (name == "query" && shape.size() >= 2) {
+      query_seq_len = shape[1]; // [B, seqlen_q, hidden]
+    }
+  }
+  int64_t total_seq_len_val = past_seq_len + query_seq_len;
+
+  if (config.verbose) {
+    std::cout << "\n  GQA detected: past_seq_len=" << past_seq_len
+              << ", query_seq_len=" << query_seq_len
+              << ", total_seq_len=" << total_seq_len_val << std::endl;
+  }
+
+  // Second pass: generate input data
+  for (size_t i = 0; i < num_inputs; ++i) {
+    auto elem_type = input_types[i];
+    size_t size = input_elem_counts[i];
+    const auto &name = input_names[i];
+
+    // Determine element byte size
+    size_t elem_bytes = 4; // default float32
+    switch (elem_type) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+      elem_bytes = 2;
+      break;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+      elem_bytes = 4;
+      break;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+      elem_bytes = 8;
+      break;
+    default:
+      elem_bytes = 4;
+      break;
+    }
+
+    std::vector<uint8_t> raw(size * elem_bytes, 0);
+
+    if (size > 0) {
+      // Check for GQA-specific semantic inputs
+      bool is_seqlens = (name.find("seqlens") != std::string::npos);
+      bool is_total_seq = (name.find("total_seq") != std::string::npos ||
+                           name.find("total_sequence") != std::string::npos);
+
+      if (is_seqlens || is_total_seq) {
+        // GQA semantic values:
+        //   seqlens_k = total_sequence_length - 1  (ORT CPU uses: total_seqlen
+        //   = seqlens_k + 1) total_seq_len = past + query
+        // Ref: onnxruntime/contrib_ops/cpu/bert/gqa_attention_base.h
+        int64_t fill_val =
+            is_seqlens ? (total_seq_len_val - 1) : total_seq_len_val;
+
+        if (config.verbose) {
+          std::cout << "  Setting " << name << " = " << fill_val << std::endl;
+        }
+
+        if (elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+          int32_t *data = reinterpret_cast<int32_t *>(raw.data());
+          for (size_t j = 0; j < size; ++j)
+            data[j] = static_cast<int32_t>(fill_val);
+        } else if (elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+          int64_t *data = reinterpret_cast<int64_t *>(raw.data());
+          for (size_t j = 0; j < size; ++j)
+            data[j] = fill_val;
+        }
+      } else if (elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+        float *data = reinterpret_cast<float *>(raw.data());
+        for (size_t j = 0; j < size; ++j)
+          data[j] = dist(rng);
+      } else if (elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+        uint16_t *data = reinterpret_cast<uint16_t *>(raw.data());
+        for (size_t j = 0; j < size; ++j)
+          data[j] = float_to_fp16(dist(rng));
+      } else if (elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+        int32_t *data = reinterpret_cast<int32_t *>(raw.data());
+        for (size_t j = 0; j < size; ++j)
+          data[j] = int_dist(rng);
+      } else if (elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+        int64_t *data = reinterpret_cast<int64_t *>(raw.data());
+        for (size_t j = 0; j < size; ++j)
+          data[j] = static_cast<int64_t>(int_dist(rng));
+      } else {
+        // Fallback: treat as float32
+        float *data = reinterpret_cast<float *>(raw.data());
+        for (size_t j = 0; j < size; ++j)
+          data[j] = dist(rng);
+      }
+    }
+    input_raw_data.push_back(std::move(raw));
+  }
+
+  // Get output names and types
   std::vector<std::string> output_names;
+  std::vector<ONNXTensorElementDataType> output_types;
   std::cout << "\n--- Output Information ---" << std::endl;
   for (size_t i = 0; i < num_outputs; ++i) {
     auto name = cpu_session.GetOutputNameAllocated(i, allocator);
@@ -356,9 +641,12 @@ int main(int argc, char **argv) {
     auto type_info = cpu_session.GetOutputTypeInfo(i);
     auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
     auto shape = tensor_info.GetShape();
+    auto elem_type = tensor_info.GetElementType();
+    output_types.push_back(elem_type);
 
     std::cout << "  Output " << i << ": " << output_names[i] << " "
-              << shape_to_string(shape) << std::endl;
+              << shape_to_string(shape) << " " << elem_type_name(elem_type)
+              << std::endl;
   }
 
   // Convert names to char pointers
@@ -380,22 +668,68 @@ int main(int argc, char **argv) {
 
     // Regenerate input data for each iteration (except first)
     if (iter > 0) {
-      for (size_t i = 0; i < input_data.size(); ++i) {
-        for (size_t j = 0; j < input_data[i].size(); ++j) {
-          input_data[i][j] = dist(rng);
+      for (size_t i = 0; i < input_raw_data.size(); ++i) {
+        auto elem_type = input_types[i];
+        size_t size = input_elem_counts[i];
+        if (size == 0)
+          continue; // Skip zero-sized tensors
+
+        if (elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+          float *data = reinterpret_cast<float *>(input_raw_data[i].data());
+          for (size_t j = 0; j < size; ++j)
+            data[j] = dist(rng);
+        } else if (elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+          uint16_t *data =
+              reinterpret_cast<uint16_t *>(input_raw_data[i].data());
+          for (size_t j = 0; j < size; ++j)
+            data[j] = float_to_fp16(dist(rng));
+        } else if (elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+          int32_t *data = reinterpret_cast<int32_t *>(input_raw_data[i].data());
+          for (size_t j = 0; j < size; ++j)
+            data[j] = int_dist(rng);
         }
       }
     }
 
-    // Create input tensors
+    // Helper: create ORT input tensors from raw data (reused for CPU and GPU)
     auto memory_info =
         Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-    std::vector<Ort::Value> input_tensors;
-    for (size_t i = 0; i < num_inputs; ++i) {
-      input_tensors.push_back(Ort::Value::CreateTensor<float>(
-          memory_info, input_data[i].data(), input_data[i].size(),
-          input_shapes[i].data(), input_shapes[i].size()));
-    }
+    auto create_input_tensors = [&]() -> std::vector<Ort::Value> {
+      std::vector<Ort::Value> tensors;
+      for (size_t i = 0; i < num_inputs; ++i) {
+        auto elem_type = input_types[i];
+        size_t elem_count = input_elem_counts[i];
+
+        if (elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+          tensors.push_back(Ort::Value::CreateTensor<float>(
+              memory_info, reinterpret_cast<float *>(input_raw_data[i].data()),
+              elem_count, input_shapes[i].data(), input_shapes[i].size()));
+        } else if (elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+          tensors.push_back(Ort::Value::CreateTensor(
+              memory_info, input_raw_data[i].data(), input_raw_data[i].size(),
+              input_shapes[i].data(), input_shapes[i].size(),
+              ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16));
+        } else if (elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+          tensors.push_back(Ort::Value::CreateTensor<int32_t>(
+              memory_info,
+              reinterpret_cast<int32_t *>(input_raw_data[i].data()), elem_count,
+              input_shapes[i].data(), input_shapes[i].size()));
+        } else if (elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+          tensors.push_back(Ort::Value::CreateTensor<int64_t>(
+              memory_info,
+              reinterpret_cast<int64_t *>(input_raw_data[i].data()), elem_count,
+              input_shapes[i].data(), input_shapes[i].size()));
+        } else {
+          // Fallback: treat as float32
+          tensors.push_back(Ort::Value::CreateTensor<float>(
+              memory_info, reinterpret_cast<float *>(input_raw_data[i].data()),
+              elem_count, input_shapes[i].data(), input_shapes[i].size()));
+        }
+      }
+      return tensors;
+    };
+
+    std::vector<Ort::Value> input_tensors = create_input_tensors();
 
     // Run CPU inference
     std::cout << "\n--- CPU Inference ---" << std::endl;
@@ -411,22 +745,24 @@ int main(int argc, char **argv) {
                         .count();
     std::cout << "  Time: " << (cpu_time / 1000.0f) << " ms" << std::endl;
 
-    // Store CPU outputs
+    // Store CPU outputs (convert to float for comparison)
     std::vector<std::vector<float>> cpu_output_data;
     std::vector<std::vector<int64_t>> output_shapes;
     for (size_t i = 0; i < cpu_outputs.size(); ++i) {
-      const float *data = cpu_outputs[i].GetTensorData<float>();
-      size_t size =
-          cpu_outputs[i].GetTensorTypeAndShapeInfo().GetElementCount();
       auto shape = cpu_outputs[i].GetTensorTypeAndShapeInfo().GetShape();
+      auto out_elem_type =
+          cpu_outputs[i].GetTensorTypeAndShapeInfo().GetElementType();
 
-      cpu_output_data.push_back(std::vector<float>(data, data + size));
+      // Extract as float regardless of actual type
+      auto float_data = extract_output_as_float(cpu_outputs[i]);
+      cpu_output_data.push_back(float_data);
       output_shapes.push_back(shape);
 
-      if (config.verbose) {
-        std::cout << "  Output " << i << " " << shape_to_string(shape)
-                  << ": first=" << data[0] << ", last=" << data[size - 1]
-                  << std::endl;
+      if (config.verbose && !float_data.empty()) {
+        std::cout << "  Output " << i << " " << shape_to_string(shape) << " "
+                  << elem_type_name(out_elem_type)
+                  << ": first=" << float_data[0]
+                  << ", last=" << float_data.back() << std::endl;
       }
     }
 
@@ -490,13 +826,9 @@ int main(int argc, char **argv) {
             << std::endl;
       }
 
-      // Recreate input tensors for GPU session
-      std::vector<Ort::Value> gpu_input_tensors;
-      for (size_t i = 0; i < num_inputs; ++i) {
-        gpu_input_tensors.push_back(Ort::Value::CreateTensor<float>(
-            memory_info, input_data[i].data(), input_data[i].size(),
-            input_shapes[i].data(), input_shapes[i].size()));
-      }
+      // Recreate input tensors for GPU session (same data, separate ORT
+      // objects)
+      std::vector<Ort::Value> gpu_input_tensors = create_input_tensors();
 
       auto gpu_start = std::chrono::high_resolution_clock::now();
 
@@ -515,25 +847,33 @@ int main(int argc, char **argv) {
       // Compare outputs
       std::cout << "\n--- Output Comparison ---" << std::endl;
       for (size_t i = 0; i < gpu_outputs.size(); ++i) {
-        const float *data = gpu_outputs[i].GetTensorData<float>();
-        size_t size =
-            gpu_outputs[i].GetTensorTypeAndShapeInfo().GetElementCount();
+        auto gpu_elem_type =
+            gpu_outputs[i].GetTensorTypeAndShapeInfo().GetElementType();
 
-        std::vector<float> gpu_output(data, data + size);
+        // Extract GPU output as float (handles fp16 conversion)
+        auto gpu_output = extract_output_as_float(gpu_outputs[i]);
 
         std::cout << "\nOutput " << i << " (" << output_names[i] << ") "
-                  << shape_to_string(output_shapes[i]) << ":" << std::endl;
+                  << shape_to_string(output_shapes[i]) << " "
+                  << elem_type_name(gpu_elem_type) << ":" << std::endl;
 
-        if (config.verbose) {
+        if (config.verbose && !gpu_output.empty() &&
+            !cpu_output_data[i].empty()) {
           std::cout << "  CPU: first=" << cpu_output_data[i][0]
                     << ", last=" << cpu_output_data[i].back() << std::endl;
           std::cout << "  GPU: first=" << gpu_output[0]
                     << ", last=" << gpu_output.back() << std::endl;
         }
 
+        if (cpu_output_data[i].empty() && gpu_output.empty()) {
+          std::cout << "  (zero-sized output, skipping comparison)"
+                    << std::endl;
+          continue;
+        }
+
         auto stats = compare_outputs(cpu_output_data[i], gpu_output,
                                      config.tolerance, config.verbose);
-        print_stats(stats, config.tolerance);
+        print_stats(stats, config.tolerance, cpu_output_data[i], gpu_output);
 
         if (stats.mismatch_count > 0 || stats.nan_count > 0) {
           all_passed = false;

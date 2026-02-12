@@ -429,22 +429,30 @@ void RocmCustomOp::AllocateIntermediateBuffers() {
     auto &data = *node_data_[i];
 
     // Calculate output size based on operation parameters
-    size_t output_size = GetOutputSize(i, 0);
+    // GQA has 3 outputs; all other ops have 1 output
+    int num_outputs = 1;
+    if (node.params().op_type() == "gqa") {
+      num_outputs = node.params().gqa_params().num_outputs();
+    }
 
-    if (output_size > 0) {
-      float *output_buf = nullptr;
-      hipError_t err = hipMalloc(&output_buf, output_size);
-      if (err != hipSuccess) {
-        LOG(ERROR)
-            << "[ROCm CustomOp] Failed to allocate output buffer for node " << i
-            << ": " << hipGetErrorString(err);
-        throw std::runtime_error(
-            "Failed to allocate GPU memory for node output");
+    for (int out_idx = 0; out_idx < num_outputs; ++out_idx) {
+      size_t output_size = GetOutputSize(i, out_idx);
+
+      if (output_size > 0) {
+        float *output_buf = nullptr;
+        hipError_t err = hipMalloc(&output_buf, output_size);
+        if (err != hipSuccess) {
+          LOG(ERROR)
+              << "[ROCm CustomOp] Failed to allocate output buffer for node "
+              << i << " output " << out_idx << ": " << hipGetErrorString(err);
+          throw std::runtime_error(
+              "Failed to allocate GPU memory for node output");
+        }
+        data.output_buffers.push_back(output_buf);
+        data.output_sizes.push_back(output_size);
+        MY_LOG(2) << "[ROCm CustomOp] Node " << i << ": Allocated output["
+                  << out_idx << "] buffer " << output_size << " bytes";
       }
-      data.output_buffers.push_back(output_buf);
-      data.output_sizes.push_back(output_size);
-      MY_LOG(2) << "[ROCm CustomOp] Node " << i << ": Allocated output buffer "
-                << output_size << " bytes";
     }
 
     // Upload weights to GPU if not already done
@@ -542,6 +550,22 @@ size_t RocmCustomOp::GetOutputSize(int32_t node_id,
     const auto &tile_params = params.tile_params();
     // Tile expands size
     return tile_params.out_size() * sizeof(float);
+  } else if (params.op_type() == "gqa") {
+    const auto &gqa = params.gqa_params();
+    // GQA has 3 outputs: output, present_key, present_value (all fp16)
+    auto shape_bytes = [](const auto &shape) -> size_t {
+      size_t elems = 1;
+      for (int i = 0; i < shape.size(); ++i)
+        elems *= shape.Get(i);
+      return elems * 2; // fp16 = 2 bytes
+    };
+    if (output_index == 0)
+      return shape_bytes(gqa.output_shape());
+    if (output_index == 1)
+      return shape_bytes(gqa.present_key_shape());
+    if (output_index == 2)
+      return shape_bytes(gqa.present_value_shape());
+    return 0;
   }
 
   return 0;
@@ -645,9 +669,44 @@ void RocmCustomOp::UploadExternalInputs(const OrtApi *api,
 
     size_t elem_count = 0;
     api->GetTensorShapeElementCount(type_info, &elem_count);
+
+    // Detect element type to compute correct byte size
+    ONNXTensorElementDataType elem_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+    api->GetTensorElementType(type_info, &elem_type);
     api->ReleaseTensorTypeAndShapeInfo(type_info);
 
-    size_t bytes = elem_count * sizeof(float);
+    size_t elem_size = sizeof(float); // default
+    switch (elem_type) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+      elem_size = 2;
+      break;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+      elem_size = sizeof(int32_t);
+      break;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+      elem_size = sizeof(int64_t);
+      break;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+    default:
+      elem_size = sizeof(float);
+      break;
+    }
+    size_t bytes = elem_count * elem_size;
+
+    // Handle zero-sized tensors (e.g., past_key with shape [1, 8, 0, 128])
+    // Allocate a minimal 1-byte placeholder so the buffer exists in the map
+    if (bytes == 0) {
+      auto it = external_input_buffers_.find(name);
+      if (it == external_input_buffers_.end()) {
+        float *d_placeholder = nullptr;
+        hipMalloc(&d_placeholder, 1); // minimal allocation
+        external_input_buffers_[name] = d_placeholder;
+        external_input_sizes_[name] = 0;
+      }
+      MY_LOG(2) << "[ROCm CustomOp] Zero-sized external input: " << name
+                << " (placeholder allocated)";
+      continue;
+    }
 
     // Get host pointer
     float *h_data = nullptr;
@@ -692,7 +751,8 @@ void RocmCustomOp::UploadExternalInputs(const OrtApi *api,
 void RocmCustomOp::ExecuteSubgraph(const OrtApi *api,
                                    OrtKernelContext *context) const {
   MY_LOG(2) << "[ROCm CustomOp] Phase 2: Executing " << subgraph_.nodes_size()
-            << " nodes";
+            << " nodes, external_input_buffers_="
+            << external_input_buffers_.size();
 
   for (const auto &node : subgraph_.nodes()) {
     ExecuteNode(node);
@@ -710,12 +770,22 @@ void RocmCustomOp::ExecuteNode(const rocm::RocmNodeProto &node) const {
 
   // Gather input pointers and log input references
   std::vector<float *> inputs;
+  MY_LOG(2) << "[ROCm CustomOp] Node " << node_id << " has "
+            << node.inputs_size() << " input refs";
   for (int i = 0; i < node.inputs_size(); ++i) {
     const auto &input_ref = node.inputs(i);
+    MY_LOG(2) << "[ROCm CustomOp] Node " << node_id << " input[" << i
+              << "]: has_external=" << input_ref.has_external_name()
+              << " has_internal=" << input_ref.has_internal()
+              << (input_ref.has_external_name()
+                      ? " name=" + input_ref.external_name()
+                      : "");
     float *ptr = ResolveTensorRef(input_ref);
     if (ptr == nullptr) {
-      LOG(ERROR) << "[ROCm CustomOp] Failed to resolve input for node "
-                 << node_id;
+      LOG(ERROR) << "[ROCm CustomOp] Failed to resolve input " << i
+                 << " for node " << node_id
+                 << " (has_ext=" << input_ref.has_external_name()
+                 << " has_int=" << input_ref.has_internal() << ")";
       throw std::runtime_error("Failed to resolve tensor reference");
     }
     inputs.push_back(ptr);
@@ -785,6 +855,8 @@ void RocmCustomOp::ExecuteNode(const rocm::RocmNodeProto &node) const {
     ExecuteTransposeNode(node_id, params.transpose_params(), inputs, output);
   } else if (params.op_type() == "tile") {
     ExecuteTileNode(node_id, params.tile_params(), inputs, output);
+  } else if (params.op_type() == "gqa") {
+    ExecuteGQANode(node_id, params.gqa_params(), inputs);
   } else {
     LOG(ERROR) << "[ROCm CustomOp] Unknown op_type: " << params.op_type();
     throw std::runtime_error("Unknown operation type: " + params.op_type());
@@ -1505,6 +1577,207 @@ void RocmCustomOp::ExecuteTileNode(int32_t node_id,
             << ": Tile executed successfully";
 }
 
+void RocmCustomOp::ExecuteGQANode(int32_t node_id,
+                                  const rocm::GqaParamProto &params,
+                                  const std::vector<float *> &inputs) const {
+  MY_LOG(2) << "[ROCm CustomOp] ExecuteGQANode[" << node_id
+            << "]: num_heads=" << params.num_heads()
+            << ", kv_num_heads=" << params.kv_num_heads()
+            << ", head_size=" << params.head_size()
+            << ", scale=" << params.scale();
+
+  auto stream = hip_context_->stream();
+  auto &data = *node_data_[node_id];
+
+  // GQA params
+  int32_t num_heads = params.num_heads();
+  int32_t kv_num_heads = params.kv_num_heads();
+  int32_t head_size = params.head_size();
+  float scale = params.scale();
+
+  // Input pointers (all on GPU, uploaded as raw bytes)
+  // Inputs: 0=query, 1=key, 2=value, 3=past_key, 4=past_value, 5=seqlens_k,
+  // 6=total_seq_len
+  const void *d_query = inputs[0]; // [B, S_q, num_heads * head_size] fp16
+  const void *d_key = inputs[1];   // [B, S_q, kv_num_heads * head_size] fp16
+  const void *d_value = inputs[2]; // [B, S_q, kv_num_heads * head_size] fp16
+  const void *d_past_key =
+      inputs[3]; // [B, kv_num_heads, past_S, head_size] fp16 (BNSH)
+  const void *d_past_value =
+      inputs[4]; // [B, kv_num_heads, past_S, head_size] fp16 (BNSH)
+  // inputs[5] = seqlens_k (int32), inputs[6] = total_seq_len (int32)
+  // These are used by ORT but our kernel derives lengths from shapes
+
+  // Output buffers (3 outputs for GQA)
+  void *d_output =
+      data.output_buffers[0]; // [B, S_q, num_heads * head_size] fp16
+  void *d_present_key =
+      data.output_buffers[1]; // [B, kv_num_heads, total_S, head_size] fp16
+  void *d_present_value =
+      data.output_buffers[2]; // [B, kv_num_heads, total_S, head_size] fp16
+
+  // Derive dimensions from proto shapes
+  // query_shape: [B, S_q, hidden_size]
+  int32_t batch = (params.query_shape_size() > 0) ? params.query_shape(0) : 1;
+  int32_t seqlen_q =
+      (params.query_shape_size() > 1) ? params.query_shape(1) : 1;
+  // key_shape: [B, S_new, kv_hidden_size]
+  int32_t seqlen_new = (params.key_shape_size() > 1) ? params.key_shape(1) : 1;
+  // past_key_shape: [B, kv_num_heads, past_S, head_size]
+  int32_t past_seqlen =
+      (params.past_key_shape_size() > 2) ? params.past_key_shape(2) : 0;
+  // total sequence length for attention
+  int32_t total_seqlen = past_seqlen + seqlen_new;
+
+  MY_LOG(2) << "[ROCm CustomOp] GQA dims: batch=" << batch
+            << " seqlen_q=" << seqlen_q << " seqlen_new=" << seqlen_new
+            << " past_seqlen=" << past_seqlen
+            << " total_seqlen=" << total_seqlen;
+
+  // TODO: Support batch_size > 1
+  // TODO: Support packed QKV (query contains Q+K+V when key/value are absent)
+  // TODO: Support cos_cache/sin_cache for in-kernel RoPE (do_rotary=1)
+  // TODO: Support position_ids input
+  // TODO: Support attention_bias input
+  // TODO: Support head_sink (smooth softmax) input
+  // TODO: Support local_window_size for sliding window attention
+  // TODO: Support softcap for attention weight capping
+  // TODO: Support output_qk (4th output)
+
+  // ==========================================
+  // Step 1: Build present_key/value = concat(past, new) along seq dim
+  // Layout: [B, kv_num_heads, total_seqlen, head_size] (BNSH, fp16)
+  // New key/value is [B, S_new, kv_hidden] (BSH) -> scatter into BNSH
+  // ==========================================
+
+  size_t fp16_size = 2; // sizeof(half)
+
+  // Helper: build present KV = concat(past BNSH, new BSH->BNSH) for one tensor
+  auto build_present_kv = [&](const void *d_past, const void *d_new,
+                              void *d_present) {
+    // Copy past (BNSH -> BNSH, different seq stride)
+    if (past_seqlen > 0) {
+      for (int b = 0; b < batch; ++b) {
+        for (int h = 0; h < kv_num_heads; ++h) {
+          size_t past_off =
+              ((size_t)b * kv_num_heads * past_seqlen * head_size +
+               (size_t)h * past_seqlen * head_size) *
+              fp16_size;
+          size_t pres_off =
+              ((size_t)b * kv_num_heads * total_seqlen * head_size +
+               (size_t)h * total_seqlen * head_size) *
+              fp16_size;
+          hipMemcpyAsync((char *)d_present + pres_off,
+                         (const char *)d_past + past_off,
+                         (size_t)past_seqlen * head_size * fp16_size,
+                         hipMemcpyDeviceToDevice, stream);
+        }
+      }
+    }
+    // Scatter new (BSH -> BNSH at offset past_seqlen)
+    for (int b = 0; b < batch; ++b) {
+      for (int h = 0; h < kv_num_heads; ++h) {
+        for (int s = 0; s < seqlen_new; ++s) {
+          size_t src_off =
+              ((size_t)b * seqlen_new * kv_num_heads * head_size +
+               (size_t)s * kv_num_heads * head_size + (size_t)h * head_size) *
+              fp16_size;
+          size_t dst_off =
+              ((size_t)b * kv_num_heads * total_seqlen * head_size +
+               (size_t)h * total_seqlen * head_size +
+               (size_t)(past_seqlen + s) * head_size) *
+              fp16_size;
+          hipMemcpyAsync(
+              (char *)d_present + dst_off, (const char *)d_new + src_off,
+              (size_t)head_size * fp16_size, hipMemcpyDeviceToDevice, stream);
+        }
+      }
+    }
+  };
+
+  build_present_kv(d_past_key, d_key, d_present_key);
+  build_present_kv(d_past_value, d_value, d_present_value);
+
+  // ==========================================
+  // Step 2: Transpose Q from BSH to BNSH, run FMHA, transpose O back
+  // ==========================================
+
+  // Helper: transpose fp16 tensor between BSH [B, S, N*D] and BNSH [B, N, S, D]
+  auto transpose_bsh_bnsh = [&](const void *src, void *dst, int nheads,
+                                int seqlen, bool bsh_to_bnsh) {
+    for (int b = 0; b < batch; ++b) {
+      for (int n = 0; n < nheads; ++n) {
+        for (int s = 0; s < seqlen; ++s) {
+          size_t bsh_off =
+              ((size_t)b * seqlen * nheads * head_size +
+               (size_t)s * nheads * head_size + (size_t)n * head_size) *
+              fp16_size;
+          size_t bnsh_off =
+              ((size_t)b * nheads * seqlen * head_size +
+               (size_t)n * seqlen * head_size + (size_t)s * head_size) *
+              fp16_size;
+          auto src_off = bsh_to_bnsh ? bsh_off : bnsh_off;
+          auto dst_off = bsh_to_bnsh ? bnsh_off : bsh_off;
+          hipMemcpyAsync((char *)dst + dst_off, (const char *)src + src_off,
+                         (size_t)head_size * fp16_size, hipMemcpyDeviceToDevice,
+                         stream);
+        }
+      }
+    }
+  };
+
+  size_t q_bnsh_bytes =
+      (size_t)batch * num_heads * seqlen_q * head_size * fp16_size;
+  void *d_q_bnsh = nullptr;
+  hipError_t err = hipMalloc(&d_q_bnsh, q_bnsh_bytes);
+  if (err != hipSuccess) {
+    LOG(ERROR) << "[ROCm CustomOp] Failed to allocate Q BNSH buffer";
+    throw std::runtime_error("Failed to allocate Q BNSH buffer for GQA");
+  }
+
+  transpose_bsh_bnsh(d_query, d_q_bnsh, num_heads, seqlen_q,
+                     /*bsh_to_bnsh=*/true);
+
+  // Allocate FMHA output in BNSH layout
+  void *d_o_bnsh = nullptr;
+  err = hipMalloc(&d_o_bnsh, q_bnsh_bytes);
+  if (err != hipSuccess) {
+    hipFree(d_q_bnsh);
+    LOG(ERROR) << "[ROCm CustomOp] Failed to allocate O BNSH buffer";
+    throw std::runtime_error("Failed to allocate O BNSH buffer for GQA");
+  }
+
+  // Run FMHA forward kernel with causal masking
+  err = launch_fmha_fwd_fp16_causal(
+      stream,
+      d_q_bnsh,        // Q: [B, nhead_q, seqlen_q, hdim]
+      d_present_key,   // K: [B, nhead_k, total_seqlen, hdim]
+      d_present_value, // V: [B, nhead_k, total_seqlen, hdim]
+      d_o_bnsh,        // O: [B, nhead_q, seqlen_q, hdim]
+      batch, num_heads, kv_num_heads, seqlen_q, total_seqlen, head_size, scale);
+
+  if (err != hipSuccess) {
+    hipFree(d_q_bnsh);
+    hipFree(d_o_bnsh);
+    LOG(ERROR) << "[ROCm CustomOp] FMHA kernel failed: "
+               << hipGetErrorString(err);
+    throw std::runtime_error("FMHA kernel failed");
+  }
+
+  // Transpose output from BNSH back to BSH
+  transpose_bsh_bnsh(d_o_bnsh, d_output, num_heads, seqlen_q,
+                     /*bsh_to_bnsh=*/false);
+
+  hipFree(d_q_bnsh);
+  hipFree(d_o_bnsh);
+
+  MY_LOG(2) << "[ROCm CustomOp] Node " << node_id
+            << ": GQA executed successfully"
+            << " (output=" << data.output_sizes[0]
+            << ", present_key=" << data.output_sizes[1]
+            << ", present_value=" << data.output_sizes[2] << " bytes)";
+}
+
 void RocmCustomOp::DownloadExternalOutputs(const OrtApi *api,
                                            OrtKernelContext *context) const {
   // Use per-session stream
@@ -1582,6 +1855,18 @@ void RocmCustomOp::DownloadExternalOutputs(const OrtApi *api,
       for (int j = 0; j < tile_params.shape_out_size(); ++j) {
         output_shape.push_back(tile_params.shape_out(j));
       }
+    } else if (params.op_type() == "gqa") {
+      const auto &gqa = params.gqa_params();
+      auto append_shape = [&output_shape](const auto &shape) {
+        for (int j = 0; j < shape.size(); ++j)
+          output_shape.push_back(shape.Get(j));
+      };
+      if (output_idx == 0)
+        append_shape(gqa.output_shape());
+      else if (output_idx == 1)
+        append_shape(gqa.present_key_shape());
+      else if (output_idx == 2)
+        append_shape(gqa.present_value_shape());
     }
 
     // Get ORT output tensor
