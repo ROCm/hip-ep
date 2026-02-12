@@ -23,7 +23,8 @@ using namespace morphizen_cxx;
  *   4: past_value [B, kv_num_heads, past_S, head_size] fp16, optional (BNSH)
  *   5: seqlens_k  [B]                                  int32, required
  *   6: total_sequence_length  scalar                    int32, required
- *   7-11: cos_cache, sin_cache, position_ids, attention_bias, head_sink (unused)
+ *   7-11: cos_cache, sin_cache, position_ids, attention_bias, head_sink
+ * (unused)
  *
  * GQA outputs (3):
  *   0: output         [B, S_q, num_heads * head_size]       fp16
@@ -65,13 +66,15 @@ struct Level2RocmGqa {
           if (node_has_attr(*gqa_node, "num_heads")) {
             num_heads = node_get_attr_int(*gqa_node, "num_heads");
           } else {
-            ROCM_LOG(1) << LOG_PREFIX << " Missing required attribute: num_heads";
+            ROCM_LOG(1) << LOG_PREFIX
+                        << " Missing required attribute: num_heads";
             return false;
           }
           if (node_has_attr(*gqa_node, "kv_num_heads")) {
             kv_num_heads = node_get_attr_int(*gqa_node, "kv_num_heads");
           } else {
-            ROCM_LOG(1) << LOG_PREFIX << " Missing required attribute: kv_num_heads";
+            ROCM_LOG(1) << LOG_PREFIX
+                        << " Missing required attribute: kv_num_heads";
             return false;
           }
 
@@ -101,8 +104,7 @@ struct Level2RocmGqa {
 
           ROCM_LOG(1) << LOG_PREFIX << " num_heads=" << num_heads
                       << " kv_num_heads=" << kv_num_heads
-                      << " head_size=" << head_size
-                      << " scale=" << scale;
+                      << " head_size=" << head_size << " scale=" << scale;
 
           // Check for unsupported features
           // TODO: Forward cos_cache/sin_cache inputs when do_rotary=1
@@ -113,7 +115,8 @@ struct Level2RocmGqa {
 
           if (node_has_attr(*gqa_node, "do_rotary") &&
               node_get_attr_int(*gqa_node, "do_rotary") != 0) {
-            ROCM_LOG(1) << LOG_PREFIX << " do_rotary=1 not yet supported, skipping";
+            ROCM_LOG(1) << LOG_PREFIX
+                        << " do_rotary=1 not yet supported, skipping";
             return false;
           }
 
@@ -126,8 +129,9 @@ struct Level2RocmGqa {
           gqa_params->set_kv_num_heads(static_cast<int32_t>(kv_num_heads));
           gqa_params->set_head_size(static_cast<int32_t>(head_size));
           gqa_params->set_scale(scale);
-          gqa_params->set_num_inputs(7);   // query, key, value, past_key, past_value, seqlens_k, total_seq_len
-          gqa_params->set_num_outputs(3);  // output, present_key, present_value
+          gqa_params->set_num_inputs(7); // query, key, value, past_key,
+                                         // past_value, seqlens_k, total_seq_len
+          gqa_params->set_num_outputs(3); // output, present_key, present_value
 
           // Store query shape
           if (query_shape) {
@@ -159,9 +163,9 @@ struct Level2RocmGqa {
           }
 
           // Compute present_key/value shapes
-          // The present_key shape depends on runtime total_seq_len, which is dynamic.
-          // We use the output shape from the graph which has this information.
-          // present_key: output 1 of the GQA node
+          // The present_key shape depends on runtime total_seq_len, which is
+          // dynamic. We use the output shape from the graph which has this
+          // information. present_key: output 1 of the GQA node
           auto present_key_out_shape = node_get_output_shape(*gqa_node, 1);
           auto present_value_out_shape = node_get_output_shape(*gqa_node, 2);
 
@@ -179,23 +183,25 @@ struct Level2RocmGqa {
           std::string past_key_name = node_arg_get_name(*past_key.node_arg);
           std::string past_value_name = node_arg_get_name(*past_value.node_arg);
           std::string seqlens_k_name = node_arg_get_name(*seqlens_k.node_arg);
-          std::string total_seq_len_name = node_arg_get_name(*total_seq_len.node_arg);
+          std::string total_seq_len_name =
+              node_arg_get_name(*total_seq_len.node_arg);
           std::string output_name = node_arg_get_name(*output.node_arg);
 
-          // GQA node has 3 outputs - get names for present_key and present_value
-          // The output binder refers to output 0, but we need outputs 1 and 2 as well
+          // GQA node has 3 outputs - get names for present_key and
+          // present_value The output binder refers to output 0, but we need
+          // outputs 1 and 2 as well
           auto gqa_output_node_args = node_get_output_node_args(*gqa_node);
 
           std::vector<std::string> input_names{
-              query_name, key_name, value_name,
-              past_key_name, past_value_name,
-              seqlens_k_name, total_seq_len_name};
+              query_name,      key_name,       value_name,        past_key_name,
+              past_value_name, seqlens_k_name, total_seq_len_name};
 
           // Output names: output(0), present_key(1), present_value(2)
           std::vector<std::string> output_names;
           if (gqa_output_node_args.size() >= 3) {
             for (size_t i = 0; i < 3; ++i) {
-              output_names.push_back(node_arg_get_name(*gqa_output_node_args[i]));
+              output_names.push_back(
+                  node_arg_get_name(*gqa_output_node_args[i]));
             }
           } else {
             output_names.push_back(output_name);
@@ -212,8 +218,9 @@ struct Level2RocmGqa {
                              constant_initializers, "ROCm_EP");
 
           if (meta_def) {
-            return rocm_pass::finalize_level2_fuse(
-                self, *graph, *meta_def, rocm_param, output_names[0], LOG_PREFIX);
+            return rocm_pass::finalize_level2_fuse(self, *graph, *meta_def,
+                                                   rocm_param, output_names[0],
+                                                   LOG_PREFIX);
           }
 
           ROCM_LOG(1) << LOG_PREFIX << " Failed to fuse: " << error.comments;
