@@ -53,12 +53,13 @@ git config --global core.longpaths true
 ###  Clone and Fetch Sources
 
 ```cmd
+:: Create and activate conda environment (if not already done)
+conda create -n llvm python=3.12 pip cmake ninja pkg-config -y
+conda activate llvm
+
 git clone https://github.com/ROCm/TheRock.git
 cd TheRock
 
-python -m venv .venv
-.venv\Scripts\Activate.bat
-pip install --upgrade pip
 pip install -r requirements.txt
 
 python ./build_tools/fetch_sources.py
