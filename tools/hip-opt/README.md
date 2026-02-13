@@ -108,6 +108,7 @@ set THEROCK_DIST=C:\Users\chiz\work\gpu\TheRock\build\dist\rocm
 ### Build Troubleshooting (TheRock)
 
 - **`Could NOT find PkgConfig`**: Install `pkg-config-lite` via `winget install bloodrock.pkg-config-lite`, or install via conda: `conda install -c conda-forge pkg-config`
+- **`Failed to find ROCm root directory`** or **`does not contain the HIP runtime CMake package`**: A pre-existing ROCm/HIP SDK install (e.g. from conda `rocm-sdk-core`) conflicts with TheRock's build. Uninstall it: `pip uninstall rocm rocm-sdk-core rocm-sdk-devel rocm-sdk-libraries-gfx1151`. After uninstalling, delete stale CMake caches in the failed sub-projects (e.g. `build/core/hip-tests/build/CMakeCache.txt`, `build/ml-libs/hipDNN/build/CMakeCache.txt`) and re-run configure.
 - **`PAL_CLIENT_INTERFACE_MAJOR_VERSION not supported`**: This is a warning, not an error. It can be safely ignored.
 - **`amd_comgr version not compatible`**: The version mismatch warning (requested 2.9, found 3.0.0) is expected and handled by TheRock's dependency provider.
 - **Long path errors**: Ensure long paths are enabled in git and Windows registry.
