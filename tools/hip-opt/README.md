@@ -136,7 +136,6 @@ set THEROCK_DIST=C:\Users\chiz\work\gpu\TheRock\build\dist\rocm
 - **`No engine configurations available for the graph`** (hipDNN matmul runtime error): hipDNN requires a plugin that supports matmul. Rebuild TheRock with `-DTHEROCK_ENABLE_HIPBLASLT_PLUGIN=ON`. The plugin DLL will be installed to `dist/rocm/bin/hipdnn_plugins/engines/`. hipDNN auto-loads plugins from this directory relative to `hipdnn_backend.dll` at `hipdnnCreate()` time.
 - **`Could NOT find PkgConfig`**: Install `pkg-config-lite` via `winget install bloodrock.pkg-config-lite`, or via conda: `conda install -c conda-forge pkg-config`
 - **`Failed to find ROCm root directory`** or **`does not contain the HIP runtime CMake package`**: A pre-existing ROCm/HIP SDK install (e.g. from conda `rocm-sdk-core`) conflicts with TheRock's build. Uninstall it: `pip uninstall rocm rocm-sdk-core rocm-sdk-devel rocm-sdk-libraries-gfx1151`. After uninstalling, delete stale CMake caches in the failed sub-projects (e.g. `build/core/hip-tests/build/CMakeCache.txt`, `build/ml-libs/hipDNN/build/CMakeCache.txt`) and re-run configure.
-- **`THEROCK_ENABLE_HIPBLASLT` not used**: The correct flag for hipBLAS-LT is `-DTHEROCK_ENABLE_BLAS=ON` (hipBLASLt is part of the BLAS component group). There is no `THEROCK_ENABLE_HIPBLASLT` flag.
 - **`CMAKE_Fortran_COMPILER gfortran is not a full path and was not found`**: hipBLASLt requires a Fortran compiler. Install via conda: `conda install -n llvm -c conda-forge gfortran`. Then delete the stale cache and rebuild: `del build\math-libs\BLAS\hipBLASLt\build\CMakeCache.txt`.
 - **`PAL_CLIENT_INTERFACE_MAJOR_VERSION not supported`**: This is a warning, not an error. Can be safely ignored.
 - **`amd_comgr version not compatible`**: The version mismatch warning (requested 2.9, found 3.0.0) is expected and handled by TheRock's dependency provider.
@@ -229,7 +228,7 @@ Frees device memory previously allocated with `hip.alloc`.
 ### `hip.gemm(%handle, %A, %B, %C, %M, %K, %N) : (...)`
 Matrix multiply C = A @ B. A is MxK, B is KxN, C is MxN. All pointers must be device memory. Lowered to a call to `hip_gemm_f32()` which uses the hipDNN graph API.
 
-## GEMM End-to-End Pipeline
+## GEMM End-to-End Pipeline (hipBLASLt)
 
 The full pipeline from MLIR to a runnable executable:
 
@@ -278,7 +277,7 @@ set PATH=%THEROCK_DIST%\bin;%PATH%
 gemm_test_hipblaslt.exe
 ```
 
-## GEMM End-to-End Pipeline (hipDNN variant)
+## GEMM End-to-End Pipeline (hipDNN)
 
 The same MLIR code and main driver work with a hipDNN backend by swapping the runtime wrapper at link time. The MLIR lowering emits `llvm.call @hip_gemm_f32(...)` which is backend-agnostic.
 
