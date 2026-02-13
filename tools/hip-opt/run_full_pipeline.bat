@@ -1,10 +1,27 @@
 @echo off
-call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
-call C:\Users\chiz\anaconda3\condabin\conda.bat activate llvm
+REM --- Activate VS tools only if not already active ---
+if not defined VSINSTALLDIR (
+  call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+)
+
+REM --- Activate conda env only if not already active ---
+if not defined CONDA_PREFIX (
+  call C:\Users\chiz\anaconda3\condabin\conda.bat activate llvm
+)
 
 set LLVM_BIN=C:\Users\chiz\work\gpu\llvm-project\build\Debug\bin
 set THEROCK_DIST=C:\Users\chiz\work\gpu\TheRock\build\dist\rocm
-set PATH=%LLVM_BIN%;%THEROCK_DIST%\bin;C:\Users\chiz\anaconda3\envs\llvm\Library\bin;%PATH%
+set HIP_OPT_BIN=C:\Users\chiz\work\gpu\onnx-hipdnn-ep\tools\hip-opt\build\Debug
+
+REM --- Prepend to PATH only if not already present (avoids exceeding 8191-char limit) ---
+echo "%PATH%" | findstr /I /C:"%HIP_OPT_BIN%" >nul 2>&1
+if errorlevel 1 set "PATH=%HIP_OPT_BIN%;%PATH%"
+echo "%PATH%" | findstr /I /C:"%LLVM_BIN%" >nul 2>&1
+if errorlevel 1 set "PATH=%LLVM_BIN%;%PATH%"
+echo "%PATH%" | findstr /I /C:"%THEROCK_DIST%\bin" >nul 2>&1
+if errorlevel 1 set "PATH=%THEROCK_DIST%\bin;%PATH%"
+echo "%PATH%" | findstr /I /C:"anaconda3\envs\llvm\Library\bin" >nul 2>&1
+if errorlevel 1 set "PATH=C:\Users\chiz\anaconda3\envs\llvm\Library\bin;%PATH%"
 
 cd /d C:\Users\chiz\work\gpu\onnx-hipdnn-ep\tools\hip-opt\build
 
