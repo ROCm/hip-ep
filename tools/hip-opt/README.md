@@ -30,7 +30,7 @@ These operations are lowered to LLVM IR function calls that interface with the H
 
 ## Prerequisites: Building TheRock (ROCm) on Windows
 
-The GEMM pipeline requires the HIP runtime (`amdhip64.dll`) and hipBLAS-LT (`libhipblaslt.dll`), which are built from source using [TheRock](https://github.com/ROCm/TheRock).
+The GEMM pipeline requires the HIP runtime (`amdhip64.dll`), hipBLAS-LT (`libhipblaslt.dll`), and hipDNN (`hipdnn_backend.dll` + hipBLASLt engine plugin), which are built from source using [TheRock](https://github.com/ROCm/TheRock).
 
 
 ### Install Build Tools
