@@ -9,19 +9,10 @@ if not defined CONDA_PREFIX (
   call C:\Users\chiz\anaconda3\condabin\conda.bat activate llvm
 )
 
+REM --- Tool paths (no PATH modification) ---
 set LLVM_BIN=C:\Users\chiz\work\gpu\llvm-project\build\Debug\bin
 set THEROCK_DIST=C:\Users\chiz\work\gpu\TheRock\build\dist\rocm
 set HIP_OPT_BIN=C:\Users\chiz\work\gpu\onnx-hipdnn-ep\tools\hip-opt\build\Debug
-
-REM --- Prepend to PATH only if not already present (avoids exceeding 8191-char limit) ---
-echo "%PATH%" | findstr /I /C:"%HIP_OPT_BIN%" >nul 2>&1
-if errorlevel 1 set "PATH=%HIP_OPT_BIN%;%PATH%"
-echo "%PATH%" | findstr /I /C:"%LLVM_BIN%" >nul 2>&1
-if errorlevel 1 set "PATH=%LLVM_BIN%;%PATH%"
-echo "%PATH%" | findstr /I /C:"%THEROCK_DIST%\bin" >nul 2>&1
-if errorlevel 1 set "PATH=%THEROCK_DIST%\bin;%PATH%"
-echo "%PATH%" | findstr /I /C:"anaconda3\envs\llvm\Library\bin" >nul 2>&1
-if errorlevel 1 set "PATH=C:\Users\chiz\anaconda3\envs\llvm\Library\bin;%PATH%"
 
 cd /d C:\Users\chiz\work\gpu\onnx-hipdnn-ep\tools\hip-opt\build
 
@@ -32,19 +23,19 @@ echo ============================================================
 
 echo.
 echo [1/8] MLIR -^> LLVM Dialect (hip-opt)
-hip-opt.exe ..\test_gemm.mlir --convert-hip-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts -o gemm_lowered.mlir
+"%HIP_OPT_BIN%\hip-opt.exe" ..\test_gemm.mlir --convert-hip-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts -o gemm_lowered.mlir
 if errorlevel 1 (echo FAILED at step 1 && exit /b 1)
 echo      OK: gemm_lowered.mlir
 
 echo.
 echo [2/8] LLVM Dialect -^> LLVM IR (mlir-translate)
-mlir-translate.exe gemm_lowered.mlir --mlir-to-llvmir -o gemm.ll
+"%LLVM_BIN%\mlir-translate.exe" gemm_lowered.mlir --mlir-to-llvmir -o gemm.ll
 if errorlevel 1 (echo FAILED at step 2 && exit /b 1)
 echo      OK: gemm.ll
 
 echo.
 echo [3/8] LLVM IR -^> Object File (llc)
-llc.exe gemm.ll -filetype=obj -o gemm.obj
+"%LLVM_BIN%\llc.exe" gemm.ll -filetype=obj -o gemm.obj
 if errorlevel 1 (echo FAILED at step 3 && exit /b 1)
 echo      OK: gemm.obj
 
@@ -75,18 +66,18 @@ echo      OK: main.obj
 
 echo.
 echo [7/8] Link executable
-link.exe gemm.obj runtime.obj main.obj /LIBPATH:"%THEROCK_DIST%\lib" amdhip64.lib hipblaslt.lib /out:gemm_test.exe
+link.exe gemm.obj runtime.obj main.obj /LIBPATH:"%THEROCK_DIST%\lib" amdhip64.lib hipblaslt.lib /out:gemm_test_hipblaslt.exe
 if errorlevel 1 (echo FAILED at step 7 && exit /b 1)
-echo      OK: gemm_test.exe
+echo      OK: gemm_test_hipblaslt.exe
 
 echo.
 echo [8/8] Quick sanity check
-gemm_test.exe --help >nul 2>&1
-echo      OK: gemm_test.exe is a valid executable
+gemm_test_hipblaslt.exe --help >nul 2>&1
+echo      OK: gemm_test_hipblaslt.exe is a valid executable
 
 echo.
 echo ============================================================
-echo  Build completed! Run with: build\gemm_test.exe
+echo  Build completed! Run with: build\gemm_test_hipblaslt.exe
 echo ============================================================
 echo.
 echo  NOTE: Ensure these DLLs are in PATH at runtime:
