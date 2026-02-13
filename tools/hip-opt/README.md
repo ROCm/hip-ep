@@ -22,9 +22,11 @@ These operations are lowered to LLVM IR function calls that interface with the H
 - `hip-opt.cpp` - Main compiler driver
 - `test.mlir` - Example MLIR file using HIP dialect (memory ops)
 - `test_gemm.mlir` - GEMM example using `hip.gemm`
-- `hip_gemm_runtime.cpp` - Runtime wrapper implementing `hip_gemm_f32` via hipDNN graph API
+- `hip_gemm_runtime.cpp` - Runtime wrapper implementing `hip_gemm_f32` via hipBLAS-LT
+- `hip_gemm_runtime_hipdnn.cpp` - Runtime wrapper implementing `hip_gemm_f32` via hipDNN graph API
 - `main_gemm.cpp` - Main driver for the GEMM end-to-end test
-- `run_full_pipeline.bat` - Script to compile MLIR through the full pipeline
+- `run_full_pipeline_hipblaslt.bat` - Script to compile MLIR through the full pipeline (hipBLAS-LT backend)
+- `run_full_pipeline_hipdnn.bat` - Script to compile MLIR through the full pipeline (hipDNN backend)
 
 ## Prerequisites: Building TheRock (ROCm) on Windows
 
@@ -71,18 +73,39 @@ cmake -B build -GNinja --preset windows-release ^
   -DTHEROCK_AMDGPU_TARGETS=gfx1151
 ```
 
-Replace `gfx1151` with your GPU target. To build only the components needed for this project (HIP runtime + hipBLAS-LT + hipDNN), you can do a minimal build:
+Replace `gfx1151` with your GPU target. To build only the components needed for this project (HIP runtime + hipBLAS-LT + hipDNN + hipDNN plugins), you can do a minimal build:
 
 ```cmd
 cmake -B build -GNinja --preset windows-release ^
   -DTHEROCK_AMDGPU_TARGETS=gfx1151 ^
   -DTHEROCK_ENABLE_ALL=OFF ^
-  -DTHEROCK_ENABLE_HIP_RUNTIME=ON ^
   -DTHEROCK_ENABLE_BLAS=ON ^
-  -DTHEROCK_ENABLE_HIPDNN=ON
+  -DTHEROCK_ENABLE_HIPDNN=ON ^
+  -DTHEROCK_ENABLE_HIPBLASLT_PLUGIN=ON
 ```
 
-###  Build
+Note: `THEROCK_ENABLE_HIP_RUNTIME` and `THEROCK_ENABLE_COMPILER` are implicitly enabled as dependencies. The flags explained:
+
+| Flag | What it builds |
+|------|----------------|
+| `THEROCK_ENABLE_BLAS=ON` | hipBLAS-LT library (`libhipblaslt.dll`) |
+| `THEROCK_ENABLE_HIPDNN=ON` | hipDNN backend + frontend (`hipdnn_backend.dll`) |
+| `THEROCK_ENABLE_HIPBLASLT_PLUGIN=ON` | hipBLASLt engine plugin for hipDNN matmul |
+
+The hipBLASLt plugin is **required** for hipDNN matmul/GEMM to work. hipDNN is a plugin-driven framework -- without a plugin that implements matmul, `graph.build()` will fail with "No engine configurations available."
+
+```
+hipDNN Architecture:
+  Frontend (graph API)  -- user code builds graphs here
+      |
+  Backend (hipdnn_backend.dll)  -- dispatch layer
+      |
+  Engine Plugins (loaded at runtime from hipdnn_plugins/engines/)
+    ├── MIOpen plugin (convolution, batchnorm)
+    └── hipBLASLt plugin (matmul/GEMM)  <-- needed for GEMM
+```
+
+### 5. Build
 
 ```cmd
 cmake --build build --target therock-dist
@@ -92,9 +115,11 @@ This will take a long time (1+ hour). Once complete, the ROCm SDK will be at:
 
 ```
 TheRock\build\dist\rocm\
-  ├── bin\        (amdhip64.dll, libhipblaslt.dll, ...)
-  ├── include\    (hip/, hipblas/, hipblaslt/, ...)
-  └── lib\        (amdhip64.lib, hipblaslt.lib, ...)
+  ├── bin\
+  │   ├── amdhip64_7.dll, libhipblaslt.dll, hipdnn_backend.dll
+  │   └── hipdnn_plugins\engines\   (hipBLASLt plugin DLL)
+  ├── include\    (hip/, hipblaslt/, hipdnn/, ...)
+  └── lib\        (amdhip64.lib, hipdnn_backend.lib, ...)
 ```
 
 ###  Set Environment Variable
@@ -107,6 +132,7 @@ set THEROCK_DIST=C:\Users\chiz\work\gpu\TheRock\build\dist\rocm
 
 ### Build Troubleshooting (TheRock)
 
+- **`No engine configurations available for the graph`** (hipDNN matmul runtime error): hipDNN requires a plugin that supports matmul. Rebuild TheRock with `-DTHEROCK_ENABLE_HIPBLASLT_PLUGIN=ON`. The plugin DLL will be installed to `dist/rocm/bin/hipdnn_plugins/engines/`. hipDNN auto-loads plugins from this directory relative to `hipdnn_backend.dll` at `hipdnnCreate()` time.
 - **`Could NOT find PkgConfig`**: Install `pkg-config-lite` via `winget install bloodrock.pkg-config-lite`, or via conda: `conda install -c conda-forge pkg-config`
 - **`Failed to find ROCm root directory`** or **`does not contain the HIP runtime CMake package`**: A pre-existing ROCm/HIP SDK install (e.g. from conda `rocm-sdk-core`) conflicts with TheRock's build. Uninstall it: `pip uninstall rocm rocm-sdk-core rocm-sdk-devel rocm-sdk-libraries-gfx1151`. After uninstalling, delete stale CMake caches in the failed sub-projects (e.g. `build/core/hip-tests/build/CMakeCache.txt`, `build/ml-libs/hipDNN/build/CMakeCache.txt`) and re-run configure.
 - **`THEROCK_ENABLE_HIPBLASLT` not used**: The correct flag for hipBLAS-LT is `-DTHEROCK_ENABLE_BLAS=ON` (hipBLASLt is part of the BLAS component group). There is no `THEROCK_ENABLE_HIPBLASLT` flag.
@@ -212,7 +238,7 @@ test_gemm.mlir  -->  hip-opt  -->  mlir-translate  -->  llc  -->  gemm.obj
 hip_gemm_runtime.cpp  -->  cl.exe  -->  runtime.obj                   |
 main_gemm.cpp         -->  cl.exe  -->  main.obj                      |
                                                                       v
-                                              link.exe  -->  gemm_test.exe
+                                              link.exe  -->  gemm_test_hipblaslt.exe
                                                 (+ hipblaslt.lib, amdhip64.lib)
 ```
 
@@ -226,7 +252,7 @@ set THEROCK_DIST=C:\path\to\TheRock\build\dist\rocm
 
 ```bash
 # Run the full pipeline script
-run_full_pipeline.bat
+run_full_pipeline_hipblaslt.bat
 
 # Or manually:
 hip-opt test_gemm.mlir --convert-hip-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts -o gemm_lowered.mlir
@@ -244,11 +270,61 @@ cl /c /EHsc /std:c++17 /D__HIP_PLATFORM_AMD__ /I%THEROCK_DIST%\include main_gemm
 ### Step 3: Link and Run
 
 ```cmd
-link gemm.obj runtime.obj main.obj /LIBPATH:%THEROCK_DIST%\lib amdhip64.lib hipblaslt.lib /out:gemm_test.exe
+link gemm.obj runtime.obj main.obj /LIBPATH:%THEROCK_DIST%\lib amdhip64.lib hipblaslt.lib /out:gemm_test_hipblaslt.exe
 
 :: Ensure runtime DLLs are in PATH
 set PATH=%THEROCK_DIST%\bin;%PATH%
-gemm_test.exe
+gemm_test_hipblaslt.exe
+```
+
+## GEMM End-to-End Pipeline (hipDNN variant)
+
+The same MLIR code and main driver work with a hipDNN backend by swapping the runtime wrapper at link time. The MLIR lowering emits `llvm.call @hip_gemm_f32(...)` which is backend-agnostic.
+
+**Prerequisites**: TheRock must be built with `-DTHEROCK_ENABLE_HIPBLASLT_PLUGIN=ON` so the matmul engine plugin is available at runtime.
+
+**Note**: The hipDNN runtime wrapper must be compiled with TheRock's **clang++** (not MSVC `cl.exe`), because the hipDNN headers pull in HIP-specific types (`hip_bfloat16`, `__hip_bfloat16`) that use clang-only syntax.
+
+```
+test_gemm.mlir  -->  hip-opt  -->  mlir-translate  -->  llc  -->  gemm.obj
+                                                                      |
+hip_gemm_runtime_hipdnn.cpp  -->  clang++  -->  runtime.obj           |
+main_gemm.cpp                -->  cl.exe   -->  main.obj              |
+                                                                      v
+                                              link.exe  -->  gemm_test_hipdnn.exe
+                                                (+ hipdnn_backend.lib, amdhip64.lib)
+```
+
+### Using the hipDNN pipeline script
+
+```cmd
+run_full_pipeline_hipdnn.bat
+```
+
+### Manual steps
+
+```cmd
+set THEROCK_DIST=C:\path\to\TheRock\build\dist\rocm
+set THEROCK_CLANG=C:\path\to\TheRock\build\compiler\amd-llvm\dist\lib\llvm\bin
+
+:: Steps 1-3 are identical to the hipBLAS-LT pipeline (compile MLIR to gemm.obj)
+
+:: Compile hipDNN runtime wrapper with clang++ (MSVC cl.exe cannot compile hipDNN headers)
+%THEROCK_CLANG%\clang++.exe -c -std=c++17 -fms-extensions -fms-compatibility ^
+  -D__HIP_PLATFORM_AMD__ -D__HIPCC__ -DSPDLOG_FMT_EXTERNAL -DFMT_HEADER_ONLY ^
+  -I%THEROCK_DIST%\include -I%THEROCK_DIST%\include\hipdnn\frontend ^
+  -I%THEROCK_DIST%\include\hipdnn\backend -I%THEROCK_DIST%\include\hipdnn\data_sdk ^
+  -Wno-unused-value -Wno-c++11-narrowing ^
+  hip_gemm_runtime_hipdnn.cpp -o runtime.obj
+
+:: Compile main driver (same as hipBLAS-LT pipeline, uses MSVC cl.exe)
+cl /c /EHsc /std:c++17 /D__HIP_PLATFORM_AMD__ /I%THEROCK_DIST%\include main_gemm.cpp /Fo:main.obj
+
+:: Link against hipdnn_backend.lib instead of hipblaslt.lib
+link gemm.obj runtime.obj main.obj /LIBPATH:%THEROCK_DIST%\lib amdhip64.lib hipdnn_backend.lib /out:gemm_test_hipdnn.exe
+
+set PATH=%THEROCK_DIST%\bin;%PATH%
+gemm_test_hipdnn.exe
 ```
 
 ## Type System
