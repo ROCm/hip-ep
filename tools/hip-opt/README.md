@@ -26,7 +26,93 @@ These operations are lowered to LLVM IR function calls that interface with the H
 - `main_gemm.cpp` - Main driver for the GEMM end-to-end test
 - `run_full_pipeline.bat` - Script to compile MLIR through the full pipeline
 
-## Building
+## Prerequisites: Building TheRock (ROCm) on Windows
+
+The GEMM pipeline requires the HIP runtime (`amdhip64.dll`) and hipBLAS-LT (`libhipblaslt.dll`), which are built from source using [TheRock](https://github.com/ROCm/TheRock).
+
+
+### Install Build Tools
+
+Using `winget` (recommended):
+
+```cmd
+winget install Git.Git -e --source winget --custom "/o:PathOption=CmdTools"
+winget install cmake ninja-build.ninja ccache python strawberryperl bloodrock.pkg-config-lite
+winget install --id Iterative.DVC --silent --accept-source-agreements
+```
+
+Configure git for long paths and symlinks:
+
+```cmd
+git config --global core.symlinks true
+git config --global core.longpaths true
+```
+
+###  Clone and Fetch Sources
+
+```cmd
+git clone https://github.com/ROCm/TheRock.git
+cd TheRock
+
+python -m venv .venv
+.venv\Scripts\Activate.bat
+pip install --upgrade pip
+pip install -r requirements.txt
+
+python ./build_tools/fetch_sources.py
+```
+
+###  Configure
+
+Open an **x64 Native Tools Command Prompt for VS 2022** (or run `vcvars64.bat`), then:
+
+```cmd
+cmake -B build -GNinja --preset windows-release ^
+  -DTHEROCK_AMDGPU_TARGETS=gfx1151
+```
+
+Replace `gfx1151` with your GPU target. To build only the components needed for this project (HIP runtime + hipBLAS-LT + hipDNN), you can do a minimal build:
+
+```cmd
+cmake -B build -GNinja --preset windows-release ^
+  -DTHEROCK_AMDGPU_TARGETS=gfx1151 ^
+  -DTHEROCK_ENABLE_ALL=OFF ^
+  -DTHEROCK_ENABLE_HIP_RUNTIME=ON ^
+  -DTHEROCK_ENABLE_BLAS=ON ^
+  -DTHEROCK_ENABLE_HIPDNN=ON
+```
+
+###  Build
+
+```cmd
+cmake --build build --target therock-dist
+```
+
+This will take a long time (1+ hour). Once complete, the ROCm SDK will be at:
+
+```
+TheRock\build\dist\rocm\
+  ├── bin\        (amdhip64.dll, libhipblaslt.dll, ...)
+  ├── include\    (hip/, hipblas/, hipblaslt/, ...)
+  └── lib\        (amdhip64.lib, hipblaslt.lib, ...)
+```
+
+###  Set Environment Variable
+
+Set `THEROCK_DIST` to point to the dist output for use by the build steps below:
+
+```cmd
+set THEROCK_DIST=C:\Users\chiz\work\gpu\TheRock\build\dist\rocm
+```
+
+### Build Troubleshooting (TheRock)
+
+- **`Could NOT find PkgConfig`**: Install `pkg-config-lite` via `winget install bloodrock.pkg-config-lite`, or install via conda: `conda install -c conda-forge pkg-config`
+- **`PAL_CLIENT_INTERFACE_MAJOR_VERSION not supported`**: This is a warning, not an error. It can be safely ignored.
+- **`amd_comgr version not compatible`**: The version mismatch warning (requested 2.9, found 3.0.0) is expected and handled by TheRock's dependency provider.
+- **Long path errors**: Ensure long paths are enabled in git and Windows registry.
+
+## Building hip-opt
 
 Build LLVM and MLIR first (e.g. from `C:\local\llvm-project`):
 
@@ -124,7 +210,13 @@ hip_gemm_runtime.cpp  -->  cl.exe  -->  runtime.obj                   |
 main_gemm.cpp         -->  cl.exe  -->  main.obj                      |
                                                                       v
                                               link.exe  -->  gemm_test.exe
-                                                (+ hipdnn.lib, amdhip64.lib)
+                                                (+ hipblaslt.lib, amdhip64.lib)
+```
+
+Requires `THEROCK_DIST` to point to the TheRock dist output (see [Prerequisites](#prerequisites-building-therock-rocm-on-windows)):
+
+```cmd
+set THEROCK_DIST=C:\path\to\TheRock\build\dist\rocm
 ```
 
 ### Step 1: Compile MLIR to Object File
@@ -139,17 +231,20 @@ mlir-translate gemm_lowered.mlir --mlir-to-llvmir -o gemm.ll
 llc gemm.ll -filetype=obj -o gemm.obj
 ```
 
-### Step 2: Compile Runtime and Main (requires THEROCK_DIST)
+### Step 2: Compile Runtime and Main
 
-```bash
-cl /c /EHsc /I%THEROCK_DIST%\include hip_gemm_runtime.cpp /Fo:runtime.obj
-cl /c /EHsc /I%THEROCK_DIST%\include main_gemm.cpp /Fo:main.obj
+```cmd
+cl /c /EHsc /std:c++17 /D__HIP_PLATFORM_AMD__ /I%THEROCK_DIST%\include hip_gemm_runtime.cpp /Fo:runtime.obj
+cl /c /EHsc /std:c++17 /D__HIP_PLATFORM_AMD__ /I%THEROCK_DIST%\include main_gemm.cpp /Fo:main.obj
 ```
 
 ### Step 3: Link and Run
 
-```bash
-link gemm.obj runtime.obj main.obj /LIBPATH:%THEROCK_DIST%\lib hipdnn.lib amdhip64.lib /out:gemm_test.exe
+```cmd
+link gemm.obj runtime.obj main.obj /LIBPATH:%THEROCK_DIST%\lib amdhip64.lib hipblaslt.lib /out:gemm_test.exe
+
+:: Ensure runtime DLLs are in PATH
+set PATH=%THEROCK_DIST%\bin;%PATH%
 gemm_test.exe
 ```
 
