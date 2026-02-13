@@ -7,8 +7,9 @@ This directory contains a custom MLIR dialect for HIP (Heterogeneous-compute Int
 The HIP dialect provides high-level operations for:
 - Creating and destroying HIP runtime handles
 - Allocating and freeing device memory
+- Matrix multiplication (GEMM) via hipDNN graph API
 
-These operations are lowered to LLVM IR function calls that interface with the HIP runtime library.
+These operations are lowered to LLVM IR function calls that interface with the HIP runtime library and hipDNN.
 
 ## Files
 
@@ -19,7 +20,11 @@ These operations are lowered to LLVM IR function calls that interface with the H
 - `HipPasses.h` - Pass registration
 - `HipToLLVM.cpp` - Conversion pass from HIP dialect to LLVM dialect
 - `hip-opt.cpp` - Main compiler driver
-- `test.mlir` - Example MLIR file using HIP dialect
+- `test.mlir` - Example MLIR file using HIP dialect (memory ops)
+- `test_gemm.mlir` - GEMM example using `hip.gemm`
+- `hip_gemm_runtime.cpp` - Runtime wrapper implementing `hip_gemm_f32` via hipDNN graph API
+- `main_gemm.cpp` - Main driver for the GEMM end-to-end test
+- `run_full_pipeline.bat` - Script to compile MLIR through the full pipeline
 
 ## Building
 
@@ -104,6 +109,49 @@ Allocates device memory and returns a memref. Supports dynamic dimensions.
 
 ### `hip.free(%handle, %memref) : memref<...>`
 Frees device memory previously allocated with `hip.alloc`.
+
+### `hip.gemm(%handle, %A, %B, %C, %M, %K, %N) : (...)`
+Matrix multiply C = A @ B. A is MxK, B is KxN, C is MxN. All pointers must be device memory. Lowered to a call to `hip_gemm_f32()` which uses the hipDNN graph API.
+
+## GEMM End-to-End Pipeline
+
+The full pipeline from MLIR to a runnable executable:
+
+```
+test_gemm.mlir  -->  hip-opt  -->  mlir-translate  -->  llc  -->  gemm.obj
+                                                                      |
+hip_gemm_runtime.cpp  -->  cl.exe  -->  runtime.obj                   |
+main_gemm.cpp         -->  cl.exe  -->  main.obj                      |
+                                                                      v
+                                              link.exe  -->  gemm_test.exe
+                                                (+ hipdnn.lib, amdhip64.lib)
+```
+
+### Step 1: Compile MLIR to Object File
+
+```bash
+# Run the full pipeline script
+run_full_pipeline.bat
+
+# Or manually:
+hip-opt test_gemm.mlir --convert-hip-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts -o gemm_lowered.mlir
+mlir-translate gemm_lowered.mlir --mlir-to-llvmir -o gemm.ll
+llc gemm.ll -filetype=obj -o gemm.obj
+```
+
+### Step 2: Compile Runtime and Main (requires THEROCK_DIST)
+
+```bash
+cl /c /EHsc /I%THEROCK_DIST%\include hip_gemm_runtime.cpp /Fo:runtime.obj
+cl /c /EHsc /I%THEROCK_DIST%\include main_gemm.cpp /Fo:main.obj
+```
+
+### Step 3: Link and Run
+
+```bash
+link gemm.obj runtime.obj main.obj /LIBPATH:%THEROCK_DIST%\lib hipdnn.lib amdhip64.lib /out:gemm_test.exe
+gemm_test.exe
+```
 
 ## Type System
 

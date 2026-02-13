@@ -61,6 +61,32 @@ def Hip_AllocOp : Hip_Op<"alloc", []> {
   }];
 }
 
+def Hip_GemmOp : Hip_Op<"gemm", []> {
+  let summary = "Matrix multiply C = A @ B using hipDNN";
+  let description = [{
+    Performs matrix multiplication C = A @ B using hipDNN graph API.
+    A is MxK, B is KxN, C is MxN. All pointers must be device memory.
+
+    Example:
+    ```mlir
+    hip.gemm(%handle, %A, %B, %C, %M, %K, %N)
+        : (!hip.handle, !llvm.ptr, !llvm.ptr, !llvm.ptr, index, index, index)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_HandleType:$handle,
+    AnyType:$A,
+    AnyType:$B,
+    AnyType:$C,
+    Index:$M, Index:$K, Index:$N
+  );
+
+  let assemblyFormat = [{
+    `(` $handle `,` $A `,` $B `,` $C `,` $M `,` $K `,` $N `)` attr-dict `:` `(` type($handle) `,` type($A) `,` type($B) `,` type($C) `,` type($M) `,` type($K) `,` type($N) `)`
+  }];
+}
+
 def Hip_FreeOp : Hip_Op<"free", []> {
   let summary = "Free device memory";
   let description = [{

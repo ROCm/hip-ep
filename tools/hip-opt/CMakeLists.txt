@@ -83,6 +83,8 @@ target_link_libraries(hip-opt PRIVATE
   MLIRMemRefDialect
   MLIRLLVMDialect
   MLIRLLVMCommonConversion
+  MLIRFuncToLLVM
+  MLIRReconcileUnrealizedCasts
   MLIRTransformUtils
   ${llvm_libs}
 )
