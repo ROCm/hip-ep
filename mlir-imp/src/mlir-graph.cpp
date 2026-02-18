@@ -14,7 +14,6 @@
 #include "mlir-named-attribute.hpp"
 #include "mlir-node-attributes.hpp"
 #include "mlir/Bytecode/BytecodeWriter.h"  // for writeBytecodeToFile
-#include "mlir/Dialect/Arith/IR/Arith.h"   // for ConstantOp
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h" // for EmptyOp
 #include "mlir/IR/Builders.h"
@@ -78,6 +77,8 @@ static mlir::Operation* get_or_create_none(mlir::func::FuncOp func) {
   builder.setInsertionPointToStart(&func.getBody().front());
   mlir::OperationState state(builder.getUnknownLoc(), onnx_mlir::ONNX_NONE);
   state.addTypes(builder.getNoneType());
+  // onnx.NoValue requires a 'value' UnitAttr
+  state.addAttribute("value", builder.getUnitAttr());
   return builder.create(state);
 }
 MLIRGraph::MLIRGraph(MLIRModel& model, mlir::func::FuncOp func,
@@ -158,9 +159,9 @@ void MLIRGraph::initialize_node_args_map() {
     if (mlir::isa<mlir::func::ReturnOp>(op)) {
       return;
     }
-    // Skip arith::ConstantOp, arith::ConstantOp mapping onnx
+    // Skip onnx.Constant, onnx.Constant mapping onnx
     // GraphProto.initializer
-    if (mlir::isa<mlir::arith::ConstantOp>(op)) {
+    if (op->getName().getStringRef() == "onnx.Constant") {
       // already processed in initialize_constant_initializers
       return;
     }
@@ -184,23 +185,25 @@ void MLIRGraph::initialize_node_args_map() {
 
 void MLIRGraph::initialize_constant_initializers() {
   MY_LOG(1) << "Initializing constant initializers";
-  // use mlir filter iterator to find all arith.ConstantOp
+  // Filter operations by name to find all onnx.Constant
   auto& block = func_.getBody().front();
-  auto constant_ops = block.getOps<mlir::arith::ConstantOp>();
-  for (auto op : constant_ops) {
-    // attr :  NODE_OUTPUTS
-    // constant op has a single result
-    auto value = op.getResult();
-    auto value_name = extract_value_name(value);
-    all_node_args_.push_back(std::make_unique<MLIRNodeArg>(value_name, value));
-    node_args_map_.emplace(
-        value_name,
-        MLIRNodeArgIndex::node_output((int32_t)all_node_args_.size() - 1,
-                                      GraphId::create_main_graph(graph_id_)));
+  for (auto& op : block.getOperations()) {
+    if (op.getName().getStringRef() == "onnx.Constant") {
+      // attr :  NODE_OUTPUTS
+      // constant op has a single result
+      auto value = op.getResult(0);
+      auto value_name = extract_value_name(value);
+      all_node_args_.push_back(
+          std::make_unique<MLIRNodeArg>(value_name, value));
+      node_args_map_.emplace(
+          value_name,
+          MLIRNodeArgIndex::node_output((int32_t)all_node_args_.size() - 1,
+                                        GraphId::create_main_graph(graph_id_)));
 
-    constant_initializers_.push_back(node_args_map_[value_name]);
-    initialized_tensors_cache_[value_name] =
-        &node_args_map_[value_name].get_const_data_as_tensor();
+      constant_initializers_.push_back(node_args_map_[value_name]);
+      initialized_tensors_cache_[value_name] =
+          &node_args_map_[value_name].get_const_data_as_tensor();
+    }
   }
 }
 
@@ -263,7 +266,7 @@ void MLIRGraph::maintain_morphizen_attributes() {
     // Skip function operation itself, return operations, constant operations,
     // and our custom onnx.None operations
     if (op != func_.getOperation() && !mlir::isa<mlir::func::ReturnOp>(op) &&
-        !mlir::isa<mlir::arith::ConstantOp>(op) &&
+        op->getName().getStringRef() != "onnx.Constant" &&
         op->getName().getStringRef() != onnx_mlir::ONNX_NONE) {
       // Collect input NodeArg pointers for this operation
       llvm::SmallVector<mlir::Attribute> inputIndexes;
@@ -333,7 +336,7 @@ std::vector<mlir::Operation*> MLIRGraph::nodes_unsafe() const {
     // and our custom onnx.None operations
     if (op != const_cast<mlir::func::FuncOp&>(func_).getOperation() &&
         !mlir::isa<mlir::func::ReturnOp>(op) &&
-        !mlir::isa<mlir::arith::ConstantOp>(op) &&
+        op->getName().getStringRef() != "onnx.Constant" &&
         op->getName().getStringRef() != onnx_mlir::ONNX_NONE) {
       // Add operation as node
       nodes.push_back(op);
@@ -447,7 +450,7 @@ MLIRGraph::producer_node(const std::string& node_arg_name) const {
     if (const auto* node_arg = get_node_arg(node_arg_index)) {
       auto value = node_arg->getValue();
       if (mlir::Operation* defining_op = value.getDefiningOp()) {
-        if (mlir::isa<mlir::arith::ConstantOp>(defining_op)) {
+        if (defining_op->getName().getStringRef() == "onnx.Constant") {
           // For constant initlalizer we skip it , for same with onnx
           return nullptr;
         }
@@ -541,7 +544,7 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
       if (auto* input_node_arg = get_node_arg(arg)) {
         if (auto& value = input_node_arg->getValue()) {
           if (auto* definingOp = value.getDefiningOp()) {
-            if (mlir::isa<mlir::arith::ConstantOp>(definingOp)) {
+            if (definingOp->getName().getStringRef() == "onnx.Constant") {
               hasConstantInput = true;
             }
 
@@ -561,7 +564,7 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
       }
     }
 
-    // If any input is from arith.constant, find the last arith.constant in the
+    // If any input is from onnx.Constant, find the last onnx.Constant in the
     // block and use it as reference point to ensure all constants stay at the
     // beginning
     if (hasConstantInput) {
@@ -569,7 +572,7 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
       mlir::Operation* lastConstantOp = nullptr;
 
       for (auto& op : entryBlock.getOperations()) {
-        if (mlir::isa<mlir::arith::ConstantOp>(op)) {
+        if (op.getName().getStringRef() == "onnx.Constant") {
           lastConstantOp = &op;
         }
       }
@@ -725,8 +728,8 @@ void MLIRGraph::add_constant_initialized_tensor(
   auto* context = func_->getContext();
   mlir::OpBuilder builder(context);
 
-  // Find the last arith.constant operation to insert after it
-  // Order should be: onnx.None -> arith.constant ops -> other ops -> return
+  // Find the last onnx.Constant operation to insert after it
+  // Order should be: onnx.None -> onnx.Constant ops -> other ops -> return
   auto& block = func_.getBody().front();
   mlir::Operation* lastConstantOp = nullptr;
   mlir::Operation* noneOp = nullptr;
@@ -736,8 +739,8 @@ void MLIRGraph::add_constant_initialized_tensor(
     if (op.getName().getStringRef() == onnx_mlir::ONNX_NONE) {
       noneOp = &op;
     }
-    // Track arith.constant operations
-    else if (mlir::isa<mlir::arith::ConstantOp>(op)) {
+    // Track onnx.Constant operations
+    else if (op.getName().getStringRef() == "onnx.Constant") {
       lastConstantOp = &op;
     } else if (!mlir::isa<mlir::func::ReturnOp>(op)) {
       // Stop searching when we hit the first non-constant, non-return, non-None
@@ -780,20 +783,23 @@ void MLIRGraph::add_constant_initialized_tensor(
   auto rawData = llvm::ArrayRef<char>(static_cast<const char*>(data), dataSize);
   denseAttr =
       mlir::DenseElementsAttr::getFromRawBuffer(shapedTensorType, rawData);
-  // Create arith.constant operation with the dense attribute
-  auto constantOp = builder.create<mlir::arith::ConstantOp>(loc, denseAttr);
-  constantOp->setAttr(attr_names::NODE_OUTPUTS,
-                      builder.getArrayAttr({builder.getStringAttr(name)}));
+  // Create onnx.Constant using generic operation (no onnx-mlir dependency)
+  mlir::OperationState state(loc, "onnx.Constant");
+  state.addTypes(denseAttr.getType());
+  state.addAttribute("value", denseAttr);
+  mlir::Operation* op = builder.create(state);
+  op->setAttr(attr_names::NODE_OUTPUTS,
+              builder.getArrayAttr({builder.getStringAttr(name)}));
   // update value in MLIRTensor object.
-  node_arg->setValue(constantOp.getResult());
+  node_arg->setValue(op->getResult(0));
 
   MY_LOG(1) << " constant op \"" << name
             << "\":" << node_arg->getValue().getAsOpaquePointer() << " = "
-            << " result=" << constantOp.getResult().getAsOpaquePointer()
-            << " op=" << (void*)constantOp.getOperation();
+            << " result=" << op->getResult(0).getAsOpaquePointer()
+            << " op=" << (void*)op;
   MY_LOG(1) << "node arg=" << MLIRNodeArgIndex(node_arg_ptr).to_string();
   MY_LOG(1) << "Successfully created constant tensor '" << name
-            << "' as arith.constant operation";
+            << "' as onnx.Constant operation";
 }
 
 const std::unordered_map<std::string, const void*>&
@@ -1031,7 +1037,7 @@ void MLIRGraph::reverse_dfs_from_preemp(
       }
 
       // Skip constant operations (initializers) in traversal
-      if (mlir::isa<mlir::arith::ConstantOp>(producer_op)) {
+      if (producer_op->getName().getStringRef() == "onnx.Constant") {
         continue;
       }
       if (producer_op->getName().getStringRef() == onnx_mlir::ONNX_NONE) {
@@ -1121,7 +1127,7 @@ void MLIRGraph::remove_node(mlir::Operation* op) {
 
 void MLIRGraph::remove_initialized_tensor(const std::string& name) {
   func_.walk([&](mlir::Operation* op) -> mlir::WalkResult {
-    if (!mlir::isa<mlir::arith::ConstantOp>(op)) {
+    if (op->getName().getStringRef() != "onnx.Constant") {
       return mlir::WalkResult::advance();
     }
     if (op && op->use_empty()) {
@@ -1245,7 +1251,7 @@ MLIRGraph::create_func_func(
     for (auto operand : op->getOperands()) {
       if (!value_mapping.contains(operand)) {
         if (auto* defining_op = operand.getDefiningOp()) {
-          if (mlir::isa<mlir::arith::ConstantOp>(operand.getDefiningOp())) {
+          if (defining_op->getName().getStringRef() == "onnx.Constant") {
             builder.setInsertionPointToEnd(&block);
             cloned_ops_cache.push(defining_op);
             builder.clone(*defining_op, value_mapping);
@@ -1281,7 +1287,7 @@ mlir::Operation* MLIRGraph::create_func_call(
   for (const auto& input : inputs) {
     auto value = input.get_node_arg().getValue();
     if (auto* definingOp = value.getDefiningOp()) {
-      if (mlir::isa<mlir::arith::ConstantOp>(definingOp)) {
+      if (definingOp->getName().getStringRef() == "onnx.Constant") {
         hasConstantInput = true;
       }
 
@@ -1291,14 +1297,14 @@ mlir::Operation* MLIRGraph::create_func_call(
     }
   }
 
-  // If any input is from arith.constant, find the last arith.constant in the
+  // If any input is from onnx.Constant, find the last onnx.Constant in the
   // block
   if (hasConstantInput) {
     auto& entryBlock = func_.getBody().front();
     mlir::Operation* lastConstantOp = nullptr;
 
     for (auto& op : entryBlock.getOperations()) {
-      if (mlir::isa<mlir::arith::ConstantOp>(op)) {
+      if (op.getName().getStringRef() == "onnx.Constant") {
         lastConstantOp = &op;
       } else if (!mlir::isa<mlir::func::ReturnOp>(op)) {
         break;
