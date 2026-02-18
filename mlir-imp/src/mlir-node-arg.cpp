@@ -4,9 +4,8 @@
  */
 #include "./mlir-node-arg.hpp"
 #include "./mlir-constants.hpp"
-#include "mlir/Dialect/Arith/IR/Arith.h" // for ConstantOp
 #include "mlir/IR/Builders.h"
-#include "mlir/IR/BuiltinAttributes.h"   // for DenseElementsAttr
+#include "mlir/IR/BuiltinAttributes.h" // for DenseElementsAttr
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/OpDefinition.h"
 #include <cstring>
@@ -123,30 +122,33 @@ MLIRNodeArg::MLIRNodeArg(const std::string& name, mlir::Value value)
   validateElementType(element_type_);
   // DenseElementsAttr with splat values need special handling to expand data
   // clang-format off
-  // eg : %3 = "arith.constant"() <{value = dense<0.000000e+00> : tensor<64xf32>}> {node.outputs = ["conv_bias"]} : () -> tensor<64xf32> loc(#loc) // user: %4
+  // eg : %3 = "onnx.Constant"() <{value = dense<0.000000e+00> : tensor<64xf32>}> {node.outputs = ["conv_bias"]} : () -> tensor<64xf32> loc(#loc) // user: %4
   // clang-format on
   // We cache the full data in data_store_ when
   // DenseElementsAttr with splat
   //  For getData() and getDataSize() return actual data and data_size
   if (auto defining_op = value_.getDefiningOp()) {
-    if (auto const_op = mlir::dyn_cast<mlir::arith::ConstantOp>(defining_op)) {
-      auto attr = const_op.getValueAttr();
-      if (auto dense_attr = mlir::dyn_cast<mlir::DenseElementsAttr>(attr)) {
-        // For dense tensor constants, use the actual raw data size
-        // shape empty means scalar, skip it
-        if (dense_attr.isSplat() && !shape_.empty()) {
-          // For splat constants, we need to expand the single value to fill the
-          // entire tensor
-          auto raw_data = dense_attr.getRawData();
-          if (!raw_data.empty()) {
-            int64_t element_size = raw_data.size(); // TODO : i4, u4 ?
-            int64_t element_count = getElementCount();
-            data_store_ = std::vector<uint8_t>(element_count * element_size);
-            const char* src_data = raw_data.data();
-            uint8_t* dest_data = data_store_->data();
+    if (defining_op->getName().getStringRef() == "onnx.Constant") {
+      if (auto value_attr = defining_op->getAttr("value")) {
+        if (auto dense_attr =
+                mlir::dyn_cast<mlir::DenseElementsAttr>(value_attr)) {
+          // For dense tensor constants, use the actual raw data size
+          // shape empty means scalar, skip it
+          if (dense_attr.isSplat() && !shape_.empty()) {
+            // For splat constants, we need to expand the single value to fill
+            // the entire tensor
+            auto raw_data = dense_attr.getRawData();
+            if (!raw_data.empty()) {
+              int64_t element_size = raw_data.size(); // TODO : i4, u4 ?
+              int64_t element_count = getElementCount();
+              data_store_ = std::vector<uint8_t>(element_count * element_size);
+              const char* src_data = raw_data.data();
+              uint8_t* dest_data = data_store_->data();
 
-            for (int64_t i = 0; i < element_count; ++i) {
-              std::memcpy(dest_data + i * element_size, src_data, element_size);
+              for (int64_t i = 0; i < element_count; ++i) {
+                std::memcpy(dest_data + i * element_size, src_data,
+                            element_size);
+              }
             }
           }
         }
@@ -204,25 +206,25 @@ const void* MLIRNodeArg::getData() const {
   // If no stored data, try to extract from MLIR value if it's a constant
   if (value_) {
     if (auto defining_op = value_.getDefiningOp()) {
-      if (auto const_op =
-              mlir::dyn_cast<mlir::arith::ConstantOp>(defining_op)) {
+      if (defining_op->getName().getStringRef() == "onnx.Constant") {
         // Get the constant value attribute
-        auto attr = const_op.getValue();
+        if (auto value_attr = defining_op->getAttr("value")) {
+          // Handle different attribute types
+          if (auto dense_attr =
+                  mlir::dyn_cast<mlir::DenseElementsAttr>(value_attr)) {
+            // For dense tensor constants (handles all dense<...> cases
+            // including binary data) This covers: dense<0>, dense<[1, -1]>,
+            // dense<"0xFD09..."> etc.
+            auto raw_data = dense_attr.getRawData();
 
-        // Handle different attribute types
-        if (auto dense_attr = mlir::dyn_cast<mlir::DenseElementsAttr>(attr)) {
-          // For dense tensor constants (handles all dense<...> cases including
-          // binary data) This covers: dense<0>, dense<[1, -1]>,
-          // dense<"0xFD09..."> etc.
-          auto raw_data = dense_attr.getRawData();
+            // Skip the raw_data.empty() check because {value = dense<> :
+            // tensor<0xf32>} is valid. Its print result is shown below and it
+            // is expected to be nullptr: LOG(WARNING) << "DenseElementsAttr has
+            // empty raw data for: " << name_ << " " << (void*)raw_data.data();
+            // DenseElementsAttr has empty raw data for: 801 0000000000000000
 
-          // Skip the raw_data.empty() check because {value = dense<> :
-          // tensor<0xf32>} is valid. Its print result is shown below and it is
-          // expected to be nullptr: LOG(WARNING) << "DenseElementsAttr has
-          // empty raw data for: " << name_ << " " << (void*)raw_data.data();
-          // DenseElementsAttr has empty raw data for: 801 0000000000000000
-
-          return raw_data.data();
+            return raw_data.data();
+          }
         }
       }
     }
@@ -240,15 +242,15 @@ size_t MLIRNodeArg::getDataSize() const {
   // If no stored data, try to calculate size from MLIR value if it's a constant
   if (value_) {
     if (auto defining_op = value_.getDefiningOp()) {
-      if (auto const_op =
-              mlir::dyn_cast<mlir::arith::ConstantOp>(defining_op)) {
-        auto attr = const_op.getValue();
-
-        if (auto dense_attr = mlir::dyn_cast<mlir::DenseElementsAttr>(attr)) {
-          // For dense tensor constants, use the actual raw data size
-          // This is more reliable than calculating from shape/element type
-          auto raw_data = dense_attr.getRawData();
-          return raw_data.size();
+      if (defining_op->getName().getStringRef() == "onnx.Constant") {
+        if (auto value_attr = defining_op->getAttr("value")) {
+          if (auto dense_attr =
+                  mlir::dyn_cast<mlir::DenseElementsAttr>(value_attr)) {
+            // For dense tensor constants, use the actual raw data size
+            // This is more reliable than calculating from shape/element type
+            auto raw_data = dense_attr.getRawData();
+            return raw_data.size();
+          }
         }
       }
     }
@@ -266,8 +268,7 @@ bool MLIRNodeArg::hasData() const {
   // If no stored data, check if we have a constant MLIR value
   if (value_) {
     if (auto defining_op = value_.getDefiningOp()) {
-      if (auto const_op =
-              mlir::dyn_cast<mlir::arith::ConstantOp>(defining_op)) {
+      if (defining_op->getName().getStringRef() == "onnx.Constant") {
         return true; // Constant operations always have data
       }
     }
@@ -289,7 +290,7 @@ bool MLIRNodeArg::isConstantValue() const {
     return hasData();
   }
   if (auto defining_op = value_.getDefiningOp()) {
-    return mlir::isa<mlir::arith::ConstantOp>(defining_op);
+    return defining_op->getName().getStringRef() == "onnx.Constant";
   }
   return false;
 }

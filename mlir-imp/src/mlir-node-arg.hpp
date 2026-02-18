@@ -75,7 +75,7 @@ public:
 
   /// Check if the held mlir::Value is a constant
   /// Returns true if the value is produced by a constant operation
-  /// (e.g., arith.constant, std.constant, or has ConstantLike trait)
+  /// (e.g., onnx.Constant)
   bool isConstantValue() const;
 
   // === Template methods for typed data access ===
