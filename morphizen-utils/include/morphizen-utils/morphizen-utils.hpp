@@ -9,9 +9,11 @@
  * @brief Main header for MorphiZen utility library
  *
  * This header provides convenient access to all utility components:
- * - Environment configuration with type safety
+ * - Environment configuration with type safety (re-exported from foundation)
  * - Weak reference patterns (singleton and store)
- * - String parsing utilities
+ * - String parsing utilities (re-exported from foundation)
+ * - Plugin loading system
+ * - Cleanup utilities
  *
  * Usage:
  * @code
@@ -28,21 +30,30 @@
  * @endcode
  */
 
-#include "./env_config.hpp"
-#include "./parse_value.hpp"
+// Import foundation utilities (generic utilities moved to morphizen-foundation)
+#include <morphizen-foundation/env_config.hpp>
+#include <morphizen-foundation/parse_value.hpp>
+
+// Local utilities (MorphiZen-specific)
+#include "./cleanup.hpp"
+#include "./morphizen_plugin.hpp"
 #include "./weak_refs.hpp"
 
 /**
  * @namespace morphizen::utils
  * @brief Utility functions and templates for MorphiZen project
  *
- * This namespace contains general-purpose utilities that can be used
- * across different components of the MorphiZen project:
+ * This namespace contains framework-specific utilities for the MorphiZen
+ * project:
  *
- * - **Environment Configuration**: Type-safe environment variable access
+ * - **Environment Configuration**: Type-safe environment variable access (from
+ * foundation)
+ * - **String Parsing**: Robust parsing utilities (from foundation)
  * - **Weak References**: Memory-safe singleton and object store patterns
- * - **String Parsing**: Robust parsing utilities with error checking
+ * - **Plugin System**: Dynamic plugin loading
+ * - **Cleanup Utilities**: Framework cleanup helpers
  */
 namespace morphizen::utils {
-// All functionality is defined in individual headers
-}
+// Re-export foundation namespace for backwards compatibility
+using namespace morphizen::foundation;
+} // namespace morphizen::utils

@@ -18,7 +18,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for issue quality guidelines.
 - **#052 relates to #050, #051** - All improve TarFile implementation quality
 - **#053 relates to #052** - Documents architecture that #052 will modify
 - **#056 relates to #051** - Both improve TarFile documentation quality
-- **#060 relates to #059** - Implements two-tier utilities pattern from guidelines
 
 See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 
@@ -37,8 +36,6 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 | [#052](issues/052-eliminate-redundant-cached-stream-pointers.md) | Eliminate Redundant Cached Stream Pointers | L | 1h | TarFile Refactor | - | tar_file.hpp/.cpp/tar_entry.hpp/.cpp |
 | [#053](issues/053-document-tar-streaming-architecture.md) | Document TAR Streaming | M | 2h | TarFile Docs | - | tar-streaming-architecture.md |
 | [#056](issues/056-add-comprehensive-documentation-to-tarfile.md) | Add TarFile Docs | M | 2h | TarFile Docs | - | tar_file.hpp |
-| [#059](issues/059-component-organization-guidelines.md) | Component Organization Guidelines | M | 2h | Documentation | - | component-organization-guidelines.md |
-| [#060](issues/060-create-morphizen-foundation.md) | Create morphizen-foundation | M | 4h | Architecture | - | morphizen-foundation/* |
 
 **Legend:**
 - **Pri**: Priority (C=Critical, H=High, M=Medium, L=Low)
@@ -54,11 +51,11 @@ See [issue-dependency-analysis.md](issue-dependency-analysis.md) for details.
 See **[completed-issues.md](completed-issues.md)** for full archive of all completed issues.
 
 **Recent (last 5):**
+- #060 (PR #179) - Create morphizen-foundation Library
+- #059 (PR #179) - Component Organization Guidelines
 - #061 (PR #173) - Windows CI MSBuild Generator Compatibility
 - #064 (PR #170) - Enable LLVM/MLIR Smart Fallback with Auto-Fetch
 - #061 (PR #168) - Remove Misleading Shape Inference Code
-- #048 (PR #166) - Extract Platform-Specific tmpfile Helper
-- #040 (PR #165) - Remove Legacy tar_ball Re-Serialization
 
 ---
 

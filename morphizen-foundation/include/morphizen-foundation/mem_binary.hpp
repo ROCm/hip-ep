@@ -4,7 +4,7 @@
  */
 #pragma once
 #include <filesystem>
-#include <morphizen/morphizen_gsl.h>
+#include <gsl/span>
 #include <optional>
 #include <string>
 #include <vector>

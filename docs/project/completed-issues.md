@@ -12,6 +12,8 @@ Chronological archive of all completed backlog issues (newest first).
 
 | # | Author | PR | Commit | Date | Title |
 |---|--------|----|----|------|-------|
+| #060 | wcy123 | #179 | TBD | 02-18 | Create morphizen-foundation Library |
+| #059 | wcy123 | #179 | TBD | 02-18 | Component Organization Guidelines |
 | #061 | zhenzew | #173 | TBD | 02-10 | Windows CI MSBuild Generator Compatibility |
 | #064 | mingyueliuh | #170 | TBD | 02-10 | Enable LLVM/MLIR Smart Fallback with Auto-Fetch |
 | #061 | wcy123 | #168 | TBD | 02-09 | Remove Misleading Shape Inference Code |

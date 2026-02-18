@@ -9,7 +9,7 @@
 #include <sstream>
 #include <string>
 
-namespace morphizen::utils {
+namespace morphizen::foundation {
 
 /**
  * @brief Parse string value to various types with error checking
@@ -103,4 +103,4 @@ inline void parse_value(const std::string& text, bool& value) {
   }
 }
 
-} // namespace morphizen::utils
+} // namespace morphizen::foundation

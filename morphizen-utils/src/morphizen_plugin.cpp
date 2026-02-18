@@ -7,7 +7,7 @@
 // we must include glog before morphizen headers
 #include <glog/logging.h>
 // clang-format on
-#include "morphizen-utils/env_config.hpp"
+#include "morphizen-foundation/env_config.hpp"
 #include "morphizen-utils/morphizen_plugin.hpp"
 #include "morphizen-utils/weak_refs.hpp"
 // include local headers

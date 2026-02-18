@@ -4,7 +4,7 @@
  */
 #include "./mlir-graph-store.hpp"
 #include "./mlir-graph.hpp"
-#include "morphizen-utils/env_config.hpp"
+#include "morphizen-foundation/env_config.hpp"
 #include <glog/logging.h>
 #include <sstream>
 #include <vector>

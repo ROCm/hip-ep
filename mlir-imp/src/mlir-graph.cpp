@@ -19,7 +19,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Verifier.h"
-#include "morphizen-utils/env_config.hpp"
+#include "morphizen-foundation/env_config.hpp"
 #include "llvm/ADT/STLExtras.h"       // for map_range, to_vector
 #include "llvm/ADT/SmallSet.h"        // for SmallSet
 #include "llvm/ADT/SmallVector.h"     // for SmallVector

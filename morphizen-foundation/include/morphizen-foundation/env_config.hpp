@@ -13,7 +13,7 @@
 // C function declaration
 extern "C" const char* vitis_ai_getenv_s(const char* name);
 
-namespace morphizen::utils {
+namespace morphizen::foundation {
 
 /**
  * @brief Helper template for converting strings to various types
@@ -117,7 +117,7 @@ env_config_helper<std::vector<T>>::from_string(const std::string& s) {
   return list;
 }
 
-} // namespace morphizen::utils
+} // namespace morphizen::foundation
 
 /**
  * @brief Define an environment parameter with type and default value
@@ -129,7 +129,8 @@ env_config_helper<std::vector<T>>::from_string(const std::string& s) {
  */
 #define DEF_ENV_PARAM_2(param_name, defvalue, type)                            \
   struct ENV_PARAM_##param_name                                                \
-      : public ::morphizen::utils::env_config<type, ENV_PARAM_##param_name> {  \
+      : public ::morphizen::foundation::env_config<type,                       \
+                                                   ENV_PARAM_##param_name> {   \
     static const char* get_name() { return #param_name; }                      \
     static const char* get_default_value() { return defvalue; }                \
   };

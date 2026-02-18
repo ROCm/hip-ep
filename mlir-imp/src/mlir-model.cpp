@@ -11,7 +11,7 @@
 #include "mlir/IR/Block.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Parser/Parser.h"
-#include "morphizen-utils/env_config.hpp"
+#include "morphizen-foundation/env_config.hpp"
 #include "llvm/Support/raw_ostream.h"
 #include <filesystem>
 #include <fstream>
