@@ -132,8 +132,7 @@ set(MorphiZen_DEPS
   onnxruntime::onnxruntime
   protobuf::libprotobuf
   glog::glog
-  morphizen::encryption
-  morphizen::mem_binary
+  morphizen::foundation
   Microsoft.GSL::GSL
   morphizen-utils
   morphizen-ort-api-ext

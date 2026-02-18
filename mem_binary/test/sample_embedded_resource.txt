@@ -1,9 +1,0 @@
-[
-    {
-        # this is not a json file, it is evaluated using ast.literal_eval
-        # relative path from the root of the repo, use "r" to ignore escape char.
-        "name": r"sample.bin",
-        # Use True if you want to store the file compressed, for file already compressed, you should mark it as False
-        "compression": False
-    },
-]

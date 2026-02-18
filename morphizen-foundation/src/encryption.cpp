@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "morphizen/encryption.hpp"
+#include "morphizen-foundation/encryption.hpp"
 #include <algorithm>
 #include <array>
 #include <glog/logging.h>

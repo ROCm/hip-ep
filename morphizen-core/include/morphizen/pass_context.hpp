@@ -21,6 +21,9 @@
 #include <memory>
 #include <optional>
 
+// Import generic file I/O interfaces from foundation
+#include <morphizen-foundation/file_io.hpp>
+
 namespace morphizen {
 // The reason PassContext exists is that PassContext has a longer life cycle
 // than Pass. The Pass will be destoryed after model is compiled but some info
@@ -33,23 +36,13 @@ public:
   PassContextTimer();
   virtual ~PassContextTimer();
 };
-class CacheFileReader {
-public:
-  CacheFileReader() = default;
-  CacheFileReader(const CacheFileReader&) = delete;
-  virtual ~CacheFileReader() = default;
-  virtual size_t size() const = 0;
-  virtual void rewind() const = 0;
-  virtual std::size_t fread(void* buffer, std::size_t size) const = 0;
-  virtual void* mmap() { return nullptr; }
-};
-class CacheFileWriter {
-public:
-  CacheFileWriter() = default;
-  CacheFileWriter(const CacheFileWriter&) = delete;
-  virtual ~CacheFileWriter() = default;
-  virtual std::size_t fwrite(const void* buffer, std::size_t size) const = 0;
-};
+
+// Type aliases for backwards compatibility with existing code
+// These interfaces have been moved to morphizen-foundation as
+// FileReader/FileWriter for generic reuse across the codebase and in DLL
+// boundaries.
+using CacheFileReader = FileReader;
+using CacheFileWriter = FileWriter;
 
 class QoSUpdateInterface {
 public:

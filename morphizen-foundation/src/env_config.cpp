@@ -4,7 +4,7 @@
  */
 #define _CRT_SECURE_NO_WARNINGS
 
-#include "morphizen-utils/env_config.hpp"
+#include "morphizen-foundation/env_config.hpp"
 #include <cstdlib>
 #include <stdio.h>
 
@@ -25,7 +25,7 @@ extern "C" const char* vitis_ai_getenv_s(const char* name) {
 #endif
 }
 
-namespace morphizen::utils {
+namespace morphizen::foundation {
 
 std::string get_env_string(const char* name, const std::string& default_value) {
   std::string ret;
@@ -49,4 +49,4 @@ std::string my_getenv_s(const char* name, const std::string& default_value) {
   return get_env_string(name, default_value);
 }
 
-} // namespace morphizen::utils
+} // namespace morphizen::foundation

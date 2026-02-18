@@ -18,7 +18,6 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/../morphizen-core/cmake/find_onnxruntime.cma
 
 # Library source files
 set(MORPHIZEN_UTILS_SOURCES
-    src/env_config.cpp
     src/morphizen_plugin.cpp
     src/cleanup.cpp
 )
@@ -31,9 +30,7 @@ endif()
 # Library header files
 set(MORPHIZEN_UTILS_HEADERS
     include/morphizen-utils/morphizen-utils.hpp
-    include/morphizen-utils/env_config.hpp
     include/morphizen-utils/weak_refs.hpp
-    include/morphizen-utils/parse_value.hpp
     include/morphizen-utils/morphizen_plugin.hpp
     include/morphizen-utils/cleanup.hpp
 )
@@ -61,7 +58,10 @@ target_include_directories(morphizen-utils
 # Compiler-specific options
 message("MORPHIZEN_COMPILER_OPTIONS is ${MORPHIZEN_COMPILER_OPTIONS}")
 target_compile_options(morphizen-utils PRIVATE ${MORPHIZEN_COMPILER_OPTIONS})
-target_link_libraries(morphizen-utils PRIVATE glog::glog)
+target_link_libraries(morphizen-utils
+    PUBLIC morphizen::foundation
+    PRIVATE glog::glog
+)
 
 # Optional: Enable testing
 option(MORPHIZEN_UTILS_BUILD_TESTS "Build tests for morphizen-utils" OFF)

@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "morphizen-utils/cleanup.hpp"
-#include "morphizen-utils/env_config.hpp"
+#include "morphizen-foundation/env_config.hpp"
 #include <functional>
 #include <glog/logging.h>
 #include <utility>

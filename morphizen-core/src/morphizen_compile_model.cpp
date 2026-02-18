@@ -17,7 +17,7 @@
 #include "profile_utils.hpp"
 #include "morphizen/morphizen.hpp"
 #include "morphizen/util.hpp"
-#include "morphizen/env_config.hpp"
+#include "morphizen-foundation/env_config.hpp"
 #include <codecvt>
 #include <errno.h>
 #include <functional>
@@ -32,9 +32,9 @@
 #include <string>
 #include <sstream>
 #include <set>
-#include "morphizen/encryption.hpp"
+#include "morphizen-foundation/encryption.hpp"
 #include <onnxruntime_session_options_config_keys.h>
-#include "morphizen/mem_binary.hpp"
+#include "morphizen-foundation/mem_binary.hpp"
 #include "morphizen/config_reader.hpp"
 // clang-format on
 
@@ -81,8 +81,8 @@ int64_t PassContext::get_provier_option_with_class<
   const char* name = env_name::get_name();
   const char* defvalue = env_name::get_default_value();
   auto p = get_provider_option(std::string(name), std::string(defvalue));
-  using helper =
-      typename morphizen::env_config_helper<decltype(env_name::value)>;
+  using helper = typename morphizen::foundation::env_config_helper<
+      decltype(env_name::value)>;
   return helper::from_string(p);
 } /*
  void force_instantiate_get_provider_options_with_class () {

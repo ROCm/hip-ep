@@ -6,10 +6,11 @@
 #ifndef GLOG_NO_ABBREVIATED_SEVERITIES
 #  define GLOG_NO_ABBREVIATED_SEVERITIES
 #endif
-#include "morphizen/mem_binary.hpp"
+#include "morphizen-foundation/mem_binary.hpp"
+#include "morphizen-foundation/env_config.hpp"
 #include <glog/logging.h>
 #include <iostream>
-#include <morphizen-utils/morphizen-utils.hpp>
+#include <unordered_map>
 #ifdef ENABLE_COMPRESSION
 #  include <zlib.h>
 #endif
