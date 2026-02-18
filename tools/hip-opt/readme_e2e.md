@@ -119,7 +119,7 @@ cmake --build . --config Debug --target hip-opt
 
 ```bat
 cd tools/hip-opt
-run_e2e_pipeline.bat
+scripts\run_e2e_pipeline.bat
 ```
 
 This runs all 7 steps below. If any step fails it stops with the step number.
@@ -131,7 +131,7 @@ This runs all 7 steps below. If any step fails it stops with the step number.
 ### Step 1: Lower HIP dialect to LLVM dialect
 
 ```bat
-hip-opt.exe test_e2e.mlir ^
+hip-opt.exe examples\test_e2e.mlir ^
   --convert-hip-to-llvm ^
   --convert-scf-to-cf ^
   --convert-func-to-llvm ^
@@ -276,17 +276,17 @@ Expected stderr output:
 
 | File | Purpose |
 |---|---|
-| `test_e2e.mlir` | Self-contained transformer (2 layers, static shapes, all HIP ops) |
+| `examples/test_e2e.mlir` | Self-contained transformer (2 layers, static shapes, all HIP ops) |
 | `main_e2e.cpp` | C driver: calls `@run()`, prints status |
 | `ops_runtime/all_runtime.cpp` | Unified runtime: stubs + `#ifdef` real library calls |
-| `run_e2e_pipeline.bat` | Automated build script (steps 1-7) |
+| `scripts/run_e2e_pipeline.bat` | Automated build script (steps 1-7) |
 
 ---
 
 ## Compilation Flow
 
 ```
-test_e2e.mlir
+examples/test_e2e.mlir
     |  hip-opt (--convert-hip-to-llvm --convert-scf-to-cf
     |           --convert-func-to-llvm --convert-cf-to-llvm
     |           --reconcile-unrealized-casts)

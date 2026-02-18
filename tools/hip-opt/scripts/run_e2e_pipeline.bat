@@ -27,7 +27,7 @@ echo ============================================================
 
 echo.
 echo [1/7] MLIR -^> LLVM Dialect (hip-opt)
-"%HIP_OPT_BIN%\hip-opt.exe" ..\test_e2e.mlir ^
+"%HIP_OPT_BIN%\hip-opt.exe" ..\examples\test_e2e.mlir ^
   --convert-hip-to-llvm ^
   --convert-scf-to-cf ^
   --convert-func-to-llvm ^

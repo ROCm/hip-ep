@@ -24,7 +24,7 @@ echo ============================================================
 
 echo.
 echo [1/7] MLIR -^> LLVM Dialect (hip-opt)
-"%HIP_OPT_BIN%\hip-opt.exe" ..\test_gemm.mlir --convert-hip-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts -o gemm_lowered.mlir
+"%HIP_OPT_BIN%\hip-opt.exe" ..\examples\test_gemm.mlir --convert-hip-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts -o gemm_lowered.mlir
 if errorlevel 1 (echo FAILED at step 1 && exit /b 1)
 echo      OK: gemm_lowered.mlir
 

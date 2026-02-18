@@ -20,13 +20,17 @@ These operations are lowered to LLVM IR function calls that interface with the H
 - `HipPasses.h` - Pass registration
 - `HipToLLVM.cpp` - Conversion pass from HIP dialect to LLVM dialect
 - `hip-opt.cpp` - Main compiler driver
-- `test.mlir` - Example MLIR file using HIP dialect (memory ops)
-- `test_gemm.mlir` - GEMM example using `hip.gemm`
+- `examples/test.mlir` - Example MLIR file using HIP dialect (memory ops)
+- `examples/test_gemm.mlir` - GEMM example using `hip.gemm`
+- `examples/test_e2e.mlir` - Self-contained transformer layer (E2E test)
+- `examples/model_target_hip.mlir` - Target HIP dialect reference (full transformer)
+- `examples/model_hip.mlir` - Generated HIP dialect from Llama-3.2-1B
 - `hip_gemm_runtime.cpp` - Runtime wrapper implementing `hip_gemm_f32` via hipBLAS-LT
 - `hip_gemm_runtime_hipdnn.cpp` - Runtime wrapper implementing `hip_gemm_f32` via hipDNN graph API
 - `main_gemm.cpp` - Main driver for the GEMM end-to-end test
-- `run_full_pipeline_hipblaslt.bat` - Script to compile MLIR through the full pipeline (hipBLAS-LT backend)
-- `run_full_pipeline_hipdnn.bat` - Script to compile MLIR through the full pipeline (hipDNN backend)
+- `scripts/run_full_pipeline_hipblaslt.bat` - Script to compile MLIR through the full pipeline (hipBLAS-LT backend)
+- `scripts/run_full_pipeline_hipdnn.bat` - Script to compile MLIR through the full pipeline (hipDNN backend)
+- `scripts/run_e2e_pipeline.bat` - E2E transformer pipeline (all ops)
 
 ## Prerequisites: Building TheRock (ROCm) on Windows
 
@@ -181,7 +185,7 @@ module {
 ### Convert to LLVM Dialect
 
 ```bash
-./hip-opt test.mlir --convert-hip-to-llvm
+./hip-opt examples/test.mlir --convert-hip-to-llvm
 ```
 
 ### Output LLVM Dialect
@@ -208,7 +212,7 @@ llvm.call @hipDestroyHandle(%handle) : (!llvm.ptr) -> ()
 To get actual LLVM IR, you can further translate the LLVM dialect:
 
 ```bash
-./hip-opt test.mlir --convert-hip-to-llvm | mlir-translate --mlir-to-llvmir
+./hip-opt examples/test.mlir --convert-hip-to-llvm | mlir-translate --mlir-to-llvmir
 ```
 
 ## HIP Dialect Operations
@@ -252,10 +256,10 @@ set THEROCK_DIST=C:\path\to\TheRock\build\dist\rocm
 
 ```bash
 # Run the full pipeline script
-run_full_pipeline_hipblaslt.bat
+scripts\run_full_pipeline_hipblaslt.bat
 
 # Or manually:
-hip-opt test_gemm.mlir --convert-hip-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts -o gemm_lowered.mlir
+hip-opt examples/test_gemm.mlir --convert-hip-to-llvm --convert-func-to-llvm --reconcile-unrealized-casts -o gemm_lowered.mlir
 mlir-translate gemm_lowered.mlir --mlir-to-llvmir -o gemm.ll
 llc gemm.ll -filetype=obj -o gemm.obj
 ```
@@ -298,7 +302,7 @@ main_gemm.cpp                -->  cl.exe   -->  main.obj              |
 ### Using the hipDNN pipeline script
 
 ```cmd
-run_full_pipeline_hipdnn.bat
+scripts\run_full_pipeline_hipdnn.bat
 ```
 
 ### Manual steps
