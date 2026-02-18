@@ -79,11 +79,15 @@ target_link_libraries(hip-opt PRIVATE
   MLIRTransforms
   MLIRAnalysis
   MLIRArithDialect
+  MLIRControlFlowDialect
   MLIRFuncDialect
   MLIRMemRefDialect
+  MLIRSCFDialect
   MLIRLLVMDialect
   MLIRLLVMCommonConversion
   MLIRFuncToLLVM
+  MLIRSCFToControlFlow
+  MLIRControlFlowToLLVM
   MLIRReconcileUnrealizedCasts
   MLIRTransformUtils
   ${llvm_libs}
