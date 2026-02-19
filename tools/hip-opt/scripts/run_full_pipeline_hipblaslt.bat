@@ -3,21 +3,7 @@ REM === End-to-End Matmul Pipeline (hipBLASLt) ===
 REM Compiles test_gemm.mlir (two chained hip.hipblaslt.matmul ops in DPS)
 REM through the full pipeline to produce matmul_test.exe.
 
-REM --- Activate VS tools only if not already active ---
-if not defined VSINSTALLDIR (
-  call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
-)
-
-REM --- Activate conda env only if not already active ---
-if not defined CONDA_PREFIX (
-  call C:\Users\chiz\anaconda3\condabin\conda.bat activate llvm
-)
-
-REM --- Tool paths (no PATH modification) ---
-set LLVM_BIN=C:\Users\chiz\work\gpu\llvm-project\build\Debug\bin
-set THEROCK_DIST=C:\Users\chiz\work\gpu\TheRock\build\dist\rocm
-set HIP_OPT_BIN=C:\Users\chiz\work\gpu\onnx-hipdnn-ep\tools\hip-opt\build\Debug
-set SRC_DIR=C:\Users\chiz\work\gpu\onnx-hipdnn-ep\tools\hip-opt
+call "%~dp0env.bat"
 
 cd /d "%SRC_DIR%\build"
 

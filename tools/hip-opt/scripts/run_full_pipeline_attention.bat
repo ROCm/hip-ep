@@ -3,17 +3,7 @@ REM === End-to-End Attention Pipeline ===
 REM Compiles test_attention.mlir (single-head attention from composed ops)
 REM Uses: hipBLASLt (matmul), MIOpen (mul, softmax), custom (transpose)
 
-if not defined VSINSTALLDIR (
-  call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
-)
-if not defined CONDA_PREFIX (
-  call C:\Users\chiz\anaconda3\condabin\conda.bat activate llvm
-)
-
-set LLVM_BIN=C:\Users\chiz\work\gpu\llvm-project\build\Debug\bin
-set THEROCK_DIST=C:\Users\chiz\work\gpu\TheRock\build\dist\rocm
-set HIP_OPT_BIN=C:\Users\chiz\work\gpu\onnx-hipdnn-ep\tools\hip-opt\build\Debug
-set SRC_DIR=C:\Users\chiz\work\gpu\onnx-hipdnn-ep\tools\hip-opt
+call "%~dp0env.bat"
 
 cd /d "%SRC_DIR%\build"
 

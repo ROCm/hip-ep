@@ -50,6 +50,7 @@ All lowerings are **rank-generic**: ops detect tensor rank at compile time and p
 
 ### Pipeline Scripts
 
+- `scripts/env.bat` - **Shared environment config** (edit paths here for your machine)
 - `scripts/run_full_pipeline_hipblaslt.bat` - Matmul test (hipBLASLt)
 - `scripts/run_full_pipeline_miopen_add.bat` - Add test (MIOpen)
 - `scripts/run_full_pipeline_miopen_mul.bat` - Mul test (MIOpen)
@@ -225,24 +226,31 @@ All compute ops use Destination-Passing Style with rank-generic lowerings. For L
 - **`hip.silu(%handle) ins(%input : ...) outs(%output : ...)`** -- SiLU activation (stub).
 - **`hip.gqa(%handle, %layer, %start_pos, %seq_len) ins(%q, %k, %v : ...) outs(%kv_cache, %output : ...)`** -- Grouped query attention (stub).
 
-## End-to-End Pipeline Example
+## Running Tests
 
-The matmul test: `A[B,S,K] @ B0[K,N] -> tmp -> tmp @ B1[N,P] -> C[B,S,P]`
-
-```
-test_gemm.mlir  -->  hip-opt  -->  mlir-translate  -->  llc  -->  gemm.obj
-                                                                      |
-ops_runtime/hip_runtime.cpp      -->  cl.exe  -->  hip_runtime.obj    |
-ops_runtime/hipblaslt_matmul.cpp -->  cl.exe  -->  hipblaslt_matmul.obj
-examples/main_gemm.cpp           -->  cl.exe  -->  main.obj           |
-                                                                      v
-                                              link.exe  -->  matmul_test.exe
-                                                (+ hipblaslt.lib, amdhip64.lib)
-```
+First, edit `scripts/env.bat` to set the paths for your machine (LLVM, TheRock, hip-opt, conda).
+Then run any pipeline script:
 
 ```cmd
-set THEROCK_DIST=C:\path\to\TheRock\build\dist\rocm
-scripts\run_full_pipeline_hipblaslt.bat
+REM Edit scripts/env.bat first, then:
+scripts\run_full_pipeline_hipblaslt.bat       REM matmul (hipBLASLt only)
+scripts\run_full_pipeline_miopen_add.bat      REM add (MIOpen)
+scripts\run_full_pipeline_miopen_mul.bat      REM mul (MIOpen)
+scripts\run_full_pipeline_miopen_rms_norm.bat REM rms_norm (MIOpen)
+scripts\run_full_pipeline_miopen_softmax.bat  REM softmax (MIOpen)
+scripts\run_full_pipeline_attention.bat       REM full attention (all backends)
+```
+
+Each script compiles `examples/test_<op>.mlir` through the full pipeline:
+
+```
+test_<op>.mlir  -->  hip-opt  -->  mlir-translate  -->  llc  -->  <op>.obj
+                                                                       |
+ops_runtime/hip_runtime.cpp  -->  cl.exe  -->  hip_runtime.obj         |
+ops_runtime/<op_runtime>.cpp -->  cl.exe  -->  <op_runtime>.obj        |
+examples/main_<op>.cpp       -->  cl.exe  -->  main.obj                |
+                                                                       v
+                                               link.exe  -->  <op>_test.exe
 ```
 
 ## Type System
