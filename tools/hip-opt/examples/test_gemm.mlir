@@ -1,10 +1,7 @@
-// Test: two chained hip.hipblaslt.matmul in Destination-Passing Style (DPS)
+// Test: two chained hip.hipblaslt.matmul in DPS with 3D tensors
 //
-//   matmul0: A[M,K] x B0[K,N] -> tmp[M,N]   (intermediate, allocated internally)
-//   matmul1: tmp[M,N] x B1[N,P] -> C[M,P]    (final output, provided by caller)
-//
-// %tmp is the internally managed intermediate buffer (hip.alloc / hip.free).
-// %C is the caller-provided output destination -- no alloc/free needed.
+//   matmul0: A[B,S,K] @ B0[K,N] -> tmp[B,S,N]  (B0 broadcast across batch)
+//   matmul1: tmp[B,S,N] @ B1[N,P] -> C[B,S,P]   (B1 broadcast across batch)
 //
 // Compile pipeline:
 //   hip-opt test_gemm.mlir \
@@ -14,30 +11,30 @@
 
 module {
   func.func @two_matmuls(
-      %A:  memref<?x?xf32, 1>,
+      %A:  memref<?x?x?xf32, 1>,
       %B0: memref<?x?xf32, 1>,
       %B1: memref<?x?xf32, 1>,
-      %C:  memref<?x?xf32, 1>) {
+      %C:  memref<?x?x?xf32, 1>) {
     %handle = hip.create_handle() : !hip.handle
 
-    // Extract dimensions for the intermediate buffer: tmp is [M, N]
-    //   M = dim 0 of A,  N = dim 1 of B0
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
-    %M = memref.dim %A, %c0 : memref<?x?xf32, 1>
+    %c2 = arith.constant 2 : index
+    %B = memref.dim %A, %c0 : memref<?x?x?xf32, 1>
+    %S = memref.dim %A, %c1 : memref<?x?x?xf32, 1>
     %N = memref.dim %B0, %c1 : memref<?x?xf32, 1>
 
-    %tmp = hip.alloc(%handle, %M, %N) : memref<?x?xf32, 1>
+    %tmp = hip.alloc(%handle, %B, %S, %N) : memref<?x?x?xf32, 1>
 
     hip.hipblaslt.matmul(%handle)
-        ins(%A, %B0 : memref<?x?xf32, 1>, memref<?x?xf32, 1>)
-        outs(%tmp : memref<?x?xf32, 1>)
+        ins(%A, %B0 : memref<?x?x?xf32, 1>, memref<?x?xf32, 1>)
+        outs(%tmp : memref<?x?x?xf32, 1>)
 
     hip.hipblaslt.matmul(%handle)
-        ins(%tmp, %B1 : memref<?x?xf32, 1>, memref<?x?xf32, 1>)
-        outs(%C : memref<?x?xf32, 1>)
+        ins(%tmp, %B1 : memref<?x?x?xf32, 1>, memref<?x?xf32, 1>)
+        outs(%C : memref<?x?x?xf32, 1>)
 
-    hip.free(%handle, %tmp) : memref<?x?xf32, 1>
+    hip.free(%handle, %tmp) : memref<?x?x?xf32, 1>
     hip.destroy_handle(%handle) : !hip.handle
     return
   }

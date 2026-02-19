@@ -1,10 +1,13 @@
 //===- hipblaslt_matmul.cpp - hip.hipblaslt.matmul runtime -----------------===//
 //
-// Runtime for hip.hipblaslt.matmul(handle) ins(A, B) outs(C).
-// The MLIR lowering extracts device pointers and dimensions from
-// the memref descriptors:
-//   hip_hipblaslt_matmul(handle, A_ptr, B_ptr, C_ptr, M, K, N)
-// where A is [M,K], B is [K,N], C is [M,N].
+// Rank-generic matmul: C = A @ B  (row-major)
+//
+// Signature from MLIR lowering:
+//   hip_hipblaslt_matmul(handle, A, B, C, rankA, rankB, batch, M, K, N)
+//
+// - batch from A: if A is 3D, batch = A.dim[0]; else batch = 1
+// - M = A.dim[-2], K = A.dim[-1], N = B.dim[-1]
+// - B broadcast: if rankB < rankA, stride_B = 0 (same W for all batches)
 //
 //===----------------------------------------------------------------------===//
 
@@ -26,12 +29,23 @@
 
 extern "C" void hip_hipblaslt_matmul(void * /*handle*/,
                                       void *A, void *B, void *C,
+                                      int64_t rankA, int64_t rankB,
+                                      int64_t batch,
                                       int64_t M, int64_t K, int64_t N) {
-  // hipBLAS-LT uses column-major.  For row-major C = A @ B we compute
-  // column-major C' = B' @ A' by swapping operands and transposing dims.
+  fprintf(stderr, "[hipblaslt.matmul] rankA=%lld rankB=%lld batch=%lld M=%lld K=%lld N=%lld\n",
+          (long long)rankA, (long long)rankB, (long long)batch,
+          (long long)M, (long long)K, (long long)N);
+
+  // hipBLAS-LT column-major: for row-major C = A @ B, compute C' = B' @ A'
   const int64_t blas_M = N, blas_N = M, blas_K = K;
   const int64_t lda = N, ldb = K, ldc = N;
   float alpha = 1.0f, beta = 0.0f;
+
+  // Strides for batched GEMM
+  // blas_A = B (row-major), blas_B = A (row-major) -- swapped for col-major trick
+  int64_t stride_blas_a = (rankB < rankA) ? 0 : K * N;  // B broadcast if lower rank
+  int64_t stride_blas_b = M * K;                          // A always has batch stride
+  int64_t stride_c = M * N;
 
   hipblasLtHandle_t handle = nullptr;
   HIPBLASLT_CHECK(hipblasLtCreate(&handle));
@@ -47,6 +61,26 @@ extern "C" void hip_hipblaslt_matmul(void * /*handle*/,
   HIPBLASLT_CHECK(hipblasLtMatrixLayoutCreate(&lb, HIP_R_32F, blas_K, blas_N, ldb));
   HIPBLASLT_CHECK(hipblasLtMatrixLayoutCreate(&lc, HIP_R_32F, blas_M, blas_N, ldc));
   HIPBLASLT_CHECK(hipblasLtMatrixLayoutCreate(&ld, HIP_R_32F, blas_M, blas_N, ldc));
+
+  if (batch > 1) {
+    // blas_A = B (row-major), blas_B = A (row-major)
+    HIPBLASLT_CHECK(hipblasLtMatrixLayoutSetAttribute(
+        la, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch, sizeof(batch)));
+    HIPBLASLT_CHECK(hipblasLtMatrixLayoutSetAttribute(
+        la, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stride_blas_a, sizeof(stride_blas_a)));
+    HIPBLASLT_CHECK(hipblasLtMatrixLayoutSetAttribute(
+        lb, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch, sizeof(batch)));
+    HIPBLASLT_CHECK(hipblasLtMatrixLayoutSetAttribute(
+        lb, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stride_blas_b, sizeof(stride_blas_b)));
+    HIPBLASLT_CHECK(hipblasLtMatrixLayoutSetAttribute(
+        lc, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch, sizeof(batch)));
+    HIPBLASLT_CHECK(hipblasLtMatrixLayoutSetAttribute(
+        lc, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stride_c, sizeof(stride_c)));
+    HIPBLASLT_CHECK(hipblasLtMatrixLayoutSetAttribute(
+        ld, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch, sizeof(batch)));
+    HIPBLASLT_CHECK(hipblasLtMatrixLayoutSetAttribute(
+        ld, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stride_c, sizeof(stride_c)));
+  }
 
   hipblasLtMatmulPreference_t pref = nullptr;
   HIPBLASLT_CHECK(hipblasLtMatmulPreferenceCreate(&pref));
@@ -67,8 +101,7 @@ extern "C" void hip_hipblaslt_matmul(void * /*handle*/,
                                      &result.algo, ws, result.workspaceSize, nullptr));
     hipDeviceSynchronize();
   } else {
-    fprintf(stderr, "[hipblaslt.matmul] no algorithm found for M=%lld K=%lld N=%lld\n",
-            (long long)M, (long long)K, (long long)N);
+    fprintf(stderr, "[hipblaslt.matmul] no algorithm found\n");
   }
 
   if (ws) hipFree(ws);
