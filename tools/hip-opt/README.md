@@ -40,11 +40,13 @@ These operations are lowered to LLVM IR function calls that interface with the H
 - `examples/main_add.cpp` - Main driver for the add test
 - `examples/main_mul.cpp` - Main driver for the mul test
 - `examples/main_rms_norm.cpp` - Main driver for the rms_norm test
+- `examples/main_softmax.cpp` - Main driver for the softmax test
 - `examples/main_attention.cpp` - Main driver for the attention test
 - `scripts/run_full_pipeline_hipblaslt.bat` - Matmul pipeline (hipBLASLt)
 - `scripts/run_full_pipeline_miopen_add.bat` - Add pipeline (MIOpen)
 - `scripts/run_full_pipeline_miopen_mul.bat` - Mul pipeline (MIOpen)
 - `scripts/run_full_pipeline_miopen_rms_norm.bat` - RMS Norm pipeline (MIOpen)
+- `scripts/run_full_pipeline_miopen_softmax.bat` - Softmax pipeline (MIOpen)
 - `scripts/run_full_pipeline_attention.bat` - Attention pipeline (hipBLASLt + MIOpen + custom)
 
 ## Prerequisites: Building TheRock (ROCm) on Windows
