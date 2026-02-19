@@ -31,7 +31,6 @@ static constexpr const char *kHipCreateHandle = "hipCreateHandle";
 static constexpr const char *kHipDestroyHandle = "hipDestroyHandle";
 static constexpr const char *kHipMalloc = "hip_device_malloc";
 static constexpr const char *kHipFree = "hip_device_free";
-static constexpr const char *kHipGemmF32 = "hip_gemm_f32";
 
 static constexpr const char *kHipblasltMatmul = "hip_hipblaslt_matmul";
 static constexpr const char *kMiopenRmsNorm = "hip_miopen_rms_norm";
@@ -183,40 +182,6 @@ struct FreeOpLowering : public ConvertOpToLLVMPattern<FreeOp> {
   }
 };
 
-// --- GemmOp: hip.gemm(%handle, %A, %B, %C, %M, %K, %N)
-//            -> llvm.call @hip_gemm_f32(%A, %B, %C, %M, %K, %N)
-struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
-
-  LogicalResult
-  matchAndRewrite(GemmOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    Location loc = op.getLoc();
-    ModuleOp module = op->getParentOfType<ModuleOp>();
-    Type voidType = getVoidType();
-    Type ptrType = getPtrType();
-    Type indexType = getIndexType();
-
-    // Declare hip_gemm_f32(A: ptr, B: ptr, C: ptr, M: i64, K: i64, N: i64)
-    SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType,
-                                       indexType, indexType, indexType};
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kHipGemmF32, paramTypes, voidType);
-    if (failed(funcOp))
-      return failure();
-
-    // The pointer args (A, B, C) are already !llvm.ptr after type conversion.
-    // The dimension args (M, K, N) are index -> i64 after type conversion.
-    SmallVector<Value, 6> args = {adaptor.getA(), adaptor.getB(),
-                                  adaptor.getC(), adaptor.getM(),
-                                  adaptor.getK(), adaptor.getN()};
-
-    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
-    rewriter.eraseOp(op);
-    return success();
-  }
-};
-
 // ===== Region ops: inline body and erase =====================================
 
 template <typename OpTy>
@@ -238,8 +203,9 @@ using HipblasltGraphOpLowering = GraphRegionOpLowering<HipblasltGraphOp>;
 
 // ===== hipBLASLt ops =========================================================
 
-// hip.hipblaslt.matmul(handle, A, B, C)
-//   -> llvm.call @hip_hipblaslt_matmul(handle, A_ptr, B_ptr, C_ptr)
+// hip.hipblaslt.matmul(handle) ins(A, B) outs(C)
+//   -> llvm.call @hip_hipblaslt_matmul(handle, A_ptr, B_ptr, C_ptr, M, K, N)
+// Dimensions extracted from memref descriptors: A is [M,K], B is [K,N].
 struct HipblasltMatmulOpLowering
     : public ConvertOpToLLVMPattern<HipblasltMatmulOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -251,18 +217,27 @@ struct HipblasltMatmulOpLowering
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type voidType = getVoidType();
     Type ptrType = getPtrType();
+    Type indexType = getIndexType();
 
-    SmallVector<Type> paramTypes(4, ptrType);
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, ptrType,
+                                    indexType, indexType, indexType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kHipblasltMatmul, paramTypes, voidType);
     if (failed(funcOp))
       return failure();
 
+    MemRefDescriptor aDesc(adaptor.getA());
+    MemRefDescriptor bDesc(adaptor.getB());
+    Value M = aDesc.size(rewriter, loc, 0);
+    Value K = aDesc.size(rewriter, loc, 1);
+    Value N = bDesc.size(rewriter, loc, 1);
+
     SmallVector<Value> args = {
         adaptor.getHandle(),
         extractMemRefPtr(adaptor.getA(), rewriter, loc),
         extractMemRefPtr(adaptor.getB(), rewriter, loc),
-        extractMemRefPtr(adaptor.getC(), rewriter, loc)};
+        extractMemRefPtr(adaptor.getC(), rewriter, loc),
+        M, K, N};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -272,7 +247,9 @@ struct HipblasltMatmulOpLowering
 
 // ===== MIOpen ops ============================================================
 
-// hip.miopen.rms_norm(handle, input, weight, output)
+// hip.miopen.rms_norm(%handle) ins(%input, %weight) outs(%output)
+//   -> hip_miopen_rms_norm(handle, input_ptr, weight_ptr, output_ptr, N, D)
+// input is [N,D], weight is [D], output is [N,D].
 struct MiopenRmsNormOpLowering
     : public ConvertOpToLLVMPattern<MiopenRmsNormOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -284,18 +261,25 @@ struct MiopenRmsNormOpLowering
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type voidType = getVoidType();
     Type ptrType = getPtrType();
+    Type indexType = getIndexType();
 
-    SmallVector<Type> paramTypes(4, ptrType);
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, ptrType,
+                                    indexType, indexType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kMiopenRmsNorm, paramTypes, voidType);
     if (failed(funcOp))
       return failure();
 
+    MemRefDescriptor inputDesc(adaptor.getInput());
+    Value N = inputDesc.size(rewriter, loc, 0);
+    Value D = inputDesc.size(rewriter, loc, 1);
+
     SmallVector<Value> args = {
         adaptor.getHandle(),
         extractMemRefPtr(adaptor.getInput(), rewriter, loc),
         extractMemRefPtr(adaptor.getWeight(), rewriter, loc),
-        extractMemRefPtr(adaptor.getOutput(), rewriter, loc)};
+        extractMemRefPtr(adaptor.getOutput(), rewriter, loc),
+        N, D};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -370,7 +354,9 @@ struct MiopenRopeOpLowering : public ConvertOpToLLVMPattern<MiopenRopeOp> {
   }
 };
 
-// hip.miopen.add(handle, A, B, C) / hip.miopen.mul(handle, A, B, C)
+// hip.miopen.add / hip.miopen.mul  (element-wise binary ops)
+// Lowered call: hip_miopen_{add,mul}(handle, A_ptr, B_ptr, C_ptr, numElements)
+// numElements is computed as the product of all memref dimensions.
 template <typename OpTy>
 struct MiopenBinaryOpLowering : public ConvertOpToLLVMPattern<OpTy> {
   using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
@@ -387,18 +373,28 @@ struct MiopenBinaryOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     ModuleOp module = op->template getParentOfType<ModuleOp>();
     Type voidType = this->getVoidType();
     Type ptrType = this->getPtrType();
+    Type indexType = this->getIndexType();
 
-    SmallVector<Type> paramTypes(4, ptrType);
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, ptrType,
+                                    indexType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, funcName, paramTypes, voidType);
     if (failed(funcOp))
       return failure();
 
+    MemRefDescriptor aDesc(adaptor.getA());
+    int rank = cast<MemRefType>(op.getA().getType()).getRank();
+    Value numElements = aDesc.size(rewriter, loc, 0);
+    for (int i = 1; i < rank; i++)
+      numElements = LLVM::MulOp::create(rewriter, loc, numElements,
+                                        aDesc.size(rewriter, loc, i));
+
     SmallVector<Value> args = {
         adaptor.getHandle(),
         extractMemRefPtr(adaptor.getA(), rewriter, loc),
         extractMemRefPtr(adaptor.getB(), rewriter, loc),
-        extractMemRefPtr(adaptor.getC(), rewriter, loc)};
+        extractMemRefPtr(adaptor.getC(), rewriter, loc),
+        numElements};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -533,7 +529,6 @@ struct ConvertHipToLLVMPass
     RewritePatternSet patterns(ctx);
     patterns.add<CreateHandleOpLowering, DestroyHandleOpLowering,
                  AllocOpLowering, FreeOpLowering,
-                 GemmOpLowering,
                  // Region ops
                  MiopenGraphOpLowering, HipblasltGraphOpLowering,
                  // hipBLASLt

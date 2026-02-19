@@ -1,7 +1,7 @@
 @echo off
-REM === End-to-End Matmul Pipeline (hipBLASLt) ===
-REM Compiles test_gemm.mlir (two chained hip.hipblaslt.matmul ops in DPS)
-REM through the full pipeline to produce matmul_test.exe.
+REM === End-to-End Add Pipeline (MIOpen) ===
+REM Compiles test_add.mlir (two chained hip.miopen.add ops in DPS)
+REM through the full pipeline to produce add_test.exe.
 
 REM --- Activate VS tools only if not already active ---
 if not defined VSINSTALLDIR (
@@ -13,7 +13,7 @@ if not defined CONDA_PREFIX (
   call C:\Users\chiz\anaconda3\condabin\conda.bat activate llvm
 )
 
-REM --- Tool paths (no PATH modification) ---
+REM --- Tool paths ---
 set LLVM_BIN=C:\Users\chiz\work\gpu\llvm-project\build\Debug\bin
 set THEROCK_DIST=C:\Users\chiz\work\gpu\TheRock\build\dist\rocm
 set HIP_OPT_BIN=C:\Users\chiz\work\gpu\onnx-hipdnn-ep\tools\hip-opt\build\Debug
@@ -23,44 +23,35 @@ cd /d "%SRC_DIR%\build"
 
 echo.
 echo ============================================================
-echo  MLIR Matmul Pipeline (hipBLASLt, DPS)
+echo  MLIR Add Pipeline (MIOpen, DPS)
 echo ============================================================
 
 echo.
-echo [1/7] MLIR -^> LLVM Dialect (hip-opt)
-"%HIP_OPT_BIN%\hip-opt.exe" ..\examples\test_gemm.mlir ^
+echo [1/8] MLIR -^> LLVM Dialect (hip-opt)
+"%HIP_OPT_BIN%\hip-opt.exe" ..\examples\test_add.mlir ^
   --convert-hip-to-llvm ^
   --finalize-memref-to-llvm ^
   --convert-arith-to-llvm ^
   --convert-func-to-llvm ^
   --reconcile-unrealized-casts ^
-  -o gemm_lowered.mlir
+  -o add_lowered.mlir
 if errorlevel 1 (echo FAILED at step 1 && exit /b 1)
-echo      OK: gemm_lowered.mlir
+echo      OK: add_lowered.mlir
 
 echo.
-echo [2/7] LLVM Dialect -^> LLVM IR (mlir-translate)
-"%LLVM_BIN%\mlir-translate.exe" gemm_lowered.mlir --mlir-to-llvmir -o gemm.ll
+echo [2/8] LLVM Dialect -^> LLVM IR (mlir-translate)
+"%LLVM_BIN%\mlir-translate.exe" add_lowered.mlir --mlir-to-llvmir -o add.ll
 if errorlevel 1 (echo FAILED at step 2 && exit /b 1)
-echo      OK: gemm.ll
+echo      OK: add.ll
 
 echo.
-echo [3/7] LLVM IR -^> Object File (llc)
-"%LLVM_BIN%\llc.exe" gemm.ll -filetype=obj -o gemm.obj
+echo [3/8] LLVM IR -^> Object File (llc)
+"%LLVM_BIN%\llc.exe" add.ll -filetype=obj -o add.obj
 if errorlevel 1 (echo FAILED at step 3 && exit /b 1)
-echo      OK: gemm.obj
+echo      OK: add.obj
 
 echo.
-echo [4/7] Generate import libraries (if needed)
-if not exist hipblaslt.lib (
-  dumpbin /EXPORTS "%THEROCK_DIST%\bin\libhipblaslt.dll" | findstr /R "^  *[0-9]" > _exports_raw.txt
-  echo LIBRARY libhipblaslt.dll > hipblaslt.def
-  echo EXPORTS >> hipblaslt.def
-  for /f "tokens=4" %%a in (_exports_raw.txt) do echo   %%a >> hipblaslt.def
-  lib /def:hipblaslt.def /out:hipblaslt.lib /machine:x64 >nul 2>&1
-  del _exports_raw.txt
-  if errorlevel 1 (echo FAILED generating hipblaslt.lib && exit /b 1)
-)
+echo [4/8] Generate import libraries (if needed)
 if not exist amdhip64.lib (
   dumpbin /EXPORTS "%THEROCK_DIST%\bin\amdhip64_7.dll" | findstr /R "^  *[0-9]" > _hip_exports.txt
   echo LIBRARY amdhip64_7.dll > amdhip64.def
@@ -69,7 +60,15 @@ if not exist amdhip64.lib (
   lib /def:amdhip64.def /out:amdhip64.lib /machine:x64 >nul 2>&1
   del _hip_exports.txt
 )
-echo      OK: hipblaslt.lib, amdhip64.lib
+if not exist MIOpen.lib (
+  dumpbin /EXPORTS "%THEROCK_DIST%\bin\MIOpen.dll" | findstr /R "^  *[0-9]" > _miopen_exports.txt
+  echo LIBRARY MIOpen.dll > MIOpen.def
+  echo EXPORTS >> MIOpen.def
+  for /f "tokens=4" %%a in (_miopen_exports.txt) do echo   %%a >> MIOpen.def
+  lib /def:MIOpen.def /out:MIOpen.lib /machine:x64 >nul 2>&1
+  del _miopen_exports.txt
+)
+echo      OK: amdhip64.lib, MIOpen.lib
 
 echo.
 echo [5/8] Compile hip runtime (handle lifecycle + memory)
@@ -78,29 +77,29 @@ if errorlevel 1 (echo FAILED at step 5 && exit /b 1)
 echo      OK: hip_runtime.obj
 
 echo.
-echo [6/8] Compile hipblaslt matmul runtime
-cl.exe /c /EHsc /std:c++17 /D__HIP_PLATFORM_AMD__ /I"%THEROCK_DIST%\include" ..\ops_runtime\hipblaslt_matmul.cpp /Fo:hipblaslt_matmul.obj
+echo [6/8] Compile miopen add runtime
+cl.exe /c /EHsc /std:c++17 /D__HIP_PLATFORM_AMD__ /I"%THEROCK_DIST%\include" ..\ops_runtime\miopen_add.cpp /Fo:miopen_add.obj
 if errorlevel 1 (echo FAILED at step 6 && exit /b 1)
-echo      OK: hipblaslt_matmul.obj
+echo      OK: miopen_add.obj
 
 echo.
 echo [7/8] Compile main driver
-cl.exe /c /EHsc /std:c++17 /D__HIP_PLATFORM_AMD__ /I"%THEROCK_DIST%\include" ..\examples\main_gemm.cpp /Fo:main.obj
+cl.exe /c /EHsc /std:c++17 /D__HIP_PLATFORM_AMD__ /I"%THEROCK_DIST%\include" ..\examples\main_add.cpp /Fo:main_add.obj
 if errorlevel 1 (echo FAILED at step 7 && exit /b 1)
-echo      OK: main.obj
+echo      OK: main_add.obj
 
 echo.
 echo [8/8] Link executable
-link.exe gemm.obj hip_runtime.obj hipblaslt_matmul.obj main.obj /LIBPATH:. /LIBPATH:"%THEROCK_DIST%\lib" amdhip64.lib hipblaslt.lib /out:matmul_test.exe
+link.exe add.obj hip_runtime.obj miopen_add.obj main_add.obj /LIBPATH:. /LIBPATH:"%THEROCK_DIST%\lib" amdhip64.lib MIOpen.lib /out:add_test.exe
 if errorlevel 1 (echo FAILED at step 8 && exit /b 1)
-echo      OK: matmul_test.exe
+echo      OK: add_test.exe
 
 echo.
 echo ============================================================
-echo  Build completed! Run with: build\matmul_test.exe
+echo  Build completed! Run with: build\add_test.exe
 echo ============================================================
 echo.
 echo  NOTE: Ensure these DLLs are in PATH at runtime:
-echo    - amdhip64_7.dll     (from %THEROCK_DIST%\bin)
-echo    - libhipblaslt.dll   (from %THEROCK_DIST%\bin)
+echo    - amdhip64_7.dll   (from %THEROCK_DIST%\bin)
+echo    - MIOpen.dll       (from %THEROCK_DIST%\bin)
 echo ============================================================

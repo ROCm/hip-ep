@@ -61,32 +61,6 @@ def Hip_AllocOp : Hip_Op<"alloc", []> {
   }];
 }
 
-def Hip_GemmOp : Hip_Op<"gemm", []> {
-  let summary = "Matrix multiply C = A @ B using hipDNN";
-  let description = [{
-    Performs matrix multiplication C = A @ B using hipDNN graph API.
-    A is MxK, B is KxN, C is MxN. All pointers must be device memory.
-
-    Example:
-    ```mlir
-    hip.gemm(%handle, %A, %B, %C, %M, %K, %N)
-        : (!hip.handle, !llvm.ptr, !llvm.ptr, !llvm.ptr, index, index, index)
-    ```
-  }];
-
-  let arguments = (ins
-    Hip_HandleType:$handle,
-    AnyType:$A,
-    AnyType:$B,
-    AnyType:$C,
-    Index:$M, Index:$K, Index:$N
-  );
-
-  let assemblyFormat = [{
-    `(` $handle `,` $A `,` $B `,` $C `,` $M `,` $K `,` $N `)` attr-dict `:` `(` type($handle) `,` type($A) `,` type($B) `,` type($C) `,` type($M) `,` type($K) `,` type($N) `)`
-  }];
-}
-
 def Hip_FreeOp : Hip_Op<"free", []> {
   let summary = "Free device memory";
   let description = [{
@@ -141,8 +115,9 @@ def Hip_HipblasltMatmulOp : Hip_Op<"hipblaslt.matmul", []> {
     AnyMemRef:$C
   );
   let assemblyFormat = [{
-    `(` $handle `,` $A `,` $B `,` $C `)`
-    attr-dict `:` `(` type($A) `,` type($B) `,` type($C) `)` `->` `(` `)`
+    `(` $handle `)`
+    `ins` `(` $A `,` $B `:` type($A) `,` type($B) `)`
+    `outs` `(` $C `:` type($C) `)` attr-dict
   }];
 }
 
@@ -157,8 +132,9 @@ def Hip_MiopenRmsNormOp : Hip_Op<"miopen.rms_norm", []> {
     AnyMemRef:$output
   );
   let assemblyFormat = [{
-    `(` $handle `,` $input `,` $weight `,` $output `)`
-    attr-dict `:` `(` type($input) `,` type($weight) `,` type($output) `)` `->` `(` `)`
+    `(` $handle `)`
+    `ins` `(` $input `,` $weight `:` type($input) `,` type($weight) `)`
+    `outs` `(` $output `:` type($output) `)` attr-dict
   }];
 }
 
@@ -173,9 +149,9 @@ def Hip_MiopenSkipRmsNormOp : Hip_Op<"miopen.skip_rms_norm", []> {
     AnyMemRef:$residual
   );
   let assemblyFormat = [{
-    `(` $handle `,` $x `,` $skip `,` $weight `,` $output `,` $residual `)`
-    attr-dict `:` `(` type($x) `,` type($skip) `,` type($weight) `,`
-                      type($output) `,` type($residual) `)` `->` `(` `)`
+    `(` $handle `)`
+    `ins` `(` $x `,` $skip `,` $weight `:` type($x) `,` type($skip) `,` type($weight) `)`
+    `outs` `(` $output `,` $residual `:` type($output) `,` type($residual) `)` attr-dict
   }];
 }
 
@@ -190,9 +166,9 @@ def Hip_MiopenRopeOp : Hip_Op<"miopen.rope", []> {
     Index:$start_pos
   );
   let assemblyFormat = [{
-    `(` $handle `,` $q `,` $k `,` $cos_cache `,` $sin_cache `,` $start_pos `)`
-    attr-dict `:` `(` type($q) `,` type($k) `,`
-                      type($cos_cache) `,` type($sin_cache) `,` type($start_pos) `)` `->` `(` `)`
+    `(` $handle `,` $start_pos `)`
+    `ins` `(` $cos_cache `,` $sin_cache `:` type($cos_cache) `,` type($sin_cache) `)`
+    `outs` `(` $q `,` $k `:` type($q) `,` type($k) `)` attr-dict
   }];
 }
 
@@ -205,8 +181,9 @@ def Hip_MiopenAddOp : Hip_Op<"miopen.add", []> {
     AnyMemRef:$C
   );
   let assemblyFormat = [{
-    `(` $handle `,` $A `,` $B `,` $C `)`
-    attr-dict `:` `(` type($A) `,` type($B) `,` type($C) `)` `->` `(` `)`
+    `(` $handle `)`
+    `ins` `(` $A `,` $B `:` type($A) `,` type($B) `)`
+    `outs` `(` $C `:` type($C) `)` attr-dict
   }];
 }
 
@@ -219,8 +196,9 @@ def Hip_MiopenMulOp : Hip_Op<"miopen.mul", []> {
     AnyMemRef:$C
   );
   let assemblyFormat = [{
-    `(` $handle `,` $A `,` $B `,` $C `)`
-    attr-dict `:` `(` type($A) `,` type($B) `,` type($C) `)` `->` `(` `)`
+    `(` $handle `)`
+    `ins` `(` $A `,` $B `:` type($A) `,` type($B) `)`
+    `outs` `(` $C `:` type($C) `)` attr-dict
   }];
 }
 
@@ -235,8 +213,9 @@ def Hip_GatherOp : Hip_Op<"gather", []> {
     AnyMemRef:$output
   );
   let assemblyFormat = [{
-    `(` $handle `,` $indices `,` $table `,` $output `)`
-    attr-dict `:` `(` type($indices) `,` type($table) `,` type($output) `)` `->` `(` `)`
+    `(` $handle `)`
+    `ins` `(` $indices `,` $table `:` type($indices) `,` type($table) `)`
+    `outs` `(` $output `:` type($output) `)` attr-dict
   }];
 }
 
@@ -248,8 +227,9 @@ def Hip_SiluOp : Hip_Op<"silu", []> {
     AnyMemRef:$output
   );
   let assemblyFormat = [{
-    `(` $handle `,` $input `,` $output `)`
-    attr-dict `:` `(` type($input) `,` type($output) `)` `->` `(` `)`
+    `(` $handle `)`
+    `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)` attr-dict
   }];
 }
 
@@ -267,11 +247,9 @@ def Hip_GqaOp : Hip_Op<"gqa", []> {
     Index:$seq_len
   );
   let assemblyFormat = [{
-    `(` $handle `,` $q `,` $k `,` $v `,` $kv_cache `,` $output `,`
-        $layer `,` $start_pos `,` $seq_len `)`
-    attr-dict `:` `(` type($q) `,` type($k) `,` type($v) `,`
-                      type($kv_cache) `,` type($output) `,`
-                      type($layer) `,` type($start_pos) `,` type($seq_len) `)` `->` `(` `)`
+    `(` $handle `,` $layer `,` $start_pos `,` $seq_len `)`
+    `ins` `(` $q `,` $k `,` $v `:` type($q) `,` type($k) `,` type($v) `)`
+    `outs` `(` $kv_cache `,` $output `:` type($kv_cache) `,` type($output) `)` attr-dict
   }];
 }
 

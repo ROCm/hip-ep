@@ -24,6 +24,8 @@ int main(int argc, char **argv) {
 
   mlir::hip::registerHipPasses();
   mlir::registerConvertFuncToLLVMPass();
+  mlir::registerArithToLLVMConversionPass();
+  mlir::registerFinalizeMemRefToLLVMConversionPass();
   mlir::registerSCFToControlFlowPass();
   mlir::registerConvertControlFlowToLLVMPass();
   mlir::registerReconcileUnrealizedCastsPass();

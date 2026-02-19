@@ -85,6 +85,8 @@ target_link_libraries(hip-opt PRIVATE
   MLIRSCFDialect
   MLIRLLVMDialect
   MLIRLLVMCommonConversion
+  MLIRArithToLLVM
+  MLIRMemRefToLLVM
   MLIRFuncToLLVM
   MLIRSCFToControlFlow
   MLIRControlFlowToLLVM
