@@ -202,7 +202,37 @@ def Hip_MiopenMulOp : Hip_Op<"miopen.mul", []> {
   }];
 }
 
+def Hip_MiopenSoftmaxOp : Hip_Op<"miopen.softmax", []> {
+  let summary = "Softmax via miopenSoftmaxForward_V2 (row-wise, last dim)";
+  let arguments = (ins
+    Hip_HandleType:$handle,
+    AnyMemRef:$input,
+    AnyMemRef:$output
+  );
+  let assemblyFormat = [{
+    `(` $handle `)`
+    `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)` attr-dict
+  }];
+}
+
 // ===== Custom HIP kernel ops (no library equivalent) =========================
+
+def Hip_TransposeOp : Hip_Op<"transpose", []> {
+  let summary = "N-D transpose swapping two specified dimensions";
+  let arguments = (ins
+    Hip_HandleType:$handle,
+    Index:$dim0,
+    Index:$dim1,
+    AnyMemRef:$input,
+    AnyMemRef:$output
+  );
+  let assemblyFormat = [{
+    `(` $handle `,` $dim0 `,` $dim1 `)`
+    `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)` attr-dict
+  }];
+}
 
 def Hip_GatherOp : Hip_Op<"gather", []> {
   let summary = "Embedding table lookup";

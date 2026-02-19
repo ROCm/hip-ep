@@ -34,14 +34,18 @@ These operations are lowered to LLVM IR function calls that interface with the H
 - `ops_runtime/miopen_add.cpp` - MIOpen element-wise add runtime (full implementation)
 - `ops_runtime/miopen_mul.cpp` - MIOpen element-wise mul runtime (full implementation)
 - `ops_runtime/miopen_rms_norm.cpp` - MIOpen RMS normalization runtime (full implementation)
+- `ops_runtime/miopen_softmax.cpp` - MIOpen softmax runtime (full implementation)
+- `ops_runtime/transpose.cpp` - Custom 2D transpose runtime (full implementation)
 - `examples/main_gemm.cpp` - Main driver for the matmul test
 - `examples/main_add.cpp` - Main driver for the add test
 - `examples/main_mul.cpp` - Main driver for the mul test
 - `examples/main_rms_norm.cpp` - Main driver for the rms_norm test
+- `examples/main_attention.cpp` - Main driver for the attention test
 - `scripts/run_full_pipeline_hipblaslt.bat` - Matmul pipeline (hipBLASLt)
 - `scripts/run_full_pipeline_miopen_add.bat` - Add pipeline (MIOpen)
 - `scripts/run_full_pipeline_miopen_mul.bat` - Mul pipeline (MIOpen)
 - `scripts/run_full_pipeline_miopen_rms_norm.bat` - RMS Norm pipeline (MIOpen)
+- `scripts/run_full_pipeline_attention.bat` - Attention pipeline (hipBLASLt + MIOpen + custom)
 
 ## Prerequisites: Building TheRock (ROCm) on Windows
 
@@ -197,12 +201,16 @@ All compute ops use Destination-Passing Style: read-only inputs are in `ins(...)
 output destinations are in `outs(...)`. The handle and scalar params are leading
 positional arguments.
 
-- **`hip.hipblaslt.matmul(%handle) ins(%A, %B : ...) outs(%C : ...)`** -- Matrix multiply C = A @ B via hipBLASLt.
-- **`hip.miopen.rms_norm(%handle) ins(%input, %weight : ...) outs(%output : ...)`** -- RMS normalization.
-- **`hip.miopen.skip_rms_norm(%handle) ins(%x, %skip, %weight : ...) outs(%output, %residual : ...)`** -- Fused Add + RMS normalization.
-- **`hip.miopen.rope(%handle, %start_pos) ins(%cos, %sin : ...) outs(%q, %k : ...)`** -- Rotary positional embeddings.
+All ops are rank-generic (2D and 3D tensors supported). For LLM workloads, tensors are typically `[B, S, D]` (batch, sequence, model_dim).
+
+- **`hip.hipblaslt.matmul(%handle) ins(%A, %B : ...) outs(%C : ...)`** -- Matrix multiply. Supports batched GEMM (3D) and weight broadcast (3D x 2D).
+- **`hip.miopen.rms_norm(%handle) ins(%input, %weight : ...) outs(%output : ...)`** -- RMS normalization. Flattens batch dims for MIOpen.
+- **`hip.miopen.softmax(%handle) ins(%input : ...) outs(%output : ...)`** -- Row-wise softmax over last dim.
 - **`hip.miopen.add(%handle) ins(%A, %B : ...) outs(%C : ...)`** -- Element-wise add.
 - **`hip.miopen.mul(%handle) ins(%A, %B : ...) outs(%C : ...)`** -- Element-wise multiply.
+- **`hip.transpose(%handle, %dim0, %dim1) ins(%input : ...) outs(%output : ...)`** -- N-D transpose swapping two dims.
+- **`hip.miopen.skip_rms_norm(%handle) ins(%x, %skip, %weight : ...) outs(%output, %residual : ...)`** -- Fused Add + RMS normalization.
+- **`hip.miopen.rope(%handle, %start_pos) ins(%cos, %sin : ...) outs(%q, %k : ...)`** -- Rotary positional embeddings.
 - **`hip.gather(%handle) ins(%indices, %table : ...) outs(%output : ...)`** -- Embedding table lookup.
 - **`hip.silu(%handle) ins(%input : ...) outs(%output : ...)`** -- SiLU activation.
 - **`hip.gqa(%handle, %layer, %start_pos, %seq_len) ins(%q, %k, %v : ...) outs(%kv_cache, %output : ...)`** -- Grouped query attention.
@@ -214,8 +222,9 @@ The full pipeline from MLIR to a runnable executable using two chained matmuls:
 ```
 test_gemm.mlir  -->  hip-opt  -->  mlir-translate  -->  llc  -->  gemm.obj
                                                                       |
-ops_runtime/all_runtime.cpp  -->  cl.exe  -->  runtime.obj            |
-main_gemm.cpp                -->  cl.exe  -->  main.obj               |
+ops_runtime/hip_runtime.cpp      -->  cl.exe  -->  hip_runtime.obj    |
+ops_runtime/hipblaslt_matmul.cpp -->  cl.exe  -->  hipblaslt_matmul.obj|
+examples/main_gemm.cpp           -->  cl.exe  -->  main.obj           |
                                                                       v
                                               link.exe  -->  matmul_test.exe
                                                 (+ hipblaslt.lib, amdhip64.lib)

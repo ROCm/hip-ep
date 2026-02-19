@@ -38,10 +38,11 @@ Matrix multiplication backed by the hipBLASLt library (`hipblasLtMatmul`).
 
 | Op | DPS Syntax | Runtime | Status |
 |---|---|---|---|
-| `hip.hipblaslt.matmul` | `(%handle) ins(%A, %B : ...) outs(%C : ...)` | `hip_hipblaslt_matmul(handle, A, B, C, M, K, N)` | Full impl |
+| `hip.hipblaslt.matmul` | `(%handle) ins(%A, %B : ...) outs(%C : ...)` | `hip_hipblaslt_matmul(handle, A, B, C, rankA, rankB, batch, M, K, N)` | Full impl |
 
-The lowering extracts M, K, N from the memref descriptors (A is [M,K], B is [K,N])
-and passes them to the runtime alongside the device pointers.
+Rank-generic: batch is determined from A's rank (3D -> batched, 2D -> single).
+If B has fewer dims than A (e.g. `X[B,S,D] @ W[D,D]`), B is broadcast across
+batches (`stride_B = 0`). Supports strided batched GEMM via hipBLASLt.
 
 ---
 
@@ -56,7 +57,7 @@ Ops backed by the MIOpen library. Each maps to a specific MIOpen C API call.
 | `hip.miopen.rms_norm` | `(%handle) ins(%input, %weight : ...) outs(%output : ...)` | `miopenT5LayerNormForward` | Full impl |
 | `hip.miopen.skip_rms_norm` | `(%handle) ins(%x, %skip, %weight : ...) outs(%output, %residual : ...)` | `miopenAddLayerNormForward` (T5 mode) | Stub |
 
-The `rms_norm` lowering extracts N and D from the input memref (input is [N,D]) and
+Rank-generic: for 3D input `[B,S,D]`, the lowering flattens `N = B*S, D = D` and
 passes them to the runtime: `hip_miopen_rms_norm(handle, input, weight, output, N, D)`.
 
 `skip_rms_norm` fuses Add + RMSNorm into a single kernel:
@@ -79,17 +80,28 @@ Uses `MIOPEN_ELEMENTWISE_AFFINE_T5` normalization mode.
 The binary op lowering computes `numElements` (product of all memref dimensions) and
 passes it to the runtime: `hip_miopen_{add,mul}(handle, A, B, C, numElements)`.
 
+### Softmax
+
+| Op | DPS Syntax | MIOpen API | Status |
+|---|---|---|---|
+| `hip.miopen.softmax` | `(%handle) ins(%input : ...) outs(%output : ...)` | `miopenSoftmaxForward_V2` | Full impl |
+
+Row-wise softmax over the last dimension. Rank-generic: for 3D `[B,S,S]`, the
+lowering flattens `rows = B*S, cols = S`. The runtime uses a 4D descriptor
+`[rows, cols, 1, 1]` with `MIOPEN_SOFTMAX_MODE_CHANNEL` to normalize over cols.
+
 ---
 
 ## Custom HIP Kernel Ops
 
-Ops with no MIOpen or hipBLASLt equivalent. These require custom HIP kernels.
+Ops with no MIOpen or hipBLASLt equivalent. Implemented as pure C++ kernels.
 
-| Op | DPS Syntax | Purpose |
-|---|---|---|
-| `hip.gather` | `(%handle) ins(%indices, %table : ...) outs(%output : ...)` | Embedding table lookup |
-| `hip.silu` | `(%handle) ins(%input : ...) outs(%output : ...)` | SiLU activation: `x * sigmoid(x)` |
-| `hip.gqa` | `(%handle, %layer, %start_pos, %seq_len) ins(%q, %k, %v : ...) outs(%kv_cache, %output : ...)` | Grouped query attention with KV cache |
+| Op | DPS Syntax | Purpose | Status |
+|---|---|---|---|
+| `hip.transpose` | `(%handle, %dim0, %dim1) ins(%input : ...) outs(%output : ...)` | N-D transpose swapping two dims | Full impl |
+| `hip.gather` | `(%handle) ins(%indices, %table : ...) outs(%output : ...)` | Embedding table lookup | Stub |
+| `hip.silu` | `(%handle) ins(%input : ...) outs(%output : ...)` | SiLU activation: `x * sigmoid(x)` | Stub |
+| `hip.gqa` | `(%handle, %layer, %start_pos, %seq_len) ins(%q, %k, %v : ...) outs(%kv_cache, %output : ...)` | Grouped query attention with KV cache | Stub |
 
 ---
 
@@ -105,38 +117,39 @@ No runtime -- inlined and erased during lowering to LLVM.
 
 ---
 
-## Example: Two Chained Matmuls (DPS)
+## Example: 3D Matmul with Weight Broadcast (DPS)
 
 ```mlir
 func.func @two_matmuls(
-    %A:  memref<?x?xf32, 1>,
-    %B0: memref<?x?xf32, 1>,
-    %B1: memref<?x?xf32, 1>,
-    %C:  memref<?x?xf32, 1>) {
+    %A:  memref<?x?x?xf32, 1>,   // [B, S, K]
+    %B0: memref<?x?xf32, 1>,     // [K, N]  (2D, broadcast across batch)
+    %B1: memref<?x?xf32, 1>,     // [N, P]
+    %C:  memref<?x?x?xf32, 1>) { // [B, S, P]
   %handle = hip.create_handle() : !hip.handle
 
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
-  %M = memref.dim %A, %c0 : memref<?x?xf32, 1>
+  %B = memref.dim %A, %c0 : memref<?x?x?xf32, 1>
+  %S = memref.dim %A, %c1 : memref<?x?x?xf32, 1>
   %N = memref.dim %B0, %c1 : memref<?x?xf32, 1>
-  %tmp = hip.alloc(%handle, %M, %N) : memref<?x?xf32, 1>
+  %tmp = hip.alloc(%handle, %B, %S, %N) : memref<?x?x?xf32, 1>
 
   hip.hipblaslt.matmul(%handle)
-      ins(%A, %B0 : memref<?x?xf32, 1>, memref<?x?xf32, 1>)
-      outs(%tmp : memref<?x?xf32, 1>)
+      ins(%A, %B0 : memref<?x?x?xf32, 1>, memref<?x?xf32, 1>)
+      outs(%tmp : memref<?x?x?xf32, 1>)
 
   hip.hipblaslt.matmul(%handle)
-      ins(%tmp, %B1 : memref<?x?xf32, 1>, memref<?x?xf32, 1>)
-      outs(%C : memref<?x?xf32, 1>)
+      ins(%tmp, %B1 : memref<?x?x?xf32, 1>, memref<?x?xf32, 1>)
+      outs(%C : memref<?x?x?xf32, 1>)
 
-  hip.free(%handle, %tmp) : memref<?x?xf32, 1>
+  hip.free(%handle, %tmp) : memref<?x?x?xf32, 1>
   hip.destroy_handle(%handle) : !hip.handle
   return
 }
 ```
 
-`%tmp` is the internally managed intermediate buffer (allocated and freed
-within the function). `%C` is the caller-provided output destination.
+`%A` is 3D `[B,S,K]`, `%B0` is 2D `[K,N]` -- the matmul broadcasts B0 across
+all batches (stride_B=0). `%tmp` is the internally managed intermediate.
 
 ---
 
@@ -147,8 +160,10 @@ All ops are lowered to LLVM IR by the `--convert-hip-to-llvm` pass in
 
 - **Compute ops** lower to `llvm.call @hip_<op_name>(...)`. Memref arguments are
   converted to raw pointers via `MemRefDescriptor(...).allocatedPtr()`.
-  Shape metadata is extracted from memref descriptors and passed to the runtime:
-  M/K/N for matmul, numElements for add/mul, N/D for rms_norm.
+  Shape metadata is extracted rank-generically from memref descriptors:
+  `rankA/rankB/batch/M/K/N` for matmul, `numElements` for add/mul,
+  `rows/cols` (flattened) for softmax and rms_norm,
+  `rank/dim0/dim1/shape` for transpose.
 - **Region ops** are inlined: body ops moved to parent block, region op erased.
 - **`!hip.handle`** is converted to `!llvm.ptr`.
 
@@ -175,8 +190,10 @@ ops_runtime/
   miopen_add.cpp          MIOpen add (full impl)
   miopen_mul.cpp          MIOpen mul (full impl)
   miopen_rms_norm.cpp     MIOpen RMS norm (full impl)
+  miopen_softmax.cpp      MIOpen softmax (full impl)
   miopen_skip_rms_norm.cpp  Stub
   miopen_rope.cpp         Stub
+  transpose.cpp           N-D transpose (full impl, pure C++)
   gather.cpp              Stub
   silu.cpp                Stub
   gqa.cpp                 Stub
@@ -186,12 +203,14 @@ examples/
   test_add.mlir           Two chained adds (DPS, MIOpen)
   test_mul.mlir           Two chained muls (DPS, MIOpen)
   test_rms_norm.mlir      Two chained RMS norms (DPS, MIOpen)
+  test_attention.mlir     Single-head attention from composed ops
   test_e2e.mlir           Self-contained transformer layer
   model_hip.mlir          Generated HIP dialect from Llama-3.2-1B
   main_gemm.cpp           C++ driver for test_gemm
   main_add.cpp            C++ driver for test_add
   main_mul.cpp            C++ driver for test_mul
   main_rms_norm.cpp       C++ driver for test_rms_norm
+  main_attention.cpp      C++ driver for test_attention
   main_e2e.cpp            C++ driver for test_e2e
 
 scripts/
@@ -199,4 +218,5 @@ scripts/
   run_full_pipeline_miopen_add.bat       Add pipeline (MIOpen)
   run_full_pipeline_miopen_mul.bat       Mul pipeline (MIOpen)
   run_full_pipeline_miopen_rms_norm.bat  RMS Norm pipeline (MIOpen)
+  run_full_pipeline_attention.bat       Attention pipeline (composed ops)
 ```

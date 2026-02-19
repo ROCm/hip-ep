@@ -38,6 +38,8 @@ static constexpr const char *kMiopenSkipRmsNorm = "hip_miopen_skip_rms_norm";
 static constexpr const char *kMiopenRope = "hip_miopen_rope";
 static constexpr const char *kMiopenAdd = "hip_miopen_add";
 static constexpr const char *kMiopenMul = "hip_miopen_mul";
+static constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
+static constexpr const char *kHipTranspose = "hip_transpose";
 static constexpr const char *kHipGather = "hip_gather";
 static constexpr const char *kHipSilu = "hip_silu";
 static constexpr const char *kHipGqa = "hip_gqa";
@@ -204,8 +206,8 @@ using HipblasltGraphOpLowering = GraphRegionOpLowering<HipblasltGraphOp>;
 // ===== hipBLASLt ops =========================================================
 
 // hip.hipblaslt.matmul(handle) ins(A, B) outs(C)
-//   -> llvm.call @hip_hipblaslt_matmul(handle, A_ptr, B_ptr, C_ptr, M, K, N)
-// Dimensions extracted from memref descriptors: A is [M,K], B is [K,N].
+//   -> hip_hipblaslt_matmul(handle, A, B, C, rankA, rankB, batch, M, K, N)
+// Rank-generic: batch from A if 3D, B broadcast if rankB < rankA.
 struct HipblasltMatmulOpLowering
     : public ConvertOpToLLVMPattern<HipblasltMatmulOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -219,25 +221,38 @@ struct HipblasltMatmulOpLowering
     Type ptrType = getPtrType();
     Type indexType = getIndexType();
 
+    // (handle, A, B, C, rankA, rankB, batch, M, K, N)
     SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, ptrType,
+                                    indexType, indexType, indexType,
                                     indexType, indexType, indexType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kHipblasltMatmul, paramTypes, voidType);
     if (failed(funcOp))
       return failure();
 
+    int rankA = cast<MemRefType>(op.getA().getType()).getRank();
+    int rankB = cast<MemRefType>(op.getB().getType()).getRank();
     MemRefDescriptor aDesc(adaptor.getA());
     MemRefDescriptor bDesc(adaptor.getB());
-    Value M = aDesc.size(rewriter, loc, 0);
-    Value K = aDesc.size(rewriter, loc, 1);
-    Value N = bDesc.size(rewriter, loc, 1);
+
+    Value one = rewriter.create<LLVM::ConstantOp>(
+        loc, indexType, rewriter.getIndexAttr(1));
+    Value rankAVal = rewriter.create<LLVM::ConstantOp>(
+        loc, indexType, rewriter.getIndexAttr(rankA));
+    Value rankBVal = rewriter.create<LLVM::ConstantOp>(
+        loc, indexType, rewriter.getIndexAttr(rankB));
+
+    Value batch = (rankA == 3) ? aDesc.size(rewriter, loc, 0) : one;
+    Value M = aDesc.size(rewriter, loc, rankA - 2);
+    Value K = aDesc.size(rewriter, loc, rankA - 1);
+    Value N = bDesc.size(rewriter, loc, rankB - 1);
 
     SmallVector<Value> args = {
         adaptor.getHandle(),
         extractMemRefPtr(adaptor.getA(), rewriter, loc),
         extractMemRefPtr(adaptor.getB(), rewriter, loc),
         extractMemRefPtr(adaptor.getC(), rewriter, loc),
-        M, K, N};
+        rankAVal, rankBVal, batch, M, K, N};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -248,8 +263,9 @@ struct HipblasltMatmulOpLowering
 // ===== MIOpen ops ============================================================
 
 // hip.miopen.rms_norm(%handle) ins(%input, %weight) outs(%output)
-//   -> hip_miopen_rms_norm(handle, input_ptr, weight_ptr, output_ptr, N, D)
-// input is [N,D], weight is [D], output is [N,D].
+//   -> hip_miopen_rms_norm(handle, input, weight, output, N, D)
+// Rank-generic: N = product of all dims except last, D = last dim.
+// For 3D [B,S,D]: N = B*S, D = D.
 struct MiopenRmsNormOpLowering
     : public ConvertOpToLLVMPattern<MiopenRmsNormOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -270,9 +286,15 @@ struct MiopenRmsNormOpLowering
     if (failed(funcOp))
       return failure();
 
+    int rank = cast<MemRefType>(op.getInput().getType()).getRank();
     MemRefDescriptor inputDesc(adaptor.getInput());
+
+    // D = last dim; N = product of all other dims
+    Value D = inputDesc.size(rewriter, loc, rank - 1);
     Value N = inputDesc.size(rewriter, loc, 0);
-    Value D = inputDesc.size(rewriter, loc, 1);
+    for (int i = 1; i < rank - 1; i++)
+      N = LLVM::MulOp::create(rewriter, loc, N,
+                              inputDesc.size(rewriter, loc, i));
 
     SmallVector<Value> args = {
         adaptor.getHandle(),
@@ -402,7 +424,100 @@ struct MiopenBinaryOpLowering : public ConvertOpToLLVMPattern<OpTy> {
   }
 };
 
+// hip.miopen.softmax(%handle) ins(%input) outs(%output)
+//   -> hip_miopen_softmax(handle, input, output, rows, cols)
+// Rank-generic: softmax over last dim. For 3D [B,S,D], rows = B*S, cols = D.
+struct MiopenSoftmaxOpLowering
+    : public ConvertOpToLLVMPattern<MiopenSoftmaxOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(MiopenSoftmaxOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type voidType = getVoidType();
+    Type ptrType = getPtrType();
+    Type indexType = getIndexType();
+
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType,
+                                    indexType, indexType};
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kMiopenSoftmax, paramTypes, voidType);
+    if (failed(funcOp))
+      return failure();
+
+    int rank = cast<MemRefType>(op.getInput().getType()).getRank();
+    MemRefDescriptor inputDesc(adaptor.getInput());
+
+    // cols = last dim; rows = product of all other dims
+    Value cols = inputDesc.size(rewriter, loc, rank - 1);
+    Value rows = inputDesc.size(rewriter, loc, 0);
+    for (int i = 1; i < rank - 1; i++)
+      rows = LLVM::MulOp::create(rewriter, loc, rows,
+                                 inputDesc.size(rewriter, loc, i));
+
+    SmallVector<Value> args = {
+        adaptor.getHandle(),
+        extractMemRefPtr(adaptor.getInput(), rewriter, loc),
+        extractMemRefPtr(adaptor.getOutput(), rewriter, loc),
+        rows, cols};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 // ===== Custom HIP kernel ops ================================================
+
+// hip.transpose(%handle, %dim0, %dim1) ins(%input) outs(%output)
+//   -> hip_transpose(handle, input, output, rank, dim0, dim1, s0, s1, s2)
+// Swaps the two specified dimensions. Pads shape to 3 dims (trailing 1s).
+struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(TransposeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type voidType = getVoidType();
+    Type ptrType = getPtrType();
+    Type indexType = getIndexType();
+
+    // (handle, input, output, rank, dim0, dim1, s0, s1, s2)
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType,
+                                    indexType, indexType, indexType,
+                                    indexType, indexType, indexType};
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kHipTranspose, paramTypes, voidType);
+    if (failed(funcOp))
+      return failure();
+
+    int rank = cast<MemRefType>(op.getInput().getType()).getRank();
+    MemRefDescriptor inputDesc(adaptor.getInput());
+    Value rankVal = rewriter.create<LLVM::ConstantOp>(
+        loc, indexType, rewriter.getIndexAttr(rank));
+    Value one = rewriter.create<LLVM::ConstantOp>(
+        loc, indexType, rewriter.getIndexAttr(1));
+
+    SmallVector<Value, 3> shape;
+    for (int i = 0; i < 3; i++)
+      shape.push_back(i < rank ? inputDesc.size(rewriter, loc, i) : one);
+
+    SmallVector<Value> args = {
+        adaptor.getHandle(),
+        extractMemRefPtr(adaptor.getInput(), rewriter, loc),
+        extractMemRefPtr(adaptor.getOutput(), rewriter, loc),
+        rankVal, adaptor.getDim0(), adaptor.getDim1(),
+        shape[0], shape[1], shape[2]};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
 
 // hip.gather(handle, indices, table, output)
 struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
@@ -536,7 +651,9 @@ struct ConvertHipToLLVMPass
                  // MIOpen
                  MiopenRmsNormOpLowering, MiopenSkipRmsNormOpLowering,
                  MiopenRopeOpLowering,
+                 MiopenSoftmaxOpLowering,
                  // Custom
+                 TransposeOpLowering,
                  GatherOpLowering, SiluOpLowering, GqaOpLowering
                  >(typeConverter);
     patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter, kMiopenAdd);
