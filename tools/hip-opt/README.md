@@ -134,7 +134,7 @@ TheRock\build\dist\rocm\
 ###  Set Environment Variable
 
 ```cmd
-set THEROCK_DIST=C:\Users\chiz\work\gpu\TheRock\build\dist\rocm
+set THEROCK_DIST=C:\path\to\TheRock\build\dist\rocm
 ```
 
 ### Build Troubleshooting (TheRock)
@@ -149,7 +149,7 @@ set THEROCK_DIST=C:\Users\chiz\work\gpu\TheRock\build\dist\rocm
 Build LLVM and MLIR first:
 
 ```bash
-cd C:\local\llvm-project
+cd /path/to/llvm-project
 cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_PROJECTS=mlir -DLLVM_TARGETS_TO_BUILD=host
 cmake --build build
 ```
@@ -158,7 +158,7 @@ Then build hip-opt:
 
 ```bash
 mkdir build && cd build
-cmake .. -DLLVM_DIR=C:/local/llvm-project/build/lib/cmake/llvm -DMLIR_DIR=C:/local/llvm-project/build/lib/cmake/mlir
+cmake .. -DLLVM_DIR=/path/to/llvm-project/build/lib/cmake/llvm -DMLIR_DIR=/path/to/llvm-project/build/lib/cmake/mlir
 cmake --build .
 ```
 
