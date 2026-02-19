@@ -203,6 +203,7 @@ examples/
   test_add.mlir           Two chained adds (DPS, MIOpen)
   test_mul.mlir           Two chained muls (DPS, MIOpen)
   test_rms_norm.mlir      Two chained RMS norms (DPS, MIOpen)
+  test_softmax.mlir       Two chained softmaxes (DPS, MIOpen)
   test_attention.mlir     Single-head attention from composed ops
   test_e2e.mlir           Self-contained transformer layer
   model_hip.mlir          Generated HIP dialect from Llama-3.2-1B
@@ -210,6 +211,7 @@ examples/
   main_add.cpp            C++ driver for test_add
   main_mul.cpp            C++ driver for test_mul
   main_rms_norm.cpp       C++ driver for test_rms_norm
+  main_softmax.cpp        C++ driver for test_softmax
   main_attention.cpp      C++ driver for test_attention
   main_e2e.cpp            C++ driver for test_e2e
 
@@ -218,5 +220,6 @@ scripts/
   run_full_pipeline_miopen_add.bat       Add pipeline (MIOpen)
   run_full_pipeline_miopen_mul.bat       Mul pipeline (MIOpen)
   run_full_pipeline_miopen_rms_norm.bat  RMS Norm pipeline (MIOpen)
+  run_full_pipeline_miopen_softmax.bat   Softmax pipeline (MIOpen)
   run_full_pipeline_attention.bat       Attention pipeline (composed ops)
 ```
