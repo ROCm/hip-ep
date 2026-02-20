@@ -1,10 +1,13 @@
 # Understanding the Problem
 
-Your current pipeline is AOT (Ahead-of-Time):
+Your current pipeline compiles MLIR to a DLL using `hip-compiler`:
 
 ```
-MLIR → hip-opt → mlir-translate → llc → .obj → link.exe → .exe
+MLIR → hip-compiler → model.dll + model.lib
 ```
+
+`hip-compiler` performs the full pipeline internally: MLIR pass pipeline, LLVM IR
+translation, native code generation, and linking with `hip_runtime_static.lib`.
 
 The two alternative in-memory execution paths you've considered both have problems:
 
@@ -19,7 +22,8 @@ The LLVM interpreter is a legitimate third path. Here's the full picture.
 
 ### Approach 1: AOT Compiler (Current)
 
-What you have now. Produces `.obj` → `.exe` on disk.
+What you have now. `hip-compiler` produces `.dll` + `.lib` from `.mlir`. Each test
+has a C++ driver that links against the import library.
 
 ### Approach 2: JIT (MLIR ExecutionEngine / LLVM ORC JIT)
 
@@ -99,7 +103,8 @@ No unsigned DLLs. No executable memory. The `.bc` file is just data — like a c
 ## New Pipeline
 
 ```
-MLIR → hip-opt → mlir-translate → llvm-as → gemm.bc (bitcode, data)
-                                                │
-                              hip-runner.exe loads & interprets
+MLIR → hip-compiler → model.dll + model.lib    (AOT: current approach)
+MLIR → hip-compiler → model.bc                 (interpreter: future approach)
+                          │
+            hip-runner.exe loads & interprets .bc
 ```

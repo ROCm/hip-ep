@@ -13,7 +13,7 @@
 #include <vector>
 
 // X[B,S,D]=9, Wq[D,D]=7, Wk[D,D]=7, Wv[D,D]=7, scale[B,S,S]=9, out[B,S,D]=9
-extern "C" void attention(
+extern "C" __declspec(dllimport) void attention(
     float *X_a, float *X_al, int64_t X_o, int64_t X_s0, int64_t X_s1, int64_t X_s2, int64_t X_st0, int64_t X_st1, int64_t X_st2,
     float *Wq_a, float *Wq_al, int64_t Wq_o, int64_t Wq_s0, int64_t Wq_s1, int64_t Wq_st0, int64_t Wq_st1,
     float *Wk_a, float *Wk_al, int64_t Wk_o, int64_t Wk_s0, int64_t Wk_s1, int64_t Wk_st0, int64_t Wk_st1,

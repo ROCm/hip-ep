@@ -10,15 +10,16 @@ GEMM demo to full LLM model inference.
 
 ### What is AOT?
 
-AOT (Ahead-of-Time) means the code is fully compiled before execution. In our current
-pipeline:
+AOT (Ahead-of-Time) means the code is fully compiled before execution. The current
+pipeline uses `hip-compiler` to compile MLIR directly to a DLL:
 
 ```
-MLIR → hip-opt → mlir-translate → llc → .obj → link.exe → .exe
+MLIR → hip-compiler → model.dll + model.lib
 ```
 
-Every step produces a file on disk, and the final `.exe` is run as a normal program.
-The entire compilation is done before the program ever starts — hence "ahead of time".
+The `hip-compiler` tool performs all steps internally (MLIR lowering, LLVM IR
+translation, native code generation, and linking with `hip_runtime_static.lib`).
+The resulting `.dll` is loaded by a driver program at runtime.
 
 This contrasts with JIT (Just-in-Time), where compilation and execution happen in the
 same process at runtime.
@@ -32,14 +33,14 @@ On Windows, code signing works as follows:
 2. You sign `.exe` / `.dll` files using `signtool.exe`
 3. Windows, antivirus (AV), and EDR software check this signature to determine trust
 
-Our pipeline uses `link.exe` to produce a raw binary. There is no signing step, so the
-output is **unsigned**. Compare:
+Our pipeline uses `hip-compiler` to produce a DLL from MLIR. There is no signing step,
+so the output is **unsigned**. Compare:
 
 | Binary | Signed? | Why |
 |---|---|---|
 | `amdhip64.dll` | Yes (AMD-signed) | AMD signs it with their certificate |
 | `onnxruntime.dll` | Yes (Microsoft-signed) | Microsoft signs it |
-| Our `gemm.exe` | **No (unsigned)** | We only compiled and linked — no signing step |
+| Our `model.dll` | **No (unsigned)** | We only compiled and linked -- no signing step |
 
 Unsigned executables on enterprise machines may be:
 - Flagged or quarantined by antivirus
@@ -50,10 +51,12 @@ Unsigned executables on enterprise machines may be:
 
 ## 2. From Standalone EXE to ONNX Runtime Integration
 
-### Current state: standalone demo
+### Current state: DLL-based compilation
 
-The current pipeline produces a standalone `gemm.exe` with its own `main()` entry point.
-This is a proof-of-concept only.
+The current pipeline uses `hip-compiler` to produce a `.dll` from MLIR. Each test has
+its own C++ driver that links against the generated DLL's import library. The driver
+declares the MLIR entry function with `__declspec(dllimport)` and is compiled/linked
+via `cl.exe` against the generated `.lib`.
 
 ### Target state: ONNX Runtime Execution Provider
 
@@ -69,10 +72,10 @@ Application (.exe)
 ```
 
 Our EP must run **inside** the ONNX Runtime process, not as a separate `.exe`. When the
-EP needs to execute a GEMM operation, the AOT approach would mean:
+EP needs to execute a subgraph, the AOT approach would mean:
 
 ```
-Runtime discovers GEMM op → MLIR compile → generate kernel.dll → LoadLibrary() → call
+Runtime discovers subgraph → MLIR compile → hip-compiler → kernel.dll → LoadLibrary() → call
 ```
 
 This dynamically generates an **unsigned `.dll`** at runtime, which triggers the same
@@ -170,7 +173,7 @@ Second load (same model):
 
 The cache key is a hash of the model's graph structure. Recompilation is only needed when:
 - The model changes
-- The compiler (`hip-opt`) is upgraded (optimization strategies may differ)
+- The compiler (`hip-compiler`) is upgraded (optimization strategies may differ)
 - The target GPU changes (different tiling strategies)
 - Compilation options are modified
 
@@ -222,22 +225,28 @@ method. The compilation output and execution method are independent choices:
                 = AOT to disk   = JIT        = Interpreter
 ```
 
-### Strategy A: Compile to DLL at runtime
+### Strategy A: Compile to DLL (current approach for standalone tests)
 
 ```cpp
-// At model load time (inside the EP)
-void HipEP::CompileGraph(const OnnxGraph& graph) {
-    auto llvm_ir = generateAndLower(graph);
-    auto obj = compileToObject(llvm_ir);      // LLVM TargetMachine
-    auto dll = linkToDLL(obj);                // link.exe or lld
-    HMODULE h = LoadLibraryA(dll.c_str());
-    run_fn = GetProcAddress(h, "run_gemm");   // native speed
+// hip-compiler does this internally:
+void compile(const char* mlirFile, const char* outputDll) {
+    auto module = parseMLIR(mlirFile);
+    runPassPipeline(module);              // --convert-hip-to-llvm, etc.
+    injectDllExport(module);              // mark entry functions
+    auto llvmIR = translateToLLVMIR(module);
+    auto obj = compileToObject(llvmIR);   // LLVM TargetMachine
+    linkToDLL(obj, outputDll);            // lld-link or link.exe + hip_runtime_static.lib
 }
+
+// Driver code (e.g. main_attention.cpp):
+extern "C" __declspec(dllimport) void attention(...);
+// Compiled and linked against attention.lib by cl.exe
 ```
 
-**Pros:** Best execution performance (native speed).
+**Pros:** Best execution performance (native speed). Clean separation between model DLL
+and driver. Each test has its own driver `.exe` linked against the model `.lib`.
 **Cons:** Requires a linker on target machine. Produces unsigned DLL. `LoadLibrary` of
-unsigned DLL may be blocked by security policies. Requires disk write permission.
+unsigned DLL may be blocked by security policies.
 
 ### Strategy B: JIT (LLVM ORC / MLIR ExecutionEngine)
 
@@ -304,7 +313,7 @@ Security/AV:       Interpreter > AOT DLL > JIT
 
 ```
 Model Load (first time):
-  ONNX model → graph optimization/fusion → MLIR → hip-opt → .bc → cache to disk
+  ONNX model → graph optimization/fusion → MLIR → hip-compiler → .bc → cache to disk
 
 Model Load (subsequent):
   ONNX model → compute graph hash → cache hit → load .bc

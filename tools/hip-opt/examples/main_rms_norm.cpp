@@ -12,7 +12,7 @@
 #include <vector>
 
 // A, B are 3D (9 args each); W0, W1 are 1D (5 args each)
-extern "C" void two_rms_norms(
+extern "C" __declspec(dllimport) void two_rms_norms(
     float *A_a, float *A_al, int64_t A_o, int64_t A_s0, int64_t A_s1, int64_t A_s2, int64_t A_st0, int64_t A_st1, int64_t A_st2,
     float *W0_a, float *W0_al, int64_t W0_o, int64_t W0_s0, int64_t W0_st0,
     float *W1_a, float *W1_al, int64_t W1_o, int64_t W1_s0, int64_t W1_st0,
