@@ -4,7 +4,6 @@
  */
 
 // Helper class headers
-#include "CompilationArtifact.h"
 #include "CompilationConfig.h"
 #include "FusionManager.h"
 #include "MetadataBuilder.h"
@@ -34,10 +33,8 @@ struct Level1MlirPass {
     // 1. Load configuration from provider options
     auto config = CompilationConfig::fromProviderOptions(self.get_context());
     MY_LOG(1) << "Artifact format: "
-              << (config.artifactFormat ==
-                          CompilationConfig::ArtifactFormat::Native
-                      ? "native"
-                      : "llvm_ir");
+              << (config.artifactFormat == ArtifactFormat::Native ? "native"
+                                                                   : "llvm_ir");
 
     // 2. Get MLIR bytecode from graph
     //    Graph.save_string() returns MLIR bytecode format

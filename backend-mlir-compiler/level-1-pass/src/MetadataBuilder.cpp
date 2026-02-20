@@ -3,7 +3,6 @@
  * Licensed under the MIT License.
  */
 #include "MetadataBuilder.h"
-#include "CompilationArtifact.h"
 #include "CompilationConfig.h"
 
 // CRITICAL: morphizen.hpp must be included before any other morphizen headers
@@ -35,10 +34,9 @@ std::optional<std::string> MetadataBuilder::build(
                        .count();
 
   mlir_compilation::MlirCompilationProto proto;
-  proto.set_artifact_format(config.artifactFormat ==
-                                    CompilationConfig::ArtifactFormat::Native
-                                ? "native"
-                                : "llvm_ir");
+  proto.set_artifact_format(config.artifactFormat == ArtifactFormat::Native
+                                 ? "native"
+                                 : "llvm_ir");
   proto.set_compilation_timestamp(timestamp);
   proto.set_compiler_version("mlir-hip-compiler-1.0");
   proto.set_optimization_level(config.optLevel);

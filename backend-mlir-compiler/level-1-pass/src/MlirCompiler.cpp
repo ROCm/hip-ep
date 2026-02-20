@@ -4,7 +4,6 @@
  */
 
 #include "MlirCompiler.h"
-#include "CompilationArtifact.h"
 #include "CompilationConfig.h"
 
 // CRITICAL: morphizen.hpp must be included before any other morphizen headers
