@@ -66,8 +66,32 @@ add_dependencies(hip-opt
   HipOpsIncGen
 )
 
+# Add hip-compiler executable
+add_executable(hip-compiler
+  hip-compiler.cpp
+  HipDialect.cpp
+  HipToLLVM.cpp
+)
+add_dependencies(hip-compiler
+  HipDialectIncGen
+  HipTypesIncGen
+  HipOpsIncGen
+)
+
 # Link LLVM components
 llvm_map_components_to_libnames(llvm_libs Support Core)
+
+# Build static runtime library
+file(GLOB RUNTIME_SRCS "ops_runtime/*.cpp")
+add_library(hip_runtime_static STATIC ${RUNTIME_SRCS})
+set_target_properties(hip_runtime_static PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED ON
+)
+target_compile_definitions(hip_runtime_static PRIVATE __HIP_PLATFORM_AMD__)
+if(DEFINED ENV{THEROCK_DIST})
+  target_include_directories(hip_runtime_static PRIVATE $ENV{THEROCK_DIST}/include)
+endif()
 
 # Link against MLIR libraries (no RegisterAll*; we register dialects explicitly)
 target_link_libraries(hip-opt PRIVATE
@@ -95,8 +119,43 @@ target_link_libraries(hip-opt PRIVATE
   ${llvm_libs}
 )
 
+target_link_libraries(hip-compiler PRIVATE
+  MLIROptLib
+  MLIRSupport
+  MLIRIR
+  MLIRParser
+  MLIRPass
+  MLIRTransforms
+  MLIRAnalysis
+  MLIRArithDialect
+  MLIRControlFlowDialect
+  MLIRFuncDialect
+  MLIRMemRefDialect
+  MLIRSCFDialect
+  MLIRLLVMDialect
+  MLIRLLVMCommonConversion
+  MLIRArithToLLVM
+  MLIRMemRefToLLVM
+  MLIRFuncToLLVM
+  MLIRSCFToControlFlow
+  MLIRControlFlowToLLVM
+  MLIRReconcileUnrealizedCasts
+  MLIRTransformUtils
+  MLIRTargetLLVMIRExport
+  MLIRExecutionEngine
+  MLIRTranslateLib
+  LLVMX86CodeGen
+  LLVMX86AsmParser
+  LLVMMC
+  LLVMSupport
+  LLVMTarget
+  LLVMIRReader
+  LLVMLinker
+  ${llvm_libs}
+)
+
 # Set C++ standard
-set_target_properties(hip-opt PROPERTIES
+set_target_properties(hip-opt hip-compiler PROPERTIES
   CXX_STANDARD 17
   CXX_STANDARD_REQUIRED ON
 )

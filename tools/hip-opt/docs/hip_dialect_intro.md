@@ -167,24 +167,30 @@ All ops are lowered to LLVM IR by the `--convert-hip-to-llvm` pass in
 - **Region ops** are inlined: body ops moved to parent block, region op erased.
 - **`!hip.handle`** is converted to `!llvm.ptr`.
 
-Additional standard passes needed for a full lowering pipeline:
-`--finalize-memref-to-llvm`, `--convert-arith-to-llvm`, `--convert-func-to-llvm`,
-`--reconcile-unrealized-casts`.
+The `hip-compiler` tool runs this pass pipeline automatically, then translates
+the resulting LLVM dialect to LLVM IR, generates a native `.obj`, and links it
+with `hip_runtime_static.lib` and external libraries to produce a `.dll`.
+
+For manual debugging, `hip-opt` can run the pass pipeline in isolation:
+`--convert-hip-to-llvm`, `--finalize-memref-to-llvm`, `--convert-arith-to-llvm`,
+`--convert-func-to-llvm`, `--reconcile-unrealized-casts`.
 
 ---
 
 ## File Structure
 
 ```
+hip-opt.cpp              MLIR pass pipeline tool (for debugging)
+hip-compiler.cpp         One-stop MLIR-to-DLL compiler
 HipDialect.td            Dialect definition (namespace "hip")
 HipTypes.td              Type definitions (!hip.handle)
 HipOps.td                All op definitions (DPS ins/outs format)
 HipDialect.h / .cpp      C++ dialect registration
 HipToLLVM.cpp            Lowering pass (hip -> llvm.call)
 HipPasses.h              Pass registration header
-hip-opt.cpp              Compiler driver
+CMakeLists.txt           Builds hip-opt, hip-compiler, and hip_runtime_static
 
-ops_runtime/
+ops_runtime/                    (compiled into hip_runtime_static.lib by CMake)
   hip_runtime.cpp         Handle lifecycle + device memory (shared by all tests)
   hipblaslt_matmul.cpp    hipBLASLt matmul (full impl)
   miopen_add.cpp          MIOpen add (full impl)
@@ -207,19 +213,20 @@ examples/
   test_attention.mlir     Single-head attention from composed ops
   test_e2e.mlir           Self-contained transformer layer
   model_hip.mlir          Generated HIP dialect from Llama-3.2-1B
-  main_gemm.cpp           C++ driver for test_gemm
-  main_add.cpp            C++ driver for test_add
-  main_mul.cpp            C++ driver for test_mul
-  main_rms_norm.cpp       C++ driver for test_rms_norm
-  main_softmax.cpp        C++ driver for test_softmax
-  main_attention.cpp      C++ driver for test_attention
+  main_gemm.cpp           C++ driver for test_gemm (links gemm.lib)
+  main_add.cpp            C++ driver for test_add (links add.lib)
+  main_mul.cpp            C++ driver for test_mul (links mul.lib)
+  main_rms_norm.cpp       C++ driver for test_rms_norm (links rms_norm.lib)
+  main_softmax.cpp        C++ driver for test_softmax (links softmax.lib)
+  main_attention.cpp      C++ driver for test_attention (links attention.lib)
   main_e2e.cpp            C++ driver for test_e2e
 
 scripts/
-  run_full_pipeline_hipblaslt.bat        Matmul pipeline (hipBLASLt)
-  run_full_pipeline_miopen_add.bat       Add pipeline (MIOpen)
-  run_full_pipeline_miopen_mul.bat       Mul pipeline (MIOpen)
-  run_full_pipeline_miopen_rms_norm.bat  RMS Norm pipeline (MIOpen)
-  run_full_pipeline_miopen_softmax.bat   Softmax pipeline (MIOpen)
-  run_full_pipeline_attention.bat       Attention pipeline (composed ops)
+  env.bat                          Shared environment config (edit paths here)
+  run_full_pipeline_hipblaslt.bat        Matmul: hip-compiler + cl.exe driver
+  run_full_pipeline_miopen_add.bat       Add: hip-compiler + cl.exe driver
+  run_full_pipeline_miopen_mul.bat       Mul: hip-compiler + cl.exe driver
+  run_full_pipeline_miopen_rms_norm.bat  RMS Norm: hip-compiler + cl.exe driver
+  run_full_pipeline_miopen_softmax.bat   Softmax: hip-compiler + cl.exe driver
+  run_full_pipeline_attention.bat        Attention: hip-compiler + cl.exe driver
 ```

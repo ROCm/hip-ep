@@ -11,7 +11,7 @@
 #include <cstdlib>
 #include <vector>
 
-extern "C" void two_muls(
+extern "C" __declspec(dllimport) void two_muls(
     float *A_a, float *A_al, int64_t A_o, int64_t A_s0, int64_t A_s1, int64_t A_s2, int64_t A_st0, int64_t A_st1, int64_t A_st2,
     float *B_a, float *B_al, int64_t B_o, int64_t B_s0, int64_t B_s1, int64_t B_s2, int64_t B_st0, int64_t B_st1, int64_t B_st2,
     float *C_a, float *C_al, int64_t C_o, int64_t C_s0, int64_t C_s1, int64_t C_s2, int64_t C_st0, int64_t C_st1, int64_t C_st2,

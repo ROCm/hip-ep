@@ -8,7 +8,7 @@
 
 #include <cstdio>
 
-extern "C" void run();
+extern "C" __declspec(dllimport) void run();
 
 int main() {
   printf("=== HIP Dialect E2E Transformer Test ===\n");
