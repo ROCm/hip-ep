@@ -40,12 +40,6 @@ CompilationConfig CompilationConfig::fromProviderOptions(
     // Parse output filename
     config.outputFilename = context->get_provider_option("output_filename", "");
 
-    // Parse mock runtime flag
-    std::string use_mock_runtime_str =
-        context->get_provider_option("use_mock_runtime", "true");
-    config.useMockRuntime =
-        (use_mock_runtime_str == "true" || use_mock_runtime_str == "1");
-
   } catch (const std::exception &ex) {
     MY_LOG(1) << "Failed to parse provider options: " << ex.what()
               << ", using defaults";
@@ -59,7 +53,6 @@ CompilationConfig CompilationConfig::defaultConfig() {
   config.artifactFormat = ArtifactFormat::Native;
   config.optLevel = 2;
   config.outputFilename = "";
-  config.useMockRuntime = true;
   return config;
 }
 

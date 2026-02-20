@@ -5,7 +5,6 @@
 #ifndef METADATA_BUILDER_H
 #define METADATA_BUILDER_H
 
-#include "CompilationArtifact.h"
 #include "CompilationConfig.h"
 #include <cstdint>
 #include <optional>

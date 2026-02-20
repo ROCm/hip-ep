@@ -6,7 +6,6 @@
 #ifndef HIPDNN_LEVEL1PASS_MLIR_COMPILER_H
 #define HIPDNN_LEVEL1PASS_MLIR_COMPILER_H
 
-#include "CompilationArtifact.h"
 #include "CompilationConfig.h"
 #include "MlirCompilerTypes.h"
 #include <cstdint>
@@ -22,6 +21,11 @@ namespace level1pass {
  *
  * Replaces the old direct LLVM/MLIR integration (MlirParser, MlirTransformer,
  * LlvmCompiler).
+ *
+ * NOTE: Mock runtime is not supported. The morphizen-mlir-compiler plugin
+ * always generates native code that targets the actual HIP/ROCm runtime.
+ * Mock runtime functionality was removed as it is not compatible with the
+ * plugin-based compilation architecture.
  */
 class MlirCompiler {
 public:
