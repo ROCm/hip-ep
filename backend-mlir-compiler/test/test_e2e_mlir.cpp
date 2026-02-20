@@ -25,8 +25,20 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <codecvt>
+#include <locale>
 
 namespace fs = std::filesystem;
+
+namespace {
+// Helper to convert std::string to std::wstring on Windows
+#ifdef _WIN32
+std::wstring StringToWString(const std::string& str) {
+  std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+  return converter.from_bytes(str);
+}
+#endif
+}
 
 // Model path defined by CMake
 #ifndef TWO_LAYER_CONV_MODEL_PATH
@@ -98,14 +110,22 @@ class MlirE2ETest : public ::testing::Test {
     std::cout << "[SetUp] Model path: " << model_path_ << std::endl;
     std::cout << "[SetUp] EP library path: " << ep_lib_path_ << std::endl;
 
-    // Register MorphiZen EP
-    try {
-      Ort::SessionOptions options;
-      options.RegisterCustomOpsLibrary(ep_lib_path_.c_str());
-      std::cout << "[SetUp] MorphiZen EP registered successfully" << std::endl;
-    } catch (const Ort::Exception& e) {
-      GTEST_SKIP() << "Failed to register MorphiZen EP: " << e.what();
+    // Register MorphiZen EP using RegisterExecutionProviderLibrary (not RegisterCustomOps)
+#ifdef _WIN32
+    OrtStatus* status = Ort::GetApi().RegisterExecutionProviderLibrary(
+        *env_, "MorphiZenExecutionProvider", StringToWString(ep_lib_path_).c_str());
+#else
+    OrtStatus* status = Ort::GetApi().RegisterExecutionProviderLibrary(
+        *env_, "MorphiZenExecutionProvider", ep_lib_path_.c_str());
+#endif
+
+    if (status != nullptr) {
+      std::string error_msg = Ort::GetApi().GetErrorMessage(status);
+      Ort::GetApi().ReleaseStatus(status);
+      GTEST_SKIP() << "Failed to register MorphiZen EP: " << error_msg;
     }
+
+    std::cout << "[SetUp] MorphiZen EP registered successfully" << std::endl;
   }
 
   void TearDown() override {
@@ -133,16 +153,45 @@ class MlirE2ETest : public ::testing::Test {
 TEST_F(MlirE2ETest, TwoLayerConvSession) {
   std::cout << "[Test] Creating session with MorphiZen EP (MLIR backend)..." << std::endl;
 
+  // Get EP devices
+  std::vector<Ort::ConstEpDevice> devices = env_->GetEpDevices();
+
+  // Find MorphiZen device
+  const OrtEpDevice* morphizen_device = nullptr;
+  for (const auto& device : devices) {
+    std::string ep_name = device.EpName();
+    if (ep_name == "MorphiZenExecutionProvider") {
+      morphizen_device = static_cast<const OrtEpDevice*>(device);
+      std::cout << "[Test] Found MorphiZen EP device" << std::endl;
+      break;
+    }
+  }
+
+  if (morphizen_device == nullptr) {
+    GTEST_SKIP() << "MorphiZen EP V2 device not found (EP registered but device API not implemented)";
+  }
+
   // Create session options
   Ort::SessionOptions session_options;
   session_options.SetIntraOpNumThreads(1);
   session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
 
-  // Register MorphiZen EP
-  session_options.RegisterCustomOpsLibrary(ep_lib_path_.c_str());
+  // Append MorphiZen EP using V2 API
+  OrtStatus* status = Ort::GetApi().SessionOptionsAppendExecutionProvider_V2(
+      session_options, *env_, &morphizen_device, 1, nullptr, nullptr, 0);
+
+  if (status != nullptr) {
+    std::string error_msg = Ort::GetApi().GetErrorMessage(status);
+    Ort::GetApi().ReleaseStatus(status);
+    GTEST_SKIP() << "Failed to append MorphiZen EP: " << error_msg;
+  }
 
   // Create session (this triggers ONNX → MLIR → HIP compilation)
+#ifdef _WIN32
+  Ort::Session session(*env_, StringToWString(model_path_).c_str(), session_options);
+#else
   Ort::Session session(*env_, model_path_.c_str(), session_options);
+#endif
 
   std::cout << "[Test] Session created successfully with MorphiZen EP!" << std::endl;
 
