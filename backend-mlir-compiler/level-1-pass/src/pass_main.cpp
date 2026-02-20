@@ -256,12 +256,8 @@ struct Level1MlirPass {
     // Step 5: Build metadata JSON from graph outputs
     auto metadata_json = build_metadata_json(artifact, graph);
 
-    // Step 6: Extract unique ID from artifact filename (remove extension)
-    std::string unique_id =
-        artifact.filename.substr(0, artifact.filename.find_last_of('.'));
-
-    // Step 7: Fuse graph into single MLIR custom op
-    if (!fuse_graph(self, graph, metadata_json, unique_id)) {
+    // Step 6: Fuse graph into single MLIR custom op
+    if (!fuse_graph(self, graph, metadata_json, artifact.filename)) {
       LOG(WARNING) << "Graph fusion failed";
       return;
     }
