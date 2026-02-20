@@ -72,3 +72,6 @@ add_subdirectory(custom-op-rocm)
 
 # Add test directory (test_gqa can be built independently)
 add_subdirectory(test)
+
+# MLIR backend (experimental, built alongside ROCm backend)
+add_subdirectory(backend-mlir-compiler)
