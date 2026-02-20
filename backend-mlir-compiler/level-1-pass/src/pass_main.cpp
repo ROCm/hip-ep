@@ -43,7 +43,7 @@ struct OutputMetadata {
   std::string name;
   int32_t rank;
   std::vector<int64_t> shape;
-  std::string dtype;
+  int32_t elem_type;  // ONNX element type (e.g., 1=float, 7=int64)
 };
 
 } // namespace level1pass
@@ -139,34 +139,6 @@ static bool write_artifact_to_epcontext(PassContext *ctx,
   return true;
 }
 
-// Helper: Convert ONNX element type to dtype string
-static std::string get_dtype_string(int elem_type) {
-  switch (elem_type) {
-  case 1:
-    return "float32";
-  case 2:
-    return "uint8";
-  case 3:
-    return "int8";
-  case 4:
-    return "uint16";
-  case 5:
-    return "int16";
-  case 6:
-    return "int32";
-  case 7:
-    return "int64";
-  case 10:
-    return "float16";
-  case 11:
-    return "double";
-  case 16:
-    return "bfloat16";
-  default:
-    return "unknown";
-  }
-}
-
 // Step 5: Extract output metadata from graph
 static std::vector<OutputMetadata> extract_output_metadata(Graph &graph) {
   std::vector<OutputMetadata> output_metadata;
@@ -185,13 +157,12 @@ static std::vector<OutputMetadata> extract_output_metadata(Graph &graph) {
       meta.rank = -1; // Unknown rank
     }
 
-    // Get element type and convert to dtype string
-    int elem_type = output.element_type();
-    meta.dtype = get_dtype_string(elem_type);
+    // Get element type (ONNX data type enum value)
+    meta.elem_type = output.element_type();
 
     output_metadata.push_back(meta);
     MY_LOG(2) << "Output " << meta.name << ": rank=" << meta.rank
-              << ", dtype=" << meta.dtype;
+              << ", elem_type=" << meta.elem_type;
   }
 
   return output_metadata;
@@ -232,7 +203,7 @@ build_metadata_json(const CompilationArtifact &artifact,
       json << "{";
       json << "\"name\": \"" << output.name << "\",";
       json << "\"rank\": " << output.rank << ",";
-      json << "\"dtype\": \"" << output.dtype << "\"";
+      json << "\"elem_type\": " << output.elem_type;
 
       if (!output.shape.empty()) {
         json << ",\"shape\": [";
