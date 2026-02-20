@@ -269,26 +269,166 @@ MLIR's pass manager has built-in debugging flags to dump IR before/after each pa
 - `convert-hip-to-llvm` - HIP to LLVM conversion
 - `hip-generate-interface` - Interface generation
 
-### 7. Narrow Down the Problematic Pass
+### 7. Isolate the Problematic Pass (Two Methods)
 
-Once you identify the failing pass from the logs:
+Once you identify the failing pass from the logs, use one of these methods to isolate it:
 
-1. **Extract the input IR** from the `--mlir-print-ir-before=<pass-name>` output
-2. **Save it to a file** (e.g., `input_to_failing_pass.mlir`)
-3. **Run only that specific pass** to isolate the error:
+#### Method 1: Use --mlir-print-ir-tree-dir (Recommended)
+
+MLIR can automatically dump IR to files before/after each pass:
 
 ```bash
-# Example: If convert-hip-to-llvm is failing
+# Create output directory for IR dumps
+mkdir -p ir_dumps
+
+# Run with automatic IR file dumping
+"$BUILD_DIR/bin/Debug/hip-opt" \
+  --all-passes \
+  --mlir-print-ir-tree-dir=ir_dumps \
+  --mlir-print-ir-before=convert-hip-to-llvm \
+  --mlir-disable-threading \
+  two_layer_conv.mlir 2>&1 | tee debug.log
+
+# IR files are created in ir_dumps/ with timestamps
+# Example: ir_dumps/pipeline_convert-hip-to-llvm_before_0.mlir
+ls -lt ir_dumps/
+```
+
+**Advantages:**
+- Automatic file creation with meaningful names
+- No manual extraction needed
+- Timestamps for tracking multiple runs
+
+#### Method 2: Manual Extraction from Logs
+
+If `--mlir-print-ir-tree-dir` is not available or you prefer manual control:
+
+```bash
+# 1. Dump IR before failing pass to stdout
+"$BUILD_DIR/bin/Debug/hip-opt" \
+  --all-passes \
+  --mlir-print-ir-before=convert-hip-to-llvm \
+  --mlir-print-ir-module-scope \
+  --mlir-disable-threading \
+  two_layer_conv.mlir 2>&1 > debug_before.log
+
+# 2. Extract the IR from the log (between IR dump markers)
+# Look for "// -----// IR Dump Before ConvertHipToLLVM //" in the log
+# Copy the MLIR code block to a new file
+cat debug_before.log | sed -n '/IR Dump Before/,/^$/p' > input_to_failing_pass.mlir
+
+# Or manually extract using a text editor
+```
+
+#### Method 3: Run Passes Incrementally
+
+Run passes one-by-one up to the failing pass:
+
+```bash
+# Run only passes BEFORE the failing pass
+# Example: If convert-hip-to-llvm fails, run up to hip-memory-pooling
+
+"$BUILD_DIR/bin/Debug/hip-opt" \
+  --convert-onnx-to-hip \
+  --func.func='buffer-loop-hoisting,ownership-based-buffer-deallocation,optimize-allocation-liveness' \
+  --canonicalize \
+  --hip-memory-pooling \
+  -o input_before_failing_pass.mlir \
+  two_layer_conv.mlir
+
+# Now test the failing pass in isolation
 "$BUILD_DIR/bin/Debug/hip-opt" \
   --convert-hip-to-llvm \
   --mlir-print-ir-after-all \
   --mlir-print-ir-module-scope \
-  input_to_failing_pass.mlir 2>&1 | tee isolated_pass_debug.log
+  input_before_failing_pass.mlir 2>&1 | tee isolated_pass_debug.log
 ```
 
-This narrows down the root cause to a specific transformation.
+**When to use each method:**
+- **Method 1**: Best for automatic troubleshooting, clean workflow
+- **Method 2**: When you need full control over extracted IR
+- **Method 3**: When you want to test pass combinations or dependencies
 
-### 8. Common Issues
+### 8. Run Isolated Pass for Root Cause Analysis
+
+Once you have the input IR file (from any method above):
+
+```bash
+# Run the specific failing pass with verbose output
+"$BUILD_DIR/bin/Debug/hip-opt" \
+  --<failing-pass-name> \
+  --mlir-print-ir-after-all \
+  --mlir-print-ir-module-scope \
+  --mlir-disable-threading \
+  input_to_failing_pass.mlir 2>&1 | tee isolated_pass_debug.log
+
+# Example for convert-hip-to-llvm:
+"$BUILD_DIR/bin/Debug/hip-opt" \
+  --convert-hip-to-llvm \
+  --mlir-print-ir-after-all \
+  --mlir-print-ir-module-scope \
+  input_before_convert_hip_to_llvm.mlir 2>&1 | tee hip_to_llvm_isolated.log
+```
+
+This narrows down the root cause to a specific transformation with minimal noise.
+
+### 9. Complete Example: Debugging a Failing Pass
+
+Here's a complete reproducible workflow from start to finish:
+
+```bash
+# Setup (from project root)
+BUILD_DIR=$(cd ../../build/$(basename $PWD) && pwd)
+cd backend-mlir-compiler/test
+
+# Step 1: Run test to get bytecode dump
+MORPHIZEN_DEBUG_MLIR_BACKEND=2 \
+  "$BUILD_DIR/Debug/bin/mlir_e2e_test.exe"
+
+# Step 2: Find dump directory from test output
+# Look for: dump_dir: "C:\\temp\\morphizen_dumps\\<cache_key>"
+DUMP_DIR="/c/temp/morphizen_dumps/<cache_key>"
+
+# Step 3: Convert bytecode to text
+LOCAL_DIR=$(cd ../../local && pwd)
+"$LOCAL_DIR/bin/mlir-opt" --allow-unregistered-dialect \
+  "$DUMP_DIR/mlir_bytecode_dump.mlir" \
+  -o two_layer_conv.mlir
+
+# Step 4: Test complete pipeline to identify failing pass
+"$BUILD_DIR/bin/Debug/hip-opt" \
+  --all-passes \
+  --mlir-print-ir-after-all \
+  --mlir-disable-threading \
+  two_layer_conv.mlir 2>&1 | tee full_pipeline_debug.log
+
+# Step 5: If a pass fails (e.g., convert-hip-to-llvm), dump IR before it
+mkdir -p ir_dumps
+"$BUILD_DIR/bin/Debug/hip-opt" \
+  --all-passes \
+  --mlir-print-ir-tree-dir=ir_dumps \
+  --mlir-print-ir-before=convert-hip-to-llvm \
+  --mlir-disable-threading \
+  two_layer_conv.mlir 2>&1 | tee debug_with_dumps.log
+
+# Step 6: Find the dumped IR file
+# Files are named like: pipeline_convert-hip-to-llvm_before_0.mlir
+IR_FILE=$(ls -t ir_dumps/pipeline_*before*.mlir | head -1)
+echo "Input IR: $IR_FILE"
+
+# Step 7: Run failing pass in isolation
+"$BUILD_DIR/bin/Debug/hip-opt" \
+  --convert-hip-to-llvm \
+  --mlir-print-ir-after-all \
+  --mlir-print-ir-module-scope \
+  "$IR_FILE" 2>&1 | tee isolated_pass_debug.log
+
+# Step 8: Analyze the isolated output for root cause
+# Look for pattern matching failures, type mismatches, etc.
+grep -E "(error|failed|mismatch)" isolated_pass_debug.log
+```
+
+### 10. Common Issues
 
 **Malformed null-terminated string error**:
 - This occurred when `from_onnx_mlir = false` was hardcoded, causing all passes to be skipped
