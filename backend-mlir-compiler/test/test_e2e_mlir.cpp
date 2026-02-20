@@ -18,6 +18,8 @@
 #include <gtest/gtest.h>
 #include <onnxruntime_cxx_api.h>
 
+#include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -35,6 +37,38 @@ namespace fs = std::filesystem;
 #error "MORPHIZEN_EP_LIB_PATH must be defined by CMake"
 #endif
 
+namespace {
+// Parse ORT_LOG_LEVEL environment variable
+OrtLoggingLevel GetOrtLoggingLevel() {
+  const char* log_level_str = std::getenv("ORT_LOG_LEVEL");
+  if (!log_level_str) {
+    return ORT_LOGGING_LEVEL_WARNING;  // Default
+  }
+
+  std::string level(log_level_str);
+  // Convert to lowercase for case-insensitive comparison
+  std::transform(level.begin(), level.end(), level.begin(), ::tolower);
+
+  if (level == "verbose") return ORT_LOGGING_LEVEL_VERBOSE;
+  if (level == "info") return ORT_LOGGING_LEVEL_INFO;
+  if (level == "warning") return ORT_LOGGING_LEVEL_WARNING;
+  if (level == "error") return ORT_LOGGING_LEVEL_ERROR;
+  if (level == "fatal") return ORT_LOGGING_LEVEL_FATAL;
+
+  // Try to parse as integer (0=VERBOSE, 1=INFO, 2=WARNING, 3=ERROR, 4=FATAL)
+  try {
+    int level_int = std::stoi(level);
+    if (level_int >= 0 && level_int <= 4) {
+      return static_cast<OrtLoggingLevel>(level_int);
+    }
+  } catch (...) {
+    // Ignore parse errors, use default
+  }
+
+  return ORT_LOGGING_LEVEL_WARNING;  // Default if invalid
+}
+}  // namespace
+
 class MlirE2ETest : public ::testing::Test {
  protected:
   std::unique_ptr<Ort::Env> env_;
@@ -42,8 +76,9 @@ class MlirE2ETest : public ::testing::Test {
   std::string ep_lib_path_;
 
   void SetUp() override {
-    // Initialize ORT environment
-    env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "MlirE2ETest");
+    // Initialize ORT environment with configurable log level
+    OrtLoggingLevel log_level = GetOrtLoggingLevel();
+    env_ = std::make_unique<Ort::Env>(log_level, "MlirE2ETest");
 
     // Set model path
     model_path_ = TWO_LAYER_CONV_MODEL_PATH;
