@@ -10,6 +10,7 @@
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
 #include <chrono>
+#include <fstream>
 #include <glog/logging.h>
 #include <sstream>
 #include <vector>
@@ -101,6 +102,20 @@ static std::string get_mlir_bytecode(Graph &graph) {
 
   std::string mlir_bytecode(graph_string->data(), graph_string->size());
   MY_LOG(1) << "MLIR bytecode size: " << mlir_bytecode.size() << " bytes";
+
+  // Dump bytecode to file for troubleshooting if env var is set
+  if (ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= 2) {
+    std::string dump_path = "mlir_bytecode_dump.mlir";
+    std::ofstream dump_file(dump_path, std::ios::binary);
+    if (dump_file.is_open()) {
+      dump_file.write(mlir_bytecode.data(), mlir_bytecode.size());
+      dump_file.close();
+      MY_LOG(1) << "Dumped MLIR bytecode to: " << dump_path;
+    } else {
+      LOG(WARNING) << "Failed to dump MLIR bytecode to: " << dump_path;
+    }
+  }
+
   return mlir_bytecode;
 }
 
