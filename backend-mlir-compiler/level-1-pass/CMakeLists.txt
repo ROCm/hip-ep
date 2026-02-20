@@ -6,25 +6,34 @@
 message(STATUS "Configuring level-1-pass (MLIR compiler plugin)")
 
 find_package(glog CONFIG REQUIRED)
+find_package(Protobuf CONFIG REQUIRED)
+
+# Generate protobuf files
+set(PROTO_SRC "${CMAKE_CURRENT_SOURCE_DIR}/proto/metadata.proto")
+set(PROTO_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}")
+
+protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS ${PROTO_SRC})
 
 set(LIB_NAME morphizen-level1-pass-mlir-compiler)
 add_library(${LIB_NAME} STATIC
     src/pass_main.cpp
     src/MlirCompiler.cpp
+    ${PROTO_SRCS}
+    ${PROTO_HDRS}
 )
 
-# Link dependencies (NO morphizen-mlir-compiler - loaded at runtime)
+# Link dependencies
 target_link_libraries(${LIB_NAME} PRIVATE
     morphizen::morphizen-core-static
     glog::glog
+    protobuf::libprotobuf
     # NOTE: morphizen-mlir-compiler.dll is loaded dynamically at runtime, not linked
-    # NOTE: Protobuf removed - metadata is now simple JSON string building
 )
 
-# Include directories - NO morphizen-mlir-compiler headers needed (types defined locally)
+# Include directories
 target_include_directories(${LIB_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
-    # Note: morphizen-mlir-compiler types are defined in src/MlirCompilerTypes.h
+    ${PROTO_OUT_DIR}  # For generated proto headers
 )
 
 target_compile_definitions(${LIB_NAME} PRIVATE
