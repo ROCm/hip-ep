@@ -29,7 +29,7 @@ test_<op>.mlir
     v
 <op>.dll + <op>.lib    (model DLL with exported entry functions)
     |
-    |  cl.exe links main_<op>.cpp against <op>.lib
+    |  cl.exe links main_<op>.cpp against <op>.lib + amdhip64.lib
     v
 <op>_test.exe          (driver executable, dynamically links <op>.dll)
 ```
@@ -80,7 +80,7 @@ Each test has a `.mlir` model and a C++ driver. The driver declares the model's 
 
 Each script compiles a `.mlir` file to a DLL via `hip-compiler`, then compiles and links the driver against it.
 
-- `scripts/env.bat` - **Shared environment config** (edit paths here for your machine)
+- `scripts/env.bat` - **Shared environment config** (edit paths here; also auto-generates import libraries from TheRock DLLs on first run)
 - `scripts/run_full_pipeline_hipblaslt.bat` - Matmul test (hipBLASLt)
 - `scripts/run_full_pipeline_miopen_add.bat` - Add test (MIOpen)
 - `scripts/run_full_pipeline_miopen_mul.bat` - Mul test (MIOpen)
@@ -297,9 +297,9 @@ test_<op>.mlir
     v
 <op>.dll + <op>.lib              (model DLL + import library)
     |
-    |  cl.exe main_<op>.cpp <op>.lib
+    |  cl.exe main_<op>.cpp <op>.lib amdhip64.lib
     v
-<op>_test.exe                    (driver linked against model DLL)
+<op>_test.exe                    (driver linked against model DLL + HIP runtime)
 ```
 
 ## Type System
