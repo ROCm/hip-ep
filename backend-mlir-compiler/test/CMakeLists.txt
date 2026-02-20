@@ -10,9 +10,14 @@ add_executable(mlir_e2e_test test_e2e_mlir.cpp)
 # Model path (using Git LFS committed model)
 set(TWO_LAYER_CONV_MODEL_PATH "${CMAKE_CURRENT_SOURCE_DIR}/models/two_layer_conv.onnx")
 
+# Get the MorphiZen EP target (set by parent morphizen build system)
+if(NOT DEFINED morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET)
+  message(FATAL_ERROR "morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET not defined - test requires MorphiZen EP")
+endif()
+
 target_compile_definitions(mlir_e2e_test PRIVATE
   TWO_LAYER_CONV_MODEL_PATH="${TWO_LAYER_CONV_MODEL_PATH}"
-  MORPHIZEN_EP_LIB_PATH="$<TARGET_FILE:morphizen-mlir-compiler>"
+  MORPHIZEN_EP_LIB_PATH="$<TARGET_FILE:${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET}>"
 )
 
 # Pass BUILD_MOCK_RUNTIME flag to test code
