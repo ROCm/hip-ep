@@ -7,6 +7,9 @@ find_package(GTest REQUIRED)
 # Executable
 add_executable(mlir_e2e_test test_e2e_mlir.cpp)
 
+# Require C++17 for std::filesystem
+target_compile_features(mlir_e2e_test PRIVATE cxx_std_17)
+
 # Model path (using Git LFS committed model)
 set(TWO_LAYER_CONV_MODEL_PATH "${CMAKE_CURRENT_SOURCE_DIR}/models/two_layer_conv.onnx")
 
@@ -47,6 +50,17 @@ if(WIN32)
       $<TARGET_FILE:onnxruntime::onnxruntime>
       $<TARGET_FILE_DIR:mlir_e2e_test>
   )
+
+  # Copy zlib DLL (required by morphizen EP)
+  find_package(ZLIB REQUIRED)
+  if(TARGET ZLIB::ZLIB)
+    add_custom_command(
+      TARGET mlir_e2e_test POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_FILE:ZLIB::ZLIB>
+        $<TARGET_FILE_DIR:mlir_e2e_test>
+    )
+  endif()
 endif()
 
 # Register test
