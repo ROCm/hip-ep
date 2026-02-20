@@ -42,13 +42,12 @@ cmake --build ../../build/onnx-hipdnn-ep-mlir-integration --config Debug --paral
 cd ../../build/onnx-hipdnn-ep-mlir-integration/Debug/bin
 
 # Basic run
-MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1 ./mlir_e2e_test.exe
+./mlir_e2e_test.exe
 
 # With verbose logging
 ORT_LOG_LEVEL=info \
 DEBUG_MORPHIZEN_PASS=1 \
 MORPHIZEN_DEBUG_MLIR_BACKEND=3 \
-MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1 \
 ./mlir_e2e_test.exe
 
 # Using ctest
@@ -67,7 +66,7 @@ cmake --build ../../build/onnx-hipdnn-ep-mlir-integration --config Debug
 
 # Run test
 cd ../../build/onnx-hipdnn-ep-mlir-integration/Debug/bin
-MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1 ./mlir_e2e_test.exe
+./mlir_e2e_test.exe
 ```
 
 ## Expected Output
@@ -95,11 +94,12 @@ MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1 ./mlir_e2e_test.exe
 [  PASSED  ] MlirE2ETest.TwoLayerConvSession
 ```
 
-## Environment Variables
-- `MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1` - **Required** for EP device API
+## Environment Variables (All Optional)
 - `ORT_LOG_LEVEL=info` - Enable ORT session creation logging
 - `DEBUG_MORPHIZEN_PASS=1` - Enable morphizen pass debug logging
 - `MORPHIZEN_DEBUG_MLIR_BACKEND=3` - MLIR backend compilation verbose logging
+
+**Note**: CPU device support is enabled by default in MorphiZen EP (`MORPHIZEN_EP_ENABLE_CPU_DEVICE=1`), so no special environment variables are required to run the test.
 
 ## TODO - Future Enhancements
 - Add actual inference testing (forward pass with input data, output validation)
