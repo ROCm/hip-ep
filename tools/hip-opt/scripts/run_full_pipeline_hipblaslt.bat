@@ -1,3 +1,7 @@
+::
+:: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+:: Licensed under the MIT License.
+::
 @echo off
 REM === End-to-End Matmul Pipeline ===
 REM Compiles test_gemm.mlir to DLL and links with main driver

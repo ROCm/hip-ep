@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
 //===- main_e2e.cpp - Main driver for E2E transformer test ----------------===//
 //
 // Calls the MLIR-compiled @run function from test_e2e.mlir.

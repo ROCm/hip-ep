@@ -1,4 +1,10 @@
-//===- miopen_add.cpp - hip.miopen.add runtime -----------------------------===//
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
+//===- miopen_add.cpp - hip.miopen.add runtime
+//-----------------------------===//
 //
 // Element-wise addition C = A + B via miopenOpTensor(miopenTensorOpAdd).
 //
@@ -14,24 +20,23 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include <miopen/miopen.h>
-#include <hip/hip_runtime_api.h>
 #include <cstdint>
 #include <cstdio>
+#include <hip/hip_runtime_api.h>
+#include <miopen/miopen.h>
 
-#define MIOPEN_CHECK(call)                                                \
-  do {                                                                    \
-    miopenStatus_t status = (call);                                       \
-    if (status != miopenStatusSuccess) {                                  \
-      fprintf(stderr, "MIOpen error at %s:%d (status=%d)\n",              \
-              __FILE__, __LINE__, status);                                \
-      return;                                                             \
-    }                                                                     \
+#define MIOPEN_CHECK(call)                                                     \
+  do {                                                                         \
+    miopenStatus_t status = (call);                                            \
+    if (status != miopenStatusSuccess) {                                       \
+      fprintf(stderr, "MIOpen error at %s:%d (status=%d)\n", __FILE__,         \
+              __LINE__, status);                                               \
+      return;                                                                  \
+    }                                                                          \
   } while (0)
 
-extern "C" void hip_miopen_add(void * /*handle*/,
-                                void *A, void *B, void *C,
-                                int64_t numElements) {
+extern "C" void hip_miopen_add(void * /*handle*/, void *A, void *B, void *C,
+                               int64_t numElements) {
   fprintf(stderr, "[miopen.add] C = A + B  (%lld elements)\n",
           (long long)numElements);
 
@@ -46,10 +51,8 @@ extern "C" void hip_miopen_add(void * /*handle*/,
   MIOPEN_CHECK(miopenSetTensorDescriptor(desc, miopenFloat, 1, dims, strides));
 
   float alpha1 = 1.0f, alpha2 = 1.0f, beta = 0.0f;
-  MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd,
-                               &alpha1, desc, A,
-                               &alpha2, desc, B,
-                               &beta,   desc, C));
+  MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha1, desc, A,
+                              &alpha2, desc, B, &beta, desc, C));
   hipDeviceSynchronize();
 
   miopenDestroyTensorDescriptor(desc);

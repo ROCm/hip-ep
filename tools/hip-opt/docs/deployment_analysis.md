@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # Deployment Analysis: From Toy GEMM to LLM Inference
 
 This document analyzes the deployment strategies for integrating the HIP MLIR pipeline

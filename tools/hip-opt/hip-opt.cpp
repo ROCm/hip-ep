@@ -1,12 +1,16 @@
-#include "mlir/Tools/mlir-opt/MlirOptMain.h"
-#include "mlir/IR/BuiltinDialect.h"
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+#include "mlir/Conversion/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/Conversion/Passes.h"
+#include "mlir/IR/BuiltinDialect.h"
+#include "mlir/Tools/mlir-opt/MlirOptMain.h"
 
 #include "HipDialect.h"
 #include "HipPasses.h"
@@ -30,6 +34,6 @@ int main(int argc, char **argv) {
   mlir::registerConvertControlFlowToLLVMPass();
   mlir::registerReconcileUnrealizedCastsPass();
 
-  return mlir::asMainReturnCode(
-      mlir::MlirOptMain(argc, argv, "hip-opt: custom compiler driver\n", registry));
+  return mlir::asMainReturnCode(mlir::MlirOptMain(
+      argc, argv, "hip-opt: custom compiler driver\n", registry));
 }

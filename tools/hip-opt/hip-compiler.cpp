@@ -1,32 +1,36 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+#include "mlir/Conversion/Passes.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/FileUtilities.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/Conversion/Passes.h"
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
 
-#include "llvm/IR/Module.h"
 #include "llvm/IR/LegacyPassManager.h"
-#include "llvm/Support/TargetSelect.h"
-#include "llvm/TargetParser/Host.h"
-#include "llvm/Support/ToolOutputFile.h"
-#include "llvm/Support/SourceMgr.h"
+#include "llvm/IR/Module.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
+#include "llvm/Support/Program.h"
+#include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
-#include "llvm/Support/FileSystem.h"
-#include "llvm/Support/Program.h"
-#include "llvm/Support/Path.h"
+#include "llvm/TargetParser/Host.h"
 #include "llvm/TargetParser/Triple.h"
 
 #include "HipDialect.h"
@@ -44,7 +48,7 @@ int main(int argc, char **argv) {
   std::string outputDll;
   for (int i = 2; i < argc; ++i) {
     if (std::string(argv[i]) == "-o" && i + 1 < argc) {
-      outputDll = argv[i+1];
+      outputDll = argv[i + 1];
       break;
     }
   }
@@ -132,14 +136,13 @@ int main(int argc, char **argv) {
 
   llvm::TargetOptions opt;
   auto rm = std::optional<llvm::Reloc::Model>();
-  auto targetMachine = target->createTargetMachine(
-      targetTriple, "generic", "", opt, rm);
+  auto targetMachine =
+      target->createTargetMachine(targetTriple, "generic", "", opt, rm);
 
   llvmModule->setDataLayout(targetMachine->createDataLayout());
   llvmModule->setTargetTriple(targetTriple);
 
-  std::string objFilename =
-      llvm::sys::path::stem(inputFilename).str() + ".obj";
+  std::string objFilename = llvm::sys::path::stem(inputFilename).str() + ".obj";
   std::error_code EC;
   llvm::raw_fd_ostream dest(objFilename, EC, llvm::sys::fs::OF_None);
   if (EC) {
@@ -170,7 +173,7 @@ int main(int argc, char **argv) {
   }
 
   std::string therockDist = "";
-  if (const char* env_p = std::getenv("THEROCK_DIST")) {
+  if (const char *env_p = std::getenv("THEROCK_DIST")) {
     therockDist = env_p;
   }
 
@@ -210,8 +213,8 @@ int main(int argc, char **argv) {
   linkArgs.push_back("MIOpen.lib");
 
   std::string errMsg;
-  int result = llvm::sys::ExecuteAndWait(
-      *linkerPath, linkArgs, std::nullopt, {}, 0, 0, &errMsg);
+  int result = llvm::sys::ExecuteAndWait(*linkerPath, linkArgs, std::nullopt,
+                                         {}, 0, 0, &errMsg);
   if (result != 0) {
     std::cerr << "Linker failed with code " << result << "\n";
     if (!errMsg.empty()) {

@@ -1,3 +1,7 @@
+##
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
 cmake_minimum_required(VERSION 3.20)
 project(hip-opt)
 
@@ -53,14 +57,14 @@ mlir_tablegen(HipOps.cpp.inc -gen-op-defs)
 add_public_tablegen_target(HipOpsIncGen)
 
 # Add the executable
-add_executable(hip-opt 
+add_executable(hip-opt
   hip-opt.cpp
   HipDialect.cpp
   HipToLLVM.cpp
 )
 
 # Add dependencies on TableGen targets
-add_dependencies(hip-opt 
+add_dependencies(hip-opt
   HipDialectIncGen
   HipTypesIncGen
   HipOpsIncGen
