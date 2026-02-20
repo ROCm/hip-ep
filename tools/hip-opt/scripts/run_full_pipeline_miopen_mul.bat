@@ -19,7 +19,7 @@ echo      OK: mul.dll
 
 echo.
 echo [2/2] Compile and link driver
-cl.exe /EHsc /std:c++17 /D__HIP_PLATFORM_AMD__ /I"%THEROCK_DIST%\include" ..\examples\main_mul.cpp mul.lib /Fe:mul_test.exe
+cl.exe /EHsc /std:c++17 /D__HIP_PLATFORM_AMD__ /I"%THEROCK_DIST%\include" ..\examples\main_mul.cpp mul.lib amdhip64.lib /Fe:mul_test.exe
 if errorlevel 1 (echo FAILED at step 2 && exit /b 1)
 echo      OK: mul_test.exe
 

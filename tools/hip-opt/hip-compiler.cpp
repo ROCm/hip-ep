@@ -18,24 +18,21 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/Support/TargetSelect.h"
-#include "llvm/Support/Host.h"
+#include "llvm/TargetParser/Host.h"
 #include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/Support/FileSystem.h"
-
 #include "llvm/Support/Program.h"
 #include "llvm/Support/Path.h"
+#include "llvm/TargetParser/Triple.h"
 
 #include "HipDialect.h"
 #include "HipPasses.h"
 
 #include <iostream>
-
-using namespace mlir;
-using namespace llvm;
 
 int main(int argc, char **argv) {
   if (argc < 3) {
@@ -58,24 +55,23 @@ int main(int argc, char **argv) {
   }
 
   // 1. Setup MLIR context and parse input
-  DialectRegistry registry;
-  registry.insert<BuiltinDialect>();
-  registry.insert<arith::ArithDialect>();
-  registry.insert<cf::ControlFlowDialect>();
-  registry.insert<func::FuncDialect>();
-  registry.insert<memref::MemRefDialect>();
-  registry.insert<scf::SCFDialect>();
-  registry.insert<LLVM::LLVMDialect>();
-  registry.insert<hip::HipDialect>();
-  
-  // Register translation to LLVM IR
-  registerBuiltinDialectTranslation(registry);
-  registerLLVMDialectTranslation(registry);
+  mlir::DialectRegistry registry;
+  registry.insert<mlir::BuiltinDialect>();
+  registry.insert<mlir::arith::ArithDialect>();
+  registry.insert<mlir::cf::ControlFlowDialect>();
+  registry.insert<mlir::func::FuncDialect>();
+  registry.insert<mlir::memref::MemRefDialect>();
+  registry.insert<mlir::scf::SCFDialect>();
+  registry.insert<mlir::LLVM::LLVMDialect>();
+  registry.insert<mlir::hip::HipDialect>();
 
-  MLIRContext context(registry);
-  
+  mlir::registerBuiltinDialectTranslation(registry);
+  mlir::registerLLVMDialectTranslation(registry);
+
+  mlir::MLIRContext context(registry);
+
   std::string errorMessage;
-  auto file = openInputFile(inputFilename, &errorMessage);
+  auto file = mlir::openInputFile(inputFilename, &errorMessage);
   if (!file) {
     std::cerr << errorMessage << "\n";
     return 1;
@@ -83,33 +79,28 @@ int main(int argc, char **argv) {
 
   llvm::SourceMgr sourceMgr;
   sourceMgr.AddNewSourceBuffer(std::move(file), llvm::SMLoc());
-  
-  OwningOpRef<ModuleOp> module = parseSourceFile<ModuleOp>(sourceMgr, &context);
+
+  mlir::OwningOpRef<mlir::ModuleOp> module =
+      mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, &context);
   if (!module) {
     std::cerr << "Error parsing MLIR file\n";
     return 1;
   }
 
-  // 2. Run PassManager
-  PassManager pm(&context);
-  pm.addPass(hip::createConvertHipToLLVMPass());
-  pm.addPass(createFinalizeMemRefToLLVMConversionPass());
-  pm.addPass(createArithToLLVMConversionPass());
-  pm.addPass(createConvertFuncToLLVMPass());
-  pm.addPass(createReconcileUnrealizedCastsPass());
-  
-  if (failed(pm.run(*module))) {
+  // 2. Run MLIR PassManager
+  mlir::PassManager pm(&context);
+  pm.addPass(mlir::hip::createConvertHipToLLVMPass());
+  pm.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
+  pm.addPass(mlir::createArithToLLVMConversionPass());
+  pm.addPass(mlir::createConvertFuncToLLVMPass());
+  pm.addPass(mlir::createReconcileUnrealizedCastsPass());
+
+  if (mlir::failed(pm.run(*module))) {
     std::cerr << "Error running passes\n";
     return 1;
   }
 
-  // 3. DLL Export Injection
-  // We need to inject dllexport linkage onto the top-level functions so they appear in the .dll.
-  module->walk([&](LLVM::LLVMFuncOp funcOp) {
-    if (!funcOp.isExternal()) {
-      funcOp.setLinkage(LLVM::linkage::Linkage::dllexport);
-    }
-  });
+  // 3. DLL Export Injection is done after translation to LLVM IR (step 4)
 
   // 4. Translate MLIR to LLVM IR
   llvm::LLVMContext llvmContext;
@@ -119,52 +110,59 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  // Mark all non-declaration functions as dllexport so they appear in the DLL
+  for (auto &func : *llvmModule) {
+    if (!func.isDeclaration()) {
+      func.setDLLStorageClass(llvm::GlobalValue::DLLExportStorageClass);
+    }
+  }
+
   // 5. Code Generation to Object File
-  InitializeNativeTarget();
-  InitializeNativeTargetAsmPrinter();
+  llvm::InitializeNativeTarget();
+  llvm::InitializeNativeTargetAsmPrinter();
 
   std::string err;
-  auto targetTriple = sys::getDefaultTargetTriple();
-  auto target = TargetRegistry::lookupTarget(targetTriple, err);
+  auto targetTripleStr = llvm::sys::getDefaultTargetTriple();
+  llvm::Triple targetTriple(targetTripleStr);
+  auto target = llvm::TargetRegistry::lookupTarget(targetTripleStr, err);
   if (!target) {
     std::cerr << "Error looking up target: " << err << "\n";
     return 1;
   }
 
   llvm::TargetOptions opt;
-  auto rm = std::optional<Reloc::Model>();
-  auto targetMachine = target->createTargetMachine(targetTriple, "generic", "", opt, rm);
+  auto rm = std::optional<llvm::Reloc::Model>();
+  auto targetMachine = target->createTargetMachine(
+      targetTriple, "generic", "", opt, rm);
 
   llvmModule->setDataLayout(targetMachine->createDataLayout());
   llvmModule->setTargetTriple(targetTriple);
 
-  std::string objFilename = inputFilename + ".obj";
+  std::string objFilename =
+      llvm::sys::path::stem(inputFilename).str() + ".obj";
   std::error_code EC;
-  raw_fd_ostream dest(objFilename, EC, sys::fs::OF_None);
+  llvm::raw_fd_ostream dest(objFilename, EC, llvm::sys::fs::OF_None);
   if (EC) {
     std::cerr << "Could not open file: " << EC.message() << "\n";
     return 1;
   }
 
-  legacy::PassManager pass;
-  auto fileType = CodeGenFileType::ObjectFile;
+  llvm::legacy::PassManager pass;
+  auto fileType = llvm::CodeGenFileType::ObjectFile;
   if (targetMachine->addPassesToEmitFile(pass, dest, nullptr, fileType)) {
     std::cerr << "TargetMachine can't emit a file of this type\n";
     return 1;
   }
   pass.run(*llvmModule);
   dest.flush();
-  
+  dest.close();
+
   std::cout << "Generated temporary object: " << objFilename << "\n";
 
   // 6. Link into DLL
-  // We'll invoke lld-link (which is LLVM's linker) or link.exe via Program::ExecuteAndWait
-  std::vector<StringRef> linkArgs;
-  
-  // Find link.exe or lld-link
-  auto linkerPath = sys::findProgramByName("lld-link");
+  auto linkerPath = llvm::sys::findProgramByName("lld-link");
   if (!linkerPath) {
-    linkerPath = sys::findProgramByName("link.exe");
+    linkerPath = llvm::sys::findProgramByName("link.exe");
     if (!linkerPath) {
       std::cerr << "Could not find lld-link or link.exe in PATH\n";
       return 1;
@@ -179,39 +177,41 @@ int main(int argc, char **argv) {
   std::string outArg = "/OUT:" + outputDll;
   std::string dllArg = "/DLL";
   std::string noLogoArg = "/NOLOGO";
-  
-  // We'll pass the generated obj, our static runtime lib, and any dependencies
+
+  std::vector<llvm::StringRef> linkArgs;
   linkArgs.push_back(*linkerPath);
   linkArgs.push_back(noLogoArg);
   linkArgs.push_back(dllArg);
   linkArgs.push_back(outArg);
   linkArgs.push_back(objFilename);
-  
-  // The hip_runtime_static.lib will be next to the executable in a typical CMake build,
-  // but for robustness we might need its absolute path or assume it's in the lib path.
-  // For now, assuming we run this where hip_runtime_static.lib is available, 
-  // or we need to look it up based on the executable path.
-  std::string exePath = llvm::sys::fs::getMainExecutable(argv[0], (void *)(intptr_t)main);
-  StringRef exeDir = llvm::sys::path::parent_path(exePath);
-  
-  // Try to find hip_runtime_static.lib
-  SmallString<128> runtimeLibPath(exeDir);
+
+  std::string exePath =
+      llvm::sys::fs::getMainExecutable(argv[0], (void *)(intptr_t)main);
+  llvm::StringRef exeDir = llvm::sys::path::parent_path(exePath);
+
+  llvm::SmallString<128> runtimeLibPath(exeDir);
   llvm::sys::path::append(runtimeLibPath, "hip_runtime_static.lib");
   linkArgs.push_back(runtimeLibPath.str());
 
+  std::string cwdLibPath = "/LIBPATH:.";
+  linkArgs.push_back(cwdLibPath);
+
+  std::string exeDirLibPath = std::string("/LIBPATH:") + exeDir.str();
+  linkArgs.push_back(exeDirLibPath);
+
+  std::string libPathArg;
   if (!therockDist.empty()) {
-    std::string libPathArg = "/LIBPATH:" + therockDist + "\\lib";
+    libPathArg = "/LIBPATH:" + therockDist + "\\lib";
     linkArgs.push_back(libPathArg);
   }
 
-  // Common dependencies
   linkArgs.push_back("amdhip64.lib");
   linkArgs.push_back("hipblaslt.lib");
   linkArgs.push_back("MIOpen.lib");
-  linkArgs.push_back("msvcrt.lib");
 
   std::string errMsg;
-  int result = sys::ExecuteAndWait(*linkerPath, linkArgs, std::nullopt, {}, 0, 0, &errMsg);
+  int result = llvm::sys::ExecuteAndWait(
+      *linkerPath, linkArgs, std::nullopt, {}, 0, 0, &errMsg);
   if (result != 0) {
     std::cerr << "Linker failed with code " << result << "\n";
     if (!errMsg.empty()) {
@@ -220,7 +220,8 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  std::cout << "Successfully generated " << outputDll << " and its import library\n";
+  std::cout << "Successfully generated " << outputDll
+            << " and its import library\n";
 
   return 0;
 }
