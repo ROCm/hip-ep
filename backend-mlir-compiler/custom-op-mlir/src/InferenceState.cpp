@@ -7,12 +7,11 @@
 // CRITICAL: morphizen.hpp must be included before other morphizen headers
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
+#include "morphizen/plugin.hpp"
+#include <cstdlib>
+#include <fstream>
 #include <glog/logging.h>
 #include <utility>
-
-// Component headers
-#include "LlvmJitLoader.h"
-#include "NativeDllLoader.h"
 
 // Environment parameters (global scope, before namespace)
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
@@ -22,94 +21,82 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
 namespace mlir_compilation {
 namespace customop {
 
-InferenceState::InferenceState(void *state,
-                               std::variant<DllHandle, JitHandle> artifact)
-    : state_(state), artifact_(std::move(artifact)) {}
+InferenceState::InferenceState(void *state, std::unique_ptr<morphizen::Plugin> plugin,
+                               const std::string &temp_dll_path)
+    : state_(state), plugin_(std::move(plugin)), temp_dll_path_(temp_dll_path) {}
 
-std::optional<InferenceState>
-InferenceState::create(std::variant<DllHandle, JitHandle> artifact) {
+std::unique_ptr<InferenceState> InferenceState::create(const std::vector<uint8_t> &dll_bytes) {
+  MY_LOG(1) << "Loading inference plugin from memory...";
 
-  // Extract functions from artifact before calling init
-  const DllFunctions *functions_ptr = std::visit(
-      [](auto &handle) -> const DllFunctions * { return &handle.functions(); },
-      artifact);
+  // Write DLL to temp file (morphizen::Plugin loads from file path)
+  char temp_path[L_tmpnam];
+  if (!std::tmpnam(temp_path)) {
+    LOG(FATAL) << "Failed to generate temporary DLL path";
+  }
 
-  if (!functions_ptr || !functions_ptr->init) {
-    LOG(WARNING) << "inference_init function is null";
-    return std::nullopt;
+  std::string dll_path = std::string(temp_path) + ".dll";
+  MY_LOG(2) << "Temporary DLL path: " << dll_path;
+
+  // Write DLL to temp file
+  {
+    std::ofstream dll_out(dll_path, std::ios::binary);
+    if (!dll_out) {
+      LOG(FATAL) << "Failed to create temporary DLL file: " << dll_path;
+    }
+    dll_out.write(reinterpret_cast<const char *>(dll_bytes.data()), dll_bytes.size());
+    dll_out.close();
+  }
+
+  // Load plugin using morphizen infrastructure
+  auto plugin = std::make_unique<morphizen::Plugin>(dll_path.c_str());
+
+  // Get init function and call it
+  // NOTE: Keep temp DLL file until plugin is destroyed
+  auto init_fn = plugin->get_method<int, void **>("inference_init");
+  if (!init_fn) {
+    LOG(FATAL) << "inference_init function not found in plugin";
   }
 
   void *state = nullptr;
-  int ret = functions_ptr->init(&state);
+  int ret = init_fn(&state);
   if (ret != 0) {
-    LOG(WARNING) << "inference_init() failed with code: " << ret;
-    return std::nullopt;
+    LOG(FATAL) << "inference_init() failed with code: " << ret;
   }
 
   MY_LOG(1) << "Inference state initialized";
 
-  return InferenceState(state, std::move(artifact));
+  return std::unique_ptr<InferenceState>(new InferenceState(state, std::move(plugin), dll_path));
 }
 
 InferenceState::~InferenceState() {
   MY_LOG(1) << "InferenceState destructor: cleaning up state";
-  if (state_) {
-    // Extract cleanup function before calling it
-    const DllFunctions *functions_ptr = std::visit(
-        [](auto &handle) -> const DllFunctions * {
-          return &handle.functions();
-        },
-        artifact_);
-
-    if (functions_ptr && functions_ptr->cleanup) {
-      int ret = functions_ptr->cleanup(state_);
+  if (state_ && plugin_) {
+    auto cleanup_fn = plugin_->get_method<int, void *>("inference_cleanup");
+    if (cleanup_fn) {
+      int ret = cleanup_fn(state_);
       if (ret != 0) {
         LOG(WARNING) << "inference_cleanup() failed with code: " << ret;
       }
     }
     state_ = nullptr;
   }
-  MY_LOG(1) << "InferenceState destructor: artifact will be destroyed next";
-  // artifact_ destructor runs automatically after this
-}
+  MY_LOG(1) << "InferenceState destructor: plugin will be destroyed next";
+  // plugin_ destructor runs automatically after this
 
-InferenceState::InferenceState(InferenceState &&other) noexcept
-    : state_(std::exchange(other.state_, nullptr)),
-      artifact_(std::move(other.artifact_)) {}
-
-InferenceState &InferenceState::operator=(InferenceState &&other) noexcept {
-  if (this != &other) {
-    if (state_) {
-      const DllFunctions *functions_ptr = std::visit(
-          [](auto &handle) -> const DllFunctions * {
-            return &handle.functions();
-          },
-          artifact_);
-
-      if (functions_ptr && functions_ptr->cleanup) {
-        int ret = functions_ptr->cleanup(state_);
-        if (ret != 0) {
-          LOG(WARNING) << "inference_cleanup() failed with code: " << ret;
-        }
-      }
-    }
-    state_ = other.state_;
-    artifact_ = std::move(other.artifact_);
-    other.state_ = nullptr;
+  // Delete temporary DLL file after plugin is destroyed
+  if (!temp_dll_path_.empty()) {
+    std::remove(temp_dll_path_.c_str());
+    MY_LOG(2) << "Deleted temporary DLL: " << temp_dll_path_;
   }
-  return *this;
 }
 
 int InferenceState::compute(span_t *inputs, span_t *outputs) const {
-  // Get compute function from owned artifact
-  const DllFunctions &functions = std::visit(
-      [](const auto &handle) -> const DllFunctions & {
-        return handle.functions();
-      },
-      artifact_);
-
-  // Call inference_compute with our state handle
-  return functions.compute(state_, inputs, outputs);
+  auto compute_fn = plugin_->get_method<int, void *, span_t *, span_t *>("inference_compute");
+  if (!compute_fn) {
+    LOG(ERROR) << "inference_compute function not found in plugin";
+    return -1;
+  }
+  return compute_fn(state_, inputs, outputs);
 }
 
 } // namespace customop

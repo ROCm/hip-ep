@@ -13,6 +13,9 @@
 #include <glog/logging.h>
 #include <sstream>
 
+namespace hipdnn {
+namespace level1pass {
+
 namespace {
 
 // Error codes from morphizen-mlir-compiler C API
@@ -35,25 +38,6 @@ struct CompilerError {
     char message[1024];
 };
 
-namespace hipdnn {
-namespace level1pass {
-
-// These are defined in pass_main.cpp
-enum class ArtifactFormat { Native, LlvmIr };
-
-struct CompilationConfig {
-  ArtifactFormat artifactFormat;
-  int optLevel;
-};
-
-struct CompilationArtifact {
-  std::string filename;
-  std::vector<uint8_t> bytes;
-  ArtifactFormat format;
-};
-
-namespace {
-
 // Generate safe temporary filename (replaces deprecated std::tmpnam)
 std::string generateTempPath() {
   auto now = std::chrono::system_clock::now();
@@ -70,6 +54,16 @@ std::string generateTempPath() {
 #else
   return std::string("/tmp/") + filename;
 #endif
+}
+
+// Build JSON options string from compilation config
+std::string build_compiler_options_json(const CompilationConfig &config) {
+  std::ostringstream json;
+  json << "{";
+  json << "\"opt_level\": " << config.optLevel;
+  json << ", \"output_mode\": \"OUTPUT_MODE_DLL\"";
+  json << "}";
+  return json.str();
 }
 
 } // anonymous namespace
@@ -96,13 +90,7 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
   std::string temp_output_path = generateTempPath();
 
   // Build JSON options string from config
-  // Format: {"opt_level": N, "output_mode": "OUTPUT_MODE_DLL"}
-  std::ostringstream json;
-  json << "{";
-  json << "\"opt_level\": " << config.optLevel;
-  json << ", \"output_mode\": \"OUTPUT_MODE_DLL\"";
-  json << "}";
-  std::string options_json = json.str();
+  std::string options_json = build_compiler_options_json(config);
 
   LOG(INFO) << "Compilation options (JSON): " << options_json;
 

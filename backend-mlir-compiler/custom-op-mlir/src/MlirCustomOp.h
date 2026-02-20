@@ -6,6 +6,7 @@
 #define MLIR_CUSTOM_OP_H
 
 #include "InferenceState.h"
+#include "metadata.pb.h"
 #include "morphizen/morphizen.hpp"
 #include <memory>
 #include <optional>
@@ -30,11 +31,11 @@ public:
   void Compute(const OrtApi *api, OrtKernelContext *context) const override;
 
 private:
-  // Inference state owns the artifact (clear dependency)
-  std::optional<customop::InferenceState> inference_state_;
+  // Inference state owns the artifact (clear ownership via unique_ptr)
+  std::unique_ptr<customop::InferenceState> inference_state_;
 
-  // Output shapes from metadata (populated in constructor)
-  std::vector<std::vector<int64_t>> output_shapes_;
+  // Metadata from EPContext (contains output shapes)
+  mlir_metadata::Metadata metadata_;
 };
 
 } // namespace mlir_compilation

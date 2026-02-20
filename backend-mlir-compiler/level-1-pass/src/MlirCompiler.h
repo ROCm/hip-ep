@@ -14,10 +14,21 @@
 namespace hipdnn {
 namespace level1pass {
 
-// Forward declarations (defined in pass_main.cpp)
-enum class ArtifactFormat;
-struct CompilationConfig;
-struct CompilationArtifact;
+// Artifact format (native DLL or LLVM IR)
+enum class ArtifactFormat { Native, LlvmIr };
+
+// Compilation configuration
+struct CompilationConfig {
+  ArtifactFormat artifactFormat;
+  int optLevel;
+};
+
+// Compiled artifact (bytes + metadata)
+struct CompilationArtifact {
+  std::string filename;
+  std::vector<uint8_t> bytes;
+  ArtifactFormat format;
+};
 
 /**
  * Simplified MLIR compiler that uses morphizen-mlir-compiler plugin C API.
