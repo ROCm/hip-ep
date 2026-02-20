@@ -93,26 +93,25 @@ static CompilationConfig load_config(PassContext *ctx) {
 
 // Step 2: Get MLIR bytecode from graph
 static std::string get_mlir_bytecode(Graph &graph) {
-  auto graph_string = GraphConstRef(GraphRef(graph)).save_string();
-  if (!graph_string || graph_string->empty()) {
+  auto bytecode = GraphConstRef(GraphRef(graph)).save_string();
+  if (!bytecode || bytecode->empty()) {
     return "";
   }
 
-  std::string bytecode(graph_string->data(), graph_string->size());
-  MY_LOG(1) << "MLIR bytecode size: " << bytecode.size() << " bytes";
+  MY_LOG(1) << "MLIR bytecode size: " << bytecode->size() << " bytes";
 
   // Dump bytecode to file for troubleshooting if env var is set
   if (ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= 2) {
     std::ofstream dump_file("mlir_bytecode_dump.mlir", std::ios::binary);
     if (dump_file.is_open()) {
-      dump_file.write(bytecode.data(), bytecode.size());
+      dump_file.write(bytecode->data(), bytecode->size());
       MY_LOG(1) << "Dumped MLIR bytecode to mlir_bytecode_dump.mlir";
     } else {
       LOG(WARNING) << "Failed to dump MLIR bytecode";
     }
   }
 
-  return bytecode;
+  return std::string(bytecode->data(), bytecode->size());
 }
 
 // Step 3: Compile MLIR bytecode to artifact
