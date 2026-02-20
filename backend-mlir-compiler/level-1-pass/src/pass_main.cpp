@@ -30,7 +30,6 @@ enum class ArtifactFormat { Native, LlvmIr };
 struct CompilationConfig {
   ArtifactFormat artifactFormat;
   int optLevel;
-  std::string outputFilename;
 };
 
 struct CompilationArtifact {
@@ -62,7 +61,6 @@ static CompilationConfig load_config(PassContext *ctx) {
   CompilationConfig config;
   config.artifactFormat = ArtifactFormat::Native;
   config.optLevel = 2;
-  config.outputFilename = "";
 
   try {
     // Parse artifact format
@@ -79,9 +77,6 @@ static CompilationConfig load_config(PassContext *ctx) {
     std::string opt_level_str =
         ctx->get_provider_option("optimization_level", "2");
     config.optLevel = std::stoi(opt_level_str);
-
-    // Parse output filename
-    config.outputFilename = ctx->get_provider_option("output_filename", "");
 
   } catch (const std::exception &ex) {
     MY_LOG(1) << "Failed to parse provider options: " << ex.what()

@@ -24,7 +24,6 @@ enum class ArtifactFormat { Native, LlvmIr };
 struct CompilationConfig {
   ArtifactFormat artifactFormat;
   int optLevel;
-  std::string outputFilename;
 };
 
 struct CompilationArtifact {
@@ -73,12 +72,7 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
   auto version = plugin->invoke<const char *>("morphizen_mlir_get_version");
   LOG(INFO) << "Plugin version: " << version;
 
-  // Generate output filename
-  std::string output_filename = config.outputFilename.empty()
-                                    ? "model_compiled.dll"
-                                    : config.outputFilename;
-
-  // Generate temporary output path
+  // Generate temporary output path for compilation
   std::string temp_output_path = generateTempPath();
 
   // Build JSON options string from config
@@ -150,12 +144,11 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
 
   // Build artifact
   CompilationArtifact artifact;
-  artifact.filename = output_filename;
+  artifact.filename = "model_compiled.dll";
   artifact.bytes = std::move(buffer);
   artifact.format = config.artifactFormat;
 
-  LOG(INFO) << "Artifact created: " << artifact.filename << " ("
-            << artifact.bytes.size() << " bytes)";
+  LOG(INFO) << "Artifact created: " << artifact.bytes.size() << " bytes";
 
   return artifact;
 }
