@@ -14,6 +14,10 @@
 #include <sstream>
 #include <vector>
 
+// Protobuf
+#include "google/protobuf/util/json_util.h"
+#include "metadata.pb.h"
+
 using namespace morphizen;
 using namespace morphizen_cxx;
 
@@ -170,63 +174,30 @@ static std::vector<OutputMetadata> extract_output_metadata(Graph &graph) {
   return output_metadata;
 }
 
-// Step 6: Build metadata JSON (replaces Protobuf)
+// Step 6: Build metadata JSON using Protobuf
 static std::string
 build_metadata_json(const CompilationArtifact &artifact,
                     const CompilationConfig &config,
                     const std::vector<OutputMetadata> &outputs) {
-  auto now = std::chrono::system_clock::now();
-  auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-                       now.time_since_epoch())
-                       .count();
+  mlir_metadata::Metadata metadata;
+  metadata.set_artifact_filename(artifact.filename);
 
-  std::ostringstream json;
-  json << "{";
-
-  // Basic metadata
-  json << "\"artifact_format\": \""
-       << (config.artifactFormat == ArtifactFormat::Native ? "native"
-                                                            : "llvm_ir")
-       << "\",";
-  json << "\"compilation_timestamp\": " << timestamp << ",";
-  json << "\"compiler_version\": \"mlir-hip-compiler-1.0\",";
-  json << "\"optimization_level\": " << config.optLevel << ",";
-  json << "\"artifact_filename\": \"" << artifact.filename << "\",";
-  json << "\"artifact_size\": " << artifact.bytes.size();
-
-  // Output metadata
-  if (!outputs.empty()) {
-    json << ",\"outputs\": [";
-    for (size_t i = 0; i < outputs.size(); ++i) {
-      const auto &output = outputs[i];
-      if (i > 0)
-        json << ",";
-
-      json << "{";
-      json << "\"name\": \"" << output.name << "\",";
-      json << "\"rank\": " << output.rank << ",";
-      json << "\"elem_type\": " << output.elem_type;
-
-      if (!output.shape.empty()) {
-        json << ",\"shape\": [";
-        for (size_t j = 0; j < output.shape.size(); ++j) {
-          if (j > 0)
-            json << ",";
-          json << output.shape[j];
-        }
-        json << "]";
-      }
-
-      json << "}";
+  for (const auto &output : outputs) {
+    auto *output_proto = metadata.add_outputs();
+    output_proto->set_name(output.name);
+    output_proto->set_rank(output.rank);
+    output_proto->set_elem_type(output.elem_type);
+    for (int64_t dim : output.shape) {
+      output_proto->add_shape(dim);
     }
-    json << "]";
   }
 
-  json << "}";
+  std::string json;
+  auto status = google::protobuf::util::MessageToJsonString(metadata, &json);
+  CHECK(status.ok()) << "Failed to serialize metadata to JSON: " << status.ToString();
 
-  std::string metadata = json.str();
-  MY_LOG(1) << "Metadata JSON: " << metadata;
-  return metadata;
+  MY_LOG(1) << "Metadata JSON: " << json;
+  return json;
 }
 
 // Step 7: Fuse graph into single MLIR custom op

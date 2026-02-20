@@ -1,0 +1,19 @@
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+
+syntax = "proto3";
+
+package mlir_metadata;
+
+// Minimal metadata for MLIR compiled artifacts
+message Metadata {
+  string artifact_filename = 1;
+  repeated Output outputs = 2;
+}
+
+message Output {
+  string name = 1;
+  int32 rank = 2;
+  int32 elem_type = 3;
+  repeated int64 shape = 4;
+}
