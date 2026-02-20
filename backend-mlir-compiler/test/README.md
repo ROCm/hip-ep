@@ -24,7 +24,7 @@ git add models/two_layer_conv.onnx  # Git LFS will handle it automatically
 ## Build
 ```bash
 LOCAL_DIR=$(cd ../../local && pwd)
-cmake -S ../.. -B ../../build/onnx-hipdnn-ep-mlir-integration \
+cmake -S ../.. -B ../../build/$(basename $PWD) \
   -DBUILD_SHARED_LIBS=OFF \
   "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded\$<\$<CONFIG:Debug>:Debug>" \
   -DCMAKE_BUILD_TYPE=Debug \
@@ -33,14 +33,14 @@ cmake -S ../.. -B ../../build/onnx-hipdnn-ep-mlir-integration \
   -DBUILD_MOCK_RUNTIME=ON \
   --fresh
 
-cmake --build ../../build/onnx-hipdnn-ep-mlir-integration --config Debug --parallel
+cmake --build ../../build/$(basename $PWD) --config Debug --parallel
 ```
 
 ## Running the Test
 
 ### With MOCK Runtime (default, no GPU required)
 ```bash
-cd ../../build/onnx-hipdnn-ep-mlir-integration/Debug/bin
+cd ../../build/$(basename $PWD)/Debug/bin
 
 # Basic run
 ./mlir_e2e_test.exe
@@ -52,7 +52,7 @@ MORPHIZEN_DEBUG_MLIR_BACKEND=3 \
 ./mlir_e2e_test.exe
 
 # Using ctest
-cd ../../build/onnx-hipdnn-ep-mlir-integration
+cd ../../build/$(basename $PWD)
 ctest -R MlirE2ETest --verbose
 ```
 
@@ -60,7 +60,7 @@ ctest -R MlirE2ETest --verbose
 ```bash
 # Rebuild with REAL runtime
 LOCAL_DIR=$(cd ../../local && pwd)
-cmake -S ../.. -B ../../build/onnx-hipdnn-ep-mlir-integration \
+cmake -S ../.. -B ../../build/$(basename $PWD) \
   -DBUILD_SHARED_LIBS=OFF \
   "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded\$<\$<CONFIG:Debug>:Debug>" \
   -DCMAKE_BUILD_TYPE=Debug \
@@ -69,10 +69,10 @@ cmake -S ../.. -B ../../build/onnx-hipdnn-ep-mlir-integration \
   -DBUILD_MOCK_RUNTIME=OFF \
   --fresh
 
-cmake --build ../../build/onnx-hipdnn-ep-mlir-integration --config Debug --parallel
+cmake --build ../../build/$(basename $PWD) --config Debug --parallel
 
 # Run test
-cd ../../build/onnx-hipdnn-ep-mlir-integration/Debug/bin
+cd ../../build/$(basename $PWD)/Debug/bin
 ./mlir_e2e_test.exe
 ```
 
