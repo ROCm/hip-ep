@@ -9,11 +9,10 @@
  * The test uses a two-layer convolution model:
  * Input [1,3,224,224] → Conv1 → ReLU → Conv2 → ReLU → Output [1,64,112,112]
  *
- * Environment variables:
- * - MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1 (required for EP device API)
- * - ORT_LOG_LEVEL=info (optional, for verbose logging)
- * - DEBUG_MORPHIZEN_PASS=1 (optional, for pass debug output)
- * - MORPHIZEN_DEBUG_MLIR_BACKEND=3 (optional, for MLIR backend verbose logging)
+ * Environment variables (all optional):
+ * - ORT_LOG_LEVEL=info - Enable ORT session creation logging
+ * - DEBUG_MORPHIZEN_PASS=1 - Enable morphizen pass debug logging
+ * - MORPHIZEN_DEBUG_MLIR_BACKEND=3 - MLIR backend compilation verbose logging
  */
 
 #include <gtest/gtest.h>
