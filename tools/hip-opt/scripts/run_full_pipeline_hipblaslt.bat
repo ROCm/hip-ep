@@ -19,7 +19,7 @@ echo      OK: gemm.dll
 
 echo.
 echo [2/2] Compile and link driver
-cl.exe /EHsc /std:c++17 /D__HIP_PLATFORM_AMD__ /I"%THEROCK_DIST%\include" ..\examples\main_gemm.cpp gemm.lib /Fe:matmul_test.exe
+cl.exe /EHsc /std:c++17 /D__HIP_PLATFORM_AMD__ /I"%THEROCK_DIST%\include" ..\examples\main_gemm.cpp gemm.lib amdhip64.lib /Fe:matmul_test.exe
 if errorlevel 1 (echo FAILED at step 2 && exit /b 1)
 echo      OK: matmul_test.exe
 
