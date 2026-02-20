@@ -102,6 +102,7 @@ static std::string get_mlir_bytecode(Graph &graph) {
 
   // Dump bytecode to file for troubleshooting if env var is set
   if (ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= 2) {
+    MY_LOG(1) << "Dumping MLIR bytecode to mlir_bytecode_dump.mlir";
     CHECK(std::ofstream("mlir_bytecode_dump.mlir", std::ios::binary)
               .write(bytecode->data(), bytecode->size())
               .good())
