@@ -41,13 +41,6 @@ struct CompilationArtifact {
   ArtifactFormat format;
 };
 
-struct OutputMetadata {
-  std::string name;
-  int32_t rank;
-  std::vector<int64_t> shape;
-  int32_t elem_type;  // ONNX element type (e.g., 1=float, 7=int64)
-};
-
 } // namespace level1pass
 } // namespace hipdnn
 
@@ -145,51 +138,31 @@ static bool write_artifact_to_epcontext(PassContext *ctx,
   return true;
 }
 
-// Step 5: Extract output metadata from graph
-static std::vector<OutputMetadata> extract_output_metadata(Graph &graph) {
-  std::vector<OutputMetadata> output_metadata;
-  GraphRef graphRef(graph);
-
-  for (const auto &output : graphRef.outputs()) {
-    OutputMetadata meta;
-    meta.name = output.name();
-
-    // Get shape
-    auto shape_ptr = output.shape();
-    if (shape_ptr && !output.is_unknown_shape()) {
-      meta.shape = *shape_ptr;
-      meta.rank = static_cast<int32_t>(meta.shape.size());
-    } else {
-      meta.rank = -1; // Unknown rank
-    }
-
-    // Get element type (ONNX data type enum value)
-    meta.elem_type = output.element_type();
-
-    output_metadata.push_back(meta);
-    MY_LOG(2) << "Output " << meta.name << ": rank=" << meta.rank
-              << ", elem_type=" << meta.elem_type;
-  }
-
-  return output_metadata;
-}
-
-// Step 6: Build metadata JSON using Protobuf
+// Step 5: Build metadata JSON from graph outputs
 static std::string
-build_metadata_json(const CompilationArtifact &artifact,
-                    const CompilationConfig &config,
-                    const std::vector<OutputMetadata> &outputs) {
+build_metadata_json(const CompilationArtifact &artifact, Graph &graph) {
   mlir_metadata::Metadata metadata;
   metadata.set_artifact_filename(artifact.filename);
 
-  for (const auto &output : outputs) {
+  GraphRef graphRef(graph);
+  for (const auto &output : graphRef.outputs()) {
     auto *output_proto = metadata.add_outputs();
-    output_proto->set_name(output.name);
-    output_proto->set_rank(output.rank);
-    output_proto->set_elem_type(output.elem_type);
-    for (int64_t dim : output.shape) {
-      output_proto->add_shape(dim);
+    output_proto->set_name(output.name());
+    output_proto->set_elem_type(output.element_type());
+
+    // Get shape and rank
+    auto shape_ptr = output.shape();
+    if (shape_ptr && !output.is_unknown_shape()) {
+      output_proto->set_rank(static_cast<int32_t>(shape_ptr->size()));
+      for (int64_t dim : *shape_ptr) {
+        output_proto->add_shape(dim);
+      }
+    } else {
+      output_proto->set_rank(-1); // Unknown rank
     }
+
+    MY_LOG(2) << "Output " << output.name() << ": rank=" << output_proto->rank()
+              << ", elem_type=" << output_proto->elem_type();
   }
 
   std::string json;
@@ -280,17 +253,14 @@ struct Level1MlirPass {
       return;
     }
 
-    // Step 5: Extract output metadata from graph
-    auto output_metadata = extract_output_metadata(graph);
+    // Step 5: Build metadata JSON from graph outputs
+    auto metadata_json = build_metadata_json(artifact, graph);
 
-    // Step 6: Build metadata JSON
-    auto metadata_json = build_metadata_json(artifact, config, output_metadata);
-
-    // Step 7: Extract unique ID from artifact filename (remove extension)
+    // Step 6: Extract unique ID from artifact filename (remove extension)
     std::string unique_id =
         artifact.filename.substr(0, artifact.filename.find_last_of('.'));
 
-    // Step 8: Fuse graph into single MLIR custom op
+    // Step 7: Fuse graph into single MLIR custom op
     if (!fuse_graph(self, graph, metadata_json, unique_id)) {
       LOG(WARNING) << "Graph fusion failed";
       return;
