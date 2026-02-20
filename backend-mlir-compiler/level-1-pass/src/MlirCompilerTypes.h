@@ -5,13 +5,13 @@
 
 #include <cstddef>
 
-// Local type definitions matching morphizen-mlir-compiler simplified C API
-// These are defined here to avoid dependency on morphizen-mlir-compiler headers
-// The actual ABI contract is enforced by the DLL boundary and Plugin API
+// Local type definitions for morphizen-mlir-compiler C API
+// NOTE: These must stay in sync with morphizen-mlir-compiler/compiler_types.h
+// to ensure ABI compatibility across the DLL boundary.
 
 namespace mlir_compiler_local {
 
-// Error codes (must match morphizen-mlir-compiler/compiler_types.h enum values)
+// Error codes - must match morphizen-mlir-compiler/compiler_types.h
 enum CompilerErrorCode {
     COMPILER_SUCCESS = 0,
     COMPILER_ERROR_INVALID_INPUT = 1,
@@ -25,7 +25,7 @@ enum CompilerErrorCode {
     COMPILER_ERROR_INTERNAL = 99
 };
 
-// Error struct (must match binary layout in morphizen-mlir-compiler/compiler_types.h)
+// Error struct - must match binary layout in morphizen-mlir-compiler/compiler_types.h
 struct CompilerError {
     CompilerErrorCode code;
     char message[1024];  // Fixed-size buffer for DLL safety
