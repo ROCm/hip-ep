@@ -4,7 +4,6 @@
  */
 
 #include "MlirCompiler.h"
-#include "MlirCompilerTypes.h"
 
 // Morphizen headers
 #include "morphizen/env_config.hpp"
@@ -17,7 +16,6 @@
 
 using namespace morphizen;
 using namespace morphizen_cxx;
-using namespace mlir_compiler_local;
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= n)
