@@ -14,12 +14,7 @@ set(LIB_NAME morphizen-custom-op-mlir)
 add_library(${LIB_NAME} STATIC
   src/main.cpp
   src/MlirCustomOp.cpp
-  src/MetadataParser.cpp
-  src/ArtifactLoader.cpp
-  src/NativeDllLoader.cpp
-  src/LlvmJitLoader.cpp
   src/InferenceState.cpp
-  src/TensorMarshaler.cpp
 )
 
 # Define MORPHIZEN_CUSTOM_OP for conditional compilation
@@ -29,13 +24,13 @@ target_compile_definitions(${LIB_NAME} PRIVATE "MORPHIZEN_CUSTOM_OP=1")
 target_link_libraries(${LIB_NAME} PRIVATE
   morphizen::morphizen-core-static
   glog::glog
-  mlir_compilation_proto  # Protobuf metadata library
+  mlir_compilation_proto  # Shared protobuf metadata library
 )
 
 # Include directories
 target_include_directories(${LIB_NAME} PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
-  ${CMAKE_CURRENT_BINARY_DIR}/..  # For generated protobuf headers (mlir_compilation.pb.h)
+  ${CMAKE_CURRENT_BINARY_DIR}/..  # For generated protobuf headers (metadata.pb.h)
 )
 
 # Link to EP target with whole archive to ensure registration

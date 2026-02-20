@@ -24,25 +24,7 @@ using namespace morphizen_cxx;
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= n)
 
-namespace hipdnn {
-namespace level1pass {
-
-// Forward declarations for types used in pass_main.cpp
-enum class ArtifactFormat { Native, LlvmIr };
-
-struct CompilationConfig {
-  ArtifactFormat artifactFormat;
-  int optLevel;
-};
-
-struct CompilationArtifact {
-  std::string filename;
-  std::vector<uint8_t> bytes;
-  ArtifactFormat format;
-};
-
-} // namespace level1pass
-} // namespace hipdnn
+// Types are now defined in MlirCompiler.h
 
 using namespace hipdnn::level1pass;
 
@@ -89,7 +71,7 @@ static CompilationConfig load_config(PassContext *ctx) {
 // Step 2: Get MLIR bytecode from graph
 static std::string get_mlir_bytecode(Graph &graph) {
   auto bytecode = GraphConstRef(GraphRef(graph)).save_string();
-  if (!bytecode || bytecode->empty()) {
+  if (bytecode->empty()) {
     return "";
   }
 
@@ -231,7 +213,7 @@ struct Level1MlirPass {
     MY_LOG(1) << "Level1MlirPass::process() called";
 
     // Step 1: Load configuration from provider options
-    auto config = load_config(self.get_context());
+    auto config = load_config(self.get_context().get());
 
     // Step 2: Get MLIR bytecode from graph
     auto mlir_bytecode = get_mlir_bytecode(graph);
@@ -249,7 +231,7 @@ struct Level1MlirPass {
     CompilationArtifact artifact = *artifactOpt;
 
     // Step 4: Write artifact to EPContext
-    if (!write_artifact_to_epcontext(self.get_context(), artifact)) {
+    if (!write_artifact_to_epcontext(self.get_context().get(), artifact)) {
       return;
     }
 
