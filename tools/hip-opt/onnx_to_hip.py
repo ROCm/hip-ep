@@ -1,3 +1,7 @@
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 """Convert an ONNX model to HIP dialect MLIR.
 
 Applies the following transformations:
@@ -11,9 +15,8 @@ import argparse
 import re
 import sys
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-import numpy as np
 import onnx
 from onnx import TensorProto
 
@@ -57,44 +60,44 @@ def sanitize_name(name: str) -> str:
 
 OP_MAP: dict[tuple[str, str], str] = {
     # --- hipBLASLt (GEMM) ---
-    ("", "MatMul"):              "hip.hipblaslt.matmul",
-    ("", "Gemm"):                "hip.hipblaslt.matmul",
+    ("", "MatMul"): "hip.hipblaslt.matmul",
+    ("", "Gemm"): "hip.hipblaslt.matmul",
     # --- MIOpen: normalization (miopenLayerNormForward / miopenT5LayerNormForward / miopenAddLayerNormForward) ---
-    ("", "LayerNormalization"):  "hip.miopen.layer_norm",
+    ("", "LayerNormalization"): "hip.miopen.layer_norm",
     ("", "SimplifiedLayerNormalization"): "hip.miopen.t5_layer_norm",
     ("com.microsoft", "SkipSimplifiedLayerNormalization"): "hip.miopen.skip_rms_norm",
     ("com.microsoft", "SkipLayerNormalization"): "hip.miopen.skip_layer_norm",
     ("com.microsoft", "SimplifiedLayerNormalization"): "hip.miopen.t5_layer_norm",
     # --- MIOpen: activation (miopenActivationForward) ---
-    ("", "Sigmoid"):             "hip.miopen.sigmoid",
-    ("", "Relu"):                "hip.miopen.relu",
+    ("", "Sigmoid"): "hip.miopen.sigmoid",
+    ("", "Relu"): "hip.miopen.relu",
     # --- MIOpen: softmax (miopenSoftmaxForward) ---
-    ("", "Softmax"):             "hip.miopen.softmax",
+    ("", "Softmax"): "hip.miopen.softmax",
     # --- MIOpen: element-wise tensor ops (miopenOpTensor) ---
-    ("", "Add"):                 "hip.miopen.add",
-    ("", "Mul"):                 "hip.miopen.mul",
+    ("", "Add"): "hip.miopen.add",
+    ("", "Mul"): "hip.miopen.mul",
     # --- MIOpen: reduction (miopenReduceTensor) ---
-    ("", "ReduceMean"):          "hip.miopen.reduce_mean",
+    ("", "ReduceMean"): "hip.miopen.reduce_mean",
     # --- MIOpen: concat (miopenCatForward, experimental) ---
-    ("", "Concat"):              "hip.miopen.cat",
+    ("", "Concat"): "hip.miopen.cat",
     # --- Attention ---
     ("com.microsoft", "GroupQueryAttention"): "hip.gqa",
     # --- Quantization (blank impl placeholders) ---
-    ("", "QuantizeLinear"):      "hip.quantize_linear",
-    ("", "DequantizeLinear"):    "hip.dequantize_linear",
+    ("", "QuantizeLinear"): "hip.quantize_linear",
+    ("", "DequantizeLinear"): "hip.dequantize_linear",
     # --- Zero-cost metadata ops (no kernel) ---
-    ("", "Reshape"):             "hip.reshape",
-    ("", "Unsqueeze"):           "hip.unsqueeze",
-    ("", "Squeeze"):             "hip.squeeze",
+    ("", "Reshape"): "hip.reshape",
+    ("", "Unsqueeze"): "hip.unsqueeze",
+    ("", "Squeeze"): "hip.squeeze",
     # --- Custom HIP kernels (no MIOpen equivalent) ---
-    ("", "Transpose"):           "hip.transpose",
-    ("", "Gather"):              "hip.gather",
-    ("", "Cast"):                "hip.cast",
-    ("", "Div"):                 "hip.div",
-    ("", "Pow"):                 "hip.pow",
-    ("", "Sqrt"):                "hip.sqrt",
-    ("", "Constant"):            "hip.constant",
-    ("", "LpNormalization"):     "hip.lp_normalization",
+    ("", "Transpose"): "hip.transpose",
+    ("", "Gather"): "hip.gather",
+    ("", "Cast"): "hip.cast",
+    ("", "Div"): "hip.div",
+    ("", "Pow"): "hip.pow",
+    ("", "Sqrt"): "hip.sqrt",
+    ("", "Constant"): "hip.constant",
+    ("", "LpNormalization"): "hip.lp_normalization",
 }
 
 
@@ -109,6 +112,7 @@ def map_op(domain: str, op_type: str) -> str:
 # Graph region grouping
 # ---------------------------------------------------------------------------
 
+
 def _op_backend(hip_op: str) -> str | None:
     """Return the backend graph region for an op, or None if ungrouped."""
     if hip_op.startswith("hip.hipblaslt."):
@@ -121,6 +125,7 @@ def _op_backend(hip_op: str) -> str | None:
 # ---------------------------------------------------------------------------
 # Type helpers
 # ---------------------------------------------------------------------------
+
 
 def _parse_dims(type_proto) -> tuple[list[int | str], str]:
     """Extract (dims, elem_type_str) from a TensorTypeProto."""
@@ -158,9 +163,11 @@ def mlir_type(dims: list[int | str], et: str, *, use_memref: bool = False) -> st
 # Graph-level pattern fusion (Phase A3)
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class FusedOp:
     """Represents a fused operation that replaces multiple ONNX nodes."""
+
     hip_op: str
     inputs: list[str]
     outputs: list[str]
@@ -211,14 +218,13 @@ def detect_fusions(nodes: list[onnx.NodeProto]) -> dict[int, FusedOp]:
             if p_val == 2 and axis_val == -1:
                 mul_node, chain = _find_mul_after(nodes, i, producer, consumer)
                 if mul_node is not None:
-                    mul_idx = next(
-                        idx for idx, n in enumerate(nodes) if n is mul_node
-                    )
+                    mul_idx = next(idx for idx, n in enumerate(nodes) if n is mul_node)
                     all_consumed = {i, mul_idx} | chain
                     if not all_consumed & consumed:
                         fusions[i] = FusedOp(
                             hip_op="hip.miopen.rms_norm",
-                            inputs=list(node.input) + [_get_weight_input(mul_node, nodes, i, chain)],
+                            inputs=list(node.input)
+                            + [_get_weight_input(mul_node, nodes, i, chain)],
                             outputs=list(mul_node.output),
                             attrs={},
                             consumed_nodes=all_consumed,
@@ -229,9 +235,7 @@ def detect_fusions(nodes: list[onnx.NodeProto]) -> dict[int, FusedOp]:
         if node.op_type == "Sigmoid" and i not in consumed:
             mul_node, chain = _find_silu_mul_after(nodes, i, producer, consumer)
             if mul_node is not None:
-                mul_idx = next(
-                    idx for idx, n in enumerate(nodes) if n is mul_node
-                )
+                mul_idx = next(idx for idx, n in enumerate(nodes) if n is mul_node)
                 all_consumed = {i, mul_idx} | chain
                 if not all_consumed & consumed:
                     fusions[i] = FusedOp(
@@ -370,6 +374,7 @@ def _traces_back_to(
 # HIP MLIR Emitter
 # ---------------------------------------------------------------------------
 
+
 class HipEmitter:
     """Emits HIP dialect MLIR from an ONNX graph."""
 
@@ -411,7 +416,11 @@ class HipEmitter:
     # --- Type resolution ---
 
     def _build_type_map(self):
-        for vi in list(self.graph.input) + list(self.graph.output) + list(self.graph.value_info):
+        for vi in (
+            list(self.graph.input)
+            + list(self.graph.output)
+            + list(self.graph.value_info)
+        ):
             if vi.type.HasField("tensor_type"):
                 dims, et = _parse_dims(vi.type)
                 self.type_map[vi.name] = mlir_type(dims, et, use_memref=self.use_memref)
@@ -422,7 +431,9 @@ class HipEmitter:
             if init.name not in self.type_map:
                 et = mlir_elem_type(init.data_type)
                 dims = list(init.dims)
-                self.type_map[init.name] = mlir_type(dims, et, use_memref=self.use_memref)
+                self.type_map[init.name] = mlir_type(
+                    dims, et, use_memref=self.use_memref
+                )
 
     def _build_init_set(self):
         self.init_names = {init.name for init in self.graph.initializer}
@@ -498,7 +509,9 @@ class HipEmitter:
         self._line("}")
 
     def _emit_func(self):
-        real_inputs = [inp for inp in self.graph.input if inp.name not in self.init_names]
+        real_inputs = [
+            inp for inp in self.graph.input if inp.name not in self.init_names
+        ]
 
         arg_strs = []
         for inp in real_inputs:
@@ -525,11 +538,11 @@ class HipEmitter:
         else:
             self._line(f"func.func @{graph_name}(")
             self._line(f"    {args_str}")
-            self._line(f"  ) {{")
+            self._line("  ) {")
         self.indent += 1
 
         if self.add_lifecycle:
-            self._line('%handle = hip.create_handle() : !hip.handle')
+            self._line("%handle = hip.create_handle() : !hip.handle")
             self._blank()
 
         if not self.extract_weights:
@@ -540,7 +553,7 @@ class HipEmitter:
         self._blank()
 
         if self.add_lifecycle:
-            self._line('hip.destroy_handle(%handle) : !hip.handle')
+            self._line("hip.destroy_handle(%handle) : !hip.handle")
             self._blank()
 
         self._emit_return()
@@ -554,8 +567,8 @@ class HipEmitter:
             ty = self._get_type(init.name)
             self._line(
                 f'{ssa} = "hip.constant"() '
-                f'{{value = dense<0> : {ty}}} : () -> {ty}'
-                f'  // {init.name}'
+                f"{{value = dense<0> : {ty}}} : () -> {ty}"
+                f"  // {init.name}"
             )
 
     def _emit_nodes(self):
@@ -586,7 +599,9 @@ class HipEmitter:
             else:
                 # Collect consecutive ops with the same backend
                 group_start = idx
-                while idx < len(emit_items) and _op_backend(emit_items[idx][0]) == backend:
+                while (
+                    idx < len(emit_items) and _op_backend(emit_items[idx][0]) == backend
+                ):
                     idx += 1
                 group = emit_items[group_start:idx]
 
@@ -647,13 +662,19 @@ class HipEmitter:
         in_types = ", ".join(input_types)
         out_types = ", ".join(output_types)
         attrs_part = " {" + ", ".join(attr_strs) + "}" if attr_strs else ""
-        func_type = f"({in_types}) -> {out_types}" if out_types else f"({in_types}) -> ()"
+        func_type = (
+            f"({in_types}) -> {out_types}" if out_types else f"({in_types}) -> ()"
+        )
         name_comment = f"  // {node.name}" if node.name else ""
 
         if lhs:
-            self._line(f'{lhs} = "{hip_op}"({rhs_args}){attrs_part} : {func_type}{name_comment}')
+            self._line(
+                f'{lhs} = "{hip_op}"({rhs_args}){attrs_part} : {func_type}{name_comment}'
+            )
         else:
-            self._line(f'"{hip_op}"({rhs_args}){attrs_part} : {func_type}{name_comment}')
+            self._line(
+                f'"{hip_op}"({rhs_args}){attrs_part} : {func_type}{name_comment}'
+            )
 
     def _emit_return(self):
         if not self.graph.output:
@@ -667,6 +688,7 @@ class HipEmitter:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def convert(
     model_path: str,
@@ -698,16 +720,31 @@ def main():
     )
     parser.add_argument("model", help="Path to .onnx model file")
     parser.add_argument("-o", "--output", help="Output .mlir file (default: stdout)")
-    parser.add_argument("--memref", action="store_true",
-                        help="Use memref<..., 1> types instead of tensor<...>")
-    parser.add_argument("--extract-weights", action="store_true",
-                        help="Move weights from constants to function arguments")
-    parser.add_argument("--fuse", action="store_true",
-                        help="Fuse patterns (RMSNorm, SiLU) into single ops")
-    parser.add_argument("--lifecycle", action="store_true",
-                        help="Add hip.create_handle / hip.destroy_handle lifecycle")
-    parser.add_argument("--all", action="store_true",
-                        help="Enable all transformations (--memref --extract-weights --fuse --lifecycle)")
+    parser.add_argument(
+        "--memref",
+        action="store_true",
+        help="Use memref<..., 1> types instead of tensor<...>",
+    )
+    parser.add_argument(
+        "--extract-weights",
+        action="store_true",
+        help="Move weights from constants to function arguments",
+    )
+    parser.add_argument(
+        "--fuse",
+        action="store_true",
+        help="Fuse patterns (RMSNorm, SiLU) into single ops",
+    )
+    parser.add_argument(
+        "--lifecycle",
+        action="store_true",
+        help="Add hip.create_handle / hip.destroy_handle lifecycle",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Enable all transformations (--memref --extract-weights --fuse --lifecycle)",
+    )
     args = parser.parse_args()
 
     if args.all:

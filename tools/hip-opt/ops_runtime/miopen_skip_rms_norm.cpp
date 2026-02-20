@@ -1,4 +1,10 @@
-//===- miopen_skip_rms_norm.cpp - hip.miopen.skip_rms_norm runtime ---------===//
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
+//===- miopen_skip_rms_norm.cpp - hip.miopen.skip_rms_norm runtime
+//---------===//
 //
 // Fused Add + RMS normalization via miopenAddLayerNormForward (T5 mode).
 //   residual = x + skip
@@ -9,14 +15,14 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include <miopen/miopen.h>
-#include <hip/hip_runtime_api.h>
 #include <cstdint>
 #include <cstdio>
+#include <hip/hip_runtime_api.h>
+#include <miopen/miopen.h>
 
-extern "C" void hip_miopen_skip_rms_norm(void * /*handle*/, void *x,
-                                          void *skip, void *weight,
-                                          void *output, void *residual) {
+extern "C" void hip_miopen_skip_rms_norm(void * /*handle*/, void *x, void *skip,
+                                         void *weight, void *output,
+                                         void *residual) {
   // Structural stub -- full implementation would call:
   //   miopenAddLayerNormForward(miopenHandle, MIOPEN_ELEMENTWISE_AFFINE_T5,
   //       xDesc, x, x2Desc, skip, weightDesc, weight, biasDesc, nullptr,

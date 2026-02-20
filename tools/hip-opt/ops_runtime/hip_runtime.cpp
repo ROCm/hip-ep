@@ -1,4 +1,10 @@
-//===- hip_runtime.cpp - Handle lifecycle & device memory ------------------===//
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
+//===- hip_runtime.cpp - Handle lifecycle & device memory
+//------------------===//
 //
 // Provides the extern "C" functions that every MLIR-compiled HIP dialect
 // module calls for handle management and device memory allocation:
@@ -16,9 +22,9 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include <hip/hip_runtime_api.h>
 #include <cstdint>
 #include <cstdio>
+#include <hip/hip_runtime_api.h>
 
 extern "C" void *hipCreateHandle() {
   fprintf(stderr, "[hip] create_handle\n");
@@ -44,5 +50,6 @@ extern "C" void *hip_device_malloc(int64_t sizeBytes) {
 
 extern "C" void hip_device_free(void *ptr) {
   fprintf(stderr, "[hip] free %p\n", ptr);
-  if (ptr) hipFree(ptr);
+  if (ptr)
+    hipFree(ptr);
 }

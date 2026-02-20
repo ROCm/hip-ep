@@ -1,4 +1,10 @@
-//===- miopen_softmax.cpp - hip.miopen.softmax runtime ---------------------===//
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
+//===- miopen_softmax.cpp - hip.miopen.softmax runtime
+//---------------------===//
 //
 // Row-wise softmax via miopenSoftmaxForward_V2.
 // output[n,:] = softmax(input[n,:])  for each row n.
@@ -16,24 +22,23 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include <miopen/miopen.h>
-#include <hip/hip_runtime_api.h>
 #include <cstdint>
 #include <cstdio>
+#include <hip/hip_runtime_api.h>
+#include <miopen/miopen.h>
 
-#define MIOPEN_CHECK(call)                                                \
-  do {                                                                    \
-    miopenStatus_t status = (call);                                       \
-    if (status != miopenStatusSuccess) {                                  \
-      fprintf(stderr, "MIOpen error at %s:%d (status=%d)\n",              \
-              __FILE__, __LINE__, status);                                \
-      goto cleanup;                                                       \
-    }                                                                     \
+#define MIOPEN_CHECK(call)                                                     \
+  do {                                                                         \
+    miopenStatus_t status = (call);                                            \
+    if (status != miopenStatusSuccess) {                                       \
+      fprintf(stderr, "MIOpen error at %s:%d (status=%d)\n", __FILE__,         \
+              __LINE__, status);                                               \
+      goto cleanup;                                                            \
+    }                                                                          \
   } while (0)
 
-extern "C" void hip_miopen_softmax(void * /*handle*/,
-                                    void *input, void *output,
-                                    int64_t N, int64_t D) {
+extern "C" void hip_miopen_softmax(void * /*handle*/, void *input, void *output,
+                                   int64_t N, int64_t D) {
   fprintf(stderr, "[miopen.softmax] softmax [%lld, %lld] over last dim\n",
           (long long)N, (long long)D);
 
@@ -49,12 +54,14 @@ extern "C" void hip_miopen_softmax(void * /*handle*/,
   MIOPEN_CHECK(miopenSetTensorDescriptor(desc, miopenFloat, 4, dims, strides));
 
   float alpha = 1.0f, beta = 0.0f;
-  MIOPEN_CHECK(miopenSoftmaxForward_V2(
-      handle, &alpha, desc, input, &beta, desc, output,
-      MIOPEN_SOFTMAX_ACCURATE, MIOPEN_SOFTMAX_MODE_CHANNEL));
+  MIOPEN_CHECK(miopenSoftmaxForward_V2(handle, &alpha, desc, input, &beta, desc,
+                                       output, MIOPEN_SOFTMAX_ACCURATE,
+                                       MIOPEN_SOFTMAX_MODE_CHANNEL));
   hipDeviceSynchronize();
 
 cleanup:
-  if (desc) miopenDestroyTensorDescriptor(desc);
-  if (handle) miopenDestroy(handle);
+  if (desc)
+    miopenDestroyTensorDescriptor(desc);
+  if (handle)
+    miopenDestroy(handle);
 }

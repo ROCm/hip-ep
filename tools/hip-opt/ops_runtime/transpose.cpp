@@ -1,4 +1,10 @@
-//===- transpose.cpp - hip.transpose runtime -------------------------------===//
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
+//===- transpose.cpp - hip.transpose runtime
+//-------------------------------===//
 //
 // N-D transpose swapping two specified dimensions.
 //
@@ -11,19 +17,20 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include <hip/hip_runtime_api.h>
 #include <cstdint>
 #include <cstdio>
+#include <hip/hip_runtime_api.h>
 #include <vector>
 
-extern "C" void hip_transpose(void * /*handle*/,
-                               void *input, void *output,
-                               int64_t rank, int64_t dim0, int64_t dim1,
-                               int64_t s0, int64_t s1, int64_t s2) {
+extern "C" void hip_transpose(void * /*handle*/, void *input, void *output,
+                              int64_t rank, int64_t dim0, int64_t dim1,
+                              int64_t s0, int64_t s1, int64_t s2) {
   int64_t shape[3] = {s0, s1, s2};
-  fprintf(stderr, "[transpose] rank=%lld, swap dims %lld<->%lld, shape=[%lld,%lld,%lld]\n",
-          (long long)rank, (long long)dim0, (long long)dim1,
-          (long long)s0, (long long)s1, (long long)s2);
+  fprintf(
+      stderr,
+      "[transpose] rank=%lld, swap dims %lld<->%lld, shape=[%lld,%lld,%lld]\n",
+      (long long)rank, (long long)dim0, (long long)dim1, (long long)s0,
+      (long long)s1, (long long)s2);
 
   int64_t total = s0 * s1 * s2;
   std::vector<float> h_in(total), h_out(total);
@@ -43,7 +50,8 @@ extern "C" void hip_transpose(void * /*handle*/,
         int64_t idx[3] = {i0, i1, i2};
         int64_t src = i0 * in_stride[0] + i1 * in_stride[1] + i2 * in_stride[2];
         std::swap(idx[dim0], idx[dim1]);
-        int64_t dst = idx[0] * out_stride[0] + idx[1] * out_stride[1] + idx[2] * out_stride[2];
+        int64_t dst = idx[0] * out_stride[0] + idx[1] * out_stride[1] +
+                      idx[2] * out_stride[2];
         h_out[dst] = h_in[src];
       }
 

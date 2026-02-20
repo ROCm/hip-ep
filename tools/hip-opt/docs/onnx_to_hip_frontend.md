@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # ONNX-to-HIP Frontend
 
 Converts `.onnx` models directly into HIP dialect MLIR via a single Python script.

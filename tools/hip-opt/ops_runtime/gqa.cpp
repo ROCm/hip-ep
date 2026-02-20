@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
 //===- gqa.cpp - Grouped Query Attention (stub) ---------------------------===//
 //
 // Stub implementation: zeroes the output buffer.
@@ -5,14 +10,15 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include <hip/hip_runtime_api.h>
 #include <cstdint>
 #include <cstdio>
+#include <hip/hip_runtime_api.h>
 
 extern "C" void hip_gqa(void * /*handle*/, void * /*q*/, void * /*k*/,
                         void * /*v*/, void * /*kv_cache*/, void *output,
                         int64_t /*layer*/, int64_t /*start_pos*/,
                         int64_t /*seq_len*/) {
   (void)output;
-  fprintf(stderr, "[hip_gqa] stub called -- output not zeroed (no size info)\n");
+  fprintf(stderr,
+          "[hip_gqa] stub called -- output not zeroed (no size info)\n");
 }
