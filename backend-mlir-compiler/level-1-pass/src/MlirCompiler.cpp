@@ -31,8 +31,6 @@ struct CompilationArtifact {
   std::string filename;
   std::vector<uint8_t> bytes;
   ArtifactFormat format;
-  int64_t compilation_ms;
-  int64_t linking_ms;
 };
 
 namespace {
@@ -116,26 +114,17 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
     return std::nullopt;
   }
 
-  // Measure compilation time
-  auto start_time = std::chrono::high_resolution_clock::now();
-
   // Call the function
   CompilerError error = {};
   auto result =
       func(mlir_bytecode.c_str(), temp_output_path.c_str(), options_json.c_str(), &error);
-
-  auto end_time = std::chrono::high_resolution_clock::now();
-  int64_t compilation_ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(end_time -
-                                                            start_time)
-          .count();
 
   if (result != COMPILER_SUCCESS) {
     LOG(ERROR) << "Compilation failed: " << error.message;
     return std::nullopt;
   }
 
-  LOG(INFO) << "Compilation successful (" << compilation_ms << " ms)";
+  LOG(INFO) << "Compilation successful";
   LOG(INFO) << "Reading artifact from: " << temp_output_path;
 
   // Read compiled DLL into memory
@@ -159,13 +148,11 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
   // Clean up temporary file
   std::remove(temp_output_path.c_str());
 
-  // Build artifact with timing information
+  // Build artifact
   CompilationArtifact artifact;
   artifact.filename = output_filename;
   artifact.bytes = std::move(buffer);
   artifact.format = config.artifactFormat;
-  artifact.compilation_ms = compilation_ms; // Total compilation time
-  artifact.linking_ms = 0;                  // Not separately measured yet
 
   LOG(INFO) << "Artifact created: " << artifact.filename << " ("
             << artifact.bytes.size() << " bytes)";

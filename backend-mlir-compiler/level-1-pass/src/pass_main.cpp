@@ -37,8 +37,6 @@ struct CompilationArtifact {
   std::string filename;
   std::vector<uint8_t> bytes;
   ArtifactFormat format;
-  int64_t compilation_ms;
-  int64_t linking_ms;
 };
 
 struct OutputMetadata {
@@ -115,21 +113,7 @@ static std::string get_mlir_bytecode(Graph &graph) {
 static std::optional<CompilationArtifact>
 compile_mlir(const std::string &mlir_bytecode,
              const CompilationConfig &config) {
-  auto start_time = std::chrono::high_resolution_clock::now();
-
-  auto artifactOpt = MlirCompiler::compileFromBytecode(mlir_bytecode, config);
-
-  auto end_time = std::chrono::high_resolution_clock::now();
-  int64_t mlir_duration_ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(end_time -
-                                                            start_time)
-          .count();
-
-  if (artifactOpt) {
-    MY_LOG(1) << "Compilation successful (" << mlir_duration_ms << " ms)";
-  }
-
-  return artifactOpt;
+  return MlirCompiler::compileFromBytecode(mlir_bytecode, config);
 }
 
 // Step 4: Write artifact to EPContext
@@ -369,8 +353,7 @@ struct Level1MlirPass {
     }
 
     MY_LOG(1) << "MLIR compilation completed: " << artifact.filename << " ("
-              << artifact.bytes.size() << " bytes, " << artifact.compilation_ms
-              << " ms)";
+              << artifact.bytes.size() << " bytes)";
   }
 
   IPass &self_;
