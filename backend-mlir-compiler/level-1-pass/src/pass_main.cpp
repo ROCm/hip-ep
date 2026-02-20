@@ -93,30 +93,26 @@ static CompilationConfig load_config(PassContext *ctx) {
 
 // Step 2: Get MLIR bytecode from graph
 static std::string get_mlir_bytecode(Graph &graph) {
-  GraphRef graphRef(graph);
-  auto graph_string = GraphConstRef(graphRef).save_string();
-
+  auto graph_string = GraphConstRef(GraphRef(graph)).save_string();
   if (!graph_string || graph_string->empty()) {
     return "";
   }
 
-  std::string mlir_bytecode(graph_string->data(), graph_string->size());
-  MY_LOG(1) << "MLIR bytecode size: " << mlir_bytecode.size() << " bytes";
+  std::string bytecode(graph_string->data(), graph_string->size());
+  MY_LOG(1) << "MLIR bytecode size: " << bytecode.size() << " bytes";
 
   // Dump bytecode to file for troubleshooting if env var is set
   if (ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= 2) {
-    std::string dump_path = "mlir_bytecode_dump.mlir";
-    std::ofstream dump_file(dump_path, std::ios::binary);
+    std::ofstream dump_file("mlir_bytecode_dump.mlir", std::ios::binary);
     if (dump_file.is_open()) {
-      dump_file.write(mlir_bytecode.data(), mlir_bytecode.size());
-      dump_file.close();
-      MY_LOG(1) << "Dumped MLIR bytecode to: " << dump_path;
+      dump_file.write(bytecode.data(), bytecode.size());
+      MY_LOG(1) << "Dumped MLIR bytecode to mlir_bytecode_dump.mlir";
     } else {
-      LOG(WARNING) << "Failed to dump MLIR bytecode to: " << dump_path;
+      LOG(WARNING) << "Failed to dump MLIR bytecode";
     }
   }
 
-  return mlir_bytecode;
+  return bytecode;
 }
 
 // Step 3: Compile MLIR bytecode to artifact
