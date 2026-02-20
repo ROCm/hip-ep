@@ -3,7 +3,7 @@
 Converts `.onnx` models directly into HIP dialect MLIR via a single Python script.
 
 ```
-model.onnx  -->  onnx_to_hip.py --all  -->  model_hip.mlir  -->  hip-opt  -->  ...
+model.onnx  -->  onnx_to_hip.py --all  -->  model_hip.mlir  -->  hip-compiler  -->  model.dll
 ```
 
 ## Usage

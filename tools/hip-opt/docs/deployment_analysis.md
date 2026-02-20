@@ -240,7 +240,7 @@ void compile(const char* mlirFile, const char* outputDll) {
 
 // Driver code (e.g. main_attention.cpp):
 extern "C" __declspec(dllimport) void attention(...);
-// Compiled and linked against attention.lib by cl.exe
+// Compiled and linked against attention.lib + amdhip64.lib by cl.exe
 ```
 
 **Pros:** Best execution performance (native speed). Clean separation between model DLL
