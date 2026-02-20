@@ -30,6 +30,7 @@ cmake -S ../.. -B ../../build/onnx-hipdnn-ep-mlir-integration \
   -DCMAKE_BUILD_TYPE=Debug \
   "-DCMAKE_PREFIX_PATH=$LOCAL_DIR" \
   -Dmorphizen_ENABLE_UNIT_TEST=ON \
+  -DBUILD_MOCK_RUNTIME=ON \
   --fresh
 
 cmake --build ../../build/onnx-hipdnn-ep-mlir-integration --config Debug --parallel
@@ -58,11 +59,17 @@ ctest -R MlirE2ETest --verbose
 ### With REAL Runtime (requires ROCm GPU)
 ```bash
 # Rebuild with REAL runtime
-cmake -S . -B ../../build/onnx-hipdnn-ep-mlir-integration \
+LOCAL_DIR=$(cd ../../local && pwd)
+cmake -S ../.. -B ../../build/onnx-hipdnn-ep-mlir-integration \
+  -DBUILD_SHARED_LIBS=OFF \
+  "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded\$<\$<CONFIG:Debug>:Debug>" \
+  -DCMAKE_BUILD_TYPE=Debug \
+  "-DCMAKE_PREFIX_PATH=$LOCAL_DIR" \
+  -Dmorphizen_ENABLE_UNIT_TEST=ON \
   -DBUILD_MOCK_RUNTIME=OFF \
-  ... (other options)
+  --fresh
 
-cmake --build ../../build/onnx-hipdnn-ep-mlir-integration --config Debug
+cmake --build ../../build/onnx-hipdnn-ep-mlir-integration --config Debug --parallel
 
 # Run test
 cd ../../build/onnx-hipdnn-ep-mlir-integration/Debug/bin
