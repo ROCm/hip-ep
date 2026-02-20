@@ -6,7 +6,6 @@
 #ifndef HIPDNN_LEVEL1PASS_MLIR_COMPILER_H
 #define HIPDNN_LEVEL1PASS_MLIR_COMPILER_H
 
-#include "MlirCompilerTypes.h"
 #include <cstdint>
 #include <optional>
 #include <string>
