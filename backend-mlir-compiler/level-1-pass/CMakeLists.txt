@@ -10,26 +10,20 @@ find_package(glog CONFIG REQUIRED)
 set(LIB_NAME morphizen-level1-pass-mlir-compiler)
 add_library(${LIB_NAME} STATIC
     src/pass_main.cpp
-    src/CompilationConfig.cpp
-    src/MetadataBuilder.cpp
-    src/FusionManager.cpp
-    src/MlirCompiler.cpp  # NEW - simplified compiler using C API
-    # Removed: MlirPipelineBuilder.cpp, MlirParser.cpp, MlirTransformer.cpp, LlvmCompiler.cpp
-    # These are no longer needed - all MLIR compilation is done via morphizen-mlir-compiler.dll C API
+    src/MlirCompiler.cpp
 )
 
 # Link dependencies (NO morphizen-mlir-compiler - loaded at runtime)
 target_link_libraries(${LIB_NAME} PRIVATE
     morphizen::morphizen-core-static
     glog::glog
-    mlir_compilation_proto  # Keep for metadata
     # NOTE: morphizen-mlir-compiler.dll is loaded dynamically at runtime, not linked
+    # NOTE: Protobuf removed - metadata is now simple JSON string building
 )
 
 # Include directories - NO morphizen-mlir-compiler headers needed (types defined locally)
 target_include_directories(${LIB_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_BINARY_DIR}
     # Note: morphizen-mlir-compiler types are defined in src/MlirCompilerTypes.h
 )
 

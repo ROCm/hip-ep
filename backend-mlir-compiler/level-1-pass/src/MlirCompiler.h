@@ -6,7 +6,6 @@
 #ifndef HIPDNN_LEVEL1PASS_MLIR_COMPILER_H
 #define HIPDNN_LEVEL1PASS_MLIR_COMPILER_H
 
-#include "CompilationConfig.h"
 #include "MlirCompilerTypes.h"
 #include <cstdint>
 #include <optional>
@@ -15,6 +14,11 @@
 
 namespace hipdnn {
 namespace level1pass {
+
+// Forward declarations (defined in pass_main.cpp)
+enum class ArtifactFormat;
+struct CompilationConfig;
+struct CompilationArtifact;
 
 /**
  * Simplified MLIR compiler that uses morphizen-mlir-compiler plugin C API.

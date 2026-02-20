@@ -4,7 +4,6 @@
  */
 
 #include "MlirCompiler.h"
-#include "CompilationConfig.h"
 
 // CRITICAL: morphizen.hpp must be included before any other morphizen headers
 #include "morphizen/morphizen.hpp"
@@ -19,42 +18,24 @@ using namespace mlir_compiler_local;
 namespace hipdnn {
 namespace level1pass {
 
+// These are defined in pass_main.cpp
+enum class ArtifactFormat { Native, LlvmIr };
+
+struct CompilationConfig {
+  ArtifactFormat artifactFormat;
+  int optLevel;
+  std::string outputFilename;
+};
+
+struct CompilationArtifact {
+  std::string filename;
+  std::vector<uint8_t> bytes;
+  ArtifactFormat format;
+  int64_t compilation_ms;
+  int64_t linking_ms;
+};
+
 namespace {
-
-// Call morphizen_mlir_compile with JSON-based options
-//
-// NEW API (morphizen-mlir-compiler integration.morphizen-mlir-compiler branch):
-// - Function: morphizen_mlir_compile(input_mlir, output_path, options_json, error)
-// - Replaces old morphizen_mlir_compile_bytecode with 5 parameters
-// - Uses JSON string for options instead of C struct (extensible, no ABI coupling)
-CompilerErrorCode
-call_compile_with_json(morphizen::Plugin *plugin, const std::string &input_mlir,
-                       const char *output_path, const std::string &options_json,
-                       CompilerError *error) {
-  // Check if symbol exists
-  if (!plugin->has_method("morphizen_mlir_compile")) {
-    LOG(ERROR) << "Symbol 'morphizen_mlir_compile' NOT found in DLL";
-    return COMPILER_ERROR_INTERNAL;
-  }
-
-  LOG(INFO) << "Calling morphizen_mlir_compile with JSON options: "
-            << options_json;
-
-  // Get method with explicit types (avoids template forwarding ref issues)
-  // Signature: CompilerErrorCode (*)(const char*, const char*, const char*, CompilerError*)
-  auto func =
-      plugin->get_method<CompilerErrorCode, const char *, const char *,
-                         const char *, CompilerError *>(
-          "morphizen_mlir_compile");
-
-  if (func == nullptr) {
-    LOG(ERROR) << "get_method returned nullptr for morphizen_mlir_compile";
-    return COMPILER_ERROR_INTERNAL;
-  }
-
-  // Call the function
-  return func(input_mlir.c_str(), output_path, options_json.c_str(), error);
-}
 
 // Generate safe temporary filename (replaces deprecated std::tmpnam)
 std::string generateTempPath() {
@@ -113,13 +94,35 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
 
   LOG(INFO) << "Compilation options (JSON): " << options_json;
 
+  // Check if symbol exists
+  if (!plugin->has_method("morphizen_mlir_compile")) {
+    LOG(ERROR) << "Symbol 'morphizen_mlir_compile' NOT found in DLL";
+    return std::nullopt;
+  }
+
+  LOG(INFO) << "Calling morphizen_mlir_compile with JSON options: "
+            << options_json;
+
+  // Get method with explicit types (avoids template forwarding ref issues)
+  // Signature: CompilerErrorCode (*)(const char*, const char*, const char*,
+  // CompilerError*)
+  auto func =
+      plugin->get_method<CompilerErrorCode, const char *, const char *,
+                         const char *, CompilerError *>(
+          "morphizen_mlir_compile");
+
+  if (func == nullptr) {
+    LOG(ERROR) << "get_method returned nullptr for morphizen_mlir_compile";
+    return std::nullopt;
+  }
+
   // Measure compilation time
   auto start_time = std::chrono::high_resolution_clock::now();
 
-  // Call new JSON-based C API
+  // Call the function
   CompilerError error = {};
-  auto result = call_compile_with_json(
-      plugin, mlir_bytecode, temp_output_path.c_str(), options_json, &error);
+  auto result =
+      func(mlir_bytecode.c_str(), temp_output_path.c_str(), options_json.c_str(), &error);
 
   auto end_time = std::chrono::high_resolution_clock::now();
   int64_t compilation_ms =
