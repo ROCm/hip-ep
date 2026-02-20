@@ -8,6 +8,7 @@
 
 #include "CompilationArtifact.h"
 #include "CompilationConfig.h"
+#include "MlirCompilerTypes.h"
 #include <cstdint>
 #include <optional>
 #include <string>

@@ -7,71 +7,54 @@
 #include "CompilationArtifact.h"
 #include "CompilationConfig.h"
 
-// C API types (no linking - DLL loaded at runtime via Plugin API)
-#include "morphizen-mlir-compiler/compiler_api.h"
-#include "morphizen-mlir-compiler/compiler_types.h"
-
 // CRITICAL: morphizen.hpp must be included before any other morphizen headers
 #include "morphizen/morphizen.hpp"
 #include "morphizen/plugin.hpp"
 #include <chrono>
 #include <fstream>
 #include <glog/logging.h>
+#include <sstream>
+
+using namespace mlir_compiler_local;
 
 namespace hipdnn {
 namespace level1pass {
 
 namespace {
 
-// WORKAROUND: Bypass template forwarding reference issue in morphizen
-// Plugin::invoke
+// Call morphizen_mlir_compile with JSON-based options
 //
-// Problem: Plugin::invoke<R>(name, args...) uses template parameter Args&&...
-// (forwarding refs), which causes get_method<R, Args&&...> to create function
-// pointer typedef with rvalue refs:
-//   e.g., CompilerErrorCode (*)(const void*&&, size_t&&, ...)
-// This never matches C function signatures, causing symbol lookup to fail.
-//
-// Solution: Use get_method with EXPLICIT VALUE TYPES (not forwarding refs) to
-// match C signature.
-//
-// TODO: Fix morphizen_plugin.hpp::get_method to use std::decay<Args>::type...
-// in typedef
+// NEW API (morphizen-mlir-compiler integration.morphizen-mlir-compiler branch):
+// - Function: morphizen_mlir_compile(input_mlir, output_path, options_json, error)
+// - Replaces old morphizen_mlir_compile_bytecode with 5 parameters
+// - Uses JSON string for options instead of C struct (extensible, no ABI coupling)
 CompilerErrorCode
-call_compile_bytecode_direct(morphizen::Plugin *plugin, const void *bytecode,
-                             size_t bytecode_size, const char *output_path,
-                             const CompilationOptions *options,
-                             CompilerError *error) {
-  // First check if symbol exists (without template type checking)
-  if (!plugin->has_method("morphizen_mlir_compile_bytecode")) {
-    LOG(ERROR) << "Symbol 'morphizen_mlir_compile_bytecode' NOT found in DLL "
-                  "via has_method";
+call_compile_with_json(morphizen::Plugin *plugin, const std::string &input_mlir,
+                       const char *output_path, const std::string &options_json,
+                       CompilerError *error) {
+  // Check if symbol exists
+  if (!plugin->has_method("morphizen_mlir_compile")) {
+    LOG(ERROR) << "Symbol 'morphizen_mlir_compile' NOT found in DLL";
     return COMPILER_ERROR_INTERNAL;
   }
 
-  LOG(INFO) << "Symbol 'morphizen_mlir_compile_bytecode' exists in DLL, "
-               "getting typed function pointer...";
+  LOG(INFO) << "Calling morphizen_mlir_compile with JSON options: "
+            << options_json;
 
-  // Call get_method with EXPLICIT types (not auto-deduced with &&)
-  // This creates: CompilerErrorCode (*)(const void*, size_t, const char*, const
-  // CompilationOptions*, CompilerError*)
+  // Get method with explicit types (avoids template forwarding ref issues)
+  // Signature: CompilerErrorCode (*)(const char*, const char*, const char*, CompilerError*)
   auto func =
-      plugin->get_method<CompilerErrorCode, const void *, size_t, const char *,
-                         const CompilationOptions *, CompilerError *>(
-          "morphizen_mlir_compile_bytecode");
+      plugin->get_method<CompilerErrorCode, const char *, const char *,
+                         const char *, CompilerError *>(
+          "morphizen_mlir_compile");
 
   if (func == nullptr) {
-    LOG(ERROR) << "get_method returned nullptr despite has_method=true - TYPE "
-                  "MISMATCH in template";
-    LOG(ERROR) << "Expected: CompilerErrorCode (*)(const void*, size_t, const "
-                  "char*, const CompilationOptions*, CompilerError*)";
+    LOG(ERROR) << "get_method returned nullptr for morphizen_mlir_compile";
     return COMPILER_ERROR_INTERNAL;
   }
 
-  LOG(INFO) << "Successfully got typed function pointer, calling...";
-
-  // Call the function with exact argument types
-  return func(bytecode, bytecode_size, output_path, options, error);
+  // Call the function
+  return func(input_mlir.c_str(), output_path, options_json.c_str(), error);
 }
 
 // Generate safe temporary filename (replaces deprecated std::tmpnam)
@@ -120,27 +103,24 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
   // Generate temporary output path
   std::string temp_output_path = generateTempPath();
 
-  // Setup compilation options
-  CompilationOptions opts = {}; // Zero-initialize to prevent garbage values
-  plugin->invoke<void>("morphizen_mlir_get_default_options", &opts);
+  // Build JSON options string from config
+  // Format: {"opt_level": N, "output_mode": "OUTPUT_MODE_DLL"}
+  std::ostringstream json;
+  json << "{";
+  json << "\"opt_level\": " << config.optLevel;
+  json << ", \"output_mode\": \"OUTPUT_MODE_DLL\"";
+  json << "}";
+  std::string options_json = json.str();
 
-  opts.from_onnx_mlir = 1; // Input is ONNX MLIR dialect
-  opts.opt_level = config.optLevel;
-  opts.output_mode = OUTPUT_MODE_DLL;
-  opts.mock_runtime = config.useMockRuntime ? 1 : 0;
-  opts.memory_alignment = 64;
-  opts.verbose = 0;
-  opts.keep_intermediates = 0;
+  LOG(INFO) << "Compilation options (JSON): " << options_json;
 
   // Measure compilation time
   auto start_time = std::chrono::high_resolution_clock::now();
 
-  // Call C API via Plugin (using direct wrapper to avoid template forwarding
-  // ref issue)
-  CompilerError error;
-  auto result = call_compile_bytecode_direct(
-      plugin, mlir_bytecode.data(), mlir_bytecode.size(),
-      temp_output_path.c_str(), &opts, &error);
+  // Call new JSON-based C API
+  CompilerError error = {};
+  auto result = call_compile_with_json(
+      plugin, mlir_bytecode, temp_output_path.c_str(), options_json, &error);
 
   auto end_time = std::chrono::high_resolution_clock::now();
   int64_t compilation_ms =
