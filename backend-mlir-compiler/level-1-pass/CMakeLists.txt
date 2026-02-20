@@ -26,11 +26,11 @@ target_link_libraries(${LIB_NAME} PRIVATE
     # NOTE: morphizen-mlir-compiler.dll is loaded dynamically at runtime, not linked
 )
 
-# Include directories - ONLY C API headers (for type definitions), NO LLVM/MLIR headers
+# Include directories - NO morphizen-mlir-compiler headers needed (types defined locally)
 target_include_directories(${LIB_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_BINARY_DIR}
-    ${CMAKE_SOURCE_DIR}/3rd-party/morphizen/morphizen-mlir-compiler/include  # C API types only
+    # Note: morphizen-mlir-compiler types are defined in src/MlirCompilerTypes.h
 )
 
 target_compile_definitions(${LIB_NAME} PRIVATE
