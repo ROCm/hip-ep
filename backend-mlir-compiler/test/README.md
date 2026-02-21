@@ -12,8 +12,8 @@ This README assumes the following structure:
 │   ├── bin/                       # MLIR tools (mlir-opt, hip-opt, etc.)
 │   ├── lib/                       # Libraries
 │   └── ...
-└── onnx-hipdnn-ep/
-    └── mlir-integration/          # Project root (PROJECT_ROOT)
+└── <repo>/
+    └── <project-root>/            # Project root (PROJECT_ROOT)
         ├── backend-mlir-compiler/
         │   └── test/              # You are here
         │       ├── README.md      # This file
