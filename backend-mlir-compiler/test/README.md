@@ -99,13 +99,13 @@ cmake --build "$BUILD_DIR" --config Debug --parallel
 
 ```bash
 # Basic run
-"$BUILD_DIR/Debug/bin/mlir_e2e_test.exe"
+"$BUILD_DIR/bin/Debug/test-e2e-mlir.exe"
 
 # With verbose logging
 ORT_LOG_LEVEL=info \
 DEBUG_MORPHIZEN_PASS=1 \
 MORPHIZEN_DEBUG_MLIR_BACKEND=3 \
-"$BUILD_DIR/Debug/bin/mlir_e2e_test.exe"
+"$BUILD_DIR/bin/Debug/test-e2e-mlir.exe"
 
 # Using ctest
 ctest --test-dir "$BUILD_DIR" -R MlirE2ETest --verbose
@@ -126,7 +126,7 @@ cmake -S "$PROJECT_ROOT" -B "$BUILD_DIR" \
 cmake --build "$BUILD_DIR" --config Debug --parallel
 
 # Run test
-"$BUILD_DIR/Debug/bin/mlir_e2e_test.exe"
+"$BUILD_DIR/bin/Debug/test-e2e-mlir.exe"
 ```
 
 ### Troubleshooting: Missing DLL Dependencies
@@ -221,7 +221,7 @@ Set `MORPHIZEN_DEBUG_MLIR_BACKEND=2` to dump MLIR bytecode:
 ```bash
 MORPHIZEN_DEBUG_MLIR_BACKEND=2 \
 XLNX_ONNX_EP_VERBOSE=2 \
-"$BUILD_DIR/Debug/bin/mlir_e2e_test.exe"
+"$BUILD_DIR/bin/Debug/test-e2e-mlir.exe"
 ```
 
 Find dump directory from output (look for `dump_dir:` line).
@@ -415,7 +415,7 @@ LOCAL_DIR="$PROJECT_ROOT/../../local"  # Two levels up from project root
 TEMP_DIR="/c/temp"
 
 # Run E2E test with bytecode dump
-MORPHIZEN_DEBUG_MLIR_BACKEND=2 "$BUILD_DIR/Debug/bin/mlir_e2e_test.exe"
+MORPHIZEN_DEBUG_MLIR_BACKEND=2 "$BUILD_DIR/bin/Debug/test-e2e-mlir.exe"
 
 # Convert bytecode (SAVE TO TEMP)
 DUMP_DIR="$TEMP_DIR/morphizen_dumps/abc123"
@@ -613,7 +613,7 @@ llvm-lit -v "$PROJECT_ROOT/3rd-party/morphizen/morphizen-mlir-compiler/test/lit/
 # Expected: PASSES
 
 # 6. Verify E2E test also passes
-"$BUILD_DIR/Debug/bin/mlir_e2e_test.exe"
+"$BUILD_DIR/bin/Debug/test-e2e-mlir.exe"
 
 # 7. Clean up temp files (NOT in project workspace)
 rm "$TEMP_DIR/input.mlir" "$TEMP_DIR/output.mlir"
