@@ -33,12 +33,12 @@ def create_two_layer_conv_model():
     # Conv1: 3 → 64 channels, kernel=3x3, stride=1, padding=1
     conv1_weight_shape = [64, 3, 3, 3]  # [out_channels, in_channels, kH, kW]
     conv1_bias_shape = [64]
-    conv1_output_shape = [1, 64, 224, 224]  # stride=1, padding=1 preserves size
+    # conv1_output_shape = [1, 64, 224, 224]  # stride=1, padding=1 preserves size
 
     # Conv2: 64 → 64 channels, kernel=3x3, stride=2, padding=1
     conv2_weight_shape = [64, 64, 3, 3]
     conv2_bias_shape = [64]
-    conv2_output_shape = [1, 64, 112, 112]  # stride=2 halves spatial dimensions
+    # conv2_output_shape = [1, 64, 112, 112]  # stride=2 halves spatial dimensions
 
     # Random weight initialization for testing
     np.random.seed(42)
