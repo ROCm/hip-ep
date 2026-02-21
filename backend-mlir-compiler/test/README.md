@@ -7,20 +7,24 @@ End-to-end tests for MLIR backend integration. Works with both MOCK runtime (com
 
 This README assumes the following structure:
 ```
-<project-root>/                    # mlir-integration/
-├── backend-mlir-compiler/
-│   └── test/                      # You are here
-│       ├── README.md              # This file
-│       ├── test_e2e_mlir.cpp
-│       ├── models/two_layer_conv.onnx
-│       └── ...
-├── build/                         # Build output (gitignored)
-│   └── test/                      # Build directory for this test
-└── local/                         # Install prefix (gitignored)
-    └── ...                        # OR set CMAKE_PREFIX_PATH to your install location
+<workspace>/                       # Two levels up from project root
+├── local/                         # Install prefix (LOCAL_DIR = $PROJECT_ROOT/../../local)
+│   ├── bin/                       # MLIR tools (mlir-opt, hip-opt, etc.)
+│   ├── lib/                       # Libraries
+│   └── ...
+└── onnx-hipdnn-ep/
+    └── mlir-integration/          # Project root (PROJECT_ROOT)
+        ├── backend-mlir-compiler/
+        │   └── test/              # You are here
+        │       ├── README.md      # This file
+        │       ├── test_e2e_mlir.cpp
+        │       ├── models/two_layer_conv.onnx
+        │       └── ...
+        └── build/                 # Build output (gitignored)
+            └── test/              # Build directory (BUILD_DIR = $PROJECT_ROOT/build/test)
 ```
 
-**Note**: If your dependencies are installed elsewhere, set `CMAKE_PREFIX_PATH` to that location.
+**Note**: The `local/` directory is at `$PROJECT_ROOT/../../local` (two levels up from project root). If your dependencies are installed elsewhere, set `CMAKE_PREFIX_PATH` to that location.
 
 **CRITICAL - Debugging Workflow**:
 - NEVER save temporary MLIR files in the project workspace
