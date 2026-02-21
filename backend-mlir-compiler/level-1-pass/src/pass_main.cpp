@@ -69,7 +69,7 @@ static CompilationConfig load_config(PassContext *ctx) {
 }
 
 // Step 2: Get MLIR bytecode from graph
-static std::string get_mlir_bytecode(Graph &graph) {
+static std::string get_mlir_bytecode(PassContext *ctx, Graph &graph) {
   auto bytecode = GraphConstRef(GraphRef(graph)).save_string();
   if (bytecode->empty()) {
     return "";
@@ -79,12 +79,13 @@ static std::string get_mlir_bytecode(Graph &graph) {
 
   // Dump bytecode to file for troubleshooting if env var is set
   if (ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= 2) {
-    MY_LOG(1) << "Dumping MLIR bytecode to mlir_bytecode_dump.mlir";
-    CHECK(std::ofstream("mlir_bytecode_dump.mlir", std::ios::binary)
+    auto dump_path = ctx->get_dump_directory() / "mlir_bytecode_dump.mlir";
+    MY_LOG(1) << "Dumping MLIR bytecode to " << dump_path;
+    CHECK(std::ofstream(dump_path, std::ios::binary)
               .write(bytecode->data(), bytecode->size())
               .good())
-        << "Failed to dump MLIR bytecode to mlir_bytecode_dump.mlir";
-    MY_LOG(1) << "Dumped MLIR bytecode to mlir_bytecode_dump.mlir";
+        << "Failed to dump MLIR bytecode to " << dump_path;
+    MY_LOG(1) << "Dumped MLIR bytecode to " << dump_path;
   }
 
   return std::string(bytecode->data(), bytecode->size());
@@ -216,7 +217,7 @@ struct Level1MlirPass {
     auto config = load_config(self.get_context().get());
 
     // Step 2: Get MLIR bytecode from graph
-    auto mlir_bytecode = get_mlir_bytecode(graph);
+    auto mlir_bytecode = get_mlir_bytecode(self.get_context().get(), graph);
     if (mlir_bytecode.empty()) {
       LOG(WARNING) << "Empty graph bytecode, skipping compilation";
       return;

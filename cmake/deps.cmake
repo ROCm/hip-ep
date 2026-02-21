@@ -84,5 +84,8 @@ set(morphizen_OUTPUT_NAME "onnxruntime_morphizen_ep" CACHE STRING "Set output na
 set(MORPHIZEN_VERSEION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
 set(MORPHIZEN_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/etc/morphizen_config.json")
 
+# Enable MLIR compiler plugin build
+set(morphizen_ENABLE_MLIR_COMPILER ON CACHE BOOL "Enable morphizen-mlir-compiler build" FORCE)
+
 # Add morphizen subdirectory (after all options are set)
 add_subdirectory(3rd-party/morphizen)

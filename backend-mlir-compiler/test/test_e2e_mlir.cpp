@@ -49,6 +49,10 @@ std::wstring StringToWString(const std::string& str) {
 #error "MORPHIZEN_EP_LIB_PATH must be defined by CMake"
 #endif
 
+#ifndef MORPHIZEN_CONFIG_MLIR_PATH
+#error "MORPHIZEN_CONFIG_MLIR_PATH must be defined by CMake"
+#endif
+
 namespace {
 // Parse ORT_LOG_LEVEL environment variable
 OrtLoggingLevel GetOrtLoggingLevel() {
@@ -86,8 +90,14 @@ class MlirE2ETest : public ::testing::Test {
   std::unique_ptr<Ort::Env> env_;
   std::string model_path_;
   std::string ep_lib_path_;
+  std::string config_path_;
 
   void SetUp() override {
+    // Set environment variables for verbose logging
+    _putenv_s("XLNX_ONNX_EP_VERBOSE", "2");
+    _putenv_s("DEBUG_LOG_LEVEL", "info");
+    _putenv_s("MORPHIZEN_DEBUG_PLUGIN", "1");
+
     // Initialize ORT environment with configurable log level
     OrtLoggingLevel log_level = GetOrtLoggingLevel();
     env_ = std::make_unique<Ort::Env>(log_level, "MlirE2ETest");
@@ -95,6 +105,7 @@ class MlirE2ETest : public ::testing::Test {
     // Set model path
     model_path_ = TWO_LAYER_CONV_MODEL_PATH;
     ep_lib_path_ = MORPHIZEN_EP_LIB_PATH;
+    config_path_ = MORPHIZEN_CONFIG_MLIR_PATH;
 
     // Verify model file exists
     if (!fs::exists(model_path_)) {
@@ -109,6 +120,12 @@ class MlirE2ETest : public ::testing::Test {
 
     std::cout << "[SetUp] Model path: " << model_path_ << std::endl;
     std::cout << "[SetUp] EP library path: " << ep_lib_path_ << std::endl;
+    std::cout << "[SetUp] Config path: " << config_path_ << std::endl;
+
+    // Verify config file exists
+    if (!fs::exists(config_path_)) {
+      GTEST_SKIP() << "Config file not found: " << config_path_;
+    }
 
     // Register MorphiZen EP using RegisterExecutionProviderLibrary (not RegisterCustomOps)
 #ifdef _WIN32
@@ -176,15 +193,22 @@ TEST_F(MlirE2ETest, TwoLayerConvSession) {
   session_options.SetIntraOpNumThreads(1);
   session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
 
-  // Append MorphiZen EP using V2 API
+  // Append MorphiZen EP using V2 API with MLIR config
+  const char* provider_options_keys[] = {"config_file"};
+  std::string config_path_str = config_path_;  // Use absolute path from CMake
+  const char* provider_options_values[] = {config_path_str.c_str()};
+
   OrtStatus* status = Ort::GetApi().SessionOptionsAppendExecutionProvider_V2(
-      session_options, *env_, &morphizen_device, 1, nullptr, nullptr, 0);
+      session_options, *env_, &morphizen_device, 1,
+      provider_options_keys, provider_options_values, 1);
 
   if (status != nullptr) {
     std::string error_msg = Ort::GetApi().GetErrorMessage(status);
     Ort::GetApi().ReleaseStatus(status);
     GTEST_SKIP() << "Failed to append MorphiZen EP: " << error_msg;
   }
+
+  std::cout << "[Test] MorphiZen EP configured with " << config_path_ << std::endl;
 
   // Create session (this triggers ONNX → MLIR → HIP compilation)
 #ifdef _WIN32

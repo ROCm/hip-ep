@@ -104,22 +104,28 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
             << options_json;
 
   // Get method with explicit types (avoids template forwarding ref issues)
-  // Signature: CompilerErrorCode (*)(const char*, const char*, const char*,
+  // Signature: CompilerErrorCode (*)(const void*, size_t, const char*, const char*,
   // CompilerError*)
   auto func =
-      plugin->get_method<CompilerErrorCode, const char *, const char *,
+      plugin->get_method<CompilerErrorCode, const void *, size_t, const char *,
                          const char *, CompilerError *>(
           "morphizen_mlir_compile");
+
+  std::cerr << "[MlirCompiler] get_method returned func = " << (void*)func << "\n";
+  std::cerr << "[MlirCompiler] Bytecode data() = " << (void*)mlir_bytecode.data() << "\n";
+  std::cerr << "[MlirCompiler] Bytecode size() = " << mlir_bytecode.size() << "\n";
 
   if (func == nullptr) {
     LOG(ERROR) << "get_method returned nullptr for morphizen_mlir_compile";
     return std::nullopt;
   }
 
-  // Call the function
+  // Call the function with binary-safe parameters
+  std::cerr << "[MlirCompiler] About to call func with size = " << mlir_bytecode.size() << "\n";
+
   CompilerError error = {};
   auto result =
-      func(mlir_bytecode.c_str(), temp_output_path.c_str(), options_json.c_str(), &error);
+      func(mlir_bytecode.data(), mlir_bytecode.size(), temp_output_path.c_str(), options_json.c_str(), &error);
 
   if (result != COMPILER_SUCCESS) {
     LOG(ERROR) << "Compilation failed: " << error.message;
