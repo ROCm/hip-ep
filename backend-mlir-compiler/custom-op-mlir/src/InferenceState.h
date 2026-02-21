@@ -13,7 +13,7 @@
 
 // Forward declare to avoid include order issues
 namespace morphizen {
-class Plugin;
+struct Plugin;  // Must match definition in morphizen_plugin.hpp (struct, not class)
 }
 
 namespace mlir_compilation {
