@@ -21,7 +21,7 @@ This document shows a working end-to-end test with real output from the MLIR bac
 
 ```bash
 cd backend-mlir-compiler/test
-../../build/test/bin/Debug/mlir-e2e-test.exe
+../../build/test/bin/Debug/test-e2e-mlir.exe
 ```
 
 **Output:**
@@ -91,7 +91,7 @@ The system is structured in layers you can inspect progressively:
 
 ### Layer 1: Full End-to-End (Black Box)
 
-**Command:** `./mlir-e2e-test.exe`
+**Command:** `./test-e2e-mlir.exe`
 
 ```
 ONNX Model → ONNX Runtime → EP Plugin → [compilation] → Native DLL → [PASSED]
@@ -469,7 +469,7 @@ cmake -S ../.. -B ../../build/$(basename $PWD) \
 cmake --build ../../build/$(basename $PWD) --config Debug --parallel
 ```
 
-**Output**: `../../build/mlir-integration/bin/Debug/mlir-e2e-test.exe`
+**Output**: `../../build/mlir-integration/bin/Debug/test-e2e-mlir.exe`
 
 ---
 
@@ -480,7 +480,7 @@ cmake --build ../../build/$(basename $PWD) --config Debug --parallel
 ORT_LOG_LEVEL=info \
 DEBUG_MORPHIZEN_PASS=1 \
 MORPHIZEN_DEBUG_MLIR_BACKEND=3 \
-./mlir-e2e-test.exe
+./test-e2e-mlir.exe
 ```
 
 ---
@@ -936,9 +936,9 @@ DLL testing and validation tool.
 - **Note**: Uses mock runtime (no GPU required)
 - **Status**: In development (not available in all build configurations)
 
-### mlir-e2e-test.exe
+### test-e2e-mlir.exe
 
-**Location**: `../../build/mlir-integration/bin/Debug/mlir-e2e-test.exe`
+**Location**: `../../build/mlir-integration/bin/Debug/test-e2e-mlir.exe`
 **Source**: `backend-mlir-compiler/test/test_e2e_mlir.cpp`
 **Purpose**: End-to-end validation of ONNX Runtime integration
 **Input**: ONNX model file (`two_layer_conv.onnx`)
@@ -948,10 +948,10 @@ DLL testing and validation tool.
 **Usage**:
 ```bash
 # Basic run
-./mlir-e2e-test.exe
+./test-e2e-mlir.exe
 
 # Verbose run
-ORT_LOG_LEVEL=info MORPHIZEN_DEBUG_MLIR_BACKEND=3 ./mlir-e2e-test.exe
+ORT_LOG_LEVEL=info MORPHIZEN_DEBUG_MLIR_BACKEND=3 ./test-e2e-mlir.exe
 ```
 
 **What it tests**:
