@@ -63,7 +63,7 @@ cd /c/Develop/m/onnx-hipdnn-ep/mlir-integration  # Adjust to your path
 # Set up directory variables
 PROJECT_ROOT=$(pwd)
 BUILD_DIR="$PROJECT_ROOT/build/test"
-LOCAL_DIR="$PROJECT_ROOT/../local"  # One level up from project root
+LOCAL_DIR="$PROJECT_ROOT/../../local"  # Two levels up from project root
 TEMP_DIR="/c/temp"  # Windows Git Bash
 # TEMP_DIR="/tmp"   # Linux
 ```
@@ -189,7 +189,7 @@ cd /c/Develop/m/onnx-hipdnn-ep/mlir-integration  # Adjust to your path
 # Set up directory variables
 PROJECT_ROOT=$(pwd)
 BUILD_DIR="$PROJECT_ROOT/build/test"
-LOCAL_DIR="$PROJECT_ROOT/../local"  # One level up from project root
+LOCAL_DIR="$PROJECT_ROOT/../../local"  # Two levels up from project root
 TEMP_DIR="/c/temp"  # Windows Git Bash
 # TEMP_DIR="/tmp"   # Linux
 ```
@@ -403,7 +403,7 @@ Here's the complete workflow that was used to debug the "failed to legalize onnx
 cd /c/Develop/m/onnx-hipdnn-ep/mlir-integration
 PROJECT_ROOT=$(pwd)
 BUILD_DIR="$PROJECT_ROOT/build/test"
-LOCAL_DIR="$PROJECT_ROOT/../local"  # One level up from project root
+LOCAL_DIR="$PROJECT_ROOT/../../local"  # Two levels up from project root
 TEMP_DIR="/c/temp"
 
 # Run E2E test with bytecode dump
