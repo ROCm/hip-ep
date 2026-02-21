@@ -3,10 +3,30 @@
 ## Overview
 End-to-end tests for MLIR backend integration. Works with both MOCK runtime (compile-time default) and REAL runtime (compile-time option with `BUILD_MOCK_RUNTIME=OFF`).
 
+## Directory Structure
+
+This README assumes the following structure:
+```
+<project-root>/                    # mlir-integration/
+├── backend-mlir-compiler/
+│   └── test/                      # You are here
+│       ├── README.md              # This file
+│       ├── test_e2e_mlir.cpp
+│       ├── models/two_layer_conv.onnx
+│       └── ...
+├── build/                         # Build output (gitignored)
+│   └── test/                      # Build directory for this test
+└── local/                         # Install prefix (gitignored)
+    └── ...                        # OR set CMAKE_PREFIX_PATH to your install location
+```
+
+**Note**: If your dependencies are installed elsewhere, set `CMAKE_PREFIX_PATH` to that location.
+
 ## Prerequisites
-- ONNX Runtime installed in `../../local/`
-- GTest available
-- MorphiZen MLIR compiler built with `BUILD_MOCK_RUNTIME=ON` (default)
+- ONNX Runtime (via CMAKE_PREFIX_PATH)
+- LLVM/MLIR (via CMAKE_PREFIX_PATH or auto-fetched)
+- GTest (auto-fetched if not found)
+- Protobuf (auto-fetched if not found)
 
 ## Test Model
 The test uses `models/two_layer_conv.onnx` (committed via Git LFS):
@@ -17,14 +37,32 @@ The test uses `models/two_layer_conv.onnx` (committed via Git LFS):
 ### Regenerating the Model (Optional)
 If you need to regenerate the test model:
 ```bash
+# From backend-mlir-compiler/test directory
 python gen_two_layer_conv_model.py --output models/two_layer_conv.onnx
 git add models/two_layer_conv.onnx  # Git LFS will handle it automatically
 ```
 
 ## Build
+
+### Step 1: Navigate to Test Directory
 ```bash
+cd backend-mlir-compiler/test
+```
+
+### Step 2: Set Dependencies Path
+```bash
+# If dependencies are in ../../local (relative to project root):
 LOCAL_DIR=$(cd ../../local && pwd)
-cmake -S ../.. -B ../../build/$(basename $PWD) \
+
+# OR if dependencies are elsewhere, set explicit path:
+# LOCAL_DIR="/path/to/your/install/prefix"
+```
+
+### Step 3: Configure CMake
+```bash
+# Source: ../.. (project root)
+# Build: ../../build/test (build/test relative to project root)
+cmake -S ../.. -B ../../build/test \
   -DBUILD_SHARED_LIBS=OFF \
   "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded\$<\$<CONFIG:Debug>:Debug>" \
   -DCMAKE_BUILD_TYPE=Debug \
@@ -32,15 +70,20 @@ cmake -S ../.. -B ../../build/$(basename $PWD) \
   -Dmorphizen_ENABLE_UNIT_TEST=ON \
   -DBUILD_MOCK_RUNTIME=ON \
   --fresh
+```
 
-cmake --build ../../build/$(basename $PWD) --config Debug --parallel
+### Step 4: Build
+```bash
+cmake --build ../../build/test --config Debug --parallel
 ```
 
 ## Running the Test
 
 ### With MOCK Runtime (default, no GPU required)
+
 ```bash
-cd ../../build/$(basename $PWD)/Debug/bin
+# From backend-mlir-compiler/test directory
+cd ../../build/test/Debug/bin
 
 # Basic run
 ./mlir_e2e_test.exe
@@ -51,16 +94,18 @@ DEBUG_MORPHIZEN_PASS=1 \
 MORPHIZEN_DEBUG_MLIR_BACKEND=3 \
 ./mlir_e2e_test.exe
 
-# Using ctest
-cd ../../build/$(basename $PWD)
+# Using ctest (from build directory)
+cd ../../build/test
 ctest -R MlirE2ETest --verbose
 ```
 
 ### With REAL Runtime (requires ROCm GPU)
 ```bash
+# From backend-mlir-compiler/test directory
+
 # Rebuild with REAL runtime
-LOCAL_DIR=$(cd ../../local && pwd)
-cmake -S ../.. -B ../../build/$(basename $PWD) \
+LOCAL_DIR=$(cd ../../local && pwd)  # Or your custom install path
+cmake -S ../.. -B ../../build/test \
   -DBUILD_SHARED_LIBS=OFF \
   "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded\$<\$<CONFIG:Debug>:Debug>" \
   -DCMAKE_BUILD_TYPE=Debug \
@@ -69,10 +114,10 @@ cmake -S ../.. -B ../../build/$(basename $PWD) \
   -DBUILD_MOCK_RUNTIME=OFF \
   --fresh
 
-cmake --build ../../build/$(basename $PWD) --config Debug --parallel
+cmake --build ../../build/test --config Debug --parallel
 
 # Run test
-cd ../../build/$(basename $PWD)/Debug/bin
+cd ../../build/test/Debug/bin
 ./mlir_e2e_test.exe
 ```
 
@@ -127,8 +172,8 @@ If the test shows MLIR compilation failures, use this workflow to debug:
 Set `MORPHIZEN_DEBUG_MLIR_BACKEND=2` to dump the MLIR bytecode to file:
 
 ```bash
-# Navigate to build output directory
-cd ../../build/$(basename $PWD)/Debug/bin
+# From backend-mlir-compiler/test directory
+cd ../../build/test/Debug/bin
 
 MORPHIZEN_DEBUG_MLIR_BACKEND=2 \
 XLNX_ONNX_EP_VERBOSE=2 \
@@ -145,20 +190,22 @@ This creates `mlir_bytecode_dump.mlir` in the dump directory. Check the test out
 
 The bytecode file will be at: `<dump_directory>/mlir_bytecode_dump.mlir`
 
-On Windows, the default dump directory is typically `C:\temp\morphizen_dumps\<cache_key>\`.
+**Platform-specific dump locations:**
+- Windows: `C:\temp\morphizen_dumps\<cache_key>\`
+- Linux: `/tmp/morphizen_dumps/<cache_key>/`
 
 ### 2. Locate the Bytecode Dump
 
-Find the dump directory from the test output and navigate to it:
+Find the dump directory from the test output:
 
 ```bash
 # Extract dump directory from test output (look for "dump_dir:" line)
-# Windows Git Bash: DUMP_DIR="/c/temp/morphizen_dumps/<cache_key>"
-# Linux: DUMP_DIR="/tmp/morphizen_dumps/<cache_key>"
+# Example: DUMP_DIR="C:\temp\morphizen_dumps\abc123"
+# In Git Bash (Windows): DUMP_DIR="/c/temp/morphizen_dumps/abc123"
+# In Linux: DUMP_DIR="/tmp/morphizen_dumps/abc123"
 
-# Navigate to dump directory (replace <cache_key> with actual value from test output)
-cd "$DUMP_DIR"
-ls -lh mlir_bytecode_dump.mlir
+# Verify the file exists
+ls -lh "$DUMP_DIR/mlir_bytecode_dump.mlir"
 ```
 
 ### 3. Convert Bytecode to Text Format
@@ -166,38 +213,23 @@ ls -lh mlir_bytecode_dump.mlir
 Use `mlir-opt` to convert the binary bytecode to human-readable MLIR text:
 
 ```bash
-# Store the dump directory path
+# Set paths (from backend-mlir-compiler/test directory)
 DUMP_DIR="<path_from_test_output>"
+LOCAL_DIR=$(cd ../../local && pwd)  # Or your CMAKE_PREFIX_PATH location
 
-# mlir-opt is in ../../local/bin/ relative to project root
-# Assuming you're in the project root directory:
-LOCAL_DIR=$(cd ../../local && pwd)
-
+# Convert bytecode to text
 "$LOCAL_DIR/bin/mlir-opt" --allow-unregistered-dialect \
   "$DUMP_DIR/mlir_bytecode_dump.mlir" \
   -o two_layer_conv.mlir
 ```
 
-### 4. Save Test File for Reference
-
-Copy the converted MLIR to the morphizen-mlir-compiler test directory:
-
-```bash
-# From project root directory
-mkdir -p 3rd-party/morphizen/morphizen-mlir-compiler/test/e2e
-
-# Copy the converted MLIR
-cp two_layer_conv.mlir \
-  3rd-party/morphizen/morphizen-mlir-compiler/test/e2e/two_layers_conv_real_constant.mlir
-```
-
-### 5. Test Complete Pipeline with hip-opt
+### 4. Test Complete Pipeline with hip-opt
 
 Use `hip-opt` with `--all-passes` to test the full ONNX→HIP→LLVM→Interface pipeline:
 
 ```bash
-# From project root directory
-BUILD_DIR=$(cd ../../build/$(basename $PWD) && pwd)
+# From backend-mlir-compiler/test directory
+BUILD_DIR=$(cd ../../build/test && pwd)
 
 "$BUILD_DIR/bin/Debug/hip-opt" \
   --all-passes \
@@ -220,6 +252,9 @@ If successful, this validates that all MLIR transformations work correctly.
 MLIR's pass manager has built-in debugging flags to dump IR before/after each pass. Use these to identify which pass is failing:
 
 ```bash
+# From backend-mlir-compiler/test directory
+BUILD_DIR=$(cd ../../build/test && pwd)
+
 # Dump IR before ALL passes
 "$BUILD_DIR/bin/Debug/hip-opt" \
   --all-passes \
@@ -377,9 +412,12 @@ This narrows down the root cause to a specific transformation with minimal noise
 Here's a complete reproducible workflow from start to finish:
 
 ```bash
-# Setup (from project root)
-BUILD_DIR=$(cd ../../build/$(basename $PWD) && pwd)
+# Navigate to test directory
 cd backend-mlir-compiler/test
+
+# Set up paths (adjust LOCAL_DIR if your dependencies are elsewhere)
+BUILD_DIR=$(cd ../../build/test && pwd)
+LOCAL_DIR=$(cd ../../local && pwd)
 
 # Step 1: Run test to get bytecode dump
 MORPHIZEN_DEBUG_MLIR_BACKEND=2 \
@@ -387,10 +425,11 @@ MORPHIZEN_DEBUG_MLIR_BACKEND=2 \
 
 # Step 2: Find dump directory from test output
 # Look for: dump_dir: "C:\\temp\\morphizen_dumps\\<cache_key>"
-DUMP_DIR="/c/temp/morphizen_dumps/<cache_key>"
+# Replace <cache_key> with actual value from output:
+DUMP_DIR="/c/temp/morphizen_dumps/<cache_key>"  # Windows Git Bash
+# DUMP_DIR="/tmp/morphizen_dumps/<cache_key>"    # Linux
 
 # Step 3: Convert bytecode to text
-LOCAL_DIR=$(cd ../../local && pwd)
 "$LOCAL_DIR/bin/mlir-opt" --allow-unregistered-dialect \
   "$DUMP_DIR/mlir_bytecode_dump.mlir" \
   -o two_layer_conv.mlir
