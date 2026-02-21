@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 """
 Generate a two-layer convolution ONNX model for MLIR integration testing.
 
@@ -47,69 +51,69 @@ def create_two_layer_conv_model():
     nodes = [
         # Conv1
         helper.make_node(
-            'Conv',
-            inputs=['input', 'conv1_weight', 'conv1_bias'],
-            outputs=['conv1_output'],
+            "Conv",
+            inputs=["input", "conv1_weight", "conv1_bias"],
+            outputs=["conv1_output"],
             kernel_shape=[3, 3],
             strides=[1, 1],
             pads=[1, 1, 1, 1],  # ONNX uses [top, left, bottom, right]
-            name='conv1'
+            name="conv1",
         ),
         # ReLU1
         helper.make_node(
-            'Relu',
-            inputs=['conv1_output'],
-            outputs=['relu1_output'],
-            name='relu1'
+            "Relu", inputs=["conv1_output"], outputs=["relu1_output"], name="relu1"
         ),
         # Conv2
         helper.make_node(
-            'Conv',
-            inputs=['relu1_output', 'conv2_weight', 'conv2_bias'],
-            outputs=['conv2_output'],
+            "Conv",
+            inputs=["relu1_output", "conv2_weight", "conv2_bias"],
+            outputs=["conv2_output"],
             kernel_shape=[3, 3],
             strides=[2, 2],
             pads=[1, 1, 1, 1],
-            name='conv2'
+            name="conv2",
         ),
         # ReLU2
         helper.make_node(
-            'Relu',
-            inputs=['conv2_output'],
-            outputs=['output'],
-            name='relu2'
+            "Relu", inputs=["conv2_output"], outputs=["output"], name="relu2"
         ),
     ]
 
     # Create graph inputs
-    inputs = [
-        helper.make_tensor_value_info('input', TensorProto.FLOAT, input_shape)
-    ]
+    inputs = [helper.make_tensor_value_info("input", TensorProto.FLOAT, input_shape)]
 
     # Create graph outputs
     outputs = [
-        helper.make_tensor_value_info('output', TensorProto.FLOAT, conv2_output_shape)
+        helper.make_tensor_value_info("output", TensorProto.FLOAT, conv2_output_shape)
     ]
 
     # Create initializers (weights and biases)
     initializers = [
-        helper.make_tensor('conv1_weight', TensorProto.FLOAT, conv1_weight_shape, conv1_weight.flatten()),
-        helper.make_tensor('conv1_bias', TensorProto.FLOAT, conv1_bias_shape, conv1_bias.flatten()),
-        helper.make_tensor('conv2_weight', TensorProto.FLOAT, conv2_weight_shape, conv2_weight.flatten()),
-        helper.make_tensor('conv2_bias', TensorProto.FLOAT, conv2_bias_shape, conv2_bias.flatten()),
+        helper.make_tensor(
+            "conv1_weight",
+            TensorProto.FLOAT,
+            conv1_weight_shape,
+            conv1_weight.flatten(),
+        ),
+        helper.make_tensor(
+            "conv1_bias", TensorProto.FLOAT, conv1_bias_shape, conv1_bias.flatten()
+        ),
+        helper.make_tensor(
+            "conv2_weight",
+            TensorProto.FLOAT,
+            conv2_weight_shape,
+            conv2_weight.flatten(),
+        ),
+        helper.make_tensor(
+            "conv2_bias", TensorProto.FLOAT, conv2_bias_shape, conv2_bias.flatten()
+        ),
     ]
 
     # Create the graph
-    graph = helper.make_graph(
-        nodes,
-        'two_layer_conv',
-        inputs,
-        outputs,
-        initializers
-    )
+    graph = helper.make_graph(nodes, "two_layer_conv", inputs, outputs, initializers)
 
     # Create the model
-    model = helper.make_model(graph, producer_name='onnx-hipdnn-ep-test')
+    model = helper.make_model(graph, producer_name="onnx-hipdnn-ep-test")
     model.opset_import[0].version = 13
 
     # Check model validity
@@ -119,26 +123,32 @@ def create_two_layer_conv_model():
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Generate two-layer convolution ONNX model')
-    parser.add_argument('--output', type=str, required=True,
-                        help='Output path for the ONNX model (e.g., models/two_layer_conv.onnx)')
+    parser = argparse.ArgumentParser(
+        description="Generate two-layer convolution ONNX model"
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        required=True,
+        help="Output path for the ONNX model (e.g., models/two_layer_conv.onnx)",
+    )
     args = parser.parse_args()
 
-    print(f"Generating two-layer convolution model...")
+    print("Generating two-layer convolution model...")
     model = create_two_layer_conv_model()
 
     print(f"Saving model to {args.output}...")
     onnx.save(model, args.output)
 
-    print(f"Model saved successfully!")
-    print(f"\nModel structure:")
-    print(f"  Input: [1, 3, 224, 224]")
-    print(f"  Conv1 (stride=1, padding=1) -> [1, 64, 224, 224]")
-    print(f"  ReLU1")
-    print(f"  Conv2 (stride=2, padding=1) -> [1, 64, 112, 112]")
-    print(f"  ReLU2")
-    print(f"  Output: [1, 64, 112, 112]")
+    print("Model saved successfully!")
+    print("\nModel structure:")
+    print("  Input: [1, 3, 224, 224]")
+    print("  Conv1 (stride=1, padding=1) -> [1, 64, 224, 224]")
+    print("  ReLU1")
+    print("  Conv2 (stride=2, padding=1) -> [1, 64, 112, 112]")
+    print("  ReLU2")
+    print("  Output: [1, 64, 112, 112]")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

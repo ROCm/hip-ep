@@ -63,7 +63,7 @@ static CompilationConfig load_config(PassContext *ctx) {
 
   MY_LOG(1) << "Artifact format: "
             << (config.artifactFormat == ArtifactFormat::Native ? "native"
-                                                                 : "llvm_ir");
+                                                                : "llvm_ir");
 
   return config;
 }
@@ -122,8 +122,8 @@ static bool write_artifact_to_epcontext(PassContext *ctx,
 }
 
 // Step 5: Build metadata JSON from graph outputs
-static std::string
-build_metadata_json(const CompilationArtifact &artifact, Graph &graph) {
+static std::string build_metadata_json(const CompilationArtifact &artifact,
+                                       Graph &graph) {
   mlir_metadata::Metadata metadata;
   metadata.set_artifact_filename(artifact.filename);
 
@@ -150,15 +150,15 @@ build_metadata_json(const CompilationArtifact &artifact, Graph &graph) {
 
   std::string json;
   auto status = google::protobuf::util::MessageToJsonString(metadata, &json);
-  CHECK(status.ok()) << "Failed to serialize metadata to JSON: " << status.ToString();
+  CHECK(status.ok()) << "Failed to serialize metadata to JSON: "
+                     << status.ToString();
 
   MY_LOG(1) << "Metadata JSON: " << json;
   return json;
 }
 
 // Step 7: Fuse graph into single MLIR custom op
-static bool fuse_graph(IPass &self, Graph &graph,
-                       const std::string &metadata,
+static bool fuse_graph(IPass &self, Graph &graph, const std::string &metadata,
                        const std::string &unique_id) {
   MY_LOG(1) << "Attempting to fuse entire graph with domain 'MLIR'";
 
