@@ -2,7 +2,6 @@
 # ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
-# Protobuf library for metadata serialization
 find_package(Protobuf REQUIRED)
 # Generate C++ code from proto
 protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS metadata.proto)

@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
 /**
  * @file test_e2e_mlir.cpp
  * @brief E2E test for MLIR backend integration
@@ -19,26 +24,26 @@
 #include <onnxruntime_cxx_api.h>
 
 #include <algorithm>
+#include <codecvt>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <locale>
 #include <memory>
 #include <string>
 #include <vector>
-#include <codecvt>
-#include <locale>
 
 namespace fs = std::filesystem;
 
 namespace {
 // Helper to convert std::string to std::wstring on Windows
 #ifdef _WIN32
-std::wstring StringToWString(const std::string& str) {
+std::wstring StringToWString(const std::string &str) {
   std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
   return converter.from_bytes(str);
 }
 #endif
-}
+} // namespace
 
 // Model path defined by CMake
 #ifndef TWO_LAYER_CONV_MODEL_PATH
@@ -56,20 +61,25 @@ std::wstring StringToWString(const std::string& str) {
 namespace {
 // Parse ORT_LOG_LEVEL environment variable
 OrtLoggingLevel GetOrtLoggingLevel() {
-  const char* log_level_str = std::getenv("ORT_LOG_LEVEL");
+  const char *log_level_str = std::getenv("ORT_LOG_LEVEL");
   if (!log_level_str) {
-    return ORT_LOGGING_LEVEL_WARNING;  // Default
+    return ORT_LOGGING_LEVEL_WARNING; // Default
   }
 
   std::string level(log_level_str);
   // Convert to lowercase for case-insensitive comparison
   std::transform(level.begin(), level.end(), level.begin(), ::tolower);
 
-  if (level == "verbose") return ORT_LOGGING_LEVEL_VERBOSE;
-  if (level == "info") return ORT_LOGGING_LEVEL_INFO;
-  if (level == "warning") return ORT_LOGGING_LEVEL_WARNING;
-  if (level == "error") return ORT_LOGGING_LEVEL_ERROR;
-  if (level == "fatal") return ORT_LOGGING_LEVEL_FATAL;
+  if (level == "verbose")
+    return ORT_LOGGING_LEVEL_VERBOSE;
+  if (level == "info")
+    return ORT_LOGGING_LEVEL_INFO;
+  if (level == "warning")
+    return ORT_LOGGING_LEVEL_WARNING;
+  if (level == "error")
+    return ORT_LOGGING_LEVEL_ERROR;
+  if (level == "fatal")
+    return ORT_LOGGING_LEVEL_FATAL;
 
   // Try to parse as integer (0=VERBOSE, 1=INFO, 2=WARNING, 3=ERROR, 4=FATAL)
   try {
@@ -81,12 +91,12 @@ OrtLoggingLevel GetOrtLoggingLevel() {
     // Ignore parse errors, use default
   }
 
-  return ORT_LOGGING_LEVEL_WARNING;  // Default if invalid
+  return ORT_LOGGING_LEVEL_WARNING; // Default if invalid
 }
-}  // namespace
+} // namespace
 
 class MlirE2ETest : public ::testing::Test {
- protected:
+protected:
   std::unique_ptr<Ort::Env> env_;
   std::string model_path_;
   std::string ep_lib_path_;
@@ -110,7 +120,8 @@ class MlirE2ETest : public ::testing::Test {
     // Verify model file exists
     if (!fs::exists(model_path_)) {
       GTEST_SKIP() << "Model file not found: " << model_path_
-                   << "\nRun: python gen_two_layer_conv_model.py --output models/two_layer_conv.onnx";
+                   << "\nRun: python gen_two_layer_conv_model.py --output "
+                      "models/two_layer_conv.onnx";
     }
 
     // Verify EP library exists
@@ -127,12 +138,14 @@ class MlirE2ETest : public ::testing::Test {
       GTEST_SKIP() << "Config file not found: " << config_path_;
     }
 
-    // Register MorphiZen EP using RegisterExecutionProviderLibrary (not RegisterCustomOps)
+    // Register MorphiZen EP using RegisterExecutionProviderLibrary (not
+    // RegisterCustomOps)
 #ifdef _WIN32
-    OrtStatus* status = Ort::GetApi().RegisterExecutionProviderLibrary(
-        *env_, "MorphiZenExecutionProvider", StringToWString(ep_lib_path_).c_str());
+    OrtStatus *status = Ort::GetApi().RegisterExecutionProviderLibrary(
+        *env_, "MorphiZenExecutionProvider",
+        StringToWString(ep_lib_path_).c_str());
 #else
-    OrtStatus* status = Ort::GetApi().RegisterExecutionProviderLibrary(
+    OrtStatus *status = Ort::GetApi().RegisterExecutionProviderLibrary(
         *env_, "MorphiZenExecutionProvider", ep_lib_path_.c_str());
 #endif
 
@@ -159,7 +172,8 @@ class MlirE2ETest : public ::testing::Test {
  * 1. MorphiZen EP can be registered
  * 2. ONNX model can be loaded
  * 3. Session can be created (triggers MLIR compilation pipeline)
- * 4. Works with both MOCK runtime (default) and REAL runtime (BUILD_MOCK_RUNTIME=OFF)
+ * 4. Works with both MOCK runtime (default) and REAL runtime
+ * (BUILD_MOCK_RUNTIME=OFF)
  *
  * Expected behavior:
  * - MOCK runtime: Logs show [MOCK] prefixes for HIP/MIOpen calls
@@ -168,39 +182,42 @@ class MlirE2ETest : public ::testing::Test {
  * TODO: Add actual inference with input data and output validation
  */
 TEST_F(MlirE2ETest, TwoLayerConvSession) {
-  std::cout << "[Test] Creating session with MorphiZen EP (MLIR backend)..." << std::endl;
+  std::cout << "[Test] Creating session with MorphiZen EP (MLIR backend)..."
+            << std::endl;
 
   // Get EP devices
   std::vector<Ort::ConstEpDevice> devices = env_->GetEpDevices();
 
   // Find MorphiZen device
-  const OrtEpDevice* morphizen_device = nullptr;
-  for (const auto& device : devices) {
+  const OrtEpDevice *morphizen_device = nullptr;
+  for (const auto &device : devices) {
     std::string ep_name = device.EpName();
     if (ep_name == "MorphiZenExecutionProvider") {
-      morphizen_device = static_cast<const OrtEpDevice*>(device);
+      morphizen_device = static_cast<const OrtEpDevice *>(device);
       std::cout << "[Test] Found MorphiZen EP device" << std::endl;
       break;
     }
   }
 
   if (morphizen_device == nullptr) {
-    GTEST_SKIP() << "MorphiZen EP V2 device not found (EP registered but device API not implemented)";
+    GTEST_SKIP() << "MorphiZen EP V2 device not found (EP registered but "
+                    "device API not implemented)";
   }
 
   // Create session options
   Ort::SessionOptions session_options;
   session_options.SetIntraOpNumThreads(1);
-  session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+  session_options.SetGraphOptimizationLevel(
+      GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
 
   // Append MorphiZen EP using V2 API with MLIR config
-  const char* provider_options_keys[] = {"config_file"};
-  std::string config_path_str = config_path_;  // Use absolute path from CMake
-  const char* provider_options_values[] = {config_path_str.c_str()};
+  const char *provider_options_keys[] = {"config_file"};
+  std::string config_path_str = config_path_; // Use absolute path from CMake
+  const char *provider_options_values[] = {config_path_str.c_str()};
 
-  OrtStatus* status = Ort::GetApi().SessionOptionsAppendExecutionProvider_V2(
-      session_options, *env_, &morphizen_device, 1,
-      provider_options_keys, provider_options_values, 1);
+  OrtStatus *status = Ort::GetApi().SessionOptionsAppendExecutionProvider_V2(
+      session_options, *env_, &morphizen_device, 1, provider_options_keys,
+      provider_options_values, 1);
 
   if (status != nullptr) {
     std::string error_msg = Ort::GetApi().GetErrorMessage(status);
@@ -208,16 +225,19 @@ TEST_F(MlirE2ETest, TwoLayerConvSession) {
     GTEST_SKIP() << "Failed to append MorphiZen EP: " << error_msg;
   }
 
-  std::cout << "[Test] MorphiZen EP configured with " << config_path_ << std::endl;
+  std::cout << "[Test] MorphiZen EP configured with " << config_path_
+            << std::endl;
 
   // Create session (this triggers ONNX → MLIR → HIP compilation)
 #ifdef _WIN32
-  Ort::Session session(*env_, StringToWString(model_path_).c_str(), session_options);
+  Ort::Session session(*env_, StringToWString(model_path_).c_str(),
+                       session_options);
 #else
   Ort::Session session(*env_, model_path_.c_str(), session_options);
 #endif
 
-  std::cout << "[Test] Session created successfully with MorphiZen EP!" << std::endl;
+  std::cout << "[Test] Session created successfully with MorphiZen EP!"
+            << std::endl;
 
   // Get input/output info
   Ort::AllocatorWithDefaultOptions allocator;
@@ -238,7 +258,8 @@ TEST_F(MlirE2ETest, TwoLayerConvSession) {
     std::cout << "[Test] Input " << i << ": " << input_name.get() << " shape=[";
     for (size_t j = 0; j < shape.size(); j++) {
       std::cout << shape[j];
-      if (j < shape.size() - 1) std::cout << ",";
+      if (j < shape.size() - 1)
+        std::cout << ",";
     }
     std::cout << "]" << std::endl;
   }
@@ -250,10 +271,12 @@ TEST_F(MlirE2ETest, TwoLayerConvSession) {
     auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
     auto shape = tensor_info.GetShape();
 
-    std::cout << "[Test] Output " << i << ": " << output_name.get() << " shape=[";
+    std::cout << "[Test] Output " << i << ": " << output_name.get()
+              << " shape=[";
     for (size_t j = 0; j < shape.size(); j++) {
       std::cout << shape[j];
-      if (j < shape.size() - 1) std::cout << ",";
+      if (j < shape.size() - 1)
+        std::cout << ",";
     }
     std::cout << "]" << std::endl;
   }
@@ -269,11 +292,12 @@ TEST_F(MlirE2ETest, TwoLayerConvSession) {
   // - For REAL runtime: outputs will be computed results
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);
 
   std::cout << "=== MLIR E2E Test ===" << std::endl;
-  std::cout << "This test validates ONNX → MLIR → HIP compilation pipeline" << std::endl;
+  std::cout << "This test validates ONNX → MLIR → HIP compilation pipeline"
+            << std::endl;
   std::cout << "Runtime: "
 #ifdef BUILD_MOCK_RUNTIME
             << "MOCK (no GPU required, outputs filled with zeros)"

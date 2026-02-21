@@ -13,19 +13,21 @@
 
 // Forward declare to avoid include order issues
 namespace morphizen {
-struct Plugin;  // Must match definition in morphizen_plugin.hpp (struct, not class)
+struct Plugin; // Must match definition in morphizen_plugin.hpp (struct, not
+               // class)
 }
 
 namespace mlir_compilation {
 namespace customop {
 
-// Manages inference state and owns the plugin that provides inference functions.
-// Uses morphizen::Plugin infrastructure for dynamic library loading.
+// Manages inference state and owns the plugin that provides inference
+// functions. Uses morphizen::Plugin infrastructure for dynamic library loading.
 class InferenceState {
 public:
   // Create inference state from DLL bytes
   // Logs FATAL and terminates on failure
-  static std::unique_ptr<InferenceState> create(const std::vector<uint8_t> &dll_bytes);
+  static std::unique_ptr<InferenceState>
+  create(const std::vector<uint8_t> &dll_bytes);
 
   ~InferenceState();
 

@@ -62,8 +62,9 @@ TensorData marshal_input_tensors(OrtKernelContext *context) {
 }
 
 // Marshal output tensors from ORT context using metadata outputs
-TensorData marshal_output_tensors(OrtKernelContext *context,
-                                   const google::protobuf::RepeatedPtrField<mlir_metadata::Output> &outputs) {
+TensorData marshal_output_tensors(
+    OrtKernelContext *context,
+    const google::protobuf::RepeatedPtrField<mlir_metadata::Output> &outputs) {
   if (outputs.size() == 0) {
     LOG(FATAL) << "No output shapes in metadata";
   }
@@ -77,7 +78,8 @@ TensorData marshal_output_tensors(OrtKernelContext *context,
 
   for (int i = 0; i < outputs.size(); ++i) {
     const auto &output_meta = outputs[i];
-    data.shapes[i].assign(output_meta.shape().begin(), output_meta.shape().end());
+    data.shapes[i].assign(output_meta.shape().begin(),
+                          output_meta.shape().end());
 
     // GetOutput allocates the tensor and returns a reference
     auto output_tensor = ctx.GetOutput(i, data.shapes[i]);
@@ -107,13 +109,15 @@ mlir_metadata::Metadata parse_metadata_from_metadef(
 
   auto metadata_json = context->get_meta_def_param(*meta_def);
   mlir_metadata::Metadata metadata;
-  auto status = google::protobuf::util::JsonStringToMessage(metadata_json, &metadata);
+  auto status =
+      google::protobuf::util::JsonStringToMessage(metadata_json, &metadata);
 
   if (!status.ok()) {
     LOG(FATAL) << "Failed to parse MLIR metadata: " << status.ToString();
   }
 
-  MY_LOG(1) << "Parsed metadata - Artifact filename: " << metadata.artifact_filename();
+  MY_LOG(1) << "Parsed metadata - Artifact filename: "
+            << metadata.artifact_filename();
   return metadata;
 }
 
@@ -125,7 +129,8 @@ std::vector<uint8_t> load_artifact_from_epcontext(
 
   auto artifact_stream = context->open_file_for_read(artifact_filename);
   if (!artifact_stream) {
-    LOG(FATAL) << "Failed to open artifact from EPContext: " << artifact_filename;
+    LOG(FATAL) << "Failed to open artifact from EPContext: "
+               << artifact_filename;
   }
 
   std::vector<uint8_t> artifact_bytes;
@@ -167,7 +172,8 @@ MlirCustomOp::MlirCustomOp(
   // Parse metadata from JSON
   metadata_ = parse_metadata_from_metadef(context, meta_def);
   // Create inference state from DLL bytes (uses morphizen::Plugin)
-  inference_state_ = customop::InferenceState::create(load_artifact_from_epcontext(context, metadata_.artifact_filename()));
+  inference_state_ = customop::InferenceState::create(
+      load_artifact_from_epcontext(context, metadata_.artifact_filename()));
 }
 
 void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {

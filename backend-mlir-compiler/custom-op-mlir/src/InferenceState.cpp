@@ -21,11 +21,14 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
 namespace mlir_compilation {
 namespace customop {
 
-InferenceState::InferenceState(void *state, std::unique_ptr<morphizen::Plugin> plugin,
+InferenceState::InferenceState(void *state,
+                               std::unique_ptr<morphizen::Plugin> plugin,
                                const std::string &temp_dll_path)
-    : state_(state), plugin_(std::move(plugin)), temp_dll_path_(temp_dll_path) {}
+    : state_(state), plugin_(std::move(plugin)), temp_dll_path_(temp_dll_path) {
+}
 
-std::unique_ptr<InferenceState> InferenceState::create(const std::vector<uint8_t> &dll_bytes) {
+std::unique_ptr<InferenceState>
+InferenceState::create(const std::vector<uint8_t> &dll_bytes) {
   MY_LOG(1) << "Loading inference plugin from memory...";
 
   // Write DLL to temp file (morphizen::Plugin loads from file path)
@@ -43,7 +46,8 @@ std::unique_ptr<InferenceState> InferenceState::create(const std::vector<uint8_t
     if (!dll_out) {
       LOG(FATAL) << "Failed to create temporary DLL file: " << dll_path;
     }
-    dll_out.write(reinterpret_cast<const char *>(dll_bytes.data()), dll_bytes.size());
+    dll_out.write(reinterpret_cast<const char *>(dll_bytes.data()),
+                  dll_bytes.size());
     dll_out.close();
   }
 
@@ -52,8 +56,9 @@ std::unique_ptr<InferenceState> InferenceState::create(const std::vector<uint8_t
 
   // Check if plugin DLL loaded successfully
   if (!plugin) {
-    LOG(FATAL) << "Failed to load DLL: " << dll_path
-               << " - check that the file exists and all dependencies are available";
+    LOG(FATAL)
+        << "Failed to load DLL: " << dll_path
+        << " - check that the file exists and all dependencies are available";
   }
 
   // Get init function and call it
@@ -72,7 +77,8 @@ std::unique_ptr<InferenceState> InferenceState::create(const std::vector<uint8_t
 
   MY_LOG(1) << "Inference state initialized";
 
-  return std::unique_ptr<InferenceState>(new InferenceState(state, std::move(plugin), dll_path));
+  return std::unique_ptr<InferenceState>(
+      new InferenceState(state, std::move(plugin), dll_path));
 }
 
 InferenceState::~InferenceState() {
@@ -98,7 +104,8 @@ InferenceState::~InferenceState() {
 }
 
 int InferenceState::compute(span_t *inputs, span_t *outputs) const {
-  auto compute_fn = plugin_->get_method<int, void *, span_t *, span_t *>("inference_compute");
+  auto compute_fn =
+      plugin_->get_method<int, void *, span_t *, span_t *>("inference_compute");
   if (!compute_fn) {
     LOG(ERROR) << "inference_compute function not found in plugin";
     return -1;
