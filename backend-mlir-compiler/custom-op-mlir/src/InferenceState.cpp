@@ -47,14 +47,21 @@ std::unique_ptr<InferenceState> InferenceState::create(const std::vector<uint8_t
     dll_out.close();
   }
 
-  // Load plugin using morphizen infrastructure
-  auto plugin = std::make_unique<morphizen::Plugin>(dll_path.c_str());
+  // Load plugin using morphizen infrastructure (factory pattern)
+  auto plugin = morphizen::Plugin::create(dll_path.c_str());
+
+  // Check if plugin DLL loaded successfully
+  if (!plugin) {
+    LOG(FATAL) << "Failed to load DLL: " << dll_path
+               << " - check that the file exists and all dependencies are available";
+  }
 
   // Get init function and call it
   // NOTE: Keep temp DLL file until plugin is destroyed
   auto init_fn = plugin->get_method<int, void **>("inference_init");
   if (!init_fn) {
-    LOG(FATAL) << "inference_init function not found in plugin";
+    LOG(FATAL) << "inference_init function not found in plugin: " << dll_path
+               << " - DLL loaded successfully but symbol is missing";
   }
 
   void *state = nullptr;
