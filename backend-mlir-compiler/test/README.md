@@ -135,7 +135,7 @@ If you encounter an error loading `morphizen-mlir-compiler.dll` due to missing d
 
 ```bash
 # Workaround: Copy DLLs from local/bin to the binary directory
-cp "$LOCAL_DIR/bin"/*.dll "$BUILD_DIR/Debug/bin/"
+cp "$LOCAL_DIR/bin"/*.dll "$BUILD_DIR/bin/Debug/"
 ```
 
 This copies all required DLLs from the install directory to the test binary directory.
@@ -464,7 +464,7 @@ grep "Pattern.*onnx.Conv" "$TEMP_DIR/debug.log"
 - If the test fails to load `morphizen-mlir-compiler.dll` due to missing dependencies:
   ```bash
   # Workaround: Copy DLLs from local/bin to binary directory
-  cp "$LOCAL_DIR/bin"/*.dll "$BUILD_DIR/Debug/bin/"
+  cp "$LOCAL_DIR/bin"/*.dll "$BUILD_DIR/bin/Debug/"
   ```
 
 **Malformed null-terminated string error**:
