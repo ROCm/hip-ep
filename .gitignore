@@ -91,3 +91,7 @@ coverage/
 *.crt
 .env
 .env.*
+
+# MLIR debugging artifacts (use /c/temp/ instead)
+backend-mlir-compiler/test/*.mlir
+backend-mlir-compiler/test/ir_dumps/
