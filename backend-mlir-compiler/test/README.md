@@ -22,6 +22,14 @@ This README assumes the following structure:
 
 **Note**: If your dependencies are installed elsewhere, set `CMAKE_PREFIX_PATH` to that location.
 
+**CRITICAL - Debugging Workflow**:
+- NEVER save temporary MLIR files in the project workspace
+- Use temp directories for debugging:
+  - Windows: `/c/temp/` (Git Bash) or `C:\temp\` (CMD)
+  - Linux: `/tmp/`
+- Once root cause is identified, create LIT unit tests in `3rd-party/morphizen/morphizen-mlir-compiler/test/lit/`
+- See "Creating LIT Unit Tests from E2E Failures" section below
+
 ## Prerequisites
 - ONNX Runtime (via CMAKE_PREFIX_PATH)
 - LLVM/MLIR (via CMAKE_PREFIX_PATH or auto-fetched)
@@ -44,25 +52,25 @@ git add models/two_layer_conv.onnx  # Git LFS will handle it automatically
 
 ## Build
 
-### Step 1: Navigate to Test Directory
+### Step 1: Set Up Directory Variables
+
+**CRITICAL**: All commands in this guide run from the project root. Never use `cd` commands except the initial navigation to the project root.
+
 ```bash
-cd backend-mlir-compiler/test
+# Navigate to project root ONCE
+cd /c/Develop/m/onnx-hipdnn-ep/mlir-integration  # Adjust to your path
+
+# Set up directory variables
+PROJECT_ROOT=$(pwd)
+BUILD_DIR="$PROJECT_ROOT/build/test"
+LOCAL_DIR="$PROJECT_ROOT/../local"  # One level up from project root
+TEMP_DIR="/c/temp"  # Windows Git Bash
+# TEMP_DIR="/tmp"   # Linux
 ```
 
-### Step 2: Set Dependencies Path
+### Step 2: Configure CMake
 ```bash
-# If dependencies are in ../../local (relative to project root):
-LOCAL_DIR=$(cd ../../local && pwd)
-
-# OR if dependencies are elsewhere, set explicit path:
-# LOCAL_DIR="/path/to/your/install/prefix"
-```
-
-### Step 3: Configure CMake
-```bash
-# Source: ../.. (project root)
-# Build: ../../build/test (build/test relative to project root)
-cmake -S ../.. -B ../../build/test \
+cmake -S "$PROJECT_ROOT" -B "$BUILD_DIR" \
   -DBUILD_SHARED_LIBS=OFF \
   "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded\$<\$<CONFIG:Debug>:Debug>" \
   -DCMAKE_BUILD_TYPE=Debug \
@@ -72,9 +80,9 @@ cmake -S ../.. -B ../../build/test \
   --fresh
 ```
 
-### Step 4: Build
+### Step 3: Build
 ```bash
-cmake --build ../../build/test --config Debug --parallel
+cmake --build "$BUILD_DIR" --config Debug --parallel
 ```
 
 ## Running the Test
@@ -82,30 +90,23 @@ cmake --build ../../build/test --config Debug --parallel
 ### With MOCK Runtime (default, no GPU required)
 
 ```bash
-# From backend-mlir-compiler/test directory
-cd ../../build/test/Debug/bin
-
 # Basic run
-./mlir_e2e_test.exe
+"$BUILD_DIR/Debug/bin/mlir_e2e_test.exe"
 
 # With verbose logging
 ORT_LOG_LEVEL=info \
 DEBUG_MORPHIZEN_PASS=1 \
 MORPHIZEN_DEBUG_MLIR_BACKEND=3 \
-./mlir_e2e_test.exe
+"$BUILD_DIR/Debug/bin/mlir_e2e_test.exe"
 
-# Using ctest (from build directory)
-cd ../../build/test
-ctest -R MlirE2ETest --verbose
+# Using ctest
+ctest --test-dir "$BUILD_DIR" -R MlirE2ETest --verbose
 ```
 
 ### With REAL Runtime (requires ROCm GPU)
 ```bash
-# From backend-mlir-compiler/test directory
-
 # Rebuild with REAL runtime
-LOCAL_DIR=$(cd ../../local && pwd)  # Or your custom install path
-cmake -S ../.. -B ../../build/test \
+cmake -S "$PROJECT_ROOT" -B "$BUILD_DIR" \
   -DBUILD_SHARED_LIBS=OFF \
   "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded\$<\$<CONFIG:Debug>:Debug>" \
   -DCMAKE_BUILD_TYPE=Debug \
@@ -114,12 +115,22 @@ cmake -S ../.. -B ../../build/test \
   -DBUILD_MOCK_RUNTIME=OFF \
   --fresh
 
-cmake --build ../../build/test --config Debug --parallel
+cmake --build "$BUILD_DIR" --config Debug --parallel
 
 # Run test
-cd ../../build/test/Debug/bin
-./mlir_e2e_test.exe
+"$BUILD_DIR/Debug/bin/mlir_e2e_test.exe"
 ```
+
+### Troubleshooting: Missing DLL Dependencies
+
+If you encounter an error loading `morphizen-mlir-compiler.dll` due to missing dependencies:
+
+```bash
+# Workaround: Copy DLLs from local/bin to the binary directory
+cp "$LOCAL_DIR/bin"/*.dll "$BUILD_DIR/Debug/bin/"
+```
+
+This copies all required DLLs from the install directory to the test binary directory.
 
 ## Expected Output
 
@@ -165,81 +176,76 @@ Additional optional environment variables:
 
 ## Troubleshooting MLIR Compilation Errors
 
-If the test shows MLIR compilation failures, use this workflow to debug:
+When the E2E test shows MLIR compilation failures, follow this **evidence-based systematic workflow**. The key principle: **use debug flags to gather evidence, not speculation**.
 
-### 1. Enable Bytecode Dumping
+### Prerequisites: Set Up Environment
 
-Set `MORPHIZEN_DEBUG_MLIR_BACKEND=2` to dump the MLIR bytecode to file:
+Run ALL commands from the project root:
 
 ```bash
-# From backend-mlir-compiler/test directory
-cd ../../build/test/Debug/bin
+# Navigate to project root ONCE
+cd /c/Develop/m/onnx-hipdnn-ep/mlir-integration  # Adjust to your path
 
+# Set up directory variables
+PROJECT_ROOT=$(pwd)
+BUILD_DIR="$PROJECT_ROOT/build/test"
+LOCAL_DIR="$PROJECT_ROOT/../local"  # One level up from project root
+TEMP_DIR="/c/temp"  # Windows Git Bash
+# TEMP_DIR="/tmp"   # Linux
+```
+
+### Workflow Overview
+
+```
+1. Dump MLIR bytecode from E2E test
+2. Convert bytecode to text format (save to TEMP_DIR)
+3. Test complete pipeline to identify failing pass
+4. Use debug flags to gather evidence (NOT speculation)
+5. Isolate the failing pass
+6. Identify root cause
+7. Create LIT unit test for regression prevention
+```
+
+### Step 1: Enable Bytecode Dumping
+
+Set `MORPHIZEN_DEBUG_MLIR_BACKEND=2` to dump MLIR bytecode:
+
+```bash
 MORPHIZEN_DEBUG_MLIR_BACKEND=2 \
 XLNX_ONNX_EP_VERBOSE=2 \
-DEBUG_LOG_LEVEL=info \
-MORPHIZEN_DEBUG_PLUGIN=1 \
-./mlir_e2e_test.exe
+"$BUILD_DIR/Debug/bin/mlir_e2e_test.exe"
 ```
 
-This creates `mlir_bytecode_dump.mlir` in the dump directory. Check the test output for the dump directory path:
+Find dump directory from output (look for `dump_dir:` line).
 
-```
-[XLNX_ONNX_EP_VERBOSE] EXEC VERSION: dump_dir: "<dump_directory_path>"
-```
-
-The bytecode file will be at: `<dump_directory>/mlir_bytecode_dump.mlir`
-
-**Platform-specific dump locations:**
-- Windows: `C:\temp\morphizen_dumps\<cache_key>\`
-- Linux: `/tmp/morphizen_dumps/<cache_key>/`
-
-### 2. Locate the Bytecode Dump
-
-Find the dump directory from the test output:
+### Step 2: Convert Bytecode to Text
 
 ```bash
-# Extract dump directory from test output (look for "dump_dir:" line)
-# Example: DUMP_DIR="C:\temp\morphizen_dumps\abc123"
-# In Git Bash (Windows): DUMP_DIR="/c/temp/morphizen_dumps/abc123"
-# In Linux: DUMP_DIR="/tmp/morphizen_dumps/abc123"
+# Set dump directory from test output
+DUMP_DIR="$TEMP_DIR/morphizen_dumps/<cache_key>"  # Replace <cache_key>
 
-# Verify the file exists
-ls -lh "$DUMP_DIR/mlir_bytecode_dump.mlir"
-```
-
-### 3. Convert Bytecode to Text Format
-
-Use `mlir-opt` to convert the binary bytecode to human-readable MLIR text:
-
-```bash
-# Set paths (from backend-mlir-compiler/test directory)
-DUMP_DIR="<path_from_test_output>"
-LOCAL_DIR=$(cd ../../local && pwd)  # Or your CMAKE_PREFIX_PATH location
-
-# Convert bytecode to text
+# Convert to text - SAVE TO TEMP DIRECTORY (NOT project workspace)
 "$LOCAL_DIR/bin/mlir-opt" --allow-unregistered-dialect \
   "$DUMP_DIR/mlir_bytecode_dump.mlir" \
-  -o two_layer_conv.mlir
+  -o "$TEMP_DIR/input.mlir"
 ```
 
-### 4. Test Complete Pipeline with hip-opt
+**CRITICAL**: Save to `$TEMP_DIR/input.mlir`, NOT the project workspace.
+
+### Step 3: Test Complete Pipeline
 
 Use `hip-opt` with `--all-passes` to test the full ONNX→HIP→LLVM→Interface pipeline:
 
 ```bash
-# From backend-mlir-compiler/test directory
-BUILD_DIR=$(cd ../../build/test && pwd)
-
 "$BUILD_DIR/bin/Debug/hip-opt" \
   --all-passes \
-  two_layer_conv.mlir \
-  -o two_layer_conv_compiled.mlir
+  "$TEMP_DIR/input.mlir" \
+  -o "$TEMP_DIR/output.mlir"
 ```
 
-The `--all-passes` flag runs the complete compilation pipeline (equivalent to the passes in `CompilerPipeline::runMLIRPasses()`):
+The `--all-passes` flag runs the complete compilation pipeline:
 1. `--convert-onnx-to-hip` - Convert ONNX operations to HIP dialect
-2. `--func.func='buffer-loop-hoisting,ownership-based-buffer-deallocation,optimize-allocation-liveness'` - Buffer management passes (nested under func.func)
+2. `--func.func='buffer-loop-hoisting,ownership-based-buffer-deallocation,optimize-allocation-liveness'` - Buffer management passes
 3. `--canonicalize` - Canonicalization pass
 4. `--hip-memory-pooling` - Memory pooling optimization
 5. `--convert-hip-to-llvm` - Convert HIP dialect to LLVM dialect
@@ -247,52 +253,74 @@ The `--all-passes` flag runs the complete compilation pipeline (equivalent to th
 
 If successful, this validates that all MLIR transformations work correctly.
 
-### 6. Debug Individual Passes with MLIR Built-in Flags
+### Step 4: Gather Evidence with Debug Flags
 
-MLIR's pass manager has built-in debugging flags to dump IR before/after each pass. Use these to identify which pass is failing:
+**CRITICAL**: Don't speculate about what's wrong. Use MLIR's built-in debug flags to gather evidence.
+
+#### Method A: Use --debug-only for Dialect Conversion Failures
+
+When you see errors like "failed to legalize operation 'onnx.Conv'", the error message is intentionally cryptic. Use debug flags to see the actual reason:
 
 ```bash
-# From backend-mlir-compiler/test directory
-BUILD_DIR=$(cd ../../build/test && pwd)
-
-# Dump IR before ALL passes
 "$BUILD_DIR/bin/Debug/hip-opt" \
   --all-passes \
-  --mlir-print-ir-before-all \
-  --mlir-print-ir-module-scope \
+  --debug-only=dialect-conversion \
   --mlir-disable-threading \
-  two_layer_conv.mlir 2>&1 | tee debug_all_before.log
-
-# Dump IR after ALL passes
-"$BUILD_DIR/bin/Debug/hip-opt" \
-  --all-passes \
-  --mlir-print-ir-after-all \
-  --mlir-print-ir-module-scope \
-  --mlir-disable-threading \
-  two_layer_conv.mlir 2>&1 | tee debug_all_after.log
-
-# Dump IR before a SPECIFIC pass (e.g., convert-onnx-to-hip)
-"$BUILD_DIR/bin/Debug/hip-opt" \
-  --all-passes \
-  --mlir-print-ir-before=convert-onnx-to-hip \
-  --mlir-print-ir-module-scope \
-  two_layer_conv.mlir 2>&1 | tee debug_before_onnx_to_hip.log
-
-# Dump IR after a SPECIFIC pass (e.g., convert-onnx-to-hip)
-"$BUILD_DIR/bin/Debug/hip-opt" \
-  --all-passes \
-  --mlir-print-ir-after=convert-onnx-to-hip \
-  --mlir-print-ir-module-scope \
-  two_layer_conv.mlir 2>&1 | tee debug_after_onnx_to_hip.log
+  "$TEMP_DIR/input.mlir" 2>&1 | tee "$TEMP_DIR/debug_conversion.log"
 ```
 
-**Available MLIR Debug Flags**:
+**What this reveals**:
+- Pattern matching failures with specific reasons (e.g., "Conv operation missing required attributes")
+- Which conversion pattern was attempted
+- Why the pattern failed to match
+
+**Example output**:
+```
+* Pattern : 'onnx.Conv -> (hip.conv)' {
+  ** Failure : Conv operation missing required attributes: dilations
+} -> FAILURE : pattern failed to match
+```
+
+This immediately tells you the root cause without speculation.
+
+#### Method B: Dump IR at Each Pass
+
+Use `--mlir-print-ir-tree-dir` to automatically dump IR before/after each pass:
+
+```bash
+mkdir -p "$TEMP_DIR/ir_dumps"
+
+"$BUILD_DIR/bin/Debug/hip-opt" \
+  --all-passes \
+  --mlir-print-ir-tree-dir="$TEMP_DIR/ir_dumps" \
+  --mlir-print-ir-before-all \
+  --mlir-disable-threading \
+  "$TEMP_DIR/input.mlir" 2>&1 | tee "$TEMP_DIR/debug_all_passes.log"
+```
+
+**Advantages**:
+- Automatic file creation with meaningful names
+- No manual extraction needed
+- See exact IR state before each pass
+
+#### Available MLIR Debug Flags
+
+**Dialect Conversion Debug Flags**:
+- `--debug-only=dialect-conversion` - Show pattern matching attempts and failures with reasons
+- `--debug-only=greedy-rewriter` - Show greedy pattern rewriter decisions
+
+**IR Dumping Flags**:
 - `--mlir-print-ir-before=<pass-name>` - Print IR before a specific pass
 - `--mlir-print-ir-after=<pass-name>` - Print IR after a specific pass
 - `--mlir-print-ir-before-all` - Print IR before all passes
 - `--mlir-print-ir-after-all` - Print IR after all passes
+- `--mlir-print-ir-tree-dir=<dir>` - Automatically dump IR to files (RECOMMENDED)
 - `--mlir-print-ir-module-scope` - Always print at module scope (recommended for readability)
-- `--mlir-disable-threading` - Disable multi-threading for deterministic output (recommended for debugging)
+
+**Other Debug Flags**:
+- `--mlir-disable-threading` - Disable multi-threading for deterministic output (REQUIRED for debugging)
+- `--mlir-timing` - Display pass execution timing
+- `--mlir-pass-statistics` - Display pass statistics
 
 **Pass names** (use with `--mlir-print-ir-before=<name>` or `--mlir-print-ir-after=<name>`):
 - `convert-onnx-to-hip` - ONNX to HIP conversion
@@ -304,58 +332,11 @@ BUILD_DIR=$(cd ../../build/test && pwd)
 - `convert-hip-to-llvm` - HIP to LLVM conversion
 - `hip-generate-interface` - Interface generation
 
-### 7. Isolate the Problematic Pass (Two Methods)
+### Step 5: Isolate the Failing Pass
 
-Once you identify the failing pass from the logs, use one of these methods to isolate it:
+Once you identify the failing pass, isolate it for focused debugging:
 
-#### Method 1: Use --mlir-print-ir-tree-dir (Recommended)
-
-MLIR can automatically dump IR to files before/after each pass:
-
-```bash
-# Create output directory for IR dumps
-mkdir -p ir_dumps
-
-# Run with automatic IR file dumping
-"$BUILD_DIR/bin/Debug/hip-opt" \
-  --all-passes \
-  --mlir-print-ir-tree-dir=ir_dumps \
-  --mlir-print-ir-before=convert-hip-to-llvm \
-  --mlir-disable-threading \
-  two_layer_conv.mlir 2>&1 | tee debug.log
-
-# IR files are created in ir_dumps/ with timestamps
-# Example: ir_dumps/pipeline_convert-hip-to-llvm_before_0.mlir
-ls -lt ir_dumps/
-```
-
-**Advantages:**
-- Automatic file creation with meaningful names
-- No manual extraction needed
-- Timestamps for tracking multiple runs
-
-#### Method 2: Manual Extraction from Logs
-
-If `--mlir-print-ir-tree-dir` is not available or you prefer manual control:
-
-```bash
-# 1. Dump IR before failing pass to stdout
-"$BUILD_DIR/bin/Debug/hip-opt" \
-  --all-passes \
-  --mlir-print-ir-before=convert-hip-to-llvm \
-  --mlir-print-ir-module-scope \
-  --mlir-disable-threading \
-  two_layer_conv.mlir 2>&1 > debug_before.log
-
-# 2. Extract the IR from the log (between IR dump markers)
-# Look for "// -----// IR Dump Before ConvertHipToLLVM //" in the log
-# Copy the MLIR code block to a new file
-cat debug_before.log | sed -n '/IR Dump Before/,/^$/p' > input_to_failing_pass.mlir
-
-# Or manually extract using a text editor
-```
-
-#### Method 3: Run Passes Incrementally
+#### Method 1: Run Passes Incrementally
 
 Run passes one-by-one up to the failing pass:
 
@@ -368,106 +349,115 @@ Run passes one-by-one up to the failing pass:
   --func.func='buffer-loop-hoisting,ownership-based-buffer-deallocation,optimize-allocation-liveness' \
   --canonicalize \
   --hip-memory-pooling \
-  -o input_before_failing_pass.mlir \
-  two_layer_conv.mlir
+  -o "$TEMP_DIR/input_before_failing_pass.mlir" \
+  "$TEMP_DIR/input.mlir"
 
 # Now test the failing pass in isolation
 "$BUILD_DIR/bin/Debug/hip-opt" \
   --convert-hip-to-llvm \
   --mlir-print-ir-after-all \
   --mlir-print-ir-module-scope \
-  input_before_failing_pass.mlir 2>&1 | tee isolated_pass_debug.log
+  --mlir-disable-threading \
+  "$TEMP_DIR/input_before_failing_pass.mlir" 2>&1 | tee "$TEMP_DIR/isolated_pass_debug.log"
 ```
 
-**When to use each method:**
-- **Method 1**: Best for automatic troubleshooting, clean workflow
-- **Method 2**: When you need full control over extracted IR
-- **Method 3**: When you want to test pass combinations or dependencies
+#### Method 2: Extract from IR Tree Dumps
 
-### 8. Run Isolated Pass for Root Cause Analysis
-
-Once you have the input IR file (from any method above):
+Use the IR files created by `--mlir-print-ir-tree-dir`:
 
 ```bash
-# Run the specific failing pass with verbose output
+# Find the IR file dumped before the failing pass
+IR_FILE=$(ls -t "$TEMP_DIR/ir_dumps"/pipeline_*before*.mlir | head -1)
+echo "Input IR: $IR_FILE"
+
+# Run failing pass in isolation
 "$BUILD_DIR/bin/Debug/hip-opt" \
   --<failing-pass-name> \
   --mlir-print-ir-after-all \
   --mlir-print-ir-module-scope \
   --mlir-disable-threading \
-  input_to_failing_pass.mlir 2>&1 | tee isolated_pass_debug.log
-
-# Example for convert-hip-to-llvm:
-"$BUILD_DIR/bin/Debug/hip-opt" \
-  --convert-hip-to-llvm \
-  --mlir-print-ir-after-all \
-  --mlir-print-ir-module-scope \
-  input_before_convert_hip_to_llvm.mlir 2>&1 | tee hip_to_llvm_isolated.log
+  "$IR_FILE" 2>&1 | tee "$TEMP_DIR/isolated_pass_debug.log"
 ```
 
-This narrows down the root cause to a specific transformation with minimal noise.
+### Step 6: Identify Root Cause
 
-### 9. Complete Example: Debugging a Failing Pass
-
-Here's a complete reproducible workflow from start to finish:
+Analyze the debug output to identify the root cause:
 
 ```bash
-# Navigate to test directory
-cd backend-mlir-compiler/test
+# Search for pattern matching failures
+grep "Pattern.*FAILURE" "$TEMP_DIR/debug_conversion.log"
 
-# Set up paths (adjust LOCAL_DIR if your dependencies are elsewhere)
-BUILD_DIR=$(cd ../../build/test && pwd)
-LOCAL_DIR=$(cd ../../local && pwd)
+# Search for errors
+grep -E "(error|failed|mismatch)" "$TEMP_DIR/isolated_pass_debug.log"
 
-# Step 1: Run test to get bytecode dump
-MORPHIZEN_DEBUG_MLIR_BACKEND=2 \
-  "$BUILD_DIR/Debug/bin/mlir_e2e_test.exe"
-
-# Step 2: Find dump directory from test output
-# Look for: dump_dir: "C:\\temp\\morphizen_dumps\\<cache_key>"
-# Replace <cache_key> with actual value from output:
-DUMP_DIR="/c/temp/morphizen_dumps/<cache_key>"  # Windows Git Bash
-# DUMP_DIR="/tmp/morphizen_dumps/<cache_key>"    # Linux
-
-# Step 3: Convert bytecode to text
-"$LOCAL_DIR/bin/mlir-opt" --allow-unregistered-dialect \
-  "$DUMP_DIR/mlir_bytecode_dump.mlir" \
-  -o two_layer_conv.mlir
-
-# Step 4: Test complete pipeline to identify failing pass
-"$BUILD_DIR/bin/Debug/hip-opt" \
-  --all-passes \
-  --mlir-print-ir-after-all \
-  --mlir-disable-threading \
-  two_layer_conv.mlir 2>&1 | tee full_pipeline_debug.log
-
-# Step 5: If a pass fails (e.g., convert-hip-to-llvm), dump IR before it
-mkdir -p ir_dumps
-"$BUILD_DIR/bin/Debug/hip-opt" \
-  --all-passes \
-  --mlir-print-ir-tree-dir=ir_dumps \
-  --mlir-print-ir-before=convert-hip-to-llvm \
-  --mlir-disable-threading \
-  two_layer_conv.mlir 2>&1 | tee debug_with_dumps.log
-
-# Step 6: Find the dumped IR file
-# Files are named like: pipeline_convert-hip-to-llvm_before_0.mlir
-IR_FILE=$(ls -t ir_dumps/pipeline_*before*.mlir | head -1)
-echo "Input IR: $IR_FILE"
-
-# Step 7: Run failing pass in isolation
-"$BUILD_DIR/bin/Debug/hip-opt" \
-  --convert-hip-to-llvm \
-  --mlir-print-ir-after-all \
-  --mlir-print-ir-module-scope \
-  "$IR_FILE" 2>&1 | tee isolated_pass_debug.log
-
-# Step 8: Analyze the isolated output for root cause
-# Look for pattern matching failures, type mismatches, etc.
-grep -E "(error|failed|mismatch)" isolated_pass_debug.log
+# Review the IR at the failure point
+cat "$TEMP_DIR/input_before_failing_pass.mlir"
 ```
 
-### 10. Common Issues
+### Complete Example: Debugging ONNX Conv Attribute Issue
+
+Here's the complete workflow that was used to debug the "failed to legalize onnx.Conv" issue:
+
+```bash
+# Set up environment
+cd /c/Develop/m/onnx-hipdnn-ep/mlir-integration
+PROJECT_ROOT=$(pwd)
+BUILD_DIR="$PROJECT_ROOT/build/test"
+LOCAL_DIR="$PROJECT_ROOT/../local"  # One level up from project root
+TEMP_DIR="/c/temp"
+
+# Run E2E test with bytecode dump
+MORPHIZEN_DEBUG_MLIR_BACKEND=2 "$BUILD_DIR/Debug/bin/mlir_e2e_test.exe"
+
+# Convert bytecode (SAVE TO TEMP)
+DUMP_DIR="$TEMP_DIR/morphizen_dumps/abc123"
+"$LOCAL_DIR/bin/mlir-opt" --allow-unregistered-dialect \
+  "$DUMP_DIR/mlir_bytecode_dump.mlir" -o "$TEMP_DIR/input.mlir"
+
+# Test pipeline
+"$BUILD_DIR/bin/Debug/hip-opt" --all-passes "$TEMP_DIR/input.mlir"
+# ERROR: "failed to legalize operation 'onnx.Conv'"
+
+# Use debug flags (NOT speculation)
+"$BUILD_DIR/bin/Debug/hip-opt" \
+  --all-passes \
+  --debug-only=dialect-conversion \
+  --mlir-disable-threading \
+  "$TEMP_DIR/input.mlir" 2>&1 | tee "$TEMP_DIR/debug.log"
+
+# Analyze evidence
+grep "Pattern.*onnx.Conv" "$TEMP_DIR/debug.log"
+# RESULT: "** Failure : Conv operation missing required attributes: dilations"
+
+# ROOT CAUSE: Pattern expects dilations but ONNX spec says it's optional
+# FIX: Update pattern to provide default [1,1]
+```
+
+### Best Practices for Evidence-Based Debugging
+
+1. **Don't speculate - use debug flags first**
+   - ❌ Bad: "Maybe it's a type mismatch" → spend hours guessing
+   - ✅ Good: `--debug-only=dialect-conversion` → see exact failure in 30 seconds
+
+2. **Save all temp files to temp directory, NOT project workspace**
+   - ❌ Bad: `backend-mlir-compiler/test/input.mlir`
+   - ✅ Good: `/c/temp/input.mlir`
+
+3. **Work from project root - never use cd commands**
+   - ❌ Bad: `cd backend-mlir-compiler/test && ../../build/...`
+   - ✅ Good: `"$BUILD_DIR/bin/Debug/hip-opt" ...`
+
+4. **Create LIT tests after identifying root cause**
+   - See "Creating LIT Unit Tests from E2E Failures" section
+
+### Common Issues
+
+**Missing DLL dependencies (morphizen-mlir-compiler.dll)**:
+- If the test fails to load `morphizen-mlir-compiler.dll` due to missing dependencies:
+  ```bash
+  # Workaround: Copy DLLs from local/bin to binary directory
+  cp "$LOCAL_DIR/bin"/*.dll "$BUILD_DIR/Debug/bin/"
+  ```
 
 **Malformed null-terminated string error**:
 - This occurred when `from_onnx_mlir = false` was hardcoded, causing all passes to be skipped
@@ -478,14 +468,164 @@ grep -E "(error|failed|mismatch)" isolated_pass_debug.log
 - Check that onnx-mlir is built correctly
 
 **Pass failures**:
-- Use `--mlir-print-ir-before=<pass-name>` and `--mlir-print-ir-after=<pass-name>` to isolate which pass is failing
+- Use `--debug-only=dialect-conversion` to see pattern matching failures with reasons
+- Use `--mlir-print-ir-tree-dir` to automatically dump IR at each stage
 - Extract the input IR and run the specific pass in isolation
-- Check the MLIR IR at each stage
 
 **Pattern matching failures in ONNX→HIP conversion**:
+- Use `--debug-only=dialect-conversion` to see why patterns failed
 - Review the ONNX operations in the input IR
 - Check if all required ONNX ops have HIP lowering patterns registered
-- Use `--mlir-print-ir-after=convert-onnx-to-hip` to verify the conversion succeeded
+- Verify that optional attributes have proper default values
+
+## Creating LIT Unit Tests from E2E Failures
+
+After identifying the root cause of an E2E test failure, create a focused LIT unit test to prevent regression.
+
+### When to Create a LIT Test
+
+Create a LIT test when you:
+- Identify a specific conversion pattern failure
+- Find a missing attribute default value
+- Discover an unsupported operation variant
+- Fix a type conversion bug
+
+**Rule of thumb**: If the bug affected a specific MLIR operation or pass, create a LIT test for that operation/pass in isolation.
+
+### Where to Put LIT Tests
+
+```
+3rd-party/morphizen/morphizen-mlir-compiler/test/lit/
+├── Conversion/
+│   ├── onnx-to-hip/    # ONNX → HIP lowering (most common for E2E failures)
+│   └── hip-to-llvm/
+├── Transforms/
+└── Integration/
+```
+
+### LIT Test Structure
+
+```mlir
+// Copyright (C) 2026 Advanced Micro Devices, Inc.
+// Licensed under the MIT License.
+
+// ============================================================================
+// TEST PURPOSE:
+// Brief description of what this test validates
+//
+// This test validates:
+// - Specific behavior being tested
+// - Edge case being covered
+// - Bug that was fixed
+// ============================================================================
+
+// RUN: hip-opt %s --convert-onnx-to-hip | FileCheck %s
+
+module {
+  func.func @test_name(%input: tensor<...>) -> tensor<...> {
+    // CHECK-LABEL: func.func @test_name
+
+    %output = "onnx.Operation"(%input) {
+      attr1 = value1
+      // attr2 intentionally omitted to test default handling
+    } : (tensor<...>) -> tensor<...>
+
+    // CHECK: hip.operation
+    // CHECK-SAME: {attr1 = value1, attr2 = default_value}
+
+    return %output : tensor<...>
+  }
+}
+```
+
+### Example: Conv Missing Dilations Attribute
+
+File: `3rd-party/morphizen/morphizen-mlir-compiler/test/lit/Conversion/onnx-to-hip/test_conv_missing_dilations.mlir`
+
+```mlir
+// RUN: hip-opt %s --convert-onnx-to-hip | FileCheck %s
+
+module {
+  func.func @test_conv_missing_dilations(
+    %input: tensor<1x3x224x224xf32>,
+    %weights: tensor<64x3x7x7xf32>,
+    %bias: tensor<64xf32>
+  ) -> tensor<1x64x112x112xf32> {
+    // CHECK-LABEL: func.func @test_conv_missing_dilations
+
+    // ONNX Conv with dilations OMITTED (testing default behavior)
+    %output = "onnx.Conv"(%input, %weights, %bias) {
+      kernel_shape = [7, 7],
+      strides = [2, 2],
+      pads = [3, 3, 3, 3]
+      // dilations intentionally omitted - should default to [1, 1]
+    } : (...) -> tensor<1x64x112x112xf32>
+
+    // Verify dilations=[1,1] is present in lowered hip.conv
+    // CHECK: hip.conv
+    // CHECK-SAME: {dilations = [1, 1],
+
+    return %output : tensor<1x64x112x112xf32>
+  }
+}
+```
+
+### Running LIT Tests
+
+```bash
+# Via CTest
+ctest --test-dir "$BUILD_DIR" -R LitTests --verbose
+
+# Via llvm-lit
+llvm-lit -v "$PROJECT_ROOT/3rd-party/morphizen/morphizen-mlir-compiler/test/lit/Conversion/onnx-to-hip/test_conv_missing_dilations.mlir"
+
+# Manual verification during development
+"$BUILD_DIR/bin/Debug/hip-opt" \
+  "$PROJECT_ROOT/3rd-party/morphizen/.../test_conv_missing_dilations.mlir" \
+  --convert-onnx-to-hip | FileCheck "$PROJECT_ROOT/3rd-party/morphizen/.../test_conv_missing_dilations.mlir"
+```
+
+### Workflow: From E2E Failure to LIT Test
+
+```bash
+# 1. Debug E2E failure (see Troubleshooting section)
+# ... ROOT CAUSE IDENTIFIED: missing dilations attribute
+
+# 2. Create minimal LIT test
+# (Create file in appropriate test/lit/ subdirectory)
+
+# 3. Verify test FAILS before fix (reproduces bug)
+"$BUILD_DIR/bin/Debug/hip-opt" test.mlir --convert-onnx-to-hip | FileCheck test.mlir
+# Expected: FAILS
+
+# 4. Implement fix in conversion pattern
+
+# 5. Verify test PASSES after fix
+"$BUILD_DIR/bin/Debug/hip-opt" test.mlir --convert-onnx-to-hip | FileCheck test.mlir
+# Expected: PASSES
+
+# 6. Verify E2E test also passes
+"$BUILD_DIR/Debug/bin/mlir_e2e_test.exe"
+
+# 7. Clean up temp files (NOT in project workspace)
+rm "$TEMP_DIR/input.mlir" "$TEMP_DIR/output.mlir"
+rm -rf "$TEMP_DIR/ir_dumps"
+```
+
+### Best Practices for LIT Tests
+
+1. **One test = One behavior** - Don't test multiple features in a single test
+2. **Use descriptive names** - `test_conv_missing_dilations.mlir` ✅, `test_conv2.mlir` ❌
+3. **Document the "why"** - Explain what bug this prevents
+4. **Test edge cases** - Missing optional attributes, boundary values
+5. **Keep tests minimal** - Small tensors, simple operations
+6. **Use CHECK-LABEL** - Prevents false matches from other functions
+
+### Reference Documentation
+
+- **LIT Test Guide**: `3rd-party/morphizen/morphizen-mlir-compiler/test/lit/README.md`
+- **FileCheck Syntax**: https://llvm.org/docs/CommandGuide/FileCheck.html
+- **Existing Examples**: Browse `3rd-party/morphizen/.../test/lit/Conversion/onnx-to-hip/`
 
 ## TODO - Future Enhancements
 - Add actual inference testing (forward pass with input data, output validation)
@@ -503,4 +643,40 @@ backend-mlir-compiler/test/
 ├── models/                      # Test models (Git LFS)
 │   └── two_layer_conv.onnx      # Two-layer convolution model
 └── test_e2e_mlir.cpp            # E2E test implementation
+
+# These should NOT exist (workspace pollution - use /c/temp/ instead):
+# ├── ir_dumps/                  # Should be in /c/temp/ir_dumps/
+# └── two_layer_conv.mlir        # Should be in /c/temp/input.mlir
 ```
+
+## Best Practices Summary
+
+### Debugging Workflow
+1. ✅ Work from project root - set `$PROJECT_ROOT`, `$BUILD_DIR`, `$LOCAL_DIR` variables
+2. ✅ Save temp files to `/c/temp/` or `/tmp/` - NEVER in project workspace
+3. ✅ Use debug flags FIRST (`--debug-only=dialect-conversion`) - gather evidence, not speculation
+4. ✅ Use `--mlir-print-ir-tree-dir` for automatic IR dumps
+5. ✅ Test isolated passes, not just full pipeline
+6. ✅ Create LIT unit tests after identifying root cause
+
+### Anti-Patterns to Avoid
+1. ❌ NEVER use `cd` commands in workflows (except initial navigation to project root)
+2. ❌ NEVER save MLIR files to project workspace (pollutes version control)
+3. ❌ NEVER speculate about bugs - use debug flags to get evidence
+4. ❌ NEVER skip creating LIT tests after fixing bugs (prevents regression)
+
+### Path Examples
+```bash
+# ✅ Good - All commands from project root
+cd /c/Develop/m/onnx-hipdnn-ep/mlir-integration
+"$BUILD_DIR/bin/Debug/hip-opt" --all-passes "$TEMP_DIR/input.mlir"
+
+# ❌ Bad - Using cd, relative paths, workspace pollution
+cd backend-mlir-compiler/test
+../../build/test/bin/Debug/hip-opt --all-passes two_layer_conv.mlir
+```
+
+### Debug Flag Priority
+1. **First**: `--debug-only=dialect-conversion` - Pattern matching failures with reasons
+2. **Second**: `--mlir-print-ir-tree-dir` - Automatic IR dumps
+3. **Always**: `--mlir-disable-threading` - Deterministic debugging output
