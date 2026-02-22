@@ -22,8 +22,9 @@
 #include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/IR/BuiltinDialect.h"
 
-
+#ifdef ENABLE_ONNX_FRONTEND
 #include "src/Dialect/ONNX/ONNXDialect.hpp"
+#endif
 
 #include "HipDialect.h"
 #include "HipPasses.h"
@@ -119,7 +120,9 @@ int main(int argc, char** argv) {
   registry.insert<mlir::tensor::TensorDialect>();
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::hip::HipDialect>();
+#ifdef ENABLE_ONNX_FRONTEND
   registry.insert<mlir::ONNXDialect>();
+#endif
 
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(registry);
@@ -127,7 +130,11 @@ int main(int argc, char** argv) {
   mlir::tensor::registerBufferizableOpInterfaceExternalModels(registry);
   registerHipBufferizableOpInterfaceModels(registry);
 
+#ifdef ENABLE_ONNX_FRONTEND
   mlir::hip::registerHipPasses();
+#else
+  mlir::hip::registerConvertHipToLLVMPass();
+#endif
   mlir::bufferization::registerBufferizationPasses();
   mlir::registerConvertFuncToLLVMPass();
   mlir::registerArithToLLVMConversionPass();

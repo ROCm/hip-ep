@@ -4,28 +4,54 @@ Licensed under the MIT License.
 -->
 # ONNX-to-HIP Frontend
 
-Converts `.onnx` models directly into HIP dialect MLIR via a single Python script.
+Converts ONNX dialect IR (produced by onnx-mlir) into HIP dialect IR at the MLIR
+level using destination-passing style (DPS) with tensor types. Bufferization to memref
+is handled by a separate `--one-shot-bufferize` pass.
 
 ```
-model.onnx  -->  onnx_to_hip.py --all  -->  model_hip.mlir  -->  hip-compiler  -->  model.dll
+model.onnx  -->  onnx-mlir  -->  onnx_dialect.mlir  -->  hip-opt --convert-onnx-to-hip
+                                                           --one-shot-bufferize
+                                                           --convert-hip-to-llvm ...
 ```
 
-## Usage
+## Build Requirements
+
+This feature is **optional** and disabled by default. Enable it by passing
+`-DONNX_MLIR_SRC` at cmake time:
 
 ```bash
-pip install onnx numpy
-
-python onnx_to_hip.py model.onnx --all -o model_hip.mlir
+cmake .. \
+  -DLLVM_DIR=/path/to/llvm-project/build/lib/cmake/llvm \
+  -DMLIR_DIR=/path/to/llvm-project/build/lib/cmake/mlir \
+  -DONNX_MLIR_SRC=/path/to/onnx-mlir \
+  -DONNX_MLIR_BUILD=/path/to/onnx-mlir/build
 ```
 
-| Flag | Effect |
-|---|---|
-| *(default)* | Remap all ops from `onnx.*` / `com.microsoft.*` to `hip.*` |
-| `--extract-weights` | Move weights from inline constants to function arguments |
-| `--fuse` | Fuse RMSNorm (LpNorm+Mul) and SiLU (Sigmoid+Mul) patterns |
-| `--memref` | Convert `tensor<...>` to `memref<..., 1>` (device memory) |
-| `--lifecycle` | Add `hip.create_handle` / `hip.destroy_handle` wrapping |
-| `--all` | All of the above |
+Without `-DONNX_MLIR_SRC`, hip-opt and hip-compiler build normally with HIP dialect
+support only; the `--convert-onnx-to-hip` pass is simply not registered.
+
+**Known limitation:** onnx-mlir pins to an LLVM 22-dev commit (`0c2701fe7fa0`,
+Nov 2025) and is not compatible with LLVM 23. If you are using LLVM 23, leave
+`ONNX_MLIR_SRC` unset.
+
+---
+
+## Pass Pipeline
+
+The `--convert-onnx-to-hip` pass performs the following transformations:
+
+1. **Weight extraction** -- `onnx.Constant` ops are promoted to new function arguments
+2. **Op mapping** -- ONNX ops are rewritten to HIP dialect ops (tensor DPS):
+   - `ONNXMatMulOp` → `hip.hipblaslt.matmul`
+   - `ONNXTransposeOp` → `hip.transpose`
+   - `ONNXMulOp` → `hip.miopen.mul`
+   - `ONNXSoftmaxOp` → `hip.miopen.softmax`
+3. **Handle lifecycle** -- `hip.create_handle` / `hip.destroy_handle` are inserted
+4. **Cleanup** -- `onnx.EntryPoint` is erased
+
+After this pass, the IR is in HIP dialect with tensor types. The standard
+`--one-shot-bufferize` pass then converts tensors to memrefs, followed by the
+existing `--convert-hip-to-llvm` pipeline.
 
 ---
 
@@ -119,30 +145,9 @@ Unmapped ops default to `hip.<OpType>`.
 
 ---
 
-## Pattern Fusion (`--fuse`)
-
-Detects multi-op patterns and replaces them with single fused ops.
-Q/DQ pairs between component ops are skipped during pattern matching.
-
-**RMSNorm**: `LpNormalization(p=2, axis=-1)` -> [Q/DQ] -> `Mul(_, weight)` => `hip.miopen.rms_norm(x, weight)`
-
-**SiLU**: `Sigmoid(x)` -> [Q/DQ] -> `Mul(x, sigmoid_out)` => `hip.silu(x)`
-
----
-
-## Backend Graph Grouping
-
-Consecutive ops targeting the same backend are wrapped in graph regions:
-
-- `hip.hipblaslt.*` ops -> `hip.hipblaslt.graph { ... }`
-- `hip.miopen.*` ops -> `hip.miopen.graph { ... }`
-- Other ops remain ungrouped
-
----
-
 ## Validation (Llama-3.2-1B)
 
-Tested on `Llama-3.2-1B-Instruct` quantized ONNX model with `--all`:
+Tested on `Llama-3.2-1B-Instruct` quantized ONNX model:
 
 | HIP Op | Count |
 |---|---|
