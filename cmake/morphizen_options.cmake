@@ -89,6 +89,7 @@ option(morphizen_ENABLE_ONNX_BACKEND "enable ONNX backend for ORT bridge" OFF)
 option(morphizen_ENABLE_MLIR_BACKEND "enable MLIR as a backend of morphizen_ort_api for ORT bridge" ON)
 option(morphizen_ENABLE_ONNX_SCHEMA_SUPPORT "enable ONNX schema support for node_with_named_args feature in morphizen-core-static" OFF)
 option(morphizen_ENABLE_PATTERN_MATCHING "enable pattern matching library (morphizen-pattern)" ON)
+option(morphizen_ENABLE_MLIR_COMPILER "enable MLIR compiler backend (morphizen-mlir-compiler)" OFF)
 
 # Validate backend configuration when ORT bridge is enabled
 if(morphizen_ENABLE_ORT_BRIDGE)
@@ -114,3 +115,4 @@ message(STATUS "  morphizen_ENABLE_UNIT_TEST : ${morphizen_ENABLE_UNIT_TEST}")
 message(STATUS "  morphizen_ENABLE_BOOST : ${morphizen_ENABLE_BOOST}")
 message(STATUS "  morphizen_ENABLE_ONNX_SCHEMA_SUPPORT : ${morphizen_ENABLE_ONNX_SCHEMA_SUPPORT}")
 message(STATUS "  morphizen_ENABLE_PATTERN_MATCHING : ${morphizen_ENABLE_PATTERN_MATCHING}")
+message(STATUS "  morphizen_ENABLE_MLIR_COMPILER : ${morphizen_ENABLE_MLIR_COMPILER}")
