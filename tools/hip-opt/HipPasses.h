@@ -6,18 +6,17 @@
 #define HIP_PASSES_H
 
 #include "mlir/Pass/Pass.h"
-#include <memory>
 
 namespace mlir {
 namespace hip {
 
-/// Create a pass to convert HIP operations to LLVM dialect.
-std::unique_ptr<Pass> createConvertHipToLLVMPass();
+#define GEN_PASS_DECL
+#include "HipPasses.h.inc"
 
-/// Register all HIP passes.
-void registerHipPasses();
+#define GEN_PASS_REGISTRATION
+#include "HipPasses.h.inc"
 
-} // namespace hip
-} // namespace mlir
+}  // namespace hip
+}  // namespace mlir
 
-#endif // HIP_PASSES_H
+#endif  // HIP_PASSES_H

@@ -3,11 +3,16 @@
 
 include "HipDialect.td"
 include "HipTypes.td"
+include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/IR/OpBase.td"
 
 class Hip_Op<string mnemonic, list<Trait> traits = []> :
     Op<Hip_Dialect, mnemonic, traits>;
+
+// Accepts both ranked tensor (pre-bufferization) and memref (post-bufferization).
+def Hip_TensorOrMemRef : AnyTypeOf<[AnyRankedTensor, AnyMemRef],
+                                    "ranked tensor or memref">;
 
 def Hip_CreateHandleOp : Hip_Op<"create_handle", []> {
   let summary = "Create a HIP runtime handle";
@@ -106,181 +111,181 @@ def Hip_HipblasltGraphOp : Hip_Op<"hipblaslt.graph", [SingleBlock, NoTerminator]
 
 // ===== hipBLASLt ops =========================================================
 
-def Hip_HipblasltMatmulOp : Hip_Op<"hipblaslt.matmul", []> {
+def Hip_HipblasltMatmulOp : Hip_Op<"hipblaslt.matmul",
+    [DeclareOpInterfaceMethods<DestinationStyleOpInterface>,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Matrix multiply C = A @ B via hipBLASLt";
   let arguments = (ins
     Hip_HandleType:$handle,
-    AnyMemRef:$A,
-    AnyMemRef:$B,
-    AnyMemRef:$C
+    Hip_TensorOrMemRef:$A,
+    Hip_TensorOrMemRef:$B,
+    Hip_TensorOrMemRef:$C
   );
-  let assemblyFormat = [{
-    `(` $handle `)`
-    `ins` `(` $A `,` $B `:` type($A) `,` type($B) `)`
-    `outs` `(` $C `:` type($C) `)` attr-dict
-  }];
+  let results = (outs Optional<AnyRankedTensor>:$result);
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
 // ===== MIOpen ops ============================================================
 
-def Hip_MiopenRmsNormOp : Hip_Op<"miopen.rms_norm", []> {
+def Hip_MiopenRmsNormOp : Hip_Op<"miopen.rms_norm",
+    [DeclareOpInterfaceMethods<DestinationStyleOpInterface>,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "RMS normalization via miopenT5LayerNormForward";
   let arguments = (ins
     Hip_HandleType:$handle,
-    AnyMemRef:$input,
-    AnyMemRef:$weight,
-    AnyMemRef:$output
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$weight,
+    Hip_TensorOrMemRef:$output
   );
-  let assemblyFormat = [{
-    `(` $handle `)`
-    `ins` `(` $input `,` $weight `:` type($input) `,` type($weight) `)`
-    `outs` `(` $output `:` type($output) `)` attr-dict
-  }];
+  let results = (outs Optional<AnyRankedTensor>:$result);
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
-def Hip_MiopenSkipRmsNormOp : Hip_Op<"miopen.skip_rms_norm", []> {
+def Hip_MiopenSkipRmsNormOp : Hip_Op<"miopen.skip_rms_norm",
+    [DeclareOpInterfaceMethods<DestinationStyleOpInterface>,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Fused Add + RMS normalization via miopenAddLayerNormForward (T5 mode)";
   let arguments = (ins
     Hip_HandleType:$handle,
-    AnyMemRef:$x,
-    AnyMemRef:$skip,
-    AnyMemRef:$weight,
-    AnyMemRef:$output,
-    AnyMemRef:$residual
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$skip,
+    Hip_TensorOrMemRef:$weight,
+    Hip_TensorOrMemRef:$output,
+    Hip_TensorOrMemRef:$residual
   );
-  let assemblyFormat = [{
-    `(` $handle `)`
-    `ins` `(` $x `,` $skip `,` $weight `:` type($x) `,` type($skip) `,` type($weight) `)`
-    `outs` `(` $output `,` $residual `:` type($output) `,` type($residual) `)` attr-dict
-  }];
+  let results = (outs Variadic<AnyRankedTensor>:$results);
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
-def Hip_MiopenRopeOp : Hip_Op<"miopen.rope", []> {
+def Hip_MiopenRopeOp : Hip_Op<"miopen.rope",
+    [DeclareOpInterfaceMethods<DestinationStyleOpInterface>,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Rotary positional embeddings (MIOpen experimental)";
   let arguments = (ins
     Hip_HandleType:$handle,
-    AnyMemRef:$q,
-    AnyMemRef:$k,
-    AnyMemRef:$cos_cache,
-    AnyMemRef:$sin_cache,
+    Hip_TensorOrMemRef:$q,
+    Hip_TensorOrMemRef:$k,
+    Hip_TensorOrMemRef:$cos_cache,
+    Hip_TensorOrMemRef:$sin_cache,
     Index:$start_pos
   );
-  let assemblyFormat = [{
-    `(` $handle `,` $start_pos `)`
-    `ins` `(` $cos_cache `,` $sin_cache `:` type($cos_cache) `,` type($sin_cache) `)`
-    `outs` `(` $q `,` $k `:` type($q) `,` type($k) `)` attr-dict
-  }];
+  let results = (outs Variadic<AnyRankedTensor>:$results);
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
-def Hip_MiopenAddOp : Hip_Op<"miopen.add", []> {
+def Hip_MiopenAddOp : Hip_Op<"miopen.add",
+    [DeclareOpInterfaceMethods<DestinationStyleOpInterface>,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Element-wise add via miopenOpTensor(miopenTensorOpAdd)";
   let arguments = (ins
     Hip_HandleType:$handle,
-    AnyMemRef:$A,
-    AnyMemRef:$B,
-    AnyMemRef:$C
+    Hip_TensorOrMemRef:$A,
+    Hip_TensorOrMemRef:$B,
+    Hip_TensorOrMemRef:$C
   );
-  let assemblyFormat = [{
-    `(` $handle `)`
-    `ins` `(` $A `,` $B `:` type($A) `,` type($B) `)`
-    `outs` `(` $C `:` type($C) `)` attr-dict
-  }];
+  let results = (outs Optional<AnyRankedTensor>:$result);
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
-def Hip_MiopenMulOp : Hip_Op<"miopen.mul", []> {
+def Hip_MiopenMulOp : Hip_Op<"miopen.mul",
+    [DeclareOpInterfaceMethods<DestinationStyleOpInterface>,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Element-wise multiply via miopenOpTensor(miopenTensorOpMul)";
   let arguments = (ins
     Hip_HandleType:$handle,
-    AnyMemRef:$A,
-    AnyMemRef:$B,
-    AnyMemRef:$C
+    Hip_TensorOrMemRef:$A,
+    Hip_TensorOrMemRef:$B,
+    Hip_TensorOrMemRef:$C
   );
-  let assemblyFormat = [{
-    `(` $handle `)`
-    `ins` `(` $A `,` $B `:` type($A) `,` type($B) `)`
-    `outs` `(` $C `:` type($C) `)` attr-dict
-  }];
+  let results = (outs Optional<AnyRankedTensor>:$result);
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
-def Hip_MiopenSoftmaxOp : Hip_Op<"miopen.softmax", []> {
+def Hip_MiopenSoftmaxOp : Hip_Op<"miopen.softmax",
+    [DeclareOpInterfaceMethods<DestinationStyleOpInterface>,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Softmax via miopenSoftmaxForward_V2 (row-wise, last dim)";
   let arguments = (ins
     Hip_HandleType:$handle,
-    AnyMemRef:$input,
-    AnyMemRef:$output
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output
   );
-  let assemblyFormat = [{
-    `(` $handle `)`
-    `ins` `(` $input `:` type($input) `)`
-    `outs` `(` $output `:` type($output) `)` attr-dict
-  }];
+  let results = (outs Optional<AnyRankedTensor>:$result);
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
 // ===== Custom HIP kernel ops (no library equivalent) =========================
 
-def Hip_TransposeOp : Hip_Op<"transpose", []> {
+def Hip_TransposeOp : Hip_Op<"transpose",
+    [DeclareOpInterfaceMethods<DestinationStyleOpInterface>,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "N-D transpose swapping two specified dimensions";
   let arguments = (ins
     Hip_HandleType:$handle,
     Index:$dim0,
     Index:$dim1,
-    AnyMemRef:$input,
-    AnyMemRef:$output
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output
   );
-  let assemblyFormat = [{
-    `(` $handle `,` $dim0 `,` $dim1 `)`
-    `ins` `(` $input `:` type($input) `)`
-    `outs` `(` $output `:` type($output) `)` attr-dict
-  }];
+  let results = (outs Optional<AnyRankedTensor>:$result);
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
-def Hip_GatherOp : Hip_Op<"gather", []> {
+def Hip_GatherOp : Hip_Op<"gather",
+    [DeclareOpInterfaceMethods<DestinationStyleOpInterface>,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Embedding table lookup";
   let arguments = (ins
     Hip_HandleType:$handle,
-    AnyMemRef:$indices,
-    AnyMemRef:$table,
-    AnyMemRef:$output
+    Hip_TensorOrMemRef:$indices,
+    Hip_TensorOrMemRef:$table,
+    Hip_TensorOrMemRef:$output
   );
-  let assemblyFormat = [{
-    `(` $handle `)`
-    `ins` `(` $indices `,` $table `:` type($indices) `,` type($table) `)`
-    `outs` `(` $output `:` type($output) `)` attr-dict
-  }];
+  let results = (outs Optional<AnyRankedTensor>:$result);
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
-def Hip_SiluOp : Hip_Op<"silu", []> {
+def Hip_SiluOp : Hip_Op<"silu",
+    [DeclareOpInterfaceMethods<DestinationStyleOpInterface>,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "SiLU activation: output = input * sigmoid(input)";
   let arguments = (ins
     Hip_HandleType:$handle,
-    AnyMemRef:$input,
-    AnyMemRef:$output
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output
   );
-  let assemblyFormat = [{
-    `(` $handle `)`
-    `ins` `(` $input `:` type($input) `)`
-    `outs` `(` $output `:` type($output) `)` attr-dict
-  }];
+  let results = (outs Optional<AnyRankedTensor>:$result);
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
-def Hip_GqaOp : Hip_Op<"gqa", []> {
+def Hip_GqaOp : Hip_Op<"gqa",
+    [DeclareOpInterfaceMethods<DestinationStyleOpInterface>,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Grouped query attention";
   let arguments = (ins
     Hip_HandleType:$handle,
-    AnyMemRef:$q,
-    AnyMemRef:$k,
-    AnyMemRef:$v,
-    AnyMemRef:$kv_cache,
-    AnyMemRef:$output,
+    Hip_TensorOrMemRef:$q,
+    Hip_TensorOrMemRef:$k,
+    Hip_TensorOrMemRef:$v,
+    Hip_TensorOrMemRef:$kv_cache,
+    Hip_TensorOrMemRef:$output,
     Index:$layer,
     Index:$start_pos,
     Index:$seq_len
   );
-  let assemblyFormat = [{
-    `(` $handle `,` $layer `,` $start_pos `,` $seq_len `)`
-    `ins` `(` $q `,` $k `,` $v `:` type($q) `,` type($k) `,` type($v) `)`
-    `outs` `(` $kv_cache `,` $output `:` type($kv_cache) `,` type($output) `)` attr-dict
-  }];
+  let results = (outs Variadic<AnyRankedTensor>:$results);
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
 #endif // HIP_OPS
