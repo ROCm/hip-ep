@@ -27,17 +27,17 @@
 #include <hip/hip_runtime_api.h>
 #include <miopen/miopen.h>
 
-#define MIOPEN_CHECK(call)                                                     \
-  do {                                                                         \
-    miopenStatus_t status = (call);                                            \
-    if (status != miopenStatusSuccess) {                                       \
-      fprintf(stderr, "MIOpen error at %s:%d (status=%d)\n", __FILE__,         \
-              __LINE__, status);                                               \
-      goto cleanup;                                                            \
-    }                                                                          \
+#define MIOPEN_CHECK(call)                                             \
+  do {                                                                 \
+    miopenStatus_t status = (call);                                    \
+    if (status != miopenStatusSuccess) {                               \
+      fprintf(stderr, "MIOpen error at %s:%d (status=%d)\n", __FILE__, \
+              __LINE__, status);                                       \
+      goto cleanup;                                                    \
+    }                                                                  \
   } while (0)
 
-extern "C" void hip_miopen_softmax(void * /*handle*/, void *input, void *output,
+extern "C" void hip_miopen_softmax(void* /*handle*/, void* input, void* output,
                                    int64_t N, int64_t D) {
   fprintf(stderr, "[miopen.softmax] softmax [%lld, %lld] over last dim\n",
           (long long)N, (long long)D);

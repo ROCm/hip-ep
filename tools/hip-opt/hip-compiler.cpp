@@ -38,7 +38,7 @@
 
 #include <iostream>
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   if (argc < 3) {
     std::cerr << "Usage: " << argv[0] << " <input.mlir> -o <output.dll>\n";
     return 1;
@@ -115,7 +115,7 @@ int main(int argc, char **argv) {
   }
 
   // Mark all non-declaration functions as dllexport so they appear in the DLL
-  for (auto &func : *llvmModule) {
+  for (auto& func : *llvmModule) {
     if (!func.isDeclaration()) {
       func.setDLLStorageClass(llvm::GlobalValue::DLLExportStorageClass);
     }
@@ -173,7 +173,7 @@ int main(int argc, char **argv) {
   }
 
   std::string therockDist = "";
-  if (const char *env_p = std::getenv("THEROCK_DIST")) {
+  if (const char* env_p = std::getenv("THEROCK_DIST")) {
     therockDist = env_p;
   }
 
@@ -189,7 +189,7 @@ int main(int argc, char **argv) {
   linkArgs.push_back(objFilename);
 
   std::string exePath =
-      llvm::sys::fs::getMainExecutable(argv[0], (void *)(intptr_t)main);
+      llvm::sys::fs::getMainExecutable(argv[0], (void*)(intptr_t)main);
   llvm::StringRef exeDir = llvm::sys::path::parent_path(exePath);
 
   llvm::SmallString<128> runtimeLibPath(exeDir);

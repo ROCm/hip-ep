@@ -19,12 +19,12 @@
 
 // Both args are 3D memref<?x?x?xf32,1> = 9 args each
 extern "C" __declspec(dllimport) void two_softmaxes(
-    float *A_a, float *A_al, int64_t A_o, int64_t A_s0, int64_t A_s1,
-    int64_t A_s2, int64_t A_st0, int64_t A_st1, int64_t A_st2, float *B_a,
-    float *B_al, int64_t B_o, int64_t B_s0, int64_t B_s1, int64_t B_s2,
+    float* A_a, float* A_al, int64_t A_o, int64_t A_s0, int64_t A_s1,
+    int64_t A_s2, int64_t A_st0, int64_t A_st1, int64_t A_st2, float* B_a,
+    float* B_al, int64_t B_o, int64_t B_s0, int64_t B_s1, int64_t B_s2,
     int64_t B_st0, int64_t B_st1, int64_t B_st2);
 
-static void cpu_softmax(const float *in, float *out, int64_t rows,
+static void cpu_softmax(const float* in, float* out, int64_t rows,
                         int64_t cols) {
   for (int64_t n = 0; n < rows; ++n) {
     float mx = in[n * cols];
@@ -40,14 +40,14 @@ static void cpu_softmax(const float *in, float *out, int64_t rows,
   }
 }
 
-#define HIP_CHECK(call)                                                        \
-  do {                                                                         \
-    hipError_t e = (call);                                                     \
-    if (e != hipSuccess) {                                                     \
-      fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__,             \
-              hipGetErrorString(e));                                           \
-      exit(1);                                                                 \
-    }                                                                          \
+#define HIP_CHECK(call)                                            \
+  do {                                                             \
+    hipError_t e = (call);                                         \
+    if (e != hipSuccess) {                                         \
+      fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__, \
+              hipGetErrorString(e));                               \
+      exit(1);                                                     \
+    }                                                              \
   } while (0)
 
 int main() {

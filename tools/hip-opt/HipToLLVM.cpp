@@ -228,7 +228,7 @@ struct HipblasltMatmulOpLowering
     Type indexType = getIndexType();
 
     // (handle, A, B, C, rankA, rankB, batch, M, K, N)
-    SmallVector<Type> paramTypes = {ptrType,   ptrType,   ptrType,   ptrType,
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, ptrType,
                                     indexType, indexType, indexType, indexType,
                                     indexType, indexType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -289,7 +289,7 @@ struct MiopenRmsNormOpLowering
     Type ptrType = getPtrType();
     Type indexType = getIndexType();
 
-    SmallVector<Type> paramTypes = {ptrType, ptrType,   ptrType,
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType,
                                     ptrType, indexType, indexType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kMiopenRmsNorm, paramTypes, voidType);
@@ -495,7 +495,7 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
     Type indexType = getIndexType();
 
     // (handle, input, output, rank, dim0, dim1, s0, s1, s2)
-    SmallVector<Type> paramTypes = {ptrType,   ptrType,   ptrType,
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType,
                                     indexType, indexType, indexType,
                                     indexType, indexType, indexType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -603,8 +603,8 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     Type ptrType = getPtrType();
     Type indexType = getIndexType();
 
-    SmallVector<Type> paramTypes = {ptrType,   ptrType,   ptrType,
-                                    ptrType,   ptrType,   ptrType,
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType,
+                                    ptrType, ptrType, ptrType,
                                     indexType, indexType, indexType};
     FailureOr<LLVM::LLVMFuncOp> funcOp =
         LLVM::lookupOrCreateFn(rewriter, module, kHipGqa, paramTypes, voidType);

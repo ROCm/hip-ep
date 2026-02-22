@@ -20,9 +20,9 @@
 #include <hip/hip_runtime_api.h>
 #include <miopen/miopen.h>
 
-extern "C" void hip_miopen_skip_rms_norm(void * /*handle*/, void *x, void *skip,
-                                         void *weight, void *output,
-                                         void *residual) {
+extern "C" void hip_miopen_skip_rms_norm(void* /*handle*/, void* x, void* skip,
+                                         void* weight, void* output,
+                                         void* residual) {
   // Structural stub -- full implementation would call:
   //   miopenAddLayerNormForward(miopenHandle, MIOPEN_ELEMENTWISE_AFFINE_T5,
   //       xDesc, x, x2Desc, skip, weightDesc, weight, biasDesc, nullptr,

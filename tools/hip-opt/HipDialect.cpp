@@ -38,7 +38,7 @@ static bool isTensorMode(Value v) {
 
 /// Verify that all data operands (skipping handle and Index args) are
 /// uniformly tensor or memref, and that results match the mode.
-static LogicalResult verifyDpsComputeOp(Operation *op,
+static LogicalResult verifyDpsComputeOp(Operation* op,
                                         ArrayRef<Value> dataOperands,
                                         unsigned numInits) {
   if (dataOperands.empty())
@@ -70,14 +70,13 @@ static LogicalResult verifyDpsComputeOp(Operation *op,
 
 /// Emit memory effects for a DPS compute op: inputs read, inits write.
 static void emitDpsMemoryEffects(
-    Operation *op, ArrayRef<Value> inputs,
+    Operation* op, ArrayRef<Value> inputs,
     MutableOperandRange inits,
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>& effects) {
   if (inputs.empty() || !isa<MemRefType>(inputs.front().getType()))
     return;
   for (Value v : inputs) {
-    for (auto &operand : op->getOpOperands()) {
+    for (auto& operand : op->getOpOperands()) {
       if (operand.get() == v) {
         effects.emplace_back(MemoryEffects::Read::get(), &operand,
                              SideEffects::DefaultResource::get());
@@ -85,7 +84,7 @@ static void emitDpsMemoryEffects(
       }
     }
   }
-  for (auto &operand : inits) {
+  for (auto& operand : inits) {
     effects.emplace_back(MemoryEffects::Write::get(), &operand,
                          SideEffects::DefaultResource::get());
   }
@@ -107,9 +106,9 @@ static void emitDpsMemoryEffects(
 /// Parse a parenthesized comma-separated list of operands with types:
 ///   `(` ssa-use `,` ... `:` type `,` ... `)`
 static ParseResult
-parseOperandListWithTypes(OpAsmParser &parser,
-                          SmallVectorImpl<OpAsmParser::UnresolvedOperand> &ops,
-                          SmallVectorImpl<Type> &types) {
+parseOperandListWithTypes(OpAsmParser& parser,
+                          SmallVectorImpl<OpAsmParser::UnresolvedOperand>& ops,
+                          SmallVectorImpl<Type>& types) {
   if (parser.parseLParen())
     return failure();
   if (succeeded(parser.parseOptionalRParen()))
@@ -135,7 +134,7 @@ parseOperandListWithTypes(OpAsmParser &parser,
 }
 
 /// Print a parenthesized comma-separated list of operands with types.
-static void printOperandListWithTypes(OpAsmPrinter &p, ValueRange operands) {
+static void printOperandListWithTypes(OpAsmPrinter& p, ValueRange operands) {
   p << "(";
   llvm::interleaveComma(operands, p, [&](Value v) { p.printOperand(v); });
   p << " : ";
@@ -155,7 +154,7 @@ static void printOperandListWithTypes(OpAsmPrinter &p, ValueRange operands) {
 /// \p extraScalars operands between handle and ins (e.g. dim0, dim1 for
 ///                 transpose). They are parsed as `(` handle `,` scalar... `)`.
 static ParseResult
-parseSingleInitDpsOp(OpAsmParser &parser, OperationState &result,
+parseSingleInitDpsOp(OpAsmParser& parser, OperationState& result,
                      unsigned numIns, unsigned extraScalars = 0) {
   OpAsmParser::UnresolvedOperand handle;
   Type handleType;
@@ -178,7 +177,7 @@ parseSingleInitDpsOp(OpAsmParser &parser, OperationState &result,
   if (parser.resolveOperand(handle, handleType, result.operands))
     return failure();
   // Resolve scalars as index
-  for (auto &s : scalarOps)
+  for (auto& s : scalarOps)
     if (parser.resolveOperand(s, IndexType::get(parser.getContext()),
                               result.operands))
       return failure();
@@ -191,7 +190,8 @@ parseSingleInitDpsOp(OpAsmParser &parser, OperationState &result,
     return failure();
   if (insOps.size() != numIns)
     return parser.emitError(parser.getCurrentLocation(),
-                            "expected ") << numIns << " ins operand(s)";
+                            "expected ")
+           << numIns << " ins operand(s)";
   for (unsigned i = 0; i < insOps.size(); ++i)
     if (parser.resolveOperand(insOps[i], insTypes[i], result.operands))
       return failure();
@@ -224,7 +224,7 @@ parseSingleInitDpsOp(OpAsmParser &parser, OperationState &result,
 }
 
 /// Print a single-init DPS compute op.
-static void printSingleInitDpsOp(OpAsmPrinter &p, Operation *op,
+static void printSingleInitDpsOp(OpAsmPrinter& p, Operation* op,
                                  Value handle, ValueRange scalarArgs,
                                  ValueRange ins, ValueRange outs) {
   p << "(";
@@ -253,8 +253,7 @@ MutableOperandRange HipblasltMatmulOp::getDpsInitsMutable() {
 }
 
 void HipblasltMatmulOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>& effects) {
   emitDpsMemoryEffects(*this, {getA(), getB()}, getCMutable(), effects);
 }
 
@@ -262,12 +261,12 @@ LogicalResult HipblasltMatmulOp::verify() {
   return verifyDpsComputeOp(*this, {getA(), getB(), getC()}, /*numInits=*/1);
 }
 
-ParseResult HipblasltMatmulOp::parse(OpAsmParser &parser,
-                                     OperationState &result) {
+ParseResult HipblasltMatmulOp::parse(OpAsmParser& parser,
+                                     OperationState& result) {
   return parseSingleInitDpsOp(parser, result, /*numIns=*/2);
 }
 
-void HipblasltMatmulOp::print(OpAsmPrinter &p) {
+void HipblasltMatmulOp::print(OpAsmPrinter& p) {
   printSingleInitDpsOp(p, *this, getHandle(), /*scalarArgs=*/{},
                        {getA(), getB()}, {getC()});
 }
@@ -281,8 +280,7 @@ MutableOperandRange MiopenRmsNormOp::getDpsInitsMutable() {
 }
 
 void MiopenRmsNormOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>& effects) {
   emitDpsMemoryEffects(*this, {getInput(), getWeight()}, getOutputMutable(),
                        effects);
 }
@@ -292,12 +290,12 @@ LogicalResult MiopenRmsNormOp::verify() {
                             /*numInits=*/1);
 }
 
-ParseResult MiopenRmsNormOp::parse(OpAsmParser &parser,
-                                   OperationState &result) {
+ParseResult MiopenRmsNormOp::parse(OpAsmParser& parser,
+                                   OperationState& result) {
   return parseSingleInitDpsOp(parser, result, /*numIns=*/2);
 }
 
-void MiopenRmsNormOp::print(OpAsmPrinter &p) {
+void MiopenRmsNormOp::print(OpAsmPrinter& p) {
   printSingleInitDpsOp(p, *this, getHandle(), /*scalarArgs=*/{},
                        {getInput(), getWeight()}, {getOutput()});
 }
@@ -312,8 +310,7 @@ MutableOperandRange MiopenSkipRmsNormOp::getDpsInitsMutable() {
 }
 
 void MiopenSkipRmsNormOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>& effects) {
   emitDpsMemoryEffects(*this, {getX(), getSkip(), getWeight()},
                        getDpsInitsMutable(), effects);
 }
@@ -325,12 +322,12 @@ LogicalResult MiopenSkipRmsNormOp::verify() {
       /*numInits=*/2);
 }
 
-ParseResult MiopenSkipRmsNormOp::parse(OpAsmParser &parser,
-                                       OperationState &result) {
+ParseResult MiopenSkipRmsNormOp::parse(OpAsmParser& parser,
+                                       OperationState& result) {
   return parseSingleInitDpsOp(parser, result, /*numIns=*/3);
 }
 
-void MiopenSkipRmsNormOp::print(OpAsmPrinter &p) {
+void MiopenSkipRmsNormOp::print(OpAsmPrinter& p) {
   printSingleInitDpsOp(p, *this, getHandle(), /*scalarArgs=*/{},
                        {getX(), getSkip(), getWeight()},
                        {getOutput(), getResidual()});
@@ -347,8 +344,7 @@ MutableOperandRange MiopenRopeOp::getDpsInitsMutable() {
 }
 
 void MiopenRopeOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>& effects) {
   emitDpsMemoryEffects(*this, {getCosCache(), getSinCache()},
                        getDpsInitsMutable(), effects);
 }
@@ -359,14 +355,14 @@ LogicalResult MiopenRopeOp::verify() {
       /*numInits=*/2);
 }
 
-ParseResult MiopenRopeOp::parse(OpAsmParser &parser,
-                                OperationState &result) {
+ParseResult MiopenRopeOp::parse(OpAsmParser& parser,
+                                OperationState& result) {
   // `(` handle `,` start_pos `)` `ins` ... `outs` ...
   return parseSingleInitDpsOp(parser, result, /*numIns=*/2,
                               /*extraScalars=*/1);
 }
 
-void MiopenRopeOp::print(OpAsmPrinter &p) {
+void MiopenRopeOp::print(OpAsmPrinter& p) {
   printSingleInitDpsOp(p, *this, getHandle(), {getStartPos()},
                        {getCosCache(), getSinCache()}, {getQ(), getK()});
 }
@@ -380,8 +376,7 @@ MutableOperandRange MiopenAddOp::getDpsInitsMutable() {
 }
 
 void MiopenAddOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>& effects) {
   emitDpsMemoryEffects(*this, {getA(), getB()}, getCMutable(), effects);
 }
 
@@ -389,11 +384,11 @@ LogicalResult MiopenAddOp::verify() {
   return verifyDpsComputeOp(*this, {getA(), getB(), getC()}, /*numInits=*/1);
 }
 
-ParseResult MiopenAddOp::parse(OpAsmParser &parser, OperationState &result) {
+ParseResult MiopenAddOp::parse(OpAsmParser& parser, OperationState& result) {
   return parseSingleInitDpsOp(parser, result, /*numIns=*/2);
 }
 
-void MiopenAddOp::print(OpAsmPrinter &p) {
+void MiopenAddOp::print(OpAsmPrinter& p) {
   printSingleInitDpsOp(p, *this, getHandle(), /*scalarArgs=*/{},
                        {getA(), getB()}, {getC()});
 }
@@ -407,8 +402,7 @@ MutableOperandRange MiopenMulOp::getDpsInitsMutable() {
 }
 
 void MiopenMulOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>& effects) {
   emitDpsMemoryEffects(*this, {getA(), getB()}, getCMutable(), effects);
 }
 
@@ -416,11 +410,11 @@ LogicalResult MiopenMulOp::verify() {
   return verifyDpsComputeOp(*this, {getA(), getB(), getC()}, /*numInits=*/1);
 }
 
-ParseResult MiopenMulOp::parse(OpAsmParser &parser, OperationState &result) {
+ParseResult MiopenMulOp::parse(OpAsmParser& parser, OperationState& result) {
   return parseSingleInitDpsOp(parser, result, /*numIns=*/2);
 }
 
-void MiopenMulOp::print(OpAsmPrinter &p) {
+void MiopenMulOp::print(OpAsmPrinter& p) {
   printSingleInitDpsOp(p, *this, getHandle(), /*scalarArgs=*/{},
                        {getA(), getB()}, {getC()});
 }
@@ -434,8 +428,7 @@ MutableOperandRange MiopenSoftmaxOp::getDpsInitsMutable() {
 }
 
 void MiopenSoftmaxOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>& effects) {
   emitDpsMemoryEffects(*this, {getInput()}, getOutputMutable(), effects);
 }
 
@@ -443,12 +436,12 @@ LogicalResult MiopenSoftmaxOp::verify() {
   return verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1);
 }
 
-ParseResult MiopenSoftmaxOp::parse(OpAsmParser &parser,
-                                   OperationState &result) {
+ParseResult MiopenSoftmaxOp::parse(OpAsmParser& parser,
+                                   OperationState& result) {
   return parseSingleInitDpsOp(parser, result, /*numIns=*/1);
 }
 
-void MiopenSoftmaxOp::print(OpAsmPrinter &p) {
+void MiopenSoftmaxOp::print(OpAsmPrinter& p) {
   printSingleInitDpsOp(p, *this, getHandle(), /*scalarArgs=*/{},
                        {getInput()}, {getOutput()});
 }
@@ -462,8 +455,7 @@ MutableOperandRange TransposeOp::getDpsInitsMutable() {
 }
 
 void TransposeOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>& effects) {
   emitDpsMemoryEffects(*this, {getInput()}, getOutputMutable(), effects);
 }
 
@@ -471,12 +463,12 @@ LogicalResult TransposeOp::verify() {
   return verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1);
 }
 
-ParseResult TransposeOp::parse(OpAsmParser &parser, OperationState &result) {
+ParseResult TransposeOp::parse(OpAsmParser& parser, OperationState& result) {
   return parseSingleInitDpsOp(parser, result, /*numIns=*/1,
                               /*extraScalars=*/2);
 }
 
-void TransposeOp::print(OpAsmPrinter &p) {
+void TransposeOp::print(OpAsmPrinter& p) {
   printSingleInitDpsOp(p, *this, getHandle(), {getDim0(), getDim1()},
                        {getInput()}, {getOutput()});
 }
@@ -490,8 +482,7 @@ MutableOperandRange GatherOp::getDpsInitsMutable() {
 }
 
 void GatherOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>& effects) {
   emitDpsMemoryEffects(*this, {getIndices(), getTable()}, getOutputMutable(),
                        effects);
 }
@@ -501,11 +492,11 @@ LogicalResult GatherOp::verify() {
                             /*numInits=*/1);
 }
 
-ParseResult GatherOp::parse(OpAsmParser &parser, OperationState &result) {
+ParseResult GatherOp::parse(OpAsmParser& parser, OperationState& result) {
   return parseSingleInitDpsOp(parser, result, /*numIns=*/2);
 }
 
-void GatherOp::print(OpAsmPrinter &p) {
+void GatherOp::print(OpAsmPrinter& p) {
   printSingleInitDpsOp(p, *this, getHandle(), /*scalarArgs=*/{},
                        {getIndices(), getTable()}, {getOutput()});
 }
@@ -519,8 +510,7 @@ MutableOperandRange SiluOp::getDpsInitsMutable() {
 }
 
 void SiluOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>& effects) {
   emitDpsMemoryEffects(*this, {getInput()}, getOutputMutable(), effects);
 }
 
@@ -528,11 +518,11 @@ LogicalResult SiluOp::verify() {
   return verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1);
 }
 
-ParseResult SiluOp::parse(OpAsmParser &parser, OperationState &result) {
+ParseResult SiluOp::parse(OpAsmParser& parser, OperationState& result) {
   return parseSingleInitDpsOp(parser, result, /*numIns=*/1);
 }
 
-void SiluOp::print(OpAsmPrinter &p) {
+void SiluOp::print(OpAsmPrinter& p) {
   printSingleInitDpsOp(p, *this, getHandle(), /*scalarArgs=*/{},
                        {getInput()}, {getOutput()});
 }
@@ -550,8 +540,7 @@ MutableOperandRange GqaOp::getDpsInitsMutable() {
 }
 
 void GqaOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>& effects) {
   emitDpsMemoryEffects(*this, {getQ(), getK(), getV()}, getDpsInitsMutable(),
                        effects);
 }
@@ -562,13 +551,13 @@ LogicalResult GqaOp::verify() {
       /*numInits=*/2);
 }
 
-ParseResult GqaOp::parse(OpAsmParser &parser, OperationState &result) {
+ParseResult GqaOp::parse(OpAsmParser& parser, OperationState& result) {
   // `(` handle `,` layer `,` start_pos `,` seq_len `)`
   return parseSingleInitDpsOp(parser, result, /*numIns=*/3,
                               /*extraScalars=*/3);
 }
 
-void GqaOp::print(OpAsmPrinter &p) {
+void GqaOp::print(OpAsmPrinter& p) {
   printSingleInitDpsOp(p, *this, getHandle(),
                        {getLayer(), getStartPos(), getSeqLen()},
                        {getQ(), getK(), getV()},

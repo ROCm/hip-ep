@@ -25,17 +25,17 @@
 #include <hip/hip_runtime_api.h>
 #include <miopen/miopen.h>
 
-#define MIOPEN_CHECK(call)                                                     \
-  do {                                                                         \
-    miopenStatus_t status = (call);                                            \
-    if (status != miopenStatusSuccess) {                                       \
-      fprintf(stderr, "MIOpen error at %s:%d (status=%d)\n", __FILE__,         \
-              __LINE__, status);                                               \
-      return;                                                                  \
-    }                                                                          \
+#define MIOPEN_CHECK(call)                                             \
+  do {                                                                 \
+    miopenStatus_t status = (call);                                    \
+    if (status != miopenStatusSuccess) {                               \
+      fprintf(stderr, "MIOpen error at %s:%d (status=%d)\n", __FILE__, \
+              __LINE__, status);                                       \
+      return;                                                          \
+    }                                                                  \
   } while (0)
 
-extern "C" void hip_miopen_mul(void * /*handle*/, void *A, void *B, void *C,
+extern "C" void hip_miopen_mul(void* /*handle*/, void* A, void* B, void* C,
                                int64_t numElements) {
   fprintf(stderr, "[miopen.mul] C = A * B  (%lld elements)\n",
           (long long)numElements);

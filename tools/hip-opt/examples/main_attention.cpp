@@ -20,18 +20,18 @@
 
 // X[B,S,D]=9, Wq[D,D]=7, Wk[D,D]=7, Wv[D,D]=7, scale[B,S,S]=9, out[B,S,D]=9
 extern "C" __declspec(dllimport) void attention(
-    float *X_a, float *X_al, int64_t X_o, int64_t X_s0, int64_t X_s1,
-    int64_t X_s2, int64_t X_st0, int64_t X_st1, int64_t X_st2, float *Wq_a,
-    float *Wq_al, int64_t Wq_o, int64_t Wq_s0, int64_t Wq_s1, int64_t Wq_st0,
-    int64_t Wq_st1, float *Wk_a, float *Wk_al, int64_t Wk_o, int64_t Wk_s0,
-    int64_t Wk_s1, int64_t Wk_st0, int64_t Wk_st1, float *Wv_a, float *Wv_al,
+    float* X_a, float* X_al, int64_t X_o, int64_t X_s0, int64_t X_s1,
+    int64_t X_s2, int64_t X_st0, int64_t X_st1, int64_t X_st2, float* Wq_a,
+    float* Wq_al, int64_t Wq_o, int64_t Wq_s0, int64_t Wq_s1, int64_t Wq_st0,
+    int64_t Wq_st1, float* Wk_a, float* Wk_al, int64_t Wk_o, int64_t Wk_s0,
+    int64_t Wk_s1, int64_t Wk_st0, int64_t Wk_st1, float* Wv_a, float* Wv_al,
     int64_t Wv_o, int64_t Wv_s0, int64_t Wv_s1, int64_t Wv_st0, int64_t Wv_st1,
-    float *sc_a, float *sc_al, int64_t sc_o, int64_t sc_s0, int64_t sc_s1,
-    int64_t sc_s2, int64_t sc_st0, int64_t sc_st1, int64_t sc_st2, float *out_a,
-    float *out_al, int64_t out_o, int64_t out_s0, int64_t out_s1,
+    float* sc_a, float* sc_al, int64_t sc_o, int64_t sc_s0, int64_t sc_s1,
+    int64_t sc_s2, int64_t sc_st0, int64_t sc_st1, int64_t sc_st2, float* out_a,
+    float* out_al, int64_t out_o, int64_t out_s0, int64_t out_s1,
     int64_t out_s2, int64_t out_st0, int64_t out_st1, int64_t out_st2);
 
-static void cpu_matmul(const float *A, const float *B, float *C, int64_t M,
+static void cpu_matmul(const float* A, const float* B, float* C, int64_t M,
                        int64_t K, int64_t N) {
   for (int64_t i = 0; i < M; ++i)
     for (int64_t j = 0; j < N; ++j) {
@@ -42,7 +42,7 @@ static void cpu_matmul(const float *A, const float *B, float *C, int64_t M,
     }
 }
 
-static void cpu_softmax(const float *in, float *out, int64_t rows,
+static void cpu_softmax(const float* in, float* out, int64_t rows,
                         int64_t cols) {
   for (int64_t n = 0; n < rows; ++n) {
     float mx = in[n * cols];
@@ -58,14 +58,14 @@ static void cpu_softmax(const float *in, float *out, int64_t rows,
   }
 }
 
-#define HIP_CHECK(call)                                                        \
-  do {                                                                         \
-    hipError_t e = (call);                                                     \
-    if (e != hipSuccess) {                                                     \
-      fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__,             \
-              hipGetErrorString(e));                                           \
-      exit(1);                                                                 \
-    }                                                                          \
+#define HIP_CHECK(call)                                            \
+  do {                                                             \
+    hipError_t e = (call);                                         \
+    if (e != hipSuccess) {                                         \
+      fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__, \
+              hipGetErrorString(e));                               \
+      exit(1);                                                     \
+    }                                                              \
   } while (0)
 
 int main() {

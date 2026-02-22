@@ -28,18 +28,18 @@
 #include <hip/hip_runtime_api.h>
 #include <miopen/miopen.h>
 
-#define MIOPEN_CHECK(call)                                                     \
-  do {                                                                         \
-    miopenStatus_t status = (call);                                            \
-    if (status != miopenStatusSuccess) {                                       \
-      fprintf(stderr, "MIOpen error at %s:%d (status=%d)\n", __FILE__,         \
-              __LINE__, status);                                               \
-      goto cleanup;                                                            \
-    }                                                                          \
+#define MIOPEN_CHECK(call)                                             \
+  do {                                                                 \
+    miopenStatus_t status = (call);                                    \
+    if (status != miopenStatusSuccess) {                               \
+      fprintf(stderr, "MIOpen error at %s:%d (status=%d)\n", __FILE__, \
+              __LINE__, status);                                       \
+      goto cleanup;                                                    \
+    }                                                                  \
   } while (0)
 
-extern "C" void hip_miopen_rms_norm(void * /*handle*/, void *input,
-                                    void *weight, void *output, int64_t N,
+extern "C" void hip_miopen_rms_norm(void* /*handle*/, void* input,
+                                    void* weight, void* output, int64_t N,
                                     int64_t D) {
   fprintf(
       stderr,
@@ -49,7 +49,7 @@ extern "C" void hip_miopen_rms_norm(void * /*handle*/, void *input,
   miopenHandle_t handle = nullptr;
   miopenTensorDescriptor_t inputDesc = nullptr, weightDesc = nullptr;
   miopenTensorDescriptor_t outputDesc = nullptr, rstdDesc = nullptr;
-  void *rstd = nullptr;
+  void* rstd = nullptr;
   float epsilon = 1e-5f;
 
   miopenCreate(&handle);
