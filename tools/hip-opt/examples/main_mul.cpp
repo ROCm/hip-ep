@@ -17,23 +17,23 @@
 #include <vector>
 
 extern "C" __declspec(dllimport) void two_muls(
-    float *A_a, float *A_al, int64_t A_o, int64_t A_s0, int64_t A_s1,
-    int64_t A_s2, int64_t A_st0, int64_t A_st1, int64_t A_st2, float *B_a,
-    float *B_al, int64_t B_o, int64_t B_s0, int64_t B_s1, int64_t B_s2,
-    int64_t B_st0, int64_t B_st1, int64_t B_st2, float *C_a, float *C_al,
+    float* A_a, float* A_al, int64_t A_o, int64_t A_s0, int64_t A_s1,
+    int64_t A_s2, int64_t A_st0, int64_t A_st1, int64_t A_st2, float* B_a,
+    float* B_al, int64_t B_o, int64_t B_s0, int64_t B_s1, int64_t B_s2,
+    int64_t B_st0, int64_t B_st1, int64_t B_st2, float* C_a, float* C_al,
     int64_t C_o, int64_t C_s0, int64_t C_s1, int64_t C_s2, int64_t C_st0,
-    int64_t C_st1, int64_t C_st2, float *D_a, float *D_al, int64_t D_o,
+    int64_t C_st1, int64_t C_st2, float* D_a, float* D_al, int64_t D_o,
     int64_t D_s0, int64_t D_s1, int64_t D_s2, int64_t D_st0, int64_t D_st1,
     int64_t D_st2);
 
-#define HIP_CHECK(call)                                                        \
-  do {                                                                         \
-    hipError_t e = (call);                                                     \
-    if (e != hipSuccess) {                                                     \
-      fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__,             \
-              hipGetErrorString(e));                                           \
-      exit(1);                                                                 \
-    }                                                                          \
+#define HIP_CHECK(call)                                            \
+  do {                                                             \
+    hipError_t e = (call);                                         \
+    if (e != hipSuccess) {                                         \
+      fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__, \
+              hipGetErrorString(e));                               \
+      exit(1);                                                     \
+    }                                                              \
   } while (0)
 
 int main() {

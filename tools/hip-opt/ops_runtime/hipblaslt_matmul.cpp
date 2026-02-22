@@ -23,18 +23,18 @@
 #include <cstdint>
 #include <cstdio>
 
-#define HIPBLASLT_CHECK(call)                                                  \
-  do {                                                                         \
-    hipblasStatus_t status = (call);                                           \
-    if (status != HIPBLAS_STATUS_SUCCESS) {                                    \
-      fprintf(stderr, "hipBLAS-LT error at %s:%d (status=%d)\n", __FILE__,     \
-              __LINE__, status);                                               \
-      return;                                                                  \
-    }                                                                          \
+#define HIPBLASLT_CHECK(call)                                              \
+  do {                                                                     \
+    hipblasStatus_t status = (call);                                       \
+    if (status != HIPBLAS_STATUS_SUCCESS) {                                \
+      fprintf(stderr, "hipBLAS-LT error at %s:%d (status=%d)\n", __FILE__, \
+              __LINE__, status);                                           \
+      return;                                                              \
+    }                                                                      \
   } while (0)
 
-extern "C" void hip_hipblaslt_matmul(void * /*handle*/, void *A, void *B,
-                                     void *C, int64_t rankA, int64_t rankB,
+extern "C" void hip_hipblaslt_matmul(void* /*handle*/, void* A, void* B,
+                                     void* C, int64_t rankA, int64_t rankB,
                                      int64_t batch, int64_t M, int64_t K,
                                      int64_t N) {
   fprintf(stderr,
@@ -52,8 +52,8 @@ extern "C" void hip_hipblaslt_matmul(void * /*handle*/, void *A, void *B,
   // blas_A = B (row-major), blas_B = A (row-major) -- swapped for col-major
   // trick
   int64_t stride_blas_a =
-      (rankB < rankA) ? 0 : K * N; // B broadcast if lower rank
-  int64_t stride_blas_b = M * K;   // A always has batch stride
+      (rankB < rankA) ? 0 : K * N;  // B broadcast if lower rank
+  int64_t stride_blas_b = M * K;    // A always has batch stride
   int64_t stride_c = M * N;
 
   hipblasLtHandle_t handle = nullptr;
@@ -114,7 +114,7 @@ extern "C" void hip_hipblaslt_matmul(void * /*handle*/, void *A, void *B,
   HIPBLASLT_CHECK(hipblasLtMatmulAlgoGetHeuristic(handle, desc, la, lb, lc, ld,
                                                   pref, 1, &result, &returned));
 
-  void *ws = nullptr;
+  void* ws = nullptr;
   if (returned > 0 && result.workspaceSize > 0)
     hipMalloc(&ws, result.workspaceSize);
 

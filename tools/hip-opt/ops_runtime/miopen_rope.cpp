@@ -21,8 +21,8 @@
 #include <cstdio>
 #include <hip/hip_runtime_api.h>
 
-extern "C" void hip_miopen_rope(void * /*handle*/, void *q, void *k,
-                                void *cos_cache, void *sin_cache,
+extern "C" void hip_miopen_rope(void* /*handle*/, void* q, void* k,
+                                void* cos_cache, void* sin_cache,
                                 int64_t start_pos) {
   fprintf(stderr,
           "[hip_miopen_rope] called (q=%p, k=%p, cos=%p, sin=%p, pos=%lld)\n",

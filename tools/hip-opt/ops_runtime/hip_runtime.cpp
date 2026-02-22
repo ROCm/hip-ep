@@ -26,17 +26,17 @@
 #include <cstdio>
 #include <hip/hip_runtime_api.h>
 
-extern "C" void *hipCreateHandle() {
+extern "C" void* hipCreateHandle() {
   fprintf(stderr, "[hip] create_handle\n");
   return nullptr;
 }
 
-extern "C" void hipDestroyHandle(void *) {
+extern "C" void hipDestroyHandle(void*) {
   fprintf(stderr, "[hip] destroy_handle\n");
 }
 
-extern "C" void *hip_device_malloc(int64_t sizeBytes) {
-  void *ptr = nullptr;
+extern "C" void* hip_device_malloc(int64_t sizeBytes) {
+  void* ptr = nullptr;
   hipError_t err = hipMalloc(&ptr, (size_t)sizeBytes);
   if (err != hipSuccess) {
     fprintf(stderr, "[hip] hipMalloc FAILED (%lld bytes): %s\n",
@@ -48,7 +48,7 @@ extern "C" void *hip_device_malloc(int64_t sizeBytes) {
   return ptr;
 }
 
-extern "C" void hip_device_free(void *ptr) {
+extern "C" void hip_device_free(void* ptr) {
   fprintf(stderr, "[hip] free %p\n", ptr);
   if (ptr)
     hipFree(ptr);
