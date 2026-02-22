@@ -32,24 +32,25 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
 # ---------------------------------------------------------------------------
-# onnx-mlir (Approach B): register the ONNX dialect for typed op matching.
+# onnx-mlir (optional): enables --convert-onnx-to-hip pass.
 # Set ONNX_MLIR_SRC and ONNX_MLIR_BUILD on the cmake command line, e.g.:
 #   -DONNX_MLIR_SRC=/path/to/onnx-mlir
 #   -DONNX_MLIR_BUILD=/path/to/onnx-mlir/build
+# Without these, hip-opt and hip-compiler still build with HIP dialect only.
 # ---------------------------------------------------------------------------
-if(NOT ONNX_MLIR_SRC)
-  message(FATAL_ERROR
-    "ONNX_MLIR_SRC is not set. Pass -DONNX_MLIR_SRC=/path/to/onnx-mlir on the cmake command line.")
+if(ONNX_MLIR_SRC)
+  set(ENABLE_ONNX_FRONTEND ON)
+  if(NOT ONNX_MLIR_BUILD)
+    set(ONNX_MLIR_BUILD "${ONNX_MLIR_SRC}/build")
+  endif()
+  message(STATUS "onnx-mlir source: ${ONNX_MLIR_SRC}")
+  message(STATUS "onnx-mlir build:  ${ONNX_MLIR_BUILD}")
+  include_directories(${ONNX_MLIR_SRC})
+  include_directories(${ONNX_MLIR_BUILD})
+else()
+  set(ENABLE_ONNX_FRONTEND OFF)
+  message(STATUS "onnx-mlir: DISABLED (ONNX_MLIR_SRC not set, --convert-onnx-to-hip unavailable)")
 endif()
-if(NOT ONNX_MLIR_BUILD)
-  set(ONNX_MLIR_BUILD "${ONNX_MLIR_SRC}/build")
-endif()
-
-message(STATUS "onnx-mlir source: ${ONNX_MLIR_SRC}")
-message(STATUS "onnx-mlir build:  ${ONNX_MLIR_BUILD}")
-
-include_directories(${ONNX_MLIR_SRC})
-include_directories(${ONNX_MLIR_BUILD})
 
 # Add LLVM TableGen function
 list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
@@ -82,18 +83,25 @@ mlir_tablegen(HipPasses.h.inc -gen-pass-decls -name Hip)
 add_public_tablegen_target(HipPassesIncGen)
 
 # Add the executable
-add_executable(hip-opt
+set(HIP_OPT_SRCS
   hip-opt.cpp
   HipDialect.cpp
   HipToLLVM.cpp
-  OnnxToHip.cpp
 )
+if(ENABLE_ONNX_FRONTEND)
+  list(APPEND HIP_OPT_SRCS OnnxToHip.cpp)
+endif()
+add_executable(hip-opt ${HIP_OPT_SRCS})
+if(ENABLE_ONNX_FRONTEND)
+  target_compile_definitions(hip-opt PRIVATE ENABLE_ONNX_FRONTEND)
+endif()
 
 # Add dependencies on TableGen targets
 add_dependencies(hip-opt
   HipDialectIncGen
   HipTypesIncGen
   HipOpsIncGen
+  HipPassesIncGen
 )
 
 # Add hip-compiler executable
@@ -194,38 +202,32 @@ target_link_libraries(hip-compiler PRIVATE
 )
 
 # ---------------------------------------------------------------------------
-# onnx-mlir libraries (Approach B: typed ONNX dialect matching)
-# Use linker group to handle circular deps between static archives.
-# NOTE: libOMCompilerOptions.a is deliberately excluded because it registers
-# an --allow-unregistered-dialect cl::opt that conflicts with MLIROptLib.
-# A stub for the required symbol (disableMemRefPrefetch) is in OnnxToHip.cpp.
+# onnx-mlir libraries (optional, only when ENABLE_ONNX_FRONTEND is ON)
 # ---------------------------------------------------------------------------
-set(ONNX_MLIR_LIB_DIR "${ONNX_MLIR_BUILD}/Release/lib")
-target_link_libraries(hip-opt PRIVATE
-  -Wl,--start-group
-  ${ONNX_MLIR_LIB_DIR}/libOMONNXOps.a
-  ${ONNX_MLIR_LIB_DIR}/libOMMlirDialects.a
-  ${ONNX_MLIR_LIB_DIR}/libOMMlirUtilities.a
-  ${ONNX_MLIR_LIB_DIR}/libOMSmallFPConversion.a
-  ${ONNX_MLIR_LIB_DIR}/libOMShapeHelperOpInterface.a
-  ${ONNX_MLIR_LIB_DIR}/libOMONNXElementsAttr.a
-  ${ONNX_MLIR_LIB_DIR}/libOMShapeInferenceOpInterface.a
-  ${ONNX_MLIR_LIB_DIR}/libOMResultTypeInferenceOpInterface.a
-  ${ONNX_MLIR_LIB_DIR}/libOMHasOnnxSubgraphOpInterface.a
-  ${ONNX_MLIR_LIB_DIR}/libOMDiagnostic.a
-  ${ONNX_MLIR_LIB_DIR}/libOMSupport.a
-  ${ONNX_MLIR_LIB_DIR}/libOMAccelerator.a
-  ${ONNX_MLIR_LIB_DIR}/libonnx.a
-  ${ONNX_MLIR_LIB_DIR}/libonnx_proto.a
-  -Wl,--end-group
-
-  # MLIRShapeDialect must come after onnx-mlir group (onnx-mlir depends on it)
-  MLIRShapeDialect
-)
-
-# protobuf is required by onnx_proto
-find_package(Protobuf REQUIRED)
-target_link_libraries(hip-opt PRIVATE protobuf::libprotobuf)
+if(ENABLE_ONNX_FRONTEND)
+  set(ONNX_MLIR_LIB_DIR "${ONNX_MLIR_BUILD}/Release/lib")
+  target_link_libraries(hip-opt PRIVATE
+    -Wl,--start-group
+    ${ONNX_MLIR_LIB_DIR}/libOMONNXOps.a
+    ${ONNX_MLIR_LIB_DIR}/libOMMlirDialects.a
+    ${ONNX_MLIR_LIB_DIR}/libOMMlirUtilities.a
+    ${ONNX_MLIR_LIB_DIR}/libOMSmallFPConversion.a
+    ${ONNX_MLIR_LIB_DIR}/libOMShapeHelperOpInterface.a
+    ${ONNX_MLIR_LIB_DIR}/libOMONNXElementsAttr.a
+    ${ONNX_MLIR_LIB_DIR}/libOMShapeInferenceOpInterface.a
+    ${ONNX_MLIR_LIB_DIR}/libOMResultTypeInferenceOpInterface.a
+    ${ONNX_MLIR_LIB_DIR}/libOMHasOnnxSubgraphOpInterface.a
+    ${ONNX_MLIR_LIB_DIR}/libOMDiagnostic.a
+    ${ONNX_MLIR_LIB_DIR}/libOMSupport.a
+    ${ONNX_MLIR_LIB_DIR}/libOMAccelerator.a
+    ${ONNX_MLIR_LIB_DIR}/libonnx.a
+    ${ONNX_MLIR_LIB_DIR}/libonnx_proto.a
+    -Wl,--end-group
+    MLIRShapeDialect
+  )
+  find_package(Protobuf REQUIRED)
+  target_link_libraries(hip-opt PRIVATE protobuf::libprotobuf)
+endif()
 
 # Set C++ standard
 set_target_properties(hip-opt hip-compiler PROPERTIES

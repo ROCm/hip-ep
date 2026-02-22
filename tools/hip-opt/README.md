@@ -202,6 +202,22 @@ This produces three targets:
 - `hip-compiler` -- One-stop MLIR-to-DLL compiler
 - `hip_runtime_static.lib` -- Static library containing all `ops_runtime/*.cpp` implementations
 
+### Optional: ONNX frontend (`--convert-onnx-to-hip`)
+
+The `--convert-onnx-to-hip` pass converts ONNX dialect IR (from onnx-mlir) into HIP dialect IR. This feature is **optional** and disabled by default. Without it, all HIP dialect examples and the `hip-compiler` pipeline work normally.
+
+To enable it, pass `-DONNX_MLIR_SRC` (and optionally `-DONNX_MLIR_BUILD`) at cmake time:
+
+```bash
+cmake .. \
+  -DLLVM_DIR=/path/to/llvm-project/build/lib/cmake/llvm \
+  -DMLIR_DIR=/path/to/llvm-project/build/lib/cmake/mlir \
+  -DONNX_MLIR_SRC=/path/to/onnx-mlir \
+  -DONNX_MLIR_BUILD=/path/to/onnx-mlir/build
+```
+
+**Known limitation:** onnx-mlir currently pins to an LLVM 22-dev commit (`0c2701fe7fa0`, Nov 2025). Building onnx-mlir against LLVM 23 is not yet supported and will require porting work (API changes, updated abseil dependency, etc.). If you are using LLVM 23, leave `ONNX_MLIR_SRC` unset to build without the ONNX frontend.
+
 ## Usage
 
 ### Input MLIR with HIP Dialect (3D tensors)

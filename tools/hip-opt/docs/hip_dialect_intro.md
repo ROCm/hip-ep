@@ -13,6 +13,10 @@ into `ins(...)` (read-only inputs) and `outs(...)` (output destinations
 provided by the caller). Handle and scalar parameters are leading positional
 arguments.
 
+All compute ops support **dual-mode operation**:
+- **Memref mode** (default for hand-written tests): operands are `memref<...>`, no results, writes in-place.
+- **Tensor mode** (used by `--convert-onnx-to-hip` and bufferization): operands are `tensor<...>`, returns results. Standard `--one-shot-bufferize` can then lower tensor mode to memref mode automatically.
+
 ---
 
 ## Types
@@ -189,9 +193,11 @@ hip-compiler.cpp         One-stop MLIR-to-DLL compiler
 HipDialect.td            Dialect definition (namespace "hip")
 HipTypes.td              Type definitions (!hip.handle)
 HipOps.td                All op definitions (DPS ins/outs format)
-HipDialect.h / .cpp      C++ dialect registration
+HipDialect.h / .cpp      C++ dialect registration + DPS interface implementations
+HipPasses.td             Pass definitions via TableGen (convert-hip-to-llvm, convert-onnx-to-hip)
+HipPasses.h              Pass declarations (auto-generated from HipPasses.td)
 HipToLLVM.cpp            Lowering pass (hip -> llvm.call)
-HipPasses.h              Pass registration header
+OnnxToHip.cpp            [optional] ONNX-to-HIP conversion pass (requires onnx-mlir)
 CMakeLists.txt           Builds hip-opt, hip-compiler, and hip_runtime_static
 
 ops_runtime/                    (compiled into hip_runtime_static.lib by CMake)
