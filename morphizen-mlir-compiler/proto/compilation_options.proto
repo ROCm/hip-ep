@@ -1,0 +1,29 @@
+// Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+/*
+ * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
+syntax = "proto3";
+
+package morphizen.mlir_compiler;
+
+// Compilation output mode
+enum OutputMode {
+  OUTPUT_MODE_UNSPECIFIED = 0;
+  OUTPUT_MODE_DLL = 1;         // Generate shared library (.dll/.so)
+  OUTPUT_MODE_LLVM_IR = 2;     // Generate LLVM IR (.ll)
+}
+
+// Minimal compilation options
+message CompilationOptions {
+  // LLVM optimization level (0-3, default: 2)
+  int32 opt_level = 1;
+
+  // Output mode (default: OUTPUT_MODE_DLL)
+  OutputMode output_mode = 2;
+
+  // Verbose output (default: false)
+  bool verbose = 3;
+}

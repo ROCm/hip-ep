@@ -1,0 +1,3 @@
+docs_norepo/
+# Test ONNX models (binary files, can be regenerated with generate_test_models scripts)
+test/e2e/*.onnx

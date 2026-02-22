@@ -115,19 +115,31 @@ PassContextImp::WithPass PassContextImp::with_current_pass(IPass& pass) {
 std::filesystem::path PassContextImp::get_dump_directory() const {
   // Check provider option override first
   auto dump_dir_option = get_provider_option("dump_dir", "");
+  std::filesystem::path dump_dir;
+
   if (!dump_dir_option.empty()) {
-    return std::filesystem::path(dump_dir_option);
+    dump_dir = std::filesystem::path(dump_dir_option);
+  } else {
+    // Default: temp/morphizen_dumps/cache_key
+    auto temp_dir =
+#ifdef _WIN32
+        std::filesystem::path("C:\\temp");
+#else
+        std::filesystem::path("/tmp");
+#endif
+    dump_dir = temp_dir / "morphizen_dumps" / get_context_proto().cache_key();
   }
 
-  // Default: temp/morphizen_dumps/cache_key
-  auto temp_dir =
-#ifdef _WIN32
-      std::filesystem::path("C:\\temp");
-#else
-      std::filesystem::path("/tmp");
-#endif
+  // Create the directory if it doesn't exist
+  // Use create_directories which is idempotent (safe if directory exists)
+  std::error_code ec;
+  std::filesystem::create_directories(dump_dir, ec);
+  if (ec && ec != std::errc::file_exists) {
+    LOG(WARNING) << "Failed to create dump directory: " << dump_dir
+                 << " - Error: " << ec.message();
+  }
 
-  return temp_dir / "morphizen_dumps" / get_context_proto().cache_key();
+  return dump_dir;
 }
 
 template <typename T1, typename T2>

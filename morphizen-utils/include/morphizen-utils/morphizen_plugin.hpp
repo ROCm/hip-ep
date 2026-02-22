@@ -14,6 +14,7 @@
 namespace morphizen {
 using plugin_t = void*;
 enum class scope_t { PUBLIC, PRIVATE };
+struct Plugin_Func_Set; // Forward declaration
 std::pair<plugin_t, bool> open_plugin_dyn(const std::string& name,
                                           scope_t scope);
 void* plugin_sym_dyn(plugin_t plugin, const std::string& name);
@@ -49,7 +50,16 @@ extern "C" void morphizen_register_static_plugin(const char* name,
 
 struct Plugin {
 
-  Plugin(const char* name);
+  // Factory method - returns nullptr if plugin fails to load
+  static std::unique_ptr<Plugin> create(const char* name);
+
+private:
+  struct PrivateTag {}; // See docs/technical/privatetag-factory-pattern.md
+
+public:
+  // Constructor requires PrivateTag - only callable from factory method
+  Plugin(PrivateTag, const char* name, void* plugin, Plugin_Func_Set* func_set,
+         bool owned);
   ~Plugin();
   template <typename R, typename... Args>
   static R invoke(const char* plugin_name, const char* symbol, Args&&... args) {
@@ -78,6 +88,12 @@ struct Plugin {
   bool has_method(const char* name) const {
     return my_plugin_sym(plugin_, name) != nullptr;
   };
+
+  // Check if the plugin DLL was successfully loaded
+  bool is_loaded() const { return plugin_ != nullptr; }
+
+  // Get the actual DLL path that was attempted (useful for error reporting)
+  const std::string& get_so_name() const { return so_name_; }
   /**
    * @brief Retrieves all symbols associated with the given name.
    *

@@ -324,3 +324,20 @@ if(morphizen_ENABLE_MLIR_BACKEND)
 
   message(STATUS "LLVM/MLIR configuration complete")
 endif()
+
+###############################################################################
+# ONNX-MLIR (if morphizen_ENABLE_MLIR_COMPILER=ON)
+###############################################################################
+if(morphizen_ENABLE_MLIR_COMPILER)
+  # onnx-mlir will be built from git submodule at 3rd-party/onnx-mlir
+  # by morphizen-mlir-compiler/3rd-party/CMakeLists.txt
+
+  # Verify submodule exists
+  if(NOT EXISTS "${CMAKE_SOURCE_DIR}/3rd-party/onnx-mlir/CMakeLists.txt")
+    message(FATAL_ERROR
+      "onnx-mlir submodule not initialized. Run:\n"
+      "  git submodule update --init --recursive 3rd-party/onnx-mlir")
+  endif()
+
+  message(STATUS "ONNX-MLIR will be built from: ${CMAKE_SOURCE_DIR}/3rd-party/onnx-mlir")
+endif()

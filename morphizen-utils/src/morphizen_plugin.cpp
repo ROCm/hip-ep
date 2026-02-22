@@ -41,31 +41,66 @@ static Plugin_Func_Set* g_dynamic_plugin_func_set_ptr =
     &g_dynamic_plugin_func_set;
 
 std::string Plugin::guess_name(const char* name) {
+  std::string name_str(name);
 #ifdef _WIN32
-  return std::string("") + name + ".dll";
+  // Only add .dll if not already present
+  if (name_str.size() >= 4 && name_str.substr(name_str.size() - 4) == ".dll") {
+    return name_str;
+  }
+  return name_str + ".dll";
 #else
-  return std::string("lib") + name + ".so";
+  // Only add lib/.so if not already present
+  if (name_str.size() >= 3 && name_str.substr(name_str.size() - 3) == ".so") {
+    return name_str;
+  }
+  if (name_str.size() >= 3 && name_str.substr(0, 3) == "lib") {
+    return name_str;
+  }
+  return "lib" + name_str + ".so";
 #endif
 }
 
-Plugin::Plugin(const char* name)
-    : name_{name}, so_name_{guess_name(name)}, func_set_{nullptr},
-      plugin_{nullptr}, owned_{false} {
+// Factory method - returns nullptr if loading fails
+std::unique_ptr<Plugin> Plugin::create(const char* name) {
+  std::string name_str(name);
+  std::string so_name = guess_name(name);
 
-  auto load = [this](const std::string& tag, Plugin_Func_Set* func_set) {
+  void* plugin = nullptr;
+  bool owned = false;
+  Plugin_Func_Set* func_set = nullptr;
+
+  auto try_load = [&](const std::string& tag, Plugin_Func_Set* fs) -> bool {
     MY_LOG(1) << "trying load from " << tag;
-    std::tie(plugin_, owned_) =
-        func_set->open_plugin(so_name_, scope_t::PUBLIC);
-    if (plugin_) {
-      func_set_ = func_set;
-      MY_LOG(1) << " load plugin from " << tag << " name=" << name_
-                << " so_name=" << so_name_;
+    std::tie(plugin, owned) = fs->open_plugin(so_name, scope_t::PUBLIC);
+    if (plugin) {
+      func_set = fs;
+      MY_LOG(1) << " load plugin from " << tag << " name=" << name
+                << " so_name=" << so_name;
+      return true;
     }
+    return false;
   };
-  load("static", g_static_plugin_func_set_ptr);
-  if (!plugin_) {
-    load("dynamic", g_dynamic_plugin_func_set_ptr);
+
+  // Try static first, then dynamic
+  if (!try_load("static", g_static_plugin_func_set_ptr)) {
+    if (!try_load("dynamic", g_dynamic_plugin_func_set_ptr)) {
+      // Both failed - return nullptr
+      MY_LOG(1) << "Failed to load plugin: " << name << " (tried: " << so_name
+                << ")";
+      return nullptr;
+    }
   }
+
+  // Success - create Plugin object using PrivateTag
+  return std::make_unique<Plugin>(PrivateTag{}, name, plugin, func_set, owned);
+}
+
+// Constructor - only callable via factory method (requires PrivateTag)
+Plugin::Plugin(PrivateTag, const char* name, void* plugin,
+               Plugin_Func_Set* func_set, bool owned)
+    : name_{name}, so_name_{guess_name(name)}, func_set_{func_set},
+      plugin_{plugin}, owned_{owned} {
+  // Invariant: plugin_ is never nullptr (enforced by factory method)
 }
 
 Plugin::~Plugin() {
