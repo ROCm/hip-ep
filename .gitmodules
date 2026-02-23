@@ -1,4 +1,4 @@
 [submodule "3rd-party/morphizen"]
 	path = 3rd-party/morphizen
-	url = https://github.com/wcy123/MorphiZen.git
-	branch = integration.morphizen-mlir-compiler
+	url = ../MorphiZen
+	branch = main
