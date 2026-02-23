@@ -1,4 +1,4 @@
-// RUN: hip-opt %s --convert-onnx-to-hip --convert-hip-to-llvm | FileCheck %s
+// RUN: morphizen-opt %s --convert-onnx-to-hip --convert-hip-to-llvm | FileCheck %s
 
 // Test double-layer Conv+Relu network from E2E test
 // This IR contains onnx.Constant operations with tensor types from mlir-imp
@@ -10,7 +10,7 @@
 
 // CHECK: module attributes {hipdnn.input_count
 // CHECK: llvm.mlir.global internal constant @constant_{{.*}}(dense
-// CHECK: llvm.mlir.global internal constant @constant_registry
+// CHECK: llvm.mlir.global internal @__constant_registry
 // CHECK: llvm.func @get_constant_registry() -> !llvm.ptr
 // CHECK-NOT: arith.constant
 // CHECK-NOT: onnx.Constant

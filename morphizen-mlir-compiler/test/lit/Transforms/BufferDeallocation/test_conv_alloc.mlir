@@ -18,7 +18,7 @@
 // Expected: hip.free for temp buffer only, not for function arguments
 // ============================================================================
 
-// RUN: hip-opt %s --hip-buffer-deallocation | FileCheck %s
+// RUN: morphizen-opt %s --hip-buffer-deallocation | FileCheck %s
 
 module {
   func.func @conv_test(

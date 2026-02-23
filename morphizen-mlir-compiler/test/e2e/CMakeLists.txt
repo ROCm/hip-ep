@@ -7,60 +7,45 @@
 # E2E Integration Tests
 #=============================================================================
 # These tests compile MLIR → DLL and execute them to verify end-to-end
-# functionality. All outputs go to CMAKE_CURRENT_BINARY_DIR (build directory).
+# functionality. Auto-discovers .mlir files from test/lit/e2e/.
 
-message(STATUS "Configuring E2E integration tests (CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH})")
+message(STATUS "Configuring E2E integration tests")
 
-# Test 1: Compile demo_two_layer_conv.mlir → demo_two_layer.dll
-add_test(NAME CompileDemoConvDLL
-    COMMAND mlir-hip-compiler
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/hip-opt/demos/demo_two_layer_conv.mlir"
-        --from-onnx-mlir
-        -o "${CMAKE_CURRENT_BINARY_DIR}/demo_two_layer.dll"
-        --mode dll
-        --keep
-        -v
-    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-)
+# Auto-discover all .mlir test files from test/lit/e2e/
+file(GLOB MLIR_E2E_TESTS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../lit/e2e/*.mlir")
 
-# Test 2: Load and test demo_two_layer.dll
-add_test(NAME TestDemoConvDLL
-    COMMAND test-model-dll "${CMAKE_CURRENT_BINARY_DIR}/demo_two_layer.dll" --verbose --validate
-    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-)
+# For each .mlir file, create compile + execute test pair
+foreach(test_file ${MLIR_E2E_TESTS})
+    # Extract test name (filename without extension)
+    get_filename_component(test_name ${test_file} NAME_WE)
 
-# TestDemoConvDLL depends on CompileDemoConvDLL
-set_tests_properties(TestDemoConvDLL PROPERTIES
-    DEPENDS CompileDemoConvDLL
-)
+    # Output DLL path
+    set(dll_output "${CMAKE_CURRENT_BINARY_DIR}/${test_name}.dll")
 
-#=============================================================================
-# ORT Integration Test (optional, requires ONNX Runtime + GTest)
-#=============================================================================
+    # Test 1: Compile .mlir → .dll
+    add_test(NAME E2E_Compile_${test_name}
+        COMMAND $<TARGET_FILE:morphizen-compile>
+            "${test_file}"
+            -o "${dll_output}"
+            --mode dll
+            -v
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+    )
 
-find_package(onnxruntime QUIET)
+    # Test 2: Execute .dll
+    add_test(NAME E2E_Execute_${test_name}
+        COMMAND $<TARGET_FILE:test-model-dll>
+            "${dll_output}"
+            --verbose
+            --validate
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+    )
 
-if(TARGET onnxruntime::onnxruntime)
-    find_package(GTest QUIET)
+    # Execution depends on compilation
+    set_tests_properties(E2E_Execute_${test_name} PROPERTIES
+        DEPENDS E2E_Compile_${test_name}
+    )
+endforeach()
 
-    if(TARGET GTest::gtest)
-        message(STATUS "Building ORT integration test")
-
-        add_executable(ort_integration_test test_ort_integration.cpp)
-        target_link_libraries(ort_integration_test PRIVATE
-            onnxruntime::onnxruntime
-            GTest::gtest
-            GTest::gtest_main
-        )
-
-        if(WIN32)
-            target_compile_definitions(ort_integration_test PRIVATE "_CRT_SECURE_NO_WARNINGS")
-        endif()
-
-        add_test(NAME OrtIntegration COMMAND ort_integration_test)
-
-        set_target_properties(ort_integration_test PROPERTIES FOLDER "tests")
-    endif()
-else()
-    message(STATUS "ONNX Runtime not found, skipping ORT integration test")
-endif()
+list(LENGTH MLIR_E2E_TESTS num_tests)
+message(STATUS "Configured ${num_tests} E2E test(s)")

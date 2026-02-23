@@ -21,7 +21,7 @@ set(MLIR_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 
 # Disable StableHLO tests (onnx-mlir dependency)
 set(STABLEHLO_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(STABLEHLO_ENABLE_BINDINGS_BUILD OFF CACHE BOOL "" FORCE)
+set(ONNX_MLIR_ENABLE_STABLEHLO OFF CACHE BOOL "" FORCE)
 
 # Disable benchmark builds
 set(ONNX_MLIR_ENABLE_BENCHMARK OFF CACHE BOOL "" FORCE)
@@ -50,10 +50,10 @@ set(ONNX_MLIR_ENABLE_BENCHMARK OFF CACHE BOOL "" FORCE)
 set(CMAKE_WARN_DEPRECATED FALSE)
 
 # Add ONNX-MLIR (required for ONNX dialect and OnnxToHip conversion)
-# Use parent project's onnx-mlir submodule (one level up from morphizen-mlir-compiler)
+# onnx-mlir submodule is now local to morphizen-mlir-compiler/3rd-party
 # Note: The test directory issue is now fixed directly in onnx-mlir/CMakeLists.txt
 # (see ONNX_MLIR_FORK_SUMMARY.md Change 6)
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../3rd-party/onnx-mlir ${CMAKE_CURRENT_BINARY_DIR}/onnx-mlir EXCLUDE_FROM_ALL)
+add_subdirectory(onnx-mlir EXCLUDE_FROM_ALL)
 
 # Restore deprecation warnings
 set(CMAKE_WARN_DEPRECATED TRUE)

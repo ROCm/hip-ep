@@ -7,7 +7,7 @@ cmake_minimum_required(VERSION 3.20)
 project(morphizen-mlir-compiler VERSION 1.0.0 LANGUAGES CXX C)
 
 # Build options
-option(BUILD_STANDALONE_TOOLS "Build hip-opt and mlir-hip-compiler" ON)
+option(BUILD_STANDALONE_TOOLS "Build morphizen-opt and morphizen-compile" ON)
 option(BUILD_MOCK_RUNTIME "Build with mock runtime (no GPU required)" ON)
 option(ONNX_HIP_INCLUDE_LIT_TESTS "Include LIT tests" ON)
 
@@ -73,10 +73,15 @@ endif()
 add_subdirectory(proto)
 
 # Static libraries (shared by all tools/DLL)
-add_subdirectory(lib/Runtime)
-add_subdirectory(lib/Backend)
-add_subdirectory(lib/HipDialect)
+# New structure (following MLIR best practices)
+add_subdirectory(lib/Dialect/Hip/IR)
+add_subdirectory(lib/Dialect/Hip/Transforms)
+add_subdirectory(lib/Conversion)
+add_subdirectory(lib/Target/LLVM)
 add_subdirectory(lib/Compiler)
+
+# Legacy directories (keep for now, will be removed in Phase 4)
+add_subdirectory(lib/Runtime)
 add_subdirectory(lib/CInterface)
 
 # DLL (always build)

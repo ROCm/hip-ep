@@ -16,7 +16,7 @@
 // Expected: hip.conv operation with identical attributes
 // ============================================================================
 
-// RUN: hip-opt %s --convert-onnx-to-hip | FileCheck %s
+// RUN: morphizen-opt %s --convert-onnx-to-hip | FileCheck %s
 
 module {
   func.func @conv_test(%input: tensor<1x3x224x224xf32>, %weights: tensor<64x3x7x7xf32>, %bias: tensor<64xf32>) -> tensor<1x64x112x112xf32> {

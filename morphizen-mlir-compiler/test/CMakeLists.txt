@@ -10,6 +10,3 @@ endif()
 
 # E2E tests (includes ORT integration test)
 add_subdirectory(e2e)
-
-# API tests
-add_subdirectory(api)

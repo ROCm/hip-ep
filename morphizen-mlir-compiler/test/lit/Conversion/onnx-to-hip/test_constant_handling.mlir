@@ -21,7 +21,7 @@
 // Expected: hip.get_constant with arith.constant index, not embedded values
 // ============================================================================
 
-// RUN: hip-opt %s --convert-onnx-to-hip | FileCheck %s
+// RUN: morphizen-opt %s --convert-onnx-to-hip | FileCheck %s
 
 module {
   func.func @constant_test() -> tensor<3xf32> {

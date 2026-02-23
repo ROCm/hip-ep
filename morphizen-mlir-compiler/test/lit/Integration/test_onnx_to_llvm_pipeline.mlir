@@ -20,7 +20,7 @@
 // Detailed behavior is tested in individual pass tests.
 // ============================================================================
 
-// RUN: hip-opt %s --convert-onnx-to-hip --hip-buffer-deallocation --convert-hip-to-llvm | FileCheck %s
+// RUN: morphizen-opt %s --convert-onnx-to-hip --hip-buffer-deallocation --convert-hip-to-llvm | FileCheck %s
 
 module {
   func.func @full_pipeline(

@@ -3,92 +3,71 @@ Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
 
-# E2E Tests - Quick Guide
+# E2E Integration Tests
 
-## Prerequisites
+End-to-end tests for the MorphiZen MLIR compiler. These tests verify full compilation and deployment: `.mlir` → DLL → execution.
 
-1. ONNX Runtime and GTest installed in `../../local/`
-2. Build morphizen-mlir-compiler with `BUILD_MOCK_RUNTIME=ON`
-3. Generate test models (see below)
+## Test Discovery
 
-## Generate Test Models
+Tests are auto-discovered from `test/lit/e2e/*.mlir`. No manual CMake configuration needed.
 
-```bash
-# From morphizen-mlir-compiler/test/e2e/
-python gen_conv_model.py --two-layer --output /c/Develop/m/build/onnx-hipdnn-ep-mlir-integration-1/Debug/bin/conv_model.onnx
-python gen_conv_gemm_model.py --output /c/Develop/m/build/onnx-hipdnn-ep-mlir-integration-1/Debug/bin/conv_gemm_model.onnx
-```
-
-## Run ORT Integration Test
+## Running Tests
 
 ```bash
-cd /c/Develop/m/build/onnx-hipdnn-ep-mlir-integration-1/Debug/bin
+# All E2E tests
+ctest --test-dir ../../build/$(basename $PWD) -R "^E2E_" --verbose
 
-# Basic test
-MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1 ./ort_integration_test.exe
+# Specific test
+ctest --test-dir ../../build/$(basename $PWD) -R "E2E_.*_test_conv_double_layer" --verbose
 
-# With verbose logging
-ORT_LOG_LEVEL=info \
-DEBUG_LOG_LEVEL=info \
-XLNX_ONNX_EP_VERBOSE=2 \
-DEBUG_MORPHIZEN_PASS=1 \
-MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1 \
-./ort_integration_test.exe
+# Just compilation tests
+ctest --test-dir ../../build/$(basename $PWD) -R "^E2E_Compile_" --verbose
 
-# Run specific test
-MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1 \
-./ort_integration_test.exe --gtest_filter=OrtIntegrationTest.CreateSessionWithMorphiZenProvider
+# Just execution tests
+ctest --test-dir ../../build/$(basename $PWD) -R "^E2E_Execute_" --verbose
 ```
 
-## Environment Variables
+## Test Structure
 
-- `MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1` - **Required**: Enable CPU device for MorphiZen EP
-- `ORT_LOG_LEVEL=info` - ONNX Runtime logging (session creation, graph transforms)
-- `DEBUG_LOG_LEVEL=info` - General debug logging
-- `XLNX_ONNX_EP_VERBOSE=2` - Vitis AI EP verbose logging (cache, versions, statistics)
-- `DEBUG_MORPHIZEN_PASS=1` - Enable morphizen pass debug logging
-- `MORPHIZEN_DEBUG_MLIR_BACKEND=3` - MLIR backend compilation verbose logging
+For each `.mlir` file in `test/lit/e2e/`, two CTest tests are created:
 
-## Expected Output
+1. **E2E_Compile_{test_name}**: Compiles `.mlir` → `.dll` using `morphizen-compile`
+2. **E2E_Execute_{test_name}**: Loads and executes `.dll` using `test-model-dll`
 
-```
-[  PASSED  ] LoadMorphiZenProvider - EP registered
-[  PASSED  ] CreateSessionWithMorphiZenProvider - Session created with Conv model
-[  PASSED  ] CreateSessionWithConvGemmModel - Session created with Conv+Gemm model
-```
+**Example:**
+- `test/lit/e2e/test_conv_double_layer.mlir` creates:
+  - `E2E_Compile_test_conv_double_layer`
+  - `E2E_Execute_test_conv_double_layer`
 
-## Test Models
+## Adding New Tests
 
-- **conv_model.onnx**: Two-layer Conv [1,3,224,224] → [1,64,112,112]
-- **conv_gemm_model.onnx**: Conv+Gemm [1,3,8,8] → [1,32]
+1. Add new `.mlir` file to `test/lit/e2e/`
+2. Reconfigure CMake: `cmake -S . -B ../build/$(basename $PWD) --fresh`
+3. Run tests: `ctest --test-dir ../../build/$(basename $PWD) -R "^E2E_"`
 
-## Logs and Artifacts
+No CMake editing required - tests are auto-discovered.
 
-- **Cache dir**: `C:\temp\chunywan\vaip\.cache\<cache-key>/`
-- **Init graph**: `./vaip_init/init-graph-for-requ-dq.onnx`
-- **Log dir**: Set by `XLNX_ONNX_EP_VERBOSE` (in-mem mode: no persistent logs)
+## Test Files
+
+Test `.mlir` files are located in `test/lit/e2e/` and serve dual purposes:
+- **LIT tests**: Verify MLIR pass transformations (via `// RUN:` directives)
+- **E2E tests**: Verify full compilation and execution (via this CMakeLists.txt)
+
+## Current Tests
+
+Run `ctest --test-dir ../../build/$(basename $PWD) -N -R "^E2E_"` to see all discovered E2E tests.
 
 ## Troubleshooting
 
-**Test skips with "V2 API not implemented"**:
-- Set `MORPHIZEN_VITISAI_EP_ENABLE_CPU_DEVICE=1`
+**No tests found:**
+- Verify `.mlir` files exist in `test/lit/e2e/`
+- Reconfigure CMake with `--fresh` flag
 
-**Missing DLLs**:
-The required DLLs should be automatically copied to the bin directory during build:
-- `onnxruntime.dll` - From ../../local/bin (ONNX Runtime)
-- `onnxruntime_providers_shared.dll` - From ../../local/bin (ONNX Runtime shared providers)
-- `onnxruntime_morphizen_ep.dll` - **Built from 3rd-party/morphizen** (do NOT use the one from ../../local/bin, it's outdated!)
+**Compilation failures:**
+- Check `morphizen-compile` is built: `cmake --build ../build/$(basename $PWD) --target morphizen-compile`
+- Run compiler manually: `morphizen-compile path/to/test.mlir -o test.dll --mode dll -v`
 
-**CRITICAL - Wrong morphizen EP DLL**:
-If you see old morphizen version in logs (e.g., version from Feb 17), ensure you're using the newly built DLL:
-```bash
-# The bin directory should contain the newly built morphizen EP DLL (from current build)
-# Do NOT manually copy onnxruntime_morphizen_ep.dll from ../../local/bin (it's outdated)
-ls -lh onnxruntime_morphizen_ep.dll  # Should show recent build timestamp
-```
-
-**API version mismatch**:
-- The ONNX Runtime DLL (onnxruntime.dll) should be copied from ../../local/bin automatically during build
-- If you see API version errors, verify the DLL in bin directory matches the one in ../../local/bin
-
-See `README_E2E_TESTING.md` for detailed documentation.
+**Execution failures:**
+- Check `test-model-dll` is built: `cmake --build ../build/$(basename $PWD) --target test-model-dll`
+- Check DLL was generated by compilation step
+- Run manually: `test-model-dll path/to/test.dll --verbose --validate`

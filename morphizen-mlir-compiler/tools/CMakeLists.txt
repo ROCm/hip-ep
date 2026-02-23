@@ -3,5 +3,6 @@
 # ** Licensed under the MIT License.
 ##
 
-add_subdirectory(hip-opt)
-add_subdirectory(mlir-hip-compiler)
+add_subdirectory(morphizen-opt)
+add_subdirectory(morphizen-compile)
+add_subdirectory(test-model-dll)

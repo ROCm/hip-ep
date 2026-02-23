@@ -9,38 +9,49 @@ Standalone MLIR-based compiler infrastructure for AMD GPUs via HIP/MIOpen.
 
 This is a portable subproject that provides:
 1. **C API** (`morphizen-mlir-compiler.dll`) - DLL-safe interface using morphizen FileReader/FileWriter
-2. **C++ Library** (`MorphizenCompiler`) - Reusable CompilerPipeline for MLIR → DLL/Object/IR compilation
-3. **CLI Tools** (`hip-opt`, `mlir-hip-compiler`) - Standalone compilation tools
+2. **C++ Library** (`MorphizenCompiler`) - Reusable CompilerDriver for MLIR → DLL/Object/IR compilation
+3. **CLI Tools** (`morphizen-opt`, `morphizen-compile`) - Standalone compilation tools
 
 ## Architecture
 
 ```
 morphizen-mlir-compiler/
-├── include/                  # Public C API headers
-│   └── morphizen-mlir-compiler/
-│       ├── compiler_api.h    # C interface (extern "C")
-│       └── compiler_types.h  # C-compatible types
+├── include/morphizen-mlir-compiler/  # Public headers
+│   ├── Dialect/Hip/          # HIP dialect (IR, types, ops)
+│   │   ├── IR/               # Dialect definition
+│   │   └── Transforms/       # HIP→HIP optimizations
+│   ├── Conversion/           # Cross-dialect conversions
+│   │   ├── OnnxToHip/        # ONNX→HIP lowering
+│   │   ├── HipToLLVM/        # HIP→LLVM lowering
+│   │   └── Passes.h          # Umbrella header
+│   ├── Compiler/             # Application-level
+│   │   ├── Passes/           # App-specific passes
+│   │   ├── Pipeline.h        # SINGLE SOURCE OF TRUTH
+│   │   └── CompilerDriver.h  # End-to-end driver
+│   ├── Target/LLVM/          # Code generation
+│   └── InitAllPasses.h       # Convenience header
 │
-├── lib/                      # Static libraries (shared by tools/DLL)
-│   ├── HipDialect/           # MLIR dialect + 5 passes
-│   ├── Backend/              # LLVM translation + linking
+├── lib/                      # Implementation (mirrors include/)
+│   ├── Dialect/Hip/
+│   │   ├── IR/               # HipDialect, ops, types
+│   │   └── Transforms/       # MemoryPooling, BufferDeallocation
+│   ├── Conversion/
+│   │   ├── OnnxToHip/        # ONNX→HIP conversion
+│   │   ├── HipToLLVM/        # HIP→LLVM conversion
+│   │   └── Passes.cpp        # Registration
+│   ├── Compiler/
+│   │   ├── Passes/           # GenerateInterface
+│   │   ├── Pipeline/         # Pipeline definition
+│   │   └── CompilerDriver.cpp
+│   ├── Target/LLVM/          # LLVMBackend, DLLLinker
 │   ├── Runtime/              # HIP/MIOpen wrappers
-│   ├── Compiler/             # CompilerPipeline (high-level API)
-│   └── CInterface/           # C API wrapper (future)
+│   └── CInterface/           # C API wrapper
 │
-├── tools/                    # Standalone executables
-│   ├── hip-opt/              # MLIR pass debugging tool
-│   └── mlir-hip-compiler/    # MLIR → DLL compiler
+├── tools/
+│   ├── morphizen-opt/        # Pass runner (debugging)
+│   └── morphizen-compile/    # MLIR → DLL compiler
 │
-├── test/                     # Tests
-│   ├── lit/                  # LIT tests (pass unit tests)
-│   ├── e2e/                  # End-to-end integration tests
-│   └── api/                  # C API tests (future)
-│
-└── doc/                      # Documentation
-    ├── design/               # Architecture, dialects, passes
-    ├── guides/               # Demos, GPU testing
-    └── integration/          # Integration guides
+└── test/                     # LIT and E2E tests
 ```
 
 ## Building
@@ -75,7 +86,7 @@ ctest --test-dir ../../build/morphizen-mlir-compiler --verbose
 ### Build Options
 
 - `BUILD_COMPILER_DLL` - Build morphizen-mlir-compiler.dll (default: ON, future work)
-- `BUILD_STANDALONE_TOOLS` - Build hip-opt and mlir-hip-compiler (default: ON)
+- `BUILD_STANDALONE_TOOLS` - Build morphizen-opt and morphizen-compile (default: ON)
 - `BUILD_MOCK_RUNTIME` - Build with mock runtime (no GPU required) (default: ON)
 - `ONNX_HIP_INCLUDE_LIT_TESTS` - Include LIT tests (default: ON)
 
@@ -102,21 +113,22 @@ cmake -S . -B ../../build/morphizen-mlir-compiler \
 
 ```bash
 # Compile MLIR to DLL
-mlir-hip-compiler input.mlir -o output.dll --from-onnx-mlir -O2 -v
+morphizen-compile input.mlir -o output.dll --from-onnx-mlir -O2 -v
 
 # Debug MLIR passes
-hip-opt input.mlir --onnx-to-hip --hip-to-llvm
+morphizen-opt input.mlir --morphizen-pipeline
+morphizen-opt input.mlir --convert-onnx-to-hip --convert-hip-to-llvm
 ```
 
 ### C++ Library
 
 ```cpp
-#include "CompilerPipeline.h"
+#include "morphizen-mlir-compiler/Compiler/CompilerDriver.h"
 
 using namespace morphizen::mlir_compiler;
 
-CompilerPipeline pipeline;
-CompilerPipeline::Options opts;
+CompilerDriver driver;
+CompilationOptions opts;
 opts.from_onnx_mlir = true;
 opts.opt_level = 2;
 opts.verbose = true;

@@ -60,8 +60,8 @@ cmake --build ../../build/onnx-hipdnn-ep --config Debug --parallel
 export THEROCK_DIST=C:/Develop/m/dist/therock
 
 # Compile demo model
-../../build/onnx-hipdnn-ep/Debug/bin/mlir-hip-compiler.exe \
-  mlir-compiler/tools/hip-opt/demos/demo_two_layer_conv.mlir \
+../../build/onnx-hipdnn-ep/Debug/bin/morphizen-compile.exe \
+  mlir-compiler/tools/morphizen-opt/demos/demo_two_layer_conv.mlir \
   --from-onnx-mlir \
   -o ../output/demo_gpu.dll \
   --mode dll
@@ -321,7 +321,7 @@ After successful build, verify these artifacts exist:
 ```
 ../../build/onnx-hipdnn-ep/
 ├── mlir-compiler/lib/Runtime/runtime.bc         # Real runtime (40KB, not mock)
-├── Debug/bin/mlir-hip-compiler.exe              # Compiler tool (262MB)
+├── Debug/bin/morphizen-compile.exe              # Compiler tool (262MB)
 ├── Debug/bin/test-model-dll.exe                 # Test harness (2.5MB)
 └── (generated)
     ../output/demo_gpu.dll                       # Compiled model (1.1MB)
@@ -342,10 +342,10 @@ For automated testing without GPU:
 1. **Build Verification** (no GPU needed):
    ```bash
    # Verify compilation succeeds
-   cmake --build ../../build/onnx-hipdnn-ep --target mlir-hip-compiler
+   cmake --build ../../build/onnx-hipdnn-ep --target morphizen-compile
 
    # Verify DLL generation succeeds
-   mlir-hip-compiler test.mlir -o test.dll
+   morphizen-compile test.mlir -o test.dll
 
    # Verify DLL exports
    dumpbin //EXPORTS test.dll | grep inference

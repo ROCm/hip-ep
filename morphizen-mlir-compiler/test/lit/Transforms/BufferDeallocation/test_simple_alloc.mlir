@@ -20,7 +20,7 @@
 // Expected: hip.free calls in reverse allocation order before return
 // ============================================================================
 
-// RUN: hip-opt %s --hip-buffer-deallocation | FileCheck %s
+// RUN: morphizen-opt %s --hip-buffer-deallocation | FileCheck %s
 
 module {
   func.func @simple_alloc(%ctx: !hip.context) -> i32 {

@@ -277,9 +277,9 @@ add_custom_target(RuntimeBitcode DEPENDS MorphizenRuntime)
 #   1. Backend/CMakeLists.txt runs xxd.py to convert runtime.bc → runtime_ir_data.cpp
 #   2. runtime_ir_data.cpp contains: runtime_bc_data[] array + runtime_bc_data_size
 #   3. Backend/LLVMBackend.cpp includes runtime_ir_data.cpp as source file
-#   4. LLVMBackend.lib (containing runtime_bc_data) is linked into mlir-hip-compiler.exe
+#   4. LLVMBackend.lib (containing runtime_bc_data) is linked into morphizen-compile.exe
 #
-# What happens at model compilation (mlir-hip-compiler):
+# What happens at model compilation (morphizen-compile):
 #   1. LLVMBackend::linkRuntimeModule() reads runtime_bc_data from its own memory
 #   2. Parses bitcode to LLVM IR using llvm::parseBitcodeFile()
 #   3. Merges runtime IR with generated model IR using llvm::Linker::linkInModule()
