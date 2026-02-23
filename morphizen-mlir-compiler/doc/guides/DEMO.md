@@ -107,7 +107,7 @@ ONNX Model → ONNX Runtime → EP Plugin → [compilation] → Native DLL → [
 **Commands:**
 ```bash
 # Compile ONNX → native DLL
-mlir-hip-compiler demo_two_layer_conv.mlir --from-onnx-mlir -o demo.dll
+morphizen-compile demo_two_layer_conv.mlir --from-onnx-mlir -o demo.dll
 
 # Load and execute DLL
 test-model-dll demo.dll
@@ -123,11 +123,11 @@ test-model-dll demo.dll
 
 ### Layer 3: Individual Passes Exposed (Second Box Opened)
 
-**Command:** `hip-opt <input> --<pass-name>`
+**Command:** `morphizen-opt <input> --<pass-name>`
 
 **Example - Stage 1:**
 ```bash
-hip-opt demo.mlir --convert-onnx-to-hip > stage1.mlir
+morphizen-opt demo.mlir --convert-onnx-to-hip > stage1.mlir
 ```
 
 **Output shows:**
@@ -564,8 +564,8 @@ func.func @main(%input: tensor<1x3x224x224xf32>) -> tensor<1x64x112x112xf32> {
 
 **Command:**
 ```bash
-../../build/$(basename $PWD)/Debug/bin/hip-opt.exe \
-  tools/hip-opt/demos/demo_two_layer_conv.mlir \
+../../build/$(basename $PWD)/Debug/bin/morphizen-opt.exe \
+  tools/morphizen-opt/demos/demo_two_layer_conv.mlir \
   --convert-onnx-to-hip \
   > ../output/stage1.mlir
 ```
@@ -620,7 +620,7 @@ module attributes {hipdnn.input_count = 1 : i64, hipdnn.output_count = 1 : i64,
 
 **Command:**
 ```bash
-../../build/$(basename $PWD)/Debug/bin/hip-opt.exe \
+../../build/$(basename $PWD)/Debug/bin/morphizen-opt.exe \
   ../output/stage1.mlir \
   --ownership-based-buffer-deallocation \
   > ../output/stage2.mlir
@@ -669,7 +669,7 @@ func.func @main(%arg0: !hip.context,
 
 **Command:**
 ```bash
-../../build/$(basename $PWD)/Debug/bin/hip-opt.exe \
+../../build/$(basename $PWD)/Debug/bin/morphizen-opt.exe \
   ../output/stage2.mlir \
   --memory-pooling \
   > ../output/stage3.mlir
@@ -725,7 +725,7 @@ module attributes {
 
 **Command:**
 ```bash
-../../build/$(basename $PWD)/Debug/bin/hip-opt.exe \
+../../build/$(basename $PWD)/Debug/bin/morphizen-opt.exe \
   ../output/stage3.mlir \
   --convert-hip-to-llvm \
   > ../output/stage4.mlir
@@ -793,7 +793,7 @@ module {
 
 **Command:**
 ```bash
-../../build/$(basename $PWD)/Debug/bin/hip-opt.exe \
+../../build/$(basename $PWD)/Debug/bin/morphizen-opt.exe \
   ../output/stage4.mlir \
   --generate-interface \
   > ../output/stage5.mlir
@@ -862,7 +862,7 @@ module {
 **Command:**
 ```bash
 ../../build/$(basename $PWD)/Debug/bin/mlir-hip-compiler.exe \
-  tools/hip-opt/demos/demo_two_layer_conv.mlir \
+  tools/morphizen-opt/demos/demo_two_layer_conv.mlir \
   --from-onnx-mlir \
   -o ../output/demo_two_layer.dll \
   --mode dll \
@@ -872,7 +872,7 @@ module {
 **Output:**
 ```
 === MLIR to HIP DLL Compiler ===
-Input: tools/hip-opt/demos/demo_two_layer_conv.mlir
+Input: tools/morphizen-opt/demos/demo_two_layer_conv.mlir
 Output: ../output/demo_two_layer.dll
 
 --- Step 1: Parsing MLIR ---
@@ -916,7 +916,7 @@ Output: ../output/demo_two_layer.dll
 
 ## Tools Reference
 
-### hip-opt
+### morphizen-opt
 MLIR transformation tool for testing individual passes.
 - **Input**: ONNX/HIP MLIR
 - **Output**: Transformed MLIR
@@ -985,7 +985,7 @@ ORT_LOG_LEVEL=info MORPHIZEN_DEBUG_MLIR_BACKEND=3 ./mlir-e2e-test.exe
 ```bash
 cd /path/to/onnx-hipdnn-ep
 # Run all stages, save to ../output/
-../../build/$(basename $PWD)/Debug/bin/hip-opt.exe tools/hip-opt/demos/demo_two_layer_conv.mlir --convert-onnx-to-hip > ../output/stage1_onnx_to_hip.mlir
+../../build/$(basename $PWD)/Debug/bin/morphizen-opt.exe tools/morphizen-opt/demos/demo_two_layer_conv.mlir --convert-onnx-to-hip > ../output/stage1_onnx_to_hip.mlir
 # ... (all stages)
 ```
 Copy actual output into this document. Never fabricate examples.
@@ -996,12 +996,12 @@ Copy actual output into this document. Never fabricate examples.
 - Exception: One concrete example per concept with "(demo model)" note
 
 **Rule 3: Use Relative Paths**
-- ❌ `C:/Develop/m/build/onnx-hipdnn-ep/Debug/bin/hip-opt.exe`
-- ✅ `../../build/$(basename $PWD)/Debug/bin/hip-opt.exe`
+- ❌ `C:/Develop/m/build/onnx-hipdnn-ep/Debug/bin/morphizen-opt.exe`
+- ✅ `../../build/$(basename $PWD)/Debug/bin/morphizen-opt.exe`
 
 **Rule 4: Make Commands Reproducible**
 - Use `$(basename $PWD)` - works on any checkout
-- Use `tools/hip-opt/demos/` - correct paths from project root
+- Use `tools/morphizen-opt/demos/` - correct paths from project root
 - Anyone should copy-paste and succeed
 
 **Rule 5: Validate Everything** ⚠️ **MANDATORY**

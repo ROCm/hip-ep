@@ -6,10 +6,13 @@
 # LIT tests for morphizen-mlir-compiler
 # Simplified - tests are run via llvm-lit directly (no site config needed)
 
+# Find lit executable
+find_program(LIT_EXECUTABLE NAMES lit llvm-lit REQUIRED)
+
 # Add test target
 add_custom_target(check-morphizen-mlir-lit
-    COMMAND ${Python3_EXECUTABLE} -m lit -v ${CMAKE_CURRENT_SOURCE_DIR}
-    DEPENDS hip-opt mlir-hip-compiler
+    COMMAND ${LIT_EXECUTABLE} -v ${CMAKE_CURRENT_SOURCE_DIR}
+    DEPENDS morphizen-opt morphizen-compile
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     COMMENT "Running LIT tests for morphizen-mlir-compiler"
 )
@@ -17,6 +20,6 @@ add_custom_target(check-morphizen-mlir-lit
 # Add to CTest
 add_test(
     NAME MorphizenMLIRLitTests
-    COMMAND ${Python3_EXECUTABLE} -m lit -v ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMAND ${LIT_EXECUTABLE} -v ${CMAKE_CURRENT_SOURCE_DIR}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )

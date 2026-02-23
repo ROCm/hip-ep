@@ -18,7 +18,7 @@
 // Expected: LLVM calls to HIP runtime wrapper functions
 // ============================================================================
 
-// RUN: hip-opt %s --convert-hip-to-llvm | FileCheck %s
+// RUN: morphizen-opt %s --convert-hip-to-llvm | FileCheck %s
 
 module {
   // Test function receives context as parameter (real pipeline pattern)

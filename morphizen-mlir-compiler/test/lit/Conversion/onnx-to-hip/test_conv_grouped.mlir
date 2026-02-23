@@ -20,7 +20,7 @@
 // Expected: hip.conv operations with correct group attribute
 // ============================================================================
 
-// RUN: hip-opt %s --convert-onnx-to-hip | FileCheck %s
+// RUN: morphizen-opt %s --convert-onnx-to-hip | FileCheck %s
 
 module {
   func.func @conv_grouped_test(%input: tensor<1x64x56x56xf32>, %weights: tensor<128x32x3x3xf32>, %bias: tensor<128xf32>) -> tensor<1x128x56x56xf32> {

@@ -1,4 +1,4 @@
-// RUN: hip-opt %s -canonicalize | FileCheck %s
+// RUN: morphizen-opt %s -canonicalize | FileCheck %s
 
 // Test self-copy elimination
 func.func @test_self_copy(%ctx: !hip.context, %buf: memref<1x64xf32, 1>) {

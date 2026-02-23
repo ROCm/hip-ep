@@ -8,7 +8,7 @@ MLIR-based ahead-of-time (AOT) compilation backend for onnx-hipdnn-ep.
 
 ## Architecture
 
-MLIR dialects → mlir-hip-compiler → HIP backend → DLL generation → ONNX Runtime EP
+MLIR dialects → morphizen-compile → HIP backend → DLL generation → ONNX Runtime EP
 
 ## Documentation
 

@@ -68,7 +68,7 @@ cmake -S . -B ../../build/onnx-hipdnn-ep \
   -DBUILD_HIP_OPT_TOOL=ON
 
 cmake --build ../../build/onnx-hipdnn-ep \
-  --config Debug --target hip-opt
+  --config Debug --target morphizen-opt
 ```
 
 ---
@@ -76,7 +76,7 @@ cmake --build ../../build/onnx-hipdnn-ep \
 # Stage 1: ONNX → HIP Dialect
 
 ```bash
-hip-opt.exe demo_two_layer_conv.mlir \
+morphizen-opt.exe demo_two_layer_conv.mlir \
   --convert-onnx-to-hip
 ```
 
@@ -90,7 +90,7 @@ hip-opt.exe demo_two_layer_conv.mlir \
 # Stage 2: Buffer Deallocation
 
 ```bash
-hip-opt.exe demo_two_layer_conv.mlir \
+morphizen-opt.exe demo_two_layer_conv.mlir \
   --convert-onnx-to-hip \
   --ownership-based-buffer-deallocation
 ```
@@ -106,7 +106,7 @@ hip-opt.exe demo_two_layer_conv.mlir \
 # Stage 3: Memory Pooling
 
 ```bash
-hip-opt.exe demo_two_layer_conv.mlir \
+morphizen-opt.exe demo_two_layer_conv.mlir \
   --convert-onnx-to-hip \
   --ownership-based-buffer-deallocation \
   --memory-pooling
@@ -123,7 +123,7 @@ hip-opt.exe demo_two_layer_conv.mlir \
 # Stage 4: HIP → LLVM Lowering
 
 ```bash
-hip-opt.exe demo_two_layer_conv.mlir \
+morphizen-opt.exe demo_two_layer_conv.mlir \
   --convert-onnx-to-hip \
   --ownership-based-buffer-deallocation \
   --memory-pooling \
@@ -141,7 +141,7 @@ hip-opt.exe demo_two_layer_conv.mlir \
 # Stage 5: C Interface Generation
 
 ```bash
-hip-opt.exe demo_two_layer_conv.mlir \
+morphizen-opt.exe demo_two_layer_conv.mlir \
   --convert-onnx-to-hip \
   --ownership-based-buffer-deallocation \
   --memory-pooling \
@@ -160,7 +160,7 @@ hip-opt.exe demo_two_layer_conv.mlir \
 
 ```bash
 # Save the interface-generated MLIR to a file
-hip-opt.exe demo_two_layer_conv.mlir \
+morphizen-opt.exe demo_two_layer_conv.mlir \
   --convert-onnx-to-hip \
   --ownership-based-buffer-deallocation \
   --memory-pooling \
@@ -169,7 +169,7 @@ hip-opt.exe demo_two_layer_conv.mlir \
   > demo_with_interface.mlir
 
 # Compile to DLL (or use --from-onnx-mlir to run all passes)
-mlir-hip-compiler.exe demo_with_interface.mlir \
+morphizen-compile.exe demo_with_interface.mlir \
   -o inference.dll -v --keep
 ```
 
@@ -723,7 +723,7 @@ llvm.func @inference_cleanup(%state: !llvm.ptr) -> i32
 
 # Stage 6: Tool Reference
 
-**Tool**: `mlir-hip-compiler` (uses LLVMBackend + DLLLinker libraries)
+**Tool**: `morphizen-compile` (uses LLVMBackend + DLLLinker libraries)
 
 **Options**:
 - `--from-onnx-mlir` - Run all 5 passes (ONNX→HIP→BufferDealloc→Pool→LLVM→Interface)
@@ -1009,7 +1009,7 @@ func.func @main(%ctx, %input, %output) -> i32
 
 **Development Workflow** (Standalone Tools):
 ```
-ONNX MLIR → hip-opt (passes) → mlir-hip-compiler → DLL
+ONNX MLIR → morphizen-opt (passes) → morphizen-compile → DLL
 ```
 
 **Production Workflow** (ONNX Runtime Integration):
@@ -1079,7 +1079,7 @@ struct ONNXConvOpLoweringPattern :
 - [x] **Constant handling** with upload/release helpers
 - [x] **Error handling** with proper return codes
 - [x] **Two-layer convolution demo** working end-to-end
-- [x] **LLVM IR → DLL compilation** via mlir-hip-compiler
+- [x] **LLVM IR → DLL compilation** via morphizen-compile
 - [x] **DLL export verification** with automated checks
 - [x] **End-to-end testing infrastructure** with mock runtime
 - [x] **GPU resource management** (hipStreamCreate, miopenCreate)
@@ -1102,7 +1102,7 @@ struct ONNXConvOpLoweringPattern :
 
 2. ~~**Memory pooling**~~ ✅ **COMPLETED** with ~60% savings
 
-3. ~~**LLVM IR → DLL compilation**~~ ✅ **COMPLETED** via mlir-hip-compiler
+3. ~~**LLVM IR → DLL compilation**~~ ✅ **COMPLETED** via morphizen-compile
 
 4. ~~**End-to-end testing**~~ ✅ **COMPLETED** with mock runtime
 
@@ -1158,21 +1158,21 @@ cd /path/to/onnx-hipdnn-ep
 cmake -S . -B ../../build/$(basename $PWD) \
   -DBUILD_HIP_OPT_TOOL=ON -DBUILD_MLIR_HIP_COMPILER=ON
 cmake --build ../../build/$(basename $PWD) \
-  --config Debug --target hip-opt mlir-hip-compiler test-model-dll
+  --config Debug --target morphizen-opt morphizen-compile test-model-dll
 
 # 2. Run Stage 1: ONNX → HIP
-hip-opt.exe demo_two_layer_conv.mlir --convert-onnx-to-hip
+morphizen-opt.exe demo_two_layer_conv.mlir --convert-onnx-to-hip
 
 # 3. Run Stage 2: Buffer Deallocation
-hip-opt.exe demo_two_layer_conv.mlir \
+morphizen-opt.exe demo_two_layer_conv.mlir \
   --convert-onnx-to-hip --ownership-based-buffer-deallocation
 
 # 4. Run Stage 3: Memory Pooling
-hip-opt.exe demo_two_layer_conv.mlir \
+morphizen-opt.exe demo_two_layer_conv.mlir \
   --convert-onnx-to-hip --ownership-based-buffer-deallocation --memory-pooling
 
 # 5. Run Stages 4-5: HIP → LLVM → Interface
-hip-opt.exe demo_two_layer_conv.mlir \
+morphizen-opt.exe demo_two_layer_conv.mlir \
   --convert-onnx-to-hip \
   --ownership-based-buffer-deallocation \
   --memory-pooling \
@@ -1181,7 +1181,7 @@ hip-opt.exe demo_two_layer_conv.mlir \
   2>/dev/null > my_stage5.mlir
 
 # 6. Run Stage 6: Compile to DLL (runs all passes with --from-onnx-mlir)
-mlir-hip-compiler.exe demo_two_layer_conv.mlir \
+morphizen-compile.exe demo_two_layer_conv.mlir \
   --from-onnx-mlir -o my_inference.dll -v --keep
 
 # 7. Run Stage 7: End-to-End Testing
@@ -1301,13 +1301,13 @@ ONNX Model (Input)
 │ COMPILE TIME (Two Paths)                              │
 ├───────────────────────────────────────────────────────┤
 │ PATH A: Standalone Tools (Dev)                        │
-│ • hip-opt: ONNX → MLIR (7 stages)                     │
+│ • morphizen-opt: ONNX → MLIR (7 stages)                     │
 │   (--convert-onnx-to-hip)                             │
 │   (--ownership-based-buffer-deallocation)             │
 │   (--memory-pooling)                                  │
 │   (--convert-hip-to-llvm)                             │
 │   (--generate-interface)                              │
-│ • mlir-hip-compiler: MLIR → DLL                       │
+│ • morphizen-compile: MLIR → DLL                       │
 │   (Translate, Optimize, Compile, Link)                │
 │ • test-model-dll: DLL → Validation                    │
 │                                                       │
@@ -1340,7 +1340,7 @@ ONNX + EPContext (Cached)
 <div class="columns">
 <div>
 
-**hip-opt** (MLIR Transformation)
+**morphizen-opt** (MLIR Transformation)
 - Purpose: Pass testing
 - Input: ONNX/HIP MLIR
 - Output: Transformed MLIR
@@ -1352,7 +1352,7 @@ ONNX + EPContext (Cached)
   - --generate-interface
 - Usage: Development, debugging
 
-**mlir-hip-compiler** (DLL Compilation)
+**morphizen-compile** (DLL Compilation)
 - Purpose: Production artifacts
 - Input: LLVM dialect MLIR
 - Output: Native DLL
@@ -1386,18 +1386,18 @@ ONNX + EPContext (Cached)
 
 **Multi-step (Development/Debugging)**:
 ```bash
-hip-opt input.mlir --convert-onnx-to-hip \
+morphizen-opt input.mlir --convert-onnx-to-hip \
   --ownership-based-buffer-deallocation \
   --memory-pooling \
   --convert-hip-to-llvm \
   --generate-interface > transformed.mlir
-mlir-hip-compiler transformed.mlir -o output.dll
+morphizen-compile transformed.mlir -o output.dll
 test-model-dll output.dll
 ```
 
 **One-step (Production)**:
 ```bash
-mlir-hip-compiler input.mlir --from-onnx-mlir -o output.dll
+morphizen-compile input.mlir --from-onnx-mlir -o output.dll
 ```
 
 **Both use same passes and backend**: LLVMBackend + DLLLinker
@@ -1420,7 +1420,7 @@ mlir-hip-compiler input.mlir --from-onnx-mlir -o output.dll
 # Questions?
 
 **Demo files available at:**
-`tools/hip-opt/demos/demo_two_layer_conv.mlir`
+`tools/morphizen-opt/demos/demo_two_layer_conv.mlir`
 
 **Output files available at:**
 `../output/stage*.mlir`

@@ -109,10 +109,10 @@ Licensed under the MIT License.
 - `src/CMakeLists.txt`
 - `src/Tools/onnx-mlir-opt/CMakeLists.txt`
 
-**Problem**: hip-opt tool had CLI option conflict
+**Problem**: morphizen-opt tool had CLI option conflict
 - Error: `CommandLine Error: Option 'o' registered more than once!`
-- Root cause: Both hip-opt and onnx-mlir libraries register `-o` option via OMCompilerOptions
-- Bad dependency chain: `hip-opt → HipDialect → OMONNXOps → OMMlirDialects → OMCompilerOptions`
+- Root cause: Both morphizen-opt and onnx-mlir libraries register `-o` option via OMCompilerOptions
+- Bad dependency chain: `morphizen-opt → HipDialect → OMONNXOps → OMMlirDialects → OMCompilerOptions`
 
 **Initial Approach (ABANDONED)**: Remove OMCompilerOptions dependency
 - Tried removing `OMCompilerOptions` from `OMMlirDialects` CMake
@@ -161,7 +161,7 @@ Licensed under the MIT License.
 - Global variables (like `disableMemRefPrefetch`, `outputBaseName`) always exist with default values
 - CLI registration (`llvm::cl::opt<>` declarations) only compiled when macro is defined
 - **onnx-mlir** and **onnx-mlir-opt**: Define macro → CLI registration enabled
-- **hip-opt**: Don't define macro → CLI registration disabled, no `-o` conflict!
+- **morphizen-opt**: Don't define macro → CLI registration disabled, no `-o` conflict!
 
 **Status**: ✅ COMMITTED (252a588b)
 
@@ -222,7 +222,7 @@ CMake Error: The dependency target "split-file" of target "check-onnx-lit" does 
 The original design smell remains (core dialect depending on CLI options), but we solve the immediate problem:
 
 **Benefits**:
-1. ✅ No CLI option conflicts - hip-opt can now build and run
+1. ✅ No CLI option conflicts - morphizen-opt can now build and run
 2. ✅ Minimal code changes - only wrap existing code with `#ifdef`
 3. ✅ No functional changes - onnx-mlir tools work exactly the same
 4. ✅ Safe - global variables still accessible to code that needs them
@@ -283,14 +283,14 @@ cmake -B ../../build/onnx-hipdnn-ep -G Ninja \
   -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded$<$<CONFIG:Debug>:Debug>"
 
-# Build hip-opt
-ninja -C ../../build/onnx-hipdnn-ep hip-opt
+# Build morphizen-opt
+ninja -C ../../build/onnx-hipdnn-ep morphizen-opt
 
 # Verify it runs without option conflicts
-../../build/onnx-hipdnn-ep/bin/hip-opt.exe --help
+../../build/onnx-hipdnn-ep/bin/morphizen-opt.exe --help
 ```
 
-Expected: hip-opt runs successfully, no "Option 'o' registered more than once" error.
+Expected: morphizen-opt runs successfully, no "Option 'o' registered more than once" error.
 
 ## Maintenance Notes
 
@@ -306,8 +306,8 @@ To update from upstream onnx/onnx-mlir:
 ### Testing After Changes
 
 After modifying onnx-mlir, verify:
-1. ✅ hip-opt builds successfully on Windows (MSVC + Ninja)
-2. ✅ hip-opt runs without CLI option conflicts
+1. ✅ morphizen-opt builds successfully on Windows (MSVC + Ninja)
+2. ✅ morphizen-opt runs without CLI option conflicts
 3. ✅ All MSVC-specific fixes still apply
 4. ✅ onnx-mlir and onnx-mlir-opt tools still work correctly
 5. Update this document and commit changes
@@ -327,14 +327,14 @@ cmake -B ../../build/onnx-hipdnn-ep -G Ninja -DCMAKE_BUILD_TYPE=Debug
 The onnx-mlir fork contains **minimal, well-justified changes**:
 - ✅ Two MSVC compilation fixes (3c1bf123)
 - ❌ TableGen path fix for Windows/Ninja (documented but not committed)
-- ✅ Conditional CLI registration to fix hip-opt conflict (252a588b)
+- ✅ Conditional CLI registration to fix morphizen-opt conflict (252a588b)
 - ✅ Restored OMCompilerOptions dependency (252a588b)
 - ✅ Fixed broken ONNX_MLIR_BUILD_TESTS flag (current)
 - ✅ No behavioral changes - all fixes are compile-time only
 - ✅ Safe for production use
 - ✅ All changes committed and tested working
 
-**Verdict**: Clean fork with targeted improvements for Windows/MSVC compatibility, hip-opt integration, and proper CMake option handling.
+**Verdict**: Clean fork with targeted improvements for Windows/MSVC compatibility, morphizen-opt integration, and proper CMake option handling.
 
 **Notes**:
 - Change 3 (TableGen path configuration) was documented but not actually needed for the build to succeed. The Visual Studio generator works correctly without this change.

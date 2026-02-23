@@ -751,7 +751,7 @@ DLLLinker::InMemoryLinkOutput DLLLinker::linkDLLFromMemory_Linux(
 
 ### Phase 4: Integration with MLIR-HIP Compiler
 
-**File**: `mlir-compiler/tools/mlir-hip-compiler/main.cpp`
+**File**: `mlir-compiler/tools/morphizen-compile/main.cpp`
 
 **Add new mode**: `--mode in-memory-dll`
 
@@ -904,7 +904,7 @@ module {
 **Test script**:
 ```bash
 # Compile with in-memory mode
-mlir-hip-compiler test/e2e/test_in_memory_dll.mlir \
+morphizen-compile test/e2e/test_in_memory_dll.mlir \
   --mode in-memory-dll -o test_output.dll
 
 # Verify DLL exists and has correct format
@@ -1032,7 +1032,7 @@ In-memory approach:
 
 - **LLVMBackend**: `mlir-compiler/lib/Backend/LLVMBackend.{h,cpp}`
 - **DLLLinker**: `mlir-compiler/lib/Backend/DLLLinker.{h,cpp}`
-- **Compiler Tool**: `mlir-compiler/tools/mlir-hip-compiler/main.cpp`
+- **Compiler Tool**: `mlir-compiler/tools/morphizen-compile/main.cpp`
 
 ### Documentation
 
@@ -1063,7 +1063,7 @@ In-memory approach:
 - [ ] Verify .so output format
 
 ### Phase 4: Integration
-- [ ] Add `--mode in-memory-dll` option to mlir-hip-compiler
+- [ ] Add `--mode in-memory-dll` option to morphizen-compile
 - [ ] Integrate LLVMBackend and DLLLinker in main.cpp
 - [ ] Add end-to-end test
 - [ ] Document usage in BUILDING.md

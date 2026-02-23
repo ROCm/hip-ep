@@ -14,8 +14,10 @@ Guidance for Claude Code when working with this repository.
 
 ## Build System
 
-**CRITICAL**: Non-standard build paths:
-- Build: `../../build/$(basename $PWD)` (NOT `./build`)
+**CRITICAL**: Work from project root directory.
+
+**Build paths**:
+- Build: `../build/$(basename $PWD)` (NOT `./build`)
 - Install: `../../local`
 - Runtime: `/MTd` via `CMAKE_MSVC_RUNTIME_LIBRARY`
 
@@ -23,20 +25,20 @@ Guidance for Claude Code when working with this repository.
 ```bash
 # CRITICAL: CMAKE_PREFIX_PATH must be absolute path (relative paths fail)
 LOCAL_DIR=$(cd ../../local && pwd)
-cmake -S . -B ../../build/$(basename $PWD) -DBUILD_SHARED_LIBS=OFF \
+cmake -S . -B ../build/$(basename $PWD) -DBUILD_SHARED_LIBS=OFF \
   "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded\$<\$<CONFIG:Debug>:Debug>" \
   -DCMAKE_BUILD_TYPE=Debug "-DCMAKE_PREFIX_PATH=$LOCAL_DIR" \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
   -Dmorphizen_ENABLE_UNIT_TEST=ON --fresh
 ```
 
-**Build**: `cmake --build ../../build/$(basename $PWD) --config Debug --parallel`
+**Build**: `cmake --build ../build/$(basename $PWD) --config Debug --parallel`
 
-**Test**: `../../build/$(basename $PWD)/bin/morphizen-unit-tests.exe`
+**Test**: `ctest --test-dir ../build/$(basename $PWD)/unit-test --verbose`
 
 **MSVC Setup** (if headers missing):
 ```bash
-cmd /c "call \"\"C:\\msvsn2022\\VC\\Auxiliary\\Build\\vcvars64.bat\"\" && cd /d %CD% && cmake --build \"\"../../build/$(basename $PWD)\"\" --config Debug --parallel"
+cmd /c "call \"\"C:\\msvsn2022\\VC\\Auxiliary\\Build\\vcvars64.bat\"\" && cd /d %CD% && cmake --build \"\"../build/$(basename $PWD)\"\" --config Debug --parallel"
 ```
 
 **Key Options** (defaults in cmake/morphizen_options.cmake):

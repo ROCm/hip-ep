@@ -16,7 +16,7 @@
 // Expected: hip.relu operation preserving tensor shape and context
 // ============================================================================
 
-// RUN: hip-opt %s --convert-onnx-to-hip | FileCheck %s
+// RUN: morphizen-opt %s --convert-onnx-to-hip | FileCheck %s
 
 module {
   func.func @test_relu(%input: tensor<1x64x224x224xf32>) -> tensor<1x64x224x224xf32> {

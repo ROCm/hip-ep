@@ -63,6 +63,9 @@ TEXT_EXTENSIONS = {
     ".gitattributes",
     ".clang-format",
     ".clang-tidy",
+    # MLIR
+    ".mlir",
+    ".td",
 }
 
 

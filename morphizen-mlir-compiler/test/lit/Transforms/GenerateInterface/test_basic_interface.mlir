@@ -27,7 +27,7 @@
 // the pass loads correctly and checks prerequisites.
 // ============================================================================
 
-// RUN: not hip-opt %s --generate-interface 2>&1 | FileCheck %s
+// RUN: not morphizen-opt %s --generate-interface 2>&1 | FileCheck %s
 
 module {
   // Minimal module that will fail prerequisite checks

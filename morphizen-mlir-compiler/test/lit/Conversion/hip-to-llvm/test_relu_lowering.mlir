@@ -14,7 +14,7 @@
 //   (NOT MemRef descriptor pointer)
 // ============================================================================
 
-// RUN: hip-opt %s --convert-hip-to-llvm | FileCheck %s
+// RUN: morphizen-opt %s --convert-hip-to-llvm | FileCheck %s
 
 module {
   func.func @test_relu_lowering(%ctx: !hip.context,

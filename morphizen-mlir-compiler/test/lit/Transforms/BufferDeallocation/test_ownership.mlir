@@ -19,7 +19,7 @@
 // Expected: hip.free for temp only, NOT for input (function argument)
 // ============================================================================
 
-// RUN: hip-opt %s --hip-buffer-deallocation | FileCheck %s
+// RUN: morphizen-opt %s --hip-buffer-deallocation | FileCheck %s
 
 module {
   func.func @test_ownership(
