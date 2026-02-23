@@ -18,7 +18,10 @@
 #include <hip/hip_runtime_api.h>
 #include <vector>
 
-struct MemRef3D { float *a, *al; int64_t o, s[3], st[3]; };
+struct MemRef3D {
+  float *a, *al;
+  int64_t o, s[3], st[3];
+};
 
 extern "C" __declspec(dllimport) MemRef3D attention(
     float* X_a, float* X_al, int64_t X_o, int64_t X_s0, int64_t X_s1,
