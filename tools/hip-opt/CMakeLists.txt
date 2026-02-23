@@ -179,6 +179,14 @@ target_link_libraries(hip-compiler PRIVATE
   MLIRFuncDialect
   MLIRMemRefDialect
   MLIRSCFDialect
+  MLIRTensorDialect
+  MLIRDestinationStyleOpInterface
+  MLIRBufferizationDialect
+  MLIRBufferizationTransforms
+  MLIRArithTransforms
+  MLIRSCFTransforms
+  MLIRTensorTransforms
+  MLIRFuncTransforms
   MLIRLLVMDialect
   MLIRLLVMCommonConversion
   MLIRArithToLLVM

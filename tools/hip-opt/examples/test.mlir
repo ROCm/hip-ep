@@ -1,3 +1,4 @@
+// Memref-level test: exercises hip.alloc / hip.free directly (post-bufferization ops).
 // RUN: hip-opt %s --convert-hip-to-llvm | FileCheck %s
 
 module {

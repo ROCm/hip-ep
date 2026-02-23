@@ -220,20 +220,26 @@ cmake .. \
 
 ## Usage
 
-### Input MLIR with HIP Dialect (3D tensors)
+### Input MLIR with HIP Dialect (tensor DPS)
+
+The HIP dialect uses **tensor types** as its canonical form. All compute ops use
+destination-passing style (DPS): output tensors are passed as function arguments
+and returned as results. Bufferization to memref is handled automatically by the
+compiler pipeline.
 
 ```mlir
 module {
   func.func @example(
-      %A: memref<?x?x?xf32, 1>,   // [B, S, D]
-      %W: memref<?x?xf32, 1>,     // [D, D]  (2D weight, broadcast)
-      %C: memref<?x?x?xf32, 1>) { // [B, S, D]
+      %A: tensor<?x?x?xf32>,   // [B, S, D]
+      %W: tensor<?x?xf32>,     // [D, D]  (2D weight, broadcast)
+      %C: tensor<?x?x?xf32>)   // [B, S, D]  (output init)
+      -> tensor<?x?x?xf32> {
     %handle = hip.create_handle() : !hip.handle
-    hip.hipblaslt.matmul(%handle)
-        ins(%A, %W : memref<?x?x?xf32, 1>, memref<?x?xf32, 1>)
-        outs(%C : memref<?x?x?xf32, 1>)
+    %result = hip.hipblaslt.matmul(%handle)
+        ins(%A, %W : tensor<?x?x?xf32>, tensor<?x?xf32>)
+        outs(%C : tensor<?x?x?xf32>) -> tensor<?x?x?xf32>
     hip.destroy_handle(%handle) : !hip.handle
-    return
+    return %result : tensor<?x?x?xf32>
   }
 }
 ```
@@ -247,15 +253,17 @@ hip-compiler input.mlir -o model.dll
 ```
 
 This performs the full pipeline internally:
-1. MLIR parsing and pass pipeline (`--convert-hip-to-llvm`, etc.)
-2. DLL export injection (marks entry functions with `dllexport`)
-3. LLVM IR translation and native code generation (`.obj`)
-4. Linking with `hip_runtime_static.lib` and external dependencies to produce `.dll` + `.lib`
+1. One-shot bufferization (tensor -> memref with device memory allocation)
+2. HIP-to-LLVM lowering (`--convert-hip-to-llvm`, memref finalization, etc.)
+3. DLL export injection (marks entry functions with `dllexport`)
+4. LLVM IR translation and native code generation (`.obj`)
+5. Linking with `hip_runtime_static.lib` and external dependencies to produce `.dll` + `.lib`
 
 For debugging, you can still use `hip-opt` to inspect intermediate IR:
 
 ```bash
 hip-opt input.mlir \
+    --one-shot-bufferize="bufferize-function-boundaries" \
     --convert-hip-to-llvm \
     --finalize-memref-to-llvm \
     --convert-arith-to-llvm \
@@ -329,15 +337,20 @@ An opaque type representing a HIP runtime handle. Lowered to `!llvm.ptr` in LLVM
 
 ## Pass Pipeline
 
-The `--convert-hip-to-llvm` pass converts all HIP ops to LLVM function calls. Additional standard passes are needed:
+The full lowering pipeline from tensor HIP IR to LLVM IR:
 
 ```
---convert-hip-to-llvm          # HIP ops -> llvm.call @hip_*()
+--one-shot-bufferize           # tensor -> memref (device allocation)
+--convert-hip-to-llvm          # HIP ops + memref.alloc -> llvm.call @hip_*()
 --finalize-memref-to-llvm      # memref.dim -> LLVM
 --convert-arith-to-llvm        # arith.constant -> LLVM
 --convert-func-to-llvm         # func.func -> LLVM
 --reconcile-unrealized-casts   # Clean up type casts
 ```
+
+The `--convert-hip-to-llvm` pass also converts `memref.alloc` and `memref.dealloc`
+(produced by bufferization) to device memory allocation calls (`hip_device_malloc` /
+`hip_device_free`), ensuring all intermediate buffers are allocated on the GPU.
 
 ## Extending the Dialect
 

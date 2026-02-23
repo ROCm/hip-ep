@@ -17,9 +17,10 @@
 #include <hip/hip_runtime_api.h>
 #include <vector>
 
-// A is 3D memref<?x?x?xf32,1> = 9 args; B0, B1 are 2D = 7 args each; C is 3D =
-// 9 args
-extern "C" __declspec(dllimport) void two_matmuls(
+struct MemRef3D { float *a, *al; int64_t o, s[3], st[3]; };
+struct MemRef2D { float *a, *al; int64_t o, s[2], st[2]; };
+
+extern "C" __declspec(dllimport) MemRef3D two_matmuls(
     float* A_a, float* A_al, int64_t A_o, int64_t A_s0, int64_t A_s1,
     int64_t A_s2, int64_t A_st0, int64_t A_st1, int64_t A_st2, float* B0_a,
     float* B0_al, int64_t B0_o, int64_t B0_s0, int64_t B0_s1, int64_t B0_st0,
