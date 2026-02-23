@@ -12,13 +12,7 @@
 #include "morphizen-mlir-compiler/Target/LLVM/DLLLinker.h"
 #include "morphizen-mlir-compiler/Target/LLVM/LLVMBackend.h"
 
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Parser/Parser.h"
@@ -26,8 +20,6 @@
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
 #include "mlir/Transforms/Passes.h"
-
-#include "src/Dialect/ONNX/ONNXDialect.hpp"
 
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -52,20 +44,11 @@ bool CompilerDriver::compile(
     const morphizen::mlir_compiler::CompilationOptions& options,
     std::string& error_message) {
   // Register all passes (idempotent)
-  morphizen::compiler::registerCompilerPasses();
-  morphizen::registerConversionPasses();
-  mlir::hip::registerHipTransformPasses();
+  morphizen::registerAllPasses();
 
   // Initialize MLIR context
   mlir::MLIRContext context;
-  context.loadDialect<mlir::BuiltinDialect>();
-  context.loadDialect<mlir::LLVM::LLVMDialect>();
-  context.loadDialect<mlir::func::FuncDialect>();
-  context.loadDialect<mlir::arith::ArithDialect>();
-  context.loadDialect<mlir::memref::MemRefDialect>();
-  context.loadDialect<mlir::bufferization::BufferizationDialect>();
-  context.loadDialect<mlir::hip::HipDialect>();
-  context.loadDialect<mlir::ONNXDialect>();
+  morphizen::loadAllDialects(context);
   mlir::registerLLVMDialectTranslation(context);
 
   // Parse MLIR input
