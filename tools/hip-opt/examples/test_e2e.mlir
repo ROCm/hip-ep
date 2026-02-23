@@ -1,4 +1,6 @@
 // End-to-end test: self-contained transformer layer exercising all HIP dialect ops.
+// NOTE: This test uses memref mode with the legacy positional argument format.
+// It is kept as a memref-level reference; new tests should use tensor DPS mode.
 // All buffers allocated internally via hip.alloc (zero-filled by hipMalloc).
 // No function arguments -- avoids memref calling convention complexity.
 //

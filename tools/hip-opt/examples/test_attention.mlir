@@ -11,86 +11,78 @@
 //
 // scale is pre-filled with 1/sqrt(D) from the C++ driver.
 //
-// Compile pipeline:
+// Compile pipeline (hip-compiler handles this automatically):
 //   hip-opt test_attention.mlir \
+//       --one-shot-bufferize="bufferize-function-boundaries" \
 //       --convert-hip-to-llvm --finalize-memref-to-llvm --convert-arith-to-llvm \
 //       --convert-func-to-llvm --reconcile-unrealized-casts \
 //     | mlir-translate --mlir-to-llvmir -o attention.ll
 
 module {
   func.func @attention(
-      %X:     memref<?x?x?xf32, 1>,
-      %Wq:    memref<?x?xf32, 1>,
-      %Wk:    memref<?x?xf32, 1>,
-      %Wv:    memref<?x?xf32, 1>,
-      %scale: memref<?x?x?xf32, 1>,
-      %out:   memref<?x?x?xf32, 1>) {
+      %X:     tensor<?x?x?xf32>,
+      %Wq:    tensor<?x?xf32>,
+      %Wk:    tensor<?x?xf32>,
+      %Wv:    tensor<?x?xf32>,
+      %scale: tensor<?x?x?xf32>,
+      %out:   tensor<?x?x?xf32>) -> tensor<?x?x?xf32> {
     %handle = hip.create_handle() : !hip.handle
 
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     %c2 = arith.constant 2 : index
-    %B = memref.dim %X, %c0 : memref<?x?x?xf32, 1>
-    %S = memref.dim %X, %c1 : memref<?x?x?xf32, 1>
-    %D = memref.dim %X, %c2 : memref<?x?x?xf32, 1>
+    %B = tensor.dim %X, %c0 : tensor<?x?x?xf32>
+    %S = tensor.dim %X, %c1 : tensor<?x?x?xf32>
+    %D = tensor.dim %X, %c2 : tensor<?x?x?xf32>
 
     // Q = X @ Wq  [B,S,D]  (Wq is 2D, broadcast across batch)
-    %Q = hip.alloc(%handle, %B, %S, %D) : memref<?x?x?xf32, 1>
-    hip.hipblaslt.matmul(%handle)
-        ins(%X, %Wq : memref<?x?x?xf32, 1>, memref<?x?xf32, 1>)
-        outs(%Q : memref<?x?x?xf32, 1>)
+    %Q_init = tensor.empty(%B, %S, %D) : tensor<?x?x?xf32>
+    %Q = hip.hipblaslt.matmul(%handle)
+        ins(%X, %Wq : tensor<?x?x?xf32>, tensor<?x?xf32>)
+        outs(%Q_init : tensor<?x?x?xf32>) -> tensor<?x?x?xf32>
 
     // K = X @ Wk  [B,S,D]
-    %K = hip.alloc(%handle, %B, %S, %D) : memref<?x?x?xf32, 1>
-    hip.hipblaslt.matmul(%handle)
-        ins(%X, %Wk : memref<?x?x?xf32, 1>, memref<?x?xf32, 1>)
-        outs(%K : memref<?x?x?xf32, 1>)
+    %K_init = tensor.empty(%B, %S, %D) : tensor<?x?x?xf32>
+    %K = hip.hipblaslt.matmul(%handle)
+        ins(%X, %Wk : tensor<?x?x?xf32>, tensor<?x?xf32>)
+        outs(%K_init : tensor<?x?x?xf32>) -> tensor<?x?x?xf32>
 
     // V = X @ Wv  [B,S,D]
-    %V = hip.alloc(%handle, %B, %S, %D) : memref<?x?x?xf32, 1>
-    hip.hipblaslt.matmul(%handle)
-        ins(%X, %Wv : memref<?x?x?xf32, 1>, memref<?x?xf32, 1>)
-        outs(%V : memref<?x?x?xf32, 1>)
+    %V_init = tensor.empty(%B, %S, %D) : tensor<?x?x?xf32>
+    %V = hip.hipblaslt.matmul(%handle)
+        ins(%X, %Wv : tensor<?x?x?xf32>, tensor<?x?xf32>)
+        outs(%V_init : tensor<?x?x?xf32>) -> tensor<?x?x?xf32>
 
     // KT = transpose(K, 1, 2)  [B,D,S]
-    %KT = hip.alloc(%handle, %B, %D, %S) : memref<?x?x?xf32, 1>
-    hip.transpose(%handle, %c1, %c2)
-        ins(%K : memref<?x?x?xf32, 1>)
-        outs(%KT : memref<?x?x?xf32, 1>)
+    %KT_init = tensor.empty(%B, %D, %S) : tensor<?x?x?xf32>
+    %KT = hip.transpose(%handle, %c1, %c2)
+        ins(%K : tensor<?x?x?xf32>)
+        outs(%KT_init : tensor<?x?x?xf32>) -> tensor<?x?x?xf32>
 
     // scores = Q @ KT  [B,S,S]  (batched matmul, both 3D)
-    %scores = hip.alloc(%handle, %B, %S, %S) : memref<?x?x?xf32, 1>
-    hip.hipblaslt.matmul(%handle)
-        ins(%Q, %KT : memref<?x?x?xf32, 1>, memref<?x?x?xf32, 1>)
-        outs(%scores : memref<?x?x?xf32, 1>)
+    %scores_init = tensor.empty(%B, %S, %S) : tensor<?x?x?xf32>
+    %scores = hip.hipblaslt.matmul(%handle)
+        ins(%Q, %KT : tensor<?x?x?xf32>, tensor<?x?x?xf32>)
+        outs(%scores_init : tensor<?x?x?xf32>) -> tensor<?x?x?xf32>
 
     // scaled = scores * scale  [B,S,S]  (scale pre-filled with 1/sqrt(D))
-    %scaled = hip.alloc(%handle, %B, %S, %S) : memref<?x?x?xf32, 1>
-    hip.miopen.mul(%handle)
-        ins(%scores, %scale : memref<?x?x?xf32, 1>, memref<?x?x?xf32, 1>)
-        outs(%scaled : memref<?x?x?xf32, 1>)
+    %scaled_init = tensor.empty(%B, %S, %S) : tensor<?x?x?xf32>
+    %scaled = hip.miopen.mul(%handle)
+        ins(%scores, %scale : tensor<?x?x?xf32>, tensor<?x?x?xf32>)
+        outs(%scaled_init : tensor<?x?x?xf32>) -> tensor<?x?x?xf32>
 
     // attn = softmax(scaled)  [B,S,S]  (softmax over last dim)
-    %attn = hip.alloc(%handle, %B, %S, %S) : memref<?x?x?xf32, 1>
-    hip.miopen.softmax(%handle)
-        ins(%scaled : memref<?x?x?xf32, 1>)
-        outs(%attn : memref<?x?x?xf32, 1>)
+    %attn_init = tensor.empty(%B, %S, %S) : tensor<?x?x?xf32>
+    %attn = hip.miopen.softmax(%handle)
+        ins(%scaled : tensor<?x?x?xf32>)
+        outs(%attn_init : tensor<?x?x?xf32>) -> tensor<?x?x?xf32>
 
     // out = attn @ V  [B,S,D]  (batched matmul, both 3D)
-    hip.hipblaslt.matmul(%handle)
-        ins(%attn, %V : memref<?x?x?xf32, 1>, memref<?x?x?xf32, 1>)
-        outs(%out : memref<?x?x?xf32, 1>)
-
-    // Free intermediates
-    hip.free(%handle, %Q) : memref<?x?x?xf32, 1>
-    hip.free(%handle, %K) : memref<?x?x?xf32, 1>
-    hip.free(%handle, %V) : memref<?x?x?xf32, 1>
-    hip.free(%handle, %KT) : memref<?x?x?xf32, 1>
-    hip.free(%handle, %scores) : memref<?x?x?xf32, 1>
-    hip.free(%handle, %scaled) : memref<?x?x?xf32, 1>
-    hip.free(%handle, %attn) : memref<?x?x?xf32, 1>
+    %result = hip.hipblaslt.matmul(%handle)
+        ins(%attn, %V : tensor<?x?x?xf32>, tensor<?x?x?xf32>)
+        outs(%out : tensor<?x?x?xf32>) -> tensor<?x?x?xf32>
 
     hip.destroy_handle(%handle) : !hip.handle
-    return
+    return %result : tensor<?x?x?xf32>
   }
 }

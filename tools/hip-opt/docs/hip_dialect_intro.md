@@ -125,61 +125,71 @@ No runtime -- inlined and erased during lowering to LLVM.
 
 ---
 
-## Example: 3D Matmul with Weight Broadcast (DPS)
+## Example: 3D Matmul with Weight Broadcast (tensor DPS)
 
 ```mlir
 func.func @two_matmuls(
-    %A:  memref<?x?x?xf32, 1>,   // [B, S, K]
-    %B0: memref<?x?xf32, 1>,     // [K, N]  (2D, broadcast across batch)
-    %B1: memref<?x?xf32, 1>,     // [N, P]
-    %C:  memref<?x?x?xf32, 1>) { // [B, S, P]
+    %A:  tensor<?x?x?xf32>,   // [B, S, K]
+    %B0: tensor<?x?xf32>,     // [K, N]  (2D, broadcast across batch)
+    %B1: tensor<?x?xf32>,     // [N, P]
+    %C:  tensor<?x?x?xf32>)   // [B, S, P]  (output init)
+    -> tensor<?x?x?xf32> {
   %handle = hip.create_handle() : !hip.handle
 
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
-  %B = memref.dim %A, %c0 : memref<?x?x?xf32, 1>
-  %S = memref.dim %A, %c1 : memref<?x?x?xf32, 1>
-  %N = memref.dim %B0, %c1 : memref<?x?xf32, 1>
-  %tmp = hip.alloc(%handle, %B, %S, %N) : memref<?x?x?xf32, 1>
+  %B = tensor.dim %A, %c0 : tensor<?x?x?xf32>
+  %S = tensor.dim %A, %c1 : tensor<?x?x?xf32>
+  %N = tensor.dim %B0, %c1 : tensor<?x?xf32>
+  %tmp_init = tensor.empty(%B, %S, %N) : tensor<?x?x?xf32>
 
-  hip.hipblaslt.matmul(%handle)
-      ins(%A, %B0 : memref<?x?x?xf32, 1>, memref<?x?xf32, 1>)
-      outs(%tmp : memref<?x?x?xf32, 1>)
+  %tmp = hip.hipblaslt.matmul(%handle)
+      ins(%A, %B0 : tensor<?x?x?xf32>, tensor<?x?xf32>)
+      outs(%tmp_init : tensor<?x?x?xf32>) -> tensor<?x?x?xf32>
 
-  hip.hipblaslt.matmul(%handle)
-      ins(%tmp, %B1 : memref<?x?x?xf32, 1>, memref<?x?xf32, 1>)
-      outs(%C : memref<?x?x?xf32, 1>)
+  %C_out = hip.hipblaslt.matmul(%handle)
+      ins(%tmp, %B1 : tensor<?x?x?xf32>, tensor<?x?xf32>)
+      outs(%C : tensor<?x?x?xf32>) -> tensor<?x?x?xf32>
 
-  hip.free(%handle, %tmp) : memref<?x?x?xf32, 1>
   hip.destroy_handle(%handle) : !hip.handle
-  return
+  return %C_out : tensor<?x?x?xf32>
 }
 ```
 
 `%A` is 3D `[B,S,K]`, `%B0` is 2D `[K,N]` -- the matmul broadcasts B0 across
-all batches (stride_B=0). `%tmp` is the internally managed intermediate.
+all batches (stride_B=0). `%tmp_init` is created via `tensor.empty` and
+automatically becomes a device allocation after bufferization.
 
 ---
 
-## Lowering
+## Lowering Pipeline
 
-All ops are lowered to LLVM IR by the `--convert-hip-to-llvm` pass in
-`HipToLLVM.cpp`:
+The canonical HIP dialect uses tensor types. The lowering pipeline is:
+
+1. **`--one-shot-bufferize`** — converts tensor DPS ops to memref in-place ops.
+   `tensor.empty` becomes `memref.alloc`; function tensor args become memref args.
+2. **`--convert-hip-to-llvm`** — lowers all HIP ops and `memref.alloc`/`dealloc`
+   to LLVM dialect calls. `memref.alloc` is converted to `hip_device_malloc`
+   (device memory), not standard `malloc`.
+3. Standard LLVM lowering passes: `--finalize-memref-to-llvm`, `--convert-arith-to-llvm`,
+   `--convert-func-to-llvm`, `--reconcile-unrealized-casts`.
+
+Details of `--convert-hip-to-llvm`:
 
 - **Compute ops** lower to `llvm.call @hip_<op_name>(...)`. Memref arguments are
   converted to raw pointers via `MemRefDescriptor(...).allocatedPtr()`.
-  Shape metadata is extracted rank-generically from memref descriptors:
-  `rankA/rankB/batch/M/K/N` for matmul, `numElements` for add/mul,
-  `rows/cols` (flattened) for softmax and rms_norm,
-  `rank/dim0/dim1/shape` for transpose.
+  Shape metadata is extracted rank-generically from memref descriptors.
+- **`memref.alloc` / `memref.dealloc`** (produced by bufferization) are converted
+  to device allocation calls (`hip_device_malloc` / `hip_device_free`).
 - **Region ops** are inlined: body ops moved to parent block, region op erased.
 - **`!hip.handle`** is converted to `!llvm.ptr`.
 
-The `hip-compiler` tool runs this pass pipeline automatically, then translates
+The `hip-compiler` tool runs this full pipeline automatically, then translates
 the resulting LLVM dialect to LLVM IR, generates a native `.obj`, and links it
 with `hip_runtime_static.lib` and external libraries to produce a `.dll`.
 
 For manual debugging, `hip-opt` can run the pass pipeline in isolation:
+`--one-shot-bufferize="bufferize-function-boundaries"`,
 `--convert-hip-to-llvm`, `--finalize-memref-to-llvm`, `--convert-arith-to-llvm`,
 `--convert-func-to-llvm`, `--reconcile-unrealized-casts`.
 

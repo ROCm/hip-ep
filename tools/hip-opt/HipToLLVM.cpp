@@ -628,6 +628,69 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
   }
 };
 
+// --- memref.alloc -> hip_device_malloc (produced by bufferization for tensor.empty)
+struct MemRefAllocOpLowering
+    : public ConvertOpToLLVMPattern<memref::AllocOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(memref::AllocOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter& rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    MemRefType memRefType = op.getType();
+
+    if (!isConvertibleAndHasIdentityMaps(memRefType))
+      return rewriter.notifyMatchFailure(op, "incompatible memref type");
+
+    Type indexType = getIndexType();
+    Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+    FailureOr<LLVM::LLVMFuncOp> mallocFn = LLVM::lookupOrCreateFn(
+        rewriter, module, kHipMalloc, indexType, ptrType);
+    if (failed(mallocFn))
+      return failure();
+
+    SmallVector<Value, 4> sizes;
+    SmallVector<Value, 4> strides;
+    Value sizeBytes;
+    getMemRefDescriptorSizes(loc, memRefType, adaptor.getDynamicSizes(),
+                             rewriter, sizes, strides, sizeBytes, true);
+
+    Value allocatedPtr =
+        LLVM::CallOp::create(rewriter, loc, *mallocFn, sizeBytes).getResult();
+
+    MemRefDescriptor desc = createMemRefDescriptor(
+        loc, memRefType, allocatedPtr, allocatedPtr, sizes, strides, rewriter);
+    rewriter.replaceOp(op, {desc});
+    return success();
+  }
+};
+
+// --- memref.dealloc -> hip_device_free (produced by bufferization)
+struct MemRefDeallocOpLowering
+    : public ConvertOpToLLVMPattern<memref::DeallocOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(memref::DeallocOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter& rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type voidType = LLVM::LLVMVoidType::get(rewriter.getContext());
+    Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kHipFree, ptrType, voidType);
+    if (failed(funcOp))
+      return failure();
+
+    Value ptr = extractMemRefPtr(adaptor.getMemref(), rewriter, loc);
+    LLVM::CallOp::create(rewriter, loc, *funcOp, ptr);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 //===----------------------------------------------------------------------===//
 // ConvertHipToLLVM Pass
 //===----------------------------------------------------------------------===//
@@ -662,10 +725,12 @@ void ConvertHipToLLVMPass::runOnOperation() {
                GatherOpLowering, SiluOpLowering, GqaOpLowering>(typeConverter);
   patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter, kMiopenAdd);
   patterns.insert<MiopenBinaryOpLowering<MiopenMulOp>>(typeConverter, kMiopenMul);
+  patterns.add<MemRefAllocOpLowering, MemRefDeallocOpLowering>(typeConverter);
 
   LLVMConversionTarget target(*ctx);
   target.addLegalDialect<LLVM::LLVMDialect>();
   target.addIllegalDialect<HipDialect>();
+  target.addIllegalOp<memref::AllocOp, memref::DeallocOp>();
   target.addLegalOp<ModuleOp>();
 
   if (failed(applyPartialConversion(module, target, std::move(patterns))))
