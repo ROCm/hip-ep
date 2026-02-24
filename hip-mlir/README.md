@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # HIP MLIR Dialect
 
 An MLIR dialect for HIP (Heterogeneous-compute Interface for Portability)
