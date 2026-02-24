@@ -83,7 +83,7 @@ struct ConvToHipPattern : public OpConversionPattern<ONNXConvOp> {
 ```
 onnx-hipdnn-ep/
 ├── 3rd-party/
-│   ├── morphizen/              # MorphiZen framework (submodule)
+│   ├── morphizen/              # MorphiZen framework (parent project)
 │   └── onnx-mlir/              # onnx-mlir (added as source)
 │       ├── src/
 │       │   ├── Dialect/ONNX/   # ONNX dialect operations
@@ -114,10 +114,8 @@ onnx-hipdnn-ep/
 # Configure onnx-mlir (REQUIRED for ONNX→HIP lowering)
 message(STATUS "Configuring onnx-mlir")
 
-# Check if onnx-mlir submodule exists
-if(NOT EXISTS "${CMAKE_SOURCE_DIR}/3rd-party/onnx-mlir/CMakeLists.txt")
-  message(FATAL_ERROR "onnx-mlir submodule not found. Run: git submodule update --init --recursive")
-endif()
+# onnx-mlir is automatically fetched via FetchContent
+# See morphizen-mlir-compiler/3rd-party/CMakeLists.txt
 
 # onnx-mlir build options
 set(ONNX_MLIR_BUILD_TESTS OFF CACHE BOOL "Build onnx-mlir tests")
@@ -341,6 +339,8 @@ std::unique_ptr<Pass> createConvertOnnxToHipPass() {
 ---
 
 ## Integration Approach: Why Not Git Submodule?
+
+**Note:** This section is historical documentation. The project now uses FetchContent for onnx-mlir (see Issue #004).
 
 ### Attempted Approach 1: Git Submodule (Failed)
 

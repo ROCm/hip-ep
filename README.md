@@ -31,7 +31,6 @@ Clone the repository and build:
 ```bash
 git clone ../MorphiZen
 cd MorphiZen
-git submodule update --init --recursive
 
 # For contributors: Set up pre-commit hooks (required)
 # Windows:

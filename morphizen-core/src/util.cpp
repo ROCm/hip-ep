@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "morphizen/util.hpp"
-#include "hash-library/md5.h"
+#include "md5.h"
 #include <cstdio>
 
 #include <glog/logging.h>

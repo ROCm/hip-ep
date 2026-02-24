@@ -48,29 +48,19 @@ Licensed under the MIT License.
 
 ## How to Enable onnx-mlir Build
 
-### Option 1: Initialize Submodules (Recommended)
+### Option 1: Initialize Submodules (DEPRECATED - Now uses FetchContent)
+
+**Note:** This option is no longer needed. onnx-mlir is automatically fetched via CMake FetchContent.
 
 ```bash
-# Navigate to onnx-mlir directory
-cd 3rd-party/onnx-mlir
-
-# Initialize git for this directory (if needed)
-git init
-git remote add origin https://github.com/wcy123/onnx-mlir.git
-git fetch origin
-git checkout main  # or specific branch
-
-# Initialize all submodules
-git submodule update --init --recursive
-
-# Return to project root
-cd ../..
+# onnx-mlir is now automatically fetched when configuring CMake
+# See morphizen-mlir-compiler/3rd-party/CMakeLists.txt
 
 # Enable onnx-mlir in CMake
 cmake -B ../../build/onnx-hipdnn-ep -DBUILD_ONNX_MLIR=ON
 ```
 
-### Option 2: Clone Dependencies Manually
+### Option 2: Clone Dependencies Manually (DEPRECATED)
 
 ```bash
 cd 3rd-party/onnx-mlir/third_party
@@ -88,9 +78,9 @@ cd ../../..
 cmake -B ../../build/onnx-hipdnn-ep -DBUILD_ONNX_MLIR=ON
 ```
 
-### Option 3: Use FetchContent in CMake (Future)
+### Option 3: Use FetchContent in CMake (CURRENT)
 
-Modify `cmake/deps.cmake` to use CMake's FetchContent for onnx-mlir dependencies instead of git submodules.
+onnx-mlir is now fetched via FetchContent (see morphizen-mlir-compiler/3rd-party/CMakeLists.txt).
 
 ## Expected Build After Enabling onnx-mlir
 
@@ -179,8 +169,8 @@ TEST(OnnxToHipTest, ConvLowering) {
 ## Troubleshooting
 
 ### Error: "third_party/onnx does not contain CMakeLists.txt"
-- **Cause:** onnx-mlir submodules not initialized
-- **Fix:** Run `git submodule update --init --recursive` in `3rd-party/onnx-mlir/`
+- **Cause:** onnx-mlir FetchContent failed
+- **Fix:** Check network connection and re-run cmake configure
 
 ### Error: "Cannot find OMONNXOps"
 - **Cause:** onnx-mlir not built or not in library path
@@ -207,7 +197,7 @@ cmake --build ../../build/onnx-hipdnn-ep --config Debug --parallel 4
 
 ## Next Steps
 
-1. **Initialize onnx-mlir submodules** using Option 1 or 2 above
+1. **Configure with CMake** - onnx-mlir will be automatically fetched
 2. **Enable `BUILD_ONNX_MLIR=ON`** in CMake configuration
 3. **Verify onnx-mlir builds** without errors
 4. **Implement OnnxToHip.cpp** with typed ONNX operations

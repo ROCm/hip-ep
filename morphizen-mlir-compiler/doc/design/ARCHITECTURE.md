@@ -134,14 +134,14 @@ For compilation pipeline details:
 - Type safety: Compile-time checked operation types vs runtime string matching
 - Extensible: Adding operations = adding pattern classes
 - Productivity: Semantic operand access (getX(), getW()) vs manual operand indexing
-- Maintainability: ONNX spec updates handled via onnx-mlir submodule updates
+- Maintainability: ONNX spec updates handled via onnx-mlir fork updates (update GIT_TAG in CMakeLists.txt)
 
 **Trade-offs:**
 
 | Aspect | Pattern-Based | Manual Transform |
 |--------|--------------|------------------|
 | **Type safety** | Compile-time checked | Runtime crashes possible |
-| **Maintainability** | ONNX spec updates via submodule | Manual updates per spec change |
+| **Maintainability** | ONNX spec updates via fork | Manual updates per spec change |
 | **Learning curve** | Must learn [MLIR patterns](https://mlir.llvm.org/docs/PatternRewriter/) | Straightforward imperative code |
 | **Attribute access** | Semantic getters | Manual string lookup + cast |
 
@@ -369,7 +369,7 @@ Use [onnx-mlir](https://github.com/wcy123/onnx-mlir) fork for type-safe ONNX dia
 |---------|------------------|----------------|
 | **Type safety** | String matching: `if (opName == "Conv")` | Typed patterns: `OpConversionPattern<ONNXConvOp>` |
 | **Attribute access** | Manual cast + null check | Semantic getters: `getKernelShape()` |
-| **Maintainability** | Manual updates per ONNX spec change | Auto-updated via submodule |
+| **Maintainability** | Manual updates per ONNX spec change | Auto-updated via fork |
 | **Error messages** | "Invalid operand 0" | "Conv input X must be 4D tensor" |
 
 ### Integration Points

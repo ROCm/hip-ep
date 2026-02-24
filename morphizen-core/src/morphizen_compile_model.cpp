@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <glog/logging.h>
 
-#include <hash-library/md5.h>
+#include "md5.h"
 #include "./config.hpp"
 #include "./file_lock.hpp"
 #include "./logger_adapter.hpp"

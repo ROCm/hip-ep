@@ -4,8 +4,8 @@
  */
 #define _CRT_SECURE_NO_WARNINGS 1
 #include "./tar_entry.hpp"
-#include "./hash-library/md5.h"
 #include "./tar_file.hpp"
+#include "md5.h"
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
 #include "tar_header.hpp"

@@ -4,8 +4,8 @@ Licensed under the MIT License.
 -->
 # onnx-mlir Fork Summary
 
-**Last Updated**: 2026-02-12
-**Maintainer**: Auto-updated when onnx-mlir submodule changes
+**Last Updated**: 2026-02-23
+**Maintainer**: Updated when onnx-mlir fork is updated (commit SHA in CMakeLists.txt)
 
 ## Repository Information
 
