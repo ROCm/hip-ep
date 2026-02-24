@@ -10,17 +10,17 @@
 // byte offset.
 //
 // Algorithm overview:
-//   Phase 1 – Liveness:  assign [defIndex, lastUseIndex] to each alloc,
+//   Phase 1 - Liveness:  assign [defIndex, lastUseIndex] to each alloc,
 //             following view-like ops transitively.
-//   Phase 2 – Partition:  split allocs into static (compile-time byte size)
+//   Phase 2 - Partition:  split allocs into static (compile-time byte size)
 //             and dynamic (runtime byte size) groups.
-//   Phase 3 – Static packing:  greedy best-fit offset assignment inspired by
+//   Phase 3 - Static packing:  greedy best-fit offset assignment inspired by
 //             greedy best-fit strip packing.  Allocs whose
 //             lifetimes don't overlap may share the same offset range.
-//   Phase 4 – Dynamic packing:  group by structural byte-size key (same
+//   Phase 4 - Dynamic packing:  group by structural byte-size key (same
 //             static factor + same dynamic SSA operands).  Within each group,
 //             bin non-overlapping lifetimes so they share an offset at runtime.
-//   Phase 5 – IR emission:  create the pool memref.alloc, compute offsets via
+//   Phase 5 - IR emission:  create the pool memref.alloc, compute offsets via
 //             arith ops, and replace each original alloc with memref.view.
 //             Attach hipdnn.pool_size / hipdnn.buffer_offsets metadata.
 //
@@ -54,7 +54,7 @@ namespace {
 static constexpr int64_t kDefaultAlignment = 256;
 
 // ===--------------------------------------------------------------------===//
-// AllocInfo – per-alloc metadata collected in Phase 1
+// AllocInfo - per-alloc metadata collected in Phase 1
 // ===--------------------------------------------------------------------===//
 
 struct AllocInfo {
@@ -72,7 +72,7 @@ static int64_t getStaticByteSize(MemRefType type) {
 }
 
 /// True when \p user produces a memref that aliases its memref operand
-/// (subview, cast, reshape, select, …).
+/// (subview, cast, reshape, select, ...).
 static bool isMemRefAlias(Operation* user) {
   return isa<ViewLikeOpInterface, arith::SelectOp>(user);
 }
@@ -125,8 +125,25 @@ static bool lifetimesOverlap(const AllocInfo& a, const AllocInfo& b) {
 }
 
 // ===--------------------------------------------------------------------===//
-// Phase 3 – Static packing: greedy best-fit gap finding
+// Phase 3 - Static packing: greedy best-fit gap finding
 // ===--------------------------------------------------------------------===//
+//
+// Assigns a byte offset in a 1D address space to each static alloc.
+// Two allocs whose lifetimes don't overlap may share the same address range.
+//
+// Example (static attention model, 4 allocs of 32768 bytes each):
+//
+//   Alloc  Lifetime      Offset assigned   Why
+//   -----  ------------  ----------------  -------------------------------
+//   A      [3, 16]       0                 first alloc, placed at start
+//   B      [5, 13]       32768             overlaps A -> append after A
+//   C      [7, 14]       65536             overlaps A,B -> append after B
+//   D      [9, 11]       98304             overlaps A,B,C -> append after C
+//
+//   Pool: |----A----|----B----|----C----|----D----|  = 131072 bytes
+//
+// If alloc X's lifetime ends before alloc Y starts, Y can reuse X's
+// address range.  The gap-finding loop looks for such opportunities.
 
 /// A placed allocation in the linear address space.
 struct Reservation {
@@ -165,7 +182,7 @@ packStaticAllocs(MutableArrayRef<AllocInfo> statics, int64_t alignment) {
       currentOffset = std::max(currentOffset, res.offset + res.size);
     }
 
-    // No gap found – append after all overlapping reservations.
+    // No gap found - append after all overlapping reservations.
     if (bestOffset < 0)
       bestOffset = alignUp(currentOffset, alignment);
 
@@ -182,8 +199,52 @@ packStaticAllocs(MutableArrayRef<AllocInfo> statics, int64_t alignment) {
 }
 
 // ===--------------------------------------------------------------------===//
-// Phase 4 – Dynamic packing: bucket by structural byte-size, bin by lifetime
+// Phase 4 - Dynamic packing: bucket by structural byte-size, bin by lifetime
 // ===--------------------------------------------------------------------===//
+//
+// For allocs with runtime-unknown sizes we cannot hardcode byte offsets.
+// Instead we group allocs that provably have the same runtime byte size into
+// "buckets", then within each bucket we bin allocs with non-overlapping
+// lifetimes so they can share one offset slot.
+//
+// Two-level grouping:
+//
+//   Level 1 - Bucket by DynSizeKey:
+//     A DynSizeKey = {staticFactor, [dynOperands...]}.
+//     staticFactor = elementBytes * product_of_static_dims.
+//     dynOperands  = SSA values for the dynamic dimensions.
+//     Two allocs with the same key have the same runtime byte size:
+//       byte_size = staticFactor * dynDim0 * dynDim1 * ...
+//
+//   Level 2 - Bin by lifetime:
+//     Within a bucket, first-fit pack allocs whose lifetimes don't overlap
+//     into bins.  All allocs in the same bin share one offset at runtime.
+//
+// Example (dynamic attention model, 6 allocs after optimize-memrefs):
+//
+//   Alloc    Type                Operands              Key
+//   -------  ------------------  --------------------  ----------------------
+//   Q        memref<?x?x64xf32>  (%dim, %dim_0)       {256, [%dim, %dim_0]}
+//   K        memref<?x?x64xf32>  (%dim, %dim_0)       {256, [%dim, %dim_0]}
+//   V        memref<?x?x64xf32>  (%dim, %dim_0)       {256, [%dim, %dim_0]}
+//   KT       memref<?x64x?xf32>  (%dim, %dim_0)       {256, [%dim, %dim_0]}
+//   scores   memref<?x?x?xf32>   (%dim,%dim_0,%dim_0) {4, [%dim,%dim_0,%dim_0]}
+//   scaled   memref<?x?x?xf32>   (%dim,%dim_0,%dim_0) {4, [%dim,%dim_0,%dim_0]}
+//
+//   Note: ?x?x64xf32 and ?x64x?xf32 have different shapes but the same
+//   total byte size (4 * 64 * dim * dim_0 = 256 * dim * dim_0).
+//
+//   Bucket A  (byte_size = 256 * dim * dim_0):  Q, K, V, KT
+//     All lifetimes overlap -> 4 bins, one alloc each.
+//   Bucket B  (byte_size = 4 * dim * dim_0^2):  scores, scaled
+//     Lifetimes overlap -> 2 bins.
+//
+//   Pool layout at runtime:
+//     |--Q--|--K--|--V--|--KT--|-scores-|-scaled-|
+//      bin0   bin1  bin2  bin3    bin0     bin1
+//      <- 4 x alignUp(bucketA) -> <- 2 x alignUp(bucketB) ->
+//
+//   pool_size = 4*alignUp(bucketA) + 2*alignUp(bucketB)
 
 /// A bucket groups dynamic allocs that share the same runtime byte size.
 /// Within a bucket, each "bin" holds allocs with non-overlapping lifetimes
@@ -194,9 +255,15 @@ struct DynBucket {
 };
 
 /// Structural key for grouping allocs with identical runtime byte sizes.
+///
 /// Two allocs match if they have the same compile-time factor (product of
 /// element bytes and static dimensions) and the same SSA operands for
 /// dynamic dimensions.
+///
+/// Example: memref<?x?x64xf32> allocated with (%dim, %dim_0)
+///   staticFactor = 4 (f32 bytes) * 64 (static dim) = 256
+///   dynOperands  = [%dim, %dim_0]
+///   runtime byte size = 256 * %dim * %dim_0
 struct DynSizeKey {
   int64_t staticFactor;
   SmallVector<Value, 2> dynOperands;
@@ -319,6 +386,11 @@ void PoolAllocsPass::runOnOperation() {
   Block& block = funcOp.getBody().front();
 
   // ----- Phase 1: liveness analysis ------------------------------------
+  //
+  // Assign each op a sequential index and compute [defIndex, lastUseIndex]
+  // for every memref.alloc.  lastUseIndex is the maximum index among all
+  // *transitive* users: if %buf feeds memref.subview -> op X, then %buf
+  // must stay live until X, not just until the subview.
 
   DenseMap<Operation*, unsigned> opIndex;
   unsigned idx = 0;
@@ -348,6 +420,9 @@ void PoolAllocsPass::runOnOperation() {
     return;
 
   // ----- Phase 2: partition into static / dynamic ----------------------
+  //
+  // Static allocs (all dims known) go through the greedy offset assignment
+  // in Phase 3.  Dynamic allocs go through the bucket/bin packing in Phase 4.
 
   SmallVector<AllocInfo> statics, dynamics;
   for (auto& info : allInfos) {
@@ -357,7 +432,9 @@ void PoolAllocsPass::runOnOperation() {
       dynamics.push_back(info);
   }
 
-  // Largest-first ordering improves packing density.
+  // Largest-first ordering improves packing density:  big allocs are harder
+  // to fit into gaps, so placing them first gives smaller allocs more
+  // opportunities to fill the remaining holes.
   llvm::sort(statics, [](const AllocInfo& a, const AllocInfo& b) {
     return a.staticByteSize > b.staticByteSize;
   });
@@ -377,9 +454,10 @@ void PoolAllocsPass::runOnOperation() {
   Location loc = funcOp.getLoc();
   OpBuilder builder(funcOp.getContext());
 
-  // Insert all pool IR right before the first alloc being pooled so that
-  // downstream passes (e.g. hip-lower-allocs) see the pool after any
-  // prerequisite ops like hip.create_handle.
+  // Insert all pool IR right before the earliest alloc being pooled so
+  // that downstream passes (e.g. hip-lower-allocs) see the pool after
+  // any prerequisite ops like hip.create_handle but before any consumer
+  // of the pooled buffers.
   Operation* firstPooledAlloc = allInfos.front().allocOp.getOperation();
   for (auto& info : allInfos)
     if (info.allocOp->isBeforeInBlock(firstPooledAlloc))
@@ -389,6 +467,26 @@ void PoolAllocsPass::runOnOperation() {
   auto dynBuckets = packDynamicAllocs(dynamics, builder, loc);
 
   // ----- Phase 5: emit pool + views -----------------------------------
+  //
+  // Build a single pool memref and replace every original alloc with a
+  // memref.view into it.
+  //
+  // Emitted IR for a fully-static case (4 allocs totalling 131072 bytes):
+  //
+  //   %pool = memref.alloc() : memref<131072xi8>
+  //   %off0 = arith.constant 0     : index
+  //   %v0   = memref.view %pool[%off0][] : memref<131072xi8> to memref<...>
+  //   %off1 = arith.constant 32768 : index
+  //   %v1   = memref.view %pool[%off1][] : memref<131072xi8> to memref<...>
+  //   ...
+  //
+  // For a mixed static+dynamic case the pool becomes memref<?xi8>:
+  //
+  //   %static_part = arith.constant 32768 : index
+  //   %aligned     = <alignUp(%dynBucketSize, 256)>  // arith add/div/mul
+  //   %pool_size   = arith.addi %static_part, %aligned : index
+  //   %pool        = memref.alloc(%pool_size) : memref<?xi8>
+  //   ...
 
   bool hasDynamic = !dynBuckets.empty();
 
@@ -515,10 +613,13 @@ void PoolAllocsPass::runOnOperation() {
     info.allocOp.replaceAllUsesWith(view.getResult());
     info.allocOp.erase();
 
+    // Record offsets for the hipdnn.buffer_offsets attribute.
+    // Dynamic offsets are represented as -1 since the actual value
+    // is only known at runtime.
     if (auto constOp = offset.getDefiningOp<arith::ConstantIndexOp>())
       staticOffsets.push_back(constOp.value());
     else
-      staticOffsets.push_back(-1);  // sentinel for dynamic offset
+      staticOffsets.push_back(-1);
   }
 
   // 5e. Attach pool metadata to the function for runtime/deployment use.
