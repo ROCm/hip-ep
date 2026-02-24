@@ -147,6 +147,7 @@ target_link_libraries(hip-opt PRIVATE
   MLIRControlFlowDialect
   MLIRFuncDialect
   MLIRMemRefDialect
+  MLIRMemRefTransforms
   MLIRSCFDialect
   MLIRTensorDialect
   MLIRDestinationStyleOpInterface
@@ -180,6 +181,7 @@ target_link_libraries(hip-compiler PRIVATE
   MLIRControlFlowDialect
   MLIRFuncDialect
   MLIRMemRefDialect
+  MLIRMemRefTransforms
   MLIRSCFDialect
   MLIRTensorDialect
   MLIRDestinationStyleOpInterface
