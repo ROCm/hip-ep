@@ -3,26 +3,24 @@
 # ** Licensed under the MIT License.
 ##
 
-find_package(hashlib CONFIG QUIET)
-if(NOT TARGET hashlib::hashlib)
-  add_library(HASH_LIBRARY OBJECT
-    ../3rd-party/hash-library/crc32.cpp
-    ../3rd-party/hash-library/crc32.h
-    ../3rd-party/hash-library/hash.h
-    ../3rd-party/hash-library/hmac.h
-    ../3rd-party/hash-library/keccak.cpp
-    ../3rd-party/hash-library/keccak.h
-    ../3rd-party/hash-library/md5.cpp
-    ../3rd-party/hash-library/md5.h
-    ../3rd-party/hash-library/sha1.cpp
-    ../3rd-party/hash-library/sha1.h
-    ../3rd-party/hash-library/sha256.cpp
-    ../3rd-party/hash-library/sha256.h
-    ../3rd-party/hash-library/sha3.cpp
-    ../3rd-party/hash-library/sha3.h)
+# hash-library is now managed via FetchContent in cmake/deps.cmake
+# Just create the OBJECT library from the fetched sources
+add_library(HASH_LIBRARY OBJECT
+  ${hash-library_SOURCE_DIR}/crc32.cpp
+  ${hash-library_SOURCE_DIR}/crc32.h
+  ${hash-library_SOURCE_DIR}/hash.h
+  ${hash-library_SOURCE_DIR}/hmac.h
+  ${hash-library_SOURCE_DIR}/keccak.cpp
+  ${hash-library_SOURCE_DIR}/keccak.h
+  ${hash-library_SOURCE_DIR}/md5.cpp
+  ${hash-library_SOURCE_DIR}/md5.h
+  ${hash-library_SOURCE_DIR}/sha1.cpp
+  ${hash-library_SOURCE_DIR}/sha1.h
+  ${hash-library_SOURCE_DIR}/sha256.cpp
+  ${hash-library_SOURCE_DIR}/sha256.h
+  ${hash-library_SOURCE_DIR}/sha3.cpp
+  ${hash-library_SOURCE_DIR}/sha3.h)
 
-  target_link_libraries(morphizen-core-static PRIVATE HASH_LIBRARY)
-  set_target_properties(HASH_LIBRARY PROPERTIES FOLDER Dependencies/hash-library)
-else()
-  target_link_libraries(morphizen-core-static PRIVATE hashlib::hashlib)
-endif()
+target_include_directories(HASH_LIBRARY PUBLIC ${hash-library_SOURCE_DIR})
+target_link_libraries(morphizen-core-static PRIVATE HASH_LIBRARY)
+set_target_properties(HASH_LIBRARY PROPERTIES FOLDER Dependencies/hash-library)

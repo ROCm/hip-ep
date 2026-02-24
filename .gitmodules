@@ -1,9 +1,0 @@
-[submodule "3rd-party/hash-library"]
-	path = 3rd-party/hash-library
-	url = https://github.com/stbrumme/hash-library.git
-	branch = main
-
-[submodule "morphizen-mlir-compiler/3rd-party/onnx-mlir"]
-	path = morphizen-mlir-compiler/3rd-party/onnx-mlir
-	url = https://github.com/wcy123/onnx-mlir.git
-	branch = fork-master

@@ -25,7 +25,7 @@ Comprehensive instructions for building, configuring, and testing onnx-hipdnn-ep
 - **CMake** 3.28 or later
 - **Visual Studio 2022** (Windows) or equivalent C++17 compiler
 - **Python 3** with onnx package: `pip install onnx`
-- **Git** (for cloning repositories and managing submodules)
+- **Git** (for cloning repositories)
 - **Clang and llvm-link** (for HIP runtime bitcode compilation)
   - Download from https://releases.llvm.org/ (LLVM 19+ recommended)
   - Or use system package manager:
@@ -37,7 +37,7 @@ Comprehensive instructions for building, configuring, and testing onnx-hipdnn-ep
 **Build Dependencies:**
 1. **ONNXRuntime** (required - must be built first)
 2. **LLVM/MLIR** (optional pre-build - can be auto-fetched via FetchContent)
-3. **MorphiZen** (git submodule at `3rd-party/morphizen`)
+3. **MorphiZen** (integrated as parent project)
 
 **Note:** LLVM/MLIR pre-build is optional. The build system automatically fetches and builds LLVM via CMake FetchContent if not pre-installed. However, pre-building can save time on subsequent builds (first auto-build takes 1-3 hours).
 
@@ -121,17 +121,7 @@ Replace `--config Release` with `--config Debug` and build/install from `../buil
 
 ## Building onnx-hipdnn-ep
 
-### Step 1: Initialize Submodules
-
-From onnx-hipdnn-ep directory:
-```bash
-cd onnx-hipdnn-ep
-git submodule update --init --recursive
-```
-
-This clones the MorphiZen framework into `3rd-party/morphizen`.
-
-### Step 2: Configure with CMake
+### Step 1: Configure with CMake
 
 **Windows (Visual Studio generator - recommended):**
 
@@ -187,7 +177,6 @@ cmake --build ../build/onnxruntime/Release/ --target install
 
 # 2. Build onnx-hipdnn-ep
 cd ../onnx-hipdnn-ep
-git submodule update --init --recursive
 cmake -S . -B ../build/onnx-hipdnn-ep \
   -DBUILD_SHARED_LIBS=OFF \
   -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL \
@@ -556,14 +545,6 @@ cmake ... -DCMAKE_PROGRAM_PATH=/opt/homebrew/opt/llvm/bin
 - Ensure plugin is built: check `../build/onnx-hipdnn-ep/bin/Release/morphizen-level1-pass-mlir.dll` (Windows) or `.so` (Linux)
 - Verify `etc/morphizen_config.json` is copied to build output
 - Check plugin name matches library name (without extension)
-
-### Git Submodule Errors
-
-**Symptom:** `fatal: not a git repository: 3rd-party/morphizen`
-
-**Solution:**
-- Initialize submodules: `git submodule update --init --recursive`
-- If submodule URL changed: `git submodule sync && git submodule update --init --recursive`
 
 ---
 

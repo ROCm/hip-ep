@@ -11,4 +11,4 @@ pybind11;https://github.com/pybind/pybind11/archive/refs/tags/v2.13.6.tar.gz;a2e
 Boost;https://github.com/boostorg/boost/releases/download/boost-1.84.0/boost-1.84.0.tar.xz;893b5203b862eb9bbd08553e24ff146a
 onnx;https://github.com/onnx/onnx/archive/refs/tags/v1.18.0.zip;f156d032a3af91b66d554e11158b33ca77bbb1f2
 llvm;https://github.com/llvm/llvm-project.git;f8cb7987c64dcffb72414a40560055cb717dbf74
-onnx-mlir;https://github.com/onnx/onnx-mlir.git;62effc706015d3e9c7eca36ca117d9e7898e4066
+hash-library;https://github.com/stbrumme/hash-library.git;d389d18112bcf7e4786ec5e8723f3658a7f433d7

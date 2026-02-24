@@ -1173,7 +1173,7 @@ void morphizen_register_ops(
 ```
 morphizen/
 ├── 3rd-party/              # Third-party dependencies
-│   ├── hash-library/       # Hash library (git submodule)
+│   ├── hash-library/       # Hash library (FetchContent dependency)
 │   └── onnxruntime-morphizen-headers/  # ORT headers
 ├── cmake/                  # CMake configuration files
 ├── custom-op-generic/      # Generic custom operators

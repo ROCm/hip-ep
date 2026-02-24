@@ -217,6 +217,20 @@ else()
 endif()
 
 ##
+## hash-library dependency (small header-mostly hash library for MD5/SHA)
+## Note: No find_package fallback - upstream doesn't provide CMake config files
+##
+message(STATUS "Fetching hash-library from ${DEP_URL_hash-library}")
+FetchContent_Declare(
+  hash-library
+  GIT_REPOSITORY ${DEP_URL_hash-library}
+  GIT_TAG ${DEP_SHA1_hash-library}
+  GIT_SHALLOW TRUE
+  EXCLUDE_FROM_ALL
+)
+FetchContent_MakeAvailable(hash-library)
+
+##
 ## LLVM/MLIR dependency (when morphizen_ENABLE_MLIR_BACKEND=ON)
 ## Three-tier fallback: pre-installed → local source → GitHub download
 ## Based on proven morphizen-mlir pattern

@@ -50,10 +50,21 @@ set(ONNX_MLIR_ENABLE_BENCHMARK OFF CACHE BOOL "" FORCE)
 set(CMAKE_WARN_DEPRECATED FALSE)
 
 # Add ONNX-MLIR (required for ONNX dialect and OnnxToHip conversion)
-# onnx-mlir submodule is now local to morphizen-mlir-compiler/3rd-party
-# Note: The test directory issue is now fixed directly in onnx-mlir/CMakeLists.txt
-# (see ONNX_MLIR_FORK_SUMMARY.md Change 6)
-add_subdirectory(onnx-mlir EXCLUDE_FROM_ALL)
+# Use FetchContent to conditionally download from custom fork (wcy123/onnx-mlir)
+# Fork contains critical MSVC/Windows fixes (see ONNX_MLIR_FORK_SUMMARY.md)
+include(FetchContent)
+
+message(STATUS "Fetching onnx-mlir from wcy123/onnx-mlir fork")
+FetchContent_Declare(
+  onnx-mlir
+  GIT_REPOSITORY https://github.com/wcy123/onnx-mlir.git
+  GIT_TAG 70299fed229bfdddf9d5d4938c6aa3162a1a2ad7  # fork-master latest as of 2026-02-23
+  GIT_SHALLOW FALSE  # Need full history for fork
+  EXCLUDE_FROM_ALL
+  SOURCE_SUBDIR .  # onnx-mlir root contains CMakeLists.txt
+)
+
+FetchContent_MakeAvailable(onnx-mlir)
 
 # Restore deprecation warnings
 set(CMAKE_WARN_DEPRECATED TRUE)
