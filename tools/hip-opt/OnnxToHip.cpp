@@ -46,17 +46,20 @@ namespace {
 // Helpers
 //===----------------------------------------------------------------------===//
 
-/// Create a tensor.empty for a DPS init operand.
+/// Create a tensor.empty for a DPS init operand.  Dynamic dimension sizes
+/// are extracted from \p source using tensor.dim at each dynamic index.
+/// Suitable for ops where the output shape aligns positionally with one input
+/// (e.g., softmax, element-wise).
 static mlir::Value createEmptyTensor(mlir::OpBuilder& builder, mlir::Location loc,
-                                     mlir::Type type) {
-  auto tensorType = mlir::cast<mlir::RankedTensorType>(type);
+                                     mlir::RankedTensorType resultType,
+                                     mlir::Value source) {
   llvm::SmallVector<mlir::Value> dynSizes;
-  for (int64_t i = 0; i < tensorType.getRank(); ++i) {
-    if (tensorType.isDynamicDim(i))
-      dynSizes.push_back(mlir::tensor::DimOp::create(builder, loc, mlir::Value(), i));
+  for (int64_t i = 0; i < resultType.getRank(); ++i) {
+    if (resultType.isDynamicDim(i))
+      dynSizes.push_back(mlir::tensor::DimOp::create(builder, loc, source, i));
   }
-  return mlir::tensor::EmptyOp::create(builder, loc, tensorType.getShape(),
-                                       tensorType.getElementType(), dynSizes);
+  return mlir::tensor::EmptyOp::create(builder, loc, resultType.getShape(),
+                                       resultType.getElementType(), dynSizes);
 }
 
 /// Extract onnx.Constant ops into new function arguments.
@@ -114,8 +117,28 @@ struct MatMulToHip : public mlir::OpRewritePattern<ONNXMatMulOp> {
 mlir::LogicalResult MatMulToHip::matchAndRewrite(ONNXMatMulOp op,
                                                  mlir::PatternRewriter& rewriter) const {
   mlir::Location loc = op.getLoc();
-  mlir::Type resultType = op->getResult(0).getType();
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType);
+  auto resultType = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+
+  // MatMul: result[..., M, N] = A[..., M, K] @ B[..., K, N].
+  // Batch and M dims come from A; N comes from B's last dim.
+  llvm::SmallVector<mlir::Value> dynSizes;
+  int64_t rank = resultType.getRank();
+  auto bType = mlir::cast<mlir::RankedTensorType>(op.getB().getType());
+  for (int64_t i = 0; i < rank; ++i) {
+    if (!resultType.isDynamicDim(i))
+      continue;
+    if (i == rank - 1) {
+      dynSizes.push_back(mlir::tensor::DimOp::create(
+          rewriter, loc, op.getB(), bType.getRank() - 1));
+    } else {
+      dynSizes.push_back(
+          mlir::tensor::DimOp::create(rewriter, loc, op.getA(), i));
+    }
+  }
+
+  mlir::Value init = mlir::tensor::EmptyOp::create(
+      rewriter, loc, resultType.getShape(), resultType.getElementType(),
+      dynSizes);
   auto hipOp = mlir::hip::HipblasltMatmulOp::create(
       rewriter, loc, resultType, handle, op.getA(), op.getB(), init);
   rewriter.replaceOp(op, hipOp->getResult(0));
@@ -154,8 +177,21 @@ mlir::LogicalResult TransposeToHip::matchAndRewrite(
   if (dim0 < 0 || dim1 < 0)
     return op.emitOpError("perm must swap exactly two dimensions");
 
-  mlir::Type resultType = op->getResult(0).getType();
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType);
+  auto resultType = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+
+  // Transpose: output dim i corresponds to input dim perm[i].
+  llvm::SmallVector<mlir::Value> dynSizes;
+  for (int64_t i = 0; i < resultType.getRank(); ++i) {
+    if (resultType.isDynamicDim(i)) {
+      int64_t srcDim = mlir::cast<mlir::IntegerAttr>(perm[i]).getInt();
+      dynSizes.push_back(
+          mlir::tensor::DimOp::create(rewriter, loc, op.getData(), srcDim));
+    }
+  }
+
+  mlir::Value init = mlir::tensor::EmptyOp::create(
+      rewriter, loc, resultType.getShape(), resultType.getElementType(),
+      dynSizes);
 
   mlir::Value d0 = mlir::arith::ConstantIndexOp::create(rewriter, loc, dim0);
   mlir::Value d1 = mlir::arith::ConstantIndexOp::create(rewriter, loc, dim1);
@@ -179,8 +215,15 @@ struct MulToHip : public mlir::OpRewritePattern<ONNXMulOp> {
 mlir::LogicalResult MulToHip::matchAndRewrite(ONNXMulOp op,
                                               mlir::PatternRewriter& rewriter) const {
   mlir::Location loc = op.getLoc();
-  mlir::Type resultType = op->getResult(0).getType();
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType);
+  auto resultType = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+
+  // Use the operand whose rank matches the result for dim extraction
+  // (handles scalar * tensor broadcasting).
+  auto aType = mlir::cast<mlir::RankedTensorType>(op.getA().getType());
+  mlir::Value source =
+      (aType.getRank() == resultType.getRank()) ? op.getA() : op.getB();
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
+
   auto hipOp = mlir::hip::MiopenMulOp::create(
       rewriter, loc, resultType, handle, op.getA(), op.getB(), init);
   rewriter.replaceOp(op, hipOp->getResult(0));
@@ -200,8 +243,8 @@ struct SoftmaxToHip : public mlir::OpRewritePattern<ONNXSoftmaxOp> {
 mlir::LogicalResult SoftmaxToHip::matchAndRewrite(
     ONNXSoftmaxOp op, mlir::PatternRewriter& rewriter) const {
   mlir::Location loc = op.getLoc();
-  mlir::Type resultType = op->getResult(0).getType();
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType);
+  auto resultType = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, op.getInput());
   auto hipOp = mlir::hip::MiopenSoftmaxOp::create(
       rewriter, loc, resultType, handle, op.getInput(), init);
   rewriter.replaceOp(op, hipOp->getResult(0));

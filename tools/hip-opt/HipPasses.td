@@ -44,4 +44,42 @@ def ConvertHipToLLVMPass : Pass<"convert-hip-to-llvm", "mlir::ModuleOp"> {
   ];
 }
 
+def OptimizeMemRefsPass : Pass<"hip-optimize-memrefs", "mlir::func::FuncOp"> {
+  let summary = "Optimize memref buffers to reduce allocation count";
+  let description = [{
+    Performs liveness-based best-fit buffer reuse on straight-line bufferized
+    HIP IR.  Replaces memref.alloc ops with earlier compatible buffers whose
+    live ranges have ended, reducing peak memory usage.
+
+    Compatibility rules:
+      - Static shapes: any slot whose byte-size is >= the needed allocation
+        (same element type and memory space).  A memref.reinterpret_cast is
+        inserted when shapes differ.
+      - Dynamic shapes: the MemRefType must be identical and every dynamic-size
+        operand must be the same SSA value.
+
+    Only single-block functions are optimized; multi-block functions are left
+    unchanged.
+  }];
+  let dependentDialects = [
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
+def LowerAllocsPass : Pass<"hip-lower-allocs", "mlir::func::FuncOp"> {
+  let summary = "Lower memref.alloc to hip.alloc and insert hip.free";
+  let description = [{
+    Replaces memref.alloc operations with hip.alloc (device allocation via
+    hipMalloc) and inserts hip.free for buffers that are not returned from
+    the function.  Requires a hip.create_handle op to exist in the function.
+
+    This pass bridges one-shot-bufferize output (generic memref allocations)
+    to the HIP-specific lowering that produces hipMalloc/hipFree calls.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 #endif // HIP_PASSES
