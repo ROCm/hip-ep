@@ -5,8 +5,15 @@
 //===- LowerAllocs.cpp - memref.alloc -> hip.alloc + hip.free -------------===//
 //
 // Replaces memref.alloc with hip.alloc (device allocation via hipMalloc) and
-// inserts hip.free for buffers not returned from the function.  Bridges
-// one-shot-bufferize output to HIP-specific lowering.
+// inserts hip.free for non-returned buffers.  Bridges one-shot-bufferize
+// output to the HIP-specific lowering that ultimately produces
+// hipMalloc / hipFree runtime calls.
+//
+// Ownership convention:
+//   - Returned buffers are caller-owned: no hip.free is emitted.
+//   - All other buffers are freed before hip.destroy_handle, because the
+//     handle encapsulates the HIP runtime context required by hipFree.
+//     If no destroy_handle exists, frees are placed before the terminator.
 //
 //===----------------------------------------------------------------------===//
 

@@ -4,6 +4,13 @@
  */
 //===-- HipPasses.td - HIP pass definitions ----------------*- tablegen -*-===//
 //
+// Typical pipeline order (each pass feeds into the next):
+//   1. --convert-onnx-to-hip    Tensor-level ONNX -> HIP DPS ops
+//   2. --one-shot-bufferize     Tensor -> memref (MLIR built-in)
+//   3. --hip-optimize-memrefs   Liveness-based buffer reuse
+//   4. --hip-lower-allocs       memref.alloc -> hip.alloc / hip.free
+//   5. --convert-hip-to-llvm    HIP ops -> LLVM runtime calls
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef HIP_PASSES
