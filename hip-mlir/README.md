@@ -48,17 +48,6 @@ HIP kernels.
 All compute ops use **destination-passing style** (DPS) and work in both
 tensor mode (pre-bufferization) and memref mode (post-bufferization).
 
-### Passes (declarations only)
-
-| Flag | Description |
-|------|-------------|
-| `--convert-onnx-to-hip` | ONNX dialect → HIP dialect (tensor DPS) |
-| `--convert-hip-to-llvm` | HIP dialect → LLVM dialect (runtime calls) |
-| `--hip-optimize-memrefs` | Liveness-based buffer reuse |
-| `--hip-lower-allocs` | `memref.alloc` → `hip.alloc` / `hip.free` |
-
-Pass implementations are provided separately.
-
 ## File layout
 
 ```
@@ -67,10 +56,8 @@ hip-mlir/
 ├── HipDialect.td         # Dialect definition
 ├── HipTypes.td           # Type definitions (!hip.handle)
 ├── HipOps.td             # Operation definitions
-├── HipPasses.td          # Pass declarations
 ├── HipDialect.h          # Dialect C++ header
 ├── HipDialect.cpp        # Dialect + op implementation (parse/print/verify)
-├── HipPasses.h           # Pass registration header
 ├── HipBufferize.h        # DPS bufferization interface
 └── README.md
 ```

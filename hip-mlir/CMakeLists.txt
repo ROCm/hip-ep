@@ -56,18 +56,12 @@ mlir_tablegen(HipOps.h.inc -gen-op-decls)
 mlir_tablegen(HipOps.cpp.inc -gen-op-defs)
 add_public_tablegen_target(HipOpsIncGen)
 
-# Generate pass definitions
-set(LLVM_TARGET_DEFINITIONS HipPasses.td)
-mlir_tablegen(HipPasses.h.inc -gen-pass-decls -name Hip)
-add_public_tablegen_target(HipPassesIncGen)
-
 # HIP dialect static library
 add_library(HipDialect STATIC HipDialect.cpp)
 add_dependencies(HipDialect
   HipDialectIncGen
   HipTypesIncGen
   HipOpsIncGen
-  HipPassesIncGen
 )
 
 llvm_map_components_to_libnames(llvm_libs Support Core)
