@@ -57,5 +57,4 @@ See [04-MemoryPooling.md](mlir/passes/04-MemoryPooling.md) for algorithm and [BU
 ## Related Documents
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) - Overall system design
-- [MLIR-COMPILATION-DESIGN.md](MLIR-COMPILATION-DESIGN.md) - MLIR lowering pipeline
-- [notes/MEMORY_MANAGEMENT_DESIGN.md](../notes/MEMORY_MANAGEMENT_DESIGN.md) - Detailed technical notes
+- [MLIR-COMPILATION-OVERVIEW.md](MLIR-COMPILATION-OVERVIEW.md) - MLIR lowering pipeline

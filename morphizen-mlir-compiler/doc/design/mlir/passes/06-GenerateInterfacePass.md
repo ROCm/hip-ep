@@ -60,7 +60,7 @@ This pass serves as an **adapter layer** between two incompatible representation
 
 The pass cannot be eliminated and moved to runtime because MLIR's type system requires compile-time knowledge of tensor ranks to generate memref struct types (`{ptr, ptr, i64, [N x i64], [N x i64]}`). Moving this to runtime would require hardcoding MLIR's internal memref layout in C++ code, creating fragile coupling and losing type safety.
 
-**For detailed analysis of alternatives and trade-offs**, see [../../WHY-GENERATEINTERFACEPASS.md](../../WHY-GENERATEINTERFACEPASS.md).
+**Rationale**: MLIR's type system requires compile-time knowledge of tensor ranks for memref struct types, making a pure runtime solution fragile and error-prone.
 
 ---
 
@@ -99,7 +99,7 @@ Before the `GenerateInterfacePass` can run, prior passes must establish certain 
 
 **Interface Design for Dynamic Shapes**
 
-Interface designed to support runtime dimension values. For implementation challenges, see [../DYNAMIC-SHAPE-DESIGN.md](../../DYNAMIC-SHAPE-DESIGN.md).
+Interface designed to support runtime dimension values. For implementation challenges, see [DYNAMIC-SHAPE-DESIGN.md](../../DYNAMIC-SHAPE-DESIGN.md).
 
 Design:
 - Tensor **rank** is compile-time known (e.g., 4D tensor)
@@ -353,10 +353,10 @@ typedef struct {
 
 | Contract | Critical For | Documented In |
 |----------|--------------|---------------|
-| @main_graph behavioral contract | Correct memref handling | [05-HipToLLVM.md](../conversion/05-HipToLLVM.md) |
+| @main_graph behavioral contract | Correct memref handling | [05-HipToLLVM.md](05-HipToLLVM.md) |
 | Constant registry contract | GPU memory management | [../../CONSTANT-HANDLING-DESIGN.md](../../CONSTANT-HANDLING-DESIGN.md) |
 | RuntimeState opaque design | ABI stability | [../../RUNTIME-ARCHITECTURE.md](../../RUNTIME-ARCHITECTURE.md) |
-| Tensor interface (span_t/tensor_t) | C-ABI compatibility | [../../INTERFACE-DESIGN.md](../../INTERFACE-DESIGN.md) |
+| Tensor interface (span_t/tensor_t) | C-ABI compatibility | [../INTERFACE-DESIGN.md](../INTERFACE-DESIGN.md) |
 | Dynamic shape support | Runtime flexibility | [../../DYNAMIC-SHAPE-DESIGN.md](../../DYNAMIC-SHAPE-DESIGN.md) |
 
 ---
@@ -830,7 +830,7 @@ int ret = init(&state);  // Must work without stack corruption
 4. Builds memref struct with size/stride arrays
 5. Passes to @main
 
-See [../DYNAMIC-SHAPE-DESIGN.md](../../DYNAMIC-SHAPE-DESIGN.md) for implementation challenges.
+See [DYNAMIC-SHAPE-DESIGN.md](../../DYNAMIC-SHAPE-DESIGN.md) for implementation challenges.
 
 ---
 
@@ -881,7 +881,7 @@ class GenerateInterfacePass : public PassWrapper<GenerateInterfacePass, Operatio
 
 **Design:**
 - [../INTERFACE-DESIGN.md](../INTERFACE-DESIGN.md) - What and why (design rationale, function contracts)
-- [../DYNAMIC-SHAPE-DESIGN.md](../../DYNAMIC-SHAPE-DESIGN.md) - Dynamic shape architecture
+- [DYNAMIC-SHAPE-DESIGN.md](../../DYNAMIC-SHAPE-DESIGN.md) - Dynamic shape architecture
 
 **Prerequisites:**
 - [01-OnnxToHip.md](01-OnnxToHip.md) - Generates constant helpers and metadata

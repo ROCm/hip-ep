@@ -7,7 +7,7 @@ Licensed under the MIT License.
 **Date:** 2026-02-20
 **Document Type:** Implementation
 **Status:** Draft
-**Related:** [01-OnnxToHip.md](01-OnnxToHip.md), [02-BufferDeallocation.md](02-BufferDeallocation.md), [HIP-COPY-DESIGN.md](../HIP-COPY-DESIGN.md)
+**Related:** [01-OnnxToHip.md](01-OnnxToHip.md), [02-BufferDeallocation.md](02-BufferDeallocation.md), [HIP-COPY-DESIGN.md](../../HIP-COPY-DESIGN.md)
 
 ## Overview
 
@@ -141,7 +141,7 @@ Test file: `test/lit/Transforms/Canonicalize/test_hip_copy_elimination.mlir`
 
 ## Related Documents
 
-- **[HIP-COPY-DESIGN.md](../HIP-COPY-DESIGN.md)** - Copy optimization strategy
+- **[HIP-COPY-DESIGN.md](../../HIP-COPY-DESIGN.md)** - Copy optimization strategy
 - **[01-OnnxToHip.md](01-OnnxToHip.md)** - DPS optimization at generation time
 - **[02-BufferDeallocation.md](02-BufferDeallocation.md)** - Dead code cleanup
 - **[HIP-DIALECT-DESIGN.md](../HIP-DIALECT-DESIGN.md)** - Operation definitions

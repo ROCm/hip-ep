@@ -341,6 +341,6 @@ For complete interface design, see [../INTERFACE-DESIGN.md](../INTERFACE-DESIGN.
 - **[06-GenerateInterfacePass.md](06-GenerateInterfacePass.md)** - Final pass (C interface generation)
 - **[../../CONSTANT-HANDLING-DESIGN.md](../../CONSTANT-HANDLING-DESIGN.md)** - Constant extraction strategy
 - **[../HIP-DIALECT-DESIGN.md](../HIP-DIALECT-DESIGN.md)** - HIP operation definitions
-- **[../HIP-COPY-DESIGN.md](../HIP-COPY-DESIGN.md)** - Copy optimization strategy
+- **[../../HIP-COPY-DESIGN.md](../../HIP-COPY-DESIGN.md)** - Copy optimization strategy
 - **[../INTERFACE-DESIGN.md](../INTERFACE-DESIGN.md)** - Prerequisites this pass must satisfy
 - **[../LOWERING-PIPELINE.md](../LOWERING-PIPELINE.md)** - Pipeline overview

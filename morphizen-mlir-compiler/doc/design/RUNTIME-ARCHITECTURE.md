@@ -336,9 +336,9 @@ Memory pooling is optional. If MemoryPoolingPass runs during compilation, the fl
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Pool metadata**: [04-MemoryPooling.md](../mlir/passes/04-MemoryPooling.md) computes pool size and offsets using graph coloring.
+**Pool metadata**: [04-MemoryPooling.md](mlir/passes/04-MemoryPooling.md) computes pool size and offsets using graph coloring.
 
-**Generated code**: [GenerateInterfacePass.md - Pool Allocation](../mlir/passes/GenerateInterfacePass.md#pool-allocation) shows how pool_init call is generated.
+**Generated code**: [06-GenerateInterfacePass.md - Pool Allocation](mlir/passes/06-GenerateInterfacePass.md#pool-allocation) shows how pool_init call is generated.
 
 ---
 
@@ -411,7 +411,7 @@ struct RuntimeState {
 
 **Pool allocation**: If model was compiled with memory pooling (MemoryPoolingPass), `inference_init` allocates single pool via `hipdnn_ep_pool_init`. Individual buffers retrieved via `hipdnn_ep_get_buffer_from_pool(state, index)` which returns `pool_base + buffer_offsets[index]`.
 
-**Memory savings**: Demo model achieves 60% reduction (12.8MB vs 32.1MB) using graph coloring algorithm. See [04-MemoryPooling.md](../mlir/passes/04-MemoryPooling.md) for algorithm details.
+**Memory savings**: Demo model achieves 60% reduction (12.8MB vs 32.1MB) using graph coloring algorithm. See [04-MemoryPooling.md](mlir/passes/04-MemoryPooling.md) for algorithm details.
 
 ### Design Properties
 

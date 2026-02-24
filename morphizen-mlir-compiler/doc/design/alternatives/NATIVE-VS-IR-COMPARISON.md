@@ -311,7 +311,7 @@ Consider your primary goal:
 
 ## References
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) - Main architecture document
+- [ARCHITECTURE.md](../ARCHITECTURE.md) - Main architecture document
 - [ONNX Runtime EP Context Design](https://onnxruntime.ai/docs/execution-providers/EP-Context-Design.html)
 - [MemoryModule](https://github.com/fancycode/MemoryModule) - In-memory DLL loading
 - [LLVM JIT Tutorial](https://llvm.org/docs/tutorial/) - LLVM JIT compilation

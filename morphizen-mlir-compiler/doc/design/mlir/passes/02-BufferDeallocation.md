@@ -7,7 +7,7 @@ Licensed under the MIT License.
 **Date:** 2026-02-20
 **Document Type:** Implementation
 **Status:** Draft
-**Related:** [01-OnnxToHip.md](01-OnnxToHip.md), [03-Canonicalization.md](03-Canonicalization.md), [BUFFER-LIFETIME-DESIGN.md](../BUFFER-LIFETIME-DESIGN.md)
+**Related:** [01-OnnxToHip.md](01-OnnxToHip.md), [03-Canonicalization.md](03-Canonicalization.md), [BUFFER-LIFETIME-DESIGN.md](../../BUFFER-LIFETIME-DESIGN.md)
 
 ## Overview
 
@@ -146,6 +146,6 @@ Complementary: OptimizeAllocationLiveness minimizes lifetimes → MemoryPooling 
 - **[01-OnnxToHip.md](01-OnnxToHip.md)** - Previous pass (generates allocations)
 - **[03-Canonicalization.md](03-Canonicalization.md)** - Next pass (dead code elimination)
 - **[04-MemoryPooling.md](04-MemoryPooling.md)** - Uses liveness for spatial optimization
-- **[BUFFER-LIFETIME-DESIGN.md](../BUFFER-LIFETIME-DESIGN.md)** - Ownership model
-- **[MEMORY-MANAGEMENT.md](../MEMORY-MANAGEMENT.md)** - Overall strategy
+- **[BUFFER-LIFETIME-DESIGN.md](../../BUFFER-LIFETIME-DESIGN.md)** - Ownership model
+- **[MEMORY-MANAGEMENT.md](../../MEMORY-MANAGEMENT.md)** - Overall strategy
 - **[LOWERING-PIPELINE.md](../LOWERING-PIPELINE.md)** - Pipeline overview
