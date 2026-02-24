@@ -5,15 +5,8 @@
 //===- LowerAllocs.cpp - memref.alloc -> hip.alloc + hip.free -------------===//
 //
 // Replaces memref.alloc with hip.alloc (device allocation via hipMalloc) and
-// inserts hip.free for non-returned buffers.  Bridges one-shot-bufferize
-// output to the HIP-specific lowering that ultimately produces
-// hipMalloc / hipFree runtime calls.
-//
-// Ownership convention:
-//   - Returned buffers are caller-owned: no hip.free is emitted.
-//   - All other buffers are freed before hip.destroy_handle, because the
-//     handle encapsulates the HIP runtime context required by hipFree.
-//     If no destroy_handle exists, frees are placed before the terminator.
+// inserts hip.free for buffers not returned from the function.  Bridges
+// one-shot-bufferize output to HIP-specific lowering.
 //
 //===----------------------------------------------------------------------===//
 
@@ -49,15 +42,6 @@ void LowerAllocsPass::runOnOperation() {
     return;
   }
 
-  // Find the insertion point for hip.free ops.  Prefer placing them just
-  // before hip.destroy_handle; fall back to just before the terminator.
-  Operation* freeInsertionPoint = nullptr;
-  funcOp.walk([&](DestroyHandleOp op) { freeInsertionPoint = op; });
-  if (!freeInsertionPoint) {
-    Block& entry = funcOp.getBody().front();
-    freeInsertionPoint = entry.getTerminator();
-  }
-
   OpBuilder builder(funcOp.getContext());
 
   // Replace each memref.alloc with hip.alloc.
@@ -83,13 +67,32 @@ void LowerAllocsPass::runOnOperation() {
       returnedValues.insert(v);
   });
 
-  // Insert hip.free for each buffer not returned to the caller.
+  // Move hip.destroy_handle to just before the terminator.  Passes like
+  // buffer-results-to-out-params may insert ops (e.g., memref.copy) after
+  // the original destroy_handle position; the handle must stay valid until
+  // all hip.free ops have executed.
+  Block& entry = funcOp.getBody().front();
+  Operation* terminator = entry.getTerminator();
+  Operation* destroyHandleOp = nullptr;
+  funcOp.walk([&](DestroyHandleOp op) { destroyHandleOp = op; });
+  if (destroyHandleOp)
+    destroyHandleOp->moveBefore(terminator);
+
+  // Insert hip.free for each non-returned alloc after its last use.
+  // NOTE: only direct users are tracked; aliasing ops (memref.cast,
+  // memref.subview) are not followed transitively.
   for (AllocOp hipAlloc : hipAllocs) {
-    if (!returnedValues.contains(hipAlloc.getResult())) {
-      builder.setInsertionPoint(freeInsertionPoint);
-      FreeOp::create(builder, freeInsertionPoint->getLoc(), handle,
-                     hipAlloc.getResult());
+    if (returnedValues.contains(hipAlloc.getResult()))
+      continue;
+
+    Operation* lastUser = hipAlloc;
+    for (Operation* user : hipAlloc.getResult().getUsers()) {
+      if (lastUser->isBeforeInBlock(user))
+        lastUser = user;
     }
+
+    builder.setInsertionPointAfter(lastUser);
+    FreeOp::create(builder, hipAlloc.getLoc(), handle, hipAlloc.getResult());
   }
 }
 
