@@ -20,4 +20,4 @@
 #define GET_OP_CLASSES
 #include "HipOps.h.inc"
 
-#endif  // HIP_DIALECT_H
+#endif // HIP_DIALECT_H
