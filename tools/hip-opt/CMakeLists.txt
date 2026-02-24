@@ -87,6 +87,8 @@ set(HIP_OPT_SRCS
   hip-opt.cpp
   HipDialect.cpp
   HipToLLVM.cpp
+  LowerAllocs.cpp
+  OptimizeMemRefs.cpp
 )
 if(ENABLE_ONNX_FRONTEND)
   list(APPEND HIP_OPT_SRCS OnnxToHip.cpp)
