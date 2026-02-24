@@ -68,17 +68,17 @@ func.func @no_handle_noop(%a: memref<2x64x64xf32>) -> memref<2x64x64xf32> {
 }
 
 // Three memref<2x64x64xf32> allocs: alloc0 and alloc1 are not returned, so
-// both get hip.free before hip.destroy_handle. alloc2 is returned.
+// both get hip.free after their last use. alloc2 is returned.
 // CHECK-LABEL: func.func @multiple_frees
 // CHECK:         %[[H:.*]] = hip.create_handle()
 // CHECK:         %[[A:.*]] = hip.alloc(%[[H]]) : memref<2x64x64xf32>
 // CHECK:         hip.hipblaslt.matmul
 // CHECK:         %[[B:.*]] = hip.alloc(%[[H]]) : memref<2x64x64xf32>
 // CHECK:         hip.miopen.softmax
+// CHECK:         hip.free(%[[H]], %[[A]]) : memref<2x64x64xf32>
 // CHECK:         %[[C:.*]] = hip.alloc(%[[H]]) : memref<2x64x64xf32>
 // CHECK:         hip.miopen.softmax
-// CHECK-DAG:     hip.free(%[[H]], %[[A]]) : memref<2x64x64xf32>
-// CHECK-DAG:     hip.free(%[[H]], %[[B]]) : memref<2x64x64xf32>
+// CHECK:         hip.free(%[[H]], %[[B]]) : memref<2x64x64xf32>
 // CHECK:         hip.destroy_handle(%[[H]])
 // CHECK:         return %[[C]]
 func.func @multiple_frees(
