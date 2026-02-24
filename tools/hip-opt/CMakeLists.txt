@@ -89,6 +89,7 @@ set(HIP_OPT_SRCS
   HipToLLVM.cpp
   LowerAllocs.cpp
   OptimizeMemRefs.cpp
+  PoolAllocs.cpp
 )
 if(ENABLE_ONNX_FRONTEND)
   list(APPEND HIP_OPT_SRCS OnnxToHip.cpp)
@@ -181,7 +182,6 @@ target_link_libraries(hip-compiler PRIVATE
   MLIRControlFlowDialect
   MLIRFuncDialect
   MLIRMemRefDialect
-  MLIRMemRefTransforms
   MLIRSCFDialect
   MLIRTensorDialect
   MLIRDestinationStyleOpInterface

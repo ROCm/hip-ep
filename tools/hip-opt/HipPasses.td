@@ -4,13 +4,6 @@
  */
 //===-- HipPasses.td - HIP pass definitions ----------------*- tablegen -*-===//
 //
-// Typical pipeline order (each pass feeds into the next):
-//   1. --convert-onnx-to-hip    Tensor-level ONNX -> HIP DPS ops
-//   2. --one-shot-bufferize     Tensor -> memref (MLIR built-in)
-//   3. --hip-optimize-memrefs   Liveness-based buffer reuse
-//   4. --hip-lower-allocs       memref.alloc -> hip.alloc / hip.free
-//   5. --convert-hip-to-llvm    HIP ops -> LLVM runtime calls
-//
 //===----------------------------------------------------------------------===//
 
 #ifndef HIP_PASSES
@@ -69,6 +62,30 @@ def OptimizeMemRefsPass : Pass<"hip-optimize-memrefs", "mlir::func::FuncOp"> {
     unchanged.
   }];
   let dependentDialects = [
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
+def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
+  let summary = "Pool memref.alloc ops into a single i8 byte buffer";
+  let description = [{
+    Packs all memref.alloc ops in a single-block function into one contiguous
+    byte pool (memref<Nxi8> for fully static, memref<?xi8> when any alloc is
+    dynamic).  Each original allocation is replaced with a memref.view at a
+    computed byte offset into the pool.
+
+    Static allocations use greedy best-fit offset assignment (inspired by
+    greedy best-fit strip packing).  Dynamic allocations
+    are bucketed by their byte-size SSA value: non-overlapping lifetimes within
+    a bucket share an offset.
+
+    Sub-buffer offsets are aligned to 256 bytes by default.
+
+    Recommended pipeline position:
+      hip-optimize-memrefs (optional) -> hip-pool-allocs -> hip-lower-allocs
+  }];
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
     "mlir::memref::MemRefDialect"
   ];
 }
