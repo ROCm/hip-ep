@@ -9,7 +9,7 @@ Licensed under the MIT License.
 
 **Note:** This document describes the **WHAT** and **WHY** of the C interface. For **HOW** to implement it (GenerateInterfacePass details), see [passes/06-GenerateInterfacePass.md](passes/06-GenerateInterfacePass.md).
 
-**Related:** [MLIR-COMPILATION-OVERVIEW.md](MLIR-COMPILATION-OVERVIEW.md)
+**Related:** [MLIR-COMPILATION-OVERVIEW.md](../MLIR-COMPILATION-OVERVIEW.md)
 
 ---
 
@@ -405,9 +405,9 @@ span_t input_span = {
 ## 5. Related Documents
 
 **Core design:**
-- [MLIR-COMPILATION-OVERVIEW.md](MLIR-COMPILATION-OVERVIEW.md) - Overall compilation pipeline
-- [DYNAMIC-SHAPE-DESIGN.md](DYNAMIC-SHAPE-DESIGN.md) - Dynamic shape support details
-- [STATE-AND-CONTEXT.md](STATE-AND-CONTEXT.md) - Runtime state structure
+- [MLIR-COMPILATION-OVERVIEW.md](../MLIR-COMPILATION-OVERVIEW.md) - Overall compilation pipeline
+- [DYNAMIC-SHAPE-DESIGN.md](../DYNAMIC-SHAPE-DESIGN.md) - Dynamic shape support details
+- [RUNTIME-ARCHITECTURE.md](../RUNTIME-ARCHITECTURE.md) - Runtime state structure
 
 **Implementation:**
 - [passes/06-GenerateInterfacePass.md](passes/06-GenerateInterfacePass.md) - How to implement the C interface in MLIR

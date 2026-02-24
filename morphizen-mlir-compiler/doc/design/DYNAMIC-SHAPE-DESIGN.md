@@ -10,7 +10,7 @@ Licensed under the MIT License.
 **Date:** 2026-02-14
 **Document Type:** Design
 **Review Status:** Draft
-**Related:** [ARCHITECTURE.md](ARCHITECTURE.md), [MLIR-COMPILATION-DESIGN.md](MLIR-COMPILATION-DESIGN.md), [04-MemoryPooling.md](mlir/passes/04-MemoryPooling.md)
+**Related:** [ARCHITECTURE.md](ARCHITECTURE.md), [MLIR-COMPILATION-OVERVIEW.md](MLIR-COMPILATION-OVERVIEW.md), [04-MemoryPooling.md](mlir/passes/04-MemoryPooling.md)
 
 ---
 
@@ -281,4 +281,4 @@ The struct type is identical; only the initialization differs.
 - [ARCHITECTURE.md](ARCHITECTURE.md) - C interface design
 - [04-MemoryPooling.md](mlir/passes/04-MemoryPooling.md) - Memory pooling algorithm and limitations
 - [BUFFER-LIFETIME-DESIGN.md](BUFFER-LIFETIME-DESIGN.md) - Buffer lifetime management
-- [MLIR-COMPILATION-DESIGN.md](MLIR-COMPILATION-DESIGN.md) - Wrapper functions and compilation pipeline
+- [MLIR-COMPILATION-OVERVIEW.md](MLIR-COMPILATION-OVERVIEW.md) - Wrapper functions and compilation pipeline

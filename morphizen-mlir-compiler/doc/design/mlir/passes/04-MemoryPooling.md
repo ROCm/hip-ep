@@ -8,7 +8,7 @@ Licensed under the MIT License.
 **Date:** 2026-02-20
 **Document Type:** Implementation
 **Status:** Draft
-**Related:** [02-BufferDeallocation.md](02-BufferDeallocation.md), [04a-MemoryPoolingAlgorithm.md](04a-MemoryPoolingAlgorithm.md), [BUFFER-LIFETIME-DESIGN.md](../BUFFER-LIFETIME-DESIGN.md)
+**Related:** [02-BufferDeallocation.md](02-BufferDeallocation.md), [04a-MemoryPoolingAlgorithm.md](04a-MemoryPoolingAlgorithm.md), [BUFFER-LIFETIME-DESIGN.md](../../BUFFER-LIFETIME-DESIGN.md)
 
 ---
 
@@ -91,7 +91,7 @@ Generates code in `inference_init()` to allocate pool at runtime:
 )
 ```
 
-See [GenerateInterfacePass.md - Pool Allocation](GenerateInterfacePass.md#pool-allocation) for code generation details.
+See [06-GenerateInterfacePass.md - Pool Allocation](06-GenerateInterfacePass.md#pool-allocation) for code generation details.
 
 ### HipToLLVM
 
@@ -102,7 +102,7 @@ Lowers `hip.alloc` operations to pool-based allocation:
 %buffer_ptr = call ptr @hipdnn_ep_get_buffer_from_pool(ptr %state, i64 %buffer_index)
 ```
 
-See [HipToLLVM.md - Pool-based Allocation](HipToLLVM.md#pool-based-allocation) for lowering details.
+See [05-HipToLLVM.md - Pool-based Allocation](05-HipToLLVM.md#pool-based-allocation) for lowering details.
 
 ### Design Separation
 

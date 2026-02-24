@@ -187,5 +187,4 @@ See `test/e2e/test-model-dll` tool which uses this interface for shape discovery
 ## See Also
 
 - [GenerateInterfacePass.cpp](../../lib/HipDialect/GenerateInterfacePass.cpp) - Implementation
-- [CInterface Design](../c-interface.md) - Overall interface architecture
-- [E2E Testing](../../../test/e2e/README.md) - Integration testing
+- [C Interface Design](../mlir/INTERFACE-DESIGN.md) - Overall interface architecture
