@@ -380,8 +380,9 @@ void PoolAllocsPass::runOnOperation() {
 
   if (funcOp.empty())
     return;
-  if (!funcOp.getBody().hasOneBlock())
-    return;
+  assert(funcOp.getBody().hasOneBlock() &&
+         "hip-pool-allocs requires single-block functions; liveness analysis "
+         "uses sequential op indices that do not generalize to control flow");
 
   Block& block = funcOp.getBody().front();
 
