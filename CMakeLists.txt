@@ -52,27 +52,26 @@ endif()
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
 
 # HIP kernels library (compiled with hipcc on Windows, CMake HIP on Linux)
-# Temporarily disabled to focus on MLIR backend
-# add_subdirectory(kernels)
+add_subdirectory(kernels)
 
-# add_subdirectory(proto)
-# add_subdirectory(rocm-pass-common)
-# add_subdirectory(level-1-pass-rocm)
+add_subdirectory(proto)
+add_subdirectory(rocm-pass-common)
+add_subdirectory(level-1-pass-rocm)
 
 # Level-2 passes for different op types
-# add_subdirectory(level-2-pass-rocm-conv)
-# add_subdirectory(level-2-pass-rocm-gemm)
-# add_subdirectory(level-2-pass-rocm-matmul)
-# add_subdirectory(level-2-pass-rocm-mul)
-# add_subdirectory(level-2-pass-rocm-softmax)
-# add_subdirectory(level-2-pass-rocm-reshape)
-# add_subdirectory(level-2-pass-rocm-transpose)
-# add_subdirectory(level-2-pass-rocm-tile)
+add_subdirectory(level-2-pass-rocm-conv)
+add_subdirectory(level-2-pass-rocm-gemm)
+add_subdirectory(level-2-pass-rocm-matmul)
+add_subdirectory(level-2-pass-rocm-mul)
+add_subdirectory(level-2-pass-rocm-softmax)
+add_subdirectory(level-2-pass-rocm-reshape)
+add_subdirectory(level-2-pass-rocm-transpose)
+add_subdirectory(level-2-pass-rocm-tile)
 
-# add_subdirectory(custom-op-rocm)
+add_subdirectory(custom-op-rocm)
 
 # Add test directory (test_gqa can be built independently)
-# add_subdirectory(test)
+add_subdirectory(test)
 
 # MLIR backend (experimental, built alongside ROCm backend)
 add_subdirectory(backend-mlir-compiler)
