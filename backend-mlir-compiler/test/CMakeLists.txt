@@ -58,17 +58,6 @@ if(WIN32)
       $<TARGET_FILE:onnxruntime::onnxruntime>
       $<TARGET_FILE_DIR:test-e2e-mlir>
   )
-
-  # Copy zlib DLL (required by morphizen EP)
-  find_package(ZLIB REQUIRED)
-  if(TARGET ZLIB::ZLIB)
-    add_custom_command(
-      TARGET test-e2e-mlir POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_FILE:ZLIB::ZLIB>
-        $<TARGET_FILE_DIR:test-e2e-mlir>
-    )
-  endif()
 endif()
 
 # Register test
