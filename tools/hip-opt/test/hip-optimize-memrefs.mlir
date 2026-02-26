@@ -7,8 +7,14 @@
 
 // RUN: %hip-opt --hip-optimize-memrefs %s | %FileCheck %s
 
-// Three memref<2x64x64xf32> buffers: alloc0 becomes dead after matmul writes alloc1,
-// so alloc1's matmul reuses alloc0. alloc2 (softmax output) is a new allocation.
+// Three memref<2x64x64xf32> buffers: alloc0 becomes dead after matmul writes
+// alloc1, so alloc1 reuses alloc0. alloc2 (softmax output) is new.
+//
+// Intervals:
+//   alloc0: [0, 0]   dead before index 1
+//   alloc1: [1, 2]   reuses alloc0's slot (0 < 1)
+//   alloc2: [2, ret]  new slot (returned)
+//
 // CHECK-LABEL: func.func @static_reuse_same_type
 // CHECK:         %[[A:.*]] = memref.alloc()
 // CHECK:         hip.hipblaslt.matmul
@@ -31,9 +37,15 @@ func.func @static_reuse_same_type(
   return %alloc2 : memref<2x64x64xf32>
 }
 
-// alloc0 (memref<2x64x64xf32>) becomes dead after mul reads it into alloc1.
-// alloc2 (memref<64xf32>) fits inside alloc0's byte-size, so alloc0 is reused
-// via memref.reinterpret_cast.
+// alloc0 (memref<2x64x64xf32>, 32768 bytes) becomes dead after mul reads it
+// into alloc1. alloc2 (memref<64xf32>, 256 bytes) fits inside alloc0's
+// byte-size, so alloc0 is reused via memref.reinterpret_cast.
+//
+// Intervals:
+//   alloc0: [0, 1]   dead before index 2
+//   alloc1: [1, 2]   new slot (alloc0 still live at 1)
+//   alloc2: [2, ret]  reuses alloc0 via reinterpret_cast (256 <= 32768)
+//
 // CHECK-LABEL: func.func @bytesize_reuse_reinterpret_cast
 // CHECK:         %[[BIG:.*]] = memref.alloc(){{.*}}: memref<2x64x64xf32>
 // CHECK:         hip.hipblaslt.matmul
@@ -57,8 +69,13 @@ func.func @bytesize_reuse_reinterpret_cast(
   return %alloc2 : memref<64xf32>
 }
 
-// alloc0 (memref<2x64x64xf32>) is read as both inputs to the matmul that writes alloc1.
-// Since alloc0 is still live when alloc1 is allocated, reuse is not possible.
+// alloc0 is read as BOTH inputs to the matmul that writes alloc1.  Since
+// alloc0 is still live at the same op that defines alloc1, reuse is blocked.
+//
+// Intervals:
+//   alloc0: [0, 1]   used at index 1 (as matmul input)
+//   alloc1: [1, ret]  cannot reuse alloc0 (0's lastUse=1 >= 1's def=1)
+//
 // CHECK-LABEL: func.func @no_reuse_overlapping_lifetimes
 // CHECK:         %[[A:.*]] = memref.alloc()
 // CHECK:         hip.hipblaslt.matmul
@@ -78,6 +95,12 @@ func.func @no_reuse_overlapping_lifetimes(
 
 // Three memref<?x64xf32> buffers all sized by the same SSA value %n.
 // alloc0 becomes dead after softmax reads it, so alloc2 reuses alloc0.
+//
+// Intervals:
+//   alloc0: [0, 1]   dead before index 2
+//   alloc1: [1, 2]   new slot (alloc0 still live at 1)
+//   alloc2: [2, ret]  reuses alloc0 (same type, same SSA dim %n)
+//
 // CHECK-LABEL: func.func @dynamic_same_dim_reuse
 // CHECK:         %[[A:.*]] = memref.alloc(%arg3)
 // CHECK:         hip.hipblaslt.matmul
@@ -100,7 +123,10 @@ func.func @dynamic_same_dim_reuse(
   return %alloc2 : memref<?x64xf32>
 }
 
-// Two memref<?x64xf32> buffers with different dynamic sizes (%n vs %m) must NOT be reused.
+// Two memref<?x64xf32> buffers with different SSA dimension values (%n vs %m).
+// Even though both are memref<?x64xf32>, the pass requires SSA identity of
+// dynamic-size operands to guarantee equal runtime sizes.  Different SSA
+// values means no reuse.
 // CHECK-LABEL: func.func @no_reuse_different_dynamic
 // CHECK:         memref.alloc(%arg3) : memref<?x64xf32>
 // CHECK:         hip.hipblaslt.matmul
@@ -119,9 +145,15 @@ func.func @no_reuse_different_dynamic(
   return %alloc1 : memref<?x64xf32>
 }
 
-// alloc0 (memref<2x64x64xf32>) has a subview derived from it. The subview is
-// used as input to the matmul that writes alloc1, so alloc0 is still live
-// when alloc1 is allocated — no reuse is possible.
+// alloc0 has a subview derived from it.  The transitive-use analysis follows
+// the subview -> cast chain, extending alloc0's lifetime to the matmul that
+// reads the cast.  Since alloc0 is still live when alloc1 is created, no
+// reuse is possible.
+//
+// Intervals (transitive):
+//   alloc0: [0, 3]   subview at 1, cast at 2, matmul reads cast at 3
+//   alloc1: [2, ret]  cannot reuse alloc0 (0's lastUse=3 >= 2's def=2)
+//
 // CHECK-LABEL: func.func @subview_extends_lifetime
 // CHECK:         %[[A:.*]] = memref.alloc()
 // CHECK:         hip.hipblaslt.matmul
@@ -156,7 +188,8 @@ func.func @no_allocs(
 }
 
 // alloc0 (memref<64xf32>) and alloc1 (memref<64xf16>) have different element
-// types (f32 vs f16), so reuse is not allowed even though alloc0 is dead.
+// types.  canReuse requires matching element types, so reuse is blocked even
+// though alloc0 is dead and the byte-sizes would fit (256 bytes >= 128 bytes).
 // CHECK-LABEL: func.func @no_reuse_different_element_type
 // CHECK:         memref.alloc(){{.*}}: memref<64xf32>
 // CHECK:         memref.alloc(){{.*}}: memref<64xf16>

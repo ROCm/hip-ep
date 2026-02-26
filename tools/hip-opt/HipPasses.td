@@ -66,6 +66,30 @@ def OptimizeMemRefsPass : Pass<"hip-optimize-memrefs", "mlir::func::FuncOp"> {
   ];
 }
 
+def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
+  let summary = "Pool memref.alloc ops into a single i8 byte buffer";
+  let description = [{
+    Packs all memref.alloc ops in a single-block function into one contiguous
+    byte pool (memref<Nxi8> for fully static, memref<?xi8> when any alloc is
+    dynamic).  Each original allocation is replaced with a memref.view at a
+    computed byte offset into the pool.
+
+    Static allocations use greedy best-fit offset assignment (inspired by
+    greedy best-fit strip packing).  Dynamic allocations
+    are bucketed by their byte-size SSA value: non-overlapping lifetimes within
+    a bucket share an offset.
+
+    Sub-buffer offsets are aligned to 256 bytes by default.
+
+    Recommended pipeline position:
+      hip-optimize-memrefs (optional) -> hip-pool-allocs -> hip-lower-allocs
+  }];
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 def LowerAllocsPass : Pass<"hip-lower-allocs", "mlir::func::FuncOp"> {
   let summary = "Lower memref.alloc to hip.alloc and insert hip.free";
   let description = [{

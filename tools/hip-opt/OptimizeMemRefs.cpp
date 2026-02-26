@@ -8,12 +8,37 @@
 // memref.alloc ops whose live ranges don't overlap with earlier compatible
 // allocations, reducing peak device-memory usage.
 //
+// Algorithm (illustrated with single-head attention, 8 allocs after
+// bufferization):
+//
+//   1. Index every op in the entry block sequentially: op0->0, op1->1, ...
+//
+//   2. For each memref.alloc, compute a live interval [def, lastUse]:
+//        - def     = index of the alloc op
+//        - lastUse = max index among all transitive users (follows aliasing
+//                    ops like subview, cast, reshape so that a derived view
+//                    extends the source buffer's lifetime)
+//
+//   3. Walk intervals in program order.  For each one, try to find a
+//      previously-created "slot" whose lastUse < this def (i.e., dead):
+//        - Among compatible dead slots, pick the one with smallest byte
+//          waste (best-fit).  Insert memref.reinterpret_cast if shapes differ.
+//        - If no compatible slot exists, create a new one.
+//
+//   4. Replace all reused allocs with their assigned slot buffer and erase
+//      the dead alloc ops.
+//
+//   Result for attention: 8 allocs -> 4 allocs (50% reduction).
+//
 // Compatibility rules:
 //   - Static shapes: any alloc whose byte-size fits inside an earlier slot
 //     (same element type and memory space).  A memref.reinterpret_cast is
 //     inserted when the shapes differ.
 //   - Dynamic shapes: the MemRefType must be identical and every dynamic-size
-//     operand must be the same SSA value.
+//     operand must be the same SSA value (not merely value-equivalent --
+//     proving value-equivalence in general would require alias analysis;
+//     SSA identity is sound and cheap, and CSE should run first to
+//     maximize opportunities).
 //
 //===----------------------------------------------------------------------===//
 
@@ -32,22 +57,25 @@ namespace hip {
 
 namespace {
 
+/// A memref.alloc and its live range within the entry block.
 struct AllocInterval {
   memref::AllocOp allocOp;
-  unsigned defIndex;
-  unsigned lastUseIndex;
+  unsigned defIndex;      ///< Block index where the alloc occurs.
+  unsigned lastUseIndex;  ///< Block index of the last (transitive) use.
 };
 
+/// A reusable memory slot: tracks the buffer, its type, when it becomes
+/// dead, and (for dynamic shapes) the SSA values that determine its size.
 struct Slot {
   Value buffer;
   MemRefType type;
-  unsigned lastUseIndex;
+  unsigned lastUseIndex;  ///< Updated when the slot is reused.
   SmallVector<Value, 4> dynamicSizes;
 };
 
-// ---------------------------------------------------------------------------
+//===----------------------------------------------------------------------===//
 // Helpers
-// ---------------------------------------------------------------------------
+//===----------------------------------------------------------------------===//
 
 /// Returns the allocation size in bytes for a fully-static memref type.
 /// Returns 0 when any dimension is dynamic.
@@ -73,7 +101,13 @@ static SmallVector<int64_t> getContiguousStrides(MemRefType type) {
 /// the given dynamic-size operands.
 ///
 /// Static shapes: the slot must have at least as many bytes (same element
-/// type and memory space).
+/// type and memory space).  Examples (slot holds memref<2x64x64xf32>,
+/// 32768 bytes):
+///   canReuse(memref<64xf32>)       -> true  (256 <= 32768, same f32)
+///   canReuse(memref<2x64x64xf32>)  -> true  (exact fit, no cast needed)
+///   canReuse(memref<3x64x64xf32>)  -> false (49152 > 32768)
+///   canReuse(memref<64xf16>)       -> false (different element type)
+///
 /// Dynamic shapes: the MemRefType must be identical and every dynamic-size
 /// operand must be the same SSA value.
 static bool canReuse(const Slot& slot, MemRefType neededType,
@@ -112,6 +146,16 @@ static bool isMemRefAlias(Operation* user) {
 /// Returns the highest operation index among all transitive users of \p value,
 /// following view-like and select ops so that the liveness of the source
 /// buffer accounts for all its derived views.
+///
+/// memref.dealloc ops are excluded: they are administrative, not data uses,
+/// and counting them would extend every lifetime to the block's end when
+/// buffer-deallocation-pipeline has been run, defeating buffer reuse.
+///
+/// Example:
+///   %buf  = memref.alloc() : memref<2x64x64xf32>           // index 3
+///   %sv   = memref.subview %buf[...] : ... to memref<...>   // alias, index 5
+///   use(%sv)                                                 // index 15
+///   -> buf.lastUse = 15 (not 3), preventing premature reuse
 static unsigned findLastTransitiveUseIndex(
     Value value, Block& block,
     const DenseMap<Operation*, unsigned>& opIndex,
@@ -126,6 +170,9 @@ static unsigned findLastTransitiveUseIndex(
       continue;
 
     for (Operation* user : current.getUsers()) {
+      if (isa<memref::DeallocOp>(user))
+        continue;
+
       auto it = opIndex.find(user);
       unsigned userIdx;
       if (it != opIndex.end()) {
@@ -147,9 +194,9 @@ static unsigned findLastTransitiveUseIndex(
   return lastIdx;
 }
 
-// ---------------------------------------------------------------------------
+//===----------------------------------------------------------------------===//
 // Pass
-// ---------------------------------------------------------------------------
+//===----------------------------------------------------------------------===//
 
 struct OptimizeMemRefsPass
     : public impl::OptimizeMemRefsPassBase<OptimizeMemRefsPass> {
@@ -195,8 +242,10 @@ void OptimizeMemRefsPass::runOnOperation() {
   if (intervals.size() < 2)
     return;
 
-  // Greedy best-fit slot assignment: pick the smallest sufficient dead slot
-  // whose live range ended strictly before this alloc.
+  // Greedy best-fit slot assignment.  For each interval in program order,
+  // find a dead slot (slot.lastUse < interval.def) with the smallest byte
+  // waste.  Best-fit minimizes internal fragmentation; early exit on exact
+  // match (waste == 0) avoids unnecessary scanning.
   SmallVector<Slot> slots;
   SmallVector<std::pair<Value, Value>> replacements;
 
@@ -241,8 +290,35 @@ void OptimizeMemRefsPass::runOnOperation() {
     }
   }
 
+  // Map each alloc to its memref.dealloc (if any) so we can erase the
+  // dealloc when the alloc it targets is replaced.  Without this, RAUW
+  // would turn `memref.dealloc %replaced` into `memref.dealloc %reuser`,
+  // causing a double-free.
+  DenseMap<Value, memref::DeallocOp> allocToDealloc;
+  for (Operation& op : block) {
+    if (auto deallocOp = dyn_cast<memref::DeallocOp>(op))
+      allocToDealloc[deallocOp.getMemref()] = deallocOp;
+  }
+
   // Apply all replacements and erase dead alloc ops.
   for (auto [oldVal, newVal] : replacements) {
+    if (auto it = allocToDealloc.find(oldVal); it != allocToDealloc.end()) {
+      it->second.erase();
+      allocToDealloc.erase(it);
+    }
+
+    // When a returned alloc (no dealloc) is merged into a slot that has a
+    // dealloc, the slot becomes the returned buffer and must not be freed.
+    bool oldIsReturned = llvm::any_of(oldVal.getUsers(), [](Operation* user) {
+      return isa<func::ReturnOp>(user);
+    });
+    if (oldIsReturned) {
+      if (auto it = allocToDealloc.find(newVal); it != allocToDealloc.end()) {
+        it->second.erase();
+        allocToDealloc.erase(it);
+      }
+    }
+
     oldVal.replaceAllUsesWith(newVal);
     oldVal.getDefiningOp()->erase();
   }
