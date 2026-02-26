@@ -29,6 +29,37 @@ void HipDialect::initialize() {
 #include "HipTypes.cpp.inc"
 
 //===----------------------------------------------------------------------===//
+// Non-DPS ops: memory effect declarations
+//===----------------------------------------------------------------------===//
+
+void CreateHandleOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>& effects) {
+  effects.emplace_back(MemoryEffects::Write::get(),
+                       SideEffects::DefaultResource::get());
+}
+
+void DestroyHandleOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>& effects) {
+  effects.emplace_back(MemoryEffects::Write::get(),
+                       SideEffects::DefaultResource::get());
+}
+
+void AllocOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>& effects) {
+  effects.emplace_back(MemoryEffects::Allocate::get(),
+                       getOperation()->getResult(0),
+                       SideEffects::DefaultResource::get());
+}
+
+void FreeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>& effects) {
+  // memref is operand #1 (operand #0 is handle)
+  effects.emplace_back(MemoryEffects::Free::get(),
+                       &getOperation()->getOpOperand(1),
+                       SideEffects::DefaultResource::get());
+}
+
+//===----------------------------------------------------------------------===//
 // Helpers for DPS compute ops (custom parse/print, verify, interfaces)
 //===----------------------------------------------------------------------===//
 
