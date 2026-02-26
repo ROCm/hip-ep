@@ -15,6 +15,7 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 
 namespace mlir {
 namespace hip {
@@ -25,11 +26,10 @@ namespace hip {
 namespace {
 
 /// Return true if \p op creates a memref alias (view) of one of its inputs
-/// without allocating new memory.
+/// without allocating new memory.  Uses the MLIR ViewLikeOpInterface so that
+/// any future view-like ops are automatically covered.
 static bool isMemRefAlias(Operation* op) {
-  return isa<memref::ViewOp, memref::SubViewOp, memref::CastOp,
-             memref::ReinterpretCastOp, memref::CollapseShapeOp,
-             memref::ExpandShapeOp, memref::ReshapeOp>(op);
+  return isa<ViewLikeOpInterface>(op);
 }
 
 /// Walk \p val back through view-like alias ops and return the root
@@ -38,16 +38,10 @@ static AllocOp traceToHipAlloc(Value val) {
   while (val) {
     if (auto alloc = val.getDefiningOp<AllocOp>())
       return alloc;
-    Operation* def = val.getDefiningOp();
-    if (!def || !isMemRefAlias(def))
+    auto viewLike = dyn_cast_or_null<ViewLikeOpInterface>(val.getDefiningOp());
+    if (!viewLike)
       return nullptr;
-    val = Value();
-    for (Value operand : def->getOperands()) {
-      if (isa<MemRefType>(operand.getType())) {
-        val = operand;
-        break;
-      }
-    }
+    val = viewLike.getViewSource();
   }
   return nullptr;
 }
@@ -85,6 +79,10 @@ void LowerAllocsPass::runOnOperation() {
 
   if (funcOp.empty())
     return;
+  assert(funcOp.getBody().hasOneBlock() &&
+         "hip-lower-allocs requires single-block functions; "
+         "findLastTransitiveUser uses isBeforeInBlock which does not "
+         "generalize to multi-block control flow");
 
   // Find the hip.handle produced by hip.create_handle.
   Value handle;
