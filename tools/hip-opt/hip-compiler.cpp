@@ -48,22 +48,22 @@
 #include <iostream>
 
 int main(int argc, char** argv) {
-  if (argc < 3) {
-    std::cerr << "Usage: " << argv[0] << " <input.mlir> -o <output.dll>\n";
-    return 1;
-  }
-
-  std::string inputFilename = argv[1];
+  std::string inputFilename;
   std::string outputDll;
-  for (int i = 2; i < argc; ++i) {
+  bool skipBufferize = false;
+  for (int i = 1; i < argc; ++i) {
     if (std::string(argv[i]) == "-o" && i + 1 < argc) {
-      outputDll = argv[i + 1];
-      break;
+      outputDll = argv[++i];
+    } else if (std::string(argv[i]) == "--no-bufferize") {
+      skipBufferize = true;
+    } else if (argv[i][0] != '-') {
+      inputFilename = argv[i];
     }
   }
 
-  if (outputDll.empty()) {
-    std::cerr << "Error: Output DLL not specified (-o <output.dll>)\n";
+  if (inputFilename.empty() || outputDll.empty()) {
+    std::cerr << "Usage: " << argv[0]
+              << " [--no-bufferize] <input.mlir> -o <output.dll>\n";
     return 1;
   }
 
@@ -111,9 +111,11 @@ int main(int argc, char** argv) {
   // 2. Run MLIR PassManager
   mlir::PassManager pm(&context);
 
-  mlir::bufferization::OneShotBufferizePassOptions bufOpts;
-  bufOpts.bufferizeFunctionBoundaries = true;
-  pm.addPass(mlir::bufferization::createOneShotBufferizePass(bufOpts));
+  if (!skipBufferize) {
+    mlir::bufferization::OneShotBufferizePassOptions bufOpts;
+    bufOpts.bufferizeFunctionBoundaries = true;
+    pm.addPass(mlir::bufferization::createOneShotBufferizePass(bufOpts));
+  }
 
   pm.addPass(mlir::hip::createConvertHipToLLVMPass());
   pm.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());

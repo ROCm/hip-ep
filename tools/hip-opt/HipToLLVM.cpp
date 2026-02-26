@@ -44,11 +44,14 @@ static constexpr const char* kHipGather = "hip_gather";
 static constexpr const char* kHipSilu = "hip_silu";
 static constexpr const char* kHipGqa = "hip_gqa";
 
-// Helper: extract allocated pointer from a converted memref descriptor,
+// Helper: extract the aligned data pointer from a converted memref descriptor,
 // casting to address space 0 if needed.
+// Uses alignedPtr (not allocatedPtr) so that memref.view offsets into a memory
+// pool are respected -- each view has the same allocatedPtr but a distinct
+// alignedPtr.
 static Value extractMemRefPtr(Value memrefDesc, ConversionPatternRewriter& rewriter,
                               Location loc) {
-  Value ptr = MemRefDescriptor(memrefDesc).allocatedPtr(rewriter, loc);
+  Value ptr = MemRefDescriptor(memrefDesc).alignedPtr(rewriter, loc);
   auto ptrTy = cast<LLVM::LLVMPointerType>(ptr.getType());
   if (ptrTy.getAddressSpace() != 0)
     ptr = rewriter.create<LLVM::AddrSpaceCastOp>(
@@ -388,8 +391,10 @@ struct MiopenRopeOpLowering : public ConvertOpToLLVMPattern<MiopenRopeOp> {
 };
 
 // hip.miopen.add / hip.miopen.mul  (element-wise binary ops)
-// Lowered call: hip_miopen_{add,mul}(handle, A_ptr, B_ptr, C_ptr, numElements)
-// numElements is computed as the product of all memref dimensions.
+// Lowered call: hip_miopen_{add,mul}(handle, A_ptr, B_ptr, C_ptr, numA, numB)
+// numA/numB are computed as the product of all memref dimensions for each
+// operand.  When numB == 1 (scalar broadcast), the runtime broadcasts B
+// over all elements of A.
 template <typename OpTy>
 struct MiopenBinaryOpLowering : public ConvertOpToLLVMPattern<OpTy> {
   using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
@@ -398,6 +403,19 @@ struct MiopenBinaryOpLowering : public ConvertOpToLLVMPattern<OpTy> {
   MiopenBinaryOpLowering(const LLVMTypeConverter& converter,
                          const char* name)
       : ConvertOpToLLVMPattern<OpTy>(converter), funcName(name) {}
+
+  Value computeNumElements(MemRefType type, Value descriptor,
+                           ConversionPatternRewriter& rewriter,
+                           Location loc) const {
+    Type indexType = this->getIndexType();
+    int rank = type.getRank();
+    Value num = rewriter.create<LLVM::ConstantOp>(
+        loc, indexType, rewriter.getIndexAttr(1));
+    for (int i = 0; i < rank; i++)
+      num = LLVM::MulOp::create(rewriter, loc, num,
+                                MemRefDescriptor(descriptor).size(rewriter, loc, i));
+    return num;
+  }
 
   LogicalResult
   matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
@@ -409,23 +427,21 @@ struct MiopenBinaryOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     Type indexType = this->getIndexType();
 
     SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, ptrType,
-                                    indexType};
+                                    indexType, indexType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, funcName, paramTypes, voidType);
     if (failed(funcOp))
       return failure();
 
-    MemRefDescriptor aDesc(adaptor.getA());
-    int rank = cast<MemRefType>(op.getA().getType()).getRank();
-    Value numElements = aDesc.size(rewriter, loc, 0);
-    for (int i = 1; i < rank; i++)
-      numElements = LLVM::MulOp::create(rewriter, loc, numElements,
-                                        aDesc.size(rewriter, loc, i));
+    auto aType = cast<MemRefType>(op.getA().getType());
+    auto bType = cast<MemRefType>(op.getB().getType());
+    Value numA = computeNumElements(aType, adaptor.getA(), rewriter, loc);
+    Value numB = computeNumElements(bType, adaptor.getB(), rewriter, loc);
 
     SmallVector<Value> args = {
         adaptor.getHandle(), extractMemRefPtr(adaptor.getA(), rewriter, loc),
         extractMemRefPtr(adaptor.getB(), rewriter, loc),
-        extractMemRefPtr(adaptor.getC(), rewriter, loc), numElements};
+        extractMemRefPtr(adaptor.getC(), rewriter, loc), numA, numB};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

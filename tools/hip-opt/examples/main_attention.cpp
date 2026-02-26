@@ -3,11 +3,17 @@
  * Licensed under the MIT License.
  */
 
-//===- main_attention.cpp - Main driver for 3D attention test
-//--------------===//
+//===- main_attention.cpp - ORT-vs-MLIR attention test driver -------------===//
 //
-// Single-head attention: Q/K/V projections, transpose, score, scale,
-// softmax, output. All tensors are 3D [B,S,D].
+// Usage: attention_test.exe <attention.onnx>
+//
+// 1. Loads the ONNX model and runs inference on CPU via ONNX Runtime
+//    to produce reference output.
+// 2. Calls the compiled MLIR DLL (main_graph) on GPU.
+// 3. Compares GPU output against the ORT reference.
+//
+// The MLIR DLL (attention.dll) exports main_graph with the signature
+// produced by compiling attention.hip.mlir through convert-hip-to-llvm.
 //
 //===----------------------------------------------------------------------===//
 
@@ -15,149 +21,214 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <hip/hip_runtime_api.h>
+#include <cstring>
+#include <string>
 #include <vector>
 
-struct MemRef3D {
-  float *a, *al;
-  int64_t o, s[3], st[3];
-};
+#include <hip/hip_runtime_api.h>
+#include <onnxruntime_c_api.h>
 
-extern "C" __declspec(dllimport) MemRef3D attention(
-    float* X_a, float* X_al, int64_t X_o, int64_t X_s0, int64_t X_s1,
-    int64_t X_s2, int64_t X_st0, int64_t X_st1, int64_t X_st2, float* Wq_a,
-    float* Wq_al, int64_t Wq_o, int64_t Wq_s0, int64_t Wq_s1, int64_t Wq_st0,
-    int64_t Wq_st1, float* Wk_a, float* Wk_al, int64_t Wk_o, int64_t Wk_s0,
-    int64_t Wk_s1, int64_t Wk_st0, int64_t Wk_st1, float* Wv_a, float* Wv_al,
-    int64_t Wv_o, int64_t Wv_s0, int64_t Wv_s1, int64_t Wv_st0, int64_t Wv_st1,
-    float* sc_a, float* sc_al, int64_t sc_o, int64_t sc_s0, int64_t sc_s1,
-    int64_t sc_s2, int64_t sc_st0, int64_t sc_st1, int64_t sc_st2, float* out_a,
-    float* out_al, int64_t out_o, int64_t out_s0, int64_t out_s1,
-    int64_t out_s2, int64_t out_st0, int64_t out_st1, int64_t out_st2);
+// --------------------------------------------------------------------------
+// DLL import: compiled from attention.hip.mlir
+//
+// func.func @main_graph(
+//     %arg0: memref<2x64x64xf32, strided<[?,?,?], offset:?>>,
+//     %arg1: memref<2x64x64xf32>)
+//
+// After convert-func-to-llvm each memref arg is flattened to:
+//   (alloc_ptr, aligned_ptr, offset, s0, s1, s2, st0, st1, st2)
+// --------------------------------------------------------------------------
+extern "C" __declspec(dllimport) void main_graph(
+    float* X_a, float* X_al, int64_t X_o,
+    int64_t X_s0, int64_t X_s1, int64_t X_s2,
+    int64_t X_st0, int64_t X_st1, int64_t X_st2,
+    float* out_a, float* out_al, int64_t out_o,
+    int64_t out_s0, int64_t out_s1, int64_t out_s2,
+    int64_t out_st0, int64_t out_st1, int64_t out_st2);
 
-static void cpu_matmul(const float* A, const float* B, float* C, int64_t M,
-                       int64_t K, int64_t N) {
-  for (int64_t i = 0; i < M; ++i)
-    for (int64_t j = 0; j < N; ++j) {
-      float s = 0;
-      for (int64_t k = 0; k < K; ++k)
-        s += A[i * K + k] * B[k * N + j];
-      C[i * N + j] = s;
-    }
-}
-
-static void cpu_softmax(const float* in, float* out, int64_t rows,
-                        int64_t cols) {
-  for (int64_t n = 0; n < rows; ++n) {
-    float mx = in[n * cols];
-    for (int64_t d = 1; d < cols; ++d)
-      mx = std::fmax(mx, in[n * cols + d]);
-    float sum = 0;
-    for (int64_t d = 0; d < cols; ++d) {
-      out[n * cols + d] = std::exp(in[n * cols + d] - mx);
-      sum += out[n * cols + d];
-    }
-    for (int64_t d = 0; d < cols; ++d)
-      out[n * cols + d] /= sum;
-  }
-}
-
-#define HIP_CHECK(call)                                            \
-  do {                                                             \
-    hipError_t e = (call);                                         \
-    if (e != hipSuccess) {                                         \
-      fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__, \
-              hipGetErrorString(e));                               \
-      exit(1);                                                     \
-    }                                                              \
+// --------------------------------------------------------------------------
+// Error-checking macros
+// --------------------------------------------------------------------------
+#define HIP_CHECK(call)                                                \
+  do {                                                                 \
+    hipError_t e = (call);                                             \
+    if (e != hipSuccess) {                                             \
+      fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__,    \
+              hipGetErrorString(e));                                   \
+      exit(1);                                                         \
+    }                                                                  \
   } while (0)
 
-int main() {
-  const int64_t B = 2, S = 4, D = 8;
-  const float scale_val = 1.0f / std::sqrt((float)D);
-  printf("3D Attention: B=%lld S=%lld D=%lld scale=%.4f\n", B, S, D, scale_val);
+#define ORT_ABORT_ON_ERROR(ort, expr)                                  \
+  do {                                                                 \
+    OrtStatus* _s = (expr);                                            \
+    if (_s) {                                                          \
+      fprintf(stderr, "ORT error %s:%d: %s\n", __FILE__, __LINE__,    \
+              (ort)->GetErrorMessage(_s));                              \
+      (ort)->ReleaseStatus(_s);                                        \
+      exit(1);                                                         \
+    }                                                                  \
+  } while (0)
 
-  std::vector<float> h_X(B * S * D), h_Wq(D * D), h_Wk(D * D), h_Wv(D * D);
-  std::vector<float> h_scale(B * S * S, scale_val);
-  std::vector<float> h_out(B * S * D, 0), h_ref(B * S * D);
+// --------------------------------------------------------------------------
+// Widen a narrow path to wchar_t (Windows CreateSession needs wchar_t*)
+// --------------------------------------------------------------------------
+static std::wstring to_wstring(const char* s) {
+  size_t len = strlen(s);
+  std::wstring ws(len, L'\0');
+  for (size_t i = 0; i < len; ++i)
+    ws[i] = static_cast<wchar_t>(static_cast<unsigned char>(s[i]));
+  return ws;
+}
 
-  for (int64_t i = 0; i < B * S * D; ++i)
-    h_X[i] = float(i % 7) * 0.1f;
-  for (int64_t i = 0; i < D * D; ++i)
-    h_Wq[i] = (i / D == i % D) ? 1.0f : 0.0f;
-  for (int64_t i = 0; i < D * D; ++i)
-    h_Wk[i] = h_Wq[i];
-  for (int64_t i = 0; i < D * D; ++i)
-    h_Wv[i] = h_Wq[i];
-
-  // CPU reference per batch
-  for (int64_t b = 0; b < B; b++) {
-    std::vector<float> Q(S * D), K(S * D), V(S * D), KT(D * S), sc(S * S),
-        scaled(S * S), attn(S * S);
-    cpu_matmul(&h_X[b * S * D], h_Wq.data(), Q.data(), S, D, D);
-    cpu_matmul(&h_X[b * S * D], h_Wk.data(), K.data(), S, D, D);
-    cpu_matmul(&h_X[b * S * D], h_Wv.data(), V.data(), S, D, D);
-    for (int64_t i = 0; i < S; i++)
-      for (int64_t j = 0; j < D; j++)
-        KT[j * S + i] = K[i * D + j];
-    cpu_matmul(Q.data(), KT.data(), sc.data(), S, D, S);
-    for (int64_t i = 0; i < S * S; i++)
-      scaled[i] = sc[i] * scale_val;
-    cpu_softmax(scaled.data(), attn.data(), S, S);
-    cpu_matmul(attn.data(), V.data(), &h_ref[b * S * D], S, S, D);
+int main(int argc, char** argv) {
+  if (argc < 2) {
+    fprintf(stderr, "Usage: %s <attention.onnx>\n", argv[0]);
+    return 1;
   }
+  const char* onnx_path = argv[1];
 
-  float *d_X, *d_Wq, *d_Wk, *d_Wv, *d_scale, *d_out;
-  HIP_CHECK(hipMalloc(&d_X, B * S * D * 4));
-  HIP_CHECK(hipMalloc(&d_Wq, D * D * 4));
-  HIP_CHECK(hipMalloc(&d_Wk, D * D * 4));
-  HIP_CHECK(hipMalloc(&d_Wv, D * D * 4));
-  HIP_CHECK(hipMalloc(&d_scale, B * S * S * 4));
-  HIP_CHECK(hipMalloc(&d_out, B * S * D * 4));
-  HIP_CHECK(hipMemcpy(d_X, h_X.data(), B * S * D * 4, hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemcpy(d_Wq, h_Wq.data(), D * D * 4, hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemcpy(d_Wk, h_Wk.data(), D * D * 4, hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemcpy(d_Wv, h_Wv.data(), D * D * 4, hipMemcpyHostToDevice));
-  HIP_CHECK(
-      hipMemcpy(d_scale, h_scale.data(), B * S * S * 4, hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemset(d_out, 0, B * S * D * 4));
+  const int64_t B = 2, S = 64, D = 64;
+  const int64_t total = B * S * D;
 
-  printf("Running attention on GPU...\n");
-  attention(d_X, d_X, 0, B, S, D, S * D, D, 1, d_Wq, d_Wq, 0, D, D, D, 1, d_Wk,
-            d_Wk, 0, D, D, D, 1, d_Wv, d_Wv, 0, D, D, D, 1, d_scale, d_scale, 0,
-            B, S, S, S * S, S, 1, d_out, d_out, 0, B, S, D, S * D, D, 1);
+  printf("=== Attention ORT-vs-MLIR test ===\n");
+  printf("Shape: [%lld, %lld, %lld]  (%lld floats)\n",
+         (long long)B, (long long)S, (long long)D, (long long)total);
 
-  HIP_CHECK(
-      hipMemcpy(h_out.data(), d_out, B * S * D * 4, hipMemcpyDeviceToHost));
+  // ------------------------------------------------------------------
+  // Generate deterministic input
+  // ------------------------------------------------------------------
+  std::vector<float> h_X(total);
+  srand(42);
+  for (auto& v : h_X)
+    v = ((float)rand() / RAND_MAX - 0.5f) * 0.2f;
 
-  printf("\nGPU output (batch 0, first 2 rows):\n");
-  for (int64_t i = 0; i < 2; ++i) {
-    printf("  [");
-    for (int64_t j = 0; j < D; ++j)
-      printf(" %6.3f", h_out[i * D + j]);
-    printf(" ]\n");
-  }
-  printf("CPU reference (batch 0, first 2 rows):\n");
-  for (int64_t i = 0; i < 2; ++i) {
-    printf("  [");
-    for (int64_t j = 0; j < D; ++j)
-      printf(" %6.3f", h_ref[i * D + j]);
-    printf(" ]\n");
-  }
+  // ==================================================================
+  //  ORT: run on CPU as reference
+  // ==================================================================
+  printf("\n[ORT] Loading model: %s\n", onnx_path);
 
-  float mx = 0;
-  for (int64_t i = 0; i < B * S * D; ++i) {
+  const OrtApi* ort = OrtGetApiBase()->GetApi(ORT_API_VERSION);
+
+  OrtEnv* env = nullptr;
+  ORT_ABORT_ON_ERROR(ort,
+      ort->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "attn_test", &env));
+
+  OrtSessionOptions* opts = nullptr;
+  ORT_ABORT_ON_ERROR(ort, ort->CreateSessionOptions(&opts));
+
+  std::wstring wpath = to_wstring(onnx_path);
+  OrtSession* session = nullptr;
+  ORT_ABORT_ON_ERROR(ort,
+      ort->CreateSession(env, wpath.c_str(), opts, &session));
+
+  OrtAllocator* alloc = nullptr;
+  ORT_ABORT_ON_ERROR(ort, ort->GetAllocatorWithDefaultOptions(&alloc));
+
+  // Query input name
+  char* raw_input_name = nullptr;
+  ORT_ABORT_ON_ERROR(ort,
+      ort->SessionGetInputName(session, 0, alloc, &raw_input_name));
+  std::string input_name(raw_input_name);
+  ORT_ABORT_ON_ERROR(ort, ort->AllocatorFree(alloc, raw_input_name));
+
+  // Query output name
+  char* raw_output_name = nullptr;
+  ORT_ABORT_ON_ERROR(ort,
+      ort->SessionGetOutputName(session, 0, alloc, &raw_output_name));
+  std::string output_name(raw_output_name);
+  ORT_ABORT_ON_ERROR(ort, ort->AllocatorFree(alloc, raw_output_name));
+
+  printf("[ORT] input: \"%s\"  output: \"%s\"\n",
+         input_name.c_str(), output_name.c_str());
+
+  // Create input tensor
+  OrtMemoryInfo* mem_info = nullptr;
+  ORT_ABORT_ON_ERROR(ort,
+      ort->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault,
+                               &mem_info));
+
+  int64_t shape[] = {B, S, D};
+  OrtValue* input_tensor = nullptr;
+  ORT_ABORT_ON_ERROR(ort,
+      ort->CreateTensorWithDataAsOrtValue(
+          mem_info, h_X.data(), total * sizeof(float),
+          shape, 3, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &input_tensor));
+
+  // Run
+  const char* in_names[] = {input_name.c_str()};
+  const char* out_names[] = {output_name.c_str()};
+  OrtValue* output_tensor = nullptr;
+  printf("[ORT] Running inference on CPU...\n");
+  ORT_ABORT_ON_ERROR(ort,
+      ort->Run(session, nullptr, in_names,
+               (const OrtValue* const*)&input_tensor, 1,
+               out_names, 1, &output_tensor));
+
+  float* ort_data = nullptr;
+  ORT_ABORT_ON_ERROR(ort,
+      ort->GetTensorMutableData(output_tensor, (void**)&ort_data));
+
+  std::vector<float> h_ref(ort_data, ort_data + total);
+  printf("[ORT] Done. First values: %.6f %.6f %.6f ...\n",
+         h_ref[0], h_ref[1], h_ref[2]);
+
+  ort->ReleaseValue(output_tensor);
+  ort->ReleaseValue(input_tensor);
+  ort->ReleaseMemoryInfo(mem_info);
+  ort->ReleaseSession(session);
+  ort->ReleaseSessionOptions(opts);
+  ort->ReleaseEnv(env);
+
+  // ==================================================================
+  //  GPU: run the compiled MLIR DLL
+  // ==================================================================
+  printf("\n[GPU] Allocating device memory...\n");
+
+  float *d_X = nullptr, *d_out = nullptr;
+  HIP_CHECK(hipMalloc(&d_X, total * sizeof(float)));
+  HIP_CHECK(hipMalloc(&d_out, total * sizeof(float)));
+  HIP_CHECK(hipMemcpy(d_X, h_X.data(), total * sizeof(float),
+                       hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemset(d_out, 0, total * sizeof(float)));
+
+  printf("[GPU] Calling main_graph...\n");
+  main_graph(
+      d_X,   d_X,   0,  B, S, D,  S * D, D, 1,
+      d_out, d_out, 0,  B, S, D,  S * D, D, 1);
+
+  std::vector<float> h_out(total);
+  HIP_CHECK(hipMemcpy(h_out.data(), d_out, total * sizeof(float),
+                       hipMemcpyDeviceToHost));
+  printf("[GPU] Done. First values: %.6f %.6f %.6f ...\n",
+         h_out[0], h_out[1], h_out[2]);
+
+  // ==================================================================
+  //  Compare
+  // ==================================================================
+  printf("\n--- Comparison ---\n");
+  printf("  GPU output (first 8): ");
+  for (int i = 0; i < 8 && i < total; ++i)
+    printf(" %8.5f", h_out[i]);
+  printf("\n  ORT ref    (first 8): ");
+  for (int i = 0; i < 8 && i < total; ++i)
+    printf(" %8.5f", h_ref[i]);
+  printf("\n");
+
+  float max_diff = 0;
+  int64_t worst_idx = 0;
+  for (int64_t i = 0; i < total; ++i) {
     float d = std::fabs(h_out[i] - h_ref[i]);
-    if (d > mx)
-      mx = d;
+    if (d > max_diff) {
+      max_diff = d;
+      worst_idx = i;
+    }
   }
-  printf("\nMax diff: %e\n%s\n", mx, mx < 1e-2f ? "PASS" : "FAIL");
+  printf("\n  Max abs diff: %e  (at index %lld: gpu=%.6f ort=%.6f)\n",
+         max_diff, (long long)worst_idx, h_out[worst_idx], h_ref[worst_idx]);
+  printf("  Result: %s\n\n", max_diff < 1e-2f ? "PASS" : "FAIL");
 
   HIP_CHECK(hipFree(d_X));
-  HIP_CHECK(hipFree(d_Wq));
-  HIP_CHECK(hipFree(d_Wk));
-  HIP_CHECK(hipFree(d_Wv));
-  HIP_CHECK(hipFree(d_scale));
   HIP_CHECK(hipFree(d_out));
-  return (mx < 1e-2f) ? 0 : 1;
+  return (max_diff < 1e-2f) ? 0 : 1;
 }
