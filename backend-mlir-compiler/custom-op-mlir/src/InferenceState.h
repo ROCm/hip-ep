@@ -39,11 +39,16 @@ public:
   // Execute inference computation
   int compute(span_t *inputs, span_t *outputs) const;
 
-private:
-  // Private constructor: Use create() factory method
-  InferenceState(void *state, std::unique_ptr<morphizen::Plugin> plugin,
+  // Passkey tag — only create() can construct one; enables std::make_unique
+  // with an otherwise-private constructor.
+  struct PrivateTag {};
+
+  // Public constructor gated by PrivateTag: use create() factory instead.
+  InferenceState(PrivateTag, void *state,
+                 std::unique_ptr<morphizen::Plugin> plugin,
                  const std::string &temp_dll_path);
 
+private:
   // Opaque handle returned by inference_init()
   void *state_;
 

@@ -35,7 +35,7 @@ std::string artifactExtension() {
 
 namespace mlir_compilation::customop {
 
-InferenceState::InferenceState(void *state,
+InferenceState::InferenceState(PrivateTag, void *state,
                                std::unique_ptr<morphizen::Plugin> plugin,
                                const std::string &temp_dll_path)
     : state_(state), plugin_(std::move(plugin)), temp_dll_path_(temp_dll_path) {
@@ -89,8 +89,8 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes) {
 
   MY_LOG(1) << "Inference state initialized";
 
-  return std::unique_ptr<InferenceState>(
-      new InferenceState(state, std::move(plugin), dll_path));
+  return std::make_unique<InferenceState>(PrivateTag{}, state, std::move(plugin),
+                                          dll_path);
 }
 
 InferenceState::~InferenceState() {
