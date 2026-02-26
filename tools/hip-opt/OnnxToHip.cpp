@@ -62,20 +62,28 @@ static mlir::Value createEmptyTensor(mlir::OpBuilder& builder, mlir::Location lo
                                        resultType.getElementType(), dynSizes);
 }
 
-/// Extract onnx.Constant ops into new function arguments.
-static void extractWeights(mlir::func::FuncOp funcOp) {
+/// Lower onnx.Constant ops to arith.constant so that bufferization converts
+/// them to memref.global + memref.get_global (the standard MLIR path for
+/// compile-time constants).
+static mlir::LogicalResult lowerOnnxConstants(mlir::func::FuncOp funcOp) {
   llvm::SmallVector<ONNXConstantOp> constants;
   funcOp.walk([&](ONNXConstantOp op) { constants.push_back(op); });
 
   for (ONNXConstantOp constOp : constants) {
-    mlir::Type resultType = constOp.getResult().getType();
-    unsigned argIdx = funcOp.getNumArguments();
-    (void)funcOp.insertArgument(argIdx, resultType, mlir::DictionaryAttr(),
-                                constOp.getLoc());
-    mlir::BlockArgument newArg = funcOp.getArgument(argIdx);
-    constOp.getResult().replaceAllUsesWith(newArg);
+    auto valueAttr =
+        mlir::dyn_cast_or_null<mlir::ElementsAttr>(constOp.getValueAttr());
+    if (!valueAttr) {
+      return constOp.emitError(
+          "unsupported onnx.Constant form (expected dense value attribute)");
+    }
+
+    mlir::OpBuilder builder(constOp);
+    auto arithConst = mlir::arith::ConstantOp::create(
+        builder, constOp.getLoc(), valueAttr);
+    constOp.getResult().replaceAllUsesWith(arithConst.getResult());
     constOp.erase();
   }
+  return mlir::success();
 }
 
 /// Insert hip.create_handle at function entry and hip.destroy_handle before
@@ -287,7 +295,8 @@ void ConvertOnnxToHipPass::runOnOperation() {
   mlir::MLIRContext* ctx = module.getContext();
 
   for (auto funcOp : llvm::make_early_inc_range(module.getOps<mlir::func::FuncOp>())) {
-    extractWeights(funcOp);
+    if (mlir::failed(lowerOnnxConstants(funcOp)))
+      return signalPassFailure();
     mlir::Value handle = insertHandleLifecycle(funcOp, ctx);
     if (mlir::failed(convertComputeOps(funcOp, ctx, handle)))
       return signalPassFailure();
