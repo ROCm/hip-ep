@@ -53,9 +53,9 @@ namespace {
 /// GPU-friendly alignment for sub-buffer byte offsets.
 static constexpr int64_t kDefaultAlignment = 256;
 
-// ===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 // AllocInfo - per-alloc metadata collected in Phase 1
-// ===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 
 struct AllocInfo {
   memref::AllocOp allocOp;
@@ -80,6 +80,9 @@ static bool isMemRefAlias(Operation* user) {
 /// Walk all transitive users of \p value (through view-like and select ops)
 /// and return the maximum operation index.  This extends an alloc's effective
 /// lifetime to cover all derived views.
+///
+/// memref.dealloc ops are excluded so that lifetimes reflect actual data
+/// usage, not administrative cleanup.
 static unsigned findLastTransitiveUseIndex(
     Value value, Block& block,
     const DenseMap<Operation*, unsigned>& opIndex, unsigned blockSize) {
@@ -93,6 +96,9 @@ static unsigned findLastTransitiveUseIndex(
       continue;
 
     for (Operation* user : current.getUsers()) {
+      if (isa<memref::DeallocOp>(user))
+        continue;
+
       auto it = opIndex.find(user);
       unsigned userIdx;
       if (it != opIndex.end()) {
@@ -124,9 +130,9 @@ static bool lifetimesOverlap(const AllocInfo& a, const AllocInfo& b) {
   return !(a.lastUseIndex < b.defIndex || b.lastUseIndex < a.defIndex);
 }
 
-// ===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 // Phase 3 - Static packing: greedy best-fit gap finding
-// ===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 //
 // Assigns a byte offset in a 1D address space to each static alloc.
 // Two allocs whose lifetimes don't overlap may share the same address range.
@@ -198,9 +204,9 @@ packStaticAllocs(MutableArrayRef<AllocInfo> statics, int64_t alignment) {
   return assignments;
 }
 
-// ===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 // Phase 4 - Dynamic packing: bucket by structural byte-size, bin by lifetime
-// ===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 //
 // For allocs with runtime-unknown sizes we cannot hardcode byte offsets.
 // Instead we group allocs that provably have the same runtime byte size into
@@ -367,9 +373,9 @@ packDynamicAllocs(MutableArrayRef<AllocInfo> dynamics, OpBuilder& builder,
   return buckets;
 }
 
-// ===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 // Pass entry point
-// ===--------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 
 struct PoolAllocsPass : public impl::PoolAllocsPassBase<PoolAllocsPass> {
   void runOnOperation() override;
@@ -596,6 +602,7 @@ void PoolAllocsPass::runOnOperation() {
   }
 
   // 5d. Replace each original alloc with a memref.view into the pool.
+  bool hadDeallocs = false;
   SmallVector<int64_t> staticOffsets;
   for (auto& info : allInfos) {
     auto it = allocToOffset.find(info.allocOp.getOperation());
@@ -621,6 +628,23 @@ void PoolAllocsPass::runOnOperation() {
       staticOffsets.push_back(constOp.value());
     else
       staticOffsets.push_back(-1);
+  }
+
+  // 5d'. Erase deallocs that now target views (invalid to free a view)
+  // and insert a single dealloc for the pool buffer.  After RAUW above,
+  // any `memref.dealloc %alloc_X` became `memref.dealloc %view_X`.
+  SmallVector<memref::DeallocOp> orphanedDeallocs;
+  funcOp.walk([&](memref::DeallocOp op) {
+    if (op.getMemref().getDefiningOp<memref::ViewOp>())
+      orphanedDeallocs.push_back(op);
+  });
+  hadDeallocs = !orphanedDeallocs.empty();
+  for (auto op : orphanedDeallocs)
+    op.erase();
+
+  if (hadDeallocs) {
+    builder.setInsertionPoint(block.getTerminator());
+    memref::DeallocOp::create(builder, loc, pool);
   }
 
   // 5e. Attach pool metadata to the function for runtime/deployment use.

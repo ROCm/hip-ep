@@ -73,9 +73,9 @@ struct Slot {
   SmallVector<Value, 4> dynamicSizes;
 };
 
-// ---------------------------------------------------------------------------
+//===----------------------------------------------------------------------===//
 // Helpers
-// ---------------------------------------------------------------------------
+//===----------------------------------------------------------------------===//
 
 /// Returns the allocation size in bytes for a fully-static memref type.
 /// Returns 0 when any dimension is dynamic.
@@ -147,6 +147,10 @@ static bool isMemRefAlias(Operation* user) {
 /// following view-like and select ops so that the liveness of the source
 /// buffer accounts for all its derived views.
 ///
+/// memref.dealloc ops are excluded: they are administrative, not data uses,
+/// and counting them would extend every lifetime to the block's end when
+/// buffer-deallocation-pipeline has been run, defeating buffer reuse.
+///
 /// Example:
 ///   %buf  = memref.alloc() : memref<2x64x64xf32>           // index 3
 ///   %sv   = memref.subview %buf[...] : ... to memref<...>   // alias, index 5
@@ -166,6 +170,9 @@ static unsigned findLastTransitiveUseIndex(
       continue;
 
     for (Operation* user : current.getUsers()) {
+      if (isa<memref::DeallocOp>(user))
+        continue;
+
       auto it = opIndex.find(user);
       unsigned userIdx;
       if (it != opIndex.end()) {
@@ -187,9 +194,9 @@ static unsigned findLastTransitiveUseIndex(
   return lastIdx;
 }
 
-// ---------------------------------------------------------------------------
+//===----------------------------------------------------------------------===//
 // Pass
-// ---------------------------------------------------------------------------
+//===----------------------------------------------------------------------===//
 
 struct OptimizeMemRefsPass
     : public impl::OptimizeMemRefsPassBase<OptimizeMemRefsPass> {
@@ -283,8 +290,35 @@ void OptimizeMemRefsPass::runOnOperation() {
     }
   }
 
+  // Map each alloc to its memref.dealloc (if any) so we can erase the
+  // dealloc when the alloc it targets is replaced.  Without this, RAUW
+  // would turn `memref.dealloc %replaced` into `memref.dealloc %reuser`,
+  // causing a double-free.
+  DenseMap<Value, memref::DeallocOp> allocToDealloc;
+  for (Operation& op : block) {
+    if (auto deallocOp = dyn_cast<memref::DeallocOp>(op))
+      allocToDealloc[deallocOp.getMemref()] = deallocOp;
+  }
+
   // Apply all replacements and erase dead alloc ops.
   for (auto [oldVal, newVal] : replacements) {
+    if (auto it = allocToDealloc.find(oldVal); it != allocToDealloc.end()) {
+      it->second.erase();
+      allocToDealloc.erase(it);
+    }
+
+    // When a returned alloc (no dealloc) is merged into a slot that has a
+    // dealloc, the slot becomes the returned buffer and must not be freed.
+    bool oldIsReturned = llvm::any_of(oldVal.getUsers(), [](Operation* user) {
+      return isa<func::ReturnOp>(user);
+    });
+    if (oldIsReturned) {
+      if (auto it = allocToDealloc.find(newVal); it != allocToDealloc.end()) {
+        it->second.erase();
+        allocToDealloc.erase(it);
+      }
+    }
+
     oldVal.replaceAllUsesWith(newVal);
     oldVal.getDefiningOp()->erase();
   }
