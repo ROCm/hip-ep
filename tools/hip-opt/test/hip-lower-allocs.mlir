@@ -3,13 +3,18 @@
 //
 //===----------------------------------------------------------------------===//
 // FileCheck tests for --hip-lower-allocs (memref.alloc -> hip.alloc/free).
+//
+// Ownership convention verified by these tests:
+//   - Every memref.alloc becomes hip.alloc (device memory via hipMalloc).
+//   - Returned buffers are caller-owned: no hip.free emitted.
+//   - Non-returned buffers get hip.free before hip.destroy_handle (the handle
+//     holds the HIP context needed by hipFree).
 //===----------------------------------------------------------------------===//
 
 // RUN: %hip-opt --hip-lower-allocs %s 2>&1 | %FileCheck %s
 
-// Two static memref<2x64x64xf32> allocs: both become hip.alloc. alloc0 is not
-// returned, so hip.free is inserted for it before hip.destroy_handle.
-// alloc1 (softmax output) is returned, so no hip.free for it.
+// Two static allocs: alloc0 is not returned -> hip.free before destroy_handle.
+// alloc1 is returned -> no hip.free (caller-owned).
 // CHECK-LABEL: func.func @static_lower
 // CHECK:         %[[H:.*]] = hip.create_handle()
 // CHECK:         %[[A:.*]] = hip.alloc(%[[H]]) : memref<2x64x64xf32>
@@ -63,17 +68,17 @@ func.func @no_handle_noop(%a: memref<2x64x64xf32>) -> memref<2x64x64xf32> {
 }
 
 // Three memref<2x64x64xf32> allocs: alloc0 and alloc1 are not returned, so
-// both get hip.free before hip.destroy_handle. alloc2 is returned.
+// both get hip.free after their last use. alloc2 is returned.
 // CHECK-LABEL: func.func @multiple_frees
 // CHECK:         %[[H:.*]] = hip.create_handle()
 // CHECK:         %[[A:.*]] = hip.alloc(%[[H]]) : memref<2x64x64xf32>
 // CHECK:         hip.hipblaslt.matmul
 // CHECK:         %[[B:.*]] = hip.alloc(%[[H]]) : memref<2x64x64xf32>
 // CHECK:         hip.miopen.softmax
+// CHECK:         hip.free(%[[H]], %[[A]]) : memref<2x64x64xf32>
 // CHECK:         %[[C:.*]] = hip.alloc(%[[H]]) : memref<2x64x64xf32>
 // CHECK:         hip.miopen.softmax
-// CHECK-DAG:     hip.free(%[[H]], %[[A]]) : memref<2x64x64xf32>
-// CHECK-DAG:     hip.free(%[[H]], %[[B]]) : memref<2x64x64xf32>
+// CHECK:         hip.free(%[[H]], %[[B]]) : memref<2x64x64xf32>
 // CHECK:         hip.destroy_handle(%[[H]])
 // CHECK:         return %[[C]]
 func.func @multiple_frees(

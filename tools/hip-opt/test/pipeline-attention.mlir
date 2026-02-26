@@ -3,14 +3,20 @@
 //
 //===----------------------------------------------------------------------===//
 // End-to-end pipeline test: bufferization -> buffer reuse -> alloc lowering.
+//
+// Models single-head scaled dot-product attention:
+//   Q  = X @ Wq          K  = X @ Wk          V  = X @ Wv
+//   KT = transpose(K)    scores = Q @ KT
+//   scaled = scores * (1/sqrt(D))   probs = softmax(scaled)   out = probs @ V
+//
+// Allocation lifecycle through the pipeline:
+//   tensor IR:              8 tensor.empty (no allocation yet)
+//   after bufferize:        8 memref.alloc
+//   after optimize-memrefs: 4 memref.alloc (Q, KT, scores, scaled reuse slots)
+//   after lower-allocs:     4 hip.alloc, 3 hip.free (out is returned)
 //===----------------------------------------------------------------------===//
 
 // RUN: %hip-opt --one-shot-bufferize="bufferize-function-boundaries" --hip-optimize-memrefs --hip-lower-allocs %s | %FileCheck %s
-
-// The attention model has 8 tensor.empty + HIP ops. After the pipeline:
-//   - one-shot-bufferize: 8 memref.alloc
-//   - hip-optimize-memrefs: reduced to 4 memref.alloc
-//   - hip-lower-allocs: 4 hip.alloc, 3 hip.free (one buffer is returned)
 
 // CHECK-LABEL: func.func @attention_pipeline
 
@@ -36,27 +42,35 @@ func.func @attention_pipeline(
   %c2 = arith.constant 2 : index
   %handle = hip.create_handle() : !hip.handle
 
+  // Q = X @ Wq  [B,S,D] @ [D,D] -> [B,S,D]
   %e0 = tensor.empty() : tensor<2x64x64xf32>
   %Q = hip.hipblaslt.matmul(%handle) ins(%X, %Wq : tensor<2x64x64xf32>, tensor<64x64xf32>) outs(%e0 : tensor<2x64x64xf32>) -> tensor<2x64x64xf32>
 
+  // K = X @ Wk
   %e1 = tensor.empty() : tensor<2x64x64xf32>
   %K = hip.hipblaslt.matmul(%handle) ins(%X, %Wk : tensor<2x64x64xf32>, tensor<64x64xf32>) outs(%e1 : tensor<2x64x64xf32>) -> tensor<2x64x64xf32>
 
+  // V = X @ Wv
   %e2 = tensor.empty() : tensor<2x64x64xf32>
   %V = hip.hipblaslt.matmul(%handle) ins(%X, %Wv : tensor<2x64x64xf32>, tensor<64x64xf32>) outs(%e2 : tensor<2x64x64xf32>) -> tensor<2x64x64xf32>
 
+  // KT = transpose(K, 1, 2)  [B,S,D] -> [B,D,S]
   %e3 = tensor.empty() : tensor<2x64x64xf32>
   %KT = hip.transpose(%handle, %c1, %c2) ins(%K : tensor<2x64x64xf32>) outs(%e3 : tensor<2x64x64xf32>) -> tensor<2x64x64xf32>
 
+  // scores = Q @ KT  [B,S,D] @ [B,D,S] -> [B,S,S]
   %e4 = tensor.empty() : tensor<2x64x64xf32>
   %scores = hip.hipblaslt.matmul(%handle) ins(%Q, %KT : tensor<2x64x64xf32>, tensor<2x64x64xf32>) outs(%e4 : tensor<2x64x64xf32>) -> tensor<2x64x64xf32>
 
+  // scaled = scores * (1/sqrt(D))
   %e5 = tensor.empty() : tensor<2x64x64xf32>
   %scaled = hip.miopen.mul(%handle) ins(%scores, %scale : tensor<2x64x64xf32>, tensor<f32>) outs(%e5 : tensor<2x64x64xf32>) -> tensor<2x64x64xf32>
 
+  // probs = softmax(scaled, axis=-1)
   %e6 = tensor.empty() : tensor<2x64x64xf32>
   %probs = hip.miopen.softmax(%handle) ins(%scaled : tensor<2x64x64xf32>) outs(%e6 : tensor<2x64x64xf32>) -> tensor<2x64x64xf32>
 
+  // out = probs @ V  [B,S,S] @ [B,S,D] -> [B,S,D]
   %e7 = tensor.empty() : tensor<2x64x64xf32>
   %out = hip.hipblaslt.matmul(%handle) ins(%probs, %V : tensor<2x64x64xf32>, tensor<2x64x64xf32>) outs(%e7 : tensor<2x64x64xf32>) -> tensor<2x64x64xf32>
 

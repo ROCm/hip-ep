@@ -14,7 +14,8 @@ class Hip_Op<string mnemonic, list<Trait> traits = []> :
 def Hip_TensorOrMemRef : AnyTypeOf<[AnyRankedTensor, AnyMemRef],
                                     "ranked tensor or memref">;
 
-def Hip_CreateHandleOp : Hip_Op<"create_handle", []> {
+def Hip_CreateHandleOp : Hip_Op<"create_handle",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Create a HIP runtime handle";
   let description = [{
     Creates and returns a new HIP runtime handle.
@@ -29,7 +30,8 @@ def Hip_CreateHandleOp : Hip_Op<"create_handle", []> {
   let assemblyFormat = "`(` `)` attr-dict `:` type($handle)";
 }
 
-def Hip_DestroyHandleOp : Hip_Op<"destroy_handle", []> {
+def Hip_DestroyHandleOp : Hip_Op<"destroy_handle",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Destroy a HIP runtime handle";
   let description = [{
     Destroys a HIP runtime handle.
@@ -44,7 +46,8 @@ def Hip_DestroyHandleOp : Hip_Op<"destroy_handle", []> {
   let assemblyFormat = "`(` $handle `)` attr-dict `:` type($handle)";
 }
 
-def Hip_AllocOp : Hip_Op<"alloc", []> {
+def Hip_AllocOp : Hip_Op<"alloc",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Allocate device memory";
   let description = [{
     Allocates device memory using HIP and returns a memref.
@@ -66,7 +69,8 @@ def Hip_AllocOp : Hip_Op<"alloc", []> {
   }];
 }
 
-def Hip_FreeOp : Hip_Op<"free", []> {
+def Hip_FreeOp : Hip_Op<"free",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Free device memory";
   let description = [{
     Frees device memory allocated with hip.alloc.
