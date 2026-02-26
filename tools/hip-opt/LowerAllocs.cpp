@@ -24,6 +24,58 @@ namespace hip {
 
 namespace {
 
+/// Return true if \p op creates a memref alias (view) of one of its inputs
+/// without allocating new memory.
+static bool isMemRefAlias(Operation* op) {
+  return isa<memref::ViewOp, memref::SubViewOp, memref::CastOp,
+             memref::ReinterpretCastOp, memref::CollapseShapeOp,
+             memref::ExpandShapeOp, memref::ReshapeOp>(op);
+}
+
+/// Walk \p val back through view-like alias ops and return the root
+/// hip::AllocOp if the chain originates from one, or nullptr otherwise.
+static AllocOp traceToHipAlloc(Value val) {
+  while (val) {
+    if (auto alloc = val.getDefiningOp<AllocOp>())
+      return alloc;
+    Operation* def = val.getDefiningOp();
+    if (!def || !isMemRefAlias(def))
+      return nullptr;
+    val = Value();
+    for (Value operand : def->getOperands()) {
+      if (isa<MemRefType>(operand.getType())) {
+        val = operand;
+        break;
+      }
+    }
+  }
+  return nullptr;
+}
+
+/// Find the last user of \p rootValue, walking transitively through
+/// view-like (aliasing) ops.  Without this, hip.free can be placed after
+/// a memref.view but before consumers of the view — a use-after-free.
+static Operation* findLastTransitiveUser(Value rootValue) {
+  Operation* lastUser = rootValue.getDefiningOp();
+  SmallVector<Value> worklist = {rootValue};
+  DenseSet<Value> visited;
+
+  while (!worklist.empty()) {
+    Value val = worklist.pop_back_val();
+    if (!visited.insert(val).second)
+      continue;
+    for (Operation* user : val.getUsers()) {
+      if (lastUser->isBeforeInBlock(user))
+        lastUser = user;
+      if (isMemRefAlias(user)) {
+        for (OpResult result : user->getResults())
+          worklist.push_back(result);
+      }
+    }
+  }
+  return lastUser;
+}
+
 struct LowerAllocsPass : public impl::LowerAllocsPassBase<LowerAllocsPass> {
   void runOnOperation() override;
 };
@@ -78,33 +130,35 @@ void LowerAllocsPass::runOnOperation() {
   if (destroyHandleOp)
     destroyHandleOp->moveBefore(terminator);
 
-  // Replace memref.dealloc -> hip.free (placed by buffer-deallocation-pipeline).
+  // Replace memref.dealloc -> hip.free for buffers that trace back to a
+  // hip.alloc.  Non-HIP deallocs (e.g. externally-owned memrefs) are left
+  // untouched for other lowerings.
   DenseSet<Value> deallocated;
   SmallVector<memref::DeallocOp> deallocs;
   funcOp.walk([&](memref::DeallocOp op) { deallocs.push_back(op); });
   for (memref::DeallocOp deallocOp : deallocs) {
     Value memref = deallocOp.getMemref();
+    AllocOp rootAlloc = traceToHipAlloc(memref);
+    if (!rootAlloc)
+      continue;
+
     builder.setInsertionPoint(deallocOp);
     FreeOp::create(builder, deallocOp.getLoc(), handle, memref);
-    deallocated.insert(memref);
+    deallocated.insert(rootAlloc.getResult());
     deallocOp.erase();
   }
 
   // Fallback: insert hip.free after last use for allocs that have no
   // memref.dealloc (e.g. when buffer-deallocation-pipeline is not in
-  // the pass pipeline).
+  // the pass pipeline).  Uses transitive user walk to account for
+  // alias-creating ops like memref.view / subview / cast.
   for (AllocOp hipAlloc : hipAllocs) {
     if (returnedValues.contains(hipAlloc.getResult()))
       continue;
     if (deallocated.contains(hipAlloc.getResult()))
       continue;
 
-    Operation* lastUser = hipAlloc;
-    for (Operation* user : hipAlloc.getResult().getUsers()) {
-      if (lastUser->isBeforeInBlock(user))
-        lastUser = user;
-    }
-
+    Operation* lastUser = findLastTransitiveUser(hipAlloc.getResult());
     builder.setInsertionPointAfter(lastUser);
     FreeOp::create(builder, hipAlloc.getLoc(), handle, hipAlloc.getResult());
   }
