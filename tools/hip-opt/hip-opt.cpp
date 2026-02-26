@@ -12,6 +12,7 @@
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Bufferization/IR/DstBufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
+#include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -139,6 +140,8 @@ int main(int argc, char** argv) {
   mlir::hip::registerConvertHipToLLVMPass();
 #endif
   mlir::bufferization::registerBufferizationPasses();
+  mlir::bufferization::registerBufferizationPipelines();
+  mlir::registerConvertBufferizationToMemRefPass();
   mlir::registerConvertFuncToLLVMPass();
   mlir::registerArithToLLVMConversionPass();
   mlir::registerFinalizeMemRefToLLVMConversionPass();

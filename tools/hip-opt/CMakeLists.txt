@@ -154,6 +154,8 @@ target_link_libraries(hip-opt PRIVATE
   MLIRDestinationStyleOpInterface
   MLIRBufferizationDialect
   MLIRBufferizationTransforms
+  MLIRBufferizationPipelines
+  MLIRBufferizationToMemRef
   MLIRArithTransforms
   MLIRSCFTransforms
   MLIRTensorTransforms

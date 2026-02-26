@@ -78,11 +78,25 @@ void LowerAllocsPass::runOnOperation() {
   if (destroyHandleOp)
     destroyHandleOp->moveBefore(terminator);
 
-  // Insert hip.free for each non-returned alloc after its last use.
-  // NOTE: only direct users are tracked; aliasing ops (memref.cast,
-  // memref.subview) are not followed transitively.
+  // Replace memref.dealloc -> hip.free (placed by buffer-deallocation-pipeline).
+  DenseSet<Value> deallocated;
+  SmallVector<memref::DeallocOp> deallocs;
+  funcOp.walk([&](memref::DeallocOp op) { deallocs.push_back(op); });
+  for (memref::DeallocOp deallocOp : deallocs) {
+    Value memref = deallocOp.getMemref();
+    builder.setInsertionPoint(deallocOp);
+    FreeOp::create(builder, deallocOp.getLoc(), handle, memref);
+    deallocated.insert(memref);
+    deallocOp.erase();
+  }
+
+  // Fallback: insert hip.free after last use for allocs that have no
+  // memref.dealloc (e.g. when buffer-deallocation-pipeline is not in
+  // the pass pipeline).
   for (AllocOp hipAlloc : hipAllocs) {
     if (returnedValues.contains(hipAlloc.getResult()))
+      continue;
+    if (deallocated.contains(hipAlloc.getResult()))
       continue;
 
     Operation* lastUser = hipAlloc;
