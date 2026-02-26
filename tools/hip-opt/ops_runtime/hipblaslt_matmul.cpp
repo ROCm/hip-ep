@@ -22,6 +22,8 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #define HIPBLASLT_CHECK(call)                                              \
   do {                                                                     \
@@ -33,6 +35,26 @@
     }                                                                      \
   } while (0)
 
+static void* ensure_device(void* ptr, size_t bytes) {
+  if (!ptr || bytes == 0) return ptr;
+  hipPointerAttribute_t attrs = {};
+  if (hipPointerGetAttributes(&attrs, ptr) == hipSuccess &&
+      (attrs.type == hipMemoryTypeDevice ||
+       attrs.type == hipMemoryTypeUnified))
+    return ptr;
+  // Non-HIP pointer (e.g. DLL .rdata constant).  Stage through a heap
+  // buffer because HIP PAL's hipMemcpy can crash on read-only sections.
+  void* staging = malloc(bytes);
+  if (!staging) return ptr;
+  memcpy(staging, ptr, bytes);
+  void* d = nullptr;
+  hipMalloc(&d, bytes);
+  hipMemcpy(d, staging, bytes, hipMemcpyHostToDevice);
+  free(staging);
+  fprintf(stderr, "[hipblaslt] staged %zu bytes host->device\n", bytes);
+  return d;
+}
+
 extern "C" void hip_hipblaslt_matmul(void* /*handle*/, void* A, void* B,
                                      void* C, int64_t rankA, int64_t rankB,
                                      int64_t batch, int64_t M, int64_t K,
@@ -42,6 +64,14 @@ extern "C" void hip_hipblaslt_matmul(void* /*handle*/, void* A, void* B,
           "N=%lld\n",
           (long long)rankA, (long long)rankB, (long long)batch, (long long)M,
           (long long)K, (long long)N);
+
+  size_t sizeA = batch * M * K * sizeof(float);
+  size_t sizeB = (rankB < rankA ? K * N : batch * K * N) * sizeof(float);
+  size_t sizeC = batch * M * N * sizeof(float);
+  void* devA = ensure_device(A, sizeA);
+  void* devB = ensure_device(B, sizeB);
+  void* devC = ensure_device(C, sizeC);
+  bool allocA = (devA != A), allocB = (devB != B), allocC = (devC != C);
 
   // hipBLAS-LT column-major: for row-major C = A @ B, compute C' = B' @ A'
   const int64_t blas_M = N, blas_N = M, blas_K = K;
@@ -119,13 +149,16 @@ extern "C" void hip_hipblaslt_matmul(void* /*handle*/, void* A, void* B,
     hipMalloc(&ws, result.workspaceSize);
 
   if (returned > 0) {
-    HIPBLASLT_CHECK(hipblasLtMatmul(handle, desc, &alpha, B, la, A, lb, &beta,
-                                    C, lc, C, ld, &result.algo, ws,
+    HIPBLASLT_CHECK(hipblasLtMatmul(handle, desc, &alpha, devB, la, devA, lb,
+                                    &beta, devC, lc, devC, ld, &result.algo, ws,
                                     result.workspaceSize, nullptr));
     hipDeviceSynchronize();
   } else {
     fprintf(stderr, "[hipblaslt.matmul] no algorithm found\n");
   }
+
+  if (allocC)
+    hipMemcpy(C, devC, sizeC, hipMemcpyDeviceToHost);
 
   if (ws)
     hipFree(ws);
@@ -136,4 +169,8 @@ extern "C" void hip_hipblaslt_matmul(void* /*handle*/, void* A, void* B,
   hipblasLtMatrixLayoutDestroy(la);
   hipblasLtMatmulDescDestroy(desc);
   hipblasLtDestroy(handle);
+
+  if (allocA) hipFree(devA);
+  if (allocB) hipFree(devB);
+  if (allocC) hipFree(devC);
 }

@@ -7,7 +7,7 @@ Licensed under the MIT License.
 This directory contains a custom MLIR dialect for HIP (Heterogeneous-compute Interface for Portability) operations and two compiler tools:
 
 - **`hip-opt`** -- MLIR pass pipeline tool (useful for debugging and inspecting intermediate IR)
-- **`hip-compiler`** -- One-stop compiler that takes `.mlir` input and produces a `.dll` + import `.lib`
+- **`hip-compiler`** -- One-stop compiler that takes `.mlir` input and produces a `.dll` + import `.lib`. Supports `--no-bufferize` for pre-bufferized `.hip.mlir` inputs.
 
 ## Overview
 
@@ -15,7 +15,7 @@ The HIP dialect provides high-level operations for GPU inference on AMD ROCm, ta
 
 - **Lifecycle & memory**: `hip.create_handle`, `hip.destroy_handle`, `hip.alloc`, `hip.free`
 - **hipBLASLt**: `hip.hipblaslt.matmul` -- batched GEMM with weight broadcast (3D x 2D)
-- **MIOpen**: `hip.miopen.add`, `hip.miopen.mul`, `hip.miopen.rms_norm`, `hip.miopen.softmax`
+- **MIOpen**: `hip.miopen.add`, `hip.miopen.mul`, `hip.miopen.rms_norm`, `hip.miopen.softmax` (binary ops support scalar broadcast)
 - **Custom kernels**: `hip.transpose` (N-D with dim params)
 
 All compute ops use **Destination-Passing Style (DPS)**: arguments are split into
@@ -61,8 +61,8 @@ All runtime implementations are compiled into a static library (`hip_runtime_sta
 
 - `ops_runtime/hip_runtime.cpp` - Handle lifecycle + device memory (shared by all tests)
 - `ops_runtime/hipblaslt_matmul.cpp` - hipBLASLt matmul with batched GEMM + broadcast
-- `ops_runtime/miopen_add.cpp` - MIOpen element-wise add
-- `ops_runtime/miopen_mul.cpp` - MIOpen element-wise mul
+- `ops_runtime/miopen_add.cpp` - MIOpen element-wise add (supports scalar broadcast via separate descriptors)
+- `ops_runtime/miopen_mul.cpp` - MIOpen element-wise mul (supports scalar broadcast via separate descriptors)
 - `ops_runtime/miopen_rms_norm.cpp` - MIOpen RMS normalization (`MIOPEN_BETA_API` required)
 - `ops_runtime/miopen_softmax.cpp` - MIOpen softmax
 - `ops_runtime/transpose.cpp` - N-D transpose (pure C++, swaps two specified dims)
@@ -76,7 +76,8 @@ Each test has a `.mlir` model and a C++ driver. The driver declares the model's 
 - `examples/test_mul.mlir` + `main_mul.cpp` - 3D element-wise mul
 - `examples/test_rms_norm.mlir` + `main_rms_norm.cpp` - 3D RMS normalization
 - `examples/test_softmax.mlir` + `main_softmax.cpp` - 3D softmax
-- `examples/test_attention.mlir` + `main_attention.cpp` - Full single-head attention (B=2)
+- `examples/test_attention.mlir` - Full single-head attention in tensor DPS (B=2)
+- `examples/attention.hip.mlir` + `attention.onnx` + `main_attention.cpp` - Pre-bufferized attention with ORT CPU reference comparison
 - `examples/test.mlir` - Basic memory ops example
 - `examples/model_hip.mlir` - Generated HIP dialect from Llama-3.2-1B
 
@@ -90,7 +91,7 @@ Each script compiles a `.mlir` file to a DLL via `hip-compiler`, then compiles a
 - `scripts/run_full_pipeline_miopen_mul.bat` - Mul test (MIOpen)
 - `scripts/run_full_pipeline_miopen_rms_norm.bat` - RMS Norm test (MIOpen)
 - `scripts/run_full_pipeline_miopen_softmax.bat` - Softmax test (MIOpen)
-- `scripts/run_full_pipeline_attention.bat` - Attention test (hipBLASLt + MIOpen + custom)
+- `scripts/run_full_pipeline_attention.bat` - Pre-bufferized attention test (ORT CPU reference vs GPU; requires ONNX Runtime)
 
 ## Prerequisites: Building TheRock (ROCm) on Windows
 
@@ -249,11 +250,15 @@ module {
 The recommended workflow uses `hip-compiler` to produce a DLL directly:
 
 ```bash
+# Tensor-mode input (standard path: bufferize + lower)
 hip-compiler input.mlir -o model.dll
+
+# Pre-bufferized input (skip bufferization)
+hip-compiler --no-bufferize input.hip.mlir -o model.dll
 ```
 
 This performs the full pipeline internally:
-1. One-shot bufferization (tensor -> memref with device memory allocation)
+1. One-shot bufferization (tensor -> memref; skipped with `--no-bufferize`)
 2. HIP-to-LLVM lowering (`--convert-hip-to-llvm`, memref finalization, etc.)
 3. DLL export injection (marks entry functions with `dllexport`)
 4. LLVM IR translation and native code generation (`.obj`)
@@ -271,6 +276,35 @@ hip-opt input.mlir \
     --reconcile-unrealized-casts \
     -o lowered.mlir
 ```
+
+### Pre-Bufferized Format (`.hip.mlir`)
+
+In addition to tensor-mode inputs, the compiler supports a **pre-bufferized memref format**
+where weights are embedded as `memref.global` constants and intermediate buffers are
+carved from a single memory pool via `memref.view`:
+
+```mlir
+module {
+  memref.global "private" constant @weight : memref<64x64xf32> = dense<"0x...">
+  func.func @main_graph(%X: memref<2x64x64xf32, strided<[?,?,?], offset: ?>>,
+                        %out: memref<2x64x64xf32>) {
+    %h = hip.create_handle() : !hip.handle
+    %pool = hip.alloc(%h) : memref<131072xi8>
+    %buf = memref.view %pool[%c0][] : memref<131072xi8> to memref<2x64x64xf32>
+    %w = memref.get_global @weight : memref<64x64xf32>
+    hip.hipblaslt.matmul(%h) ins(%X, %w : ...) outs(%buf : ...)
+    // ...
+    hip.free(%h, %pool) : memref<131072xi8>
+    hip.destroy_handle(%h) : !hip.handle
+    return
+  }
+}
+```
+
+Use `hip-compiler --no-bufferize` for this format. The runtime transparently
+handles host constants (from `memref.global`) by staging them through heap memory
+before `hipMemcpy` to device, avoiding HIP PAL compatibility issues with read-only
+`.rdata` sections on Windows.
 
 ## HIP Dialect Operations
 
@@ -305,6 +339,10 @@ All compute ops use Destination-Passing Style with rank-generic lowerings. For L
 ## Running Tests
 
 First, edit `scripts/env.bat` to set the paths for your machine (LLVM, TheRock, hip-opt, conda).
+For the attention test, also set `ORT_HOME` to the ONNX Runtime C/C++ release package
+(download from [GitHub Releases](https://github.com/microsoft/onnxruntime/releases),
+e.g. `onnxruntime-win-x64-1.x.x.zip`; the pip package does not include C headers).
+
 Then run any pipeline script:
 
 ```cmd
@@ -341,16 +379,23 @@ The full lowering pipeline from tensor HIP IR to LLVM IR:
 
 ```
 --one-shot-bufferize           # tensor -> memref (device allocation)
---convert-hip-to-llvm          # HIP ops + memref.alloc -> llvm.call @hip_*()
---finalize-memref-to-llvm      # memref.dim -> LLVM
+--hip-optimize-memrefs         # liveness-based buffer reuse (reduces alloc count)
+--hip-lower-allocs             # memref.alloc -> hip.alloc + hip.free
+--convert-hip-to-llvm          # HIP ops -> llvm.call @hip_*()
+--finalize-memref-to-llvm      # memref.view, memref.get_global -> LLVM
 --convert-arith-to-llvm        # arith.constant -> LLVM
 --convert-func-to-llvm         # func.func -> LLVM
 --reconcile-unrealized-casts   # Clean up type casts
 ```
 
-The `--convert-hip-to-llvm` pass also converts `memref.alloc` and `memref.dealloc`
-(produced by bufferization) to device memory allocation calls (`hip_device_malloc` /
-`hip_device_free`), ensuring all intermediate buffers are allocated on the GPU.
+For pre-bufferized `.hip.mlir` inputs (memory pool + `memref.view` + `memref.global`),
+skip the first three passes and start from `--convert-hip-to-llvm`.
+
+The `--convert-hip-to-llvm` pass converts HIP dialect ops to LLVM calls. Memref
+operands are unpacked via `alignedPtr` (not `allocatedPtr`) so that `memref.view`
+offsets into a memory pool are correctly preserved. Binary ops (`hip.miopen.add`,
+`hip.miopen.mul`) pass both `numA` and `numB` to the runtime, enabling scalar
+broadcast when `numB == 1`.
 
 ## Extending the Dialect
 

@@ -30,6 +30,9 @@ set HIP_OPT_BIN=C:\Users\chiz\work\gpu\onnx-hipdnn-ep\tools\hip-opt\build\Debug
 REM --- hip-opt source root ---
 set SRC_DIR=C:\Users\chiz\work\gpu\onnx-hipdnn-ep\tools\hip-opt
 
+REM --- ONNX Runtime (onnxruntime_c_api.h, onnxruntime.lib) ---
+if not defined ORT_HOME set ORT_HOME=C:\Users\chiz\work\onnxruntime
+
 REM --- Generate import libraries from TheRock DLLs (one-time, cached in build dir) ---
 if not exist "%SRC_DIR%\build" mkdir "%SRC_DIR%\build"
 pushd "%SRC_DIR%\build"
