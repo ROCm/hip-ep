@@ -11,8 +11,7 @@
 #include <string>
 #include <vector>
 
-namespace hipdnn {
-namespace level1pass {
+namespace hipdnn::level1pass {
 
 // Artifact format (native DLL or LLVM IR)
 enum class ArtifactFormat { Native, LlvmIr };
@@ -56,7 +55,6 @@ public:
                       const CompilationConfig &config);
 };
 
-} // namespace level1pass
-} // namespace hipdnn
+} // namespace hipdnn::level1pass
 
 #endif // HIPDNN_LEVEL1PASS_MLIR_COMPILER_H

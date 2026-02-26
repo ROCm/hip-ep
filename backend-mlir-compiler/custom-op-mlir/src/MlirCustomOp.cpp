@@ -23,7 +23,6 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= n)
 
 namespace mlir_compilation {
-namespace customop {
 
 // Tensor marshaling state - holds tensors, shapes, and span
 struct TensorData {
@@ -96,8 +95,6 @@ TensorData marshal_output_tensors(
 
   return data;
 }
-
-} // namespace customop
 
 namespace {
 
@@ -179,8 +176,8 @@ MlirCustomOp::MlirCustomOp(
 void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   MY_LOG(2) << "MlirCustomOp::Compute() called";
 
-  auto inputs = customop::marshal_input_tensors(context);
-  auto outputs = customop::marshal_output_tensors(context, metadata_.outputs());
+  auto inputs = marshal_input_tensors(context);
+  auto outputs = marshal_output_tensors(context, metadata_.outputs());
 
   int ret = inference_state_->compute(&inputs.span, &outputs.span);
   if (ret != 0) {

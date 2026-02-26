@@ -8,18 +8,32 @@
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
 #include "morphizen/plugin.hpp"
-#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
 #include <utility>
+#include "../../common/temp_path.hpp"
 
 // Environment parameters (global scope, before namespace)
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
 
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= n)
 
-namespace mlir_compilation {
-namespace customop {
+namespace {
+// Returns the platform-appropriate file extension for a compiled artifact.
+// TODO: derive from artifact format stored in metadata when multiple formats
+// are supported (e.g. ArtifactFormat::SharedLib → ".so" on Linux,
+// ArtifactFormat::Portable → ".mlir")
+std::string artifactExtension() {
+#ifdef _WIN32
+  return ".dll";
+#else
+  return ".so";
+#endif
+}
+} // anonymous namespace
+
+namespace mlir_compilation::customop {
 
 InferenceState::InferenceState(void *state,
                                std::unique_ptr<morphizen::Plugin> plugin,
@@ -32,12 +46,7 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes) {
   MY_LOG(1) << "Loading inference plugin from memory...";
 
   // Write DLL to temp file (morphizen::Plugin loads from file path)
-  char temp_path[L_tmpnam];
-  if (!std::tmpnam(temp_path)) {
-    LOG(FATAL) << "Failed to generate temporary DLL path";
-  }
-
-  std::string dll_path = std::string(temp_path) + ".dll";
+  std::string dll_path = mlir_compiler_utils::generateTempPath(artifactExtension());
   MY_LOG(2) << "Temporary DLL path: " << dll_path;
 
   // Write DLL to temp file
@@ -52,7 +61,10 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes) {
   }
 
   // Load plugin using morphizen infrastructure (factory pattern)
-  auto plugin = morphizen::Plugin::create(dll_path.c_str());
+  // Pass path without extension — Plugin::guess_name adds platform-correct suffix
+  std::string base_path =
+      std::filesystem::path(dll_path).replace_extension("").string();
+  auto plugin = morphizen::Plugin::create(base_path.c_str());
 
   // Check if plugin DLL loaded successfully
   if (!plugin) {
@@ -113,5 +125,4 @@ int InferenceState::compute(span_t *inputs, span_t *outputs) const {
   return compute_fn(state_, inputs, outputs);
 }
 
-} // namespace customop
-} // namespace mlir_compilation
+} // namespace mlir_compilation::customop

@@ -19,7 +19,7 @@
       ],
       "provider_options": {
         "pass.init.enable_dump": "1",
-        "pass.init.directory": "vaip_init",
+        "pass.init.directory": "morphizen_mlir_init",
         "pass.init.filename": "init-graph-for-mlir.onnx"
       }
     }

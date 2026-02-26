@@ -12,7 +12,7 @@ find_package(glog CONFIG REQUIRED)
 # Create custom op library
 set(LIB_NAME morphizen-custom-op-mlir)
 add_library(${LIB_NAME} STATIC
-  src/main.cpp
+  src/plugin_registration.cpp
   src/MlirCustomOp.cpp
   src/InferenceState.cpp
 )

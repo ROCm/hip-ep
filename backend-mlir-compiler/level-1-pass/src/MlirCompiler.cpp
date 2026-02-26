@@ -6,15 +6,18 @@
 #include "MlirCompiler.h"
 
 // CRITICAL: morphizen.hpp must be included before any other morphizen headers
+#include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
 #include "morphizen/plugin.hpp"
-#include <chrono>
 #include <fstream>
 #include <glog/logging.h>
 #include <sstream>
+#include "../../common/temp_path.hpp"
 
-namespace hipdnn {
-namespace level1pass {
+DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
+#define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= n)
+
+namespace hipdnn::level1pass {
 
 namespace {
 
@@ -37,24 +40,6 @@ struct CompilerError {
   CompilerErrorCode code;
   char message[1024];
 };
-
-// Generate safe temporary filename (replaces deprecated std::tmpnam)
-std::string generateTempPath() {
-  auto now = std::chrono::system_clock::now();
-  auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-                       now.time_since_epoch())
-                       .count();
-
-  static int counter = 0;
-  std::string filename = "morphizen_mlir_" + std::to_string(timestamp) + "_" +
-                         std::to_string(counter++) + ".dll";
-
-#ifdef _WIN32
-  return filename; // Current directory on Windows
-#else
-  return std::string("/tmp/") + filename;
-#endif
-}
 
 // Build JSON options string from compilation config
 std::string build_compiler_options_json(const CompilationConfig &config) {
@@ -87,7 +72,8 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
   LOG(INFO) << "Plugin version: " << version;
 
   // Generate temporary output path for compilation
-  std::string temp_output_path = generateTempPath();
+  // No extension: compiler derives output format from output_mode in options JSON
+  std::string temp_output_path = mlir_compiler_utils::generateTempPath("");
 
   // Build JSON options string from config
   std::string options_json = build_compiler_options_json(config);
@@ -110,12 +96,9 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
                                  const char *, const char *, CompilerError *>(
       "morphizen_mlir_compile");
 
-  std::cerr << "[MlirCompiler] get_method returned func = " << (void *)func
-            << "\n";
-  std::cerr << "[MlirCompiler] Bytecode data() = "
-            << (void *)mlir_bytecode.data() << "\n";
-  std::cerr << "[MlirCompiler] Bytecode size() = " << mlir_bytecode.size()
-            << "\n";
+  MY_LOG(2) << "get_method returned func = " << (void *)func;
+  MY_LOG(2) << "Bytecode data() = " << (void *)mlir_bytecode.data();
+  MY_LOG(2) << "Bytecode size() = " << mlir_bytecode.size();
 
   if (func == nullptr) {
     LOG(ERROR) << "get_method returned nullptr for morphizen_mlir_compile";
@@ -123,8 +106,7 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
   }
 
   // Call the function with binary-safe parameters
-  std::cerr << "[MlirCompiler] About to call func with size = "
-            << mlir_bytecode.size() << "\n";
+  MY_LOG(2) << "About to call func with size = " << mlir_bytecode.size();
 
   CompilerError error = {};
   auto result = func(mlir_bytecode.data(), mlir_bytecode.size(),
@@ -161,7 +143,7 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
 
   // Build artifact
   CompilationArtifact artifact;
-  artifact.filename = "model_compiled.dll";
+  artifact.filename = "model_compiled";
   artifact.bytes = std::move(buffer);
   artifact.format = config.artifactFormat;
 
@@ -170,5 +152,4 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
   return artifact;
 }
 
-} // namespace level1pass
-} // namespace hipdnn
+} // namespace hipdnn::level1pass

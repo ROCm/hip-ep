@@ -17,8 +17,7 @@ struct Plugin; // Must match definition in morphizen_plugin.hpp (struct, not
                // class)
 }
 
-namespace mlir_compilation {
-namespace customop {
+namespace mlir_compilation::customop {
 
 // Manages inference state and owns the plugin that provides inference
 // functions. Uses morphizen::Plugin infrastructure for dynamic library loading.
@@ -55,7 +54,6 @@ private:
   std::string temp_dll_path_;
 };
 
-} // namespace customop
-} // namespace mlir_compilation
+} // namespace mlir_compilation::customop
 
 #endif
