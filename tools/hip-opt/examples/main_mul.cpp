@@ -16,12 +16,7 @@
 #include <hip/hip_runtime_api.h>
 #include <vector>
 
-struct MemRef3D {
-  float *a, *al;
-  int64_t o, s[3], st[3];
-};
-
-extern "C" __declspec(dllimport) MemRef3D two_muls(
+extern "C" __declspec(dllimport) void two_muls(
     float* A_a, float* A_al, int64_t A_o, int64_t A_s0, int64_t A_s1,
     int64_t A_s2, int64_t A_st0, int64_t A_st1, int64_t A_st2, float* B_a,
     float* B_al, int64_t B_o, int64_t B_s0, int64_t B_s1, int64_t B_s2,

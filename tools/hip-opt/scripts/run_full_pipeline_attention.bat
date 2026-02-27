@@ -21,8 +21,8 @@ echo  Attention Pipeline (pre-bufferized .hip.mlir)
 echo ============================================================
 
 echo.
-echo [1/3] Compiling attention.hip.mlir to DLL (skip bufferize)
-"%HIP_OPT_BIN%\hip-compiler.exe" --no-bufferize ..\examples\attention.hip.mlir -o attention.dll
+echo [1/3] Compiling attention.hip.mlir to DLL
+"%HIP_OPT_BIN%\hip-compiler.exe" ..\examples\attention.hip.mlir -o attention.dll
 if errorlevel 1 (echo FAILED at step 1 && exit /b 1)
 echo      OK: attention.dll
 

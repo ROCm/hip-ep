@@ -4,7 +4,7 @@
 ::
 @echo off
 REM === End-to-End Mul Pipeline ===
-REM Compiles test_mul.mlir to DLL and links with main driver
+REM Compiles mul.hip.mlir to DLL and links with main driver
 
 call "%~dp0env.bat"
 
@@ -17,7 +17,7 @@ echo ============================================================
 
 echo.
 echo [1/2] Compiling MLIR to DLL
-"%HIP_OPT_BIN%\hip-compiler.exe" ..\examples\test_mul.mlir -o mul.dll
+"%HIP_OPT_BIN%\hip-compiler.exe" ..\examples\mul.hip.mlir -o mul.dll
 if errorlevel 1 (echo FAILED at step 1 && exit /b 1)
 echo      OK: mul.dll
 

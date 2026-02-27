@@ -4,7 +4,7 @@
 ::
 @echo off
 REM === End-to-End Add Pipeline ===
-REM Compiles test_add.mlir to DLL and links with main driver
+REM Compiles add.hip.mlir to DLL and links with main driver
 
 call "%~dp0env.bat"
 
@@ -17,7 +17,7 @@ echo ============================================================
 
 echo.
 echo [1/2] Compiling MLIR to DLL
-"%HIP_OPT_BIN%\hip-compiler.exe" ..\examples\test_add.mlir -o add.dll
+"%HIP_OPT_BIN%\hip-compiler.exe" ..\examples\add.hip.mlir -o add.dll
 if errorlevel 1 (echo FAILED at step 1 && exit /b 1)
 echo      OK: add.dll
 
