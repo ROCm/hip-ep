@@ -15,7 +15,7 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_ROCM, "0")
 DEF_ENV_PARAM(MORPHIZEN_GPU_TIMEOUT_MS, "5000")
 DEF_ENV_PARAM(MORPHIZEN_GPU_WATCHDOG_ENABLED, "1")
 DEF_ENV_PARAM(MORPHIZEN_DRY_RUN,
-              "0") // Set to 1 to skip GPU execution for debugging
+              "0")  // Set to 1 to skip GPU execution for debugging
 
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_ROCM) >= n)
 
@@ -144,10 +144,9 @@ TimeoutStatus HipContext::sync_stream_with_timeout(int timeout_ms) const {
 // ============================================================================
 
 RocmCustomOp::RocmCustomOp(std::shared_ptr<const PassContext> context,
-                           const std::shared_ptr<MetaDefProto> &meta_def,
-                           onnxruntime::Model *model)
+                           const std::shared_ptr<MetaDefProto>& meta_def,
+                           onnxruntime::Model* model)
     : CustomOpImp(context, meta_def, model) {
-
   MY_LOG(2) << "[ROCm CustomOp] Constructor called";
 
   // Get or create per-session HipContext via registry
@@ -185,7 +184,7 @@ RocmCustomOp::RocmCustomOp(std::shared_ptr<const PassContext> context,
 
     // Build output name to index mapping
     for (int i = 0; i < subgraph_.outputs_size(); ++i) {
-      const auto &ext_output = subgraph_.outputs(i);
+      const auto& ext_output = subgraph_.outputs(i);
       output_name_to_index_[ext_output.name()] = i;
       MY_LOG(2) << "[ROCm CustomOp] Output mapping: " << ext_output.name()
                 << " -> index " << i << " (from node "
@@ -209,49 +208,49 @@ RocmCustomOp::RocmCustomOp(std::shared_ptr<const PassContext> context,
               << single_node_proto_.op_type();
 
     // Convert to subgraph format for unified execution
-    auto *node = subgraph_.add_nodes();
+    auto* node = subgraph_.add_nodes();
     node->set_node_id(0);
     *node->mutable_params() = single_node_proto_;
 
     // Add external input reference (input from ORT context index 0)
-    auto *input_ref = node->add_inputs();
+    auto* input_ref = node->add_inputs();
     if (single_node_proto_.op_type() == "conv") {
-      const auto &conv_params = single_node_proto_.conv_params();
+      const auto& conv_params = single_node_proto_.conv_params();
       if (conv_params.input_names_size() > 0) {
         input_ref->set_external_name(conv_params.input_names(0));
       }
     } else if (single_node_proto_.op_type() == "gemm") {
-      const auto &gemm_params = single_node_proto_.gemm_params();
+      const auto& gemm_params = single_node_proto_.gemm_params();
       if (gemm_params.input_names_size() > 0) {
         input_ref->set_external_name(gemm_params.input_names(0));
       }
     } else if (single_node_proto_.op_type() == "matmul") {
-      const auto &matmul_params = single_node_proto_.matmul_params();
+      const auto& matmul_params = single_node_proto_.matmul_params();
       if (matmul_params.input_names_size() > 0) {
         input_ref->set_external_name(matmul_params.input_names(0));
       }
       // If B is not constant, add it as second external input
       if (!matmul_params.b_is_constant() &&
           matmul_params.input_names_size() > 1) {
-        auto *input_b_ref = node->add_inputs();
+        auto* input_b_ref = node->add_inputs();
         input_b_ref->set_external_name(matmul_params.input_names(1));
       }
     }
 
     // Add external output
-    auto *ext_output = subgraph_.add_outputs();
+    auto* ext_output = subgraph_.add_outputs();
     if (single_node_proto_.op_type() == "conv") {
-      const auto &conv_params = single_node_proto_.conv_params();
+      const auto& conv_params = single_node_proto_.conv_params();
       if (conv_params.output_names_size() > 0) {
         ext_output->set_name(conv_params.output_names(0));
       }
     } else if (single_node_proto_.op_type() == "gemm") {
-      const auto &gemm_params = single_node_proto_.gemm_params();
+      const auto& gemm_params = single_node_proto_.gemm_params();
       if (gemm_params.output_names_size() > 0) {
         ext_output->set_name(gemm_params.output_names(0));
       }
     } else if (single_node_proto_.op_type() == "matmul") {
-      const auto &matmul_params = single_node_proto_.matmul_params();
+      const auto& matmul_params = single_node_proto_.matmul_params();
       if (matmul_params.output_names_size() > 0) {
         ext_output->set_name(matmul_params.output_names(0));
       }
@@ -273,7 +272,7 @@ RocmCustomOp::RocmCustomOp(std::shared_ptr<const PassContext> context,
 
 RocmCustomOp::~RocmCustomOp() {
   // Cleanup external input buffers
-  for (auto &[name, ptr] : external_input_buffers_) {
+  for (auto& [name, ptr] : external_input_buffers_) {
     if (ptr)
       hipFree(ptr);
   }
@@ -288,7 +287,7 @@ void RocmCustomOp::LoadAllWeights() {
   auto pass_context = get_context();
 
   for (int i = 0; i < subgraph_.nodes_size(); ++i) {
-    const auto &node = subgraph_.nodes(i);
+    const auto& node = subgraph_.nodes(i);
     LoadNodeWeights(i, node.params());
   }
 
@@ -296,17 +295,17 @@ void RocmCustomOp::LoadAllWeights() {
 }
 
 void RocmCustomOp::LoadNodeWeights(int32_t node_id,
-                                   const rocm::RocmParamProto &params) {
+                                   const rocm::RocmParamProto& params) {
   auto pass_context = get_context();
-  auto &data = *node_data_[node_id];
+  auto& data = *node_data_[node_id];
 
-  const auto &op_type = params.op_type();
+  const auto& op_type = params.op_type();
 
   if (op_type == "conv") {
-    const auto &conv_params = params.conv_params();
+    const auto& conv_params = params.conv_params();
 
     // Load weight file
-    const auto &weight_file = conv_params.weight_file_path();
+    const auto& weight_file = conv_params.weight_file_path();
     if (!weight_file.empty()) {
       int64_t weight_size = conv_params.weight_file_size();
       MY_LOG(2) << "[ROCm CustomOp] Node " << node_id
@@ -327,7 +326,7 @@ void RocmCustomOp::LoadNodeWeights(int32_t node_id,
     }
 
     // Load bias file if present
-    const auto &bias_file = conv_params.bias_file_path();
+    const auto& bias_file = conv_params.bias_file_path();
     if (!bias_file.empty() && conv_params.has_bias()) {
       int64_t bias_size = conv_params.bias_file_size();
       MY_LOG(2) << "[ROCm CustomOp] Node " << node_id
@@ -346,10 +345,10 @@ void RocmCustomOp::LoadNodeWeights(int32_t node_id,
       }
     }
   } else if (op_type == "gemm") {
-    const auto &gemm_params = params.gemm_params();
+    const auto& gemm_params = params.gemm_params();
 
     // Load weight file (B matrix)
-    const auto &weight_file = gemm_params.weight_file_path();
+    const auto& weight_file = gemm_params.weight_file_path();
     if (!weight_file.empty()) {
       int64_t weight_size = gemm_params.weight_file_size();
       MY_LOG(2) << "[ROCm CustomOp] Node " << node_id
@@ -370,7 +369,7 @@ void RocmCustomOp::LoadNodeWeights(int32_t node_id,
     }
 
     // Load bias file if present
-    const auto &bias_file = gemm_params.bias_file_path();
+    const auto& bias_file = gemm_params.bias_file_path();
     if (!bias_file.empty() && gemm_params.has_bias()) {
       int64_t bias_size = gemm_params.bias_file_size();
       MY_LOG(2) << "[ROCm CustomOp] Node " << node_id
@@ -389,11 +388,11 @@ void RocmCustomOp::LoadNodeWeights(int32_t node_id,
       }
     }
   } else if (op_type == "matmul") {
-    const auto &matmul_params = params.matmul_params();
+    const auto& matmul_params = params.matmul_params();
 
     // Load weight file (B matrix) if it's a constant
     if (matmul_params.b_is_constant()) {
-      const auto &weight_file = matmul_params.weight_file_path();
+      const auto& weight_file = matmul_params.weight_file_path();
       if (!weight_file.empty()) {
         int64_t weight_size = matmul_params.weight_file_size();
         MY_LOG(2) << "[ROCm CustomOp] Node " << node_id
@@ -425,14 +424,14 @@ void RocmCustomOp::AllocateIntermediateBuffers() {
 
   // Allocate output buffers for each node
   for (int i = 0; i < subgraph_.nodes_size(); ++i) {
-    const auto &node = subgraph_.nodes(i);
-    auto &data = *node_data_[i];
+    const auto& node = subgraph_.nodes(i);
+    auto& data = *node_data_[i];
 
     // Calculate output size based on operation parameters
     size_t output_size = GetOutputSize(i, 0);
 
     if (output_size > 0) {
-      float *output_buf = nullptr;
+      float* output_buf = nullptr;
       hipError_t err = hipMalloc(&output_buf, output_size);
       if (err != hipSuccess) {
         LOG(ERROR)
@@ -492,17 +491,17 @@ void RocmCustomOp::AllocateIntermediateBuffers() {
 
 size_t RocmCustomOp::GetOutputSize(int32_t node_id,
                                    int32_t output_index) const {
-  const auto &node = subgraph_.nodes(node_id);
-  const auto &params = node.params();
+  const auto& node = subgraph_.nodes(node_id);
+  const auto& params = node.params();
 
   if (params.op_type() == "conv") {
-    const auto &conv_params = params.conv_params();
+    const auto& conv_params = params.conv_params();
     size_t output_elements = static_cast<size_t>(conv_params.batch_size()) *
                              conv_params.out_channels() *
                              conv_params.out_height() * conv_params.out_width();
     return output_elements * sizeof(float);
   } else if (params.op_type() == "gemm") {
-    const auto &gemm_params = params.gemm_params();
+    const auto& gemm_params = params.gemm_params();
     size_t output_elements =
         static_cast<size_t>(gemm_params.m()) * gemm_params.n();
     if (gemm_params.batch_count() > 1) {
@@ -510,7 +509,7 @@ size_t RocmCustomOp::GetOutputSize(int32_t node_id,
     }
     return output_elements * sizeof(float);
   } else if (params.op_type() == "matmul") {
-    const auto &matmul_params = params.matmul_params();
+    const auto& matmul_params = params.matmul_params();
     // Output shape: [..., M, N]
     size_t output_elements =
         static_cast<size_t>(matmul_params.m()) * matmul_params.n();
@@ -519,11 +518,11 @@ size_t RocmCustomOp::GetOutputSize(int32_t node_id,
     }
     return output_elements * sizeof(float);
   } else if (params.op_type() == "mul") {
-    const auto &mul_params = params.mul_params();
+    const auto& mul_params = params.mul_params();
     // Output size matches the larger input (A)
     return mul_params.size_a() * sizeof(float);
   } else if (params.op_type() == "softmax") {
-    const auto &softmax_params = params.softmax_params();
+    const auto& softmax_params = params.softmax_params();
     // Softmax preserves shape - compute total from shape dimensions
     int64_t total = 1;
     for (int i = 0; i < softmax_params.shape_size(); ++i) {
@@ -531,15 +530,15 @@ size_t RocmCustomOp::GetOutputSize(int32_t node_id,
     }
     return total * sizeof(float);
   } else if (params.op_type() == "reshape") {
-    const auto &reshape_params = params.reshape_params();
+    const auto& reshape_params = params.reshape_params();
     // Reshape preserves total size
     return reshape_params.total_size() * sizeof(float);
   } else if (params.op_type() == "transpose") {
-    const auto &transpose_params = params.transpose_params();
+    const auto& transpose_params = params.transpose_params();
     // Transpose preserves total size
     return transpose_params.total_size() * sizeof(float);
   } else if (params.op_type() == "tile") {
-    const auto &tile_params = params.tile_params();
+    const auto& tile_params = params.tile_params();
     // Tile expands size
     return tile_params.out_size() * sizeof(float);
   }
@@ -547,7 +546,7 @@ size_t RocmCustomOp::GetOutputSize(int32_t node_id,
   return 0;
 }
 
-float *RocmCustomOp::ResolveTensorRef(const rocm::TensorRefProto &ref) const {
+float* RocmCustomOp::ResolveTensorRef(const rocm::TensorRefProto& ref) const {
   if (ref.has_external_name()) {
     // External input - look up in external_input_buffers_
     auto it = external_input_buffers_.find(ref.external_name());
@@ -559,13 +558,13 @@ float *RocmCustomOp::ResolveTensorRef(const rocm::TensorRefProto &ref) const {
     return nullptr;
   } else if (ref.has_internal()) {
     // Internal reference - look up in node_data_
-    const auto &internal_ref = ref.internal();
+    const auto& internal_ref = ref.internal();
     int32_t producer_node = internal_ref.producer_node_id();
     int32_t output_idx = internal_ref.output_index();
 
     if (producer_node >= 0 &&
         producer_node < static_cast<int32_t>(node_data_.size())) {
-      const auto &producer_data = *node_data_[producer_node];
+      const auto& producer_data = *node_data_[producer_node];
       if (output_idx >= 0 &&
           output_idx <
               static_cast<int32_t>(producer_data.output_buffers.size())) {
@@ -580,7 +579,7 @@ float *RocmCustomOp::ResolveTensorRef(const rocm::TensorRefProto &ref) const {
   return nullptr;
 }
 
-void RocmCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
+void RocmCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const {
   MY_LOG(1) << "[ROCm CustomOp] Compute() - " << subgraph_.nodes_size()
             << " nodes";
 
@@ -591,7 +590,7 @@ void RocmCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   }
 
   // Lazy initialization of buffers
-  const_cast<RocmCustomOp *>(this)->AllocateIntermediateBuffers();
+  const_cast<RocmCustomOp*>(this)->AllocateIntermediateBuffers();
 
   // Phase 1: Upload external inputs to GPU
   UploadExternalInputs(api, context);
@@ -617,8 +616,8 @@ void RocmCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   MY_LOG(1) << "[ROCm CustomOp] Compute completed successfully";
 }
 
-void RocmCustomOp::UploadExternalInputs(const OrtApi *api,
-                                        OrtKernelContext *context) const {
+void RocmCustomOp::UploadExternalInputs(const OrtApi* api,
+                                        OrtKernelContext* context) const {
   // Use per-session stream
   auto stream = hip_context_->stream();
 
@@ -631,8 +630,8 @@ void RocmCustomOp::UploadExternalInputs(const OrtApi *api,
   // Upload each external input
   for (int input_idx = 0; input_idx < subgraph_.external_inputs_size();
        ++input_idx) {
-    const auto &name = subgraph_.external_inputs(input_idx);
-    const OrtValue *ort_input = nullptr;
+    const auto& name = subgraph_.external_inputs(input_idx);
+    const OrtValue* ort_input = nullptr;
     api->KernelContext_GetInput(context, input_idx, &ort_input);
     if (ort_input == nullptr) {
       LOG(ERROR) << "[ROCm CustomOp] External input " << name << " is NULL";
@@ -640,7 +639,7 @@ void RocmCustomOp::UploadExternalInputs(const OrtApi *api,
     }
 
     // Get tensor info
-    OrtTensorTypeAndShapeInfo *type_info = nullptr;
+    OrtTensorTypeAndShapeInfo* type_info = nullptr;
     api->GetTensorTypeAndShape(ort_input, &type_info);
 
     size_t elem_count = 0;
@@ -650,9 +649,9 @@ void RocmCustomOp::UploadExternalInputs(const OrtApi *api,
     size_t bytes = elem_count * sizeof(float);
 
     // Get host pointer
-    float *h_data = nullptr;
-    api->GetTensorMutableData(const_cast<OrtValue *>(ort_input),
-                              (void **)&h_data);
+    float* h_data = nullptr;
+    api->GetTensorMutableData(const_cast<OrtValue*>(ort_input),
+                              (void**)&h_data);
 
     // Allocate or reuse device buffer
     auto it = external_input_buffers_.find(name);
@@ -661,7 +660,7 @@ void RocmCustomOp::UploadExternalInputs(const OrtApi *api,
       if (it != external_input_buffers_.end()) {
         hipFree(it->second);
       }
-      float *d_data = nullptr;
+      float* d_data = nullptr;
       hipError_t err = hipMalloc(&d_data, bytes);
       if (err != hipSuccess) {
         LOG(ERROR) << "[ROCm CustomOp] Failed to allocate device buffer for "
@@ -689,30 +688,30 @@ void RocmCustomOp::UploadExternalInputs(const OrtApi *api,
   MY_LOG(2) << "[ROCm CustomOp] Phase 1 complete: all external inputs uploaded";
 }
 
-void RocmCustomOp::ExecuteSubgraph(const OrtApi *api,
-                                   OrtKernelContext *context) const {
+void RocmCustomOp::ExecuteSubgraph(const OrtApi* api,
+                                   OrtKernelContext* context) const {
   MY_LOG(2) << "[ROCm CustomOp] Phase 2: Executing " << subgraph_.nodes_size()
             << " nodes";
 
-  for (const auto &node : subgraph_.nodes()) {
+  for (const auto& node : subgraph_.nodes()) {
     ExecuteNode(node);
   }
 
   MY_LOG(2) << "[ROCm CustomOp] Phase 2 complete: all nodes executed";
 }
 
-void RocmCustomOp::ExecuteNode(const rocm::RocmNodeProto &node) const {
-  const auto &params = node.params();
+void RocmCustomOp::ExecuteNode(const rocm::RocmNodeProto& node) const {
+  const auto& params = node.params();
   int32_t node_id = node.node_id();
 
   MY_LOG(2) << "[ROCm CustomOp] Executing node " << node_id
             << " (op_type: " << params.op_type() << ")";
 
   // Gather input pointers and log input references
-  std::vector<float *> inputs;
+  std::vector<float*> inputs;
   for (int i = 0; i < node.inputs_size(); ++i) {
-    const auto &input_ref = node.inputs(i);
-    float *ptr = ResolveTensorRef(input_ref);
+    const auto& input_ref = node.inputs(i);
+    float* ptr = ResolveTensorRef(input_ref);
     if (ptr == nullptr) {
       LOG(ERROR) << "[ROCm CustomOp] Failed to resolve input for node "
                  << node_id;
@@ -736,8 +735,8 @@ void RocmCustomOp::ExecuteNode(const rocm::RocmNodeProto &node) const {
   }
 
   // Get output buffer
-  auto &data = *node_data_[node_id];
-  float *output =
+  auto& data = *node_data_[node_id];
+  float* output =
       data.output_buffers.empty() ? nullptr : data.output_buffers[0];
 
   if (output == nullptr) {
@@ -752,7 +751,7 @@ void RocmCustomOp::ExecuteNode(const rocm::RocmNodeProto &node) const {
     MY_LOG(0) << "[ROCm CustomOp DRY RUN] Node " << node_id
               << " op_type=" << params.op_type() << " inputs=" << inputs.size()
               << " output_size=" << output_size
-              << " output_ptr=" << (void *)output << " SKIPPED (dry run mode)";
+              << " output_ptr=" << (void*)output << " SKIPPED (dry run mode)";
 
     // Initialize output with zeros to provide valid data for subsequent ops
     // We can't copy input->output because tile/broadcast ops have larger
@@ -792,9 +791,9 @@ void RocmCustomOp::ExecuteNode(const rocm::RocmNodeProto &node) const {
 }
 
 void RocmCustomOp::ExecuteConvNode(int32_t node_id,
-                                   const rocm::ConvParamProto &params,
-                                   const std::vector<float *> &inputs,
-                                   float *output) const {
+                                   const rocm::ConvParamProto& params,
+                                   const std::vector<float*>& inputs,
+                                   float* output) const {
   MY_LOG(2) << "[ROCm CustomOp] ExecuteConvNode[" << node_id
             << "]: batch=" << params.batch_size()
             << ", C_in=" << params.in_channels()
@@ -804,18 +803,18 @@ void RocmCustomOp::ExecuteConvNode(int32_t node_id,
   auto miopen_handle = hip_context_->miopen_handle();
   auto stream = hip_context_->stream();
 
-  float *d_input = inputs[0];
+  float* d_input = inputs[0];
 
   // Get node data directly using node_id (no search needed)
-  auto &node_data = *node_data_[node_id];
+  auto& node_data = *node_data_[node_id];
 
   if (node_data.d_weight == nullptr) {
     LOG(ERROR) << "[ROCm CustomOp] Conv weights not found for node " << node_id;
     throw std::runtime_error("Conv weights not loaded");
   }
 
-  float *d_weight = node_data.d_weight;
-  float *d_bias = node_data.d_bias;
+  float* d_weight = node_data.d_weight;
+  float* d_bias = node_data.d_bias;
 
   // Create MIOpen descriptors (cheap, ~microseconds each)
   miopenTensorDescriptor_t input_desc, weight_desc, output_desc;
@@ -855,7 +854,7 @@ void RocmCustomOp::ExecuteConvNode(int32_t node_id,
   }
 
   // Allocate workspace if needed
-  void *workspace_ptr = nullptr;
+  void* workspace_ptr = nullptr;
   if (workspace_size > 0) {
     if (node_data.workspace == nullptr ||
         node_data.workspace_size < workspace_size) {
@@ -949,9 +948,9 @@ void RocmCustomOp::ExecuteConvNode(int32_t node_id,
 }
 
 void RocmCustomOp::ExecuteGemmNode(int32_t node_id,
-                                   const rocm::GemmParamProto &params,
-                                   const std::vector<float *> &inputs,
-                                   float *output) const {
+                                   const rocm::GemmParamProto& params,
+                                   const std::vector<float*>& inputs,
+                                   float* output) const {
   MY_LOG(2) << "[ROCm CustomOp] ExecuteGemmNode[" << node_id
             << "]: M=" << params.m() << ", N=" << params.n()
             << ", K=" << params.k();
@@ -960,18 +959,18 @@ void RocmCustomOp::ExecuteGemmNode(int32_t node_id,
   auto blaslt_handle = hip_context_->hipblaslt_handle();
   auto stream = hip_context_->stream();
 
-  float *d_a = inputs[0];
+  float* d_a = inputs[0];
 
   // Get node data directly using node_id (no search needed)
-  auto &node_data = *node_data_[node_id];
+  auto& node_data = *node_data_[node_id];
 
   if (node_data.d_weight == nullptr) {
     LOG(ERROR) << "[ROCm CustomOp] GEMM weights not found for node " << node_id;
     throw std::runtime_error("GEMM weights not loaded");
   }
 
-  float *d_b = node_data.d_weight;
-  float *d_c = node_data.d_bias; // May be nullptr
+  float* d_b = node_data.d_weight;
+  float* d_c = node_data.d_bias;  // May be nullptr
 
   int64_t M = params.m();
   int64_t N = params.n();
@@ -994,9 +993,9 @@ void RocmCustomOp::ExecuteGemmNode(int32_t node_id,
   // B is [K, N] in row-major, viewed as [N, K] in column-major, ld = N
   // A is [M, K] in row-major, viewed as [K, M] in column-major, ld = K
   // D is [M, N] in row-major, viewed as [N, M] in column-major, ld = N
-  hipblasLtMatrixLayoutCreate(&layout_B, HIP_R_32F, N, K, N); // "A" for hipBLAS
-  hipblasLtMatrixLayoutCreate(&layout_A, HIP_R_32F, K, M, K); // "B" for hipBLAS
-  hipblasLtMatrixLayoutCreate(&layout_D, HIP_R_32F, N, M, N); // "D" for hipBLAS
+  hipblasLtMatrixLayoutCreate(&layout_B, HIP_R_32F, N, K, N);  // "A" for hipBLAS
+  hipblasLtMatrixLayoutCreate(&layout_A, HIP_R_32F, K, M, K);  // "B" for hipBLAS
+  hipblasLtMatrixLayoutCreate(&layout_D, HIP_R_32F, N, M, N);  // "D" for hipBLAS
 
   // Create matmul descriptor - no transpose needed since we're swapping A and B
   hipblasLtMatmulDesc_t matmul_desc;
@@ -1017,7 +1016,7 @@ void RocmCustomOp::ExecuteGemmNode(int32_t node_id,
     hipblasLtMatmulPreference_t pref;
     hipblasLtMatmulPreferenceCreate(&pref);
 
-    size_t max_workspace = 32 * 1024 * 1024; // 32 MB
+    size_t max_workspace = 32 * 1024 * 1024;  // 32 MB
     hipblasLtMatmulPreferenceSetAttribute(
         pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_workspace,
         sizeof(max_workspace));
@@ -1054,7 +1053,7 @@ void RocmCustomOp::ExecuteGemmNode(int32_t node_id,
   }
 
   // Allocate workspace if needed
-  void *workspace_ptr = nullptr;
+  void* workspace_ptr = nullptr;
   size_t workspace_size =
       node_data.gemm_algo_cached ? node_data.cached_gemm_workspace_size : 0;
 
@@ -1129,9 +1128,9 @@ void RocmCustomOp::ExecuteGemmNode(int32_t node_id,
 }
 
 void RocmCustomOp::ExecuteMatmulNode(int32_t node_id,
-                                     const rocm::MatmulParamProto &params,
-                                     const std::vector<float *> &inputs,
-                                     float *output) const {
+                                     const rocm::MatmulParamProto& params,
+                                     const std::vector<float*>& inputs,
+                                     float* output) const {
   MY_LOG(1) << "[ROCm CustomOp] ExecuteMatmulNode[" << node_id
             << "]: M=" << params.m() << ", K=" << params.k()
             << ", N=" << params.n() << ", batch=" << params.batch_count()
@@ -1142,11 +1141,11 @@ void RocmCustomOp::ExecuteMatmulNode(int32_t node_id,
   auto blaslt_handle = hip_context_->hipblaslt_handle();
   auto stream = hip_context_->stream();
 
-  float *d_a = inputs[0]; // A matrix (always runtime input)
+  float* d_a = inputs[0];  // A matrix (always runtime input)
 
   // Get B matrix - either from cached weight or runtime input
-  float *d_b = nullptr;
-  auto &node_data = *node_data_[node_id];
+  float* d_b = nullptr;
+  auto& node_data = *node_data_[node_id];
 
   if (params.b_is_constant()) {
     // B is a constant weight
@@ -1191,17 +1190,17 @@ void RocmCustomOp::ExecuteMatmulNode(int32_t node_id,
   // A is [M, K] in row-major, viewed as [K, M] in column-major, ld = K
   // D is [M, N] in row-major, viewed as [N, M] in column-major, ld = N
   hipblasLtMatrixLayoutCreate(&layout_B, HIP_R_32F, N, K,
-                              N); // "A" for hipBLAS: [N, K], ld=N
+                              N);  // "A" for hipBLAS: [N, K], ld=N
   hipblasLtMatrixLayoutCreate(&layout_A, HIP_R_32F, K, M,
-                              K); // "B" for hipBLAS: [K, M], ld=K
+                              K);  // "B" for hipBLAS: [K, M], ld=K
   hipblasLtMatrixLayoutCreate(&layout_D, HIP_R_32F, N, M,
-                              N); // "D" for hipBLAS: [N, M], ld=N
+                              N);  // "D" for hipBLAS: [N, M], ld=N
 
   // Set batch count and strides if batched
   if (batch_count > 1) {
-    int64_t stride_a = M * K; // Original A is [batch, M, K], stride = M*K
-    int64_t stride_b = K * N; // Original B is [batch, K, N], stride = K*N
-    int64_t stride_d = M * N; // D is [batch, M, N], stride = M*N
+    int64_t stride_a = M * K;  // Original A is [batch, M, K], stride = M*K
+    int64_t stride_b = K * N;  // Original B is [batch, K, N], stride = K*N
+    int64_t stride_d = M * N;  // D is [batch, M, N], stride = M*N
 
     // Note: Since we swap A and B in the matmul call, we also swap the strides:
     // - layout_B is used for d_b (original B), so it gets stride_b
@@ -1247,7 +1246,7 @@ void RocmCustomOp::ExecuteMatmulNode(int32_t node_id,
     hipblasLtMatmulPreference_t pref;
     hipblasLtMatmulPreferenceCreate(&pref);
 
-    size_t max_workspace = 32 * 1024 * 1024; // 32 MB
+    size_t max_workspace = 32 * 1024 * 1024;  // 32 MB
     hipblasLtMatmulPreferenceSetAttribute(
         pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_workspace,
         sizeof(max_workspace));
@@ -1284,7 +1283,7 @@ void RocmCustomOp::ExecuteMatmulNode(int32_t node_id,
   }
 
   // Allocate workspace if needed
-  void *workspace_ptr = nullptr;
+  void* workspace_ptr = nullptr;
   size_t workspace_size =
       node_data.gemm_algo_cached ? node_data.cached_gemm_workspace_size : 0;
 
@@ -1359,15 +1358,15 @@ void RocmCustomOp::ExecuteMatmulNode(int32_t node_id,
 //============================================================================
 
 void RocmCustomOp::ExecuteMulNode(int32_t node_id,
-                                  const rocm::MulParamProto &params,
-                                  const std::vector<float *> &inputs,
-                                  float *output) const {
+                                  const rocm::MulParamProto& params,
+                                  const std::vector<float*>& inputs,
+                                  float* output) const {
   MY_LOG(2) << "[ROCm CustomOp] ExecuteMulNode[" << node_id
             << "]: size_a=" << params.size_a() << ", size_b=" << params.size_b()
             << ", b_is_scalar=" << params.b_is_scalar();
 
   auto stream = hip_context_->stream();
-  const float *d_a = inputs[0];
+  const float* d_a = inputs[0];
 
   if (params.b_is_scalar() && params.b_is_constant()) {
     // Use scalar multiplication
@@ -1375,7 +1374,7 @@ void RocmCustomOp::ExecuteMulNode(int32_t node_id,
                              params.size_a(), stream);
   } else {
     // Use element-wise multiplication
-    const float *d_b = inputs.size() > 1 ? inputs[1] : nullptr;
+    const float* d_b = inputs.size() > 1 ? inputs[1] : nullptr;
     if (d_b == nullptr) {
       LOG(ERROR) << "[ROCm CustomOp] Mul requires 2 inputs when B is not "
                     "scalar constant";
@@ -1390,11 +1389,11 @@ void RocmCustomOp::ExecuteMulNode(int32_t node_id,
 }
 
 void RocmCustomOp::ExecuteSoftmaxNode(int32_t node_id,
-                                      const rocm::SoftmaxParamProto &params,
-                                      const std::vector<float *> &inputs,
-                                      float *output) const {
+                                      const rocm::SoftmaxParamProto& params,
+                                      const std::vector<float*>& inputs,
+                                      float* output) const {
   auto stream = hip_context_->stream();
-  const float *d_input = inputs[0];
+  const float* d_input = inputs[0];
 
   // Calculate outer_size, axis_size, and inner_size from shape and axis
   int64_t axis = params.axis();
@@ -1428,14 +1427,14 @@ void RocmCustomOp::ExecuteSoftmaxNode(int32_t node_id,
 }
 
 void RocmCustomOp::ExecuteReshapeNode(int32_t node_id,
-                                      const rocm::ReshapeParamProto &params,
-                                      const std::vector<float *> &inputs,
-                                      float *output) const {
+                                      const rocm::ReshapeParamProto& params,
+                                      const std::vector<float*>& inputs,
+                                      float* output) const {
   MY_LOG(2) << "[ROCm CustomOp] ExecuteReshapeNode[" << node_id
             << "]: total_size=" << params.total_size();
 
   auto stream = hip_context_->stream();
-  const float *d_input = inputs[0];
+  const float* d_input = inputs[0];
 
   // Reshape is typically zero-copy, but we need to copy if input != output
   if (d_input != output) {
@@ -1447,15 +1446,15 @@ void RocmCustomOp::ExecuteReshapeNode(int32_t node_id,
 }
 
 void RocmCustomOp::ExecuteTransposeNode(int32_t node_id,
-                                        const rocm::TransposeParamProto &params,
-                                        const std::vector<float *> &inputs,
-                                        float *output) const {
+                                        const rocm::TransposeParamProto& params,
+                                        const std::vector<float*>& inputs,
+                                        float* output) const {
   MY_LOG(2) << "[ROCm CustomOp] ExecuteTransposeNode[" << node_id
             << "]: total_size=" << params.total_size()
             << ", ndim=" << params.ndim() << ", is_0213=" << params.is_0213();
 
   auto stream = hip_context_->stream();
-  const float *d_input = inputs[0];
+  const float* d_input = inputs[0];
 
   if (params.is_0213() && params.ndim() == 4) {
     // Use optimized [0,2,1,3] transpose
@@ -1482,15 +1481,15 @@ void RocmCustomOp::ExecuteTransposeNode(int32_t node_id,
 }
 
 void RocmCustomOp::ExecuteTileNode(int32_t node_id,
-                                   const rocm::TileParamProto &params,
-                                   const std::vector<float *> &inputs,
-                                   float *output) const {
+                                   const rocm::TileParamProto& params,
+                                   const std::vector<float*>& inputs,
+                                   float* output) const {
   MY_LOG(2) << "[ROCm CustomOp] ExecuteTileNode[" << node_id
             << "]: in_size=" << params.in_size()
             << ", out_size=" << params.out_size() << ", ndim=" << params.ndim();
 
   auto stream = hip_context_->stream();
-  const float *d_input = inputs[0];
+  const float* d_input = inputs[0];
 
   std::vector<int64_t> in_shape(params.shape_in().begin(),
                                 params.shape_in().end());
@@ -1505,8 +1504,8 @@ void RocmCustomOp::ExecuteTileNode(int32_t node_id,
             << ": Tile executed successfully";
 }
 
-void RocmCustomOp::DownloadExternalOutputs(const OrtApi *api,
-                                           OrtKernelContext *context) const {
+void RocmCustomOp::DownloadExternalOutputs(const OrtApi* api,
+                                           OrtKernelContext* context) const {
   // Use per-session stream
   auto stream = hip_context_->stream();
 
@@ -1515,35 +1514,35 @@ void RocmCustomOp::DownloadExternalOutputs(const OrtApi *api,
 
   // For each external output, copy from GPU to ORT output tensor
   for (int i = 0; i < subgraph_.outputs_size(); ++i) {
-    const auto &ext_output = subgraph_.outputs(i);
+    const auto& ext_output = subgraph_.outputs(i);
     int32_t producer_node = ext_output.producer_node_id();
     int32_t output_idx = ext_output.output_index();
 
     // Get device buffer
-    const auto &producer_data = *node_data_[producer_node];
+    const auto& producer_data = *node_data_[producer_node];
     if (output_idx >=
         static_cast<int32_t>(producer_data.output_buffers.size())) {
       LOG(ERROR) << "[ROCm CustomOp] Invalid output index for external output "
                  << ext_output.name();
       throw std::runtime_error("Invalid output index");
     }
-    float *d_data = producer_data.output_buffers[output_idx];
+    float* d_data = producer_data.output_buffers[output_idx];
     size_t bytes = producer_data.output_sizes[output_idx];
 
     // Get output shape from node params
-    const auto &node = subgraph_.nodes(producer_node);
-    const auto &params = node.params();
+    const auto& node = subgraph_.nodes(producer_node);
+    const auto& params = node.params();
 
     std::vector<int64_t> output_shape;
     if (params.op_type() == "conv") {
-      const auto &conv_params = params.conv_params();
+      const auto& conv_params = params.conv_params();
       output_shape = {conv_params.batch_size(), conv_params.out_channels(),
                       conv_params.out_height(), conv_params.out_width()};
     } else if (params.op_type() == "gemm") {
-      const auto &gemm_params = params.gemm_params();
+      const auto& gemm_params = params.gemm_params();
       output_shape = {gemm_params.m(), gemm_params.n()};
     } else if (params.op_type() == "matmul") {
-      const auto &matmul_params = params.matmul_params();
+      const auto& matmul_params = params.matmul_params();
       // Use stored output shape if available
       if (matmul_params.shape_y_size() > 0) {
         for (int j = 0; j < matmul_params.shape_y_size(); ++j) {
@@ -1558,34 +1557,34 @@ void RocmCustomOp::DownloadExternalOutputs(const OrtApi *api,
         output_shape.push_back(matmul_params.n());
       }
     } else if (params.op_type() == "mul") {
-      const auto &mul_params = params.mul_params();
+      const auto& mul_params = params.mul_params();
       for (int j = 0; j < mul_params.shape_y_size(); ++j) {
         output_shape.push_back(mul_params.shape_y(j));
       }
     } else if (params.op_type() == "softmax") {
-      const auto &softmax_params = params.softmax_params();
+      const auto& softmax_params = params.softmax_params();
       for (int j = 0; j < softmax_params.shape_size(); ++j) {
         output_shape.push_back(softmax_params.shape(j));
       }
     } else if (params.op_type() == "reshape") {
-      const auto &reshape_params = params.reshape_params();
+      const auto& reshape_params = params.reshape_params();
       for (int j = 0; j < reshape_params.shape_out_size(); ++j) {
         output_shape.push_back(reshape_params.shape_out(j));
       }
     } else if (params.op_type() == "transpose") {
-      const auto &transpose_params = params.transpose_params();
+      const auto& transpose_params = params.transpose_params();
       for (int j = 0; j < transpose_params.shape_out_size(); ++j) {
         output_shape.push_back(transpose_params.shape_out(j));
       }
     } else if (params.op_type() == "tile") {
-      const auto &tile_params = params.tile_params();
+      const auto& tile_params = params.tile_params();
       for (int j = 0; j < tile_params.shape_out_size(); ++j) {
         output_shape.push_back(tile_params.shape_out(j));
       }
     }
 
     // Get ORT output tensor
-    OrtValue *ort_output = nullptr;
+    OrtValue* ort_output = nullptr;
     api->KernelContext_GetOutput(context, i, output_shape.data(),
                                  output_shape.size(), &ort_output);
     if (ort_output == nullptr) {
@@ -1593,8 +1592,8 @@ void RocmCustomOp::DownloadExternalOutputs(const OrtApi *api,
       throw std::runtime_error("Failed to get ORT output tensor");
     }
 
-    float *h_data = nullptr;
-    api->GetTensorMutableData(ort_output, (void **)&h_data);
+    float* h_data = nullptr;
+    api->GetTensorMutableData(ort_output, (void**)&h_data);
 
     // Async D2H copy
     hipError_t err =
@@ -1613,4 +1612,4 @@ void RocmCustomOp::DownloadExternalOutputs(const OrtApi *api,
       << "[ROCm CustomOp] Phase 3 complete: all outputs scheduled for download";
 }
 
-} // namespace hip_ep
+}  // namespace hip_ep
