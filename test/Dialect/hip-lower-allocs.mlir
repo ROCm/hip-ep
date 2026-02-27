@@ -11,7 +11,7 @@
 //     holds the HIP context needed by hipFree).
 //===----------------------------------------------------------------------===//
 
-// RUN: %mlir-hip-opt --hip-lower-allocs %s 2>&1 | %FileCheck %s
+// RUN: %hip-mlir-opt --hip-lower-allocs %s 2>&1 | %FileCheck %s
 
 // Two static allocs: alloc0 is not returned -> hip.free before destroy_handle.
 // alloc1 is returned -> no hip.free (caller-owned).
