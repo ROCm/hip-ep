@@ -1,3 +1,0 @@
-1.288366e-02 hip-lower-allocs.mlir
-1.394463e-02 hip-optimize-memrefs.mlir
-1.133490e-02 pipeline-attention.mlir
