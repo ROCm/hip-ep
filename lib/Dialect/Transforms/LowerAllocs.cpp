@@ -13,6 +13,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
@@ -27,9 +28,10 @@ namespace {
 
 /// Return true if \p op creates a memref alias (view) of one of its inputs
 /// without allocating new memory.  Uses the MLIR ViewLikeOpInterface so that
-/// any future view-like ops are automatically covered.
+/// any future view-like ops are automatically covered.  arith::SelectOp is
+/// included because its result may alias either memref operand.
 static bool isMemRefAlias(Operation* op) {
-  return isa<ViewLikeOpInterface>(op);
+  return isa<ViewLikeOpInterface, arith::SelectOp>(op);
 }
 
 /// Walk \p val back through view-like alias ops and return the root
@@ -48,8 +50,11 @@ static AllocOp traceToHipAlloc(Value val) {
 
 /// Find the last user of \p rootValue, walking transitively through
 /// view-like (aliasing) ops.  Without this, hip.free can be placed after
-/// a memref.view but before consumers of the view — a use-after-free.
-static Operation* findLastTransitiveUser(Value rootValue) {
+/// a memref.view but before consumers of the view -- a use-after-free.
+///
+/// Users in nested regions (e.g. scf.for body) are resolved to their
+/// ancestor in the entry block so that isBeforeInBlock remains valid.
+static Operation* findLastTransitiveUser(Value rootValue, Block& entryBlock) {
   Operation* lastUser = rootValue.getDefiningOp();
   SmallVector<Value> worklist = {rootValue};
   DenseSet<Value> visited;
@@ -59,8 +64,14 @@ static Operation* findLastTransitiveUser(Value rootValue) {
     if (!visited.insert(val).second)
       continue;
     for (Operation* user : val.getUsers()) {
-      if (lastUser->isBeforeInBlock(user))
-        lastUser = user;
+      Operation* resolved = user;
+      if (resolved->getBlock() != &entryBlock) {
+        resolved = entryBlock.findAncestorOpInBlock(*resolved);
+        if (!resolved)
+          continue;
+      }
+      if (lastUser->isBeforeInBlock(resolved))
+        lastUser = resolved;
       if (isMemRefAlias(user)) {
         for (OpResult result : user->getResults())
           worklist.push_back(result);
@@ -79,10 +90,13 @@ void LowerAllocsPass::runOnOperation() {
 
   if (funcOp.empty())
     return;
-  assert(funcOp.getBody().hasOneBlock() &&
-         "hip-lower-allocs requires single-block functions; "
-         "findLastTransitiveUser uses isBeforeInBlock which does not "
-         "generalize to multi-block control flow");
+  if (!funcOp.getBody().hasOneBlock()) {
+    funcOp.emitError(
+        "hip-lower-allocs requires single-block functions; "
+        "findLastTransitiveUser uses isBeforeInBlock which does "
+        "not generalize to multi-block control flow");
+    return signalPassFailure();
+  }
 
   // Find the hip.handle produced by hip.create_handle.
   Value handle;
@@ -116,6 +130,27 @@ void LowerAllocsPass::runOnOperation() {
     for (Value v : ret.getOperands())
       returnedValues.insert(v);
   });
+
+  // Check whether any value in the transitive alias chain of \p root is
+  // returned.  Needed because pooled allocs are returned via memref.view,
+  // not directly.
+  auto isTransitivelyReturned = [&](Value root) -> bool {
+    SmallVector<Value> wl = {root};
+    DenseSet<Value> seen;
+    while (!wl.empty()) {
+      Value v = wl.pop_back_val();
+      if (!seen.insert(v).second)
+        continue;
+      if (returnedValues.contains(v))
+        return true;
+      for (Operation* user : v.getUsers()) {
+        if (isMemRefAlias(user))
+          for (OpResult r : user->getResults())
+            wl.push_back(r);
+      }
+    }
+    return false;
+  };
 
   // Move hip.destroy_handle to just before the terminator.  Passes like
   // buffer-results-to-out-params may insert ops (e.g., memref.copy) after
@@ -151,12 +186,12 @@ void LowerAllocsPass::runOnOperation() {
   // the pass pipeline).  Uses transitive user walk to account for
   // alias-creating ops like memref.view / subview / cast.
   for (AllocOp hipAlloc : hipAllocs) {
-    if (returnedValues.contains(hipAlloc.getResult()))
+    if (isTransitivelyReturned(hipAlloc.getResult()))
       continue;
     if (deallocated.contains(hipAlloc.getResult()))
       continue;
 
-    Operation* lastUser = findLastTransitiveUser(hipAlloc.getResult());
+    Operation* lastUser = findLastTransitiveUser(hipAlloc.getResult(), entry);
     builder.setInsertionPointAfter(lastUser);
     FreeOp::create(builder, hipAlloc.getLoc(), handle, hipAlloc.getResult());
   }

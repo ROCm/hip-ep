@@ -14,7 +14,9 @@
 //
 // Two memref<8x8xf32> allocs (256 bytes each) become:
 //   1. hip-pool-allocs: memref<512xi8> pool + two memref.view
-//   2. hip-lower-allocs: hip.alloc for the pool, two memref.view, single hip.free
+//   2. hip-lower-allocs: hip.alloc for the pool, two memref.view
+//
+// The pool is NOT freed because a view of it (%alloc1) is returned.
 //
 // CHECK-LABEL: func.func @static_pool_then_lower
 // CHECK:         %[[H:.*]] = hip.create_handle()
@@ -23,7 +25,7 @@
 // CHECK:         hip.hipblaslt.matmul
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<512xi8> to memref<8x8xf32>
 // CHECK:         hip.miopen.softmax
-// CHECK:         hip.free(%[[H]], %[[POOL]]) : memref<512xi8>
+// CHECK-NOT:     hip.free
 // CHECK:         hip.destroy_handle(%[[H]])
 // CHECK:         return
 func.func @static_pool_then_lower(
@@ -42,7 +44,9 @@ func.func @static_pool_then_lower(
 //
 // Two memref<?x8xf32> allocs (same %n) become:
 //   1. hip-pool-allocs: memref<?xi8> pool + two memref.view
-//   2. hip-lower-allocs: hip.alloc for the pool, two memref.view, single hip.free
+//   2. hip-lower-allocs: hip.alloc for the pool, two memref.view
+//
+// The pool is NOT freed because a view of it (%alloc1) is returned.
 //
 // CHECK-LABEL: func.func @dynamic_pool_then_lower
 // CHECK:         %[[H:.*]] = hip.create_handle()
@@ -51,7 +55,7 @@ func.func @static_pool_then_lower(
 // CHECK:         hip.hipblaslt.matmul
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<?x8xf32>
 // CHECK:         hip.miopen.softmax
-// CHECK:         hip.free(%[[H]], %[[POOL]]) : memref<?xi8>
+// CHECK-NOT:     hip.free
 // CHECK:         hip.destroy_handle(%[[H]])
 // CHECK:         return
 func.func @dynamic_pool_then_lower(
