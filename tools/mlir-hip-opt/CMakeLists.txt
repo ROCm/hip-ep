@@ -79,7 +79,3 @@ if(ENABLE_ONNX_FRONTEND)
   )
 endif()
 
-set_target_properties(mlir-hip-opt PROPERTIES
-  CXX_STANDARD 17
-  CXX_STANDARD_REQUIRED ON
-)
