@@ -7,14 +7,14 @@
 import lit.formats
 import os
 
-config.name = "mlir-hip-opt"
+config.name = "hip-mlir-opt"
 config.test_format = lit.formats.ShTest(preamble_commands=[])
 config.suffixes = [".mlir"]
 
 config.test_source_root = os.path.dirname(__file__)
 
-mlir_hip_opt = os.path.join(os.path.dirname(__file__), "..", "build", "mlir-hip-opt")
-config.substitutions.append(("%mlir-hip-opt", mlir_hip_opt))
+hip_mlir_opt = os.path.join(os.path.dirname(__file__), "..", "build", "hip-mlir-opt")
+config.substitutions.append(("%hip-mlir-opt", hip_mlir_opt))
 
 llvm_build_bin = os.environ.get(
     "LLVM_BUILD_BIN",

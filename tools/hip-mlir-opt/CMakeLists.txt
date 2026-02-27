@@ -3,9 +3,9 @@
 # ** Licensed under the MIT License.
 ##
 
-add_executable(mlir-hip-opt mlir-hip-opt.cpp)
+add_executable(hip-mlir-opt hip-mlir-opt.cpp)
 
-add_dependencies(mlir-hip-opt
+add_dependencies(hip-mlir-opt
   HipDialectIncGen
   HipTypesIncGen
   HipOpsIncGen
@@ -13,10 +13,10 @@ add_dependencies(mlir-hip-opt
 )
 
 if(ENABLE_ONNX_FRONTEND)
-  target_compile_definitions(mlir-hip-opt PRIVATE ENABLE_ONNX_FRONTEND)
+  target_compile_definitions(hip-mlir-opt PRIVATE ENABLE_ONNX_FRONTEND)
 endif()
 
-target_link_libraries(mlir-hip-opt PRIVATE
+target_link_libraries(hip-mlir-opt PRIVATE
   HipDialectIR
   HipDialectTransforms
   HipToLLVM
@@ -56,7 +56,7 @@ target_link_libraries(mlir-hip-opt PRIVATE
 )
 
 if(ENABLE_ONNX_FRONTEND)
-  target_link_libraries(mlir-hip-opt PRIVATE
+  target_link_libraries(hip-mlir-opt PRIVATE
     OnnxToHip
     -Wl,--start-group
     ${ONNX_MLIR_LIB_DIR}/libOMONNXOps.a

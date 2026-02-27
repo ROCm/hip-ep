@@ -156,5 +156,5 @@ int main(int argc, char** argv) {
   });
 
   return mlir::asMainReturnCode(mlir::MlirOptMain(
-      argc, argv, "mlir-hip-opt: HIP dialect compiler driver\n", registry));
+      argc, argv, "hip-mlir-opt: HIP dialect compiler driver\n", registry));
 }

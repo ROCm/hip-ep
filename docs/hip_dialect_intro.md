@@ -197,7 +197,7 @@ The `hip-compiler` tool runs this pipeline automatically, then translates
 the resulting LLVM dialect to LLVM IR, generates a native `.obj`, and links it
 with `hip_runtime_static.lib` and external libraries to produce a `.dll`.
 
-For manual debugging, `mlir-hip-opt` can run the pass pipeline in isolation:
+For manual debugging, `hip-mlir-opt` can run the pass pipeline in isolation:
 `--one-shot-bufferize="bufferize-function-boundaries"`,
 `--hip-optimize-memrefs`, `--hip-lower-allocs`,
 `--convert-hip-to-llvm`, `--finalize-memref-to-llvm`, `--convert-arith-to-llvm`,
@@ -230,8 +230,8 @@ lib/Conversion/HipToLLVM/
 lib/Conversion/OnnxToHip/
   OnnxToHip.cpp            [optional] ONNX-to-HIP conversion pass (requires onnx-mlir)
 
-tools/mlir-hip-opt/
-  mlir-hip-opt.cpp         MLIR pass pipeline tool (for debugging)
+tools/hip-mlir-opt/
+  hip-mlir-opt.cpp         MLIR pass pipeline tool (for debugging)
 tools/hip-compiler/
   hip-compiler.cpp         One-stop MLIR-to-DLL compiler
 
