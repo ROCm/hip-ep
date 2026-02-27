@@ -1,3 +1,8 @@
+##
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
 add_executable(mlir-hip-opt mlir-hip-opt.cpp)
 
 add_dependencies(mlir-hip-opt
