@@ -21,16 +21,16 @@
 #include <onnxruntime_cxx_api.h>
 
 // Simple environment variable helpers (same approach as test_gqa.cpp)
-static std::string get_env(const char *name,
-                           const std::string &default_value = "") {
-  const char *value = std::getenv(name);
+static std::string get_env(const char* name,
+                           const std::string& default_value = "") {
+  const char* value = std::getenv(name);
   return value ? value : default_value;
 }
 
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
-inline std::wstring ToWideString(const char *str) {
+inline std::wstring ToWideString(const char* str) {
   int len = MultiByteToWideChar(CP_UTF8, 0, str, -1, nullptr, 0);
   std::wstring result(len - 1, 0);
   MultiByteToWideChar(CP_UTF8, 0, str, -1, &result[0], len);
@@ -51,13 +51,13 @@ inline std::wstring ToWideString(const char *str) {
 #endif
 
 // Check if a file exists
-bool file_exists(const std::string &path) {
+bool file_exists(const std::string& path) {
   std::ifstream f(path);
   return f.good();
 }
 
 class OrtIntegrationTest : public ::testing::Test {
-protected:
+ protected:
   void SetUp() override {
     // Determine log level from environment variable ORT_LOG_LEVEL
     OrtLoggingLevel ort_log_level = ORT_LOGGING_LEVEL_WARNING;
@@ -72,13 +72,13 @@ protected:
     env_ = std::make_unique<Ort::Env>(ort_log_level, "OrtIntegrationTest");
 
     // Register Morphizen EP
-    const char *lib_path_str = MORPHIZEN_EP_LIB_PATH;
+    const char* lib_path_str = MORPHIZEN_EP_LIB_PATH;
 #ifdef _WIN32
     auto lib_path_w = ToWideString(lib_path_str);
-    OrtStatus *status = Ort::GetApi().RegisterExecutionProviderLibrary(
+    OrtStatus* status = Ort::GetApi().RegisterExecutionProviderLibrary(
         *env_, "MorphiZen", lib_path_w.c_str());
 #else
-    OrtStatus *status = Ort::GetApi().RegisterExecutionProviderLibrary(
+    OrtStatus* status = Ort::GetApi().RegisterExecutionProviderLibrary(
         *env_, "MorphiZen", lib_path_str);
 #endif
 
@@ -123,14 +123,14 @@ TEST_F(OrtIntegrationTest, LoadMorphiZenProvider) {
     std::cout << "[Test] Found " << devices.size() << " EP device(s)"
               << std::endl;
 
-    for (const auto &device : devices) {
+    for (const auto& device : devices) {
       std::string ep_name = device.EpName();
       std::cout << "[Test]   - EP device: " << ep_name << std::endl;
     }
 
     // Check for Morphizen device
     bool found_morphizen = false;
-    for (const auto &device : devices) {
+    for (const auto& device : devices) {
       std::string ep_name = device.EpName();
       if (ep_name == "MorphiZen" || ep_name == "MorphiZenExecutionProvider") {
         found_morphizen = true;
@@ -188,14 +188,14 @@ TEST_F(OrtIntegrationTest, MorphiZenProviderInference) {
         memory_info, input_data.data(), input_size, input_shape.data(),
         input_shape.size());
 
-    const char *input_names[] = {"X"};
-    const char *output_names[] = {"Y"};
+    const char* input_names[] = {"X"};
+    const char* output_names[] = {"Y"};
 
     auto output_tensors = session.Run(Ort::RunOptions{}, input_names,
                                       &input_tensor, 1, output_names, 1);
 
     ASSERT_EQ(output_tensors.size(), 1);
-    const float *output_data = output_tensors[0].GetTensorData<float>();
+    const float* output_data = output_tensors[0].GetTensorData<float>();
     size_t output_size =
         output_tensors[0].GetTensorTypeAndShapeInfo().GetElementCount();
     cpu_output.assign(output_data, output_data + output_size);
@@ -210,12 +210,12 @@ TEST_F(OrtIntegrationTest, MorphiZenProviderInference) {
     std::vector<Ort::ConstEpDevice> devices = env_->GetEpDevices();
 
     // Find Morphizen device
-    const OrtEpDevice *morphizen_device = nullptr;
-    for (const auto &device : devices) {
+    const OrtEpDevice* morphizen_device = nullptr;
+    for (const auto& device : devices) {
       std::string ep_name = device.EpName();
       std::cout << "[Test] Found EP device: " << ep_name << std::endl;
       if (ep_name == "MorphiZen" || ep_name == "MorphiZenExecutionProvider") {
-        morphizen_device = static_cast<const OrtEpDevice *>(device);
+        morphizen_device = static_cast<const OrtEpDevice*>(device);
         break;
       }
     }
@@ -243,7 +243,7 @@ TEST_F(OrtIntegrationTest, MorphiZenProviderInference) {
     }
 
     // Add Morphizen EP using V2 API
-    OrtStatus *status = Ort::GetApi().SessionOptionsAppendExecutionProvider_V2(
+    OrtStatus* status = Ort::GetApi().SessionOptionsAppendExecutionProvider_V2(
         session_options, *env_, &morphizen_device, 1, nullptr, nullptr, 0);
 
     if (status != nullptr) {
@@ -267,8 +267,8 @@ TEST_F(OrtIntegrationTest, MorphiZenProviderInference) {
           memory_info, input_data.data(), input_size, input_shape.data(),
           input_shape.size());
 
-      const char *input_names[] = {"X"};
-      const char *output_names[] = {"Y"};
+      const char* input_names[] = {"X"};
+      const char* output_names[] = {"Y"};
 
       std::cout
           << "[Test] Running Morphizen EP inference (MIOpen Conv backend)..."
@@ -278,11 +278,11 @@ TEST_F(OrtIntegrationTest, MorphiZenProviderInference) {
       std::cout << "[Test] Inference completed" << std::endl;
 
       ASSERT_EQ(output_tensors.size(), 1);
-      auto &output_tensor = output_tensors[0];
+      auto& output_tensor = output_tensors[0];
       auto output_shape = output_tensor.GetTensorTypeAndShapeInfo().GetShape();
       size_t output_size =
           output_tensor.GetTensorTypeAndShapeInfo().GetElementCount();
-      const float *output_data = output_tensor.GetTensorData<float>();
+      const float* output_data = output_tensor.GetTensorData<float>();
 
       std::vector<float> gpu_output(output_data, output_data + output_size);
 
@@ -299,7 +299,7 @@ TEST_F(OrtIntegrationTest, MorphiZenProviderInference) {
       // Compare outputs with early exit on excessive mismatches
       ASSERT_EQ(cpu_output.size(), gpu_output.size()) << "Output size mismatch";
 
-      const size_t MAX_MISMATCH_BEFORE_FATAL = 5; // Exit after 5 mismatches
+      const size_t MAX_MISMATCH_BEFORE_FATAL = 5;  // Exit after 5 mismatches
       const float TOLERANCE = 1e-4f;
 
       float max_diff = 0.0f;
@@ -348,7 +348,7 @@ TEST_F(OrtIntegrationTest, MorphiZenProviderInference) {
       std::cout << "[Test] Morphizen EP inference verified successfully!"
                 << std::endl;
 
-    } catch (const Ort::Exception &ex) {
+    } catch (const Ort::Exception& ex) {
       std::string error_msg = ex.what();
       // Check if the error is due to missing backend
       if (error_msg.find("No engine configurations available") !=
@@ -364,10 +364,11 @@ TEST_F(OrtIntegrationTest, MorphiZenProviderInference) {
   }
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   std::cout << "\n========================================" << std::endl;
   std::cout << "ORT Integration Test for Morphizen ROCm EP" << std::endl;
-  std::cout << "========================================\n" << std::endl;
+  std::cout << "========================================\n"
+            << std::endl;
 
   std::cout
       << "To see More detailed log output, set these environment variables:"

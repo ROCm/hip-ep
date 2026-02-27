@@ -17,70 +17,70 @@ extern "C" {
 
 //--- Add Bias kernels (Conv) ---
 
-void launch_add_bias_nchw_f32(float *data, const float *bias, int64_t channels,
+void launch_add_bias_nchw_f32(float* data, const float* bias, int64_t channels,
                               int64_t spatial_size, int64_t total_size,
                               hipStream_t stream);
 
 //--- Softmax kernels ---
 
-void launch_softmax_f32(const float *input, float *output, int64_t batch,
+void launch_softmax_f32(const float* input, float* output, int64_t batch,
                         int64_t dim, hipStream_t stream);
 
-void launch_softmax_2d_f32(const float *input, float *output, int64_t axis_size,
+void launch_softmax_2d_f32(const float* input, float* output, int64_t axis_size,
                            int64_t outer_size, hipStream_t stream);
 
-void launch_softmax_3d_f32(const float *input, float *output, int64_t axis_size,
+void launch_softmax_3d_f32(const float* input, float* output, int64_t axis_size,
                            int64_t inner_size, int64_t outer_size,
                            hipStream_t stream);
 
 //--- Multiply kernels ---
 
-void launch_mul_f32(const float *input_a, const float *input_b, float *output,
+void launch_mul_f32(const float* input_a, const float* input_b, float* output,
                     int64_t size_out, int64_t size_a, int64_t size_b,
                     hipStream_t stream);
 
-void launch_mul_scalar_f32(const float *input, float scalar, float *output,
+void launch_mul_scalar_f32(const float* input, float scalar, float* output,
                            int64_t size, hipStream_t stream);
 
-void launch_mul_elementwise_f32(const float *a, const float *b, float *output,
+void launch_mul_elementwise_f32(const float* a, const float* b, float* output,
                                 int64_t total_size, int64_t b_size,
                                 hipStream_t stream);
 
 //--- Transpose kernels ---
 
-void launch_transpose_0213_f32(const float *input, float *output, int64_t n,
+void launch_transpose_0213_f32(const float* input, float* output, int64_t n,
                                int64_t a, int64_t b, int64_t c,
                                hipStream_t stream);
 
-void launch_transpose_4d_f32(const float *input, float *output, int64_t d0,
+void launch_transpose_4d_f32(const float* input, float* output, int64_t d0,
                              int64_t d1, int64_t d2, int64_t d3, int64_t p0,
                              int64_t p1, int64_t p2, int64_t p3,
                              hipStream_t stream);
 
 //--- Tile kernels ---
 
-void launch_tile_4d_f32(const float *input, float *output, int64_t in_d0,
+void launch_tile_4d_f32(const float* input, float* output, int64_t in_d0,
                         int64_t in_d1, int64_t in_d2, int64_t in_d3, int64_t r0,
                         int64_t r1, int64_t r2, int64_t r3, int64_t out_size,
                         hipStream_t stream);
 
-void launch_tile_5d_f32(const float *input, float *output, int64_t in_d0,
+void launch_tile_5d_f32(const float* input, float* output, int64_t in_d0,
                         int64_t in_d1, int64_t in_d2, int64_t in_d3,
                         int64_t in_d4, int64_t r0, int64_t r1, int64_t r2,
                         int64_t r3, int64_t r4, int64_t out_size,
                         hipStream_t stream);
 
-void launch_tile_nd_f32(const float *input, float *output,
-                        const int64_t *input_shape, int ndims,
-                        const int64_t *repeats, int64_t input_elements,
+void launch_tile_nd_f32(const float* input, float* output,
+                        const int64_t* input_shape, int ndims,
+                        const int64_t* repeats, int64_t input_elements,
                         int64_t output_elements, hipStream_t stream);
 
 //--- Utility kernels ---
 
-void launch_reshape_copy_f32(const float *input, float *output, int64_t size,
+void launch_reshape_copy_f32(const float* input, float* output, int64_t size,
                              hipStream_t stream);
 
-} // extern "C"
+}  // extern "C"
 
 //============================================================================
 // C++ wrapper namespace for convenience
@@ -103,7 +103,7 @@ namespace rocm_kernels {
  * @param spatial_size H * W
  * @param stream HIP stream
  */
-void add_bias_nchw(float *data, const float *bias, int64_t batch,
+void add_bias_nchw(float* data, const float* bias, int64_t batch,
                    int64_t channels, int64_t spatial_size, hipStream_t stream);
 
 //============================================================================
@@ -122,7 +122,7 @@ void add_bias_nchw(float *data, const float *bias, int64_t batch,
  * @param size_b Size of tensor b
  * @param stream HIP stream for async execution
  */
-void mul(const float *a, const float *b, float *output, int64_t size_out,
+void mul(const float* a, const float* b, float* output, int64_t size_out,
          int64_t size_a, int64_t size_b, hipStream_t stream);
 
 /**
@@ -136,7 +136,7 @@ void mul(const float *a, const float *b, float *output, int64_t size_out,
  * @param b_size Size of tensor b (for broadcasting, b_size <= total_size)
  * @param stream HIP stream for async execution
  */
-void mul_elementwise(const float *a, const float *b, float *output,
+void mul_elementwise(const float* a, const float* b, float* output,
                      int64_t total_size, int64_t b_size, hipStream_t stream);
 
 /**
@@ -148,7 +148,7 @@ void mul_elementwise(const float *a, const float *b, float *output,
  * @param size Number of elements
  * @param stream HIP stream
  */
-void mul_scalar(const float *a, float scalar, float *output, int64_t size,
+void mul_scalar(const float* a, float scalar, float* output, int64_t size,
                 hipStream_t stream);
 
 //============================================================================
@@ -165,7 +165,7 @@ void mul_scalar(const float *a, float scalar, float *output, int64_t size,
  * @param dim Size of the last dimension (softmax dimension)
  * @param stream HIP stream
  */
-void softmax(const float *input, float *output, int64_t batch, int64_t dim,
+void softmax(const float* input, float* output, int64_t batch, int64_t dim,
              hipStream_t stream);
 
 /**
@@ -178,7 +178,7 @@ void softmax(const float *input, float *output, int64_t batch, int64_t dim,
  * @param outer_size Size of dimensions before the softmax axis
  * @param stream HIP stream
  */
-void softmax_3d(const float *input, float *output, int64_t axis_size,
+void softmax_3d(const float* input, float* output, int64_t axis_size,
                 int64_t inner_size, int64_t outer_size, hipStream_t stream);
 
 //============================================================================
@@ -194,7 +194,7 @@ void softmax_3d(const float *input, float *output, int64_t axis_size,
  * @param size Total number of elements
  * @param stream HIP stream
  */
-void reshape_copy(const float *input, float *output, int64_t size,
+void reshape_copy(const float* input, float* output, int64_t size,
                   hipStream_t stream);
 
 //============================================================================
@@ -213,8 +213,8 @@ void reshape_copy(const float *input, float *output, int64_t size,
  * @param total_size Total number of elements
  * @param stream HIP stream
  */
-void transpose(const float *input, float *output, const int64_t *in_shape,
-               const int64_t *out_shape, const int32_t *perm, int32_t ndim,
+void transpose(const float* input, float* output, const int64_t* in_shape,
+               const int64_t* out_shape, const int32_t* perm, int32_t ndim,
                int64_t total_size, hipStream_t stream);
 
 /**
@@ -229,7 +229,7 @@ void transpose(const float *input, float *output, const int64_t *in_shape,
  * @param c Size of dim 3
  * @param stream HIP stream
  */
-void transpose_0213(const float *input, float *output, int64_t n, int64_t a,
+void transpose_0213(const float* input, float* output, int64_t n, int64_t a,
                     int64_t b, int64_t c, hipStream_t stream);
 
 //============================================================================
@@ -248,8 +248,8 @@ void transpose_0213(const float *input, float *output, int64_t n, int64_t a,
  * @param out_size Total output elements
  * @param stream HIP stream
  */
-void tile(const float *input, float *output, const int64_t *in_shape,
-          const int64_t *repeats, int32_t ndim, int64_t in_size,
+void tile(const float* input, float* output, const int64_t* in_shape,
+          const int64_t* repeats, int32_t ndim, int64_t in_size,
           int64_t out_size, hipStream_t stream);
 
-} // namespace rocm_kernels
+}  // namespace rocm_kernels

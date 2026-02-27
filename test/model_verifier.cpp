@@ -39,7 +39,7 @@
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
-inline std::wstring ToWideString(const char *str) {
+inline std::wstring ToWideString(const char* str) {
   int len = MultiByteToWideChar(CP_UTF8, 0, str, -1, nullptr, 0);
   std::wstring result(len - 1, 0);
   MultiByteToWideChar(CP_UTF8, 0, str, -1, &result[0], len);
@@ -68,9 +68,9 @@ struct Config {
 // Statistics
 struct ComparisonStats {
   float max_diff = 0.0f;
-  float max_diff_cpu_val = 0.0f; // CPU value that caused max_diff
-  float max_diff_gpu_val = 0.0f; // GPU value that caused max_diff
-  size_t max_diff_idx = 0;       // Index where max_diff occurred
+  float max_diff_cpu_val = 0.0f;  // CPU value that caused max_diff
+  float max_diff_gpu_val = 0.0f;  // GPU value that caused max_diff
+  size_t max_diff_idx = 0;        // Index where max_diff occurred
   float mean_diff = 0.0f;
   float std_diff = 0.0f;
   size_t mismatch_count = 0;
@@ -79,7 +79,7 @@ struct ComparisonStats {
   size_t inf_count = 0;
 };
 
-void print_usage(const char *prog_name) {
+void print_usage(const char* prog_name) {
   std::cout << "Model Verifier - Compare CPU vs GPU (HipDNN EP) outputs\n\n";
   std::cout << "Usage: " << prog_name << " <model_path> [options]\n\n";
   std::cout << "Options:\n";
@@ -93,7 +93,7 @@ void print_usage(const char *prog_name) {
   std::cout << "  MORPHIZEN_DEBUG_ROCM=2  Enable debug output from HipDNN EP\n";
 }
 
-Config parse_args(int argc, char **argv) {
+Config parse_args(int argc, char** argv) {
   Config config;
 
   if (argc < 2) {
@@ -122,7 +122,7 @@ Config parse_args(int argc, char **argv) {
   return config;
 }
 
-std::string shape_to_string(const std::vector<int64_t> &shape) {
+std::string shape_to_string(const std::vector<int64_t>& shape) {
   std::string s = "[";
   for (size_t i = 0; i < shape.size(); ++i) {
     s += std::to_string(shape[i]);
@@ -133,8 +133,8 @@ std::string shape_to_string(const std::vector<int64_t> &shape) {
   return s;
 }
 
-ComparisonStats compare_outputs(const std::vector<float> &cpu,
-                                const std::vector<float> &gpu, float tolerance,
+ComparisonStats compare_outputs(const std::vector<float>& cpu,
+                                const std::vector<float>& gpu, float tolerance,
                                 bool verbose) {
   ComparisonStats stats;
   stats.total_elements = cpu.size();
@@ -190,7 +190,7 @@ ComparisonStats compare_outputs(const std::vector<float> &cpu,
   return stats;
 }
 
-void print_stats(const ComparisonStats &stats, float tolerance) {
+void print_stats(const ComparisonStats& stats, float tolerance) {
   std::cout << "\n=== Comparison Statistics ===" << std::endl;
   std::cout << std::fixed << std::setprecision(6);
   std::cout << "  Total elements:     " << stats.total_elements << std::endl;
@@ -222,11 +222,13 @@ void print_stats(const ComparisonStats &stats, float tolerance) {
   }
 }
 
-int main(int argc, char **argv) {
-  std::cout << "\n" << std::string(70, '=') << std::endl;
+int main(int argc, char** argv) {
+  std::cout << "\n"
+            << std::string(70, '=') << std::endl;
   std::cout << "  HipDNN EP Model Verifier - CPU vs GPU Comparison"
             << std::endl;
-  std::cout << std::string(70, '=') << "\n" << std::endl;
+  std::cout << std::string(70, '=') << "\n"
+            << std::endl;
 
   Config config = parse_args(argc, argv);
 
@@ -252,7 +254,7 @@ int main(int argc, char **argv) {
 
   // Determine log level from environment variable ORT_LOG_LEVEL
   OrtLoggingLevel ort_log_level = ORT_LOGGING_LEVEL_WARNING;
-  const char *log_level_env = std::getenv("ORT_LOG_LEVEL");
+  const char* log_level_env = std::getenv("ORT_LOG_LEVEL");
   if (log_level_env != nullptr) {
     std::string log_level_str(log_level_env);
     if (log_level_str == "info") {
@@ -266,7 +268,7 @@ int main(int argc, char **argv) {
   Ort::Env env(ort_log_level, "ModelVerifier");
 
   // Register HipDNN EP using C++ API
-  const char *lib_path = HIPDNN_EP_LIB_PATH;
+  const char* lib_path = HIPDNN_EP_LIB_PATH;
   std::cout << "Loading EP library: " << lib_path << std::endl;
 
   try {
@@ -276,7 +278,7 @@ int main(int argc, char **argv) {
 #else
     env.RegisterExecutionProviderLibrary("MorphiZen", lib_path);
 #endif
-  } catch (const Ort::Exception &ex) {
+  } catch (const Ort::Exception& ex) {
     std::cerr << "ERROR: Failed to register HipDNN EP: " << ex.what()
               << std::endl;
     return 1;
@@ -324,9 +326,9 @@ int main(int argc, char **argv) {
     auto shape = tensor_info.GetShape();
 
     // Handle dynamic dimensions
-    for (auto &dim : shape) {
+    for (auto& dim : shape) {
       if (dim < 0)
-        dim = 1; // Default dynamic dims to 1
+        dim = 1;  // Default dynamic dims to 1
     }
     input_shapes.push_back(shape);
 
@@ -362,18 +364,19 @@ int main(int argc, char **argv) {
   }
 
   // Convert names to char pointers
-  std::vector<const char *> input_name_ptrs;
-  for (const auto &n : input_names)
+  std::vector<const char*> input_name_ptrs;
+  for (const auto& n : input_names)
     input_name_ptrs.push_back(n.c_str());
-  std::vector<const char *> output_name_ptrs;
-  for (const auto &n : output_names)
+  std::vector<const char*> output_name_ptrs;
+  for (const auto& n : output_names)
     output_name_ptrs.push_back(n.c_str());
 
   // Run iterations
   bool all_passed = true;
 
   for (int iter = 0; iter < config.iterations; ++iter) {
-    std::cout << "\n" << std::string(70, '-') << std::endl;
+    std::cout << "\n"
+              << std::string(70, '-') << std::endl;
     std::cout << "  Iteration " << (iter + 1) << "/" << config.iterations
               << std::endl;
     std::cout << std::string(70, '-') << std::endl;
@@ -415,7 +418,7 @@ int main(int argc, char **argv) {
     std::vector<std::vector<float>> cpu_output_data;
     std::vector<std::vector<int64_t>> output_shapes;
     for (size_t i = 0; i < cpu_outputs.size(); ++i) {
-      const float *data = cpu_outputs[i].GetTensorData<float>();
+      const float* data = cpu_outputs[i].GetTensorData<float>();
       size_t size =
           cpu_outputs[i].GetTensorTypeAndShapeInfo().GetElementCount();
       auto shape = cpu_outputs[i].GetTensorTypeAndShapeInfo().GetShape();
@@ -434,12 +437,12 @@ int main(int argc, char **argv) {
     std::cout << "\n--- GPU Inference (HipDNN EP) ---" << std::endl;
 
     std::vector<Ort::ConstEpDevice> devices = env.GetEpDevices();
-    const OrtEpDevice *hipdnn_device = nullptr;
+    const OrtEpDevice* hipdnn_device = nullptr;
 
-    for (const auto &device : devices) {
+    for (const auto& device : devices) {
       std::string ep_name = device.EpName();
       if (ep_name == "MorphiZen" || ep_name == "MorphiZenExecutionProvider") {
-        hipdnn_device = static_cast<const OrtEpDevice *>(device);
+        hipdnn_device = static_cast<const OrtEpDevice*>(device);
         break;
       }
     }
@@ -466,7 +469,7 @@ int main(int argc, char **argv) {
       std::vector<Ort::ConstEpDevice> selected_devices;
       selected_devices.push_back(Ort::ConstEpDevice(hipdnn_device));
       gpu_options.AppendExecutionProvider_V2(env, selected_devices, {});
-    } catch (const Ort::Exception &ex) {
+    } catch (const Ort::Exception& ex) {
       std::cerr << "  ERROR: Failed to add HipDNN EP: " << ex.what()
                 << std::endl;
       all_passed = false;
@@ -515,7 +518,7 @@ int main(int argc, char **argv) {
       // Compare outputs
       std::cout << "\n--- Output Comparison ---" << std::endl;
       for (size_t i = 0; i < gpu_outputs.size(); ++i) {
-        const float *data = gpu_outputs[i].GetTensorData<float>();
+        const float* data = gpu_outputs[i].GetTensorData<float>();
         size_t size =
             gpu_outputs[i].GetTensorTypeAndShapeInfo().GetElementCount();
 
@@ -540,22 +543,25 @@ int main(int argc, char **argv) {
         }
       }
 
-    } catch (const Ort::Exception &ex) {
+    } catch (const Ort::Exception& ex) {
       std::cerr << "  ERROR: " << ex.what() << std::endl;
       all_passed = false;
     }
   }
 
   // Final summary
-  std::cout << "\n" << std::string(70, '=') << std::endl;
+  std::cout << "\n"
+            << std::string(70, '=') << std::endl;
   std::cout << "  FINAL RESULT" << std::endl;
   std::cout << std::string(70, '=') << std::endl;
 
   if (all_passed) {
-    std::cout << "\n  [PASS] All comparisons passed!\n" << std::endl;
+    std::cout << "\n  [PASS] All comparisons passed!\n"
+              << std::endl;
     return 0;
   } else {
-    std::cout << "\n  [FAIL] Some comparisons failed!\n" << std::endl;
+    std::cout << "\n  [FAIL] Some comparisons failed!\n"
+              << std::endl;
     return 1;
   }
 }

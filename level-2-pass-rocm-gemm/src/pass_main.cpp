@@ -13,16 +13,16 @@ using namespace morphizen_cxx;
  * Level-2 Pass: Gemm Pattern Matching (hipBLASLt)
  */
 struct Level2RocmGemm {
-  static constexpr const char *LOG_PREFIX = "[ROCm Gemm L2]";
+  static constexpr const char* LOG_PREFIX = "[ROCm Gemm L2]";
 
-  Level2RocmGemm(IPass &self) : self_{self} {}
+  Level2RocmGemm(IPass& self) : self_{self} {}
 
-  std::unique_ptr<Rule> create_rule(IPass *self) {
+  std::unique_ptr<Rule> create_rule(IPass* self) {
     auto pattern =
-        PatternBuilder().create_by_json(std::string((const char *)gemm_json));
+        PatternBuilder().create_by_json(std::string((const char*)gemm_json));
 
     return Rule::create_rule(
-        pattern, [=](Graph *graph, binder_t &binder) -> bool {
+        pattern, [=](Graph* graph, binder_t& binder) -> bool {
           auto input_A = binder["input_A"];
           auto input_B = binder["input_B"];
           auto output = binder["output"];
@@ -33,7 +33,7 @@ struct Level2RocmGemm {
           rocm::RocmParamProto rocm_param;
           rocm_param.set_op_type("gemm");
 
-          auto *gemm_params = rocm_param.mutable_gemm_params();
+          auto* gemm_params = rocm_param.mutable_gemm_params();
           gemm_params->set_trans_a(0);
           gemm_params->set_trans_b(0);
           gemm_params->set_alpha(1.0f);
@@ -77,7 +77,7 @@ struct Level2RocmGemm {
 
           // Extract and save bias tensor (C matrix) if present
           if (has_C) {
-            auto *bias_node_arg = binder["input_C"].node_arg;
+            auto* bias_node_arg = binder["input_C"].node_arg;
             auto bias_ref =
                 NodeArgConstRef::from_node_arg(*graph, *bias_node_arg);
             auto bias_name = node_arg_get_name(*bias_node_arg);
@@ -141,12 +141,12 @@ struct Level2RocmGemm {
         });
   }
 
-  void process(IPass &self, Graph &graph) {
+  void process(IPass& self, Graph& graph) {
     ROCM_LOG(1) << LOG_PREFIX << " Processing graph for Gemm patterns...";
     create_rule(&self)->apply(&graph);
   }
 
-  IPass &self_;
+  IPass& self_;
 };
 
 DEFINE_MORPHIZEN_PASS(Level2RocmGemm, morphizen_pass_level2_rocm_gemm)

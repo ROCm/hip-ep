@@ -16,16 +16,16 @@ using namespace morphizen_cxx;
  * Handles broadcasting when one input is smaller.
  */
 struct Level2RocmMul {
-  static constexpr const char *LOG_PREFIX = "[ROCm Mul L2]";
+  static constexpr const char* LOG_PREFIX = "[ROCm Mul L2]";
 
-  Level2RocmMul(IPass &self) : self_{self} {}
+  Level2RocmMul(IPass& self) : self_{self} {}
 
-  std::unique_ptr<Rule> create_rule(IPass *self) {
+  std::unique_ptr<Rule> create_rule(IPass* self) {
     auto pattern =
-        PatternBuilder().create_by_json(std::string((const char *)mul_json));
+        PatternBuilder().create_by_json(std::string((const char*)mul_json));
 
     return Rule::create_rule(
-        pattern, [=](Graph *graph, binder_t &binder) -> bool {
+        pattern, [=](Graph* graph, binder_t& binder) -> bool {
           auto input_A = binder["input_A"];
           auto input_B = binder["input_B"];
           auto output = binder["output"];
@@ -36,7 +36,7 @@ struct Level2RocmMul {
           rocm::RocmParamProto rocm_param;
           rocm_param.set_op_type("mul");
 
-          auto *mul_params = rocm_param.mutable_mul_params();
+          auto* mul_params = rocm_param.mutable_mul_params();
 
           // Get input shapes
           auto a_shape = node_arg_get_shape_i64(*input_A.node_arg);
@@ -127,12 +127,12 @@ struct Level2RocmMul {
         });
   }
 
-  void process(IPass &self, Graph &graph) {
+  void process(IPass& self, Graph& graph) {
     ROCM_LOG(1) << LOG_PREFIX << " Processing graph for Mul patterns...";
     create_rule(&self)->apply(&graph);
   }
 
-  IPass &self_;
+  IPass& self_;
 };
 
 DEFINE_MORPHIZEN_PASS(Level2RocmMul, morphizen_pass_level2_rocm_mul)
