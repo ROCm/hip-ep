@@ -1,3 +1,8 @@
+##
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
 set(LLVM_TARGET_DEFINITIONS HipDialect.td)
 mlir_tablegen(HipDialect.h.inc -gen-dialect-decls -dialect=hip)
 mlir_tablegen(HipDialect.cpp.inc -gen-dialect-defs -dialect=hip)

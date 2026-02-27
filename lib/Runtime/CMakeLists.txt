@@ -1,3 +1,8 @@
+##
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
 file(GLOB RUNTIME_SRCS "ops_runtime/*.cpp")
 add_library(hip_runtime_static STATIC ${RUNTIME_SRCS})
 set_target_properties(hip_runtime_static PROPERTIES
