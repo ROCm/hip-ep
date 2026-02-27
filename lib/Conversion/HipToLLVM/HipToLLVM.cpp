@@ -54,8 +54,9 @@ static Value extractMemRefPtr(Value memrefDesc, ConversionPatternRewriter& rewri
   Value ptr = MemRefDescriptor(memrefDesc).alignedPtr(rewriter, loc);
   auto ptrTy = cast<LLVM::LLVMPointerType>(ptr.getType());
   if (ptrTy.getAddressSpace() != 0)
-    ptr = rewriter.create<LLVM::AddrSpaceCastOp>(
-        loc, LLVM::LLVMPointerType::get(rewriter.getContext(), 0), ptr);
+    ptr = LLVM::AddrSpaceCastOp::create(
+        rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext(), 0),
+        ptr);
   return ptr;
 }
 
@@ -150,8 +151,9 @@ struct AllocOpLowering : public ConvertOpToLLVMPattern<AllocOp> {
       return failure();
     if (cast<LLVM::LLVMPointerType>(allocatedPtr.getType()).getAddressSpace() !=
         *addrSpace)
-      allocatedPtr = rewriter.create<LLVM::AddrSpaceCastOp>(
-          loc, LLVM::LLVMPointerType::get(rewriter.getContext(), *addrSpace),
+      allocatedPtr = LLVM::AddrSpaceCastOp::create(
+          rewriter, loc,
+          LLVM::LLVMPointerType::get(rewriter.getContext(), *addrSpace),
           allocatedPtr);
 
     MemRefDescriptor desc = createMemRefDescriptor(
@@ -185,7 +187,7 @@ struct FreeOpLowering : public ConvertOpToLLVMPattern<FreeOp> {
     auto ptrTy = allocatedPtr.getType();
     if (cast<LLVM::LLVMPointerType>(ptrTy).getAddressSpace() != 0)
       allocatedPtr =
-          rewriter.create<LLVM::AddrSpaceCastOp>(loc, ptrType, allocatedPtr);
+          LLVM::AddrSpaceCastOp::create(rewriter, loc, ptrType, allocatedPtr);
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, allocatedPtr);
     rewriter.eraseOp(op);
@@ -244,12 +246,12 @@ struct HipblasltMatmulOpLowering
     MemRefDescriptor aDesc(adaptor.getA());
     MemRefDescriptor bDesc(adaptor.getB());
 
-    Value one = rewriter.create<LLVM::ConstantOp>(loc, indexType,
-                                                  rewriter.getIndexAttr(1));
-    Value rankAVal = rewriter.create<LLVM::ConstantOp>(
-        loc, indexType, rewriter.getIndexAttr(rankA));
-    Value rankBVal = rewriter.create<LLVM::ConstantOp>(
-        loc, indexType, rewriter.getIndexAttr(rankB));
+    Value one = LLVM::ConstantOp::create(rewriter, loc, indexType,
+                                         rewriter.getIndexAttr(1));
+    Value rankAVal = LLVM::ConstantOp::create(rewriter, loc, indexType,
+                                              rewriter.getIndexAttr(rankA));
+    Value rankBVal = LLVM::ConstantOp::create(rewriter, loc, indexType,
+                                              rewriter.getIndexAttr(rankB));
 
     Value batch = (rankA == 3) ? aDesc.size(rewriter, loc, 0) : one;
     Value M = aDesc.size(rewriter, loc, rankA - 2);
@@ -409,8 +411,8 @@ struct MiopenBinaryOpLowering : public ConvertOpToLLVMPattern<OpTy> {
                            Location loc) const {
     Type indexType = this->getIndexType();
     int rank = type.getRank();
-    Value num = rewriter.create<LLVM::ConstantOp>(
-        loc, indexType, rewriter.getIndexAttr(1));
+    Value num = LLVM::ConstantOp::create(rewriter, loc, indexType,
+                                         rewriter.getIndexAttr(1));
     for (int i = 0; i < rank; i++)
       num = LLVM::MulOp::create(rewriter, loc, num,
                                 MemRefDescriptor(descriptor).size(rewriter, loc, i));
@@ -521,10 +523,10 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
 
     int rank = cast<MemRefType>(op.getInput().getType()).getRank();
     MemRefDescriptor inputDesc(adaptor.getInput());
-    Value rankVal = rewriter.create<LLVM::ConstantOp>(
-        loc, indexType, rewriter.getIndexAttr(rank));
-    Value one = rewriter.create<LLVM::ConstantOp>(loc, indexType,
-                                                  rewriter.getIndexAttr(1));
+    Value rankVal = LLVM::ConstantOp::create(rewriter, loc, indexType,
+                                             rewriter.getIndexAttr(rank));
+    Value one = LLVM::ConstantOp::create(rewriter, loc, indexType,
+                                         rewriter.getIndexAttr(1));
 
     SmallVector<Value, 3> shape;
     for (int i = 0; i < 3; i++)
@@ -700,8 +702,16 @@ struct MemRefDeallocOpLowering
     if (failed(funcOp))
       return failure();
 
-    Value ptr = extractMemRefPtr(adaptor.getMemref(), rewriter, loc);
-    LLVM::CallOp::create(rewriter, loc, *funcOp, ptr);
+    // Must use allocatedPtr (not alignedPtr) -- hipFree requires the original
+    // allocation base.  With memref.view, alignedPtr points into the pool
+    // interior while allocatedPtr is the pool base.
+    Value allocatedPtr =
+        MemRefDescriptor(adaptor.getMemref()).allocatedPtr(rewriter, loc);
+    if (cast<LLVM::LLVMPointerType>(allocatedPtr.getType()).getAddressSpace() !=
+        0)
+      allocatedPtr = LLVM::AddrSpaceCastOp::create(rewriter, loc, ptrType,
+                                                   allocatedPtr);
+    LLVM::CallOp::create(rewriter, loc, *funcOp, allocatedPtr);
     rewriter.eraseOp(op);
     return success();
   }

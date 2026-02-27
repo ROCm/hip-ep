@@ -4,10 +4,12 @@
  */
 
 #include "hip/Dialect/IR/HipDialect.h"
+
+#include "llvm/ADT/TypeSwitch.h"
+
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpDefinition.h"
-#include "llvm/ADT/TypeSwitch.h"
 
 using namespace mlir;
 using namespace mlir::hip;
@@ -370,8 +372,8 @@ void MiopenSkipRmsNormOp::print(OpAsmPrinter& p) {
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange MiopenRopeOp::getDpsInitsMutable() {
-  // q and k are operands #1 and #2 (0=handle, 1=q, 2=k, 3=cos, 4=sin, 5=pos)
-  return MutableOperandRange(*this, /*start=*/1, /*length=*/2);
+  // 0=handle, 1=start_pos, 2=cos_cache, 3=sin_cache, 4=q, 5=k
+  return MutableOperandRange(*this, /*start=*/4, /*length=*/2);
 }
 
 void MiopenRopeOp::getEffects(
@@ -564,10 +566,9 @@ void SiluOp::print(OpAsmPrinter& p) {
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange GqaOp::getDpsInitsMutable() {
-  // kv_cache and output: operands #4 and #5
-  // (0=handle, 1=q, 2=k, 3=v, 4=kv_cache, 5=output, 6=layer, 7=start_pos,
-  //  8=seq_len)
-  return MutableOperandRange(*this, /*start=*/4, /*length=*/2);
+  // 0=handle, 1=layer, 2=start_pos, 3=seq_len, 4=q, 5=k, 6=v,
+  // 7=kv_cache, 8=output
+  return MutableOperandRange(*this, /*start=*/7, /*length=*/2);
 }
 
 void GqaOp::getEffects(

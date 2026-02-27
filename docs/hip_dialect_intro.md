@@ -256,16 +256,13 @@ examples/
   rms_norm.hip.mlir       Two chained RMS norms (MIOpen)
   softmax.hip.mlir        Two chained softmaxes (MIOpen)
   attention.hip.mlir      Attention (memref pool + embedded weights)
-  attention.onnx          ONNX model matching attention.hip.mlir (for ORT reference)
-  test_e2e.mlir           Self-contained transformer layer
-  model_hip.mlir          Generated HIP dialect from Llama-3.2-1B
-  main_gemm.cpp           C++ driver for test_gemm (links gemm.lib)
-  main_add.cpp            C++ driver for test_add (links add.lib)
-  main_mul.cpp            C++ driver for test_mul (links mul.lib)
-  main_rms_norm.cpp       C++ driver for test_rms_norm (links rms_norm.lib)
-  main_softmax.cpp        C++ driver for test_softmax (links softmax.lib)
-  main_attention.cpp      C++ driver for attention (ORT CPU ref vs GPU)
-  main_e2e.cpp            C++ driver for test_e2e
+  main_gemm.cpp           C++ driver for gemm.hip.mlir
+  main_add.cpp            C++ driver for add.hip.mlir
+  main_mul.cpp            C++ driver for mul.hip.mlir
+  main_rms_norm.cpp       C++ driver for rms_norm.hip.mlir
+  main_softmax.cpp        C++ driver for softmax.hip.mlir
+  main_attention.cpp      C++ driver for attention.hip.mlir
+  main_e2e.cpp            C++ driver for end-to-end test
 
 scripts/
   env.bat                          Shared environment config (edit paths here)

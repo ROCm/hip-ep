@@ -26,6 +26,9 @@ project(
   VERSION 1.0.0
   LANGUAGES C CXX)
 
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 # ==============================================================================
 # TheRock ROCm SDK Configuration
 # ==============================================================================
@@ -90,9 +93,6 @@ endif()
 option(BUILD_HIP_TOOLS "Build HIP MLIR compiler tools (hip-mlir-opt, hip-compiler)" OFF)
 
 if(BUILD_HIP_TOOLS)
-  set(CMAKE_CXX_STANDARD 17)
-  set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
   find_package(LLVM REQUIRED CONFIG)
   find_package(MLIR REQUIRED CONFIG)
 
