@@ -2,7 +2,6 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-
 #pragma once
 
 #include "mlir/IR/Builders.h"
@@ -28,7 +27,7 @@ namespace mlir_impl {
 // clang-format on
 
 // Not all mlir::Operation* are morphizen::Node*;
-// `onnx.Constant` and `func.return` are special cases.
+// `onnx.Constant` and `onnx.Return` (or `func.return`) are special cases.
 
 // MLIR/ONNX attribute name constants to avoid typos
 namespace attr_names {
@@ -79,6 +78,27 @@ namespace onnx_mlir {
 // onnx.NoValue operation is adopted from the onnx-mlir project to handle
 // optional operands consistently.
 constexpr const char* ONNX_NONE = "onnx.NoValue";
+
+// "onnx.Return" is the function return operation in the ONNX dialect.
+// It terminates a func::FuncOp in the ONNX dialect and is semantically
+// equivalent to func::ReturnOp but allows shape refinement between operands
+// and function signature result types. This is adopted from onnx-mlir for
+// compatibility with onnx-mlir's MLIR representation.
+constexpr const char* ONNX_RETURN = "onnx.Return";
+
+// Helper function to check if an operation is an onnx.Return operation
+inline bool isOnnxReturn(mlir::Operation* op) {
+  return op && op->getName().getStringRef() == ONNX_RETURN;
+}
+
+// Helper function to check if an operation is either onnx.Return or func.return
+// This is useful for transitional code that may encounter either terminator
+inline bool isReturnOp(mlir::Operation* op) {
+  if (!op)
+    return false;
+  auto name = op->getName().getStringRef();
+  return name == ONNX_RETURN || name == "func.return";
+}
 } // namespace onnx_mlir
 
 // Utility function to convert ONNX element types to MLIR types

@@ -24,6 +24,8 @@
 #include <thread>
 static int g_sequence_no = 0;
 DEF_ENV_PARAM(ENABLE_SAVE_GRAPH_TXT, "0")
+DEF_ENV_PARAM(ENABLE_SAVE_GRAPH_MLIR, "0")
+DEF_ENV_PARAM(MORPHIZEN_SAVE_MLIR_AS_TEXT, "0")
 DEF_ENV_PARAM(ENABLE_SAVE_ONNX_MODEL, "0")
 DEF_ENV_PARAM(DEBUG_MORPHIZEN_PASS, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_MORPHIZEN_PASS) >= n)
@@ -166,8 +168,10 @@ void Pass::apply(Graph& graph_old) {
     graph =
         (Graph*)get_context()->get_context_resource("__current_graph").get();
     maybe_dump_txt(action_index, *graph);
+    maybe_dump_mlir(action_index, *graph);
     morphizen_cxx::GraphRef(*graph).resolve();
     maybe_dump_txt(action_index + 100, *graph);
+    maybe_dump_mlir(action_index + 100, *graph);
     maybe_gc(*graph);
     morphizen_cxx::GraphRef(*graph).resolve();
     maybe_dump_onnx(action_index, *graph);
@@ -244,6 +248,39 @@ void Pass::maybe_dump_txt(int action_index, const Graph& graph) const {
   }
   dump_graph(graph, filepath.u8string());
 }
+
+void Pass::maybe_dump_mlir(int action_index, const Graph& graph) const {
+  if ((!ENV_PARAM(ENABLE_SAVE_GRAPH_MLIR)) || (!can_be_dumped(context_))) {
+    return;
+  }
+#if MORPHIZEN_ORT_API_MAJOR >= 18
+  // Use .mlir for text format, .mlirbc for bytecode format
+  auto ext = ENV_PARAM(MORPHIZEN_SAVE_MLIR_AS_TEXT) ? ".mlir" : ".mlirbc";
+  auto filepath = get_dump_file_name(action_index, ext);
+  LOG(INFO) << "pass=" << name()
+            << " save mlir file to: " << filepath.u8string() << " format="
+            << (ENV_PARAM(MORPHIZEN_SAVE_MLIR_AS_TEXT) ? "text" : "bytecode");
+  auto basedir = filepath.parent_path();
+  if (!std::filesystem::exists(basedir)) {
+    std::filesystem::create_directories(basedir);
+  }
+  auto graph_ref = morphizen_cxx::GraphConstRef(graph);
+  auto mlir_string = graph_ref.save_string();
+  std::ofstream out(filepath, std::ios::binary);
+  if (out.is_open()) {
+    out << *mlir_string;
+    out.close();
+  } else {
+    LOG(WARNING) << "Failed to open file for writing: " << filepath.u8string();
+  }
+#else
+  (void)action_index;
+  (void)graph;
+  LOG(WARNING)
+      << "ENABLE_SAVE_GRAPH_MLIR requires MORPHIZEN_ORT_API_MAJOR >= 18";
+#endif
+}
+
 // onnx graph_save to onnx model maybe has bugs
 void Pass::maybe_dump_onnx(int action_index, const Graph& graph) const {
   if ((!ENV_PARAM(ENABLE_SAVE_ONNX_MODEL)) || (!can_be_dumped(context_))) {

@@ -2,7 +2,6 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-
 #pragma once
 
 #include <deque>
@@ -37,6 +36,7 @@ public:
 private:
   void apply(Graph& graph);
   void maybe_dump_txt(int index, const Graph& graph) const;
+  void maybe_dump_mlir(int index, const Graph& graph) const;
   void maybe_dump_onnx(int index, const Graph& graph) const;
 
   void maybe_gc(Graph& graph) const;
