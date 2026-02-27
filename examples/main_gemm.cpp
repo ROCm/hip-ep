@@ -17,15 +17,14 @@
 #include <hip/hip_runtime_api.h>
 #include <vector>
 
-extern "C" __declspec(dllimport) void
-two_matmuls(float *A_a, float *A_al, int64_t A_o, int64_t A_s0, int64_t A_s1,
-            int64_t A_s2, int64_t A_st0, int64_t A_st1, int64_t A_st2,
-            float *B0_a, float *B0_al, int64_t B0_o, int64_t B0_s0,
-            int64_t B0_s1, int64_t B0_st0, int64_t B0_st1, float *B1_a,
-            float *B1_al, int64_t B1_o, int64_t B1_s0, int64_t B1_s1,
-            int64_t B1_st0, int64_t B1_st1, float *C_a, float *C_al,
-            int64_t C_o, int64_t C_s0, int64_t C_s1, int64_t C_s2,
-            int64_t C_st0, int64_t C_st1, int64_t C_st2);
+extern "C" __declspec(dllimport) void two_matmuls(
+    float *A_a, float *A_al, int64_t A_o, int64_t A_s0, int64_t A_s1,
+    int64_t A_s2, int64_t A_st0, int64_t A_st1, int64_t A_st2, float *B0_a,
+    float *B0_al, int64_t B0_o, int64_t B0_s0, int64_t B0_s1, int64_t B0_st0,
+    int64_t B0_st1, float *B1_a, float *B1_al, int64_t B1_o, int64_t B1_s0,
+    int64_t B1_s1, int64_t B1_st0, int64_t B1_st1, float *C_a, float *C_al,
+    int64_t C_o, int64_t C_s0, int64_t C_s1, int64_t C_s2, int64_t C_st0,
+    int64_t C_st1, int64_t C_st2);
 
 static void cpu_matmul(const float *A, const float *B, float *C, int64_t M,
                        int64_t K, int64_t N) {

@@ -35,12 +35,11 @@
 // After convert-func-to-llvm each memref arg is flattened to:
 //   (alloc_ptr, aligned_ptr, offset, s0, s1, s2, st0, st1, st2)
 // --------------------------------------------------------------------------
-extern "C" __declspec(dllimport) void
-main_graph(float *X_a, float *X_al, int64_t X_o, int64_t X_s0, int64_t X_s1,
-           int64_t X_s2, int64_t X_st0, int64_t X_st1, int64_t X_st2,
-           float *out_a, float *out_al, int64_t out_o, int64_t out_s0,
-           int64_t out_s1, int64_t out_s2, int64_t out_st0, int64_t out_st1,
-           int64_t out_st2);
+extern "C" __declspec(dllimport) void main_graph(
+    float *X_a, float *X_al, int64_t X_o, int64_t X_s0, int64_t X_s1,
+    int64_t X_s2, int64_t X_st0, int64_t X_st1, int64_t X_st2, float *out_a,
+    float *out_al, int64_t out_o, int64_t out_s0, int64_t out_s1,
+    int64_t out_s2, int64_t out_st0, int64_t out_st1, int64_t out_st2);
 
 #define HIP_CHECK(call)                                                        \
   do {                                                                         \
