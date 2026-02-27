@@ -2,454 +2,407 @@
 Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
-# ONNX HIP DNN Execution Provider
+# HIP MLIR Dialect Compiler
 
-An implementation of HIP DNN operations in the MorphiZen framework.
+This directory contains a custom MLIR dialect for HIP (Heterogeneous-compute Interface for Portability) operations and two compiler tools:
 
-This project demonstrates the integration of HIP (Heterogeneous-compute Interface for Portability) DNN operations within the MorphiZen optimization framework for ONNX Runtime.
+- **`mlir-hip-opt`** -- MLIR pass pipeline tool (useful for debugging and inspecting intermediate IR)
+- **`hip-compiler`** -- One-stop compiler that takes `.mlir` input and produces a `.dll` + import `.lib`. Supports `--no-bufferize` for pre-bufferized `.hip.mlir` inputs.
 
----
+## Overview
 
-## Features
+The HIP dialect provides high-level operations for GPU inference on AMD ROCm, targeting LLM workloads with 3D tensors `[B, S, D]` (batch, sequence, model_dim):
 
-- **Unified EP Architecture**: Single execution provider supporting multiple operation types
-- **Level-1/Level-2 Pass System**: Modular pattern matching with orchestration
-- **Shared HIP Context**: Operations share the same GPU stream for implicit fusion
-- **GPU Timeout Protection**: Prevents indefinite hangs with configurable timeouts
-- **MIOpen Convolution**: Forward convolution with optional bias
-- **hipBLASLt GEMM**: Matrix multiplication with epilogue support
-- **Custom HIP Kernels**: Softmax, Tile, Transpose, Mul, Reshape operations
+- **Lifecycle & memory**: `hip.create_handle`, `hip.destroy_handle`, `hip.alloc`, `hip.free`
+- **hipBLASLt**: `hip.hipblaslt.matmul` -- batched GEMM with weight broadcast (3D x 2D)
+- **MIOpen**: `hip.miopen.add`, `hip.miopen.mul`, `hip.miopen.rms_norm`, `hip.miopen.softmax` (binary ops support scalar broadcast)
+- **Custom kernels**: `hip.transpose` (N-D with dim params)
 
----
+All compute ops use **Destination-Passing Style (DPS)**: arguments are split into
+`ins(...)` (read-only inputs) and `outs(...)` (output destinations that the caller provides).
 
-## Supported Operations
+All lowerings are **rank-generic**: ops detect tensor rank at compile time and pass appropriate shape metadata to the runtime (batched GEMM for 3D matmul, flattened dims for MIOpen ops, etc.).
 
-| Operation | Library | Status |
-|-----------|---------|--------|
-| Conv (2D) | MIOpen | Implemented |
-| Conv + Bias | MIOpen | Implemented |
-| Gemm | hipBLASLt | Implemented |
-| Gemm + Bias | hipBLASLt | Implemented |
-| MatMul | rocBLAS | Implemented |
-| Mul | HIPRTC | Implemented |
-| Softmax | HIPRTC | Implemented |
-| Reshape | HIP Memory | Implemented |
-| Transpose | HIPRTC | Implemented |
-| Tile | HIPRTC | Implemented |
+## Architecture
 
----
-
-## Project Design
-
-### Components
-
-- **level-1-pass-rocm**: Level-1 orchestrator pass for ROCm operations
-- **level-2-pass-rocm-conv**: Level-2 Conv pass (MIOpen)
-- **level-2-pass-rocm-gemm**: Level-2 Gemm pass (hipBLASLt)
-- **level-2-pass-rocm-matmul**: Level-2 MatMul pass (rocBLAS)
-- **level-2-pass-rocm-mul**: Level-2 Mul pass (HIPRTC)
-- **level-2-pass-rocm-softmax**: Level-2 Softmax pass (HIPRTC)
-- **level-2-pass-rocm-reshape**: Level-2 Reshape pass
-- **level-2-pass-rocm-transpose**: Level-2 Transpose pass (HIPRTC)
-- **level-2-pass-rocm-tile**: Level-2 Tile pass (HIPRTC)
-- **custom-op-rocm**: Custom operator implementations using HIP
-- **kernels**: GPU kernel implementations (HIPRTC)
-- **proto**: Protocol buffer definitions
-- **test**: Test suite for validation
-
-### Architecture
+The project uses a two-stage workflow: `hip-compiler` compiles MLIR to a DLL containing the model and all runtime support, then each test's C++ driver is compiled and linked against the generated DLL's import library.
 
 ```
-                    ┌─────────────────────────────┐
-                    │    Level-1 Pass (ROCm)      │
-                    │  • GPU availability check   │
-                    │  • Orchestrates sub-passes  │
-                    └─────────────┬───────────────┘
-                                  │
-          ┌───────────────────────┼───────────────────────┐
-          │           │           │           │           │
-    ┌─────▼─────┐ ┌───▼───┐ ┌─────▼─────┐ ┌───▼───┐ ┌─────▼─────┐
-    │ Level-2   │ │Level-2│ │ Level-2   │ │Level-2│ │ Level-2   │
-    │ Conv Pass │ │ Gemm  │ │ MatMul    │ │ Mul   │ │ Softmax   │
-    │ (MIOpen)  │ │(hBLT) │ │ (rocBLAS) │ │(HIPRTC│ │ (HIPRTC)  │
-    └─────┬─────┘ └───┬───┘ └─────┬─────┘ └───┬───┘ └─────┬─────┘
-          │           │           │           │           │
-          └───────────┴───────────┼───────────┴───────────┘
-                                  ▼
-                    ┌─────────────────────────────┐
-                    │     Custom Op (ROCm)        │
-                    │  • Shared HIP stream        │
-                    │  • ConvExecutor             │
-                    │  • GemmExecutor             │
-                    │  • HIPRTC Kernels           │
-                    └─────────────────────────────┘
+test_<op>.mlir
+    |  hip-compiler.exe (MLIR passes + LLVM codegen + linker)
+    v
+<op>.dll + <op>.lib    (model DLL with exported entry functions)
+    |
+    |  cl.exe links main_<op>.cpp against <op>.lib + amdhip64.lib
+    v
+<op>_test.exe          (driver executable, dynamically links <op>.dll)
 ```
 
----
+## Files
 
-## Prerequisites
+### Compiler Tools (`tools/`)
 
-### System Requirements
-- Windows 10/11 with AMD GPU (ROCm support)
-- Visual Studio 2022 with C++ workload
-- CMake 3.29+
-- Git with Git Bash
-- Python 3.8+
+- `tools/mlir-hip-opt/mlir-hip-opt.cpp` -- MLIR pass pipeline tool (for debugging intermediate IR)
+- `tools/hip-compiler/hip-compiler.cpp` -- One-stop MLIR-to-DLL compiler
 
----
+### Dialect Definition (`include/hip/` + `lib/`)
 
-## Directory Structure
+- `include/hip/Dialect/IR/HipDialect.td` - Dialect definition
+- `include/hip/Dialect/IR/HipTypes.td` - Type definitions (e.g., `!hip.handle`)
+- `include/hip/Dialect/IR/HipOps.td` - Operation definitions (DPS `ins`/`outs` format)
+- `include/hip/Dialect/IR/HipDialect.h` + `lib/Dialect/IR/HipDialect.cpp` - Dialect C++ implementation
+- `include/hip/Dialect/Transforms/Passes.h` - Pass registration
+- `lib/Conversion/HipToLLVM/HipToLLVM.cpp` - Conversion pass from HIP dialect to LLVM dialect
 
-After completing the build instructions below, your workspace will have the following structure:
+### Runtime (pre-built as `hip_runtime_static.lib`)
+
+All runtime implementations are compiled into a static library (`hip_runtime_static.lib`) by CMake and linked into the generated model DLL by `hip-compiler`.
+
+- `ops_runtime/hip_runtime.cpp` - Handle lifecycle + device memory (shared by all tests)
+- `ops_runtime/hipblaslt_matmul.cpp` - hipBLASLt matmul with batched GEMM + broadcast
+- `ops_runtime/miopen_add.cpp` - MIOpen element-wise add (supports scalar broadcast via separate descriptors)
+- `ops_runtime/miopen_mul.cpp` - MIOpen element-wise mul (supports scalar broadcast via separate descriptors)
+- `ops_runtime/miopen_rms_norm.cpp` - MIOpen RMS normalization (`MIOPEN_BETA_API` required)
+- `ops_runtime/miopen_softmax.cpp` - MIOpen softmax
+- `ops_runtime/transpose.cpp` - N-D transpose (pure C++, swaps two specified dims)
+
+### Examples and Tests
+
+Each test has a `.mlir` model and a C++ driver. The driver declares the model's entry function with `__declspec(dllimport)` and links against the import library generated by `hip-compiler`.
+
+- `examples/test_gemm.mlir` + `main_gemm.cpp` - 3D matmul with 2D weight broadcast
+- `examples/test_add.mlir` + `main_add.cpp` - 3D element-wise add
+- `examples/test_mul.mlir` + `main_mul.cpp` - 3D element-wise mul
+- `examples/test_rms_norm.mlir` + `main_rms_norm.cpp` - 3D RMS normalization
+- `examples/test_softmax.mlir` + `main_softmax.cpp` - 3D softmax
+- `examples/test_attention.mlir` - Full single-head attention in tensor DPS (B=2)
+- `examples/attention.hip.mlir` + `attention.onnx` + `main_attention.cpp` - Pre-bufferized attention with ORT CPU reference comparison
+- `examples/test.mlir` - Basic memory ops example
+- `examples/model_hip.mlir` - Generated HIP dialect from Llama-3.2-1B
+
+### Pipeline Scripts
+
+Each script compiles a `.mlir` file to a DLL via `hip-compiler`, then compiles and links the driver against it.
+
+- `scripts/env.bat` - **Shared environment config** (edit paths here; also auto-generates import libraries from TheRock DLLs on first run)
+- `scripts/run_full_pipeline_hipblaslt.bat` - Matmul test (hipBLASLt)
+- `scripts/run_full_pipeline_miopen_add.bat` - Add test (MIOpen)
+- `scripts/run_full_pipeline_miopen_mul.bat` - Mul test (MIOpen)
+- `scripts/run_full_pipeline_miopen_rms_norm.bat` - RMS Norm test (MIOpen)
+- `scripts/run_full_pipeline_miopen_softmax.bat` - Softmax test (MIOpen)
+- `scripts/run_full_pipeline_attention.bat` - Pre-bufferized attention test (ORT CPU reference vs GPU; requires ONNX Runtime)
+
+## Prerequisites: Building TheRock (ROCm) on Windows
+
+The pipeline requires the HIP runtime (`amdhip64.dll`), hipBLAS-LT (`libhipblaslt.dll`), and MIOpen (`MIOpen.dll`), built from source using [TheRock](https://github.com/ROCm/TheRock).
+
+### Install Build Tools
+
+Using `winget` (recommended):
+
+```cmd
+winget install Git.Git -e --source winget --custom "/o:PathOption=CmdTools"
+winget install cmake ninja-build.ninja ccache python strawberryperl bloodrock.pkg-config-lite
+winget install --id Iterative.DVC --silent --accept-source-agreements
+```
+
+Configure git for long paths and symlinks:
+
+```cmd
+git config --global core.symlinks true
+git config --global core.longpaths true
+```
+
+###  Clone and Fetch Sources
+
+```cmd
+conda create -n llvm python=3.12 pip cmake ninja pkg-config -y
+conda activate llvm
+
+git clone https://github.com/ROCm/TheRock.git
+cd TheRock
+pip install -r requirements.txt
+python ./build_tools/fetch_sources.py
+```
+
+###  Configure
+
+Open an **x64 Native Tools Command Prompt for VS 2022** (or run `vcvars64.bat`), then:
+
+```cmd
+cmake -B build -GNinja --preset windows-release ^
+  -DTHEROCK_AMDGPU_TARGETS=gfx1151
+```
+
+Replace `gfx1151` with your GPU target. For a minimal build with hipBLASLt + MIOpen:
+
+```cmd
+cmake -B build -GNinja --preset windows-release ^
+  -DTHEROCK_AMDGPU_TARGETS=gfx1151 ^
+  -DTHEROCK_ENABLE_ALL=OFF ^
+  -DTHEROCK_ENABLE_BLAS=ON ^
+  -DTHEROCK_ENABLE_MIOPEN=ON
+```
+
+| Flag | What it builds |
+|------|----------------|
+| `THEROCK_ENABLE_BLAS=ON` | hipBLAS-LT library (`libhipblaslt.dll`) |
+| `THEROCK_ENABLE_MIOPEN=ON` | MIOpen library (`MIOpen.dll`) |
+
+Note: `THEROCK_ENABLE_HIP_RUNTIME` and `THEROCK_ENABLE_COMPILER` are implicitly enabled.
+
+### Build
+
+```cmd
+cmake --build build --target therock-dist
+```
+
+This will take a long time (1+ hour). Once complete, the ROCm SDK will be at:
 
 ```
-workspace/
-├── therock/                  # TheRock ROCm SDK (extracted from tarball)
-│   ├── bin/                  # Runtime DLLs (MIOpen.dll, hiprtc.dll, etc.)
-│   └── lib/llvm/bin/         # LLVM tools (amdgpu-arch.exe)
-├── onnxruntime/              # ONNX Runtime source code (git clone)
-├── build/
-│   ├── onnxruntime/          # ONNX Runtime build artifacts
-│   └── onnx-hipdnn-ep/       # onnx-hipdnn-ep build artifacts
-├── local/                    # ONNX Runtime installation (CMAKE_PREFIX_PATH)
-│   ├── bin/                  # onnxruntime.dll, onnxruntime_morphizen_ep.dll, test_gqa.exe
-│   └── lib/cmake/            # CMake configuration files
-└── onnx-hipdnn-ep/           # This project (git clone)
-    ├── 3rd-party/morphizen/  # MorphiZen framework (git submodule)
-    ├── test/models/     # Test models (gqa_layer_00.onnx)
-    └── etc/                  # Configuration files (morphizen_config.json)
+TheRock\build\dist\rocm\
+  ├── bin\      (amdhip64_7.dll, libhipblaslt.dll, MIOpen.dll)
+  ├── include\  (hip/, hipblaslt/, miopen/, ...)
+  └── lib\      (amdhip64.lib, ...)
 ```
 
----
+###  Set Environment Variable
 
-## Build Instructions
+```cmd
+set THEROCK_DIST=C:\path\to\TheRock\build\dist\rocm
+```
 
-### Step 1: Setup TheRock ROCm SDK
+### Build Troubleshooting (TheRock)
 
-TheRock SDK provides HIP/ROCm runtime for Windows.
+- **`Could NOT find PkgConfig`**: `winget install bloodrock.pkg-config-lite`
+- **`Failed to find ROCm root directory`**: Uninstall conflicting ROCm packages: `pip uninstall rocm rocm-sdk-core rocm-sdk-devel rocm-sdk-libraries-gfx1151`
+- **`CMAKE_Fortran_COMPILER gfortran is not a full path`**: `conda install -n llvm -c conda-forge gfortran`
+- **Long path errors**: Enable long paths in git and Windows registry.
 
-**Download:** https://therock-nightly-tarball.s3.amazonaws.com/index.html
+## Building mlir-hip-opt and hip-compiler
 
-1. **Determine your GPU architecture** (before downloading):
-
-   Open **Device Manager** → **Display adapters** to find your AMD GPU model, then select the matching GFX series:
-
-   | GPU Model | GFX Series | TheRock Tarball |
-   |-----------|------------|-----------------|
-   | Radeon RX 7900/7800/7700/7600 | gfx110X | `therock-dist-windows-gfx110X-all-*.tar.gz` |
-   | Radeon RX 6900/6800/6700/6600 | gfx103X | `therock-dist-windows-gfx103X-all-*.tar.gz` |
-   | Radeon 880M/780M (Strix Point) | gfx115X | `therock-dist-windows-gfx115X-all-*.tar.gz` |
-   | Radeon 890M (Strix Halo) | gfx120X | `therock-dist-windows-gfx120X-all-*.tar.gz` |
-
-2. **Create workspace and extract TheRock**:
-   ```bash
-   mkdir workspace
-   cd workspace
-
-   # Extract TheRock tarball to workspace/therock
-   mkdir therock
-   tar -xzf /path/to/therock-dist-windows-gfx115X-all-*.tar.gz -C therock
-   ```
-
-3. **Verify installation**:
-   ```bash
-   # Verify GPU architecture detection (IMPORTANT: note this value for build!)
-   ./therock/lib/llvm/bin/amdgpu-arch.exe
-   # Example output: gfx1151
-
-   # Alternative: hipInfo shows architecture as 'gcnArchName'
-   ./therock/bin/hipInfo.exe | grep gcnArchName
-   # Example output: gcnArchName: gfx1151
-
-   # Verify HIP configuration (version, paths, compiler)
-   ./therock/bin/hipconfig.exe --full
-   ```
-
-### Step 2: Build ONNXRuntime
-
-To build ONNX Runtime, follow the [official documentation](https://onnxruntime.ai/docs/build/inferencing.html).
-
-It is recommended to use Git Bash. The commands below have only been tested in Git Bash.
-
-#### Download onnxruntime
+Build LLVM and MLIR first:
 
 ```bash
-cd workspace
-git clone https://github.com/Microsoft/onnxruntime.git
-cd onnxruntime
+cd /path/to/llvm-project
+cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_PROJECTS=mlir -DLLVM_TARGETS_TO_BUILD=host
+cmake --build build
 ```
 
-#### Build ONNX Runtime
+Then build the tools:
 
 ```bash
-./build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --cmake_extra_defines CMAKE_INSTALL_PREFIX=$PWD/../local --disable_memleak_checker
-cmake --build ../build/onnxruntime/Release/ --target install
+cmake -B build -S . -DBUILD_HIP_TOOLS=ON \
+  -DLLVM_DIR=/path/to/llvm-project/build/lib/cmake/llvm \
+  -DMLIR_DIR=/path/to/llvm-project/build/lib/cmake/mlir
+cmake --build build
 ```
 
-### Step 3: Build onnx-hipdnn-ep
+This produces three targets:
+- `mlir-hip-opt` -- MLIR pass pipeline tool
+- `hip-compiler` -- One-stop MLIR-to-DLL compiler
+- `hip_runtime_static.lib` -- Static library containing all `ops_runtime/*.cpp` implementations
 
-#### Download onnx-hipdnn-ep
+### Optional: ONNX frontend (`--convert-onnx-to-hip`)
+
+The `--convert-onnx-to-hip` pass converts ONNX dialect IR (from onnx-mlir) into HIP dialect IR. This feature is **optional** and disabled by default. Without it, all HIP dialect examples and the `hip-compiler` pipeline work normally.
+
+To enable it, pass `-DONNX_MLIR_SRC` (and optionally `-DONNX_MLIR_BUILD`) at cmake time:
 
 ```bash
-cd workspace
-git clone --recursive https://github.com/ROCm/onnx-hipdnn-ep.git
+cmake .. \
+  -DLLVM_DIR=/path/to/llvm-project/build/lib/cmake/llvm \
+  -DMLIR_DIR=/path/to/llvm-project/build/lib/cmake/mlir \
+  -DONNX_MLIR_SRC=/path/to/onnx-mlir \
+  -DONNX_MLIR_BUILD=/path/to/onnx-mlir/build
 ```
 
-> **Note**: The `--recursive` flag is required to clone the `3rd-party/morphizen` submodule. If you already cloned without it, run:
-> ```bash
-> cd onnx-hipdnn-ep
-> git submodule update --init --recursive
-> ```
+**Known limitation:** onnx-mlir currently pins to an LLVM 22-dev commit (`0c2701fe7fa0`, Nov 2025). Building onnx-mlir against LLVM 23 is not yet supported and will require porting work (API changes, updated abseil dependency, etc.). If you are using LLVM 23, leave `ONNX_MLIR_SRC` unset to build without the ONNX frontend.
 
-#### Known Issue
+## Usage
 
-**nlohmann_json Package Not Found**
+### Input MLIR with HIP Dialect (tensor DPS)
 
+The HIP dialect uses **tensor types** as its canonical form. All compute ops use
+destination-passing style (DPS): output tensors are passed as function arguments
+and returned as results. Bufferization to memref is handled automatically by the
+compiler pipeline.
+
+```mlir
+module {
+  func.func @example(
+      %A: tensor<?x?x?xf32>,   // [B, S, D]
+      %W: tensor<?x?xf32>,     // [D, D]  (2D weight, broadcast)
+      %C: tensor<?x?x?xf32>)   // [B, S, D]  (output init)
+      -> tensor<?x?x?xf32> {
+    %handle = hip.create_handle() : !hip.handle
+    %result = hip.hipblaslt.matmul(%handle)
+        ins(%A, %W : tensor<?x?x?xf32>, tensor<?x?xf32>)
+        outs(%C : tensor<?x?x?xf32>) -> tensor<?x?x?xf32>
+    hip.destroy_handle(%handle) : !hip.handle
+    return %result : tensor<?x?x?xf32>
+  }
+}
 ```
-Error Message:
-CMake Error: Could not find a package configuration file provided by "nlohmann_json"
 
-Root Cause:
-TheRock SDK's nlohmann_json CMake configuration file contains problematic INTERFACE_SOURCES attribute.
+### Compile Pipeline
 
-Solution:
-File Path: $PWD/../therock/share/cmake/nlohmann_json/nlohmann_jsonTargets.cmake
-Modifications:
-Open file and find set_target_properties(nlohmann_json::nlohmann_json ...)
-Remove the INTERFACE_SOURCES line (if it exists)
-```
-
-#### Detect HIP Architecture (CRITICAL)
-
-> **⚠️ IMPORTANT FOR DEVELOPERS AND AI TOOLS:**
-> You **MUST** set `HIP_ARCHITECTURES` to match your GPU. Failure to do so will result in
-> runtime errors like `Exception Code: 0xC0000005` (Access Violation) in `hipLaunchKernel`.
-> The HIP kernels are compiled for a specific GPU architecture; mismatched architectures
-> cause kernel launch failures at runtime.
-
-**Detect your GPU architecture using the SDK:**
+The recommended workflow uses `hip-compiler` to produce a DLL directly:
 
 ```bash
-# Using amdgpu-arch from TheRock SDK (recommended - outputs just the arch)
-$THEROCK_DIST/lib/llvm/bin/amdgpu-arch
-# Example output: gfx1151
+# Tensor-mode input (standard path: bufferize + lower)
+hip-compiler input.mlir -o model.dll
 
-# Alternative: Using hipInfo (look for gcnArchName)
-$THEROCK_DIST/bin/hipInfo | grep gcnArchName
-# Example output: gcnArchName: gfx1151
+# Pre-bufferized input (skip bufferization)
+hip-compiler --no-bufferize input.hip.mlir -o model.dll
 ```
 
-**Common HIP architectures:**
+This performs the full pipeline internally:
+1. One-shot bufferization (tensor -> memref; skipped with `--no-bufferize`)
+2. HIP-to-LLVM lowering (`--convert-hip-to-llvm`, memref finalization, etc.)
+3. DLL export injection (marks entry functions with `dllexport`)
+4. LLVM IR translation and native code generation (`.obj`)
+5. Linking with `hip_runtime_static.lib` and external dependencies to produce `.dll` + `.lib`
 
-| GPU Model | Architecture |
-|-----------|--------------|
-| Radeon RX 7900 XTX/XT | gfx1100 |
-| Radeon RX 7800/7700 | gfx1101, gfx1102 |
-| Radeon RX 7600 | gfx1102 |
-| Radeon RX 6900/6800 | gfx1030 |
-| Radeon RX 6700/6600 | gfx1031, gfx1032 |
-| Radeon 890M (Strix Halo) | gfx1201 |
-| Radeon 880M/780M (Strix Point) | gfx1150, gfx1151 |
-
-#### Configure and build
-
-**Using Bash (Git Bash on Windows):**
+For debugging, you can still use `mlir-hip-opt` to inspect intermediate IR:
 
 ```bash
-cd onnx-hipdnn-ep
-export THEROCK_DIST=$PWD/../therock
-
-# CRITICAL: Detect and set HIP architecture
-export HIP_ARCH=$($THEROCK_DIST/lib/llvm/bin/amdgpu-arch)
-echo "Detected HIP architecture: $HIP_ARCH"
-
-cmake \
-  -B ../build/onnx-hipdnn-ep -S . \
-  -DTHEROCK_DIST=$THEROCK_DIST \
-  -DCMAKE_PREFIX_PATH=$PWD/../local \
-  -DCMAKE_INSTALL_PREFIX=$PWD/../local \
-  -DHIP_PLATFORM=amd \
-  -DHIP_ARCHITECTURES=$HIP_ARCH
-
-# Build Release version (recommended)
-cmake --build ../build/onnx-hipdnn-ep --config Release --target install --parallel
+mlir-hip-opt input.mlir \
+    --one-shot-bufferize="bufferize-function-boundaries" \
+    --convert-hip-to-llvm \
+    --finalize-memref-to-llvm \
+    --convert-arith-to-llvm \
+    --convert-func-to-llvm \
+    --reconcile-unrealized-casts \
+    -o lowered.mlir
 ```
 
-**Using PowerShell:**
+### Pre-Bufferized Format (`.hip.mlir`)
 
-```powershell
-cd onnx-hipdnn-ep
-$env:THEROCK_DIST = "$PWD\..\therock"
-$env:HIP_PLATFORM = "amd"
+In addition to tensor-mode inputs, the compiler supports a **pre-bufferized memref format**
+where weights are embedded as `memref.global` constants and intermediate buffers are
+carved from a single memory pool via `memref.view`:
 
-# CRITICAL: Detect and set HIP architecture
-$HIP_ARCH = & "$env:THEROCK_DIST\lib\llvm\bin\amdgpu-arch.exe"
-Write-Host "Detected HIP architecture: $HIP_ARCH"
-
-cmake -B ..\build\onnx-hipdnn-ep -S . `
-  -DTHEROCK_DIST="$env:THEROCK_DIST" `
-  -DCMAKE_PREFIX_PATH="$PWD\..\local" `
-  -DCMAKE_INSTALL_PREFIX="$PWD\..\local" `
-  -DHIP_PLATFORM=amd `
-  -DHIP_ARCHITECTURES=$HIP_ARCH
-
-# Build Release version (recommended)
-cmake --build ..\build\onnx-hipdnn-ep --config Release --target install --parallel
+```mlir
+module {
+  memref.global "private" constant @weight : memref<64x64xf32> = dense<"0x...">
+  func.func @main_graph(%X: memref<2x64x64xf32, strided<[?,?,?], offset: ?>>,
+                        %out: memref<2x64x64xf32>) {
+    %h = hip.create_handle() : !hip.handle
+    %pool = hip.alloc(%h) : memref<131072xi8>
+    %buf = memref.view %pool[%c0][] : memref<131072xi8> to memref<2x64x64xf32>
+    %w = memref.get_global @weight : memref<64x64xf32>
+    hip.hipblaslt.matmul(%h) ins(%X, %w : ...) outs(%buf : ...)
+    // ...
+    hip.free(%h, %pool) : memref<131072xi8>
+    hip.destroy_handle(%h) : !hip.handle
+    return
+  }
+}
 ```
 
-#### CMake Options
+Use `hip-compiler --no-bufferize` for this format. The runtime transparently
+handles host constants (from `memref.global`) by staging them through heap memory
+before `hipMemcpy` to device, avoiding HIP PAL compatibility issues with read-only
+`.rdata` sections on Windows.
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `THEROCK_DIST` | (required) | Path to TheRock ROCm SDK installation |
-| `CMAKE_PREFIX_PATH` | - | Path to ONNX Runtime installation (for find_package) |
-| `CMAKE_INSTALL_PREFIX` | - | Installation directory for built artifacts |
-| `HIP_PLATFORM` | `amd` | HIP platform (use `amd` for AMD GPUs) |
-| `HIP_ARCHITECTURES` | **(required)** | GPU architecture (e.g., `gfx1151`). **MUST match your GPU!** Detect using `$THEROCK_DIST/lib/llvm/bin/amdgpu-arch`. Mismatched architectures cause runtime crashes. |
+## HIP Dialect Operations
 
----
+### Lifecycle and Memory
 
-## Environment Variables
+- **`hip.create_handle() : !hip.handle`** -- Creates a HIP runtime handle.
+- **`hip.destroy_handle(%handle) : !hip.handle`** -- Destroys a HIP runtime handle.
+- **`hip.alloc(%handle, %dynamicSizes...) : memref<...>`** -- Allocates device memory.
+- **`hip.free(%handle, %memref) : memref<...>`** -- Frees device memory.
 
-| Variable | Description |
-|----------|-------------|
-| `THEROCK_DIST` | Path to TheRock SDK installation |
-| `HIP_PLATFORM` | Set to `amd` for AMD GPU support |
-| `MORPHIZEN_DEBUG_ROCM` | Debug level (1=basic, 2=verbose) |
-| `MORPHIZEN_ROCM_EN_LVL1_MERGE` | Enable Level-1 subgraph merging (1=enabled) |
-| `MORPHIZEN_DRY_RUN` | Dry run mode without GPU execution (1=enabled) |
-| `MORPHIZEN_EP_JSON_CONFIG` | Path to custom morphizen_config.json |
+### Compute Ops (DPS, rank-generic)
 
----
+All compute ops use Destination-Passing Style with rank-generic lowerings. For LLM workloads, tensors are typically `[B, S, D]` (batch, sequence, model_dim).
 
-## Testing
+**hipBLASLt:**
+- **`hip.hipblaslt.matmul(%handle) ins(%A, %B : ...) outs(%C : ...)`** -- Matrix multiply. Supports batched GEMM (3D) and weight broadcast (3D x 2D: `stride_B=0`).
 
-### Test case 1: Run ORT Integration Unit Test
+**MIOpen:**
+- **`hip.miopen.add(%handle) ins(%A, %B : ...) outs(%C : ...)`** -- Element-wise add.
+- **`hip.miopen.mul(%handle) ins(%A, %B : ...) outs(%C : ...)`** -- Element-wise multiply.
+- **`hip.miopen.rms_norm(%handle) ins(%input, %weight : ...) outs(%output : ...)`** -- RMS normalization. For 3D input, flattens `B*S` as rows.
+- **`hip.miopen.softmax(%handle) ins(%input : ...) outs(%output : ...)`** -- Row-wise softmax over last dim. For 3D input, flattens `B*S` as rows.
+- **`hip.miopen.skip_rms_norm(%handle) ins(%x, %skip, %weight : ...) outs(%output, %residual : ...)`** -- Fused Add + RMS normalization (stub).
+- **`hip.miopen.rope(%handle, %start_pos) ins(%cos, %sin : ...) outs(%q, %k : ...)`** -- Rotary positional embeddings (stub).
 
-Tests MIOpen Conv, hipBLASLt Gemm, and basic operations:
+**Custom kernels:**
+- **`hip.transpose(%handle, %dim0, %dim1) ins(%input : ...) outs(%output : ...)`** -- N-D transpose swapping two specified dims.
+- **`hip.gather(%handle) ins(%indices, %table : ...) outs(%output : ...)`** -- Embedding table lookup (stub).
+- **`hip.silu(%handle) ins(%input : ...) outs(%output : ...)`** -- SiLU activation (stub).
+- **`hip.gqa(%handle, %layer, %start_pos, %seq_len) ins(%q, %k, %v : ...) outs(%kv_cache, %output : ...)`** -- Grouped query attention (stub).
 
-```bash
-# Set environment
-export PATH="$THEROCK_DIST/bin:$PATH"
-export ENABLE_CACHE_CONTEXT=1  # optional, 1:generate EP Context model
+## Running Tests
 
-# Generate sample model and run test
-cd ../local/bin
-python ../../onnx-hipdnn-ep/test/gen_sample_model.py
-./ort_integration_test.exe
+First, edit `scripts/env.bat` to set the paths for your machine (LLVM, TheRock, build output, conda).
+For the attention test, also set `ORT_HOME` to the ONNX Runtime C/C++ release package
+(download from [GitHub Releases](https://github.com/microsoft/onnxruntime/releases),
+e.g. `onnxruntime-win-x64-1.x.x.zip`; the pip package does not include C headers).
+
+Then run any pipeline script:
+
+```cmd
+REM Edit scripts/env.bat first, then:
+scripts\run_full_pipeline_hipblaslt.bat       REM matmul (hipBLASLt only)
+scripts\run_full_pipeline_miopen_add.bat      REM add (MIOpen)
+scripts\run_full_pipeline_miopen_mul.bat      REM mul (MIOpen)
+scripts\run_full_pipeline_miopen_rms_norm.bat REM rms_norm (MIOpen)
+scripts\run_full_pipeline_miopen_softmax.bat  REM softmax (MIOpen)
+scripts\run_full_pipeline_attention.bat       REM full attention (all backends)
 ```
 
-```powershell
-# Set environment
-$env:PATH = "$env:THEROCK_DIST\bin;$env:PATH"
-$env:ENABLE_CACHE_CONTEXT = "1"  # optional, 1:generate EP Context model
-
-# Generate sample model and run test
-cd ..\local\bin
-python ..\..\onnx-hipdnn-ep\test\gen_sample_model.py
-.\ort_integration_test.exe
-```
-
-**Expected Output:**
-```
-[==========] Running 2 tests from 1 test suite.
-[ RUN      ] OrtIntegrationTest.LoadMorphiZenProvider
-[       OK ] OrtIntegrationTest.LoadMorphiZenProvider (234 ms)
-[ RUN      ] OrtIntegrationTest.MorphiZenProviderInference
-[Test] Max difference between CPU and GPU: 2.98023e-07
-[       OK ] OrtIntegrationTest.MorphiZenProviderInference (343 ms)
-[  PASSED  ] 2 tests.
-```
-
-If you set `ENABLE_CACHE_CONTEXT=1`, an EP context model (`sample_ctx.onnx`) will be generated in the same directory as `sample.onnx`. This cached model contains pre-compiled graph optimizations and can be loaded directly for faster startup in subsequent runs.
-
-> **Note:** You must delete `sample_ctx.onnx` before re-running the test if you want to regenerate it.
-
-
-### Test case 2: Run GQA Test
-
-```bash
-# Set environment
-export PATH="$THEROCK_DIST/bin:$PATH"
-
-# Run test
-cd /path/to/onnx-hipdnn-ep
-cd ../local/bin
-./test_gqa.exe ../../onnx-hipdnn-ep/test/models/gqa_layer_00.onnx
-```
-
-```powershell
-# Set environment
-$env:PATH = "$env:THEROCK_DIST\bin;$env:PATH"
-
-# Run test
-cd ..\local\bin
-.\test_gqa.exe ..\..\onnx-hipdnn-ep\test\models\gqa_layer_00.onnx
-```
-
-### Benchmark Results
+Each script runs two steps:
 
 ```
-=== Benchmark Results ===
-  Iterations: 1
-  Mean latency: 53.50 ms
-  Std dev: 0.00 ms
-  Min latency: 53.50 ms
-  Max latency: 53.50 ms
-  Median: 53.50 ms
-  P90: 53.50 ms
-  P99: 53.50 ms
-  Throughput: 18.69 infer/sec
+test_<op>.mlir
+    |  hip-compiler.exe (passes + codegen + link)
+    v
+<op>.dll + <op>.lib              (model DLL + import library)
+    |
+    |  cl.exe main_<op>.cpp <op>.lib amdhip64.lib
+    v
+<op>_test.exe                    (driver linked against model DLL + HIP runtime)
 ```
 
----
+## Type System
 
-## Troubleshooting
+### `!hip.handle`
+An opaque type representing a HIP runtime handle. Lowered to `!llvm.ptr` in LLVM.
 
-### Runtime Crash: Access Violation in hipLaunchKernel
+## Pass Pipeline
 
-**Symptoms:**
+The full lowering pipeline from tensor HIP IR to LLVM IR:
+
 ```
-Exception Code: 0xC0000005
-hipLaunchKernel() + 0x871F0 byte(s)
-```
-
-**Cause:** HIP kernels were compiled for a different GPU architecture than the one you're running on.
-
-**Solution:**
-1. Detect your GPU architecture:
-   ```bash
-   $THEROCK_DIST/lib/llvm/bin/amdgpu-arch
-   ```
-2. Rebuild with the correct architecture:
-   ```bash
-   cmake -B ../build/onnx-hipdnn-ep -DHIP_ARCHITECTURES=<your-arch>
-   cmake --build ../build/onnx-hipdnn-ep --config Release
-   ```
-
-> **Note for AI Tools:** When building this project, always detect the HIP architecture
-> using `amdgpu-arch` from the TheRock SDK and pass it via `-DHIP_ARCHITECTURES=<arch>`.
-> Never omit this option or use a hardcoded default.
-
-### MLIR Configuration Error: MLIRTargets.cmake Not Found
-
-**Symptoms:**
-```
-CMake Error: include could not find requested file: MLIRTargets.cmake
+--one-shot-bufferize           # tensor -> memref (device allocation)
+--hip-optimize-memrefs         # liveness-based buffer reuse (reduces alloc count)
+--hip-lower-allocs             # memref.alloc -> hip.alloc + hip.free
+--convert-hip-to-llvm          # HIP ops -> llvm.call @hip_*()
+--finalize-memref-to-llvm      # memref.view, memref.get_global -> LLVM
+--convert-arith-to-llvm        # arith.constant -> LLVM
+--convert-func-to-llvm         # func.func -> LLVM
+--reconcile-unrealized-casts   # Clean up type casts
 ```
 
-**Cause:** Corrupted CMake cache after partial build or reconfiguration.
+For pre-bufferized `.hip.mlir` inputs (memory pool + `memref.view` + `memref.global`),
+skip the first three passes and start from `--convert-hip-to-llvm`.
 
-**Solution:**
-1. Clear the LLVM build cache:
-   ```bash
-   rm -rf ../build/onnx-hipdnn-ep/_deps/llvm-project-*
-   ```
-2. Reconfigure and rebuild.
+The `--convert-hip-to-llvm` pass converts HIP dialect ops to LLVM calls. Memref
+operands are unpacked via `alignedPtr` (not `allocatedPtr`) so that `memref.view`
+offsets into a memory pool are correctly preserved. Binary ops (`hip.miopen.add`,
+`hip.miopen.mul`) pass both `numA` and `numB` to the runtime, enabling scalar
+broadcast when `numB == 1`.
 
----
+## Extending the Dialect
 
-## License
+To add new operations:
 
-Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
-Licensed under the MIT License.
+1. Add the op definition in `HipOps.td` with `ins`/`outs` DPS assembly format
+2. Add a lowering pattern in `HipToLLVM.cpp` (extract shape from memref descriptors rank-generically)
+3. Add a runtime implementation in `ops_runtime/` with the matching C function signature
+4. Create a test: `examples/test_<op>.mlir` + `examples/main_<op>.cpp` + `scripts/run_full_pipeline_<op>.bat`
+5. Rebuild (`cmake --build .` regenerates TableGen outputs and relinks `hip_runtime_static`)
