@@ -17,13 +17,13 @@ template <typename OpTy>
 struct HipDstBufferizableModel
     : public bufferization::DstBufferizableOpInterfaceExternalModel<
           HipDstBufferizableModel<OpTy>, OpTy> {
-  LogicalResult bufferize(Operation* op, RewriterBase& rewriter,
-                          const bufferization::BufferizationOptions& options,
-                          bufferization::BufferizationState& state) const {
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const bufferization::BufferizationOptions &options,
+                          bufferization::BufferizationState &state) const {
     auto dstOp = cast<DestinationStyleOpInterface>(op);
 
     SmallVector<Value> newOperands;
-    for (OpOperand& operand : op->getOpOperands()) {
+    for (OpOperand &operand : op->getOpOperands()) {
       if (isa<TensorType>(operand.get().getType())) {
         FailureOr<Value> buffer =
             getBuffer(rewriter, operand.get(), options, state);
@@ -44,7 +44,7 @@ struct HipDstBufferizableModel
         replacements.push_back(result);
         continue;
       }
-      OpOperand* initOperand = dstOp.getTiedOpOperand(result);
+      OpOperand *initOperand = dstOp.getTiedOpOperand(result);
       FailureOr<Value> initBuffer =
           getBuffer(rewriter, initOperand->get(), options, state);
       if (failed(initBuffer))
@@ -58,20 +58,19 @@ struct HipDstBufferizableModel
 };
 
 inline void
-registerHipBufferizableOpInterfaceModels(DialectRegistry& registry) {
-  registry.addExtension(+[](MLIRContext* ctx, HipDialect*) {
+registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
+  registry.addExtension(+[](MLIRContext *ctx, HipDialect *) {
     HipblasltMatmulOp::attachInterface<
         HipDstBufferizableModel<HipblasltMatmulOp>>(*ctx);
-    MiopenRmsNormOp::attachInterface<
-        HipDstBufferizableModel<MiopenRmsNormOp>>(*ctx);
+    MiopenRmsNormOp::attachInterface<HipDstBufferizableModel<MiopenRmsNormOp>>(
+        *ctx);
     MiopenSkipRmsNormOp::attachInterface<
         HipDstBufferizableModel<MiopenSkipRmsNormOp>>(*ctx);
-    MiopenRopeOp::attachInterface<HipDstBufferizableModel<MiopenRopeOp>>(
-        *ctx);
+    MiopenRopeOp::attachInterface<HipDstBufferizableModel<MiopenRopeOp>>(*ctx);
     MiopenAddOp::attachInterface<HipDstBufferizableModel<MiopenAddOp>>(*ctx);
     MiopenMulOp::attachInterface<HipDstBufferizableModel<MiopenMulOp>>(*ctx);
-    MiopenSoftmaxOp::attachInterface<
-        HipDstBufferizableModel<MiopenSoftmaxOp>>(*ctx);
+    MiopenSoftmaxOp::attachInterface<HipDstBufferizableModel<MiopenSoftmaxOp>>(
+        *ctx);
     TransposeOp::attachInterface<HipDstBufferizableModel<TransposeOp>>(*ctx);
     GatherOp::attachInterface<HipDstBufferizableModel<GatherOp>>(*ctx);
     SiluOp::attachInterface<HipDstBufferizableModel<SiluOp>>(*ctx);
@@ -79,7 +78,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry& registry) {
   });
 }
 
-}  // namespace hip
-}  // namespace mlir
+} // namespace hip
+} // namespace mlir
 
-#endif  // HIP_BUFFERIZE_H
+#endif // HIP_BUFFERIZE_H

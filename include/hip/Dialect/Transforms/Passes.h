@@ -16,7 +16,7 @@ namespace hip {
 #define GEN_PASS_REGISTRATION
 #include "hip/Dialect/Transforms/Passes.h.inc"
 
-}  // namespace hip
-}  // namespace mlir
+} // namespace hip
+} // namespace mlir
 
-#endif  // HIP_PASSES_H
+#endif // HIP_PASSES_H

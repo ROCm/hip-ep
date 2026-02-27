@@ -27,29 +27,30 @@ namespace hip {
 
 namespace {
 
-static constexpr const char* kHipCreateHandle = "hipCreateHandle";
-static constexpr const char* kHipDestroyHandle = "hipDestroyHandle";
-static constexpr const char* kHipMalloc = "hip_device_malloc";
-static constexpr const char* kHipFree = "hip_device_free";
+static constexpr const char *kHipCreateHandle = "hipCreateHandle";
+static constexpr const char *kHipDestroyHandle = "hipDestroyHandle";
+static constexpr const char *kHipMalloc = "hip_device_malloc";
+static constexpr const char *kHipFree = "hip_device_free";
 
-static constexpr const char* kHipblasltMatmul = "hip_hipblaslt_matmul";
-static constexpr const char* kMiopenRmsNorm = "hip_miopen_rms_norm";
-static constexpr const char* kMiopenSkipRmsNorm = "hip_miopen_skip_rms_norm";
-static constexpr const char* kMiopenRope = "hip_miopen_rope";
-static constexpr const char* kMiopenAdd = "hip_miopen_add";
-static constexpr const char* kMiopenMul = "hip_miopen_mul";
-static constexpr const char* kMiopenSoftmax = "hip_miopen_softmax";
-static constexpr const char* kHipTranspose = "hip_transpose";
-static constexpr const char* kHipGather = "hip_gather";
-static constexpr const char* kHipSilu = "hip_silu";
-static constexpr const char* kHipGqa = "hip_gqa";
+static constexpr const char *kHipblasltMatmul = "hip_hipblaslt_matmul";
+static constexpr const char *kMiopenRmsNorm = "hip_miopen_rms_norm";
+static constexpr const char *kMiopenSkipRmsNorm = "hip_miopen_skip_rms_norm";
+static constexpr const char *kMiopenRope = "hip_miopen_rope";
+static constexpr const char *kMiopenAdd = "hip_miopen_add";
+static constexpr const char *kMiopenMul = "hip_miopen_mul";
+static constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
+static constexpr const char *kHipTranspose = "hip_transpose";
+static constexpr const char *kHipGather = "hip_gather";
+static constexpr const char *kHipSilu = "hip_silu";
+static constexpr const char *kHipGqa = "hip_gqa";
 
 // Helper: extract the aligned data pointer from a converted memref descriptor,
 // casting to address space 0 if needed.
 // Uses alignedPtr (not allocatedPtr) so that memref.view offsets into a memory
 // pool are respected -- each view has the same allocatedPtr but a distinct
 // alignedPtr.
-static Value extractMemRefPtr(Value memrefDesc, ConversionPatternRewriter& rewriter,
+static Value extractMemRefPtr(Value memrefDesc,
+                              ConversionPatternRewriter &rewriter,
                               Location loc) {
   Value ptr = MemRefDescriptor(memrefDesc).alignedPtr(rewriter, loc);
   auto ptrTy = cast<LLVM::LLVMPointerType>(ptr.getType());
@@ -66,7 +67,7 @@ struct CreateHandleOpLowering : public ConvertOpToLLVMPattern<CreateHandleOp> {
 
   LogicalResult
   matchAndRewrite(CreateHandleOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter& rewriter) const override {
+                  ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
@@ -90,7 +91,7 @@ struct DestroyHandleOpLowering
 
   LogicalResult
   matchAndRewrite(DestroyHandleOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter& rewriter) const override {
+                  ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type voidType = getVoidType();
@@ -114,7 +115,7 @@ struct AllocOpLowering : public ConvertOpToLLVMPattern<AllocOp> {
 
   LogicalResult
   matchAndRewrite(AllocOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter& rewriter) const override {
+                  ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     MemRefType memRefType = op.getMemref().getType();
@@ -169,7 +170,7 @@ struct FreeOpLowering : public ConvertOpToLLVMPattern<FreeOp> {
 
   LogicalResult
   matchAndRewrite(FreeOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter& rewriter) const override {
+                  ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type voidType = getVoidType();
@@ -203,8 +204,8 @@ struct GraphRegionOpLowering : public ConvertOpToLLVMPattern<OpTy> {
 
   LogicalResult
   matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
-                  ConversionPatternRewriter& rewriter) const override {
-    Block& body = op.getBody().front();
+                  ConversionPatternRewriter &rewriter) const override {
+    Block &body = op.getBody().front();
     rewriter.inlineBlockBefore(&body, op);
     rewriter.eraseOp(op);
     return success();
@@ -225,7 +226,7 @@ struct HipblasltMatmulOpLowering
 
   LogicalResult
   matchAndRewrite(HipblasltMatmulOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter& rewriter) const override {
+                  ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type voidType = getVoidType();
@@ -233,7 +234,7 @@ struct HipblasltMatmulOpLowering
     Type indexType = getIndexType();
 
     // (handle, A, B, C, rankA, rankB, batch, M, K, N)
-    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, ptrType,
+    SmallVector<Type> paramTypes = {ptrType,   ptrType,   ptrType,   ptrType,
                                     indexType, indexType, indexType, indexType,
                                     indexType, indexType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -287,14 +288,14 @@ struct MiopenRmsNormOpLowering
 
   LogicalResult
   matchAndRewrite(MiopenRmsNormOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter& rewriter) const override {
+                  ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type voidType = getVoidType();
     Type ptrType = getPtrType();
     Type indexType = getIndexType();
 
-    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType,
+    SmallVector<Type> paramTypes = {ptrType, ptrType,   ptrType,
                                     ptrType, indexType, indexType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kMiopenRmsNorm, paramTypes, voidType);
@@ -332,7 +333,7 @@ struct MiopenSkipRmsNormOpLowering
 
   LogicalResult
   matchAndRewrite(MiopenSkipRmsNormOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter& rewriter) const override {
+                  ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type voidType = getVoidType();
@@ -364,7 +365,7 @@ struct MiopenRopeOpLowering : public ConvertOpToLLVMPattern<MiopenRopeOp> {
 
   LogicalResult
   matchAndRewrite(MiopenRopeOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter& rewriter) const override {
+                  ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type voidType = getVoidType();
@@ -400,36 +401,36 @@ struct MiopenRopeOpLowering : public ConvertOpToLLVMPattern<MiopenRopeOp> {
 template <typename OpTy>
 struct MiopenBinaryOpLowering : public ConvertOpToLLVMPattern<OpTy> {
   using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
-  const char* funcName;
+  const char *funcName;
 
-  MiopenBinaryOpLowering(const LLVMTypeConverter& converter,
-                         const char* name)
+  MiopenBinaryOpLowering(const LLVMTypeConverter &converter, const char *name)
       : ConvertOpToLLVMPattern<OpTy>(converter), funcName(name) {}
 
   Value computeNumElements(MemRefType type, Value descriptor,
-                           ConversionPatternRewriter& rewriter,
+                           ConversionPatternRewriter &rewriter,
                            Location loc) const {
     Type indexType = this->getIndexType();
     int rank = type.getRank();
     Value num = LLVM::ConstantOp::create(rewriter, loc, indexType,
                                          rewriter.getIndexAttr(1));
     for (int i = 0; i < rank; i++)
-      num = LLVM::MulOp::create(rewriter, loc, num,
-                                MemRefDescriptor(descriptor).size(rewriter, loc, i));
+      num = LLVM::MulOp::create(
+          rewriter, loc, num,
+          MemRefDescriptor(descriptor).size(rewriter, loc, i));
     return num;
   }
 
   LogicalResult
   matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
-                  ConversionPatternRewriter& rewriter) const override {
+                  ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->template getParentOfType<ModuleOp>();
     Type voidType = this->getVoidType();
     Type ptrType = this->getPtrType();
     Type indexType = this->getIndexType();
 
-    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, ptrType,
-                                    indexType, indexType};
+    SmallVector<Type> paramTypes = {ptrType, ptrType,   ptrType,
+                                    ptrType, indexType, indexType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, funcName, paramTypes, voidType);
     if (failed(funcOp))
@@ -440,10 +441,12 @@ struct MiopenBinaryOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     Value numA = computeNumElements(aType, adaptor.getA(), rewriter, loc);
     Value numB = computeNumElements(bType, adaptor.getB(), rewriter, loc);
 
-    SmallVector<Value> args = {
-        adaptor.getHandle(), extractMemRefPtr(adaptor.getA(), rewriter, loc),
-        extractMemRefPtr(adaptor.getB(), rewriter, loc),
-        extractMemRefPtr(adaptor.getC(), rewriter, loc), numA, numB};
+    SmallVector<Value> args = {adaptor.getHandle(),
+                               extractMemRefPtr(adaptor.getA(), rewriter, loc),
+                               extractMemRefPtr(adaptor.getB(), rewriter, loc),
+                               extractMemRefPtr(adaptor.getC(), rewriter, loc),
+                               numA,
+                               numB};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -460,7 +463,7 @@ struct MiopenSoftmaxOpLowering
 
   LogicalResult
   matchAndRewrite(MiopenSoftmaxOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter& rewriter) const override {
+                  ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type voidType = getVoidType();
@@ -505,7 +508,7 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
 
   LogicalResult
   matchAndRewrite(TransposeOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter& rewriter) const override {
+                  ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type voidType = getVoidType();
@@ -513,7 +516,7 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
     Type indexType = getIndexType();
 
     // (handle, input, output, rank, dim0, dim1, s0, s1, s2)
-    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType,
+    SmallVector<Type> paramTypes = {ptrType,   ptrType,   ptrType,
                                     indexType, indexType, indexType,
                                     indexType, indexType, indexType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -555,7 +558,7 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
 
   LogicalResult
   matchAndRewrite(GatherOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter& rewriter) const override {
+                  ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type voidType = getVoidType();
@@ -585,7 +588,7 @@ struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
 
   LogicalResult
   matchAndRewrite(SiluOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter& rewriter) const override {
+                  ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type voidType = getVoidType();
@@ -614,15 +617,15 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
 
   LogicalResult
   matchAndRewrite(GqaOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter& rewriter) const override {
+                  ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type voidType = getVoidType();
     Type ptrType = getPtrType();
     Type indexType = getIndexType();
 
-    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType,
-                                    ptrType, ptrType, ptrType,
+    SmallVector<Type> paramTypes = {ptrType,   ptrType,   ptrType,
+                                    ptrType,   ptrType,   ptrType,
                                     indexType, indexType, indexType};
     FailureOr<LLVM::LLVMFuncOp> funcOp =
         LLVM::lookupOrCreateFn(rewriter, module, kHipGqa, paramTypes, voidType);
@@ -646,14 +649,14 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
   }
 };
 
-// --- memref.alloc -> hip_device_malloc (produced by bufferization for tensor.empty)
-struct MemRefAllocOpLowering
-    : public ConvertOpToLLVMPattern<memref::AllocOp> {
+// --- memref.alloc -> hip_device_malloc (produced by bufferization for
+// tensor.empty)
+struct MemRefAllocOpLowering : public ConvertOpToLLVMPattern<memref::AllocOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
   matchAndRewrite(memref::AllocOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter& rewriter) const override {
+                  ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     MemRefType memRefType = op.getType();
@@ -691,7 +694,7 @@ struct MemRefDeallocOpLowering
 
   LogicalResult
   matchAndRewrite(memref::DeallocOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter& rewriter) const override {
+                  ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type voidType = LLVM::LLVMVoidType::get(rewriter.getContext());
@@ -709,8 +712,8 @@ struct MemRefDeallocOpLowering
         MemRefDescriptor(adaptor.getMemref()).allocatedPtr(rewriter, loc);
     if (cast<LLVM::LLVMPointerType>(allocatedPtr.getType()).getAddressSpace() !=
         0)
-      allocatedPtr = LLVM::AddrSpaceCastOp::create(rewriter, loc, ptrType,
-                                                   allocatedPtr);
+      allocatedPtr =
+          LLVM::AddrSpaceCastOp::create(rewriter, loc, ptrType, allocatedPtr);
     LLVM::CallOp::create(rewriter, loc, *funcOp, allocatedPtr);
     rewriter.eraseOp(op);
     return success();
@@ -728,29 +731,27 @@ struct ConvertHipToLLVMPass
 
 void ConvertHipToLLVMPass::runOnOperation() {
   ModuleOp module = getOperation();
-  MLIRContext* ctx = module.getContext();
+  MLIRContext *ctx = module.getContext();
 
   LowerToLLVMOptions options(ctx);
   LLVMTypeConverter typeConverter(ctx, options);
 
   // !hip.handle -> !llvm.ptr (opaque pointer to runtime context)
-  typeConverter.addConversion(
-      [ctx](HandleType type) -> Type {
-        return LLVM::LLVMPointerType::get(ctx, 0);
-      });
+  typeConverter.addConversion([ctx](HandleType type) -> Type {
+    return LLVM::LLVMPointerType::get(ctx, 0);
+  });
 
   RewritePatternSet patterns(ctx);
-  patterns.add<CreateHandleOpLowering, DestroyHandleOpLowering,
-               AllocOpLowering, FreeOpLowering,
-               MiopenGraphOpLowering, HipblasltGraphOpLowering,
-               HipblasltMatmulOpLowering,
-               MiopenRmsNormOpLowering, MiopenSkipRmsNormOpLowering,
-               MiopenRopeOpLowering,
-               MiopenSoftmaxOpLowering,
-               TransposeOpLowering,
-               GatherOpLowering, SiluOpLowering, GqaOpLowering>(typeConverter);
-  patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter, kMiopenAdd);
-  patterns.insert<MiopenBinaryOpLowering<MiopenMulOp>>(typeConverter, kMiopenMul);
+  patterns.add<CreateHandleOpLowering, DestroyHandleOpLowering, AllocOpLowering,
+               FreeOpLowering, MiopenGraphOpLowering, HipblasltGraphOpLowering,
+               HipblasltMatmulOpLowering, MiopenRmsNormOpLowering,
+               MiopenSkipRmsNormOpLowering, MiopenRopeOpLowering,
+               MiopenSoftmaxOpLowering, TransposeOpLowering, GatherOpLowering,
+               SiluOpLowering, GqaOpLowering>(typeConverter);
+  patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter,
+                                                       kMiopenAdd);
+  patterns.insert<MiopenBinaryOpLowering<MiopenMulOp>>(typeConverter,
+                                                       kMiopenMul);
   patterns.add<MemRefAllocOpLowering, MemRefDeallocOpLowering>(typeConverter);
 
   LLVMConversionTarget target(*ctx);
@@ -763,7 +764,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
     signalPassFailure();
 }
 
-}  // namespace
+} // namespace
 
-}  // namespace hip
-}  // namespace mlir
+} // namespace hip
+} // namespace mlir

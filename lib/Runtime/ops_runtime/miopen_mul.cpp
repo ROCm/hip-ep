@@ -24,41 +24,42 @@
 #include <hip/hip_runtime_api.h>
 #include <miopen/miopen.h>
 
-#define MIOPEN_CHECK(call)                                             \
-  do {                                                                 \
-    miopenStatus_t status = (call);                                    \
-    if (status != miopenStatusSuccess) {                               \
-      fprintf(stderr, "MIOpen error at %s:%d (status=%d)\n", __FILE__, \
-              __LINE__, status);                                       \
-      return;                                                          \
-    }                                                                  \
+#define MIOPEN_CHECK(call)                                                     \
+  do {                                                                         \
+    miopenStatus_t status = (call);                                            \
+    if (status != miopenStatusSuccess) {                                       \
+      fprintf(stderr, "MIOpen error at %s:%d (status=%d)\n", __FILE__,         \
+              __LINE__, status);                                               \
+      return;                                                                  \
+    }                                                                          \
   } while (0)
 
-static void* ensure_device(void* ptr, size_t bytes) {
-  if (!ptr || bytes == 0) return ptr;
+static void *ensure_device(void *ptr, size_t bytes) {
+  if (!ptr || bytes == 0)
+    return ptr;
   hipPointerAttribute_t attrs = {};
   if (hipPointerGetAttributes(&attrs, ptr) == hipSuccess &&
-      (attrs.type == hipMemoryTypeDevice ||
-       attrs.type == hipMemoryTypeUnified))
+      (attrs.type == hipMemoryTypeDevice || attrs.type == hipMemoryTypeUnified))
     return ptr;
-  void* staging = malloc(bytes);
-  if (!staging) return ptr;
+  void *staging = malloc(bytes);
+  if (!staging)
+    return ptr;
   memcpy(staging, ptr, bytes);
-  void* d = nullptr;
+  void *d = nullptr;
   hipMalloc(&d, bytes);
   hipMemcpy(d, staging, bytes, hipMemcpyHostToDevice);
   free(staging);
   return d;
 }
 
-extern "C" void hip_miopen_mul(void* /*handle*/, void* A, void* B, void* C,
+extern "C" void hip_miopen_mul(void * /*handle*/, void *A, void *B, void *C,
                                int64_t numA, int64_t numB) {
   fprintf(stderr, "[miopen.mul] C = A * B  (numA=%lld numB=%lld)\n",
           (long long)numA, (long long)numB);
 
-  void* devA = ensure_device(A, numA * sizeof(float));
-  void* devB = ensure_device(B, numB * sizeof(float));
-  void* devC = ensure_device(C, numA * sizeof(float));
+  void *devA = ensure_device(A, numA * sizeof(float));
+  void *devB = ensure_device(B, numB * sizeof(float));
+  void *devC = ensure_device(C, numA * sizeof(float));
   bool allocA = (devA != A), allocB = (devB != B), allocC = (devC != C);
 
   miopenHandle_t handle = nullptr;
@@ -73,9 +74,12 @@ extern "C" void hip_miopen_mul(void* /*handle*/, void* A, void* B, void* C,
   int stridesA[] = {(int)numA, 1};
   int dimsB[] = {1, (int)numB};
   int stridesB[] = {(int)numB, 1};
-  MIOPEN_CHECK(miopenSetTensorDescriptor(descA, miopenFloat, 2, dimsA, stridesA));
-  MIOPEN_CHECK(miopenSetTensorDescriptor(descB, miopenFloat, 2, dimsB, stridesB));
-  MIOPEN_CHECK(miopenSetTensorDescriptor(descC, miopenFloat, 2, dimsA, stridesA));
+  MIOPEN_CHECK(
+      miopenSetTensorDescriptor(descA, miopenFloat, 2, dimsA, stridesA));
+  MIOPEN_CHECK(
+      miopenSetTensorDescriptor(descB, miopenFloat, 2, dimsB, stridesB));
+  MIOPEN_CHECK(
+      miopenSetTensorDescriptor(descC, miopenFloat, 2, dimsA, stridesA));
 
   float alpha1 = 1.0f, alpha2 = 1.0f, beta = 0.0f;
   MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpMul, &alpha1, descA, devA,
@@ -90,7 +94,10 @@ extern "C" void hip_miopen_mul(void* /*handle*/, void* A, void* B, void* C,
   miopenDestroyTensorDescriptor(descA);
   miopenDestroy(handle);
 
-  if (allocA) hipFree(devA);
-  if (allocB) hipFree(devB);
-  if (allocC) hipFree(devC);
+  if (allocA)
+    hipFree(devA);
+  if (allocB)
+    hipFree(devB);
+  if (allocC)
+    hipFree(devC);
 }

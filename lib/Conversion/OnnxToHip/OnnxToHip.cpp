@@ -29,10 +29,10 @@
 // linker without pulling in that library.
 namespace onnx_mlir {
 bool disableMemRefPrefetch = false;
-int64_t getZArchNum(const std::string& /*arch*/, const std::string /*cpu*/) {
+int64_t getZArchNum(const std::string & /*arch*/, const std::string /*cpu*/) {
   return 0;
 }
-}  // namespace onnx_mlir
+} // namespace onnx_mlir
 
 namespace mlir {
 namespace hip {
@@ -50,7 +50,8 @@ namespace {
 /// are extracted from \p source using tensor.dim at each dynamic index.
 /// Suitable for ops where the output shape aligns positionally with one input
 /// (e.g., softmax, element-wise).
-static mlir::Value createEmptyTensor(mlir::OpBuilder& builder, mlir::Location loc,
+static mlir::Value createEmptyTensor(mlir::OpBuilder &builder,
+                                     mlir::Location loc,
                                      mlir::RankedTensorType resultType,
                                      mlir::Value source) {
   llvm::SmallVector<mlir::Value> dynSizes;
@@ -78,8 +79,8 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::func::FuncOp funcOp) {
     }
 
     mlir::OpBuilder builder(constOp);
-    auto arithConst = mlir::arith::ConstantOp::create(
-        builder, constOp.getLoc(), valueAttr);
+    auto arithConst =
+        mlir::arith::ConstantOp::create(builder, constOp.getLoc(), valueAttr);
     constOp.getResult().replaceAllUsesWith(arithConst.getResult());
     constOp.erase();
   }
@@ -89,8 +90,8 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::func::FuncOp funcOp) {
 /// Insert hip.create_handle at function entry and hip.destroy_handle before
 /// each return. Returns the handle value.
 static mlir::Value insertHandleLifecycle(mlir::func::FuncOp funcOp,
-                                         mlir::MLIRContext* ctx) {
-  mlir::Block& entryBlock = funcOp.getBody().front();
+                                         mlir::MLIRContext *ctx) {
+  mlir::Block &entryBlock = funcOp.getBody().front();
   mlir::OpBuilder entryBuilder(ctx);
   entryBuilder.setInsertionPointToStart(&entryBlock);
   mlir::Value handle = mlir::hip::CreateHandleOp::create(
@@ -105,7 +106,7 @@ static mlir::Value insertHandleLifecycle(mlir::func::FuncOp funcOp,
 }
 
 static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
-                                             mlir::MLIRContext* ctx,
+                                             mlir::MLIRContext *ctx,
                                              mlir::Value handle);
 
 //===----------------------------------------------------------------------===//
@@ -115,17 +116,20 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
 /// ONNXMatMulOp -> hip.hipblaslt.matmul
 struct MatMulToHip : public mlir::OpRewritePattern<ONNXMatMulOp> {
   mlir::Value handle;
-  MatMulToHip(mlir::MLIRContext* ctx, mlir::Value handle)
+  MatMulToHip(mlir::MLIRContext *ctx, mlir::Value handle)
       : OpRewritePattern(ctx), handle(handle) {}
 
-  mlir::LogicalResult matchAndRewrite(ONNXMatMulOp op,
-                                      mlir::PatternRewriter& rewriter) const override;
+  mlir::LogicalResult
+  matchAndRewrite(ONNXMatMulOp op,
+                  mlir::PatternRewriter &rewriter) const override;
 };
 
-mlir::LogicalResult MatMulToHip::matchAndRewrite(ONNXMatMulOp op,
-                                                 mlir::PatternRewriter& rewriter) const {
+mlir::LogicalResult
+MatMulToHip::matchAndRewrite(ONNXMatMulOp op,
+                             mlir::PatternRewriter &rewriter) const {
   mlir::Location loc = op.getLoc();
-  auto resultType = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
   // MatMul: result[..., M, N] = A[..., M, K] @ B[..., K, N].
   // Batch and M dims come from A; N comes from B's last dim.
@@ -136,17 +140,17 @@ mlir::LogicalResult MatMulToHip::matchAndRewrite(ONNXMatMulOp op,
     if (!resultType.isDynamicDim(i))
       continue;
     if (i == rank - 1) {
-      dynSizes.push_back(mlir::tensor::DimOp::create(
-          rewriter, loc, op.getB(), bType.getRank() - 1));
+      dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, op.getB(),
+                                                     bType.getRank() - 1));
     } else {
       dynSizes.push_back(
           mlir::tensor::DimOp::create(rewriter, loc, op.getA(), i));
     }
   }
 
-  mlir::Value init = mlir::tensor::EmptyOp::create(
-      rewriter, loc, resultType.getShape(), resultType.getElementType(),
-      dynSizes);
+  mlir::Value init =
+      mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                    resultType.getElementType(), dynSizes);
   auto hipOp = mlir::hip::HipblasltMatmulOp::create(
       rewriter, loc, resultType, handle, op.getA(), op.getB(), init);
   rewriter.replaceOp(op, hipOp->getResult(0));
@@ -156,15 +160,17 @@ mlir::LogicalResult MatMulToHip::matchAndRewrite(ONNXMatMulOp op,
 /// ONNXTransposeOp -> hip.transpose
 struct TransposeToHip : public mlir::OpRewritePattern<ONNXTransposeOp> {
   mlir::Value handle;
-  TransposeToHip(mlir::MLIRContext* ctx, mlir::Value handle)
+  TransposeToHip(mlir::MLIRContext *ctx, mlir::Value handle)
       : OpRewritePattern(ctx), handle(handle) {}
 
-  mlir::LogicalResult matchAndRewrite(ONNXTransposeOp op,
-                                      mlir::PatternRewriter& rewriter) const override;
+  mlir::LogicalResult
+  matchAndRewrite(ONNXTransposeOp op,
+                  mlir::PatternRewriter &rewriter) const override;
 };
 
-mlir::LogicalResult TransposeToHip::matchAndRewrite(
-    ONNXTransposeOp op, mlir::PatternRewriter& rewriter) const {
+mlir::LogicalResult
+TransposeToHip::matchAndRewrite(ONNXTransposeOp op,
+                                mlir::PatternRewriter &rewriter) const {
   mlir::Location loc = op.getLoc();
 
   auto permAttr = op.getPerm();
@@ -185,7 +191,8 @@ mlir::LogicalResult TransposeToHip::matchAndRewrite(
   if (dim0 < 0 || dim1 < 0)
     return op.emitOpError("perm must swap exactly two dimensions");
 
-  auto resultType = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
   // Transpose: output dim i corresponds to input dim perm[i].
   llvm::SmallVector<mlir::Value> dynSizes;
@@ -197,15 +204,15 @@ mlir::LogicalResult TransposeToHip::matchAndRewrite(
     }
   }
 
-  mlir::Value init = mlir::tensor::EmptyOp::create(
-      rewriter, loc, resultType.getShape(), resultType.getElementType(),
-      dynSizes);
+  mlir::Value init =
+      mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                    resultType.getElementType(), dynSizes);
 
   mlir::Value d0 = mlir::arith::ConstantIndexOp::create(rewriter, loc, dim0);
   mlir::Value d1 = mlir::arith::ConstantIndexOp::create(rewriter, loc, dim1);
 
-  auto hipOp = mlir::hip::TransposeOp::create(
-      rewriter, loc, resultType, handle, d0, d1, op.getData(), init);
+  auto hipOp = mlir::hip::TransposeOp::create(rewriter, loc, resultType, handle,
+                                              d0, d1, op.getData(), init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
@@ -213,17 +220,18 @@ mlir::LogicalResult TransposeToHip::matchAndRewrite(
 /// ONNXMulOp -> hip.miopen.mul
 struct MulToHip : public mlir::OpRewritePattern<ONNXMulOp> {
   mlir::Value handle;
-  MulToHip(mlir::MLIRContext* ctx, mlir::Value handle)
+  MulToHip(mlir::MLIRContext *ctx, mlir::Value handle)
       : OpRewritePattern(ctx), handle(handle) {}
 
-  mlir::LogicalResult matchAndRewrite(ONNXMulOp op,
-                                      mlir::PatternRewriter& rewriter) const override;
+  mlir::LogicalResult
+  matchAndRewrite(ONNXMulOp op, mlir::PatternRewriter &rewriter) const override;
 };
 
-mlir::LogicalResult MulToHip::matchAndRewrite(ONNXMulOp op,
-                                              mlir::PatternRewriter& rewriter) const {
+mlir::LogicalResult
+MulToHip::matchAndRewrite(ONNXMulOp op, mlir::PatternRewriter &rewriter) const {
   mlir::Location loc = op.getLoc();
-  auto resultType = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
   // Use the operand whose rank matches the result for dim extraction
   // (handles scalar * tensor broadcasting).
@@ -232,8 +240,8 @@ mlir::LogicalResult MulToHip::matchAndRewrite(ONNXMulOp op,
       (aType.getRank() == resultType.getRank()) ? op.getA() : op.getB();
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
 
-  auto hipOp = mlir::hip::MiopenMulOp::create(
-      rewriter, loc, resultType, handle, op.getA(), op.getB(), init);
+  auto hipOp = mlir::hip::MiopenMulOp::create(rewriter, loc, resultType, handle,
+                                              op.getA(), op.getB(), init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
@@ -241,20 +249,24 @@ mlir::LogicalResult MulToHip::matchAndRewrite(ONNXMulOp op,
 /// ONNXSoftmaxOp -> hip.miopen.softmax
 struct SoftmaxToHip : public mlir::OpRewritePattern<ONNXSoftmaxOp> {
   mlir::Value handle;
-  SoftmaxToHip(mlir::MLIRContext* ctx, mlir::Value handle)
+  SoftmaxToHip(mlir::MLIRContext *ctx, mlir::Value handle)
       : OpRewritePattern(ctx), handle(handle) {}
 
-  mlir::LogicalResult matchAndRewrite(ONNXSoftmaxOp op,
-                                      mlir::PatternRewriter& rewriter) const override;
+  mlir::LogicalResult
+  matchAndRewrite(ONNXSoftmaxOp op,
+                  mlir::PatternRewriter &rewriter) const override;
 };
 
-mlir::LogicalResult SoftmaxToHip::matchAndRewrite(
-    ONNXSoftmaxOp op, mlir::PatternRewriter& rewriter) const {
+mlir::LogicalResult
+SoftmaxToHip::matchAndRewrite(ONNXSoftmaxOp op,
+                              mlir::PatternRewriter &rewriter) const {
   mlir::Location loc = op.getLoc();
-  auto resultType = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, op.getInput());
-  auto hipOp = mlir::hip::MiopenSoftmaxOp::create(
-      rewriter, loc, resultType, handle, op.getInput(), init);
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::Value init =
+      createEmptyTensor(rewriter, loc, resultType, op.getInput());
+  auto hipOp = mlir::hip::MiopenSoftmaxOp::create(rewriter, loc, resultType,
+                                                  handle, op.getInput(), init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
@@ -264,7 +276,7 @@ mlir::LogicalResult SoftmaxToHip::matchAndRewrite(
 //===----------------------------------------------------------------------===//
 
 static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
-                                             mlir::MLIRContext* ctx,
+                                             mlir::MLIRContext *ctx,
                                              mlir::Value handle) {
   mlir::RewritePatternSet patterns(ctx);
   patterns.add<MatMulToHip>(ctx, handle);
@@ -275,7 +287,8 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
 
-  if (mlir::failed(mlir::applyPatternsGreedily(funcOp, std::move(patterns), config)))
+  if (mlir::failed(
+          mlir::applyPatternsGreedily(funcOp, std::move(patterns), config)))
     return mlir::failure();
 
   return mlir::success();
@@ -292,9 +305,10 @@ struct ConvertOnnxToHipPass
 
 void ConvertOnnxToHipPass::runOnOperation() {
   mlir::ModuleOp module = getOperation();
-  mlir::MLIRContext* ctx = module.getContext();
+  mlir::MLIRContext *ctx = module.getContext();
 
-  for (auto funcOp : llvm::make_early_inc_range(module.getOps<mlir::func::FuncOp>())) {
+  for (auto funcOp :
+       llvm::make_early_inc_range(module.getOps<mlir::func::FuncOp>())) {
     if (mlir::failed(lowerOnnxConstants(funcOp)))
       return signalPassFailure();
     mlir::Value handle = insertHandleLifecycle(funcOp, ctx);
@@ -306,7 +320,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
     ep.erase();
 }
 
-}  // namespace
+} // namespace
 
-}  // namespace hip
-}  // namespace mlir
+} // namespace hip
+} // namespace mlir
