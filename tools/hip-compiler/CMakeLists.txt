@@ -56,4 +56,3 @@ target_link_libraries(hip-compiler PRIVATE
   LLVMLinker
   ${llvm_libs}
 )
-

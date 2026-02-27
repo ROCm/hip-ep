@@ -78,4 +78,3 @@ if(ENABLE_ONNX_FRONTEND)
     protobuf::libprotobuf
   )
 endif()
-
