@@ -1,3 +1,8 @@
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+//
+
 #ifndef HIP_OPS
 #define HIP_OPS
 
@@ -170,11 +175,11 @@ def Hip_MiopenRopeOp : Hip_Op<"miopen.rope",
   let summary = "Rotary positional embeddings (MIOpen experimental)";
   let arguments = (ins
     Hip_HandleType:$handle,
-    Hip_TensorOrMemRef:$q,
-    Hip_TensorOrMemRef:$k,
+    Index:$start_pos,
     Hip_TensorOrMemRef:$cos_cache,
     Hip_TensorOrMemRef:$sin_cache,
-    Index:$start_pos
+    Hip_TensorOrMemRef:$q,
+    Hip_TensorOrMemRef:$k
   );
   let results = (outs Variadic<AnyRankedTensor>:$results);
   let hasCustomAssemblyFormat = 1;
@@ -278,14 +283,14 @@ def Hip_GqaOp : Hip_Op<"gqa",
   let summary = "Grouped query attention";
   let arguments = (ins
     Hip_HandleType:$handle,
+    Index:$layer,
+    Index:$start_pos,
+    Index:$seq_len,
     Hip_TensorOrMemRef:$q,
     Hip_TensorOrMemRef:$k,
     Hip_TensorOrMemRef:$v,
     Hip_TensorOrMemRef:$kv_cache,
-    Hip_TensorOrMemRef:$output,
-    Index:$layer,
-    Index:$start_pos,
-    Index:$seq_len
+    Hip_TensorOrMemRef:$output
   );
   let results = (outs Variadic<AnyRankedTensor>:$results);
   let hasCustomAssemblyFormat = 1;
