@@ -59,9 +59,9 @@ static constexpr int64_t kDefaultAlignment = 256;
 
 struct AllocInfo {
   memref::AllocOp allocOp;
-  unsigned defIndex;       ///< sequential index of the alloc op in the block
-  unsigned lastUseIndex;   ///< highest index of any (transitive) user
-  int64_t staticByteSize;  ///< >0 for static shapes, 0 for dynamic
+  unsigned defIndex;      ///< sequential index of the alloc op in the block
+  unsigned lastUseIndex;  ///< highest index of any (transitive) user
+  int64_t staticByteSize; ///< >0 for static shapes, 0 for dynamic
 };
 
 /// Total byte size for a fully-static memref type, 0 when any dim is dynamic.
@@ -73,7 +73,7 @@ static int64_t getStaticByteSize(MemRefType type) {
 
 /// True when \p user produces a memref that aliases its memref operand
 /// (subview, cast, reshape, select, ...).
-static bool isMemRefAlias(Operation* user) {
+static bool isMemRefAlias(Operation *user) {
   return isa<ViewLikeOpInterface, arith::SelectOp>(user);
 }
 
@@ -83,9 +83,10 @@ static bool isMemRefAlias(Operation* user) {
 ///
 /// memref.dealloc ops are excluded so that lifetimes reflect actual data
 /// usage, not administrative cleanup.
-static unsigned findLastTransitiveUseIndex(
-    Value value, Block& block,
-    const DenseMap<Operation*, unsigned>& opIndex, unsigned blockSize) {
+static unsigned
+findLastTransitiveUseIndex(Value value, Block &block,
+                           const DenseMap<Operation *, unsigned> &opIndex,
+                           unsigned blockSize) {
   unsigned lastIdx = 0;
   SmallVector<Value> worklist = {value};
   DenseSet<Value> visited;
@@ -95,7 +96,7 @@ static unsigned findLastTransitiveUseIndex(
     if (!visited.insert(current).second)
       continue;
 
-    for (Operation* user : current.getUsers()) {
+    for (Operation *user : current.getUsers()) {
       if (isa<memref::DeallocOp>(user))
         continue;
 
@@ -103,7 +104,7 @@ static unsigned findLastTransitiveUseIndex(
       unsigned userIdx;
       if (it != opIndex.end()) {
         userIdx = it->second;
-      } else if (auto* ancestor = block.findAncestorOpInBlock(*user)) {
+      } else if (auto *ancestor = block.findAncestorOpInBlock(*user)) {
         userIdx = opIndex.lookup(ancestor);
       } else {
         userIdx = blockSize - 1;
@@ -126,7 +127,7 @@ static int64_t alignUp(int64_t value, int64_t alignment) {
 }
 
 /// True when two allocs' [def, lastUse] intervals overlap.
-static bool lifetimesOverlap(const AllocInfo& a, const AllocInfo& b) {
+static bool lifetimesOverlap(const AllocInfo &a, const AllocInfo &b) {
   return !(a.lastUseIndex < b.defIndex || b.lastUseIndex < a.defIndex);
 }
 
@@ -153,9 +154,9 @@ static bool lifetimesOverlap(const AllocInfo& a, const AllocInfo& b) {
 
 /// A placed allocation in the linear address space.
 struct Reservation {
-  AllocInfo* info;
+  AllocInfo *info;
   int64_t offset;
-  int64_t size;  ///< aligned byte size
+  int64_t size; ///< aligned byte size
 };
 
 /// Assign byte offsets to static allocs using a greedy best-fit strategy.
@@ -163,12 +164,12 @@ struct Reservation {
 /// For each alloc (processed largest-first), scan the existing reservations
 /// whose lifetimes overlap, find the smallest gap that fits, and place it
 /// there.  If no gap fits, append after the last overlapping reservation.
-static SmallVector<std::pair<AllocInfo*, int64_t>>
+static SmallVector<std::pair<AllocInfo *, int64_t>>
 packStaticAllocs(MutableArrayRef<AllocInfo> statics, int64_t alignment) {
-  SmallVector<std::pair<AllocInfo*, int64_t>> assignments;
-  std::list<Reservation> reservations;  // kept sorted by offset
+  SmallVector<std::pair<AllocInfo *, int64_t>> assignments;
+  std::list<Reservation> reservations; // kept sorted by offset
 
-  for (AllocInfo& info : statics) {
+  for (AllocInfo &info : statics) {
     int64_t size = alignUp(info.staticByteSize, alignment);
     int64_t bestOffset = -1;
     int64_t bestFit = INT64_MAX;
@@ -176,7 +177,7 @@ packStaticAllocs(MutableArrayRef<AllocInfo> statics, int64_t alignment) {
     // Walk existing reservations with overlapping lifetimes and look for
     // the smallest gap between them that fits this allocation.
     int64_t currentOffset = 0;
-    for (auto& res : reservations) {
+    for (auto &res : reservations) {
       if (!lifetimesOverlap(info, *res.info))
         continue;
       int64_t alignedOffset = alignUp(currentOffset, alignment);
@@ -256,8 +257,9 @@ packStaticAllocs(MutableArrayRef<AllocInfo> statics, int64_t alignment) {
 /// Within a bucket, each "bin" holds allocs with non-overlapping lifetimes
 /// that can share a single offset at runtime.
 struct DynBucket {
-  Value byteSizeValue;                        ///< SSA value for the byte size
-  SmallVector<SmallVector<AllocInfo*>> bins;  ///< bins of non-overlapping allocs
+  Value byteSizeValue; ///< SSA value for the byte size
+  SmallVector<SmallVector<AllocInfo *>>
+      bins; ///< bins of non-overlapping allocs
 };
 
 /// Structural key for grouping allocs with identical runtime byte sizes.
@@ -274,7 +276,7 @@ struct DynSizeKey {
   int64_t staticFactor;
   SmallVector<Value, 2> dynOperands;
 
-  bool operator==(const DynSizeKey& other) const {
+  bool operator==(const DynSizeKey &other) const {
     return staticFactor == other.staticFactor &&
            dynOperands == other.dynOperands;
   }
@@ -288,16 +290,16 @@ struct DynSizeKey {
 /// 3. Group allocs by byte-size SSA value.
 /// 4. Within each group, first-fit bin allocs with non-overlapping lifetimes.
 static SmallVector<DynBucket>
-packDynamicAllocs(MutableArrayRef<AllocInfo> dynamics, OpBuilder& builder,
+packDynamicAllocs(MutableArrayRef<AllocInfo> dynamics, OpBuilder &builder,
                   Location loc) {
   struct KeyedInfo {
     DynSizeKey key;
-    AllocInfo* info;
+    AllocInfo *info;
   };
 
   // Step 1: build structural keys.
   SmallVector<KeyedInfo> keyed;
-  for (AllocInfo& info : dynamics) {
+  for (AllocInfo &info : dynamics) {
     MemRefType type = info.allocOp.getType();
     auto dynSizes = info.allocOp.getDynamicSizes();
     int64_t elemBytes = type.getElementTypeBitWidth() / 8;
@@ -316,15 +318,14 @@ packDynamicAllocs(MutableArrayRef<AllocInfo> dynamics, OpBuilder& builder,
 
   // Step 2: one byte-size SSA value per unique key.
   SmallVector<std::pair<DynSizeKey, Value>> uniqueKeys;
-  auto findOrCreateByteSize = [&](const DynSizeKey& key) -> Value {
-    for (auto& [k, v] : uniqueKeys)
+  auto findOrCreateByteSize = [&](const DynSizeKey &key) -> Value {
+    for (auto &[k, v] : uniqueKeys)
       if (k == key)
         return v;
     // byte_size = staticFactor * dynDim0 * dynDim1 * ...
     Value byteSize;
     if (key.staticFactor != 1)
-      byteSize =
-          arith::ConstantIndexOp::create(builder, loc, key.staticFactor);
+      byteSize = arith::ConstantIndexOp::create(builder, loc, key.staticFactor);
     for (Value dynDim : key.dynOperands) {
       if (byteSize)
         byteSize = arith::MulIOp::create(builder, loc, byteSize, dynDim);
@@ -332,27 +333,26 @@ packDynamicAllocs(MutableArrayRef<AllocInfo> dynamics, OpBuilder& builder,
         byteSize = dynDim;
     }
     if (!byteSize)
-      byteSize =
-          arith::ConstantIndexOp::create(builder, loc, key.staticFactor);
+      byteSize = arith::ConstantIndexOp::create(builder, loc, key.staticFactor);
     uniqueKeys.push_back({key, byteSize});
     return byteSize;
   };
 
   // Step 3: group by byte-size SSA value.
-  llvm::MapVector<Value, SmallVector<AllocInfo*>> bySize;
-  for (auto& [key, info] : keyed)
+  llvm::MapVector<Value, SmallVector<AllocInfo *>> bySize;
+  for (auto &[key, info] : keyed)
     bySize[findOrCreateByteSize(key)].push_back(info);
 
   // Step 4: first-fit bin packing within each group.
   SmallVector<DynBucket> buckets;
-  for (auto& [sizeVal, infos] : bySize) {
+  for (auto &[sizeVal, infos] : bySize) {
     DynBucket bucket;
     bucket.byteSizeValue = sizeVal;
-    for (AllocInfo* info : infos) {
+    for (AllocInfo *info : infos) {
       bool placed = false;
-      for (auto& bin : bucket.bins) {
+      for (auto &bin : bucket.bins) {
         bool conflicts = false;
-        for (AllocInfo* existing : bin) {
+        for (AllocInfo *existing : bin) {
           if (lifetimesOverlap(*info, *existing)) {
             conflicts = true;
             break;
@@ -387,14 +387,13 @@ void PoolAllocsPass::runOnOperation() {
   if (funcOp.empty())
     return;
   if (!funcOp.getBody().hasOneBlock()) {
-    funcOp.emitError(
-        "hip-pool-allocs requires single-block functions; "
-        "liveness analysis uses sequential op indices that do "
-        "not generalize to control flow");
+    funcOp.emitError("hip-pool-allocs requires single-block functions; "
+                     "liveness analysis uses sequential op indices that do "
+                     "not generalize to control flow");
     return signalPassFailure();
   }
 
-  Block& block = funcOp.getBody().front();
+  Block &block = funcOp.getBody().front();
 
   // ----- Phase 1: liveness analysis ------------------------------------
   //
@@ -403,14 +402,14 @@ void PoolAllocsPass::runOnOperation() {
   // *transitive* users: if %buf feeds memref.subview -> op X, then %buf
   // must stay live until X, not just until the subview.
 
-  DenseMap<Operation*, unsigned> opIndex;
+  DenseMap<Operation *, unsigned> opIndex;
   unsigned idx = 0;
-  for (Operation& op : block)
+  for (Operation &op : block)
     opIndex[&op] = idx++;
   unsigned blockSize = idx;
 
   SmallVector<AllocInfo> allInfos;
-  for (Operation& op : block) {
+  for (Operation &op : block) {
     auto allocOp = dyn_cast<memref::AllocOp>(op);
     if (!allocOp)
       continue;
@@ -436,7 +435,7 @@ void PoolAllocsPass::runOnOperation() {
   // in Phase 3.  Dynamic allocs go through the bucket/bin packing in Phase 4.
 
   SmallVector<AllocInfo> statics, dynamics;
-  for (auto& info : allInfos) {
+  for (auto &info : allInfos) {
     if (info.staticByteSize > 0)
       statics.push_back(info);
     else
@@ -446,7 +445,7 @@ void PoolAllocsPass::runOnOperation() {
   // Largest-first ordering improves packing density:  big allocs are harder
   // to fit into gaps, so placing them first gives smaller allocs more
   // opportunities to fill the remaining holes.
-  llvm::sort(statics, [](const AllocInfo& a, const AllocInfo& b) {
+  llvm::sort(statics, [](const AllocInfo &a, const AllocInfo &b) {
     return a.staticByteSize > b.staticByteSize;
   });
 
@@ -455,7 +454,7 @@ void PoolAllocsPass::runOnOperation() {
   auto staticAssignments = packStaticAllocs(statics, kDefaultAlignment);
 
   int64_t staticPoolSize = 0;
-  for (auto& [info, offset] : staticAssignments) {
+  for (auto &[info, offset] : staticAssignments) {
     int64_t end = offset + alignUp(info->staticByteSize, kDefaultAlignment);
     staticPoolSize = std::max(staticPoolSize, end);
   }
@@ -469,8 +468,8 @@ void PoolAllocsPass::runOnOperation() {
   // that downstream passes (e.g. hip-lower-allocs) see the pool after
   // any prerequisite ops like hip.create_handle but before any consumer
   // of the pooled buffers.
-  Operation* firstPooledAlloc = allInfos.front().allocOp.getOperation();
-  for (auto& info : allInfos)
+  Operation *firstPooledAlloc = allInfos.front().allocOp.getOperation();
+  for (auto &info : allInfos)
     if (info.allocOp->isBeforeInBlock(firstPooledAlloc))
       firstPooledAlloc = info.allocOp.getOperation();
   builder.setInsertionPoint(firstPooledAlloc);
@@ -508,11 +507,11 @@ void PoolAllocsPass::runOnOperation() {
     Value alignConst =
         arith::ConstantIndexOp::create(builder, loc, kDefaultAlignment);
 
-    for (auto& bucket : dynBuckets) {
+    for (auto &bucket : dynBuckets) {
       int64_t numBins = bucket.bins.size();
       // alignUp(bucketSize, alignment) via arith ops.
-      Value alignM1 = arith::ConstantIndexOp::create(
-          builder, loc, kDefaultAlignment - 1);
+      Value alignM1 =
+          arith::ConstantIndexOp::create(builder, loc, kDefaultAlignment - 1);
       Value sum =
           arith::AddIOp::create(builder, loc, bucket.byteSizeValue, alignM1);
       Value divided = arith::DivUIOp::create(builder, loc, sum, alignConst);
@@ -549,9 +548,9 @@ void PoolAllocsPass::runOnOperation() {
   }
 
   // 5c. Compute byte offsets for every alloc and store in allocToOffset.
-  DenseMap<Operation*, Value> allocToOffset;
+  DenseMap<Operation *, Value> allocToOffset;
 
-  for (auto& [info, offset] : staticAssignments) {
+  for (auto &[info, offset] : staticAssignments) {
     Value offsetVal = arith::ConstantIndexOp::create(builder, loc, offset);
     allocToOffset[info->allocOp.getOperation()] = offsetVal;
   }
@@ -564,9 +563,9 @@ void PoolAllocsPass::runOnOperation() {
     Value alignM1 =
         arith::ConstantIndexOp::create(builder, loc, kDefaultAlignment - 1);
 
-    for (auto& bucket : dynBuckets) {
-      Value sum = arith::AddIOp::create(builder, loc, bucket.byteSizeValue,
-                                        alignM1);
+    for (auto &bucket : dynBuckets) {
+      Value sum =
+          arith::AddIOp::create(builder, loc, bucket.byteSizeValue, alignM1);
       Value divided = arith::DivUIOp::create(builder, loc, sum, alignConst2);
       Value alignedBucketSize =
           arith::MulIOp::create(builder, loc, divided, alignConst2);
@@ -585,7 +584,7 @@ void PoolAllocsPass::runOnOperation() {
           binOffset =
               arith::AddIOp::create(builder, loc, currentBase, binContrib);
         }
-        for (AllocInfo* info : bucket.bins[binIdx])
+        for (AllocInfo *info : bucket.bins[binIdx])
           allocToOffset[info->allocOp.getOperation()] = binOffset;
       }
 
@@ -599,8 +598,8 @@ void PoolAllocsPass::runOnOperation() {
         currentBase =
             arith::AddIOp::create(builder, loc, currentBase, bucketTotal);
       } else {
-        currentBase = arith::AddIOp::create(builder, loc, currentBase,
-                                            alignedBucketSize);
+        currentBase =
+            arith::AddIOp::create(builder, loc, currentBase, alignedBucketSize);
       }
     }
   }
@@ -608,7 +607,7 @@ void PoolAllocsPass::runOnOperation() {
   // 5d. Replace each original alloc with a memref.view into the pool.
   bool hadDeallocs = false;
   SmallVector<int64_t> staticOffsets;
-  for (auto& info : allInfos) {
+  for (auto &info : allInfos) {
     auto it = allocToOffset.find(info.allocOp.getOperation());
     if (it == allocToOffset.end())
       continue;
@@ -618,9 +617,9 @@ void PoolAllocsPass::runOnOperation() {
 
     MemRefType viewType = info.allocOp.getType();
     auto dynSizes = info.allocOp.getDynamicSizes();
-    auto view = memref::ViewOp::create(builder, info.allocOp.getLoc(), viewType,
-                                       pool, offset,
-                                       SmallVector<Value>(dynSizes));
+    auto view =
+        memref::ViewOp::create(builder, info.allocOp.getLoc(), viewType, pool,
+                               offset, SmallVector<Value>(dynSizes));
 
     info.allocOp.replaceAllUsesWith(view.getResult());
     info.allocOp.erase();
@@ -652,7 +651,7 @@ void PoolAllocsPass::runOnOperation() {
   }
 
   // 5e. Attach pool metadata to the function for runtime/deployment use.
-  MLIRContext* ctx = funcOp.getContext();
+  MLIRContext *ctx = funcOp.getContext();
   if (!hasDynamic)
     funcOp->setAttr("hipdnn.pool_size",
                     builder.getI64IntegerAttr(staticPoolSize));
@@ -662,6 +661,6 @@ void PoolAllocsPass::runOnOperation() {
   funcOp->setAttr("hipdnn.buffer_offsets", ArrayAttr::get(ctx, offsetAttrs));
 }
 
-}  // namespace
-}  // namespace hip
-}  // namespace mlir
+} // namespace
+} // namespace hip
+} // namespace mlir

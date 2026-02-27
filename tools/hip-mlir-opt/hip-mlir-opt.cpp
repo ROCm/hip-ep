@@ -41,13 +41,14 @@ template <typename OpTy>
 struct HipDstBufferizableModel
     : public mlir::bufferization::DstBufferizableOpInterfaceExternalModel<
           HipDstBufferizableModel<OpTy>, OpTy> {
-  mlir::LogicalResult bufferize(mlir::Operation* op, mlir::RewriterBase& rewriter,
-                                const mlir::bufferization::BufferizationOptions& options,
-                                mlir::bufferization::BufferizationState& state) const {
+  mlir::LogicalResult
+  bufferize(mlir::Operation *op, mlir::RewriterBase &rewriter,
+            const mlir::bufferization::BufferizationOptions &options,
+            mlir::bufferization::BufferizationState &state) const {
     auto dstOp = mlir::cast<mlir::DestinationStyleOpInterface>(op);
 
     llvm::SmallVector<mlir::Value> newOperands;
-    for (mlir::OpOperand& operand : op->getOpOperands()) {
+    for (mlir::OpOperand &operand : op->getOpOperands()) {
       if (mlir::isa<mlir::TensorType>(operand.get().getType())) {
         mlir::FailureOr<mlir::Value> buffer =
             getBuffer(rewriter, operand.get(), options, state);
@@ -60,7 +61,8 @@ struct HipDstBufferizableModel
     }
 
     // Recreate op with memref operands; no tensor results (writes in-place).
-    OpTy::create(rewriter, op->getLoc(), mlir::TypeRange{}, newOperands, op->getAttrs());
+    OpTy::create(rewriter, op->getLoc(), mlir::TypeRange{}, newOperands,
+                 op->getAttrs());
 
     // DPS convention: replace each tensor result with its tied init buffer.
     llvm::SmallVector<mlir::Value> replacements;
@@ -69,7 +71,7 @@ struct HipDstBufferizableModel
         replacements.push_back(result);
         continue;
       }
-      mlir::OpOperand* initOperand = dstOp.getTiedOpOperand(result);
+      mlir::OpOperand *initOperand = dstOp.getTiedOpOperand(result);
       mlir::FailureOr<mlir::Value> initBuffer =
           getBuffer(rewriter, initOperand->get(), options, state);
       if (mlir::failed(initBuffer))
@@ -77,13 +79,14 @@ struct HipDstBufferizableModel
       replacements.push_back(*initBuffer);
     }
 
-    mlir::bufferization::replaceOpWithBufferizedValues(rewriter, op, replacements);
+    mlir::bufferization::replaceOpWithBufferizedValues(rewriter, op,
+                                                       replacements);
     return mlir::success();
   }
 };
 
-void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry& registry) {
-  registry.addExtension(+[](mlir::MLIRContext* ctx, mlir::hip::HipDialect*) {
+void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
+  registry.addExtension(+[](mlir::MLIRContext *ctx, mlir::hip::HipDialect *) {
     mlir::hip::HipblasltMatmulOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::HipblasltMatmulOp>>(*ctx);
     mlir::hip::MiopenRmsNormOp::attachInterface<
@@ -109,9 +112,9 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry& registry) {
   });
 }
 
-}  // namespace
+} // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
   mlir::DialectRegistry registry;
   registry.insert<mlir::BuiltinDialect>();
   registry.insert<mlir::arith::ArithDialect>();
@@ -128,7 +131,8 @@ int main(int argc, char** argv) {
 #endif
 
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
-  mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(registry);
+  mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
+      registry);
   mlir::scf::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::tensor::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::memref::registerAllocationOpInterfaceExternalModels(registry);
@@ -148,9 +152,8 @@ int main(int argc, char** argv) {
   mlir::registerSCFToControlFlowPass();
   mlir::registerConvertControlFlowToLLVMPass();
   mlir::registerReconcileUnrealizedCastsPass();
-  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
-    return mlir::createCSEPass();
-  });
+  mlir::registerPass(
+      []() -> std::unique_ptr<mlir::Pass> { return mlir::createCSEPass(); });
   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
     return mlir::createCanonicalizerPass();
   });

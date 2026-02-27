@@ -16,15 +16,16 @@
 #include <hip/hip_runtime_api.h>
 #include <vector>
 
-extern "C" __declspec(dllimport) void two_rms_norms(
-    float* A_a, float* A_al, int64_t A_o, int64_t A_s0, int64_t A_s1,
-    int64_t A_s2, int64_t A_st0, int64_t A_st1, int64_t A_st2, float* W0_a,
-    float* W0_al, int64_t W0_o, int64_t W0_s0, int64_t W0_st0, float* W1_a,
-    float* W1_al, int64_t W1_o, int64_t W1_s0, int64_t W1_st0, float* B_a,
-    float* B_al, int64_t B_o, int64_t B_s0, int64_t B_s1, int64_t B_s2,
-    int64_t B_st0, int64_t B_st1, int64_t B_st2);
+extern "C" __declspec(dllimport) void
+two_rms_norms(float *A_a, float *A_al, int64_t A_o, int64_t A_s0, int64_t A_s1,
+              int64_t A_s2, int64_t A_st0, int64_t A_st1, int64_t A_st2,
+              float *W0_a, float *W0_al, int64_t W0_o, int64_t W0_s0,
+              int64_t W0_st0, float *W1_a, float *W1_al, int64_t W1_o,
+              int64_t W1_s0, int64_t W1_st0, float *B_a, float *B_al,
+              int64_t B_o, int64_t B_s0, int64_t B_s1, int64_t B_s2,
+              int64_t B_st0, int64_t B_st1, int64_t B_st2);
 
-static void cpu_rms_norm(const float* in, const float* w, float* out,
+static void cpu_rms_norm(const float *in, const float *w, float *out,
                          int64_t rows, int64_t D, float eps) {
   for (int64_t n = 0; n < rows; ++n) {
     float sq = 0;
@@ -38,14 +39,14 @@ static void cpu_rms_norm(const float* in, const float* w, float* out,
   }
 }
 
-#define HIP_CHECK(call)                                            \
-  do {                                                             \
-    hipError_t e = (call);                                         \
-    if (e != hipSuccess) {                                         \
-      fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__, \
-              hipGetErrorString(e));                               \
-      exit(1);                                                     \
-    }                                                              \
+#define HIP_CHECK(call)                                                        \
+  do {                                                                         \
+    hipError_t e = (call);                                                     \
+    if (e != hipSuccess) {                                                     \
+      fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__,             \
+              hipGetErrorString(e));                                           \
+      exit(1);                                                                 \
+    }                                                                          \
   } while (0)
 
 int main() {

@@ -17,16 +17,17 @@
 #include <hip/hip_runtime_api.h>
 #include <vector>
 
-extern "C" __declspec(dllimport) void two_matmuls(
-    float* A_a, float* A_al, int64_t A_o, int64_t A_s0, int64_t A_s1,
-    int64_t A_s2, int64_t A_st0, int64_t A_st1, int64_t A_st2, float* B0_a,
-    float* B0_al, int64_t B0_o, int64_t B0_s0, int64_t B0_s1, int64_t B0_st0,
-    int64_t B0_st1, float* B1_a, float* B1_al, int64_t B1_o, int64_t B1_s0,
-    int64_t B1_s1, int64_t B1_st0, int64_t B1_st1, float* C_a, float* C_al,
-    int64_t C_o, int64_t C_s0, int64_t C_s1, int64_t C_s2, int64_t C_st0,
-    int64_t C_st1, int64_t C_st2);
+extern "C" __declspec(dllimport) void
+two_matmuls(float *A_a, float *A_al, int64_t A_o, int64_t A_s0, int64_t A_s1,
+            int64_t A_s2, int64_t A_st0, int64_t A_st1, int64_t A_st2,
+            float *B0_a, float *B0_al, int64_t B0_o, int64_t B0_s0,
+            int64_t B0_s1, int64_t B0_st0, int64_t B0_st1, float *B1_a,
+            float *B1_al, int64_t B1_o, int64_t B1_s0, int64_t B1_s1,
+            int64_t B1_st0, int64_t B1_st1, float *C_a, float *C_al,
+            int64_t C_o, int64_t C_s0, int64_t C_s1, int64_t C_s2,
+            int64_t C_st0, int64_t C_st1, int64_t C_st2);
 
-static void cpu_matmul(const float* A, const float* B, float* C, int64_t M,
+static void cpu_matmul(const float *A, const float *B, float *C, int64_t M,
                        int64_t K, int64_t N) {
   for (int64_t i = 0; i < M; ++i)
     for (int64_t j = 0; j < N; ++j) {
@@ -37,22 +38,21 @@ static void cpu_matmul(const float* A, const float* B, float* C, int64_t M,
     }
 }
 
-#define HIP_CHECK(call)                                            \
-  do {                                                             \
-    hipError_t e = (call);                                         \
-    if (e != hipSuccess) {                                         \
-      fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__, \
-              hipGetErrorString(e));                               \
-      exit(1);                                                     \
-    }                                                              \
+#define HIP_CHECK(call)                                                        \
+  do {                                                                         \
+    hipError_t e = (call);                                                     \
+    if (e != hipSuccess) {                                                     \
+      fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__,             \
+              hipGetErrorString(e));                                           \
+      exit(1);                                                                 \
+    }                                                                          \
   } while (0)
 
 int main() {
   const int64_t B = 1, S = 4, K = 8, N = 4, P = 4;
-  printf(
-      "3D matmul test: A[%lld,%lld,%lld] @ B0[%lld,%lld] -> tmp, tmp @ "
-      "B1[%lld,%lld] -> C\n",
-      B, S, K, K, N, N, P);
+  printf("3D matmul test: A[%lld,%lld,%lld] @ B0[%lld,%lld] -> tmp, tmp @ "
+         "B1[%lld,%lld] -> C\n",
+         B, S, K, K, N, N, P);
 
   std::vector<float> h_A(B * S * K), h_B0(K * N), h_B1(N * P);
   std::vector<float> h_C(B * S * P, 0), h_ref(B * S * P);

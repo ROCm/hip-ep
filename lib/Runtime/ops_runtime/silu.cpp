@@ -15,7 +15,7 @@
 #include <cstdio>
 #include <hip/hip_runtime_api.h>
 
-extern "C" void hip_silu(void* /*handle*/, void* /*input*/, void* output) {
+extern "C" void hip_silu(void * /*handle*/, void * /*input*/, void *output) {
   (void)output;
   fprintf(stderr,
           "[hip_silu] stub called -- output not zeroed (no size info)\n");

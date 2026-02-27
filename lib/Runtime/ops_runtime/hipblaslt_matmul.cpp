@@ -25,29 +25,30 @@
 #include <cstdlib>
 #include <cstring>
 
-#define HIPBLASLT_CHECK(call)                                              \
-  do {                                                                     \
-    hipblasStatus_t status = (call);                                       \
-    if (status != HIPBLAS_STATUS_SUCCESS) {                                \
-      fprintf(stderr, "hipBLAS-LT error at %s:%d (status=%d)\n", __FILE__, \
-              __LINE__, status);                                           \
-      return;                                                              \
-    }                                                                      \
+#define HIPBLASLT_CHECK(call)                                                  \
+  do {                                                                         \
+    hipblasStatus_t status = (call);                                           \
+    if (status != HIPBLAS_STATUS_SUCCESS) {                                    \
+      fprintf(stderr, "hipBLAS-LT error at %s:%d (status=%d)\n", __FILE__,     \
+              __LINE__, status);                                               \
+      return;                                                                  \
+    }                                                                          \
   } while (0)
 
-static void* ensure_device(void* ptr, size_t bytes) {
-  if (!ptr || bytes == 0) return ptr;
+static void *ensure_device(void *ptr, size_t bytes) {
+  if (!ptr || bytes == 0)
+    return ptr;
   hipPointerAttribute_t attrs = {};
   if (hipPointerGetAttributes(&attrs, ptr) == hipSuccess &&
-      (attrs.type == hipMemoryTypeDevice ||
-       attrs.type == hipMemoryTypeUnified))
+      (attrs.type == hipMemoryTypeDevice || attrs.type == hipMemoryTypeUnified))
     return ptr;
   // Non-HIP pointer (e.g. DLL .rdata constant).  Stage through a heap
   // buffer because HIP PAL's hipMemcpy can crash on read-only sections.
-  void* staging = malloc(bytes);
-  if (!staging) return ptr;
+  void *staging = malloc(bytes);
+  if (!staging)
+    return ptr;
   memcpy(staging, ptr, bytes);
-  void* d = nullptr;
+  void *d = nullptr;
   hipMalloc(&d, bytes);
   hipMemcpy(d, staging, bytes, hipMemcpyHostToDevice);
   free(staging);
@@ -55,8 +56,8 @@ static void* ensure_device(void* ptr, size_t bytes) {
   return d;
 }
 
-extern "C" void hip_hipblaslt_matmul(void* /*handle*/, void* A, void* B,
-                                     void* C, int64_t rankA, int64_t rankB,
+extern "C" void hip_hipblaslt_matmul(void * /*handle*/, void *A, void *B,
+                                     void *C, int64_t rankA, int64_t rankB,
                                      int64_t batch, int64_t M, int64_t K,
                                      int64_t N) {
   fprintf(stderr,
@@ -68,9 +69,9 @@ extern "C" void hip_hipblaslt_matmul(void* /*handle*/, void* A, void* B,
   size_t sizeA = batch * M * K * sizeof(float);
   size_t sizeB = (rankB < rankA ? K * N : batch * K * N) * sizeof(float);
   size_t sizeC = batch * M * N * sizeof(float);
-  void* devA = ensure_device(A, sizeA);
-  void* devB = ensure_device(B, sizeB);
-  void* devC = ensure_device(C, sizeC);
+  void *devA = ensure_device(A, sizeA);
+  void *devB = ensure_device(B, sizeB);
+  void *devC = ensure_device(C, sizeC);
   bool allocA = (devA != A), allocB = (devB != B), allocC = (devC != C);
 
   // hipBLAS-LT column-major: for row-major C = A @ B, compute C' = B' @ A'
@@ -82,8 +83,8 @@ extern "C" void hip_hipblaslt_matmul(void* /*handle*/, void* A, void* B,
   // blas_A = B (row-major), blas_B = A (row-major) -- swapped for col-major
   // trick
   int64_t stride_blas_a =
-      (rankB < rankA) ? 0 : K * N;  // B broadcast if lower rank
-  int64_t stride_blas_b = M * K;    // A always has batch stride
+      (rankB < rankA) ? 0 : K * N; // B broadcast if lower rank
+  int64_t stride_blas_b = M * K;   // A always has batch stride
   int64_t stride_c = M * N;
 
   hipblasLtHandle_t handle = nullptr;
@@ -144,7 +145,7 @@ extern "C" void hip_hipblaslt_matmul(void* /*handle*/, void* A, void* B,
   HIPBLASLT_CHECK(hipblasLtMatmulAlgoGetHeuristic(handle, desc, la, lb, lc, ld,
                                                   pref, 1, &result, &returned));
 
-  void* ws = nullptr;
+  void *ws = nullptr;
   if (returned > 0 && result.workspaceSize > 0)
     hipMalloc(&ws, result.workspaceSize);
 
@@ -170,7 +171,10 @@ extern "C" void hip_hipblaslt_matmul(void* /*handle*/, void* A, void* B,
   hipblasLtMatmulDescDestroy(desc);
   hipblasLtDestroy(handle);
 
-  if (allocA) hipFree(devA);
-  if (allocB) hipFree(devB);
-  if (allocC) hipFree(devC);
+  if (allocA)
+    hipFree(devA);
+  if (allocB)
+    hipFree(devB);
+  if (allocC)
+    hipFree(devC);
 }

@@ -22,7 +22,7 @@
 #include <hip/hip_runtime_api.h>
 #include <vector>
 
-extern "C" void hip_transpose(void* /*handle*/, void* input, void* output,
+extern "C" void hip_transpose(void * /*handle*/, void *input, void *output,
                               int64_t rank, int64_t dim0, int64_t dim1,
                               int64_t s0, int64_t s1, int64_t s2) {
   int64_t shape[3] = {s0, s1, s2};

@@ -60,8 +60,8 @@ namespace {
 /// A memref.alloc and its live range within the entry block.
 struct AllocInterval {
   memref::AllocOp allocOp;
-  unsigned defIndex;      ///< Block index where the alloc occurs.
-  unsigned lastUseIndex;  ///< Block index of the last (transitive) use.
+  unsigned defIndex;     ///< Block index where the alloc occurs.
+  unsigned lastUseIndex; ///< Block index of the last (transitive) use.
 };
 
 /// A reusable memory slot: tracks the buffer, its type, when it becomes
@@ -69,7 +69,7 @@ struct AllocInterval {
 struct Slot {
   Value buffer;
   MemRefType type;
-  unsigned lastUseIndex;  ///< Updated when the slot is reused.
+  unsigned lastUseIndex; ///< Updated when the slot is reused.
   SmallVector<Value, 4> dynamicSizes;
 };
 
@@ -110,7 +110,7 @@ static SmallVector<int64_t> getContiguousStrides(MemRefType type) {
 ///
 /// Dynamic shapes: the MemRefType must be identical and every dynamic-size
 /// operand must be the same SSA value.
-static bool canReuse(const Slot& slot, MemRefType neededType,
+static bool canReuse(const Slot &slot, MemRefType neededType,
                      OperandRange neededDynSizes) {
   if (slot.type.getElementType() != neededType.getElementType())
     return false;
@@ -124,8 +124,7 @@ static bool canReuse(const Slot& slot, MemRefType neededType,
     return slotBytes >= neededBytes;
 
   if (slotBytes == 0 && neededBytes == 0 && slot.type == neededType) {
-    if (slot.dynamicSizes.size() !=
-        static_cast<size_t>(neededDynSizes.size()))
+    if (slot.dynamicSizes.size() != static_cast<size_t>(neededDynSizes.size()))
       return false;
     for (unsigned i = 0; i < slot.dynamicSizes.size(); ++i)
       if (slot.dynamicSizes[i] != neededDynSizes[i])
@@ -139,7 +138,7 @@ static bool canReuse(const Slot& slot, MemRefType neededType,
 /// Returns true if \p user produces a memref result that aliases its memref
 /// operand.  Covers ViewLikeOpInterface (subview, cast, reshape, etc.) and
 /// arith::SelectOp whose result may alias either operand.
-static bool isMemRefAlias(Operation* user) {
+static bool isMemRefAlias(Operation *user) {
   return isa<ViewLikeOpInterface, arith::SelectOp>(user);
 }
 
@@ -156,10 +155,10 @@ static bool isMemRefAlias(Operation* user) {
 ///   %sv   = memref.subview %buf[...] : ... to memref<...>   // alias, index 5
 ///   use(%sv)                                                 // index 15
 ///   -> buf.lastUse = 15 (not 3), preventing premature reuse
-static unsigned findLastTransitiveUseIndex(
-    Value value, Block& block,
-    const DenseMap<Operation*, unsigned>& opIndex,
-    unsigned blockSize) {
+static unsigned
+findLastTransitiveUseIndex(Value value, Block &block,
+                           const DenseMap<Operation *, unsigned> &opIndex,
+                           unsigned blockSize) {
   unsigned lastIdx = 0;
   SmallVector<Value> worklist = {value};
   DenseSet<Value> visited;
@@ -169,7 +168,7 @@ static unsigned findLastTransitiveUseIndex(
     if (!visited.insert(current).second)
       continue;
 
-    for (Operation* user : current.getUsers()) {
+    for (Operation *user : current.getUsers()) {
       if (isa<memref::DeallocOp>(user))
         continue;
 
@@ -177,7 +176,7 @@ static unsigned findLastTransitiveUseIndex(
       unsigned userIdx;
       if (it != opIndex.end()) {
         userIdx = it->second;
-      } else if (auto* ancestor = block.findAncestorOpInBlock(*user)) {
+      } else if (auto *ancestor = block.findAncestorOpInBlock(*user)) {
         userIdx = opIndex.lookup(ancestor);
       } else {
         userIdx = blockSize - 1;
@@ -212,12 +211,12 @@ void OptimizeMemRefsPass::runOnOperation() {
   if (!funcOp.getBody().hasOneBlock())
     return;
 
-  Block& block = funcOp.getBody().front();
+  Block &block = funcOp.getBody().front();
 
   // Assign each op a sequential index for interval ordering.
-  DenseMap<Operation*, unsigned> opIndex;
+  DenseMap<Operation *, unsigned> opIndex;
   unsigned idx = 0;
-  for (Operation& op : block)
+  for (Operation &op : block)
     opIndex[&op] = idx++;
   unsigned blockSize = idx;
 
@@ -225,7 +224,7 @@ void OptimizeMemRefsPass::runOnOperation() {
   // Liveness follows view-like and select ops transitively so that derived
   // views extend the source buffer's lifetime.
   SmallVector<AllocInterval> intervals;
-  for (Operation& op : block) {
+  for (Operation &op : block) {
     auto allocOp = dyn_cast<memref::AllocOp>(op);
     if (!allocOp)
       continue;
@@ -249,13 +248,13 @@ void OptimizeMemRefsPass::runOnOperation() {
   SmallVector<Slot> slots;
   SmallVector<std::pair<Value, Value>> replacements;
 
-  for (auto& interval : intervals) {
+  for (auto &interval : intervals) {
     MemRefType neededType = interval.allocOp.getType();
     auto neededDynSizes = interval.allocOp.getDynamicSizes();
 
-    Slot* bestSlot = nullptr;
+    Slot *bestSlot = nullptr;
     int64_t bestWaste = INT64_MAX;
-    for (auto& slot : slots) {
+    for (auto &slot : slots) {
       if (slot.lastUseIndex >= interval.defIndex)
         continue;
       if (!canReuse(slot, neededType, neededDynSizes))
@@ -283,10 +282,10 @@ void OptimizeMemRefsPass::runOnOperation() {
       replacements.emplace_back(interval.allocOp.getResult(), replacement);
       bestSlot->lastUseIndex = interval.lastUseIndex;
     } else {
-      slots.push_back(
-          {interval.allocOp.getResult(), neededType, interval.lastUseIndex,
-           SmallVector<Value, 4>(neededDynSizes.begin(),
-                                 neededDynSizes.end())});
+      slots.push_back({interval.allocOp.getResult(), neededType,
+                       interval.lastUseIndex,
+                       SmallVector<Value, 4>(neededDynSizes.begin(),
+                                             neededDynSizes.end())});
     }
   }
 
@@ -295,7 +294,7 @@ void OptimizeMemRefsPass::runOnOperation() {
   // would turn `memref.dealloc %replaced` into `memref.dealloc %reuser`,
   // causing a double-free.
   DenseMap<Value, memref::DeallocOp> allocToDealloc;
-  for (Operation& op : block) {
+  for (Operation &op : block) {
     if (auto deallocOp = dyn_cast<memref::DeallocOp>(op))
       allocToDealloc[deallocOp.getMemref()] = deallocOp;
   }
@@ -309,7 +308,7 @@ void OptimizeMemRefsPass::runOnOperation() {
 
     // When a returned alloc (no dealloc) is merged into a slot that has a
     // dealloc, the slot becomes the returned buffer and must not be freed.
-    bool oldIsReturned = llvm::any_of(oldVal.getUsers(), [](Operation* user) {
+    bool oldIsReturned = llvm::any_of(oldVal.getUsers(), [](Operation *user) {
       return isa<func::ReturnOp>(user);
     });
     if (oldIsReturned) {
@@ -324,6 +323,6 @@ void OptimizeMemRefsPass::runOnOperation() {
   }
 }
 
-}  // namespace
-}  // namespace hip
-}  // namespace mlir
+} // namespace
+} // namespace hip
+} // namespace mlir

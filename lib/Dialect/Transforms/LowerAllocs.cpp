@@ -30,7 +30,7 @@ namespace {
 /// without allocating new memory.  Uses the MLIR ViewLikeOpInterface so that
 /// any future view-like ops are automatically covered.  arith::SelectOp is
 /// included because its result may alias either memref operand.
-static bool isMemRefAlias(Operation* op) {
+static bool isMemRefAlias(Operation *op) {
   return isa<ViewLikeOpInterface, arith::SelectOp>(op);
 }
 
@@ -54,8 +54,8 @@ static AllocOp traceToHipAlloc(Value val) {
 ///
 /// Users in nested regions (e.g. scf.for body) are resolved to their
 /// ancestor in the entry block so that isBeforeInBlock remains valid.
-static Operation* findLastTransitiveUser(Value rootValue, Block& entryBlock) {
-  Operation* lastUser = rootValue.getDefiningOp();
+static Operation *findLastTransitiveUser(Value rootValue, Block &entryBlock) {
+  Operation *lastUser = rootValue.getDefiningOp();
   SmallVector<Value> worklist = {rootValue};
   DenseSet<Value> visited;
 
@@ -63,8 +63,8 @@ static Operation* findLastTransitiveUser(Value rootValue, Block& entryBlock) {
     Value val = worklist.pop_back_val();
     if (!visited.insert(val).second)
       continue;
-    for (Operation* user : val.getUsers()) {
-      Operation* resolved = user;
+    for (Operation *user : val.getUsers()) {
+      Operation *resolved = user;
       if (resolved->getBlock() != &entryBlock) {
         resolved = entryBlock.findAncestorOpInBlock(*resolved);
         if (!resolved)
@@ -91,10 +91,9 @@ void LowerAllocsPass::runOnOperation() {
   if (funcOp.empty())
     return;
   if (!funcOp.getBody().hasOneBlock()) {
-    funcOp.emitError(
-        "hip-lower-allocs requires single-block functions; "
-        "findLastTransitiveUser uses isBeforeInBlock which does "
-        "not generalize to multi-block control flow");
+    funcOp.emitError("hip-lower-allocs requires single-block functions; "
+                     "findLastTransitiveUser uses isBeforeInBlock which does "
+                     "not generalize to multi-block control flow");
     return signalPassFailure();
   }
 
@@ -115,9 +114,9 @@ void LowerAllocsPass::runOnOperation() {
   SmallVector<AllocOp> hipAllocs;
   for (memref::AllocOp allocOp : allocs) {
     builder.setInsertionPoint(allocOp);
-    auto hipAlloc = AllocOp::create(builder, allocOp.getLoc(),
-                                    allocOp.getType(), handle,
-                                    allocOp.getDynamicSizes());
+    auto hipAlloc =
+        AllocOp::create(builder, allocOp.getLoc(), allocOp.getType(), handle,
+                        allocOp.getDynamicSizes());
     allocOp.replaceAllUsesWith(hipAlloc.getResult());
     allocOp.erase();
     hipAllocs.push_back(hipAlloc);
@@ -143,7 +142,7 @@ void LowerAllocsPass::runOnOperation() {
         continue;
       if (returnedValues.contains(v))
         return true;
-      for (Operation* user : v.getUsers()) {
+      for (Operation *user : v.getUsers()) {
         if (isMemRefAlias(user))
           for (OpResult r : user->getResults())
             wl.push_back(r);
@@ -156,9 +155,9 @@ void LowerAllocsPass::runOnOperation() {
   // buffer-results-to-out-params may insert ops (e.g., memref.copy) after
   // the original destroy_handle position; the handle must stay valid until
   // all hip.free ops have executed.
-  Block& entry = funcOp.getBody().front();
-  Operation* terminator = entry.getTerminator();
-  Operation* destroyHandleOp = nullptr;
+  Block &entry = funcOp.getBody().front();
+  Operation *terminator = entry.getTerminator();
+  Operation *destroyHandleOp = nullptr;
   funcOp.walk([&](DestroyHandleOp op) { destroyHandleOp = op; });
   if (destroyHandleOp)
     destroyHandleOp->moveBefore(terminator);
@@ -191,12 +190,12 @@ void LowerAllocsPass::runOnOperation() {
     if (deallocated.contains(hipAlloc.getResult()))
       continue;
 
-    Operation* lastUser = findLastTransitiveUser(hipAlloc.getResult(), entry);
+    Operation *lastUser = findLastTransitiveUser(hipAlloc.getResult(), entry);
     builder.setInsertionPointAfter(lastUser);
     FreeOp::create(builder, hipAlloc.getLoc(), handle, hipAlloc.getResult());
   }
 }
 
-}  // namespace
-}  // namespace hip
-}  // namespace mlir
+} // namespace
+} // namespace hip
+} // namespace mlir
