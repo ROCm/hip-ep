@@ -91,4 +91,3 @@ coverage/
 *.crt
 .env
 .env.*
-tools/hip-opt/DESIGN.md
