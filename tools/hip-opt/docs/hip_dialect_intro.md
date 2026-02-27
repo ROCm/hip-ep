@@ -167,24 +167,17 @@ automatically becomes a device allocation after bufferization.
 
 ## Lowering Pipeline
 
-The canonical HIP dialect uses tensor types. The full lowering pipeline is:
+The `hip-compiler` accepts pre-bufferized `.hip.mlir` input (memref format).
+Bufferization is handled upstream. The `hip-compiler` pipeline is:
 
-1. **`--one-shot-bufferize`** — converts tensor DPS ops to memref in-place ops.
-   `tensor.empty` becomes `memref.alloc`; function tensor args become memref args.
-2. **`--hip-optimize-memrefs`** — liveness-based buffer reuse. Replaces
-   `memref.alloc` ops whose live ranges don't overlap with compatible earlier
-   allocations, reducing peak device memory. Supports static shapes (byte-size
-   matching with `reinterpret_cast`) and dynamic shapes (identical type + SSA values).
-3. **`--hip-lower-allocs`** — converts remaining `memref.alloc` to `hip.alloc`
-   (device allocation via `hipMalloc`) and inserts `hip.free` before
-   `hip.destroy_handle`. Buffers returned by the function are not freed.
-4. **`--convert-hip-to-llvm`** — lowers all HIP ops to LLVM dialect calls.
-5. Standard LLVM lowering passes: `--finalize-memref-to-llvm`, `--convert-arith-to-llvm`,
+1. **`--convert-hip-to-llvm`** — lowers all HIP ops to LLVM dialect calls.
+2. Standard LLVM lowering passes: `--finalize-memref-to-llvm`, `--convert-arith-to-llvm`,
    `--convert-func-to-llvm`, `--reconcile-unrealized-casts`.
 
-For **pre-bufferized `.hip.mlir`** inputs (memory pool + `memref.view` +
-`memref.global` constants), skip steps 1–3 and start from `--convert-hip-to-llvm`.
-Use `hip-compiler --no-bufferize` for this path.
+For reference, the upstream bufferization passes (not part of `hip-compiler`) are:
+- **`--one-shot-bufferize`** — converts tensor DPS ops to memref in-place ops.
+- **`--hip-optimize-memrefs`** — liveness-based buffer reuse.
+- **`--hip-lower-allocs`** — converts `memref.alloc` to `hip.alloc` + `hip.free`.
 
 Details of `--convert-hip-to-llvm`:
 
@@ -200,13 +193,11 @@ Details of `--convert-hip-to-llvm`:
 - **Region ops** are inlined: body ops moved to parent block, region op erased.
 - **`!hip.handle`** is converted to `!llvm.ptr`.
 
-The `hip-compiler` tool runs this full pipeline automatically, then translates
+The `hip-compiler` tool runs this pipeline automatically, then translates
 the resulting LLVM dialect to LLVM IR, generates a native `.obj`, and links it
 with `hip_runtime_static.lib` and external libraries to produce a `.dll`.
 
 For manual debugging, `hip-opt` can run the pass pipeline in isolation:
-`--one-shot-bufferize="bufferize-function-boundaries"`,
-`--hip-optimize-memrefs`, `--hip-lower-allocs`,
 `--convert-hip-to-llvm`, `--finalize-memref-to-llvm`, `--convert-arith-to-llvm`,
 `--convert-func-to-llvm`, `--reconcile-unrealized-casts`.
 
@@ -216,7 +207,7 @@ For manual debugging, `hip-opt` can run the pass pipeline in isolation:
 
 ```
 hip-opt.cpp              MLIR pass pipeline tool (for debugging)
-hip-compiler.cpp         One-stop MLIR-to-DLL compiler
+hip-compiler.cpp         Pre-bufferized MLIR-to-DLL compiler (no bufferization)
 HipDialect.td            Dialect definition (namespace "hip")
 HipTypes.td              Type definitions (!hip.handle)
 HipOps.td                All op definitions (DPS ins/outs format)
@@ -244,13 +235,12 @@ ops_runtime/                    (compiled into hip_runtime_static.lib by CMake)
   gqa.cpp                 Stub
 
 examples/
-  test_gemm.mlir          Two chained matmuls (DPS, hipBLASLt)
-  test_add.mlir           Two chained adds (DPS, MIOpen)
-  test_mul.mlir           Two chained muls (DPS, MIOpen)
-  test_rms_norm.mlir      Two chained RMS norms (DPS, MIOpen)
-  test_softmax.mlir       Two chained softmaxes (DPS, MIOpen)
-  test_attention.mlir     Single-head attention from composed ops (tensor DPS)
-  attention.hip.mlir      Pre-bufferized attention (memref pool + embedded weights)
+  gemm.hip.mlir           Two chained matmuls (hipBLASLt)
+  add.hip.mlir            Two chained adds (MIOpen)
+  mul.hip.mlir            Two chained muls (MIOpen)
+  rms_norm.hip.mlir       Two chained RMS norms (MIOpen)
+  softmax.hip.mlir        Two chained softmaxes (MIOpen)
+  attention.hip.mlir      Attention (memref pool + embedded weights)
   attention.onnx          ONNX model matching attention.hip.mlir (for ORT reference)
   test_e2e.mlir           Self-contained transformer layer
   model_hip.mlir          Generated HIP dialect from Llama-3.2-1B
@@ -259,7 +249,7 @@ examples/
   main_mul.cpp            C++ driver for test_mul (links mul.lib)
   main_rms_norm.cpp       C++ driver for test_rms_norm (links rms_norm.lib)
   main_softmax.cpp        C++ driver for test_softmax (links softmax.lib)
-  main_attention.cpp      C++ driver for attention.hip.mlir (ORT CPU ref vs GPU)
+  main_attention.cpp      C++ driver for attention (ORT CPU ref vs GPU)
   main_e2e.cpp            C++ driver for test_e2e
 
 scripts/
@@ -269,5 +259,5 @@ scripts/
   run_full_pipeline_miopen_mul.bat       Mul: hip-compiler + cl.exe driver
   run_full_pipeline_miopen_rms_norm.bat  RMS Norm: hip-compiler + cl.exe driver
   run_full_pipeline_miopen_softmax.bat   Softmax: hip-compiler + cl.exe driver
-  run_full_pipeline_attention.bat        Pre-bufferized attention: hip-compiler --no-bufferize + ORT reference
+  run_full_pipeline_attention.bat        Attention: hip-compiler + ORT reference
 ```

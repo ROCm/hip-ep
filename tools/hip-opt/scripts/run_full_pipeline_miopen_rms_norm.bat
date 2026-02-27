@@ -4,7 +4,7 @@
 ::
 @echo off
 REM === End-to-End RMS Norm Pipeline ===
-REM Compiles test_rms_norm.mlir to DLL and links with main driver
+REM Compiles rms_norm.hip.mlir to DLL and links with main driver
 
 call "%~dp0env.bat"
 
@@ -17,7 +17,7 @@ echo ============================================================
 
 echo.
 echo [1/2] Compiling MLIR to DLL
-"%HIP_OPT_BIN%\hip-compiler.exe" ..\examples\test_rms_norm.mlir -o rms_norm.dll
+"%HIP_OPT_BIN%\hip-compiler.exe" ..\examples\rms_norm.hip.mlir -o rms_norm.dll
 if errorlevel 1 (echo FAILED at step 1 && exit /b 1)
 echo      OK: rms_norm.dll
 

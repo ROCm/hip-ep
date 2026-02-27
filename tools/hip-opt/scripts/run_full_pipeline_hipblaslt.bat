@@ -4,7 +4,7 @@
 ::
 @echo off
 REM === End-to-End Matmul Pipeline ===
-REM Compiles test_gemm.mlir to DLL and links with main driver
+REM Compiles gemm.hip.mlir to DLL and links with main driver
 
 call "%~dp0env.bat"
 
@@ -17,7 +17,7 @@ echo ============================================================
 
 echo.
 echo [1/2] Compiling MLIR to DLL
-"%HIP_OPT_BIN%\hip-compiler.exe" ..\examples\test_gemm.mlir -o gemm.dll
+"%HIP_OPT_BIN%\hip-compiler.exe" ..\examples\gemm.hip.mlir -o gemm.dll
 if errorlevel 1 (echo FAILED at step 1 && exit /b 1)
 echo      OK: gemm.dll
 

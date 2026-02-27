@@ -4,7 +4,7 @@
 ::
 @echo off
 REM === End-to-End Softmax Pipeline ===
-REM Compiles test_softmax.mlir to DLL and links with main driver
+REM Compiles softmax.hip.mlir to DLL and links with main driver
 
 call "%~dp0env.bat"
 
@@ -17,7 +17,7 @@ echo ============================================================
 
 echo.
 echo [1/2] Compiling MLIR to DLL
-"%HIP_OPT_BIN%\hip-compiler.exe" ..\examples\test_softmax.mlir -o softmax.dll
+"%HIP_OPT_BIN%\hip-compiler.exe" ..\examples\softmax.hip.mlir -o softmax.dll
 if errorlevel 1 (echo FAILED at step 1 && exit /b 1)
 echo      OK: softmax.dll
 

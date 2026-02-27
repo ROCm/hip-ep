@@ -4,19 +4,10 @@
  */
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
-#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
-#include "mlir/Dialect/Bufferization/IR/DstBufferizableOpInterfaceImpl.h"
-#include "mlir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
-#include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/Dialect/SCF/Transforms/BufferizableOpInterfaceImpl.h"
-#include "mlir/Dialect/Tensor/IR/Tensor.h"
-#include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
@@ -41,7 +32,6 @@
 #include "llvm/TargetParser/Host.h"
 #include "llvm/TargetParser/Triple.h"
 
-#include "HipBufferize.h"
 #include "HipDialect.h"
 #include "HipPasses.h"
 
@@ -50,20 +40,16 @@
 int main(int argc, char** argv) {
   std::string inputFilename;
   std::string outputDll;
-  bool skipBufferize = false;
   for (int i = 1; i < argc; ++i) {
     if (std::string(argv[i]) == "-o" && i + 1 < argc) {
       outputDll = argv[++i];
-    } else if (std::string(argv[i]) == "--no-bufferize") {
-      skipBufferize = true;
     } else if (argv[i][0] != '-') {
       inputFilename = argv[i];
     }
   }
 
   if (inputFilename.empty() || outputDll.empty()) {
-    std::cerr << "Usage: " << argv[0]
-              << " [--no-bufferize] <input.mlir> -o <output.dll>\n";
+    std::cerr << "Usage: " << argv[0] << " <input.hip.mlir> -o <output.dll>\n";
     return 1;
   }
 
@@ -71,20 +57,11 @@ int main(int argc, char** argv) {
   mlir::DialectRegistry registry;
   registry.insert<mlir::BuiltinDialect>();
   registry.insert<mlir::arith::ArithDialect>();
-  registry.insert<mlir::bufferization::BufferizationDialect>();
   registry.insert<mlir::cf::ControlFlowDialect>();
   registry.insert<mlir::func::FuncDialect>();
   registry.insert<mlir::memref::MemRefDialect>();
-  registry.insert<mlir::scf::SCFDialect>();
-  registry.insert<mlir::tensor::TensorDialect>();
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::hip::HipDialect>();
-
-  mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
-  mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(registry);
-  mlir::scf::registerBufferizableOpInterfaceExternalModels(registry);
-  mlir::tensor::registerBufferizableOpInterfaceExternalModels(registry);
-  mlir::hip::registerHipBufferizableOpInterfaceModels(registry);
 
   mlir::registerBuiltinDialectTranslation(registry);
   mlir::registerLLVMDialectTranslation(registry);
@@ -108,15 +85,8 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // 2. Run MLIR PassManager
+  // 2. Run MLIR PassManager (input must be pre-bufferized memref IR)
   mlir::PassManager pm(&context);
-
-  if (!skipBufferize) {
-    mlir::bufferization::OneShotBufferizePassOptions bufOpts;
-    bufOpts.bufferizeFunctionBoundaries = true;
-    pm.addPass(mlir::bufferization::createOneShotBufferizePass(bufOpts));
-  }
-
   pm.addPass(mlir::hip::createConvertHipToLLVMPass());
   pm.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
   pm.addPass(mlir::createArithToLLVMConversionPass());
@@ -128,9 +98,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // 3. DLL Export Injection is done after translation to LLVM IR (step 4)
-
-  // 4. Translate MLIR to LLVM IR
+  // 3. Translate MLIR to LLVM IR
   llvm::LLVMContext llvmContext;
   auto llvmModule = mlir::translateModuleToLLVMIR(module.get(), llvmContext);
   if (!llvmModule) {
@@ -138,14 +106,13 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // Mark all non-declaration functions as dllexport so they appear in the DLL
   for (auto& func : *llvmModule) {
     if (!func.isDeclaration()) {
       func.setDLLStorageClass(llvm::GlobalValue::DLLExportStorageClass);
     }
   }
 
-  // 5. Code Generation to Object File
+  // 4. Code Generation to Object File
   llvm::InitializeNativeTarget();
   llvm::InitializeNativeTargetAsmPrinter();
 
@@ -186,7 +153,7 @@ int main(int argc, char** argv) {
 
   std::cout << "Generated temporary object: " << objFilename << "\n";
 
-  // 6. Link into DLL
+  // 5. Link into DLL
   auto linkerPath = llvm::sys::findProgramByName("lld-link");
   if (!linkerPath) {
     linkerPath = llvm::sys::findProgramByName("link.exe");
