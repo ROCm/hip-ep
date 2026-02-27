@@ -16,16 +16,16 @@ using namespace morphizen_cxx;
  * Extracts permutation from the 'perm' attribute.
  */
 struct Level2RocmTranspose {
-  static constexpr const char *LOG_PREFIX = "[ROCm Transpose L2]";
+  static constexpr const char* LOG_PREFIX = "[ROCm Transpose L2]";
 
-  Level2RocmTranspose(IPass &self) : self_{self} {}
+  Level2RocmTranspose(IPass& self) : self_{self} {}
 
-  std::unique_ptr<Rule> create_rule(IPass *self) {
+  std::unique_ptr<Rule> create_rule(IPass* self) {
     auto pattern = PatternBuilder().create_by_json(
-        std::string((const char *)transpose_json));
+        std::string((const char*)transpose_json));
 
     return Rule::create_rule(
-        pattern, [=](Graph *graph, binder_t &binder) -> bool {
+        pattern, [=](Graph* graph, binder_t& binder) -> bool {
           auto input = binder["input"];
           auto output = binder["output"];
 
@@ -35,7 +35,7 @@ struct Level2RocmTranspose {
           rocm::RocmParamProto rocm_param;
           rocm_param.set_op_type("transpose");
 
-          auto *transpose_params = rocm_param.mutable_transpose_params();
+          auto* transpose_params = rocm_param.mutable_transpose_params();
 
           // Get input shape
           auto in_shape = node_arg_get_shape_i64(*input.node_arg);
@@ -62,7 +62,7 @@ struct Level2RocmTranspose {
           transpose_params->set_ndim(ndim);
 
           // Get permutation from node attribute
-          auto *transpose_node = output.node;
+          auto* transpose_node = output.node;
           if (node_has_attr(*transpose_node, "perm")) {
             auto perm = node_get_attr_ints(*transpose_node, "perm");
             for (auto p : perm) {
@@ -110,12 +110,12 @@ struct Level2RocmTranspose {
         });
   }
 
-  void process(IPass &self, Graph &graph) {
+  void process(IPass& self, Graph& graph) {
     ROCM_LOG(1) << LOG_PREFIX << " Processing graph for Transpose patterns...";
     create_rule(&self)->apply(&graph);
   }
 
-  IPass &self_;
+  IPass& self_;
 };
 
 DEFINE_MORPHIZEN_PASS(Level2RocmTranspose, morphizen_pass_level2_rocm_transpose)

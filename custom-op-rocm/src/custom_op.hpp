@@ -33,9 +33,9 @@ using namespace morphizen;
  * GPU Operation Timeout Result
  */
 enum class TimeoutStatus {
-  SUCCESS, // Operation completed successfully
-  TIMEOUT, // Operation timed out
-  ERROR    // Error occurred
+  SUCCESS,  // Operation completed successfully
+  TIMEOUT,  // Operation timed out
+  ERROR     // Error occurred
 };
 
 /**
@@ -46,7 +46,7 @@ enum class TimeoutStatus {
  * @return TimeoutStatus indicating success, timeout, or error
  */
 inline TimeoutStatus WaitStreamWithTimeout(hipStream_t stream, int timeout_ms) {
-  const int poll_interval_ms = 10; // Poll every 10ms
+  const int poll_interval_ms = 10;  // Poll every 10ms
   auto start = std::chrono::steady_clock::now();
 
   while (true) {
@@ -97,15 +97,15 @@ inline TimeoutStatus WaitStreamWithTimeout(hipStream_t stream, int timeout_ms) {
  * session's PassContext is destroyed.
  */
 class HipContext {
-public:
+ public:
   HipContext();
   ~HipContext();
 
   // Non-copyable, non-movable (owns GPU resources)
-  HipContext(const HipContext &) = delete;
-  HipContext &operator=(const HipContext &) = delete;
-  HipContext(HipContext &&) = delete;
-  HipContext &operator=(HipContext &&) = delete;
+  HipContext(const HipContext&) = delete;
+  HipContext& operator=(const HipContext&) = delete;
+  HipContext(HipContext&&) = delete;
+  HipContext& operator=(HipContext&&) = delete;
 
   hipStream_t stream() const { return stream_; }
   miopenHandle_t miopen_handle() const { return miopen_handle_; }
@@ -120,12 +120,12 @@ public:
    */
   TimeoutStatus sync_stream_with_timeout(int timeout_ms = 0) const;
 
-private:
+ private:
   bool initialized_ = false;
   hipStream_t stream_ = nullptr;
   miopenHandle_t miopen_handle_ = nullptr;
   hipblasLtHandle_t hipblaslt_handle_ = nullptr;
-  mutable std::mutex algo_find_mutex_; // For thread-safe algorithm search
+  mutable std::mutex algo_find_mutex_;  // For thread-safe algorithm search
 };
 
 /**
@@ -145,11 +145,11 @@ private:
  * - We use shared_ptr so HipContext stays alive while any CustomOp uses it
  */
 class SessionContextRegistry {
-public:
+ public:
   /**
    * Get the singleton registry instance
    */
-  static SessionContextRegistry &instance() {
+  static SessionContextRegistry& instance() {
     static SessionContextRegistry registry;
     return registry;
   }
@@ -160,7 +160,7 @@ public:
    * @param ctx Pointer to PassContext (used as session identifier)
    * @return Shared pointer to HipContext
    */
-  std::shared_ptr<HipContext> get_or_create(const PassContext *ctx) {
+  std::shared_ptr<HipContext> get_or_create(const PassContext* ctx) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     // Cleanup expired entries first
@@ -172,7 +172,7 @@ public:
       if (locked) {
         LOG(INFO) << "[SessionContextRegistry] Reusing existing HipContext for "
                      "session "
-                  << static_cast<const void *>(ctx);
+                  << static_cast<const void*>(ctx);
         return locked;
       }
       // Entry exists but expired - will be replaced
@@ -183,7 +183,7 @@ public:
     contexts_[ctx] = new_context;
 
     LOG(INFO) << "[SessionContextRegistry] Created new HipContext for session "
-              << static_cast<const void *>(ctx)
+              << static_cast<const void*>(ctx)
               << " (total active sessions: " << count_active() << ")";
 
     return new_context;
@@ -192,12 +192,12 @@ public:
   /**
    * Explicitly remove a session's context (called when session ends)
    */
-  void remove(const PassContext *ctx) {
+  void remove(const PassContext* ctx) {
     std::lock_guard<std::mutex> lock(mutex_);
     contexts_.erase(ctx);
   }
 
-private:
+ private:
   SessionContextRegistry() = default;
 
   void cleanup_expired() {
@@ -205,7 +205,7 @@ private:
       if (it->second.expired()) {
         LOG(INFO) << "[SessionContextRegistry] Cleaning up expired context for "
                      "session "
-                  << static_cast<const void *>(it->first);
+                  << static_cast<const void*>(it->first);
         it = contexts_.erase(it);
       } else {
         ++it;
@@ -215,7 +215,7 @@ private:
 
   size_t count_active() const {
     size_t count = 0;
-    for (const auto &[key, weak_ctx] : contexts_) {
+    for (const auto& [key, weak_ctx] : contexts_) {
       if (!weak_ctx.expired())
         ++count;
     }
@@ -223,7 +223,7 @@ private:
   }
 
   std::mutex mutex_;
-  std::unordered_map<const PassContext *, std::weak_ptr<HipContext>> contexts_;
+  std::unordered_map<const PassContext*, std::weak_ptr<HipContext>> contexts_;
 };
 
 /**
@@ -233,19 +233,19 @@ private:
  */
 struct NodeRuntimeData {
   // Output buffers for this node (indexed by output_index)
-  std::vector<float *> output_buffers;
+  std::vector<float*> output_buffers;
   std::vector<size_t> output_sizes;
 
   // Weight buffers (cached on GPU)
-  float *d_weight = nullptr;
-  float *d_bias = nullptr;
+  float* d_weight = nullptr;
+  float* d_bias = nullptr;
 
   // Host-side cached weight/bias data
   std::vector<float> host_weight;
   std::vector<float> host_bias;
 
   // Workspace for this node
-  void *workspace = nullptr;
+  void* workspace = nullptr;
   size_t workspace_size = 0;
 
   // Cached algorithm for conv operations
@@ -261,7 +261,7 @@ struct NodeRuntimeData {
   size_t cached_gemm_workspace_size = 0;
 
   ~NodeRuntimeData() {
-    for (auto *buf : output_buffers) {
+    for (auto* buf : output_buffers) {
       if (buf)
         hipFree(buf);
     }
@@ -289,60 +289,60 @@ struct NodeRuntimeData {
  * - Per-session HipContext for GPU parallelism between sessions
  */
 class RocmCustomOp : public CustomOpImp {
-public:
+ public:
   RocmCustomOp(std::shared_ptr<const PassContext> context,
-               const std::shared_ptr<MetaDefProto> &meta_def,
-               onnxruntime::Model *model);
+               const std::shared_ptr<MetaDefProto>& meta_def,
+               onnxruntime::Model* model);
 
   virtual ~RocmCustomOp();
 
-private:
-  void Compute(const OrtApi *api, OrtKernelContext *context) const override;
+ private:
+  void Compute(const OrtApi* api, OrtKernelContext* context) const override;
 
   // Subgraph execution phases
-  void UploadExternalInputs(const OrtApi *api, OrtKernelContext *context) const;
-  void ExecuteSubgraph(const OrtApi *api, OrtKernelContext *context) const;
-  void DownloadExternalOutputs(const OrtApi *api,
-                               OrtKernelContext *context) const;
+  void UploadExternalInputs(const OrtApi* api, OrtKernelContext* context) const;
+  void ExecuteSubgraph(const OrtApi* api, OrtKernelContext* context) const;
+  void DownloadExternalOutputs(const OrtApi* api,
+                               OrtKernelContext* context) const;
 
   // Node execution
-  void ExecuteNode(const rocm::RocmNodeProto &node) const;
-  void ExecuteConvNode(int32_t node_id, const rocm::ConvParamProto &params,
-                       const std::vector<float *> &inputs, float *output) const;
-  void ExecuteGemmNode(int32_t node_id, const rocm::GemmParamProto &params,
-                       const std::vector<float *> &inputs, float *output) const;
-  void ExecuteMatmulNode(int32_t node_id, const rocm::MatmulParamProto &params,
-                         const std::vector<float *> &inputs,
-                         float *output) const;
+  void ExecuteNode(const rocm::RocmNodeProto& node) const;
+  void ExecuteConvNode(int32_t node_id, const rocm::ConvParamProto& params,
+                       const std::vector<float*>& inputs, float* output) const;
+  void ExecuteGemmNode(int32_t node_id, const rocm::GemmParamProto& params,
+                       const std::vector<float*>& inputs, float* output) const;
+  void ExecuteMatmulNode(int32_t node_id, const rocm::MatmulParamProto& params,
+                         const std::vector<float*>& inputs,
+                         float* output) const;
 
   // New ops execution (using rocm_kernels library)
-  void ExecuteMulNode(int32_t node_id, const rocm::MulParamProto &params,
-                      const std::vector<float *> &inputs, float *output) const;
+  void ExecuteMulNode(int32_t node_id, const rocm::MulParamProto& params,
+                      const std::vector<float*>& inputs, float* output) const;
   void ExecuteSoftmaxNode(int32_t node_id,
-                          const rocm::SoftmaxParamProto &params,
-                          const std::vector<float *> &inputs,
-                          float *output) const;
+                          const rocm::SoftmaxParamProto& params,
+                          const std::vector<float*>& inputs,
+                          float* output) const;
   void ExecuteReshapeNode(int32_t node_id,
-                          const rocm::ReshapeParamProto &params,
-                          const std::vector<float *> &inputs,
-                          float *output) const;
+                          const rocm::ReshapeParamProto& params,
+                          const std::vector<float*>& inputs,
+                          float* output) const;
   void ExecuteTransposeNode(int32_t node_id,
-                            const rocm::TransposeParamProto &params,
-                            const std::vector<float *> &inputs,
-                            float *output) const;
-  void ExecuteTileNode(int32_t node_id, const rocm::TileParamProto &params,
-                       const std::vector<float *> &inputs, float *output) const;
+                            const rocm::TransposeParamProto& params,
+                            const std::vector<float*>& inputs,
+                            float* output) const;
+  void ExecuteTileNode(int32_t node_id, const rocm::TileParamProto& params,
+                       const std::vector<float*>& inputs, float* output) const;
 
   // Tensor resolution
-  float *ResolveTensorRef(const rocm::TensorRefProto &ref) const;
+  float* ResolveTensorRef(const rocm::TensorRefProto& ref) const;
   size_t GetOutputSize(int32_t node_id, int32_t output_index) const;
 
   // Initialization
   void LoadAllWeights();
-  void LoadNodeWeights(int32_t node_id, const rocm::RocmParamProto &params);
+  void LoadNodeWeights(int32_t node_id, const rocm::RocmParamProto& params);
   void AllocateIntermediateBuffers();
 
-private:
+ private:
   // Per-session HIP context (stream + handles)
   // All CustomOps in the same session share this context
   std::shared_ptr<HipContext> hip_context_;
@@ -358,7 +358,7 @@ private:
   mutable std::vector<std::unique_ptr<NodeRuntimeData>> node_data_;
 
   // External input buffers (name -> device pointer)
-  mutable std::unordered_map<std::string, float *> external_input_buffers_;
+  mutable std::unordered_map<std::string, float*> external_input_buffers_;
   mutable std::unordered_map<std::string, size_t> external_input_sizes_;
 
   // Output index mapping for ORT (output_name -> ORT output index)
@@ -369,4 +369,4 @@ private:
   mutable bool buffers_allocated_ = false;
 };
 
-} // namespace hip_ep
+}  // namespace hip_ep
