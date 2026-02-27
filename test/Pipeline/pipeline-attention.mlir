@@ -16,7 +16,7 @@
 //   after lower-allocs:     4 hip.alloc, 3 hip.free (out is returned)
 //===----------------------------------------------------------------------===//
 
-// RUN: %mlir-hip-opt --one-shot-bufferize="bufferize-function-boundaries" --hip-optimize-memrefs --hip-lower-allocs %s | %FileCheck %s
+// RUN: %hip-mlir-opt --one-shot-bufferize="bufferize-function-boundaries" --hip-optimize-memrefs --hip-lower-allocs %s | %FileCheck %s
 
 // CHECK-LABEL: func.func @attention_pipeline
 

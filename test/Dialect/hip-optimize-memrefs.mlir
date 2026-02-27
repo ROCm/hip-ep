@@ -5,7 +5,7 @@
 // FileCheck tests for --hip-optimize-memrefs (liveness-based buffer reuse).
 //===----------------------------------------------------------------------===//
 
-// RUN: %mlir-hip-opt --hip-optimize-memrefs %s | %FileCheck %s
+// RUN: %hip-mlir-opt --hip-optimize-memrefs %s | %FileCheck %s
 
 // Three memref<2x64x64xf32> buffers: alloc0 becomes dead after matmul writes
 // alloc1, so alloc1 reuses alloc0. alloc2 (softmax output) is new.

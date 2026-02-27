@@ -3,5 +3,5 @@
 # ** Licensed under the MIT License.
 ##
 
-add_subdirectory(mlir-hip-opt)
+add_subdirectory(hip-mlir-opt)
 add_subdirectory(hip-compiler)

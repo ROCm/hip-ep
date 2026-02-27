@@ -9,7 +9,7 @@ level using destination-passing style (DPS) with tensor types. Bufferization to 
 is handled by a separate `--one-shot-bufferize` pass.
 
 ```
-model.onnx  -->  onnx-mlir  -->  onnx_dialect.mlir  -->  mlir-hip-opt --convert-onnx-to-hip
+model.onnx  -->  onnx-mlir  -->  onnx_dialect.mlir  -->  hip-mlir-opt --convert-onnx-to-hip
                                                            --one-shot-bufferize
                                                            --convert-hip-to-llvm ...
 ```
@@ -27,7 +27,7 @@ cmake .. \
   -DONNX_MLIR_BUILD=/path/to/onnx-mlir/build
 ```
 
-Without `-DONNX_MLIR_SRC`, mlir-hip-opt and hip-compiler build normally with HIP dialect
+Without `-DONNX_MLIR_SRC`, hip-mlir-opt and hip-compiler build normally with HIP dialect
 support only; the `--convert-onnx-to-hip` pass is simply not registered.
 
 **Known limitation:** onnx-mlir pins to an LLVM 22-dev commit (`0c2701fe7fa0`,
