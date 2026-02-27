@@ -15,9 +15,9 @@
  * execution_providers section.
  */
 
-static morphizen::ExecutionProvider *create_execution_provider_imp(
-    std::shared_ptr<const morphizen::PassContext> &context,
-    const morphizen::MetaDefProto &meta_def) {
+static morphizen::ExecutionProvider* create_execution_provider_imp(
+    std::shared_ptr<const morphizen::PassContext>& context,
+    const morphizen::MetaDefProto& meta_def) {
   return new morphizen::ExecutionProviderImp<rocm_ep::RocmCustomOp>(context,
                                                                     meta_def);
 }
@@ -28,5 +28,5 @@ namespace {
 // is the device passed to try_fuse() in the pass
 static ::morphizen::StaticPluginRegister
     __register("morphizen_custom_op_ROCm_EP", "create_execution_provider",
-               (void *)&create_execution_provider_imp);
-} // namespace
+               (void*)&create_execution_provider_imp);
+}  // namespace

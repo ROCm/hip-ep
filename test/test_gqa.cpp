@@ -28,18 +28,18 @@ std::wstring_convert<convert_t, wchar_t> strconverter;
 #endif
 
 // Simple environment variable helper
-static std::string get_env(const char *name,
-                           const std::string &default_value = "") {
-  const char *value = std::getenv(name);
+static std::string get_env(const char* name,
+                           const std::string& default_value = "") {
+  const char* value = std::getenv(name);
   return value ? value : default_value;
 }
 
-#define CHECK(expr, msg)                                                       \
-  do {                                                                         \
-    if (!(expr)) {                                                             \
-      std::cerr << __FILE__ << ":" << __LINE__ << " " << (msg) << std::endl;   \
-      std::abort();                                                            \
-    }                                                                          \
+#define CHECK(expr, msg)                                                     \
+  do {                                                                       \
+    if (!(expr)) {                                                           \
+      std::cerr << __FILE__ << ":" << __LINE__ << " " << (msg) << std::endl; \
+      std::abort();                                                          \
+    }                                                                        \
   } while (0)
 
 static void usage() {
@@ -75,27 +75,27 @@ struct GQAConfig {
 // Convert ONNX element type to string
 static std::string element_type_to_string(ONNXTensorElementDataType type) {
   switch (type) {
-  case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
-    return "float32";
-  case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
-    return "float16";
-  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
-    return "int64";
-  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
-    return "int32";
-  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
-    return "int8";
-  case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
-    return "uint8";
-  case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
-    return "bool";
-  default:
-    return "unknown";
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+      return "float32";
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+      return "float16";
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+      return "int64";
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+      return "int32";
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+      return "int8";
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+      return "uint8";
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
+      return "bool";
+    default:
+      return "unknown";
   }
 }
 
 // Calculate total number of elements
-static int64_t calculate_product(const std::vector<int64_t> &shape) {
+static int64_t calculate_product(const std::vector<int64_t>& shape) {
   int64_t total = 1;
   for (auto dim : shape) {
     if (dim > 0)
@@ -105,9 +105,9 @@ static int64_t calculate_product(const std::vector<int64_t> &shape) {
 }
 
 // Generate random float data
-static void fill_random_float(float *data, size_t size, float min_val = -1.0f,
+static void fill_random_float(float* data, size_t size, float min_val = -1.0f,
                               float max_val = 1.0f) {
-  static std::mt19937 rng(42); // Fixed seed for reproducibility
+  static std::mt19937 rng(42);  // Fixed seed for reproducibility
   std::uniform_real_distribution<float> dist(min_val, max_val);
   for (size_t i = 0; i < size; i++) {
     data[i] = dist(rng);
@@ -115,7 +115,7 @@ static void fill_random_float(float *data, size_t size, float min_val = -1.0f,
 }
 
 // Generate random int64 data
-static void fill_random_int64(int64_t *data, size_t size, int64_t min_val = 0,
+static void fill_random_int64(int64_t* data, size_t size, int64_t min_val = 0,
                               int64_t max_val = 100) {
   static std::mt19937 rng(42);
   std::uniform_int_distribution<int64_t> dist(min_val, max_val);
@@ -125,7 +125,7 @@ static void fill_random_int64(int64_t *data, size_t size, int64_t min_val = 0,
 }
 
 // Generate random int32 data
-static void fill_random_int32(int32_t *data, size_t size, int32_t min_val = 0,
+static void fill_random_int32(int32_t* data, size_t size, int32_t min_val = 0,
                               int32_t max_val = 100) {
   static std::mt19937 rng(42);
   std::uniform_int_distribution<int32_t> dist(min_val, max_val);
@@ -135,10 +135,9 @@ static void fill_random_int32(int32_t *data, size_t size, int32_t min_val = 0,
 }
 
 class GQATester {
-public:
-  GQATester(const std::filesystem::path &model_path, GQAConfig &config)
+ public:
+  GQATester(const std::filesystem::path& model_path, GQAConfig& config)
       : config_(config), model_path_(model_path) {
-
     const std::string kRegistrationName =
         get_env("EP_KREGISTERATIONNAME", "MorphiZenExecutionProvider");
 
@@ -156,7 +155,7 @@ public:
 
     // Determine log level from environment variable ORT_LOG_LEVEL
     OrtLoggingLevel ort_log_level = ORT_LOGGING_LEVEL_WARNING;
-    const char *log_level_env = std::getenv("ORT_LOG_LEVEL");
+    const char* log_level_env = std::getenv("ORT_LOG_LEVEL");
     if (log_level_env != nullptr) {
       std::string log_level_str(log_level_env);
       if (log_level_str == "info") {
@@ -211,7 +210,7 @@ public:
     // Configure EP if enabled
     if (config_.enable_ep) {
       std::vector<Ort::ConstEpDevice> selected_devices;
-      for (const auto &device : env_->GetEpDevices()) {
+      for (const auto& device : env_->GetEpDevices()) {
         if (device.EpName() == kRegistrationName) {
           selected_devices.emplace_back(device);
         }
@@ -326,8 +325,8 @@ public:
   }
 
   // Resolve dynamic dimensions in shape
-  std::vector<int64_t> ResolveShape(const std::vector<int64_t> &shape,
-                                    const std::string &name) {
+  std::vector<int64_t> ResolveShape(const std::vector<int64_t>& shape,
+                                    const std::string& name) {
     std::vector<int64_t> resolved = shape;
 
     for (size_t i = 0; i < resolved.size(); i++) {
@@ -365,8 +364,8 @@ public:
     std::vector<std::vector<int64_t>> int64_buffers;
     std::vector<std::vector<int32_t>> int32_buffers;
     std::vector<Ort::Value> input_tensors;
-    std::vector<const char *> input_name_ptrs;
-    std::vector<const char *> output_name_ptrs;
+    std::vector<const char*> input_name_ptrs;
+    std::vector<const char*> output_name_ptrs;
 
     for (size_t i = 0; i < num_inputs_; i++) {
       auto resolved_shape = ResolveShape(input_shapes_[i], input_names_[i]);
@@ -378,70 +377,70 @@ public:
       }
 
       switch (input_types_[i]) {
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: {
-        float_buffers.emplace_back(num_elements);
-        fill_random_float(float_buffers.back().data(), num_elements);
-        input_tensors.push_back(Ort::Value::CreateTensor<float>(
-            memory_info, float_buffers.back().data(), num_elements,
-            resolved_shape.data(), resolved_shape.size()));
-        break;
-      }
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: {
-        // For FP16, we allocate as uint16_t
-        std::vector<uint16_t> fp16_data(num_elements);
-        // Initialize with zero (proper FP16 conversion would be needed for real
-        // data)
-        std::fill(fp16_data.begin(), fp16_data.end(), 0);
-        input_tensors.push_back(Ort::Value::CreateTensor(
-            memory_info, fp16_data.data(), num_elements * sizeof(uint16_t),
-            resolved_shape.data(), resolved_shape.size(),
-            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16));
-        break;
-      }
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64: {
-        int64_buffers.emplace_back(num_elements);
-        // For seqlens inputs, use appropriate values
-        if (input_names_[i].find("seqlens") != std::string::npos) {
-          std::fill(int64_buffers.back().begin(), int64_buffers.back().end(),
-                    config_.seq_len);
-        } else if (input_names_[i].find("total_sequence_length") !=
-                   std::string::npos) {
-          std::fill(int64_buffers.back().begin(), int64_buffers.back().end(),
-                    config_.seq_len);
-        } else {
-          fill_random_int64(int64_buffers.back().data(), num_elements, 0, 100);
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: {
+          float_buffers.emplace_back(num_elements);
+          fill_random_float(float_buffers.back().data(), num_elements);
+          input_tensors.push_back(Ort::Value::CreateTensor<float>(
+              memory_info, float_buffers.back().data(), num_elements,
+              resolved_shape.data(), resolved_shape.size()));
+          break;
         }
-        input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
-            memory_info, int64_buffers.back().data(), num_elements,
-            resolved_shape.data(), resolved_shape.size()));
-        break;
-      }
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32: {
-        int32_buffers.emplace_back(num_elements);
-        if (input_names_[i].find("seqlens") != std::string::npos) {
-          std::fill(int32_buffers.back().begin(), int32_buffers.back().end(),
-                    config_.seq_len);
-        } else if (input_names_[i].find("total_sequence_length") !=
-                   std::string::npos) {
-          std::fill(int32_buffers.back().begin(), int32_buffers.back().end(),
-                    config_.seq_len);
-        } else {
-          fill_random_int32(int32_buffers.back().data(), num_elements, 0, 100);
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: {
+          // For FP16, we allocate as uint16_t
+          std::vector<uint16_t> fp16_data(num_elements);
+          // Initialize with zero (proper FP16 conversion would be needed for real
+          // data)
+          std::fill(fp16_data.begin(), fp16_data.end(), 0);
+          input_tensors.push_back(Ort::Value::CreateTensor(
+              memory_info, fp16_data.data(), num_elements * sizeof(uint16_t),
+              resolved_shape.data(), resolved_shape.size(),
+              ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16));
+          break;
         }
-        input_tensors.push_back(Ort::Value::CreateTensor<int32_t>(
-            memory_info, int32_buffers.back().data(), num_elements,
-            resolved_shape.data(), resolved_shape.size()));
-        break;
-      }
-      default:
-        std::cerr << "Unsupported input type: "
-                  << element_type_to_string(input_types_[i]) << std::endl;
-        // Create empty tensor with float type as fallback
-        float_buffers.emplace_back(1, 0.0f);
-        input_tensors.push_back(Ort::Value::CreateTensor<float>(
-            memory_info, float_buffers.back().data(), 1, resolved_shape.data(),
-            resolved_shape.size()));
-        break;
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64: {
+          int64_buffers.emplace_back(num_elements);
+          // For seqlens inputs, use appropriate values
+          if (input_names_[i].find("seqlens") != std::string::npos) {
+            std::fill(int64_buffers.back().begin(), int64_buffers.back().end(),
+                      config_.seq_len);
+          } else if (input_names_[i].find("total_sequence_length") !=
+                     std::string::npos) {
+            std::fill(int64_buffers.back().begin(), int64_buffers.back().end(),
+                      config_.seq_len);
+          } else {
+            fill_random_int64(int64_buffers.back().data(), num_elements, 0, 100);
+          }
+          input_tensors.push_back(Ort::Value::CreateTensor<int64_t>(
+              memory_info, int64_buffers.back().data(), num_elements,
+              resolved_shape.data(), resolved_shape.size()));
+          break;
+        }
+        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32: {
+          int32_buffers.emplace_back(num_elements);
+          if (input_names_[i].find("seqlens") != std::string::npos) {
+            std::fill(int32_buffers.back().begin(), int32_buffers.back().end(),
+                      config_.seq_len);
+          } else if (input_names_[i].find("total_sequence_length") !=
+                     std::string::npos) {
+            std::fill(int32_buffers.back().begin(), int32_buffers.back().end(),
+                      config_.seq_len);
+          } else {
+            fill_random_int32(int32_buffers.back().data(), num_elements, 0, 100);
+          }
+          input_tensors.push_back(Ort::Value::CreateTensor<int32_t>(
+              memory_info, int32_buffers.back().data(), num_elements,
+              resolved_shape.data(), resolved_shape.size()));
+          break;
+        }
+        default:
+          std::cerr << "Unsupported input type: "
+                    << element_type_to_string(input_types_[i]) << std::endl;
+          // Create empty tensor with float type as fallback
+          float_buffers.emplace_back(1, 0.0f);
+          input_tensors.push_back(Ort::Value::CreateTensor<float>(
+              memory_info, float_buffers.back().data(), 1, resolved_shape.data(),
+              resolved_shape.size()));
+          break;
       }
 
       input_name_ptrs.push_back(input_names_[i].c_str());
@@ -465,7 +464,7 @@ public:
         if (config_.verbose) {
           std::cout << "  Warmup " << (i + 1) << " completed" << std::endl;
         }
-      } catch (const Ort::Exception &e) {
+      } catch (const Ort::Exception& e) {
         std::cerr << "Warmup error: " << e.what() << std::endl;
         return;
       }
@@ -513,7 +512,7 @@ public:
 
             // Print sample output values
             if (output_types_[j] == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-              float *data = output_tensors[j].GetTensorMutableData<float>();
+              float* data = output_tensors[j].GetTensorMutableData<float>();
               int64_t num_elements = calculate_product(output_shape);
               std::cout << "    First 5 values: ";
               for (int64_t k = 0; k < std::min(int64_t(5), num_elements); k++) {
@@ -526,7 +525,7 @@ public:
           std::cout << std::endl;
         }
 
-      } catch (const Ort::Exception &e) {
+      } catch (const Ort::Exception& e) {
         std::cerr << "Inference error: " << e.what() << std::endl;
         return;
       }
@@ -570,8 +569,8 @@ public:
               << (1000.0 / mean) << " infer/sec" << std::endl;
   }
 
-private:
-  GQAConfig &config_;
+ private:
+  GQAConfig& config_;
   std::filesystem::path model_path_;
 
   std::unique_ptr<Ort::Env> env_;
@@ -590,7 +589,7 @@ private:
 };
 
 // Simple command line argument parsing (no getopt dependency)
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
   GQAConfig config;
   std::string model_path;
 
@@ -639,10 +638,10 @@ int main(int argc, char *argv[]) {
   try {
     GQATester tester(model_path, config);
     tester.Run();
-  } catch (const Ort::Exception &e) {
+  } catch (const Ort::Exception& e) {
     std::cerr << "ONNX Runtime error: " << e.what() << std::endl;
     return 1;
-  } catch (const std::exception &e) {
+  } catch (const std::exception& e) {
     std::cerr << "Error: " << e.what() << std::endl;
     return 1;
   }

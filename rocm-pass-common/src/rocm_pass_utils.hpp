@@ -27,10 +27,10 @@ namespace rocm_pass {
  * @param tensor_name Original tensor name from the graph
  * @return Sanitized filename with .bin extension
  */
-inline std::string generate_weight_filename(const std::string &prefix,
-                                            const std::string &tensor_name) {
+inline std::string generate_weight_filename(const std::string& prefix,
+                                            const std::string& tensor_name) {
   std::string sanitized_name = tensor_name;
-  for (auto &c : sanitized_name) {
+  for (auto& c : sanitized_name) {
     if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' ||
         c == '<' || c == '>' || c == '|') {
       c = '_';
@@ -58,13 +58,12 @@ inline std::string generate_weight_filename(const std::string &prefix,
  * @param log_prefix Logging prefix (e.g., "[ROCm Conv L2]", "[ROCm Gemm L2]")
  * @return true if fusion succeeded, false otherwise
  */
-inline bool finalize_level2_fuse(morphizen::IPass *self,
-                                 morphizen::Graph &graph,
-                                 morphizen::MetaDefProto &meta_def,
-                                 const rocm::RocmParamProto &rocm_param,
-                                 const std::string &output_name,
-                                 const std::string &log_prefix) {
-
+inline bool finalize_level2_fuse(morphizen::IPass* self,
+                                 morphizen::Graph& graph,
+                                 morphizen::MetaDefProto& meta_def,
+                                 const rocm::RocmParamProto& rocm_param,
+                                 const std::string& output_name,
+                                 const std::string& log_prefix) {
   // Serialize params to JSON
   std::string rocm_param_json;
   auto status =
@@ -92,11 +91,11 @@ inline bool finalize_level2_fuse(morphizen::IPass *self,
 
   // Use level_2_fuse() - does NOT update context.json
   // Level-1 will call fuse() after merging subgraphs
-  const auto &fused_node = self->level_2_fuse(graph, meta_def);
+  const auto& fused_node = self->level_2_fuse(graph, meta_def);
 
   // Add node attribute to mark this as ROCm fused node
   // const_cast is needed because level_2_fuse returns const Node&
-  morphizen::Node &mutable_node = const_cast<morphizen::Node &>(fused_node);
+  morphizen::Node& mutable_node = const_cast<morphizen::Node&>(fused_node);
   morphizen::NodeAttributesBuilder attr_builder;
   attr_builder.add("rocm_param_file", param_filename);
   attr_builder.merge_into(mutable_node);
@@ -117,10 +116,9 @@ inline bool finalize_level2_fuse(morphizen::IPass *self,
  * @return true if write succeeded, false otherwise
  */
 inline bool save_weight_to_cache(
-    const std::shared_ptr<morphizen::PassContext> &pass_context,
-    const gsl::span<const float> &weight_data, const std::string &filename,
-    const std::string &log_prefix) {
-
+    const std::shared_ptr<morphizen::PassContext>& pass_context,
+    const gsl::span<const float>& weight_data, const std::string& filename,
+    const std::string& log_prefix) {
   size_t weight_bytes = weight_data.size() * sizeof(float);
   auto writer = pass_context->open_file_for_write(filename);
   if (writer) {
@@ -135,4 +133,4 @@ inline bool save_weight_to_cache(
   }
 }
 
-} // namespace rocm_pass
+}  // namespace rocm_pass

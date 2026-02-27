@@ -16,7 +16,7 @@ namespace rocm_kernels {
 // Add Bias Implementation (for Conv)
 //============================================================================
 
-void add_bias_nchw(float *data, const float *bias, int64_t batch,
+void add_bias_nchw(float* data, const float* bias, int64_t batch,
                    int64_t channels, int64_t spatial_size, hipStream_t stream) {
   int64_t total_size = batch * channels * spatial_size;
   launch_add_bias_nchw_f32(data, bias, channels, spatial_size, total_size,
@@ -27,17 +27,17 @@ void add_bias_nchw(float *data, const float *bias, int64_t batch,
 // Mul Implementation
 //============================================================================
 
-void mul(const float *a, const float *b, float *output, int64_t size_out,
+void mul(const float* a, const float* b, float* output, int64_t size_out,
          int64_t size_a, int64_t size_b, hipStream_t stream) {
   launch_mul_f32(a, b, output, size_out, size_a, size_b, stream);
 }
 
-void mul_elementwise(const float *a, const float *b, float *output,
+void mul_elementwise(const float* a, const float* b, float* output,
                      int64_t total_size, int64_t b_size, hipStream_t stream) {
   launch_mul_elementwise_f32(a, b, output, total_size, b_size, stream);
 }
 
-void mul_scalar(const float *a, float scalar, float *output, int64_t size,
+void mul_scalar(const float* a, float scalar, float* output, int64_t size,
                 hipStream_t stream) {
   launch_mul_scalar_f32(a, scalar, output, size, stream);
 }
@@ -46,12 +46,12 @@ void mul_scalar(const float *a, float scalar, float *output, int64_t size,
 // Softmax Implementation - calls precompiled kernel
 //============================================================================
 
-void softmax(const float *input, float *output, int64_t batch, int64_t dim,
+void softmax(const float* input, float* output, int64_t batch, int64_t dim,
              hipStream_t stream) {
   launch_softmax_f32(input, output, batch, dim, stream);
 }
 
-void softmax_3d(const float *input, float *output, int64_t axis_size,
+void softmax_3d(const float* input, float* output, int64_t axis_size,
                 int64_t inner_size, int64_t outer_size, hipStream_t stream) {
   if (inner_size == 1) {
     // Use optimized 2D kernel when inner_size is 1
@@ -67,7 +67,7 @@ void softmax_3d(const float *input, float *output, int64_t axis_size,
 // Reshape Implementation (just a memory copy)
 //============================================================================
 
-void reshape_copy(const float *input, float *output, int64_t size,
+void reshape_copy(const float* input, float* output, int64_t size,
                   hipStream_t stream) {
   launch_reshape_copy_f32(input, output, size, stream);
 }
@@ -76,8 +76,8 @@ void reshape_copy(const float *input, float *output, int64_t size,
 // Transpose Implementation - calls precompiled kernels
 //============================================================================
 
-void transpose(const float *input, float *output, const int64_t *in_shape,
-               const int64_t *out_shape, const int32_t *perm, int32_t ndim,
+void transpose(const float* input, float* output, const int64_t* in_shape,
+               const int64_t* out_shape, const int32_t* perm, int32_t ndim,
                int64_t total_size, hipStream_t stream) {
   if (ndim == 4) {
     // Convert int32_t perm to int64_t for kernel (implicit promotion)
@@ -93,7 +93,7 @@ void transpose(const float *input, float *output, const int64_t *in_shape,
   }
 }
 
-void transpose_0213(const float *input, float *output, int64_t n, int64_t a,
+void transpose_0213(const float* input, float* output, int64_t n, int64_t a,
                     int64_t b, int64_t c, hipStream_t stream) {
   launch_transpose_0213_f32(input, output, n, a, b, c, stream);
 }
@@ -102,8 +102,8 @@ void transpose_0213(const float *input, float *output, int64_t n, int64_t a,
 // Tile Implementation - calls precompiled kernels
 //============================================================================
 
-void tile(const float *input, float *output, const int64_t *in_shape,
-          const int64_t *repeats, int32_t ndim, int64_t in_size,
+void tile(const float* input, float* output, const int64_t* in_shape,
+          const int64_t* repeats, int32_t ndim, int64_t in_size,
           int64_t out_size, hipStream_t stream) {
   if (in_size == out_size) {
     // No tiling needed
@@ -127,4 +127,4 @@ void tile(const float *input, float *output, const int64_t *in_shape,
   }
 }
 
-} // namespace rocm_kernels
+}  // namespace rocm_kernels

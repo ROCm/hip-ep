@@ -28,9 +28,9 @@ namespace rocm_ep {
  * GPU Operation Timeout Result
  */
 enum class TimeoutStatus {
-  SUCCESS, // Operation completed successfully
-  TIMEOUT, // Operation timed out
-  ERROR    // Error occurred
+  SUCCESS,  // Operation completed successfully
+  TIMEOUT,  // Operation timed out
+  ERROR     // Error occurred
 };
 
 /**
@@ -41,7 +41,7 @@ enum class TimeoutStatus {
  * @return TimeoutStatus indicating success, timeout, or error
  */
 inline TimeoutStatus WaitStreamWithTimeout(hipStream_t stream, int timeout_ms) {
-  const int poll_interval_ms = 10; // Poll every 10ms
+  const int poll_interval_ms = 10;  // Poll every 10ms
   auto start = std::chrono::steady_clock::now();
 
   while (true) {
@@ -75,7 +75,7 @@ inline TimeoutStatus WaitStreamWithTimeout(hipStream_t stream, int timeout_ms) {
   }
 }
 
-} // namespace rocm_ep
+}  // namespace rocm_ep
 
 void test_immediate_completion() {
   std::cout << "\n=== Test 1: Immediate Completion ===" << std::endl;
@@ -113,7 +113,7 @@ void test_short_operation() {
   }
 
   // Allocate device memory and perform a simple operation
-  float *d_data = nullptr;
+  float* d_data = nullptr;
   size_t size = 1024 * 1024 * sizeof(float);
   err = hipMalloc(&d_data, size);
   if (err != hipSuccess) {
@@ -166,7 +166,7 @@ void test_timeout_detection() {
   }
 
   // Allocate device memory
-  float *d_data = nullptr;
+  float* d_data = nullptr;
   size_t size = 1024 * 1024 * sizeof(float);
   err = hipMalloc(&d_data, size);
   if (err != hipSuccess) {
@@ -184,7 +184,7 @@ void test_timeout_detection() {
   // Try to wait with a VERY short timeout (likely to timeout if operations are
   // still running) Note: On fast GPUs, even this might complete in time
   auto start = std::chrono::steady_clock::now();
-  auto status = rocm_ep::WaitStreamWithTimeout(stream, 1); // 1ms timeout
+  auto status = rocm_ep::WaitStreamWithTimeout(stream, 1);  // 1ms timeout
   auto end = std::chrono::steady_clock::now();
   auto elapsed_ms =
       std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
@@ -209,7 +209,7 @@ void test_timeout_detection() {
   hipStreamDestroy(stream);
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   // Initialize glog
   google::InitGoogleLogging(argv[0]);
   FLAGS_logtostderr = 1;
