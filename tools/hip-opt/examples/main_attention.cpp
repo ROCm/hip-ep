@@ -49,25 +49,25 @@ extern "C" __declspec(dllimport) void main_graph(
 // --------------------------------------------------------------------------
 // Error-checking macros
 // --------------------------------------------------------------------------
-#define HIP_CHECK(call)                                                \
-  do {                                                                 \
-    hipError_t e = (call);                                             \
-    if (e != hipSuccess) {                                             \
-      fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__,    \
-              hipGetErrorString(e));                                   \
-      exit(1);                                                         \
-    }                                                                  \
+#define HIP_CHECK(call)                                            \
+  do {                                                             \
+    hipError_t e = (call);                                         \
+    if (e != hipSuccess) {                                         \
+      fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__, \
+              hipGetErrorString(e));                               \
+      exit(1);                                                     \
+    }                                                              \
   } while (0)
 
-#define ORT_ABORT_ON_ERROR(ort, expr)                                  \
-  do {                                                                 \
-    OrtStatus* _s = (expr);                                            \
-    if (_s) {                                                          \
-      fprintf(stderr, "ORT error %s:%d: %s\n", __FILE__, __LINE__,    \
-              (ort)->GetErrorMessage(_s));                              \
-      (ort)->ReleaseStatus(_s);                                        \
-      exit(1);                                                         \
-    }                                                                  \
+#define ORT_ABORT_ON_ERROR(ort, expr)                              \
+  do {                                                             \
+    OrtStatus* _s = (expr);                                        \
+    if (_s) {                                                      \
+      fprintf(stderr, "ORT error %s:%d: %s\n", __FILE__, __LINE__, \
+              (ort)->GetErrorMessage(_s));                         \
+      (ort)->ReleaseStatus(_s);                                    \
+      exit(1);                                                     \
+    }                                                              \
   } while (0)
 
 // --------------------------------------------------------------------------
@@ -112,7 +112,7 @@ int main(int argc, char** argv) {
 
   OrtEnv* env = nullptr;
   ORT_ABORT_ON_ERROR(ort,
-      ort->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "attn_test", &env));
+                     ort->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "attn_test", &env));
 
   OrtSessionOptions* opts = nullptr;
   ORT_ABORT_ON_ERROR(ort, ort->CreateSessionOptions(&opts));
@@ -120,7 +120,7 @@ int main(int argc, char** argv) {
   std::wstring wpath = to_wstring(onnx_path);
   OrtSession* session = nullptr;
   ORT_ABORT_ON_ERROR(ort,
-      ort->CreateSession(env, wpath.c_str(), opts, &session));
+                     ort->CreateSession(env, wpath.c_str(), opts, &session));
 
   OrtAllocator* alloc = nullptr;
   ORT_ABORT_ON_ERROR(ort, ort->GetAllocatorWithDefaultOptions(&alloc));
@@ -128,14 +128,14 @@ int main(int argc, char** argv) {
   // Query input name
   char* raw_input_name = nullptr;
   ORT_ABORT_ON_ERROR(ort,
-      ort->SessionGetInputName(session, 0, alloc, &raw_input_name));
+                     ort->SessionGetInputName(session, 0, alloc, &raw_input_name));
   std::string input_name(raw_input_name);
   ORT_ABORT_ON_ERROR(ort, ort->AllocatorFree(alloc, raw_input_name));
 
   // Query output name
   char* raw_output_name = nullptr;
   ORT_ABORT_ON_ERROR(ort,
-      ort->SessionGetOutputName(session, 0, alloc, &raw_output_name));
+                     ort->SessionGetOutputName(session, 0, alloc, &raw_output_name));
   std::string output_name(raw_output_name);
   ORT_ABORT_ON_ERROR(ort, ort->AllocatorFree(alloc, raw_output_name));
 
@@ -145,15 +145,15 @@ int main(int argc, char** argv) {
   // Create input tensor
   OrtMemoryInfo* mem_info = nullptr;
   ORT_ABORT_ON_ERROR(ort,
-      ort->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault,
-                               &mem_info));
+                     ort->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault,
+                                              &mem_info));
 
   int64_t shape[] = {B, S, D};
   OrtValue* input_tensor = nullptr;
   ORT_ABORT_ON_ERROR(ort,
-      ort->CreateTensorWithDataAsOrtValue(
-          mem_info, h_X.data(), total * sizeof(float),
-          shape, 3, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &input_tensor));
+                     ort->CreateTensorWithDataAsOrtValue(
+                         mem_info, h_X.data(), total * sizeof(float),
+                         shape, 3, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &input_tensor));
 
   // Run
   const char* in_names[] = {input_name.c_str()};
@@ -161,13 +161,13 @@ int main(int argc, char** argv) {
   OrtValue* output_tensor = nullptr;
   printf("[ORT] Running inference on CPU...\n");
   ORT_ABORT_ON_ERROR(ort,
-      ort->Run(session, nullptr, in_names,
-               (const OrtValue* const*)&input_tensor, 1,
-               out_names, 1, &output_tensor));
+                     ort->Run(session, nullptr, in_names,
+                              (const OrtValue* const*)&input_tensor, 1,
+                              out_names, 1, &output_tensor));
 
   float* ort_data = nullptr;
   ORT_ABORT_ON_ERROR(ort,
-      ort->GetTensorMutableData(output_tensor, (void**)&ort_data));
+                     ort->GetTensorMutableData(output_tensor, (void**)&ort_data));
 
   std::vector<float> h_ref(ort_data, ort_data + total);
   printf("[ORT] Done. First values: %.6f %.6f %.6f ...\n",
@@ -189,17 +189,17 @@ int main(int argc, char** argv) {
   HIP_CHECK(hipMalloc(&d_X, total * sizeof(float)));
   HIP_CHECK(hipMalloc(&d_out, total * sizeof(float)));
   HIP_CHECK(hipMemcpy(d_X, h_X.data(), total * sizeof(float),
-                       hipMemcpyHostToDevice));
+                      hipMemcpyHostToDevice));
   HIP_CHECK(hipMemset(d_out, 0, total * sizeof(float)));
 
   printf("[GPU] Calling main_graph...\n");
   main_graph(
-      d_X,   d_X,   0,  B, S, D,  S * D, D, 1,
-      d_out, d_out, 0,  B, S, D,  S * D, D, 1);
+      d_X, d_X, 0, B, S, D, S * D, D, 1,
+      d_out, d_out, 0, B, S, D, S * D, D, 1);
 
   std::vector<float> h_out(total);
   HIP_CHECK(hipMemcpy(h_out.data(), d_out, total * sizeof(float),
-                       hipMemcpyDeviceToHost));
+                      hipMemcpyDeviceToHost));
   printf("[GPU] Done. First values: %.6f %.6f %.6f ...\n",
          h_out[0], h_out[1], h_out[2]);
 
