@@ -43,14 +43,14 @@ extern "C" __declspec(dllimport) void main_graph(
     int64_t out_s0, int64_t out_s1, int64_t out_s2,
     int64_t out_st0, int64_t out_st1, int64_t out_st2);
 
-#define HIP_CHECK(call)                                                \
-  do {                                                                 \
-    hipError_t e = (call);                                             \
-    if (e != hipSuccess) {                                             \
-      fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__,    \
-              hipGetErrorString(e));                                   \
-      exit(1);                                                         \
-    }                                                                  \
+#define HIP_CHECK(call)                                            \
+  do {                                                             \
+    hipError_t e = (call);                                         \
+    if (e != hipSuccess) {                                         \
+      fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__, \
+              hipGetErrorString(e));                               \
+      exit(1);                                                     \
+    }                                                              \
   } while (0)
 
 // --------------------------------------------------------------------------
@@ -66,7 +66,7 @@ static std::vector<float> run_ort_reference(const char* onnx_path,
   std::wstring wpath(onnx_path, onnx_path + strlen(onnx_path));
   Ort::Session session(env, wpath.c_str(), opts);
 
-  auto in_name  = session.GetInputNameAllocated(0, Ort::AllocatorWithDefaultOptions());
+  auto in_name = session.GetInputNameAllocated(0, Ort::AllocatorWithDefaultOptions());
   auto out_name = session.GetOutputNameAllocated(0, Ort::AllocatorWithDefaultOptions());
   printf("[ORT] input: \"%s\"  output: \"%s\"\n", in_name.get(), out_name.get());
 
@@ -75,7 +75,7 @@ static std::vector<float> run_ort_reference(const char* onnx_path,
   auto input_tensor = Ort::Value::CreateTensor<float>(
       mem_info, const_cast<float*>(input_data), total, shape, 3);
 
-  const char* in_names[]  = {in_name.get()};
+  const char* in_names[] = {in_name.get()};
   const char* out_names[] = {out_name.get()};
   printf("[ORT] Running inference on CPU...\n");
   auto outputs = session.Run(Ort::RunOptions{}, in_names, &input_tensor, 1,
@@ -100,17 +100,17 @@ static std::vector<float> run_gpu(const float* input_data,
   HIP_CHECK(hipMalloc(&d_X, total * sizeof(float)));
   HIP_CHECK(hipMalloc(&d_out, total * sizeof(float)));
   HIP_CHECK(hipMemcpy(d_X, input_data, total * sizeof(float),
-                       hipMemcpyHostToDevice));
+                      hipMemcpyHostToDevice));
   HIP_CHECK(hipMemset(d_out, 0, total * sizeof(float)));
 
   printf("[GPU] Calling main_graph...\n");
   main_graph(
-      d_X,   d_X,   0,  B, S, D,  S * D, D, 1,
-      d_out, d_out, 0,  B, S, D,  S * D, D, 1);
+      d_X, d_X, 0, B, S, D, S * D, D, 1,
+      d_out, d_out, 0, B, S, D, S * D, D, 1);
 
   std::vector<float> result(total);
   HIP_CHECK(hipMemcpy(result.data(), d_out, total * sizeof(float),
-                       hipMemcpyDeviceToHost));
+                      hipMemcpyDeviceToHost));
   printf("[GPU] Done. First values: %.6f %.6f %.6f ...\n",
          result[0], result[1], result[2]);
 
