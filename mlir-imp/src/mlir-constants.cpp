@@ -76,14 +76,12 @@ mlir::Type onnxElementTypeToMlirType(int element_type, mlir::OpBuilder& builder,
     return elementType;
   }
 
-  // for scalar in onnx-mlir
-  // onnx node attribute scalar use `RankedTensorType + empty shape`.
-  // node output scalar use `UnrankedTensorType`
-
   // Create tensor type with shape
+  // Empty shape = scalar (rank-0 tensor), e.g. tensor<i32>
+  // UnrankedTensorType (tensor<*xT>) cannot be lowered by dialect converters
+  // because the rank is unknown, so we always use RankedTensorType.
   if (shape->empty()) {
-    // Create unranked tensor type
-    return mlir::UnrankedTensorType::get(elementType);
+    return mlir::RankedTensorType::get({}, elementType);
   } else {
     // Create ranked tensor type with shape
     return mlir::RankedTensorType::get(*shape, elementType);
