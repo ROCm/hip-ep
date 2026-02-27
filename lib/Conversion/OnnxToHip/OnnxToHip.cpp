@@ -179,16 +179,22 @@ TransposeToHip::matchAndRewrite(ONNXTransposeOp op,
   auto perm = *permAttr;
 
   int64_t dim0 = -1, dim1 = -1;
+  int64_t mismatchCount = 0;
   for (int64_t i = 0; i < static_cast<int64_t>(perm.size()); ++i) {
     int64_t p = mlir::cast<mlir::IntegerAttr>(perm[i]).getInt();
     if (p != i) {
+      ++mismatchCount;
       if (dim0 < 0)
         dim0 = i;
-      else
+      else if (dim1 < 0)
         dim1 = i;
     }
   }
-  if (dim0 < 0 || dim1 < 0)
+  if (mismatchCount != 2 || dim0 < 0 || dim1 < 0)
+    return op.emitOpError("perm must swap exactly two dimensions");
+  int64_t p0 = mlir::cast<mlir::IntegerAttr>(perm[dim0]).getInt();
+  int64_t p1 = mlir::cast<mlir::IntegerAttr>(perm[dim1]).getInt();
+  if (p0 != dim1 || p1 != dim0)
     return op.emitOpError("perm must swap exactly two dimensions");
 
   auto resultType =
@@ -309,6 +315,8 @@ void ConvertOnnxToHipPass::runOnOperation() {
 
   for (auto funcOp :
        llvm::make_early_inc_range(module.getOps<mlir::func::FuncOp>())) {
+    if (funcOp.isDeclaration())
+      continue;
     if (mlir::failed(lowerOnnxConstants(funcOp)))
       return signalPassFailure();
     mlir::Value handle = insertHandleLifecycle(funcOp, ctx);

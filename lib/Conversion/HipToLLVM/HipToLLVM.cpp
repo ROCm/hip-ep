@@ -525,6 +525,10 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
       return failure();
 
     int rank = cast<MemRefType>(op.getInput().getType()).getRank();
+    if (rank > 3)
+      return op.emitOpError("hip.transpose lowering supports rank <= 3, got ")
+             << rank;
+
     MemRefDescriptor inputDesc(adaptor.getInput());
     Value rankVal = LLVM::ConstantOp::create(rewriter, loc, indexType,
                                              rewriter.getIndexAttr(rank));
