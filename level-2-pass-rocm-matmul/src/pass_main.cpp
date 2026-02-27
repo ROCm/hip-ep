@@ -25,12 +25,12 @@ namespace {
  * - Attention-Value: softmax(QK) @ V
  */
 struct Level2RocmMatmul {
-  static constexpr const char* LOG_PREFIX = "[ROCm MatMul L2]";
+  static constexpr const char *LOG_PREFIX = "[ROCm MatMul L2]";
 
-  Level2RocmMatmul(IPass& self) : self_{self} {}
+  Level2RocmMatmul(IPass &self) : self_{self} {}
 
   // Calculate batch size from shape (product of all dims except last 2)
-  int64_t calc_batch_size(const std::vector<int64_t>& shape) {
+  int64_t calc_batch_size(const std::vector<int64_t> &shape) {
     if (shape.size() <= 2)
       return 1;
     int64_t batch = 1;
@@ -40,12 +40,12 @@ struct Level2RocmMatmul {
     return batch;
   }
 
-  std::unique_ptr<Rule> create_rule(IPass* self) {
+  std::unique_ptr<Rule> create_rule(IPass *self) {
     auto pattern =
-        PatternBuilder().create_by_json(std::string((const char*)matmul_json));
+        PatternBuilder().create_by_json(std::string((const char *)matmul_json));
 
     return Rule::create_rule(
-        pattern, [=](Graph* graph, binder_t& binder) -> bool {
+        pattern, [=](Graph *graph, binder_t &binder) -> bool {
           auto input_A = binder["input_A"];
           auto input_B = binder["input_B"];
           auto output = binder["output"];
@@ -56,8 +56,8 @@ struct Level2RocmMatmul {
           rocm::RocmParamProto rocm_param;
           rocm_param.set_op_type("matmul");
 
-          auto* matmul_params = rocm_param.mutable_matmul_params();
-          matmul_params->set_algorithm_index(-1);  // Auto-select
+          auto *matmul_params = rocm_param.mutable_matmul_params();
+          matmul_params->set_algorithm_index(-1); // Auto-select
 
           // Get input tensor shapes
           auto a_shape_opt = node_arg_get_shape_i64(*input_A.node_arg);
@@ -102,9 +102,9 @@ struct Level2RocmMatmul {
           matmul_params->set_batch_count(batch_count);
 
           // Set leading dimensions (row-major)
-          matmul_params->set_lda(k);  // A is [..., M, K]
-          matmul_params->set_ldb(n);  // B is [..., K, N]
-          matmul_params->set_ldd(n);  // D/Y is [..., M, N]
+          matmul_params->set_lda(k); // A is [..., M, K]
+          matmul_params->set_ldb(n); // B is [..., K, N]
+          matmul_params->set_ldd(n); // D/Y is [..., M, N]
 
           // Set strides for batched operations
           matmul_params->set_stride_a(m * k);
@@ -211,14 +211,14 @@ struct Level2RocmMatmul {
         });
   }
 
-  void process(IPass& self, Graph& graph) {
+  void process(IPass &self, Graph &graph) {
     ROCM_LOG(1) << LOG_PREFIX << " Processing graph for MatMul patterns...";
     create_rule(&self)->apply(&graph);
   }
 
-  IPass& self_;
+  IPass &self_;
 };
 
-}  // namespace
+} // namespace
 
 DEFINE_MORPHIZEN_PASS(Level2RocmMatmul, morphizen_pass_level2_rocm_matmul)

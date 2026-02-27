@@ -20,7 +20,7 @@
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_ROCM, "0")
 DEF_ENV_PARAM(MORPHIZEN_ROCM_EN_LVL1_MERGE,
-              "0")  // Set to 1 to enable Level-1 subgraph merging
+              "0") // Set to 1 to enable Level-1 subgraph merging
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_ROCM) >= n)
 
 using namespace morphizen;
@@ -45,7 +45,7 @@ using namespace morphizen;
  * See doc/02_LEVEL1_PASS_DESIGN.md for architecture overview.
  */
 struct Level1Rocm {
-  Level1Rocm(IPass& self) : self_{self} {}
+  Level1Rocm(IPass &self) : self_{self} {}
 
   //============================================================================
   // Union-Find Data Structure
@@ -53,8 +53,8 @@ struct Level1Rocm {
   //============================================================================
 
   // Find the root of a node with path compression
-  const Node* find_root(std::unordered_map<const Node*, const Node*>& parent,
-                        const Node* node) {
+  const Node *find_root(std::unordered_map<const Node *, const Node *> &parent,
+                        const Node *node) {
     if (parent[node] != node) {
       // Path compression: make the node point directly to the root
       parent[node] = find_root(parent, parent[node]);
@@ -63,10 +63,10 @@ struct Level1Rocm {
   }
 
   // Union two nodes into the same group
-  void union_nodes(std::unordered_map<const Node*, const Node*>& parent,
-                   const Node* a, const Node* b) {
-    const Node* root_a = find_root(parent, a);
-    const Node* root_b = find_root(parent, b);
+  void union_nodes(std::unordered_map<const Node *, const Node *> &parent,
+                   const Node *a, const Node *b) {
+    const Node *root_a = find_root(parent, a);
+    const Node *root_b = find_root(parent, b);
     if (root_a != root_b) {
       // Merge groups: make root_a point to root_b
       parent[root_a] = root_b;
@@ -86,7 +86,7 @@ struct Level1Rocm {
   // Level-2 passes add a node attribute using
   // NodeAttributesBuilder::merge_into() after calling level_2_fuse(). Level-1
   // can detect this using NodeConstRef.has_attr().
-  bool is_rocm_fused_node(Graph& graph, const Node& node) {
+  bool is_rocm_fused_node(Graph &graph, const Node &node) {
     // Use C++ style NodeConstRef API (cheap - just two pointer copies)
     auto node_ref = morphizen_cxx::NodeConstRef::from_node(graph, node);
 
@@ -124,7 +124,7 @@ struct Level1Rocm {
   }
 
   // Get op type from fused node output name
-  std::string get_rocm_op_type(const Node& node) {
+  std::string get_rocm_op_type(const Node &node) {
     auto output_name = node_get_first_output_name(node);
     MY_LOG(2) << "[ROCm EP Level-1] get_rocm_op_type: output=" << output_name;
     if (output_name.find("rocm_conv") != std::string::npos) {
@@ -148,11 +148,11 @@ struct Level1Rocm {
   }
 
   // Get all ROCm fused nodes from the graph in topological order
-  std::vector<const Node*> find_rocm_fused_nodes(Graph& graph) {
-    std::vector<const Node*> rocm_nodes;
+  std::vector<const Node *> find_rocm_fused_nodes(Graph &graph) {
+    std::vector<const Node *> rocm_nodes;
     auto all_nodes = graph_nodes(graph);
 
-    for (auto* node : all_nodes) {
+    for (auto *node : all_nodes) {
       if (is_rocm_fused_node(graph, *node)) {
         rocm_nodes.push_back(node);
         MY_LOG(2) << "[ROCm EP Level-1] Found ROCm fused node: "
@@ -169,12 +169,12 @@ struct Level1Rocm {
 
   // Build a map from output node_arg name to the node that produces it
   // Only includes outputs from ROCm fused nodes
-  std::unordered_map<std::string, const Node*>
-  build_producer_map(const std::vector<const Node*>& nodes) {
-    std::unordered_map<std::string, const Node*> producer_map;
-    for (auto* node : nodes) {
+  std::unordered_map<std::string, const Node *>
+  build_producer_map(const std::vector<const Node *> &nodes) {
+    std::unordered_map<std::string, const Node *> producer_map;
+    for (auto *node : nodes) {
       auto outputs = node_get_output_node_args(*node);
-      for (auto* output : outputs) {
+      for (auto *output : outputs) {
         if (output) {
           producer_map[node_arg_get_name(*output)] = node;
         }
@@ -197,9 +197,9 @@ struct Level1Rocm {
   // Union-Find algorithm groups connected ROCm nodes efficiently.
   //============================================================================
 
-  std::vector<std::vector<const Node*>> find_mergeable_groups(
-      const std::vector<const Node*>& rocm_nodes,
-      const std::unordered_map<std::string, const Node*>& producer_map) {
+  std::vector<std::vector<const Node *>> find_mergeable_groups(
+      const std::vector<const Node *> &rocm_nodes,
+      const std::unordered_map<std::string, const Node *> &producer_map) {
     if (rocm_nodes.empty()) {
       return {};
     }
@@ -209,9 +209,9 @@ struct Level1Rocm {
     if (!ENV_PARAM(MORPHIZEN_ROCM_EN_LVL1_MERGE)) {
       MY_LOG(1) << "[ROCm EP Level-1] Single-node mode: creating one subgraph "
                    "per node";
-      std::vector<std::vector<const Node*>> groups;
+      std::vector<std::vector<const Node *>> groups;
       groups.reserve(rocm_nodes.size());
-      for (auto* node : rocm_nodes) {
+      for (auto *node : rocm_nodes) {
         groups.push_back({node});
       }
       return groups;
@@ -221,16 +221,16 @@ struct Level1Rocm {
     MY_LOG(1) << "[ROCm EP Level-1] Merge mode: grouping connected nodes";
 
     // Initialize Union-Find: each node is its own group initially
-    std::unordered_map<const Node*, const Node*> parent;
-    for (auto* node : rocm_nodes) {
+    std::unordered_map<const Node *, const Node *> parent;
+    for (auto *node : rocm_nodes) {
       parent[node] = node;
     }
 
     // Process nodes in topological order (they are already in this order)
     // For each node, check if any of its inputs come from another ROCm node
-    for (auto* node : rocm_nodes) {
+    for (auto *node : rocm_nodes) {
       auto inputs = node_get_input_node_args(*node);
-      for (auto* input : inputs) {
+      for (auto *input : inputs) {
         if (input) {
           auto name = node_arg_get_name(*input);
           auto it = producer_map.find(name);
@@ -247,16 +247,16 @@ struct Level1Rocm {
     }
 
     // Collect groups from Union-Find structure
-    std::unordered_map<const Node*, std::vector<const Node*>> group_map;
-    for (auto* node : rocm_nodes) {
-      const Node* root = find_root(parent, node);
+    std::unordered_map<const Node *, std::vector<const Node *>> group_map;
+    for (auto *node : rocm_nodes) {
+      const Node *root = find_root(parent, node);
       group_map[root].push_back(node);
     }
 
     // Convert to vector of groups
-    std::vector<std::vector<const Node*>> groups;
+    std::vector<std::vector<const Node *>> groups;
     groups.reserve(group_map.size());
-    for (auto& [root, group] : group_map) {
+    for (auto &[root, group] : group_map) {
       groups.push_back(std::move(group));
     }
 
@@ -268,14 +268,14 @@ struct Level1Rocm {
   // Using std::set would sort alphabetically which breaks the mapping between
   // ONNX Runtime's input indices and our external_input_buffers_.
   std::vector<std::string> collect_external_inputs(
-      const std::vector<const Node*>& group,
-      const std::unordered_set<std::string>& internal_outputs) {
+      const std::vector<const Node *> &group,
+      const std::unordered_set<std::string> &internal_outputs) {
     std::vector<std::string> inputs_ordered;
-    std::unordered_set<std::string> seen;  // For deduplication
+    std::unordered_set<std::string> seen; // For deduplication
 
-    for (auto* node : group) {
+    for (auto *node : group) {
       auto inputs = node_get_input_node_args(*node);
-      for (auto* input : inputs) {
+      for (auto *input : inputs) {
         if (input) {
           auto name = node_arg_get_name(*input);
           // Only include if it's not produced by another node in the group
@@ -305,15 +305,15 @@ struct Level1Rocm {
   // Collect external outputs (outputs that are consumed outside the group or
   // are graph outputs)
   std::vector<std::string> collect_external_outputs(
-      const std::vector<const Node*>& group,
-      const std::unordered_set<std::string>& group_internal_inputs,
-      Graph& graph) {
+      const std::vector<const Node *> &group,
+      const std::unordered_set<std::string> &group_internal_inputs,
+      Graph &graph) {
     std::set<std::string> outputs_ordered;
 
     // Get graph output names
     std::unordered_set<std::string> graph_output_names;
     auto graph_outputs = graph_get_outputs(graph);
-    for (auto* output : graph_outputs) {
+    for (auto *output : graph_outputs) {
       if (output) {
         graph_output_names.insert(node_arg_get_name(*output));
       }
@@ -321,18 +321,18 @@ struct Level1Rocm {
 
     // Create set of all outputs in the group
     std::unordered_set<std::string> group_outputs;
-    for (auto* node : group) {
+    for (auto *node : group) {
       auto outputs = node_get_output_node_args(*node);
-      for (auto* output : outputs) {
+      for (auto *output : outputs) {
         if (output) {
           group_outputs.insert(node_arg_get_name(*output));
         }
       }
     }
 
-    for (auto* node : group) {
+    for (auto *node : group) {
       auto outputs = node_get_output_node_args(*node);
-      for (auto* output : outputs) {
+      for (auto *output : outputs) {
         if (output) {
           auto name = node_arg_get_name(*output);
 
@@ -367,17 +367,17 @@ struct Level1Rocm {
   //============================================================================
 
   rocm::RocmSubgraphProto
-  build_subgraph_proto(const std::vector<const Node*>& group,
-                       const std::unordered_set<std::string>& internal_outputs,
-                       const std::vector<std::string>& external_inputs,
-                       const std::vector<std::string>& external_outputs,
-                       Graph& graph) {
+  build_subgraph_proto(const std::vector<const Node *> &group,
+                       const std::unordered_set<std::string> &internal_outputs,
+                       const std::vector<std::string> &external_inputs,
+                       const std::vector<std::string> &external_outputs,
+                       Graph &graph) {
     rocm::RocmSubgraphProto subgraph;
     auto pass_context = self_.get_context();
 
     // Pre-compute unique external inputs (field 1 in proto)
     // This eliminates runtime deduplication overhead in custom op
-    for (const auto& input_name : external_inputs) {
+    for (const auto &input_name : external_inputs) {
       subgraph.add_external_inputs(input_name);
       MY_LOG(2) << "[ROCm EP Level-1] Added external_input: " << input_name;
     }
@@ -388,11 +388,11 @@ struct Level1Rocm {
 
     // Build nodes in topological order
     for (int32_t i = 0; i < static_cast<int32_t>(group.size()); ++i) {
-      const Node* node = group[i];
+      const Node *node = group[i];
       auto output_name = node_get_first_output_name(*node);
       auto node_ref = morphizen_cxx::NodeConstRef::from_node(graph, *node);
 
-      rocm::RocmNodeProto* node_proto = subgraph.add_nodes();
+      rocm::RocmNodeProto *node_proto = subgraph.add_nodes();
       node_proto->set_node_id(i);
 
       // Read params from cache file and set as node params
@@ -425,17 +425,17 @@ struct Level1Rocm {
 
       // Build input references
       auto inputs = node_get_input_node_args(*node);
-      for (auto* input : inputs) {
+      for (auto *input : inputs) {
         if (!input)
           continue;
         auto input_name = node_arg_get_name(*input);
 
-        rocm::TensorRefProto* input_ref = node_proto->add_inputs();
+        rocm::TensorRefProto *input_ref = node_proto->add_inputs();
 
         auto it = output_producer_map.find(input_name);
         if (it != output_producer_map.end()) {
           // Internal reference - from another node in subgraph
-          auto* internal_ref = input_ref->mutable_internal();
+          auto *internal_ref = input_ref->mutable_internal();
           internal_ref->set_producer_node_id(it->second.first);
           internal_ref->set_output_index(it->second.second);
           MY_LOG(2) << "[ROCm EP Level-1] Node " << i << ": input "
@@ -461,10 +461,10 @@ struct Level1Rocm {
     }
 
     // Add external outputs with their source node mappings
-    for (const auto& ext_out_name : external_outputs) {
+    for (const auto &ext_out_name : external_outputs) {
       auto it = output_producer_map.find(ext_out_name);
       if (it != output_producer_map.end()) {
-        rocm::ExternalOutputProto* ext_output = subgraph.add_outputs();
+        rocm::ExternalOutputProto *ext_output = subgraph.add_outputs();
         ext_output->set_name(ext_out_name);
         ext_output->set_producer_node_id(it->second.first);
         ext_output->set_output_index(it->second.second);
@@ -476,7 +476,7 @@ struct Level1Rocm {
     return subgraph;
   }
 
-  void process(IPass& self, Graph& graph) {
+  void process(IPass &self, Graph &graph) {
     MY_LOG(1) << "[ROCm EP Level-1] Starting ROCm pass";
     MY_LOG(2) << "[ROCm EP Level-1] process() called - Starting ROCm pass";
 
@@ -499,7 +499,7 @@ struct Level1Rocm {
     // update context.json
     MY_LOG(2) << "[ROCm EP Level-1] Number of sub-passes to run: "
               << config.sub_pass_names_size();
-    for (const auto& sub_pass_name : config.sub_pass_names()) {
+    for (const auto &sub_pass_name : config.sub_pass_names()) {
       MY_LOG(1) << "[ROCm EP Level-1] Running sub-pass: " << sub_pass_name;
 
       PassProto sub_pass_proto;
@@ -538,15 +538,15 @@ struct Level1Rocm {
     auto pass_context = self_.get_context();
     int group_index = 0;
 
-    for (auto& group : groups) {
+    for (auto &group : groups) {
       MY_LOG(1) << "[ROCm EP Level-1] Processing group " << group_index
                 << " with " << group.size() << " nodes";
 
       // Collect internal outputs (outputs produced within the group)
       std::unordered_set<std::string> internal_outputs;
-      for (auto* node : group) {
+      for (auto *node : group) {
         auto outputs = node_get_output_node_args(*node);
-        for (auto* output : outputs) {
+        for (auto *output : outputs) {
           if (output) {
             internal_outputs.insert(node_arg_get_name(*output));
           }
@@ -555,9 +555,9 @@ struct Level1Rocm {
 
       // Collect internal inputs (inputs consumed within the group)
       std::unordered_set<std::string> internal_inputs;
-      for (auto* node : group) {
+      for (auto *node : group) {
         auto inputs = node_get_input_node_args(*node);
-        for (auto* input : inputs) {
+        for (auto *input : inputs) {
           if (input) {
             auto name = node_arg_get_name(*input);
             if (internal_outputs.count(name) > 0) {
@@ -637,7 +637,7 @@ struct Level1Rocm {
               << " groups";
   }
 
-  IPass& self_;
+  IPass &self_;
 };
 
 DEFINE_MORPHIZEN_PASS(Level1Rocm, morphizen_pass_level1_rocm)
