@@ -16,16 +16,16 @@ using namespace morphizen_cxx;
  * Softmax is applied along a specified axis (default: -1, last dim).
  */
 struct Level2RocmSoftmax {
-  static constexpr const char* LOG_PREFIX = "[ROCm Softmax L2]";
+  static constexpr const char *LOG_PREFIX = "[ROCm Softmax L2]";
 
-  Level2RocmSoftmax(IPass& self) : self_{self} {}
+  Level2RocmSoftmax(IPass &self) : self_{self} {}
 
-  std::unique_ptr<Rule> create_rule(IPass* self) {
+  std::unique_ptr<Rule> create_rule(IPass *self) {
     auto pattern = PatternBuilder().create_by_json(
-        std::string((const char*)softmax_json));
+        std::string((const char *)softmax_json));
 
     return Rule::create_rule(
-        pattern, [=](Graph* graph, binder_t& binder) -> bool {
+        pattern, [=](Graph *graph, binder_t &binder) -> bool {
           auto input = binder["input"];
           auto output = binder["output"];
 
@@ -35,7 +35,7 @@ struct Level2RocmSoftmax {
           rocm::RocmParamProto rocm_param;
           rocm_param.set_op_type("softmax");
 
-          auto* softmax_params = rocm_param.mutable_softmax_params();
+          auto *softmax_params = rocm_param.mutable_softmax_params();
 
           // Get input shape
           auto in_shape = node_arg_get_shape_i64(*input.node_arg);
@@ -45,7 +45,7 @@ struct Level2RocmSoftmax {
           int32_t axis = -1;
 
           // Get axis attribute from node
-          auto* softmax_node = output.node;
+          auto *softmax_node = output.node;
           if (node_has_attr(*softmax_node, "axis")) {
             axis =
                 static_cast<int32_t>(node_get_attr_int(*softmax_node, "axis"));
@@ -115,12 +115,12 @@ struct Level2RocmSoftmax {
         });
   }
 
-  void process(IPass& self, Graph& graph) {
+  void process(IPass &self, Graph &graph) {
     ROCM_LOG(1) << LOG_PREFIX << " Processing graph for Softmax patterns...";
     create_rule(&self)->apply(&graph);
   }
 
-  IPass& self_;
+  IPass &self_;
 };
 
 DEFINE_MORPHIZEN_PASS(Level2RocmSoftmax, morphizen_pass_level2_rocm_softmax)

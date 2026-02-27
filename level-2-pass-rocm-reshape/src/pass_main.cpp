@@ -16,16 +16,16 @@ using namespace morphizen_cxx;
  * Reshape is typically zero-copy when data is contiguous.
  */
 struct Level2RocmReshape {
-  static constexpr const char* LOG_PREFIX = "[ROCm Reshape L2]";
+  static constexpr const char *LOG_PREFIX = "[ROCm Reshape L2]";
 
-  Level2RocmReshape(IPass& self) : self_{self} {}
+  Level2RocmReshape(IPass &self) : self_{self} {}
 
-  std::unique_ptr<Rule> create_rule(IPass* self) {
+  std::unique_ptr<Rule> create_rule(IPass *self) {
     auto pattern = PatternBuilder().create_by_json(
-        std::string((const char*)reshape_json));
+        std::string((const char *)reshape_json));
 
     return Rule::create_rule(
-        pattern, [=](Graph* graph, binder_t& binder) -> bool {
+        pattern, [=](Graph *graph, binder_t &binder) -> bool {
           auto input_data = binder["input_data"];
           auto input_shape = binder["input_shape"];
           auto output = binder["output"];
@@ -36,7 +36,7 @@ struct Level2RocmReshape {
           rocm::RocmParamProto rocm_param;
           rocm_param.set_op_type("reshape");
 
-          auto* reshape_params = rocm_param.mutable_reshape_params();
+          auto *reshape_params = rocm_param.mutable_reshape_params();
 
           // Get input and output shapes
           auto in_shape = node_arg_get_shape_i64(*input_data.node_arg);
@@ -89,12 +89,12 @@ struct Level2RocmReshape {
         });
   }
 
-  void process(IPass& self, Graph& graph) {
+  void process(IPass &self, Graph &graph) {
     ROCM_LOG(1) << LOG_PREFIX << " Processing graph for Reshape patterns...";
     create_rule(&self)->apply(&graph);
   }
 
-  IPass& self_;
+  IPass &self_;
 };
 
 DEFINE_MORPHIZEN_PASS(Level2RocmReshape, morphizen_pass_level2_rocm_reshape)

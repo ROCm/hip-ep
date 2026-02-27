@@ -16,16 +16,16 @@ using namespace morphizen_cxx;
  * Tile repeats tensor along specified dimensions.
  */
 struct Level2RocmTile {
-  static constexpr const char* LOG_PREFIX = "[ROCm Tile L2]";
+  static constexpr const char *LOG_PREFIX = "[ROCm Tile L2]";
 
-  Level2RocmTile(IPass& self) : self_{self} {}
+  Level2RocmTile(IPass &self) : self_{self} {}
 
-  std::unique_ptr<Rule> create_rule(IPass* self) {
+  std::unique_ptr<Rule> create_rule(IPass *self) {
     auto pattern =
-        PatternBuilder().create_by_json(std::string((const char*)tile_json));
+        PatternBuilder().create_by_json(std::string((const char *)tile_json));
 
     return Rule::create_rule(
-        pattern, [=](Graph* graph, binder_t& binder) -> bool {
+        pattern, [=](Graph *graph, binder_t &binder) -> bool {
           auto input = binder["input"];
           auto repeats_arg = binder["repeats"];
           auto output = binder["output"];
@@ -36,7 +36,7 @@ struct Level2RocmTile {
           rocm::RocmParamProto rocm_param;
           rocm_param.set_op_type("tile");
 
-          auto* tile_params = rocm_param.mutable_tile_params();
+          auto *tile_params = rocm_param.mutable_tile_params();
 
           // Get input shape
           auto in_shape = node_arg_get_shape_i64(*input.node_arg);
@@ -107,12 +107,12 @@ struct Level2RocmTile {
         });
   }
 
-  void process(IPass& self, Graph& graph) {
+  void process(IPass &self, Graph &graph) {
     ROCM_LOG(1) << LOG_PREFIX << " Processing graph for Tile patterns...";
     create_rule(&self)->apply(&graph);
   }
 
-  IPass& self_;
+  IPass &self_;
 };
 
 DEFINE_MORPHIZEN_PASS(Level2RocmTile, morphizen_pass_level2_rocm_tile)

@@ -24,16 +24,16 @@ int64_t calc_output_dim(int64_t input_dim, int64_t filter_dim, int32_t pad,
  * Extracts weight tensors and saves them to pass context cache.
  */
 struct Level2RocmConv {
-  static constexpr const char* LOG_PREFIX = "[ROCm Conv L2]";
+  static constexpr const char *LOG_PREFIX = "[ROCm Conv L2]";
 
-  Level2RocmConv(IPass& self) : self_{self} {}
+  Level2RocmConv(IPass &self) : self_{self} {}
 
-  std::unique_ptr<Rule> create_rule(IPass* self) {
+  std::unique_ptr<Rule> create_rule(IPass *self) {
     auto pattern =
-        PatternBuilder().create_by_json(std::string((const char*)conv_json));
+        PatternBuilder().create_by_json(std::string((const char *)conv_json));
 
     return Rule::create_rule(
-        pattern, [=](Graph* graph, binder_t& binder) -> bool {
+        pattern, [=](Graph *graph, binder_t &binder) -> bool {
           // Extract matched nodes
           auto input_X = binder["input_X"];
           auto input_W = binder["input_W"];
@@ -46,10 +46,10 @@ struct Level2RocmConv {
           rocm::RocmParamProto rocm_param;
           rocm_param.set_op_type("conv");
 
-          auto* conv_params = rocm_param.mutable_conv_params();
+          auto *conv_params = rocm_param.mutable_conv_params();
 
           // Get Conv attributes from the matched node using new API
-          auto* conv_node = output.node;
+          auto *conv_node = output.node;
 
           // Extract padding, stride, dilation from attributes
           int32_t pad_h = 0, pad_w = 0;
@@ -169,7 +169,7 @@ struct Level2RocmConv {
 
           // Extract and save bias tensor if present
           if (has_bias) {
-            auto* bias_node_arg = binder["input_B"].node_arg;
+            auto *bias_node_arg = binder["input_B"].node_arg;
             auto bias_ref =
                 NodeArgConstRef::from_node_arg(*graph, *bias_node_arg);
             auto bias_name = node_arg_get_name(*bias_node_arg);
@@ -233,13 +233,13 @@ struct Level2RocmConv {
         });
   }
 
-  void process(IPass& self, Graph& graph) {
+  void process(IPass &self, Graph &graph) {
     ROCM_LOG(1) << LOG_PREFIX << " Processing graph for Conv patterns...";
     create_rule(&self)->apply(&graph);
   }
 
-  IPass& self_;
+  IPass &self_;
 };
-}  // namespace
+} // namespace
 
 DEFINE_MORPHIZEN_PASS(Level2RocmConv, morphizen_pass_level2_rocm_conv)
