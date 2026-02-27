@@ -80,14 +80,14 @@ endif()
 # ==============================================================================
 # HIP MLIR Compiler Tools (optional)
 # ==============================================================================
-# Build the MLIR-based HIP compiler tools (mlir-hip-opt, hip-compiler).
+# Build the MLIR-based HIP compiler tools (hip-mlir-opt, hip-compiler).
 # Requires LLVM and MLIR to be available via find_package.
 #
 # Usage:
 #   cmake -B build -S . -DBUILD_HIP_TOOLS=ON \
 #     [-DONNX_MLIR_SRC=/path/to/onnx-mlir -DONNX_MLIR_BUILD=/path/to/build]
 # ==============================================================================
-option(BUILD_HIP_TOOLS "Build HIP MLIR compiler tools (mlir-hip-opt, hip-compiler)" OFF)
+option(BUILD_HIP_TOOLS "Build HIP MLIR compiler tools (hip-mlir-opt, hip-compiler)" OFF)
 
 if(BUILD_HIP_TOOLS)
   set(CMAKE_CXX_STANDARD 17)

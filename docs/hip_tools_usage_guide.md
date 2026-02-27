@@ -6,7 +6,7 @@ Licensed under the MIT License.
 
 This directory contains a custom MLIR dialect for HIP (Heterogeneous-compute Interface for Portability) operations and two compiler tools:
 
-- **`mlir-hip-opt`** -- MLIR pass pipeline tool (useful for debugging and inspecting intermediate IR)
+- **`hip-mlir-opt`** -- MLIR pass pipeline tool (useful for debugging and inspecting intermediate IR)
 - **`hip-compiler`** -- One-stop compiler that takes `.mlir` input and produces a `.dll` + import `.lib`. Supports `--no-bufferize` for pre-bufferized `.hip.mlir` inputs.
 
 ## Overview
@@ -42,7 +42,7 @@ test_<op>.mlir
 
 ### Compiler Tools (`tools/`)
 
-- `tools/mlir-hip-opt/mlir-hip-opt.cpp` -- MLIR pass pipeline tool (for debugging intermediate IR)
+- `tools/hip-mlir-opt/hip-mlir-opt.cpp` -- MLIR pass pipeline tool (for debugging intermediate IR)
 - `tools/hip-compiler/hip-compiler.cpp` -- One-stop MLIR-to-DLL compiler
 
 ### Dialect Definition (`include/hip/` + `lib/`)
@@ -179,7 +179,7 @@ set THEROCK_DIST=C:\path\to\TheRock\build\dist\rocm
 - **`CMAKE_Fortran_COMPILER gfortran is not a full path`**: `conda install -n llvm -c conda-forge gfortran`
 - **Long path errors**: Enable long paths in git and Windows registry.
 
-## Building mlir-hip-opt and hip-compiler
+## Building hip-mlir-opt and hip-compiler
 
 Build LLVM and MLIR first:
 
@@ -199,7 +199,7 @@ cmake --build build
 ```
 
 This produces three targets:
-- `mlir-hip-opt` -- MLIR pass pipeline tool
+- `hip-mlir-opt` -- MLIR pass pipeline tool
 - `hip-compiler` -- One-stop MLIR-to-DLL compiler
 - `hip_runtime_static.lib` -- Static library containing all `ops_runtime/*.cpp` implementations
 
@@ -264,10 +264,10 @@ This performs the full pipeline internally:
 4. LLVM IR translation and native code generation (`.obj`)
 5. Linking with `hip_runtime_static.lib` and external dependencies to produce `.dll` + `.lib`
 
-For debugging, you can still use `mlir-hip-opt` to inspect intermediate IR:
+For debugging, you can still use `hip-mlir-opt` to inspect intermediate IR:
 
 ```bash
-mlir-hip-opt input.mlir \
+hip-mlir-opt input.mlir \
     --one-shot-bufferize="bufferize-function-boundaries" \
     --convert-hip-to-llvm \
     --finalize-memref-to-llvm \
