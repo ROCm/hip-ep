@@ -57,7 +57,3 @@ target_link_libraries(hip-compiler PRIVATE
   ${llvm_libs}
 )
 
-set_target_properties(hip-compiler PROPERTIES
-  CXX_STANDARD 17
-  CXX_STANDARD_REQUIRED ON
-)
