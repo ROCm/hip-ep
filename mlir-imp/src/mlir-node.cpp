@@ -30,6 +30,18 @@ mlir::StringRef MLIRNode::getDomain() const {
   auto op_name = (*this)->getName();
   auto full_op_name = op_name.getStringRef().split('.').second;
   CHECK(!full_op_name.empty());
+
+  // Check if this is an onnx.Custom operation
+  if (full_op_name == "Custom") {
+    // For onnx.Custom, domain is stored in the "domain_name" attribute
+    if (auto attr = (*this)->getAttrOfType<mlir::StringAttr>("domain_name")) {
+      return attr.getValue();
+    }
+    return "";
+  }
+
+  // For regular operations, parse domain from operation name (e.g.,
+  // "com.microsoft:Op")
   auto x = full_op_name.split(':');
   return x.second.empty() ? "" : x.first;
 }
@@ -38,6 +50,17 @@ mlir::StringRef MLIRNode::getOpType() const {
   auto op_name = (*this)->getName();
   auto full_op_name = op_name.getStringRef().split('.').second;
   CHECK(!full_op_name.empty());
+
+  // Check if this is an onnx.Custom operation
+  if (full_op_name == "Custom") {
+    // For onnx.Custom, op_type is stored in the "function_name" attribute
+    if (auto attr = (*this)->getAttrOfType<mlir::StringAttr>("function_name")) {
+      return attr.getValue();
+    }
+    return "Custom";
+  }
+
+  // For regular operations, parse op_type from operation name
   auto x = full_op_name.split(':');
   return x.second.empty() ? x.first : x.second;
 }

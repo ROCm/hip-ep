@@ -561,6 +561,32 @@ struct ReturnOpConversion : public OpConversionPattern<func::ReturnOp> {
 };
 
 //===----------------------------------------------------------------------===//
+// ONNX Return to Func Return Conversion Pattern
+//===----------------------------------------------------------------------===//
+// Convert onnx.Return to func.return as a first step before the main
+// ReturnOpConversion. This handles MLIR modules generated with onnx.Return
+// (onnx-mlir compatible representation) by lowering to standard func.return.
+//
+// onnx.Return is the ONNX dialect's function terminator that allows shape
+// refinement between operands and function signature result types. It needs
+// to be converted to func.return before applying destination-passing style
+// optimizations.
+
+struct OnnxReturnToFuncReturnPattern : public RewritePattern {
+  OnnxReturnToFuncReturnPattern(MLIRContext* context,
+                                PatternBenefit benefit = 1)
+      : RewritePattern("onnx.Return", benefit, context) {}
+
+  LogicalResult matchAndRewrite(Operation* op,
+                                PatternRewriter& rewriter) const override {
+    // Simply replace onnx.Return with func.return, preserving operands
+    SmallVector<Value> operands(op->getOperands());
+    rewriter.replaceOpWithNewOp<func::ReturnOp>(op, operands);
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // Type Converter: Tensor → MemRef (GPU Address Space)
 //===----------------------------------------------------------------------===//
 //
@@ -1312,6 +1338,11 @@ private:
       });
     });
 
+    // Mark onnx.Return as illegal - must be converted to func.return first
+    // onnx.Return is the ONNX dialect terminator (onnx-mlir compatible)
+    target.addDynamicallyLegalOp(OperationName("onnx.Return", context),
+                                 [](Operation*) { return false; });
+
     // Mark MemRef dialect as legal (we generate memref.dim for dynamic shapes)
     target.addLegalDialect<memref::MemRefDialect>();
 
@@ -1347,6 +1378,9 @@ private:
     patterns.add<ConvToHipPattern>(typeConverter, context);
     patterns.add<ReluToHipPattern>(typeConverter, context);
     patterns.add<GemmToHipPattern>(typeConverter, context);
+    // Convert onnx.Return to func.return first (higher priority)
+    patterns.add<OnnxReturnToFuncReturnPattern>(context, /*benefit=*/2);
+    // Then convert func.return with destination-passing style
     patterns.add<ReturnOpConversion>(typeConverter, context);
 
     // Apply conversion

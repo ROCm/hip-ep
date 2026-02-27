@@ -36,6 +36,8 @@ add_executable(${TEST_EXE_NAME}
   morphizen/test_ep_shared_context_workspace.cpp
   morphizen/test_op_invoker.cpp
   morphizen/test_mlir_ssa_dominance.cpp
+  morphizen/test_onnx_return.cpp
+  morphizen/test_onnx_custom.cpp
   ${MORPHIZEN_E2E_TESTS_PROTO_SRCS}
   ${MORPHIZEN_E2E_TESTS_PROTO_HDRS}
   morphizen-e2e-test/config.cpp
@@ -140,7 +142,7 @@ gtest_discover_tests(${TEST_EXE_NAME}
 if(MSVC)
   # Copy required ONNX Runtime DLLs to test directory
   # Note: onnxruntime_providers_vitisai.dll is NOT copied because this project
-  # focuses on the new ABI (onnxruntime_vitisai_ep.dll built by MorphiZen).
+  # focuses on the new ABI (onnxruntime_morphizen_ep.dll built by MorphiZen).
   # The old ABI provider (onnxruntime_providers_vitisai.dll) is only available
   # when ONNX Runtime is built with --use-vitisai flag, which is not required
   # for MorphiZen development.

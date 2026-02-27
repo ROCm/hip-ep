@@ -2,7 +2,6 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-
 #include "mlir-graph.hpp"
 #include "./mlir-constants.hpp"
 #include "./mlir-graph-store.hpp"
@@ -30,6 +29,7 @@
 #include <system_error>               // for std::error_code
 #include <unordered_set>              // for std::unordered_set
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_GRAPH, "0")
+DEF_ENV_PARAM(MORPHIZEN_SAVE_MLIR_AS_TEXT, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MLIR_GRAPH) >= n)
 namespace morphizen {
 namespace mlir_impl {
@@ -38,19 +38,19 @@ static mlir::Operation* get_or_create_terminator(mlir::func::FuncOp func) {
   // Get the function's entry block
   auto& entryBlock = func.getBody().front();
   mlir::Operation* terminator = nullptr;
-  // Find the existing terminator (should be a func.return operation)
+  // Find the existing terminator (should be an onnx.Return operation)
   auto has_terminator = entryBlock.mightHaveTerminator();
 
   if (!has_terminator) {
-    // No terminator exists, create a new func.return operation
+    // No terminator exists, create a new onnx.Return operation
     auto* context = func->getContext();
     mlir::OpBuilder builder(context);
     builder.setInsertionPointToEnd(&entryBlock);
 
-    // Convert gsl::span to SmallVector for MLIR API
-    llvm::SmallVector<mlir::Value> outputValues({});
-    terminator = builder.create<mlir::func::ReturnOp>(builder.getUnknownLoc(),
-                                                      outputValues);
+    // Create onnx.Return operation (dialect-specific return for ONNX)
+    mlir::OperationState state(builder.getUnknownLoc(), onnx_mlir::ONNX_RETURN);
+    // onnx.Return has Terminator trait, no results needed
+    terminator = builder.create(state);
   } else {
     terminator = entryBlock.getTerminator();
   }
@@ -155,8 +155,8 @@ void MLIRGraph::initialize_node_args_map() {
     if (op == func_.getOperation()) {
       return;
     }
-    // Skip return operations (terminators)
-    if (mlir::isa<mlir::func::ReturnOp>(op)) {
+    // Skip return operations (terminators) - both onnx.Return and func.return
+    if (onnx_mlir::isReturnOp(op)) {
       return;
     }
     // Skip onnx.Constant, onnx.Constant mapping onnx
@@ -234,9 +234,9 @@ void MLIRGraph::initialize_graph_outputs() {
 
   CHECK(terminator_) << "Terminator must not be null when initializing outputs";
   // Get the return operation to find graph outputs
-  if (terminator_ && mlir::isa<mlir::func::ReturnOp>(terminator_)) {
-    auto return_op = mlir::cast<mlir::func::ReturnOp>(terminator_);
-    auto operands = return_op.getOperands();
+  // Handle both onnx.Return and func.return for compatibility
+  if (terminator_ && onnx_mlir::isReturnOp(terminator_)) {
+    auto operands = terminator_->getOperands();
 
     for (auto operand : operands) {
       // Find the corresponding NodeArg in our collection
@@ -265,7 +265,7 @@ void MLIRGraph::maintain_morphizen_attributes() {
   func_.walk([&](mlir::Operation* op) {
     // Skip function operation itself, return operations, constant operations,
     // and our custom onnx.None operations
-    if (op != func_.getOperation() && !mlir::isa<mlir::func::ReturnOp>(op) &&
+    if (op != func_.getOperation() && !onnx_mlir::isReturnOp(op) &&
         op->getName().getStringRef() != "onnx.Constant" &&
         op->getName().getStringRef() != onnx_mlir::ONNX_NONE) {
       // Collect input NodeArg pointers for this operation
@@ -335,7 +335,7 @@ std::vector<mlir::Operation*> MLIRGraph::nodes_unsafe() const {
     // Skip function operation itself, return operations, constant operations,
     // and our custom onnx.None operations
     if (op != const_cast<mlir::func::FuncOp&>(func_).getOperation() &&
-        !mlir::isa<mlir::func::ReturnOp>(op) &&
+        !onnx_mlir::isReturnOp(op) &&
         op->getName().getStringRef() != "onnx.Constant" &&
         op->getName().getStringRef() != onnx_mlir::ONNX_NONE) {
       // Add operation as node
@@ -371,17 +371,19 @@ void MLIRGraph::set_outputs(
     mlir_outputs.push_back(nodeArg->getValue());
   }
 
-  if (auto returnOp = mlir::dyn_cast<mlir::func::ReturnOp>(terminator_)) {
+  // Handle both onnx.Return and func.return terminators
+  if (onnx_mlir::isReturnOp(terminator_)) {
     // Replace the operands of the existing return operation
-    returnOp->setOperands(
+    terminator_->setOperands(
         llvm::ArrayRef<mlir::Value>(mlir_outputs.data(), mlir_outputs.size()));
 
-    MY_LOG(1) << "Updated existing func.return terminator with "
-              << mlir_outputs.size() << " outputs";
+    MY_LOG(1) << "Updated existing "
+              << terminator_->getName().getStringRef().str()
+              << " terminator with " << mlir_outputs.size() << " outputs";
   } else {
     LOG(FATAL) << "Unexpected terminator type: "
                << terminator_->getName().getStringRef().str()
-               << ", expected func.return";
+               << ", expected onnx.Return or func.return";
   }
 
   // Update func_ type to reflect the new output types
@@ -607,13 +609,6 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
     mlir_input_args.push_back(none_->getResult(0));
   }
 
-  // For now, create a generic ONNX operation
-  // In a real implementation, this would need to map op_type to specific MLIR
-  // operations
-
-  // Create operation name with domain
-  std::string full_op_name = domain.empty() ? op_type : domain + ":" + op_type;
-
   // Convert output types from mlir::Values (if they have types)
   llvm::SmallVector<mlir::Type> result_types;
   for (const auto& output : output_args) {
@@ -626,13 +621,51 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
   // Get attributes as MLIR dictionary
   mlir::DictionaryAttr mlir_attrs = attributes.get_mlir_dictionary();
 
-  // Create the operation
-  mlir::OperationState state(loc, "onnx." + full_op_name);
-  state.addOperands(mlir_input_args);
-  state.addTypes(result_types);
-  state.attributes = mlir_attrs;
+  // Determine if this is a custom domain operation
+  // Standard ONNX domain is "" (empty) or "ai.onnx"
+  bool is_custom_domain =
+      !domain.empty() && domain != "ai.onnx" && domain != "onnx";
 
-  mlir::Operation* op = builder.create(state);
+  mlir::Operation* op = nullptr;
+  if (is_custom_domain) {
+    // For custom domain operations (e.g., com.microsoft), use onnx.Custom
+    // This follows the onnx-mlir convention for custom operators
+    mlir::OperationState state(loc, "onnx.Custom");
+    state.addOperands(mlir_input_args);
+    state.addTypes(result_types);
+
+    // Add function_name and domain_name as properties (inside <{}>)
+    llvm::SmallVector<mlir::NamedAttribute> props;
+    props.push_back(
+        builder.getNamedAttr("function_name", builder.getStringAttr(op_type)));
+
+    // Copy existing attributes and add domain_name
+    llvm::SmallVector<mlir::NamedAttribute> attrs;
+    attrs.push_back(
+        builder.getNamedAttr("domain_name", builder.getStringAttr(domain)));
+    for (auto& attr : mlir_attrs) {
+      attrs.push_back(attr);
+    }
+
+    // Set properties and attributes
+    state.addAttribute("function_name", builder.getStringAttr(op_type));
+    for (auto& attr : attrs) {
+      state.addAttribute(attr.getName(), attr.getValue());
+    }
+
+    op = builder.create(state);
+    MY_LOG(1) << "Created onnx.Custom operation for " << domain << ":"
+              << op_type;
+  } else {
+    // For standard ONNX operations, use the normal naming convention
+    std::string full_op_name = op_type;
+    mlir::OperationState state(loc, "onnx." + full_op_name);
+    state.addOperands(mlir_input_args);
+    state.addTypes(result_types);
+    state.attributes = mlir_attrs;
+
+    op = builder.create(state);
+  }
 
   {
     // Store NodeArg pointer references as MLIR attributes for runtime access
@@ -742,7 +775,7 @@ void MLIRGraph::add_constant_initialized_tensor(
     // Track onnx.Constant operations
     else if (op.getName().getStringRef() == "onnx.Constant") {
       lastConstantOp = &op;
-    } else if (!mlir::isa<mlir::func::ReturnOp>(op)) {
+    } else if (!onnx_mlir::isReturnOp(&op)) {
       // Stop searching when we hit the first non-constant, non-return, non-None
       // operation
       break;
@@ -885,24 +918,31 @@ std::string MLIRGraph::save_string() const {
     }
   });
 
-  // Serialize the MLIR module to bytecode (binary format)
+  // Serialize the MLIR module (text or bytecode based on env var)
   std::string result;
   llvm::raw_string_ostream stream(result);
-  mlir::BytecodeWriterConfig config;
-  if (failed(mlir::writeBytecodeToFile(module, stream, config))) {
-    LOG(ERROR) << "Failed to write MLIR bytecode";
-    // Restore the backed up morphizen attributes before returning
-    for (const auto& backup : backups) {
-      if (backup.inputsAttr) {
-        backup.op->setAttr(attr_names::MORPHIZEN_NODE_INPUTS,
-                           backup.inputsAttr);
+
+  if (ENV_PARAM(MORPHIZEN_SAVE_MLIR_AS_TEXT)) {
+    // Text format for human readability
+    module.print(stream);
+  } else {
+    // Bytecode format (default, more compact)
+    mlir::BytecodeWriterConfig config;
+    if (failed(mlir::writeBytecodeToFile(module, stream, config))) {
+      LOG(ERROR) << "Failed to write MLIR bytecode";
+      // Restore the backed up morphizen attributes before returning
+      for (const auto& backup : backups) {
+        if (backup.inputsAttr) {
+          backup.op->setAttr(attr_names::MORPHIZEN_NODE_INPUTS,
+                             backup.inputsAttr);
+        }
+        if (backup.outputsAttr) {
+          backup.op->setAttr(attr_names::MORPHIZEN_NODE_OUTPUTS,
+                             backup.outputsAttr);
+        }
       }
-      if (backup.outputsAttr) {
-        backup.op->setAttr(attr_names::MORPHIZEN_NODE_OUTPUTS,
-                           backup.outputsAttr);
-      }
+      return "";
     }
-    return "";
   }
   stream.flush();
 
@@ -918,7 +958,9 @@ std::string MLIRGraph::save_string() const {
   }
 
   MY_LOG(1) << "Successfully serialized MLIR graph to string (restored "
-            << backups.size() << " operations with morphizen attributes)";
+            << backups.size() << " operations with morphizen attributes)"
+            << " format="
+            << (ENV_PARAM(MORPHIZEN_SAVE_MLIR_AS_TEXT) ? "text" : "bytecode");
   return result;
 }
 
@@ -936,13 +978,14 @@ MLIRGraph::get_consumer_nodes(const std::string& node_arg_name) const {
   std::vector<const mlir::Operation*> consumers;
   auto node_arg = get_node_arg(get_node_arg_index(node_arg_name));
   for (mlir::Operation* userOp : node_arg->getValue().getUsers()) {
-    // Skip func.return operations to avoid treating function outputs as regular
-    // consumers. Bug scenario: When a node's output (e.g.,
-    // "linear_img_add_DequantizeLinear") is directly returned by the function,
-    // including func.return as a consumer causes incorrect dependency analysis
-    // in graph partitioning, leading to wrong subgraph boundaries or the
-    // Partitioner incorrectly treating graph outputs as having real successors.
-    if (mlir::isa<mlir::func::ReturnOp>(userOp)) {
+    // Skip return operations (onnx.Return or func.return) to avoid treating
+    // function outputs as regular consumers. Bug scenario: When a node's output
+    // (e.g., "linear_img_add_DequantizeLinear") is directly returned by the
+    // function, including return ops as a consumer causes incorrect dependency
+    // analysis in graph partitioning, leading to wrong subgraph boundaries or
+    // the Partitioner incorrectly treating graph outputs as having real
+    // successors.
+    if (onnx_mlir::isReturnOp(userOp)) {
       continue;
     }
     consumers.push_back(userOp);
@@ -1264,12 +1307,15 @@ MLIRGraph::create_func_func(
     builder.clone(*op, value_mapping);
   }
 
-  // Create return operation with mapped outputs
+  // Create onnx.Return operation with mapped outputs
   auto output_values =
       llvm::to_vector(llvm::map_range(outputs, [&](const auto& output) {
         return value_mapping.lookup(output.get_node_arg().getValue());
       }));
-  builder.create<mlir::func::ReturnOp>(builder.getUnknownLoc(), output_values);
+  mlir::OperationState returnState(builder.getUnknownLoc(),
+                                   onnx_mlir::ONNX_RETURN);
+  returnState.addOperands(output_values);
+  builder.create(returnState);
 
   return std::make_pair(temp_func, cloned_ops_cache);
 }
@@ -1306,7 +1352,7 @@ mlir::Operation* MLIRGraph::create_func_call(
     for (auto& op : entryBlock.getOperations()) {
       if (op.getName().getStringRef() == "onnx.Constant") {
         lastConstantOp = &op;
-      } else if (!mlir::isa<mlir::func::ReturnOp>(op)) {
+      } else if (!onnx_mlir::isReturnOp(&op)) {
         break;
       }
     }
@@ -1378,7 +1424,7 @@ mlir::Operation* MLIRGraph::create_func_call(
   std::function<void(mlir::Operation*)> collectDependentOps =
       [&](mlir::Operation* userOp) {
         if (visited.count(userOp) || userOp == fuse_node ||
-            mlir::isa<mlir::func::ReturnOp>(userOp)) {
+            onnx_mlir::isReturnOp(userOp)) {
           return;
         }
         visited.insert(userOp);

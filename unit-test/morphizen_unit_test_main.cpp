@@ -16,7 +16,7 @@
 #include "morphizen-utils/morphizen_plugin.hpp"
 #include "morphizen/morphizen-ort-api-ext.hpp"
 template <typename... Args> void* morphizen_main_cmd(Args... args) {
-  auto ep_dll = morphizen::Plugin::get("onnxruntime_vitisai_ep");
+  auto ep_dll = morphizen::Plugin::get("onnxruntime_morphizen_ep");
   if (ep_dll == nullptr) {
     LOG(ERROR) << "Failed to load MorphiZen EP";
     return nullptr;
@@ -91,8 +91,18 @@ int main(int argc, const char* argv[]) {
     // This is required for tests that directly use MorphiZen APIs without
     // going through the EP registration path (which normally handles this)
 #ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+    // Enable text MLIR output mode for unit tests to allow verification of
+    // MLIR content (e.g., checking for onnx.Return, onnx.Custom, etc.)
+    // This must be set before any MLIR operations are performed.
+#  ifdef _WIN32
+    _putenv("MORPHIZEN_SAVE_MLIR_AS_TEXT=1");
+#  else
+    putenv(const_cast<char*>("MORPHIZEN_SAVE_MLIR_AS_TEXT=1"));
+#  endif
+
     morphizen::setup_global_morphizen_ort_api(morphizen::kMLIRBackend);
     LOG(INFO) << "Global MorphiZen ORT API initialized with MLIR backend";
+    LOG(INFO) << "MORPHIZEN_SAVE_MLIR_AS_TEXT=1 (text mode enabled for tests)";
 #else
     morphizen::setup_global_morphizen_ort_api(morphizen::kONNXIRBackend);
     LOG(INFO) << "Global MorphiZen ORT API initialized with ONNX-IR backend";
