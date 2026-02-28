@@ -360,6 +360,7 @@ public:
   virtual const std::map<std::string, std::string>&
   get_compiled_model_compatibility_info() const override final;
   virtual void disable_delete_tar_file_in_session_created() override final;
+  virtual std::unique_ptr<FileSystem> get_file_system() override final;
 
 private:
   std::function<std::optional<std::string>(std::string)> get_run_options_;
