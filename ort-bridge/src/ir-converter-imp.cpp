@@ -158,7 +158,9 @@ IRConverterImp::guess_missing_output(std::vector<morphizen::NodeArg*> outputs,
     }
   }
 
-  // guess output
+  // guess output: add dangling node outputs that are not consumed by any other
+  // node and are not already in the output list. Skip optional intermediates
+  // from multi-output ops where at least one sibling result IS consumed.
   for (auto& node : nodes) {
     std::vector<const OrtValueInfo*> node_outputs = {};
     size_t num_of_outputs = 0;
@@ -166,9 +168,26 @@ IRConverterImp::guess_missing_output(std::vector<morphizen::NodeArg*> outputs,
     node_outputs.resize(num_of_outputs);
     throw_if_error(
         ort_api.Node_GetOutputs(node, node_outputs.data(), num_of_outputs));
+
+    bool any_sibling_consumed = false;
+    if (num_of_outputs > 1) {
+      for (auto sibling : node_outputs) {
+        if (sibling != nullptr && all_inputs.count(sibling) > 0) {
+          any_sibling_consumed = true;
+          break;
+        }
+      }
+    }
+
     for (auto output : node_outputs) {
       if (output != nullptr) { // output == nullptr mean optional argument.
         if (all_inputs.count(output) == 0) {
+          if (any_sibling_consumed) {
+            auto vi = Ort::ConstValueInfo(output);
+            MY_LOG(3) << "Skipping optional intermediate output: "
+                      << vi.GetName();
+            continue;
+          }
           // Create ValueInfo wrapper for the output
           auto value_info = Ort::ConstValueInfo(output);
           morphizen::NodeArg* node_arg = nullptr;
