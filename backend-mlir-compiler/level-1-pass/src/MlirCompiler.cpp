@@ -57,18 +57,18 @@ std::optional<CompilationArtifact>
 MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
                                   const CompilationConfig &config) {
 
-  LOG(INFO) << "Compiling MLIR bytecode using morphizen-mlir-compiler plugin";
+  LOG(INFO) << "Compiling MLIR bytecode using hip-compiler plugin";
   LOG(INFO) << "Bytecode size: " << mlir_bytecode.size() << " bytes";
 
   // Load plugin via MorphiZen Plugin API
-  auto plugin = morphizen::Plugin::get("morphizen-mlir-compiler");
+  auto plugin = morphizen::Plugin::get("hip-compiler");
   if (!plugin) {
-    LOG(ERROR) << "Failed to load morphizen-mlir-compiler plugin";
+    LOG(ERROR) << "Failed to load hip-compiler plugin";
     return std::nullopt;
   }
 
   // Get plugin version
-  auto version = plugin->invoke<const char *>("morphizen_mlir_get_version");
+  auto version = plugin->invoke<const char *>("hip_get_version");
   LOG(INFO) << "Plugin version: " << version;
 
   // Generate temporary output path for compilation
@@ -81,27 +81,26 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
   LOG(INFO) << "Compilation options (JSON): " << options_json;
 
   // Check if symbol exists
-  if (!plugin->has_method("morphizen_mlir_compile")) {
-    LOG(ERROR) << "Symbol 'morphizen_mlir_compile' NOT found in DLL";
+  if (!plugin->has_method("hip_compile")) {
+    LOG(ERROR) << "Symbol 'hip_compile' NOT found in DLL";
     return std::nullopt;
   }
 
-  LOG(INFO) << "Calling morphizen_mlir_compile with JSON options: "
-            << options_json;
+  LOG(INFO) << "Calling hip_compile with JSON options: " << options_json;
 
   // Get method with explicit types (avoids template forwarding ref issues)
   // Signature: CompilerErrorCode (*)(const void*, size_t, const char*, const
   // char*, CompilerError*)
   auto func = plugin->get_method<CompilerErrorCode, const void *, size_t,
                                  const char *, const char *, CompilerError *>(
-      "morphizen_mlir_compile");
+      "hip_compile");
 
   MY_LOG(2) << "get_method returned func = " << (void *)func;
   MY_LOG(2) << "Bytecode data() = " << (void *)mlir_bytecode.data();
   MY_LOG(2) << "Bytecode size() = " << mlir_bytecode.size();
 
   if (func == nullptr) {
-    LOG(ERROR) << "get_method returned nullptr for morphizen_mlir_compile";
+    LOG(ERROR) << "get_method returned nullptr for hip_compile";
     return std::nullopt;
   }
 

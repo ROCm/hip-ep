@@ -16,9 +16,10 @@ namespace mlir_compilation {
 // Describes a single tensor passed across the DLL boundary.
 // All memory is caller-owned CPU memory; the DLL copies H2D/D2H internally.
 struct tensor_t {
-  void *data;     // Pointer to contiguous tensor data (CPU memory, caller-owned)
-  int64_t *shape; // Pointer to shape array of length `rank` (caller-owned)
-  size_t rank;    // Number of dimensions (must match the compiled model's rank)
+  void *data;         // Pointer to contiguous tensor data (CPU memory, caller-owned)
+  int64_t *shape;     // Pointer to shape array of length `rank` (caller-owned)
+  size_t rank;        // Number of dimensions (must match the compiled model's rank)
+  size_t element_size; // Bytes per element (e.g. 4=float32, 2=float16, 8=int64)
 };
 
 // A contiguous array of tensor_t descriptors (inputs or outputs).

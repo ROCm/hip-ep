@@ -107,7 +107,7 @@ ONNX Model → ONNX Runtime → EP Plugin → [compilation] → Native DLL → [
 **Commands:**
 ```bash
 # Compile ONNX → native DLL
-mlir-hip-compiler demo_two_layer_conv.mlir --from-onnx-mlir -o demo.dll
+hip-compile demo_two_layer_conv.mlir --from-onnx-mlir -o demo.dll
 
 # Load and execute DLL
 test-model-dll demo.dll
@@ -245,7 +245,7 @@ This example separates compilation from execution:
 │  │ • No LLVM/MLIR deps      │      │                               │
 │  │ • No ROCm deps           │      ▼                               │
 │  │ • Just orchestration     │  ┌─────────────────────────────┐    │
-│  └──────────────────────────┘  │ morphizen-mlir-compiler.dll │    │
+│  └──────────────────────────┘  │ hip-compiler.dll           │    │
 │                                 │                             │    │
 │                                 │ Depends on:                 │    │
 │                                 │  • LLVM                     │    │
@@ -280,14 +280,14 @@ This example separates compilation from execution:
 │                                 │ • No LLVM/MLIR                   │
 │                                 └──────────────────────────────────┘
 │                                                                     │
-│  Note: morphizen-mlir-compiler.dll NOT needed at inference time    │
+│  Note: hip-compiler.dll NOT needed at inference time              │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
 **Deployment scenarios this enables:**
 
 1. **Offline compilation:**
-   - Compile on server with `morphizen-mlir-compiler.dll`
+   - Compile on server with `hip-compiler.dll`
    - Deploy only `model.dll` to inference machines
    - Inference machines don't need LLVM/MLIR (hundreds of MB saved)
 
@@ -564,7 +564,7 @@ func.func @main(%input: tensor<1x3x224x224xf32>) -> tensor<1x64x112x112xf32> {
 
 **Command:**
 ```bash
-../../build/$(basename $PWD)/Debug/bin/hip-opt.exe \
+../../local/bin/hip-opt.exe \
   tools/hip-opt/demos/demo_two_layer_conv.mlir \
   --convert-onnx-to-hip \
   > ../output/stage1.mlir
@@ -620,9 +620,9 @@ module attributes {hipdnn.input_count = 1 : i64, hipdnn.output_count = 1 : i64,
 
 **Command:**
 ```bash
-../../build/$(basename $PWD)/Debug/bin/hip-opt.exe \
+../../local/bin/hip-opt.exe \
   ../output/stage1.mlir \
-  --ownership-based-buffer-deallocation \
+  --hip-buffer-deallocation \
   > ../output/stage2.mlir
 ```
 
@@ -669,7 +669,7 @@ func.func @main(%arg0: !hip.context,
 
 **Command:**
 ```bash
-../../build/$(basename $PWD)/Debug/bin/hip-opt.exe \
+../../local/bin/hip-opt.exe \
   ../output/stage2.mlir \
   --memory-pooling \
   > ../output/stage3.mlir
@@ -725,7 +725,7 @@ module attributes {
 
 **Command:**
 ```bash
-../../build/$(basename $PWD)/Debug/bin/hip-opt.exe \
+../../local/bin/hip-opt.exe \
   ../output/stage3.mlir \
   --convert-hip-to-llvm \
   > ../output/stage4.mlir
@@ -793,7 +793,7 @@ module {
 
 **Command:**
 ```bash
-../../build/$(basename $PWD)/Debug/bin/hip-opt.exe \
+../../local/bin/hip-opt.exe \
   ../output/stage4.mlir \
   --generate-interface \
   > ../output/stage5.mlir
@@ -861,7 +861,7 @@ module {
 
 **Command:**
 ```bash
-../../build/$(basename $PWD)/Debug/bin/mlir-hip-compiler.exe \
+../../local/bin/hip-compile.exe \
   tools/hip-opt/demos/demo_two_layer_conv.mlir \
   --from-onnx-mlir \
   -o ../output/demo_two_layer.dll \
@@ -920,9 +920,9 @@ Output: ../output/demo_two_layer.dll
 MLIR transformation tool for testing individual passes.
 - **Input**: ONNX/HIP MLIR
 - **Output**: Transformed MLIR
-- **Passes**: `--convert-onnx-to-hip`, `--ownership-based-buffer-deallocation`, `--memory-pooling`, `--convert-hip-to-llvm`, `--generate-interface`
+- **Passes**: `--convert-onnx-to-hip`, `--hip-buffer-deallocation`, `--memory-pooling`, `--convert-hip-to-llvm`, `--generate-interface`
 
-### mlir-hip-compiler
+### hip-compile
 End-to-end DLL compiler (runs full pipeline automatically).
 - **Input**: MLIR (or ONNX-MLIR with `--from-onnx-mlir`)
 - **Output**: Native DLL with C-ABI exports
@@ -985,7 +985,7 @@ ORT_LOG_LEVEL=info MORPHIZEN_DEBUG_MLIR_BACKEND=3 ./test-e2e-mlir.exe
 ```bash
 cd /path/to/onnx-hipdnn-ep
 # Run all stages, save to ../output/
-../../build/$(basename $PWD)/Debug/bin/hip-opt.exe tools/hip-opt/demos/demo_two_layer_conv.mlir --convert-onnx-to-hip > ../output/stage1_onnx_to_hip.mlir
+../../local/bin/hip-opt.exe tools/hip-opt/demos/demo_two_layer_conv.mlir --convert-onnx-to-hip > ../output/stage1_onnx_to_hip.mlir
 # ... (all stages)
 ```
 Copy actual output into this document. Never fabricate examples.
@@ -996,8 +996,8 @@ Copy actual output into this document. Never fabricate examples.
 - Exception: One concrete example per concept with "(demo model)" note
 
 **Rule 3: Use Relative Paths**
-- ❌ `C:/Develop/m/build/onnx-hipdnn-ep/Debug/bin/hip-opt.exe`
-- ✅ `../../build/$(basename $PWD)/Debug/bin/hip-opt.exe`
+- ❌ `C:/Develop/m/local/bin/hip-opt.exe`
+- ✅ `../../local/bin/hip-opt.exe`
 
 **Rule 4: Make Commands Reproducible**
 - Use `$(basename $PWD)` - works on any checkout

@@ -26,6 +26,9 @@ project(
   VERSION 1.0.0
   LANGUAGES C CXX)
 
+# Use static CRT (/MT for Release, /MTd for Debug) to match pre-built dependencies
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "" FORCE)
+
 # ==============================================================================
 # TheRock ROCm SDK Configuration
 # ==============================================================================
@@ -50,6 +53,11 @@ if(THEROCK_DIST)
 endif()
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
+
+# glog is found inside MorphiZen's subdirectory scope, but IMPORTED targets
+# from find_package are directory-scoped. Re-find at top level so that
+# rocm-pass-common and other top-level targets can link against glog::glog.
+find_package(glog CONFIG REQUIRED)
 
 # HIP kernels library (compiled with hipcc on Windows, CMake HIP on Linux)
 add_subdirectory(kernels)

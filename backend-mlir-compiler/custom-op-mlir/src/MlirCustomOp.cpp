@@ -31,6 +31,43 @@ struct TensorData {
   span_t span;
 };
 
+static size_t ort_element_size(ONNXTensorElementDataType dtype) {
+  switch (dtype) {
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:   return 4;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:  return 8;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: return 2;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:return 2;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:    return 1;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:   return 1;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:   return 2;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:  return 2;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:   return 4;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:  return 4;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:   return 8;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:  return 8;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:    return 1;
+  default:                                     return 4;
+  }
+}
+
+static size_t onnx_elem_type_size(int elem_type) {
+  switch (elem_type) {
+  case 1:  return 4; // FLOAT
+  case 2:  return 1; // UINT8
+  case 3:  return 1; // INT8
+  case 5:  return 2; // INT16
+  case 6:  return 4; // INT32
+  case 7:  return 8; // INT64
+  case 9:  return 1; // BOOL
+  case 10: return 2; // FLOAT16
+  case 11: return 8; // DOUBLE
+  case 12: return 4; // UINT32
+  case 13: return 8; // UINT64
+  case 16: return 2; // BFLOAT16
+  default: return 4;
+  }
+}
+
 // Marshal input tensors from ORT context
 TensorData marshal_input_tensors(OrtKernelContext *context) {
   Ort::KernelContext ctx(context);
@@ -50,8 +87,11 @@ TensorData marshal_input_tensors(OrtKernelContext *context) {
     data.tensors[i].data = const_cast<void *>(input_tensor.GetTensorRawData());
     data.tensors[i].shape = data.shapes[i].data();
     data.tensors[i].rank = data.shapes[i].size();
+    data.tensors[i].element_size =
+        ort_element_size(tensor_info.GetElementType());
 
-    MY_LOG(3) << "Input[" << i << "]: rank=" << data.tensors[i].rank;
+    MY_LOG(3) << "Input[" << i << "]: rank=" << data.tensors[i].rank
+              << " element_size=" << data.tensors[i].element_size;
   }
 
   data.span.data = data.tensors.data();
@@ -86,8 +126,11 @@ TensorData marshal_output_tensors(
     data.tensors[i].data = output_tensor.GetTensorMutableRawData();
     data.tensors[i].shape = data.shapes[i].data();
     data.tensors[i].rank = data.shapes[i].size();
+    data.tensors[i].element_size =
+        onnx_elem_type_size(output_meta.elem_type());
 
-    MY_LOG(3) << "Output[" << i << "]: rank=" << data.tensors[i].rank;
+    MY_LOG(3) << "Output[" << i << "]: rank=" << data.tensors[i].rank
+              << " element_size=" << data.tensors[i].element_size;
   }
 
   data.span.data = data.tensors.data();

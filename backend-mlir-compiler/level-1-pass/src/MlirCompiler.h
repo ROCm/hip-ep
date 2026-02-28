@@ -30,12 +30,12 @@ struct CompilationArtifact {
 };
 
 /**
- * Simplified MLIR compiler that uses morphizen-mlir-compiler plugin C API.
+ * Simplified MLIR compiler that uses hip-compiler plugin C API.
  *
  * Replaces the old direct LLVM/MLIR integration (MlirParser, MlirTransformer,
  * LlvmCompiler).
  *
- * NOTE: Mock runtime is not supported. The morphizen-mlir-compiler plugin
+ * NOTE: Mock runtime is not supported. The hip-compiler plugin
  * always generates native code that targets the actual HIP/ROCm runtime.
  * Mock runtime functionality was removed as it is not compatible with the
  * plugin-based compilation architecture.
