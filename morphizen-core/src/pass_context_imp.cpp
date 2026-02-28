@@ -847,6 +847,20 @@ std::size_t CacheFileWriterStreamImp::fwrite(const void* buffer,
   return ret;
 }
 
+FileSystemImp::FileSystemImp(PassContext& context) : context_(context) {}
+
+FileReader* FileSystemImp::create_reader(const char* path) {
+  return context_.open_file_for_read(path).release();
+}
+
+FileWriter* FileSystemImp::create_writer(const char* path) {
+  return context_.open_file_for_write(path).release();
+}
+
+void FileSystemImp::destroy_reader(FileReader* reader) { delete reader; }
+
+void FileSystemImp::destroy_writer(FileWriter* writer) { delete writer; }
+
 void PassContextImp::maybe_create_tar_file_for_write() {
   auto is_shared_context_enabled =
       get_session_config(kOrtSessionOptionShareEpContexts, "0") == "1";

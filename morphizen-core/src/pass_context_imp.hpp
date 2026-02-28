@@ -85,6 +85,18 @@ private:
   std::unique_ptr<std::ostream> stream_;
 };
 
+class FileSystemImp : public FileSystem {
+public:
+  explicit FileSystemImp(PassContext& context);
+  FileReader* create_reader(const char* path) override;
+  FileWriter* create_writer(const char* path) override;
+  void destroy_reader(FileReader* reader) override;
+  void destroy_writer(FileWriter* writer) override;
+
+private:
+  PassContext& context_;
+};
+
 // iostream adapters for CacheFile
 
 class CacheFileOstreambuf : public std::streambuf {
