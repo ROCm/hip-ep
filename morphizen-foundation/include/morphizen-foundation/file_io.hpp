@@ -6,6 +6,8 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
+#include <type_traits>
 
 namespace morphizen {
 
@@ -211,6 +213,119 @@ public:
    * Ensure data is flushed before the FileWriter is destroyed.
    */
   virtual std::size_t fwrite(const void* buffer, std::size_t size) const = 0;
+};
+
+/**
+ * @brief Abstract interface for file system operations
+ *
+ * FileSystem provides a DLL-safe factory for creating FileReader and FileWriter
+ * instances. It decouples file I/O creation from any specific context (such as
+ * PassContext), allowing generic components to open files without depending on
+ * higher-level abstractions.
+ *
+ * @par DLL Safety
+ * - Uses const char* for paths (no std::string across DLL boundaries)
+ * - Returns raw pointers; caller owns the returned object and must delete it
+ * - Both FileReader and FileWriter have virtual destructors, so delete through
+ *   the base pointer correctly invokes the derived destructor
+ *
+ * @par Example Usage (raw pointers with manual destroy)
+ * @code
+ * void process(FileSystem& fs) {
+ *     FileReader* reader = fs.create_reader("input.bin");
+ *     FileWriter* writer = fs.create_writer("output.bin");
+ *     if (reader && writer) {
+ *         char buf[4096];
+ *         reader->rewind();
+ *         while (auto n = reader->fread(buf, sizeof(buf)))
+ *             writer->fwrite(buf, n);
+ *     }
+ *     fs.destroy_writer(writer);
+ *     fs.destroy_reader(reader);
+ * }
+ * @endcode
+ *
+ * @par Example Usage (RAII with create_reader_template/create_writer_template)
+ * @code
+ * void process(FileSystem& fs) {
+ *     auto reader = fs.create_reader_template("input.bin");
+ *     auto writer = fs.create_writer_template("output.bin");
+ *     if (reader && writer) {
+ *         char buf[4096];
+ *         reader->rewind();
+ *         while (auto n = reader->fread(buf, sizeof(buf)))
+ *             writer->fwrite(buf, n);
+ *     }
+ *     // automatically destroyed when reader/writer go out of scope
+ * }
+ * @endcode
+ */
+class FileSystem {
+public:
+  FileSystem() = default;
+  FileSystem(const FileSystem&) = delete;
+  FileSystem& operator=(const FileSystem&) = delete;
+  virtual ~FileSystem() = default;
+
+  /**
+   * @brief Creates a FileReader for the given path
+   *
+   * @param path Null-terminated file path
+   * @return Pointer to a new FileReader, or nullptr on failure.
+   *         Caller must pass the returned pointer to destroy_reader() when
+   *         done.
+   */
+  virtual FileReader* create_reader(const char* path) = 0;
+
+  /**
+   * @brief Creates a FileWriter for the given path
+   *
+   * @param path Null-terminated file path
+   * @return Pointer to a new FileWriter, or nullptr on failure.
+   *         Caller must pass the returned pointer to destroy_writer() when
+   *         done.
+   */
+  virtual FileWriter* create_writer(const char* path) = 0;
+
+  /**
+   * @brief Destroys a FileReader previously returned by create_reader()
+   *
+   * Ensures deallocation happens in the same DLL that allocated the object,
+   * avoiding cross-DLL heap mismatches.
+   *
+   * @param reader Pointer to destroy (nullptr is safely ignored)
+   */
+  virtual void destroy_reader(FileReader* reader) = 0;
+
+  /**
+   * @brief Destroys a FileWriter previously returned by create_writer()
+   *
+   * Ensures deallocation happens in the same DLL that allocated the object,
+   * avoiding cross-DLL heap mismatches.
+   *
+   * @param writer Pointer to destroy (nullptr is safely ignored)
+   */
+  virtual void destroy_writer(FileWriter* writer) = 0;
+
+  template <typename T> struct Deleter {
+    FileSystem* fs;
+    void operator()(T* ptr) const {
+      if constexpr (std::is_same_v<T, FileReader>)
+        fs->destroy_reader(ptr);
+      else
+        fs->destroy_writer(ptr);
+    }
+  };
+
+  std::unique_ptr<FileReader, Deleter<FileReader>>
+  create_reader_template(const char* path) {
+    return {create_reader(path), {this}};
+  }
+
+  std::unique_ptr<FileWriter, Deleter<FileWriter>>
+  create_writer_template(const char* path) {
+    return {create_writer(path), {this}};
+  }
 };
 
 } // namespace morphizen
