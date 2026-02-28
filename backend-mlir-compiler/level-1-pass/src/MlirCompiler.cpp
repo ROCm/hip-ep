@@ -55,7 +55,8 @@ std::string build_compiler_options_json(const CompilationConfig &config) {
 
 std::optional<CompilationArtifact>
 MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
-                                  const CompilationConfig &config) {
+                                  const CompilationConfig &config,
+                                  morphizen::FileSystem *fs) {
 
   LOG(INFO) << "Compiling MLIR bytecode using hip-compiler plugin";
   LOG(INFO) << "Bytecode size: " << mlir_bytecode.size() << " bytes";
@@ -82,26 +83,28 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
   LOG(INFO) << "Compilation options (JSON): " << options_json;
 
   // Check if symbol exists
-  if (!plugin->has_method("hip_compile")) {
-    LOG(ERROR) << "Symbol 'hip_compile' NOT found in DLL";
+  if (!plugin->has_method("hip_compile_with_fs")) {
+    LOG(ERROR) << "Symbol 'hip_compile_with_fs' NOT found in DLL";
     return std::nullopt;
   }
 
-  LOG(INFO) << "Calling hip_compile with JSON options: " << options_json;
+  LOG(INFO) << "Calling hip_compile_with_fs with JSON options: "
+            << options_json;
 
   // Get method with explicit types (avoids template forwarding ref issues)
   // Signature: CompilerErrorCode (*)(const void*, size_t, const char*, const
-  // char*, CompilerError*)
+  // char*, CompilerError*, void* fs)
   auto func =
       plugin->get_method<CompilerErrorCode, const void *, size_t, const char *,
-                         const char *, CompilerError *>("hip_compile");
+                         const char *, CompilerError *, void *>(
+          "hip_compile_with_fs");
 
   MY_LOG(2) << "get_method returned func = " << (void *)func;
   MY_LOG(2) << "Bytecode data() = " << (void *)mlir_bytecode.data();
   MY_LOG(2) << "Bytecode size() = " << mlir_bytecode.size();
 
   if (func == nullptr) {
-    LOG(ERROR) << "get_method returned nullptr for hip_compile";
+    LOG(ERROR) << "get_method returned nullptr for hip_compile_with_fs";
     return std::nullopt;
   }
 
@@ -109,8 +112,9 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
   MY_LOG(2) << "About to call func with size = " << mlir_bytecode.size();
 
   CompilerError error = {};
-  auto result = func(mlir_bytecode.data(), mlir_bytecode.size(),
-                     temp_output_path.c_str(), options_json.c_str(), &error);
+  auto result =
+      func(mlir_bytecode.data(), mlir_bytecode.size(), temp_output_path.c_str(),
+           options_json.c_str(), &error, fs);
 
   if (result != COMPILER_SUCCESS) {
     LOG(ERROR) << "Compilation failed: " << error.message;
