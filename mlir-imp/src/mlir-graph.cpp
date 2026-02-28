@@ -16,6 +16,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h" // for EmptyOp
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Verifier.h"
 #include "morphizen-foundation/env_config.hpp"
@@ -27,6 +28,7 @@
 #include <glog/logging.h>
 #include <iomanip>                    // for std::setprecision
 #include <system_error>               // for std::error_code
+#include <unordered_map>              // for std::unordered_map
 #include <unordered_set>              // for std::unordered_set
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_GRAPH, "0")
 DEF_ENV_PARAM(MORPHIZEN_SAVE_MLIR_AS_TEXT, "0")
@@ -171,6 +173,10 @@ void MLIRGraph::initialize_node_args_map() {
 
     // Process all results of this operation
     for (auto result : op->getResults()) {
+      // Skip optional/unused outputs that were assigned NoneType
+      // (e.g. unused outputs of SkipSimplifiedLayerNormalization)
+      if (mlir::isa<mlir::NoneType>(result.getType()))
+        continue;
       // Try to get the name from node.outputs attribute or generate one
       std::string name = extract_value_name(result);
       // Create MLIRNodeArg from the operation result
@@ -229,7 +235,6 @@ void MLIRGraph::initialize_graph_inputs() {
 void MLIRGraph::initialize_graph_outputs() {
   MY_LOG(1) << "Initializing graph outputs";
 
-  // Clear existing outputs
   graph_outputs_.clear();
 
   CHECK(terminator_) << "Terminator must not be null when initializing outputs";
@@ -239,11 +244,13 @@ void MLIRGraph::initialize_graph_outputs() {
     auto operands = terminator_->getOperands();
 
     for (auto operand : operands) {
-      // Find the corresponding NodeArg in our collection
       for (size_t i = 0; i < all_node_args_.size(); ++i) {
         const auto& node_arg = all_node_args_[i];
         if (node_arg && node_arg->getValue() == operand) {
           graph_outputs_.push_back(node_args_map_[node_arg->getName()]);
+          if (!model_output_names_frozen_) {
+            model_output_names_.insert(node_arg->getName());
+          }
           MY_LOG(2) << "Added graph output: " << node_arg->getName()
                     << " at index " << i;
           break;
@@ -252,7 +259,9 @@ void MLIRGraph::initialize_graph_outputs() {
     }
   }
 
-  MY_LOG(1) << "Initialized " << graph_outputs_.size() << " graph outputs";
+  model_output_names_frozen_ = true;
+  MY_LOG(1) << "Initialized " << graph_outputs_.size() << " graph outputs"
+            << " (model_output_names: " << model_output_names_.size() << ")";
 }
 
 void MLIRGraph::maintain_morphizen_attributes() {
@@ -358,22 +367,36 @@ llvm::SmallVector<MLIRNodeArgIndex> MLIRGraph::get_outputs() const {
 void MLIRGraph::set_outputs(
     const llvm::SmallVector<MLIRNodeArgIndex>& outputs) {
 
-  graph_outputs_ = outputs;
-
   CHECK(func_) << "func_ must not be null when setting outputs";
-  // Convert MLIRNodeArgIndex to mlir::Value
+
+  llvm::SmallVector<MLIRNodeArgIndex> valid_outputs;
   llvm::SmallVector<mlir::Value> mlir_outputs;
+  valid_outputs.reserve(outputs.size());
   mlir_outputs.reserve(outputs.size());
   for (const auto& output : outputs) {
-    // Get the mlir::Value from the NodeArg
     auto* nodeArg = get_node_arg(output);
-    CHECK(nodeArg->getValue()) << "NodeArg must have a value for outputs";
+    if (!nodeArg || !nodeArg->getValue() ||
+        mlir::isa<mlir::NoneType>(nodeArg->getValue().getType())) {
+      MY_LOG(1) << "Skipping NoneType output: " << output.get_name();
+      continue;
+    }
+    // model_output_names_ is populated only by initialize_graph_outputs()
+    // from the model's existing onnx.Return. Use it to filter spurious
+    // intermediate outputs that the ORT bridge may include beyond the
+    // model's actual graph outputs. When empty (graph built from scratch),
+    // no filtering is applied.
+    if (!model_output_names_.empty() &&
+        !model_output_names_.count(output.get_name())) {
+      MY_LOG(1) << "Skipping non-model output: " << output.get_name();
+      continue;
+    }
+    valid_outputs.push_back(output);
     mlir_outputs.push_back(nodeArg->getValue());
   }
+  graph_outputs_ = valid_outputs;
 
   // Handle both onnx.Return and func.return terminators
   if (onnx_mlir::isReturnOp(terminator_)) {
-    // Replace the operands of the existing return operation
     terminator_->setOperands(
         llvm::ArrayRef<mlir::Value>(mlir_outputs.data(), mlir_outputs.size()));
 
@@ -398,8 +421,8 @@ void MLIRGraph::set_outputs(
   }
 
   func_.setType(builder.getFunctionType(argTypes, resultTypes));
-  for (size_t i = 0; i < outputs.size(); ++i) {
-    auto name = outputs[i].get_name();
+  for (size_t i = 0; i < valid_outputs.size(); ++i) {
+    auto name = valid_outputs[i].get_name();
     func_.setResultAttr((unsigned int)i, mlir_impl::attr_names::ONNX_NAME,
                         mlir::StringAttr::get(func_.getContext(), name));
   }
@@ -609,10 +632,22 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
     mlir_input_args.push_back(none_->getResult(0));
   }
 
-  // Convert output types from mlir::Values (if they have types)
+  // Convert output types from mlir::Values (if they have types).
+  // Outputs with empty names or no registered NodeArg are treated as
+  // optional/unused (NoneType). Empty names follow the ONNX convention for
+  // unconnected optional outputs. The NoneType results are then filtered
+  // out of graph outputs by set_outputs().
   llvm::SmallVector<mlir::Type> result_types;
-  for (const auto& output : output_args) {
-    result_types.push_back(get_node_arg(output)->getType(builder));
+  for (unsigned idx = 0; idx < output_args.size(); ++idx) {
+    if (!output_args[idx].is_valid() || output_args[idx].get_name().empty()) {
+      result_types.push_back(builder.getNoneType());
+      continue;
+    }
+    if (auto* output_node_arg = get_node_arg(output_args[idx])) {
+      result_types.push_back(output_node_arg->getType(builder));
+    } else {
+      result_types.push_back(builder.getNoneType());
+    }
   }
 
   // Create operation location
@@ -621,13 +656,23 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
   // Get attributes as MLIR dictionary
   mlir::DictionaryAttr mlir_attrs = attributes.get_mlir_dictionary();
 
-  // Determine if this is a custom domain operation
-  // Standard ONNX domain is "" (empty) or "ai.onnx"
+  // Determine if this operation should use onnx.Custom representation.
+  // Two cases require onnx.Custom:
+  // 1. Non-standard domain ops (e.g., com.microsoft)
+  // 2. Standard-domain ops not registered in onnx-mlir's ONNX dialect.
+  //    The hip-compiler uses a specific onnx-mlir fork that may lack newer
+  //    ONNX ops (e.g. opset 21+). These must be emitted as onnx.Custom so
+  //    the compiler can parse them and match its own conversion patterns.
+  static const std::unordered_set<std::string> unregistered_onnx_ops = {
+      "SimplifiedLayerNormalization",
+  };
+
   bool is_custom_domain =
       !domain.empty() && domain != "ai.onnx" && domain != "onnx";
+  bool use_custom_op = is_custom_domain || unregistered_onnx_ops.count(op_type);
 
   mlir::Operation* op = nullptr;
-  if (is_custom_domain) {
+  if (use_custom_op) {
     // For custom domain operations (e.g., com.microsoft), use onnx.Custom
     // This follows the onnx-mlir convention for custom operators
     mlir::OperationState state(loc, "onnx.Custom");
@@ -662,7 +707,31 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
     mlir::OperationState state(loc, "onnx." + full_op_name);
     state.addOperands(mlir_input_args);
     state.addTypes(result_types);
-    state.attributes = mlir_attrs;
+
+    if (op_type == "Cast") {
+      // onnx.Cast requires 'to' as a TypeAttr property, not an IntegerAttr.
+      // The EP receives 'to' as an ONNX TensorProto_DataType enum (integer),
+      // but the registered ONNX dialect in the compiler expects TypeAttr.
+      llvm::SmallVector<mlir::NamedAttribute> new_attrs;
+      for (auto& attr : mlir_attrs) {
+        if (attr.getName() == "to") {
+          if (auto int_attr =
+                  mlir::dyn_cast<mlir::IntegerAttr>(attr.getValue())) {
+            int onnx_type = static_cast<int>(int_attr.getSInt());
+            mlir::Type mlir_type =
+                onnxElementTypeToMlirType(onnx_type, builder);
+            new_attrs.push_back(
+                builder.getNamedAttr("to", mlir::TypeAttr::get(mlir_type)));
+            continue;
+          }
+        }
+        new_attrs.push_back(attr);
+      }
+      state.attributes =
+          mlir::DictionaryAttr::get(builder.getContext(), new_attrs);
+    } else {
+      state.attributes = mlir_attrs;
+    }
 
     op = builder.create(state);
   }
@@ -689,7 +758,11 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
   // Collect output names for the "node.outputs" attribute
   llvm::SmallVector<mlir::Attribute> outputNames;
   for (const auto& output : output_args) {
-    outputNames.push_back(builder.getStringAttr(output.get_name()));
+    if (output.is_valid() && get_node_arg(output)) {
+      outputNames.push_back(builder.getStringAttr(output.get_name()));
+    } else {
+      outputNames.push_back(builder.getStringAttr(""));
+    }
   }
 
   // Set the "node.outputs" attribute on the operation
@@ -703,6 +776,8 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
   mlir::IRRewriter rewriter(func_->getContext());
   for (const auto& [output, result] :
        llvm::zip(output_args, op->getResults())) {
+    if (!output.is_valid() || !get_node_arg(output))
+      continue;
     auto& node_arg = output.get_node_arg();
     if (auto& value = node_arg.getValue()) {
       rewriter.replaceAllUsesWith(value, result);
@@ -1112,6 +1187,78 @@ void MLIRGraph::reverse_dfs_from_preemp(
   }
 }
 
+void MLIRGraph::canonicalize_optional_outputs() {
+  // Align with onnx-mlir behavior: for multi-result operations, any result
+  // that has no users (not consumed by other ops, not in onnx.Return) is an
+  // unused optional output and should be typed as `none`.
+  // This avoids allocating dummy buffers for unused intermediate values.
+  auto noneType = mlir::NoneType::get(func_->getContext());
+  mlir::OpBuilder builder(func_->getContext());
+
+  // Collect the set of values used by the terminator (onnx.Return)
+  llvm::DenseSet<mlir::Value> terminator_operands;
+  if (terminator_) {
+    for (auto operand : terminator_->getOperands())
+      terminator_operands.insert(operand);
+  }
+
+  llvm::SmallVector<mlir::Operation*> ops_to_process;
+  func_.walk([&](mlir::Operation* op) {
+    if (op == func_.getOperation() || op == terminator_ || op == none_)
+      return;
+    if (op->getNumResults() <= 1)
+      return;
+    bool has_unused = false;
+    for (auto result : op->getResults()) {
+      if (result.use_empty() && !terminator_operands.contains(result) &&
+          !mlir::isa<mlir::NoneType>(result.getType())) {
+        has_unused = true;
+        break;
+      }
+    }
+    if (has_unused)
+      ops_to_process.push_back(op);
+  });
+
+  for (auto* op : ops_to_process) {
+    llvm::SmallVector<mlir::Type> newTypes;
+    llvm::SmallVector<unsigned> unused_indices;
+    for (unsigned i = 0; i < op->getNumResults(); ++i) {
+      auto result = op->getResult(i);
+      if (result.use_empty() && !terminator_operands.contains(result) &&
+          !mlir::isa<mlir::NoneType>(result.getType())) {
+        newTypes.push_back(noneType);
+        unused_indices.push_back(i);
+      } else {
+        newTypes.push_back(result.getType());
+      }
+    }
+
+    // Rebuild the operation with updated result types
+    builder.setInsertionPoint(op);
+    mlir::OperationState state(op->getLoc(), op->getName().getStringRef());
+    state.addOperands(op->getOperands());
+    state.addTypes(newTypes);
+    state.addAttributes(op->getAttrs());
+    // Copy inherent/discardable attributes and properties
+    if (op->getPropertiesStorageSize())
+      state.propertiesAttr = op->getPropertiesAsAttribute();
+
+    auto* newOp = builder.create(state);
+
+    // Replace all uses of old results with new results
+    for (unsigned i = 0; i < op->getNumResults(); ++i)
+      op->getResult(i).replaceAllUsesWith(newOp->getResult(i));
+
+    op->erase();
+
+    for (unsigned idx : unused_indices) {
+      MY_LOG(1) << "Canonicalized unused result #" << idx << " of "
+                << newOp->getName().getStringRef().str() << " to none";
+    }
+  }
+}
+
 int MLIRGraph::resolve(bool force) {
   MY_LOG(1) << "MLIRGraph::resolve called with force=" << force;
   // In MLIR, the IR is always in a consistent state
@@ -1133,6 +1280,9 @@ int MLIRGraph::resolve(bool force) {
     }
 
     // TODO : shape inference
+
+    // Canonicalize unused optional outputs to none (align with onnx-mlir)
+    canonicalize_optional_outputs();
 
     // Re-initialize internal structures to ensure consistency
     initialize();

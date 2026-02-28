@@ -138,6 +138,7 @@ private:
 
   // helper functions
   std::string extract_value_name(const mlir::Value value);
+  void canonicalize_optional_outputs();
 
   // Fusion helper methods
   std::pair<mlir::func::FuncOp, std::stack<mlir::Operation*>>
@@ -179,6 +180,13 @@ private:
 
   llvm::SmallVector<MLIRNodeArgIndex> graph_inputs_;
   llvm::SmallVector<MLIRNodeArgIndex> graph_outputs_;
+  // Output names captured from the onnx.Return terminator during the first
+  // initialize_graph_outputs() call. Used as a stable reference filter in
+  // set_outputs to reject spurious intermediate outputs from the ORT bridge.
+  // Never repopulated on subsequent resolve() calls so that user-driven
+  // set_outputs changes are not blocked.
+  std::unordered_set<std::string> model_output_names_;
+  bool model_output_names_frozen_ = false;
   std::vector<MLIRNodeArgIndex> constant_initializers_;
   // it is only used for cache, to return a reference
   std::unordered_map<std::string, const void*> initialized_tensors_cache_;
