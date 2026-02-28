@@ -316,5 +316,6 @@ public:
   get_compiled_model_compatibility_info() const = 0;
 
   virtual void disable_delete_tar_file_in_session_created() = 0;
+  virtual std::unique_ptr<FileSystem> get_file_system() = 0;
 };
 } // namespace morphizen

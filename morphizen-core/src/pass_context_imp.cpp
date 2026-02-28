@@ -861,6 +861,10 @@ void FileSystemImp::destroy_reader(FileReader* reader) { delete reader; }
 
 void FileSystemImp::destroy_writer(FileWriter* writer) { delete writer; }
 
+std::unique_ptr<FileSystem> PassContextImp::get_file_system() {
+  return std::make_unique<FileSystemImp>(*this);
+}
+
 void PassContextImp::maybe_create_tar_file_for_write() {
   auto is_shared_context_enabled =
       get_session_config(kOrtSessionOptionShareEpContexts, "0") == "1";
