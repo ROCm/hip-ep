@@ -93,9 +93,9 @@ static std::string get_mlir_bytecode(PassContext *ctx, Graph &graph) {
 
 // Step 3: Compile MLIR bytecode to artifact
 static std::optional<CompilationArtifact>
-compile_mlir(const std::string &mlir_bytecode,
-             const CompilationConfig &config) {
-  return MlirCompiler::compileFromBytecode(mlir_bytecode, config);
+compile_mlir(const std::string &mlir_bytecode, const CompilationConfig &config,
+             morphizen::FileSystem *fs) {
+  return MlirCompiler::compileFromBytecode(mlir_bytecode, config, fs);
 }
 
 // Step 4: Write artifact to EPContext
@@ -224,7 +224,8 @@ struct Level1MlirPass {
     }
 
     // Step 3: Compile bytecode to artifact
-    auto artifactOpt = compile_mlir(mlir_bytecode, config);
+    auto fs = self.get_context()->get_file_system();
+    auto artifactOpt = compile_mlir(mlir_bytecode, config, fs.get());
     if (!artifactOpt) {
       LOG(WARNING) << "MLIR compilation failed, skipping";
       return;
