@@ -1,3 +1,4 @@
 [submodule "3rd-party/morphizen"]
 	path = 3rd-party/morphizen
 	url = ../MorphiZen
+	branch = main
