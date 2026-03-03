@@ -53,10 +53,8 @@ if(THEROCK_DIST)
 endif()
 
 option(BUILD_EP "Build the ONNX HIP DNN Execution Provider" OFF)
-
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
 if(BUILD_EP)
-  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
-
   # HIP kernels library (compiled with hipcc on Windows, CMake HIP on Linux)
   add_subdirectory(kernels)
 
@@ -143,5 +141,5 @@ if(BUILD_HIP_TOOLS)
   add_subdirectory(tools)
 endif()
 
-# MLIR backend (experimental, built alongside ROCm backend)
+# MLIR backend (experimental, requires morphizen)
 add_subdirectory(backend-mlir-compiler)
