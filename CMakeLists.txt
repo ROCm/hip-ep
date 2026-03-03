@@ -142,3 +142,6 @@ if(BUILD_HIP_TOOLS)
   # Executable targets
   add_subdirectory(tools)
 endif()
+
+# MLIR backend (experimental, built alongside ROCm backend)
+add_subdirectory(backend-mlir-compiler)
