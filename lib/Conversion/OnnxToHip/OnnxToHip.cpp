@@ -87,6 +87,25 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::func::FuncOp funcOp) {
   return mlir::success();
 }
 
+/// Replace onnx.Return terminators with func.return.
+///
+/// In onnx-mlir's own pipeline a dedicated StandardFuncReturnPass handles
+/// this before lowering.  Since we bypass that pipeline we must do it
+/// ourselves.  This MUST run before insertHandleLifecycle(), which walks
+/// func::ReturnOp to place hip.destroy_handle -- if only onnx.Return is
+/// present the handle destroy would be silently skipped.
+static void lowerOnnxReturns(mlir::func::FuncOp funcOp) {
+  llvm::SmallVector<ONNXReturnOp> returns;
+  funcOp.walk([&](ONNXReturnOp op) { returns.push_back(op); });
+
+  for (ONNXReturnOp returnOp : returns) {
+    mlir::OpBuilder builder(returnOp);
+    mlir::func::ReturnOp::create(builder, returnOp.getLoc(),
+                                 returnOp.getOperands());
+    returnOp.erase();
+  }
+}
+
 /// Insert hip.create_handle at function entry and hip.destroy_handle before
 /// each return. Returns the handle value.
 static mlir::Value insertHandleLifecycle(mlir::func::FuncOp funcOp,
@@ -319,6 +338,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
       continue;
     if (mlir::failed(lowerOnnxConstants(funcOp)))
       return signalPassFailure();
+    lowerOnnxReturns(funcOp);
     mlir::Value handle = insertHandleLifecycle(funcOp, ctx);
     if (mlir::failed(convertComputeOps(funcOp, ctx, handle)))
       return signalPassFailure();
