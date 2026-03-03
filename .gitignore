@@ -40,7 +40,7 @@ dist/
 
 # Test outputs
 *.onnx
-!test/models/*.onnx
+!backend-mlir-compiler/test/models/*.onnx
 *.dat
 test_output/
 
@@ -91,3 +91,7 @@ coverage/
 *.crt
 .env
 .env.*
+
+# MLIR debugging artifacts (use /c/temp/ instead)
+backend-mlir-compiler/test/*.mlir
+backend-mlir-compiler/test/ir_dumps/
