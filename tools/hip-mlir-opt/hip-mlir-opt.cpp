@@ -142,6 +142,7 @@ int main(int argc, char **argv) {
   mlir::hip::registerHipPasses();
 #else
   mlir::hip::registerConvertHipToLLVMPass();
+  mlir::hip::registerResolveExternConstantsPass();
 #endif
   mlir::bufferization::registerBufferizationPasses();
   mlir::bufferization::registerBufferizationPipelines();

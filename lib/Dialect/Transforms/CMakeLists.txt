@@ -7,6 +7,7 @@ add_library(HipDialectTransforms STATIC
   LowerAllocs.cpp
   OptimizeMemRefs.cpp
   PoolAllocs.cpp
+  ResolveExternConstants.cpp
 )
 
 add_dependencies(HipDialectTransforms
