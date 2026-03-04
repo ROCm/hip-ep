@@ -21,6 +21,10 @@ if(ENABLE_ONNX_FRONTEND)
     MLIRFuncDialect
     MLIRArithDialect
     MLIRTensorDialect
+    MLIRMemRefDialect
+    MLIRBufferizationDialect
+    MLIRIR
+    MLIRSupport
     MLIRTransforms
   )
 endif()
