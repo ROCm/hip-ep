@@ -18,16 +18,36 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
     destination-passing style (DPS) with tensor types.
 
     Transformations:
-      1. Weight extraction: onnx.Constant -> new func arguments
+      1. Constants: onnx.Constant -> arith.constant (small/inline) or
+         memref.global extern + memref.get_global + bufferization.to_tensor
+         (large/externalized to sidecar .constants.bin + .constants.json)
       2. Op mapping: onnx.{MatMul,Transpose,Mul,Softmax} -> hip.* (tensor DPS)
       3. Lifecycle: insert hip.create_handle / hip.destroy_handle
       4. Cleanup: erase onnx.EntryPoint
+
+    Constant externalization (opt-in via --externalize-min-num-elements):
+      Large constants above the threshold are written to a binary sidecar file
+      and replaced with extern memref.global ops carrying a hip.external_data
+      attribute (offset + size).  The filename is recorded as a
+      hip.constants_file attribute on the module.  This follows the onnx-mlir
+      pattern (krnl.global + omMMapBinaryFile) adapted to standard MLIR ops.
+      Splat constants are always kept inline regardless of size.
   }];
+  let options = [
+    Option<"externalizeOutputDir", "externalize-output-dir", "std::string",
+           /*default=*/"\"\"",
+           "Directory for sidecar .constants.bin/.json files (empty = cwd)">,
+    Option<"externalizeMinNumElements", "externalize-min-num-elements",
+           "int64_t", /*default=*/"0",
+           "Minimum number of tensor elements to externalize (0 = disabled)">
+  ];
   let dependentDialects = [
     "mlir::hip::HipDialect",
     "mlir::arith::ArithDialect",
     "mlir::func::FuncDialect",
-    "mlir::tensor::TensorDialect"
+    "mlir::tensor::TensorDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::bufferization::BufferizationDialect"
   ];
 }
 
