@@ -8,7 +8,7 @@
 // Provides the extern "C" functions for loading externalized model constants
 // from a sidecar .constants.bin file into GPU-accessible memory:
 //
-//   hip_load_constants()    -- mmap file, allocate device memory, copy
+//   hip_load_constants()    -- read file, allocate device memory, copy
 //   hip_unload_constants()  -- free device memory
 //
 // Called from compiled MLIR (or host code) to populate the constants buffer
@@ -23,37 +23,50 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #include <hip/hip_runtime_api.h>
 
 extern "C" void *hip_load_constants(void * /*handle*/, const char *bin_path) {
-  int fd = open(bin_path, O_RDONLY);
-  if (fd < 0) {
+  FILE *fp = fopen(bin_path, "rb");
+  if (!fp) {
     fprintf(stderr, "[hip] hip_load_constants: failed to open '%s': %s\n",
             bin_path, strerror(errno));
     return nullptr;
   }
 
-  struct stat st;
-  if (fstat(fd, &st) != 0) {
-    fprintf(stderr, "[hip] hip_load_constants: fstat failed: %s\n",
+  if (fseek(fp, 0, SEEK_END) != 0) {
+    fprintf(stderr, "[hip] hip_load_constants: fseek failed: %s\n",
             strerror(errno));
-    close(fd);
+    fclose(fp);
     return nullptr;
   }
-  size_t fileSize = static_cast<size_t>(st.st_size);
-
-  void *mapped =
-      mmap(nullptr, fileSize, PROT_READ, MAP_PRIVATE, fd, /*offset=*/0);
-  close(fd);
-  if (mapped == MAP_FAILED) {
-    fprintf(stderr, "[hip] hip_load_constants: mmap failed: %s\n",
+  long fileSizeLong = ftell(fp);
+  if (fileSizeLong < 0) {
+    fprintf(stderr, "[hip] hip_load_constants: ftell failed: %s\n",
             strerror(errno));
+    fclose(fp);
+    return nullptr;
+  }
+  rewind(fp);
+  size_t fileSize = static_cast<size_t>(fileSizeLong);
+
+  void *hostBuf = malloc(fileSize);
+  if (!hostBuf) {
+    fprintf(stderr,
+            "[hip] hip_load_constants: malloc(%zu bytes) failed\n", fileSize);
+    fclose(fp);
+    return nullptr;
+  }
+
+  size_t bytesRead = fread(hostBuf, 1, fileSize, fp);
+  fclose(fp);
+  if (bytesRead != fileSize) {
+    fprintf(stderr,
+            "[hip] hip_load_constants: short read (%zu of %zu bytes)\n",
+            bytesRead, fileSize);
+    free(hostBuf);
     return nullptr;
   }
 
@@ -63,12 +76,12 @@ extern "C" void *hip_load_constants(void * /*handle*/, const char *bin_path) {
     fprintf(stderr,
             "[hip] hip_load_constants: hipMalloc(%zu bytes) failed: %s\n",
             fileSize, hipGetErrorString(err));
-    munmap(mapped, fileSize);
+    free(hostBuf);
     return nullptr;
   }
 
-  err = hipMemcpy(devicePtr, mapped, fileSize, hipMemcpyHostToDevice);
-  munmap(mapped, fileSize);
+  err = hipMemcpy(devicePtr, hostBuf, fileSize, hipMemcpyHostToDevice);
+  free(hostBuf);
   if (err != hipSuccess) {
     fprintf(stderr, "[hip] hip_load_constants: hipMemcpy failed: %s\n",
             hipGetErrorString(err));
