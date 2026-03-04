@@ -126,4 +126,28 @@ def LowerAllocsPass : Pass<"hip-lower-allocs", "mlir::func::FuncOp"> {
   ];
 }
 
+def ResolveExternConstantsPass
+    : Pass<"hip-resolve-extern-constants", "mlir::ModuleOp"> {
+  let summary = "Replace extern memref.global constants with views into a "
+                "constants buffer argument";
+  let description = [{
+    Resolves externalized constants (memref.global ops with hip.external_data
+    attributes produced by --convert-onnx-to-hip) by replacing each
+    memref.get_global with a memref.view into a new %_constants : memref<?xi8>
+    function argument.
+
+    The host is responsible for loading the sidecar .constants.bin file
+    (e.g. via hip_load_constants()) and passing the resulting pointer as
+    the %_constants argument.
+
+    This pass should run after all buffer optimizations (hip-pool-allocs,
+    hip-lower-allocs) and before --convert-hip-to-llvm.
+  }];
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::func::FuncDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 #endif // HIP_PASSES
