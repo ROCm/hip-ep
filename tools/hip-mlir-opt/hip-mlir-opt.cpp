@@ -5,6 +5,7 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
+#include "hip/Dialect/Transforms/Pipelines.h"
 
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -152,6 +153,7 @@ int main(int argc, char **argv) {
   mlir::hip::registerLowerAllocsPass();
   mlir::hip::registerResolveExternConstantsPass();
   mlir::hip::registerConvertOnnxToHipPass();
+  mlir::hip::registerHipPipelines();
   mlir::bufferization::registerBufferizationPasses();
   mlir::bufferization::registerBufferizationPipelines();
   mlir::registerConvertBufferizationToMemRefPass();
