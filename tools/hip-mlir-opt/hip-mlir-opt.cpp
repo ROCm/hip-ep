@@ -149,7 +149,8 @@ int main(int argc, char **argv) {
   mlir::memref::registerAllocationOpInterfaceExternalModels(registry);
   registerHipBufferizableOpInterfaceModels(registry);
 
-  mlir::hip::registerHipTransformPasses();
+  mlir::hip::registerOptimizeMemRefsPass();
+  mlir::hip::registerPoolAllocsPass();
   udna::compiler::registerConversionPasses();
   mlir::bufferization::registerBufferizationPasses();
   mlir::bufferization::registerBufferizationPipelines();

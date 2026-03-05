@@ -18,7 +18,7 @@ endif()
 
 target_link_libraries(hip-mlir-opt PRIVATE
   HipDialectIR
-  UdnaHipTransforms
+  HipDialectTransforms
   UdnaConversion
   MLIROptLib
   MLIRSupport

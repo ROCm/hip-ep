@@ -89,7 +89,8 @@ inline void registerAllPasses() {
   mlir::registerCanonicalizerPass();
 
   // Morphizen custom passes
-  mlir::hip::registerHipTransformPasses();
+  mlir::hip::registerOptimizeMemRefsPass();
+  mlir::hip::registerPoolAllocsPass();
   registerConversionPasses();
 }
 
