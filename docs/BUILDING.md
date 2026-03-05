@@ -78,9 +78,9 @@ This downloads the following assets from
 
 Already-downloaded zip files are skipped on subsequent runs.
 
-### 2. Build ONNX Runtime (Required for BUILD_EP=ON)
+**Note for BUILD_EP=ON**: Refer to `3rd-party/morphizen/docs/developer-guide.md` under "Build Instructions for Each Dependency" to build all required dependencies (GTest, Protobuf, glog, Microsoft GSL, ONNX Runtime) to `../prebuilt-local/`.
 
-If you plan to build with `-DBUILD_EP=ON` (to build the MorphiZen Execution Provider), you must first build and install ONNX Runtime.
+### 2. Build ONNX Runtime (Required for BUILD_EP=ON)
 
 **Clone ONNX Runtime** (if not already cloned):
 
@@ -113,6 +113,8 @@ ls $PREBUILT_DIR/lib/cmake/onnxruntime/
 
 ## Configure
 
+### Standalone Compiler (BUILD_EP=OFF, default)
+
 Run from the project root (the cloned repository directory):
 
 ```bash
@@ -131,6 +133,36 @@ cmake -S . -B ../build/$(basename $PWD) \
   --fresh
 ```
 
+### With MorphiZen Execution Provider (BUILD_EP=ON)
+
+**Prerequisites**: Complete steps 1-3 (download prebuilt dependencies, build additional dependencies, build ONNX Runtime) and install TheRock SDK.
+
+Run from the project root:
+
+```bash
+PREBUILT_DIR=$(cd ../prebuilt-local && pwd)
+THEROCK_DIST=$(cd ../therock && pwd)
+
+cmake -S . -B ../build/$(basename $PWD) \
+  -G Ninja \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
+  -DCMAKE_BUILD_TYPE=Release \
+  "-DCMAKE_PREFIX_PATH=$PREBUILT_DIR" \
+  "-DCMAKE_INSTALL_PREFIX=$PREBUILT_DIR" \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+  -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+  -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
+  -DTHEROCK_DIST="$THEROCK_DIST" \
+  -DHIP_PLATFORM=amd \
+  -DHIP_ARCHITECTURES=gfx1151 \
+  -DBUILD_MOCK_RUNTIME=OFF \
+  -DONNX_HIP_INCLUDE_LIT_TESTS=OFF \
+  -DBUILD_EP=ON
+```
+
+**Note**: Replace `gfx1151` with your GPU architecture. Detect using: `$THEROCK_DIST/lib/llvm/bin/amdgpu-arch.exe`
+
 **Key options:**
 
 | Option | Value | Notes |
@@ -138,9 +170,15 @@ cmake -S . -B ../build/$(basename $PWD) \
 | `-G Ninja` | — | Required; MSVC generator is not supported for this flow |
 | `CMAKE_MSVC_RUNTIME_LIBRARY` | `MultiThreaded` | Must match pre-built binaries (`/MT`) |
 | `CMAKE_BUILD_TYPE` | `Release` | Pre-built binaries are Release; Debug CRT (`/MTd`) is incompatible |
+| `CMAKE_PREFIX_PATH` | `$PREBUILT_DIR` | Where to find dependencies |
+| `CMAKE_INSTALL_PREFIX` | `$PREBUILT_DIR` | Where to install (required for BUILD_EP=ON) |
 | `CMAKE_C/CXX_COMPILER_LAUNCHER` | `sccache` | Omit if sccache is not installed |
-| `BUILD_MOCK_RUNTIME` | `ON` | Enables build without a GPU / ROCm installation |
-| `ONNX_HIP_INCLUDE_LIT_TESTS` | `ON` | Includes the LIT test suite |
+| `BUILD_MOCK_RUNTIME` | `ON` (standalone) / `OFF` (with EP) | Mock runtime for standalone, real HIP for EP |
+| `ONNX_HIP_INCLUDE_LIT_TESTS` | `ON` (standalone) / `OFF` (with EP) | LIT tests for standalone builds |
+| `THEROCK_DIST` | Path to TheRock SDK | Required for BUILD_EP=ON |
+| `HIP_PLATFORM` | `amd` | Required for BUILD_EP=ON |
+| `HIP_ARCHITECTURES` | GPU architecture (e.g., `gfx1151`) | Required for BUILD_EP=ON |
+| `BUILD_EP` | `ON` / `OFF` | Build MorphiZen Execution Provider |
 
 ## Build
 
