@@ -12,16 +12,13 @@
 // RUN: mkdir -p %t && %hip-mlir-opt --convert-onnx-to-hip='externalize-min-num-elements=4 externalize-output-dir=%t' %s | %FileCheck %s
 
 // The node name "/model/layers.0/Constant" should become hip_ext_constant_model_layers_0_Constant_0
-// CHECK: memref.global "private" @hip_ext_constant_model_layers_0_Constant_0
-// CHECK-SAME: hip.external_data
+// CHECK-DAG: memref.global "private" @hip_ext_constant_model_layers_0_Constant_0{{.*}}hip.external_data
 
 // The node name "weight::bias" should become hip_ext_constant_weight_bias_1
-// CHECK: memref.global "private" @hip_ext_constant_weight_bias_1
-// CHECK-SAME: hip.external_data
+// CHECK-DAG: memref.global "private" @hip_ext_constant_weight_bias_1{{.*}}hip.external_data
 
 // A constant with no onnx_node_name falls back to index-only: hip_ext_constant_2
-// CHECK: memref.global "private" @hip_ext_constant_2
-// CHECK-SAME: hip.external_data
+// CHECK-DAG: memref.global "private" @hip_ext_constant_2{{.*}}hip.external_data
 
 module {
   func.func @test_sanitize() -> (tensor<2x4xf32>, tensor<2x4xf32>, tensor<2x4xf32>) {

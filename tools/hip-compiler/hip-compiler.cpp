@@ -37,7 +37,8 @@
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/Dialect/Transforms/Pipelines.h"
 
-#include <iostream>
+#include "llvm/Support/Process.h"
+#include "llvm/Support/raw_ostream.h"
 
 int main(int argc, char **argv) {
   std::string inputFilename;
@@ -51,7 +52,7 @@ int main(int argc, char **argv) {
   }
 
   if (inputFilename.empty() || outputDll.empty()) {
-    std::cerr << "Usage: " << argv[0] << " <input.hip.mlir> -o <output.dll>\n";
+    llvm::errs() << "Usage: " << argv[0] << " <input.hip.mlir> -o <output.dll>\n";
     return 1;
   }
 
@@ -73,7 +74,7 @@ int main(int argc, char **argv) {
   std::string errorMessage;
   auto file = mlir::openInputFile(inputFilename, &errorMessage);
   if (!file) {
-    std::cerr << errorMessage << "\n";
+    llvm::errs() << errorMessage << "\n";
     return 1;
   }
 
@@ -83,7 +84,7 @@ int main(int argc, char **argv) {
   mlir::OwningOpRef<mlir::ModuleOp> module =
       mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, &context);
   if (!module) {
-    std::cerr << "Error parsing MLIR file\n";
+    llvm::errs() << "error: failed to parse MLIR file\n";
     return 1;
   }
 
@@ -92,7 +93,7 @@ int main(int argc, char **argv) {
   mlir::hip::buildHipToLLVMPipeline(pm);
 
   if (mlir::failed(pm.run(*module))) {
-    std::cerr << "Error running passes\n";
+    llvm::errs() << "error: MLIR pass pipeline failed\n";
     return 1;
   }
 
@@ -100,7 +101,7 @@ int main(int argc, char **argv) {
   llvm::LLVMContext llvmContext;
   auto llvmModule = mlir::translateModuleToLLVMIR(module.get(), llvmContext);
   if (!llvmModule) {
-    std::cerr << "Error translating to LLVM IR\n";
+    llvm::errs() << "error: failed to translate to LLVM IR\n";
     return 1;
   }
 
@@ -119,7 +120,7 @@ int main(int argc, char **argv) {
   llvm::Triple targetTriple(targetTripleStr);
   auto target = llvm::TargetRegistry::lookupTarget(targetTripleStr, err);
   if (!target) {
-    std::cerr << "Error looking up target: " << err << "\n";
+    llvm::errs() << "error: looking up target: " << err << "\n";
     return 1;
   }
 
@@ -135,36 +136,35 @@ int main(int argc, char **argv) {
   std::error_code EC;
   llvm::raw_fd_ostream dest(objFilename, EC, llvm::sys::fs::OF_None);
   if (EC) {
-    std::cerr << "Could not open file: " << EC.message() << "\n";
+    llvm::errs() << "error: could not open file: " << EC.message() << "\n";
     return 1;
   }
 
   llvm::legacy::PassManager pass;
   auto fileType = llvm::CodeGenFileType::ObjectFile;
   if (targetMachine->addPassesToEmitFile(pass, dest, nullptr, fileType)) {
-    std::cerr << "TargetMachine can't emit a file of this type\n";
+    llvm::errs() << "error: target machine can't emit a file of this type\n";
     return 1;
   }
   pass.run(*llvmModule);
   dest.flush();
   dest.close();
 
-  std::cout << "Generated temporary object: " << objFilename << "\n";
+  llvm::outs() << "Generated temporary object: " << objFilename << "\n";
 
   // 5. Link into DLL
   auto linkerPath = llvm::sys::findProgramByName("lld-link");
   if (!linkerPath) {
     linkerPath = llvm::sys::findProgramByName("link.exe");
     if (!linkerPath) {
-      std::cerr << "Could not find lld-link or link.exe in PATH\n";
+      llvm::errs() << "error: could not find lld-link or link.exe in PATH\n";
       return 1;
     }
   }
 
-  std::string therockDist = "";
-  if (const char *env_p = std::getenv("THEROCK_DIST")) {
-    therockDist = env_p;
-  }
+  std::string therockDist;
+  if (auto env = llvm::sys::Process::GetEnv("THEROCK_DIST"))
+    therockDist = *env;
 
   std::string outArg = "/OUT:" + outputDll;
   std::string dllArg = "/DLL";
@@ -205,15 +205,14 @@ int main(int argc, char **argv) {
   int result = llvm::sys::ExecuteAndWait(*linkerPath, linkArgs, std::nullopt,
                                          {}, 0, 0, &errMsg);
   if (result != 0) {
-    std::cerr << "Linker failed with code " << result << "\n";
-    if (!errMsg.empty()) {
-      std::cerr << "Error: " << errMsg << "\n";
-    }
+    llvm::errs() << "error: linker failed with code " << result << "\n";
+    if (!errMsg.empty())
+      llvm::errs() << "  " << errMsg << "\n";
     return 1;
   }
 
-  std::cout << "Successfully generated " << outputDll
-            << " and its import library\n";
+  llvm::outs() << "Successfully generated " << outputDll
+               << " and its import library\n";
 
   return 0;
 }

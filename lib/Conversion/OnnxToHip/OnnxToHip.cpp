@@ -24,10 +24,12 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/Sequence.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
-
-#include <fstream>
 
 namespace mlir {
 namespace hip {
@@ -50,7 +52,7 @@ static mlir::Value createEmptyTensor(mlir::OpBuilder &builder,
                                      mlir::RankedTensorType resultType,
                                      mlir::Value source) {
   llvm::SmallVector<mlir::Value> dynSizes;
-  for (int64_t i = 0; i < resultType.getRank(); ++i) {
+  for (int64_t i : llvm::seq<int64_t>(resultType.getRank())) {
     if (resultType.isDynamicDim(i))
       dynSizes.push_back(mlir::tensor::DimOp::create(builder, loc, source, i));
   }
@@ -65,21 +67,21 @@ static mlir::Value createEmptyTensor(mlir::OpBuilder &builder,
 static std::string elementTypeToString(mlir::Type elemType) {
   if (elemType.isF16())
     return "f16";
-  if (elemType.isBF16())
+  else if (elemType.isBF16())
     return "bf16";
-  if (elemType.isF32())
+  else if (elemType.isF32())
     return "f32";
-  if (elemType.isF64())
+  else if (elemType.isF64())
     return "f64";
-  if (elemType.isInteger(8))
+  else if (elemType.isInteger(8))
     return "i8";
-  if (elemType.isInteger(16))
+  else if (elemType.isInteger(16))
     return "i16";
-  if (elemType.isInteger(32))
+  else if (elemType.isInteger(32))
     return "i32";
-  if (elemType.isInteger(64))
+  else if (elemType.isInteger(64))
     return "i64";
-  if (elemType.isInteger(1))
+  else if (elemType.isInteger(1))
     return "i1";
   std::string result;
   llvm::raw_string_ostream os(result);
@@ -94,11 +96,11 @@ static int64_t alignTo(int64_t value, int64_t alignment) {
 /// Mutable state shared across calls to lowerOnnxConstants when
 /// externalization is enabled.
 struct ExternalizationState {
-  std::ofstream binFile;
+  std::unique_ptr<llvm::raw_fd_ostream> binFile;
   llvm::json::Array manifestEntries;
   int64_t currentOffset = 0;
   int64_t constantIndex = 0;
-  std::string binFileName; // bare filename (no directory prefix)
+  std::string binFileName;
 };
 
 /// Lower onnx.Constant ops.
@@ -177,11 +179,12 @@ lowerOnnxConstants(mlir::ModuleOp module, mlir::func::FuncOp funcOp,
       name += std::to_string(extState->constantIndex);
 
       // Pad binary file to alignment boundary.
-      int64_t padding =
-          alignTo(extState->currentOffset, kAlignment) - extState->currentOffset;
+      int64_t aligned =
+          llvm::alignTo(extState->currentOffset, kAlignment);
+      int64_t padding = aligned - extState->currentOffset;
       if (padding > 0) {
-        std::vector<char> zeros(padding, 0);
-        extState->binFile.write(zeros.data(), padding);
+        llvm::SmallVector<char> zeros(padding, 0);
+        extState->binFile->write(zeros.data(), padding);
         extState->currentOffset += padding;
       }
       int64_t entryOffset = extState->currentOffset;
@@ -189,7 +192,7 @@ lowerOnnxConstants(mlir::ModuleOp module, mlir::func::FuncOp funcOp,
       // Write raw bytes to the sidecar binary.
       auto rawData = valueAttr.getRawData();
       int64_t byteSize = static_cast<int64_t>(rawData.size());
-      extState->binFile.write(rawData.data(), byteSize);
+      extState->binFile->write(rawData.data(), byteSize);
       extState->currentOffset += byteSize;
 
       // Build JSON manifest entry.
@@ -214,15 +217,13 @@ lowerOnnxConstants(mlir::ModuleOp module, mlir::func::FuncOp funcOp,
           moduleBuilder.getNamedAttr(
               "size", moduleBuilder.getI64IntegerAttr(byteSize)),
       });
-      mlir::memref::GlobalOp::create(
+      auto globalOp = mlir::memref::GlobalOp::create(
           moduleBuilder, constOp->getLoc(), name,
           /*sym_visibility=*/moduleBuilder.getStringAttr("private"),
           /*type=*/memrefType,
           /*initial_value=*/nullptr,
           /*constant=*/false,
           /*alignment=*/moduleBuilder.getI64IntegerAttr(kAlignment));
-      // Attach hip.external_data as a discardable attr on the global.
-      auto globalOp = module.lookupSymbol<mlir::memref::GlobalOp>(name);
       globalOp->setAttr("hip.external_data", externalDataAttr);
 
       // At the use site: memref.get_global + bufferization.to_tensor.
@@ -322,7 +323,7 @@ MatMulToHip::matchAndRewrite(mlir::Operation *op,
   llvm::SmallVector<mlir::Value> dynSizes;
   int64_t rank = resultType.getRank();
   auto bType = mlir::cast<mlir::RankedTensorType>(b.getType());
-  for (int64_t i = 0; i < rank; ++i) {
+  for (int64_t i : llvm::seq<int64_t>(rank)) {
     if (!resultType.isDynamicDim(i))
       continue;
     if (i == rank - 1) {
@@ -366,14 +367,14 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
 
   int64_t dim0 = -1, dim1 = -1;
   int64_t mismatchCount = 0;
-  for (int64_t i = 0; i < static_cast<int64_t>(permAttr.size()); ++i) {
-    int64_t p = mlir::cast<mlir::IntegerAttr>(permAttr[i]).getInt();
-    if (p != i) {
+  for (auto [i, attr] : llvm::enumerate(permAttr)) {
+    int64_t p = mlir::cast<mlir::IntegerAttr>(attr).getInt();
+    if (p != static_cast<int64_t>(i)) {
       ++mismatchCount;
       if (dim0 < 0)
-        dim0 = i;
+        dim0 = static_cast<int64_t>(i);
       else if (dim1 < 0)
-        dim1 = i;
+        dim1 = static_cast<int64_t>(i);
     }
   }
   if (mismatchCount != 2 || dim0 < 0 || dim1 < 0)
@@ -388,9 +389,9 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
 
   // Transpose: output dim i corresponds to input dim perm[i].
   llvm::SmallVector<mlir::Value> dynSizes;
-  for (int64_t i = 0; i < resultType.getRank(); ++i) {
+  for (auto [i, attr] : llvm::enumerate(permAttr)) {
     if (resultType.isDynamicDim(i)) {
-      int64_t srcDim = mlir::cast<mlir::IntegerAttr>(permAttr[i]).getInt();
+      int64_t srcDim = mlir::cast<mlir::IntegerAttr>(attr).getInt();
       dynSizes.push_back(
           mlir::tensor::DimOp::create(rewriter, loc, data, srcDim));
     }
@@ -507,8 +508,8 @@ void ConvertOnnxToHipPass::runOnOperation() {
 
   // Set up externalization state if enabled.
   std::unique_ptr<ExternalizationState> extState;
-  std::string dir =
-      externalizeOutputDir.getValue().empty() ? "." : externalizeOutputDir.getValue();
+  llvm::StringRef dirRef = externalizeOutputDir.getValue();
+  std::string dir = dirRef.empty() ? "." : dirRef.str();
   if (externalizeMinNumElements > 0) {
     extState = std::make_unique<ExternalizationState>();
 
@@ -520,9 +521,12 @@ void ConvertOnnxToHipPass::runOnOperation() {
     extState->binFileName = baseName + ".constants.bin";
 
     std::string binPath = dir + "/" + extState->binFileName;
-    extState->binFile.open(binPath, std::ios::binary | std::ios::trunc);
-    if (!extState->binFile.is_open()) {
-      module.emitError("failed to open constants binary file: " + binPath);
+    std::error_code binEC;
+    extState->binFile = std::make_unique<llvm::raw_fd_ostream>(
+        binPath, binEC, llvm::sys::fs::OF_None);
+    if (binEC) {
+      module.emitError("failed to open constants binary file: " + binPath +
+                       " (" + binEC.message() + ")");
       return signalPassFailure();
     }
   }
@@ -552,7 +556,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
   // Finalize externalization: close binary, write JSON manifest, set module
   // attribute.
   if (extState && extState->constantIndex > 0) {
-    extState->binFile.close();
+    extState->binFile->close();
 
     // Set hip.constants_file on the module so downstream passes/tools know
     // where the sidecar lives.
@@ -590,7 +594,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
         << dir + "/" + extState->binFileName;
   } else if (extState) {
     // No constants qualified -- clean up empty file.
-    extState->binFile.close();
+    extState->binFile->close();
   }
 }
 

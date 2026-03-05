@@ -48,6 +48,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
+#include "llvm/ADT/STLExtras.h"
 
 namespace mlir {
 namespace hip {
@@ -126,8 +127,9 @@ static bool canReuse(const Slot &slot, MemRefType neededType,
   if (slotBytes == 0 && neededBytes == 0 && slot.type == neededType) {
     if (slot.dynamicSizes.size() != static_cast<size_t>(neededDynSizes.size()))
       return false;
-    for (unsigned i = 0; i < slot.dynamicSizes.size(); ++i)
-      if (slot.dynamicSizes[i] != neededDynSizes[i])
+    for (auto [slotDyn, neededDyn] :
+         llvm::zip(slot.dynamicSizes, neededDynSizes))
+      if (slotDyn != neededDyn)
         return false;
     return true;
   }

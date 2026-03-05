@@ -2,8 +2,8 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#ifndef HIP_PIPELINES_H
-#define HIP_PIPELINES_H
+#ifndef HIP_DIALECT_TRANSFORMS_PIPELINES_H
+#define HIP_DIALECT_TRANSFORMS_PIPELINES_H
 
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassOptions.h"
@@ -14,7 +14,7 @@ namespace hip {
 /// Pipeline options forwarded to the ConvertOnnxToHipPass for constant
 /// externalization. These mirror the pass options on ConvertOnnxToHipPass
 /// so the pipeline flag surface is:
-///   --hip-onnx-to-hip-pipeline='externalize-min-num-elements=256
+///   --onnx-to-hip-pipeline='externalize-min-num-elements=256
 ///                                externalize-output-dir=/tmp'
 struct OnnxToHipPipelineOptions
     : public PassPipelineOptions<OnnxToHipPipelineOptions> {
@@ -52,4 +52,4 @@ void registerHipPipelines();
 } // namespace hip
 } // namespace mlir
 
-#endif // HIP_PIPELINES_H
+#endif // HIP_DIALECT_TRANSFORMS_PIPELINES_H
