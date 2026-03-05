@@ -8,24 +8,17 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
-#include "mlir/Pass/Pass.h"
 
 namespace mlir {
 namespace hip {
 
+#define GEN_PASS_DEF_HIPADDCONTEXTARGPASS
+#include "hip/Conversion/OnnxToHip/Passes.h.inc"
+
 namespace {
 
-/// Pass that inserts a `!hip.context` argument as argument index 0 into every
-/// `func.func` in the module.  The OnnxToHip conversion patterns assume that
-/// the context value is always available as the first function argument.
 struct HipAddContextArgPass
-    : public PassWrapper<HipAddContextArgPass, OperationPass<ModuleOp>> {
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(HipAddContextArgPass)
-
-  StringRef getArgument() const override { return "hip-add-context-arg"; }
-  StringRef getDescription() const override {
-    return "Insert !hip.context as arg 0 into every func.func in the module";
-  }
+    : public impl::HipAddContextArgPassBase<HipAddContextArgPass> {
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
@@ -53,10 +46,6 @@ struct HipAddContextArgPass
 };
 
 } // namespace
-
-std::unique_ptr<Pass> createHipAddContextArgPass() {
-  return std::make_unique<HipAddContextArgPass>();
-}
 
 } // namespace hip
 } // namespace mlir

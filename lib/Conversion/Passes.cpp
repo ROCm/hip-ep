@@ -9,10 +9,8 @@
 namespace udna::compiler {
 
 void registerConversionPasses() {
-  // Register context-arg insertion pass
-  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
-    return mlir::hip::createHipAddContextArgPass();
-  });
+  // Tablegen-generated registration for HipAddContextArgPass
+  mlir::hip::registerHipAddContextArgPass();
 
   // Register ONNX to HIP conversion pass (no-arg: falls back to DiskFileSystem
   // in current dir when model has constants — troubleshooting only)
