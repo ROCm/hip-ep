@@ -965,7 +965,7 @@ public:
       // If no FileSystem was provided, fall back to DiskFileSystem (current
       // dir). This is a troubleshooting convenience only; production callers
       // should supply a FileSystem via createConvertOnnxToHipPass(fs) or
-      // udna_compile_with_fs().
+      // hip_compile_with_fs().
       std::unique_ptr<udna::DiskFileSystem> fallbackFs;
       morphizen::FileSystem* fs = fileSystem_;
       if (!fs) {

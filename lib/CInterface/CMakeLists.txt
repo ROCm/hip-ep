@@ -4,7 +4,7 @@
 ##
 
 # CInterface library - C API wrapper for CompilerPipeline
-# This library provides a DLL-safe C interface for udna-compiler
+# This library provides a DLL-safe C interface for hip-compiler
 
 add_library(UdnaCInterface STATIC
     CompilerAPI.cpp
@@ -15,9 +15,9 @@ target_include_directories(UdnaCInterface PUBLIC
     ${CMAKE_SOURCE_DIR}/include
 )
 
-# Define UDNA_COMPILER_EXPORTS for __declspec(dllexport)
+# Define HIP_COMPILER_EXPORTS for __declspec(dllexport)
 target_compile_definitions(UdnaCInterface PRIVATE
-    UDNA_COMPILER_EXPORTS
+    HIP_COMPILER_EXPORTS
 )
 
 target_link_libraries(UdnaCInterface PUBLIC

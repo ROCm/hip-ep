@@ -3,16 +3,16 @@ Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
 
-# UDNA Compiler Tests
+# HIP Compiler Tests
 
-Quick reference for running all test suites in the udna-compiler.
+Quick reference for running all test suites in the hip-compiler.
 
 **IMPORTANT**: All commands assume you're at the project root directory.
 
 ## Quick Start
 
 ```bash
-ctest --test-dir ../build/$(basename $PWD)/udna-compiler --verbose
+ctest --test-dir ../build/$(basename $PWD) --verbose
 ```
 
 ## Running Tests
@@ -21,7 +21,7 @@ ctest --test-dir ../build/$(basename $PWD)/udna-compiler --verbose
 
 ```bash
 # Via CTest
-ctest --test-dir ../build/$(basename $PWD)/udna-compiler --verbose
+ctest --test-dir ../build/$(basename $PWD) --verbose
 
 # Via CMake target
 cmake --build ../build/$(basename $PWD) --target check-onnx-hip-lit
@@ -31,17 +31,17 @@ cmake --build ../build/$(basename $PWD) --target check-onnx-hip-lit
 
 ```bash
 # LIT tests only (MLIR pass validation)
-ctest --test-dir ../build/$(basename $PWD)/udna-compiler -R LitTests --verbose
+ctest --test-dir ../build/$(basename $PWD) -R LitTests --verbose
 
 # E2E tests only (ORT integration)
-ctest --test-dir ../build/$(basename $PWD)/udna-compiler -R OrtIntegration --verbose
+ctest --test-dir ../build/$(basename $PWD) -R OrtIntegration --verbose
 ```
 
 ### Specific Tests
 
 ```bash
 # Single LIT test via llvm-lit
-llvm-lit -v udna-compiler/test/lit/Conversion/onnx-to-hip/test_gemm_basic.mlir
+llvm-lit -v onnx-hipdnn-ep/test/lit/Conversion/onnx-to-hip/test_gemm_basic.mlir
 ```
 
 ## Prerequisites
@@ -50,7 +50,7 @@ llvm-lit -v udna-compiler/test/lit/Conversion/onnx-to-hip/test_gemm_basic.mlir
 - **LLVM/MLIR**: Auto-fetched by CMake if not found
 - **Python + lit**: `pip install lit`
 - **FileCheck**: Provided by LLVM
-- **udna-opt**: Built by this project
+- **hip-mlir-opt**: Built by this project
 
 ### E2E Tests
 - **ONNX Runtime**: Pre-built in `../../local/`
@@ -80,7 +80,7 @@ cmake --build ../build/$(basename $PWD) --config Debug --parallel
 ```
 
 **Key Options**:
-- `morphizen_ENABLE_MLIR_COMPILER=ON` - **REQUIRED**: Enable udna-compiler build
+- `morphizen_ENABLE_MLIR_COMPILER=ON` - **REQUIRED**: Enable hip-compiler build
 - `ONNX_HIP_INCLUDE_LIT_TESTS=ON` - Enable LIT tests (default: ON)
 - `BUILD_MOCK_RUNTIME=ON` - Enable E2E tests with mock runtime
 
@@ -108,10 +108,10 @@ See [test/e2e/README.md](e2e/) for model generation and environment setup.
 pip install lit
 ```
 
-**Tests fail to find udna-opt**:
+**Tests fail to find hip-mlir-opt**:
 ```bash
-# Ensure udna-opt is built
-cmake --build ../build/$(basename $PWD) --target udna-opt --config Debug
+# Ensure hip-mlir-opt is built
+cmake --build ../build/$(basename $PWD) --target hip-mlir-opt --config Debug
 ```
 
 ### E2E Tests

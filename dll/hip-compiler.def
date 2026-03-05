@@ -1,14 +1,14 @@
 ; Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 ; Licensed under the MIT License.
 ;
-; Export definitions for udna-compiler.dll
+; Export definitions for hip-compiler.dll
 ; This file specifies the C API functions exported from the DLL
 
-LIBRARY udna-compiler
+LIBRARY hip-compiler
 
 EXPORTS
     ; Compilation entry point (FileSystem-based, for models with constants)
-    udna_compile_with_fs
+    hip_compile_with_fs
 
     ; Version information
-    udna_get_version
+    hip_get_version

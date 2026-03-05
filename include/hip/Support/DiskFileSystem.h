@@ -75,7 +75,7 @@ private:
 //
 // Usage:
 //   udna::DiskFileSystem fs("/path/to/model/dir");
-//   udna_compile_with_fs(mlir_data, size, "model.dll", nullptr, &err, &fs);
+//   hip_compile_with_fs(mlir_data, size, "model.dll", nullptr, &err, &fs);
 //   // constants.bin is written to /path/to/model/dir/constants.bin
 //
 class DiskFileSystem : public morphizen::FileSystem {

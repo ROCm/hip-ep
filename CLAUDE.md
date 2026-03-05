@@ -37,7 +37,7 @@ cmake -S . -B ../build/$(basename $PWD) -DBUILD_SHARED_LIBS=OFF \
 **Test**: \`ctest --test-dir ../build/$(basename $PWD) --verbose\`
 
 **Key Options**:
-- \`BUILD_STANDALONE_TOOLS=ON\` (default) - Build udna-opt and udna-compile
+- \`BUILD_STANDALONE_TOOLS=ON\` (default) - Build hip-mlir-opt and hip-compiler
 - \`BUILD_MOCK_RUNTIME=ON\` (default) - Build with mock runtime (no GPU required)
 - \`ONNX_HIP_INCLUDE_LIT_TESTS=ON\` (default) - Include LIT tests
 
@@ -72,7 +72,7 @@ cmake -S . -B ../build/$(basename $PWD) -DBUILD_SHARED_LIBS=OFF \
 
 **Key Headers**: \`CompilerDriver.h\`, \`Pipeline.h\`, \`Passes.h\`, \`HipDialect.h\`, \`compiler_api.h\`
 
-**Directories**: \`include/udna-compiler/\`, \`lib/\`, \`tools/udna-opt/\`, \`tools/udna-compile/\`, \`dll/\`, \`test/\`, \`proto/\`
+**Directories**: \`include/hip/\`, \`lib/\`, \`tools/hip-mlir-opt/\`, \`tools/hip-compiler/\`, \`dll/\`, \`test/\`, \`proto/\`
 
 ## Testing
 

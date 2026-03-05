@@ -58,18 +58,18 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
                                   const CompilationConfig &config,
                                   morphizen::FileSystem *fs) {
 
-  LOG(INFO) << "Compiling MLIR bytecode using udna-compiler plugin";
+  LOG(INFO) << "Compiling MLIR bytecode using hip-compiler plugin";
   LOG(INFO) << "Bytecode size: " << mlir_bytecode.size() << " bytes";
 
   // Load plugin via MorphiZen Plugin API
-  auto plugin = morphizen::Plugin::get("udna-compiler");
+  auto plugin = morphizen::Plugin::get("hip-compiler");
   if (!plugin) {
-    LOG(ERROR) << "Failed to load udna-compiler plugin";
+    LOG(ERROR) << "Failed to load hip-compiler plugin";
     return std::nullopt;
   }
 
   // Get plugin version
-  auto version = plugin->invoke<const char *>("udna_get_version");
+  auto version = plugin->invoke<const char *>("hip_get_version");
   LOG(INFO) << "Plugin version: " << version;
 
   // Generate temporary output path for compilation
@@ -83,12 +83,12 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
   LOG(INFO) << "Compilation options (JSON): " << options_json;
 
   // Check if symbol exists
-  if (!plugin->has_method("udna_compile_with_fs")) {
-    LOG(ERROR) << "Symbol 'udna_compile_with_fs' NOT found in DLL";
+  if (!plugin->has_method("hip_compile_with_fs")) {
+    LOG(ERROR) << "Symbol 'hip_compile_with_fs' NOT found in DLL";
     return std::nullopt;
   }
 
-  LOG(INFO) << "Calling udna_compile_with_fs with JSON options: "
+  LOG(INFO) << "Calling hip_compile_with_fs with JSON options: "
             << options_json;
 
   // Get method with explicit types (avoids template forwarding ref issues)
@@ -97,14 +97,14 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
   auto func =
       plugin->get_method<CompilerErrorCode, const void *, size_t, const char *,
                          const char *, CompilerError *, void *>(
-          "udna_compile_with_fs");
+          "hip_compile_with_fs");
 
   MY_LOG(2) << "get_method returned func = " << (void *)func;
   MY_LOG(2) << "Bytecode data() = " << (void *)mlir_bytecode.data();
   MY_LOG(2) << "Bytecode size() = " << mlir_bytecode.size();
 
   if (func == nullptr) {
-    LOG(ERROR) << "get_method returned nullptr for udna_compile_with_fs";
+    LOG(ERROR) << "get_method returned nullptr for hip_compile_with_fs";
     return std::nullopt;
   }
 

@@ -3,7 +3,7 @@
 # ** Licensed under the MIT License.
 ##
 
-# Third-party dependencies for udna-compiler
+# Third-party dependencies for hip-compiler
 
 # CRITICAL: Disable ALL tests in onnx-mlir and its dependencies
 # This prevents CMake from looking for LLVM test utilities (FileCheck, not, count, etc.)

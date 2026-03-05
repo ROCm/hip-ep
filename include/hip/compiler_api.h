@@ -3,14 +3,14 @@
  * Licensed under the MIT License.
  */
 
-#ifndef UDNA_COMPILER_API_H
-#define UDNA_COMPILER_API_H
+#ifndef HIP_COMPILER_API_H
+#define HIP_COMPILER_API_H
 
 #include "compiler_types.h"
 
 /* Export macro for DLL visibility */
 #ifdef _WIN32
-#  ifdef UDNA_COMPILER_EXPORTS
+#  ifdef HIP_COMPILER_EXPORTS
 #    define COMPILER_API __declspec(dllexport)
 #  else
 #    define COMPILER_API __declspec(dllimport)
@@ -46,7 +46,7 @@ extern "C" {
  *                     Used to create "constants.bin" for writing.
  * @return             COMPILER_SUCCESS or error code
  */
-COMPILER_API CompilerErrorCode udna_compile_with_fs(
+COMPILER_API CompilerErrorCode hip_compile_with_fs(
     const void* input_mlir,
     size_t input_size,
     const char* output_path,
@@ -59,10 +59,10 @@ COMPILER_API CompilerErrorCode udna_compile_with_fs(
  *
  * @return Static version string (e.g., "1.0.0")
  */
-COMPILER_API const char* udna_get_version(void);
+COMPILER_API const char* hip_get_version(void);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* UDNA_COMPILER_API_H */
+#endif /* HIP_COMPILER_API_H */

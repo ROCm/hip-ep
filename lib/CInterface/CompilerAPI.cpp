@@ -49,7 +49,7 @@ static void setError(CompilerError* error, const std::string& message) {
 
 extern "C" {
 
-COMPILER_API CompilerErrorCode udna_compile_with_fs(
+COMPILER_API CompilerErrorCode hip_compile_with_fs(
     const void* input_mlir, size_t input_size, const char* output_path,
     const char* options_json, CompilerError* error, void* fs) {
   // Validate inputs
@@ -99,7 +99,7 @@ COMPILER_API CompilerErrorCode udna_compile_with_fs(
   }
 }
 
-COMPILER_API const char* udna_get_version(void) {
+COMPILER_API const char* hip_get_version(void) {
   return COMPILER_VERSION;
 }
 

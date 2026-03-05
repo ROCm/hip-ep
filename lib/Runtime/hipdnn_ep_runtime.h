@@ -120,7 +120,7 @@ typedef struct RuntimeState RuntimeState;
 //==============================================================================
 
 // Initialize runtime state with external constant storage via FileSystem.
-// Used when compiled with udna_compile_with_fs.
+// Used when compiled with hip_compile_with_fs.
 // Reads constants_filename and constant_sizes from the FlatBuffers blob
 // (UdnaModelMetaInfo schema), opens the file via fs, reads each constant
 // sequentially, uploads each to GPU via hipMalloc+hipMemcpy.
