@@ -2,8 +2,8 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#ifndef hip_COMPILER_CONVERSION_ONNXTOHIP_PASSES_H
-#define hip_COMPILER_CONVERSION_ONNXTOHIP_PASSES_H
+#ifndef HIP_CONVERSION_ONNXTOHIP_PASSES_H
+#define HIP_CONVERSION_ONNXTOHIP_PASSES_H
 
 #include "mlir/Pass/Pass.h"
 #include <memory>
@@ -21,9 +21,11 @@ struct CompilationOptionsT;
 namespace mlir {
 namespace hip {
 
-/// Creates a pass that inserts !hip.context as argument 0 into every
-/// func.func in the module, so that OnnxToHip patterns can access the context.
-std::unique_ptr<Pass> createHipAddContextArgPass();
+#define GEN_PASS_DECL
+#include "hip/Conversion/OnnxToHip/Passes.h.inc"
+
+#define GEN_PASS_REGISTRATION
+#include "hip/Conversion/OnnxToHip/Passes.h.inc"
 
 /// Creates a pass that converts ONNX operations to HIP dialect.
 /// onnx.Constant data is written via fs using options.constants_file as the
