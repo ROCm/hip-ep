@@ -3,28 +3,26 @@
 # ** Licensed under the MIT License.
 ##
 
-if(ENABLE_ONNX_FRONTEND)
-  add_library(OnnxToHip STATIC
-    OnnxToHip.cpp
-  )
+add_library(OnnxToHip STATIC
+  OnnxToHip.cpp
+)
 
-  add_dependencies(OnnxToHip
-    HipDialectIncGen
-    HipTypesIncGen
-    HipOpsIncGen
-    HipPassesIncGen
-  )
+add_dependencies(OnnxToHip
+  HipDialectIncGen
+  HipTypesIncGen
+  HipOpsIncGen
+  HipPassesIncGen
+)
 
-  target_link_libraries(OnnxToHip PUBLIC
-    HipDialectIR
-    MLIRPass
-    MLIRFuncDialect
-    MLIRArithDialect
-    MLIRTensorDialect
-    MLIRMemRefDialect
-    MLIRBufferizationDialect
-    MLIRIR
-    MLIRSupport
-    MLIRTransforms
-  )
-endif()
+target_link_libraries(OnnxToHip PUBLIC
+  HipDialectIR
+  MLIRPass
+  MLIRFuncDialect
+  MLIRArithDialect
+  MLIRTensorDialect
+  MLIRMemRefDialect
+  MLIRBufferizationDialect
+  MLIRIR
+  MLIRSupport
+  MLIRTransforms
+)

@@ -30,7 +30,7 @@ echo.
 echo [2/3] Compile and link driver (with ORT + HIP)
 cl.exe /EHsc /std:c++17 /D__HIP_PLATFORM_AMD__ ^
   /I"%THEROCK_DIST%\include" ^
-  /I"%ORT_HOME%\include" ^
+  /I"%ORT_HOME%\include\onnxruntime" ^
   /Fe:attention_test.exe ^
   ..\examples\main_attention.cpp ^
   attention.lib ^
