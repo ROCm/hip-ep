@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "udna-compiler/Conversion/Passes.h"
+#include "hip/Conversion/Passes.h"
 #include "mlir/Pass/Pass.h"
 
 namespace udna::compiler {

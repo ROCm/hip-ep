@@ -5,8 +5,8 @@
 #ifndef UDNA_COMPILER_CONVERSION_PASSES_H
 #define UDNA_COMPILER_CONVERSION_PASSES_H
 
-#include "udna-compiler/Conversion/HipToLLVM/Passes.h"
-#include "udna-compiler/Conversion/OnnxToHip/Passes.h"
+#include "hip/Conversion/HipToLLVM/Passes.h"
+#include "hip/Conversion/OnnxToHip/Passes.h"
 
 namespace udna::compiler {
 

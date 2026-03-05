@@ -3,10 +3,10 @@
  * Licensed under the MIT License.
  */
 
-#include "udna-compiler/Compiler/CompilerDriver.h"
-#include "udna-compiler/compiler_api.h"
-#include "udna-compiler/compiler_types.h"
-#include "udna-compiler/flatbuffers_json.h"
+#include "hip/Compiler/CompilerDriver.h"
+#include "hip/compiler_api.h"
+#include "hip/compiler_types.h"
+#include "hip/flatbuffers_json.h"
 
 #include "morphizen-foundation/file_io.hpp"
 

@@ -27,8 +27,8 @@
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/Passes.h"
-#include "udna-compiler/Conversion/HipToLLVM/Passes.h"
-#include "udna-compiler/Dialect/Hip/IR/HipDialect.h"
+#include "hip/Conversion/HipToLLVM/Passes.h"
+#include "hip/Dialect/IR/HipDialect.h"
 
 namespace mlir {
 namespace hip {

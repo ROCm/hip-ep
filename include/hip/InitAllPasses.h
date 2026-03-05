@@ -5,12 +5,12 @@
 #ifndef UDNA_COMPILER_INITALLPASSES_H
 #define UDNA_COMPILER_INITALLPASSES_H
 
-#include "udna-compiler/Compiler/Passes/Passes.h"
-#include "udna-compiler/Compiler/Pipeline.h"
-#include "udna-compiler/Conversion/Passes.h"
-#include "udna-compiler/Dialect/Hip/IR/HipBufferize.h"
-#include "udna-compiler/Dialect/Hip/IR/HipDialect.h"
-#include "udna-compiler/Dialect/Hip/Transforms/Passes.h"
+#include "hip/Compiler/Passes/Passes.h"
+#include "hip/Compiler/Pipeline.h"
+#include "hip/Conversion/Passes.h"
+#include "hip/Dialect/IR/HipBufferize.h"
+#include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"

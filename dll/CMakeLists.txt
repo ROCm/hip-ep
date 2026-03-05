@@ -40,7 +40,7 @@ install(TARGETS udna-compiler
 )
 
 # Install C API headers
-install(DIRECTORY ${CMAKE_SOURCE_DIR}/include/udna-compiler
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/include/hip
     DESTINATION include
     FILES_MATCHING PATTERN "*.h"
 )

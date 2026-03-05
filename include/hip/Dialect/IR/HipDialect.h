@@ -15,12 +15,12 @@
 #include "mlir/IR/Types.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
-#include "udna-compiler/Dialect/Hip/IR/HipDialect.h.inc"
+#include "hip/Dialect/IR/HipDialect.h.inc"
 
 #define GET_TYPEDEF_CLASSES
-#include "udna-compiler/Dialect/Hip/IR/HipTypes.h.inc"
+#include "hip/Dialect/IR/HipTypes.h.inc"
 
 #define GET_OP_CLASSES
-#include "udna-compiler/Dialect/Hip/IR/HipOps.h.inc"
+#include "hip/Dialect/IR/HipOps.h.inc"
 
 #endif // UDNA_COMPILER_DIALECT_HIP_IR_HIPDIALECT_H

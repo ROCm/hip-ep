@@ -5,7 +5,7 @@
 #ifndef UDNA_COMPILER_DIALECT_HIP_IR_HIPBUFFERIZE_H
 #define UDNA_COMPILER_DIALECT_HIP_IR_HIPBUFFERIZE_H
 
-#include "udna-compiler/Dialect/Hip/IR/HipDialect.h"
+#include "hip/Dialect/IR/HipDialect.h"
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 #include "mlir/Dialect/Bufferization/IR/DstBufferizableOpInterfaceImpl.h"
 #include "mlir/IR/DialectRegistry.h"

@@ -3,14 +3,14 @@
  * Licensed under the MIT License.
  */
 
-#include "udna-compiler/Compiler/Pipeline.h"
+#include "hip/Compiler/Pipeline.h"
 #include "mlir/Dialect/Bufferization/Transforms/OneShotAnalysis.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
-#include "udna-compiler/Compiler/Passes/Passes.h"
-#include "udna-compiler/Conversion/Passes.h"
-#include "udna-compiler/Dialect/Hip/Transforms/Passes.h"
+#include "hip/Compiler/Passes/Passes.h"
+#include "hip/Conversion/Passes.h"
+#include "hip/Dialect/Transforms/Passes.h"
 
 namespace udna::compiler {
 namespace compiler {

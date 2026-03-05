@@ -3,13 +3,13 @@
  * Licensed under the MIT License.
  */
 
-#include "udna-compiler/Compiler/CompilerDriver.h"
-#include "udna-compiler/Compiler/Pipeline.h"
-#include "udna-compiler/Dialect/Hip/IR/HipDialect.h"
-#include "udna-compiler/InitAllPasses.h"
+#include "hip/Compiler/CompilerDriver.h"
+#include "hip/Compiler/Pipeline.h"
+#include "hip/Dialect/IR/HipDialect.h"
+#include "hip/InitAllPasses.h"
 
-#include "udna-compiler/Target/LLVM/DLLLinker.h"
-#include "udna-compiler/Target/LLVM/LLVMBackend.h"
+#include "hip/Target/LLVM/DLLLinker.h"
+#include "hip/Target/LLVM/LLVMBackend.h"
 
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/IR/BuiltinOps.h"

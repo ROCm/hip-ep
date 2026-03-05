@@ -3,8 +3,8 @@
  * Licensed under the MIT License.
  */
 
-#include "udna-compiler/Dialect/Hip/IR/HipBufferize.h"
-#include "udna-compiler/Dialect/Hip/IR/HipDialect.h"
+#include "hip/Dialect/IR/HipBufferize.h"
+#include "hip/Dialect/IR/HipDialect.h"
 #include "mlir/IR/DialectRegistry.h"
 
 namespace mlir {
