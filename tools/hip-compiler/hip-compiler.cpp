@@ -35,6 +35,7 @@
 #include "hip/Dialect/IR/HipBufferize.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
+#include "hip/Dialect/Transforms/Pipelines.h"
 
 #include <iostream>
 
@@ -88,11 +89,7 @@ int main(int argc, char **argv) {
 
   // 2. Run MLIR PassManager (input must be pre-bufferized memref IR)
   mlir::PassManager pm(&context);
-  pm.addPass(mlir::hip::createConvertHipToLLVMPass());
-  pm.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
-  pm.addPass(mlir::createArithToLLVMConversionPass());
-  pm.addPass(mlir::createConvertFuncToLLVMPass());
-  pm.addPass(mlir::createReconcileUnrealizedCastsPass());
+  mlir::hip::buildHipToLLVMPipeline(pm);
 
   if (mlir::failed(pm.run(*module))) {
     std::cerr << "Error running passes\n";
