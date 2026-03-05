@@ -72,8 +72,7 @@ void ResolveExternConstantsPass::runOnOperation() {
       globalOp.emitError("hip.external_data missing offset or size");
       return signalPassFailure();
     }
-    externGlobals.push_back(
-        {globalOp, offsetAttr.getInt(), sizeAttr.getInt()});
+    externGlobals.push_back({globalOp, offsetAttr.getInt(), sizeAttr.getInt()});
   }
 
   if (externGlobals.empty())
@@ -106,8 +105,7 @@ void ResolveExternConstantsPass::runOnOperation() {
       if (funcOp.isDeclaration() || needsConstantsArg.contains(funcOp))
         continue;
       funcOp.walk([&](func::CallOp callOp) {
-        auto callee =
-            module.lookupSymbol<func::FuncOp>(callOp.getCallee());
+        auto callee = module.lookupSymbol<func::FuncOp>(callOp.getCallee());
         if (callee && needsConstantsArg.contains(callee)) {
           needsConstantsArg.insert(funcOp);
           changed = true;
@@ -131,8 +129,7 @@ void ResolveExternConstantsPass::runOnOperation() {
     auto oldFuncType = funcOp.getFunctionType();
     llvm::SmallVector<Type> newInputTypes(oldFuncType.getInputs());
     newInputTypes.push_back(constantsType);
-    funcOp.setFunctionType(FunctionType::get(module.getContext(),
-                                             newInputTypes,
+    funcOp.setFunctionType(FunctionType::get(module.getContext(), newInputTypes,
                                              oldFuncType.getResults()));
 
     if (auto allArgAttrs = funcOp.getAllArgAttrs()) {
@@ -149,8 +146,7 @@ void ResolveExternConstantsPass::runOnOperation() {
     if (funcOp.isDeclaration())
       continue;
     funcOp.walk([&](func::CallOp callOp) {
-      auto callee =
-          module.lookupSymbol<func::FuncOp>(callOp.getCallee());
+      auto callee = module.lookupSymbol<func::FuncOp>(callOp.getCallee());
       if (!callee || !needsConstantsArg.contains(callee))
         return;
 
@@ -165,9 +161,9 @@ void ResolveExternConstantsPass::runOnOperation() {
       llvm::SmallVector<Value> newOperands(callOp.getOperands());
       newOperands.push_back(it->second);
       OpBuilder builder(callOp);
-      auto newCall = func::CallOp::create(
-          builder, callOp.getLoc(), callOp.getCallee(),
-          callOp.getResultTypes(), newOperands);
+      auto newCall =
+          func::CallOp::create(builder, callOp.getLoc(), callOp.getCallee(),
+                               callOp.getResultTypes(), newOperands);
       callOp.replaceAllUsesWith(newCall.getResults());
       callOp.erase();
     });
@@ -197,9 +193,9 @@ void ResolveExternConstantsPass::runOnOperation() {
 
       Value offset = arith::ConstantOp::create(
           builder, loc, builder.getIndexAttr(info->offset));
-      auto viewOp = memref::ViewOp::create(
-          builder, loc, getGlobalOp.getType(), constantsArg, offset,
-          /*sizes=*/ValueRange{});
+      auto viewOp = memref::ViewOp::create(builder, loc, getGlobalOp.getType(),
+                                           constantsArg, offset,
+                                           /*sizes=*/ValueRange{});
 
       getGlobalOp.replaceAllUsesWith(viewOp.getResult());
       getGlobalOp.erase();

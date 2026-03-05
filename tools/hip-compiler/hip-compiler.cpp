@@ -43,16 +43,17 @@
 int main(int argc, char **argv) {
   std::string inputFilename;
   std::string outputDll;
-  for (int i = 1; i < argc; ++i) {
-    if (std::string(argv[i]) == "-o" && i + 1 < argc) {
-      outputDll = argv[++i];
-    } else if (argv[i][0] != '-') {
-      inputFilename = argv[i];
+  for (int argIdx = 1; argIdx < argc; ++argIdx) {
+    if (std::string(argv[argIdx]) == "-o" && argIdx + 1 < argc) {
+      outputDll = argv[++argIdx];
+    } else if (argv[argIdx][0] != '-') {
+      inputFilename = argv[argIdx];
     }
   }
 
   if (inputFilename.empty() || outputDll.empty()) {
-    llvm::errs() << "Usage: " << argv[0] << " <input.hip.mlir> -o <output.dll>\n";
+    llvm::errs() << "Usage: " << argv[0]
+                 << " <input.hip.mlir> -o <output.dll>\n";
     return 1;
   }
 
@@ -170,7 +171,7 @@ int main(int argc, char **argv) {
   std::string dllArg = "/DLL";
   std::string noLogoArg = "/NOLOGO";
 
-  std::vector<llvm::StringRef> linkArgs;
+  llvm::SmallVector<llvm::StringRef, 16> linkArgs;
   linkArgs.push_back(*linkerPath);
   linkArgs.push_back(noLogoArg);
   linkArgs.push_back(dllArg);
