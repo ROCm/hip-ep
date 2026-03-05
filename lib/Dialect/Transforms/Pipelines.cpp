@@ -6,14 +6,14 @@
 #include "hip/Dialect/Transforms/Pipelines.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Conversion/BufferizationToMemRef/BufferizationToMemRef.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
+#include "mlir/Conversion/BufferizationToMemRef/BufferizationToMemRef.h"
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
 #include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/Passes.h"
 
@@ -76,7 +76,7 @@ void mlir::hip::buildHipToLLVMPipeline(OpPassManager &pm) {
 
 void mlir::hip::registerHipPipelines() {
   PassPipelineRegistration<OnnxToHipPipelineOptions>(
-      "hip-onnx-to-hip-pipeline",
+      "onnx-to-hip-pipeline",
       "Lower ONNX IR to bufferized HIP memref IR with optional constant "
       "externalization",
       buildOnnxToHipPipeline);

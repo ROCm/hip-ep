@@ -91,7 +91,7 @@ void ResolveExternConstantsPass::runOnOperation() {
     if (funcOp.isDeclaration())
       continue;
     funcOp.walk([&](memref::GetGlobalOp op) {
-      if (globalsByName.count(op.getName()))
+      if (globalsByName.contains(op.getName()))
         needsConstantsArg.insert(funcOp);
     });
   }
@@ -186,7 +186,7 @@ void ResolveExternConstantsPass::runOnOperation() {
 
     llvm::SmallVector<memref::GetGlobalOp> getGlobalOps;
     funcOp.walk([&](memref::GetGlobalOp op) {
-      if (globalsByName.count(op.getName()))
+      if (globalsByName.contains(op.getName()))
         getGlobalOps.push_back(op);
     });
 

@@ -18,6 +18,7 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "llvm/ADT/Sequence.h"
 
 namespace mlir {
 namespace hip {
@@ -413,7 +414,7 @@ struct MiopenBinaryOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     int rank = type.getRank();
     Value num = LLVM::ConstantOp::create(rewriter, loc, indexType,
                                          rewriter.getIndexAttr(1));
-    for (int i = 0; i < rank; i++)
+    for (int i : llvm::seq<int>(rank))
       num = LLVM::MulOp::create(
           rewriter, loc, num,
           MemRefDescriptor(descriptor).size(rewriter, loc, i));
@@ -536,7 +537,7 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
                                          rewriter.getIndexAttr(1));
 
     SmallVector<Value, 3> shape;
-    for (int i = 0; i < 3; i++)
+    for (int i : llvm::seq<int>(3))
       shape.push_back(i < rank ? inputDesc.size(rewriter, loc, i) : one);
 
     SmallVector<Value> args = {
