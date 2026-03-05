@@ -2,7 +2,7 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#include "hip-compiler/Target/LLVM/DLLLinker.h"
+#include "hip/Target/LLVM/DLLLinker.h"
 
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/FileSystem.h>

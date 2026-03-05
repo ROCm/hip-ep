@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "hip-compiler/Conversion/Passes.h"
+#include "hip/Conversion/Passes.h"
 #include "mlir/Pass/Pass.h"
 
 namespace hip::compiler {

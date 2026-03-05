@@ -11,7 +11,7 @@
 // measurement.
 //===----------------------------------------------------------------------===//
 
-#include "hip-compiler/Support/DiskFileSystem.h"
+#include "hip/Support/DiskFileSystem.h"
 #include "llvm/Support/DynamicLibrary.h"
 #include "llvm/Support/JSON.h"
 #include <algorithm>

@@ -18,8 +18,8 @@ endif()
 
 target_link_libraries(hip-mlir-opt PRIVATE
   HipDialectIR
-  HipDialectTransforms
-  HipToLLVM
+  UdnaHipTransforms
+  UdnaConversion
   MLIROptLib
   MLIRSupport
   MLIRIR
@@ -57,7 +57,7 @@ target_link_libraries(hip-mlir-opt PRIVATE
 
 if(ENABLE_ONNX_FRONTEND)
   target_link_libraries(hip-mlir-opt PRIVATE
-    OnnxToHip
+    UdnaConversionOnnxToHip
     -Wl,--start-group
     ${ONNX_MLIR_LIB_DIR}/libOMONNXOps.a
     ${ONNX_MLIR_LIB_DIR}/libOMMlirDialects.a

@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "hip-compiler/Dialect/Hip/Transforms/Passes.h"
+#include "hip/Dialect/Transforms/Passes.h"
 #include "mlir/Pass/Pass.h"
 
 namespace mlir {

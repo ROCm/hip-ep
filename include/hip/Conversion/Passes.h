@@ -5,8 +5,8 @@
 #ifndef hip_COMPILER_CONVERSION_PASSES_H
 #define hip_COMPILER_CONVERSION_PASSES_H
 
-#include "hip-compiler/Conversion/HipToLLVM/Passes.h"
-#include "hip-compiler/Conversion/OnnxToHip/Passes.h"
+#include "hip/Conversion/HipToLLVM/Passes.h"
+#include "hip/Conversion/OnnxToHip/Passes.h"
 
 namespace hip::compiler {
 

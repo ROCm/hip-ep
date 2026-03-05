@@ -3,14 +3,14 @@
  * Licensed under the MIT License.
  */
 
-#include "hip-compiler/Compiler/Pipeline.h"
+#include "hip/Compiler/Pipeline.h"
 #include "mlir/Dialect/Bufferization/Transforms/OneShotAnalysis.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
-#include "hip-compiler/Compiler/Passes/Passes.h"
-#include "hip-compiler/Conversion/Passes.h"
-#include "hip-compiler/Dialect/Hip/Transforms/Passes.h"
+#include "hip/Compiler/Passes/Passes.h"
+#include "hip/Conversion/Passes.h"
+#include "hip/Dialect/Transforms/Passes.h"
 
 namespace hip::compiler {
 namespace compiler {

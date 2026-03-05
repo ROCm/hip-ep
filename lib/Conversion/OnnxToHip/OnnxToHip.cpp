@@ -24,11 +24,11 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-#include "hip-compiler/Conversion/OnnxToHip/Passes.h"
-#include "hip-compiler/Dialect/Hip/IR/HipDialect.h"
+#include "hip/Conversion/OnnxToHip/Passes.h"
+#include "hip/Dialect/IR/HipDialect.h"
 
 #include "morphizen-foundation/file_io.hpp"
-#include "hip-compiler/Support/DiskFileSystem.h"
+#include "hip/Support/DiskFileSystem.h"
 #include "compilation_options_generated.h"
 
 // Include ONNX dialect operations from onnx-mlir

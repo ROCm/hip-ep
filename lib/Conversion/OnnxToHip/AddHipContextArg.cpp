@@ -3,8 +3,8 @@
  * Licensed under the MIT License.
  */
 
-#include "hip-compiler/Conversion/OnnxToHip/Passes.h"
-#include "hip-compiler/Dialect/Hip/IR/HipDialect.h"
+#include "hip/Conversion/OnnxToHip/Passes.h"
+#include "hip/Dialect/IR/HipDialect.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"

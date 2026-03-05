@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "hip-compiler/Dialect/Hip/IR/HipDialect.h"
+#include "hip/Dialect/IR/HipDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
@@ -12,16 +12,16 @@
 using namespace mlir;
 using namespace mlir::hip;
 
-#include "hip-compiler/Dialect/Hip/IR/HipDialect.cpp.inc"
+#include "hip/Dialect/IR/HipDialect.cpp.inc"
 
 void HipDialect::initialize() {
   addTypes<
 #define GET_TYPEDEF_LIST
-#include "hip-compiler/Dialect/Hip/IR/HipTypes.cpp.inc"
+#include "hip/Dialect/IR/HipTypes.cpp.inc"
       >();
   addOperations<
 #define GET_OP_LIST
-#include "hip-compiler/Dialect/Hip/IR/HipOps.cpp.inc"
+#include "hip/Dialect/IR/HipOps.cpp.inc"
       >();
 }
 
@@ -264,7 +264,7 @@ void mlir::hip::GetConstantOp::getEffects(
 
 // Type and op class implementations (parse/print/verify, TypeIDs)
 #define GET_TYPEDEF_CLASSES
-#include "hip-compiler/Dialect/Hip/IR/HipTypes.cpp.inc"
+#include "hip/Dialect/IR/HipTypes.cpp.inc"
 
 #define GET_OP_CLASSES
-#include "hip-compiler/Dialect/Hip/IR/HipOps.cpp.inc"
+#include "hip/Dialect/IR/HipOps.cpp.inc"

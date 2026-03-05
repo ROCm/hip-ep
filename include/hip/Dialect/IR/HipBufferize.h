@@ -5,7 +5,7 @@
 #ifndef hip_COMPILER_DIALECT_HIP_IR_HIPBUFFERIZE_H
 #define hip_COMPILER_DIALECT_HIP_IR_HIPBUFFERIZE_H
 
-#include "hip-compiler/Dialect/Hip/IR/HipDialect.h"
+#include "hip/Dialect/IR/HipDialect.h"
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 #include "mlir/Dialect/Bufferization/IR/DstBufferizableOpInterfaceImpl.h"
 #include "mlir/IR/DialectRegistry.h"

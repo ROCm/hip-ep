@@ -3,13 +3,13 @@
  * Licensed under the MIT License.
  */
 
-#include "hip-compiler/Compiler/CompilerDriver.h"
-#include "hip-compiler/Compiler/Pipeline.h"
-#include "hip-compiler/Dialect/Hip/IR/HipDialect.h"
-#include "hip-compiler/InitAllPasses.h"
+#include "hip/Compiler/CompilerDriver.h"
+#include "hip/Compiler/Pipeline.h"
+#include "hip/Dialect/IR/HipDialect.h"
+#include "hip/InitAllPasses.h"
 
-#include "hip-compiler/Target/LLVM/DLLLinker.h"
-#include "hip-compiler/Target/LLVM/LLVMBackend.h"
+#include "hip/Target/LLVM/DLLLinker.h"
+#include "hip/Target/LLVM/LLVMBackend.h"
 
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/IR/BuiltinOps.h"
