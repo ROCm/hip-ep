@@ -19,6 +19,10 @@ FlatBuffers, and Protobuf binaries instead of compiling them from source.
 | **`gh` CLI** | Downloading pre-built binaries (`gh auth login` required) |
 | **`unzip`** | Extracting downloaded archives (available in Git Bash / MSYS2) |
 
+**MSVC Environment Setup:**
+- Launch git-bash from "Developer Command Prompt for VS XXXX" (where XXXX is your VS version: 2019, 2022, 2026, etc.) to ensure MSVC environment is available
+- Or launch Claude Code from Developer Command Prompt
+
 **sccache installation:**
 ```bash
 # Windows (winget)
@@ -54,6 +58,8 @@ prebuilt-local directories are siblings:
 
 ## One-Time Setup
 
+### 1. Download Pre-built Dependencies
+
 Run from the project root (inside Git Bash / MSYS2):
 
 ```bash
@@ -71,6 +77,39 @@ This downloads the following assets from
 | `flatbuffers-25.12.19-release` | `flatbuffers-25.12.19-release-windows-x64.zip` |
 
 Already-downloaded zip files are skipped on subsequent runs.
+
+### 2. Build ONNX Runtime (Required for BUILD_EP=ON)
+
+If you plan to build with `-DBUILD_EP=ON` (to build the MorphiZen Execution Provider), you must first build and install ONNX Runtime.
+
+**Clone ONNX Runtime** (if not already cloned):
+
+```bash
+cd ..  # Go to workspace directory (parent of project root)
+git clone https://github.com/Microsoft/onnxruntime.git
+cd onnxruntime
+```
+
+**Build and install ONNX Runtime**:
+
+```bash
+# Build ONNX Runtime using build.bat (do NOT set CMAKE_INSTALL_PREFIX during build)
+# This ensures ONNX Runtime uses its own FlatBuffers version, avoiding conflicts with prebuilt FlatBuffers
+./build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --disable_memleak_checker
+
+# Install to prebuilt-local (set prefix at install time, not during configuration)
+PREBUILT_DIR=$(cd ../prebuilt-local && pwd)
+cmake --install ../build/onnxruntime/Release --prefix "$PREBUILT_DIR"
+```
+
+**Verify installation**:
+
+```bash
+ls $PREBUILT_DIR/lib/cmake/onnxruntime/
+# Should see onnxruntime-config.cmake and related files
+```
+
+**Note**: For standalone compiler builds (without the Execution Provider), you can skip this step. The project builds successfully without `-DBUILD_EP=ON`.
 
 ## Configure
 
@@ -174,3 +213,16 @@ configure command.
 **Solution:** Ensure `lit` is installed via pip (`pip install lit`) and that
 CMake found the correct `lit.exe` during configure. Re-run configure with
 `--fresh` after installing lit.
+
+### Missing DIA SDK library (diaguids.lib)
+
+**Symptom:** `ninja: error: 'C:/msvsn2022/DIA SDK/lib/amd64/diaguids.lib' missing`
+
+**Cause:** The prebuilt LLVM package has `C:\msvsn2022` hardcoded in LLVMExports.cmake for the DIA SDK path. This is a known LLVM issue: https://github.com/llvm/llvm-project/issues/111829
+
+**Solution:** Create a junction from `C:\msvsn2022` to your Visual Studio installation:
+
+```bash
+# Auto-detect VS installation path and create junction
+for /f "usebackq delims=" %i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do mklink /J C:\msvsn2022 "%i"
+```
