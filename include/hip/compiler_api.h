@@ -3,14 +3,14 @@
  * Licensed under the MIT License.
  */
 
-#ifndef hip_COMPILER_API_H
-#define hip_COMPILER_API_H
+#ifndef HIP_COMPILER_API_H
+#define HIP_COMPILER_API_H
 
 #include "compiler_types.h"
 
 /* Export macro for DLL visibility */
 #ifdef _WIN32
-#  ifdef hip_COMPILER_EXPORTS
+#  ifdef HIP_COMPILER_EXPORTS
 #    define COMPILER_API __declspec(dllexport)
 #  else
 #    define COMPILER_API __declspec(dllimport)
@@ -65,4 +65,4 @@ COMPILER_API const char* hip_get_version(void);
 }
 #endif
 
-#endif /* hip_COMPILER_API_H */
+#endif /* HIP_COMPILER_API_H */

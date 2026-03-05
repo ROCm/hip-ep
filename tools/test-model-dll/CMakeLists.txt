@@ -18,7 +18,7 @@ target_link_libraries(test-model-dll
 
 target_include_directories(test-model-dll
   PRIVATE
-  ${CMAKE_SOURCE_DIR}/include   # For hip-compiler/Support/DiskFileSystem.h
+  ${CMAKE_SOURCE_DIR}/include   # For hip/Support/DiskFileSystem.h
 )
 
 # Install target

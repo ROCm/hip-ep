@@ -188,7 +188,7 @@ ls <build-dir>/include/hip/Dialect/IR/*.h.inc
 ## Success Criteria
 
 - [ ] `lib/Dialect/IR/HipDialect.td`, `HipTypes.td`, `HipOps.td` deleted
-- [ ] `include/hip/Dialect/IR/*.td` contain authoritative hip-compiler content
+- [ ] `include/hip/Dialect/IR/*.td` contain authoritative content
 - [ ] Include paths in `HipTypes.td` and `HipOps.td` use `hip/Dialect/IR/` prefix
 - [ ] Generated headers at `build/include/hip/Dialect/IR/`
 - [ ] No references to `UdnaHipDialectIR` anywhere

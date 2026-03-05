@@ -3,7 +3,7 @@ Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
 
-# hip Compiler Tests
+# HIP Compiler Tests
 
 Quick reference for running all test suites in the hip-compiler.
 
@@ -12,7 +12,7 @@ Quick reference for running all test suites in the hip-compiler.
 ## Quick Start
 
 ```bash
-ctest --test-dir ../build/$(basename $PWD)/hip-compiler --verbose
+ctest --test-dir ../build/$(basename $PWD) --verbose
 ```
 
 ## Running Tests
@@ -21,7 +21,7 @@ ctest --test-dir ../build/$(basename $PWD)/hip-compiler --verbose
 
 ```bash
 # Via CTest
-ctest --test-dir ../build/$(basename $PWD)/hip-compiler --verbose
+ctest --test-dir ../build/$(basename $PWD) --verbose
 
 # Via CMake target
 cmake --build ../build/$(basename $PWD) --target check-onnx-hip-lit
@@ -31,17 +31,17 @@ cmake --build ../build/$(basename $PWD) --target check-onnx-hip-lit
 
 ```bash
 # LIT tests only (MLIR pass validation)
-ctest --test-dir ../build/$(basename $PWD)/hip-compiler -R LitTests --verbose
+ctest --test-dir ../build/$(basename $PWD) -R LitTests --verbose
 
 # E2E tests only (ORT integration)
-ctest --test-dir ../build/$(basename $PWD)/hip-compiler -R OrtIntegration --verbose
+ctest --test-dir ../build/$(basename $PWD) -R OrtIntegration --verbose
 ```
 
 ### Specific Tests
 
 ```bash
 # Single LIT test via llvm-lit
-llvm-lit -v hip-compiler/test/lit/Conversion/onnx-to-hip/test_gemm_basic.mlir
+llvm-lit -v onnx-hipdnn-ep/test/lit/Conversion/onnx-to-hip/test_gemm_basic.mlir
 ```
 
 ## Prerequisites
@@ -50,7 +50,7 @@ llvm-lit -v hip-compiler/test/lit/Conversion/onnx-to-hip/test_gemm_basic.mlir
 - **LLVM/MLIR**: Auto-fetched by CMake if not found
 - **Python + lit**: `pip install lit`
 - **FileCheck**: Provided by LLVM
-- **hip-opt**: Built by this project
+- **hip-mlir-opt**: Built by this project
 
 ### E2E Tests
 - **ONNX Runtime**: Pre-built in `../../local/`
@@ -108,10 +108,10 @@ See [test/e2e/README.md](e2e/) for model generation and environment setup.
 pip install lit
 ```
 
-**Tests fail to find hip-opt**:
+**Tests fail to find hip-mlir-opt**:
 ```bash
-# Ensure hip-opt is built
-cmake --build ../build/$(basename $PWD) --target hip-opt --config Debug
+# Ensure hip-mlir-opt is built
+cmake --build ../build/$(basename $PWD) --target hip-mlir-opt --config Debug
 ```
 
 ### E2E Tests

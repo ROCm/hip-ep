@@ -15,9 +15,9 @@ target_include_directories(UdnaCInterface PUBLIC
     ${CMAKE_SOURCE_DIR}/include
 )
 
-# Define hip_COMPILER_EXPORTS for __declspec(dllexport)
+# Define HIP_COMPILER_EXPORTS for __declspec(dllexport)
 target_compile_definitions(UdnaCInterface PRIVATE
-    hip_COMPILER_EXPORTS
+    HIP_COMPILER_EXPORTS
 )
 
 target_link_libraries(UdnaCInterface PUBLIC

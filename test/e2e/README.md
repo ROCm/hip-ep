@@ -31,7 +31,7 @@ ctest --test-dir ../../build/$(basename $PWD) -R "^E2E_Execute_" --verbose
 
 For each `.mlir` file in `test/lit/e2e/`, two CTest tests are created:
 
-1. **E2E_Compile_{test_name}**: Compiles `.mlir` → `.dll` using `hip-compile`
+1. **E2E_Compile_{test_name}**: Compiles `.mlir` → `.dll` using `hip-compiler`
 2. **E2E_Execute_{test_name}**: Loads and executes `.dll` using `test-model-dll`
 
 **Example:**
@@ -67,18 +67,18 @@ to be in the system path.
 ```cmd
 set "THEROCK_DIST=D:\Develop\m\dist\therock"
 set PATH=D:\Develop\m\dist\therock\bin;%PATH%
-ctest --test-dir ../../build/hip-compiler -R "^E2E_" --build-config Debug --verbose
+ctest --test-dir ../../build/onnx-hipdnn-ep -R "^E2E_" --build-config Debug --verbose
 ```
 
 **Linux (bash):**
 ```bash
 export THEROCK_DIST=/path/to/therock
 export LD_LIBRARY_PATH=$THEROCK_DIST/lib:$LD_LIBRARY_PATH
-ctest --test-dir ../../build/hip-compiler -R "^E2E_" --verbose
+ctest --test-dir ../../build/onnx-hipdnn-ep -R "^E2E_" --verbose
 ```
 
 > **Note:** `THEROCK_DIST` must be set for both compile and execute tests.
-> Compile tests need it so `hip-compile` can find import libraries at link
+> Compile tests need it so `hip-compiler` can find import libraries at link
 > time. Execute tests need the ROCm DLLs in PATH to load the generated model
 > DLL.
 
@@ -89,8 +89,8 @@ ctest --test-dir ../../build/hip-compiler -R "^E2E_" --verbose
 - Reconfigure CMake with `--fresh` flag
 
 **Compilation failures:**
-- Check `hip-compile` is built: `cmake --build ../build/$(basename $PWD) --target hip-compile`
-- Run compiler manually: `hip-compile path/to/test.mlir -o test.dll --mode dll -v`
+- Check `hip-compiler` is built: `cmake --build ../build/$(basename $PWD) --target hip-compiler-exe`
+- Run compiler manually: `hip-compiler path/to/test.mlir -o test.dll --mode dll -v`
 
 **Execution failures:**
 - Check `test-model-dll` is built: `cmake --build ../build/$(basename $PWD) --target test-model-dll`
