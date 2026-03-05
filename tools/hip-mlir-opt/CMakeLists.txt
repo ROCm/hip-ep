@@ -1,45 +1,80 @@
 ##
-# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
 
-# Add the executable
-add_executable(hip-opt
-  hip-opt.cpp
+add_executable(hip-mlir-opt hip-mlir-opt.cpp)
+
+add_dependencies(hip-mlir-opt
+  HipDialectIncGen
+  HipTypesIncGen
+  HipOpsIncGen
+  HipPassesIncGen
 )
 
-# Link LLVM components
-llvm_map_components_to_libnames(llvm_libs Support Core)
+if(ENABLE_ONNX_FRONTEND)
+  target_compile_definitions(hip-mlir-opt PRIVATE ENABLE_ONNX_FRONTEND)
+endif()
 
-# Link against required libraries
-# Note: hip-opt uses UdnaPipeline (lightweight, no LLD dependencies)
-# instead of UdnaCompiler (which includes backend and LLD dependencies)
-target_link_libraries(hip-opt PRIVATE
-  UdnaPipeline  # For Pipeline.cpp (registerUdnaPipeline) - no LLD deps
-  UdnaHipDialectIR
-  UdnaHipTransforms
-  UdnaConversion
-  MLIROptLib  # Includes mlir::registerAllPasses() implementation
-  MLIRIR
-  MLIRPass
+target_link_libraries(hip-mlir-opt PRIVATE
+  HipDialectIR
+  HipDialectTransforms
+  HipToLLVM
+  MLIROptLib
   MLIRSupport
-  MLIRTransforms  # For canonicalizer and other standard passes
-  MLIRArithTransforms          # arith bufferization models
-  MLIRTensorTransforms         # tensor bufferization models
-  MLIRBufferizationTransforms  # func_ext bufferization models
+  MLIRIR
+  MLIRParser
+  MLIRPass
+  MLIRTransforms
+  MLIRAnalysis
+  MLIRArithDialect
+  MLIRControlFlowDialect
+  MLIRFuncDialect
+  MLIRMemRefDialect
+  MLIRMemRefTransforms
+  MLIRSCFDialect
+  MLIRTensorDialect
+  MLIRDestinationStyleOpInterface
+  MLIRBufferizationDialect
+  MLIRBufferizationTransforms
+  MLIRBufferizationPipelines
+  MLIRBufferizationToMemRef
+  MLIRArithTransforms
+  MLIRSCFTransforms
+  MLIRTensorTransforms
+  MLIRFuncTransforms
+  MLIRLLVMDialect
+  MLIRLLVMCommonConversion
+  MLIRArithToLLVM
+  MLIRMemRefToLLVM
+  MLIRFuncToLLVM
+  MLIRSCFToControlFlow
+  MLIRControlFlowToLLVM
+  MLIRReconcileUnrealizedCasts
+  MLIRTransformUtils
   ${llvm_libs}
-  OMONNXOps
 )
 
-# Add include directories
-target_include_directories(hip-opt PRIVATE
-  ${CMAKE_SOURCE_DIR}/include
-  ${CMAKE_SOURCE_DIR}/3rd-party/onnx-mlir
-  ${CMAKE_BINARY_DIR}/3rd-party/onnx-mlir
-  ${CMAKE_BINARY_DIR}/proto
-)
-
-# Install
-install(TARGETS hip-opt
-    RUNTIME DESTINATION bin
-)
+if(ENABLE_ONNX_FRONTEND)
+  target_link_libraries(hip-mlir-opt PRIVATE
+    OnnxToHip
+    -Wl,--start-group
+    ${ONNX_MLIR_LIB_DIR}/libOMONNXOps.a
+    ${ONNX_MLIR_LIB_DIR}/libOMMlirDialects.a
+    ${ONNX_MLIR_LIB_DIR}/libOMMlirUtilities.a
+    ${ONNX_MLIR_LIB_DIR}/libOMSmallFPConversion.a
+    ${ONNX_MLIR_LIB_DIR}/libOMShapeHelperOpInterface.a
+    ${ONNX_MLIR_LIB_DIR}/libOMONNXElementsAttr.a
+    ${ONNX_MLIR_LIB_DIR}/libOMShapeInferenceOpInterface.a
+    ${ONNX_MLIR_LIB_DIR}/libOMResultTypeInferenceOpInterface.a
+    ${ONNX_MLIR_LIB_DIR}/libOMHasOnnxSubgraphOpInterface.a
+    ${ONNX_MLIR_LIB_DIR}/libOMDiagnostic.a
+    ${ONNX_MLIR_LIB_DIR}/libOMSupport.a
+    ${ONNX_MLIR_LIB_DIR}/libOMAccelerator.a
+    ${ONNX_MLIR_LIB_DIR}/libonnx.a
+    ${ONNX_MLIR_LIB_DIR}/libonnx_proto.a
+    -Wl,--end-group
+    MLIRShapeDialect
+    protobuf::libprotobuf
+  )
+endif()
