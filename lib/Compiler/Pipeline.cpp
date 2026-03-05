@@ -15,36 +15,6 @@
 namespace udna::compiler {
 namespace compiler {
 
-void populateHipPipeline(mlir::OpPassManager &pm,
-                         const udna::compiler::CompilationOptionsT &options) {
-  // Stage 1: One-shot bufferization
-  // Converts tensor-mode HIP ops to memref-mode via BufferizableOpInterface
-  mlir::bufferization::OneShotBufferizePassOptions bufOpts;
-  bufOpts.bufferizeFunctionBoundaries = true;
-  pm.addPass(mlir::bufferization::createOneShotBufferizePass(bufOpts));
-
-  // Stage 2: Convert function results to out-params (destination-passing style)
-  // Transforms func return values into pointer output arguments for C ABI.
-  // modifyPublicFunctions=true is required because @main_graph is public.
-  mlir::bufferization::BufferResultsToOutParamsPassOptions outParamOpts;
-  outParamOpts.modifyPublicFunctions = true;
-  pm.addPass(
-      mlir::bufferization::createBufferResultsToOutParamsPass(outParamOpts));
-
-  // Stage 3: Canonicalization
-  pm.addPass(mlir::createCanonicalizerPass());
-
-  // Stage 4: Memory pooling optimization
-  // Packs multiple memref.alloc ops into a single byte pool
-  pm.addPass(mlir::hip::createPoolAllocsPass());
-
-  // Stage 5: HIP → LLVM conversion
-  pm.addPass(mlir::hip::createConvertHipToLLVMPass());
-
-  // Stage 6: Interface generation
-  pm.addPass(createGenerateInterfacePass(options));
-}
-
 void populateMorphizenPipeline(mlir::OpPassManager &pm,
                                const udna::compiler::CompilationOptionsT &options,
                                morphizen::FileSystem *fs) {
@@ -54,8 +24,32 @@ void populateMorphizenPipeline(mlir::OpPassManager &pm,
   // Stage 1: ONNX → HIP conversion (tensor-first, no allocation)
   pm.addPass(mlir::hip::createConvertOnnxToHipPass(fs, options));
 
-  // Stages 2-6: shared HIP→LLVM sub-pipeline
-  populateHipPipeline(pm, options);
+  // Stage 2: One-shot bufferization
+  // Converts tensor-mode HIP ops to memref-mode via BufferizableOpInterface
+  mlir::bufferization::OneShotBufferizePassOptions bufOpts;
+  bufOpts.bufferizeFunctionBoundaries = true;
+  pm.addPass(mlir::bufferization::createOneShotBufferizePass(bufOpts));
+
+  // Stage 3: Convert function results to out-params (destination-passing style)
+  // Transforms func return values into pointer output arguments for C ABI.
+  // modifyPublicFunctions=true is required because @main_graph is public.
+  mlir::bufferization::BufferResultsToOutParamsPassOptions outParamOpts;
+  outParamOpts.modifyPublicFunctions = true;
+  pm.addPass(
+      mlir::bufferization::createBufferResultsToOutParamsPass(outParamOpts));
+
+  // Stage 4: Canonicalization
+  pm.addPass(mlir::createCanonicalizerPass());
+
+  // Stage 5: Memory pooling optimization
+  // Packs multiple memref.alloc ops into a single byte pool
+  pm.addPass(mlir::hip::createPoolAllocsPass());
+
+  // Stage 6: HIP → LLVM conversion
+  pm.addPass(mlir::hip::createConvertHipToLLVMPass());
+
+  // Stage 7: Interface generation
+  pm.addPass(createGenerateInterfacePass(options));
 }
 
 } // namespace compiler

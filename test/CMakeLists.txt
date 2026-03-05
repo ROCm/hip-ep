@@ -194,11 +194,15 @@ if(NOT hip_FOUND OR NOT miopen_FOUND OR NOT hipblaslt_FOUND)
   return()
 endif()
 
-message(STATUS "Building ROCm tests")
+find_package(GTest QUIET)
+find_package(glog QUIET)
 
-# Find GTest for the tests
-find_package(GTest REQUIRED)
-find_package(glog REQUIRED)
+if(NOT GTest_FOUND OR NOT glog_FOUND)
+  message(STATUS "GTest/glog not found, skipping ROCm tests")
+  return()
+endif()
+
+message(STATUS "Building ROCm tests")
 
 # Timeout test (GPU timeout mechanism) - standalone test for WaitStreamWithTimeout
 add_executable(rocm_timeout_test test_timeout.cpp)

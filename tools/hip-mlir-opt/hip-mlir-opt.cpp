@@ -16,7 +16,7 @@
 
 namespace {
 
-/// Pipeline options shared by both morphizen-pipeline and hip-pipeline.
+/// Pipeline options for morphizen-pipeline.
 /// constants-file: embedded in the DLL metadata blob by generate-interface.
 /// constants-dir:  directory where OnnxToHip writes the constants binary.
 struct PipelineOptions : public mlir::PassPipelineOptions<PipelineOptions> {
@@ -50,28 +50,6 @@ int main(int argc, char **argv) {
   // valid for the full duration of pm.run().
   udna::compiler::CompilationOptionsT compilationOpts;
   std::unique_ptr<udna::DiskFileSystem> fs;
-
-  // HIP→LLVM sub-pipeline: bufferization, canonicalize, pool-allocs,
-  // HIP→LLVM, generate-interface. Shared with CompilerDriver.
-  // Use when input is already in HIP tensor IR (after OnnxToHip).
-  mlir::PassPipelineRegistration<PipelineOptions> hipPipeline(
-      "hip-pipeline",
-      "HIP→LLVM sub-pipeline (bufferize, canonicalize, pool, HIP→LLVM, "
-      "interface)",
-      [&compilationOpts, &fs](mlir::OpPassManager &pm,
-                              const PipelineOptions &opts) {
-        compilationOpts.constants_file = opts.constantsFile;
-        compilationOpts.opt_level = opts.optLevel;
-        compilationOpts.verbose = opts.verbose;
-
-        const std::string &dir = opts.constantsDir;
-        if (!dir.empty())
-          llvm::sys::fs::create_directories(dir);
-        fs = std::make_unique<udna::DiskFileSystem>(
-            dir.empty() ? "." : dir.c_str());
-
-        udna::compiler::compiler::populateHipPipeline(pm, compilationOpts);
-      });
 
   // Full ONNX→HIP→LLVM→Interface pipeline.
   // Use when input is ONNX dialect MLIR (from onnx-mlir frontend).
