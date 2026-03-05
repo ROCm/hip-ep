@@ -63,6 +63,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/wcy123/onnx-mlir.git
   GIT_TAG fbf9984b0723bdf9b0eb7ccb747f1e08c6b21783  # fork-master: fix getRegisteredOptions() for LLVM 22.0 and 22.1+
   GIT_SHALLOW FALSE  # Need full history for fork
+  GIT_SUBMODULES_RECURSE TRUE  # Initialize submodules recursively (third_party/onnx, etc.)
   EXCLUDE_FROM_ALL
   SOURCE_SUBDIR .  # onnx-mlir root contains CMakeLists.txt
 )
