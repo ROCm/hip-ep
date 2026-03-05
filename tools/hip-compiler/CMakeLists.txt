@@ -1,58 +1,23 @@
 ##
-# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
 
-add_executable(hip-compiler hip-compiler.cpp)
+# Create executable (thin wrapper around UdnaCompiler library)
+add_executable(udna-compile udna-compile.cpp)
 
-add_dependencies(hip-compiler
-  HipDialectIncGen
-  HipTypesIncGen
-  HipOpsIncGen
-  HipPassesIncGen
+# Link against UdnaCompiler library (transitively links all dependencies)
+# OMBuilder provides ImportFrontendModelFile for .onnx import
+target_link_libraries(udna-compile
+    PRIVATE
+    UdnaCompiler
+    OMBuilder
 )
 
-target_link_libraries(hip-compiler PRIVATE
-  HipDialectIR
-  HipToLLVM
-  MLIROptLib
-  MLIRSupport
-  MLIRIR
-  MLIRParser
-  MLIRPass
-  MLIRTransforms
-  MLIRAnalysis
-  MLIRArithDialect
-  MLIRControlFlowDialect
-  MLIRFuncDialect
-  MLIRMemRefDialect
-  MLIRSCFDialect
-  MLIRTensorDialect
-  MLIRDestinationStyleOpInterface
-  MLIRBufferizationDialect
-  MLIRBufferizationTransforms
-  MLIRArithTransforms
-  MLIRSCFTransforms
-  MLIRTensorTransforms
-  MLIRFuncTransforms
-  MLIRLLVMDialect
-  MLIRLLVMCommonConversion
-  MLIRArithToLLVM
-  MLIRMemRefToLLVM
-  MLIRFuncToLLVM
-  MLIRSCFToControlFlow
-  MLIRControlFlowToLLVM
-  MLIRReconcileUnrealizedCasts
-  MLIRTransformUtils
-  MLIRTargetLLVMIRExport
-  MLIRExecutionEngine
-  MLIRTranslateLib
-  LLVMX86CodeGen
-  LLVMX86AsmParser
-  LLVMMC
-  LLVMSupport
-  LLVMTarget
-  LLVMIRReader
-  LLVMLinker
-  ${llvm_libs}
+# Add include directories
+target_include_directories(udna-compile PRIVATE
+  ${CMAKE_SOURCE_DIR}/include
 )
+
+# Installation
+install(TARGETS udna-compile DESTINATION bin)

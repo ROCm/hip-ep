@@ -1,25 +1,35 @@
 ##
-# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
 
-add_library(HipDialectTransforms STATIC
-  LowerAllocs.cpp
-  OptimizeMemRefs.cpp
-  PoolAllocs.cpp
+message(STATUS "Building HIP Dialect Transforms Library")
+
+# Create HIP dialect transforms library
+add_library(UdnaHipTransforms STATIC
+  MemoryPooling.cpp
+  Passes.cpp
 )
 
-add_dependencies(HipDialectTransforms
-  HipDialectIncGen
-  HipTypesIncGen
-  HipOpsIncGen
-  HipPassesIncGen
-)
-
-target_link_libraries(HipDialectTransforms PUBLIC
-  HipDialectIR
+# Link against required libraries
+target_link_libraries(UdnaHipTransforms PUBLIC
+  UdnaHipDialectIR
+  MLIRIR
   MLIRPass
+  MLIRSupport
+  MLIRTransforms
   MLIRFuncDialect
   MLIRMemRefDialect
   MLIRArithDialect
+  MLIRBufferizationDialect
+  MLIRBufferizationTransforms
 )
+
+# Add include directories
+target_include_directories(UdnaHipTransforms PUBLIC
+  ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_BINARY_DIR}/lib
+)
+
+# Set folder for IDE organization
+set_target_properties(UdnaHipTransforms PROPERTIES FOLDER "mlir/Dialect")

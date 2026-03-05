@@ -1,23 +1,26 @@
 /*
- * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#ifndef HIP_DIALECT_H
-#define HIP_DIALECT_H
+#ifndef UDNA_COMPILER_DIALECT_HIP_IR_HIPDIALECT_H
+#define UDNA_COMPILER_DIALECT_HIP_IR_HIPDIALECT_H
 
+#include "mlir/Bytecode/BytecodeOpInterface.h"
+#include "mlir/Dialect/Bufferization/IR/AllocationOpInterface.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/IR/Types.h"
-#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
-#include "hip/Dialect/IR/HipDialect.h.inc"
+#include "udna-compiler/Dialect/Hip/IR/HipDialect.h.inc"
 
 #define GET_TYPEDEF_CLASSES
-#include "hip/Dialect/IR/HipTypes.h.inc"
+#include "udna-compiler/Dialect/Hip/IR/HipTypes.h.inc"
 
 #define GET_OP_CLASSES
-#include "hip/Dialect/IR/HipOps.h.inc"
+#include "udna-compiler/Dialect/Hip/IR/HipOps.h.inc"
 
-#endif // HIP_DIALECT_H
+#endif // UDNA_COMPILER_DIALECT_HIP_IR_HIPDIALECT_H
