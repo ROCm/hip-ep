@@ -45,8 +45,8 @@ void populateMorphizenPipeline(mlir::OpPassManager& pm,
   pm.addPass(mlir::createCanonicalizerPass());
 
   // Stage 5: Memory pooling optimization
-  // Merges multiple memref.alloc ops into a single GPU memory pool
-  pm.addPass(mlir::hip::createMemoryPoolingPass());
+  // Packs multiple memref.alloc ops into a single byte pool
+  pm.addPass(mlir::hip::createPoolAllocsPass());
 
   // Stage 6: HIP → LLVM conversion
   // Lowers HIP dialect to LLVM dialect (calls to MIOpen/HIP runtime)

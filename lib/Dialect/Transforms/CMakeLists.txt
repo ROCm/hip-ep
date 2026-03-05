@@ -1,40 +1,42 @@
 ##
-# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
 
-message(STATUS "Building HIP Dialect Transforms Library")
+# Generate Passes.h.inc from include/hip/Dialect/Transforms/Passes.td
+set(TABLEGEN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/include/hip/Dialect/Transforms)
+file(RELATIVE_PATH TABLEGEN_OUTPUT_REL
+  "${CMAKE_CURRENT_BINARY_DIR}"
+  "${TABLEGEN_OUTPUT_DIR}"
+)
+file(MAKE_DIRECTORY ${TABLEGEN_OUTPUT_DIR})
 
-# Generate pass declarations from Passes.td
 set(LLVM_TARGET_DEFINITIONS ${CMAKE_SOURCE_DIR}/include/hip/Dialect/Transforms/Passes.td)
-mlir_tablegen(Passes.h.inc -gen-pass-decls -name Hip)
+mlir_tablegen(${TABLEGEN_OUTPUT_REL}/Passes.h.inc -gen-pass-decls -name Hip)
 add_public_tablegen_target(HipPassesIncGen)
 
-# Create HIP dialect transforms library
-add_library(UdnaHipTransforms STATIC
-  MemoryPooling.cpp
-  Passes.cpp
+add_library(HipDialectTransforms STATIC
+  LowerAllocs.cpp
+  OptimizeMemRefs.cpp
+  PoolAllocs.cpp
 )
 
-# Link against required libraries
-target_link_libraries(UdnaHipTransforms PUBLIC
+add_dependencies(HipDialectTransforms
+  HipDialectIncGen
+  HipTypesIncGen
+  HipOpsIncGen
+  HipPassesIncGen
+)
+
+target_link_libraries(HipDialectTransforms PUBLIC
   HipDialectIR
-  MLIRIR
   MLIRPass
-  MLIRSupport
-  MLIRTransforms
   MLIRFuncDialect
   MLIRMemRefDialect
   MLIRArithDialect
-  MLIRBufferizationDialect
-  MLIRBufferizationTransforms
 )
 
-# Add include directories
-target_include_directories(UdnaHipTransforms PUBLIC
+target_include_directories(HipDialectTransforms PUBLIC
   ${CMAKE_SOURCE_DIR}/include
-  ${CMAKE_BINARY_DIR}/lib
+  ${CMAKE_BINARY_DIR}/include
 )
-
-# Set folder for IDE organization
-set_target_properties(UdnaHipTransforms PROPERTIES FOLDER "mlir/Dialect")
