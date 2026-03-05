@@ -15,7 +15,7 @@
 // static offsets assigned by the memory-pooling pass.
 // ============================================================================
 
-// RUN: hip-opt %s --convert-hip-to-llvm | FileCheck %s
+// RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
 
 module attributes {"hipdnn.pool_size" = 65536 : i64} {
   // CHECK-LABEL: llvm.func @test_get_pool

@@ -1,4 +1,4 @@
-// RUN: hip-opt %s --morphizen-pipeline | FileCheck %s
+// RUN: hip-mlir-opt %s --morphizen-pipeline | FileCheck %s
 
 // Test Conv+Relu network with real constant data through full pipeline
 // Verifies morphizen-pipeline on a model with real weights

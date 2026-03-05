@@ -62,7 +62,7 @@ set(LIT_ARGS "-sv" CACHE STRING "Extra arguments passed to lit (e.g. -j4 --no-pr
 # Add custom build target for manual invocation: cmake --build . --target check-hip-mlir-lit
 add_custom_target(check-hip-mlir-lit
     COMMAND ${LIT_EXECUTABLE} ${LIT_ARGS} --param=build_mode=$<CONFIG> .
-    DEPENDS hip-opt hip-compile
+    DEPENDS hip-mlir-opt hip-compiler-exe
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Running LIT tests for hip-mlir-compiler"
 )

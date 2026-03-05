@@ -6,7 +6,7 @@
 //===----------------------------------------------------------------------===//
 // hip-inspect-dll - Print metadata embedded in a compiled model DLL
 //===----------------------------------------------------------------------===//
-// Loads a DLL produced by hip-compile, calls inference_get_metadata_json(),
+// Loads a DLL produced by hip-compiler, calls inference_get_metadata_json(),
 // and prints a human-readable summary of the model's inputs, outputs, and
 // constants.
 //

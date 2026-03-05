@@ -18,8 +18,8 @@
 #
 # Attributes guaranteed to exist when this file runs (set by lit.site.cfg.py):
 #   config.llvm_tools_dir  — path to FileCheck, not, etc.
-#   config.hip_build_dir  — CMAKE_BINARY_DIR
-#   config.hip_build_mode — "Debug" or "Release" (resolved at runtime for VS)
+#   config.hip_build_dir   — CMAKE_BINARY_DIR
+#   config.hip_build_mode  — "Debug" or "Release" (resolved at runtime for VS)
 
 import os
 import lit.formats
@@ -38,20 +38,20 @@ config.test_exec_root = config.test_source_root
 llvm_config = lit.llvm.config.LLVMConfig(lit_config, config)
 
 # Locate hip tools. Search order:
-#   1. <build>/tools/hip-opt/<mode>/  (VS multi-config layout)
-#   2. <build>/tools/hip-opt/         (Ninja single-config layout)
+#   1. <build>/tools/hip-mlir-opt/<mode>/  (VS multi-config layout)
+#   2. <build>/tools/hip-mlir-opt/         (Ninja single-config layout)
 #   3. <build>/bin/<mode>
 #   4. <build>/bin
 hip_tool_search = [
-    os.path.join(config.hip_build_dir, "tools", "hip-opt", config.hip_build_mode),
-    os.path.join(config.hip_build_dir, "tools", "hip-opt"),
+    os.path.join(config.hip_build_dir, "tools", "hip-mlir-opt", config.hip_build_mode),
+    os.path.join(config.hip_build_dir, "tools", "hip-mlir-opt"),
     os.path.join(config.hip_build_dir, "bin", config.hip_build_mode),
     os.path.join(config.hip_build_dir, "bin"),
 ]
 hip_tools_dirs = [d for d in hip_tool_search if os.path.isdir(d)]
 
-# hip-compile may live in a separate directory from hip-opt
-hip_compile_dir = os.path.join(config.hip_build_dir, "tools", "hip-compile")
+# hip-compiler may live in a separate directory from hip-mlir-opt
+hip_compile_dir = os.path.join(config.hip_build_dir, "tools", "hip-compiler")
 if os.path.isdir(hip_compile_dir) and hip_compile_dir not in hip_tools_dirs:
     hip_tools_dirs.append(hip_compile_dir)
 
@@ -61,8 +61,8 @@ if not hip_tools_dirs:
 llvm_config.with_environment("PATH", hip_tools_dirs, append_path=True)
 
 tools = [
-    "hip-opt",
-    "hip-compile",
+    "hip-mlir-opt",
+    "hip-compiler",
     "FileCheck",
     "not",
 ]

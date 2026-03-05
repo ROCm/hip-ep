@@ -20,7 +20,7 @@
 // Expected: LLVM function calling hipBLAS wrapper with correct signature
 // ============================================================================
 
-// RUN: hip-opt %s --convert-hip-to-llvm | FileCheck %s
+// RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
 
 module {
   func.func @gemm_llvm_test(

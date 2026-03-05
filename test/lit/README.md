@@ -92,7 +92,7 @@ LIT tests use the following structure:
 
 ```mlir
 // Brief description of what this test verifies
-// RUN: hip-opt %s --pass-name | FileCheck %s
+// RUN: hip-mlir-opt %s --pass-name | FileCheck %s
 
 module {
   func.func @test_name(%arg: type) -> type {
@@ -110,7 +110,7 @@ module {
 
 1. **RUN line**: Specifies the command to run
    - `%s` = current file path
-   - `hip-opt` = MLIR optimization tool
+   - `hip-mlir-opt` = MLIR optimization tool
    - `--pass-name` = pass to test
    - `FileCheck %s` = verify output matches CHECK patterns
 
@@ -131,7 +131,7 @@ module {
 
 ```mlir
 // Test ONNX ReLU → HIP ReLU lowering
-// RUN: hip-opt %s --convert-onnx-to-hip | FileCheck %s
+// RUN: hip-mlir-opt %s --convert-onnx-to-hip | FileCheck %s
 
 module {
   func.func @test_relu(%ctx: !hip.context, %input: memref<10xf32>) -> memref<10xf32> {
@@ -153,7 +153,7 @@ module {
 
 ```mlir
 // Test automatic hip.free insertion
-// RUN: hip-opt %s --bufferization-buffer-deallocation | FileCheck %s
+// RUN: hip-mlir-opt %s --bufferization-buffer-deallocation | FileCheck %s
 
 module {
   func.func @test_alloc(%ctx: !hip.context) -> i32 {
@@ -174,7 +174,7 @@ module {
 
 ```mlir
 // Test ONNX → HIP → LLVM pipeline
-// RUN: hip-opt %s --convert-onnx-to-hip --convert-hip-to-llvm | FileCheck %s
+// RUN: hip-mlir-opt %s --convert-onnx-to-hip --convert-hip-to-llvm | FileCheck %s
 
 module {
   func.func @pipeline(%ctx: !hip.context, %in: memref<10xf32>) {
@@ -256,17 +256,17 @@ When a test fails:
 llvm-lit -v test/lit/path/to/test.mlir
 
 # See the actual MLIR output
-hip-opt test/lit/path/to/test.mlir --pass-name
+hip-mlir-opt test/lit/path/to/test.mlir --pass-name
 
 # Compare expected vs actual
-hip-opt test/lit/path/to/test.mlir --pass-name | FileCheck test/lit/path/to/test.mlir -v
+hip-mlir-opt test/lit/path/to/test.mlir --pass-name | FileCheck test/lit/path/to/test.mlir -v
 ```
 
 ## Prerequisites
 
 - **llvm-lit**: Install via `pip install lit`
 - **FileCheck**: Provided by LLVM installation
-- **hip-opt**: Built by this project (`BUILD_HIP_OPT_TOOL=ON`)
+- **hip-mlir-opt**: Built by this project (`BUILD_HIP_OPT_TOOL=ON`)
 
 ## References
 

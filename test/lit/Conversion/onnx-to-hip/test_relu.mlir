@@ -16,7 +16,7 @@
 // Expected: hip.relu in tensor mode, returning result tensor directly
 // ============================================================================
 
-// RUN: hip-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
+// RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
 
 module {
   func.func @test_relu(%input: tensor<1x64x224x224xf32>) -> tensor<1x64x224x224xf32> {

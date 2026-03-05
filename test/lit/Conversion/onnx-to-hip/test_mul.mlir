@@ -17,7 +17,7 @@
 // Model: Llama-3.1-8B SiLU activation (gate_proj * sigmoid)
 // ============================================================================
 
-// RUN: hip-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
+// RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
 
 module {
   func.func @test_mul(%lhs: tensor<1x128x14336xf16>, %rhs: tensor<1x128x14336xf16>) -> tensor<1x128x14336xf16> {

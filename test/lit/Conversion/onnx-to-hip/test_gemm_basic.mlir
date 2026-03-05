@@ -18,7 +18,7 @@
 // Expected: hip.gemm in tensor mode with identical attributes
 // ============================================================================
 
-// RUN: hip-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
+// RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
 
 module {
   func.func @gemm_test(%A: tensor<128x256xf32>, %B: tensor<256x512xf32>, %C: tensor<128x512xf32>) -> tensor<128x512xf32> {

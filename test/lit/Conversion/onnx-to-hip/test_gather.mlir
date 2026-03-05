@@ -18,7 +18,7 @@
 // Model: Llama-3.1-8B attention mask shape extraction
 // ============================================================================
 
-// RUN: hip-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
+// RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
 
 module {
   // axis = 0: gather along the first (and only) axis

@@ -30,7 +30,7 @@ lit.llvm.initialize(lit_config, config)
 
 # Resolve %(build_mode)s for VS multi-config generators. No-op for single-config.
 # If --param build_mode=<config> was not passed, default to Debug so tool paths
-# like tools/hip-opt/Debug/ resolve correctly without extra lit arguments.
+# like tools/hip-mlir-opt/Debug/ resolve correctly without extra lit arguments.
 try:
     config.hip_build_mode = config.hip_build_mode % lit_config.params
 except KeyError:

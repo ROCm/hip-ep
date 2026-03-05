@@ -1,4 +1,4 @@
-// RUN: hip-opt %s --morphizen-pipeline | FileCheck %s
+// RUN: hip-mlir-opt %s --morphizen-pipeline | FileCheck %s
 
 // Test Sub E2E full pipeline from real Llama-3.1-8B attention mask subgraph
 // This IR was imported from Sub_fix.onnx via onnx-mlir
