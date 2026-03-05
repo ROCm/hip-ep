@@ -32,7 +32,7 @@ foreach(test_file ${MLIR_E2E_TESTS})
     # --constants-dir routes the constants file into the per-test directory.
     # --constants-file uses a test-specific name to exercise the flag end-to-end.
     add_test(NAME E2E_Compile_${test_name}
-        COMMAND $<TARGET_FILE:hip-compile>
+        COMMAND $<TARGET_FILE:hip-compiler>
             "${test_file}"
             -o "${dll_output}"
             --mode dll

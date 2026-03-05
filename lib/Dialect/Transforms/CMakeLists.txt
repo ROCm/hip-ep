@@ -5,6 +5,11 @@
 
 message(STATUS "Building HIP Dialect Transforms Library")
 
+# Generate pass declarations from Passes.td
+set(LLVM_TARGET_DEFINITIONS ${CMAKE_SOURCE_DIR}/include/hip/Dialect/Transforms/Passes.td)
+mlir_tablegen(Passes.h.inc -gen-pass-decls -name Hip)
+add_public_tablegen_target(HipPassesIncGen)
+
 # Create HIP dialect transforms library
 add_library(UdnaHipTransforms STATIC
   MemoryPooling.cpp
