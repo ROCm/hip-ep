@@ -82,29 +82,52 @@ void ResolveExternConstantsPass::runOnOperation() {
   for (auto &info : externGlobals)
     globalsByName[info.globalOp.getSymName()] = &info;
 
-  // Process each function that references extern globals.
+  auto i8Type = IntegerType::get(module.getContext(), 8);
+  auto constantsType = MemRefType::get({ShapedType::kDynamic}, i8Type);
+
+  // Phase 1: Identify functions that directly use externalized globals.
+  llvm::DenseSet<func::FuncOp> needsConstantsArg;
   for (auto funcOp : module.getOps<func::FuncOp>()) {
     if (funcOp.isDeclaration())
       continue;
-
-    // Find all memref.get_global ops that reference extern globals.
-    llvm::SmallVector<memref::GetGlobalOp> getGlobalOps;
     funcOp.walk([&](memref::GetGlobalOp op) {
       if (globalsByName.count(op.getName()))
-        getGlobalOps.push_back(op);
+        needsConstantsArg.insert(funcOp);
     });
+  }
 
-    if (getGlobalOps.empty())
+  // Phase 2: Propagate transitively -- any function that calls a function
+  // needing %_constants must also receive it so it can pass it through.
+  // Fixed-point iteration handles arbitrary call depth.
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (auto funcOp : module.getOps<func::FuncOp>()) {
+      if (funcOp.isDeclaration() || needsConstantsArg.contains(funcOp))
+        continue;
+      funcOp.walk([&](func::CallOp callOp) {
+        auto callee =
+            module.lookupSymbol<func::FuncOp>(callOp.getCallee());
+        if (callee && needsConstantsArg.contains(callee)) {
+          needsConstantsArg.insert(funcOp);
+          changed = true;
+        }
+      });
+    }
+  }
+
+  // Phase 3: Add %_constants : memref<?xi8> argument to every function
+  // that needs it (both direct users and transitive callers).
+  llvm::DenseMap<func::FuncOp, Value> constantsArgMap;
+  for (auto funcOp : module.getOps<func::FuncOp>()) {
+    if (!needsConstantsArg.contains(funcOp))
       continue;
 
-    // Add %_constants : memref<?xi8> argument to the function.
     Block &entryBlock = funcOp.getBody().front();
-    auto i8Type = IntegerType::get(module.getContext(), 8);
-    auto constantsType = MemRefType::get({ShapedType::kDynamic}, i8Type);
     entryBlock.addArgument(constantsType, funcOp.getLoc());
     Value constantsArg = entryBlock.getArguments().back();
+    constantsArgMap[funcOp] = constantsArg;
 
-    // Update the function type to include the new argument.
     auto oldFuncType = funcOp.getFunctionType();
     llvm::SmallVector<Type> newInputTypes(oldFuncType.getInputs());
     newInputTypes.push_back(constantsType);
@@ -112,15 +135,61 @@ void ResolveExternConstantsPass::runOnOperation() {
                                              newInputTypes,
                                              oldFuncType.getResults()));
 
-    // Extend argument attributes array to include the new argument.
     if (auto allArgAttrs = funcOp.getAllArgAttrs()) {
       llvm::SmallVector<Attribute> newArgAttrs(allArgAttrs.begin(),
                                                allArgAttrs.end());
       newArgAttrs.push_back(DictionaryAttr::get(module.getContext()));
       funcOp.setAllArgAttrs(newArgAttrs);
     }
+  }
 
-    // Replace each memref.get_global with memref.view into the buffer.
+  // Phase 4: Rewrite func.call sites -- append the caller's %_constants
+  // to every call targeting a function whose signature was extended.
+  for (auto funcOp : module.getOps<func::FuncOp>()) {
+    if (funcOp.isDeclaration())
+      continue;
+    funcOp.walk([&](func::CallOp callOp) {
+      auto callee =
+          module.lookupSymbol<func::FuncOp>(callOp.getCallee());
+      if (!callee || !needsConstantsArg.contains(callee))
+        return;
+
+      auto it = constantsArgMap.find(funcOp);
+      if (it == constantsArgMap.end()) {
+        callOp.emitError("caller does not have %_constants but callee ")
+            << callee.getName() << " requires it";
+        signalPassFailure();
+        return;
+      }
+
+      llvm::SmallVector<Value> newOperands(callOp.getOperands());
+      newOperands.push_back(it->second);
+      OpBuilder builder(callOp);
+      auto newCall = func::CallOp::create(
+          builder, callOp.getLoc(), callOp.getCallee(),
+          callOp.getResultTypes(), newOperands);
+      callOp.replaceAllUsesWith(newCall.getResults());
+      callOp.erase();
+    });
+  }
+
+  // Phase 5: Replace memref.get_global with memref.view into the buffer
+  // (only in functions that directly use externalized globals).
+  for (auto funcOp : module.getOps<func::FuncOp>()) {
+    if (funcOp.isDeclaration())
+      continue;
+
+    auto it = constantsArgMap.find(funcOp);
+    if (it == constantsArgMap.end())
+      continue;
+    Value constantsArg = it->second;
+
+    llvm::SmallVector<memref::GetGlobalOp> getGlobalOps;
+    funcOp.walk([&](memref::GetGlobalOp op) {
+      if (globalsByName.count(op.getName()))
+        getGlobalOps.push_back(op);
+    });
+
     for (auto getGlobalOp : getGlobalOps) {
       ExternGlobalInfo *info = globalsByName[getGlobalOp.getName()];
       OpBuilder builder(getGlobalOp);
@@ -137,11 +206,10 @@ void ResolveExternConstantsPass::runOnOperation() {
     }
   }
 
-  // Erase the extern memref.global ops (now unused).
+  // Phase 6: Clean up -- erase extern globals and strip module attribute.
   for (auto &info : externGlobals)
     info.globalOp.erase();
 
-  // Strip module-level hip.constants_file attribute.
   module->removeAttr("hip.constants_file");
 }
 

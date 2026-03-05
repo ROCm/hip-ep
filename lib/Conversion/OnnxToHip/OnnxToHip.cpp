@@ -141,14 +141,40 @@ lowerOnnxConstants(mlir::ModuleOp module, mlir::func::FuncOp funcOp,
       auto memrefType = mlir::MemRefType::get(tensorType.getShape(),
                                               tensorType.getElementType());
 
-      // Derive a name for the global symbol.
-      std::string name;
+      // Derive a unique, MLIR-safe symbol name for the global.
+      // onnx_node_name often contains /, :, spaces etc. that are invalid
+      // in bare MLIR identifiers. We sanitize and always append the
+      // monotonic constant index to guarantee uniqueness even when
+      // multiple nodes share the same (sanitized) name.
+      std::string name = "hip_ext_constant_";
       if (auto nodeNameAttr =
-              constOp->getAttrOfType<mlir::StringAttr>("onnx_node_name"))
-        name = "hip_ext_" + nodeNameAttr.getValue().str();
-      else
-        name = "hip_ext_constant_" +
-               std::to_string(extState->constantIndex);
+              constOp->getAttrOfType<mlir::StringAttr>("onnx_node_name")) {
+        std::string sanitized;
+        for (char c : nodeNameAttr.getValue()) {
+          if (std::isalnum(static_cast<unsigned char>(c)) || c == '_')
+            sanitized.push_back(c);
+          else
+            sanitized.push_back('_');
+        }
+        // Collapse runs of underscores and trim leading/trailing ones.
+        std::string collapsed;
+        bool lastWasUnderscore = true; // suppress leading _
+        for (char c : sanitized) {
+          if (c == '_') {
+            if (!lastWasUnderscore)
+              collapsed.push_back(c);
+            lastWasUnderscore = true;
+          } else {
+            collapsed.push_back(c);
+            lastWasUnderscore = false;
+          }
+        }
+        while (!collapsed.empty() && collapsed.back() == '_')
+          collapsed.pop_back();
+        if (!collapsed.empty())
+          name += collapsed + "_";
+      }
+      name += std::to_string(extState->constantIndex);
 
       // Pad binary file to alignment boundary.
       int64_t padding =
