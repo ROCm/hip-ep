@@ -3,4 +3,8 @@
 # ** Licensed under the MIT License.
 ##
 
-add_subdirectory(hip-mlir-opt)
+add_executable(hip-compiler main.cpp)
+
+target_link_libraries(hip-compiler PRIVATE
+  hip-compiler-lib
+)

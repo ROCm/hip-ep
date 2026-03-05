@@ -1,0 +1,27 @@
+{
+  "passes": [
+    {
+      "name": "init",
+      "plugin": "morphizen-pass-init"
+    },
+    {
+      "name": "hip-pass",
+      "plugin": "hip-compiler-level1-pass"
+    }
+  ],
+  "target": "hip-target",
+  "targets": [
+    {
+      "name": "hip-target",
+      "pass": [
+        "init",
+        "hip-pass"
+      ],
+      "provider_options": {
+        "pass.init.enable_dump": "1",
+        "pass.init.directory": "morphizen_hip_init",
+        "pass.init.filename": "init-graph-for-hip.onnx"
+      }
+    }
+  ]
+}

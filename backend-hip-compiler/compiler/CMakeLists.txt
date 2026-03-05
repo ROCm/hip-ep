@@ -3,16 +3,23 @@
 # ** Licensed under the MIT License.
 ##
 
-add_executable(hip-compiler hip-compiler.cpp)
+add_library(hip-compiler-lib STATIC
+  HipCompiler.cpp
+  InterfaceGenerator.cpp
+)
 
-add_dependencies(hip-compiler
+add_dependencies(hip-compiler-lib
   HipDialectIncGen
   HipTypesIncGen
   HipOpsIncGen
   HipPassesIncGen
 )
 
-target_link_libraries(hip-compiler PRIVATE
+target_include_directories(hip-compiler-lib PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(hip-compiler-lib PUBLIC
   HipDialectIR
   HipToLLVM
   MLIROptLib
