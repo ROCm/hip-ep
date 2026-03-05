@@ -128,7 +128,7 @@ install(DIRECTORY include/hip
 # ==============================================================================
 # ONNX HIP DNN Execution Provider (optional)
 # ==============================================================================
-option(BUILD_EP "Build the ONNX HIP DNN Execution Provider" ON)
+option(BUILD_EP "Build the ONNX HIP DNN Execution Provider" OFF)
 
 if(BUILD_EP)
   include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
