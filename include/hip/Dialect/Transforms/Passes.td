@@ -90,20 +90,4 @@ def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
   ];
 }
 
-def LowerAllocsPass : Pass<"hip-lower-allocs", "mlir::func::FuncOp"> {
-  let summary = "Lower memref.alloc to hip.alloc and insert hip.free";
-  let description = [{
-    Replaces memref.alloc operations with hip.alloc (device allocation via
-    hipMalloc) and inserts hip.free for buffers that are not returned from
-    the function.  Requires a hip.create_handle op to exist in the function.
-
-    This pass bridges one-shot-bufferize output (generic memref allocations)
-    to the HIP-specific lowering that produces hipMalloc/hipFree calls.
-  }];
-  let dependentDialects = [
-    "mlir::hip::HipDialect",
-    "mlir::memref::MemRefDialect"
-  ];
-}
-
 #endif // HIP_PASSES

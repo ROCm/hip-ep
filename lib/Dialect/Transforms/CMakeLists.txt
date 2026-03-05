@@ -16,7 +16,6 @@ mlir_tablegen(${TABLEGEN_OUTPUT_REL}/Passes.h.inc -gen-pass-decls -name Hip)
 add_public_tablegen_target(HipPassesIncGen)
 
 add_library(HipDialectTransforms STATIC
-  LowerAllocs.cpp
   OptimizeMemRefs.cpp
   PoolAllocs.cpp
 )
