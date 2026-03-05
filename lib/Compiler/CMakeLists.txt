@@ -10,14 +10,14 @@ add_subdirectory(Passes)
 add_subdirectory(Pipeline)
 
 # Create compiler library
-add_library(UdnaCompiler STATIC
+add_library(LibHipCompiler STATIC
   Pipeline.cpp
   CompilerDriver.cpp
 )
 
 # Link against required libraries
-target_link_libraries(UdnaCompiler PUBLIC
-  UdnaCompilerPasses
+target_link_libraries(LibHipCompiler PUBLIC
+  LibHipCompilerPasses
   UdnaConversion
   HipDialectIR
   HipDialectTransforms
@@ -54,10 +54,10 @@ llvm_map_components_to_libnames(llvm_libs
   X86Info
 )
 
-target_link_libraries(UdnaCompiler PUBLIC ${llvm_libs})
+target_link_libraries(LibHipCompiler PUBLIC ${llvm_libs})
 
 # Add include directories
-target_include_directories(UdnaCompiler PUBLIC
+target_include_directories(LibHipCompiler PUBLIC
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_BINARY_DIR}/include  # For generated TableGen files
   ${CMAKE_BINARY_DIR}/lib
@@ -75,11 +75,11 @@ if(NOT BUILD_MOCK_RUNTIME AND CMAKE_INSTALL_PREFIX)
     else()
         set(_custom_kernels_lib "${CMAKE_INSTALL_PREFIX}/lib/libhip_custom_kernels.a")
     endif()
-    target_compile_definitions(UdnaCompiler PRIVATE
+    target_compile_definitions(LibHipCompiler PRIVATE
         "hip_CUSTOM_KERNELS_LIB_PATH=\"${_custom_kernels_lib}\""
     )
     message(STATUS "Custom kernels lib path for CompilerDriver: ${_custom_kernels_lib}")
 endif()
 
 # Set folder for IDE organization
-set_target_properties(UdnaCompiler PROPERTIES FOLDER "mlir/Compiler")
+set_target_properties(LibHipCompiler PROPERTIES FOLDER "mlir/Compiler")

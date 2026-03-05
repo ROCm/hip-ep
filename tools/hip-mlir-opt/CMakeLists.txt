@@ -17,7 +17,7 @@ if(ENABLE_ONNX_FRONTEND)
 endif()
 
 target_link_libraries(hip-mlir-opt PRIVATE
-  UdnaCompiler
+  LibHipCompiler
   HipDialectIR
   HipDialectTransforms
   UdnaConversion

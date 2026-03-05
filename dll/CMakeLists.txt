@@ -15,7 +15,7 @@ add_library(hip-compiler SHARED
 target_link_libraries(hip-compiler PRIVATE
     UdnaCInterface
     # UdnaCInterface transitively links:
-    #   - UdnaCompiler
+    #   - LibHipCompiler
     #   - UdnaHipDialect (→ OMONNXOps)
     #   - UdnaBackend
     #   - MLIR/LLVM libraries

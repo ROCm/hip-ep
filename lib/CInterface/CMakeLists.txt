@@ -21,9 +21,9 @@ target_compile_definitions(UdnaCInterface PRIVATE
 )
 
 target_link_libraries(UdnaCInterface PUBLIC
-    UdnaCompiler
+    LibHipCompiler
     UdnaSchemasLib
-    # UdnaCompiler already pulls in:
+    # LibHipCompiler already pulls in:
     #   - UdnaHipDialect (→ OMONNXOps)
     #   - UdnaBackend
     #   - MLIR/LLVM libraries
