@@ -1,7 +1,7 @@
-//
-// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
-// Licensed under the MIT License.
-//
+/*
+ * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
 
 #ifndef HIP_TYPES
 #define HIP_TYPES
@@ -14,10 +14,20 @@ class Hip_Type<string name, string typeMnemonic>
   let mnemonic = typeMnemonic;
 }
 
-def Hip_HandleType : Hip_Type<"Handle", "handle"> {
-  let summary = "HIP runtime handle type";
+def Hip_ContextType : Hip_Type<"Context", "context"> {
+  let summary = "Opaque HIP execution context";
   let description = [{
-    Represents an opaque HIP runtime handle used for managing HIP operations.
+    Represents runtime state including stream, library handles (MIOpen,
+    hipBLASLT), and GPU memory. Lowered to !llvm.ptr during HIP->LLVM conversion.
+
+    The context is an opaque pointer to a runtime-managed struct that contains:
+    - HIP stream for asynchronous execution
+    - Library handles (miopenHandle_t, hipblasLtHandle_t, etc.)
+    - GPU pointers to uploaded weights
+    - Cached descriptors and workspace buffers
+
+    This type is intentionally opaque to separate high-level IR from low-level
+    implementation details, enabling easy extension without IR changes.
   }];
 }
 

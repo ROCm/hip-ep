@@ -13,7 +13,7 @@ add_library(UdnaConversionOnnxToHip STATIC
 
 # Link against required libraries
 target_link_libraries(UdnaConversionOnnxToHip PUBLIC
-  UdnaHipDialectIR
+  HipDialectIR
   UdnaSchemasLib  # ensures compilation_options_generated.h is generated first
   MLIRIR
   MLIRPass

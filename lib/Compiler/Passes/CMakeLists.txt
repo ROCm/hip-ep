@@ -12,7 +12,7 @@ add_library(UdnaCompilerPasses STATIC
 
 # Link against required libraries
 target_link_libraries(UdnaCompilerPasses PUBLIC
-  UdnaHipDialectIR
+  HipDialectIR
   UdnaSchemasLib
   MLIRIR
   MLIRPass

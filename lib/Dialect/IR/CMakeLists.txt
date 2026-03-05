@@ -26,8 +26,8 @@ message(STATUS "Found llvm-tblgen: ${LLVM_TABLEGEN_EXE}")
 include(TableGen)
 
 # Create output directory structure to match include paths
-# This allows headers to use #include "hip-compiler/Dialect/Hip/IR/HipDialect.h.inc"
-set(TABLEGEN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/include/hip-compiler/Dialect/Hip/IR)
+# This allows headers to use #include "hip/Dialect/IR/HipDialect.h.inc"
+set(TABLEGEN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/include/hip/Dialect/IR)
 file(RELATIVE_PATH TABLEGEN_OUTPUT_REL
   "${CMAKE_CURRENT_BINARY_DIR}"
   "${TABLEGEN_OUTPUT_DIR}"
@@ -35,31 +35,31 @@ file(RELATIVE_PATH TABLEGEN_OUTPUT_REL
 file(MAKE_DIRECTORY ${TABLEGEN_OUTPUT_DIR})
 
 # Generate dialect definition
-set(LLVM_TARGET_DEFINITIONS HipDialect.td)
+set(LLVM_TARGET_DEFINITIONS ${CMAKE_SOURCE_DIR}/include/hip/Dialect/IR/HipDialect.td)
 mlir_tablegen(${TABLEGEN_OUTPUT_REL}/HipDialect.h.inc -gen-dialect-decls -dialect=hip)
 mlir_tablegen(${TABLEGEN_OUTPUT_REL}/HipDialect.cpp.inc -gen-dialect-defs -dialect=hip)
 add_public_tablegen_target(HipDialectIncGen)
 
 # Generate type definitions
-set(LLVM_TARGET_DEFINITIONS HipTypes.td)
+set(LLVM_TARGET_DEFINITIONS ${CMAKE_SOURCE_DIR}/include/hip/Dialect/IR/HipTypes.td)
 mlir_tablegen(${TABLEGEN_OUTPUT_REL}/HipTypes.h.inc -gen-typedef-decls -typedefs-dialect=hip)
 mlir_tablegen(${TABLEGEN_OUTPUT_REL}/HipTypes.cpp.inc -gen-typedef-defs -typedefs-dialect=hip)
 add_public_tablegen_target(HipTypesIncGen)
 
 # Generate operation definitions
-set(LLVM_TARGET_DEFINITIONS HipOps.td)
+set(LLVM_TARGET_DEFINITIONS ${CMAKE_SOURCE_DIR}/include/hip/Dialect/IR/HipOps.td)
 mlir_tablegen(${TABLEGEN_OUTPUT_REL}/HipOps.h.inc -gen-op-decls)
 mlir_tablegen(${TABLEGEN_OUTPUT_REL}/HipOps.cpp.inc -gen-op-defs)
 add_public_tablegen_target(HipOpsIncGen)
 
 # Create HIP dialect IR library
-add_library(UdnaHipDialectIR STATIC
+add_library(HipDialectIR STATIC
   HipDialect.cpp
   HipBufferize.cpp
 )
 
 # Add dependencies on TableGen targets
-add_dependencies(UdnaHipDialectIR
+add_dependencies(HipDialectIR
   HipDialectIncGen
   HipTypesIncGen
   HipOpsIncGen
@@ -69,7 +69,7 @@ add_dependencies(UdnaHipDialectIR
 llvm_map_components_to_libnames(llvm_libs Support Core)
 
 # Link against MLIR libraries
-target_link_libraries(UdnaHipDialectIR PUBLIC
+target_link_libraries(HipDialectIR PUBLIC
   MLIRIR
   MLIRSupport
   MLIRFuncDialect
@@ -80,7 +80,7 @@ target_link_libraries(UdnaHipDialectIR PUBLIC
 )
 
 # Add include directories
-target_include_directories(UdnaHipDialectIR PUBLIC
+target_include_directories(HipDialectIR PUBLIC
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_BINARY_DIR}/include
   ${CMAKE_BINARY_DIR}/lib
@@ -88,4 +88,4 @@ target_include_directories(UdnaHipDialectIR PUBLIC
 )
 
 # Set folder for IDE organization
-set_target_properties(UdnaHipDialectIR PROPERTIES FOLDER "mlir/Dialect")
+set_target_properties(HipDialectIR PROPERTIES FOLDER "mlir/Dialect")
