@@ -14,7 +14,7 @@ add_library(UdnaPipeline STATIC
 # Note: Does NOT link UdnaTargetLLVM to avoid LLD dependencies
 target_link_libraries(UdnaPipeline PUBLIC
   HipDialectIR
-  UdnaHipTransforms
+  HipDialectTransforms
   UdnaConversion
   UdnaCompilerPasses
   MLIRPass
