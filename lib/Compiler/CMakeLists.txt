@@ -19,7 +19,7 @@ add_library(UdnaCompiler STATIC
 target_link_libraries(UdnaCompiler PUBLIC
   UdnaCompilerPasses
   UdnaConversion
-  UdnaHipDialectIR
+  HipDialectIR
   UdnaHipTransforms
   UdnaTargetLLVM
   MLIRIR

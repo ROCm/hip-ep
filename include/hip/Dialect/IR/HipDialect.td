@@ -1,7 +1,7 @@
-//
-// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
-// Licensed under the MIT License.
-//
+/*
+ * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
 
 #ifndef HIP_DIALECT
 #define HIP_DIALECT
@@ -18,6 +18,11 @@ def Hip_Dialect : Dialect {
   }];
   let cppNamespace = "::mlir::hip";
   let useDefaultTypePrinterParser = 1;
+
+  let dependentDialects = [
+    "memref::MemRefDialect",
+    "bufferization::BufferizationDialect"
+  ];
 }
 
 #endif // HIP_DIALECT

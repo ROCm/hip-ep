@@ -13,7 +13,7 @@ add_library(UdnaHipTransforms STATIC
 
 # Link against required libraries
 target_link_libraries(UdnaHipTransforms PUBLIC
-  UdnaHipDialectIR
+  HipDialectIR
   MLIRIR
   MLIRPass
   MLIRSupport
