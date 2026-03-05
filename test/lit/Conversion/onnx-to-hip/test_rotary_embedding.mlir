@@ -1,4 +1,4 @@
-// RUN: udna-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
+// RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 
 module {
   func.func @main_graph(%input: tensor<1x128x4096xf16>,

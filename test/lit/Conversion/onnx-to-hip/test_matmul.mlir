@@ -15,7 +15,7 @@
 // Expected: hip.matmul in tensor mode with correct types
 // ============================================================================
 
-// RUN: udna-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
+// RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
 
 module {
   func.func @matmul_test(%input: tensor<1x128x4096xf16>, %weight: tensor<4096x1024xf16>) -> tensor<1x128x1024xf16> {

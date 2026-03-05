@@ -17,7 +17,7 @@
 // Model: Llama-3.1-8B attention mask reformatting (ReduceSum - 1)
 // ============================================================================
 
-// RUN: udna-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
+// RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
 
 module {
   func.func @test_sub(%lhs: tensor<1x1xi64>, %rhs: tensor<1x1xi64>) -> tensor<1x1xi64> {

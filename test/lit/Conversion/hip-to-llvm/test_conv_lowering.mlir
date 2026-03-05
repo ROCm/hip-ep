@@ -20,7 +20,7 @@
 // Expected: LLVM function with expanded parameters calling MIOpen wrapper
 // ============================================================================
 
-// RUN: udna-opt %s --convert-hip-to-llvm | FileCheck %s
+// RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
 
 module {
   func.func @conv_llvm_test(

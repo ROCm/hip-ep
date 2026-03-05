@@ -17,7 +17,7 @@
 // 5. i32 → f32   (to = 1)
 // ============================================================================
 
-// RUN: udna-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
+// RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 
 module {
   func.func @cast_i64_to_i32(%input: tensor<4xi64>) -> tensor<4xi32> {

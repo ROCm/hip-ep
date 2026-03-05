@@ -16,7 +16,7 @@
 // - kernel_shape, strides, pads forwarded correctly
 // ============================================================================
 
-// RUN: udna-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
+// RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
 
 module {
   // --------------------------------------------------------------------------

@@ -18,7 +18,7 @@
 // Model: Llama-3.1-8B attention mask sum computation
 // ============================================================================
 
-// RUN: udna-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
+// RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
 
 module {
   // keepdims = 1: reduced dim is kept as size 1

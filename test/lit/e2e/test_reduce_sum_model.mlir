@@ -1,4 +1,4 @@
-// RUN: udna-opt %s --morphizen-pipeline | FileCheck %s
+// RUN: hip-mlir-opt %s --morphizen-pipeline | FileCheck %s
 
 // Test ReduceSum E2E full pipeline from real Llama-3.1-8B attention mask subgraph
 // This IR was imported from ReduceSum_fix.onnx via onnx-mlir

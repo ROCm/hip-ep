@@ -12,7 +12,7 @@
 // - hip.sigmoid result type matches input type
 // ============================================================================
 
-// RUN: udna-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
+// RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 
 module {
   func.func @main_graph(%input: tensor<1x128x14336xf16>) -> tensor<1x128x14336xf16> {

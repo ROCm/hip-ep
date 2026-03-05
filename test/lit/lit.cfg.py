@@ -18,8 +18,8 @@
 #
 # Attributes guaranteed to exist when this file runs (set by lit.site.cfg.py):
 #   config.llvm_tools_dir  — path to FileCheck, not, etc.
-#   config.udna_build_dir  — CMAKE_BINARY_DIR
-#   config.udna_build_mode — "Debug" or "Release" (resolved at runtime for VS)
+#   config.hip_build_dir   — CMAKE_BINARY_DIR
+#   config.hip_build_mode  — "Debug" or "Release" (resolved at runtime for VS)
 
 import os
 import lit.formats
@@ -37,33 +37,33 @@ config.test_exec_root = config.test_source_root
 # This sets up PATH and enables add_tool_substitutions / with_environment.
 llvm_config = lit.llvm.config.LLVMConfig(lit_config, config)
 
-# Locate udna tools. Search order:
-#   1. <build>/tools/udna-opt/<mode>/  (VS multi-config layout)
-#   2. <build>/tools/udna-opt/         (Ninja single-config layout)
+# Locate hip tools. Search order:
+#   1. <build>/tools/hip-mlir-opt/<mode>/  (VS multi-config layout)
+#   2. <build>/tools/hip-mlir-opt/         (Ninja single-config layout)
 #   3. <build>/bin/<mode>
 #   4. <build>/bin
-udna_tool_search = [
-    os.path.join(config.udna_build_dir, "tools", "udna-opt", config.udna_build_mode),
-    os.path.join(config.udna_build_dir, "tools", "udna-opt"),
-    os.path.join(config.udna_build_dir, "bin", config.udna_build_mode),
-    os.path.join(config.udna_build_dir, "bin"),
+hip_tool_search = [
+    os.path.join(config.hip_build_dir, "tools", "hip-mlir-opt", config.hip_build_mode),
+    os.path.join(config.hip_build_dir, "tools", "hip-mlir-opt"),
+    os.path.join(config.hip_build_dir, "bin", config.hip_build_mode),
+    os.path.join(config.hip_build_dir, "bin"),
 ]
-udna_tools_dirs = [d for d in udna_tool_search if os.path.isdir(d)]
+hip_tools_dirs = [d for d in hip_tool_search if os.path.isdir(d)]
 
-# udna-compile may live in a separate directory from udna-opt
-udna_compile_dir = os.path.join(config.udna_build_dir, "tools", "udna-compile")
-if os.path.isdir(udna_compile_dir) and udna_compile_dir not in udna_tools_dirs:
-    udna_tools_dirs.append(udna_compile_dir)
+# hip-compiler may live in a separate directory from hip-mlir-opt
+hip_compile_dir = os.path.join(config.hip_build_dir, "tools", "hip-compiler")
+if os.path.isdir(hip_compile_dir) and hip_compile_dir not in hip_tools_dirs:
+    hip_tools_dirs.append(hip_compile_dir)
 
-if not udna_tools_dirs:
-    udna_tools_dirs = [os.path.join(config.udna_build_dir, "bin")]
+if not hip_tools_dirs:
+    hip_tools_dirs = [os.path.join(config.hip_build_dir, "bin")]
 
-llvm_config.with_environment("PATH", udna_tools_dirs, append_path=True)
+llvm_config.with_environment("PATH", hip_tools_dirs, append_path=True)
 
 tools = [
-    "udna-opt",
-    "udna-compile",
+    "hip-mlir-opt",
+    "hip-compiler",
     "FileCheck",
     "not",
 ]
-llvm_config.add_tool_substitutions(tools, udna_tools_dirs + [config.llvm_tools_dir])
+llvm_config.add_tool_substitutions(tools, hip_tools_dirs + [config.llvm_tools_dir])

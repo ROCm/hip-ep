@@ -1,4 +1,4 @@
-// RUN: udna-opt %s --morphizen-pipeline | FileCheck %s
+// RUN: hip-mlir-opt %s --morphizen-pipeline | FileCheck %s
 
 // Test Mul E2E full pipeline from real Llama-3.1-8B SiLU activation
 // This IR was imported from Mul_fix.onnx via onnx-mlir

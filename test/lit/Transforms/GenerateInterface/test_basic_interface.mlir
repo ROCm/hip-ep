@@ -26,10 +26,10 @@
 // the pass loads correctly and checks prerequisites.
 // ============================================================================
 
-// RUN: not udna-opt %s --generate-interface 2>&1 | FileCheck %s
+// RUN: not hip-mlir-opt %s --generate-interface 2>&1 | FileCheck %s
 
-// --generate-interface is a compiler-driver pass, not a standalone udna-opt
-// pass. Verify that udna-opt rejects it with the expected diagnostic so that
+// --generate-interface is a compiler-driver pass, not a standalone hip-mlir-opt
+// pass. Verify that hip-mlir-opt rejects it with the expected diagnostic so that
 // any accidental registration in the wrong tool is caught immediately.
 
 module {

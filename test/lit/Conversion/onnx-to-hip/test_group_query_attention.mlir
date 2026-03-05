@@ -16,7 +16,7 @@
 // Model: Llama-3.1-8B GroupQueryAttention decode step
 // ============================================================================
 
-// RUN: udna-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
+// RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
 
 module {
   func.func @main_graph(

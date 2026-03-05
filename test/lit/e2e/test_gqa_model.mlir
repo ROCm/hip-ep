@@ -1,4 +1,4 @@
-// RUN: udna-opt %s --morphizen-pipeline | FileCheck %s
+// RUN: hip-mlir-opt %s --morphizen-pipeline | FileCheck %s
 
 // Test GroupQueryAttention E2E full pipeline from real Llama-3.1-8B decode step
 // This IR was imported from GroupQueryAttention_fix_decode.onnx via onnx-mlir

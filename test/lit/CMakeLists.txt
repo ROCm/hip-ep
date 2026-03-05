@@ -59,12 +59,12 @@ configure_file(
 # which is the correct behaviour on both dev machines and CI runners.
 set(LIT_ARGS "-sv" CACHE STRING "Extra arguments passed to lit (e.g. -j4 --no-progress-bar)")
 
-# Add custom build target for manual invocation: cmake --build . --target check-udna-mlir-lit
-add_custom_target(check-udna-mlir-lit
+# Add custom build target for manual invocation: cmake --build . --target check-hip-mlir-lit
+add_custom_target(check-hip-mlir-lit
     COMMAND ${LIT_EXECUTABLE} ${LIT_ARGS} --param=build_mode=$<CONFIG> .
-    DEPENDS udna-opt udna-compile
+    DEPENDS hip-mlir-opt hip-compiler-exe
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    COMMENT "Running LIT tests for udna-mlir-compiler"
+    COMMENT "Running LIT tests for hip-mlir-compiler"
 )
 
 # Register with CTest (run via: ctest --test-dir <build> -C <config>).

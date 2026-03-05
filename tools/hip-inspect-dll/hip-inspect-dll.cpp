@@ -4,14 +4,14 @@
  */
 
 //===----------------------------------------------------------------------===//
-// udna-inspect-dll - Print metadata embedded in a compiled model DLL
+// hip-inspect-dll - Print metadata embedded in a compiled model DLL
 //===----------------------------------------------------------------------===//
-// Loads a DLL produced by udna-compile, calls inference_get_metadata_json(),
+// Loads a DLL produced by hip-compiler, calls inference_get_metadata_json(),
 // and prints a human-readable summary of the model's inputs, outputs, and
 // constants.
 //
 // Usage:
-//   udna-inspect-dll <model.dll> [--json]
+//   hip-inspect-dll <model.dll> [--json]
 //
 //   --json   Dump the raw JSON instead of the formatted summary.
 //===----------------------------------------------------------------------===//
