@@ -23,7 +23,7 @@ echo      OK: add.dll
 
 echo.
 echo [2/2] Compile and link driver
-cl.exe /EHsc /std:c++17 /D__HIP_PLATFORM_AMD__ /I"%THEROCK_DIST%\include" ..\examples\main_add.cpp add.lib amdhip64.lib /Fe:add_test.exe
+cl.exe /EHsc /std:c++17 /I..\examples ..\examples\main_add.cpp add.lib /Fe:add_test.exe
 if errorlevel 1 (echo FAILED at step 2 && exit /b 1)
 echo      OK: add_test.exe
 

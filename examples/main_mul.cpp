@@ -3,38 +3,16 @@
  * Licensed under the MIT License.
  */
 
-//===- main_mul.cpp - Main driver for two-mul DPS test (3D) ---------------===//
+//===- main_mul.cpp - Two-mul test via inference interface -----------------===//
 //
 // D[B,S,D] = A * B * C   (two chained muls with 3D tensors)
 //
 //===----------------------------------------------------------------------===//
 
+#include "hip_inference.h"
 #include <cmath>
-#include <cstdint>
 #include <cstdio>
-#include <cstdlib>
-#include <hip/hip_runtime_api.h>
 #include <vector>
-
-extern "C" __declspec(dllimport) void two_muls(
-    float *A_a, float *A_al, int64_t A_o, int64_t A_s0, int64_t A_s1,
-    int64_t A_s2, int64_t A_st0, int64_t A_st1, int64_t A_st2, float *B_a,
-    float *B_al, int64_t B_o, int64_t B_s0, int64_t B_s1, int64_t B_s2,
-    int64_t B_st0, int64_t B_st1, int64_t B_st2, float *C_a, float *C_al,
-    int64_t C_o, int64_t C_s0, int64_t C_s1, int64_t C_s2, int64_t C_st0,
-    int64_t C_st1, int64_t C_st2, float *D_a, float *D_al, int64_t D_o,
-    int64_t D_s0, int64_t D_s1, int64_t D_s2, int64_t D_st0, int64_t D_st1,
-    int64_t D_st2);
-
-#define HIP_CHECK(call)                                                        \
-  do {                                                                         \
-    hipError_t e = (call);                                                     \
-    if (e != hipSuccess) {                                                     \
-      fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__,             \
-              hipGetErrorString(e));                                           \
-      exit(1);                                                                 \
-    }                                                                          \
-  } while (0)
 
 int main() {
   const int64_t B = 1, S = 4, D = 4;
@@ -49,22 +27,28 @@ int main() {
     h_ref[i] = h_A[i] * h_B[i] * h_C[i];
   }
 
-  float *d_A, *d_B, *d_C, *d_D;
-  HIP_CHECK(hipMalloc(&d_A, n * 4));
-  HIP_CHECK(hipMalloc(&d_B, n * 4));
-  HIP_CHECK(hipMalloc(&d_C, n * 4));
-  HIP_CHECK(hipMalloc(&d_D, n * 4));
-  HIP_CHECK(hipMemcpy(d_A, h_A.data(), n * 4, hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemcpy(d_B, h_B.data(), n * 4, hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemcpy(d_C, h_C.data(), n * 4, hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemset(d_D, 0, n * 4));
+  void *state = nullptr;
+  inference_init(&state);
+
+  int64_t shape[] = {B, S, D};
+  tensor_t inputs[] = {
+      {h_A.data(), shape, 3, sizeof(float)},
+      {h_B.data(), shape, 3, sizeof(float)},
+      {h_C.data(), shape, 3, sizeof(float)},
+  };
+  tensor_t outputs[] = {
+      {h_D.data(), shape, 3, sizeof(float)},
+  };
+  span_t in_span = {inputs, 3};
+  span_t out_span = {outputs, 1};
 
   printf("Running on GPU...\n");
-  two_muls(d_A, d_A, 0, B, S, D, S * D, D, 1, d_B, d_B, 0, B, S, D, S * D, D, 1,
-           d_C, d_C, 0, B, S, D, S * D, D, 1, d_D, d_D, 0, B, S, D, S * D, D,
-           1);
-
-  HIP_CHECK(hipMemcpy(h_D.data(), d_D, n * 4, hipMemcpyDeviceToHost));
+  int ret = inference_compute(state, &in_span, &out_span);
+  if (ret != 0) {
+    fprintf(stderr, "inference_compute failed: %d\n", ret);
+    inference_cleanup(state);
+    return 1;
+  }
 
   float mx = 0;
   for (int64_t i = 0; i < n; ++i) {
@@ -74,9 +58,6 @@ int main() {
   }
   printf("Max diff: %e  %s\n", mx, mx < 1e-4f ? "PASS" : "FAIL");
 
-  HIP_CHECK(hipFree(d_A));
-  HIP_CHECK(hipFree(d_B));
-  HIP_CHECK(hipFree(d_C));
-  HIP_CHECK(hipFree(d_D));
+  inference_cleanup(state);
   return (mx < 1e-4f) ? 0 : 1;
 }

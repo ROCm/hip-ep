@@ -3,28 +3,17 @@
  * Licensed under the MIT License.
  */
 
-//===- main_gemm.cpp - Main driver for two-matmul DPS test (3D) -----------===//
+//===- main_gemm.cpp - Two-matmul test via inference interface -------------===//
 //
 // A[B,S,K] @ B0[K,N] -> tmp[B,S,N] -> tmp @ B1[N,P] -> C[B,S,P]
 // B0, B1 are 2D (broadcast across batch).
 //
 //===----------------------------------------------------------------------===//
 
+#include "hip_inference.h"
 #include <cmath>
-#include <cstdint>
 #include <cstdio>
-#include <cstdlib>
-#include <hip/hip_runtime_api.h>
 #include <vector>
-
-extern "C" __declspec(dllimport) void two_matmuls(
-    float *A_a, float *A_al, int64_t A_o, int64_t A_s0, int64_t A_s1,
-    int64_t A_s2, int64_t A_st0, int64_t A_st1, int64_t A_st2, float *B0_a,
-    float *B0_al, int64_t B0_o, int64_t B0_s0, int64_t B0_s1, int64_t B0_st0,
-    int64_t B0_st1, float *B1_a, float *B1_al, int64_t B1_o, int64_t B1_s0,
-    int64_t B1_s1, int64_t B1_st0, int64_t B1_st1, float *C_a, float *C_al,
-    int64_t C_o, int64_t C_s0, int64_t C_s1, int64_t C_s2, int64_t C_st0,
-    int64_t C_st1, int64_t C_st2);
 
 static void cpu_matmul(const float *A, const float *B, float *C, int64_t M,
                        int64_t K, int64_t N) {
@@ -36,16 +25,6 @@ static void cpu_matmul(const float *A, const float *B, float *C, int64_t M,
       C[i * N + j] = s;
     }
 }
-
-#define HIP_CHECK(call)                                                        \
-  do {                                                                         \
-    hipError_t e = (call);                                                     \
-    if (e != hipSuccess) {                                                     \
-      fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__,             \
-              hipGetErrorString(e));                                           \
-      exit(1);                                                                 \
-    }                                                                          \
-  } while (0)
 
 int main() {
   const int64_t B = 1, S = 4, K = 8, N = 4, P = 4;
@@ -68,25 +47,31 @@ int main() {
     cpu_matmul(&h_tmp[b * S * N], h_B1.data(), &h_ref[b * S * P], S, N, P);
   }
 
-  float *d_A, *d_B0, *d_B1, *d_C;
-  HIP_CHECK(hipMalloc(&d_A, B * S * K * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_B0, K * N * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_B1, N * P * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_C, B * S * P * sizeof(float)));
-  HIP_CHECK(hipMemcpy(d_A, h_A.data(), B * S * K * sizeof(float),
-                      hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemcpy(d_B0, h_B0.data(), K * N * sizeof(float),
-                      hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemcpy(d_B1, h_B1.data(), N * P * sizeof(float),
-                      hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemset(d_C, 0, B * S * P * sizeof(float)));
+  void *state = nullptr;
+  inference_init(&state);
+
+  int64_t a_shape[] = {B, S, K};
+  int64_t b0_shape[] = {K, N};
+  int64_t b1_shape[] = {N, P};
+  int64_t c_shape[] = {B, S, P};
+  tensor_t inputs[] = {
+      {h_A.data(), a_shape, 3, sizeof(float)},
+      {h_B0.data(), b0_shape, 2, sizeof(float)},
+      {h_B1.data(), b1_shape, 2, sizeof(float)},
+  };
+  tensor_t outputs[] = {
+      {h_C.data(), c_shape, 3, sizeof(float)},
+  };
+  span_t in_span = {inputs, 3};
+  span_t out_span = {outputs, 1};
 
   printf("Running on GPU...\n");
-  two_matmuls(d_A, d_A, 0, B, S, K, S * K, K, 1, d_B0, d_B0, 0, K, N, N, 1,
-              d_B1, d_B1, 0, N, P, P, 1, d_C, d_C, 0, B, S, P, S * P, P, 1);
-
-  HIP_CHECK(hipMemcpy(h_C.data(), d_C, B * S * P * sizeof(float),
-                      hipMemcpyDeviceToHost));
+  int ret = inference_compute(state, &in_span, &out_span);
+  if (ret != 0) {
+    fprintf(stderr, "inference_compute failed: %d\n", ret);
+    inference_cleanup(state);
+    return 1;
+  }
 
   float mx = 0;
   for (int64_t i = 0; i < B * S * P; ++i) {
@@ -96,9 +81,6 @@ int main() {
   }
   printf("Max diff: %e  %s\n", mx, mx < 1e-4f ? "PASS" : "FAIL");
 
-  HIP_CHECK(hipFree(d_A));
-  HIP_CHECK(hipFree(d_B0));
-  HIP_CHECK(hipFree(d_B1));
-  HIP_CHECK(hipFree(d_C));
+  inference_cleanup(state);
   return (mx < 1e-4f) ? 0 : 1;
 }

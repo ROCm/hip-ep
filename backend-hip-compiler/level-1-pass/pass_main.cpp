@@ -57,7 +57,6 @@ compile_hip(const std::string &mlir_text, PassContext *ctx) {
       ctx->get_dump_directory() / "hip_model_compiled.dll";
 
   CompileOptions opts;
-  opts.mode = CompileMode::Plugin;
   opts.optLevel = 2;
 
   return HipCompiler::compileFile(temp_mlir.string(), temp_dll.string(), opts);

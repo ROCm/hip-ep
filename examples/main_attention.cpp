@@ -3,57 +3,26 @@
  * Licensed under the MIT License.
  */
 
-//===- main_attention.cpp - ORT-vs-MLIR attention test driver -------------===//
+//===- main_attention.cpp - ORT-vs-MLIR attention test via inference API ---===//
 //
 // Usage: attention_test.exe <attention.onnx>
 //
-// 1. Loads the ONNX model and runs inference on CPU via ONNX Runtime
-//    to produce reference output.
-// 2. Calls the compiled MLIR DLL (main_graph) on GPU.
+// 1. Runs the ONNX model on CPU via ONNX Runtime to produce reference output.
+// 2. Calls the compiled MLIR DLL via inference_init/compute/cleanup on GPU.
 // 3. Compares GPU output against the ORT reference.
 //
 //===----------------------------------------------------------------------===//
 
+#include "hip_inference.h"
 #include <cmath>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
 
-#include <hip/hip_runtime_api.h>
 #include <onnxruntime_cxx_api.h>
 
-// --------------------------------------------------------------------------
-// DLL import: compiled from attention.hip.mlir
-//
-// func.func @main_graph(
-//     %arg0: memref<2x64x64xf32, strided<[?,?,?], offset:?>>,
-//     %arg1: memref<2x64x64xf32>)
-//
-// After convert-func-to-llvm each memref arg is flattened to:
-//   (alloc_ptr, aligned_ptr, offset, s0, s1, s2, st0, st1, st2)
-// --------------------------------------------------------------------------
-extern "C" __declspec(dllimport) void main_graph(
-    float *X_a, float *X_al, int64_t X_o, int64_t X_s0, int64_t X_s1,
-    int64_t X_s2, int64_t X_st0, int64_t X_st1, int64_t X_st2, float *out_a,
-    float *out_al, int64_t out_o, int64_t out_s0, int64_t out_s1,
-    int64_t out_s2, int64_t out_st0, int64_t out_st1, int64_t out_st2);
-
-#define HIP_CHECK(call)                                                        \
-  do {                                                                         \
-    hipError_t e = (call);                                                     \
-    if (e != hipSuccess) {                                                     \
-      fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__,             \
-              hipGetErrorString(e));                                           \
-      exit(1);                                                                 \
-    }                                                                          \
-  } while (0)
-
-// --------------------------------------------------------------------------
-// ORT: run ONNX model on CPU, return output as host vector
-// --------------------------------------------------------------------------
 static std::vector<float> run_ort_reference(const char *onnx_path,
                                             const float *input_data, int64_t B,
                                             int64_t S, int64_t D) {
@@ -90,39 +59,38 @@ static std::vector<float> run_ort_reference(const char *onnx_path,
   return result;
 }
 
-// --------------------------------------------------------------------------
-// GPU: run the compiled MLIR DLL, return output as host vector
-// --------------------------------------------------------------------------
-static std::vector<float> run_gpu(const float *input_data, int64_t B, int64_t S,
-                                  int64_t D) {
+static std::vector<float> run_gpu(const float *input_data, int64_t B,
+                                  int64_t S, int64_t D) {
   const int64_t total = B * S * D;
-  printf("[GPU] Allocating device memory...\n");
 
-  float *d_X = nullptr, *d_out = nullptr;
-  HIP_CHECK(hipMalloc(&d_X, total * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_out, total * sizeof(float)));
-  HIP_CHECK(
-      hipMemcpy(d_X, input_data, total * sizeof(float), hipMemcpyHostToDevice));
-  HIP_CHECK(hipMemset(d_out, 0, total * sizeof(float)));
+  void *state = nullptr;
+  inference_init(&state);
 
-  printf("[GPU] Calling main_graph...\n");
-  main_graph(d_X, d_X, 0, B, S, D, S * D, D, 1, d_out, d_out, 0, B, S, D, S * D,
-             D, 1);
+  std::vector<float> h_out(total, 0);
 
-  std::vector<float> result(total);
-  HIP_CHECK(hipMemcpy(result.data(), d_out, total * sizeof(float),
-                      hipMemcpyDeviceToHost));
-  printf("[GPU] Done. First values: %.6f %.6f %.6f ...\n", result[0], result[1],
-         result[2]);
+  int64_t in_shape[] = {B, S, D};
+  int64_t out_shape[] = {B, S, D};
+  tensor_t inputs[] = {
+      {const_cast<float *>(input_data), in_shape, 3, sizeof(float)},
+  };
+  tensor_t outputs[] = {
+      {h_out.data(), out_shape, 3, sizeof(float)},
+  };
+  span_t in_span = {inputs, 1};
+  span_t out_span = {outputs, 1};
 
-  HIP_CHECK(hipFree(d_X));
-  HIP_CHECK(hipFree(d_out));
-  return result;
+  printf("[GPU] Calling inference_compute...\n");
+  int ret = inference_compute(state, &in_span, &out_span);
+  if (ret != 0)
+    fprintf(stderr, "[GPU] inference_compute failed: %d\n", ret);
+
+  printf("[GPU] Done. First values: %.6f %.6f %.6f ...\n", h_out[0], h_out[1],
+         h_out[2]);
+
+  inference_cleanup(state);
+  return h_out;
 }
 
-// --------------------------------------------------------------------------
-// Compare two float vectors element-wise
-// --------------------------------------------------------------------------
 static bool compare_results(const std::vector<float> &gpu,
                             const std::vector<float> &ref, float tolerance) {
   int64_t total = static_cast<int64_t>(gpu.size());

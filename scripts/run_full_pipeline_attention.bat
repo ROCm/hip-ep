@@ -27,14 +27,13 @@ if errorlevel 1 (echo FAILED at step 1 && exit /b 1)
 echo      OK: attention.dll
 
 echo.
-echo [2/3] Compile and link driver (with ORT + HIP)
-cl.exe /EHsc /std:c++17 /D__HIP_PLATFORM_AMD__ ^
-  /I"%THEROCK_DIST%\include" ^
+echo [2/3] Compile and link driver (with ORT)
+cl.exe /EHsc /std:c++17 ^
+  /I..\examples ^
   /I"%ORT_HOME%\include" ^
   /Fe:attention_test.exe ^
   ..\examples\main_attention.cpp ^
   attention.lib ^
-  amdhip64.lib ^
   /link /LIBPATH:"%ORT_HOME%\lib" onnxruntime.lib
 if errorlevel 1 (echo FAILED at step 2 && exit /b 1)
 echo      OK: attention_test.exe

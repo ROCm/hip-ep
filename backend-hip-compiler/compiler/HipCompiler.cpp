@@ -62,10 +62,24 @@ mlir::MLIRContext createContext() {
   return mlir::MLIRContext(registry);
 }
 
+// Determine whether a function argument is an output.
+// Priority: (1) explicit "bufferize.result" attribute, (2) identity memref
+// layout heuristic (DPS convention: outputs use identity layout, inputs use
+// strided layout with dynamic strides/offset).
+bool isOutputArg(mlir::func::FuncOp funcOp, unsigned argIdx,
+                 bool hasExplicitAnnotations) {
+  if (hasExplicitAnnotations)
+    return funcOp.getArgAttr(argIdx, "bufferize.result") != nullptr;
+
+  auto type = funcOp.getFunctionType().getInput(argIdx);
+  if (auto memrefTy = mlir::dyn_cast<mlir::MemRefType>(type))
+    return memrefTy.getLayout().isIdentity();
+  return false;
+}
+
 ModelMetadata extractMetadata(mlir::ModuleOp module) {
   ModelMetadata meta;
 
-  // Extract pool_size and buffer_offsets from module or function attributes
   module.walk([&](mlir::func::FuncOp funcOp) {
     if (meta.entryFunction.empty())
       meta.entryFunction = funcOp.getName().str();
@@ -80,36 +94,37 @@ ModelMetadata extractMetadata(mlir::ModuleOp module) {
       meta.bufferOffsets.assign(vals.begin(), vals.end());
     }
 
-    // Count inputs vs outputs by looking at function signature and attributes
     auto funcType = funcOp.getFunctionType();
     int totalArgs = funcType.getNumInputs();
 
-    // Args with "bufferize.result" attribute are outputs
-    int outputCount = 0;
+    // Check whether any arg has an explicit "bufferize.result" annotation
+    bool hasExplicit = false;
     for (int i = 0; i < totalArgs; ++i) {
-      if (funcOp.getArgAttr(i, "bufferize.result"))
-        ++outputCount;
+      if (funcOp.getArgAttr(i, "bufferize.result")) {
+        hasExplicit = true;
+        break;
+      }
     }
-    meta.outputCount = outputCount > 0 ? outputCount : 0;
-    meta.inputCount = totalArgs - meta.outputCount;
 
-    // Extract ranks and shapes from memref types
+    // Classify each argument as input or output
     for (int i = 0; i < totalArgs; ++i) {
       auto type = funcType.getInput(i);
       int rank = 0;
       std::vector<int64_t> shape;
-      if (auto memrefTy = type.dyn_cast<mlir::MemRefType>()) {
+      if (auto memrefTy = mlir::dyn_cast<mlir::MemRefType>(type)) {
         rank = memrefTy.getRank();
         for (int64_t dim : memrefTy.getShape())
           shape.push_back(dim);
       }
 
-      if (funcOp.getArgAttr(i, "bufferize.result")) {
+      if (isOutputArg(funcOp, i, hasExplicit)) {
         meta.outputRanks.push_back(rank);
         meta.outputShapes.push_back(shape);
+        ++meta.outputCount;
       } else {
         meta.inputRanks.push_back(rank);
         meta.inputShapes.push_back(shape);
+        ++meta.inputCount;
       }
     }
   });
@@ -128,22 +143,16 @@ bool runPasses(mlir::ModuleOp module, mlir::MLIRContext &context) {
 }
 
 std::unique_ptr<llvm::Module> translateToLLVMIR(mlir::ModuleOp module,
-                                                llvm::LLVMContext &llvmCtx,
-                                                CompileMode mode) {
+                                                llvm::LLVMContext &llvmCtx) {
   auto llvmModule = mlir::translateModuleToLLVMIR(module, llvmCtx);
   if (!llvmModule)
     return nullptr;
 
+  // Internal compute functions are not exported directly;
+  // only the interface wrappers (inference_init/compute/cleanup) get dllexport.
   for (auto &func : *llvmModule) {
-    if (func.isDeclaration())
-      continue;
-    if (mode == CompileMode::Plugin) {
-      // In plugin mode, only interface functions get dllexport;
-      // rename internal compute function so it doesn't clash
+    if (!func.isDeclaration())
       func.setDLLStorageClass(llvm::GlobalValue::DefaultStorageClass);
-    } else {
-      func.setDLLStorageClass(llvm::GlobalValue::DLLExportStorageClass);
-    }
   }
 
   return llvmModule;
@@ -278,16 +287,14 @@ compileModule(mlir::OwningOpRef<mlir::ModuleOp> &module,
 
   // Translate to LLVM IR
   llvm::LLVMContext llvmCtx;
-  auto llvmModule = translateToLLVMIR(module.get(), llvmCtx, options.mode);
+  auto llvmModule = translateToLLVMIR(module.get(), llvmCtx);
   if (!llvmModule) {
     std::cerr << "Error translating to LLVM IR\n";
     return std::nullopt;
   }
 
-  // In plugin mode, add interface wrapper functions to the LLVM module
-  if (options.mode == CompileMode::Plugin) {
-    InterfaceGenerator::addInterfaceFunctions(*llvmModule, metadata);
-  }
+  // Add interface wrapper functions (inference_init/compute/cleanup)
+  InterfaceGenerator::addInterfaceFunctions(*llvmModule, metadata);
 
   // Emit object file
   std::string objPath =

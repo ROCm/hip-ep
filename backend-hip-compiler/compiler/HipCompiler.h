@@ -12,13 +12,7 @@
 
 namespace hipdnn::compiler {
 
-enum class CompileMode {
-  Standalone, // Raw function exports (for standalone testing)
-  Plugin      // init/compute/cleanup exports (for EP integration)
-};
-
 struct CompileOptions {
-  CompileMode mode = CompileMode::Standalone;
   int optLevel = 2;
   // Directory containing hip_runtime_static.lib; empty = derive from exe path
   std::string runtimeLibDir;
@@ -43,12 +37,12 @@ struct CompileResult {
 
 class HipCompiler {
 public:
-  /// Compile a HIP MLIR file to a DLL.
+  /// Compile a HIP MLIR file to a DLL with inference_init/compute/cleanup.
   static std::optional<CompileResult>
   compileFile(const std::string &inputPath, const std::string &outputPath,
               const CompileOptions &options);
 
-  /// Compile HIP MLIR text (string) to a DLL.
+  /// Compile HIP MLIR text (string) to a DLL with inference_init/compute/cleanup.
   static std::optional<CompileResult>
   compile(const std::string &mlirText, const std::string &outputPath,
           const CompileOptions &options);
