@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 
+#include "hip/Conversion/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
@@ -87,28 +88,38 @@ struct HipDstBufferizableModel
 
 void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
   registry.addExtension(+[](mlir::MLIRContext *ctx, mlir::hip::HipDialect *) {
-    mlir::hip::HipblasltMatmulOp::attachInterface<
-        HipDstBufferizableModel<mlir::hip::HipblasltMatmulOp>>(*ctx);
-    mlir::hip::MiopenRmsNormOp::attachInterface<
-        HipDstBufferizableModel<mlir::hip::MiopenRmsNormOp>>(*ctx);
-    mlir::hip::MiopenSkipRmsNormOp::attachInterface<
-        HipDstBufferizableModel<mlir::hip::MiopenSkipRmsNormOp>>(*ctx);
-    mlir::hip::MiopenRopeOp::attachInterface<
-        HipDstBufferizableModel<mlir::hip::MiopenRopeOp>>(*ctx);
-    mlir::hip::MiopenAddOp::attachInterface<
-        HipDstBufferizableModel<mlir::hip::MiopenAddOp>>(*ctx);
-    mlir::hip::MiopenMulOp::attachInterface<
-        HipDstBufferizableModel<mlir::hip::MiopenMulOp>>(*ctx);
-    mlir::hip::MiopenSoftmaxOp::attachInterface<
-        HipDstBufferizableModel<mlir::hip::MiopenSoftmaxOp>>(*ctx);
-    mlir::hip::TransposeOp::attachInterface<
-        HipDstBufferizableModel<mlir::hip::TransposeOp>>(*ctx);
+    mlir::hip::AvgPoolOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::AvgPoolOp>>(*ctx);
+    mlir::hip::CastOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::CastOp>>(*ctx);
+    mlir::hip::ConvOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ConvOp>>(*ctx);
     mlir::hip::GatherOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::GatherOp>>(*ctx);
-    mlir::hip::SiluOp::attachInterface<
-        HipDstBufferizableModel<mlir::hip::SiluOp>>(*ctx);
-    mlir::hip::GqaOp::attachInterface<
-        HipDstBufferizableModel<mlir::hip::GqaOp>>(*ctx);
+    mlir::hip::GemmOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::GemmOp>>(*ctx);
+    mlir::hip::GroupQueryAttentionOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::GroupQueryAttentionOp>>(*ctx);
+    mlir::hip::MatMulOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::MatMulOp>>(*ctx);
+    mlir::hip::MaxPoolOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::MaxPoolOp>>(*ctx);
+    mlir::hip::MulOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::MulOp>>(*ctx);
+    mlir::hip::ReduceSumOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ReduceSumOp>>(*ctx);
+    mlir::hip::ReluOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ReluOp>>(*ctx);
+    mlir::hip::RotaryEmbeddingOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::RotaryEmbeddingOp>>(*ctx);
+    mlir::hip::SigmoidOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::SigmoidOp>>(*ctx);
+    mlir::hip::SimplifiedLayerNormOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::SimplifiedLayerNormOp>>(*ctx);
+    mlir::hip::SkipSimplifiedLayerNormOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::SkipSimplifiedLayerNormOp>>(*ctx);
+    mlir::hip::SubOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::SubOp>>(*ctx);
   });
 }
 
@@ -138,11 +149,8 @@ int main(int argc, char **argv) {
   mlir::memref::registerAllocationOpInterfaceExternalModels(registry);
   registerHipBufferizableOpInterfaceModels(registry);
 
-#ifdef ENABLE_ONNX_FRONTEND
-  mlir::hip::registerHipPasses();
-#else
-  mlir::hip::registerConvertHipToLLVMPass();
-#endif
+  mlir::hip::registerHipTransformPasses();
+  udna::compiler::registerConversionPasses();
   mlir::bufferization::registerBufferizationPasses();
   mlir::bufferization::registerBufferizationPipelines();
   mlir::registerConvertBufferizationToMemRefPass();
