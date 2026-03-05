@@ -198,6 +198,7 @@ message(STATUS "Building ROCm tests")
 
 # Find GTest for the tests
 find_package(GTest REQUIRED)
+find_package(glog REQUIRED)
 
 # Timeout test (GPU timeout mechanism) - standalone test for WaitStreamWithTimeout
 add_executable(rocm_timeout_test test_timeout.cpp)
