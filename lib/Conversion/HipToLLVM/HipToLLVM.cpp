@@ -414,10 +414,10 @@ struct MiopenBinaryOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     int rank = type.getRank();
     Value num = LLVM::ConstantOp::create(rewriter, loc, indexType,
                                          rewriter.getIndexAttr(1));
-    for (int i : llvm::seq<int>(rank))
+    for (int dimIdx : llvm::seq<int>(rank))
       num = LLVM::MulOp::create(
           rewriter, loc, num,
-          MemRefDescriptor(descriptor).size(rewriter, loc, i));
+          MemRefDescriptor(descriptor).size(rewriter, loc, dimIdx));
     return num;
   }
 
@@ -537,8 +537,9 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
                                          rewriter.getIndexAttr(1));
 
     SmallVector<Value, 3> shape;
-    for (int i : llvm::seq<int>(3))
-      shape.push_back(i < rank ? inputDesc.size(rewriter, loc, i) : one);
+    for (int dimIdx : llvm::seq<int>(3))
+      shape.push_back(dimIdx < rank ? inputDesc.size(rewriter, loc, dimIdx)
+                                    : one);
 
     SmallVector<Value> args = {
         adaptor.getHandle(),

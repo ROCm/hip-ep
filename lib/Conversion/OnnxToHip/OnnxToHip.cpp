@@ -43,6 +43,39 @@ namespace {
 // Helpers
 //===----------------------------------------------------------------------===//
 
+/// Sanitize an arbitrary string (typically an ONNX node name) into a valid
+/// MLIR bare identifier fragment.  Non-alphanumeric characters are replaced
+/// with '_', consecutive underscores are collapsed, and leading/trailing
+/// underscores are stripped.  Returns an empty string if the input yields
+/// no usable characters.
+static std::string sanitizeForMlirIdentifier(llvm::StringRef raw) {
+  std::string sanitized;
+  sanitized.reserve(raw.size());
+  for (char c : raw) {
+    if (std::isalnum(static_cast<unsigned char>(c)) || c == '_')
+      sanitized.push_back(c);
+    else
+      sanitized.push_back('_');
+  }
+  // Collapse runs of underscores and trim leading/trailing ones.
+  std::string result;
+  result.reserve(sanitized.size());
+  bool lastWasUnderscore = true; // suppress leading '_'
+  for (char c : sanitized) {
+    if (c == '_') {
+      if (!lastWasUnderscore)
+        result.push_back(c);
+      lastWasUnderscore = true;
+    } else {
+      result.push_back(c);
+      lastWasUnderscore = false;
+    }
+  }
+  while (!result.empty() && result.back() == '_')
+    result.pop_back();
+  return result;
+}
+
 /// Create a tensor.empty for a DPS init operand.  Dynamic dimension sizes
 /// are extracted from \p source using tensor.dim at each dynamic index.
 /// Suitable for ops where the output shape aligns positionally with one input
@@ -52,9 +85,10 @@ static mlir::Value createEmptyTensor(mlir::OpBuilder &builder,
                                      mlir::RankedTensorType resultType,
                                      mlir::Value source) {
   llvm::SmallVector<mlir::Value> dynSizes;
-  for (int64_t i : llvm::seq<int64_t>(resultType.getRank())) {
-    if (resultType.isDynamicDim(i))
-      dynSizes.push_back(mlir::tensor::DimOp::create(builder, loc, source, i));
+  for (int64_t dimIdx : llvm::seq<int64_t>(resultType.getRank())) {
+    if (resultType.isDynamicDim(dimIdx))
+      dynSizes.push_back(
+          mlir::tensor::DimOp::create(builder, loc, source, dimIdx));
   }
   return mlir::tensor::EmptyOp::create(builder, loc, resultType.getShape(),
                                        resultType.getElementType(), dynSizes);
@@ -114,9 +148,10 @@ struct ExternalizationState {
 /// they are replaced by an extern memref.global (no initial value) carrying
 /// a hip.external_data {offset, size} attribute, plus a
 /// memref.get_global + bufferization.to_tensor bridge at the use site.
-static mlir::LogicalResult
-lowerOnnxConstants(mlir::ModuleOp module, mlir::func::FuncOp funcOp,
-                   int64_t minNumElements, ExternalizationState *extState) {
+static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
+                                              mlir::func::FuncOp funcOp,
+                                              int64_t minNumElements,
+                                              ExternalizationState *extState) {
   constexpr int64_t kAlignment = 64;
 
   llvm::SmallVector<mlir::Operation *> constants;
@@ -133,54 +168,29 @@ lowerOnnxConstants(mlir::ModuleOp module, mlir::func::FuncOp funcOp,
           "unsupported onnx.Constant form (expected dense value attribute)");
     }
 
-    bool shouldExternalize =
-        extState && minNumElements > 0 &&
-        !valueAttr.isSplat() &&
-        valueAttr.getNumElements() >= minNumElements;
+    bool shouldExternalize = extState && minNumElements > 0 &&
+                             !valueAttr.isSplat() &&
+                             valueAttr.getNumElements() >= minNumElements;
 
     if (shouldExternalize) {
       auto tensorType = mlir::cast<mlir::RankedTensorType>(valueAttr.getType());
       auto memrefType = mlir::MemRefType::get(tensorType.getShape(),
                                               tensorType.getElementType());
 
-      // Derive a unique, MLIR-safe symbol name for the global.
-      // onnx_node_name often contains /, :, spaces etc. that are invalid
-      // in bare MLIR identifiers. We sanitize and always append the
-      // monotonic constant index to guarantee uniqueness even when
-      // multiple nodes share the same (sanitized) name.
+      // Build a unique, MLIR-safe symbol name: prefix + sanitized node
+      // name (if present) + monotonic index to guarantee uniqueness.
       std::string name = "hip_ext_constant_";
       if (auto nodeNameAttr =
               constOp->getAttrOfType<mlir::StringAttr>("onnx_node_name")) {
-        std::string sanitized;
-        for (char c : nodeNameAttr.getValue()) {
-          if (std::isalnum(static_cast<unsigned char>(c)) || c == '_')
-            sanitized.push_back(c);
-          else
-            sanitized.push_back('_');
-        }
-        // Collapse runs of underscores and trim leading/trailing ones.
-        std::string collapsed;
-        bool lastWasUnderscore = true; // suppress leading _
-        for (char c : sanitized) {
-          if (c == '_') {
-            if (!lastWasUnderscore)
-              collapsed.push_back(c);
-            lastWasUnderscore = true;
-          } else {
-            collapsed.push_back(c);
-            lastWasUnderscore = false;
-          }
-        }
-        while (!collapsed.empty() && collapsed.back() == '_')
-          collapsed.pop_back();
-        if (!collapsed.empty())
-          name += collapsed + "_";
+        std::string fragment =
+            sanitizeForMlirIdentifier(nodeNameAttr.getValue());
+        if (!fragment.empty())
+          name += fragment + "_";
       }
       name += std::to_string(extState->constantIndex);
 
       // Pad binary file to alignment boundary.
-      int64_t aligned =
-          llvm::alignTo(extState->currentOffset, kAlignment);
+      int64_t aligned = llvm::alignTo(extState->currentOffset, kAlignment);
       int64_t padding = aligned - extState->currentOffset;
       if (padding > 0) {
         llvm::SmallVector<char> zeros(padding, 0);
@@ -214,8 +224,8 @@ lowerOnnxConstants(mlir::ModuleOp module, mlir::func::FuncOp funcOp,
       auto externalDataAttr = moduleBuilder.getDictionaryAttr({
           moduleBuilder.getNamedAttr(
               "offset", moduleBuilder.getI64IntegerAttr(entryOffset)),
-          moduleBuilder.getNamedAttr(
-              "size", moduleBuilder.getI64IntegerAttr(byteSize)),
+          moduleBuilder.getNamedAttr("size",
+                                     moduleBuilder.getI64IntegerAttr(byteSize)),
       });
       auto globalOp = mlir::memref::GlobalOp::create(
           moduleBuilder, constOp->getLoc(), name,
@@ -321,25 +331,24 @@ MatMulToHip::matchAndRewrite(mlir::Operation *op,
   // MatMul: result[..., M, N] = A[..., M, K] @ B[..., K, N].
   // Batch and M dims come from A; N comes from B's last dim.
   llvm::SmallVector<mlir::Value> dynSizes;
-  int64_t rank = resultType.getRank();
-  auto bType = mlir::cast<mlir::RankedTensorType>(b.getType());
-  for (int64_t i : llvm::seq<int64_t>(rank)) {
-    if (!resultType.isDynamicDim(i))
+  const int64_t rank = resultType.getRank();
+  const auto bType = mlir::cast<mlir::RankedTensorType>(b.getType());
+  for (int64_t dimIdx : llvm::seq<int64_t>(rank)) {
+    if (!resultType.isDynamicDim(dimIdx))
       continue;
-    if (i == rank - 1) {
-      dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, b,
-                                                     bType.getRank() - 1));
-    } else {
+    if (dimIdx == rank - 1) {
       dynSizes.push_back(
-          mlir::tensor::DimOp::create(rewriter, loc, a, i));
+          mlir::tensor::DimOp::create(rewriter, loc, b, bType.getRank() - 1));
+    } else {
+      dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, a, dimIdx));
     }
   }
 
   mlir::Value init =
       mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
                                     resultType.getElementType(), dynSizes);
-  auto hipOp = mlir::hip::HipblasltMatmulOp::create(
-      rewriter, loc, resultType, handle, a, b, init);
+  auto hipOp = mlir::hip::HipblasltMatmulOp::create(rewriter, loc, resultType,
+                                                    handle, a, b, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
@@ -367,14 +376,14 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
 
   int64_t dim0 = -1, dim1 = -1;
   int64_t mismatchCount = 0;
-  for (auto [i, attr] : llvm::enumerate(permAttr)) {
+  for (auto [permIdx, attr] : llvm::enumerate(permAttr)) {
     int64_t p = mlir::cast<mlir::IntegerAttr>(attr).getInt();
-    if (p != static_cast<int64_t>(i)) {
+    if (p != static_cast<int64_t>(permIdx)) {
       ++mismatchCount;
       if (dim0 < 0)
-        dim0 = static_cast<int64_t>(i);
+        dim0 = static_cast<int64_t>(permIdx);
       else if (dim1 < 0)
-        dim1 = static_cast<int64_t>(i);
+        dim1 = static_cast<int64_t>(permIdx);
     }
   }
   if (mismatchCount != 2 || dim0 < 0 || dim1 < 0)
@@ -389,9 +398,9 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
 
   // Transpose: output dim i corresponds to input dim perm[i].
   llvm::SmallVector<mlir::Value> dynSizes;
-  for (auto [i, attr] : llvm::enumerate(permAttr)) {
-    if (resultType.isDynamicDim(i)) {
-      int64_t srcDim = mlir::cast<mlir::IntegerAttr>(attr).getInt();
+  for (auto [outDimIdx, attr] : llvm::enumerate(permAttr)) {
+    if (resultType.isDynamicDim(outDimIdx)) {
+      const int64_t srcDim = mlir::cast<mlir::IntegerAttr>(attr).getInt();
       dynSizes.push_back(
           mlir::tensor::DimOp::create(rewriter, loc, data, srcDim));
     }
@@ -433,8 +442,7 @@ MulToHip::matchAndRewrite(mlir::Operation *op,
   // Use the operand whose rank matches the result for dim extraction
   // (handles scalar * tensor broadcasting).
   auto aType = mlir::cast<mlir::RankedTensorType>(a.getType());
-  mlir::Value source =
-      (aType.getRank() == resultType.getRank()) ? a : b;
+  mlir::Value source = (aType.getRank() == resultType.getRank()) ? a : b;
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
 
   auto hipOp = mlir::hip::MiopenMulOp::create(rewriter, loc, resultType, handle,
@@ -461,8 +469,7 @@ SoftmaxToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value input = op->getOperand(0);
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value init =
-      createEmptyTensor(rewriter, loc, resultType, input);
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
   auto hipOp = mlir::hip::MiopenSoftmaxOp::create(rewriter, loc, resultType,
                                                   handle, input, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
@@ -535,9 +542,8 @@ void ConvertOnnxToHipPass::runOnOperation() {
        llvm::make_early_inc_range(module.getOps<mlir::func::FuncOp>())) {
     if (funcOp.isDeclaration())
       continue;
-    if (mlir::failed(lowerOnnxConstants(module, funcOp,
-                                        externalizeMinNumElements,
-                                        extState.get())))
+    if (mlir::failed(lowerOnnxConstants(
+            module, funcOp, externalizeMinNumElements, extState.get())))
       return signalPassFailure();
     lowerOnnxReturns(funcOp);
     mlir::Value handle = insertHandleLifecycle(funcOp, ctx);
@@ -580,18 +586,16 @@ void ConvertOnnxToHipPass::runOnOperation() {
     std::error_code ec;
     llvm::raw_fd_ostream jsonFile(jsonPath, ec);
     if (ec) {
-      module.emitError("failed to open constants manifest: " + jsonPath +
-                       " (" + ec.message() + ")");
+      module.emitError("failed to open constants manifest: " + jsonPath + " (" +
+                       ec.message() + ")");
       return signalPassFailure();
     }
-    jsonFile << llvm::formatv("{0:2}",
-                              llvm::json::Value(std::move(manifest)));
+    jsonFile << llvm::formatv("{0:2}", llvm::json::Value(std::move(manifest)));
     jsonFile.close();
 
     module.emitRemark("externalized ")
-        << extState->constantIndex << " constants ("
-        << extState->currentOffset << " bytes) to "
-        << dir + "/" + extState->binFileName;
+        << extState->constantIndex << " constants (" << extState->currentOffset
+        << " bytes) to " << dir + "/" + extState->binFileName;
   } else if (extState) {
     // No constants qualified -- clean up empty file.
     extState->binFile->close();

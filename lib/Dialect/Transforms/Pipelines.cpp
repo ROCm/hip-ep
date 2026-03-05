@@ -38,8 +38,7 @@ void mlir::hip::buildOnnxToHipPipeline(
   outParamsOpts.hoistDynamicAllocs = true;
   outParamsOpts.addResultAttribute = true;
   outParamsOpts.modifyPublicFunctions = true;
-  pm.addPass(
-      bufferization::createBufferResultsToOutParamsPass(outParamsOpts));
+  pm.addPass(bufferization::createBufferResultsToOutParamsPass(outParamsOpts));
 
   // 4. Insert ownership-based buffer deallocation
   bufferization::BufferDeallocationPipelineOptions deallocOpts;
@@ -82,7 +81,6 @@ void mlir::hip::registerHipPipelines() {
       buildOnnxToHipPipeline);
 
   PassPipelineRegistration<>(
-      "hip-to-llvm-pipeline",
-      "Lower HIP memref IR to LLVM dialect",
+      "hip-to-llvm-pipeline", "Lower HIP memref IR to LLVM dialect",
       [](OpPassManager &pm) { buildHipToLLVMPipeline(pm); });
 }
