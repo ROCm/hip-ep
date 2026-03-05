@@ -93,17 +93,6 @@ if(NOT BUILD_MOCK_RUNTIME)
     add_subdirectory(3rd-party/custom_kernels)
 endif()
 
-add_subdirectory(dll)
-add_subdirectory(tools)
-
-enable_testing()
-add_subdirectory(test)
-
-install(DIRECTORY include/hip
-    DESTINATION include
-    FILES_MATCHING PATTERN "*.h"
-)
-
 # ==============================================================================
 # TheRock ROCm SDK Configuration
 # ==============================================================================
@@ -125,13 +114,36 @@ if(THEROCK_DIST)
   list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}/lib/cmake")
 endif()
 
+add_subdirectory(dll)
+add_subdirectory(tools)
+
+enable_testing()
+add_subdirectory(test)
+
+install(DIRECTORY include/hip
+    DESTINATION include
+    FILES_MATCHING PATTERN "*.h"
+)
+
 # ==============================================================================
 # ONNX HIP DNN Execution Provider (optional)
 # ==============================================================================
-option(BUILD_EP "Build the ONNX HIP DNN Execution Provider" OFF)
+option(BUILD_EP "Build the ONNX HIP DNN Execution Provider" ON)
 
 if(BUILD_EP)
   include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
+  find_package(glog REQUIRED)
+
+  # Fix morphizen 3rd-party build under LLVM's HandleLLVMOptions:
+  #   /wd4005: suppress C4005 macro redefinition (_CRT_SECURE_NO_WARNINGS)
+  #   /UUNICODE /U_UNICODE: prevent LPCSTR/LPCWSTR mismatch in util_mswin.cpp
+  if(MSVC)
+    foreach(_morphizen_target morphizen-foundation morphizen-core-static)
+      if(TARGET ${_morphizen_target})
+        target_compile_options(${_morphizen_target} PRIVATE /wd4005 /UUNICODE /U_UNICODE)
+      endif()
+    endforeach()
+  endif()
 
   add_subdirectory(kernels)
 

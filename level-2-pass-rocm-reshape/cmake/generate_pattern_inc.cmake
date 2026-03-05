@@ -6,7 +6,7 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_custom_command (
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/reshape_pattern_json.hpp
   COMMAND ${CMAKE_COMMAND} -E env
-    $<TARGET_FILE:Python3::Interpreter> ${morphizen_SOURCE_DIR}/tools/xxd.py
+    $<TARGET_FILE:Python3::Interpreter> ${morphizen_SOURCE_DIR}/cmake/scripts/xxd.py
     "--column" 16
     "--var" reshape_json
     --output ${CMAKE_CURRENT_BINARY_DIR}/reshape_pattern_json.hpp
