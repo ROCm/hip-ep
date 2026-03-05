@@ -1,0 +1,48 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
+message(STATUS "Building hip-compiler.dll")
+
+# Create the DLL target
+add_library(hip-compiler SHARED
+    dll_main.cpp
+    hip-compiler.def
+)
+
+# Link against CInterface library (which pulls in all dependencies)
+target_link_libraries(hip-compiler PRIVATE
+    UdnaCInterface
+    # UdnaCInterface transitively links:
+    #   - UdnaCompiler
+    #   - UdnaHipDialect (→ OMONNXOps)
+    #   - UdnaBackend
+    #   - MLIR/LLVM libraries
+)
+
+# Include directories for C API headers
+target_include_directories(hip-compiler PUBLIC
+    ${CMAKE_SOURCE_DIR}/include
+)
+
+# Set output name (no prefix on Windows)
+# Don't override RUNTIME_OUTPUT_DIRECTORY - let it use CMAKE_RUNTIME_OUTPUT_DIRECTORY variable
+set_target_properties(hip-compiler PROPERTIES
+    OUTPUT_NAME "hip-compiler"
+)
+
+# Install DLL and import library
+install(TARGETS hip-compiler
+    RUNTIME DESTINATION bin
+    ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION lib
+)
+
+# Install C API headers
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/include/hip-compiler
+    DESTINATION include
+    FILES_MATCHING PATTERN "*.h"
+)
+
+message(STATUS "hip-compiler.dll configuration complete")

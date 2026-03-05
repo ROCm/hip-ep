@@ -1,7 +1,9 @@
 ##
-# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
 
-add_subdirectory(hip-mlir-opt)
-add_subdirectory(hip-compiler)
+add_subdirectory(hip-opt)
+add_subdirectory(hip-compile)
+add_subdirectory(test-model-dll)
+add_subdirectory(hip-inspect-dll)
