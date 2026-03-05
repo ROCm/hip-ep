@@ -2,222 +2,221 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#include "mlir/Conversion/Passes.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/IR/BuiltinDialect.h"
-#include "mlir/IR/BuiltinOps.h"
-#include "mlir/IR/MLIRContext.h"
-#include "mlir/Parser/Parser.h"
-#include "mlir/Pass/PassManager.h"
-#include "mlir/Support/FileUtilities.h"
-#include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
-#include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
-#include "mlir/Target/LLVMIR/Export.h"
 
-#include "llvm/IR/LegacyPassManager.h"
-#include "llvm/IR/Module.h"
-#include "llvm/MC/TargetRegistry.h"
+// Standalone MLIR/ONNX to DLL Compiler
+// Supports both .mlir and .onnx input files
+
+#include "hip/Compiler/CompilerDriver.h"
+#include "hip/InitAllPasses.h"
+#include "hip/Support/DiskFileSystem.h"
+#include "compilation_options_generated.h"
+
+#ifdef ENABLE_ONNX_FRONTEND
+#include "src/Builder/FrontendDialectTransformer.hpp"
+#endif
+
 #include "llvm/Support/FileSystem.h"
-#include "llvm/Support/Path.h"
-#include "llvm/Support/Program.h"
-#include "llvm/Support/SourceMgr.h"
-#include "llvm/Support/TargetSelect.h"
-#include "llvm/Support/ToolOutputFile.h"
-#include "llvm/Target/TargetMachine.h"
-#include "llvm/Target/TargetOptions.h"
-#include "llvm/TargetParser/Host.h"
-#include "llvm/TargetParser/Triple.h"
+#include "llvm/Support/InitLLVM.h"
 
-#include "hip/Conversion/HipToLLVM/Passes.h"
-#include "hip/Dialect/IR/HipBufferize.h"
-#include "hip/Dialect/IR/HipDialect.h"
-#include "hip/Dialect/Transforms/Passes.h"
-
+#include <fstream>
 #include <iostream>
+#include <sstream>
+#include <string>
 
-int main(int argc, char **argv) {
+using namespace udna::compiler;
+
+struct Options {
   std::string inputFilename;
-  std::string outputDll;
-  for (int i = 1; i < argc; ++i) {
-    if (std::string(argv[i]) == "-o" && i + 1 < argc) {
-      outputDll = argv[++i];
-    } else if (argv[i][0] != '-') {
-      inputFilename = argv[i];
+  std::string outputFilename = "output.dll";
+  // CLI-only: needed to detect "onnx-mlir" special mode that exits before
+  // compilation and has no equivalent in CompilationOptionsT.
+  std::string outputModeStr = "dll";
+  // CLI-only: directory for DiskFileSystem; never embedded in the DLL.
+  // Created automatically if it does not exist.
+  std::string constantsDir;
+  // All other compilation settings parsed directly into the proto struct so
+  // there is no duplication or manual copy step.
+  CompilationOptionsT compilerOpts;
+
+  bool parse(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+      std::string arg = argv[i];
+      if (arg == "-o" && i + 1 < argc) {
+        outputFilename = argv[++i];
+      } else if (arg == "--mode" && i + 1 < argc) {
+        outputModeStr = argv[++i];
+        if (outputModeStr == "ir") {
+          compilerOpts.output_mode = OutputMode::LLVM_IR;
+        } else if (outputModeStr == "dll") {
+          compilerOpts.output_mode = OutputMode::DLL;
+        } else if (outputModeStr != "onnx-mlir") {
+          std::cerr << "Unknown mode: " << outputModeStr << "\n";
+          return false;
+        }
+      } else if (arg == "--constants-file" && i + 1 < argc) {
+        compilerOpts.constants_file = argv[++i];
+      } else if (arg == "--constants-dir" && i + 1 < argc) {
+        constantsDir = argv[++i];
+      } else if (arg == "-O" && i + 1 < argc) {
+        compilerOpts.opt_level = std::stoi(argv[++i]);
+      } else if (arg == "-v" || arg == "--verbose") {
+        compilerOpts.verbose = true;
+      } else if (arg == "-h" || arg == "--help") {
+        return false;
+      } else if (arg[0] != '-') {
+        inputFilename = arg;
+      } else {
+        std::cerr << "Unknown option: " << arg << "\n";
+        return false;
+      }
     }
+    return !inputFilename.empty();
   }
 
-  if (inputFilename.empty() || outputDll.empty()) {
-    std::cerr << "Usage: " << argv[0] << " <input.hip.mlir> -o <output.dll>\n";
+  void printHelp() const {
+    std::cout
+        << "MLIR/ONNX to HIP DLL Compiler\n\n"
+        << "Usage: hip-compiler [options] <input.mlir|input.onnx>\n\n"
+        << "Options:\n"
+        << "  -o <file>                Output filename (default: output.dll)\n"
+        << "  --mode <mode>            Output mode: ir, dll, onnx-mlir "
+           "(default: dll)\n"
+        << "  --constants-file <name>  Filename for constants data (default: "
+           "constants.bin);\n"
+        << "                           stored in DLL metadata so the runtime "
+           "can load it\n"
+        << "  --constants-dir <dir>    Directory to write the constants file "
+           "into;\n"
+        << "                           created if it does not exist (default: "
+           "current dir)\n"
+        << "  -O <level>               Optimization level 0-3 (default: 2)\n"
+        << "  -v, --verbose            Enable verbose output\n"
+        << "  -h, --help               Show this help\n"
+        << "\nInput formats:\n"
+        << "  .mlir              MLIR text (ONNX dialect)\n"
+#ifdef ENABLE_ONNX_FRONTEND
+        << "  .onnx              ONNX model\n"
+#endif
+        << "\nOutput modes:\n"
+        << "  dll                Compile to DLL (default)\n"
+        << "  ir                 Emit LLVM IR\n"
+#ifdef ENABLE_ONNX_FRONTEND
+        << "  onnx-mlir          Import ONNX and print ONNX dialect MLIR\n"
+#endif
+        ;
+  }
+
+  bool isOnnxInput() const {
+    return inputFilename.size() >= 5 &&
+           inputFilename.substr(inputFilename.size() - 5) == ".onnx";
+  }
+};
+
+// Create constantsDir (and any missing parents) then return a DiskFileSystem
+// rooted there. Falls back to "." when constantsDir is empty.
+static udna::DiskFileSystem makeFileSystem(const std::string& constantsDir) {
+  if (!constantsDir.empty())
+    llvm::sys::fs::create_directories(constantsDir);
+  return udna::DiskFileSystem(constantsDir.empty() ? "." : constantsDir.c_str());
+}
+
+int main(int argc, char** argv) {
+  Options opts;
+  if (!opts.parse(argc, argv)) {
+    opts.printHelp();
     return 1;
   }
 
-  // 1. Setup MLIR context and parse input
-  mlir::DialectRegistry registry;
-  registry.insert<mlir::BuiltinDialect>();
-  registry.insert<mlir::arith::ArithDialect>();
-  registry.insert<mlir::cf::ControlFlowDialect>();
-  registry.insert<mlir::func::FuncDialect>();
-  registry.insert<mlir::memref::MemRefDialect>();
-  registry.insert<mlir::LLVM::LLVMDialect>();
-  registry.insert<mlir::hip::HipDialect>();
+  llvm::InitLLVM X(argc, argv);
 
-  mlir::registerBuiltinDialectTranslation(registry);
-  mlir::registerLLVMDialectTranslation(registry);
-
-  mlir::MLIRContext context(registry);
-
-  std::string errorMessage;
-  auto file = mlir::openInputFile(inputFilename, &errorMessage);
-  if (!file) {
-    std::cerr << errorMessage << "\n";
-    return 1;
+  if (opts.compilerOpts.verbose) {
+    std::cout << "=== MLIR/ONNX to HIP DLL Compiler ===\n";
+    std::cout << "Input: " << opts.inputFilename << "\n";
+    std::cout << "Output: " << opts.outputFilename << "\n";
+    std::cout << "Mode: " << opts.outputModeStr << "\n";
+    std::cout << "Optimization: O" << opts.compilerOpts.opt_level << "\n";
+    std::cout << "Constants file: " << opts.compilerOpts.constants_file << "\n";
+    if (!opts.constantsDir.empty())
+      std::cout << "Constants dir: " << opts.constantsDir << "\n";
+    std::cout << "\n";
   }
 
-  llvm::SourceMgr sourceMgr;
-  sourceMgr.AddNewSourceBuffer(std::move(file), llvm::SMLoc());
+#ifdef ENABLE_ONNX_FRONTEND
+  // Handle ONNX model import
+  if (opts.isOnnxInput()) {
+    mlir::MLIRContext context;
+    udna::compiler::loadAllDialects(context);
 
-  mlir::OwningOpRef<mlir::ModuleOp> module =
-      mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, &context);
-  if (!module) {
-    std::cerr << "Error parsing MLIR file\n";
-    return 1;
-  }
+    mlir::OwningOpRef<mlir::ModuleOp> module;
+    std::string errorMessage;
 
-  // 2. Run MLIR PassManager (input must be pre-bufferized memref IR)
-  mlir::PassManager pm(&context);
-  pm.addPass(mlir::hip::createConvertHipToLLVMPass());
-  pm.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
-  pm.addPass(mlir::createArithToLLVMConversionPass());
-  pm.addPass(mlir::createConvertFuncToLLVMPass());
-  pm.addPass(mlir::createReconcileUnrealizedCastsPass());
-
-  if (mlir::failed(pm.run(*module))) {
-    std::cerr << "Error running passes\n";
-    return 1;
-  }
-
-  // 3. Translate MLIR to LLVM IR
-  llvm::LLVMContext llvmContext;
-  auto llvmModule = mlir::translateModuleToLLVMIR(module.get(), llvmContext);
-  if (!llvmModule) {
-    std::cerr << "Error translating to LLVM IR\n";
-    return 1;
-  }
-
-  for (auto &func : *llvmModule) {
-    if (!func.isDeclaration()) {
-      func.setDLLStorageClass(llvm::GlobalValue::DLLExportStorageClass);
-    }
-  }
-
-  // 4. Code Generation to Object File
-  llvm::InitializeNativeTarget();
-  llvm::InitializeNativeTargetAsmPrinter();
-
-  std::string err;
-  auto targetTripleStr = llvm::sys::getDefaultTargetTriple();
-  llvm::Triple targetTriple(targetTripleStr);
-  auto target = llvm::TargetRegistry::lookupTarget(targetTripleStr, err);
-  if (!target) {
-    std::cerr << "Error looking up target: " << err << "\n";
-    return 1;
-  }
-
-  llvm::TargetOptions opt;
-  auto rm = std::optional<llvm::Reloc::Model>();
-  auto targetMachine =
-      target->createTargetMachine(targetTriple, "generic", "", opt, rm);
-
-  llvmModule->setDataLayout(targetMachine->createDataLayout());
-  llvmModule->setTargetTriple(targetTriple);
-
-  std::string objFilename = llvm::sys::path::stem(inputFilename).str() + ".obj";
-  std::error_code EC;
-  llvm::raw_fd_ostream dest(objFilename, EC, llvm::sys::fs::OF_None);
-  if (EC) {
-    std::cerr << "Could not open file: " << EC.message() << "\n";
-    return 1;
-  }
-
-  llvm::legacy::PassManager pass;
-  auto fileType = llvm::CodeGenFileType::ObjectFile;
-  if (targetMachine->addPassesToEmitFile(pass, dest, nullptr, fileType)) {
-    std::cerr << "TargetMachine can't emit a file of this type\n";
-    return 1;
-  }
-  pass.run(*llvmModule);
-  dest.flush();
-  dest.close();
-
-  std::cout << "Generated temporary object: " << objFilename << "\n";
-
-  // 5. Link into DLL
-  auto linkerPath = llvm::sys::findProgramByName("lld-link");
-  if (!linkerPath) {
-    linkerPath = llvm::sys::findProgramByName("link.exe");
-    if (!linkerPath) {
-      std::cerr << "Could not find lld-link or link.exe in PATH\n";
+    onnx_mlir::ImportOptions importOpts;
+    importOpts.useOnnxModelTypes = true;
+    int importResult = onnx_mlir::ImportFrontendModelFile(
+        llvm::StringRef(opts.inputFilename), context, module, &errorMessage,
+        importOpts);
+    if (importResult != 0) {
+      std::cerr << "ONNX import failed: " << errorMessage << "\n";
       return 1;
     }
-  }
 
-  std::string therockDist = "";
-  if (const char *env_p = std::getenv("THEROCK_DIST")) {
-    therockDist = env_p;
-  }
-
-  std::string outArg = "/OUT:" + outputDll;
-  std::string dllArg = "/DLL";
-  std::string noLogoArg = "/NOLOGO";
-
-  std::vector<llvm::StringRef> linkArgs;
-  linkArgs.push_back(*linkerPath);
-  linkArgs.push_back(noLogoArg);
-  linkArgs.push_back(dllArg);
-  linkArgs.push_back(outArg);
-  linkArgs.push_back(objFilename);
-
-  std::string exePath =
-      llvm::sys::fs::getMainExecutable(argv[0], (void *)(intptr_t)main);
-  llvm::StringRef exeDir = llvm::sys::path::parent_path(exePath);
-
-  llvm::SmallString<128> runtimeLibPath(exeDir);
-  llvm::sys::path::append(runtimeLibPath, "hip_runtime_static.lib");
-  linkArgs.push_back(runtimeLibPath.str());
-
-  std::string cwdLibPath = "/LIBPATH:.";
-  linkArgs.push_back(cwdLibPath);
-
-  std::string exeDirLibPath = std::string("/LIBPATH:") + exeDir.str();
-  linkArgs.push_back(exeDirLibPath);
-
-  std::string libPathArg;
-  if (!therockDist.empty()) {
-    libPathArg = "/LIBPATH:" + therockDist + "\\lib";
-    linkArgs.push_back(libPathArg);
-  }
-
-  linkArgs.push_back("amdhip64.lib");
-  linkArgs.push_back("hipblaslt.lib");
-  linkArgs.push_back("MIOpen.lib");
-
-  std::string errMsg;
-  int result = llvm::sys::ExecuteAndWait(*linkerPath, linkArgs, std::nullopt,
-                                         {}, 0, 0, &errMsg);
-  if (result != 0) {
-    std::cerr << "Linker failed with code " << result << "\n";
-    if (!errMsg.empty()) {
-      std::cerr << "Error: " << errMsg << "\n";
+    if (opts.outputModeStr == "onnx-mlir") {
+      module->print(llvm::outs());
+      llvm::outs() << "\n";
+      return 0;
     }
+
+    CompilerDriver pipeline;
+    auto fs = makeFileSystem(opts.constantsDir);
+    pipeline.setFileSystem(&fs);
+
+    std::string errorMsg;
+    if (!pipeline.compileFromModule(*module, opts.outputFilename,
+                                   opts.compilerOpts, errorMsg)) {
+      std::cerr << "Compilation failed: " << errorMsg << "\n";
+      return 1;
+    }
+
+    std::cout << "=== Compilation Successful ===\n";
+    std::cout << "Output: " << opts.outputFilename << "\n";
+    return 0;
+  }
+#else
+  if (opts.isOnnxInput()) {
+    std::cerr << "Error: .onnx input requires ENABLE_ONNX_FRONTEND build\n";
+    return 1;
+  }
+  if (opts.outputModeStr == "onnx-mlir") {
+    std::cerr << "Error: --mode onnx-mlir requires ENABLE_ONNX_FRONTEND build\n";
+    return 1;
+  }
+#endif
+
+  // Standard MLIR input path (binary mode for MLIR bytecode support)
+  std::ifstream inputFile(opts.inputFilename, std::ios::binary);
+  if (!inputFile) {
+    std::cerr << "Error: Cannot open input file: " << opts.inputFilename
+              << "\n";
     return 1;
   }
 
-  std::cout << "Successfully generated " << outputDll
-            << " and its import library\n";
+  std::string inputMLIR(
+      (std::istreambuf_iterator<char>(inputFile)),
+      std::istreambuf_iterator<char>());
+
+  CompilerDriver pipeline;
+  auto fs = makeFileSystem(opts.constantsDir);
+  pipeline.setFileSystem(&fs);
+
+  std::string errorMessage;
+  if (!pipeline.compile(inputMLIR, opts.outputFilename, opts.compilerOpts,
+                        errorMessage)) {
+    std::cerr << "Compilation failed: " << errorMessage << "\n";
+    return 1;
+  }
+
+  std::cout << "=== Compilation Successful ===\n";
+  std::cout << "Output: " << opts.outputFilename << "\n";
 
   return 0;
 }
