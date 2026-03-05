@@ -108,22 +108,9 @@ if(BUILD_HIP_TOOLS)
   include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
   include_directories(${CMAKE_CURRENT_BINARY_DIR}/include)
 
-  # onnx-mlir (optional): enables --convert-onnx-to-hip pass.
-  if(ONNX_MLIR_SRC)
-    set(ENABLE_ONNX_FRONTEND ON)
-    if(NOT ONNX_MLIR_BUILD)
-      set(ONNX_MLIR_BUILD "${ONNX_MLIR_SRC}/build")
-    endif()
-    set(ONNX_MLIR_LIB_DIR "${ONNX_MLIR_BUILD}/Release/lib")
-    message(STATUS "onnx-mlir source: ${ONNX_MLIR_SRC}")
-    message(STATUS "onnx-mlir build:  ${ONNX_MLIR_BUILD}")
-    include_directories(${ONNX_MLIR_SRC})
-    include_directories(${ONNX_MLIR_BUILD})
-    find_package(Protobuf REQUIRED)
-  else()
-    set(ENABLE_ONNX_FRONTEND OFF)
-    message(STATUS "onnx-mlir: DISABLED (ONNX_MLIR_SRC not set)")
-  endif()
+  # onnx-mlir is no longer required. The convert-onnx-to-hip pass uses
+  # MLIR's generic Operation API to match ONNX ops by name, so no onnx-mlir
+  # headers or libraries are needed.
 
   list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
   list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
