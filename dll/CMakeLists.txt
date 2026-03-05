@@ -15,7 +15,7 @@ add_library(udna-compiler SHARED
 target_link_libraries(udna-compiler PRIVATE
     UdnaCInterface
     # UdnaCInterface transitively links:
-    #   - UdnaCompiler
+    #   - LibHipCompiler
     #   - UdnaHipDialect (→ OMONNXOps)
     #   - UdnaBackend
     #   - MLIR/LLVM libraries

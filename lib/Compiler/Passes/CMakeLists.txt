@@ -6,12 +6,12 @@
 message(STATUS "Building Compiler Passes Library")
 
 # Create compiler passes library
-add_library(UdnaCompilerPasses STATIC
+add_library(LibHipCompilerPasses STATIC
   GenerateInterface.cpp
 )
 
 # Link against required libraries
-target_link_libraries(UdnaCompilerPasses PUBLIC
+target_link_libraries(LibHipCompilerPasses PUBLIC
   HipDialectIR
   UdnaSchemasLib
   MLIRIR
@@ -24,11 +24,11 @@ target_link_libraries(UdnaCompilerPasses PUBLIC
 )
 
 # Add include directories
-target_include_directories(UdnaCompilerPasses PUBLIC
+target_include_directories(LibHipCompilerPasses PUBLIC
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_BINARY_DIR}/lib
   ${CMAKE_BINARY_DIR}/proto
 )
 
 # Set folder for IDE organization
-set_target_properties(UdnaCompilerPasses PROPERTIES FOLDER "mlir/Compiler")
+set_target_properties(LibHipCompilerPasses PROPERTIES FOLDER "mlir/Compiler")

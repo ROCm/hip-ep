@@ -16,7 +16,7 @@ target_link_libraries(UdnaPipeline PUBLIC
   HipDialectIR
   HipDialectTransforms
   UdnaConversion
-  UdnaCompilerPasses
+  LibHipCompilerPasses
   MLIRPass
   MLIRSupport
   MLIRTransforms

@@ -3,13 +3,13 @@
 # ** Licensed under the MIT License.
 ##
 
-# Create executable (thin wrapper around UdnaCompiler library)
+# Create executable (thin wrapper around LibHipCompiler library)
 add_executable(hip-compiler hip-compiler.cpp)
 
-# Link against UdnaCompiler library (transitively links all dependencies)
+# Link against LibHipCompiler library (transitively links all dependencies)
 # OMBuilder provides ImportFrontendModelFile for .onnx import
 target_link_libraries(hip-compiler PRIVATE
-  UdnaCompiler
+  LibHipCompiler
   OMBuilder
 )
 
