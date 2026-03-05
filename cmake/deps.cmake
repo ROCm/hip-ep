@@ -2,6 +2,11 @@
 # ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
+if(DEPS_CMAKE_INCLUDED)
+  return()
+endif()
+set(DEPS_CMAKE_INCLUDED TRUE)
+
 include(FetchContent)
 
 # Function to get git version info for a component
