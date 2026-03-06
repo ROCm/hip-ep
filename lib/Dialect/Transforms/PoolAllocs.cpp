@@ -29,6 +29,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -490,62 +491,25 @@ void PoolAllocsPass::runOnOperation() {
   //   %v1   = memref.view %pool[%off1][] : memref<131072xi8> to memref<...>
   //   ...
   //
-  // For a mixed static+dynamic case the pool becomes memref<?xi8>:
-  //
-  //   %static_part = arith.constant 32768 : index
-  //   %aligned     = <alignUp(%dynBucketSize, 256)>  // arith add/div/mul
-  //   %pool_size   = arith.addi %static_part, %aligned : index
-  //   %pool        = memref.alloc(%pool_size) : memref<?xi8>
-  //   ...
+  // For a mixed static+dynamic case the pool is still memref<?xi8>; the
+  // runtime sizes it conservatively (hip.get_pool returns whatever the
+  // runtime pre-allocated — no compile-time pool alloc is emitted):
 
   bool hasDynamic = !dynBuckets.empty();
 
-  // 5a. Compute total pool size as an SSA value.
-  Value poolSize;
-  if (hasDynamic) {
-    poolSize = arith::ConstantIndexOp::create(builder, loc, staticPoolSize);
-    Value alignConst =
-        arith::ConstantIndexOp::create(builder, loc, kDefaultAlignment);
+  // Early exit: nothing to pool.
+  if (staticPoolSize == 0 && !hasDynamic)
+    return;
 
-    for (auto &bucket : dynBuckets) {
-      int64_t numBins = bucket.bins.size();
-      // alignUp(bucketSize, alignment) via arith ops.
-      Value alignM1 =
-          arith::ConstantIndexOp::create(builder, loc, kDefaultAlignment - 1);
-      Value sum =
-          arith::AddIOp::create(builder, loc, bucket.byteSizeValue, alignM1);
-      Value divided = arith::DivUIOp::create(builder, loc, sum, alignConst);
-      Value alignedBucketSize =
-          arith::MulIOp::create(builder, loc, divided, alignConst);
-
-      if (numBins > 1) {
-        Value numBinsVal =
-            arith::ConstantIndexOp::create(builder, loc, numBins);
-        Value contribution =
-            arith::MulIOp::create(builder, loc, alignedBucketSize, numBinsVal);
-        poolSize = arith::AddIOp::create(builder, loc, poolSize, contribution);
-      } else {
-        poolSize =
-            arith::AddIOp::create(builder, loc, poolSize, alignedBucketSize);
-      }
-    }
-  } else {
-    if (staticPoolSize == 0)
-      return;
-  }
-
-  // 5b. Create the single pool allocation.
-  Value pool;
-  if (hasDynamic) {
-    auto poolType =
-        MemRefType::get({ShapedType::kDynamic}, builder.getIntegerType(8));
-    pool =
-        memref::AllocOp::create(builder, loc, poolType, ValueRange{poolSize});
-  } else {
-    auto poolType =
-        MemRefType::get({staticPoolSize}, builder.getIntegerType(8));
-    pool = memref::AllocOp::create(builder, loc, poolType);
-  }
+  // 5b. Get the pre-allocated GPU pool via hip.get_pool(%ctx).
+  // The pool is allocated once during inference_init (hipdnn_ep_pool_init)
+  // and lives in the runtime state — no per-inference allocation or free.
+  // %ctx is arg 0, guaranteed present because hip-add-context-arg runs
+  // before this pass.
+  Value ctxArg = funcOp.getArgument(0);
+  auto poolType =
+      MemRefType::get({ShapedType::kDynamic}, builder.getIntegerType(8));
+  Value pool = hip::GetPoolOp::create(builder, loc, poolType, ctxArg);
 
   // 5c. Compute byte offsets for every alloc and store in allocToOffset.
   DenseMap<Operation *, Value> allocToOffset;
@@ -605,7 +569,6 @@ void PoolAllocsPass::runOnOperation() {
   }
 
   // 5d. Replace each original alloc with a memref.view into the pool.
-  bool hadDeallocs = false;
   SmallVector<int64_t> staticOffsets;
   for (auto &info : allInfos) {
     auto it = allocToOffset.find(info.allocOp.getOperation());
@@ -633,32 +596,36 @@ void PoolAllocsPass::runOnOperation() {
       staticOffsets.push_back(-1);
   }
 
-  // 5d'. Erase deallocs that now target views (invalid to free a view)
-  // and insert a single dealloc for the pool buffer.  After RAUW above,
-  // any `memref.dealloc %alloc_X` became `memref.dealloc %view_X`.
+  // 5d'. Erase deallocs that now target views — the pool is owned by the
+  // runtime state (not this function), so no pool dealloc is inserted.
+  // After RAUW above, any `memref.dealloc %alloc_X` became
+  // `memref.dealloc %view_X`; those are invalid and must be removed.
   SmallVector<memref::DeallocOp> orphanedDeallocs;
   funcOp.walk([&](memref::DeallocOp op) {
     if (op.getMemref().getDefiningOp<memref::ViewOp>())
       orphanedDeallocs.push_back(op);
   });
-  hadDeallocs = !orphanedDeallocs.empty();
   for (auto op : orphanedDeallocs)
     op.erase();
 
-  if (hadDeallocs) {
-    builder.setInsertionPoint(block.getTerminator());
-    memref::DeallocOp::create(builder, loc, pool);
-  }
-
-  // 5e. Attach pool metadata to the function for runtime/deployment use.
-  MLIRContext *ctx = funcOp.getContext();
-  if (!hasDynamic)
-    funcOp->setAttr("hipdnn.pool_size",
+  // 5e. Attach pool metadata to the module so GenerateInterface can emit
+  // hipdnn_ep_pool_init(state, pool_size, offsets, num_buffers) in
+  // inference_init. All three attributes are required — GenerateInterface
+  // skips pool init if any is absent.
+  // Note: for functions with dynamic allocs, staticPoolSize records only the
+  // static portion; dynamic pool support in GenerateInterface is not yet
+  // implemented, so the runtime pool must be sized conservatively externally.
+  ModuleOp moduleOp = funcOp->getParentOfType<ModuleOp>();
+  MLIRContext *mlirCtx = funcOp.getContext();
+  moduleOp->setAttr("hipdnn.pool_size",
                     builder.getI64IntegerAttr(staticPoolSize));
+  moduleOp->setAttr("hipdnn.buffer_count",
+                    builder.getI64IntegerAttr((int64_t)allInfos.size()));
   SmallVector<Attribute> offsetAttrs;
   for (int64_t off : staticOffsets)
     offsetAttrs.push_back(builder.getI64IntegerAttr(off));
-  funcOp->setAttr("hipdnn.buffer_offsets", ArrayAttr::get(ctx, offsetAttrs));
+  moduleOp->setAttr("hipdnn.buffer_offsets",
+                    ArrayAttr::get(mlirCtx, offsetAttrs));
 }
 
 } // namespace
