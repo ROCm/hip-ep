@@ -7,13 +7,18 @@
 
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/Bufferization/Transforms/OneShotAnalysis.h"
+#include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
+#include "mlir/Bytecode/BytecodeReader.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/FileUtilities.h"
@@ -39,12 +44,22 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#ifdef ENABLE_ONNX_FRONTEND
+#include "src/Dialect/ONNX/ONNXDialect.hpp"
+#endif
+
 #include <fstream>
 #include <iostream>
 
 namespace hipdnn::compiler {
 
 namespace {
+
+// MLIR bytecode magic: "ML\xefR"
+bool isMlirBytecode(const std::string &data) {
+  return data.size() >= 4 && data[0] == 'M' && data[1] == 'L' &&
+         data[2] == '\xef' && data[3] == 'R';
+}
 
 mlir::MLIRContext createContext() {
   mlir::DialectRegistry registry;
@@ -53,19 +68,27 @@ mlir::MLIRContext createContext() {
   registry.insert<mlir::cf::ControlFlowDialect>();
   registry.insert<mlir::func::FuncDialect>();
   registry.insert<mlir::memref::MemRefDialect>();
+  registry.insert<mlir::tensor::TensorDialect>();
+  registry.insert<mlir::bufferization::BufferizationDialect>();
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::hip::HipDialect>();
+#ifdef ENABLE_ONNX_FRONTEND
+  registry.insert<mlir::ONNXDialect>();
+#endif
 
   mlir::registerBuiltinDialectTranslation(registry);
   mlir::registerLLVMDialectTranslation(registry);
 
+  mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
+  mlir::tensor::registerBufferizableOpInterfaceExternalModels(registry);
+  mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
+      registry);
+  mlir::memref::registerAllocationOpInterfaceExternalModels(registry);
+  registerHipBufferizableOpInterfaceModels(registry);
+
   return mlir::MLIRContext(registry);
 }
 
-// Determine whether a function argument is an output.
-// Priority: (1) explicit "bufferize.result" attribute, (2) identity memref
-// layout heuristic (DPS convention: outputs use identity layout, inputs use
-// strided layout with dynamic strides/offset).
 bool isOutputArg(mlir::func::FuncOp funcOp, unsigned argIdx,
                  bool hasExplicitAnnotations) {
   if (hasExplicitAnnotations)
@@ -97,7 +120,6 @@ ModelMetadata extractMetadata(mlir::ModuleOp module) {
     auto funcType = funcOp.getFunctionType();
     int totalArgs = funcType.getNumInputs();
 
-    // Check whether any arg has an explicit "bufferize.result" annotation
     bool hasExplicit = false;
     for (int i = 0; i < totalArgs; ++i) {
       if (funcOp.getArgAttr(i, "bufferize.result")) {
@@ -106,7 +128,6 @@ ModelMetadata extractMetadata(mlir::ModuleOp module) {
       }
     }
 
-    // Classify each argument as input or output
     for (int i = 0; i < totalArgs; ++i) {
       auto type = funcType.getInput(i);
       int rank = 0;
@@ -132,7 +153,35 @@ ModelMetadata extractMetadata(mlir::ModuleOp module) {
   return meta;
 }
 
-bool runPasses(mlir::ModuleOp module, mlir::MLIRContext &context) {
+// Frontend passes: ONNX → HIP → bufferized memref.
+// Only runs when input contains ONNX ops (detected by ENABLE_ONNX_FRONTEND).
+bool runFrontendPasses(mlir::ModuleOp module, mlir::MLIRContext &context) {
+#ifdef ENABLE_ONNX_FRONTEND
+  mlir::PassManager pm(&context);
+
+  pm.addPass(mlir::hip::createConvertOnnxToHipPass());
+
+  // Bufferize tensor DPS → memref
+  mlir::bufferization::OneShotBufferizationOptions bufOpts;
+  bufOpts.bufferizeFunctionBoundaries = true;
+  pm.addPass(mlir::bufferization::createOneShotBufferizePass(bufOpts));
+
+  pm.addPass(mlir::hip::createLowerAllocsPass());
+
+  if (mlir::failed(pm.run(module))) {
+    std::cerr << "Error running frontend passes (ONNX → HIP)\n";
+    return false;
+  }
+  return true;
+#else
+  (void)module;
+  (void)context;
+  return true;
+#endif
+}
+
+// Backend passes: HIP → LLVM lowering.
+bool runBackendPasses(mlir::ModuleOp module, mlir::MLIRContext &context) {
   mlir::PassManager pm(&context);
   pm.addPass(mlir::hip::createConvertHipToLLVMPass());
   pm.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
@@ -142,14 +191,26 @@ bool runPasses(mlir::ModuleOp module, mlir::MLIRContext &context) {
   return mlir::succeeded(pm.run(module));
 }
 
+// Detect whether the module contains ONNX dialect ops.
+bool hasOnnxOps(mlir::ModuleOp module) {
+  bool found = false;
+  module.walk([&](mlir::Operation *op) {
+    if (op->getDialect() &&
+        op->getDialect()->getNamespace() == "onnx") {
+      found = true;
+      return mlir::WalkResult::interrupt();
+    }
+    return mlir::WalkResult::advance();
+  });
+  return found;
+}
+
 std::unique_ptr<llvm::Module> translateToLLVMIR(mlir::ModuleOp module,
                                                 llvm::LLVMContext &llvmCtx) {
   auto llvmModule = mlir::translateModuleToLLVMIR(module, llvmCtx);
   if (!llvmModule)
     return nullptr;
 
-  // Internal compute functions are not exported directly;
-  // only the interface wrappers (inference_init/compute/cleanup) get dllexport.
   for (auto &func : *llvmModule) {
     if (!func.isDeclaration())
       func.setDLLStorageClass(llvm::GlobalValue::DefaultStorageClass);
@@ -216,7 +277,6 @@ bool linkDll(const std::vector<std::string> &objFiles,
 
   std::string outArg = "/OUT:" + outputDll;
 
-  // Build link arg strings (keep alive for StringRef)
   std::vector<std::string> argStorage;
   argStorage.push_back(*linkerPath);
   argStorage.push_back("/NOLOGO");
@@ -225,7 +285,6 @@ bool linkDll(const std::vector<std::string> &objFiles,
   for (auto &obj : objFiles)
     argStorage.push_back(obj);
 
-  // Runtime lib
   if (!options.runtimeLibDir.empty()) {
     argStorage.push_back(options.runtimeLibDir + "/hip_runtime_static.lib");
     argStorage.push_back("/LIBPATH:" + options.runtimeLibDir);
@@ -269,19 +328,51 @@ std::optional<std::vector<uint8_t>> readFileBytes(const std::string &path) {
   return buffer;
 }
 
+// Parse an MLIR module from a SourceMgr, handling both text and bytecode.
+mlir::OwningOpRef<mlir::ModuleOp>
+parseModule(llvm::SourceMgr &sourceMgr, mlir::MLIRContext &context) {
+  auto bufRef = sourceMgr.getMemoryBuffer(1);
+  if (!bufRef)
+    return nullptr;
+
+  auto data = bufRef->getBuffer();
+  if (isMlirBytecode(data.str())) {
+    mlir::ParserConfig config(&context);
+    return mlir::readBytecodeFile(
+        llvm::MemoryBufferRef(data, bufRef->getBufferIdentifier()), config);
+  }
+
+  return mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, &context);
+}
+
 std::optional<CompileResult>
 compileModule(mlir::OwningOpRef<mlir::ModuleOp> &module,
               mlir::MLIRContext &context, const std::string &outputPath,
               const CompileOptions &options) {
-  // Extract metadata before lowering (func signatures still available)
+  // If input contains ONNX ops, run ONNX → HIP → bufferize frontend first
+  if (hasOnnxOps(module.get())) {
+#ifdef ENABLE_ONNX_FRONTEND
+    std::cout << "Detected ONNX dialect, running frontend passes...\n";
+    if (!runFrontendPasses(module.get(), context)) {
+      std::cerr << "Error running frontend passes\n";
+      return std::nullopt;
+    }
+#else
+    std::cerr << "Input contains ONNX ops but ENABLE_ONNX_FRONTEND is not "
+                 "enabled. Rebuild with -DONNX_MLIR_SRC=...\n";
+    return std::nullopt;
+#endif
+  }
+
+  // Extract metadata (func signatures now have memref types)
   auto metadata = extractMetadata(module.get());
   std::cout << "Entry function: " << metadata.entryFunction << "\n";
   std::cout << "Inputs: " << metadata.inputCount
             << ", Outputs: " << metadata.outputCount << "\n";
 
-  // Run MLIR passes (HIP -> LLVM)
-  if (!runPasses(module.get(), context)) {
-    std::cerr << "Error running MLIR passes\n";
+  // Run backend passes (HIP → LLVM)
+  if (!runBackendPasses(module.get(), context)) {
+    std::cerr << "Error running backend passes\n";
     return std::nullopt;
   }
 
@@ -334,6 +425,7 @@ HipCompiler::compileFile(const std::string &inputPath,
                          const std::string &outputPath,
                          const CompileOptions &options) {
   auto context = createContext();
+  context.allowUnregisteredDialects();
 
   std::string errorMessage;
   auto file = mlir::openInputFile(inputPath, &errorMessage);
@@ -345,8 +437,7 @@ HipCompiler::compileFile(const std::string &inputPath,
   llvm::SourceMgr sourceMgr;
   sourceMgr.AddNewSourceBuffer(std::move(file), llvm::SMLoc());
 
-  auto module =
-      mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, &context);
+  auto module = parseModule(sourceMgr, context);
   if (!module) {
     std::cerr << "Error parsing MLIR file\n";
     return std::nullopt;
@@ -356,19 +447,21 @@ HipCompiler::compileFile(const std::string &inputPath,
 }
 
 std::optional<CompileResult>
-HipCompiler::compile(const std::string &mlirText,
+HipCompiler::compile(const std::string &mlirData,
                      const std::string &outputPath,
                      const CompileOptions &options) {
   auto context = createContext();
+  context.allowUnregisteredDialects();
 
-  auto memBuffer = llvm::MemoryBuffer::getMemBuffer(mlirText, "input.mlir");
+  auto memBuffer =
+      llvm::MemoryBuffer::getMemBuffer(mlirData, "input.mlir",
+                                       /*RequiresNullTerminator=*/false);
   llvm::SourceMgr sourceMgr;
   sourceMgr.AddNewSourceBuffer(std::move(memBuffer), llvm::SMLoc());
 
-  auto module =
-      mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, &context);
+  auto module = parseModule(sourceMgr, context);
   if (!module) {
-    std::cerr << "Error parsing MLIR text\n";
+    std::cerr << "Error parsing MLIR input\n";
     return std::nullopt;
   }
 
