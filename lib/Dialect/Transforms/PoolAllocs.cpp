@@ -36,6 +36,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
 
 #include <list>
@@ -570,21 +571,20 @@ void PoolAllocsPass::runOnOperation() {
       Value alignedBucketSize =
           arith::MulIOp::create(builder, loc, divided, alignConst2);
 
-      for (int64_t binIdx = 0;
-           binIdx < static_cast<int64_t>(bucket.bins.size()); ++binIdx) {
+      for (auto [binIdx, bin] : llvm::enumerate(bucket.bins)) {
         // offset = currentBase + binIdx * alignedBucketSize
         Value binOffset;
         if (binIdx == 0) {
           binOffset = currentBase;
         } else {
-          Value binIdxVal =
-              arith::ConstantIndexOp::create(builder, loc, binIdx);
+          Value binIdxVal = arith::ConstantIndexOp::create(
+              builder, loc, static_cast<int64_t>(binIdx));
           Value binContrib =
               arith::MulIOp::create(builder, loc, alignedBucketSize, binIdxVal);
           binOffset =
               arith::AddIOp::create(builder, loc, currentBase, binContrib);
         }
-        for (AllocInfo *info : bucket.bins[binIdx])
+        for (AllocInfo *info : bin)
           allocToOffset[info->allocOp.getOperation()] = binOffset;
       }
 
