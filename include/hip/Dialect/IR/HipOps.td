@@ -22,6 +22,19 @@ class Hip_Op<string mnemonic, list<Trait> traits = []> :
 // level (post-bufferization).
 def Hip_TensorOrMemRef : AnyTypeOf<[AnyRankedTensor, AnyMemRef]>;
 
+// Base class for all HIP destination-passing-style (DPS) compute ops.
+// Provides MemoryEffectsOpInterface, DestinationStyleOpInterface, and the
+// Variadic<AnyRankedTensor>:$result_tensors result (non-empty only at the
+// tensor level; empty after bufferization).
+class Hip_DpsOp<string mnemonic, list<Trait> traits = []> :
+    Hip_Op<mnemonic, !listconcat([
+      DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+      DeclareOpInterfaceMethods<DestinationStyleOpInterface,
+                                ["getDpsInitsMutable"]>
+    ], traits)> {
+  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
+}
+
 def Hip_GetPoolOp : Hip_Op<"get_pool", [
   DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
 ]> {
@@ -53,10 +66,7 @@ def Hip_GetPoolOp : Hip_Op<"get_pool", [
 // MIOpen DNN Operations
 //===----------------------------------------------------------------------===//
 
-def Hip_ConvOp : Hip_Op<"conv", [
-  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-  DeclareOpInterfaceMethods<DestinationStyleOpInterface, ["getDpsInitsMutable"]>
-]> {
+def Hip_ConvOp : Hip_DpsOp<"conv"> {
   let summary = "2D convolution operation using MIOpen (in-place)";
   let description = [{
     Performs 2D convolution using MIOpen (miopenConvolutionForward).
@@ -73,13 +83,12 @@ def Hip_ConvOp : Hip_Op<"conv", [
 
     Example:
     ```mlir
-    %output = hip.alloc(%handle) : memref<1x64x112x112xf32, 1>
-    hip.conv(%handle, %input, %weights, %bias, %output)
-             {kernel_shape = [3, 3], strides = [1, 1],
-              pads = [1, 1, 1, 1], dilations = [1, 1], group = 1}
-             : (!hip.context, memref<1x3x224x224xf32, 1>,
-                memref<64x3x3x3xf32, 1>, memref<64xf32, 1>,
-                memref<1x64x112x112xf32, 1>)
+    hip.conv(%handle) ins(%input, %weights, %bias : memref<1x3x224x224xf32, 1>,
+                                                    memref<64x3x3x3xf32, 1>,
+                                                    memref<64xf32, 1>)
+                      outs(%output : memref<1x64x112x112xf32, 1>)
+                      {kernel_shape = [3, 3], strides = [1, 1],
+                       pads = [1, 1, 1, 1], dilations = [1, 1], group = 1}
     ```
   }];
 
@@ -95,19 +104,16 @@ def Hip_ConvOp : Hip_Op<"conv", [
     I64ArrayAttr:$dilations,
     I64Attr:$group
   );
-  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 
   let assemblyFormat = [{
-    `(` $handle `,` $input `,` $weights (`,` $bias^)? `,` $output `)` attr-dict
-    `:` `(` type($handle) `,` type($input) `,` type($weights) (`,` type($bias)^)? `,` type($output) `)`
-    (`:` type($result_tensors)^)?
+    `(` $handle `)` `ins` `(` $input `,` $weights (`,` $bias^)? `:`
+    type($input) `,` type($weights) (`,` type($bias)^)? `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
   }];
 }
 
-def Hip_GemmOp : Hip_Op<"gemm", [
-  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-  DeclareOpInterfaceMethods<DestinationStyleOpInterface, ["getDpsInitsMutable"]>
-]> {
+def Hip_GemmOp : Hip_DpsOp<"gemm"> {
   let summary = "General matrix multiplication using hipBLASLt (in-place)";
   let description = [{
     Performs matrix multiplication: result = alpha * A * B + beta * C
@@ -123,10 +129,11 @@ def Hip_GemmOp : Hip_Op<"gemm", [
 
     Example:
     ```mlir
-    %result = hip.alloc(%handle) : memref<MxNxf32, 1>
-    hip.gemm(%handle, %A, %B, %C, %result)
-            {transA = 0, transB = 0, alpha = 1.0, beta = 1.0}
-            : (!hip.context, memref<MxKxf32, 1>, memref<KxNxf32, 1>, memref<MxNxf32, 1>, memref<MxNxf32, 1>)
+    hip.gemm(%handle) ins(%A, %B, %C : memref<MxKxf32, 1>,
+                                       memref<KxNxf32, 1>,
+                                       memref<MxNxf32, 1>)
+                      outs(%output : memref<MxNxf32, 1>)
+                      {transA = 0, transB = 0, alpha = 1.0, beta = 1.0}
     ```
   }];
 
@@ -135,25 +142,21 @@ def Hip_GemmOp : Hip_Op<"gemm", [
     Hip_TensorOrMemRef:$A,
     Hip_TensorOrMemRef:$B,
     Hip_TensorOrMemRef:$C,
-    Hip_TensorOrMemRef:$result,
+    Hip_TensorOrMemRef:$output,
     I64Attr:$transA,
     I64Attr:$transB,
     F32Attr:$alpha,
     F32Attr:$beta
   );
-  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 
   let assemblyFormat = [{
-    `(` $handle `,` $A `,` $B `,` $C `,` $result `)` attr-dict
-    `:` `(` type($handle) `,` type($A) `,` type($B) `,` type($C) `,` type($result) `)`
-    (`:` type($result_tensors)^)?
+    `(` $handle `)` `ins` `(` $A `,` $B `,` $C `:` type($A) `,` type($B) `,` type($C) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
   }];
 }
 
-def Hip_MaxPoolOp : Hip_Op<"maxpool", [
-  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-  DeclareOpInterfaceMethods<DestinationStyleOpInterface, ["getDpsInitsMutable"]>
-]> {
+def Hip_MaxPoolOp : Hip_DpsOp<"maxpool"> {
   let summary = "Max pooling operation using MIOpen (in-place)";
   let description = [{
     Performs max pooling using MIOpen (miopenPoolingForward with max mode).
@@ -167,10 +170,9 @@ def Hip_MaxPoolOp : Hip_Op<"maxpool", [
 
     Example:
     ```mlir
-    %output = hip.alloc(%handle) : memref<1x64x56x56xf32, 1>
-    hip.maxpool(%handle, %input, %output)
-               {kernel_shape = [2, 2], strides = [2, 2], pads = [0, 0, 0, 0]}
-               : (!hip.context, memref<1x64x112x112xf32, 1>, memref<1x64x56x56xf32, 1>)
+    hip.maxpool(%handle) ins(%input : memref<1x64x112x112xf32, 1>)
+                         outs(%output : memref<1x64x56x56xf32, 1>)
+                         {kernel_shape = [2, 2], strides = [2, 2], pads = [0, 0, 0, 0]}
     ```
   }];
 
@@ -182,19 +184,15 @@ def Hip_MaxPoolOp : Hip_Op<"maxpool", [
     I64ArrayAttr:$strides,
     I64ArrayAttr:$pads
   );
-  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 
   let assemblyFormat = [{
-    `(` $handle `,` $input `,` $output `)` attr-dict
-    `:` `(` type($handle) `,` type($input) `,` type($output) `)`
-    (`:` type($result_tensors)^)?
+    `(` $handle `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
   }];
 }
 
-def Hip_AvgPoolOp : Hip_Op<"avgpool", [
-  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-  DeclareOpInterfaceMethods<DestinationStyleOpInterface, ["getDpsInitsMutable"]>
-]> {
+def Hip_AvgPoolOp : Hip_DpsOp<"avgpool"> {
   let summary = "Average pooling operation using MIOpen (in-place)";
   let description = [{
     Performs average pooling using MIOpen (miopenPoolingForward with average mode).
@@ -208,10 +206,9 @@ def Hip_AvgPoolOp : Hip_Op<"avgpool", [
 
     Example:
     ```mlir
-    %output = hip.alloc(%handle) : memref<1x64x56x56xf32, 1>
-    hip.avgpool(%handle, %input, %output)
-               {kernel_shape = [2, 2], strides = [2, 2], pads = [0, 0, 0, 0]}
-               : (!hip.context, memref<1x64x112x112xf32, 1>, memref<1x64x56x56xf32, 1>)
+    hip.avgpool(%handle) ins(%input : memref<1x64x112x112xf32, 1>)
+                         outs(%output : memref<1x64x56x56xf32, 1>)
+                         {kernel_shape = [2, 2], strides = [2, 2], pads = [0, 0, 0, 0]}
     ```
   }];
 
@@ -223,12 +220,11 @@ def Hip_AvgPoolOp : Hip_Op<"avgpool", [
     I64ArrayAttr:$strides,
     I64ArrayAttr:$pads
   );
-  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 
   let assemblyFormat = [{
-    `(` $handle `,` $input `,` $output `)` attr-dict
-    `:` `(` type($handle) `,` type($input) `,` type($output) `)`
-    (`:` type($result_tensors)^)?
+    `(` $handle `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
   }];
 }
 
@@ -236,10 +232,7 @@ def Hip_AvgPoolOp : Hip_Op<"avgpool", [
 // Activation Operations
 //===----------------------------------------------------------------------===//
 
-def Hip_ReluOp : Hip_Op<"relu", [
-  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-  DeclareOpInterfaceMethods<DestinationStyleOpInterface, ["getDpsInitsMutable"]>
-]> {
+def Hip_ReluOp : Hip_DpsOp<"relu"> {
   let summary = "ReLU activation";
   let description = [{
     Applies ReLU activation: output = max(0, input)
@@ -249,9 +242,8 @@ def Hip_ReluOp : Hip_Op<"relu", [
 
     Example:
     ```mlir
-    %output = hip.alloc(%handle) : memref<1x64x224x224xf32, 1>
-    hip.relu(%handle, %input, %output)
-      : (!hip.context, memref<1x64x224x224xf32, 1>, memref<1x64x224x224xf32, 1>)
+    hip.relu(%handle) ins(%input : memref<1x64x224x224xf32, 1>)
+                      outs(%output : memref<1x64x224x224xf32, 1>)
     ```
   }];
 
@@ -260,19 +252,15 @@ def Hip_ReluOp : Hip_Op<"relu", [
     Hip_TensorOrMemRef:$input,
     Hip_TensorOrMemRef:$output
   );
-  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 
   let assemblyFormat = [{
-    `(` $handle `,` $input `,` $output `)` attr-dict
-    `:` `(` type($handle) `,` type($input) `,` type($output) `)`
-    (`:` type($result_tensors)^)?
+    `(` $handle `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
   }];
 }
 
-def Hip_CastOp : Hip_Op<"cast", [
-  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-  DeclareOpInterfaceMethods<DestinationStyleOpInterface, ["getDpsInitsMutable"]>
-]> {
+def Hip_CastOp : Hip_DpsOp<"cast"> {
   let summary = "Element type cast";
   let description = [{
     Casts tensor elements from one data type to another.
@@ -282,9 +270,8 @@ def Hip_CastOp : Hip_Op<"cast", [
 
     Example:
     ```mlir
-    %output = hip.alloc(%handle) : memref<i32, 1>
-    hip.cast(%handle, %input, %output) {to = 6 : i64}
-      : (!hip.context, memref<i64, 1>, memref<i32, 1>)
+    hip.cast(%handle) ins(%input : memref<i64, 1>)
+                      outs(%output : memref<i32, 1>) {to = 6 : i64}
     ```
   }];
 
@@ -294,12 +281,11 @@ def Hip_CastOp : Hip_Op<"cast", [
     Hip_TensorOrMemRef:$output,
     I64Attr:$to
   );
-  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 
   let assemblyFormat = [{
-    `(` $handle `,` $input `,` $output `)` attr-dict
-    `:` `(` type($handle) `,` type($input) `,` type($output) `)`
-    (`:` type($result_tensors)^)?
+    `(` $handle `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
   }];
 }
 
@@ -345,10 +331,7 @@ def Hip_GetConstantOp : Hip_Op<"get_constant", [
 // MatMul Operation
 //===----------------------------------------------------------------------===//
 
-def Hip_MatMulOp : Hip_Op<"matmul", [
-  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-  DeclareOpInterfaceMethods<DestinationStyleOpInterface, ["getDpsInitsMutable"]>
-]> {
+def Hip_MatMulOp : Hip_DpsOp<"matmul"> {
   let summary = "Matrix multiplication (supports batched N-D x N-D)";
   let description = [{
     Performs matrix multiplication: output = A @ B
@@ -361,18 +344,16 @@ def Hip_MatMulOp : Hip_Op<"matmul", [
 
     Example (2D):
     ```mlir
-    %result = hip.alloc(%handle) : memref<128x1024xf32, 1>
-    hip.matmul(%handle, %A, %B, %result)
-      : (!hip.context, memref<128x4096xf32, 1>,
-         memref<4096x1024xf32, 1>, memref<128x1024xf32, 1>)
+    hip.matmul(%handle) ins(%A, %B : memref<128x4096xf32, 1>,
+                                     memref<4096x1024xf32, 1>)
+                        outs(%output : memref<128x1024xf32, 1>)
     ```
 
     Example (3D batched):
     ```mlir
-    %result = hip.alloc(%handle) : memref<1x128x1024xf16, 1>
-    hip.matmul(%handle, %A, %B, %result)
-      : (!hip.context, memref<1x128x4096xf16, 1>,
-         memref<4096x1024xf16, 1>, memref<1x128x1024xf16, 1>)
+    hip.matmul(%handle) ins(%A, %B : memref<1x128x4096xf16, 1>,
+                                     memref<4096x1024xf16, 1>)
+                        outs(%output : memref<1x128x1024xf16, 1>)
     ```
   }];
 
@@ -380,14 +361,13 @@ def Hip_MatMulOp : Hip_Op<"matmul", [
     Hip_ContextType:$handle,
     Hip_TensorOrMemRef:$A,
     Hip_TensorOrMemRef:$B,
-    Hip_TensorOrMemRef:$result
+    Hip_TensorOrMemRef:$output
   );
-  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 
   let assemblyFormat = [{
-    `(` $handle `,` $A `,` $B `,` $result `)` attr-dict
-    `:` `(` type($handle) `,` type($A) `,` type($B) `,` type($result) `)`
-    (`:` type($result_tensors)^)?
+    `(` $handle `)` `ins` `(` $A `,` $B `:` type($A) `,` type($B) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
   }];
 }
 
@@ -395,10 +375,7 @@ def Hip_MatMulOp : Hip_Op<"matmul", [
 // Attention Operations
 //===----------------------------------------------------------------------===//
 
-def Hip_GroupQueryAttentionOp : Hip_Op<"group_query_attention", [
-  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-  DeclareOpInterfaceMethods<DestinationStyleOpInterface, ["getDpsInitsMutable"]>
-]> {
+def Hip_GroupQueryAttentionOp : Hip_DpsOp<"group_query_attention"> {
   let summary = "Group Query Attention (com.microsoft GQA)";
   let description = [{
     Multi-head attention with grouped key/value heads (GQA/MQA).
@@ -408,6 +385,10 @@ def Hip_GroupQueryAttentionOp : Hip_Op<"group_query_attention", [
     dot-product attention with grouped heads.
 
     Uses destination-passing style: output buffers are provided as arguments.
+
+    Operand layout (for getDpsInitsMutable): operands 0..7 are inputs
+    (handle, query, key, value, past_key, past_value, seqlens_k, total_seq_len);
+    operands 8..10 are DPS inits (output, present_key, present_value).
 
     Attributes:
     - num_heads: Number of query attention heads
@@ -419,12 +400,12 @@ def Hip_GroupQueryAttentionOp : Hip_Op<"group_query_attention", [
 
     Example:
     ```mlir
-    hip.group_query_attention(%ctx, %query, %key, %value,
-        %past_key, %past_value, %seqlens_k, %total_seq_len,
-        %output, %present_key, %present_value)
+    hip.group_query_attention(%ctx)
+        ins(%query, %key, %value, %past_key, %past_value, %seqlens_k, %total_seq_len :
+            memref<1x1x4096xf16, 1>, ...)
+        outs(%output, %present_key, %present_value : ...)
         {num_heads = 32, kv_num_heads = 8, scale = 0.0884,
          softcap = 0.0, do_rotary = 0, rotary_interleaved = 0}
-        : (!hip.context, memref<1x1x4096xf16, 1>, ...)
     ```
   }];
 
@@ -447,16 +428,17 @@ def Hip_GroupQueryAttentionOp : Hip_Op<"group_query_attention", [
     I64Attr:$do_rotary,
     I64Attr:$rotary_interleaved
   );
-  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 
   let assemblyFormat = [{
-    `(` $handle `,` $query `,` $key `,` $value `,`
-        $past_key `,` $past_value `,` $seqlens_k `,` $total_seq_len `,`
-        $output `,` $present_key `,` $present_value `)` attr-dict
-    `:` `(` type($handle) `,` type($query) `,` type($key) `,` type($value) `,`
-            type($past_key) `,` type($past_value) `,` type($seqlens_k) `,` type($total_seq_len) `,`
-            type($output) `,` type($present_key) `,` type($present_value) `)`
-    (`:` type($result_tensors)^)?
+    `(` $handle `)` `ins` `(`
+        $query `,` $key `,` $value `,`
+        $past_key `,` $past_value `,` $seqlens_k `,` $total_seq_len `:`
+        type($query) `,` type($key) `,` type($value) `,`
+        type($past_key) `,` type($past_value) `,` type($seqlens_k) `,` type($total_seq_len)
+    `)`
+    `outs` `(` $output `,` $present_key `,` $present_value `:`
+              type($output) `,` type($present_key) `,` type($present_value) `)`
+    attr-dict (`:` type($result_tensors)^)?
   }];
 }
 
@@ -464,10 +446,7 @@ def Hip_GroupQueryAttentionOp : Hip_Op<"group_query_attention", [
 // Elementwise Operations
 //===----------------------------------------------------------------------===//
 
-def Hip_MulOp : Hip_Op<"mul", [
-  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-  DeclareOpInterfaceMethods<DestinationStyleOpInterface, ["getDpsInitsMutable"]>
-]> {
+def Hip_MulOp : Hip_DpsOp<"mul"> {
   let summary = "Elementwise multiplication";
   let description = [{
     Performs elementwise multiplication: output = lhs * rhs
@@ -477,10 +456,9 @@ def Hip_MulOp : Hip_Op<"mul", [
 
     Example:
     ```mlir
-    %output = hip.alloc(%handle) : memref<1x128x14336xf16, 1>
-    hip.mul(%handle, %lhs, %rhs, %output)
-      : (!hip.context, memref<1x128x14336xf16, 1>, memref<1x128x14336xf16, 1>,
-         memref<1x128x14336xf16, 1>)
+    hip.mul(%handle) ins(%lhs, %rhs : memref<1x128x14336xf16, 1>,
+                                      memref<1x128x14336xf16, 1>)
+                     outs(%output : memref<1x128x14336xf16, 1>)
     ```
   }];
 
@@ -490,19 +468,15 @@ def Hip_MulOp : Hip_Op<"mul", [
     Hip_TensorOrMemRef:$rhs,
     Hip_TensorOrMemRef:$output
   );
-  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 
   let assemblyFormat = [{
-    `(` $handle `,` $lhs `,` $rhs `,` $output `)` attr-dict
-    `:` `(` type($handle) `,` type($lhs) `,` type($rhs) `,` type($output) `)`
-    (`:` type($result_tensors)^)?
+    `(` $handle `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
   }];
 }
 
-def Hip_SubOp : Hip_Op<"sub", [
-  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-  DeclareOpInterfaceMethods<DestinationStyleOpInterface, ["getDpsInitsMutable"]>
-]> {
+def Hip_SubOp : Hip_DpsOp<"sub"> {
   let summary = "Elementwise subtraction";
   let description = [{
     Performs elementwise subtraction: output = lhs - rhs
@@ -512,10 +486,8 @@ def Hip_SubOp : Hip_Op<"sub", [
 
     Example:
     ```mlir
-    %output = hip.alloc(%handle) : memref<1x1xi64, 1>
-    hip.sub(%handle, %lhs, %rhs, %output)
-      : (!hip.context, memref<1x1xi64, 1>, memref<1x1xi64, 1>,
-         memref<1x1xi64, 1>)
+    hip.sub(%handle) ins(%lhs, %rhs : memref<1x1xi64, 1>, memref<1x1xi64, 1>)
+                     outs(%output : memref<1x1xi64, 1>)
     ```
   }];
 
@@ -525,19 +497,15 @@ def Hip_SubOp : Hip_Op<"sub", [
     Hip_TensorOrMemRef:$rhs,
     Hip_TensorOrMemRef:$output
   );
-  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 
   let assemblyFormat = [{
-    `(` $handle `,` $lhs `,` $rhs `,` $output `)` attr-dict
-    `:` `(` type($handle) `,` type($lhs) `,` type($rhs) `,` type($output) `)`
-    (`:` type($result_tensors)^)?
+    `(` $handle `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
   }];
 }
 
-def Hip_SigmoidOp : Hip_Op<"sigmoid", [
-  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-  DeclareOpInterfaceMethods<DestinationStyleOpInterface, ["getDpsInitsMutable"]>
-]> {
+def Hip_SigmoidOp : Hip_DpsOp<"sigmoid"> {
   let summary = "Sigmoid activation";
   let description = [{
     Applies sigmoid activation: output = 1 / (1 + exp(-input))
@@ -546,9 +514,8 @@ def Hip_SigmoidOp : Hip_Op<"sigmoid", [
 
     Example:
     ```mlir
-    %output = hip.alloc(%handle) : memref<1x128x14336xf16, 1>
-    hip.sigmoid(%handle, %input, %output)
-      : (!hip.context, memref<1x128x14336xf16, 1>, memref<1x128x14336xf16, 1>)
+    hip.sigmoid(%handle) ins(%input : memref<1x128x14336xf16, 1>)
+                         outs(%output : memref<1x128x14336xf16, 1>)
     ```
   }];
 
@@ -557,12 +524,11 @@ def Hip_SigmoidOp : Hip_Op<"sigmoid", [
     Hip_TensorOrMemRef:$input,
     Hip_TensorOrMemRef:$output
   );
-  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 
   let assemblyFormat = [{
-    `(` $handle `,` $input `,` $output `)` attr-dict
-    `:` `(` type($handle) `,` type($input) `,` type($output) `)`
-    (`:` type($result_tensors)^)?
+    `(` $handle `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
   }];
 }
 
@@ -570,10 +536,7 @@ def Hip_SigmoidOp : Hip_Op<"sigmoid", [
 // Data Movement Operations
 //===----------------------------------------------------------------------===//
 
-def Hip_GatherOp : Hip_Op<"gather", [
-  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-  DeclareOpInterfaceMethods<DestinationStyleOpInterface, ["getDpsInitsMutable"]>
-]> {
+def Hip_GatherOp : Hip_DpsOp<"gather"> {
   let summary = "Gather elements along an axis";
   let description = [{
     Gathers elements from data along the given axis using indices.
@@ -583,9 +546,8 @@ def Hip_GatherOp : Hip_Op<"gather", [
 
     Example:
     ```mlir
-    %output = hip.alloc(%handle) : memref<i64, 1>
-    hip.gather(%handle, %data, %indices, %output) {axis = 0 : i64}
-      : (!hip.context, memref<2xi64, 1>, memref<i64, 1>, memref<i64, 1>)
+    hip.gather(%handle) ins(%data, %indices : memref<2xi64, 1>, memref<i64, 1>)
+                        outs(%output : memref<i64, 1>) {axis = 0 : i64}
     ```
   }];
 
@@ -596,12 +558,11 @@ def Hip_GatherOp : Hip_Op<"gather", [
     Hip_TensorOrMemRef:$output,
     I64Attr:$axis
   );
-  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 
   let assemblyFormat = [{
-    `(` $handle `,` $data `,` $indices `,` $output `)` attr-dict
-    `:` `(` type($handle) `,` type($data) `,` type($indices) `,` type($output) `)`
-    (`:` type($result_tensors)^)?
+    `(` $handle `)` `ins` `(` $data `,` $indices `:` type($data) `,` type($indices) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
   }];
 }
 
@@ -609,10 +570,7 @@ def Hip_GatherOp : Hip_Op<"gather", [
 // Reduction Operations
 //===----------------------------------------------------------------------===//
 
-def Hip_ReduceSumOp : Hip_Op<"reduce_sum", [
-  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-  DeclareOpInterfaceMethods<DestinationStyleOpInterface, ["getDpsInitsMutable"]>
-]> {
+def Hip_ReduceSumOp : Hip_DpsOp<"reduce_sum"> {
   let summary = "Reduce tensor by summing along axes";
   let description = [{
     Computes the sum of input tensor elements along the specified axes.
@@ -622,9 +580,8 @@ def Hip_ReduceSumOp : Hip_Op<"reduce_sum", [
 
     Example:
     ```mlir
-    %output = hip.alloc(%handle) : memref<1x1xi64, 1>
-    hip.reduce_sum(%handle, %data, %axes, %output) {keepdims = 1 : i64}
-      : (!hip.context, memref<1x128xi64, 1>, memref<i64, 1>, memref<1x1xi64, 1>)
+    hip.reduce_sum(%handle) ins(%data, %axes : memref<1x128xi64, 1>, memref<i64, 1>)
+                            outs(%output : memref<1x1xi64, 1>) {keepdims = 1 : i64}
     ```
   }];
 
@@ -635,19 +592,15 @@ def Hip_ReduceSumOp : Hip_Op<"reduce_sum", [
     Hip_TensorOrMemRef:$output,
     I64Attr:$keepdims
   );
-  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 
   let assemblyFormat = [{
-    `(` $handle `,` $data `,` $axes `,` $output `)` attr-dict
-    `:` `(` type($handle) `,` type($data) `,` type($axes) `,` type($output) `)`
-    (`:` type($result_tensors)^)?
+    `(` $handle `)` `ins` `(` $data `,` $axes `:` type($data) `,` type($axes) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
   }];
 }
 
-def Hip_RotaryEmbeddingOp : Hip_Op<"rotary_embedding", [
-  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-  DeclareOpInterfaceMethods<DestinationStyleOpInterface, ["getDpsInitsMutable"]>
-]> {
+def Hip_RotaryEmbeddingOp : Hip_DpsOp<"rotary_embedding"> {
   let summary = "Rotary position embedding (RoPE)";
   let description = [{
     Applies rotary position embedding to the input tensor.
@@ -657,11 +610,12 @@ def Hip_RotaryEmbeddingOp : Hip_Op<"rotary_embedding", [
 
     Example:
     ```mlir
-    %output = hip.alloc(%handle) : memref<1x128x4096xf16, 1>
-    hip.rotary_embedding(%handle, %input, %position_ids, %cos_cache, %sin_cache, %output)
+    hip.rotary_embedding(%handle)
+        ins(%input, %position_ids, %cos_cache, %sin_cache :
+            memref<1x128x4096xf16, 1>, memref<1x128xi64, 1>,
+            memref<131072x64xf16, 1>, memref<131072x64xf16, 1>)
+        outs(%output : memref<1x128x4096xf16, 1>)
         {interleaved = 0 : i64, num_heads = 0 : i64, rotary_embedding_dim = 0 : i64}
-      : (!hip.context, memref<1x128x4096xf16, 1>, memref<1x128xi64, 1>,
-         memref<131072x64xf16, 1>, memref<131072x64xf16, 1>, memref<1x128x4096xf16, 1>)
     ```
   }];
 
@@ -676,20 +630,18 @@ def Hip_RotaryEmbeddingOp : Hip_Op<"rotary_embedding", [
     I64Attr:$num_heads,
     I64Attr:$rotary_embedding_dim
   );
-  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 
   let assemblyFormat = [{
-    `(` $handle `,` $input `,` $position_ids `,` $cos_cache `,` $sin_cache `,` $output `)` attr-dict
-    `:` `(` type($handle) `,` type($input) `,` type($position_ids) `,`
-         type($cos_cache) `,` type($sin_cache) `,` type($output) `)`
-    (`:` type($result_tensors)^)?
+    `(` $handle `)` `ins` `(`
+        $input `,` $position_ids `,` $cos_cache `,` $sin_cache `:`
+        type($input) `,` type($position_ids) `,` type($cos_cache) `,` type($sin_cache)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
   }];
 }
 
-def Hip_SimplifiedLayerNormOp : Hip_Op<"simplified_layer_norm", [
-  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-  DeclareOpInterfaceMethods<DestinationStyleOpInterface, ["getDpsInitsMutable"]>
-]> {
+def Hip_SimplifiedLayerNormOp : Hip_DpsOp<"simplified_layer_norm"> {
   let summary = "Simplified layer normalization";
   let description = [{
     Applies simplified (RMS) layer normalization.
@@ -699,11 +651,10 @@ def Hip_SimplifiedLayerNormOp : Hip_Op<"simplified_layer_norm", [
 
     Example:
     ```mlir
-    %output = hip.alloc(%handle) : memref<1x128x4096xf16, 1>
-    hip.simplified_layer_norm(%handle, %input, %scale, %output)
+    hip.simplified_layer_norm(%handle)
+        ins(%input, %scale : memref<1x128x4096xf16, 1>, memref<4096xf16, 1>)
+        outs(%output : memref<1x128x4096xf16, 1>)
         {axis = -1 : i64, epsilon = 9.99999974e-06 : f32, stash_type = 1 : i64}
-      : (!hip.context, memref<1x128x4096xf16, 1>, memref<4096xf16, 1>,
-         memref<1x128x4096xf16, 1>)
     ```
   }];
 
@@ -716,19 +667,15 @@ def Hip_SimplifiedLayerNormOp : Hip_Op<"simplified_layer_norm", [
     F32Attr:$epsilon,
     I64Attr:$stash_type
   );
-  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 
   let assemblyFormat = [{
-    `(` $handle `,` $input `,` $scale `,` $output `)` attr-dict
-    `:` `(` type($handle) `,` type($input) `,` type($scale) `,` type($output) `)`
-    (`:` type($result_tensors)^)?
+    `(` $handle `)` `ins` `(` $input `,` $scale `:` type($input) `,` type($scale) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
   }];
 }
 
-def Hip_SkipSimplifiedLayerNormOp : Hip_Op<"skip_simplified_layer_norm", [
-  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
-  DeclareOpInterfaceMethods<DestinationStyleOpInterface, ["getDpsInitsMutable"]>
-]> {
+def Hip_SkipSimplifiedLayerNormOp : Hip_DpsOp<"skip_simplified_layer_norm"> {
   let summary = "Skip connection + simplified layer normalization";
   let description = [{
     Adds a skip connection then applies simplified layer normalization.
@@ -738,14 +685,18 @@ def Hip_SkipSimplifiedLayerNormOp : Hip_Op<"skip_simplified_layer_norm", [
 
     Uses destination-passing style: output buffers are provided as arguments.
 
+    Operand layout (for getDpsInitsMutable): operands 0..3 are inputs
+    (handle, input, skip, gamma); operands 4..5 are DPS inits (output, skip_output).
+
     Example:
     ```mlir
-    %output = hip.alloc(%handle) : memref<1x128x4096xf16, 1>
-    %skip_output = hip.alloc(%handle) : memref<1x128x4096xf16, 1>
-    hip.skip_simplified_layer_norm(%handle, %input, %skip, %gamma, %output, %skip_output)
+    hip.skip_simplified_layer_norm(%handle)
+        ins(%input, %skip, %gamma : memref<1x128x4096xf16, 1>,
+                                    memref<1x128x4096xf16, 1>,
+                                    memref<4096xf16, 1>)
+        outs(%output, %skip_output : memref<1x128x4096xf16, 1>,
+                                     memref<1x128x4096xf16, 1>)
         {epsilon = 9.99999974e-06 : f32}
-      : (!hip.context, memref<1x128x4096xf16, 1>, memref<1x128x4096xf16, 1>,
-         memref<4096xf16, 1>, memref<1x128x4096xf16, 1>, memref<1x128x4096xf16, 1>)
     ```
   }];
 
@@ -758,13 +709,12 @@ def Hip_SkipSimplifiedLayerNormOp : Hip_Op<"skip_simplified_layer_norm", [
     Hip_TensorOrMemRef:$skip_output,
     F32Attr:$epsilon
   );
-  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 
   let assemblyFormat = [{
-    `(` $handle `,` $input `,` $skip `,` $gamma `,` $output `,` $skip_output `)` attr-dict
-    `:` `(` type($handle) `,` type($input) `,` type($skip) `,`
-         type($gamma) `,` type($output) `,` type($skip_output) `)`
-    (`:` type($result_tensors)^)?
+    `(` $handle `)` `ins` `(` $input `,` $skip `,` $gamma `:`
+                              type($input) `,` type($skip) `,` type($gamma) `)`
+    `outs` `(` $output `,` $skip_output `:` type($output) `,` type($skip_output) `)`
+    attr-dict (`:` type($result_tensors)^)?
   }];
 }
 

@@ -198,7 +198,7 @@ MutableOperandRange mlir::hip::ReluOp::getDpsInitsMutable() {
 }
 
 MutableOperandRange mlir::hip::GemmOp::getDpsInitsMutable() {
-  return getResultMutable();
+  return getOutputMutable();
 }
 
 MutableOperandRange mlir::hip::MaxPoolOp::getDpsInitsMutable() {
@@ -210,7 +210,7 @@ MutableOperandRange mlir::hip::AvgPoolOp::getDpsInitsMutable() {
 }
 
 MutableOperandRange mlir::hip::MatMulOp::getDpsInitsMutable() {
-  return getResultMutable();
+  return getOutputMutable();
 }
 
 MutableOperandRange mlir::hip::GroupQueryAttentionOp::getDpsInitsMutable() {

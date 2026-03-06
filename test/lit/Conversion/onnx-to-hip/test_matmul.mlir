@@ -27,7 +27,7 @@ module {
 
     // After conversion: tensor.empty() for init, hip.matmul in tensor mode
     // CHECK: tensor.empty() : tensor<1x128x1024xf16>
-    // CHECK: hip.matmul(%[[CTX]], %[[INPUT]], %[[WEIGHT]], {{.*}})
+    // CHECK: hip.matmul(%[[CTX]]) ins(%[[INPUT]], %[[WEIGHT]] : tensor<1x128x4096xf16>, tensor<4096x1024xf16>) outs({{.*}} : tensor<1x128x1024xf16>)
     // CHECK-NOT: hip.alloc
     // CHECK-NOT: hip.copy
 

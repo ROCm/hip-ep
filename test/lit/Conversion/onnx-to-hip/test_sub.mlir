@@ -29,7 +29,7 @@ module {
 
     // After conversion: tensor.empty() for init, hip.sub in tensor mode
     // CHECK: tensor.empty() : tensor<1x1xi64>
-    // CHECK: hip.sub(%[[CTX]], %[[LHS]], %[[RHS]], {{.*}})
+    // CHECK: hip.sub(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<1x1xi64>, tensor<1x1xi64>) outs({{.*}} : tensor<1x1xi64>)
     // CHECK-NOT: hip.alloc
     // CHECK-NOT: hip.copy
 

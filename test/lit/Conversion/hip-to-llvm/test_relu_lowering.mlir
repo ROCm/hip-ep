@@ -21,7 +21,8 @@ module {
                                 %input: memref<1x64x224x224xf32, 1>,
                                 %output: memref<1x64x224x224xf32, 1>) {
     // HIP ReLU operation
-    hip.relu(%ctx, %input, %output) : (!hip.context, memref<1x64x224x224xf32, 1>, memref<1x64x224x224xf32, 1>)
+    hip.relu(%ctx) ins(%input : memref<1x64x224x224xf32, 1>)
+                   outs(%output : memref<1x64x224x224xf32, 1>)
 
     // After lowering to LLVM: Runtime wrapper should have MemRef-agnostic signature
     // Function declaration appears before function definition in module

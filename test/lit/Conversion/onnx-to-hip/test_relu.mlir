@@ -29,7 +29,7 @@ module {
 
     // After conversion: tensor.empty() for init, hip.relu in tensor mode, return result
     // CHECK: tensor.empty() : tensor<1x64x224x224xf32>
-    // CHECK: hip.relu(%[[CTX]], %[[INPUT]], {{.*}})
+    // CHECK: hip.relu(%[[CTX]]) ins(%[[INPUT]] : tensor<1x64x224x224xf32>) outs({{.*}} : tensor<1x64x224x224xf32>)
     // CHECK-NOT: hip.alloc
     // CHECK-NOT: hip.copy
 
