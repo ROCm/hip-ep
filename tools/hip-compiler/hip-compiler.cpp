@@ -35,22 +35,25 @@
 #include "hip/Dialect/IR/HipBufferize.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
+#include "hip/Dialect/Transforms/Pipelines.h"
 
-#include <iostream>
+#include "llvm/Support/Process.h"
+#include "llvm/Support/raw_ostream.h"
 
 int main(int argc, char **argv) {
   std::string inputFilename;
   std::string outputDll;
-  for (int i = 1; i < argc; ++i) {
-    if (std::string(argv[i]) == "-o" && i + 1 < argc) {
-      outputDll = argv[++i];
-    } else if (argv[i][0] != '-') {
-      inputFilename = argv[i];
+  for (int argIdx = 1; argIdx < argc; ++argIdx) {
+    if (std::string(argv[argIdx]) == "-o" && argIdx + 1 < argc) {
+      outputDll = argv[++argIdx];
+    } else if (argv[argIdx][0] != '-') {
+      inputFilename = argv[argIdx];
     }
   }
 
   if (inputFilename.empty() || outputDll.empty()) {
-    std::cerr << "Usage: " << argv[0] << " <input.hip.mlir> -o <output.dll>\n";
+    llvm::errs() << "Usage: " << argv[0]
+                 << " <input.hip.mlir> -o <output.dll>\n";
     return 1;
   }
 
@@ -72,7 +75,7 @@ int main(int argc, char **argv) {
   std::string errorMessage;
   auto file = mlir::openInputFile(inputFilename, &errorMessage);
   if (!file) {
-    std::cerr << errorMessage << "\n";
+    llvm::errs() << errorMessage << "\n";
     return 1;
   }
 
@@ -82,20 +85,16 @@ int main(int argc, char **argv) {
   mlir::OwningOpRef<mlir::ModuleOp> module =
       mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, &context);
   if (!module) {
-    std::cerr << "Error parsing MLIR file\n";
+    llvm::errs() << "error: failed to parse MLIR file\n";
     return 1;
   }
 
   // 2. Run MLIR PassManager (input must be pre-bufferized memref IR)
   mlir::PassManager pm(&context);
-  pm.addPass(mlir::hip::createConvertHipToLLVMPass());
-  pm.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
-  pm.addPass(mlir::createArithToLLVMConversionPass());
-  pm.addPass(mlir::createConvertFuncToLLVMPass());
-  pm.addPass(mlir::createReconcileUnrealizedCastsPass());
+  mlir::hip::buildHipToLLVMPipeline(pm);
 
   if (mlir::failed(pm.run(*module))) {
-    std::cerr << "Error running passes\n";
+    llvm::errs() << "error: MLIR pass pipeline failed\n";
     return 1;
   }
 
@@ -103,7 +102,7 @@ int main(int argc, char **argv) {
   llvm::LLVMContext llvmContext;
   auto llvmModule = mlir::translateModuleToLLVMIR(module.get(), llvmContext);
   if (!llvmModule) {
-    std::cerr << "Error translating to LLVM IR\n";
+    llvm::errs() << "error: failed to translate to LLVM IR\n";
     return 1;
   }
 
@@ -122,7 +121,7 @@ int main(int argc, char **argv) {
   llvm::Triple targetTriple(targetTripleStr);
   auto target = llvm::TargetRegistry::lookupTarget(targetTripleStr, err);
   if (!target) {
-    std::cerr << "Error looking up target: " << err << "\n";
+    llvm::errs() << "error: looking up target: " << err << "\n";
     return 1;
   }
 
@@ -138,42 +137,41 @@ int main(int argc, char **argv) {
   std::error_code EC;
   llvm::raw_fd_ostream dest(objFilename, EC, llvm::sys::fs::OF_None);
   if (EC) {
-    std::cerr << "Could not open file: " << EC.message() << "\n";
+    llvm::errs() << "error: could not open file: " << EC.message() << "\n";
     return 1;
   }
 
   llvm::legacy::PassManager pass;
   auto fileType = llvm::CodeGenFileType::ObjectFile;
   if (targetMachine->addPassesToEmitFile(pass, dest, nullptr, fileType)) {
-    std::cerr << "TargetMachine can't emit a file of this type\n";
+    llvm::errs() << "error: target machine can't emit a file of this type\n";
     return 1;
   }
   pass.run(*llvmModule);
   dest.flush();
   dest.close();
 
-  std::cout << "Generated temporary object: " << objFilename << "\n";
+  llvm::outs() << "Generated temporary object: " << objFilename << "\n";
 
   // 5. Link into DLL
   auto linkerPath = llvm::sys::findProgramByName("lld-link");
   if (!linkerPath) {
     linkerPath = llvm::sys::findProgramByName("link.exe");
     if (!linkerPath) {
-      std::cerr << "Could not find lld-link or link.exe in PATH\n";
+      llvm::errs() << "error: could not find lld-link or link.exe in PATH\n";
       return 1;
     }
   }
 
-  std::string therockDist = "";
-  if (const char *env_p = std::getenv("THEROCK_DIST")) {
-    therockDist = env_p;
-  }
+  std::string therockDist;
+  if (auto env = llvm::sys::Process::GetEnv("THEROCK_DIST"))
+    therockDist = *env;
 
   std::string outArg = "/OUT:" + outputDll;
   std::string dllArg = "/DLL";
   std::string noLogoArg = "/NOLOGO";
 
-  std::vector<llvm::StringRef> linkArgs;
+  llvm::SmallVector<llvm::StringRef, 16> linkArgs;
   linkArgs.push_back(*linkerPath);
   linkArgs.push_back(noLogoArg);
   linkArgs.push_back(dllArg);
@@ -208,15 +206,14 @@ int main(int argc, char **argv) {
   int result = llvm::sys::ExecuteAndWait(*linkerPath, linkArgs, std::nullopt,
                                          {}, 0, 0, &errMsg);
   if (result != 0) {
-    std::cerr << "Linker failed with code " << result << "\n";
-    if (!errMsg.empty()) {
-      std::cerr << "Error: " << errMsg << "\n";
-    }
+    llvm::errs() << "error: linker failed with code " << result << "\n";
+    if (!errMsg.empty())
+      llvm::errs() << "  " << errMsg << "\n";
     return 1;
   }
 
-  std::cout << "Successfully generated " << outputDll
-            << " and its import library\n";
+  llvm::outs() << "Successfully generated " << outputDll
+               << " and its import library\n";
 
   return 0;
 }
