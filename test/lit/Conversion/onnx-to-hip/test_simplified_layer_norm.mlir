@@ -20,5 +20,5 @@ module {
 // CHECK-SAME: %[[INPUT:.*]]: tensor<1x128x4096xf16>,
 // CHECK-SAME: %[[SCALE:.*]]: tensor<4096xf16>) -> tensor<1x128x4096xf16>
 // CHECK: tensor.empty() : tensor<1x128x4096xf16>
-// CHECK: hip.simplified_layer_norm(%[[CTX]], %[[INPUT]], %[[SCALE]], {{.*}}) {axis = -1 : i64, epsilon = 9.99999974E-6 : f32, stash_type = 1 : i64}
+// CHECK: hip.simplified_layer_norm(%[[CTX]]) ins(%[[INPUT]], %[[SCALE]] : tensor<1x128x4096xf16>, tensor<4096xf16>) outs({{.*}} : tensor<1x128x4096xf16>) {axis = -1 : i64, epsilon = 9.99999974E-6 : f32, stash_type = 1 : i64}
 // CHECK-NOT: hip.alloc

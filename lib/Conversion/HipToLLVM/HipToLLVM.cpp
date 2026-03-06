@@ -327,7 +327,7 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
     Value APtr = getAlignedPtr(adaptor.getA());
     Value BPtr = getAlignedPtr(adaptor.getB());
     Value CPtr = getAlignedPtr(adaptor.getC());
-    Value resultPtr = getAlignedPtr(adaptor.getResult());
+    Value resultPtr = getAlignedPtr(adaptor.getOutput());
 
     // Extract matrix dimensions from memref types
     // A: [M x K], B: [K x N], C: [M x N], result: [M x N]
@@ -1481,7 +1481,7 @@ struct MatMulOpLowering : public ConvertOpToLLVMPattern<MatMulOp> {
     Value statePtr = adaptor.getHandle();
     Value APtr = getAlignedPtr(adaptor.getA());
     Value BPtr = getAlignedPtr(adaptor.getB());
-    Value resultPtr = getAlignedPtr(adaptor.getResult());
+    Value resultPtr = getAlignedPtr(adaptor.getOutput());
 
     // Extract shapes from memref types
     auto AType = cast<MemRefType>(op.getA().getType());

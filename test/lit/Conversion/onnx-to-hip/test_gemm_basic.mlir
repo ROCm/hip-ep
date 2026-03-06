@@ -36,7 +36,7 @@ module {
 
     // After conversion: tensor.empty() for init, hip.gemm in tensor mode
     // CHECK: tensor.empty() : tensor<128x512xf32>
-    // CHECK: hip.gemm(%[[CTX]], %[[A]], %[[B]], %[[C]], {{.*}}) {alpha = 1.000000e+00 : f32, beta = 1.000000e+00 : f32, transA = 0 : i64, transB = 0 : i64}
+    // CHECK: hip.gemm(%[[CTX]]) ins(%[[A]], %[[B]], %[[C]] : tensor<128x256xf32>, tensor<256x512xf32>, tensor<128x512xf32>) outs({{.*}} : tensor<128x512xf32>) {alpha = 1.000000e+00 : f32, beta = 1.000000e+00 : f32, transA = 0 : i64, transB = 0 : i64}
     // CHECK-NOT: hip.alloc
     // CHECK-NOT: hip.copy
 

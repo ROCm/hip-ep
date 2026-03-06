@@ -31,7 +31,7 @@ module {
 
     // After conversion: tensor.empty() for init, hip.gather in tensor mode
     // CHECK: tensor.empty() : tensor<i64>
-    // CHECK: hip.gather(%[[CTX]], %[[DATA]], %[[INDICES]], {{.*}}) {axis = 0 : i64}
+    // CHECK: hip.gather(%[[CTX]]) ins(%[[DATA]], %[[INDICES]] : tensor<2xi64>, tensor<i64>) outs({{.*}} : tensor<i64>) {axis = 0 : i64}
     // CHECK-NOT: hip.alloc
     // CHECK-NOT: hip.copy
 
@@ -46,7 +46,7 @@ module {
     %output = "onnx.Gather"(%data, %indices) {axis = -1 : si64} : (tensor<4x8xi64>, tensor<2xi64>) -> tensor<4x2xi64>
 
     // CHECK: tensor.empty() : tensor<4x2xi64>
-    // CHECK: hip.gather(%[[CTX]], %[[DATA]], %[[INDICES]], {{.*}}) {axis = -1 : i64}
+    // CHECK: hip.gather(%[[CTX]]) ins(%[[DATA]], %[[INDICES]] : tensor<4x8xi64>, tensor<2xi64>) outs({{.*}} : tensor<4x2xi64>) {axis = -1 : i64}
     // CHECK-NOT: hip.alloc
 
     return %output : tensor<4x2xi64>

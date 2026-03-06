@@ -34,12 +34,12 @@ module {
     // CHECK-SAME: %[[CTX:.*]]: !llvm.ptr
 
     // HIP convolution operation
-    hip.conv(%ctx, %input, %weights, %bias, %output)
-      {kernel_shape = [7, 7], strides = [2, 2],
-       pads = [3, 3, 3, 3], dilations = [1, 1], group = 1}
-      : (!hip.context, memref<1x3x224x224xf32, 1>,
-         memref<64x3x7x7xf32, 1>, memref<64xf32, 1>,
-         memref<1x64x112x112xf32, 1>)
+    hip.conv(%ctx) ins(%input, %weights, %bias : memref<1x3x224x224xf32, 1>,
+                                                 memref<64x3x7x7xf32, 1>,
+                                                 memref<64xf32, 1>)
+                   outs(%output : memref<1x64x112x112xf32, 1>)
+                   {kernel_shape = [7, 7], strides = [2, 2],
+                    pads = [3, 3, 3, 3], dilations = [1, 1], group = 1}
 
     // Should lower to MIOpen convolution forward call
     // The wrapper is declared and called

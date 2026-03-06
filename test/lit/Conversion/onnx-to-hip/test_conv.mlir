@@ -41,7 +41,7 @@ module {
   // CHECK-LABEL: func.func @conv_basic
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<1x3x224x224xf32>, %[[W:.*]]: tensor<64x3x7x7xf32>, %[[B:.*]]: tensor<64xf32>) -> tensor<1x64x112x112xf32>
   // CHECK: tensor.empty() : tensor<1x64x112x112xf32>
-  // CHECK: hip.conv(%[[CTX]], %[[IN]], %[[W]], %[[B]], {{.*}}) {dilations = [1, 1], group = 1 : i64, kernel_shape = [7, 7], pads = [3, 3, 3, 3], strides = [2, 2]}
+  // CHECK: hip.conv(%[[CTX]]) ins(%[[IN]], %[[W]], %[[B]] : tensor<1x3x224x224xf32>, tensor<64x3x7x7xf32>, tensor<64xf32>) outs({{.*}} : tensor<1x64x112x112xf32>) {dilations = [1, 1], group = 1 : i64, kernel_shape = [7, 7], pads = [3, 3, 3, 3], strides = [2, 2]}
   // CHECK-NOT: hip.alloc
 
   // --------------------------------------------------------------------------
@@ -61,7 +61,7 @@ module {
   // CHECK-LABEL: func.func @conv_grouped
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<1x64x56x56xf32>, %[[W:.*]]: tensor<128x32x3x3xf32>, %[[B:.*]]: tensor<128xf32>) -> tensor<1x128x56x56xf32>
   // CHECK: tensor.empty() : tensor<1x128x56x56xf32>
-  // CHECK: hip.conv(%[[CTX]], %[[IN]], %[[W]], %[[B]], {{.*}}) {dilations = [1, 1], group = 2 : i64, kernel_shape = [3, 3], pads = [1, 1, 1, 1], strides = [1, 1]}
+  // CHECK: hip.conv(%[[CTX]]) ins(%[[IN]], %[[W]], %[[B]] : tensor<1x64x56x56xf32>, tensor<128x32x3x3xf32>, tensor<128xf32>) outs({{.*}} : tensor<1x128x56x56xf32>) {dilations = [1, 1], group = 2 : i64, kernel_shape = [3, 3], pads = [1, 1, 1, 1], strides = [1, 1]}
   // CHECK-NOT: hip.alloc
 
   // --------------------------------------------------------------------------
@@ -80,7 +80,7 @@ module {
 
   // CHECK-LABEL: func.func @conv_depthwise
   // CHECK-SAME: !hip.context
-  // CHECK: hip.conv({{.*}}) {dilations = [1, 1], group = 64 : i64, kernel_shape = [3, 3]
+  // CHECK: hip.conv({{.*}}) ins({{.*}}) outs({{.*}}) {dilations = [1, 1], group = 64 : i64, kernel_shape = [3, 3]
   // CHECK-NOT: hip.alloc
 
   // --------------------------------------------------------------------------
@@ -100,7 +100,7 @@ module {
   // CHECK-LABEL: func.func @conv_stride2
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<1x64x56x56xf32>, %[[W:.*]]: tensor<128x64x3x3xf32>, %[[B:.*]]: tensor<128xf32>) -> tensor<1x128x28x28xf32>
   // CHECK: tensor.empty() : tensor<1x128x28x28xf32>
-  // CHECK: hip.conv(%[[CTX]], %[[IN]], %[[W]], %[[B]], {{.*}}) {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3], pads = [1, 1, 1, 1], strides = [2, 2]}
+  // CHECK: hip.conv(%[[CTX]]) ins(%[[IN]], %[[W]], %[[B]] : tensor<1x64x56x56xf32>, tensor<128x64x3x3xf32>, tensor<128xf32>) outs({{.*}} : tensor<1x128x28x28xf32>) {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3], pads = [1, 1, 1, 1], strides = [2, 2]}
   // CHECK-NOT: hip.alloc
 
   // --------------------------------------------------------------------------
@@ -119,6 +119,6 @@ module {
 
   // CHECK-LABEL: func.func @conv_asymmetric_stride
   // CHECK-SAME: !hip.context
-  // CHECK: hip.conv({{.*}}) {dilations = [1, 1], group = 1 : i64, kernel_shape = [7, 3], pads = [3, 1, 3, 1], strides = [2, 3]}
+  // CHECK: hip.conv({{.*}}) ins({{.*}}) outs({{.*}}) {dilations = [1, 1], group = 1 : i64, kernel_shape = [7, 3], pads = [3, 1, 3, 1], strides = [2, 3]}
   // CHECK-NOT: hip.alloc
 }

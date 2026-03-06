@@ -34,8 +34,7 @@ module {
   // CHECK-LABEL: func.func @avgpool_basic
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<1x64x4x4xf32>) -> tensor<1x64x2x2xf32>
   // CHECK: tensor.empty() : tensor<1x64x2x2xf32>
-  // CHECK: hip.avgpool(%[[CTX]], %[[IN]], {{.*}}) {kernel_shape = [2, 2], pads = [0, 0, 0, 0], strides = [2, 2]}
-  // CHECK-SAME: (!hip.context, tensor<1x64x4x4xf32>, tensor<1x64x2x2xf32>) : tensor<1x64x2x2xf32>
+  // CHECK: hip.avgpool(%[[CTX]]) ins(%[[IN]] : tensor<1x64x4x4xf32>) outs({{.*}} : tensor<1x64x2x2xf32>) {kernel_shape = [2, 2], pads = [0, 0, 0, 0], strides = [2, 2]} : tensor<1x64x2x2xf32>
   // CHECK-NOT: hip.alloc
 
   // --------------------------------------------------------------------------
@@ -53,7 +52,7 @@ module {
   // CHECK-LABEL: func.func @avgpool_padded
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<1x64x8x8xf32>) -> tensor<1x64x8x8xf32>
   // CHECK: tensor.empty() : tensor<1x64x8x8xf32>
-  // CHECK: hip.avgpool(%[[CTX]], %[[IN]], {{.*}}) {kernel_shape = [3, 3], pads = [1, 1, 1, 1], strides = [1, 1]}
+  // CHECK: hip.avgpool(%[[CTX]]) ins(%[[IN]] : tensor<1x64x8x8xf32>) outs({{.*}} : tensor<1x64x8x8xf32>) {kernel_shape = [3, 3], pads = [1, 1, 1, 1], strides = [1, 1]}
   // CHECK-NOT: hip.alloc
 
   // --------------------------------------------------------------------------
@@ -69,6 +68,6 @@ module {
 
   // CHECK-LABEL: func.func @avgpool_default_stride
   // CHECK-SAME: !hip.context
-  // CHECK: hip.avgpool({{.*}}) {kernel_shape = [2, 2], pads = [0, 0, 0, 0], strides = [1, 1]}
+  // CHECK: hip.avgpool({{.*}}) ins({{.*}}) outs({{.*}}) {kernel_shape = [2, 2], pads = [0, 0, 0, 0], strides = [1, 1]}
   // CHECK-NOT: hip.alloc
 }

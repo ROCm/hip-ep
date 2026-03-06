@@ -34,10 +34,10 @@ module {
     // CHECK-SAME: %[[CTX:.*]]: !llvm.ptr
 
     // HIP GEMM: Y = alpha * A * B + beta * C
-    hip.gemm(%ctx, %A, %B, %C, %Y)
-      {alpha = 1.0 : f32, beta = 1.0 : f32, transA = 0, transB = 0}
-      : (!hip.context, memref<128x256xf32, 1>, memref<256x512xf32, 1>,
-         memref<128x512xf32, 1>, memref<128x512xf32, 1>)
+    hip.gemm(%ctx) ins(%A, %B, %C : memref<128x256xf32, 1>, memref<256x512xf32, 1>,
+                                    memref<128x512xf32, 1>)
+                   outs(%Y : memref<128x512xf32, 1>)
+                   {alpha = 1.0 : f32, beta = 1.0 : f32, transA = 0, transB = 0}
 
     // Should lower to hipBLAS single-precision GEMM call
     // The wrapper is declared and called

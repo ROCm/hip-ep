@@ -25,5 +25,5 @@ module {
 // CHECK-SAME: (%[[CTX:.*]]: !hip.context,
 // CHECK-SAME: %[[INPUT:.*]]: tensor<1x128x14336xf16>) -> tensor<1x128x14336xf16>
 // CHECK: tensor.empty() : tensor<1x128x14336xf16>
-// CHECK: hip.sigmoid(%[[CTX]], %[[INPUT]], {{.*}}) : (!hip.context, tensor<1x128x14336xf16>, tensor<1x128x14336xf16>) : tensor<1x128x14336xf16>
+// CHECK: hip.sigmoid(%[[CTX]]) ins(%[[INPUT]] : tensor<1x128x14336xf16>) outs({{.*}} : tensor<1x128x14336xf16>) : tensor<1x128x14336xf16>
 // CHECK-NOT: hip.alloc
