@@ -46,7 +46,7 @@ std::string build_compiler_options_json(const CompilationConfig &config) {
   std::ostringstream json;
   json << "{";
   json << "\"opt_level\": " << config.optLevel;
-  json << ", \"output_mode\": \"OUTPUT_MODE_DLL\"";
+  json << ", \"output_mode\": \"DLL\"";
   json << "}";
   return json.str();
 }
