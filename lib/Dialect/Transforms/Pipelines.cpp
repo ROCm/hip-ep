@@ -21,6 +21,9 @@ using namespace mlir;
 
 void mlir::hip::buildOnnxToHipPipeline(
     OpPassManager &pm, const OnnxToHipPipelineOptions &options) {
+  // 0. Insert !hip.context as arg 0 into every func.func
+  pm.addPass(createHipAddContextArgPass());
+
   // 1. ONNX → HIP tensor DPS + constant externalization
   ConvertOnnxToHipPassOptions onnxToHipOpts;
   onnxToHipOpts.externalizeOutputDir = options.externalizeOutputDir;

@@ -467,7 +467,7 @@ void PoolAllocsPass::runOnOperation() {
 
   // Insert all pool IR right before the earliest alloc being pooled so
   // that downstream passes (e.g. hip-lower-allocs) see the pool after
-  // any prerequisite ops like hip.create_handle but before any consumer
+  // any prerequisite ops like !hip.context arg but before any consumer
   // of the pooled buffers.
   Operation *firstPooledAlloc = allInfos.front().allocOp.getOperation();
   for (auto &info : allInfos)
