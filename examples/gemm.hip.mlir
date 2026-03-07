@@ -8,20 +8,19 @@
 
 module {
   func.func @two_matmuls(
+      %ctx: !hip.context,
       %A:  memref<1x4x8xf32, strided<[?, ?, ?], offset: ?>>,
       %B0: memref<8x4xf32, strided<[?, ?], offset: ?>>,
       %B1: memref<4x4xf32, strided<[?, ?], offset: ?>>,
       %C:  memref<1x4x4xf32>) {
-    %handle = hip.create_handle() : !hip.handle
-    %pool = hip.alloc(%handle) : memref<64xi8>
+    %pool = hip.alloc(%ctx) : memref<64xi8>
     %c0 = arith.constant 0 : index
     %tmp = memref.view %pool[%c0][] : memref<64xi8> to memref<1x4x4xf32>
 
-    hip.hipblaslt.matmul(%handle) ins(%A, %B0 : memref<1x4x8xf32, strided<[?, ?, ?], offset: ?>>, memref<8x4xf32, strided<[?, ?], offset: ?>>) outs(%tmp : memref<1x4x4xf32>)
-    hip.hipblaslt.matmul(%handle) ins(%tmp, %B1 : memref<1x4x4xf32>, memref<4x4xf32, strided<[?, ?], offset: ?>>) outs(%C : memref<1x4x4xf32>)
+    hip.hipblaslt.matmul(%ctx) ins(%A, %B0 : memref<1x4x8xf32, strided<[?, ?, ?], offset: ?>>, memref<8x4xf32, strided<[?, ?], offset: ?>>) outs(%tmp : memref<1x4x4xf32>)
+    hip.hipblaslt.matmul(%ctx) ins(%tmp, %B1 : memref<1x4x4xf32>, memref<4x4xf32, strided<[?, ?], offset: ?>>) outs(%C : memref<1x4x4xf32>)
 
-    hip.free(%handle, %pool) : memref<64xi8>
-    hip.destroy_handle(%handle) : !hip.handle
+    hip.free(%ctx, %pool) : memref<64xi8>
     return
   }
 }

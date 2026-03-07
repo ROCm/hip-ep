@@ -97,11 +97,14 @@ void LowerAllocsPass::runOnOperation() {
     return signalPassFailure();
   }
 
-  // Find the hip.handle produced by hip.create_handle.
-  Value handle;
-  funcOp.walk([&](CreateHandleOp op) { handle = op.getResult(); });
-  if (!handle) {
-    funcOp.emitRemark("no hip.create_handle found; skipping alloc lowering");
+  // Get !hip.context from function argument 0.
+  Value ctx;
+  if (!funcOp.getArguments().empty() &&
+      isa<ContextType>(funcOp.getArgument(0).getType()))
+    ctx = funcOp.getArgument(0);
+  if (!ctx) {
+    funcOp.emitRemark(
+        "no !hip.context argument found; skipping alloc lowering");
     return;
   }
 
@@ -115,7 +118,7 @@ void LowerAllocsPass::runOnOperation() {
   for (memref::AllocOp allocOp : allocs) {
     builder.setInsertionPoint(allocOp);
     auto hipAlloc =
-        AllocOp::create(builder, allocOp.getLoc(), allocOp.getType(), handle,
+        AllocOp::create(builder, allocOp.getLoc(), allocOp.getType(), ctx,
                         allocOp.getDynamicSizes());
     allocOp.replaceAllUsesWith(hipAlloc.getResult());
     allocOp.erase();
@@ -151,16 +154,7 @@ void LowerAllocsPass::runOnOperation() {
     return false;
   };
 
-  // Move hip.destroy_handle to just before the terminator.  Passes like
-  // buffer-results-to-out-params may insert ops (e.g., memref.copy) after
-  // the original destroy_handle position; the handle must stay valid until
-  // all hip.free ops have executed.
   Block &entry = funcOp.getBody().front();
-  Operation *terminator = entry.getTerminator();
-  Operation *destroyHandleOp = nullptr;
-  funcOp.walk([&](DestroyHandleOp op) { destroyHandleOp = op; });
-  if (destroyHandleOp)
-    destroyHandleOp->moveBefore(terminator);
 
   // Replace memref.dealloc -> hip.free for buffers that trace back to a
   // hip.alloc.  Non-HIP deallocs (e.g. externally-owned memrefs) are left
@@ -175,7 +169,7 @@ void LowerAllocsPass::runOnOperation() {
       continue;
 
     builder.setInsertionPoint(deallocOp);
-    FreeOp::create(builder, deallocOp.getLoc(), handle, memref);
+    FreeOp::create(builder, deallocOp.getLoc(), ctx, memref);
     deallocated.insert(rootAlloc.getResult());
     deallocOp.erase();
   }
@@ -192,7 +186,7 @@ void LowerAllocsPass::runOnOperation() {
 
     Operation *lastUser = findLastTransitiveUser(hipAlloc.getResult(), entry);
     builder.setInsertionPointAfter(lastUser);
-    FreeOp::create(builder, hipAlloc.getLoc(), handle, hipAlloc.getResult());
+    FreeOp::create(builder, hipAlloc.getLoc(), ctx, hipAlloc.getResult());
   }
 }
 

@@ -14,7 +14,7 @@ def Hip_Dialect : Dialect {
   let summary = "HIP runtime dialect";
   let description = [{
     A dialect for HIP (Heterogeneous-compute Interface for Portability) operations.
-    Provides operations for memory management and runtime handle operations.
+    Provides operations for memory management and GPU compute dispatch.
   }];
   let cppNamespace = "::mlir::hip";
   let useDefaultTypePrinterParser = 1;

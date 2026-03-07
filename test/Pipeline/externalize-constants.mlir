@@ -14,7 +14,7 @@
 // pattern rewrite driver that runs as part of convertComputeOps.
 //===----------------------------------------------------------------------===//
 
-// RUN: mkdir -p %t && %hip-mlir-opt --convert-onnx-to-hip='externalize-min-num-elements=4 externalize-output-dir=%t' %s | %FileCheck %s
+// RUN: mkdir -p %t && %hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip='externalize-min-num-elements=4 externalize-output-dir=%t' %s | %FileCheck %s
 
 // Module-level: constants file attribute and extern memref.global.
 // CHECK: module attributes {{{.*}}hip.constants_file = "model.constants.bin"
@@ -26,12 +26,9 @@
 // CHECK-DAG:   arith.constant dense<[1.000000e+00, 2.000000e+00]> : tensor<2xf32>
 //   Splat constant stays inline despite 16 elements >= threshold.
 // CHECK-DAG:   arith.constant dense<5.000000e-01> : tensor<4x4xf32>
-//   Handle inserted at the top of the function.
-// CHECK:       hip.create_handle
 //   Large non-splat constant loaded from extern global.
 // CHECK:       memref.get_global @hip_ext_constant_0 : memref<2x4xf32>
 // CHECK-NEXT:  bufferization.to_tensor {{.*}} restrict
-// CHECK:       hip.destroy_handle
 // CHECK:       return
 
 module {
