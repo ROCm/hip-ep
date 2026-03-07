@@ -51,15 +51,12 @@ func.func @dynamic_lower(
   return %alloc0 : memref<?x64xf32>
 }
 
-// No !hip.context arg: pass is a no-op, memref.alloc is preserved.
-// CHECK-LABEL: func.func @no_context_noop
-// CHECK:         memref.alloc()
+// No memref.alloc in function: pass is a no-op.
+// CHECK-LABEL: func.func @no_allocs_noop
 // CHECK-NOT:     hip.alloc
 // CHECK:         return
-func.func @no_context_noop(%a: memref<2x64x64xf32>) -> memref<2x64x64xf32> {
-  %alloc = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
-  memref.copy %a, %alloc : memref<2x64x64xf32> to memref<2x64x64xf32>
-  return %alloc : memref<2x64x64xf32>
+func.func @no_allocs_noop(%ctx: !hip.context, %a: memref<2x64x64xf32>) -> memref<2x64x64xf32> {
+  return %a : memref<2x64x64xf32>
 }
 
 // Three memref<2x64x64xf32> allocs: alloc0 and alloc1 are not returned, so
