@@ -103,9 +103,9 @@ void LowerAllocsPass::runOnOperation() {
       isa<ContextType>(funcOp.getArgument(0).getType()))
     ctx = funcOp.getArgument(0);
   if (!ctx) {
-    funcOp.emitRemark(
-        "no !hip.context argument found; skipping alloc lowering");
-    return;
+    funcOp.emitError("no !hip.context argument found; "
+                     "hip-add-context-arg must run first");
+    return signalPassFailure();
   }
 
   OpBuilder builder(funcOp.getContext());
