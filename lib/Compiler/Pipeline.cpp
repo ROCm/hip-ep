@@ -7,6 +7,7 @@
 #include "hip/Compiler/Passes/Passes.h"
 #include "hip/Conversion/Passes.h"
 #include "hip/Dialect/Transforms/Passes.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Bufferization/Transforms/OneShotAnalysis.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Pass/PassManager.h"
@@ -55,7 +56,8 @@ void populateMorphizenPipeline(mlir::OpPassManager &pm,
 
   // Stage 5: Memory pooling optimization
   // Packs multiple memref.alloc ops into a single byte pool
-  pm.addPass(mlir::hip::createPoolAllocsPass());
+  // PoolAllocsPass operates on func::FuncOp, so nest it.
+  pm.addNestedPass<mlir::func::FuncOp>(mlir::hip::createPoolAllocsPass());
 
   // Stage 6: HIP → LLVM conversion
   pm.addPass(mlir::hip::createConvertHipToLLVMPass());
