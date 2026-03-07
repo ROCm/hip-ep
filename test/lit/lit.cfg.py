@@ -51,9 +51,12 @@ hip_tool_search = [
 hip_tools_dirs = [d for d in hip_tool_search if os.path.isdir(d)]
 
 # hip-compiler may live in a separate directory from hip-mlir-opt
-hip_compile_dir = os.path.join(config.hip_build_dir, "tools", "hip-compiler")
-if os.path.isdir(hip_compile_dir) and hip_compile_dir not in hip_tools_dirs:
-    hip_tools_dirs.append(hip_compile_dir)
+for hip_compile_candidate in [
+    os.path.join(config.hip_build_dir, "tools", "hip-compiler", config.hip_build_mode),
+    os.path.join(config.hip_build_dir, "tools", "hip-compiler"),
+]:
+    if os.path.isdir(hip_compile_candidate) and hip_compile_candidate not in hip_tools_dirs:
+        hip_tools_dirs.append(hip_compile_candidate)
 
 if not hip_tools_dirs:
     hip_tools_dirs = [os.path.join(config.hip_build_dir, "bin")]

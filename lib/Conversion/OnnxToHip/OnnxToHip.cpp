@@ -33,6 +33,7 @@
 
 // Include ONNX dialect operations from onnx-mlir
 #include "src/Dialect/ONNX/ONNXOps.hpp"
+#include "src/Dialect/ONNX/ElementsAttr/ElementsAttrBuilder.hpp"
 
 using namespace mlir;
 
@@ -1089,7 +1090,15 @@ private:
         if (!valueAttr)
           return WalkResult::advance();
 
-        auto elementsAttr = dyn_cast<ElementsAttr>(valueAttr.value());
+        auto rawAttr = dyn_cast<ElementsAttr>(valueAttr.value());
+        if (!rawAttr)
+          return WalkResult::advance();
+
+        // onnx-mlir import produces DisposableElementsAttr (memory-buffer
+        // backed); convert to DenseElementsAttr so writeConstantsToFileSystem
+        // can access raw bytes via getRawData()/isSplat().
+        auto elementsAttr =
+            onnx_mlir::ElementsAttrBuilder::toDenseElementsAttr(rawAttr);
         if (!elementsAttr)
           return WalkResult::advance();
 

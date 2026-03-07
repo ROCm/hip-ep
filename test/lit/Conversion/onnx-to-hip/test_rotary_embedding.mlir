@@ -25,6 +25,6 @@ module {
 // CHECK: tensor.empty()
 // CHECK: hip.rotary_embedding
 // CHECK-SAME: interleaved = 0
-// CHECK-SAME: num_heads = 0
-// CHECK-SAME: rotary_embedding_dim = 0
+// CHECK-SAME: num_heads = 32
+// CHECK-SAME: rotary_embedding_dim = 128
 // CHECK-NOT: hip.alloc

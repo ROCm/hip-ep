@@ -19,6 +19,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/MemRef/Transforms/AllocationOpInterfaceImpl.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/IR/BuiltinDialect.h"
@@ -61,6 +62,10 @@ inline void registerAllDialects(mlir::DialectRegistry& registry) {
   mlir::tensor::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
       registry);
+  // Required by buffer-results-to-out-params hoist-static-allocs: lets the
+  // pass query AllocationOpInterface on memref.alloc to redirect uses of the
+  // alloc to the out-param arg and erase the alloc without inserting a copy.
+  mlir::memref::registerAllocationOpInterfaceExternalModels(registry);
   // Attach bufferization external models for all HIP compute ops so that
   // one-shot-bufferize can lower them without hip.alloc/hip.copy.
   mlir::hip::registerHipBufferizableOpInterfaceModels(registry);

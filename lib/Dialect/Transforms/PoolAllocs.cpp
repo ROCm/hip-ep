@@ -427,8 +427,15 @@ void PoolAllocsPass::runOnOperation() {
   }
 
   // Need at least 2 allocs to pool.
-  if (allInfos.size() < 2)
+  if (allInfos.size() < 2) {
+    ModuleOp moduleOp = funcOp->getParentOfType<ModuleOp>();
+    OpBuilder zeroBuilder(funcOp.getContext());
+    moduleOp->setAttr("hipdnn.pool_size", zeroBuilder.getI64IntegerAttr(0));
+    moduleOp->setAttr("hipdnn.buffer_count", zeroBuilder.getI64IntegerAttr(0));
+    moduleOp->setAttr("hipdnn.buffer_offsets",
+                      zeroBuilder.getArrayAttr(SmallVector<Attribute>{}));
     return;
+  }
 
   // ----- Phase 2: partition into static / dynamic ----------------------
   //

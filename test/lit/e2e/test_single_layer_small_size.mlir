@@ -16,9 +16,9 @@ module {
     %6 = onnx.Constant dense<1.000000e+00> : tensor<256x8xf16>
     %7 = onnx.Constant dense<1.000000e+00> : tensor<64x64xf16>
     %8 = onnx.Constant dense<1.000000e+00> : tensor<64xf16>
-    %9 = onnx.Constant dense<1.000000e+00> : tensor<64x128xf16>
-    %10 = onnx.Constant dense<1.000000e+00> : tensor<64x128xf16>
-    %11 = onnx.Constant dense<1.000000e+00> : tensor<128x64xf16>
+    %9 = onnx.Constant dense<5.000000e-02> : tensor<64x128xf16>
+    %10 = onnx.Constant dense<5.000000e-02> : tensor<64x128xf16>
+    %11 = onnx.Constant dense<5.000000e-02> : tensor<128x64xf16>
     %12 = onnx.Constant dense<8> : tensor<i32>
     %13 = onnx.Constant dense<1> : tensor<1xi64>
     %14 = "onnx.Gather"(%0, %arg0) <{axis = 0 : si64}> {onnx_node_name = "embed_tokens"} : (tensor<256x64xf16>, tensor<1x1xi64>) -> tensor<1x1x64xf16>
