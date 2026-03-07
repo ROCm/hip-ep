@@ -16,11 +16,7 @@ static constexpr char DEFAULT_UNAME[] = "chunywan";
 static constexpr char DEFAULT_GNAME[] = "chunywan";
 
 TarHeader::TarHeader(const std::string& name, size_t size)
-    : name_(name), size_(size) {
-  if (size_ > 0xFFFFFFFF) {
-    throw std::runtime_error("Size too large");
-  }
-}
+    : name_(name), size_(size) {}
 std::string TarHeader::to_string() const {
   std::ostringstream str;
   str << "TarHeader{"
@@ -181,13 +177,21 @@ void TarHeader::fill_gid(HD_USTAR* header, int gid) {
   header->gid[7] = '\0'; // Ensure null termination
 }
 void TarHeader::fill_size(HD_USTAR* header, size_t size) {
-  // Ensure size is within the range of 0 to 8^11 - 1 (octal)
-  if (size > 0xFFFFFFFF) {
-    CHECK(false) << "Size too large for tar header" << size;
+  if (size <= 077777777777ULL) {
+    // Standard POSIX ustar: 11-digit octal, supports up to 8 GB
+    snprintf(header->size, sizeof(header->size), "%011llo",
+             static_cast<unsigned long long>(size));
+    header->size[11] = '\0';
+  } else {
+    // GNU tar base-256 extension: first byte 0x80, remaining 11 bytes
+    // big-endian binary. Supports files up to ~4096 PB.
+    header->size[0] = static_cast<char>(0x80u);
+    size_t tmp = size;
+    for (int i = 11; i >= 1; --i) {
+      header->size[i] = static_cast<char>(tmp & 0xFFu);
+      tmp >>= 8;
+    }
   }
-  snprintf(header->size, sizeof(header->size), "%011lo",
-           static_cast<unsigned long>(size));
-  header->size[11] = '\0'; // Ensure null termination
 }
 void TarHeader::fill_mtime(HD_USTAR* header) {
   snprintf(header->mtime, sizeof(header->mtime), "%011lo", mtime_);
@@ -363,7 +367,16 @@ std::optional<TarHeader> TarHeader::read_header(std::istream& is) {
         std::min(sizeof(header->linkname), ret->real_path_.value().size()));
   }
   ret->block_end_pos_ = is.tellg();
-  ret->size_ = std::stoul(header->size, nullptr, 8);
+  if (static_cast<unsigned char>(header->size[0]) & 0x80u) {
+    // GNU tar base-256 encoding: remaining 11 bytes are big-endian binary
+    size_t val = 0;
+    for (int i = 1; i <= 11; ++i) {
+      val = (val << 8) | static_cast<unsigned char>(header->size[i]);
+    }
+    ret->size_ = val;
+  } else {
+    ret->size_ = std::stoull(header->size, nullptr, 8);
+  }
   ret->data_begin_pos_ = is.tellg();
   ret->data_end_pos_ = ret->data_begin_pos_ + (std::streamoff)ret->size_;
   is.seekg(round_up_to_block_size(ret->data_end_pos_), std::ios::beg);
