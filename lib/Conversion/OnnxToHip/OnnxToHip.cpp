@@ -736,7 +736,6 @@ struct SkipSimplifiedLayerNormToHipPattern
     auto epsilonAttr = customOp->getAttrOfType<FloatAttr>("epsilon");
 
     unsigned numResults = customOp.getNumResults();
-    unsigned skipOutIdx = numResults - 1;
 
     // Output 0: normalized output
     auto resultType0 =
@@ -744,35 +743,45 @@ struct SkipSimplifiedLayerNormToHipPattern
     Value init0 = rewriter.create<tensor::EmptyOp>(
         loc, resultType0.getShape(), resultType0.getElementType());
 
-    // Output skipOutIdx: residual skip sum
-    auto resultTypeLast =
-        cast<RankedTensorType>(customOp.getResult(skipOutIdx).getType());
+    // The kernel always computes the residual skip sum, so we always need
+    // a skip-output buffer. When the ONNX op exposes it (outputs >= 2),
+    // use the last output's type; otherwise reuse output 0's type as scratch.
+    bool hasSkipOutput = numResults >= 2;
+    unsigned skipOutIdx = hasSkipOutput ? numResults - 1 : 0;
+    RankedTensorType resultTypeLast =
+        hasSkipOutput
+            ? cast<RankedTensorType>(customOp.getResult(skipOutIdx).getType())
+            : resultType0;
     Value initLast = rewriter.create<tensor::EmptyOp>(
         loc, resultTypeLast.getShape(), resultTypeLast.getElementType());
 
+    // HIP op always produces 2 results (DPS inits are fixed at offset 4,
+    // length 2). The second result may be unused when numResults == 1.
     auto hipOp = rewriter.create<hip::SkipSimplifiedLayerNormOp>(
         loc, TypeRange{resultType0, resultTypeLast}, context, input, skip,
         gamma, init0, initLast, epsilonAttr);
 
-    // Build replacement values for all ONNX results.
-    // Intermediate results (indices 1..skipOutIdx-1) may be NoneType or unused.
+    // Build replacement values matching the ONNX op's result count.
     SmallVector<Value> replacements;
     replacements.push_back(hipOp.getResultTensors()[0]); // result 0
 
-    for (unsigned i = 1; i < skipOutIdx; ++i) {
-      Type origType = customOp.getResult(i).getType();
-      if (isa<NoneType>(origType)) {
-        assert(customOp.getResult(i).use_empty() &&
-               "unexpected use of NoneType result");
-        replacements.push_back(Value{});
-        continue;
+    if (hasSkipOutput) {
+      // Intermediate results (indices 1..skipOutIdx-1) may be NoneType or
+      // unused.
+      for (unsigned i = 1; i < skipOutIdx; ++i) {
+        Type origType = customOp.getResult(i).getType();
+        if (isa<NoneType>(origType)) {
+          assert(customOp.getResult(i).use_empty() &&
+                 "unexpected use of NoneType result");
+          replacements.push_back(Value{});
+          continue;
+        }
+        auto dummyType = cast<RankedTensorType>(origType);
+        replacements.push_back(rewriter.create<tensor::EmptyOp>(
+            loc, dummyType.getShape(), dummyType.getElementType()));
       }
-      // Unused tensor result: emit a dummy tensor.empty
-      auto dummyType = cast<RankedTensorType>(origType);
-      replacements.push_back(rewriter.create<tensor::EmptyOp>(
-          loc, dummyType.getShape(), dummyType.getElementType()));
+      replacements.push_back(hipOp.getResultTensors()[1]); // last result
     }
-    replacements.push_back(hipOp.getResultTensors()[1]); // last result
 
     rewriter.replaceOp(customOp, replacements);
     return success();

@@ -8,6 +8,9 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#ifdef _WIN32
+#include <io.h>
+#endif
 
 namespace udna {
 
@@ -18,9 +21,16 @@ public:
       : file_(std::fopen(path, "rb")), size_(0) {
     if (!file_)
       return;
+#ifdef _WIN32
+    // ftell returns long (32-bit on Windows), which overflows for files > 2GB.
+    _fseeki64(file_, 0, SEEK_END);
+    size_ = static_cast<std::size_t>(_ftelli64(file_));
+    _fseeki64(file_, 0, SEEK_SET);
+#else
     std::fseek(file_, 0, SEEK_END);
     size_ = static_cast<std::size_t>(std::ftell(file_));
     std::fseek(file_, 0, SEEK_SET);
+#endif
   }
 
   ~DiskFileReader() override {
