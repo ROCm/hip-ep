@@ -11,6 +11,21 @@
 
 include "mlir/Pass/PassBase.td"
 
+def HipAddContextArgPass : Pass<"hip-add-context-arg", "mlir::ModuleOp"> {
+  let summary = "Insert !hip.context as arg 0 into every func.func";
+  let description = [{
+    Inserts a !hip.context argument at position 0 into every func.func in
+    the module. The OnnxToHip conversion patterns assume that the context
+    value is always available as the first function argument.
+
+    Skips functions that already have a !hip.context as argument 0.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::func::FuncDialect"
+  ];
+}
+
 def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
   let summary = "Convert ONNX dialect to HIP dialect (tensor DPS)";
   let description = [{
@@ -22,8 +37,10 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
          memref.global extern + memref.get_global + bufferization.to_tensor
          (large/externalized to sidecar .constants.bin + .constants.json)
       2. Op mapping: onnx.{MatMul,Transpose,Mul,Softmax} -> hip.* (tensor DPS)
-      3. Lifecycle: insert hip.create_handle / hip.destroy_handle
-      4. Cleanup: erase onnx.EntryPoint
+      3. Cleanup: erase onnx.EntryPoint
+
+    Requires hip-add-context-arg to have run first so that !hip.context is
+    available as function argument 0.
 
     Constant externalization (opt-in via --externalize-min-num-elements):
       Large constants above the threshold are written to a binary sidecar file
@@ -115,7 +132,7 @@ def LowerAllocsPass : Pass<"hip-lower-allocs", "mlir::func::FuncOp"> {
   let description = [{
     Replaces memref.alloc operations with hip.alloc (device allocation via
     hipMalloc) and inserts hip.free for buffers that are not returned from
-    the function.  Requires a hip.create_handle op to exist in the function.
+    the function.  Requires !hip.context as function argument 0.
 
     This pass bridges one-shot-bufferize output (generic memref allocations)
     to the HIP-specific lowering that produces hipMalloc/hipFree calls.

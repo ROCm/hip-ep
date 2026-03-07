@@ -4,6 +4,7 @@
 ##
 
 add_library(HipDialectTransforms STATIC
+  AddHipContextArg.cpp
   LowerAllocs.cpp
   OptimizeMemRefs.cpp
   Pipelines.cpp
