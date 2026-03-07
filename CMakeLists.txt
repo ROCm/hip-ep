@@ -53,6 +53,10 @@ if(THEROCK_DIST)
 endif()
 
 option(BUILD_EP "Build the ONNX HIP DNN Execution Provider" OFF)
+option(BUILD_TESTS "Build tests" ON)
+if(BUILD_TESTS)
+  enable_testing()
+endif()
 
 if(BUILD_EP)
   include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
@@ -93,6 +97,10 @@ endif()
 option(BUILD_HIP_TOOLS "Build HIP MLIR compiler tools (hip-mlir-opt, hip-compiler)" OFF)
 
 if(BUILD_HIP_TOOLS)
+  if(NOT THEROCK_DIST)
+    message(FATAL_ERROR "BUILD_HIP_TOOLS requires THEROCK_DIST to be set")
+  endif()
+
   find_package(LLVM REQUIRED CONFIG)
   find_package(MLIR REQUIRED CONFIG)
 
@@ -128,6 +136,11 @@ if(BUILD_HIP_TOOLS)
 
   # Executable targets
   add_subdirectory(tools)
+
+  # MLIR-to-GPU tests (compile MLIR to DLL, run on GPU, verify numerics)
+  if(BUILD_TESTS)
+    add_subdirectory(test/MLIRToGPU)
+  endif()
 endif()
 
 if(BUILD_EP)

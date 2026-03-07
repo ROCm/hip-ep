@@ -9,6 +9,6 @@ set_target_properties(hip_runtime_static PROPERTIES
   ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
 )
 target_compile_definitions(hip_runtime_static PRIVATE __HIP_PLATFORM_AMD__ MIOPEN_BETA_API)
-if(DEFINED ENV{THEROCK_DIST})
-  target_include_directories(hip_runtime_static PRIVATE $ENV{THEROCK_DIST}/include)
+if(THEROCK_DIST)
+  target_include_directories(hip_runtime_static PRIVATE ${THEROCK_DIST}/include)
 endif()
