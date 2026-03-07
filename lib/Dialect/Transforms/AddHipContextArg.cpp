@@ -25,6 +25,8 @@ struct HipAddContextArgPass
     MLIRContext *ctx = &getContext();
     Type hipCtxType = ContextType::get(ctx);
 
+    // TODO: update func.call ops to forward !hip.context to callees
+    // once we support multi-function modules.
     module.walk([&](func::FuncOp funcOp) {
       if (!funcOp.getArguments().empty() &&
           funcOp.getArgument(0).getType() == hipCtxType)
