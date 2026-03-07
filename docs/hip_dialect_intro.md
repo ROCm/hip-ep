@@ -23,20 +23,18 @@ All compute ops support **dual-mode operation**:
 
 | Type | Description |
 |---|---|
-| `!hip.handle` | Opaque runtime handle for managing HIP library state |
+| `!hip.context` | Opaque execution context. Passed as function arg 0. Lowered to `!llvm.ptr`. |
 
 ---
 
-## Runtime Lifecycle & Memory
+## Context & Memory
 
-These ops manage the HIP runtime and device memory.
+The `!hip.context` type is passed as the first function argument. The `hip-add-context-arg` pass injects it automatically.
 
 | Op | Signature | Runtime |
 |---|---|---|
-| `hip.create_handle` | `() -> !hip.handle` | `hipCreateHandle()` |
-| `hip.destroy_handle` | `(!hip.handle) -> ()` | `hipDestroyHandle(handle)` |
-| `hip.alloc` | `(handle, dyn_sizes...) -> memref<...>` | `hip_device_malloc(size)` + memref descriptor |
-| `hip.free` | `(handle, memref) -> ()` | `hip_device_free(ptr)` |
+| `hip.alloc` | `(ctx, dyn_sizes...) -> memref<...>` | `hip_device_malloc(size)` + memref descriptor |
+| `hip.free` | `(ctx, memref) -> ()` | `hip_device_free(ptr)` |
 
 ---
 
@@ -46,7 +44,7 @@ Matrix multiplication backed by the hipBLASLt library (`hipblasLtMatmul`).
 
 | Op | DPS Syntax | Runtime | Status |
 |---|---|---|---|
-| `hip.hipblaslt.matmul` | `(%handle) ins(%A, %B : ...) outs(%C : ...)` | `hip_hipblaslt_matmul(handle, A, B, C, rankA, rankB, batch, M, K, N)` | Full impl |
+| `hip.hipblaslt.matmul` | `(%ctx) ins(%A, %B : ...) outs(%C : ...)` | `hip_hipblaslt_matmul(handle, A, B, C, rankA, rankB, batch, M, K, N)` | Full impl |
 
 Rank-generic: batch is determined from A's rank (3D -> batched, 2D -> single).
 If B has fewer dims than A (e.g. `X[B,S,D] @ W[D,D]`), B is broadcast across
@@ -62,8 +60,8 @@ Ops backed by the MIOpen library. Each maps to a specific MIOpen C API call.
 
 | Op | DPS Syntax | MIOpen API | Status |
 |---|---|---|---|
-| `hip.miopen.rms_norm` | `(%handle) ins(%input, %weight : ...) outs(%output : ...)` | `miopenT5LayerNormForward` | Full impl |
-| `hip.miopen.skip_rms_norm` | `(%handle) ins(%x, %skip, %weight : ...) outs(%output, %residual : ...)` | `miopenAddLayerNormForward` (T5 mode) | Stub |
+| `hip.miopen.rms_norm` | `(%ctx) ins(%input, %weight : ...) outs(%output : ...)` | `miopenT5LayerNormForward` | Full impl |
+| `hip.miopen.skip_rms_norm` | `(%ctx) ins(%x, %skip, %weight : ...) outs(%output, %residual : ...)` | `miopenAddLayerNormForward` (T5 mode) | Stub |
 
 Rank-generic: for 3D input `[B,S,D]`, the lowering flattens `N = B*S, D = D` and
 passes them to the runtime: `hip_miopen_rms_norm(handle, input, weight, output, N, D)`.
@@ -76,14 +74,14 @@ Uses `MIOPEN_ELEMENTWISE_AFFINE_T5` normalization mode.
 
 | Op | DPS Syntax | MIOpen API |
 |---|---|---|
-| `hip.miopen.rope` | `(%handle, %start_pos) ins(%cos, %sin : ...) outs(%q, %k : ...)` | `miopenRotaryPositionalEmbeddings` (experimental) |
+| `hip.miopen.rope` | `(%ctx, %start_pos) ins(%cos, %sin : ...) outs(%q, %k : ...)` | `miopenRotaryPositionalEmbeddings` (experimental) |
 
 ### Element-wise Tensor Ops
 
 | Op | DPS Syntax | MIOpen API | Status |
 |---|---|---|---|
-| `hip.miopen.add` | `(%handle) ins(%A, %B : ...) outs(%C : ...)` | `miopenOpTensor(miopenTensorOpAdd)` | Full impl |
-| `hip.miopen.mul` | `(%handle) ins(%A, %B : ...) outs(%C : ...)` | `miopenOpTensor(miopenTensorOpMul)` | Full impl |
+| `hip.miopen.add` | `(%ctx) ins(%A, %B : ...) outs(%C : ...)` | `miopenOpTensor(miopenTensorOpAdd)` | Full impl |
+| `hip.miopen.mul` | `(%ctx) ins(%A, %B : ...) outs(%C : ...)` | `miopenOpTensor(miopenTensorOpMul)` | Full impl |
 
 The binary op lowering computes `numA` and `numB` (product of all memref dimensions
 for each operand) and passes both to the runtime:
@@ -95,7 +93,7 @@ elements of A via MIOpen's tensor broadcasting support.
 
 | Op | DPS Syntax | MIOpen API | Status |
 |---|---|---|---|
-| `hip.miopen.softmax` | `(%handle) ins(%input : ...) outs(%output : ...)` | `miopenSoftmaxForward_V2` | Full impl |
+| `hip.miopen.softmax` | `(%ctx) ins(%input : ...) outs(%output : ...)` | `miopenSoftmaxForward_V2` | Full impl |
 
 Row-wise softmax over the last dimension. Rank-generic: for 3D `[B,S,S]`, the
 lowering flattens `rows = B*S, cols = S`. The runtime uses a 4D descriptor
@@ -109,10 +107,10 @@ Ops with no MIOpen or hipBLASLt equivalent. Implemented as pure C++ kernels.
 
 | Op | DPS Syntax | Purpose | Status |
 |---|---|---|---|
-| `hip.transpose` | `(%handle, %dim0, %dim1) ins(%input : ...) outs(%output : ...)` | N-D transpose swapping two dims | Full impl |
-| `hip.gather` | `(%handle) ins(%indices, %table : ...) outs(%output : ...)` | Embedding table lookup | Stub |
-| `hip.silu` | `(%handle) ins(%input : ...) outs(%output : ...)` | SiLU activation: `x * sigmoid(x)` | Stub |
-| `hip.gqa` | `(%handle, %layer, %start_pos, %seq_len) ins(%q, %k, %v : ...) outs(%kv_cache, %output : ...)` | Grouped query attention with KV cache | Stub |
+| `hip.transpose` | `(%ctx, %dim0, %dim1) ins(%input : ...) outs(%output : ...)` | N-D transpose swapping two dims | Full impl |
+| `hip.gather` | `(%ctx) ins(%indices, %table : ...) outs(%output : ...)` | Embedding table lookup | Stub |
+| `hip.silu` | `(%ctx) ins(%input : ...) outs(%output : ...)` | SiLU activation: `x * sigmoid(x)` | Stub |
+| `hip.gqa` | `(%ctx, %layer, %start_pos, %seq_len) ins(%q, %k, %v : ...) outs(%kv_cache, %output : ...)` | Grouped query attention with KV cache | Stub |
 
 ---
 
@@ -132,13 +130,12 @@ No runtime -- inlined and erased during lowering to LLVM.
 
 ```mlir
 func.func @two_matmuls(
+    %ctx: !hip.context,
     %A:  tensor<?x?x?xf32>,   // [B, S, K]
     %B0: tensor<?x?xf32>,     // [K, N]  (2D, broadcast across batch)
     %B1: tensor<?x?xf32>,     // [N, P]
     %C:  tensor<?x?x?xf32>)   // [B, S, P]  (output init)
     -> tensor<?x?x?xf32> {
-  %handle = hip.create_handle() : !hip.handle
-
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
   %B = tensor.dim %A, %c0 : tensor<?x?x?xf32>
@@ -146,15 +143,14 @@ func.func @two_matmuls(
   %N = tensor.dim %B0, %c1 : tensor<?x?xf32>
   %tmp_init = tensor.empty(%B, %S, %N) : tensor<?x?x?xf32>
 
-  %tmp = hip.hipblaslt.matmul(%handle)
+  %tmp = hip.hipblaslt.matmul(%ctx)
       ins(%A, %B0 : tensor<?x?x?xf32>, tensor<?x?xf32>)
       outs(%tmp_init : tensor<?x?x?xf32>) -> tensor<?x?x?xf32>
 
-  %C_out = hip.hipblaslt.matmul(%handle)
+  %C_out = hip.hipblaslt.matmul(%ctx)
       ins(%tmp, %B1 : tensor<?x?x?xf32>, tensor<?x?xf32>)
       outs(%C : tensor<?x?x?xf32>) -> tensor<?x?x?xf32>
 
-  hip.destroy_handle(%handle) : !hip.handle
   return %C_out : tensor<?x?x?xf32>
 }
 ```
@@ -191,7 +187,7 @@ Details of `--convert-hip-to-llvm`:
 - **`memref.alloc` / `memref.dealloc`** (if any remain) are converted
   to device allocation calls (`hip_device_malloc` / `hip_device_free`).
 - **Region ops** are inlined: body ops moved to parent block, region op erased.
-- **`!hip.handle`** is converted to `!llvm.ptr`.
+- **`!hip.context`** is converted to `!llvm.ptr`.
 
 The `hip-compiler` tool runs this pipeline automatically, then translates
 the resulting LLVM dialect to LLVM IR, generates a native `.obj`, and links it
@@ -210,7 +206,7 @@ For manual debugging, `hip-mlir-opt` can run the pass pipeline in isolation:
 ```
 include/hip/Dialect/IR/
   HipDialect.td            Dialect definition (namespace "hip")
-  HipTypes.td              Type definitions (!hip.handle)
+  HipTypes.td              Type definitions (!hip.context)
   HipOps.td                All op definitions (DPS ins/outs format)
   HipDialect.h             Dialect C++ header
   HipBufferize.h           Bufferization interface models

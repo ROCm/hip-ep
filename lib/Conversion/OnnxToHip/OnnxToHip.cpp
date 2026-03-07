@@ -264,9 +264,7 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
 ///
 /// In onnx-mlir's own pipeline a dedicated StandardFuncReturnPass handles
 /// this before lowering.  Since we bypass that pipeline we must do it
-/// ourselves.  This MUST run before insertHandleLifecycle(), which walks
-/// func::ReturnOp to place hip.destroy_handle -- if only onnx.Return is
-/// present the handle destroy would be silently skipped.
+/// ourselves.
 static void lowerOnnxReturns(mlir::func::FuncOp funcOp) {
   llvm::SmallVector<mlir::Operation *> returns;
   funcOp.walk([&](mlir::Operation *op) {
@@ -282,27 +280,25 @@ static void lowerOnnxReturns(mlir::func::FuncOp funcOp) {
   }
 }
 
-/// Insert hip.create_handle at function entry and hip.destroy_handle before
-/// each return. Returns the handle value.
-static mlir::Value insertHandleLifecycle(mlir::func::FuncOp funcOp,
-                                         mlir::MLIRContext *ctx) {
-  mlir::Block &entryBlock = funcOp.getBody().front();
-  mlir::OpBuilder entryBuilder(ctx);
-  entryBuilder.setInsertionPointToStart(&entryBlock);
-  mlir::Value handle = mlir::hip::CreateHandleOp::create(
-      entryBuilder, funcOp.getLoc(), mlir::hip::HandleType::get(ctx));
-
-  funcOp.walk([&](mlir::func::ReturnOp retOp) {
-    mlir::OpBuilder retBuilder(retOp);
-    mlir::hip::DestroyHandleOp::create(retBuilder, retOp.getLoc(), handle);
-  });
-
-  return handle;
+/// Get !hip.context from function argument 0. Returns failure if the
+/// function has no arguments or the first argument is not !hip.context.
+static mlir::FailureOr<mlir::Value>
+getContextArg(mlir::Operation *op, mlir::PatternRewriter &rewriter) {
+  auto funcOp = op->getParentOfType<mlir::func::FuncOp>();
+  if (!funcOp)
+    return rewriter.notifyMatchFailure(op, "not inside a function");
+  auto &entry = funcOp.getBody().front();
+  if (entry.getNumArguments() == 0)
+    return rewriter.notifyMatchFailure(op, "function has no arguments");
+  mlir::Value ctx = entry.getArgument(0);
+  if (!mlir::isa<mlir::hip::ContextType>(ctx.getType()))
+    return rewriter.notifyMatchFailure(op,
+                                       "first argument is not !hip.context");
+  return ctx;
 }
 
 static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
-                                             mlir::MLIRContext *ctx,
-                                             mlir::Value handle);
+                                             mlir::MLIRContext *ctx);
 
 //===----------------------------------------------------------------------===//
 // Rewrite Patterns
@@ -310,9 +306,8 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
 
 /// onnx.MatMul -> hip.hipblaslt.matmul
 struct MatMulToHip : public mlir::RewritePattern {
-  mlir::Value handle;
-  MatMulToHip(mlir::MLIRContext *ctx, mlir::Value handle)
-      : RewritePattern("onnx.MatMul", /*benefit=*/1, ctx), handle(handle) {}
+  MatMulToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.MatMul", /*benefit=*/1, ctx) {}
 
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
@@ -322,6 +317,11 @@ struct MatMulToHip : public mlir::RewritePattern {
 mlir::LogicalResult
 MatMulToHip::matchAndRewrite(mlir::Operation *op,
                              mlir::PatternRewriter &rewriter) const {
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
   mlir::Location loc = op->getLoc();
   mlir::Value a = op->getOperand(0);
   mlir::Value b = op->getOperand(1);
@@ -348,16 +348,15 @@ MatMulToHip::matchAndRewrite(mlir::Operation *op,
       mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
                                     resultType.getElementType(), dynSizes);
   auto hipOp = mlir::hip::HipblasltMatmulOp::create(rewriter, loc, resultType,
-                                                    handle, a, b, init);
+                                                    context, a, b, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
 
 /// onnx.Transpose -> hip.transpose
 struct TransposeToHip : public mlir::RewritePattern {
-  mlir::Value handle;
-  TransposeToHip(mlir::MLIRContext *ctx, mlir::Value handle)
-      : RewritePattern("onnx.Transpose", /*benefit=*/1, ctx), handle(handle) {}
+  TransposeToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Transpose", /*benefit=*/1, ctx) {}
 
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
@@ -367,6 +366,11 @@ struct TransposeToHip : public mlir::RewritePattern {
 mlir::LogicalResult
 TransposeToHip::matchAndRewrite(mlir::Operation *op,
                                 mlir::PatternRewriter &rewriter) const {
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
   mlir::Location loc = op->getLoc();
   mlir::Value data = op->getOperand(0);
 
@@ -413,17 +417,16 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value d0 = mlir::arith::ConstantIndexOp::create(rewriter, loc, dim0);
   mlir::Value d1 = mlir::arith::ConstantIndexOp::create(rewriter, loc, dim1);
 
-  auto hipOp = mlir::hip::TransposeOp::create(rewriter, loc, resultType, handle,
-                                              d0, d1, data, init);
+  auto hipOp = mlir::hip::TransposeOp::create(rewriter, loc, resultType,
+                                              context, d0, d1, data, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
 
 /// onnx.Mul -> hip.miopen.mul
 struct MulToHip : public mlir::RewritePattern {
-  mlir::Value handle;
-  MulToHip(mlir::MLIRContext *ctx, mlir::Value handle)
-      : RewritePattern("onnx.Mul", /*benefit=*/1, ctx), handle(handle) {}
+  MulToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Mul", /*benefit=*/1, ctx) {}
 
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
@@ -433,6 +436,11 @@ struct MulToHip : public mlir::RewritePattern {
 mlir::LogicalResult
 MulToHip::matchAndRewrite(mlir::Operation *op,
                           mlir::PatternRewriter &rewriter) const {
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
   mlir::Location loc = op->getLoc();
   mlir::Value a = op->getOperand(0);
   mlir::Value b = op->getOperand(1);
@@ -445,17 +453,16 @@ MulToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value source = (aType.getRank() == resultType.getRank()) ? a : b;
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
 
-  auto hipOp = mlir::hip::MiopenMulOp::create(rewriter, loc, resultType, handle,
-                                              a, b, init);
+  auto hipOp = mlir::hip::MiopenMulOp::create(rewriter, loc, resultType,
+                                              context, a, b, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
 
 /// onnx.Softmax -> hip.miopen.softmax
 struct SoftmaxToHip : public mlir::RewritePattern {
-  mlir::Value handle;
-  SoftmaxToHip(mlir::MLIRContext *ctx, mlir::Value handle)
-      : RewritePattern("onnx.Softmax", /*benefit=*/1, ctx), handle(handle) {}
+  SoftmaxToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Softmax", /*benefit=*/1, ctx) {}
 
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
@@ -465,13 +472,18 @@ struct SoftmaxToHip : public mlir::RewritePattern {
 mlir::LogicalResult
 SoftmaxToHip::matchAndRewrite(mlir::Operation *op,
                               mlir::PatternRewriter &rewriter) const {
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
   mlir::Location loc = op->getLoc();
   mlir::Value input = op->getOperand(0);
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
   auto hipOp = mlir::hip::MiopenSoftmaxOp::create(rewriter, loc, resultType,
-                                                  handle, input, init);
+                                                  context, input, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
@@ -481,13 +493,12 @@ SoftmaxToHip::matchAndRewrite(mlir::Operation *op,
 //===----------------------------------------------------------------------===//
 
 static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
-                                             mlir::MLIRContext *ctx,
-                                             mlir::Value handle) {
+                                             mlir::MLIRContext *ctx) {
   mlir::RewritePatternSet patterns(ctx);
-  patterns.add<MatMulToHip>(ctx, handle);
-  patterns.add<TransposeToHip>(ctx, handle);
-  patterns.add<MulToHip>(ctx, handle);
-  patterns.add<SoftmaxToHip>(ctx, handle);
+  patterns.add<MatMulToHip>(ctx);
+  patterns.add<TransposeToHip>(ctx);
+  patterns.add<MulToHip>(ctx);
+  patterns.add<SoftmaxToHip>(ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
@@ -546,8 +557,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
             module, funcOp, externalizeMinNumElements, extState.get())))
       return signalPassFailure();
     lowerOnnxReturns(funcOp);
-    mlir::Value handle = insertHandleLifecycle(funcOp, ctx);
-    if (mlir::failed(convertComputeOps(funcOp, ctx, handle)))
+    if (mlir::failed(convertComputeOps(funcOp, ctx)))
       return signalPassFailure();
   }
 

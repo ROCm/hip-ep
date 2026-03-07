@@ -22,13 +22,13 @@
 // CHECK:         hip.miopen.softmax{{.*}}outs(%[[V1]] :
 // CHECK:         return %[[V1]]
 func.func @static_two_allocs(
-    %handle: !hip.handle,
+    %ctx: !hip.context,
     %a: memref<8x8xf32, strided<[?, ?], offset: ?>>,
     %b: memref<8x8xf32, strided<[?, ?], offset: ?>>) -> memref<8x8xf32> {
   %alloc0 = memref.alloc() : memref<8x8xf32>
-  hip.hipblaslt.matmul(%handle) ins(%a, %b : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<8x8xf32>)
+  hip.hipblaslt.matmul(%ctx) ins(%a, %b : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<8x8xf32>)
   %alloc1 = memref.alloc() : memref<8x8xf32>
-  hip.miopen.softmax(%handle) ins(%alloc0 : memref<8x8xf32>) outs(%alloc1 : memref<8x8xf32>)
+  hip.miopen.softmax(%ctx) ins(%alloc0 : memref<8x8xf32>) outs(%alloc1 : memref<8x8xf32>)
   return %alloc1 : memref<8x8xf32>
 }
 
@@ -43,15 +43,15 @@ func.func @static_two_allocs(
 // CHECK-COUNT-3: memref.view %[[POOL]]
 // CHECK:         return
 func.func @static_three_allocs_overlap(
-    %handle: !hip.handle,
+    %ctx: !hip.context,
     %a: memref<8x8xf32, strided<[?, ?], offset: ?>>,
     %b: memref<8x8xf32, strided<[?, ?], offset: ?>>) -> memref<8x8xf32> {
   %alloc0 = memref.alloc() : memref<8x8xf32>
-  hip.hipblaslt.matmul(%handle) ins(%a, %b : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<8x8xf32>)
+  hip.hipblaslt.matmul(%ctx) ins(%a, %b : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<8x8xf32>)
   %alloc1 = memref.alloc() : memref<8x8xf32>
-  hip.miopen.softmax(%handle) ins(%alloc0 : memref<8x8xf32>) outs(%alloc1 : memref<8x8xf32>)
+  hip.miopen.softmax(%ctx) ins(%alloc0 : memref<8x8xf32>) outs(%alloc1 : memref<8x8xf32>)
   %alloc2 = memref.alloc() : memref<8x8xf32>
-  hip.miopen.softmax(%handle) ins(%alloc1 : memref<8x8xf32>) outs(%alloc2 : memref<8x8xf32>)
+  hip.miopen.softmax(%ctx) ins(%alloc1 : memref<8x8xf32>) outs(%alloc2 : memref<8x8xf32>)
   return %alloc2 : memref<8x8xf32>
 }
 
@@ -66,14 +66,14 @@ func.func @static_three_allocs_overlap(
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<{{[0-9]+}}xi8> to memref<8x8xf16>
 // CHECK:         return
 func.func @mixed_element_types(
-    %handle: !hip.handle,
+    %ctx: !hip.context,
     %a: memref<8x8xf32, strided<[?, ?], offset: ?>>,
     %b: memref<8x8xf32, strided<[?, ?], offset: ?>>,
     %c: memref<8x8xf16>) -> memref<8x8xf16> {
   %alloc0 = memref.alloc() : memref<8x8xf32>
-  hip.hipblaslt.matmul(%handle) ins(%a, %b : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<8x8xf32>)
+  hip.hipblaslt.matmul(%ctx) ins(%a, %b : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<8x8xf32>)
   %alloc1 = memref.alloc() : memref<8x8xf16>
-  hip.miopen.softmax(%handle) ins(%c : memref<8x8xf16>) outs(%alloc1 : memref<8x8xf16>)
+  hip.miopen.softmax(%ctx) ins(%c : memref<8x8xf16>) outs(%alloc1 : memref<8x8xf16>)
   return %alloc1 : memref<8x8xf16>
 }
 
@@ -84,11 +84,11 @@ func.func @mixed_element_types(
 // CHECK:         memref.alloc() : memref<8x8xf32>
 // CHECK:         return
 func.func @single_alloc_noop(
-    %handle: !hip.handle,
+    %ctx: !hip.context,
     %a: memref<8x8xf32, strided<[?, ?], offset: ?>>,
     %b: memref<8x8xf32, strided<[?, ?], offset: ?>>) -> memref<8x8xf32> {
   %alloc0 = memref.alloc() : memref<8x8xf32>
-  hip.hipblaslt.matmul(%handle) ins(%a, %b : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<8x8xf32>)
+  hip.hipblaslt.matmul(%ctx) ins(%a, %b : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<8x8xf32>)
   return %alloc0 : memref<8x8xf32>
 }
 
@@ -99,10 +99,10 @@ func.func @single_alloc_noop(
 // CHECK:         hip.miopen.softmax
 // CHECK:         return
 func.func @no_allocs_noop(
-    %handle: !hip.handle,
+    %ctx: !hip.context,
     %in: memref<8x8xf32>,
     %out: memref<8x8xf32>) {
-  hip.miopen.softmax(%handle) ins(%in : memref<8x8xf32>) outs(%out : memref<8x8xf32>)
+  hip.miopen.softmax(%ctx) ins(%in : memref<8x8xf32>) outs(%out : memref<8x8xf32>)
   return
 }
 
@@ -116,14 +116,14 @@ func.func @no_allocs_noop(
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<?x8xf32>
 // CHECK:         return
 func.func @dynamic_two_allocs_same_size(
-    %handle: !hip.handle,
+    %ctx: !hip.context,
     %a: memref<?x8xf32>,
     %b: memref<8x8xf32, strided<[?, ?], offset: ?>>,
     %n: index) -> memref<?x8xf32> {
   %alloc0 = memref.alloc(%n) : memref<?x8xf32>
-  hip.hipblaslt.matmul(%handle) ins(%a, %b : memref<?x8xf32>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<?x8xf32>)
+  hip.hipblaslt.matmul(%ctx) ins(%a, %b : memref<?x8xf32>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<?x8xf32>)
   %alloc1 = memref.alloc(%n) : memref<?x8xf32>
-  hip.miopen.softmax(%handle) ins(%alloc0 : memref<?x8xf32>) outs(%alloc1 : memref<?x8xf32>)
+  hip.miopen.softmax(%ctx) ins(%alloc0 : memref<?x8xf32>) outs(%alloc1 : memref<?x8xf32>)
   return %alloc1 : memref<?x8xf32>
 }
 
@@ -138,15 +138,15 @@ func.func @dynamic_two_allocs_same_size(
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<?x8xf32>
 // CHECK:         return
 func.func @mixed_static_dynamic(
-    %handle: !hip.handle,
+    %ctx: !hip.context,
     %a: memref<8x8xf32, strided<[?, ?], offset: ?>>,
     %b: memref<8x8xf32, strided<[?, ?], offset: ?>>,
     %c: memref<?x8xf32>,
     %n: index) -> memref<?x8xf32> {
   %alloc0 = memref.alloc() : memref<8x8xf32>
-  hip.hipblaslt.matmul(%handle) ins(%a, %b : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<8x8xf32>)
+  hip.hipblaslt.matmul(%ctx) ins(%a, %b : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<8x8xf32>)
   %alloc1 = memref.alloc(%n) : memref<?x8xf32>
-  hip.miopen.softmax(%handle) ins(%c : memref<?x8xf32>) outs(%alloc1 : memref<?x8xf32>)
+  hip.miopen.softmax(%ctx) ins(%c : memref<?x8xf32>) outs(%alloc1 : memref<?x8xf32>)
   return %alloc1 : memref<?x8xf32>
 }
 
@@ -163,11 +163,11 @@ func.func @mixed_static_dynamic(
 // CHECK:         memref.view %[[POOL]]
 // CHECK:         return
 func.func @alignment_256(
-    %handle: !hip.handle,
+    %ctx: !hip.context,
     %in: memref<1xf32>) -> memref<1xf32> {
   %alloc0 = memref.alloc() : memref<1xf32>
-  hip.miopen.softmax(%handle) ins(%in : memref<1xf32>) outs(%alloc0 : memref<1xf32>)
+  hip.miopen.softmax(%ctx) ins(%in : memref<1xf32>) outs(%alloc0 : memref<1xf32>)
   %alloc1 = memref.alloc() : memref<1xf32>
-  hip.miopen.softmax(%handle) ins(%alloc0 : memref<1xf32>) outs(%alloc1 : memref<1xf32>)
+  hip.miopen.softmax(%ctx) ins(%alloc0 : memref<1xf32>) outs(%alloc1 : memref<1xf32>)
   return %alloc1 : memref<1xf32>
 }
