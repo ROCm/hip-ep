@@ -9,6 +9,18 @@
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE) >= n)
+
+// 64-bit file position helpers.
+// On Windows MSVC (LLP64), `long` is 32-bit, so std::ftell / std::fseek can
+// only handle files up to 2 GB. Use platform-specific 64-bit variants instead.
+#ifdef _WIN32
+#  define FTELL64(f) _ftelli64(f)
+#  define FSEEK64(f, o, w) _fseeki64(f, o, w)
+#else
+#  define FTELL64(f) ftello(f)
+#  define FSEEK64(f, o, w) fseeko(f, o, w)
+#endif
+
 namespace morphizen {
 FileBuf::FileBuf(FILE* file, std::size_t buffer_size) {
   // Constructor to initialize the file stream buffer
@@ -26,8 +38,8 @@ FileBuf::FileBuf(FILE* file, std::size_t buffer_size) {
       put_buffer_.data(),
       put_buffer_.data() + put_buffer_.size() -
           1 /*overflow() needs one more ch to be written*/); // Set write buffer
-  get_pos_ = ftell(file_); // Initialize current position
-  put_pos_ = get_pos_;     // Initialize current position
+  get_pos_ = FTELL64(file_); // Initialize current position
+  put_pos_ = get_pos_;       // Initialize current position
   CHECK_NE(get_pos_, -1) << " cannot ftell";
   MY_LOG(1) << " init done: "
             << "pos_=" << get_pos_ << ";" //
@@ -43,24 +55,24 @@ FileBuf::~FileBuf() {
 
 std::streambuf::int_type FileBuf::underflow() {
   // Handles reading from FILE*
-  auto old_pos = std::ftell(file_);
+  auto old_pos = FTELL64(file_);
   if (old_pos == -1) {
     MY_LOG(1) << "conner case, cannot test current file position.";
     return traits_type::eof(); // Error in getting position
   }
   auto restore_old_pos =
       std::shared_ptr<void>(nullptr, [old_pos, this](void* /*p*/) {
-        auto r = std::fseek(file_, old_pos, SEEK_SET);
+        auto r = FSEEK64(file_, old_pos, SEEK_SET);
         CHECK(r == 0) << " conner case: fseek fail";
       });
-  auto r = std::fseek(file_, (long)get_pos_, SEEK_SET);
+  auto r = FSEEK64(file_, get_pos_, SEEK_SET);
   CHECK(r == 0) << " conner case: fseek fail";
   std::size_t num_of_element_read = std::fread(
       get_buffer_.data(), sizeof(char_type), get_buffer_.size(), file_);
   if (num_of_element_read == 0) {
     return traits_type::eof();
   }
-  get_pos_ = ftell(file_);
+  get_pos_ = FTELL64(file_);
   CHECK_NE(get_pos_, -1) << "cannot ftell";
   setg(get_buffer_.data(), get_buffer_.data(),
        get_buffer_.data() + num_of_element_read);
@@ -74,17 +86,17 @@ std::streambuf::int_type FileBuf::overflow(int_type ch) {
     end++; // it is safe, because put_buffer.size() is one more than the buffer
            // size;
   }
-  auto old_pos = std::ftell(file_);
+  auto old_pos = FTELL64(file_);
   if (old_pos == -1) {
     MY_LOG(1) << "conner case, cannot test current file position.";
     return traits_type::eof(); // Error in getting position
   }
   auto restore_old_pos =
       std::shared_ptr<void>(nullptr, [old_pos, this](void* /*p*/) {
-        auto r = std::fseek(file_, old_pos, SEEK_SET);
+        auto r = FSEEK64(file_, old_pos, SEEK_SET);
         CHECK(r == 0) << " conner case: fseek fail";
       });
-  auto r = std::fseek(file_, (long)put_pos_, SEEK_SET);
+  auto r = FSEEK64(file_, put_pos_, SEEK_SET);
   CHECK(r == 0) << " conner case: fseek fail";
   auto num_of_elements = static_cast<std::size_t>(end - pbase());
   auto num_of_element_written =
@@ -93,7 +105,7 @@ std::streambuf::int_type FileBuf::overflow(int_type ch) {
   setp(put_buffer_.data(),
        put_buffer_.data() + put_buffer_.size() -
            1 /*overflow() needs one more ch to be written*/);
-  put_pos_ = std::ftell(file_);
+  put_pos_ = FTELL64(file_);
   CHECK_GE(put_pos_, 0);
   return ch; // Typically, ch is returned to indicate success.
 }
@@ -121,19 +133,19 @@ std::streampos FileBuf::seekoff_in(std::streamoff offset,
   if (way == std::ios_base::cur) {
     new_get_pos = new_get_pos + offset;
   } else if (way == std::ios_base::end) {
-    auto old_pos = std::ftell(file_);
+    auto old_pos = FTELL64(file_);
     if (old_pos == -1) {
       MY_LOG(1) << "conner case, cannot test current file position.";
       return -1;
     }
     auto restore_old_pos =
         std::shared_ptr<void>(nullptr, [old_pos, this](void* /*p*/) {
-          auto r = std::fseek(file_, old_pos, SEEK_SET);
+          auto r = FSEEK64(file_, old_pos, SEEK_SET);
           CHECK(r == 0) << " conner case: fseek fail";
         });
-    auto r = std::fseek(file_, old_pos, SEEK_END);
+    auto r = FSEEK64(file_, old_pos, SEEK_END);
     CHECK(r == 0) << " conner case: fseek fail";
-    new_get_pos = ftell(file_);
+    new_get_pos = FTELL64(file_);
     CHECK_NE(new_get_pos, -1) << "ftell failed.";
   } else if (way == std::ios_base::beg) {
     new_get_pos = offset;
@@ -157,19 +169,19 @@ std::streampos FileBuf::seekoff_out(std::streamoff offset,
   if (way == std::ios_base::cur) {
     new_put_pos = new_put_pos + offset;
   } else if (way == std::ios_base::end) {
-    auto old_pos = std::ftell(file_);
+    auto old_pos = FTELL64(file_);
     if (old_pos == -1) {
       MY_LOG(1) << "conner case, cannot test current file position.";
       return -1;
     }
     auto restore_old_pos =
         std::shared_ptr<void>(nullptr, [old_pos, this](void* /*p*/) {
-          auto r = std::fseek(file_, old_pos, SEEK_SET);
+          auto r = FSEEK64(file_, old_pos, SEEK_SET);
           CHECK(r == 0) << " conner case: fseek fail";
         });
-    auto r = std::fseek(file_, old_pos, SEEK_END);
+    auto r = FSEEK64(file_, old_pos, SEEK_END);
     CHECK(r == 0) << " conner case: fseek fail";
-    new_put_pos = ftell(file_);
+    new_put_pos = FTELL64(file_);
     CHECK_NE(new_put_pos, -1) << "ftell failed.";
     new_put_pos = new_put_pos + offset;
   } else if (way == std::ios_base::beg) {
@@ -191,17 +203,17 @@ std::streampos FileBuf::seekpos(std::streampos pos,
 }
 
 bool FileBuf::flush_buffer() {
-  auto old_pos = std::ftell(file_);
+  auto old_pos = FTELL64(file_);
   if (old_pos == -1) {
     MY_LOG(1) << "conner case, cannot test current file position.";
     return false;
   }
   auto restore_old_pos =
       std::shared_ptr<void>(nullptr, [old_pos, this](void* /*p*/) {
-        auto r = std::fseek(file_, old_pos, SEEK_SET);
+        auto r = FSEEK64(file_, old_pos, SEEK_SET);
         CHECK(r == 0) << " conner case: fseek fail";
       });
-  auto r = std::fseek(file_, (long)put_pos_, SEEK_SET);
+  auto r = FSEEK64(file_, put_pos_, SEEK_SET);
   CHECK(r == 0) << " conner case: fseek fail";
   std::ptrdiff_t count = pptr() - pbase();
   if (count > 0) {
