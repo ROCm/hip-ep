@@ -671,14 +671,29 @@ private:
         loc, initFunc,
         ValueRange{outStatePtr, fsPtr, blobPtr, blobSizeVal});
 
-    // Check if memory pooling is enabled (module has pool metadata)
+    // MemoryPoolingPass must always emit all three pool attributes (even when
+    // pool_size is 0).  Missing attributes means the pass was skipped or buggy.
     auto poolSizeAttr = module->getAttrOfType<IntegerAttr>("hipdnn.pool_size");
     auto bufferOffsetsAttr =
         module->getAttrOfType<ArrayAttr>("hipdnn.buffer_offsets");
     auto bufferCountAttr =
         module->getAttrOfType<IntegerAttr>("hipdnn.buffer_count");
 
-    if (poolSizeAttr && bufferOffsetsAttr && bufferCountAttr) {
+    if (!poolSizeAttr || !bufferOffsetsAttr || !bufferCountAttr) {
+      llvm::errs()
+          << "[GenerateInterface] FATAL: memory pool attributes missing.\n"
+          << "  hipdnn.pool_size: " << (poolSizeAttr ? "present" : "MISSING")
+          << "\n"
+          << "  hipdnn.buffer_offsets: "
+          << (bufferOffsetsAttr ? "present" : "MISSING") << "\n"
+          << "  hipdnn.buffer_count: "
+          << (bufferCountAttr ? "present" : "MISSING") << "\n"
+          << "  Ensure MemoryPoolingPass runs before GenerateInterface.\n";
+      signalPassFailure();
+      return;
+    }
+
+    if (poolSizeAttr.getInt() > 0) {
       // Initialize memory pool
       size_t poolSize = poolSizeAttr.getInt();
       size_t numBuffers = bufferCountAttr.getInt();
@@ -740,7 +755,7 @@ private:
       // Return pool init result
       builder.create<LLVM::ReturnOp>(loc, poolInitCall.getResult());
     } else {
-      // No pooling - return init result directly
+      // No pooling needed — return init result directly
       builder.create<LLVM::ReturnOp>(loc, initCall.getResult());
     }
   }

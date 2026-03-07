@@ -7,9 +7,9 @@
 // CHECK: Wrote constant
 module {
   func.func @main_graph(%arg0: tensor<1x128x4096xf16> {onnx.name = "/model/layers.0/post_attention_layernorm/output_0"}) -> (tensor<1x128x4096xf16> {onnx.name = "/model/layers.0/mlp/down_proj/MatMul/output_0"}) {
-    %0 = onnx.Constant dense<1.000000e+00> : tensor<4096x14336xf16>
-    %1 = onnx.Constant dense<1.000000e+00> : tensor<4096x14336xf16>
-    %2 = onnx.Constant dense<1.000000e+00> : tensor<14336x4096xf16>
+    %0 = onnx.Constant dense<5.000000e-03> : tensor<4096x14336xf16>
+    %1 = onnx.Constant dense<5.000000e-03> : tensor<4096x14336xf16>
+    %2 = onnx.Constant dense<5.000000e-03> : tensor<14336x4096xf16>
     %3 = "onnx.MatMul"(%arg0, %0) {onnx_node_name = "/model/layers.0/mlp/gate_proj/MatMul"} : (tensor<1x128x4096xf16>, tensor<4096x14336xf16>) -> tensor<1x128x14336xf16>
     %4 = "onnx.MatMul"(%arg0, %1) {onnx_node_name = "/model/layers.0/mlp/up_proj/MatMul"} : (tensor<1x128x4096xf16>, tensor<4096x14336xf16>) -> tensor<1x128x14336xf16>
     %5 = "onnx.Sigmoid"(%3) {onnx_node_name = "/model/layers.0/mlp/act_fn/Sigmoid"} : (tensor<1x128x14336xf16>) -> tensor<1x128x14336xf16>

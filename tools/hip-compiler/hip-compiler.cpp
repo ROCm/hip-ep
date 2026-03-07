@@ -17,10 +17,10 @@
 
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/InitLLVM.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/raw_ostream.h"
 
-#include <fstream>
 #include <iostream>
-#include <sstream>
 #include <string>
 
 using namespace hip::compiler;
@@ -28,6 +28,7 @@ using namespace hip::compiler;
 struct Options {
   std::string inputFilename;
   std::string outputFilename = "output.dll";
+  bool outputSpecified = false;
   // CLI-only: needed to detect "onnx-mlir" special mode that exits before
   // compilation and has no equivalent in CompilationOptionsT.
   std::string outputModeStr = "dll";
@@ -43,6 +44,7 @@ struct Options {
       std::string arg = argv[i];
       if (arg == "-o" && i + 1 < argc) {
         outputFilename = argv[++i];
+        outputSpecified = true;
       } else if (arg == "--mode" && i + 1 < argc) {
         outputModeStr = argv[++i];
         if (outputModeStr == "ir") {
@@ -101,7 +103,8 @@ struct Options {
         << "  dll                Compile to DLL (default)\n"
         << "  ir                 Emit LLVM IR\n"
 #ifdef ENABLE_ONNX_FRONTEND
-        << "  onnx-mlir          Import ONNX and print ONNX dialect MLIR\n"
+        << "  onnx-mlir          Import ONNX and emit ONNX dialect MLIR\n"
+        << "                     (prints to stdout; use -o to write to file)\n"
 #endif
         ;
   }
@@ -161,8 +164,21 @@ int main(int argc, char** argv) {
     }
 
     if (opts.outputModeStr == "onnx-mlir") {
-      module->print(llvm::outs());
-      llvm::outs() << "\n";
+      if (opts.outputSpecified) {
+        std::error_code ec;
+        llvm::raw_fd_ostream outFile(opts.outputFilename, ec);
+        if (ec) {
+          std::cerr << "Error: Cannot open output file: " << opts.outputFilename
+                    << ": " << ec.message() << "\n";
+          return 1;
+        }
+        module->print(outFile);
+        outFile << "\n";
+        std::cout << "MLIR written to: " << opts.outputFilename << "\n";
+      } else {
+        module->print(llvm::outs());
+        llvm::outs() << "\n";
+      }
       return 0;
     }
 
@@ -192,17 +208,20 @@ int main(int argc, char** argv) {
   }
 #endif
 
-  // Standard MLIR input path (binary mode for MLIR bytecode support)
-  std::ifstream inputFile(opts.inputFilename, std::ios::binary);
-  if (!inputFile) {
-    std::cerr << "Error: Cannot open input file: " << opts.inputFilename
-              << "\n";
+  // Standard MLIR input path — use MemoryBuffer (mmap) to avoid reading
+  // the entire file into a std::string, which OOMs on large models.
+  if (opts.outputModeStr == "onnx-mlir") {
+    std::cerr << "Error: --mode onnx-mlir requires .onnx input file\n";
     return 1;
   }
 
-  std::string inputMLIR(
-      (std::istreambuf_iterator<char>(inputFile)),
-      std::istreambuf_iterator<char>());
+  auto bufferOrErr = llvm::MemoryBuffer::getFile(opts.inputFilename);
+  if (!bufferOrErr) {
+    std::cerr << "Error: Cannot open input file: " << opts.inputFilename
+              << ": " << bufferOrErr.getError().message() << "\n";
+    return 1;
+  }
+  llvm::StringRef inputMLIR = (*bufferOrErr)->getBuffer();
 
   CompilerDriver pipeline;
   auto fs = makeFileSystem(opts.constantsDir);
