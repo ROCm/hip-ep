@@ -46,8 +46,10 @@ The `--convert-onnx-to-hip` pass performs the following transformations:
    - `ONNXTransposeOp` → `hip.transpose`
    - `ONNXMulOp` → `hip.miopen.mul`
    - `ONNXSoftmaxOp` → `hip.miopen.softmax`
-3. **Handle lifecycle** -- `hip.create_handle` / `hip.destroy_handle` are inserted
-4. **Cleanup** -- `onnx.EntryPoint` is erased
+3. **Cleanup** -- `onnx.EntryPoint` is erased
+
+The `hip-add-context-arg` pass must run before this pass to inject `!hip.context`
+as function argument 0.
 
 After this pass, the IR is in HIP dialect with tensor types. The standard
 `--one-shot-bufferize` pass then converts tensors to memrefs, followed by the
