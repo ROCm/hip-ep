@@ -28,8 +28,6 @@ namespace hip {
 
 namespace {
 
-static constexpr const char *kHipCreateHandle = "hipCreateHandle";
-static constexpr const char *kHipDestroyHandle = "hipDestroyHandle";
 static constexpr const char *kHipMalloc = "hip_device_malloc";
 static constexpr const char *kHipFree = "hip_device_free";
 
@@ -62,55 +60,7 @@ static Value extractMemRefPtr(Value memrefDesc,
   return ptr;
 }
 
-// --- CreateHandleOp: hip.create_handle() -> llvm.call @hipCreateHandle()
-struct CreateHandleOpLowering : public ConvertOpToLLVMPattern<CreateHandleOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
-
-  LogicalResult
-  matchAndRewrite(CreateHandleOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    Location loc = op.getLoc();
-    ModuleOp module = op->getParentOfType<ModuleOp>();
-    Type ptrType = getPtrType();
-
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kHipCreateHandle, /*paramTypes=*/{}, ptrType);
-    if (failed(funcOp))
-      return failure();
-
-    auto callOp = LLVM::CallOp::create(rewriter, loc, *funcOp, ValueRange());
-    rewriter.replaceOp(op, callOp.getResult());
-    return success();
-  }
-};
-
-// --- DestroyHandleOp: hip.destroy_handle(%h) -> llvm.call
-// @hipDestroyHandle(%h)
-struct DestroyHandleOpLowering
-    : public ConvertOpToLLVMPattern<DestroyHandleOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
-
-  LogicalResult
-  matchAndRewrite(DestroyHandleOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    Location loc = op.getLoc();
-    ModuleOp module = op->getParentOfType<ModuleOp>();
-    Type voidType = getVoidType();
-    Type ptrType = getPtrType();
-
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kHipDestroyHandle, ptrType, voidType);
-    if (failed(funcOp))
-      return failure();
-
-    LLVM::CallOp::create(rewriter, loc, *funcOp, adaptor.getHandle());
-    rewriter.eraseOp(op);
-    return success();
-  }
-};
-
-// --- AllocOp: hip.alloc(%handle, %dyn...) -> hipMalloc(bytes) + memref
-// descriptor
+// --- AllocOp: hip.alloc(%ctx, %dyn...) -> hipMalloc(bytes) + memref descriptor
 struct AllocOpLowering : public ConvertOpToLLVMPattern<AllocOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -132,7 +82,7 @@ struct AllocOpLowering : public ConvertOpToLLVMPattern<AllocOp> {
     if (failed(mallocFn))
       return failure();
 
-    // Compute sizes and sizeBytes (dynamic sizes are after the handle).
+    // Compute sizes and sizeBytes (dynamic sizes are after the ctx).
     SmallVector<Value, 4> sizes;
     SmallVector<Value, 4> strides;
     Value sizeBytes;
@@ -165,7 +115,7 @@ struct AllocOpLowering : public ConvertOpToLLVMPattern<AllocOp> {
   }
 };
 
-// --- FreeOp: hip.free(%handle, %memref) -> llvm.call @hipFree(allocated_ptr)
+// --- FreeOp: hip.free(%ctx, %memref) -> llvm.call @hipFree(allocated_ptr)
 struct FreeOpLowering : public ConvertOpToLLVMPattern<FreeOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -260,7 +210,7 @@ struct HipblasltMatmulOpLowering
     Value K = aDesc.size(rewriter, loc, rankA - 1);
     Value N = bDesc.size(rewriter, loc, rankB - 1);
 
-    SmallVector<Value> args = {adaptor.getHandle(),
+    SmallVector<Value> args = {adaptor.getCtx(),
                                extractMemRefPtr(adaptor.getA(), rewriter, loc),
                                extractMemRefPtr(adaptor.getB(), rewriter, loc),
                                extractMemRefPtr(adaptor.getC(), rewriter, loc),
@@ -314,7 +264,7 @@ struct MiopenRmsNormOpLowering
                               inputDesc.size(rewriter, loc, i));
 
     SmallVector<Value> args = {
-        adaptor.getHandle(),
+        adaptor.getCtx(),
         extractMemRefPtr(adaptor.getInput(), rewriter, loc),
         extractMemRefPtr(adaptor.getWeight(), rewriter, loc),
         extractMemRefPtr(adaptor.getOutput(), rewriter, loc),
@@ -347,7 +297,7 @@ struct MiopenSkipRmsNormOpLowering
       return failure();
 
     SmallVector<Value> args = {
-        adaptor.getHandle(),
+        adaptor.getCtx(),
         extractMemRefPtr(adaptor.getX(), rewriter, loc),
         extractMemRefPtr(adaptor.getSkip(), rewriter, loc),
         extractMemRefPtr(adaptor.getWeight(), rewriter, loc),
@@ -381,7 +331,7 @@ struct MiopenRopeOpLowering : public ConvertOpToLLVMPattern<MiopenRopeOp> {
       return failure();
 
     SmallVector<Value> args = {
-        adaptor.getHandle(),
+        adaptor.getCtx(),
         extractMemRefPtr(adaptor.getQ(), rewriter, loc),
         extractMemRefPtr(adaptor.getK(), rewriter, loc),
         extractMemRefPtr(adaptor.getCosCache(), rewriter, loc),
@@ -442,7 +392,7 @@ struct MiopenBinaryOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     Value numA = computeNumElements(aType, adaptor.getA(), rewriter, loc);
     Value numB = computeNumElements(bType, adaptor.getB(), rewriter, loc);
 
-    SmallVector<Value> args = {adaptor.getHandle(),
+    SmallVector<Value> args = {adaptor.getCtx(),
                                extractMemRefPtr(adaptor.getA(), rewriter, loc),
                                extractMemRefPtr(adaptor.getB(), rewriter, loc),
                                extractMemRefPtr(adaptor.getC(), rewriter, loc),
@@ -489,8 +439,7 @@ struct MiopenSoftmaxOpLowering
                                  inputDesc.size(rewriter, loc, i));
 
     SmallVector<Value> args = {
-        adaptor.getHandle(),
-        extractMemRefPtr(adaptor.getInput(), rewriter, loc),
+        adaptor.getCtx(), extractMemRefPtr(adaptor.getInput(), rewriter, loc),
         extractMemRefPtr(adaptor.getOutput(), rewriter, loc), rows, cols};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
@@ -542,7 +491,7 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
                                     : one);
 
     SmallVector<Value> args = {
-        adaptor.getHandle(),
+        adaptor.getCtx(),
         extractMemRefPtr(adaptor.getInput(), rewriter, loc),
         extractMemRefPtr(adaptor.getOutput(), rewriter, loc),
         rankVal,
@@ -577,8 +526,7 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
       return failure();
 
     SmallVector<Value> args = {
-        adaptor.getHandle(),
-        extractMemRefPtr(adaptor.getIndices(), rewriter, loc),
+        adaptor.getCtx(), extractMemRefPtr(adaptor.getIndices(), rewriter, loc),
         extractMemRefPtr(adaptor.getTable(), rewriter, loc),
         extractMemRefPtr(adaptor.getOutput(), rewriter, loc)};
 
@@ -607,8 +555,7 @@ struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
       return failure();
 
     SmallVector<Value> args = {
-        adaptor.getHandle(),
-        extractMemRefPtr(adaptor.getInput(), rewriter, loc),
+        adaptor.getCtx(), extractMemRefPtr(adaptor.getInput(), rewriter, loc),
         extractMemRefPtr(adaptor.getOutput(), rewriter, loc)};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
@@ -639,7 +586,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
       return failure();
 
     SmallVector<Value> args = {
-        adaptor.getHandle(),
+        adaptor.getCtx(),
         extractMemRefPtr(adaptor.getQ(), rewriter, loc),
         extractMemRefPtr(adaptor.getK(), rewriter, loc),
         extractMemRefPtr(adaptor.getV(), rewriter, loc),
@@ -742,18 +689,18 @@ void ConvertHipToLLVMPass::runOnOperation() {
   LowerToLLVMOptions options(ctx);
   LLVMTypeConverter typeConverter(ctx, options);
 
-  // !hip.handle -> !llvm.ptr (opaque pointer to runtime context)
-  typeConverter.addConversion([ctx](HandleType type) -> Type {
+  // !hip.context -> !llvm.ptr (opaque pointer to runtime context)
+  typeConverter.addConversion([ctx](ContextType type) -> Type {
     return LLVM::LLVMPointerType::get(ctx, 0);
   });
 
   RewritePatternSet patterns(ctx);
-  patterns.add<CreateHandleOpLowering, DestroyHandleOpLowering, AllocOpLowering,
-               FreeOpLowering, MiopenGraphOpLowering, HipblasltGraphOpLowering,
-               HipblasltMatmulOpLowering, MiopenRmsNormOpLowering,
-               MiopenSkipRmsNormOpLowering, MiopenRopeOpLowering,
-               MiopenSoftmaxOpLowering, TransposeOpLowering, GatherOpLowering,
-               SiluOpLowering, GqaOpLowering>(typeConverter);
+  patterns
+      .add<AllocOpLowering, FreeOpLowering, MiopenGraphOpLowering,
+           HipblasltGraphOpLowering, HipblasltMatmulOpLowering,
+           MiopenRmsNormOpLowering, MiopenSkipRmsNormOpLowering,
+           MiopenRopeOpLowering, MiopenSoftmaxOpLowering, TransposeOpLowering,
+           GatherOpLowering, SiluOpLowering, GqaOpLowering>(typeConverter);
   patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter,
                                                        kMiopenAdd);
   patterns.insert<MiopenBinaryOpLowering<MiopenMulOp>>(typeConverter,

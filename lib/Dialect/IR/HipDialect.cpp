@@ -34,20 +34,6 @@ void HipDialect::initialize() {
 // Non-DPS ops: memory effect declarations
 //===----------------------------------------------------------------------===//
 
-void CreateHandleOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
-  effects.emplace_back(MemoryEffects::Write::get(),
-                       SideEffects::DefaultResource::get());
-}
-
-void DestroyHandleOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
-  effects.emplace_back(MemoryEffects::Write::get(),
-                       SideEffects::DefaultResource::get());
-}
-
 void AllocOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
@@ -59,7 +45,7 @@ void AllocOp::getEffects(
 void FreeOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  // memref is operand #1 (operand #0 is handle)
+  // memref is operand #1 (operand #0 is ctx)
   effects.emplace_back(MemoryEffects::Free::get(),
                        &getOperation()->getOpOperand(1),
                        SideEffects::DefaultResource::get());
@@ -71,7 +57,7 @@ void FreeOp::getEffects(
 
 static bool isTensorMode(Value v) { return isa<RankedTensorType>(v.getType()); }
 
-/// Verify that all data operands (skipping handle and Index args) are
+/// Verify that all data operands (skipping ctx and Index args) are
 /// uniformly tensor or memref, and that results match the mode.
 static LogicalResult verifyDpsComputeOp(Operation *op,
                                         ArrayRef<Value> dataOperands,
@@ -129,13 +115,13 @@ static void emitDpsMemoryEffects(
 // Generic DPS assembly format: parse / print
 //
 // Single-output ops:
-//   Tensor:  %r = hip.op(%handle) ins(%a, %b : T1, T2)
-//                                  outs(%c : T3) -> T3
-//   Memref:  hip.op(%handle) ins(%a, %b : M1, M2) outs(%c : M3)
+//   Tensor:  %r = hip.op(%ctx) ins(%a, %b : T1, T2)
+//                               outs(%c : T3) -> T3
+//   Memref:  hip.op(%ctx) ins(%a, %b : M1, M2) outs(%c : M3)
 //
 // Multi-output ops use Variadic results:
-//   Tensor:  %r:2 = hip.op(%handle) ins(...) outs(%c, %d : T1, T2) -> T1, T2
-//   Memref:  hip.op(%handle) ins(...) outs(%c, %d : M1, M2)
+//   Tensor:  %r:2 = hip.op(%ctx) ins(...) outs(%c, %d : T1, T2) -> T1, T2
+//   Memref:  hip.op(%ctx) ins(...) outs(%c, %d : M1, M2)
 //===----------------------------------------------------------------------===//
 
 /// Parse a parenthesized comma-separated list of operands with types:
@@ -178,26 +164,26 @@ static void printOperandListWithTypes(OpAsmPrinter &p, ValueRange operands) {
 }
 
 //===----------------------------------------------------------------------===//
-// Parse/print for single-init ops (handle + ins + outs(1) [-> result])
+// Parse/print for single-init ops (ctx + ins + outs(1) [-> result])
 //
-// Format:  `(` handle `)` `ins` `(` ... `)` `outs` `(` ... `)` [attr-dict]
+// Format:  `(` ctx `)` `ins` `(` ... `)` `outs` `(` ... `)` [attr-dict]
 //          [`->` type]
 //===----------------------------------------------------------------------===//
 
 /// Parse a single-init DPS compute op.
 /// \p numIns       number of data operands in the ins(...) clause.
-/// \p extraScalars operands between handle and ins (e.g. dim0, dim1 for
-///                 transpose). They are parsed as `(` handle `,` scalar... `)`.
+/// \p extraScalars operands between ctx and ins (e.g. dim0, dim1 for
+///                 transpose). They are parsed as `(` ctx `,` scalar... `)`.
 static ParseResult parseSingleInitDpsOp(OpAsmParser &parser,
                                         OperationState &result, unsigned numIns,
                                         unsigned extraScalars = 0) {
-  OpAsmParser::UnresolvedOperand handle;
-  Type handleType;
+  OpAsmParser::UnresolvedOperand ctxOperand;
+  Type ctxType;
   SmallVector<OpAsmParser::UnresolvedOperand> scalarOps;
   SmallVector<Type> scalarTypes;
 
-  // `(` handle [`,` scalar `,` scalar ...] `)`
-  if (parser.parseLParen() || parser.parseOperand(handle))
+  // `(` ctx [`,` scalar `,` scalar ...] `)`
+  if (parser.parseLParen() || parser.parseOperand(ctxOperand))
     return failure();
   for (unsigned i = 0; i < extraScalars; ++i) {
     scalarOps.emplace_back();
@@ -207,9 +193,9 @@ static ParseResult parseSingleInitDpsOp(OpAsmParser &parser,
   if (parser.parseRParen())
     return failure();
 
-  // Resolve handle as !hip.handle
-  handleType = HandleType::get(parser.getContext());
-  if (parser.resolveOperand(handle, handleType, result.operands))
+  // Resolve ctx as !hip.context
+  ctxType = ContextType::get(parser.getContext());
+  if (parser.resolveOperand(ctxOperand, ctxType, result.operands))
     return failure();
   // Resolve scalars as index
   for (auto &s : scalarOps)
@@ -258,11 +244,11 @@ static ParseResult parseSingleInitDpsOp(OpAsmParser &parser,
 }
 
 /// Print a single-init DPS compute op.
-static void printSingleInitDpsOp(OpAsmPrinter &p, Operation *op, Value handle,
+static void printSingleInitDpsOp(OpAsmPrinter &p, Operation *op, Value ctx,
                                  ValueRange scalarArgs, ValueRange ins,
                                  ValueRange outs) {
   p << "(";
-  p.printOperand(handle);
+  p.printOperand(ctx);
   for (Value s : scalarArgs) {
     p << ", ";
     p.printOperand(s);
@@ -302,8 +288,8 @@ ParseResult HipblasltMatmulOp::parse(OpAsmParser &parser,
 }
 
 void HipblasltMatmulOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getHandle(), /*scalarArgs=*/{},
-                       {getA(), getB()}, {getC()});
+  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{}, {getA(), getB()},
+                       {getC()});
 }
 
 //===----------------------------------------------------------------------===//
@@ -332,7 +318,7 @@ ParseResult MiopenRmsNormOp::parse(OpAsmParser &parser,
 }
 
 void MiopenRmsNormOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getHandle(), /*scalarArgs=*/{},
+  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{},
                        {getInput(), getWeight()}, {getOutput()});
 }
 
@@ -341,7 +327,7 @@ void MiopenRmsNormOp::print(OpAsmPrinter &p) {
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange MiopenSkipRmsNormOp::getDpsInitsMutable() {
-  // output and residual are operands #4 and #5 (0=handle,1=x,2=skip,3=weight)
+  // output and residual are operands #4 and #5 (0=ctx,1=x,2=skip,3=weight)
   return MutableOperandRange(*this, /*start=*/4, /*length=*/2);
 }
 
@@ -364,7 +350,7 @@ ParseResult MiopenSkipRmsNormOp::parse(OpAsmParser &parser,
 }
 
 void MiopenSkipRmsNormOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getHandle(), /*scalarArgs=*/{},
+  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{},
                        {getX(), getSkip(), getWeight()},
                        {getOutput(), getResidual()});
 }
@@ -375,7 +361,7 @@ void MiopenSkipRmsNormOp::print(OpAsmPrinter &p) {
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange MiopenRopeOp::getDpsInitsMutable() {
-  // 0=handle, 1=start_pos, 2=cos_cache, 3=sin_cache, 4=q, 5=k
+  // 0=ctx, 1=start_pos, 2=cos_cache, 3=sin_cache, 4=q, 5=k
   return MutableOperandRange(*this, /*start=*/4, /*length=*/2);
 }
 
@@ -393,13 +379,13 @@ LogicalResult MiopenRopeOp::verify() {
 }
 
 ParseResult MiopenRopeOp::parse(OpAsmParser &parser, OperationState &result) {
-  // `(` handle `,` start_pos `)` `ins` ... `outs` ...
+  // `(` ctx `,` start_pos `)` `ins` ... `outs` ...
   return parseSingleInitDpsOp(parser, result, /*numIns=*/2,
                               /*extraScalars=*/1);
 }
 
 void MiopenRopeOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getHandle(), {getStartPos()},
+  printSingleInitDpsOp(p, *this, getCtx(), {getStartPos()},
                        {getCosCache(), getSinCache()}, {getQ(), getK()});
 }
 
@@ -424,8 +410,8 @@ ParseResult MiopenAddOp::parse(OpAsmParser &parser, OperationState &result) {
 }
 
 void MiopenAddOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getHandle(), /*scalarArgs=*/{},
-                       {getA(), getB()}, {getC()});
+  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{}, {getA(), getB()},
+                       {getC()});
 }
 
 //===----------------------------------------------------------------------===//
@@ -449,8 +435,8 @@ ParseResult MiopenMulOp::parse(OpAsmParser &parser, OperationState &result) {
 }
 
 void MiopenMulOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getHandle(), /*scalarArgs=*/{},
-                       {getA(), getB()}, {getC()});
+  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{}, {getA(), getB()},
+                       {getC()});
 }
 
 //===----------------------------------------------------------------------===//
@@ -477,7 +463,7 @@ ParseResult MiopenSoftmaxOp::parse(OpAsmParser &parser,
 }
 
 void MiopenSoftmaxOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getHandle(), /*scalarArgs=*/{}, {getInput()},
+  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{}, {getInput()},
                        {getOutput()});
 }
 
@@ -505,8 +491,8 @@ ParseResult TransposeOp::parse(OpAsmParser &parser, OperationState &result) {
 }
 
 void TransposeOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getHandle(), {getDim0(), getDim1()},
-                       {getInput()}, {getOutput()});
+  printSingleInitDpsOp(p, *this, getCtx(), {getDim0(), getDim1()}, {getInput()},
+                       {getOutput()});
 }
 
 //===----------------------------------------------------------------------===//
@@ -534,7 +520,7 @@ ParseResult GatherOp::parse(OpAsmParser &parser, OperationState &result) {
 }
 
 void GatherOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getHandle(), /*scalarArgs=*/{},
+  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{},
                        {getIndices(), getTable()}, {getOutput()});
 }
 
@@ -559,7 +545,7 @@ ParseResult SiluOp::parse(OpAsmParser &parser, OperationState &result) {
 }
 
 void SiluOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getHandle(), /*scalarArgs=*/{}, {getInput()},
+  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{}, {getInput()},
                        {getOutput()});
 }
 
@@ -569,7 +555,7 @@ void SiluOp::print(OpAsmPrinter &p) {
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange GqaOp::getDpsInitsMutable() {
-  // 0=handle, 1=layer, 2=start_pos, 3=seq_len, 4=q, 5=k, 6=v,
+  // 0=ctx, 1=layer, 2=start_pos, 3=seq_len, 4=q, 5=k, 6=v,
   // 7=kv_cache, 8=output
   return MutableOperandRange(*this, /*start=*/7, /*length=*/2);
 }
@@ -588,13 +574,13 @@ LogicalResult GqaOp::verify() {
 }
 
 ParseResult GqaOp::parse(OpAsmParser &parser, OperationState &result) {
-  // `(` handle `,` layer `,` start_pos `,` seq_len `)`
+  // `(` ctx `,` layer `,` start_pos `,` seq_len `)`
   return parseSingleInitDpsOp(parser, result, /*numIns=*/3,
                               /*extraScalars=*/3);
 }
 
 void GqaOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getHandle(),
+  printSingleInitDpsOp(p, *this, getCtx(),
                        {getLayer(), getStartPos(), getSeqLen()},
                        {getQ(), getK(), getV()}, {getKvCache(), getOutput()});
 }

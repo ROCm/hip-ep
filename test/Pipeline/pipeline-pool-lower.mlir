@@ -19,24 +19,22 @@
 // The pool is NOT freed because a view of it (%alloc1) is returned.
 //
 // CHECK-LABEL: func.func @static_pool_then_lower
-// CHECK:         %[[H:.*]] = hip.create_handle()
-// CHECK:         %[[POOL:.*]] = hip.alloc(%[[H]]) : memref<512xi8>
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context,
+// CHECK:         %[[POOL:.*]] = hip.alloc(%[[CTX]]
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<512xi8> to memref<8x8xf32>
 // CHECK:         hip.hipblaslt.matmul
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<512xi8> to memref<8x8xf32>
 // CHECK:         hip.miopen.softmax
 // CHECK-NOT:     hip.free
-// CHECK:         hip.destroy_handle(%[[H]])
 // CHECK:         return
 func.func @static_pool_then_lower(
+    %ctx: !hip.context,
     %a: memref<8x8xf32, strided<[?, ?], offset: ?>>,
     %b: memref<8x8xf32, strided<[?, ?], offset: ?>>) -> memref<8x8xf32> {
-  %handle = hip.create_handle() : !hip.handle
   %alloc0 = memref.alloc() : memref<8x8xf32>
-  hip.hipblaslt.matmul(%handle) ins(%a, %b : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<8x8xf32>)
+  hip.hipblaslt.matmul(%ctx) ins(%a, %b : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<8x8xf32>)
   %alloc1 = memref.alloc() : memref<8x8xf32>
-  hip.miopen.softmax(%handle) ins(%alloc0 : memref<8x8xf32>) outs(%alloc1 : memref<8x8xf32>)
-  hip.destroy_handle(%handle) : !hip.handle
+  hip.miopen.softmax(%ctx) ins(%alloc0 : memref<8x8xf32>) outs(%alloc1 : memref<8x8xf32>)
   return %alloc1 : memref<8x8xf32>
 }
 
@@ -49,24 +47,22 @@ func.func @static_pool_then_lower(
 // The pool is NOT freed because a view of it (%alloc1) is returned.
 //
 // CHECK-LABEL: func.func @dynamic_pool_then_lower
-// CHECK:         %[[H:.*]] = hip.create_handle()
-// CHECK:         %[[POOL:.*]] = hip.alloc(%[[H]]{{.*}}) : memref<?xi8>
+// CHECK-SAME:    (%[[CTX2:.*]]: !hip.context,
+// CHECK:         %[[POOL:.*]] = hip.alloc(%[[CTX2]]
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<?x8xf32>
 // CHECK:         hip.hipblaslt.matmul
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<?x8xf32>
 // CHECK:         hip.miopen.softmax
 // CHECK-NOT:     hip.free
-// CHECK:         hip.destroy_handle(%[[H]])
 // CHECK:         return
 func.func @dynamic_pool_then_lower(
+    %ctx: !hip.context,
     %a: memref<?x8xf32>,
     %b: memref<8x8xf32, strided<[?, ?], offset: ?>>,
     %n: index) -> memref<?x8xf32> {
-  %handle = hip.create_handle() : !hip.handle
   %alloc0 = memref.alloc(%n) : memref<?x8xf32>
-  hip.hipblaslt.matmul(%handle) ins(%a, %b : memref<?x8xf32>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<?x8xf32>)
+  hip.hipblaslt.matmul(%ctx) ins(%a, %b : memref<?x8xf32>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<?x8xf32>)
   %alloc1 = memref.alloc(%n) : memref<?x8xf32>
-  hip.miopen.softmax(%handle) ins(%alloc0 : memref<?x8xf32>) outs(%alloc1 : memref<?x8xf32>)
-  hip.destroy_handle(%handle) : !hip.handle
+  hip.miopen.softmax(%ctx) ins(%alloc0 : memref<?x8xf32>) outs(%alloc1 : memref<?x8xf32>)
   return %alloc1 : memref<?x8xf32>
 }

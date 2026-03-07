@@ -7,20 +7,19 @@
 
 module {
   func.func @two_adds(
+      %ctx: !hip.context,
       %A: memref<1x4x4xf32, strided<[?, ?, ?], offset: ?>>,
       %B: memref<1x4x4xf32, strided<[?, ?, ?], offset: ?>>,
       %C: memref<1x4x4xf32, strided<[?, ?, ?], offset: ?>>,
       %D: memref<1x4x4xf32>) {
-    %handle = hip.create_handle() : !hip.handle
-    %pool = hip.alloc(%handle) : memref<64xi8>
+    %pool = hip.alloc(%ctx) : memref<64xi8>
     %c0 = arith.constant 0 : index
     %tmp = memref.view %pool[%c0][] : memref<64xi8> to memref<1x4x4xf32>
 
-    hip.miopen.add(%handle) ins(%A, %B : memref<1x4x4xf32, strided<[?, ?, ?], offset: ?>>, memref<1x4x4xf32, strided<[?, ?, ?], offset: ?>>) outs(%tmp : memref<1x4x4xf32>)
-    hip.miopen.add(%handle) ins(%tmp, %C : memref<1x4x4xf32>, memref<1x4x4xf32, strided<[?, ?, ?], offset: ?>>) outs(%D : memref<1x4x4xf32>)
+    hip.miopen.add(%ctx) ins(%A, %B : memref<1x4x4xf32, strided<[?, ?, ?], offset: ?>>, memref<1x4x4xf32, strided<[?, ?, ?], offset: ?>>) outs(%tmp : memref<1x4x4xf32>)
+    hip.miopen.add(%ctx) ins(%tmp, %C : memref<1x4x4xf32>, memref<1x4x4xf32, strided<[?, ?, ?], offset: ?>>) outs(%D : memref<1x4x4xf32>)
 
-    hip.free(%handle, %pool) : memref<64xi8>
-    hip.destroy_handle(%handle) : !hip.handle
+    hip.free(%ctx, %pool) : memref<64xi8>
     return
   }
 }
