@@ -4,20 +4,23 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify HIP convolution operations are correctly lowered to LLVM calls
-// to MIOpen library.
+// to MIOpen library runtime wrapper.
 //
 // This test validates:
-// - hip.conv → llvm.call @hip_miopen_conv
+// - hip.conv → llvm.call @wrap_miopenConvolutionForward
 // - Type conversion: !hip.context → !llvm.ptr
-// - Memref descriptors expanded to individual LLVM parameters
-// - Attribute passing to runtime calls
-// - Proper function signature for MIOpen API
+// - Shape extraction from memref types (input_n, input_c, etc.)
+// - Attribute passing (kernel_shape, strides, pads, dilations, group)
+// - Proper function signature with 23 parameters returning i32
 //
-// Note: MLIR's memref-to-LLVM conversion expands memref descriptors into
-// individual scalar parameters (allocated_ptr, aligned_ptr, offset, sizes,
-// strides). This is standard MLIR behavior.
+// The wrapper function follows PR-17 pattern with explicit shape parameters:
+// wrap_miopenConvolutionForward(state, input, input_n, input_c, input_h, input_w,
+//                                weights, weights_k, bias, output, output_h, output_w,
+//                                kernel_h, kernel_w, stride_h, stride_w,
+//                                pad_top, pad_left, pad_bottom, pad_right,
+//                                dilation_h, dilation_w, group) -> i32
 //
-// Expected: LLVM function with expanded parameters calling MIOpen wrapper
+// Expected: LLVM function declaration and call with all shape/attr parameters
 // ============================================================================
 
 // RUN: %hip-mlir-opt %s --convert-hip-to-llvm | %FileCheck %s
@@ -42,9 +45,9 @@ module {
                    {kernel_shape = [7, 7], strides = [2, 2],
                     pads = [3, 3, 3, 3], dilations = [1, 1], group = 1}
 
-    // Should lower to MIOpen convolution forward call
-    // The wrapper is declared and called
-    // CHECK: llvm.call @hip_miopen_conv
+    // Should lower to MIOpen convolution forward call via runtime wrapper
+    // Check function declaration with 23 params returning i32
+    // CHECK: llvm.call @wrap_miopenConvolutionForward({{.*}}) : (!llvm.ptr, !llvm.ptr, i64, i64, i64, i64, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
