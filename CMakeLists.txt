@@ -128,6 +128,9 @@ if(BUILD_HIP_TOOLS)
 
   # Executable targets
   add_subdirectory(tools)
+
+  # LIT tests for MLIR passes
+  add_subdirectory(test/lit)
 endif()
 
 if(BUILD_EP)
