@@ -1,6 +1,6 @@
 # -*- Python -*-
 #
-# Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 #
 
@@ -55,7 +55,10 @@ for hip_compile_candidate in [
     os.path.join(config.hip_build_dir, "tools", "hip-compiler", config.hip_build_mode),
     os.path.join(config.hip_build_dir, "tools", "hip-compiler"),
 ]:
-    if os.path.isdir(hip_compile_candidate) and hip_compile_candidate not in hip_tools_dirs:
+    if (
+        os.path.isdir(hip_compile_candidate)
+        and hip_compile_candidate not in hip_tools_dirs
+    ):
         hip_tools_dirs.append(hip_compile_candidate)
 
 if not hip_tools_dirs:
