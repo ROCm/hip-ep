@@ -66,11 +66,11 @@ static Value extractMemRefPtr(Value memrefDesc,
 
 // hip.conv(%ctx, %input, %weights, %bias, %output)
 //   -> wrap_miopenConvolutionForward(ctx, input, input_n, input_c, input_h,
-//                                     input_w, weights, weights_k, bias, output,
-//                                     output_h, output_w, kernel_h, kernel_w,
-//                                     stride_h, stride_w, pad_top, pad_left,
-//                                     pad_bottom, pad_right, dilation_h,
-//                                     dilation_w, group)
+//                                     input_w, weights, weights_k, bias,
+//                                     output, output_h, output_w, kernel_h,
+//                                     kernel_w, stride_h, stride_w, pad_top,
+//                                     pad_left, pad_bottom, pad_right,
+//                                     dilation_h, dilation_w, group)
 struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
