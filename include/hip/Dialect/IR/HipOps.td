@@ -86,6 +86,59 @@ def Hip_HipblasltGraphOp : Hip_Op<"hipblaslt.graph", [SingleBlock, NoTerminator]
   let assemblyFormat = "$body attr-dict";
 }
 
+// ===== MIOpen DNN Operations =================================================
+
+def Hip_ConvOp : Hip_Op<"conv",
+    [DeclareOpInterfaceMethods<DestinationStyleOpInterface>,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "2D convolution operation using MIOpen (in-place)";
+  let description = [{
+    Performs 2D convolution using MIOpen (miopenConvolutionForward).
+
+    Uses destination-passing style: output buffer is provided as argument,
+    operation writes result in-place.
+
+    Attributes:
+    - kernel_shape: Array of kernel dimensions [H, W]
+    - strides: Array of stride values [H, W]
+    - pads: Array of padding values [top, left, bottom, right]
+    - dilations: Array of dilation values [H, W]
+    - group: Number of groups for grouped convolution
+
+    Example:
+    ```mlir
+    hip.conv(%ctx) ins(%input, %weights, %bias :
+                       memref<1x3x224x224xf32, 1>,
+                       memref<64x3x3x3xf32, 1>,
+                       memref<64xf32, 1>)
+                   outs(%output : memref<1x64x112x112xf32, 1>)
+                   {kernel_shape = [3, 3], strides = [1, 1],
+                    pads = [1, 1, 1, 1], dilations = [1, 1], group = 1}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$weights,
+    Optional<Hip_TensorOrMemRef>:$bias,
+    Hip_TensorOrMemRef:$output,
+    I64ArrayAttr:$kernel_shape,
+    I64ArrayAttr:$strides,
+    I64ArrayAttr:$pads,
+    I64ArrayAttr:$dilations,
+    I64Attr:$group
+  );
+  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $weights (`,` $bias^)? `:`
+    type($input) `,` type($weights) (`,` type($bias)^)? `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^ )?
+  }];
+}
+
 // ===== hipBLASLt ops =========================================================
 
 def Hip_HipblasltMatmulOp : Hip_Op<"hipblaslt.matmul",

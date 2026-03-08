@@ -31,6 +31,7 @@ namespace {
 static constexpr const char *kHipMalloc = "hip_device_malloc";
 static constexpr const char *kHipFree = "hip_device_free";
 
+static constexpr const char *kHipConv = "hip_miopen_conv";
 static constexpr const char *kHipblasltMatmul = "hip_hipblaslt_matmul";
 static constexpr const char *kMiopenRmsNorm = "hip_miopen_rms_norm";
 static constexpr const char *kMiopenSkipRmsNorm = "hip_miopen_skip_rms_norm";
@@ -59,6 +60,88 @@ static Value extractMemRefPtr(Value memrefDesc,
         ptr);
   return ptr;
 }
+
+// ===== Convolution ops ================================
+
+// hip.conv(%ctx, %input, %weights, %bias, %output)
+//   -> hip_miopen_conv(ctx, input, weights, bias, output, kernel_h, kernel_w,
+//                      stride_h, stride_w, pad_top, pad_left, pad_bottom,
+//                      pad_right, dilation_h, dilation_w, group)
+struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(ConvOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type voidType = getVoidType();
+    Type ptrType = getPtrType();
+    Type indexType = getIndexType();
+
+    // (ctx, input, weights, bias, output, kernel_h, kernel_w,
+    //  stride_h, stride_w, pad_top, pad_left, pad_bottom, pad_right,
+    //  dilation_h, dilation_w, group)
+    SmallVector<Type> paramTypes = {
+        ptrType,   ptrType,   ptrType,
+        ptrType,   ptrType, // ctx, input, weights, bias, output
+        indexType, indexType, indexType,
+        indexType, indexType, // kernel_h, kernel_w, stride_h, stride_w, pad_top
+        indexType, indexType, indexType,
+        indexType, indexType // pad_left, pad_bottom, pad_right, dilation_h,
+                             // dilation_w
+    };
+    paramTypes.push_back(indexType); // group
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kHipConv, paramTypes, voidType);
+    if (failed(funcOp))
+      return failure();
+
+    // Extract kernel_shape, strides, pads, dilations attributes
+    auto kernelShape = op.getKernelShape();
+    auto strides = op.getStrides();
+    auto pads = op.getPads();
+    auto dilations = op.getDilations();
+    auto group = op.getGroup();
+
+    // Create constant values for attributes
+    auto getI64Const = [&](int64_t val) {
+      return LLVM::ConstantOp::create(rewriter, loc, indexType,
+                                      rewriter.getIndexAttr(val));
+    };
+
+    // Helper to extract int64 from ArrayAttr element
+    auto getAttrInt = [](ArrayAttr arr, size_t idx) -> int64_t {
+      return cast<IntegerAttr>(arr[idx]).getInt();
+    };
+
+    SmallVector<Value> args = {
+        adaptor.getCtx(),
+        extractMemRefPtr(adaptor.getInput(), rewriter, loc),
+        extractMemRefPtr(adaptor.getWeights(), rewriter, loc),
+        adaptor.getBias()
+            ? extractMemRefPtr(adaptor.getBias(), rewriter, loc)
+            : LLVM::ConstantOp::create(rewriter, loc, ptrType,
+                                       rewriter.getIntegerAttr(ptrType, 0)),
+        extractMemRefPtr(adaptor.getOutput(), rewriter, loc),
+        getI64Const(getAttrInt(kernelShape, 0)),
+        getI64Const(getAttrInt(kernelShape, 1)),
+        getI64Const(getAttrInt(strides, 0)),
+        getI64Const(getAttrInt(strides, 1)),
+        getI64Const(getAttrInt(pads, 0)),
+        getI64Const(getAttrInt(pads, 1)),
+        getI64Const(getAttrInt(pads, 2)),
+        getI64Const(getAttrInt(pads, 3)),
+        getI64Const(getAttrInt(dilations, 0)),
+        getI64Const(getAttrInt(dilations, 1)),
+        getI64Const(group)};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
 
 // --- AllocOp: hip.alloc(%ctx, %dyn...) -> hipMalloc(bytes) + memref descriptor
 struct AllocOpLowering : public ConvertOpToLLVMPattern<AllocOp> {
@@ -697,7 +780,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   RewritePatternSet patterns(ctx);
   patterns
       .add<AllocOpLowering, FreeOpLowering, MiopenGraphOpLowering,
-           HipblasltGraphOpLowering, HipblasltMatmulOpLowering,
+           HipblasltGraphOpLowering, ConvOpLowering, HipblasltMatmulOpLowering,
            MiopenRmsNormOpLowering, MiopenSkipRmsNormOpLowering,
            MiopenRopeOpLowering, MiopenSoftmaxOpLowering, TransposeOpLowering,
            GatherOpLowering, SiluOpLowering, GqaOpLowering>(typeConverter);
