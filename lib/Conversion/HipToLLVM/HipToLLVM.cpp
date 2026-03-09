@@ -5,10 +5,17 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
+#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
+#include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
+#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVM.h"
 #include "mlir/Conversion/LLVMCommon/ConversionTarget.h"
 #include "mlir/Conversion/LLVMCommon/MemRefBuilder.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
+#include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/FunctionCallUtils.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
@@ -885,6 +892,8 @@ void ConvertHipToLLVMPass::runOnOperation() {
   });
 
   RewritePatternSet patterns(ctx);
+
+  // HIP dialect-specific lowerings
   patterns
       .add<AllocOpLowering, FreeOpLowering, MiopenGraphOpLowering,
            HipblasltGraphOpLowering, ConvOpLowering, HipblasltMatmulOpLowering,
@@ -896,6 +905,15 @@ void ConvertHipToLLVMPass::runOnOperation() {
   patterns.insert<MiopenBinaryOpLowering<MiopenMulOp>>(typeConverter,
                                                        kMiopenMul);
   patterns.add<MemRefAllocOpLowering, MemRefDeallocOpLowering>(typeConverter);
+
+  // Standard dialect lowerings (matches PR-17)
+  // Bundle func/memref/arith/cf lowering with HIP lowering to minimize
+  // unrealized casts at the memref/LLVM boundary. Running them as separate
+  // stages would require a reconcile-unrealized-casts cleanup pass.
+  populateFuncToLLVMConversionPatterns(typeConverter, patterns);
+  populateFinalizeMemRefToLLVMConversionPatterns(typeConverter, patterns);
+  arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
+  cf::populateControlFlowToLLVMConversionPatterns(typeConverter, patterns);
 
   LLVMConversionTarget target(*ctx);
   target.addLegalDialect<LLVM::LLVMDialect>();

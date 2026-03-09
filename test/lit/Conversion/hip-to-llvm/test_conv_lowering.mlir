@@ -29,7 +29,9 @@ module {
       %weights: memref<64x3x7x7xf32, 1>,
       %bias: memref<64xf32, 1>,
       %output: memref<1x64x112x112xf32, 1>) {
-    // CHECK-LABEL: func.func @conv_llvm_test
+    // After lowering, function becomes llvm.func with expanded parameters
+    // CHECK-LABEL: llvm.func @conv_llvm_test
+    // CHECK-SAME: %[[CTX:.*]]: !llvm.ptr
 
     // HIP convolution operation
     hip.conv(%ctx) ins(%input, %weights, %bias : memref<1x3x224x224xf32, 1>,
