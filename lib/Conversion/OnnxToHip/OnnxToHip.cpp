@@ -621,6 +621,76 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
 }
 
 //===----------------------------------------------------------------------===//
+// Module metadata generation
+//===----------------------------------------------------------------------===//
+
+/// Generate module metadata attributes required by GenerateInterfacePass.
+/// Must be called BEFORE patterns transform function signatures.
+static mlir::LogicalResult generateModuleMetadata(mlir::ModuleOp module) {
+  auto mainFunc = module.lookupSymbol<mlir::func::FuncOp>("main_graph");
+  if (!mainFunc)
+    return mlir::success();
+
+  auto originalFuncType = mainFunc.getFunctionType();
+  mlir::OpBuilder builder(module.getContext());
+
+  int64_t inputCount = originalFuncType.getNumInputs();
+  llvm::SmallVector<mlir::Attribute> inputShapes;
+  llvm::SmallVector<int64_t> inputElementSizes;
+
+  for (mlir::Type inputType : originalFuncType.getInputs()) {
+    if (mlir::isa<mlir::hip::ContextType>(inputType)) {
+      --inputCount;
+      continue;
+    }
+    if (auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(inputType)) {
+      llvm::SmallVector<int64_t> shape(tensorType.getShape().begin(),
+                                       tensorType.getShape().end());
+      inputShapes.push_back(builder.getDenseI64ArrayAttr(shape));
+      inputElementSizes.push_back(
+          tensorType.getElementType().getIntOrFloatBitWidth() / 8);
+    } else {
+      llvm::errs() << "[ONNX→HIP] Warning: non-tensor input in @main_graph, "
+                      "skipping metadata\n";
+      return mlir::success();
+    }
+  }
+
+  int64_t outputCount = originalFuncType.getNumResults();
+  llvm::SmallVector<mlir::Attribute> outputShapes;
+  llvm::SmallVector<int64_t> outputElementSizes;
+
+  for (mlir::Type resultType : originalFuncType.getResults()) {
+    if (auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(resultType)) {
+      llvm::SmallVector<int64_t> shape(tensorType.getShape().begin(),
+                                       tensorType.getShape().end());
+      outputShapes.push_back(builder.getDenseI64ArrayAttr(shape));
+      outputElementSizes.push_back(
+          tensorType.getElementType().getIntOrFloatBitWidth() / 8);
+    } else {
+      llvm::errs() << "[ONNX→HIP] Warning: non-tensor output in @main_graph, "
+                      "skipping metadata\n";
+      return mlir::success();
+    }
+  }
+
+  module->setAttr("hipdnn.input_count", builder.getI64IntegerAttr(inputCount));
+  module->setAttr("hipdnn.input_shapes", builder.getArrayAttr(inputShapes));
+  module->setAttr("hipdnn.input_element_sizes",
+                  builder.getDenseI64ArrayAttr(inputElementSizes));
+  module->setAttr("hipdnn.output_count",
+                  builder.getI64IntegerAttr(outputCount));
+  module->setAttr("hipdnn.output_shapes", builder.getArrayAttr(outputShapes));
+  module->setAttr("hipdnn.output_element_sizes",
+                  builder.getDenseI64ArrayAttr(outputElementSizes));
+
+  llvm::errs() << "[ONNX→HIP] Generated module metadata: input_count="
+               << inputCount << " output_count=" << outputCount << "\n";
+
+  return mlir::success();
+}
+
+//===----------------------------------------------------------------------===//
 // ConvertOnnxToHip Pass
 //===----------------------------------------------------------------------===//
 
@@ -658,6 +728,10 @@ void ConvertOnnxToHipPass::runOnOperation() {
       return signalPassFailure();
     }
   }
+
+  // Capture original function signatures as module metadata before lowering.
+  if (mlir::failed(generateModuleMetadata(module)))
+    return signalPassFailure();
 
   for (auto funcOp :
        llvm::make_early_inc_range(module.getOps<mlir::func::FuncOp>())) {
