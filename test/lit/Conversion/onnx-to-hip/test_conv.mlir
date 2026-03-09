@@ -21,7 +21,7 @@
 // - all Conv attributes forwarded (kernel_shape, strides, pads, dilations, group)
 // ============================================================================
 
-// RUN: %hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | %FileCheck %s
+// RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
 
 module {
   // --------------------------------------------------------------------------
