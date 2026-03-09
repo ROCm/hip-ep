@@ -650,9 +650,8 @@ static mlir::LogicalResult generateModuleMetadata(mlir::ModuleOp module) {
       inputElementSizes.push_back(
           tensorType.getElementType().getIntOrFloatBitWidth() / 8);
     } else {
-      llvm::errs() << "[ONNX→HIP] Warning: non-tensor input in @main_graph, "
-                      "skipping metadata\n";
-      return mlir::success();
+      mainFunc.emitError("non-tensor input type in @main_graph: ") << inputType;
+      return mlir::failure();
     }
   }
 
@@ -668,9 +667,9 @@ static mlir::LogicalResult generateModuleMetadata(mlir::ModuleOp module) {
       outputElementSizes.push_back(
           tensorType.getElementType().getIntOrFloatBitWidth() / 8);
     } else {
-      llvm::errs() << "[ONNX→HIP] Warning: non-tensor output in @main_graph, "
-                      "skipping metadata\n";
-      return mlir::success();
+      mainFunc.emitError("non-tensor output type in @main_graph: ")
+          << resultType;
+      return mlir::failure();
     }
   }
 
@@ -684,8 +683,15 @@ static mlir::LogicalResult generateModuleMetadata(mlir::ModuleOp module) {
   module->setAttr("hipdnn.output_element_sizes",
                   builder.getDenseI64ArrayAttr(outputElementSizes));
 
-  llvm::errs() << "[ONNX→HIP] Generated module metadata: input_count="
-               << inputCount << " output_count=" << outputCount << "\n";
+  auto remark = module.emitRemark("module metadata: ");
+  remark << "input_count=" << inputCount
+         << ", input_shapes=" << builder.getArrayAttr(inputShapes)
+         << ", input_element_sizes="
+         << builder.getDenseI64ArrayAttr(inputElementSizes)
+         << ", output_count=" << outputCount
+         << ", output_shapes=" << builder.getArrayAttr(outputShapes)
+         << ", output_element_sizes="
+         << builder.getDenseI64ArrayAttr(outputElementSizes);
 
   return mlir::success();
 }
