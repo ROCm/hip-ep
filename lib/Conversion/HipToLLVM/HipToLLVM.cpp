@@ -906,7 +906,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
                                                        kMiopenMul);
   patterns.add<MemRefAllocOpLowering, MemRefDeallocOpLowering>(typeConverter);
 
-  // Standard dialect lowerings (matches PR-17)
+  // Standard dialect lowerings
   // Bundle func/memref/arith/cf lowering with HIP lowering to minimize
   // unrealized casts at the memref/LLVM boundary. Running them as separate
   // stages would require a reconcile-unrealized-casts cleanup pass.
