@@ -15,6 +15,19 @@ include "mlir/IR/OpBase.td"
 class Hip_Op<string mnemonic, list<Trait> traits = []> :
     Op<Hip_Dialect, mnemonic, traits>;
 
+// Base class for all HIP destination-passing-style (DPS) compute ops.
+// Provides MemoryEffectsOpInterface, DestinationStyleOpInterface, and the
+// Variadic<AnyRankedTensor>:$result_tensors result (non-empty only at the
+// tensor level; empty after bufferization).
+class Hip_DpsOp<string mnemonic, list<Trait> traits = []> :
+    Hip_Op<mnemonic, !listconcat([
+      DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+      DeclareOpInterfaceMethods<DestinationStyleOpInterface,
+                                ["getDpsInitsMutable"]>
+    ], traits)> {
+  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
+}
+
 // Accepts both ranked tensor (pre-bufferization) and memref (post-bufferization).
 def Hip_TensorOrMemRef : AnyTypeOf<[AnyRankedTensor, AnyMemRef],
                                     "ranked tensor or memref">;
@@ -88,9 +101,7 @@ def Hip_HipblasltGraphOp : Hip_Op<"hipblaslt.graph", [SingleBlock, NoTerminator]
 
 // ===== MIOpen DNN Operations =================================================
 
-def Hip_ConvOp : Hip_Op<"conv",
-    [DeclareOpInterfaceMethods<DestinationStyleOpInterface>,
-     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+def Hip_ConvOp : Hip_DpsOp<"conv"> {
   let summary = "2D convolution operation using MIOpen (in-place)";
   let description = [{
     Performs 2D convolution using MIOpen (miopenConvolutionForward).
@@ -129,7 +140,6 @@ def Hip_ConvOp : Hip_Op<"conv",
     I64ArrayAttr:$dilations,
     I64Attr:$group
   );
-  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $input `,` $weights (`,` $bias^)? `:`
