@@ -21,7 +21,7 @@
 // CHECK-DAG: memref.global "private" @hip_ext_constant_2{{.*}}hip.external_data
 
 module {
-  func.func @test_sanitize() -> (tensor<2x4xf32>, tensor<2x4xf32>, tensor<2x4xf32>) {
+  func.func @main_graph() -> (tensor<2x4xf32>, tensor<2x4xf32>, tensor<2x4xf32>) {
     %a = "onnx.Constant"() {
       onnx_node_name = "/model/layers.0/Constant",
       value = dense<[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]> : tensor<2x4xf32>
