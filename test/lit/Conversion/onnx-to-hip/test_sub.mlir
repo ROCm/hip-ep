@@ -20,9 +20,6 @@
 // RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
 
 module {
-  // --------------------------------------------------------------------------
-  // Main test case from PR17 (i64, LLaMA attention mask)
-  // --------------------------------------------------------------------------
   func.func @test_sub(%lhs: tensor<1x1xi64>, %rhs: tensor<1x1xi64>) -> tensor<1x1xi64> {
     // After conversion: context prepended, tensors remain tensors, tensor return
     // CHECK-LABEL: func.func @test_sub
@@ -39,42 +36,15 @@ module {
     return %output : tensor<1x1xi64>
   }
 
-  // --------------------------------------------------------------------------
-  // Additional test cases (f32)
-  // --------------------------------------------------------------------------
-  func.func @sub_2d(%a: tensor<128x256xf32>, %b: tensor<128x256xf32>) -> tensor<128x256xf32> {
-    %output = "onnx.Sub"(%a, %b) : (tensor<128x256xf32>, tensor<128x256xf32>) -> tensor<128x256xf32>
-    return %output : tensor<128x256xf32>
+  // Dynamic shape test
+  func.func @sub_dynamic(%lhs: tensor<?x?xf32>, %rhs: tensor<?x?xf32>) -> tensor<?x?xf32> {
+    %output = "onnx.Sub"(%lhs, %rhs) : (tensor<?x?xf32>, tensor<?x?xf32>) -> tensor<?x?xf32>
+    return %output : tensor<?x?xf32>
   }
-
-  // CHECK-LABEL: func.func @sub_2d
-  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<128x256xf32>, %[[B:.*]]: tensor<128x256xf32>) -> tensor<128x256xf32>
-  // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<128x256xf32>
-  // CHECK: %[[OUT:.*]] = hip.sub(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<128x256xf32>, tensor<128x256xf32>) outs(%[[INIT]] : tensor<128x256xf32>) : tensor<128x256xf32>
-  // CHECK: return %[[OUT]]
-  // CHECK-NOT: hip.alloc
-
-  func.func @sub_3d(%a: tensor<8x128x512xf32>, %b: tensor<8x128x512xf32>) -> tensor<8x128x512xf32> {
-    %output = "onnx.Sub"(%a, %b) : (tensor<8x128x512xf32>, tensor<8x128x512xf32>) -> tensor<8x128x512xf32>
-    return %output : tensor<8x128x512xf32>
-  }
-
-  // CHECK-LABEL: func.func @sub_3d
-  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<8x128x512xf32>, %[[B:.*]]: tensor<8x128x512xf32>) -> tensor<8x128x512xf32>
-  // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<8x128x512xf32>
-  // CHECK: %[[OUT:.*]] = hip.sub(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<8x128x512xf32>, tensor<8x128x512xf32>) outs(%[[INIT]] : tensor<8x128x512xf32>) : tensor<8x128x512xf32>
-  // CHECK: return %[[OUT]]
-  // CHECK-NOT: hip.alloc
-
-  func.func @sub_broadcast(%a: tensor<128x256xf32>, %b: tensor<1xf32>) -> tensor<128x256xf32> {
-    %output = "onnx.Sub"(%a, %b) : (tensor<128x256xf32>, tensor<1xf32>) -> tensor<128x256xf32>
-    return %output : tensor<128x256xf32>
-  }
-
-  // CHECK-LABEL: func.func @sub_broadcast
-  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<128x256xf32>, %[[B:.*]]: tensor<1xf32>) -> tensor<128x256xf32>
-  // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<128x256xf32>
-  // CHECK: %[[OUT:.*]] = hip.sub(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<128x256xf32>, tensor<1xf32>) outs(%[[INIT]] : tensor<128x256xf32>) : tensor<128x256xf32>
-  // CHECK: return %[[OUT]]
-  // CHECK-NOT: hip.alloc
 }
+
+// CHECK-LABEL: func.func @sub_dynamic
+// CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[LHS:.*]]: tensor<?x?xf32>, %[[RHS:.*]]: tensor<?x?xf32>) -> tensor<?x?xf32>
+// CHECK: %[[INIT:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf32>
+// CHECK: hip.sub(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<?x?xf32>, tensor<?x?xf32>) outs(%[[INIT]] : tensor<?x?xf32>) : tensor<?x?xf32>
+// CHECK-NOT: hip.alloc

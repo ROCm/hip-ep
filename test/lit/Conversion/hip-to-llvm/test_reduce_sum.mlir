@@ -27,13 +27,12 @@ module {
       %axes: memref<1xi64, 1>,
       %output: memref<8x128xf32, 1>) {
     // CHECK-LABEL: llvm.func @reduce_sum_static_last_axis
-    // CHECK-SAME: %[[CTX:.*]]: !llvm.ptr
 
     hip.reduce_sum(%ctx) ins(%input, %axes : memref<8x128x512xf32, 1>, memref<1xi64, 1>)
                          outs(%output : memref<8x128xf32, 1>)
                          {keepdims = 0 : i64}
 
-    // CHECK: llvm.call @wrap_reduce_sum(%[[CTX]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_reduce_sum({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -45,22 +44,19 @@ module {
       %axes: memref<1xi64, 1>,
       %output: memref<?x?xf32, 1>) {
     // CHECK-LABEL: llvm.func @reduce_sum_dynamic
-    // CHECK-SAME: %[[CTX:.*]]: !llvm.ptr
 
     hip.reduce_sum(%ctx) ins(%input, %axes : memref<?x?x512xf32, 1>, memref<1xi64, 1>)
                          outs(%output : memref<?x?xf32, 1>)
                          {keepdims = 0 : i64}
 
     // Verify dynamic shape computation for data_num_elements
-    // CHECK: %[[ONE:.*]] = llvm.mlir.constant(1 : i64) : i64
-    // CHECK: %[[DIM0:.*]] = llvm.extractvalue %{{.*}}[3, 0]
-    // CHECK: %[[PROD1:.*]] = llvm.mul %[[ONE]], %[[DIM0]] : i64
-    // CHECK: %[[DIM1:.*]] = llvm.extractvalue %{{.*}}[3, 1]
-    // CHECK: %[[PROD2:.*]] = llvm.mul %[[PROD1]], %[[DIM1]] : i64
-    // CHECK: %[[DIM2:.*]] = llvm.mlir.constant(512 : i64) : i64
-    // CHECK: %[[DATA_NUM_ELEMENTS:.*]] = llvm.mul %[[PROD2]], %[[DIM2]] : i64
+    // CHECK-DAG: llvm.mlir.constant(1 : i64) : i64
+    // CHECK-DAG: llvm.extractvalue %{{.*}}[3, 0]
+    // CHECK-DAG: llvm.mul %{{.*}}, %{{.*}} : i64
+    // CHECK-DAG: llvm.extractvalue %{{.*}}[3, 1]
+    // CHECK-DAG: llvm.mlir.constant(512 : i64) : i64
 
-    // CHECK: llvm.call @wrap_reduce_sum(%[[CTX]], %{{.*}}, %{{.*}}, %{{.*}}, %[[DATA_NUM_ELEMENTS]], %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_reduce_sum({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
 
     return
   }

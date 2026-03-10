@@ -357,14 +357,15 @@ def Hip_CastOp : Hip_DpsOp<"cast"> {
     Example:
     ```mlir
     hip.cast(%ctx) ins(%input : memref<128x256xf32, 1>)
-                   outs(%output : memref<128x256xf16, 1>)
+                   outs(%output : memref<128x256xf16, 1>) {to = 10 : i64}
     ```
   }];
 
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$input,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$to
   );
 
   let assemblyFormat = [{

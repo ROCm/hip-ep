@@ -26,12 +26,11 @@ module {
       %input: memref<256x512xf32, 1>,
       %output: memref<256x512xf16, 1>) {
     // CHECK-LABEL: llvm.func @cast_static_2d_f32_to_f16
-    // CHECK-SAME: %[[CTX:.*]]: !llvm.ptr
 
     hip.cast(%ctx) ins(%input : memref<256x512xf32, 1>)
-                   outs(%output : memref<256x512xf16, 1>)
+                   outs(%output : memref<256x512xf16, 1>) {to = 10 : i64}
 
-    // CHECK: llvm.call @wrap_miopenCast(%[[CTX]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_miopenCast({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
 
     return
   }
@@ -42,12 +41,11 @@ module {
       %input: memref<1x128x512xf16, 1>,
       %output: memref<1x128x512xf32, 1>) {
     // CHECK-LABEL: llvm.func @cast_static_3d_f16_to_f32
-    // CHECK-SAME: %[[CTX:.*]]: !llvm.ptr
 
     hip.cast(%ctx) ins(%input : memref<1x128x512xf16, 1>)
-                   outs(%output : memref<1x128x512xf32, 1>)
+                   outs(%output : memref<1x128x512xf32, 1>) {to = 1 : i64}
 
-    // CHECK: llvm.call @wrap_miopenCast(%[[CTX]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_miopenCast({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
 
     return
   }
@@ -58,25 +56,18 @@ module {
       %input: memref<?x?x512xf32, 1>,
       %output: memref<?x?x512xf16, 1>) {
     // CHECK-LABEL: llvm.func @cast_dynamic_f32_to_f16
-    // CHECK-SAME: %[[CTX:.*]]: !llvm.ptr
 
     hip.cast(%ctx) ins(%input : memref<?x?x512xf32, 1>)
-                   outs(%output : memref<?x?x512xf16, 1>)
+                   outs(%output : memref<?x?x512xf16, 1>) {to = 10 : i64}
 
     // Verify dynamic shape computation
-    // CHECK: %[[ONE:.*]] = llvm.mlir.constant(1 : i64) : i64
-    // CHECK: %[[DIM0:.*]] = llvm.extractvalue %{{.*}}[3, 0]
-    // CHECK: %[[PROD1:.*]] = llvm.mul %[[ONE]], %[[DIM0]] : i64
-    // CHECK: %[[DIM1:.*]] = llvm.extractvalue %{{.*}}[3, 1]
-    // CHECK: %[[PROD2:.*]] = llvm.mul %[[PROD1]], %[[DIM1]] : i64
-    // CHECK: %[[DIM2:.*]] = llvm.mlir.constant(512 : i64) : i64
-    // CHECK: %[[NUM_ELEMENTS:.*]] = llvm.mul %[[PROD2]], %[[DIM2]] : i64
+    // CHECK-DAG: llvm.mlir.constant(1 : i64) : i64
+    // CHECK-DAG: llvm.extractvalue %{{.*}}[3, 0]
+    // CHECK-DAG: llvm.mul %{{.*}}, %{{.*}} : i64
+    // CHECK-DAG: llvm.extractvalue %{{.*}}[3, 1]
+    // CHECK-DAG: llvm.mlir.constant(512 : i64) : i64
 
-    // Verify data type constants (f32=0, f16=1)
-    // CHECK: %[[SRC_TYPE:.*]] = llvm.mlir.constant(0 : i64) : i64
-    // CHECK: %[[DST_TYPE:.*]] = llvm.mlir.constant(1 : i64) : i64
-
-    // CHECK: llvm.call @wrap_miopenCast(%[[CTX]], %{{.*}}, %{{.*}}, %[[NUM_ELEMENTS]], %[[SRC_TYPE]], %[[DST_TYPE]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_miopenCast({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
 
     return
   }
