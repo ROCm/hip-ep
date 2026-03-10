@@ -1132,16 +1132,18 @@ private:
 
     if (nextIndex > 0) {
       COMPILER_DEBUG_LOG("[ONNX→HIP] Discovered " << nextIndex << " constants:\n");
-      for (const auto& entry : constantRegistry_) {
-        const auto& info = entry.second;
-        llvm::errs() << "  [" << info.globalIndex << "] " << info.name
-                     << " : shape=[";
-        for (size_t i = 0; i < info.shape.size(); ++i) {
-          if (i > 0)
-            llvm::errs() << "x";
-          llvm::errs() << info.shape[i];
+      if (hipdnn_ep_debug_enabled()) {
+        for (const auto& entry : constantRegistry_) {
+          const auto& info = entry.second;
+          llvm::errs() << "  [" << info.globalIndex << "] " << info.name
+                       << " : shape=[";
+          for (size_t i = 0; i < info.shape.size(); ++i) {
+            if (i > 0)
+              llvm::errs() << "x";
+            llvm::errs() << info.shape[i];
+          }
+          llvm::errs() << "], size=" << info.sizeInBytes << " bytes\n";
         }
-        llvm::errs() << "], size=" << info.sizeInBytes << " bytes\n";
       }
     }
 

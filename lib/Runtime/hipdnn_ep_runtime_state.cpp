@@ -91,8 +91,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState** out_state, void* fs,
     free(state);
     return 4;
   }
-  fprintf(stderr, "Device detected: %s (arch=%s)\n", prop.name,
-          prop.gcnArchName);
+  RUNTIME_DEBUG_LOG("Device detected: %s (arch=%s)\n", prop.name,
+                    prop.gcnArchName);
 
   // WORKAROUND: TheRock SDK Windows bug - gcnArchName is empty due to PAL
   // backend. Root cause: Windows uses PAL (Platform Abstraction Layer) instead
@@ -128,10 +128,9 @@ int hipdnn_ep_state_init_with_fs(RuntimeState** out_state, void* fs,
     fprintf(stderr, "Long-term fix: Report to ROCm/TheRock GitHub issues\n");
     fprintf(stderr, "===================================================\n\n");
   } else {
-    fprintf(stderr,
-            "gcnArchName properly populated: '%s' (initialization should "
-            "succeed)\n",
-            prop.gcnArchName);
+    RUNTIME_DEBUG_LOG("gcnArchName properly populated: '%s' (initialization should "
+                      "succeed)\n",
+                      prop.gcnArchName);
   }
 
   // Create HIP stream
@@ -162,9 +161,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState** out_state, void* fs,
   // DIAGNOSTIC: Check if gcnArchName is still valid AFTER MIOpen initialization
   hipDeviceProp_t prop_after_miopen;
   if (hipGetDeviceProperties(&prop_after_miopen, 0) == hipSuccess) {
-    fprintf(stderr,
-            "After MIOpen init - gcnArchName='%s' (checking for corruption)\n",
-            prop_after_miopen.gcnArchName);
+    RUNTIME_DEBUG_LOG("After MIOpen init - gcnArchName='%s' (checking for corruption)\n",
+                      prop_after_miopen.gcnArchName);
     if (prop_after_miopen.gcnArchName[0] == '\0') {
       fprintf(
           stderr,
