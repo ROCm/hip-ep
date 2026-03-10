@@ -26,10 +26,13 @@
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
+
+#define DEBUG_TYPE "convert-onnx-to-hip"
 
 namespace mlir {
 namespace hip {
@@ -628,8 +631,10 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
 /// Must be called BEFORE patterns transform function signatures.
 static mlir::LogicalResult generateModuleMetadata(mlir::ModuleOp module) {
   auto mainFunc = module.lookupSymbol<mlir::func::FuncOp>("main_graph");
-  if (!mainFunc)
-    return mlir::success();
+  if (!mainFunc) {
+    module.emitError("expected @main_graph function for metadata generation");
+    return mlir::failure();
+  }
 
   auto originalFuncType = mainFunc.getFunctionType();
   mlir::OpBuilder builder(module.getContext());
@@ -644,11 +649,16 @@ static mlir::LogicalResult generateModuleMetadata(mlir::ModuleOp module) {
       continue;
     }
     if (auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(inputType)) {
+      auto elemType = tensorType.getElementType();
+      if (!elemType.isIntOrFloat()) {
+        mainFunc.emitError("unsupported element type in @main_graph input: ")
+            << elemType;
+        return mlir::failure();
+      }
       llvm::SmallVector<int64_t> shape(tensorType.getShape().begin(),
                                        tensorType.getShape().end());
       inputShapes.push_back(builder.getDenseI64ArrayAttr(shape));
-      inputElementSizes.push_back(
-          tensorType.getElementType().getIntOrFloatBitWidth() / 8);
+      inputElementSizes.push_back(elemType.getIntOrFloatBitWidth() / 8);
     } else {
       mainFunc.emitError("non-tensor input type in @main_graph: ") << inputType;
       return mlir::failure();
@@ -661,11 +671,16 @@ static mlir::LogicalResult generateModuleMetadata(mlir::ModuleOp module) {
 
   for (mlir::Type resultType : originalFuncType.getResults()) {
     if (auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(resultType)) {
+      auto elemType = tensorType.getElementType();
+      if (!elemType.isIntOrFloat()) {
+        mainFunc.emitError("unsupported element type in @main_graph output: ")
+            << elemType;
+        return mlir::failure();
+      }
       llvm::SmallVector<int64_t> shape(tensorType.getShape().begin(),
                                        tensorType.getShape().end());
       outputShapes.push_back(builder.getDenseI64ArrayAttr(shape));
-      outputElementSizes.push_back(
-          tensorType.getElementType().getIntOrFloatBitWidth() / 8);
+      outputElementSizes.push_back(elemType.getIntOrFloatBitWidth() / 8);
     } else {
       mainFunc.emitError("non-tensor output type in @main_graph: ")
           << resultType;
@@ -683,15 +698,17 @@ static mlir::LogicalResult generateModuleMetadata(mlir::ModuleOp module) {
   module->setAttr("hipdnn.output_element_sizes",
                   builder.getDenseI64ArrayAttr(outputElementSizes));
 
-  auto remark = module.emitRemark("module metadata: ");
-  remark << "input_count=" << inputCount
-         << ", input_shapes=" << builder.getArrayAttr(inputShapes)
-         << ", input_element_sizes="
-         << builder.getDenseI64ArrayAttr(inputElementSizes)
-         << ", output_count=" << outputCount
-         << ", output_shapes=" << builder.getArrayAttr(outputShapes)
-         << ", output_element_sizes="
-         << builder.getDenseI64ArrayAttr(outputElementSizes);
+  LLVM_DEBUG({
+    llvm::dbgs() << "[convert-onnx-to-hip] module metadata:"
+                 << " input_count=" << inputCount
+                 << " input_shapes=" << builder.getArrayAttr(inputShapes)
+                 << " input_element_sizes="
+                 << builder.getDenseI64ArrayAttr(inputElementSizes)
+                 << " output_count=" << outputCount
+                 << " output_shapes=" << builder.getArrayAttr(outputShapes)
+                 << " output_element_sizes="
+                 << builder.getDenseI64ArrayAttr(outputElementSizes) << "\n";
+  });
 
   return mlir::success();
 }
