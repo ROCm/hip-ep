@@ -54,6 +54,7 @@ static constexpr const char *kHipSilu = "hip_silu";
 static constexpr const char *kWrapMiopenActivationForward =
     "wrap_miopenActivationForward";
 static constexpr const char *kWrapMiopenCast = "wrap_miopenCast";
+static constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
 static constexpr const char *kHipGqa = "hip_gqa";
 
 // Maps MLIR element type to runtime data type enum (HIPDNN_EP_DATATYPE_*).
@@ -1154,7 +1155,6 @@ struct ReduceSumOpLowering : public ConvertOpToLLVMPattern<ReduceSumOp> {
     SmallVector<Type, 8> paramTypes = {ptrType, ptrType, ptrType, ptrType,
                                        i64Type, i64Type, i64Type, i64Type};
 
-    static constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapReduceSum, paramTypes, i32Type);
     if (failed(funcOp))
