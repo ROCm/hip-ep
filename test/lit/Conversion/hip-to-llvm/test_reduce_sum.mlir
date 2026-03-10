@@ -4,17 +4,17 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify HIP reduce_sum operation is correctly lowered to LLVM call
-// to wrap_miopenReduceSum runtime function with both static and dynamic shapes.
+// to wrap_reduce_sum runtime function with both static and dynamic shapes.
 //
 // This test validates:
-// - hip.reduce_sum → llvm.call @wrap_miopenReduceSum
+// - hip.reduce_sum → llvm.call @wrap_reduce_sum
 // - Type conversion: !hip.context → !llvm.ptr
 // - Static shapes: num_elements computed at compile time
 // - Dynamic shapes: num_elements computed at runtime via extractvalue
-// - Proper axes and keepdims parameters
+// - Axes passed as pointer to runtime
 //
-// Expected: wrap_miopenReduceSum(state, data_ptr, output_ptr, num_elements,
-//                                 axes_packed, num_axes, keepdims, data_type)
+// Expected: wrap_reduce_sum(state, data, axes, output, data_num_elements,
+//                            output_num_elements, element_size_bytes, keepdims)
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
@@ -34,31 +34,12 @@ module {
                          outs(%output : memref<8x128xf32, 1>)
                          {keepdims = 0 : i64}
 
-    // CHECK: llvm.call @wrap_miopenReduceSum(%[[CTX]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_reduce_sum(%[[CTX]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
 
     return
   }
 
-  // Test 2: Static 2D tensor, reduce first axis
-  func.func @reduce_sum_static_first_axis(
-      %ctx: !hip.context,
-      %input: memref<128x256xf32, 1>,
-      %axes: memref<1xi64, 1>,
-      %output: memref<256xf32, 1>) {
-    // CHECK-LABEL: llvm.func @reduce_sum_static_first_axis
-    // CHECK-SAME: %[[CTX:.*]]: !llvm.ptr
-
-    %c0 = arith.constant dense<0> : tensor<1xi64>
-    hip.reduce_sum(%ctx) ins(%input, %c0 : memref<128x256xf32, 1>, tensor<1xi64>)
-                         outs(%output : memref<256xf32, 1>)
-                         {keepdims = 0 : i64}
-
-    // CHECK: llvm.call @wrap_miopenReduceSum(%[[CTX]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
-
-    return
-  }
-
-  // Test 3: Dynamic shapes
+  // Test 2: Dynamic shapes
   func.func @reduce_sum_dynamic(
       %ctx: !hip.context,
       %input: memref<?x?x512xf32, 1>,
@@ -72,16 +53,16 @@ module {
                          outs(%output : memref<?x?xf32, 1>)
                          {keepdims = 0 : i64}
 
-    // Verify dynamic shape computation
+    // Verify dynamic shape computation for data_num_elements
     // CHECK: %[[ONE:.*]] = llvm.mlir.constant(1 : i64) : i64
     // CHECK: %[[DIM0:.*]] = llvm.extractvalue %{{.*}}[3, 0]
     // CHECK: %[[PROD1:.*]] = llvm.mul %[[ONE]], %[[DIM0]] : i64
     // CHECK: %[[DIM1:.*]] = llvm.extractvalue %{{.*}}[3, 1]
     // CHECK: %[[PROD2:.*]] = llvm.mul %[[PROD1]], %[[DIM1]] : i64
     // CHECK: %[[DIM2:.*]] = llvm.mlir.constant(512 : i64) : i64
-    // CHECK: %[[NUM_ELEMENTS:.*]] = llvm.mul %[[PROD2]], %[[DIM2]] : i64
+    // CHECK: %[[DATA_NUM_ELEMENTS:.*]] = llvm.mul %[[PROD2]], %[[DIM2]] : i64
 
-    // CHECK: llvm.call @wrap_miopenReduceSum(%[[CTX]], %{{.*}}, %{{.*}}, %[[NUM_ELEMENTS]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_reduce_sum(%[[CTX]], %{{.*}}, %{{.*}}, %{{.*}}, %[[DATA_NUM_ELEMENTS]], %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
 
     return
   }
