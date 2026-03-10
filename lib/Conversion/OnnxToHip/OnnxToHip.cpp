@@ -509,7 +509,11 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Location loc = op->getLoc();
   mlir::Value input = op->getOperand(0);
   mlir::Value weights = op->getOperand(1);
-  mlir::Value bias = (op->getNumOperands() > 2) ? op->getOperand(2) : nullptr;
+
+  // ONNX Conv always has 3 operands, but bias can be onnx.NoValue (NoneType)
+  bool hasBias = op->getNumOperands() > 2 &&
+                 !mlir::isa<mlir::NoneType>(op->getOperand(2).getType());
+  mlir::Value bias = hasBias ? op->getOperand(2) : nullptr;
 
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
