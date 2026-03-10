@@ -154,35 +154,52 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
       biasPtr = LLVM::ZeroOp::create(rewriter, loc, ptrType);
     }
 
-    // Extract shapes from memref types (static shapes known at compile time)
+    // Extract shapes from memref types
+    // Supports both static and dynamic dimensions using MemRefDescriptor
     auto inputType = cast<MemRefType>(op.getInput().getType());
     auto weightsType = cast<MemRefType>(op.getWeights().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
-    // Input shape: [N, C, H, W]
-    auto inputShape = inputType.getShape();
-    if (inputShape.size() != 4) {
+    // Verify ranks
+    if (inputType.getRank() != 4) {
       return op.emitError("Input must be rank-4 tensor [N, C, H, W]");
     }
-    Value inputN = createI64Const(inputShape[0]);
-    Value inputC = createI64Const(inputShape[1]);
-    Value inputH = createI64Const(inputShape[2]);
-    Value inputW = createI64Const(inputShape[3]);
-
-    // Weights shape: [K, C, R, S] where K=output channels
-    auto weightsShape = weightsType.getShape();
-    if (weightsShape.size() != 4) {
+    if (weightsType.getRank() != 4) {
       return op.emitError("Weights must be rank-4 tensor [K, C, R, S]");
     }
-    Value weightsK = createI64Const(weightsShape[0]);
-
-    // Output shape: [N, K, H', W']
-    auto outputShape = outputType.getShape();
-    if (outputShape.size() != 4) {
+    if (outputType.getRank() != 4) {
       return op.emitError("Output must be rank-4 tensor [N, K, H', W']");
     }
-    Value outputH = createI64Const(outputShape[2]);
-    Value outputW = createI64Const(outputShape[3]);
+
+    // Helper: Get dimension value (static constant or dynamic descriptor size)
+    auto getDim = [&](MemRefDescriptor &desc, MemRefType type,
+                      unsigned dimIdx) -> Value {
+      int64_t dimSize = type.getShape()[dimIdx];
+      if (!ShapedType::isDynamic(dimSize)) {
+        // Static dimension: use compile-time constant
+        return createI64Const(dimSize);
+      }
+      // Dynamic dimension: extract from runtime descriptor
+      return desc.size(rewriter, loc, dimIdx);
+    };
+
+    // Create descriptors for accessing runtime sizes
+    MemRefDescriptor inputDesc(adaptor.getInput());
+    MemRefDescriptor weightsDesc(adaptor.getWeights());
+    MemRefDescriptor outputDesc(adaptor.getOutput());
+
+    // Input shape: [N, C, H, W]
+    Value inputN = getDim(inputDesc, inputType, 0);
+    Value inputC = getDim(inputDesc, inputType, 1);
+    Value inputH = getDim(inputDesc, inputType, 2);
+    Value inputW = getDim(inputDesc, inputType, 3);
+
+    // Weights shape: [K, C, R, S] where K=output channels
+    Value weightsK = getDim(weightsDesc, weightsType, 0);
+
+    // Output shape: [N, K, H', W']
+    Value outputH = getDim(outputDesc, outputType, 2);
+    Value outputW = getDim(outputDesc, outputType, 3);
 
     // Extract attributes
     auto kernelShape = op.getKernelShape();
