@@ -592,6 +592,11 @@ CastToHip::matchAndRewrite(mlir::Operation *op,
     onnxDataType = 7;
   else if (targetType.isInteger(1))
     onnxDataType = 9;
+
+  // Validate that we have a supported type
+  if (onnxDataType == 0)
+    return rewriter.notifyMatchFailure(op, "unsupported cast target type");
+
   auto toAttr = rewriter.getI64IntegerAttr(onnxDataType);
 
   auto hipOp = mlir::hip::CastOp::create(rewriter, loc, resultType, context,
