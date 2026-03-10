@@ -26,6 +26,7 @@
 #include "model_metadata_generated.h"
 #include "model_metadata_schema.h"
 #include "flatbuffers/flatbuffers.h"
+#include "hip/debug_log.h"
 
 using namespace mlir;
 
@@ -246,7 +247,7 @@ public:
     generateMetadataGlobal(module, json);
     generateInferenceGetMetadataJson(module);
 
-    llvm::errs() << "[GenerateInterface] Generated 4 interface functions\n";
+    COMPILER_DEBUG_LOG("[GenerateInterface] Generated 4 interface functions\n");
   }
 
 private:
@@ -568,8 +569,8 @@ private:
         module.lookupSymbol<LLVM::LLVMFuncOp>("inference_compute") ||
         module.lookupSymbol<LLVM::LLVMFuncOp>("inference_cleanup") ||
         module.lookupSymbol<LLVM::LLVMFuncOp>("inference_get_metadata_json")) {
-      llvm::errs() << "[GenerateInterface] Interface functions already exist. "
-                   << "Pass already ran.\n";
+      COMPILER_DEBUG_LOG("[GenerateInterface] Interface functions already exist. "
+                   << "Pass already ran.\n");
       return failure();
     }
 
@@ -579,12 +580,12 @@ private:
     if (!mainFunc) {
       // Give helpful error if it's func.func
       if (module.lookupSymbol<func::FuncOp>("main_graph")) {
-        llvm::errs() << "[GenerateInterface] @main_graph is func.func, needs "
+        COMPILER_DEBUG_LOG("[GenerateInterface] @main_graph is func.func, needs "
                         "llvm.func.\n"
-                     << "Run --convert-hip-to-llvm first.\n";
+                     << "Run --convert-hip-to-llvm first.\n");
         return failure();
       }
-      llvm::errs() << "[GenerateInterface] @main_graph (llvm.func) not found\n";
+      COMPILER_DEBUG_LOG("[GenerateInterface] @main_graph (llvm.func) not found\n");
       return failure();
     }
 
@@ -594,30 +595,30 @@ private:
         mainType.getParamType(1) != ptrType ||
         mainType.getParamType(2) != ptrType ||
         mainType.getReturnType() != i32Type) {
-      llvm::errs() << "[GenerateInterface] @main_graph has wrong signature.\n"
-                   << "Expected: (ptr, ptr, ptr) -> i32\n";
+      COMPILER_DEBUG_LOG("[GenerateInterface] @main_graph has wrong signature.\n"
+                   << "Expected: (ptr, ptr, ptr) -> i32\n");
       return failure();
     }
 
     // 2. Check all 4 metadata attributes exist
     if (!module->getAttr("hipdnn.input_count")) {
-      llvm::errs()
-          << "[GenerateInterface] hipdnn.input_count attribute missing\n";
+      COMPILER_DEBUG_LOG(
+          "[GenerateInterface] hipdnn.input_count attribute missing\n");
       return failure();
     }
     if (!module->getAttr("hipdnn.input_shapes")) {
-      llvm::errs()
-          << "[GenerateInterface] hipdnn.input_shapes attribute missing\n";
+      COMPILER_DEBUG_LOG(
+          "[GenerateInterface] hipdnn.input_shapes attribute missing\n");
       return failure();
     }
     if (!module->getAttr("hipdnn.output_count")) {
-      llvm::errs()
-          << "[GenerateInterface] hipdnn.output_count attribute missing\n";
+      COMPILER_DEBUG_LOG(
+          "[GenerateInterface] hipdnn.output_count attribute missing\n");
       return failure();
     }
     if (!module->getAttr("hipdnn.output_shapes")) {
-      llvm::errs()
-          << "[GenerateInterface] hipdnn.output_shapes attribute missing\n";
+      COMPILER_DEBUG_LOG(
+          "[GenerateInterface] hipdnn.output_shapes attribute missing\n");
       return failure();
     }
 
@@ -680,15 +681,15 @@ private:
         module->getAttrOfType<IntegerAttr>("hipdnn.buffer_count");
 
     if (!poolSizeAttr || !bufferOffsetsAttr || !bufferCountAttr) {
-      llvm::errs()
-          << "[GenerateInterface] FATAL: memory pool attributes missing.\n"
+      COMPILER_DEBUG_LOG(
+          "[GenerateInterface] FATAL: memory pool attributes missing.\n"
           << "  hipdnn.pool_size: " << (poolSizeAttr ? "present" : "MISSING")
           << "\n"
           << "  hipdnn.buffer_offsets: "
           << (bufferOffsetsAttr ? "present" : "MISSING") << "\n"
           << "  hipdnn.buffer_count: "
           << (bufferCountAttr ? "present" : "MISSING") << "\n"
-          << "  Ensure MemoryPoolingPass runs before GenerateInterface.\n";
+          << "  Ensure MemoryPoolingPass runs before GenerateInterface.\n");
       signalPassFailure();
       return;
     }
@@ -1067,8 +1068,8 @@ private:
                                       ArrayRef<LLVM::GEPArg>{indexVal});
       builder.create<LLVM::StoreOp>(loc, memrefPtr, arraySlot);
 
-      llvm::errs() << "[GenerateInterface] Built input memref " << i
-                   << " using opaque TensorBuffer accessors\n";
+      COMPILER_DEBUG_LOG("[GenerateInterface] Built input memref " << i
+                   << " using opaque TensorBuffer accessors\n");
     }
 
     // Build output memref array similarly
@@ -1166,7 +1167,7 @@ private:
 
     auto mainFunc = module.lookupSymbol<LLVM::LLVMFuncOp>("main_graph");
     if (!mainFunc) {
-      llvm::errs() << "[GenerateInterface] Warning: @main_graph not found\n";
+      COMPILER_DEBUG_LOG("[GenerateInterface] Warning: @main_graph not found\n");
       builder.create<LLVM::BrOp>(loc, mainSuccessBlock);
     } else {
       Value mainRet =

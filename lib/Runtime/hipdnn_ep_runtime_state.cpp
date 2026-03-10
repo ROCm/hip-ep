@@ -4,6 +4,7 @@
  */
 #include "hipdnn_ep_runtime.h"
 #include "runtime_types.h"
+#include "debug_log.h"
 
 #include "model_metadata_generated.h"
 #include "morphizen-foundation/file_io.hpp"

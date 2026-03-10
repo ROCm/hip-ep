@@ -30,6 +30,7 @@
 #include "morphizen-foundation/file_io.hpp"
 #include "hip/Support/DiskFileSystem.h"
 #include "compilation_options_generated.h"
+#include "hip/debug_log.h"
 
 // Include ONNX dialect operations from onnx-mlir
 #include "src/Dialect/ONNX/ONNXOps.hpp"
@@ -979,8 +980,8 @@ public:
       std::unique_ptr<udna::DiskFileSystem> fallbackFs;
       morphizen::FileSystem* fs = fileSystem_;
       if (!fs) {
-        llvm::errs() << "[ONNX→HIP] WARNING: no FileSystem provided, "
-                        "falling back to DiskFileSystem (current dir)\n";
+        COMPILER_DEBUG_LOG("[ONNX→HIP] WARNING: no FileSystem provided, "
+                        "falling back to DiskFileSystem (current dir)\n");
         fallbackFs = std::make_unique<udna::DiskFileSystem>(".");
         fs = fallbackFs.get();
       }
@@ -1130,7 +1131,7 @@ private:
     }
 
     if (nextIndex > 0) {
-      llvm::errs() << "[ONNX→HIP] Discovered " << nextIndex << " constants:\n";
+      COMPILER_DEBUG_LOG("[ONNX→HIP] Discovered " << nextIndex << " constants:\n");
       for (const auto& entry : constantRegistry_) {
         const auto& info = entry.second;
         llvm::errs() << "  [" << info.globalIndex << "] " << info.name
@@ -1217,7 +1218,7 @@ private:
   LogicalResult writeConstantsToFileSystem(ModuleOp module,
                                            morphizen::FileSystem* fs) {
     if (constantRegistry_.empty()) {
-      llvm::errs() << "[ONNX→HIP] No constants to write (external mode)\n";
+      COMPILER_DEBUG_LOG("[ONNX→HIP] No constants to write (external mode)\n");
       return success();
     }
 
@@ -1236,8 +1237,8 @@ private:
             : "constants.bin";
     auto writer = fs->create_writer_template(constantsFilename.c_str());
     if (!writer) {
-      llvm::errs() << "[ONNX→HIP] Failed to create " << constantsFilename
-                   << " via FileSystem\n";
+      COMPILER_DEBUG_LOG("[ONNX→HIP] Failed to create " << constantsFilename
+                   << " via FileSystem\n");
       return failure();
     }
 
@@ -1248,7 +1249,7 @@ private:
       while (n > 0) {
         size_t chunk = std::min(n, kConstantAlignment);
         if (writer->fwrite(zeros.data(), chunk) != chunk) {
-          llvm::errs() << "[ONNX→HIP] Short write during zero-fill\n";
+          COMPILER_DEBUG_LOG("[ONNX→HIP] Short write during zero-fill\n");
           return failure();
         }
         n -= chunk;
@@ -1267,8 +1268,8 @@ private:
 
       auto denseAttr = mlir::dyn_cast<DenseElementsAttr>(info->value);
       if (!denseAttr) {
-        llvm::errs() << "[ONNX→HIP] Constant [" << info->globalIndex
-                     << "] is not DenseElementsAttr\n";
+        COMPILER_DEBUG_LOG("[ONNX→HIP] Constant [" << info->globalIndex
+                     << "] is not DenseElementsAttr\n");
         return failure();
       }
       auto rawData = denseAttr.getRawData();
@@ -1288,24 +1289,24 @@ private:
         while (remaining > 0) {
           size_t toWrite = std::min(remaining, bufSize);
           if (writer->fwrite(buf.data(), toWrite) != toWrite) {
-            llvm::errs() << "[ONNX→HIP] Short write (splat) for constant ["
-                         << info->globalIndex << "]\n";
+            COMPILER_DEBUG_LOG("[ONNX→HIP] Short write (splat) for constant ["
+                         << info->globalIndex << "]\n");
             return failure();
           }
           remaining -= toWrite;
         }
       } else {
         if (writer->fwrite(rawData.data(), rawData.size()) != rawData.size()) {
-          llvm::errs() << "[ONNX→HIP] Short write for constant ["
-                       << info->globalIndex << "]\n";
+          COMPILER_DEBUG_LOG("[ONNX→HIP] Short write for constant ["
+                       << info->globalIndex << "]\n");
           return failure();
         }
       }
       writePos += info->sizeInBytes;
 
-      llvm::errs() << "[ONNX→HIP] Wrote constant [" << info->globalIndex
+      COMPILER_DEBUG_LOG("[ONNX→HIP] Wrote constant [" << info->globalIndex
                    << "] " << info->name << " at offset=" << info->offset
-                   << " (" << info->sizeInBytes << " bytes)\n";
+                   << " (" << info->sizeInBytes << " bytes)\n");
     }
 
     // Zero-fill trailing alignment padding for the last large constant.
@@ -1315,8 +1316,8 @@ private:
       writePos = totalFileSize_;
     }
 
-    llvm::errs() << "[ONNX→HIP] constants.bin total: " << writePos
-                 << " bytes\n";
+    COMPILER_DEBUG_LOG("[ONNX→HIP] constants.bin total: " << writePos
+                 << " bytes\n");
     return success();
   }
 
@@ -1354,8 +1355,8 @@ private:
                     DenseI64ArrayAttr::get(ctx, offsets));
 
     for (size_t i = 0; i < sizes.size(); ++i)
-      llvm::errs() << "[ONNX→HIP]   [" << i << "] size=" << sizes[i]
-                   << " offset=" << offsets[i] << "\n";
+      COMPILER_DEBUG_LOG("[ONNX→HIP]   [" << i << "] size=" << sizes[i]
+                   << " offset=" << offsets[i] << "\n");
 
     return success();
   }
@@ -1387,8 +1388,8 @@ private:
         inputElementSizes.push_back(
             tensorType.getElementType().getIntOrFloatBitWidth() / 8);
       } else {
-        llvm::errs() << "[ONNX→HIP] Warning: non-tensor input in @main_graph, "
-                        "skipping metadata\n";
+        COMPILER_DEBUG_LOG("[ONNX→HIP] Warning: non-tensor input in @main_graph, "
+                        "skipping metadata\n");
         return success();
       }
     }
@@ -1405,8 +1406,8 @@ private:
         outputElementSizes.push_back(
             tensorType.getElementType().getIntOrFloatBitWidth() / 8);
       } else {
-        llvm::errs() << "[ONNX→HIP] Warning: non-tensor output in @main_graph, "
-                        "skipping metadata\n";
+        COMPILER_DEBUG_LOG("[ONNX→HIP] Warning: non-tensor output in @main_graph, "
+                        "skipping metadata\n");
         return success();
       }
     }
@@ -1423,8 +1424,8 @@ private:
     module->setAttr("hipdnn.output_element_sizes",
                     builder.getDenseI64ArrayAttr(outputElementSizes));
 
-    llvm::errs() << "[ONNX→HIP] Generated module metadata: input_count="
-                 << inputCount << " output_count=" << outputCount << "\n";
+    COMPILER_DEBUG_LOG("[ONNX→HIP] Generated module metadata: input_count="
+                 << inputCount << " output_count=" << outputCount << "\n");
 
     return success();
   }
@@ -1438,7 +1439,7 @@ private:
     auto loc = module.getLoc();
     auto* context = builder.getContext();
 
-    llvm::errs() << "[ONNX→HIP] Generating constant registry\n";
+    COMPILER_DEBUG_LOG("[ONNX→HIP] Generating constant registry\n");
 
     auto ptrType = LLVM::LLVMPointerType::get(context);
     auto i64Type = builder.getI64Type();
