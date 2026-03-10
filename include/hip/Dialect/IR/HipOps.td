@@ -326,20 +326,20 @@ def Hip_SubOp : Hip_DpsOp<"sub"> {
 
     Example:
     ```mlir
-    hip.sub(%handle) ins(%lhs, %rhs : memref<1x1xi64, 1>, memref<1x1xi64, 1>)
-                     outs(%output : memref<1x1xi64, 1>)
+    hip.sub(%ctx) ins(%lhs, %rhs : memref<1x1xi64, 1>, memref<1x1xi64, 1>)
+                  outs(%output : memref<1x1xi64, 1>)
     ```
   }];
 
   let arguments = (ins
-    Hip_ContextType:$handle,
+    Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$lhs,
     Hip_TensorOrMemRef:$rhs,
     Hip_TensorOrMemRef:$output
   );
 
   let assemblyFormat = [{
-    `(` $handle `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
@@ -385,13 +385,13 @@ def Hip_ReduceSumOp : Hip_DpsOp<"reduce_sum"> {
 
     Example:
     ```mlir
-    hip.reduce_sum(%handle) ins(%data, %axes : memref<1x128xi64, 1>, memref<i64, 1>)
-                            outs(%output : memref<1x1xi64, 1>) {keepdims = 1 : i64}
+    hip.reduce_sum(%ctx) ins(%data, %axes : memref<1x128xi64, 1>, memref<i64, 1>)
+                         outs(%output : memref<1x1xi64, 1>) {keepdims = 1 : i64}
     ```
   }];
 
   let arguments = (ins
-    Hip_ContextType:$handle,
+    Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$data,
     Hip_TensorOrMemRef:$axes,
     Hip_TensorOrMemRef:$output,
@@ -399,7 +399,7 @@ def Hip_ReduceSumOp : Hip_DpsOp<"reduce_sum"> {
   );
 
   let assemblyFormat = [{
-    `(` $handle `)` `ins` `(` $data `,` $axes `:` type($data) `,` type($axes) `)`
+    `(` $ctx `)` `ins` `(` $data `,` $axes `:` type($data) `,` type($axes) `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];

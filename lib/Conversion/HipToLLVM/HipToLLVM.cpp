@@ -949,7 +949,7 @@ struct SubOpLowering : public ConvertOpToLLVMPattern<SubOp> {
       return ptr;
     };
 
-    Value statePtr = adaptor.getHandle();
+    Value statePtr = adaptor.getCtx();
     Value lhsPtr = getAlignedPtr(adaptor.getLhs());
     Value rhsPtr = getAlignedPtr(adaptor.getRhs());
     Value outputPtr = getAlignedPtr(adaptor.getOutput());
@@ -1104,7 +1104,7 @@ struct ReduceSumOpLowering : public ConvertOpToLLVMPattern<ReduceSumOp> {
       return ptr;
     };
 
-    Value statePtr = adaptor.getHandle();
+    Value statePtr = adaptor.getCtx();
     Value dataPtr = getAlignedPtr(adaptor.getData());
     Value axesPtr = getAlignedPtr(adaptor.getAxes());
     Value outputPtr = getAlignedPtr(adaptor.getOutput());
