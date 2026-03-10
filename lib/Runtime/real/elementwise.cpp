@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
+#include "../debug_log.h"
 #include "runtime_types.h"
 #include "hip_custom_kernels.h"
 
@@ -12,7 +13,7 @@
   do {                                                                         \
     miopenStatus_t status = (cmd);                                             \
     if (status != miopenStatusSuccess) {                                       \
-      fprintf(stderr, "[REAL] MIOpen error %d at %s:%d\n", status, __FILE__,   \
+      RUNTIME_DEBUG_LOG("[REAL] MIOpen error %d at %s:%d\n", status, __FILE__,   \
               __LINE__);                                                       \
       return -1;                                                               \
     }                                                                          \
@@ -66,7 +67,7 @@ int wrap_miopenOpTensor(RuntimeState* state, void* lhs, void* rhs,
                         void* output, int64_t num_elements,
                         int64_t data_type, int64_t tensor_op) {
   if (!state || !lhs || !rhs || !output) {
-    fprintf(stderr, "[REAL] wrap_miopenOpTensor: null argument\n");
+    RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: null argument\n");
     return -1;
   }
 
@@ -83,7 +84,7 @@ int wrap_miopenOpTensor(RuntimeState* state, void* lhs, void* rhs,
   miopenHandle_t handle = static_cast<miopenHandle_t>(
       hipdnn_ep_state_get_miopen_handle(state));
   if (!handle) {
-    fprintf(stderr, "[REAL] wrap_miopenOpTensor: null MIOpen handle\n");
+    RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: null MIOpen handle\n");
     return -1;
   }
 
@@ -114,7 +115,7 @@ int wrap_miopenOpTensor(RuntimeState* state, void* lhs, void* rhs,
   MIOPEN_CHECK(miopenOpTensor(handle, miopen_op, &alpha1, aDesc, lhs,
                               &alpha2, bDesc, rhs, &beta, cDesc, output));
 
-  fprintf(stderr, "[REAL] wrap_miopenOpTensor: completed successfully\n");
+  RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: completed successfully\n");
 
   miopenDestroyTensorDescriptor(aDesc);
   miopenDestroyTensorDescriptor(bDesc);
@@ -135,7 +136,7 @@ int wrap_elementwise_sub(RuntimeState* state, void* lhs, void* rhs,
                          void* output, int64_t num_elements,
                          int64_t element_size_bytes) {
   if (!state || !lhs || !rhs || !output) {
-    fprintf(stderr, "[REAL] wrap_elementwise_sub: null argument\n");
+    RUNTIME_DEBUG_LOG("[REAL] wrap_elementwise_sub: null argument\n");
     return -1;
   }
 

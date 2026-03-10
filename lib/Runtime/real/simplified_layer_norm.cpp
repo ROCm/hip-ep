@@ -7,6 +7,7 @@
 #define MIOPEN_BETA_API
 
 #include "../hipdnn_ep_runtime.h"
+#include "../debug_log.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -72,13 +73,12 @@ int wrap_miopenT5LayerNormForward(RuntimeState* state,
 
   const char* type_name = (element_size_bytes == 2) ? "f16"
                         : (element_size_bytes == 4) ? "f32" : "?";
-  fprintf(stderr,
-          "[REAL] wrap_miopenT5LayerNormForward: num_rows=%lld, hidden_dim=%lld, "
-          "data_type=%s, epsilon=%e, "
-          "total_bytes=%lld\n",
-          (long long)num_rows, (long long)hidden_dim,
-          type_name, (double)epsilon,
-          (long long)(input_num_elements * element_size_bytes));
+  RUNTIME_DEBUG_LOG("[REAL] wrap_miopenT5LayerNormForward: num_rows=%lld, hidden_dim=%lld, "
+                    "data_type=%s, epsilon=%e, "
+                    "total_bytes=%lld\n",
+                    (long long)num_rows, (long long)hidden_dim,
+                    type_name, (double)epsilon,
+                    (long long)(input_num_elements * element_size_bytes));
 
   miopenDataType_t data_type;
   if (element_size_bytes == 2)
@@ -129,18 +129,16 @@ int wrap_miopenT5LayerNormForward(RuntimeState* state,
                                            rstd_dims, rstd_strides));
   }
 
-  fprintf(stderr,
-          "[REAL] wrap_miopenT5LayerNormForward: calling miopenT5LayerNormForward"
-          "(mode=ELEMENTWISE_AFFINE_T5, eps=%e)\n",
-          (double)epsilon);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_miopenT5LayerNormForward: calling miopenT5LayerNormForward"
+                    "(mode=ELEMENTWISE_AFFINE_T5, eps=%e)\n",
+                    (double)epsilon);
 
   MIOPEN_CHECK(miopenT5LayerNormForward(handle, MIOPEN_ELEMENTWISE_AFFINE_T5,
                                         xDesc, input, weightDesc, scale,
                                         epsilon, yDesc, output, rstdDesc,
                                         rstd_buf));
 
-  fprintf(stderr,
-          "[REAL] wrap_miopenT5LayerNormForward: completed successfully\n");
+  RUNTIME_DEBUG_LOG("[REAL] wrap_miopenT5LayerNormForward: completed successfully\n");
   rc = 0;
 
 cleanup:

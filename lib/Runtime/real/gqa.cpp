@@ -4,6 +4,7 @@
  */
 
 #include "../hipdnn_ep_runtime.h"
+#include "../debug_log.h"
 #include "hip_custom_kernels.h"
 
 #include <cstdio>
@@ -69,7 +70,7 @@ int wrap_group_query_attention(
   if (rc != 0) {
     fprintf(stderr, "wrap_group_query_attention: hip_gqa_forward failed (rc=%d)\n", rc);
   } else {
-    fprintf(stderr, "[REAL] wrap_group_query_attention: completed successfully\n");
+    RUNTIME_DEBUG_LOG("[REAL] wrap_group_query_attention: completed successfully\n");
   }
 
   return rc;

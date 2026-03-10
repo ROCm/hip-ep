@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
+#include "../debug_log.h"
 #include "runtime_types.h"
 #include "hip_custom_kernels.h"
 
@@ -12,7 +13,7 @@ int wrap_gather(RuntimeState* state, void* data, void* indices,
                 void* output, int64_t axis, int64_t data_num_elements,
                 int64_t output_num_elements, int64_t element_size_bytes) {
   if (!state || !data || !indices || !output) {
-    fprintf(stderr, "[REAL] wrap_gather: null argument\n");
+    RUNTIME_DEBUG_LOG("[REAL] wrap_gather: null argument\n");
     return -1;
   }
 
