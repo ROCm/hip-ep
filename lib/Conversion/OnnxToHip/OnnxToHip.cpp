@@ -570,8 +570,32 @@ CastToHip::matchAndRewrite(mlir::Operation *op,
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+
+  // Map MLIR element type to ONNX DataType enum
+  mlir::Type targetType = resultType.getElementType();
+  int64_t onnxDataType = 0;
+  if (targetType.isF16())
+    onnxDataType = 10;
+  else if (targetType.isBF16())
+    onnxDataType = 16;
+  else if (targetType.isF32())
+    onnxDataType = 1;
+  else if (targetType.isF64())
+    onnxDataType = 11;
+  else if (targetType.isInteger(8))
+    onnxDataType = 3;
+  else if (targetType.isInteger(16))
+    onnxDataType = 5;
+  else if (targetType.isInteger(32))
+    onnxDataType = 6;
+  else if (targetType.isInteger(64))
+    onnxDataType = 7;
+  else if (targetType.isInteger(1))
+    onnxDataType = 9;
+  auto toAttr = rewriter.getI64IntegerAttr(onnxDataType);
+
   auto hipOp = mlir::hip::CastOp::create(rewriter, loc, resultType, context,
-                                         input, init);
+                                         input, init, toAttr);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }

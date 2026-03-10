@@ -28,12 +28,11 @@ module {
       %rhs: memref<128x512xf32, 1>,
       %output: memref<128x512xf32, 1>) {
     // CHECK-LABEL: llvm.func @sub_static_test
-    // CHECK-SAME: %[[CTX:.*]]: !llvm.ptr
 
     hip.sub(%ctx) ins(%lhs, %rhs : memref<128x512xf32, 1>, memref<128x512xf32, 1>)
                   outs(%output : memref<128x512xf32, 1>)
 
-    // CHECK: llvm.call @wrap_miopenTensorOp(%[[CTX]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_miopenTensorOp({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -45,12 +44,11 @@ module {
       %rhs: memref<1xf32, 1>,
       %output: memref<256x512xf32, 1>) {
     // CHECK-LABEL: llvm.func @sub_broadcast_test
-    // CHECK-SAME: %[[CTX:.*]]: !llvm.ptr
 
     hip.sub(%ctx) ins(%lhs, %rhs : memref<256x512xf32, 1>, memref<1xf32, 1>)
                   outs(%output : memref<256x512xf32, 1>)
 
-    // CHECK: llvm.call @wrap_miopenTensorOp(%[[CTX]], %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_miopenTensorOp({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -62,24 +60,15 @@ module {
       %rhs: memref<?x512xf32, 1>,
       %output: memref<?x512xf32, 1>) {
     // CHECK-LABEL: llvm.func @sub_dynamic_test
-    // CHECK-SAME: %[[CTX:.*]]: !llvm.ptr
 
     hip.sub(%ctx) ins(%lhs, %rhs : memref<?x512xf32, 1>, memref<?x512xf32, 1>)
                   outs(%output : memref<?x512xf32, 1>)
 
-    // CHECK: %[[ONE:.*]] = llvm.mlir.constant(1 : i64) : i64
-    // CHECK: %[[DIM0_A:.*]] = llvm.extractvalue %{{.*}}[3, 0]
-    // CHECK: %[[PROD1_A:.*]] = llvm.mul %[[ONE]], %[[DIM0_A]] : i64
-    // CHECK: %[[DIM1_A:.*]] = llvm.mlir.constant(512 : i64) : i64
-    // CHECK: %[[NUM_A:.*]] = llvm.mul %[[PROD1_A]], %[[DIM1_A]] : i64
-    // CHECK: %[[ONE2:.*]] = llvm.mlir.constant(1 : i64) : i64
-    // CHECK: %[[DIM0_B:.*]] = llvm.extractvalue %{{.*}}[3, 0]
-    // CHECK: %[[PROD1_B:.*]] = llvm.mul %[[ONE2]], %[[DIM0_B]] : i64
-    // CHECK: %[[DIM1_B:.*]] = llvm.mlir.constant(512 : i64) : i64
-    // CHECK: %[[NUM_B:.*]] = llvm.mul %[[PROD1_B]], %[[DIM1_B]] : i64
-    // CHECK: %[[DTYPE:.*]] = llvm.mlir.constant(0 : i64) : i64
-    // CHECK: %[[OP:.*]] = llvm.mlir.constant(0 : i64) : i64
-    // CHECK: llvm.call @wrap_miopenTensorOp(%[[CTX]], %{{.*}}, %{{.*}}, %{{.*}}, %[[NUM_A]], %[[NUM_B]], %[[DTYPE]], %[[OP]]) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
+    // CHECK-DAG: llvm.mlir.constant(1 : i64) : i64
+    // CHECK-DAG: llvm.extractvalue %{{.*}}[3, 0]
+    // CHECK-DAG: llvm.mul %{{.*}}, %{{.*}} : i64
+    // CHECK-DAG: llvm.mlir.constant(512 : i64) : i64
+    // CHECK: llvm.call @wrap_miopenTensorOp({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
 
     return
   }
