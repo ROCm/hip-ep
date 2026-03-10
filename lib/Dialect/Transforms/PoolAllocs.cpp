@@ -232,17 +232,35 @@ packDynamicAllocs(MutableArrayRef<AllocInfo> dynamics, OpBuilder &builder,
     return byteSize;
   };
 
-  // Step 3: group by byte-size SSA value.
-  llvm::MapVector<Value, SmallVector<AllocInfo *>> bySize;
-  for (auto &[key, info] : keyed)
-    bySize[findOrCreateByteSize(key)].push_back(info);
+  // Step 3: group by byte-size SSA value.  Track the staticFactor alongside
+  // each group so step 4 can skip alignment when the factor is already a
+  // multiple of the alignment (e.g. staticFactor=256 with alignment=256).
+  struct SizeGroup {
+    int64_t staticFactor;
+    SmallVector<AllocInfo *> infos;
+  };
+  llvm::MapVector<Value, SizeGroup> bySize;
+  for (auto &[key, info] : keyed) {
+    Value sizeVal = findOrCreateByteSize(key);
+    auto &group = bySize[sizeVal];
+    group.staticFactor = key.staticFactor;
+    group.infos.push_back(info);
+  }
 
   // Step 4: first-fit bin packing within each group.
   SmallVector<DynBucket> buckets;
-  for (auto &[sizeVal, infos] : bySize) {
+  for (auto &[sizeVal, group] : bySize) {
+    auto &infos = group.infos;
     DynBucket bucket;
     bucket.byteSizeValue = sizeVal;
-    bucket.alignedSize = emitAlignUp(builder, loc, sizeVal, alignment);
+    // When staticFactor is a multiple of alignment, the byte size
+    // (staticFactor * dynDim0 * dynDim1 * ...) is guaranteed to be aligned
+    // regardless of the dynamic dimensions, so emitAlignUp is a no-op.
+    // Skipping it avoids an expensive divui + supporting arithmetic.
+    if (group.staticFactor % alignment == 0)
+      bucket.alignedSize = sizeVal;
+    else
+      bucket.alignedSize = emitAlignUp(builder, loc, sizeVal, alignment);
     for (AllocInfo *info : infos) {
       bool placed = false;
       for (auto &bin : bucket.bins) {
