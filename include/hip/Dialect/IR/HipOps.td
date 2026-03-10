@@ -345,6 +345,35 @@ def Hip_SubOp : Hip_DpsOp<"sub"> {
   }];
 }
 
+def Hip_CastOp : Hip_DpsOp<"cast"> {
+  let summary = "Type conversion operation";
+  let description = [{
+    Converts input tensor from one data type to another.
+
+    Input and output may have different element types but the same shape.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.cast(%ctx) ins(%input : memref<128x256xf32, 1>)
+                   outs(%output : memref<128x256xf16, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_GqaOp : Hip_DpsOp<"gqa"> {
   let summary = "Grouped query attention";
   let arguments = (ins

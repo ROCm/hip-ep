@@ -547,6 +547,35 @@ SubToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
+/// onnx.Cast -> hip.cast
+struct CastToHip : public mlir::RewritePattern {
+  CastToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Cast", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+CastToHip::matchAndRewrite(mlir::Operation *op,
+                           mlir::PatternRewriter &rewriter) const {
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value input = op->getOperand(0);
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  auto hipOp = mlir::hip::CastOp::create(rewriter, loc, resultType, context,
+                                         input, init);
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
 /// onnx.Conv -> hip.conv
 struct ConvToHip : public mlir::RewritePattern {
   ConvToHip(mlir::MLIRContext *ctx)
@@ -669,6 +698,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   patterns.add<SoftmaxToHip>(ctx);
   patterns.add<SigmoidToHip>(ctx);
   patterns.add<SubToHip>(ctx);
+  patterns.add<CastToHip>(ctx);
   patterns.add<ConvToHip>(ctx);
 
   mlir::GreedyRewriteConfig config;
