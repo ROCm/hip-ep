@@ -48,6 +48,10 @@ unsigned mlir::hip::findLastAliasedUseIndex(
     Block &block, const DenseMap<Operation *, unsigned> &opIndex,
     unsigned blockSize) {
   unsigned lastIdx = 0;
+  // resolve() returns all *forward* (downstream) aliases: the allocResult
+  // itself plus any values derived from it via view-like ops (memref.view,
+  // memref.subview, memref.cast, etc.).  We must consider users of ALL
+  // aliases to get the true last-use index.
   for (Value alias : aliasAnalysis.resolve(allocResult)) {
     for (Operation *user : alias.getUsers()) {
       if (isa<memref::DeallocOp>(user))
@@ -56,10 +60,14 @@ unsigned mlir::hip::findLastAliasedUseIndex(
       auto it = opIndex.find(user);
       unsigned userIdx;
       if (it != opIndex.end()) {
+        // User is directly in the entry block.
         userIdx = it->second;
       } else if (auto *ancestor = block.findAncestorOpInBlock(*user)) {
+        // User is inside a nested region (e.g. scf.for body); attribute
+        // its index to the enclosing op in the entry block.
         userIdx = opIndex.lookup(ancestor);
       } else {
+        // User is unreachable from this block; conservatively assume last.
         userIdx = blockSize - 1;
       }
       lastIdx = std::max(lastIdx, userIdx);
@@ -71,7 +79,10 @@ unsigned mlir::hip::findLastAliasedUseIndex(
 Operation *mlir::hip::findLastAliasedUser(
     Value allocResult, const BufferViewFlowAnalysis &aliasAnalysis,
     Block &entryBlock) {
+  // Start from the defining op so we always have a valid baseline, even if
+  // the alloc has no users at all (e.g., dead code not yet cleaned up).
   Operation *lastUser = allocResult.getDefiningOp();
+  // resolve() returns all forward aliases -- see findLastAliasedUseIndex.
   for (Value alias : aliasAnalysis.resolve(allocResult)) {
     for (Operation *user : alias.getUsers()) {
       Operation *resolved = user;
@@ -90,6 +101,9 @@ Operation *mlir::hip::findLastAliasedUser(
 bool mlir::hip::isAliasInSet(Value root,
                              const BufferViewFlowAnalysis &aliasAnalysis,
                              const DenseSet<Value> &valueSet) {
+  // Check whether root or any of its forward aliases (views, casts, etc.)
+  // appears in valueSet.  Used by LowerAllocs to skip hip.free for returned
+  // buffers even when a derived view (not the alloc itself) is returned.
   for (Value alias : aliasAnalysis.resolve(root))
     if (valueSet.contains(alias))
       return true;
