@@ -88,10 +88,9 @@ void LowerAllocsPass::runOnOperation() {
     return signalPassFailure();
   }
 
-  BufferViewFlowAnalysis aliasAnalysis(funcOp);
   OpBuilder builder(funcOp.getContext());
 
-  // Replace each memref.alloc with hip.alloc.
+  // ---- Phase 1: Replace each memref.alloc with hip.alloc ----------------
   SmallVector<memref::AllocOp> allocs;
   funcOp.walk([&](memref::AllocOp op) { allocs.push_back(op); });
 
@@ -107,6 +106,28 @@ void LowerAllocsPass::runOnOperation() {
     ++NumAllocsLowered;
   }
 
+  // ---- Phase 2: Build alias analysis on the *modified* IR ---------------
+  //
+  // CRITICAL: BufferViewFlowAnalysis must be constructed AFTER the
+  // memref.alloc -> hip.alloc replacement above.  The analysis records
+  // forward alias edges (source -> view) for ViewLikeOpInterface ops
+  // (memref.view, memref.subview, memref.cast, etc.).  resolve(value)
+  // then returns all downstream aliases of that value.
+  //
+  // If the analysis were built on the original IR (with memref.alloc),
+  // then queried with the NEW hip.alloc SSA values, resolve() would
+  // return only {hipAlloc} -- missing all downstream views.  This causes:
+  //   - isAliasInSet: fails to detect that a returned memref.view aliases
+  //     the pool, so hip.free is incorrectly inserted for returned buffers.
+  //   - findLastAliasedUser: finds only the immediate SSA user (e.g. the
+  //     memref.view op) rather than the last transitive consumer, placing
+  //     hip.free before ops that still read/write through the view.
+  //
+  // Both are use-after-free bugs triggered in the pool-allocs -> lower-allocs
+  // pipeline, where the single pool hip.alloc has memref.view aliases that
+  // are returned from the function.
+  BufferViewFlowAnalysis aliasAnalysis(funcOp);
+
   // Collect returned values AFTER all replacements so the set contains
   // the new hip.alloc results (not the erased memref.alloc results).
   DenseSet<Value> returnedValues;
@@ -117,8 +138,10 @@ void LowerAllocsPass::runOnOperation() {
 
   Block &entry = funcOp.getBody().front();
 
-  // Replace memref.dealloc -> hip.free for buffers that trace back to a
-  // hip.alloc.
+  // ---- Phase 3: Convert memref.dealloc -> hip.free ----------------------
+  //
+  // Explicit deallocs that trace back to a hip.alloc are converted first.
+  // traceToHipAlloc walks through ViewLikeOpInterface ops to find the root.
   DenseSet<Value> deallocated;
   SmallVector<memref::DeallocOp> deallocs;
   funcOp.walk([&](memref::DeallocOp op) { deallocs.push_back(op); });
@@ -135,9 +158,12 @@ void LowerAllocsPass::runOnOperation() {
     ++NumDeallocsConverted;
   }
 
-  // Fallback: insert hip.free after last use for allocs that have no
-  // memref.dealloc.  Uses BufferViewFlowAnalysis to account for
-  // alias-creating ops like memref.view / subview / cast.
+  // ---- Phase 4: Insert hip.free for allocs without explicit dealloc -----
+  //
+  // Uses BufferViewFlowAnalysis to find all downstream aliases (views,
+  // subviews, casts) of each hip.alloc.  hip.free is placed after the
+  // last user of any alias, ensuring all transitive consumers have
+  // completed before the memory is released.
   for (AllocOp hipAlloc : hipAllocs) {
     if (isAliasInSet(hipAlloc.getResult(), aliasAnalysis, returnedValues))
       continue;
