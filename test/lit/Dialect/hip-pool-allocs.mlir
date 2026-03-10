@@ -5,7 +5,7 @@
 // FileCheck tests for --hip-pool-allocs (memory pooling into i8 byte buffer).
 //===----------------------------------------------------------------------===//
 
-// RUN: %hip-mlir-opt --hip-pool-allocs %s | %FileCheck %s
+// RUN: hip-mlir-opt --hip-pool-allocs %s | FileCheck %s
 
 // ===== Static pooling: two non-overlapping f32 allocs =====
 //
