@@ -488,6 +488,35 @@ SoftmaxToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
+/// onnx.Sigmoid -> hip.sigmoid
+struct SigmoidToHip : public mlir::RewritePattern {
+  SigmoidToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Sigmoid", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+SigmoidToHip::matchAndRewrite(mlir::Operation *op,
+                              mlir::PatternRewriter &rewriter) const {
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value input = op->getOperand(0);
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  auto hipOp = mlir::hip::SigmoidOp::create(rewriter, loc, resultType, context,
+                                            input, init);
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
 /// onnx.Conv -> hip.conv
 struct ConvToHip : public mlir::RewritePattern {
   ConvToHip(mlir::MLIRContext *ctx)
@@ -608,6 +637,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   patterns.add<TransposeToHip>(ctx);
   patterns.add<MulToHip>(ctx);
   patterns.add<SoftmaxToHip>(ctx);
+  patterns.add<SigmoidToHip>(ctx);
   patterns.add<ConvToHip>(ctx);
 
   mlir::GreedyRewriteConfig config;
