@@ -8,7 +8,7 @@
 // hip-lower-allocs then converts to a single hip.alloc + hip.free.
 //===----------------------------------------------------------------------===//
 
-// RUN: %hip-mlir-opt --hip-pool-allocs --hip-lower-allocs %s | %FileCheck %s
+// RUN: hip-mlir-opt --hip-pool-allocs --hip-lower-allocs %s | FileCheck %s
 
 // ===== Static model: pool + lower =====
 //

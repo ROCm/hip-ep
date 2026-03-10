@@ -5,10 +5,17 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
+#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
+#include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
+#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVM.h"
 #include "mlir/Conversion/LLVMCommon/ConversionTarget.h"
 #include "mlir/Conversion/LLVMCommon/MemRefBuilder.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
+#include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/FunctionCallUtils.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
@@ -31,6 +38,8 @@ namespace {
 static constexpr const char *kHipMalloc = "hip_device_malloc";
 static constexpr const char *kHipFree = "hip_device_free";
 
+static constexpr const char *kMiopenConvolutionForward =
+    "wrap_miopenConvolutionForward";
 static constexpr const char *kHipblasltMatmul = "hip_hipblaslt_matmul";
 static constexpr const char *kMiopenRmsNorm = "hip_miopen_rms_norm";
 static constexpr const char *kMiopenSkipRmsNorm = "hip_miopen_skip_rms_norm";
@@ -59,6 +68,211 @@ static Value extractMemRefPtr(Value memrefDesc,
         ptr);
   return ptr;
 }
+
+// ===== Convolution ops ================================
+
+// hip.conv(%ctx, %input, %weights, %bias, %output)
+//   -> wrap_miopenConvolutionForward(ctx, input, input_n, input_c, input_h,
+//                                     input_w, weights, weights_k, bias,
+//                                     output, output_h, output_w, kernel_h,
+//                                     kernel_w, stride_h, stride_w, pad_top,
+//                                     pad_left, pad_bottom, pad_right,
+//                                     dilation_h, dilation_w, group)
+struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(ConvOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+
+    // Generate call to runtime wrapper following opaque RuntimeState pattern.
+    // The wrapper extracts handle/stream from state internally (no direct field
+    // access!).
+    //
+    // Signature:
+    // int wrap_miopenConvolutionForward(
+    //     RuntimeState* state,    // Opaque pointer - extracts handle/stream
+    //                             // internally
+    //     void* input,            // Input tensor data pointer
+    //     int64_t input_n,        // Input batch size
+    //     int64_t input_c,        // Input channels
+    //     int64_t input_h,        // Input height
+    //     int64_t input_w,        // Input width
+    //     void* weights,          // Weights tensor data pointer
+    //     int64_t weights_k,      // Output channels (number of filters)
+    //     void* bias,             // Bias tensor data pointer (nullable)
+    //     void* output,           // Output tensor data pointer (in-place)
+    //     int64_t output_h,       // Output height
+    //     int64_t output_w,       // Output width
+    //     int64_t kernel_h,       // Kernel height
+    //     int64_t kernel_w,       // Kernel width
+    //     int64_t stride_h,       // Stride height
+    //     int64_t stride_w,       // Stride width
+    //     int64_t pad_top,        // Padding top
+    //     int64_t pad_left,       // Padding left
+    //     int64_t pad_bottom,     // Padding bottom
+    //     int64_t pad_right,      // Padding right
+    //     int64_t dilation_h,     // Dilation height
+    //     int64_t dilation_w,     // Dilation width
+    //     int64_t group           // Number of groups
+    // );
+    //
+    // Returns: 0 on success, non-zero on error
+
+    // Helper to create i64 constants
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    // Extract memref pointers (aligned pointers from descriptors)
+    auto getAlignedPtr = [&](Value memrefDesc) -> Value {
+      Value ptr = MemRefDescriptor(memrefDesc).alignedPtr(rewriter, loc);
+      // Cast to void* (address space 0) if needed
+      if (cast<LLVM::LLVMPointerType>(ptr.getType()).getAddressSpace() != 0) {
+        ptr = LLVM::AddrSpaceCastOp::create(rewriter, loc, ptrType, ptr);
+      }
+      return ptr;
+    };
+
+    Value statePtr = adaptor.getCtx(); // RuntimeState* (opaque)
+    Value inputPtr = getAlignedPtr(adaptor.getInput());
+    Value weightsPtr = getAlignedPtr(adaptor.getWeights());
+    Value outputPtr = getAlignedPtr(adaptor.getOutput());
+
+    // Handle optional bias
+    Value biasPtr;
+    if (adaptor.getBias()) {
+      biasPtr = getAlignedPtr(adaptor.getBias());
+    } else {
+      // Pass null pointer if no bias
+      biasPtr = LLVM::ZeroOp::create(rewriter, loc, ptrType);
+    }
+
+    // Extract shapes from memref types
+    // Supports both static and dynamic dimensions using MemRefDescriptor
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    auto weightsType = cast<MemRefType>(op.getWeights().getType());
+    auto outputType = cast<MemRefType>(op.getOutput().getType());
+
+    // Verify ranks
+    if (inputType.getRank() != 4) {
+      return op.emitError("Input must be rank-4 tensor [N, C, H, W]");
+    }
+    if (weightsType.getRank() != 4) {
+      return op.emitError("Weights must be rank-4 tensor [K, C, R, S]");
+    }
+    if (outputType.getRank() != 4) {
+      return op.emitError("Output must be rank-4 tensor [N, K, H', W']");
+    }
+
+    // Helper: Get dimension value (static constant or dynamic descriptor size)
+    auto getDim = [&](MemRefDescriptor &desc, MemRefType type,
+                      unsigned dimIdx) -> Value {
+      int64_t dimSize = type.getShape()[dimIdx];
+      if (!ShapedType::isDynamic(dimSize)) {
+        // Static dimension: use compile-time constant
+        return createI64Const(dimSize);
+      }
+      // Dynamic dimension: extract from runtime descriptor
+      return desc.size(rewriter, loc, dimIdx);
+    };
+
+    // Create descriptors for accessing runtime sizes
+    MemRefDescriptor inputDesc(adaptor.getInput());
+    MemRefDescriptor weightsDesc(adaptor.getWeights());
+    MemRefDescriptor outputDesc(adaptor.getOutput());
+
+    // Input shape: [N, C, H, W]
+    Value inputN = getDim(inputDesc, inputType, 0);
+    Value inputC = getDim(inputDesc, inputType, 1);
+    Value inputH = getDim(inputDesc, inputType, 2);
+    Value inputW = getDim(inputDesc, inputType, 3);
+
+    // Weights shape: [K, C, R, S] where K=output channels
+    Value weightsK = getDim(weightsDesc, weightsType, 0);
+
+    // Output shape: [N, K, H', W']
+    Value outputH = getDim(outputDesc, outputType, 2);
+    Value outputW = getDim(outputDesc, outputType, 3);
+
+    // Extract attributes
+    auto kernelShape = op.getKernelShape();
+    auto strides = op.getStrides();
+    auto pads = op.getPads();
+    auto dilations = op.getDilations();
+    auto group = op.getGroup();
+
+    // Extract integer values from attributes
+    auto getI64 = [](Attribute attr) -> int64_t {
+      return cast<IntegerAttr>(attr).getInt();
+    };
+
+    Value kernelH = createI64Const(getI64(kernelShape[0]));
+    Value kernelW = createI64Const(getI64(kernelShape[1]));
+    Value strideH = createI64Const(getI64(strides[0]));
+    Value strideW = createI64Const(getI64(strides[1]));
+    Value padTop = createI64Const(getI64(pads[0]));
+    Value padLeft = createI64Const(getI64(pads[1]));
+    Value padBottom = createI64Const(getI64(pads[2]));
+    Value padRight = createI64Const(getI64(pads[3]));
+    Value dilationH = createI64Const(getI64(dilations[0]));
+    Value dilationW = createI64Const(getI64(dilations[1]));
+    Value groupVal = createI64Const(group);
+
+    // Build function signature
+    SmallVector<Type, 24> paramTypes = {
+        ptrType, // state
+        ptrType, // input
+        i64Type, // input_n
+        i64Type, // input_c
+        i64Type, // input_h
+        i64Type, // input_w
+        ptrType, // weights
+        i64Type, // weights_k
+        ptrType, // bias
+        ptrType, // output
+        i64Type, // output_h
+        i64Type, // output_w
+        i64Type, // kernel_h
+        i64Type, // kernel_w
+        i64Type, // stride_h
+        i64Type, // stride_w
+        i64Type, // pad_top
+        i64Type, // pad_left
+        i64Type, // pad_bottom
+        i64Type, // pad_right
+        i64Type, // dilation_h
+        i64Type, // dilation_w
+        i64Type  // group
+    };
+
+    // Lookup or create the runtime function
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kMiopenConvolutionForward, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    // Build argument list matching the signature
+    SmallVector<Value, 24> args = {
+        statePtr,   inputPtr, inputN,    inputC,    inputH,  inputW,
+        weightsPtr, weightsK, biasPtr,   outputPtr, outputH, outputW,
+        kernelH,    kernelW,  strideH,   strideW,   padTop,  padLeft,
+        padBottom,  padRight, dilationH, dilationW, groupVal};
+
+    // Call the runtime function
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+
+    // Erase the HIP conv operation (it's in-place, no results)
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
 
 // --- AllocOp: hip.alloc(%ctx, %dyn...) -> hipMalloc(bytes) + memref descriptor
 struct AllocOpLowering : public ConvertOpToLLVMPattern<AllocOp> {
@@ -695,9 +909,11 @@ void ConvertHipToLLVMPass::runOnOperation() {
   });
 
   RewritePatternSet patterns(ctx);
+
+  // HIP dialect-specific lowerings
   patterns
       .add<AllocOpLowering, FreeOpLowering, MiopenGraphOpLowering,
-           HipblasltGraphOpLowering, HipblasltMatmulOpLowering,
+           HipblasltGraphOpLowering, ConvOpLowering, HipblasltMatmulOpLowering,
            MiopenRmsNormOpLowering, MiopenSkipRmsNormOpLowering,
            MiopenRopeOpLowering, MiopenSoftmaxOpLowering, TransposeOpLowering,
            GatherOpLowering, SiluOpLowering, GqaOpLowering>(typeConverter);
@@ -706,6 +922,15 @@ void ConvertHipToLLVMPass::runOnOperation() {
   patterns.insert<MiopenBinaryOpLowering<MiopenMulOp>>(typeConverter,
                                                        kMiopenMul);
   patterns.add<MemRefAllocOpLowering, MemRefDeallocOpLowering>(typeConverter);
+
+  // Standard dialect lowerings
+  // Bundle func/memref/arith/cf lowering with HIP lowering to minimize
+  // unrealized casts at the memref/LLVM boundary. Running them as separate
+  // stages would require a reconcile-unrealized-casts cleanup pass.
+  populateFuncToLLVMConversionPatterns(typeConverter, patterns);
+  populateFinalizeMemRefToLLVMConversionPatterns(typeConverter, patterns);
+  arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
+  cf::populateControlFlowToLLVMConversionPatterns(typeConverter, patterns);
 
   LLVMConversionTarget target(*ctx);
   target.addLegalDialect<LLVM::LLVMDialect>();
