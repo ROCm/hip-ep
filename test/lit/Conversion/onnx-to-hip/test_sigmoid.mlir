@@ -41,7 +41,7 @@ module {
   // CHECK-LABEL: func.func @sigmoid_2d
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<128x256xf32>) -> tensor<128x256xf32>
   // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<128x256xf32>
-  // CHECK: %[[OUT:.*]] = hip.sigmoid(%[[CTX]]) ins(%[[IN]] : tensor<128x256xf32>) outs(%[[INIT]] : tensor<128x256xf32>) -> tensor<128x256xf32>
+  // CHECK: %[[OUT:.*]] = hip.sigmoid(%[[CTX]]) ins(%[[IN]] : tensor<128x256xf32>) outs(%[[INIT]] : tensor<128x256xf32>) : tensor<128x256xf32>
   // CHECK: return %[[OUT]]
   // CHECK-NOT: hip.alloc
 
@@ -53,7 +53,7 @@ module {
   // CHECK-LABEL: func.func @sigmoid_3d
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<8x128x512xf32>) -> tensor<8x128x512xf32>
   // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<8x128x512xf32>
-  // CHECK: %[[OUT:.*]] = hip.sigmoid(%[[CTX]]) ins(%[[IN]] : tensor<8x128x512xf32>) outs(%[[INIT]] : tensor<8x128x512xf32>) -> tensor<8x128x512xf32>
+  // CHECK: %[[OUT:.*]] = hip.sigmoid(%[[CTX]]) ins(%[[IN]] : tensor<8x128x512xf32>) outs(%[[INIT]] : tensor<8x128x512xf32>) : tensor<8x128x512xf32>
   // CHECK: return %[[OUT]]
   // CHECK-NOT: hip.alloc
 
@@ -65,7 +65,7 @@ module {
   // CHECK-LABEL: func.func @sigmoid_4d
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<1x64x56x56xf32>) -> tensor<1x64x56x56xf32>
   // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<1x64x56x56xf32>
-  // CHECK: %[[OUT:.*]] = hip.sigmoid(%[[CTX]]) ins(%[[IN]] : tensor<1x64x56x56xf32>) outs(%[[INIT]] : tensor<1x64x56x56xf32>) -> tensor<1x64x56x56xf32>
+  // CHECK: %[[OUT:.*]] = hip.sigmoid(%[[CTX]]) ins(%[[IN]] : tensor<1x64x56x56xf32>) outs(%[[INIT]] : tensor<1x64x56x56xf32>) : tensor<1x64x56x56xf32>
   // CHECK: return %[[OUT]]
   // CHECK-NOT: hip.alloc
 }

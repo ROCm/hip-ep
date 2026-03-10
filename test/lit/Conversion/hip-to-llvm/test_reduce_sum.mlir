@@ -29,8 +29,7 @@ module {
     // CHECK-LABEL: llvm.func @reduce_sum_static_last_axis
     // CHECK-SAME: %[[CTX:.*]]: !llvm.ptr
 
-    %c2 = arith.constant dense<2> : tensor<1xi64>
-    hip.reduce_sum(%ctx) ins(%input, %c2 : memref<8x128x512xf32, 1>, tensor<1xi64>)
+    hip.reduce_sum(%ctx) ins(%input, %axes : memref<8x128x512xf32, 1>, memref<1xi64, 1>)
                          outs(%output : memref<8x128xf32, 1>)
                          {keepdims = 0 : i64}
 
@@ -48,8 +47,7 @@ module {
     // CHECK-LABEL: llvm.func @reduce_sum_dynamic
     // CHECK-SAME: %[[CTX:.*]]: !llvm.ptr
 
-    %c2 = arith.constant dense<2> : tensor<1xi64>
-    hip.reduce_sum(%ctx) ins(%input, %c2 : memref<?x?x512xf32, 1>, tensor<1xi64>)
+    hip.reduce_sum(%ctx) ins(%input, %axes : memref<?x?x512xf32, 1>, memref<1xi64, 1>)
                          outs(%output : memref<?x?xf32, 1>)
                          {keepdims = 0 : i64}
 
