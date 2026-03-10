@@ -60,12 +60,11 @@ int wrap_cast(RuntimeState* state, void* input, void* output,
     return -1;
   }
 
-  fprintf(stderr,
-          "[REAL] wrap_cast: num_elements=%lld, input_size=%lld, "
-          "output_size=%lld, to=%lld, input_dtype=%d, output_dtype=%d\n",
-          (long long)num_elements, (long long)input_element_size,
-          (long long)output_element_size, (long long)to,
-          input_dtype, output_dtype);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_cast: num_elements=%lld, input_size=%lld, "
+                    "output_size=%lld, to=%lld, input_dtype=%d, output_dtype=%d\n",
+                    (long long)num_elements, (long long)input_element_size,
+                    (long long)output_element_size, (long long)to,
+                    input_dtype, output_dtype);
 
   return hip_cast(stream, input, output, num_elements,
                    input_dtype, output_dtype);

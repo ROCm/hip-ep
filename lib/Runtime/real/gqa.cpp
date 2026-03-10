@@ -44,15 +44,14 @@ int wrap_group_query_attention(
     return -1;
   }
 
-  fprintf(stderr,
-          "[REAL] wrap_group_query_attention: batch=%lld, seq_q=%lld, "
-          "seq_kv=%lld, num_heads=%lld, kv_heads=%lld, head_dim=%lld, "
-          "scale=%f, do_rotary=%lld, elem_size=%lld\n",
-          (long long)batch_size, (long long)seq_len_q,
-          (long long)seq_len_kv, (long long)num_heads,
-          (long long)kv_num_heads, (long long)head_dim,
-          (double)scale, (long long)do_rotary,
-          (long long)element_size_bytes);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_group_query_attention: batch=%lld, seq_q=%lld, "
+                    "seq_kv=%lld, num_heads=%lld, kv_heads=%lld, head_dim=%lld, "
+                    "scale=%f, do_rotary=%lld, elem_size=%lld\n",
+                    (long long)batch_size, (long long)seq_len_q,
+                    (long long)seq_len_kv, (long long)num_heads,
+                    (long long)kv_num_heads, (long long)head_dim,
+                    (double)scale, (long long)do_rotary,
+                    (long long)element_size_bytes);
 
   int rc = hip_gqa_forward(
       stream,

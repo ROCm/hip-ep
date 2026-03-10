@@ -66,12 +66,11 @@ int wrap_miopenActivationForward(RuntimeState* state, void* input, void* output,
   const char* act_name = hipdnn_ep_activation_name(activation_mode);
   const char* type_name = hipdnn_ep_datatype_name(data_type);
   int64_t elem_size = hipdnn_ep_datatype_size(data_type);
-  fprintf(stderr,
-          "[REAL] wrap_miopenActivationForward: activation=%s, "
-          "num_elements=%lld, data_type=%s(%lld), element_size=%lld bytes, "
-          "total_size=%lld bytes\n",
-          act_name, (long long)num_elements, type_name, (long long)data_type,
-          (long long)elem_size, (long long)(num_elements * elem_size));
+  RUNTIME_DEBUG_LOG("[REAL] wrap_miopenActivationForward: activation=%s, "
+                    "num_elements=%lld, data_type=%s(%lld), element_size=%lld bytes, "
+                    "total_size=%lld bytes\n",
+                    act_name, (long long)num_elements, type_name, (long long)data_type,
+                    (long long)elem_size, (long long)(num_elements * elem_size));
 
   miopenHandle_t handle = static_cast<miopenHandle_t>(
       hipdnn_ep_state_get_miopen_handle(state));
@@ -84,10 +83,9 @@ int wrap_miopenActivationForward(RuntimeState* state, void* input, void* output,
   miopenActivationMode_t miopen_act = hipdnn_ep_to_miopen_activation(activation_mode);
 
   int n = static_cast<int>(num_elements);
-  fprintf(stderr,
-          "[REAL] wrap_miopenActivationForward: creating tensor descriptors "
-          "[1,1,1,%d] with type %s\n",
-          n, type_name);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_miopenActivationForward: creating tensor descriptors "
+                    "[1,1,1,%d] with type %s\n",
+                    n, type_name);
 
   miopenTensorDescriptor_t inDesc, outDesc;
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&inDesc));
@@ -102,10 +100,9 @@ int wrap_miopenActivationForward(RuntimeState* state, void* input, void* output,
                                              0.0, 0.0, 0.0));
 
   float alpha = 1.0f, beta = 0.0f;
-  fprintf(stderr,
-          "[REAL] wrap_miopenActivationForward: calling miopenActivationForward"
-          "(%s, alpha=%.1f, beta=%.1f)\n",
-          act_name, alpha, beta);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_miopenActivationForward: calling miopenActivationForward"
+                    "(%s, alpha=%.1f, beta=%.1f)\n",
+                    act_name, alpha, beta);
 
   MIOPEN_CHECK(miopenActivationForward(handle, actDesc, &alpha,
                                        inDesc, input, &beta,

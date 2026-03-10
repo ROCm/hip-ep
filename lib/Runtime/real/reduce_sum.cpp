@@ -25,17 +25,15 @@ int wrap_reduce_sum(RuntimeState* state, void* data, void* axes,
     case 8: hip_dtype = hip_DTYPE_INT64; break;
     case 4: hip_dtype = hip_DTYPE_INT32; break;
     default:
-      fprintf(stderr,
-              "[REAL] wrap_reduce_sum: unsupported element_size=%lld\n",
-              (long long)element_size_bytes);
+      RUNTIME_DEBUG_LOG("[REAL] wrap_reduce_sum: unsupported element_size=%lld\n",
+                        (long long)element_size_bytes);
       return -1;
   }
 
-  fprintf(stderr,
-          "[REAL] wrap_reduce_sum: data_num=%lld, output_num=%lld, "
-          "elem_size=%lld, keepdims=%lld, dtype=%d -> calling hip_reduce_sum\n",
-          (long long)data_num_elements, (long long)output_num_elements,
-          (long long)element_size_bytes, (long long)keepdims, hip_dtype);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_reduce_sum: data_num=%lld, output_num=%lld, "
+                    "elem_size=%lld, keepdims=%lld, dtype=%d -> calling hip_reduce_sum\n",
+                    (long long)data_num_elements, (long long)output_num_elements,
+                    (long long)element_size_bytes, (long long)keepdims, hip_dtype);
 
   return hip_reduce_sum(stream, data, output, data_num_elements,
                          output_num_elements, hip_dtype);

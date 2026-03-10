@@ -74,12 +74,11 @@ int wrap_miopenOpTensor(RuntimeState* state, void* lhs, void* rhs,
   const char* type_name = hipdnn_ep_datatype_name(data_type);
   const char* op_name = hipdnn_ep_tensor_op_name(tensor_op);
   int64_t elem_size = hipdnn_ep_datatype_size(data_type);
-  fprintf(stderr,
-          "[REAL] wrap_miopenOpTensor: op=%s, num_elements=%lld, "
-          "data_type=%s(%lld), element_size=%lld bytes, "
-          "total_size=%lld bytes\n",
-          op_name, (long long)num_elements, type_name, (long long)data_type,
-          (long long)elem_size, (long long)(num_elements * elem_size));
+  RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: op=%s, num_elements=%lld, "
+                    "data_type=%s(%lld), element_size=%lld bytes, "
+                    "total_size=%lld bytes\n",
+                    op_name, (long long)num_elements, type_name, (long long)data_type,
+                    (long long)elem_size, (long long)(num_elements * elem_size));
 
   miopenHandle_t handle = static_cast<miopenHandle_t>(
       hipdnn_ep_state_get_miopen_handle(state));
@@ -97,20 +96,18 @@ int wrap_miopenOpTensor(RuntimeState* state, void* lhs, void* rhs,
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&cDesc));
 
   int n = static_cast<int>(num_elements);
-  fprintf(stderr,
-          "[REAL] wrap_miopenOpTensor: creating tensor descriptors "
-          "[1,1,1,%d] with type %s\n",
-          n, type_name);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: creating tensor descriptors "
+                    "[1,1,1,%d] with type %s\n",
+                    n, type_name);
 
   MIOPEN_CHECK(miopenSet4dTensorDescriptor(aDesc, miopen_type, 1, 1, 1, n));
   MIOPEN_CHECK(miopenSet4dTensorDescriptor(bDesc, miopen_type, 1, 1, 1, n));
   MIOPEN_CHECK(miopenSet4dTensorDescriptor(cDesc, miopen_type, 1, 1, 1, n));
 
   float alpha1 = 1.0f, alpha2 = 1.0f, beta = 0.0f;
-  fprintf(stderr,
-          "[REAL] wrap_miopenOpTensor: calling miopenOpTensor"
-          "(op=%s, alpha1=%.1f, alpha2=%.1f, beta=%.1f)\n",
-          op_name, alpha1, alpha2, beta);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: calling miopenOpTensor"
+                    "(op=%s, alpha1=%.1f, alpha2=%.1f, beta=%.1f)\n",
+                    op_name, alpha1, alpha2, beta);
 
   MIOPEN_CHECK(miopenOpTensor(handle, miopen_op, &alpha1, aDesc, lhs,
                               &alpha2, bDesc, rhs, &beta, cDesc, output));
@@ -146,17 +143,15 @@ int wrap_elementwise_sub(RuntimeState* state, void* lhs, void* rhs,
   switch (element_size_bytes) {
     case 8: hip_dtype = hip_DTYPE_INT64; break;
     default:
-      fprintf(stderr,
-              "[REAL] wrap_elementwise_sub: unsupported element_size=%lld, "
-              "only int64 (8 bytes) is currently supported via custom kernel\n",
-              (long long)element_size_bytes);
+      RUNTIME_DEBUG_LOG("[REAL] wrap_elementwise_sub: unsupported element_size=%lld, "
+                        "only int64 (8 bytes) is currently supported via custom kernel\n",
+                        (long long)element_size_bytes);
       return -1;
   }
 
-  fprintf(stderr,
-          "[REAL] wrap_elementwise_sub: num_elements=%lld, "
-          "element_size=%lld, dtype=%d -> calling hip_elementwise_sub\n",
-          (long long)num_elements, (long long)element_size_bytes, hip_dtype);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_elementwise_sub: num_elements=%lld, "
+                    "element_size=%lld, dtype=%d -> calling hip_elementwise_sub\n",
+                    (long long)num_elements, (long long)element_size_bytes, hip_dtype);
 
   return hip_elementwise_sub(stream, lhs, rhs, output, num_elements,
                               hip_dtype);

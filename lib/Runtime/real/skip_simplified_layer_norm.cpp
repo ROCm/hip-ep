@@ -53,16 +53,14 @@ int wrap_skip_simplified_layer_norm(RuntimeState* state,
                                     int64_t element_size_bytes,
                                     float epsilon) {
   if (!state || !input || !skip || !gamma || !output || !skip_output) {
-    fprintf(stderr,
-            "[REAL] wrap_skip_simplified_layer_norm: null argument\n");
+    RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: null argument\n");
     return -1;
   }
 
   miopenHandle_t handle = static_cast<miopenHandle_t>(
       hipdnn_ep_state_get_miopen_handle(state));
   if (!handle) {
-    fprintf(stderr,
-            "[REAL] wrap_skip_simplified_layer_norm: null MIOpen handle\n");
+    RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: null MIOpen handle\n");
     return -1;
   }
 
@@ -72,13 +70,12 @@ int wrap_skip_simplified_layer_norm(RuntimeState* state,
   const char* type_name = (element_size_bytes == 2)   ? "f16"
                           : (element_size_bytes == 4)  ? "f32"
                                                        : "?";
-  fprintf(stderr,
-          "[REAL] wrap_skip_simplified_layer_norm: num_rows=%lld, "
-          "hidden_dim=%lld, data_type=%s, epsilon=%e, "
-          "total_bytes=%lld\n",
-          (long long)num_rows, (long long)hidden_dim,
-          type_name, (double)epsilon,
-          (long long)(input_num_elements * element_size_bytes));
+  RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: num_rows=%lld, "
+                    "hidden_dim=%lld, data_type=%s, epsilon=%e, "
+                    "total_bytes=%lld\n",
+                    (long long)num_rows, (long long)hidden_dim,
+                    type_name, (double)epsilon,
+                    (long long)(input_num_elements * element_size_bytes));
 
   miopenDataType_t data_type;
   if (element_size_bytes == 2)
@@ -86,10 +83,9 @@ int wrap_skip_simplified_layer_norm(RuntimeState* state,
   else if (element_size_bytes == 4)
     data_type = miopenFloat;
   else {
-    fprintf(stderr,
-            "[REAL] wrap_skip_simplified_layer_norm: unsupported "
-            "element_size %lld\n",
-            (long long)element_size_bytes);
+    RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: unsupported "
+                      "element_size %lld\n",
+                      (long long)element_size_bytes);
     return -1;
   }
 
@@ -110,10 +106,9 @@ int wrap_skip_simplified_layer_norm(RuntimeState* state,
   // =========================================================================
   // Step 1: Element-wise add — skip_output = input + skip
   // =========================================================================
-  fprintf(stderr,
-          "[REAL] wrap_skip_simplified_layer_norm: step 1 — "
-          "miopenOpTensor(ADD) for %lld elements\n",
-          (long long)input_num_elements);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: step 1 — "
+                    "miopenOpTensor(ADD) for %lld elements\n",
+                    (long long)input_num_elements);
 
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&addADesc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&addBDesc));
@@ -137,26 +132,23 @@ int wrap_skip_simplified_layer_norm(RuntimeState* state,
                                 &beta, addCDesc, skip_output));
   }
 
-  fprintf(stderr,
-          "[REAL] wrap_skip_simplified_layer_norm: step 1 completed "
-          "(add)\n");
+  RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: step 1 completed "
+                    "(add)\n");
 
   // =========================================================================
   // Step 2: T5 RMS norm — output = RMSNorm(skip_output) * gamma
   // =========================================================================
-  fprintf(stderr,
-          "[REAL] wrap_skip_simplified_layer_norm: step 2 — "
-          "miopenT5LayerNormForward(eps=%e)\n",
-          (double)epsilon);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: step 2 — "
+                    "miopenT5LayerNormForward(eps=%e)\n",
+                    (double)epsilon);
 
   // rstd scratch buffer (always f32)
   {
     hipError_t hip_err = hipMalloc(&rstd_buf, num_rows * sizeof(float));
     if (hip_err != hipSuccess) {
-      fprintf(stderr,
-              "[REAL] wrap_skip_simplified_layer_norm: hipMalloc rstd "
-              "failed: %s\n",
-              hipGetErrorString(hip_err));
+      RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: hipMalloc rstd "
+                        "failed: %s\n",
+                        hipGetErrorString(hip_err));
       goto cleanup;
     }
   }
@@ -193,9 +185,8 @@ int wrap_skip_simplified_layer_norm(RuntimeState* state,
                                         yDesc, output,
                                         rstdDesc, rstd_buf));
 
-  fprintf(stderr,
-          "[REAL] wrap_skip_simplified_layer_norm: completed "
-          "successfully\n");
+  RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: completed "
+                    "successfully\n");
   rc = 0;
 
 cleanup:
