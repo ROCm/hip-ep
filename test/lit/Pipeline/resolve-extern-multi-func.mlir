@@ -9,7 +9,7 @@
 // callers also receive the new argument.
 //===----------------------------------------------------------------------===//
 
-// RUN: %hip-mlir-opt --hip-resolve-extern-constants %s | %FileCheck %s
+// RUN: hip-mlir-opt --hip-resolve-extern-constants %s | FileCheck %s
 
 // The extern globals should be erased.
 // CHECK-NOT: memref.global{{.*}}hip.external_data
