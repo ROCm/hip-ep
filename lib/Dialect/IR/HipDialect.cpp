@@ -89,23 +89,21 @@ static LogicalResult verifyDpsComputeOp(Operation *op,
   return success();
 }
 
-/// Emit memory effects for a DPS compute op: inputs read, inits write.
+/// Emit memory effects for a DPS compute op: memref inputs read, memref inits
+/// write. Non-memref operands (e.g. !hip.context, index scalars) are skipped.
 static void emitDpsMemoryEffects(
-    Operation *op, ArrayRef<Value> inputs, MutableOperandRange inits,
+    ArrayRef<OpOperand *> inputOperands, MutableOperandRange initOperands,
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  if (inputs.empty() || !isa<MemRefType>(inputs.front().getType()))
-    return;
-  for (Value v : inputs) {
-    for (auto &operand : op->getOpOperands()) {
-      if (operand.get() == v) {
-        effects.emplace_back(MemoryEffects::Read::get(), &operand,
-                             SideEffects::DefaultResource::get());
-        break;
-      }
-    }
+  for (OpOperand *operand : inputOperands) {
+    if (!isa<MemRefType>(operand->get().getType()))
+      continue;
+    effects.emplace_back(MemoryEffects::Read::get(), operand,
+                         SideEffects::DefaultResource::get());
   }
-  for (auto &operand : inits) {
+  for (OpOperand &operand : initOperands) {
+    if (!isa<MemRefType>(operand.get().getType()))
+      continue;
     effects.emplace_back(MemoryEffects::Write::get(), &operand,
                          SideEffects::DefaultResource::get());
   }
@@ -274,14 +272,7 @@ MutableOperandRange ConvOp::getDpsInitsMutable() { return getOutputMutable(); }
 void ConvOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  // Memory effects only apply to memref operands, not tensors
-  // (tensors are immutable SSA values with no memory side effects)
-  SmallVector<Value> inputs;
-  inputs.push_back(getInput());
-  inputs.push_back(getWeights());
-  if (getBias())
-    inputs.push_back(getBias());
-  emitDpsMemoryEffects(*this, inputs, getOutputMutable(), effects);
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
 //===----------------------------------------------------------------------===//
@@ -295,7 +286,7 @@ MutableOperandRange HipblasltMatmulOp::getDpsInitsMutable() {
 void HipblasltMatmulOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  emitDpsMemoryEffects(*this, {getA(), getB()}, getCMutable(), effects);
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
 LogicalResult HipblasltMatmulOp::verify() {
@@ -323,8 +314,7 @@ MutableOperandRange MiopenRmsNormOp::getDpsInitsMutable() {
 void MiopenRmsNormOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  emitDpsMemoryEffects(*this, {getInput(), getWeight()}, getOutputMutable(),
-                       effects);
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
 LogicalResult MiopenRmsNormOp::verify() {
@@ -354,8 +344,7 @@ MutableOperandRange MiopenSkipRmsNormOp::getDpsInitsMutable() {
 void MiopenSkipRmsNormOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  emitDpsMemoryEffects(*this, {getX(), getSkip(), getWeight()},
-                       getDpsInitsMutable(), effects);
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
 LogicalResult MiopenSkipRmsNormOp::verify() {
@@ -388,8 +377,7 @@ MutableOperandRange MiopenRopeOp::getDpsInitsMutable() {
 void MiopenRopeOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  emitDpsMemoryEffects(*this, {getCosCache(), getSinCache()},
-                       getDpsInitsMutable(), effects);
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
 LogicalResult MiopenRopeOp::verify() {
@@ -418,7 +406,7 @@ MutableOperandRange MiopenAddOp::getDpsInitsMutable() { return getCMutable(); }
 void MiopenAddOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  emitDpsMemoryEffects(*this, {getA(), getB()}, getCMutable(), effects);
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
 LogicalResult MiopenAddOp::verify() {
@@ -443,7 +431,7 @@ MutableOperandRange MiopenMulOp::getDpsInitsMutable() { return getCMutable(); }
 void MiopenMulOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  emitDpsMemoryEffects(*this, {getA(), getB()}, getCMutable(), effects);
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
 LogicalResult MiopenMulOp::verify() {
@@ -470,7 +458,7 @@ MutableOperandRange MiopenSoftmaxOp::getDpsInitsMutable() {
 void MiopenSoftmaxOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  emitDpsMemoryEffects(*this, {getInput()}, getOutputMutable(), effects);
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
 LogicalResult MiopenSoftmaxOp::verify() {
@@ -498,7 +486,7 @@ MutableOperandRange TransposeOp::getDpsInitsMutable() {
 void TransposeOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  emitDpsMemoryEffects(*this, {getInput()}, getOutputMutable(), effects);
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
 LogicalResult TransposeOp::verify() {
@@ -526,8 +514,7 @@ MutableOperandRange GatherOp::getDpsInitsMutable() {
 void GatherOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  emitDpsMemoryEffects(*this, {getIndices(), getTable()}, getOutputMutable(),
-                       effects);
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
 LogicalResult GatherOp::verify() {
@@ -553,7 +540,7 @@ MutableOperandRange SiluOp::getDpsInitsMutable() { return getOutputMutable(); }
 void SiluOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  emitDpsMemoryEffects(*this, {getInput()}, getOutputMutable(), effects);
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
 LogicalResult SiluOp::verify() {
@@ -583,8 +570,7 @@ MutableOperandRange GqaOp::getDpsInitsMutable() {
 void GqaOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  emitDpsMemoryEffects(*this, {getQ(), getK(), getV()}, getDpsInitsMutable(),
-                       effects);
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
 LogicalResult GqaOp::verify() {
