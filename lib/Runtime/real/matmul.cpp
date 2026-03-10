@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
+#include "../debug_log.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -70,13 +71,12 @@ int wrap_hipblasLtMatmul(RuntimeState* state,
   }
 
   const char* type_name = (elem_size == 2) ? "f16" : (elem_size == 4) ? "f32" : "?";
-  fprintf(stderr,
-          "[REAL] wrap_hipblasLtMatmul: M=%lld, N=%lld, K=%lld, "
-          "batch=%lld, elem_size=%lld (%s), "
-          "total_bytes=%lld\n",
-          (long long)M, (long long)N, (long long)K,
-          (long long)batch_count, (long long)elem_size, type_name,
-          (long long)(batch_count * M * N * elem_size));
+  RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: M=%lld, N=%lld, K=%lld, "
+                    "batch=%lld, elem_size=%lld (%s), "
+                    "total_bytes=%lld\n",
+                    (long long)M, (long long)N, (long long)K,
+                    (long long)batch_count, (long long)elem_size, type_name,
+                    (long long)(batch_count * M * N * elem_size));
 
   hipDataType data_type;
   if (elem_size == 2)
@@ -150,6 +150,6 @@ int wrap_hipblasLtMatmul(RuntimeState* state,
   hipblasLtMatrixLayoutDestroy(matC_layout);
   hipblasLtMatmulDescDestroy(matmul_desc);
 
-  fprintf(stderr, "[REAL] wrap_hipblasLtMatmul: completed successfully\n");
+  RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: completed successfully\n");
   return 0;
 }

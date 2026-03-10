@@ -22,6 +22,8 @@ struct RuntimeState {
 
 // Helper function to check and log gcnArchName
 static void check_gcnarch(const char* location) {
+  if (!hipdnn_ep_debug_enabled())
+    return;
   hipDeviceProp_t prop;
   hipError_t err = hipGetDeviceProperties(&prop, 0);
   if (err == hipSuccess) {
