@@ -576,6 +576,65 @@ CastToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
+/// onnx.ReduceSum -> hip.reduce_sum
+struct ReduceSumToHip : public mlir::RewritePattern {
+  ReduceSumToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.ReduceSum", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
+                                mlir::PatternRewriter &rewriter) const {
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value input = op->getOperand(0);
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+
+  // Extract axes attribute (optional, defaults to all axes)
+  // ONNX axes attribute is ArrayAttr
+  llvm::SmallVector<int64_t> axesVec;
+  if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
+    for (auto a : axesAttr)
+      axesVec.push_back(mlir::cast<mlir::IntegerAttr>(a).getInt());
+  } else {
+    // Default: reduce all axes
+    for (int64_t i = 0; i < resultType.getRank(); ++i)
+      axesVec.push_back(i);
+  }
+  auto axesAttr = rewriter.getI64ArrayAttr(axesVec);
+
+  // Extract keepdims attribute (defaults to true in ONNX)
+  // ONNX keepdims is signed integer (si64), use getSInt()
+  bool keepdims = true;
+  if (auto keepdimsAttr = op->getAttrOfType<mlir::IntegerAttr>("keepdims")) {
+    keepdims = keepdimsAttr.getSInt() != 0;
+  }
+
+  // Build operands and attributes for hip.reduce_sum
+  llvm::SmallVector<mlir::Value> operands = {context, input, init};
+  llvm::SmallVector<mlir::NamedAttribute> attrs;
+  attrs.push_back(rewriter.getNamedAttr("axes", axesAttr));
+  attrs.push_back(
+      rewriter.getNamedAttr("keepdims", rewriter.getBoolAttr(keepdims)));
+
+  // Create hip.reduce_sum operation
+  auto hipOp = rewriter.create<mlir::hip::ReduceSumOp>(
+      loc, mlir::TypeRange{resultType}, operands, attrs);
+
+  rewriter.replaceOp(op, hipOp.getResult(0));
+  return mlir::success();
+}
+
 /// onnx.Conv -> hip.conv
 struct ConvToHip : public mlir::RewritePattern {
   ConvToHip(mlir::MLIRContext *ctx)
@@ -699,6 +758,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   patterns.add<SigmoidToHip>(ctx);
   patterns.add<SubToHip>(ctx);
   patterns.add<CastToHip>(ctx);
+  patterns.add<ReduceSumToHip>(ctx);
   patterns.add<ConvToHip>(ctx);
 
   mlir::GreedyRewriteConfig config;
