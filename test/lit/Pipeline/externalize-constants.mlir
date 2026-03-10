@@ -14,7 +14,7 @@
 // pattern rewrite driver that runs as part of convertComputeOps.
 //===----------------------------------------------------------------------===//
 
-// RUN: mkdir -p %t && %hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip='externalize-min-num-elements=4 externalize-output-dir=%t' %s | %FileCheck %s
+// RUN: mkdir -p %t && hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip='externalize-min-num-elements=4 externalize-output-dir=%t' %s | FileCheck %s
 
 // Module-level: constants file attribute and extern memref.global.
 // CHECK: module attributes {{{.*}}hip.constants_file = "model.constants.bin"
