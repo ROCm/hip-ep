@@ -3,21 +3,27 @@
 
 // ============================================================================
 // TEST PURPOSE:
-// Verify ONNX ReduceSum operation is correctly converted to HIP reduce_sum operation.
+// Verify ONNX ReduceSum is correctly lowered to hip.reduce_sum operation
+// in tensor-first mode.
 //
 // This test validates:
-// - onnx.ReduceSum → hip.reduce_sum conversion
-// - Axes and keepdims attributes properly handled
-// - Context argument inserted via --hip-add-context-arg
-// - tensor.empty created for output
+// - Reduction operation lowering (onnx.ReduceSum -> hip.reduce_sum)
+// - keepdims = 1: output shape keeps reduced dimension as size 1
+// - keepdims = 0: output shape drops the reduced dimension entirely
+// - i64 element type support
+// - 2D tensor reduction with axes as attribute
+// - Proper !hip.context threading through operations
+// - Tensor-first DPS: tensor.empty() used as output init
 //
-// Expected: hip.reduce_sum operation with axes and keepdims attributes
+// Model: Llama-3.1-8B attention mask sum computation
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
 
 module {
+  // --------------------------------------------------------------------------
   // Test 1: Reduce along last axis, keepdims=false
+  // --------------------------------------------------------------------------
   func.func @reduce_sum_last_axis(%input: tensor<8x128x512xf32>) -> tensor<8x128xf32> {
     // CHECK-LABEL: func.func @reduce_sum_last_axis
     // CHECK-SAME: %[[CTX:.*]]: !hip.context
@@ -30,7 +36,9 @@ module {
     return %output : tensor<8x128xf32>
   }
 
+  // --------------------------------------------------------------------------
   // Test 2: Reduce along multiple axes, keepdims=true
+  // --------------------------------------------------------------------------
   func.func @reduce_sum_multi_axes(%input: tensor<8x128x512xf32>) -> tensor<8x1x1xf32> {
     // CHECK-LABEL: func.func @reduce_sum_multi_axes
     // CHECK: hip.reduce_sum(%{{.*}}) ins(%{{.*}} : tensor<8x128x512xf32>) outs(%{{.*}} : tensor<8x1x1xf32>) {axes = [1, 2], keepdims = true} : tensor<8x1x1xf32>
@@ -39,7 +47,9 @@ module {
     return %output : tensor<8x1x1xf32>
   }
 
+  // --------------------------------------------------------------------------
   // Test 3: Reduce along first axis
+  // --------------------------------------------------------------------------
   func.func @reduce_sum_first_axis(%input: tensor<128x256xf32>) -> tensor<256xf32> {
     // CHECK-LABEL: func.func @reduce_sum_first_axis
     // CHECK: hip.reduce_sum(%{{.*}}) ins(%{{.*}} : tensor<128x256xf32>) outs(%{{.*}} : tensor<256xf32>) {axes = [0], keepdims = false} : tensor<256xf32>

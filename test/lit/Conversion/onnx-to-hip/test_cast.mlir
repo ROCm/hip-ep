@@ -3,48 +3,75 @@
 
 // ============================================================================
 // TEST PURPOSE:
-// Verify ONNX Cast operation is correctly converted to HIP cast operation.
+// Verify ONNX Cast is correctly lowered to hip.cast with the right ONNX
+// DataType enum encoded in the `to` attribute.
 //
-// This test validates:
-// - onnx.Cast → hip.cast conversion
-// - Type attribute properly handled
-// - Context argument inserted via --hip-add-context-arg
-// - tensor.empty created for output
+// ONNX DataType enum values used here:
+//   f32 = 1,  i32 = 6,  i64 = 7,  f16 = 10
 //
-// Expected: hip.cast operation with same input/output shapes but different types
+// Test cases:
+// 1. i64 → i32   (to = 6)
+// 2. f32 → f16   (to = 10)
+// 3. f16 → f32   (to = 1)
+// 4. f32 → i64   (to = 7)
+// 5. i32 → f32   (to = 1)
 // ============================================================================
 
-// RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
+// RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 
 module {
-  // Test 1: f32 -> f16 conversion (2D)
-  func.func @cast_f32_to_f16(%input: tensor<128x256xf32>) -> tensor<128x256xf16> {
-    // CHECK-LABEL: func.func @cast_f32_to_f16
-    // CHECK-SAME: %[[CTX:.*]]: !hip.context
-    // CHECK-SAME: %[[INPUT:.*]]: tensor<128x256xf32>
-    // CHECK: %[[EMPTY:.*]] = tensor.empty() : tensor<128x256xf16>
-    // CHECK: %[[RESULT:.*]] = hip.cast(%[[CTX]]) ins(%[[INPUT]] : tensor<128x256xf32>) outs(%[[EMPTY]] : tensor<128x256xf16>) : tensor<128x256xf16>
-    // CHECK: return %[[RESULT]]
-
-    %output = "onnx.Cast"(%input) {to = f16} : (tensor<128x256xf32>) -> tensor<128x256xf16>
-    return %output : tensor<128x256xf16>
+  func.func @cast_i64_to_i32(%input: tensor<4xi64>) -> tensor<4xi32> {
+    %output = "onnx.Cast"(%input) {to = i32} : (tensor<4xi64>) -> tensor<4xi32>
+    return %output : tensor<4xi32>
   }
 
-  // Test 2: f16 -> f32 conversion (3D)
-  func.func @cast_f16_to_f32(%input: tensor<8x128x512xf16>) -> tensor<8x128x512xf32> {
-    // CHECK-LABEL: func.func @cast_f16_to_f32
-    // CHECK: hip.cast(%{{.*}}) ins(%{{.*}} : tensor<8x128x512xf16>) outs(%{{.*}} : tensor<8x128x512xf32>) : tensor<8x128x512xf32>
+  // CHECK-LABEL: func.func @cast_i64_to_i32
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<4xi64>) -> tensor<4xi32>
+  // CHECK: tensor.empty() : tensor<4xi32>
+  // CHECK: hip.cast(%[[CTX]]) ins(%[[IN]] : tensor<4xi64>) outs({{.*}} : tensor<4xi32>) {to = 6 : i64} : tensor<4xi32>
+  // CHECK-NOT: hip.alloc
 
-    %output = "onnx.Cast"(%input) {to = f32} : (tensor<8x128x512xf16>) -> tensor<8x128x512xf32>
-    return %output : tensor<8x128x512xf32>
+  func.func @cast_f32_to_f16(%input: tensor<4xf32>) -> tensor<4xf16> {
+    %output = "onnx.Cast"(%input) {to = f16} : (tensor<4xf32>) -> tensor<4xf16>
+    return %output : tensor<4xf16>
   }
 
-  // Test 3: f32 -> i32 conversion (4D)
-  func.func @cast_f32_to_i32(%input: tensor<1x64x56x56xf32>) -> tensor<1x64x56x56xi32> {
-    // CHECK-LABEL: func.func @cast_f32_to_i32
-    // CHECK: hip.cast(%{{.*}}) ins(%{{.*}} : tensor<1x64x56x56xf32>) outs(%{{.*}} : tensor<1x64x56x56xi32>) : tensor<1x64x56x56xi32>
+  // CHECK-LABEL: func.func @cast_f32_to_f16
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<4xf32>) -> tensor<4xf16>
+  // CHECK: tensor.empty() : tensor<4xf16>
+  // CHECK: hip.cast(%[[CTX]]) ins(%[[IN]] : tensor<4xf32>) outs({{.*}} : tensor<4xf16>) {to = 10 : i64}
+  // CHECK-NOT: hip.alloc
 
-    %output = "onnx.Cast"(%input) {to = i32} : (tensor<1x64x56x56xf32>) -> tensor<1x64x56x56xi32>
-    return %output : tensor<1x64x56x56xi32>
+  func.func @cast_f16_to_f32(%input: tensor<4xf16>) -> tensor<4xf32> {
+    %output = "onnx.Cast"(%input) {to = f32} : (tensor<4xf16>) -> tensor<4xf32>
+    return %output : tensor<4xf32>
   }
+
+  // CHECK-LABEL: func.func @cast_f16_to_f32
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<4xf16>) -> tensor<4xf32>
+  // CHECK: tensor.empty() : tensor<4xf32>
+  // CHECK: hip.cast(%[[CTX]]) ins(%[[IN]] : tensor<4xf16>) outs({{.*}} : tensor<4xf32>) {to = 1 : i64}
+  // CHECK-NOT: hip.alloc
+
+  func.func @cast_f32_to_i64(%input: tensor<4xf32>) -> tensor<4xi64> {
+    %output = "onnx.Cast"(%input) {to = i64} : (tensor<4xf32>) -> tensor<4xi64>
+    return %output : tensor<4xi64>
+  }
+
+  // CHECK-LABEL: func.func @cast_f32_to_i64
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<4xf32>) -> tensor<4xi64>
+  // CHECK: tensor.empty() : tensor<4xi64>
+  // CHECK: hip.cast(%[[CTX]]) ins(%[[IN]] : tensor<4xf32>) outs({{.*}} : tensor<4xi64>) {to = 7 : i64}
+  // CHECK-NOT: hip.alloc
+
+  func.func @cast_i32_to_f32(%input: tensor<4xi32>) -> tensor<4xf32> {
+    %output = "onnx.Cast"(%input) {to = f32} : (tensor<4xi32>) -> tensor<4xf32>
+    return %output : tensor<4xf32>
+  }
+
+  // CHECK-LABEL: func.func @cast_i32_to_f32
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<4xi32>) -> tensor<4xf32>
+  // CHECK: tensor.empty() : tensor<4xf32>
+  // CHECK: hip.cast(%[[CTX]]) ins(%[[IN]] : tensor<4xi32>) outs({{.*}} : tensor<4xf32>) {to = 1 : i64}
+  // CHECK-NOT: hip.alloc
 }
