@@ -50,7 +50,22 @@ static constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
 static constexpr const char *kHipTranspose = "hip_transpose";
 static constexpr const char *kHipGather = "hip_gather";
 static constexpr const char *kHipSilu = "hip_silu";
+static constexpr const char *kWrapMiopenActivationForward =
+    "wrap_miopenActivationForward";
 static constexpr const char *kHipGqa = "hip_gqa";
+
+// Maps MLIR element type to runtime data type enum (HIPDNN_EP_DATATYPE_*).
+// Values must match the #defines in hipdnn_ep_runtime.h.
+// Returns -1 for unsupported types.
+static int64_t getHipdnnDataType(Type elemType) {
+  if (elemType.isF32())
+    return 0; // HIPDNN_EP_DATATYPE_FLOAT
+  if (elemType.isF16())
+    return 1; // HIPDNN_EP_DATATYPE_HALF
+  if (elemType.isBF16())
+    return 2; // HIPDNN_EP_DATATYPE_BFLOAT16
+  return -1;
+}
 
 // Helper: extract the aligned data pointer from a converted memref descriptor,
 // casting to address space 0 if needed.
@@ -778,6 +793,89 @@ struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
   }
 };
 
+// hip.sigmoid(ctx, input, output)
+//   -> wrap_miopenActivationForward(state, input, output, num_elements,
+//                                    data_type, activation_mode=0)
+// Supports both static and dynamic shapes (computes num_elements at runtime).
+struct SigmoidOpLowering : public ConvertOpToLLVMPattern<SigmoidOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(SigmoidOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+
+    // Helper to create i64 constants
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    // Extract pointers using alignedPtr (respects memref.view offsets)
+    auto getAlignedPtr = [&](Value memrefDesc) -> Value {
+      MemRefDescriptor desc(memrefDesc);
+      Value ptr = desc.alignedPtr(rewriter, loc);
+      if (cast<LLVM::LLVMPointerType>(ptr.getType()).getAddressSpace() != 0)
+        ptr = LLVM::AddrSpaceCastOp::create(rewriter, loc, ptrType, ptr);
+      return ptr;
+    };
+
+    Value statePtr = adaptor.getCtx();
+    Value inputPtr = getAlignedPtr(adaptor.getInput());
+    Value outputPtr = getAlignedPtr(adaptor.getOutput());
+
+    auto outputType = cast<MemRefType>(op.getOutput().getType());
+
+    // Compute num_elements (supports dynamic shapes)
+    // Start with constant 1, multiply by each dimension (static or dynamic)
+    Value numElements = createI64Const(1);
+    MemRefDescriptor outputDesc(adaptor.getOutput());
+
+    for (unsigned dimIdx = 0; dimIdx < outputType.getRank(); ++dimIdx) {
+      Value dimSize;
+      if (outputType.isDynamicDim(dimIdx)) {
+        // Dynamic dimension: extract from runtime descriptor
+        dimSize = outputDesc.size(rewriter, loc, dimIdx);
+      } else {
+        // Static dimension: use compile-time constant
+        dimSize = createI64Const(outputType.getDimSize(dimIdx));
+      }
+      numElements = LLVM::MulOp::create(rewriter, loc, numElements, dimSize);
+    }
+
+    // Get data type enum (f32=0, f16=1, bf16=2)
+    int64_t dataType = getHipdnnDataType(outputType.getElementType());
+    if (dataType < 0)
+      return rewriter.notifyMatchFailure(
+          op, "unsupported element type for hip.sigmoid");
+
+    Value dataTypeVal = createI64Const(dataType);
+    Value activationModeVal = createI64Const(0); // HIPDNN_EP_ACTIVATION_SIGMOID
+
+    // int wrap_miopenActivationForward(RuntimeState* state, void* input,
+    //     void* output, int64_t num_elements, int64_t data_type,
+    //     int64_t activation_mode)
+    SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType,
+                                       i64Type, i64Type, i64Type};
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapMiopenActivationForward, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value, 6> args = {statePtr,    inputPtr,    outputPtr,
+                                  numElements, dataTypeVal, activationModeVal};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 // hip.gqa(handle, q, k, v, kv_cache, output, layer, start_pos, seq_len)
 struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -916,7 +1014,8 @@ void ConvertHipToLLVMPass::runOnOperation() {
            HipblasltGraphOpLowering, ConvOpLowering, HipblasltMatmulOpLowering,
            MiopenRmsNormOpLowering, MiopenSkipRmsNormOpLowering,
            MiopenRopeOpLowering, MiopenSoftmaxOpLowering, TransposeOpLowering,
-           GatherOpLowering, SiluOpLowering, GqaOpLowering>(typeConverter);
+           GatherOpLowering, SiluOpLowering, SigmoidOpLowering, GqaOpLowering>(
+          typeConverter);
   patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter,
                                                        kMiopenAdd);
   patterns.insert<MiopenBinaryOpLowering<MiopenMulOp>>(typeConverter,
