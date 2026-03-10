@@ -274,12 +274,14 @@ MutableOperandRange ConvOp::getDpsInitsMutable() { return getOutputMutable(); }
 void ConvOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  // Read inputs (conservative: assumes reads from memory)
-  effects.emplace_back(MemoryEffects::Read::get(),
-                       SideEffects::DefaultResource::get());
-  // Write output
-  effects.emplace_back(MemoryEffects::Write::get(),
-                       SideEffects::DefaultResource::get());
+  // Memory effects only apply to memref operands, not tensors
+  // (tensors are immutable SSA values with no memory side effects)
+  SmallVector<Value> inputs;
+  inputs.push_back(getInput());
+  inputs.push_back(getWeights());
+  if (getBias())
+    inputs.push_back(getBias());
+  emitDpsMemoryEffects(*this, inputs, getOutputMutable(), effects);
 }
 
 //===----------------------------------------------------------------------===//
