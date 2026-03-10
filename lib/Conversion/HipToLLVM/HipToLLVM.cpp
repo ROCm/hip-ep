@@ -46,13 +46,14 @@ static constexpr const char *kMiopenSkipRmsNorm = "hip_miopen_skip_rms_norm";
 static constexpr const char *kMiopenRope = "hip_miopen_rope";
 static constexpr const char *kMiopenAdd = "hip_miopen_add";
 static constexpr const char *kMiopenMul = "hip_miopen_mul";
-static constexpr const char *kWrapMiopenTensorOp = "wrap_miopenTensorOp";
 static constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
 static constexpr const char *kHipTranspose = "hip_transpose";
 static constexpr const char *kHipGather = "hip_gather";
 static constexpr const char *kHipSilu = "hip_silu";
 static constexpr const char *kWrapMiopenActivationForward =
-    "wrap_miopenActivationForward";
+    "wrap_miopenActivationForward"; // hip.sigmoid
+static constexpr const char *kWrapMiopenTensorOp =
+    "wrap_miopenTensorOp"; // hip.sub
 static constexpr const char *kWrapMiopenCast = "wrap_miopenCast";
 static constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
 static constexpr const char *kHipGqa = "hip_gqa";
