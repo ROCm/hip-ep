@@ -375,32 +375,30 @@ def Hip_CastOp : Hip_DpsOp<"cast"> {
 }
 
 def Hip_ReduceSumOp : Hip_DpsOp<"reduce_sum"> {
-  let summary = "Reduce sum operation";
+  let summary = "Reduce tensor by summing along axes";
   let description = [{
-    Computes the sum of elements along specified axes.
-
-    Supports multi-axis reduction with optional keepdims flag.
+    Computes the sum of input tensor elements along the specified axes.
+    Implements the ONNX ReduceSum operator (opset 13+).
 
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
     ```mlir
-    hip.reduce_sum(%ctx) ins(%input : memref<8x128x512xf32, 1>)
-                         outs(%output : memref<8x128xf32, 1>)
-                         {axes = [2], keepdims = false}
+    hip.reduce_sum(%handle) ins(%data, %axes : memref<1x128xi64, 1>, memref<i64, 1>)
+                            outs(%output : memref<1x1xi64, 1>) {keepdims = 1 : i64}
     ```
   }];
 
   let arguments = (ins
-    Hip_ContextType:$ctx,
-    Hip_TensorOrMemRef:$input,
+    Hip_ContextType:$handle,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$axes,
     Hip_TensorOrMemRef:$output,
-    I64ArrayAttr:$axes,
-    BoolAttr:$keepdims
+    I64Attr:$keepdims
   );
 
   let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `(` $handle `)` `ins` `(` $data `,` $axes `:` type($data) `,` type($axes) `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];

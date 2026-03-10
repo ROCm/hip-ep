@@ -609,7 +609,7 @@ void CastOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
-// ReduceSumOp: ins(input), outs(output)
+// ReduceSumOp: ins(data, axes), outs(output)
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange ReduceSumOp::getDpsInitsMutable() {
@@ -619,7 +619,8 @@ MutableOperandRange ReduceSumOp::getDpsInitsMutable() {
 void ReduceSumOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  emitDpsMemoryEffects(*this, {getInput()}, getOutputMutable(), effects);
+  emitDpsMemoryEffects(*this, {getData(), getAxes()}, getOutputMutable(),
+                       effects);
 }
 
 //===----------------------------------------------------------------------===//
