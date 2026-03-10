@@ -7,6 +7,7 @@
 #define MIOPEN_BETA_API
 
 #include "../hipdnn_ep_runtime.h"
+#include "../debug_log.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -15,7 +16,7 @@
   do {                                                                         \
     miopenStatus_t status = (cmd);                                             \
     if (status != miopenStatusSuccess) {                                       \
-      fprintf(stderr, "[REAL] MIOpen error %d at %s:%d\n", status, __FILE__,   \
+      RUNTIME_DEBUG_LOG("[REAL] MIOpen error %d at %s:%d\n", status, __FILE__,   \
               __LINE__);                                                        \
       goto cleanup;                                                            \
     }                                                                          \

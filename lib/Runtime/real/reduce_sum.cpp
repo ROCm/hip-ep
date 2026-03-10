@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
+#include "../debug_log.h"
 #include "runtime_types.h"
 #include "udna_custom_kernels.h"
 
@@ -13,7 +14,7 @@ int wrap_reduce_sum(RuntimeState* state, void* data, void* axes,
                     int64_t output_num_elements, int64_t element_size_bytes,
                     int64_t keepdims) {
   if (!state || !data || !output) {
-    fprintf(stderr, "[REAL] wrap_reduce_sum: null argument\n");
+    RUNTIME_DEBUG_LOG("[REAL] wrap_reduce_sum: null argument\n");
     return -1;
   }
 

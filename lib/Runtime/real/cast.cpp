@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
+#include "../debug_log.h"
 #include "runtime_types.h"
 #include "udna_custom_kernels.h"
 
@@ -37,7 +38,7 @@ int wrap_cast(RuntimeState* state, void* input, void* output,
               int64_t num_elements, int64_t input_element_size,
               int64_t output_element_size, int64_t to) {
   if (!state || !input || !output) {
-    fprintf(stderr, "[REAL] wrap_cast: null argument\n");
+    RUNTIME_DEBUG_LOG("[REAL] wrap_cast: null argument\n");
     return -1;
   }
 

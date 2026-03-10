@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
+#include "../debug_log.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -11,7 +12,7 @@
   do {                                                                         \
     miopenStatus_t status = (cmd);                                             \
     if (status != miopenStatusSuccess) {                                       \
-      fprintf(stderr, "[REAL] MIOpen error %d at %s:%d\n", status, __FILE__,   \
+      RUNTIME_DEBUG_LOG("[REAL] MIOpen error %d at %s:%d\n", status, __FILE__,   \
               __LINE__);                                                       \
       return -1;                                                               \
     }                                                                          \
@@ -58,7 +59,7 @@ int wrap_miopenActivationForward(RuntimeState* state, void* input, void* output,
                                  int64_t num_elements, int64_t data_type,
                                  int64_t activation_mode) {
   if (!state || !input || !output) {
-    fprintf(stderr, "[REAL] wrap_miopenActivationForward: null argument\n");
+    RUNTIME_DEBUG_LOG("[REAL] wrap_miopenActivationForward: null argument\n");
     return -1;
   }
 
@@ -75,7 +76,7 @@ int wrap_miopenActivationForward(RuntimeState* state, void* input, void* output,
   miopenHandle_t handle = static_cast<miopenHandle_t>(
       hipdnn_ep_state_get_miopen_handle(state));
   if (!handle) {
-    fprintf(stderr, "[REAL] wrap_miopenActivationForward: null MIOpen handle\n");
+    RUNTIME_DEBUG_LOG("[REAL] wrap_miopenActivationForward: null MIOpen handle\n");
     return -1;
   }
 
@@ -110,7 +111,7 @@ int wrap_miopenActivationForward(RuntimeState* state, void* input, void* output,
                                        inDesc, input, &beta,
                                        outDesc, output));
 
-  fprintf(stderr, "[REAL] wrap_miopenActivationForward: completed successfully\n");
+  RUNTIME_DEBUG_LOG("[REAL] wrap_miopenActivationForward: completed successfully\n");
 
   miopenDestroyActivationDescriptor(actDesc);
   miopenDestroyTensorDescriptor(inDesc);

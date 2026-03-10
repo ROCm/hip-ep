@@ -4,6 +4,7 @@
  */
 
 #include "../hipdnn_ep_runtime.h"
+#include "../debug_log.h"
 #include "udna_custom_kernels.h"
 
 #include <cstdio>
@@ -83,7 +84,7 @@ int wrap_rotary_embedding(RuntimeState* state,
   if (rc != 0) {
     fprintf(stderr, "wrap_rotary_embedding: udna_rope_forward failed (rc=%d)\n", rc);
   } else {
-    fprintf(stderr, "[REAL] wrap_rotary_embedding: completed successfully\n");
+    RUNTIME_DEBUG_LOG("[REAL] wrap_rotary_embedding: completed successfully\n");
   }
 
   return rc;
