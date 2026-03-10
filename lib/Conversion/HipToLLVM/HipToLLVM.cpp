@@ -46,6 +46,7 @@ static constexpr const char *kMiopenSkipRmsNorm = "hip_miopen_skip_rms_norm";
 static constexpr const char *kMiopenRope = "hip_miopen_rope";
 static constexpr const char *kMiopenAdd = "hip_miopen_add";
 static constexpr const char *kMiopenMul = "hip_miopen_mul";
+static constexpr const char *kWrapMiopenTensorOp = "wrap_miopenTensorOp";
 static constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
 static constexpr const char *kHipTranspose = "hip_transpose";
 static constexpr const char *kHipGather = "hip_gather";
@@ -65,6 +66,27 @@ static int64_t getHipdnnDataType(Type elemType) {
   if (elemType.isBF16())
     return 2; // HIPDNN_EP_DATATYPE_BFLOAT16
   return -1;
+}
+
+// Tensor operation types (must match runtime enum).
+// HIPDNN_EP_TENSOR_OP_* values.
+enum class TensorOp : int64_t {
+  Sub = 0, // Subtraction: C = A - B
+  Add = 1, // Addition: C = A + B
+  Mul = 2, // Multiplication: C = A * B
+};
+
+static const char *getTensorOpName(TensorOp op) {
+  switch (op) {
+  case TensorOp::Sub:
+    return "sub";
+  case TensorOp::Add:
+    return "add";
+  case TensorOp::Mul:
+    return "mul";
+  default:
+    return "unknown";
+  }
 }
 
 // Helper: extract the aligned data pointer from a converted memref descriptor,
@@ -793,6 +815,96 @@ struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
   }
 };
 
+// hip.sub(handle, lhs, rhs, output)
+//   -> wrap_miopenTensorOp(state, lhs, rhs, output, num_lhs, num_rhs,
+//                          data_type, tensor_op=0)
+// Supports both static and dynamic shapes (computes num_lhs, num_rhs at
+// runtime).
+struct SubOpLowering : public ConvertOpToLLVMPattern<SubOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(SubOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+
+    // Helper to create i64 constants
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    // Helper to compute num_elements for a memref (static or dynamic)
+    auto computeNumElements = [&](MemRefType type, Value descriptor) -> Value {
+      Value num = createI64Const(1);
+      MemRefDescriptor desc(descriptor);
+      for (unsigned dimIdx = 0; dimIdx < type.getRank(); ++dimIdx) {
+        Value dimSize;
+        if (type.isDynamicDim(dimIdx)) {
+          dimSize = desc.size(rewriter, loc, dimIdx);
+        } else {
+          dimSize = createI64Const(type.getDimSize(dimIdx));
+        }
+        num = LLVM::MulOp::create(rewriter, loc, num, dimSize);
+      }
+      return num;
+    };
+
+    // Extract pointers using alignedPtr (respects memref.view offsets)
+    auto getAlignedPtr = [&](Value memrefDesc) -> Value {
+      MemRefDescriptor desc(memrefDesc);
+      Value ptr = desc.alignedPtr(rewriter, loc);
+      if (cast<LLVM::LLVMPointerType>(ptr.getType()).getAddressSpace() != 0)
+        ptr = LLVM::AddrSpaceCastOp::create(rewriter, loc, ptrType, ptr);
+      return ptr;
+    };
+
+    Value statePtr = adaptor.getHandle();
+    Value lhsPtr = getAlignedPtr(adaptor.getLhs());
+    Value rhsPtr = getAlignedPtr(adaptor.getRhs());
+    Value outputPtr = getAlignedPtr(adaptor.getOutput());
+
+    auto lhsType = cast<MemRefType>(op.getLhs().getType());
+    auto rhsType = cast<MemRefType>(op.getRhs().getType());
+    auto outputType = cast<MemRefType>(op.getOutput().getType());
+
+    // Compute number of elements for lhs and rhs (supports dynamic shapes)
+    Value numLhs = computeNumElements(lhsType, adaptor.getLhs());
+    Value numRhs = computeNumElements(rhsType, adaptor.getRhs());
+
+    // Get data type enum (f32=0, f16=1, bf16=2)
+    int64_t dataType = getHipdnnDataType(outputType.getElementType());
+    if (dataType < 0)
+      return rewriter.notifyMatchFailure(
+          op, "unsupported element type for hip.sub");
+
+    Value dataTypeVal = createI64Const(dataType);
+    Value tensorOpVal = createI64Const(static_cast<int64_t>(TensorOp::Sub));
+
+    // int wrap_miopenTensorOp(RuntimeState* state, void* lhs, void* rhs,
+    //     void* output, int64_t num_lhs, int64_t num_rhs, int64_t data_type,
+    //     int64_t tensor_op)
+    SmallVector<Type, 8> paramTypes = {ptrType, ptrType, ptrType, ptrType,
+                                       i64Type, i64Type, i64Type, i64Type};
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapMiopenTensorOp, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value, 8> args = {statePtr, lhsPtr, rhsPtr,      outputPtr,
+                                  numLhs,   numRhs, dataTypeVal, tensorOpVal};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 // hip.sigmoid(ctx, input, output)
 //   -> wrap_miopenActivationForward(state, input, output, num_elements,
 //                                    data_type, activation_mode=0)
@@ -1009,13 +1121,13 @@ void ConvertHipToLLVMPass::runOnOperation() {
   RewritePatternSet patterns(ctx);
 
   // HIP dialect-specific lowerings
-  patterns
-      .add<AllocOpLowering, FreeOpLowering, MiopenGraphOpLowering,
-           HipblasltGraphOpLowering, ConvOpLowering, HipblasltMatmulOpLowering,
-           MiopenRmsNormOpLowering, MiopenSkipRmsNormOpLowering,
-           MiopenRopeOpLowering, MiopenSoftmaxOpLowering, TransposeOpLowering,
-           GatherOpLowering, SiluOpLowering, SigmoidOpLowering, GqaOpLowering>(
-          typeConverter);
+  patterns.add<AllocOpLowering, FreeOpLowering, MiopenGraphOpLowering,
+               HipblasltGraphOpLowering, ConvOpLowering,
+               HipblasltMatmulOpLowering, MiopenRmsNormOpLowering,
+               MiopenSkipRmsNormOpLowering, MiopenRopeOpLowering,
+               MiopenSoftmaxOpLowering, TransposeOpLowering, GatherOpLowering,
+               SiluOpLowering, SigmoidOpLowering, SubOpLowering, GqaOpLowering>(
+      typeConverter);
   patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter,
                                                        kMiopenAdd);
   patterns.insert<MiopenBinaryOpLowering<MiopenMulOp>>(typeConverter,
