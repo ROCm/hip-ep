@@ -609,6 +609,20 @@ void CastOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// ReduceSumOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ReduceSumOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ReduceSumOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(*this, {getInput()}, getOutputMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // GqaOp: ins(q, k, v), outs(kv_cache, output)
 // Extra scalars: layer, start_pos, seq_len
 //===----------------------------------------------------------------------===//

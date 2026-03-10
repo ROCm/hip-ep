@@ -54,6 +54,7 @@ static constexpr const char *kHipSilu = "hip_silu";
 static constexpr const char *kWrapMiopenActivationForward =
     "wrap_miopenActivationForward";
 static constexpr const char *kWrapMiopenCast = "wrap_miopenCast";
+static constexpr const char *kWrapMiopenReduceSum = "wrap_miopenReduceSum";
 static constexpr const char *kHipGqa = "hip_gqa";
 
 // Maps MLIR element type to runtime data type enum (HIPDNN_EP_DATATYPE_*).
@@ -1071,6 +1072,108 @@ struct CastOpLowering : public ConvertOpToLLVMPattern<CastOp> {
   }
 };
 
+// hip.reduce_sum(ctx, input, output) {axes = [...], keepdims = ...}
+//   -> wrap_miopenReduceSum(state, input, output, num_elements,
+//                           axes_ptr, num_axes, keepdims, data_type)
+// Supports both static and dynamic shapes (computes num_elements at runtime).
+struct ReduceSumOpLowering : public ConvertOpToLLVMPattern<ReduceSumOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(ReduceSumOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+
+    // Helper to create i64 constants
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    // Extract pointers using alignedPtr
+    auto getAlignedPtr = [&](Value memrefDesc) -> Value {
+      MemRefDescriptor desc(memrefDesc);
+      Value ptr = desc.alignedPtr(rewriter, loc);
+      if (cast<LLVM::LLVMPointerType>(ptr.getType()).getAddressSpace() != 0)
+        ptr = LLVM::AddrSpaceCastOp::create(rewriter, loc, ptrType, ptr);
+      return ptr;
+    };
+
+    Value statePtr = adaptor.getCtx();
+    Value inputPtr = getAlignedPtr(adaptor.getInput());
+    Value outputPtr = getAlignedPtr(adaptor.getOutput());
+
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    auto outputType = cast<MemRefType>(op.getOutput().getType());
+
+    // Compute num_elements (supports dynamic shapes)
+    Value numElements = createI64Const(1);
+    MemRefDescriptor inputDesc(adaptor.getInput());
+
+    for (unsigned dimIdx = 0; dimIdx < inputType.getRank(); ++dimIdx) {
+      Value dimSize;
+      if (inputType.isDynamicDim(dimIdx)) {
+        dimSize = inputDesc.size(rewriter, loc, dimIdx);
+      } else {
+        dimSize = createI64Const(inputType.getDimSize(dimIdx));
+      }
+      numElements = LLVM::MulOp::create(rewriter, loc, numElements, dimSize);
+    }
+
+    // Get data type enum
+    int64_t dataType = getHipdnnDataType(inputType.getElementType());
+    if (dataType < 0)
+      return rewriter.notifyMatchFailure(
+          op, "unsupported element type for hip.reduce_sum");
+
+    Value dataTypeVal = createI64Const(dataType);
+
+    // Extract axes array - use array indexing like ConvOp does
+    auto axesAttr = op.getAxes();
+    auto getI64 = [](Attribute attr) -> int64_t {
+      return cast<IntegerAttr>(attr).getInt();
+    };
+
+    SmallVector<int64_t> axesVec;
+    for (Attribute axisAttr : axesAttr) {
+      axesVec.push_back(getI64(axisAttr));
+    }
+    Value numAxes = createI64Const(axesVec.size());
+
+    // Pack axes into a single i64 value (up to 8 axes, each taking 8 bits)
+    // Runtime will unpack this value
+    int64_t axesPacked = 0;
+    for (size_t i = 0; i < axesVec.size() && i < 8; ++i) {
+      axesPacked |= (axesVec[i] & 0xFF) << (i * 8);
+    }
+    Value axesVal = createI64Const(axesPacked);
+
+    Value keepdimsVal = createI64Const(op.getKeepdims() ? 1 : 0);
+
+    // int wrap_miopenReduceSum(RuntimeState* state, void* input, void* output,
+    //     int64_t num_elements, int64_t axes_packed, int64_t num_axes,
+    //     int64_t keepdims, int64_t data_type)
+    SmallVector<Type, 8> paramTypes = {ptrType, ptrType, ptrType, i64Type,
+                                       i64Type, i64Type, i64Type, i64Type};
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapMiopenReduceSum, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value, 8> args = {statePtr, inputPtr, outputPtr,   numElements,
+                                  axesVal,  numAxes,  keepdimsVal, dataTypeVal};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 // hip.gqa(handle, q, k, v, kv_cache, output, layer, start_pos, seq_len)
 struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -1209,8 +1312,8 @@ void ConvertHipToLLVMPass::runOnOperation() {
            HipblasltGraphOpLowering, ConvOpLowering, HipblasltMatmulOpLowering,
            MiopenRmsNormOpLowering, MiopenSkipRmsNormOpLowering,
            MiopenRopeOpLowering, MiopenSoftmaxOpLowering, TransposeOpLowering,
-           GatherOpLowering, SiluOpLowering, SigmoidOpLowering,
-           SubOpLowering, CastOpLowering, GqaOpLowering>(typeConverter);
+           GatherOpLowering, SiluOpLowering, SigmoidOpLowering, SubOpLowering,
+           CastOpLowering, ReduceSumOpLowering, GqaOpLowering>(typeConverter);
   patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter,
                                                        kMiopenAdd);
   patterns.insert<MiopenBinaryOpLowering<MiopenMulOp>>(typeConverter,
