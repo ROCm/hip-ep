@@ -595,37 +595,49 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value context = *ctxOrFailure;
 
   mlir::Location loc = op->getLoc();
-  mlir::Value input = op->getOperand(0);
+  mlir::Value data = op->getOperand(0);
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, data);
 
-  // Extract axes attribute (optional, defaults to all axes)
-  // ONNX axes attribute is ArrayAttr
-  llvm::SmallVector<int64_t> axesVec;
-  if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
-    for (auto a : axesAttr)
-      axesVec.push_back(mlir::cast<mlir::IntegerAttr>(a).getInt());
+  // Handle axes: can be operand (opset 13+) or attribute (opset < 13)
+  mlir::Value axesOperand;
+  if (op->getNumOperands() > 1) {
+    // Axes provided as operand (opset 13+)
+    axesOperand = op->getOperand(1);
   } else {
-    // Default: reduce all axes
-    for (int64_t i = 0; i < resultType.getRank(); ++i)
-      axesVec.push_back(i);
-  }
-  auto axesAttr = rewriter.getI64ArrayAttr(axesVec);
+    // Axes provided as attribute - convert to constant tensor
+    llvm::SmallVector<int64_t> axesVec;
+    if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
+      for (auto a : axesAttr)
+        axesVec.push_back(mlir::cast<mlir::IntegerAttr>(a).getInt());
+    } else {
+      // Default: reduce all axes
+      auto inputType = mlir::cast<mlir::RankedTensorType>(data.getType());
+      for (int64_t i = 0; i < inputType.getRank(); ++i)
+        axesVec.push_back(i);
+    }
 
-  // Extract keepdims attribute (defaults to true in ONNX)
-  // ONNX keepdims is signed integer (si64), use getSInt()
-  bool keepdims = true;
+    // Create constant tensor for axes
+    auto axesType = mlir::RankedTensorType::get(
+        {static_cast<int64_t>(axesVec.size())}, rewriter.getI64Type());
+    auto axesAttr =
+        mlir::DenseIntElementsAttr::get(axesType, llvm::ArrayRef(axesVec));
+    axesOperand =
+        rewriter.create<mlir::arith::ConstantOp>(loc, axesType, axesAttr);
+  }
+
+  // Extract keepdims attribute (defaults to 1 in ONNX)
+  int64_t keepdims = 1;
   if (auto keepdimsAttr = op->getAttrOfType<mlir::IntegerAttr>("keepdims")) {
-    keepdims = keepdimsAttr.getSInt() != 0;
+    keepdims = keepdimsAttr.getSInt();
   }
 
   // Build operands and attributes for hip.reduce_sum
-  llvm::SmallVector<mlir::Value> operands = {context, input, init};
+  llvm::SmallVector<mlir::Value> operands = {context, data, axesOperand, init};
   llvm::SmallVector<mlir::NamedAttribute> attrs;
-  attrs.push_back(rewriter.getNamedAttr("axes", axesAttr));
   attrs.push_back(
-      rewriter.getNamedAttr("keepdims", rewriter.getBoolAttr(keepdims)));
+      rewriter.getNamedAttr("keepdims", rewriter.getI64IntegerAttr(keepdims)));
 
   // Create hip.reduce_sum operation
   auto hipOp = rewriter.create<mlir::hip::ReduceSumOp>(

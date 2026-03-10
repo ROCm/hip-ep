@@ -1103,45 +1103,54 @@ struct ReduceSumOpLowering : public ConvertOpToLLVMPattern<ReduceSumOp> {
       return ptr;
     };
 
-    Value statePtr = adaptor.getCtx();
-    Value inputPtr = getAlignedPtr(adaptor.getInput());
+    Value statePtr = adaptor.getHandle();
+    Value dataPtr = getAlignedPtr(adaptor.getData());
     Value outputPtr = getAlignedPtr(adaptor.getOutput());
 
-    auto inputType = cast<MemRefType>(op.getInput().getType());
+    auto dataType = cast<MemRefType>(op.getData().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
     // Compute num_elements (supports dynamic shapes)
     Value numElements = createI64Const(1);
-    MemRefDescriptor inputDesc(adaptor.getInput());
+    MemRefDescriptor dataDesc(adaptor.getData());
 
-    for (unsigned dimIdx = 0; dimIdx < inputType.getRank(); ++dimIdx) {
+    for (unsigned dimIdx = 0; dimIdx < dataType.getRank(); ++dimIdx) {
       Value dimSize;
-      if (inputType.isDynamicDim(dimIdx)) {
-        dimSize = inputDesc.size(rewriter, loc, dimIdx);
+      if (dataType.isDynamicDim(dimIdx)) {
+        dimSize = dataDesc.size(rewriter, loc, dimIdx);
       } else {
-        dimSize = createI64Const(inputType.getDimSize(dimIdx));
+        dimSize = createI64Const(dataType.getDimSize(dimIdx));
       }
       numElements = LLVM::MulOp::create(rewriter, loc, numElements, dimSize);
     }
 
     // Get data type enum
-    int64_t dataType = getHipdnnDataType(inputType.getElementType());
-    if (dataType < 0)
+    int64_t elemType = getHipdnnDataType(dataType.getElementType());
+    if (elemType < 0)
       return rewriter.notifyMatchFailure(
           op, "unsupported element type for hip.reduce_sum");
 
-    Value dataTypeVal = createI64Const(dataType);
+    Value dataTypeVal = createI64Const(elemType);
 
-    // Extract axes array - use array indexing like ConvOp does
-    auto axesAttr = op.getAxes();
-    auto getI64 = [](Attribute attr) -> int64_t {
-      return cast<IntegerAttr>(attr).getInt();
-    };
+    // Extract axes from constant tensor operand
+    // The axes operand should be a constant from arith.constant
+    auto axesDefOp = op.getAxes().getDefiningOp();
+    if (!axesDefOp)
+      return rewriter.notifyMatchFailure(op, "axes must be a constant");
 
     SmallVector<int64_t> axesVec;
-    for (Attribute axisAttr : axesAttr) {
-      axesVec.push_back(getI64(axisAttr));
+    if (auto constOp = dyn_cast<mlir::arith::ConstantOp>(axesDefOp)) {
+      auto axesAttr = dyn_cast<mlir::DenseIntElementsAttr>(constOp.getValue());
+      if (!axesAttr)
+        return rewriter.notifyMatchFailure(
+            op, "axes constant must be DenseIntElementsAttr");
+      for (auto val : axesAttr.getValues<int64_t>()) {
+        axesVec.push_back(val);
+      }
+    } else {
+      return rewriter.notifyMatchFailure(op, "axes must be arith.constant");
     }
+
     Value numAxes = createI64Const(axesVec.size());
 
     // Pack axes into a single i64 value (up to 8 axes, each taking 8 bits)
@@ -1152,7 +1161,7 @@ struct ReduceSumOpLowering : public ConvertOpToLLVMPattern<ReduceSumOp> {
     }
     Value axesVal = createI64Const(axesPacked);
 
-    Value keepdimsVal = createI64Const(op.getKeepdims() ? 1 : 0);
+    Value keepdimsVal = createI64Const(op.getKeepdims());
 
     // int wrap_miopenReduceSum(RuntimeState* state, void* input, void* output,
     //     int64_t num_elements, int64_t axes_packed, int64_t num_axes,
@@ -1165,8 +1174,8 @@ struct ReduceSumOpLowering : public ConvertOpToLLVMPattern<ReduceSumOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 8> args = {statePtr, inputPtr, outputPtr,   numElements,
-                                  axesVal,  numAxes,  keepdimsVal, dataTypeVal};
+    SmallVector<Value, 8> args = {statePtr, dataPtr, outputPtr,   numElements,
+                                  axesVal,  numAxes, keepdimsVal, dataTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
