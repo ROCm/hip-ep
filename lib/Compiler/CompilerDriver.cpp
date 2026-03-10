@@ -24,6 +24,8 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
 
+#include "hip/debug_log.h"
+
 #include <cstdlib>
 #include <iostream>
 #include <sstream>
@@ -54,19 +56,19 @@ bool CompilerDriver::compile(
   // Parse MLIR input
   // Binary-safe: do not require null terminator (bytecode may contain embedded
   // nulls)
-  std::cerr << "[CompilerDriver::compile] Input size: " << input_mlir.size()
-            << " bytes\n";
+  DRIVER_DEBUG_LOG("[CompilerDriver::compile] Input size: " << input_mlir.size()
+            << " bytes\n");
   if (input_mlir.size() >= 4) {
-    std::cerr << "[CompilerDriver::compile] First 4 bytes: 0x" << std::hex
+    DRIVER_DEBUG_LOG("[CompilerDriver::compile] First 4 bytes: 0x" << std::hex
               << (unsigned int)(unsigned char)input_mlir[0]
               << (unsigned int)(unsigned char)input_mlir[1]
               << (unsigned int)(unsigned char)input_mlir[2]
-              << (unsigned int)(unsigned char)input_mlir[3] << std::dec << "\n";
+              << (unsigned int)(unsigned char)input_mlir[3] << std::dec << "\n");
   }
 
   auto memBuffer = llvm::MemoryBuffer::getMemBuffer(input_mlir, "", false);
-  std::cerr << "[CompilerDriver::compile] MemBuffer size: "
-            << memBuffer->getBufferSize() << " bytes\n";
+  DRIVER_DEBUG_LOG("[CompilerDriver::compile] MemBuffer size: "
+            << memBuffer->getBufferSize() << " bytes\n");
 
   llvm::SourceMgr sourceMgr;
   sourceMgr.AddNewSourceBuffer(std::move(memBuffer), llvm::SMLoc());

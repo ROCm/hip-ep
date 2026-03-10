@@ -29,6 +29,7 @@
 #include "mlir/Transforms/Passes.h"
 #include "hip/Conversion/HipToLLVM/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/debug_log.h"
 
 namespace mlir {
 namespace hip {
@@ -1749,9 +1750,9 @@ private:
 
     if (!inputCountAttr || !outputCountAttr || !inputShapesAttr ||
         !outputShapesAttr) {
-      llvm::errs()
-          << "[HipToLLVM] Warning: No metadata found, skipping @main_graph "
-             "transformation\n";
+      COMPILER_DEBUG_LOG(
+          "[HipToLLVM] Warning: No metadata found, skipping @main_graph "
+             "transformation\n");
       return success(); // Graceful degradation
     }
 
@@ -1897,8 +1898,8 @@ private:
       builder.create<LLVM::ReturnOp>(loc, callOp.getResult());
     }
 
-    llvm::errs() << "[HipToLLVM] Transformed @main_graph signature: "
-                 << actualParams << " params → 3 params\n";
+    COMPILER_DEBUG_LOG("[HipToLLVM] Transformed @main_graph signature: "
+                 << actualParams << " params → 3 params\n");
     return success();
   }
 };

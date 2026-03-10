@@ -4,6 +4,7 @@
  */
 #include "hipdnn_ep_runtime.h"
 #include "runtime_types.h"
+#include "debug_log.h"
 
 #include <cstdio>
 #include <cstring>
@@ -77,29 +78,29 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState* state, span_t* inputs,
   check_gcnarch("BEFORE prepare_input");
 
   // VERIFICATION: Struct sizes
-  fprintf(stderr, "[Runtime DEBUG] === Struct Size Verification ===\n");
-  fprintf(stderr, "[Runtime DEBUG] sizeof(TensorBuffer) = %zu\n",
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] === Struct Size Verification ===\n");
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] sizeof(TensorBuffer) = %zu\n",
           sizeof(TensorBuffer));
-  fprintf(stderr, "[Runtime DEBUG] offsetof(TensorBuffer, gpu_ptr) = %zu\n",
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(TensorBuffer, gpu_ptr) = %zu\n",
           offsetof(TensorBuffer, gpu_ptr));
-  fprintf(stderr, "[Runtime DEBUG] offsetof(TensorBuffer, host_ptr) = %zu\n",
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(TensorBuffer, host_ptr) = %zu\n",
           offsetof(TensorBuffer, host_ptr));
-  fprintf(stderr, "[Runtime DEBUG] offsetof(TensorBuffer, shape_ptr) = %zu\n",
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(TensorBuffer, shape_ptr) = %zu\n",
           offsetof(TensorBuffer, shape_ptr));
-  fprintf(stderr, "[Runtime DEBUG] offsetof(TensorBuffer, rank) = %zu\n",
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(TensorBuffer, rank) = %zu\n",
           offsetof(TensorBuffer, rank));
-  fprintf(stderr, "[Runtime DEBUG] offsetof(TensorBuffer, size_bytes) = %zu\n",
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(TensorBuffer, size_bytes) = %zu\n",
           offsetof(TensorBuffer, size_bytes));
-  fprintf(stderr, "[Runtime DEBUG] offsetof(TensorBuffer, is_pooled) = %zu\n",
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(TensorBuffer, is_pooled) = %zu\n",
           offsetof(TensorBuffer, is_pooled));
 
   // VERIFICATION: tensor_t struct
-  fprintf(stderr, "[Runtime DEBUG] sizeof(tensor_t) = %zu\n", sizeof(tensor_t));
-  fprintf(stderr, "[Runtime DEBUG] offsetof(tensor_t, data) = %zu\n",
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] sizeof(tensor_t) = %zu\n", sizeof(tensor_t));
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(tensor_t, data) = %zu\n",
           offsetof(tensor_t, data));
-  fprintf(stderr, "[Runtime DEBUG] offsetof(tensor_t, shape) = %zu\n",
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(tensor_t, shape) = %zu\n",
           offsetof(tensor_t, shape));
-  fprintf(stderr, "[Runtime DEBUG] offsetof(tensor_t, rank) = %zu\n",
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(tensor_t, rank) = %zu\n",
           offsetof(tensor_t, rank));
 
   // Validate arguments
@@ -117,9 +118,9 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState* state, span_t* inputs,
   }
 
   // VERIFICATION: span_t access
-  fprintf(stderr, "[Runtime DEBUG] inputs pointer = %p\n", (void*)inputs);
-  fprintf(stderr, "[Runtime DEBUG] inputs->data = %p\n", (void*)inputs->data);
-  fprintf(stderr, "[Runtime DEBUG] inputs->count = %zu\n", inputs->count);
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] inputs pointer = %p\n", (void*)inputs);
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] inputs->data = %p\n", (void*)inputs->data);
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] inputs->count = %zu\n", inputs->count);
 
   // Validate index bounds
   if (index >= inputs->count) {
@@ -134,17 +135,17 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState* state, span_t* inputs,
   tensor_t* tensor = &inputs->data[index];
 
   // DUMP: Raw memory of tensor_t struct
-  fprintf(stderr, "[Runtime DEBUG] tensor_t struct memory dump (address=%p):\n",
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] tensor_t struct memory dump (address=%p):\n",
           (void*)tensor);
   unsigned char* bytes = (unsigned char*)tensor;
   for (size_t i = 0; i < sizeof(tensor_t); i++) {
-    fprintf(stderr, "  [%02zu] = 0x%02x\n", i, bytes[i]);
+    RUNTIME_DEBUG_LOG("  [%02zu] = 0x%02x\n", i, bytes[i]);
   }
 
   // DUMP: Field values
-  fprintf(stderr, "[Runtime DEBUG] tensor->data = %p\n", tensor->data);
-  fprintf(stderr, "[Runtime DEBUG] tensor->shape = %p\n", (void*)tensor->shape);
-  fprintf(stderr, "[Runtime DEBUG] tensor->rank = %zu\n", tensor->rank);
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] tensor->data = %p\n", tensor->data);
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] tensor->shape = %p\n", (void*)tensor->shape);
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] tensor->rank = %zu\n", tensor->rank);
 
   // Validate field access doesn't corrupt memory (re-read test)
   void* data_before = tensor->data;
@@ -202,8 +203,7 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState* state, span_t* inputs,
     return HIPDNN_EP_ERR_INVALID_DIMENSION;
   }
 
-  fprintf(stderr,
-          "[Runtime DEBUG] prepare_input[%zu]: rank=%zu element_size=%zu "
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] prepare_input[%zu]: rank=%zu element_size=%zu "
           "size_bytes=%zu\n",
           index, tensor->rank, element_size, size_bytes);
 
@@ -306,8 +306,7 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState* state, span_t* outputs,
     return HIPDNN_EP_ERR_INVALID_DIMENSION;
   }
 
-  fprintf(stderr,
-          "[Runtime DEBUG] prepare_output[%zu]: rank=%zu element_size=%zu "
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] prepare_output[%zu]: rank=%zu element_size=%zu "
           "size_bytes=%zu\n",
           index, tensor->rank, element_size, size_bytes);
 
