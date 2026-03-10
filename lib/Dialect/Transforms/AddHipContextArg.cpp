@@ -63,7 +63,9 @@ struct HipAddContextArgPass
     if (updatedNames.empty())
       return;
 
-    // Phase 2: collect call sites, then update.
+    // Phase 2: collect call sites, then update.  Collect-then-modify avoids
+    // iterator invalidation: erasing a CallOp during a walk over the module
+    // would invalidate the walk's internal iterator.
     SmallVector<func::CallOp> callsToUpdate;
     module.walk([&](func::CallOp callOp) {
       if (updatedNames.contains(callOp.getCallee()))
