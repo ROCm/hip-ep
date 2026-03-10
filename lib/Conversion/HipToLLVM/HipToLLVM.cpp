@@ -1149,21 +1149,20 @@ struct ReduceSumOpLowering : public ConvertOpToLLVMPattern<ReduceSumOp> {
 
     // int wrap_reduce_sum(RuntimeState* state, void* data, void* axes,
     //                     void* output, int64_t data_num_elements,
-    //                     int64_t output_num_elements, int64_t element_size_bytes,
-    //                     int64_t keepdims)
+    //                     int64_t output_num_elements, int64_t
+    //                     element_size_bytes, int64_t keepdims)
     SmallVector<Type, 8> paramTypes = {ptrType, ptrType, ptrType, ptrType,
                                        i64Type, i64Type, i64Type, i64Type};
 
     static constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
-    FailureOr<LLVM::LLVMFuncOp> funcOp =
-        LLVM::lookupOrCreateFn(rewriter, module, kWrapReduceSum, paramTypes,
-                               i32Type);
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapReduceSum, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 8> args = {statePtr,      dataPtr,           axesPtr,
-                                  outputPtr,     dataNumElements,   outputNumElements,
-                                  elemSizeVal,   keepdimsVal};
+    SmallVector<Value, 8> args = {
+        statePtr,        dataPtr,           axesPtr,     outputPtr,
+        dataNumElements, outputNumElements, elemSizeVal, keepdimsVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
