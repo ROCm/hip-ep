@@ -315,6 +315,36 @@ def Hip_SigmoidOp : Hip_DpsOp<"sigmoid"> {
   }];
 }
 
+def Hip_SubOp : Hip_DpsOp<"sub"> {
+  let summary = "Elementwise subtraction";
+  let description = [{
+    Performs elementwise subtraction: output = lhs - rhs
+
+    Both inputs must have the same shape (broadcasting handled before lowering).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.sub(%handle) ins(%lhs, %rhs : memref<1x1xi64, 1>, memref<1x1xi64, 1>)
+                     outs(%output : memref<1x1xi64, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$handle,
+    Hip_TensorOrMemRef:$lhs,
+    Hip_TensorOrMemRef:$rhs,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $handle `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_GqaOp : Hip_DpsOp<"gqa"> {
   let summary = "Grouped query attention";
   let arguments = (ins

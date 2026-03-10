@@ -584,6 +584,19 @@ void SigmoidOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// SubOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SubOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void SubOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(*this, {getLhs(), getRhs()}, getOutputMutable(),
+                       effects);
+}
+
+//===----------------------------------------------------------------------===//
 // GqaOp: ins(q, k, v), outs(kv_cache, output)
 // Extra scalars: layer, start_pos, seq_len
 //===----------------------------------------------------------------------===//
