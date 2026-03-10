@@ -64,14 +64,13 @@ int wrap_rotary_embedding(RuntimeState* state,
   int64_t half_rot = rotary_dim / 2;
   int64_t max_seq_len = (half_rot > 0) ? cos_cache_num_elements / half_rot : 1;
 
-  fprintf(stderr,
-          "[REAL] wrap_rotary_embedding: num_positions=%lld, num_heads=%lld, "
-          "head_dim=%lld, rotary_dim=%lld, max_seq_len=%lld, "
-          "interleaved=%lld, elem_size=%lld\n",
-          (long long)num_positions, (long long)num_heads,
-          (long long)head_dim, (long long)rotary_dim,
-          (long long)max_seq_len,
-          (long long)interleaved, (long long)element_size_bytes);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_rotary_embedding: num_positions=%lld, num_heads=%lld, "
+                    "head_dim=%lld, rotary_dim=%lld, max_seq_len=%lld, "
+                    "interleaved=%lld, elem_size=%lld\n",
+                    (long long)num_positions, (long long)num_heads,
+                    (long long)head_dim, (long long)rotary_dim,
+                    (long long)max_seq_len,
+                    (long long)interleaved, (long long)element_size_bytes);
 
   int rc = udna_rope_forward(
       stream,
