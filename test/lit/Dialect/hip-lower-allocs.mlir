@@ -10,7 +10,7 @@
 //   - Non-returned buffers get hip.free (using the HIP context from arg 0).
 //===----------------------------------------------------------------------===//
 
-// RUN: %hip-mlir-opt --hip-lower-allocs %s 2>&1 | %FileCheck %s
+// RUN: hip-mlir-opt --hip-lower-allocs %s 2>&1 | FileCheck %s
 
 // Two static allocs: alloc0 is not returned -> hip.free.
 // alloc1 is returned -> no hip.free (caller-owned).
