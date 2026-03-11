@@ -71,6 +71,7 @@ void LowerAllocsPass::runOnOperation() {
 
   if (funcOp.empty())
     return;
+  // TODO: Generalize to multi-block functions using MLIR's Liveness analysis.
   if (!funcOp.getBody().hasOneBlock()) {
     funcOp.emitError("hip-lower-allocs requires single-block functions; "
                      "findLastAliasedUser uses isBeforeInBlock which does "

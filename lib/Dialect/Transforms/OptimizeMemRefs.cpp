@@ -147,6 +147,8 @@ void OptimizeMemRefsPass::runOnOperation() {
   if (funcOp.empty())
     return;
 
+  // TODO: Generalize to multi-block functions using MLIR's Liveness analysis
+  // instead of sequential op indices.
   if (!funcOp.getBody().hasOneBlock()) {
     funcOp.emitError("hip-optimize-memrefs requires single-block functions; "
                      "liveness analysis uses sequential op indices that do "
