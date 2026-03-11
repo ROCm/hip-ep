@@ -443,7 +443,8 @@ void MulOp::getEffects(
 }
 
 LogicalResult MulOp::verify() {
-  return verifyDpsComputeOp(*this, {getLhs(), getRhs(), getOutput()}, /*numInits=*/1);
+  return verifyDpsComputeOp(*this, {getLhs(), getRhs(), getOutput()},
+                            /*numInits=*/1);
 }
 
 ParseResult MulOp::parse(OpAsmParser &parser, OperationState &result) {
@@ -451,8 +452,8 @@ ParseResult MulOp::parse(OpAsmParser &parser, OperationState &result) {
 }
 
 void MulOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getHandle(), /*scalarArgs=*/{}, {getLhs(), getRhs()},
-                       {getOutput()});
+  printSingleInitDpsOp(p, *this, getHandle(), /*scalarArgs=*/{},
+                       {getLhs(), getRhs()}, {getOutput()});
 }
 
 //===----------------------------------------------------------------------===//
