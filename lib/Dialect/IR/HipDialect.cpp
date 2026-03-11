@@ -567,7 +567,7 @@ MutableOperandRange SigmoidOp::getDpsInitsMutable() {
 void SigmoidOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  emitDpsMemoryEffects(*this, {getInput()}, getOutputMutable(), effects);
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
 //===----------------------------------------------------------------------===//
@@ -579,8 +579,7 @@ MutableOperandRange SubOp::getDpsInitsMutable() { return getOutputMutable(); }
 void SubOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  emitDpsMemoryEffects(*this, {getLhs(), getRhs()}, getOutputMutable(),
-                       effects);
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
 //===----------------------------------------------------------------------===//
@@ -592,7 +591,7 @@ MutableOperandRange CastOp::getDpsInitsMutable() { return getOutputMutable(); }
 void CastOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  emitDpsMemoryEffects(*this, {getInput()}, getOutputMutable(), effects);
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
 //===----------------------------------------------------------------------===//
@@ -606,8 +605,7 @@ MutableOperandRange ReduceSumOp::getDpsInitsMutable() {
 void ReduceSumOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  emitDpsMemoryEffects(*this, {getData(), getAxes()}, getOutputMutable(),
-                       effects);
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
 //===----------------------------------------------------------------------===//
