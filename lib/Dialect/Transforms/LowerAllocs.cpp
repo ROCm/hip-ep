@@ -31,7 +31,8 @@
 
 STATISTIC(NumAllocsLowered, "Number of memref.alloc lowered to hip.alloc");
 STATISTIC(NumFreesInserted, "Number of hip.free ops inserted");
-STATISTIC(NumDeallocsConverted, "Number of memref.dealloc converted to hip.free");
+STATISTIC(NumDeallocsConverted,
+          "Number of memref.dealloc converted to hip.free");
 
 namespace mlir {
 namespace hip {

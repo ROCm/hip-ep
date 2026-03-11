@@ -20,8 +20,7 @@ using namespace mlir;
 int64_t mlir::hip::getStaticByteSize(MemRefType type) {
   if (!type.hasStaticShape())
     return 0;
-  int64_t totalBits =
-      type.getNumElements() * type.getElementTypeBitWidth();
+  int64_t totalBits = type.getNumElements() * type.getElementTypeBitWidth();
   return static_cast<int64_t>(llvm::divideCeil(totalBits, 8));
 }
 
@@ -34,10 +33,8 @@ Value mlir::hip::emitAlignUp(OpBuilder &builder, Location loc, Value value,
                              int64_t alignment) {
   if (alignment <= 1)
     return value;
-  Value alignM1 =
-      arith::ConstantIndexOp::create(builder, loc, alignment - 1);
-  Value alignConst =
-      arith::ConstantIndexOp::create(builder, loc, alignment);
+  Value alignM1 = arith::ConstantIndexOp::create(builder, loc, alignment - 1);
+  Value alignConst = arith::ConstantIndexOp::create(builder, loc, alignment);
   Value sum = builder.createOrFold<arith::AddIOp>(loc, value, alignM1);
   Value divided = builder.createOrFold<arith::DivUIOp>(loc, sum, alignConst);
   return builder.createOrFold<arith::MulIOp>(loc, divided, alignConst);
@@ -76,9 +73,10 @@ unsigned mlir::hip::findLastAliasedUseIndex(
   return lastIdx;
 }
 
-Operation *mlir::hip::findLastAliasedUser(
-    Value allocResult, const BufferViewFlowAnalysis &aliasAnalysis,
-    Block &entryBlock) {
+Operation *
+mlir::hip::findLastAliasedUser(Value allocResult,
+                               const BufferViewFlowAnalysis &aliasAnalysis,
+                               Block &entryBlock) {
   // Start from the defining op so we always have a valid baseline, even if
   // the alloc has no users at all (e.g., dead code not yet cleaned up).
   Operation *lastUser = allocResult.getDefiningOp();

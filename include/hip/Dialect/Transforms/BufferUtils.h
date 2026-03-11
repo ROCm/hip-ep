@@ -41,10 +41,11 @@ Value emitAlignUp(OpBuilder &builder, Location loc, Value value,
 ///
 /// Users in nested regions are resolved to their ancestor in \p block
 /// via Block::findAncestorOpInBlock.
-unsigned findLastAliasedUseIndex(
-    Value allocResult, const BufferViewFlowAnalysis &aliasAnalysis,
-    Block &block, const DenseMap<Operation *, unsigned> &opIndex,
-    unsigned blockSize);
+unsigned findLastAliasedUseIndex(Value allocResult,
+                                 const BufferViewFlowAnalysis &aliasAnalysis,
+                                 Block &block,
+                                 const DenseMap<Operation *, unsigned> &opIndex,
+                                 unsigned blockSize);
 
 /// Find the last Operation* among all transitive users of \p allocResult,
 /// following view-like aliases via \p aliasAnalysis.  Resolves nested-region
