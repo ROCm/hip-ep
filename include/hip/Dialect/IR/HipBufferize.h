@@ -62,10 +62,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, HipDialect *) {
     HipblasltMatmulOp::attachInterface<
         HipDstBufferizableModel<HipblasltMatmulOp>>(*ctx);
-    MiopenRmsNormOp::attachInterface<HipDstBufferizableModel<MiopenRmsNormOp>>(
-        *ctx);
-    MiopenSkipRmsNormOp::attachInterface<
-        HipDstBufferizableModel<MiopenSkipRmsNormOp>>(*ctx);
+    RmsNormOp::attachInterface<HipDstBufferizableModel<RmsNormOp>>(*ctx);
+    SkipRmsNormOp::attachInterface<HipDstBufferizableModel<SkipRmsNormOp>>(*ctx);
     MiopenRopeOp::attachInterface<HipDstBufferizableModel<MiopenRopeOp>>(*ctx);
     MiopenAddOp::attachInterface<HipDstBufferizableModel<MiopenAddOp>>(*ctx);
     MiopenMulOp::attachInterface<HipDstBufferizableModel<MiopenMulOp>>(*ctx);
