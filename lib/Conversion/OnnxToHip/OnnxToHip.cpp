@@ -491,6 +491,190 @@ SoftmaxToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
+/// onnx.Sigmoid -> hip.sigmoid
+struct SigmoidToHip : public mlir::RewritePattern {
+  SigmoidToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Sigmoid", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+SigmoidToHip::matchAndRewrite(mlir::Operation *op,
+                              mlir::PatternRewriter &rewriter) const {
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value input = op->getOperand(0);
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  auto hipOp = mlir::hip::SigmoidOp::create(rewriter, loc, resultType, context,
+                                            input, init);
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
+/// onnx.Sub -> hip.sub
+struct SubToHip : public mlir::RewritePattern {
+  SubToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Sub", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+SubToHip::matchAndRewrite(mlir::Operation *op,
+                          mlir::PatternRewriter &rewriter) const {
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value lhs = op->getOperand(0);
+  mlir::Value rhs = op->getOperand(1);
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, lhs);
+  auto hipOp = mlir::hip::SubOp::create(rewriter, loc, resultType, context, lhs,
+                                        rhs, init);
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
+/// onnx.Cast -> hip.cast
+struct CastToHip : public mlir::RewritePattern {
+  CastToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Cast", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+CastToHip::matchAndRewrite(mlir::Operation *op,
+                           mlir::PatternRewriter &rewriter) const {
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value input = op->getOperand(0);
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+
+  // Map MLIR element type to ONNX DataType enum
+  mlir::Type targetType = resultType.getElementType();
+  int64_t onnxDataType = 0;
+  if (targetType.isF16())
+    onnxDataType = 10;
+  else if (targetType.isBF16())
+    onnxDataType = 16;
+  else if (targetType.isF32())
+    onnxDataType = 1;
+  else if (targetType.isF64())
+    onnxDataType = 11;
+  else if (targetType.isInteger(8))
+    onnxDataType = 3;
+  else if (targetType.isInteger(16))
+    onnxDataType = 5;
+  else if (targetType.isInteger(32))
+    onnxDataType = 6;
+  else if (targetType.isInteger(64))
+    onnxDataType = 7;
+  else if (targetType.isInteger(1))
+    onnxDataType = 9;
+
+  // Validate that we have a supported type
+  if (onnxDataType == 0)
+    return rewriter.notifyMatchFailure(op, "unsupported cast target type");
+
+  auto toAttr = rewriter.getI64IntegerAttr(onnxDataType);
+
+  auto hipOp = mlir::hip::CastOp::create(rewriter, loc, resultType, context,
+                                         input, init, toAttr);
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
+/// onnx.ReduceSum -> hip.reduce_sum
+struct ReduceSumToHip : public mlir::RewritePattern {
+  ReduceSumToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.ReduceSum", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
+                                mlir::PatternRewriter &rewriter) const {
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value data = op->getOperand(0);
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, data);
+
+  // Handle axes: can be operand (opset 13+) or attribute (opset < 13)
+  mlir::Value axesOperand;
+  if (op->getNumOperands() > 1) {
+    // Axes provided as operand (opset 13+)
+    axesOperand = op->getOperand(1);
+  } else {
+    // Axes provided as attribute - convert to constant tensor
+    llvm::SmallVector<int64_t> axesVec;
+    if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
+      for (auto a : axesAttr)
+        axesVec.push_back(mlir::cast<mlir::IntegerAttr>(a).getInt());
+    } else {
+      // Default: reduce all axes
+      auto inputType = mlir::cast<mlir::RankedTensorType>(data.getType());
+      for (int64_t i = 0; i < inputType.getRank(); ++i)
+        axesVec.push_back(i);
+    }
+
+    // Create constant tensor for axes
+    auto axesType = mlir::RankedTensorType::get(
+        {static_cast<int64_t>(axesVec.size())}, rewriter.getI64Type());
+    auto axesAttr =
+        mlir::DenseIntElementsAttr::get(axesType, llvm::ArrayRef(axesVec));
+    axesOperand =
+        rewriter.create<mlir::arith::ConstantOp>(loc, axesType, axesAttr);
+  }
+
+  // Extract keepdims attribute (defaults to 1 in ONNX)
+  int64_t keepdims = 1;
+  if (auto keepdimsAttr = op->getAttrOfType<mlir::IntegerAttr>("keepdims")) {
+    keepdims = keepdimsAttr.getSInt();
+  }
+
+  // Create hip.reduce_sum operation
+  auto keepdimsAttr = rewriter.getI64IntegerAttr(keepdims);
+  auto hipOp =
+      mlir::hip::ReduceSumOp::create(rewriter, loc, resultType, context, data,
+                                     axesOperand, init, keepdimsAttr);
+
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
 /// onnx.Conv -> hip.conv
 struct ConvToHip : public mlir::RewritePattern {
   ConvToHip(mlir::MLIRContext *ctx)
@@ -611,6 +795,10 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   patterns.add<TransposeToHip>(ctx);
   patterns.add<MulToHip>(ctx);
   patterns.add<SoftmaxToHip>(ctx);
+  patterns.add<SigmoidToHip>(ctx);
+  patterns.add<SubToHip>(ctx);
+  patterns.add<CastToHip>(ctx);
+  patterns.add<ReduceSumToHip>(ctx);
   patterns.add<ConvToHip>(ctx);
 
   mlir::GreedyRewriteConfig config;
