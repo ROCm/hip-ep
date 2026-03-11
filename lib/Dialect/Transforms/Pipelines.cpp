@@ -66,6 +66,11 @@ void mlir::hip::buildOnnxToHipPipeline(
 
   // 9. Resolve extern constants → memref.view into constants blob argument
   pm.addPass(createResolveExternConstantsPass());
+
+  // 10. Final cleanup: LowerAllocs and ResolveExternConstants both introduce
+  //     new constants and ops that benefit from deduplication and hoisting.
+  pm.addPass(createCSEPass());
+  pm.addPass(createCanonicalizerPass());
 }
 
 void mlir::hip::buildHipToLLVMPipeline(OpPassManager &pm) {

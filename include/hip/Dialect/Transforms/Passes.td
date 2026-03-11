@@ -116,11 +116,15 @@ def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
     are bucketed by their byte-size SSA value: non-overlapping lifetimes within
     a bucket share an offset.
 
-    Sub-buffer offsets are aligned to 256 bytes by default.
+    Sub-buffer offsets are aligned to 256 bytes by default (configurable).
 
     Recommended pipeline position:
       hip-optimize-memrefs (optional) -> hip-pool-allocs -> hip-lower-allocs
   }];
+  let options = [
+    Option<"alignment", "alignment", "int64_t", /*default=*/"256",
+           "Sub-buffer byte offset alignment (must be power of 2)">
+  ];
   let dependentDialects = [
     "mlir::arith::ArithDialect",
     "mlir::memref::MemRefDialect"
