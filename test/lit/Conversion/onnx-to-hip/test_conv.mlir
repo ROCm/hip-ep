@@ -24,6 +24,11 @@
 // RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
 
 module {
+  // Dummy entry point required by generateModuleMetadata.
+  func.func @main_graph(%arg0: tensor<1x3x224x224xf32>) -> tensor<1x3x224x224xf32> {
+    return %arg0 : tensor<1x3x224x224xf32>
+  }
+
   // --------------------------------------------------------------------------
   // 1. Basic conv with bias
   // --------------------------------------------------------------------------
