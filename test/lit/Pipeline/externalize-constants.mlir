@@ -21,7 +21,7 @@
 // CHECK: memref.global "private" @hip_ext_constant_0 : memref<2x4xf32>
 // CHECK-SAME: hip.external_data = {offset = 0 : i64, size = 32 : i64}
 
-// CHECK-LABEL: func.func @test_externalize
+// CHECK-LABEL: func.func @main_graph
 //   Small constant stays inline (2 elements < threshold 4).
 // CHECK-DAG:   arith.constant dense<[1.000000e+00, 2.000000e+00]> : tensor<2xf32>
 //   Splat constant stays inline despite 16 elements >= threshold.
@@ -32,7 +32,7 @@
 // CHECK:       return
 
 module {
-  func.func @test_externalize() -> (tensor<2xf32>, tensor<4x4xf32>, tensor<2x4xf32>) {
+  func.func @main_graph() -> (tensor<2xf32>, tensor<4x4xf32>, tensor<2x4xf32>) {
     // Small: 2 elements (below threshold of 4).
     %small = "onnx.Constant"() {value = dense<[1.0, 2.0]> : tensor<2xf32>} : () -> tensor<2xf32>
     // Splat: 16 elements (above threshold) but splat -- stays inline.
