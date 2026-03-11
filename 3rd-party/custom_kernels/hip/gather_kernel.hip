@@ -4,6 +4,7 @@
  */
 
 #include "hip_custom_kernels.h"
+#include "debug_log.h"
 
 #include <hip/hip_runtime.h>
 #include <cstdint>
@@ -58,8 +59,7 @@ extern "C" int hip_gather(
   int64_t slice_size = output_num_elements;
   int64_t data_axis_size = data_num_elements / slice_size;
 
-  fprintf(stderr,
-          "[custom_kernels] hip_gather: axis=0, elem_size=%d, "
+  CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_gather: axis=0, elem_size=%d, "
           "data_num=%lld, output_num=%lld, data_axis_size=%lld, "
           "grid=%d, block=%d\n",
           element_size_bytes,

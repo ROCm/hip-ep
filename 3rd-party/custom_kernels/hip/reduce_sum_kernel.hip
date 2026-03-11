@@ -4,6 +4,7 @@
  */
 
 #include "hip_custom_kernels.h"
+#include "debug_log.h"
 
 #include <hip/hip_runtime.h>
 #include <cstdint>
@@ -76,8 +77,7 @@ extern "C" int hip_reduce_sum(
       }
       size_t shared_mem = block_size * sizeof(int64_t);
 
-      fprintf(stderr,
-              "[custom_kernels] hip_reduce_sum: dtype=INT64, "
+      CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_reduce_sum: dtype=INT64, "
               "input=%lld, output=%lld, reduce_size=%lld, "
               "grid=%lld, block=%d, smem=%zu\n",
               (long long)num_input_elements, (long long)num_output_elements,

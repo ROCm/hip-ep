@@ -4,6 +4,7 @@
  */
 
 #include "hip_custom_kernels.h"
+#include "debug_log.h"
 
 #include <hip/hip_runtime.h>
 #include <cstdint>
@@ -33,8 +34,7 @@ extern "C" int hip_cast(
   int grid_size = static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
 
   if (input_dtype == hip_DTYPE_INT64 && output_dtype == hip_DTYPE_INT32) {
-    fprintf(stderr,
-            "[custom_kernels] hip_cast: INT64->INT32, "
+    CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_cast: INT64->INT32, "
             "num_elements=%lld, grid=%d, block=%d\n",
             (long long)num_elements, grid_size, kBlockSize);
 

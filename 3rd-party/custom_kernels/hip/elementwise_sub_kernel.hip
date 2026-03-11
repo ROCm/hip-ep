@@ -4,6 +4,7 @@
  */
 
 #include "hip_custom_kernels.h"
+#include "debug_log.h"
 
 #include <hip/hip_runtime.h>
 #include <cstdint>
@@ -35,8 +36,7 @@ extern "C" int hip_elementwise_sub(
 
   switch (hip_dtype) {
     case hip_DTYPE_INT64: {
-      fprintf(stderr,
-              "[custom_kernels] hip_elementwise_sub: dtype=INT64, "
+      CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_elementwise_sub: dtype=INT64, "
               "num_elements=%lld, grid=%d, block=%d\n",
               (long long)num_elements, grid_size, kBlockSize);
 
