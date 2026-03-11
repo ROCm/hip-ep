@@ -313,6 +313,8 @@ void PoolAllocsPass::runOnOperation() {
 
   if (funcOp.empty())
     return;
+  // TODO: Generalize to multi-block functions using MLIR's Liveness analysis
+  // instead of sequential op indices.
   if (!funcOp.getBody().hasOneBlock()) {
     funcOp.emitError("hip-pool-allocs requires single-block functions; "
                      "liveness analysis uses sequential op indices that do "
