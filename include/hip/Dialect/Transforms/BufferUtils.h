@@ -24,11 +24,7 @@ namespace hip {
 /// Uses llvm::divideCeil to correctly handle sub-byte element types (e.g. i1).
 int64_t getStaticByteSize(MemRefType type);
 
-/// Compile-time alignment: rounds \p value up to the nearest multiple of
-/// \p alignment.  Requires alignment > 0.
-int64_t alignUp(int64_t value, int64_t alignment);
-
-/// Emit arith ops for: alignUp(value, alignment).
+/// Emit arith ops for: llvm::alignTo(value, alignment).
 /// Produces: ((value + alignment - 1) / alignment) * alignment.
 /// Returns \p value unchanged if alignment <= 1.
 Value emitAlignUp(OpBuilder &builder, Location loc, Value value,

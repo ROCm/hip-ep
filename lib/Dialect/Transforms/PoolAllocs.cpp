@@ -40,6 +40,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/MathExtras.h"
 
 #define DEBUG_TYPE "hip-pool-allocs"
 
@@ -110,7 +111,7 @@ packStaticAllocs(MutableArrayRef<AllocInfo> statics, int64_t alignment) {
   SmallVector<Reservation, 16> reservations; // kept sorted by offset
 
   for (AllocInfo &info : statics) {
-    int64_t size = alignUp(info.staticByteSize, alignment);
+    int64_t size = llvm::alignTo(info.staticByteSize, alignment);
     int64_t bestOffset = -1;
     int64_t bestFit = INT64_MAX;
 
@@ -120,7 +121,7 @@ packStaticAllocs(MutableArrayRef<AllocInfo> statics, int64_t alignment) {
     for (auto &res : reservations) {
       if (!lifetimesOverlap(info, *res.info))
         continue;
-      int64_t alignedOffset = alignUp(currentOffset, alignment);
+      int64_t alignedOffset = llvm::alignTo(currentOffset, alignment);
       if (alignedOffset + size <= res.offset &&
           res.offset - alignedOffset < bestFit) {
         bestOffset = alignedOffset;
@@ -131,7 +132,7 @@ packStaticAllocs(MutableArrayRef<AllocInfo> statics, int64_t alignment) {
 
     // No gap found - append after all overlapping reservations.
     if (bestOffset < 0)
-      bestOffset = alignUp(currentOffset, alignment);
+      bestOffset = llvm::alignTo(currentOffset, alignment);
 
     // Insert into the sorted reservation list.
     Reservation newRes{&info, bestOffset, size};
@@ -380,7 +381,7 @@ void PoolAllocsPass::runOnOperation() {
 
   int64_t staticPoolSize = 0;
   for (auto &[info, offset] : staticAssignments) {
-    int64_t end = offset + alignUp(info->staticByteSize, align);
+    int64_t end = offset + llvm::alignTo(info->staticByteSize, align);
     staticPoolSize = std::max(staticPoolSize, end);
   }
 
