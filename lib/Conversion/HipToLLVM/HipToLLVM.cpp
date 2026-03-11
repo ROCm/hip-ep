@@ -79,19 +79,6 @@ enum class TensorOp : int64_t {
   Mul = 2, // Multiplication: C = A * B
 };
 
-static const char *getTensorOpName(TensorOp op) {
-  switch (op) {
-  case TensorOp::Sub:
-    return "sub";
-  case TensorOp::Add:
-    return "add";
-  case TensorOp::Mul:
-    return "mul";
-  default:
-    return "unknown";
-  }
-}
-
 // Helper: extract the aligned data pointer from a converted memref descriptor,
 // casting to address space 0 if needed.
 // Uses alignedPtr (not allocatedPtr) so that memref.view offsets into a memory
@@ -860,7 +847,7 @@ struct SigmoidOpLowering : public ConvertOpToLLVMPattern<SigmoidOp> {
     Value numElements = createI64Const(1);
     MemRefDescriptor outputDesc(adaptor.getOutput());
 
-    for (unsigned dimIdx = 0; dimIdx < outputType.getRank(); ++dimIdx) {
+    for (auto dimIdx : llvm::seq<int64_t>(outputType.getRank())) {
       Value dimSize;
       if (outputType.isDynamicDim(dimIdx)) {
         // Dynamic dimension: extract from runtime descriptor
@@ -928,7 +915,7 @@ struct SubOpLowering : public ConvertOpToLLVMPattern<SubOp> {
     auto computeNumElements = [&](MemRefType type, Value descriptor) -> Value {
       Value num = createI64Const(1);
       MemRefDescriptor desc(descriptor);
-      for (unsigned dimIdx = 0; dimIdx < type.getRank(); ++dimIdx) {
+      for (auto dimIdx : llvm::seq<int64_t>(type.getRank())) {
         Value dimSize;
         if (type.isDynamicDim(dimIdx)) {
           dimSize = desc.size(rewriter, loc, dimIdx);
@@ -1033,7 +1020,7 @@ struct CastOpLowering : public ConvertOpToLLVMPattern<CastOp> {
     Value numElements = createI64Const(1);
     MemRefDescriptor outputDesc(adaptor.getOutput());
 
-    for (unsigned dimIdx = 0; dimIdx < outputType.getRank(); ++dimIdx) {
+    for (auto dimIdx : llvm::seq<int64_t>(outputType.getRank())) {
       Value dimSize;
       if (outputType.isDynamicDim(dimIdx)) {
         dimSize = outputDesc.size(rewriter, loc, dimIdx);
@@ -1116,7 +1103,7 @@ struct ReduceSumOpLowering : public ConvertOpToLLVMPattern<ReduceSumOp> {
     Value dataNumElements = createI64Const(1);
     MemRefDescriptor dataDesc(adaptor.getData());
 
-    for (unsigned dimIdx = 0; dimIdx < dataType.getRank(); ++dimIdx) {
+    for (auto dimIdx : llvm::seq<int64_t>(dataType.getRank())) {
       Value dimSize;
       if (dataType.isDynamicDim(dimIdx)) {
         dimSize = dataDesc.size(rewriter, loc, dimIdx);
@@ -1131,7 +1118,7 @@ struct ReduceSumOpLowering : public ConvertOpToLLVMPattern<ReduceSumOp> {
     Value outputNumElements = createI64Const(1);
     MemRefDescriptor outputDesc(adaptor.getOutput());
 
-    for (unsigned dimIdx = 0; dimIdx < outputType.getRank(); ++dimIdx) {
+    for (auto dimIdx : llvm::seq<int64_t>(outputType.getRank())) {
       Value dimSize;
       if (outputType.isDynamicDim(dimIdx)) {
         dimSize = outputDesc.size(rewriter, loc, dimIdx);

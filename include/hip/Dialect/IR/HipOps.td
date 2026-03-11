@@ -320,7 +320,8 @@ def Hip_SubOp : Hip_DpsOp<"sub"> {
   let description = [{
     Performs elementwise subtraction: output = lhs - rhs
 
-    Both inputs must have the same shape (broadcasting handled before lowering).
+    Both inputs must have the same shape. Broadcasting is not currently supported
+    and must be handled before conversion to HIP dialect.
 
     Uses destination-passing style: output buffer is provided as argument.
 
