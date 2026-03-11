@@ -456,8 +456,8 @@ MulToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value source = (aType.getRank() == resultType.getRank()) ? a : b;
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
 
-  auto hipOp = mlir::hip::MulOp::create(rewriter, loc, resultType,
-                                              context, a, b, init);
+  auto hipOp =
+      mlir::hip::MulOp::create(rewriter, loc, resultType, context, a, b, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }

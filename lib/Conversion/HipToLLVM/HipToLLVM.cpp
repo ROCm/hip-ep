@@ -54,7 +54,8 @@ static constexpr const char *kHipSilu = "hip_silu";
 static constexpr const char *kWrapMiopenActivationForward =
     "wrap_miopenActivationForward"; // hip.sigmoid
 static constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
-static constexpr const char *kWrapMiopenOpTensor = "wrap_miopenOpTensor"; // hip.mul
+static constexpr const char *kWrapMiopenOpTensor =
+    "wrap_miopenOpTensor"; // hip.mul
 static constexpr const char *kWrapMiopenCast = "wrap_miopenCast";
 static constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
 static constexpr const char *kHipGqa = "hip_gqa";
@@ -936,8 +937,9 @@ struct SigmoidOpLowering : public ConvertOpToLLVMPattern<SigmoidOp> {
   }
 };
 
-// hip.mul(handle, A, B, C)
-//   -> wrap_miopenOpTensor(state, A, B, C, num_elements, data_type, tensor_op=0)
+// hip.mul(handle, lhs, rhs, output)
+//   -> wrap_miopenOpTensor(state, lhs, rhs, output, num_elements, data_type,
+//   tensor_op=0)
 // Supports both static and dynamic shapes.
 struct MulOpLowering : public ConvertOpToLLVMPattern<MulOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -982,18 +984,18 @@ struct MulOpLowering : public ConvertOpToLLVMPattern<MulOp> {
       return ptr;
     };
 
-    Value statePtr = adaptor.getCtx();
-    Value aPtr = getAlignedPtr(adaptor.getA());
-    Value bPtr = getAlignedPtr(adaptor.getB());
-    Value cPtr = getAlignedPtr(adaptor.getC());
+    Value statePtr = adaptor.getHandle();
+    Value lhsPtr = getAlignedPtr(adaptor.getLhs());
+    Value rhsPtr = getAlignedPtr(adaptor.getRhs());
+    Value outputPtr = getAlignedPtr(adaptor.getOutput());
 
-    auto cType = cast<MemRefType>(op.getC().getType());
+    auto outputType = cast<MemRefType>(op.getOutput().getType());
 
     // Compute num_elements (supports dynamic shapes)
-    Value numElementsVal = computeNumElements(cType, adaptor.getC());
+    Value numElementsVal = computeNumElements(outputType, adaptor.getOutput());
 
     // Get data type enum (f32=0, f16=1, bf16=2)
-    int64_t dataType = getHipdnnDataType(cType.getElementType());
+    int64_t dataType = getHipdnnDataType(outputType.getElementType());
     if (dataType < 0)
       return rewriter.notifyMatchFailure(
           op, "unsupported element type for hip.mul");
@@ -1001,7 +1003,8 @@ struct MulOpLowering : public ConvertOpToLLVMPattern<MulOp> {
     Value dataTypeVal = createI64Const(dataType);
     Value tensorOpVal = createI64Const(0); // HIPDNN_EP_TENSOR_OP_MUL
 
-    // int wrap_miopenOpTensor(RuntimeState* state, void* A, void* B, void* C,
+    // int wrap_miopenOpTensor(RuntimeState* state, void* lhs, void* rhs, void*
+    // output,
     //     int64_t num_elements, int64_t data_type, int64_t tensor_op)
     SmallVector<Type, 7> paramTypes = {ptrType, ptrType, ptrType, ptrType,
                                        i64Type, i64Type, i64Type};
@@ -1011,8 +1014,8 @@ struct MulOpLowering : public ConvertOpToLLVMPattern<MulOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 7> args = {statePtr,  aPtr,         bPtr,
-                                  cPtr,      numElementsVal, dataTypeVal,
+    SmallVector<Value, 7> args = {statePtr,   lhsPtr,         rhsPtr,
+                                  outputPtr,  numElementsVal, dataTypeVal,
                                   tensorOpVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);

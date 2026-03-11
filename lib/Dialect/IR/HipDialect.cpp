@@ -431,28 +431,15 @@ void MiopenAddOp::print(OpAsmPrinter &p) {
 }
 
 //===----------------------------------------------------------------------===//
-// MulOp: ins(A, B), outs(C)
+// MulOp: ins(lhs, rhs), outs(output)
 //===----------------------------------------------------------------------===//
 
-MutableOperandRange MulOp::getDpsInitsMutable() { return getCMutable(); }
+MutableOperandRange MulOp::getDpsInitsMutable() { return getOutputMutable(); }
 
 void MulOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
-}
-
-LogicalResult MulOp::verify() {
-  return verifyDpsComputeOp(*this, {getA(), getB(), getC()}, /*numInits=*/1);
-}
-
-ParseResult MulOp::parse(OpAsmParser &parser, OperationState &result) {
-  return parseSingleInitDpsOp(parser, result, /*numIns=*/2);
-}
-
-void MulOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{}, {getA(), getB()},
-                       {getC()});
 }
 
 //===----------------------------------------------------------------------===//
