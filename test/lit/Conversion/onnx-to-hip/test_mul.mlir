@@ -4,10 +4,10 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify ONNX Mul (elementwise multiplication) is correctly lowered
-// to hip.miopen.mul operation in tensor-first mode.
+// to hip.mul operation in tensor-first mode.
 //
 // This test validates:
-// - Elementwise binary operation lowering (onnx.Mul → hip.miopen.mul)
+// - Elementwise binary operation lowering (onnx.Mul → hip.mul)
 // - Two-input operand handling
 // - f16 element type support
 // - 3D tensor shape preservation
@@ -27,9 +27,9 @@ module {
 
     %output = "onnx.Mul"(%lhs, %rhs) : (tensor<1x128x14336xf16>, tensor<1x128x14336xf16>) -> tensor<1x128x14336xf16>
 
-    // After conversion: tensor.empty() for init, hip.miopen.mul in tensor mode
+    // After conversion: tensor.empty() for init, hip.mul in tensor mode
     // CHECK: tensor.empty() : tensor<1x128x14336xf16>
-    // CHECK: hip.miopen.mul(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<1x128x14336xf16>, tensor<1x128x14336xf16>) outs({{.*}} : tensor<1x128x14336xf16>)
+    // CHECK: hip.mul(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<1x128x14336xf16>, tensor<1x128x14336xf16>) outs({{.*}} : tensor<1x128x14336xf16>)
     // CHECK-NOT: hip.alloc
     // CHECK-NOT: hip.copy
 

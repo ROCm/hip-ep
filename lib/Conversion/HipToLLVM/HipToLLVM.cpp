@@ -54,7 +54,7 @@ static constexpr const char *kHipSilu = "hip_silu";
 static constexpr const char *kWrapMiopenActivationForward =
     "wrap_miopenActivationForward"; // hip.sigmoid
 static constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
-static constexpr const char *kWrapMiopenOpTensor = "wrap_miopenOpTensor"; // hip.miopen.mul
+static constexpr const char *kWrapMiopenOpTensor = "wrap_miopenOpTensor"; // hip.mul
 static constexpr const char *kWrapMiopenCast = "wrap_miopenCast";
 static constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
 static constexpr const char *kHipGqa = "hip_gqa";
@@ -633,7 +633,7 @@ struct MiopenRopeOpLowering : public ConvertOpToLLVMPattern<MiopenRopeOp> {
   }
 };
 
-// hip.miopen.add / hip.miopen.mul  (element-wise binary ops)
+// hip.miopen.add / hip.mul  (element-wise binary ops)
 // Lowered call: hip_miopen_{add,mul}(handle, A_ptr, B_ptr, C_ptr, numA, numB)
 // numA/numB are computed as the product of all memref dimensions for each
 // operand.  When numB == 1 (scalar broadcast), the runtime broadcasts B
@@ -936,14 +936,14 @@ struct SigmoidOpLowering : public ConvertOpToLLVMPattern<SigmoidOp> {
   }
 };
 
-// hip.miopen.mul(handle, A, B, C)
+// hip.mul(handle, A, B, C)
 //   -> wrap_miopenOpTensor(state, A, B, C, num_elements, data_type, tensor_op=0)
 // Supports both static and dynamic shapes.
-struct MulOpLowering : public ConvertOpToLLVMPattern<MiopenMulOp> {
+struct MulOpLowering : public ConvertOpToLLVMPattern<MulOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
-  matchAndRewrite(MiopenMulOp op, OpAdaptor adaptor,
+  matchAndRewrite(MulOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
@@ -996,7 +996,7 @@ struct MulOpLowering : public ConvertOpToLLVMPattern<MiopenMulOp> {
     int64_t dataType = getHipdnnDataType(cType.getElementType());
     if (dataType < 0)
       return rewriter.notifyMatchFailure(
-          op, "unsupported element type for hip.miopen.mul");
+          op, "unsupported element type for hip.mul");
 
     Value dataTypeVal = createI64Const(dataType);
     Value tensorOpVal = createI64Const(0); // HIPDNN_EP_TENSOR_OP_MUL
