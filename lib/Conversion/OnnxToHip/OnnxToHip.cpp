@@ -662,17 +662,13 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
     keepdims = keepdimsAttr.getSInt();
   }
 
-  // Build operands and attributes for hip.reduce_sum
-  llvm::SmallVector<mlir::Value> operands = {context, data, axesOperand, init};
-  llvm::SmallVector<mlir::NamedAttribute> attrs;
-  attrs.push_back(
-      rewriter.getNamedAttr("keepdims", rewriter.getI64IntegerAttr(keepdims)));
-
   // Create hip.reduce_sum operation
-  auto hipOp = rewriter.create<mlir::hip::ReduceSumOp>(
-      loc, mlir::TypeRange{resultType}, operands, attrs);
+  auto keepdimsAttr = rewriter.getI64IntegerAttr(keepdims);
+  auto hipOp = mlir::hip::ReduceSumOp::create(rewriter, loc, resultType, context,
+                                               data, axesOperand, init,
+                                               keepdimsAttr);
 
-  rewriter.replaceOp(op, hipOp.getResult(0));
+  rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
 
