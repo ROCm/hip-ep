@@ -24,11 +24,6 @@ int64_t mlir::hip::getStaticByteSize(MemRefType type) {
   return static_cast<int64_t>(llvm::divideCeil(totalBits, 8));
 }
 
-int64_t mlir::hip::alignUp(int64_t value, int64_t alignment) {
-  assert(alignment > 0 && "alignment must be positive");
-  return (value + alignment - 1) / alignment * alignment;
-}
-
 Value mlir::hip::emitAlignUp(OpBuilder &builder, Location loc, Value value,
                              int64_t alignment) {
   if (alignment <= 1)
