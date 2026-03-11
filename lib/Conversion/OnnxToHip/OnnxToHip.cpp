@@ -784,6 +784,71 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
+/// onnx.Custom(SimplifiedLayerNormalization) -> hip.rms_norm
+struct SimplifiedLayerNormToHip : public mlir::RewritePattern {
+  SimplifiedLayerNormToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult SimplifiedLayerNormToHip::matchAndRewrite(
+    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
+  // Check if this is SimplifiedLayerNormalization
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr ||
+      funcNameAttr.getValue() != "SimplifiedLayerNormalization")
+    return mlir::failure();
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+
+  // Check operands (should be 2: input and scale)
+  if (op->getNumOperands() != 2)
+    return rewriter.notifyMatchFailure(
+        op, "expected 2 operands for SimplifiedLayerNormalization");
+
+  mlir::Value input = op->getOperand(0);
+  mlir::Value scale = op->getOperand(1);
+
+  // Extract attributes
+  auto epsilonAttr = op->getAttrOfType<mlir::FloatAttr>("epsilon");
+  if (!epsilonAttr)
+    return rewriter.notifyMatchFailure(op, "missing epsilon attribute");
+
+  auto axisAttr = op->getAttrOfType<mlir::IntegerAttr>("axis");
+  if (!axisAttr)
+    return rewriter.notifyMatchFailure(op, "missing axis attribute");
+
+  auto stashTypeAttr = op->getAttrOfType<mlir::IntegerAttr>("stash_type");
+  if (!stashTypeAttr)
+    return rewriter.notifyMatchFailure(op, "missing stash_type attribute");
+
+  // Convert axis to i64
+  auto axisI64Attr = rewriter.getI64IntegerAttr(axisAttr.getSInt());
+  auto stashTypeI64Attr = rewriter.getI64IntegerAttr(stashTypeAttr.getSInt());
+
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+
+  // Create init tensor
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+
+  // Create hip.rms_norm operation
+  auto hipOp = mlir::hip::RmsNormOp::create(rewriter, loc, resultType, context,
+                                            input, scale, init, axisI64Attr,
+                                            epsilonAttr, stashTypeI64Attr);
+
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
 //===----------------------------------------------------------------------===//
 // convertComputeOps implementation
 //===----------------------------------------------------------------------===//
@@ -800,6 +865,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   patterns.add<CastToHip>(ctx);
   patterns.add<ReduceSumToHip>(ctx);
   patterns.add<ConvToHip>(ctx);
+  patterns.add<SimplifiedLayerNormToHip>(ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
