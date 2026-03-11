@@ -21,6 +21,11 @@
 // RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
 
 module {
+  // Dummy entry point required by generateModuleMetadata.
+  func.func @main_graph(%arg0: tensor<1x128xi64>) -> tensor<1x128xi64> {
+    return %arg0 : tensor<1x128xi64>
+  }
+
   // keepdims = 1: reduced dim is kept as size 1
   func.func @test_reduce_sum_keepdims(%data: tensor<1x128xi64>, %axes: tensor<i64>) -> tensor<1x1xi64> {
     // After conversion: context prepended, tensors remain tensors, tensor return

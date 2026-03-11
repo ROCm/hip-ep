@@ -20,6 +20,11 @@
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 
 module {
+  // Dummy entry point required by generateModuleMetadata.
+  func.func @main_graph(%arg0: tensor<4xf32>) -> tensor<4xf32> {
+    return %arg0 : tensor<4xf32>
+  }
+
   func.func @cast_i64_to_i32(%input: tensor<4xi64>) -> tensor<4xi32> {
     %output = "onnx.Cast"(%input) {to = i32} : (tensor<4xi64>) -> tensor<4xi32>
     return %output : tensor<4xi32>
