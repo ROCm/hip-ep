@@ -57,22 +57,21 @@ def Hip_AllocOp : Hip_Op<"alloc",
 
 def Hip_GetPoolOp : Hip_Op<"get_pool",
     [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
-  let summary = \"Get the runtime-owned GPU memory pool\";
+  let summary = "Get the runtime-owned GPU memory pool (grow-on-demand)";
   let description = [{
-    Returns a reference to the pre-allocated GPU memory pool managed by the
-    runtime. The pool is allocated once during inference_init via
-    hipdnn_ep_pool_init() and its size is determined by the hipdnn.pool_size
-    module attribute set by the hip-pool-allocs pass.
+    Returns a reference to the runtime-managed GPU memory pool.  The runtime
+    guarantees that the returned buffer is at least %pool_size bytes.  If the
+    current pool is smaller, the runtime grows it (realloc) transparently.
 
     Example:
     ```mlir
-    %pool = hip.get_pool(%ctx) : memref<?xi8>
+    %pool = hip.get_pool(%ctx, %size) : memref<?xi8>
     ```
   }];
 
-  let arguments = (ins Hip_ContextType:$ctx);
+  let arguments = (ins Hip_ContextType:$ctx, Index:$pool_size);
   let results = (outs AnyMemRef:$pool);
-  let assemblyFormat = \"`(` $ctx `)` attr-dict `:` type($pool)\";
+  let assemblyFormat = "`(` $ctx `,` $pool_size `)` attr-dict `:` type($pool)";
 }
 
 def Hip_FreeOp : Hip_Op<"free",
