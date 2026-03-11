@@ -166,14 +166,45 @@ def Hip_HipblasltMatmulOp : Hip_DpsOp<"hipblaslt.matmul"> {
 
 // ===== MIOpen ops ============================================================
 
-def Hip_MiopenRmsNormOp : Hip_DpsOp<"miopen.rms_norm"> {
-  let summary = "RMS normalization via miopenT5LayerNormForward";
+def Hip_RmsNormOp : Hip_DpsOp<"rms_norm"> {
+  let summary = "RMS (Root Mean Square) layer normalization";
+  let description = [{
+    Applies RMS layer normalization (also known as SimplifiedLayerNormalization).
+
+    Formula: output = input / sqrt(mean(input^2) + epsilon) * scale
+
+    This is a simplified variant of layer normalization without mean subtraction
+    or bias term, commonly used in LLaMA and T5 models.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.rms_norm(%ctx)
+        ins(%input, %scale : memref<1x128x4096xf16, 1>, memref<4096xf16, 1>)
+        outs(%output : memref<1x128x4096xf16, 1>)
+        {axis = -1 : i64, epsilon = 9.99999974e-06 : f32, stash_type = 1 : i64}
+    ```
+
+    Supports dynamic shapes:
+    ```mlir
+    hip.rms_norm(%ctx)
+        ins(%input, %scale : memref<?x?xf16, 1>, memref<?xf16, 1>)
+        outs(%output : memref<?x?xf16, 1>)
+        {axis = -1 : i64, epsilon = 1.0e-05 : f32, stash_type = 1 : i64}
+    ```
+  }];
+
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$input,
-    Hip_TensorOrMemRef:$weight,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$scale,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$axis,
+    F32Attr:$epsilon,
+    I64Attr:$stash_type
   );
+
   // result_tensors inherited from Hip_DpsOp
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;

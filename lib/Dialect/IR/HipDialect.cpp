@@ -304,32 +304,32 @@ void HipblasltMatmulOp::print(OpAsmPrinter &p) {
 }
 
 //===----------------------------------------------------------------------===//
-// MiopenRmsNormOp: ins(input, weight), outs(output)
+// RmsNormOp: ins(input, scale), outs(output)
 //===----------------------------------------------------------------------===//
 
-MutableOperandRange MiopenRmsNormOp::getDpsInitsMutable() {
+MutableOperandRange RmsNormOp::getDpsInitsMutable() {
   return getOutputMutable();
 }
 
-void MiopenRmsNormOp::getEffects(
+void RmsNormOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-LogicalResult MiopenRmsNormOp::verify() {
-  return verifyDpsComputeOp(*this, {getInput(), getWeight(), getOutput()},
+LogicalResult RmsNormOp::verify() {
+  return verifyDpsComputeOp(*this, {getInput(), getScale(), getOutput()},
                             /*numInits=*/1);
 }
 
-ParseResult MiopenRmsNormOp::parse(OpAsmParser &parser,
+ParseResult RmsNormOp::parse(OpAsmParser &parser,
                                    OperationState &result) {
   return parseSingleInitDpsOp(parser, result, /*numIns=*/2);
 }
 
-void MiopenRmsNormOp::print(OpAsmPrinter &p) {
+void RmsNormOp::print(OpAsmPrinter &p) {
   printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{},
-                       {getInput(), getWeight()}, {getOutput()});
+                       {getInput(), getScale()}, {getOutput()});
 }
 
 //===----------------------------------------------------------------------===//
