@@ -322,16 +322,6 @@ LogicalResult RmsNormOp::verify() {
                             /*numInits=*/1);
 }
 
-ParseResult RmsNormOp::parse(OpAsmParser &parser,
-                                   OperationState &result) {
-  return parseSingleInitDpsOp(parser, result, /*numIns=*/2);
-}
-
-void RmsNormOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{},
-                       {getInput(), getScale()}, {getOutput()});
-}
-
 //===----------------------------------------------------------------------===//
 // MiopenSkipRmsNormOp: ins(x, skip, weight), outs(output, residual)
 //===----------------------------------------------------------------------===//

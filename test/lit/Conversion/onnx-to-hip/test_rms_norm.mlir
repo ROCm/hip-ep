@@ -6,6 +6,7 @@ module {
       -> tensor<1x128x4096xf16> {
     %output = "onnx.Custom"(%input, %scale) {
       function_name = "SimplifiedLayerNormalization",
+      domain_name = "com.microsoft",
       epsilon = 9.99999974E-6 : f32,
       axis = -1 : si64,
       stash_type = 1 : si64

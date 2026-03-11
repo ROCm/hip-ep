@@ -802,6 +802,11 @@ mlir::LogicalResult SimplifiedLayerNormToHip::matchAndRewrite(
       funcNameAttr.getValue() != "SimplifiedLayerNormalization")
     return mlir::failure();
 
+  // Check domain is "com.microsoft"
+  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+    return mlir::failure();
+
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return mlir::failure();
