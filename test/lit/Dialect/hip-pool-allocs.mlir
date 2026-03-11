@@ -7,6 +7,10 @@
 
 // RUN: hip-mlir-opt --hip-pool-allocs %s | FileCheck %s
 // RUN: hip-mlir-opt --hip-pool-allocs='alignment=64' %s | FileCheck %s --check-prefix=ALIGN64
+// RUN: not hip-mlir-opt --hip-pool-allocs='alignment=0' %s 2>&1 | FileCheck %s --check-prefix=BAD-ALIGN
+// RUN: not hip-mlir-opt --hip-pool-allocs='alignment=3' %s 2>&1 | FileCheck %s --check-prefix=BAD-ALIGN
+// RUN: not hip-mlir-opt --hip-pool-allocs='alignment=-1' %s 2>&1 | FileCheck %s --check-prefix=BAD-ALIGN
+// BAD-ALIGN: alignment must be a positive power of 2
 
 // ===== Static pooling: two non-overlapping f32 allocs =====
 //

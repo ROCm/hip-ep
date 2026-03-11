@@ -110,3 +110,53 @@ func.func @caller_preserves_result(%a: memref<4x4xf32>) -> memref<4x4xf32> {
   %res = func.call @callee_with_result(%a) : (memref<4x4xf32>) -> memref<4x4xf32>
   return %res : memref<4x4xf32>
 }
+
+// ===== Mixed: pre-existing-context callee + caller that both already have context =====
+//
+// When a callee already has !hip.context, the pass skips it in Phase 1.
+// Callers that already have !hip.context are also skipped.  The call site
+// is already valid (correct arity and types) and must not be rewritten.
+//
+// Note: a caller *without* !hip.context cannot call a callee that expects
+// !hip.context (no way to produce the value), so the "mixed pre-existing
+// callee + non-context caller" scenario is impossible with valid input IR.
+//
+// CHECK-LABEL: func.func @preexisting_callee
+// CHECK-SAME:    (%arg0: !hip.context, %arg1: memref<8x8xf32>)
+// CHECK-NOT:     !hip.context, !hip.context
+// CHECK:         return
+
+// CHECK-LABEL: func.func @preexisting_caller
+// CHECK-SAME:    (%[[CTX5:.*]]: !hip.context, %[[A5:.*]]: memref<8x8xf32>)
+// CHECK:         call @preexisting_callee(%[[CTX5]], %[[A5]])
+// CHECK:         return
+func.func @preexisting_callee(%ctx: !hip.context, %a: memref<8x8xf32>) -> memref<8x8xf32> {
+  return %a : memref<8x8xf32>
+}
+
+func.func @preexisting_caller(%ctx: !hip.context, %a: memref<8x8xf32>) -> memref<8x8xf32> {
+  %res = func.call @preexisting_callee(%ctx, %a) : (!hip.context, memref<8x8xf32>) -> memref<8x8xf32>
+  return %res : memref<8x8xf32>
+}
+
+// ===== Coexistence: pre-existing-context func alongside updated func =====
+//
+// @standalone_preexisting already has !hip.context and is not called by anyone.
+// @standalone_needs_update does not.  After the pass, both have context and
+// the pre-existing function is completely untouched.
+//
+// CHECK-LABEL: func.func @standalone_preexisting
+// CHECK-SAME:    (%arg0: !hip.context, %arg1: memref<4x4xf32>)
+// CHECK-NOT:     !hip.context, !hip.context
+// CHECK:         return
+
+// CHECK-LABEL: func.func @standalone_needs_update
+// CHECK-SAME:    (%arg0: !hip.context, %arg1: memref<4x4xf32>)
+// CHECK:         return
+func.func @standalone_preexisting(%ctx: !hip.context, %a: memref<4x4xf32>) -> memref<4x4xf32> {
+  return %a : memref<4x4xf32>
+}
+
+func.func @standalone_needs_update(%a: memref<4x4xf32>) -> memref<4x4xf32> {
+  return %a : memref<4x4xf32>
+}
