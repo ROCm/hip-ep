@@ -442,6 +442,19 @@ void MulOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult MulOp::verify() {
+  return verifyDpsComputeOp(*this, {getLhs(), getRhs(), getOutput()}, /*numInits=*/1);
+}
+
+ParseResult MulOp::parse(OpAsmParser &parser, OperationState &result) {
+  return parseSingleInitDpsOp(parser, result, /*numIns=*/2);
+}
+
+void MulOp::print(OpAsmPrinter &p) {
+  printSingleInitDpsOp(p, *this, getHandle(), /*scalarArgs=*/{}, {getLhs(), getRhs()},
+                       {getOutput()});
+}
+
 //===----------------------------------------------------------------------===//
 // MiopenSoftmaxOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
