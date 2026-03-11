@@ -26,8 +26,10 @@
 
 #define DEBUG_TYPE "hip-add-context-arg"
 
-STATISTIC(NumFuncsUpdated, "Number of functions given !hip.context argument");
-STATISTIC(NumCallsUpdated, "Number of call sites updated with !hip.context");
+STATISTIC(NumFuncsUpdated,
+          "Number of functions given !hip.context argument");
+STATISTIC(NumCallsUpdated,
+          "Number of call sites updated with !hip.context");
 
 namespace mlir {
 namespace hip {
@@ -72,10 +74,15 @@ struct HipAddContextArgPass
 
     for (func::CallOp callOp : callsToUpdate) {
       auto callerFunc = callOp->getParentOfType<func::FuncOp>();
-      if (!callerFunc || callerFunc.getArguments().empty() ||
+      if (!callerFunc) {
+        callOp.emitError("call op is not inside a func.func");
+        return signalPassFailure();
+      }
+      if (callerFunc.getArguments().empty() ||
           !isa<ContextType>(callerFunc.getArgument(0).getType())) {
         callOp.emitError("caller @")
-            << callerFunc.getName() << " does not have !hip.context as arg 0";
+            << callerFunc.getName()
+            << " does not have !hip.context as arg 0";
         return signalPassFailure();
       }
 
@@ -84,9 +91,9 @@ struct HipAddContextArgPass
       newOperands.append(callOp.getOperands().begin(),
                          callOp.getOperands().end());
       OpBuilder builder(callOp);
-      auto newCall =
-          func::CallOp::create(builder, callOp.getLoc(), callOp.getCallee(),
-                               callOp.getResultTypes(), newOperands);
+      auto newCall = func::CallOp::create(
+          builder, callOp.getLoc(), callOp.getCallee(),
+          callOp.getResultTypes(), newOperands);
       callOp.replaceAllUsesWith(newCall.getResults());
       callOp.erase();
       ++NumCallsUpdated;
