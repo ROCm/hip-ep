@@ -323,35 +323,24 @@ LogicalResult RmsNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
-// MiopenSkipRmsNormOp: ins(x, skip, weight), outs(output, residual)
+// SkipRmsNormOp: ins(x, skip, scale), outs(output, residual)
 //===----------------------------------------------------------------------===//
 
-MutableOperandRange MiopenSkipRmsNormOp::getDpsInitsMutable() {
-  // output and residual are operands #4 and #5 (0=ctx,1=x,2=skip,3=weight)
+MutableOperandRange SkipRmsNormOp::getDpsInitsMutable() {
+  // output and residual are operands #4 and #5 (0=ctx,1=x,2=skip,3=scale)
   return MutableOperandRange(*this, /*start=*/4, /*length=*/2);
 }
 
-void MiopenSkipRmsNormOp::getEffects(
+void SkipRmsNormOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-LogicalResult MiopenSkipRmsNormOp::verify() {
+LogicalResult SkipRmsNormOp::verify() {
   return verifyDpsComputeOp(
-      *this, {getX(), getSkip(), getWeight(), getOutput(), getResidual()},
+      *this, {getX(), getSkip(), getScale(), getOutput(), getResidual()},
       /*numInits=*/2);
-}
-
-ParseResult MiopenSkipRmsNormOp::parse(OpAsmParser &parser,
-                                       OperationState &result) {
-  return parseSingleInitDpsOp(parser, result, /*numIns=*/3);
-}
-
-void MiopenSkipRmsNormOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{},
-                       {getX(), getSkip(), getWeight()},
-                       {getOutput(), getResidual()});
 }
 
 //===----------------------------------------------------------------------===//

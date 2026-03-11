@@ -43,7 +43,8 @@ static constexpr const char *kMiopenConvolutionForward =
 static constexpr const char *kHipblasltMatmul = "hip_hipblaslt_matmul";
 static constexpr const char *kWrapMiopenT5LayerNormForward =
     "wrap_miopenT5LayerNormForward";
-static constexpr const char *kMiopenSkipRmsNorm = "hip_miopen_skip_rms_norm";
+static constexpr const char *kWrapMiopenAddT5LayerNormForward =
+    "wrap_miopenAddT5LayerNormForward";
 static constexpr const char *kMiopenRope = "hip_miopen_rope";
 static constexpr const char *kMiopenAdd = "hip_miopen_add";
 static constexpr const char *kMiopenMul = "hip_miopen_mul";
@@ -556,32 +557,84 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
   }
 };
 
-// hip.miopen.skip_rms_norm(handle, x, skip, weight, output, residual)
-struct MiopenSkipRmsNormOpLowering
-    : public ConvertOpToLLVMPattern<MiopenSkipRmsNormOp> {
+// hip.skip_rms_norm lowering with dynamic shape support
+struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
-  matchAndRewrite(MiopenSkipRmsNormOp op, OpAdaptor adaptor,
+  matchAndRewrite(SkipRmsNormOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
-    Type voidType = getVoidType();
     Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    Type f32Type = rewriter.getF32Type();
 
-    SmallVector<Type> paramTypes(6, ptrType);
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kMiopenSkipRmsNorm, paramTypes, voidType);
+    auto getAlignedPtr = [&](Value memrefDesc) -> Value {
+      MemRefDescriptor desc(memrefDesc);
+      Value ptr = desc.alignedPtr(rewriter, loc);
+      if (cast<LLVM::LLVMPointerType>(ptr.getType()).getAddressSpace() != 0)
+        ptr = rewriter.create<LLVM::AddrSpaceCastOp>(loc, ptrType, ptr);
+      return ptr;
+    };
+
+    auto createI64Const = [&](int64_t value) -> Value {
+      return rewriter.create<LLVM::ConstantOp>(
+          loc, i64Type, rewriter.getI64IntegerAttr(value));
+    };
+
+    auto computeNumElements = [&](MemRefType type, Value descriptor) -> Value {
+      MemRefDescriptor desc(descriptor);
+      Value num = createI64Const(1);
+      for (auto dimIdx : llvm::seq<int64_t>(type.getRank())) {
+        Value dimSize = type.isDynamicDim(dimIdx)
+                            ? desc.size(rewriter, loc, dimIdx)
+                            : createI64Const(type.getDimSize(dimIdx));
+        num = LLVM::MulOp::create(rewriter, loc, num, dimSize);
+      }
+      return num;
+    };
+
+    // Extract pointers
+    Value statePtr = adaptor.getCtx();
+    Value xPtr = getAlignedPtr(adaptor.getX());
+    Value skipPtr = getAlignedPtr(adaptor.getSkip());
+    Value scalePtr = getAlignedPtr(adaptor.getScale());
+    Value outputPtr = getAlignedPtr(adaptor.getOutput());
+    Value residualPtr = getAlignedPtr(adaptor.getResidual());
+
+    // Compute num_elements for x, skip, and scale
+    auto xType = cast<MemRefType>(op.getX().getType());
+    Value xNumElements = computeNumElements(xType, adaptor.getX());
+
+    auto skipType = cast<MemRefType>(op.getSkip().getType());
+    Value skipNumElements = computeNumElements(skipType, adaptor.getSkip());
+
+    auto scaleType = cast<MemRefType>(op.getScale().getType());
+    Value scaleNumElements = computeNumElements(scaleType, adaptor.getScale());
+
+    // Extract attributes
+    Value axisVal = createI64Const(op.getAxis());
+    Value epsilonVal =
+        rewriter.create<LLVM::ConstantOp>(loc, f32Type, op.getEpsilonAttr());
+    Value stashTypeVal = createI64Const(op.getStashType());
+
+    // Runtime function signature (12 params)
+    SmallVector<Type> paramTypes = {
+        ptrType, ptrType, ptrType, ptrType, ptrType, ptrType, // state, x, skip, scale, output, residual
+        i64Type, i64Type, i64Type,              // x_num, skip_num, scale_num
+        i64Type, f32Type, i64Type               // axis, epsilon, stash_type
+    };
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kWrapMiopenAddT5LayerNormForward,
+                               paramTypes, rewriter.getI32Type());
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {
-        adaptor.getCtx(),
-        extractMemRefPtr(adaptor.getX(), rewriter, loc),
-        extractMemRefPtr(adaptor.getSkip(), rewriter, loc),
-        extractMemRefPtr(adaptor.getWeight(), rewriter, loc),
-        extractMemRefPtr(adaptor.getOutput(), rewriter, loc),
-        extractMemRefPtr(adaptor.getResidual(), rewriter, loc)};
+    SmallVector<Value> args = {statePtr, xPtr, skipPtr, scalePtr, outputPtr, residualPtr,
+                               xNumElements, skipNumElements, scaleNumElements,
+                               axisVal, epsilonVal, stashTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -1332,7 +1385,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   patterns
       .add<AllocOpLowering, FreeOpLowering, MiopenGraphOpLowering,
            HipblasltGraphOpLowering, ConvOpLowering, HipblasltMatmulOpLowering,
-           RmsNormOpLowering, MiopenSkipRmsNormOpLowering, MiopenRopeOpLowering,
+           RmsNormOpLowering, SkipRmsNormOpLowering, MiopenRopeOpLowering,
            MiopenSoftmaxOpLowering, TransposeOpLowering, GatherOpLowering,
            SiluOpLowering, SigmoidOpLowering, SubOpLowering, CastOpLowering,
            ReduceSumOpLowering, GqaOpLowering>(typeConverter);
