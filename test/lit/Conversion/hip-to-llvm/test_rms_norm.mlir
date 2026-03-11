@@ -1,3 +1,24 @@
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+
+// ============================================================================
+// TEST PURPOSE:
+// Verify hip.rms_norm operation is correctly lowered to LLVM dialect with
+// runtime calls to wrap_miopenT5LayerNormForward function.
+//
+// This test validates:
+// - Static shape lowering: constants for dimensions
+// - Dynamic shape lowering: runtime extraction from memref descriptors
+// - Element type support: f32, f16
+// - Tensor rank support: 1D, 2D, 3D
+// - Num elements computation: product of all dimensions
+// - Attribute lowering: axis, epsilon, stash_type passed to runtime
+// - Runtime function signature: 9 parameters
+//   (context, input, scale, output, input_num, scale_num, axis, epsilon, stash_type)
+//
+// Model: Llama-3.1-8B RMS layer normalization
+// ============================================================================
+
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
 
 // ===== Static shape tests =====
