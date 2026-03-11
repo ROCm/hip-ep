@@ -242,16 +242,32 @@ def Hip_MiopenAddOp : Hip_DpsOp<"miopen.add"> {
 }
 
 def Hip_MulOp : Hip_DpsOp<"mul"> {
-  let summary = "Element-wise multiply via miopenOpTensor(miopenTensorOpMul)";
+  let summary = "Elementwise multiplication";
+  let description = [{
+    Performs elementwise multiplication: output = lhs * rhs
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.mul(%handle) ins(%lhs, %rhs : memref<1x128x14336xf16, 1>,
+                                      memref<1x128x14336xf16, 1>)
+                     outs(%output : memref<1x128x14336xf16, 1>)
+    ```
+  }];
+
   let arguments = (ins
-    Hip_ContextType:$ctx,
-    Hip_TensorOrMemRef:$A,
-    Hip_TensorOrMemRef:$B,
-    Hip_TensorOrMemRef:$C
+    Hip_ContextType:$handle,
+    Hip_TensorOrMemRef:$lhs,
+    Hip_TensorOrMemRef:$rhs,
+    Hip_TensorOrMemRef:$output
   );
-  // result_tensors inherited from Hip_DpsOp
-  let hasCustomAssemblyFormat = 1;
-  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $handle `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
 }
 
 def Hip_MiopenSoftmaxOp : Hip_DpsOp<"miopen.softmax"> {
