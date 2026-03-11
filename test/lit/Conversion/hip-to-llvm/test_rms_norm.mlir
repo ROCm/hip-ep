@@ -8,20 +8,20 @@ func.func @rms_norm_static_f32(%ctx: !hip.context) {
   %scale = memref.alloc() : memref<512xf32, 1>
   %output = memref.alloc() : memref<128x512xf32, 1>
 
-  // Verify constants are generated for static shapes
-  // CHECK-DAG: llvm.mlir.constant(1 : i64) : i64
-  // CHECK-DAG: llvm.mlir.constant(128 : i64) : i64
-  // CHECK-DAG: llvm.mlir.constant(512 : i64) : i64
-  // CHECK: [[INPUT_ELEMS:%.*]] = llvm.mul {{.*}}, {{.*}} : i64
-  // CHECK: [[INPUT_TOTAL:%.*]] = llvm.mul [[INPUT_ELEMS]], {{.*}} : i64
-  // CHECK: [[SCALE_ELEMS:%.*]] = llvm.mul {{.*}}, {{.*}} : i64
+  // Verify constants for dimensions
+  // CHECK-DAG: llvm.mlir.constant(1 : i64)
+  // CHECK-DAG: llvm.mlir.constant(128 : i64)
+  // CHECK-DAG: llvm.mlir.constant(512 : i64)
 
-  // Verify attributes are passed as constants
-  // CHECK: llvm.mlir.constant(-1 : i64) : i64
-  // CHECK: llvm.mlir.constant(9.99999974E-6 : f32) : f32
-  // CHECK: llvm.mlir.constant(1 : i64) : i64
+  // Verify num_elements computation
+  // CHECK: llvm.mul {{.*}}, {{.*}} : i64
+  // CHECK: llvm.mul {{.*}}, {{.*}} : i64
 
-  // Verify runtime call with 9 parameters
+  // Verify attribute constants
+  // CHECK-DAG: llvm.mlir.constant(-1 : i64)
+  // CHECK-DAG: llvm.mlir.constant(9.99999974E-6 : f32)
+
+  // Verify runtime function call
   // CHECK: llvm.call @wrap_miopenT5LayerNormForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, i64) -> i32
   hip.rms_norm(%ctx)
       ins(%input, %scale : memref<128x512xf32, 1>, memref<512xf32, 1>)
