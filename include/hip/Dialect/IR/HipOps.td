@@ -288,6 +288,124 @@ def Hip_SiluOp : Hip_DpsOp<"silu"> {
   let hasVerifier = 1;
 }
 
+def Hip_SigmoidOp : Hip_DpsOp<"sigmoid"> {
+  let summary = "Sigmoid activation";
+  let description = [{
+    Applies sigmoid activation: output = 1 / (1 + exp(-input))
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.sigmoid(%ctx) ins(%input : memref<1x128x512xf32, 1>)
+                      outs(%output : memref<1x128x512xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_SubOp : Hip_DpsOp<"sub"> {
+  let summary = "Elementwise subtraction";
+  let description = [{
+    Performs elementwise subtraction: output = lhs - rhs
+
+    Both inputs must have the same shape. Broadcasting is not currently supported
+    and must be handled before conversion to HIP dialect.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.sub(%ctx) ins(%lhs, %rhs : memref<1x1xi64, 1>, memref<1x1xi64, 1>)
+                  outs(%output : memref<1x1xi64, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,
+    Hip_TensorOrMemRef:$rhs,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_CastOp : Hip_DpsOp<"cast"> {
+  let summary = "Type conversion operation";
+  let description = [{
+    Converts input tensor from one data type to another.
+
+    Input and output may have different element types but the same shape.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.cast(%ctx) ins(%input : memref<128x256xf32, 1>)
+                   outs(%output : memref<128x256xf16, 1>) {to = 10 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$to
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_ReduceSumOp : Hip_DpsOp<"reduce_sum"> {
+  let summary = "Reduce tensor by summing along axes";
+  let description = [{
+    Computes the sum of input tensor elements along the specified axes.
+    Implements the ONNX ReduceSum operator (opset 13+).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.reduce_sum(%ctx) ins(%data, %axes : memref<1x128xi64, 1>, memref<i64, 1>)
+                         outs(%output : memref<1x1xi64, 1>) {keepdims = 1 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$axes,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$keepdims
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $axes `:` type($data) `,` type($axes) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_GqaOp : Hip_DpsOp<"gqa"> {
   let summary = "Grouped query attention";
   let arguments = (ins

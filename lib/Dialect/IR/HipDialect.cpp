@@ -557,6 +557,60 @@ void SiluOp::print(OpAsmPrinter &p) {
 }
 
 //===----------------------------------------------------------------------===//
+// SigmoidOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SigmoidOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void SigmoidOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(*this, {getInput()}, getOutputMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// SubOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SubOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void SubOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(*this, {getLhs(), getRhs()}, getOutputMutable(),
+                       effects);
+}
+
+//===----------------------------------------------------------------------===//
+// CastOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange CastOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void CastOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(*this, {getInput()}, getOutputMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ReduceSumOp: ins(data, axes), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ReduceSumOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ReduceSumOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(*this, {getData(), getAxes()}, getOutputMutable(),
+                       effects);
+}
+
+//===----------------------------------------------------------------------===//
 // GqaOp: ins(q, k, v), outs(kv_cache, output)
 // Extra scalars: layer, start_pos, seq_len
 //===----------------------------------------------------------------------===//
