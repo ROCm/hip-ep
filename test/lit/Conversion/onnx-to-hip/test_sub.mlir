@@ -20,6 +20,11 @@
 // RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
 
 module {
+  // Dummy entry point required by generateModuleMetadata.
+  func.func @main_graph(%arg0: tensor<1x1xi64>) -> tensor<1x1xi64> {
+    return %arg0 : tensor<1x1xi64>
+  }
+
   func.func @test_sub(%lhs: tensor<1x1xi64>, %rhs: tensor<1x1xi64>) -> tensor<1x1xi64> {
     // After conversion: context prepended, tensors remain tensors, tensor return
     // CHECK-LABEL: func.func @test_sub
