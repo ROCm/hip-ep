@@ -664,9 +664,9 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
 
   // Create hip.reduce_sum operation
   auto keepdimsAttr = rewriter.getI64IntegerAttr(keepdims);
-  auto hipOp = mlir::hip::ReduceSumOp::create(rewriter, loc, resultType, context,
-                                               data, axesOperand, init,
-                                               keepdimsAttr);
+  auto hipOp =
+      mlir::hip::ReduceSumOp::create(rewriter, loc, resultType, context, data,
+                                     axesOperand, init, keepdimsAttr);
 
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
