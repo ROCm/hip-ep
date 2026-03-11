@@ -176,13 +176,11 @@ void OptimizeMemRefsPass::runOnOperation() {
     if (result.use_empty())
       continue;
 
-    unsigned lastUse =
-        findLastAliasedUseIndex(result, aliasAnalysis, block, opIndex,
-                                blockSize);
+    unsigned lastUse = findLastAliasedUseIndex(result, aliasAnalysis, block,
+                                               opIndex, blockSize);
     intervals.push_back({allocOp, opIndex[&op], lastUse});
-    LLVM_DEBUG(llvm::dbgs()
-               << "  interval " << allocOp << " [" << opIndex[&op]
-               << ", " << lastUse << "]\n");
+    LLVM_DEBUG(llvm::dbgs() << "  interval " << allocOp << " [" << opIndex[&op]
+                            << ", " << lastUse << "]\n");
   }
 
   if (intervals.size() < 2)
@@ -230,8 +228,7 @@ void OptimizeMemRefsPass::runOnOperation() {
       bestSlot->lastUseIndex = interval.lastUseIndex;
       ++NumAllocsReused;
     } else {
-      LLVM_DEBUG(llvm::dbgs()
-                 << "  New slot for " << neededType << "\n");
+      LLVM_DEBUG(llvm::dbgs() << "  New slot for " << neededType << "\n");
       slots.push_back({interval.allocOp.getResult(), neededType,
                        interval.lastUseIndex,
                        SmallVector<Value, 4>(neededDynSizes.begin(),

@@ -41,10 +41,8 @@
 
 #define DEBUG_TYPE "hip-resolve-extern-constants"
 
-STATISTIC(NumGlobalsResolved,
-          "Number of extern globals resolved to views");
-STATISTIC(NumFuncsUpdated,
-          "Number of functions receiving constants argument");
+STATISTIC(NumGlobalsResolved, "Number of extern globals resolved to views");
+STATISTIC(NumFuncsUpdated, "Number of functions receiving constants argument");
 
 namespace mlir {
 namespace hip {
@@ -202,7 +200,8 @@ void ResolveExternConstantsPass::runOnOperation() {
     });
 
     for (auto getGlobalOp : getGlobalOps) {
-      ExternGlobalInfo &info = externGlobals[globalsByName[getGlobalOp.getName()]];
+      ExternGlobalInfo &info =
+          externGlobals[globalsByName[getGlobalOp.getName()]];
       OpBuilder builder(getGlobalOp);
       Location loc = getGlobalOp.getLoc();
 
