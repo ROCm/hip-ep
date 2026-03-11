@@ -206,7 +206,11 @@ def Hip_RmsNormOp : Hip_DpsOp<"rms_norm"> {
   );
 
   // result_tensors inherited from Hip_DpsOp
-  let hasCustomAssemblyFormat = 1;
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $scale `:` type($input) `,` type($scale) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
   let hasVerifier = 1;
 }
 

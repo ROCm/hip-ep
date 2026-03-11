@@ -41,7 +41,8 @@ static constexpr const char *kHipFree = "hip_device_free";
 static constexpr const char *kMiopenConvolutionForward =
     "wrap_miopenConvolutionForward";
 static constexpr const char *kHipblasltMatmul = "hip_hipblaslt_matmul";
-static constexpr const char *kMiopenRmsNorm = "hip_miopen_rms_norm";
+static constexpr const char *kWrapMiopenT5LayerNormForward =
+    "wrap_miopenT5LayerNormForward";
 static constexpr const char *kMiopenSkipRmsNorm = "hip_miopen_skip_rms_norm";
 static constexpr const char *kMiopenRope = "hip_miopen_rope";
 static constexpr const char *kMiopenAdd = "hip_miopen_add";
@@ -539,8 +540,6 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
         i64Type, f32Type, i64Type // axis, epsilon, stash_type
     };
 
-    static constexpr const char *kWrapMiopenT5LayerNormForward =
-        "wrap_miopenT5LayerNormForward";
     FailureOr<LLVM::LLVMFuncOp> funcOp =
         LLVM::lookupOrCreateFn(rewriter, module, kWrapMiopenT5LayerNormForward,
                                paramTypes, rewriter.getI32Type());
