@@ -263,11 +263,9 @@ def Hip_MulOp : Hip_DpsOp<"mul"> {
     Hip_TensorOrMemRef:$output
   );
 
-  let assemblyFormat = [{
-    `(` $handle `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
-    `outs` `(` $output `:` type($output) `)`
-    attr-dict (`:` type($result_tensors)^)?
-  }];
+  // result_tensors inherited from Hip_DpsOp
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
 def Hip_MiopenSoftmaxOp : Hip_DpsOp<"miopen.softmax"> {
