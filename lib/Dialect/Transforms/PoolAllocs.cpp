@@ -171,8 +171,8 @@ packStaticAllocs(MutableArrayRef<AllocInfo> statics, int64_t alignment) {
 /// Within a bucket, each "bin" holds allocs with non-overlapping lifetimes
 /// that can share a single offset at runtime.
 struct DynBucket {
-  Value byteSizeValue;  ///< SSA value for the unaligned byte size
-  Value alignedSize;    ///< SSA value for the aligned byte size (cached)
+  Value byteSizeValue; ///< SSA value for the unaligned byte size
+  Value alignedSize;   ///< SSA value for the aligned byte size (cached)
   SmallVector<SmallVector<AllocInfo *>>
       bins; ///< bins of non-overlapping allocs
 };
@@ -343,14 +343,12 @@ void PoolAllocsPass::runOnOperation() {
     AllocInfo info;
     info.allocOp = allocOp;
     info.defIndex = opIndex[&op];
-    info.lastUseIndex =
-        findLastAliasedUseIndex(result, aliasAnalysis, block, opIndex,
-                                blockSize);
+    info.lastUseIndex = findLastAliasedUseIndex(result, aliasAnalysis, block,
+                                                opIndex, blockSize);
     info.staticByteSize = getStaticByteSize(allocOp.getType());
-    LLVM_DEBUG(llvm::dbgs()
-               << "  alloc " << allocOp << " ["
-               << info.defIndex << ", " << info.lastUseIndex << "] "
-               << info.staticByteSize << " bytes\n");
+    LLVM_DEBUG(llvm::dbgs() << "  alloc " << allocOp << " [" << info.defIndex
+                            << ", " << info.lastUseIndex << "] "
+                            << info.staticByteSize << " bytes\n");
     allInfos.push_back(info);
   }
 
@@ -422,10 +420,9 @@ void PoolAllocsPass::runOnOperation() {
       return;
   }
 
-  LLVM_DEBUG(llvm::dbgs()
-             << "Pool: static=" << staticPoolSize << " bytes, "
-             << dynBuckets.size() << " dynamic buckets, "
-             << allInfos.size() << " total allocs\n");
+  LLVM_DEBUG(llvm::dbgs() << "Pool: static=" << staticPoolSize << " bytes, "
+                          << dynBuckets.size() << " dynamic buckets, "
+                          << allInfos.size() << " total allocs\n");
 
   // 5b. Create the single pool allocation.
   Value pool;
@@ -459,8 +456,8 @@ void PoolAllocsPass::runOnOperation() {
             builder, loc, static_cast<int64_t>(binIdx));
         Value binContrib = builder.createOrFold<arith::MulIOp>(
             loc, bucket.alignedSize, binIdxVal);
-        Value binOffset = builder.createOrFold<arith::AddIOp>(
-            loc, currentBase, binContrib);
+        Value binOffset =
+            builder.createOrFold<arith::AddIOp>(loc, currentBase, binContrib);
         for (AllocInfo *info : bin)
           allocToOffset[info->allocOp.getOperation()] = binOffset;
       }
@@ -470,8 +467,8 @@ void PoolAllocsPass::runOnOperation() {
           builder, loc, static_cast<int64_t>(bucket.bins.size()));
       Value bucketTotal = builder.createOrFold<arith::MulIOp>(
           loc, bucket.alignedSize, numBinsVal);
-      currentBase = builder.createOrFold<arith::AddIOp>(
-          loc, currentBase, bucketTotal);
+      currentBase =
+          builder.createOrFold<arith::AddIOp>(loc, currentBase, bucketTotal);
     }
   }
 
@@ -526,7 +523,7 @@ void PoolAllocsPass::runOnOperation() {
   for (int64_t off : staticOffsets)
     offsetAttrs.push_back(builder.getI64IntegerAttr(off));
   funcOp->setAttr("hipdnn.buffer_offsets",
-                   ArrayAttr::get(mlirCtx, offsetAttrs));
+                  ArrayAttr::get(mlirCtx, offsetAttrs));
 }
 
 } // namespace
