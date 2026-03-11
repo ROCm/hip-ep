@@ -96,19 +96,24 @@ __global__ void attention_kernel(
     int64_t head_dim,
     float scale,
     float softcap,
-    int64_t kv_bnsd) {
+    int64_t kv_bnsd,
+    int64_t q_offset,
+    int64_t q_count) {
 
-  // Each thread handles one (batch, head, query_pos) tuple
+  // Each thread handles one (batch, head, query_pos) tuple.
+  // q_offset/q_count enable chunked launches to avoid TDR timeout
+  // on long sequences: each launch processes a subset of query positions.
   int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-  int64_t total = batch_size * num_heads * seq_len_q;
+  int64_t total = batch_size * num_heads * q_count;
 
   if (idx >= total)
     return;
 
-  int64_t q_pos = idx % seq_len_q;
-  int64_t remaining = idx / seq_len_q;
+  int64_t local_q = idx % q_count;
+  int64_t remaining = idx / q_count;
   int64_t head = remaining % num_heads;
   int64_t b = remaining / num_heads;
+  int64_t q_pos = local_q + q_offset;
 
   int64_t heads_per_kv = num_heads / kv_num_heads;
   int64_t kv_head = head / heads_per_kv;
@@ -125,75 +130,56 @@ __global__ void attention_kernel(
   int64_t kv_base_bnsd = (b * kv_num_heads + kv_head) * seq_len_kv * head_dim;
   int64_t kv_base_bsd = b * seq_len_kv * kv_hidden;
 
-  // Step 1: Compute Q @ K^T scores and find max for numerical stability
-  float max_score = -FLT_MAX;
-  for (int64_t kv_pos = 0; kv_pos < seq_len_kv; kv_pos++) {
-    const T* k_row = kv_bnsd
-        ? key + kv_base_bnsd + kv_pos * head_dim
-        : key + kv_base_bsd + kv_pos * kv_hidden + kv_head * head_dim;
-    float dot = 0.0f;
-    for (int64_t d = 0; d < head_dim; d++) {
-      dot += (float)q_row[d] * (float)k_row[d];
-    }
-    dot *= scale;
-
-    if (softcap > 0.0f) {
-      dot = softcap * tanhf(dot / softcap);
-    }
-
-    if (dot > max_score)
-      max_score = dot;
-  }
-
-  // Step 2: Compute softmax denominator
-  float sum_exp = 0.0f;
-  for (int64_t kv_pos = 0; kv_pos < seq_len_kv; kv_pos++) {
-    const T* k_row = kv_bnsd
-        ? key + kv_base_bnsd + kv_pos * head_dim
-        : key + kv_base_bsd + kv_pos * kv_hidden + kv_head * head_dim;
-    float dot = 0.0f;
-    for (int64_t d = 0; d < head_dim; d++) {
-      dot += (float)q_row[d] * (float)k_row[d];
-    }
-    dot *= scale;
-
-    if (softcap > 0.0f) {
-      dot = softcap * tanhf(dot / softcap);
-    }
-
-    sum_exp += expf(dot - max_score);
-  }
-
-  float inv_sum = 1.0f / (sum_exp + 1e-8f);
-
-  // Step 3: Compute weighted sum of values
   T* out_row = output + b * seq_len_q * q_hidden +
                q_pos * q_hidden + head * head_dim;
 
-  for (int64_t d = 0; d < head_dim; d++) {
-    float acc = 0.0f;
-    for (int64_t kv_pos = 0; kv_pos < seq_len_kv; kv_pos++) {
-      const T* k_row = kv_bnsd
-          ? key + kv_base_bnsd + kv_pos * head_dim
-          : key + kv_base_bsd + kv_pos * kv_hidden + kv_head * head_dim;
-      float dot = 0.0f;
-      for (int64_t dd = 0; dd < head_dim; dd++) {
-        dot += (float)q_row[dd] * (float)k_row[dd];
-      }
-      dot *= scale;
+  // Online softmax + weighted value accumulation in a single pass.
+  // Reads K and V once, avoiding 3 redundant passes over global memory.
+  // Algorithm: maintain running (max_score, sum_exp, acc[d]) and rescale
+  // the partial accumulator whenever a new max is encountered.
+  float max_score = -FLT_MAX;
+  float sum_exp = 0.0f;
+  float acc[256]; // head_dim <= 256 for all supported models
+  for (int64_t d = 0; d < head_dim; d++)
+    acc[d] = 0.0f;
 
-      if (softcap > 0.0f) {
-        dot = softcap * tanhf(dot / softcap);
-      }
+  for (int64_t kv_pos = 0; kv_pos < seq_len_kv; kv_pos++) {
+    const T* k_row = kv_bnsd
+        ? key + kv_base_bnsd + kv_pos * head_dim
+        : key + kv_base_bsd + kv_pos * kv_hidden + kv_head * head_dim;
 
-      float weight = expf(dot - max_score) * inv_sum;
-      const T* v_row = kv_bnsd
-          ? value + kv_base_bnsd + kv_pos * head_dim
-          : value + kv_base_bsd + kv_pos * kv_hidden + kv_head * head_dim;
-      acc += weight * (float)v_row[d];
+    float dot = 0.0f;
+    for (int64_t d = 0; d < head_dim; d++)
+      dot += (float)q_row[d] * (float)k_row[d];
+    dot *= scale;
+
+    if (softcap > 0.0f)
+      dot = softcap * tanhf(dot / softcap);
+
+    // Online softmax: if new score exceeds running max, rescale the
+    // existing accumulator and denominator by exp(old_max - new_max).
+    if (dot > max_score) {
+      float correction = expf(max_score - dot);
+      sum_exp *= correction;
+      for (int64_t d = 0; d < head_dim; d++)
+        acc[d] *= correction;
+      max_score = dot;
     }
-    out_row[d] = (T)acc;
+
+    float exp_val = expf(dot - max_score);
+    sum_exp += exp_val;
+
+    const T* v_row = kv_bnsd
+        ? value + kv_base_bnsd + kv_pos * head_dim
+        : value + kv_base_bsd + kv_pos * kv_hidden + kv_head * head_dim;
+    for (int64_t d = 0; d < head_dim; d++)
+      acc[d] += exp_val * (float)v_row[d];
   }
+
+  // Normalize by softmax denominator
+  float inv_sum = 1.0f / (sum_exp + 1e-8f);
+  for (int64_t d = 0; d < head_dim; d++)
+    out_row[d] = (T)(acc[d] * inv_sum);
 }
 
 // =============================================================================
@@ -329,6 +315,37 @@ static int gqa_forward_typed(
   int64_t att_seq_kv = present_key ? seq_len_kv : seq_len_q;
   int64_t kv_bnsd = present_key ? 1 : 0;
 
+  // Launch attention kernel in chunks of query positions to avoid
+  // Windows TDR timeout on long sequences. The threshold is calibrated
+  // so each chunk stays well under the 2-second TDR limit.
+  // Each query position's attention is independent, so chunking is exact.
+  auto launch_attention_chunked = [&](
+      const T* q_ptr, const T* k_ptr, const T* v_ptr, T* out_ptr,
+      int64_t att_seq_len_kv, int64_t use_kv_bnsd) {
+    constexpr int64_t kMaxWorkPerLaunch = 1024LL * 1024 * 128;
+    int64_t work_per_q = att_seq_len_kv * head_dim;
+    int64_t chunk_q = (work_per_q > 0)
+        ? (kMaxWorkPerLaunch / work_per_q)
+        : seq_len_q;
+    if (chunk_q < 1) chunk_q = 1;
+    if (chunk_q > seq_len_q) chunk_q = seq_len_q;
+
+    for (int64_t q_start = 0; q_start < seq_len_q; q_start += chunk_q) {
+      int64_t q_cnt = (q_start + chunk_q <= seq_len_q)
+          ? chunk_q : (seq_len_q - q_start);
+      int64_t total_threads = batch_size * num_heads * q_cnt;
+      int grid = (int)((total_threads + block_size - 1) / block_size);
+
+      hipLaunchKernelGGL(attention_kernel<T>,
+          dim3(grid), dim3(block_size), 0, stream,
+          q_ptr, k_ptr, v_ptr, out_ptr,
+          batch_size, seq_len_q, att_seq_len_kv,
+          num_heads, kv_num_heads, head_dim,
+          scale, softcap, use_kv_bnsd,
+          q_start, q_cnt);
+    }
+  };
+
   // Step 2: Optional RoPE on query and key
   if (do_rotary && cos_cache && sin_cache) {
     int64_t q_hidden = num_heads * head_dim;
@@ -366,36 +383,23 @@ static int gqa_forward_typed(
 
     // Attention using RoPE'd query (stored in output) and present KV
     {
-      int64_t total_heads = batch_size * num_heads * seq_len_q;
-      int grid = (int)((total_heads + block_size - 1) / block_size);
-
       T* q_rotated = nullptr;
-      hipMalloc(&q_rotated, batch_size * seq_len_q * q_hidden * sizeof(T));
+      int64_t q_hidden2 = num_heads * head_dim;
+      hipMalloc(&q_rotated, batch_size * seq_len_q * q_hidden2 * sizeof(T));
       hipMemcpyAsync(q_rotated, output,
-                     batch_size * seq_len_q * q_hidden * sizeof(T),
+                     batch_size * seq_len_q * q_hidden2 * sizeof(T),
                      hipMemcpyDeviceToDevice, stream);
 
-      hipLaunchKernelGGL(attention_kernel<T>,
-          dim3(grid), dim3(block_size), 0, stream,
-          q_rotated, att_key, att_value, output,
-          batch_size, seq_len_q, att_seq_kv,
-          num_heads, kv_num_heads, head_dim,
-          scale, softcap, kv_bnsd);
+      launch_attention_chunked(q_rotated, att_key, att_value, output,
+                               att_seq_kv, kv_bnsd);
 
       hipStreamSynchronize(stream);
       hipFree(q_rotated);
     }
   } else {
     // Attention without RoPE
-    int64_t total_heads = batch_size * num_heads * seq_len_q;
-    int grid = (int)((total_heads + block_size - 1) / block_size);
-
-    hipLaunchKernelGGL(attention_kernel<T>,
-        dim3(grid), dim3(block_size), 0, stream,
-        query, att_key, att_value, output,
-        batch_size, seq_len_q, att_seq_kv,
-        num_heads, kv_num_heads, head_dim,
-        scale, softcap, kv_bnsd);
+    launch_attention_chunked(query, att_key, att_value, output,
+                             att_seq_kv, kv_bnsd);
   }
 
   hipError_t err = hipGetLastError();
