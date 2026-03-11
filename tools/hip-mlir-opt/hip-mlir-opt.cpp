@@ -110,8 +110,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::MiopenRopeOp>>(*ctx);
     mlir::hip::MiopenAddOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::MiopenAddOp>>(*ctx);
-    mlir::hip::MiopenMulOp::attachInterface<
-        HipDstBufferizableModel<mlir::hip::MiopenMulOp>>(*ctx);
+    mlir::hip::MulOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::MulOp>>(*ctx);
     mlir::hip::MiopenSoftmaxOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::MiopenSoftmaxOp>>(*ctx);
     mlir::hip::TransposeOp::attachInterface<

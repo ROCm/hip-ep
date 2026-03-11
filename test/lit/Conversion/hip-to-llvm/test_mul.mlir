@@ -7,7 +7,7 @@
 // to wrap_miopenOpTensor runtime function with both static and dynamic shapes.
 //
 // This test validates:
-// - hip.miopen.mul → llvm.call @wrap_miopenOpTensor
+// - hip.mul → llvm.call @wrap_miopenOpTensor
 // - Type conversion: !hip.context → !llvm.ptr
 // - Static shapes: num_elements computed at compile time
 // - Dynamic shapes: num_elements computed at runtime via llvm.mul of dims
@@ -30,7 +30,7 @@ module {
       %c: memref<128x512xf32, 1>) {
     // CHECK-LABEL: llvm.func @mul_static_f32_test
 
-    hip.miopen.mul(%ctx) ins(%a, %b : memref<128x512xf32, 1>, memref<128x512xf32, 1>)
+    hip.mul(%ctx) ins(%a, %b : memref<128x512xf32, 1>, memref<128x512xf32, 1>)
                          outs(%c : memref<128x512xf32, 1>)
 
     // CHECK: llvm.mlir.constant(128 : i64)
@@ -50,7 +50,7 @@ module {
       %c: memref<1024xf16, 1>) {
     // CHECK-LABEL: llvm.func @mul_static_f16_test
 
-    hip.miopen.mul(%ctx) ins(%a, %b : memref<1024xf16, 1>, memref<1024xf16, 1>)
+    hip.mul(%ctx) ins(%a, %b : memref<1024xf16, 1>, memref<1024xf16, 1>)
                          outs(%c : memref<1024xf16, 1>)
 
     // CHECK: llvm.mlir.constant(1024 : i64)
@@ -68,7 +68,7 @@ module {
       %c: memref<2x64x128xf32, 1>) {
     // CHECK-LABEL: llvm.func @mul_3d_test
 
-    hip.miopen.mul(%ctx) ins(%a, %b : memref<2x64x128xf32, 1>, memref<2x64x128xf32, 1>)
+    hip.mul(%ctx) ins(%a, %b : memref<2x64x128xf32, 1>, memref<2x64x128xf32, 1>)
                          outs(%c : memref<2x64x128xf32, 1>)
 
     // CHECK: llvm.mlir.constant(2 : i64)
@@ -90,7 +90,7 @@ module {
       %c: memref<?x512xf32, 1>) {
     // CHECK-LABEL: llvm.func @mul_dynamic_test
 
-    hip.miopen.mul(%ctx) ins(%a, %b : memref<?x512xf32, 1>, memref<?x512xf32, 1>)
+    hip.mul(%ctx) ins(%a, %b : memref<?x512xf32, 1>, memref<?x512xf32, 1>)
                          outs(%c : memref<?x512xf32, 1>)
 
     // CHECK: llvm.extractvalue {{.*}}[3, 0]
@@ -110,7 +110,7 @@ module {
       %c: memref<?x?xf16, 1>) {
     // CHECK-LABEL: llvm.func @mul_fully_dynamic_test
 
-    hip.miopen.mul(%ctx) ins(%a, %b : memref<?x?xf16, 1>, memref<?x?xf16, 1>)
+    hip.mul(%ctx) ins(%a, %b : memref<?x?xf16, 1>, memref<?x?xf16, 1>)
                          outs(%c : memref<?x?xf16, 1>)
 
     // CHECK: llvm.extractvalue {{.*}}[3, 0]

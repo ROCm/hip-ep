@@ -241,7 +241,7 @@ def Hip_MiopenAddOp : Hip_DpsOp<"miopen.add"> {
   let hasVerifier = 1;
 }
 
-def Hip_MiopenMulOp : Hip_DpsOp<"miopen.mul"> {
+def Hip_MulOp : Hip_DpsOp<"mul"> {
   let summary = "Element-wise multiply via miopenOpTensor(miopenTensorOpMul)";
   let arguments = (ins
     Hip_ContextType:$ctx,
