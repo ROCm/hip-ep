@@ -4,6 +4,7 @@
  */
 
 #include "udna_custom_kernels.h"
+#include "debug_log.h"
 
 #include <hip/hip_runtime.h>
 #include <cstdint>
@@ -35,8 +36,7 @@ extern "C" int udna_elementwise_sub(
 
   switch (udna_dtype) {
     case UDNA_DTYPE_INT64: {
-      fprintf(stderr,
-              "[custom_kernels] udna_elementwise_sub: dtype=INT64, "
+      CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] udna_elementwise_sub: dtype=INT64, "
               "num_elements=%lld, grid=%d, block=%d\n",
               (long long)num_elements, grid_size, kBlockSize);
 
