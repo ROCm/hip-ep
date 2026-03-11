@@ -404,6 +404,8 @@ void PoolAllocsPass::runOnOperation() {
   bool hasDynamic = !dynBuckets.empty();
 
   // 5a. Compute total pool size as an SSA value.
+  // Uses createOrFold so that trivial ops (addi(x,0), muli(x,1)) are
+  // folded away automatically by the arith dialect's fold methods.
   if (!hasDynamic && staticPoolSize == 0)
     return;
 
@@ -453,6 +455,7 @@ void PoolAllocsPass::runOnOperation() {
 
     for (auto &bucket : dynBuckets) {
       for (auto [binIdx, bin] : llvm::enumerate(bucket.bins)) {
+        // offset = currentBase + binIdx * alignedBucketSize
         Value binIdxVal = arith::ConstantIndexOp::create(
             builder, loc, static_cast<int64_t>(binIdx));
         Value binContrib = builder.createOrFold<arith::MulIOp>(
@@ -463,6 +466,7 @@ void PoolAllocsPass::runOnOperation() {
           allocToOffset[info->allocOp.getOperation()] = binOffset;
       }
 
+      // Advance base past this entire bucket.
       Value numBinsVal = arith::ConstantIndexOp::create(
           builder, loc, static_cast<int64_t>(bucket.bins.size()));
       Value bucketTotal = builder.createOrFold<arith::MulIOp>(
