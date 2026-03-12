@@ -36,6 +36,14 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 
+#include "llvm/ADT/Statistic.h"
+#include "llvm/Support/Debug.h"
+
+#define DEBUG_TYPE "hip-resolve-extern-constants"
+
+STATISTIC(NumGlobalsResolved, "Number of extern globals resolved to views");
+STATISTIC(NumFuncsUpdated, "Number of functions receiving constants argument");
+
 namespace mlir {
 namespace hip {
 
@@ -58,8 +66,7 @@ void ResolveExternConstantsPass::runOnOperation() {
     int64_t offset;
     int64_t size;
   };
-  llvm::SmallVector<ExternGlobalInfo> externGlobals;
-  llvm::DenseMap<StringRef, ExternGlobalInfo *> globalsByName;
+  SmallVector<ExternGlobalInfo> externGlobals;
 
   for (auto globalOp : module.getOps<memref::GlobalOp>()) {
     auto extDataAttr =
@@ -78,14 +85,16 @@ void ResolveExternConstantsPass::runOnOperation() {
   if (externGlobals.empty())
     return;
 
-  for (auto &info : externGlobals)
-    globalsByName[info.globalOp.getSymName()] = &info;
+  // Index-based lookup avoids storing pointers into the SmallVector.
+  DenseMap<StringRef, size_t> globalsByName;
+  for (auto [idx, info] : llvm::enumerate(externGlobals))
+    globalsByName[info.globalOp.getSymName()] = idx;
 
   auto i8Type = IntegerType::get(module.getContext(), 8);
   auto constantsType = MemRefType::get({ShapedType::kDynamic}, i8Type);
 
   // Phase 1: Identify functions that directly use externalized globals.
-  llvm::DenseSet<func::FuncOp> needsConstantsArg;
+  DenseSet<func::FuncOp> needsConstantsArg;
   for (auto funcOp : module.getOps<func::FuncOp>()) {
     if (funcOp.isDeclaration())
       continue;
@@ -97,7 +106,6 @@ void ResolveExternConstantsPass::runOnOperation() {
 
   // Phase 2: Propagate transitively -- any function that calls a function
   // needing %_constants must also receive it so it can pass it through.
-  // Fixed-point iteration handles arbitrary call depth.
   bool changed = true;
   while (changed) {
     changed = false;
@@ -116,7 +124,7 @@ void ResolveExternConstantsPass::runOnOperation() {
 
   // Phase 3: Add %_constants : memref<?xi8> argument to every function
   // that needs it (both direct users and transitive callers).
-  llvm::DenseMap<func::FuncOp, Value> constantsArgMap;
+  DenseMap<func::FuncOp, Value> constantsArgMap;
   for (auto funcOp : module.getOps<func::FuncOp>()) {
     if (!needsConstantsArg.contains(funcOp))
       continue;
@@ -127,38 +135,44 @@ void ResolveExternConstantsPass::runOnOperation() {
     constantsArgMap[funcOp] = constantsArg;
 
     auto oldFuncType = funcOp.getFunctionType();
-    llvm::SmallVector<Type> newInputTypes(oldFuncType.getInputs());
+    SmallVector<Type> newInputTypes(oldFuncType.getInputs());
     newInputTypes.push_back(constantsType);
     funcOp.setFunctionType(FunctionType::get(module.getContext(), newInputTypes,
                                              oldFuncType.getResults()));
 
     if (auto allArgAttrs = funcOp.getAllArgAttrs()) {
-      llvm::SmallVector<Attribute> newArgAttrs(allArgAttrs.begin(),
-                                               allArgAttrs.end());
+      SmallVector<Attribute> newArgAttrs(allArgAttrs.begin(),
+                                         allArgAttrs.end());
       newArgAttrs.push_back(DictionaryAttr::get(module.getContext()));
       funcOp.setAllArgAttrs(newArgAttrs);
     }
+
+    ++NumFuncsUpdated;
+    LLVM_DEBUG(llvm::dbgs()
+               << "  Added %_constants arg to @" << funcOp.getName() << "\n");
   }
 
-  // Phase 4: Rewrite func.call sites -- append the caller's %_constants
-  // to every call targeting a function whose signature was extended.
+  // Phase 4: Rewrite func.call sites -- collect first, then modify.
   for (auto funcOp : module.getOps<func::FuncOp>()) {
     if (funcOp.isDeclaration())
       continue;
+
+    SmallVector<func::CallOp> callsToUpdate;
     funcOp.walk([&](func::CallOp callOp) {
       auto callee = module.lookupSymbol<func::FuncOp>(callOp.getCallee());
-      if (!callee || !needsConstantsArg.contains(callee))
-        return;
+      if (callee && needsConstantsArg.contains(callee))
+        callsToUpdate.push_back(callOp);
+    });
 
+    for (func::CallOp callOp : callsToUpdate) {
       auto it = constantsArgMap.find(funcOp);
       if (it == constantsArgMap.end()) {
         callOp.emitError("caller does not have %_constants but callee ")
-            << callee.getName() << " requires it";
-        signalPassFailure();
-        return;
+            << callOp.getCallee() << " requires it";
+        return signalPassFailure();
       }
 
-      llvm::SmallVector<Value> newOperands(callOp.getOperands());
+      SmallVector<Value> newOperands(callOp.getOperands());
       newOperands.push_back(it->second);
       OpBuilder builder(callOp);
       auto newCall =
@@ -166,11 +180,10 @@ void ResolveExternConstantsPass::runOnOperation() {
                                callOp.getResultTypes(), newOperands);
       callOp.replaceAllUsesWith(newCall.getResults());
       callOp.erase();
-    });
+    }
   }
 
-  // Phase 5: Replace memref.get_global with memref.view into the buffer
-  // (only in functions that directly use externalized globals).
+  // Phase 5: Replace memref.get_global with memref.view into the buffer.
   for (auto funcOp : module.getOps<func::FuncOp>()) {
     if (funcOp.isDeclaration())
       continue;
@@ -180,25 +193,27 @@ void ResolveExternConstantsPass::runOnOperation() {
       continue;
     Value constantsArg = it->second;
 
-    llvm::SmallVector<memref::GetGlobalOp> getGlobalOps;
+    SmallVector<memref::GetGlobalOp> getGlobalOps;
     funcOp.walk([&](memref::GetGlobalOp op) {
       if (globalsByName.contains(op.getName()))
         getGlobalOps.push_back(op);
     });
 
     for (auto getGlobalOp : getGlobalOps) {
-      ExternGlobalInfo *info = globalsByName[getGlobalOp.getName()];
+      ExternGlobalInfo &info =
+          externGlobals[globalsByName[getGlobalOp.getName()]];
       OpBuilder builder(getGlobalOp);
       Location loc = getGlobalOp.getLoc();
 
       Value offset = arith::ConstantOp::create(
-          builder, loc, builder.getIndexAttr(info->offset));
+          builder, loc, builder.getIndexAttr(info.offset));
       auto viewOp = memref::ViewOp::create(builder, loc, getGlobalOp.getType(),
                                            constantsArg, offset,
                                            /*sizes=*/ValueRange{});
 
       getGlobalOp.replaceAllUsesWith(viewOp.getResult());
       getGlobalOp.erase();
+      ++NumGlobalsResolved;
     }
   }
 

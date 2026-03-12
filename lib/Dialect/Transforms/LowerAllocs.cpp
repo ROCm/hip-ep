@@ -8,15 +8,31 @@
 // inserts hip.free for buffers not returned from the function.  Bridges
 // one-shot-bufferize output to HIP-specific lowering.
 //
+// Alias-aware free placement uses BufferViewFlowAnalysis to transitively
+// follow view-like ops so that hip.free is placed after all consumers of
+// any derived view, preventing use-after-free.
+//
 //===----------------------------------------------------------------------===//
 
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/Transforms/BufferUtils.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Transforms/BufferViewFlowOpInterfaceImpl.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
+
+#include "llvm/ADT/Statistic.h"
+#include "llvm/Support/Debug.h"
+
+#define DEBUG_TYPE "hip-lower-allocs"
+
+STATISTIC(NumAllocsLowered, "Number of memref.alloc lowered to hip.alloc");
+STATISTIC(NumFreesInserted, "Number of hip.free ops inserted");
+STATISTIC(NumDeallocsConverted,
+          "Number of memref.dealloc converted to hip.free");
 
 namespace mlir {
 namespace hip {
@@ -25,14 +41,6 @@ namespace hip {
 #include "hip/Dialect/Transforms/Passes.h.inc"
 
 namespace {
-
-/// Return true if \p op creates a memref alias (view) of one of its inputs
-/// without allocating new memory.  Uses the MLIR ViewLikeOpInterface so that
-/// any future view-like ops are automatically covered.  arith::SelectOp is
-/// included because its result may alias either memref operand.
-static bool isMemRefAlias(Operation *op) {
-  return isa<ViewLikeOpInterface, arith::SelectOp>(op);
-}
 
 /// Walk \p val back through view-like alias ops and return the root
 /// hip::AllocOp if the chain originates from one, or nullptr otherwise.
@@ -48,40 +56,13 @@ static AllocOp traceToHipAlloc(Value val) {
   return nullptr;
 }
 
-/// Find the last user of \p rootValue, walking transitively through
-/// view-like (aliasing) ops.  Without this, hip.free can be placed after
-/// a memref.view but before consumers of the view -- a use-after-free.
-///
-/// Users in nested regions (e.g. scf.for body) are resolved to their
-/// ancestor in the entry block so that isBeforeInBlock remains valid.
-static Operation *findLastTransitiveUser(Value rootValue, Block &entryBlock) {
-  Operation *lastUser = rootValue.getDefiningOp();
-  SmallVector<Value> worklist = {rootValue};
-  DenseSet<Value> visited;
-
-  while (!worklist.empty()) {
-    Value val = worklist.pop_back_val();
-    if (!visited.insert(val).second)
-      continue;
-    for (Operation *user : val.getUsers()) {
-      Operation *resolved = user;
-      if (resolved->getBlock() != &entryBlock) {
-        resolved = entryBlock.findAncestorOpInBlock(*resolved);
-        if (!resolved)
-          continue;
-      }
-      if (lastUser->isBeforeInBlock(resolved))
-        lastUser = resolved;
-      if (isMemRefAlias(user)) {
-        for (OpResult result : user->getResults())
-          worklist.push_back(result);
-      }
-    }
-  }
-  return lastUser;
-}
-
 struct LowerAllocsPass : public impl::LowerAllocsPassBase<LowerAllocsPass> {
+
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registry.insert<hip::HipDialect, memref::MemRefDialect>();
+    arith::registerBufferViewFlowOpInterfaceExternalModels(registry);
+  }
+
   void runOnOperation() override;
 };
 
@@ -90,9 +71,10 @@ void LowerAllocsPass::runOnOperation() {
 
   if (funcOp.empty())
     return;
+  // TODO: Generalize to multi-block functions using MLIR's Liveness analysis.
   if (!funcOp.getBody().hasOneBlock()) {
     funcOp.emitError("hip-lower-allocs requires single-block functions; "
-                     "findLastTransitiveUser uses isBeforeInBlock which does "
+                     "findLastAliasedUser uses isBeforeInBlock which does "
                      "not generalize to multi-block control flow");
     return signalPassFailure();
   }
@@ -110,7 +92,7 @@ void LowerAllocsPass::runOnOperation() {
 
   OpBuilder builder(funcOp.getContext());
 
-  // Replace each memref.alloc with hip.alloc.
+  // ---- Phase 1: Replace each memref.alloc with hip.alloc ----------------
   SmallVector<memref::AllocOp> allocs;
   funcOp.walk([&](memref::AllocOp op) { allocs.push_back(op); });
 
@@ -123,7 +105,30 @@ void LowerAllocsPass::runOnOperation() {
     allocOp.replaceAllUsesWith(hipAlloc.getResult());
     allocOp.erase();
     hipAllocs.push_back(hipAlloc);
+    ++NumAllocsLowered;
   }
+
+  // ---- Phase 2: Build alias analysis on the *modified* IR ---------------
+  //
+  // CRITICAL: BufferViewFlowAnalysis must be constructed AFTER the
+  // memref.alloc -> hip.alloc replacement above.  The analysis records
+  // forward alias edges (source -> view) for ViewLikeOpInterface ops
+  // (memref.view, memref.subview, memref.cast, etc.).  resolve(value)
+  // then returns all downstream aliases of that value.
+  //
+  // If the analysis were built on the original IR (with memref.alloc),
+  // then queried with the NEW hip.alloc SSA values, resolve() would
+  // return only {hipAlloc} -- missing all downstream views.  This causes:
+  //   - isAliasInSet: fails to detect that a returned memref.view aliases
+  //     the pool, so hip.free is incorrectly inserted for returned buffers.
+  //   - findLastAliasedUser: finds only the immediate SSA user (e.g. the
+  //     memref.view op) rather than the last transitive consumer, placing
+  //     hip.free before ops that still read/write through the view.
+  //
+  // Both are use-after-free bugs triggered in the pool-allocs -> lower-allocs
+  // pipeline, where the single pool hip.alloc has memref.view aliases that
+  // are returned from the function.
+  BufferViewFlowAnalysis aliasAnalysis(funcOp);
 
   // Collect returned values AFTER all replacements so the set contains
   // the new hip.alloc results (not the erased memref.alloc results).
@@ -133,32 +138,12 @@ void LowerAllocsPass::runOnOperation() {
       returnedValues.insert(v);
   });
 
-  // Check whether any value in the transitive alias chain of \p root is
-  // returned.  Needed because pooled allocs are returned via memref.view,
-  // not directly.
-  auto isTransitivelyReturned = [&](Value root) -> bool {
-    SmallVector<Value> wl = {root};
-    DenseSet<Value> seen;
-    while (!wl.empty()) {
-      Value v = wl.pop_back_val();
-      if (!seen.insert(v).second)
-        continue;
-      if (returnedValues.contains(v))
-        return true;
-      for (Operation *user : v.getUsers()) {
-        if (isMemRefAlias(user))
-          for (OpResult r : user->getResults())
-            wl.push_back(r);
-      }
-    }
-    return false;
-  };
-
   Block &entry = funcOp.getBody().front();
 
-  // Replace memref.dealloc -> hip.free for buffers that trace back to a
-  // hip.alloc.  Non-HIP deallocs (e.g. externally-owned memrefs) are left
-  // untouched for other lowerings.
+  // ---- Phase 3: Convert memref.dealloc -> hip.free ----------------------
+  //
+  // Explicit deallocs that trace back to a hip.alloc are converted first.
+  // traceToHipAlloc walks through ViewLikeOpInterface ops to find the root.
   DenseSet<Value> deallocated;
   SmallVector<memref::DeallocOp> deallocs;
   funcOp.walk([&](memref::DeallocOp op) { deallocs.push_back(op); });
@@ -172,21 +157,28 @@ void LowerAllocsPass::runOnOperation() {
     FreeOp::create(builder, deallocOp.getLoc(), ctx, memref);
     deallocated.insert(rootAlloc.getResult());
     deallocOp.erase();
+    ++NumDeallocsConverted;
   }
 
-  // Fallback: insert hip.free after last use for allocs that have no
-  // memref.dealloc (e.g. when buffer-deallocation-pipeline is not in
-  // the pass pipeline).  Uses transitive user walk to account for
-  // alias-creating ops like memref.view / subview / cast.
+  // ---- Phase 4: Insert hip.free for allocs without explicit dealloc -----
+  //
+  // Uses BufferViewFlowAnalysis to find all downstream aliases (views,
+  // subviews, casts) of each hip.alloc.  hip.free is placed after the
+  // last user of any alias, ensuring all transitive consumers have
+  // completed before the memory is released.
   for (AllocOp hipAlloc : hipAllocs) {
-    if (isTransitivelyReturned(hipAlloc.getResult()))
+    if (isAliasInSet(hipAlloc.getResult(), aliasAnalysis, returnedValues))
       continue;
     if (deallocated.contains(hipAlloc.getResult()))
       continue;
 
-    Operation *lastUser = findLastTransitiveUser(hipAlloc.getResult(), entry);
+    Operation *lastUser =
+        findLastAliasedUser(hipAlloc.getResult(), aliasAnalysis, entry);
     builder.setInsertionPointAfter(lastUser);
     FreeOp::create(builder, hipAlloc.getLoc(), ctx, hipAlloc.getResult());
+    ++NumFreesInserted;
+    LLVM_DEBUG(llvm::dbgs()
+               << "  Inserted hip.free after " << *lastUser << "\n");
   }
 }
 

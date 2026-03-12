@@ -104,24 +104,32 @@ def OptimizeMemRefsPass : Pass<"hip-optimize-memrefs", "mlir::func::FuncOp"> {
 }
 
 def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
-  let summary = "Pool memref.alloc ops into a single i8 byte buffer";
+  let summary = "Pool memref.alloc ops into a grow-on-demand i8 byte buffer";
   let description = [{
     Packs all memref.alloc ops in a single-block function into one contiguous
-    byte pool (memref<Nxi8> for fully static, memref<?xi8> when any alloc is
-    dynamic).  Each original allocation is replaced with a memref.view at a
-    computed byte offset into the pool.
+    byte pool (memref<?xi8>) obtained via hip.get_pool.  Each original
+    allocation is replaced with a memref.view at a computed byte offset.
+
+    The pool size is computed as an SSA value and passed to hip.get_pool,
+    which uses grow-on-demand semantics: the runtime grows the pool when the
+    requested size exceeds current capacity.
 
     Static allocations use greedy best-fit offset assignment (inspired by
     greedy best-fit strip packing).  Dynamic allocations
     are bucketed by their byte-size SSA value: non-overlapping lifetimes within
     a bucket share an offset.
 
-    Sub-buffer offsets are aligned to 256 bytes by default.
+    Sub-buffer offsets are aligned to 256 bytes by default (configurable).
 
     Recommended pipeline position:
       hip-optimize-memrefs (optional) -> hip-pool-allocs -> hip-lower-allocs
   }];
+  let options = [
+    Option<"alignment", "alignment", "int64_t", /*default=*/"256",
+           "Sub-buffer byte offset alignment (must be power of 2)">
+  ];
   let dependentDialects = [
+    "mlir::hip::HipDialect",
     "mlir::arith::ArithDialect",
     "mlir::memref::MemRefDialect"
   ];
