@@ -1417,14 +1417,14 @@ void ConvertHipToLLVMPass::runOnOperation() {
   RewritePatternSet patterns(ctx);
 
   // HIP dialect-specific lowerings
-  patterns
-      .add<AllocOpLowering, FreeOpLowering, MiopenGraphOpLowering,GetPoolOpLowering,
-           HipblasltGraphOpLowering, ConvOpLowering, HipblasltMatmulOpLowering,
-           MiopenRmsNormOpLowering, MiopenSkipRmsNormOpLowering,
-           MiopenRopeOpLowering, MiopenSoftmaxOpLowering, TransposeOpLowering,
-           GatherOpLowering, SiluOpLowering, SigmoidOpLowering, MulOpLowering,
-           SubOpLowering, CastOpLowering, ReduceSumOpLowering, GqaOpLowering>(
-          typeConverter);
+  patterns.add<AllocOpLowering, FreeOpLowering, MiopenGraphOpLowering,
+               GetPoolOpLowering, HipblasltGraphOpLowering, ConvOpLowering,
+               HipblasltMatmulOpLowering, MiopenRmsNormOpLowering,
+               MiopenSkipRmsNormOpLowering, MiopenRopeOpLowering,
+               MiopenSoftmaxOpLowering, TransposeOpLowering, GatherOpLowering,
+               SiluOpLowering, SigmoidOpLowering, MulOpLowering, SubOpLowering,
+               CastOpLowering, ReduceSumOpLowering, GqaOpLowering>(
+      typeConverter);
   patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter,
                                                        kMiopenAdd);
   patterns.add<MemRefAllocOpLowering, MemRefDeallocOpLowering>(typeConverter);
