@@ -241,14 +241,28 @@ def Hip_MiopenAddOp : Hip_DpsOp<"miopen.add"> {
   let hasVerifier = 1;
 }
 
-def Hip_MiopenMulOp : Hip_DpsOp<"miopen.mul"> {
-  let summary = "Element-wise multiply via miopenOpTensor(miopenTensorOpMul)";
+def Hip_MulOp : Hip_DpsOp<"mul"> {
+  let summary = "Elementwise multiplication";
+  let description = [{
+    Performs elementwise multiplication: output = lhs * rhs
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.mul(%ctx) ins(%lhs, %rhs : memref<1x128x14336xf16, 1>,
+                                   memref<1x128x14336xf16, 1>)
+                  outs(%output : memref<1x128x14336xf16, 1>)
+    ```
+  }];
+
   let arguments = (ins
     Hip_ContextType:$ctx,
-    Hip_TensorOrMemRef:$A,
-    Hip_TensorOrMemRef:$B,
-    Hip_TensorOrMemRef:$C
+    Hip_TensorOrMemRef:$lhs,
+    Hip_TensorOrMemRef:$rhs,
+    Hip_TensorOrMemRef:$output
   );
+
   // result_tensors inherited from Hip_DpsOp
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
