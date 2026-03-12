@@ -884,50 +884,39 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
 
   mlir::Location loc = op->getLoc();
 
-  // Check operands (should be 3: x, skip, scale)
+  // Check operands (should be 3: input, skip, gamma)
   if (op->getNumOperands() != 3)
     return rewriter.notifyMatchFailure(
         op, "expected 3 operands for SkipSimplifiedLayerNormalization");
 
-  mlir::Value x = op->getOperand(0);
+  mlir::Value input = op->getOperand(0);
   mlir::Value skip = op->getOperand(1);
-  mlir::Value scale = op->getOperand(2);
+  mlir::Value gamma = op->getOperand(2);
 
-  // Extract attributes
+  // Extract epsilon attribute
   auto epsilonAttr = op->getAttrOfType<mlir::FloatAttr>("epsilon");
   if (!epsilonAttr)
     return rewriter.notifyMatchFailure(op, "missing epsilon attribute");
 
-  auto axisAttr = op->getAttrOfType<mlir::IntegerAttr>("axis");
-  if (!axisAttr)
-    return rewriter.notifyMatchFailure(op, "missing axis attribute");
-
-  auto stashTypeAttr = op->getAttrOfType<mlir::IntegerAttr>("stash_type");
-  if (!stashTypeAttr)
-    return rewriter.notifyMatchFailure(op, "missing stash_type attribute");
-
-  // Convert axis to i64
-  auto axisI64Attr = rewriter.getI64IntegerAttr(axisAttr.getSInt());
-  auto stashTypeI64Attr = rewriter.getI64IntegerAttr(stashTypeAttr.getSInt());
-
-  // Should have 2 results: output and residual
+  // Should have 2 results: output and skip_output
   if (op->getNumResults() != 2)
     return rewriter.notifyMatchFailure(
         op, "expected 2 results for SkipSimplifiedLayerNormalization");
 
   auto outputType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  auto residualType =
+  auto skipOutputType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
 
   // Create init tensors
-  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, x);
-  mlir::Value residualInit = createEmptyTensor(rewriter, loc, residualType, x);
+  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
+  mlir::Value skipOutputInit =
+      createEmptyTensor(rewriter, loc, skipOutputType, input);
 
   // Create hip.skip_rms_norm operation
   auto hipOp = mlir::hip::SkipRmsNormOp::create(
-      rewriter, loc, {outputType, residualType}, context, x, skip, scale,
-      outputInit, residualInit, axisI64Attr, epsilonAttr, stashTypeI64Attr);
+      rewriter, loc, {outputType, skipOutputType}, context, input, skip, gamma,
+      outputInit, skipOutputInit, epsilonAttr);
 
   rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();
