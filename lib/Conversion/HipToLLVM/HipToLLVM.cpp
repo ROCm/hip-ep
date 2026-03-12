@@ -577,17 +577,23 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
     auto scaleType = cast<MemRefType>(op.getScale().getType());
     Value scaleNumElements = computeNumElements(scaleType, adaptor.getScale());
 
+    // Compute element_size_bytes based on element type
+    Type elementType = inputType.getElementType();
+    unsigned elementSizeBytes = elementType.getIntOrFloatBitWidth() / 8;
+    Value elementSizeBytesVal = createI64Const(elementSizeBytes);
+
     // Extract attributes
     Value axisVal = createI64Const(op.getAxis());
     Value epsilonVal =
         rewriter.create<LLVM::ConstantOp>(loc, f32Type, op.getEpsilonAttr());
     Value stashTypeVal = createI64Const(op.getStashType());
 
-    // Runtime function signature (9 params)
+    // Runtime function signature (10 params)
     SmallVector<Type> paramTypes = {
         ptrType, ptrType, ptrType, ptrType, // state, input, scale, output
-        i64Type, i64Type,         // input_num_elements, scale_num_elements
-        i64Type, f32Type, i64Type // axis, epsilon, stash_type
+        i64Type, i64Type, i64Type, // input_num_elements, scale_num_elements,
+                                   // element_size_bytes
+        i64Type, f32Type, i64Type  // axis, epsilon, stash_type
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp =
@@ -596,9 +602,16 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {statePtr,  inputPtr,         scalePtr,
-                               outputPtr, inputNumElements, scaleNumElements,
-                               axisVal,   epsilonVal,       stashTypeVal};
+    SmallVector<Value> args = {statePtr,
+                               inputPtr,
+                               scalePtr,
+                               outputPtr,
+                               inputNumElements,
+                               scaleNumElements,
+                               elementSizeBytesVal,
+                               axisVal,
+                               epsilonVal,
+                               stashTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -652,15 +665,17 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     Value outputPtr = getAlignedPtr(adaptor.getOutput());
     Value skipOutputPtr = getAlignedPtr(adaptor.getSkipOutput());
 
-    // Compute num_elements for input, skip, and gamma
+    // Compute num_elements for input and gamma
     auto inputType = cast<MemRefType>(op.getInput().getType());
     Value inputNumElements = computeNumElements(inputType, adaptor.getInput());
 
-    auto skipType = cast<MemRefType>(op.getSkip().getType());
-    Value skipNumElements = computeNumElements(skipType, adaptor.getSkip());
-
     auto gammaType = cast<MemRefType>(op.getGamma().getType());
     Value gammaNumElements = computeNumElements(gammaType, adaptor.getGamma());
+
+    // Compute element_size_bytes based on element type
+    Type elementType = inputType.getElementType();
+    unsigned elementSizeBytes = elementType.getIntOrFloatBitWidth() / 8;
+    Value elementSizeBytesVal = createI64Const(elementSizeBytes);
 
     // Extract epsilon attribute
     Value epsilonVal =
@@ -670,7 +685,7 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     SmallVector<Type> paramTypes = {
         ptrType, ptrType, ptrType, ptrType,
         ptrType, ptrType, // state, input, skip, gamma, output, skip_output
-        i64Type, i64Type, i64Type, // input_num, skip_num, gamma_num
+        i64Type, i64Type, i64Type, // input_num, gamma_num, element_size_bytes
         f32Type                    // epsilon
     };
 
@@ -681,9 +696,10 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
       return failure();
 
     SmallVector<Value> args = {
-        statePtr,         inputPtr,      skipPtr,          gammaPtr,
-        outputPtr,        skipOutputPtr, inputNumElements, skipNumElements,
-        gammaNumElements, epsilonVal};
+        statePtr,         inputPtr,         skipPtr,
+        gammaPtr,         outputPtr,        skipOutputPtr,
+        inputNumElements, gammaNumElements, elementSizeBytesVal,
+        epsilonVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
