@@ -984,7 +984,7 @@ struct MulOpLowering : public ConvertOpToLLVMPattern<MulOp> {
       return ptr;
     };
 
-    Value statePtr = adaptor.getHandle();
+    Value statePtr = adaptor.getCtx();
     Value lhsPtr = getAlignedPtr(adaptor.getLhs());
     Value rhsPtr = getAlignedPtr(adaptor.getRhs());
     Value outputPtr = getAlignedPtr(adaptor.getOutput());
