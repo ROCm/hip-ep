@@ -2,32 +2,29 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// Pipeline test: hip-pool-allocs -> hip-lower-allocs
+// Pipeline test: hip-pool-allocs -> convert-hip-to-llvm
 //
-// Verifies that pooling produces a single memref.alloc (i8 pool) which
-// hip-lower-allocs then converts to a single hip.alloc + hip.free.
+// Verifies that pooling + LLVM lowering produces llvm.call
+// @hipdnn_ep_get_pool_base for the pool and llvm.call @hip_* for compute ops.
 //===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt --hip-pool-allocs --hip-lower-allocs %s | FileCheck %s
+// RUN: hip-mlir-opt --hip-pool-allocs --convert-hip-to-llvm %s | FileCheck %s
 
-// ===== Static model: pool + lower =====
+// ===== Static model: pool + LLVM lowering =====
 //
-// Two memref<8x8xf32> allocs (256 bytes each) become:
-//   1. hip-pool-allocs: memref<512xi8> pool + two memref.view
-//   2. hip-lower-allocs: hip.alloc for the pool, two memref.view
+// Two memref<8x8xf32> allocs (256 bytes each), pool = 512 bytes.
+// hip.get_pool -> llvm.call @hipdnn_ep_get_pool_base(%arg0)
+// Pool size 512 appears as llvm.mlir.constant, offset 256 for second view.
 //
-// The pool is NOT freed because a view of it (%alloc1) is returned.
-//
-// CHECK-LABEL: func.func @static_pool_then_lower
-// CHECK-SAME:    (%[[CTX:.*]]: !hip.context,
-// CHECK:         %[[POOL:.*]] = hip.alloc(%[[CTX]]
-// CHECK:         memref.view %[[POOL]]{{.*}} : memref<512xi8> to memref<8x8xf32>
-// CHECK:         hip.hipblaslt.matmul
-// CHECK:         memref.view %[[POOL]]{{.*}} : memref<512xi8> to memref<8x8xf32>
-// CHECK:         hip.miopen.softmax
-// CHECK-NOT:     hip.free
-// CHECK:         return
-func.func @static_pool_then_lower(
+// CHECK-LABEL: llvm.func @static_pool_to_llvm
+// CHECK-SAME:    (%[[CTX:[a-z0-9]+]]: !llvm.ptr,
+// CHECK:         %[[POOL_SIZE:.*]] = llvm.mlir.constant(512 : index) : i64
+// CHECK:         llvm.call @hipdnn_ep_get_pool_base(%[[CTX]], %[[POOL_SIZE]]) : (!llvm.ptr, i64) -> !llvm.ptr
+// CHECK:         llvm.mlir.constant(256 : index) : i64
+// CHECK:         llvm.call @hip_hipblaslt_matmul(%[[CTX]],
+// CHECK:         llvm.call @hip_miopen_softmax(%[[CTX]],
+// CHECK:         llvm.return
+func.func @static_pool_to_llvm(
     %ctx: !hip.context,
     %a: memref<8x8xf32, strided<[?, ?], offset: ?>>,
     %b: memref<8x8xf32, strided<[?, ?], offset: ?>>) -> memref<8x8xf32> {
@@ -38,24 +35,20 @@ func.func @static_pool_then_lower(
   return %alloc1 : memref<8x8xf32>
 }
 
-// ===== Dynamic model: pool + lower =====
+// ===== Dynamic model: pool + LLVM lowering =====
 //
-// Two memref<?x8xf32> allocs (same %n) become:
-//   1. hip-pool-allocs: memref<?xi8> pool + two memref.view
-//   2. hip-lower-allocs: hip.alloc for the pool, two memref.view
+// Two memref<?x8xf32> allocs (same %n). Byte size = n * 32 (f32 * 8).
+// Pool size is computed at runtime: alignUp(n*32, 256) * 2.
 //
-// The pool is NOT freed because a view of it (%alloc1) is returned.
-//
-// CHECK-LABEL: func.func @dynamic_pool_then_lower
-// CHECK-SAME:    (%[[CTX2:.*]]: !hip.context,
-// CHECK:         %[[POOL:.*]] = hip.alloc(%[[CTX2]]
-// CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<?x8xf32>
-// CHECK:         hip.hipblaslt.matmul
-// CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<?x8xf32>
-// CHECK:         hip.miopen.softmax
-// CHECK-NOT:     hip.free
-// CHECK:         return
-func.func @dynamic_pool_then_lower(
+// CHECK-LABEL: llvm.func @dynamic_pool_to_llvm
+// CHECK-SAME:    (%[[CTX2:[a-z0-9]+]]: !llvm.ptr,
+// CHECK:         %[[C32:[a-z0-9_]+]] = llvm.mlir.constant(32 : index) : i64
+// CHECK:         llvm.mul %arg15, %[[C32]] : i64
+// CHECK:         llvm.call @hipdnn_ep_get_pool_base(%[[CTX2]], %{{[0-9]+}}) : (!llvm.ptr, i64) -> !llvm.ptr
+// CHECK:         llvm.call @hip_hipblaslt_matmul(%[[CTX2]],
+// CHECK:         llvm.call @hip_miopen_softmax(%[[CTX2]],
+// CHECK:         llvm.return
+func.func @dynamic_pool_to_llvm(
     %ctx: !hip.context,
     %a: memref<?x8xf32>,
     %b: memref<8x8xf32, strided<[?, ?], offset: ?>>,

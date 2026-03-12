@@ -37,6 +37,7 @@ namespace {
 
 static constexpr const char *kHipMalloc = "hip_device_malloc";
 static constexpr const char *kHipFree = "hip_device_free";
+static constexpr const char *kHipGetPoolBase = "hipdnn_ep_get_pool_base";
 
 static constexpr const char *kMiopenConvolutionForward =
     "wrap_miopenConvolutionForward";
@@ -384,6 +385,53 @@ struct FreeOpLowering : public ConvertOpToLLVMPattern<FreeOp> {
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, allocatedPtr);
     rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+// --- GetPoolOp: hip.get_pool(%ctx, %pool_size) : memref<?xi8>
+//     -> llvm.call @hipdnn_ep_get_pool_base(state, size) + memref descriptor
+struct GetPoolOpLowering : public ConvertOpToLLVMPattern<GetPoolOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(GetPoolOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    MemRefType memRefType = cast<MemRefType>(op.getPool().getType());
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kHipGetPoolBase, {ptrType, i64Type}, ptrType);
+    if (failed(funcOp))
+      return failure();
+
+    Value poolSize = adaptor.getPoolSize();
+    Value rawPtr = LLVM::CallOp::create(rewriter, loc, *funcOp,
+                                        ValueRange{adaptor.getCtx(), poolSize})
+                       .getResult();
+
+    FailureOr<unsigned> addrSpace =
+        getTypeConverter()->getMemRefAddressSpace(memRefType);
+    if (failed(addrSpace))
+      return failure();
+
+    Value gpuPtr = rawPtr;
+    if (cast<LLVM::LLVMPointerType>(rawPtr.getType()).getAddressSpace() !=
+        *addrSpace)
+      gpuPtr = LLVM::AddrSpaceCastOp::create(
+          rewriter, loc,
+          LLVM::LLVMPointerType::get(rewriter.getContext(), *addrSpace),
+          rawPtr);
+
+    Value stride1 = LLVM::ConstantOp::create(
+        rewriter, loc, rewriter.getI64Type(), rewriter.getI64IntegerAttr(1));
+
+    MemRefDescriptor desc = createMemRefDescriptor(
+        loc, memRefType, gpuPtr, gpuPtr, {poolSize}, {stride1}, rewriter);
+    rewriter.replaceOp(op, {desc});
     return success();
   }
 };
@@ -1289,15 +1337,13 @@ void ConvertHipToLLVMPass::runOnOperation() {
   });
 
   RewritePatternSet patterns(ctx);
-
-  // HIP dialect-specific lowerings
-  patterns
-      .add<AllocOpLowering, FreeOpLowering, MiopenGraphOpLowering,
-           HipblasltGraphOpLowering, ConvOpLowering, HipblasltMatmulOpLowering,
-           MiopenRmsNormOpLowering, MiopenSkipRmsNormOpLowering,
-           MiopenRopeOpLowering, MiopenSoftmaxOpLowering, TransposeOpLowering,
-           GatherOpLowering, SiluOpLowering, SigmoidOpLowering, SubOpLowering,
-           CastOpLowering, ReduceSumOpLowering, GqaOpLowering>(typeConverter);
+  patterns.add<AllocOpLowering, FreeOpLowering, GetPoolOpLowering,
+               MiopenGraphOpLowering, HipblasltGraphOpLowering, ConvOpLowering,
+               HipblasltMatmulOpLowering, MiopenRmsNormOpLowering,
+               MiopenSkipRmsNormOpLowering, MiopenRopeOpLowering,
+               MiopenSoftmaxOpLowering, TransposeOpLowering, GatherOpLowering,
+               SiluOpLowering, SigmoidOpLowering, SubOpLowering, CastOpLowering,
+               ReduceSumOpLowering, GqaOpLowering>(typeConverter);
   patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter,
                                                        kMiopenAdd);
   patterns.insert<MiopenBinaryOpLowering<MiopenMulOp>>(typeConverter,
