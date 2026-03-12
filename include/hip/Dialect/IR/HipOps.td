@@ -231,7 +231,30 @@ def Hip_RmsNormOp : Hip_DpsOp<"rms_norm"> {
 }
 
 def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm"> {
-  let summary = "Fused Add + RMS normalization via miopenAddLayerNormForward (T5 mode)";
+  let summary = "Fused Add + RMS normalization";
+  let description = [{
+    Performs fused skip connection addition followed by RMS normalization.
+    This operation combines two steps:
+      1. skip_output = input + skip  (residual connection)
+      2. output = RMSNorm(skip_output) * gamma  (RMS normalization)
+
+    Uses destination-passing style: output buffers are provided as arguments.
+
+    The epsilon parameter is used for numerical stability in the normalization:
+      RMSNorm(x) = x / sqrt(mean(x^2) + epsilon)
+
+    Example:
+    ```mlir
+    hip.skip_rms_norm(%ctx)
+        ins(%input, %skip, %gamma : memref<1x128x4096xf16, 1>,
+                                     memref<1x128x4096xf16, 1>,
+                                     memref<4096xf16, 1>)
+        outs(%output, %skip_output : memref<1x128x4096xf16, 1>,
+                                      memref<1x128x4096xf16, 1>)
+        {epsilon = 1.0e-05 : f32}
+    ```
+  }];
+
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$input,
@@ -241,7 +264,7 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm"> {
     Hip_TensorOrMemRef:$skip_output,
     F32Attr:$epsilon
   );
-  // result_tensors inherited from Hip_DpsOp
+
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $input `,` $skip `,` $gamma `:` type($input) `,` type($skip) `,` type($gamma) `)`
     `outs` `(` $output `,` $skip_output `:` type($output) `,` type($skip_output) `)`
