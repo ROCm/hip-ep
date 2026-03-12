@@ -3,31 +3,30 @@
  * Licensed under the MIT License.
  */
 
-//===- ResolveExternConstants.cpp - Wire extern globals to buffer arg -----===//
+//===- ResolveExternConstants.cpp - Replace extern globals with hip.get_constant
 //
 // The --hip-resolve-extern-constants pass bridges the gap between compile-time
 // constant externalization (which produces memref.global ops with
 // hip.external_data attributes and no initial value) and LLVM lowering (which
-// needs concrete data or a runtime mechanism to provide it).
+// needs a runtime mechanism to provide constant data).
 //
-// Strategy (mirrors the pool allocator pattern from --hip-pool-allocs):
+// Strategy:
 //
 // For each function that uses externalized constants via memref.get_global:
-//   1. Add a new argument: %_constants : memref<?xi8>
-//   2. Replace each memref.get_global @hip_ext_xxx with a memref.view into
-//      %_constants at the byte offset recorded in hip.external_data.
-//   3. Erase the now-unused memref.global ops.
-//   4. Strip hip.constants_file from the module.
+//   1. Get !hip.context from arg 0 (inserted by hip-add-context-arg).
+//   2. Read the constant index from hip.external_data on the memref.global.
+//   3. Replace memref.get_global with hip.get_constant(%ctx, %index).
+//   4. Erase the now-unused memref.global ops.
+//   5. Strip hip.constants_file from the module.
 //
-// The host (ORT EP or test harness) is responsible for:
-//   - Loading the sidecar .constants.bin via hip_load_constants()
-//   - Passing the resulting device pointer as the %_constants argument
-//
-// This keeps the MLIR pass simple (no LLVM dialect mixing) and lets
-// --convert-memref-to-llvm handle everything naturally.
+// The runtime is responsible for:
+//   - Loading constants.bin via the FileSystem abstraction
+//   - Uploading constants to GPU memory during initialization
+//   - Returning GPU pointers via hipdnn_ep_constant_get(state, index)
 //
 //===----------------------------------------------------------------------===//
 
+#include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -63,6 +62,7 @@ void ResolveExternConstantsPass::runOnOperation() {
   // Collect extern globals that have hip.external_data.
   struct ExternGlobalInfo {
     memref::GlobalOp globalOp;
+    int64_t index;
     int64_t offset;
     int64_t size;
   };
@@ -73,13 +73,15 @@ void ResolveExternConstantsPass::runOnOperation() {
         globalOp->getAttrOfType<DictionaryAttr>("hip.external_data");
     if (!extDataAttr)
       continue;
+    auto indexAttr = extDataAttr.getAs<IntegerAttr>("index");
     auto offsetAttr = extDataAttr.getAs<IntegerAttr>("offset");
     auto sizeAttr = extDataAttr.getAs<IntegerAttr>("size");
-    if (!offsetAttr || !sizeAttr) {
-      globalOp.emitError("hip.external_data missing offset or size");
+    if (!indexAttr || !offsetAttr || !sizeAttr) {
+      globalOp.emitError("hip.external_data missing index, offset, or size");
       return signalPassFailure();
     }
-    externGlobals.push_back({globalOp, offsetAttr.getInt(), sizeAttr.getInt()});
+    externGlobals.push_back(
+        {globalOp, indexAttr.getInt(), offsetAttr.getInt(), sizeAttr.getInt()});
   }
 
   if (externGlobals.empty())
@@ -90,108 +92,18 @@ void ResolveExternConstantsPass::runOnOperation() {
   for (auto [idx, info] : llvm::enumerate(externGlobals))
     globalsByName[info.globalOp.getSymName()] = idx;
 
-  auto i8Type = IntegerType::get(module.getContext(), 8);
-  auto constantsType = MemRefType::get({ShapedType::kDynamic}, i8Type);
-
-  // Phase 1: Identify functions that directly use externalized globals.
-  DenseSet<func::FuncOp> needsConstantsArg;
-  for (auto funcOp : module.getOps<func::FuncOp>()) {
-    if (funcOp.isDeclaration())
-      continue;
-    funcOp.walk([&](memref::GetGlobalOp op) {
-      if (globalsByName.contains(op.getName()))
-        needsConstantsArg.insert(funcOp);
-    });
-  }
-
-  // Phase 2: Propagate transitively -- any function that calls a function
-  // needing %_constants must also receive it so it can pass it through.
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    for (auto funcOp : module.getOps<func::FuncOp>()) {
-      if (funcOp.isDeclaration() || needsConstantsArg.contains(funcOp))
-        continue;
-      funcOp.walk([&](func::CallOp callOp) {
-        auto callee = module.lookupSymbol<func::FuncOp>(callOp.getCallee());
-        if (callee && needsConstantsArg.contains(callee)) {
-          needsConstantsArg.insert(funcOp);
-          changed = true;
-        }
-      });
-    }
-  }
-
-  // Phase 3: Add %_constants : memref<?xi8> argument to every function
-  // that needs it (both direct users and transitive callers).
-  DenseMap<func::FuncOp, Value> constantsArgMap;
-  for (auto funcOp : module.getOps<func::FuncOp>()) {
-    if (!needsConstantsArg.contains(funcOp))
-      continue;
-
-    Block &entryBlock = funcOp.getBody().front();
-    entryBlock.addArgument(constantsType, funcOp.getLoc());
-    Value constantsArg = entryBlock.getArguments().back();
-    constantsArgMap[funcOp] = constantsArg;
-
-    auto oldFuncType = funcOp.getFunctionType();
-    SmallVector<Type> newInputTypes(oldFuncType.getInputs());
-    newInputTypes.push_back(constantsType);
-    funcOp.setFunctionType(FunctionType::get(module.getContext(), newInputTypes,
-                                             oldFuncType.getResults()));
-
-    if (auto allArgAttrs = funcOp.getAllArgAttrs()) {
-      SmallVector<Attribute> newArgAttrs(allArgAttrs.begin(),
-                                         allArgAttrs.end());
-      newArgAttrs.push_back(DictionaryAttr::get(module.getContext()));
-      funcOp.setAllArgAttrs(newArgAttrs);
-    }
-
-    ++NumFuncsUpdated;
-    LLVM_DEBUG(llvm::dbgs()
-               << "  Added %_constants arg to @" << funcOp.getName() << "\n");
-  }
-
-  // Phase 4: Rewrite func.call sites -- collect first, then modify.
+  // Replace memref.get_global with hip.get_constant in every function.
   for (auto funcOp : module.getOps<func::FuncOp>()) {
     if (funcOp.isDeclaration())
       continue;
 
-    SmallVector<func::CallOp> callsToUpdate;
-    funcOp.walk([&](func::CallOp callOp) {
-      auto callee = module.lookupSymbol<func::FuncOp>(callOp.getCallee());
-      if (callee && needsConstantsArg.contains(callee))
-        callsToUpdate.push_back(callOp);
-    });
-
-    for (func::CallOp callOp : callsToUpdate) {
-      auto it = constantsArgMap.find(funcOp);
-      if (it == constantsArgMap.end()) {
-        callOp.emitError("caller does not have %_constants but callee ")
-            << callOp.getCallee() << " requires it";
-        return signalPassFailure();
-      }
-
-      SmallVector<Value> newOperands(callOp.getOperands());
-      newOperands.push_back(it->second);
-      OpBuilder builder(callOp);
-      auto newCall =
-          func::CallOp::create(builder, callOp.getLoc(), callOp.getCallee(),
-                               callOp.getResultTypes(), newOperands);
-      callOp.replaceAllUsesWith(newCall.getResults());
-      callOp.erase();
-    }
-  }
-
-  // Phase 5: Replace memref.get_global with memref.view into the buffer.
-  for (auto funcOp : module.getOps<func::FuncOp>()) {
-    if (funcOp.isDeclaration())
+    // Get !hip.context from arg 0.
+    auto &entry = funcOp.getBody().front();
+    if (entry.getNumArguments() == 0)
       continue;
-
-    auto it = constantsArgMap.find(funcOp);
-    if (it == constantsArgMap.end())
+    Value ctxArg = entry.getArgument(0);
+    if (!isa<hip::ContextType>(ctxArg.getType()))
       continue;
-    Value constantsArg = it->second;
 
     SmallVector<memref::GetGlobalOp> getGlobalOps;
     funcOp.walk([&](memref::GetGlobalOp op) {
@@ -199,25 +111,38 @@ void ResolveExternConstantsPass::runOnOperation() {
         getGlobalOps.push_back(op);
     });
 
+    if (!getGlobalOps.empty()) {
+      ++NumFuncsUpdated;
+      LLVM_DEBUG(llvm::dbgs()
+                 << "  Resolving constants in @" << funcOp.getName() << "\n");
+    }
+
     for (auto getGlobalOp : getGlobalOps) {
       ExternGlobalInfo &info =
           externGlobals[globalsByName[getGlobalOp.getName()]];
       OpBuilder builder(getGlobalOp);
       Location loc = getGlobalOp.getLoc();
 
-      Value offset = arith::ConstantOp::create(
-          builder, loc, builder.getIndexAttr(info.offset));
-      auto viewOp = memref::ViewOp::create(builder, loc, getGlobalOp.getType(),
-                                           constantsArg, offset,
-                                           /*sizes=*/ValueRange{});
+      // Create index constant.
+      Value indexVal =
+          arith::ConstantOp::create(builder, loc, builder.getI64Type(),
+                                    builder.getI64IntegerAttr(info.index));
 
-      getGlobalOp.replaceAllUsesWith(viewOp.getResult());
+      // Produce hip.get_constant with the original memref type so that all
+      // downstream users see the same type they expected from the
+      // memref.get_global.  The HipToLLVM lowering will emit the correct
+      // GPU-pointer logic regardless of the declared address space.
+      auto origMemRefType = getGlobalOp.getType();
+      auto getConstOp = hip::GetConstantOp::create(builder, loc, origMemRefType,
+                                                   ctxArg, indexVal);
+
+      getGlobalOp.replaceAllUsesWith(getConstOp.getResult());
       getGlobalOp.erase();
       ++NumGlobalsResolved;
     }
   }
 
-  // Phase 6: Clean up -- erase extern globals and strip module attribute.
+  // Clean up -- erase extern globals and strip module attribute.
   for (auto &info : externGlobals)
     info.globalOp.erase();
 

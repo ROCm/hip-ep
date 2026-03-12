@@ -24,10 +24,12 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
+#include "hip/Support/DiskFileSystem.h"
+#include "morphizen-foundation/file_io.hpp"
+
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
@@ -133,11 +135,15 @@ static int64_t alignTo(int64_t value, int64_t alignment) {
 /// Mutable state shared across calls to lowerOnnxConstants when
 /// externalization is enabled.
 struct ExternalizationState {
-  std::unique_ptr<llvm::raw_fd_ostream> binFile;
+  std::unique_ptr<morphizen::FileWriter,
+                  morphizen::FileSystem::Deleter<morphizen::FileWriter>>
+      writer;
   llvm::json::Array manifestEntries;
   int64_t currentOffset = 0;
   int64_t constantIndex = 0;
   std::string binFileName;
+  llvm::SmallVector<int64_t> constantSizes;
+  llvm::SmallVector<int64_t> constantOffsets;
 };
 
 /// Lower onnx.Constant ops.
@@ -197,16 +203,20 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
       int64_t padding = aligned - extState->currentOffset;
       if (padding > 0) {
         llvm::SmallVector<char> zeros(padding, 0);
-        extState->binFile->write(zeros.data(), padding);
+        extState->writer->fwrite(zeros.data(), padding);
         extState->currentOffset += padding;
       }
       int64_t entryOffset = extState->currentOffset;
 
-      // Write raw bytes to the sidecar binary.
+      // Write raw bytes to the sidecar binary via FileSystem.
       auto rawData = valueAttr.getRawData();
       int64_t byteSize = static_cast<int64_t>(rawData.size());
-      extState->binFile->write(rawData.data(), byteSize);
+      extState->writer->fwrite(rawData.data(), byteSize);
       extState->currentOffset += byteSize;
+
+      // Track sizes and offsets for module-level metadata.
+      extState->constantSizes.push_back(byteSize);
+      extState->constantOffsets.push_back(entryOffset);
 
       // Build JSON manifest entry.
       llvm::json::Array shapeArray;
@@ -225,6 +235,8 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
       mlir::OpBuilder moduleBuilder(module.getBody(),
                                     module.getBody()->begin());
       auto externalDataAttr = moduleBuilder.getDictionaryAttr({
+          moduleBuilder.getNamedAttr("index", moduleBuilder.getI64IntegerAttr(
+                                                  extState->constantIndex)),
           moduleBuilder.getNamedAttr(
               "offset", moduleBuilder.getI64IntegerAttr(entryOffset)),
           moduleBuilder.getNamedAttr("size",
@@ -1358,6 +1370,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
   std::unique_ptr<ExternalizationState> extState;
   llvm::StringRef dirRef = externalizeOutputDir.getValue();
   std::string dir = dirRef.empty() ? "." : dirRef.str();
+  mlir::hip::DiskFileSystem diskFs(dir.c_str());
   if (externalizeMinNumElements > 0) {
     extState = std::make_unique<ExternalizationState>();
 
@@ -1368,13 +1381,11 @@ void ConvertOnnxToHipPass::runOnOperation() {
       baseName = sym.getValue().str();
     extState->binFileName = baseName + ".constants.bin";
 
-    std::string binPath = dir + "/" + extState->binFileName;
-    std::error_code binEC;
-    extState->binFile = std::make_unique<llvm::raw_fd_ostream>(
-        binPath, binEC, llvm::sys::fs::OF_None);
-    if (binEC) {
-      module.emitError("failed to open constants binary file: " + binPath +
-                       " (" + binEC.message() + ")");
+    extState->writer =
+        diskFs.create_writer_template(extState->binFileName.c_str());
+    if (!extState->writer) {
+      module.emitError("failed to open constants binary file via FileSystem: " +
+                       extState->binFileName);
       return signalPassFailure();
     }
   }
@@ -1403,22 +1414,29 @@ void ConvertOnnxToHipPass::runOnOperation() {
   for (auto *ep : entryPoints)
     ep->erase();
 
-  // Finalize externalization: close binary, write JSON manifest, set module
-  // attribute.
+  // Finalize externalization: release writer, write JSON manifest, set module
+  // attributes.
   if (extState && extState->constantIndex > 0) {
-    extState->binFile->close();
+    extState->writer.reset();
 
     // Set hip.constants_file on the module so downstream passes/tools know
     // where the sidecar lives.
     module->setAttr("hip.constants_file",
                     mlir::StringAttr::get(ctx, extState->binFileName));
 
+    // Emit hipdnn.constant_sizes and hipdnn.constant_offsets for the runtime.
+    module->setAttr("hipdnn.constant_sizes",
+                    mlir::DenseI64ArrayAttr::get(ctx, extState->constantSizes));
+    module->setAttr(
+        "hipdnn.constant_offsets",
+        mlir::DenseI64ArrayAttr::get(ctx, extState->constantOffsets));
+
     // Derive base name again for JSON path.
     std::string baseName = "model";
     if (auto sym = module->getAttrOfType<mlir::StringAttr>(
             mlir::SymbolTable::getSymbolAttrName()))
       baseName = sym.getValue().str();
-    std::string jsonPath = dir + "/" + baseName + ".constants.json";
+    std::string jsonPath = baseName + ".constants.json";
 
     llvm::json::Object manifest;
     manifest["version"] = 1;
@@ -1427,22 +1445,19 @@ void ConvertOnnxToHipPass::runOnOperation() {
     manifest["total_bytes"] = extState->currentOffset;
     manifest["constants"] = std::move(extState->manifestEntries);
 
-    std::error_code ec;
-    llvm::raw_fd_ostream jsonFile(jsonPath, ec);
-    if (ec) {
-      module.emitError("failed to open constants manifest: " + jsonPath + " (" +
-                       ec.message() + ")");
-      return signalPassFailure();
+    auto jsonWriter = diskFs.create_writer_template(jsonPath.c_str());
+    if (jsonWriter) {
+      std::string jsonStr;
+      llvm::raw_string_ostream jsonOs(jsonStr);
+      jsonOs << llvm::formatv("{0:2}", llvm::json::Value(std::move(manifest)));
+      jsonWriter->fwrite(jsonStr.data(), jsonStr.size());
     }
-    jsonFile << llvm::formatv("{0:2}", llvm::json::Value(std::move(manifest)));
-    jsonFile.close();
 
     module.emitRemark("externalized ")
         << extState->constantIndex << " constants (" << extState->currentOffset
-        << " bytes) to " << dir + "/" + extState->binFileName;
+        << " bytes) to " << extState->binFileName;
   } else if (extState) {
-    // No constants qualified -- clean up empty file.
-    extState->binFile->close();
+    extState->writer.reset();
   }
 }
 
