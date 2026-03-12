@@ -189,7 +189,6 @@ def Hip_RmsNormOp : Hip_DpsOp<"rms_norm"> {
   let summary = "RMS normalization via miopenT5LayerNormForward";
   let description = [{
     Applies simplified (RMS) layer normalization.
-    Implements the Microsoft SimplifiedLayerNormalization operator.
 
     Formula: output = input / sqrt(mean(input^2) + epsilon) * scale
 

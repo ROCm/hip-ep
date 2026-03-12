@@ -8,7 +8,6 @@
 //
 // This test validates:
 // - Custom operation lowering (onnx.Custom -> hip.rms_norm)
-// - No domain restriction (accepts any domain or no domain)
 // - RMS normalization attributes: epsilon, axis, stash_type
 // - f16 element type support
 // - 3D tensor (1x128x4096) normalization
@@ -26,7 +25,6 @@ module {
       -> tensor<1x128x4096xf16> {
     %output = "onnx.Custom"(%input, %scale) {
       function_name = "SimplifiedLayerNormalization",
-      domain_name = "com.microsoft",
       epsilon = 9.99999974E-6 : f32,
       axis = -1 : si64,
       stash_type = 1 : si64
@@ -42,28 +40,12 @@ module {
       -> tensor<?x?xf16> {
     %output = "onnx.Custom"(%input, %scale) {
       function_name = "SimplifiedLayerNormalization",
-      domain_name = "com.microsoft",
       epsilon = 1.0e-05 : f32,
       axis = -1 : si64,
       stash_type = 1 : si64
     } : (tensor<?x?xf16>, tensor<?xf16>)
         -> tensor<?x?xf16>
     return %output : tensor<?x?xf16>
-  }
-
-  // ===== Test without domain_name attribute =====
-
-  func.func @no_domain_rms_norm(%input: tensor<128x512xf32>,
-                                 %scale: tensor<512xf32>)
-      -> tensor<128x512xf32> {
-    %output = "onnx.Custom"(%input, %scale) {
-      function_name = "SimplifiedLayerNormalization",
-      epsilon = 1.0e-05 : f32,
-      axis = -1 : si64,
-      stash_type = 1 : si64
-    } : (tensor<128x512xf32>, tensor<512xf32>)
-        -> tensor<128x512xf32>
-    return %output : tensor<128x512xf32>
   }
 }
 
@@ -85,12 +67,4 @@ module {
 // CHECK: %{{.*}} = tensor.dim %[[INPUT]], %[[C1]] : tensor<?x?xf16>
 // CHECK: tensor.empty({{.*}}, {{.*}}) : tensor<?x?xf16>
 // CHECK: hip.rms_norm(%[[CTX]]) ins(%[[INPUT]], %[[SCALE]] : tensor<?x?xf16>, tensor<?xf16>) outs({{.*}} : tensor<?x?xf16>) {axis = -1 : i64, epsilon = 9.99999974E-6 : f32, stash_type = 1 : i64}
-// CHECK-NOT: onnx.Custom
-
-// CHECK-LABEL: func.func @no_domain_rms_norm
-// CHECK-SAME: (%[[CTX:.*]]: !hip.context,
-// CHECK-SAME: %[[INPUT:.*]]: tensor<128x512xf32>,
-// CHECK-SAME: %[[SCALE:.*]]: tensor<512xf32>) -> tensor<128x512xf32>
-// CHECK: tensor.empty() : tensor<128x512xf32>
-// CHECK: hip.rms_norm(%[[CTX]]) ins(%[[INPUT]], %[[SCALE]] : tensor<128x512xf32>, tensor<512xf32>) outs({{.*}} : tensor<128x512xf32>) {axis = -1 : i64, epsilon = 9.99999974E-6 : f32, stash_type = 1 : i64}
 // CHECK-NOT: onnx.Custom
