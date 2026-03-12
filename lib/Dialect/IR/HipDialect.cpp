@@ -335,7 +335,8 @@ LogicalResult RmsNormOp::verify() {
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange SkipRmsNormOp::getDpsInitsMutable() {
-  // output and skip_output are operands #4 and #5 (0=ctx,1=input,2=skip,3=gamma)
+  // output and skip_output are operands #4 and #5
+  // (0=ctx,1=input,2=skip,3=gamma)
   return MutableOperandRange(*this, /*start=*/4, /*length=*/2);
 }
 
