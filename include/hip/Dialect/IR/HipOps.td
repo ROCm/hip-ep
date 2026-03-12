@@ -186,14 +186,11 @@ def Hip_HipblasltMatmulOp : Hip_DpsOp<"hipblaslt.matmul"> {
 // ===== MIOpen ops ============================================================
 
 def Hip_RmsNormOp : Hip_DpsOp<"rms_norm"> {
-  let summary = "RMS (Root Mean Square) layer normalization";
+  let summary = "RMS normalization via miopenT5LayerNormForward";
   let description = [{
-    Applies RMS layer normalization (also known as SimplifiedLayerNormalization).
+    Applies simplified (RMS) layer normalization.
 
     Formula: output = input / sqrt(mean(input^2) + epsilon) * scale
-
-    This is a simplified variant of layer normalization without mean subtraction
-    or bias term, commonly used in LLaMA and T5 models.
 
     Uses destination-passing style: output buffer is provided as argument.
 
