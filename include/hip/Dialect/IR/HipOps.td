@@ -189,6 +189,7 @@ def Hip_RmsNormOp : Hip_DpsOp<"rms_norm"> {
   let summary = "RMS normalization via miopenT5LayerNormForward";
   let description = [{
     Applies simplified (RMS) layer normalization.
+    Implements the Microsoft SimplifiedLayerNormalization operator.
 
     Formula: output = input / sqrt(mean(input^2) + epsilon) * scale
 
@@ -231,9 +232,11 @@ def Hip_RmsNormOp : Hip_DpsOp<"rms_norm"> {
 }
 
 def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm"> {
-  let summary = "Fused Add + RMS normalization";
+  let summary = "Fused Add + RMS normalization via miopenAddLayerNormForward (T5 mode)";
   let description = [{
     Performs fused skip connection addition followed by RMS normalization.
+    Implements the Microsoft SkipSimplifiedLayerNormalization operator.
+
     This operation combines two steps:
       1. skip_output = input + skip  (residual connection)
       2. output = RMSNorm(skip_output) * gamma  (RMS normalization)

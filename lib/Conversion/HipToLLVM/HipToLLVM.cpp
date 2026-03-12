@@ -668,9 +668,10 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
 
     // Runtime function signature (10 params)
     SmallVector<Type> paramTypes = {
-        ptrType, ptrType, ptrType, ptrType, ptrType, ptrType, // state, input, skip, gamma, output, skip_output
-        i64Type, i64Type, i64Type,                             // input_num, skip_num, gamma_num
-        f32Type                                                // epsilon
+        ptrType, ptrType, ptrType, ptrType,
+        ptrType, ptrType, // state, input, skip, gamma, output, skip_output
+        i64Type, i64Type, i64Type, // input_num, skip_num, gamma_num
+        f32Type                    // epsilon
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -679,10 +680,10 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {statePtr,     inputPtr,        skipPtr,
-                               gammaPtr,     outputPtr,       skipOutputPtr,
-                               inputNumElements, skipNumElements, gammaNumElements,
-                               epsilonVal};
+    SmallVector<Value> args = {
+        statePtr,         inputPtr,      skipPtr,          gammaPtr,
+        outputPtr,        skipOutputPtr, inputNumElements, skipNumElements,
+        gammaNumElements, epsilonVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -1507,14 +1508,14 @@ void ConvertHipToLLVMPass::runOnOperation() {
   RewritePatternSet patterns(ctx);
 
   // HIP dialect-specific lowerings
-  patterns.add<AllocOpLowering, FreeOpLowering, MiopenGraphOpLowering,
-               GetPoolOpLowering, HipblasltGraphOpLowering, ConvOpLowering,
-               HipblasltMatmulOpLowering, RmsNormOpLowering,
-               SkipRmsNormOpLowering, MiopenRopeOpLowering,
-               MiopenSoftmaxOpLowering, TransposeOpLowering, GatherOpLowering,
-               SiluOpLowering, SigmoidOpLowering, MulOpLowering, SubOpLowering,
-               CastOpLowering, ReduceSumOpLowering, GqaOpLowering>(
-      typeConverter);
+  patterns
+      .add<AllocOpLowering, FreeOpLowering, MiopenGraphOpLowering,
+           GetPoolOpLowering, HipblasltGraphOpLowering, ConvOpLowering,
+           HipblasltMatmulOpLowering, RmsNormOpLowering, SkipRmsNormOpLowering,
+           MiopenRopeOpLowering, MiopenSoftmaxOpLowering, TransposeOpLowering,
+           GatherOpLowering, SiluOpLowering, SigmoidOpLowering, MulOpLowering,
+           SubOpLowering, CastOpLowering, ReduceSumOpLowering, GqaOpLowering>(
+          typeConverter);
   patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter,
                                                        kMiopenAdd);
   patterns.add<MemRefAllocOpLowering, MemRefDeallocOpLowering>(typeConverter);
