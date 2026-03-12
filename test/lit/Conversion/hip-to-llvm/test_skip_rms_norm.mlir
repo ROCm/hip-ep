@@ -11,12 +11,12 @@
 // - Dynamic shape lowering: runtime extraction from memref descriptors
 // - Element type support: f32, f16
 // - Tensor rank support: 2D, 3D
-// - Num elements computation: product of all dimensions for x, skip, and scale
-// - Attribute lowering: axis, epsilon, stash_type passed to runtime
-// - Runtime function signature: 12 parameters
-//   (context, x, skip, scale, output, residual,
-//    x_num, skip_num, scale_num, axis, epsilon, stash_type)
-// - Fused operation: residual = x + skip, output = RMSNorm(residual) * scale
+// - Num elements computation: product of all dimensions for input, skip, and gamma
+// - Attribute lowering: epsilon passed to runtime
+// - Runtime function signature: 10 parameters
+//   (context, input, skip, gamma, output, skip_output,
+//    input_num, skip_num, gamma_num, epsilon)
+// - Fused operation: skip_output = input + skip, output = RMSNorm(skip_output) * gamma
 //
 // Model: Llama-3.1-8B skip RMS layer normalization
 // ============================================================================
@@ -27,71 +27,70 @@
 
 // CHECK-LABEL: @skip_rms_norm_static_f32
 func.func @skip_rms_norm_static_f32(%ctx: !hip.context) {
-  %x = memref.alloc() : memref<128x512xf32, 1>
+  %input = memref.alloc() : memref<128x512xf32, 1>
   %skip = memref.alloc() : memref<128x512xf32, 1>
-  %scale = memref.alloc() : memref<512xf32, 1>
+  %gamma = memref.alloc() : memref<512xf32, 1>
   %output = memref.alloc() : memref<128x512xf32, 1>
-  %residual = memref.alloc() : memref<128x512xf32, 1>
+  %skip_output = memref.alloc() : memref<128x512xf32, 1>
 
   // Verify constants for dimensions
   // CHECK-DAG: llvm.mlir.constant(1 : i64)
   // CHECK-DAG: llvm.mlir.constant(128 : i64)
   // CHECK-DAG: llvm.mlir.constant(512 : i64)
 
-  // Verify num_elements computation for x, skip, and scale
+  // Verify num_elements computation for input, skip, and gamma
   // CHECK: llvm.mul {{.*}}, {{.*}} : i64
   // CHECK: llvm.mul {{.*}}, {{.*}} : i64
   // CHECK: llvm.mul {{.*}}, {{.*}} : i64
 
-  // Verify attribute constants
-  // CHECK-DAG: llvm.mlir.constant(-1 : i64)
+  // Verify epsilon constant
   // CHECK-DAG: llvm.mlir.constant(9.99999974E-6 : f32)
 
   // Verify runtime function call
-  // CHECK: llvm.call @wrap_miopenAddT5LayerNormForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, i64) -> i32
+  // CHECK: llvm.call @wrap_miopenAddT5LayerNormForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
   hip.skip_rms_norm(%ctx)
-      ins(%x, %skip, %scale : memref<128x512xf32, 1>, memref<128x512xf32, 1>, memref<512xf32, 1>)
-      outs(%output, %residual : memref<128x512xf32, 1>, memref<128x512xf32, 1>)
-      {axis = -1 : i64, epsilon = 9.99999974e-06 : f32, stash_type = 1 : i64}
+      ins(%input, %skip, %gamma : memref<128x512xf32, 1>, memref<128x512xf32, 1>, memref<512xf32, 1>)
+      outs(%output, %skip_output : memref<128x512xf32, 1>, memref<128x512xf32, 1>)
+      {epsilon = 9.99999974e-06 : f32}
 
   return
 }
 
 // CHECK-LABEL: @skip_rms_norm_static_f16
 func.func @skip_rms_norm_static_f16(%ctx: !hip.context) {
-  %x = memref.alloc() : memref<1024xf16, 1>
+  %input = memref.alloc() : memref<1024xf16, 1>
   %skip = memref.alloc() : memref<1024xf16, 1>
-  %scale = memref.alloc() : memref<1024xf16, 1>
+  %gamma = memref.alloc() : memref<1024xf16, 1>
   %output = memref.alloc() : memref<1024xf16, 1>
-  %residual = memref.alloc() : memref<1024xf16, 1>
+  %skip_output = memref.alloc() : memref<1024xf16, 1>
 
   // 1D tensor test case
-  // CHECK: llvm.call @wrap_miopenAddT5LayerNormForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, i64) -> i32
+  // CHECK: llvm.call @wrap_miopenAddT5LayerNormForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
   hip.skip_rms_norm(%ctx)
-      ins(%x, %skip, %scale : memref<1024xf16, 1>, memref<1024xf16, 1>, memref<1024xf16, 1>)
-      outs(%output, %residual : memref<1024xf16, 1>, memref<1024xf16, 1>)
-      {axis = -1 : i64, epsilon = 1.0e-05 : f32, stash_type = 1 : i64}
+      ins(%input, %skip, %gamma : memref<1024xf16, 1>, memref<1024xf16, 1>, memref<1024xf16, 1>)
+      outs(%output, %skip_output : memref<1024xf16, 1>, memref<1024xf16, 1>)
+      {epsilon = 1.0e-05 : f32}
 
   return
 }
 
 // CHECK-LABEL: @skip_rms_norm_3d
 func.func @skip_rms_norm_3d(%ctx: !hip.context) {
-  %x = memref.alloc() : memref<2x64x128xf32, 1>
+  %input = memref.alloc() : memref<2x64x128xf32, 1>
   %skip = memref.alloc() : memref<2x64x128xf32, 1>
-  %scale = memref.alloc() : memref<128xf32, 1>
+  %gamma = memref.alloc() : memref<128xf32, 1>
   %output = memref.alloc() : memref<2x64x128xf32, 1>
-  %residual = memref.alloc() : memref<2x64x128xf32, 1>
+  %skip_output = memref.alloc() : memref<2x64x128xf32, 1>
 
   // 3D tensor test case
   // CHECK: llvm.mlir.constant(2 : i64) : i64
   // CHECK: llvm.mlir.constant(64 : i64) : i64
   // CHECK: llvm.mlir.constant(128 : i64) : i64
-  // CHECK: llvm.call @wrap_miopenAddT5LayerNormForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, i64) -> i32
+  // CHECK: llvm.call @wrap_miopenAddT5LayerNormForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
   hip.skip_rms_norm(%ctx)
-      ins(%x, %skip, %scale : memref<2x64x128xf32, 1>, memref<2x64x128xf32, 1>, memref<128xf32, 1>)
-      outs(%output, %residual : memref<2x64x128xf32, 1>, memref<2x64x128xf32, 1>)
-      {axis = -1 : i64, epsilon = 1.0e-05 : f32, stash_type = 1 : i64}
+      ins(%input, %skip, %gamma : memref<2x64x128xf32, 1>, memref<2x64x128xf32, 1>, memref<128xf32, 1>)
+      outs(%output, %skip_output : memref<2x64x128xf32, 1>, memref<2x64x128xf32, 1>)
+      {epsilon = 1.0e-05 : f32}
 
   return
 }
@@ -99,13 +98,13 @@ func.func @skip_rms_norm_3d(%ctx: !hip.context) {
 // ===== Dynamic shape tests =====
 
 // CHECK-LABEL: @skip_rms_norm_dynamic
-func.func @skip_rms_norm_dynamic(%ctx: !hip.context, %x: memref<?x512xf16, 1>, %skip: memref<?x512xf16, 1>) {
+func.func @skip_rms_norm_dynamic(%ctx: !hip.context, %input: memref<?x512xf16, 1>, %skip: memref<?x512xf16, 1>) {
   %c0 = arith.constant 0 : index
   %c512 = arith.constant 512 : index
-  %scale = memref.alloc(%c512) : memref<?xf16, 1>
-  %dim0 = memref.dim %x, %c0 : memref<?x512xf16, 1>
+  %gamma = memref.alloc(%c512) : memref<?xf16, 1>
+  %dim0 = memref.dim %input, %c0 : memref<?x512xf16, 1>
   %output = memref.alloc(%dim0) : memref<?x512xf16, 1>
-  %residual = memref.alloc(%dim0) : memref<?x512xf16, 1>
+  %skip_output = memref.alloc(%dim0) : memref<?x512xf16, 1>
 
   // Verify dynamic dimension extraction from memref descriptor
   // CHECK: llvm.extractvalue {{.*}}[3, 0]
@@ -114,38 +113,38 @@ func.func @skip_rms_norm_dynamic(%ctx: !hip.context, %x: memref<?x512xf16, 1>, %
   // CHECK: llvm.mul {{.*}}, {{.*}} : i64
   // CHECK: llvm.mul {{.*}}, {{.*}} : i64
 
-  // CHECK: llvm.call @wrap_miopenAddT5LayerNormForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, i64) -> i32
+  // CHECK: llvm.call @wrap_miopenAddT5LayerNormForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
   hip.skip_rms_norm(%ctx)
-      ins(%x, %skip, %scale : memref<?x512xf16, 1>, memref<?x512xf16, 1>, memref<?xf16, 1>)
-      outs(%output, %residual : memref<?x512xf16, 1>, memref<?x512xf16, 1>)
-      {axis = -1 : i64, epsilon = 1.0e-05 : f32, stash_type = 1 : i64}
+      ins(%input, %skip, %gamma : memref<?x512xf16, 1>, memref<?x512xf16, 1>, memref<?xf16, 1>)
+      outs(%output, %skip_output : memref<?x512xf16, 1>, memref<?x512xf16, 1>)
+      {epsilon = 1.0e-05 : f32}
 
   return
 }
 
 // CHECK-LABEL: @skip_rms_norm_fully_dynamic
-func.func @skip_rms_norm_fully_dynamic(%ctx: !hip.context, %x: memref<?x?xf16, 1>, %skip: memref<?x?xf16, 1>) {
+func.func @skip_rms_norm_fully_dynamic(%ctx: !hip.context, %input: memref<?x?xf16, 1>, %skip: memref<?x?xf16, 1>) {
   %c0 = arith.constant 0 : index
   %c1 = arith.constant 1 : index
-  %dim0 = memref.dim %x, %c0 : memref<?x?xf16, 1>
-  %dim1 = memref.dim %x, %c1 : memref<?x?xf16, 1>
-  %scale = memref.alloc(%dim1) : memref<?xf16, 1>
+  %dim0 = memref.dim %input, %c0 : memref<?x?xf16, 1>
+  %dim1 = memref.dim %input, %c1 : memref<?x?xf16, 1>
+  %gamma = memref.alloc(%dim1) : memref<?xf16, 1>
   %output = memref.alloc(%dim0, %dim1) : memref<?x?xf16, 1>
-  %residual = memref.alloc(%dim0, %dim1) : memref<?x?xf16, 1>
+  %skip_output = memref.alloc(%dim0, %dim1) : memref<?x?xf16, 1>
 
   // Fully dynamic 2D tensor - both dimensions extracted at runtime
   // CHECK: llvm.extractvalue {{.*}}[3, 0]
   // CHECK: llvm.extractvalue {{.*}}[3, 1]
 
-  // Compute num_elements for x, skip, and scale
+  // Compute num_elements for input, skip, and gamma
   // CHECK: llvm.mul {{.*}}, {{.*}} : i64
   // CHECK: llvm.mul {{.*}}, {{.*}} : i64
 
-  // CHECK: llvm.call @wrap_miopenAddT5LayerNormForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, i64) -> i32
+  // CHECK: llvm.call @wrap_miopenAddT5LayerNormForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
   hip.skip_rms_norm(%ctx)
-      ins(%x, %skip, %scale : memref<?x?xf16, 1>, memref<?x?xf16, 1>, memref<?xf16, 1>)
-      outs(%output, %residual : memref<?x?xf16, 1>, memref<?x?xf16, 1>)
-      {axis = -1 : i64, epsilon = 1.0e-05 : f32, stash_type = 1 : i64}
+      ins(%input, %skip, %gamma : memref<?x?xf16, 1>, memref<?x?xf16, 1>, memref<?xf16, 1>)
+      outs(%output, %skip_output : memref<?x?xf16, 1>, memref<?x?xf16, 1>)
+      {epsilon = 1.0e-05 : f32}
 
   return
 }

@@ -331,11 +331,11 @@ LogicalResult RmsNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
-// SkipRmsNormOp: ins(x, skip, scale), outs(output, residual)
+// SkipRmsNormOp: ins(input, skip, gamma), outs(output, skip_output)
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange SkipRmsNormOp::getDpsInitsMutable() {
-  // output and residual are operands #4 and #5 (0=ctx,1=x,2=skip,3=scale)
+  // output and skip_output are operands #4 and #5 (0=ctx,1=input,2=skip,3=gamma)
   return MutableOperandRange(*this, /*start=*/4, /*length=*/2);
 }
 
@@ -347,7 +347,7 @@ void SkipRmsNormOp::getEffects(
 
 LogicalResult SkipRmsNormOp::verify() {
   return verifyDpsComputeOp(
-      *this, {getX(), getSkip(), getScale(), getOutput(), getResidual()},
+      *this, {getInput(), getSkip(), getGamma(), getOutput(), getSkipOutput()},
       /*numInits=*/2);
 }
 

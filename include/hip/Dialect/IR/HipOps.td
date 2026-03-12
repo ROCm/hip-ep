@@ -234,19 +234,17 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm"> {
   let summary = "Fused Add + RMS normalization via miopenAddLayerNormForward (T5 mode)";
   let arguments = (ins
     Hip_ContextType:$ctx,
-    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$input,
     Hip_TensorOrMemRef:$skip,
-    Hip_TensorOrMemRef:$scale,
+    Hip_TensorOrMemRef:$gamma,
     Hip_TensorOrMemRef:$output,
-    Hip_TensorOrMemRef:$residual,
-    I64Attr:$axis,
-    F32Attr:$epsilon,
-    I64Attr:$stash_type
+    Hip_TensorOrMemRef:$skip_output,
+    F32Attr:$epsilon
   );
   // result_tensors inherited from Hip_DpsOp
   let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(` $x `,` $skip `,` $scale `:` type($x) `,` type($skip) `,` type($scale) `)`
-    `outs` `(` $output `,` $residual `:` type($output) `,` type($residual) `)`
+    `(` $ctx `)` `ins` `(` $input `,` $skip `,` $gamma `:` type($input) `,` type($skip) `,` type($gamma) `)`
+    `outs` `(` $output `,` $skip_output `:` type($output) `,` type($skip_output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
   let hasVerifier = 1;

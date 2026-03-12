@@ -646,34 +646,31 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
 
     // Extract pointers
     Value statePtr = adaptor.getCtx();
-    Value xPtr = getAlignedPtr(adaptor.getX());
+    Value inputPtr = getAlignedPtr(adaptor.getInput());
     Value skipPtr = getAlignedPtr(adaptor.getSkip());
-    Value scalePtr = getAlignedPtr(adaptor.getScale());
+    Value gammaPtr = getAlignedPtr(adaptor.getGamma());
     Value outputPtr = getAlignedPtr(adaptor.getOutput());
-    Value residualPtr = getAlignedPtr(adaptor.getResidual());
+    Value skipOutputPtr = getAlignedPtr(adaptor.getSkipOutput());
 
-    // Compute num_elements for x, skip, and scale
-    auto xType = cast<MemRefType>(op.getX().getType());
-    Value xNumElements = computeNumElements(xType, adaptor.getX());
+    // Compute num_elements for input, skip, and gamma
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    Value inputNumElements = computeNumElements(inputType, adaptor.getInput());
 
     auto skipType = cast<MemRefType>(op.getSkip().getType());
     Value skipNumElements = computeNumElements(skipType, adaptor.getSkip());
 
-    auto scaleType = cast<MemRefType>(op.getScale().getType());
-    Value scaleNumElements = computeNumElements(scaleType, adaptor.getScale());
+    auto gammaType = cast<MemRefType>(op.getGamma().getType());
+    Value gammaNumElements = computeNumElements(gammaType, adaptor.getGamma());
 
-    // Extract attributes
-    Value axisVal = createI64Const(op.getAxis());
+    // Extract epsilon attribute
     Value epsilonVal =
         rewriter.create<LLVM::ConstantOp>(loc, f32Type, op.getEpsilonAttr());
-    Value stashTypeVal = createI64Const(op.getStashType());
 
-    // Runtime function signature (12 params)
+    // Runtime function signature (10 params)
     SmallVector<Type> paramTypes = {
-        ptrType, ptrType, ptrType,
-        ptrType, ptrType, ptrType, // state, x, skip, scale, output, residual
-        i64Type, i64Type, i64Type, // x_num, skip_num, scale_num
-        i64Type, f32Type, i64Type  // axis, epsilon, stash_type
+        ptrType, ptrType, ptrType, ptrType, ptrType, ptrType, // state, input, skip, gamma, output, skip_output
+        i64Type, i64Type, i64Type,                             // input_num, skip_num, gamma_num
+        f32Type                                                // epsilon
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -682,10 +679,10 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {
-        statePtr,         xPtr,        skipPtr,      scalePtr,
-        outputPtr,        residualPtr, xNumElements, skipNumElements,
-        scaleNumElements, axisVal,     epsilonVal,   stashTypeVal};
+    SmallVector<Value> args = {statePtr,     inputPtr,        skipPtr,
+                               gammaPtr,     outputPtr,       skipOutputPtr,
+                               inputNumElements, skipNumElements, gammaNumElements,
+                               epsilonVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
