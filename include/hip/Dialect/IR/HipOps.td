@@ -250,14 +250,14 @@ def Hip_MulOp : Hip_DpsOp<"mul"> {
 
     Example:
     ```mlir
-    hip.mul(%handle) ins(%lhs, %rhs : memref<1x128x14336xf16, 1>,
-                                      memref<1x128x14336xf16, 1>)
-                     outs(%output : memref<1x128x14336xf16, 1>)
+    hip.mul(%ctx) ins(%lhs, %rhs : memref<1x128x14336xf16, 1>,
+                                   memref<1x128x14336xf16, 1>)
+                  outs(%output : memref<1x128x14336xf16, 1>)
     ```
   }];
 
   let arguments = (ins
-    Hip_ContextType:$handle,
+    Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$lhs,
     Hip_TensorOrMemRef:$rhs,
     Hip_TensorOrMemRef:$output

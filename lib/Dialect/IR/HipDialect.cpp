@@ -452,7 +452,7 @@ ParseResult MulOp::parse(OpAsmParser &parser, OperationState &result) {
 }
 
 void MulOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getHandle(), /*scalarArgs=*/{},
+  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{},
                        {getLhs(), getRhs()}, {getOutput()});
 }
 
