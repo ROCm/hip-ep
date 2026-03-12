@@ -61,7 +61,7 @@ func.func @attention_pipeline(
 
   // scaled = scores * (1/sqrt(D))
   %e5 = tensor.empty() : tensor<2x64x64xf32>
-  %scaled = hip.miopen.mul(%ctx) ins(%scores, %scale : tensor<2x64x64xf32>, tensor<f32>) outs(%e5 : tensor<2x64x64xf32>) -> tensor<2x64x64xf32>
+  %scaled = hip.mul(%ctx) ins(%scores, %scale : tensor<2x64x64xf32>, tensor<f32>) outs(%e5 : tensor<2x64x64xf32>) -> tensor<2x64x64xf32>
 
   // probs = softmax(scaled, axis=-1)
   %e6 = tensor.empty() : tensor<2x64x64xf32>

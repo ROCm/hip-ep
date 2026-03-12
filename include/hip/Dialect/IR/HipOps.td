@@ -55,6 +55,25 @@ def Hip_AllocOp : Hip_Op<"alloc",
   }];
 }
 
+def Hip_GetPoolOp : Hip_Op<"get_pool",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Get the runtime-owned GPU memory pool (grow-on-demand)";
+  let description = [{
+    Returns a reference to the runtime-managed GPU memory pool.  The runtime
+    guarantees that the returned buffer is at least %pool_size bytes.  If the
+    current pool is smaller, the runtime grows it (realloc) transparently.
+
+    Example:
+    ```mlir
+    %pool = hip.get_pool(%ctx, %size) : memref<?xi8>
+    ```
+  }];
+
+  let arguments = (ins Hip_ContextType:$ctx, Index:$pool_size);
+  let results = (outs AnyMemRef:$pool);
+  let assemblyFormat = "`(` $ctx `,` $pool_size `)` attr-dict `:` type($pool)";
+}
+
 def Hip_FreeOp : Hip_Op<"free",
     [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Free device memory";
@@ -264,14 +283,28 @@ def Hip_MiopenAddOp : Hip_DpsOp<"miopen.add"> {
   let hasVerifier = 1;
 }
 
-def Hip_MiopenMulOp : Hip_DpsOp<"miopen.mul"> {
-  let summary = "Element-wise multiply via miopenOpTensor(miopenTensorOpMul)";
+def Hip_MulOp : Hip_DpsOp<"mul"> {
+  let summary = "Elementwise multiplication";
+  let description = [{
+    Performs elementwise multiplication: output = lhs * rhs
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.mul(%ctx) ins(%lhs, %rhs : memref<1x128x14336xf16, 1>,
+                                   memref<1x128x14336xf16, 1>)
+                  outs(%output : memref<1x128x14336xf16, 1>)
+    ```
+  }];
+
   let arguments = (ins
     Hip_ContextType:$ctx,
-    Hip_TensorOrMemRef:$A,
-    Hip_TensorOrMemRef:$B,
-    Hip_TensorOrMemRef:$C
+    Hip_TensorOrMemRef:$lhs,
+    Hip_TensorOrMemRef:$rhs,
+    Hip_TensorOrMemRef:$output
   );
+
   // result_tensors inherited from Hip_DpsOp
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;

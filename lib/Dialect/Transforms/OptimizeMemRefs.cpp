@@ -16,8 +16,7 @@
 //   2. For each memref.alloc, compute a live interval [def, lastUse]:
 //        - def     = index of the alloc op
 //        - lastUse = max index among all transitive users (follows aliasing
-//                    ops like subview, cast, reshape so that a derived view
-//                    extends the source buffer's lifetime)
+//                    ops via BufferViewFlowAnalysis)
 //
 //   3. Walk intervals in program order.  For each one, try to find a
 //      previously-created "slot" whose lastUse < this def (i.e., dead):
@@ -42,13 +41,22 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "hip/Dialect/Transforms/BufferUtils.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Transforms/BufferViewFlowOpInterfaceImpl.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/Interfaces/ViewLikeInterface.h"
+
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/Statistic.h"
+#include "llvm/Support/Debug.h"
+
+#define DEBUG_TYPE "hip-optimize-memrefs"
+
+STATISTIC(NumAllocsReused, "Number of allocations reused via slot assignment");
+STATISTIC(NumSlotsCreated, "Number of unique memory slots created");
 
 namespace mlir {
 namespace hip {
@@ -78,14 +86,6 @@ struct Slot {
 // Helpers
 //===----------------------------------------------------------------------===//
 
-/// Returns the allocation size in bytes for a fully-static memref type.
-/// Returns 0 when any dimension is dynamic.
-static int64_t getStaticByteSize(MemRefType type) {
-  if (!type.hasStaticShape())
-    return 0;
-  return type.getNumElements() * type.getElementTypeBitWidth() / 8;
-}
-
 /// Computes contiguous row-major strides for a statically-shaped memref.
 static SmallVector<int64_t> getContiguousStrides(MemRefType type) {
   auto shape = type.getShape();
@@ -100,17 +100,6 @@ static SmallVector<int64_t> getContiguousStrides(MemRefType type) {
 
 /// Returns true if \p slot can serve an allocation of \p neededType with
 /// the given dynamic-size operands.
-///
-/// Static shapes: the slot must have at least as many bytes (same element
-/// type and memory space).  Examples (slot holds memref<2x64x64xf32>,
-/// 32768 bytes):
-///   canReuse(memref<64xf32>)       -> true  (256 <= 32768, same f32)
-///   canReuse(memref<2x64x64xf32>)  -> true  (exact fit, no cast needed)
-///   canReuse(memref<3x64x64xf32>)  -> false (49152 > 32768)
-///   canReuse(memref<64xf16>)       -> false (different element type)
-///
-/// Dynamic shapes: the MemRefType must be identical and every dynamic-size
-/// operand must be the same SSA value.
 static bool canReuse(const Slot &slot, MemRefType neededType,
                      OperandRange neededDynSizes) {
   if (slot.type.getElementType() != neededType.getElementType())
@@ -137,70 +126,18 @@ static bool canReuse(const Slot &slot, MemRefType neededType,
   return false;
 }
 
-/// Returns true if \p user produces a memref result that aliases its memref
-/// operand.  Covers ViewLikeOpInterface (subview, cast, reshape, etc.) and
-/// arith::SelectOp whose result may alias either operand.
-static bool isMemRefAlias(Operation *user) {
-  return isa<ViewLikeOpInterface, arith::SelectOp>(user);
-}
-
-/// Returns the highest operation index among all transitive users of \p value,
-/// following view-like and select ops so that the liveness of the source
-/// buffer accounts for all its derived views.
-///
-/// memref.dealloc ops are excluded: they are administrative, not data uses,
-/// and counting them would extend every lifetime to the block's end when
-/// buffer-deallocation-pipeline has been run, defeating buffer reuse.
-///
-/// Example:
-///   %buf  = memref.alloc() : memref<2x64x64xf32>           // index 3
-///   %sv   = memref.subview %buf[...] : ... to memref<...>   // alias, index 5
-///   use(%sv)                                                 // index 15
-///   -> buf.lastUse = 15 (not 3), preventing premature reuse
-static unsigned
-findLastTransitiveUseIndex(Value value, Block &block,
-                           const DenseMap<Operation *, unsigned> &opIndex,
-                           unsigned blockSize) {
-  unsigned lastIdx = 0;
-  SmallVector<Value> worklist = {value};
-  DenseSet<Value> visited;
-
-  while (!worklist.empty()) {
-    Value current = worklist.pop_back_val();
-    if (!visited.insert(current).second)
-      continue;
-
-    for (Operation *user : current.getUsers()) {
-      if (isa<memref::DeallocOp>(user))
-        continue;
-
-      auto it = opIndex.find(user);
-      unsigned userIdx;
-      if (it != opIndex.end()) {
-        userIdx = it->second;
-      } else if (auto *ancestor = block.findAncestorOpInBlock(*user)) {
-        userIdx = opIndex.lookup(ancestor);
-      } else {
-        userIdx = blockSize - 1;
-      }
-      lastIdx = std::max(lastIdx, userIdx);
-
-      if (isMemRefAlias(user)) {
-        for (Value result : user->getResults())
-          if (isa<MemRefType>(result.getType()))
-            worklist.push_back(result);
-      }
-    }
-  }
-  return lastIdx;
-}
-
 //===----------------------------------------------------------------------===//
 // Pass
 //===----------------------------------------------------------------------===//
 
 struct OptimizeMemRefsPass
     : public impl::OptimizeMemRefsPassBase<OptimizeMemRefsPass> {
+
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registry.insert<memref::MemRefDialect>();
+    arith::registerBufferViewFlowOpInterfaceExternalModels(registry);
+  }
+
   void runOnOperation() override;
 };
 
@@ -210,10 +147,18 @@ void OptimizeMemRefsPass::runOnOperation() {
   if (funcOp.empty())
     return;
 
-  if (!funcOp.getBody().hasOneBlock())
-    return;
+  // TODO: Generalize to multi-block functions using MLIR's Liveness analysis
+  // instead of sequential op indices.
+  if (!funcOp.getBody().hasOneBlock()) {
+    funcOp.emitError("hip-optimize-memrefs requires single-block functions; "
+                     "liveness analysis uses sequential op indices that do "
+                     "not generalize to control flow");
+    return signalPassFailure();
+  }
 
   Block &block = funcOp.getBody().front();
+
+  BufferViewFlowAnalysis aliasAnalysis(funcOp);
 
   // Assign each op a sequential index for interval ordering.
   DenseMap<Operation *, unsigned> opIndex;
@@ -222,9 +167,7 @@ void OptimizeMemRefsPass::runOnOperation() {
     opIndex[&op] = idx++;
   unsigned blockSize = idx;
 
-  // Collect alloc ops (static and dynamic) and compute their live intervals.
-  // Liveness follows view-like and select ops transitively so that derived
-  // views extend the source buffer's lifetime.
+  // Collect alloc ops and compute their live intervals.
   SmallVector<AllocInterval> intervals;
   for (Operation &op : block) {
     auto allocOp = dyn_cast<memref::AllocOp>(op);
@@ -235,18 +178,17 @@ void OptimizeMemRefsPass::runOnOperation() {
     if (result.use_empty())
       continue;
 
-    intervals.push_back(
-        {allocOp, opIndex[&op],
-         findLastTransitiveUseIndex(result, block, opIndex, blockSize)});
+    unsigned lastUse = findLastAliasedUseIndex(result, aliasAnalysis, block,
+                                               opIndex, blockSize);
+    intervals.push_back({allocOp, opIndex[&op], lastUse});
+    LLVM_DEBUG(llvm::dbgs() << "  interval " << allocOp << " [" << opIndex[&op]
+                            << ", " << lastUse << "]\n");
   }
 
   if (intervals.size() < 2)
     return;
 
-  // Greedy best-fit slot assignment.  For each interval in program order,
-  // find a dead slot (slot.lastUse < interval.def) with the smallest byte
-  // waste.  Best-fit minimizes internal fragmentation; early exit on exact
-  // match (waste == 0) avoids unnecessary scanning.
+  // Greedy best-fit slot assignment.
   SmallVector<Slot> slots;
   SmallVector<std::pair<Value, Value>> replacements;
 
@@ -281,20 +223,24 @@ void OptimizeMemRefsPass::runOnOperation() {
             /*sizes=*/neededType.getShape(),
             /*strides=*/getContiguousStrides(neededType));
       }
+      LLVM_DEBUG(llvm::dbgs()
+                 << "  Reusing slot (type=" << bestSlot->type
+                 << ", waste=" << bestWaste << ") for " << neededType << "\n");
       replacements.emplace_back(interval.allocOp.getResult(), replacement);
       bestSlot->lastUseIndex = interval.lastUseIndex;
+      ++NumAllocsReused;
     } else {
+      LLVM_DEBUG(llvm::dbgs() << "  New slot for " << neededType << "\n");
       slots.push_back({interval.allocOp.getResult(), neededType,
                        interval.lastUseIndex,
                        SmallVector<Value, 4>(neededDynSizes.begin(),
                                              neededDynSizes.end())});
+      ++NumSlotsCreated;
     }
   }
 
   // Map each alloc to its memref.dealloc (if any) so we can erase the
-  // dealloc when the alloc it targets is replaced.  Without this, RAUW
-  // would turn `memref.dealloc %replaced` into `memref.dealloc %reuser`,
-  // causing a double-free.
+  // dealloc when the alloc it targets is replaced.
   DenseMap<Value, memref::DeallocOp> allocToDealloc;
   for (Operation &op : block) {
     if (auto deallocOp = dyn_cast<memref::DeallocOp>(op))

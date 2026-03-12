@@ -426,7 +426,7 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
-/// onnx.Mul -> hip.miopen.mul
+/// onnx.Mul -> hip.mul
 struct MulToHip : public mlir::RewritePattern {
   MulToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Mul", /*benefit=*/1, ctx) {}
@@ -456,8 +456,8 @@ MulToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value source = (aType.getRank() == resultType.getRank()) ? a : b;
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
 
-  auto hipOp = mlir::hip::MiopenMulOp::create(rewriter, loc, resultType,
-                                              context, a, b, init);
+  auto hipOp =
+      mlir::hip::MulOp::create(rewriter, loc, resultType, context, a, b, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
