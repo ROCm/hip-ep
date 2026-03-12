@@ -621,20 +621,22 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
 
     // Runtime function signature (12 params)
     SmallVector<Type> paramTypes = {
-        ptrType, ptrType, ptrType, ptrType, ptrType, ptrType, // state, x, skip, scale, output, residual
-        i64Type, i64Type, i64Type,              // x_num, skip_num, scale_num
-        i64Type, f32Type, i64Type               // axis, epsilon, stash_type
+        ptrType, ptrType, ptrType,
+        ptrType, ptrType, ptrType, // state, x, skip, scale, output, residual
+        i64Type, i64Type, i64Type, // x_num, skip_num, scale_num
+        i64Type, f32Type, i64Type  // axis, epsilon, stash_type
     };
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp =
-        LLVM::lookupOrCreateFn(rewriter, module, kWrapMiopenAddT5LayerNormForward,
-                               paramTypes, rewriter.getI32Type());
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapMiopenAddT5LayerNormForward, paramTypes,
+        rewriter.getI32Type());
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {statePtr, xPtr, skipPtr, scalePtr, outputPtr, residualPtr,
-                               xNumElements, skipNumElements, scaleNumElements,
-                               axisVal, epsilonVal, stashTypeVal};
+    SmallVector<Value> args = {
+        statePtr,         xPtr,        skipPtr,      scalePtr,
+        outputPtr,        residualPtr, xNumElements, skipNumElements,
+        scaleNumElements, axisVal,     epsilonVal,   stashTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
