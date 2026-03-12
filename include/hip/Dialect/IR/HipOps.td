@@ -55,6 +55,25 @@ def Hip_AllocOp : Hip_Op<"alloc",
   }];
 }
 
+def Hip_GetPoolOp : Hip_Op<"get_pool",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Get the runtime-owned GPU memory pool (grow-on-demand)";
+  let description = [{
+    Returns a reference to the runtime-managed GPU memory pool.  The runtime
+    guarantees that the returned buffer is at least %pool_size bytes.  If the
+    current pool is smaller, the runtime grows it (realloc) transparently.
+
+    Example:
+    ```mlir
+    %pool = hip.get_pool(%ctx, %size) : memref<?xi8>
+    ```
+  }];
+
+  let arguments = (ins Hip_ContextType:$ctx, Index:$pool_size);
+  let results = (outs AnyMemRef:$pool);
+  let assemblyFormat = "`(` $ctx `,` $pool_size `)` attr-dict `:` type($pool)";
+}
+
 def Hip_FreeOp : Hip_Op<"free",
     [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Free device memory";

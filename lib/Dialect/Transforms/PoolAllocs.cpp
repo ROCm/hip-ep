@@ -5,9 +5,9 @@
 //===- PoolAllocs.cpp - Pack memref.alloc into a single i8 pool -----------===//
 //
 // Packs all memref.alloc ops in a single-block function into one contiguous
-// byte pool (memref<Nxi8> for fully-static, memref<?xi8> when any alloc is
-// dynamic), replacing each original alloc with a memref.view at a computed
-// byte offset.
+// byte pool (memref<?xi8>), replacing each original alloc with a memref.view
+// at a computed byte offset. The pool is acquired via hip.get_pool(%ctx,
+// %pool_size) so the runtime can grow on demand.
 //
 // Algorithm overview:
 //   Phase 1 - Liveness:  assign [defIndex, lastUseIndex] to each alloc,
@@ -20,15 +20,15 @@
 //   Phase 4 - Dynamic packing:  group by structural byte-size key (same
 //             static factor + same dynamic SSA operands).  Within each group,
 //             bin non-overlapping lifetimes so they share an offset at runtime.
-//   Phase 5 - IR emission:  create the pool memref.alloc, compute offsets via
+//   Phase 5 - IR emission:  create hip.get_pool, compute offsets via
 //             arith ops, and replace each original alloc with memref.view.
-//             Attach hipdnn.pool_size / hipdnn.buffer_offsets metadata.
 //
 // All sub-buffer offsets are aligned to the configured alignment (default 256
 // bytes) to satisfy GPU coalesced-access requirements.
 //
 //===----------------------------------------------------------------------===//
 
+#include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/BufferUtils.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
@@ -406,6 +406,9 @@ void PoolAllocsPass::runOnOperation() {
   // 5a. Compute total pool size as an SSA value.
   // Uses createOrFold so that trivial ops (addi(x,0), muli(x,1)) are
   // folded away automatically by the arith dialect's fold methods.
+  if (!hasDynamic && staticPoolSize == 0)
+    return;
+
   Value poolSize;
   if (hasDynamic) {
     poolSize = arith::ConstantIndexOp::create(builder, loc, staticPoolSize);
@@ -419,26 +422,24 @@ void PoolAllocsPass::runOnOperation() {
           builder.createOrFold<arith::AddIOp>(loc, poolSize, contribution);
     }
   } else {
-    if (staticPoolSize == 0)
-      return;
+    poolSize = arith::ConstantIndexOp::create(builder, loc, staticPoolSize);
   }
 
   LLVM_DEBUG(llvm::dbgs() << "Pool: static=" << staticPoolSize << " bytes, "
                           << dynBuckets.size() << " dynamic buckets, "
                           << allInfos.size() << " total allocs\n");
 
-  // 5b. Create the single pool allocation.
-  Value pool;
-  if (hasDynamic) {
-    auto poolType =
-        MemRefType::get({ShapedType::kDynamic}, builder.getIntegerType(8));
-    pool =
-        memref::AllocOp::create(builder, loc, poolType, ValueRange{poolSize});
-  } else {
-    auto poolType =
-        MemRefType::get({staticPoolSize}, builder.getIntegerType(8));
-    pool = memref::AllocOp::create(builder, loc, poolType);
+  // 5b. Acquire the pool via hip.get_pool(%ctx, %pool_size).
+  if (funcOp.getNumArguments() == 0 ||
+      !isa<hip::ContextType>(funcOp.getArgument(0).getType())) {
+    funcOp.emitError("function missing !hip.context as arg 0 — "
+                     "run hip-add-context-arg before hip-pool-allocs");
+    return signalPassFailure();
   }
+  Value ctx = funcOp.getArgument(0);
+  auto poolType =
+      MemRefType::get({ShapedType::kDynamic}, builder.getIntegerType(8));
+  Value pool = hip::GetPoolOp::create(builder, loc, poolType, ctx, poolSize);
 
   // 5c. Compute byte offsets for every alloc and store in allocToOffset.
   DenseMap<Operation *, Value> allocToOffset;
@@ -476,8 +477,6 @@ void PoolAllocsPass::runOnOperation() {
   }
 
   // 5d. Replace each original alloc with a memref.view into the pool.
-  bool hadDeallocs = false;
-  SmallVector<int64_t> staticOffsets;
   for (auto &info : allInfos) {
     auto it = allocToOffset.find(info.allocOp.getOperation());
     if (it == allocToOffset.end())
@@ -495,38 +494,17 @@ void PoolAllocsPass::runOnOperation() {
     info.allocOp.replaceAllUsesWith(view.getResult());
     info.allocOp.erase();
     ++NumAllocsPooled;
-
-    if (auto constOp = offset.getDefiningOp<arith::ConstantIndexOp>())
-      staticOffsets.push_back(constOp.value());
-    else
-      staticOffsets.push_back(-1);
   }
 
-  // 5d'. Erase deallocs that now target views and insert a single pool dealloc.
+  // 5d'. Erase deallocs that now target views — the pool is owned by the
+  // runtime state (not this function), so no pool dealloc is inserted.
   SmallVector<memref::DeallocOp> orphanedDeallocs;
   funcOp.walk([&](memref::DeallocOp op) {
     if (op.getMemref().getDefiningOp<memref::ViewOp>())
       orphanedDeallocs.push_back(op);
   });
-  hadDeallocs = !orphanedDeallocs.empty();
   for (auto op : orphanedDeallocs)
     op.erase();
-
-  if (hadDeallocs) {
-    builder.setInsertionPoint(block.getTerminator());
-    memref::DeallocOp::create(builder, loc, pool);
-  }
-
-  // 5e. Attach pool metadata to the function for runtime/deployment use.
-  MLIRContext *mlirCtx = funcOp.getContext();
-  if (!hasDynamic)
-    funcOp->setAttr("hipdnn.pool_size",
-                    builder.getI64IntegerAttr(staticPoolSize));
-  SmallVector<Attribute> offsetAttrs;
-  for (int64_t off : staticOffsets)
-    offsetAttrs.push_back(builder.getI64IntegerAttr(off));
-  funcOp->setAttr("hipdnn.buffer_offsets",
-                  ArrayAttr::get(mlirCtx, offsetAttrs));
 }
 
 } // namespace
