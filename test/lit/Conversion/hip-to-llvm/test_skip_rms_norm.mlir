@@ -11,11 +11,11 @@
 // - Dynamic shape lowering: runtime extraction from memref descriptors
 // - Element type support: f32, f16
 // - Tensor rank support: 2D, 3D
-// - Num elements computation: product of all dimensions for input, skip, and gamma
+// - Num elements computation: product of all dimensions for input and gamma
 // - Attribute lowering: epsilon passed to runtime
 // - Runtime function signature: 10 parameters
 //   (context, input, skip, gamma, output, skip_output,
-//    input_num, skip_num, gamma_num, epsilon)
+//    input_num, gamma_num, element_size_bytes, epsilon)
 // - Fused operation: skip_output = input + skip, output = RMSNorm(skip_output) * gamma
 //
 // Model: Llama-3.1-8B skip RMS layer normalization
@@ -38,8 +38,7 @@ func.func @skip_rms_norm_static_f32(%ctx: !hip.context) {
   // CHECK-DAG: llvm.mlir.constant(128 : i64)
   // CHECK-DAG: llvm.mlir.constant(512 : i64)
 
-  // Verify num_elements computation for input, skip, and gamma
-  // CHECK: llvm.mul {{.*}}, {{.*}} : i64
+  // Verify num_elements computation for input and gamma
   // CHECK: llvm.mul {{.*}}, {{.*}} : i64
   // CHECK: llvm.mul {{.*}}, {{.*}} : i64
 
