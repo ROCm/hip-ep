@@ -277,7 +277,7 @@ hip-mlir-opt input.mlir \
 
 In addition to tensor-mode inputs, the compiler supports a **pre-bufferized memref format**
 where weights are embedded as `memref.global` constants and intermediate buffers are
-carved from a single memory pool via `memref.view`:
+carved from a single grow-on-demand memory pool via `memref.view`:
 
 ```mlir
 module {
@@ -285,12 +285,13 @@ module {
   func.func @main_graph(%ctx: !hip.context,
                         %X: memref<2x64x64xf32, strided<[?,?,?], offset: ?>>,
                         %out: memref<2x64x64xf32>) {
-    %pool = hip.alloc(%ctx) : memref<131072xi8>
-    %buf = memref.view %pool[%c0][] : memref<131072xi8> to memref<2x64x64xf32>
+    %size = arith.constant 131072 : index
+    %pool = hip.get_pool(%ctx, %size) : memref<?xi8>
+    %c0 = arith.constant 0 : index
+    %buf = memref.view %pool[%c0][] : memref<?xi8> to memref<2x64x64xf32>
     %w = memref.get_global @weight : memref<64x64xf32>
     hip.hipblaslt.matmul(%ctx) ins(%X, %w : ...) outs(%buf : ...)
     // ...
-    hip.free(%ctx, %pool) : memref<131072xi8>
     return
   }
 }

@@ -15,15 +15,17 @@
 // ===== Static pooling: two non-overlapping f32 allocs =====
 //
 // Two memref<8x8xf32> (256 bytes each). Both are live at different times.
-// With 256-byte alignment, they pack at offsets 0 and 256 -> pool = 512xi8.
+// With 256-byte alignment, they pack at offsets 0 and 256 -> pool needs 512.
 //
 // CHECK-LABEL: func.func @static_two_allocs
-// CHECK:         %[[POOL:.*]] = memref.alloc() : memref<512xi8>
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context,
+// CHECK:         %[[SIZE:.*]] = arith.constant 512 : index
+// CHECK:         %[[POOL:.*]] = hip.get_pool(%[[CTX]], %[[SIZE]]) : memref<?xi8>
 // CHECK-DAG:     %[[OFF0:.*]] = arith.constant 0 : index
 // CHECK-DAG:     %[[OFF1:.*]] = arith.constant 256 : index
-// CHECK:         %[[V0:.*]] = memref.view %[[POOL]][%[[OFF0]]][] : memref<512xi8> to memref<8x8xf32>
+// CHECK:         %[[V0:.*]] = memref.view %[[POOL]][%[[OFF0]]][] : memref<?xi8> to memref<8x8xf32>
 // CHECK:         hip.hipblaslt.matmul{{.*}}outs(%[[V0]] :
-// CHECK:         %[[V1:.*]] = memref.view %[[POOL]][%[[OFF1]]][] : memref<512xi8> to memref<8x8xf32>
+// CHECK:         %[[V1:.*]] = memref.view %[[POOL]][%[[OFF1]]][] : memref<?xi8> to memref<8x8xf32>
 // CHECK:         hip.miopen.softmax{{.*}}outs(%[[V1]] :
 // CHECK:         return %[[V1]]
 func.func @static_two_allocs(
@@ -44,7 +46,7 @@ func.func @static_two_allocs(
 // Pool size depends on alignment and overlap analysis.
 //
 // CHECK-LABEL: func.func @static_three_allocs_overlap
-// CHECK:         %[[POOL:.*]] = memref.alloc() : memref<{{[0-9]+}}xi8>
+// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}) : memref<?xi8>
 // CHECK-COUNT-3: memref.view %[[POOL]]
 // CHECK:         return
 func.func @static_three_allocs_overlap(
@@ -66,9 +68,9 @@ func.func @static_three_allocs_overlap(
 // Both go into the same i8 pool (type-agnostic via memref.view).
 //
 // CHECK-LABEL: func.func @mixed_element_types
-// CHECK:         %[[POOL:.*]] = memref.alloc() : memref<{{[0-9]+}}xi8>
-// CHECK:         memref.view %[[POOL]]{{.*}} : memref<{{[0-9]+}}xi8> to memref<8x8xf32>
-// CHECK:         memref.view %[[POOL]]{{.*}} : memref<{{[0-9]+}}xi8> to memref<8x8xf16>
+// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<8x8xf32>
+// CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<8x8xf16>
 // CHECK:         return
 func.func @mixed_element_types(
     %ctx: !hip.context,
@@ -85,7 +87,7 @@ func.func @mixed_element_types(
 // ===== Single alloc: pass is a no-op (need >=2 allocs to pool) =====
 //
 // CHECK-LABEL: func.func @single_alloc_noop
-// CHECK-NOT:     memref<{{[0-9]+}}xi8>
+// CHECK-NOT:     hip.get_pool
 // CHECK:         memref.alloc() : memref<8x8xf32>
 // CHECK:         return
 func.func @single_alloc_noop(
@@ -100,7 +102,7 @@ func.func @single_alloc_noop(
 // ===== No allocs: pass is a no-op =====
 //
 // CHECK-LABEL: func.func @no_allocs_noop
-// CHECK-NOT:     memref.alloc
+// CHECK-NOT:     hip.get_pool
 // CHECK:         hip.miopen.softmax
 // CHECK:         return
 func.func @no_allocs_noop(
@@ -113,10 +115,10 @@ func.func @no_allocs_noop(
 
 // ===== Dynamic pooling: two dynamic allocs with same size SSA value =====
 //
-// Both memref<?x8xf32> allocs use %n. Pool should be memref<?xi8>.
+// Both memref<?x8xf32> allocs use %n. Pool comes from hip.get_pool.
 //
 // CHECK-LABEL: func.func @dynamic_two_allocs_same_size
-// CHECK:         %[[POOL:.*]] = memref.alloc({{.*}}) : memref<?xi8>
+// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}) : memref<?xi8>
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<?x8xf32>
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<?x8xf32>
 // CHECK:         return
@@ -135,10 +137,10 @@ func.func @dynamic_two_allocs_same_size(
 // ===== Mixed static + dynamic: f32 static + dynamic allocs in same pool =====
 //
 // One static memref<8x8xf32> (256 bytes) and one dynamic memref<?x8xf32>.
-// Pool is memref<?xi8>.
+// Pool comes from hip.get_pool.
 //
 // CHECK-LABEL: func.func @mixed_static_dynamic
-// CHECK:         %[[POOL:.*]] = memref.alloc({{.*}}) : memref<?xi8>
+// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}) : memref<?xi8>
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<8x8xf32>
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<?x8xf32>
 // CHECK:         return
@@ -158,10 +160,12 @@ func.func @mixed_static_dynamic(
 // ===== Alignment: offsets are 256-byte aligned =====
 //
 // memref<1xf32> = 4 bytes, but should be rounded up to 256-byte alignment.
-// Two allocs -> pool should be at least 512xi8 (256 + 256).
+// Two allocs -> pool needs at least 512 bytes (256 + 256).
 //
 // CHECK-LABEL: func.func @alignment_256
-// CHECK:         %[[POOL:.*]] = memref.alloc() : memref<512xi8>
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context,
+// CHECK:         %[[SIZE:.*]] = arith.constant 512 : index
+// CHECK:         %[[POOL:.*]] = hip.get_pool(%[[CTX]], %[[SIZE]]) : memref<?xi8>
 // CHECK-DAG:     arith.constant 0 : index
 // CHECK-DAG:     arith.constant 256 : index
 // CHECK:         memref.view %[[POOL]]
@@ -170,7 +174,8 @@ func.func @mixed_static_dynamic(
 //
 // With --alignment=64, each 4-byte alloc rounds to 64 bytes -> pool = 128xi8.
 // ALIGN64-LABEL: func.func @alignment_256
-// ALIGN64:         memref.alloc() : memref<128xi8>
+// ALIGN64:         arith.constant 128 : index
+// ALIGN64:         hip.get_pool({{.*}}) : memref<?xi8>
 func.func @alignment_256(
     %ctx: !hip.context,
     %in: memref<1xf32>) -> memref<1xf32> {
@@ -187,7 +192,7 @@ func.func @alignment_256(
 // buckets.  Pool = bucket0_aligned_size + bucket1_aligned_size.
 //
 // CHECK-LABEL: func.func @dynamic_two_buckets
-// CHECK:         %[[POOL:.*]] = memref.alloc({{.*}}) : memref<?xi8>
+// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}) : memref<?xi8>
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<?x8xf32>
 // CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<?x4xf32>
 // CHECK:         return
@@ -204,12 +209,15 @@ func.func @dynamic_two_buckets(
   return %alloc1 : memref<?x4xf32>
 }
 
-// ===== Metadata: hipdnn.pool_size and hipdnn.buffer_offsets =====
+// ===== Metadata: attributes are no longer emitted =====
 //
-// Two static allocs: pool_size=512, offsets=[0, 256].
+// Pool metadata (hipdnn.pool_size, hipdnn.buffer_offsets) is removed;
+// pool sizing is handled at runtime via hip.get_pool.
 //
 // CHECK-LABEL: func.func @metadata_attributes
-// CHECK-SAME:    attributes {hipdnn.buffer_offsets = [0, 256], hipdnn.pool_size = 512 : i64}
+// CHECK-NOT:     hipdnn.pool_size
+// CHECK-NOT:     hipdnn.buffer_offsets
+// CHECK:         hip.get_pool({{.*}}) : memref<?xi8>
 func.func @metadata_attributes(
     %ctx: !hip.context,
     %a: memref<8x8xf32, strided<[?, ?], offset: ?>>,
@@ -221,18 +229,17 @@ func.func @metadata_attributes(
   return %alloc1 : memref<8x8xf32>
 }
 
-// ===== Pre-existing dealloc: erased and replaced with pool dealloc =====
+// ===== Pre-existing dealloc: erased (pool is runtime-owned) =====
 //
 // When input has memref.dealloc ops, they should be erased after pooling
-// (since views into the pool can't be individually deallocated) and a
-// single memref.dealloc for the pool should appear before the terminator.
+// (since views into the pool can't be individually deallocated).
+// No pool dealloc is inserted — the pool is owned by the runtime.
 //
 // CHECK-LABEL: func.func @preexisting_deallocs
-// CHECK:         %[[POOL:.*]] = memref.alloc() : memref<512xi8>
+// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}) : memref<?xi8>
 // CHECK:         memref.view %[[POOL]]
 // CHECK:         memref.view %[[POOL]]
-// CHECK-NOT:     memref.dealloc{{.*}}memref<8x8xf32>
-// CHECK:         memref.dealloc %[[POOL]] : memref<512xi8>
+// CHECK-NOT:     memref.dealloc
 // CHECK:         return
 func.func @preexisting_deallocs(
     %ctx: !hip.context,
@@ -247,10 +254,11 @@ func.func @preexisting_deallocs(
   return
 }
 
-// ===== Dynamic metadata: offsets contain -1 for dynamic buckets =====
+// ===== Dynamic metadata: attributes no longer emitted =====
 //
 // CHECK-LABEL: func.func @dynamic_metadata
-// CHECK-SAME:    attributes {hipdnn.buffer_offsets = [0, -1]}
+// CHECK-NOT:     hipdnn.buffer_offsets
+// CHECK:         hip.get_pool({{.*}}) : memref<?xi8>
 func.func @dynamic_metadata(
     %ctx: !hip.context,
     %a: memref<?x8xf32>,
