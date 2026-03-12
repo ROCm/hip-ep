@@ -96,6 +96,39 @@ def Hip_FreeOp : Hip_Op<"free",
   }];
 }
 
+// ===== Constant Management ===================================================
+
+def Hip_GetConstantOp : Hip_Op<"get_constant", [
+  DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
+]> {
+  let summary = "Retrieve constant from GPU memory";
+  let description = [{
+    Retrieves a pre-uploaded constant from state->gpu_constants[index].
+
+    Arguments:
+    - ctx: HIP execution context (contains gpu_constants array)
+    - index: Index in gpu_constants array (0, 1, 2, ...)
+
+    Returns:
+    - memref: GPU memory reference to the constant
+
+    Example:
+    ```mlir
+    %weight = hip.get_constant(%ctx, %index_0) : memref<64x3x3x3xf32, 1>
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    I64:$index
+  );
+  let results = (outs AnyMemRef:$result);
+
+  let assemblyFormat = [{
+    `(` $ctx `,` $index `)` attr-dict `:` type($result)
+  }];
+}
+
 // ===== Region ops (structural grouping, no runtime) =========================
 
 def Hip_MiopenGraphOp : Hip_Op<"miopen.graph", [SingleBlock, NoTerminator]> {
