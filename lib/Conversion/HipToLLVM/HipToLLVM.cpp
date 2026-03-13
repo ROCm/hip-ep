@@ -55,6 +55,7 @@ static constexpr const char *kHipSilu = "hip_silu";
 static constexpr const char *kWrapMiopenActivationForward =
     "wrap_miopenActivationForward"; // hip.sigmoid
 static constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
+static constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";
 static constexpr const char *kWrapMiopenOpTensor =
     "wrap_miopenOpTensor"; // hip.mul
 static constexpr const char *kWrapMiopenCast = "wrap_miopenCast";
@@ -745,7 +746,7 @@ struct RopeOpLowering : public ConvertOpToLLVMPattern<RopeOp> {
                                         i64Type, i64Type, i64Type, i64Type};
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, "wrap_rotary_embedding", paramTypes, i32Type);
+        rewriter, module, kWrapRotaryEmbedding, paramTypes, i32Type);
 
     if (failed(funcOp))
       return failure();
