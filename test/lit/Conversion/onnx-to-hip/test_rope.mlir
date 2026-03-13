@@ -27,6 +27,9 @@ module {
                          %cos_cache: tensor<131072x64xf16>,
                          %sin_cache: tensor<131072x64xf16>)
       -> tensor<1x128x4096xf16> {
+    // Test attribute inference: 0 means "infer from tensor shapes"
+    // Expected: rotary_dim = cos_cache.shape[-1] * 2 = 64 * 2 = 128
+    //           num_heads = input.shape[-1] / rotary_dim = 4096 / 128 = 32
     %output = "onnx.Custom"(%input, %position_ids, %cos_cache, %sin_cache) {
       function_name = "RotaryEmbedding",
       domain_name = "com.microsoft",
