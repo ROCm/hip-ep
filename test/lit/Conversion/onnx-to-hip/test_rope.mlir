@@ -39,6 +39,12 @@ module {
     return %output : tensor<1x128x4096xf16>
   }
 
+  // CHECK-LABEL: func.func @main_graph
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[INPUT:.*]]: tensor<1x128x4096xf16>, %[[POS_IDS:.*]]: tensor<1x128xi64>, %[[COS:.*]]: tensor<131072x64xf16>, %[[SIN:.*]]: tensor<131072x64xf16>) -> tensor<1x128x4096xf16>
+  // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<1x128x4096xf16>
+  // CHECK: hip.rope(%[[CTX]]) ins(%[[INPUT]], %[[POS_IDS]], %[[COS]], %[[SIN]] : tensor<1x128x4096xf16>, tensor<1x128xi64>, tensor<131072x64xf16>, tensor<131072x64xf16>) outs(%[[INIT]] : tensor<1x128x4096xf16>) {interleaved = 0 : i64, num_heads = 32 : i64, rotary_embedding_dim = 128 : i64} : tensor<1x128x4096xf16>
+  // CHECK-NOT: onnx.Custom
+
   // ===== Dynamic shape test =====
 
   func.func @dynamic_rope(%input: tensor<?x?x?xf16>,
@@ -58,6 +64,18 @@ module {
     return %output : tensor<?x?x?xf16>
   }
 
+  // CHECK-LABEL: func.func @dynamic_rope
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[INPUT:.*]]: tensor<?x?x?xf16>, %[[POS_IDS:.*]]: tensor<?x?xi64>, %[[COS:.*]]: tensor<?x?xf16>, %[[SIN:.*]]: tensor<?x?xf16>) -> tensor<?x?x?xf16>
+  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[C2:.*]] = arith.constant 2 : index
+  // CHECK: %{{.*}} = tensor.dim %[[INPUT]], %[[C0]] : tensor<?x?x?xf16>
+  // CHECK: %{{.*}} = tensor.dim %[[INPUT]], %[[C1]] : tensor<?x?x?xf16>
+  // CHECK: %{{.*}} = tensor.dim %[[INPUT]], %[[C2]] : tensor<?x?x?xf16>
+  // CHECK: %[[INIT:.*]] = tensor.empty({{.*}}, {{.*}}, {{.*}}) : tensor<?x?x?xf16>
+  // CHECK: hip.rope(%[[CTX]]) ins(%[[INPUT]], %[[POS_IDS]], %[[COS]], %[[SIN]] : tensor<?x?x?xf16>, tensor<?x?xi64>, tensor<?x?xf16>, tensor<?x?xf16>) outs(%[[INIT]] : tensor<?x?x?xf16>) {interleaved = 0 : i64, num_heads = 32 : i64, rotary_embedding_dim = 128 : i64} : tensor<?x?x?xf16>
+  // CHECK-NOT: onnx.Custom
+
   // ===== Explicit attributes (no inference) =====
 
   func.func @explicit_attrs_rope(%input: tensor<1x128x4096xf16>,
@@ -76,28 +94,10 @@ module {
         -> tensor<1x128x4096xf16>
     return %output : tensor<1x128x4096xf16>
   }
+
+  // CHECK-LABEL: func.func @explicit_attrs_rope
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[INPUT:.*]]: tensor<1x128x4096xf16>, %[[POS_IDS:.*]]: tensor<1x128xi64>, %[[COS:.*]]: tensor<131072x64xf16>, %[[SIN:.*]]: tensor<131072x64xf16>) -> tensor<1x128x4096xf16>
+  // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<1x128x4096xf16>
+  // CHECK: hip.rope(%[[CTX]]) ins(%[[INPUT]], %[[POS_IDS]], %[[COS]], %[[SIN]] : tensor<1x128x4096xf16>, tensor<1x128xi64>, tensor<131072x64xf16>, tensor<131072x64xf16>) outs(%[[INIT]] : tensor<1x128x4096xf16>) {interleaved = 1 : i64, num_heads = 32 : i64, rotary_embedding_dim = 128 : i64} : tensor<1x128x4096xf16>
+  // CHECK-NOT: onnx.Custom
 }
-
-// CHECK-LABEL: func.func @main_graph
-// CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[INPUT:.*]]: tensor<1x128x4096xf16>, %[[POS_IDS:.*]]: tensor<1x128xi64>, %[[COS:.*]]: tensor<131072x64xf16>, %[[SIN:.*]]: tensor<131072x64xf16>) -> tensor<1x128x4096xf16>
-// CHECK: %[[INIT:.*]] = tensor.empty() : tensor<1x128x4096xf16>
-// CHECK: hip.rope(%[[CTX]]) ins(%[[INPUT]], %[[POS_IDS]], %[[COS]], %[[SIN]] : tensor<1x128x4096xf16>, tensor<1x128xi64>, tensor<131072x64xf16>, tensor<131072x64xf16>) outs(%[[INIT]] : tensor<1x128x4096xf16>) {interleaved = 0 : i64, num_heads = 32 : i64, rotary_embedding_dim = 128 : i64} : tensor<1x128x4096xf16>
-// CHECK-NOT: onnx.Custom
-
-// CHECK-LABEL: func.func @dynamic_rope
-// CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[INPUT:.*]]: tensor<?x?x?xf16>, %[[POS_IDS:.*]]: tensor<?x?xi64>, %[[COS:.*]]: tensor<?x?xf16>, %[[SIN:.*]]: tensor<?x?xf16>) -> tensor<?x?x?xf16>
-// CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
-// CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
-// CHECK-DAG: %[[C2:.*]] = arith.constant 2 : index
-// CHECK: %{{.*}} = tensor.dim %[[INPUT]], %[[C0]] : tensor<?x?x?xf16>
-// CHECK: %{{.*}} = tensor.dim %[[INPUT]], %[[C1]] : tensor<?x?x?xf16>
-// CHECK: %{{.*}} = tensor.dim %[[INPUT]], %[[C2]] : tensor<?x?x?xf16>
-// CHECK: %[[INIT:.*]] = tensor.empty({{.*}}, {{.*}}, {{.*}}) : tensor<?x?x?xf16>
-// CHECK: hip.rope(%[[CTX]]) ins(%[[INPUT]], %[[POS_IDS]], %[[COS]], %[[SIN]] : tensor<?x?x?xf16>, tensor<?x?xi64>, tensor<?x?xf16>, tensor<?x?xf16>) outs(%[[INIT]] : tensor<?x?x?xf16>) {interleaved = 0 : i64, num_heads = 32 : i64, rotary_embedding_dim = 128 : i64} : tensor<?x?x?xf16>
-// CHECK-NOT: onnx.Custom
-
-// CHECK-LABEL: func.func @explicit_attrs_rope
-// CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[INPUT:.*]]: tensor<1x128x4096xf16>, %[[POS_IDS:.*]]: tensor<1x128xi64>, %[[COS:.*]]: tensor<131072x64xf16>, %[[SIN:.*]]: tensor<131072x64xf16>) -> tensor<1x128x4096xf16>
-// CHECK: %[[INIT:.*]] = tensor.empty() : tensor<1x128x4096xf16>
-// CHECK: hip.rope(%[[CTX]]) ins(%[[INPUT]], %[[POS_IDS]], %[[COS]], %[[SIN]] : tensor<1x128x4096xf16>, tensor<1x128xi64>, tensor<131072x64xf16>, tensor<131072x64xf16>) outs(%[[INIT]] : tensor<1x128x4096xf16>) {interleaved = 1 : i64, num_heads = 32 : i64, rotary_embedding_dim = 128 : i64} : tensor<1x128x4096xf16>
-// CHECK-NOT: onnx.Custom
