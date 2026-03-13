@@ -1397,7 +1397,9 @@ struct ReduceSumOpLowering : public ConvertOpToLLVMPattern<ReduceSumOp> {
   }
 };
 
-// hip.gqa(handle, q, k, v, kv_cache, output, layer, start_pos, seq_len)
+// hip.gqa(ctx, query, key, value, past_key, past_value, seqlens_k,
+// total_seq_len,
+//         output, present_key, present_value) {attributes...}
 struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -1406,30 +1408,131 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
-    Type voidType = getVoidType();
     Type ptrType = getPtrType();
-    Type indexType = getIndexType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+    Type f32Type = rewriter.getF32Type();
 
-    SmallVector<Type> paramTypes = {ptrType,   ptrType,   ptrType,
-                                    ptrType,   ptrType,   ptrType,
-                                    indexType, indexType, indexType};
+    auto createI64Const = [&](int64_t value) -> Value {
+      return rewriter.create<LLVM::ConstantOp>(
+          loc, i64Type, rewriter.getI64IntegerAttr(value));
+    };
+    auto createF32Const = [&](float value) -> Value {
+      return rewriter.create<LLVM::ConstantOp>(loc, f32Type,
+                                               rewriter.getF32FloatAttr(value));
+    };
+
+    Value statePtr = adaptor.getCtx();
+    Value queryPtr = extractMemRefPtr(adaptor.getQuery(), rewriter, loc);
+    Value keyPtr = extractMemRefPtr(adaptor.getKey(), rewriter, loc);
+    Value valuePtr = extractMemRefPtr(adaptor.getValue(), rewriter, loc);
+    Value pastKeyPtr = extractMemRefPtr(adaptor.getPastKey(), rewriter, loc);
+    Value pastValuePtr =
+        extractMemRefPtr(adaptor.getPastValue(), rewriter, loc);
+    Value seqlensKPtr = extractMemRefPtr(adaptor.getSeqlensK(), rewriter, loc);
+    Value totalSeqLenPtr =
+        extractMemRefPtr(adaptor.getTotalSeqLen(), rewriter, loc);
+    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value presentKeyPtr =
+        extractMemRefPtr(adaptor.getPresentKey(), rewriter, loc);
+    Value presentValuePtr =
+        extractMemRefPtr(adaptor.getPresentValue(), rewriter, loc);
+
+    // cos/sin cache: NULL pointers for now (RoPE done via separate op)
+    Value nullPtr = rewriter.create<LLVM::ZeroOp>(loc, ptrType);
+    Value cosCachePtr = nullPtr;
+    Value sinCachePtr = nullPtr;
+
+    Value numHeads = createI64Const(op.getNumHeads());
+    Value kvNumHeads = createI64Const(op.getKvNumHeads());
+    Value scale = createF32Const(op.getScale().convertToFloat());
+    Value softcap = createF32Const(op.getSoftcap().convertToFloat());
+    Value doRotary = createI64Const(op.getDoRotary());
+    Value rotaryInterleaved = createI64Const(op.getRotaryInterleaved());
+
+    // Extract shape info from query memref: [batch, seq_q, num_heads *
+    // head_dim]
+    auto queryType = cast<MemRefType>(op.getQuery().getType());
+    auto queryShape = queryType.getShape();
+    int64_t batchSize = queryShape[0];
+    int64_t seqLenQ = queryShape[1];
+    int64_t queryHidden = queryShape[2];
+    int64_t headDim = queryHidden / op.getNumHeads();
+    unsigned elementSizeBytes =
+        queryType.getElementType().getIntOrFloatBitWidth() / 8;
+
+    // Extract seq_len_kv from present_key shape.
+    // ONNX GQA uses BNSD layout: [batch, kv_num_heads, total_seq, head_dim]
+    auto presentKeyType = cast<MemRefType>(op.getPresentKey().getType());
+    auto pkShape = presentKeyType.getShape();
+    int64_t seqLenKV = (pkShape.size() == 4) ? pkShape[2] : pkShape[1];
+
+    Value batchSizeVal = createI64Const(batchSize);
+    Value seqLenQVal = createI64Const(seqLenQ);
+    Value seqLenKVVal = createI64Const(seqLenKV);
+    Value headDimVal = createI64Const(headDim);
+    Value elemSizeVal = createI64Const(elementSizeBytes);
+
+    SmallVector<Type, 24> paramTypes = {
+        ptrType, // state
+        ptrType, // query
+        ptrType, // key
+        ptrType, // value
+        ptrType, // past_key
+        ptrType, // past_value
+        ptrType, // seqlens_k
+        ptrType, // total_seq_len
+        ptrType, // cos_cache
+        ptrType, // sin_cache
+        ptrType, // output
+        ptrType, // present_key
+        ptrType, // present_value
+        i64Type, // num_heads
+        i64Type, // kv_num_heads
+        f32Type, // scale
+        f32Type, // softcap
+        i64Type, // do_rotary
+        i64Type, // rotary_interleaved
+        i64Type, // batch_size
+        i64Type, // seq_len_q
+        i64Type, // seq_len_kv
+        i64Type, // head_dim
+        i64Type  // element_size_bytes
+    };
+
+    static constexpr const char *kWrapGQA = "wrap_group_query_attention";
     FailureOr<LLVM::LLVMFuncOp> funcOp =
-        LLVM::lookupOrCreateFn(rewriter, module, kHipGqa, paramTypes, voidType);
+        LLVM::lookupOrCreateFn(rewriter, module, kWrapGQA, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {
-        adaptor.getCtx(),
-        extractMemRefPtr(adaptor.getQ(), rewriter, loc),
-        extractMemRefPtr(adaptor.getK(), rewriter, loc),
-        extractMemRefPtr(adaptor.getV(), rewriter, loc),
-        extractMemRefPtr(adaptor.getKvCache(), rewriter, loc),
-        extractMemRefPtr(adaptor.getOutput(), rewriter, loc),
-        adaptor.getLayer(),
-        adaptor.getStartPos(),
-        adaptor.getSeqLen()};
+    SmallVector<Value, 24> args = {statePtr,
+                                   queryPtr,
+                                   keyPtr,
+                                   valuePtr,
+                                   pastKeyPtr,
+                                   pastValuePtr,
+                                   seqlensKPtr,
+                                   totalSeqLenPtr,
+                                   cosCachePtr,
+                                   sinCachePtr,
+                                   outputPtr,
+                                   presentKeyPtr,
+                                   presentValuePtr,
+                                   numHeads,
+                                   kvNumHeads,
+                                   scale,
+                                   softcap,
+                                   doRotary,
+                                   rotaryInterleaved,
+                                   batchSizeVal,
+                                   seqLenQVal,
+                                   seqLenKVVal,
+                                   headDimVal,
+                                   elemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+
     rewriter.eraseOp(op);
     return success();
   }

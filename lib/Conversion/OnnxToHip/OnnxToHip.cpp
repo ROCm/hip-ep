@@ -1033,6 +1033,117 @@ RotaryEmbeddingToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
+/// onnx.Custom(GroupQueryAttention) -> hip.gqa
+struct GroupQueryAttentionToHip : public mlir::RewritePattern {
+  GroupQueryAttentionToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
+    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
+  // Check if this is GroupQueryAttention
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr || funcNameAttr.getValue() != "GroupQueryAttention")
+    return rewriter.notifyMatchFailure(op,
+                                       "not a GroupQueryAttention operation");
+
+  // Check domain is "com.microsoft"
+  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+    return rewriter.notifyMatchFailure(
+        op, "domain must be com.microsoft for GroupQueryAttention");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+
+  // Check operands (should be 9: query, key, value, past_key, past_value,
+  // seqlens_k, total_seq_len, cos_cache, sin_cache)
+  // Last two (cos/sin cache) are optional and may be onnx.NoValue
+  if (op->getNumOperands() != 9)
+    return rewriter.notifyMatchFailure(
+        op, "expected 9 operands for GroupQueryAttention");
+
+  mlir::Value query = op->getOperand(0);
+  mlir::Value key = op->getOperand(1);
+  mlir::Value value = op->getOperand(2);
+  mlir::Value pastKey = op->getOperand(3);
+  mlir::Value pastValue = op->getOperand(4);
+  mlir::Value seqlensK = op->getOperand(5);
+  mlir::Value totalSeqLen = op->getOperand(6);
+
+  // Extract attributes
+  auto numHeadsAttr = op->getAttrOfType<mlir::IntegerAttr>("num_heads");
+  if (!numHeadsAttr)
+    return rewriter.notifyMatchFailure(op, "missing num_heads attribute");
+
+  auto kvNumHeadsAttr = op->getAttrOfType<mlir::IntegerAttr>("kv_num_heads");
+  if (!kvNumHeadsAttr)
+    return rewriter.notifyMatchFailure(op, "missing kv_num_heads attribute");
+
+  auto scaleAttr = op->getAttrOfType<mlir::FloatAttr>("scale");
+  if (!scaleAttr)
+    return rewriter.notifyMatchFailure(op, "missing scale attribute");
+
+  auto softcapAttr = op->getAttrOfType<mlir::FloatAttr>("softcap");
+  if (!softcapAttr)
+    return rewriter.notifyMatchFailure(op, "missing softcap attribute");
+
+  auto doRotaryAttr = op->getAttrOfType<mlir::IntegerAttr>("do_rotary");
+  if (!doRotaryAttr)
+    return rewriter.notifyMatchFailure(op, "missing do_rotary attribute");
+
+  auto rotaryInterleavedAttr =
+      op->getAttrOfType<mlir::IntegerAttr>("rotary_interleaved");
+  if (!rotaryInterleavedAttr)
+    return rewriter.notifyMatchFailure(op,
+                                       "missing rotary_interleaved attribute");
+
+  // Convert to proper attribute types
+  auto numHeadsI64Attr = rewriter.getI64IntegerAttr(numHeadsAttr.getSInt());
+  auto kvNumHeadsI64Attr = rewriter.getI64IntegerAttr(kvNumHeadsAttr.getSInt());
+  auto doRotaryI64Attr = rewriter.getI64IntegerAttr(doRotaryAttr.getSInt());
+  auto rotaryInterleavedI64Attr =
+      rewriter.getI64IntegerAttr(rotaryInterleavedAttr.getSInt());
+
+  // Should have 3 results: output, present_key, present_value
+  if (op->getNumResults() != 3)
+    return rewriter.notifyMatchFailure(
+        op, "expected 3 results for GroupQueryAttention");
+
+  auto outputType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  auto presentKeyType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
+  auto presentValueType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(2).getType());
+
+  // Create init tensors
+  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, query);
+  mlir::Value presentKeyInit =
+      createEmptyTensor(rewriter, loc, presentKeyType, pastKey);
+  mlir::Value presentValueInit =
+      createEmptyTensor(rewriter, loc, presentValueType, pastValue);
+
+  // Create hip.gqa operation
+  auto hipOp = mlir::hip::GqaOp::create(
+      rewriter, loc,
+      mlir::TypeRange{outputType, presentKeyType, presentValueType}, context,
+      query, key, value, pastKey, pastValue, seqlensK, totalSeqLen, outputInit,
+      presentKeyInit, presentValueInit, numHeadsI64Attr, kvNumHeadsI64Attr,
+      scaleAttr, softcapAttr, doRotaryI64Attr, rotaryInterleavedI64Attr);
+
+  rewriter.replaceOp(op, hipOp->getResults());
+  return mlir::success();
+}
+
 //===----------------------------------------------------------------------===//
 // convertComputeOps implementation
 //===----------------------------------------------------------------------===//
@@ -1052,6 +1163,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   patterns.add<SimplifiedLayerNormToHip>(ctx);
   patterns.add<SkipSimplifiedLayerNormToHip>(ctx);
   patterns.add<RotaryEmbeddingToHip>(ctx);
+  patterns.add<GroupQueryAttentionToHip>(ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);

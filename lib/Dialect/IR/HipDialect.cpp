@@ -571,38 +571,21 @@ void ReduceSumOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
-// GqaOp: ins(q, k, v), outs(kv_cache, output)
-// Extra scalars: layer, start_pos, seq_len
+// GqaOp: ins(query, key, value, past_key, past_value, seqlens_k, total_seq_len)
+//        outs(output, present_key, present_value)
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange GqaOp::getDpsInitsMutable() {
-  // 0=ctx, 1=layer, 2=start_pos, 3=seq_len, 4=q, 5=k, 6=v,
-  // 7=kv_cache, 8=output
-  return MutableOperandRange(*this, /*start=*/7, /*length=*/2);
+  // Operands 0-7 are inputs (ctx, query, key, value, past_key, past_value,
+  // seqlens_k, total_seq_len) Operands 8-10 are DPS inits (output, present_key,
+  // present_value)
+  return MutableOperandRange(*this, /*start=*/8, /*length=*/3);
 }
 
 void GqaOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
-}
-
-LogicalResult GqaOp::verify() {
-  return verifyDpsComputeOp(*this,
-                            {getQ(), getK(), getV(), getKvCache(), getOutput()},
-                            /*numInits=*/2);
-}
-
-ParseResult GqaOp::parse(OpAsmParser &parser, OperationState &result) {
-  // `(` ctx `,` layer `,` start_pos `,` seq_len `)`
-  return parseSingleInitDpsOp(parser, result, /*numIns=*/3,
-                              /*extraScalars=*/3);
-}
-
-void GqaOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getCtx(),
-                       {getLayer(), getStartPos(), getSeqLen()},
-                       {getQ(), getK(), getV()}, {getKvCache(), getOutput()});
 }
 
 #define GET_OP_CLASSES
