@@ -350,8 +350,8 @@ MatMulToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value init =
       mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
                                     resultType.getElementType(), dynSizes);
-  auto hipOp = mlir::hip::HipblasltMatmulOp::create(rewriter, loc, resultType,
-                                                    context, a, b, init);
+  auto hipOp = mlir::hip::MatmulOp::create(rewriter, loc, resultType, context,
+                                           a, b, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }

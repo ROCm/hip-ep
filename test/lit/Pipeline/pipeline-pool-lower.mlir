@@ -21,7 +21,7 @@
 // CHECK:         %[[POOL_SIZE:.*]] = llvm.mlir.constant(512 : index) : i64
 // CHECK:         llvm.call @hipdnn_ep_get_pool_base(%[[CTX]], %[[POOL_SIZE]]) : (!llvm.ptr, i64) -> !llvm.ptr
 // CHECK:         llvm.mlir.constant(256 : index) : i64
-// CHECK:         llvm.call @hip_hipblaslt_matmul(%[[CTX]],
+// CHECK:         llvm.call @wrap_hipblasLtMatmul(%[[CTX]],
 // CHECK:         llvm.call @hip_miopen_softmax(%[[CTX]],
 // CHECK:         llvm.return
 func.func @static_pool_to_llvm(
@@ -29,7 +29,7 @@ func.func @static_pool_to_llvm(
     %a: memref<8x8xf32, strided<[?, ?], offset: ?>>,
     %b: memref<8x8xf32, strided<[?, ?], offset: ?>>) -> memref<8x8xf32> {
   %alloc0 = memref.alloc() : memref<8x8xf32>
-  hip.hipblaslt.matmul(%ctx) ins(%a, %b : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<8x8xf32>)
+  hip.matmul(%ctx) ins(%a, %b : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<8x8xf32>)
   %alloc1 = memref.alloc() : memref<8x8xf32>
   hip.miopen.softmax(%ctx) ins(%alloc0 : memref<8x8xf32>) outs(%alloc1 : memref<8x8xf32>)
   return %alloc1 : memref<8x8xf32>
@@ -45,7 +45,7 @@ func.func @static_pool_to_llvm(
 // CHECK:         %[[C32:[a-z0-9_]+]] = llvm.mlir.constant(32 : index) : i64
 // CHECK:         llvm.mul %arg15, %[[C32]] : i64
 // CHECK:         llvm.call @hipdnn_ep_get_pool_base(%[[CTX2]], %{{[0-9]+}}) : (!llvm.ptr, i64) -> !llvm.ptr
-// CHECK:         llvm.call @hip_hipblaslt_matmul(%[[CTX2]],
+// CHECK:         llvm.call @wrap_hipblasLtMatmul(%[[CTX2]],
 // CHECK:         llvm.call @hip_miopen_softmax(%[[CTX2]],
 // CHECK:         llvm.return
 func.func @dynamic_pool_to_llvm(
@@ -54,7 +54,7 @@ func.func @dynamic_pool_to_llvm(
     %b: memref<8x8xf32, strided<[?, ?], offset: ?>>,
     %n: index) -> memref<?x8xf32> {
   %alloc0 = memref.alloc(%n) : memref<?x8xf32>
-  hip.hipblaslt.matmul(%ctx) ins(%a, %b : memref<?x8xf32>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<?x8xf32>)
+  hip.matmul(%ctx) ins(%a, %b : memref<?x8xf32>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<?x8xf32>)
   %alloc1 = memref.alloc(%n) : memref<?x8xf32>
   hip.miopen.softmax(%ctx) ins(%alloc0 : memref<?x8xf32>) outs(%alloc1 : memref<?x8xf32>)
   return %alloc1 : memref<?x8xf32>
