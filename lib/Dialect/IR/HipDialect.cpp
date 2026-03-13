@@ -312,64 +312,44 @@ void HipblasltMatmulOp::print(OpAsmPrinter &p) {
 }
 
 //===----------------------------------------------------------------------===//
-// MiopenRmsNormOp: ins(input, weight), outs(output)
+// RmsNormOp: ins(input, scale), outs(output)
 //===----------------------------------------------------------------------===//
 
-MutableOperandRange MiopenRmsNormOp::getDpsInitsMutable() {
+MutableOperandRange RmsNormOp::getDpsInitsMutable() {
   return getOutputMutable();
 }
 
-void MiopenRmsNormOp::getEffects(
+void RmsNormOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-LogicalResult MiopenRmsNormOp::verify() {
-  return verifyDpsComputeOp(*this, {getInput(), getWeight(), getOutput()},
+LogicalResult RmsNormOp::verify() {
+  return verifyDpsComputeOp(*this, {getInput(), getScale(), getOutput()},
                             /*numInits=*/1);
 }
 
-ParseResult MiopenRmsNormOp::parse(OpAsmParser &parser,
-                                   OperationState &result) {
-  return parseSingleInitDpsOp(parser, result, /*numIns=*/2);
-}
-
-void MiopenRmsNormOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{},
-                       {getInput(), getWeight()}, {getOutput()});
-}
-
 //===----------------------------------------------------------------------===//
-// MiopenSkipRmsNormOp: ins(x, skip, weight), outs(output, residual)
+// SkipRmsNormOp: ins(input, skip, gamma), outs(output, skip_output)
 //===----------------------------------------------------------------------===//
 
-MutableOperandRange MiopenSkipRmsNormOp::getDpsInitsMutable() {
-  // output and residual are operands #4 and #5 (0=ctx,1=x,2=skip,3=weight)
+MutableOperandRange SkipRmsNormOp::getDpsInitsMutable() {
+  // output and skip_output are operands #4 and #5
+  // (0=ctx,1=input,2=skip,3=gamma)
   return MutableOperandRange(*this, /*start=*/4, /*length=*/2);
 }
 
-void MiopenSkipRmsNormOp::getEffects(
+void SkipRmsNormOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-LogicalResult MiopenSkipRmsNormOp::verify() {
+LogicalResult SkipRmsNormOp::verify() {
   return verifyDpsComputeOp(
-      *this, {getX(), getSkip(), getWeight(), getOutput(), getResidual()},
+      *this, {getInput(), getSkip(), getGamma(), getOutput(), getSkipOutput()},
       /*numInits=*/2);
-}
-
-ParseResult MiopenSkipRmsNormOp::parse(OpAsmParser &parser,
-                                       OperationState &result) {
-  return parseSingleInitDpsOp(parser, result, /*numIns=*/3);
-}
-
-void MiopenSkipRmsNormOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{},
-                       {getX(), getSkip(), getWeight()},
-                       {getOutput(), getResidual()});
 }
 
 //===----------------------------------------------------------------------===//

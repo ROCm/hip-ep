@@ -185,31 +185,93 @@ def Hip_HipblasltMatmulOp : Hip_DpsOp<"hipblaslt.matmul"> {
 
 // ===== MIOpen ops ============================================================
 
-def Hip_MiopenRmsNormOp : Hip_DpsOp<"miopen.rms_norm"> {
+def Hip_RmsNormOp : Hip_DpsOp<"rms_norm"> {
   let summary = "RMS normalization via miopenT5LayerNormForward";
+  let description = [{
+    Applies simplified (RMS) layer normalization.
+
+    Formula: output = input / sqrt(mean(input^2) + epsilon) * scale
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.rms_norm(%ctx)
+        ins(%input, %scale : memref<1x128x4096xf16, 1>, memref<4096xf16, 1>)
+        outs(%output : memref<1x128x4096xf16, 1>)
+        {axis = -1 : i64, epsilon = 9.99999974e-06 : f32, stash_type = 1 : i64}
+    ```
+
+    Supports dynamic shapes:
+    ```mlir
+    hip.rms_norm(%ctx)
+        ins(%input, %scale : memref<?x?xf16, 1>, memref<?xf16, 1>)
+        outs(%output : memref<?x?xf16, 1>)
+        {axis = -1 : i64, epsilon = 1.0e-05 : f32, stash_type = 1 : i64}
+    ```
+  }];
+
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$input,
-    Hip_TensorOrMemRef:$weight,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$scale,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$axis,
+    F32Attr:$epsilon,
+    I64Attr:$stash_type
   );
+
   // result_tensors inherited from Hip_DpsOp
-  let hasCustomAssemblyFormat = 1;
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $scale `:` type($input) `,` type($scale) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
   let hasVerifier = 1;
 }
 
-def Hip_MiopenSkipRmsNormOp : Hip_DpsOp<"miopen.skip_rms_norm"> {
+def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm"> {
   let summary = "Fused Add + RMS normalization via miopenAddLayerNormForward (T5 mode)";
+  let description = [{
+    Performs fused skip connection addition followed by RMS normalization.
+    Implements the Microsoft SkipSimplifiedLayerNormalization operator.
+
+    This operation combines two steps:
+      1. skip_output = input + skip  (residual connection)
+      2. output = RMSNorm(skip_output) * gamma  (RMS normalization)
+
+    Uses destination-passing style: output buffers are provided as arguments.
+
+    The epsilon parameter is used for numerical stability in the normalization:
+      RMSNorm(x) = x / sqrt(mean(x^2) + epsilon)
+
+    Example:
+    ```mlir
+    hip.skip_rms_norm(%ctx)
+        ins(%input, %skip, %gamma : memref<1x128x4096xf16, 1>,
+                                     memref<1x128x4096xf16, 1>,
+                                     memref<4096xf16, 1>)
+        outs(%output, %skip_output : memref<1x128x4096xf16, 1>,
+                                      memref<1x128x4096xf16, 1>)
+        {epsilon = 1.0e-05 : f32}
+    ```
+  }];
+
   let arguments = (ins
     Hip_ContextType:$ctx,
-    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$input,
     Hip_TensorOrMemRef:$skip,
-    Hip_TensorOrMemRef:$weight,
+    Hip_TensorOrMemRef:$gamma,
     Hip_TensorOrMemRef:$output,
-    Hip_TensorOrMemRef:$residual
+    Hip_TensorOrMemRef:$skip_output,
+    F32Attr:$epsilon
   );
-  // result_tensors inherited from Hip_DpsOp
-  let hasCustomAssemblyFormat = 1;
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $skip `,` $gamma `:` type($input) `,` type($skip) `,` type($gamma) `)`
+    `outs` `(` $output `,` $skip_output `:` type($output) `,` type($skip_output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
   let hasVerifier = 1;
 }
 

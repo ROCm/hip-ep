@@ -784,6 +784,143 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
+/// onnx.Custom(SimplifiedLayerNormalization) -> hip.rms_norm
+struct SimplifiedLayerNormToHip : public mlir::RewritePattern {
+  SimplifiedLayerNormToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult SimplifiedLayerNormToHip::matchAndRewrite(
+    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
+  // Check if this is SimplifiedLayerNormalization
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr ||
+      funcNameAttr.getValue() != "SimplifiedLayerNormalization")
+    return rewriter.notifyMatchFailure(
+        op, "not a SimplifiedLayerNormalization operation");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+
+  // Check operands (should be 2: input and scale)
+  if (op->getNumOperands() != 2)
+    return rewriter.notifyMatchFailure(
+        op, "expected 2 operands for SimplifiedLayerNormalization");
+
+  mlir::Value input = op->getOperand(0);
+  mlir::Value scale = op->getOperand(1);
+
+  // Extract attributes
+  auto epsilonAttr = op->getAttrOfType<mlir::FloatAttr>("epsilon");
+  if (!epsilonAttr)
+    return rewriter.notifyMatchFailure(op, "missing epsilon attribute");
+
+  auto axisAttr = op->getAttrOfType<mlir::IntegerAttr>("axis");
+  if (!axisAttr)
+    return rewriter.notifyMatchFailure(op, "missing axis attribute");
+
+  auto stashTypeAttr = op->getAttrOfType<mlir::IntegerAttr>("stash_type");
+  if (!stashTypeAttr)
+    return rewriter.notifyMatchFailure(op, "missing stash_type attribute");
+
+  // Convert axis to i64
+  auto axisI64Attr = rewriter.getI64IntegerAttr(axisAttr.getSInt());
+  auto stashTypeI64Attr = rewriter.getI64IntegerAttr(stashTypeAttr.getSInt());
+
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+
+  // Create init tensor
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+
+  // Create hip.rms_norm operation
+  auto hipOp = mlir::hip::RmsNormOp::create(rewriter, loc, resultType, context,
+                                            input, scale, init, axisI64Attr,
+                                            epsilonAttr, stashTypeI64Attr);
+
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
+/// onnx.Custom(SkipSimplifiedLayerNormalization) -> hip.skip_rms_norm
+struct SkipSimplifiedLayerNormToHip : public mlir::RewritePattern {
+  SkipSimplifiedLayerNormToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
+    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
+  // Check if this is SkipSimplifiedLayerNormalization
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr ||
+      funcNameAttr.getValue() != "SkipSimplifiedLayerNormalization")
+    return rewriter.notifyMatchFailure(
+        op, "not a SkipSimplifiedLayerNormalization operation");
+
+  // Check domain is "com.microsoft"
+  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+    return rewriter.notifyMatchFailure(
+        op,
+        "domain must be com.microsoft for SkipSimplifiedLayerNormalization");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+
+  // Check operands (should be 3: input, skip, gamma)
+  if (op->getNumOperands() != 3)
+    return rewriter.notifyMatchFailure(
+        op, "expected 3 operands for SkipSimplifiedLayerNormalization");
+
+  mlir::Value input = op->getOperand(0);
+  mlir::Value skip = op->getOperand(1);
+  mlir::Value gamma = op->getOperand(2);
+
+  // Extract epsilon attribute
+  auto epsilonAttr = op->getAttrOfType<mlir::FloatAttr>("epsilon");
+  if (!epsilonAttr)
+    return rewriter.notifyMatchFailure(op, "missing epsilon attribute");
+
+  // Should have 2 results: output and skip_output
+  if (op->getNumResults() != 2)
+    return rewriter.notifyMatchFailure(
+        op, "expected 2 results for SkipSimplifiedLayerNormalization");
+
+  auto outputType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  auto skipOutputType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
+
+  // Create init tensors
+  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
+  mlir::Value skipOutputInit =
+      createEmptyTensor(rewriter, loc, skipOutputType, input);
+
+  // Create hip.skip_rms_norm operation
+  auto hipOp = mlir::hip::SkipRmsNormOp::create(
+      rewriter, loc, {outputType, skipOutputType}, context, input, skip, gamma,
+      outputInit, skipOutputInit, epsilonAttr);
+
+  rewriter.replaceOp(op, hipOp->getResults());
+  return mlir::success();
+}
+
 //===----------------------------------------------------------------------===//
 // convertComputeOps implementation
 //===----------------------------------------------------------------------===//
@@ -800,6 +937,8 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   patterns.add<CastToHip>(ctx);
   patterns.add<ReduceSumToHip>(ctx);
   patterns.add<ConvToHip>(ctx);
+  patterns.add<SimplifiedLayerNormToHip>(ctx);
+  patterns.add<SkipSimplifiedLayerNormToHip>(ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
