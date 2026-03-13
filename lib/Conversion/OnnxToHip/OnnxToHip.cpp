@@ -1165,8 +1165,7 @@ struct GatherToHip : public mlir::RewritePattern {
     mlir::Value indices = op->getOperand(1);
 
     // Get axis attribute from ONNX Gather operation
-    int64_t axis =
-        op->getAttrOfType<mlir::IntegerAttr>("axis").getSInt();
+    int64_t axis = op->getAttrOfType<mlir::IntegerAttr>("axis").getSInt();
     auto axisAttr = rewriter.getI64IntegerAttr(axis);
 
     // Get result type
