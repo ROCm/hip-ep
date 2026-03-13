@@ -1672,34 +1672,35 @@ struct GetConstantOpLowering : public ConvertOpToLLVMPattern<GetConstantOp> {
 
     SmallVector<Value, 2> args = {adaptor.getCtx(), adaptor.getIndex()};
     auto callOp = LLVM::CallOp::create(rewriter, loc, *funcOp, args);
-    Value gpuPtr = callOp.getResult();
 
-    // Cast to GPU address space only when the memref declares one (AS != 0).
-    unsigned targetAS = 0;
-    if (auto memSpace = memRefType.getMemorySpace())
-      if (auto intAttr = dyn_cast<IntegerAttr>(memSpace))
-        targetAS = intAttr.getInt();
+    // The runtime always returns a generic pointer (AS 0).  Cast to the
+    // memref's address space (e.g. AS 1 = AMDGPU global memory) if needed.
+    FailureOr<unsigned> addrSpace =
+        getTypeConverter()->getMemRefAddressSpace(memRefType);
+    if (failed(addrSpace))
+      return failure();
 
-    Value dataPtr = gpuPtr;
-    if (targetAS != 0)
-      dataPtr = rewriter.create<LLVM::AddrSpaceCastOp>(
-          loc, LLVM::LLVMPointerType::get(rewriter.getContext(), targetAS),
-          gpuPtr);
+    Value dataPtr = callOp.getResult();
+    if (*addrSpace != 0)
+      dataPtr = LLVM::AddrSpaceCastOp::create(
+          rewriter, loc,
+          LLVM::LLVMPointerType::get(rewriter.getContext(), *addrSpace),
+          dataPtr);
 
     auto shape = memRefType.getShape();
     SmallVector<Value, 4> sizes;
     SmallVector<Value, 4> strides;
 
     for (int64_t dim : shape) {
-      Value size = rewriter.create<LLVM::ConstantOp>(
-          loc, i64Type, rewriter.getI64IntegerAttr(dim));
+      Value size = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                            rewriter.getI64IntegerAttr(dim));
       sizes.push_back(size);
     }
 
     int64_t stride = 1;
     for (int i = shape.size() - 1; i >= 0; --i) {
-      Value strideVal = rewriter.create<LLVM::ConstantOp>(
-          loc, i64Type, rewriter.getI64IntegerAttr(stride));
+      Value strideVal = LLVM::ConstantOp::create(
+          rewriter, loc, i64Type, rewriter.getI64IntegerAttr(stride));
       strides.insert(strides.begin(), strideVal);
       stride *= shape[i];
     }
@@ -1736,14 +1737,14 @@ void ConvertHipToLLVMPass::runOnOperation() {
   RewritePatternSet patterns(ctx);
 
   // HIP dialect-specific lowerings
-  patterns
-      .add<AllocOpLowering, FreeOpLowering, GetConstantOpLowering,
-           MiopenGraphOpLowering, GetPoolOpLowering, HipblasltGraphOpLowering,
-           ConvOpLowering, MatmulOpLowering, RmsNormOpLowering,
-           SkipRmsNormOpLowering, RopeOpLowering, MiopenSoftmaxOpLowering,
-           TransposeOpLowering, GatherOpLowering, SiluOpLowering,
-           SigmoidOpLowering, MulOpLowering, SubOpLowering, CastOpLowering,
-           ReduceSumOpLowering, GqaOpLowering>(typeConverter);
+  patterns.add<AllocOpLowering, FreeOpLowering, GetConstantOpLowering,
+               MiopenGraphOpLowering, GetPoolOpLowering,
+               HipblasltGraphOpLowering, ConvOpLowering, MatmulOpLowering,
+               RmsNormOpLowering, SkipRmsNormOpLowering, RopeOpLowering,
+               MiopenSoftmaxOpLowering, TransposeOpLowering, GatherOpLowering,
+               SiluOpLowering, SigmoidOpLowering, MulOpLowering, SubOpLowering,
+               CastOpLowering, ReduceSumOpLowering, GqaOpLowering>(
+      typeConverter);
   patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter,
                                                        kMiopenAdd);
   patterns.add<MemRefAllocOpLowering, MemRefDeallocOpLowering>(typeConverter);

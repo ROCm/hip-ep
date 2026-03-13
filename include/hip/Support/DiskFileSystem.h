@@ -7,6 +7,7 @@
 #include "morphizen-foundation/file_io.hpp"
 #include <cstdio>
 #include <filesystem>
+#include <memory>
 #include <string>
 #ifdef _WIN32
 #include <io.h>
@@ -14,71 +15,74 @@
 
 namespace mlir::hip {
 
+using FilePtr = std::unique_ptr<std::FILE, decltype(&std::fclose)>;
+
+inline int fileSeek(std::FILE *f, int64_t offset, int origin) {
+#ifdef _WIN32
+  return _fseeki64(f, offset, origin);
+#else
+  return fseeko(f, offset, origin);
+#endif
+}
+
+inline int64_t fileTell(std::FILE *f) {
+#ifdef _WIN32
+  return _ftelli64(f);
+#else
+  return ftello(f);
+#endif
+}
+
 class DiskFileReader : public morphizen::FileReader {
 public:
   explicit DiskFileReader(const char *path)
-      : file_(std::fopen(path, "rb")), size_(0) {
+      : file_(std::fopen(path, "rb"), &std::fclose), size_(0) {
     if (!file_)
       return;
-#ifdef _WIN32
-    _fseeki64(file_, 0, SEEK_END);
-    size_ = static_cast<std::size_t>(_ftelli64(file_));
-    _fseeki64(file_, 0, SEEK_SET);
-#else
-    fseeko(file_, 0, SEEK_END);
-    size_ = static_cast<std::size_t>(ftello(file_));
-    fseeko(file_, 0, SEEK_SET);
-#endif
-  }
-
-  ~DiskFileReader() override {
-    if (file_)
-      std::fclose(file_);
+    fileSeek(file_.get(), 0, SEEK_END);
+    auto pos = fileTell(file_.get());
+    if (pos < 0) {
+      file_.reset();
+      return;
+    }
+    size_ = static_cast<std::size_t>(pos);
+    fileSeek(file_.get(), 0, SEEK_SET);
   }
 
   bool ok() const { return file_ != nullptr; }
   std::size_t size() const override { return size_; }
 
   void rewind() const override {
-    if (file_) {
-#ifdef _WIN32
-      _fseeki64(file_, 0, SEEK_SET);
-#else
-      fseeko(file_, 0, SEEK_SET);
-#endif
-    }
+    if (file_)
+      fileSeek(file_.get(), 0, SEEK_SET);
   }
 
   std::size_t fread(void *buffer, std::size_t size) const override {
     if (!file_)
       return 0;
-    return std::fread(buffer, 1, size, file_);
+    return std::fread(buffer, 1, size, file_.get());
   }
 
 private:
-  std::FILE *file_;
+  FilePtr file_;
   std::size_t size_;
 };
 
 class DiskFileWriter : public morphizen::FileWriter {
 public:
-  explicit DiskFileWriter(const char *path) : file_(std::fopen(path, "wb")) {}
-
-  ~DiskFileWriter() override {
-    if (file_)
-      std::fclose(file_);
-  }
+  explicit DiskFileWriter(const char *path)
+      : file_(std::fopen(path, "wb"), &std::fclose) {}
 
   bool ok() const { return file_ != nullptr; }
 
   std::size_t fwrite(const void *buffer, std::size_t size) const override {
     if (!file_)
       return 0;
-    return std::fwrite(buffer, 1, size, file_);
+    return std::fwrite(buffer, 1, size, file_.get());
   }
 
 private:
-  std::FILE *file_;
+  FilePtr file_;
 };
 
 class DiskFileSystem : public morphizen::FileSystem {
