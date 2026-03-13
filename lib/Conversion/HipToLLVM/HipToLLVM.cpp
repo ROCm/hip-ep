@@ -60,7 +60,7 @@ static constexpr const char *kWrapMiopenOpTensor =
     "wrap_miopenOpTensor"; // hip.mul
 static constexpr const char *kWrapMiopenCast = "wrap_miopenCast";
 static constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
-static constexpr const char *kHipGqa = "hip_gqa";
+static constexpr const char *kWrapGQA = "wrap_group_query_attention";
 
 // Maps MLIR element type to runtime data type enum (HIPDNN_EP_DATATYPE_*).
 // Values must match the #defines in hipdnn_ep_runtime.h.
@@ -1535,7 +1535,6 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type  // element_size_bytes
     };
 
-    static constexpr const char *kWrapGQA = "wrap_group_query_attention";
     FailureOr<LLVM::LLVMFuncOp> funcOp =
         LLVM::lookupOrCreateFn(rewriter, module, kWrapGQA, paramTypes, i32Type);
     if (failed(funcOp))
