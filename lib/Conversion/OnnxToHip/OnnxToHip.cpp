@@ -1164,30 +1164,25 @@ struct GatherToHip : public mlir::RewritePattern {
     mlir::Value data = op->getOperand(0);
     mlir::Value indices = op->getOperand(1);
 
-    // Get axis attribute (default = 0)
-    int64_t axis = 0;
-    if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("axis"))
-      axis = attr.getSInt();
+    // Get axis attribute from ONNX Gather operation
+    int64_t axis =
+        op->getAttrOfType<mlir::IntegerAttr>("axis").getSInt();
+    auto axisAttr = rewriter.getI64IntegerAttr(axis);
 
     // Get result type
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
+    auto indicesType = mlir::cast<mlir::RankedTensorType>(indices.getType());
+
+    // Normalize negative axis for dimension calculations only
+    int64_t normalizedAxis = axis < 0 ? axis + dataType.getRank() : axis;
 
     // Create output tensor with dynamic shape support
     // Output shape: [data[0:axis], indices.shape, data[axis+1:]]
     llvm::SmallVector<mlir::Value> dynSizes;
-    auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
-    auto indicesType = mlir::cast<mlir::RankedTensorType>(indices.getType());
-
-    // Normalize negative axis for dimension calculations (but preserve original
-    // for attribute)
-    int64_t normalizedAxis = axis;
-    if (normalizedAxis < 0)
-      normalizedAxis += dataType.getRank();
-
-    auto axisAttr = rewriter.getI64IntegerAttr(axis);
-
     int64_t outDimIdx = 0;
+
     // Copy dimensions before axis from data
     for (int64_t i = 0; i < normalizedAxis; ++i) {
       if (outDimIdx < resultType.getRank() &&
