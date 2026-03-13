@@ -275,19 +275,50 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm"> {
   let hasVerifier = 1;
 }
 
-def Hip_MiopenRopeOp : Hip_DpsOp<"miopen.rope"> {
-  let summary = "Rotary positional embeddings (MIOpen experimental)";
+def Hip_RopeOp : Hip_DpsOp<"rope"> {
+  let summary = "Rotary position embedding (RoPE)";
+  let description = [{
+    Applies rotary position embedding to the input tensor.
+    Implements the Microsoft RotaryEmbedding operator.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Attributes:
+    - interleaved: Rotary embedding interleaved format (0 or 1)
+    - num_heads: Number of attention heads
+    - rotary_embedding_dim: Dimension of rotary embedding
+
+    Example:
+    ```mlir
+    hip.rope(%ctx)
+        ins(%input, %position_ids, %cos_cache, %sin_cache :
+            memref<1x128x4096xf16, 1>, memref<1x128xi64, 1>,
+            memref<131072x64xf16, 1>, memref<131072x64xf16, 1>)
+        outs(%output : memref<1x128x4096xf16, 1>)
+        {interleaved = 0 : i64, num_heads = 32 : i64, rotary_embedding_dim = 128 : i64}
+    ```
+  }];
+
   let arguments = (ins
     Hip_ContextType:$ctx,
-    Index:$start_pos,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$position_ids,
     Hip_TensorOrMemRef:$cos_cache,
     Hip_TensorOrMemRef:$sin_cache,
-    Hip_TensorOrMemRef:$q,
-    Hip_TensorOrMemRef:$k
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$interleaved,
+    I64Attr:$num_heads,
+    I64Attr:$rotary_embedding_dim
   );
-  // result_tensors inherited from Hip_DpsOp
-  let hasCustomAssemblyFormat = 1;
-  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $position_ids `,` $cos_cache `,` $sin_cache `:`
+        type($input) `,` type($position_ids) `,` type($cos_cache) `,` type($sin_cache)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
 }
 
 def Hip_MiopenAddOp : Hip_DpsOp<"miopen.add"> {

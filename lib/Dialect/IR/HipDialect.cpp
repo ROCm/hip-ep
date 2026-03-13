@@ -353,36 +353,18 @@ LogicalResult SkipRmsNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
-// MiopenRopeOp: ins(cos_cache, sin_cache), outs(q, k)
-// Extra scalar: start_pos (Index)
+// RopeOp: ins(input, position_ids, cos_cache, sin_cache), outs(output)
 //===----------------------------------------------------------------------===//
 
-MutableOperandRange MiopenRopeOp::getDpsInitsMutable() {
-  // 0=ctx, 1=start_pos, 2=cos_cache, 3=sin_cache, 4=q, 5=k
-  return MutableOperandRange(*this, /*start=*/4, /*length=*/2);
+MutableOperandRange RopeOp::getDpsInitsMutable() {
+  // 0=ctx, 1=input, 2=position_ids, 3=cos_cache, 4=sin_cache, 5=output
+  return MutableOperandRange(*this, /*start=*/5, /*length=*/1);
 }
 
-void MiopenRopeOp::getEffects(
+void RopeOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
-}
-
-LogicalResult MiopenRopeOp::verify() {
-  return verifyDpsComputeOp(*this,
-                            {getQ(), getK(), getCosCache(), getSinCache()},
-                            /*numInits=*/2);
-}
-
-ParseResult MiopenRopeOp::parse(OpAsmParser &parser, OperationState &result) {
-  // `(` ctx `,` start_pos `)` `ins` ... `outs` ...
-  return parseSingleInitDpsOp(parser, result, /*numIns=*/2,
-                              /*extraScalars=*/1);
-}
-
-void MiopenRopeOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getCtx(), {getStartPos()},
-                       {getCosCache(), getSinCache()}, {getQ(), getK()});
 }
 
 //===----------------------------------------------------------------------===//
