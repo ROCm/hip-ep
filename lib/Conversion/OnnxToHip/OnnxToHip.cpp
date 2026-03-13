@@ -800,11 +800,12 @@ mlir::LogicalResult SimplifiedLayerNormToHip::matchAndRewrite(
   auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
   if (!funcNameAttr ||
       funcNameAttr.getValue() != "SimplifiedLayerNormalization")
-    return mlir::failure();
+    return rewriter.notifyMatchFailure(
+        op, "not a SimplifiedLayerNormalization operation");
 
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
-    return mlir::failure();
+    return rewriter.notifyMatchFailure(op, "missing context argument");
   mlir::Value context = *ctxOrFailure;
 
   mlir::Location loc = op->getLoc();
@@ -865,16 +866,18 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
   if (!funcNameAttr ||
       funcNameAttr.getValue() != "SkipSimplifiedLayerNormalization")
-    return mlir::failure();
+    return rewriter.notifyMatchFailure(
+        op, "not a SkipSimplifiedLayerNormalization operation");
 
   // Check domain is "com.microsoft"
   auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
   if (!domainAttr || domainAttr.getValue() != "com.microsoft")
-    return mlir::failure();
+    return rewriter.notifyMatchFailure(
+        op, "domain must be com.microsoft for SkipSimplifiedLayerNormalization");
 
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
-    return mlir::failure();
+    return rewriter.notifyMatchFailure(op, "missing context argument");
   mlir::Value context = *ctxOrFailure;
 
   mlir::Location loc = op->getLoc();
