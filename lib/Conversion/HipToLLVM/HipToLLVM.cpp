@@ -46,7 +46,6 @@ static constexpr const char *kWrapMiopenT5LayerNormForward =
     "wrap_miopenT5LayerNormForward";
 static constexpr const char *kWrapMiopenAddT5LayerNormForward =
     "wrap_miopenAddT5LayerNormForward";
-static constexpr const char *kMiopenRope = "hip_miopen_rope";
 static constexpr const char *kMiopenAdd = "hip_miopen_add";
 static constexpr const char *kMiopenMul = "hip_miopen_mul";
 static constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
@@ -689,32 +688,72 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
 };
 
 // hip.miopen.rope(handle, q, k, cos_cache, sin_cache, start_pos)
-struct MiopenRopeOpLowering : public ConvertOpToLLVMPattern<MiopenRopeOp> {
+struct RopeOpLowering : public ConvertOpToLLVMPattern<RopeOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
-  matchAndRewrite(MiopenRopeOp op, OpAdaptor adaptor,
+  matchAndRewrite(RopeOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
-    Type voidType = getVoidType();
     Type ptrType = getPtrType();
-    Type indexType = getIndexType();
+    Type i64Type = rewriter.getI64Type();
+    Type i32Type = rewriter.getI32Type();
 
-    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType,
-                                    ptrType, ptrType, indexType};
+    // Extract pointers
+    Value statePtr = adaptor.getCtx();
+    Value inputPtr = extractMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value posIdsPtr = extractMemRefPtr(adaptor.getPositionIds(), rewriter, loc);
+    Value cosCachePtr = extractMemRefPtr(adaptor.getCosCache(), rewriter, loc);
+    Value sinCachePtr = extractMemRefPtr(adaptor.getSinCache(), rewriter, loc);
+    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+
+    // Extract attributes as constants
+    Value interleaved = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type,
+        rewriter.getI64IntegerAttr(op.getInterleaved()));
+    Value numHeads = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(op.getNumHeads()));
+    Value rotaryDim = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type,
+        rewriter.getI64IntegerAttr(op.getRotaryEmbeddingDim()));
+
+    // Compute num_elements (supports dynamic shapes)
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    Value inputNumElements =
+        computeNumElements(inputType, adaptor.getInput(), rewriter, loc);
+
+    auto cosCacheType = cast<MemRefType>(op.getCosCache().getType());
+    Value cosCacheNumElements =
+        computeNumElements(cosCacheType, adaptor.getCosCache(), rewriter, loc);
+
+    // Compute element_size_bytes
+    unsigned elementSizeBits =
+        inputType.getElementType().getIntOrFloatBitWidth();
+    Value elemSizeBytes = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type,
+        rewriter.getI64IntegerAttr(elementSizeBits / 8));
+
+    // Function signature: wrap_rotary_embedding(
+    //     RuntimeState* state, void* input, void* position_ids,
+    //     void* cos_cache, void* sin_cache, void* output,
+    //     int64_t interleaved, int64_t num_heads, int64_t rotary_dim,
+    //     int64_t input_num_elements, int64_t cos_cache_num_elements,
+    //     int64_t element_size_bytes)
+    SmallVector<Type, 12> paramTypes = {ptrType, ptrType, ptrType, ptrType,
+                                        ptrType, ptrType, i64Type, i64Type,
+                                        i64Type, i64Type, i64Type, i64Type};
+
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kMiopenRope, paramTypes, voidType);
+        rewriter, module, "wrap_rotary_embedding", paramTypes, i32Type);
+
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {
-        adaptor.getCtx(),
-        extractMemRefPtr(adaptor.getQ(), rewriter, loc),
-        extractMemRefPtr(adaptor.getK(), rewriter, loc),
-        extractMemRefPtr(adaptor.getCosCache(), rewriter, loc),
-        extractMemRefPtr(adaptor.getSinCache(), rewriter, loc),
-        adaptor.getStartPos()};
+    SmallVector<Value, 12> args = {
+        statePtr,    inputPtr,         posIdsPtr,           cosCachePtr,
+        sinCachePtr, outputPtr,        interleaved,         numHeads,
+        rotaryDim,   inputNumElements, cosCacheNumElements, elemSizeBytes};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -1509,7 +1548,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
       .add<AllocOpLowering, FreeOpLowering, MiopenGraphOpLowering,
            GetPoolOpLowering, HipblasltGraphOpLowering, ConvOpLowering,
            HipblasltMatmulOpLowering, RmsNormOpLowering, SkipRmsNormOpLowering,
-           MiopenRopeOpLowering, MiopenSoftmaxOpLowering, TransposeOpLowering,
+           RopeOpLowering, MiopenSoftmaxOpLowering, TransposeOpLowering,
            GatherOpLowering, SiluOpLowering, SigmoidOpLowering, MulOpLowering,
            SubOpLowering, CastOpLowering, ReduceSumOpLowering, GqaOpLowering>(
           typeConverter);
