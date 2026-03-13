@@ -417,16 +417,32 @@ def Hip_TransposeOp : Hip_DpsOp<"transpose"> {
 }
 
 def Hip_GatherOp : Hip_DpsOp<"gather"> {
-  let summary = "Embedding table lookup";
+  let summary = "Gather elements along an axis";
+  let description = [{
+    Gathers elements from data tensor along the given axis using indices.
+    Implements the ONNX Gather operator.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.gather(%ctx) ins(%data, %indices : memref<3x4xf32, 1>, memref<2xi64, 1>)
+                     outs(%output : memref<2x4xf32, 1>) {axis = 0 : i64}
+    ```
+  }];
   let arguments = (ins
     Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
     Hip_TensorOrMemRef:$indices,
-    Hip_TensorOrMemRef:$table,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$axis
   );
   // result_tensors inherited from Hip_DpsOp
-  let hasCustomAssemblyFormat = 1;
-  let hasVerifier = 1;
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $indices `:` type($data) `,` type($indices) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
 }
 
 def Hip_SiluOp : Hip_DpsOp<"silu"> {
