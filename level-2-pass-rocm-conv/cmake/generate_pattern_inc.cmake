@@ -6,7 +6,7 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_custom_command (
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/conv_pattern_json.hpp
   COMMAND ${CMAKE_COMMAND} -E env
-    $<TARGET_FILE:Python3::Interpreter> ${morphizen_SOURCE_DIR}/tools/xxd.py
+    $<TARGET_FILE:Python3::Interpreter> ${CMAKE_SOURCE_DIR}/cmake/xxd.py
     "--column" 16
     "--var" conv_json
     --output ${CMAKE_CURRENT_BINARY_DIR}/conv_pattern_json.hpp
