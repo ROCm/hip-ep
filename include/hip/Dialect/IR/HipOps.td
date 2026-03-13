@@ -560,21 +560,70 @@ def Hip_ReduceSumOp : Hip_DpsOp<"reduce_sum"> {
 }
 
 def Hip_GqaOp : Hip_DpsOp<"gqa"> {
-  let summary = "Grouped query attention";
+  let summary = "Group Query Attention (com.microsoft GQA)";
+  let description = [{
+    Multi-head attention with grouped key/value heads (GQA/MQA).
+    Implements the com.microsoft GroupQueryAttention operator for LLM inference.
+
+    Concatenates new key/value with past KV cache and computes scaled
+    dot-product attention with grouped heads.
+
+    Uses destination-passing style: output buffers are provided as arguments.
+
+    Operand layout (for getDpsInitsMutable): operands 0..7 are inputs
+    (ctx, query, key, value, past_key, past_value, seqlens_k, total_seq_len);
+    operands 8..10 are DPS inits (output, present_key, present_value).
+
+    Attributes:
+    - num_heads: Number of query attention heads
+    - kv_num_heads: Number of key/value heads (< num_heads for GQA)
+    - scale: Attention score scaling factor (1/sqrt(head_dim))
+    - softcap: Soft capping value for attention logits (0 = disabled)
+    - do_rotary: Apply rotary positional embedding (0 or 1)
+    - rotary_interleaved: Rotary embedding interleaved format (0 or 1)
+
+    Example:
+    ```mlir
+    hip.gqa(%ctx)
+        ins(%query, %key, %value, %past_key, %past_value, %seqlens_k, %total_seq_len :
+            memref<1x1x4096xf16, 1>, ...)
+        outs(%output, %present_key, %present_value : ...)
+        {num_heads = 32, kv_num_heads = 8, scale = 0.0884,
+         softcap = 0.0, do_rotary = 0, rotary_interleaved = 0}
+    ```
+  }];
+
   let arguments = (ins
     Hip_ContextType:$ctx,
-    Index:$layer,
-    Index:$start_pos,
-    Index:$seq_len,
-    Hip_TensorOrMemRef:$q,
-    Hip_TensorOrMemRef:$k,
-    Hip_TensorOrMemRef:$v,
-    Hip_TensorOrMemRef:$kv_cache,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$query,
+    Hip_TensorOrMemRef:$key,
+    Hip_TensorOrMemRef:$value,
+    Hip_TensorOrMemRef:$past_key,
+    Hip_TensorOrMemRef:$past_value,
+    Hip_TensorOrMemRef:$seqlens_k,
+    Hip_TensorOrMemRef:$total_seq_len,
+    Hip_TensorOrMemRef:$output,
+    Hip_TensorOrMemRef:$present_key,
+    Hip_TensorOrMemRef:$present_value,
+    I64Attr:$num_heads,
+    I64Attr:$kv_num_heads,
+    F32Attr:$scale,
+    F32Attr:$softcap,
+    I64Attr:$do_rotary,
+    I64Attr:$rotary_interleaved
   );
-  // result_tensors inherited from Hip_DpsOp
-  let hasCustomAssemblyFormat = 1;
-  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $query `,` $key `,` $value `,`
+        $past_key `,` $past_value `,` $seqlens_k `,` $total_seq_len `:`
+        type($query) `,` type($key) `,` type($value) `,`
+        type($past_key) `,` type($past_value) `,` type($seqlens_k) `,` type($total_seq_len)
+    `)`
+    `outs` `(` $output `,` $present_key `,` $present_value `:`
+              type($output) `,` type($present_key) `,` type($present_value) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
 }
 
 #endif // HIP_OPS
