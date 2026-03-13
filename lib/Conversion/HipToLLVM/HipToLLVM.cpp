@@ -100,6 +100,30 @@ static Value extractMemRefPtr(Value memrefDesc,
   return ptr;
 }
 
+// Helper: compute total number of elements in a memref, handling both static
+// and dynamic dimensions.
+static Value computeNumElements(MemRefType type, Value descriptor,
+                                ConversionPatternRewriter &rewriter,
+                                Location loc) {
+  MemRefDescriptor desc(descriptor);
+  Type i64Type = rewriter.getI64Type();
+  Value num = LLVM::ConstantOp::create(
+      rewriter, loc, i64Type, rewriter.getI64IntegerAttr(1));
+
+  for (auto dimIdx : llvm::seq<int64_t>(type.getRank())) {
+    Value dimSize;
+    if (type.isDynamicDim(dimIdx)) {
+      dimSize = desc.size(rewriter, loc, dimIdx);
+    } else {
+      dimSize = LLVM::ConstantOp::create(
+          rewriter, loc, i64Type,
+          rewriter.getI64IntegerAttr(type.getDimSize(dimIdx)));
+    }
+    num = LLVM::MulOp::create(rewriter, loc, num, dimSize);
+  }
+  return num;
+}
+
 // ===== Convolution ops ================================
 
 // hip.conv(%ctx, %input, %weights, %bias, %output)
@@ -537,56 +561,34 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
     Type i64Type = rewriter.getI64Type();
     Type f32Type = rewriter.getF32Type();
 
-    auto getAlignedPtr = [&](Value memrefDesc) -> Value {
-      MemRefDescriptor desc(memrefDesc);
-      Value ptr = desc.alignedPtr(rewriter, loc);
-      if (cast<LLVM::LLVMPointerType>(ptr.getType()).getAddressSpace() != 0)
-        ptr = rewriter.create<LLVM::AddrSpaceCastOp>(loc, ptrType, ptr);
-      return ptr;
-    };
-
-    auto createI64Const = [&](int64_t value) -> Value {
-      return rewriter.create<LLVM::ConstantOp>(
-          loc, i64Type, rewriter.getI64IntegerAttr(value));
-    };
-
     // Extract pointers
     Value statePtr = adaptor.getCtx();
-    Value inputPtr = getAlignedPtr(adaptor.getInput());
-    Value scalePtr = getAlignedPtr(adaptor.getScale());
-    Value outputPtr = getAlignedPtr(adaptor.getOutput());
+    Value inputPtr = extractMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value scalePtr = extractMemRefPtr(adaptor.getScale(), rewriter, loc);
+    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     // Compute num_elements with dynamic shape support
     auto inputType = cast<MemRefType>(op.getInput().getType());
-    MemRefDescriptor inputDesc(adaptor.getInput());
-
-    auto computeNumElements = [&](MemRefType type, Value descriptor) -> Value {
-      MemRefDescriptor desc(descriptor);
-      Value num = createI64Const(1);
-      for (auto dimIdx : llvm::seq<int64_t>(type.getRank())) {
-        Value dimSize = type.isDynamicDim(dimIdx)
-                            ? desc.size(rewriter, loc, dimIdx)
-                            : createI64Const(type.getDimSize(dimIdx));
-        num = LLVM::MulOp::create(rewriter, loc, num, dimSize);
-      }
-      return num;
-    };
-
-    Value inputNumElements = computeNumElements(inputType, adaptor.getInput());
+    Value inputNumElements =
+        computeNumElements(inputType, adaptor.getInput(), rewriter, loc);
 
     auto scaleType = cast<MemRefType>(op.getScale().getType());
-    Value scaleNumElements = computeNumElements(scaleType, adaptor.getScale());
+    Value scaleNumElements =
+        computeNumElements(scaleType, adaptor.getScale(), rewriter, loc);
 
     // Compute element_size_bytes based on element type
     Type elementType = inputType.getElementType();
     unsigned elementSizeBytes = elementType.getIntOrFloatBitWidth() / 8;
-    Value elementSizeBytesVal = createI64Const(elementSizeBytes);
+    Value elementSizeBytesVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(elementSizeBytes));
 
     // Extract attributes
-    Value axisVal = createI64Const(op.getAxis());
+    Value axisVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(op.getAxis()));
     Value epsilonVal =
-        rewriter.create<LLVM::ConstantOp>(loc, f32Type, op.getEpsilonAttr());
-    Value stashTypeVal = createI64Const(op.getStashType());
+        LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
+    Value stashTypeVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(op.getStashType()));
 
     // Runtime function signature (10 params)
     SmallVector<Type> paramTypes = {
@@ -632,54 +634,32 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     Type i64Type = rewriter.getI64Type();
     Type f32Type = rewriter.getF32Type();
 
-    auto getAlignedPtr = [&](Value memrefDesc) -> Value {
-      MemRefDescriptor desc(memrefDesc);
-      Value ptr = desc.alignedPtr(rewriter, loc);
-      if (cast<LLVM::LLVMPointerType>(ptr.getType()).getAddressSpace() != 0)
-        ptr = rewriter.create<LLVM::AddrSpaceCastOp>(loc, ptrType, ptr);
-      return ptr;
-    };
-
-    auto createI64Const = [&](int64_t value) -> Value {
-      return rewriter.create<LLVM::ConstantOp>(
-          loc, i64Type, rewriter.getI64IntegerAttr(value));
-    };
-
-    auto computeNumElements = [&](MemRefType type, Value descriptor) -> Value {
-      MemRefDescriptor desc(descriptor);
-      Value num = createI64Const(1);
-      for (auto dimIdx : llvm::seq<int64_t>(type.getRank())) {
-        Value dimSize = type.isDynamicDim(dimIdx)
-                            ? desc.size(rewriter, loc, dimIdx)
-                            : createI64Const(type.getDimSize(dimIdx));
-        num = LLVM::MulOp::create(rewriter, loc, num, dimSize);
-      }
-      return num;
-    };
-
     // Extract pointers
     Value statePtr = adaptor.getCtx();
-    Value inputPtr = getAlignedPtr(adaptor.getInput());
-    Value skipPtr = getAlignedPtr(adaptor.getSkip());
-    Value gammaPtr = getAlignedPtr(adaptor.getGamma());
-    Value outputPtr = getAlignedPtr(adaptor.getOutput());
-    Value skipOutputPtr = getAlignedPtr(adaptor.getSkipOutput());
+    Value inputPtr = extractMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value skipPtr = extractMemRefPtr(adaptor.getSkip(), rewriter, loc);
+    Value gammaPtr = extractMemRefPtr(adaptor.getGamma(), rewriter, loc);
+    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value skipOutputPtr = extractMemRefPtr(adaptor.getSkipOutput(), rewriter, loc);
 
     // Compute num_elements for input and gamma
     auto inputType = cast<MemRefType>(op.getInput().getType());
-    Value inputNumElements = computeNumElements(inputType, adaptor.getInput());
+    Value inputNumElements =
+        computeNumElements(inputType, adaptor.getInput(), rewriter, loc);
 
     auto gammaType = cast<MemRefType>(op.getGamma().getType());
-    Value gammaNumElements = computeNumElements(gammaType, adaptor.getGamma());
+    Value gammaNumElements =
+        computeNumElements(gammaType, adaptor.getGamma(), rewriter, loc);
 
     // Compute element_size_bytes based on element type
     Type elementType = inputType.getElementType();
     unsigned elementSizeBytes = elementType.getIntOrFloatBitWidth() / 8;
-    Value elementSizeBytesVal = createI64Const(elementSizeBytes);
+    Value elementSizeBytesVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(elementSizeBytes));
 
     // Extract epsilon attribute
     Value epsilonVal =
-        rewriter.create<LLVM::ConstantOp>(loc, f32Type, op.getEpsilonAttr());
+        LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
 
     // Runtime function signature (10 params)
     SmallVector<Type> paramTypes = {
