@@ -873,7 +873,8 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
   if (!domainAttr || domainAttr.getValue() != "com.microsoft")
     return rewriter.notifyMatchFailure(
-        op, "domain must be com.microsoft for SkipSimplifiedLayerNormalization");
+        op,
+        "domain must be com.microsoft for SkipSimplifiedLayerNormalization");
 
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))

@@ -107,8 +107,8 @@ static Value computeNumElements(MemRefType type, Value descriptor,
                                 Location loc) {
   MemRefDescriptor desc(descriptor);
   Type i64Type = rewriter.getI64Type();
-  Value num = LLVM::ConstantOp::create(
-      rewriter, loc, i64Type, rewriter.getI64IntegerAttr(1));
+  Value num = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                       rewriter.getI64IntegerAttr(1));
 
   for (auto dimIdx : llvm::seq<int64_t>(type.getRank())) {
     Value dimSize;
@@ -640,7 +640,8 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     Value skipPtr = extractMemRefPtr(adaptor.getSkip(), rewriter, loc);
     Value gammaPtr = extractMemRefPtr(adaptor.getGamma(), rewriter, loc);
     Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
-    Value skipOutputPtr = extractMemRefPtr(adaptor.getSkipOutput(), rewriter, loc);
+    Value skipOutputPtr =
+        extractMemRefPtr(adaptor.getSkipOutput(), rewriter, loc);
 
     // Compute num_elements for input and gamma
     auto inputType = cast<MemRefType>(op.getInput().getType());
