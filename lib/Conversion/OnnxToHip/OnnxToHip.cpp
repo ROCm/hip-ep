@@ -1145,6 +1145,86 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
 }
 
 //===----------------------------------------------------------------------===//
+// ONNX Gather → HIP Gather
+//===----------------------------------------------------------------------===//
+
+struct GatherToHip : public mlir::RewritePattern {
+  GatherToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Gather", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (mlir::failed(ctxOrFailure))
+      return rewriter.notifyMatchFailure(op, "missing context argument");
+    mlir::Value context = *ctxOrFailure;
+
+    mlir::Location loc = op->getLoc();
+    mlir::Value data = op->getOperand(0);
+    mlir::Value indices = op->getOperand(1);
+
+    // Get axis attribute (default = 0)
+    int64_t axis = 0;
+    if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("axis"))
+      axis = attr.getSInt();
+
+    // Get result type
+    auto resultType =
+        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+
+    // Create output tensor with dynamic shape support
+    // Output shape: [data[0:axis], indices.shape, data[axis+1:]]
+    llvm::SmallVector<mlir::Value> dynSizes;
+    auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
+    auto indicesType = mlir::cast<mlir::RankedTensorType>(indices.getType());
+
+    // Normalize negative axis for dimension calculations (but preserve original
+    // for attribute)
+    int64_t normalizedAxis = axis;
+    if (normalizedAxis < 0)
+      normalizedAxis += dataType.getRank();
+
+    auto axisAttr = rewriter.getI64IntegerAttr(axis);
+
+    int64_t outDimIdx = 0;
+    // Copy dimensions before axis from data
+    for (int64_t i = 0; i < normalizedAxis; ++i) {
+      if (outDimIdx < resultType.getRank() &&
+          resultType.isDynamicDim(outDimIdx))
+        dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));
+      outDimIdx++;
+    }
+    // Copy all dimensions from indices
+    for (int64_t i = 0; i < indicesType.getRank(); ++i) {
+      if (outDimIdx < resultType.getRank() &&
+          resultType.isDynamicDim(outDimIdx))
+        dynSizes.push_back(
+            mlir::tensor::DimOp::create(rewriter, loc, indices, i));
+      outDimIdx++;
+    }
+    // Copy dimensions after axis from data
+    for (int64_t i = normalizedAxis + 1; i < dataType.getRank(); ++i) {
+      if (outDimIdx < resultType.getRank() &&
+          resultType.isDynamicDim(outDimIdx))
+        dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));
+      outDimIdx++;
+    }
+
+    mlir::Value init =
+        mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                      resultType.getElementType(), dynSizes);
+
+    // Create hip.gather operation
+    auto gatherOp = mlir::hip::GatherOp::create(
+        rewriter, loc, resultType, context, data, indices, init, axisAttr);
+
+    rewriter.replaceOp(op, gatherOp->getResult(0));
+    return mlir::success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // convertComputeOps implementation
 //===----------------------------------------------------------------------===//
 
@@ -1159,6 +1239,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   patterns.add<SubToHip>(ctx);
   patterns.add<CastToHip>(ctx);
   patterns.add<ReduceSumToHip>(ctx);
+  patterns.add<GatherToHip>(ctx);
   patterns.add<ConvToHip>(ctx);
   patterns.add<SimplifiedLayerNormToHip>(ctx);
   patterns.add<SkipSimplifiedLayerNormToHip>(ctx);

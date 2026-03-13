@@ -50,7 +50,7 @@ static constexpr const char *kMiopenAdd = "hip_miopen_add";
 static constexpr const char *kMiopenMul = "hip_miopen_mul";
 static constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
 static constexpr const char *kHipTranspose = "hip_transpose";
-static constexpr const char *kHipGather = "hip_gather";
+static constexpr const char *kWrapGather = "wrap_gather";
 static constexpr const char *kHipSilu = "hip_silu";
 static constexpr const char *kWrapMiopenActivationForward =
     "wrap_miopenActivationForward"; // hip.sigmoid
@@ -958,19 +958,54 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
-    Type voidType = getVoidType();
     Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
 
-    SmallVector<Type> paramTypes(4, ptrType);
+    Value statePtr = adaptor.getCtx();
+    Value dataPtr = extractMemRefPtr(adaptor.getData(), rewriter, loc);
+    Value indicesPtr = extractMemRefPtr(adaptor.getIndices(), rewriter, loc);
+    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+
+    // Compute data_num_elements
+    auto dataType = cast<MemRefType>(op.getData().getType());
+    Value dataNumElementsVal =
+        computeNumElements(dataType, adaptor.getData(), rewriter, loc);
+
+    // Compute output_num_elements
+    auto outputType = cast<MemRefType>(op.getOutput().getType());
+    Value outputNumElementsVal =
+        computeNumElements(outputType, adaptor.getOutput(), rewriter, loc);
+
+    // element_size_bytes
+    unsigned elementSizeBytes =
+        dataType.getElementType().getIntOrFloatBitWidth() / 8;
+    Value elemSizeVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(elementSizeBytes));
+
+    // axis attribute
+    Value axisVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(op.getAxis()));
+
+    // int wrap_gather(RuntimeState* state, void* data, void* indices,
+    //                 void* output, int64_t axis, int64_t data_num_elements,
+    //                 int64_t output_num_elements, int64_t element_size_bytes)
+    SmallVector<Type, 8> paramTypes = {ptrType, ptrType, ptrType, ptrType,
+                                       i64Type, i64Type, i64Type, i64Type};
+
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kHipGather, paramTypes, voidType);
+        rewriter, module, kWrapGather, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {
-        adaptor.getCtx(), extractMemRefPtr(adaptor.getIndices(), rewriter, loc),
-        extractMemRefPtr(adaptor.getTable(), rewriter, loc),
-        extractMemRefPtr(adaptor.getOutput(), rewriter, loc)};
+    SmallVector<Value> args = {statePtr,
+                               dataPtr,
+                               indicesPtr,
+                               outputPtr,
+                               axisVal,
+                               dataNumElementsVal,
+                               outputNumElementsVal,
+                               elemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -1414,12 +1449,12 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     Type f32Type = rewriter.getF32Type();
 
     auto createI64Const = [&](int64_t value) -> Value {
-      return rewriter.create<LLVM::ConstantOp>(
-          loc, i64Type, rewriter.getI64IntegerAttr(value));
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
     };
     auto createF32Const = [&](float value) -> Value {
-      return rewriter.create<LLVM::ConstantOp>(loc, f32Type,
-                                               rewriter.getF32FloatAttr(value));
+      return LLVM::ConstantOp::create(rewriter, loc, f32Type,
+                                      rewriter.getF32FloatAttr(value));
     };
 
     Value statePtr = adaptor.getCtx();
@@ -1439,7 +1474,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         extractMemRefPtr(adaptor.getPresentValue(), rewriter, loc);
 
     // cos/sin cache: NULL pointers for now (RoPE done via separate op)
-    Value nullPtr = rewriter.create<LLVM::ZeroOp>(loc, ptrType);
+    Value nullPtr = LLVM::ZeroOp::create(rewriter, loc, ptrType);
     Value cosCachePtr = nullPtr;
     Value sinCachePtr = nullPtr;
 

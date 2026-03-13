@@ -479,20 +479,6 @@ void GatherOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-LogicalResult GatherOp::verify() {
-  return verifyDpsComputeOp(*this, {getIndices(), getTable(), getOutput()},
-                            /*numInits=*/1);
-}
-
-ParseResult GatherOp::parse(OpAsmParser &parser, OperationState &result) {
-  return parseSingleInitDpsOp(parser, result, /*numIns=*/2);
-}
-
-void GatherOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{},
-                       {getIndices(), getTable()}, {getOutput()});
-}
-
 //===----------------------------------------------------------------------===//
 // SiluOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
