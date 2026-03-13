@@ -47,6 +47,8 @@ module {
   // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<1x128x4096xf16>
   // CHECK: hip.rope(%[[CTX]]) ins(%[[INPUT]], %[[POS_IDS]], %[[COS]], %[[SIN]] : tensor<1x128x4096xf16>, tensor<1x128xi64>, tensor<131072x64xf16>, tensor<131072x64xf16>) outs(%[[INIT]] : tensor<1x128x4096xf16>) {interleaved = 0 : i64, num_heads = 32 : i64, rotary_embedding_dim = 128 : i64} : tensor<1x128x4096xf16>
   // CHECK-NOT: onnx.Custom
+  // CHECK-NOT: hip.alloc
+  // CHECK-NOT: hip.copy
 
   // ===== Dynamic shape test =====
 
@@ -78,6 +80,8 @@ module {
   // CHECK: %[[INIT:.*]] = tensor.empty({{.*}}, {{.*}}, {{.*}}) : tensor<?x?x?xf16>
   // CHECK: hip.rope(%[[CTX]]) ins(%[[INPUT]], %[[POS_IDS]], %[[COS]], %[[SIN]] : tensor<?x?x?xf16>, tensor<?x?xi64>, tensor<?x?xf16>, tensor<?x?xf16>) outs(%[[INIT]] : tensor<?x?x?xf16>) {interleaved = 0 : i64, num_heads = 32 : i64, rotary_embedding_dim = 128 : i64} : tensor<?x?x?xf16>
   // CHECK-NOT: onnx.Custom
+  // CHECK-NOT: hip.alloc
+  // CHECK-NOT: hip.copy
 
   // ===== Explicit attributes (no inference) =====
 
@@ -103,4 +107,6 @@ module {
   // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<1x128x4096xf16>
   // CHECK: hip.rope(%[[CTX]]) ins(%[[INPUT]], %[[POS_IDS]], %[[COS]], %[[SIN]] : tensor<1x128x4096xf16>, tensor<1x128xi64>, tensor<131072x64xf16>, tensor<131072x64xf16>) outs(%[[INIT]] : tensor<1x128x4096xf16>) {interleaved = 1 : i64, num_heads = 32 : i64, rotary_embedding_dim = 128 : i64} : tensor<1x128x4096xf16>
   // CHECK-NOT: onnx.Custom
+  // CHECK-NOT: hip.alloc
+  // CHECK-NOT: hip.copy
 }
