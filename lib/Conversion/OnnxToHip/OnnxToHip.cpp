@@ -668,7 +668,7 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
     auto axesAttr =
         mlir::DenseIntElementsAttr::get(axesType, llvm::ArrayRef(axesVec));
     axesOperand =
-        rewriter.create<mlir::arith::ConstantOp>(loc, axesType, axesAttr);
+        mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttr);
   }
 
   // Extract keepdims attribute (defaults to 1 in ONNX)
@@ -789,8 +789,8 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   attrs.push_back(rewriter.getNamedAttr("group", groupAttr));
 
   // Create hip.conv operation using generic builder
-  auto hipOp = rewriter.create<mlir::hip::ConvOp>(
-      loc, mlir::TypeRange{resultType}, operands, attrs);
+  auto hipOp = mlir::hip::ConvOp::create(
+      rewriter, loc, mlir::TypeRange{resultType}, operands, attrs);
 
   rewriter.replaceOp(op, hipOp.getResult(0));
   return mlir::success();
@@ -1446,16 +1446,19 @@ void ConvertOnnxToHipPass::runOnOperation() {
     manifest["constants"] = std::move(extState->manifestEntries);
 
     auto jsonWriter = diskFs.create_writer_template(jsonPath.c_str());
-    if (jsonWriter) {
-      std::string jsonStr;
-      llvm::raw_string_ostream jsonOs(jsonStr);
-      jsonOs << llvm::formatv("{0:2}", llvm::json::Value(std::move(manifest)));
-      jsonWriter->fwrite(jsonStr.data(), jsonStr.size());
+    if (!jsonWriter) {
+      module.emitError("failed to open constants manifest via FileSystem: " +
+                       jsonPath);
+      return signalPassFailure();
     }
+    std::string jsonStr;
+    llvm::raw_string_ostream jsonOs(jsonStr);
+    jsonOs << llvm::formatv("{0:2}", llvm::json::Value(std::move(manifest)));
+    jsonWriter->fwrite(jsonStr.data(), jsonStr.size());
 
-    module.emitRemark("externalized ")
-        << extState->constantIndex << " constants (" << extState->currentOffset
-        << " bytes) to " << extState->binFileName;
+    LLVM_DEBUG(llvm::dbgs() << "externalized " << extState->constantIndex
+                            << " constants (" << extState->currentOffset
+                            << " bytes) to " << extState->binFileName << "\n");
   } else if (extState) {
     extState->writer.reset();
   }
