@@ -287,28 +287,19 @@ void ConvOp::getEffects(
 // HipblasltMatmulOp: ins(A, B), outs(C)
 //===----------------------------------------------------------------------===//
 
-MutableOperandRange HipblasltMatmulOp::getDpsInitsMutable() {
-  return getCMutable();
+//===----------------------------------------------------------------------===//
+// MatmulOp: ins(A, B), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MatmulOp::getDpsInitsMutable() {
+  // 0=ctx, 1=A, 2=B, 3=output
+  return getOutputMutable();
 }
 
-void HipblasltMatmulOp::getEffects(
+void MatmulOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
-}
-
-LogicalResult HipblasltMatmulOp::verify() {
-  return verifyDpsComputeOp(*this, {getA(), getB(), getC()}, /*numInits=*/1);
-}
-
-ParseResult HipblasltMatmulOp::parse(OpAsmParser &parser,
-                                     OperationState &result) {
-  return parseSingleInitDpsOp(parser, result, /*numIns=*/2);
-}
-
-void HipblasltMatmulOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{}, {getA(), getB()},
-                       {getC()});
 }
 
 //===----------------------------------------------------------------------===//

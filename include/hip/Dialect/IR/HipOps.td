@@ -170,17 +170,44 @@ def Hip_ConvOp : Hip_DpsOp<"conv"> {
 
 // ===== hipBLASLt ops =========================================================
 
-def Hip_HipblasltMatmulOp : Hip_DpsOp<"hipblaslt.matmul"> {
-  let summary = "Matrix multiply C = A @ B via hipBLASLt";
+def Hip_MatmulOp : Hip_DpsOp<"matmul"> {
+  let summary = "Matrix multiplication (supports batched N-D x N-D)";
+  let description = [{
+    Performs matrix multiplication: output = A @ B
+    Supports batched operation (leading dimensions are batch dimensions).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Unlike hip.gemm, this has no alpha/beta/transA/transB/bias — it maps
+    directly to onnx.MatMul semantics.
+
+    Example (2D):
+    ```mlir
+    hip.matmul(%ctx) ins(%A, %B : memref<128x4096xf32, 1>,
+                                  memref<4096x1024xf32, 1>)
+                     outs(%output : memref<128x1024xf32, 1>)
+    ```
+
+    Example (3D batched):
+    ```mlir
+    hip.matmul(%ctx) ins(%A, %B : memref<1x128x4096xf16, 1>,
+                                  memref<4096x1024xf16, 1>)
+                     outs(%output : memref<1x128x1024xf16, 1>)
+    ```
+  }];
+
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$A,
     Hip_TensorOrMemRef:$B,
-    Hip_TensorOrMemRef:$C
+    Hip_TensorOrMemRef:$output
   );
-  // result_tensors inherited from Hip_DpsOp
-  let hasCustomAssemblyFormat = 1;
-  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $A `,` $B `:` type($A) `,` type($B) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
 }
 
 // ===== MIOpen ops ============================================================
