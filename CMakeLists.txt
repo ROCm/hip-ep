@@ -87,11 +87,12 @@ endif()
 # UDNA Compiler Libraries
 # ==============================================================================
 add_subdirectory(proto)
-add_subdirectory(lib)
 
 if(NOT BUILD_MOCK_RUNTIME)
     add_subdirectory(3rd-party/custom_kernels)
 endif()
+
+add_subdirectory(lib)
 
 # ==============================================================================
 # TheRock ROCm SDK Configuration
@@ -145,21 +146,21 @@ if(BUILD_EP)
     endforeach()
   endif()
 
-  add_subdirectory(kernels)
+  # add_subdirectory(kernels)
 
-  add_subdirectory(rocm-pass-common)
-  add_subdirectory(level-1-pass-rocm)
+  # add_subdirectory(rocm-pass-common)
+  # add_subdirectory(level-1-pass-rocm)
 
-  add_subdirectory(level-2-pass-rocm-conv)
-  add_subdirectory(level-2-pass-rocm-gemm)
-  add_subdirectory(level-2-pass-rocm-matmul)
-  add_subdirectory(level-2-pass-rocm-mul)
-  add_subdirectory(level-2-pass-rocm-softmax)
-  add_subdirectory(level-2-pass-rocm-reshape)
-  add_subdirectory(level-2-pass-rocm-transpose)
-  add_subdirectory(level-2-pass-rocm-tile)
+  # add_subdirectory(level-2-pass-rocm-conv)
+  # add_subdirectory(level-2-pass-rocm-gemm)
+  # add_subdirectory(level-2-pass-rocm-matmul)
+  # add_subdirectory(level-2-pass-rocm-mul)
+  # add_subdirectory(level-2-pass-rocm-softmax)
+  # add_subdirectory(level-2-pass-rocm-reshape)
+  # add_subdirectory(level-2-pass-rocm-transpose)
+  # add_subdirectory(level-2-pass-rocm-tile)
 
-  add_subdirectory(custom-op-rocm)
+  # add_subdirectory(custom-op-rocm)
 endif()
 
 # MLIR backend (experimental, requires morphizen)
