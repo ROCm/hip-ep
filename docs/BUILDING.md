@@ -135,7 +135,7 @@ cmake -S . -B ../build/$(basename $PWD) \
 
 ### With MorphiZen Execution Provider (BUILD_EP=ON)
 
-**Prerequisites**: Complete steps 1-3 (download prebuilt dependencies, build additional dependencies, build ONNX Runtime) and install [TheRock SDK](https://therock-nightly-tarball.s3.amazonaws.com/index.html).
+**Prerequisites**: Complete steps 1-3 (download prebuilt dependencies, build additional dependencies, build ONNX Runtime) and install [TheRock SDK](https://repo.amd.com/rocm/tarball/).
 
 Run from the project root:
 
