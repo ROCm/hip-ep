@@ -128,7 +128,7 @@ workspace/
 
 TheRock SDK provides HIP/ROCm runtime for Windows.
 
-**Download:** https://therock-nightly-tarball.s3.amazonaws.com/index.html
+**Download base URL:** `https://repo.amd.com/rocm/tarball/`
 
 1. **Determine your GPU architecture** (before downloading):
 
@@ -136,10 +136,10 @@ TheRock SDK provides HIP/ROCm runtime for Windows.
 
    | GPU Model | GFX Series | TheRock Tarball |
    |-----------|------------|-----------------|
-   | Radeon RX 7900/7800/7700/7600 | gfx110X | `therock-dist-windows-gfx110X-all-*.tar.gz` |
-   | Radeon RX 6900/6800/6700/6600 | gfx103X | `therock-dist-windows-gfx103X-all-*.tar.gz` |
-   | Radeon 880M/780M (Strix Point) | gfx115X | `therock-dist-windows-gfx115X-all-*.tar.gz` |
-   | Radeon 890M (Strix Halo) | gfx120X | `therock-dist-windows-gfx120X-all-*.tar.gz` |
+   | Radeon RX 7900/7800/7700/7600 | gfx110X | `therock-dist-windows-gfx110X-7.11.0.tar.gz` |
+   | Radeon RX 6900/6800/6700/6600 | gfx103X | `therock-dist-windows-gfx103X-7.11.0.tar.gz` |
+   | Radeon 880M/780M (Strix Point) | gfx115X | `therock-dist-windows-gfx115X-7.11.0.tar.gz` |
+   | Radeon 890M (Strix Halo) | gfx120X | `therock-dist-windows-gfx120X-7.11.0.tar.gz` |
 
 2. **Create workspace and extract TheRock**:
    ```bash
@@ -148,7 +148,7 @@ TheRock SDK provides HIP/ROCm runtime for Windows.
 
    # Extract TheRock tarball to workspace/therock
    mkdir therock
-   tar -xzf /path/to/therock-dist-windows-gfx115X-all-*.tar.gz -C therock
+   tar -xzf /path/to/therock-dist-windows-gfx115X-7.11.0.tar.gz -C therock
    ```
 
 3. **Verify installation**:
