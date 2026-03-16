@@ -21,6 +21,11 @@ FlatBuffers, and Protobuf binaries instead of compiling them from source.
 
 **MSVC Environment Setup:**
 - Launch git-bash from "Developer Command Prompt for VS XXXX" (where XXXX is your VS version: 2019, 2022, 2026, etc.) to ensure MSVC environment is available
+
+  ```bash
+  # Verify
+  echo $INCLUDE  # Expect to paths which related to "Microsoft Visual Studio"
+  ```
 - Or launch Claude Code from Developer Command Prompt
 
 **sccache installation:**
