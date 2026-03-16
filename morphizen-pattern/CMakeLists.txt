@@ -103,6 +103,13 @@ target_compile_options(morphizen-pattern PRIVATE ${MORPHIZEN_COMPILER_OPTIONS})
 if(MSVC)
     target_compile_options(morphizen-pattern PRIVATE /wd4946)
 endif()
+# Suppress C4267 (size_t → int) from protobuf-generated pattern.pb.h.
+# All 7 pattern source files include pattern.pb.h directly; the generated
+# .pb.cc is suppressed via /w in set_source_files_properties (lines 36-50)
+# but that does not protect the including .cpp files.
+if(MSVC)
+    target_compile_options(morphizen-pattern PRIVATE /wd4267)
+endif()
 target_compile_features(morphizen-pattern PUBLIC cxx_std_17)
 
 target_compile_definitions(morphizen-pattern

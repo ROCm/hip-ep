@@ -64,6 +64,12 @@ target_compile_options(${LIB_NAME}
 if(MSVC)
   target_compile_options(${LIB_NAME} PRIVATE /wd4946)
 endif()
+# Suppress C4702 (unreachable code) from LLVM/MLIR prebuilt headers.
+# MSVC's /external:W0 does not suppress optimizer-phase warnings even for
+# SYSTEM-flagged include directories; /wd4702 must be set on the target directly.
+if(MSVC)
+  target_compile_options(${LIB_NAME} PRIVATE /wd4702)
+endif()
 
 target_link_libraries(${LIB_NAME}
   PRIVATE

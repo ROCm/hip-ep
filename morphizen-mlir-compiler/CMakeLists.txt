@@ -42,6 +42,14 @@ include_directories(${Protobuf_INCLUDE_DIRS})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 include_directories(${CMAKE_CURRENT_BINARY_DIR}/include)
 include_directories(${CMAKE_CURRENT_BINARY_DIR})  # For generated .pb.h
+# Suppress C4702 (unreachable code) from LLVM/MLIR prebuilt headers for all
+# targets in this subdirectory. MSVC's /external:W0 does not suppress
+# optimizer-phase warnings; the flag must be applied at compile time.
+# Scoped to morphizen-mlir-compiler only, consistent with the directory-scoped
+# include_directories above.
+if(MSVC)
+  add_compile_options(/wd4702)
+endif()
 
 # Build ONNX-MLIR from 3rd-party (required for OnnxToHip conversion pass)
 # Only build if not already built by parent project

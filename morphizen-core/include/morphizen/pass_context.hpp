@@ -7,8 +7,8 @@
 
 #ifdef _WIN32
 #  pragma warning(push)
-#  pragma warning(disable : 4946) // reinterpret_cast between related classes in
-                                  // protobuf
+#  pragma warning(                                                             \
+          disable : 4946 4267) // reinterpret_cast / size_t→int in protobuf
 #endif
 #include "morphizen/pass_context.pb.h"
 #ifdef _WIN32
