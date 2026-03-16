@@ -1183,14 +1183,14 @@ struct GatherToHip : public mlir::RewritePattern {
     int64_t outDimIdx = 0;
 
     // Copy dimensions before axis from data
-    for (int64_t i = 0; i < normalizedAxis; ++i) {
+    for (auto i : llvm::seq<int64_t>(0, normalizedAxis)) {
       if (outDimIdx < resultType.getRank() &&
           resultType.isDynamicDim(outDimIdx))
         dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));
       outDimIdx++;
     }
     // Copy all dimensions from indices
-    for (int64_t i = 0; i < indicesType.getRank(); ++i) {
+    for (auto i : llvm::seq<int64_t>(0, indicesType.getRank())) {
       if (outDimIdx < resultType.getRank() &&
           resultType.isDynamicDim(outDimIdx))
         dynSizes.push_back(
@@ -1198,7 +1198,7 @@ struct GatherToHip : public mlir::RewritePattern {
       outDimIdx++;
     }
     // Copy dimensions after axis from data
-    for (int64_t i = normalizedAxis + 1; i < dataType.getRank(); ++i) {
+    for (auto i : llvm::seq<int64_t>(normalizedAxis + 1, dataType.getRank())) {
       if (outDimIdx < resultType.getRank() &&
           resultType.isDynamicDim(outDimIdx))
         dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));

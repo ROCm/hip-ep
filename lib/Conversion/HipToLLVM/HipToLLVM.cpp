@@ -1487,6 +1487,9 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
 
     // Extract shape info from query memref: [batch, seq_q, num_heads *
     // head_dim]
+    // NOTE: Currently only supports static shapes. Dynamic shape support would
+    // require extracting dimensions at runtime using MemRefDescriptor::size()
+    // and computing headDim dynamically.
     auto queryType = cast<MemRefType>(op.getQuery().getType());
     auto queryShape = queryType.getShape();
     int64_t batchSize = queryShape[0];
