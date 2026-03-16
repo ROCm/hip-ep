@@ -17,6 +17,8 @@
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/Passes.h"
 
+#include "compilation_options_generated.h"
+
 using namespace mlir;
 
 void mlir::hip::buildOnnxToHipPipeline(
@@ -73,12 +75,18 @@ void mlir::hip::buildOnnxToHipPipeline(
   pm.addPass(createCanonicalizerPass());
 }
 
-void mlir::hip::buildHipToLLVMPipeline(OpPassManager &pm) {
+void mlir::hip::buildHipToLLVMPipeline(
+    OpPassManager &pm, const HipToLLVMPipelineOptions &options) {
   pm.addPass(createConvertHipToLLVMPass());
   pm.addPass(createFinalizeMemRefToLLVMConversionPass());
   pm.addPass(createArithToLLVMConversionPass());
   pm.addPass(createConvertFuncToLLVMPass());
   pm.addPass(createReconcileUnrealizedCastsPass());
+
+  // GenerateInterface: create C-ABI wrapper functions for the compiled module
+  mlir::hip::CompilationOptionsT compOpts;
+  compOpts.constants_file = options.constantsFile;
+  pm.addPass(createGenerateInterfacePass(compOpts));
 }
 
 void mlir::hip::registerHipPipelines() {
@@ -88,7 +96,8 @@ void mlir::hip::registerHipPipelines() {
       "externalization",
       buildOnnxToHipPipeline);
 
-  PassPipelineRegistration<>(
-      "hip-to-llvm-pipeline", "Lower HIP memref IR to LLVM dialect",
-      [](OpPassManager &pm) { buildHipToLLVMPipeline(pm); });
+  PassPipelineRegistration<HipToLLVMPipelineOptions>(
+      "hip-to-llvm-pipeline",
+      "Lower HIP memref IR to LLVM dialect and generate C interface",
+      buildHipToLLVMPipeline);
 }
