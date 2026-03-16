@@ -33,17 +33,29 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
 
     steps:
-      # NOTE: ROCm/MorphiZen is a private repo. This checkout requires the
-      # ROCm org-level GITHUB_TOKEN to have read access to org resources
-      # (ROCm org → Settings → Actions → General → Workflow permissions).
-      # If that is not yet enabled, fall back to Option A (deploy key) in
-      # docs/ci-private-submodule-access.md.
+      # ROCm/MorphiZen is a private repo. A read-only deploy key is stored as
+      # MORPHIZEN_DEPLOY_KEY in ROCm/onnx-hipdnn-ep secrets, and the matching
+      # public key is added to ROCm/MorphiZen deploy keys. The git URL rewrite
+      # below redirects the HTTPS submodule URL to SSH at clone time so that
+      # .gitmodules can stay as HTTPS.
+      - name: Setup SSH key for MorphiZen submodule
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.MORPHIZEN_DEPLOY_KEY }}
+
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          submodules: recursive
+          submodules: false
           fetch-depth: 0
           show-progress: false
+
+      - name: Checkout MorphiZen submodule
+        shell: bash
+        run: |
+          git config --global url."git@github.com:ROCm/MorphiZen.git".insteadOf \
+            "../MorphiZen"
+          git submodule update --init --recursive
 
       # -----------------------------------------------------------------------
       # Cache: ONNX Runtime + LLVM prebuilt + flatbuffers
