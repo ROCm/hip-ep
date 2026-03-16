@@ -288,4 +288,4 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Run LIT tests
         shell: bash
-        run: cmake --build ../build/$(basename "$PWD") --target check-hip-lit
+        run: cmake --build ../build/$(basename "$PWD") --target check-hip-mlir-lit
