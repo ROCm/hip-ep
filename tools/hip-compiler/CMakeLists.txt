@@ -16,6 +16,7 @@ target_link_libraries(hip-compiler PRIVATE
   HipDialectIR
   HipDialectTransforms
   HipToLLVM
+  HipSchemasLib
   MLIROptLib
   MLIRSupport
   MLIRIR
