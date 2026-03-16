@@ -31,6 +31,9 @@ jobs:
       GTEST_VERSION: "1.15.0"
       THEROCK_VERSION: therock-dist-windows-gfx1151-7.11.0
       SCCACHE_GHA_ENABLED: "true"
+      # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
+      # Node.js 24 releases yet; allow Node.js 20 until they are updated.
+      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
     steps:
       # ROCm/MorphiZen is a private repo. A read-only deploy key is stored as
