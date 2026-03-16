@@ -1,4 +1,4 @@
-// RUN: hip-mlir-opt %s --morphizen-pipeline 2>&1 | FileCheck %s
+// RUN: env HIPDNN_EP_DEBUG=1 hip-mlir-opt %s --morphizen-pipeline 2>&1 | FileCheck %s
 
 // Verifies that --morphizen-pipeline falls back to DiskFileSystem when a model has
 // onnx.Constant ops and no FileSystem is provided. Models with constants
