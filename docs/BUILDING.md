@@ -100,7 +100,7 @@ cd onnxruntime
 ```bash
 # Build ONNX Runtime using build.bat (do NOT set CMAKE_INSTALL_PREFIX during build)
 # This ensures ONNX Runtime uses its own FlatBuffers version, avoiding conflicts with prebuilt FlatBuffers
-./build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --disable_memleak_checker
+./build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --disable_memleak_checker --use_dml
 
 # Install to prebuilt-local (set prefix at install time, not during configuration)
 PREBUILT_DIR=$(cd ../prebuilt-local && pwd)
