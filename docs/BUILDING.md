@@ -135,13 +135,15 @@ cmake -S . -B ../build/$(basename $PWD) \
 
 ### With MorphiZen Execution Provider (BUILD_EP=ON)
 
-**Prerequisites**: Complete steps 1-3 (download prebuilt dependencies, build additional dependencies, build ONNX Runtime) and install TheRock SDK.
+**Prerequisites**: Complete steps 1-3 (download prebuilt dependencies, build additional dependencies, build ONNX Runtime) and install [TheRock SDK](https://therock-nightly-tarball.s3.amazonaws.com/index.html).
 
 Run from the project root:
 
 ```bash
 PREBUILT_DIR=$(cd ../prebuilt-local && pwd)
 THEROCK_DIST=$(cd ../therock && pwd)
+
+git submodule update --init
 
 cmake -S . -B ../build/$(basename $PWD) \
   -G Ninja \
