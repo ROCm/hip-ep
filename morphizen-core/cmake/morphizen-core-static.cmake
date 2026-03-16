@@ -169,6 +169,14 @@ target_compile_options(morphizen-core-static PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:
 if(MSVC)
   target_compile_options(morphizen-core-static PRIVATE /wd4946)
 endif()
+# Suppress C4267 (size_t → int) from protobuf-generated .pb.h headers included by
+# morphizen-core private sources (config.hpp, config.cpp, model_compatibility.cpp).
+# The generated .pb.cc files are compiled with /w via set_source_files_properties
+# in cmake/proto.cmake, but that does not protect .cpp files that #include the
+# same .pb.h headers.
+if(MSVC)
+  target_compile_options(morphizen-core-static PRIVATE /wd4267)
+endif()
 if(WIN24_BUILD)
   target_compile_definitions(${LIB_NAME} PUBLIC "-DWIN24_BUILD=ON")
 endif()
