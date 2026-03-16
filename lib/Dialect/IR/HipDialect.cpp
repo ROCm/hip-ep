@@ -287,28 +287,19 @@ void ConvOp::getEffects(
 // HipblasltMatmulOp: ins(A, B), outs(C)
 //===----------------------------------------------------------------------===//
 
-MutableOperandRange HipblasltMatmulOp::getDpsInitsMutable() {
-  return getCMutable();
+//===----------------------------------------------------------------------===//
+// MatmulOp: ins(A, B), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MatmulOp::getDpsInitsMutable() {
+  // 0=ctx, 1=A, 2=B, 3=output
+  return getOutputMutable();
 }
 
-void HipblasltMatmulOp::getEffects(
+void MatmulOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
-}
-
-LogicalResult HipblasltMatmulOp::verify() {
-  return verifyDpsComputeOp(*this, {getA(), getB(), getC()}, /*numInits=*/1);
-}
-
-ParseResult HipblasltMatmulOp::parse(OpAsmParser &parser,
-                                     OperationState &result) {
-  return parseSingleInitDpsOp(parser, result, /*numIns=*/2);
-}
-
-void HipblasltMatmulOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{}, {getA(), getB()},
-                       {getC()});
 }
 
 //===----------------------------------------------------------------------===//
@@ -353,36 +344,18 @@ LogicalResult SkipRmsNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
-// MiopenRopeOp: ins(cos_cache, sin_cache), outs(q, k)
-// Extra scalar: start_pos (Index)
+// RopeOp: ins(input, position_ids, cos_cache, sin_cache), outs(output)
 //===----------------------------------------------------------------------===//
 
-MutableOperandRange MiopenRopeOp::getDpsInitsMutable() {
-  // 0=ctx, 1=start_pos, 2=cos_cache, 3=sin_cache, 4=q, 5=k
-  return MutableOperandRange(*this, /*start=*/4, /*length=*/2);
+MutableOperandRange RopeOp::getDpsInitsMutable() {
+  // 0=ctx, 1=input, 2=position_ids, 3=cos_cache, 4=sin_cache, 5=output
+  return MutableOperandRange(*this, /*start=*/5, /*length=*/1);
 }
 
-void MiopenRopeOp::getEffects(
+void RopeOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
-}
-
-LogicalResult MiopenRopeOp::verify() {
-  return verifyDpsComputeOp(*this,
-                            {getQ(), getK(), getCosCache(), getSinCache()},
-                            /*numInits=*/2);
-}
-
-ParseResult MiopenRopeOp::parse(OpAsmParser &parser, OperationState &result) {
-  // `(` ctx `,` start_pos `)` `ins` ... `outs` ...
-  return parseSingleInitDpsOp(parser, result, /*numIns=*/2,
-                              /*extraScalars=*/1);
-}
-
-void MiopenRopeOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getCtx(), {getStartPos()},
-                       {getCosCache(), getSinCache()}, {getQ(), getK()});
 }
 
 //===----------------------------------------------------------------------===//
@@ -506,20 +479,6 @@ void GatherOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-LogicalResult GatherOp::verify() {
-  return verifyDpsComputeOp(*this, {getIndices(), getTable(), getOutput()},
-                            /*numInits=*/1);
-}
-
-ParseResult GatherOp::parse(OpAsmParser &parser, OperationState &result) {
-  return parseSingleInitDpsOp(parser, result, /*numIns=*/2);
-}
-
-void GatherOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{},
-                       {getIndices(), getTable()}, {getOutput()});
-}
-
 //===----------------------------------------------------------------------===//
 // SiluOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
@@ -598,38 +557,21 @@ void ReduceSumOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
-// GqaOp: ins(q, k, v), outs(kv_cache, output)
-// Extra scalars: layer, start_pos, seq_len
+// GqaOp: ins(query, key, value, past_key, past_value, seqlens_k, total_seq_len)
+//        outs(output, present_key, present_value)
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange GqaOp::getDpsInitsMutable() {
-  // 0=ctx, 1=layer, 2=start_pos, 3=seq_len, 4=q, 5=k, 6=v,
-  // 7=kv_cache, 8=output
-  return MutableOperandRange(*this, /*start=*/7, /*length=*/2);
+  // Operands 0-7 are inputs (ctx, query, key, value, past_key, past_value,
+  // seqlens_k, total_seq_len) Operands 8-10 are DPS inits (output, present_key,
+  // present_value)
+  return MutableOperandRange(*this, /*start=*/8, /*length=*/3);
 }
 
 void GqaOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
-}
-
-LogicalResult GqaOp::verify() {
-  return verifyDpsComputeOp(*this,
-                            {getQ(), getK(), getV(), getKvCache(), getOutput()},
-                            /*numInits=*/2);
-}
-
-ParseResult GqaOp::parse(OpAsmParser &parser, OperationState &result) {
-  // `(` ctx `,` layer `,` start_pos `,` seq_len `)`
-  return parseSingleInitDpsOp(parser, result, /*numIns=*/3,
-                              /*extraScalars=*/3);
-}
-
-void GqaOp::print(OpAsmPrinter &p) {
-  printSingleInitDpsOp(p, *this, getCtx(),
-                       {getLayer(), getStartPos(), getSeqLen()},
-                       {getQ(), getK(), getV()}, {getKvCache(), getOutput()});
 }
 
 #define GET_OP_CLASSES

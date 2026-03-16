@@ -170,17 +170,44 @@ def Hip_ConvOp : Hip_DpsOp<"conv"> {
 
 // ===== hipBLASLt ops =========================================================
 
-def Hip_HipblasltMatmulOp : Hip_DpsOp<"hipblaslt.matmul"> {
-  let summary = "Matrix multiply C = A @ B via hipBLASLt";
+def Hip_MatmulOp : Hip_DpsOp<"matmul"> {
+  let summary = "Matrix multiplication (supports batched N-D x N-D)";
+  let description = [{
+    Performs matrix multiplication: output = A @ B
+    Supports batched operation (leading dimensions are batch dimensions).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Unlike hip.gemm, this has no alpha/beta/transA/transB/bias — it maps
+    directly to onnx.MatMul semantics.
+
+    Example (2D):
+    ```mlir
+    hip.matmul(%ctx) ins(%A, %B : memref<128x4096xf32, 1>,
+                                  memref<4096x1024xf32, 1>)
+                     outs(%output : memref<128x1024xf32, 1>)
+    ```
+
+    Example (3D batched):
+    ```mlir
+    hip.matmul(%ctx) ins(%A, %B : memref<1x128x4096xf16, 1>,
+                                  memref<4096x1024xf16, 1>)
+                     outs(%output : memref<1x128x1024xf16, 1>)
+    ```
+  }];
+
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$A,
     Hip_TensorOrMemRef:$B,
-    Hip_TensorOrMemRef:$C
+    Hip_TensorOrMemRef:$output
   );
-  // result_tensors inherited from Hip_DpsOp
-  let hasCustomAssemblyFormat = 1;
-  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $A `,` $B `:` type($A) `,` type($B) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
 }
 
 // ===== MIOpen ops ============================================================
@@ -275,19 +302,50 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm"> {
   let hasVerifier = 1;
 }
 
-def Hip_MiopenRopeOp : Hip_DpsOp<"miopen.rope"> {
-  let summary = "Rotary positional embeddings (MIOpen experimental)";
+def Hip_RopeOp : Hip_DpsOp<"rope"> {
+  let summary = "Rotary position embedding (RoPE)";
+  let description = [{
+    Applies rotary position embedding to the input tensor.
+    Implements the Microsoft RotaryEmbedding operator.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Attributes:
+    - interleaved: Rotary embedding interleaved format (0 or 1)
+    - num_heads: Number of attention heads
+    - rotary_embedding_dim: Dimension of rotary embedding
+
+    Example:
+    ```mlir
+    hip.rope(%ctx)
+        ins(%input, %position_ids, %cos_cache, %sin_cache :
+            memref<1x128x4096xf16, 1>, memref<1x128xi64, 1>,
+            memref<131072x64xf16, 1>, memref<131072x64xf16, 1>)
+        outs(%output : memref<1x128x4096xf16, 1>)
+        {interleaved = 0 : i64, num_heads = 32 : i64, rotary_embedding_dim = 128 : i64}
+    ```
+  }];
+
   let arguments = (ins
     Hip_ContextType:$ctx,
-    Index:$start_pos,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$position_ids,
     Hip_TensorOrMemRef:$cos_cache,
     Hip_TensorOrMemRef:$sin_cache,
-    Hip_TensorOrMemRef:$q,
-    Hip_TensorOrMemRef:$k
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$interleaved,
+    I64Attr:$num_heads,
+    I64Attr:$rotary_embedding_dim
   );
-  // result_tensors inherited from Hip_DpsOp
-  let hasCustomAssemblyFormat = 1;
-  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $position_ids `,` $cos_cache `,` $sin_cache `:`
+        type($input) `,` type($position_ids) `,` type($cos_cache) `,` type($sin_cache)
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
 }
 
 def Hip_MiopenAddOp : Hip_DpsOp<"miopen.add"> {
@@ -359,16 +417,32 @@ def Hip_TransposeOp : Hip_DpsOp<"transpose"> {
 }
 
 def Hip_GatherOp : Hip_DpsOp<"gather"> {
-  let summary = "Embedding table lookup";
+  let summary = "Gather elements along an axis";
+  let description = [{
+    Gathers elements from data tensor along the given axis using indices.
+    Implements the ONNX Gather operator.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.gather(%ctx) ins(%data, %indices : memref<3x4xf32, 1>, memref<2xi64, 1>)
+                     outs(%output : memref<2x4xf32, 1>) {axis = 0 : i64}
+    ```
+  }];
   let arguments = (ins
     Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
     Hip_TensorOrMemRef:$indices,
-    Hip_TensorOrMemRef:$table,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$axis
   );
   // result_tensors inherited from Hip_DpsOp
-  let hasCustomAssemblyFormat = 1;
-  let hasVerifier = 1;
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $indices `:` type($data) `,` type($indices) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
 }
 
 def Hip_SiluOp : Hip_DpsOp<"silu"> {
@@ -502,21 +576,70 @@ def Hip_ReduceSumOp : Hip_DpsOp<"reduce_sum"> {
 }
 
 def Hip_GqaOp : Hip_DpsOp<"gqa"> {
-  let summary = "Grouped query attention";
+  let summary = "Group Query Attention (com.microsoft GQA)";
+  let description = [{
+    Multi-head attention with grouped key/value heads (GQA/MQA).
+    Implements the com.microsoft GroupQueryAttention operator for LLM inference.
+
+    Concatenates new key/value with past KV cache and computes scaled
+    dot-product attention with grouped heads.
+
+    Uses destination-passing style: output buffers are provided as arguments.
+
+    Operand layout (for getDpsInitsMutable): operands 0..7 are inputs
+    (ctx, query, key, value, past_key, past_value, seqlens_k, total_seq_len);
+    operands 8..10 are DPS inits (output, present_key, present_value).
+
+    Attributes:
+    - num_heads: Number of query attention heads
+    - kv_num_heads: Number of key/value heads (< num_heads for GQA)
+    - scale: Attention score scaling factor (1/sqrt(head_dim))
+    - softcap: Soft capping value for attention logits (0 = disabled)
+    - do_rotary: Apply rotary positional embedding (0 or 1)
+    - rotary_interleaved: Rotary embedding interleaved format (0 or 1)
+
+    Example:
+    ```mlir
+    hip.gqa(%ctx)
+        ins(%query, %key, %value, %past_key, %past_value, %seqlens_k, %total_seq_len :
+            memref<1x1x4096xf16, 1>, ...)
+        outs(%output, %present_key, %present_value : ...)
+        {num_heads = 32, kv_num_heads = 8, scale = 0.0884,
+         softcap = 0.0, do_rotary = 0, rotary_interleaved = 0}
+    ```
+  }];
+
   let arguments = (ins
     Hip_ContextType:$ctx,
-    Index:$layer,
-    Index:$start_pos,
-    Index:$seq_len,
-    Hip_TensorOrMemRef:$q,
-    Hip_TensorOrMemRef:$k,
-    Hip_TensorOrMemRef:$v,
-    Hip_TensorOrMemRef:$kv_cache,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$query,
+    Hip_TensorOrMemRef:$key,
+    Hip_TensorOrMemRef:$value,
+    Hip_TensorOrMemRef:$past_key,
+    Hip_TensorOrMemRef:$past_value,
+    Hip_TensorOrMemRef:$seqlens_k,
+    Hip_TensorOrMemRef:$total_seq_len,
+    Hip_TensorOrMemRef:$output,
+    Hip_TensorOrMemRef:$present_key,
+    Hip_TensorOrMemRef:$present_value,
+    I64Attr:$num_heads,
+    I64Attr:$kv_num_heads,
+    F32Attr:$scale,
+    F32Attr:$softcap,
+    I64Attr:$do_rotary,
+    I64Attr:$rotary_interleaved
   );
-  // result_tensors inherited from Hip_DpsOp
-  let hasCustomAssemblyFormat = 1;
-  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $query `,` $key `,` $value `,`
+        $past_key `,` $past_value `,` $seqlens_k `,` $total_seq_len `:`
+        type($query) `,` type($key) `,` type($value) `,`
+        type($past_key) `,` type($past_value) `,` type($seqlens_k) `,` type($total_seq_len)
+    `)`
+    `outs` `(` $output `,` $present_key `,` $present_value `:`
+              type($output) `,` type($present_key) `,` type($present_value) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
 }
 
 #endif // HIP_OPS
