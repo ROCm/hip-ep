@@ -350,8 +350,8 @@ MatMulToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value init =
       mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
                                     resultType.getElementType(), dynSizes);
-  auto hipOp = mlir::hip::HipblasltMatmulOp::create(rewriter, loc, resultType,
-                                                    context, a, b, init);
+  auto hipOp = mlir::hip::MatmulOp::create(rewriter, loc, resultType, context,
+                                           a, b, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
@@ -921,6 +921,303 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   return mlir::success();
 }
 
+/// onnx.Custom(RotaryEmbedding) -> hip.rope
+struct RotaryEmbeddingToHip : public mlir::RewritePattern {
+  RotaryEmbeddingToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+RotaryEmbeddingToHip::matchAndRewrite(mlir::Operation *op,
+                                      mlir::PatternRewriter &rewriter) const {
+  // Check if this is RotaryEmbedding
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr || funcNameAttr.getValue() != "RotaryEmbedding")
+    return rewriter.notifyMatchFailure(op, "not a RotaryEmbedding operation");
+
+  // Check domain is "com.microsoft"
+  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+    return rewriter.notifyMatchFailure(
+        op, "domain must be com.microsoft for RotaryEmbedding");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+
+  // Check operands (should be 4: input, position_ids, cos_cache, sin_cache)
+  if (op->getNumOperands() != 4)
+    return rewriter.notifyMatchFailure(
+        op, "expected 4 operands for RotaryEmbedding");
+
+  mlir::Value input = op->getOperand(0);
+  mlir::Value positionIds = op->getOperand(1);
+  mlir::Value cosCache = op->getOperand(2);
+  mlir::Value sinCache = op->getOperand(3);
+
+  // Extract attributes
+  auto interleavedAttr = op->getAttrOfType<mlir::IntegerAttr>("interleaved");
+  if (!interleavedAttr)
+    return rewriter.notifyMatchFailure(op, "missing interleaved attribute");
+
+  auto numHeadsAttr = op->getAttrOfType<mlir::IntegerAttr>("num_heads");
+  if (!numHeadsAttr)
+    return rewriter.notifyMatchFailure(op, "missing num_heads attribute");
+
+  auto rotaryDimAttr =
+      op->getAttrOfType<mlir::IntegerAttr>("rotary_embedding_dim");
+  if (!rotaryDimAttr)
+    return rewriter.notifyMatchFailure(
+        op, "missing rotary_embedding_dim attribute");
+
+  int64_t numHeadsVal = numHeadsAttr.getSInt();
+  int64_t rotaryDimVal = rotaryDimAttr.getSInt();
+
+  // ONNX com.microsoft.RotaryEmbedding: 0 means "infer from tensor shapes"
+  //   cos_cache: [max_seq, rotary_dim/2] → rotary_dim = last_dim * 2
+  //   input:     [batch, seq, hidden]     → num_heads = hidden / rotary_dim
+  if (rotaryDimVal == 0) {
+    auto cosCacheType =
+        mlir::dyn_cast<mlir::RankedTensorType>(cosCache.getType());
+    if (cosCacheType && cosCacheType.hasStaticShape() &&
+        cosCacheType.getRank() >= 2) {
+      rotaryDimVal = cosCacheType.getShape().back() * 2;
+    } else {
+      return rewriter.notifyMatchFailure(
+          op, "Cannot infer rotary_embedding_dim: "
+              "cos_cache must have static shape with rank >= 2");
+    }
+  }
+
+  if (numHeadsVal == 0 && rotaryDimVal > 0) {
+    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+    if (inputType && inputType.hasStaticShape() && inputType.getRank() >= 1) {
+      int64_t hidden = inputType.getShape().back();
+      numHeadsVal = hidden / rotaryDimVal;
+    } else {
+      return rewriter.notifyMatchFailure(op, "Cannot infer num_heads: "
+                                             "input must have static shape");
+    }
+  }
+
+  // Convert to i64 attributes (using inferred or original values)
+  auto interleavedI64Attr =
+      rewriter.getI64IntegerAttr(interleavedAttr.getSInt());
+  auto numHeadsI64Attr = rewriter.getI64IntegerAttr(numHeadsVal);
+  auto rotaryDimI64Attr = rewriter.getI64IntegerAttr(rotaryDimVal);
+
+  // Should have 1 result: output
+  if (op->getNumResults() != 1)
+    return rewriter.notifyMatchFailure(op,
+                                       "expected 1 result for RotaryEmbedding");
+
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+
+  // Create init tensor
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+
+  // Create hip.rope operation
+  auto hipOp = mlir::hip::RopeOp::create(
+      rewriter, loc, resultType, context, input, positionIds, cosCache,
+      sinCache, init, interleavedI64Attr, numHeadsI64Attr, rotaryDimI64Attr);
+
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
+/// onnx.Custom(GroupQueryAttention) -> hip.gqa
+struct GroupQueryAttentionToHip : public mlir::RewritePattern {
+  GroupQueryAttentionToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
+    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
+  // Check if this is GroupQueryAttention
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr || funcNameAttr.getValue() != "GroupQueryAttention")
+    return rewriter.notifyMatchFailure(op,
+                                       "not a GroupQueryAttention operation");
+
+  // Check domain is "com.microsoft"
+  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+    return rewriter.notifyMatchFailure(
+        op, "domain must be com.microsoft for GroupQueryAttention");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+
+  // Check operands (should be 9: query, key, value, past_key, past_value,
+  // seqlens_k, total_seq_len, cos_cache, sin_cache)
+  // Last two (cos/sin cache) are optional and may be onnx.NoValue
+  if (op->getNumOperands() != 9)
+    return rewriter.notifyMatchFailure(
+        op, "expected 9 operands for GroupQueryAttention");
+
+  mlir::Value query = op->getOperand(0);
+  mlir::Value key = op->getOperand(1);
+  mlir::Value value = op->getOperand(2);
+  mlir::Value pastKey = op->getOperand(3);
+  mlir::Value pastValue = op->getOperand(4);
+  mlir::Value seqlensK = op->getOperand(5);
+  mlir::Value totalSeqLen = op->getOperand(6);
+
+  // Extract attributes
+  auto numHeadsAttr = op->getAttrOfType<mlir::IntegerAttr>("num_heads");
+  if (!numHeadsAttr)
+    return rewriter.notifyMatchFailure(op, "missing num_heads attribute");
+
+  auto kvNumHeadsAttr = op->getAttrOfType<mlir::IntegerAttr>("kv_num_heads");
+  if (!kvNumHeadsAttr)
+    return rewriter.notifyMatchFailure(op, "missing kv_num_heads attribute");
+
+  auto scaleAttr = op->getAttrOfType<mlir::FloatAttr>("scale");
+  if (!scaleAttr)
+    return rewriter.notifyMatchFailure(op, "missing scale attribute");
+
+  auto softcapAttr = op->getAttrOfType<mlir::FloatAttr>("softcap");
+  if (!softcapAttr)
+    return rewriter.notifyMatchFailure(op, "missing softcap attribute");
+
+  auto doRotaryAttr = op->getAttrOfType<mlir::IntegerAttr>("do_rotary");
+  if (!doRotaryAttr)
+    return rewriter.notifyMatchFailure(op, "missing do_rotary attribute");
+
+  auto rotaryInterleavedAttr =
+      op->getAttrOfType<mlir::IntegerAttr>("rotary_interleaved");
+  if (!rotaryInterleavedAttr)
+    return rewriter.notifyMatchFailure(op,
+                                       "missing rotary_interleaved attribute");
+
+  // Convert to proper attribute types
+  auto numHeadsI64Attr = rewriter.getI64IntegerAttr(numHeadsAttr.getSInt());
+  auto kvNumHeadsI64Attr = rewriter.getI64IntegerAttr(kvNumHeadsAttr.getSInt());
+  auto doRotaryI64Attr = rewriter.getI64IntegerAttr(doRotaryAttr.getSInt());
+  auto rotaryInterleavedI64Attr =
+      rewriter.getI64IntegerAttr(rotaryInterleavedAttr.getSInt());
+
+  // Should have 3 results: output, present_key, present_value
+  if (op->getNumResults() != 3)
+    return rewriter.notifyMatchFailure(
+        op, "expected 3 results for GroupQueryAttention");
+
+  auto outputType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  auto presentKeyType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
+  auto presentValueType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(2).getType());
+
+  // Create init tensors
+  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, query);
+  mlir::Value presentKeyInit =
+      createEmptyTensor(rewriter, loc, presentKeyType, pastKey);
+  mlir::Value presentValueInit =
+      createEmptyTensor(rewriter, loc, presentValueType, pastValue);
+
+  // Create hip.gqa operation
+  auto hipOp = mlir::hip::GqaOp::create(
+      rewriter, loc,
+      mlir::TypeRange{outputType, presentKeyType, presentValueType}, context,
+      query, key, value, pastKey, pastValue, seqlensK, totalSeqLen, outputInit,
+      presentKeyInit, presentValueInit, numHeadsI64Attr, kvNumHeadsI64Attr,
+      scaleAttr, softcapAttr, doRotaryI64Attr, rotaryInterleavedI64Attr);
+
+  rewriter.replaceOp(op, hipOp->getResults());
+  return mlir::success();
+}
+
+//===----------------------------------------------------------------------===//
+// ONNX Gather → HIP Gather
+//===----------------------------------------------------------------------===//
+
+struct GatherToHip : public mlir::RewritePattern {
+  GatherToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Gather", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (mlir::failed(ctxOrFailure))
+      return rewriter.notifyMatchFailure(op, "missing context argument");
+    mlir::Value context = *ctxOrFailure;
+
+    mlir::Location loc = op->getLoc();
+    mlir::Value data = op->getOperand(0);
+    mlir::Value indices = op->getOperand(1);
+
+    // Get axis attribute from ONNX Gather operation
+    int64_t axis = op->getAttrOfType<mlir::IntegerAttr>("axis").getSInt();
+    auto axisAttr = rewriter.getI64IntegerAttr(axis);
+
+    // Get result type
+    auto resultType =
+        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
+    auto indicesType = mlir::cast<mlir::RankedTensorType>(indices.getType());
+
+    // Normalize negative axis for dimension calculations only
+    int64_t normalizedAxis = axis < 0 ? axis + dataType.getRank() : axis;
+
+    // Create output tensor with dynamic shape support
+    // Output shape: [data[0:axis], indices.shape, data[axis+1:]]
+    llvm::SmallVector<mlir::Value> dynSizes;
+    int64_t outDimIdx = 0;
+
+    // Copy dimensions before axis from data
+    for (auto i : llvm::seq<int64_t>(0, normalizedAxis)) {
+      if (outDimIdx < resultType.getRank() &&
+          resultType.isDynamicDim(outDimIdx))
+        dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));
+      outDimIdx++;
+    }
+    // Copy all dimensions from indices
+    for (auto i : llvm::seq<int64_t>(0, indicesType.getRank())) {
+      if (outDimIdx < resultType.getRank() &&
+          resultType.isDynamicDim(outDimIdx))
+        dynSizes.push_back(
+            mlir::tensor::DimOp::create(rewriter, loc, indices, i));
+      outDimIdx++;
+    }
+    // Copy dimensions after axis from data
+    for (auto i : llvm::seq<int64_t>(normalizedAxis + 1, dataType.getRank())) {
+      if (outDimIdx < resultType.getRank() &&
+          resultType.isDynamicDim(outDimIdx))
+        dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));
+      outDimIdx++;
+    }
+
+    mlir::Value init =
+        mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                      resultType.getElementType(), dynSizes);
+
+    // Create hip.gather operation
+    auto gatherOp = mlir::hip::GatherOp::create(
+        rewriter, loc, resultType, context, data, indices, init, axisAttr);
+
+    rewriter.replaceOp(op, gatherOp->getResult(0));
+    return mlir::success();
+  }
+};
+
 //===----------------------------------------------------------------------===//
 // convertComputeOps implementation
 //===----------------------------------------------------------------------===//
@@ -936,9 +1233,12 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   patterns.add<SubToHip>(ctx);
   patterns.add<CastToHip>(ctx);
   patterns.add<ReduceSumToHip>(ctx);
+  patterns.add<GatherToHip>(ctx);
   patterns.add<ConvToHip>(ctx);
   patterns.add<SimplifiedLayerNormToHip>(ctx);
   patterns.add<SkipSimplifiedLayerNormToHip>(ctx);
+  patterns.add<RotaryEmbeddingToHip>(ctx);
+  patterns.add<GroupQueryAttentionToHip>(ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
