@@ -39,12 +39,12 @@ jobs:
       # below redirects the HTTPS submodule URL to SSH at clone time so that
       # .gitmodules can stay as HTTPS.
       - name: Setup SSH key for MorphiZen submodule
-        uses: webfactory/ssh-agent@v0.9.0
+        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
         with:
           ssh-private-key: ${{ secrets.MORPHIZEN_DEPLOY_KEY }}
 
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           submodules: false
           fetch-depth: 0
@@ -67,7 +67,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Cache prebuilt-local
         id: cache-prebuilt
-        uses: actions/cache@v4
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/prebuilt-local
           key: prebuilt-ort-${{ env.ONNXRUNTIME_VERSION }}-${{ env.LLVM_TAG }}-${{ env.FLATBUFFERS_TAG }}-${{ env.PROTO_TAG }}-gtest${{ env.GTEST_VERSION }}
@@ -175,7 +175,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Cache TheRock
         id: cache-therock
-        uses: actions/cache@v4
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/therock-dist
           key: ${{ env.THEROCK_VERSION }}
@@ -219,7 +219,7 @@ jobs:
 
       # Put cl.exe and ninja.exe (bundled with VS) into PATH
       - name: Setup MSVC environment
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
       # -----------------------------------------------------------------------
       # Build GTest from source and install into prebuilt-local.
