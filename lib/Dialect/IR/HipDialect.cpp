@@ -7,6 +7,8 @@
 
 #include "llvm/ADT/TypeSwitch.h"
 
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpDefinition.h"

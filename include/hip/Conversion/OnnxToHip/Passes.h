@@ -33,7 +33,7 @@ namespace hip {
 /// attributes for use by GenerateInterfacePass.
 std::unique_ptr<Pass>
 createConvertOnnxToHipPass(morphizen::FileSystem *fs,
-                           const hip::compiler::CompilationOptionsT &options);
+                           const ::hip::compiler::CompilationOptionsT &options);
 
 /// No-arg overload for CLI registration (--convert-onnx-to-hip).
 /// Uses default CompilationOptionsT (constants.bin, no FileSystem).
