@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
 #ifndef UDNA_COMPILER_INITALLPASSES_H
@@ -47,7 +47,7 @@ namespace udna::compiler {
 
 /// Register all required dialects into a DialectRegistry.
 /// Use this for tools like morphizen-opt that use DialectRegistry.
-inline void registerAllDialects(mlir::DialectRegistry& registry) {
+inline void registerAllDialects(mlir::DialectRegistry &registry) {
   registry.insert<mlir::BuiltinDialect>();
   registry.insert<mlir::arith::ArithDialect>();
   registry.insert<mlir::func::FuncDialect>();
@@ -75,7 +75,7 @@ inline void registerAllDialects(mlir::DialectRegistry& registry) {
 /// Use this for libraries like CompilerDriver that directly create MLIRContext.
 /// Uses a DialectRegistry so that external bufferization models are attached
 /// before the dialects are fully loaded.
-inline void loadAllDialects(mlir::MLIRContext& context) {
+inline void loadAllDialects(mlir::MLIRContext &context) {
   mlir::DialectRegistry registry;
   registerAllDialects(registry);
   context.appendDialectRegistry(registry);

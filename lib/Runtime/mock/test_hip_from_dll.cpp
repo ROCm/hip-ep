@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -11,9 +11,9 @@
 #include <string.h>
 
 #ifdef _WIN32
-#  include <windows.h>
+#include <windows.h>
 #else
-#  include <pthread.h>
+#include <pthread.h>
 #endif
 
 extern "C" {

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
@@ -9,7 +9,7 @@
 
 // HIP memory copy wrapper (GPU-to-GPU using hipMemcpyAsync)
 // Follows opaque RuntimeState pattern - extracts stream internally
-int wrap_hipMemcpyAsync(RuntimeState* state, void* dst_ptr, const void* src_ptr,
+int wrap_hipMemcpyAsync(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                         size_t size_bytes) {
   if (!state) {
     fprintf(stderr, "wrap_hipMemcpyAsync: null state\n");

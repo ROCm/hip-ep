@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
@@ -10,24 +10,24 @@
 #include <cstring>
 
 #ifdef _WIN32
-#  include <windows.h>
+#include <windows.h>
 // On Windows with static CRT, each DLL has its own stdout
 // Use OutputDebugString so output appears in DebugView/debugger
 // and fprintf(stderr) to try to reach the parent process
-#  define MOCK_PRINT(...)                                                      \
-    do {                                                                       \
-      char buf[512];                                                           \
-      snprintf(buf, sizeof(buf), __VA_ARGS__);                                 \
-      OutputDebugStringA(buf);                                                 \
-      fprintf(stderr, "%s", buf);                                              \
-      fflush(stderr);                                                          \
-    } while (0)
+#define MOCK_PRINT(...)                                                        \
+  do {                                                                         \
+    char buf[512];                                                             \
+    snprintf(buf, sizeof(buf), __VA_ARGS__);                                   \
+    OutputDebugStringA(buf);                                                   \
+    fprintf(stderr, "%s", buf);                                                \
+    fflush(stderr);                                                            \
+  } while (0)
 #else
-#  define MOCK_PRINT(...)                                                      \
-    do {                                                                       \
-      printf(__VA_ARGS__);                                                     \
-      fflush(stdout);                                                          \
-    } while (0)
+#define MOCK_PRINT(...)                                                        \
+  do {                                                                         \
+    printf(__VA_ARGS__);                                                       \
+    fflush(stdout);                                                            \
+  } while (0)
 #endif
 
 // Mock type definitions are now in mock_types.h (included via runtime_types.h)
@@ -37,7 +37,7 @@
 // Prints all operations for debugging and verification
 
 // Mock HIP device functions
-extern "C" hipError_t hipGetDeviceCount(int* count) {
+extern "C" hipError_t hipGetDeviceCount(int *count) {
   MOCK_PRINT("[MOCK] hipGetDeviceCount\n");
   *count = 1; // Pretend we have one device
   return hipSuccess;
@@ -48,7 +48,7 @@ extern "C" hipError_t hipSetDevice(int device) {
   return hipSuccess;
 }
 
-extern "C" hipError_t hipGetDeviceProperties(hipDeviceProp_t* prop,
+extern "C" hipError_t hipGetDeviceProperties(hipDeviceProp_t *prop,
                                              int device) {
   MOCK_PRINT("[MOCK] hipGetDeviceProperties(device=%d)\n", device);
   if (prop) {
@@ -60,7 +60,7 @@ extern "C" hipError_t hipGetDeviceProperties(hipDeviceProp_t* prop,
 }
 
 // Mock HIP stream functions (non-static so test can link against them)
-extern "C" hipError_t hipStreamCreate(hipStream_t* stream) {
+extern "C" hipError_t hipStreamCreate(hipStream_t *stream) {
   *stream = malloc(8); // Fake handle
   MOCK_PRINT("[MOCK] hipStreamCreate() -> %p\n", *stream);
   return hipSuccess;
@@ -78,19 +78,19 @@ extern "C" hipError_t hipStreamSynchronize(hipStream_t stream) {
 }
 
 // Mock HIP memory functions (non-static for cross-module linking)
-extern "C" hipError_t hipMalloc(void** ptr, size_t size) {
+extern "C" hipError_t hipMalloc(void **ptr, size_t size) {
   *ptr = malloc(size);
   MOCK_PRINT("[MOCK] hipMalloc(%zu bytes) -> %p\n", size, *ptr);
   return *ptr ? hipSuccess : -1;
 }
 
-extern "C" hipError_t hipFree(void* ptr) {
+extern "C" hipError_t hipFree(void *ptr) {
   MOCK_PRINT("[MOCK] hipFree(%p)\n", ptr);
   free(ptr);
   return hipSuccess;
 }
 
-extern "C" hipError_t hipHostMalloc(void** ptr, size_t size,
+extern "C" hipError_t hipHostMalloc(void **ptr, size_t size,
                                     unsigned int flags) {
   (void)flags;
   *ptr = malloc(size);
@@ -98,15 +98,15 @@ extern "C" hipError_t hipHostMalloc(void** ptr, size_t size,
   return *ptr ? hipSuccess : -1;
 }
 
-extern "C" hipError_t hipHostFree(void* ptr) {
+extern "C" hipError_t hipHostFree(void *ptr) {
   MOCK_PRINT("[MOCK] hipHostFree(%p)\n", ptr);
   free(ptr);
   return hipSuccess;
 }
 
-extern "C" hipError_t hipMemcpy(void* dst, const void* src, size_t size,
+extern "C" hipError_t hipMemcpy(void *dst, const void *src, size_t size,
                                 int kind) {
-  const char* kind_str = (kind == hipMemcpyHostToDevice)   ? "H2D"
+  const char *kind_str = (kind == hipMemcpyHostToDevice)   ? "H2D"
                          : (kind == hipMemcpyDeviceToHost) ? "D2H"
                                                            : "D2D";
   MOCK_PRINT("[MOCK] hipMemcpy(dst=%p, src=%p, size=%zu, %s)\n", dst, src, size,
@@ -115,9 +115,9 @@ extern "C" hipError_t hipMemcpy(void* dst, const void* src, size_t size,
   return hipSuccess;
 }
 
-extern "C" hipError_t hipMemcpyAsync(void* dst, const void* src, size_t size,
+extern "C" hipError_t hipMemcpyAsync(void *dst, const void *src, size_t size,
                                      int kind, hipStream_t stream) {
-  const char* kind_str = (kind == hipMemcpyHostToDevice)   ? "H2D"
+  const char *kind_str = (kind == hipMemcpyHostToDevice)   ? "H2D"
                          : (kind == hipMemcpyDeviceToHost) ? "D2H"
                                                            : "D2D";
   MOCK_PRINT("[MOCK] hipMemcpyAsync(dst=%p, src=%p, size=%zu, %s, stream=%p)\n",
@@ -127,14 +127,14 @@ extern "C" hipError_t hipMemcpyAsync(void* dst, const void* src, size_t size,
 }
 
 // Mock MIOpen types and constants
-typedef void* miopenTensorDescriptor_t;
-typedef void* miopenConvolutionDescriptor_t;
+typedef void *miopenTensorDescriptor_t;
+typedef void *miopenConvolutionDescriptor_t;
 typedef enum { miopenFloat = 0 } miopenDataType_t;
 typedef enum { miopenConvolution = 0 } miopenConvolutionMode_t;
 typedef enum { miopenConvolutionFwdAlgoGEMM = 0 } miopenConvFwdAlgorithm_t;
 
 // Mock MIOpen handle functions (non-static so test can link against them)
-extern "C" miopenStatus_t miopenCreate(miopenHandle_t* handle) {
+extern "C" miopenStatus_t miopenCreate(miopenHandle_t *handle) {
   *handle = malloc(8); // Fake handle
   MOCK_PRINT("[MOCK] miopenCreate() -> %p\n", *handle);
   return miopenStatusSuccess;
@@ -154,7 +154,7 @@ extern "C" miopenStatus_t miopenSetStream(miopenHandle_t handle,
 
 // Mock MIOpen tensor descriptor functions
 static miopenStatus_t
-miopenCreateTensorDescriptor(miopenTensorDescriptor_t* desc) {
+miopenCreateTensorDescriptor(miopenTensorDescriptor_t *desc) {
   *desc = malloc(8); // Fake descriptor
   return miopenStatusSuccess;
 }
@@ -177,7 +177,7 @@ static miopenStatus_t miopenSet4dTensorDescriptor(miopenTensorDescriptor_t desc,
 
 // Mock MIOpen convolution descriptor functions
 static miopenStatus_t
-miopenCreateConvolutionDescriptor(miopenConvolutionDescriptor_t* desc) {
+miopenCreateConvolutionDescriptor(miopenConvolutionDescriptor_t *desc) {
   *desc = malloc(8); // Fake descriptor
   return miopenStatusSuccess;
 }
@@ -202,11 +202,11 @@ static miopenStatus_t miopenInitConvolutionDescriptor(
 // Mock MIOpen convolution algorithm finding
 static miopenStatus_t miopenFindConvolutionForwardAlgorithm(
     miopenHandle_t handle, miopenTensorDescriptor_t input_desc,
-    const void* input, miopenTensorDescriptor_t weights_desc,
-    const void* weights, miopenConvolutionDescriptor_t conv_desc,
-    miopenTensorDescriptor_t output_desc, const void* output,
-    int requestAlgoCount, miopenConvFwdAlgorithm_t* algo,
-    int* returnedAlgoCount, void* workspace, size_t workspaceSize,
+    const void *input, miopenTensorDescriptor_t weights_desc,
+    const void *weights, miopenConvolutionDescriptor_t conv_desc,
+    miopenTensorDescriptor_t output_desc, const void *output,
+    int requestAlgoCount, miopenConvFwdAlgorithm_t *algo,
+    int *returnedAlgoCount, void *workspace, size_t workspaceSize,
     bool exhaustiveSearch) {
   (void)handle;
   (void)input_desc;
@@ -232,7 +232,7 @@ static miopenStatus_t miopenConvolutionForwardGetWorkSpaceSize(
     miopenHandle_t handle, miopenTensorDescriptor_t weights_desc,
     miopenTensorDescriptor_t input_desc,
     miopenConvolutionDescriptor_t conv_desc,
-    miopenTensorDescriptor_t output_desc, size_t* workspaceSize) {
+    miopenTensorDescriptor_t output_desc, size_t *workspaceSize) {
   (void)handle;
   (void)weights_desc;
   (void)input_desc;
@@ -243,12 +243,12 @@ static miopenStatus_t miopenConvolutionForwardGetWorkSpaceSize(
 }
 
 static miopenStatus_t miopenConvolutionForward(
-    miopenHandle_t handle, const void* alpha,
-    miopenTensorDescriptor_t input_desc, const void* input,
-    miopenTensorDescriptor_t weights_desc, const void* weights,
+    miopenHandle_t handle, const void *alpha,
+    miopenTensorDescriptor_t input_desc, const void *input,
+    miopenTensorDescriptor_t weights_desc, const void *weights,
     miopenConvolutionDescriptor_t conv_desc, miopenConvFwdAlgorithm_t algo,
-    const void* beta, miopenTensorDescriptor_t output_desc, void* output,
-    void* workspace, size_t workspaceSize) {
+    const void *beta, miopenTensorDescriptor_t output_desc, void *output,
+    void *workspace, size_t workspaceSize) {
   (void)handle;
   (void)alpha;
   (void)input_desc;
@@ -268,13 +268,13 @@ static miopenStatus_t miopenConvolutionForward(
 }
 
 // Mock hipBLASLt types and constants
-typedef void* hipblasLtMatrixLayout_t;
-typedef void* hipblasLtMatmulDesc_t;
+typedef void *hipblasLtMatrixLayout_t;
+typedef void *hipblasLtMatmulDesc_t;
 typedef enum { HIPBLAS_R_32F = 0 } hipblasDatatype_t;
 typedef enum { HIPBLAS_COMPUTE_32F = 0 } hipblasComputeType_t;
 
 // Mock hipBLASLt handle functions (non-static so test can link against them)
-extern "C" hipblasStatus_t hipblasLtCreate(hipblasLtHandle_t* handle) {
+extern "C" hipblasStatus_t hipblasLtCreate(hipblasLtHandle_t *handle) {
   *handle = malloc(8); // Fake handle
   MOCK_PRINT("[MOCK] hipblasLtCreate() -> %p\n", *handle);
   return HIPBLAS_STATUS_SUCCESS;
@@ -288,7 +288,7 @@ extern "C" hipblasStatus_t hipblasLtDestroy(hipblasLtHandle_t handle) {
 
 // Mock hipBLASLt matrix layout functions
 static hipblasStatus_t
-hipblasLtMatrixLayoutCreate(hipblasLtMatrixLayout_t* layout,
+hipblasLtMatrixLayoutCreate(hipblasLtMatrixLayout_t *layout,
                             hipblasDatatype_t type, uint64_t rows,
                             uint64_t cols, int64_t ld) {
   (void)type;
@@ -307,7 +307,7 @@ hipblasLtMatrixLayoutDestroy(hipblasLtMatrixLayout_t layout) {
 
 // Mock hipBLASLt matmul descriptor functions
 static hipblasStatus_t
-hipblasLtMatmulDescCreate(hipblasLtMatmulDesc_t* desc,
+hipblasLtMatmulDescCreate(hipblasLtMatmulDesc_t *desc,
                           hipblasComputeType_t computeType,
                           hipblasDatatype_t dataType) {
   (void)computeType;
@@ -324,10 +324,10 @@ static hipblasStatus_t hipblasLtMatmulDescDestroy(hipblasLtMatmulDesc_t desc) {
 // Mock hipBLASLt matmul function
 static hipblasStatus_t
 hipblasLtMatmul(hipblasLtHandle_t handle, hipblasLtMatmulDesc_t matmul_desc,
-                const void* alpha, const void* A, hipblasLtMatrixLayout_t matA,
-                const void* B, hipblasLtMatrixLayout_t matB, const void* beta,
-                const void* C, hipblasLtMatrixLayout_t matC, void* D,
-                hipblasLtMatrixLayout_t matD, const void* algo, void* workspace,
+                const void *alpha, const void *A, hipblasLtMatrixLayout_t matA,
+                const void *B, hipblasLtMatrixLayout_t matB, const void *beta,
+                const void *C, hipblasLtMatrixLayout_t matC, void *D,
+                hipblasLtMatrixLayout_t matD, const void *algo, void *workspace,
                 size_t workspaceSize, hipStream_t stream) {
   (void)handle;
   (void)matmul_desc;
@@ -368,9 +368,9 @@ hipblasLtMatmul(hipblasLtHandle_t handle, hipblasLtMatmulDesc_t matmul_desc,
 // Mock wrapper implementations (called from generated MLIR code)
 
 int wrap_miopenConvolutionForward(
-    RuntimeState* state, const void* input, int64_t input_n, int64_t input_c,
-    int64_t input_h, int64_t input_w, const void* weights, int64_t weights_k,
-    const void* bias, void* output, int64_t output_h, int64_t output_w,
+    RuntimeState *state, const void *input, int64_t input_n, int64_t input_c,
+    int64_t input_h, int64_t input_w, const void *weights, int64_t weights_k,
+    const void *bias, void *output, int64_t output_h, int64_t output_w,
     int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
     int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
     int64_t dilation_h, int64_t dilation_w, int64_t group) {
@@ -403,8 +403,8 @@ int wrap_miopenConvolutionForward(
 
 // Mock implementation for ReLU activation
 extern "C" int wrap_miopenActivationForward_relu(
-    RuntimeState* state, void* input_gpu_ptr, int64_t input_n, int64_t input_c,
-    int64_t input_h, int64_t input_w, void* output_gpu_ptr, int64_t output_n,
+    RuntimeState *state, void *input_gpu_ptr, int64_t input_n, int64_t input_c,
+    int64_t input_h, int64_t input_w, void *output_gpu_ptr, int64_t output_n,
     int64_t output_c, int64_t output_h, int64_t output_w) {
   if (!state || !input_gpu_ptr || !output_gpu_ptr) {
     fprintf(stderr, "Invalid arguments to wrap_miopenActivationForward_relu\n");
@@ -421,9 +421,9 @@ extern "C" int wrap_miopenActivationForward_relu(
   return 0;
 }
 
-int wrap_hipblasLtGemm(void* handle, void* stream, int64_t m, int64_t n,
-                       int64_t k, const void* alpha, const void* A,
-                       const void* B, const void* beta, void* C) {
+int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
+                       int64_t k, const void *alpha, const void *A,
+                       const void *B, const void *beta, void *C) {
   if (!handle || !stream || !alpha || !A || !B || !beta || !C) {
     fprintf(stderr, "Invalid arguments to wrap_hipblasLtGemm\n");
     return -1;
@@ -463,10 +463,9 @@ int wrap_hipblasLtGemm(void* handle, void* stream, int64_t m, int64_t n,
   return 0;
 }
 
-int wrap_hipblasLtMatmul(RuntimeState* state,
-                const void* A, const void* B, void* output,
-                int64_t M, int64_t N, int64_t K,
-                int64_t batch_count, int64_t elem_size) {
+int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
+                         void *output, int64_t M, int64_t N, int64_t K,
+                         int64_t batch_count, int64_t elem_size) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_hipblasLtMatmul\n");
     return -1;
@@ -474,24 +473,22 @@ int wrap_hipblasLtMatmul(RuntimeState* state,
 
   MOCK_PRINT("[MOCK] wrap_hipblasLtMatmul(M=%lld, N=%lld, K=%lld, "
              "batch=%lld, elem_size=%lld)\n",
-             (long long)M, (long long)N, (long long)K,
-             (long long)batch_count, (long long)elem_size);
+             (long long)M, (long long)N, (long long)K, (long long)batch_count,
+             (long long)elem_size);
 
   return 0;
 }
 
-int wrap_group_query_attention(
-    RuntimeState* state,
-    void* query, void* key, void* value,
-    void* past_key, void* past_value,
-    void* seqlens_k, void* total_seq_len,
-    void* cos_cache, void* sin_cache,
-    void* output, void* present_key, void* present_value,
-    int64_t num_heads, int64_t kv_num_heads,
-    float scale, float softcap,
-    int64_t do_rotary, int64_t rotary_interleaved,
-    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
-    int64_t head_dim, int64_t element_size_bytes) {
+int wrap_group_query_attention(RuntimeState *state, void *query, void *key,
+                               void *value, void *past_key, void *past_value,
+                               void *seqlens_k, void *total_seq_len,
+                               void *cos_cache, void *sin_cache, void *output,
+                               void *present_key, void *present_value,
+                               int64_t num_heads, int64_t kv_num_heads,
+                               float scale, float softcap, int64_t do_rotary,
+                               int64_t rotary_interleaved, int64_t batch_size,
+                               int64_t seq_len_q, int64_t seq_len_kv,
+                               int64_t head_dim, int64_t element_size_bytes) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_group_query_attention\n");
     return -1;
@@ -505,16 +502,15 @@ int wrap_group_query_attention(
              (long long)do_rotary, (long long)rotary_interleaved);
   MOCK_PRINT("[MOCK]   batch=%lld, seq_q=%lld, seq_kv=%lld, "
              "head_dim=%lld, elem_size=%lld)\n",
-             (long long)batch_size, (long long)seq_len_q,
-             (long long)seq_len_kv, (long long)head_dim,
-             (long long)element_size_bytes);
+             (long long)batch_size, (long long)seq_len_q, (long long)seq_len_kv,
+             (long long)head_dim, (long long)element_size_bytes);
 
   return 0;
 }
 
-int wrap_miopenOpTensor(RuntimeState* state, void* lhs, void* rhs,
-                        void* output, int64_t num_elements,
-                        int64_t data_type, int64_t tensor_op) {
+int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
+                        int64_t num_elements, int64_t data_type,
+                        int64_t tensor_op) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_miopenOpTensor\n");
     return -1;
@@ -522,16 +518,15 @@ int wrap_miopenOpTensor(RuntimeState* state, void* lhs, void* rhs,
 
   MOCK_PRINT("[MOCK] wrap_miopenOpTensor(op=%s, num_elements=%lld, "
              "data_type=%s(%lld), element_size=%lld)\n",
-             hipdnn_ep_tensor_op_name(tensor_op),
-             (long long)num_elements,
+             hipdnn_ep_tensor_op_name(tensor_op), (long long)num_elements,
              hipdnn_ep_datatype_name(data_type), (long long)data_type,
              (long long)hipdnn_ep_datatype_size(data_type));
 
   return 0;
 }
 
-int wrap_elementwise_sub(RuntimeState* state, void* lhs, void* rhs,
-                         void* output, int64_t num_elements,
+int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
+                         void *output, int64_t num_elements,
                          int64_t element_size_bytes) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_elementwise_sub\n");
@@ -545,8 +540,8 @@ int wrap_elementwise_sub(RuntimeState* state, void* lhs, void* rhs,
   return 0;
 }
 
-int wrap_gather(RuntimeState* state, void* data, void* indices,
-                void* output, int64_t axis, int64_t data_num_elements,
+int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
+                int64_t axis, int64_t data_num_elements,
                 int64_t output_num_elements, int64_t element_size_bytes) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_gather\n");
@@ -561,10 +556,9 @@ int wrap_gather(RuntimeState* state, void* data, void* indices,
   return 0;
 }
 
-int wrap_reduce_sum(RuntimeState* state, void* data, void* axes,
-                    void* output, int64_t data_num_elements,
-                    int64_t output_num_elements, int64_t element_size_bytes,
-                    int64_t keepdims) {
+int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
+                    int64_t data_num_elements, int64_t output_num_elements,
+                    int64_t element_size_bytes, int64_t keepdims) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_reduce_sum\n");
     return -1;
@@ -578,7 +572,7 @@ int wrap_reduce_sum(RuntimeState* state, void* data, void* axes,
   return 0;
 }
 
-int wrap_cast(RuntimeState* state, void* input, void* output,
+int wrap_cast(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t input_element_size,
               int64_t output_element_size, int64_t to) {
   if (!state) {
@@ -594,7 +588,7 @@ int wrap_cast(RuntimeState* state, void* input, void* output,
   return 0;
 }
 
-int wrap_miopenActivationForward(RuntimeState* state, void* input, void* output,
+int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
                                  int64_t activation_mode) {
   if (!state) {
@@ -605,20 +599,17 @@ int wrap_miopenActivationForward(RuntimeState* state, void* input, void* output,
   MOCK_PRINT("[MOCK] wrap_miopenActivationForward(activation=%s, "
              "num_elements=%lld, data_type=%s(%lld), element_size=%lld)\n",
              hipdnn_ep_activation_name(activation_mode),
-             (long long)num_elements,
-             hipdnn_ep_datatype_name(data_type), (long long)data_type,
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type,
              (long long)hipdnn_ep_datatype_size(data_type));
 
   return 0;
 }
 
-int wrap_rotary_embedding(RuntimeState* state,
-                          void* input, void* position_ids,
-                          void* cos_cache, void* sin_cache,
-                          void* output,
+int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
+                          void *cos_cache, void *sin_cache, void *output,
                           int64_t interleaved, int64_t num_heads,
-                          int64_t rotary_dim,
-                          int64_t input_num_elements,
+                          int64_t rotary_dim, int64_t input_num_elements,
                           int64_t cos_cache_num_elements,
                           int64_t element_size_bytes) {
   if (!state) {
@@ -631,19 +622,16 @@ int wrap_rotary_embedding(RuntimeState* state,
              "cos_cache_num_elements=%lld, element_size=%lld)\n",
              (long long)interleaved, (long long)num_heads,
              (long long)rotary_dim, (long long)input_num_elements,
-             (long long)cos_cache_num_elements,
-             (long long)element_size_bytes);
+             (long long)cos_cache_num_elements, (long long)element_size_bytes);
 
   return 0;
 }
 
-int wrap_miopenT5LayerNormForward(RuntimeState* state,
-                               void* input, void* scale, void* output,
-                               int64_t input_num_elements,
-                               int64_t scale_num_elements,
-                               int64_t element_size_bytes,
-                               int64_t axis, float epsilon,
-                               int64_t stash_type) {
+int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
+                                  void *output, int64_t input_num_elements,
+                                  int64_t scale_num_elements,
+                                  int64_t element_size_bytes, int64_t axis,
+                                  float epsilon, int64_t stash_type) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_miopenT5LayerNormForward\n");
     return -1;
@@ -653,19 +641,18 @@ int wrap_miopenT5LayerNormForward(RuntimeState* state,
              "scale_num_elements=%lld, element_size=%lld, axis=%lld, "
              "epsilon=%f, stash_type=%lld)\n",
              (long long)input_num_elements, (long long)scale_num_elements,
-             (long long)element_size_bytes, (long long)axis,
-             (double)epsilon, (long long)stash_type);
+             (long long)element_size_bytes, (long long)axis, (double)epsilon,
+             (long long)stash_type);
 
   return 0;
 }
 
-int wrap_skip_simplified_layer_norm(RuntimeState* state,
-                                    void* input, void* skip, void* gamma,
-                                    void* output, void* skip_output,
+int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
+                                    void *skip, void *gamma, void *output,
+                                    void *skip_output,
                                     int64_t input_num_elements,
                                     int64_t gamma_num_elements,
-                                    int64_t element_size_bytes,
-                                    float epsilon) {
+                                    int64_t element_size_bytes, float epsilon) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_skip_simplified_layer_norm\n");
     return -1;
@@ -679,29 +666,29 @@ int wrap_skip_simplified_layer_norm(RuntimeState* state,
   return 0;
 }
 
-int wrap_hipMalloc(void** ptr, int64_t size) {
+int wrap_hipMalloc(void **ptr, int64_t size) {
   HIP_CHECK(hipMalloc(ptr, size));
   return 0;
 }
 
-int wrap_hipFree(void* ptr) {
+int wrap_hipFree(void *ptr) {
   HIP_CHECK(hipFree(ptr));
   return 0;
 }
 
-int wrap_hipMemcpyH2D(void* dst, const void* src, int64_t size, void* stream) {
+int wrap_hipMemcpyH2D(void *dst, const void *src, int64_t size, void *stream) {
   HIP_CHECK(hipMemcpyAsync(dst, src, size, hipMemcpyHostToDevice,
                            static_cast<hipStream_t>(stream)));
   return 0;
 }
 
-int wrap_hipMemcpyD2H(void* dst, const void* src, int64_t size, void* stream) {
+int wrap_hipMemcpyD2H(void *dst, const void *src, int64_t size, void *stream) {
   HIP_CHECK(hipMemcpyAsync(dst, src, size, hipMemcpyDeviceToHost,
                            static_cast<hipStream_t>(stream)));
   return 0;
 }
 
-int wrap_hipStreamSynchronize(void* stream) {
+int wrap_hipStreamSynchronize(void *stream) {
   HIP_CHECK(hipStreamSynchronize(static_cast<hipStream_t>(stream)));
   return 0;
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
@@ -20,29 +20,29 @@
 
 // HIP memory wrappers
 
-int wrap_hipMalloc(void** ptr, int64_t size) {
+int wrap_hipMalloc(void **ptr, int64_t size) {
   HIP_CHECK(hipMalloc(ptr, size));
   return 0;
 }
 
-int wrap_hipFree(void* ptr) {
+int wrap_hipFree(void *ptr) {
   HIP_CHECK(hipFree(ptr));
   return 0;
 }
 
-int wrap_hipMemcpyH2D(void* dst, const void* src, int64_t size, void* stream) {
+int wrap_hipMemcpyH2D(void *dst, const void *src, int64_t size, void *stream) {
   HIP_CHECK(hipMemcpyAsync(dst, src, size, hipMemcpyHostToDevice,
                            static_cast<hipStream_t>(stream)));
   return 0;
 }
 
-int wrap_hipMemcpyD2H(void* dst, const void* src, int64_t size, void* stream) {
+int wrap_hipMemcpyD2H(void *dst, const void *src, int64_t size, void *stream) {
   HIP_CHECK(hipMemcpyAsync(dst, src, size, hipMemcpyDeviceToHost,
                            static_cast<hipStream_t>(stream)));
   return 0;
 }
 
-int wrap_hipStreamSynchronize(void* stream) {
+int wrap_hipStreamSynchronize(void *stream) {
   HIP_CHECK(hipStreamSynchronize(static_cast<hipStream_t>(stream)));
   return 0;
 }

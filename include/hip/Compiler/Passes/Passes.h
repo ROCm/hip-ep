@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
 #ifndef UDNA_COMPILER_COMPILER_PASSES_PASSES_H
@@ -22,7 +22,7 @@ namespace compiler {
 /// Runtime. options.constants_file is embedded in the DLL metadata so the
 /// runtime knows which file to load.
 std::unique_ptr<mlir::Pass>
-createGenerateInterfacePass(const udna::compiler::CompilationOptionsT& options);
+createGenerateInterfacePass(const udna::compiler::CompilationOptionsT &options);
 
 } // namespace compiler
 } // namespace udna::compiler

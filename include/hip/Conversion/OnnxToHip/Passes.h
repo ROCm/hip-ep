@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
 #ifndef HIP_CONVERSION_ONNXTOHIP_PASSES_H
@@ -32,8 +32,8 @@ namespace hip {
 /// filename. The module gains hipdnn.constant_sizes and hipdnn.constant_count
 /// attributes for use by GenerateInterfacePass.
 std::unique_ptr<Pass>
-createConvertOnnxToHipPass(morphizen::FileSystem* fs,
-                           const udna::compiler::CompilationOptionsT& options);
+createConvertOnnxToHipPass(morphizen::FileSystem *fs,
+                           const udna::compiler::CompilationOptionsT &options);
 
 /// No-arg overload for CLI registration (--convert-onnx-to-hip).
 /// Uses default CompilationOptionsT (constants.bin, no FileSystem).

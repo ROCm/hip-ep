@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -7,18 +7,18 @@
 #include "hip/Compiler/Passes/Passes.h"
 #include "hip/Conversion/Passes.h"
 #include "hip/Dialect/Transforms/Passes.h"
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Bufferization/Transforms/OneShotAnalysis.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 
 namespace udna::compiler {
 namespace compiler {
 
-void populateMorphizenPipeline(mlir::OpPassManager &pm,
-                               const udna::compiler::CompilationOptionsT &options,
-                               morphizen::FileSystem *fs) {
+void populateMorphizenPipeline(
+    mlir::OpPassManager &pm, const udna::compiler::CompilationOptionsT &options,
+    morphizen::FileSystem *fs) {
   // Stage 0: Insert !hip.context argument into all functions
   pm.addPass(mlir::hip::createHipAddContextArgPass());
 

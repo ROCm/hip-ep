@@ -1,10 +1,10 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+#include "debug_log.h"
 #include "hipdnn_ep_runtime.h"
 #include "runtime_types.h"
-#include "debug_log.h"
 
 #include "model_metadata_generated.h"
 #include "morphizen-foundation/file_io.hpp"
@@ -24,29 +24,29 @@ struct RuntimeState {
   // ConstantInfo, so only one allocation/copy is needed at init time.
   // On dGPU: hipMalloc (VRAM). On iGPU: hipHostMalloc (pinned system RAM,
   // GPU reads in-place, no hipMemcpy needed).
-  void*  gpu_constants_blob;
-  bool   constants_blob_is_host; // true = hipHostMalloc, false = hipMalloc
-  void** gpu_constants;
+  void *gpu_constants_blob;
+  bool constants_blob_is_host; // true = hipHostMalloc, false = hipMalloc
+  void **gpu_constants;
   size_t num_constants;
 
   // Memory pooling support
-  void* pool_base;        // Single large memory pool
+  void *pool_base;        // Single large memory pool
   size_t pool_size;       // Total pool size in bytes
-  size_t* buffer_offsets; // Offset for each buffer in the pool
+  size_t *buffer_offsets; // Offset for each buffer in the pool
   size_t num_buffers;     // Number of buffers in the pool
 };
 
 // Runtime state management implementation
 
-int hipdnn_ep_state_init_with_fs(RuntimeState** out_state, void* fs,
-                                 const void* metadata_blob, size_t blob_size) {
+int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
+                                 const void *metadata_blob, size_t blob_size) {
   if (!out_state || !fs) {
     fprintf(stderr, "Invalid arguments to hipdnn_ep_state_init_with_fs\n");
     return 1;
   }
 
   // Allocate context struct
-  RuntimeState* state = (RuntimeState*)malloc(sizeof(RuntimeState));
+  RuntimeState *state = (RuntimeState *)malloc(sizeof(RuntimeState));
   if (!state) {
     fprintf(stderr, "Failed to allocate runtime state\n");
     return 1;
@@ -106,7 +106,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState** out_state, void* fs,
     fprintf(stderr, "Impact: rocBLAS/hipBLASLt cannot load arch-specific "
                     "Tensile kernels\n\n");
 
-    const char* gfx_override = getenv("HSA_OVERRIDE_GFX_VERSION");
+    const char *gfx_override = getenv("HSA_OVERRIDE_GFX_VERSION");
     if (gfx_override && gfx_override[0] != '\0') {
       fprintf(stderr,
               "HSA_OVERRIDE_GFX_VERSION=%s (set, but may not work in DLL "
@@ -128,9 +128,10 @@ int hipdnn_ep_state_init_with_fs(RuntimeState** out_state, void* fs,
     fprintf(stderr, "Long-term fix: Report to ROCm/TheRock GitHub issues\n");
     fprintf(stderr, "===================================================\n\n");
   } else {
-    RUNTIME_DEBUG_LOG("gcnArchName properly populated: '%s' (initialization should "
-                      "succeed)\n",
-                      prop.gcnArchName);
+    RUNTIME_DEBUG_LOG(
+        "gcnArchName properly populated: '%s' (initialization should "
+        "succeed)\n",
+        prop.gcnArchName);
   }
 
   // Create HIP stream
@@ -161,8 +162,9 @@ int hipdnn_ep_state_init_with_fs(RuntimeState** out_state, void* fs,
   // DIAGNOSTIC: Check if gcnArchName is still valid AFTER MIOpen initialization
   hipDeviceProp_t prop_after_miopen;
   if (hipGetDeviceProperties(&prop_after_miopen, 0) == hipSuccess) {
-    RUNTIME_DEBUG_LOG("After MIOpen init - gcnArchName='%s' (checking for corruption)\n",
-                      prop_after_miopen.gcnArchName);
+    RUNTIME_DEBUG_LOG(
+        "After MIOpen init - gcnArchName='%s' (checking for corruption)\n",
+        prop_after_miopen.gcnArchName);
     if (prop_after_miopen.gcnArchName[0] == '\0') {
       fprintf(
           stderr,
@@ -187,19 +189,20 @@ int hipdnn_ep_state_init_with_fs(RuntimeState** out_state, void* fs,
   if (!metadata_blob || blob_size == 0)
     return 0; // No metadata — no constants to load
 
-  auto* meta = flatbuffers::GetRoot<udna::UdnaModelMetaInfo>(metadata_blob);
-  auto* constants = meta->constants();
+  auto *meta = flatbuffers::GetRoot<udna::UdnaModelMetaInfo>(metadata_blob);
+  auto *constants = meta->constants();
   int64_t count = constants ? (int64_t)constants->size() : 0;
 
   if (count <= 0)
     return 0; // No constants to load
 
-  const char* constants_filename = "constants.bin";
+  const char *constants_filename = "constants.bin";
   if (meta->constants_filename())
     constants_filename = meta->constants_filename()->c_str();
 
   // Allocate GPU constants pointer array
-  state->gpu_constants = (void**)calloc(static_cast<size_t>(count), sizeof(void*));
+  state->gpu_constants =
+      (void **)calloc(static_cast<size_t>(count), sizeof(void *));
   if (!state->gpu_constants) {
     fprintf(stderr, "Failed to allocate gpu_constants array\n");
     hipdnn_ep_state_cleanup(state);
@@ -209,7 +212,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState** out_state, void* fs,
   state->num_constants = static_cast<size_t>(count);
 
   // Open constants file via FileSystem
-  auto* fileSystem = static_cast<morphizen::FileSystem*>(fs);
+  auto *fileSystem = static_cast<morphizen::FileSystem *>(fs);
   auto reader = fileSystem->create_reader_template(constants_filename);
   if (!reader) {
     fprintf(stderr, "Failed to open %s via FileSystem\n", constants_filename);
@@ -237,14 +240,14 @@ int hipdnn_ep_state_init_with_fs(RuntimeState** out_state, void* fs,
     }
     state->constants_blob_is_host = true;
 
-    const void* src = reader->mmap();
+    const void *src = reader->mmap();
     if (src) {
       memcpy(state->gpu_constants_blob, src, total_size);
     } else {
       size_t bytes_read = reader->fread(state->gpu_constants_blob, total_size);
       if (bytes_read != total_size) {
-        fprintf(stderr, "Short read: got %zu of %zu bytes\n",
-                bytes_read, total_size);
+        fprintf(stderr, "Short read: got %zu of %zu bytes\n", bytes_read,
+                total_size);
         hipdnn_ep_state_cleanup(state);
         *out_state = nullptr;
         return 1;
@@ -252,8 +255,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState** out_state, void* fs,
     }
   } else {
     // dGPU: allocate in VRAM, upload once via hipMemcpy.
-    const void* src = reader->mmap();
-    void* cpu_buf   = nullptr;
+    const void *src = reader->mmap();
+    void *cpu_buf = nullptr;
 
     if (!src) {
       // No mmap — read entire file into a staging buffer
@@ -267,8 +270,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState** out_state, void* fs,
       }
       size_t bytes_read = reader->fread(cpu_buf, total_size);
       if (bytes_read != total_size) {
-        fprintf(stderr, "Short read: got %zu of %zu bytes\n",
-                bytes_read, total_size);
+        fprintf(stderr, "Short read: got %zu of %zu bytes\n", bytes_read,
+                total_size);
         free(cpu_buf);
         hipdnn_ep_state_cleanup(state);
         *out_state = nullptr;
@@ -303,13 +306,13 @@ int hipdnn_ep_state_init_with_fs(RuntimeState** out_state, void* fs,
   for (int64_t i = 0; i < count; ++i) {
     size_t offset = static_cast<size_t>(constants->Get(i)->offset());
     state->gpu_constants[i] =
-        static_cast<char*>(state->gpu_constants_blob) + offset;
+        static_cast<char *>(state->gpu_constants_blob) + offset;
   }
 
   return 0;
 }
 
-int hipdnn_ep_state_cleanup(RuntimeState* state) {
+int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (!state) {
     fprintf(stderr, "Invalid runtime state in cleanup\n");
     return 0; // Best-effort - don't fail
@@ -362,7 +365,7 @@ int hipdnn_ep_state_cleanup(RuntimeState* state) {
   return 0; // Best-effort cleanup always returns success
 }
 
-void* hipdnn_ep_constant_get(RuntimeState* state, int64_t index) {
+void *hipdnn_ep_constant_get(RuntimeState *state, int64_t index) {
   if (!state || index < 0 || (size_t)index >= state->num_constants) {
     fprintf(stderr, "hipdnn_ep_constant_get: invalid state or index %lld\n",
             (long long)index);
@@ -371,16 +374,16 @@ void* hipdnn_ep_constant_get(RuntimeState* state, int64_t index) {
   return state->gpu_constants[index];
 }
 
-void* hipdnn_ep_state_get_stream(RuntimeState* state) {
-  return state ? static_cast<void*>(state->stream) : nullptr;
+void *hipdnn_ep_state_get_stream(RuntimeState *state) {
+  return state ? static_cast<void *>(state->stream) : nullptr;
 }
 
-void* hipdnn_ep_state_get_miopen_handle(RuntimeState* state) {
-  return state ? static_cast<void*>(state->miopen_handle) : nullptr;
+void *hipdnn_ep_state_get_miopen_handle(RuntimeState *state) {
+  return state ? static_cast<void *>(state->miopen_handle) : nullptr;
 }
 
-void* hipdnn_ep_state_get_hipblas_handle(RuntimeState* state) {
-  return state ? static_cast<void*>(state->hipblas_handle) : nullptr;
+void *hipdnn_ep_state_get_hipblas_handle(RuntimeState *state) {
+  return state ? static_cast<void *>(state->hipblas_handle) : nullptr;
 }
 
 //==============================================================================
@@ -389,8 +392,8 @@ void* hipdnn_ep_state_get_hipblas_handle(RuntimeState* state) {
 
 extern "C" {
 
-int hipdnn_ep_pool_init(RuntimeState* state, size_t pool_size,
-                        const size_t* buffer_offsets, size_t num_buffers) {
+int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
+                        const size_t *buffer_offsets, size_t num_buffers) {
   if (!state) {
     fprintf(stderr, "Invalid state parameter to hipdnn_ep_pool_init\n");
     return 1;
@@ -413,7 +416,7 @@ int hipdnn_ep_pool_init(RuntimeState* state, size_t pool_size,
 
   // Copy buffer offsets array
   if (num_buffers > 0 && buffer_offsets) {
-    state->buffer_offsets = (size_t*)malloc(sizeof(size_t) * num_buffers);
+    state->buffer_offsets = (size_t *)malloc(sizeof(size_t) * num_buffers);
     if (!state->buffer_offsets) {
       fprintf(stderr, "Failed to allocate buffer offsets array\n");
       if (state->pool_base) {
@@ -430,7 +433,7 @@ int hipdnn_ep_pool_init(RuntimeState* state, size_t pool_size,
   return 0; // Success
 }
 
-void* hipdnn_ep_get_buffer_from_pool(RuntimeState* state, size_t index) {
+void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index) {
   if (!state || !state->pool_base) {
     fprintf(stderr, "Invalid state or pool not initialized\n");
     return nullptr;
@@ -443,12 +446,12 @@ void* hipdnn_ep_get_buffer_from_pool(RuntimeState* state, size_t index) {
   }
 
   // Return pointer at pool_base + offset
-  char* pool_ptr = static_cast<char*>(state->pool_base);
+  char *pool_ptr = static_cast<char *>(state->pool_base);
   size_t offset = state->buffer_offsets[index];
   return pool_ptr + offset;
 }
 
-void* hipdnn_ep_get_pool_base(RuntimeState* state) {
+void *hipdnn_ep_get_pool_base(RuntimeState *state) {
   if (!state) {
     fprintf(stderr, "Invalid state parameter to hipdnn_ep_get_pool_base\n");
     return nullptr;

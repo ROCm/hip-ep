@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -27,41 +27,41 @@
 #include <vector>
 
 // Interface function types
-typedef int (*InferenceInitFunc)(void** out_state, void* fs);
-typedef int (*InferenceComputeFunc)(void* state, void* inputs, void* outputs);
-typedef int (*InferenceCleanupFunc)(void* state);
-typedef const char* (*InferenceGetMetadataJsonFunc)(void);
+typedef int (*InferenceInitFunc)(void **out_state, void *fs);
+typedef int (*InferenceComputeFunc)(void *state, void *inputs, void *outputs);
+typedef int (*InferenceCleanupFunc)(void *state);
+typedef const char *(*InferenceGetMetadataJsonFunc)(void);
 
 // Tensor structures matching hipdnn_ep_runtime.h
 typedef struct {
-  void* data;          // Host data pointer
-  int64_t* shape;      // Array of dimension sizes
+  void *data;          // Host data pointer
+  int64_t *shape;      // Array of dimension sizes
   size_t rank;         // Number of dimensions
   size_t element_size; // Bytes per element (e.g. 4=float32, 2=float16, 8=int64)
 } tensor_t;
 
 typedef struct {
-  tensor_t* data; // Array of tensors
+  tensor_t *data; // Array of tensors
   size_t count;   // Number of tensors
 } span_t;
 
 // Cross-platform DLL loader using LLVM's DynamicLibrary
 class DllLoader {
 public:
-  DllLoader(const std::string& path) {
+  DllLoader(const std::string &path) {
     std::string errMsg;
     // permanently load: the library stays loaded until process exit
     if (llvm::sys::DynamicLibrary::LoadLibraryPermanently(path.c_str(),
                                                           &errMsg)) {
       std::cerr << "Failed to load DLL: " << path << " - " << errMsg << "\n";
     } else {
-      lib_ = llvm::sys::DynamicLibrary::getPermanentLibrary(path.c_str(),
-                                                            &errMsg);
+      lib_ =
+          llvm::sys::DynamicLibrary::getPermanentLibrary(path.c_str(), &errMsg);
       valid_ = lib_.isValid();
     }
   }
 
-  void* getSymbol(const char* name) {
+  void *getSymbol(const char *name) {
     if (!valid_)
       return nullptr;
     return lib_.getAddressOfSymbol(name);
@@ -76,7 +76,7 @@ private:
 
 // Parse --input-shape arguments: "0=8,3,224,224;1=8,512"
 std::map<int, std::vector<int64_t>>
-parseShapeOverrides(const std::string& arg) {
+parseShapeOverrides(const std::string &arg) {
   std::map<int, std::vector<int64_t>> result;
   std::istringstream iss(arg);
   std::string token;
@@ -103,8 +103,8 @@ parseShapeOverrides(const std::string& arg) {
 }
 
 // Resolve dynamic dimensions (-1) to concrete values
-void resolveShape(std::vector<int64_t>& shape, int64_t default_batch = 1) {
-  for (auto& dim : shape) {
+void resolveShape(std::vector<int64_t> &shape, int64_t default_batch = 1) {
+  for (auto &dim : shape) {
     if (dim == -1) {
       dim = default_batch;
     }
@@ -112,7 +112,7 @@ void resolveShape(std::vector<int64_t>& shape, int64_t default_batch = 1) {
 }
 
 // Calculate total element count
-size_t elementCount(const std::vector<int64_t>& shape) {
+size_t elementCount(const std::vector<int64_t> &shape) {
   size_t count = 1;
   for (auto dim : shape) {
     count *= dim;
@@ -135,27 +135,25 @@ static uint16_t floatToHalf(float value) {
   } else if (exp < -14) {
     h = static_cast<uint16_t>(sign << 15); // flush to zero
   } else {
-    h = static_cast<uint16_t>((sign << 15) |
-                              ((exp + 15) << 10) |
-                              (mant >> 13));
+    h = static_cast<uint16_t>((sign << 15) | ((exp + 15) << 10) | (mant >> 13));
   }
   return h;
 }
 
 // Generate test data with valid values for the element type
-void generateTestData(void* data, size_t sizeBytes, size_t elemSize) {
+void generateTestData(void *data, size_t sizeBytes, size_t elemSize) {
   if (elemSize == 4) {
-    auto* fdata = static_cast<float*>(data);
+    auto *fdata = static_cast<float *>(data);
     size_t count = sizeBytes / 4;
     for (size_t i = 0; i < count; i++)
       fdata[i] = static_cast<float>(i % 1000) * 0.001f;
   } else if (elemSize == 2) {
-    auto* hdata = static_cast<uint16_t*>(data);
+    auto *hdata = static_cast<uint16_t *>(data);
     size_t count = sizeBytes / 2;
     for (size_t i = 0; i < count; i++)
       hdata[i] = floatToHalf(static_cast<float>(i % 1000) * 0.001f);
   } else {
-    auto* bytes = static_cast<uint8_t*>(data);
+    auto *bytes = static_cast<uint8_t *>(data);
     for (size_t i = 0; i < sizeBytes; i++)
       bytes[i] = static_cast<uint8_t>(i % 256);
   }
@@ -189,7 +187,7 @@ static float halfToFloat(uint16_t h) {
 }
 
 // Validate output buffer (check for NaN/Inf which may indicate failure)
-bool validateOutput(const void* data, size_t sizeBytes, size_t elemSize,
+bool validateOutput(const void *data, size_t sizeBytes, size_t elemSize,
                     bool verbose) {
   size_t elemCount = sizeBytes / elemSize;
 
@@ -197,15 +195,15 @@ bool validateOutput(const void* data, size_t sizeBytes, size_t elemSize,
     std::cout << "  First 10 values: ";
     for (size_t i = 0; i < std::min(elemCount, size_t(10)); i++) {
       if (elemSize == 4) {
-        std::cout << static_cast<const float*>(data)[i] << " ";
+        std::cout << static_cast<const float *>(data)[i] << " ";
       } else if (elemSize == 2) {
-        const auto* p = static_cast<const uint16_t*>(data);
+        const auto *p = static_cast<const uint16_t *>(data);
         std::cout << halfToFloat(p[i]) << " ";
       } else if (elemSize == 8) {
-        const auto* p = static_cast<const int64_t*>(data);
+        const auto *p = static_cast<const int64_t *>(data);
         std::cout << p[i] << " ";
       } else {
-        const auto* p = static_cast<const uint8_t*>(data);
+        const auto *p = static_cast<const uint8_t *>(data);
         std::cout << static_cast<int>(p[i]) << " ";
       }
     }
@@ -216,7 +214,7 @@ bool validateOutput(const void* data, size_t sizeBytes, size_t elemSize,
   size_t nan_count = 0, inf_count = 0;
 
   if (elemSize == 4) {
-    const auto* fdata = static_cast<const float*>(data);
+    const auto *fdata = static_cast<const float *>(data);
     for (size_t i = 0; i < elemCount; i++) {
       if (std::isnan(fdata[i]))
         nan_count++;
@@ -224,7 +222,7 @@ bool validateOutput(const void* data, size_t sizeBytes, size_t elemSize,
         inf_count++;
     }
   } else if (elemSize == 2) {
-    const auto* hdata = static_cast<const uint16_t*>(data);
+    const auto *hdata = static_cast<const uint16_t *>(data);
     for (size_t i = 0; i < elemCount; i++) {
       float val = halfToFloat(hdata[i]);
       if (std::isnan(val))
@@ -251,46 +249,44 @@ struct TensorMeta {
 
 // Parse the metadata JSON string returned by inference_get_metadata_json().
 // Schema defined in proto/model_metadata.fbs.
-static bool parseMetadata(const char* json_str,
-                           std::vector<TensorMeta>& inputs,
-                           std::vector<TensorMeta>& outputs,
-                           std::string& error) {
+static bool parseMetadata(const char *json_str, std::vector<TensorMeta> &inputs,
+                          std::vector<TensorMeta> &outputs,
+                          std::string &error) {
   auto parsed = llvm::json::parse(llvm::StringRef(json_str));
   if (!parsed) {
     error = "JSON parse error: ";
-    llvm::handleAllErrors(parsed.takeError(), [&](const llvm::ErrorInfoBase& e) {
-      error += e.message();
-    });
+    llvm::handleAllErrors(
+        parsed.takeError(),
+        [&](const llvm::ErrorInfoBase &e) { error += e.message(); });
     return false;
   }
 
-  auto* root = parsed->getAsObject();
+  auto *root = parsed->getAsObject();
   if (!root) {
     error = "metadata JSON root is not an object";
     return false;
   }
 
   auto parseTensors = [&](llvm::StringRef key,
-                           std::vector<TensorMeta>& out) -> bool {
-    auto* arr = root->getArray(key);
+                          std::vector<TensorMeta> &out) -> bool {
+    auto *arr = root->getArray(key);
     if (!arr)
       return true; // empty is fine
-    for (auto& elem : *arr) {
-      auto* obj = elem.getAsObject();
+    for (auto &elem : *arr) {
+      auto *obj = elem.getAsObject();
       if (!obj) {
         error = "tensor entry is not an object";
         return false;
       }
       TensorMeta tm;
-      if (auto* shapeArr = obj->getArray("shape")) {
-        for (auto& d : *shapeArr) {
+      if (auto *shapeArr = obj->getArray("shape")) {
+        for (auto &d : *shapeArr) {
           if (auto v = d.getAsInteger())
             tm.shape.push_back(*v);
         }
       }
       if (auto es = obj->getInteger("element_size")) {
-        tm.element_size =
-            (*es > 0) ? static_cast<size_t>(*es) : sizeof(float);
+        tm.element_size = (*es > 0) ? static_cast<size_t>(*es) : sizeof(float);
       }
       out.push_back(std::move(tm));
     }
@@ -300,7 +296,7 @@ static bool parseMetadata(const char* json_str,
   return parseTensors("inputs", inputs) && parseTensors("outputs", outputs);
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
   if (argc < 2) {
     std::cerr << "Usage: " << argv[0]
               << " <model.dll> [--input-shape INDEX=DIMS;...] [--iterations N] "
@@ -342,8 +338,8 @@ int main(int argc, char** argv) {
   auto init_func = (InferenceInitFunc)dll.getSymbol("inference_init");
   auto compute_func = (InferenceComputeFunc)dll.getSymbol("inference_compute");
   auto cleanup_func = (InferenceCleanupFunc)dll.getSymbol("inference_cleanup");
-  auto get_metadata_func =
-      (InferenceGetMetadataJsonFunc)dll.getSymbol("inference_get_metadata_json");
+  auto get_metadata_func = (InferenceGetMetadataJsonFunc)dll.getSymbol(
+      "inference_get_metadata_json");
 
   if (!init_func || !compute_func || !cleanup_func || !get_metadata_func) {
     std::cerr << "ERROR: Missing required interface functions\n";
@@ -358,7 +354,7 @@ int main(int argc, char** argv) {
   }
 
   // Get and parse metadata JSON
-  const char* json_str = get_metadata_func();
+  const char *json_str = get_metadata_func();
   if (verbose)
     std::cout << "Metadata JSON: " << json_str << "\n";
 
@@ -479,7 +475,7 @@ int main(int argc, char** argv) {
   // DiskFileSystem resolves "constants.bin" relative to the current working
   // directory, which matches the WORKING_DIRECTORY set in the e2e CMakeLists.
   mlir::hip::DiskFileSystem fs(".");
-  void* state = nullptr;
+  void *state = nullptr;
   int ret = init_func(&state, &fs);
   if (ret != 0) {
     std::cerr << "ERROR: inference_init failed with code " << ret << "\n";

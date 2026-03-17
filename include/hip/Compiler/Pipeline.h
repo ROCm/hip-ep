@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
 #ifndef UDNA_COMPILER_COMPILER_PIPELINE_H
@@ -26,9 +26,9 @@ namespace compiler {
 /// 5. Memory pooling (hip-pool-allocs)
 /// 6. HIP → LLVM conversion
 /// 7. Interface generation
-void populateMorphizenPipeline(mlir::OpPassManager& pm,
-                               const udna::compiler::CompilationOptionsT& options,
-                               morphizen::FileSystem* fs);
+void populateMorphizenPipeline(
+    mlir::OpPassManager &pm, const udna::compiler::CompilationOptionsT &options,
+    morphizen::FileSystem *fs);
 
 } // namespace compiler
 } // namespace udna::compiler
