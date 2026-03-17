@@ -5,13 +5,12 @@
 // FileCheck tests for --hip-resolve-extern-constants (standalone pass).
 //
 // Verifies:
-//   - memref.get_global replaced with memref.view into %_constants arg
-//   - Function signatures gain %_constants : memref<?xi8>
-//   - Call sites forward the constants buffer
+//   - memref.get_global replaced with hip.get_constant
+//   - Function signatures are NOT modified (no %_constants arg)
 //   - Extern globals are erased
 //   - Module hip.constants_file attribute is stripped
 //   - No-op when no extern globals exist
-//   - Multiple extern globals with distinct offsets
+//   - Multiple extern globals with distinct indices
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --hip-resolve-extern-constants %s | FileCheck %s
@@ -25,74 +24,75 @@
 // ===== Single function using one extern global =====
 //
 // CHECK-LABEL: func.func @single_func_one_global
-// CHECK-SAME:    (%[[A:.*]]: memref<4x4xf32>, %[[CONST:.*]]: memref<?xi8>)
-// CHECK:         %[[OFF:.*]] = arith.constant 0 : index
-// CHECK:         %[[VIEW:.*]] = memref.view %[[CONST]][%[[OFF]]][]
-// CHECK-SAME:      : memref<?xi8> to memref<4x4xf32>
+// CHECK-SAME:    (%[[CTX1:.*]]: !hip.context, %[[A:.*]]: memref<4x4xf32>)
+// CHECK:         %[[C0:.*]] = arith.constant 0 : i64
+// CHECK:         hip.get_constant(%[[CTX1]], %[[C0]]) : memref<4x4xf32>
 // CHECK-NOT:     memref.get_global
-// CHECK:         return %[[VIEW]]
+// CHECK-NOT:     memref.view
 
-// ===== Function with multiple extern globals at different offsets =====
+// ===== Function with multiple extern globals at different indices =====
 //
 // CHECK-LABEL: func.func @multi_global_offsets
-// CHECK-SAME:    (%[[A2:.*]]: memref<4x4xf32>, %[[CONST2:.*]]: memref<?xi8>)
-// CHECK:         memref.view %[[CONST2]]{{.*}} : memref<?xi8> to memref<4x4xf32>
-// CHECK:         memref.view %[[CONST2]]{{.*}} : memref<?xi8> to memref<2x2xf32>
+// CHECK-SAME:    (%[[CTX2:.*]]: !hip.context, %[[A2:.*]]: memref<4x4xf32>)
+// CHECK:         %[[IDX0:.*]] = arith.constant 0 : i64
+// CHECK:         hip.get_constant(%[[CTX2]], %[[IDX0]]) : memref<4x4xf32>
+// CHECK:         %[[IDX1:.*]] = arith.constant 1 : i64
+// CHECK:         hip.get_constant(%[[CTX2]], %[[IDX1]]) : memref<2x2xf32>
 // CHECK-NOT:     memref.get_global
 // CHECK:         return
 
-// ===== Caller/callee: transitive propagation of constants arg =====
+// ===== Caller/callee: no transitive argument propagation needed =====
 //
 // CHECK-LABEL: func.func @callee_uses_global
-// CHECK-SAME:    (%[[CA:.*]]: memref<4x4xf32>, %[[CC:.*]]: memref<?xi8>)
-// CHECK:         memref.view %[[CC]]
+// CHECK-SAME:    (%[[CC:.*]]: !hip.context, %[[CA:.*]]: memref<4x4xf32>)
+// CHECK:         %[[CI:.*]] = arith.constant 0 : i64
+// CHECK:         hip.get_constant(%[[CC]], %[[CI]]) : memref<4x4xf32>
 // CHECK-NOT:     memref.get_global
 
 // CHECK-LABEL: func.func @caller_passes_constants
-// CHECK-SAME:    (%[[TA:.*]]: memref<4x4xf32>, %[[TC:.*]]: memref<?xi8>)
-// CHECK:         call @callee_uses_global(%[[TA]], %[[TC]])
+// CHECK-SAME:    (%[[TC:.*]]: !hip.context, %[[TA:.*]]: memref<4x4xf32>)
+// CHECK:         call @callee_uses_global(%[[TC]], %[[TA]])
 
 // ===== No-op: function without extern globals is unchanged =====
 //
 // CHECK-LABEL: func.func @no_globals_noop
-// CHECK-SAME:    (%arg0: memref<4x4xf32>)
-// CHECK-NOT:     memref<?xi8>
+// CHECK-SAME:    (%{{.*}}: !hip.context, %arg1: memref<4x4xf32>)
 // CHECK:         return
 
 module attributes {hip.constants_file = "model.constants.bin"} {
 
   memref.global "private" @weight_a : memref<4x4xf32> {
     alignment = 64 : i64,
-    hip.external_data = {offset = 0 : i64, size = 64 : i64}
+    hip.external_data = {index = 0 : i64, offset = 0 : i64, size = 64 : i64}
   }
 
   memref.global "private" @weight_b : memref<2x2xf32> {
     alignment = 64 : i64,
-    hip.external_data = {offset = 64 : i64, size = 16 : i64}
+    hip.external_data = {index = 1 : i64, offset = 64 : i64, size = 16 : i64}
   }
 
-  func.func @single_func_one_global(%arg0: memref<4x4xf32>) -> memref<4x4xf32> {
+  func.func @single_func_one_global(%ctx: !hip.context, %arg0: memref<4x4xf32>) -> memref<4x4xf32> {
     %w = memref.get_global @weight_a : memref<4x4xf32>
     return %w : memref<4x4xf32>
   }
 
-  func.func @multi_global_offsets(%arg0: memref<4x4xf32>) -> memref<4x4xf32> {
+  func.func @multi_global_offsets(%ctx: !hip.context, %arg0: memref<4x4xf32>) -> memref<4x4xf32> {
     %wa = memref.get_global @weight_a : memref<4x4xf32>
     %wb = memref.get_global @weight_b : memref<2x2xf32>
     return %wa : memref<4x4xf32>
   }
 
-  func.func @callee_uses_global(%arg0: memref<4x4xf32>) -> memref<4x4xf32> {
+  func.func @callee_uses_global(%ctx: !hip.context, %arg0: memref<4x4xf32>) -> memref<4x4xf32> {
     %w = memref.get_global @weight_a : memref<4x4xf32>
     return %w : memref<4x4xf32>
   }
 
-  func.func @caller_passes_constants(%arg0: memref<4x4xf32>) -> memref<4x4xf32> {
-    %res = func.call @callee_uses_global(%arg0) : (memref<4x4xf32>) -> memref<4x4xf32>
+  func.func @caller_passes_constants(%ctx: !hip.context, %arg0: memref<4x4xf32>) -> memref<4x4xf32> {
+    %res = func.call @callee_uses_global(%ctx, %arg0) : (!hip.context, memref<4x4xf32>) -> memref<4x4xf32>
     return %res : memref<4x4xf32>
   }
 
-  func.func @no_globals_noop(%arg0: memref<4x4xf32>) -> memref<4x4xf32> {
+  func.func @no_globals_noop(%ctx: !hip.context, %arg0: memref<4x4xf32>) -> memref<4x4xf32> {
     return %arg0 : memref<4x4xf32>
   }
 }
