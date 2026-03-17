@@ -2,11 +2,11 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#ifndef hip_CUSTOM_KERNELS_H
-#define hip_CUSTOM_KERNELS_H
+#ifndef HIP_CUSTOM_KERNELS_H
+#define HIP_CUSTOM_KERNELS_H
 
 /*
- * Pure C interface for hip custom HIP kernels.
+ * Pure C interface for HIP custom kernels.
  *
  * This header declares host-side launcher functions that are implemented
  * in .hip files compiled by hipcc. The interface uses only standard C types
@@ -37,12 +37,12 @@ extern "C" {
  * support float32/float16 (no ambiguity). New kernels should prefer hip_dtype.
  */
 typedef enum {
-    hip_DTYPE_FLOAT32  = 0,
-    hip_DTYPE_FLOAT16  = 1,
-    hip_DTYPE_INT64    = 2,
-    hip_DTYPE_INT32    = 3,
-    hip_DTYPE_FLOAT64  = 4,
-    hip_DTYPE_BFLOAT16 = 5,
+    HIP_DTYPE_FLOAT32  = 0,
+    HIP_DTYPE_FLOAT16  = 1,
+    HIP_DTYPE_INT64    = 2,
+    HIP_DTYPE_INT32    = 3,
+    HIP_DTYPE_FLOAT64  = 4,
+    HIP_DTYPE_BFLOAT16 = 5,
 } hip_dtype_t;
 
 /* =========================================================================
@@ -57,9 +57,9 @@ typedef enum {
  *   rhs          - GPU pointer to right-hand operand
  *   output       - GPU pointer to output
  *   num_elements - number of elements in each tensor
- *   hip_dtype   - data type (hip_dtype_t value cast to int)
+ *   hip_dtype    - data type (hip_dtype_t value cast to int)
  *
- * Currently supported types: hip_DTYPE_INT64
+ * Currently supported types: HIP_DTYPE_INT64
  * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
  */
 int hip_elementwise_sub(
@@ -265,9 +265,9 @@ int hip_gather(
  *   output              - GPU pointer to output tensor
  *   num_input_elements  - total input elements
  *   num_output_elements - total output elements
- *   hip_dtype          - data type (hip_dtype_t value cast to int)
+ *   hip_dtype           - data type (hip_dtype_t value cast to int)
  *
- * Currently supported types: hip_DTYPE_INT64
+ * Currently supported types: HIP_DTYPE_INT64
  * Returns: 0 on success, non-zero on failure
  */
 int hip_reduce_sum(
@@ -282,4 +282,4 @@ int hip_reduce_sum(
 }
 #endif
 
-#endif /* hip_CUSTOM_KERNELS_H */
+#endif /* HIP_CUSTOM_KERNELS_H */

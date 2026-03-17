@@ -202,10 +202,10 @@ bool CompilerDriver::compileImpl(
 
       // Custom kernel library (GQA, RoPE) — installed to
       // CMAKE_INSTALL_PREFIX/lib Path configured at CMake time via
-      // hip_CUSTOM_KERNELS_LIB_PATH define
-#ifdef hip_CUSTOM_KERNELS_LIB_PATH
+      // HIP_CUSTOM_KERNELS_LIB_PATH define
+#ifdef HIP_CUSTOM_KERNELS_LIB_PATH
     {
-      std::string custom_lib = hip_CUSTOM_KERNELS_LIB_PATH;
+      std::string custom_lib = HIP_CUSTOM_KERNELS_LIB_PATH;
       if (llvm::sys::fs::exists(custom_lib)) {
         libraries.push_back(custom_lib);
         std::cout << "  Custom kernels: " << custom_lib << "\n";

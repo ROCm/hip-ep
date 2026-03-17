@@ -40,10 +40,10 @@ hip_add_library(hip_custom_kernels STATIC
 )
 
 # Export the library path for CompilerDriver to discover at model-compile time
-set(hip_CUSTOM_KERNELS_LIB_PATH "$<TARGET_FILE:hip_custom_kernels>" PARENT_SCOPE)
+set(HIP_CUSTOM_KERNELS_LIB_PATH "$<TARGET_FILE:hip_custom_kernels>" PARENT_SCOPE)
 
 # Export include directory for Runtime bitcode compilation
-set(hip_CUSTOM_KERNELS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include" PARENT_SCOPE)
+set(HIP_CUSTOM_KERNELS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include" PARENT_SCOPE)
 
 # Install the static library and header to the install prefix.
 # After `cmake --install`, CompilerDriver can find:

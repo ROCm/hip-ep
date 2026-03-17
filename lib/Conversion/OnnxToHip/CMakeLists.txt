@@ -14,12 +14,12 @@ add_dependencies(OnnxToHip
   HipTypesIncGen
   HipOpsIncGen
   HipPassesIncGen
-  UdnaSchemasLib
+  HipSchemasLib
 )
 
 target_link_libraries(OnnxToHip PUBLIC
   HipDialectIR
-  UdnaSchemasLib
+  HipSchemasLib
   MLIRPass
   MLIRFuncDialect
   MLIRArithDialect

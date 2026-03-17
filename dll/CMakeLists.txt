@@ -13,11 +13,11 @@ add_library(hip-compiler-dll SHARED
 
 # Link against CInterface library (which pulls in all dependencies)
 target_link_libraries(hip-compiler-dll PRIVATE
-    UdnaCInterface
-    # UdnaCInterface transitively links:
+    HipCInterface
+    # HipCInterface transitively links:
     #   - LibHipCompiler
-    #   - UdnaHipDialect (→ OMONNXOps)
-    #   - UdnaBackend
+    #   - HipDialect (→ OMONNXOps)
+    #   - HipBackend
     #   - MLIR/LLVM libraries
 )
 

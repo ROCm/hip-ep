@@ -39,14 +39,14 @@ add_custom_command(
 )
 
 # Create target LLVM library
-add_library(UdnaTargetLLVM STATIC
+add_library(HipTargetLLVM STATIC
   LLVMBackend.cpp
   DLLLinker.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp  # Generated file
 )
 
-# Ensure runtime.bc is generated before building UdnaTargetLLVM
-add_dependencies(UdnaTargetLLVM RuntimeBitcode)
+# Ensure runtime.bc is generated before building HipTargetLLVM
+add_dependencies(HipTargetLLVM RuntimeBitcode)
 
 # Link LLVM components
 llvm_map_components_to_libnames(llvm_libs
@@ -95,7 +95,7 @@ find_library(LLD_COMMON_LIB NAMES lldCommon PATHS ${LLVM_LIBRARY_DIRS} REQUIRED)
 find_library(LLVM_DTLTO_LIB NAMES LLVMDTLTO PATHS ${LLVM_LIBRARY_DIRS})
 
 # Link against required libraries
-target_link_libraries(UdnaTargetLLVM PUBLIC
+target_link_libraries(HipTargetLLVM PUBLIC
   MLIRIR
   MLIRSupport
   MLIRTargetLLVMIRExport
@@ -109,9 +109,9 @@ target_link_libraries(UdnaTargetLLVM PUBLIC
 )
 
 # Add include directories
-target_include_directories(UdnaTargetLLVM PUBLIC
+target_include_directories(HipTargetLLVM PUBLIC
   ${CMAKE_SOURCE_DIR}/include
 )
 
 # Set folder for IDE organization
-set_target_properties(UdnaTargetLLVM PROPERTIES FOLDER "mlir/Target")
+set_target_properties(HipTargetLLVM PROPERTIES FOLDER "mlir/Target")

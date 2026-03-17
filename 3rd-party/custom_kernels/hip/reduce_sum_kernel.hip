@@ -68,7 +68,7 @@ extern "C" int hip_reduce_sum(
   int64_t reduce_size = num_input_elements / num_output_elements;
 
   switch (hip_dtype) {
-    case hip_DTYPE_INT64: {
+    case HIP_DTYPE_INT64: {
       int block_size = 256;
       if (reduce_size < 256) {
         block_size = 1;

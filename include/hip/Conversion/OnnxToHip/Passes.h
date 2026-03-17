@@ -42,4 +42,4 @@ std::unique_ptr<Pass> createConvertOnnxToHipPass();
 } // namespace hip
 } // namespace mlir
 
-#endif // hip_COMPILER_CONVERSION_ONNXTOHIP_PASSES_H
+#endif // HIP_COMPILER_CONVERSION_ONNXTOHIP_PASSES_H

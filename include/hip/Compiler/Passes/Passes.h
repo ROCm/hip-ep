@@ -2,8 +2,8 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#ifndef hip_COMPILER_COMPILER_PASSES_PASSES_H
-#define hip_COMPILER_COMPILER_PASSES_PASSES_H
+#ifndef HIP_COMPILER_COMPILER_PASSES_PASSES_H
+#define HIP_COMPILER_COMPILER_PASSES_PASSES_H
 
 #include "mlir/Pass/Pass.h"
 #include <memory>
@@ -27,4 +27,4 @@ createGenerateInterfacePass(const hip::compiler::CompilationOptionsT &options);
 } // namespace compiler
 } // namespace hip::compiler
 
-#endif // hip_COMPILER_COMPILER_PASSES_PASSES_H
+#endif // HIP_COMPILER_COMPILER_PASSES_PASSES_H

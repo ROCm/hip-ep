@@ -148,7 +148,7 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
   int hip_dtype;
   switch (element_size_bytes) {
   case 8:
-    hip_dtype = hip_DTYPE_INT64;
+    hip_dtype = HIP_DTYPE_INT64;
     break;
   default:
     RUNTIME_DEBUG_LOG(

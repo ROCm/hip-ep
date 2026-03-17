@@ -2,8 +2,8 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#ifndef hip_COMPILER_COMPILER_PIPELINE_H
-#define hip_COMPILER_COMPILER_PIPELINE_H
+#ifndef HIP_COMPILER_COMPILER_PIPELINE_H
+#define HIP_COMPILER_COMPILER_PIPELINE_H
 
 #include "compilation_options_generated.h"
 #include "mlir/Pass/PassManager.h"
@@ -33,4 +33,4 @@ void populateMorphizenPipeline(
 } // namespace compiler
 } // namespace hip::compiler
 
-#endif // hip_COMPILER_COMPILER_PIPELINE_H
+#endif // HIP_COMPILER_COMPILER_PIPELINE_H

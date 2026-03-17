@@ -2,8 +2,8 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#ifndef hip_COMPILER_INITALLPASSES_H
-#define hip_COMPILER_INITALLPASSES_H
+#ifndef HIP_COMPILER_INITALLPASSES_H
+#define HIP_COMPILER_INITALLPASSES_H
 
 #include "hip/Compiler/Passes/Passes.h"
 #include "hip/Compiler/Pipeline.h"
@@ -101,4 +101,4 @@ inline void registerAllPasses() {
 
 } // namespace hip::compiler
 
-#endif // hip_COMPILER_INITALLPASSES_H
+#endif // HIP_COMPILER_INITALLPASSES_H

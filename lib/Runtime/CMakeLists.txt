@@ -208,8 +208,8 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         endif()
 
         # Add custom kernels header for RoPE/GQA wrappers
-        if(hip_CUSTOM_KERNELS_INCLUDE_DIR)
-            list(APPEND COMPILE_FLAGS "-I${hip_CUSTOM_KERNELS_INCLUDE_DIR}")
+        if(HIP_CUSTOM_KERNELS_INCLUDE_DIR)
+            list(APPEND COMPILE_FLAGS "-I${HIP_CUSTOM_KERNELS_INCLUDE_DIR}")
         endif()
     else()
         list(APPEND COMPILE_FLAGS "-I${CMAKE_CURRENT_SOURCE_DIR}/mock")
@@ -229,7 +229,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
                 ${COMPILE_FLAGS}
                 ${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE}
                 -o ${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_BC}
-        # model_metadata_generated.h is produced by the UdnaSchemas flatc step;
+        # model_metadata_generated.h is produced by the HipSchemas flatc step;
         # list it explicitly so Ninja waits for flatc before running clang.
         DEPENDS ${SOURCE_FILE} hipdnn_ep_runtime.h
                 ${CMAKE_BINARY_DIR}/proto/model_metadata_generated.h
@@ -322,7 +322,7 @@ add_custom_command(
 # Runtime library's responsibility ends at runtime.bc generation.
 # The Backend project will consume runtime.bc and convert it to C array as needed.
 
-add_custom_target(UdnaRuntime
+add_custom_target(HipRuntime
     DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/runtime.bc
 )
 
@@ -330,7 +330,7 @@ add_custom_target(UdnaRuntime
 set(RUNTIME_BC_PATH ${CMAKE_CURRENT_BINARY_DIR}/runtime.bc PARENT_SCOPE)
 
 # Alias for backward compatibility
-add_custom_target(RuntimeBitcode DEPENDS UdnaRuntime)
+add_custom_target(RuntimeBitcode DEPENDS HipRuntime)
 
 # ============================================================================
 # SUMMARY OF BUILD ARTIFACTS AND PIPELINE

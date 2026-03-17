@@ -3,8 +3,8 @@
  * Licensed under the MIT License.
  */
 
-#ifndef hip_COMPILER_TYPES_H
-#define hip_COMPILER_TYPES_H
+#ifndef HIP_COMPILER_TYPES_H
+#define HIP_COMPILER_TYPES_H
 
 #include <stddef.h>
 
@@ -37,4 +37,4 @@ typedef struct {
 }
 #endif
 
-#endif /* hip_COMPILER_TYPES_H */
+#endif /* HIP_COMPILER_TYPES_H */

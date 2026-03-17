@@ -3,8 +3,8 @@
  * Licensed under the MIT License.
  */
 
-#ifndef hip_COMPILER_COMPILER_DRIVER_H
-#define hip_COMPILER_COMPILER_DRIVER_H
+#ifndef HIP_COMPILER_COMPILER_DRIVER_H
+#define HIP_COMPILER_COMPILER_DRIVER_H
 
 #include "compilation_options_generated.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -156,4 +156,4 @@ private:
 
 } // namespace hip::compiler
 
-#endif // hip_COMPILER_COMPILER_DRIVER_H
+#endif // HIP_COMPILER_COMPILER_DRIVER_H

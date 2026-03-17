@@ -18,10 +18,10 @@ add_library(LibHipCompiler STATIC
 # Link against required libraries
 target_link_libraries(LibHipCompiler PUBLIC
   LibHipCompilerPasses
-  UdnaConversion
+  HipConversion
   HipDialectIR
   HipDialectTransforms
-  UdnaTargetLLVM
+  HipTargetLLVM
   MLIRIR
   MLIRPass
   MLIRSupport
@@ -38,7 +38,7 @@ target_link_libraries(LibHipCompiler PUBLIC
   MLIRLLVMToLLVMIRTranslation
   MLIRTargetLLVMIRExport
   OMONNXOps
-  UdnaSchemasLib
+  HipSchemasLib
 )
 
 # Link LLVM components
@@ -76,7 +76,7 @@ if(NOT BUILD_MOCK_RUNTIME AND CMAKE_INSTALL_PREFIX)
         set(_custom_kernels_lib "${CMAKE_INSTALL_PREFIX}/lib/libhip_custom_kernels.a")
     endif()
     target_compile_definitions(LibHipCompiler PRIVATE
-        "hip_CUSTOM_KERNELS_LIB_PATH=\"${_custom_kernels_lib}\""
+        "HIP_CUSTOM_KERNELS_LIB_PATH=\"${_custom_kernels_lib}\""
     )
     message(STATUS "Custom kernels lib path for CompilerDriver: ${_custom_kernels_lib}")
 endif()

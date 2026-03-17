@@ -11,7 +11,7 @@
 ///   toJson:   NativeT -> Pack() -> binary -> GenerateText() -> JSON string
 ///   fromJson: JSON string -> ParseJson() -> binary -> UnPackTo() -> NativeT
 ///
-/// Template parameter: NativeT (e.g. CompilationOptionsT, UdnaModelMetaInfoT)
+/// Template parameter: NativeT (e.g. CompilationOptionsT, HipModelMetaInfoT)
 /// FlatT (the binary accessor class) is derived via NativeT::TableType so
 /// callers never need to mention it.
 

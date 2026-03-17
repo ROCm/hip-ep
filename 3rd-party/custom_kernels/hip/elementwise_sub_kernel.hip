@@ -35,7 +35,7 @@ extern "C" int hip_elementwise_sub(
   int grid_size = static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
 
   switch (hip_dtype) {
-    case hip_DTYPE_INT64: {
+    case HIP_DTYPE_INT64: {
       CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_elementwise_sub: dtype=INT64, "
               "num_elements=%lld, grid=%d, block=%d\n",
               (long long)num_elements, grid_size, kBlockSize);

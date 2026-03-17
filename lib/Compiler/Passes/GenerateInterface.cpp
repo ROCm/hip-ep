@@ -46,12 +46,12 @@ buildTensorInfo(ArrayAttr shapes, DenseI64ArrayAttr elementSizes, size_t i) {
   return ti;
 }
 
-/// Build a UdnaModelMetaInfoT native struct from module attributes.
+/// Build a HipModelMetaInfoT native struct from module attributes.
 /// Shared by buildMetadataBlob() and buildMetadataJson() so module attributes
 /// are read exactly once.
 /// Each ConstantInfo carries both size and a running byte offset, enabling
 /// future non-sequential or grouped constant layouts.
-hip::UdnaModelMetaInfoT buildMetadataNative(ModuleOp module,
+hip::HipModelMetaInfoT buildMetadataNative(ModuleOp module,
                                              const std::string &constantsFile) {
   auto inputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.input_shapes");
   auto outputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.output_shapes");
@@ -68,7 +68,7 @@ hip::UdnaModelMetaInfoT buildMetadataNative(ModuleOp module,
   auto constantOffsetsAttr =
       module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.constant_offsets");
 
-  hip::UdnaModelMetaInfoT meta;
+  hip::HipModelMetaInfoT meta;
   meta.version = 1;
   meta.constants_filename = constantsFile;
 
@@ -105,13 +105,13 @@ hip::UdnaModelMetaInfoT buildMetadataNative(ModuleOp module,
 }
 
 /// Build FlatBuffers binary blob from module attributes.
-/// Uses generated UdnaModelMetaInfoT native struct (--gen-object-api) so the
+/// Uses generated HipModelMetaInfoT native struct (--gen-object-api) so the
 /// code tracks schema changes automatically.
 std::vector<uint8_t> buildMetadataBlob(ModuleOp module,
                                        const std::string &constantsFile) {
-  hip::UdnaModelMetaInfoT meta = buildMetadataNative(module, constantsFile);
+  hip::HipModelMetaInfoT meta = buildMetadataNative(module, constantsFile);
   flatbuffers::FlatBufferBuilder fbb;
-  fbb.Finish(hip::UdnaModelMetaInfo::Pack(fbb, &meta));
+  fbb.Finish(hip::HipModelMetaInfo::Pack(fbb, &meta));
   const uint8_t *buf = fbb.GetBufferPointer();
   return std::vector<uint8_t>(buf, buf + fbb.GetSize());
 }
@@ -121,8 +121,8 @@ std::vector<uint8_t> buildMetadataBlob(ModuleOp module,
 /// with the binary blob — no manual field mapping needed.
 std::string buildMetadataJson(ModuleOp module,
                               const std::string &constantsFile) {
-  hip::UdnaModelMetaInfoT meta = buildMetadataNative(module, constantsFile);
-  return hip::toJson<hip::UdnaModelMetaInfoT>(
+  hip::HipModelMetaInfoT meta = buildMetadataNative(module, constantsFile);
+  return hip::toJson<hip::HipModelMetaInfoT>(
       meta, hip::k_model_metadata_schema());
 }
 
