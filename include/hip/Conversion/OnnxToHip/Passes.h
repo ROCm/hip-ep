@@ -21,12 +21,6 @@ struct CompilationOptionsT;
 namespace mlir {
 namespace hip {
 
-#define GEN_PASS_DECL
-#include "hip/Conversion/OnnxToHip/Passes.h.inc"
-
-#define GEN_PASS_REGISTRATION
-#include "hip/Conversion/OnnxToHip/Passes.h.inc"
-
 /// Creates a pass that converts ONNX operations to HIP dialect.
 /// onnx.Constant data is written via fs using options.constants_file as the
 /// filename. The module gains hipdnn.constant_sizes and hipdnn.constant_count
