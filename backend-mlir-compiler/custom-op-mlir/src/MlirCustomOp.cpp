@@ -127,10 +127,46 @@ TensorData marshal_input_tensors(OrtKernelContext *context) {
   return data;
 }
 
-// Marshal output tensors from ORT context using metadata outputs
+// Build a mapping from metadata output index to ORT kernel context output
+// index. The metadata output order (which matches the compiled DLL's output
+// order) may differ from the meta_def output order (which matches the fused
+// node / ORT kernel context order). MorphiZen's try_fuse() computes outputs
+// via calculate_return_values() in DFS-topological order rather than
+// preserving the caller-supplied output order. We resolve this by matching
+// output names between the two orderings.
+static std::vector<int> build_output_index_map(
+    const google::protobuf::RepeatedPtrField<mlir_metadata::Output> &outputs,
+    const morphizen::MetaDefProto &meta_def) {
+  std::vector<int> map(outputs.size());
+  for (int i = 0; i < outputs.size(); ++i) {
+    const auto &name = outputs[i].name();
+    int meta_def_idx = -1;
+    for (int j = 0; j < meta_def.outputs_size(); ++j) {
+      if (meta_def.outputs(j) == name) {
+        meta_def_idx = j;
+        break;
+      }
+    }
+    CHECK(meta_def_idx >= 0)
+        << "metadata output '" << name << "' not found in meta_def outputs";
+    int ort_idx = (!meta_def.output_argument_indice().empty())
+                      ? meta_def.output_argument_indice(meta_def_idx)
+                      : meta_def_idx;
+    map[i] = ort_idx;
+    MY_LOG(3) << "Output map: metadata[" << i << "] '" << name
+              << "' -> meta_def[" << meta_def_idx << "] -> ort[" << ort_idx
+              << "]";
+  }
+  return map;
+}
+
+// Marshal output tensors from ORT context using metadata outputs.
+// output_index_map maps from metadata output index (= DLL output index) to
+// the ORT kernel context output index.
 TensorData marshal_output_tensors(
     OrtKernelContext *context,
-    const google::protobuf::RepeatedPtrField<mlir_metadata::Output> &outputs) {
+    const google::protobuf::RepeatedPtrField<mlir_metadata::Output> &outputs,
+    const std::vector<int> &output_index_map) {
   if (outputs.size() == 0) {
     LOG(FATAL) << "No output shapes in metadata";
   }
@@ -147,15 +183,16 @@ TensorData marshal_output_tensors(
     data.shapes[i].assign(output_meta.shape().begin(),
                           output_meta.shape().end());
 
-    // GetOutput allocates the tensor and returns a reference
-    auto output_tensor = ctx.GetOutput(i, data.shapes[i]);
+    int ort_idx = output_index_map[i];
+    auto output_tensor = ctx.GetOutput(ort_idx, data.shapes[i]);
 
     data.tensors[i].data = output_tensor.GetTensorMutableRawData();
     data.tensors[i].shape = data.shapes[i].data();
     data.tensors[i].rank = data.shapes[i].size();
     data.tensors[i].element_size = onnx_elem_type_size(output_meta.elem_type());
 
-    MY_LOG(3) << "Output[" << i << "]: rank=" << data.tensors[i].rank
+    MY_LOG(3) << "Output[" << i << "] (ort_idx=" << ort_idx
+              << "): rank=" << data.tensors[i].rank
               << " element_size=" << data.tensors[i].element_size;
   }
 
@@ -237,16 +274,25 @@ MlirCustomOp::MlirCustomOp(
   MY_LOG(1) << "MlirCustomOp constructor";
   // Parse metadata from JSON
   metadata_ = parse_metadata_from_metadef(context, meta_def);
+  // Precompute output index mapping (metadata order -> ORT kernel context
+  // order)
+  output_index_map_ = build_output_index_map(metadata_.outputs(), *meta_def);
+  // Get FileSystem from PassContext for constants file resolution.
+  // const_cast follows the established morphizen pattern (custom_op_imp.hpp).
+  auto fs =
+      const_cast<morphizen::PassContext *>(context.get())->get_file_system();
   // Create inference state from DLL bytes (uses morphizen::Plugin)
   inference_state_ = customop::InferenceState::create(
-      load_artifact_from_epcontext(context, metadata_.artifact_filename()));
+      load_artifact_from_epcontext(context, metadata_.artifact_filename()),
+      fs.get());
 }
 
 void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   MY_LOG(2) << "MlirCustomOp::Compute() called";
 
   auto inputs = marshal_input_tensors(context);
-  auto outputs = marshal_output_tensors(context, metadata_.outputs());
+  auto outputs =
+      marshal_output_tensors(context, metadata_.outputs(), output_index_map_);
 
   int ret = inference_state_->compute(&inputs.span, &outputs.span);
   if (ret != 0) {
