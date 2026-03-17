@@ -17,7 +17,7 @@
 // CHECK-LABEL: func.func @static_lower
 // CHECK-SAME:    (%[[CTX:.*]]: !hip.context,
 // CHECK:         %[[A:.*]] = hip.alloc(%[[CTX]]) : memref<2x64x64xf32>
-// CHECK:         hip.hipblaslt.matmul
+// CHECK:         hip.matmul
 // CHECK:         %[[B:.*]] = hip.alloc(%[[CTX]]) : memref<2x64x64xf32>
 // CHECK:         hip.miopen.softmax
 // CHECK:         hip.free(%[[CTX]], %[[A]]) : memref<2x64x64xf32>
@@ -27,7 +27,7 @@ func.func @static_lower(
     %a: memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>,
     %b: memref<64x64xf32, strided<[?, ?], offset: ?>>) -> memref<2x64x64xf32> {
   %alloc0 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
-  hip.hipblaslt.matmul(%ctx) ins(%a, %b : memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<2x64x64xf32>)
+  hip.matmul(%ctx) ins(%a, %b : memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<2x64x64xf32>)
   %alloc1 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
   hip.miopen.softmax(%ctx) ins(%alloc0 : memref<2x64x64xf32>) outs(%alloc1 : memref<2x64x64xf32>)
   return %alloc1 : memref<2x64x64xf32>
@@ -38,7 +38,7 @@ func.func @static_lower(
 // CHECK-LABEL: func.func @dynamic_lower
 // CHECK-SAME:    (%[[CTX2:.*]]: !hip.context,
 // CHECK:         hip.alloc(%[[CTX2]], %{{.*}}) : memref<?x64xf32>
-// CHECK:         hip.hipblaslt.matmul
+// CHECK:         hip.matmul
 // CHECK-NOT:     hip.free
 // CHECK:         return
 func.func @dynamic_lower(
@@ -47,7 +47,7 @@ func.func @dynamic_lower(
     %b: memref<64x64xf32, strided<[?, ?], offset: ?>>,
     %n: index) -> memref<?x64xf32> {
   %alloc0 = memref.alloc(%n) : memref<?x64xf32>
-  hip.hipblaslt.matmul(%ctx) ins(%a, %b : memref<?x64xf32>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<?x64xf32>)
+  hip.matmul(%ctx) ins(%a, %b : memref<?x64xf32>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<?x64xf32>)
   return %alloc0 : memref<?x64xf32>
 }
 
@@ -64,7 +64,7 @@ func.func @no_allocs_noop(%ctx: !hip.context, %a: memref<2x64x64xf32>) -> memref
 // CHECK-LABEL: func.func @multiple_frees
 // CHECK-SAME:    (%[[CTX3:.*]]: !hip.context,
 // CHECK:         %[[A:.*]] = hip.alloc(%[[CTX3]]) : memref<2x64x64xf32>
-// CHECK:         hip.hipblaslt.matmul
+// CHECK:         hip.matmul
 // CHECK:         %[[B:.*]] = hip.alloc(%[[CTX3]]) : memref<2x64x64xf32>
 // CHECK:         hip.miopen.softmax
 // CHECK:         hip.free(%[[CTX3]], %[[A]]) : memref<2x64x64xf32>
@@ -77,7 +77,7 @@ func.func @multiple_frees(
     %input: memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>,
     %w: memref<64x64xf32, strided<[?, ?], offset: ?>>) -> memref<2x64x64xf32> {
   %alloc0 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
-  hip.hipblaslt.matmul(%ctx) ins(%input, %w : memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<2x64x64xf32>)
+  hip.matmul(%ctx) ins(%input, %w : memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<2x64x64xf32>)
   %alloc1 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
   hip.miopen.softmax(%ctx) ins(%alloc0 : memref<2x64x64xf32>) outs(%alloc1 : memref<2x64x64xf32>)
   %alloc2 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
@@ -112,7 +112,7 @@ func.func @dealloc_conversion(
 // CHECK-LABEL: func.func @free_after_all_direct_users
 // CHECK-SAME:    (%[[CTX5:.*]]: !hip.context,
 // CHECK:         %[[A:.*]] = hip.alloc(%[[CTX5]]) : memref<8x8xf32>
-// CHECK:         hip.hipblaslt.matmul{{.*}}outs(%[[A]] :
+// CHECK:         hip.matmul{{.*}}outs(%[[A]] :
 // CHECK:         %[[B:.*]] = hip.alloc(%[[CTX5]]) : memref<8x8xf32>
 // CHECK:         hip.miopen.softmax{{.*}}ins(%[[A]]{{.*}}outs(%[[B]] :
 // CHECK:         hip.free(%[[CTX5]], %[[A]]) : memref<8x8xf32>
@@ -122,7 +122,7 @@ func.func @free_after_all_direct_users(
     %a: memref<8x8xf32, strided<[?, ?], offset: ?>>,
     %b: memref<8x8xf32, strided<[?, ?], offset: ?>>) -> memref<8x8xf32> {
   %alloc0 = memref.alloc() : memref<8x8xf32>
-  hip.hipblaslt.matmul(%ctx) ins(%a, %b : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<8x8xf32>)
+  hip.matmul(%ctx) ins(%a, %b : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<8x8xf32>)
   %alloc1 = memref.alloc() : memref<8x8xf32>
   hip.miopen.softmax(%ctx) ins(%alloc0 : memref<8x8xf32>) outs(%alloc1 : memref<8x8xf32>)
   return %alloc1 : memref<8x8xf32>
@@ -137,7 +137,7 @@ func.func @free_after_all_direct_users(
 // CHECK:         %[[ALLOC:.*]] = hip.alloc(%[[CTX6]]) : memref<2x64x64xf32>
 // CHECK:         memref.subview
 // CHECK:         memref.cast
-// CHECK:         hip.hipblaslt.matmul
+// CHECK:         hip.matmul
 // CHECK:         hip.free(%[[CTX6]], %[[ALLOC]]) : memref<2x64x64xf32>
 // CHECK:         return
 func.func @view_alias_chain_free_placement(
@@ -150,7 +150,7 @@ func.func @view_alias_chain_free_placement(
   %cast = memref.cast %sv
       : memref<1x64x64xf32, strided<[4096, 64, 1]>>
         to memref<1x64x64xf32, strided<[?, ?, ?], offset: ?>>
-  hip.hipblaslt.matmul(%ctx) ins(%cast, %b : memref<1x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%out : memref<2x64x64xf32>)
+  hip.matmul(%ctx) ins(%cast, %b : memref<1x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%out : memref<2x64x64xf32>)
   return %out : memref<2x64x64xf32>
 }
 
@@ -174,7 +174,7 @@ func.func @pool_view_returned_no_free(
   %c256 = arith.constant 256 : index
   %pool = memref.alloc() : memref<512xi8>
   %view0 = memref.view %pool[%c0][] : memref<512xi8> to memref<8x8xf32>
-  hip.hipblaslt.matmul(%ctx) ins(%a, %b : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%view0 : memref<8x8xf32>)
+  hip.matmul(%ctx) ins(%a, %b : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%view0 : memref<8x8xf32>)
   %view1 = memref.view %pool[%c256][] : memref<512xi8> to memref<8x8xf32>
   hip.miopen.softmax(%ctx) ins(%view0 : memref<8x8xf32>) outs(%view1 : memref<8x8xf32>)
   return %view1 : memref<8x8xf32>

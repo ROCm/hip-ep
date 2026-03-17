@@ -60,15 +60,13 @@ struct HipDstBufferizableModel
 inline void
 registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, HipDialect *) {
-    HipblasltMatmulOp::attachInterface<
-        HipDstBufferizableModel<HipblasltMatmulOp>>(*ctx);
-    MiopenRmsNormOp::attachInterface<HipDstBufferizableModel<MiopenRmsNormOp>>(
+    MatmulOp::attachInterface<HipDstBufferizableModel<MatmulOp>>(*ctx);
+    RmsNormOp::attachInterface<HipDstBufferizableModel<RmsNormOp>>(*ctx);
+    SkipRmsNormOp::attachInterface<HipDstBufferizableModel<SkipRmsNormOp>>(
         *ctx);
-    MiopenSkipRmsNormOp::attachInterface<
-        HipDstBufferizableModel<MiopenSkipRmsNormOp>>(*ctx);
-    MiopenRopeOp::attachInterface<HipDstBufferizableModel<MiopenRopeOp>>(*ctx);
+    RopeOp::attachInterface<HipDstBufferizableModel<RopeOp>>(*ctx);
     MiopenAddOp::attachInterface<HipDstBufferizableModel<MiopenAddOp>>(*ctx);
-    MiopenMulOp::attachInterface<HipDstBufferizableModel<MiopenMulOp>>(*ctx);
+    MulOp::attachInterface<HipDstBufferizableModel<MulOp>>(*ctx);
     MiopenSoftmaxOp::attachInterface<HipDstBufferizableModel<MiopenSoftmaxOp>>(
         *ctx);
     TransposeOp::attachInterface<HipDstBufferizableModel<TransposeOp>>(*ctx);

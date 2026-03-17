@@ -153,22 +153,26 @@ def LowerAllocsPass : Pass<"hip-lower-allocs", "mlir::func::FuncOp"> {
 
 def ResolveExternConstantsPass
     : Pass<"hip-resolve-extern-constants", "mlir::ModuleOp"> {
-  let summary = "Replace extern memref.global constants with views into a "
-                "constants buffer argument";
+  let summary = "Replace extern memref.global constants with "
+                "hip.get_constant ops";
   let description = [{
     Resolves externalized constants (memref.global ops with hip.external_data
     attributes produced by --convert-onnx-to-hip) by replacing each
-    memref.get_global with a memref.view into a new %_constants : memref<?xi8>
-    function argument.
+    memref.get_global with a hip.get_constant(%ctx, %index) operation.
 
-    The host is responsible for loading the sidecar .constants.bin file
-    (e.g. via hip_load_constants()) and passing the resulting pointer as
-    the %_constants argument.
+    The index is read from the hip.external_data attribute on each extern
+    memref.global. The !hip.context is taken from function argument 0
+    (inserted by --hip-add-context-arg).
+
+    The runtime is responsible for loading the sidecar constants.bin file
+    via morphizen::FileSystem, uploading constants to GPU memory, and
+    returning GPU pointers via hipdnn_ep_constant_get(state, index).
 
     This pass should run after all buffer optimizations (hip-pool-allocs,
     hip-lower-allocs) and before --convert-hip-to-llvm.
   }];
   let dependentDialects = [
+    "mlir::hip::HipDialect",
     "mlir::arith::ArithDialect",
     "mlir::func::FuncDialect",
     "mlir::memref::MemRefDialect"
