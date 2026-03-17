@@ -22,7 +22,7 @@ add_custom_command(
 
     # Convert runtime.bc to C array
     COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_SOURCE_DIR}/cmake/scripts/xxd.py
+            ${CMAKE_SOURCE_DIR}/cmake/xxd.py
             --var runtime_bc_data
             --output ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp.tmp
             ${RUNTIME_BC_PATH}
