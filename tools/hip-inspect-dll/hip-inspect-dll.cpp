@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -24,12 +24,12 @@
 #include <string>
 #include <vector>
 
-typedef const char* (*InferenceGetMetadataJsonFunc)(void);
+typedef const char *(*InferenceGetMetadataJsonFunc)(void);
 
 // Cross-platform DLL loader (same pattern as test-model-dll).
 class DllLoader {
 public:
-  explicit DllLoader(const std::string& path) {
+  explicit DllLoader(const std::string &path) {
     std::string errMsg;
     if (llvm::sys::DynamicLibrary::LoadLibraryPermanently(path.c_str(),
                                                           &errMsg)) {
@@ -41,7 +41,7 @@ public:
     }
   }
 
-  void* getSymbol(const char* name) {
+  void *getSymbol(const char *name) {
     if (!valid_)
       return nullptr;
     return lib_.getAddressOfSymbol(name);
@@ -71,7 +71,7 @@ static std::string elementTypeName(int64_t element_size) {
 }
 
 // Format a shape array as "[d0, d1, ...]".
-static std::string formatShape(const llvm::json::Array* shapeArr) {
+static std::string formatShape(const llvm::json::Array *shapeArr) {
   if (!shapeArr || shapeArr->empty())
     return "[]";
   std::string s = "[";
@@ -88,19 +88,18 @@ static std::string formatShape(const llvm::json::Array* shapeArr) {
 }
 
 // Print formatted summary of parsed metadata JSON.
-static bool printSummary(const char* json_str) {
+static bool printSummary(const char *json_str) {
   auto parsed = llvm::json::parse(llvm::StringRef(json_str));
   if (!parsed) {
     std::cerr << "Failed to parse metadata JSON: ";
-    llvm::handleAllErrors(parsed.takeError(),
-                          [](const llvm::ErrorInfoBase& e) {
-                            std::cerr << e.message();
-                          });
+    llvm::handleAllErrors(parsed.takeError(), [](const llvm::ErrorInfoBase &e) {
+      std::cerr << e.message();
+    });
     std::cerr << "\n";
     return false;
   }
 
-  auto* root = parsed->getAsObject();
+  auto *root = parsed->getAsObject();
   if (!root) {
     std::cerr << "Metadata JSON root is not an object.\n";
     return false;
@@ -114,11 +113,11 @@ static bool printSummary(const char* json_str) {
   if (auto cf = root->getString("constants_filename"))
     std::cout << "Constants file  : " << cf->str() << "\n";
 
-  if (auto* consts = root->getArray("constants")) {
+  if (auto *consts = root->getArray("constants")) {
     std::cout << "Constants       : " << consts->size() << "\n";
     int64_t total = 0;
-    for (auto& c : *consts) {
-      if (auto* obj = c.getAsObject()) {
+    for (auto &c : *consts) {
+      if (auto *obj = c.getAsObject()) {
         if (auto sz = obj->getInteger("size"))
           total += *sz;
       }
@@ -129,12 +128,12 @@ static bool printSummary(const char* json_str) {
   std::cout << "\n";
 
   // Inputs
-  auto printTensors = [&](const char* key, const char* label) {
-    auto* arr = root->getArray(key);
+  auto printTensors = [&](const char *key, const char *label) {
+    auto *arr = root->getArray(key);
     int64_t count = arr ? static_cast<int64_t>(arr->size()) : 0;
     // Prefer the explicit count field when present.
-    std::string countKey = std::string(key) == "inputs" ? "input_count"
-                                                        : "output_count";
+    std::string countKey =
+        std::string(key) == "inputs" ? "input_count" : "output_count";
     if (auto c = root->getInteger(countKey))
       count = *c;
 
@@ -144,7 +143,7 @@ static bool printSummary(const char* json_str) {
       return;
     }
     for (size_t i = 0; i < arr->size(); ++i) {
-      auto* obj = (*arr)[i].getAsObject();
+      auto *obj = (*arr)[i].getAsObject();
       if (!obj)
         continue;
       std::string dtype = "float32";
@@ -163,15 +162,16 @@ static bool printSummary(const char* json_str) {
   return true;
 }
 
-static void printHelp(const char* argv0) {
-  std::cout << "Print metadata embedded in a compiled model DLL.\n\n"
-            << "Usage: " << argv0 << " <model.dll> [--json]\n\n"
-            << "Options:\n"
-            << "  --json   Dump raw metadata JSON instead of formatted summary\n"
-            << "  -h, --help   Show this help\n";
+static void printHelp(const char *argv0) {
+  std::cout
+      << "Print metadata embedded in a compiled model DLL.\n\n"
+      << "Usage: " << argv0 << " <model.dll> [--json]\n\n"
+      << "Options:\n"
+      << "  --json   Dump raw metadata JSON instead of formatted summary\n"
+      << "  -h, --help   Show this help\n";
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
   std::string dllPath;
   bool dumpJson = false;
 
@@ -200,16 +200,15 @@ int main(int argc, char** argv) {
   if (!loader.isValid())
     return 1;
 
-  auto* getMetadata = reinterpret_cast<InferenceGetMetadataJsonFunc>(
+  auto *getMetadata = reinterpret_cast<InferenceGetMetadataJsonFunc>(
       loader.getSymbol("inference_get_metadata_json"));
   if (!getMetadata) {
-    std::cerr
-        << "Symbol 'inference_get_metadata_json' not found in: " << dllPath
-        << "\n";
+    std::cerr << "Symbol 'inference_get_metadata_json' not found in: "
+              << dllPath << "\n";
     return 1;
   }
 
-  const char* json = getMetadata();
+  const char *json = getMetadata();
   if (!json) {
     std::cerr << "inference_get_metadata_json returned null.\n";
     return 1;

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -14,19 +14,19 @@
 // - inference_get_metadata_json: Return JSON metadata (input/output shapes)
 //===----------------------------------------------------------------------===//
 
+#include "compilation_options_generated.h"
+#include "flatbuffers/flatbuffers.h"
+#include "hip/Compiler/Passes/Passes.h"
+#include "hip/Dialect/IR/HipDialect.h"
+#include "hip/debug_log.h"
+#include "hip/flatbuffers_json.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
-#include "hip/Compiler/Passes/Passes.h"
-#include "compilation_options_generated.h"
-#include "hip/Dialect/IR/HipDialect.h"
-#include "hip/flatbuffers_json.h"
 #include "model_metadata_generated.h"
 #include "model_metadata_schema.h"
-#include "flatbuffers/flatbuffers.h"
-#include "hip/debug_log.h"
 
 using namespace mlir;
 
@@ -52,7 +52,7 @@ buildTensorInfo(ArrayAttr shapes, DenseI64ArrayAttr elementSizes, size_t i) {
 /// Each ConstantInfo carries both size and a running byte offset, enabling
 /// future non-sequential or grouped constant layouts.
 hip::UdnaModelMetaInfoT buildMetadataNative(ModuleOp module,
-                                             const std::string& constantsFile) {
+                                             const std::string &constantsFile) {
   auto inputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.input_shapes");
   auto outputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.output_shapes");
   auto inputElementSizes =
@@ -74,8 +74,8 @@ hip::UdnaModelMetaInfoT buildMetadataNative(ModuleOp module,
 
   if (constantSizesAttr) {
     auto sizes = constantSizesAttr.asArrayRef();
-    auto offsets =
-        constantOffsetsAttr ? constantOffsetsAttr.asArrayRef() : ArrayRef<int64_t>{};
+    auto offsets = constantOffsetsAttr ? constantOffsetsAttr.asArrayRef()
+                                       : ArrayRef<int64_t>{};
     for (size_t i = 0; i < sizes.size(); ++i) {
       auto ci = std::make_unique<hip::ConstantInfoT>();
       ci->size = sizes[i];
@@ -86,8 +86,7 @@ hip::UdnaModelMetaInfoT buildMetadataNative(ModuleOp module,
 
   if (inputShapes) {
     for (size_t i = 0; i < inputShapes.size(); i++)
-      meta.inputs.push_back(
-          buildTensorInfo(inputShapes, inputElementSizes, i));
+      meta.inputs.push_back(buildTensorInfo(inputShapes, inputElementSizes, i));
   }
   if (outputShapes) {
     for (size_t i = 0; i < outputShapes.size(); i++)
@@ -95,12 +94,12 @@ hip::UdnaModelMetaInfoT buildMetadataNative(ModuleOp module,
           buildTensorInfo(outputShapes, outputElementSizes, i));
   }
 
-  meta.input_count =
-      inputCountAttr ? inputCountAttr.getInt()
-                     : (int64_t)(inputShapes ? inputShapes.size() : 0);
-  meta.output_count =
-      outputCountAttr ? outputCountAttr.getInt()
-                      : (int64_t)(outputShapes ? outputShapes.size() : 0);
+  meta.input_count = inputCountAttr
+                         ? inputCountAttr.getInt()
+                         : (int64_t)(inputShapes ? inputShapes.size() : 0);
+  meta.output_count = outputCountAttr
+                          ? outputCountAttr.getInt()
+                          : (int64_t)(outputShapes ? outputShapes.size() : 0);
 
   return meta;
 }
@@ -109,11 +108,11 @@ hip::UdnaModelMetaInfoT buildMetadataNative(ModuleOp module,
 /// Uses generated UdnaModelMetaInfoT native struct (--gen-object-api) so the
 /// code tracks schema changes automatically.
 std::vector<uint8_t> buildMetadataBlob(ModuleOp module,
-                                       const std::string& constantsFile) {
+                                       const std::string &constantsFile) {
   hip::UdnaModelMetaInfoT meta = buildMetadataNative(module, constantsFile);
   flatbuffers::FlatBufferBuilder fbb;
   fbb.Finish(hip::UdnaModelMetaInfo::Pack(fbb, &meta));
-  const uint8_t* buf = fbb.GetBufferPointer();
+  const uint8_t *buf = fbb.GetBufferPointer();
   return std::vector<uint8_t>(buf, buf + fbb.GetSize());
 }
 
@@ -121,14 +120,14 @@ std::vector<uint8_t> buildMetadataBlob(ModuleOp module,
 /// Uses the embedded model_metadata schema so the output is always consistent
 /// with the binary blob — no manual field mapping needed.
 std::string buildMetadataJson(ModuleOp module,
-                              const std::string& constantsFile) {
+                              const std::string &constantsFile) {
   hip::UdnaModelMetaInfoT meta = buildMetadataNative(module, constantsFile);
   return hip::toJson<hip::UdnaModelMetaInfoT>(
       meta, hip::k_model_metadata_schema());
 }
 
 /// Generate global constant string for metadata JSON
-void generateMetadataGlobal(ModuleOp module, const std::string& jsonStr) {
+void generateMetadataGlobal(ModuleOp module, const std::string &jsonStr) {
   OpBuilder builder(module.getContext());
   auto i8Type = builder.getI8Type();
   auto arrayType = LLVM::LLVMArrayType::get(i8Type, jsonStr.size() + 1);
@@ -142,13 +141,13 @@ void generateMetadataGlobal(ModuleOp module, const std::string& jsonStr) {
 
 /// Generate global constant for metadata FlatBuffers blob
 void generateMetadataBlobGlobal(ModuleOp module,
-                                const std::vector<uint8_t>& blob) {
+                                const std::vector<uint8_t> &blob) {
   OpBuilder builder(module.getContext());
   auto i8Type = builder.getI8Type();
   auto arrayType = LLVM::LLVMArrayType::get(i8Type, blob.size());
 
   builder.setInsertionPoint(&module.getBody()->front());
-  llvm::StringRef blobRef(reinterpret_cast<const char*>(blob.data()),
+  llvm::StringRef blobRef(reinterpret_cast<const char *>(blob.data()),
                           blob.size());
   builder.create<LLVM::GlobalOp>(module.getLoc(), arrayType,
                                  /*isConstant=*/true, LLVM::Linkage::Internal,
@@ -171,7 +170,7 @@ void generateInferenceGetMetadataJson(ModuleOp module) {
   funcOp->setAttr("llvm.emit_c_interface", builder.getUnitAttr());
   funcOp->setAttr("sym_visibility", builder.getStringAttr("public"));
 
-  Block* entry = funcOp.addEntryBlock(builder);
+  Block *entry = funcOp.addEntryBlock(builder);
   builder.setInsertionPointToStart(entry);
 
   Value addr =
@@ -185,7 +184,7 @@ public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GenerateInterfacePass)
 
   explicit GenerateInterfacePass(
-      const hip::compiler::CompilationOptionsT& compilationOptions)
+      const hip::compiler::CompilationOptionsT &compilationOptions)
       : compilationOptions_(compilationOptions) {}
 
   StringRef getArgument() const final { return "generate-interface"; }
@@ -194,7 +193,7 @@ public:
            "inference_compute, inference_cleanup, inference_get_metadata_json)";
   }
 
-  void getDependentDialects(DialectRegistry& registry) const override {
+  void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<LLVM::LLVMDialect>();
     registry.insert<func::FuncDialect>();
     registry.insert<arith::ArithDialect>();
@@ -214,7 +213,8 @@ public:
     auto outputCount =
         module->getAttrOfType<IntegerAttr>("hipdnn.output_count");
 
-    // Resolve constants filename from compilation options (default: constants.bin)
+    // Resolve constants filename from compilation options (default:
+    // constants.bin)
     const std::string constantsFile =
         !compilationOptions_.constants_file.empty()
             ? compilationOptions_.constants_file
@@ -233,7 +233,8 @@ public:
     // Generate interface functions
     generateInferenceInit(module, blob.size());
     auto inputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.input_shapes");
-    auto outputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.output_shapes");
+    auto outputShapes =
+        module->getAttrOfType<ArrayAttr>("hipdnn.output_shapes");
     auto inputElementSizes =
         module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.input_element_sizes");
     auto outputElementSizes =
@@ -251,13 +252,13 @@ public:
   }
 
 private:
-  const hip::compiler::CompilationOptionsT& compilationOptions_;
+  const hip::compiler::CompilationOptionsT &compilationOptions_;
 
   /// Returns LLVM struct type for memref: (ptr, ptr, i64, array<rank x i64>,
   /// array<rank x i64>)
-  Type getMemRefStructType(OpBuilder& builder, int64_t rank,
+  Type getMemRefStructType(OpBuilder &builder, int64_t rank,
                            unsigned addrSpace) {
-    MLIRContext* ctx = builder.getContext();
+    MLIRContext *ctx = builder.getContext();
     Type ptrType = LLVM::LLVMPointerType::get(ctx, addrSpace);
     Type i64Type = builder.getI64Type();
     Type sizeArrayType = LLVM::LLVMArrayType::get(i64Type, rank);
@@ -280,7 +281,7 @@ private:
     Type ptrType = LLVM::LLVMPointerType::get(builder.getContext(), 0);
 
     // Find insertion point at start of module body (before first operation)
-    auto& firstOp = module.getBody()->front();
+    auto &firstOp = module.getBody()->front();
     builder.setInsertionPoint(&firstOp);
 
     // Declare malloc if not already present
@@ -312,7 +313,7 @@ private:
     Type voidType = LLVM::LLVMVoidType::get(builder.getContext());
 
     // Find insertion point
-    auto& firstOp = module.getBody()->front();
+    auto &firstOp = module.getBody()->front();
     builder.setInsertionPoint(&firstOp);
 
     // Declare HIP functions
@@ -559,7 +560,7 @@ private:
 
   /// Verify that module has all required prerequisites
   LogicalResult verifyPrerequisites(ModuleOp module) {
-    MLIRContext* ctx = module.getContext();
+    MLIRContext *ctx = module.getContext();
     Type ptrType = LLVM::LLVMPointerType::get(ctx, 0);
     Type i32Type = IntegerType::get(ctx, 32);
     Type i64Type = IntegerType::get(ctx, 64);
@@ -569,8 +570,9 @@ private:
         module.lookupSymbol<LLVM::LLVMFuncOp>("inference_compute") ||
         module.lookupSymbol<LLVM::LLVMFuncOp>("inference_cleanup") ||
         module.lookupSymbol<LLVM::LLVMFuncOp>("inference_get_metadata_json")) {
-      COMPILER_DEBUG_LOG("[GenerateInterface] Interface functions already exist. "
-                   << "Pass already ran.\n");
+      COMPILER_DEBUG_LOG(
+          "[GenerateInterface] Interface functions already exist. "
+          << "Pass already ran.\n");
       return failure();
     }
 
@@ -580,12 +582,14 @@ private:
     if (!mainFunc) {
       // Give helpful error if it's func.func
       if (module.lookupSymbol<func::FuncOp>("main_graph")) {
-        COMPILER_DEBUG_LOG("[GenerateInterface] @main_graph is func.func, needs "
-                        "llvm.func.\n"
-                     << "Run --convert-hip-to-llvm first.\n");
+        COMPILER_DEBUG_LOG(
+            "[GenerateInterface] @main_graph is func.func, needs "
+            "llvm.func.\n"
+            << "Run --convert-hip-to-llvm first.\n");
         return failure();
       }
-      COMPILER_DEBUG_LOG("[GenerateInterface] @main_graph (llvm.func) not found\n");
+      COMPILER_DEBUG_LOG(
+          "[GenerateInterface] @main_graph (llvm.func) not found\n");
       return failure();
     }
 
@@ -595,8 +599,9 @@ private:
         mainType.getParamType(1) != ptrType ||
         mainType.getParamType(2) != ptrType ||
         mainType.getReturnType() != i32Type) {
-      COMPILER_DEBUG_LOG("[GenerateInterface] @main_graph has wrong signature.\n"
-                   << "Expected: (ptr, ptr, ptr) -> i32\n");
+      COMPILER_DEBUG_LOG(
+          "[GenerateInterface] @main_graph has wrong signature.\n"
+          << "Expected: (ptr, ptr, ptr) -> i32\n");
       return failure();
     }
 
@@ -653,7 +658,7 @@ private:
     funcOp->setAttr("sym_visibility", builder.getStringAttr("public"));
 
     // Create function body
-    Block* entryBlock = funcOp.addEntryBlock(builder);
+    Block *entryBlock = funcOp.addEntryBlock(builder);
     builder.setInsertionPointToStart(entryBlock);
 
     Value outStatePtr = entryBlock->getArgument(0);
@@ -669,8 +674,7 @@ private:
     auto initFunc =
         module.lookupSymbol<LLVM::LLVMFuncOp>("hipdnn_ep_state_init_with_fs");
     LLVM::CallOp initCall = builder.create<LLVM::CallOp>(
-        loc, initFunc,
-        ValueRange{outStatePtr, fsPtr, blobPtr, blobSizeVal});
+        loc, initFunc, ValueRange{outStatePtr, fsPtr, blobPtr, blobSizeVal});
 
     // MemoryPoolingPass must always emit all three pool attributes (even when
     // pool_size is 0).  Missing attributes means the pass was skipped or buggy.
@@ -707,8 +711,8 @@ private:
           loc, LLVM::ICmpPredicate::ne, initCall.getResult(), zero_i32);
 
       // Create blocks for conditional pool init
-      Block* poolInitBlock = funcOp.addBlock();
-      Block* returnErrorBlock = funcOp.addBlock();
+      Block *poolInitBlock = funcOp.addBlock();
+      Block *returnErrorBlock = funcOp.addBlock();
 
       // If state init failed, return error immediately
       builder.create<LLVM::CondBrOp>(loc, initFailed, returnErrorBlock,
@@ -781,8 +785,7 @@ private:
   void generateInferenceCompute(ModuleOp module, IntegerAttr inputCount,
                                 ArrayAttr inputShapes,
                                 DenseI64ArrayAttr inputElementSizes,
-                                IntegerAttr outputCount,
-                                ArrayAttr outputShapes,
+                                IntegerAttr outputCount, ArrayAttr outputShapes,
                                 DenseI64ArrayAttr outputElementSizes) {
     OpBuilder builder(module.getContext());
     Location loc = module.getLoc();
@@ -802,7 +805,7 @@ private:
     funcOp->setAttr("sym_visibility", builder.getStringAttr("public"));
 
     // Create function body
-    Block* entryBlock = funcOp.addEntryBlock(builder);
+    Block *entryBlock = funcOp.addEntryBlock(builder);
     builder.setInsertionPointToStart(entryBlock);
 
     Value state = entryBlock->getArgument(0);
@@ -864,7 +867,7 @@ private:
     }
 
     // Create error cleanup block
-    Block* errorCleanupBlock = funcOp.addBlock();
+    Block *errorCleanupBlock = funcOp.addBlock();
 
     // ========================================================================
     // Prepare all input tensors
@@ -889,10 +892,9 @@ private:
       // element_size is read from tensor_t.element_size by the runtime
       Value retVal =
           builder
-              .create<LLVM::CallOp>(
-                  loc, prepareInputFunc,
-                  ValueRange{state, inputsSpanPtr, indexVal, rankVal,
-                             bufferPtr})
+              .create<LLVM::CallOp>(loc, prepareInputFunc,
+                                    ValueRange{state, inputsSpanPtr, indexVal,
+                                               rankVal, bufferPtr})
               .getResult();
 
       // Check for error (non-zero return)
@@ -900,10 +902,10 @@ private:
                                                   retVal, c0_i32);
 
       // Create blocks for error path
-      Block* continueBlock = funcOp.addBlock();
+      Block *continueBlock = funcOp.addBlock();
 
       // If prepare failed, store error code and jump to cleanup
-      Block* storeErrorBlock = funcOp.addBlock();
+      Block *storeErrorBlock = funcOp.addBlock();
       builder.create<LLVM::CondBrOp>(loc, failed, storeErrorBlock,
                                      continueBlock);
 
@@ -940,10 +942,9 @@ private:
       // element_size is read from tensor_t.element_size by the runtime
       Value retVal =
           builder
-              .create<LLVM::CallOp>(
-                  loc, prepareOutputFunc,
-                  ValueRange{state, outputsSpanPtr, indexVal, rankVal,
-                             bufferPtr})
+              .create<LLVM::CallOp>(loc, prepareOutputFunc,
+                                    ValueRange{state, outputsSpanPtr, indexVal,
+                                               rankVal, bufferPtr})
               .getResult();
 
       // Check for error
@@ -951,10 +952,10 @@ private:
                                                   retVal, c0_i32);
 
       // Create blocks for error path
-      Block* continueBlock = funcOp.addBlock();
+      Block *continueBlock = funcOp.addBlock();
 
       // If prepare/finalize failed, store error code and jump to cleanup
-      Block* storeErrorBlock = funcOp.addBlock();
+      Block *storeErrorBlock = funcOp.addBlock();
       builder.create<LLVM::CondBrOp>(loc, failed, storeErrorBlock,
                                      continueBlock);
 
@@ -1068,8 +1069,8 @@ private:
                                       ArrayRef<LLVM::GEPArg>{indexVal});
       builder.create<LLVM::StoreOp>(loc, memrefPtr, arraySlot);
 
-      COMPILER_DEBUG_LOG("[GenerateInterface] Built input memref " << i
-                   << " using opaque TensorBuffer accessors\n");
+      COMPILER_DEBUG_LOG("[GenerateInterface] Built input memref "
+                         << i << " using opaque TensorBuffer accessors\n");
     }
 
     // Build output memref array similarly
@@ -1163,11 +1164,12 @@ private:
     // ========================================================================
     // Call @main with arrays of pointers
     // ========================================================================
-    Block* mainSuccessBlock = funcOp.addBlock();
+    Block *mainSuccessBlock = funcOp.addBlock();
 
     auto mainFunc = module.lookupSymbol<LLVM::LLVMFuncOp>("main_graph");
     if (!mainFunc) {
-      COMPILER_DEBUG_LOG("[GenerateInterface] Warning: @main_graph not found\n");
+      COMPILER_DEBUG_LOG(
+          "[GenerateInterface] Warning: @main_graph not found\n");
       builder.create<LLVM::BrOp>(loc, mainSuccessBlock);
     } else {
       Value mainRet =
@@ -1181,7 +1183,7 @@ private:
       Value mainFailed = builder.create<LLVM::ICmpOp>(
           loc, LLVM::ICmpPredicate::ne, mainRet, c0_i32);
 
-      Block* storeMainErrorBlock = funcOp.addBlock();
+      Block *storeMainErrorBlock = funcOp.addBlock();
       builder.create<LLVM::CondBrOp>(loc, mainFailed, storeMainErrorBlock,
                                      mainSuccessBlock);
 
@@ -1208,10 +1210,10 @@ private:
       Value failed = builder.create<LLVM::ICmpOp>(loc, LLVM::ICmpPredicate::ne,
                                                   retVal, c0_i32);
 
-      Block* continueBlock = funcOp.addBlock();
+      Block *continueBlock = funcOp.addBlock();
 
       // If prepare/finalize failed, store error code and jump to cleanup
-      Block* storeErrorBlock = funcOp.addBlock();
+      Block *storeErrorBlock = funcOp.addBlock();
       builder.create<LLVM::CondBrOp>(loc, failed, storeErrorBlock,
                                      continueBlock);
 
@@ -1288,7 +1290,7 @@ private:
     funcOp->setAttr("sym_visibility", builder.getStringAttr("public"));
 
     // Create function body
-    Block* entryBlock = funcOp.addEntryBlock(builder);
+    Block *entryBlock = funcOp.addEntryBlock(builder);
     builder.setInsertionPointToStart(entryBlock);
 
     Value state = entryBlock->getArgument(0);
@@ -1309,11 +1311,10 @@ private:
 namespace hip::compiler {
 namespace compiler {
 
-std::unique_ptr<mlir::Pass>
-createGenerateInterfacePass(const hip::compiler::CompilationOptionsT& compilationOptions) {
+std::unique_ptr<mlir::Pass> createGenerateInterfacePass(
+    const hip::compiler::CompilationOptionsT &compilationOptions) {
   return std::make_unique<GenerateInterfacePass>(compilationOptions);
 }
-
 
 } // namespace compiler
 } // namespace hip::compiler

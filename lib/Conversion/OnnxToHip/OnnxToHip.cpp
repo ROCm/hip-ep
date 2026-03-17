@@ -24,9 +24,9 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
+#include "compilation_options_generated.h"
 #include "hip/Support/DiskFileSystem.h"
 #include "morphizen-foundation/file_io.hpp"
-#include "compilation_options_generated.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"

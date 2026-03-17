@@ -1,9 +1,9 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#include "../hipdnn_ep_runtime.h"
 #include "../debug_log.h"
+#include "../hipdnn_ep_runtime.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -14,7 +14,7 @@
     hipError_t error = (cmd);                                                  \
     if (error != hipSuccess) {                                                 \
       fprintf(stderr, "HIP error at %s:%d: %s\n", __FILE__, __LINE__,          \
-              hipGetErrorString(error));                                        \
+              hipGetErrorString(error));                                       \
       return -1;                                                               \
     }                                                                          \
   } while (0)
@@ -51,26 +51,27 @@
 // Both fp16 and fp32 use HIPBLAS_COMPUTE_32F for accumulation precision.
 // =============================================================================
 
-int wrap_hipblasLtMatmul(RuntimeState* state,
-                const void* A, const void* B, void* output,
-                int64_t M, int64_t N, int64_t K,
-                int64_t batch_count, int64_t elem_size) {
+int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
+                         void *output, int64_t M, int64_t N, int64_t K,
+                         int64_t batch_count, int64_t elem_size) {
   if (!state || !A || !B || !output) {
     fprintf(stderr, "Invalid arguments to wrap_hipblasLtMatmul\n");
     return -1;
   }
 
-  hipblasLtHandle_t handle = static_cast<hipblasLtHandle_t>(
-      hipdnn_ep_state_get_hipblas_handle(state));
-  hipStream_t stream = static_cast<hipStream_t>(
-      hipdnn_ep_state_get_stream(state));
+  hipblasLtHandle_t handle =
+      static_cast<hipblasLtHandle_t>(hipdnn_ep_state_get_hipblas_handle(state));
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
 
   if (!handle || !stream) {
     fprintf(stderr, "wrap_hipblasLtMatmul: null handle or stream\n");
     return -1;
   }
 
-  const char* type_name = (elem_size == 2) ? "f16" : (elem_size == 4) ? "f32" : "?";
+  const char *type_name = (elem_size == 2)   ? "f16"
+                          : (elem_size == 4) ? "f32"
+                                             : "?";
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: M=%lld, N=%lld, K=%lld, "
                     "batch=%lld, elem_size=%lld (%s), "
                     "total_bytes=%lld\n",
@@ -130,20 +131,17 @@ int wrap_hipblasLtMatmul(RuntimeState* state,
   }
 
   hipblasLtMatmulDesc_t matmul_desc;
-  HIPBLAS_CHECK(hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F,
-                                          HIP_R_32F));
+  HIPBLAS_CHECK(
+      hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
 
   float alpha = 1.0f;
   float beta = 0.0f;
 
-  HIPBLAS_CHECK(hipblasLtMatmul(handle, matmul_desc, &alpha,
-                                B, matA_layout,  // "A" = B (row→col trick)
-                                A, matB_layout,  // "B" = A (row→col trick)
-                                &beta,
-                                output, matC_layout,
-                                output, matC_layout,
-                                nullptr, nullptr, 0,
-                                stream));
+  HIPBLAS_CHECK(hipblasLtMatmul(handle, matmul_desc, &alpha, B,
+                                matA_layout,    // "A" = B (row→col trick)
+                                A, matB_layout, // "B" = A (row→col trick)
+                                &beta, output, matC_layout, output, matC_layout,
+                                nullptr, nullptr, 0, stream));
 
   hipblasLtMatrixLayoutDestroy(matA_layout);
   hipblasLtMatrixLayoutDestroy(matB_layout);

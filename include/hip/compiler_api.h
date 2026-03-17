@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -10,13 +10,13 @@
 
 /* Export macro for DLL visibility */
 #ifdef _WIN32
-#  ifdef HIP_COMPILER_EXPORTS
-#    define COMPILER_API __declspec(dllexport)
-#  else
-#    define COMPILER_API __declspec(dllimport)
-#  endif
+#ifdef HIP_COMPILER_EXPORTS
+#define COMPILER_API __declspec(dllexport)
 #else
-#  define COMPILER_API __attribute__((visibility("default")))
+#define COMPILER_API __declspec(dllimport)
+#endif
+#else
+#define COMPILER_API __attribute__((visibility("default")))
 #endif
 
 #ifdef __cplusplus
@@ -47,19 +47,15 @@ extern "C" {
  * @return             COMPILER_SUCCESS or error code
  */
 COMPILER_API CompilerErrorCode hip_compile_with_fs(
-    const void* input_mlir,
-    size_t input_size,
-    const char* output_path,
-    const char* options_json,
-    CompilerError* error,
-    void* fs);
+    const void *input_mlir, size_t input_size, const char *output_path,
+    const char *options_json, CompilerError *error, void *fs);
 
 /**
  * Get compiler version string.
  *
  * @return Static version string (e.g., "1.0.0")
  */
-COMPILER_API const char* hip_get_version(void);
+COMPILER_API const char *hip_get_version(void);
 
 #ifdef __cplusplus
 }

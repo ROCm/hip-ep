@@ -274,12 +274,13 @@ MlirCustomOp::MlirCustomOp(
   MY_LOG(1) << "MlirCustomOp constructor";
   // Parse metadata from JSON
   metadata_ = parse_metadata_from_metadef(context, meta_def);
-  // Precompute output index mapping (metadata order -> ORT kernel context order)
+  // Precompute output index mapping (metadata order -> ORT kernel context
+  // order)
   output_index_map_ = build_output_index_map(metadata_.outputs(), *meta_def);
   // Get FileSystem from PassContext for constants file resolution.
   // const_cast follows the established morphizen pattern (custom_op_imp.hpp).
-  auto fs = const_cast<morphizen::PassContext *>(context.get())
-                ->get_file_system();
+  auto fs =
+      const_cast<morphizen::PassContext *>(context.get())->get_file_system();
   // Create inference state from DLL bytes (uses morphizen::Plugin)
   inference_state_ = customop::InferenceState::create(
       load_artifact_from_epcontext(context, metadata_.artifact_filename()),

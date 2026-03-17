@@ -16,7 +16,7 @@ namespace morphizen {
 struct Plugin; // Must match definition in morphizen_plugin.hpp (struct, not
                // class)
 class FileSystem;
-}
+} // namespace morphizen
 
 namespace mlir_compilation::customop {
 

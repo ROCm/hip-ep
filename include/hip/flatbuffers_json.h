@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -22,7 +22,7 @@
 namespace hip {
 
 template <typename NativeT>
-std::string toJson(const NativeT& native, const char* schema) {
+std::string toJson(const NativeT &native, const char *schema) {
   using FlatT = typename NativeT::TableType;
 
   flatbuffers::FlatBufferBuilder fbb;
@@ -41,8 +41,8 @@ std::string toJson(const NativeT& native, const char* schema) {
 }
 
 template <typename NativeT>
-bool fromJson(const std::string& json, const char* schema, NativeT& result,
-              std::string& error) {
+bool fromJson(const std::string &json, const char *schema, NativeT &result,
+              std::string &error) {
   flatbuffers::Parser parser;
   if (!parser.Parse(schema)) {
     error = "Schema parse error: " + std::string(parser.error_);

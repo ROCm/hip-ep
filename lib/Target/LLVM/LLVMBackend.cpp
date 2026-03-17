@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
 #include "hip/Target/LLVM/LLVMBackend.h"
@@ -51,7 +51,7 @@ void LLVMBackend::initializeTarget() {
 
 std::unique_ptr<llvm::Module>
 LLVMBackend::translateMLIRtoLLVMIR(mlir::ModuleOp mlirModule,
-                                   llvm::LLVMContext& llvmContext) {
+                                   llvm::LLVMContext &llvmContext) {
   // Register LLVM IR translation dialects
   mlir::registerBuiltinDialectTranslation(*mlirModule->getContext());
   mlir::registerLLVMDialectTranslation(*mlirModule->getContext());
@@ -74,7 +74,7 @@ LLVMBackend::translateMLIRtoLLVMIR(mlir::ModuleOp mlirModule,
   return llvmModule;
 }
 
-void LLVMBackend::optimizeLLVMIR(llvm::Module* module, int optLevel) {
+void LLVMBackend::optimizeLLVMIR(llvm::Module *module, int optLevel) {
   if (!module || optLevel < 0 || optLevel > 3) {
     std::cerr << "Invalid arguments to optimizeLLVMIR\n";
     return;
@@ -115,8 +115,8 @@ void LLVMBackend::optimizeLLVMIR(llvm::Module* module, int optLevel) {
   MPM.run(*module, MAM);
 }
 
-bool LLVMBackend::emitLLVMIR(llvm::Module* module,
-                             const std::string& outputPath) {
+bool LLVMBackend::emitLLVMIR(llvm::Module *module,
+                             const std::string &outputPath) {
   if (!module) {
     std::cerr << "Null module in emitLLVMIR\n";
     return false;
@@ -137,7 +137,7 @@ bool LLVMBackend::emitLLVMIR(llvm::Module* module,
   return true;
 }
 
-bool LLVMBackend::emitLLVMIRToString(llvm::Module* module, std::string& outIR) {
+bool LLVMBackend::emitLLVMIRToString(llvm::Module *module, std::string &outIR) {
   if (!module) {
     std::cerr << "Null module in emitLLVMIRToString\n";
     return false;
@@ -151,7 +151,7 @@ bool LLVMBackend::emitLLVMIRToString(llvm::Module* module, std::string& outIR) {
   return true;
 }
 
-llvm::TargetMachine* LLVMBackend::createTargetMachine() {
+llvm::TargetMachine *LLVMBackend::createTargetMachine() {
   initializeTarget();
 
   // Get target triple for current platform
@@ -159,7 +159,7 @@ llvm::TargetMachine* LLVMBackend::createTargetMachine() {
 
   // Look up target
   std::string error_msg;
-  const llvm::Target* target =
+  const llvm::Target *target =
       llvm::TargetRegistry::lookupTarget(target_triple.str(), error_msg);
   if (!target) {
     std::cerr << "Failed to lookup target: " << error_msg << "\n";
@@ -173,7 +173,7 @@ llvm::TargetMachine* LLVMBackend::createTargetMachine() {
   llvm::Reloc::Model RM =
       llvm::Reloc::PIC_; // Position-independent code for DLL
 
-  llvm::TargetMachine* TM =
+  llvm::TargetMachine *TM =
       target->createTargetMachine(target_triple, cpu, features, options, RM);
 
   if (!TM) {
@@ -184,8 +184,8 @@ llvm::TargetMachine* LLVMBackend::createTargetMachine() {
   return TM;
 }
 
-bool LLVMBackend::compileToObjectFile(llvm::Module* module,
-                                      const std::string& outputPath) {
+bool LLVMBackend::compileToObjectFile(llvm::Module *module,
+                                      const std::string &outputPath) {
   if (!module) {
     std::cerr << "Null module in compileToObjectFile\n";
     return false;
@@ -227,8 +227,8 @@ bool LLVMBackend::compileToObjectFile(llvm::Module* module,
   return true;
 }
 
-bool LLVMBackend::compileToObjectInMemory(llvm::Module* module,
-                                          std::vector<uint8_t>& outBytes) {
+bool LLVMBackend::compileToObjectInMemory(llvm::Module *module,
+                                          std::vector<uint8_t> &outBytes) {
   if (!module) {
     std::cerr << "Null module in compileToObjectInMemory\n";
     return false;
@@ -274,7 +274,7 @@ bool LLVMBackend::compileToObjectInMemory(llvm::Module* module,
 extern "C" const unsigned char runtime_bc_data[];
 extern "C" const size_t runtime_bc_data_size;
 
-bool LLVMBackend::linkRuntimeModule(llvm::Module* destModule) {
+bool LLVMBackend::linkRuntimeModule(llvm::Module *destModule) {
   if (!destModule) {
     std::cerr << "Error: Null destination module\n";
     return false;
@@ -297,7 +297,7 @@ bool LLVMBackend::linkRuntimeModule(llvm::Module* destModule) {
 
   // Create memory buffer from embedded bitcode
   auto MemBuf = llvm::MemoryBuffer::getMemBuffer(
-      llvm::StringRef(reinterpret_cast<const char*>(runtime_bc_data), bcSize),
+      llvm::StringRef(reinterpret_cast<const char *>(runtime_bc_data), bcSize),
       "runtime.bc",
       /*RequiresNullTerminator=*/false);
 

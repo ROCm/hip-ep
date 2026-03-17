@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
@@ -115,9 +115,9 @@
 // MIOpen convolution forward implementation
 // Follows opaque RuntimeState pattern - extracts handle/stream from state
 int wrap_miopenConvolutionForward(
-    RuntimeState* state, const void* input, int64_t input_n, int64_t input_c,
-    int64_t input_h, int64_t input_w, const void* weights, int64_t weights_k,
-    const void* bias, void* output, int64_t output_h, int64_t output_w,
+    RuntimeState *state, const void *input, int64_t input_n, int64_t input_c,
+    int64_t input_h, int64_t input_w, const void *weights, int64_t weights_k,
+    const void *bias, void *output, int64_t output_h, int64_t output_w,
     int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
     int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
     int64_t dilation_h, int64_t dilation_w, int64_t group) {
@@ -166,7 +166,7 @@ int wrap_miopenConvolutionForward(
   // MIOpen's Find API needs workspace to test algorithms
   // Use a conservative estimate (10MB) for algorithm selection
   const size_t find_workspace_size = 10 * 1024 * 1024; // 10MB
-  void* find_workspace = nullptr;
+  void *find_workspace = nullptr;
   HIP_CHECK(hipMalloc(&find_workspace, find_workspace_size));
 
   // Find best algorithm
@@ -194,7 +194,7 @@ int wrap_miopenConvolutionForward(
       &workspace_size));
 
   // Reuse find_workspace if it's large enough, otherwise reallocate
-  void* workspace = find_workspace;
+  void *workspace = find_workspace;
   if (workspace_size > find_workspace_size) {
     hipError_t err = hipFree(find_workspace);
     if (err != hipSuccess) {
@@ -238,8 +238,8 @@ int wrap_miopenConvolutionForward(
 // =============================================================================
 
 extern "C" int wrap_miopenActivationForward_relu(
-    RuntimeState* state, void* input_gpu_ptr, int64_t input_n, int64_t input_c,
-    int64_t input_h, int64_t input_w, void* output_gpu_ptr, int64_t output_n,
+    RuntimeState *state, void *input_gpu_ptr, int64_t input_n, int64_t input_c,
+    int64_t input_h, int64_t input_w, void *output_gpu_ptr, int64_t output_n,
     int64_t output_c, int64_t output_h, int64_t output_w) {
   if (!state || !input_gpu_ptr || !output_gpu_ptr) {
     fprintf(stderr, "Invalid arguments to wrap_miopenActivationForward_relu\n");
@@ -250,8 +250,8 @@ extern "C" int wrap_miopenActivationForward_relu(
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
 
   // Use parameters directly - no MemRef knowledge!
-  void* input_ptr = input_gpu_ptr;
-  void* output_ptr = output_gpu_ptr;
+  void *input_ptr = input_gpu_ptr;
+  void *output_ptr = output_gpu_ptr;
 
   // Dimensions from parameters (not extracted from struct)
   int64_t n = input_n;
