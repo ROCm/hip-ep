@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "udna_custom_kernels.h"
+#include "hip_custom_kernels.h"
 #include "debug_log.h"
 
 #include <hip/hip_runtime.h>
@@ -20,7 +20,7 @@ __global__ void cast_i64_to_i32_kernel(
   }
 }
 
-extern "C" int udna_cast(
+extern "C" int hip_cast(
     void* stream,
     const void* input,
     void* output,
@@ -33,8 +33,8 @@ extern "C" int udna_cast(
   constexpr int kBlockSize = 256;
   int grid_size = static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
 
-  if (input_dtype == UDNA_DTYPE_INT64 && output_dtype == UDNA_DTYPE_INT32) {
-    CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] udna_cast: INT64->INT32, "
+  if (input_dtype == HIP_DTYPE_INT64 && output_dtype == HIP_DTYPE_INT32) {
+    CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_cast: INT64->INT32, "
             "num_elements=%lld, grid=%d, block=%d\n",
             (long long)num_elements, grid_size, kBlockSize);
 
@@ -45,7 +45,7 @@ extern "C" int udna_cast(
                        num_elements);
   } else {
     fprintf(stderr,
-            "[custom_kernels] udna_cast: unsupported conversion "
+            "[custom_kernels] hip_cast: unsupported conversion "
             "input_dtype=%d -> output_dtype=%d\n",
             input_dtype, output_dtype);
     return -1;
@@ -54,7 +54,7 @@ extern "C" int udna_cast(
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
     fprintf(stderr,
-            "[custom_kernels] udna_cast launch failed: %s\n",
+            "[custom_kernels] hip_cast launch failed: %s\n",
             hipGetErrorString(err));
   }
   return static_cast<int>(err);

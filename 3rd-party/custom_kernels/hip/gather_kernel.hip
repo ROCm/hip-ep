@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "udna_custom_kernels.h"
+#include "hip_custom_kernels.h"
 #include "debug_log.h"
 
 #include <hip/hip_runtime.h>
@@ -33,7 +33,7 @@ __global__ void gather_axis0_kernel(
   }
 }
 
-extern "C" int udna_gather(
+extern "C" int hip_gather(
     void* stream,
     const void* data,
     const void* indices,
@@ -51,7 +51,7 @@ extern "C" int udna_gather(
 
   if (axis != 0) {
     fprintf(stderr,
-            "[custom_kernels] udna_gather: only axis=0 supported, got %lld\n",
+            "[custom_kernels] hip_gather: only axis=0 supported, got %lld\n",
             (long long)axis);
     return -1;
   }
@@ -59,7 +59,7 @@ extern "C" int udna_gather(
   int64_t slice_size = output_num_elements;
   int64_t data_axis_size = data_num_elements / slice_size;
 
-  CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] udna_gather: axis=0, elem_size=%d, "
+  CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_gather: axis=0, elem_size=%d, "
           "data_num=%lld, output_num=%lld, data_axis_size=%lld, "
           "grid=%d, block=%d\n",
           element_size_bytes,
@@ -93,7 +93,7 @@ extern "C" int udna_gather(
       break;
     default:
       fprintf(stderr,
-              "[custom_kernels] udna_gather: unsupported element_size=%d\n",
+              "[custom_kernels] hip_gather: unsupported element_size=%d\n",
               element_size_bytes);
       return -1;
   }
@@ -101,7 +101,7 @@ extern "C" int udna_gather(
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
     fprintf(stderr,
-            "[custom_kernels] udna_gather launch failed: %s\n",
+            "[custom_kernels] hip_gather launch failed: %s\n",
             hipGetErrorString(err));
   }
   return static_cast<int>(err);

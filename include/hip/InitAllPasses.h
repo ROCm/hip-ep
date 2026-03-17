@@ -2,8 +2,8 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#ifndef UDNA_COMPILER_INITALLPASSES_H
-#define UDNA_COMPILER_INITALLPASSES_H
+#ifndef HIP_COMPILER_INITALLPASSES_H
+#define HIP_COMPILER_INITALLPASSES_H
 
 #include "hip/Compiler/Passes/Passes.h"
 #include "hip/Compiler/Pipeline.h"
@@ -27,7 +27,7 @@
 #include "mlir/Transforms/Passes.h"
 #include "src/Dialect/ONNX/ONNXDialect.hpp"
 
-namespace udna::compiler {
+namespace hip::compiler {
 
 // clang-format off
 // Usage Guide:
@@ -99,6 +99,6 @@ inline void registerAllPasses() {
   registerConversionPasses();
 }
 
-} // namespace udna::compiler
+} // namespace hip::compiler
 
-#endif // UDNA_COMPILER_INITALLPASSES_H
+#endif // HIP_COMPILER_INITALLPASSES_H

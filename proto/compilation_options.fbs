@@ -1,7 +1,7 @@
 // Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-namespace udna.compiler;
+namespace hip.compiler;
 
 enum OutputMode : int {
   DLL = 0,

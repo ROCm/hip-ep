@@ -2,11 +2,11 @@
  * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#ifndef UDNA_CUSTOM_KERNELS_H
-#define UDNA_CUSTOM_KERNELS_H
+#ifndef HIP_CUSTOM_KERNELS_H
+#define HIP_CUSTOM_KERNELS_H
 
 /*
- * Pure C interface for UDNA custom HIP kernels.
+ * Pure C interface for HIP custom kernels.
  *
  * This header declares host-side launcher functions that are implemented
  * in .hip files compiled by hipcc. The interface uses only standard C types
@@ -34,16 +34,16 @@ extern "C" {
  * (e.g. int64 vs float64, int32 vs float32).
  *
  * Existing GQA/RoPE kernels continue using element_size_bytes since they only
- * support float32/float16 (no ambiguity). New kernels should prefer udna_dtype.
+ * support float32/float16 (no ambiguity). New kernels should prefer hip_dtype.
  */
 typedef enum {
-    UDNA_DTYPE_FLOAT32  = 0,
-    UDNA_DTYPE_FLOAT16  = 1,
-    UDNA_DTYPE_INT64    = 2,
-    UDNA_DTYPE_INT32    = 3,
-    UDNA_DTYPE_FLOAT64  = 4,
-    UDNA_DTYPE_BFLOAT16 = 5,
-} udna_dtype_t;
+    HIP_DTYPE_FLOAT32  = 0,
+    HIP_DTYPE_FLOAT16  = 1,
+    HIP_DTYPE_INT64    = 2,
+    HIP_DTYPE_INT32    = 3,
+    HIP_DTYPE_FLOAT64  = 4,
+    HIP_DTYPE_BFLOAT16 = 5,
+} hip_dtype_t;
 
 /* =========================================================================
  * Elementwise Subtraction
@@ -57,18 +57,18 @@ typedef enum {
  *   rhs          - GPU pointer to right-hand operand
  *   output       - GPU pointer to output
  *   num_elements - number of elements in each tensor
- *   udna_dtype   - data type (udna_dtype_t value cast to int)
+ *   hip_dtype    - data type (hip_dtype_t value cast to int)
  *
- * Currently supported types: UDNA_DTYPE_INT64
+ * Currently supported types: HIP_DTYPE_INT64
  * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
  */
-int udna_elementwise_sub(
+int hip_elementwise_sub(
     void* stream,
     const void* lhs,
     const void* rhs,
     void* output,
     int64_t num_elements,
-    int udna_dtype);
+    int hip_dtype);
 
 /* =========================================================================
  * Rotary Position Embedding (RoPE)
@@ -108,7 +108,7 @@ int udna_elementwise_sub(
  *
  * Returns: 0 on success, non-zero on error
  */
-int udna_rope_forward(
+int hip_rope_forward(
     void* stream,
     const void* input,
     const void* position_ids,
@@ -166,7 +166,7 @@ int udna_rope_forward(
  *
  * Returns: 0 on success, non-zero on error
  */
-int udna_gqa_forward(
+int hip_gqa_forward(
     void* stream,
     const void* query,
     const void* key,
@@ -204,13 +204,13 @@ int udna_gqa_forward(
  *   input        - GPU pointer to source data
  *   output       - GPU pointer to destination
  *   num_elements - number of elements to convert
- *   input_dtype  - source data type (udna_dtype_t value cast to int)
- *   output_dtype - destination data type (udna_dtype_t value cast to int)
+ *   input_dtype  - source data type (hip_dtype_t value cast to int)
+ *   output_dtype - destination data type (hip_dtype_t value cast to int)
  *
  * Currently supported conversions: INT64 -> INT32
  * Returns: 0 on success, non-zero on failure
  */
-int udna_cast(
+int hip_cast(
     void* stream,
     const void* input,
     void* output,
@@ -240,7 +240,7 @@ int udna_cast(
  * Supported element sizes: 2 (f16/bf16), 4 (f32/i32), 8 (i64/f64)
  * Returns: 0 on success, non-zero on failure
  */
-int udna_gather(
+int hip_gather(
     void* stream,
     const void* data,
     const void* indices,
@@ -265,21 +265,21 @@ int udna_gather(
  *   output              - GPU pointer to output tensor
  *   num_input_elements  - total input elements
  *   num_output_elements - total output elements
- *   udna_dtype          - data type (udna_dtype_t value cast to int)
+ *   hip_dtype           - data type (hip_dtype_t value cast to int)
  *
- * Currently supported types: UDNA_DTYPE_INT64
+ * Currently supported types: HIP_DTYPE_INT64
  * Returns: 0 on success, non-zero on failure
  */
-int udna_reduce_sum(
+int hip_reduce_sum(
     void* stream,
     const void* data,
     void* output,
     int64_t num_input_elements,
     int64_t num_output_elements,
-    int udna_dtype);
+    int hip_dtype);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* UDNA_CUSTOM_KERNELS_H */
+#endif /* HIP_CUSTOM_KERNELS_H */

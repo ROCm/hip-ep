@@ -1476,7 +1476,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
 /// pass options derived from CompilationOptionsT.
 std::unique_ptr<::mlir::Pass>
 createConvertOnnxToHipPass(morphizen::FileSystem * /*fs*/,
-                           const udna::compiler::CompilationOptionsT &options) {
+                           const hip::compiler::CompilationOptionsT &options) {
   ConvertOnnxToHipPassOptions passOptions;
   if (!options.constants_file.empty()) {
     passOptions.externalizeOutputDir = ".";

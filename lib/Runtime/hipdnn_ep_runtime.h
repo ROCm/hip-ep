@@ -140,11 +140,11 @@ typedef struct RuntimeState RuntimeState;
 // Initialize runtime state with external constant storage via FileSystem.
 // Used when compiled with hip_compile_with_fs.
 // Reads constants_filename and constant_sizes from the FlatBuffers blob
-// (UdnaModelMetaInfo schema), opens the file via fs, reads each constant
+// (HipModelMetaInfo schema), opens the file via fs, reads each constant
 // sequentially, uploads each to GPU via hipMalloc+hipMemcpy.
 //   out_state:     Pointer to receive allocated RuntimeState
 //   fs:            morphizen::FileSystem* (void* for C ABI) - must not be null
-//   metadata_blob: FlatBuffers binary blob (UdnaModelMetaInfo) baked into DLL
+//   metadata_blob: FlatBuffers binary blob (HipModelMetaInfo) baked into DLL
 //   blob_size:     Size of metadata_blob in bytes
 // Return codes: 0=success, 1=alloc/read error, 2-9=GPU handle init error
 int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,

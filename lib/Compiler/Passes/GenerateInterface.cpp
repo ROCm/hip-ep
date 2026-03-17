@@ -33,9 +33,9 @@ using namespace mlir;
 namespace {
 
 /// Build a TensorInfoT native struct from module tensor attributes at index i.
-static std::unique_ptr<udna::TensorInfoT>
+static std::unique_ptr<hip::TensorInfoT>
 buildTensorInfo(ArrayAttr shapes, DenseI64ArrayAttr elementSizes, size_t i) {
-  auto ti = std::make_unique<udna::TensorInfoT>();
+  auto ti = std::make_unique<hip::TensorInfoT>();
   if (shapes && i < shapes.size()) {
     if (auto shapeAttr = dyn_cast<DenseI64ArrayAttr>(shapes.getValue()[i]))
       ti->shape.assign(shapeAttr.asArrayRef().begin(),
@@ -46,12 +46,12 @@ buildTensorInfo(ArrayAttr shapes, DenseI64ArrayAttr elementSizes, size_t i) {
   return ti;
 }
 
-/// Build a UdnaModelMetaInfoT native struct from module attributes.
+/// Build a HipModelMetaInfoT native struct from module attributes.
 /// Shared by buildMetadataBlob() and buildMetadataJson() so module attributes
 /// are read exactly once.
 /// Each ConstantInfo carries both size and a running byte offset, enabling
 /// future non-sequential or grouped constant layouts.
-udna::UdnaModelMetaInfoT buildMetadataNative(ModuleOp module,
+hip::HipModelMetaInfoT buildMetadataNative(ModuleOp module,
                                              const std::string &constantsFile) {
   auto inputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.input_shapes");
   auto outputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.output_shapes");
@@ -68,7 +68,7 @@ udna::UdnaModelMetaInfoT buildMetadataNative(ModuleOp module,
   auto constantOffsetsAttr =
       module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.constant_offsets");
 
-  udna::UdnaModelMetaInfoT meta;
+  hip::HipModelMetaInfoT meta;
   meta.version = 1;
   meta.constants_filename = constantsFile;
 
@@ -77,7 +77,7 @@ udna::UdnaModelMetaInfoT buildMetadataNative(ModuleOp module,
     auto offsets = constantOffsetsAttr ? constantOffsetsAttr.asArrayRef()
                                        : ArrayRef<int64_t>{};
     for (size_t i = 0; i < sizes.size(); ++i) {
-      auto ci = std::make_unique<udna::ConstantInfoT>();
+      auto ci = std::make_unique<hip::ConstantInfoT>();
       ci->size = sizes[i];
       ci->offset = (i < offsets.size()) ? offsets[i] : 0;
       meta.constants.push_back(std::move(ci));
@@ -105,13 +105,13 @@ udna::UdnaModelMetaInfoT buildMetadataNative(ModuleOp module,
 }
 
 /// Build FlatBuffers binary blob from module attributes.
-/// Uses generated UdnaModelMetaInfoT native struct (--gen-object-api) so the
+/// Uses generated HipModelMetaInfoT native struct (--gen-object-api) so the
 /// code tracks schema changes automatically.
 std::vector<uint8_t> buildMetadataBlob(ModuleOp module,
                                        const std::string &constantsFile) {
-  udna::UdnaModelMetaInfoT meta = buildMetadataNative(module, constantsFile);
+  hip::HipModelMetaInfoT meta = buildMetadataNative(module, constantsFile);
   flatbuffers::FlatBufferBuilder fbb;
-  fbb.Finish(udna::UdnaModelMetaInfo::Pack(fbb, &meta));
+  fbb.Finish(hip::HipModelMetaInfo::Pack(fbb, &meta));
   const uint8_t *buf = fbb.GetBufferPointer();
   return std::vector<uint8_t>(buf, buf + fbb.GetSize());
 }
@@ -121,9 +121,9 @@ std::vector<uint8_t> buildMetadataBlob(ModuleOp module,
 /// with the binary blob — no manual field mapping needed.
 std::string buildMetadataJson(ModuleOp module,
                               const std::string &constantsFile) {
-  udna::UdnaModelMetaInfoT meta = buildMetadataNative(module, constantsFile);
-  return udna::toJson<udna::UdnaModelMetaInfoT>(
-      meta, udna::k_model_metadata_schema());
+  hip::HipModelMetaInfoT meta = buildMetadataNative(module, constantsFile);
+  return hip::toJson<hip::HipModelMetaInfoT>(
+      meta, hip::k_model_metadata_schema());
 }
 
 /// Generate global constant string for metadata JSON
@@ -184,7 +184,7 @@ public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GenerateInterfacePass)
 
   explicit GenerateInterfacePass(
-      const udna::compiler::CompilationOptionsT &compilationOptions)
+      const hip::compiler::CompilationOptionsT &compilationOptions)
       : compilationOptions_(compilationOptions) {}
 
   StringRef getArgument() const final { return "generate-interface"; }
@@ -252,7 +252,7 @@ public:
   }
 
 private:
-  const udna::compiler::CompilationOptionsT &compilationOptions_;
+  const hip::compiler::CompilationOptionsT &compilationOptions_;
 
   /// Returns LLVM struct type for memref: (ptr, ptr, i64, array<rank x i64>,
   /// array<rank x i64>)
@@ -1308,13 +1308,13 @@ private:
 
 } // namespace
 
-namespace udna::compiler {
+namespace hip::compiler {
 namespace compiler {
 
 std::unique_ptr<mlir::Pass> createGenerateInterfacePass(
-    const udna::compiler::CompilationOptionsT &compilationOptions) {
+    const hip::compiler::CompilationOptionsT &compilationOptions) {
   return std::make_unique<GenerateInterfacePass>(compilationOptions);
 }
 
 } // namespace compiler
-} // namespace udna::compiler
+} // namespace hip::compiler

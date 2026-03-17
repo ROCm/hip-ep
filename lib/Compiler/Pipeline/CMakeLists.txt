@@ -6,16 +6,16 @@
 message(STATUS "Building Compiler Pipeline Library")
 
 # Create pipeline library (lightweight, no backend dependencies)
-add_library(UdnaPipeline STATIC
+add_library(HipPipeline STATIC
   ../Pipeline.cpp
 )
 
 # Link against required libraries
-# Note: Does NOT link UdnaTargetLLVM to avoid LLD dependencies
-target_link_libraries(UdnaPipeline PUBLIC
+# Note: Does NOT link HipTargetLLVM to avoid LLD dependencies
+target_link_libraries(HipPipeline PUBLIC
   HipDialectIR
   HipDialectTransforms
-  UdnaConversion
+  HipConversion
   LibHipCompilerPasses
   MLIRPass
   MLIRSupport
@@ -25,10 +25,10 @@ target_link_libraries(UdnaPipeline PUBLIC
 )
 
 # Add include directories
-target_include_directories(UdnaPipeline PUBLIC
+target_include_directories(HipPipeline PUBLIC
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_BINARY_DIR}/include
 )
 
 # Set folder for IDE organization
-set_target_properties(UdnaPipeline PROPERTIES FOLDER "mlir/Compiler")
+set_target_properties(HipPipeline PROPERTIES FOLDER "mlir/Compiler")

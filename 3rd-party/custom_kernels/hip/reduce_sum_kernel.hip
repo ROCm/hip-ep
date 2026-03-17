@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "udna_custom_kernels.h"
+#include "hip_custom_kernels.h"
 #include "debug_log.h"
 
 #include <hip/hip_runtime.h>
@@ -46,20 +46,20 @@ __global__ void reduce_sum_i64_kernel(
   }
 }
 
-extern "C" int udna_reduce_sum(
+extern "C" int hip_reduce_sum(
     void* stream,
     const void* data,
     void* output,
     int64_t num_input_elements,
     int64_t num_output_elements,
-    int udna_dtype) {
+    int hip_dtype) {
   if (num_output_elements <= 0) return 0;
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
   if (num_input_elements % num_output_elements != 0) {
     fprintf(stderr,
-            "[custom_kernels] udna_reduce_sum: input(%lld) not divisible "
+            "[custom_kernels] hip_reduce_sum: input(%lld) not divisible "
             "by output(%lld)\n",
             (long long)num_input_elements, (long long)num_output_elements);
     return -1;
@@ -67,8 +67,8 @@ extern "C" int udna_reduce_sum(
 
   int64_t reduce_size = num_input_elements / num_output_elements;
 
-  switch (udna_dtype) {
-    case UDNA_DTYPE_INT64: {
+  switch (hip_dtype) {
+    case HIP_DTYPE_INT64: {
       int block_size = 256;
       if (reduce_size < 256) {
         block_size = 1;
@@ -77,7 +77,7 @@ extern "C" int udna_reduce_sum(
       }
       size_t shared_mem = block_size * sizeof(int64_t);
 
-      CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] udna_reduce_sum: dtype=INT64, "
+      CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_reduce_sum: dtype=INT64, "
               "input=%lld, output=%lld, reduce_size=%lld, "
               "grid=%lld, block=%d, smem=%zu\n",
               (long long)num_input_elements, (long long)num_output_elements,
@@ -95,15 +95,15 @@ extern "C" int udna_reduce_sum(
     }
     default:
       fprintf(stderr,
-              "[custom_kernels] udna_reduce_sum: unsupported dtype=%d\n",
-              udna_dtype);
+              "[custom_kernels] hip_reduce_sum: unsupported dtype=%d\n",
+              hip_dtype);
       return -1;
   }
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
     fprintf(stderr,
-            "[custom_kernels] udna_reduce_sum launch failed: %s\n",
+            "[custom_kernels] hip_reduce_sum launch failed: %s\n",
             hipGetErrorString(err));
   }
   return static_cast<int>(err);

@@ -3,8 +3,8 @@
  * Licensed under the MIT License.
  */
 
-#ifndef UDNA_COMPILER_COMPILER_DRIVER_H
-#define UDNA_COMPILER_COMPILER_DRIVER_H
+#ifndef HIP_COMPILER_COMPILER_DRIVER_H
+#define HIP_COMPILER_COMPILER_DRIVER_H
 
 #include "compilation_options_generated.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -27,7 +27,7 @@ namespace morphizen {
 class FileSystem;
 } // namespace morphizen
 
-namespace udna::compiler {
+namespace hip::compiler {
 
 /**
  * End-to-end compilation driver for MLIR → DLL/Object/IR.
@@ -66,7 +66,7 @@ public:
    * @return true on success, false on error (check error_message)
    */
   bool compile(llvm::StringRef input_mlir, const std::string &output_path,
-               const udna::compiler::CompilationOptionsT &options,
+               const hip::compiler::CompilationOptionsT &options,
                std::string &error_message);
 
   /**
@@ -79,7 +79,7 @@ public:
    * @return true on success, false on error (check error_message)
    */
   bool compileFromModule(mlir::ModuleOp module, const std::string &output_path,
-                         const udna::compiler::CompilationOptionsT &options,
+                         const hip::compiler::CompilationOptionsT &options,
                          std::string &error_message);
 
   /**
@@ -98,14 +98,14 @@ private:
    * Core compilation implementation (shared by compile and compileFromModule).
    */
   bool compileImpl(mlir::ModuleOp module, const std::string &output_path,
-                   const udna::compiler::CompilationOptionsT &options,
+                   const hip::compiler::CompilationOptionsT &options,
                    std::string &error_message);
 
   /**
    * Run MLIR transformation passes.
    */
   bool runMLIRPasses(mlir::ModuleOp module,
-                     const udna::compiler::CompilationOptionsT &options,
+                     const hip::compiler::CompilationOptionsT &options,
                      std::string &error_message);
 
   /**
@@ -154,6 +154,6 @@ private:
   morphizen::FileSystem *fileSystem_ = nullptr;
 };
 
-} // namespace udna::compiler
+} // namespace hip::compiler
 
-#endif // UDNA_COMPILER_COMPILER_DRIVER_H
+#endif // HIP_COMPILER_COMPILER_DRIVER_H

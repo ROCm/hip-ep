@@ -17,7 +17,7 @@
 #include <cstring>
 #include <string>
 
-using namespace udna::compiler;
+using namespace hip::compiler;
 
 // Version string
 static const char *COMPILER_VERSION = "1.0.0";
@@ -26,13 +26,13 @@ static const char *COMPILER_VERSION = "1.0.0";
 // Schema-driven: no manual field mapping — adding fields to
 // compilation_options.fbs is sufficient; no changes needed here.
 static bool parseOptions(const char *options_json,
-                         udna::compiler::CompilationOptionsT &opts,
+                         hip::compiler::CompilationOptionsT &opts,
                          std::string &error_message) {
   if (!options_json || strlen(options_json) == 0)
     return true; // defaults already set in struct
 
-  return udna::fromJson<udna::compiler::CompilationOptionsT>(
-      options_json, udna::k_compilation_options_schema(), opts, error_message);
+  return hip::fromJson<hip::compiler::CompilationOptionsT>(
+      options_json, hip::k_compilation_options_schema(), opts, error_message);
 }
 
 // Helper: Set error message
@@ -66,7 +66,7 @@ COMPILER_API CompilerErrorCode hip_compile_with_fs(
 
   try {
     // Parse JSON options
-    udna::compiler::CompilationOptionsT options;
+    hip::compiler::CompilationOptionsT options;
     std::string parse_error;
     if (!parseOptions(options_json, options, parse_error)) {
       setError(error, parse_error);
@@ -74,7 +74,7 @@ COMPILER_API CompilerErrorCode hip_compile_with_fs(
     }
 
     // Create compiler pipeline with external constant storage
-    udna::compiler::CompilerDriver driver;
+    hip::compiler::CompilerDriver driver;
     driver.setFileSystem(static_cast<morphizen::FileSystem *>(fs));
 
     std::string error_message;

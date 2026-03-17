@@ -6,31 +6,31 @@
 # CInterface library - C API wrapper for CompilerPipeline
 # This library provides a DLL-safe C interface for hip-compiler
 
-add_library(UdnaCInterface STATIC
+add_library(HipCInterface STATIC
     CompilerAPI.cpp
 )
 
-target_include_directories(UdnaCInterface PUBLIC
+target_include_directories(HipCInterface PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/include
 )
 
 # Define HIP_COMPILER_EXPORTS for __declspec(dllexport)
-target_compile_definitions(UdnaCInterface PRIVATE
+target_compile_definitions(HipCInterface PRIVATE
     HIP_COMPILER_EXPORTS
 )
 
-target_link_libraries(UdnaCInterface PUBLIC
+target_link_libraries(HipCInterface PUBLIC
     LibHipCompiler
-    UdnaSchemasLib
+    HipSchemasLib
     # LibHipCompiler already pulls in:
-    #   - UdnaHipDialect (→ OMONNXOps)
-    #   - UdnaBackend
+    #   - HipDialect (→ OMONNXOps)
+    #   - HipBackend
     #   - MLIR/LLVM libraries
 )
 
 # Install library
-install(TARGETS UdnaCInterface
+install(TARGETS HipCInterface
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib
 )

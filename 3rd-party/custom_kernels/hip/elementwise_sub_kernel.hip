@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "udna_custom_kernels.h"
+#include "hip_custom_kernels.h"
 #include "debug_log.h"
 
 #include <hip/hip_runtime.h>
@@ -21,22 +21,22 @@ __global__ void elementwise_sub_i64_kernel(
   }
 }
 
-extern "C" int udna_elementwise_sub(
+extern "C" int hip_elementwise_sub(
     void* stream,
     const void* lhs,
     const void* rhs,
     void* output,
     int64_t num_elements,
-    int udna_dtype) {
+    int hip_dtype) {
   if (num_elements <= 0) return 0;
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   constexpr int kBlockSize = 256;
   int grid_size = static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
 
-  switch (udna_dtype) {
-    case UDNA_DTYPE_INT64: {
-      CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] udna_elementwise_sub: dtype=INT64, "
+  switch (hip_dtype) {
+    case HIP_DTYPE_INT64: {
+      CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_elementwise_sub: dtype=INT64, "
               "num_elements=%lld, grid=%d, block=%d\n",
               (long long)num_elements, grid_size, kBlockSize);
 
@@ -50,15 +50,15 @@ extern "C" int udna_elementwise_sub(
     }
     default:
       fprintf(stderr,
-              "[custom_kernels] udna_elementwise_sub: unsupported dtype=%d\n",
-              udna_dtype);
+              "[custom_kernels] hip_elementwise_sub: unsupported dtype=%d\n",
+              hip_dtype);
       return -1;
   }
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
     fprintf(stderr,
-            "[custom_kernels] udna_elementwise_sub launch failed: %s\n",
+            "[custom_kernels] hip_elementwise_sub launch failed: %s\n",
             hipGetErrorString(err));
   }
   return static_cast<int>(err);

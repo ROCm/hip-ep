@@ -3,8 +3,8 @@
  * Licensed under the MIT License.
  */
 
-#ifndef UDNA_COMPILER_TYPES_H
-#define UDNA_COMPILER_TYPES_H
+#ifndef HIP_COMPILER_TYPES_H
+#define HIP_COMPILER_TYPES_H
 
 #include <stddef.h>
 
@@ -37,4 +37,4 @@ typedef struct {
 }
 #endif
 
-#endif /* UDNA_COMPILER_TYPES_H */
+#endif /* HIP_COMPILER_TYPES_H */

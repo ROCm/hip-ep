@@ -13,7 +13,7 @@ add_library(LibHipCompilerPasses STATIC
 # Link against required libraries
 target_link_libraries(LibHipCompilerPasses PUBLIC
   HipDialectIR
-  UdnaSchemasLib
+  HipSchemasLib
   MLIRIR
   MLIRPass
   MLIRSupport

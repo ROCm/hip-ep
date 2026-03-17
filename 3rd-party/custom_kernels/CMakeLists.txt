@@ -3,16 +3,16 @@
 # ** Licensed under the MIT License.
 ##
 
-# udna_custom_kernels - Custom HIP kernels for ops without ROCm library support
+# hip_custom_kernels - Custom HIP kernels for ops without ROCm library support
 #
 # This builds .hip files (containing __global__ kernels) into a static library
 # using hipcc. The library is linked into model DLLs at model-compile time,
 # alongside MIOpen/hipBLASLt/amdhip64 import libs.
 #
 # Build flow:
-#   .hip files → hipcc -c → .obj → static lib (udna_custom_kernels.lib)
-#   cmake --install → <prefix>/lib/udna_custom_kernels.lib
-#                    → <prefix>/include/udna_custom_kernels.h
+#   .hip files → hipcc -c → .obj → static lib (hip_custom_kernels.lib)
+#   cmake --install → <prefix>/lib/hip_custom_kernels.lib
+#                    → <prefix>/include/hip_custom_kernels.h
 
 cmake_minimum_required(VERSION 3.18)
 
@@ -28,7 +28,7 @@ endif()
 message(STATUS "[custom_kernels] Using HIP_ARCHITECTURES: ${HIP_ARCHITECTURES}")
 
 # Build the static library from HIP sources
-hip_add_library(udna_custom_kernels STATIC
+hip_add_library(hip_custom_kernels STATIC
     hip/rope_kernel.hip
     hip/gqa_kernel.hip
     hip/elementwise_sub_kernel.hip
@@ -40,23 +40,23 @@ hip_add_library(udna_custom_kernels STATIC
 )
 
 # Export the library path for CompilerDriver to discover at model-compile time
-set(UDNA_CUSTOM_KERNELS_LIB_PATH "$<TARGET_FILE:udna_custom_kernels>" PARENT_SCOPE)
+set(HIP_CUSTOM_KERNELS_LIB_PATH "$<TARGET_FILE:hip_custom_kernels>" PARENT_SCOPE)
 
 # Export include directory for Runtime bitcode compilation
-set(UDNA_CUSTOM_KERNELS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include" PARENT_SCOPE)
+set(HIP_CUSTOM_KERNELS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include" PARENT_SCOPE)
 
 # Install the static library and header to the install prefix.
 # After `cmake --install`, CompilerDriver can find:
-#   <prefix>/lib/udna_custom_kernels.lib  (static lib with compiled HIP kernels)
-#   <prefix>/include/udna_custom_kernels.h (pure C header)
-install(TARGETS udna_custom_kernels
+#   <prefix>/lib/hip_custom_kernels.lib  (static lib with compiled HIP kernels)
+#   <prefix>/include/hip_custom_kernels.h (pure C header)
+install(TARGETS hip_custom_kernels
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib
 )
 
-install(FILES include/udna_custom_kernels.h
+install(FILES include/hip_custom_kernels.h
     DESTINATION include
 )
 
-message(STATUS "[custom_kernels] Will install udna_custom_kernels.lib to \${CMAKE_INSTALL_PREFIX}/lib")
-message(STATUS "[custom_kernels] Will install udna_custom_kernels.h to \${CMAKE_INSTALL_PREFIX}/include")
+message(STATUS "[custom_kernels] Will install hip_custom_kernels.lib to \${CMAKE_INSTALL_PREFIX}/lib")
+message(STATUS "[custom_kernels] Will install hip_custom_kernels.h to \${CMAKE_INSTALL_PREFIX}/include")

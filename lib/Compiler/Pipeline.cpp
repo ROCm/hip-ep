@@ -13,11 +13,11 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 
-namespace udna::compiler {
+namespace hip::compiler {
 namespace compiler {
 
 void populateMorphizenPipeline(
-    mlir::OpPassManager &pm, const udna::compiler::CompilationOptionsT &options,
+    mlir::OpPassManager &pm, const hip::compiler::CompilationOptionsT &options,
     morphizen::FileSystem *fs) {
   // Stage 0: Insert !hip.context argument into all functions
   pm.addPass(mlir::hip::createHipAddContextArgPass());
@@ -67,4 +67,4 @@ void populateMorphizenPipeline(
 }
 
 } // namespace compiler
-} // namespace udna::compiler
+} // namespace hip::compiler

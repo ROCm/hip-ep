@@ -10,12 +10,12 @@ add_subdirectory(OnnxToHip)
 add_subdirectory(HipToLLVM)
 
 # Create umbrella conversion library
-add_library(UdnaConversion STATIC
+add_library(HipConversion STATIC
   Passes.cpp
 )
 
 # Link subdirectory libraries
-target_link_libraries(UdnaConversion PUBLIC
+target_link_libraries(HipConversion PUBLIC
   OnnxToHip
   HipToLLVM
   MLIRIR
@@ -23,9 +23,9 @@ target_link_libraries(UdnaConversion PUBLIC
 )
 
 # Add include directories
-target_include_directories(UdnaConversion PUBLIC
+target_include_directories(HipConversion PUBLIC
   ${CMAKE_SOURCE_DIR}/include
 )
 
 # Set folder for IDE organization
-set_target_properties(UdnaConversion PROPERTIES FOLDER "mlir/Conversion")
+set_target_properties(HipConversion PROPERTIES FOLDER "mlir/Conversion")

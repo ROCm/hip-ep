@@ -9,7 +9,7 @@
 #include <cstdio>
 #include <cfloat>
 
-#include "udna_custom_kernels.h"
+#include "hip_custom_kernels.h"
 
 // =============================================================================
 // KV Cache Update Kernel
@@ -404,7 +404,7 @@ static int gqa_forward_typed(
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
-    fprintf(stderr, "udna_gqa_forward: kernel error: %s\n",
+    fprintf(stderr, "hip_gqa_forward: kernel error: %s\n",
             hipGetErrorString(err));
     return -1;
   }
@@ -412,7 +412,7 @@ static int gqa_forward_typed(
   return 0;
 }
 
-extern "C" int udna_gqa_forward(
+extern "C" int hip_gqa_forward(
     void* stream_ptr,
     const void* query,
     const void* key,
@@ -439,12 +439,12 @@ extern "C" int udna_gqa_forward(
     int64_t element_size_bytes) {
 
   if (!query || !key || !value || !output) {
-    fprintf(stderr, "udna_gqa_forward: null pointer for required argument\n");
+    fprintf(stderr, "hip_gqa_forward: null pointer for required argument\n");
     return -1;
   }
 
   if (num_heads % kv_num_heads != 0) {
-    fprintf(stderr, "udna_gqa_forward: num_heads (%lld) must be divisible by kv_num_heads (%lld)\n",
+    fprintf(stderr, "hip_gqa_forward: num_heads (%lld) must be divisible by kv_num_heads (%lld)\n",
             (long long)num_heads, (long long)kv_num_heads);
     return -1;
   }
@@ -488,7 +488,7 @@ extern "C" int udna_gqa_forward(
         num_heads, kv_num_heads, head_dim,
         scale, softcap, do_rotary, rotary_interleaved);
   } else {
-    fprintf(stderr, "udna_gqa_forward: unsupported element_size %lld\n",
+    fprintf(stderr, "hip_gqa_forward: unsupported element_size %lld\n",
             (long long)element_size_bytes);
     return -1;
   }

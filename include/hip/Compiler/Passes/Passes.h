@@ -2,19 +2,19 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#ifndef UDNA_COMPILER_COMPILER_PASSES_PASSES_H
-#define UDNA_COMPILER_COMPILER_PASSES_PASSES_H
+#ifndef HIP_COMPILER_COMPILER_PASSES_PASSES_H
+#define HIP_COMPILER_COMPILER_PASSES_PASSES_H
 
 #include "mlir/Pass/Pass.h"
 #include <memory>
 
-namespace udna {
+namespace hip {
 namespace compiler {
 struct CompilationOptionsT;
 } // namespace compiler
-} // namespace udna
+} // namespace hip
 
-namespace udna::compiler {
+namespace hip::compiler {
 namespace compiler {
 
 /// Creates a pass that generates the C interface for the compiled module.
@@ -22,9 +22,9 @@ namespace compiler {
 /// Runtime. options.constants_file is embedded in the DLL metadata so the
 /// runtime knows which file to load.
 std::unique_ptr<mlir::Pass>
-createGenerateInterfacePass(const udna::compiler::CompilationOptionsT &options);
+createGenerateInterfacePass(const hip::compiler::CompilationOptionsT &options);
 
 } // namespace compiler
-} // namespace udna::compiler
+} // namespace hip::compiler
 
-#endif // UDNA_COMPILER_COMPILER_PASSES_PASSES_H
+#endif // HIP_COMPILER_COMPILER_PASSES_PASSES_H

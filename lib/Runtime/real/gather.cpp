@@ -5,7 +5,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "runtime_types.h"
-#include "udna_custom_kernels.h"
+#include "hip_custom_kernels.h"
 
 #include <cstdio>
 
@@ -21,10 +21,10 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_gather: axis=%lld, data_num=%lld, output_num=%lld, "
-      "elem_size=%lld -> calling udna_gather\n",
+      "elem_size=%lld -> calling hip_gather\n",
       (long long)axis, (long long)data_num_elements,
       (long long)output_num_elements, (long long)element_size_bytes);
 
-  return udna_gather(stream, data, indices, output, axis, data_num_elements,
+  return hip_gather(stream, data, indices, output, axis, data_num_elements,
                      output_num_elements, static_cast<int>(element_size_bytes));
 }

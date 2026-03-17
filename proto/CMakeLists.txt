@@ -73,7 +73,7 @@ foreach(schema ${FBS_SCHEMAS})
 endforeach()
 
 # Target that drives header generation
-add_custom_target(UdnaSchemas ALL DEPENDS ${GENERATED_HEADERS})
+add_custom_target(HipSchemas ALL DEPENDS ${GENERATED_HEADERS})
 
 # Embed each .fbs schema as a C++ string constant so consumers can use
 # flatbuffers::Parser for JSON<->binary conversion without a separate schema file.
@@ -85,12 +85,12 @@ foreach(schema ${FBS_SCHEMAS})
         CONTENT
 "// Auto-generated from ${schema_name}.fbs — do not edit manually.
 #pragma once
-namespace udna {
+namespace hip {
 inline const char* k_${schema_name}_schema() {
   static const char kSchema[] = R\"fbs(${schema_content})fbs\";
   return kSchema;
 }
-} // namespace udna
+} // namespace hip
 "
         NEWLINE_STYLE LF
     )
@@ -99,12 +99,12 @@ endforeach()
 # Interface library: consumers depend on this to get generated headers
 # and the flatbuffers include path (for flatbuffers/flatbuffers.h and
 # flatbuffers/idl.h).
-add_library(UdnaSchemasLib INTERFACE)
-add_dependencies(UdnaSchemasLib UdnaSchemas)
-target_include_directories(UdnaSchemasLib INTERFACE
+add_library(HipSchemasLib INTERFACE)
+add_dependencies(HipSchemasLib HipSchemas)
+target_include_directories(HipSchemasLib INTERFACE
     ${CMAKE_CURRENT_BINARY_DIR}
     ${CMAKE_SOURCE_DIR}/include
 )
-target_link_libraries(UdnaSchemasLib INTERFACE
+target_link_libraries(HipSchemasLib INTERFACE
     flatbuffers::flatbuffers
 )

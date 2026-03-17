@@ -6,7 +6,7 @@
 #include "hip/Conversion/Passes.h"
 #include "mlir/Pass/Pass.h"
 
-namespace udna::compiler {
+namespace hip::compiler {
 
 void registerConversionPasses() {
   // Register ONNX to HIP conversion pass (no-arg: falls back to DiskFileSystem
@@ -21,4 +21,4 @@ void registerConversionPasses() {
   });
 }
 
-} // namespace udna::compiler
+} // namespace hip::compiler

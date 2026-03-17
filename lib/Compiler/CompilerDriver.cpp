@@ -30,7 +30,7 @@
 #include <iostream>
 #include <sstream>
 
-namespace udna::compiler {
+namespace hip::compiler {
 
 namespace {
 // Helper to check if file exists
@@ -43,14 +43,14 @@ bool fileExists(const std::string &path) {
 
 bool CompilerDriver::compile(llvm::StringRef input_mlir,
                              const std::string &output_path,
-                             const udna::compiler::CompilationOptionsT &options,
+                             const hip::compiler::CompilationOptionsT &options,
                              std::string &error_message) {
   // Register all passes (idempotent)
-  udna::compiler::registerAllPasses();
+  hip::compiler::registerAllPasses();
 
   // Initialize MLIR context
   mlir::MLIRContext context;
-  udna::compiler::loadAllDialects(context);
+  hip::compiler::loadAllDialects(context);
   mlir::registerLLVMDialectTranslation(context);
 
   // Parse MLIR input
@@ -87,10 +87,10 @@ bool CompilerDriver::compile(llvm::StringRef input_mlir,
 
 bool CompilerDriver::compileFromModule(
     mlir::ModuleOp module, const std::string &output_path,
-    const udna::compiler::CompilationOptionsT &options,
+    const hip::compiler::CompilationOptionsT &options,
     std::string &error_message) {
   // Register all Morphizen passes (idempotent)
-  udna::compiler::registerAllPasses();
+  hip::compiler::registerAllPasses();
 
   return compileImpl(module, output_path, options, error_message);
 }
@@ -129,7 +129,7 @@ bool CompilerDriver::validate(llvm::StringRef input_mlir,
 
 bool CompilerDriver::compileImpl(
     mlir::ModuleOp module, const std::string &output_path,
-    const udna::compiler::CompilationOptionsT &options,
+    const hip::compiler::CompilationOptionsT &options,
     std::string &error_message) {
   // Step 2: Run MLIR passes
   if (!runMLIRPasses(module, options, error_message))
@@ -158,7 +158,7 @@ bool CompilerDriver::compileImpl(
   std::string obj_path = base_path + ".obj";
 
   // Step 5: Emit LLVM IR (if requested)
-  if (options.output_mode == udna::compiler::OutputMode::LLVM_IR) {
+  if (options.output_mode == hip::compiler::OutputMode::LLVM_IR) {
     if (!emitLLVMIR(llvmModule.get(), ll_path, error_message))
       return false;
     return true; // Done - IR output requested
@@ -202,10 +202,10 @@ bool CompilerDriver::compileImpl(
 
       // Custom kernel library (GQA, RoPE) — installed to
       // CMAKE_INSTALL_PREFIX/lib Path configured at CMake time via
-      // UDNA_CUSTOM_KERNELS_LIB_PATH define
-#ifdef UDNA_CUSTOM_KERNELS_LIB_PATH
+      // HIP_CUSTOM_KERNELS_LIB_PATH define
+#ifdef HIP_CUSTOM_KERNELS_LIB_PATH
     {
-      std::string custom_lib = UDNA_CUSTOM_KERNELS_LIB_PATH;
+      std::string custom_lib = HIP_CUSTOM_KERNELS_LIB_PATH;
       if (llvm::sys::fs::exists(custom_lib)) {
         libraries.push_back(custom_lib);
         std::cout << "  Custom kernels: " << custom_lib << "\n";
@@ -232,7 +232,7 @@ bool CompilerDriver::compileImpl(
 }
 
 bool CompilerDriver::runMLIRPasses(
-    mlir::ModuleOp module, const udna::compiler::CompilationOptionsT &options,
+    mlir::ModuleOp module, const hip::compiler::CompilationOptionsT &options,
     std::string &error_message) {
   mlir::PassManager pm(module.getContext());
 
@@ -339,4 +339,4 @@ void CompilerDriver::cleanupIntermediates(const std::string &basePath) {
   }
 }
 
-} // namespace udna::compiler
+} // namespace hip::compiler

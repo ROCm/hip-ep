@@ -11,7 +11,7 @@
 ///   toJson:   NativeT -> Pack() -> binary -> GenerateText() -> JSON string
 ///   fromJson: JSON string -> ParseJson() -> binary -> UnPackTo() -> NativeT
 ///
-/// Template parameter: NativeT (e.g. CompilationOptionsT, UdnaModelMetaInfoT)
+/// Template parameter: NativeT (e.g. CompilationOptionsT, HipModelMetaInfoT)
 /// FlatT (the binary accessor class) is derived via NativeT::TableType so
 /// callers never need to mention it.
 
@@ -19,7 +19,7 @@
 
 #include <string>
 
-namespace udna {
+namespace hip {
 
 template <typename NativeT>
 std::string toJson(const NativeT &native, const char *schema) {
@@ -58,4 +58,4 @@ bool fromJson(const std::string &json, const char *schema, NativeT &result,
   return true;
 }
 
-} // namespace udna
+} // namespace hip

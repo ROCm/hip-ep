@@ -12,11 +12,11 @@ namespace morphizen {
 class FileSystem;
 } // namespace morphizen
 
-namespace udna {
+namespace hip {
 namespace compiler {
 struct CompilationOptionsT;
 } // namespace compiler
-} // namespace udna
+} // namespace hip
 
 namespace mlir {
 namespace hip {
@@ -33,7 +33,7 @@ namespace hip {
 /// attributes for use by GenerateInterfacePass.
 std::unique_ptr<Pass>
 createConvertOnnxToHipPass(morphizen::FileSystem *fs,
-                           const udna::compiler::CompilationOptionsT &options);
+                           const hip::compiler::CompilationOptionsT &options);
 
 /// No-arg overload for CLI registration (--convert-onnx-to-hip).
 /// Uses default CompilationOptionsT (constants.bin, no FileSystem).
@@ -42,4 +42,4 @@ std::unique_ptr<Pass> createConvertOnnxToHipPass();
 } // namespace hip
 } // namespace mlir
 
-#endif // UDNA_COMPILER_CONVERSION_ONNXTOHIP_PASSES_H
+#endif // HIP_COMPILER_CONVERSION_ONNXTOHIP_PASSES_H

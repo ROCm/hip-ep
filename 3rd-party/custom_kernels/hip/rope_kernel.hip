@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 
-#include "udna_custom_kernels.h"
+#include "hip_custom_kernels.h"
 
 // Half-rotated RoPE: dimensions [0..half) and [half..rotary_dim) form pairs.
 // Uses int32 index arithmetic for RDNA GPU performance (int64 div/mod is slow).
@@ -145,7 +145,7 @@ __global__ void rope_copy_remaining_kernel(
   output[src_idx] = input[src_idx];
 }
 
-extern "C" int udna_rope_forward(
+extern "C" int hip_rope_forward(
     void* stream_ptr,
     const void* input,
     const void* position_ids,
@@ -162,7 +162,7 @@ extern "C" int udna_rope_forward(
     int64_t element_size_bytes) {
 
   if (!input || !position_ids || !cos_cache || !sin_cache || !output) {
-    fprintf(stderr, "udna_rope_forward: null pointer argument\n");
+    fprintf(stderr, "hip_rope_forward: null pointer argument\n");
     return -1;
   }
 
@@ -240,14 +240,14 @@ extern "C" int udna_rope_forward(
           in, out, bs, sl, nh, hd, rd);
     }
   } else {
-    fprintf(stderr, "udna_rope_forward: unsupported element_size %lld\n",
+    fprintf(stderr, "hip_rope_forward: unsupported element_size %lld\n",
             (long long)element_size_bytes);
     return -1;
   }
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
-    fprintf(stderr, "udna_rope_forward: kernel launch failed: %s\n",
+    fprintf(stderr, "hip_rope_forward: kernel launch failed: %s\n",
             hipGetErrorString(err));
     return -1;
   }

@@ -2,8 +2,8 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#ifndef UDNA_COMPILER_COMPILER_PIPELINE_H
-#define UDNA_COMPILER_COMPILER_PIPELINE_H
+#ifndef HIP_COMPILER_COMPILER_PIPELINE_H
+#define HIP_COMPILER_COMPILER_PIPELINE_H
 
 #include "compilation_options_generated.h"
 #include "mlir/Pass/PassManager.h"
@@ -12,7 +12,7 @@ namespace morphizen {
 class FileSystem;
 } // namespace morphizen
 
-namespace udna::compiler {
+namespace hip::compiler {
 namespace compiler {
 
 /// Populates the complete Morphizen compilation pipeline.
@@ -27,10 +27,10 @@ namespace compiler {
 /// 6. HIP → LLVM conversion
 /// 7. Interface generation
 void populateMorphizenPipeline(
-    mlir::OpPassManager &pm, const udna::compiler::CompilationOptionsT &options,
+    mlir::OpPassManager &pm, const hip::compiler::CompilationOptionsT &options,
     morphizen::FileSystem *fs);
 
 } // namespace compiler
-} // namespace udna::compiler
+} // namespace hip::compiler
 
-#endif // UDNA_COMPILER_COMPILER_PIPELINE_H
+#endif // HIP_COMPILER_COMPILER_PIPELINE_H
