@@ -17,7 +17,7 @@ add_library(UdnaConversion STATIC
 # Link subdirectory libraries
 target_link_libraries(UdnaConversion PUBLIC
   OnnxToHip
-  UdnaConversionHipToLLVM
+  HipToLLVM
   MLIRIR
   MLIRPass
 )
