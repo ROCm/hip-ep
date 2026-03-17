@@ -15,7 +15,7 @@ add_dependencies(hip-compiler
 target_link_libraries(hip-compiler PRIVATE
   HipDialectIR
   HipDialectTransforms
-  HipToLLVM
+  UdnaConversionHipToLLVM
   MLIROptLib
   MLIRSupport
   MLIRIR

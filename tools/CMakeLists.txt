@@ -5,3 +5,5 @@
 
 add_subdirectory(hip-mlir-opt)
 add_subdirectory(hip-compiler)
+add_subdirectory(test-model-dll)
+add_subdirectory(hip-inspect-dll)

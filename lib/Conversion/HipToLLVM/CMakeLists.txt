@@ -1,24 +1,43 @@
 ##
-# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
 # ** Licensed under the MIT License.
 ##
 
-add_library(HipToLLVM STATIC
+message(STATUS "Building HIP to LLVM Conversion Library")
+
+# Create HIP to LLVM conversion library
+add_library(UdnaConversionHipToLLVM STATIC
   HipToLLVM.cpp
 )
 
-add_dependencies(HipToLLVM
-  HipDialectIncGen
-  HipTypesIncGen
-  HipOpsIncGen
-  HipPassesIncGen
+# Link against required libraries
+target_link_libraries(UdnaConversionHipToLLVM PUBLIC
+  HipDialectIR
+  MLIRIR
+  MLIRPass
+  MLIRSupport
+  MLIRTransforms
+  MLIRFuncDialect
+  MLIRArithDialect
+  MLIRMemRefDialect
+  MLIRLLVMDialect
+  MLIRBufferizationDialect
+  MLIRBufferizationTransforms
+  MLIRControlFlowDialect
+  # MLIR conversion libraries
+  MLIRArithToLLVM
+  MLIRControlFlowToLLVM
+  MLIRFuncToLLVM
+  MLIRMemRefToLLVM
+  MLIRLLVMCommonConversion
+  MLIRTransformUtils
 )
 
-target_link_libraries(HipToLLVM PUBLIC
-  HipDialectIR
-  MLIRPass
-  MLIRLLVMDialect
-  MLIRLLVMCommonConversion
-  MLIRMemRefDialect
-  MLIRTransforms
+# Add include directories
+target_include_directories(UdnaConversionHipToLLVM PUBLIC
+  ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_BINARY_DIR}/lib
 )
+
+# Set folder for IDE organization
+set_target_properties(UdnaConversionHipToLLVM PROPERTIES FOLDER "mlir/Conversion")
