@@ -13,7 +13,7 @@ namespace mlir {
 namespace hip {
 
 #define GEN_PASS_DEF_HIPADDCONTEXTARGPASS
-#include "hip/Conversion/OnnxToHip/Passes.h.inc"
+#include "hip/Dialect/Transforms/Passes.h.inc"
 
 namespace {
 
