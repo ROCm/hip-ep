@@ -13,7 +13,7 @@ This directory contains a custom MLIR dialect for HIP (Heterogeneous-compute Int
 
 The HIP dialect provides high-level operations for GPU inference on AMD ROCm, targeting LLM workloads with 3D tensors `[B, S, D]` (batch, sequence, model_dim):
 
-- **Lifecycle & memory**: `hip.create_handle`, `hip.destroy_handle`, `hip.alloc`, `hip.free`
+- **Context & memory**: `!hip.context` (function argument), `hip.alloc`, `hip.free`
 - **hipBLASLt**: `hip.hipblaslt.matmul` -- batched GEMM with weight broadcast (3D x 2D)
 - **MIOpen**: `hip.miopen.add`, `hip.miopen.mul`, `hip.miopen.rms_norm`, `hip.miopen.softmax` (binary ops support scalar broadcast)
 - **Custom kernels**: `hip.transpose` (N-D with dim params)
@@ -48,7 +48,7 @@ test_<op>.mlir
 ### Dialect Definition (`include/hip/` + `lib/`)
 
 - `include/hip/Dialect/IR/HipDialect.td` - Dialect definition
-- `include/hip/Dialect/IR/HipTypes.td` - Type definitions (e.g., `!hip.handle`)
+- `include/hip/Dialect/IR/HipTypes.td` - Type definitions (e.g., `!hip.context`)
 - `include/hip/Dialect/IR/HipOps.td` - Operation definitions (DPS `ins`/`outs` format)
 - `include/hip/Dialect/IR/HipDialect.h` + `lib/Dialect/IR/HipDialect.cpp` - Dialect C++ implementation
 - `include/hip/Dialect/Transforms/Passes.h` - Pass registration
@@ -228,15 +228,14 @@ compiler pipeline.
 ```mlir
 module {
   func.func @example(
+      %ctx: !hip.context,
       %A: tensor<?x?x?xf32>,   // [B, S, D]
       %W: tensor<?x?xf32>,     // [D, D]  (2D weight, broadcast)
       %C: tensor<?x?x?xf32>)   // [B, S, D]  (output init)
       -> tensor<?x?x?xf32> {
-    %handle = hip.create_handle() : !hip.handle
-    %result = hip.hipblaslt.matmul(%handle)
+    %result = hip.hipblaslt.matmul(%ctx)
         ins(%A, %W : tensor<?x?x?xf32>, tensor<?x?xf32>)
         outs(%C : tensor<?x?x?xf32>) -> tensor<?x?x?xf32>
-    hip.destroy_handle(%handle) : !hip.handle
     return %result : tensor<?x?x?xf32>
   }
 }
@@ -278,21 +277,21 @@ hip-mlir-opt input.mlir \
 
 In addition to tensor-mode inputs, the compiler supports a **pre-bufferized memref format**
 where weights are embedded as `memref.global` constants and intermediate buffers are
-carved from a single memory pool via `memref.view`:
+carved from a single grow-on-demand memory pool via `memref.view`:
 
 ```mlir
 module {
   memref.global "private" constant @weight : memref<64x64xf32> = dense<"0x...">
-  func.func @main_graph(%X: memref<2x64x64xf32, strided<[?,?,?], offset: ?>>,
+  func.func @main_graph(%ctx: !hip.context,
+                        %X: memref<2x64x64xf32, strided<[?,?,?], offset: ?>>,
                         %out: memref<2x64x64xf32>) {
-    %h = hip.create_handle() : !hip.handle
-    %pool = hip.alloc(%h) : memref<131072xi8>
-    %buf = memref.view %pool[%c0][] : memref<131072xi8> to memref<2x64x64xf32>
+    %size = arith.constant 131072 : index
+    %pool = hip.get_pool(%ctx, %size) : memref<?xi8>
+    %c0 = arith.constant 0 : index
+    %buf = memref.view %pool[%c0][] : memref<?xi8> to memref<2x64x64xf32>
     %w = memref.get_global @weight : memref<64x64xf32>
-    hip.hipblaslt.matmul(%h) ins(%X, %w : ...) outs(%buf : ...)
+    hip.hipblaslt.matmul(%ctx) ins(%X, %w : ...) outs(%buf : ...)
     // ...
-    hip.free(%h, %pool) : memref<131072xi8>
-    hip.destroy_handle(%h) : !hip.handle
     return
   }
 }
@@ -305,33 +304,32 @@ before `hipMemcpy` to device, avoiding HIP PAL compatibility issues with read-on
 
 ## HIP Dialect Operations
 
-### Lifecycle and Memory
+### Context and Memory
 
-- **`hip.create_handle() : !hip.handle`** -- Creates a HIP runtime handle.
-- **`hip.destroy_handle(%handle) : !hip.handle`** -- Destroys a HIP runtime handle.
-- **`hip.alloc(%handle, %dynamicSizes...) : memref<...>`** -- Allocates device memory.
-- **`hip.free(%handle, %memref) : memref<...>`** -- Frees device memory.
+- **`!hip.context`** -- Opaque execution context, passed as function argument 0.
+- **`hip.alloc(%ctx, %dynamicSizes...) : memref<...>`** -- Allocates device memory.
+- **`hip.free(%ctx, %memref) : memref<...>`** -- Frees device memory.
 
 ### Compute Ops (DPS, rank-generic)
 
 All compute ops use Destination-Passing Style with rank-generic lowerings. For LLM workloads, tensors are typically `[B, S, D]` (batch, sequence, model_dim).
 
 **hipBLASLt:**
-- **`hip.hipblaslt.matmul(%handle) ins(%A, %B : ...) outs(%C : ...)`** -- Matrix multiply. Supports batched GEMM (3D) and weight broadcast (3D x 2D: `stride_B=0`).
+- **`hip.hipblaslt.matmul(%ctx) ins(%A, %B : ...) outs(%C : ...)`** -- Matrix multiply. Supports batched GEMM (3D) and weight broadcast (3D x 2D: `stride_B=0`).
 
 **MIOpen:**
-- **`hip.miopen.add(%handle) ins(%A, %B : ...) outs(%C : ...)`** -- Element-wise add.
-- **`hip.miopen.mul(%handle) ins(%A, %B : ...) outs(%C : ...)`** -- Element-wise multiply.
-- **`hip.miopen.rms_norm(%handle) ins(%input, %weight : ...) outs(%output : ...)`** -- RMS normalization. For 3D input, flattens `B*S` as rows.
-- **`hip.miopen.softmax(%handle) ins(%input : ...) outs(%output : ...)`** -- Row-wise softmax over last dim. For 3D input, flattens `B*S` as rows.
-- **`hip.miopen.skip_rms_norm(%handle) ins(%x, %skip, %weight : ...) outs(%output, %residual : ...)`** -- Fused Add + RMS normalization (stub).
-- **`hip.miopen.rope(%handle, %start_pos) ins(%cos, %sin : ...) outs(%q, %k : ...)`** -- Rotary positional embeddings (stub).
+- **`hip.miopen.add(%ctx) ins(%A, %B : ...) outs(%C : ...)`** -- Element-wise add.
+- **`hip.miopen.mul(%ctx) ins(%A, %B : ...) outs(%C : ...)`** -- Element-wise multiply.
+- **`hip.miopen.rms_norm(%ctx) ins(%input, %weight : ...) outs(%output : ...)`** -- RMS normalization. For 3D input, flattens `B*S` as rows.
+- **`hip.miopen.softmax(%ctx) ins(%input : ...) outs(%output : ...)`** -- Row-wise softmax over last dim. For 3D input, flattens `B*S` as rows.
+- **`hip.miopen.skip_rms_norm(%ctx) ins(%x, %skip, %weight : ...) outs(%output, %residual : ...)`** -- Fused Add + RMS normalization (stub).
+- **`hip.miopen.rope(%ctx, %start_pos) ins(%cos, %sin : ...) outs(%q, %k : ...)`** -- Rotary positional embeddings (stub).
 
 **Custom kernels:**
-- **`hip.transpose(%handle, %dim0, %dim1) ins(%input : ...) outs(%output : ...)`** -- N-D transpose swapping two specified dims.
-- **`hip.gather(%handle) ins(%indices, %table : ...) outs(%output : ...)`** -- Embedding table lookup (stub).
-- **`hip.silu(%handle) ins(%input : ...) outs(%output : ...)`** -- SiLU activation (stub).
-- **`hip.gqa(%handle, %layer, %start_pos, %seq_len) ins(%q, %k, %v : ...) outs(%kv_cache, %output : ...)`** -- Grouped query attention (stub).
+- **`hip.transpose(%ctx, %dim0, %dim1) ins(%input : ...) outs(%output : ...)`** -- N-D transpose swapping two specified dims.
+- **`hip.gather(%ctx) ins(%indices, %table : ...) outs(%output : ...)`** -- Embedding table lookup (stub).
+- **`hip.silu(%ctx) ins(%input : ...) outs(%output : ...)`** -- SiLU activation (stub).
+- **`hip.gqa(%ctx, %layer, %start_pos, %seq_len) ins(%q, %k, %v : ...) outs(%kv_cache, %output : ...)`** -- Grouped query attention (stub).
 
 ## Running Tests
 
@@ -367,8 +365,8 @@ test_<op>.mlir
 
 ## Type System
 
-### `!hip.handle`
-An opaque type representing a HIP runtime handle. Lowered to `!llvm.ptr` in LLVM.
+### `!hip.context`
+An opaque type representing the HIP execution context. Lowered to `!llvm.ptr`.
 
 ## Pass Pipeline
 

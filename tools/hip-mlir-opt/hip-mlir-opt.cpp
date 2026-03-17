@@ -5,10 +5,7 @@
 
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
-
-#ifdef ENABLE_ONNX_FRONTEND
-#include "src/Dialect/ONNX/ONNXDialect.hpp"
-#endif
+#include "hip/Dialect/Transforms/Pipelines.h"
 
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -31,6 +28,20 @@
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "mlir/Transforms/Passes.h"
+
+/// Minimal ONNX dialect stub that claims the "onnx" namespace and permits
+/// unknown operations.  This allows hip-mlir-opt to parse generic-syntax
+/// ONNX MLIR (e.g. "onnx.MatMul"(...)) without requiring the full onnx-mlir
+/// dialect library.
+class OnnxStubDialect : public mlir::Dialect {
+public:
+  explicit OnnxStubDialect(mlir::MLIRContext *ctx)
+      : Dialect(getDialectNamespace(), ctx,
+                mlir::TypeID::get<OnnxStubDialect>()) {
+    allowUnknownOperations();
+  }
+  static constexpr llvm::StringLiteral getDialectNamespace() { return "onnx"; }
+};
 
 namespace {
 
@@ -87,6 +98,8 @@ struct HipDstBufferizableModel
 
 void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
   registry.addExtension(+[](mlir::MLIRContext *ctx, mlir::hip::HipDialect *) {
+    mlir::hip::ConvOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::ConvOp>>(*ctx);
     mlir::hip::HipblasltMatmulOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::HipblasltMatmulOp>>(*ctx);
     mlir::hip::MiopenRmsNormOp::attachInterface<
@@ -126,9 +139,7 @@ int main(int argc, char **argv) {
   registry.insert<mlir::tensor::TensorDialect>();
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::hip::HipDialect>();
-#ifdef ENABLE_ONNX_FRONTEND
-  registry.insert<mlir::ONNXDialect>();
-#endif
+  registry.insert<OnnxStubDialect>();
 
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
@@ -138,11 +149,8 @@ int main(int argc, char **argv) {
   mlir::memref::registerAllocationOpInterfaceExternalModels(registry);
   registerHipBufferizableOpInterfaceModels(registry);
 
-#ifdef ENABLE_ONNX_FRONTEND
   mlir::hip::registerHipPasses();
-#else
-  mlir::hip::registerConvertHipToLLVMPass();
-#endif
+  mlir::hip::registerHipPipelines();
   mlir::bufferization::registerBufferizationPasses();
   mlir::bufferization::registerBufferizationPipelines();
   mlir::registerConvertBufferizationToMemRefPass();

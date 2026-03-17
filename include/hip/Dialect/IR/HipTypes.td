@@ -14,10 +14,10 @@ class Hip_Type<string name, string typeMnemonic>
   let mnemonic = typeMnemonic;
 }
 
-def Hip_HandleType : Hip_Type<"Handle", "handle"> {
-  let summary = "HIP runtime handle type";
+def Hip_ContextType : Hip_Type<"Context", "context"> {
+  let summary = "Opaque HIP execution context";
   let description = [{
-    Represents an opaque HIP runtime handle used for managing HIP operations.
+    Represents an opaque HIP execution context. Lowered to !llvm.ptr.
   }];
 }
 

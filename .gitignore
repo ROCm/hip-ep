@@ -41,6 +41,7 @@ dist/
 # Test outputs
 *.onnx
 !backend-mlir-compiler/test/models/*.onnx
+!examples/*.onnx
 *.dat
 test_output/
 
