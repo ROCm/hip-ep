@@ -33,9 +33,9 @@ using namespace mlir;
 namespace {
 
 /// Build a TensorInfoT native struct from module tensor attributes at index i.
-static std::unique_ptr<hip::TensorInfoT>
+static std::unique_ptr<::hip::TensorInfoT>
 buildTensorInfo(ArrayAttr shapes, DenseI64ArrayAttr elementSizes, size_t i) {
-  auto ti = std::make_unique<hip::TensorInfoT>();
+  auto ti = std::make_unique<::hip::TensorInfoT>();
   if (shapes && i < shapes.size()) {
     if (auto shapeAttr = dyn_cast<DenseI64ArrayAttr>(shapes.getValue()[i]))
       ti->shape.assign(shapeAttr.asArrayRef().begin(),
@@ -51,7 +51,7 @@ buildTensorInfo(ArrayAttr shapes, DenseI64ArrayAttr elementSizes, size_t i) {
 /// are read exactly once.
 /// Each ConstantInfo carries both size and a running byte offset, enabling
 /// future non-sequential or grouped constant layouts.
-hip::HipModelMetaInfoT buildMetadataNative(ModuleOp module,
+::hip::HipModelMetaInfoT buildMetadataNative(ModuleOp module,
                                              const std::string &constantsFile) {
   auto inputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.input_shapes");
   auto outputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.output_shapes");
@@ -68,7 +68,7 @@ hip::HipModelMetaInfoT buildMetadataNative(ModuleOp module,
   auto constantOffsetsAttr =
       module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.constant_offsets");
 
-  hip::HipModelMetaInfoT meta;
+  ::hip::HipModelMetaInfoT meta;
   meta.version = 1;
   meta.constants_filename = constantsFile;
 
@@ -77,7 +77,7 @@ hip::HipModelMetaInfoT buildMetadataNative(ModuleOp module,
     auto offsets = constantOffsetsAttr ? constantOffsetsAttr.asArrayRef()
                                        : ArrayRef<int64_t>{};
     for (size_t i = 0; i < sizes.size(); ++i) {
-      auto ci = std::make_unique<hip::ConstantInfoT>();
+      auto ci = std::make_unique<::hip::ConstantInfoT>();
       ci->size = sizes[i];
       ci->offset = (i < offsets.size()) ? offsets[i] : 0;
       meta.constants.push_back(std::move(ci));
@@ -109,9 +109,9 @@ hip::HipModelMetaInfoT buildMetadataNative(ModuleOp module,
 /// code tracks schema changes automatically.
 std::vector<uint8_t> buildMetadataBlob(ModuleOp module,
                                        const std::string &constantsFile) {
-  hip::HipModelMetaInfoT meta = buildMetadataNative(module, constantsFile);
+  ::hip::HipModelMetaInfoT meta = buildMetadataNative(module, constantsFile);
   flatbuffers::FlatBufferBuilder fbb;
-  fbb.Finish(hip::HipModelMetaInfo::Pack(fbb, &meta));
+  fbb.Finish(::hip::HipModelMetaInfo::Pack(fbb, &meta));
   const uint8_t *buf = fbb.GetBufferPointer();
   return std::vector<uint8_t>(buf, buf + fbb.GetSize());
 }
@@ -121,9 +121,9 @@ std::vector<uint8_t> buildMetadataBlob(ModuleOp module,
 /// with the binary blob — no manual field mapping needed.
 std::string buildMetadataJson(ModuleOp module,
                               const std::string &constantsFile) {
-  hip::HipModelMetaInfoT meta = buildMetadataNative(module, constantsFile);
-  return hip::toJson<hip::HipModelMetaInfoT>(
-      meta, hip::k_model_metadata_schema());
+  ::hip::HipModelMetaInfoT meta = buildMetadataNative(module, constantsFile);
+  return ::hip::toJson<::hip::HipModelMetaInfoT>(
+      meta, ::hip::k_model_metadata_schema());
 }
 
 /// Generate global constant string for metadata JSON
@@ -184,7 +184,7 @@ public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GenerateInterfacePass)
 
   explicit GenerateInterfacePass(
-      const hip::compiler::CompilationOptionsT &compilationOptions)
+      const ::hip::compiler::CompilationOptionsT &compilationOptions)
       : compilationOptions_(compilationOptions) {}
 
   StringRef getArgument() const final { return "generate-interface"; }
@@ -252,7 +252,7 @@ public:
   }
 
 private:
-  const hip::compiler::CompilationOptionsT &compilationOptions_;
+  const ::hip::compiler::CompilationOptionsT &compilationOptions_;
 
   /// Returns LLVM struct type for memref: (ptr, ptr, i64, array<rank x i64>,
   /// array<rank x i64>)
@@ -1312,7 +1312,7 @@ namespace hip::compiler {
 namespace compiler {
 
 std::unique_ptr<mlir::Pass> createGenerateInterfacePass(
-    const hip::compiler::CompilationOptionsT &compilationOptions) {
+    const ::hip::compiler::CompilationOptionsT &compilationOptions) {
   return std::make_unique<GenerateInterfacePass>(compilationOptions);
 }
 
