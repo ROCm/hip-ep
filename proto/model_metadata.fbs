@@ -1,0 +1,26 @@
+// Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+
+namespace udna;
+
+table TensorInfo {
+  shape: [int64];
+  element_size: int64;
+}
+
+table ConstantInfo {
+  size:   int64;
+  offset: int64;
+}
+
+table UdnaModelMetaInfo {
+  version: int32 = 1;
+  constants_filename: string;
+  constants: [ConstantInfo];
+  input_count: int64;
+  output_count: int64;
+  inputs: [TensorInfo];
+  outputs: [TensorInfo];
+}
+
+root_type UdnaModelMetaInfo;

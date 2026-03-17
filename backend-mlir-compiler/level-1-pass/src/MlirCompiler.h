@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+#include <morphizen-foundation/file_io.hpp>
+
 namespace hipdnn::level1pass {
 
 // Artifact format (native DLL or LLVM IR)
@@ -30,12 +32,12 @@ struct CompilationArtifact {
 };
 
 /**
- * Simplified MLIR compiler that uses UDNA-compiler plugin C API.
+ * Simplified MLIR compiler that uses morphizen-mlir-compiler plugin C API.
  *
  * Replaces the old direct LLVM/MLIR integration (MlirParser, MlirTransformer,
  * LlvmCompiler).
  *
- * NOTE: Mock runtime is not supported. The UDNA-compiler plugin
+ * NOTE: Mock runtime is not supported. The morphizen-mlir-compiler plugin
  * always generates native code that targets the actual HIP/ROCm runtime.
  * Mock runtime functionality was removed as it is not compatible with the
  * plugin-based compilation architecture.
@@ -52,7 +54,8 @@ public:
    */
   static std::optional<CompilationArtifact>
   compileFromBytecode(const std::string &mlir_bytecode,
-                      const CompilationConfig &config);
+                      const CompilationConfig &config,
+                      morphizen::FileSystem *fs);
 };
 
 } // namespace hipdnn::level1pass

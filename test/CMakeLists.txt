@@ -4,6 +4,18 @@
 ##
 
 #=============================================================================
+# LIT tests (from UDNA-compiler)
+#=============================================================================
+if(ONNX_HIP_INCLUDE_LIT_TESTS)
+    add_subdirectory(lit)
+endif()
+
+#=============================================================================
+# E2E tests (includes ORT integration test from UDNA-compiler)
+#=============================================================================
+add_subdirectory(e2e)
+
+#=============================================================================
 # Standalone mode: Build only test_gqa without onnx-hipdnn-ep dependencies
 # Usage: cmake -B build -S . -DCMAKE_PREFIX_PATH=".../local" -DSTANDALONE_BUILD=ON
 #=============================================================================
@@ -182,10 +194,15 @@ if(NOT hip_FOUND OR NOT miopen_FOUND OR NOT hipblaslt_FOUND)
   return()
 endif()
 
-message(STATUS "Building ROCm tests")
+find_package(GTest QUIET)
+find_package(glog QUIET)
 
-# Find GTest for the tests
-find_package(GTest REQUIRED)
+if(NOT GTest_FOUND OR NOT glog_FOUND)
+  message(STATUS "GTest/glog not found, skipping ROCm tests")
+  return()
+endif()
+
+message(STATUS "Building ROCm tests")
 
 # Timeout test (GPU timeout mechanism) - standalone test for WaitStreamWithTimeout
 add_executable(rocm_timeout_test test_timeout.cpp)
@@ -232,24 +249,6 @@ if(TARGET onnxruntime)
 elseif(ORT_SOURCE_INCLUDE_DIR AND EXISTS "${ORT_BUILD_IMPLIB}")
   # Use ORT from build output (common case when building onnx-hipdnn-ep)
   message(STATUS "Building ORT integration test (using build output)")
-  message(STATUS "  ORT include: ${ORT_SOURCE_INCLUDE_DIR}")
-  message(STATUS "  ORT lib: ${ORT_BUILD_IMPLIB}")
-
-  add_executable(ort_integration_test test_ort_integration.cpp)
-  target_link_libraries(ort_integration_test PRIVATE
-    "${ORT_BUILD_IMPLIB}"
-    GTest::gtest
-    GTest::gtest_main
-  )
-  target_include_directories(ort_integration_test PRIVATE "${ORT_SOURCE_INCLUDE_DIR}")
-  target_compile_features(ort_integration_test PRIVATE cxx_std_17)
-  if(WIN32)
-    target_compile_definitions(ort_integration_test PRIVATE "_CRT_SECURE_NO_WARNINGS")
-  endif()
-  set_target_properties(ort_integration_test PROPERTIES FOLDER "rocm-tests")
-elseif(ORT_SOURCE_INCLUDE_DIR)
-  # ORT headers found - use installation lib path
-  message(STATUS "Building ORT integration test (using installation lib)")
   message(STATUS "  ORT include: ${ORT_SOURCE_INCLUDE_DIR}")
   message(STATUS "  ORT lib: ${ORT_BUILD_IMPLIB}")
 
