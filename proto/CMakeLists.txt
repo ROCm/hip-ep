@@ -46,7 +46,8 @@ endif(NOT MSVC)
 
 # Find flatc executable from the prebuilt package
 find_program(FLATC_EXECUTABLE flatc
-    HINTS ${CMAKE_PREFIX_PATH}/bin
+    HINTS ${CMAKE_PREFIX_PATH}
+    PATH_SUFFIXES bin
     NO_DEFAULT_PATH
     REQUIRED
 )
