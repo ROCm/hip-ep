@@ -4,8 +4,8 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
-#include "runtime_types.h"
 #include "hip_custom_kernels.h"
+#include "runtime_types.h"
 
 #include <cstdio>
 
@@ -40,5 +40,5 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
       (long long)element_size_bytes, (long long)keepdims, hip_dtype);
 
   return hip_reduce_sum(stream, data, output, data_num_elements,
-                         output_num_elements, hip_dtype);
+                        output_num_elements, hip_dtype);
 }

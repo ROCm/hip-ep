@@ -4,8 +4,8 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
-#include "runtime_types.h"
 #include "hip_custom_kernels.h"
+#include "runtime_types.h"
 
 #include <cstdio>
 
@@ -163,6 +163,5 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
       "element_size=%lld, dtype=%d -> calling hip_elementwise_sub\n",
       (long long)num_elements, (long long)element_size_bytes, hip_dtype);
 
-  return hip_elementwise_sub(stream, lhs, rhs, output, num_elements,
-                              hip_dtype);
+  return hip_elementwise_sub(stream, lhs, rhs, output, num_elements, hip_dtype);
 }

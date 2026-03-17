@@ -4,8 +4,8 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
-#include "runtime_types.h"
 #include "hip_custom_kernels.h"
+#include "runtime_types.h"
 
 #include <cstdio>
 
@@ -74,5 +74,5 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
       (long long)output_element_size, (long long)to, input_dtype, output_dtype);
 
   return hip_cast(stream, input, output, num_elements, input_dtype,
-                   output_dtype);
+                  output_dtype);
 }
