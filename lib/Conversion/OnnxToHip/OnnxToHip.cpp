@@ -24,10 +24,12 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
+#include "hip/Support/DiskFileSystem.h"
+#include "morphizen-foundation/file_io.hpp"
+
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
@@ -133,11 +135,15 @@ static int64_t alignTo(int64_t value, int64_t alignment) {
 /// Mutable state shared across calls to lowerOnnxConstants when
 /// externalization is enabled.
 struct ExternalizationState {
-  std::unique_ptr<llvm::raw_fd_ostream> binFile;
+  std::unique_ptr<morphizen::FileWriter,
+                  morphizen::FileSystem::Deleter<morphizen::FileWriter>>
+      writer;
   llvm::json::Array manifestEntries;
   int64_t currentOffset = 0;
   int64_t constantIndex = 0;
   std::string binFileName;
+  llvm::SmallVector<int64_t> constantSizes;
+  llvm::SmallVector<int64_t> constantOffsets;
 };
 
 /// Lower onnx.Constant ops.
@@ -197,16 +203,20 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
       int64_t padding = aligned - extState->currentOffset;
       if (padding > 0) {
         llvm::SmallVector<char> zeros(padding, 0);
-        extState->binFile->write(zeros.data(), padding);
+        extState->writer->fwrite(zeros.data(), padding);
         extState->currentOffset += padding;
       }
       int64_t entryOffset = extState->currentOffset;
 
-      // Write raw bytes to the sidecar binary.
+      // Write raw bytes to the sidecar binary via FileSystem.
       auto rawData = valueAttr.getRawData();
       int64_t byteSize = static_cast<int64_t>(rawData.size());
-      extState->binFile->write(rawData.data(), byteSize);
+      extState->writer->fwrite(rawData.data(), byteSize);
       extState->currentOffset += byteSize;
+
+      // Track sizes and offsets for module-level metadata.
+      extState->constantSizes.push_back(byteSize);
+      extState->constantOffsets.push_back(entryOffset);
 
       // Build JSON manifest entry.
       llvm::json::Array shapeArray;
@@ -225,6 +235,8 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
       mlir::OpBuilder moduleBuilder(module.getBody(),
                                     module.getBody()->begin());
       auto externalDataAttr = moduleBuilder.getDictionaryAttr({
+          moduleBuilder.getNamedAttr("index", moduleBuilder.getI64IntegerAttr(
+                                                  extState->constantIndex)),
           moduleBuilder.getNamedAttr(
               "offset", moduleBuilder.getI64IntegerAttr(entryOffset)),
           moduleBuilder.getNamedAttr("size",
@@ -350,8 +362,8 @@ MatMulToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value init =
       mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
                                     resultType.getElementType(), dynSizes);
-  auto hipOp = mlir::hip::HipblasltMatmulOp::create(rewriter, loc, resultType,
-                                                    context, a, b, init);
+  auto hipOp = mlir::hip::MatmulOp::create(rewriter, loc, resultType, context,
+                                           a, b, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
@@ -426,7 +438,7 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
-/// onnx.Mul -> hip.miopen.mul
+/// onnx.Mul -> hip.mul
 struct MulToHip : public mlir::RewritePattern {
   MulToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Mul", /*benefit=*/1, ctx) {}
@@ -456,8 +468,8 @@ MulToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value source = (aType.getRank() == resultType.getRank()) ? a : b;
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
 
-  auto hipOp = mlir::hip::MiopenMulOp::create(rewriter, loc, resultType,
-                                              context, a, b, init);
+  auto hipOp =
+      mlir::hip::MulOp::create(rewriter, loc, resultType, context, a, b, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
@@ -656,7 +668,7 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
     auto axesAttr =
         mlir::DenseIntElementsAttr::get(axesType, llvm::ArrayRef(axesVec));
     axesOperand =
-        rewriter.create<mlir::arith::ConstantOp>(loc, axesType, axesAttr);
+        mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttr);
   }
 
   // Extract keepdims attribute (defaults to 1 in ONNX)
@@ -777,12 +789,446 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   attrs.push_back(rewriter.getNamedAttr("group", groupAttr));
 
   // Create hip.conv operation using generic builder
-  auto hipOp = rewriter.create<mlir::hip::ConvOp>(
-      loc, mlir::TypeRange{resultType}, operands, attrs);
+  auto hipOp = mlir::hip::ConvOp::create(
+      rewriter, loc, mlir::TypeRange{resultType}, operands, attrs);
 
   rewriter.replaceOp(op, hipOp.getResult(0));
   return mlir::success();
 }
+
+/// onnx.Custom(SimplifiedLayerNormalization) -> hip.rms_norm
+struct SimplifiedLayerNormToHip : public mlir::RewritePattern {
+  SimplifiedLayerNormToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult SimplifiedLayerNormToHip::matchAndRewrite(
+    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
+  // Check if this is SimplifiedLayerNormalization
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr ||
+      funcNameAttr.getValue() != "SimplifiedLayerNormalization")
+    return rewriter.notifyMatchFailure(
+        op, "not a SimplifiedLayerNormalization operation");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+
+  // Check operands (should be 2: input and scale)
+  if (op->getNumOperands() != 2)
+    return rewriter.notifyMatchFailure(
+        op, "expected 2 operands for SimplifiedLayerNormalization");
+
+  mlir::Value input = op->getOperand(0);
+  mlir::Value scale = op->getOperand(1);
+
+  // Extract attributes
+  auto epsilonAttr = op->getAttrOfType<mlir::FloatAttr>("epsilon");
+  if (!epsilonAttr)
+    return rewriter.notifyMatchFailure(op, "missing epsilon attribute");
+
+  auto axisAttr = op->getAttrOfType<mlir::IntegerAttr>("axis");
+  if (!axisAttr)
+    return rewriter.notifyMatchFailure(op, "missing axis attribute");
+
+  auto stashTypeAttr = op->getAttrOfType<mlir::IntegerAttr>("stash_type");
+  if (!stashTypeAttr)
+    return rewriter.notifyMatchFailure(op, "missing stash_type attribute");
+
+  // Convert axis to i64
+  auto axisI64Attr = rewriter.getI64IntegerAttr(axisAttr.getSInt());
+  auto stashTypeI64Attr = rewriter.getI64IntegerAttr(stashTypeAttr.getSInt());
+
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+
+  // Create init tensor
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+
+  // Create hip.rms_norm operation
+  auto hipOp = mlir::hip::RmsNormOp::create(rewriter, loc, resultType, context,
+                                            input, scale, init, axisI64Attr,
+                                            epsilonAttr, stashTypeI64Attr);
+
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
+/// onnx.Custom(SkipSimplifiedLayerNormalization) -> hip.skip_rms_norm
+struct SkipSimplifiedLayerNormToHip : public mlir::RewritePattern {
+  SkipSimplifiedLayerNormToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
+    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
+  // Check if this is SkipSimplifiedLayerNormalization
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr ||
+      funcNameAttr.getValue() != "SkipSimplifiedLayerNormalization")
+    return rewriter.notifyMatchFailure(
+        op, "not a SkipSimplifiedLayerNormalization operation");
+
+  // Check domain is "com.microsoft"
+  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+    return rewriter.notifyMatchFailure(
+        op,
+        "domain must be com.microsoft for SkipSimplifiedLayerNormalization");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+
+  // Check operands (should be 3: input, skip, gamma)
+  if (op->getNumOperands() != 3)
+    return rewriter.notifyMatchFailure(
+        op, "expected 3 operands for SkipSimplifiedLayerNormalization");
+
+  mlir::Value input = op->getOperand(0);
+  mlir::Value skip = op->getOperand(1);
+  mlir::Value gamma = op->getOperand(2);
+
+  // Extract epsilon attribute
+  auto epsilonAttr = op->getAttrOfType<mlir::FloatAttr>("epsilon");
+  if (!epsilonAttr)
+    return rewriter.notifyMatchFailure(op, "missing epsilon attribute");
+
+  // Should have 2 results: output and skip_output
+  if (op->getNumResults() != 2)
+    return rewriter.notifyMatchFailure(
+        op, "expected 2 results for SkipSimplifiedLayerNormalization");
+
+  auto outputType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  auto skipOutputType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
+
+  // Create init tensors
+  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
+  mlir::Value skipOutputInit =
+      createEmptyTensor(rewriter, loc, skipOutputType, input);
+
+  // Create hip.skip_rms_norm operation
+  auto hipOp = mlir::hip::SkipRmsNormOp::create(
+      rewriter, loc, {outputType, skipOutputType}, context, input, skip, gamma,
+      outputInit, skipOutputInit, epsilonAttr);
+
+  rewriter.replaceOp(op, hipOp->getResults());
+  return mlir::success();
+}
+
+/// onnx.Custom(RotaryEmbedding) -> hip.rope
+struct RotaryEmbeddingToHip : public mlir::RewritePattern {
+  RotaryEmbeddingToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+RotaryEmbeddingToHip::matchAndRewrite(mlir::Operation *op,
+                                      mlir::PatternRewriter &rewriter) const {
+  // Check if this is RotaryEmbedding
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr || funcNameAttr.getValue() != "RotaryEmbedding")
+    return rewriter.notifyMatchFailure(op, "not a RotaryEmbedding operation");
+
+  // Check domain is "com.microsoft"
+  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+    return rewriter.notifyMatchFailure(
+        op, "domain must be com.microsoft for RotaryEmbedding");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+
+  // Check operands (should be 4: input, position_ids, cos_cache, sin_cache)
+  if (op->getNumOperands() != 4)
+    return rewriter.notifyMatchFailure(
+        op, "expected 4 operands for RotaryEmbedding");
+
+  mlir::Value input = op->getOperand(0);
+  mlir::Value positionIds = op->getOperand(1);
+  mlir::Value cosCache = op->getOperand(2);
+  mlir::Value sinCache = op->getOperand(3);
+
+  // Extract attributes
+  auto interleavedAttr = op->getAttrOfType<mlir::IntegerAttr>("interleaved");
+  if (!interleavedAttr)
+    return rewriter.notifyMatchFailure(op, "missing interleaved attribute");
+
+  auto numHeadsAttr = op->getAttrOfType<mlir::IntegerAttr>("num_heads");
+  if (!numHeadsAttr)
+    return rewriter.notifyMatchFailure(op, "missing num_heads attribute");
+
+  auto rotaryDimAttr =
+      op->getAttrOfType<mlir::IntegerAttr>("rotary_embedding_dim");
+  if (!rotaryDimAttr)
+    return rewriter.notifyMatchFailure(
+        op, "missing rotary_embedding_dim attribute");
+
+  int64_t numHeadsVal = numHeadsAttr.getSInt();
+  int64_t rotaryDimVal = rotaryDimAttr.getSInt();
+
+  // ONNX com.microsoft.RotaryEmbedding: 0 means "infer from tensor shapes"
+  //   cos_cache: [max_seq, rotary_dim/2] → rotary_dim = last_dim * 2
+  //   input:     [batch, seq, hidden]     → num_heads = hidden / rotary_dim
+  if (rotaryDimVal == 0) {
+    auto cosCacheType =
+        mlir::dyn_cast<mlir::RankedTensorType>(cosCache.getType());
+    if (cosCacheType && cosCacheType.hasStaticShape() &&
+        cosCacheType.getRank() >= 2) {
+      rotaryDimVal = cosCacheType.getShape().back() * 2;
+    } else {
+      return rewriter.notifyMatchFailure(
+          op, "Cannot infer rotary_embedding_dim: "
+              "cos_cache must have static shape with rank >= 2");
+    }
+  }
+
+  if (numHeadsVal == 0 && rotaryDimVal > 0) {
+    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+    if (inputType && inputType.hasStaticShape() && inputType.getRank() >= 1) {
+      int64_t hidden = inputType.getShape().back();
+      numHeadsVal = hidden / rotaryDimVal;
+    } else {
+      return rewriter.notifyMatchFailure(op, "Cannot infer num_heads: "
+                                             "input must have static shape");
+    }
+  }
+
+  // Convert to i64 attributes (using inferred or original values)
+  auto interleavedI64Attr =
+      rewriter.getI64IntegerAttr(interleavedAttr.getSInt());
+  auto numHeadsI64Attr = rewriter.getI64IntegerAttr(numHeadsVal);
+  auto rotaryDimI64Attr = rewriter.getI64IntegerAttr(rotaryDimVal);
+
+  // Should have 1 result: output
+  if (op->getNumResults() != 1)
+    return rewriter.notifyMatchFailure(op,
+                                       "expected 1 result for RotaryEmbedding");
+
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+
+  // Create init tensor
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+
+  // Create hip.rope operation
+  auto hipOp = mlir::hip::RopeOp::create(
+      rewriter, loc, resultType, context, input, positionIds, cosCache,
+      sinCache, init, interleavedI64Attr, numHeadsI64Attr, rotaryDimI64Attr);
+
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
+/// onnx.Custom(GroupQueryAttention) -> hip.gqa
+struct GroupQueryAttentionToHip : public mlir::RewritePattern {
+  GroupQueryAttentionToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
+    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
+  // Check if this is GroupQueryAttention
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr || funcNameAttr.getValue() != "GroupQueryAttention")
+    return rewriter.notifyMatchFailure(op,
+                                       "not a GroupQueryAttention operation");
+
+  // Check domain is "com.microsoft"
+  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+    return rewriter.notifyMatchFailure(
+        op, "domain must be com.microsoft for GroupQueryAttention");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+
+  // Check operands (should be 9: query, key, value, past_key, past_value,
+  // seqlens_k, total_seq_len, cos_cache, sin_cache)
+  // Last two (cos/sin cache) are optional and may be onnx.NoValue
+  if (op->getNumOperands() != 9)
+    return rewriter.notifyMatchFailure(
+        op, "expected 9 operands for GroupQueryAttention");
+
+  mlir::Value query = op->getOperand(0);
+  mlir::Value key = op->getOperand(1);
+  mlir::Value value = op->getOperand(2);
+  mlir::Value pastKey = op->getOperand(3);
+  mlir::Value pastValue = op->getOperand(4);
+  mlir::Value seqlensK = op->getOperand(5);
+  mlir::Value totalSeqLen = op->getOperand(6);
+
+  // Extract attributes
+  auto numHeadsAttr = op->getAttrOfType<mlir::IntegerAttr>("num_heads");
+  if (!numHeadsAttr)
+    return rewriter.notifyMatchFailure(op, "missing num_heads attribute");
+
+  auto kvNumHeadsAttr = op->getAttrOfType<mlir::IntegerAttr>("kv_num_heads");
+  if (!kvNumHeadsAttr)
+    return rewriter.notifyMatchFailure(op, "missing kv_num_heads attribute");
+
+  auto scaleAttr = op->getAttrOfType<mlir::FloatAttr>("scale");
+  if (!scaleAttr)
+    return rewriter.notifyMatchFailure(op, "missing scale attribute");
+
+  auto softcapAttr = op->getAttrOfType<mlir::FloatAttr>("softcap");
+  if (!softcapAttr)
+    return rewriter.notifyMatchFailure(op, "missing softcap attribute");
+
+  auto doRotaryAttr = op->getAttrOfType<mlir::IntegerAttr>("do_rotary");
+  if (!doRotaryAttr)
+    return rewriter.notifyMatchFailure(op, "missing do_rotary attribute");
+
+  auto rotaryInterleavedAttr =
+      op->getAttrOfType<mlir::IntegerAttr>("rotary_interleaved");
+  if (!rotaryInterleavedAttr)
+    return rewriter.notifyMatchFailure(op,
+                                       "missing rotary_interleaved attribute");
+
+  // Convert to proper attribute types
+  auto numHeadsI64Attr = rewriter.getI64IntegerAttr(numHeadsAttr.getSInt());
+  auto kvNumHeadsI64Attr = rewriter.getI64IntegerAttr(kvNumHeadsAttr.getSInt());
+  auto doRotaryI64Attr = rewriter.getI64IntegerAttr(doRotaryAttr.getSInt());
+  auto rotaryInterleavedI64Attr =
+      rewriter.getI64IntegerAttr(rotaryInterleavedAttr.getSInt());
+
+  // Should have 3 results: output, present_key, present_value
+  if (op->getNumResults() != 3)
+    return rewriter.notifyMatchFailure(
+        op, "expected 3 results for GroupQueryAttention");
+
+  auto outputType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  auto presentKeyType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
+  auto presentValueType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(2).getType());
+
+  // Create init tensors
+  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, query);
+  mlir::Value presentKeyInit =
+      createEmptyTensor(rewriter, loc, presentKeyType, pastKey);
+  mlir::Value presentValueInit =
+      createEmptyTensor(rewriter, loc, presentValueType, pastValue);
+
+  // Create hip.gqa operation
+  auto hipOp = mlir::hip::GqaOp::create(
+      rewriter, loc,
+      mlir::TypeRange{outputType, presentKeyType, presentValueType}, context,
+      query, key, value, pastKey, pastValue, seqlensK, totalSeqLen, outputInit,
+      presentKeyInit, presentValueInit, numHeadsI64Attr, kvNumHeadsI64Attr,
+      scaleAttr, softcapAttr, doRotaryI64Attr, rotaryInterleavedI64Attr);
+
+  rewriter.replaceOp(op, hipOp->getResults());
+  return mlir::success();
+}
+
+//===----------------------------------------------------------------------===//
+// ONNX Gather → HIP Gather
+//===----------------------------------------------------------------------===//
+
+struct GatherToHip : public mlir::RewritePattern {
+  GatherToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Gather", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (mlir::failed(ctxOrFailure))
+      return rewriter.notifyMatchFailure(op, "missing context argument");
+    mlir::Value context = *ctxOrFailure;
+
+    mlir::Location loc = op->getLoc();
+    mlir::Value data = op->getOperand(0);
+    mlir::Value indices = op->getOperand(1);
+
+    // Get axis attribute from ONNX Gather operation
+    int64_t axis = op->getAttrOfType<mlir::IntegerAttr>("axis").getSInt();
+    auto axisAttr = rewriter.getI64IntegerAttr(axis);
+
+    // Get result type
+    auto resultType =
+        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
+    auto indicesType = mlir::cast<mlir::RankedTensorType>(indices.getType());
+
+    // Normalize negative axis for dimension calculations only
+    int64_t normalizedAxis = axis < 0 ? axis + dataType.getRank() : axis;
+
+    // Create output tensor with dynamic shape support
+    // Output shape: [data[0:axis], indices.shape, data[axis+1:]]
+    llvm::SmallVector<mlir::Value> dynSizes;
+    int64_t outDimIdx = 0;
+
+    // Copy dimensions before axis from data
+    for (auto i : llvm::seq<int64_t>(0, normalizedAxis)) {
+      if (outDimIdx < resultType.getRank() &&
+          resultType.isDynamicDim(outDimIdx))
+        dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));
+      outDimIdx++;
+    }
+    // Copy all dimensions from indices
+    for (auto i : llvm::seq<int64_t>(0, indicesType.getRank())) {
+      if (outDimIdx < resultType.getRank() &&
+          resultType.isDynamicDim(outDimIdx))
+        dynSizes.push_back(
+            mlir::tensor::DimOp::create(rewriter, loc, indices, i));
+      outDimIdx++;
+    }
+    // Copy dimensions after axis from data
+    for (auto i : llvm::seq<int64_t>(normalizedAxis + 1, dataType.getRank())) {
+      if (outDimIdx < resultType.getRank() &&
+          resultType.isDynamicDim(outDimIdx))
+        dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));
+      outDimIdx++;
+    }
+
+    mlir::Value init =
+        mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                      resultType.getElementType(), dynSizes);
+
+    // Create hip.gather operation
+    auto gatherOp = mlir::hip::GatherOp::create(
+        rewriter, loc, resultType, context, data, indices, init, axisAttr);
+
+    rewriter.replaceOp(op, gatherOp->getResult(0));
+    return mlir::success();
+  }
+};
 
 //===----------------------------------------------------------------------===//
 // convertComputeOps implementation
@@ -799,7 +1245,12 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   patterns.add<SubToHip>(ctx);
   patterns.add<CastToHip>(ctx);
   patterns.add<ReduceSumToHip>(ctx);
+  patterns.add<GatherToHip>(ctx);
   patterns.add<ConvToHip>(ctx);
+  patterns.add<SimplifiedLayerNormToHip>(ctx);
+  patterns.add<SkipSimplifiedLayerNormToHip>(ctx);
+  patterns.add<RotaryEmbeddingToHip>(ctx);
+  patterns.add<GroupQueryAttentionToHip>(ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
@@ -919,6 +1370,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
   std::unique_ptr<ExternalizationState> extState;
   llvm::StringRef dirRef = externalizeOutputDir.getValue();
   std::string dir = dirRef.empty() ? "." : dirRef.str();
+  mlir::hip::DiskFileSystem diskFs(dir.c_str());
   if (externalizeMinNumElements > 0) {
     extState = std::make_unique<ExternalizationState>();
 
@@ -929,13 +1381,11 @@ void ConvertOnnxToHipPass::runOnOperation() {
       baseName = sym.getValue().str();
     extState->binFileName = baseName + ".constants.bin";
 
-    std::string binPath = dir + "/" + extState->binFileName;
-    std::error_code binEC;
-    extState->binFile = std::make_unique<llvm::raw_fd_ostream>(
-        binPath, binEC, llvm::sys::fs::OF_None);
-    if (binEC) {
-      module.emitError("failed to open constants binary file: " + binPath +
-                       " (" + binEC.message() + ")");
+    extState->writer =
+        diskFs.create_writer_template(extState->binFileName.c_str());
+    if (!extState->writer) {
+      module.emitError("failed to open constants binary file via FileSystem: " +
+                       extState->binFileName);
       return signalPassFailure();
     }
   }
@@ -964,22 +1414,29 @@ void ConvertOnnxToHipPass::runOnOperation() {
   for (auto *ep : entryPoints)
     ep->erase();
 
-  // Finalize externalization: close binary, write JSON manifest, set module
-  // attribute.
+  // Finalize externalization: release writer, write JSON manifest, set module
+  // attributes.
   if (extState && extState->constantIndex > 0) {
-    extState->binFile->close();
+    extState->writer.reset();
 
     // Set hip.constants_file on the module so downstream passes/tools know
     // where the sidecar lives.
     module->setAttr("hip.constants_file",
                     mlir::StringAttr::get(ctx, extState->binFileName));
 
+    // Emit hipdnn.constant_sizes and hipdnn.constant_offsets for the runtime.
+    module->setAttr("hipdnn.constant_sizes",
+                    mlir::DenseI64ArrayAttr::get(ctx, extState->constantSizes));
+    module->setAttr(
+        "hipdnn.constant_offsets",
+        mlir::DenseI64ArrayAttr::get(ctx, extState->constantOffsets));
+
     // Derive base name again for JSON path.
     std::string baseName = "model";
     if (auto sym = module->getAttrOfType<mlir::StringAttr>(
             mlir::SymbolTable::getSymbolAttrName()))
       baseName = sym.getValue().str();
-    std::string jsonPath = dir + "/" + baseName + ".constants.json";
+    std::string jsonPath = baseName + ".constants.json";
 
     llvm::json::Object manifest;
     manifest["version"] = 1;
@@ -988,22 +1445,22 @@ void ConvertOnnxToHipPass::runOnOperation() {
     manifest["total_bytes"] = extState->currentOffset;
     manifest["constants"] = std::move(extState->manifestEntries);
 
-    std::error_code ec;
-    llvm::raw_fd_ostream jsonFile(jsonPath, ec);
-    if (ec) {
-      module.emitError("failed to open constants manifest: " + jsonPath + " (" +
-                       ec.message() + ")");
+    auto jsonWriter = diskFs.create_writer_template(jsonPath.c_str());
+    if (!jsonWriter) {
+      module.emitError("failed to open constants manifest via FileSystem: " +
+                       jsonPath);
       return signalPassFailure();
     }
-    jsonFile << llvm::formatv("{0:2}", llvm::json::Value(std::move(manifest)));
-    jsonFile.close();
+    std::string jsonStr;
+    llvm::raw_string_ostream jsonOs(jsonStr);
+    jsonOs << llvm::formatv("{0:2}", llvm::json::Value(std::move(manifest)));
+    jsonWriter->fwrite(jsonStr.data(), jsonStr.size());
 
-    module.emitRemark("externalized ")
-        << extState->constantIndex << " constants (" << extState->currentOffset
-        << " bytes) to " << dir + "/" + extState->binFileName;
+    LLVM_DEBUG(llvm::dbgs() << "externalized " << extState->constantIndex
+                            << " constants (" << extState->currentOffset
+                            << " bytes) to " << extState->binFileName << "\n");
   } else if (extState) {
-    // No constants qualified -- clean up empty file.
-    extState->binFile->close();
+    extState->writer.reset();
   }
 }
 

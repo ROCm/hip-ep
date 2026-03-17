@@ -41,15 +41,15 @@ func.func @attention_pipeline(
 
   // Q = X @ Wq  [B,S,D] @ [D,D] -> [B,S,D]
   %e0 = tensor.empty() : tensor<2x64x64xf32>
-  %Q = hip.hipblaslt.matmul(%ctx) ins(%X, %Wq : tensor<2x64x64xf32>, tensor<64x64xf32>) outs(%e0 : tensor<2x64x64xf32>) -> tensor<2x64x64xf32>
+  %Q = hip.matmul(%ctx) ins(%X, %Wq : tensor<2x64x64xf32>, tensor<64x64xf32>) outs(%e0 : tensor<2x64x64xf32>) : tensor<2x64x64xf32>
 
   // K = X @ Wk
   %e1 = tensor.empty() : tensor<2x64x64xf32>
-  %K = hip.hipblaslt.matmul(%ctx) ins(%X, %Wk : tensor<2x64x64xf32>, tensor<64x64xf32>) outs(%e1 : tensor<2x64x64xf32>) -> tensor<2x64x64xf32>
+  %K = hip.matmul(%ctx) ins(%X, %Wk : tensor<2x64x64xf32>, tensor<64x64xf32>) outs(%e1 : tensor<2x64x64xf32>) : tensor<2x64x64xf32>
 
   // V = X @ Wv
   %e2 = tensor.empty() : tensor<2x64x64xf32>
-  %V = hip.hipblaslt.matmul(%ctx) ins(%X, %Wv : tensor<2x64x64xf32>, tensor<64x64xf32>) outs(%e2 : tensor<2x64x64xf32>) -> tensor<2x64x64xf32>
+  %V = hip.matmul(%ctx) ins(%X, %Wv : tensor<2x64x64xf32>, tensor<64x64xf32>) outs(%e2 : tensor<2x64x64xf32>) : tensor<2x64x64xf32>
 
   // KT = transpose(K, 1, 2)  [B,S,D] -> [B,D,S]
   %e3 = tensor.empty() : tensor<2x64x64xf32>
@@ -57,11 +57,11 @@ func.func @attention_pipeline(
 
   // scores = Q @ KT  [B,S,D] @ [B,D,S] -> [B,S,S]
   %e4 = tensor.empty() : tensor<2x64x64xf32>
-  %scores = hip.hipblaslt.matmul(%ctx) ins(%Q, %KT : tensor<2x64x64xf32>, tensor<2x64x64xf32>) outs(%e4 : tensor<2x64x64xf32>) -> tensor<2x64x64xf32>
+  %scores = hip.matmul(%ctx) ins(%Q, %KT : tensor<2x64x64xf32>, tensor<2x64x64xf32>) outs(%e4 : tensor<2x64x64xf32>) : tensor<2x64x64xf32>
 
   // scaled = scores * (1/sqrt(D))
   %e5 = tensor.empty() : tensor<2x64x64xf32>
-  %scaled = hip.miopen.mul(%ctx) ins(%scores, %scale : tensor<2x64x64xf32>, tensor<f32>) outs(%e5 : tensor<2x64x64xf32>) -> tensor<2x64x64xf32>
+  %scaled = hip.mul(%ctx) ins(%scores, %scale : tensor<2x64x64xf32>, tensor<f32>) outs(%e5 : tensor<2x64x64xf32>) -> tensor<2x64x64xf32>
 
   // probs = softmax(scaled, axis=-1)
   %e6 = tensor.empty() : tensor<2x64x64xf32>
@@ -69,7 +69,7 @@ func.func @attention_pipeline(
 
   // out = probs @ V  [B,S,S] @ [B,S,D] -> [B,S,D]
   %e7 = tensor.empty() : tensor<2x64x64xf32>
-  %out = hip.hipblaslt.matmul(%ctx) ins(%probs, %V : tensor<2x64x64xf32>, tensor<2x64x64xf32>) outs(%e7 : tensor<2x64x64xf32>) -> tensor<2x64x64xf32>
+  %out = hip.matmul(%ctx) ins(%probs, %V : tensor<2x64x64xf32>, tensor<2x64x64xf32>) outs(%e7 : tensor<2x64x64xf32>) : tensor<2x64x64xf32>
 
   return %out : tensor<2x64x64xf32>
 }

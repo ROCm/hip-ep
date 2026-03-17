@@ -17,9 +17,9 @@
 //
 // CHECK-LABEL: func.func @static_reuse_same_type
 // CHECK:         %[[A:.*]] = memref.alloc()
-// CHECK:         hip.hipblaslt.matmul
+// CHECK:         hip.matmul
 // CHECK-NOT:     memref.alloc()
-// CHECK:         hip.hipblaslt.matmul{{.*}}outs(%[[A]] :
+// CHECK:         hip.matmul{{.*}}outs(%[[A]] :
 // CHECK:         %[[B:.*]] = memref.alloc()
 // CHECK:         hip.miopen.softmax{{.*}}outs(%[[B]] :
 // CHECK:         return %[[B]]
@@ -29,9 +29,9 @@ func.func @static_reuse_same_type(
     %b: memref<64x64xf32, strided<[?, ?], offset: ?>>,
     %c: memref<64x64xf32, strided<[?, ?], offset: ?>>) -> memref<2x64x64xf32> {
   %alloc0 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
-  hip.hipblaslt.matmul(%ctx) ins(%a, %b : memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<2x64x64xf32>)
+  hip.matmul(%ctx) ins(%a, %b : memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<2x64x64xf32>)
   %alloc1 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
-  hip.hipblaslt.matmul(%ctx) ins(%a, %c : memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc1 : memref<2x64x64xf32>)
+  hip.matmul(%ctx) ins(%a, %c : memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc1 : memref<2x64x64xf32>)
   %alloc2 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
   hip.miopen.softmax(%ctx) ins(%alloc1 : memref<2x64x64xf32>) outs(%alloc2 : memref<2x64x64xf32>)
   return %alloc2 : memref<2x64x64xf32>
@@ -48,9 +48,9 @@ func.func @static_reuse_same_type(
 //
 // CHECK-LABEL: func.func @bytesize_reuse_reinterpret_cast
 // CHECK:         %[[BIG:.*]] = memref.alloc(){{.*}}: memref<2x64x64xf32>
-// CHECK:         hip.hipblaslt.matmul
+// CHECK:         hip.matmul
 // CHECK:         %[[OTHER:.*]] = memref.alloc(){{.*}}: memref<2x64x64xf32>
-// CHECK:         hip.miopen.mul
+// CHECK:         hip.mul
 // CHECK-NOT:     memref.alloc()
 // CHECK:         %[[CAST:.*]] = memref.reinterpret_cast %[[BIG]]
 // CHECK:         hip.miopen.softmax{{.*}}outs(%[[CAST]] :
@@ -61,9 +61,9 @@ func.func @bytesize_reuse_reinterpret_cast(
     %b: memref<64x64xf32, strided<[?, ?], offset: ?>>,
     %s: memref<f32, strided<[], offset: ?>>) -> memref<64xf32> {
   %alloc0 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
-  hip.hipblaslt.matmul(%ctx) ins(%a, %b : memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<2x64x64xf32>)
+  hip.matmul(%ctx) ins(%a, %b : memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<2x64x64xf32>)
   %alloc1 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
-  hip.miopen.mul(%ctx) ins(%alloc0, %s : memref<2x64x64xf32>, memref<f32, strided<[], offset: ?>>) outs(%alloc1 : memref<2x64x64xf32>)
+  hip.mul(%ctx) ins(%alloc0, %s : memref<2x64x64xf32>, memref<f32, strided<[], offset: ?>>) outs(%alloc1 : memref<2x64x64xf32>)
   %alloc2 = memref.alloc() : memref<64xf32>
   hip.miopen.softmax(%ctx) ins(%alloc1 : memref<2x64x64xf32>) outs(%alloc2 : memref<64xf32>)
   return %alloc2 : memref<64xf32>
@@ -78,18 +78,18 @@ func.func @bytesize_reuse_reinterpret_cast(
 //
 // CHECK-LABEL: func.func @no_reuse_overlapping_lifetimes
 // CHECK:         %[[A:.*]] = memref.alloc()
-// CHECK:         hip.hipblaslt.matmul
+// CHECK:         hip.matmul
 // CHECK:         %[[B:.*]] = memref.alloc()
-// CHECK:         hip.hipblaslt.matmul{{.*}}ins(%[[A]], %[[A]]{{.*}}outs(%[[B]] :
+// CHECK:         hip.matmul{{.*}}ins(%[[A]], %[[A]]{{.*}}outs(%[[B]] :
 // CHECK:         return %[[B]]
 func.func @no_reuse_overlapping_lifetimes(
     %ctx: !hip.context,
     %a: memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>,
     %b: memref<64x64xf32, strided<[?, ?], offset: ?>>) -> memref<2x64x64xf32> {
   %alloc0 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
-  hip.hipblaslt.matmul(%ctx) ins(%a, %b : memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<2x64x64xf32>)
+  hip.matmul(%ctx) ins(%a, %b : memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<2x64x64xf32>)
   %alloc1 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
-  hip.hipblaslt.matmul(%ctx) ins(%alloc0, %alloc0 : memref<2x64x64xf32>, memref<2x64x64xf32>) outs(%alloc1 : memref<2x64x64xf32>)
+  hip.matmul(%ctx) ins(%alloc0, %alloc0 : memref<2x64x64xf32>, memref<2x64x64xf32>) outs(%alloc1 : memref<2x64x64xf32>)
   return %alloc1 : memref<2x64x64xf32>
 }
 
@@ -103,7 +103,7 @@ func.func @no_reuse_overlapping_lifetimes(
 //
 // CHECK-LABEL: func.func @dynamic_same_dim_reuse
 // CHECK:         %[[A:.*]] = memref.alloc(%arg3)
-// CHECK:         hip.hipblaslt.matmul
+// CHECK:         hip.matmul
 // CHECK:         %[[B:.*]] = memref.alloc(%arg3)
 // CHECK:         hip.miopen.softmax{{.*}}outs(%[[B]] :
 // CHECK-NOT:     memref.alloc
@@ -115,7 +115,7 @@ func.func @dynamic_same_dim_reuse(
     %b: memref<64x64xf32, strided<[?, ?], offset: ?>>,
     %n: index) -> memref<?x64xf32> {
   %alloc0 = memref.alloc(%n) : memref<?x64xf32>
-  hip.hipblaslt.matmul(%ctx) ins(%a, %b : memref<?x64xf32>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<?x64xf32>)
+  hip.matmul(%ctx) ins(%a, %b : memref<?x64xf32>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<?x64xf32>)
   %alloc1 = memref.alloc(%n) : memref<?x64xf32>
   hip.miopen.softmax(%ctx) ins(%alloc0 : memref<?x64xf32>) outs(%alloc1 : memref<?x64xf32>)
   %alloc2 = memref.alloc(%n) : memref<?x64xf32>
@@ -129,7 +129,7 @@ func.func @dynamic_same_dim_reuse(
 // values means no reuse.
 // CHECK-LABEL: func.func @no_reuse_different_dynamic
 // CHECK:         memref.alloc(%arg3) : memref<?x64xf32>
-// CHECK:         hip.hipblaslt.matmul
+// CHECK:         hip.matmul
 // CHECK:         memref.alloc(%arg4) : memref<?x64xf32>
 // CHECK:         hip.miopen.softmax
 // CHECK:         return
@@ -139,7 +139,7 @@ func.func @no_reuse_different_dynamic(
     %b: memref<64x64xf32, strided<[?, ?], offset: ?>>,
     %n: index, %m: index) -> memref<?x64xf32> {
   %alloc0 = memref.alloc(%n) : memref<?x64xf32>
-  hip.hipblaslt.matmul(%ctx) ins(%a, %b : memref<?x64xf32>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<?x64xf32>)
+  hip.matmul(%ctx) ins(%a, %b : memref<?x64xf32>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<?x64xf32>)
   %alloc1 = memref.alloc(%m) : memref<?x64xf32>
   hip.miopen.softmax(%ctx) ins(%alloc0 : memref<?x64xf32>) outs(%alloc1 : memref<?x64xf32>)
   return %alloc1 : memref<?x64xf32>
@@ -156,22 +156,22 @@ func.func @no_reuse_different_dynamic(
 //
 // CHECK-LABEL: func.func @subview_extends_lifetime
 // CHECK:         %[[A:.*]] = memref.alloc()
-// CHECK:         hip.hipblaslt.matmul
+// CHECK:         hip.matmul
 // CHECK:         memref.subview %[[A]]
 // CHECK:         %[[B:.*]] = memref.alloc()
 // CHECK:         memref.cast
-// CHECK:         hip.hipblaslt.matmul
+// CHECK:         hip.matmul
 // CHECK:         return %[[B]]
 func.func @subview_extends_lifetime(
     %ctx: !hip.context,
     %a: memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>,
     %b: memref<64x64xf32, strided<[?, ?], offset: ?>>) -> memref<2x64x64xf32> {
   %alloc0 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
-  hip.hipblaslt.matmul(%ctx) ins(%a, %b : memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<2x64x64xf32>)
+  hip.matmul(%ctx) ins(%a, %b : memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<2x64x64xf32>)
   %sv = memref.subview %alloc0[0, 0, 0][1, 64, 64][1, 1, 1] : memref<2x64x64xf32> to memref<1x64x64xf32, strided<[4096, 64, 1]>>
   %alloc1 = memref.alloc() {alignment = 64 : i64} : memref<2x64x64xf32>
   %cast = memref.cast %sv : memref<1x64x64xf32, strided<[4096, 64, 1]>> to memref<1x64x64xf32, strided<[?, ?, ?], offset: ?>>
-  hip.hipblaslt.matmul(%ctx) ins(%cast, %b : memref<1x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc1 : memref<2x64x64xf32>)
+  hip.matmul(%ctx) ins(%cast, %b : memref<1x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc1 : memref<2x64x64xf32>)
   return %alloc1 : memref<2x64x64xf32>
 }
 
@@ -199,7 +199,7 @@ func.func @no_reuse_different_element_type(
     %b: memref<64x64xf32, strided<[?, ?], offset: ?>>,
     %c: memref<64xf16>) -> memref<64xf16> {
   %alloc0 = memref.alloc() : memref<64xf32>
-  hip.hipblaslt.matmul(%ctx) ins(%a, %b : memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<64xf32>)
+  hip.matmul(%ctx) ins(%a, %b : memref<2x64x64xf32, strided<[?, ?, ?], offset: ?>>, memref<64x64xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<64xf32>)
   %alloc1 = memref.alloc() : memref<64xf16>
   hip.miopen.softmax(%ctx) ins(%c : memref<64xf16>) outs(%alloc1 : memref<64xf16>)
   return %alloc1 : memref<64xf16>
