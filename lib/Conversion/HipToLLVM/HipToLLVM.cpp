@@ -61,6 +61,7 @@ static constexpr const char *kWrapMiopenOpTensor =
 static constexpr const char *kWrapMiopenCast = "wrap_miopenCast";
 static constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
 static constexpr const char *kWrapGQA = "wrap_group_query_attention";
+static constexpr const char *kHipGetConstant = "hipdnn_ep_constant_get";
 
 // Maps MLIR element type to runtime data type enum (HIPDNN_EP_DATATYPE_*).
 // Values must match the #defines in hipdnn_ep_runtime.h.
@@ -1647,6 +1648,72 @@ struct MemRefDeallocOpLowering
 };
 
 //===----------------------------------------------------------------------===//
+// GetConstantOp Lowering
+//===----------------------------------------------------------------------===//
+
+struct GetConstantOpLowering : public ConvertOpToLLVMPattern<GetConstantOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(GetConstantOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+    Type i64Type = IntegerType::get(rewriter.getContext(), 64);
+    MemRefType memRefType = op.getResult().getType();
+
+    SmallVector<Type, 2> paramTypes = {ptrType, i64Type};
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kHipGetConstant, paramTypes, ptrType);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value, 2> args = {adaptor.getCtx(), adaptor.getIndex()};
+    auto callOp = LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+
+    // The runtime always returns a generic pointer (AS 0).  Cast to the
+    // memref's address space (e.g. AS 1 = AMDGPU global memory) if needed.
+    FailureOr<unsigned> addrSpace =
+        getTypeConverter()->getMemRefAddressSpace(memRefType);
+    if (failed(addrSpace))
+      return failure();
+
+    Value dataPtr = callOp.getResult();
+    if (*addrSpace != 0)
+      dataPtr = LLVM::AddrSpaceCastOp::create(
+          rewriter, loc,
+          LLVM::LLVMPointerType::get(rewriter.getContext(), *addrSpace),
+          dataPtr);
+
+    auto shape = memRefType.getShape();
+    SmallVector<Value, 4> sizes;
+    SmallVector<Value, 4> strides;
+
+    for (int64_t dim : shape) {
+      Value size = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                            rewriter.getI64IntegerAttr(dim));
+      sizes.push_back(size);
+    }
+
+    int64_t stride = 1;
+    for (int i = shape.size() - 1; i >= 0; --i) {
+      Value strideVal = LLVM::ConstantOp::create(
+          rewriter, loc, i64Type, rewriter.getI64IntegerAttr(stride));
+      strides.insert(strides.begin(), strideVal);
+      stride *= shape[i];
+    }
+
+    MemRefDescriptor desc = createMemRefDescriptor(
+        loc, memRefType, dataPtr, dataPtr, sizes, strides, rewriter);
+
+    rewriter.replaceOp(op, {desc});
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // ConvertHipToLLVM Pass
 //===----------------------------------------------------------------------===//
 
@@ -1670,14 +1737,14 @@ void ConvertHipToLLVMPass::runOnOperation() {
   RewritePatternSet patterns(ctx);
 
   // HIP dialect-specific lowerings
-  patterns
-      .add<AllocOpLowering, FreeOpLowering, MiopenGraphOpLowering,
-           GetPoolOpLowering, HipblasltGraphOpLowering, ConvOpLowering,
-           MatmulOpLowering, RmsNormOpLowering, SkipRmsNormOpLowering,
-           RopeOpLowering, MiopenSoftmaxOpLowering, TransposeOpLowering,
-           GatherOpLowering, SiluOpLowering, SigmoidOpLowering, MulOpLowering,
-           SubOpLowering, CastOpLowering, ReduceSumOpLowering, GqaOpLowering>(
-          typeConverter);
+  patterns.add<AllocOpLowering, FreeOpLowering, GetConstantOpLowering,
+               MiopenGraphOpLowering, GetPoolOpLowering,
+               HipblasltGraphOpLowering, ConvOpLowering, MatmulOpLowering,
+               RmsNormOpLowering, SkipRmsNormOpLowering, RopeOpLowering,
+               MiopenSoftmaxOpLowering, TransposeOpLowering, GatherOpLowering,
+               SiluOpLowering, SigmoidOpLowering, MulOpLowering, SubOpLowering,
+               CastOpLowering, ReduceSumOpLowering, GqaOpLowering>(
+      typeConverter);
   patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter,
                                                        kMiopenAdd);
   patterns.add<MemRefAllocOpLowering, MemRefDeallocOpLowering>(typeConverter);
