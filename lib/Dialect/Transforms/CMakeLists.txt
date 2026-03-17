@@ -22,7 +22,7 @@ add_dependencies(HipDialectTransforms
 
 target_link_libraries(HipDialectTransforms PUBLIC
   HipDialectIR
-  UdnaConversionHipToLLVM
+  HipToLLVM
   OnnxToHip
   MLIRPass
   MLIRTransforms

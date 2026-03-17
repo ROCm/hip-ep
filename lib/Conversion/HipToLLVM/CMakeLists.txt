@@ -6,12 +6,12 @@
 message(STATUS "Building HIP to LLVM Conversion Library")
 
 # Create HIP to LLVM conversion library
-add_library(UdnaConversionHipToLLVM STATIC
+add_library(HipToLLVM STATIC
   HipToLLVM.cpp
 )
 
 # Link against required libraries
-target_link_libraries(UdnaConversionHipToLLVM PUBLIC
+target_link_libraries(HipToLLVM PUBLIC
   HipDialectIR
   MLIRIR
   MLIRPass
@@ -34,10 +34,10 @@ target_link_libraries(UdnaConversionHipToLLVM PUBLIC
 )
 
 # Add include directories
-target_include_directories(UdnaConversionHipToLLVM PUBLIC
+target_include_directories(HipToLLVM PUBLIC
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_BINARY_DIR}/lib
 )
 
 # Set folder for IDE organization
-set_target_properties(UdnaConversionHipToLLVM PROPERTIES FOLDER "mlir/Conversion")
+set_target_properties(HipToLLVM PROPERTIES FOLDER "mlir/Conversion")
