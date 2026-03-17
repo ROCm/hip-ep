@@ -87,23 +87,5 @@ set(MORPHIZEN_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/etc/morphizen_config
 # Enable MLIR compiler plugin build
 set(morphizen_ENABLE_MLIR_COMPILER OFF CACHE BOOL "Enable morphizen-mlir-compiler build" FORCE)
 
-# Suppress MSVC warnings triggered by third-party headers included in MorphiZen
-# targets. These cannot be fixed by marking headers SYSTEM because MSVC does not
-# suppress C4267/C4702 when warnings originate from template instantiations
-# expanded in the including translation unit.
-#
-# C4267: protobuf v34 changed MapField::size() return type from int to size_t;
-#        generated .pb.h wrappers return size_t from int-typed functions.
-# C4702: LLVM/MLIR headers (DenseMap.h, Value.h, Attributes.h) contain
-#        unreachable code paths inside heavily-templated internals.
-if(MSVC)
-  add_compile_options(/wd4267 /wd4702)
-endif()
-
 # Add morphizen subdirectory (after all options are set)
 add_subdirectory(3rd-party/morphizen)
-
-# Re-find glog at the top level so glog::glog is visible to subdirectories
-# (e.g. test/) added after morphizen. MorphiZen finds/fetches glog internally,
-# but imported targets created inside a subdirectory are not global by default.
-find_package(glog QUIET)
