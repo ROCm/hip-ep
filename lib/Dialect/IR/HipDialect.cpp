@@ -59,6 +59,13 @@ void FreeOp::getEffects(
                        SideEffects::DefaultResource::get());
 }
 
+void GetConstantOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  effects.emplace_back(MemoryEffects::Read::get(), getOperation()->getResult(0),
+                       SideEffects::DefaultResource::get());
+}
+
 //===----------------------------------------------------------------------===//
 // Helpers for DPS compute ops (custom parse/print, verify, interfaces)
 //===----------------------------------------------------------------------===//
