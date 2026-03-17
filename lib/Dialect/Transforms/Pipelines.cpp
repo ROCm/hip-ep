@@ -6,11 +6,7 @@
 #include "hip/Dialect/Transforms/Pipelines.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
-#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/BufferizationToMemRef/BufferizationToMemRef.h"
-#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
-#include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
-#include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -78,12 +74,7 @@ void mlir::hip::buildOnnxToHipPipeline(
 void mlir::hip::buildHipToLLVMPipeline(
     OpPassManager &pm, const HipToLLVMPipelineOptions &options) {
   pm.addPass(createConvertHipToLLVMPass());
-  pm.addPass(createFinalizeMemRefToLLVMConversionPass());
-  pm.addPass(createArithToLLVMConversionPass());
-  pm.addPass(createConvertFuncToLLVMPass());
-  pm.addPass(createReconcileUnrealizedCastsPass());
 
-  // GenerateInterface: create C-ABI wrapper functions for the compiled module
   mlir::hip::CompilationOptionsT compOpts;
   compOpts.constants_file = options.constantsFile;
   pm.addPass(createGenerateInterfacePass(compOpts));
