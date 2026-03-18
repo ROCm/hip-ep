@@ -16,7 +16,6 @@
 
 #include "compilation_options_generated.h"
 #include "flatbuffers/flatbuffers.h"
-#include "llvm/ADT/Sequence.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/debug_log.h"
@@ -28,6 +27,7 @@
 #include "mlir/Pass/Pass.h"
 #include "model_metadata_generated.h"
 #include "model_metadata_schema.h"
+#include "llvm/ADT/Sequence.h"
 
 using namespace mlir;
 
@@ -43,7 +43,9 @@ buildTensorInfo(ArrayAttr shapes, DenseI64ArrayAttr elementSizes, size_t i) {
                        shapeAttr.asArrayRef().end());
   }
   ti->element_size =
-      (elementSizes && i < elementSizes.size()) ? elementSizes[i] : 4;
+      (elementSizes && i < static_cast<size_t>(elementSizes.size()))
+          ? elementSizes[i]
+          : 4;
   return ti;
 }
 
@@ -220,8 +222,8 @@ static Value buildMemrefDescriptor(OpBuilder &builder, Location loc,
   for (int64_t d : llvm::seq<int64_t>(0, rank)) {
     Value idx = LLVM::ConstantOp::create(builder, loc, i64Type,
                                          builder.getI64IntegerAttr(d));
-    Value dimPtr = LLVM::GEPOp::create(builder, loc, ptrType, ptrType,
-                                       shapePtr, ArrayRef<LLVM::GEPArg>{idx});
+    Value dimPtr = LLVM::GEPOp::create(builder, loc, ptrType, ptrType, shapePtr,
+                                       ArrayRef<LLVM::GEPArg>{idx});
     Value dimVal = LLVM::LoadOp::create(builder, loc, i64Type, dimPtr);
     sizes = LLVM::InsertValueOp::create(builder, loc, sizes, dimVal,
                                         ArrayRef<int64_t>{d});
@@ -238,9 +240,8 @@ static Value buildMemrefDescriptor(OpBuilder &builder, Location loc,
     if (d > 0) {
       Value idx = LLVM::ConstantOp::create(builder, loc, i64Type,
                                            builder.getI64IntegerAttr(d));
-      Value dimPtr =
-          LLVM::GEPOp::create(builder, loc, ptrType, ptrType, shapePtr,
-                              ArrayRef<LLVM::GEPArg>{idx});
+      Value dimPtr = LLVM::GEPOp::create(builder, loc, ptrType, ptrType,
+                                         shapePtr, ArrayRef<LLVM::GEPArg>{idx});
       Value dimSize = LLVM::LoadOp::create(builder, loc, i64Type, dimPtr);
       acc = LLVM::MulOp::create(builder, loc, acc, dimSize);
     }
@@ -307,10 +308,6 @@ public:
       return;
     }
 
-    auto inputCount = module->getAttrOfType<IntegerAttr>("hipdnn.input_count");
-    auto outputCount =
-        module->getAttrOfType<IntegerAttr>("hipdnn.output_count");
-
     const std::string constantsFile =
         !compilationOptions_.constants_file.empty()
             ? compilationOptions_.constants_file
@@ -325,12 +322,7 @@ public:
     auto inputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.input_shapes");
     auto outputShapes =
         module->getAttrOfType<ArrayAttr>("hipdnn.output_shapes");
-    auto inputElementSizes =
-        module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.input_element_sizes");
-    auto outputElementSizes =
-        module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.output_element_sizes");
-    generateInferenceCompute(module, inputCount, inputShapes, inputElementSizes,
-                             outputCount, outputShapes, outputElementSizes);
+    generateInferenceCompute(module, inputShapes, outputShapes);
     generateInferenceCleanup(module);
 
     std::string json = buildMetadataJson(module, constantsFile);
@@ -438,25 +430,13 @@ private:
       return failure();
     }
 
-    if (!module->getAttr("hipdnn.input_count")) {
-      llvm::errs()
-          << "[GenerateInterface] hipdnn.input_count attribute missing\n";
-      return failure();
-    }
-    if (!module->getAttr("hipdnn.input_shapes")) {
-      llvm::errs()
-          << "[GenerateInterface] hipdnn.input_shapes attribute missing\n";
-      return failure();
-    }
-    if (!module->getAttr("hipdnn.output_count")) {
-      llvm::errs()
-          << "[GenerateInterface] hipdnn.output_count attribute missing\n";
-      return failure();
-    }
-    if (!module->getAttr("hipdnn.output_shapes")) {
-      llvm::errs()
-          << "[GenerateInterface] hipdnn.output_shapes attribute missing\n";
-      return failure();
+    for (StringRef attr : {"hipdnn.input_count", "hipdnn.input_shapes",
+                           "hipdnn.output_count", "hipdnn.output_shapes"}) {
+      if (!module->getAttr(attr)) {
+        llvm::errs() << "[GenerateInterface] " << attr
+                     << " attribute missing\n";
+        return failure();
+      }
     }
 
     return success();
@@ -467,8 +447,8 @@ private:
   ///       attributes {llvm.emit_c_interface, sym_visibility = "public"} {
   ///     %blob = llvm.mlir.addressof @__metadata_blob : !llvm.ptr
   ///     %sz  = llvm.mlir.constant(168 : i64) : i64
-  ///     %rc  = llvm.call @hipdnn_ep_state_init_with_fs(%state, %fs, %blob, %sz)
-  ///     llvm.return %rc : i32
+  ///     %rc  = llvm.call @hipdnn_ep_state_init_with_fs(%state, %fs, %blob,
+  ///     %sz) llvm.return %rc : i32
   ///   }
   void generateInferenceInit(ModuleOp module, size_t blobSize) {
     OpBuilder builder(module.getContext());
@@ -586,19 +566,19 @@ private:
   ///                                %outs: !llvm.ptr) -> i32
   ///       attributes {llvm.emit_c_interface, sym_visibility = "public"} {
   ///     // 1. Alloca TensorBuffer structs on the stack
-  ///     // 2. For each input:  call hipdnn_ep_tensor_prepare_input, error-check
-  ///     // 3. For each output: call hipdnn_ep_tensor_prepare_output, error-check
+  ///     // 2. For each input:  call hipdnn_ep_tensor_prepare_input,
+  ///     error-check
+  ///     // 3. For each output: call hipdnn_ep_tensor_prepare_output,
+  ///     error-check
   ///     // 4. Build LLVM memref descriptors from TensorBuffer GPU/shape ptrs
   ///     // 5. Call @main_graph(%state, %input_memrefs, %output_memrefs)
-  ///     // 6. For each output: call hipdnn_ep_tensor_finalize_output, error-check
+  ///     // 6. For each output: call hipdnn_ep_tensor_finalize_output,
+  ///     error-check
   ///     // 7. Free input TensorBuffers
   ///     // On error: store error code, free inputs, return error
   ///   }
-  void generateInferenceCompute(ModuleOp module, IntegerAttr inputCount,
-                                ArrayAttr inputShapes,
-                                DenseI64ArrayAttr inputElementSizes,
-                                IntegerAttr outputCount, ArrayAttr outputShapes,
-                                DenseI64ArrayAttr outputElementSizes) {
+  void generateInferenceCompute(ModuleOp module, ArrayAttr inputShapes,
+                                ArrayAttr outputShapes) {
     OpBuilder builder(module.getContext());
     Location loc = module.getLoc();
     builder.setInsertionPointToEnd(module.getBody());
@@ -674,9 +654,6 @@ private:
 
     Block *errorCleanupBlock = funcOp.addBlock();
 
-    // Prepare all input tensors
-    SmallVector<Value> inputMemrefs;
-
     for (auto i : llvm::seq<size_t>(0, numInputs)) {
       Value bufferPtr = inputBuffers[i];
 
@@ -693,9 +670,6 @@ private:
           ValueRange{state, inputsSpanPtr, indexVal, rankVal, bufferPtr},
           errorCodePtr, errorCleanupBlock, funcOp);
     }
-
-    // Prepare all output tensors
-    SmallVector<Value> outputMemrefs;
 
     for (auto i : llvm::seq<size_t>(0, numOutputs)) {
       Value bufferPtr = outputBuffers[i];
@@ -785,10 +759,10 @@ private:
       COMPILER_DEBUG_LOG("[GenerateInterface] Warning: @main_graph not found\n");
       LLVM::BrOp::create(builder, loc, mainSuccessBlock);
     } else {
-      emitErrorCheckedCall(builder, loc, mainFunc,
-                           ValueRange{state, inputMemrefArray,
-                                      outputMemrefArray},
-                           errorCodePtr, errorCleanupBlock, funcOp);
+      emitErrorCheckedCall(
+          builder, loc, mainFunc,
+          ValueRange{state, inputMemrefArray, outputMemrefArray}, errorCodePtr,
+          errorCleanupBlock, funcOp);
       LLVM::BrOp::create(builder, loc, mainSuccessBlock);
     }
 
