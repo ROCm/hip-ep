@@ -37,7 +37,6 @@ target_link_libraries(LibHipCompiler PUBLIC
   MLIRParser
   MLIRLLVMToLLVMIRTranslation
   MLIRTargetLLVMIRExport
-  OMONNXOps
   HipSchemasLib
 )
 
@@ -62,8 +61,6 @@ target_include_directories(LibHipCompiler PUBLIC
   ${CMAKE_BINARY_DIR}/include  # For generated TableGen files
   ${CMAKE_BINARY_DIR}/lib
   ${CMAKE_BINARY_DIR}/proto  # For generated FlatBuffers headers
-  ${CMAKE_SOURCE_DIR}/3rd-party/onnx-mlir
-  ${CMAKE_BINARY_DIR}/3rd-party/onnx-mlir
 )
 
 # Configure custom kernels library path for CompilerDriver
