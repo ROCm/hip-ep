@@ -77,6 +77,7 @@ option(BUILD_HIP_TOOLS "Build HIP MLIR compiler tools (hip-mlir-opt, hip-compile
 if(BUILD_HIP_TOOLS)
   find_package(LLVM REQUIRED CONFIG)
   find_package(MLIR REQUIRED CONFIG)
+  find_package(flatbuffers REQUIRED CONFIG)
 
   message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
   message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
@@ -89,6 +90,7 @@ if(BUILD_HIP_TOOLS)
   include_directories(${MLIR_INCLUDE_DIRS})
   include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
   include_directories(${CMAKE_CURRENT_BINARY_DIR}/include)
+  include_directories(${CMAKE_CURRENT_BINARY_DIR}/proto)
 
   # onnx-mlir is no longer required. The convert-onnx-to-hip pass uses
   # MLIR's generic Operation API to match ONNX ops by name, so no onnx-mlir
@@ -105,12 +107,23 @@ if(BUILD_HIP_TOOLS)
   # TableGen targets
   add_subdirectory(include/hip)
 
+  # FlatBuffers schemas
+  add_subdirectory(proto)
+
   # Library targets
   add_subdirectory(lib)
+
+  # DLL target (hip-compiler.dll)
+  add_subdirectory(dll)
 
   # Executable targets
   add_subdirectory(tools)
 
   # LIT tests for MLIR passes
-  add_subdirectory(test/lit)
+  # When BUILD_EP=ON, test/lit is already added via add_subdirectory(test)
+  # in the BUILD_EP block above (test/CMakeLists.txt -> add_subdirectory(lit)).
+  # Only add it directly here when BUILD_EP is OFF.
+  if(NOT BUILD_EP)
+    add_subdirectory(test/lit)
+  endif()
 endif()
