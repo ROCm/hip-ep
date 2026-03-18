@@ -5,34 +5,22 @@
       "plugin": "morphizen-pass-init"
     },
     {
-      "name": "fuse_ROCm",
-      "plugin": "morphizen-level1-pass-rocm",
-      "passGenericParam": {
-        "subPassNames": [
-          "morphizen-level2-pass-rocm-conv",
-          "morphizen-level2-pass-rocm-gemm",
-          "morphizen-level2-pass-rocm-matmul",
-          "morphizen-level2-pass-rocm-reshape",
-          "morphizen-level2-pass-rocm-transpose",
-          "morphizen-level2-pass-rocm-tile",
-          "morphizen-level2-pass-rocm-mul",
-          "morphizen-level2-pass-rocm-softmax"
-        ]
-      }
+      "name": "mlir-pass",
+      "plugin": "morphizen-level1-pass-mlir-compiler"
     }
   ],
-  "target": "ROCm_default",
+  "target": "mlir-target",
   "targets": [
     {
-      "name": "ROCm_default",
+      "name": "mlir-target",
       "pass": [
         "init",
-        "fuse_ROCm"
+        "mlir-pass"
       ],
       "provider_options": {
         "pass.init.enable_dump": "0",
-        "pass.init.directory": "morphizen_init",
-        "pass.init.filename": "init-graph-for-rocm.onnx"
+        "pass.init.directory": "morphizen_mlir_init",
+        "pass.init.filename": "init-graph-for-mlir.onnx"
       }
     }
   ]
