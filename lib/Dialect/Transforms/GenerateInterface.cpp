@@ -620,9 +620,15 @@ private:
     SmallVector<Value> inputBuffers;
     SmallVector<Value> outputBuffers;
 
+    // sizeof(TensorBuffer) in the runtime (6 fields, 48 bytes on 64-bit).
+    // TODO: Replace with sizeof(TensorBuffer) or a runtime query once the
+    // runtime is ported into this repo.
+    constexpr int64_t kTensorBufferSizeBytes = 48;
+
     Type i8Type = builder.getI8Type();
     Value tensorBufferSize = LLVM::ConstantOp::create(
-        builder, loc, i64Type, builder.getI64IntegerAttr(48));
+        builder, loc, i64Type,
+        builder.getI64IntegerAttr(kTensorBufferSizeBytes));
 
     for (size_t i = 0; i < numInputs; i++) {
       Value bufferPtr = LLVM::AllocaOp::create(builder, loc, ptrType, i8Type,
