@@ -162,7 +162,14 @@ void generateMetadataBlobGlobal(ModuleOp module,
                          "__metadata_blob", builder.getStringAttr(blobRef));
 }
 
-/// Generate inference_get_metadata_json() function
+/// Generate inference_get_metadata_json() function.
+///
+/// Generated IR example:
+///   llvm.func @inference_get_metadata_json() -> !llvm.ptr
+///       attributes {llvm.emit_c_interface, sym_visibility = "public"} {
+///     %0 = llvm.mlir.addressof @__metadata_json : !llvm.ptr
+///     llvm.return %0 : !llvm.ptr
+///   }
 void generateInferenceGetMetadataJson(ModuleOp module) {
   OpBuilder builder(module.getContext());
   Location loc = module.getLoc();
@@ -455,6 +462,14 @@ private:
     return success();
   }
 
+  /// Generated IR example (no pool):
+  ///   llvm.func @inference_init(%state: !llvm.ptr, %fs: !llvm.ptr) -> i32
+  ///       attributes {llvm.emit_c_interface, sym_visibility = "public"} {
+  ///     %blob = llvm.mlir.addressof @__metadata_blob : !llvm.ptr
+  ///     %sz  = llvm.mlir.constant(168 : i64) : i64
+  ///     %rc  = llvm.call @hipdnn_ep_state_init_with_fs(%state, %fs, %blob, %sz)
+  ///     llvm.return %rc : i32
+  ///   }
   void generateInferenceInit(ModuleOp module, size_t blobSize) {
     OpBuilder builder(module.getContext());
     Location loc = module.getLoc();
@@ -566,6 +581,19 @@ private:
     }
   }
 
+  /// Generated IR overview (1 input, 1 output of rank 1):
+  ///   llvm.func @inference_compute(%state: !llvm.ptr, %ins: !llvm.ptr,
+  ///                                %outs: !llvm.ptr) -> i32
+  ///       attributes {llvm.emit_c_interface, sym_visibility = "public"} {
+  ///     // 1. Alloca TensorBuffer structs on the stack
+  ///     // 2. For each input:  call hipdnn_ep_tensor_prepare_input, error-check
+  ///     // 3. For each output: call hipdnn_ep_tensor_prepare_output, error-check
+  ///     // 4. Build LLVM memref descriptors from TensorBuffer GPU/shape ptrs
+  ///     // 5. Call @main_graph(%state, %input_memrefs, %output_memrefs)
+  ///     // 6. For each output: call hipdnn_ep_tensor_finalize_output, error-check
+  ///     // 7. Free input TensorBuffers
+  ///     // On error: store error code, free inputs, return error
+  ///   }
   void generateInferenceCompute(ModuleOp module, IntegerAttr inputCount,
                                 ArrayAttr inputShapes,
                                 DenseI64ArrayAttr inputElementSizes,
@@ -796,6 +824,12 @@ private:
     LLVM::ReturnOp::create(builder, loc, errorCode);
   }
 
+  /// Generated IR example:
+  ///   llvm.func @inference_cleanup(%state: !llvm.ptr) -> i32
+  ///       attributes {llvm.emit_c_interface, sym_visibility = "public"} {
+  ///     %rc = llvm.call @hipdnn_ep_state_cleanup(%state)
+  ///     llvm.return %rc : i32
+  ///   }
   void generateInferenceCleanup(ModuleOp module) {
     OpBuilder builder(module.getContext());
     Location loc = module.getLoc();
