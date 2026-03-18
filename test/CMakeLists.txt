@@ -173,6 +173,11 @@ endif()
 
 # THEROCK_DIST and CMAKE_PREFIX_PATH are configured in root CMakeLists.txt
 
+# hip-config.cmake requires HIP_PLATFORM to be set before find_package(hip)
+if(NOT DEFINED HIP_PLATFORM)
+  set(HIP_PLATFORM "amd" CACHE STRING "HIP platform (amd or nvidia)")
+endif()
+
 find_package(hip QUIET)
 find_package(miopen QUIET)
 find_package(hipblaslt QUIET)
