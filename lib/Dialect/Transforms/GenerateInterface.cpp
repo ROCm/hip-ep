@@ -184,6 +184,65 @@ void generateInferenceGetMetadataJson(ModuleOp module) {
   LLVM::ReturnOp::create(builder, loc, addr);
 }
 
+/// Build an LLVM memref descriptor struct {ptr, ptr, offset, sizes, strides}
+/// from a TensorBuffer's GPU pointer and shape pointer.
+static Value buildMemrefDescriptor(OpBuilder &builder, Location loc,
+                                   Value gpuPtrRaw, Value shapePtr,
+                                   int64_t rank, Type ptrType, Type i64Type) {
+  Type gpuPtrType = LLVM::LLVMPointerType::get(builder.getContext(), 1);
+  Value gpuPtr =
+      LLVM::AddrSpaceCastOp::create(builder, loc, gpuPtrType, gpuPtrRaw);
+
+  Type sizeArrayType = LLVM::LLVMArrayType::get(i64Type, rank);
+  Type memrefType = LLVM::LLVMStructType::getLiteral(
+      builder.getContext(),
+      {gpuPtrType, gpuPtrType, i64Type, sizeArrayType, sizeArrayType});
+
+  Value desc = LLVM::UndefOp::create(builder, loc, memrefType);
+  desc = LLVM::InsertValueOp::create(builder, loc, desc, gpuPtr,
+                                     ArrayRef<int64_t>{0});
+  desc = LLVM::InsertValueOp::create(builder, loc, desc, gpuPtr,
+                                     ArrayRef<int64_t>{1});
+  Value zero = LLVM::ConstantOp::create(builder, loc, i64Type,
+                                        builder.getI64IntegerAttr(0));
+  desc = LLVM::InsertValueOp::create(builder, loc, desc, zero,
+                                     ArrayRef<int64_t>{2});
+
+  Value sizes = LLVM::UndefOp::create(builder, loc, sizeArrayType);
+  for (int64_t d = 0; d < rank; d++) {
+    Value idx = LLVM::ConstantOp::create(builder, loc, i64Type,
+                                         builder.getI64IntegerAttr(d));
+    Value dimPtr = LLVM::GEPOp::create(builder, loc, ptrType, ptrType,
+                                       shapePtr, ArrayRef<LLVM::GEPArg>{idx});
+    Value dimVal = LLVM::LoadOp::create(builder, loc, i64Type, dimPtr);
+    sizes = LLVM::InsertValueOp::create(builder, loc, sizes, dimVal,
+                                        ArrayRef<int64_t>{d});
+  }
+  desc = LLVM::InsertValueOp::create(builder, loc, desc, sizes,
+                                     ArrayRef<int64_t>{3});
+
+  Value strides = LLVM::UndefOp::create(builder, loc, sizeArrayType);
+  Value acc = LLVM::ConstantOp::create(builder, loc, i64Type,
+                                       builder.getI64IntegerAttr(1));
+  for (int64_t d = rank - 1; d >= 0; d--) {
+    strides = LLVM::InsertValueOp::create(builder, loc, strides, acc,
+                                          ArrayRef<int64_t>{d});
+    if (d > 0) {
+      Value idx = LLVM::ConstantOp::create(builder, loc, i64Type,
+                                           builder.getI64IntegerAttr(d));
+      Value dimPtr =
+          LLVM::GEPOp::create(builder, loc, ptrType, ptrType, shapePtr,
+                              ArrayRef<LLVM::GEPArg>{idx});
+      Value dimSize = LLVM::LoadOp::create(builder, loc, i64Type, dimPtr);
+      acc = LLVM::MulOp::create(builder, loc, acc, dimSize);
+    }
+  }
+  desc = LLVM::InsertValueOp::create(builder, loc, desc, strides,
+                                     ArrayRef<int64_t>{4});
+
+  return desc;
+}
+
 class GenerateInterfacePass
     : public PassWrapper<GenerateInterfacePass, OperationPass<ModuleOp>> {
 public:
@@ -251,20 +310,6 @@ public:
 
 private:
   mlir::hip::CompilationOptionsT compilationOptions_;
-
-  /// Returns LLVM struct type for memref: (ptr, ptr, i64, array<rank x i64>,
-  /// array<rank x i64>)
-  Type getMemRefStructType(OpBuilder &builder, int64_t rank,
-                           unsigned addrSpace) {
-    MLIRContext *ctx = builder.getContext();
-    Type ptrType = LLVM::LLVMPointerType::get(ctx, addrSpace);
-    Type i64Type = builder.getI64Type();
-    Type sizeArrayType = LLVM::LLVMArrayType::get(i64Type, rank);
-    Type strideArrayType = LLVM::LLVMArrayType::get(i64Type, rank);
-
-    return LLVM::LLVMStructType::getLiteral(
-        ctx, {ptrType, ptrType, i64Type, sizeArrayType, strideArrayType});
-  }
 
   struct RuntimeFuncSpec {
     llvm::StringRef name;
@@ -648,71 +693,20 @@ private:
 
     for (size_t i = 0; i < numInputs; i++) {
       int64_t rank = cast<DenseI64ArrayAttr>(inputShapes.getValue()[i]).size();
-      Type memrefType = getMemRefStructType(builder, rank, 1);
 
       Value bufferPtr = inputBuffers[i];
-
       Value gpuPtrRaw = LLVM::CallOp::create(builder, loc, getGpuPtrFunc,
                                              ValueRange{bufferPtr})
                             .getResult();
-
-      Type gpuPtrType = LLVM::LLVMPointerType::get(builder.getContext(), 1);
-      Value gpuPtr =
-          LLVM::AddrSpaceCastOp::create(builder, loc, gpuPtrType, gpuPtrRaw);
-
       Value shapePtr = LLVM::CallOp::create(builder, loc, getShapePtrFunc,
                                             ValueRange{bufferPtr})
                            .getResult();
 
-      Value memref = LLVM::UndefOp::create(builder, loc, memrefType);
+      Value memref = buildMemrefDescriptor(builder, loc, gpuPtrRaw, shapePtr,
+                                           rank, ptrType, i64Type);
 
-      memref = LLVM::InsertValueOp::create(builder, loc, memref, gpuPtr,
-                                           ArrayRef<int64_t>{0});
-
-      memref = LLVM::InsertValueOp::create(builder, loc, memref, gpuPtr,
-                                           ArrayRef<int64_t>{1});
-
-      Value c0_i64 = LLVM::ConstantOp::create(builder, loc, i64Type,
-                                              builder.getI64IntegerAttr(0));
-      memref = LLVM::InsertValueOp::create(builder, loc, memref, c0_i64,
-                                           ArrayRef<int64_t>{2});
-
-      Value sizesArray = LLVM::UndefOp::create(
-          builder, loc, LLVM::LLVMArrayType::get(i64Type, rank));
-      for (int64_t dim = 0; dim < rank; dim++) {
-        Value dimIndexVal = LLVM::ConstantOp::create(
-            builder, loc, i64Type, builder.getI64IntegerAttr(dim));
-        Value dimPtr =
-            LLVM::GEPOp::create(builder, loc, ptrType, ptrType, shapePtr,
-                                ArrayRef<LLVM::GEPArg>{dimIndexVal});
-        Value dimValue = LLVM::LoadOp::create(builder, loc, i64Type, dimPtr);
-        sizesArray = LLVM::InsertValueOp::create(
-            builder, loc, sizesArray, dimValue, ArrayRef<int64_t>{dim});
-      }
-      memref = LLVM::InsertValueOp::create(builder, loc, memref, sizesArray,
-                                           ArrayRef<int64_t>{3});
-
-      Value stridesArray = LLVM::UndefOp::create(
-          builder, loc, LLVM::LLVMArrayType::get(i64Type, rank));
-      Value strideAccum = c1_i64;
-      for (int64_t dim = rank - 1; dim >= 0; dim--) {
-        stridesArray = LLVM::InsertValueOp::create(
-            builder, loc, stridesArray, strideAccum, ArrayRef<int64_t>{dim});
-        if (dim > 0) {
-          Value dimIndexVal = LLVM::ConstantOp::create(
-              builder, loc, i64Type, builder.getI64IntegerAttr(dim));
-          Value dimPtr =
-              LLVM::GEPOp::create(builder, loc, ptrType, ptrType, shapePtr,
-                                  ArrayRef<LLVM::GEPArg>{dimIndexVal});
-          Value dimSize = LLVM::LoadOp::create(builder, loc, i64Type, dimPtr);
-          strideAccum = LLVM::MulOp::create(builder, loc, strideAccum, dimSize);
-        }
-      }
-      memref = LLVM::InsertValueOp::create(builder, loc, memref, stridesArray,
-                                           ArrayRef<int64_t>{4});
-
-      Value memrefPtr =
-          LLVM::AllocaOp::create(builder, loc, ptrType, memrefType, c1_i64, 0);
+      Value memrefPtr = LLVM::AllocaOp::create(builder, loc, ptrType,
+                                               memref.getType(), c1_i64, 0);
       LLVM::StoreOp::create(builder, loc, memref, memrefPtr);
 
       Value indexVal = LLVM::ConstantOp::create(builder, loc, i64Type,
@@ -721,9 +715,6 @@ private:
           LLVM::GEPOp::create(builder, loc, ptrType, ptrType, inputMemrefArray,
                               ArrayRef<LLVM::GEPArg>{indexVal});
       LLVM::StoreOp::create(builder, loc, memrefPtr, arraySlot);
-
-      llvm::errs() << "[GenerateInterface] Built input memref " << i
-                   << " using opaque TensorBuffer accessors\n";
     }
 
     Value numOutputsVal = LLVM::ConstantOp::create(
@@ -733,68 +724,20 @@ private:
 
     for (size_t i = 0; i < numOutputs; i++) {
       int64_t rank = cast<DenseI64ArrayAttr>(outputShapes.getValue()[i]).size();
-      Type memrefType = getMemRefStructType(builder, rank, 1);
 
       Value bufferPtr = outputBuffers[i];
-
       Value gpuPtrRaw = LLVM::CallOp::create(builder, loc, getGpuPtrFunc,
                                              ValueRange{bufferPtr})
                             .getResult();
-
-      Type gpuPtrType = LLVM::LLVMPointerType::get(builder.getContext(), 1);
-      Value gpuPtr =
-          LLVM::AddrSpaceCastOp::create(builder, loc, gpuPtrType, gpuPtrRaw);
-
       Value shapePtr = LLVM::CallOp::create(builder, loc, getShapePtrFunc,
                                             ValueRange{bufferPtr})
                            .getResult();
 
-      Value memref = LLVM::UndefOp::create(builder, loc, memrefType);
-      memref = LLVM::InsertValueOp::create(builder, loc, memref, gpuPtr,
-                                           ArrayRef<int64_t>{0});
-      memref = LLVM::InsertValueOp::create(builder, loc, memref, gpuPtr,
-                                           ArrayRef<int64_t>{1});
-      Value c0_i64 = LLVM::ConstantOp::create(builder, loc, i64Type,
-                                              builder.getI64IntegerAttr(0));
-      memref = LLVM::InsertValueOp::create(builder, loc, memref, c0_i64,
-                                           ArrayRef<int64_t>{2});
+      Value memref = buildMemrefDescriptor(builder, loc, gpuPtrRaw, shapePtr,
+                                           rank, ptrType, i64Type);
 
-      Value sizesArray = LLVM::UndefOp::create(
-          builder, loc, LLVM::LLVMArrayType::get(i64Type, rank));
-      for (int64_t dim = 0; dim < rank; dim++) {
-        Value dimIndexVal = LLVM::ConstantOp::create(
-            builder, loc, i64Type, builder.getI64IntegerAttr(dim));
-        Value dimPtr =
-            LLVM::GEPOp::create(builder, loc, ptrType, ptrType, shapePtr,
-                                ArrayRef<LLVM::GEPArg>{dimIndexVal});
-        Value dimValue = LLVM::LoadOp::create(builder, loc, i64Type, dimPtr);
-        sizesArray = LLVM::InsertValueOp::create(
-            builder, loc, sizesArray, dimValue, ArrayRef<int64_t>{dim});
-      }
-      memref = LLVM::InsertValueOp::create(builder, loc, memref, sizesArray,
-                                           ArrayRef<int64_t>{3});
-
-      Value stridesArray = LLVM::UndefOp::create(
-          builder, loc, LLVM::LLVMArrayType::get(i64Type, rank));
-      Value strideAccum = c1_i64;
-      for (int64_t dim = rank - 1; dim >= 0; dim--) {
-        stridesArray = LLVM::InsertValueOp::create(
-            builder, loc, stridesArray, strideAccum, ArrayRef<int64_t>{dim});
-        if (dim > 0) {
-          Value dimIndexVal = LLVM::ConstantOp::create(
-              builder, loc, i64Type, builder.getI64IntegerAttr(dim));
-          Value dimPtr =
-              LLVM::GEPOp::create(builder, loc, ptrType, ptrType, shapePtr,
-                                  ArrayRef<LLVM::GEPArg>{dimIndexVal});
-          Value dimSize = LLVM::LoadOp::create(builder, loc, i64Type, dimPtr);
-          strideAccum = LLVM::MulOp::create(builder, loc, strideAccum, dimSize);
-        }
-      }
-      memref = LLVM::InsertValueOp::create(builder, loc, memref, stridesArray,
-                                           ArrayRef<int64_t>{4});
-
-      Value memrefPtr =
-          LLVM::AllocaOp::create(builder, loc, ptrType, memrefType, c1_i64, 0);
+      Value memrefPtr = LLVM::AllocaOp::create(builder, loc, ptrType,
+                                               memref.getType(), c1_i64, 0);
       LLVM::StoreOp::create(builder, loc, memref, memrefPtr);
 
       Value indexVal = LLVM::ConstantOp::create(builder, loc, i64Type,
