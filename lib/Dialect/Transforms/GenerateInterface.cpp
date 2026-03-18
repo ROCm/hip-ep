@@ -243,6 +243,30 @@ static Value buildMemrefDescriptor(OpBuilder &builder, Location loc,
   return desc;
 }
 
+/// Emit a call to a runtime function and branch to errorBlock if it
+/// returns non-zero.  Leaves the builder at the start of a new
+/// continuation block.
+static void emitErrorCheckedCall(OpBuilder &builder, Location loc,
+                                 LLVM::LLVMFuncOp func, ValueRange args,
+                                 Value errorCodePtr, Block *errorBlock,
+                                 LLVM::LLVMFuncOp &parentFunc) {
+  Value ret = LLVM::CallOp::create(builder, loc, func, args).getResult();
+  Value zero = LLVM::ConstantOp::create(builder, loc, builder.getI32Type(),
+                                        builder.getI32IntegerAttr(0));
+  Value failed =
+      LLVM::ICmpOp::create(builder, loc, LLVM::ICmpPredicate::ne, ret, zero);
+
+  Block *continueBlock = parentFunc.addBlock();
+  Block *storeErrorBlock = parentFunc.addBlock();
+  LLVM::CondBrOp::create(builder, loc, failed, storeErrorBlock, continueBlock);
+
+  builder.setInsertionPointToStart(storeErrorBlock);
+  LLVM::StoreOp::create(builder, loc, ret, errorCodePtr);
+  LLVM::BrOp::create(builder, loc, errorBlock);
+
+  builder.setInsertionPointToStart(continueBlock);
+}
+
 class GenerateInterfacePass
     : public PassWrapper<GenerateInterfacePass, OperationPass<ModuleOp>> {
 public:
@@ -627,26 +651,10 @@ private:
           builder.getI64IntegerAttr(
               cast<DenseI64ArrayAttr>(inputShapes.getValue()[i]).size()));
 
-      Value retVal =
-          LLVM::CallOp::create(
-              builder, loc, prepareInputFunc,
-              ValueRange{state, inputsSpanPtr, indexVal, rankVal, bufferPtr})
-              .getResult();
-
-      Value failed = LLVM::ICmpOp::create(builder, loc, LLVM::ICmpPredicate::ne,
-                                          retVal, c0_i32);
-
-      Block *continueBlock = funcOp.addBlock();
-
-      Block *storeErrorBlock = funcOp.addBlock();
-      LLVM::CondBrOp::create(builder, loc, failed, storeErrorBlock,
-                             continueBlock);
-
-      builder.setInsertionPointToStart(storeErrorBlock);
-      LLVM::StoreOp::create(builder, loc, retVal, errorCodePtr);
-      LLVM::BrOp::create(builder, loc, errorCleanupBlock);
-
-      builder.setInsertionPointToStart(continueBlock);
+      emitErrorCheckedCall(
+          builder, loc, prepareInputFunc,
+          ValueRange{state, inputsSpanPtr, indexVal, rankVal, bufferPtr},
+          errorCodePtr, errorCleanupBlock, funcOp);
     }
 
     // Prepare all output tensors
@@ -663,26 +671,10 @@ private:
           builder.getI64IntegerAttr(
               cast<DenseI64ArrayAttr>(outputShapes.getValue()[i]).size()));
 
-      Value retVal =
-          LLVM::CallOp::create(
-              builder, loc, prepareOutputFunc,
-              ValueRange{state, outputsSpanPtr, indexVal, rankVal, bufferPtr})
-              .getResult();
-
-      Value failed = LLVM::ICmpOp::create(builder, loc, LLVM::ICmpPredicate::ne,
-                                          retVal, c0_i32);
-
-      Block *continueBlock = funcOp.addBlock();
-
-      Block *storeErrorBlock = funcOp.addBlock();
-      LLVM::CondBrOp::create(builder, loc, failed, storeErrorBlock,
-                             continueBlock);
-
-      builder.setInsertionPointToStart(storeErrorBlock);
-      LLVM::StoreOp::create(builder, loc, retVal, errorCodePtr);
-      LLVM::BrOp::create(builder, loc, errorCleanupBlock);
-
-      builder.setInsertionPointToStart(continueBlock);
+      emitErrorCheckedCall(
+          builder, loc, prepareOutputFunc,
+          ValueRange{state, outputsSpanPtr, indexVal, rankVal, bufferPtr},
+          errorCodePtr, errorCleanupBlock, funcOp);
     }
 
     // Build memref structs for @main call
@@ -756,21 +748,11 @@ private:
       COMPILER_DEBUG_LOG("[GenerateInterface] Warning: @main_graph not found\n");
       LLVM::BrOp::create(builder, loc, mainSuccessBlock);
     } else {
-      Value mainRet = LLVM::CallOp::create(builder, loc, mainFunc,
-                                           ValueRange{state, inputMemrefArray,
-                                                      outputMemrefArray})
-                          .getResult();
-
-      Value mainFailed = LLVM::ICmpOp::create(
-          builder, loc, LLVM::ICmpPredicate::ne, mainRet, c0_i32);
-
-      Block *storeMainErrorBlock = funcOp.addBlock();
-      LLVM::CondBrOp::create(builder, loc, mainFailed, storeMainErrorBlock,
-                             mainSuccessBlock);
-
-      builder.setInsertionPointToStart(storeMainErrorBlock);
-      LLVM::StoreOp::create(builder, loc, mainRet, errorCodePtr);
-      LLVM::BrOp::create(builder, loc, errorCleanupBlock);
+      emitErrorCheckedCall(builder, loc, mainFunc,
+                           ValueRange{state, inputMemrefArray,
+                                      outputMemrefArray},
+                           errorCodePtr, errorCleanupBlock, funcOp);
+      LLVM::BrOp::create(builder, loc, mainSuccessBlock);
     }
 
     // Finalize output tensors (D2H, sync, cleanup)
@@ -778,25 +760,9 @@ private:
 
     for (size_t i = 0; i < numOutputs; i++) {
       Value bufferPtr = outputBuffers[i];
-
-      Value retVal = LLVM::CallOp::create(builder, loc, finalizeOutputFunc,
-                                          ValueRange{state, bufferPtr})
-                         .getResult();
-
-      Value failed = LLVM::ICmpOp::create(builder, loc, LLVM::ICmpPredicate::ne,
-                                          retVal, c0_i32);
-
-      Block *continueBlock = funcOp.addBlock();
-
-      Block *storeErrorBlock = funcOp.addBlock();
-      LLVM::CondBrOp::create(builder, loc, failed, storeErrorBlock,
-                             continueBlock);
-
-      builder.setInsertionPointToStart(storeErrorBlock);
-      LLVM::StoreOp::create(builder, loc, retVal, errorCodePtr);
-      LLVM::BrOp::create(builder, loc, errorCleanupBlock);
-
-      builder.setInsertionPointToStart(continueBlock);
+      emitErrorCheckedCall(builder, loc, finalizeOutputFunc,
+                           ValueRange{state, bufferPtr}, errorCodePtr,
+                           errorCleanupBlock, funcOp);
     }
 
     // Free input tensors
