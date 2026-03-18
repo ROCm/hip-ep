@@ -155,7 +155,6 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
 
     # Always add root directory for public headers
     list(APPEND COMPILE_FLAGS "-I${CMAKE_CURRENT_SOURCE_DIR}")
-    list(APPEND COMPILE_FLAGS "-I${CMAKE_SOURCE_DIR}/include/hip/Runtime")
 
     # Add morphizen-foundation headers
     list(APPEND COMPILE_FLAGS "-I${MORPHIZEN_FOUNDATION_INCLUDE_DIR}")
@@ -200,7 +199,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
                 ${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE}
                 -o ${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_BC}
         DEPENDS ${SOURCE_FILE}
-                ${CMAKE_SOURCE_DIR}/include/hip/Runtime/hipdnn_ep_runtime.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/hipdnn_ep_runtime.h
                 ${CMAKE_BINARY_DIR}/schemas/model_metadata_generated.h
         COMMENT "Compiling ${SOURCE_FILE} to bitcode"
         VERBATIM
