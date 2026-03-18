@@ -1,27 +1,27 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+#include "debug_log.h"
 #include "hipdnn_ep_runtime.h"
 #include "runtime_types.h"
-#include "debug_log.h"
 
 #include <cstdio>
 #include <cstring>
 
 // Internal runtime state structure (must match state.cpp)
 struct RuntimeState {
-  void* stream;
-  void* miopen_handle;
-  void* hipblas_handle;
-  void** gpu_constants;
+  void *stream;
+  void *miopen_handle;
+  void *hipblas_handle;
+  void **gpu_constants;
   size_t num_constants;
 };
 
 // Element size is read from tensor_t.element_size (set by EP caller)
 
 // Helper function to check and log gcnArchName
-static void check_gcnarch(const char* location) {
+static void check_gcnarch(const char *location) {
   if (!hipdnn_ep_debug_enabled())
     return;
   hipDeviceProp_t prop;
@@ -37,7 +37,7 @@ static void check_gcnarch(const char* location) {
 
 // Helper: Calculate total size in bytes for a tensor
 // Returns 0 on error (overflow or invalid dimensions)
-static size_t calculateTensorSize(const int64_t* shape, size_t rank,
+static size_t calculateTensorSize(const int64_t *shape, size_t rank,
                                   size_t element_size) {
   if (rank == 0) {
     return element_size; // Rank-0 scalar: 1 element
@@ -74,36 +74,38 @@ static size_t calculateTensorSize(const int64_t* shape, size_t rank,
 }
 
 // Prepare input tensor: parse, validate, allocate GPU buffer, H2D transfer
-int hipdnn_ep_tensor_prepare_input(RuntimeState* state, span_t* inputs,
+int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
                                    size_t index, size_t expected_rank,
-                                   TensorBuffer* out_buffer) {
+                                   TensorBuffer *out_buffer) {
   check_gcnarch("BEFORE prepare_input");
 
   // VERIFICATION: Struct sizes
   RUNTIME_DEBUG_LOG("[Runtime DEBUG] === Struct Size Verification ===\n");
   RUNTIME_DEBUG_LOG("[Runtime DEBUG] sizeof(TensorBuffer) = %zu\n",
-          sizeof(TensorBuffer));
+                    sizeof(TensorBuffer));
   RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(TensorBuffer, gpu_ptr) = %zu\n",
-          offsetof(TensorBuffer, gpu_ptr));
+                    offsetof(TensorBuffer, gpu_ptr));
   RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(TensorBuffer, host_ptr) = %zu\n",
-          offsetof(TensorBuffer, host_ptr));
+                    offsetof(TensorBuffer, host_ptr));
   RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(TensorBuffer, shape_ptr) = %zu\n",
-          offsetof(TensorBuffer, shape_ptr));
+                    offsetof(TensorBuffer, shape_ptr));
   RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(TensorBuffer, rank) = %zu\n",
-          offsetof(TensorBuffer, rank));
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(TensorBuffer, size_bytes) = %zu\n",
-          offsetof(TensorBuffer, size_bytes));
+                    offsetof(TensorBuffer, rank));
+  RUNTIME_DEBUG_LOG(
+      "[Runtime DEBUG] offsetof(TensorBuffer, size_bytes) = %zu\n",
+      offsetof(TensorBuffer, size_bytes));
   RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(TensorBuffer, is_pooled) = %zu\n",
-          offsetof(TensorBuffer, is_pooled));
+                    offsetof(TensorBuffer, is_pooled));
 
   // VERIFICATION: tensor_t struct
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] sizeof(tensor_t) = %zu\n", sizeof(tensor_t));
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] sizeof(tensor_t) = %zu\n",
+                    sizeof(tensor_t));
   RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(tensor_t, data) = %zu\n",
-          offsetof(tensor_t, data));
+                    offsetof(tensor_t, data));
   RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(tensor_t, shape) = %zu\n",
-          offsetof(tensor_t, shape));
+                    offsetof(tensor_t, shape));
   RUNTIME_DEBUG_LOG("[Runtime DEBUG] offsetof(tensor_t, rank) = %zu\n",
-          offsetof(tensor_t, rank));
+                    offsetof(tensor_t, rank));
 
   // Validate arguments
   if (!state) {
@@ -120,8 +122,9 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState* state, span_t* inputs,
   }
 
   // VERIFICATION: span_t access
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] inputs pointer = %p\n", (void*)inputs);
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] inputs->data = %p\n", (void*)inputs->data);
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] inputs pointer = %p\n", (void *)inputs);
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] inputs->data = %p\n",
+                    (void *)inputs->data);
   RUNTIME_DEBUG_LOG("[Runtime DEBUG] inputs->count = %zu\n", inputs->count);
 
   // Validate index bounds
@@ -134,24 +137,26 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState* state, span_t* inputs,
   }
 
   // Extract tensor from span
-  tensor_t* tensor = &inputs->data[index];
+  tensor_t *tensor = &inputs->data[index];
 
   // DUMP: Raw memory of tensor_t struct
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] tensor_t struct memory dump (address=%p):\n",
-          (void*)tensor);
-  unsigned char* bytes = (unsigned char*)tensor;
+  RUNTIME_DEBUG_LOG(
+      "[Runtime DEBUG] tensor_t struct memory dump (address=%p):\n",
+      (void *)tensor);
+  unsigned char *bytes = (unsigned char *)tensor;
   for (size_t i = 0; i < sizeof(tensor_t); i++) {
     RUNTIME_DEBUG_LOG("  [%02zu] = 0x%02x\n", i, bytes[i]);
   }
 
   // DUMP: Field values
   RUNTIME_DEBUG_LOG("[Runtime DEBUG] tensor->data = %p\n", tensor->data);
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] tensor->shape = %p\n", (void*)tensor->shape);
+  RUNTIME_DEBUG_LOG("[Runtime DEBUG] tensor->shape = %p\n",
+                    (void *)tensor->shape);
   RUNTIME_DEBUG_LOG("[Runtime DEBUG] tensor->rank = %zu\n", tensor->rank);
 
   // Validate field access doesn't corrupt memory (re-read test)
-  void* data_before = tensor->data;
-  int64_t* shape_before = tensor->shape;
+  void *data_before = tensor->data;
+  int64_t *shape_before = tensor->shape;
   size_t rank_before = tensor->rank;
 
   // Re-read and compare
@@ -159,8 +164,8 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState* state, span_t* inputs,
       tensor->rank != rank_before) {
     fprintf(stderr, "[Runtime ERROR] Struct fields changed on re-read!\n");
     fprintf(stderr, "  data: %p -> %p\n", data_before, tensor->data);
-    fprintf(stderr, "  shape: %p -> %p\n", (void*)shape_before,
-            (void*)tensor->shape);
+    fprintf(stderr, "  shape: %p -> %p\n", (void *)shape_before,
+            (void *)tensor->shape);
     fprintf(stderr, "  rank: %zu -> %zu\n", rank_before, tensor->rank);
     return HIPDNN_EP_ERR_NULL_POINTER; // Use generic error code
   }
@@ -205,12 +210,13 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState* state, span_t* inputs,
     return HIPDNN_EP_ERR_INVALID_DIMENSION;
   }
 
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] prepare_input[%zu]: rank=%zu element_size=%zu "
-          "size_bytes=%zu\n",
-          index, tensor->rank, element_size, size_bytes);
+  RUNTIME_DEBUG_LOG(
+      "[Runtime DEBUG] prepare_input[%zu]: rank=%zu element_size=%zu "
+      "size_bytes=%zu\n",
+      index, tensor->rank, element_size, size_bytes);
 
   // Allocate GPU buffer
-  void* gpu_ptr = nullptr;
+  void *gpu_ptr = nullptr;
   if (hipMalloc(&gpu_ptr, size_bytes) != hipSuccess) {
     fprintf(stderr,
             "hipdnn_ep_tensor_prepare_input: failed to allocate %zu bytes\n",
@@ -239,9 +245,9 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState* state, span_t* inputs,
 }
 
 // Prepare output tensor: parse, validate, allocate GPU buffer (no H2D)
-int hipdnn_ep_tensor_prepare_output(RuntimeState* state, span_t* outputs,
+int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
                                     size_t index, size_t expected_rank,
-                                    TensorBuffer* out_buffer) {
+                                    TensorBuffer *out_buffer) {
   // Validate arguments
   if (!state) {
     fprintf(stderr, "hipdnn_ep_tensor_prepare_output: null state\n");
@@ -266,7 +272,7 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState* state, span_t* outputs,
   }
 
   // Extract tensor from span
-  tensor_t* tensor = &outputs->data[index];
+  tensor_t *tensor = &outputs->data[index];
 
   // Validate tensor pointers
   if (!tensor->data) {
@@ -308,12 +314,13 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState* state, span_t* outputs,
     return HIPDNN_EP_ERR_INVALID_DIMENSION;
   }
 
-  RUNTIME_DEBUG_LOG("[Runtime DEBUG] prepare_output[%zu]: rank=%zu element_size=%zu "
-          "size_bytes=%zu\n",
-          index, tensor->rank, element_size, size_bytes);
+  RUNTIME_DEBUG_LOG(
+      "[Runtime DEBUG] prepare_output[%zu]: rank=%zu element_size=%zu "
+      "size_bytes=%zu\n",
+      index, tensor->rank, element_size, size_bytes);
 
   // Allocate GPU buffer
-  void* gpu_ptr = nullptr;
+  void *gpu_ptr = nullptr;
   if (hipMalloc(&gpu_ptr, size_bytes) != hipSuccess) {
     fprintf(stderr,
             "hipdnn_ep_tensor_prepare_output: failed to allocate %zu bytes\n",
@@ -333,8 +340,8 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState* state, span_t* outputs,
 }
 
 // Finalize output tensor: D2H transfer, sync, release buffer
-int hipdnn_ep_tensor_finalize_output(RuntimeState* state,
-                                     TensorBuffer* buffer) {
+int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
+                                     TensorBuffer *buffer) {
   if (!state) {
     fprintf(stderr, "hipdnn_ep_tensor_finalize_output: null state\n");
     return HIPDNN_EP_ERR_NULL_POINTER;
@@ -375,7 +382,7 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState* state,
 }
 
 // Release input tensor buffer (no D2H transfer needed)
-void hipdnn_ep_tensor_free_input(RuntimeState* state, TensorBuffer* buffer) {
+void hipdnn_ep_tensor_free_input(RuntimeState *state, TensorBuffer *buffer) {
   if (!buffer) {
     fprintf(stderr, "hipdnn_ep_tensor_free_input: null buffer\n");
     return;
@@ -392,22 +399,22 @@ void hipdnn_ep_tensor_free_input(RuntimeState* state, TensorBuffer* buffer) {
 // TensorBuffer Field Accessors (Opaque Pattern)
 //==============================================================================
 
-void* hipdnn_ep_tensor_buffer_get_gpu_ptr(TensorBuffer* buffer) {
+void *hipdnn_ep_tensor_buffer_get_gpu_ptr(TensorBuffer *buffer) {
   return buffer ? buffer->gpu_ptr : nullptr;
 }
 
-void* hipdnn_ep_tensor_buffer_get_host_ptr(TensorBuffer* buffer) {
+void *hipdnn_ep_tensor_buffer_get_host_ptr(TensorBuffer *buffer) {
   return buffer ? buffer->host_ptr : nullptr;
 }
 
-int64_t* hipdnn_ep_tensor_buffer_get_shape_ptr(TensorBuffer* buffer) {
+int64_t *hipdnn_ep_tensor_buffer_get_shape_ptr(TensorBuffer *buffer) {
   return buffer ? buffer->shape_ptr : nullptr;
 }
 
-size_t hipdnn_ep_tensor_buffer_get_rank(TensorBuffer* buffer) {
+size_t hipdnn_ep_tensor_buffer_get_rank(TensorBuffer *buffer) {
   return buffer ? buffer->rank : 0;
 }
 
-size_t hipdnn_ep_tensor_buffer_get_size_bytes(TensorBuffer* buffer) {
+size_t hipdnn_ep_tensor_buffer_get_size_bytes(TensorBuffer *buffer) {
   return buffer ? buffer->size_bytes : 0;
 }
