@@ -4,12 +4,15 @@
 // onnx.Constant ops and no FileSystem is provided. Models with constants
 // onnx.Constant ops and no FileSystem is provided (troubleshooting mode).
 
-// CHECK: Wrote constant
+// CHECK: llvm.mlir.global private constant @__constant_
+// CHECK: llvm.func @inference_init
+// CHECK: llvm.func @inference_compute
+// CHECK-NOT: onnx.Constant
 module {
   func.func @main_graph(%arg0: tensor<1x128x4096xf16> {onnx.name = "/model/embed_tokens/Gather/output_0"}, %arg1: tensor<1x128x4096xf16> {onnx.name = "/model/layers.0/attn/o_proj/MatMul/output_0"}) -> (tensor<1x128x4096xf16> {onnx.name = "/model/layers.0/post_attention_layernorm/output_0"}, tensor<1x128x4096xf16> {onnx.name = "/model/layers.0/post_attention_layernorm/output_3"}) {
-    %0 = onnx.Constant dense<1.000000e+00> : tensor<4096xf16>
+    %0 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<4096xf16>} : () -> tensor<4096xf16>
     %1:4 = "onnx.Custom"(%arg0, %arg1, %0) <{function_name = "SkipSimplifiedLayerNormalization"}> {domain_name = "com.microsoft", epsilon = 9.99999974E-6 : f32, onnx_node_name = "/model/layers.0/post_attention_layernorm/SkipLayerNorm"} : (tensor<1x128x4096xf16>, tensor<1x128x4096xf16>, tensor<4096xf16>) -> (tensor<1x128x4096xf16>, none, none, tensor<1x128x4096xf16>)
-    onnx.Return %1#0, %1#3 : tensor<1x128x4096xf16>, tensor<1x128x4096xf16>
+    "onnx.Return"(%1#0, %1#3) : (tensor<1x128x4096xf16>, tensor<1x128x4096xf16>) -> ()
   }
   "onnx.EntryPoint"() <{func = @main_graph}> : () -> ()
 }

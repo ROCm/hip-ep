@@ -73,6 +73,15 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     GatherOp::attachInterface<HipDstBufferizableModel<GatherOp>>(*ctx);
     SiluOp::attachInterface<HipDstBufferizableModel<SiluOp>>(*ctx);
     GqaOp::attachInterface<HipDstBufferizableModel<GqaOp>>(*ctx);
+    ConvOp::attachInterface<HipDstBufferizableModel<ConvOp>>(*ctx);
+    SigmoidOp::attachInterface<HipDstBufferizableModel<SigmoidOp>>(*ctx);
+    SubOp::attachInterface<HipDstBufferizableModel<SubOp>>(*ctx);
+    CastOp::attachInterface<HipDstBufferizableModel<CastOp>>(*ctx);
+    ReduceSumOp::attachInterface<HipDstBufferizableModel<ReduceSumOp>>(*ctx);
+    ReluOp::attachInterface<HipDstBufferizableModel<ReluOp>>(*ctx);
+    GemmOp::attachInterface<HipDstBufferizableModel<GemmOp>>(*ctx);
+    AvgPoolOp::attachInterface<HipDstBufferizableModel<AvgPoolOp>>(*ctx);
+    MaxPoolOp::attachInterface<HipDstBufferizableModel<MaxPoolOp>>(*ctx);
   });
 }
 

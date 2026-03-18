@@ -4,14 +4,17 @@
 // onnx.Constant ops and no FileSystem is provided. Models with constants
 // onnx.Constant ops and no FileSystem is provided (troubleshooting mode).
 
-// CHECK: Wrote constant
+// CHECK: llvm.mlir.global private constant @__constant_
+// CHECK: llvm.func @inference_init
+// CHECK: llvm.func @inference_compute
+// CHECK-NOT: onnx.Constant
 module {
   func.func @main_graph(%arg0: tensor<1x3x224x224xf32> {onnx.name = "input"}) -> (tensor<1x64x112x112xf32> {onnx.name = "output"}) attributes {onnx.graph.name = "resent50_by_morphizen"} {
     %0 = "onnx.NoValue"() <{value}> : () -> none
-    %1 = onnx.Constant dense<1.000000e+00> : tensor<64x3x3x3xf32>
-    %2 = onnx.Constant dense<5.000000e-01> : tensor<64xf32>
-    %3 = onnx.Constant dense<2.000000e+00> : tensor<64x64x3x3xf32>
-    %4 = onnx.Constant dense<1.000000e-01> : tensor<64xf32>
+    %1 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<64x3x3x3xf32>} : () -> tensor<64x3x3x3xf32>
+    %2 = "onnx.Constant"() {value = dense<5.000000e-01> : tensor<64xf32>} : () -> tensor<64xf32>
+    %3 = "onnx.Constant"() {value = dense<2.000000e+00> : tensor<64x64x3x3xf32>} : () -> tensor<64x64x3x3xf32>
+    %4 = "onnx.Constant"() {value = dense<1.000000e-01> : tensor<64xf32>} : () -> tensor<64xf32>
     %5 = "onnx.Conv"(%arg0, %1, %2) <{auto_pad = "NOTSET", dilations = [1, 1], group = 1 : si64, kernel_shape = [3, 3], pads = [1, 1, 1, 1], strides = [1, 1]}> {node.outputs = ["conv1_out"], onnx_node_name = ""} : (tensor<1x3x224x224xf32>, tensor<64x3x3x3xf32>, tensor<64xf32>) -> tensor<1x64x224x224xf32>
     %6 = "onnx.Relu"(%5) {node.outputs = ["relu1_out"], onnx_node_name = ""} : (tensor<1x64x224x224xf32>) -> tensor<1x64x224x224xf32>
     %7 = "onnx.Conv"(%6, %3, %4) <{auto_pad = "NOTSET", dilations = [1, 1], group = 1 : si64, kernel_shape = [3, 3], pads = [1, 1, 1, 1], strides = [2, 2]}> {node.outputs = ["conv2_out"], onnx_node_name = ""} : (tensor<1x64x224x224xf32>, tensor<64x64x3x3xf32>, tensor<64xf32>) -> tensor<1x64x112x112xf32>

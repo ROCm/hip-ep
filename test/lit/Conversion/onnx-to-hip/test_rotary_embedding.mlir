@@ -23,7 +23,7 @@ module {
 // CHECK-SAME: !hip.context
 // CHECK-SAME: tensor<1x128x4096xf16>
 // CHECK: tensor.empty()
-// CHECK: hip.rotary_embedding
+// CHECK: hip.rope
 // CHECK-SAME: interleaved = 0
 // CHECK-SAME: num_heads = 32
 // CHECK-SAME: rotary_embedding_dim = 128

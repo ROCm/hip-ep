@@ -583,5 +583,57 @@ void GqaOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+//===----------------------------------------------------------------------===//
+// ReluOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ReluOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void ReluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// GemmOp: ins(A, B, C), outs(Y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GemmOp::getDpsInitsMutable() { return getYMutable(); }
+
+void GemmOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// AvgPoolOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange AvgPoolOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void AvgPoolOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// MaxPoolOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MaxPoolOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void MaxPoolOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
 #define GET_OP_CLASSES
 #include "hip/Dialect/IR/HipOps.cpp.inc"

@@ -593,17 +593,15 @@ private:
       return failure();
     }
 
-    // Verify @main_graph signature
-    auto mainType = mainFunc.getFunctionType();
-    if (mainType.getNumParams() != 3 || mainType.getParamType(0) != ptrType ||
-        mainType.getParamType(1) != ptrType ||
-        mainType.getParamType(2) != ptrType ||
-        mainType.getReturnType() != i32Type) {
-      COMPILER_DEBUG_LOG(
-          "[GenerateInterface] @main_graph has wrong signature.\n"
-          << "Expected: (ptr, ptr, ptr) -> i32\n");
-      return failure();
-    }
+    // Accept @main_graph with any signature produced by HipToLLVM.
+    // The function may have the expanded memref-descriptor form
+    // (ctx, alloc, aligned, offset, sizes..., strides..., ...) rather than
+    // the legacy (ptr, ptr, ptr) -> i32 form.  generateInferenceCompute
+    // will build the correct argument list by extracting fields from
+    // the memref structs it already constructs.
+    (void)ptrType;
+    (void)i32Type;
+    (void)i64Type;
 
     // 2. Check all 4 metadata attributes exist
     if (!module->getAttr("hipdnn.input_count")) {
@@ -684,21 +682,12 @@ private:
     auto bufferCountAttr =
         module->getAttrOfType<IntegerAttr>("hipdnn.buffer_count");
 
-    if (!poolSizeAttr || !bufferOffsetsAttr || !bufferCountAttr) {
-      COMPILER_DEBUG_LOG(
-          "[GenerateInterface] FATAL: memory pool attributes missing.\n"
-          << "  hipdnn.pool_size: " << (poolSizeAttr ? "present" : "MISSING")
-          << "\n"
-          << "  hipdnn.buffer_offsets: "
-          << (bufferOffsetsAttr ? "present" : "MISSING") << "\n"
-          << "  hipdnn.buffer_count: "
-          << (bufferCountAttr ? "present" : "MISSING") << "\n"
-          << "  Ensure MemoryPoolingPass runs before GenerateInterface.\n");
-      signalPassFailure();
-      return;
-    }
+    // Buffer offsets and count are optional — if absent, pool is managed at
+    // runtime via hip.get_pool / hipdnn_ep_get_pool_base (no static offsets).
+    // Only attempt pool_init when all three attributes are present and pool_size > 0.
+    bool hasPoolAttrs = poolSizeAttr && bufferOffsetsAttr && bufferCountAttr;
 
-    if (poolSizeAttr.getInt() > 0) {
+    if (hasPoolAttrs && poolSizeAttr.getInt() > 0) {
       // Initialize memory pool
       size_t poolSize = poolSizeAttr.getInt();
       size_t numBuffers = bufferCountAttr.getInt();
@@ -972,6 +961,11 @@ private:
     // Since different tensors may have different ranks, we can't use a
     // homogeneous array. Use array of pointers instead.
 
+    // Track memref struct values and ranks for each tensor so we can build
+    // the expanded argument list when calling @main_graph.
+    SmallVector<Value> allMemrefStructs;   // one per tensor (inputs then outs)
+    SmallVector<int64_t> allMemrefRanks;   // corresponding ranks
+
     // Allocate array of pointers for input memrefs
     Value numInputsVal = builder.create<LLVM::ConstantOp>(
         loc, i64Type, builder.getI64IntegerAttr(numInputs));
@@ -1055,6 +1049,10 @@ private:
       }
       memref = builder.create<LLVM::InsertValueOp>(loc, memref, stridesArray,
                                                    ArrayRef<int64_t>{4});
+
+      // Save for expanded @main_graph call
+      allMemrefStructs.push_back(memref);
+      allMemrefRanks.push_back(rank);
 
       // Allocate space for this memref on stack
       Value memrefPtr =
@@ -1149,6 +1147,10 @@ private:
       memref = builder.create<LLVM::InsertValueOp>(loc, memref, stridesArray,
                                                    ArrayRef<int64_t>{4});
 
+      // Save for expanded @main_graph call
+      allMemrefStructs.push_back(memref);
+      allMemrefRanks.push_back(rank);
+
       Value memrefPtr =
           builder.create<LLVM::AllocaOp>(loc, ptrType, memrefType, c1_i64, 0);
       builder.create<LLVM::StoreOp>(loc, memref, memrefPtr);
@@ -1172,24 +1174,70 @@ private:
           "[GenerateInterface] Warning: @main_graph not found\n");
       builder.create<LLVM::BrOp>(loc, mainSuccessBlock);
     } else {
-      Value mainRet =
-          builder
-              .create<LLVM::CallOp>(
-                  loc, mainFunc,
-                  ValueRange{state, inputMemrefArray, outputMemrefArray})
-              .getResult();
+      // Build expanded argument list: ctx + expanded memref descriptors.
+      // Each memref struct (ptr, ptr, i64, [rank x i64], [rank x i64]) is
+      // unpacked into individual LLVM values in the order expected by the
+      // HipToLLVM-lowered @main_graph.
+      SmallVector<Value> mainArgs;
+      mainArgs.push_back(state); // context ptr (arg0)
 
-      // Check for error
-      Value mainFailed = builder.create<LLVM::ICmpOp>(
-          loc, LLVM::ICmpPredicate::ne, mainRet, c0_i32);
+      // @main_graph expects all pointers in address space 0 (plain !llvm.ptr).
+      // The memref structs built above use GPU address space 1 pointers.
+      // Cast them to address space 0 before calling @main_graph.
+      Type defaultPtrType = LLVM::LLVMPointerType::get(builder.getContext(), 0);
 
-      Block *storeMainErrorBlock = funcOp.addBlock();
-      builder.create<LLVM::CondBrOp>(loc, mainFailed, storeMainErrorBlock,
-                                     mainSuccessBlock);
+      auto castToAddrSpace0 = [&](Value v) -> Value {
+        if (isa<LLVM::LLVMPointerType>(v.getType()) &&
+            cast<LLVM::LLVMPointerType>(v.getType()).getAddressSpace() != 0)
+          return builder.create<LLVM::AddrSpaceCastOp>(loc, defaultPtrType, v);
+        return v;
+      };
 
-      builder.setInsertionPointToStart(storeMainErrorBlock);
-      builder.create<LLVM::StoreOp>(loc, mainRet, errorCodePtr);
-      builder.create<LLVM::BrOp>(loc, errorCleanupBlock);
+      for (size_t mi = 0; mi < allMemrefStructs.size(); mi++) {
+        int64_t mrank = allMemrefRanks[mi];
+        Value ms = allMemrefStructs[mi];
+        // alloc_ptr (field 0)
+        mainArgs.push_back(castToAddrSpace0(
+            builder.create<LLVM::ExtractValueOp>(loc, ms, ArrayRef<int64_t>{0})));
+        // aligned_ptr (field 1)
+        mainArgs.push_back(castToAddrSpace0(
+            builder.create<LLVM::ExtractValueOp>(loc, ms, ArrayRef<int64_t>{1})));
+        // offset (field 2)
+        mainArgs.push_back(
+            builder.create<LLVM::ExtractValueOp>(loc, ms, ArrayRef<int64_t>{2}));
+        // sizes (field 3)
+        for (int64_t dim = 0; dim < mrank; dim++)
+          mainArgs.push_back(
+              builder.create<LLVM::ExtractValueOp>(loc, ms,
+                                                   ArrayRef<int64_t>{3, dim}));
+        // strides (field 4)
+        for (int64_t dim = 0; dim < mrank; dim++)
+          mainArgs.push_back(
+              builder.create<LLVM::ExtractValueOp>(loc, ms,
+                                                   ArrayRef<int64_t>{4, dim}));
+      }
+
+      auto mainFuncType = mainFunc.getFunctionType();
+      bool mainReturnsI32 =
+          !isa<LLVM::LLVMVoidType>(mainFuncType.getReturnType());
+      if (mainReturnsI32) {
+        Value mainRet =
+            builder.create<LLVM::CallOp>(loc, mainFunc, mainArgs).getResult();
+
+        Value mainFailed = builder.create<LLVM::ICmpOp>(
+            loc, LLVM::ICmpPredicate::ne, mainRet, c0_i32);
+
+        Block *storeMainErrorBlock = funcOp.addBlock();
+        builder.create<LLVM::CondBrOp>(loc, mainFailed, storeMainErrorBlock,
+                                       mainSuccessBlock);
+        builder.setInsertionPointToStart(storeMainErrorBlock);
+        builder.create<LLVM::StoreOp>(loc, mainRet, errorCodePtr);
+        builder.create<LLVM::BrOp>(loc, errorCleanupBlock);
+      } else {
+        // @main_graph is void — call and always succeed
+        builder.create<LLVM::CallOp>(loc, mainFunc, mainArgs);
+        builder.create<LLVM::BrOp>(loc, mainSuccessBlock);
+      }
     }
 
     // ========================================================================

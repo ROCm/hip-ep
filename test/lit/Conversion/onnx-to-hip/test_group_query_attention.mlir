@@ -4,7 +4,7 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify com.microsoft.GroupQueryAttention (via onnx.Custom) is correctly
-// lowered to hip.group_query_attention operation in tensor-first mode.
+// lowered to hip.gqa operation in tensor-first mode.
 //
 // This test validates:
 // - Custom ONNX op matching by function_name and domain_name
@@ -54,7 +54,7 @@ module {
     // CHECK: tensor.empty() : tensor<1x1x4096xf16>
     // CHECK: tensor.empty() : tensor<1x8x128x128xf16>
     // CHECK: tensor.empty() : tensor<1x8x128x128xf16>
-    // CHECK: hip.group_query_attention
+    // CHECK: hip.gqa
     // CHECK-SAME: kv_num_heads = 8
     // CHECK-SAME: num_heads = 32
     // CHECK-NOT: hip.alloc

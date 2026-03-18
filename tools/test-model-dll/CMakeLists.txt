@@ -17,8 +17,9 @@ target_link_libraries(test-model-dll
 )
 
 target_include_directories(test-model-dll
-  PRIVATE
-  ${CMAKE_SOURCE_DIR}/include   # For hip/Support/DiskFileSystem.h
+  BEFORE PRIVATE
+  ${CMAKE_SOURCE_DIR}/include   # For hip/Support/DiskFileSystem.h (must precede local/include)
+  ${CMAKE_SOURCE_DIR}/3rd-party/morphizen/morphizen-foundation/include  # For morphizen-foundation/file_io.hpp
 )
 
 # Install target

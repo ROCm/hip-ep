@@ -172,14 +172,20 @@ bool DLLLinker::linkDLL_Windows(const std::string &objectFile,
 
   // Add Windows system libraries (C Runtime, entry point, etc.)
   // These provide malloc, free, printf, _DllMainCRTStartup, etc.
-  // EXPERIMENTAL: Use DYNAMIC CRT (/MDd) to allow HIP runtime state sharing
-  // between EXE and DLL. Static CRT (/MTd) creates isolated CRT instances.
+  // Use DYNAMIC CRT (/MD or /MDd) to allow HIP runtime state sharing
+  // between EXE and DLL. Static CRT (/MT) creates isolated CRT instances.
   // See: THEROCK_DLL_BUG_ANALYSIS.md for details
+#ifdef NDEBUG
+  argStrings.push_back("msvcrt.lib");    // MSVC Runtime (Dynamic, Release)
+  argStrings.push_back("ucrt.lib");      // Universal CRT (Dynamic, Release)
+  argStrings.push_back("vcruntime.lib"); // VC Runtime (Dynamic, Release)
+#else
   argStrings.push_back(
       "msvcrtd.lib"); // MSVC Runtime (Dynamic, Debug) - replaces libcmtd.lib
   argStrings.push_back(
       "ucrtd.lib"); // Universal CRT (Dynamic, Debug) - replaces libucrtd.lib
   argStrings.push_back("vcruntimed.lib"); // VC Runtime (Dynamic, Debug)
+#endif
   argStrings.push_back("oldnames.lib");   // Compatibility names
   argStrings.push_back("kernel32.lib");   // Windows kernel
   argStrings.push_back("user32.lib");     // Windows user API

@@ -3,7 +3,7 @@
 // Test GroupQueryAttention E2E full pipeline from real Llama-3.1-8B decode step
 // This IR was imported from GroupQueryAttention_fix_decode.onnx via onnx-mlir
 // Verifies the complete morphizen-pipeline:
-// 1. convert-onnx-to-hip: ONNX Custom op → hip.group_query_attention
+// 1. convert-onnx-to-hip: ONNX Custom op → hip.gqa
 // 2. canonicalize: Simplify redundant operations
 // 3. memory-pooling: Pool buffers into single allocation (if any)
 // 4. convert-hip-to-llvm: HIP ops → LLVM runtime calls
@@ -13,7 +13,7 @@
 // CHECK-SAME: hipdnn.input_count = 7
 // CHECK-SAME: hipdnn.output_count = 3
 // CHECK: llvm.func @wrap_group_query_attention
-// CHECK: llvm.func private @main_graph(%{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr) -> i32
+// CHECK: llvm.func @main_graph(
 // CHECK: llvm.call @wrap_group_query_attention
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
@@ -26,7 +26,7 @@ module {
     %0 = "onnx.NoValue"() <{value}> : () -> none
     %1 = "onnx.NoValue"() <{value}> : () -> none
     %2:3 = "onnx.Custom"(%arg0, %arg1, %arg2, %arg3, %arg4, %arg5, %arg6, %0, %1) <{function_name = "GroupQueryAttention"}> {do_rotary = 0 : si64, domain_name = "com.microsoft", kv_num_heads = 8 : si64, num_heads = 32 : si64, onnx_node_name = "/model/layers.0/attn/GroupQueryAttention", rotary_interleaved = 0 : si64, scale = 0.0883883461 : f32, softcap = 0.000000e+00 : f32} : (tensor<1x1x4096xf16>, tensor<1x1x1024xf16>, tensor<1x1x1024xf16>, tensor<1x8x127x128xf16>, tensor<1x8x127x128xf16>, tensor<1x1xi32>, tensor<i32>, none, none) -> (tensor<1x1x4096xf16>, tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>)
-    onnx.Return %2#0, %2#1, %2#2 : tensor<1x1x4096xf16>, tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>
+    "onnx.Return"(%2#0, %2#1, %2#2) : (tensor<1x1x4096xf16>, tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>) -> ()
   }
   "onnx.EntryPoint"() <{func = @main_graph}> : () -> ()
 }

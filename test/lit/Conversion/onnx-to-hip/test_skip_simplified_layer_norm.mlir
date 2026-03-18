@@ -12,7 +12,7 @@ module {
     } : (tensor<1x128x4096xf16>, tensor<1x128x4096xf16>,
          tensor<4096xf16>)
         -> (tensor<1x128x4096xf16>, tensor<1x128x4096xf16>)
-    onnx.Return %output, %skip_output : tensor<1x128x4096xf16>, tensor<1x128x4096xf16>
+    "onnx.Return"(%output, %skip_output) : (tensor<1x128x4096xf16>, tensor<1x128x4096xf16>) -> ()
   }
   "onnx.EntryPoint"() <{func = @main_graph}> : () -> ()
 }
@@ -22,6 +22,6 @@ module {
 // CHECK-SAME: tensor<1x128x4096xf16>
 // CHECK: tensor.empty() : tensor<1x128x4096xf16>
 // CHECK: tensor.empty() : tensor<1x128x4096xf16>
-// CHECK: hip.skip_simplified_layer_norm
+// CHECK: hip.skip_rms_norm
 // CHECK-SAME: epsilon = 9.99999974E-6
 // CHECK-NOT: hip.alloc

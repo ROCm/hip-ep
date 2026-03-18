@@ -4,13 +4,14 @@
 //===----------------------------------------------------------------------===//
 // Pipeline test: module metadata without @main_graph.
 //
-// Verifies that the pass emits an error when @main_graph is absent, since
-// our pipeline always expects it.
+// Verifies that the pass succeeds gracefully when @main_graph is absent —
+// metadata generation is skipped (no error).  This allows single-function
+// unit tests and partial-pipeline tests that do not carry @main_graph.
 //===----------------------------------------------------------------------===//
 
-// RUN: not hip-mlir-opt --convert-onnx-to-hip %s 2>&1 | FileCheck %s
+// RUN: hip-mlir-opt --convert-onnx-to-hip %s | FileCheck %s
 
-// CHECK: error: expected @main_graph function for metadata generation
+// CHECK: func.func @other_func
 
 module {
   func.func @other_func(%arg0: tensor<2x4xf32>) -> tensor<2x4xf32> {

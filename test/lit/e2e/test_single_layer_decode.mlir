@@ -4,23 +4,26 @@
 // onnx.Constant ops and no FileSystem is provided. Models with constants
 // onnx.Constant ops and no FileSystem is provided (troubleshooting mode).
 
-// CHECK: Wrote constant
+// CHECK: llvm.mlir.global private constant @__constant_
+// CHECK: llvm.func @inference_init
+// CHECK: llvm.func @inference_compute
+// CHECK-NOT: onnx.Constant
 module {
   func.func @main_graph(%arg0: tensor<1x1xi64> {onnx.name = "input_ids"}, %arg1: tensor<1x128xi64> {onnx.name = "attention_mask"}, %arg2: tensor<1x1xi64> {onnx.name = "position_ids"}, %arg3: tensor<1x8x127x128xf16> {onnx.name = "past_key_values.0.key"}, %arg4: tensor<1x8x127x128xf16> {onnx.name = "past_key_values.0.value"}) -> (tensor<1x8x128x128xf16> {onnx.name = "present.0.key"}, tensor<1x8x128x128xf16> {onnx.name = "present.0.value"}, tensor<1x1x4096xf16> {onnx.name = "/model/layers.0/post_attention_layernorm/output_3"}, tensor<1x1x4096xf16> {onnx.name = "/model/layers.0/mlp/down_proj/MatMul/output_0"}) {
-    %0 = onnx.Constant dense<1.000000e+00> : tensor<128256x4096xf16>
-    %1 = onnx.Constant dense<1.000000e+00> : tensor<4096xf16>
-    %2 = onnx.Constant dense<1.000000e+00> : tensor<4096x4096xf16>
-    %3 = onnx.Constant dense<1.000000e+00> : tensor<4096x1024xf16>
-    %4 = onnx.Constant dense<1.000000e+00> : tensor<4096x1024xf16>
-    %5 = onnx.Constant dense<1.000000e+00> : tensor<131072x64xf16>
-    %6 = onnx.Constant dense<1.000000e+00> : tensor<131072x64xf16>
-    %7 = onnx.Constant dense<1.000000e+00> : tensor<4096x4096xf16>
-    %8 = onnx.Constant dense<1.000000e+00> : tensor<4096xf16>
-    %9 = onnx.Constant dense<1.000000e+00> : tensor<4096x14336xf16>
-    %10 = onnx.Constant dense<1.000000e+00> : tensor<4096x14336xf16>
-    %11 = onnx.Constant dense<1.000000e+00> : tensor<14336x4096xf16>
-    %12 = onnx.Constant dense<128> : tensor<i32>
-    %13 = onnx.Constant dense<1> : tensor<1xi64>
+    %0 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<128256x4096xf16>} : () -> tensor<128256x4096xf16>
+    %1 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<4096xf16>} : () -> tensor<4096xf16>
+    %2 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<4096x4096xf16>} : () -> tensor<4096x4096xf16>
+    %3 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<4096x1024xf16>} : () -> tensor<4096x1024xf16>
+    %4 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<4096x1024xf16>} : () -> tensor<4096x1024xf16>
+    %5 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<131072x64xf16>} : () -> tensor<131072x64xf16>
+    %6 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<131072x64xf16>} : () -> tensor<131072x64xf16>
+    %7 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<4096x4096xf16>} : () -> tensor<4096x4096xf16>
+    %8 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<4096xf16>} : () -> tensor<4096xf16>
+    %9 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<4096x14336xf16>} : () -> tensor<4096x14336xf16>
+    %10 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<4096x14336xf16>} : () -> tensor<4096x14336xf16>
+    %11 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<14336x4096xf16>} : () -> tensor<14336x4096xf16>
+    %12 = "onnx.Constant"() {value = dense<128> : tensor<i32>} : () -> tensor<i32>
+    %13 = "onnx.Constant"() {value = dense<1> : tensor<1xi64>} : () -> tensor<1xi64>
     %14 = "onnx.Gather"(%0, %arg0) <{axis = 0 : si64}> {onnx_node_name = "/model/embed_tokens/Gather"} : (tensor<128256x4096xf16>, tensor<1x1xi64>) -> tensor<1x1x4096xf16>
     %15 = "onnx.ReduceSum"(%arg1, %13) <{keepdims = 1 : si64, noop_with_empty_axes = 0 : si64}> {onnx_node_name = "/model/attn_mask_reformat/attn_mask_subgraph/ReduceSum"} : (tensor<1x128xi64>, tensor<1xi64>) -> tensor<1x1xi64>
     %16 = "onnx.Custom"(%14, %1) <{function_name = "SimplifiedLayerNormalization"}> {axis = -1 : si64, domain_name = "", epsilon = 9.99999974E-6 : f32, onnx_node_name = "/model/layers.0/input_layernorm/LayerNorm", stash_type = 1 : si64} : (tensor<1x1x4096xf16>, tensor<4096xf16>) -> tensor<1x1x4096xf16>
@@ -42,7 +45,7 @@ module {
     %32 = "onnx.Mul"(%29, %31) {onnx_node_name = "/model/layers.0/mlp/act_fn/Mul"} : (tensor<1x1x14336xf16>, tensor<1x1x14336xf16>) -> tensor<1x1x14336xf16>
     %33 = "onnx.Mul"(%32, %30) {onnx_node_name = "/model/layers.0/mlp/Mul"} : (tensor<1x1x14336xf16>, tensor<1x1x14336xf16>) -> tensor<1x1x14336xf16>
     %34 = "onnx.MatMul"(%33, %11) {onnx_node_name = "/model/layers.0/mlp/down_proj/MatMul"} : (tensor<1x1x14336xf16>, tensor<14336x4096xf16>) -> tensor<1x1x4096xf16>
-    onnx.Return %26#1, %26#2, %28#3, %34 : tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>, tensor<1x1x4096xf16>, tensor<1x1x4096xf16>
+    "onnx.Return"(%26#1, %26#2, %28#3, %34) : (tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>, tensor<1x1x4096xf16>, tensor<1x1x4096xf16>) -> ()
   }
   "onnx.EntryPoint"() <{func = @main_graph}> : () -> ()
 }

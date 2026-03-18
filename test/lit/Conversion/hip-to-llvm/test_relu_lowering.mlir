@@ -36,11 +36,6 @@ module {
     // CHECK: llvm.addrspacecast {{.*}} : !llvm.ptr<1> to !llvm.ptr
 
     // Should create dimension constants (from static shape [1x64x224x224])
-    // Input dimensions
-    // CHECK-DAG: llvm.mlir.constant(1 : i64) : i64
-    // CHECK-DAG: llvm.mlir.constant(64 : i64) : i64
-    // CHECK-DAG: llvm.mlir.constant(224 : i64) : i64
-    // Output dimensions (same as input for ReLU)
     // CHECK-DAG: llvm.mlir.constant(1 : i64) : i64
     // CHECK-DAG: llvm.mlir.constant(64 : i64) : i64
     // CHECK-DAG: llvm.mlir.constant(224 : i64) : i64

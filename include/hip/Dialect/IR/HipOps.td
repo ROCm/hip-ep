@@ -675,4 +675,153 @@ def Hip_GqaOp : Hip_DpsOp<"gqa"> {
   }];
 }
 
+// ===== Activation ops ========================================================
+
+def Hip_ReluOp : Hip_DpsOp<"relu"> {
+  let summary = "ReLU activation via miopenActivationForward";
+  let description = [{
+    Applies ReLU (Rectified Linear Unit) activation: output = max(0, input).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.relu(%ctx) ins(%input : memref<1x64x224x224xf32, 1>)
+                   outs(%output : memref<1x64x224x224xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+// ===== GEMM ops ==============================================================
+
+def Hip_GemmOp : Hip_DpsOp<"gemm"> {
+  let summary = "General matrix multiplication Y = alpha*A*B + beta*C (hipBLAS)";
+  let description = [{
+    Performs GEMM: Y = alpha * op(A) * op(B) + beta * C.
+    Implements the ONNX Gemm operator via hipBLAS single-precision SGEMM.
+
+    Uses destination-passing style: output buffer Y is provided as argument.
+
+    Attributes:
+    - alpha: Scalar multiplier for A*B (default 1.0)
+    - beta:  Scalar multiplier for C (default 1.0)
+    - transA: Transpose A (0=no, 1=yes)
+    - transB: Transpose B (0=no, 1=yes)
+
+    Example:
+    ```mlir
+    hip.gemm(%ctx) ins(%A, %B, %C : memref<128x256xf32, 1>,
+                                    memref<256x512xf32, 1>,
+                                    memref<128x512xf32, 1>)
+                   outs(%Y : memref<128x512xf32, 1>)
+                   {alpha = 1.0 : f32, beta = 1.0 : f32, transA = 0, transB = 0}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$A,
+    Hip_TensorOrMemRef:$B,
+    Hip_TensorOrMemRef:$C,
+    Hip_TensorOrMemRef:$Y,
+    F32Attr:$alpha,
+    F32Attr:$beta,
+    I64Attr:$transA,
+    I64Attr:$transB
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $A `,` $B `,` $C `:`
+    type($A) `,` type($B) `,` type($C) `)`
+    `outs` `(` $Y `:` type($Y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+// ===== Pooling ops ===========================================================
+
+def Hip_AvgPoolOp : Hip_DpsOp<"avgpool"> {
+  let summary = "Average pooling via MIOpen";
+  let description = [{
+    Performs 2D average pooling (ONNX AveragePool).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Attributes:
+    - kernel_shape: Array of kernel dimensions [H, W]
+    - strides: Array of stride values [H, W]
+    - pads: Array of padding values [top, left, bottom, right]
+
+    Example:
+    ```mlir
+    hip.avgpool(%ctx) ins(%input : memref<1x64x4x4xf32, 1>)
+                      outs(%output : memref<1x64x2x2xf32, 1>)
+                      {kernel_shape = [2, 2], strides = [2, 2], pads = [0, 0, 0, 0]}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    I64ArrayAttr:$kernel_shape,
+    I64ArrayAttr:$strides,
+    I64ArrayAttr:$pads
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_MaxPoolOp : Hip_DpsOp<"maxpool"> {
+  let summary = "Max pooling via MIOpen";
+  let description = [{
+    Performs 2D max pooling (ONNX MaxPoolSingleOut).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Attributes:
+    - kernel_shape: Array of kernel dimensions [H, W]
+    - strides: Array of stride values [H, W]
+    - pads: Array of padding values [top, left, bottom, right]
+
+    Example:
+    ```mlir
+    hip.maxpool(%ctx) ins(%input : memref<1x64x4x4xf32, 1>)
+                      outs(%output : memref<1x64x2x2xf32, 1>)
+                      {kernel_shape = [2, 2], strides = [2, 2], pads = [0, 0, 0, 0]}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    I64ArrayAttr:$kernel_shape,
+    I64ArrayAttr:$strides,
+    I64ArrayAttr:$pads
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 #endif // HIP_OPS

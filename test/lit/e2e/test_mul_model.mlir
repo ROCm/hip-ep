@@ -23,7 +23,7 @@
 module {
   func.func @main_graph(%arg0: tensor<1x128x14336xf16> {onnx.name = "/model/layers.0/mlp/gate_proj/MatMul/output_0"}, %arg1: tensor<1x128x14336xf16> {onnx.name = "/model/layers.0/mlp/act_fn/Sigmoid/output_0"}) -> (tensor<1x128x14336xf16> {onnx.name = "/model/layers.0/mlp/act_fn/Mul/output_0"}) {
     %0 = "onnx.Mul"(%arg0, %arg1) {onnx_node_name = "/model/layers.0/mlp/act_fn/Mul"} : (tensor<1x128x14336xf16>, tensor<1x128x14336xf16>) -> tensor<1x128x14336xf16>
-    onnx.Return %0 : tensor<1x128x14336xf16>
+    "onnx.Return"(%0) : (tensor<1x128x14336xf16>) -> ()
   }
   "onnx.EntryPoint"() <{func = @main_graph}> : () -> ()
 }

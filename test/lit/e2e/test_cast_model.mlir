@@ -23,7 +23,7 @@
 module {
   func.func @main_graph(%arg0: tensor<i64> {onnx.name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather/output_0"}) -> (tensor<i32> {onnx.name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather/Cast/output_0"}) {
     %0 = "onnx.Cast"(%arg0) <{saturate = 1 : si64, to = i32}> {onnx_node_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather/Cast"} : (tensor<i64>) -> tensor<i32>
-    onnx.Return %0 : tensor<i32>
+    "onnx.Return"(%0) : (tensor<i32>) -> ()
   }
   "onnx.EntryPoint"() <{func = @main_graph}> : () -> ()
 }

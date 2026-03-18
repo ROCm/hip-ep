@@ -47,6 +47,9 @@ std::string build_compiler_options_json(const CompilationConfig &config) {
   json << "{";
   json << "\"opt_level\": " << config.optLevel;
   json << ", \"output_mode\": \"DLL\"";
+  // Always request constant externalization so onnx.Constant data is written
+  // via the injected FileSystem and read back by inference_init at runtime.
+  json << ", \"constants_file\": \"constants.bin\"";
   json << "}";
   return json.str();
 }
