@@ -16,6 +16,7 @@
 
 #include "compilation_options_generated.h"
 #include "flatbuffers/flatbuffers.h"
+#include "llvm/ADT/Sequence.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/debug_log.h"
@@ -76,7 +77,7 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
     auto sizes = constantSizesAttr.asArrayRef();
     auto offsets = constantOffsetsAttr ? constantOffsetsAttr.asArrayRef()
                                        : ArrayRef<int64_t>{};
-    for (size_t i = 0; i < sizes.size(); ++i) {
+    for (auto i : llvm::seq<size_t>(0, sizes.size())) {
       auto ci = std::make_unique<mlir::hip::ConstantInfoT>();
       ci->size = sizes[i];
       ci->offset = (i < offsets.size()) ? offsets[i] : 0;
@@ -85,11 +86,11 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
   }
 
   if (inputShapes) {
-    for (size_t i = 0; i < inputShapes.size(); i++)
+    for (auto i : llvm::seq<size_t>(0, inputShapes.size()))
       meta.inputs.push_back(buildTensorInfo(inputShapes, inputElementSizes, i));
   }
   if (outputShapes) {
-    for (size_t i = 0; i < outputShapes.size(); i++)
+    for (auto i : llvm::seq<size_t>(0, outputShapes.size()))
       meta.outputs.push_back(
           buildTensorInfo(outputShapes, outputElementSizes, i));
   }
@@ -209,7 +210,7 @@ static Value buildMemrefDescriptor(OpBuilder &builder, Location loc,
                                      ArrayRef<int64_t>{2});
 
   Value sizes = LLVM::UndefOp::create(builder, loc, sizeArrayType);
-  for (int64_t d = 0; d < rank; d++) {
+  for (int64_t d : llvm::seq<int64_t>(0, rank)) {
     Value idx = LLVM::ConstantOp::create(builder, loc, i64Type,
                                          builder.getI64IntegerAttr(d));
     Value dimPtr = LLVM::GEPOp::create(builder, loc, ptrType, ptrType,
@@ -224,7 +225,7 @@ static Value buildMemrefDescriptor(OpBuilder &builder, Location loc,
   Value strides = LLVM::UndefOp::create(builder, loc, sizeArrayType);
   Value acc = LLVM::ConstantOp::create(builder, loc, i64Type,
                                        builder.getI64IntegerAttr(1));
-  for (int64_t d = rank - 1; d >= 0; d--) {
+  for (int64_t d : llvm::reverse(llvm::seq<int64_t>(0, rank))) {
     strides = LLVM::InsertValueOp::create(builder, loc, strides, acc,
                                           ArrayRef<int64_t>{d});
     if (d > 0) {
@@ -539,7 +540,7 @@ private:
       Value offsetsArrayPtr = LLVM::AllocaOp::create(builder, loc, ptrType,
                                                      i64Type, numBuffersVal, 0);
 
-      for (size_t i = 0; i < numBuffers; i++) {
+      for (auto i : llvm::seq<size_t>(0, numBuffers)) {
         auto offsetAttr = dyn_cast<IntegerAttr>(offsetsAttrArray[i]);
         Value offset = LLVM::ConstantOp::create(
             builder, loc, i64Type,
@@ -630,12 +631,14 @@ private:
         builder, loc, i64Type,
         builder.getI64IntegerAttr(kTensorBufferSizeBytes));
 
-    for (size_t i = 0; i < numInputs; i++) {
+    for (auto i : llvm::seq<size_t>(0, numInputs)) {
+      (void)i;
       Value bufferPtr = LLVM::AllocaOp::create(builder, loc, ptrType, i8Type,
                                                tensorBufferSize, 0);
       inputBuffers.push_back(bufferPtr);
     }
-    for (size_t i = 0; i < numOutputs; i++) {
+    for (auto i : llvm::seq<size_t>(0, numOutputs)) {
+      (void)i;
       Value bufferPtr = LLVM::AllocaOp::create(builder, loc, ptrType, i8Type,
                                                tensorBufferSize, 0);
       outputBuffers.push_back(bufferPtr);
@@ -646,7 +649,7 @@ private:
     // Prepare all input tensors
     SmallVector<Value> inputMemrefs;
 
-    for (size_t i = 0; i < numInputs; i++) {
+    for (auto i : llvm::seq<size_t>(0, numInputs)) {
       Value bufferPtr = inputBuffers[i];
 
       Value indexVal = LLVM::ConstantOp::create(builder, loc, i64Type,
@@ -666,7 +669,7 @@ private:
     // Prepare all output tensors
     SmallVector<Value> outputMemrefs;
 
-    for (size_t i = 0; i < numOutputs; i++) {
+    for (auto i : llvm::seq<size_t>(0, numOutputs)) {
       Value bufferPtr = outputBuffers[i];
 
       Value indexVal = LLVM::ConstantOp::create(builder, loc, i64Type,
@@ -689,7 +692,7 @@ private:
     Value inputMemrefArray =
         LLVM::AllocaOp::create(builder, loc, ptrType, ptrType, numInputsVal, 0);
 
-    for (size_t i = 0; i < numInputs; i++) {
+    for (auto i : llvm::seq<size_t>(0, numInputs)) {
       int64_t rank = cast<DenseI64ArrayAttr>(inputShapes.getValue()[i]).size();
 
       Value bufferPtr = inputBuffers[i];
@@ -720,7 +723,7 @@ private:
     Value outputMemrefArray = LLVM::AllocaOp::create(builder, loc, ptrType,
                                                      ptrType, numOutputsVal, 0);
 
-    for (size_t i = 0; i < numOutputs; i++) {
+    for (auto i : llvm::seq<size_t>(0, numOutputs)) {
       int64_t rank = cast<DenseI64ArrayAttr>(outputShapes.getValue()[i]).size();
 
       Value bufferPtr = outputBuffers[i];
@@ -764,7 +767,7 @@ private:
     // Finalize output tensors (D2H, sync, cleanup)
     builder.setInsertionPointToStart(mainSuccessBlock);
 
-    for (size_t i = 0; i < numOutputs; i++) {
+    for (auto i : llvm::seq<size_t>(0, numOutputs)) {
       Value bufferPtr = outputBuffers[i];
       emitErrorCheckedCall(builder, loc, finalizeOutputFunc,
                            ValueRange{state, bufferPtr}, errorCodePtr,
@@ -772,7 +775,7 @@ private:
     }
 
     // Free input tensors
-    for (size_t i = 0; i < numInputs; i++) {
+    for (auto i : llvm::seq<size_t>(0, numInputs)) {
       Value bufferPtr = inputBuffers[i];
       LLVM::CallOp::create(builder, loc, freeInputFunc,
                            ValueRange{state, bufferPtr});
@@ -785,7 +788,7 @@ private:
 
     Value errorCode = LLVM::LoadOp::create(builder, loc, i32Type, errorCodePtr);
 
-    for (size_t i = 0; i < inputBuffers.size(); i++) {
+    for (auto i : llvm::seq<size_t>(0, inputBuffers.size())) {
       LLVM::CallOp::create(builder, loc, freeInputFunc,
                            ValueRange{state, inputBuffers[i]});
     }
