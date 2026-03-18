@@ -3,7 +3,6 @@
 # ** Licensed under the MIT License.
 ##
 cmake_minimum_required(VERSION 3.20)
-project(onnx-hipdnn-ep VERSION 1.0.0 LANGUAGES C CXX)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # ==============================================================================
@@ -21,67 +20,14 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 #
 # Reference: https://rocm.docs.amd.com/en/latest/conceptual/cmake-packages.html
 # ==============================================================================
+
+project(
+  onnx-hipdnn-ep
+  VERSION 1.0.0
+  LANGUAGES C CXX)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
-# ==============================================================================
-# Build Options
-# ==============================================================================
-option(BUILD_MOCK_RUNTIME "Build with mock runtime (no GPU required)" ON)
-option(ONNX_HIP_INCLUDE_LIT_TESTS "Include LIT tests" ON)
-
-# ==============================================================================
-# MLIR / LLVM / FlatBuffers
-# ==============================================================================
-find_package(MLIR REQUIRED CONFIG)
-find_package(LLVM REQUIRED CONFIG)
-find_package(flatbuffers REQUIRED CONFIG)
-
-message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
-message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
-message(STATUS "Using FlatBuffers version: ${flatbuffers_VERSION}")
-
-list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
-list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
-
-include(TableGen)
-include(AddLLVM)
-include(AddMLIR)
-include(HandleLLVMOptions)
-
-include_directories(${LLVM_INCLUDE_DIRS})
-include_directories(${MLIR_INCLUDE_DIRS})
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
-include_directories(${CMAKE_CURRENT_BINARY_DIR}/include)
-
-llvm_map_components_to_libnames(llvm_libs Support Core)
-
-# ==============================================================================
-# ONNX-MLIR (from 3rd-party)
-# ==============================================================================
-if(NOT TARGET OMONNXOps)
-    message(STATUS "Building ONNX-MLIR from 3rd-party/onnx-mlir")
-    add_subdirectory(3rd-party)
-    add_dependencies(OMONNXOps OMTransformsKrnlPassIncGen)
-else()
-    message(STATUS "Using ONNX-MLIR from parent project")
-endif()
-
-# ==============================================================================
-# Mock Runtime
-# ==============================================================================
-if(BUILD_MOCK_RUNTIME)
-    message(STATUS "Building with MOCK runtime (no GPU required)")
-    add_compile_definitions(USE_MOCK_RUNTIME)
-else()
-    message(STATUS "Building with REAL runtime (requires HIP/MIOpen)")
-    if(DEFINED ENV{THEROCK_DIST})
-        set(HIP_ROOT_DIR $ENV{THEROCK_DIST})
-        message(STATUS "Using TheRock SDK at: ${HIP_ROOT_DIR}")
-    endif()
-endif()
 
 # ==============================================================================
 # TheRock ROCm SDK Configuration
@@ -96,56 +42,24 @@ if(NOT THEROCK_DIST AND DEFINED ENV{THEROCK_DIST})
   set(THEROCK_DIST "$ENV{THEROCK_DIST}")
 endif()
 
+# Strip any trailing whitespace from THEROCK_DIST
 if(THEROCK_DIST)
   string(STRIP "${THEROCK_DIST}" THEROCK_DIST)
   message(STATUS "[onnx-hipdnn-ep] THEROCK_DIST: ${THEROCK_DIST}")
 
+  # Add to CMAKE_PREFIX_PATH for find_package
   list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}")
   list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}/lib/cmake")
 endif()
 
-install(DIRECTORY include/hip
-    DESTINATION include
-    FILES_MATCHING PATTERN "*.h"
-)
-
-# ==============================================================================
-# ONNX HIP DNN Execution Provider (optional)
-# ==============================================================================
 option(BUILD_EP "Build the ONNX HIP DNN Execution Provider" OFF)
 
 if(BUILD_EP)
   include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
-  find_package(glog REQUIRED)
-
-  # HIP kernels library (compiled with hipcc on Windows, CMake HIP on Linux)
-  add_subdirectory(kernels)
-
-  add_subdirectory(rocm-pass-common)
-  add_subdirectory(level-1-pass-rocm)
-
-  # Level-2 passes for different op types
-  add_subdirectory(level-2-pass-rocm-conv)
-  add_subdirectory(level-2-pass-rocm-gemm)
-  add_subdirectory(level-2-pass-rocm-matmul)
-  add_subdirectory(level-2-pass-rocm-mul)
-  add_subdirectory(level-2-pass-rocm-softmax)
-  add_subdirectory(level-2-pass-rocm-reshape)
-  add_subdirectory(level-2-pass-rocm-transpose)
-  add_subdirectory(level-2-pass-rocm-tile)
-
-  add_subdirectory(custom-op-rocm)
-
-  # Fix morphizen 3rd-party build under LLVM's HandleLLVMOptions:
-  #   /wd4005: suppress C4005 macro redefinition (_CRT_SECURE_NO_WARNINGS)
-  #   /UUNICODE /U_UNICODE: prevent LPCSTR/LPCWSTR mismatch in util_mswin.cpp
-  if(MSVC)
-    foreach(_morphizen_target morphizen-foundation morphizen-core-static)
-      if(TARGET ${_morphizen_target})
-        target_compile_options(${_morphizen_target} PRIVATE /wd4005 /UUNICODE /U_UNICODE)
-      endif()
-    endforeach()
-  endif()
+  # MLIR backend compiler
+  add_subdirectory(backend-mlir-compiler)
+  # Add test directory (test_gqa can be built independently)
+  add_subdirectory(test)
 endif()
 
 # ==============================================================================
@@ -180,46 +94,23 @@ if(BUILD_HIP_TOOLS)
   # MLIR's generic Operation API to match ONNX ops by name, so no onnx-mlir
   # headers or libraries are needed.
 
-  # add_subdirectory(kernels)
+  list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
+  list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
+  include(TableGen)
+  include(AddLLVM)
+  include(AddMLIR)
 
-  # add_subdirectory(rocm-pass-common)
-  # add_subdirectory(level-1-pass-rocm)
+  llvm_map_components_to_libnames(llvm_libs Support Core)
 
-  # add_subdirectory(level-2-pass-rocm-conv)
-  # add_subdirectory(level-2-pass-rocm-gemm)
-  # add_subdirectory(level-2-pass-rocm-matmul)
-  # add_subdirectory(level-2-pass-rocm-mul)
-  # add_subdirectory(level-2-pass-rocm-softmax)
-  # add_subdirectory(level-2-pass-rocm-reshape)
-  # add_subdirectory(level-2-pass-rocm-transpose)
-  # add_subdirectory(level-2-pass-rocm-tile)
-
-  # TableGen targets (must come before lib/ and tools/)
+  # TableGen targets
   add_subdirectory(include/hip)
-
-  # Proto (FlatBuffers schemas for compiler metadata)
-  add_subdirectory(proto)
-
-  if(NOT BUILD_MOCK_RUNTIME)
-    add_subdirectory(3rd-party/custom_kernels)
-  endif()
 
   # Library targets
   add_subdirectory(lib)
 
-  # DLL (C API shared library)
-  add_subdirectory(dll)
-
   # Executable targets
   add_subdirectory(tools)
 
-  # Tests (e2e + LIT)
-  enable_testing()
-  add_subdirectory(test)
-
-endif()
-
-if(BUILD_EP)
-  # MLIR backend (experimental, built alongside ROCm backend)
-  add_subdirectory(backend-mlir-compiler)
+  # LIT tests for MLIR passes
+  add_subdirectory(test/lit)
 endif()
