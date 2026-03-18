@@ -25,7 +25,6 @@
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Transforms/Passes.h"
-#include "src/Dialect/ONNX/ONNXDialect.hpp"
 
 namespace hip::compiler {
 
@@ -56,7 +55,6 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
   registry.insert<mlir::bufferization::BufferizationDialect>();
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::hip::HipDialect>();
-  registry.insert<mlir::ONNXDialect>();
   // Standard dialect bufferization models required by one-shot-bufferize.
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::tensor::registerBufferizableOpInterfaceExternalModels(registry);
