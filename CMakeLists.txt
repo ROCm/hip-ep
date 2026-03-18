@@ -56,7 +56,7 @@ option(BUILD_EP "Build the ONNX HIP DNN Execution Provider" OFF)
 
 if(BUILD_EP)
   include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
-  # MLIR backend (experimental, built alongside ROCm backend)
+  # MLIR backend compiler
   add_subdirectory(backend-mlir-compiler)
   # Add test directory (test_gqa can be built independently)
   add_subdirectory(test)
