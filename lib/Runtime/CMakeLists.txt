@@ -35,8 +35,6 @@ find_program(CLANG_EXECUTABLE NAMES clang clang-cl
         ${LLVM_BINARY_DIR}/bin
         ${LLVM_TOOLS_BINARY_DIR}
         ${CMAKE_PREFIX_PATH}/bin
-        D:/Develop/m/prebuilt-local/bin
-    NO_DEFAULT_PATH
 )
 
 if(NOT CLANG_EXECUTABLE)
@@ -47,7 +45,8 @@ if(NOT CLANG_EXECUTABLE)
         "  - ${LLVM_BINARY_DIR}/bin\n"
         "  - ${LLVM_TOOLS_BINARY_DIR}\n"
         "  - ${CMAKE_PREFIX_PATH}/bin\n"
-        "  - D:/Develop/m/prebuilt-local/bin\n")
+        "\n"
+        "Please ensure Clang is in one of these paths or in system PATH.\n")
 endif()
 
 message(STATUS "Found Clang for bitcode generation: ${CLANG_EXECUTABLE}")
@@ -58,8 +57,6 @@ find_program(LLVM_LINK_EXECUTABLE NAMES llvm-link
         ${LLVM_BINARY_DIR}/bin
         ${LLVM_TOOLS_BINARY_DIR}
         ${CMAKE_PREFIX_PATH}/bin
-        D:/Develop/m/prebuilt-local/bin
-    NO_DEFAULT_PATH
 )
 
 if(NOT LLVM_LINK_EXECUTABLE)
