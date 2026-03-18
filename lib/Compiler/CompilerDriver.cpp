@@ -106,7 +106,6 @@ bool CompilerDriver::validate(llvm::StringRef input_mlir,
   context.loadDialect<mlir::memref::MemRefDialect>();
   context.loadDialect<mlir::bufferization::BufferizationDialect>();
   context.loadDialect<mlir::hip::HipDialect>();
-  context.loadDialect<mlir::ONNXDialect>();
 
   // Parse MLIR input
   // Binary-safe: do not require null terminator (bytecode may contain embedded
