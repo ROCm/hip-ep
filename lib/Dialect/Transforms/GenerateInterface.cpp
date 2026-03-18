@@ -228,8 +228,6 @@ public:
     std::vector<uint8_t> blob = buildMetadataBlob(module, constantsFile);
     generateMetadataBlobGlobal(module, blob);
 
-    declareMallocFree(module);
-
     declareRuntimeFunctions(module);
 
     generateInferenceInit(module, blob.size());
@@ -268,247 +266,61 @@ private:
         ctx, {ptrType, ptrType, i64Type, sizeArrayType, strideArrayType});
   }
 
-  void declareMallocFree(ModuleOp module) {
-    OpBuilder builder(module.getContext());
-    Location loc = module.getLoc();
-    Type ptrType = LLVM::LLVMPointerType::get(builder.getContext(), 0);
+  struct RuntimeFuncSpec {
+    llvm::StringRef name;
+    Type resultType;
+    SmallVector<Type, 4> paramTypes;
+  };
 
-    auto &firstOp = module.getBody()->front();
-    builder.setInsertionPoint(&firstOp);
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>("malloc")) {
-      auto mallocFuncType =
-          LLVM::LLVMFunctionType::get(ptrType, {builder.getI64Type()});
-      auto mallocFunc =
-          LLVM::LLVMFuncOp::create(builder, loc, "malloc", mallocFuncType);
-      mallocFunc.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>("free")) {
-      auto freeFuncType = LLVM::LLVMFunctionType::get(
-          LLVM::LLVMVoidType::get(builder.getContext()), {ptrType});
-      auto freeFunc =
-          LLVM::LLVMFuncOp::create(builder, loc, "free", freeFuncType);
-      freeFunc.setLinkage(LLVM::Linkage::External);
-    }
+  SmallVector<RuntimeFuncSpec> getRuntimeFuncSpecs(OpBuilder &builder) {
+    Type ptr = LLVM::LLVMPointerType::get(builder.getContext(), 0);
+    Type i32 = builder.getI32Type();
+    Type i64 = builder.getI64Type();
+    Type vd = LLVM::LLVMVoidType::get(builder.getContext());
+    return {
+        {"malloc", ptr, {i64}},
+        {"free", vd, {ptr}},
+        {"hipStreamCreate", i32, {ptr}},
+        {"hipStreamDestroy", i32, {ptr}},
+        {"hipStreamSynchronize", i32, {ptr}},
+        {"miopenCreate", i32, {ptr}},
+        {"miopenSetStream", i32, {ptr, ptr}},
+        {"miopenDestroy", i32, {ptr}},
+        {"hipblasLtCreate", i32, {ptr}},
+        {"hipblasLtDestroy", i32, {ptr}},
+        {"hipdnn_ep_state_cleanup", i32, {ptr}},
+        {"wrap_hipMalloc", i32, {ptr, i64}},
+        {"wrap_hipFree", i32, {ptr}},
+        {"wrap_hipMemcpyH2D", i32, {ptr, ptr, i64, ptr}},
+        {"wrap_hipMemcpyD2H", i32, {ptr, ptr, i64, ptr}},
+        {"wrap_hipStreamSynchronize", i32, {ptr}},
+        {"hipdnn_ep_state_get_stream", ptr, {ptr}},
+        {"hipdnn_ep_pool_init", i32, {ptr, i64, ptr, i64}},
+        {"hipdnn_ep_get_buffer_from_pool", ptr, {ptr, i64}},
+        {"hipdnn_ep_tensor_prepare_input", i32, {ptr, ptr, i64, i64, ptr}},
+        {"hipdnn_ep_tensor_prepare_output", i32, {ptr, ptr, i64, i64, ptr}},
+        {"hipdnn_ep_tensor_finalize_output", i32, {ptr, ptr}},
+        {"hipdnn_ep_tensor_free_input", vd, {ptr, ptr}},
+        {"hipdnn_ep_tensor_buffer_get_gpu_ptr", ptr, {ptr}},
+        {"hipdnn_ep_tensor_buffer_get_host_ptr", ptr, {ptr}},
+        {"hipdnn_ep_tensor_buffer_get_shape_ptr", ptr, {ptr}},
+        {"hipdnn_ep_tensor_buffer_get_rank", i64, {ptr}},
+        {"hipdnn_ep_tensor_buffer_get_size_bytes", i64, {ptr}},
+        {"hipdnn_ep_state_init_with_fs", i32, {ptr, ptr, ptr, i64}},
+    };
   }
 
   void declareRuntimeFunctions(ModuleOp module) {
     OpBuilder builder(module.getContext());
+    builder.setInsertionPoint(&module.getBody()->front());
     Location loc = module.getLoc();
-    Type ptrType = LLVM::LLVMPointerType::get(builder.getContext(), 0);
-    Type i32Type = builder.getI32Type();
-    Type i64Type = builder.getI64Type();
-    Type voidType = LLVM::LLVMVoidType::get(builder.getContext());
-
-    auto &firstOp = module.getBody()->front();
-    builder.setInsertionPoint(&firstOp);
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>("hipStreamCreate")) {
-      auto funcType = LLVM::LLVMFunctionType::get(i32Type, {ptrType});
-      auto func =
-          LLVM::LLVMFuncOp::create(builder, loc, "hipStreamCreate", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>("hipStreamDestroy")) {
-      auto funcType = LLVM::LLVMFunctionType::get(i32Type, {ptrType});
-      auto func =
-          LLVM::LLVMFuncOp::create(builder, loc, "hipStreamDestroy", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>("hipStreamSynchronize")) {
-      auto funcType = LLVM::LLVMFunctionType::get(i32Type, {ptrType});
-      auto func = LLVM::LLVMFuncOp::create(builder, loc, "hipStreamSynchronize",
-                                           funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>("miopenCreate")) {
-      auto funcType = LLVM::LLVMFunctionType::get(i32Type, {ptrType});
-      auto func =
-          LLVM::LLVMFuncOp::create(builder, loc, "miopenCreate", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>("miopenSetStream")) {
-      auto funcType = LLVM::LLVMFunctionType::get(i32Type, {ptrType, ptrType});
-      auto func =
-          LLVM::LLVMFuncOp::create(builder, loc, "miopenSetStream", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>("miopenDestroy")) {
-      auto funcType = LLVM::LLVMFunctionType::get(i32Type, {ptrType});
-      auto func =
-          LLVM::LLVMFuncOp::create(builder, loc, "miopenDestroy", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>("hipblasLtCreate")) {
-      auto funcType = LLVM::LLVMFunctionType::get(i32Type, {ptrType});
-      auto func =
-          LLVM::LLVMFuncOp::create(builder, loc, "hipblasLtCreate", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>("hipblasLtDestroy")) {
-      auto funcType = LLVM::LLVMFunctionType::get(i32Type, {ptrType});
-      auto func =
-          LLVM::LLVMFuncOp::create(builder, loc, "hipblasLtDestroy", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>("hipdnn_ep_state_cleanup")) {
-      auto funcType = LLVM::LLVMFunctionType::get(i32Type, {ptrType});
-      auto func = LLVM::LLVMFuncOp::create(builder, loc,
-                                           "hipdnn_ep_state_cleanup", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>("wrap_hipMalloc")) {
-      auto funcType = LLVM::LLVMFunctionType::get(i32Type, {ptrType, i64Type});
-      auto func =
-          LLVM::LLVMFuncOp::create(builder, loc, "wrap_hipMalloc", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>("wrap_hipFree")) {
-      auto funcType = LLVM::LLVMFunctionType::get(i32Type, {ptrType});
-      auto func =
-          LLVM::LLVMFuncOp::create(builder, loc, "wrap_hipFree", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>("wrap_hipMemcpyH2D")) {
-      auto funcType = LLVM::LLVMFunctionType::get(
-          i32Type, {ptrType, ptrType, i64Type, ptrType});
-      auto func =
-          LLVM::LLVMFuncOp::create(builder, loc, "wrap_hipMemcpyH2D", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>("wrap_hipMemcpyD2H")) {
-      auto funcType = LLVM::LLVMFunctionType::get(
-          i32Type, {ptrType, ptrType, i64Type, ptrType});
-      auto func =
-          LLVM::LLVMFuncOp::create(builder, loc, "wrap_hipMemcpyD2H", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>("wrap_hipStreamSynchronize")) {
-      auto funcType = LLVM::LLVMFunctionType::get(i32Type, {ptrType});
-      auto func = LLVM::LLVMFuncOp::create(
-          builder, loc, "wrap_hipStreamSynchronize", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>("hipdnn_ep_state_get_stream")) {
-      auto funcType = LLVM::LLVMFunctionType::get(ptrType, {ptrType});
-      auto func = LLVM::LLVMFuncOp::create(
-          builder, loc, "hipdnn_ep_state_get_stream", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>("hipdnn_ep_pool_init")) {
-      auto funcType = LLVM::LLVMFunctionType::get(
-          i32Type, {ptrType, i64Type, ptrType, i64Type});
-      auto func = LLVM::LLVMFuncOp::create(builder, loc, "hipdnn_ep_pool_init",
-                                           funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>(
-            "hipdnn_ep_get_buffer_from_pool")) {
-      auto funcType = LLVM::LLVMFunctionType::get(ptrType, {ptrType, i64Type});
-      auto func = LLVM::LLVMFuncOp::create(
-          builder, loc, "hipdnn_ep_get_buffer_from_pool", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>(
-            "hipdnn_ep_tensor_prepare_input")) {
-      Type sizeTType = i64Type;
-      auto funcType = LLVM::LLVMFunctionType::get(
-          i32Type, {ptrType, ptrType, sizeTType, sizeTType, ptrType});
-      auto func = LLVM::LLVMFuncOp::create(
-          builder, loc, "hipdnn_ep_tensor_prepare_input", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>(
-            "hipdnn_ep_tensor_prepare_output")) {
-      Type sizeTType = i64Type;
-      auto funcType = LLVM::LLVMFunctionType::get(
-          i32Type, {ptrType, ptrType, sizeTType, sizeTType, ptrType});
-      auto func = LLVM::LLVMFuncOp::create(
-          builder, loc, "hipdnn_ep_tensor_prepare_output", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>(
-            "hipdnn_ep_tensor_finalize_output")) {
-      auto funcType = LLVM::LLVMFunctionType::get(i32Type, {ptrType, ptrType});
-      auto func = LLVM::LLVMFuncOp::create(
-          builder, loc, "hipdnn_ep_tensor_finalize_output", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>("hipdnn_ep_tensor_free_input")) {
-      auto funcType = LLVM::LLVMFunctionType::get(voidType, {ptrType, ptrType});
-      auto func = LLVM::LLVMFuncOp::create(
-          builder, loc, "hipdnn_ep_tensor_free_input", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>(
-            "hipdnn_ep_tensor_buffer_get_gpu_ptr")) {
-      auto funcType = LLVM::LLVMFunctionType::get(ptrType, {ptrType});
-      auto func = LLVM::LLVMFuncOp::create(
-          builder, loc, "hipdnn_ep_tensor_buffer_get_gpu_ptr", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>(
-            "hipdnn_ep_tensor_buffer_get_host_ptr")) {
-      auto funcType = LLVM::LLVMFunctionType::get(ptrType, {ptrType});
-      auto func = LLVM::LLVMFuncOp::create(
-          builder, loc, "hipdnn_ep_tensor_buffer_get_host_ptr", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>(
-            "hipdnn_ep_tensor_buffer_get_shape_ptr")) {
-      auto funcType = LLVM::LLVMFunctionType::get(ptrType, {ptrType});
-      auto func = LLVM::LLVMFuncOp::create(
-          builder, loc, "hipdnn_ep_tensor_buffer_get_shape_ptr", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>(
-            "hipdnn_ep_tensor_buffer_get_rank")) {
-      auto funcType = LLVM::LLVMFunctionType::get(i64Type, {ptrType});
-      auto func = LLVM::LLVMFuncOp::create(
-          builder, loc, "hipdnn_ep_tensor_buffer_get_rank", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>(
-            "hipdnn_ep_tensor_buffer_get_size_bytes")) {
-      auto funcType = LLVM::LLVMFunctionType::get(i64Type, {ptrType});
-      auto func = LLVM::LLVMFuncOp::create(
-          builder, loc, "hipdnn_ep_tensor_buffer_get_size_bytes", funcType);
-      func.setLinkage(LLVM::Linkage::External);
-    }
-
-    if (!module.lookupSymbol<LLVM::LLVMFuncOp>(
-            "hipdnn_ep_state_init_with_fs")) {
-      auto funcType = LLVM::LLVMFunctionType::get(
-          i32Type, {ptrType, ptrType, ptrType, i64Type});
-      auto func = LLVM::LLVMFuncOp::create(
-          builder, loc, "hipdnn_ep_state_init_with_fs", funcType);
-      func.setLinkage(LLVM::Linkage::External);
+    for (auto &spec : getRuntimeFuncSpecs(builder)) {
+      if (!module.lookupSymbol<LLVM::LLVMFuncOp>(spec.name)) {
+        auto func = LLVM::LLVMFuncOp::create(
+            builder, loc, spec.name,
+            LLVM::LLVMFunctionType::get(spec.resultType, spec.paramTypes));
+        func.setLinkage(LLVM::Linkage::External);
+      }
     }
   }
 
