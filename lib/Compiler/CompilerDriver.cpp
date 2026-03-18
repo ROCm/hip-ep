@@ -50,9 +50,6 @@ bool CompilerDriver::compile(llvm::StringRef input_mlir,
 
   // Initialize MLIR context
   mlir::MLIRContext context;
-  // Allow unregistered dialects so that onnx.* ops in the input MLIR can be
-  // parsed as generic operations and then matched by name in OnnxToHip pass.
-  context.allowUnregisteredDialects();
   hip::compiler::loadAllDialects(context);
   mlir::registerLLVMDialectTranslation(context);
 
@@ -102,7 +99,6 @@ bool CompilerDriver::validate(llvm::StringRef input_mlir,
                               std::string &error_message) {
   // Initialize MLIR context
   mlir::MLIRContext context;
-  context.allowUnregisteredDialects();
   context.loadDialect<mlir::BuiltinDialect>();
   context.loadDialect<mlir::LLVM::LLVMDialect>();
   context.loadDialect<mlir::func::FuncDialect>();
@@ -110,6 +106,7 @@ bool CompilerDriver::validate(llvm::StringRef input_mlir,
   context.loadDialect<mlir::memref::MemRefDialect>();
   context.loadDialect<mlir::bufferization::BufferizationDialect>();
   context.loadDialect<mlir::hip::HipDialect>();
+  context.allowUnregisteredDialects(true);
 
   // Parse MLIR input
   // Binary-safe: do not require null terminator (bytecode may contain embedded

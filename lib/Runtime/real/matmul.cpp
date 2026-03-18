@@ -134,6 +134,51 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
   HIPBLAS_CHECK(
       hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
 
+  // Find the best algorithm and its required workspace size.
+  hipblasLtMatmulPreference_t pref;
+  HIPBLAS_CHECK(hipblasLtMatmulPreferenceCreate(&pref));
+  const size_t max_workspace = 32ULL * 1024 * 1024; // 32 MiB
+  HIPBLAS_CHECK(hipblasLtMatmulPreferenceSetAttribute(
+      pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_workspace,
+      sizeof(max_workspace)));
+
+  hipblasLtMatmulHeuristicResult_t heuristic = {};
+  int returned_algos = 0;
+  HIPBLAS_CHECK(hipblasLtMatmulAlgoGetHeuristic(
+      handle, matmul_desc,
+      matA_layout,    // "A" layout = B viewed col-major
+      matB_layout,    // "B" layout = A viewed col-major
+      matC_layout,    // C layout
+      matC_layout,    // D layout (same as C)
+      pref, 1, &heuristic, &returned_algos));
+
+  if (returned_algos == 0) {
+    fprintf(stderr, "wrap_hipblasLtMatmul: no algorithm found for "
+                    "M=%lld N=%lld K=%lld batch=%lld elem_size=%lld\n",
+            (long long)M, (long long)N, (long long)K,
+            (long long)batch_count, (long long)elem_size);
+    hipblasLtMatmulPreferenceDestroy(pref);
+    hipblasLtMatrixLayoutDestroy(matA_layout);
+    hipblasLtMatrixLayoutDestroy(matB_layout);
+    hipblasLtMatrixLayoutDestroy(matC_layout);
+    hipblasLtMatmulDescDestroy(matmul_desc);
+    return -1;
+  }
+
+  void *workspace = nullptr;
+  if (heuristic.workspaceSize > 0) {
+    if (hipMalloc(&workspace, heuristic.workspaceSize) != hipSuccess) {
+      fprintf(stderr, "wrap_hipblasLtMatmul: failed to allocate workspace "
+                      "(%zu bytes)\n", heuristic.workspaceSize);
+      hipblasLtMatmulPreferenceDestroy(pref);
+      hipblasLtMatrixLayoutDestroy(matA_layout);
+      hipblasLtMatrixLayoutDestroy(matB_layout);
+      hipblasLtMatrixLayoutDestroy(matC_layout);
+      hipblasLtMatmulDescDestroy(matmul_desc);
+      return -1;
+    }
+  }
+
   float alpha = 1.0f;
   float beta = 0.0f;
 
@@ -141,8 +186,12 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
                                 matA_layout,    // "A" = B (row→col trick)
                                 A, matB_layout, // "B" = A (row→col trick)
                                 &beta, output, matC_layout, output, matC_layout,
-                                nullptr, nullptr, 0, stream));
+                                &heuristic.algo, workspace,
+                                heuristic.workspaceSize, stream));
 
+  if (workspace)
+    hipFree(workspace);
+  hipblasLtMatmulPreferenceDestroy(pref);
   hipblasLtMatrixLayoutDestroy(matA_layout);
   hipblasLtMatrixLayoutDestroy(matB_layout);
   hipblasLtMatrixLayoutDestroy(matC_layout);

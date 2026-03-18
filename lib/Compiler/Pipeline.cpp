@@ -25,6 +25,12 @@ void populateMorphizenPipeline(
   // Stage 1: ONNX → HIP conversion (tensor-first, no allocation)
   pm.addPass(mlir::hip::createConvertOnnxToHipPass(fs, options));
 
+  // Stage 1.5: Canonicalize to eliminate dead/residual onnx.* ops
+  // After OnnxToHip conversion, some onnx ops (e.g. onnx.NoValue) may remain
+  // as dead code. OneShotBufferize requires every live op to implement
+  // BufferizableOpInterface, so we canonicalize them away first.
+  pm.addPass(mlir::createCanonicalizerPass());
+
   // Stage 2: One-shot bufferization
   // Converts tensor-mode HIP ops to memref-mode via BufferizableOpInterface.
   // IdentityLayoutMap lets OneShotBufferize see that function return buffers

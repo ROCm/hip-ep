@@ -56,7 +56,10 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
            "Directory for sidecar .constants.bin/.json files (empty = cwd)">,
     Option<"externalizeMinNumElements", "externalize-min-num-elements",
            "int64_t", /*default=*/"0",
-           "Minimum number of tensor elements to externalize (0 = disabled)">
+           "Minimum number of tensor elements to externalize (0 = disabled)">,
+    Option<"externalizeFileName", "externalize-file-name", "std::string",
+           /*default=*/"\"constants.bin\"",
+           "Filename for the sidecar constants binary (default: constants.bin)">
   ];
   let dependentDialects = [
     "mlir::hip::HipDialect",

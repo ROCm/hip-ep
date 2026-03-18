@@ -73,6 +73,12 @@ static int64_t getHipdnnDataType(Type elemType) {
     return 1; // HIPDNN_EP_DATATYPE_HALF
   if (elemType.isBF16())
     return 2; // HIPDNN_EP_DATATYPE_BFLOAT16
+  if (elemType.isInteger(8))
+    return 3; // HIPDNN_EP_DATATYPE_INT8
+  if (elemType.isInteger(32))
+    return 6; // HIPDNN_EP_DATATYPE_INT32
+  if (elemType.isInteger(64))
+    return 7; // HIPDNN_EP_DATATYPE_INT64
   return -1;
 }
 
@@ -1714,6 +1720,130 @@ struct GetConstantOpLowering : public ConvertOpToLLVMPattern<GetConstantOp> {
 };
 
 //===----------------------------------------------------------------------===//
+// hip.relu lowering
+//   -> wrap_miopenActivationForward_relu(state, input_ptr, n, c, h, w,
+//                                        output_ptr, n, c, h, w)
+//===----------------------------------------------------------------------===//
+
+static constexpr const char *kWrapMiopenActivationForwardRelu =
+    "wrap_miopenActivationForward_relu";
+
+struct ReluOpLowering : public ConvertOpToLLVMPattern<ReluOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(ReluOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    Value statePtr = adaptor.getCtx();
+
+    // Extract GPU pointers from memref descriptors; cast addr space if needed
+    auto castToGeneric = [&](Value ptr) -> Value {
+      auto ptrTy = cast<LLVM::LLVMPointerType>(ptr.getType());
+      if (ptrTy.getAddressSpace() == 0)
+        return ptr;
+      return LLVM::AddrSpaceCastOp::create(
+          rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext(), 0),
+          ptr);
+    };
+
+    Value inputRaw = extractMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value outputRaw = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value inputPtr = castToGeneric(inputRaw);
+    Value outputPtr = castToGeneric(outputRaw);
+
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+
+    // Build per-dimension constants [N, C, H, W] for input and output
+    // (ReLU: input shape == output shape)
+    SmallVector<Value, 4> inputDims;
+    MemRefDescriptor inputDesc(adaptor.getInput());
+    for (auto i : llvm::seq<int64_t>(inputType.getRank())) {
+      if (inputType.isDynamicDim(i))
+        inputDims.push_back(inputDesc.size(rewriter, loc, i));
+      else
+        inputDims.push_back(createI64Const(inputType.getDimSize(i)));
+    }
+    // Pad to 4 dims if rank < 4
+    while ((int64_t)inputDims.size() < 4)
+      inputDims.insert(inputDims.begin(), createI64Const(1));
+
+    SmallVector<Type, 11> paramTypes = {
+        ptrType,  // state
+        ptrType, i64Type, i64Type, i64Type, i64Type,  // input + NCHW
+        ptrType, i64Type, i64Type, i64Type, i64Type   // output + NCHW
+    };
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapMiopenActivationForwardRelu, paramTypes,
+        i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value, 11> args = {
+        statePtr,
+        inputPtr,  inputDims[0], inputDims[1], inputDims[2], inputDims[3],
+        outputPtr, inputDims[0], inputDims[1], inputDims[2], inputDims[3]};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// hip.gemm lowering
+//   -> wrap_hipblas_sgemm(state, A, B, C, Y, m, n, k, alpha, beta, transA, transB)
+//===----------------------------------------------------------------------===//
+
+static constexpr const char *kWrapHipblasSgemm = "wrap_hipblas_sgemm";
+
+struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(GemmOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+    Type f32Type = rewriter.getF32Type();
+
+    Value statePtr = adaptor.getCtx();
+    Value aPtr = extractMemRefPtr(adaptor.getA(), rewriter, loc);
+    Value bPtr = extractMemRefPtr(adaptor.getB(), rewriter, loc);
+    Value cPtr = extractMemRefPtr(adaptor.getC(), rewriter, loc);
+    Value yPtr = extractMemRefPtr(adaptor.getY(), rewriter, loc);
+
+    // Declare the function (flexible signature — just emit the call)
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType,
+                                    ptrType, ptrType};
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapHipblasSgemm, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value> args = {statePtr, aPtr, bPtr, cPtr, yPtr};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // ConvertHipToLLVM Pass
 //===----------------------------------------------------------------------===//
 
@@ -1743,7 +1873,8 @@ void ConvertHipToLLVMPass::runOnOperation() {
                RmsNormOpLowering, SkipRmsNormOpLowering, RopeOpLowering,
                MiopenSoftmaxOpLowering, TransposeOpLowering, GatherOpLowering,
                SiluOpLowering, SigmoidOpLowering, MulOpLowering, SubOpLowering,
-               CastOpLowering, ReduceSumOpLowering, GqaOpLowering>(
+               CastOpLowering, ReduceSumOpLowering, GqaOpLowering,
+               ReluOpLowering, GemmOpLowering>(
       typeConverter);
   patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter,
                                                        kMiopenAdd);

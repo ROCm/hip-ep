@@ -23,7 +23,7 @@
 
 // Module-level: constants file attribute, sizes, and offsets.
 // CHECK: module attributes {
-// CHECK-SAME: hip.constants_file = "model.constants.bin"
+// CHECK-SAME: hip.constants_file = "constants.bin"
 // CHECK-SAME: hipdnn.constant_offsets = array<i64:
 // CHECK-SAME: hipdnn.constant_sizes = array<i64:
 

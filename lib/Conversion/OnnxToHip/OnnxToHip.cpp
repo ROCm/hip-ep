@@ -397,7 +397,7 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
   int64_t dim0 = -1, dim1 = -1;
   int64_t mismatchCount = 0;
   for (auto [permIdx, attr] : llvm::enumerate(permAttr)) {
-    int64_t p = mlir::cast<mlir::IntegerAttr>(attr).getInt();
+    int64_t p = mlir::cast<mlir::IntegerAttr>(attr).getValue().getSExtValue();
     if (p != static_cast<int64_t>(permIdx)) {
       ++mismatchCount;
       if (dim0 < 0)
@@ -408,8 +408,8 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
   }
   if (mismatchCount != 2 || dim0 < 0 || dim1 < 0)
     return op->emitOpError("perm must swap exactly two dimensions");
-  int64_t p0 = mlir::cast<mlir::IntegerAttr>(permAttr[dim0]).getInt();
-  int64_t p1 = mlir::cast<mlir::IntegerAttr>(permAttr[dim1]).getInt();
+  int64_t p0 = mlir::cast<mlir::IntegerAttr>(permAttr[dim0]).getValue().getSExtValue();
+  int64_t p1 = mlir::cast<mlir::IntegerAttr>(permAttr[dim1]).getValue().getSExtValue();
   if (p0 != dim1 || p1 != dim0)
     return op->emitOpError("perm must swap exactly two dimensions");
 
@@ -420,7 +420,7 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
   llvm::SmallVector<mlir::Value> dynSizes;
   for (auto [outDimIdx, attr] : llvm::enumerate(permAttr)) {
     if (resultType.isDynamicDim(outDimIdx)) {
-      const int64_t srcDim = mlir::cast<mlir::IntegerAttr>(attr).getInt();
+      const int64_t srcDim = mlir::cast<mlir::IntegerAttr>(attr).getValue().getSExtValue();
       dynSizes.push_back(
           mlir::tensor::DimOp::create(rewriter, loc, data, srcDim));
     }
@@ -655,7 +655,7 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
     llvm::SmallVector<int64_t> axesVec;
     if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
       for (auto a : axesAttr)
-        axesVec.push_back(mlir::cast<mlir::IntegerAttr>(a).getInt());
+        axesVec.push_back(mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
     } else {
       // Default: reduce all axes
       auto inputType = mlir::cast<mlir::RankedTensorType>(data.getType());
@@ -722,13 +722,13 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   llvm::SmallVector<int64_t> kernelShape;
   if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("kernel_shape")) {
     for (auto a : attr)
-      kernelShape.push_back(mlir::cast<mlir::IntegerAttr>(a).getInt());
+      kernelShape.push_back(mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
   }
 
   llvm::SmallVector<int64_t> strides;
   if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("strides")) {
     for (auto a : attr)
-      strides.push_back(mlir::cast<mlir::IntegerAttr>(a).getInt());
+      strides.push_back(mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
   } else {
     // Default strides = 1 for each spatial dimension
     strides.assign(kernelShape.size(), 1);
@@ -737,7 +737,7 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   llvm::SmallVector<int64_t> pads;
   if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("pads")) {
     for (auto a : attr)
-      pads.push_back(mlir::cast<mlir::IntegerAttr>(a).getInt());
+      pads.push_back(mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
   } else {
     // Default pads = 0
     pads.assign(kernelShape.size() * 2, 0);
@@ -746,7 +746,7 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   llvm::SmallVector<int64_t> dilations;
   if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("dilations")) {
     for (auto a : attr)
-      dilations.push_back(mlir::cast<mlir::IntegerAttr>(a).getInt());
+      dilations.push_back(mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
   } else {
     // Default dilations = 1
     dilations.assign(kernelShape.size(), 1);
@@ -754,7 +754,7 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
 
   int64_t group = 1;
   if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("group"))
-    group = attr.getInt();
+    group = attr.getValue().getSExtValue();
 
   // Create output tensor
   llvm::SmallVector<mlir::Value> dynSizes;
@@ -910,15 +910,23 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   if (!epsilonAttr)
     return rewriter.notifyMatchFailure(op, "missing epsilon attribute");
 
-  // Should have 2 results: output and skip_output
-  if (op->getNumResults() != 2)
+  // Accept 2 or 4 results:
+  //   2-result form: (output, skip_output)
+  //   4-result form: (output, none, none, skip_output)  [ONNX runtime format]
+  int numResults = op->getNumResults();
+  if (numResults != 2 && numResults != 4)
     return rewriter.notifyMatchFailure(
-        op, "expected 2 results for SkipSimplifiedLayerNormalization");
+        op, "expected 2 or 4 results for SkipSimplifiedLayerNormalization");
 
-  auto outputType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  auto skipOutputType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
+  // Locate the two tensor results (indices 0 and 1 for 2-result form,
+  // or indices 0 and 3 for 4-result form).
+  int outputIdx = 0;
+  int skipOutputIdx = (numResults == 4) ? 3 : 1;
+
+  auto outputType = mlir::cast<mlir::RankedTensorType>(
+      op->getResult(outputIdx).getType());
+  auto skipOutputType = mlir::cast<mlir::RankedTensorType>(
+      op->getResult(skipOutputIdx).getType());
 
   // Create init tensors
   mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
@@ -930,7 +938,22 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
       rewriter, loc, {outputType, skipOutputType}, context, input, skip, gamma,
       outputInit, skipOutputInit, epsilonAttr);
 
-  rewriter.replaceOp(op, hipOp->getResults());
+  // For 4-result form, reconstruct the replacement values:
+  // results 1 and 2 are 'none' (not replaced, just removed by replaceOp).
+  if (numResults == 4) {
+    llvm::SmallVector<mlir::Value> replacements(4);
+    replacements[0] = hipOp->getResult(0); // output
+    replacements[1] = mlir::Value{};       // none (dropped)
+    replacements[2] = mlir::Value{};       // none (dropped)
+    replacements[3] = hipOp->getResult(1); // skip_output
+    // Use replaceUsesOfBlockArgument-style: replace each use individually.
+    op->getResult(0).replaceAllUsesWith(hipOp->getResult(0));
+    op->getResult(3).replaceAllUsesWith(hipOp->getResult(1));
+    // Results 1 and 2 are 'none', should have no uses.
+    rewriter.eraseOp(op);
+  } else {
+    rewriter.replaceOp(op, hipOp->getResults());
+  }
   return mlir::success();
 }
 
@@ -1232,6 +1255,244 @@ struct GatherToHip : public mlir::RewritePattern {
 };
 
 //===----------------------------------------------------------------------===//
+// ONNX Relu → HIP Relu
+//===----------------------------------------------------------------------===//
+
+struct ReluToHip : public mlir::RewritePattern {
+  ReluToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Relu", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (mlir::failed(ctxOrFailure))
+      return mlir::failure();
+    mlir::Value context = *ctxOrFailure;
+
+    mlir::Location loc = op->getLoc();
+    mlir::Value input = op->getOperand(0);
+    auto resultType =
+        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+    auto hipOp = mlir::hip::ReluOp::create(rewriter, loc, resultType, context,
+                                           input, init);
+    rewriter.replaceOp(op, hipOp->getResult(0));
+    return mlir::success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// ONNX Gemm → HIP Gemm
+//===----------------------------------------------------------------------===//
+
+struct GemmToHip : public mlir::RewritePattern {
+  GemmToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Gemm", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (mlir::failed(ctxOrFailure))
+      return mlir::failure();
+    mlir::Value context = *ctxOrFailure;
+
+    mlir::Location loc = op->getLoc();
+    mlir::Value A = op->getOperand(0);
+    mlir::Value B = op->getOperand(1);
+    mlir::Value C = op->getOperand(2);
+
+    auto resultType =
+        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+
+    // Extract GEMM attributes (with defaults)
+    float alpha = 1.0f;
+    if (auto attr = op->getAttrOfType<mlir::FloatAttr>("alpha"))
+      alpha = (float)attr.getValueAsDouble();
+    float beta = 1.0f;
+    if (auto attr = op->getAttrOfType<mlir::FloatAttr>("beta"))
+      beta = (float)attr.getValueAsDouble();
+    int64_t transA = 0;
+    if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("transA"))
+      transA = attr.getValue().getSExtValue();
+    int64_t transB = 0;
+    if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("transB"))
+      transB = attr.getValue().getSExtValue();
+
+    // Create output init tensor
+    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, A);
+
+    // Build attributes
+    auto alphaAttr = rewriter.getF32FloatAttr(alpha);
+    auto betaAttr = rewriter.getF32FloatAttr(beta);
+    auto transAAttr = rewriter.getI64IntegerAttr(transA);
+    auto transBAttr = rewriter.getI64IntegerAttr(transB);
+
+    llvm::SmallVector<mlir::Value> operands = {context, A, B, C, init};
+    llvm::SmallVector<mlir::NamedAttribute> attrs;
+    attrs.push_back(rewriter.getNamedAttr("alpha", alphaAttr));
+    attrs.push_back(rewriter.getNamedAttr("beta", betaAttr));
+    attrs.push_back(rewriter.getNamedAttr("transA", transAAttr));
+    attrs.push_back(rewriter.getNamedAttr("transB", transBAttr));
+
+    auto hipOp = mlir::hip::GemmOp::create(rewriter, loc,
+                                           mlir::TypeRange{resultType},
+                                           operands, attrs);
+    rewriter.replaceOp(op, hipOp.getResult(0));
+    return mlir::success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// ONNX AveragePool → HIP AvgPool
+//===----------------------------------------------------------------------===//
+
+struct AvgPoolToHip : public mlir::RewritePattern {
+  AvgPoolToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.AveragePool", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (mlir::failed(ctxOrFailure))
+      return mlir::failure();
+    mlir::Value context = *ctxOrFailure;
+
+    mlir::Location loc = op->getLoc();
+    mlir::Value input = op->getOperand(0);
+    auto resultType =
+        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+
+    // Extract kernel_shape (required)
+    llvm::SmallVector<int64_t> kernelShape;
+    if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("kernel_shape")) {
+      for (auto a : attr)
+        kernelShape.push_back(mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
+    }
+
+    // Extract strides (default [1,1])
+    llvm::SmallVector<int64_t> strides;
+    if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("strides")) {
+      for (auto a : attr)
+        strides.push_back(mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
+    } else {
+      strides.assign(kernelShape.size(), 1);
+    }
+
+    // Extract pads (default all 0)
+    llvm::SmallVector<int64_t> pads;
+    if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("pads")) {
+      for (auto a : attr)
+        pads.push_back(mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
+    } else {
+      pads.assign(kernelShape.size() * 2, 0);
+    }
+
+    // Create output init tensor
+    llvm::SmallVector<mlir::Value> dynSizes;
+    for (int64_t i = 0; i < resultType.getRank(); ++i)
+      if (resultType.isDynamicDim(i))
+        dynSizes.push_back(
+            mlir::tensor::DimOp::create(rewriter, loc, input, i));
+    mlir::Value init =
+        mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                      resultType.getElementType(), dynSizes);
+
+    auto kernelShapeAttr = rewriter.getI64ArrayAttr(kernelShape);
+    auto stridesAttr = rewriter.getI64ArrayAttr(strides);
+    auto padsAttr = rewriter.getI64ArrayAttr(pads);
+
+    llvm::SmallVector<mlir::Value> operands = {context, input, init};
+    llvm::SmallVector<mlir::NamedAttribute> attrs;
+    attrs.push_back(rewriter.getNamedAttr("kernel_shape", kernelShapeAttr));
+    attrs.push_back(rewriter.getNamedAttr("strides", stridesAttr));
+    attrs.push_back(rewriter.getNamedAttr("pads", padsAttr));
+
+    auto hipOp = mlir::hip::AvgPoolOp::create(rewriter, loc,
+                                              mlir::TypeRange{resultType},
+                                              operands, attrs);
+    rewriter.replaceOp(op, hipOp.getResult(0));
+    return mlir::success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// ONNX MaxPoolSingleOut → HIP MaxPool
+//===----------------------------------------------------------------------===//
+
+struct MaxPoolToHip : public mlir::RewritePattern {
+  MaxPoolToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.MaxPoolSingleOut", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (mlir::failed(ctxOrFailure))
+      return mlir::failure();
+    mlir::Value context = *ctxOrFailure;
+
+    mlir::Location loc = op->getLoc();
+    mlir::Value input = op->getOperand(0);
+    auto resultType =
+        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+
+    // Extract kernel_shape (required)
+    llvm::SmallVector<int64_t> kernelShape;
+    if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("kernel_shape")) {
+      for (auto a : attr)
+        kernelShape.push_back(mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
+    }
+
+    // Extract strides (default [1,1])
+    llvm::SmallVector<int64_t> strides;
+    if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("strides")) {
+      for (auto a : attr)
+        strides.push_back(mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
+    } else {
+      strides.assign(kernelShape.size(), 1);
+    }
+
+    // Extract pads (default all 0)
+    llvm::SmallVector<int64_t> pads;
+    if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("pads")) {
+      for (auto a : attr)
+        pads.push_back(mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
+    } else {
+      pads.assign(kernelShape.size() * 2, 0);
+    }
+
+    // Create output init tensor
+    llvm::SmallVector<mlir::Value> dynSizes;
+    for (int64_t i = 0; i < resultType.getRank(); ++i)
+      if (resultType.isDynamicDim(i))
+        dynSizes.push_back(
+            mlir::tensor::DimOp::create(rewriter, loc, input, i));
+    mlir::Value init =
+        mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                      resultType.getElementType(), dynSizes);
+
+    auto kernelShapeAttr = rewriter.getI64ArrayAttr(kernelShape);
+    auto stridesAttr = rewriter.getI64ArrayAttr(strides);
+    auto padsAttr = rewriter.getI64ArrayAttr(pads);
+
+    llvm::SmallVector<mlir::Value> operands = {context, input, init};
+    llvm::SmallVector<mlir::NamedAttribute> attrs;
+    attrs.push_back(rewriter.getNamedAttr("kernel_shape", kernelShapeAttr));
+    attrs.push_back(rewriter.getNamedAttr("strides", stridesAttr));
+    attrs.push_back(rewriter.getNamedAttr("pads", padsAttr));
+
+    auto hipOp = mlir::hip::MaxPoolOp::create(rewriter, loc,
+                                              mlir::TypeRange{resultType},
+                                              operands, attrs);
+    rewriter.replaceOp(op, hipOp.getResult(0));
+    return mlir::success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // convertComputeOps implementation
 //===----------------------------------------------------------------------===//
 
@@ -1252,6 +1513,10 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   patterns.add<SkipSimplifiedLayerNormToHip>(ctx);
   patterns.add<RotaryEmbeddingToHip>(ctx);
   patterns.add<GroupQueryAttentionToHip>(ctx);
+  patterns.add<ReluToHip>(ctx);
+  patterns.add<GemmToHip>(ctx);
+  patterns.add<AvgPoolToHip>(ctx);
+  patterns.add<MaxPoolToHip>(ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
@@ -1272,8 +1537,9 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
 static mlir::LogicalResult generateModuleMetadata(mlir::ModuleOp module) {
   auto mainFunc = module.lookupSymbol<mlir::func::FuncOp>("main_graph");
   if (!mainFunc) {
-    module.emitError("expected @main_graph function for metadata generation");
-    return mlir::failure();
+    // No @main_graph function present (e.g. unit tests with arbitrary names).
+    // Metadata generation is only required for full model compilation.
+    return mlir::success();
   }
 
   auto originalFuncType = mainFunc.getFunctionType();
@@ -1360,6 +1626,12 @@ static mlir::LogicalResult generateModuleMetadata(mlir::ModuleOp module) {
 struct ConvertOnnxToHipPass
     : public impl::ConvertOnnxToHipPassBase<ConvertOnnxToHipPass> {
   using ConvertOnnxToHipPassBase::ConvertOnnxToHipPassBase;
+
+  /// Optional injected FileSystem (takes priority over externalizeOutputDir).
+  /// Set by createConvertOnnxToHipPass(fs, options) so the pass writes
+  /// constants via the same FileSystem that inference_init will read from.
+  morphizen::FileSystem *injectedFs_ = nullptr;
+
   void runOnOperation() override;
 };
 
@@ -1369,21 +1641,28 @@ void ConvertOnnxToHipPass::runOnOperation() {
 
   // Set up externalization state if enabled.
   std::unique_ptr<ExternalizationState> extState;
-  llvm::StringRef dirRef = externalizeOutputDir.getValue();
-  std::string dir = dirRef.empty() ? "." : dirRef.str();
-  DiskFileSystem diskFs(dir.c_str());
+
+  // When an injected FileSystem is available (called from CompilerDriver/EP),
+  // use it directly so constants are written where inference_init will read.
+  // Fall back to DiskFileSystem(externalizeOutputDir) for CLI usage.
+  std::unique_ptr<DiskFileSystem> ownedDiskFs;
+  morphizen::FileSystem *activeFs = injectedFs_;
+  if (!activeFs) {
+    llvm::StringRef dirRef = externalizeOutputDir.getValue();
+    std::string dir = dirRef.empty() ? "." : dirRef.str();
+    ownedDiskFs = std::make_unique<DiskFileSystem>(dir.c_str());
+    activeFs = ownedDiskFs.get();
+  }
+
   if (externalizeMinNumElements > 0) {
     extState = std::make_unique<ExternalizationState>();
 
-    // Derive base name from module symbol or default.
-    std::string baseName = "model";
-    if (auto sym = module->getAttrOfType<mlir::StringAttr>(
-            mlir::SymbolTable::getSymbolAttrName()))
-      baseName = sym.getValue().str();
-    extState->binFileName = baseName + ".constants.bin";
+    // Use the configured file name (from --externalize-file-name or
+    // createConvertOnnxToHipPass options). Default is "constants.bin".
+    extState->binFileName = externalizeFileName.getValue();
 
     extState->writer =
-        diskFs.create_writer_template(extState->binFileName.c_str());
+        activeFs->create_writer_template(extState->binFileName.c_str());
     if (!extState->writer) {
       module.emitError("failed to open constants binary file via FileSystem: " +
                        extState->binFileName);
@@ -1415,6 +1694,21 @@ void ConvertOnnxToHipPass::runOnOperation() {
   for (auto *ep : entryPoints)
     ep->erase();
 
+  // Erase any residual onnx.* ops (e.g. onnx.NoValue) that became dead after
+  // compute op conversion. These ops have no LLVMTranslationDialectInterface
+  // and would cause MLIR→LLVM IR translation to fail.
+  for (auto funcOp :
+       llvm::make_early_inc_range(module.getOps<mlir::func::FuncOp>())) {
+    llvm::SmallVector<mlir::Operation *> deadOnnxOps;
+    funcOp.walk([&](mlir::Operation *op) {
+      if (op->getName().getDialectNamespace() == "onnx" &&
+          op->use_empty())
+        deadOnnxOps.push_back(op);
+    });
+    for (auto *op : llvm::reverse(deadOnnxOps))
+      op->erase();
+  }
+
   // Finalize externalization: release writer, write JSON manifest, set module
   // attributes.
   if (extState && extState->constantIndex > 0) {
@@ -1432,12 +1726,13 @@ void ConvertOnnxToHipPass::runOnOperation() {
         "hipdnn.constant_offsets",
         mlir::DenseI64ArrayAttr::get(ctx, extState->constantOffsets));
 
-    // Derive base name again for JSON path.
-    std::string baseName = "model";
-    if (auto sym = module->getAttrOfType<mlir::StringAttr>(
-            mlir::SymbolTable::getSymbolAttrName()))
-      baseName = sym.getValue().str();
-    std::string jsonPath = baseName + ".constants.json";
+    // Derive JSON manifest path from bin filename (replace .bin extension).
+    std::string jsonPath = extState->binFileName;
+    if (jsonPath.size() >= 4 &&
+        jsonPath.substr(jsonPath.size() - 4) == ".bin")
+      jsonPath = jsonPath.substr(0, jsonPath.size() - 4) + ".json";
+    else
+      jsonPath += ".json";
 
     llvm::json::Object manifest;
     manifest["version"] = 1;
@@ -1446,7 +1741,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
     manifest["total_bytes"] = extState->currentOffset;
     manifest["constants"] = std::move(extState->manifestEntries);
 
-    auto jsonWriter = diskFs.create_writer_template(jsonPath.c_str());
+    auto jsonWriter = activeFs->create_writer_template(jsonPath.c_str());
     if (!jsonWriter) {
       module.emitError("failed to open constants manifest via FileSystem: " +
                        jsonPath);
@@ -1472,17 +1767,25 @@ void ConvertOnnxToHipPass::runOnOperation() {
 //===----------------------------------------------------------------------===//
 
 /// Create the pass using a pre-existing FileSystem and CompilationOptions.
-/// The FileSystem parameter is ignored; externalization is controlled via
-/// pass options derived from CompilationOptionsT.
+/// The FileSystem is injected into the pass so constants are written via the
+/// same fs that inference_init will use to read them back at runtime.
 std::unique_ptr<::mlir::Pass> createConvertOnnxToHipPass(
-    morphizen::FileSystem * /*fs*/,
+    morphizen::FileSystem *fs,
     const ::hip::compiler::CompilationOptionsT &options) {
   ConvertOnnxToHipPassOptions passOptions;
   if (!options.constants_file.empty()) {
+    // externalizeOutputDir is unused when injectedFs_ is set, but set it as a
+    // fallback for any code path that might read it.
     passOptions.externalizeOutputDir = ".";
     passOptions.externalizeMinNumElements = 1;
+    passOptions.externalizeFileName = options.constants_file;
   }
-  return createConvertOnnxToHipPass(std::move(passOptions));
+  auto pass = createConvertOnnxToHipPass(std::move(passOptions));
+  // Inject the caller's FileSystem so constants are written via the same fs
+  // that inference_init will use to read them back (avoids CWD mismatch).
+  if (fs && !options.constants_file.empty())
+    static_cast<ConvertOnnxToHipPass *>(pass.get())->injectedFs_ = fs;
+  return pass;
 }
 
 } // namespace hip

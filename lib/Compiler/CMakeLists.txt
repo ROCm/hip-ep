@@ -61,6 +61,7 @@ target_include_directories(LibHipCompiler PUBLIC
   ${CMAKE_BINARY_DIR}/include  # For generated TableGen files
   ${CMAKE_BINARY_DIR}/lib
   ${CMAKE_BINARY_DIR}/proto  # For generated FlatBuffers headers
+
 )
 
 # Configure custom kernels library path for CompilerDriver

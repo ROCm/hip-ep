@@ -77,6 +77,7 @@ inline void loadAllDialects(mlir::MLIRContext &context) {
   mlir::DialectRegistry registry;
   registerAllDialects(registry);
   context.appendDialectRegistry(registry);
+  context.allowUnregisteredDialects(true);
   context.loadAllAvailableDialects();
 }
 

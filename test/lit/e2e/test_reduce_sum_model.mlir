@@ -23,7 +23,7 @@
 module {
   func.func @main_graph(%arg0: tensor<1x128xi64> {onnx.name = "attention_mask"}, %arg1: tensor<i64> {onnx.name = "/model/constants/TensorProto.INT64/1D/1"}) -> (tensor<1x1xi64> {onnx.name = "/model/attn_mask_reformat/attn_mask_subgraph/ReduceSum/output_0"}) {
     %0 = "onnx.ReduceSum"(%arg0, %arg1) <{keepdims = 1 : si64, noop_with_empty_axes = 0 : si64}> {onnx_node_name = "/model/attn_mask_reformat/attn_mask_subgraph/ReduceSum"} : (tensor<1x128xi64>, tensor<i64>) -> tensor<1x1xi64>
-    onnx.Return %0 : tensor<1x1xi64>
+    "onnx.Return"(%0) : (tensor<1x1xi64>) -> ()
   }
   "onnx.EntryPoint"() <{func = @main_graph}> : () -> ()
 }

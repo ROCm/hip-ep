@@ -13,6 +13,7 @@ add_dependencies(hip-mlir-opt
 )
 
 target_link_libraries(hip-mlir-opt PRIVATE
+  LibHipCompiler
   HipDialectIR
   HipDialectTransforms
   HipToLLVM

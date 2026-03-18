@@ -23,7 +23,7 @@
 module {
   func.func @main_graph(%arg0: tensor<2xi64> {onnx.name = "/model/attn_mask_reformat/attn_mask_subgraph/Shape/output_0"}, %arg1: tensor<i64> {onnx.name = "/model/constants/TensorProto.INT64/0D/1"}) -> (tensor<i64> {onnx.name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather/output_0"}) {
     %0 = "onnx.Gather"(%arg0, %arg1) <{axis = 0 : si64}> {onnx_node_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather"} : (tensor<2xi64>, tensor<i64>) -> tensor<i64>
-    onnx.Return %0 : tensor<i64>
+    "onnx.Return"(%0) : (tensor<i64>) -> ()
   }
   "onnx.EntryPoint"() <{func = @main_graph}> : () -> ()
 }
