@@ -23,7 +23,8 @@ namespace mlir {
 namespace hip {
 
 template <typename NativeT>
-std::string toJson(const NativeT &native, const char *schema) {
+bool toJson(const NativeT &native, const char *schema, std::string &result,
+            std::string &error) {
   using FlatT = typename NativeT::TableType;
 
   flatbuffers::FlatBufferBuilder fbb;
@@ -34,11 +35,13 @@ std::string toJson(const NativeT &native, const char *schema) {
   // Without this, GenerateText produces FlatBuffers relaxed JSON with
   // unquoted keys, which standard JSON parsers reject.
   parser.opts.strict_json = true;
-  parser.Parse(schema);
+  if (!parser.Parse(schema)) {
+    error = "Schema parse error: " + std::string(parser.error_);
+    return false;
+  }
 
-  std::string json;
-  flatbuffers::GenerateText(parser, fbb.GetBufferPointer(), &json);
-  return json;
+  flatbuffers::GenerateText(parser, fbb.GetBufferPointer(), &result);
+  return true;
 }
 
 template <typename NativeT>

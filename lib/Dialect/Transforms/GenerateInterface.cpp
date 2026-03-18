@@ -18,6 +18,7 @@
 #include "flatbuffers/flatbuffers.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
+#include "hip/debug_log.h"
 #include "hip/flatbuffers_json.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -123,8 +124,13 @@ std::string buildMetadataJson(ModuleOp module,
                               const std::string &constantsFile) {
   mlir::hip::HipModelMetaInfoT meta =
       buildMetadataNative(module, constantsFile);
-  return mlir::hip::toJson<mlir::hip::HipModelMetaInfoT>(
-      meta, mlir::hip::k_model_metadata_schema());
+  std::string json, error;
+  if (!mlir::hip::toJson<mlir::hip::HipModelMetaInfoT>(
+          meta, mlir::hip::k_model_metadata_schema(), json, error)) {
+    llvm::errs() << "[GenerateInterface] " << error << "\n";
+    return "";
+  }
+  return json;
 }
 
 /// Generate global constant string for metadata JSON
@@ -242,7 +248,7 @@ public:
     generateMetadataGlobal(module, json);
     generateInferenceGetMetadataJson(module);
 
-    llvm::errs() << "[GenerateInterface] Generated 4 interface functions\n";
+    COMPILER_DEBUG_LOG("[GenerateInterface] Generated 4 interface functions\n");
   }
 
 private:
@@ -516,8 +522,8 @@ private:
         module.lookupSymbol<LLVM::LLVMFuncOp>("inference_compute") ||
         module.lookupSymbol<LLVM::LLVMFuncOp>("inference_cleanup") ||
         module.lookupSymbol<LLVM::LLVMFuncOp>("inference_get_metadata_json")) {
-      llvm::errs() << "[GenerateInterface] Interface functions already exist. "
-                   << "Pass already ran.\n";
+      COMPILER_DEBUG_LOG("[GenerateInterface] Interface functions already exist. "
+                        << "Pass already ran.\n");
       return failure();
     }
 
@@ -992,7 +998,7 @@ private:
 
     auto mainFunc = module.lookupSymbol<LLVM::LLVMFuncOp>("main_graph");
     if (!mainFunc) {
-      llvm::errs() << "[GenerateInterface] Warning: @main_graph not found\n";
+      COMPILER_DEBUG_LOG("[GenerateInterface] Warning: @main_graph not found\n");
       LLVM::BrOp::create(builder, loc, mainSuccessBlock);
     } else {
       Value mainRet = LLVM::CallOp::create(builder, loc, mainFunc,
