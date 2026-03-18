@@ -32,21 +32,27 @@ message(STATUS "Found Python: ${Python3_EXECUTABLE}")
 # Clang REQUIRED for bitcode generation
 find_program(CLANG_EXECUTABLE NAMES clang clang-cl
     PATHS
-        ${LLVM_BINARY_DIR}/bin
-        ${LLVM_TOOLS_BINARY_DIR}
-        ${CMAKE_PREFIX_PATH}/bin
+        ${LLVM_BINARY_DIR}/bin       # When LLVM built from source
+        ${LLVM_TOOLS_BINARY_DIR}     # When LLVM installed via package
 )
 
 if(NOT CLANG_EXECUTABLE)
     message(FATAL_ERROR
         "Clang compiler not found. Runtime IR merging is REQUIRED.\n"
         "\n"
+        "Why Clang is needed:\n"
+        "  - Compiles Runtime to LLVM bitcode (.bc) for zero-cost abstraction\n"
+        "  - Enables cross-module inlining (generated code + Runtime)\n"
+        "  - MSVC and GCC cannot produce compatible LLVM bitcode\n"
+        "\n"
+        "To fix:\n"
+        "  - Install LLVM with Clang: https://releases.llvm.org/\n"
+        "  - Or build LLVM from source with -DLLVM_ENABLE_PROJECTS=clang\n"
+        "\n"
         "Searched in:\n"
         "  - ${LLVM_BINARY_DIR}/bin\n"
         "  - ${LLVM_TOOLS_BINARY_DIR}\n"
-        "  - ${CMAKE_PREFIX_PATH}/bin\n"
-        "\n"
-        "Please ensure Clang is in one of these paths or in system PATH.\n")
+        "  - System PATH\n")
 endif()
 
 message(STATUS "Found Clang for bitcode generation: ${CLANG_EXECUTABLE}")
@@ -56,7 +62,6 @@ find_program(LLVM_LINK_EXECUTABLE NAMES llvm-link
     PATHS
         ${LLVM_BINARY_DIR}/bin
         ${LLVM_TOOLS_BINARY_DIR}
-        ${CMAKE_PREFIX_PATH}/bin
 )
 
 if(NOT LLVM_LINK_EXECUTABLE)
@@ -81,24 +86,6 @@ if(NOT MORPHIZEN_FOUNDATION_INCLUDE_DIR)
         "Expected in-tree at include/morphizen-foundation/file_io.hpp.")
 endif()
 message(STATUS "Found morphizen-foundation: ${MORPHIZEN_FOUNDATION_INCLUDE_DIR}")
-
-# ============================================================================
-# STEP 1c: Find FlatBuffers
-# ============================================================================
-
-find_package(flatbuffers QUIET)
-if(NOT flatbuffers_FOUND)
-    message(STATUS "flatbuffers package not found, will use manual include paths")
-    # Set a dummy target for compatibility
-    add_library(flatbuffers_dummy INTERFACE)
-    # Add prebuilt include path
-    target_include_directories(flatbuffers_dummy INTERFACE
-        D:/Develop/m/prebuilt-local/include
-    )
-    add_library(flatbuffers::flatbuffers ALIAS flatbuffers_dummy)
-else()
-    message(STATUS "Found flatbuffers: ${flatbuffers_DIR}")
-endif()
 
 # ============================================================================
 # STEP 2: Determine Runtime Mode (Mock or Real)
