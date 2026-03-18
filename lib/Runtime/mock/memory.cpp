@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
 #include "hipdnn_ep_runtime.h"
@@ -9,26 +9,26 @@
 #include <cstring>
 
 #ifdef _WIN32
-#  include <windows.h>
-#  define MOCK_PRINT(...)                                                      \
-    do {                                                                       \
-      char buf[512];                                                           \
-      snprintf(buf, sizeof(buf), __VA_ARGS__);                                 \
-      OutputDebugStringA(buf);                                                 \
-      fprintf(stderr, "%s", buf);                                              \
-      fflush(stderr);                                                          \
-    } while (0)
+#include <windows.h>
+#define MOCK_PRINT(...)                                                        \
+  do {                                                                         \
+    char buf[512];                                                             \
+    snprintf(buf, sizeof(buf), __VA_ARGS__);                                   \
+    OutputDebugStringA(buf);                                                   \
+    fprintf(stderr, "%s", buf);                                                \
+    fflush(stderr);                                                            \
+  } while (0)
 #else
-#  define MOCK_PRINT(...)                                                      \
-    do {                                                                       \
-      printf(__VA_ARGS__);                                                     \
-      fflush(stdout);                                                          \
-    } while (0)
+#define MOCK_PRINT(...)                                                        \
+  do {                                                                         \
+    printf(__VA_ARGS__);                                                       \
+    fflush(stdout);                                                            \
+  } while (0)
 #endif
 
 // Mock HIP memory copy wrapper (just uses memcpy)
 // Follows opaque RuntimeState pattern - extracts stream internally
-int wrap_hipMemcpyAsync(RuntimeState* state, void* dst_ptr, const void* src_ptr,
+int wrap_hipMemcpyAsync(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                         size_t size_bytes) {
   if (!state) {
     fprintf(stderr, "wrap_hipMemcpyAsync: null state\n");

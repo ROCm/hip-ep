@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
 #ifndef HIP_EP_RUNTIME_H
@@ -30,9 +30,9 @@ extern "C" {
 //   4. Update each backend mapping function
 //==============================================================================
 
-#define HIPDNN_EP_DATATYPE_FLOAT    0   // f32, 4 bytes
-#define HIPDNN_EP_DATATYPE_HALF     1   // f16, 2 bytes
-#define HIPDNN_EP_DATATYPE_BFLOAT16 2   // bf16, 2 bytes
+#define HIPDNN_EP_DATATYPE_FLOAT 0    // f32, 4 bytes
+#define HIPDNN_EP_DATATYPE_HALF 1     // f16, 2 bytes
+#define HIPDNN_EP_DATATYPE_BFLOAT16 2 // bf16, 2 bytes
 
 //==============================================================================
 // Backend-Independent Tensor Operation Identifiers
@@ -42,36 +42,49 @@ extern "C" {
 // library-specific ops in each backend (e.g. miopenTensorOpMul).
 //==============================================================================
 
-#define HIPDNN_EP_TENSOR_OP_MUL 0   // element-wise multiply
-#define HIPDNN_EP_TENSOR_OP_ADD 1   // element-wise add
-#define HIPDNN_EP_TENSOR_OP_MIN 2   // element-wise min
-#define HIPDNN_EP_TENSOR_OP_MAX 3   // element-wise max
+#define HIPDNN_EP_TENSOR_OP_MUL 0 // element-wise multiply
+#define HIPDNN_EP_TENSOR_OP_ADD 1 // element-wise add
+#define HIPDNN_EP_TENSOR_OP_MIN 2 // element-wise min
+#define HIPDNN_EP_TENSOR_OP_MAX 3 // element-wise max
 
-static inline const char* hipdnn_ep_tensor_op_name(int64_t op) {
+static inline const char *hipdnn_ep_tensor_op_name(int64_t op) {
   switch (op) {
-    case HIPDNN_EP_TENSOR_OP_MUL: return "mul";
-    case HIPDNN_EP_TENSOR_OP_ADD: return "add";
-    case HIPDNN_EP_TENSOR_OP_MIN: return "min";
-    case HIPDNN_EP_TENSOR_OP_MAX: return "max";
-    default:                      return "unknown";
+  case HIPDNN_EP_TENSOR_OP_MUL:
+    return "mul";
+  case HIPDNN_EP_TENSOR_OP_ADD:
+    return "add";
+  case HIPDNN_EP_TENSOR_OP_MIN:
+    return "min";
+  case HIPDNN_EP_TENSOR_OP_MAX:
+    return "max";
+  default:
+    return "unknown";
   }
 }
 
 static inline int64_t hipdnn_ep_datatype_size(int64_t data_type) {
   switch (data_type) {
-    case HIPDNN_EP_DATATYPE_FLOAT:    return 4;
-    case HIPDNN_EP_DATATYPE_HALF:     return 2;
-    case HIPDNN_EP_DATATYPE_BFLOAT16: return 2;
-    default:                          return -1;
+  case HIPDNN_EP_DATATYPE_FLOAT:
+    return 4;
+  case HIPDNN_EP_DATATYPE_HALF:
+    return 2;
+  case HIPDNN_EP_DATATYPE_BFLOAT16:
+    return 2;
+  default:
+    return -1;
   }
 }
 
-static inline const char* hipdnn_ep_datatype_name(int64_t data_type) {
+static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
   switch (data_type) {
-    case HIPDNN_EP_DATATYPE_FLOAT:    return "f32";
-    case HIPDNN_EP_DATATYPE_HALF:     return "f16";
-    case HIPDNN_EP_DATATYPE_BFLOAT16: return "bf16";
-    default:                          return "unknown";
+  case HIPDNN_EP_DATATYPE_FLOAT:
+    return "f32";
+  case HIPDNN_EP_DATATYPE_HALF:
+    return "f16";
+  case HIPDNN_EP_DATATYPE_BFLOAT16:
+    return "bf16";
+  default:
+    return "unknown";
   }
 }
 
@@ -80,7 +93,8 @@ static inline const char* hipdnn_ep_datatype_name(int64_t data_type) {
 //==============================================================================
 //
 // Same pattern as HIPDNN_EP_DATATYPE_* above. Each backend provides an explicit
-// mapping function (e.g. hipdnn_ep_to_miopen_activation in real/activation.cpp).
+// mapping function (e.g. hipdnn_ep_to_miopen_activation in
+// real/activation.cpp).
 //
 // To add a new activation:
 //   1. Add #define here
@@ -89,15 +103,19 @@ static inline const char* hipdnn_ep_datatype_name(int64_t data_type) {
 //==============================================================================
 
 #define HIPDNN_EP_ACTIVATION_SIGMOID 0
-#define HIPDNN_EP_ACTIVATION_RELU    1
-#define HIPDNN_EP_ACTIVATION_TANH    2
+#define HIPDNN_EP_ACTIVATION_RELU 1
+#define HIPDNN_EP_ACTIVATION_TANH 2
 
-static inline const char* hipdnn_ep_activation_name(int64_t activation_mode) {
+static inline const char *hipdnn_ep_activation_name(int64_t activation_mode) {
   switch (activation_mode) {
-    case HIPDNN_EP_ACTIVATION_SIGMOID: return "sigmoid";
-    case HIPDNN_EP_ACTIVATION_RELU:    return "relu";
-    case HIPDNN_EP_ACTIVATION_TANH:    return "tanh";
-    default:                           return "unknown";
+  case HIPDNN_EP_ACTIVATION_SIGMOID:
+    return "sigmoid";
+  case HIPDNN_EP_ACTIVATION_RELU:
+    return "relu";
+  case HIPDNN_EP_ACTIVATION_TANH:
+    return "tanh";
+  default:
+    return "unknown";
   }
 }
 
@@ -129,38 +147,38 @@ typedef struct RuntimeState RuntimeState;
 //   metadata_blob: FlatBuffers binary blob (UdnaModelMetaInfo) baked into DLL
 //   blob_size:     Size of metadata_blob in bytes
 // Return codes: 0=success, 1=alloc/read error, 2-9=GPU handle init error
-int hipdnn_ep_state_init_with_fs(RuntimeState** out_state, void* fs,
-                                 const void* metadata_blob, size_t blob_size);
+int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
+                                 const void *metadata_blob, size_t blob_size);
 
 // Cleanup runtime state (destroys handles, frees memory)
 // Best-effort cleanup - continues even if individual operations fail
 // Returns 0 always (best-effort)
-int hipdnn_ep_state_cleanup(RuntimeState* state);
+int hipdnn_ep_state_cleanup(RuntimeState *state);
 
 // Get GPU stream from state (for passing to HIP operations)
 // Returns: hipStream_t cast to void* (NULL on error)
 // Ownership: Caller does NOT own stream (destroyed in cleanup)
-void* hipdnn_ep_state_get_stream(RuntimeState* state);
+void *hipdnn_ep_state_get_stream(RuntimeState *state);
 
 // Get MIOpen handle from state (for MIOpen operations)
 // Returns: miopenHandle_t cast to void* (NULL on error)
 // Ownership: Caller does NOT own handle (destroyed in cleanup)
-void* hipdnn_ep_state_get_miopen_handle(RuntimeState* state);
+void *hipdnn_ep_state_get_miopen_handle(RuntimeState *state);
 
 // Get hipBLASLt handle from state (for GEMM operations)
 // Returns: hipblasLtHandle_t cast to void* (NULL on error)
 // Ownership: Caller does NOT own handle (destroyed in cleanup)
-void* hipdnn_ep_state_get_hipblas_handle(RuntimeState* state);
+void *hipdnn_ep_state_get_hipblas_handle(RuntimeState *state);
 
 // Get buffer from memory pool by index
 // Returns: GPU pointer at pool_base + buffer_offsets[index] (NULL on error)
 // Ownership: Caller does NOT own pointer (freed in cleanup)
-void* hipdnn_ep_get_buffer_from_pool(RuntimeState* state, size_t index);
+void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index);
 
 // Get the base pointer of the GPU memory pool
 // Returns: GPU base pointer of pool (NULL if pool not initialized)
 // Used by hip.get_pool lowering in generated compute kernels
-void* hipdnn_ep_get_pool_base(RuntimeState* state);
+void *hipdnn_ep_get_pool_base(RuntimeState *state);
 
 // Initialize memory pool in runtime state
 // Called by generated inference_init after creating RuntimeState
@@ -170,8 +188,8 @@ void* hipdnn_ep_get_pool_base(RuntimeState* state);
 //   buffer_offsets: Array of offsets for each buffer
 //   num_buffers: Number of buffers
 // Returns: 0=success, non-zero=error
-int hipdnn_ep_pool_init(RuntimeState* state, size_t pool_size,
-                        const size_t* buffer_offsets, size_t num_buffers);
+int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
+                        const size_t *buffer_offsets, size_t num_buffers);
 
 //==============================================================================
 // Inference API Types (for generated interface)
@@ -179,24 +197,24 @@ int hipdnn_ep_pool_init(RuntimeState* state, size_t pool_size,
 
 // Represents a tensor with host data and shape information
 typedef struct {
-  void* data;         // Host data pointer
-  int64_t* shape;     // Array of dimension sizes
-  size_t rank;        // Number of dimensions
+  void *data;          // Host data pointer
+  int64_t *shape;      // Array of dimension sizes
+  size_t rank;         // Number of dimensions
   size_t element_size; // Bytes per element (e.g. 4=float32, 2=float16, 8=int64)
 } tensor_t;
 
 // Represents a span of tensors (inputs or outputs)
 typedef struct {
-  tensor_t* data; // Array of tensors
+  tensor_t *data; // Array of tensors
   size_t count;   // Number of tensors
 } span_t;
 
 // Represents a prepared tensor with GPU buffer and metadata
 // Used internally by tensor preparation helpers
 typedef struct {
-  void* gpu_ptr;      // GPU memory (allocated or from pool)
-  void* host_ptr;     // Host memory (from tensor_t.data)
-  int64_t* shape_ptr; // Shape array (from tensor_t.shape) for memref building
+  void *gpu_ptr;      // GPU memory (allocated or from pool)
+  void *host_ptr;     // Host memory (from tensor_t.data)
+  int64_t *shape_ptr; // Shape array (from tensor_t.shape) for memref building
   size_t rank;        // Tensor rank (for validation)
   size_t size_bytes;  // Buffer size
   bool is_pooled;     // Internal: true if from pool, false if allocated
@@ -209,7 +227,7 @@ typedef struct {
 // Get GPU pointer for constant at index
 // Returns: GPU pointer (NULL if index out of range or state invalid)
 // Ownership: Caller does NOT own pointer (freed in state_cleanup)
-void* hipdnn_ep_constant_get(RuntimeState* state, int64_t index);
+void *hipdnn_ep_constant_get(RuntimeState *state, int64_t index);
 
 //==============================================================================
 // Tensor Preparation Helpers (allocation-strategy agnostic)
@@ -232,16 +250,16 @@ void* hipdnn_ep_constant_get(RuntimeState* state, int64_t index);
 //   index: Which tensor to prepare (0-based)
 //   expected_rank: Compile-time known rank (from module metadata)
 //   out_buffer: Output TensorBuffer to populate
-int hipdnn_ep_tensor_prepare_input(RuntimeState* state, span_t* inputs,
+int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
                                    size_t index, size_t expected_rank,
-                                   TensorBuffer* out_buffer);
+                                   TensorBuffer *out_buffer);
 
 // Prepare output tensor: parse, validate, get/allocate GPU buffer (no H2D)
 //
 // Parameters: same as prepare_input
-int hipdnn_ep_tensor_prepare_output(RuntimeState* state, span_t* outputs,
+int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
                                     size_t index, size_t expected_rank,
-                                    TensorBuffer* out_buffer);
+                                    TensorBuffer *out_buffer);
 
 // Finalize output tensor: D2H transfer, sync, release buffer
 //
@@ -258,14 +276,14 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState* state, span_t* outputs,
 //   HIPDNN_EP_ERR_STREAM_SYNC_FAILED = stream sync failed
 //
 // Note: Buffer is released even on error (best-effort cleanup)
-int hipdnn_ep_tensor_finalize_output(RuntimeState* state, TensorBuffer* buffer);
+int hipdnn_ep_tensor_finalize_output(RuntimeState *state, TensorBuffer *buffer);
 
 // Release input tensor buffer (no D2H transfer needed)
 //
 // Parameters:
 //   state: Runtime state
 //   buffer: TensorBuffer from prepare_input
-void hipdnn_ep_tensor_free_input(RuntimeState* state, TensorBuffer* buffer);
+void hipdnn_ep_tensor_free_input(RuntimeState *state, TensorBuffer *buffer);
 
 // TensorBuffer Field Accessors (Opaque Pattern)
 //==============================================================================
@@ -280,23 +298,23 @@ void hipdnn_ep_tensor_free_input(RuntimeState* state, TensorBuffer* buffer);
 
 // Get GPU pointer from TensorBuffer
 // Returns: GPU memory pointer (NULL on error)
-void* hipdnn_ep_tensor_buffer_get_gpu_ptr(TensorBuffer* buffer);
+void *hipdnn_ep_tensor_buffer_get_gpu_ptr(TensorBuffer *buffer);
 
 // Get host pointer from TensorBuffer
 // Returns: Host memory pointer (NULL on error)
-void* hipdnn_ep_tensor_buffer_get_host_ptr(TensorBuffer* buffer);
+void *hipdnn_ep_tensor_buffer_get_host_ptr(TensorBuffer *buffer);
 
 // Get shape array pointer from TensorBuffer
 // Returns: Pointer to int64_t shape array (NULL on error)
-int64_t* hipdnn_ep_tensor_buffer_get_shape_ptr(TensorBuffer* buffer);
+int64_t *hipdnn_ep_tensor_buffer_get_shape_ptr(TensorBuffer *buffer);
 
 // Get rank from TensorBuffer
 // Returns: Tensor rank (number of dimensions)
-size_t hipdnn_ep_tensor_buffer_get_rank(TensorBuffer* buffer);
+size_t hipdnn_ep_tensor_buffer_get_rank(TensorBuffer *buffer);
 
 // Get buffer size in bytes from TensorBuffer
 // Returns: Size in bytes
-size_t hipdnn_ep_tensor_buffer_get_size_bytes(TensorBuffer* buffer);
+size_t hipdnn_ep_tensor_buffer_get_size_bytes(TensorBuffer *buffer);
 
 //==============================================================================
 // Memory Operations
@@ -314,7 +332,7 @@ size_t hipdnn_ep_tensor_buffer_get_size_bytes(TensorBuffer* buffer);
 // Return codes:
 //   0 = success
 //   -1 = copy failed
-int wrap_hipMemcpyAsync(RuntimeState* state, void* dst_ptr, const void* src_ptr,
+int wrap_hipMemcpyAsync(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                         size_t size_bytes);
 
 //==============================================================================
@@ -326,17 +344,17 @@ int wrap_hipMemcpyAsync(RuntimeState* state, void* dst_ptr, const void* src_ptr,
 // management Follows opaque RuntimeState pattern - extracts handle/stream
 // internally Parameters match generated LLVM IR from HipToLLVM pass
 int wrap_miopenConvolutionForward(
-    RuntimeState*
-        state, // RuntimeState (opaque - extracts handle/stream internally)
-    const void* input,   // Input tensor GPU pointer
+    RuntimeState
+        *state, // RuntimeState (opaque - extracts handle/stream internally)
+    const void *input,   // Input tensor GPU pointer
     int64_t input_n,     // Input batch size
     int64_t input_c,     // Input channels
     int64_t input_h,     // Input height
     int64_t input_w,     // Input width
-    const void* weights, // Weights tensor GPU pointer
+    const void *weights, // Weights tensor GPU pointer
     int64_t weights_k,   // Output channels (number of filters)
-    const void* bias,    // Bias tensor GPU pointer (nullable)
-    void* output,        // Output tensor GPU pointer (in-place)
+    const void *bias,    // Bias tensor GPU pointer (nullable)
+    void *output,        // Output tensor GPU pointer (in-place)
     int64_t output_h,    // Output height
     int64_t output_w,    // Output width
     int64_t kernel_h,    // Kernel height
@@ -353,129 +371,121 @@ int wrap_miopenConvolutionForward(
 
 // hipBLASLt GEMM operation wrapper
 // Called by generated IR for matrix multiplication operations
-int wrap_hipblasLtGemm(void* handle,      // hipBLASLt handle
-                       void* stream,      // HIP stream
+int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
+                       void *stream, // HIP stream
                        int64_t m, int64_t n, int64_t k,
-                       const void* alpha, // Scalar alpha
-                       const void* A,     // Matrix A GPU pointer
-                       const void* B,     // Matrix B GPU pointer
-                       const void* beta,  // Scalar beta
-                       void* C);          // Matrix C GPU pointer (in/out)
+                       const void *alpha, // Scalar alpha
+                       const void *A,     // Matrix A GPU pointer
+                       const void *B,     // Matrix B GPU pointer
+                       const void *beta,  // Scalar beta
+                       void *C);          // Matrix C GPU pointer (in/out)
 
 // MatMul operation wrapper (batched matrix multiplication)
 // Called by generated IR for onnx.MatMul lowering
 // Computes output = A @ B for each batch
 // A: [batch_count x M x K], B: [K x N] (broadcast) or [batch_count x K x N]
 // output: [batch_count x M x N]
-int wrap_hipblasLtMatmul(RuntimeState* state,
-                const void* A,      // Matrix A GPU pointer
-                const void* B,      // Matrix B GPU pointer
-                void* output,       // Output GPU pointer
-                int64_t M,          // Rows of A (per batch)
-                int64_t N,          // Columns of B
-                int64_t K,          // Columns of A / Rows of B
-                int64_t batch_count, // Number of batches
-                int64_t elem_size); // Element size in bytes (2=f16, 4=f32)
+int wrap_hipblasLtMatmul(
+    RuntimeState *state,
+    const void *A,       // Matrix A GPU pointer
+    const void *B,       // Matrix B GPU pointer
+    void *output,        // Output GPU pointer
+    int64_t M,           // Rows of A (per batch)
+    int64_t N,           // Columns of B
+    int64_t K,           // Columns of A / Rows of B
+    int64_t batch_count, // Number of batches
+    int64_t elem_size);  // Element size in bytes (2=f16, 4=f32)
 
 // GroupQueryAttention operation wrapper
 // Called by generated IR for onnx.Custom(GroupQueryAttention) lowering
-int wrap_group_query_attention(
-    RuntimeState* state,
-    void* query, void* key, void* value,
-    void* past_key, void* past_value,
-    void* seqlens_k, void* total_seq_len,
-    void* cos_cache, void* sin_cache,
-    void* output, void* present_key, void* present_value,
-    int64_t num_heads, int64_t kv_num_heads,
-    float scale, float softcap,
-    int64_t do_rotary, int64_t rotary_interleaved,
-    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
-    int64_t head_dim, int64_t element_size_bytes);
+int wrap_group_query_attention(RuntimeState *state, void *query, void *key,
+                               void *value, void *past_key, void *past_value,
+                               void *seqlens_k, void *total_seq_len,
+                               void *cos_cache, void *sin_cache, void *output,
+                               void *present_key, void *present_value,
+                               int64_t num_heads, int64_t kv_num_heads,
+                               float scale, float softcap, int64_t do_rotary,
+                               int64_t rotary_interleaved, int64_t batch_size,
+                               int64_t seq_len_q, int64_t seq_len_kv,
+                               int64_t head_dim, int64_t element_size_bytes);
 
 // Generic MIOpen tensor operation wrapper
 // Computes output = op(lhs, rhs) element-wise via miopenOpTensor
 //   tensor_op: HIPDNN_EP_TENSOR_OP_* constant (mul, add, min, max)
 //   data_type: HIPDNN_EP_DATATYPE_* constant identifying the element type
-int wrap_miopenOpTensor(RuntimeState* state, void* lhs, void* rhs,
-                        void* output, int64_t num_elements,
-                        int64_t data_type, int64_t tensor_op);
+int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
+                        int64_t num_elements, int64_t data_type,
+                        int64_t tensor_op);
 
 // Element-wise subtraction wrapper
 // Computes output = lhs - rhs element-wise
-int wrap_elementwise_sub(RuntimeState* state, void* lhs, void* rhs,
-                         void* output, int64_t num_elements,
+int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
+                         void *output, int64_t num_elements,
                          int64_t element_size_bytes);
 
 // Gather operation wrapper
-int wrap_gather(RuntimeState* state, void* data, void* indices,
-                void* output, int64_t axis, int64_t data_num_elements,
+int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
+                int64_t axis, int64_t data_num_elements,
                 int64_t output_num_elements, int64_t element_size_bytes);
 
 // ReduceSum operation wrapper
-int wrap_reduce_sum(RuntimeState* state, void* data, void* axes,
-                    void* output, int64_t data_num_elements,
-                    int64_t output_num_elements, int64_t element_size_bytes,
-                    int64_t keepdims);
+int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
+                    int64_t data_num_elements, int64_t output_num_elements,
+                    int64_t element_size_bytes, int64_t keepdims);
 
 // Cast operation wrapper (element type conversion)
-int wrap_cast(RuntimeState* state, void* input, void* output,
+int wrap_cast(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t input_element_size,
               int64_t output_element_size, int64_t to);
 
 // Generic MIOpen activation wrapper
 // Applies activation_mode (HIPDNN_EP_ACTIVATION_*) element-wise
 // data_type: HIPDNN_EP_DATATYPE_* constant identifying the element type
-int wrap_miopenActivationForward(RuntimeState* state, void* input, void* output,
+int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
                                  int64_t activation_mode);
 
 // Rotary embedding operation wrapper
-int wrap_rotary_embedding(RuntimeState* state,
-                          void* input, void* position_ids,
-                          void* cos_cache, void* sin_cache,
-                          void* output,
+int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
+                          void *cos_cache, void *sin_cache, void *output,
                           int64_t interleaved, int64_t num_heads,
-                          int64_t rotary_dim,
-                          int64_t input_num_elements,
+                          int64_t rotary_dim, int64_t input_num_elements,
                           int64_t cos_cache_num_elements,
                           int64_t element_size_bytes);
 
 // SimplifiedLayerNormalization operation wrapper
-int wrap_miopenT5LayerNormForward(RuntimeState* state,
-                               void* input, void* scale, void* output,
-                               int64_t input_num_elements,
-                               int64_t scale_num_elements,
-                               int64_t element_size_bytes,
-                               int64_t axis, float epsilon,
-                               int64_t stash_type);
+int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
+                                  void *output, int64_t input_num_elements,
+                                  int64_t scale_num_elements,
+                                  int64_t element_size_bytes, int64_t axis,
+                                  float epsilon, int64_t stash_type);
 
 // SkipSimplifiedLayerNormalization operation wrapper
-int wrap_skip_simplified_layer_norm(RuntimeState* state,
-                                    void* input, void* skip, void* gamma,
-                                    void* output, void* skip_output,
+int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
+                                    void *skip, void *gamma, void *output,
+                                    void *skip_output,
                                     int64_t input_num_elements,
                                     int64_t gamma_num_elements,
-                                    int64_t element_size_bytes,
-                                    float epsilon);
+                                    int64_t element_size_bytes, float epsilon);
 
 //==============================================================================
 // Low-Level HIP Wrappers
 //==============================================================================
 
 // HIP memory allocation wrapper with error handling
-int wrap_hipMalloc(void** ptr, int64_t size);
+int wrap_hipMalloc(void **ptr, int64_t size);
 
 // HIP memory free wrapper with error handling
-int wrap_hipFree(void* ptr);
+int wrap_hipFree(void *ptr);
 
 // HIP memory copy host-to-device wrapper
-int wrap_hipMemcpyH2D(void* dst, const void* src, int64_t size, void* stream);
+int wrap_hipMemcpyH2D(void *dst, const void *src, int64_t size, void *stream);
 
 // HIP memory copy device-to-host wrapper
-int wrap_hipMemcpyD2H(void* dst, const void* src, int64_t size, void* stream);
+int wrap_hipMemcpyD2H(void *dst, const void *src, int64_t size, void *stream);
 
 // HIP stream synchronization wrapper
-int wrap_hipStreamSynchronize(void* stream);
+int wrap_hipStreamSynchronize(void *stream);
 
 #ifdef __cplusplus
 }
