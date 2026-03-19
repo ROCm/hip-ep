@@ -30,6 +30,17 @@ struct OnnxToHipPipelineOptions
       llvm::cl::init(0)};
 };
 
+/// Pipeline options for the HIP-to-LLVM lowering pipeline.
+/// Controls the GenerateInterface pass at the end of the pipeline.
+struct HipToLLVMPipelineOptions
+    : public PassPipelineOptions<HipToLLVMPipelineOptions> {
+  Option<std::string> constantsFile{
+      *this, "constants-file",
+      llvm::cl::desc(
+          "Constants filename embedded in metadata (default: constants.bin)"),
+      llvm::cl::init("constants.bin")};
+};
+
 /// Build the ONNX-to-HIP compilation pipeline. This is the main pipeline
 /// that takes ONNX-level tensor IR and produces fully bufferized HIP memref
 /// IR with pooled allocations and resolved extern constants. The pipeline
@@ -42,7 +53,13 @@ void buildOnnxToHipPipeline(OpPassManager &pm,
 /// (not part of buildOnnxToHipPipeline) because the LLVM lowering is only
 /// needed when producing executables via hip-compiler, not when inspecting
 /// intermediate HIP memref IR via hip-mlir-opt.
-void buildHipToLLVMPipeline(OpPassManager &pm);
+///
+/// The pipeline lowers HIP dialect ops to LLVM IR and appends a
+/// GenerateInterface pass that creates four C-ABI wrapper functions
+/// (inference_init, inference_compute, inference_cleanup,
+/// inference_get_metadata_json).
+void buildHipToLLVMPipeline(OpPassManager &pm,
+                            const HipToLLVMPipelineOptions &options);
 
 /// Register both pipelines with MLIR's global pass registry so they appear
 /// in hip-mlir-opt --help and are usable as single-flag invocations.

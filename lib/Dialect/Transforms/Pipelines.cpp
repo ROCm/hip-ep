@@ -6,16 +6,14 @@
 #include "hip/Dialect/Transforms/Pipelines.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
-#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/BufferizationToMemRef/BufferizationToMemRef.h"
-#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
-#include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
-#include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/Passes.h"
+
+#include "compilation_options_generated.h"
 
 using namespace mlir;
 
@@ -73,12 +71,13 @@ void mlir::hip::buildOnnxToHipPipeline(
   pm.addPass(createCanonicalizerPass());
 }
 
-void mlir::hip::buildHipToLLVMPipeline(OpPassManager &pm) {
+void mlir::hip::buildHipToLLVMPipeline(
+    OpPassManager &pm, const HipToLLVMPipelineOptions &options) {
   pm.addPass(createConvertHipToLLVMPass());
-  pm.addPass(createFinalizeMemRefToLLVMConversionPass());
-  pm.addPass(createArithToLLVMConversionPass());
-  pm.addPass(createConvertFuncToLLVMPass());
-  pm.addPass(createReconcileUnrealizedCastsPass());
+
+  mlir::hip::CompilationOptionsT compOpts;
+  compOpts.constants_file = options.constantsFile;
+  pm.addPass(createGenerateInterfacePass(compOpts));
 }
 
 void mlir::hip::registerHipPipelines() {
@@ -88,7 +87,8 @@ void mlir::hip::registerHipPipelines() {
       "externalization",
       buildOnnxToHipPipeline);
 
-  PassPipelineRegistration<>(
-      "hip-to-llvm-pipeline", "Lower HIP memref IR to LLVM dialect",
-      [](OpPassManager &pm) { buildHipToLLVMPipeline(pm); });
+  PassPipelineRegistration<HipToLLVMPipelineOptions>(
+      "hip-to-llvm-pipeline",
+      "Lower HIP memref IR to LLVM dialect and generate C interface",
+      buildHipToLLVMPipeline);
 }
