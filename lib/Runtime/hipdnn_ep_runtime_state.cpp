@@ -189,7 +189,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   if (!metadata_blob || blob_size == 0)
     return 0; // No metadata — no constants to load
 
-  auto *meta = flatbuffers::GetRoot<udna::UdnaModelMetaInfo>(metadata_blob);
+  auto *meta = flatbuffers::GetRoot<mlir::hip::HipModelMetaInfo>(metadata_blob);
   auto *constants = meta->constants();
   int64_t count = constants ? (int64_t)constants->size() : 0;
 
