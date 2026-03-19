@@ -15,7 +15,8 @@
 namespace morphizen {
 struct Plugin; // Must match definition in morphizen_plugin.hpp (struct, not
                // class)
-}
+class FileSystem;
+} // namespace morphizen
 
 namespace mlir_compilation::customop {
 
@@ -23,10 +24,11 @@ namespace mlir_compilation::customop {
 // functions. Uses morphizen::Plugin infrastructure for dynamic library loading.
 class InferenceState {
 public:
-  // Create inference state from DLL bytes
-  // Logs FATAL and terminates on failure
+  // Create inference state from DLL bytes.
+  // fs: FileSystem for resolving model constants (passed to inference_init).
+  // Logs FATAL and terminates on failure.
   static std::unique_ptr<InferenceState>
-  create(const std::vector<uint8_t> &dll_bytes);
+  create(const std::vector<uint8_t> &dll_bytes, morphizen::FileSystem *fs);
 
   ~InferenceState();
 

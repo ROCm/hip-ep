@@ -42,7 +42,8 @@ InferenceState::InferenceState(PrivateTag, void *state,
 }
 
 std::unique_ptr<InferenceState>
-InferenceState::create(const std::vector<uint8_t> &dll_bytes) {
+InferenceState::create(const std::vector<uint8_t> &dll_bytes,
+                       morphizen::FileSystem *fs) {
   MY_LOG(1) << "Loading inference plugin from memory...";
 
   // Write DLL to temp file (morphizen::Plugin loads from file path)
@@ -75,16 +76,16 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes) {
         << " - check that the file exists and all dependencies are available";
   }
 
-  // Get init function and call it
-  // NOTE: Keep temp DLL file until plugin is destroyed
-  auto init_fn = plugin->get_method<int, void **>("inference_init");
+  // inference_init(void** out_state, void* fs) — the DLL needs a FileSystem
+  // to resolve and load model constants from the EPContext archive.
+  auto init_fn = plugin->get_method<int, void **, void *>("inference_init");
   if (!init_fn) {
     LOG(FATAL) << "inference_init function not found in plugin: " << dll_path
                << " - DLL loaded successfully but symbol is missing";
   }
 
   void *state = nullptr;
-  int ret = init_fn(&state);
+  int ret = init_fn(&state, static_cast<void *>(fs));
   if (ret != 0) {
     LOG(FATAL) << "inference_init() failed with code: " << ret;
   }
