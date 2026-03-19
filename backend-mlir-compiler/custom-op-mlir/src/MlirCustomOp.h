@@ -10,6 +10,7 @@
 #include "morphizen/morphizen.hpp"
 #include <memory>
 #include <optional>
+#include <vector>
 
 namespace onnxruntime {
 class Model;
@@ -36,6 +37,11 @@ private:
 
   // Metadata from EPContext (contains output shapes)
   mlir_metadata::Metadata metadata_;
+
+  // Maps metadata output index (= DLL output index) to ORT kernel context
+  // output index. Precomputed at construction to handle ordering differences
+  // between the metadata (DLL-order) and the fused node (ORT-order).
+  std::vector<int> output_index_map_;
 };
 
 } // namespace mlir_compilation
