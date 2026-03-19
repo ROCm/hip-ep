@@ -15,7 +15,7 @@ inline bool hipdnn_ep_debug_enabled() {
   return enabled;
 }
 
-#define COMPILER_DEBUG_LOG(expr)                                                \
+#define COMPILER_DEBUG_LOG(expr)                                               \
   do {                                                                         \
     if (hipdnn_ep_debug_enabled())                                             \
       llvm::errs() << expr;                                                    \
