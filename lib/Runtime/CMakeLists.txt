@@ -197,29 +197,54 @@ compile_to_bitcode(hipdnn_ep_runtime_tensor.cpp runtime_tensor.bc)
 
 # Compile implementation-specific files
 if(NOT BUILD_MOCK_RUNTIME)
-    # Real GPU runtime implementation (placeholder - not porting yet)
+    # Real GPU runtime implementation
     compile_to_bitcode(real/hip.cpp runtime_hip.bc)
     compile_to_bitcode(real/miopen.cpp runtime_miopen.bc)
     compile_to_bitcode(real/hipblas.cpp runtime_hipblas.bc)
-    # ... more real runtime files
+    compile_to_bitcode(real/memory.cpp runtime_memory.bc)
+    compile_to_bitcode(real/elementwise.cpp runtime_elementwise.bc)
+    compile_to_bitcode(real/matmul.cpp runtime_matmul.bc)
+    compile_to_bitcode(real/activation.cpp runtime_activation.bc)
+    compile_to_bitcode(real/simplified_layer_norm.cpp runtime_simplified_layer_norm.bc)
+    compile_to_bitcode(real/skip_simplified_layer_norm.cpp runtime_skip_simplified_layer_norm.bc)
+    compile_to_bitcode(real/rotary_embedding.cpp runtime_rotary_embedding.bc)
+    compile_to_bitcode(real/gqa.cpp runtime_gqa.bc)
+    compile_to_bitcode(real/cast.cpp runtime_cast.bc)
+    compile_to_bitcode(real/gather.cpp runtime_gather.bc)
+    compile_to_bitcode(real/reduce_sum.cpp runtime_reduce_sum.bc)
+    compile_to_bitcode(real/test_hip_from_dll.cpp test_hip_from_dll.bc)
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_hip.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_miopen.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_hipblas.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_elementwise.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_activation.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_simplified_layer_norm.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_skip_simplified_layer_norm.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_rotary_embedding.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_gqa.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_cast.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_sum.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc
     )
 else()
     # Mock runtime for testing without GPU
     compile_to_bitcode(mock/mock_gpu.cpp runtime_mock.bc)
     compile_to_bitcode(mock/memory.cpp runtime_memory.bc)
+    compile_to_bitcode(mock/test_hip_from_dll.cpp test_hip_from_dll.bc)
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_mock.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc
     )
 endif()
 
