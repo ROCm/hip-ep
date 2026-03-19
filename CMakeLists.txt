@@ -107,6 +107,14 @@ if(BUILD_HIP_TOOLS)
   # FlatBuffers schemas (GenerateInterface pass metadata)
   add_subdirectory(schemas)
 
+  # Custom HIP kernels library (only for Real Runtime)
+  # BUILD_MOCK_RUNTIME is defined in lib/Runtime/CMakeLists.txt
+  # We check it here to conditionally build custom kernels
+  option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
+  if(NOT BUILD_MOCK_RUNTIME)
+    add_subdirectory(3rd-party/custom_kernels)
+  endif()
+
   # TableGen targets
   add_subdirectory(include/hip)
 
