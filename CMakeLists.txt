@@ -114,13 +114,8 @@ if(BUILD_HIP_TOOLS)
 
   if(BUILD_MOCK_RUNTIME)
     message(STATUS "Building with MOCK runtime (no GPU required)")
-    add_compile_definitions(USE_MOCK_RUNTIME)
   else()
     message(STATUS "Building with REAL runtime (requires HIP/MIOpen)")
-    if(DEFINED ENV{THEROCK_DIST})
-      set(HIP_ROOT_DIR $ENV{THEROCK_DIST})
-      message(STATUS "Using TheRock SDK at: ${HIP_ROOT_DIR}")
-    endif()
     # Add custom HIP kernels library for Real Runtime
     add_subdirectory(3rd-party/custom_kernels)
   endif()
