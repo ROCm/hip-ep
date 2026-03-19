@@ -6,6 +6,7 @@
 add_library(HipDialectTransforms STATIC
   AddHipContextArg.cpp
   BufferUtils.cpp
+  GenerateInterface.cpp
   LowerAllocs.cpp
   OptimizeMemRefs.cpp
   Pipelines.cpp
@@ -18,17 +19,20 @@ add_dependencies(HipDialectTransforms
   HipTypesIncGen
   HipOpsIncGen
   HipPassesIncGen
+  HipSchemas
 )
 
 target_link_libraries(HipDialectTransforms PUBLIC
   HipDialectIR
   HipToLLVM
   OnnxToHip
+  HipSchemasLib
   MLIRPass
   MLIRTransforms
   MLIRFuncDialect
   MLIRMemRefDialect
   MLIRArithDialect
+  MLIRLLVMDialect
   MLIRBufferizationDialect
   MLIRBufferizationTransforms
   MLIRBufferizationPipelines
@@ -37,4 +41,5 @@ target_link_libraries(HipDialectTransforms PUBLIC
   MLIRMemRefToLLVM
   MLIRFuncToLLVM
   MLIRReconcileUnrealizedCasts
+  flatbuffers::flatbuffers
 )

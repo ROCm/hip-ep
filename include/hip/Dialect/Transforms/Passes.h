@@ -6,9 +6,12 @@
 #define HIP_PASSES_H
 
 #include "mlir/Pass/Pass.h"
+#include <memory>
+#include <string>
 
-namespace mlir {
-namespace hip {
+namespace mlir::hip {
+
+struct CompilationOptionsT;
 
 #define GEN_PASS_DECL
 #include "hip/Dialect/Transforms/Passes.h.inc"
@@ -16,7 +19,13 @@ namespace hip {
 #define GEN_PASS_REGISTRATION
 #include "hip/Dialect/Transforms/Passes.h.inc"
 
-} // namespace hip
-} // namespace mlir
+/// Creates a pass that generates the C interface for the compiled module.
+/// Transforms @main_graph to produce four C-ABI wrapper functions:
+/// inference_init, inference_compute, inference_cleanup,
+/// inference_get_metadata_json.
+std::unique_ptr<mlir::Pass>
+createGenerateInterfacePass(const CompilationOptionsT &options);
+
+} // namespace mlir::hip
 
 #endif // HIP_PASSES_H

@@ -91,7 +91,8 @@ int main(int argc, char **argv) {
 
   // 2. Run MLIR PassManager (input must be pre-bufferized memref IR)
   mlir::PassManager pm(&context);
-  mlir::hip::buildHipToLLVMPipeline(pm);
+  mlir::hip::HipToLLVMPipelineOptions pipelineOpts;
+  mlir::hip::buildHipToLLVMPipeline(pm, pipelineOpts);
 
   if (mlir::failed(pm.run(*module))) {
     llvm::errs() << "error: MLIR pass pipeline failed\n";
