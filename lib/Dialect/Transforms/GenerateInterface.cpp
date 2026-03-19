@@ -451,8 +451,9 @@ private:
     return success();
   }
 
-  /// hipdnn_ep_state_init_with_fs: alloc RuntimeState, init HIP/MIOpen/hipBLASLt,
-  /// parse metadata blob, read constants via FileSystem and upload to GPU.
+  /// hipdnn_ep_state_init_with_fs: alloc RuntimeState, init
+  /// HIP/MIOpen/hipBLASLt, parse metadata blob, read constants via FileSystem
+  /// and upload to GPU.
   ///
   /// Generated IR (no pool — from test_basic_interface.mlir):
   ///   llvm.func @inference_init(%arg0: !llvm.ptr, %arg1: !llvm.ptr) -> i32
