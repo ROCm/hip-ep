@@ -77,10 +77,12 @@ option(BUILD_HIP_TOOLS "Build HIP MLIR compiler tools (hip-mlir-opt, hip-compile
 if(BUILD_HIP_TOOLS)
   find_package(LLVM REQUIRED CONFIG)
   find_package(MLIR REQUIRED CONFIG)
+  find_package(flatbuffers REQUIRED CONFIG)
 
   message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
   message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
   message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
+  message(STATUS "Using FlatBuffers version: ${flatbuffers_VERSION}")
 
   separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND ${LLVM_DEFINITIONS})
   add_definitions(${LLVM_DEFINITIONS_LIST})
@@ -101,6 +103,9 @@ if(BUILD_HIP_TOOLS)
   include(AddMLIR)
 
   llvm_map_components_to_libnames(llvm_libs Support Core)
+
+  # FlatBuffers schemas (GenerateInterface pass metadata)
+  add_subdirectory(schemas)
 
   # TableGen targets
   add_subdirectory(include/hip)
