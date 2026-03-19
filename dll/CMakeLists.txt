@@ -14,11 +14,6 @@ add_library(hip-compiler-dll SHARED
 # Link against CInterface library (which pulls in all dependencies)
 target_link_libraries(hip-compiler-dll PRIVATE
     HipCInterface
-    # HipCInterface transitively links:
-    #   - LibHipCompiler
-    #   - HipDialect (→ OMONNXOps)
-    #   - HipBackend
-    #   - MLIR/LLVM libraries
 )
 
 # Include directories for C API headers
