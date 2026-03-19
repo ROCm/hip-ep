@@ -22,10 +22,10 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
   int hip_dtype;
   switch (element_size_bytes) {
   case 8:
-    hip_dtype = hip_DTYPE_INT64;
+    hip_dtype = HIP_DTYPE_INT64;
     break;
   case 4:
-    hip_dtype = hip_DTYPE_INT32;
+    hip_dtype = HIP_DTYPE_INT32;
     break;
   default:
     RUNTIME_DEBUG_LOG("[REAL] wrap_reduce_sum: unsupported element_size=%lld\n",
