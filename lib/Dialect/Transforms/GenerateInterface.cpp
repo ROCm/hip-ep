@@ -136,7 +136,11 @@ std::string buildMetadataJson(ModuleOp module,
   return json;
 }
 
-/// Generate global constant string for metadata JSON
+/// Generate global constant string for metadata JSON.
+///
+/// Generated IR (1 input / 1 output, shape [8], element_size 4):
+///   llvm.mlir.global internal constant @__metadata_json(
+///       "{\0A  \22constants_filename\22: ...}\0A\00") {addr_space = 0 : i32}
 void generateMetadataGlobal(ModuleOp module, const std::string &jsonStr) {
   OpBuilder builder(module.getContext());
   auto i8Type = builder.getI8Type();
@@ -149,7 +153,11 @@ void generateMetadataGlobal(ModuleOp module, const std::string &jsonStr) {
                          builder.getStringAttr(jsonStr + '\0'));
 }
 
-/// Generate global constant for metadata FlatBuffers blob
+/// Generate global constant for metadata FlatBuffers blob.
+///
+/// Generated IR (168-byte blob):
+///   llvm.mlir.global internal constant @__metadata_blob(
+///       "\18\00\00\00...") {addr_space = 0 : i32}
 void generateMetadataBlobGlobal(ModuleOp module,
                                 const std::vector<uint8_t> &blob) {
   OpBuilder builder(module.getContext());
@@ -403,8 +411,9 @@ private:
         module.lookupSymbol<LLVM::LLVMFuncOp>("inference_compute") ||
         module.lookupSymbol<LLVM::LLVMFuncOp>("inference_cleanup") ||
         module.lookupSymbol<LLVM::LLVMFuncOp>("inference_get_metadata_json")) {
-      COMPILER_DEBUG_LOG("[GenerateInterface] Interface functions already exist. "
-                        << "Pass already ran.\n");
+      COMPILER_DEBUG_LOG(
+          "[GenerateInterface] Interface functions already exist. "
+          << "Pass already ran.\n");
       return failure();
     }
 
@@ -442,13 +451,40 @@ private:
     return success();
   }
 
-  /// Generated IR example (no pool):
-  ///   llvm.func @inference_init(%state: !llvm.ptr, %fs: !llvm.ptr) -> i32
+  /// hipdnn_ep_state_init_with_fs: alloc RuntimeState, init HIP/MIOpen/hipBLASLt,
+  /// parse metadata blob, read constants via FileSystem and upload to GPU.
+  ///
+  /// Generated IR (no pool — from test_basic_interface.mlir):
+  ///   llvm.func @inference_init(%arg0: !llvm.ptr, %arg1: !llvm.ptr) -> i32
   ///       attributes {llvm.emit_c_interface, sym_visibility = "public"} {
-  ///     %blob = llvm.mlir.addressof @__metadata_blob : !llvm.ptr
-  ///     %sz  = llvm.mlir.constant(168 : i64) : i64
-  ///     %rc  = llvm.call @hipdnn_ep_state_init_with_fs(%state, %fs, %blob,
-  ///     %sz) llvm.return %rc : i32
+  ///     %0 = llvm.mlir.addressof @__metadata_blob : !llvm.ptr
+  ///     %1 = llvm.mlir.constant(168 : i64) : i64
+  ///     %2 = llvm.call @hipdnn_ep_state_init_with_fs(%arg0, %arg1, %0, %1)
+  ///              : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> i32
+  ///     llvm.return %2 : i32
+  ///   }
+  ///
+  /// Generated IR (with pool, 2 buffers at offsets 0/4096, pool 8192):
+  ///   llvm.func @inference_init(%arg0: !llvm.ptr, %arg1: !llvm.ptr) -> i32
+  ///       attributes {llvm.emit_c_interface, sym_visibility = "public"} {
+  ///     %0 = llvm.mlir.addressof @__metadata_blob : !llvm.ptr
+  ///     %1 = llvm.mlir.constant(168 : i64) : i64
+  ///     %2 = llvm.call @hipdnn_ep_state_init_with_fs(%arg0, %arg1, %0, %1)
+  ///              : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> i32
+  ///     %3 = llvm.mlir.constant(0 : i32) : i32
+  ///     %4 = llvm.icmp "ne" %2, %3 : i32
+  ///     llvm.cond_br %4, ^bb2, ^bb1
+  ///   ^bb1:
+  ///     %5 = llvm.load %arg0 : !llvm.ptr -> !llvm.ptr
+  ///     %6 = llvm.mlir.constant(2 : i64) : i64
+  ///     %7 = llvm.alloca %6 x i64 : (i64) -> !llvm.ptr
+  ///     // ... store offsets [0, 4096] into %7 via GEP+store ...
+  ///     %14 = llvm.mlir.constant(8192 : i64) : i64
+  ///     %15 = llvm.call @hipdnn_ep_pool_init(%5, %14, %7, %6)
+  ///               : (!llvm.ptr, i64, !llvm.ptr, i64) -> i32
+  ///     llvm.return %15 : i32
+  ///   ^bb2:
+  ///     llvm.return %2 : i32
   ///   }
   void generateInferenceInit(ModuleOp module, size_t blobSize) {
     OpBuilder builder(module.getContext());
@@ -756,7 +792,8 @@ private:
 
     auto mainFunc = module.lookupSymbol<LLVM::LLVMFuncOp>("main_graph");
     if (!mainFunc) {
-      COMPILER_DEBUG_LOG("[GenerateInterface] Warning: @main_graph not found\n");
+      COMPILER_DEBUG_LOG(
+          "[GenerateInterface] Warning: @main_graph not found\n");
       LLVM::BrOp::create(builder, loc, mainSuccessBlock);
     } else {
       emitErrorCheckedCall(
