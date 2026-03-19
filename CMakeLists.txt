@@ -126,6 +126,9 @@ if(BUILD_HIP_TOOLS)
   # Library targets
   add_subdirectory(lib)
 
+  # DLL target (hip-compiler.dll)
+  add_subdirectory(dll)
+
   # Executable targets
   add_subdirectory(tools)
 
