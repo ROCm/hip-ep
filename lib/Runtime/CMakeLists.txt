@@ -284,6 +284,8 @@ add_custom_target(HipRuntime
 # Export runtime.bc path for consumers
 set(RUNTIME_BC_PATH ${CMAKE_CURRENT_BINARY_DIR}/runtime.bc PARENT_SCOPE)
 
+add_custom_target(RuntimeBitcode DEPENDS HipRuntime)
+
 # ============================================================================
 # KEEP OLD hip_runtime_static for backward compatibility
 # ============================================================================
