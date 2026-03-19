@@ -458,6 +458,62 @@ int wrap_skip_simplified_layer_norm(RuntimeState* state,
                                     int64_t element_size_bytes,
                                     float epsilon);
 
+// MatMulNBits operation wrapper (quantized N-bit matrix multiplication)
+// Dequantizes packed int4 weights and computes Y = A @ dequant(B)^T + bias
+// A: [batch_count x M x K], B: [N x k_blocks x blob_size] (packed uint8)
+// scales: [N x k_blocks], output: [batch_count x M x N]
+// Optional: zero_points, g_idx (deprecated), bias - pass nullptr if absent
+int wrap_matmul_nbits(RuntimeState* state,
+                      const void* A,            // activation tensor
+                      const void* B,            // packed quantized weights
+                      const void* scales,       // per-block scale factors
+                      const void* zero_points,  // per-block zero points (nullable)
+                      const void* g_idx,        // GPTQ group indices (nullable, deprecated)
+                      const void* bias,         // output bias [N] (nullable)
+                      void* output,             // result tensor
+                      int64_t M,                // rows per batch
+                      int64_t N,                // output columns
+                      int64_t K,                // inner dimension
+                      int64_t batch_count,      // number of batches
+                      int64_t bits,             // quantization bits (e.g. 4)
+                      int64_t block_size,       // quantization block size
+                      int64_t elem_size);       // element size in bytes
+
+// QMoE operation wrapper (quantized Mixture-of-Experts)
+// Routes tokens to top-k experts, performs quantized MLP per expert,
+// applies activation (e.g. SwiGLU), and combines results.
+// Optional pointer args: pass nullptr if the corresponding input is absent.
+int wrap_qmoe(RuntimeState* state,
+              const void* input,            // [num_tokens, hidden_size]
+              const void* router_probs,     // [num_tokens, num_experts]
+              const void* fc1_weights,      // [num_experts, fusion*inter, hidden/pack]
+              const void* fc1_scales,       // [num_experts, fusion*inter, hidden/bs]
+              const void* fc1_bias,         // (nullable) [num_experts, fusion*inter]
+              const void* fc2_weights,      // [num_experts, hidden, inter/pack]
+              const void* fc2_scales,       // [num_experts, hidden, inter/bs]
+              const void* fc2_bias,         // (nullable) [num_experts, hidden]
+              const void* fc3_weights,      // (nullable) unfused SwiGLU
+              const void* fc3_scales,       // (nullable)
+              const void* fc3_bias,         // (nullable)
+              const void* fc1_zero_points,  // (nullable) fc1 dequant zero points
+              const void* fc2_zero_points,  // (nullable) fc2 dequant zero points
+              const void* fc3_zero_points,  // (nullable) fc3 dequant zero points
+              void* output,                 // [num_tokens, hidden_size]
+              int64_t num_tokens,
+              int64_t hidden_size,
+              int64_t inter_size,
+              int64_t num_experts,
+              int64_t k,
+              int64_t expert_weight_bits,
+              int64_t block_size,
+              int64_t swiglu_fusion,
+              int64_t activation_type,      // 0=relu,1=gelu,2=silu,3=swiglu,4=identity
+              float activation_alpha,
+              float activation_beta,
+              float swiglu_limit,
+              int64_t normalize_routing_weights,
+              int64_t elem_size);
+
 //==============================================================================
 // Low-Level HIP Wrappers
 //==============================================================================

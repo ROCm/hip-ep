@@ -31,6 +31,9 @@ void registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         HipDstBufferizableModel<SimplifiedLayerNormOp>>(*ctx);
     SkipSimplifiedLayerNormOp::attachInterface<
         HipDstBufferizableModel<SkipSimplifiedLayerNormOp>>(*ctx);
+    MatMulNBitsOp::attachInterface<
+        HipDstBufferizableModel<MatMulNBitsOp>>(*ctx);
+    QMoEOp::attachInterface<HipDstBufferizableModel<QMoEOp>>(*ctx);
 
     // Elementwise ops (relu, cast) use the elementwise model which allows
     // in-place aliasing of input and output buffers.

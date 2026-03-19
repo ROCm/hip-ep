@@ -185,6 +185,24 @@ void mlir::hip::CastOp::getEffects(
                        SideEffects::DefaultResource::get());
 }
 
+void mlir::hip::MatMulNBitsOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>&
+        effects) {
+  effects.emplace_back(MemoryEffects::Read::get(),
+                       SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Write::get(),
+                       SideEffects::DefaultResource::get());
+}
+
+void mlir::hip::QMoEOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>&
+        effects) {
+  effects.emplace_back(MemoryEffects::Read::get(),
+                       SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Write::get(),
+                       SideEffects::DefaultResource::get());
+}
+
 //===----------------------------------------------------------------------===//
 // DestinationStyleOpInterface Implementations
 //===----------------------------------------------------------------------===//
@@ -252,6 +270,14 @@ MutableOperandRange mlir::hip::SimplifiedLayerNormOp::getDpsInitsMutable() {
 
 MutableOperandRange mlir::hip::SkipSimplifiedLayerNormOp::getDpsInitsMutable() {
   return MutableOperandRange(*this, 4, 2);
+}
+
+MutableOperandRange mlir::hip::MatMulNBitsOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+MutableOperandRange mlir::hip::QMoEOp::getDpsInitsMutable() {
+  return getOutputMutable();
 }
 
 void mlir::hip::GetConstantOp::getEffects(

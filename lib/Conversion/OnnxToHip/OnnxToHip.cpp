@@ -431,6 +431,215 @@ struct ReduceSumToHipPattern : public OpRewritePattern<ONNXReduceSumOp> {
 };
 
 //===----------------------------------------------------------------------===//
+// ONNX MatMulNBits → HIP MatMulNBits (com.microsoft custom op)
+//===----------------------------------------------------------------------===//
+
+struct MatMulNBitsToHipPattern : public OpRewritePattern<ONNXCustomOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(ONNXCustomOp customOp,
+                                PatternRewriter& rewriter) const override {
+    if (customOp.getFunctionName() != "MatMulNBits")
+      return failure();
+    auto domainAttr = customOp->getAttrOfType<StringAttr>("domain_name");
+    if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+      return failure();
+
+    auto loc = customOp.getLoc();
+
+    auto inputs = customOp.getInputs();
+    if (inputs.size() < 3)
+      return rewriter.notifyMatchFailure(
+          customOp, "expected at least 3 inputs for MatMulNBits");
+    if (customOp.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(customOp,
+                                         "expected 1 output for MatMulNBits");
+
+    auto ctxOrFailure = getContextArg(customOp, rewriter);
+    if (failed(ctxOrFailure))
+      return failure();
+    Value context = *ctxOrFailure;
+
+    Value A = inputs[0];
+    Value B = inputs[1];
+    Value scales = inputs[2];
+
+    auto getOptionalInput = [&](unsigned idx) -> Value {
+      if (idx >= inputs.size())
+        return Value{};
+      Value v = inputs[idx];
+      if (!v || isa<NoneType>(v.getType()))
+        return Value{};
+      return v;
+    };
+    Value zeroPoints = getOptionalInput(3);
+    Value gIdx = getOptionalInput(4);
+    Value bias = getOptionalInput(5);
+
+    auto KAttr = rewriter.getI64IntegerAttr(
+        customOp->getAttrOfType<IntegerAttr>("K").getSInt());
+    auto NAttr = rewriter.getI64IntegerAttr(
+        customOp->getAttrOfType<IntegerAttr>("N").getSInt());
+
+    auto bitsIntAttr = customOp->getAttrOfType<IntegerAttr>("bits");
+    auto bitsAttr = rewriter.getI64IntegerAttr(
+        bitsIntAttr ? bitsIntAttr.getSInt() : 4);
+
+    auto blockSizeAttr = rewriter.getI64IntegerAttr(
+        customOp->getAttrOfType<IntegerAttr>("block_size").getSInt());
+
+    auto accuracyIntAttr =
+        customOp->getAttrOfType<IntegerAttr>("accuracy_level");
+    auto accuracyLevelAttr = rewriter.getI64IntegerAttr(
+        accuracyIntAttr ? accuracyIntAttr.getSInt() : 0);
+
+    auto rt = cast<RankedTensorType>(customOp.getResult(0).getType());
+    Value init = rewriter.create<tensor::EmptyOp>(
+        loc, rt.getShape(), rt.getElementType());
+
+    auto hipOp = rewriter.create<hip::MatMulNBitsOp>(
+        loc, TypeRange{rt}, context, A, B, scales,
+        zeroPoints, gIdx, bias, init,
+        KAttr, NAttr, bitsAttr, blockSizeAttr, accuracyLevelAttr);
+    rewriter.replaceOp(customOp, hipOp.getResultTensors());
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// ONNX QMoE → HIP QMoE (com.microsoft custom op)
+//===----------------------------------------------------------------------===//
+
+struct QMoEToHipPattern : public OpRewritePattern<ONNXCustomOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(ONNXCustomOp customOp,
+                                PatternRewriter& rewriter) const override {
+    if (customOp.getFunctionName() != "QMoE")
+      return failure();
+    auto domainAttr = customOp->getAttrOfType<StringAttr>("domain_name");
+    if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+      return failure();
+
+    auto loc = customOp.getLoc();
+
+    auto inputs = customOp.getInputs();
+    if (inputs.size() < 7)
+      return rewriter.notifyMatchFailure(
+          customOp, "expected at least 7 inputs for QMoE");
+    if (customOp.getNumResults() != 1)
+      return rewriter.notifyMatchFailure(customOp,
+                                         "expected 1 output for QMoE");
+
+    auto ctxOrFailure = getContextArg(customOp, rewriter);
+    if (failed(ctxOrFailure))
+      return failure();
+    Value context = *ctxOrFailure;
+
+    // ONNX spec input order (7-14):
+    //   0: input, 1: router_probs,
+    //   2: fc1_weights, 3: fc1_scales, 4: fc1_bias(opt),
+    //   5: fc2_weights, 6: fc2_scales, 7: fc2_bias(opt),
+    //   8: fc3_weights(opt), 9: fc3_scales(opt), 10: fc3_bias(opt),
+    //   11: fc1_zero_points(opt), 12: fc2_zero_points(opt), 13: fc3_zero_points(opt)
+    auto getOptionalInput = [&](unsigned idx) -> Value {
+      if (idx >= inputs.size())
+        return Value{};
+      Value v = inputs[idx];
+      if (!v || isa<NoneType>(v.getType()))
+        return Value{};
+      return v;
+    };
+
+    Value input = inputs[0];
+    Value routerProbs = inputs[1];
+    Value fc1Weights = inputs[2];
+    Value fc1Scales = inputs[3];
+    Value fc1Bias = getOptionalInput(4);
+    Value fc2Weights = inputs[5];
+    Value fc2Scales = inputs[6];
+    Value fc2Bias = getOptionalInput(7);
+    Value fc3Weights = getOptionalInput(8);
+    Value fc3Scales = getOptionalInput(9);
+    Value fc3Bias = getOptionalInput(10);
+    Value fc1ZeroPoints = getOptionalInput(11);
+    Value fc2ZeroPoints = getOptionalInput(12);
+    Value fc3ZeroPoints = getOptionalInput(13);
+
+    auto expertWeightBitsIntAttr =
+        customOp->getAttrOfType<IntegerAttr>("expert_weight_bits");
+    auto expertWeightBitsAttr = rewriter.getI64IntegerAttr(
+        expertWeightBitsIntAttr ? expertWeightBitsIntAttr.getSInt() : 4);
+
+    auto kIntAttr = customOp->getAttrOfType<IntegerAttr>("k");
+    auto kAttr = rewriter.getI64IntegerAttr(
+        kIntAttr ? kIntAttr.getSInt() : 1);
+
+    auto blockSizeIntAttr = customOp->getAttrOfType<IntegerAttr>("block_size");
+    auto blockSizeAttr = rewriter.getI64IntegerAttr(
+        blockSizeIntAttr ? blockSizeIntAttr.getSInt() : 0);
+
+    auto normIntAttr =
+        customOp->getAttrOfType<IntegerAttr>("normalize_routing_weights");
+    auto normalizeAttr = rewriter.getI64IntegerAttr(
+        normIntAttr ? normIntAttr.getSInt() : 0);
+
+    auto swigluFusionIntAttr =
+        customOp->getAttrOfType<IntegerAttr>("swiglu_fusion");
+    auto swigluFusionAttr = rewriter.getI64IntegerAttr(
+        swigluFusionIntAttr ? swigluFusionIntAttr.getSInt() : 0);
+
+    auto sparseIntAttr =
+        customOp->getAttrOfType<IntegerAttr>("use_sparse_mixer");
+    auto useSparseAttr = rewriter.getI64IntegerAttr(
+        sparseIntAttr ? sparseIntAttr.getSInt() : 0);
+
+    auto alphaFloatAttr =
+        customOp->getAttrOfType<FloatAttr>("activation_alpha");
+    auto activationAlphaAttr = alphaFloatAttr
+        ? alphaFloatAttr
+        : rewriter.getF32FloatAttr(0.0f);
+
+    auto betaFloatAttr =
+        customOp->getAttrOfType<FloatAttr>("activation_beta");
+    auto activationBetaAttr = betaFloatAttr
+        ? betaFloatAttr
+        : rewriter.getF32FloatAttr(0.0f);
+
+    auto limitFloatAttr =
+        customOp->getAttrOfType<FloatAttr>("swiglu_limit");
+    auto swigluLimitAttr = limitFloatAttr
+        ? limitFloatAttr
+        : rewriter.getF32FloatAttr(0.0f);
+
+    auto activationTypeStrAttr =
+        customOp->getAttrOfType<StringAttr>("activation_type");
+    auto activationTypeAttr = activationTypeStrAttr
+        ? activationTypeStrAttr
+        : rewriter.getStringAttr("relu");
+
+    auto rt = cast<RankedTensorType>(customOp.getResult(0).getType());
+    Value init = rewriter.create<tensor::EmptyOp>(
+        loc, rt.getShape(), rt.getElementType());
+
+    auto hipOp = rewriter.create<hip::QMoEOp>(
+        loc, TypeRange{rt}, context,
+        input, routerProbs,
+        fc1Weights, fc1Scales, fc2Weights, fc2Scales,
+        fc1Bias, fc2Bias,
+        fc3Weights, fc3Scales, fc3Bias,
+        fc1ZeroPoints, fc2ZeroPoints, fc3ZeroPoints,
+        init,
+        expertWeightBitsAttr, kAttr, blockSizeAttr,
+        normalizeAttr, swigluFusionAttr, useSparseAttr,
+        activationAlphaAttr, activationBetaAttr, swigluLimitAttr,
+        activationTypeAttr);
+    rewriter.replaceOp(customOp, hipOp.getResultTensors());
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // ONNX Cast → HIP Cast (tensor-first)
 //===----------------------------------------------------------------------===//
 
@@ -1020,6 +1229,8 @@ public:
       patterns.add<CastToHipPattern>(context);
       patterns.add<SigmoidToHipPattern>(context);
       patterns.add<GroupQueryAttentionToHipPattern>(context);
+      patterns.add<MatMulNBitsToHipPattern>(context);
+      patterns.add<QMoEToHipPattern>(context);
       patterns.add<RotaryEmbeddingToHipPattern>(context);
       patterns.add<SimplifiedLayerNormToHipPattern>(context);
       patterns.add<SkipSimplifiedLayerNormToHipPattern>(context);
