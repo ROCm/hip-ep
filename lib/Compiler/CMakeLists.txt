@@ -49,10 +49,7 @@ llvm_map_components_to_libnames(compiler_llvm_libs
 
 target_link_libraries(LibHipCompiler PUBLIC ${compiler_llvm_libs})
 
-# Add include directories
 target_include_directories(LibHipCompiler PUBLIC
-  ${CMAKE_SOURCE_DIR}/include
-  ${CMAKE_BINARY_DIR}/include
   ${CMAKE_BINARY_DIR}/lib
   ${CMAKE_BINARY_DIR}/schemas
   ${CMAKE_SOURCE_DIR}/3rd-party/onnx-mlir
