@@ -1714,202 +1714,215 @@ struct GetConstantOpLowering : public ConvertOpToLLVMPattern<GetConstantOp> {
 };
 
 //===----------------------------------------------------------------------===//
-// wrapMainGraph: give @main_graph a stable (ptr,ptr,ptr)->i32 ABI
-//===----------------------------------------------------------------------===//
-
-/// After populateFuncToLLVMConversionPatterns the original @main_graph has a
-/// flat LLVM signature with one param per memref field.  GenerateInterface
-/// (and inference_compute) expect a compact three-pointer ABI:
-///   @main_graph(%state: ptr, %inputs_arr: ptr, %outputs_arr: ptr) -> i32
-///
-/// This helper:
-///  1. Renames the flattened function to @main_graph_kernel.
-///  2. Generates a new @main_graph that unpacks each memref descriptor from
-///     the pointer arrays and forwards the flat fields to the kernel.
-static void wrapMainGraph(ModuleOp module) {
-  auto *ctx = module.getContext();
-  OpBuilder builder(ctx);
-
-  auto kernel = module.lookupSymbol<LLVM::LLVMFuncOp>("main_graph");
-  if (!kernel)
-    return;
-
-  auto inputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.input_shapes");
-  auto outputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.output_shapes");
-  size_t numInputs = inputShapes ? inputShapes.size() : 0;
-  size_t numOutputs = outputShapes ? outputShapes.size() : 0;
-
-  Type ptrType = LLVM::LLVMPointerType::get(ctx, 0);
-  Type i32Type = IntegerType::get(ctx, 32);
-  Type i64Type = IntegerType::get(ctx, 64);
-
-  auto getRank = [&](ArrayAttr shapes, size_t i) -> int64_t {
-    if (!shapes || i >= shapes.size())
-      return 0;
-    if (auto a = dyn_cast<DenseI64ArrayAttr>(shapes.getValue()[i]))
-      return a.size();
-    return 0;
-  };
-
-  // Build the descriptor struct type directly from the kernel's flat parameter
-  // list, so we always match what LLVMTypeConverter actually produced.
-  // Kernel params: [ctx_ptr, (alloc, align, offset, sizes*, strides*)* ...]
-  // Each memref of rank R contributes 2 + 1 + 2*R params.
-  auto buildDescStructFromKernel = [&](size_t kernelParamOffset,
-                                       int64_t rank) -> Type {
-    auto kernelType = kernel.getFunctionType();
-    // alloc ptr type is at offset 0, align ptr at offset 1 within this memref.
-    Type allocPtrT = kernelType.getParamType(kernelParamOffset);
-    Type alignPtrT = kernelType.getParamType(kernelParamOffset + 1);
-    Type offsetT = kernelType.getParamType(kernelParamOffset + 2);
-    Type sizeT =
-        rank > 0 ? kernelType.getParamType(kernelParamOffset + 3) : i64Type;
-    Type sizeArr = LLVM::LLVMArrayType::get(sizeT, rank);
-    Type strideArr = LLVM::LLVMArrayType::get(sizeT, rank);
-    (void)allocPtrT;
-    (void)alignPtrT;
-    (void)offsetT;
-    return LLVM::LLVMStructType::getLiteral(
-        ctx, {allocPtrT, alignPtrT, offsetT, sizeArr, strideArr});
-  };
-
-  // 1. Rename the flattened kernel.
-  kernel.setName("main_graph_kernel");
-
-  // 2. Build the compact wrapper.
-  Location loc = module.getLoc();
-  builder.setInsertionPointToEnd(module.getBody());
-
-  auto wrapType =
-      LLVM::LLVMFunctionType::get(i32Type, {ptrType, ptrType, ptrType});
-  auto wrapFunc =
-      LLVM::LLVMFuncOp::create(builder, loc, "main_graph", wrapType);
-  wrapFunc.setLinkage(LLVM::Linkage::Internal);
-
-  Block *entry = wrapFunc.addEntryBlock(builder);
-  builder.setInsertionPointToStart(entry);
-
-  Value stateArg = entry->getArgument(0);
-  Value inputsArrArg = entry->getArgument(1);
-  Value outputsArrArg = entry->getArgument(2);
-
-  // Build flat kernel arg list starting with state.
-  SmallVector<Value> kernelArgs;
-  kernelArgs.push_back(stateArg);
-
-  // Track position in the kernel's flat parameter list (skip param 0 = ctx).
-  size_t kernelParamIdx = 1;
-
-  // For each tensor: load ptr-to-descriptor, load descriptor, extract fields.
-  auto appendMemrefArgs = [&](Value arrArg, size_t count, ArrayAttr shapes) {
-    for (size_t i = 0; i < count; ++i) {
-      int64_t rank = getRank(shapes, i);
-      // Build the descriptor struct type matching the kernel's actual param
-      // types.
-      Type descType = buildDescStructFromKernel(kernelParamIdx, rank);
-
-      Value idx = LLVM::ConstantOp::create(builder, loc, i64Type,
-                                           builder.getI64IntegerAttr(i));
-      // arrArg[i] is a ptr-to-ptr-to-descriptor.
-      Value slotPtr = LLVM::GEPOp::create(builder, loc, ptrType, ptrType,
-                                          arrArg, ArrayRef<LLVM::GEPArg>{idx});
-      Value descPtr = LLVM::LoadOp::create(builder, loc, ptrType, slotPtr);
-      Value desc = LLVM::LoadOp::create(builder, loc, descType, descPtr);
-
-      kernelArgs.push_back(LLVM::ExtractValueOp::create(builder, loc, desc,
-                                                        ArrayRef<int64_t>{0}));
-      kernelArgs.push_back(LLVM::ExtractValueOp::create(builder, loc, desc,
-                                                        ArrayRef<int64_t>{1}));
-      kernelArgs.push_back(LLVM::ExtractValueOp::create(builder, loc, desc,
-                                                        ArrayRef<int64_t>{2}));
-      for (int64_t d = 0; d < rank; ++d)
-        kernelArgs.push_back(LLVM::ExtractValueOp::create(
-            builder, loc, desc, ArrayRef<int64_t>{3, d}));
-      for (int64_t d = 0; d < rank; ++d)
-        kernelArgs.push_back(LLVM::ExtractValueOp::create(
-            builder, loc, desc, ArrayRef<int64_t>{4, d}));
-
-      // Advance past this memref's flat params: alloc + align + offset + R
-      // sizes + R strides.
-      kernelParamIdx += 2 + 1 + rank + rank;
-    }
-  };
-
-  appendMemrefArgs(inputsArrArg, numInputs, inputShapes);
-  appendMemrefArgs(outputsArrArg, numOutputs, outputShapes);
-
-  // @main_graph_kernel returns void (output is an out-param).
-  // Wrapper returns i32 0 (success).
-  LLVM::CallOp::create(builder, loc, kernel, kernelArgs);
-  Value zero = LLVM::ConstantOp::create(builder, loc, i32Type,
-                                        builder.getI32IntegerAttr(0));
-  LLVM::ReturnOp::create(builder, loc, zero);
-}
-
-//===----------------------------------------------------------------------===//
 // ConvertHipToLLVM Pass
 //===----------------------------------------------------------------------===//
 
 struct ConvertHipToLLVMPass
     : public impl::ConvertHipToLLVMPassBase<ConvertHipToLLVMPass> {
-  void runOnOperation() override;
-};
+  void runOnOperation() override {
+    ModuleOp module = getOperation();
+    MLIRContext *ctx = module.getContext();
 
-void ConvertHipToLLVMPass::runOnOperation() {
-  ModuleOp module = getOperation();
-  MLIRContext *ctx = module.getContext();
+    LowerToLLVMOptions options(ctx);
+    LLVMTypeConverter typeConverter(ctx, options);
 
-  LowerToLLVMOptions options(ctx);
-  LLVMTypeConverter typeConverter(ctx, options);
+    typeConverter.addConversion([ctx](ContextType type) -> Type {
+      return LLVM::LLVMPointerType::get(ctx, 0);
+    });
 
-  // !hip.context -> !llvm.ptr (opaque pointer to runtime context)
-  typeConverter.addConversion([ctx](ContextType type) -> Type {
-    return LLVM::LLVMPointerType::get(ctx, 0);
-  });
+    RewritePatternSet patterns(ctx);
 
-  RewritePatternSet patterns(ctx);
+    patterns.add<AllocOpLowering, FreeOpLowering, GetConstantOpLowering,
+                 MiopenGraphOpLowering, GetPoolOpLowering,
+                 HipblasltGraphOpLowering, ConvOpLowering, MatmulOpLowering,
+                 RmsNormOpLowering, SkipRmsNormOpLowering, RopeOpLowering,
+                 MiopenSoftmaxOpLowering, TransposeOpLowering,
+                 GatherOpLowering, SiluOpLowering, SigmoidOpLowering,
+                 MulOpLowering, SubOpLowering, CastOpLowering,
+                 ReduceSumOpLowering, GqaOpLowering>(typeConverter);
+    patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter,
+                                                         kMiopenAdd);
+    patterns.add<MemRefAllocOpLowering, MemRefDeallocOpLowering>(typeConverter);
 
-  // HIP dialect-specific lowerings
-  patterns.add<AllocOpLowering, FreeOpLowering, GetConstantOpLowering,
-               MiopenGraphOpLowering, GetPoolOpLowering,
-               HipblasltGraphOpLowering, ConvOpLowering, MatmulOpLowering,
-               RmsNormOpLowering, SkipRmsNormOpLowering, RopeOpLowering,
-               MiopenSoftmaxOpLowering, TransposeOpLowering, GatherOpLowering,
-               SiluOpLowering, SigmoidOpLowering, MulOpLowering, SubOpLowering,
-               CastOpLowering, ReduceSumOpLowering, GqaOpLowering>(
-      typeConverter);
-  patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter,
-                                                       kMiopenAdd);
-  patterns.add<MemRefAllocOpLowering, MemRefDeallocOpLowering>(typeConverter);
+    populateFuncToLLVMConversionPatterns(typeConverter, patterns);
+    populateFinalizeMemRefToLLVMConversionPatterns(typeConverter, patterns);
+    arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
+    cf::populateControlFlowToLLVMConversionPatterns(typeConverter, patterns);
 
-  // Standard dialect lowerings
-  // Bundle func/memref/arith/cf lowering with HIP lowering to minimize
-  // unrealized casts at the memref/LLVM boundary. Running them as separate
-  // stages would require a reconcile-unrealized-casts cleanup pass.
-  populateFuncToLLVMConversionPatterns(typeConverter, patterns);
-  populateFinalizeMemRefToLLVMConversionPatterns(typeConverter, patterns);
-  arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
-  cf::populateControlFlowToLLVMConversionPatterns(typeConverter, patterns);
+    LLVMConversionTarget target(*ctx);
+    target.addLegalDialect<LLVM::LLVMDialect>();
+    target.addIllegalDialect<HipDialect>();
+    target.addIllegalOp<memref::AllocOp, memref::DeallocOp>();
+    target.addLegalOp<ModuleOp>();
 
-  LLVMConversionTarget target(*ctx);
-  target.addLegalDialect<LLVM::LLVMDialect>();
-  target.addIllegalDialect<HipDialect>();
-  target.addIllegalOp<memref::AllocOp, memref::DeallocOp>();
-  target.addLegalOp<ModuleOp>();
+    if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
+      signalPassFailure();
+      return;
+    }
 
-  if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
-    signalPassFailure();
-    return;
+    if (failed(transformMainFunction(module)))
+      signalPassFailure();
   }
 
-  // Wrap @main_graph (which now has a flattened LLVM signature from memref
-  // expansion) into a stable public ABI: @main_graph(ptr state, ptr
-  // inputs_arr, ptr outputs_arr) -> i32.
-  //
-  // The stable wrapper is what GenerateInterface and inference_compute expect.
-  // The flattened kernel is renamed to @main_graph_kernel.
-  wrapMainGraph(module);
-}
+private:
+  Type getMemRefStructType(OpBuilder &builder, int64_t rank,
+                           unsigned addrSpace) {
+    MLIRContext *ctx = builder.getContext();
+    Type ptrType = LLVM::LLVMPointerType::get(ctx, addrSpace);
+    Type i64Type = builder.getI64Type();
+    Type sizeArrayType = LLVM::LLVMArrayType::get(i64Type, rank);
+    return LLVM::LLVMStructType::getLiteral(
+        ctx, {ptrType, ptrType, i64Type, sizeArrayType, sizeArrayType});
+  }
+
+  void unpackMemRefStructWithAddrCast(OpBuilder &builder, Location loc,
+                                      Value memrefStruct, int64_t rank,
+                                      SmallVectorImpl<Value> &args) {
+    Type as0PtrType = LLVM::LLVMPointerType::get(builder.getContext(), 0);
+    auto castToAs0 = [&](Value ptr) -> Value {
+      auto ptrTy = cast<LLVM::LLVMPointerType>(ptr.getType());
+      if (ptrTy.getAddressSpace() == 0)
+        return ptr;
+      return LLVM::AddrSpaceCastOp::create(builder, loc, as0PtrType, ptr);
+    };
+
+    args.push_back(castToAs0(LLVM::ExtractValueOp::create(
+        builder, loc, memrefStruct, ArrayRef<int64_t>{0})));
+    args.push_back(castToAs0(LLVM::ExtractValueOp::create(
+        builder, loc, memrefStruct, ArrayRef<int64_t>{1})));
+    args.push_back(LLVM::ExtractValueOp::create(builder, loc, memrefStruct,
+                                                ArrayRef<int64_t>{2}));
+    for (int64_t dim = 0; dim < rank; dim++)
+      args.push_back(LLVM::ExtractValueOp::create(builder, loc, memrefStruct,
+                                                  ArrayRef<int64_t>{3, dim}));
+    for (int64_t dim = 0; dim < rank; dim++)
+      args.push_back(LLVM::ExtractValueOp::create(builder, loc, memrefStruct,
+                                                  ArrayRef<int64_t>{4, dim}));
+  }
+
+  LogicalResult transformMainFunction(ModuleOp module) {
+    auto mainFunc = module.lookupSymbol<LLVM::LLVMFuncOp>("main_graph");
+    if (!mainFunc)
+      return success();
+
+    Type ptrType = LLVM::LLVMPointerType::get(module.getContext(), 0);
+    Type i32Type = IntegerType::get(module.getContext(), 32);
+
+    auto mainType = mainFunc.getFunctionType();
+    if (mainType.getNumParams() == 3 &&
+        mainType.getReturnType() == i32Type &&
+        mainType.getParamType(0) == ptrType &&
+        mainType.getParamType(1) == ptrType &&
+        mainType.getParamType(2) == ptrType)
+      return success();
+
+    auto inputCountAttr =
+        module->getAttrOfType<IntegerAttr>("hipdnn.input_count");
+    auto outputCountAttr =
+        module->getAttrOfType<IntegerAttr>("hipdnn.output_count");
+    auto inputShapesAttr =
+        module->getAttrOfType<ArrayAttr>("hipdnn.input_shapes");
+    auto outputShapesAttr =
+        module->getAttrOfType<ArrayAttr>("hipdnn.output_shapes");
+
+    if (!inputCountAttr || !outputCountAttr || !inputShapesAttr ||
+        !outputShapesAttr) {
+      llvm::errs()
+          << "[HipToLLVM] Warning: No metadata found, skipping @main_graph "
+             "transformation\n";
+      return success();
+    }
+
+    int64_t inputCount = inputCountAttr.getInt();
+    int64_t outputCount = outputCountAttr.getInt();
+
+    if ((int64_t)inputShapesAttr.size() != inputCount ||
+        (int64_t)outputShapesAttr.size() != outputCount)
+      return module.emitError("Metadata mismatch: shapes array size != count");
+
+    unsigned expectedParams = 1;
+    for (auto shapeAttr : inputShapesAttr) {
+      int64_t rank = cast<DenseI64ArrayAttr>(shapeAttr).size();
+      expectedParams += 2 + 1 + rank + rank;
+    }
+    for (auto shapeAttr : outputShapesAttr) {
+      int64_t rank = cast<DenseI64ArrayAttr>(shapeAttr).size();
+      expectedParams += 2 + 1 + rank + rank;
+    }
+
+    unsigned actualParams = mainFunc.getFunctionType().getNumParams();
+    if (actualParams != expectedParams)
+      return module.emitError()
+             << "[HipToLLVM] Parameter count mismatch: expected "
+             << expectedParams << ", got " << actualParams;
+
+    OpBuilder builder(module.getContext());
+    Location loc = mainFunc.getLoc();
+
+    mainFunc.setName("main_graph_internal");
+    mainFunc.setLinkage(LLVM::Linkage::Private);
+
+    auto newFuncType = LLVM::LLVMFunctionType::get(
+        i32Type, {ptrType, ptrType, ptrType});
+    builder.setInsertionPoint(mainFunc);
+    auto newMainFunc =
+        LLVM::LLVMFuncOp::create(builder, loc, "main_graph", newFuncType);
+    newMainFunc.setLinkage(LLVM::Linkage::Private);
+    newMainFunc->setAttr(
+        "passthrough",
+        builder.getArrayAttr({builder.getStringAttr("noinline")}));
+
+    Block *entryBlock = newMainFunc.addEntryBlock(builder);
+    builder.setInsertionPointToStart(entryBlock);
+
+    Value ctxArg = entryBlock->getArgument(0);
+    Value inputsArg = entryBlock->getArgument(1);
+    Value outputsArg = entryBlock->getArgument(2);
+
+    SmallVector<Value> internalArgs;
+    internalArgs.push_back(ctxArg);
+
+    for (int64_t i = 0; i < inputCount; i++) {
+      int64_t rank = cast<DenseI64ArrayAttr>(inputShapesAttr[i]).size();
+      Value idxVal = LLVM::ConstantOp::create(builder, loc, i32Type,
+                                              builder.getI32IntegerAttr(i));
+      Value slotPtr = LLVM::GEPOp::create(builder, loc, ptrType, ptrType,
+                                          inputsArg, ValueRange{idxVal});
+      Value structPtr = LLVM::LoadOp::create(builder, loc, ptrType, slotPtr);
+      Type memrefStructType = getMemRefStructType(builder, rank, 1);
+      Value memref =
+          LLVM::LoadOp::create(builder, loc, memrefStructType, structPtr);
+      unpackMemRefStructWithAddrCast(builder, loc, memref, rank, internalArgs);
+    }
+
+    for (int64_t i = 0; i < outputCount; i++) {
+      int64_t rank = cast<DenseI64ArrayAttr>(outputShapesAttr[i]).size();
+      Value idxVal = LLVM::ConstantOp::create(builder, loc, i32Type,
+                                              builder.getI32IntegerAttr(i));
+      Value slotPtr = LLVM::GEPOp::create(builder, loc, ptrType, ptrType,
+                                          outputsArg, ValueRange{idxVal});
+      Value structPtr = LLVM::LoadOp::create(builder, loc, ptrType, slotPtr);
+      Type memrefStructType = getMemRefStructType(builder, rank, 1);
+      Value memref =
+          LLVM::LoadOp::create(builder, loc, memrefStructType, structPtr);
+      unpackMemRefStructWithAddrCast(builder, loc, memref, rank, internalArgs);
+    }
+
+    auto internalRetTy = mainFunc.getFunctionType().getReturnType();
+    if (isa<LLVM::LLVMVoidType>(internalRetTy)) {
+      LLVM::CallOp::create(builder, loc, mainFunc, internalArgs);
+      Value zero = LLVM::ConstantOp::create(builder, loc, i32Type,
+                                            builder.getI32IntegerAttr(0));
+      LLVM::ReturnOp::create(builder, loc, zero);
+    } else {
+      auto callOp =
+          LLVM::CallOp::create(builder, loc, mainFunc, internalArgs);
+      LLVM::ReturnOp::create(builder, loc, callOp.getResult());
+    }
+
+    return success();
+  }
+};
 
 } // namespace
 
