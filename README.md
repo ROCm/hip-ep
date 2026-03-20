@@ -2,7 +2,7 @@
 Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
-# ONNX HIP DNN Execution Provider
+# ONNX HIP DNN Execution Provide1r
 
 An implementation of HIP DNN operations in the MorphiZen framework.
 
