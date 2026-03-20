@@ -4,8 +4,8 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
-#include "runtime_types.h"
 #include "hip_custom_kernels.h"
+#include "runtime_types.h"
 
 #include <cstdio>
 
@@ -18,13 +18,13 @@ static constexpr int64_t ONNX_FLOAT16 = 10;
 static int onnx_type_to_hip_dtype(int64_t onnx_type) {
   switch (onnx_type) {
   case ONNX_FLOAT:
-    return hip_DTYPE_FLOAT32;
+    return HIP_DTYPE_FLOAT32;
   case ONNX_INT32:
-    return hip_DTYPE_INT32;
+    return HIP_DTYPE_INT32;
   case ONNX_INT64:
-    return hip_DTYPE_INT64;
+    return HIP_DTYPE_INT64;
   case ONNX_FLOAT16:
-    return hip_DTYPE_FLOAT16;
+    return HIP_DTYPE_FLOAT16;
   default:
     return -1;
   }
@@ -33,11 +33,11 @@ static int onnx_type_to_hip_dtype(int64_t onnx_type) {
 static int element_size_to_hip_dtype(int64_t elem_size) {
   switch (elem_size) {
   case 8:
-    return hip_DTYPE_INT64;
+    return HIP_DTYPE_INT64;
   case 4:
-    return hip_DTYPE_INT32;
+    return HIP_DTYPE_INT32;
   case 2:
-    return hip_DTYPE_FLOAT16;
+    return HIP_DTYPE_FLOAT16;
   default:
     return -1;
   }
@@ -74,5 +74,5 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
       (long long)output_element_size, (long long)to, input_dtype, output_dtype);
 
   return hip_cast(stream, input, output, num_elements, input_dtype,
-                   output_dtype);
+                  output_dtype);
 }

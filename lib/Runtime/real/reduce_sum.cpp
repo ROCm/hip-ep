@@ -4,8 +4,8 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
-#include "runtime_types.h"
 #include "hip_custom_kernels.h"
+#include "runtime_types.h"
 
 #include <cstdio>
 
@@ -22,10 +22,10 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
   int hip_dtype;
   switch (element_size_bytes) {
   case 8:
-    hip_dtype = hip_DTYPE_INT64;
+    hip_dtype = HIP_DTYPE_INT64;
     break;
   case 4:
-    hip_dtype = hip_DTYPE_INT32;
+    hip_dtype = HIP_DTYPE_INT32;
     break;
   default:
     RUNTIME_DEBUG_LOG("[REAL] wrap_reduce_sum: unsupported element_size=%lld\n",
@@ -40,5 +40,5 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
       (long long)element_size_bytes, (long long)keepdims, hip_dtype);
 
   return hip_reduce_sum(stream, data, output, data_num_elements,
-                         output_num_elements, hip_dtype);
+                        output_num_elements, hip_dtype);
 }
