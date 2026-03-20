@@ -88,10 +88,6 @@ private:
                  const std::vector<std::string> &export_symbols,
                  std::string &error_message);
 
-  /// Discover GPU runtime libraries from THEROCK_DIST environment variable.
-  void discoverLibraries(std::vector<std::string> &libraries,
-                         std::vector<std::string> &library_paths);
-
   void cleanupIntermediates(const std::string &basePath);
 
   morphizen::FileSystem *fileSystem_ = nullptr;

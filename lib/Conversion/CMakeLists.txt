@@ -20,4 +20,8 @@ target_link_libraries(HipConversion PUBLIC
   MLIRPass
 )
 
+target_include_directories(HipConversion PUBLIC
+  ${CMAKE_SOURCE_DIR}/include
+)
+
 set_target_properties(HipConversion PROPERTIES FOLDER "mlir/Conversion")

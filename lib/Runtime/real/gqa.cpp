@@ -5,7 +5,7 @@
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
-#include "hip_custom_kernels.h"
+#include "udna_custom_kernels.h"
 
 #include <cstdio>
 
@@ -18,7 +18,7 @@
 // along with pointers and attributes (num_heads, kv_num_heads, scale, etc.)
 //
 // This wrapper extracts the HIP stream from RuntimeState and delegates to
-// the custom kernel library (hip_custom_kernels.lib).
+// the custom kernel library (udna_custom_kernels.lib).
 // =============================================================================
 
 int wrap_group_query_attention(RuntimeState *state, void *query, void *key,
@@ -50,7 +50,7 @@ int wrap_group_query_attention(RuntimeState *state, void *query, void *key,
       (long long)num_heads, (long long)kv_num_heads, (long long)head_dim,
       (double)scale, (long long)do_rotary, (long long)element_size_bytes);
 
-  int rc = hip_gqa_forward(
+  int rc = udna_gqa_forward(
       stream, query, key, value, past_key, past_value, seqlens_k, total_seq_len,
       cos_cache, sin_cache, output, present_key, present_value, batch_size,
       seq_len_q, seq_len_kv, num_heads, kv_num_heads, head_dim, scale, softcap,
@@ -58,7 +58,8 @@ int wrap_group_query_attention(RuntimeState *state, void *query, void *key,
 
   if (rc != 0) {
     fprintf(stderr,
-            "wrap_group_query_attention: hip_gqa_forward failed (rc=%d)\n", rc);
+            "wrap_group_query_attention: udna_gqa_forward failed (rc=%d)\n",
+            rc);
   } else {
     RUNTIME_DEBUG_LOG(
         "[REAL] wrap_group_query_attention: completed successfully\n");

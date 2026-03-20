@@ -1714,6 +1714,139 @@ struct GetConstantOpLowering : public ConvertOpToLLVMPattern<GetConstantOp> {
 };
 
 //===----------------------------------------------------------------------===//
+// wrapMainGraph: give @main_graph a stable (ptr,ptr,ptr)->i32 ABI
+//===----------------------------------------------------------------------===//
+
+/// After populateFuncToLLVMConversionPatterns the original @main_graph has a
+/// flat LLVM signature with one param per memref field.  GenerateInterface
+/// (and inference_compute) expect a compact three-pointer ABI:
+///   @main_graph(%state: ptr, %inputs_arr: ptr, %outputs_arr: ptr) -> i32
+///
+/// This helper:
+///  1. Renames the flattened function to @main_graph_kernel.
+///  2. Generates a new @main_graph that unpacks each memref descriptor from
+///     the pointer arrays and forwards the flat fields to the kernel.
+static void wrapMainGraph(ModuleOp module) {
+  auto *ctx = module.getContext();
+  OpBuilder builder(ctx);
+
+  auto kernel = module.lookupSymbol<LLVM::LLVMFuncOp>("main_graph");
+  if (!kernel)
+    return;
+
+  auto inputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.input_shapes");
+  auto outputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.output_shapes");
+  size_t numInputs = inputShapes ? inputShapes.size() : 0;
+  size_t numOutputs = outputShapes ? outputShapes.size() : 0;
+
+  Type ptrType = LLVM::LLVMPointerType::get(ctx, 0);
+  Type i32Type = IntegerType::get(ctx, 32);
+  Type i64Type = IntegerType::get(ctx, 64);
+
+  auto getRank = [&](ArrayAttr shapes, size_t i) -> int64_t {
+    if (!shapes || i >= shapes.size())
+      return 0;
+    if (auto a = dyn_cast<DenseI64ArrayAttr>(shapes.getValue()[i]))
+      return a.size();
+    return 0;
+  };
+
+  // Build the descriptor struct type directly from the kernel's flat parameter
+  // list, so we always match what LLVMTypeConverter actually produced.
+  // Kernel params: [ctx_ptr, (alloc, align, offset, sizes*, strides*)* ...]
+  // Each memref of rank R contributes 2 + 1 + 2*R params.
+  auto buildDescStructFromKernel = [&](size_t kernelParamOffset,
+                                       int64_t rank) -> Type {
+    auto kernelType = kernel.getFunctionType();
+    // alloc ptr type is at offset 0, align ptr at offset 1 within this memref.
+    Type allocPtrT = kernelType.getParamType(kernelParamOffset);
+    Type alignPtrT = kernelType.getParamType(kernelParamOffset + 1);
+    Type offsetT = kernelType.getParamType(kernelParamOffset + 2);
+    Type sizeT =
+        rank > 0 ? kernelType.getParamType(kernelParamOffset + 3) : i64Type;
+    Type sizeArr = LLVM::LLVMArrayType::get(sizeT, rank);
+    Type strideArr = LLVM::LLVMArrayType::get(sizeT, rank);
+    (void)allocPtrT;
+    (void)alignPtrT;
+    (void)offsetT;
+    return LLVM::LLVMStructType::getLiteral(
+        ctx, {allocPtrT, alignPtrT, offsetT, sizeArr, strideArr});
+  };
+
+  // 1. Rename the flattened kernel.
+  kernel.setName("main_graph_kernel");
+
+  // 2. Build the compact wrapper.
+  Location loc = module.getLoc();
+  builder.setInsertionPointToEnd(module.getBody());
+
+  auto wrapType =
+      LLVM::LLVMFunctionType::get(i32Type, {ptrType, ptrType, ptrType});
+  auto wrapFunc =
+      LLVM::LLVMFuncOp::create(builder, loc, "main_graph", wrapType);
+  wrapFunc.setLinkage(LLVM::Linkage::Internal);
+
+  Block *entry = wrapFunc.addEntryBlock(builder);
+  builder.setInsertionPointToStart(entry);
+
+  Value stateArg = entry->getArgument(0);
+  Value inputsArrArg = entry->getArgument(1);
+  Value outputsArrArg = entry->getArgument(2);
+
+  // Build flat kernel arg list starting with state.
+  SmallVector<Value> kernelArgs;
+  kernelArgs.push_back(stateArg);
+
+  // Track position in the kernel's flat parameter list (skip param 0 = ctx).
+  size_t kernelParamIdx = 1;
+
+  // For each tensor: load ptr-to-descriptor, load descriptor, extract fields.
+  auto appendMemrefArgs = [&](Value arrArg, size_t count, ArrayAttr shapes) {
+    for (size_t i = 0; i < count; ++i) {
+      int64_t rank = getRank(shapes, i);
+      // Build the descriptor struct type matching the kernel's actual param
+      // types.
+      Type descType = buildDescStructFromKernel(kernelParamIdx, rank);
+
+      Value idx = LLVM::ConstantOp::create(builder, loc, i64Type,
+                                           builder.getI64IntegerAttr(i));
+      // arrArg[i] is a ptr-to-ptr-to-descriptor.
+      Value slotPtr = LLVM::GEPOp::create(builder, loc, ptrType, ptrType,
+                                          arrArg, ArrayRef<LLVM::GEPArg>{idx});
+      Value descPtr = LLVM::LoadOp::create(builder, loc, ptrType, slotPtr);
+      Value desc = LLVM::LoadOp::create(builder, loc, descType, descPtr);
+
+      kernelArgs.push_back(LLVM::ExtractValueOp::create(builder, loc, desc,
+                                                        ArrayRef<int64_t>{0}));
+      kernelArgs.push_back(LLVM::ExtractValueOp::create(builder, loc, desc,
+                                                        ArrayRef<int64_t>{1}));
+      kernelArgs.push_back(LLVM::ExtractValueOp::create(builder, loc, desc,
+                                                        ArrayRef<int64_t>{2}));
+      for (int64_t d = 0; d < rank; ++d)
+        kernelArgs.push_back(LLVM::ExtractValueOp::create(
+            builder, loc, desc, ArrayRef<int64_t>{3, d}));
+      for (int64_t d = 0; d < rank; ++d)
+        kernelArgs.push_back(LLVM::ExtractValueOp::create(
+            builder, loc, desc, ArrayRef<int64_t>{4, d}));
+
+      // Advance past this memref's flat params: alloc + align + offset + R
+      // sizes + R strides.
+      kernelParamIdx += 2 + 1 + rank + rank;
+    }
+  };
+
+  appendMemrefArgs(inputsArrArg, numInputs, inputShapes);
+  appendMemrefArgs(outputsArrArg, numOutputs, outputShapes);
+
+  // @main_graph_kernel returns void (output is an out-param).
+  // Wrapper returns i32 0 (success).
+  LLVM::CallOp::create(builder, loc, kernel, kernelArgs);
+  Value zero = LLVM::ConstantOp::create(builder, loc, i32Type,
+                                        builder.getI32IntegerAttr(0));
+  LLVM::ReturnOp::create(builder, loc, zero);
+}
+
+//===----------------------------------------------------------------------===//
 // ConvertHipToLLVM Pass
 //===----------------------------------------------------------------------===//
 
@@ -1764,8 +1897,18 @@ void ConvertHipToLLVMPass::runOnOperation() {
   target.addIllegalOp<memref::AllocOp, memref::DeallocOp>();
   target.addLegalOp<ModuleOp>();
 
-  if (failed(applyPartialConversion(module, target, std::move(patterns))))
+  if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
     signalPassFailure();
+    return;
+  }
+
+  // Wrap @main_graph (which now has a flattened LLVM signature from memref
+  // expansion) into a stable public ABI: @main_graph(ptr state, ptr
+  // inputs_arr, ptr outputs_arr) -> i32.
+  //
+  // The stable wrapper is what GenerateInterface and inference_compute expect.
+  // The flattened kernel is renamed to @main_graph_kernel.
+  wrapMainGraph(module);
 }
 
 } // namespace

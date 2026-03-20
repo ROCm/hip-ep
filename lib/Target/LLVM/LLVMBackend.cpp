@@ -19,13 +19,13 @@
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/TargetSelect.h>
 
+#include <fstream>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/TargetParser/Host.h>
 
-#include "hip/debug_log.h"
-
+#include <iostream>
 #include <system_error>
 
 namespace hipdnn {
@@ -59,7 +59,7 @@ LLVMBackend::translateMLIRtoLLVMIR(mlir::ModuleOp mlirModule,
   // Translate MLIR to LLVM IR using C++ library API
   auto llvmModule = mlir::translateModuleToLLVMIR(mlirModule, llvmContext);
   if (!llvmModule) {
-    llvm::errs() << "Failed to translate MLIR to LLVM IR\n";
+    std::cerr << "Failed to translate MLIR to LLVM IR\n";
     return nullptr;
   }
 
@@ -67,7 +67,7 @@ LLVMBackend::translateMLIRtoLLVMIR(mlir::ModuleOp mlirModule,
   std::string error_msg;
   llvm::raw_string_ostream error_stream(error_msg);
   if (llvm::verifyModule(*llvmModule, &error_stream)) {
-    llvm::errs() << "LLVM IR verification failed:\n" << error_msg << "\n";
+    std::cerr << "LLVM IR verification failed:\n" << error_msg << "\n";
     return nullptr;
   }
 
@@ -76,7 +76,7 @@ LLVMBackend::translateMLIRtoLLVMIR(mlir::ModuleOp mlirModule,
 
 void LLVMBackend::optimizeLLVMIR(llvm::Module *module, int optLevel) {
   if (!module || optLevel < 0 || optLevel > 3) {
-    llvm::errs() << "Invalid arguments to optimizeLLVMIR\n";
+    std::cerr << "Invalid arguments to optimizeLLVMIR\n";
     return;
   }
 
@@ -118,7 +118,7 @@ void LLVMBackend::optimizeLLVMIR(llvm::Module *module, int optLevel) {
 bool LLVMBackend::emitLLVMIR(llvm::Module *module,
                              const std::string &outputPath) {
   if (!module) {
-    llvm::errs() << "Null module in emitLLVMIR\n";
+    std::cerr << "Null module in emitLLVMIR\n";
     return false;
   }
 
@@ -126,20 +126,20 @@ bool LLVMBackend::emitLLVMIR(llvm::Module *module,
   std::error_code EC;
   llvm::raw_fd_ostream out(outputPath, EC, llvm::sys::fs::OF_None);
   if (EC) {
-    llvm::errs() << "Failed to open output file: " << EC.message() << "\n";
+    std::cerr << "Failed to open output file: " << EC.message() << "\n";
     return false;
   }
 
   // Print LLVM IR in human-readable text format
   module->print(out, nullptr);
 
-  COMPILER_DEBUG_LOG("Emitted LLVM IR to: " << outputPath << "\n");
+  std::cout << "Emitted LLVM IR to: " << outputPath << "\n";
   return true;
 }
 
 bool LLVMBackend::emitLLVMIRToString(llvm::Module *module, std::string &outIR) {
   if (!module) {
-    llvm::errs() << "Null module in emitLLVMIRToString\n";
+    std::cerr << "Null module in emitLLVMIRToString\n";
     return false;
   }
 
@@ -162,7 +162,7 @@ llvm::TargetMachine *LLVMBackend::createTargetMachine() {
   const llvm::Target *target =
       llvm::TargetRegistry::lookupTarget(target_triple.str(), error_msg);
   if (!target) {
-    llvm::errs() << "Failed to lookup target: " << error_msg << "\n";
+    std::cerr << "Failed to lookup target: " << error_msg << "\n";
     return nullptr;
   }
 
@@ -177,7 +177,7 @@ llvm::TargetMachine *LLVMBackend::createTargetMachine() {
       target->createTargetMachine(target_triple, cpu, features, options, RM);
 
   if (!TM) {
-    llvm::errs() << "Failed to create target machine\n";
+    std::cerr << "Failed to create target machine\n";
     return nullptr;
   }
 
@@ -187,7 +187,7 @@ llvm::TargetMachine *LLVMBackend::createTargetMachine() {
 bool LLVMBackend::compileToObjectFile(llvm::Module *module,
                                       const std::string &outputPath) {
   if (!module) {
-    llvm::errs() << "Null module in compileToObjectFile\n";
+    std::cerr << "Null module in compileToObjectFile\n";
     return false;
   }
 
@@ -205,7 +205,7 @@ bool LLVMBackend::compileToObjectFile(llvm::Module *module,
   std::error_code EC;
   llvm::raw_fd_ostream out(outputPath, EC, llvm::sys::fs::OF_None);
   if (EC) {
-    llvm::errs() << "Failed to open output file: " << EC.message() << "\n";
+    std::cerr << "Failed to open output file: " << EC.message() << "\n";
     return false;
   }
 
@@ -215,7 +215,7 @@ bool LLVMBackend::compileToObjectFile(llvm::Module *module,
   // Add pass to emit object file
   if (TM->addPassesToEmitFile(pass, out, nullptr,
                               llvm::CodeGenFileType::ObjectFile)) {
-    llvm::errs() << "TargetMachine can't emit object file\n";
+    std::cerr << "TargetMachine can't emit object file\n";
     return false;
   }
 
@@ -223,14 +223,14 @@ bool LLVMBackend::compileToObjectFile(llvm::Module *module,
   pass.run(*module);
   out.flush();
 
-  COMPILER_DEBUG_LOG("Compiled object file to: " << outputPath << "\n");
+  std::cout << "Compiled object file to: " << outputPath << "\n";
   return true;
 }
 
 bool LLVMBackend::compileToObjectInMemory(llvm::Module *module,
                                           std::vector<uint8_t> &outBytes) {
   if (!module) {
-    llvm::errs() << "Null module in compileToObjectInMemory\n";
+    std::cerr << "Null module in compileToObjectInMemory\n";
     return false;
   }
 
@@ -254,7 +254,7 @@ bool LLVMBackend::compileToObjectInMemory(llvm::Module *module,
   // Add pass to emit object file to memory stream
   if (TM->addPassesToEmitFile(pass, objStream, nullptr,
                               llvm::CodeGenFileType::ObjectFile)) {
-    llvm::errs() << "TargetMachine can't emit object file\n";
+    std::cerr << "TargetMachine can't emit object file\n";
     return false;
   }
 
@@ -265,8 +265,7 @@ bool LLVMBackend::compileToObjectInMemory(llvm::Module *module,
   // Copy result to output vector
   outBytes.assign(objBuffer.begin(), objBuffer.end());
 
-  COMPILER_DEBUG_LOG("Compiled object to memory: " << outBytes.size()
-                                                   << " bytes\n");
+  std::cout << "Compiled object to memory: " << outBytes.size() << " bytes\n";
   return true;
 }
 
@@ -277,7 +276,7 @@ extern "C" const size_t runtime_bc_data_size;
 
 bool LLVMBackend::linkRuntimeModule(llvm::Module *destModule) {
   if (!destModule) {
-    llvm::errs() << "Error: Null destination module\n";
+    std::cerr << "Error: Null destination module\n";
     return false;
   }
 
@@ -287,13 +286,12 @@ bool LLVMBackend::linkRuntimeModule(llvm::Module *destModule) {
   if (bcSize == 0) {
     // Empty bitcode - this means Clang wasn't available during build
     // Runtime IR merging is disabled, skip linking
-    COMPILER_DEBUG_LOG(
-        "Warning: Runtime bitcode is empty (Clang not available during "
-        "build).\n"
-        "         Runtime IR merging disabled - accessor functions will have "
-        "call overhead.\n"
-        "         To enable zero-cost abstraction, rebuild with Clang "
-        "installed.\n");
+    std::cerr << "Warning: Runtime bitcode is empty (Clang not available "
+                 "during build).\n";
+    std::cerr << "         Runtime IR merging disabled - accessor functions "
+                 "will have call overhead.\n";
+    std::cerr << "         To enable zero-cost abstraction, rebuild with Clang "
+                 "installed.\n";
     return true; // Not an error, just a degraded mode
   }
 
@@ -309,8 +307,8 @@ bool LLVMBackend::linkRuntimeModule(llvm::Module *destModule) {
                              destModule->getContext());
 
   if (!ModuleOrErr) {
-    llvm::errs() << "Error: Failed to parse Runtime bitcode: "
-                 << llvm::toString(ModuleOrErr.takeError()) << "\n";
+    std::cerr << "Error: Failed to parse Runtime bitcode: "
+              << llvm::toString(ModuleOrErr.takeError()) << "\n";
     return false;
   }
 
@@ -321,7 +319,7 @@ bool LLVMBackend::linkRuntimeModule(llvm::Module *destModule) {
   // After this call, destModule contains both generated + Runtime IR
   llvm::Linker linker(*destModule);
   if (linker.linkInModule(std::move(RuntimeModule))) {
-    llvm::errs() << "Error: Failed to link Runtime module into destination\n";
+    std::cerr << "Error: Failed to link Runtime module into destination\n";
     return false;
   }
 

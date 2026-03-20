@@ -1406,13 +1406,16 @@ void ConvertOnnxToHipPass::runOnOperation() {
       return signalPassFailure();
   }
 
-  llvm::SmallVector<mlir::Operation *> entryPoints;
-  for (auto &op : module.getBody()->getOperations()) {
-    if (op.getName().getStringRef() == "onnx.EntryPoint")
-      entryPoints.push_back(&op);
-  }
-  for (auto *ep : entryPoints)
-    ep->erase();
+  // Erase onnx.EntryPoint and unused onnx.NoValue ops left after conversion.
+  llvm::SmallVector<mlir::Operation *> toErase;
+  module.walk([&](mlir::Operation *op) {
+    llvm::StringRef name = op->getName().getStringRef();
+    if (name == "onnx.EntryPoint" ||
+        (name == "onnx.NoValue" && op->use_empty()))
+      toErase.push_back(op);
+  });
+  for (auto *op : toErase)
+    op->erase();
 
   // Finalize externalization: release writer, write JSON manifest, set module
   // attributes.
