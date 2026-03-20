@@ -21,6 +21,11 @@ using namespace hip::compiler;
 
 static const char *COMPILER_VERSION = "1.0.0";
 
+// Parse JSON into CompilationOptionsT (defined in
+// schemas/compilation_options.fbs). Key fields:
+//   opt_level      — LLVM optimization level 0-3 (default 2)
+//   output_mode    — DLL or LLVM_IR (default DLL)
+//   constants_file — externalized weights filename (default "constants.bin")
 static bool parseOptions(const char *options_json,
                          mlir::hip::CompilationOptionsT &opts,
                          std::string &error_message) {
