@@ -6,12 +6,13 @@
 
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/FileSystem.h>
+#include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/Path.h>
 #include <llvm/Support/raw_ostream.h>
 
-#include <cstdlib>
+#include "hip/debug_log.h"
+
 #include <fstream>
-#include <iostream>
 #include <sstream>
 
 // LLD linker driver - use lldMain for crash recovery
@@ -48,69 +49,69 @@ bool DLLLinker::linkDLLInMemory(const std::vector<uint8_t> &objectBytes,
   // Strategy: Use temporary files for linking, then read result into memory
   // This approach works for MVP; can be improved with MemoryModule later
 
-  // Generate unique temp file names using std::tmpnam
-  char tempObjPath[L_tmpnam];
-  char tempDLLPath[L_tmpnam];
-
-  if (!std::tmpnam(tempObjPath) || !std::tmpnam(tempDLLPath)) {
-    std::cerr << "Failed to generate temporary file names\n";
+  // Create unique temporary files atomically (avoids TOCTOU race of tmpnam)
+  llvm::SmallString<128> objFile, dllFile;
+  if (auto EC =
+          llvm::sys::fs::createTemporaryFile("hip-link", "obj", objFile)) {
+    llvm::errs() << "Failed to create temporary object file: " << EC.message()
+                 << "\n";
+    return false;
+  }
+  if (auto EC =
+          llvm::sys::fs::createTemporaryFile("hip-link", "dll", dllFile)) {
+    llvm::sys::fs::remove(objFile);
+    llvm::errs() << "Failed to create temporary DLL file: " << EC.message()
+                 << "\n";
     return false;
   }
 
-  // Add appropriate extensions
-  std::string objFile = std::string(tempObjPath) + ".obj";
-  std::string dllFile = std::string(tempDLLPath) + ".dll";
-
   // Write object bytes to temporary file
   {
-    std::ofstream objOut(objFile, std::ios::binary);
-    if (!objOut) {
-      std::cerr << "Failed to create temporary object file: " << objFile
-                << "\n";
+    std::error_code EC;
+    llvm::raw_fd_ostream objOut(objFile, EC, llvm::sys::fs::OF_None);
+    if (EC) {
+      llvm::errs() << "Failed to open temporary object file: " << EC.message()
+                   << "\n";
+      llvm::sys::fs::remove(objFile);
+      llvm::sys::fs::remove(dllFile);
       return false;
     }
     objOut.write(reinterpret_cast<const char *>(objectBytes.data()),
                  objectBytes.size());
-    objOut.close();
   }
 
   // Link using existing file-based API
+  std::string objStr(objFile), dllStr(dllFile);
   bool linkSuccess =
-      linkDLL(objFile, dllFile, libraries, libraryPaths, exportSymbols);
+      linkDLL(objStr, dllStr, libraries, libraryPaths, exportSymbols);
 
   if (!linkSuccess) {
-    // Cleanup temp object file
     llvm::sys::fs::remove(objFile);
+    llvm::sys::fs::remove(dllFile);
     return false;
   }
 
   // Read DLL into memory
   {
-    std::ifstream dllIn(dllFile, std::ios::binary | std::ios::ate);
-    if (!dllIn) {
-      std::cerr << "Failed to open temporary DLL file: " << dllFile << "\n";
+    auto bufOrErr = llvm::MemoryBuffer::getFile(dllFile);
+    if (!bufOrErr) {
+      llvm::errs() << "Failed to read temporary DLL file: "
+                   << bufOrErr.getError().message() << "\n";
       llvm::sys::fs::remove(objFile);
       llvm::sys::fs::remove(dllFile);
       return false;
     }
-
-    std::streamsize dllSize = dllIn.tellg();
-    dllIn.seekg(0, std::ios::beg);
-
-    outDLLBytes.resize(static_cast<size_t>(dllSize));
-    if (!dllIn.read(reinterpret_cast<char *>(outDLLBytes.data()), dllSize)) {
-      std::cerr << "Failed to read temporary DLL file\n";
-      llvm::sys::fs::remove(objFile);
-      llvm::sys::fs::remove(dllFile);
-      return false;
-    }
+    auto &buf = *bufOrErr;
+    const auto *data = reinterpret_cast<const uint8_t *>(buf->getBufferStart());
+    outDLLBytes.assign(data, data + buf->getBufferSize());
   }
 
   // Cleanup temporary files
   llvm::sys::fs::remove(objFile);
   llvm::sys::fs::remove(dllFile);
 
-  std::cout << "Linked DLL in memory: " << outDLLBytes.size() << " bytes\n";
+  COMPILER_DEBUG_LOG("Linked DLL in memory: " << outDLLBytes.size()
+                                              << " bytes\n");
   return true;
 }
 
@@ -120,7 +121,7 @@ bool DLLLinker::createModuleDefinitionFile(
     const std::string &defPath, const std::vector<std::string> &exportSymbols) {
   std::ofstream defFile(defPath);
   if (!defFile) {
-    std::cerr << "Failed to create .def file: " << defPath << "\n";
+    llvm::errs() << "Failed to create .def file: " << defPath << "\n";
     return false;
   }
 
@@ -170,25 +171,13 @@ bool DLLLinker::linkDLL_Windows(const std::string &objectFile,
     }
   }
 
-  // Add Windows system libraries (C Runtime, entry point, etc.)
-  // These provide malloc, free, printf, _DllMainCRTStartup, etc.
-  // Use DYNAMIC CRT (/MD or /MDd) to allow HIP runtime state sharing
-  // between EXE and DLL. Static CRT (/MT) creates isolated CRT instances.
-  // See: THEROCK_DLL_BUG_ANALYSIS.md for details
-#ifdef NDEBUG
-  argStrings.push_back("msvcrt.lib");    // MSVC Runtime (Dynamic, Release)
-  argStrings.push_back("ucrt.lib");      // Universal CRT (Dynamic, Release)
-  argStrings.push_back("vcruntime.lib"); // VC Runtime (Dynamic, Release)
-#else
-  argStrings.push_back(
-      "msvcrtd.lib"); // MSVC Runtime (Dynamic, Debug) - replaces libcmtd.lib
-  argStrings.push_back(
-      "ucrtd.lib"); // Universal CRT (Dynamic, Debug) - replaces libucrtd.lib
-  argStrings.push_back("vcruntimed.lib"); // VC Runtime (Dynamic, Debug)
-#endif
-  argStrings.push_back("oldnames.lib"); // Compatibility names
-  argStrings.push_back("kernel32.lib"); // Windows kernel
-  argStrings.push_back("user32.lib");   // Windows user API
+  // MSVC C Runtime import libraries required for any DLL that uses the
+  // C/C++ standard library (heap, stdio, exceptions). The debug variants
+  // ("d" suffix) match the /MDd flag so the DLL shares CRT state with the
+  // host process. kernel32/user32 provide Win32 API basics.
+  for (const char *sysLib : {"msvcrtd.lib", "ucrtd.lib", "vcruntimed.lib",
+                             "oldnames.lib", "kernel32.lib", "user32.lib"})
+    argStrings.push_back(sysLib);
 
   // Add default libraries and flags
   argStrings.push_back("/NOLOGO");
@@ -205,28 +194,17 @@ bool DLLLinker::linkDLL_Windows(const std::string &objectFile,
     args.push_back(arg.c_str());
   }
 
-  // TEMP: Save .obj file before LLD deletes it
-  {
-    std::string savedObj = objectFile + ".saved";
-    llvm::sys::fs::copy_file(objectFile, savedObj);
-    std::cout << "Saved copy of object file to: " << savedObj << "\n";
-  }
-
-  // Debug: Print LLD command line
-  std::cout << "LLD-LINK command (" << args.size() << " args): ";
+  COMPILER_DEBUG_LOG("LLD-LINK command (" << args.size() << " args):\n");
   for (size_t i = 0; i < args.size(); ++i) {
-    std::cout << "[" << i << "]='" << args[i] << "' ";
+    COMPILER_DEBUG_LOG("  [" << i << "]='" << args[i] << "'\n");
   }
-  std::cout << "\n";
 
   // Call LLD linker library
   std::string stdoutStr, stderrStr;
   llvm::raw_string_ostream stdoutOS(stdoutStr);
   llvm::raw_string_ostream stderrOS(stderrStr);
 
-  // Create ArrayRef explicitly
   llvm::ArrayRef<const char *> argsRef(args);
-  std::cout << "ArrayRef size: " << argsRef.size() << "\n";
 
   // Use lldMain for crash recovery instead of direct link() call
   // lldMain provides:
@@ -238,29 +216,25 @@ bool DLLLinker::linkDLL_Windows(const std::string &objectFile,
                    {{lld::WinLink, &lld::coff::link}} // Register COFF driver
       );
 
-  // Print linker output
   if (!stdoutStr.empty()) {
-    std::cout << stdoutStr;
+    COMPILER_DEBUG_LOG(stdoutStr);
   }
   if (!stderrStr.empty()) {
-    std::cerr << stderrStr;
+    llvm::errs() << stderrStr;
   }
 
   if (result.retCode != 0) {
-    std::cerr << "LLD-LINK failed with exit code: " << result.retCode << "\n";
+    llvm::errs() << "LLD-LINK failed with exit code: " << result.retCode
+                 << "\n";
     if (!result.canRunAgain) {
-      std::cerr << "  Warning: Linker crashed, cannot run again\n";
+      llvm::errs() << "  Warning: Linker crashed, cannot run again\n";
     }
     return false;
   }
 
-  std::cout << "Successfully linked DLL: " << outputDLL << "\n";
+  COMPILER_DEBUG_LOG("Successfully linked DLL: " << outputDLL << "\n");
 
-  // Cleanup .def file
-  // DISABLED: Keep intermediate files for debugging
-  // llvm::sys::fs::remove(defFile);
-  std::cout << "Kept intermediate files: " << objectFile << ", " << defFile
-            << "\n";
+  llvm::sys::fs::remove(defFile);
 
   return true;
 }
@@ -316,23 +290,23 @@ bool DLLLinker::linkDLL_Linux(const std::string &objectFile,
                    // Register ELF driver
       );
 
-  // Print linker output
   if (!stdoutStr.empty()) {
-    std::cout << stdoutStr;
+    COMPILER_DEBUG_LOG(stdoutStr);
   }
   if (!stderrStr.empty()) {
-    std::cerr << stderrStr;
+    llvm::errs() << stderrStr;
   }
 
   if (result.retCode != 0) {
-    std::cerr << "LLD-ELF failed with exit code: " << result.retCode << "\n";
+    llvm::errs() << "LLD-ELF failed with exit code: " << result.retCode << "\n";
     if (!result.canRunAgain) {
-      std::cerr << "  Warning: Linker crashed, cannot run again\n";
+      llvm::errs() << "  Warning: Linker crashed, cannot run again\n";
     }
     return false;
   }
 
-  std::cout << "Successfully linked shared library: " << outputDLL << "\n";
+  COMPILER_DEBUG_LOG("Successfully linked shared library: " << outputDLL
+                                                            << "\n");
   return true;
 }
 
@@ -345,15 +319,13 @@ bool DLLLinker::verifyDLLExports(
   // A complete implementation would use LLVM's object file libraries
   // to parse the DLL/SO and verify exported symbols
 
-  std::cout << "Verifying DLL exports for: " << dllPath << "\n";
+  COMPILER_DEBUG_LOG("Verifying DLL exports for: " << dllPath << "\n");
   for (const auto &symbol : requiredSymbols) {
-    std::cout << "  Required symbol: " << symbol << "\n";
+    COMPILER_DEBUG_LOG("  Required symbol: " << symbol << "\n");
   }
 
-  // TODO: Implement actual symbol verification using LLVM object file API
-  // For now, just check if file exists
   if (!llvm::sys::fs::exists(dllPath)) {
-    std::cerr << "DLL file does not exist: " << dllPath << "\n";
+    llvm::errs() << "DLL file does not exist: " << dllPath << "\n";
     return false;
   }
 
