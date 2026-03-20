@@ -107,6 +107,19 @@ if(BUILD_HIP_TOOLS)
   # FlatBuffers schemas (GenerateInterface pass metadata)
   add_subdirectory(schemas)
 
+  # ==============================================================================
+  # Mock vs Real Runtime Configuration
+  # ==============================================================================
+  option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
+
+  if(BUILD_MOCK_RUNTIME)
+    message(STATUS "Building with MOCK runtime (no GPU required)")
+  else()
+    message(STATUS "Building with REAL runtime (requires HIP/MIOpen)")
+    # Add custom HIP kernels library for Real Runtime
+    add_subdirectory(3rd-party/custom_kernels)
+  endif()
+
   # TableGen targets
   add_subdirectory(include/hip)
 
