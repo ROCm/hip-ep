@@ -13,48 +13,6 @@ add_dependencies(hip-compiler
 )
 
 target_link_libraries(hip-compiler PRIVATE
-  HipDialectIR
-  HipDialectTransforms
-  HipToLLVM
-  HipSchemasLib
-  MLIROptLib
-  MLIRSupport
-  MLIRIR
-  MLIRParser
-  MLIRPass
-  MLIRTransforms
-  MLIRAnalysis
-  MLIRArithDialect
-  MLIRControlFlowDialect
-  MLIRFuncDialect
-  MLIRMemRefDialect
-  MLIRSCFDialect
-  MLIRTensorDialect
-  MLIRDestinationStyleOpInterface
-  MLIRBufferizationDialect
-  MLIRBufferizationTransforms
-  MLIRArithTransforms
-  MLIRSCFTransforms
-  MLIRTensorTransforms
-  MLIRFuncTransforms
-  MLIRLLVMDialect
-  MLIRLLVMCommonConversion
-  MLIRArithToLLVM
-  MLIRMemRefToLLVM
-  MLIRFuncToLLVM
-  MLIRSCFToControlFlow
-  MLIRControlFlowToLLVM
-  MLIRReconcileUnrealizedCasts
-  MLIRTransformUtils
-  MLIRTargetLLVMIRExport
-  MLIRExecutionEngine
-  MLIRTranslateLib
-  LLVMX86CodeGen
-  LLVMX86AsmParser
-  LLVMMC
+  LibHipCompiler
   LLVMSupport
-  LLVMTarget
-  LLVMIRReader
-  LLVMLinker
-  ${llvm_libs}
 )
