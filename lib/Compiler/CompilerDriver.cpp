@@ -284,8 +284,8 @@ void CompilerDriver::discoverLibraries(
       libraries.push_back(custom_lib);
       COMPILER_DEBUG_LOG("  Custom kernels: " << custom_lib << "\n");
     } else {
-      COMPILER_DEBUG_LOG("  WARNING: custom kernels lib not found at: "
-                         << custom_lib << "\n");
+      COMPILER_DEBUG_LOG(
+          "  WARNING: custom kernels lib not found at: " << custom_lib << "\n");
     }
   }
 #endif
