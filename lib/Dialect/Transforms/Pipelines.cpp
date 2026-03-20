@@ -6,6 +6,8 @@
 #include "hip/Dialect/Transforms/Pipelines.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include "mlir/Conversion/BufferizationToMemRef/BufferizationToMemRef.h"
+#include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/PassRegistry.h"
@@ -34,14 +36,39 @@ void mlir::hip::buildOnnxToHipPipeline(
   // 3. Convert tensor function results to out-params (memref)
   bufferization::BufferResultsToOutParamsPassOptions outParamsOpts;
   outParamsOpts.hoistStaticAllocs = true;
+  outParamsOpts.hoistDynamicAllocs = true;
+  outParamsOpts.addResultAttribute = true;
   outParamsOpts.modifyPublicFunctions = true;
   pm.addPass(bufferization::createBufferResultsToOutParamsPass(outParamsOpts));
 
-  // 4. Canonicalize to eliminate dead/residual onnx.* ops and simplify IR
+  // 4. Insert ownership-based buffer deallocation
+  bufferization::BufferDeallocationPipelineOptions deallocOpts;
+  bufferization::buildBufferDeallocationPipeline(pm, deallocOpts);
+
+  // 5. Clean up after bufferization
+  pm.addPass(createCSEPass());
   pm.addPass(createCanonicalizerPass());
 
-  // 5. Memory pooling: pack intermediate memref.alloc into a single pool
+  // 6. HIP-specific buffer optimizations
+  pm.addNestedPass<func::FuncOp>(createOptimizeMemRefsPass());
   pm.addNestedPass<func::FuncOp>(createPoolAllocsPass());
+
+  // 7. Lower remaining bufferization ops to memref
+  pm.addPass(createConvertBufferizationToMemRefPass());
+
+  pm.addPass(createCSEPass());
+  pm.addPass(createCanonicalizerPass());
+
+  // 8. Replace memref.alloc with hip.alloc/hip.free
+  pm.addNestedPass<func::FuncOp>(createLowerAllocsPass());
+
+  // 9. Resolve extern constants → memref.view into constants blob argument
+  pm.addPass(createResolveExternConstantsPass());
+
+  // 10. Final cleanup: LowerAllocs and ResolveExternConstants both introduce
+  //     new constants and ops that benefit from deduplication and hoisting.
+  pm.addPass(createCSEPass());
+  pm.addPass(createCanonicalizerPass());
 }
 
 void mlir::hip::buildHipToLLVMPipeline(
