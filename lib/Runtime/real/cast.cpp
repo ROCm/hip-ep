@@ -4,8 +4,8 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "hip_custom_kernels.h"
 #include "runtime_types.h"
-#include "udna_custom_kernels.h"
 
 #include <cstdio>
 
@@ -15,29 +15,29 @@ static constexpr int64_t ONNX_INT32 = 6;
 static constexpr int64_t ONNX_INT64 = 7;
 static constexpr int64_t ONNX_FLOAT16 = 10;
 
-static int onnx_type_to_udna_dtype(int64_t onnx_type) {
+static int onnx_type_to_hip_dtype(int64_t onnx_type) {
   switch (onnx_type) {
   case ONNX_FLOAT:
-    return UDNA_DTYPE_FLOAT32;
+    return HIP_DTYPE_FLOAT32;
   case ONNX_INT32:
-    return UDNA_DTYPE_INT32;
+    return HIP_DTYPE_INT32;
   case ONNX_INT64:
-    return UDNA_DTYPE_INT64;
+    return HIP_DTYPE_INT64;
   case ONNX_FLOAT16:
-    return UDNA_DTYPE_FLOAT16;
+    return HIP_DTYPE_FLOAT16;
   default:
     return -1;
   }
 }
 
-static int element_size_to_udna_dtype(int64_t elem_size) {
+static int element_size_to_hip_dtype(int64_t elem_size) {
   switch (elem_size) {
   case 8:
-    return UDNA_DTYPE_INT64;
+    return HIP_DTYPE_INT64;
   case 4:
-    return UDNA_DTYPE_INT32;
+    return HIP_DTYPE_INT32;
   case 2:
-    return UDNA_DTYPE_FLOAT16;
+    return HIP_DTYPE_FLOAT16;
   default:
     return -1;
   }
@@ -53,14 +53,14 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
 
   void *stream = hipdnn_ep_state_get_stream(state);
 
-  int output_dtype = onnx_type_to_udna_dtype(to);
+  int output_dtype = onnx_type_to_hip_dtype(to);
   if (output_dtype < 0) {
     fprintf(stderr, "[REAL] wrap_cast: unsupported ONNX output type to=%lld\n",
             (long long)to);
     return -1;
   }
 
-  int input_dtype = element_size_to_udna_dtype(input_element_size);
+  int input_dtype = element_size_to_hip_dtype(input_element_size);
   if (input_dtype < 0) {
     fprintf(stderr, "[REAL] wrap_cast: unsupported input element_size=%lld\n",
             (long long)input_element_size);
@@ -73,6 +73,6 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
       (long long)num_elements, (long long)input_element_size,
       (long long)output_element_size, (long long)to, input_dtype, output_dtype);
 
-  return udna_cast(stream, input, output, num_elements, input_dtype,
-                   output_dtype);
+  return hip_cast(stream, input, output, num_elements, input_dtype,
+                  output_dtype);
 }

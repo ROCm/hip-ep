@@ -5,7 +5,7 @@
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
-#include "udna_custom_kernels.h"
+#include "hip_custom_kernels.h"
 
 #include <cstdio>
 
@@ -70,14 +70,14 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
       (long long)rotary_dim, (long long)max_seq_len, (long long)interleaved,
       (long long)element_size_bytes);
 
-  int rc = udna_rope_forward(
+  int rc = hip_rope_forward(
       stream, input, position_ids, cos_cache, sin_cache, output,
       /*batch_size=*/1,
       /*seq_len=*/num_positions, num_heads, head_dim, rotary_dim, max_seq_len,
       interleaved, element_size_bytes);
 
   if (rc != 0) {
-    fprintf(stderr, "wrap_rotary_embedding: udna_rope_forward failed (rc=%d)\n",
+    fprintf(stderr, "wrap_rotary_embedding: hip_rope_forward failed (rc=%d)\n",
             rc);
   } else {
     RUNTIME_DEBUG_LOG("[REAL] wrap_rotary_embedding: completed successfully\n");

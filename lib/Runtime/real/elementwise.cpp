@@ -4,8 +4,8 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "hip_custom_kernels.h"
 #include "runtime_types.h"
-#include "udna_custom_kernels.h"
 
 #include <cstdio>
 
@@ -131,8 +131,8 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
 // =============================================================================
 //
 // For types unsupported by MIOpen (e.g. int64), dispatches to
-// udna_elementwise_sub from the custom kernels library. The caller passes
-// element_size_bytes; we map it to the corresponding udna_dtype_t.
+// hip_elementwise_sub from the custom kernels library. The caller passes
+// element_size_bytes; we map it to the corresponding hip_dtype_t.
 // =============================================================================
 
 int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
@@ -145,10 +145,10 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
 
   void *stream = hipdnn_ep_state_get_stream(state);
 
-  int udna_dtype;
+  int hip_dtype;
   switch (element_size_bytes) {
   case 8:
-    udna_dtype = UDNA_DTYPE_INT64;
+    hip_dtype = HIP_DTYPE_INT64;
     break;
   default:
     RUNTIME_DEBUG_LOG(
@@ -160,9 +160,8 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_elementwise_sub: num_elements=%lld, "
-      "element_size=%lld, dtype=%d -> calling udna_elementwise_sub\n",
-      (long long)num_elements, (long long)element_size_bytes, udna_dtype);
+      "element_size=%lld, dtype=%d -> calling hip_elementwise_sub\n",
+      (long long)num_elements, (long long)element_size_bytes, hip_dtype);
 
-  return udna_elementwise_sub(stream, lhs, rhs, output, num_elements,
-                              udna_dtype);
+  return hip_elementwise_sub(stream, lhs, rhs, output, num_elements, hip_dtype);
 }
