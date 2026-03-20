@@ -96,8 +96,12 @@ option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
 
 if(NOT BUILD_MOCK_RUNTIME)
     # Try to find ROCm components
-    if(DEFINED ENV{THEROCK_DIST})
+    # Accept THEROCK_DIST from either CMake variable or environment variable
+    if(NOT DEFINED THEROCK_DIST AND DEFINED ENV{THEROCK_DIST})
         set(THEROCK_DIST "$ENV{THEROCK_DIST}")
+    endif()
+
+    if(DEFINED THEROCK_DIST)
         message(STATUS "Using TheRock ROCm SDK at: ${THEROCK_DIST}")
 
         set(ORIGINAL_CMAKE_PREFIX_PATH "${CMAKE_PREFIX_PATH}")
@@ -158,13 +162,15 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
     if(NOT BUILD_MOCK_RUNTIME)
         list(APPEND COMPILE_FLAGS "-I${CMAKE_CURRENT_SOURCE_DIR}/real")
 
+        # Add custom_kernels include directory
+        list(APPEND COMPILE_FLAGS "-I${CMAKE_SOURCE_DIR}/3rd-party/custom_kernels/include")
+
         # Add ROCm includes
         if(THEROCK_DIST)
             message(STATUS "Adding TheRock includes for ${OUTPUT_BC}: ${THEROCK_DIST}/include")
             list(APPEND COMPILE_FLAGS "-I${THEROCK_DIST}/include")
             list(APPEND COMPILE_FLAGS "-D__HIP_PLATFORM_AMD__")
         endif()
-
     else()
         list(APPEND COMPILE_FLAGS "-I${CMAKE_CURRENT_SOURCE_DIR}/mock")
     endif()

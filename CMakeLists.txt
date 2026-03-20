@@ -87,13 +87,10 @@ if(BUILD_HIP_TOOLS)
   separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND ${LLVM_DEFINITIONS})
   add_definitions(${LLVM_DEFINITIONS_LIST})
 
-  # Source includes MUST come before LLVM/MLIR includes so that headers in
-  # the source tree take precedence over any stale installed copies.
-  include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-  include_directories(BEFORE ${CMAKE_CURRENT_BINARY_DIR}/include)
   include_directories(${LLVM_INCLUDE_DIRS})
   include_directories(${MLIR_INCLUDE_DIRS})
-  include_directories(${CMAKE_CURRENT_BINARY_DIR}/schemas)
+  include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
+  include_directories(${CMAKE_CURRENT_BINARY_DIR}/include)
 
   # onnx-mlir is no longer required. The convert-onnx-to-hip pass uses
   # MLIR's generic Operation API to match ONNX ops by name, so no onnx-mlir
@@ -104,12 +101,24 @@ if(BUILD_HIP_TOOLS)
   include(TableGen)
   include(AddLLVM)
   include(AddMLIR)
-  include(HandleLLVMOptions)
 
   llvm_map_components_to_libnames(llvm_libs Support Core)
 
   # FlatBuffers schemas (GenerateInterface pass metadata)
   add_subdirectory(schemas)
+
+  # ==============================================================================
+  # Mock vs Real Runtime Configuration
+  # ==============================================================================
+  option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
+
+  if(BUILD_MOCK_RUNTIME)
+    message(STATUS "Building with MOCK runtime (no GPU required)")
+  else()
+    message(STATUS "Building with REAL runtime (requires HIP/MIOpen)")
+    # Add custom HIP kernels library for Real Runtime
+    add_subdirectory(3rd-party/custom_kernels)
+  endif()
 
   # TableGen targets
   add_subdirectory(include/hip)
