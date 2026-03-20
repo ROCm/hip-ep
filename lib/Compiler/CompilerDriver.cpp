@@ -4,8 +4,8 @@
  */
 
 #include "hip/Compiler/CompilerDriver.h"
-#include "hip/Compiler/Pipeline.h"
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/Transforms/Pipelines.h"
 #include "hip/InitAllPasses.h"
 
 #include "hip/Target/LLVM/DLLLinker.h"
@@ -27,7 +27,6 @@
 #include "hip/debug_log.h"
 
 #include <cstdlib>
-#include <iostream>
 #include <sstream>
 
 namespace hip::compiler {
@@ -53,8 +52,10 @@ bool CompilerDriver::compile(llvm::StringRef input_mlir,
   COMPILER_DEBUG_LOG("[CompilerDriver::compile] Input size: "
                      << input_mlir.size() << " bytes\n");
 
+  // Wrap input in a non-owning buffer (no copy) for MLIR's parser.
   auto memBuffer = llvm::MemoryBuffer::getMemBuffer(input_mlir, "", false);
 
+  // SourceMgr provides source-location tracking for parser diagnostics.
   llvm::SourceMgr sourceMgr;
   sourceMgr.AddNewSourceBuffer(std::move(memBuffer), llvm::SMLoc());
 
@@ -113,11 +114,11 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
 
   optimizeLLVMIR(llvmModule.get(), options.opt_level);
 
+  // Strip .dll extension to derive intermediate file paths (.ll, .obj).
   std::string base_path = output_path;
-  if (base_path.size() >= 4 &&
-      base_path.substr(base_path.size() - 4) == ".dll") {
-    base_path = base_path.substr(0, base_path.size() - 4);
-  }
+  llvm::StringRef dll_ext = ".dll";
+  if (llvm::StringRef(base_path).ends_with(dll_ext))
+    base_path.resize(base_path.size() - dll_ext.size());
   std::string ll_path = base_path + ".ll";
   std::string obj_path = base_path + ".obj";
 
@@ -130,48 +131,16 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
   if (!compileToObject(llvmModule.get(), obj_path, error_message))
     return false;
 
+  // Symbols exported from the generated DLL:
+  //   inference_init/compute/cleanup — runtime entry points
+  //   inference_get_metadata_json    — model metadata query
+  //   test_hip_from_dll              — diagnostic hook for test-model-dll
   std::vector<std::string> export_symbols = {
       "inference_init", "inference_compute", "inference_cleanup",
       "inference_get_metadata_json", "test_hip_from_dll"};
   std::vector<std::string> libraries;
   std::vector<std::string> library_paths;
-
-  if (const char *therock = std::getenv("THEROCK_DIST")) {
-    std::string dist(therock);
-    std::string lib_dir = dist + "/lib";
-    library_paths.push_back(lib_dir);
-    std::cout << "THEROCK_DIST detected: " << dist << "\n";
-    std::cout << "  Adding library path: " << lib_dir << "\n";
-
-    libraries.push_back("amdhip64");
-    libraries.push_back("MIOpen");
-
-    std::string hipblaslt_lib = lib_dir + "/hipblaslt.lib";
-    std::string hipblaslt_dll_a = lib_dir + "/libhipblaslt.dll.a";
-    if (llvm::sys::fs::exists(hipblaslt_lib))
-      libraries.push_back("hipblaslt");
-    else if (llvm::sys::fs::exists(hipblaslt_dll_a))
-      libraries.push_back(hipblaslt_dll_a);
-    else
-      std::cerr << "  WARNING: hipblaslt import library not found\n";
-
-#ifdef HIP_CUSTOM_KERNELS_LIB_PATH
-    {
-      std::string custom_lib = HIP_CUSTOM_KERNELS_LIB_PATH;
-      if (llvm::sys::fs::exists(custom_lib)) {
-        libraries.push_back(custom_lib);
-        std::cout << "  Custom kernels: " << custom_lib << "\n";
-      } else {
-        std::cerr << "  WARNING: custom kernels lib not found at: "
-                  << custom_lib << "\n";
-      }
-    }
-#endif
-
-    for (const auto &lib : libraries) {
-      std::cout << "  Linking library: " << lib << "\n";
-    }
-  }
+  discoverLibraries(libraries, library_paths);
 
   if (!linkToDLL(obj_path, output_path, libraries, library_paths,
                  export_symbols, error_message))
@@ -188,10 +157,15 @@ bool CompilerDriver::runMLIRPasses(
   mlir::PassManager pm(module.getContext());
 
   if (options.verbose) {
-    std::cout << "Running ONNX->HIP->LLVM->Interface passes\n";
+    COMPILER_DEBUG_LOG("Running ONNX->HIP->LLVM->Interface passes\n");
   }
 
-  populateMorphizenPipeline(pm, options);
+  mlir::hip::OnnxToHipPipelineOptions onnxToHipOpts;
+  mlir::hip::buildOnnxToHipPipeline(pm, onnxToHipOpts);
+
+  mlir::hip::HipToLLVMPipelineOptions hipToLlvmOpts;
+  hipToLlvmOpts.constantsFile = options.constants_file;
+  mlir::hip::buildHipToLLVMPipeline(pm, hipToLlvmOpts);
 
   if (mlir::failed(pm.run(module))) {
     error_message = "MLIR pass pipeline failed";
@@ -204,7 +178,7 @@ bool CompilerDriver::runMLIRPasses(
   }
 
   if (options.verbose)
-    std::cout << "MLIR passes completed\n\n";
+    COMPILER_DEBUG_LOG("MLIR passes completed\n\n");
 
   return true;
 }
@@ -275,6 +249,50 @@ bool CompilerDriver::linkToDLL(const std::string &objPath,
   }
 
   return true;
+}
+
+void CompilerDriver::discoverLibraries(
+    std::vector<std::string> &libraries,
+    std::vector<std::string> &library_paths) {
+  const char *therock = std::getenv("THEROCK_DIST");
+  if (!therock)
+    return;
+
+  std::string dist(therock);
+  std::string lib_dir = dist + "/lib";
+  library_paths.push_back(lib_dir);
+  COMPILER_DEBUG_LOG("THEROCK_DIST detected: " << dist << "\n");
+  COMPILER_DEBUG_LOG("  Adding library path: " << lib_dir << "\n");
+
+  libraries.push_back("amdhip64");
+  libraries.push_back("MIOpen");
+
+  // hipblaslt ships as either .lib (Windows) or .dll.a (cross-compiled)
+  std::string hipblaslt_lib = lib_dir + "/hipblaslt.lib";
+  std::string hipblaslt_dll_a = lib_dir + "/libhipblaslt.dll.a";
+  if (llvm::sys::fs::exists(hipblaslt_lib))
+    libraries.push_back("hipblaslt");
+  else if (llvm::sys::fs::exists(hipblaslt_dll_a))
+    libraries.push_back(hipblaslt_dll_a);
+  else
+    COMPILER_DEBUG_LOG("  WARNING: hipblaslt import library not found\n");
+
+#ifdef HIP_CUSTOM_KERNELS_LIB_PATH
+  {
+    std::string custom_lib = HIP_CUSTOM_KERNELS_LIB_PATH;
+    if (llvm::sys::fs::exists(custom_lib)) {
+      libraries.push_back(custom_lib);
+      COMPILER_DEBUG_LOG("  Custom kernels: " << custom_lib << "\n");
+    } else {
+      COMPILER_DEBUG_LOG(
+          "  WARNING: custom kernels lib not found at: " << custom_lib << "\n");
+    }
+  }
+#endif
+
+  for (const auto &lib : libraries) {
+    COMPILER_DEBUG_LOG("  Linking library: " << lib << "\n");
+  }
 }
 
 void CompilerDriver::cleanupIntermediates(const std::string &basePath) {
