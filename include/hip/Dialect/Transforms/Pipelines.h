@@ -61,7 +61,32 @@ void buildOnnxToHipPipeline(OpPassManager &pm,
 void buildHipToLLVMPipeline(OpPassManager &pm,
                             const HipToLLVMPipelineOptions &options);
 
-/// Register both pipelines with MLIR's global pass registry so they appear
+/// Combined pipeline options for the full ONNX→HIP→LLVM→Interface flow.
+/// Used by hip-mlir-opt --hipdnn-pipeline and the compiler driver.
+struct HipdnnPipelineOptions
+    : public PassPipelineOptions<HipdnnPipelineOptions> {
+  Option<std::string> constantsFile{
+      *this, "constants-file",
+      llvm::cl::desc("Filename for constants data embedded in module metadata "
+                     "(default: constants.bin)"),
+      llvm::cl::init("constants.bin")};
+  Option<std::string> constantsDir{
+      *this, "constants-dir",
+      llvm::cl::desc("Directory to write constants file into (default: cwd)"),
+      llvm::cl::init("")};
+  Option<int64_t> externalizeMinNumElements{
+      *this, "externalize-min-num-elements",
+      llvm::cl::desc(
+          "Minimum number of tensor elements to externalize (0 = disabled)"),
+      llvm::cl::init(0)};
+};
+
+/// Build the complete HIPDNN pipeline: ONNX→HIP→LLVM→Interface.
+/// Chains buildOnnxToHipPipeline and buildHipToLLVMPipeline.
+void buildHipdnnPipeline(OpPassManager &pm,
+                         const HipdnnPipelineOptions &options);
+
+/// Register all pipelines with MLIR's global pass registry so they appear
 /// in hip-mlir-opt --help and are usable as single-flag invocations.
 /// Follows the torch-mlir PassPipelineRegistration pattern.
 void registerHipPipelines();

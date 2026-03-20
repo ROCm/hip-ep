@@ -4,10 +4,11 @@
 // ============================================================================
 // TEST: GenerateInterface pass creates C-ABI wrapper functions.
 //
-// Input: Pre-lowered LLVM IR with @main_graph(ptr, ptr, ptr) -> i32 and
-// all required hipdnn.* module attributes.  The earlier lowering passes in
-// hip-to-llvm-pipeline are no-ops on already-lowered IR, so GenerateInterface
-// runs directly on the input below.
+// Input: HIP dialect IR with @main_graph using !hip.context and memref types.
+// The hip-to-llvm-pipeline lowers this through:
+//   1. convert-hip-to-llvm (func/memref → LLVM, transformMainFunction wraps
+//      the expanded memref signature back to 3-pointer C ABI)
+//   2. generate-interface (creates inference_init/compute/cleanup wrappers)
 //
 // Verifies:
 //   1. Four wrapper functions are generated.
@@ -55,9 +56,10 @@ module attributes {
   hipdnn.buffer_offsets = [],
   hipdnn.buffer_count = 0 : i64
 } {
-  llvm.func @main_graph(%ctx: !llvm.ptr, %inputs: !llvm.ptr,
-                        %outputs: !llvm.ptr) -> i32 {
-    %zero = llvm.mlir.constant(0 : i32) : i32
-    llvm.return %zero : i32
+  func.func @main_graph(%ctx: !hip.context,
+                        %in: memref<8xf32>,
+                        %out: memref<8xf32>) -> i32 {
+    %zero = arith.constant 0 : i32
+    return %zero : i32
   }
 }

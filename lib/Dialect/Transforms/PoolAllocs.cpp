@@ -355,8 +355,15 @@ void PoolAllocsPass::runOnOperation() {
     allInfos.push_back(info);
   }
 
-  if (allInfos.size() < 2)
+  if (allInfos.size() < 2) {
+    ModuleOp moduleOp = funcOp->getParentOfType<ModuleOp>();
+    OpBuilder zeroBuilder(funcOp.getContext());
+    moduleOp->setAttr("hipdnn.pool_size", zeroBuilder.getI64IntegerAttr(0));
+    moduleOp->setAttr("hipdnn.buffer_count", zeroBuilder.getI64IntegerAttr(0));
+    moduleOp->setAttr("hipdnn.buffer_offsets",
+                      zeroBuilder.getArrayAttr(SmallVector<Attribute>{}));
     return;
+  }
 
   // ----- Phase 2: partition into static / dynamic ----------------------
 
@@ -477,6 +484,7 @@ void PoolAllocsPass::runOnOperation() {
   }
 
   // 5d. Replace each original alloc with a memref.view into the pool.
+  SmallVector<int64_t> staticOffsets;
   for (auto &info : allInfos) {
     auto it = allocToOffset.find(info.allocOp.getOperation());
     if (it == allocToOffset.end())
@@ -494,6 +502,11 @@ void PoolAllocsPass::runOnOperation() {
     info.allocOp.replaceAllUsesWith(view.getResult());
     info.allocOp.erase();
     ++NumAllocsPooled;
+
+    if (auto constOp = offset.getDefiningOp<arith::ConstantIndexOp>())
+      staticOffsets.push_back(constOp.value());
+    else
+      staticOffsets.push_back(-1);
   }
 
   // 5d'. Erase deallocs that now target views — the pool is owned by the
@@ -505,6 +518,19 @@ void PoolAllocsPass::runOnOperation() {
   });
   for (auto op : orphanedDeallocs)
     op.erase();
+
+  // 5e. Attach pool metadata to the module for GenerateInterface.
+  ModuleOp moduleOp = funcOp->getParentOfType<ModuleOp>();
+  MLIRContext *mlirCtx = funcOp.getContext();
+  moduleOp->setAttr("hipdnn.pool_size",
+                    builder.getI64IntegerAttr(staticPoolSize));
+  moduleOp->setAttr("hipdnn.buffer_count",
+                    builder.getI64IntegerAttr((int64_t)allInfos.size()));
+  SmallVector<Attribute> offsetAttrs;
+  for (int64_t off : staticOffsets)
+    offsetAttrs.push_back(builder.getI64IntegerAttr(off));
+  moduleOp->setAttr("hipdnn.buffer_offsets",
+                    ArrayAttr::get(mlirCtx, offsetAttrs));
 }
 
 } // namespace
