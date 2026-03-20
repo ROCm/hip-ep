@@ -80,6 +80,18 @@ void mlir::hip::buildHipToLLVMPipeline(
   pm.addPass(createGenerateInterfacePass(compOpts));
 }
 
+void mlir::hip::buildHipdnnPipeline(
+    OpPassManager &pm, const HipdnnPipelineOptions &options) {
+  OnnxToHipPipelineOptions onnxOpts;
+  onnxOpts.externalizeOutputDir = options.constantsDir;
+  onnxOpts.externalizeMinNumElements = options.externalizeMinNumElements;
+  buildOnnxToHipPipeline(pm, onnxOpts);
+
+  HipToLLVMPipelineOptions llvmOpts;
+  llvmOpts.constantsFile = options.constantsFile;
+  buildHipToLLVMPipeline(pm, llvmOpts);
+}
+
 void mlir::hip::registerHipPipelines() {
   PassPipelineRegistration<OnnxToHipPipelineOptions>(
       "onnx-to-hip-pipeline",
@@ -91,4 +103,9 @@ void mlir::hip::registerHipPipelines() {
       "hip-to-llvm-pipeline",
       "Lower HIP memref IR to LLVM dialect and generate C interface",
       buildHipToLLVMPipeline);
+
+  PassPipelineRegistration<HipdnnPipelineOptions>(
+      "hipdnn-pipeline",
+      "Complete HIPDNN ONNX→HIP→LLVM→Interface pipeline",
+      buildHipdnnPipeline);
 }

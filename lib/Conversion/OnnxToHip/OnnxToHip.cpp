@@ -909,27 +909,46 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   if (!epsilonAttr)
     return rewriter.notifyMatchFailure(op, "missing epsilon attribute");
 
-  // Should have 2 results: output and skip_output
-  if (op->getNumResults() != 2)
-    return rewriter.notifyMatchFailure(
-        op, "expected 2 results for SkipSimplifiedLayerNormalization");
+  unsigned numResults = op->getNumResults();
 
   auto outputType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  auto skipOutputType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
-
-  // Create init tensors
   mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
+
+  // The HIP op always produces 2 results (output + skip_output).
+  // ONNX may have 2 or 4 results (output, [none, none,] skip_output).
+  bool hasSkipOutput = numResults >= 2;
+  unsigned skipOutIdx = hasSkipOutput ? numResults - 1 : 0;
+  auto skipOutputType =
+      hasSkipOutput
+          ? mlir::cast<mlir::RankedTensorType>(
+                op->getResult(skipOutIdx).getType())
+          : outputType;
   mlir::Value skipOutputInit =
       createEmptyTensor(rewriter, loc, skipOutputType, input);
 
-  // Create hip.skip_rms_norm operation
   auto hipOp = mlir::hip::SkipRmsNormOp::create(
       rewriter, loc, {outputType, skipOutputType}, context, input, skip, gamma,
       outputInit, skipOutputInit, epsilonAttr);
 
-  rewriter.replaceOp(op, hipOp->getResults());
+  llvm::SmallVector<mlir::Value> replacements;
+  replacements.push_back(hipOp->getResult(0));
+
+  if (hasSkipOutput) {
+    for (unsigned i = 1; i < skipOutIdx; ++i) {
+      mlir::Type origType = op->getResult(i).getType();
+      if (mlir::isa<mlir::NoneType>(origType)) {
+        replacements.push_back(mlir::Value{});
+        continue;
+      }
+      auto dummyType = mlir::cast<mlir::RankedTensorType>(origType);
+      replacements.push_back(mlir::tensor::EmptyOp::create(
+          rewriter, loc, dummyType.getShape(), dummyType.getElementType()));
+    }
+    replacements.push_back(hipOp->getResult(1));
+  }
+
+  rewriter.replaceOp(op, replacements);
   return mlir::success();
 }
 
@@ -1230,6 +1249,203 @@ struct GatherToHip : public mlir::RewritePattern {
   }
 };
 
+/// onnx.Relu -> hip.relu
+struct ReluToHip : public mlir::RewritePattern {
+  ReluToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Relu", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (mlir::failed(ctxOrFailure))
+      return rewriter.notifyMatchFailure(op, "missing context argument");
+    mlir::Value context = *ctxOrFailure;
+    mlir::Location loc = op->getLoc();
+
+    if (op->getNumOperands() < 1)
+      return rewriter.notifyMatchFailure(op, "expected at least 1 operand");
+
+    mlir::Value input = op->getOperand(0);
+    auto resultType =
+        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    mlir::Value init = mlir::tensor::EmptyOp::create(
+        rewriter, loc, resultType.getShape(), resultType.getElementType());
+
+    auto hipOp = mlir::hip::ReluOp::create(
+        rewriter, loc, mlir::TypeRange{resultType}, context, input, init);
+    rewriter.replaceOp(op, hipOp->getResults());
+    return mlir::success();
+  }
+};
+
+/// onnx.Custom(MatMulNBits) -> hip.matmul_nbits
+struct MatMulNBitsToHip : public mlir::RewritePattern {
+  MatMulNBitsToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+    if (!funcNameAttr || funcNameAttr.getValue() != "MatMulNBits")
+      return rewriter.notifyMatchFailure(op, "not a MatMulNBits operation");
+
+    auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+    if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+      return rewriter.notifyMatchFailure(op, "domain must be com.microsoft");
+
+    if (op->getNumOperands() < 3)
+      return rewriter.notifyMatchFailure(
+          op, "expected at least 3 operands for MatMulNBits");
+
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (mlir::failed(ctxOrFailure))
+      return rewriter.notifyMatchFailure(op, "missing context argument");
+    mlir::Value context = *ctxOrFailure;
+    mlir::Location loc = op->getLoc();
+
+    mlir::Value A = op->getOperand(0);
+    mlir::Value B = op->getOperand(1);
+    mlir::Value scales = op->getOperand(2);
+
+    auto getOptionalOperand = [&](unsigned idx) -> mlir::Value {
+      if (idx >= op->getNumOperands())
+        return mlir::Value{};
+      mlir::Value v = op->getOperand(idx);
+      if (!v || mlir::isa<mlir::NoneType>(v.getType()))
+        return mlir::Value{};
+      return v;
+    };
+    mlir::Value zeroPoints = getOptionalOperand(3);
+    mlir::Value gIdx = getOptionalOperand(4);
+    mlir::Value bias = getOptionalOperand(5);
+
+    auto KAttr = rewriter.getI64IntegerAttr(
+        op->getAttrOfType<mlir::IntegerAttr>("K").getSInt());
+    auto NAttr = rewriter.getI64IntegerAttr(
+        op->getAttrOfType<mlir::IntegerAttr>("N").getSInt());
+
+    auto bitsIntAttr = op->getAttrOfType<mlir::IntegerAttr>("bits");
+    auto bitsAttr =
+        rewriter.getI64IntegerAttr(bitsIntAttr ? bitsIntAttr.getSInt() : 4);
+
+    auto blockSizeAttr = rewriter.getI64IntegerAttr(
+        op->getAttrOfType<mlir::IntegerAttr>("block_size").getSInt());
+
+    auto accuracyIntAttr =
+        op->getAttrOfType<mlir::IntegerAttr>("accuracy_level");
+    auto accuracyLevelAttr = rewriter.getI64IntegerAttr(
+        accuracyIntAttr ? accuracyIntAttr.getSInt() : 0);
+
+    auto rt =
+        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    mlir::Value init = mlir::tensor::EmptyOp::create(
+        rewriter, loc, rt.getShape(), rt.getElementType());
+
+    auto hipOp = mlir::hip::MatMulNBitsOp::create(
+        rewriter, loc, mlir::TypeRange{rt}, context, A, B, scales,
+        zeroPoints, gIdx, bias, init, KAttr, NAttr, bitsAttr, blockSizeAttr,
+        accuracyLevelAttr);
+    rewriter.replaceOp(op, hipOp->getResults());
+    return mlir::success();
+  }
+};
+
+/// onnx.Custom(QMoE) -> hip.qmoe
+struct QMoEToHip : public mlir::RewritePattern {
+  QMoEToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+    if (!funcNameAttr || funcNameAttr.getValue() != "QMoE")
+      return rewriter.notifyMatchFailure(op, "not a QMoE operation");
+
+    auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+    if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+      return rewriter.notifyMatchFailure(op, "domain must be com.microsoft");
+
+    if (op->getNumOperands() < 7)
+      return rewriter.notifyMatchFailure(
+          op, "expected at least 7 operands for QMoE");
+
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (mlir::failed(ctxOrFailure))
+      return rewriter.notifyMatchFailure(op, "missing context argument");
+    mlir::Value context = *ctxOrFailure;
+    mlir::Location loc = op->getLoc();
+
+    auto getOptionalOperand = [&](unsigned idx) -> mlir::Value {
+      if (idx >= op->getNumOperands())
+        return mlir::Value{};
+      mlir::Value v = op->getOperand(idx);
+      if (!v || mlir::isa<mlir::NoneType>(v.getType()))
+        return mlir::Value{};
+      return v;
+    };
+
+    mlir::Value input = op->getOperand(0);
+    mlir::Value routerProbs = op->getOperand(1);
+    mlir::Value fc1Weights = op->getOperand(2);
+    mlir::Value fc1Scales = op->getOperand(3);
+    mlir::Value fc1Bias = getOptionalOperand(4);
+    mlir::Value fc2Weights = op->getOperand(5);
+    mlir::Value fc2Scales = op->getOperand(6);
+    mlir::Value fc2Bias = getOptionalOperand(7);
+    mlir::Value fc3Weights = getOptionalOperand(8);
+    mlir::Value fc3Scales = getOptionalOperand(9);
+    mlir::Value fc3Bias = getOptionalOperand(10);
+    mlir::Value fc1ZeroPoints = getOptionalOperand(11);
+    mlir::Value fc2ZeroPoints = getOptionalOperand(12);
+    mlir::Value fc3ZeroPoints = getOptionalOperand(13);
+
+    auto getI64OrDefault = [&](llvm::StringRef name,
+                               int64_t def) -> mlir::IntegerAttr {
+      auto attr = op->getAttrOfType<mlir::IntegerAttr>(name);
+      return rewriter.getI64IntegerAttr(attr ? attr.getSInt() : def);
+    };
+    auto getF32OrDefault = [&](llvm::StringRef name,
+                               float def) -> mlir::FloatAttr {
+      auto attr = op->getAttrOfType<mlir::FloatAttr>(name);
+      return attr ? attr : rewriter.getF32FloatAttr(def);
+    };
+
+    auto expertWeightBitsAttr = getI64OrDefault("expert_weight_bits", 4);
+    auto kAttr = getI64OrDefault("k", 1);
+    auto blockSizeAttr = getI64OrDefault("block_size", 0);
+    auto normalizeAttr = getI64OrDefault("normalize_routing_weights", 0);
+    auto swigluFusionAttr = getI64OrDefault("swiglu_fusion", 0);
+    auto useSparseAttr = getI64OrDefault("use_sparse_mixer", 0);
+    auto activationAlphaAttr = getF32OrDefault("activation_alpha", 0.0f);
+    auto activationBetaAttr = getF32OrDefault("activation_beta", 0.0f);
+    auto swigluLimitAttr = getF32OrDefault("swiglu_limit", 0.0f);
+
+    auto activationTypeStrAttr =
+        op->getAttrOfType<mlir::StringAttr>("activation_type");
+    auto activationTypeAttr = activationTypeStrAttr
+                                  ? activationTypeStrAttr
+                                  : rewriter.getStringAttr("relu");
+
+    auto rt =
+        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    mlir::Value init = mlir::tensor::EmptyOp::create(
+        rewriter, loc, rt.getShape(), rt.getElementType());
+
+    auto hipOp = mlir::hip::QMoEOp::create(
+        rewriter, loc, mlir::TypeRange{rt}, context, input, routerProbs,
+        fc1Weights, fc1Scales, fc2Weights, fc2Scales, fc1Bias, fc2Bias,
+        fc3Weights, fc3Scales, fc3Bias, fc1ZeroPoints, fc2ZeroPoints,
+        fc3ZeroPoints, init, expertWeightBitsAttr, kAttr, blockSizeAttr,
+        normalizeAttr, swigluFusionAttr, useSparseAttr, activationAlphaAttr,
+        activationBetaAttr, swigluLimitAttr, activationTypeAttr);
+    rewriter.replaceOp(op, hipOp->getResults());
+    return mlir::success();
+  }
+};
+
 //===----------------------------------------------------------------------===//
 // convertComputeOps implementation
 //===----------------------------------------------------------------------===//
@@ -1247,10 +1463,13 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   patterns.add<ReduceSumToHip>(ctx);
   patterns.add<GatherToHip>(ctx);
   patterns.add<ConvToHip>(ctx);
+  patterns.add<ReluToHip>(ctx);
   patterns.add<SimplifiedLayerNormToHip>(ctx);
   patterns.add<SkipSimplifiedLayerNormToHip>(ctx);
   patterns.add<RotaryEmbeddingToHip>(ctx);
   patterns.add<GroupQueryAttentionToHip>(ctx);
+  patterns.add<MatMulNBitsToHip>(ctx);
+  patterns.add<QMoEToHip>(ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
@@ -1406,13 +1625,29 @@ void ConvertOnnxToHipPass::runOnOperation() {
       return signalPassFailure();
   }
 
-  llvm::SmallVector<mlir::Operation *> entryPoints;
-  for (auto &op : module.getBody()->getOperations()) {
-    if (op.getName().getStringRef() == "onnx.EntryPoint")
-      entryPoints.push_back(&op);
-  }
-  for (auto *ep : entryPoints)
-    ep->erase();
+  // Clean up onnx.NoValue and onnx.EntryPoint ops
+  llvm::SmallVector<mlir::Operation *> toErase;
+  module.walk([&](mlir::Operation *op) {
+    llvm::StringRef name = op->getName().getStringRef();
+    if (name == "onnx.NoValue" && op->use_empty())
+      toErase.push_back(op);
+    else if (name == "onnx.EntryPoint")
+      toErase.push_back(op);
+  });
+  for (auto *op : toErase)
+    op->erase();
+
+  // Strip ONNX result/arg attributes from func.func operations so that
+  // buffer-results-to-out-params can convert memref return values to
+  // out-params. That pass refuses to move results that carry attributes.
+  module.walk([&](mlir::func::FuncOp funcOp) {
+    unsigned numResults = funcOp.getNumResults();
+    if (numResults > 0) {
+      llvm::SmallVector<mlir::DictionaryAttr> emptyResAttrs(
+          numResults, mlir::DictionaryAttr::get(ctx));
+      funcOp.setAllResultAttrs(emptyResAttrs);
+    }
+  });
 
   // Finalize externalization: release writer, write JSON manifest, set module
   // attributes.
