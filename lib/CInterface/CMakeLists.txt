@@ -9,6 +9,7 @@ add_library(HipCInterface STATIC
 
 target_include_directories(HipCInterface PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/include
 )
 
 target_compile_definitions(HipCInterface PRIVATE

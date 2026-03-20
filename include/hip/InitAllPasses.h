@@ -9,6 +9,7 @@
 #include "hip/Dialect/IR/HipBufferize.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
+#include "hip/Dialect/Transforms/Pipelines.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
@@ -35,6 +36,7 @@ public:
       : Dialect(getDialectNamespace(), ctx,
                 mlir::TypeID::get<OnnxStubDialect>()) {
     allowUnknownOperations();
+    allowUnknownTypes();
   }
   static constexpr llvm::StringLiteral getDialectNamespace() { return "onnx"; }
 };
@@ -64,6 +66,7 @@ inline void loadAllDialects(mlir::MLIRContext &context) {
   mlir::DialectRegistry registry;
   registerAllDialects(registry);
   context.appendDialectRegistry(registry);
+  context.allowUnregisteredDialects(true);
   context.loadAllAvailableDialects();
 }
 
@@ -72,6 +75,7 @@ inline void registerAllPasses() {
   mlir::registerCanonicalizerPass();
   mlir::hip::registerOptimizeMemRefsPass();
   mlir::hip::registerPoolAllocsPass();
+  mlir::hip::registerHipPipelines();
   registerConversionPasses();
 }
 

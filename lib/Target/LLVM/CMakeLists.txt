@@ -113,5 +113,10 @@ target_link_libraries(HipTargetLLVM PUBLIC
   $<$<BOOL:${LLVM_DTLTO_LIB}>:${LLVM_DTLTO_LIB}>
 )
 
+# Add include directories
+target_include_directories(HipTargetLLVM PUBLIC
+  ${CMAKE_SOURCE_DIR}/include
+)
+
 # Set folder for IDE organization
 set_target_properties(HipTargetLLVM PROPERTIES FOLDER "mlir/Target")

@@ -58,7 +58,8 @@ int wrap_group_query_attention(RuntimeState *state, void *query, void *key,
 
   if (rc != 0) {
     fprintf(stderr,
-            "wrap_group_query_attention: hip_gqa_forward failed (rc=%d)\n", rc);
+            "wrap_group_query_attention: hip_gqa_forward failed (rc=%d)\n",
+            rc);
   } else {
     RUNTIME_DEBUG_LOG(
         "[REAL] wrap_group_query_attention: completed successfully\n");
