@@ -1732,14 +1732,14 @@ struct ConvertHipToLLVMPass
 
     RewritePatternSet patterns(ctx);
 
-    patterns.add<AllocOpLowering, FreeOpLowering, GetConstantOpLowering,
-                 MiopenGraphOpLowering, GetPoolOpLowering,
-                 HipblasltGraphOpLowering, ConvOpLowering, MatmulOpLowering,
-                 RmsNormOpLowering, SkipRmsNormOpLowering, RopeOpLowering,
-                 MiopenSoftmaxOpLowering, TransposeOpLowering,
-                 GatherOpLowering, SiluOpLowering, SigmoidOpLowering,
-                 MulOpLowering, SubOpLowering, CastOpLowering,
-                 ReduceSumOpLowering, GqaOpLowering>(typeConverter);
+    patterns
+        .add<AllocOpLowering, FreeOpLowering, GetConstantOpLowering,
+             MiopenGraphOpLowering, GetPoolOpLowering, HipblasltGraphOpLowering,
+             ConvOpLowering, MatmulOpLowering, RmsNormOpLowering,
+             SkipRmsNormOpLowering, RopeOpLowering, MiopenSoftmaxOpLowering,
+             TransposeOpLowering, GatherOpLowering, SiluOpLowering,
+             SigmoidOpLowering, MulOpLowering, SubOpLowering, CastOpLowering,
+             ReduceSumOpLowering, GqaOpLowering>(typeConverter);
     patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter,
                                                          kMiopenAdd);
     patterns.add<MemRefAllocOpLowering, MemRefDeallocOpLowering>(typeConverter);
@@ -1809,8 +1809,7 @@ private:
     Type i32Type = IntegerType::get(module.getContext(), 32);
 
     auto mainType = mainFunc.getFunctionType();
-    if (mainType.getNumParams() == 3 &&
-        mainType.getReturnType() == i32Type &&
+    if (mainType.getNumParams() == 3 && mainType.getReturnType() == i32Type &&
         mainType.getParamType(0) == ptrType &&
         mainType.getParamType(1) == ptrType &&
         mainType.getParamType(2) == ptrType)
@@ -1862,8 +1861,8 @@ private:
     mainFunc.setName("main_graph_internal");
     mainFunc.setLinkage(LLVM::Linkage::Private);
 
-    auto newFuncType = LLVM::LLVMFunctionType::get(
-        i32Type, {ptrType, ptrType, ptrType});
+    auto newFuncType =
+        LLVM::LLVMFunctionType::get(i32Type, {ptrType, ptrType, ptrType});
     builder.setInsertionPoint(mainFunc);
     auto newMainFunc =
         LLVM::LLVMFuncOp::create(builder, loc, "main_graph", newFuncType);
@@ -1915,8 +1914,7 @@ private:
                                             builder.getI32IntegerAttr(0));
       LLVM::ReturnOp::create(builder, loc, zero);
     } else {
-      auto callOp =
-          LLVM::CallOp::create(builder, loc, mainFunc, internalArgs);
+      auto callOp = LLVM::CallOp::create(builder, loc, mainFunc, internalArgs);
       LLVM::ReturnOp::create(builder, loc, callOp.getResult());
     }
 
