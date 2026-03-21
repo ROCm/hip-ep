@@ -225,4 +225,3 @@ int wrap_miopenConvolutionForward(
 
   return 0;
 }
-

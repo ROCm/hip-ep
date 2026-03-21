@@ -702,9 +702,9 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
         f32Type                    // epsilon
     };
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapSkipSimplifiedLayerNorm, paramTypes,
-        rewriter.getI32Type());
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kWrapSkipSimplifiedLayerNorm,
+                               paramTypes, rewriter.getI32Type());
     if (failed(funcOp))
       return failure();
 
@@ -1752,16 +1752,16 @@ private:
       return builder.create<LLVM::AddrSpaceCastOp>(loc, as0PtrType, ptr);
     };
 
-    Value allocPtr = builder.create<LLVM::ExtractValueOp>(
-        loc, memrefStruct, ArrayRef<int64_t>{0});
+    Value allocPtr = builder.create<LLVM::ExtractValueOp>(loc, memrefStruct,
+                                                          ArrayRef<int64_t>{0});
     args.push_back(castToAs0(allocPtr));
 
     Value alignedPtr = builder.create<LLVM::ExtractValueOp>(
         loc, memrefStruct, ArrayRef<int64_t>{1});
     args.push_back(castToAs0(alignedPtr));
 
-    args.push_back(builder.create<LLVM::ExtractValueOp>(
-        loc, memrefStruct, ArrayRef<int64_t>{2}));
+    args.push_back(builder.create<LLVM::ExtractValueOp>(loc, memrefStruct,
+                                                        ArrayRef<int64_t>{2}));
 
     for (int64_t dim = 0; dim < rank; dim++)
       args.push_back(builder.create<LLVM::ExtractValueOp>(
