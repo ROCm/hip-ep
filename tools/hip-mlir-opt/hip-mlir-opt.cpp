@@ -29,19 +29,7 @@
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "mlir/Transforms/Passes.h"
 
-/// Minimal ONNX dialect stub that claims the "onnx" namespace and permits
-/// unknown operations.  This allows hip-mlir-opt to parse generic-syntax
-/// ONNX MLIR (e.g. "onnx.MatMul"(...)) without requiring the full onnx-mlir
-/// dialect library.
-class OnnxStubDialect : public mlir::Dialect {
-public:
-  explicit OnnxStubDialect(mlir::MLIRContext *ctx)
-      : Dialect(getDialectNamespace(), ctx,
-                mlir::TypeID::get<OnnxStubDialect>()) {
-    allowUnknownOperations();
-  }
-  static constexpr llvm::StringLiteral getDialectNamespace() { return "onnx"; }
-};
+#include "hip/InitAllPasses.h"
 
 namespace {
 
@@ -139,7 +127,7 @@ int main(int argc, char **argv) {
   registry.insert<mlir::tensor::TensorDialect>();
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::hip::HipDialect>();
-  registry.insert<OnnxStubDialect>();
+  registry.insert<hip::compiler::detail::OnnxStubDialect>();
 
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
