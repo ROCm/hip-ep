@@ -8,8 +8,17 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassOptions.h"
 
+namespace morphizen {
+class FileSystem;
+} // namespace morphizen
+
 namespace mlir {
 namespace hip {
+
+/// Default minimum number of tensor elements for constant externalization.
+/// All tensor constants with at least this many elements are written to
+/// the sidecar constants.bin rather than inlined in the DLL.
+constexpr int64_t kDefaultExternalizeMinNumElements = 1;
 
 /// Pipeline options forwarded to the ConvertOnnxToHipPass for constant
 /// externalization. These mirror the pass options on ConvertOnnxToHipPass
@@ -48,6 +57,13 @@ struct HipToLLVMPipelineOptions
 /// each pass must appear at its position.
 void buildOnnxToHipPipeline(OpPassManager &pm,
                             const OnnxToHipPipelineOptions &options);
+
+/// Build the ONNX-to-HIP pipeline with an external FileSystem.
+/// When \p fs is non-null, externalized constants are written through it
+/// (e.g. into an EPContext archive) instead of a DiskFileSystem.
+void buildOnnxToHipPipeline(OpPassManager &pm,
+                            const OnnxToHipPipelineOptions &options,
+                            morphizen::FileSystem *fs);
 
 /// Build the HIP-to-LLVM lowering pipeline. This is a separate pipeline
 /// (not part of buildOnnxToHipPipeline) because the LLVM lowering is only

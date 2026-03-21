@@ -317,11 +317,11 @@ public:
     }
 
     std::string constantsFile = "constants.bin";
-    if (!compilationOptions_.constants_file.empty()) {
-      constantsFile = compilationOptions_.constants_file;
-    } else if (auto attr =
-                   module->getAttrOfType<mlir::StringAttr>("hip.constants_file")) {
+    if (auto attr =
+            module->getAttrOfType<mlir::StringAttr>("hip.constants_file")) {
       constantsFile = attr.getValue().str();
+    } else if (!compilationOptions_.constants_file.empty()) {
+      constantsFile = compilationOptions_.constants_file;
     }
 
     std::vector<uint8_t> blob = buildMetadataBlob(module, constantsFile);
