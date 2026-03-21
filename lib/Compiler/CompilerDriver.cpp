@@ -161,8 +161,9 @@ bool CompilerDriver::runMLIRPasses(
   }
 
   mlir::hip::OnnxToHipPipelineOptions onnxToHipOpts;
-  onnxToHipOpts.externalizeMinNumElements = 1;
-  mlir::hip::buildOnnxToHipPipeline(pm, onnxToHipOpts);
+  onnxToHipOpts.externalizeMinNumElements =
+      mlir::hip::kDefaultExternalizeMinNumElements;
+  mlir::hip::buildOnnxToHipPipeline(pm, onnxToHipOpts, fileSystem_);
 
   mlir::hip::HipToLLVMPipelineOptions hipToLlvmOpts;
   hipToLlvmOpts.constantsFile = options.constants_file;

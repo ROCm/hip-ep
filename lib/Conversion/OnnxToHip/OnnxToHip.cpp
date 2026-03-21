@@ -1399,7 +1399,14 @@ static mlir::LogicalResult generateModuleMetadata(mlir::ModuleOp module) {
 struct ConvertOnnxToHipPass
     : public impl::ConvertOnnxToHipPassBase<ConvertOnnxToHipPass> {
   using ConvertOnnxToHipPassBase::ConvertOnnxToHipPassBase;
+
+  ConvertOnnxToHipPass(morphizen::FileSystem *fs, int64_t minNumElements)
+      : fileSystem_(fs), fsMinNumElements_(minNumElements) {}
+
   void runOnOperation() override;
+
+  morphizen::FileSystem *fileSystem_ = nullptr;
+  int64_t fsMinNumElements_ = 0;
 };
 
 void ConvertOnnxToHipPass::runOnOperation() {
@@ -1407,14 +1414,25 @@ void ConvertOnnxToHipPass::runOnOperation() {
   mlir::MLIRContext *ctx = module.getContext();
 
   // Set up externalization state if enabled.
+  // When fileSystem_ is provided (e.g. EPContext from ORT), use it directly.
+  // Otherwise fall back to DiskFileSystem rooted at externalizeOutputDir.
   std::unique_ptr<ExternalizationState> extState;
-  llvm::StringRef dirRef = externalizeOutputDir.getValue();
-  std::string dir = dirRef.empty() ? "." : dirRef.str();
-  mlir::hip::DiskFileSystem diskFs(dir.c_str());
-  if (externalizeMinNumElements > 0) {
+  std::unique_ptr<mlir::hip::DiskFileSystem> fallbackFs;
+  morphizen::FileSystem *fs = fileSystem_;
+
+  int64_t minElems = fileSystem_ ? fsMinNumElements_
+                                 : externalizeMinNumElements.getValue();
+
+  if (!fs) {
+    llvm::StringRef dirRef = externalizeOutputDir.getValue();
+    std::string dir = dirRef.empty() ? "." : dirRef.str();
+    fallbackFs = std::make_unique<mlir::hip::DiskFileSystem>(dir.c_str());
+    fs = fallbackFs.get();
+  }
+
+  if (minElems > 0) {
     extState = std::make_unique<ExternalizationState>();
 
-    // Derive base name from module symbol or default.
     std::string baseName = "model";
     if (auto sym = module->getAttrOfType<mlir::StringAttr>(
             mlir::SymbolTable::getSymbolAttrName()))
@@ -1422,7 +1440,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
     extState->binFileName = baseName + ".constants.bin";
 
     extState->writer =
-        diskFs.create_writer_template(extState->binFileName.c_str());
+        fs->create_writer_template(extState->binFileName.c_str());
     if (!extState->writer) {
       module.emitError("failed to open constants binary file via FileSystem: " +
                        extState->binFileName);
@@ -1439,7 +1457,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
     if (funcOp.isDeclaration())
       continue;
     if (mlir::failed(lowerOnnxConstants(
-            module, funcOp, externalizeMinNumElements, extState.get())))
+            module, funcOp, minElems, extState.get())))
       return signalPassFailure();
     lowerOnnxReturns(funcOp);
     if (mlir::failed(convertComputeOps(funcOp, ctx)))
@@ -1501,7 +1519,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
     manifest["total_bytes"] = extState->currentOffset;
     manifest["constants"] = std::move(extState->manifestEntries);
 
-    auto jsonWriter = diskFs.create_writer_template(jsonPath.c_str());
+    auto jsonWriter = fs->create_writer_template(jsonPath.c_str());
     if (!jsonWriter) {
       module.emitError("failed to open constants manifest via FileSystem: " +
                        jsonPath);
@@ -1521,6 +1539,12 @@ void ConvertOnnxToHipPass::runOnOperation() {
 }
 
 } // namespace
+
+std::unique_ptr<mlir::Pass>
+createConvertOnnxToHipPass(morphizen::FileSystem *fs,
+                           int64_t minNumElements) {
+  return std::make_unique<ConvertOnnxToHipPass>(fs, minNumElements);
+}
 
 } // namespace hip
 } // namespace mlir
