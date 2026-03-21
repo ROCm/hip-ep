@@ -47,13 +47,12 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
     return -1;
   }
 
-  RUNTIME_DEBUG_LOG("[REAL] wrap_cast: num_elements=%lld, src=%s(%lld), "
-                    "dst=%s(%lld)\n",
-                    (long long)num_elements,
-                    hipdnn_ep_datatype_name(src_data_type),
-                    (long long)src_data_type,
-                    hipdnn_ep_datatype_name(dst_data_type),
-                    (long long)dst_data_type);
+  RUNTIME_DEBUG_LOG(
+      "[REAL] wrap_cast: num_elements=%lld, src=%s(%lld), "
+      "dst=%s(%lld)\n",
+      (long long)num_elements, hipdnn_ep_datatype_name(src_data_type),
+      (long long)src_data_type, hipdnn_ep_datatype_name(dst_data_type),
+      (long long)dst_data_type);
 
   return hip_cast(stream, input, output, num_elements, src_hip_dtype,
                   dst_hip_dtype);

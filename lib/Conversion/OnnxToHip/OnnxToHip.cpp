@@ -210,8 +210,7 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
       // Compute full tensor byte size from shape and element width.
       auto rawData = valueAttr.getRawData();
       int64_t elemBits = tensorType.getElementTypeBitWidth();
-      int64_t byteSize =
-          valueAttr.getNumElements() * ((elemBits + 7) / 8);
+      int64_t byteSize = valueAttr.getNumElements() * ((elemBits + 7) / 8);
 
       if (valueAttr.isSplat()) {
         // Splat: MLIR stores only one element; expand via a staging
@@ -940,11 +939,9 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   // ONNX may have 2 or 4 results (output, [none, none,] skip_output).
   bool hasSkipOutput = numResults >= 2;
   unsigned skipOutIdx = hasSkipOutput ? numResults - 1 : 0;
-  auto skipOutputType =
-      hasSkipOutput
-          ? mlir::cast<mlir::RankedTensorType>(
-                op->getResult(skipOutIdx).getType())
-          : outputType;
+  auto skipOutputType = hasSkipOutput ? mlir::cast<mlir::RankedTensorType>(
+                                            op->getResult(skipOutIdx).getType())
+                                      : outputType;
   mlir::Value skipOutputInit =
       createEmptyTensor(rewriter, loc, skipOutputType, input);
 
@@ -1420,8 +1417,8 @@ void ConvertOnnxToHipPass::runOnOperation() {
   std::unique_ptr<mlir::hip::DiskFileSystem> fallbackFs;
   morphizen::FileSystem *fs = fileSystem_;
 
-  int64_t minElems = fileSystem_ ? fsMinNumElements_
-                                 : externalizeMinNumElements.getValue();
+  int64_t minElems =
+      fileSystem_ ? fsMinNumElements_ : externalizeMinNumElements.getValue();
 
   if (!fs) {
     llvm::StringRef dirRef = externalizeOutputDir.getValue();
@@ -1456,8 +1453,8 @@ void ConvertOnnxToHipPass::runOnOperation() {
        llvm::make_early_inc_range(module.getOps<mlir::func::FuncOp>())) {
     if (funcOp.isDeclaration())
       continue;
-    if (mlir::failed(lowerOnnxConstants(
-            module, funcOp, minElems, extState.get())))
+    if (mlir::failed(
+            lowerOnnxConstants(module, funcOp, minElems, extState.get())))
       return signalPassFailure();
     lowerOnnxReturns(funcOp);
     if (mlir::failed(convertComputeOps(funcOp, ctx)))
@@ -1541,8 +1538,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
 } // namespace
 
 std::unique_ptr<mlir::Pass>
-createConvertOnnxToHipPass(morphizen::FileSystem *fs,
-                           int64_t minNumElements) {
+createConvertOnnxToHipPass(morphizen::FileSystem *fs, int64_t minNumElements) {
   return std::make_unique<ConvertOnnxToHipPass>(fs, minNumElements);
 }
 

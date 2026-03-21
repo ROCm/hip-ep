@@ -75,9 +75,9 @@ void mlir::hip::buildOnnxToHipPipeline(
   buildOnnxToHipPipelineTail(pm);
 }
 
-void mlir::hip::buildOnnxToHipPipeline(
-    OpPassManager &pm, const OnnxToHipPipelineOptions &options,
-    morphizen::FileSystem *fs) {
+void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
+                                       const OnnxToHipPipelineOptions &options,
+                                       morphizen::FileSystem *fs) {
   pm.addPass(createHipAddContextArgPass());
 
   if (fs) {
@@ -102,8 +102,8 @@ void mlir::hip::buildHipToLLVMPipeline(
   pm.addPass(createGenerateInterfacePass(compOpts));
 }
 
-void mlir::hip::buildHipdnnPipeline(
-    OpPassManager &pm, const HipdnnPipelineOptions &options) {
+void mlir::hip::buildHipdnnPipeline(OpPassManager &pm,
+                                    const HipdnnPipelineOptions &options) {
   OnnxToHipPipelineOptions onnxOpts;
   onnxOpts.externalizeOutputDir = options.constantsDir;
   onnxOpts.externalizeMinNumElements = options.externalizeMinNumElements;
@@ -129,7 +129,6 @@ void mlir::hip::registerHipPipelines() {
       buildHipToLLVMPipeline);
 
   PassPipelineRegistration<HipdnnPipelineOptions>(
-      "hipdnn-pipeline",
-      "Complete HIPDNN ONNX→HIP→LLVM→Interface pipeline",
+      "hipdnn-pipeline", "Complete HIPDNN ONNX→HIP→LLVM→Interface pipeline",
       buildHipdnnPipeline);
 }
