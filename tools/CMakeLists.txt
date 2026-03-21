@@ -5,3 +5,5 @@
 
 add_subdirectory(hip-mlir-opt)
 add_subdirectory(hip-compiler)
+add_subdirectory(hip-test-dll)
+add_subdirectory(hip-inspect-dll)

@@ -13,6 +13,7 @@ add_dependencies(hip-mlir-opt
 )
 
 target_link_libraries(hip-mlir-opt PRIVATE
+  LibHipCompiler
   HipDialectIR
   HipDialectTransforms
   HipToLLVM
@@ -50,4 +51,9 @@ target_link_libraries(hip-mlir-opt PRIVATE
   MLIRReconcileUnrealizedCasts
   MLIRTransformUtils
   ${llvm_libs}
+)
+
+# Install target
+install(TARGETS hip-mlir-opt
+  RUNTIME DESTINATION bin
 )
