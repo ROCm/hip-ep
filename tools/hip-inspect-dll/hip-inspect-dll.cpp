@@ -16,7 +16,7 @@
 //   --json   Dump the raw JSON instead of the formatted summary.
 //===----------------------------------------------------------------------===//
 
-#include "llvm/Support/DynamicLibrary.h"
+#include "../common/DllLoader.h"
 #include "llvm/Support/JSON.h"
 
 #include <cstdint>
@@ -25,34 +25,6 @@
 #include <vector>
 
 typedef const char *(*InferenceGetMetadataJsonFunc)(void);
-
-// Cross-platform DLL loader (same pattern as test-model-dll).
-class DllLoader {
-public:
-  explicit DllLoader(const std::string &path) {
-    std::string errMsg;
-    if (llvm::sys::DynamicLibrary::LoadLibraryPermanently(path.c_str(),
-                                                          &errMsg)) {
-      std::cerr << "Failed to load DLL: " << path << " - " << errMsg << "\n";
-    } else {
-      lib_ =
-          llvm::sys::DynamicLibrary::getPermanentLibrary(path.c_str(), &errMsg);
-      valid_ = lib_.isValid();
-    }
-  }
-
-  void *getSymbol(const char *name) {
-    if (!valid_)
-      return nullptr;
-    return lib_.getAddressOfSymbol(name);
-  }
-
-  bool isValid() const { return valid_; }
-
-private:
-  llvm::sys::DynamicLibrary lib_;
-  bool valid_ = false;
-};
 
 // Return a human-readable element type string from element_size bytes.
 static std::string elementTypeName(int64_t element_size) {

@@ -11,8 +11,8 @@
 // measurement.
 //===----------------------------------------------------------------------===//
 
+#include "../common/DllLoader.h"
 #include "hip/Support/DiskFileSystem.h"
-#include "llvm/Support/DynamicLibrary.h"
 #include "llvm/Support/JSON.h"
 #include <algorithm>
 #include <cmath>
@@ -44,35 +44,6 @@ typedef struct {
   tensor_t *data; // Array of tensors
   size_t count;   // Number of tensors
 } span_t;
-
-// Cross-platform DLL loader using LLVM's DynamicLibrary
-class DllLoader {
-public:
-  DllLoader(const std::string &path) {
-    std::string errMsg;
-    // permanently load: the library stays loaded until process exit
-    if (llvm::sys::DynamicLibrary::LoadLibraryPermanently(path.c_str(),
-                                                          &errMsg)) {
-      std::cerr << "Failed to load DLL: " << path << " - " << errMsg << "\n";
-    } else {
-      lib_ =
-          llvm::sys::DynamicLibrary::getPermanentLibrary(path.c_str(), &errMsg);
-      valid_ = lib_.isValid();
-    }
-  }
-
-  void *getSymbol(const char *name) {
-    if (!valid_)
-      return nullptr;
-    return lib_.getAddressOfSymbol(name);
-  }
-
-  bool isValid() const { return valid_; }
-
-private:
-  llvm::sys::DynamicLibrary lib_;
-  bool valid_ = false;
-};
 
 // Parse --input-shape arguments: "0=8,3,224,224;1=8,512"
 std::map<int, std::vector<int64_t>>
