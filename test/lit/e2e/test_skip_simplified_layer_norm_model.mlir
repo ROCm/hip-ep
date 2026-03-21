@@ -13,7 +13,7 @@
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 2
 // CHECK-SAME: hipdnn.output_count = 2
-// CHECK: llvm.func @wrap_miopenAddT5LayerNormForward
+// CHECK: llvm.func @wrap_skip_simplified_layer_norm
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
 // CHECK: llvm.func @inference_cleanup

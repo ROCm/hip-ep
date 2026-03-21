@@ -178,7 +178,6 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
     }
 
     bool shouldExternalize = extState && minNumElements > 0 &&
-                             !valueAttr.isSplat() &&
                              valueAttr.getNumElements() >= minNumElements;
 
     if (shouldExternalize) {
@@ -208,10 +207,32 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
       }
       int64_t entryOffset = extState->currentOffset;
 
-      // Write raw bytes to the sidecar binary via FileSystem.
+      // Compute full tensor byte size from shape and element width.
       auto rawData = valueAttr.getRawData();
-      int64_t byteSize = static_cast<int64_t>(rawData.size());
-      extState->writer->fwrite(rawData.data(), byteSize);
+      int64_t elemBits = tensorType.getElementTypeBitWidth();
+      int64_t byteSize =
+          valueAttr.getNumElements() * ((elemBits + 7) / 8);
+
+      if (valueAttr.isSplat()) {
+        // Splat: MLIR stores only one element; expand via a staging
+        // buffer to avoid per-element fwrite overhead on large tensors.
+        constexpr size_t kSplatChunk = 1024 * 1024;
+        size_t elemSize = rawData.size();
+        size_t bufSize =
+            (std::min(static_cast<size_t>(byteSize), kSplatChunk) / elemSize) *
+            elemSize;
+        std::vector<char> buf(bufSize);
+        for (size_t i = 0; i < bufSize; i += elemSize)
+          std::memcpy(buf.data() + i, rawData.data(), elemSize);
+        size_t remaining = static_cast<size_t>(byteSize);
+        while (remaining > 0) {
+          size_t toWrite = std::min(remaining, bufSize);
+          extState->writer->fwrite(buf.data(), toWrite);
+          remaining -= toWrite;
+        }
+      } else {
+        extState->writer->fwrite(rawData.data(), byteSize);
+      }
       extState->currentOffset += byteSize;
 
       // Track sizes and offsets for module-level metadata.
@@ -1249,203 +1270,6 @@ struct GatherToHip : public mlir::RewritePattern {
   }
 };
 
-/// onnx.Relu -> hip.relu
-struct ReluToHip : public mlir::RewritePattern {
-  ReluToHip(mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.Relu", /*benefit=*/1, ctx) {}
-
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override {
-    auto ctxOrFailure = getContextArg(op, rewriter);
-    if (mlir::failed(ctxOrFailure))
-      return rewriter.notifyMatchFailure(op, "missing context argument");
-    mlir::Value context = *ctxOrFailure;
-    mlir::Location loc = op->getLoc();
-
-    if (op->getNumOperands() < 1)
-      return rewriter.notifyMatchFailure(op, "expected at least 1 operand");
-
-    mlir::Value input = op->getOperand(0);
-    auto resultType =
-        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    mlir::Value init = mlir::tensor::EmptyOp::create(
-        rewriter, loc, resultType.getShape(), resultType.getElementType());
-
-    auto hipOp = mlir::hip::ReluOp::create(
-        rewriter, loc, mlir::TypeRange{resultType}, context, input, init);
-    rewriter.replaceOp(op, hipOp->getResults());
-    return mlir::success();
-  }
-};
-
-/// onnx.Custom(MatMulNBits) -> hip.matmul_nbits
-struct MatMulNBitsToHip : public mlir::RewritePattern {
-  MatMulNBitsToHip(mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
-
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override {
-    auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
-    if (!funcNameAttr || funcNameAttr.getValue() != "MatMulNBits")
-      return rewriter.notifyMatchFailure(op, "not a MatMulNBits operation");
-
-    auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
-    if (!domainAttr || domainAttr.getValue() != "com.microsoft")
-      return rewriter.notifyMatchFailure(op, "domain must be com.microsoft");
-
-    if (op->getNumOperands() < 3)
-      return rewriter.notifyMatchFailure(
-          op, "expected at least 3 operands for MatMulNBits");
-
-    auto ctxOrFailure = getContextArg(op, rewriter);
-    if (mlir::failed(ctxOrFailure))
-      return rewriter.notifyMatchFailure(op, "missing context argument");
-    mlir::Value context = *ctxOrFailure;
-    mlir::Location loc = op->getLoc();
-
-    mlir::Value A = op->getOperand(0);
-    mlir::Value B = op->getOperand(1);
-    mlir::Value scales = op->getOperand(2);
-
-    auto getOptionalOperand = [&](unsigned idx) -> mlir::Value {
-      if (idx >= op->getNumOperands())
-        return mlir::Value{};
-      mlir::Value v = op->getOperand(idx);
-      if (!v || mlir::isa<mlir::NoneType>(v.getType()))
-        return mlir::Value{};
-      return v;
-    };
-    mlir::Value zeroPoints = getOptionalOperand(3);
-    mlir::Value gIdx = getOptionalOperand(4);
-    mlir::Value bias = getOptionalOperand(5);
-
-    auto KAttr = rewriter.getI64IntegerAttr(
-        op->getAttrOfType<mlir::IntegerAttr>("K").getSInt());
-    auto NAttr = rewriter.getI64IntegerAttr(
-        op->getAttrOfType<mlir::IntegerAttr>("N").getSInt());
-
-    auto bitsIntAttr = op->getAttrOfType<mlir::IntegerAttr>("bits");
-    auto bitsAttr =
-        rewriter.getI64IntegerAttr(bitsIntAttr ? bitsIntAttr.getSInt() : 4);
-
-    auto blockSizeAttr = rewriter.getI64IntegerAttr(
-        op->getAttrOfType<mlir::IntegerAttr>("block_size").getSInt());
-
-    auto accuracyIntAttr =
-        op->getAttrOfType<mlir::IntegerAttr>("accuracy_level");
-    auto accuracyLevelAttr = rewriter.getI64IntegerAttr(
-        accuracyIntAttr ? accuracyIntAttr.getSInt() : 0);
-
-    auto rt =
-        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    mlir::Value init = mlir::tensor::EmptyOp::create(
-        rewriter, loc, rt.getShape(), rt.getElementType());
-
-    auto hipOp = mlir::hip::MatMulNBitsOp::create(
-        rewriter, loc, mlir::TypeRange{rt}, context, A, B, scales,
-        zeroPoints, gIdx, bias, init, KAttr, NAttr, bitsAttr, blockSizeAttr,
-        accuracyLevelAttr);
-    rewriter.replaceOp(op, hipOp->getResults());
-    return mlir::success();
-  }
-};
-
-/// onnx.Custom(QMoE) -> hip.qmoe
-struct QMoEToHip : public mlir::RewritePattern {
-  QMoEToHip(mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
-
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override {
-    auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
-    if (!funcNameAttr || funcNameAttr.getValue() != "QMoE")
-      return rewriter.notifyMatchFailure(op, "not a QMoE operation");
-
-    auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
-    if (!domainAttr || domainAttr.getValue() != "com.microsoft")
-      return rewriter.notifyMatchFailure(op, "domain must be com.microsoft");
-
-    if (op->getNumOperands() < 7)
-      return rewriter.notifyMatchFailure(
-          op, "expected at least 7 operands for QMoE");
-
-    auto ctxOrFailure = getContextArg(op, rewriter);
-    if (mlir::failed(ctxOrFailure))
-      return rewriter.notifyMatchFailure(op, "missing context argument");
-    mlir::Value context = *ctxOrFailure;
-    mlir::Location loc = op->getLoc();
-
-    auto getOptionalOperand = [&](unsigned idx) -> mlir::Value {
-      if (idx >= op->getNumOperands())
-        return mlir::Value{};
-      mlir::Value v = op->getOperand(idx);
-      if (!v || mlir::isa<mlir::NoneType>(v.getType()))
-        return mlir::Value{};
-      return v;
-    };
-
-    mlir::Value input = op->getOperand(0);
-    mlir::Value routerProbs = op->getOperand(1);
-    mlir::Value fc1Weights = op->getOperand(2);
-    mlir::Value fc1Scales = op->getOperand(3);
-    mlir::Value fc1Bias = getOptionalOperand(4);
-    mlir::Value fc2Weights = op->getOperand(5);
-    mlir::Value fc2Scales = op->getOperand(6);
-    mlir::Value fc2Bias = getOptionalOperand(7);
-    mlir::Value fc3Weights = getOptionalOperand(8);
-    mlir::Value fc3Scales = getOptionalOperand(9);
-    mlir::Value fc3Bias = getOptionalOperand(10);
-    mlir::Value fc1ZeroPoints = getOptionalOperand(11);
-    mlir::Value fc2ZeroPoints = getOptionalOperand(12);
-    mlir::Value fc3ZeroPoints = getOptionalOperand(13);
-
-    auto getI64OrDefault = [&](llvm::StringRef name,
-                               int64_t def) -> mlir::IntegerAttr {
-      auto attr = op->getAttrOfType<mlir::IntegerAttr>(name);
-      return rewriter.getI64IntegerAttr(attr ? attr.getSInt() : def);
-    };
-    auto getF32OrDefault = [&](llvm::StringRef name,
-                               float def) -> mlir::FloatAttr {
-      auto attr = op->getAttrOfType<mlir::FloatAttr>(name);
-      return attr ? attr : rewriter.getF32FloatAttr(def);
-    };
-
-    auto expertWeightBitsAttr = getI64OrDefault("expert_weight_bits", 4);
-    auto kAttr = getI64OrDefault("k", 1);
-    auto blockSizeAttr = getI64OrDefault("block_size", 0);
-    auto normalizeAttr = getI64OrDefault("normalize_routing_weights", 0);
-    auto swigluFusionAttr = getI64OrDefault("swiglu_fusion", 0);
-    auto useSparseAttr = getI64OrDefault("use_sparse_mixer", 0);
-    auto activationAlphaAttr = getF32OrDefault("activation_alpha", 0.0f);
-    auto activationBetaAttr = getF32OrDefault("activation_beta", 0.0f);
-    auto swigluLimitAttr = getF32OrDefault("swiglu_limit", 0.0f);
-
-    auto activationTypeStrAttr =
-        op->getAttrOfType<mlir::StringAttr>("activation_type");
-    auto activationTypeAttr = activationTypeStrAttr
-                                  ? activationTypeStrAttr
-                                  : rewriter.getStringAttr("relu");
-
-    auto rt =
-        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    mlir::Value init = mlir::tensor::EmptyOp::create(
-        rewriter, loc, rt.getShape(), rt.getElementType());
-
-    auto hipOp = mlir::hip::QMoEOp::create(
-        rewriter, loc, mlir::TypeRange{rt}, context, input, routerProbs,
-        fc1Weights, fc1Scales, fc2Weights, fc2Scales, fc1Bias, fc2Bias,
-        fc3Weights, fc3Scales, fc3Bias, fc1ZeroPoints, fc2ZeroPoints,
-        fc3ZeroPoints, init, expertWeightBitsAttr, kAttr, blockSizeAttr,
-        normalizeAttr, swigluFusionAttr, useSparseAttr, activationAlphaAttr,
-        activationBetaAttr, swigluLimitAttr, activationTypeAttr);
-    rewriter.replaceOp(op, hipOp->getResults());
-    return mlir::success();
-  }
-};
-
 //===----------------------------------------------------------------------===//
 // convertComputeOps implementation
 //===----------------------------------------------------------------------===//
@@ -1463,13 +1287,10 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   patterns.add<ReduceSumToHip>(ctx);
   patterns.add<GatherToHip>(ctx);
   patterns.add<ConvToHip>(ctx);
-  patterns.add<ReluToHip>(ctx);
   patterns.add<SimplifiedLayerNormToHip>(ctx);
   patterns.add<SkipSimplifiedLayerNormToHip>(ctx);
   patterns.add<RotaryEmbeddingToHip>(ctx);
   patterns.add<GroupQueryAttentionToHip>(ctx);
-  patterns.add<MatMulNBitsToHip>(ctx);
-  patterns.add<QMoEToHip>(ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);

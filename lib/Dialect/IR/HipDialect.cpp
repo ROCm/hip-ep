@@ -581,46 +581,5 @@ void GqaOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-//===----------------------------------------------------------------------===//
-// ReluOp: ins(input), outs(output)
-//===----------------------------------------------------------------------===//
-
-MutableOperandRange ReluOp::getDpsInitsMutable() { return getOutputMutable(); }
-
-void ReluOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
-  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
-}
-
-//===----------------------------------------------------------------------===//
-// MatMulNBitsOp: ins(A, B, scales, [zero_points], [g_idx], [bias]),
-//                outs(output)
-//===----------------------------------------------------------------------===//
-
-MutableOperandRange MatMulNBitsOp::getDpsInitsMutable() {
-  return getOutputMutable();
-}
-
-void MatMulNBitsOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
-  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
-}
-
-//===----------------------------------------------------------------------===//
-// QMoEOp: ins(input, router_probs, fc1_weights, fc1_scales, fc2_weights,
-//              fc2_scales, [optional...]),
-//         outs(output)
-//===----------------------------------------------------------------------===//
-
-MutableOperandRange QMoEOp::getDpsInitsMutable() { return getOutputMutable(); }
-
-void QMoEOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
-  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
-}
-
 #define GET_OP_CLASSES
 #include "hip/Dialect/IR/HipOps.cpp.inc"

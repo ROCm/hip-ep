@@ -78,10 +78,6 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     SigmoidOp::attachInterface<HipDstBufferizableModel<SigmoidOp>>(*ctx);
     SubOp::attachInterface<HipDstBufferizableModel<SubOp>>(*ctx);
     ReduceSumOp::attachInterface<HipDstBufferizableModel<ReduceSumOp>>(*ctx);
-    ReluOp::attachInterface<HipDstBufferizableModel<ReluOp>>(*ctx);
-    MatMulNBitsOp::attachInterface<HipDstBufferizableModel<MatMulNBitsOp>>(
-        *ctx);
-    QMoEOp::attachInterface<HipDstBufferizableModel<QMoEOp>>(*ctx);
   });
 }
 
