@@ -2,6 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+#include "compilation_options_generated.h"
 #include "hip/Compiler/CompilerDriver.h"
 
 #include "llvm/Support/MemoryBuffer.h"
@@ -10,11 +11,12 @@
 int main(int argc, char **argv) {
   std::string inputFilename;
   std::string outputDll;
-  for (int argIdx = 1; argIdx < argc; ++argIdx) {
-    if (std::string(argv[argIdx]) == "-o" && argIdx + 1 < argc) {
-      outputDll = argv[++argIdx];
-    } else if (argv[argIdx][0] != '-') {
-      inputFilename = argv[argIdx];
+
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) == "-o" && i + 1 < argc) {
+      outputDll = argv[++i];
+    } else if (argv[i][0] != '-') {
+      inputFilename = argv[i];
     }
   }
 
@@ -23,10 +25,10 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  auto fileOrErr = llvm::MemoryBuffer::getFile(inputFilename);
-  if (!fileOrErr) {
-    llvm::errs() << "error: could not open " << inputFilename << ": "
-                 << fileOrErr.getError().message() << "\n";
+  auto bufOrErr = llvm::MemoryBuffer::getFileOrSTDIN(inputFilename);
+  if (!bufOrErr) {
+    llvm::errs() << "error: cannot open '" << inputFilename
+                 << "': " << bufOrErr.getError().message() << "\n";
     return 1;
   }
 
@@ -34,7 +36,7 @@ int main(int argc, char **argv) {
   std::string errorMessage;
   hip::compiler::CompilerDriver driver;
 
-  if (!driver.compile((*fileOrErr)->getBuffer(), outputDll, options,
+  if (!driver.compile((*bufOrErr)->getBuffer(), outputDll, options,
                       errorMessage)) {
     llvm::errs() << "error: " << errorMessage << "\n";
     return 1;

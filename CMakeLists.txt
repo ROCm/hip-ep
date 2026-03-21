@@ -60,6 +60,7 @@ if(BUILD_EP)
   add_subdirectory(backend-mlir-compiler)
   # Add test directory (test_gqa can be built independently)
   add_subdirectory(test)
+  add_subdirectory(tools/hip-onnx-runner)
 endif()
 
 # ==============================================================================
@@ -125,6 +126,9 @@ if(BUILD_HIP_TOOLS)
 
   # Library targets
   add_subdirectory(lib)
+
+  # DLL target (hip-compiler.dll)
+  add_subdirectory(dll)
 
   # Executable targets
   add_subdirectory(tools)
