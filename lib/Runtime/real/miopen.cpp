@@ -162,6 +162,12 @@ int wrap_miopenConvolutionForward(
       conv_desc, miopenConvolution, pad_top, pad_left, stride_h, stride_w,
       dilation_h, dilation_w));
 
+  // Set group count for grouped convolutions (e.g., depthwise convolution)
+  // group=1 for standard convolution, group=C for depthwise convolution
+  if (group > 1) {
+    MIOPEN_CHECK(miopenSetConvolutionGroupCount(conv_desc, group));
+  }
+
   // Allocate workspace for algorithm search
   // MIOpen's Find API needs workspace to test algorithms
   // Use a conservative estimate (10MB) for algorithm selection
