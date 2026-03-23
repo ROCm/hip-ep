@@ -253,24 +253,6 @@ elseif(ORT_SOURCE_INCLUDE_DIR AND EXISTS "${ORT_BUILD_IMPLIB}")
     target_compile_definitions(ort_integration_test PRIVATE "_CRT_SECURE_NO_WARNINGS")
   endif()
   set_target_properties(ort_integration_test PROPERTIES FOLDER "rocm-tests")
-elseif(ORT_SOURCE_INCLUDE_DIR)
-  # ORT headers found - use installation lib path
-  message(STATUS "Building ORT integration test (using installation lib)")
-  message(STATUS "  ORT include: ${ORT_SOURCE_INCLUDE_DIR}")
-  message(STATUS "  ORT lib: ${ORT_BUILD_IMPLIB}")
-
-  add_executable(ort_integration_test test_ort_integration.cpp)
-  target_link_libraries(ort_integration_test PRIVATE
-    "${ORT_BUILD_IMPLIB}"
-    GTest::gtest
-    GTest::gtest_main
-  )
-  target_include_directories(ort_integration_test PRIVATE "${ORT_SOURCE_INCLUDE_DIR}")
-  target_compile_features(ort_integration_test PRIVATE cxx_std_17)
-  if(WIN32)
-    target_compile_definitions(ort_integration_test PRIVATE "_CRT_SECURE_NO_WARNINGS")
-  endif()
-  set_target_properties(ort_integration_test PROPERTIES FOLDER "rocm-tests")
 else()
   # Try to find pre-installed ORT
   find_path(ORT_INCLUDE_DIR onnxruntime_cxx_api.h

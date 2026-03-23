@@ -7,489 +7,272 @@
 #include <hip/hip_fp16.h>
 #include <cstdint>
 #include <cstdio>
-#include <cfloat>
+#include <algorithm>
 
 #include "hip_custom_kernels.h"
+
+static constexpr int GQA_THREADS = 256;
 
 // =============================================================================
 // KV Cache Update Kernel
 // =============================================================================
-// Copies current key/value into the present_key/present_value buffer at the
-// correct offset (after past sequence).
-//
-// ONNX com.microsoft.GroupQueryAttention uses BNSD layout for KV cache:
-//   past_key:    [batch, kv_num_heads, past_seq, head_dim]       (BNSD)
-//   present_key: [batch, kv_num_heads, total_seq, head_dim]      (BNSD)
-//   key (current): [batch, seq_q, kv_num_heads * head_dim]       (BSD)
-//
-// The kernel copies past entries and new entries into the present buffer,
-// converting current key/value from BSD to BNSD in the process.
+// Writes new K/V from BSHD [B,sq,G,d] into BNSD KV cache [B,G,max_seq,d]
+// at positions [past_len .. past_len+sq). Fuses the layout transpose.
 
-template <typename T>
 __global__ void kv_cache_update_kernel(
-    const T* __restrict__ past,
-    const T* __restrict__ current,
-    T* __restrict__ present,
-    const int32_t* __restrict__ seqlens_k,
-    int64_t batch_size,
-    int64_t past_seq_len,
-    int64_t current_seq_len,
-    int64_t total_seq_len,
-    int64_t kv_num_heads,
-    int64_t head_dim) {
+    const __half* __restrict__ src,
+    __half* __restrict__ cache,
+    int sq, int G, int d, int max_seq, int past_len) {
+  int batch_idx = blockIdx.y;
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int total_per_batch = sq * G * d;
+  if (idx >= total_per_batch) return;
 
-  int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-  int64_t total = batch_size * kv_num_heads * total_seq_len * head_dim;
+  int di = idx % d;
+  int remaining = idx / d;
+  int g = remaining % G;
+  int s = remaining / G;
 
-  if (idx >= total)
-    return;
+  int src_idx = ((batch_idx * sq + s) * G + g) * d + di;
+  int dst_idx = ((batch_idx * G + g) * max_seq + (past_len + s)) * d + di;
+  cache[dst_idx] = src[src_idx];
+}
 
-  // Decompose flat index into BNSD coordinates
-  int64_t d = idx % head_dim;
-  int64_t remaining = idx / head_dim;
-  int64_t s = remaining % total_seq_len;
-  remaining = remaining / total_seq_len;
-  int64_t n = remaining % kv_num_heads;
-  int64_t b = remaining / kv_num_heads;
+// =============================================================================
+// RoPE Kernel
+// =============================================================================
+// Half-rotated RoPE: for each position s, pair_d in [0, half_rot):
+//   out[d] = in[d]*cos - in[d+half]*sin
+//   out[d+half] = in[d+half]*cos + in[d]*sin
 
-  int64_t actual_past_len = seqlens_k ? (int64_t)seqlens_k[b] : past_seq_len;
+__global__ void rope_kernel(
+    const __half* __restrict__ input,
+    __half* __restrict__ output,
+    const __half* __restrict__ cos_cache,
+    const __half* __restrict__ sin_cache,
+    int seq_len, int num_heads, int head_dim,
+    int half_rot, int past_len) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int batch_idx = blockIdx.y;
+  int elems = seq_len * num_heads * half_rot;
+  if (idx >= elems) return;
 
-  // present is BNSD — idx already maps to the right position
-  if (s < actual_past_len && past) {
-    // past is BNSD: [batch, kv_num_heads, past_seq, head_dim]
-    int64_t past_idx = ((b * kv_num_heads + n) * past_seq_len + s) * head_dim + d;
-    present[idx] = past[past_idx];
-  } else if (s >= actual_past_len && s < actual_past_len + current_seq_len) {
-    // current is BSD: [batch, seq_q, kv_num_heads * head_dim]
-    int64_t cur_s = s - actual_past_len;
-    int64_t cur_idx = (b * current_seq_len + cur_s) * (kv_num_heads * head_dim)
-                      + n * head_dim + d;
-    present[idx] = current[cur_idx];
+  int d = idx % half_rot;
+  int remaining = idx / half_rot;
+  int h = remaining % num_heads;
+  int s = remaining / num_heads;
+  if (s >= seq_len) return;
+
+  int pos = past_len + s;
+  int base = ((batch_idx * seq_len + s) * num_heads + h) * head_dim;
+
+  float x1 = __half2float(input[base + d]);
+  float x2 = __half2float(input[base + d + half_rot]);
+  float c  = __half2float(cos_cache[pos * half_rot + d]);
+  float sn = __half2float(sin_cache[pos * half_rot + d]);
+
+  output[base + d]            = __float2half(x1 * c - x2 * sn);
+  output[base + d + half_rot] = __float2half(x2 * c + x1 * sn);
+}
+
+// =============================================================================
+// Transpose middle two dims of 4D tensor
+// =============================================================================
+// [B, dim1, dim2, D] -> [B, dim2, dim1, D]
+
+__global__ void transpose_mid_dims_kernel(
+    const __half* __restrict__ src,
+    __half* __restrict__ dst,
+    int dim1, int dim2, int D) {
+  int batch_idx = blockIdx.y;
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int per_batch = dim1 * dim2 * D;
+  if (idx >= per_batch) return;
+
+  int di = idx % D;
+  int remaining = idx / D;
+  int d2 = remaining % dim2;
+  int d1 = remaining / dim2;
+
+  int src_off = batch_idx * per_batch + idx;
+  int dst_off = batch_idx * per_batch + (d2 * dim1 + d1) * D + di;
+  dst[dst_off] = src[src_off];
+}
+
+// =============================================================================
+// KV Group Expansion: G groups -> H heads
+// =============================================================================
+// For head h, copies from source group g = h / heads_per_group.
+
+__global__ void expand_kv_kernel(
+    const __half* __restrict__ src,
+    __half* __restrict__ dst,
+    int heads_per_group,
+    int src_stride,
+    int dst_stride,
+    int copy_elems) {
+  int h = blockIdx.x;
+  int g = h / heads_per_group;
+  int idx = blockIdx.y * blockDim.x + threadIdx.x;
+  if (idx < copy_elems) {
+    dst[(size_t)h * dst_stride + idx] =
+        src[(size_t)g * src_stride + idx];
   }
 }
 
 // =============================================================================
-// Attention Kernel (naive implementation)
+// Causal Mask -- prefill only, skipped when sq == 1
 // =============================================================================
-// Computes scaled dot-product attention per (batch, query_head, query_pos).
-//
-// Key/value layout depends on kv_bnsd flag:
-//   kv_bnsd=1: BNSD [batch, kv_num_heads, seq_kv, head_dim]  (present buffers)
-//   kv_bnsd=0: BSD  [batch, seq_kv, kv_num_heads * head_dim] (direct key/value)
-// Query is always BSD: [batch, seq_q, num_heads * head_dim]
-//
-// This is a straightforward O(N^2) implementation suitable for correctness
-// verification and short sequences. For production use with long sequences,
-// replace with a tiled/flash-attention approach or CK integration.
+// S[k, q] = -65504 (fp16 -inf) where k > past_len + q
 
-template <typename T>
-__global__ void attention_kernel(
-    const T* __restrict__ query,
-    const T* __restrict__ key,
-    const T* __restrict__ value,
-    T* __restrict__ output,
-    int64_t batch_size,
-    int64_t seq_len_q,
-    int64_t seq_len_kv,
-    int64_t num_heads,
-    int64_t kv_num_heads,
-    int64_t head_dim,
-    float scale,
-    float softcap,
-    int64_t kv_bnsd,
-    int64_t q_offset,
-    int64_t q_count) {
+__global__ void causal_mask_kernel(
+    __half* __restrict__ S,
+    int skv, int sq, int batch_stride, int past_len) {
+  int head = blockIdx.y;
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int total = skv * sq;
+  if (idx >= total) return;
 
-  // Each thread handles one (batch, head, query_pos) tuple.
-  // q_offset/q_count enable chunked launches to avoid TDR timeout
-  // on long sequences: each launch processes a subset of query positions.
-  int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-  int64_t total = batch_size * num_heads * q_count;
-
-  if (idx >= total)
-    return;
-
-  int64_t local_q = idx % q_count;
-  int64_t remaining = idx / q_count;
-  int64_t head = remaining % num_heads;
-  int64_t b = remaining / num_heads;
-  int64_t q_pos = local_q + q_offset;
-
-  int64_t heads_per_kv = num_heads / kv_num_heads;
-  int64_t kv_head = head / heads_per_kv;
-
-  int64_t q_hidden = num_heads * head_dim;
-  int64_t kv_hidden = kv_num_heads * head_dim;
-
-  const T* q_row = query + b * seq_len_q * q_hidden +
-                   q_pos * q_hidden + head * head_dim;
-
-  // Precompute base offset for this batch+head in BNSD layout
-  // BNSD: base = (b * kv_num_heads + kv_head) * seq_len_kv * head_dim
-  // BSD:  base = b * seq_len_kv * kv_hidden, offset per pos = kv_head * head_dim
-  int64_t kv_base_bnsd = (b * kv_num_heads + kv_head) * seq_len_kv * head_dim;
-  int64_t kv_base_bsd = b * seq_len_kv * kv_hidden;
-
-  T* out_row = output + b * seq_len_q * q_hidden +
-               q_pos * q_hidden + head * head_dim;
-
-  // Online softmax + weighted value accumulation in a single pass.
-  // Reads K and V once, avoiding 3 redundant passes over global memory.
-  // Algorithm: maintain running (max_score, sum_exp, acc[d]) and rescale
-  // the partial accumulator whenever a new max is encountered.
-  float max_score = -FLT_MAX;
-  float sum_exp = 0.0f;
-  float acc[256]; // head_dim <= 256 for all supported models
-  for (int64_t d = 0; d < head_dim; d++)
-    acc[d] = 0.0f;
-
-  for (int64_t kv_pos = 0; kv_pos < seq_len_kv; kv_pos++) {
-    const T* k_row = kv_bnsd
-        ? key + kv_base_bnsd + kv_pos * head_dim
-        : key + kv_base_bsd + kv_pos * kv_hidden + kv_head * head_dim;
-
-    float dot = 0.0f;
-    for (int64_t d = 0; d < head_dim; d++)
-      dot += (float)q_row[d] * (float)k_row[d];
-    dot *= scale;
-
-    if (softcap > 0.0f)
-      dot = softcap * tanhf(dot / softcap);
-
-    // Online softmax: if new score exceeds running max, rescale the
-    // existing accumulator and denominator by exp(old_max - new_max).
-    if (dot > max_score) {
-      float correction = expf(max_score - dot);
-      sum_exp *= correction;
-      for (int64_t d = 0; d < head_dim; d++)
-        acc[d] *= correction;
-      max_score = dot;
-    }
-
-    float exp_val = expf(dot - max_score);
-    sum_exp += exp_val;
-
-    const T* v_row = kv_bnsd
-        ? value + kv_base_bnsd + kv_pos * head_dim
-        : value + kv_base_bsd + kv_pos * kv_hidden + kv_head * head_dim;
-    for (int64_t d = 0; d < head_dim; d++)
-      acc[d] += exp_val * (float)v_row[d];
-  }
-
-  // Normalize by softmax denominator
-  float inv_sum = 1.0f / (sum_exp + 1e-8f);
-  for (int64_t d = 0; d < head_dim; d++)
-    out_row[d] = (T)(acc[d] * inv_sum);
-}
-
-// =============================================================================
-// RoPE helper for GQA-internal rotary embedding
-// =============================================================================
-
-template <typename T>
-__global__ void gqa_rope_kernel(
-    T* __restrict__ data,
-    const T* __restrict__ cos_cache,
-    const T* __restrict__ sin_cache,
-    int64_t batch_size,
-    int64_t seq_len,
-    int64_t num_heads,
-    int64_t head_dim,
-    int64_t rotary_dim,
-    int64_t interleaved,
-    int64_t past_seq_offset) {
-
-  int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-  int64_t half_rot = rotary_dim / 2;
-
-  if (interleaved) {
-    int64_t total_pairs = batch_size * seq_len * num_heads * half_rot;
-    if (idx >= total_pairs)
-      return;
-
-    int64_t pair = idx % half_rot;
-    int64_t rem = idx / half_rot;
-    int64_t h = rem % num_heads;
-    rem = rem / num_heads;
-    int64_t s = rem % seq_len;
-    int64_t b = rem / seq_len;
-
-    int64_t pos = past_seq_offset + s;
-    T cos_val = cos_cache[pos * half_rot + pair];
-    T sin_val = sin_cache[pos * half_rot + pair];
-
-    int64_t hidden = num_heads * head_dim;
-    int64_t base = b * seq_len * hidden + s * hidden + h * head_dim;
-    int64_t i0 = base + 2 * pair;
-    int64_t i1 = base + 2 * pair + 1;
-
-    T x0 = data[i0];
-    T x1 = data[i1];
-    data[i0] = x0 * cos_val - x1 * sin_val;
-    data[i1] = x0 * sin_val + x1 * cos_val;
-  } else {
-    int64_t total = batch_size * seq_len * num_heads * half_rot;
-    if (idx >= total)
-      return;
-
-    int64_t d = idx % half_rot;
-    int64_t rem = idx / half_rot;
-    int64_t h = rem % num_heads;
-    rem = rem / num_heads;
-    int64_t s = rem % seq_len;
-    int64_t b = rem / seq_len;
-
-    int64_t pos = past_seq_offset + s;
-    T cos_val = cos_cache[pos * half_rot + d];
-    T sin_val = sin_cache[pos * half_rot + d];
-
-    int64_t hidden = num_heads * head_dim;
-    int64_t base = b * seq_len * hidden + s * hidden + h * head_dim;
-    int64_t i0 = base + d;
-    int64_t i1 = base + d + half_rot;
-
-    T x0 = data[i0];
-    T x1 = data[i1];
-    data[i0] = x0 * cos_val - x1 * sin_val;
-    data[i1] = x0 * sin_val + x1 * cos_val;
+  int k = idx % skv;
+  int q = idx / skv;
+  if (k > past_len + q) {
+    S[(size_t)head * batch_stride + (size_t)q * skv + k] =
+        __float2half(-65504.0f);
   }
 }
 
 // =============================================================================
-// Host launcher
+// Column-wise Softmax in-place
 // =============================================================================
+// One threadblock per (head, query) pair.
 
-template <typename T>
-static int gqa_forward_typed(
-    hipStream_t stream,
-    const T* query,
-    const T* key,
-    const T* value,
-    const T* past_key,
-    const T* past_value,
-    const int32_t* seqlens_k,
-    const void* total_seq_len_ptr,
-    const T* cos_cache,
-    const T* sin_cache,
-    T* output,
-    T* present_key,
-    T* present_value,
-    int64_t batch_size,
-    int64_t seq_len_q,
-    int64_t seq_len_kv,
-    int64_t num_heads,
-    int64_t kv_num_heads,
-    int64_t head_dim,
-    float scale,
-    float softcap,
-    int64_t do_rotary,
-    int64_t rotary_interleaved) {
+__global__ void softmax_inplace_kernel(
+    __half* data, int rows, int cols, int batch_stride) {
+  int linear = blockIdx.x;
+  int head = linear / cols;
+  int col = linear % cols;
+  __half* col_ptr = data + (size_t)head * batch_stride + (size_t)col * rows;
 
-  const int block_size = 256;
-  int64_t kv_hidden = kv_num_heads * head_dim;
-  int64_t past_seq_len = seq_len_kv - seq_len_q;
-  if (past_seq_len < 0) past_seq_len = 0;
+  extern __shared__ float smem[];
 
-  // Step 1: KV cache update — build present_key/present_value
-  if (present_key && present_value) {
-    int64_t total_kv = batch_size * seq_len_kv * kv_hidden;
-    int grid = (int)((total_kv + block_size - 1) / block_size);
-
-    hipLaunchKernelGGL(kv_cache_update_kernel<T>,
-        dim3(grid), dim3(block_size), 0, stream,
-        past_key, key, present_key, seqlens_k,
-        batch_size, past_seq_len, seq_len_q, seq_len_kv,
-        kv_num_heads, head_dim);
-
-    hipLaunchKernelGGL(kv_cache_update_kernel<T>,
-        dim3(grid), dim3(block_size), 0, stream,
-        past_value, value, present_value, seqlens_k,
-        batch_size, past_seq_len, seq_len_q, seq_len_kv,
-        kv_num_heads, head_dim);
+  float local_max = -INFINITY;
+  for (int i = threadIdx.x; i < rows; i += blockDim.x)
+    local_max = fmaxf(local_max, __half2float(col_ptr[i]));
+  smem[threadIdx.x] = local_max;
+  __syncthreads();
+  for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (threadIdx.x < (unsigned)s)
+      smem[threadIdx.x] = fmaxf(smem[threadIdx.x], smem[threadIdx.x + s]);
+    __syncthreads();
   }
+  float max_val = smem[0];
+  __syncthreads();
 
-  // Use present_key/value for attention if available, otherwise use key/value.
-  // Present buffers are BNSD [B,N,S,D], direct key/value are BSD [B,S,N*D].
-  const T* att_key = present_key ? present_key : key;
-  const T* att_value = present_value ? present_value : value;
-  int64_t att_seq_kv = present_key ? seq_len_kv : seq_len_q;
-  int64_t kv_bnsd = present_key ? 1 : 0;
-
-  // Launch attention kernel in chunks of query positions to avoid
-  // Windows TDR timeout on long sequences. The threshold is calibrated
-  // so each chunk stays well under the 2-second TDR limit.
-  // Each query position's attention is independent, so chunking is exact.
-  auto launch_attention_chunked = [&](
-      const T* q_ptr, const T* k_ptr, const T* v_ptr, T* out_ptr,
-      int64_t att_seq_len_kv, int64_t use_kv_bnsd) {
-    constexpr int64_t kMaxWorkPerLaunch = 1024LL * 1024 * 128;
-    int64_t work_per_q = att_seq_len_kv * head_dim;
-    int64_t chunk_q = (work_per_q > 0)
-        ? (kMaxWorkPerLaunch / work_per_q)
-        : seq_len_q;
-    if (chunk_q < 1) chunk_q = 1;
-    if (chunk_q > seq_len_q) chunk_q = seq_len_q;
-
-    for (int64_t q_start = 0; q_start < seq_len_q; q_start += chunk_q) {
-      int64_t q_cnt = (q_start + chunk_q <= seq_len_q)
-          ? chunk_q : (seq_len_q - q_start);
-      int64_t total_threads = batch_size * num_heads * q_cnt;
-      int grid = (int)((total_threads + block_size - 1) / block_size);
-
-      hipLaunchKernelGGL(attention_kernel<T>,
-          dim3(grid), dim3(block_size), 0, stream,
-          q_ptr, k_ptr, v_ptr, out_ptr,
-          batch_size, seq_len_q, att_seq_len_kv,
-          num_heads, kv_num_heads, head_dim,
-          scale, softcap, use_kv_bnsd,
-          q_start, q_cnt);
-    }
-  };
-
-  // Step 2: Optional RoPE on query and key
-  if (do_rotary && cos_cache && sin_cache) {
-    int64_t q_hidden = num_heads * head_dim;
-    int64_t rotary_dim = head_dim;
-    int64_t half_rot = rotary_dim / 2;
-
-    // RoPE on query (copy to output, apply RoPE there)
-    {
-      int64_t total = batch_size * seq_len_q * num_heads * half_rot;
-      int grid = (int)((total + block_size - 1) / block_size);
-      hipMemcpyAsync((void*)output, (const void*)query,
-                     batch_size * seq_len_q * q_hidden * sizeof(T),
-                     hipMemcpyDeviceToDevice, stream);
-      hipLaunchKernelGGL(gqa_rope_kernel<T>,
-          dim3(grid), dim3(block_size), 0, stream,
-          output, cos_cache, sin_cache,
-          batch_size, seq_len_q, num_heads, head_dim,
-          rotary_dim, rotary_interleaved, past_seq_len);
-    }
-
-    // TODO: RoPE on key within present_key needs BNSD-aware indexing.
-    // The gqa_rope_kernel currently uses BSD layout. For do_rotary=1
-    // with BNSD present buffers, this needs to be updated.
-    if (present_key) {
-      int64_t total = batch_size * seq_len_q * kv_num_heads * half_rot;
-      int grid = (int)((total + block_size - 1) / block_size);
-      T* new_key_start = present_key +
-          batch_size * past_seq_len * kv_hidden;
-      hipLaunchKernelGGL(gqa_rope_kernel<T>,
-          dim3(grid), dim3(block_size), 0, stream,
-          new_key_start, cos_cache, sin_cache,
-          batch_size, seq_len_q, kv_num_heads, head_dim,
-          rotary_dim, rotary_interleaved, past_seq_len);
-    }
-
-    // Attention using RoPE'd query (stored in output) and present KV
-    {
-      T* q_rotated = nullptr;
-      int64_t q_hidden2 = num_heads * head_dim;
-      hipMalloc(&q_rotated, batch_size * seq_len_q * q_hidden2 * sizeof(T));
-      hipMemcpyAsync(q_rotated, output,
-                     batch_size * seq_len_q * q_hidden2 * sizeof(T),
-                     hipMemcpyDeviceToDevice, stream);
-
-      launch_attention_chunked(q_rotated, att_key, att_value, output,
-                               att_seq_kv, kv_bnsd);
-
-      hipStreamSynchronize(stream);
-      hipFree(q_rotated);
-    }
-  } else {
-    // Attention without RoPE
-    launch_attention_chunked(query, att_key, att_value, output,
-                             att_seq_kv, kv_bnsd);
+  float local_sum = 0.0f;
+  for (int i = threadIdx.x; i < rows; i += blockDim.x) {
+    float e = expf(__half2float(col_ptr[i]) - max_val);
+    col_ptr[i] = __float2half(e);
+    local_sum += e;
   }
-
-  hipError_t err = hipGetLastError();
-  if (err != hipSuccess) {
-    fprintf(stderr, "hip_gqa_forward: kernel error: %s\n",
-            hipGetErrorString(err));
-    return -1;
+  smem[threadIdx.x] = local_sum;
+  __syncthreads();
+  for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (threadIdx.x < (unsigned)s)
+      smem[threadIdx.x] += smem[threadIdx.x + s];
+    __syncthreads();
   }
+  float sum_val = smem[0];
+  __syncthreads();
 
-  return 0;
+  float inv_sum = 1.0f / sum_val;
+  for (int i = threadIdx.x; i < rows; i += blockDim.x)
+    col_ptr[i] = __float2half(__half2float(col_ptr[i]) * inv_sum);
 }
 
-extern "C" int hip_gqa_forward(
-    void* stream_ptr,
-    const void* query,
-    const void* key,
-    const void* value,
-    const void* past_key,
-    const void* past_value,
-    const void* seqlens_k,
-    const void* total_seq_len,
-    const void* cos_cache,
-    const void* sin_cache,
-    void* output,
-    void* present_key,
-    void* present_value,
-    int64_t batch_size,
-    int64_t seq_len_q,
-    int64_t seq_len_kv,
-    int64_t num_heads,
-    int64_t kv_num_heads,
-    int64_t head_dim,
-    float scale,
-    float softcap,
-    int64_t do_rotary,
-    int64_t rotary_interleaved,
-    int64_t element_size_bytes) {
+// =============================================================================
+// Extern "C" Launchers (thin wrappers around kernel launches)
+// =============================================================================
 
-  if (!query || !key || !value || !output) {
-    fprintf(stderr, "hip_gqa_forward: null pointer for required argument\n");
-    return -1;
-  }
-
-  if (num_heads % kv_num_heads != 0) {
-    fprintf(stderr, "hip_gqa_forward: num_heads (%lld) must be divisible by kv_num_heads (%lld)\n",
-            (long long)num_heads, (long long)kv_num_heads);
-    return -1;
-  }
-
+extern "C" int hip_gqa_kv_cache_update(
+    void* stream_ptr, const void* src, void* cache,
+    int batch_size, int sq, int G, int d, int max_seq, int past_len) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  int total = sq * G * d;
+  int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
+  kv_cache_update_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0, stream>>>(
+      static_cast<const __half*>(src),
+      static_cast<__half*>(cache),
+      sq, G, d, max_seq, past_len);
+  return hipSuccess;
+}
 
-  if (element_size_bytes == 2) {
-    return gqa_forward_typed<__half>(
-        stream,
-        static_cast<const __half*>(query),
-        static_cast<const __half*>(key),
-        static_cast<const __half*>(value),
-        static_cast<const __half*>(past_key),
-        static_cast<const __half*>(past_value),
-        static_cast<const int32_t*>(seqlens_k),
-        total_seq_len,
-        static_cast<const __half*>(cos_cache),
-        static_cast<const __half*>(sin_cache),
-        static_cast<__half*>(output),
-        static_cast<__half*>(present_key),
-        static_cast<__half*>(present_value),
-        batch_size, seq_len_q, seq_len_kv,
-        num_heads, kv_num_heads, head_dim,
-        scale, softcap, do_rotary, rotary_interleaved);
-  } else if (element_size_bytes == 4) {
-    return gqa_forward_typed<float>(
-        stream,
-        static_cast<const float*>(query),
-        static_cast<const float*>(key),
-        static_cast<const float*>(value),
-        static_cast<const float*>(past_key),
-        static_cast<const float*>(past_value),
-        static_cast<const int32_t*>(seqlens_k),
-        total_seq_len,
-        static_cast<const float*>(cos_cache),
-        static_cast<const float*>(sin_cache),
-        static_cast<float*>(output),
-        static_cast<float*>(present_key),
-        static_cast<float*>(present_value),
-        batch_size, seq_len_q, seq_len_kv,
-        num_heads, kv_num_heads, head_dim,
-        scale, softcap, do_rotary, rotary_interleaved);
-  } else {
-    fprintf(stderr, "hip_gqa_forward: unsupported element_size %lld\n",
-            (long long)element_size_bytes);
-    return -1;
-  }
+extern "C" int hip_gqa_rope(
+    void* stream_ptr, const void* input, void* output,
+    const void* cos_cache, const void* sin_cache,
+    int batch_size, int seq_len, int num_heads,
+    int head_dim, int half_rot, int past_len) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  int elems = seq_len * num_heads * half_rot;
+  int blocks = (elems + GQA_THREADS - 1) / GQA_THREADS;
+  rope_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0, stream>>>(
+      static_cast<const __half*>(input),
+      static_cast<__half*>(output),
+      static_cast<const __half*>(cos_cache),
+      static_cast<const __half*>(sin_cache),
+      seq_len, num_heads, head_dim, half_rot, past_len);
+  return hipSuccess;
+}
+
+extern "C" int hip_gqa_transpose_mid_dims(
+    void* stream_ptr, const void* src, void* dst,
+    int batch_size, int dim1, int dim2, int D) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  int per_batch = dim1 * dim2 * D;
+  int blocks = (per_batch + GQA_THREADS - 1) / GQA_THREADS;
+  transpose_mid_dims_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0, stream>>>(
+      static_cast<const __half*>(src),
+      static_cast<__half*>(dst),
+      dim1, dim2, D);
+  return hipSuccess;
+}
+
+extern "C" int hip_gqa_expand_kv(
+    void* stream_ptr, const void* src, void* dst,
+    int total_heads, int heads_per_group,
+    int src_stride, int dst_stride, int copy_elems) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  int blocksY = (copy_elems + GQA_THREADS - 1) / GQA_THREADS;
+  expand_kv_kernel<<<dim3(total_heads, blocksY), GQA_THREADS, 0, stream>>>(
+      static_cast<const __half*>(src),
+      static_cast<__half*>(dst),
+      heads_per_group, src_stride, dst_stride, copy_elems);
+  return hipSuccess;
+}
+
+extern "C" int hip_gqa_causal_mask(
+    void* stream_ptr, void* S,
+    int total_heads, int skv, int sq,
+    int batch_stride, int past_len) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  int total = skv * sq;
+  int blocksX = (total + GQA_THREADS - 1) / GQA_THREADS;
+  causal_mask_kernel<<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
+      static_cast<__half*>(S),
+      skv, sq, batch_stride, past_len);
+  return hipSuccess;
+}
+
+extern "C" int hip_gqa_softmax_inplace(
+    void* stream_ptr, void* data,
+    int total_head_queries, int rows, int cols,
+    int batch_stride) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  int threads = 32;
+  while (threads < std::min(rows, 256)) threads *= 2;
+  if (threads > 256) threads = 256;
+  softmax_inplace_kernel<<<total_head_queries, threads,
+                           threads * sizeof(float), stream>>>(
+      static_cast<__half*>(data),
+      rows, cols, batch_stride);
+  return hipSuccess;
 }
