@@ -101,7 +101,7 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
     fprintf(stderr,
             "wrap_miopenT5LayerNormForward: hipMalloc rstd failed: %s\n",
             hipGetErrorString(hip_err));
-    return -1;
+    goto cleanup;
   }
 
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&xDesc));

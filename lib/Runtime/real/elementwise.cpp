@@ -96,34 +96,77 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
   miopenDataType_t miopen_type = hipdnn_ep_to_miopen_type(data_type);
   miopenTensorOp_t miopen_op = hipdnn_ep_to_miopen_op(tensor_op);
 
-  miopenTensorDescriptor_t aDesc, bDesc, cDesc;
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&aDesc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&bDesc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&cDesc));
-
+  // Initialize all resource pointers to nullptr for safe cleanup
+  miopenTensorDescriptor_t aDesc = nullptr;
+  miopenTensorDescriptor_t bDesc = nullptr;
+  miopenTensorDescriptor_t cDesc = nullptr;
+  int result = 0;
+  float alpha1 = 1.0f, alpha2 = 1.0f, beta = 0.0f;
   int n = static_cast<int>(num_elements);
+
+  if (miopenCreateTensorDescriptor(&aDesc) != miopenStatusSuccess) {
+    RUNTIME_DEBUG_LOG("[REAL] MIOpen error: failed to create aDesc\n");
+    result = -1;
+    goto cleanup;
+  }
+  if (miopenCreateTensorDescriptor(&bDesc) != miopenStatusSuccess) {
+    RUNTIME_DEBUG_LOG("[REAL] MIOpen error: failed to create bDesc\n");
+    result = -1;
+    goto cleanup;
+  }
+  if (miopenCreateTensorDescriptor(&cDesc) != miopenStatusSuccess) {
+    RUNTIME_DEBUG_LOG("[REAL] MIOpen error: failed to create cDesc\n");
+    result = -1;
+    goto cleanup;
+  }
+
   RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: creating tensor descriptors "
                     "[1,1,1,%d] with type %s\n",
                     n, type_name);
 
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(aDesc, miopen_type, 1, 1, 1, n));
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(bDesc, miopen_type, 1, 1, 1, n));
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(cDesc, miopen_type, 1, 1, 1, n));
+  if (miopenSet4dTensorDescriptor(aDesc, miopen_type, 1, 1, 1, n) != miopenStatusSuccess) {
+    RUNTIME_DEBUG_LOG("[REAL] MIOpen error: failed to set aDesc\n");
+    result = -1;
+    goto cleanup;
+  }
+  if (miopenSet4dTensorDescriptor(bDesc, miopen_type, 1, 1, 1, n) != miopenStatusSuccess) {
+    RUNTIME_DEBUG_LOG("[REAL] MIOpen error: failed to set bDesc\n");
+    result = -1;
+    goto cleanup;
+  }
+  if (miopenSet4dTensorDescriptor(cDesc, miopen_type, 1, 1, 1, n) != miopenStatusSuccess) {
+    RUNTIME_DEBUG_LOG("[REAL] MIOpen error: failed to set cDesc\n");
+    result = -1;
+    goto cleanup;
+  }
 
-  float alpha1 = 1.0f, alpha2 = 1.0f, beta = 0.0f;
   RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: calling miopenOpTensor"
                     "(op=%s, alpha1=%.1f, alpha2=%.1f, beta=%.1f)\n",
                     op_name, alpha1, alpha2, beta);
 
-  MIOPEN_CHECK(miopenOpTensor(handle, miopen_op, &alpha1, aDesc, lhs, &alpha2,
-                              bDesc, rhs, &beta, cDesc, output));
+  if (miopenOpTensor(handle, miopen_op, &alpha1, aDesc, lhs, &alpha2,
+                     bDesc, rhs, &beta, cDesc, output) != miopenStatusSuccess) {
+    RUNTIME_DEBUG_LOG("[REAL] MIOpen error: miopenOpTensor failed\n");
+    result = -1;
+    goto cleanup;
+  }
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: completed successfully\n");
 
-  miopenDestroyTensorDescriptor(aDesc);
-  miopenDestroyTensorDescriptor(bDesc);
-  miopenDestroyTensorDescriptor(cDesc);
-  return 0;
+cleanup:
+  // Best-effort cleanup: free all allocated resources
+  // Continue cleanup even if individual operations fail
+  if (aDesc) {
+    miopenDestroyTensorDescriptor(aDesc);
+  }
+  if (bDesc) {
+    miopenDestroyTensorDescriptor(bDesc);
+  }
+  if (cDesc) {
+    miopenDestroyTensorDescriptor(cDesc);
+  }
+
+  return result;
 }
 
 // =============================================================================
