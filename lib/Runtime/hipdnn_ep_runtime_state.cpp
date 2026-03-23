@@ -4,7 +4,7 @@
  */
 #include "debug_log.h"
 #include "hipdnn_ep_runtime.h"
-#include "runtime_types.h"
+#include "runtime_state_internal.h"
 
 #include "model_metadata_generated.h"
 #include "morphizen-foundation/file_io.hpp"
@@ -12,29 +12,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-
-// Internal runtime state structure
-struct RuntimeState {
-  hipStream_t stream;
-  miopenHandle_t miopen_handle;
-  hipblasLtHandle_t hipblas_handle;
-
-  // Single allocation holding all constants as one blob.
-  // gpu_constants[i] points into gpu_constants_blob at the offset stored in
-  // ConstantInfo, so only one allocation/copy is needed at init time.
-  // On dGPU: hipMalloc (VRAM). On iGPU: hipHostMalloc (pinned system RAM,
-  // GPU reads in-place, no hipMemcpy needed).
-  void *gpu_constants_blob;
-  bool constants_blob_is_host; // true = hipHostMalloc, false = hipMalloc
-  void **gpu_constants;
-  size_t num_constants;
-
-  // Memory pooling support
-  void *pool_base;        // Single large memory pool
-  size_t pool_size;       // Total pool size in bytes
-  size_t *buffer_offsets; // Offset for each buffer in the pool
-  size_t num_buffers;     // Number of buffers in the pool
-};
 
 // Runtime state management implementation
 
