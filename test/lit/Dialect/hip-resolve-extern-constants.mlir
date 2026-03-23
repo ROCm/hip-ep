@@ -8,7 +8,7 @@
 //   - memref.get_global replaced with hip.get_constant
 //   - Function signatures are NOT modified (no %_constants arg)
 //   - Extern globals are erased
-//   - Module hip.constants_file attribute is stripped
+//   - hip.constants_file is preserved for downstream metadata generation
 //   - No-op when no extern globals exist
 //   - Multiple extern globals with distinct indices
 //===----------------------------------------------------------------------===//
@@ -18,8 +18,8 @@
 // ---- Module-level checks ----
 // Extern globals should be erased.
 // CHECK-NOT: memref.global{{.*}}hip.external_data
-// hip.constants_file should be stripped.
-// CHECK-NOT: hip.constants_file
+// hip.constants_file is preserved for downstream metadata generation.
+// CHECK: hip.constants_file
 
 // ===== Single function using one extern global =====
 //

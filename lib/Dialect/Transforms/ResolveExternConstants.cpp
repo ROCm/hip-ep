@@ -17,7 +17,7 @@
 //   2. Read the constant index from hip.external_data on the memref.global.
 //   3. Replace memref.get_global with hip.get_constant(%ctx, %index).
 //   4. Erase the now-unused memref.global ops.
-//   5. Strip hip.constants_file from the module.
+//   5. Keep hip.constants_file for downstream metadata generation.
 //
 // The runtime is responsible for:
 //   - Loading constants.bin via the FileSystem abstraction
@@ -146,7 +146,8 @@ void ResolveExternConstantsPass::runOnOperation() {
   for (auto &info : externGlobals)
     info.globalOp.erase();
 
-  module->removeAttr("hip.constants_file");
+  // Keep hip.constants_file so GenerateInterface can embed the correct
+  // sidecar filename in the model metadata.
 }
 
 } // namespace
