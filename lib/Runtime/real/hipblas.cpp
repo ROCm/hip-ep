@@ -39,32 +39,36 @@ int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
   int result = 0;
 
   // Create matrix descriptors (assuming float32, column-major)
-  if (hipblasLtMatrixLayoutCreate(&matA, HIP_R_32F, m, k, m) != HIPBLAS_STATUS_SUCCESS) {
+  if (hipblasLtMatrixLayoutCreate(&matA, HIP_R_32F, m, k, m) !=
+      HIPBLAS_STATUS_SUCCESS) {
     fprintf(stderr, "hipBLAS error: failed to create matA\n");
     result = -1;
     goto cleanup;
   }
-  if (hipblasLtMatrixLayoutCreate(&matB, HIP_R_32F, k, n, k) != HIPBLAS_STATUS_SUCCESS) {
+  if (hipblasLtMatrixLayoutCreate(&matB, HIP_R_32F, k, n, k) !=
+      HIPBLAS_STATUS_SUCCESS) {
     fprintf(stderr, "hipBLAS error: failed to create matB\n");
     result = -1;
     goto cleanup;
   }
-  if (hipblasLtMatrixLayoutCreate(&matC, HIP_R_32F, m, n, m) != HIPBLAS_STATUS_SUCCESS) {
+  if (hipblasLtMatrixLayoutCreate(&matC, HIP_R_32F, m, n, m) !=
+      HIPBLAS_STATUS_SUCCESS) {
     fprintf(stderr, "hipBLAS error: failed to create matC\n");
     result = -1;
     goto cleanup;
   }
 
   // Create operation descriptor
-  if (hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F) != HIPBLAS_STATUS_SUCCESS) {
+  if (hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F) !=
+      HIPBLAS_STATUS_SUCCESS) {
     fprintf(stderr, "hipBLAS error: failed to create matmul_desc\n");
     result = -1;
     goto cleanup;
   }
 
   // Perform GEMM
-  if (hipblasLtMatmul(hipblas_handle, matmul_desc, alpha, A, matA, B,
-                      matB, beta, C, matC, C, matC,
+  if (hipblasLtMatmul(hipblas_handle, matmul_desc, alpha, A, matA, B, matB,
+                      beta, C, matC, C, matC,
                       nullptr, // algo
                       nullptr, // workspace
                       0,       // workspaceSize
