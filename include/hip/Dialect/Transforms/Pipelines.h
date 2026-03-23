@@ -16,8 +16,9 @@ namespace mlir {
 namespace hip {
 
 /// Default minimum number of tensor elements for constant externalization.
-/// All tensor constants with at least this many elements are written to
-/// the sidecar constants.bin rather than inlined in the DLL.
+/// Set to 1 means all tensor constants are written to constants.bin 
+/// rather than inlined in the DLL, because the inline element tensors 
+/// as scalar kernel arguments causes GPU launch failures (error 719)
 constexpr int64_t kDefaultExternalizeMinNumElements = 1;
 
 /// Pipeline options forwarded to the ConvertOnnxToHipPass for constant
@@ -50,17 +51,27 @@ struct HipToLLVMPipelineOptions
       llvm::cl::init("constants.bin")};
 };
 
-/// Build the ONNX-to-HIP compilation pipeline. This is the main pipeline
-/// that takes ONNX-level tensor IR and produces fully bufferized HIP memref
-/// IR with pooled allocations and resolved extern constants. The pipeline
-/// order is critical -- see Pipelines.cpp for detailed commentary on why
-/// each pass must appear at its position.
+/// Build the ONNX-to-HIP compilation pipeline.
+///
+/// Converts ONNX-level tensor IR into fully bufferized HIP memref IR with
+/// pooled allocations and resolved extern constants. The pipeline order is
+/// critical -- see Pipelines.cpp for detailed commentary on why each pass
+/// must appear at its position.
+///
+/// This overload uses a default DiskFileSystem for writing externalized
+/// constants (constants.bin). Use it for CLI / standalone workflows
+/// (hip-compiler, hip-mlir-opt, LIT tests) where constants live on disk
+/// next to the compiled DLL.
 void buildOnnxToHipPipeline(OpPassManager &pm,
                             const OnnxToHipPipelineOptions &options);
 
-/// Build the ONNX-to-HIP pipeline with an external FileSystem.
-/// When \p fs is non-null, externalized constants are written through it
-/// (e.g. into an EPContext archive) instead of a DiskFileSystem.
+/// Build the ONNX-to-HIP pipeline with a caller-supplied FileSystem.
+///
+/// Same pass sequence as the overload above, but externalized constants are
+/// written through fs instead of a DiskFileSystem. Use this overload for
+/// OnnxRuntime EP integration, where constants must be stored inside an
+/// EPContext archive so that the runtime can retrieve them later via the
+/// same FileSystem interface.
 void buildOnnxToHipPipeline(OpPassManager &pm,
                             const OnnxToHipPipelineOptions &options,
                             morphizen::FileSystem *fs);

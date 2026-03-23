@@ -316,6 +316,8 @@ public:
       return;
     }
 
+    // Prefer the hip.constants_file attribute set by OnnxToHip pass;
+    // compilation-option override is not yet wired end-to-end.
     std::string constantsFile = "constants.bin";
     if (auto attr =
             module->getAttrOfType<mlir::StringAttr>("hip.constants_file")) {

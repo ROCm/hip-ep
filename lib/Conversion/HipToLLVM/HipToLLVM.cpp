@@ -64,6 +64,15 @@ static constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
 static constexpr const char *kWrapGQA = "wrap_group_query_attention";
 static constexpr const char *kHipGetConstant = "hipdnn_ep_constant_get";
 
+// LLVM memref descriptor struct field indices.
+// Layout: { allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank] }
+static constexpr int64_t kAllocPtrIdx = 0;
+static constexpr int64_t kAlignedPtrIdx = 1;
+static constexpr int64_t kOffsetIdx = 2;
+static constexpr int64_t kSizesIdx = 3;
+static constexpr int64_t kStridesIdx = 4;
+
+
 // Maps MLIR element type to runtime data type enum (HIPDNN_EP_DATATYPE_*).
 // Values must match the #defines in hipdnn_ep_runtime.h.
 // Returns -1 for unsupported types.
@@ -1752,23 +1761,23 @@ private:
       return builder.create<LLVM::AddrSpaceCastOp>(loc, as0PtrType, ptr);
     };
 
-    Value allocPtr = builder.create<LLVM::ExtractValueOp>(loc, memrefStruct,
-                                                          ArrayRef<int64_t>{0});
+    Value allocPtr = builder.create<LLVM::ExtractValueOp>(
+        loc, memrefStruct, ArrayRef<int64_t>{kAllocPtrIdx});
     args.push_back(castToAs0(allocPtr));
 
     Value alignedPtr = builder.create<LLVM::ExtractValueOp>(
-        loc, memrefStruct, ArrayRef<int64_t>{1});
+        loc, memrefStruct, ArrayRef<int64_t>{kAlignedPtrIdx});
     args.push_back(castToAs0(alignedPtr));
 
-    args.push_back(builder.create<LLVM::ExtractValueOp>(loc, memrefStruct,
-                                                        ArrayRef<int64_t>{2}));
+    args.push_back(builder.create<LLVM::ExtractValueOp>(
+        loc, memrefStruct, ArrayRef<int64_t>{kOffsetIdx}));
 
-    for (int64_t dim = 0; dim < rank; dim++)
+    for (int64_t dim : llvm::seq<int64_t>(0, rank))
       args.push_back(builder.create<LLVM::ExtractValueOp>(
-          loc, memrefStruct, ArrayRef<int64_t>{3, dim}));
-    for (int64_t dim = 0; dim < rank; dim++)
+          loc, memrefStruct, ArrayRef<int64_t>{kSizesIdx, dim}));
+    for (int64_t dim : llvm::seq<int64_t>(0, rank))
       args.push_back(builder.create<LLVM::ExtractValueOp>(
-          loc, memrefStruct, ArrayRef<int64_t>{4, dim}));
+          loc, memrefStruct, ArrayRef<int64_t>{kStridesIdx, dim}));
   }
 
   LogicalResult transformMainFunction(ModuleOp module) {
@@ -1800,14 +1809,16 @@ private:
         (int64_t)outputShapesAttr.size() != outputCount)
       return module.emitError("Metadata mismatch: shapes array size != count");
 
+    constexpr unsigned kMemRefPtrs = 2;   // allocatedPtr + alignedPtr
+    constexpr unsigned kMemRefOffset = 1;  // offset scalar
     unsigned expectedParams = 1; // context
     for (auto shapeAttr : inputShapesAttr) {
       int64_t rank = cast<DenseI64ArrayAttr>(shapeAttr).size();
-      expectedParams += 2 + 1 + rank + rank;
+      expectedParams += kMemRefPtrs + kMemRefOffset + rank + rank;
     }
     for (auto shapeAttr : outputShapesAttr) {
       int64_t rank = cast<DenseI64ArrayAttr>(shapeAttr).size();
-      expectedParams += 2 + 1 + rank + rank;
+      expectedParams += kMemRefPtrs + kMemRefOffset + rank + rank;
     }
 
     unsigned actualParams = mainFunc.getFunctionType().getNumParams();
@@ -1820,6 +1831,9 @@ private:
     OpBuilder builder(module.getContext());
     Location loc = mainFunc.getLoc();
 
+    // Rename the original main_graph (with unpacked memref params) so we can
+    // create a new wrapper that takes the runtime's (ctx, inputs, outputs)
+    // signature and unpacks memref structs before forwarding the call.
     mainFunc.setName("main_graph_internal");
     mainFunc.setLinkage(LLVM::Linkage::Private);
 
@@ -1828,6 +1842,8 @@ private:
     SmallVector<Type> newParamTypes = {ptrType, ptrType, ptrType};
     auto newFuncType = LLVM::LLVMFunctionType::get(i32Type, newParamTypes);
 
+    // Create the new main_graph wrapper with the simplified (ctx, inputs,
+    // outputs) signature that the runtime expects.
     builder.setInsertionPoint(mainFunc);
     auto newMainFunc =
         builder.create<LLVM::LLVMFuncOp>(loc, "main_graph", newFuncType);

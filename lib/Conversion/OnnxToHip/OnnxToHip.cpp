@@ -1473,9 +1473,11 @@ void ConvertOnnxToHipPass::runOnOperation() {
   for (auto *op : toErase)
     op->erase();
 
-  // Strip ONNX result/arg attributes from func.func operations so that
-  // buffer-results-to-out-params can convert memref return values to
-  // out-params. That pass refuses to move results that carry attributes.
+  // ONNX-MLIR attaches per-result attributes (e.g. "onnx_node_name") to
+  // func.func results. The downstream buffer-results-to-out-params pass
+  // skips any result that still carries attributes, leaving the function
+  // signature unconverted and causing later lowering failures. Clear all
+  // result attributes so every result is eligible for out-param conversion.
   module.walk([&](mlir::func::FuncOp funcOp) {
     unsigned numResults = funcOp.getNumResults();
     if (numResults > 0) {
