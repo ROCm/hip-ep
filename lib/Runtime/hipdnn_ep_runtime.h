@@ -190,6 +190,11 @@ void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index);
 // Used by hip.get_pool lowering in generated compute kernels
 void *hipdnn_ep_get_pool_base(RuntimeState *state);
 
+// Shared workspace management (lazily grown, reused across MatMul/GQA/Conv)
+void *hipdnn_ep_state_get_workspace(RuntimeState *state);
+size_t hipdnn_ep_state_get_workspace_size(RuntimeState *state);
+int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size);
+
 // Initialize memory pool in runtime state
 // Called by generated inference_init after creating RuntimeState
 // Parameters:
