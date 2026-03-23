@@ -113,12 +113,14 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
     goto cleanup;
   }
 
-  if (miopenSet4dTensorDescriptor(inDesc, miopen_type, 1, 1, 1, n) != miopenStatusSuccess) {
+  if (miopenSet4dTensorDescriptor(inDesc, miopen_type, 1, 1, 1, n) !=
+      miopenStatusSuccess) {
     RUNTIME_DEBUG_LOG("[REAL] MIOpen error: failed to set inDesc\n");
     result = -1;
     goto cleanup;
   }
-  if (miopenSet4dTensorDescriptor(outDesc, miopen_type, 1, 1, 1, n) != miopenStatusSuccess) {
+  if (miopenSet4dTensorDescriptor(outDesc, miopen_type, 1, 1, 1, n) !=
+      miopenStatusSuccess) {
     RUNTIME_DEBUG_LOG("[REAL] MIOpen error: failed to set outDesc\n");
     result = -1;
     goto cleanup;
@@ -129,7 +131,8 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
     result = -1;
     goto cleanup;
   }
-  if (miopenSetActivationDescriptor(actDesc, miopen_act, 0.0, 0.0, 0.0) != miopenStatusSuccess) {
+  if (miopenSetActivationDescriptor(actDesc, miopen_act, 0.0, 0.0, 0.0) !=
+      miopenStatusSuccess) {
     RUNTIME_DEBUG_LOG("[REAL] MIOpen error: failed to set actDesc\n");
     result = -1;
     goto cleanup;
@@ -140,8 +143,8 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
       "(%s, alpha=%.1f, beta=%.1f)\n",
       act_name, alpha, beta);
 
-  if (miopenActivationForward(handle, actDesc, &alpha, inDesc, input,
-                              &beta, outDesc, output) != miopenStatusSuccess) {
+  if (miopenActivationForward(handle, actDesc, &alpha, inDesc, input, &beta,
+                              outDesc, output) != miopenStatusSuccess) {
     RUNTIME_DEBUG_LOG("[REAL] MIOpen error: miopenActivationForward failed\n");
     result = -1;
     goto cleanup;
