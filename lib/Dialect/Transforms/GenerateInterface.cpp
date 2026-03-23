@@ -316,10 +316,15 @@ public:
       return;
     }
 
-    const std::string constantsFile =
-        !compilationOptions_.constants_file.empty()
-            ? compilationOptions_.constants_file
-            : "constants.bin";
+    // Prefer the hip.constants_file attribute set by OnnxToHip pass;
+    // compilation-option override is not yet wired end-to-end.
+    std::string constantsFile = "constants.bin";
+    if (auto attr =
+            module->getAttrOfType<mlir::StringAttr>("hip.constants_file")) {
+      constantsFile = attr.getValue().str();
+    } else if (!compilationOptions_.constants_file.empty()) {
+      constantsFile = compilationOptions_.constants_file;
+    }
 
     std::vector<uint8_t> blob = buildMetadataBlob(module, constantsFile);
     generateMetadataBlobGlobal(module, blob);
@@ -528,21 +533,13 @@ private:
     auto bufferCountAttr =
         module->getAttrOfType<IntegerAttr>("hipdnn.buffer_count");
 
-    if (!poolSizeAttr || !bufferOffsetsAttr || !bufferCountAttr) {
-      llvm::errs()
-          << "[GenerateInterface] FATAL: memory pool attributes missing.\n"
-          << "  hipdnn.pool_size: " << (poolSizeAttr ? "present" : "MISSING")
-          << "\n"
-          << "  hipdnn.buffer_offsets: "
-          << (bufferOffsetsAttr ? "present" : "MISSING") << "\n"
-          << "  hipdnn.buffer_count: "
-          << (bufferCountAttr ? "present" : "MISSING") << "\n"
-          << "  Ensure MemoryPoolingPass runs before GenerateInterface.\n";
-      signalPassFailure();
-      return;
-    }
+    // Buffer offsets and count are optional — if absent, pool is managed at
+    // runtime via hip.get_pool / hipdnn_ep_get_pool_base (no static offsets).
+    // Only attempt pool_init when all three attributes are present and
+    // pool_size > 0.
+    bool hasPoolAttrs = poolSizeAttr && bufferOffsetsAttr && bufferCountAttr;
 
-    if (poolSizeAttr.getInt() > 0) {
+    if (hasPoolAttrs && poolSizeAttr.getInt() > 0) {
       size_t poolSize = poolSizeAttr.getInt();
       size_t numBuffers = bufferCountAttr.getInt();
       auto offsetsAttrArray = bufferOffsetsAttr.getValue();

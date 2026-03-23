@@ -56,5 +56,20 @@ target_include_directories(LibHipCompiler PUBLIC
   ${CMAKE_BINARY_DIR}/3rd-party/onnx-mlir
 )
 
+# Configure custom kernels library path for CompilerDriver
+# When building with real runtime, tell CompilerDriver where to find the
+# installed hip_custom_kernels.lib at model-compile time.
+if(NOT BUILD_MOCK_RUNTIME AND CMAKE_INSTALL_PREFIX)
+    if(WIN32)
+        set(_custom_kernels_lib "${CMAKE_INSTALL_PREFIX}/lib/hip_custom_kernels.lib")
+    else()
+        set(_custom_kernels_lib "${CMAKE_INSTALL_PREFIX}/lib/libhip_custom_kernels.a")
+    endif()
+    target_compile_definitions(LibHipCompiler PRIVATE
+        "HIP_CUSTOM_KERNELS_LIB_PATH=\"${_custom_kernels_lib}\""
+    )
+    message(STATUS "Custom kernels lib path for CompilerDriver: ${_custom_kernels_lib}")
+endif()
+
 # Set folder for IDE organization
 set_target_properties(LibHipCompiler PROPERTIES FOLDER "mlir/Compiler")

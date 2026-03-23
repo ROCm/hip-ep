@@ -178,7 +178,6 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
     }
 
     bool shouldExternalize = extState && minNumElements > 0 &&
-                             !valueAttr.isSplat() &&
                              valueAttr.getNumElements() >= minNumElements;
 
     if (shouldExternalize) {
@@ -208,10 +207,31 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
       }
       int64_t entryOffset = extState->currentOffset;
 
-      // Write raw bytes to the sidecar binary via FileSystem.
+      // Compute full tensor byte size from shape and element width.
       auto rawData = valueAttr.getRawData();
-      int64_t byteSize = static_cast<int64_t>(rawData.size());
-      extState->writer->fwrite(rawData.data(), byteSize);
+      int64_t elemBits = tensorType.getElementTypeBitWidth();
+      int64_t byteSize = valueAttr.getNumElements() * ((elemBits + 7) / 8);
+
+      if (valueAttr.isSplat()) {
+        // Splat: MLIR stores only one element; expand via a staging
+        // buffer to avoid per-element fwrite overhead on large tensors.
+        constexpr size_t kSplatChunk = 1024 * 1024;
+        size_t elemSize = rawData.size();
+        size_t bufSize =
+            (std::min(static_cast<size_t>(byteSize), kSplatChunk) / elemSize) *
+            elemSize;
+        std::vector<char> buf(bufSize);
+        for (size_t i = 0; i < bufSize; i += elemSize)
+          std::memcpy(buf.data() + i, rawData.data(), elemSize);
+        size_t remaining = static_cast<size_t>(byteSize);
+        while (remaining > 0) {
+          size_t toWrite = std::min(remaining, bufSize);
+          extState->writer->fwrite(buf.data(), toWrite);
+          remaining -= toWrite;
+        }
+      } else {
+        extState->writer->fwrite(rawData.data(), byteSize);
+      }
       extState->currentOffset += byteSize;
 
       // Track sizes and offsets for module-level metadata.
@@ -909,27 +929,44 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   if (!epsilonAttr)
     return rewriter.notifyMatchFailure(op, "missing epsilon attribute");
 
-  // Should have 2 results: output and skip_output
-  if (op->getNumResults() != 2)
-    return rewriter.notifyMatchFailure(
-        op, "expected 2 results for SkipSimplifiedLayerNormalization");
+  unsigned numResults = op->getNumResults();
 
   auto outputType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  auto skipOutputType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
-
-  // Create init tensors
   mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
+
+  // The HIP op always produces 2 results (output + skip_output).
+  // ONNX may have 2 or 4 results (output, [none, none,] skip_output).
+  bool hasSkipOutput = numResults >= 2;
+  unsigned skipOutIdx = hasSkipOutput ? numResults - 1 : 0;
+  auto skipOutputType = hasSkipOutput ? mlir::cast<mlir::RankedTensorType>(
+                                            op->getResult(skipOutIdx).getType())
+                                      : outputType;
   mlir::Value skipOutputInit =
       createEmptyTensor(rewriter, loc, skipOutputType, input);
 
-  // Create hip.skip_rms_norm operation
   auto hipOp = mlir::hip::SkipRmsNormOp::create(
       rewriter, loc, {outputType, skipOutputType}, context, input, skip, gamma,
       outputInit, skipOutputInit, epsilonAttr);
 
-  rewriter.replaceOp(op, hipOp->getResults());
+  llvm::SmallVector<mlir::Value> replacements;
+  replacements.push_back(hipOp->getResult(0));
+
+  if (hasSkipOutput) {
+    for (unsigned i = 1; i < skipOutIdx; ++i) {
+      mlir::Type origType = op->getResult(i).getType();
+      if (mlir::isa<mlir::NoneType>(origType)) {
+        replacements.push_back(mlir::Value{});
+        continue;
+      }
+      auto dummyType = mlir::cast<mlir::RankedTensorType>(origType);
+      replacements.push_back(mlir::tensor::EmptyOp::create(
+          rewriter, loc, dummyType.getShape(), dummyType.getElementType()));
+    }
+    replacements.push_back(hipOp->getResult(1));
+  }
+
+  rewriter.replaceOp(op, replacements);
   return mlir::success();
 }
 
@@ -1359,7 +1396,14 @@ static mlir::LogicalResult generateModuleMetadata(mlir::ModuleOp module) {
 struct ConvertOnnxToHipPass
     : public impl::ConvertOnnxToHipPassBase<ConvertOnnxToHipPass> {
   using ConvertOnnxToHipPassBase::ConvertOnnxToHipPassBase;
+
+  ConvertOnnxToHipPass(morphizen::FileSystem *fs, int64_t minNumElements)
+      : fileSystem_(fs), fsMinNumElements_(minNumElements) {}
+
   void runOnOperation() override;
+
+  morphizen::FileSystem *fileSystem_ = nullptr;
+  int64_t fsMinNumElements_ = 0;
 };
 
 void ConvertOnnxToHipPass::runOnOperation() {
@@ -1367,14 +1411,25 @@ void ConvertOnnxToHipPass::runOnOperation() {
   mlir::MLIRContext *ctx = module.getContext();
 
   // Set up externalization state if enabled.
+  // When fileSystem_ is provided (e.g. EPContext from ORT), use it directly.
+  // Otherwise fall back to DiskFileSystem rooted at externalizeOutputDir.
   std::unique_ptr<ExternalizationState> extState;
-  llvm::StringRef dirRef = externalizeOutputDir.getValue();
-  std::string dir = dirRef.empty() ? "." : dirRef.str();
-  mlir::hip::DiskFileSystem diskFs(dir.c_str());
-  if (externalizeMinNumElements > 0) {
+  std::unique_ptr<mlir::hip::DiskFileSystem> fallbackFs;
+  morphizen::FileSystem *fs = fileSystem_;
+
+  int64_t minElems =
+      fileSystem_ ? fsMinNumElements_ : externalizeMinNumElements.getValue();
+
+  if (!fs) {
+    llvm::StringRef dirRef = externalizeOutputDir.getValue();
+    std::string dir = dirRef.empty() ? "." : dirRef.str();
+    fallbackFs = std::make_unique<mlir::hip::DiskFileSystem>(dir.c_str());
+    fs = fallbackFs.get();
+  }
+
+  if (minElems > 0) {
     extState = std::make_unique<ExternalizationState>();
 
-    // Derive base name from module symbol or default.
     std::string baseName = "model";
     if (auto sym = module->getAttrOfType<mlir::StringAttr>(
             mlir::SymbolTable::getSymbolAttrName()))
@@ -1382,7 +1437,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
     extState->binFileName = baseName + ".constants.bin";
 
     extState->writer =
-        diskFs.create_writer_template(extState->binFileName.c_str());
+        fs->create_writer_template(extState->binFileName.c_str());
     if (!extState->writer) {
       module.emitError("failed to open constants binary file via FileSystem: " +
                        extState->binFileName);
@@ -1398,21 +1453,39 @@ void ConvertOnnxToHipPass::runOnOperation() {
        llvm::make_early_inc_range(module.getOps<mlir::func::FuncOp>())) {
     if (funcOp.isDeclaration())
       continue;
-    if (mlir::failed(lowerOnnxConstants(
-            module, funcOp, externalizeMinNumElements, extState.get())))
+    if (mlir::failed(
+            lowerOnnxConstants(module, funcOp, minElems, extState.get())))
       return signalPassFailure();
     lowerOnnxReturns(funcOp);
     if (mlir::failed(convertComputeOps(funcOp, ctx)))
       return signalPassFailure();
   }
 
-  llvm::SmallVector<mlir::Operation *> entryPoints;
-  for (auto &op : module.getBody()->getOperations()) {
-    if (op.getName().getStringRef() == "onnx.EntryPoint")
-      entryPoints.push_back(&op);
-  }
-  for (auto *ep : entryPoints)
-    ep->erase();
+  // Clean up onnx.NoValue and onnx.EntryPoint ops
+  llvm::SmallVector<mlir::Operation *> toErase;
+  module.walk([&](mlir::Operation *op) {
+    llvm::StringRef name = op->getName().getStringRef();
+    if (name == "onnx.NoValue" && op->use_empty())
+      toErase.push_back(op);
+    else if (name == "onnx.EntryPoint")
+      toErase.push_back(op);
+  });
+  for (auto *op : toErase)
+    op->erase();
+
+  // ONNX-MLIR attaches per-result attributes (e.g. "onnx_node_name") to
+  // func.func results. The downstream buffer-results-to-out-params pass
+  // skips any result that still carries attributes, leaving the function
+  // signature unconverted and causing later lowering failures. Clear all
+  // result attributes so every result is eligible for out-param conversion.
+  module.walk([&](mlir::func::FuncOp funcOp) {
+    unsigned numResults = funcOp.getNumResults();
+    if (numResults > 0) {
+      llvm::SmallVector<mlir::DictionaryAttr> emptyResAttrs(
+          numResults, mlir::DictionaryAttr::get(ctx));
+      funcOp.setAllResultAttrs(emptyResAttrs);
+    }
+  });
 
   // Finalize externalization: release writer, write JSON manifest, set module
   // attributes.
@@ -1445,7 +1518,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
     manifest["total_bytes"] = extState->currentOffset;
     manifest["constants"] = std::move(extState->manifestEntries);
 
-    auto jsonWriter = diskFs.create_writer_template(jsonPath.c_str());
+    auto jsonWriter = fs->create_writer_template(jsonPath.c_str());
     if (!jsonWriter) {
       module.emitError("failed to open constants manifest via FileSystem: " +
                        jsonPath);
@@ -1465,6 +1538,11 @@ void ConvertOnnxToHipPass::runOnOperation() {
 }
 
 } // namespace
+
+std::unique_ptr<mlir::Pass>
+createConvertOnnxToHipPass(morphizen::FileSystem *fs, int64_t minNumElements) {
+  return std::make_unique<ConvertOnnxToHipPass>(fs, minNumElements);
+}
 
 } // namespace hip
 } // namespace mlir

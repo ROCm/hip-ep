@@ -33,6 +33,8 @@ extern "C" {
 #define HIPDNN_EP_DATATYPE_FLOAT 0    // f32, 4 bytes
 #define HIPDNN_EP_DATATYPE_HALF 1     // f16, 2 bytes
 #define HIPDNN_EP_DATATYPE_BFLOAT16 2 // bf16, 2 bytes
+#define HIPDNN_EP_DATATYPE_INT32 3    // i32, 4 bytes
+#define HIPDNN_EP_DATATYPE_INT64 4    // i64, 8 bytes
 
 //==============================================================================
 // Backend-Independent Tensor Operation Identifiers
@@ -70,6 +72,10 @@ static inline int64_t hipdnn_ep_datatype_size(int64_t data_type) {
     return 2;
   case HIPDNN_EP_DATATYPE_BFLOAT16:
     return 2;
+  case HIPDNN_EP_DATATYPE_INT32:
+    return 4;
+  case HIPDNN_EP_DATATYPE_INT64:
+    return 8;
   default:
     return -1;
   }
@@ -83,6 +89,10 @@ static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
     return "f16";
   case HIPDNN_EP_DATATYPE_BFLOAT16:
     return "bf16";
+  case HIPDNN_EP_DATATYPE_INT32:
+    return "i32";
+  case HIPDNN_EP_DATATYPE_INT64:
+    return "i64";
   default:
     return "unknown";
   }
@@ -434,9 +444,10 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t element_size_bytes, int64_t keepdims);
 
 // Cast operation wrapper (element type conversion)
+// src_data_type and dst_data_type are HIPDNN_EP_DATATYPE_* enum values.
 int wrap_cast(RuntimeState *state, void *input, void *output,
-              int64_t num_elements, int64_t input_element_size,
-              int64_t output_element_size, int64_t to);
+              int64_t num_elements, int64_t src_data_type,
+              int64_t dst_data_type);
 
 // Generic MIOpen activation wrapper
 // Applies activation_mode (HIPDNN_EP_ACTIVATION_*) element-wise

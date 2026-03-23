@@ -401,26 +401,6 @@ int wrap_miopenConvolutionForward(
   return 0;
 }
 
-// Mock implementation for ReLU activation
-extern "C" int wrap_miopenActivationForward_relu(
-    RuntimeState *state, void *input_gpu_ptr, int64_t input_n, int64_t input_c,
-    int64_t input_h, int64_t input_w, void *output_gpu_ptr, int64_t output_n,
-    int64_t output_c, int64_t output_h, int64_t output_w) {
-  if (!state || !input_gpu_ptr || !output_gpu_ptr) {
-    fprintf(stderr, "Invalid arguments to wrap_miopenActivationForward_relu\n");
-    return -1;
-  }
-
-  MOCK_PRINT("[MOCK] wrap_miopenActivationForward_relu: "
-             "input=[%lldx%lldx%lldx%lld] output=[%lldx%lldx%lldx%lld]\n",
-             input_n, input_c, input_h, input_w, output_n, output_c, output_h,
-             output_w);
-
-  // Mock: In a real implementation, this would call MIOpen to compute ReLU
-  // For now, just log and return success
-  return 0;
-}
-
 int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
                        int64_t k, const void *alpha, const void *A,
                        const void *B, const void *beta, void *C) {
@@ -573,17 +553,17 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
 }
 
 int wrap_cast(RuntimeState *state, void *input, void *output,
-              int64_t num_elements, int64_t input_element_size,
-              int64_t output_element_size, int64_t to) {
+              int64_t num_elements, int64_t src_data_type,
+              int64_t dst_data_type) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_cast\n");
     return -1;
   }
 
-  MOCK_PRINT("[MOCK] wrap_cast(num_elements=%lld, input_elem_size=%lld, "
-             "output_elem_size=%lld, to=%lld)\n",
-             (long long)num_elements, (long long)input_element_size,
-             (long long)output_element_size, (long long)to);
+  MOCK_PRINT("[MOCK] wrap_cast(num_elements=%lld, src_dtype=%lld, "
+             "dst_dtype=%lld)\n",
+             (long long)num_elements, (long long)src_data_type,
+             (long long)dst_data_type);
 
   return 0;
 }

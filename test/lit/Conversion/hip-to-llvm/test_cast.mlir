@@ -4,16 +4,16 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify HIP cast operation is correctly lowered to LLVM call
-// to wrap_miopenCast runtime function with both static and dynamic shapes.
+// to wrap_cast runtime function with both static and dynamic shapes.
 //
 // This test validates:
-// - hip.cast → llvm.call @wrap_miopenCast
+// - hip.cast → llvm.call @wrap_cast
 // - Type conversion: !hip.context → !llvm.ptr
 // - Static shapes: num_elements computed at compile time
 // - Dynamic shapes: num_elements computed at runtime via extractvalue
 // - Proper src_data_type and dst_data_type parameters
 //
-// Expected: wrap_miopenCast(state, input_ptr, output_ptr,
+// Expected: wrap_cast(state, input_ptr, output_ptr,
 //                           num_elements, src_data_type, dst_data_type)
 // ============================================================================
 
@@ -30,7 +30,7 @@ module {
     hip.cast(%ctx) ins(%input : memref<256x512xf32, 1>)
                    outs(%output : memref<256x512xf16, 1>) {to = 10 : i64}
 
-    // CHECK: llvm.call @wrap_miopenCast({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_cast({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
 
     return
   }
@@ -45,7 +45,7 @@ module {
     hip.cast(%ctx) ins(%input : memref<1x128x512xf16, 1>)
                    outs(%output : memref<1x128x512xf32, 1>) {to = 1 : i64}
 
-    // CHECK: llvm.call @wrap_miopenCast({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_cast({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
 
     return
   }
@@ -67,7 +67,7 @@ module {
     // CHECK-DAG: llvm.extractvalue %{{.*}}[3, 1]
     // CHECK-DAG: llvm.mlir.constant(512 : i64) : i64
 
-    // CHECK: llvm.call @wrap_miopenCast({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_cast({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
 
     return
   }
