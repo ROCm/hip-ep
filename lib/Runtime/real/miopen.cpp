@@ -133,54 +133,103 @@ int wrap_miopenConvolutionForward(
   hipStream_t hip_stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
 
+  // Initialize all resource pointers to nullptr for safe cleanup
+  miopenTensorDescriptor_t input_desc = nullptr;
+  miopenTensorDescriptor_t weights_desc = nullptr;
+  miopenTensorDescriptor_t output_desc = nullptr;
+  miopenConvolutionDescriptor_t conv_desc = nullptr;
+  void *find_workspace = nullptr;
+  void *workspace = nullptr;
+  int result = 0;
+  miopenConvAlgoPerf_t perf_results[1];
+  int returned_algo_count = 0;
+  miopenConvFwdAlgorithm_t algo;
+  size_t workspace_size = 0;
+  const size_t find_workspace_size = 10 * 1024 * 1024; // 10MB
+  float alpha = 1.0f;
+  float beta = 0.0f;
+
   // Create tensor descriptors
-  miopenTensorDescriptor_t input_desc, weights_desc, output_desc;
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&input_desc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&weights_desc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&output_desc));
+  if (miopenCreateTensorDescriptor(&input_desc) != miopenStatusSuccess) {
+    fprintf(stderr, "MIOpen error: failed to create input_desc\n");
+    result = -1;
+    goto cleanup;
+  }
+  if (miopenCreateTensorDescriptor(&weights_desc) != miopenStatusSuccess) {
+    fprintf(stderr, "MIOpen error: failed to create weights_desc\n");
+    result = -1;
+    goto cleanup;
+  }
+  if (miopenCreateTensorDescriptor(&output_desc) != miopenStatusSuccess) {
+    fprintf(stderr, "MIOpen error: failed to create output_desc\n");
+    result = -1;
+    goto cleanup;
+  }
 
   // Set tensor descriptors (assuming float32 data type)
   // Input: [N, C, H, W]
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(input_desc, miopenFloat, input_n,
-                                           input_c, input_h, input_w));
+  if (miopenSet4dTensorDescriptor(input_desc, miopenFloat, input_n,
+                                  input_c, input_h, input_w) != miopenStatusSuccess) {
+    fprintf(stderr, "MIOpen error: failed to set input_desc\n");
+    result = -1;
+    goto cleanup;
+  }
 
   // Weights: [K, C, R, S] where K=output channels, C=input channels,
   // R=kernel_h, S=kernel_w
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(weights_desc, miopenFloat, weights_k,
-                                           input_c, kernel_h, kernel_w));
+  if (miopenSet4dTensorDescriptor(weights_desc, miopenFloat, weights_k,
+                                  input_c, kernel_h, kernel_w) != miopenStatusSuccess) {
+    fprintf(stderr, "MIOpen error: failed to set weights_desc\n");
+    result = -1;
+    goto cleanup;
+  }
 
   // Output: [N, K, H', W']
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(output_desc, miopenFloat, input_n,
-                                           weights_k, output_h, output_w));
+  if (miopenSet4dTensorDescriptor(output_desc, miopenFloat, input_n,
+                                  weights_k, output_h, output_w) != miopenStatusSuccess) {
+    fprintf(stderr, "MIOpen error: failed to set output_desc\n");
+    result = -1;
+    goto cleanup;
+  }
 
   // Create convolution descriptor
   // Note: MIOpen padding is per-side, but if pad_top==pad_bottom and
   // pad_left==pad_right, we use the symmetric version
-  miopenConvolutionDescriptor_t conv_desc;
-  MIOPEN_CHECK(miopenCreateConvolutionDescriptor(&conv_desc));
-  MIOPEN_CHECK(miopenInitConvolutionDescriptor(
+  if (miopenCreateConvolutionDescriptor(&conv_desc) != miopenStatusSuccess) {
+    fprintf(stderr, "MIOpen error: failed to create conv_desc\n");
+    result = -1;
+    goto cleanup;
+  }
+  if (miopenInitConvolutionDescriptor(
       conv_desc, miopenConvolution, pad_top, pad_left, stride_h, stride_w,
-      dilation_h, dilation_w));
+      dilation_h, dilation_w) != miopenStatusSuccess) {
+    fprintf(stderr, "MIOpen error: failed to init conv_desc\n");
+    result = -1;
+    goto cleanup;
+  }
 
   // Set group count for grouped convolutions (e.g., depthwise convolution)
   // group=1 for standard convolution, group=C for depthwise convolution
   if (group > 1) {
-    MIOPEN_CHECK(miopenSetConvolutionGroupCount(conv_desc, group));
+    if (miopenSetConvolutionGroupCount(conv_desc, group) != miopenStatusSuccess) {
+      fprintf(stderr, "MIOpen error: failed to set group count\n");
+      result = -1;
+      goto cleanup;
+    }
   }
 
   // Allocate workspace for algorithm search
   // MIOpen's Find API needs workspace to test algorithms
-  // Use a conservative estimate (10MB) for algorithm selection
-  const size_t find_workspace_size = 10 * 1024 * 1024; // 10MB
-  void *find_workspace = nullptr;
-  HIP_CHECK(hipMalloc(&find_workspace, find_workspace_size));
+  if (hipMalloc(&find_workspace, find_workspace_size) != hipSuccess) {
+    fprintf(stderr, "HIP error: failed to allocate find_workspace\n");
+    result = -1;
+    goto cleanup;
+  }
 
   // Find best algorithm
   // MIOpen 3.x API: returns array of performance results instead of single
   // algorithm
-  miopenConvAlgoPerf_t perf_results[1];
-  int returned_algo_count = 0;
-  MIOPEN_CHECK(miopenFindConvolutionForwardAlgorithm(
+  if (miopenFindConvolutionForwardAlgorithm(
       miopen_handle, input_desc, input, weights_desc, weights, conv_desc,
       output_desc, output,
       1,                    // requestAlgoCount - ask for 1 algorithm
@@ -188,48 +237,79 @@ int wrap_miopenConvolutionForward(
       perf_results,         // perfResults - array to receive results
       find_workspace,       // workspace for algorithm testing
       find_workspace_size,  // workspaceSize
-      false));              // exhaustiveSearch
+      false) != miopenStatusSuccess) {
+    fprintf(stderr, "MIOpen error: algorithm search failed\n");
+    result = -1;
+    goto cleanup;
+  }
 
   // Extract algorithm from performance results
-  miopenConvFwdAlgorithm_t algo = perf_results[0].fwd_algo;
+  algo = perf_results[0].fwd_algo;
 
   // Get actual workspace size needed for this algorithm
-  size_t workspace_size = 0;
-  MIOPEN_CHECK(miopenConvolutionForwardGetWorkSpaceSize(
+  if (miopenConvolutionForwardGetWorkSpaceSize(
       miopen_handle, weights_desc, input_desc, conv_desc, output_desc,
-      &workspace_size));
+      &workspace_size) != miopenStatusSuccess) {
+    fprintf(stderr, "MIOpen error: failed to get workspace size\n");
+    result = -1;
+    goto cleanup;
+  }
 
   // Reuse find_workspace if it's large enough, otherwise reallocate
-  void *workspace = find_workspace;
+  workspace = find_workspace;
   if (workspace_size > find_workspace_size) {
     hipError_t err = hipFree(find_workspace);
     if (err != hipSuccess) {
       fprintf(stderr, "Warning: hipFree failed for find_workspace: %d\n", err);
     }
-    HIP_CHECK(hipMalloc(&workspace, workspace_size));
+    find_workspace = nullptr;  // Mark as freed to avoid double-free
+    if (hipMalloc(&workspace, workspace_size) != hipSuccess) {
+      fprintf(stderr, "HIP error: failed to allocate workspace\n");
+      workspace = nullptr;
+      result = -1;
+      goto cleanup;
+    }
   }
 
   // Perform convolution
-  float alpha = 1.0f;
-  float beta = 0.0f;
-  MIOPEN_CHECK(miopenConvolutionForward(
+  if (miopenConvolutionForward(
       miopen_handle, &alpha, input_desc, input, weights_desc, weights,
-      conv_desc, algo, &beta, output_desc, output, workspace, workspace_size));
+      conv_desc, algo, &beta, output_desc, output, workspace, workspace_size) != miopenStatusSuccess) {
+    fprintf(stderr, "MIOpen error: convolution forward failed\n");
+    result = -1;
+    goto cleanup;
+  }
 
-  // Cleanup
+cleanup:
+  // Best-effort cleanup: free all allocated resources
+  // Continue cleanup even if individual operations fail
   if (workspace) {
     hipError_t err = hipFree(workspace);
     if (err != hipSuccess) {
-      fprintf(stderr, "Warning: hipFree failed during cleanup: %d\n", err);
-      // Continue cleanup anyway (best-effort)
+      fprintf(stderr, "Warning: hipFree failed for workspace: %d\n", err);
     }
   }
-  miopenDestroyTensorDescriptor(input_desc);
-  miopenDestroyTensorDescriptor(weights_desc);
-  miopenDestroyTensorDescriptor(output_desc);
-  miopenDestroyConvolutionDescriptor(conv_desc);
+  // Free find_workspace only if it wasn't already freed during reallocation
+  if (find_workspace && find_workspace != workspace) {
+    hipError_t err = hipFree(find_workspace);
+    if (err != hipSuccess) {
+      fprintf(stderr, "Warning: hipFree failed for find_workspace: %d\n", err);
+    }
+  }
+  if (input_desc) {
+    miopenDestroyTensorDescriptor(input_desc);
+  }
+  if (weights_desc) {
+    miopenDestroyTensorDescriptor(weights_desc);
+  }
+  if (output_desc) {
+    miopenDestroyTensorDescriptor(output_desc);
+  }
+  if (conv_desc) {
+    miopenDestroyConvolutionDescriptor(conv_desc);
+  }
 
-  return 0;
+  return result;
 }
 
 // =============================================================================
@@ -265,38 +345,78 @@ extern "C" int wrap_miopenActivationForward_relu(
   int64_t h = input_h;
   int64_t w = input_w;
 
-  // Create tensor descriptors
-  miopenTensorDescriptor_t input_tensor_desc, output_tensor_desc;
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&input_tensor_desc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&output_tensor_desc));
+  // Initialize all resource pointers to nullptr for safe cleanup
+  miopenTensorDescriptor_t input_tensor_desc = nullptr;
+  miopenTensorDescriptor_t output_tensor_desc = nullptr;
+  miopenActivationDescriptor_t activ_desc = nullptr;
+  int result = 0;
+  float alpha = 1.0f;
+  float beta = 0.0f;
 
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(
+  // Create tensor descriptors
+  if (miopenCreateTensorDescriptor(&input_tensor_desc) != miopenStatusSuccess) {
+    fprintf(stderr, "MIOpen error: failed to create input_tensor_desc\n");
+    result = -1;
+    goto cleanup;
+  }
+  if (miopenCreateTensorDescriptor(&output_tensor_desc) != miopenStatusSuccess) {
+    fprintf(stderr, "MIOpen error: failed to create output_tensor_desc\n");
+    result = -1;
+    goto cleanup;
+  }
+
+  if (miopenSet4dTensorDescriptor(
       input_tensor_desc, miopenFloat, static_cast<int>(n), static_cast<int>(c),
-      static_cast<int>(h), static_cast<int>(w)));
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(
+      static_cast<int>(h), static_cast<int>(w)) != miopenStatusSuccess) {
+    fprintf(stderr, "MIOpen error: failed to set input_tensor_desc\n");
+    result = -1;
+    goto cleanup;
+  }
+  if (miopenSet4dTensorDescriptor(
       output_tensor_desc, miopenFloat, static_cast<int>(n), static_cast<int>(c),
-      static_cast<int>(h), static_cast<int>(w)));
+      static_cast<int>(h), static_cast<int>(w)) != miopenStatusSuccess) {
+    fprintf(stderr, "MIOpen error: failed to set output_tensor_desc\n");
+    result = -1;
+    goto cleanup;
+  }
 
   // Create activation descriptor for ReLU
-  miopenActivationDescriptor_t activ_desc;
-  MIOPEN_CHECK(miopenCreateActivationDescriptor(&activ_desc));
+  if (miopenCreateActivationDescriptor(&activ_desc) != miopenStatusSuccess) {
+    fprintf(stderr, "MIOpen error: failed to create activ_desc\n");
+    result = -1;
+    goto cleanup;
+  }
 
   // miopenActivationRELU mode with no parameters (alpha, beta, gamma unused for
   // ReLU)
-  MIOPEN_CHECK(miopenSetActivationDescriptor(activ_desc, miopenActivationRELU,
-                                             0.0, 0.0, 0.0));
+  if (miopenSetActivationDescriptor(activ_desc, miopenActivationRELU,
+                                    0.0, 0.0, 0.0) != miopenStatusSuccess) {
+    fprintf(stderr, "MIOpen error: failed to set activ_desc\n");
+    result = -1;
+    goto cleanup;
+  }
 
   // Forward pass
-  float alpha = 1.0f;
-  float beta = 0.0f;
-  MIOPEN_CHECK(miopenActivationForward(miopen_handle, activ_desc, &alpha,
-                                       input_tensor_desc, input_ptr, &beta,
-                                       output_tensor_desc, output_ptr));
+  if (miopenActivationForward(miopen_handle, activ_desc, &alpha,
+                              input_tensor_desc, input_ptr, &beta,
+                              output_tensor_desc, output_ptr) != miopenStatusSuccess) {
+    fprintf(stderr, "MIOpen error: miopenActivationForward failed\n");
+    result = -1;
+    goto cleanup;
+  }
 
-  // Cleanup
-  miopenDestroyActivationDescriptor(activ_desc);
-  miopenDestroyTensorDescriptor(input_tensor_desc);
-  miopenDestroyTensorDescriptor(output_tensor_desc);
+cleanup:
+  // Best-effort cleanup: free all allocated resources
+  // Continue cleanup even if individual operations fail
+  if (activ_desc) {
+    miopenDestroyActivationDescriptor(activ_desc);
+  }
+  if (input_tensor_desc) {
+    miopenDestroyTensorDescriptor(input_tensor_desc);
+  }
+  if (output_tensor_desc) {
+    miopenDestroyTensorDescriptor(output_tensor_desc);
+  }
 
-  return 0;
+  return result;
 }
