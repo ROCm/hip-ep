@@ -135,4 +135,7 @@ if(BUILD_HIP_TOOLS)
 
   # LIT tests for MLIR passes
   add_subdirectory(test/lit)
+
+  # E2E integration tests (compile MLIR → DLL → execute)
+  add_subdirectory(test/e2e)
 endif()

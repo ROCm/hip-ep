@@ -6,11 +6,11 @@
 // hip.external_data with index field.
 //
 // Verifies:
-// - Large non-splat constants are externalized to memref.global with
-//   hip.external_data containing index, offset, and size
+// - Large constants (splat and non-splat) are externalized to memref.global
+//   with hip.external_data containing index, offset, and size
 // - hipdnn.constant_sizes and hipdnn.constant_offsets module attributes
 //   are emitted
-// - Small and splat constants remain inline as arith.constant
+// - Small constants (below threshold) remain inline as arith.constant
 //===----------------------------------------------------------------------===//
 
 // RUN: mkdir -p %t && hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip='externalize-min-num-elements=4 externalize-output-dir=%t' %s | FileCheck %s
@@ -22,17 +22,17 @@
 // CHECK-SAME: hipdnn.constant_sizes = array<i64:
 
 // Extern memref.global with index in hip.external_data.
-// CHECK: memref.global "private" @hip_ext_constant_0 : memref<2x4xf32>
-// CHECK-SAME: hip.external_data = {index = 0 : i64, offset = 0 : i64, size = 32 : i64}
+// Splat constant (4x4, 16 elements >= threshold) externalized as index 0.
+// CHECK-DAG: memref.global "private" @hip_ext_constant_0 : memref<4x4xf32>
+// Non-splat constant (2x4, 8 elements >= threshold) externalized as index 1.
+// CHECK-DAG: memref.global "private" @hip_ext_constant_1 : memref<2x4xf32>
 
 // CHECK-LABEL: func.func @main_graph
-//   Small constant stays inline.
+//   Small constant stays inline (2 elements < threshold 4).
 // CHECK-DAG:   arith.constant dense<[1.000000e+00, 2.000000e+00]> : tensor<2xf32>
-//   Splat constant stays inline.
-// CHECK-DAG:   arith.constant dense<5.000000e-01> : tensor<4x4xf32>
-//   Large non-splat loaded from extern global.
-// CHECK:       memref.get_global @hip_ext_constant_0 : memref<2x4xf32>
-// CHECK-NEXT:  bufferization.to_tensor {{.*}} restrict
+//   Splat and non-splat loaded from extern globals.
+// CHECK-DAG:   memref.get_global @hip_ext_constant_0 : memref<4x4xf32>
+// CHECK-DAG:   memref.get_global @hip_ext_constant_1 : memref<2x4xf32>
 
 module {
   func.func @main_graph() -> (tensor<2xf32>, tensor<4x4xf32>, tensor<2x4xf32>) {

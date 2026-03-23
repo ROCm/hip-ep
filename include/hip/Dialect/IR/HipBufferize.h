@@ -60,6 +60,7 @@ struct HipDstBufferizableModel
 inline void
 registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, HipDialect *) {
+    ConvOp::attachInterface<HipDstBufferizableModel<ConvOp>>(*ctx);
     MatmulOp::attachInterface<HipDstBufferizableModel<MatmulOp>>(*ctx);
     RmsNormOp::attachInterface<HipDstBufferizableModel<RmsNormOp>>(*ctx);
     SkipRmsNormOp::attachInterface<HipDstBufferizableModel<SkipRmsNormOp>>(
@@ -73,6 +74,10 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     GatherOp::attachInterface<HipDstBufferizableModel<GatherOp>>(*ctx);
     SiluOp::attachInterface<HipDstBufferizableModel<SiluOp>>(*ctx);
     GqaOp::attachInterface<HipDstBufferizableModel<GqaOp>>(*ctx);
+    CastOp::attachInterface<HipDstBufferizableModel<CastOp>>(*ctx);
+    SigmoidOp::attachInterface<HipDstBufferizableModel<SigmoidOp>>(*ctx);
+    SubOp::attachInterface<HipDstBufferizableModel<SubOp>>(*ctx);
+    ReduceSumOp::attachInterface<HipDstBufferizableModel<ReduceSumOp>>(*ctx);
   });
 }
 

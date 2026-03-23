@@ -4,7 +4,7 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify hip.skip_rms_norm operation is correctly lowered to LLVM dialect with
-// runtime calls to wrap_miopenAddT5LayerNormForward function.
+// runtime calls to wrap_skip_simplified_layer_norm function.
 //
 // This test validates:
 // - Static shape lowering: constants for dimensions
@@ -46,7 +46,7 @@ func.func @skip_rms_norm_static_f32(%ctx: !hip.context) {
   // CHECK-DAG: llvm.mlir.constant(9.99999974E-6 : f32)
 
   // Verify runtime function call
-  // CHECK: llvm.call @wrap_miopenAddT5LayerNormForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
+  // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
   hip.skip_rms_norm(%ctx)
       ins(%input, %skip, %gamma : memref<128x512xf32, 1>, memref<128x512xf32, 1>, memref<512xf32, 1>)
       outs(%output, %skip_output : memref<128x512xf32, 1>, memref<128x512xf32, 1>)
@@ -64,7 +64,7 @@ func.func @skip_rms_norm_static_f16(%ctx: !hip.context) {
   %skip_output = memref.alloc() : memref<1024xf16, 1>
 
   // 1D tensor test case
-  // CHECK: llvm.call @wrap_miopenAddT5LayerNormForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
+  // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
   hip.skip_rms_norm(%ctx)
       ins(%input, %skip, %gamma : memref<1024xf16, 1>, memref<1024xf16, 1>, memref<1024xf16, 1>)
       outs(%output, %skip_output : memref<1024xf16, 1>, memref<1024xf16, 1>)
@@ -85,7 +85,7 @@ func.func @skip_rms_norm_3d(%ctx: !hip.context) {
   // CHECK: llvm.mlir.constant(2 : i64) : i64
   // CHECK: llvm.mlir.constant(64 : i64) : i64
   // CHECK: llvm.mlir.constant(128 : i64) : i64
-  // CHECK: llvm.call @wrap_miopenAddT5LayerNormForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
+  // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
   hip.skip_rms_norm(%ctx)
       ins(%input, %skip, %gamma : memref<2x64x128xf32, 1>, memref<2x64x128xf32, 1>, memref<128xf32, 1>)
       outs(%output, %skip_output : memref<2x64x128xf32, 1>, memref<2x64x128xf32, 1>)
@@ -112,7 +112,7 @@ func.func @skip_rms_norm_dynamic(%ctx: !hip.context, %input: memref<?x512xf16, 1
   // CHECK: llvm.mul {{.*}}, {{.*}} : i64
   // CHECK: llvm.mul {{.*}}, {{.*}} : i64
 
-  // CHECK: llvm.call @wrap_miopenAddT5LayerNormForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
+  // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
   hip.skip_rms_norm(%ctx)
       ins(%input, %skip, %gamma : memref<?x512xf16, 1>, memref<?x512xf16, 1>, memref<?xf16, 1>)
       outs(%output, %skip_output : memref<?x512xf16, 1>, memref<?x512xf16, 1>)
@@ -139,7 +139,7 @@ func.func @skip_rms_norm_fully_dynamic(%ctx: !hip.context, %input: memref<?x?xf1
   // CHECK: llvm.mul {{.*}}, {{.*}} : i64
   // CHECK: llvm.mul {{.*}}, {{.*}} : i64
 
-  // CHECK: llvm.call @wrap_miopenAddT5LayerNormForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
+  // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
   hip.skip_rms_norm(%ctx)
       ins(%input, %skip, %gamma : memref<?x?xf16, 1>, memref<?x?xf16, 1>, memref<?xf16, 1>)
       outs(%output, %skip_output : memref<?x?xf16, 1>, memref<?x?xf16, 1>)
