@@ -31,30 +31,64 @@ int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
   hipblasLtHandle_t hipblas_handle = static_cast<hipblasLtHandle_t>(handle);
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
+  // Initialize all resource pointers to nullptr for safe cleanup
+  hipblasLtMatrixLayout_t matA = nullptr;
+  hipblasLtMatrixLayout_t matB = nullptr;
+  hipblasLtMatrixLayout_t matC = nullptr;
+  hipblasLtMatmulDesc_t matmul_desc = nullptr;
+  int result = 0;
+
   // Create matrix descriptors (assuming float32, column-major)
-  hipblasLtMatrixLayout_t matA, matB, matC;
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&matA, HIP_R_32F, m, k, m));
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&matB, HIP_R_32F, k, n, k));
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&matC, HIP_R_32F, m, n, m));
+  if (hipblasLtMatrixLayoutCreate(&matA, HIP_R_32F, m, k, m) != HIPBLAS_STATUS_SUCCESS) {
+    fprintf(stderr, "hipBLAS error: failed to create matA\n");
+    result = -1;
+    goto cleanup;
+  }
+  if (hipblasLtMatrixLayoutCreate(&matB, HIP_R_32F, k, n, k) != HIPBLAS_STATUS_SUCCESS) {
+    fprintf(stderr, "hipBLAS error: failed to create matB\n");
+    result = -1;
+    goto cleanup;
+  }
+  if (hipblasLtMatrixLayoutCreate(&matC, HIP_R_32F, m, n, m) != HIPBLAS_STATUS_SUCCESS) {
+    fprintf(stderr, "hipBLAS error: failed to create matC\n");
+    result = -1;
+    goto cleanup;
+  }
 
   // Create operation descriptor
-  hipblasLtMatmulDesc_t matmul_desc;
-  HIPBLAS_CHECK(
-      hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
+  if (hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F) != HIPBLAS_STATUS_SUCCESS) {
+    fprintf(stderr, "hipBLAS error: failed to create matmul_desc\n");
+    result = -1;
+    goto cleanup;
+  }
 
   // Perform GEMM
-  HIPBLAS_CHECK(hipblasLtMatmul(hipblas_handle, matmul_desc, alpha, A, matA, B,
-                                matB, beta, C, matC, C, matC,
-                                nullptr, // algo
-                                nullptr, // workspace
-                                0,       // workspaceSize
-                                hip_stream));
+  if (hipblasLtMatmul(hipblas_handle, matmul_desc, alpha, A, matA, B,
+                      matB, beta, C, matC, C, matC,
+                      nullptr, // algo
+                      nullptr, // workspace
+                      0,       // workspaceSize
+                      hip_stream) != HIPBLAS_STATUS_SUCCESS) {
+    fprintf(stderr, "hipBLAS error: hipblasLtMatmul failed\n");
+    result = -1;
+    goto cleanup;
+  }
 
-  // Cleanup
-  hipblasLtMatrixLayoutDestroy(matA);
-  hipblasLtMatrixLayoutDestroy(matB);
-  hipblasLtMatrixLayoutDestroy(matC);
-  hipblasLtMatmulDescDestroy(matmul_desc);
+cleanup:
+  // Best-effort cleanup: free all allocated resources
+  // Continue cleanup even if individual operations fail
+  if (matA) {
+    hipblasLtMatrixLayoutDestroy(matA);
+  }
+  if (matB) {
+    hipblasLtMatrixLayoutDestroy(matB);
+  }
+  if (matC) {
+    hipblasLtMatrixLayoutDestroy(matC);
+  }
+  if (matmul_desc) {
+    hipblasLtMatmulDescDestroy(matmul_desc);
+  }
 
-  return 0;
+  return result;
 }
