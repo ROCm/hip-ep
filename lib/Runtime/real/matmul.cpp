@@ -104,17 +104,20 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
   int64_t ld_B_hipblas = K; // leading dim of A viewed as col-major
   int64_t ld_C_hipblas = N; // leading dim of output viewed as col-major
 
-  if (hipblasLtMatrixLayoutCreate(&matA_layout, data_type, N, K, ld_A_hipblas) != HIPBLAS_STATUS_SUCCESS) {
+  if (hipblasLtMatrixLayoutCreate(&matA_layout, data_type, N, K,
+                                  ld_A_hipblas) != HIPBLAS_STATUS_SUCCESS) {
     fprintf(stderr, "hipBLASLt error: failed to create matA_layout\n");
     result = -1;
     goto cleanup;
   }
-  if (hipblasLtMatrixLayoutCreate(&matB_layout, data_type, K, M, ld_B_hipblas) != HIPBLAS_STATUS_SUCCESS) {
+  if (hipblasLtMatrixLayoutCreate(&matB_layout, data_type, K, M,
+                                  ld_B_hipblas) != HIPBLAS_STATUS_SUCCESS) {
     fprintf(stderr, "hipBLASLt error: failed to create matB_layout\n");
     result = -1;
     goto cleanup;
   }
-  if (hipblasLtMatrixLayoutCreate(&matC_layout, data_type, N, M, ld_C_hipblas) != HIPBLAS_STATUS_SUCCESS) {
+  if (hipblasLtMatrixLayoutCreate(&matC_layout, data_type, N, M,
+                                  ld_C_hipblas) != HIPBLAS_STATUS_SUCCESS) {
     fprintf(stderr, "hipBLASLt error: failed to create matC_layout\n");
     result = -1;
     goto cleanup;
@@ -126,52 +129,56 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
     int64_t stride_C_hipblas = M * N; // stride over output batches
 
     if (hipblasLtMatrixLayoutSetAttribute(
-        matA_layout, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count,
-        sizeof(batch_count)) != HIPBLAS_STATUS_SUCCESS) {
+            matA_layout, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count,
+            sizeof(batch_count)) != HIPBLAS_STATUS_SUCCESS) {
       fprintf(stderr, "hipBLASLt error: failed to set matA batch_count\n");
       result = -1;
       goto cleanup;
     }
     if (hipblasLtMatrixLayoutSetAttribute(
-        matA_layout, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,
-        &stride_A_hipblas, sizeof(stride_A_hipblas)) != HIPBLAS_STATUS_SUCCESS) {
+            matA_layout, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,
+            &stride_A_hipblas,
+            sizeof(stride_A_hipblas)) != HIPBLAS_STATUS_SUCCESS) {
       fprintf(stderr, "hipBLASLt error: failed to set matA stride\n");
       result = -1;
       goto cleanup;
     }
 
     if (hipblasLtMatrixLayoutSetAttribute(
-        matB_layout, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count,
-        sizeof(batch_count)) != HIPBLAS_STATUS_SUCCESS) {
+            matB_layout, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count,
+            sizeof(batch_count)) != HIPBLAS_STATUS_SUCCESS) {
       fprintf(stderr, "hipBLASLt error: failed to set matB batch_count\n");
       result = -1;
       goto cleanup;
     }
     if (hipblasLtMatrixLayoutSetAttribute(
-        matB_layout, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,
-        &stride_B_hipblas, sizeof(stride_B_hipblas)) != HIPBLAS_STATUS_SUCCESS) {
+            matB_layout, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,
+            &stride_B_hipblas,
+            sizeof(stride_B_hipblas)) != HIPBLAS_STATUS_SUCCESS) {
       fprintf(stderr, "hipBLASLt error: failed to set matB stride\n");
       result = -1;
       goto cleanup;
     }
 
     if (hipblasLtMatrixLayoutSetAttribute(
-        matC_layout, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count,
-        sizeof(batch_count)) != HIPBLAS_STATUS_SUCCESS) {
+            matC_layout, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count,
+            sizeof(batch_count)) != HIPBLAS_STATUS_SUCCESS) {
       fprintf(stderr, "hipBLASLt error: failed to set matC batch_count\n");
       result = -1;
       goto cleanup;
     }
     if (hipblasLtMatrixLayoutSetAttribute(
-        matC_layout, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,
-        &stride_C_hipblas, sizeof(stride_C_hipblas)) != HIPBLAS_STATUS_SUCCESS) {
+            matC_layout, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,
+            &stride_C_hipblas,
+            sizeof(stride_C_hipblas)) != HIPBLAS_STATUS_SUCCESS) {
       fprintf(stderr, "hipBLASLt error: failed to set matC stride\n");
       result = -1;
       goto cleanup;
     }
   }
 
-  if (hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F) != HIPBLAS_STATUS_SUCCESS) {
+  if (hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F) !=
+      HIPBLAS_STATUS_SUCCESS) {
     fprintf(stderr, "hipBLASLt error: failed to create matmul_desc\n");
     result = -1;
     goto cleanup;
@@ -180,8 +187,8 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
   if (hipblasLtMatmul(handle, matmul_desc, &alpha, B,
                       matA_layout,    // "A" = B (row→col trick)
                       A, matB_layout, // "B" = A (row→col trick)
-                      &beta, output, matC_layout, output, matC_layout,
-                      nullptr, nullptr, 0, stream) != HIPBLAS_STATUS_SUCCESS) {
+                      &beta, output, matC_layout, output, matC_layout, nullptr,
+                      nullptr, 0, stream) != HIPBLAS_STATUS_SUCCESS) {
     fprintf(stderr, "hipBLASLt error: hipblasLtMatmul failed\n");
     result = -1;
     goto cleanup;
