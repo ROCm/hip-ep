@@ -124,17 +124,20 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                     "[1,1,1,%d] with type %s\n",
                     n, type_name);
 
-  if (miopenSet4dTensorDescriptor(aDesc, miopen_type, 1, 1, 1, n) != miopenStatusSuccess) {
+  if (miopenSet4dTensorDescriptor(aDesc, miopen_type, 1, 1, 1, n) !=
+      miopenStatusSuccess) {
     RUNTIME_DEBUG_LOG("[REAL] MIOpen error: failed to set aDesc\n");
     result = -1;
     goto cleanup;
   }
-  if (miopenSet4dTensorDescriptor(bDesc, miopen_type, 1, 1, 1, n) != miopenStatusSuccess) {
+  if (miopenSet4dTensorDescriptor(bDesc, miopen_type, 1, 1, 1, n) !=
+      miopenStatusSuccess) {
     RUNTIME_DEBUG_LOG("[REAL] MIOpen error: failed to set bDesc\n");
     result = -1;
     goto cleanup;
   }
-  if (miopenSet4dTensorDescriptor(cDesc, miopen_type, 1, 1, 1, n) != miopenStatusSuccess) {
+  if (miopenSet4dTensorDescriptor(cDesc, miopen_type, 1, 1, 1, n) !=
+      miopenStatusSuccess) {
     RUNTIME_DEBUG_LOG("[REAL] MIOpen error: failed to set cDesc\n");
     result = -1;
     goto cleanup;
@@ -144,8 +147,8 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                     "(op=%s, alpha1=%.1f, alpha2=%.1f, beta=%.1f)\n",
                     op_name, alpha1, alpha2, beta);
 
-  if (miopenOpTensor(handle, miopen_op, &alpha1, aDesc, lhs, &alpha2,
-                     bDesc, rhs, &beta, cDesc, output) != miopenStatusSuccess) {
+  if (miopenOpTensor(handle, miopen_op, &alpha1, aDesc, lhs, &alpha2, bDesc,
+                     rhs, &beta, cDesc, output) != miopenStatusSuccess) {
     RUNTIME_DEBUG_LOG("[REAL] MIOpen error: miopenOpTensor failed\n");
     result = -1;
     goto cleanup;
