@@ -16,8 +16,8 @@ namespace mlir {
 namespace hip {
 
 /// Default minimum number of tensor elements for constant externalization.
-/// Set to 1 means all tensor constants are written to constants.bin 
-/// rather than inlined in the DLL, because the inline element tensors 
+/// Set to 1 means all tensor constants are written to constants.bin
+/// rather than inlined in the DLL, because the inline element tensors
 /// as scalar kernel arguments causes GPU launch failures (error 719)
 constexpr int64_t kDefaultExternalizeMinNumElements = 1;
 

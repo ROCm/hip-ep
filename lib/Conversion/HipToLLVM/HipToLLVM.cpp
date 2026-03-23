@@ -72,7 +72,6 @@ static constexpr int64_t kOffsetIdx = 2;
 static constexpr int64_t kSizesIdx = 3;
 static constexpr int64_t kStridesIdx = 4;
 
-
 // Maps MLIR element type to runtime data type enum (HIPDNN_EP_DATATYPE_*).
 // Values must match the #defines in hipdnn_ep_runtime.h.
 // Returns -1 for unsupported types.
@@ -1810,8 +1809,8 @@ private:
       return module.emitError("Metadata mismatch: shapes array size != count");
 
     constexpr unsigned kMemRefPtrs = 2;   // allocatedPtr + alignedPtr
-    constexpr unsigned kMemRefOffset = 1;  // offset scalar
-    unsigned expectedParams = 1; // context
+    constexpr unsigned kMemRefOffset = 1; // offset scalar
+    unsigned expectedParams = 1;          // context
     for (auto shapeAttr : inputShapesAttr) {
       int64_t rank = cast<DenseI64ArrayAttr>(shapeAttr).size();
       expectedParams += kMemRefPtrs + kMemRefOffset + rank + rank;
