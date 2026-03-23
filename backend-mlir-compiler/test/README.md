@@ -13,7 +13,7 @@ This README assumes the following structure:
 ```
 <workspace>/                       # Two levels up from project root
 ├── local/                         # Install prefix (LOCAL_DIR = $PROJECT_ROOT/../../local)
-│   ├── bin/                       # MLIR tools (hip-opt, hip-compile, etc.)
+│   ├── bin/                       # MLIR tools (hip-mlir-opt, hip-compiler, etc.)
 │   ├── lib/                       # Libraries
 │   └── ...
 └── <repo>/
@@ -39,10 +39,9 @@ This README assumes the following structure:
 - See "Creating LIT Unit Tests from E2E Failures" section below
 
 ## Prerequisites
-- ONNX Runtime (via CMAKE_PREFIX_PATH)
-- LLVM/MLIR (via CMAKE_PREFIX_PATH or auto-fetched)
-- GTest (auto-fetched if not found)
-- Protobuf (auto-fetched if not found)
+
+For build prerequisites and environment setup, see
+[docs/quick_start.md](../../docs/quick_start.md).
 
 ## Test Model
 The test uses `models/two_layer_conv.onnx` (committed via Git LFS):
@@ -60,38 +59,9 @@ git add models/two_layer_conv.onnx  # Git LFS will handle it automatically
 
 ## Build
 
-### Step 1: Set Up Directory Variables
-
-**CRITICAL**: All commands in this guide run from the project root. Never use `cd` commands except the initial navigation to the project root.
-
-```bash
-# Navigate to project root ONCE
-cd /c/Develop/m/onnx-hipdnn-ep/mlir-integration  # Adjust to your path
-
-# Set up directory variables
-PROJECT_ROOT=$(pwd)
-BUILD_DIR="$PROJECT_ROOT/build/test"
-LOCAL_DIR="$PROJECT_ROOT/../../local"  # Two levels up from project root
-TEMP_DIR="/c/temp"  # Windows Git Bash
-# TEMP_DIR="/tmp"   # Linux
-```
-
-### Step 2: Configure CMake
-```bash
-cmake -S "$PROJECT_ROOT" -B "$BUILD_DIR" \
-  -DBUILD_SHARED_LIBS=OFF \
-  "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded\$<\$<CONFIG:Debug>:Debug>" \
-  -DCMAKE_BUILD_TYPE=Debug \
-  "-DCMAKE_PREFIX_PATH=$LOCAL_DIR" \
-  -Dmorphizen_ENABLE_UNIT_TEST=ON \
-  -DBUILD_MOCK_RUNTIME=ON \
-  --fresh
-```
-
-### Step 3: Build
-```bash
-cmake --build "$BUILD_DIR" --config Debug --parallel
-```
+Follow [docs/quick_start.md](../../docs/quick_start.md) for the full build.
+To enable E2E tests specifically, add `-Dmorphizen_ENABLE_UNIT_TEST=ON`
+and `-DBUILD_MOCK_RUNTIME=ON` to your CMake configure command.
 
 ## Running the Test
 
@@ -131,7 +101,7 @@ cmake --build "$BUILD_DIR" --config Debug --parallel
 
 ### Troubleshooting: Missing DLL Dependencies
 
-If you encounter an error loading `hip-compiler.dll` due to missing dependencies:
+If you encounter an error loading `morphizen-mlir-compiler.dll` due to missing dependencies:
 
 ```bash
 # Workaround: Copy DLLs from local/bin to the binary directory
@@ -180,7 +150,7 @@ Additional optional environment variables:
 
 **Note**: CPU device support is enabled by default in MorphiZen EP (`MORPHIZEN_EP_ENABLE_CPU_DEVICE=1`), so no special environment variables are required to run the test.
 
-**Troubleshooting**: See the "Troubleshooting MLIR Compilation Errors" section for using `hip-opt` passes and MLIR debugging flags.
+**Troubleshooting**: See the "Troubleshooting MLIR Compilation Errors" section for using `hip-mlir-opt` passes and MLIR debugging flags.
 
 ## Troubleshooting MLIR Compilation Errors
 
@@ -233,7 +203,7 @@ Find dump directory from output (look for `dump_dir:` line).
 DUMP_DIR="$TEMP_DIR/morphizen_dumps/<cache_key>"  # Replace <cache_key>
 
 # Convert to text - SAVE TO TEMP DIRECTORY (NOT project workspace)
-"$LOCAL_DIR/bin/hip-opt" --allow-unregistered-dialect \
+"$LOCAL_DIR/bin/hip-mlir-opt" --allow-unregistered-dialect \
   "$DUMP_DIR/mlir_bytecode_dump.mlir" \
   -o "$TEMP_DIR/input.mlir"
 ```
@@ -242,13 +212,13 @@ DUMP_DIR="$TEMP_DIR/morphizen_dumps/<cache_key>"  # Replace <cache_key>
 
 ### Step 3: Test Complete Pipeline
 
-Use `hip-opt` to test the full ONNX→HIP→LLVM→Interface pipeline by running all passes:
+Use `hip-mlir-opt` to test the full ONNX→HIP→LLVM→Interface pipeline by running all passes:
 
 ```bash
-"$LOCAL_DIR/bin/hip-opt" \
+"$LOCAL_DIR/bin/hip-mlir-opt" \
   --convert-onnx-to-hip \
   --canonicalize \
-  --memory-pooling \
+  --hip-pool-allocs \
   --convert-hip-to-llvm \
   --generate-interface \
   "$TEMP_DIR/input.mlir" \
@@ -258,7 +228,7 @@ Use `hip-opt` to test the full ONNX→HIP→LLVM→Interface pipeline by running
 This runs the complete compilation pipeline:
 1. `--convert-onnx-to-hip` - Convert ONNX operations to HIP dialect
 2. `--canonicalize` - Canonicalization pass
-3. `--memory-pooling` - Memory pooling optimization
+3. `--hip-pool-allocs` - Memory pooling optimization
 4. `--convert-hip-to-llvm` - Convert HIP dialect to LLVM dialect
 5. `--generate-interface` - Generate C interface wrapper functions
 
@@ -273,10 +243,10 @@ If successful, this validates that all MLIR transformations work correctly.
 When you see errors like "failed to legalize operation 'onnx.Conv'", the error message is intentionally cryptic. Use debug flags to see the actual reason:
 
 ```bash
-"$LOCAL_DIR/bin/hip-opt" \
+"$LOCAL_DIR/bin/hip-mlir-opt" \
   --convert-onnx-to-hip \
   --canonicalize \
-  --memory-pooling \
+  --hip-pool-allocs \
   --convert-hip-to-llvm \
   --generate-interface \
   --debug-only=dialect-conversion \
@@ -305,10 +275,10 @@ Use `--mlir-print-ir-tree-dir` to automatically dump IR before/after each pass:
 ```bash
 mkdir -p "$TEMP_DIR/ir_dumps"
 
-"$LOCAL_DIR/bin/hip-opt" \
+"$LOCAL_DIR/bin/hip-mlir-opt" \
   --convert-onnx-to-hip \
   --canonicalize \
-  --memory-pooling \
+  --hip-pool-allocs \
   --convert-hip-to-llvm \
   --generate-interface \
   --mlir-print-ir-tree-dir="$TEMP_DIR/ir_dumps" \
@@ -344,8 +314,7 @@ mkdir -p "$TEMP_DIR/ir_dumps"
 **Pass names** (use with `--mlir-print-ir-before=<name>` or `--mlir-print-ir-after=<name>`):
 - `convert-onnx-to-hip` - ONNX to HIP conversion
 - `canonicalize` - Canonicalization
-- `memory-pooling` - Memory pooling optimization
-- `hip-buffer-deallocation` - Buffer deallocation
+- `hip-pool-allocs` - Memory pooling optimization
 - `convert-hip-to-llvm` - HIP to LLVM conversion
 - `generate-interface` - Interface generation
 
@@ -359,17 +328,17 @@ Run passes one-by-one up to the failing pass:
 
 ```bash
 # Run only passes BEFORE the failing pass
-# Example: If convert-hip-to-llvm fails, run up to memory-pooling
+# Example: If convert-hip-to-llvm fails, run up to hip-pool-allocs
 
-"$LOCAL_DIR/bin/hip-opt" \
+"$LOCAL_DIR/bin/hip-mlir-opt" \
   --convert-onnx-to-hip \
   --canonicalize \
-  --memory-pooling \
+  --hip-pool-allocs \
   -o "$TEMP_DIR/input_before_failing_pass.mlir" \
   "$TEMP_DIR/input.mlir"
 
 # Now test the failing pass in isolation
-"$LOCAL_DIR/bin/hip-opt" \
+"$LOCAL_DIR/bin/hip-mlir-opt" \
   --convert-hip-to-llvm \
   --mlir-print-ir-after-all \
   --mlir-print-ir-module-scope \
@@ -387,7 +356,7 @@ IR_FILE=$(ls -t "$TEMP_DIR/ir_dumps"/pipeline_*before*.mlir | head -1)
 echo "Input IR: $IR_FILE"
 
 # Run failing pass in isolation
-"$LOCAL_DIR/bin/hip-opt" \
+"$LOCAL_DIR/bin/hip-mlir-opt" \
   --<failing-pass-name> \
   --mlir-print-ir-after-all \
   --mlir-print-ir-module-scope \
@@ -427,19 +396,19 @@ MORPHIZEN_DEBUG_MLIR_BACKEND=2 "$BUILD_DIR/bin/Debug/test-e2e-mlir.exe"
 
 # Convert bytecode (SAVE TO TEMP)
 DUMP_DIR="$TEMP_DIR/morphizen_dumps/abc123"
-"$LOCAL_DIR/bin/hip-opt" --allow-unregistered-dialect \
+"$LOCAL_DIR/bin/hip-mlir-opt" --allow-unregistered-dialect \
   "$DUMP_DIR/mlir_bytecode_dump.mlir" -o "$TEMP_DIR/input.mlir"
 
 # Test pipeline
-"$LOCAL_DIR/bin/hip-opt" \
-  --convert-onnx-to-hip --canonicalize --memory-pooling \
+"$LOCAL_DIR/bin/hip-mlir-opt" \
+  --convert-onnx-to-hip --canonicalize --hip-pool-allocs \
   --convert-hip-to-llvm --generate-interface \
   "$TEMP_DIR/input.mlir"
 # ERROR: "failed to legalize operation 'onnx.Conv'"
 
 # Use debug flags (NOT speculation)
-"$LOCAL_DIR/bin/hip-opt" \
-  --convert-onnx-to-hip --canonicalize --memory-pooling \
+"$LOCAL_DIR/bin/hip-mlir-opt" \
+  --convert-onnx-to-hip --canonicalize --hip-pool-allocs \
   --convert-hip-to-llvm --generate-interface \
   --debug-only=dialect-conversion \
   --mlir-disable-threading \
@@ -465,15 +434,15 @@ grep "Pattern.*onnx.Conv" "$TEMP_DIR/debug.log"
 
 3. **Work from project root - never use cd commands**
    - ❌ Bad: `cd backend-mlir-compiler/test && ../../build/...`
-   - ✅ Good: `"$LOCAL_DIR/bin/hip-opt" ...`
+   - ✅ Good: `"$LOCAL_DIR/bin/hip-mlir-opt" ...`
 
 4. **Create LIT tests after identifying root cause**
    - See "Creating LIT Unit Tests from E2E Failures" section
 
 ### Common Issues
 
-**Missing DLL dependencies (hip-compiler.dll)**:
-- If the test fails to load `hip-compiler.dll` due to missing dependencies:
+**Missing DLL dependencies (morphizen-mlir-compiler.dll)**:
+- If the test fails to load `morphizen-mlir-compiler.dll` due to missing dependencies:
   ```bash
   # Workaround: Copy DLLs from local/bin to binary directory
   cp "$LOCAL_DIR/bin"/*.dll "$BUILD_DIR/bin/Debug/"
@@ -539,7 +508,7 @@ Create a LIT test when you:
 // - Bug that was fixed
 // ============================================================================
 
-// RUN: hip-opt %s --convert-onnx-to-hip | FileCheck %s
+// RUN: hip-mlir-opt %s --convert-onnx-to-hip | FileCheck %s
 
 module {
   func.func @test_name(%input: tensor<...>) -> tensor<...> {
@@ -563,7 +532,7 @@ module {
 File: `3rd-party/morphizen/morphizen-mlir-compiler/test/lit/Conversion/onnx-to-hip/test_conv_missing_dilations.mlir`
 
 ```mlir
-// RUN: hip-opt %s --convert-onnx-to-hip | FileCheck %s
+// RUN: hip-mlir-opt %s --convert-onnx-to-hip | FileCheck %s
 
 module {
   func.func @test_conv_missing_dilations(
@@ -600,7 +569,7 @@ ctest --test-dir "$BUILD_DIR" -R LitTests --verbose
 llvm-lit -v "$PROJECT_ROOT/3rd-party/morphizen/morphizen-mlir-compiler/test/lit/Conversion/onnx-to-hip/test_conv_missing_dilations.mlir"
 
 # Manual verification during development
-"$LOCAL_DIR/bin/hip-opt" \
+"$LOCAL_DIR/bin/hip-mlir-opt" \
   "$PROJECT_ROOT/3rd-party/morphizen/.../test_conv_missing_dilations.mlir" \
   --convert-onnx-to-hip | FileCheck "$PROJECT_ROOT/3rd-party/morphizen/.../test_conv_missing_dilations.mlir"
 ```
@@ -615,13 +584,13 @@ llvm-lit -v "$PROJECT_ROOT/3rd-party/morphizen/morphizen-mlir-compiler/test/lit/
 # (Create file in appropriate test/lit/ subdirectory)
 
 # 3. Verify test FAILS before fix (reproduces bug)
-"$LOCAL_DIR/bin/hip-opt" test.mlir --convert-onnx-to-hip | FileCheck test.mlir
+"$LOCAL_DIR/bin/hip-mlir-opt" test.mlir --convert-onnx-to-hip | FileCheck test.mlir
 # Expected: FAILS
 
 # 4. Implement fix in conversion pattern
 
 # 5. Verify test PASSES after fix
-"$LOCAL_DIR/bin/hip-opt" test.mlir --convert-onnx-to-hip | FileCheck test.mlir
+"$LOCAL_DIR/bin/hip-mlir-opt" test.mlir --convert-onnx-to-hip | FileCheck test.mlir
 # Expected: PASSES
 
 # 6. Verify E2E test also passes
@@ -689,12 +658,12 @@ backend-mlir-compiler/test/
 ```bash
 # ✅ Good - All commands from project root
 cd /c/Develop/m/onnx-hipdnn-ep/mlir-integration
-"$LOCAL_DIR/bin/hip-opt" --convert-onnx-to-hip --canonicalize --memory-pooling \
+"$LOCAL_DIR/bin/hip-mlir-opt" --convert-onnx-to-hip --canonicalize --hip-pool-allocs \
   --convert-hip-to-llvm --generate-interface "$TEMP_DIR/input.mlir"
 
 # ❌ Bad - Using cd, relative paths, workspace pollution
 cd backend-mlir-compiler/test
-../../build/test/bin/Debug/hip-opt --convert-onnx-to-hip two_layer_conv.mlir
+../../build/test/bin/Debug/hip-mlir-opt --convert-onnx-to-hip two_layer_conv.mlir
 ```
 
 ### Debug Flag Priority
