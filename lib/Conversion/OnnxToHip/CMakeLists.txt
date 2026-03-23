@@ -7,6 +7,12 @@ add_library(OnnxToHip STATIC
   OnnxToHip.cpp
 )
 
+# Disable C4244 warning (type conversion) on MSVC
+# These warnings come from LLVM JSON library usage with std::optional
+if(MSVC)
+  target_compile_options(OnnxToHip PRIVATE /wd4244)
+endif()
+
 add_dependencies(OnnxToHip
   HipDialectIncGen
   HipTypesIncGen
