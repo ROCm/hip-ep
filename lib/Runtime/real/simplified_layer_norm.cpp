@@ -89,18 +89,22 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&rstdDesc));
 
   {
-    // MIOpen requires 4D (NCHW) descriptors for non-vectorized tensors.
-    // Map [num_rows, hidden_dim] -> N=num_rows, C=hidden_dim, H=1, W=1
-    MIOPEN_CHECK(miopenSet4dTensorDescriptor(
-        xDesc, data_type, static_cast<int>(num_rows),
-        static_cast<int>(hidden_dim), 1, 1));
-    MIOPEN_CHECK(miopenSet4dTensorDescriptor(
-        yDesc, data_type, static_cast<int>(num_rows),
-        static_cast<int>(hidden_dim), 1, 1));
-    MIOPEN_CHECK(miopenSet4dTensorDescriptor(
-        weightDesc, data_type, 1, static_cast<int>(hidden_dim), 1, 1));
-    MIOPEN_CHECK(miopenSet4dTensorDescriptor(
-        rstdDesc, miopenFloat, static_cast<int>(num_rows), 1, 1, 1));
+    int x_dims[] = {static_cast<int>(num_rows), static_cast<int>(hidden_dim)};
+    int x_strides[] = {static_cast<int>(hidden_dim), 1};
+    MIOPEN_CHECK(
+        miopenSetTensorDescriptor(xDesc, data_type, 2, x_dims, x_strides));
+    MIOPEN_CHECK(
+        miopenSetTensorDescriptor(yDesc, data_type, 2, x_dims, x_strides));
+
+    int w_dims[] = {static_cast<int>(hidden_dim)};
+    int w_strides[] = {1};
+    MIOPEN_CHECK(
+        miopenSetTensorDescriptor(weightDesc, data_type, 1, w_dims, w_strides));
+
+    int rstd_dims[] = {static_cast<int>(num_rows)};
+    int rstd_strides[] = {1};
+    MIOPEN_CHECK(miopenSetTensorDescriptor(rstdDesc, miopenFloat, 1, rstd_dims,
+                                           rstd_strides));
   }
 
   RUNTIME_DEBUG_LOG(
