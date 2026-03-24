@@ -326,7 +326,8 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kMiopenConvolutionForward, paramTypes, i32Type);
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     // Build argument list matching the signature
     SmallVector<Value, 24> args = {
@@ -364,7 +365,8 @@ struct AllocOpLowering : public ConvertOpToLLVMPattern<AllocOp> {
     FailureOr<LLVM::LLVMFuncOp> mallocFn = LLVM::lookupOrCreateFn(
         rewriter, module, kHipMalloc, indexType, ptrType);
     if (failed(mallocFn))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     // Compute sizes and sizeBytes (dynamic sizes are after the ctx).
     SmallVector<Value, 4> sizes;
@@ -384,7 +386,8 @@ struct AllocOpLowering : public ConvertOpToLLVMPattern<AllocOp> {
     FailureOr<unsigned> addrSpace =
         getTypeConverter()->getMemRefAddressSpace(memRefType);
     if (failed(addrSpace))
-      return failure();
+      return rewriter.notifyMatchFailure(
+          op, "failed to convert memref address space");
     if (cast<LLVM::LLVMPointerType>(allocatedPtr.getType()).getAddressSpace() !=
         *addrSpace)
       allocatedPtr = LLVM::AddrSpaceCastOp::create(
@@ -414,7 +417,8 @@ struct FreeOpLowering : public ConvertOpToLLVMPattern<FreeOp> {
     FailureOr<LLVM::LLVMFuncOp> funcOp =
         LLVM::lookupOrCreateFn(rewriter, module, kHipFree, ptrType, voidType);
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     Value memrefDesc = adaptor.getMemref();
     Value allocatedPtr =
@@ -448,7 +452,8 @@ struct GetPoolOpLowering : public ConvertOpToLLVMPattern<GetPoolOp> {
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kHipGetPoolBase, {ptrType, i64Type}, ptrType);
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     Value poolSize = adaptor.getPoolSize();
     Value rawPtr = LLVM::CallOp::create(rewriter, loc, *funcOp,
@@ -458,7 +463,8 @@ struct GetPoolOpLowering : public ConvertOpToLLVMPattern<GetPoolOp> {
     FailureOr<unsigned> addrSpace =
         getTypeConverter()->getMemRefAddressSpace(memRefType);
     if (failed(addrSpace))
-      return failure();
+      return rewriter.notifyMatchFailure(
+          op, "failed to convert memref address space");
 
     Value gpuPtr = rawPtr;
     if (cast<LLVM::LLVMPointerType>(rawPtr.getType()).getAddressSpace() !=
@@ -580,7 +586,8 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapHipblasltMatmul, paramTypes, i32Type);
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     SmallVector<Value, 9> args = {statePtr, APtr, BPtr,       outputPtr, M,
                                   N,        K,    batchCount, elemSize};
@@ -650,7 +657,8 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
         LLVM::lookupOrCreateFn(rewriter, module, kWrapMiopenT5LayerNormForward,
                                paramTypes, rewriter.getI32Type());
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     SmallVector<Value> args = {statePtr,
                                inputPtr,
@@ -722,7 +730,8 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
         LLVM::lookupOrCreateFn(rewriter, module, kWrapSkipSimplifiedLayerNorm,
                                paramTypes, rewriter.getI32Type());
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     SmallVector<Value> args = {
         statePtr,         inputPtr,         skipPtr,
@@ -797,7 +806,8 @@ struct RopeOpLowering : public ConvertOpToLLVMPattern<RopeOp> {
         rewriter, module, kWrapRotaryEmbedding, paramTypes, i32Type);
 
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     SmallVector<Value, 12> args = {
         statePtr,    inputPtr,         posIdsPtr,           cosCachePtr,
@@ -851,7 +861,8 @@ struct MiopenBinaryOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, funcName, paramTypes, voidType);
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     auto aType = cast<MemRefType>(op.getA().getType());
     auto bType = cast<MemRefType>(op.getB().getType());
@@ -892,7 +903,8 @@ struct MiopenSoftmaxOpLowering
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kMiopenSoftmax, paramTypes, voidType);
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     int rank = cast<MemRefType>(op.getInput().getType()).getRank();
     MemRefDescriptor inputDesc(adaptor.getInput());
@@ -938,7 +950,8 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kHipTranspose, paramTypes, voidType);
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     int rank = cast<MemRefType>(op.getInput().getType()).getRank();
     if (rank > 3)
@@ -1020,7 +1033,8 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapGather, paramTypes, i32Type);
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     SmallVector<Value> args = {statePtr,
                                dataPtr,
@@ -1053,7 +1067,8 @@ struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kHipSilu, paramTypes, voidType);
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     SmallVector<Value> args = {
         adaptor.getCtx(), extractMemRefPtr(adaptor.getInput(), rewriter, loc),
@@ -1130,7 +1145,8 @@ struct SigmoidOpLowering : public ConvertOpToLLVMPattern<SigmoidOp> {
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapMiopenActivationForward, paramTypes, i32Type);
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     SmallVector<Value, 6> args = {statePtr,    inputPtr,    outputPtr,
                                   numElements, dataTypeVal, activationModeVal};
@@ -1207,7 +1223,8 @@ struct MulOpLowering : public ConvertOpToLLVMPattern<MulOp> {
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapMiopenOpTensor, paramTypes, i32Type);
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     SmallVector<Value, 7> args = {statePtr,   lhsPtr,         rhsPtr,
                                   outputPtr,  numElementsVal, dataTypeVal,
@@ -1278,7 +1295,8 @@ struct SubOpLowering : public ConvertOpToLLVMPattern<SubOp> {
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapElementwiseSub, paramTypes, i32Type);
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     SmallVector<Value, 6> args = {statePtr,  lhsPtr,         rhsPtr,
                                   outputPtr, numElementsVal, elemSizeVal};
@@ -1354,7 +1372,8 @@ struct CastOpLowering : public ConvertOpToLLVMPattern<CastOp> {
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapCast, paramTypes, i32Type);
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     SmallVector<Value, 6> args = {statePtr,    inputPtr,       outputPtr,
                                   numElements, srcDataTypeVal, dstDataTypeVal};
@@ -1444,7 +1463,8 @@ struct ReduceSumOpLowering : public ConvertOpToLLVMPattern<ReduceSumOp> {
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapReduceSum, paramTypes, i32Type);
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     SmallVector<Value, 8> args = {
         statePtr,        dataPtr,           axesPtr,     outputPtr,
@@ -1565,7 +1585,8 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     FailureOr<LLVM::LLVMFuncOp> funcOp =
         LLVM::lookupOrCreateFn(rewriter, module, kWrapGQA, paramTypes, i32Type);
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     SmallVector<Value, 24> args = {statePtr,
                                    queryPtr,
@@ -1619,7 +1640,8 @@ struct MemRefAllocOpLowering : public ConvertOpToLLVMPattern<memref::AllocOp> {
     FailureOr<LLVM::LLVMFuncOp> mallocFn = LLVM::lookupOrCreateFn(
         rewriter, module, kHipMalloc, indexType, ptrType);
     if (failed(mallocFn))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     SmallVector<Value, 4> sizes;
     SmallVector<Value, 4> strides;
@@ -1653,7 +1675,8 @@ struct MemRefDeallocOpLowering
     FailureOr<LLVM::LLVMFuncOp> funcOp =
         LLVM::lookupOrCreateFn(rewriter, module, kHipFree, ptrType, voidType);
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     // Must use allocatedPtr (not alignedPtr) -- hipFree requires the original
     // allocation base.  With memref.view, alignedPtr points into the pool
@@ -1741,7 +1764,8 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapMatMulNBits, paramTypes, i32Type);
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     SmallVector<Value, 15> args = {
         statePtr, APtr,    BPtr,      scalesPtr, zeroPointsPtr,
@@ -1896,7 +1920,8 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapQMoE, paramTypes, i32Type);
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     SmallVector<Value, 30> args = {statePtr,
                                    inputPtr,
@@ -1956,7 +1981,8 @@ struct GetConstantOpLowering : public ConvertOpToLLVMPattern<GetConstantOp> {
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kHipGetConstant, paramTypes, ptrType);
     if (failed(funcOp))
-      return failure();
+      return rewriter.notifyMatchFailure(op,
+                                         "failed to create runtime function");
 
     SmallVector<Value, 2> args = {adaptor.getCtx(), adaptor.getIndex()};
     auto callOp = LLVM::CallOp::create(rewriter, loc, *funcOp, args);
@@ -1966,7 +1992,8 @@ struct GetConstantOpLowering : public ConvertOpToLLVMPattern<GetConstantOp> {
     FailureOr<unsigned> addrSpace =
         getTypeConverter()->getMemRefAddressSpace(memRefType);
     if (failed(addrSpace))
-      return failure();
+      return rewriter.notifyMatchFailure(
+          op, "failed to convert memref address space");
 
     Value dataPtr = callOp.getResult();
     if (*addrSpace != 0)
