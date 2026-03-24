@@ -139,9 +139,9 @@ static Value getMemRefDimSize(MemRefType type, unsigned dimIdx,
   if (type.isDynamicDim(dimIdx))
     result = MemRefDescriptor(descriptor).size(rewriter, loc, dimIdx);
   else
-    result = LLVM::ConstantOp::create(rewriter, loc, rewriter.getI64Type(),
-                                      rewriter.getI64IntegerAttr(
-                                          type.getDimSize(dimIdx)));
+    result = LLVM::ConstantOp::create(
+        rewriter, loc, rewriter.getI64Type(),
+        rewriter.getI64IntegerAttr(type.getDimSize(dimIdx)));
   return result;
 }
 

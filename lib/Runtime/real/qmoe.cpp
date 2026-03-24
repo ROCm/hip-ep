@@ -105,8 +105,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                              num_tokens * k * sizeof(int32_t),
                              hipMemcpyDeviceToHost, hip_stream));
     HIP_CHECK(hipMemcpyAsync(h_weights.data(), d_expert_weights,
-                             num_tokens * k * elem_size,
-                             hipMemcpyDeviceToHost, hip_stream));
+                             num_tokens * k * elem_size, hipMemcpyDeviceToHost,
+                             hip_stream));
     HIP_CHECK(hipStreamSynchronize(hip_stream));
 
     std::vector<std::vector<TokenEntry>> expert_tokens(num_experts);
@@ -148,15 +148,14 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       HIP_CHECK(hipMemcpyAsync(d_token_ids, h_ids.data(),
                                count * sizeof(int32_t), hipMemcpyHostToDevice,
                                hip_stream));
-      HIP_CHECK(hipMemcpyAsync(d_token_wts, h_wts_e.data(),
-                               count * elem_size, hipMemcpyHostToDevice,
-                               hip_stream));
+      HIP_CHECK(hipMemcpyAsync(d_token_wts, h_wts_e.data(), count * elem_size,
+                               hipMemcpyHostToDevice, hip_stream));
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: %lld tokens - gather\n",
                         (long long)e, (long long)count);
-      HIP_CHECK(static_cast<hipError_t>(hip_qmoe_gather_tokens(
-          stream, input, d_gather_buf, d_token_ids, hidden_size, count,
-          elem_size)));
+      HIP_CHECK(static_cast<hipError_t>(
+          hip_qmoe_gather_tokens(stream, input, d_gather_buf, d_token_ids,
+                                 hidden_size, count, elem_size)));
 
       const char *fc1_w_e = static_cast<const char *>(fc1_weights) +
                             e * fusion_inter * k_blocks_fc1 * blob_size_fc1;
@@ -174,10 +173,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                         "[%lld x %lld] -> [%lld x %lld]\n",
                         (long long)e, (long long)count, (long long)hidden_size,
                         (long long)count, (long long)fusion_inter);
-      HIP_CHECK(static_cast<hipError_t>(hip_matmul_nbits(
-          stream, d_gather_buf, fc1_w_e, fc1_s_e, fc1_zp_e, fc1_b_e, d_fc1_buf,
-          count, fusion_inter, hidden_size, 1, expert_weight_bits, block_size,
-          elem_size)));
+      HIP_CHECK(static_cast<hipError_t>(
+          hip_matmul_nbits(stream, d_gather_buf, fc1_w_e, fc1_s_e, fc1_zp_e,
+                           fc1_b_e, d_fc1_buf, count, fusion_inter, hidden_size,
+                           1, expert_weight_bits, block_size, elem_size)));
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: swiglu(alpha=%.3f, "
                         "beta=%.3f, limit=%.1f)\n",
@@ -203,16 +202,16 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                         "[%lld x %lld] -> [%lld x %lld]\n",
                         (long long)e, (long long)count, (long long)inter_size,
                         (long long)count, (long long)hidden_size);
-      HIP_CHECK(static_cast<hipError_t>(hip_matmul_nbits(
-          stream, d_act_buf, fc2_w_e, fc2_s_e, fc2_zp_e, fc2_b_e, d_fc2_buf,
-          count, hidden_size, inter_size, 1, expert_weight_bits, block_size,
-          elem_size)));
+      HIP_CHECK(static_cast<hipError_t>(
+          hip_matmul_nbits(stream, d_act_buf, fc2_w_e, fc2_s_e, fc2_zp_e,
+                           fc2_b_e, d_fc2_buf, count, hidden_size, inter_size,
+                           1, expert_weight_bits, block_size, elem_size)));
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: scatter_add\n",
                         (long long)e);
-      HIP_CHECK(static_cast<hipError_t>(hip_qmoe_scatter_add(
-          stream, output, d_fc2_buf, d_token_ids, d_token_wts, hidden_size,
-          count, elem_size)));
+      HIP_CHECK(static_cast<hipError_t>(
+          hip_qmoe_scatter_add(stream, output, d_fc2_buf, d_token_ids,
+                               d_token_wts, hidden_size, count, elem_size)));
     }
   }
 
