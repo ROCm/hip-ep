@@ -707,6 +707,218 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
+//===----------------------------------------------------------------------===//
+// ONNX MatMulNBits -> HIP MatMulNBits (com.microsoft custom op)
+//===----------------------------------------------------------------------===//
+
+struct MatMulNBitsToHip : public mlir::RewritePattern {
+  MatMulNBitsToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
+                                  mlir::PatternRewriter &rewriter) const {
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr || funcNameAttr.getValue() != "MatMulNBits")
+    return mlir::failure();
+  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+    return mlir::failure();
+
+  mlir::Location loc = op->getLoc();
+
+  if (op->getNumOperands() < 3)
+    return rewriter.notifyMatchFailure(
+        op, "expected at least 3 inputs for MatMulNBits");
+  if (op->getNumResults() != 1)
+    return rewriter.notifyMatchFailure(op,
+                                       "expected 1 output for MatMulNBits");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Value A = op->getOperand(0);
+  mlir::Value B = op->getOperand(1);
+  mlir::Value scales = op->getOperand(2);
+
+  auto getOptionalInput = [&](unsigned idx) -> mlir::Value {
+    if (idx >= op->getNumOperands())
+      return mlir::Value{};
+    mlir::Value v = op->getOperand(idx);
+    if (!v || mlir::isa<mlir::NoneType>(v.getType()))
+      return mlir::Value{};
+    return v;
+  };
+  mlir::Value zeroPoints = getOptionalInput(3);
+  mlir::Value gIdx = getOptionalInput(4);
+  mlir::Value bias = getOptionalInput(5);
+
+  auto KAttr = rewriter.getI64IntegerAttr(
+      op->getAttrOfType<mlir::IntegerAttr>("K").getSInt());
+  auto NAttr = rewriter.getI64IntegerAttr(
+      op->getAttrOfType<mlir::IntegerAttr>("N").getSInt());
+
+  auto bitsIntAttr = op->getAttrOfType<mlir::IntegerAttr>("bits");
+  auto bitsAttr = rewriter.getI64IntegerAttr(
+      bitsIntAttr ? bitsIntAttr.getSInt() : 4);
+
+  auto blockSizeAttr = rewriter.getI64IntegerAttr(
+      op->getAttrOfType<mlir::IntegerAttr>("block_size").getSInt());
+
+  auto accuracyIntAttr =
+      op->getAttrOfType<mlir::IntegerAttr>("accuracy_level");
+  auto accuracyLevelAttr = rewriter.getI64IntegerAttr(
+      accuracyIntAttr ? accuracyIntAttr.getSInt() : 0);
+
+  auto rt = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::Value init = createEmptyTensor(rewriter, loc, rt, A);
+
+  auto hipOp = mlir::hip::MatMulNBitsOp::create(
+      rewriter, loc, mlir::TypeRange{rt}, context, A, B, scales,
+      zeroPoints, gIdx, bias, init,
+      KAttr, NAttr, bitsAttr, blockSizeAttr, accuracyLevelAttr);
+  rewriter.replaceOp(op, hipOp->getResults());
+  return mlir::success();
+}
+
+//===----------------------------------------------------------------------===//
+// ONNX QMoE -> HIP QMoE (com.microsoft custom op)
+//===----------------------------------------------------------------------===//
+
+struct QMoEToHip : public mlir::RewritePattern {
+  QMoEToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+QMoEToHip::matchAndRewrite(mlir::Operation *op,
+                            mlir::PatternRewriter &rewriter) const {
+  auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
+  if (!funcNameAttr || funcNameAttr.getValue() != "QMoE")
+    return mlir::failure();
+  auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+    return mlir::failure();
+
+  mlir::Location loc = op->getLoc();
+
+  if (op->getNumOperands() < 7)
+    return rewriter.notifyMatchFailure(
+        op, "expected at least 7 inputs for QMoE");
+  if (op->getNumResults() != 1)
+    return rewriter.notifyMatchFailure(op, "expected 1 output for QMoE");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
+  auto getOptionalInput = [&](unsigned idx) -> mlir::Value {
+    if (idx >= op->getNumOperands())
+      return mlir::Value{};
+    mlir::Value v = op->getOperand(idx);
+    if (!v || mlir::isa<mlir::NoneType>(v.getType()))
+      return mlir::Value{};
+    return v;
+  };
+
+  mlir::Value input = op->getOperand(0);
+  mlir::Value routerProbs = op->getOperand(1);
+  mlir::Value fc1Weights = op->getOperand(2);
+  mlir::Value fc1Scales = op->getOperand(3);
+  mlir::Value fc1Bias = getOptionalInput(4);
+  mlir::Value fc2Weights = op->getOperand(5);
+  mlir::Value fc2Scales = op->getOperand(6);
+  mlir::Value fc2Bias = getOptionalInput(7);
+  mlir::Value fc3Weights = getOptionalInput(8);
+  mlir::Value fc3Scales = getOptionalInput(9);
+  mlir::Value fc3Bias = getOptionalInput(10);
+  mlir::Value fc1ZeroPoints = getOptionalInput(11);
+  mlir::Value fc2ZeroPoints = getOptionalInput(12);
+  mlir::Value fc3ZeroPoints = getOptionalInput(13);
+
+  auto expertWeightBitsIntAttr =
+      op->getAttrOfType<mlir::IntegerAttr>("expert_weight_bits");
+  auto expertWeightBitsAttr = rewriter.getI64IntegerAttr(
+      expertWeightBitsIntAttr ? expertWeightBitsIntAttr.getSInt() : 4);
+
+  auto kIntAttr = op->getAttrOfType<mlir::IntegerAttr>("k");
+  auto kAttr = rewriter.getI64IntegerAttr(
+      kIntAttr ? kIntAttr.getSInt() : 1);
+
+  auto blockSizeIntAttr = op->getAttrOfType<mlir::IntegerAttr>("block_size");
+  auto blockSizeAttr = rewriter.getI64IntegerAttr(
+      blockSizeIntAttr ? blockSizeIntAttr.getSInt() : 0);
+
+  auto normIntAttr =
+      op->getAttrOfType<mlir::IntegerAttr>("normalize_routing_weights");
+  auto normalizeAttr = rewriter.getI64IntegerAttr(
+      normIntAttr ? normIntAttr.getSInt() : 0);
+
+  auto swigluFusionIntAttr =
+      op->getAttrOfType<mlir::IntegerAttr>("swiglu_fusion");
+  auto swigluFusionAttr = rewriter.getI64IntegerAttr(
+      swigluFusionIntAttr ? swigluFusionIntAttr.getSInt() : 0);
+
+  auto sparseIntAttr =
+      op->getAttrOfType<mlir::IntegerAttr>("use_sparse_mixer");
+  auto useSparseAttr = rewriter.getI64IntegerAttr(
+      sparseIntAttr ? sparseIntAttr.getSInt() : 0);
+
+  auto alphaFloatAttr =
+      op->getAttrOfType<mlir::FloatAttr>("activation_alpha");
+  auto activationAlphaAttr = alphaFloatAttr
+      ? alphaFloatAttr
+      : rewriter.getF32FloatAttr(0.0f);
+
+  auto betaFloatAttr =
+      op->getAttrOfType<mlir::FloatAttr>("activation_beta");
+  auto activationBetaAttr = betaFloatAttr
+      ? betaFloatAttr
+      : rewriter.getF32FloatAttr(0.0f);
+
+  auto limitFloatAttr =
+      op->getAttrOfType<mlir::FloatAttr>("swiglu_limit");
+  auto swigluLimitAttr = limitFloatAttr
+      ? limitFloatAttr
+      : rewriter.getF32FloatAttr(0.0f);
+
+  auto activationTypeStrAttr =
+      op->getAttrOfType<mlir::StringAttr>("activation_type");
+  auto activationTypeAttr = activationTypeStrAttr
+      ? activationTypeStrAttr
+      : rewriter.getStringAttr("relu");
+
+  auto rt = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::Value init = createEmptyTensor(rewriter, loc, rt, input);
+
+  auto hipOp = mlir::hip::QMoEOp::create(
+      rewriter, loc, mlir::TypeRange{rt}, context,
+      input, routerProbs,
+      fc1Weights, fc1Scales, fc2Weights, fc2Scales,
+      fc1Bias, fc2Bias,
+      fc3Weights, fc3Scales, fc3Bias,
+      fc1ZeroPoints, fc2ZeroPoints, fc3ZeroPoints,
+      init,
+      expertWeightBitsAttr, kAttr, blockSizeAttr,
+      normalizeAttr, swigluFusionAttr, useSparseAttr,
+      activationAlphaAttr, activationBetaAttr, swigluLimitAttr,
+      activationTypeAttr);
+  rewriter.replaceOp(op, hipOp->getResults());
+  return mlir::success();
+}
+
 /// onnx.Conv -> hip.conv
 struct ConvToHip : public mlir::RewritePattern {
   ConvToHip(mlir::MLIRContext *ctx)
@@ -1288,6 +1500,8 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   patterns.add<SkipSimplifiedLayerNormToHip>(ctx);
   patterns.add<RotaryEmbeddingToHip>(ctx);
   patterns.add<GroupQueryAttentionToHip>(ctx);
+  patterns.add<MatMulNBitsToHip>(ctx);
+  patterns.add<QMoEToHip>(ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);

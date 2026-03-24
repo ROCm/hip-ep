@@ -278,6 +278,130 @@ int hip_reduce_sum(
     int64_t num_output_elements,
     int hip_dtype);
 
+/* =========================================================================
+ * MatMulNBits (Fused Dequant + MatMul)
+ * =========================================================================
+ *
+ * Computes Y = A @ dequant(B)^T + bias, where B holds packed int4 weights.
+ *
+ * Dequantization (per-block): dequant = (quant_val - zero_point) * scale
+ * For 4-bit: lower nibble = first value, upper nibble = second.
+ * Default zero_point = 8 (when zero_points is NULL).
+ *
+ * Parameters:
+ *   stream             - hipStream_t cast to void*
+ *   A                  - GPU [batch, M, K]
+ *   B                  - GPU [N, k_blocks, blob_size] uint8 packed int4
+ *   scales             - GPU [N, k_blocks] (same type as A)
+ *   zero_points        - GPU [N, k_blocks] uint8 (nullable, default zp=8)
+ *   bias               - GPU [N] (nullable, same type as A)
+ *   output             - GPU [batch, M, N]
+ *   M                  - rows per batch
+ *   N                  - output columns
+ *   K                  - inner dimension
+ *   batch_count        - number of batches
+ *   bits               - quantization bit-width (must be 4)
+ *   block_size         - quantization block size (e.g. 32)
+ *   element_size_bytes - 2 for fp16, 4 for fp32
+ *
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_matmul_nbits(
+    void* stream,
+    const void* A,
+    const void* B,
+    const void* scales,
+    const void* zero_points,
+    const void* bias,
+    void* output,
+    int64_t M, int64_t N, int64_t K,
+    int64_t batch_count,
+    int64_t bits,
+    int64_t block_size,
+    int64_t element_size_bytes);
+
+/* =========================================================================
+ * QMoE Sub-Kernels
+ * =========================================================================
+ *
+ * Individual kernel launchers for QMoE (Quantized Mixture-of-Experts).
+ * These only launch GPU kernels — no memory allocation, no stream sync.
+ * The runtime wrapper (wrap_qmoe) orchestrates the expert loop.
+ *
+ * All functions take element_size_bytes: 2 for fp16, 4 for fp32.
+ */
+
+/* Top-k routing: find top-k experts per token from router_probs.
+ *   router_probs   - GPU [num_tokens, num_experts]
+ *   expert_indices - GPU [num_tokens, k] int32 (output)
+ *   expert_weights - GPU [num_tokens, k] (output, same type as probs)
+ *   normalize      - 1 to normalize selected weights (sum-to-one)
+ */
+int hip_qmoe_topk_routing(
+    void* stream,
+    const void* router_probs,
+    void* expert_indices,
+    void* expert_weights,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t k,
+    int64_t normalize,
+    int64_t element_size_bytes);
+
+/* Gather rows: gathered[i,:] = input[token_ids[i],:]
+ *   token_ids - GPU [count] int32
+ */
+int hip_qmoe_gather_tokens(
+    void* stream,
+    const void* input,
+    void* gathered,
+    const void* token_ids,
+    int64_t width,
+    int64_t count,
+    int64_t element_size_bytes);
+
+/* In-place bias: data[i,j] += bias[j]
+ *   No-op if bias is NULL.
+ */
+int hip_qmoe_add_bias(
+    void* stream,
+    void* data,
+    const void* bias,
+    int64_t n,
+    int64_t width,
+    int64_t element_size_bytes);
+
+/* SwiGLU activation (fused, swiglu_fusion=1):
+ *   input  [n, 2*inter_size] -> output [n, inter_size]
+ *   G = min(gate, limit)
+ *   L = clamp(linear, -limit, limit)
+ *   out = G * sigmoid(alpha*G) * (L + beta)
+ */
+int hip_qmoe_swiglu(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t n,
+    int64_t inter_size,
+    float alpha,
+    float beta,
+    float limit,
+    int64_t element_size_bytes);
+
+/* Weighted scatter-add: output[token_ids[i],:] += weights[i] * expert_out[i,:]
+ *   token_ids - GPU [count] int32
+ *   weights   - GPU [count] (same type as output)
+ */
+int hip_qmoe_scatter_add(
+    void* stream,
+    void* output,
+    const void* expert_out,
+    const void* token_ids,
+    const void* weights,
+    int64_t width,
+    int64_t count,
+    int64_t element_size_bytes);
+
 #ifdef __cplusplus
 }
 #endif

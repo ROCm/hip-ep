@@ -1663,6 +1663,274 @@ struct MemRefDeallocOpLowering
 };
 
 //===----------------------------------------------------------------------===//
+// MatMulNBits Lowering
+//===----------------------------------------------------------------------===//
+
+struct MatMulNBitsOpLowering
+    : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(MatMulNBitsOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter& rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(
+          rewriter, loc, i64Type, rewriter.getI64IntegerAttr(value));
+    };
+
+    auto getAlignedPtr = [&](Value memrefDesc) -> Value {
+      MemRefDescriptor desc(memrefDesc);
+      Value ptr = desc.alignedPtr(rewriter, loc);
+      if (cast<LLVM::LLVMPointerType>(ptr.getType()).getAddressSpace() != 0) {
+        ptr = LLVM::AddrSpaceCastOp::create(rewriter, loc, ptrType, ptr);
+      }
+      return ptr;
+    };
+
+    auto getOptionalPtr = [&](Value memrefDesc) -> Value {
+      if (!memrefDesc)
+        return LLVM::ZeroOp::create(rewriter, loc, ptrType);
+      return getAlignedPtr(memrefDesc);
+    };
+
+    Value statePtr = adaptor.getHandle();
+    Value APtr = getAlignedPtr(adaptor.getA());
+    Value BPtr = getAlignedPtr(adaptor.getB());
+    Value scalesPtr = getAlignedPtr(adaptor.getScales());
+    Value zeroPointsPtr = getOptionalPtr(adaptor.getZeroPoints());
+    Value gIdxPtr = getOptionalPtr(adaptor.getGIdx());
+    Value biasPtr = getOptionalPtr(adaptor.getBias());
+    Value outputPtr = getAlignedPtr(adaptor.getOutput());
+
+    auto AType = cast<MemRefType>(op.getA().getType());
+    auto AShape = AType.getShape();
+    int64_t ARank = AShape.size();
+
+    int64_t M = (ARank >= 2) ? AShape[ARank - 2] : 1;
+    int64_t batchCount = 1;
+    for (int64_t i = 0; i < ARank - 2; ++i)
+      batchCount *= AShape[i];
+
+    int64_t elemSize =
+        AType.getElementType().getIntOrFloatBitWidth() / 8;
+
+    Value m = createI64Const(M);
+    Value n = createI64Const(op.getN());
+    Value k = createI64Const(op.getK());
+    Value batch = createI64Const(batchCount);
+    Value bits = createI64Const(op.getBits());
+    Value blockSize = createI64Const(op.getBlockSize());
+    Value elemSizeVal = createI64Const(elemSize);
+
+    SmallVector<Type, 15> paramTypes = {
+        ptrType,  // state
+        ptrType,  // A
+        ptrType,  // B
+        ptrType,  // scales
+        ptrType,  // zero_points (nullable)
+        ptrType,  // g_idx (nullable)
+        ptrType,  // bias (nullable)
+        ptrType,  // output
+        i64Type,  // M
+        i64Type,  // N
+        i64Type,  // K
+        i64Type,  // batch_count
+        i64Type,  // bits
+        i64Type,  // block_size
+        i64Type   // elem_size
+    };
+
+    static constexpr const char* kWrapMatMulNBits = "wrap_matmul_nbits";
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapMatMulNBits, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value, 15> args = {
+        statePtr, APtr, BPtr, scalesPtr,
+        zeroPointsPtr, gIdxPtr, biasPtr, outputPtr,
+        m, n, k, batch, bits, blockSize, elemSizeVal};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// QMoE Lowering
+//===----------------------------------------------------------------------===//
+
+struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(QMoEOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter& rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+    Type f32Type = rewriter.getF32Type();
+
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(
+          rewriter, loc, i64Type, rewriter.getI64IntegerAttr(value));
+    };
+    auto createF32Const = [&](float value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, f32Type,
+                                               rewriter.getF32FloatAttr(value));
+    };
+
+    auto getAlignedPtr = [&](Value memrefDesc) -> Value {
+      MemRefDescriptor desc(memrefDesc);
+      Value ptr = desc.alignedPtr(rewriter, loc);
+      if (cast<LLVM::LLVMPointerType>(ptr.getType()).getAddressSpace() != 0) {
+        ptr = LLVM::AddrSpaceCastOp::create(rewriter, loc, ptrType, ptr);
+      }
+      return ptr;
+    };
+
+    auto getOptionalPtr = [&](Value memrefDesc) -> Value {
+      if (!memrefDesc)
+        return LLVM::ZeroOp::create(rewriter, loc, ptrType);
+      return getAlignedPtr(memrefDesc);
+    };
+
+    Value statePtr = adaptor.getHandle();
+    Value inputPtr = getAlignedPtr(adaptor.getInput());
+    Value routerPtr = getAlignedPtr(adaptor.getRouterProbs());
+    Value fc1WeightsPtr = getAlignedPtr(adaptor.getFc1ExpertsWeights());
+    Value fc1ScalesPtr = getAlignedPtr(adaptor.getFc1Scales());
+    Value fc1BiasPtr = getOptionalPtr(adaptor.getFc1ExpertsBias());
+    Value fc2WeightsPtr = getAlignedPtr(adaptor.getFc2ExpertsWeights());
+    Value fc2ScalesPtr = getAlignedPtr(adaptor.getFc2Scales());
+    Value fc2BiasPtr = getOptionalPtr(adaptor.getFc2ExpertsBias());
+    Value fc3WeightsPtr = getOptionalPtr(adaptor.getFc3ExpertsWeights());
+    Value fc3ScalesPtr = getOptionalPtr(adaptor.getFc3Scales());
+    Value fc3BiasPtr = getOptionalPtr(adaptor.getFc3ExpertsBias());
+    Value fc1ZpPtr = getOptionalPtr(adaptor.getFc1ZeroPoints());
+    Value fc2ZpPtr = getOptionalPtr(adaptor.getFc2ZeroPoints());
+    Value fc3ZpPtr = getOptionalPtr(adaptor.getFc3ZeroPoints());
+    Value outputPtr = getAlignedPtr(adaptor.getOutput());
+
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    auto inputShape = inputType.getShape();
+    int64_t numTokens = 1;
+    for (int64_t i = 0; i < (int64_t)inputShape.size() - 1; ++i)
+      numTokens *= inputShape[i];
+    int64_t hiddenSize = inputShape.back();
+
+    auto routerType = cast<MemRefType>(op.getRouterProbs().getType());
+    int64_t numExperts = routerType.getShape().back();
+
+    auto fc1Shape = cast<MemRefType>(op.getFc1ExpertsWeights().getType())
+                        .getShape();
+    int64_t fusionTimesInter = fc1Shape[1];
+    int64_t swigluFusion = op.getSwigluFusion();
+    int64_t fusionSize = (swigluFusion > 0) ? 2 : 1;
+    int64_t interSize = fusionTimesInter / fusionSize;
+
+    int64_t elemSize =
+        inputType.getElementType().getIntOrFloatBitWidth() / 8;
+
+    StringRef activationType = op.getActivationType();
+    int64_t activationTypeEnum = 0;
+    if (activationType == "relu")
+      activationTypeEnum = 0;
+    else if (activationType == "gelu")
+      activationTypeEnum = 1;
+    else if (activationType == "silu")
+      activationTypeEnum = 2;
+    else if (activationType == "swiglu")
+      activationTypeEnum = 3;
+    else if (activationType == "identity")
+      activationTypeEnum = 4;
+
+    Value numTokensVal = createI64Const(numTokens);
+    Value hiddenSizeVal = createI64Const(hiddenSize);
+    Value interSizeVal = createI64Const(interSize);
+    Value numExpertsVal = createI64Const(numExperts);
+    Value kVal = createI64Const(op.getK());
+    Value expertWeightBitsVal = createI64Const(op.getExpertWeightBits());
+    Value blockSizeVal = createI64Const(op.getBlockSize());
+    Value swigluFusionVal = createI64Const(swigluFusion);
+    Value activationTypeVal = createI64Const(activationTypeEnum);
+    Value activationAlphaVal =
+        createF32Const(op.getActivationAlpha().convertToFloat());
+    Value activationBetaVal =
+        createF32Const(op.getActivationBeta().convertToFloat());
+    Value swigluLimitVal =
+        createF32Const(op.getSwigluLimit().convertToFloat());
+    Value normalizeVal = createI64Const(op.getNormalizeRoutingWeights());
+    Value elemSizeVal = createI64Const(elemSize);
+
+    SmallVector<Type, 30> paramTypes = {
+        ptrType,  // state
+        ptrType,  // input
+        ptrType,  // router_probs
+        ptrType,  // fc1_weights
+        ptrType,  // fc1_scales
+        ptrType,  // fc1_bias (nullable)
+        ptrType,  // fc2_weights
+        ptrType,  // fc2_scales
+        ptrType,  // fc2_bias (nullable)
+        ptrType,  // fc3_weights (nullable)
+        ptrType,  // fc3_scales (nullable)
+        ptrType,  // fc3_bias (nullable)
+        ptrType,  // fc1_zero_points (nullable)
+        ptrType,  // fc2_zero_points (nullable)
+        ptrType,  // fc3_zero_points (nullable)
+        ptrType,  // output
+        i64Type,  // num_tokens
+        i64Type,  // hidden_size
+        i64Type,  // inter_size
+        i64Type,  // num_experts
+        i64Type,  // k
+        i64Type,  // expert_weight_bits
+        i64Type,  // block_size
+        i64Type,  // swiglu_fusion
+        i64Type,  // activation_type
+        f32Type,  // activation_alpha
+        f32Type,  // activation_beta
+        f32Type,  // swiglu_limit
+        i64Type,  // normalize_routing_weights
+        i64Type   // elem_size
+    };
+
+    static constexpr const char* kWrapQMoE = "wrap_qmoe";
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapQMoE, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value, 30> args = {
+        statePtr, inputPtr, routerPtr,
+        fc1WeightsPtr, fc1ScalesPtr, fc1BiasPtr,
+        fc2WeightsPtr, fc2ScalesPtr, fc2BiasPtr,
+        fc3WeightsPtr, fc3ScalesPtr, fc3BiasPtr,
+        fc1ZpPtr, fc2ZpPtr, fc3ZpPtr,
+        outputPtr,
+        numTokensVal, hiddenSizeVal, interSizeVal, numExpertsVal,
+        kVal, expertWeightBitsVal, blockSizeVal,
+        swigluFusionVal, activationTypeVal,
+        activationAlphaVal, activationBetaVal, swigluLimitVal,
+        normalizeVal, elemSizeVal};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // GetConstantOp Lowering
 //===----------------------------------------------------------------------===//
 
@@ -1931,7 +2199,8 @@ void ConvertHipToLLVMPass::runOnOperation() {
                RmsNormOpLowering, SkipRmsNormOpLowering, RopeOpLowering,
                MiopenSoftmaxOpLowering, TransposeOpLowering, GatherOpLowering,
                SiluOpLowering, SigmoidOpLowering, MulOpLowering, SubOpLowering,
-               CastOpLowering, ReduceSumOpLowering, GqaOpLowering>(
+               CastOpLowering, ReduceSumOpLowering, GqaOpLowering,
+               MatMulNBitsOpLowering, QMoEOpLowering>(
       typeConverter);
   patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter,
                                                        kMiopenAdd);

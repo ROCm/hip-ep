@@ -9,6 +9,7 @@
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 #include "mlir/Dialect/Bufferization/IR/DstBufferizableOpInterfaceImpl.h"
 #include "mlir/IR/DialectRegistry.h"
+#include "mlir/IR/OperationSupport.h"
 
 namespace mlir {
 namespace hip {
@@ -35,8 +36,11 @@ struct HipDstBufferizableModel
       }
     }
 
-    OpTy::create(rewriter, op->getLoc(), TypeRange{}, newOperands,
-                 op->getAttrs());
+    OperationState newState(op->getLoc(), op->getName().getStringRef());
+    newState.addOperands(newOperands);
+    newState.addAttributes(op->getAttrs());
+    newState.propertiesAttr = op->getPropertiesAsAttribute();
+    rewriter.create(newState);
 
     SmallVector<Value> replacements;
     for (OpResult result : op->getResults()) {
@@ -78,6 +82,9 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     SigmoidOp::attachInterface<HipDstBufferizableModel<SigmoidOp>>(*ctx);
     SubOp::attachInterface<HipDstBufferizableModel<SubOp>>(*ctx);
     ReduceSumOp::attachInterface<HipDstBufferizableModel<ReduceSumOp>>(*ctx);
+    MatMulNBitsOp::attachInterface<
+        HipDstBufferizableModel<MatMulNBitsOp>>(*ctx);
+    QMoEOp::attachInterface<HipDstBufferizableModel<QMoEOp>>(*ctx);
   });
 }
 
