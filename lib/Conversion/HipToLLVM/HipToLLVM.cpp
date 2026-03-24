@@ -130,27 +130,32 @@ static Value extractOptionalMemRefPtr(Value memrefDesc,
   return extractMemRefPtr(memrefDesc, rewriter, loc);
 }
 
+// Helper: get a single memref dimension as an i64 Value, using a compile-time
+// constant for static dims and extracting from the descriptor for dynamic dims.
+static Value getMemRefDimSize(MemRefType type, unsigned dimIdx,
+                              Value descriptor,
+                              ConversionPatternRewriter &rewriter,
+                              Location loc) {
+  int64_t dimSize = type.getDimSize(dimIdx);
+  if (!ShapedType::isDynamic(dimSize)) {
+    return LLVM::ConstantOp::create(rewriter, loc, rewriter.getI64Type(),
+                                    rewriter.getI64IntegerAttr(dimSize));
+  }
+  return MemRefDescriptor(descriptor).size(rewriter, loc, dimIdx);
+}
+
 // Helper: compute total number of elements in a memref, handling both static
 // and dynamic dimensions.
 static Value computeNumElements(MemRefType type, Value descriptor,
                                 ConversionPatternRewriter &rewriter,
                                 Location loc) {
-  MemRefDescriptor desc(descriptor);
   Type i64Type = rewriter.getI64Type();
   Value num = LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                        rewriter.getI64IntegerAttr(1));
-
-  for (auto dimIdx : llvm::seq<int64_t>(type.getRank())) {
-    Value dimSize;
-    if (type.isDynamicDim(dimIdx)) {
-      dimSize = desc.size(rewriter, loc, dimIdx);
-    } else {
-      dimSize = LLVM::ConstantOp::create(
-          rewriter, loc, i64Type,
-          rewriter.getI64IntegerAttr(type.getDimSize(dimIdx)));
-    }
-    num = LLVM::MulOp::create(rewriter, loc, num, dimSize);
-  }
+  for (auto dimIdx : llvm::seq<int64_t>(type.getRank()))
+    num = LLVM::MulOp::create(
+        rewriter, loc, num,
+        getMemRefDimSize(type, dimIdx, descriptor, rewriter, loc));
   return num;
 }
 
@@ -247,35 +252,25 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
       return op.emitError("Output must be rank-4 tensor [N, K, H', W']");
     }
 
-    // Helper: Get dimension value (static constant or dynamic descriptor size)
-    auto getDim = [&](MemRefDescriptor &desc, MemRefType type,
-                      unsigned dimIdx) -> Value {
-      int64_t dimSize = type.getShape()[dimIdx];
-      if (!ShapedType::isDynamic(dimSize)) {
-        // Static dimension: use compile-time constant
-        return createI64Const(dimSize);
-      }
-      // Dynamic dimension: extract from runtime descriptor
-      return desc.size(rewriter, loc, dimIdx);
-    };
-
-    // Create descriptors for accessing runtime sizes
-    MemRefDescriptor inputDesc(adaptor.getInput());
-    MemRefDescriptor weightsDesc(adaptor.getWeights());
-    MemRefDescriptor outputDesc(adaptor.getOutput());
-
     // Input shape: [N, C, H, W]
-    Value inputN = getDim(inputDesc, inputType, 0);
-    Value inputC = getDim(inputDesc, inputType, 1);
-    Value inputH = getDim(inputDesc, inputType, 2);
-    Value inputW = getDim(inputDesc, inputType, 3);
+    Value inputN =
+        getMemRefDimSize(inputType, 0, adaptor.getInput(), rewriter, loc);
+    Value inputC =
+        getMemRefDimSize(inputType, 1, adaptor.getInput(), rewriter, loc);
+    Value inputH =
+        getMemRefDimSize(inputType, 2, adaptor.getInput(), rewriter, loc);
+    Value inputW =
+        getMemRefDimSize(inputType, 3, adaptor.getInput(), rewriter, loc);
 
     // Weights shape: [K, C, R, S] where K=output channels
-    Value weightsK = getDim(weightsDesc, weightsType, 0);
+    Value weightsK =
+        getMemRefDimSize(weightsType, 0, adaptor.getWeights(), rewriter, loc);
 
     // Output shape: [N, K, H', W']
-    Value outputH = getDim(outputDesc, outputType, 2);
-    Value outputW = getDim(outputDesc, outputType, 3);
+    Value outputH =
+        getMemRefDimSize(outputType, 2, adaptor.getOutput(), rewriter, loc);
+    Value outputW =
+        getMemRefDimSize(outputType, 3, adaptor.getOutput(), rewriter, loc);
 
     // Extract attributes
     auto kernelShape = op.getKernelShape();
@@ -1710,20 +1705,21 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
     Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     auto AType = cast<MemRefType>(op.getA().getType());
-    auto AShape = AType.getShape();
-    int64_t ARank = AShape.size();
-
-    int64_t M = (ARank >= 2) ? AShape[ARank - 2] : 1;
-    int64_t batchCount = 1;
-    for (int64_t i = 0; i < ARank - 2; ++i)
-      batchCount *= AShape[i];
-
+    int64_t ARank = AType.getRank();
     int64_t elemSize = AType.getElementType().getIntOrFloatBitWidth() / 8;
 
-    Value m = createI64Const(M);
+    Value m = (ARank >= 2)
+                  ? getMemRefDimSize(AType, ARank - 2, adaptor.getA(),
+                                     rewriter, loc)
+                  : createI64Const(1);
+    Value batch = createI64Const(1);
+    for (int64_t i = 0; i < ARank - 2; ++i)
+      batch = LLVM::MulOp::create(
+          rewriter, loc, batch,
+          getMemRefDimSize(AType, i, adaptor.getA(), rewriter, loc));
+
     Value n = createI64Const(op.getN());
     Value k = createI64Const(op.getK());
-    Value batch = createI64Const(batchCount);
     Value bits = createI64Const(op.getBits());
     Value blockSize = createI64Const(op.getBlockSize());
     Value elemSizeVal = createI64Const(elemSize);
@@ -1818,23 +1814,30 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
     Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     auto inputType = cast<MemRefType>(op.getInput().getType());
-    auto inputShape = inputType.getShape();
-    int64_t numTokens = 1;
-    for (int64_t i = 0; i < (int64_t)inputShape.size() - 1; ++i)
-      numTokens *= inputShape[i];
-    int64_t hiddenSize = inputShape.back();
-
     auto routerType = cast<MemRefType>(op.getRouterProbs().getType());
-    int64_t numExperts = routerType.getShape().back();
+    auto fc1Type = cast<MemRefType>(op.getFc1ExpertsWeights().getType());
+    int64_t elemSize = inputType.getElementType().getIntOrFloatBitWidth() / 8;
 
-    auto fc1Shape =
-        cast<MemRefType>(op.getFc1ExpertsWeights().getType()).getShape();
-    int64_t fusionTimesInter = fc1Shape[1];
+    int64_t inputRank = inputType.getRank();
+    Value numTokensVal = createI64Const(1);
+    for (int64_t i = 0; i < inputRank - 1; ++i)
+      numTokensVal = LLVM::MulOp::create(
+          rewriter, loc, numTokensVal,
+          getMemRefDimSize(inputType, i, adaptor.getInput(), rewriter, loc));
+    Value hiddenSizeVal = getMemRefDimSize(inputType, inputRank - 1,
+                                           adaptor.getInput(), rewriter, loc);
+    Value numExpertsVal =
+        getMemRefDimSize(routerType, routerType.getRank() - 1,
+                         adaptor.getRouterProbs(), rewriter, loc);
+
     int64_t swigluFusion = op.getSwigluFusion();
     int64_t fusionSize = (swigluFusion > 0) ? 2 : 1;
-    int64_t interSize = fusionTimesInter / fusionSize;
-
-    int64_t elemSize = inputType.getElementType().getIntOrFloatBitWidth() / 8;
+    Value interSizeVal = getMemRefDimSize(fc1Type, 1,
+                                          adaptor.getFc1ExpertsWeights(),
+                                          rewriter, loc);
+    if (fusionSize > 1)
+      interSizeVal = LLVM::SDivOp::create(rewriter, loc, interSizeVal,
+                                          createI64Const(fusionSize));
 
     StringRef activationType = op.getActivationType();
     int64_t activationTypeEnum = 0;
@@ -1849,10 +1852,6 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
     else if (activationType == "identity")
       activationTypeEnum = 4;
 
-    Value numTokensVal = createI64Const(numTokens);
-    Value hiddenSizeVal = createI64Const(hiddenSize);
-    Value interSizeVal = createI64Const(interSize);
-    Value numExpertsVal = createI64Const(numExperts);
     Value kVal = createI64Const(op.getK());
     Value expertWeightBitsVal = createI64Const(op.getExpertWeightBits());
     Value blockSizeVal = createI64Const(op.getBlockSize());
