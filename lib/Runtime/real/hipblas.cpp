@@ -3,20 +3,14 @@
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
+#include "error_check_macros.h"
 #include "runtime_types.h"
 
 #include <cstdio>
 
-// Error checking macro
-#define HIPBLAS_CHECK(cmd)                                                     \
-  do {                                                                         \
-    hipblasStatus_t status = (cmd);                                            \
-    if (status != HIPBLAS_STATUS_SUCCESS) {                                    \
-      fprintf(stderr, "hipBLAS error at %s:%d: %d\n", __FILE__, __LINE__,      \
-              status);                                                         \
-      return -1;                                                               \
-    }                                                                          \
-  } while (0)
+// Convenience wrappers for goto cleanup pattern (all functions use 'cleanup'
+// label)
+#define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
 
 // hipBLASLt GEMM wrapper implementation
 
@@ -31,14 +25,19 @@ int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
   hipblasLtHandle_t hipblas_handle = static_cast<hipblasLtHandle_t>(handle);
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
+  // Initialize all resource pointers to nullptr for safe cleanup
+  hipblasLtMatrixLayout_t matA = nullptr;
+  hipblasLtMatrixLayout_t matB = nullptr;
+  hipblasLtMatrixLayout_t matC = nullptr;
+  hipblasLtMatmulDesc_t matmul_desc = nullptr;
+  int result = 0;
+
   // Create matrix descriptors (assuming float32, column-major)
-  hipblasLtMatrixLayout_t matA, matB, matC;
   HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&matA, HIP_R_32F, m, k, m));
   HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&matB, HIP_R_32F, k, n, k));
   HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&matC, HIP_R_32F, m, n, m));
 
   // Create operation descriptor
-  hipblasLtMatmulDesc_t matmul_desc;
   HIPBLAS_CHECK(
       hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
 
@@ -50,11 +49,21 @@ int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
                                 0,       // workspaceSize
                                 hip_stream));
 
-  // Cleanup
-  hipblasLtMatrixLayoutDestroy(matA);
-  hipblasLtMatrixLayoutDestroy(matB);
-  hipblasLtMatrixLayoutDestroy(matC);
-  hipblasLtMatmulDescDestroy(matmul_desc);
+cleanup:
+  // Best-effort cleanup: free all allocated resources
+  // Continue cleanup even if individual operations fail
+  if (matA) {
+    hipblasLtMatrixLayoutDestroy(matA);
+  }
+  if (matB) {
+    hipblasLtMatrixLayoutDestroy(matB);
+  }
+  if (matC) {
+    hipblasLtMatrixLayoutDestroy(matC);
+  }
+  if (matmul_desc) {
+    hipblasLtMatmulDescDestroy(matmul_desc);
+  }
 
-  return 0;
+  return result;
 }
