@@ -220,28 +220,52 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
 
 cleanup:
   if (d_expert_indices) {
-    (void)hipFree(d_expert_indices);
+    hipError_t err = hipFree(d_expert_indices);
+    if (err != hipSuccess) {
+      fprintf(stderr, "Warning: hipFree failed for d_expert_indices: %d\n", err);
+    }
   }
   if (d_expert_weights) {
-    (void)hipFree(d_expert_weights);
+    hipError_t err = hipFree(d_expert_weights);
+    if (err != hipSuccess) {
+      fprintf(stderr, "Warning: hipFree failed for d_expert_weights: %d\n", err);
+    }
   }
   if (d_gather_buf) {
-    (void)hipFree(d_gather_buf);
+    hipError_t err = hipFree(d_gather_buf);
+    if (err != hipSuccess) {
+      fprintf(stderr, "Warning: hipFree failed for d_gather_buf: %d\n", err);
+    }
   }
   if (d_fc1_buf) {
-    (void)hipFree(d_fc1_buf);
+    hipError_t err = hipFree(d_fc1_buf);
+    if (err != hipSuccess) {
+      fprintf(stderr, "Warning: hipFree failed for d_fc1_buf: %d\n", err);
+    }
   }
   if (d_act_buf) {
-    (void)hipFree(d_act_buf);
+    hipError_t err = hipFree(d_act_buf);
+    if (err != hipSuccess) {
+      fprintf(stderr, "Warning: hipFree failed for d_act_buf: %d\n", err);
+    }
   }
   if (d_fc2_buf) {
-    (void)hipFree(d_fc2_buf);
+    hipError_t err = hipFree(d_fc2_buf);
+    if (err != hipSuccess) {
+      fprintf(stderr, "Warning: hipFree failed for d_fc2_buf: %d\n", err);
+    }
   }
   if (d_token_ids) {
-    (void)hipFree(d_token_ids);
+    hipError_t err = hipFree(d_token_ids);
+    if (err != hipSuccess) {
+      fprintf(stderr, "Warning: hipFree failed for d_token_ids: %d\n", err);
+    }
   }
   if (d_token_wts) {
-    (void)hipFree(d_token_wts);
+    hipError_t err = hipFree(d_token_wts);
+    if (err != hipSuccess) {
+      fprintf(stderr, "Warning: hipFree failed for d_token_wts: %d\n", err);
+    }
   }
 
   if (result == 0) {
