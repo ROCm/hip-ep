@@ -740,7 +740,7 @@ MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
 
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
-    return mlir::failure();
+    return rewriter.notifyMatchFailure(op, "failed to get context argument");
   mlir::Value context = *ctxOrFailure;
 
   mlir::Value A = op->getOperand(0);
@@ -819,7 +819,7 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
 
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
-    return mlir::failure();
+    return rewriter.notifyMatchFailure(op, "failed to get context argument");
   mlir::Value context = *ctxOrFailure;
 
   auto getOptionalInput = [&](unsigned idx) -> mlir::Value {
