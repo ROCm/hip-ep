@@ -124,16 +124,19 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                              hip_stream));
 
     int64_t active_experts = 0;
-    for (int64_t e = 0; e < num_experts; e++)
-      if (!expert_tokens[e].empty())
+    for (int64_t e = 0; e < num_experts; e++) {
+      if (!expert_tokens[e].empty()) {
         active_experts++;
+      }
+    }
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: %lld/%lld experts active\n",
                       (long long)active_experts, (long long)num_experts);
 
     for (int64_t e = 0; e < num_experts; e++) {
       int64_t count = static_cast<int64_t>(expert_tokens[e].size());
-      if (count == 0)
+      if (count == 0) {
         continue;
+      }
 
       std::vector<int32_t> h_ids(count);
       std::vector<char> h_wts_e(count * elem_size);
@@ -216,22 +219,30 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   }
 
 cleanup:
-  if (d_expert_indices)
+  if (d_expert_indices) {
     (void)hipFree(d_expert_indices);
-  if (d_expert_weights)
+  }
+  if (d_expert_weights) {
     (void)hipFree(d_expert_weights);
-  if (d_gather_buf)
+  }
+  if (d_gather_buf) {
     (void)hipFree(d_gather_buf);
-  if (d_fc1_buf)
+  }
+  if (d_fc1_buf) {
     (void)hipFree(d_fc1_buf);
-  if (d_act_buf)
+  }
+  if (d_act_buf) {
     (void)hipFree(d_act_buf);
-  if (d_fc2_buf)
+  }
+  if (d_fc2_buf) {
     (void)hipFree(d_fc2_buf);
-  if (d_token_ids)
+  }
+  if (d_token_ids) {
     (void)hipFree(d_token_ids);
-  if (d_token_wts)
+  }
+  if (d_token_wts) {
     (void)hipFree(d_token_wts);
+  }
 
   if (result == 0) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: completed successfully\n");

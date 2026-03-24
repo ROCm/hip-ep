@@ -724,23 +724,28 @@ mlir::LogicalResult
 MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
                                   mlir::PatternRewriter &rewriter) const {
   auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
-  if (!funcNameAttr || funcNameAttr.getValue() != "MatMulNBits")
+  if (!funcNameAttr || funcNameAttr.getValue() != "MatMulNBits") {
     return rewriter.notifyMatchFailure(op, "not a MatMulNBits custom op");
+  }
   auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
-  if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft") {
     return rewriter.notifyMatchFailure(op, "not a com.microsoft domain op");
+  }
 
   mlir::Location loc = op->getLoc();
 
-  if (op->getNumOperands() < 3)
+  if (op->getNumOperands() < 3) {
     return rewriter.notifyMatchFailure(
         op, "expected at least 3 inputs for MatMulNBits");
-  if (op->getNumResults() != 1)
+  }
+  if (op->getNumResults() != 1) {
     return rewriter.notifyMatchFailure(op, "expected 1 output for MatMulNBits");
+  }
 
   auto ctxOrFailure = getContextArg(op, rewriter);
-  if (mlir::failed(ctxOrFailure))
+  if (mlir::failed(ctxOrFailure)) {
     return rewriter.notifyMatchFailure(op, "failed to get context argument");
+  }
   mlir::Value context = *ctxOrFailure;
 
   mlir::Value A = op->getOperand(0);
@@ -748,11 +753,13 @@ MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value scales = op->getOperand(2);
 
   auto getOptionalInput = [&](unsigned idx) -> mlir::Value {
-    if (idx >= op->getNumOperands())
+    if (idx >= op->getNumOperands()) {
       return mlir::Value{};
+    }
     mlir::Value v = op->getOperand(idx);
-    if (!v || mlir::isa<mlir::NoneType>(v.getType()))
+    if (!v || mlir::isa<mlir::NoneType>(v.getType())) {
       return mlir::Value{};
+    }
     return v;
   };
   mlir::Value zeroPoints = getOptionalInput(3);
@@ -803,31 +810,38 @@ mlir::LogicalResult
 QMoEToHip::matchAndRewrite(mlir::Operation *op,
                            mlir::PatternRewriter &rewriter) const {
   auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
-  if (!funcNameAttr || funcNameAttr.getValue() != "QMoE")
+  if (!funcNameAttr || funcNameAttr.getValue() != "QMoE") {
     return rewriter.notifyMatchFailure(op, "not a QMoE custom op");
+  }
   auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
-  if (!domainAttr || domainAttr.getValue() != "com.microsoft")
+  if (!domainAttr || domainAttr.getValue() != "com.microsoft") {
     return rewriter.notifyMatchFailure(op, "not a com.microsoft domain op");
+  }
 
   mlir::Location loc = op->getLoc();
 
-  if (op->getNumOperands() < 7)
+  if (op->getNumOperands() < 7) {
     return rewriter.notifyMatchFailure(op,
                                        "expected at least 7 inputs for QMoE");
-  if (op->getNumResults() != 1)
+  }
+  if (op->getNumResults() != 1) {
     return rewriter.notifyMatchFailure(op, "expected 1 output for QMoE");
+  }
 
   auto ctxOrFailure = getContextArg(op, rewriter);
-  if (mlir::failed(ctxOrFailure))
+  if (mlir::failed(ctxOrFailure)) {
     return rewriter.notifyMatchFailure(op, "failed to get context argument");
+  }
   mlir::Value context = *ctxOrFailure;
 
   auto getOptionalInput = [&](unsigned idx) -> mlir::Value {
-    if (idx >= op->getNumOperands())
+    if (idx >= op->getNumOperands()) {
       return mlir::Value{};
+    }
     mlir::Value v = op->getOperand(idx);
-    if (!v || mlir::isa<mlir::NoneType>(v.getType()))
+    if (!v || mlir::isa<mlir::NoneType>(v.getType())) {
       return mlir::Value{};
+    }
     return v;
   };
 

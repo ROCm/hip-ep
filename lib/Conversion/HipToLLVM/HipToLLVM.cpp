@@ -1713,10 +1713,11 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
                            : createI64Const(1);
     // batch_count = product of all leading dimensions before M
     Value batch = createI64Const(1);
-    for (int64_t i = 0; i < ARank - 2; ++i)
+    for (int64_t i = 0; i < ARank - 2; ++i) {
       batch = LLVM::MulOp::create(
           rewriter, loc, batch,
           getMemRefDimSize(AType, i, adaptor.getA(), rewriter, loc));
+    }
 
     Value n = createI64Const(op.getN());
     Value k = createI64Const(op.getK());
@@ -1744,8 +1745,9 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapMatMulNBits, paramTypes, i32Type);
-    if (failed(funcOp))
+    if (failed(funcOp)) {
       return failure();
+    }
 
     SmallVector<Value, 15> args = {
         statePtr, APtr,    BPtr,      scalesPtr, zeroPointsPtr,
@@ -1822,10 +1824,11 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
     // dims except the last (hidden), supporting dynamic batch/seq dimensions.
     int64_t inputRank = inputType.getRank();
     Value numTokensVal = createI64Const(1);
-    for (int64_t i = 0; i < inputRank - 1; ++i)
+    for (int64_t i = 0; i < inputRank - 1; ++i) {
       numTokensVal = LLVM::MulOp::create(
           rewriter, loc, numTokensVal,
           getMemRefDimSize(inputType, i, adaptor.getInput(), rewriter, loc));
+    }
     Value hiddenSizeVal = getMemRefDimSize(inputType, inputRank - 1,
                                            adaptor.getInput(), rewriter, loc);
     Value numExpertsVal =
@@ -1836,22 +1839,24 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
     int64_t fusionSize = (swigluFusion > 0) ? 2 : 1;
     Value interSizeVal = getMemRefDimSize(
         fc1Type, 1, adaptor.getFc1ExpertsWeights(), rewriter, loc);
-    if (fusionSize > 1)
+    if (fusionSize > 1) {
       interSizeVal = LLVM::SDivOp::create(rewriter, loc, interSizeVal,
                                           createI64Const(fusionSize));
+    }
 
     StringRef activationType = op.getActivationType();
     int64_t activationTypeEnum = 0;
-    if (activationType == "relu")
+    if (activationType == "relu") {
       activationTypeEnum = 0;
-    else if (activationType == "gelu")
+    } else if (activationType == "gelu") {
       activationTypeEnum = 1;
-    else if (activationType == "silu")
+    } else if (activationType == "silu") {
       activationTypeEnum = 2;
-    else if (activationType == "swiglu")
+    } else if (activationType == "swiglu") {
       activationTypeEnum = 3;
-    else if (activationType == "identity")
+    } else if (activationType == "identity") {
       activationTypeEnum = 4;
+    }
 
     Value kVal = createI64Const(op.getK());
     Value expertWeightBitsVal = createI64Const(op.getExpertWeightBits());
@@ -1901,8 +1906,9 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapQMoE, paramTypes, i32Type);
-    if (failed(funcOp))
+    if (failed(funcOp)) {
       return failure();
+    }
 
     SmallVector<Value, 30> args = {statePtr,
                                    inputPtr,
