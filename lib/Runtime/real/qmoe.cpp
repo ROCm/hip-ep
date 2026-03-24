@@ -222,13 +222,15 @@ cleanup:
   if (d_expert_indices) {
     hipError_t err = hipFree(d_expert_indices);
     if (err != hipSuccess) {
-      fprintf(stderr, "Warning: hipFree failed for d_expert_indices: %d\n", err);
+      fprintf(stderr, "Warning: hipFree failed for d_expert_indices: %d\n",
+              err);
     }
   }
   if (d_expert_weights) {
     hipError_t err = hipFree(d_expert_weights);
     if (err != hipSuccess) {
-      fprintf(stderr, "Warning: hipFree failed for d_expert_weights: %d\n", err);
+      fprintf(stderr, "Warning: hipFree failed for d_expert_weights: %d\n",
+              err);
     }
   }
   if (d_gather_buf) {
