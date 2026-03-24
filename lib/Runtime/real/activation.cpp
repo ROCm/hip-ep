@@ -4,12 +4,13 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
-#include "runtime_types.h"
 #include "error_check_macros.h"
+#include "runtime_types.h"
 
 #include <cstdio>
 
-// Convenience wrappers for goto cleanup pattern (all functions use 'cleanup' label)
+// Convenience wrappers for goto cleanup pattern (all functions use 'cleanup'
+// label)
 #define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
 
 static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type) {
@@ -100,15 +101,16 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
   MIOPEN_CHECK(miopenSet4dTensorDescriptor(inDesc, miopen_type, 1, 1, 1, n));
   MIOPEN_CHECK(miopenSet4dTensorDescriptor(outDesc, miopen_type, 1, 1, 1, n));
   MIOPEN_CHECK(miopenCreateActivationDescriptor(&actDesc));
-  MIOPEN_CHECK(miopenSetActivationDescriptor(actDesc, miopen_act, 0.0, 0.0, 0.0));
+  MIOPEN_CHECK(
+      miopenSetActivationDescriptor(actDesc, miopen_act, 0.0, 0.0, 0.0));
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_miopenActivationForward: calling miopenActivationForward"
       "(%s, alpha=%.1f, beta=%.1f)\n",
       act_name, alpha, beta);
 
-  MIOPEN_CHECK(miopenActivationForward(handle, actDesc, &alpha, inDesc, input, &beta,
-                                       outDesc, output));
+  MIOPEN_CHECK(miopenActivationForward(handle, actDesc, &alpha, inDesc, input,
+                                       &beta, outDesc, output));
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_miopenActivationForward: completed successfully\n");

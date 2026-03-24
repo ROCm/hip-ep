@@ -8,8 +8,8 @@
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
-#include "runtime_types.h"
 #include "error_check_macros.h"
+#include "runtime_types.h"
 
 #include <cstdio>
 
@@ -78,7 +78,8 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
   else if (element_size_bytes == 4)
     data_type = miopenFloat;
   else {
-    fprintf(stderr, "wrap_skip_simplified_layer_norm: unsupported element_size %lld\n",
+    fprintf(stderr,
+            "wrap_skip_simplified_layer_norm: unsupported element_size %lld\n",
             (long long)element_size_bytes);
     return -1;
   }

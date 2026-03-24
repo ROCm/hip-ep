@@ -3,12 +3,13 @@
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
-#include "runtime_types.h"
 #include "error_check_macros.h"
+#include "runtime_types.h"
 
 #include <cstdio>
 
-// Convenience wrappers for goto cleanup pattern (all functions use 'cleanup' label)
+// Convenience wrappers for goto cleanup pattern (all functions use 'cleanup'
+// label)
 #define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
 
@@ -140,25 +141,25 @@ int wrap_miopenConvolutionForward(
 
   // Set tensor descriptors (assuming float32 data type)
   // Input: [N, C, H, W]
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(input_desc, miopenFloat, input_n, input_c,
-                                           input_h, input_w));
+  MIOPEN_CHECK(miopenSet4dTensorDescriptor(input_desc, miopenFloat, input_n,
+                                           input_c, input_h, input_w));
 
   // Weights: [K, C, R, S] where K=output channels, C=input channels,
   // R=kernel_h, S=kernel_w
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(weights_desc, miopenFloat, weights_k, input_c,
-                                           kernel_h, kernel_w));
+  MIOPEN_CHECK(miopenSet4dTensorDescriptor(weights_desc, miopenFloat, weights_k,
+                                           input_c, kernel_h, kernel_w));
 
   // Output: [N, K, H', W']
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(output_desc, miopenFloat, input_n, weights_k,
-                                           output_h, output_w));
+  MIOPEN_CHECK(miopenSet4dTensorDescriptor(output_desc, miopenFloat, input_n,
+                                           weights_k, output_h, output_w));
 
   // Create convolution descriptor
   // Note: MIOpen padding is per-side, but if pad_top==pad_bottom and
   // pad_left==pad_right, we use the symmetric version
   MIOPEN_CHECK(miopenCreateConvolutionDescriptor(&conv_desc));
-  MIOPEN_CHECK(miopenInitConvolutionDescriptor(conv_desc, miopenConvolution, pad_top,
-                                               pad_left, stride_h, stride_w, dilation_h,
-                                               dilation_w));
+  MIOPEN_CHECK(miopenInitConvolutionDescriptor(
+      conv_desc, miopenConvolution, pad_top, pad_left, stride_h, stride_w,
+      dilation_h, dilation_w));
 
   // Set group count for grouped convolutions (e.g., depthwise convolution)
   // group=1 for standard convolution, group=C for depthwise convolution
@@ -203,10 +204,9 @@ int wrap_miopenConvolutionForward(
   }
 
   // Perform convolution
-  MIOPEN_CHECK(miopenConvolutionForward(miopen_handle, &alpha, input_desc, input,
-                                        weights_desc, weights, conv_desc, algo, &beta,
-                                        output_desc, output, workspace,
-                                        workspace_size));
+  MIOPEN_CHECK(miopenConvolutionForward(
+      miopen_handle, &alpha, input_desc, input, weights_desc, weights,
+      conv_desc, algo, &beta, output_desc, output, workspace, workspace_size));
 
 cleanup:
   // Best-effort cleanup: free all allocated resources
