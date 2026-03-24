@@ -6,6 +6,7 @@
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
+#include "error_check_macros.h"
 
 #include <cstdio>
 
@@ -72,7 +73,7 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                         int64_t num_elements, int64_t data_type,
                         int64_t tensor_op) {
   if (!state || !lhs || !rhs || !output) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: null argument\n");
+    fprintf(stderr, "wrap_miopenOpTensor: null argument\n");
     return -1;
   }
 
@@ -89,7 +90,7 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
   miopenHandle_t handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
   if (!handle) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: null MIOpen handle\n");
+    fprintf(stderr, "wrap_miopenOpTensor: null MIOpen handle\n");
     return -1;
   }
 
@@ -104,55 +105,23 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
   float alpha1 = 1.0f, alpha2 = 1.0f, beta = 0.0f;
   int n = static_cast<int>(num_elements);
 
-  if (miopenCreateTensorDescriptor(&aDesc) != miopenStatusSuccess) {
-    RUNTIME_DEBUG_LOG("[REAL] MIOpen error: failed to create aDesc\n");
-    result = -1;
-    goto cleanup;
-  }
-  if (miopenCreateTensorDescriptor(&bDesc) != miopenStatusSuccess) {
-    RUNTIME_DEBUG_LOG("[REAL] MIOpen error: failed to create bDesc\n");
-    result = -1;
-    goto cleanup;
-  }
-  if (miopenCreateTensorDescriptor(&cDesc) != miopenStatusSuccess) {
-    RUNTIME_DEBUG_LOG("[REAL] MIOpen error: failed to create cDesc\n");
-    result = -1;
-    goto cleanup;
-  }
-
   RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: creating tensor descriptors "
                     "[1,1,1,%d] with type %s\n",
                     n, type_name);
 
-  if (miopenSet4dTensorDescriptor(aDesc, miopen_type, 1, 1, 1, n) !=
-      miopenStatusSuccess) {
-    RUNTIME_DEBUG_LOG("[REAL] MIOpen error: failed to set aDesc\n");
-    result = -1;
-    goto cleanup;
-  }
-  if (miopenSet4dTensorDescriptor(bDesc, miopen_type, 1, 1, 1, n) !=
-      miopenStatusSuccess) {
-    RUNTIME_DEBUG_LOG("[REAL] MIOpen error: failed to set bDesc\n");
-    result = -1;
-    goto cleanup;
-  }
-  if (miopenSet4dTensorDescriptor(cDesc, miopen_type, 1, 1, 1, n) !=
-      miopenStatusSuccess) {
-    RUNTIME_DEBUG_LOG("[REAL] MIOpen error: failed to set cDesc\n");
-    result = -1;
-    goto cleanup;
-  }
+  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&aDesc), cleanup);
+  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&bDesc), cleanup);
+  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&cDesc), cleanup);
+  MIOPEN_CHECK_GOTO(miopenSet4dTensorDescriptor(aDesc, miopen_type, 1, 1, 1, n), cleanup);
+  MIOPEN_CHECK_GOTO(miopenSet4dTensorDescriptor(bDesc, miopen_type, 1, 1, 1, n), cleanup);
+  MIOPEN_CHECK_GOTO(miopenSet4dTensorDescriptor(cDesc, miopen_type, 1, 1, 1, n), cleanup);
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: calling miopenOpTensor"
                     "(op=%s, alpha1=%.1f, alpha2=%.1f, beta=%.1f)\n",
                     op_name, alpha1, alpha2, beta);
 
-  if (miopenOpTensor(handle, miopen_op, &alpha1, aDesc, lhs, &alpha2, bDesc,
-                     rhs, &beta, cDesc, output) != miopenStatusSuccess) {
-    RUNTIME_DEBUG_LOG("[REAL] MIOpen error: miopenOpTensor failed\n");
-    result = -1;
-    goto cleanup;
-  }
+  MIOPEN_CHECK_GOTO(miopenOpTensor(handle, miopen_op, &alpha1, aDesc, lhs, &alpha2, bDesc,
+                                   rhs, &beta, cDesc, output), cleanup);
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: completed successfully\n");
 
@@ -185,7 +154,7 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
                          void *output, int64_t num_elements,
                          int64_t element_size_bytes) {
   if (!state || !lhs || !rhs || !output) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_elementwise_sub: null argument\n");
+    fprintf(stderr, "wrap_elementwise_sub: null argument\n");
     return -1;
   }
 

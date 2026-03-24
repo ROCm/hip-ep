@@ -9,6 +9,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "runtime_types.h"
+#include "error_check_macros.h"
 
 #include <cstdio>
 
@@ -22,15 +23,9 @@
     }                                                                          \
   } while (0)
 
-#define MIOPEN_CHECK(cmd)                                                      \
-  do {                                                                         \
-    miopenStatus_t status = (cmd);                                             \
-    if (status != miopenStatusSuccess) {                                       \
-      fprintf(stderr, "MIOpen error %d at %s:%d\n", status, __FILE__,          \
-              __LINE__);                                                       \
-      goto cleanup;                                                            \
-    }                                                                          \
-  } while (0)
+// Redefine MIOPEN_CHECK to use goto cleanup pattern (matching this file's existing pattern)
+#undef MIOPEN_CHECK
+#define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
 
 // =============================================================================
 // SimplifiedLayerNormalization via MIOpen T5LayerNorm
@@ -90,19 +85,14 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
     return -1;
   }
 
+  int result = 0;
   int rc = -1;
   void *rstd_buf = nullptr;
   miopenTensorDescriptor_t xDesc = nullptr, weightDesc = nullptr,
                            yDesc = nullptr, rstdDesc = nullptr;
 
   // rstd is always f32 regardless of input type
-  hipError_t hip_err = hipMalloc(&rstd_buf, num_rows * sizeof(float));
-  if (hip_err != hipSuccess) {
-    fprintf(stderr,
-            "wrap_miopenT5LayerNormForward: hipMalloc rstd failed: %s\n",
-            hipGetErrorString(hip_err));
-    goto cleanup;
-  }
+  HIP_CHECK_GOTO(hipMalloc(&rstd_buf, num_rows * sizeof(float)), cleanup);
 
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&xDesc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&weightDesc));
