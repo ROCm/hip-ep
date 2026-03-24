@@ -9,16 +9,6 @@
 
 #include <cstdio>
 
-#define MIOPEN_CHECK(cmd)                                                      \
-  do {                                                                         \
-    miopenStatus_t status = (cmd);                                             \
-    if (status != miopenStatusSuccess) {                                       \
-      RUNTIME_DEBUG_LOG("[REAL] MIOpen error %d at %s:%d\n", status, __FILE__, \
-                        __LINE__);                                             \
-      return -1;                                                               \
-    }                                                                          \
-  } while (0)
-
 static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type) {
   switch (data_type) {
   case HIPDNN_EP_DATATYPE_FLOAT:

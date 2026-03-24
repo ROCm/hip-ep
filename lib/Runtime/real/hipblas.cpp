@@ -8,17 +8,6 @@
 
 #include <cstdio>
 
-// Error checking macro
-#define HIPBLAS_CHECK(cmd)                                                     \
-  do {                                                                         \
-    hipblasStatus_t status = (cmd);                                            \
-    if (status != HIPBLAS_STATUS_SUCCESS) {                                    \
-      fprintf(stderr, "hipBLAS error at %s:%d: %d\n", __FILE__, __LINE__,      \
-              status);                                                         \
-      return -1;                                                               \
-    }                                                                          \
-  } while (0)
-
 // hipBLASLt GEMM wrapper implementation
 
 int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,

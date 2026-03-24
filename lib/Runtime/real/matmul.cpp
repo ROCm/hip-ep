@@ -10,26 +10,6 @@
 #include <cstdio>
 #include <cstring>
 
-#define HIP_CHECK(cmd)                                                         \
-  do {                                                                         \
-    hipError_t error = (cmd);                                                  \
-    if (error != hipSuccess) {                                                 \
-      fprintf(stderr, "HIP error at %s:%d: %s\n", __FILE__, __LINE__,          \
-              hipGetErrorString(error));                                       \
-      return -1;                                                               \
-    }                                                                          \
-  } while (0)
-
-#define HIPBLAS_CHECK(cmd)                                                     \
-  do {                                                                         \
-    hipblasStatus_t status = (cmd);                                            \
-    if (status != HIPBLAS_STATUS_SUCCESS) {                                    \
-      fprintf(stderr, "hipBLASLt error at %s:%d: %d\n", __FILE__, __LINE__,    \
-              status);                                                         \
-      return -1;                                                               \
-    }                                                                          \
-  } while (0)
-
 // =============================================================================
 // Batched MatMul via hipBLASLt
 // =============================================================================

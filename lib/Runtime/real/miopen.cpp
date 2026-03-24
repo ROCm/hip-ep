@@ -8,27 +8,6 @@
 
 #include <cstdio>
 
-// Error checking macros (kept for non-goto cleanup functions)
-#define HIP_CHECK(cmd)                                                         \
-  do {                                                                         \
-    hipError_t error = (cmd);                                                  \
-    if (error != hipSuccess) {                                                 \
-      fprintf(stderr, "HIP error at %s:%d: %s\n", __FILE__, __LINE__,          \
-              hipGetErrorString(error));                                       \
-      return -1;                                                               \
-    }                                                                          \
-  } while (0)
-
-#define MIOPEN_CHECK(cmd)                                                      \
-  do {                                                                         \
-    miopenStatus_t status = (cmd);                                             \
-    if (status != miopenStatusSuccess) {                                       \
-      fprintf(stderr, "MIOpen error at %s:%d: %d\n", __FILE__, __LINE__,       \
-              status);                                                         \
-      return -1;                                                               \
-    }                                                                          \
-  } while (0)
-
 // =============================================================================
 // MIOpen Convolution Forward Wrapper
 // =============================================================================

@@ -13,18 +13,7 @@
 
 #include <cstdio>
 
-#define HIP_CHECK(cmd)                                                         \
-  do {                                                                         \
-    hipError_t error = (cmd);                                                  \
-    if (error != hipSuccess) {                                                 \
-      fprintf(stderr, "HIP error at %s:%d: %s\n", __FILE__, __LINE__,          \
-              hipGetErrorString(error));                                       \
-      return -1;                                                               \
-    }                                                                          \
-  } while (0)
-
-// Redefine MIOPEN_CHECK to use goto cleanup pattern (matching this file's existing pattern)
-#undef MIOPEN_CHECK
+// Use the shared macros from error_check_macros.h with goto cleanup pattern
 #define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
 
 // =============================================================================
