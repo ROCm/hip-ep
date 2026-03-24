@@ -4,20 +4,15 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "error_check_macros.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
 #include <cstdio>
 
-#define MIOPEN_CHECK(cmd)                                                      \
-  do {                                                                         \
-    miopenStatus_t status = (cmd);                                             \
-    if (status != miopenStatusSuccess) {                                       \
-      RUNTIME_DEBUG_LOG("[REAL] MIOpen error %d at %s:%d\n", status, __FILE__, \
-                        __LINE__);                                             \
-      return -1;                                                               \
-    }                                                                          \
-  } while (0)
+// Convenience wrappers for goto cleanup pattern (all functions use 'cleanup'
+// label)
+#define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
 
 // Explicit mapping from backend-independent HIPDNN_EP_DATATYPE_* enum to
 // MIOpen-specific miopenDataType_t. No static_cast -- our enum values are
@@ -72,7 +67,7 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                         int64_t num_elements, int64_t data_type,
                         int64_t tensor_op) {
   if (!state || !lhs || !rhs || !output) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: null argument\n");
+    fprintf(stderr, "wrap_miopenOpTensor: null argument\n");
     return -1;
   }
 
@@ -89,28 +84,32 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
   miopenHandle_t handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
   if (!handle) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: null MIOpen handle\n");
+    fprintf(stderr, "wrap_miopenOpTensor: null MIOpen handle\n");
     return -1;
   }
 
   miopenDataType_t miopen_type = hipdnn_ep_to_miopen_type(data_type);
   miopenTensorOp_t miopen_op = hipdnn_ep_to_miopen_op(tensor_op);
 
-  miopenTensorDescriptor_t aDesc, bDesc, cDesc;
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&aDesc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&bDesc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&cDesc));
-
+  // Initialize all resource pointers to nullptr for safe cleanup
+  miopenTensorDescriptor_t aDesc = nullptr;
+  miopenTensorDescriptor_t bDesc = nullptr;
+  miopenTensorDescriptor_t cDesc = nullptr;
+  int result = 0;
+  float alpha1 = 1.0f, alpha2 = 1.0f, beta = 0.0f;
   int n = static_cast<int>(num_elements);
+
   RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: creating tensor descriptors "
                     "[1,1,1,%d] with type %s\n",
                     n, type_name);
 
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&aDesc));
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&bDesc));
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&cDesc));
   MIOPEN_CHECK(miopenSet4dTensorDescriptor(aDesc, miopen_type, 1, 1, 1, n));
   MIOPEN_CHECK(miopenSet4dTensorDescriptor(bDesc, miopen_type, 1, 1, 1, n));
   MIOPEN_CHECK(miopenSet4dTensorDescriptor(cDesc, miopen_type, 1, 1, 1, n));
 
-  float alpha1 = 1.0f, alpha2 = 1.0f, beta = 0.0f;
   RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: calling miopenOpTensor"
                     "(op=%s, alpha1=%.1f, alpha2=%.1f, beta=%.1f)\n",
                     op_name, alpha1, alpha2, beta);
@@ -120,10 +119,20 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: completed successfully\n");
 
-  miopenDestroyTensorDescriptor(aDesc);
-  miopenDestroyTensorDescriptor(bDesc);
-  miopenDestroyTensorDescriptor(cDesc);
-  return 0;
+cleanup:
+  // Best-effort cleanup: free all allocated resources
+  // Continue cleanup even if individual operations fail
+  if (aDesc) {
+    miopenDestroyTensorDescriptor(aDesc);
+  }
+  if (bDesc) {
+    miopenDestroyTensorDescriptor(bDesc);
+  }
+  if (cDesc) {
+    miopenDestroyTensorDescriptor(cDesc);
+  }
+
+  return result;
 }
 
 // =============================================================================
@@ -139,7 +148,7 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
                          void *output, int64_t num_elements,
                          int64_t element_size_bytes) {
   if (!state || !lhs || !rhs || !output) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_elementwise_sub: null argument\n");
+    fprintf(stderr, "wrap_elementwise_sub: null argument\n");
     return -1;
   }
 

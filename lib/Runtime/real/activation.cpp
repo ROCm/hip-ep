@@ -4,19 +4,14 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "error_check_macros.h"
 #include "runtime_types.h"
 
 #include <cstdio>
 
-#define MIOPEN_CHECK(cmd)                                                      \
-  do {                                                                         \
-    miopenStatus_t status = (cmd);                                             \
-    if (status != miopenStatusSuccess) {                                       \
-      RUNTIME_DEBUG_LOG("[REAL] MIOpen error %d at %s:%d\n", status, __FILE__, \
-                        __LINE__);                                             \
-      return -1;                                                               \
-    }                                                                          \
-  } while (0)
+// Convenience wrappers for goto cleanup pattern (all functions use 'cleanup'
+// label)
+#define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
 
 static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type) {
   switch (data_type) {
@@ -63,7 +58,7 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
                                  int64_t activation_mode) {
   if (!state || !input || !output) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_miopenActivationForward: null argument\n");
+    fprintf(stderr, "wrap_miopenActivationForward: null argument\n");
     return -1;
   }
 
@@ -80,8 +75,7 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
   miopenHandle_t handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
   if (!handle) {
-    RUNTIME_DEBUG_LOG(
-        "[REAL] wrap_miopenActivationForward: null MIOpen handle\n");
+    fprintf(stderr, "wrap_miopenActivationForward: null MIOpen handle\n");
     return -1;
   }
 
@@ -89,25 +83,27 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
   miopenActivationMode_t miopen_act =
       hipdnn_ep_to_miopen_activation(activation_mode);
 
+  // Initialize all resource pointers to nullptr for safe cleanup
+  miopenTensorDescriptor_t inDesc = nullptr;
+  miopenTensorDescriptor_t outDesc = nullptr;
+  miopenActivationDescriptor_t actDesc = nullptr;
+  int result = 0;
+  float alpha = 1.0f, beta = 0.0f;
+
   int n = static_cast<int>(num_elements);
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_miopenActivationForward: creating tensor descriptors "
       "[1,1,1,%d] with type %s\n",
       n, type_name);
 
-  miopenTensorDescriptor_t inDesc, outDesc;
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&inDesc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&outDesc));
-
   MIOPEN_CHECK(miopenSet4dTensorDescriptor(inDesc, miopen_type, 1, 1, 1, n));
   MIOPEN_CHECK(miopenSet4dTensorDescriptor(outDesc, miopen_type, 1, 1, 1, n));
-
-  miopenActivationDescriptor_t actDesc;
   MIOPEN_CHECK(miopenCreateActivationDescriptor(&actDesc));
   MIOPEN_CHECK(
       miopenSetActivationDescriptor(actDesc, miopen_act, 0.0, 0.0, 0.0));
 
-  float alpha = 1.0f, beta = 0.0f;
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_miopenActivationForward: calling miopenActivationForward"
       "(%s, alpha=%.1f, beta=%.1f)\n",
@@ -119,8 +115,18 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_miopenActivationForward: completed successfully\n");
 
-  miopenDestroyActivationDescriptor(actDesc);
-  miopenDestroyTensorDescriptor(inDesc);
-  miopenDestroyTensorDescriptor(outDesc);
-  return 0;
+cleanup:
+  // Best-effort cleanup: free all allocated resources
+  // Continue cleanup even if individual operations fail
+  if (actDesc) {
+    miopenDestroyActivationDescriptor(actDesc);
+  }
+  if (inDesc) {
+    miopenDestroyTensorDescriptor(inDesc);
+  }
+  if (outDesc) {
+    miopenDestroyTensorDescriptor(outDesc);
+  }
+
+  return result;
 }
