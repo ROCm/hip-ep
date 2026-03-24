@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "error_check_macros.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
@@ -11,28 +12,6 @@
 #include <cstring>
 #include <utility>
 #include <vector>
-
-#define HIP_CHECK(cmd)                                                         \
-  do {                                                                         \
-    hipError_t _err = (cmd);                                                   \
-    if (_err != hipSuccess) {                                                  \
-      fprintf(stderr, "HIP error at %s:%d: %s\n", __FILE__, __LINE__,          \
-              hipGetErrorString(_err));                                        \
-      rc = -1;                                                                 \
-      goto cleanup;                                                            \
-    }                                                                          \
-  } while (0)
-
-#define KERNEL_CHECK(call)                                                     \
-  do {                                                                         \
-    int _rc = (call);                                                          \
-    if (_rc != 0) {                                                            \
-      fprintf(stderr, "Kernel failed at %s:%d (rc=%d)\n", __FILE__, __LINE__,  \
-              _rc);                                                            \
-      rc = _rc;                                                                \
-      goto cleanup;                                                            \
-    }                                                                          \
-  } while (0)
 
 struct TokenEntry {
   int32_t token_id;
@@ -82,7 +61,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   }
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-  int rc = 0;
+  int result = 0;
 
   int64_t fusion_inter = 2 * inter_size;
   int64_t k_blocks_fc1 = (hidden_size + block_size - 1) / block_size;
@@ -99,34 +78,45 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   void *d_token_ids = nullptr;
   void *d_token_wts = nullptr;
 
-  HIP_CHECK(hipMalloc(&d_expert_indices, num_tokens * k * sizeof(int32_t)));
-  HIP_CHECK(hipMalloc(&d_expert_weights, num_tokens * k * elem_size));
-  HIP_CHECK(hipMalloc(&d_gather_buf, num_tokens * hidden_size * elem_size));
-  HIP_CHECK(hipMalloc(&d_fc1_buf, num_tokens * fusion_inter * elem_size));
-  HIP_CHECK(hipMalloc(&d_act_buf, num_tokens * inter_size * elem_size));
-  HIP_CHECK(hipMalloc(&d_fc2_buf, num_tokens * hidden_size * elem_size));
-  HIP_CHECK(hipMalloc(&d_token_ids, num_tokens * sizeof(int32_t)));
-  HIP_CHECK(hipMalloc(&d_token_wts, num_tokens * elem_size));
+  HIP_CHECK_GOTO(hipMalloc(&d_expert_indices, num_tokens * k * sizeof(int32_t)),
+                 cleanup);
+  HIP_CHECK_GOTO(hipMalloc(&d_expert_weights, num_tokens * k * elem_size),
+                 cleanup);
+  HIP_CHECK_GOTO(
+      hipMalloc(&d_gather_buf, num_tokens * hidden_size * elem_size), cleanup);
+  HIP_CHECK_GOTO(hipMalloc(&d_fc1_buf, num_tokens * fusion_inter * elem_size),
+                 cleanup);
+  HIP_CHECK_GOTO(hipMalloc(&d_act_buf, num_tokens * inter_size * elem_size),
+                 cleanup);
+  HIP_CHECK_GOTO(hipMalloc(&d_fc2_buf, num_tokens * hidden_size * elem_size),
+                 cleanup);
+  HIP_CHECK_GOTO(hipMalloc(&d_token_ids, num_tokens * sizeof(int32_t)),
+                 cleanup);
+  HIP_CHECK_GOTO(hipMalloc(&d_token_wts, num_tokens * elem_size), cleanup);
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: topk_routing(tokens=%lld, experts=%lld, "
                     "k=%lld, normalize=%lld)\n",
                     (long long)num_tokens, (long long)num_experts, (long long)k,
                     (long long)normalize_routing_weights);
-  KERNEL_CHECK(hip_qmoe_topk_routing(stream, router_probs, d_expert_indices,
-                                     d_expert_weights, num_tokens, num_experts,
-                                     k, normalize_routing_weights, elem_size));
+  KERNEL_CHECK_GOTO(
+      hip_qmoe_topk_routing(stream, router_probs, d_expert_indices,
+                            d_expert_weights, num_tokens, num_experts, k,
+                            normalize_routing_weights, elem_size),
+      cleanup);
 
   {
     std::vector<int32_t> h_indices(num_tokens * k);
     std::vector<char> h_weights(num_tokens * k * elem_size);
 
-    HIP_CHECK(hipMemcpyAsync(h_indices.data(), d_expert_indices,
-                             num_tokens * k * sizeof(int32_t),
-                             hipMemcpyDeviceToHost, hip_stream));
-    HIP_CHECK(hipMemcpyAsync(h_weights.data(), d_expert_weights,
-                             num_tokens * k * elem_size, hipMemcpyDeviceToHost,
-                             hip_stream));
-    HIP_CHECK(hipStreamSynchronize(hip_stream));
+    HIP_CHECK_GOTO(hipMemcpyAsync(h_indices.data(), d_expert_indices,
+                                  num_tokens * k * sizeof(int32_t),
+                                  hipMemcpyDeviceToHost, hip_stream),
+                   cleanup);
+    HIP_CHECK_GOTO(hipMemcpyAsync(h_weights.data(), d_expert_weights,
+                                  num_tokens * k * elem_size,
+                                  hipMemcpyDeviceToHost, hip_stream),
+                   cleanup);
+    HIP_CHECK_GOTO(hipStreamSynchronize(hip_stream), cleanup);
 
     std::vector<std::vector<TokenEntry>> expert_tokens(num_experts);
     for (int64_t t = 0; t < num_tokens; t++) {
@@ -139,8 +129,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       }
     }
 
-    HIP_CHECK(hipMemsetAsync(output, 0, num_tokens * hidden_size * elem_size,
-                             hip_stream));
+    HIP_CHECK_GOTO(hipMemsetAsync(output, 0,
+                                  num_tokens * hidden_size * elem_size,
+                                  hip_stream),
+                   cleanup);
 
     int64_t active_experts = 0;
     for (int64_t e = 0; e < num_experts; e++)
@@ -164,17 +156,21 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                elem_size);
       }
 
-      HIP_CHECK(hipMemcpyAsync(d_token_ids, h_ids.data(),
-                               count * sizeof(int32_t), hipMemcpyHostToDevice,
-                               hip_stream));
-      HIP_CHECK(hipMemcpyAsync(d_token_wts, h_wts_e.data(), count * elem_size,
-                               hipMemcpyHostToDevice, hip_stream));
+      HIP_CHECK_GOTO(hipMemcpyAsync(d_token_ids, h_ids.data(),
+                                    count * sizeof(int32_t),
+                                    hipMemcpyHostToDevice, hip_stream),
+                     cleanup);
+      HIP_CHECK_GOTO(hipMemcpyAsync(d_token_wts, h_wts_e.data(),
+                                    count * elem_size, hipMemcpyHostToDevice,
+                                    hip_stream),
+                     cleanup);
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: %lld tokens - gather\n",
                         (long long)e, (long long)count);
-      KERNEL_CHECK(hip_qmoe_gather_tokens(stream, input, d_gather_buf,
-                                          d_token_ids, hidden_size, count,
-                                          elem_size));
+      KERNEL_CHECK_GOTO(hip_qmoe_gather_tokens(stream, input, d_gather_buf,
+                                              d_token_ids, hidden_size, count,
+                                              elem_size),
+                        cleanup);
 
       const char *fc1_w_e = static_cast<const char *>(fc1_weights) +
                             e * fusion_inter * k_blocks_fc1 * blob_size_fc1;
@@ -192,18 +188,22 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                         "[%lld x %lld] -> [%lld x %lld]\n",
                         (long long)e, (long long)count, (long long)hidden_size,
                         (long long)count, (long long)fusion_inter);
-      KERNEL_CHECK(hip_matmul_nbits(stream, d_gather_buf, fc1_w_e, fc1_s_e,
-                                    fc1_zp_e, fc1_b_e, d_fc1_buf, count,
-                                    fusion_inter, hidden_size, 1,
-                                    expert_weight_bits, block_size, elem_size));
+      KERNEL_CHECK_GOTO(hip_matmul_nbits(stream, d_gather_buf, fc1_w_e, fc1_s_e,
+                                        fc1_zp_e, fc1_b_e, d_fc1_buf, count,
+                                        fusion_inter, hidden_size, 1,
+                                        expert_weight_bits, block_size,
+                                        elem_size),
+                        cleanup);
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: swiglu(alpha=%.3f, "
                         "beta=%.3f, limit=%.1f)\n",
                         (long long)e, (double)activation_alpha,
                         (double)activation_beta, (double)swiglu_limit);
-      KERNEL_CHECK(hip_qmoe_swiglu(stream, d_fc1_buf, d_act_buf, count,
-                                   inter_size, activation_alpha,
-                                   activation_beta, swiglu_limit, elem_size));
+      KERNEL_CHECK_GOTO(
+          hip_qmoe_swiglu(stream, d_fc1_buf, d_act_buf, count, inter_size,
+                          activation_alpha, activation_beta, swiglu_limit,
+                          elem_size),
+          cleanup);
 
       const char *fc2_w_e = static_cast<const char *>(fc2_weights) +
                             e * hidden_size * k_blocks_fc2 * blob_size_fc2;
@@ -221,16 +221,19 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                         "[%lld x %lld] -> [%lld x %lld]\n",
                         (long long)e, (long long)count, (long long)inter_size,
                         (long long)count, (long long)hidden_size);
-      KERNEL_CHECK(hip_matmul_nbits(stream, d_act_buf, fc2_w_e, fc2_s_e,
-                                    fc2_zp_e, fc2_b_e, d_fc2_buf, count,
-                                    hidden_size, inter_size, 1,
-                                    expert_weight_bits, block_size, elem_size));
+      KERNEL_CHECK_GOTO(hip_matmul_nbits(stream, d_act_buf, fc2_w_e, fc2_s_e,
+                                        fc2_zp_e, fc2_b_e, d_fc2_buf, count,
+                                        hidden_size, inter_size, 1,
+                                        expert_weight_bits, block_size,
+                                        elem_size),
+                        cleanup);
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: scatter_add\n",
                         (long long)e);
-      KERNEL_CHECK(hip_qmoe_scatter_add(stream, output, d_fc2_buf, d_token_ids,
-                                        d_token_wts, hidden_size, count,
-                                        elem_size));
+      KERNEL_CHECK_GOTO(hip_qmoe_scatter_add(stream, output, d_fc2_buf,
+                                            d_token_ids, d_token_wts,
+                                            hidden_size, count, elem_size),
+                        cleanup);
     }
   }
 
@@ -252,8 +255,8 @@ cleanup:
   if (d_token_wts)
     hipFree(d_token_wts);
 
-  if (rc == 0) {
+  if (result == 0) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: completed successfully\n");
   }
-  return rc;
+  return result;
 }
