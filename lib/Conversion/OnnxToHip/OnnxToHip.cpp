@@ -725,10 +725,10 @@ MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
                                   mlir::PatternRewriter &rewriter) const {
   auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
   if (!funcNameAttr || funcNameAttr.getValue() != "MatMulNBits")
-    return mlir::failure();
+    return rewriter.notifyMatchFailure(op, "not a MatMulNBits custom op");
   auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
   if (!domainAttr || domainAttr.getValue() != "com.microsoft")
-    return mlir::failure();
+    return rewriter.notifyMatchFailure(op, "not a com.microsoft domain op");
 
   mlir::Location loc = op->getLoc();
 
@@ -804,10 +804,10 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
                            mlir::PatternRewriter &rewriter) const {
   auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
   if (!funcNameAttr || funcNameAttr.getValue() != "QMoE")
-    return mlir::failure();
+    return rewriter.notifyMatchFailure(op, "not a QMoE custom op");
   auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
   if (!domainAttr || domainAttr.getValue() != "com.microsoft")
-    return mlir::failure();
+    return rewriter.notifyMatchFailure(op, "not a com.microsoft domain op");
 
   mlir::Location loc = op->getLoc();
 
