@@ -89,7 +89,7 @@ cd onnxruntime
 ./build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --disable_memleak_checker --use_dml
 
 # Install to prebuilt-local (set prefix at install time, not during configuration)
-mkdir -p ../prebuilt-local 
+mkdir -p ../prebuilt-local
 PREBUILT_DIR=$(cd ../prebuilt-local && pwd)
 cmake --install ../build/onnxruntime/Release --prefix "$PREBUILT_DIR"
 ```
