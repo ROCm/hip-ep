@@ -16,19 +16,13 @@ model.onnx  -->  onnx-mlir  -->  onnx_dialect.mlir  -->  hip-mlir-opt --convert-
 
 ## Build Requirements
 
-This feature is **optional** and disabled by default. Enable it by passing
-`-DONNX_MLIR_SRC` at cmake time:
+For general build instructions, see [quick_start.md](quick_start.md).
 
-```bash
-cmake .. \
-  -DLLVM_DIR=/path/to/llvm-project/build/lib/cmake/llvm \
-  -DMLIR_DIR=/path/to/llvm-project/build/lib/cmake/mlir \
-  -DONNX_MLIR_SRC=/path/to/onnx-mlir \
-  -DONNX_MLIR_BUILD=/path/to/onnx-mlir/build
-```
-
-Without `-DONNX_MLIR_SRC`, hip-mlir-opt and hip-compiler build normally with HIP dialect
-support only; the `--convert-onnx-to-hip` pass is simply not registered.
+This feature is **optional** and disabled by default. To enable it, add
+`-DONNX_MLIR_SRC=/path/to/onnx-mlir` (and optionally `-DONNX_MLIR_BUILD`)
+to your CMake configure command. Without this flag, hip-mlir-opt and
+hip-compiler build normally; the `--convert-onnx-to-hip` pass is simply
+not registered.
 
 **Known limitation:** onnx-mlir pins to an LLVM 22-dev commit (`0c2701fe7fa0`,
 Nov 2025) and is not compatible with LLVM 23. If you are using LLVM 23, leave
