@@ -8,6 +8,10 @@
 
 #include <cstdio>
 
+// Convenience wrappers for goto cleanup pattern (all functions use 'cleanup' label)
+#define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
+#define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
+
 // =============================================================================
 // MIOpen Convolution Forward Wrapper
 // =============================================================================
@@ -130,46 +134,46 @@ int wrap_miopenConvolutionForward(
   float beta = 0.0f;
 
   // Create tensor descriptors
-  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&input_desc), cleanup);
-  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&weights_desc), cleanup);
-  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&output_desc), cleanup);
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&input_desc));
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&weights_desc));
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&output_desc));
 
   // Set tensor descriptors (assuming float32 data type)
   // Input: [N, C, H, W]
-  MIOPEN_CHECK_GOTO(miopenSet4dTensorDescriptor(input_desc, miopenFloat, input_n, input_c,
-                                                 input_h, input_w), cleanup);
+  MIOPEN_CHECK(miopenSet4dTensorDescriptor(input_desc, miopenFloat, input_n, input_c,
+                                           input_h, input_w));
 
   // Weights: [K, C, R, S] where K=output channels, C=input channels,
   // R=kernel_h, S=kernel_w
-  MIOPEN_CHECK_GOTO(miopenSet4dTensorDescriptor(weights_desc, miopenFloat, weights_k, input_c,
-                                                 kernel_h, kernel_w), cleanup);
+  MIOPEN_CHECK(miopenSet4dTensorDescriptor(weights_desc, miopenFloat, weights_k, input_c,
+                                           kernel_h, kernel_w));
 
   // Output: [N, K, H', W']
-  MIOPEN_CHECK_GOTO(miopenSet4dTensorDescriptor(output_desc, miopenFloat, input_n, weights_k,
-                                                 output_h, output_w), cleanup);
+  MIOPEN_CHECK(miopenSet4dTensorDescriptor(output_desc, miopenFloat, input_n, weights_k,
+                                           output_h, output_w));
 
   // Create convolution descriptor
   // Note: MIOpen padding is per-side, but if pad_top==pad_bottom and
   // pad_left==pad_right, we use the symmetric version
-  MIOPEN_CHECK_GOTO(miopenCreateConvolutionDescriptor(&conv_desc), cleanup);
-  MIOPEN_CHECK_GOTO(miopenInitConvolutionDescriptor(conv_desc, miopenConvolution, pad_top,
-                                                     pad_left, stride_h, stride_w, dilation_h,
-                                                     dilation_w), cleanup);
+  MIOPEN_CHECK(miopenCreateConvolutionDescriptor(&conv_desc));
+  MIOPEN_CHECK(miopenInitConvolutionDescriptor(conv_desc, miopenConvolution, pad_top,
+                                               pad_left, stride_h, stride_w, dilation_h,
+                                               dilation_w));
 
   // Set group count for grouped convolutions (e.g., depthwise convolution)
   // group=1 for standard convolution, group=C for depthwise convolution
   if (group > 1) {
-    MIOPEN_CHECK_GOTO(miopenSetConvolutionGroupCount(conv_desc, group), cleanup);
+    MIOPEN_CHECK(miopenSetConvolutionGroupCount(conv_desc, group));
   }
 
   // Allocate workspace for algorithm search
   // MIOpen's Find API needs workspace to test algorithms
-  HIP_CHECK_GOTO(hipMalloc(&find_workspace, find_workspace_size), cleanup);
+  HIP_CHECK(hipMalloc(&find_workspace, find_workspace_size));
 
   // Find best algorithm
   // MIOpen 3.x API: returns array of performance results instead of single
   // algorithm
-  MIOPEN_CHECK_GOTO(miopenFindConvolutionForwardAlgorithm(
+  MIOPEN_CHECK(miopenFindConvolutionForwardAlgorithm(
       miopen_handle, input_desc, input, weights_desc, weights, conv_desc,
       output_desc, output,
       1,                    // requestAlgoCount - ask for 1 algorithm
@@ -177,15 +181,15 @@ int wrap_miopenConvolutionForward(
       perf_results,         // perfResults - array to receive results
       find_workspace,       // workspace for algorithm testing
       find_workspace_size,  // workspaceSize
-      false), cleanup);
+      false));
 
   // Extract algorithm from performance results
   algo = perf_results[0].fwd_algo;
 
   // Get actual workspace size needed for this algorithm
-  MIOPEN_CHECK_GOTO(miopenConvolutionForwardGetWorkSpaceSize(
+  MIOPEN_CHECK(miopenConvolutionForwardGetWorkSpaceSize(
       miopen_handle, weights_desc, input_desc, conv_desc, output_desc,
-      &workspace_size), cleanup);
+      &workspace_size));
 
   // Reuse find_workspace if it's large enough, otherwise reallocate
   workspace = find_workspace;
@@ -195,14 +199,14 @@ int wrap_miopenConvolutionForward(
       fprintf(stderr, "Warning: hipFree failed for find_workspace: %d\n", err);
     }
     find_workspace = nullptr; // Mark as freed to avoid double-free
-    HIP_CHECK_GOTO(hipMalloc(&workspace, workspace_size), cleanup);
+    HIP_CHECK(hipMalloc(&workspace, workspace_size));
   }
 
   // Perform convolution
-  MIOPEN_CHECK_GOTO(miopenConvolutionForward(miopen_handle, &alpha, input_desc, input,
-                                             weights_desc, weights, conv_desc, algo, &beta,
-                                             output_desc, output, workspace,
-                                             workspace_size), cleanup);
+  MIOPEN_CHECK(miopenConvolutionForward(miopen_handle, &alpha, input_desc, input,
+                                        weights_desc, weights, conv_desc, algo, &beta,
+                                        output_desc, output, workspace,
+                                        workspace_size));
 
 cleanup:
   // Best-effort cleanup: free all allocated resources

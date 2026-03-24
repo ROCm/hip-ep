@@ -10,6 +10,9 @@
 #include <cstdio>
 #include <cstring>
 
+// Convenience wrappers for goto cleanup pattern (all functions use 'cleanup' label)
+#define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
+
 // =============================================================================
 // Batched MatMul via hipBLASLt
 // =============================================================================
@@ -85,38 +88,38 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
   int64_t ld_B_hipblas = K; // leading dim of A viewed as col-major
   int64_t ld_C_hipblas = N; // leading dim of output viewed as col-major
 
-  HIPBLAS_CHECK_GOTO(hipblasLtMatrixLayoutCreate(&matA_layout, data_type, N, K, ld_A_hipblas), cleanup);
-  HIPBLAS_CHECK_GOTO(hipblasLtMatrixLayoutCreate(&matB_layout, data_type, K, M, ld_B_hipblas), cleanup);
-  HIPBLAS_CHECK_GOTO(hipblasLtMatrixLayoutCreate(&matC_layout, data_type, N, M, ld_C_hipblas), cleanup);
+  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&matA_layout, data_type, N, K, ld_A_hipblas));
+  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&matB_layout, data_type, K, M, ld_B_hipblas));
+  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&matC_layout, data_type, N, M, ld_C_hipblas));
 
   if (batch_count > 1) {
     int64_t stride_A_hipblas = K * N; // stride over B batches
     int64_t stride_B_hipblas = M * K; // stride over A batches
     int64_t stride_C_hipblas = M * N; // stride over output batches
 
-    HIPBLAS_CHECK_GOTO(hipblasLtMatrixLayoutSetAttribute(
-        matA_layout, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count, sizeof(batch_count)), cleanup);
-    HIPBLAS_CHECK_GOTO(hipblasLtMatrixLayoutSetAttribute(
-        matA_layout, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stride_A_hipblas, sizeof(stride_A_hipblas)), cleanup);
+    HIPBLAS_CHECK(hipblasLtMatrixLayoutSetAttribute(
+        matA_layout, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count, sizeof(batch_count)));
+    HIPBLAS_CHECK(hipblasLtMatrixLayoutSetAttribute(
+        matA_layout, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stride_A_hipblas, sizeof(stride_A_hipblas)));
 
-    HIPBLAS_CHECK_GOTO(hipblasLtMatrixLayoutSetAttribute(
-        matB_layout, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count, sizeof(batch_count)), cleanup);
-    HIPBLAS_CHECK_GOTO(hipblasLtMatrixLayoutSetAttribute(
-        matB_layout, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stride_B_hipblas, sizeof(stride_B_hipblas)), cleanup);
+    HIPBLAS_CHECK(hipblasLtMatrixLayoutSetAttribute(
+        matB_layout, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count, sizeof(batch_count)));
+    HIPBLAS_CHECK(hipblasLtMatrixLayoutSetAttribute(
+        matB_layout, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stride_B_hipblas, sizeof(stride_B_hipblas)));
 
-    HIPBLAS_CHECK_GOTO(hipblasLtMatrixLayoutSetAttribute(
-        matC_layout, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count, sizeof(batch_count)), cleanup);
-    HIPBLAS_CHECK_GOTO(hipblasLtMatrixLayoutSetAttribute(
-        matC_layout, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stride_C_hipblas, sizeof(stride_C_hipblas)), cleanup);
+    HIPBLAS_CHECK(hipblasLtMatrixLayoutSetAttribute(
+        matC_layout, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count, sizeof(batch_count)));
+    HIPBLAS_CHECK(hipblasLtMatrixLayoutSetAttribute(
+        matC_layout, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stride_C_hipblas, sizeof(stride_C_hipblas)));
   }
 
-  HIPBLAS_CHECK_GOTO(hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F), cleanup);
+  HIPBLAS_CHECK(hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
 
-  HIPBLAS_CHECK_GOTO(hipblasLtMatmul(handle, matmul_desc, &alpha, B,
-                                     matA_layout,    // "A" = B (row→col trick)
-                                     A, matB_layout, // "B" = A (row→col trick)
-                                     &beta, output, matC_layout, output, matC_layout, nullptr,
-                                     nullptr, 0, stream), cleanup);
+  HIPBLAS_CHECK(hipblasLtMatmul(handle, matmul_desc, &alpha, B,
+                                matA_layout,    // "A" = B (row→col trick)
+                                A, matB_layout, // "B" = A (row→col trick)
+                                &beta, output, matC_layout, output, matC_layout, nullptr,
+                                nullptr, 0, stream));
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: completed successfully\n");
 

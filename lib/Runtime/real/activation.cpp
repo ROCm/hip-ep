@@ -9,6 +9,9 @@
 
 #include <cstdio>
 
+// Convenience wrappers for goto cleanup pattern (all functions use 'cleanup' label)
+#define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
+
 static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type) {
   switch (data_type) {
   case HIPDNN_EP_DATATYPE_FLOAT:
@@ -92,20 +95,20 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
       "[1,1,1,%d] with type %s\n",
       n, type_name);
 
-  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&inDesc), cleanup);
-  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&outDesc), cleanup);
-  MIOPEN_CHECK_GOTO(miopenSet4dTensorDescriptor(inDesc, miopen_type, 1, 1, 1, n), cleanup);
-  MIOPEN_CHECK_GOTO(miopenSet4dTensorDescriptor(outDesc, miopen_type, 1, 1, 1, n), cleanup);
-  MIOPEN_CHECK_GOTO(miopenCreateActivationDescriptor(&actDesc), cleanup);
-  MIOPEN_CHECK_GOTO(miopenSetActivationDescriptor(actDesc, miopen_act, 0.0, 0.0, 0.0), cleanup);
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&inDesc));
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&outDesc));
+  MIOPEN_CHECK(miopenSet4dTensorDescriptor(inDesc, miopen_type, 1, 1, 1, n));
+  MIOPEN_CHECK(miopenSet4dTensorDescriptor(outDesc, miopen_type, 1, 1, 1, n));
+  MIOPEN_CHECK(miopenCreateActivationDescriptor(&actDesc));
+  MIOPEN_CHECK(miopenSetActivationDescriptor(actDesc, miopen_act, 0.0, 0.0, 0.0));
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_miopenActivationForward: calling miopenActivationForward"
       "(%s, alpha=%.1f, beta=%.1f)\n",
       act_name, alpha, beta);
 
-  MIOPEN_CHECK_GOTO(miopenActivationForward(handle, actDesc, &alpha, inDesc, input, &beta,
-                                            outDesc, output), cleanup);
+  MIOPEN_CHECK(miopenActivationForward(handle, actDesc, &alpha, inDesc, input, &beta,
+                                       outDesc, output));
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_miopenActivationForward: completed successfully\n");
