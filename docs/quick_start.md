@@ -21,11 +21,11 @@ FlatBuffers, and Protobuf binaries instead of compiling them from source.
 
 **<span style="color:red">IMPORTANT</span> -- MSVC Environment Setup:**
 
-> You **must** launch Git Bash from inside a "**x64** Native Tools Command Prompt for VS
-> XXXX" (where XXXX is your VS version: 2019, 2022, 2026, etc.).
-> This is required so that `cl.exe`, `link.exe`, and the MSVC headers/libraries
-> are visible to the build system. All commands in this guide assume this
-> environment.
+You **must** launch Git Bash from inside a "**x64** Native Tools Command Prompt for VS
+XXXX" (where XXXX is your VS version: 2019, 2022, 2026, etc.).
+This is required so that `cl.exe`, `link.exe`, and the MSVC headers/libraries
+are visible to the build system. All commands in this guide assume this
+environment.
 
 ```bash
 # Verify MSVC environment is inherited
