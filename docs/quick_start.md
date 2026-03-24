@@ -19,13 +19,13 @@ FlatBuffers, and Protobuf binaries instead of compiling them from source.
 | **`gh` CLI** | Downloading pre-built binaries (`gh auth login` required) |
 | **`unzip`** | Extracting downloaded archives (available in Git Bash / MSYS2) |
 
-**IMPORTANT -- MSVC Environment Setup:**
+**<span style="color:red">IMPORTANT</span> -- MSVC Environment Setup:**
 
-> You **must** launch Git Bash from inside a "Developer Command Prompt for VS
-> XXXX" (where XXXX is your VS version: 2019, 2022, 2026, etc.).
-> This is required so that `cl.exe`, `link.exe`, and the MSVC headers/libraries
-> are visible to the build system. All commands in this guide assume this
-> environment.
+You **must** launch Git Bash from inside a "**x64** Native Tools Command Prompt for VS
+XXXX" (where XXXX is your VS version: 2019, 2022, 2026, etc.).
+This is required so that `cl.exe`, `link.exe`, and the MSVC headers/libraries
+are visible to the build system. All commands in this guide assume this
+environment.
 
 ```bash
 # Verify MSVC environment is inherited
@@ -89,6 +89,7 @@ cd onnxruntime
 ./build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --disable_memleak_checker --use_dml
 
 # Install to prebuilt-local (set prefix at install time, not during configuration)
+mkdir -p ../prebuilt-local
 PREBUILT_DIR=$(cd ../prebuilt-local && pwd)
 cmake --install ../build/onnxruntime/Release --prefix "$PREBUILT_DIR"
 ```
@@ -105,6 +106,10 @@ ls $PREBUILT_DIR/lib/cmake/onnxruntime/
 Run from the project root (inside Git Bash / MSYS2):
 
 ```bash
+cd ..
+git clone https://github.com/ROCm/onnx-hipdnn-ep.git
+cd onnx-hipdnn-ep/
+git submodule update --init --recursive
 bash scripts/setup-prebuilt.sh
 ```
 
@@ -130,8 +135,6 @@ Run from the project root:
 PREBUILT_DIR=$(cd ../prebuilt-local && pwd)
 THEROCK_DIST=$(cd ../therock && pwd)
 
-git submodule update --init
-
 cmake -S . -B ../build/$(basename $PWD) \
   -G Ninja \
   -DBUILD_SHARED_LIBS=OFF \
@@ -145,7 +148,9 @@ cmake -S . -B ../build/$(basename $PWD) \
   -DTHEROCK_DIST="$THEROCK_DIST" \
   -DHIP_PLATFORM=amd \
   -DHIP_ARCHITECTURES=gfx1151 \
-  -DBUILD_EP=ON
+  -DBUILD_EP=ON \
+  -DBUILD_MOCK_RUNTIME=OFF \
+  -DBUILD_HIP_TOOLS=ON
 ```
 
 **Note**: Replace `gfx1151` with your GPU architecture. Detect using: `$THEROCK_DIST/lib/llvm/bin/amdgpu-arch.exe`
@@ -179,14 +184,13 @@ compare MorphiZen EP (AMD GPU via HIP) against DML EP.
 
 **Setup:**
 
-`onnxruntime_perf_test.exe` and `morphizen_config.json` are not installed by
-default. Copy them into `../prebuilt-local/bin` before running:
+`onnxruntime_perf_test.exe` are not installed by
+default. Copy it into `../prebuilt-local/bin` before running:
 
 ```bash
 cp ../build/onnxruntime/Release/Release/onnxruntime_perf_test.exe $PREBUILT_DIR/bin/
-cp etc/morphizen_config.json $PREBUILT_DIR/bin/
 
-export THEROCK_DIST=~/workspace/therock
+export THEROCK_DIST=$(cd ../therock && pwd)
 export PATH="$THEROCK_DIST/bin:$PATH"
 cd $PREBUILT_DIR/bin
 ```
