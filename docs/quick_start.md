@@ -148,7 +148,10 @@ cmake -S . -B ../build/$(basename $PWD) \
   -DTHEROCK_DIST="$THEROCK_DIST" \
   -DHIP_PLATFORM=amd \
   -DHIP_ARCHITECTURES=gfx1151 \
-  -DBUILD_EP=ON
+  -DBUILD_EP=ON \
+  -DBUILD_MOCK_RUNTIME=OFF \
+  -DBUILD_HIP_TOOLS=ON \
+  -DONNX_HIP_INCLUDE_LIT_TESTS=ON
 ```
 
 **Note**: Replace `gfx1151` with your GPU architecture. Detect using: `$THEROCK_DIST/lib/llvm/bin/amdgpu-arch.exe`
