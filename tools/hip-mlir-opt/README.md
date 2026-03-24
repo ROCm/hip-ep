@@ -123,6 +123,6 @@ For build instructions, see
 
 ## See Also
 
-- [DEMO.md](../../backend-mlir-compiler/doc/DEMO.md) - Complete demo of MLIR compilation pipeline
+- [Quick Start Guide](../../docs/quick_start.md) - Build and test instructions
 - [hip-compiler](../hip-compiler/) - Production DLL compilation tool
 - [hip-test-dll](../hip-test-dll/) - DLL testing and validation tool

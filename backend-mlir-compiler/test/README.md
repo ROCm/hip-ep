@@ -212,25 +212,19 @@ DUMP_DIR="$TEMP_DIR/morphizen_dumps/<cache_key>"  # Replace <cache_key>
 
 ### Step 3: Test Complete Pipeline
 
-Use `hip-mlir-opt` to test the full ONNX→HIP→LLVM→Interface pipeline by running all passes:
+Use `hip-mlir-opt` to test the full ONNX→HIP→LLVM→Interface pipeline using the registered pipelines:
 
 ```bash
 "$LOCAL_DIR/bin/hip-mlir-opt" \
-  --convert-onnx-to-hip \
-  --canonicalize \
-  --hip-pool-allocs \
-  --convert-hip-to-llvm \
-  --generate-interface \
+  --onnx-to-hip-pipeline \
+  --hip-to-llvm-pipeline \
   "$TEMP_DIR/input.mlir" \
   -o "$TEMP_DIR/output.mlir"
 ```
 
 This runs the complete compilation pipeline:
-1. `--convert-onnx-to-hip` - Convert ONNX operations to HIP dialect
-2. `--canonicalize` - Canonicalization pass
-3. `--hip-pool-allocs` - Memory pooling optimization
-4. `--convert-hip-to-llvm` - Convert HIP dialect to LLVM dialect
-5. `--generate-interface` - Generate C interface wrapper functions
+1. `--onnx-to-hip-pipeline` — ONNX→HIP conversion, bufferization, memory optimizations (`hip-optimize-memrefs`, `hip-pool-allocs`, `hip-lower-allocs`, `hip-resolve-extern-constants`)
+2. `--hip-to-llvm-pipeline` — HIP→LLVM lowering and C interface generation
 
 If successful, this validates that all MLIR transformations work correctly.
 
@@ -244,11 +238,8 @@ When you see errors like "failed to legalize operation 'onnx.Conv'", the error m
 
 ```bash
 "$LOCAL_DIR/bin/hip-mlir-opt" \
-  --convert-onnx-to-hip \
-  --canonicalize \
-  --hip-pool-allocs \
-  --convert-hip-to-llvm \
-  --generate-interface \
+  --onnx-to-hip-pipeline \
+  --hip-to-llvm-pipeline \
   --debug-only=dialect-conversion \
   --mlir-disable-threading \
   "$TEMP_DIR/input.mlir" 2>&1 | tee "$TEMP_DIR/debug_conversion.log"
@@ -276,11 +267,8 @@ Use `--mlir-print-ir-tree-dir` to automatically dump IR before/after each pass:
 mkdir -p "$TEMP_DIR/ir_dumps"
 
 "$LOCAL_DIR/bin/hip-mlir-opt" \
-  --convert-onnx-to-hip \
-  --canonicalize \
-  --hip-pool-allocs \
-  --convert-hip-to-llvm \
-  --generate-interface \
+  --onnx-to-hip-pipeline \
+  --hip-to-llvm-pipeline \
   --mlir-print-ir-tree-dir="$TEMP_DIR/ir_dumps" \
   --mlir-print-ir-before-all \
   --mlir-disable-threading \
@@ -311,12 +299,22 @@ mkdir -p "$TEMP_DIR/ir_dumps"
 - `--mlir-timing` - Display pass execution timing
 - `--mlir-pass-statistics` - Display pass statistics
 
-**Pass names** (use with `--mlir-print-ir-before=<name>` or `--mlir-print-ir-after=<name>`):
-- `convert-onnx-to-hip` - ONNX to HIP conversion
-- `canonicalize` - Canonicalization
-- `hip-pool-allocs` - Memory pooling optimization
-- `convert-hip-to-llvm` - HIP to LLVM conversion
-- `generate-interface` - Interface generation
+**Pipelines** (recommended for running the full flow):
+- `--onnx-to-hip-pipeline` — ONNX→HIP conversion, bufferization, memory optimization
+- `--hip-to-llvm-pipeline` — HIP→LLVM lowering and C interface generation
+- `--hipdnn-pipeline` — Both of the above combined
+
+**Individual pass names** (use with `--mlir-print-ir-before=<name>` or `--mlir-print-ir-after=<name>`):
+- `convert-onnx-to-hip` — ONNX to HIP conversion
+- `hip-add-context-arg` — Add runtime context argument
+- `hip-optimize-memrefs` — Optimize memory reference operations
+- `hip-pool-allocs` — Pack allocations into a single byte pool
+- `hip-lower-allocs` — Replace memref.alloc with hip.alloc/hip.free
+- `hip-resolve-extern-constants` — Resolve external constant references
+- `convert-hip-to-llvm` — HIP to LLVM conversion
+- `generate-interface` — C interface generation
+- `canonicalize` — Canonicalization
+- `cse` — Common subexpression elimination
 
 ### Step 5: Isolate the Failing Pass
 
@@ -324,26 +322,23 @@ Once you identify the failing pass, isolate it for focused debugging:
 
 #### Method 1: Run Passes Incrementally
 
-Run passes one-by-one up to the failing pass:
+Use the sub-pipelines to narrow down which stage fails, then isolate individual passes:
 
 ```bash
-# Run only passes BEFORE the failing pass
-# Example: If convert-hip-to-llvm fails, run up to hip-pool-allocs
-
+# Run only the first pipeline to check if the failure is in onnx-to-hip or hip-to-llvm
 "$LOCAL_DIR/bin/hip-mlir-opt" \
-  --convert-onnx-to-hip \
-  --canonicalize \
-  --hip-pool-allocs \
-  -o "$TEMP_DIR/input_before_failing_pass.mlir" \
-  "$TEMP_DIR/input.mlir"
+  --onnx-to-hip-pipeline \
+  "$TEMP_DIR/input.mlir" \
+  -o "$TEMP_DIR/after_onnx_to_hip.mlir"
 
-# Now test the failing pass in isolation
+# If that succeeds, the failure is in hip-to-llvm-pipeline.
+# Test it in isolation:
 "$LOCAL_DIR/bin/hip-mlir-opt" \
-  --convert-hip-to-llvm \
+  --hip-to-llvm-pipeline \
   --mlir-print-ir-after-all \
   --mlir-print-ir-module-scope \
   --mlir-disable-threading \
-  "$TEMP_DIR/input_before_failing_pass.mlir" 2>&1 | tee "$TEMP_DIR/isolated_pass_debug.log"
+  "$TEMP_DIR/after_onnx_to_hip.mlir" 2>&1 | tee "$TEMP_DIR/isolated_pass_debug.log"
 ```
 
 #### Method 2: Extract from IR Tree Dumps
@@ -401,15 +396,13 @@ DUMP_DIR="$TEMP_DIR/morphizen_dumps/abc123"
 
 # Test pipeline
 "$LOCAL_DIR/bin/hip-mlir-opt" \
-  --convert-onnx-to-hip --canonicalize --hip-pool-allocs \
-  --convert-hip-to-llvm --generate-interface \
+  --onnx-to-hip-pipeline --hip-to-llvm-pipeline \
   "$TEMP_DIR/input.mlir"
 # ERROR: "failed to legalize operation 'onnx.Conv'"
 
 # Use debug flags (NOT speculation)
 "$LOCAL_DIR/bin/hip-mlir-opt" \
-  --convert-onnx-to-hip --canonicalize --hip-pool-allocs \
-  --convert-hip-to-llvm --generate-interface \
+  --onnx-to-hip-pipeline --hip-to-llvm-pipeline \
   --debug-only=dialect-conversion \
   --mlir-disable-threading \
   "$TEMP_DIR/input.mlir" 2>&1 | tee "$TEMP_DIR/debug.log"
@@ -658,8 +651,7 @@ backend-mlir-compiler/test/
 ```bash
 # ✅ Good - All commands from project root
 cd /c/Develop/m/onnx-hipdnn-ep/mlir-integration
-"$LOCAL_DIR/bin/hip-mlir-opt" --convert-onnx-to-hip --canonicalize --hip-pool-allocs \
-  --convert-hip-to-llvm --generate-interface "$TEMP_DIR/input.mlir"
+"$LOCAL_DIR/bin/hip-mlir-opt" --onnx-to-hip-pipeline --hip-to-llvm-pipeline "$TEMP_DIR/input.mlir"
 
 # ❌ Bad - Using cd, relative paths, workspace pollution
 cd backend-mlir-compiler/test
