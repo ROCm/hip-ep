@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "error_check_macros.h"
 #include "hip_custom_kernels.h"
 
 #include <cstdio>
@@ -38,6 +39,13 @@ int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
     return -1;
   }
 
-  return hip_matmul_nbits(stream, A, B, scales, zero_points, bias, output, M, N,
-                          K, batch_count, bits, block_size, elem_size);
+  int result = 0;
+  HIP_CHECK_GOTO(
+      static_cast<hipError_t>(hip_matmul_nbits(
+          stream, A, B, scales, zero_points, bias, output, M, N, K,
+          batch_count, bits, block_size, elem_size)),
+      cleanup);
+
+cleanup:
+  return result;
 }

@@ -64,15 +64,4 @@
     }                                                                          \
   } while (0)
 
-#define KERNEL_CHECK_GOTO(expr, label)                                         \
-  do {                                                                         \
-    int _rc = (expr);                                                          \
-    if (_rc != 0) {                                                            \
-      fprintf(stderr, "Kernel error: %s failed at %s:%d (rc=%d)\n", #expr,     \
-              __FILE__, __LINE__, _rc);                                        \
-      result = _rc;                                                            \
-      goto label;                                                              \
-    }                                                                          \
-  } while (0)
-
 #endif // HIPDNN_EP_ERROR_CHECK_MACROS_H
