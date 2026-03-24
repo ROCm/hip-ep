@@ -84,7 +84,7 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
     return -1;
   }
 
-  int rc = -1;
+  int result = 0;
   void *rstd_buf = nullptr;
 
   // Descriptors for miopenOpTensor (ADD)
@@ -175,7 +175,7 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: completed "
                     "successfully\n");
-  rc = 0;
+  result = 0;
 
 cleanup:
   if (addADesc)
@@ -195,5 +195,5 @@ cleanup:
   if (rstd_buf)
     hipFree(rstd_buf);
 
-  return rc;
+  return result;
 }
