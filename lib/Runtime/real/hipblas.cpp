@@ -8,6 +8,9 @@
 
 #include <cstdio>
 
+// Convenience wrappers for goto cleanup pattern (all functions use 'cleanup' label)
+#define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
+
 // hipBLASLt GEMM wrapper implementation
 
 int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
@@ -29,20 +32,20 @@ int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
   int result = 0;
 
   // Create matrix descriptors (assuming float32, column-major)
-  HIPBLAS_CHECK_GOTO(hipblasLtMatrixLayoutCreate(&matA, HIP_R_32F, m, k, m), cleanup);
-  HIPBLAS_CHECK_GOTO(hipblasLtMatrixLayoutCreate(&matB, HIP_R_32F, k, n, k), cleanup);
-  HIPBLAS_CHECK_GOTO(hipblasLtMatrixLayoutCreate(&matC, HIP_R_32F, m, n, m), cleanup);
+  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&matA, HIP_R_32F, m, k, m));
+  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&matB, HIP_R_32F, k, n, k));
+  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&matC, HIP_R_32F, m, n, m));
 
   // Create operation descriptor
-  HIPBLAS_CHECK_GOTO(hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F), cleanup);
+  HIPBLAS_CHECK(hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
 
   // Perform GEMM
-  HIPBLAS_CHECK_GOTO(hipblasLtMatmul(hipblas_handle, matmul_desc, alpha, A, matA, B, matB,
-                                     beta, C, matC, C, matC,
-                                     nullptr, // algo
-                                     nullptr, // workspace
-                                     0,       // workspaceSize
-                                     hip_stream), cleanup);
+  HIPBLAS_CHECK(hipblasLtMatmul(hipblas_handle, matmul_desc, alpha, A, matA, B, matB,
+                                beta, C, matC, C, matC,
+                                nullptr, // algo
+                                nullptr, // workspace
+                                0,       // workspaceSize
+                                hip_stream));
 
 cleanup:
   // Best-effort cleanup: free all allocated resources

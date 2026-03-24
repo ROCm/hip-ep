@@ -10,6 +10,9 @@
 
 #include <cstdio>
 
+// Convenience wrappers for goto cleanup pattern (all functions use 'cleanup' label)
+#define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
+
 // Explicit mapping from backend-independent HIPDNN_EP_DATATYPE_* enum to
 // MIOpen-specific miopenDataType_t. No static_cast -- our enum values are
 // independent of any library.
@@ -99,19 +102,19 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                     "[1,1,1,%d] with type %s\n",
                     n, type_name);
 
-  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&aDesc), cleanup);
-  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&bDesc), cleanup);
-  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&cDesc), cleanup);
-  MIOPEN_CHECK_GOTO(miopenSet4dTensorDescriptor(aDesc, miopen_type, 1, 1, 1, n), cleanup);
-  MIOPEN_CHECK_GOTO(miopenSet4dTensorDescriptor(bDesc, miopen_type, 1, 1, 1, n), cleanup);
-  MIOPEN_CHECK_GOTO(miopenSet4dTensorDescriptor(cDesc, miopen_type, 1, 1, 1, n), cleanup);
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&aDesc));
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&bDesc));
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&cDesc));
+  MIOPEN_CHECK(miopenSet4dTensorDescriptor(aDesc, miopen_type, 1, 1, 1, n));
+  MIOPEN_CHECK(miopenSet4dTensorDescriptor(bDesc, miopen_type, 1, 1, 1, n));
+  MIOPEN_CHECK(miopenSet4dTensorDescriptor(cDesc, miopen_type, 1, 1, 1, n));
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: calling miopenOpTensor"
                     "(op=%s, alpha1=%.1f, alpha2=%.1f, beta=%.1f)\n",
                     op_name, alpha1, alpha2, beta);
 
-  MIOPEN_CHECK_GOTO(miopenOpTensor(handle, miopen_op, &alpha1, aDesc, lhs, &alpha2, bDesc,
-                                   rhs, &beta, cDesc, output), cleanup);
+  MIOPEN_CHECK(miopenOpTensor(handle, miopen_op, &alpha1, aDesc, lhs, &alpha2, bDesc,
+                              rhs, &beta, cDesc, output));
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: completed successfully\n");
 
