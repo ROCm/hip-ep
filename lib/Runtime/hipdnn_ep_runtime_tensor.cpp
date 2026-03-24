@@ -4,19 +4,10 @@
  */
 #include "debug_log.h"
 #include "hipdnn_ep_runtime.h"
-#include "runtime_types.h"
+#include "runtime_state_internal.h"
 
 #include <cstdio>
 #include <cstring>
-
-// Internal runtime state structure (must match state.cpp)
-struct RuntimeState {
-  void *stream;
-  void *miopen_handle;
-  void *hipblas_handle;
-  void **gpu_constants;
-  size_t num_constants;
-};
 
 // Element size is read from tensor_t.element_size (set by EP caller)
 
