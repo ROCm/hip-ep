@@ -8,8 +8,8 @@
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
-#include "runtime_types.h"
 #include "error_check_macros.h"
+#include "runtime_types.h"
 
 #include <cstdio>
 

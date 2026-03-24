@@ -4,13 +4,14 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "error_check_macros.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
-#include "error_check_macros.h"
 
 #include <cstdio>
 
-// Convenience wrappers for goto cleanup pattern (all functions use 'cleanup' label)
+// Convenience wrappers for goto cleanup pattern (all functions use 'cleanup'
+// label)
 #define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
 
 // Explicit mapping from backend-independent HIPDNN_EP_DATATYPE_* enum to
@@ -113,8 +114,8 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                     "(op=%s, alpha1=%.1f, alpha2=%.1f, beta=%.1f)\n",
                     op_name, alpha1, alpha2, beta);
 
-  MIOPEN_CHECK(miopenOpTensor(handle, miopen_op, &alpha1, aDesc, lhs, &alpha2, bDesc,
-                              rhs, &beta, cDesc, output));
+  MIOPEN_CHECK(miopenOpTensor(handle, miopen_op, &alpha1, aDesc, lhs, &alpha2,
+                              bDesc, rhs, &beta, cDesc, output));
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: completed successfully\n");
 

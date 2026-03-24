@@ -3,12 +3,13 @@
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
-#include "runtime_types.h"
 #include "error_check_macros.h"
+#include "runtime_types.h"
 
 #include <cstdio>
 
-// Convenience wrappers for goto cleanup pattern (all functions use 'cleanup' label)
+// Convenience wrappers for goto cleanup pattern (all functions use 'cleanup'
+// label)
 #define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
 
 // hipBLASLt GEMM wrapper implementation
@@ -37,11 +38,12 @@ int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
   HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&matC, HIP_R_32F, m, n, m));
 
   // Create operation descriptor
-  HIPBLAS_CHECK(hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
+  HIPBLAS_CHECK(
+      hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
 
   // Perform GEMM
-  HIPBLAS_CHECK(hipblasLtMatmul(hipblas_handle, matmul_desc, alpha, A, matA, B, matB,
-                                beta, C, matC, C, matC,
+  HIPBLAS_CHECK(hipblasLtMatmul(hipblas_handle, matmul_desc, alpha, A, matA, B,
+                                matB, beta, C, matC, C, matC,
                                 nullptr, // algo
                                 nullptr, // workspace
                                 0,       // workspaceSize

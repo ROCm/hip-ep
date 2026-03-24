@@ -35,8 +35,8 @@
   do {                                                                         \
     miopenStatus_t status = (expr);                                            \
     if (status != miopenStatusSuccess) {                                       \
-      fprintf(stderr, "MIOpen error: %s failed at %s:%d (status=%d)\n",        \
-              #expr, __FILE__, __LINE__, status);                              \
+      fprintf(stderr, "MIOpen error: %s failed at %s:%d (status=%d)\n", #expr, \
+              __FILE__, __LINE__, status);                                     \
       result = -1;                                                             \
       goto label;                                                              \
     }                                                                          \
@@ -46,8 +46,8 @@
   do {                                                                         \
     hipError_t error = (expr);                                                 \
     if (error != hipSuccess) {                                                 \
-      fprintf(stderr, "HIP error: %s failed at %s:%d: %s\n",                   \
-              #expr, __FILE__, __LINE__, hipGetErrorString(error));            \
+      fprintf(stderr, "HIP error: %s failed at %s:%d: %s\n", #expr, __FILE__,  \
+              __LINE__, hipGetErrorString(error));                             \
       result = -1;                                                             \
       goto label;                                                              \
     }                                                                          \
