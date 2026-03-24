@@ -105,6 +105,10 @@ ls $PREBUILT_DIR/lib/cmake/onnxruntime/
 Run from the project root (inside Git Bash / MSYS2):
 
 ```bash
+cd ..
+git clone https://github.com/ROCm/onnx-hipdnn-ep.git
+cd onnx-hipdnn-ep/
+git submodule update --init --recursive
 bash scripts/setup-prebuilt.sh
 ```
 
@@ -129,8 +133,6 @@ Run from the project root:
 ```bash
 PREBUILT_DIR=$(cd ../prebuilt-local && pwd)
 THEROCK_DIST=$(cd ../therock && pwd)
-
-git submodule update --init
 
 cmake -S . -B ../build/$(basename $PWD) \
   -G Ninja \
