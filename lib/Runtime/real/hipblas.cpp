@@ -4,6 +4,7 @@
  */
 #include "../hipdnn_ep_runtime.h"
 #include "runtime_types.h"
+#include "error_check_macros.h"
 
 #include <cstdio>
 
@@ -39,44 +40,20 @@ int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
   int result = 0;
 
   // Create matrix descriptors (assuming float32, column-major)
-  if (hipblasLtMatrixLayoutCreate(&matA, HIP_R_32F, m, k, m) !=
-      HIPBLAS_STATUS_SUCCESS) {
-    fprintf(stderr, "hipBLAS error: failed to create matA\n");
-    result = -1;
-    goto cleanup;
-  }
-  if (hipblasLtMatrixLayoutCreate(&matB, HIP_R_32F, k, n, k) !=
-      HIPBLAS_STATUS_SUCCESS) {
-    fprintf(stderr, "hipBLAS error: failed to create matB\n");
-    result = -1;
-    goto cleanup;
-  }
-  if (hipblasLtMatrixLayoutCreate(&matC, HIP_R_32F, m, n, m) !=
-      HIPBLAS_STATUS_SUCCESS) {
-    fprintf(stderr, "hipBLAS error: failed to create matC\n");
-    result = -1;
-    goto cleanup;
-  }
+  HIPBLAS_CHECK_GOTO(hipblasLtMatrixLayoutCreate(&matA, HIP_R_32F, m, k, m), cleanup);
+  HIPBLAS_CHECK_GOTO(hipblasLtMatrixLayoutCreate(&matB, HIP_R_32F, k, n, k), cleanup);
+  HIPBLAS_CHECK_GOTO(hipblasLtMatrixLayoutCreate(&matC, HIP_R_32F, m, n, m), cleanup);
 
   // Create operation descriptor
-  if (hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F) !=
-      HIPBLAS_STATUS_SUCCESS) {
-    fprintf(stderr, "hipBLAS error: failed to create matmul_desc\n");
-    result = -1;
-    goto cleanup;
-  }
+  HIPBLAS_CHECK_GOTO(hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F), cleanup);
 
   // Perform GEMM
-  if (hipblasLtMatmul(hipblas_handle, matmul_desc, alpha, A, matA, B, matB,
-                      beta, C, matC, C, matC,
-                      nullptr, // algo
-                      nullptr, // workspace
-                      0,       // workspaceSize
-                      hip_stream) != HIPBLAS_STATUS_SUCCESS) {
-    fprintf(stderr, "hipBLAS error: hipblasLtMatmul failed\n");
-    result = -1;
-    goto cleanup;
-  }
+  HIPBLAS_CHECK_GOTO(hipblasLtMatmul(hipblas_handle, matmul_desc, alpha, A, matA, B, matB,
+                                     beta, C, matC, C, matC,
+                                     nullptr, // algo
+                                     nullptr, // workspace
+                                     0,       // workspaceSize
+                                     hip_stream), cleanup);
 
 cleanup:
   // Best-effort cleanup: free all allocated resources

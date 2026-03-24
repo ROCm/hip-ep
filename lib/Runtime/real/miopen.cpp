@@ -4,10 +4,11 @@
  */
 #include "../hipdnn_ep_runtime.h"
 #include "runtime_types.h"
+#include "error_check_macros.h"
 
 #include <cstdio>
 
-// Error checking macros
+// Error checking macros (kept for non-goto cleanup functions)
 #define HIP_CHECK(cmd)                                                         \
   do {                                                                         \
     hipError_t error = (cmd);                                                  \
@@ -150,112 +151,62 @@ int wrap_miopenConvolutionForward(
   float beta = 0.0f;
 
   // Create tensor descriptors
-  if (miopenCreateTensorDescriptor(&input_desc) != miopenStatusSuccess) {
-    fprintf(stderr, "MIOpen error: failed to create input_desc\n");
-    result = -1;
-    goto cleanup;
-  }
-  if (miopenCreateTensorDescriptor(&weights_desc) != miopenStatusSuccess) {
-    fprintf(stderr, "MIOpen error: failed to create weights_desc\n");
-    result = -1;
-    goto cleanup;
-  }
-  if (miopenCreateTensorDescriptor(&output_desc) != miopenStatusSuccess) {
-    fprintf(stderr, "MIOpen error: failed to create output_desc\n");
-    result = -1;
-    goto cleanup;
-  }
+  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&input_desc), cleanup);
+  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&weights_desc), cleanup);
+  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&output_desc), cleanup);
 
   // Set tensor descriptors (assuming float32 data type)
   // Input: [N, C, H, W]
-  if (miopenSet4dTensorDescriptor(input_desc, miopenFloat, input_n, input_c,
-                                  input_h, input_w) != miopenStatusSuccess) {
-    fprintf(stderr, "MIOpen error: failed to set input_desc\n");
-    result = -1;
-    goto cleanup;
-  }
+  MIOPEN_CHECK_GOTO(miopenSet4dTensorDescriptor(input_desc, miopenFloat, input_n, input_c,
+                                                 input_h, input_w), cleanup);
 
   // Weights: [K, C, R, S] where K=output channels, C=input channels,
   // R=kernel_h, S=kernel_w
-  if (miopenSet4dTensorDescriptor(weights_desc, miopenFloat, weights_k, input_c,
-                                  kernel_h, kernel_w) != miopenStatusSuccess) {
-    fprintf(stderr, "MIOpen error: failed to set weights_desc\n");
-    result = -1;
-    goto cleanup;
-  }
+  MIOPEN_CHECK_GOTO(miopenSet4dTensorDescriptor(weights_desc, miopenFloat, weights_k, input_c,
+                                                 kernel_h, kernel_w), cleanup);
 
   // Output: [N, K, H', W']
-  if (miopenSet4dTensorDescriptor(output_desc, miopenFloat, input_n, weights_k,
-                                  output_h, output_w) != miopenStatusSuccess) {
-    fprintf(stderr, "MIOpen error: failed to set output_desc\n");
-    result = -1;
-    goto cleanup;
-  }
+  MIOPEN_CHECK_GOTO(miopenSet4dTensorDescriptor(output_desc, miopenFloat, input_n, weights_k,
+                                                 output_h, output_w), cleanup);
 
   // Create convolution descriptor
   // Note: MIOpen padding is per-side, but if pad_top==pad_bottom and
   // pad_left==pad_right, we use the symmetric version
-  if (miopenCreateConvolutionDescriptor(&conv_desc) != miopenStatusSuccess) {
-    fprintf(stderr, "MIOpen error: failed to create conv_desc\n");
-    result = -1;
-    goto cleanup;
-  }
-  if (miopenInitConvolutionDescriptor(conv_desc, miopenConvolution, pad_top,
-                                      pad_left, stride_h, stride_w, dilation_h,
-                                      dilation_w) != miopenStatusSuccess) {
-    fprintf(stderr, "MIOpen error: failed to init conv_desc\n");
-    result = -1;
-    goto cleanup;
-  }
+  MIOPEN_CHECK_GOTO(miopenCreateConvolutionDescriptor(&conv_desc), cleanup);
+  MIOPEN_CHECK_GOTO(miopenInitConvolutionDescriptor(conv_desc, miopenConvolution, pad_top,
+                                                     pad_left, stride_h, stride_w, dilation_h,
+                                                     dilation_w), cleanup);
 
   // Set group count for grouped convolutions (e.g., depthwise convolution)
   // group=1 for standard convolution, group=C for depthwise convolution
   if (group > 1) {
-    if (miopenSetConvolutionGroupCount(conv_desc, group) !=
-        miopenStatusSuccess) {
-      fprintf(stderr, "MIOpen error: failed to set group count\n");
-      result = -1;
-      goto cleanup;
-    }
+    MIOPEN_CHECK_GOTO(miopenSetConvolutionGroupCount(conv_desc, group), cleanup);
   }
 
   // Allocate workspace for algorithm search
   // MIOpen's Find API needs workspace to test algorithms
-  if (hipMalloc(&find_workspace, find_workspace_size) != hipSuccess) {
-    fprintf(stderr, "HIP error: failed to allocate find_workspace\n");
-    result = -1;
-    goto cleanup;
-  }
+  HIP_CHECK_GOTO(hipMalloc(&find_workspace, find_workspace_size), cleanup);
 
   // Find best algorithm
   // MIOpen 3.x API: returns array of performance results instead of single
   // algorithm
-  if (miopenFindConvolutionForwardAlgorithm(
-          miopen_handle, input_desc, input, weights_desc, weights, conv_desc,
-          output_desc, output,
-          1,                    // requestAlgoCount - ask for 1 algorithm
-          &returned_algo_count, // returnedAlgoCount - how many actually
-                                // returned
-          perf_results,         // perfResults - array to receive results
-          find_workspace,       // workspace for algorithm testing
-          find_workspace_size,  // workspaceSize
-          false) != miopenStatusSuccess) {
-    fprintf(stderr, "MIOpen error: algorithm search failed\n");
-    result = -1;
-    goto cleanup;
-  }
+  MIOPEN_CHECK_GOTO(miopenFindConvolutionForwardAlgorithm(
+      miopen_handle, input_desc, input, weights_desc, weights, conv_desc,
+      output_desc, output,
+      1,                    // requestAlgoCount - ask for 1 algorithm
+      &returned_algo_count, // returnedAlgoCount - how many actually returned
+      perf_results,         // perfResults - array to receive results
+      find_workspace,       // workspace for algorithm testing
+      find_workspace_size,  // workspaceSize
+      false), cleanup);
 
   // Extract algorithm from performance results
   algo = perf_results[0].fwd_algo;
 
   // Get actual workspace size needed for this algorithm
-  if (miopenConvolutionForwardGetWorkSpaceSize(
-          miopen_handle, weights_desc, input_desc, conv_desc, output_desc,
-          &workspace_size) != miopenStatusSuccess) {
-    fprintf(stderr, "MIOpen error: failed to get workspace size\n");
-    result = -1;
-    goto cleanup;
-  }
+  MIOPEN_CHECK_GOTO(miopenConvolutionForwardGetWorkSpaceSize(
+      miopen_handle, weights_desc, input_desc, conv_desc, output_desc,
+      &workspace_size), cleanup);
 
   // Reuse find_workspace if it's large enough, otherwise reallocate
   workspace = find_workspace;
@@ -265,23 +216,14 @@ int wrap_miopenConvolutionForward(
       fprintf(stderr, "Warning: hipFree failed for find_workspace: %d\n", err);
     }
     find_workspace = nullptr; // Mark as freed to avoid double-free
-    if (hipMalloc(&workspace, workspace_size) != hipSuccess) {
-      fprintf(stderr, "HIP error: failed to allocate workspace\n");
-      workspace = nullptr;
-      result = -1;
-      goto cleanup;
-    }
+    HIP_CHECK_GOTO(hipMalloc(&workspace, workspace_size), cleanup);
   }
 
   // Perform convolution
-  if (miopenConvolutionForward(miopen_handle, &alpha, input_desc, input,
-                               weights_desc, weights, conv_desc, algo, &beta,
-                               output_desc, output, workspace,
-                               workspace_size) != miopenStatusSuccess) {
-    fprintf(stderr, "MIOpen error: convolution forward failed\n");
-    result = -1;
-    goto cleanup;
-  }
+  MIOPEN_CHECK_GOTO(miopenConvolutionForward(miopen_handle, &alpha, input_desc, input,
+                                             weights_desc, weights, conv_desc, algo, &beta,
+                                             output_desc, output, workspace,
+                                             workspace_size), cleanup);
 
 cleanup:
   // Best-effort cleanup: free all allocated resources
