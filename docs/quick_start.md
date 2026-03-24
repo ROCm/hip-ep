@@ -21,7 +21,7 @@ FlatBuffers, and Protobuf binaries instead of compiling them from source.
 
 **IMPORTANT -- MSVC Environment Setup:**
 
-> You **must** launch Git Bash from inside a "Developer Command Prompt for VS
+> You **must** launch Git Bash from inside a "x64 Native Tools Command Prompt for VS
 > XXXX" (where XXXX is your VS version: 2019, 2022, 2026, etc.).
 > This is required so that `cl.exe`, `link.exe`, and the MSVC headers/libraries
 > are visible to the build system. All commands in this guide assume this
@@ -89,6 +89,7 @@ cd onnxruntime
 ./build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --disable_memleak_checker --use_dml
 
 # Install to prebuilt-local (set prefix at install time, not during configuration)
+mkdir -p ../prebuilt-local 
 PREBUILT_DIR=$(cd ../prebuilt-local && pwd)
 cmake --install ../build/onnxruntime/Release --prefix "$PREBUILT_DIR"
 ```
@@ -181,12 +182,11 @@ compare MorphiZen EP (AMD GPU via HIP) against DML EP.
 
 **Setup:**
 
-`onnxruntime_perf_test.exe` and `morphizen_config.json` are not installed by
-default. Copy them into `../prebuilt-local/bin` before running:
+`onnxruntime_perf_test.exe` are not installed by
+default. Copy it into `../prebuilt-local/bin` before running:
 
 ```bash
 cp ../build/onnxruntime/Release/Release/onnxruntime_perf_test.exe $PREBUILT_DIR/bin/
-cp etc/morphizen_config.json $PREBUILT_DIR/bin/
 
 export THEROCK_DIST=~/workspace/therock
 export PATH="$THEROCK_DIST/bin:$PATH"
