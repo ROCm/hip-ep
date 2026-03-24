@@ -646,13 +646,11 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
   return 0;
 }
 
-int wrap_matmul_nbits(RuntimeState* state,
-                      const void* A, const void* B, const void* scales,
-                      const void* zero_points, const void* g_idx,
-                      const void* bias, void* output,
-                      int64_t M, int64_t N, int64_t K,
-                      int64_t batch_count, int64_t bits,
-                      int64_t block_size, int64_t elem_size) {
+int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
+                      const void *scales, const void *zero_points,
+                      const void *g_idx, const void *bias, void *output,
+                      int64_t M, int64_t N, int64_t K, int64_t batch_count,
+                      int64_t bits, int64_t block_size, int64_t elem_size) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_matmul_nbits\n");
     return -1;
@@ -661,36 +659,27 @@ int wrap_matmul_nbits(RuntimeState* state,
   MOCK_PRINT("[MOCK] wrap_matmul_nbits(M=%lld, N=%lld, K=%lld, "
              "batch=%lld, bits=%lld, block_size=%lld, elem_size=%lld, "
              "zero_points=%s, g_idx=%s, bias=%s)\n",
-             (long long)M, (long long)N, (long long)K,
-             (long long)batch_count, (long long)bits,
-             (long long)block_size, (long long)elem_size,
-             zero_points ? "yes" : "null",
-             g_idx ? "yes" : "null",
+             (long long)M, (long long)N, (long long)K, (long long)batch_count,
+             (long long)bits, (long long)block_size, (long long)elem_size,
+             zero_points ? "yes" : "null", g_idx ? "yes" : "null",
              bias ? "yes" : "null");
 
   return 0;
 }
 
-int wrap_qmoe(RuntimeState* state,
-              const void* input, const void* router_probs,
-              const void* fc1_weights, const void* fc1_scales,
-              const void* fc1_bias,
-              const void* fc2_weights, const void* fc2_scales,
-              const void* fc2_bias,
-              const void* fc3_weights, const void* fc3_scales,
-              const void* fc3_bias,
-              const void* fc1_zero_points, const void* fc2_zero_points,
-              const void* fc3_zero_points,
-              void* output,
-              int64_t num_tokens, int64_t hidden_size,
-              int64_t inter_size, int64_t num_experts,
-              int64_t k, int64_t expert_weight_bits,
-              int64_t block_size, int64_t swiglu_fusion,
-              int64_t activation_type,
-              float activation_alpha, float activation_beta,
-              float swiglu_limit,
-              int64_t normalize_routing_weights,
-              int64_t elem_size) {
+int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
+              const void *fc1_weights, const void *fc1_scales,
+              const void *fc1_bias, const void *fc2_weights,
+              const void *fc2_scales, const void *fc2_bias,
+              const void *fc3_weights, const void *fc3_scales,
+              const void *fc3_bias, const void *fc1_zero_points,
+              const void *fc2_zero_points, const void *fc3_zero_points,
+              void *output, int64_t num_tokens, int64_t hidden_size,
+              int64_t inter_size, int64_t num_experts, int64_t k,
+              int64_t expert_weight_bits, int64_t block_size,
+              int64_t swiglu_fusion, int64_t activation_type,
+              float activation_alpha, float activation_beta, float swiglu_limit,
+              int64_t normalize_routing_weights, int64_t elem_size) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_qmoe\n");
     return -1;
@@ -715,8 +704,7 @@ int wrap_qmoe(RuntimeState* state,
   MOCK_PRINT("[MOCK]   fc1_bias=%s, fc2_bias=%s, fc3_weights=%s, "
              "fc1_zp=%s, fc2_zp=%s)\n",
              fc1_bias ? "yes" : "null", fc2_bias ? "yes" : "null",
-             fc3_weights ? "yes" : "null",
-             fc1_zero_points ? "yes" : "null",
+             fc3_weights ? "yes" : "null", fc1_zero_points ? "yes" : "null",
              fc2_zero_points ? "yes" : "null");
 
   return 0;

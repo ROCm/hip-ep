@@ -736,8 +736,7 @@ MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
     return rewriter.notifyMatchFailure(
         op, "expected at least 3 inputs for MatMulNBits");
   if (op->getNumResults() != 1)
-    return rewriter.notifyMatchFailure(op,
-                                       "expected 1 output for MatMulNBits");
+    return rewriter.notifyMatchFailure(op, "expected 1 output for MatMulNBits");
 
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
@@ -766,14 +765,13 @@ MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
       op->getAttrOfType<mlir::IntegerAttr>("N").getSInt());
 
   auto bitsIntAttr = op->getAttrOfType<mlir::IntegerAttr>("bits");
-  auto bitsAttr = rewriter.getI64IntegerAttr(
-      bitsIntAttr ? bitsIntAttr.getSInt() : 4);
+  auto bitsAttr =
+      rewriter.getI64IntegerAttr(bitsIntAttr ? bitsIntAttr.getSInt() : 4);
 
   auto blockSizeAttr = rewriter.getI64IntegerAttr(
       op->getAttrOfType<mlir::IntegerAttr>("block_size").getSInt());
 
-  auto accuracyIntAttr =
-      op->getAttrOfType<mlir::IntegerAttr>("accuracy_level");
+  auto accuracyIntAttr = op->getAttrOfType<mlir::IntegerAttr>("accuracy_level");
   auto accuracyLevelAttr = rewriter.getI64IntegerAttr(
       accuracyIntAttr ? accuracyIntAttr.getSInt() : 0);
 
@@ -781,9 +779,9 @@ MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value init = createEmptyTensor(rewriter, loc, rt, A);
 
   auto hipOp = mlir::hip::MatMulNBitsOp::create(
-      rewriter, loc, mlir::TypeRange{rt}, context, A, B, scales,
-      zeroPoints, gIdx, bias, init,
-      KAttr, NAttr, bitsAttr, blockSizeAttr, accuracyLevelAttr);
+      rewriter, loc, mlir::TypeRange{rt}, context, A, B, scales, zeroPoints,
+      gIdx, bias, init, KAttr, NAttr, bitsAttr, blockSizeAttr,
+      accuracyLevelAttr);
   rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();
 }
@@ -803,7 +801,7 @@ struct QMoEToHip : public mlir::RewritePattern {
 
 mlir::LogicalResult
 QMoEToHip::matchAndRewrite(mlir::Operation *op,
-                            mlir::PatternRewriter &rewriter) const {
+                           mlir::PatternRewriter &rewriter) const {
   auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
   if (!funcNameAttr || funcNameAttr.getValue() != "QMoE")
     return mlir::failure();
@@ -814,8 +812,8 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Location loc = op->getLoc();
 
   if (op->getNumOperands() < 7)
-    return rewriter.notifyMatchFailure(
-        op, "expected at least 7 inputs for QMoE");
+    return rewriter.notifyMatchFailure(op,
+                                       "expected at least 7 inputs for QMoE");
   if (op->getNumResults() != 1)
     return rewriter.notifyMatchFailure(op, "expected 1 output for QMoE");
 
@@ -854,8 +852,7 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
       expertWeightBitsIntAttr ? expertWeightBitsIntAttr.getSInt() : 4);
 
   auto kIntAttr = op->getAttrOfType<mlir::IntegerAttr>("k");
-  auto kAttr = rewriter.getI64IntegerAttr(
-      kIntAttr ? kIntAttr.getSInt() : 1);
+  auto kAttr = rewriter.getI64IntegerAttr(kIntAttr ? kIntAttr.getSInt() : 1);
 
   auto blockSizeIntAttr = op->getAttrOfType<mlir::IntegerAttr>("block_size");
   auto blockSizeAttr = rewriter.getI64IntegerAttr(
@@ -863,58 +860,46 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
 
   auto normIntAttr =
       op->getAttrOfType<mlir::IntegerAttr>("normalize_routing_weights");
-  auto normalizeAttr = rewriter.getI64IntegerAttr(
-      normIntAttr ? normIntAttr.getSInt() : 0);
+  auto normalizeAttr =
+      rewriter.getI64IntegerAttr(normIntAttr ? normIntAttr.getSInt() : 0);
 
   auto swigluFusionIntAttr =
       op->getAttrOfType<mlir::IntegerAttr>("swiglu_fusion");
   auto swigluFusionAttr = rewriter.getI64IntegerAttr(
       swigluFusionIntAttr ? swigluFusionIntAttr.getSInt() : 0);
 
-  auto sparseIntAttr =
-      op->getAttrOfType<mlir::IntegerAttr>("use_sparse_mixer");
-  auto useSparseAttr = rewriter.getI64IntegerAttr(
-      sparseIntAttr ? sparseIntAttr.getSInt() : 0);
+  auto sparseIntAttr = op->getAttrOfType<mlir::IntegerAttr>("use_sparse_mixer");
+  auto useSparseAttr =
+      rewriter.getI64IntegerAttr(sparseIntAttr ? sparseIntAttr.getSInt() : 0);
 
-  auto alphaFloatAttr =
-      op->getAttrOfType<mlir::FloatAttr>("activation_alpha");
-  auto activationAlphaAttr = alphaFloatAttr
-      ? alphaFloatAttr
-      : rewriter.getF32FloatAttr(0.0f);
+  auto alphaFloatAttr = op->getAttrOfType<mlir::FloatAttr>("activation_alpha");
+  auto activationAlphaAttr =
+      alphaFloatAttr ? alphaFloatAttr : rewriter.getF32FloatAttr(0.0f);
 
-  auto betaFloatAttr =
-      op->getAttrOfType<mlir::FloatAttr>("activation_beta");
-  auto activationBetaAttr = betaFloatAttr
-      ? betaFloatAttr
-      : rewriter.getF32FloatAttr(0.0f);
+  auto betaFloatAttr = op->getAttrOfType<mlir::FloatAttr>("activation_beta");
+  auto activationBetaAttr =
+      betaFloatAttr ? betaFloatAttr : rewriter.getF32FloatAttr(0.0f);
 
-  auto limitFloatAttr =
-      op->getAttrOfType<mlir::FloatAttr>("swiglu_limit");
-  auto swigluLimitAttr = limitFloatAttr
-      ? limitFloatAttr
-      : rewriter.getF32FloatAttr(0.0f);
+  auto limitFloatAttr = op->getAttrOfType<mlir::FloatAttr>("swiglu_limit");
+  auto swigluLimitAttr =
+      limitFloatAttr ? limitFloatAttr : rewriter.getF32FloatAttr(0.0f);
 
   auto activationTypeStrAttr =
       op->getAttrOfType<mlir::StringAttr>("activation_type");
   auto activationTypeAttr = activationTypeStrAttr
-      ? activationTypeStrAttr
-      : rewriter.getStringAttr("relu");
+                                ? activationTypeStrAttr
+                                : rewriter.getStringAttr("relu");
 
   auto rt = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, rt, input);
 
   auto hipOp = mlir::hip::QMoEOp::create(
-      rewriter, loc, mlir::TypeRange{rt}, context,
-      input, routerProbs,
-      fc1Weights, fc1Scales, fc2Weights, fc2Scales,
-      fc1Bias, fc2Bias,
-      fc3Weights, fc3Scales, fc3Bias,
-      fc1ZeroPoints, fc2ZeroPoints, fc3ZeroPoints,
-      init,
-      expertWeightBitsAttr, kAttr, blockSizeAttr,
-      normalizeAttr, swigluFusionAttr, useSparseAttr,
-      activationAlphaAttr, activationBetaAttr, swigluLimitAttr,
-      activationTypeAttr);
+      rewriter, loc, mlir::TypeRange{rt}, context, input, routerProbs,
+      fc1Weights, fc1Scales, fc2Weights, fc2Scales, fc1Bias, fc2Bias,
+      fc3Weights, fc3Scales, fc3Bias, fc1ZeroPoints, fc2ZeroPoints,
+      fc3ZeroPoints, init, expertWeightBitsAttr, kAttr, blockSizeAttr,
+      normalizeAttr, swigluFusionAttr, useSparseAttr, activationAlphaAttr,
+      activationBetaAttr, swigluLimitAttr, activationTypeAttr);
   rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();
 }

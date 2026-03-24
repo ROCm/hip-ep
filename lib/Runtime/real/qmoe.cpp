@@ -1,23 +1,23 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#include "../hipdnn_ep_runtime.h"
 #include "../debug_log.h"
-#include "runtime_types.h"
+#include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
+#include "runtime_types.h"
 
 #include <cstdio>
 #include <cstring>
-#include <vector>
 #include <utility>
+#include <vector>
 
 #define HIP_CHECK(cmd)                                                         \
   do {                                                                         \
     hipError_t _err = (cmd);                                                   \
     if (_err != hipSuccess) {                                                  \
-      fprintf(stderr, "HIP error at %s:%d: %s\n", __FILE__, __LINE__,         \
-              hipGetErrorString(_err));                                         \
+      fprintf(stderr, "HIP error at %s:%d: %s\n", __FILE__, __LINE__,          \
+              hipGetErrorString(_err));                                        \
       rc = -1;                                                                 \
       goto cleanup;                                                            \
     }                                                                          \
@@ -39,26 +39,19 @@ struct TokenEntry {
   int32_t slot;
 };
 
-int wrap_qmoe(RuntimeState* state,
-              const void* input, const void* router_probs,
-              const void* fc1_weights, const void* fc1_scales,
-              const void* fc1_bias,
-              const void* fc2_weights, const void* fc2_scales,
-              const void* fc2_bias,
-              const void* fc3_weights, const void* fc3_scales,
-              const void* fc3_bias,
-              const void* fc1_zero_points, const void* fc2_zero_points,
-              const void* fc3_zero_points,
-              void* output,
-              int64_t num_tokens, int64_t hidden_size,
-              int64_t inter_size, int64_t num_experts,
-              int64_t k, int64_t expert_weight_bits,
-              int64_t block_size, int64_t swiglu_fusion,
-              int64_t activation_type,
-              float activation_alpha, float activation_beta,
-              float swiglu_limit,
-              int64_t normalize_routing_weights,
-              int64_t elem_size) {
+int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
+              const void *fc1_weights, const void *fc1_scales,
+              const void *fc1_bias, const void *fc2_weights,
+              const void *fc2_scales, const void *fc2_bias,
+              const void *fc3_weights, const void *fc3_scales,
+              const void *fc3_bias, const void *fc1_zero_points,
+              const void *fc2_zero_points, const void *fc3_zero_points,
+              void *output, int64_t num_tokens, int64_t hidden_size,
+              int64_t inter_size, int64_t num_experts, int64_t k,
+              int64_t expert_weight_bits, int64_t block_size,
+              int64_t swiglu_fusion, int64_t activation_type,
+              float activation_alpha, float activation_beta, float swiglu_limit,
+              int64_t normalize_routing_weights, int64_t elem_size) {
   if (!state || !input || !router_probs || !output) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: null argument\n");
     return -1;
@@ -71,20 +64,18 @@ int wrap_qmoe(RuntimeState* state,
   }
 
   if (fc3_weights || fc3_scales || fc3_bias || fc3_zero_points) {
-    fprintf(stderr,
-            "wrap_qmoe: fc3 (unfused SwiGLU) not supported, "
-            "use swiglu_fusion=1\n");
+    fprintf(stderr, "wrap_qmoe: fc3 (unfused SwiGLU) not supported, "
+                    "use swiglu_fusion=1\n");
     return -1;
   }
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe(tokens=%lld, hidden=%lld, inter=%lld, "
                     "experts=%lld, k=%lld, bits=%lld, elem=%lld)\n",
                     (long long)num_tokens, (long long)hidden_size,
-                    (long long)inter_size, (long long)num_experts,
-                    (long long)k, (long long)expert_weight_bits,
-                    (long long)elem_size);
+                    (long long)inter_size, (long long)num_experts, (long long)k,
+                    (long long)expert_weight_bits, (long long)elem_size);
 
-  void* stream = hipdnn_ep_state_get_stream(state);
+  void *stream = hipdnn_ep_state_get_stream(state);
   if (!stream) {
     fprintf(stderr, "wrap_qmoe: null stream\n");
     return -1;
@@ -99,14 +90,14 @@ int wrap_qmoe(RuntimeState* state,
   int64_t k_blocks_fc2 = (inter_size + block_size - 1) / block_size;
   int64_t blob_size_fc2 = block_size / 2;
 
-  void* d_expert_indices = nullptr;
-  void* d_expert_weights = nullptr;
-  void* d_gather_buf = nullptr;
-  void* d_fc1_buf = nullptr;
-  void* d_act_buf = nullptr;
-  void* d_fc2_buf = nullptr;
-  void* d_token_ids = nullptr;
-  void* d_token_wts = nullptr;
+  void *d_expert_indices = nullptr;
+  void *d_expert_weights = nullptr;
+  void *d_gather_buf = nullptr;
+  void *d_fc1_buf = nullptr;
+  void *d_act_buf = nullptr;
+  void *d_fc2_buf = nullptr;
+  void *d_token_ids = nullptr;
+  void *d_token_wts = nullptr;
 
   HIP_CHECK(hipMalloc(&d_expert_indices, num_tokens * k * sizeof(int32_t)));
   HIP_CHECK(hipMalloc(&d_expert_weights, num_tokens * k * elem_size));
@@ -119,12 +110,11 @@ int wrap_qmoe(RuntimeState* state,
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: topk_routing(tokens=%lld, experts=%lld, "
                     "k=%lld, normalize=%lld)\n",
-                    (long long)num_tokens, (long long)num_experts,
-                    (long long)k, (long long)normalize_routing_weights);
+                    (long long)num_tokens, (long long)num_experts, (long long)k,
+                    (long long)normalize_routing_weights);
   KERNEL_CHECK(hip_qmoe_topk_routing(stream, router_probs, d_expert_indices,
-                                     d_expert_weights, num_tokens,
-                                     num_experts, k,
-                                     normalize_routing_weights, elem_size));
+                                     d_expert_weights, num_tokens, num_experts,
+                                     k, normalize_routing_weights, elem_size));
 
   {
     std::vector<int32_t> h_indices(num_tokens * k);
@@ -134,8 +124,8 @@ int wrap_qmoe(RuntimeState* state,
                              num_tokens * k * sizeof(int32_t),
                              hipMemcpyDeviceToHost, hip_stream));
     HIP_CHECK(hipMemcpyAsync(h_weights.data(), d_expert_weights,
-                             num_tokens * k * elem_size,
-                             hipMemcpyDeviceToHost, hip_stream));
+                             num_tokens * k * elem_size, hipMemcpyDeviceToHost,
+                             hip_stream));
     HIP_CHECK(hipStreamSynchronize(hip_stream));
 
     std::vector<std::vector<TokenEntry>> expert_tokens(num_experts);
@@ -149,19 +139,20 @@ int wrap_qmoe(RuntimeState* state,
       }
     }
 
-    HIP_CHECK(hipMemsetAsync(output, 0,
-                             num_tokens * hidden_size * elem_size,
+    HIP_CHECK(hipMemsetAsync(output, 0, num_tokens * hidden_size * elem_size,
                              hip_stream));
 
     int64_t active_experts = 0;
     for (int64_t e = 0; e < num_experts; e++)
-      if (!expert_tokens[e].empty()) active_experts++;
+      if (!expert_tokens[e].empty())
+        active_experts++;
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: %lld/%lld experts active\n",
                       (long long)active_experts, (long long)num_experts);
 
     for (int64_t e = 0; e < num_experts; e++) {
       int64_t count = static_cast<int64_t>(expert_tokens[e].size());
-      if (count == 0) continue;
+      if (count == 0)
+        continue;
 
       std::vector<int32_t> h_ids(count);
       std::vector<char> h_wts_e(count * elem_size);
@@ -169,15 +160,14 @@ int wrap_qmoe(RuntimeState* state,
         h_ids[i] = expert_tokens[e][i].token_id;
         int32_t slot = expert_tokens[e][i].slot;
         int64_t src_off = (h_ids[i] * k + slot) * elem_size;
-        memcpy(h_wts_e.data() + i * elem_size,
-               h_weights.data() + src_off, elem_size);
+        memcpy(h_wts_e.data() + i * elem_size, h_weights.data() + src_off,
+               elem_size);
       }
 
       HIP_CHECK(hipMemcpyAsync(d_token_ids, h_ids.data(),
-                               count * sizeof(int32_t),
-                               hipMemcpyHostToDevice, hip_stream));
-      HIP_CHECK(hipMemcpyAsync(d_token_wts, h_wts_e.data(),
-                               count * elem_size,
+                               count * sizeof(int32_t), hipMemcpyHostToDevice,
+                               hip_stream));
+      HIP_CHECK(hipMemcpyAsync(d_token_wts, h_wts_e.data(), count * elem_size,
                                hipMemcpyHostToDevice, hip_stream));
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: %lld tokens - gather\n",
@@ -186,21 +176,17 @@ int wrap_qmoe(RuntimeState* state,
                                           d_token_ids, hidden_size, count,
                                           elem_size));
 
-      const char* fc1_w_e =
-          static_cast<const char*>(fc1_weights) +
-          e * fusion_inter * k_blocks_fc1 * blob_size_fc1;
-      const char* fc1_s_e =
-          static_cast<const char*>(fc1_scales) +
-          e * fusion_inter * k_blocks_fc1 * elem_size;
-      const void* fc1_zp_e =
-          fc1_zero_points
-              ? static_cast<const char*>(fc1_zero_points) +
-                    e * fusion_inter * k_blocks_fc1
-              : nullptr;
-      const void* fc1_b_e =
-          fc1_bias
-              ? static_cast<const char*>(fc1_bias) + e * fusion_inter * elem_size
-              : nullptr;
+      const char *fc1_w_e = static_cast<const char *>(fc1_weights) +
+                            e * fusion_inter * k_blocks_fc1 * blob_size_fc1;
+      const char *fc1_s_e = static_cast<const char *>(fc1_scales) +
+                            e * fusion_inter * k_blocks_fc1 * elem_size;
+      const void *fc1_zp_e = fc1_zero_points
+                                 ? static_cast<const char *>(fc1_zero_points) +
+                                       e * fusion_inter * k_blocks_fc1
+                                 : nullptr;
+      const void *fc1_b_e = fc1_bias ? static_cast<const char *>(fc1_bias) +
+                                           e * fusion_inter * elem_size
+                                     : nullptr;
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: fc1 matmul_nbits "
                         "[%lld x %lld] -> [%lld x %lld]\n",
@@ -209,8 +195,7 @@ int wrap_qmoe(RuntimeState* state,
       KERNEL_CHECK(hip_matmul_nbits(stream, d_gather_buf, fc1_w_e, fc1_s_e,
                                     fc1_zp_e, fc1_b_e, d_fc1_buf, count,
                                     fusion_inter, hidden_size, 1,
-                                    expert_weight_bits, block_size,
-                                    elem_size));
+                                    expert_weight_bits, block_size, elem_size));
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: swiglu(alpha=%.3f, "
                         "beta=%.3f, limit=%.1f)\n",
@@ -220,21 +205,17 @@ int wrap_qmoe(RuntimeState* state,
                                    inter_size, activation_alpha,
                                    activation_beta, swiglu_limit, elem_size));
 
-      const char* fc2_w_e =
-          static_cast<const char*>(fc2_weights) +
-          e * hidden_size * k_blocks_fc2 * blob_size_fc2;
-      const char* fc2_s_e =
-          static_cast<const char*>(fc2_scales) +
-          e * hidden_size * k_blocks_fc2 * elem_size;
-      const void* fc2_zp_e =
-          fc2_zero_points
-              ? static_cast<const char*>(fc2_zero_points) +
-                    e * hidden_size * k_blocks_fc2
-              : nullptr;
-      const void* fc2_b_e =
-          fc2_bias
-              ? static_cast<const char*>(fc2_bias) + e * hidden_size * elem_size
-              : nullptr;
+      const char *fc2_w_e = static_cast<const char *>(fc2_weights) +
+                            e * hidden_size * k_blocks_fc2 * blob_size_fc2;
+      const char *fc2_s_e = static_cast<const char *>(fc2_scales) +
+                            e * hidden_size * k_blocks_fc2 * elem_size;
+      const void *fc2_zp_e = fc2_zero_points
+                                 ? static_cast<const char *>(fc2_zero_points) +
+                                       e * hidden_size * k_blocks_fc2
+                                 : nullptr;
+      const void *fc2_b_e = fc2_bias ? static_cast<const char *>(fc2_bias) +
+                                           e * hidden_size * elem_size
+                                     : nullptr;
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: fc2 matmul_nbits "
                         "[%lld x %lld] -> [%lld x %lld]\n",
@@ -243,26 +224,33 @@ int wrap_qmoe(RuntimeState* state,
       KERNEL_CHECK(hip_matmul_nbits(stream, d_act_buf, fc2_w_e, fc2_s_e,
                                     fc2_zp_e, fc2_b_e, d_fc2_buf, count,
                                     hidden_size, inter_size, 1,
-                                    expert_weight_bits, block_size,
-                                    elem_size));
+                                    expert_weight_bits, block_size, elem_size));
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: scatter_add\n",
                         (long long)e);
-      KERNEL_CHECK(hip_qmoe_scatter_add(stream, output, d_fc2_buf,
-                                        d_token_ids, d_token_wts,
-                                        hidden_size, count, elem_size));
+      KERNEL_CHECK(hip_qmoe_scatter_add(stream, output, d_fc2_buf, d_token_ids,
+                                        d_token_wts, hidden_size, count,
+                                        elem_size));
     }
   }
 
 cleanup:
-  if (d_expert_indices) hipFree(d_expert_indices);
-  if (d_expert_weights) hipFree(d_expert_weights);
-  if (d_gather_buf) hipFree(d_gather_buf);
-  if (d_fc1_buf) hipFree(d_fc1_buf);
-  if (d_act_buf) hipFree(d_act_buf);
-  if (d_fc2_buf) hipFree(d_fc2_buf);
-  if (d_token_ids) hipFree(d_token_ids);
-  if (d_token_wts) hipFree(d_token_wts);
+  if (d_expert_indices)
+    hipFree(d_expert_indices);
+  if (d_expert_weights)
+    hipFree(d_expert_weights);
+  if (d_gather_buf)
+    hipFree(d_gather_buf);
+  if (d_fc1_buf)
+    hipFree(d_fc1_buf);
+  if (d_act_buf)
+    hipFree(d_act_buf);
+  if (d_fc2_buf)
+    hipFree(d_fc2_buf);
+  if (d_token_ids)
+    hipFree(d_token_ids);
+  if (d_token_wts)
+    hipFree(d_token_wts);
 
   if (rc == 0) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: completed successfully\n");

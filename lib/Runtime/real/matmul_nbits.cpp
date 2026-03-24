@@ -1,20 +1,18 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-#include "../hipdnn_ep_runtime.h"
 #include "../debug_log.h"
+#include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
 
 #include <cstdio>
 
-int wrap_matmul_nbits(RuntimeState* state,
-                      const void* A, const void* B, const void* scales,
-                      const void* zero_points, const void* g_idx,
-                      const void* bias, void* output,
-                      int64_t M, int64_t N, int64_t K,
-                      int64_t batch_count, int64_t bits,
-                      int64_t block_size, int64_t elem_size) {
+int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
+                      const void *scales, const void *zero_points,
+                      const void *g_idx, const void *bias, void *output,
+                      int64_t M, int64_t N, int64_t K, int64_t batch_count,
+                      int64_t bits, int64_t block_size, int64_t elem_size) {
   if (!state || !A || !B || !scales || !output) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_matmul_nbits: null argument\n");
     return -1;
@@ -26,11 +24,10 @@ int wrap_matmul_nbits(RuntimeState* state,
                     (long long)M, (long long)N, (long long)K,
                     (long long)batch_count, (long long)bits,
                     (long long)block_size, (long long)elem_size,
-                    zero_points ? "yes" : "null",
-                    g_idx ? "yes" : "null",
+                    zero_points ? "yes" : "null", g_idx ? "yes" : "null",
                     bias ? "yes" : "null");
 
-  void* stream = hipdnn_ep_state_get_stream(state);
+  void *stream = hipdnn_ep_state_get_stream(state);
   if (!stream) {
     fprintf(stderr, "wrap_matmul_nbits: null stream\n");
     return -1;
@@ -41,6 +38,6 @@ int wrap_matmul_nbits(RuntimeState* state,
     return -1;
   }
 
-  return hip_matmul_nbits(stream, A, B, scales, zero_points, bias, output, M,
-                          N, K, batch_count, bits, block_size, elem_size);
+  return hip_matmul_nbits(stream, A, B, scales, zero_points, bias, output, M, N,
+                          K, batch_count, bits, block_size, elem_size);
 }

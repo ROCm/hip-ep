@@ -572,8 +572,8 @@ MutableOperandRange MatMulNBitsOp::getDpsInitsMutable() {
 }
 
 void MatMulNBitsOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>&
-        effects) {
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
   effects.emplace_back(MemoryEffects::Read::get(),
                        SideEffects::DefaultResource::get());
   effects.emplace_back(MemoryEffects::Write::get(),
@@ -584,13 +584,11 @@ void MatMulNBitsOp::getEffects(
 // QMoEOp
 //===----------------------------------------------------------------------===//
 
-MutableOperandRange QMoEOp::getDpsInitsMutable() {
-  return getOutputMutable();
-}
+MutableOperandRange QMoEOp::getDpsInitsMutable() { return getOutputMutable(); }
 
 void QMoEOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>&
-        effects) {
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
   effects.emplace_back(MemoryEffects::Read::get(),
                        SideEffects::DefaultResource::get());
   effects.emplace_back(MemoryEffects::Write::get(),
