@@ -58,8 +58,6 @@ if(BUILD_EP)
   include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
   # MLIR backend compiler
   add_subdirectory(backend-mlir-compiler)
-  # Add test directory (test_gqa can be built independently)
-  add_subdirectory(test)
   add_subdirectory(tools/hip-onnx-runner)
 endif()
 
