@@ -40,11 +40,10 @@ int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
   }
 
   int result = 0;
-  HIP_CHECK_GOTO(
-      static_cast<hipError_t>(hip_matmul_nbits(
-          stream, A, B, scales, zero_points, bias, output, M, N, K,
-          batch_count, bits, block_size, elem_size)),
-      cleanup);
+  HIP_CHECK_GOTO(static_cast<hipError_t>(hip_matmul_nbits(
+                     stream, A, B, scales, zero_points, bias, output, M, N, K,
+                     batch_count, bits, block_size, elem_size)),
+                 cleanup);
 
 cleanup:
   return result;

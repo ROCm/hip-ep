@@ -125,8 +125,7 @@ static Value extractOptionalMemRefPtr(Value memrefDesc,
                                       Location loc) {
   if (!memrefDesc)
     return LLVM::ZeroOp::create(
-        rewriter, loc,
-        LLVM::LLVMPointerType::get(rewriter.getContext(), 0));
+        rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext(), 0));
   return extractMemRefPtr(memrefDesc, rewriter, loc);
 }
 
@@ -1698,20 +1697,17 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
     Value scalesPtr = extractMemRefPtr(adaptor.getScales(), rewriter, loc);
     Value zeroPointsPtr =
         extractOptionalMemRefPtr(adaptor.getZeroPoints(), rewriter, loc);
-    Value gIdxPtr =
-        extractOptionalMemRefPtr(adaptor.getGIdx(), rewriter, loc);
-    Value biasPtr =
-        extractOptionalMemRefPtr(adaptor.getBias(), rewriter, loc);
+    Value gIdxPtr = extractOptionalMemRefPtr(adaptor.getGIdx(), rewriter, loc);
+    Value biasPtr = extractOptionalMemRefPtr(adaptor.getBias(), rewriter, loc);
     Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     auto AType = cast<MemRefType>(op.getA().getType());
     int64_t ARank = AType.getRank();
     int64_t elemSize = AType.getElementType().getIntOrFloatBitWidth() / 8;
 
-    Value m = (ARank >= 2)
-                  ? getMemRefDimSize(AType, ARank - 2, adaptor.getA(),
-                                     rewriter, loc)
-                  : createI64Const(1);
+    Value m = (ARank >= 2) ? getMemRefDimSize(AType, ARank - 2, adaptor.getA(),
+                                              rewriter, loc)
+                           : createI64Const(1);
     Value batch = createI64Const(1);
     for (int64_t i = 0; i < ARank - 2; ++i)
       batch = LLVM::MulOp::create(
@@ -1832,9 +1828,8 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
 
     int64_t swigluFusion = op.getSwigluFusion();
     int64_t fusionSize = (swigluFusion > 0) ? 2 : 1;
-    Value interSizeVal = getMemRefDimSize(fc1Type, 1,
-                                          adaptor.getFc1ExpertsWeights(),
-                                          rewriter, loc);
+    Value interSizeVal = getMemRefDimSize(
+        fc1Type, 1, adaptor.getFc1ExpertsWeights(), rewriter, loc);
     if (fusionSize > 1)
       interSizeVal = LLVM::SDivOp::create(rewriter, loc, interSizeVal,
                                           createI64Const(fusionSize));
