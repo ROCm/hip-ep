@@ -188,7 +188,7 @@ default. Copy it into `../prebuilt-local/bin` before running:
 ```bash
 cp ../build/onnxruntime/Release/Release/onnxruntime_perf_test.exe $PREBUILT_DIR/bin/
 
-export THEROCK_DIST=../therock
+export THEROCK_DIST=$(cd ../therock && pwd)
 export PATH="$THEROCK_DIST/bin:$PATH"
 cd $PREBUILT_DIR/bin
 ```
