@@ -9,13 +9,15 @@
 
 #include <cstdio>
 
+#define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
+
 int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
                       const void *scales, const void *zero_points,
                       const void *g_idx, const void *bias, void *output,
                       int64_t M, int64_t N, int64_t K, int64_t batch_count,
                       int64_t bits, int64_t block_size, int64_t elem_size) {
   if (!state || !A || !B || !scales || !output) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_matmul_nbits: null argument\n");
+    fprintf(stderr, "wrap_matmul_nbits: null argument\n");
     return -1;
   }
 
@@ -40,10 +42,9 @@ int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
   }
 
   int result = 0;
-  HIP_CHECK_GOTO(static_cast<hipError_t>(hip_matmul_nbits(
-                     stream, A, B, scales, zero_points, bias, output, M, N, K,
-                     batch_count, bits, block_size, elem_size)),
-                 cleanup);
+  HIP_CHECK(static_cast<hipError_t>(hip_matmul_nbits(
+      stream, A, B, scales, zero_points, bias, output, M, N, K, batch_count,
+      bits, block_size, elem_size)));
 
 cleanup:
   return result;

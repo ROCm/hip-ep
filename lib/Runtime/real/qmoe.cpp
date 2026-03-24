@@ -13,6 +13,8 @@
 #include <utility>
 #include <vector>
 
+#define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
+
 struct TokenEntry {
   int32_t token_id;
   int32_t slot;
@@ -32,7 +34,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               float activation_alpha, float activation_beta, float swiglu_limit,
               int64_t normalize_routing_weights, int64_t elem_size) {
   if (!state || !input || !router_probs || !output) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: null argument\n");
+    fprintf(stderr, "wrap_qmoe: null argument\n");
     return -1;
   }
 
@@ -78,45 +80,34 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   void *d_token_ids = nullptr;
   void *d_token_wts = nullptr;
 
-  HIP_CHECK_GOTO(hipMalloc(&d_expert_indices, num_tokens * k * sizeof(int32_t)),
-                 cleanup);
-  HIP_CHECK_GOTO(hipMalloc(&d_expert_weights, num_tokens * k * elem_size),
-                 cleanup);
-  HIP_CHECK_GOTO(hipMalloc(&d_gather_buf, num_tokens * hidden_size * elem_size),
-                 cleanup);
-  HIP_CHECK_GOTO(hipMalloc(&d_fc1_buf, num_tokens * fusion_inter * elem_size),
-                 cleanup);
-  HIP_CHECK_GOTO(hipMalloc(&d_act_buf, num_tokens * inter_size * elem_size),
-                 cleanup);
-  HIP_CHECK_GOTO(hipMalloc(&d_fc2_buf, num_tokens * hidden_size * elem_size),
-                 cleanup);
-  HIP_CHECK_GOTO(hipMalloc(&d_token_ids, num_tokens * sizeof(int32_t)),
-                 cleanup);
-  HIP_CHECK_GOTO(hipMalloc(&d_token_wts, num_tokens * elem_size), cleanup);
+  HIP_CHECK(hipMalloc(&d_expert_indices, num_tokens * k * sizeof(int32_t)));
+  HIP_CHECK(hipMalloc(&d_expert_weights, num_tokens * k * elem_size));
+  HIP_CHECK(hipMalloc(&d_gather_buf, num_tokens * hidden_size * elem_size));
+  HIP_CHECK(hipMalloc(&d_fc1_buf, num_tokens * fusion_inter * elem_size));
+  HIP_CHECK(hipMalloc(&d_act_buf, num_tokens * inter_size * elem_size));
+  HIP_CHECK(hipMalloc(&d_fc2_buf, num_tokens * hidden_size * elem_size));
+  HIP_CHECK(hipMalloc(&d_token_ids, num_tokens * sizeof(int32_t)));
+  HIP_CHECK(hipMalloc(&d_token_wts, num_tokens * elem_size));
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: topk_routing(tokens=%lld, experts=%lld, "
                     "k=%lld, normalize=%lld)\n",
                     (long long)num_tokens, (long long)num_experts, (long long)k,
                     (long long)normalize_routing_weights);
-  HIP_CHECK_GOTO(
-      static_cast<hipError_t>(hip_qmoe_topk_routing(
-          stream, router_probs, d_expert_indices, d_expert_weights, num_tokens,
-          num_experts, k, normalize_routing_weights, elem_size)),
-      cleanup);
+  HIP_CHECK(static_cast<hipError_t>(hip_qmoe_topk_routing(
+      stream, router_probs, d_expert_indices, d_expert_weights, num_tokens,
+      num_experts, k, normalize_routing_weights, elem_size)));
 
   {
     std::vector<int32_t> h_indices(num_tokens * k);
     std::vector<char> h_weights(num_tokens * k * elem_size);
 
-    HIP_CHECK_GOTO(hipMemcpyAsync(h_indices.data(), d_expert_indices,
-                                  num_tokens * k * sizeof(int32_t),
-                                  hipMemcpyDeviceToHost, hip_stream),
-                   cleanup);
-    HIP_CHECK_GOTO(hipMemcpyAsync(h_weights.data(), d_expert_weights,
-                                  num_tokens * k * elem_size,
-                                  hipMemcpyDeviceToHost, hip_stream),
-                   cleanup);
-    HIP_CHECK_GOTO(hipStreamSynchronize(hip_stream), cleanup);
+    HIP_CHECK(hipMemcpyAsync(h_indices.data(), d_expert_indices,
+                             num_tokens * k * sizeof(int32_t),
+                             hipMemcpyDeviceToHost, hip_stream));
+    HIP_CHECK(hipMemcpyAsync(h_weights.data(), d_expert_weights,
+                             num_tokens * k * elem_size,
+                             hipMemcpyDeviceToHost, hip_stream));
+    HIP_CHECK(hipStreamSynchronize(hip_stream));
 
     std::vector<std::vector<TokenEntry>> expert_tokens(num_experts);
     for (int64_t t = 0; t < num_tokens; t++) {
@@ -129,10 +120,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       }
     }
 
-    HIP_CHECK_GOTO(hipMemsetAsync(output, 0,
-                                  num_tokens * hidden_size * elem_size,
-                                  hip_stream),
-                   cleanup);
+    HIP_CHECK(hipMemsetAsync(output, 0, num_tokens * hidden_size * elem_size,
+                             hip_stream));
 
     int64_t active_experts = 0;
     for (int64_t e = 0; e < num_experts; e++)
@@ -156,21 +145,18 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                elem_size);
       }
 
-      HIP_CHECK_GOTO(hipMemcpyAsync(d_token_ids, h_ids.data(),
-                                    count * sizeof(int32_t),
-                                    hipMemcpyHostToDevice, hip_stream),
-                     cleanup);
-      HIP_CHECK_GOTO(hipMemcpyAsync(d_token_wts, h_wts_e.data(),
-                                    count * elem_size, hipMemcpyHostToDevice,
-                                    hip_stream),
-                     cleanup);
+      HIP_CHECK(hipMemcpyAsync(d_token_ids, h_ids.data(),
+                               count * sizeof(int32_t), hipMemcpyHostToDevice,
+                               hip_stream));
+      HIP_CHECK(hipMemcpyAsync(d_token_wts, h_wts_e.data(),
+                               count * elem_size, hipMemcpyHostToDevice,
+                               hip_stream));
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: %lld tokens - gather\n",
                         (long long)e, (long long)count);
-      HIP_CHECK_GOTO(static_cast<hipError_t>(hip_qmoe_gather_tokens(
-                         stream, input, d_gather_buf, d_token_ids, hidden_size,
-                         count, elem_size)),
-                     cleanup);
+      HIP_CHECK(static_cast<hipError_t>(hip_qmoe_gather_tokens(
+          stream, input, d_gather_buf, d_token_ids, hidden_size, count,
+          elem_size)));
 
       const char *fc1_w_e = static_cast<const char *>(fc1_weights) +
                             e * fusion_inter * k_blocks_fc1 * blob_size_fc1;
@@ -188,21 +174,18 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                         "[%lld x %lld] -> [%lld x %lld]\n",
                         (long long)e, (long long)count, (long long)hidden_size,
                         (long long)count, (long long)fusion_inter);
-      HIP_CHECK_GOTO(static_cast<hipError_t>(hip_matmul_nbits(
-                         stream, d_gather_buf, fc1_w_e, fc1_s_e, fc1_zp_e,
-                         fc1_b_e, d_fc1_buf, count, fusion_inter, hidden_size,
-                         1, expert_weight_bits, block_size, elem_size)),
-                     cleanup);
+      HIP_CHECK(static_cast<hipError_t>(hip_matmul_nbits(
+          stream, d_gather_buf, fc1_w_e, fc1_s_e, fc1_zp_e, fc1_b_e, d_fc1_buf,
+          count, fusion_inter, hidden_size, 1, expert_weight_bits, block_size,
+          elem_size)));
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: swiglu(alpha=%.3f, "
                         "beta=%.3f, limit=%.1f)\n",
                         (long long)e, (double)activation_alpha,
                         (double)activation_beta, (double)swiglu_limit);
-      HIP_CHECK_GOTO(
-          static_cast<hipError_t>(hip_qmoe_swiglu(
-              stream, d_fc1_buf, d_act_buf, count, inter_size, activation_alpha,
-              activation_beta, swiglu_limit, elem_size)),
-          cleanup);
+      HIP_CHECK(static_cast<hipError_t>(hip_qmoe_swiglu(
+          stream, d_fc1_buf, d_act_buf, count, inter_size, activation_alpha,
+          activation_beta, swiglu_limit, elem_size)));
 
       const char *fc2_w_e = static_cast<const char *>(fc2_weights) +
                             e * hidden_size * k_blocks_fc2 * blob_size_fc2;
@@ -220,38 +203,36 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                         "[%lld x %lld] -> [%lld x %lld]\n",
                         (long long)e, (long long)count, (long long)inter_size,
                         (long long)count, (long long)hidden_size);
-      HIP_CHECK_GOTO(static_cast<hipError_t>(hip_matmul_nbits(
-                         stream, d_act_buf, fc2_w_e, fc2_s_e, fc2_zp_e, fc2_b_e,
-                         d_fc2_buf, count, hidden_size, inter_size, 1,
-                         expert_weight_bits, block_size, elem_size)),
-                     cleanup);
+      HIP_CHECK(static_cast<hipError_t>(hip_matmul_nbits(
+          stream, d_act_buf, fc2_w_e, fc2_s_e, fc2_zp_e, fc2_b_e, d_fc2_buf,
+          count, hidden_size, inter_size, 1, expert_weight_bits, block_size,
+          elem_size)));
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: scatter_add\n",
                         (long long)e);
-      HIP_CHECK_GOTO(static_cast<hipError_t>(hip_qmoe_scatter_add(
-                         stream, output, d_fc2_buf, d_token_ids, d_token_wts,
-                         hidden_size, count, elem_size)),
-                     cleanup);
+      HIP_CHECK(static_cast<hipError_t>(hip_qmoe_scatter_add(
+          stream, output, d_fc2_buf, d_token_ids, d_token_wts, hidden_size,
+          count, elem_size)));
     }
   }
 
 cleanup:
   if (d_expert_indices)
-    hipFree(d_expert_indices);
+    (void)hipFree(d_expert_indices);
   if (d_expert_weights)
-    hipFree(d_expert_weights);
+    (void)hipFree(d_expert_weights);
   if (d_gather_buf)
-    hipFree(d_gather_buf);
+    (void)hipFree(d_gather_buf);
   if (d_fc1_buf)
-    hipFree(d_fc1_buf);
+    (void)hipFree(d_fc1_buf);
   if (d_act_buf)
-    hipFree(d_act_buf);
+    (void)hipFree(d_act_buf);
   if (d_fc2_buf)
-    hipFree(d_fc2_buf);
+    (void)hipFree(d_fc2_buf);
   if (d_token_ids)
-    hipFree(d_token_ids);
+    (void)hipFree(d_token_ids);
   if (d_token_wts)
-    hipFree(d_token_wts);
+    (void)hipFree(d_token_wts);
 
   if (result == 0) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: completed successfully\n");
