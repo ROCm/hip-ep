@@ -62,6 +62,8 @@ static constexpr const char *kWrapMiopenOpTensor =
 static constexpr const char *kWrapCast = "wrap_cast";
 static constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
 static constexpr const char *kWrapGQA = "wrap_group_query_attention";
+static constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
+static constexpr const char *kWrapQMoE = "wrap_qmoe";
 static constexpr const char *kHipGetConstant = "hipdnn_ep_constant_get";
 
 // LLVM memref descriptor struct field indices.
@@ -1744,7 +1746,6 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
         i64Type  // elem_size
     };
 
-    static constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapMatMulNBits, paramTypes, i32Type);
     if (failed(funcOp))
@@ -1898,7 +1899,6 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
         i64Type  // elem_size
     };
 
-    static constexpr const char *kWrapQMoE = "wrap_qmoe";
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapQMoE, paramTypes, i32Type);
     if (failed(funcOp))
