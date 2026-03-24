@@ -135,12 +135,14 @@ static Value getMemRefDimSize(MemRefType type, unsigned dimIdx,
                               Value descriptor,
                               ConversionPatternRewriter &rewriter,
                               Location loc) {
-  int64_t dimSize = type.getDimSize(dimIdx);
-  if (!ShapedType::isDynamic(dimSize)) {
-    return LLVM::ConstantOp::create(rewriter, loc, rewriter.getI64Type(),
-                                    rewriter.getI64IntegerAttr(dimSize));
-  }
-  return MemRefDescriptor(descriptor).size(rewriter, loc, dimIdx);
+  Value result;
+  if (type.isDynamicDim(dimIdx))
+    result = MemRefDescriptor(descriptor).size(rewriter, loc, dimIdx);
+  else
+    result = LLVM::ConstantOp::create(rewriter, loc, rewriter.getI64Type(),
+                                      rewriter.getI64IntegerAttr(
+                                          type.getDimSize(dimIdx)));
+  return result;
 }
 
 // Helper: compute total number of elements in a memref, handling both static
@@ -1705,9 +1707,11 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
     int64_t ARank = AType.getRank();
     int64_t elemSize = AType.getElementType().getIntOrFloatBitWidth() / 8;
 
+    // A shape: [..., M, K] — M is the second-to-last dim
     Value m = (ARank >= 2) ? getMemRefDimSize(AType, ARank - 2, adaptor.getA(),
                                               rewriter, loc)
                            : createI64Const(1);
+    // batch_count = product of all leading dimensions before M
     Value batch = createI64Const(1);
     for (int64_t i = 0; i < ARank - 2; ++i)
       batch = LLVM::MulOp::create(
@@ -1814,6 +1818,8 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
     auto fc1Type = cast<MemRefType>(op.getFc1ExpertsWeights().getType());
     int64_t elemSize = inputType.getElementType().getIntOrFloatBitWidth() / 8;
 
+    // input shape: [batch, seq, ..., hidden] — numTokens = product of all
+    // dims except the last (hidden), supporting dynamic batch/seq dimensions.
     int64_t inputRank = inputType.getRank();
     Value numTokensVal = createI64Const(1);
     for (int64_t i = 0; i < inputRank - 1; ++i)
