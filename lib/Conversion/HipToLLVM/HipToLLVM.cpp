@@ -123,10 +123,14 @@ static Value extractMemRefPtr(Value memrefDesc,
 static Value extractOptionalMemRefPtr(Value memrefDesc,
                                       ConversionPatternRewriter &rewriter,
                                       Location loc) {
-  if (!memrefDesc)
-    return LLVM::ZeroOp::create(
+  Value result;
+  if (memrefDesc) {
+    result = extractMemRefPtr(memrefDesc, rewriter, loc);
+  } else {
+    result = LLVM::ZeroOp::create(
         rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext(), 0));
-  return extractMemRefPtr(memrefDesc, rewriter, loc);
+  }
+  return result;
 }
 
 // Helper: get a single memref dimension as an i64 Value, using a compile-time
