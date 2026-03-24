@@ -116,6 +116,18 @@ static Value extractMemRefPtr(Value memrefDesc,
   return ptr;
 }
 
+// Returns the aligned pointer for an optional memref operand, or a null
+// pointer if the operand is absent.
+static Value extractOptionalMemRefPtr(Value memrefDesc,
+                                      ConversionPatternRewriter &rewriter,
+                                      Location loc) {
+  if (!memrefDesc)
+    return LLVM::ZeroOp::create(
+        rewriter, loc,
+        LLVM::LLVMPointerType::get(rewriter.getContext(), 0));
+  return extractMemRefPtr(memrefDesc, rewriter, loc);
+}
+
 // Helper: compute total number of elements in a memref, handling both static
 // and dynamic dimensions.
 static Value computeNumElements(MemRefType type, Value descriptor,
@@ -1683,29 +1695,17 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
                                       rewriter.getI64IntegerAttr(value));
     };
 
-    auto getAlignedPtr = [&](Value memrefDesc) -> Value {
-      MemRefDescriptor desc(memrefDesc);
-      Value ptr = desc.alignedPtr(rewriter, loc);
-      if (cast<LLVM::LLVMPointerType>(ptr.getType()).getAddressSpace() != 0) {
-        ptr = LLVM::AddrSpaceCastOp::create(rewriter, loc, ptrType, ptr);
-      }
-      return ptr;
-    };
-
-    auto getOptionalPtr = [&](Value memrefDesc) -> Value {
-      if (!memrefDesc)
-        return LLVM::ZeroOp::create(rewriter, loc, ptrType);
-      return getAlignedPtr(memrefDesc);
-    };
-
     Value statePtr = adaptor.getHandle();
-    Value APtr = getAlignedPtr(adaptor.getA());
-    Value BPtr = getAlignedPtr(adaptor.getB());
-    Value scalesPtr = getAlignedPtr(adaptor.getScales());
-    Value zeroPointsPtr = getOptionalPtr(adaptor.getZeroPoints());
-    Value gIdxPtr = getOptionalPtr(adaptor.getGIdx());
-    Value biasPtr = getOptionalPtr(adaptor.getBias());
-    Value outputPtr = getAlignedPtr(adaptor.getOutput());
+    Value APtr = extractMemRefPtr(adaptor.getA(), rewriter, loc);
+    Value BPtr = extractMemRefPtr(adaptor.getB(), rewriter, loc);
+    Value scalesPtr = extractMemRefPtr(adaptor.getScales(), rewriter, loc);
+    Value zeroPointsPtr =
+        extractOptionalMemRefPtr(adaptor.getZeroPoints(), rewriter, loc);
+    Value gIdxPtr =
+        extractOptionalMemRefPtr(adaptor.getGIdx(), rewriter, loc);
+    Value biasPtr =
+        extractOptionalMemRefPtr(adaptor.getBias(), rewriter, loc);
+    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     auto AType = cast<MemRefType>(op.getA().getType());
     auto AShape = AType.getShape();
@@ -1787,37 +1787,34 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
                                       rewriter.getF32FloatAttr(value));
     };
 
-    auto getAlignedPtr = [&](Value memrefDesc) -> Value {
-      MemRefDescriptor desc(memrefDesc);
-      Value ptr = desc.alignedPtr(rewriter, loc);
-      if (cast<LLVM::LLVMPointerType>(ptr.getType()).getAddressSpace() != 0) {
-        ptr = LLVM::AddrSpaceCastOp::create(rewriter, loc, ptrType, ptr);
-      }
-      return ptr;
-    };
-
-    auto getOptionalPtr = [&](Value memrefDesc) -> Value {
-      if (!memrefDesc)
-        return LLVM::ZeroOp::create(rewriter, loc, ptrType);
-      return getAlignedPtr(memrefDesc);
-    };
-
     Value statePtr = adaptor.getHandle();
-    Value inputPtr = getAlignedPtr(adaptor.getInput());
-    Value routerPtr = getAlignedPtr(adaptor.getRouterProbs());
-    Value fc1WeightsPtr = getAlignedPtr(adaptor.getFc1ExpertsWeights());
-    Value fc1ScalesPtr = getAlignedPtr(adaptor.getFc1Scales());
-    Value fc1BiasPtr = getOptionalPtr(adaptor.getFc1ExpertsBias());
-    Value fc2WeightsPtr = getAlignedPtr(adaptor.getFc2ExpertsWeights());
-    Value fc2ScalesPtr = getAlignedPtr(adaptor.getFc2Scales());
-    Value fc2BiasPtr = getOptionalPtr(adaptor.getFc2ExpertsBias());
-    Value fc3WeightsPtr = getOptionalPtr(adaptor.getFc3ExpertsWeights());
-    Value fc3ScalesPtr = getOptionalPtr(adaptor.getFc3Scales());
-    Value fc3BiasPtr = getOptionalPtr(adaptor.getFc3ExpertsBias());
-    Value fc1ZpPtr = getOptionalPtr(adaptor.getFc1ZeroPoints());
-    Value fc2ZpPtr = getOptionalPtr(adaptor.getFc2ZeroPoints());
-    Value fc3ZpPtr = getOptionalPtr(adaptor.getFc3ZeroPoints());
-    Value outputPtr = getAlignedPtr(adaptor.getOutput());
+    Value inputPtr = extractMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value routerPtr = extractMemRefPtr(adaptor.getRouterProbs(), rewriter, loc);
+    Value fc1WeightsPtr =
+        extractMemRefPtr(adaptor.getFc1ExpertsWeights(), rewriter, loc);
+    Value fc1ScalesPtr =
+        extractMemRefPtr(adaptor.getFc1Scales(), rewriter, loc);
+    Value fc1BiasPtr =
+        extractOptionalMemRefPtr(adaptor.getFc1ExpertsBias(), rewriter, loc);
+    Value fc2WeightsPtr =
+        extractMemRefPtr(adaptor.getFc2ExpertsWeights(), rewriter, loc);
+    Value fc2ScalesPtr =
+        extractMemRefPtr(adaptor.getFc2Scales(), rewriter, loc);
+    Value fc2BiasPtr =
+        extractOptionalMemRefPtr(adaptor.getFc2ExpertsBias(), rewriter, loc);
+    Value fc3WeightsPtr =
+        extractOptionalMemRefPtr(adaptor.getFc3ExpertsWeights(), rewriter, loc);
+    Value fc3ScalesPtr =
+        extractOptionalMemRefPtr(adaptor.getFc3Scales(), rewriter, loc);
+    Value fc3BiasPtr =
+        extractOptionalMemRefPtr(adaptor.getFc3ExpertsBias(), rewriter, loc);
+    Value fc1ZpPtr =
+        extractOptionalMemRefPtr(adaptor.getFc1ZeroPoints(), rewriter, loc);
+    Value fc2ZpPtr =
+        extractOptionalMemRefPtr(adaptor.getFc2ZeroPoints(), rewriter, loc);
+    Value fc3ZpPtr =
+        extractOptionalMemRefPtr(adaptor.getFc3ZeroPoints(), rewriter, loc);
+    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     auto inputType = cast<MemRefType>(op.getInput().getType());
     auto inputShape = inputType.getShape();
