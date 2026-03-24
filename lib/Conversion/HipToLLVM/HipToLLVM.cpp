@@ -136,12 +136,13 @@ static Value getMemRefDimSize(MemRefType type, unsigned dimIdx,
                               ConversionPatternRewriter &rewriter,
                               Location loc) {
   Value result;
-  if (type.isDynamicDim(dimIdx))
+  if (type.isDynamicDim(dimIdx)) {
     result = MemRefDescriptor(descriptor).size(rewriter, loc, dimIdx);
-  else
+  } else {
     result = LLVM::ConstantOp::create(
         rewriter, loc, rewriter.getI64Type(),
         rewriter.getI64IntegerAttr(type.getDimSize(dimIdx)));
+  }
   return result;
 }
 
@@ -153,10 +154,11 @@ static Value computeNumElements(MemRefType type, Value descriptor,
   Type i64Type = rewriter.getI64Type();
   Value num = LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                        rewriter.getI64IntegerAttr(1));
-  for (auto dimIdx : llvm::seq<int64_t>(type.getRank()))
+  for (auto dimIdx : llvm::seq<int64_t>(type.getRank())) {
     num = LLVM::MulOp::create(
         rewriter, loc, num,
         getMemRefDimSize(type, dimIdx, descriptor, rewriter, loc));
+  }
   return num;
 }
 
