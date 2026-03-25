@@ -417,8 +417,7 @@ int wrap_group_query_attention(RuntimeState *state, void *query, void *key,
   // The hipBLASLt GQA pipeline is currently FP16-only: all matrix layouts are
   // created with HIP_R_16F and every custom HIP kernel (rope_kernel,
   // kv_cache_append_kernel, softmax_inplace_kernel, etc.) operates on __half.
-  // This matches Llama / Mistral / Phi model requirements where GQA runs in
-  // FP16.
+  // This matches requirements where GQA runs in FP16.
   //
   // Future FP32 (or BF16) support would require:
   //   1. Parameterizing all hipblasLtMatrixLayoutCreate() calls with the
