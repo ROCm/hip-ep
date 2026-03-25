@@ -288,6 +288,11 @@ void CompilerDriver::discoverLibraries(
     } else {
       COMPILER_DEBUG_LOG(
           "  WARNING: custom kernels lib not found at: " << custom_lib << "\n");
+      // Fall back: add by name so lld-link searches library_paths (/LIBPATH:)
+      // and the LIB environment variable.
+      libraries.push_back("hip_custom_kernels");
+      COMPILER_DEBUG_LOG(
+          "  Custom kernels (name fallback): hip_custom_kernels.lib\n");
     }
   }
 #endif
