@@ -34,9 +34,21 @@ __global__ void topk_routing_kernel(
   int64_t token = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (token >= num_tokens) return;
 
-  const T* probs = router_probs + token * num_experts;
+  const T* logits = router_probs + token * num_experts;
   int ik = static_cast<int>(k < kMaxK ? k : kMaxK);
 
+  // Pass 1: find max logit for numerically stable softmax
+  float max_logit = -1e30f;
+  for (int64_t e = 0; e < num_experts; e++) {
+    float val = static_cast<float>(logits[e]);
+    if (val > max_logit) {
+      max_logit = val;
+    }
+  }
+
+  // Pass 2: compute softmax denominator and find top-k by logit value.
+  // Since exp() is monotonic, top-k by logit == top-k by probability.
+  float exp_sum = 0.0f;
   float top_vals[kMaxK];
   int32_t top_idx[kMaxK];
   for (int i = 0; i < ik; i++) {
@@ -45,7 +57,9 @@ __global__ void topk_routing_kernel(
   }
 
   for (int64_t e = 0; e < num_experts; e++) {
-    float val = static_cast<float>(probs[e]);
+    float val = static_cast<float>(logits[e]);
+    exp_sum += expf(val - max_logit);
+
     if (val > top_vals[ik - 1]) {
       top_vals[ik - 1] = val;
       top_idx[ik - 1] = static_cast<int32_t>(e);
@@ -62,11 +76,21 @@ __global__ void topk_routing_kernel(
     }
   }
 
+  // Convert top-k logit values to softmax probabilities
+  for (int i = 0; i < ik; i++) {
+    top_vals[i] = expf(top_vals[i] - max_logit) / exp_sum;
+  }
+
+  // Optionally re-normalize top-k weights to sum to 1
   if (normalize) {
     float sum = 0.0f;
-    for (int i = 0; i < ik; i++) sum += top_vals[i];
+    for (int i = 0; i < ik; i++) {
+      sum += top_vals[i];
+    }
     if (sum > 0.0f) {
-      for (int i = 0; i < ik; i++) top_vals[i] /= sum;
+      for (int i = 0; i < ik; i++) {
+        top_vals[i] /= sum;
+      }
     }
   }
 
@@ -115,9 +139,9 @@ __global__ void add_bias_kernel(
 }
 
 // ---------------------------------------------------------------------------
-// SwiGLU activation (fused, swiglu_fusion=1).
+// SwiGLU activation (fused interleaved, swiglu_fusion=1).
 //
-// input:  [n, 2 * inter_size]  — first half: gate, second half: linear
+// input:  [n, 2 * inter_size]  — interleaved: gate[0], up[0], gate[1], up[1]...
 // output: [n, inter_size]
 //
 //   G = min(gate, limit)
@@ -139,8 +163,8 @@ __global__ void swiglu_kernel(
   int64_t row = idx / inter_size;
   int64_t col = idx % inter_size;
 
-  float g = static_cast<float>(input[row * 2 * inter_size + col]);
-  float l = static_cast<float>(input[row * 2 * inter_size + inter_size + col]);
+  float g = static_cast<float>(input[row * 2 * inter_size + 2 * col]);
+  float l = static_cast<float>(input[row * 2 * inter_size + 2 * col + 1]);
 
   float G = fminf(g, limit);
   float L = fmaxf(fminf(l, limit), -limit);
