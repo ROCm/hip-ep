@@ -145,6 +145,80 @@ static constexpr int GQA_THREADS = 256;
 // =========================================================================
 
 // -------------------------------------------------------------------------
+// Step 1-2: RoPE -- Rotary Positional Embedding (half-rotated)
+// -------------------------------------------------------------------------
+// Applies to Q (Step 1) and K (Step 2) independently.
+// Layout: BSHD [B, seq, num_heads, head_dim]
+//
+// For position s, head h, dimension d_i (d_i < half_rot):
+//   pos = past_len + s
+//   out[d_i]      = in[d_i]*cos[pos,d_i] - in[d_i+half]*sin[pos,d_i]
+//   out[d_i+half] = in[d_i+half]*cos[pos,d_i] + in[d_i]*sin[pos,d_i]
+//
+// Thread: one per (b,s,h,d_i) where d_i in [0, half_rot). blockIdx.y = batch.
+// Ref: onnxruntime/core/mlas/lib/rotary_embedding.cpp (MlasRotaryEmbedOneRow)
+// -------------------------------------------------------------------------
+
+__global__ void rope_kernel(
+    const __half* __restrict__ input,
+    __half* __restrict__ output,
+    const __half* __restrict__ cos_cache,
+    const __half* __restrict__ sin_cache,
+    int seq_len, int num_heads, int head_dim,
+    int half_rot, int past_len) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int batch_idx = blockIdx.y;
+  int elems = seq_len * num_heads * half_rot;
+  if (idx >= elems) return;
+
+  int d = idx % half_rot;
+  int remaining = idx / half_rot;
+  int h = remaining % num_heads;
+  int s = remaining / num_heads;
+  if (s >= seq_len) return;
+
+  int pos = past_len + s;
+  int base = ((batch_idx * seq_len + s) * num_heads + h) * head_dim;
+
+  float x1 = __half2float(input[base + d]);
+  float x2 = __half2float(input[base + d + half_rot]);
+  float c  = __half2float(cos_cache[pos * half_rot + d]);
+  float sn = __half2float(sin_cache[pos * half_rot + d]);
+
+  output[base + d]            = __float2half(x1 * c - x2 * sn);
+  output[base + d + half_rot] = __float2half(x2 * c + x1 * sn);
+}
+
+// -------------------------------------------------------------------------
+// Step 3 / Step 11: Middle-dimension transpose
+// -------------------------------------------------------------------------
+// Transposes dims 1 and 2 of a 4D tensor [B, dim1, dim2, D]:
+//   Step 3  (Q):  BSHD [B,S,H,d] -> BNSD [B,H,S,d]  (dim1=S, dim2=H)
+//   Step 11 (O):  BNSD [B,H,S,d] -> BSHD [B,S,H,d]  (dim1=H, dim2=S)
+//
+// Thread: one per element in dim1*dim2*D sub-tensor. blockIdx.y = batch.
+// -------------------------------------------------------------------------
+
+__global__ void transpose_mid_dims_kernel(
+    const __half* __restrict__ src,
+    __half* __restrict__ dst,
+    int dim1, int dim2, int D) {
+  int batch_idx = blockIdx.y;
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int per_batch = dim1 * dim2 * D;
+  if (idx >= per_batch) return;
+
+  int di = idx % D;
+  int remaining = idx / D;
+  int d2 = remaining % dim2;
+  int d1 = remaining / dim2;
+
+  int src_off = batch_idx * per_batch + idx;
+  int dst_off = batch_idx * per_batch + (d2 * dim1 + d1) * D + di;
+  dst[dst_off] = src[src_off];
+}
+
+// -------------------------------------------------------------------------
 // Step 4-5: KV Cache Append (fused transpose + scatter)
 // -------------------------------------------------------------------------
 // Appends new K (Step 4) or V (Step 5) tokens into an existing BNSD cache.
@@ -226,80 +300,6 @@ __global__ void kv_cache_concat_kernel(
     int src_idx = ((batch_idx * sq + cs) * G + g) * d + di;
     present[dst_idx] = current[src_idx];
   }
-}
-
-// -------------------------------------------------------------------------
-// Step 1-2: RoPE -- Rotary Positional Embedding (half-rotated)
-// -------------------------------------------------------------------------
-// Applies to Q (Step 1) and K (Step 2) independently.
-// Layout: BSHD [B, seq, num_heads, head_dim]
-//
-// For position s, head h, dimension d_i (d_i < half_rot):
-//   pos = past_len + s
-//   out[d_i]      = in[d_i]*cos[pos,d_i] - in[d_i+half]*sin[pos,d_i]
-//   out[d_i+half] = in[d_i+half]*cos[pos,d_i] + in[d_i]*sin[pos,d_i]
-//
-// Thread: one per (b,s,h,d_i) where d_i in [0, half_rot). blockIdx.y = batch.
-// Ref: onnxruntime/core/mlas/lib/rotary_embedding.cpp (MlasRotaryEmbedOneRow)
-// -------------------------------------------------------------------------
-
-__global__ void rope_kernel(
-    const __half* __restrict__ input,
-    __half* __restrict__ output,
-    const __half* __restrict__ cos_cache,
-    const __half* __restrict__ sin_cache,
-    int seq_len, int num_heads, int head_dim,
-    int half_rot, int past_len) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  int batch_idx = blockIdx.y;
-  int elems = seq_len * num_heads * half_rot;
-  if (idx >= elems) return;
-
-  int d = idx % half_rot;
-  int remaining = idx / half_rot;
-  int h = remaining % num_heads;
-  int s = remaining / num_heads;
-  if (s >= seq_len) return;
-
-  int pos = past_len + s;
-  int base = ((batch_idx * seq_len + s) * num_heads + h) * head_dim;
-
-  float x1 = __half2float(input[base + d]);
-  float x2 = __half2float(input[base + d + half_rot]);
-  float c  = __half2float(cos_cache[pos * half_rot + d]);
-  float sn = __half2float(sin_cache[pos * half_rot + d]);
-
-  output[base + d]            = __float2half(x1 * c - x2 * sn);
-  output[base + d + half_rot] = __float2half(x2 * c + x1 * sn);
-}
-
-// -------------------------------------------------------------------------
-// Step 3 / Step 11: Middle-dimension transpose
-// -------------------------------------------------------------------------
-// Transposes dims 1 and 2 of a 4D tensor [B, dim1, dim2, D]:
-//   Step 3  (Q):  BSHD [B,S,H,d] -> BNSD [B,H,S,d]  (dim1=S, dim2=H)
-//   Step 11 (O):  BNSD [B,H,S,d] -> BSHD [B,S,H,d]  (dim1=H, dim2=S)
-//
-// Thread: one per element in dim1*dim2*D sub-tensor. blockIdx.y = batch.
-// -------------------------------------------------------------------------
-
-__global__ void transpose_mid_dims_kernel(
-    const __half* __restrict__ src,
-    __half* __restrict__ dst,
-    int dim1, int dim2, int D) {
-  int batch_idx = blockIdx.y;
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  int per_batch = dim1 * dim2 * D;
-  if (idx >= per_batch) return;
-
-  int di = idx % D;
-  int remaining = idx / D;
-  int d2 = remaining % dim2;
-  int d1 = remaining / dim2;
-
-  int src_off = batch_idx * per_batch + idx;
-  int dst_off = batch_idx * per_batch + (d2 * dim1 + d1) * D + di;
-  dst[dst_off] = src[src_off];
 }
 
 // -------------------------------------------------------------------------
@@ -410,38 +410,10 @@ __global__ void softmax_inplace_kernel(
 }
 
 // =============================================================================
-// Extern "C" Launchers (thin wrappers around kernel launches)
+// Extern "C" Launchers (thin wrappers, ordered by pipeline step)
 // =============================================================================
 
-extern "C" int hip_gqa_kv_cache_append(
-    void* stream_ptr, const void* src, void* cache,
-    int batch_size, int sq, int G, int d, int present_seq, int past_len) {
-  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
-  int total = sq * G * d;
-  int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
-  kv_cache_append_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0, stream>>>(
-      static_cast<const __half*>(src),
-      static_cast<__half*>(cache),
-      sq, G, d, present_seq, past_len);
-  return hipSuccess;
-}
-
-extern "C" int hip_gqa_kv_cache_concat(
-    void* stream_ptr, const void* past, const void* current, void* present,
-    int batch_size, int past_len, int sq, int G, int d,
-    int past_seq, int present_seq) {
-  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
-  int total_seq = past_len + sq;
-  int total = total_seq * G * d;
-  int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
-  kv_cache_concat_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0, stream>>>(
-      static_cast<const __half*>(past),
-      static_cast<const __half*>(current),
-      static_cast<__half*>(present),
-      past_len, sq, G, d, past_seq, present_seq);
-  return hipSuccess;
-}
-
+// Step 1-2: RoPE
 extern "C" int hip_gqa_rope(
     void* stream_ptr, const void* input, void* output,
     const void* cos_cache, const void* sin_cache,
@@ -459,6 +431,7 @@ extern "C" int hip_gqa_rope(
   return hipSuccess;
 }
 
+// Step 3 / Step 11: Transpose middle dims
 extern "C" int hip_gqa_transpose_mid_dims(
     void* stream_ptr, const void* src, void* dst,
     int batch_size, int dim1, int dim2, int D) {
@@ -472,6 +445,38 @@ extern "C" int hip_gqa_transpose_mid_dims(
   return hipSuccess;
 }
 
+// Step 4-5: KV cache append (same-buffer)
+extern "C" int hip_gqa_kv_cache_append(
+    void* stream_ptr, const void* src, void* cache,
+    int batch_size, int sq, int G, int d, int present_seq, int past_len) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  int total = sq * G * d;
+  int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
+  kv_cache_append_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0, stream>>>(
+      static_cast<const __half*>(src),
+      static_cast<__half*>(cache),
+      sq, G, d, present_seq, past_len);
+  return hipSuccess;
+}
+
+// Step 4-5: KV cache concat (separate-buffer)
+extern "C" int hip_gqa_kv_cache_concat(
+    void* stream_ptr, const void* past, const void* current, void* present,
+    int batch_size, int past_len, int sq, int G, int d,
+    int past_seq, int present_seq) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  int total_seq = past_len + sq;
+  int total = total_seq * G * d;
+  int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
+  kv_cache_concat_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0, stream>>>(
+      static_cast<const __half*>(past),
+      static_cast<const __half*>(current),
+      static_cast<__half*>(present),
+      past_len, sq, G, d, past_seq, present_seq);
+  return hipSuccess;
+}
+
+// Step 6-7: KV group expansion
 extern "C" int hip_gqa_expand_kv(
     void* stream_ptr, const void* src, void* dst,
     int total_heads, int heads_per_group,
@@ -485,6 +490,7 @@ extern "C" int hip_gqa_expand_kv(
   return hipSuccess;
 }
 
+// Step 9a: Causal mask
 extern "C" int hip_gqa_causal_mask(
     void* stream_ptr, void* S,
     int total_heads, int skv, int sq,
@@ -498,6 +504,7 @@ extern "C" int hip_gqa_causal_mask(
   return hipSuccess;
 }
 
+// Step 9b: Softmax
 extern "C" int hip_gqa_softmax_inplace(
     void* stream_ptr, void* data,
     int total_head_queries, int rows, int cols,
