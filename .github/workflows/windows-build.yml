@@ -162,8 +162,7 @@ jobs:
             --skip_tests ^
             --disable_memleak_checker ^
             --use_dml ^
-            --cmake_generator Ninja ^
-            --cmake_extra_defines onnxruntime_BUILD_UNIT_TESTS=ON
+            --cmake_generator Ninja
 
       - name: Install ORT into prebuilt-local
         if: steps.cache-prebuilt.outputs.cache-hit != 'true'
