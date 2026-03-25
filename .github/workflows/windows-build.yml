@@ -482,7 +482,8 @@ jobs:
         run: |
           $resultsDir = "gpu-test-package/results"
           $runUrl = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          $sha = "${{ github.sha }}".Substring(0, 7)
+          $rawSha = if ("${{ github.event_name }}" -eq "pull_request") { "${{ github.event.pull_request.head.sha }}" } else { "${{ github.sha }}" }
+          $sha = $rawSha.Substring(0, 7)
           $prNumber = "${{ github.event.pull_request.number }}"
 
           # Build table rows from result files
@@ -493,9 +494,9 @@ jobs:
             $qpsMatch = [regex]::Match($content, 'Number of inferences per second:\s+([\d.]+)')
             if ($qpsMatch.Success) {
               $qps = "{0:F2}" -f [double]$qpsMatch.Groups[1].Value
-              $tableRows += "| ``$model`` | $qps |`n"
+              $tableRows += "| $model | $qps |`n"
             } else {
-              $tableRows += "| ``$model`` | failed |`n"
+              $tableRows += "| $model | failed |`n"
             }
           }
           if (-not $tableRows) { $tableRows = "| (no results) | - |`n" }
