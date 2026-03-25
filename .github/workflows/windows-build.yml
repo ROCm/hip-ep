@@ -61,64 +61,132 @@ jobs:
           git submodule update --init --recursive
 
       # -----------------------------------------------------------------------
-      # Cache: ONNX Runtime + LLVM prebuilt + flatbuffers
+      # Cache: ORT + LLVM prebuilt + flatbuffers + protobuf + gtest
       # All are installed into the same prebuilt-local prefix so one cache
       # entry covers all of them.
-      # Note: protobuf is excluded – cmake/deps.cmake fetches v21.12 via
-      # FetchContent (same version pinned by morphizen) to avoid C4267 errors
-      # from mismatched protobuf versions.
+      # Note: protobuf is excluded from prebuilt downloads – cmake/deps.cmake
+      # fetches v21.12 via FetchContent (same version pinned by morphizen) to
+      # avoid C4267 errors from mismatched protobuf versions.
+      # ORT is built from source and installed here (same pattern as GTest).
       # -----------------------------------------------------------------------
       - name: Cache prebuilt-local
         id: cache-prebuilt
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/prebuilt-local
-          key: prebuilt-ort-${{ env.ONNXRUNTIME_VERSION }}-${{ env.LLVM_TAG }}-${{ env.FLATBUFFERS_TAG }}-${{ env.PROTO_TAG }}-gtest${{ env.GTEST_VERSION }}
+          key: prebuilt-ort-src-${{ env.ONNXRUNTIME_VERSION }}-${{ env.LLVM_TAG }}-${{ env.FLATBUFFERS_TAG }}-${{ env.PROTO_TAG }}-gtest${{ env.GTEST_VERSION }}
 
       # -----------------------------------------------------------------------
-      # Download ONNX Runtime (official pre-built zip)
-      # morphizen-core calls find_package(onnxruntime REQUIRED), so we also
-      # create onnxruntimeConfig.cmake in the right location.
+      # Cache: TheRock HIP SDK for Windows (separate cache – large tarball)
       # -----------------------------------------------------------------------
-      - name: Download pre-built ONNX Runtime
-        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
-        shell: powershell
+      - name: Cache TheRock
+        id: cache-therock
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ runner.workspace }}/therock-dist
+          key: ${{ env.THEROCK_VERSION }}
+
+      - name: Download & extract TheRock
+        if: steps.cache-therock.outputs.cache-hit != 'true'
+        shell: bash
         run: |
-          $ortVersion = "${{ env.ONNXRUNTIME_VERSION }}"
-          $url = "https://github.com/microsoft/onnxruntime/releases/download/v$ortVersion/onnxruntime-win-x64-$ortVersion.zip"
-          $zipFile = "${{ github.workspace }}/onnxruntime-win-x64-$ortVersion.zip"
-          Write-Host "Downloading $url"
-          Invoke-WebRequest -Uri $url -OutFile $zipFile
+          THEROCK_DIST="$(cygpath -u '${{ runner.workspace }}/therock-dist')"
+          mkdir -p "$THEROCK_DIST"
+          curl -fsSL \
+            "https://repo.amd.com/rocm/tarball/${{ env.THEROCK_VERSION }}.tar.gz" \
+            -o therock.tar.gz
+          tar -xzf therock.tar.gz -C "$THEROCK_DIST" --strip-components=1
+          rm therock.tar.gz
 
-          $prefixDir = "${{ runner.workspace }}/prebuilt-local"
-          New-Item -ItemType Directory -Force -Path $prefixDir | Out-Null
-          Expand-Archive -Path $zipFile -DestinationPath $prefixDir -Force
+      # -----------------------------------------------------------------------
+      # The prebuilt LLVM package has C:\msvsn2022 hardcoded in LLVMExports.cmake
+      # for the DIA SDK path (known LLVM issue: llvm/llvm-project#111829).
+      # Create a junction from C:\msvsn2022 to the actual VS installation.
+      # -----------------------------------------------------------------------
+      - name: Fix DIA SDK path from prebuilt LLVM
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set "VS_PATH=%%i"
+          mklink /J C:\msvsn2022 "%VS_PATH%"
 
-          # Flatten nested directory produced by the zip
-          $extractedDir = "$prefixDir/onnxruntime-win-x64-$ortVersion"
-          if (Test-Path $extractedDir) {
-            Move-Item -Path "$extractedDir/*" -Destination "$prefixDir/" -Force
-            Remove-Item -Path $extractedDir -Force -Recurse
-          }
+      # -----------------------------------------------------------------------
+      # llvm-lit.py (from prebuilt) requires the lit pip package at runtime.
+      # Pin Python to avoid mismatch with find_package(Python3) in CMake.
+      # -----------------------------------------------------------------------
+      - name: Setup Python 3.12
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.12"
 
-          # Create CMake config so find_package(onnxruntime REQUIRED) succeeds.
-          # The pre-built zip puts headers in include/ and onnxruntime.lib in lib/.
-          $cmakeDir = "$prefixDir/lib/cmake/onnxruntime"
-          New-Item -ItemType Directory -Force -Path $cmakeDir | Out-Null
-          $configFile = "$cmakeDir/onnxruntimeConfig.cmake"
-          "# onnxruntimeConfig.cmake - auto-generated for pre-built ONNX Runtime $ortVersion" | Set-Content $configFile -Encoding UTF8
-          ""                                                                             | Add-Content $configFile -Encoding UTF8
-          "if(NOT TARGET onnxruntime::onnxruntime)"                                     | Add-Content $configFile -Encoding UTF8
-          "  add_library(onnxruntime::onnxruntime SHARED IMPORTED)"                     | Add-Content $configFile -Encoding UTF8
-          "  set_target_properties(onnxruntime::onnxruntime PROPERTIES"                 | Add-Content $configFile -Encoding UTF8
-          "    INTERFACE_INCLUDE_DIRECTORIES `"`${CMAKE_CURRENT_LIST_DIR}/../../../include`"" | Add-Content $configFile -Encoding UTF8
-          "    IMPORTED_LOCATION             `"`${CMAKE_CURRENT_LIST_DIR}/../../../lib/onnxruntime.dll`"" | Add-Content $configFile -Encoding UTF8
-          "    IMPORTED_IMPLIB               `"`${CMAKE_CURRENT_LIST_DIR}/../../../lib/onnxruntime.lib`"" | Add-Content $configFile -Encoding UTF8
-          "  )"                                                                          | Add-Content $configFile -Encoding UTF8
-          "endif()"                                                                      | Add-Content $configFile -Encoding UTF8
-          ""                                                                             | Add-Content $configFile -Encoding UTF8
-          "set(onnxruntime_FOUND TRUE)"                                                  | Add-Content $configFile -Encoding UTF8
-          "set(onnxruntime_VERSION `"$ortVersion`")"                                    | Add-Content $configFile -Encoding UTF8
+      - name: Install lit
+        run: pip install lit
+
+      # Put cl.exe and ninja.exe (bundled with VS) into PATH
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      # Cache compilation results across runs via GitHub Actions Cache backend
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      # -----------------------------------------------------------------------
+      # Build ONNX Runtime from source and install into prebuilt-local.
+      # Produces both the ORT shared library (build-time dep for onnx-hipdnn-ep)
+      # and onnxruntime_perf_test.exe (GPU test tool).
+      # Requires MSVC env; placed after Setup MSVC (same pattern as GTest).
+      # Clone and build are skipped when the ORT build cache hits.
+      # -----------------------------------------------------------------------
+      - name: Checkout ONNX Runtime v${{ env.ONNXRUNTIME_VERSION }}
+        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: Microsoft/onnxruntime
+          ref: v${{ env.ONNXRUNTIME_VERSION }}
+          path: source-onnxruntime
+          submodules: true
+          fetch-depth: 1
+          show-progress: false
+
+      - name: Build ONNX Runtime
+        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
+        shell: cmd
+        run: |
+          cd /d "${{ github.workspace }}\source-onnxruntime"
+          call build.bat ^
+            --config Release ^
+            --build_shared_lib ^
+            --parallel ^
+            --compile_no_warning_as_error ^
+            --skip_submodule_sync ^
+            --build_dir "${{ runner.workspace }}\build-onnxruntime" ^
+            --skip_tests ^
+            --disable_memleak_checker ^
+            --use_dml ^
+            --cmake_generator Ninja
+
+      - name: Install ORT into prebuilt-local
+        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          cmake --install "${{ runner.workspace }}/build-onnxruntime/Release" \
+            --prefix "${{ runner.workspace }}/prebuilt-local"
+          # perf_test is not a cmake install target; copy manually so it lands
+          # in prebuilt-local (cached) rather than the ephemeral build directory.
+          PERF_TEST=$(find "${{ runner.workspace }}/build-onnxruntime" \
+            -name "onnxruntime_perf_test.exe" -type f | head -1)
+          if [ -z "$PERF_TEST" ]; then
+            echo "ERROR: onnxruntime_perf_test.exe not found in build tree"
+            exit 1
+          fi
+          cp "$PERF_TEST" "${{ runner.workspace }}/prebuilt-local/bin/"
+          # DirectML.dll is not installed by cmake --install; copy manually.
+          DML_DLL=$(find "${{ runner.workspace }}/build-onnxruntime" \
+            -name "DirectML.dll" -type f | head -1)
+          if [ -z "$DML_DLL" ]; then
+            echo "ERROR: DirectML.dll not found in build tree"
+            exit 1
+          fi
+          cp "$DML_DLL" "${{ runner.workspace }}/prebuilt-local/bin/"
 
       # -----------------------------------------------------------------------
       # Download LLVM prebuilt (from wcy123/llvm-mlir-prebuilt releases)
@@ -174,57 +242,6 @@ jobs:
           rm "$PREBUILT_DIR/protobuf-34.0-release-windows-x64.zip"
 
       # -----------------------------------------------------------------------
-      # Cache: TheRock HIP SDK for Windows (separate cache – large tarball)
-      # -----------------------------------------------------------------------
-      - name: Cache TheRock
-        id: cache-therock
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
-        with:
-          path: ${{ runner.workspace }}/therock-dist
-          key: ${{ env.THEROCK_VERSION }}
-
-      - name: Download & extract TheRock
-        if: steps.cache-therock.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          THEROCK_DIST="$(cygpath -u '${{ runner.workspace }}/therock-dist')"
-          mkdir -p "$THEROCK_DIST"
-          curl -fsSL \
-            "https://repo.amd.com/rocm/tarball/${{ env.THEROCK_VERSION }}.tar.gz" \
-            -o therock.tar.gz
-          tar -xzf therock.tar.gz -C "$THEROCK_DIST" --strip-components=1
-          rm therock.tar.gz
-
-
-
-      # -----------------------------------------------------------------------
-      # The prebuilt LLVM package has C:\msvsn2022 hardcoded in LLVMExports.cmake
-      # for the DIA SDK path (known LLVM issue: llvm/llvm-project#111829).
-      # Create a junction from C:\msvsn2022 to the actual VS installation.
-      # -----------------------------------------------------------------------
-      - name: Fix DIA SDK path from prebuilt LLVM
-        shell: cmd
-        run: |
-          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set "VS_PATH=%%i"
-          mklink /J C:\msvsn2022 "%VS_PATH%"
-
-      # -----------------------------------------------------------------------
-      # llvm-lit.py (from prebuilt) requires the lit pip package at runtime.
-      # Pin Python to avoid mismatch with find_package(Python3) in CMake.
-      # -----------------------------------------------------------------------
-      - name: Setup Python 3.12
-        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
-        with:
-          python-version: "3.12"
-
-      - name: Install lit
-        run: pip install lit
-
-      # Put cl.exe and ninja.exe (bundled with VS) into PATH
-      - name: Setup MSVC environment
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-
-      # -----------------------------------------------------------------------
       # Build GTest from source and install into prebuilt-local.
       # cmake/deps.cmake does find_package(GTest CONFIG QUIET) first; if found
       # via CMAKE_PREFIX_PATH it skips FetchContent entirely.
@@ -245,10 +262,6 @@ jobs:
           rd /s /q gtest-build "googletest-${{ env.GTEST_VERSION }}"
           del gtest.zip
 
-      # Cache compilation results across runs via GitHub Actions Cache backend
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-
       # -----------------------------------------------------------------------
       # Configure
       # -----------------------------------------------------------------------
@@ -263,14 +276,15 @@ jobs:
             "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" \
             -DCMAKE_BUILD_TYPE=Release \
             "-DCMAKE_PREFIX_PATH=${{ runner.workspace }}/prebuilt-local" \
+            "-DCMAKE_INSTALL_PREFIX=${{ runner.workspace }}/install" \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DBUILD_EP=ON \
             -DBUILD_HIP_TOOLS=ON \
-            -DONNX_HIP_INCLUDE_LIT_TESTS=ON \
             "-DTHEROCK_DIST=$THEROCK_DIST" \
             -DHIP_ARCHITECTURES=gfx1151 \
             -Dmorphizen_ENABLE_UNIT_TEST=OFF \
             -DBUILD_MOCK_RUNTIME=OFF \
+            -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
             --fresh
@@ -289,3 +303,240 @@ jobs:
       - name: Run LIT tests
         shell: bash
         run: cmake --build ../build/$(basename "$PWD") --target check-hip-mlir-lit
+
+      # -----------------------------------------------------------------------
+      # Install onnx-hipdnn-ep artifacts (MorphiZen EP DLL etc.)
+      # -----------------------------------------------------------------------
+      - name: Install onnx-hipdnn-ep
+        shell: bash
+        run: cmake --build ../build/$(basename "$PWD") --target install
+
+      # -----------------------------------------------------------------------
+      # Stage GPU test package:
+      #   staging/bin/    – executables + DLLs needed at runtime on the GPU box
+      #   staging/models/ – ONNX test model
+      #   staging/morphizen_config.json
+      # -----------------------------------------------------------------------
+      - name: Stage GPU test package
+        shell: bash
+        run: |
+          mkdir -p staging/bin staging/lib
+
+          # onnxruntime_perf_test.exe + onnxruntime.dll – from prebuilt-local
+          PREBUILT="${{ runner.workspace }}/prebuilt-local"
+          PERF_TEST=$(find "$PREBUILT" -name "onnxruntime_perf_test.exe" -type f | head -1)
+          if [ -z "$PERF_TEST" ]; then
+            echo "ERROR: onnxruntime_perf_test.exe not found in $PREBUILT"
+            exit 1
+          fi
+          cp "$PERF_TEST" staging/bin/
+
+          # ORT DLL + DirectML.dll – from the install prefix
+          cp "$PREBUILT/bin/onnxruntime.dll" staging/bin/
+          cp "$PREBUILT/bin/DirectML.dll" staging/bin/
+
+          # MorphiZen EP DLL + other DLLs/EXEs from onnx-hipdnn-ep install
+          cp "${{ runner.workspace }}/install/bin/"*.dll staging/bin/ 2>/dev/null || true
+          cp "${{ runner.workspace }}/install/bin/"*.exe staging/bin/ 2>/dev/null || true
+
+          # Import libraries needed by the MorphiZen JIT linker (lld-link).
+          # hip-compiler.dll embeds the build-time install path for
+          # hip_custom_kernels.lib; staging/lib/ preserves them so the
+          # gpu-test job can restore them at the expected location.
+          cp "${{ runner.workspace }}/install/lib/"*.lib staging/lib/ 2>/dev/null || true
+
+          # amdhip64_7.dll – HIP runtime required at inference time
+          cp "${{ runner.workspace }}/therock-dist/bin/amdhip64_7.dll" staging/bin/
+
+          # MorphiZen EP config
+          cp etc/morphizen_config.json staging/
+
+          # ---------------------------------------------------------------
+          # Package MSVC/WinSDK release CRT import libraries for lld-link.
+          # The MorphiZen JIT compiler links against the release CRT (/MD),
+          # so the GPU test machine does not need VS Build Tools installed.
+          # ilammy/msvc-dev-cmd (already run above) sets VCToolsInstallDir,
+          # WindowsSdkDir, and WindowsSDKVersion in the environment.
+          # ---------------------------------------------------------------
+          MSVC_LIB="$(cygpath -u "$VCToolsInstallDir")/lib/x64"
+          UCRT_LIB="$(cygpath -u "$WindowsSdkDir")/Lib/${WindowsSDKVersion}/ucrt/x64"
+          UM_LIB="$(cygpath -u "$WindowsSdkDir")/Lib/${WindowsSDKVersion}/um/x64"
+          echo "MSVC lib: $MSVC_LIB"
+          echo "UCRT lib: $UCRT_LIB"
+          echo "UM lib:   $UM_LIB"
+          for lib in msvcrt.lib ucrt.lib vcruntime.lib oldnames.lib \
+                     libcpmt.lib libcmt.lib kernel32.lib user32.lib; do
+            src=$(find "$MSVC_LIB" "$UCRT_LIB" "$UM_LIB" \
+                    -maxdepth 1 -iname "$lib" 2>/dev/null | head -1)
+            if [ -n "$src" ]; then
+              cp "$src" staging/lib/
+              echo "  Packaged: $lib <- $src"
+            else
+              echo "  WARNING: $lib not found"
+            fi
+          done
+
+          echo "=== Staged package contents ==="
+          find staging/ -type f | sort
+
+      - name: Upload GPU test package
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-test-package
+          path: staging/
+          retention-days: 3
+
+  # ---------------------------------------------------------------------------
+  # GPU test job: runs on the self-hosted machine with a real AMD GPU.
+  # Downloads the package built above and runs onnxruntime_perf_test.
+  # ---------------------------------------------------------------------------
+  gpu-test:
+    needs: build-windows
+    runs-on: StrixHalo
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    env:
+      THEROCK_VERSION: therock-dist-windows-gfx1151-7.11.0
+      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+
+    steps:
+      - name: Clean workspace
+        shell: cmd
+        run: |
+          if exist gpu-test-package rd /s /q gpu-test-package
+
+      - name: Download GPU test package
+        uses: actions/download-artifact@v4
+        with:
+          name: gpu-test-package
+          path: gpu-test-package
+
+      # TheRock DLLs are required at runtime on the GPU machine.
+      # Download is fast enough that caching is not needed on the self-hosted runner.
+      - name: Download & extract TheRock
+        shell: powershell
+        run: |
+          $dist = "${{ runner.workspace }}\therock-dist"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          curl.exe -fsSL `
+            "https://repo.amd.com/rocm/tarball/${{ env.THEROCK_VERSION }}.tar.gz" `
+            -o therock.tar.gz
+          tar -xzf therock.tar.gz -C $dist --strip-components=1
+          Remove-Item therock.tar.gz
+
+      # Run perf test against seq128 models via MorphiZen EP.
+      # Models are pre-placed on the runner at C:\actions-runner\_work\model\.
+      # -t 30        : run for 30 seconds per model
+      # -c 1         : single session
+      # -s           : sequential execution
+      # -I           : generate random inputs (no test data files needed)
+      # THEROCK_DIST : required by discoverLibraries() to locate HIP libs
+      # LIB          : all link-time libs are packaged in gpu-test-package/lib/
+      #                (MSVC release CRT + hip_custom_kernels); no VS required.
+      # Output is tee'd to results/ for QPS extraction. Non-zero exit code
+      # sets FAILED but continues so all models are tested.
+      - name: Run onnxruntime_perf_test (GPU)
+        shell: cmd
+        run: |
+          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
+          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
+          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
+          set MODEL_DIR=${{ runner.workspace }}\model
+          if not exist "%MODEL_DIR%" (
+            echo [ERROR] MODEL_DIR not found: %MODEL_DIR%
+            exit /b 1
+          )
+          set FOUND=0
+          for /r "%MODEL_DIR%" %%M in (*seq128.onnx) do set FOUND=1
+          if "%FOUND%"=="0" (
+            echo [ERROR] No *seq128.onnx models found in %MODEL_DIR%
+            exit /b 1
+          )
+          set FAILED=0
+          cd gpu-test-package\bin
+          mkdir ..\results 2>nul
+          for /r "%MODEL_DIR%" %%M in (*seq128.onnx) do (
+            echo === Testing %%~nxM ===
+            onnxruntime_perf_test.exe ^
+              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
+              --plugin_eps "MorphiZenExecutionProvider" ^
+              --plugin_ep_options "config_file|..\morphizen_config.json" ^
+              -t 30 -c 1 -s -I ^
+              "%%M" > "..\results\%%~nxM.txt" 2>&1
+            type "..\results\%%~nxM.txt"
+            if errorlevel 1 set FAILED=1
+          )
+          exit /b %FAILED%
+
+      # Parse QPS from result files and publish:
+      #   - PR trigger  → post/update a PR comment via gh CLI (github-actions[bot])
+      #   - other trigger → write to GITHUB_STEP_SUMMARY only
+      - name: Publish perf results
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $resultsDir = "gpu-test-package/results"
+          $runUrl = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          $rawSha = if ("${{ github.event_name }}" -eq "pull_request") { "${{ github.event.pull_request.head.sha }}" } else { "${{ github.sha }}" }
+          $sha = $rawSha.Substring(0, 7)
+          $prNumber = "${{ github.event.pull_request.number }}"
+
+          # Build table rows from result files
+          $tableRows = ""
+          foreach ($f in (Get-ChildItem "$resultsDir/*.txt" -ErrorAction SilentlyContinue)) {
+            $model = $f.BaseName -replace '\.onnx$', ''
+            $content = Get-Content $f.FullName -Raw
+            $qpsMatch = [regex]::Match($content, 'Number of inferences per second:\s+([\d.]+)')
+            if ($qpsMatch.Success) {
+              $qps = "{0:F2}" -f [double]$qpsMatch.Groups[1].Value
+              $tableRows += "| $model | $qps |`n"
+            } else {
+              $tableRows += "| $model | failed |`n"
+            }
+          }
+          if (-not $tableRows) { $tableRows = "| (no results) | - |`n" }
+
+          $header = "## MorphiZen EP Performance Results`n`n" +
+                    "| Model | QPS |`n" +
+                    "|-------|----:|`n"
+          $footer = "`nRun: [${{ github.run_number }}]($runUrl) - Commit: ``$sha``"
+          $summary = $header + $tableRows + $footer
+
+          # Always write to step summary and log
+          Write-Host $summary
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+
+          # On pull_request events, also post/update a PR comment via gh CLI.
+          # Errors are non-fatal — step summary is already written above.
+          if ("${{ github.event_name }}" -eq "pull_request" -and $prNumber) {
+            $marker = "<!-- morphizen-perf-results -->"
+            $body = "$marker`n$summary"
+
+            # Find existing comment with marker using PowerShell JSON parsing (avoids jq escaping issues)
+            $commentsJson = gh api "repos/${{ github.repository }}/issues/$prNumber/comments" 2>$null
+            $ghOk = ($LASTEXITCODE -eq 0)
+            $existing = $null
+            if ($ghOk -and $commentsJson) {
+              $comments = $commentsJson | ConvertFrom-Json
+              $found = $comments | Where-Object { $_.body -and $_.body.StartsWith($marker) } | Select-Object -First 1
+              if ($found) { $existing = $found.id }
+            }
+
+            if ($ghOk -and $existing) {
+              Write-Host "Updating existing PR comment $existing"
+              gh api --method PATCH "repos/${{ github.repository }}/issues/comments/$existing" `
+                -f body="$body"
+              if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: Failed to update PR comment" }
+            } elseif ($ghOk) {
+              Write-Host "Creating new PR comment"
+              gh pr comment $prNumber -R "${{ github.repository }}" --body "$body"
+              if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: Failed to create PR comment" }
+            } else {
+              Write-Host "WARNING: gh api unreachable, skipping PR comment"
+            }
+          }
