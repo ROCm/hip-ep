@@ -13,7 +13,7 @@
 
 static constexpr int kBlockDim = 16;
 
-// Fused dequant-matmul kernel for int4 packed weights.
+// Fused dequant-matmul kernel for int4 packed weights (fp16 only).
 //
 // Y[batch, m, n] = sum_k( A[batch,m,k] * dequant(B[n,k]) ) + bias[n]
 //
@@ -22,14 +22,13 @@ static constexpr int kBlockDim = 16;
 //
 // Each thread computes one output element, accumulating in fp32 for precision.
 // The dequantization is fused into the dot-product loop — no temporary buffer.
-template <typename T>
 __global__ void matmul_nbits_kernel(
-    const T* __restrict__ A,
+    const __half* __restrict__ A,
     const uint8_t* __restrict__ B,
-    const T* __restrict__ scales,
+    const __half* __restrict__ scales,
     const uint8_t* __restrict__ zp,
-    const T* __restrict__ bias,
-    T* __restrict__ output,
+    const __half* __restrict__ bias,
+    __half* __restrict__ output,
     int64_t M, int64_t N, int64_t K,
     int64_t block_size) {
   int64_t n = static_cast<int64_t>(blockIdx.x) * kBlockDim + threadIdx.x;
@@ -42,9 +41,9 @@ __global__ void matmul_nbits_kernel(
   int64_t blob_size = block_size / 2;
 
   float acc = 0.0f;
-  const T* a_row = A + batch * M * K + m * K;
+  const __half* a_row = A + batch * M * K + m * K;
   const uint8_t* b_row = B + n * k_blocks * blob_size;
-  const T* s_row = scales + n * k_blocks;
+  const __half* s_row = scales + n * k_blocks;
 
   for (int64_t blk = 0; blk < k_blocks; blk++) {
     float scale_val = static_cast<float>(s_row[blk]);
@@ -54,7 +53,9 @@ __global__ void matmul_nbits_kernel(
 
     int64_t k_start = blk * block_size;
     int64_t k_end = k_start + block_size;
-    if (k_end > K) k_end = K;
+    if (k_end > K) {
+      k_end = K;
+    }
     const uint8_t* b_block = b_row + blk * blob_size;
 
     for (int64_t k = k_start; k < k_end; k++) {
@@ -69,8 +70,10 @@ __global__ void matmul_nbits_kernel(
     }
   }
 
-  if (bias) acc += static_cast<float>(bias[n]);
-  output[batch * M * N + m * N + n] = static_cast<T>(acc);
+  if (bias) {
+    acc += static_cast<float>(bias[n]);
+  }
+  output[batch * M * N + m * N + n] = static_cast<__half>(acc);
 }
 
 extern "C" int hip_matmul_nbits(
@@ -110,28 +113,24 @@ extern "C" int hip_matmul_nbits(
             static_cast<unsigned>((M + kBlockDim - 1) / kBlockDim),
             static_cast<unsigned>(batch_count));
 
-  if (element_size_bytes == 2) {
-    hipLaunchKernelGGL(
-        matmul_nbits_kernel<__half>, grid, block, 0, hip_stream,
-        static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
-        static_cast<const __half*>(scales),
-        static_cast<const uint8_t*>(zero_points),
-        static_cast<const __half*>(bias), static_cast<__half*>(output),
-        M, N, K, block_size);
-  } else if (element_size_bytes == 4) {
-    hipLaunchKernelGGL(
-        matmul_nbits_kernel<float>, grid, block, 0, hip_stream,
-        static_cast<const float*>(A), static_cast<const uint8_t*>(B),
-        static_cast<const float*>(scales),
-        static_cast<const uint8_t*>(zero_points),
-        static_cast<const float*>(bias), static_cast<float*>(output),
-        M, N, K, block_size);
-  } else {
+  // Only fp16 (__half, element_size_bytes==2) is supported. The target models
+  // (e.g. GPT-OSS-20B) use fp16 throughout; fp32 support is not needed and
+  // would double register pressure for the per-thread accumulation loop.
+  if (element_size_bytes != 2) {
     fprintf(stderr,
-            "[custom_kernels] hip_matmul_nbits: unsupported element_size %lld\n",
+            "[custom_kernels] hip_matmul_nbits: only fp16 supported, "
+            "got element_size %lld\n",
             (long long)element_size_bytes);
     return -1;
   }
+
+  hipLaunchKernelGGL(
+      matmul_nbits_kernel, grid, block, 0, hip_stream,
+      static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
+      static_cast<const __half*>(scales),
+      static_cast<const uint8_t*>(zero_points),
+      static_cast<const __half*>(bias), static_cast<__half*>(output),
+      M, N, K, block_size);
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {

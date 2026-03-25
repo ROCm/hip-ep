@@ -19,14 +19,13 @@ static constexpr int kBlock = 256;
 static constexpr int kMaxK = 16;
 
 // ---------------------------------------------------------------------------
-// Top-k routing: for each token, find top-k experts by probability.
-// Uses insertion sort — k is small (typically 2-8).
+// Top-k routing (fp16 only): for each token, find top-k experts by
+// probability. Uses insertion sort — k is small (typically 2-8).
 // ---------------------------------------------------------------------------
-template <typename T>
 __global__ void topk_routing_kernel(
-    const T* __restrict__ router_probs,
+    const __half* __restrict__ router_probs,
     int32_t* __restrict__ expert_indices,
-    T* __restrict__ expert_weights,
+    __half* __restrict__ expert_weights,
     int64_t num_tokens,
     int64_t num_experts,
     int64_t k,
@@ -34,7 +33,7 @@ __global__ void topk_routing_kernel(
   int64_t token = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (token >= num_tokens) return;
 
-  const T* logits = router_probs + token * num_experts;
+  const __half* logits = router_probs + token * num_experts;
   int ik = static_cast<int>(k < kMaxK ? k : kMaxK);
 
   // Pass 1: find max logit for numerically stable softmax
@@ -96,18 +95,17 @@ __global__ void topk_routing_kernel(
 
   for (int i = 0; i < ik; i++) {
     expert_indices[token * k + i] = top_idx[i];
-    expert_weights[token * k + i] = static_cast<T>(top_vals[i]);
+    expert_weights[token * k + i] = static_cast<__half>(top_vals[i]);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Gather: collect rows by index.
+// Gather (fp16 only): collect rows by index.
 // output[i, :] = input[token_ids[i], :]
 // ---------------------------------------------------------------------------
-template <typename T>
 __global__ void gather_tokens_kernel(
-    const T* __restrict__ input,
-    T* __restrict__ gathered,
+    const __half* __restrict__ input,
+    __half* __restrict__ gathered,
     const int32_t* __restrict__ token_ids,
     int64_t width,
     int64_t count) {
@@ -122,12 +120,11 @@ __global__ void gather_tokens_kernel(
 }
 
 // ---------------------------------------------------------------------------
-// In-place bias addition: data[i, j] += bias[j]
+// In-place bias addition (fp16 only): data[i, j] += bias[j]
 // ---------------------------------------------------------------------------
-template <typename T>
 __global__ void add_bias_kernel(
-    T* __restrict__ data,
-    const T* __restrict__ bias,
+    __half* __restrict__ data,
+    const __half* __restrict__ bias,
     int64_t n,
     int64_t width) {
   int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -135,11 +132,11 @@ __global__ void add_bias_kernel(
 
   int64_t col = idx % width;
   float val = static_cast<float>(data[idx]) + static_cast<float>(bias[col]);
-  data[idx] = static_cast<T>(val);
+  data[idx] = static_cast<__half>(val);
 }
 
 // ---------------------------------------------------------------------------
-// SwiGLU activation (fused interleaved, swiglu_fusion=1).
+// SwiGLU activation (fp16 only, fused interleaved, swiglu_fusion=1).
 //
 // input:  [n, 2 * inter_size]  — interleaved: gate[0], up[0], gate[1], up[1]...
 // output: [n, inter_size]
@@ -148,10 +145,9 @@ __global__ void add_bias_kernel(
 //   L = clamp(linear, -limit, limit)
 //   out = G * sigmoid(alpha * G) * (L + beta)
 // ---------------------------------------------------------------------------
-template <typename T>
 __global__ void swiglu_kernel(
-    const T* __restrict__ input,
-    T* __restrict__ output,
+    const __half* __restrict__ input,
+    __half* __restrict__ output,
     int64_t n,
     int64_t inter_size,
     float alpha,
@@ -170,21 +166,20 @@ __global__ void swiglu_kernel(
   float L = fmaxf(fminf(l, limit), -limit);
 
   float sigmoid_val = 1.0f / (1.0f + expf(-alpha * G));
-  output[idx] = static_cast<T>(G * sigmoid_val * (L + beta));
+  output[idx] = static_cast<__half>(G * sigmoid_val * (L + beta));
 }
 
 // ---------------------------------------------------------------------------
-// Weighted scatter-add:
+// Weighted scatter-add (fp16 only):
 //   output[token_ids[i], j] += weights[i] * expert_out[i, j]
 //
 // Safe when experts are processed serially (no concurrent writes to same row).
 // ---------------------------------------------------------------------------
-template <typename T>
 __global__ void scatter_add_kernel(
-    T* __restrict__ output,
-    const T* __restrict__ expert_out,
+    __half* __restrict__ output,
+    const __half* __restrict__ expert_out,
     const int32_t* __restrict__ token_ids,
-    const T* __restrict__ weights,
+    const __half* __restrict__ weights,
     int64_t width,
     int64_t count) {
   int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -198,7 +193,7 @@ __global__ void scatter_add_kernel(
   float val = static_cast<float>(expert_out[idx]);
   float out = static_cast<float>(output[dst_row * width + col]);
 
-  output[dst_row * width + col] = static_cast<T>(out + w * val);
+  output[dst_row * width + col] = static_cast<__half>(out + w * val);
 }
 
 // ===== Host launchers (extern "C") — pure kernel launches, no alloc/sync ====
@@ -218,25 +213,22 @@ extern "C" int hip_qmoe_topk_routing(
   hipStream_t s = static_cast<hipStream_t>(stream);
   int grid = static_cast<int>((num_tokens + kBlock - 1) / kBlock);
 
-  if (element_size_bytes == 2) {
-    hipLaunchKernelGGL(topk_routing_kernel<__half>, dim3(grid), dim3(kBlock),
-                       0, s, static_cast<const __half*>(router_probs),
-                       static_cast<int32_t*>(expert_indices),
-                       static_cast<__half*>(expert_weights), num_tokens,
-                       num_experts, k, normalize);
-  } else if (element_size_bytes == 4) {
-    hipLaunchKernelGGL(topk_routing_kernel<float>, dim3(grid), dim3(kBlock),
-                       0, s, static_cast<const float*>(router_probs),
-                       static_cast<int32_t*>(expert_indices),
-                       static_cast<float*>(expert_weights), num_tokens,
-                       num_experts, k, normalize);
-  } else {
+  // Only fp16 (__half, element_size_bytes==2) is supported. All QMoE sub-
+  // kernels assume fp16 I/O; the target models use fp16 for router logits,
+  // expert weights, and activations throughout the MoE layer.
+  if (element_size_bytes != 2) {
     fprintf(stderr,
-            "[custom_kernels] hip_qmoe_topk_routing: unsupported elem_size "
-            "%lld\n",
+            "[custom_kernels] hip_qmoe_topk_routing: only fp16 supported, "
+            "got element_size %lld\n",
             (long long)element_size_bytes);
     return -1;
   }
+
+  hipLaunchKernelGGL(topk_routing_kernel, dim3(grid), dim3(kBlock),
+                     0, s, static_cast<const __half*>(router_probs),
+                     static_cast<int32_t*>(expert_indices),
+                     static_cast<__half*>(expert_weights), num_tokens,
+                     num_experts, k, normalize);
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
@@ -259,23 +251,19 @@ extern "C" int hip_qmoe_gather_tokens(
   int64_t total = count * width;
   int grid = static_cast<int>((total + kBlock - 1) / kBlock);
 
-  if (element_size_bytes == 2) {
-    hipLaunchKernelGGL(gather_tokens_kernel<__half>, dim3(grid), dim3(kBlock),
-                       0, s, static_cast<const __half*>(input),
-                       static_cast<__half*>(gathered),
-                       static_cast<const int32_t*>(token_ids), width, count);
-  } else if (element_size_bytes == 4) {
-    hipLaunchKernelGGL(gather_tokens_kernel<float>, dim3(grid), dim3(kBlock),
-                       0, s, static_cast<const float*>(input),
-                       static_cast<float*>(gathered),
-                       static_cast<const int32_t*>(token_ids), width, count);
-  } else {
+  // fp16 only — see hip_qmoe_topk_routing for rationale.
+  if (element_size_bytes != 2) {
     fprintf(stderr,
-            "[custom_kernels] hip_qmoe_gather_tokens: unsupported elem_size "
-            "%lld\n",
+            "[custom_kernels] hip_qmoe_gather_tokens: only fp16 supported, "
+            "got element_size %lld\n",
             (long long)element_size_bytes);
     return -1;
   }
+
+  hipLaunchKernelGGL(gather_tokens_kernel, dim3(grid), dim3(kBlock),
+                     0, s, static_cast<const __half*>(input),
+                     static_cast<__half*>(gathered),
+                     static_cast<const int32_t*>(token_ids), width, count);
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
@@ -297,21 +285,18 @@ extern "C" int hip_qmoe_add_bias(
   int64_t total = n * width;
   int grid = static_cast<int>((total + kBlock - 1) / kBlock);
 
-  if (element_size_bytes == 2) {
-    hipLaunchKernelGGL(add_bias_kernel<__half>, dim3(grid), dim3(kBlock), 0, s,
-                       static_cast<__half*>(data),
-                       static_cast<const __half*>(bias), n, width);
-  } else if (element_size_bytes == 4) {
-    hipLaunchKernelGGL(add_bias_kernel<float>, dim3(grid), dim3(kBlock), 0, s,
-                       static_cast<float*>(data),
-                       static_cast<const float*>(bias), n, width);
-  } else {
+  // fp16 only — see hip_qmoe_topk_routing for rationale.
+  if (element_size_bytes != 2) {
     fprintf(stderr,
-            "[custom_kernels] hip_qmoe_add_bias: unsupported elem_size "
-            "%lld\n",
+            "[custom_kernels] hip_qmoe_add_bias: only fp16 supported, "
+            "got element_size %lld\n",
             (long long)element_size_bytes);
     return -1;
   }
+
+  hipLaunchKernelGGL(add_bias_kernel, dim3(grid), dim3(kBlock), 0, s,
+                     static_cast<__half*>(data),
+                     static_cast<const __half*>(bias), n, width);
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
@@ -336,22 +321,19 @@ extern "C" int hip_qmoe_swiglu(
   int64_t total = n * inter_size;
   int grid = static_cast<int>((total + kBlock - 1) / kBlock);
 
-  if (element_size_bytes == 2) {
-    hipLaunchKernelGGL(swiglu_kernel<__half>, dim3(grid), dim3(kBlock), 0, s,
-                       static_cast<const __half*>(input),
-                       static_cast<__half*>(output), n, inter_size, alpha,
-                       beta, limit);
-  } else if (element_size_bytes == 4) {
-    hipLaunchKernelGGL(swiglu_kernel<float>, dim3(grid), dim3(kBlock), 0, s,
-                       static_cast<const float*>(input),
-                       static_cast<float*>(output), n, inter_size, alpha,
-                       beta, limit);
-  } else {
+  // fp16 only — see hip_qmoe_topk_routing for rationale.
+  if (element_size_bytes != 2) {
     fprintf(stderr,
-            "[custom_kernels] hip_qmoe_swiglu: unsupported elem_size %lld\n",
+            "[custom_kernels] hip_qmoe_swiglu: only fp16 supported, "
+            "got element_size %lld\n",
             (long long)element_size_bytes);
     return -1;
   }
+
+  hipLaunchKernelGGL(swiglu_kernel, dim3(grid), dim3(kBlock), 0, s,
+                     static_cast<const __half*>(input),
+                     static_cast<__half*>(output), n, inter_size, alpha,
+                     beta, limit);
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
@@ -375,25 +357,20 @@ extern "C" int hip_qmoe_scatter_add(
   int64_t total = count * width;
   int grid = static_cast<int>((total + kBlock - 1) / kBlock);
 
-  if (element_size_bytes == 2) {
-    hipLaunchKernelGGL(scatter_add_kernel<__half>, dim3(grid), dim3(kBlock), 0,
-                       s, static_cast<__half*>(output),
-                       static_cast<const __half*>(expert_out),
-                       static_cast<const int32_t*>(token_ids),
-                       static_cast<const __half*>(weights), width, count);
-  } else if (element_size_bytes == 4) {
-    hipLaunchKernelGGL(scatter_add_kernel<float>, dim3(grid), dim3(kBlock), 0,
-                       s, static_cast<float*>(output),
-                       static_cast<const float*>(expert_out),
-                       static_cast<const int32_t*>(token_ids),
-                       static_cast<const float*>(weights), width, count);
-  } else {
+  // fp16 only — see hip_qmoe_topk_routing for rationale.
+  if (element_size_bytes != 2) {
     fprintf(stderr,
-            "[custom_kernels] hip_qmoe_scatter_add: unsupported elem_size "
-            "%lld\n",
+            "[custom_kernels] hip_qmoe_scatter_add: only fp16 supported, "
+            "got element_size %lld\n",
             (long long)element_size_bytes);
     return -1;
   }
+
+  hipLaunchKernelGGL(scatter_add_kernel, dim3(grid), dim3(kBlock), 0,
+                     s, static_cast<__half*>(output),
+                     static_cast<const __half*>(expert_out),
+                     static_cast<const int32_t*>(token_ids),
+                     static_cast<const __half*>(weights), width, count);
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
