@@ -94,8 +94,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                     (long long)num_tokens, (long long)num_experts, (long long)k,
                     (long long)normalize_routing_weights);
   HIP_CHECK(hip_qmoe_topk_routing(stream, router_probs, d_expert_indices,
-                                   d_expert_weights, num_tokens, num_experts, k,
-                                   normalize_routing_weights, elem_size));
+                                  d_expert_weights, num_tokens, num_experts, k,
+                                  normalize_routing_weights, elem_size));
 
   {
     std::vector<int32_t> h_indices(num_tokens * k);
