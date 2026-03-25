@@ -23,13 +23,18 @@
 // hipBLASLt layout helper
 // =============================================================================
 
-static void setLayoutBatch(hipblasLtMatrixLayout_t layout, int32_t batchCount,
-                           int64_t stride) {
-  hipblasLtMatrixLayoutSetAttribute(layout, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
-                                    &batchCount, sizeof(batchCount));
-  hipblasLtMatrixLayoutSetAttribute(
+static hipblasStatus_t setLayoutBatch(hipblasLtMatrixLayout_t layout,
+                                      int32_t batchCount, int64_t stride) {
+  hipblasStatus_t status;
+  status = hipblasLtMatrixLayoutSetAttribute(
+      layout, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount,
+      sizeof(batchCount));
+  if (status != HIPBLAS_STATUS_SUCCESS)
+    return status;
+  status = hipblasLtMatrixLayoutSetAttribute(
       layout, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stride,
       sizeof(stride));
+  return status;
 }
 
 // =============================================================================
@@ -208,10 +213,10 @@ static int gqa_forward_hipblaslt(
   HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&sLayB, HIP_R_16F, d, sq, d));
   HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&sLayC, HIP_R_16F, skv, sq, skv));
   HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&sLayD, HIP_R_16F, skv, sq, skv));
-  setLayoutBatch(sLayA, batchCount, (int64_t)skv * d);
-  setLayoutBatch(sLayB, batchCount, (int64_t)sq * d);
-  setLayoutBatch(sLayC, batchCount, (int64_t)sq * skv);
-  setLayoutBatch(sLayD, batchCount, (int64_t)sq * skv);
+  HIPBLAS_CHECK(setLayoutBatch(sLayA, batchCount, (int64_t)skv * d));
+  HIPBLAS_CHECK(setLayoutBatch(sLayB, batchCount, (int64_t)sq * d));
+  HIPBLAS_CHECK(setLayoutBatch(sLayC, batchCount, (int64_t)sq * skv));
+  HIPBLAS_CHECK(setLayoutBatch(sLayD, batchCount, (int64_t)sq * skv));
 
   // Value GEMM: O[d, sq] = V_exp[d,skv] * softmax(S)[skv,sq]
   HIPBLAS_CHECK(
@@ -225,10 +230,10 @@ static int gqa_forward_hipblaslt(
   HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&vLayB, HIP_R_16F, skv, sq, skv));
   HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&vLayC, HIP_R_16F, d, sq, d));
   HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&vLayD, HIP_R_16F, d, sq, d));
-  setLayoutBatch(vLayA, batchCount, (int64_t)skv * d);
-  setLayoutBatch(vLayB, batchCount, (int64_t)sq * skv);
-  setLayoutBatch(vLayC, batchCount, (int64_t)sq * d);
-  setLayoutBatch(vLayD, batchCount, (int64_t)sq * d);
+  HIPBLAS_CHECK(setLayoutBatch(vLayA, batchCount, (int64_t)skv * d));
+  HIPBLAS_CHECK(setLayoutBatch(vLayB, batchCount, (int64_t)sq * skv));
+  HIPBLAS_CHECK(setLayoutBatch(vLayC, batchCount, (int64_t)sq * d));
+  HIPBLAS_CHECK(setLayoutBatch(vLayD, batchCount, (int64_t)sq * d));
 
   if (queryGemmAlgo(ltHandle, scoreDesc, sLayA, sLayB, sLayC, sLayD, scoreKey,
                     &scoreAlgo, &scoreWs) != 0) {

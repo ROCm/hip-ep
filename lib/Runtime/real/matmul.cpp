@@ -114,9 +114,14 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
   hipblasLtMatrixLayout_t matB_layout = nullptr;
   hipblasLtMatrixLayout_t matC_layout = nullptr;
   hipblasLtMatmulDesc_t matmul_desc = nullptr;
+  hipblasLtMatmulPreference_t pref = nullptr;
   int result = 0;
   float alpha = 1.0f;
   float beta = 0.0f;
+
+  // Algorithm cache lookup -- declared before first goto-capable statement
+  MatmulCacheKey key{M, N, K, batch_count, elem_size};
+  auto it = g_matmul_algo_cache.find(key);
 
   // Row-major -> column-major trick: swap A/B and M/N
   int64_t ld_A_hipblas = N;
@@ -162,11 +167,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
 
   // -- Algorithm selection: first-call heuristic, cached for subsequent calls
   // --
-  MatmulCacheKey key{M, N, K, batch_count, elem_size};
-  auto it = g_matmul_algo_cache.find(key);
-
   if (it == g_matmul_algo_cache.end()) {
-    hipblasLtMatmulPreference_t pref;
     HIPBLAS_CHECK(hipblasLtMatmulPreferenceCreate(&pref));
     const size_t max_ws = 256ULL << 20; // 256 MB
     HIPBLAS_CHECK(hipblasLtMatmulPreferenceSetAttribute(
@@ -179,6 +180,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
         handle, matmul_desc, matA_layout, matB_layout, matC_layout, matC_layout,
         pref, 1, &heur, &returned));
     hipblasLtMatmulPreferenceDestroy(pref);
+    pref = nullptr;
 
     if (returned == 0) {
       fprintf(stderr,
@@ -222,8 +224,9 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: completed successfully\n");
 
 cleanup:
-  // Best-effort cleanup: free all allocated resources
-  // Continue cleanup even if individual operations fail
+  if (pref) {
+    hipblasLtMatmulPreferenceDestroy(pref);
+  }
   if (matA_layout) {
     hipblasLtMatrixLayoutDestroy(matA_layout);
   }
