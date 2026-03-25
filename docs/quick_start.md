@@ -134,6 +134,7 @@ Run from the project root:
 ```bash
 PREBUILT_DIR=$(cd ../prebuilt-local && pwd)
 THEROCK_DIST=$(cd ../therock && pwd)
+unset HIP_PATH
 
 cmake -S . -B ../build/$(basename $PWD) \
   -G Ninja \
