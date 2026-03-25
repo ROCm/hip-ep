@@ -34,10 +34,8 @@ struct MatmulCacheKeyHash {
     size_t h = std::hash<int64_t>{}(k.M);
     h ^= std::hash<int64_t>{}(k.N) + 0x9e3779b9 + (h << 6) + (h >> 2);
     h ^= std::hash<int64_t>{}(k.K) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<int64_t>{}(k.batch_count) + 0x9e3779b9 + (h << 6) +
-         (h >> 2);
-    h ^= std::hash<int64_t>{}(k.elem_size) + 0x9e3779b9 + (h << 6) +
-         (h >> 2);
+    h ^= std::hash<int64_t>{}(k.batch_count) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    h ^= std::hash<int64_t>{}(k.elem_size) + 0x9e3779b9 + (h << 6) + (h >> 2);
     return h;
   }
 };
@@ -162,7 +160,8 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
   HIPBLAS_CHECK(
       hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
 
-  // -- Algorithm selection: first-call heuristic, cached for subsequent calls --
+  // -- Algorithm selection: first-call heuristic, cached for subsequent calls
+  // --
   MatmulCacheKey key{M, N, K, batch_count, elem_size};
   auto it = g_matmul_algo_cache.find(key);
 
@@ -185,8 +184,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
       fprintf(stderr,
               "wrap_hipblasLtMatmul: no valid algorithm found for "
               "M=%lld N=%lld K=%lld batch=%lld\n",
-              (long long)M, (long long)N, (long long)K,
-              (long long)batch_count);
+              (long long)M, (long long)N, (long long)K, (long long)batch_count);
       result = -1;
       goto cleanup;
     }

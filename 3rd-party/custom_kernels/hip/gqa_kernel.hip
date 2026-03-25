@@ -13,16 +13,159 @@
 
 static constexpr int GQA_THREADS = 256;
 
-// =============================================================================
-// KV Cache Update Kernel
-// =============================================================================
-// Writes new K/V from BSHD [B,sq,G,d] into BNSD KV cache [B,G,max_seq,d]
-// at positions [past_len .. past_len+sq). Fuses the layout transpose.
+// =========================================================================
+// Algorithm: ONNX com.microsoft.GroupQueryAttention
+// =========================================================================
+//
+// This module implements the device kernels for the ONNX Runtime
+// GroupQueryAttention (GQA) contrib operator as specified in
+// docs/ContribOperators.md. The operator performs multi-head attention
+// with grouped key/value heads (GQA), optional rotary positional
+// embeddings (RoPE), and KV cache management.
+//
+// ONNX OPERATOR SPECIFICATION
+// -----------------------------------------------------------------------
+//   Attributes:
+//     num_heads       (H)  — number of query heads             (e.g. 32)
+//     kv_num_heads    (G)  — number of key/value heads         (e.g. 8)
+//     scale                — attention scaling factor           (1/sqrt(d))
+//     do_rotary            — apply RoPE inside the operator    (0 or 1)
+//     rotary_interleaved   — RoPE pairing mode                 (0=half-rotated)
+//     softcap              — soft capping for logits            (0=disabled)
+//
+//   Inputs (separate Q/K/V path, not packed):
+//     [0] query       : (B, S, H*d)      — FP16, BSNH layout (3D)
+//     [1] key         : (B, S, G*d)      — FP16, BSNH layout (3D)
+//     [2] value       : (B, S, G*d)      — FP16, BSNH layout (3D)
+//     [3] past_key    : (B, G, P, d)     — FP16, BNSH layout (4D), P=past buf len
+//     [4] past_value  : (B, G, P, d)     — FP16, BNSH layout (4D)
+//     [5] seqlens_k   : (B,)             — INT32, seqlens_k[b] = total_seqlen - 1
+//     [6] total_seqlen : scalar           — INT32
+//     [7] cos_cache   : (max_pos, d/2)   — optional, when do_rotary=1
+//     [8] sin_cache   : (max_pos, d/2)   — optional, when do_rotary=1
+//
+//   Outputs:
+//     [0] output      : (B, S, H*d)      — FP16, BSNH layout (3D)
+//     [1] present_key : (B, G, T, d)     — FP16, BNSH layout (4D), T=total_seqlen
+//     [2] present_value: (B, G, T, d)    — FP16, BNSH layout (4D)
+//
+//   Layout equivalence:
+//     ONNX 3D BSNH [B, S, H*d] == our 4D BSHD [B, S, H, d] (identical memory)
+//     ONNX 4D BNSH [B, G, T, d] == our 4D BNSD [B, G, T, d] (identical memory)
+//
+// ALGORITHM — 11-STEP PIPELINE
+// -----------------------------------------------------------------------
+// Given: B=batch, S=seq_q, T=total_seqlen(=past_len+S), H=num_heads,
+//        G=kv_num_heads, d=head_dim, HPG=H/G (heads per group)
+//
+// Step 1-2: RoPE (when do_rotary=1, skipped when do_rotary=0)
+//   For each position s in [0, S), compute pos = past_len + s.
+//   Half-rotated (non-interleaved) formula per head:
+//     Q_out[d_i]          = Q[d_i]*cos[pos,d_i] - Q[d_i+half]*sin[pos,d_i]
+//     Q_out[d_i+half]     = Q[d_i+half]*cos[pos,d_i] + Q[d_i]*sin[pos,d_i]
+//   where half = d/2, d_i in [0, half). Same formula for K.
+//   cos/sin cache: precomputed as cos(pos * theta_i), sin(pos * theta_i)
+//   where theta_i = 1 / (base^(2*i/d)), base typically 10000.
+//   Ref: onnxruntime/core/mlas/lib/rotary_embedding.cpp (MlasRotaryEmbedOneRow)
+//
+// Step 3: Q Transpose — BSHD [B,S,H,d] -> BNSD [B,H,S,d]
+//   Transposes the middle two dimensions for batched GEMM compatibility.
+//
+// Step 4-5: KV Cache Update
+//   Write new K (after RoPE) from BSHD [B,S,G,d] into BNSD cache [B,G,present_seq,d]
+//   at positions [past_len, past_len+S). Same for V (V is never RoPE'd).
+//   Fuses BSHD->BNSD transpose with the cache write.
+//   Ref: onnxruntime/contrib_ops/cpu/bert/gqa_attention_base.h (ConcatStateChunkGQA)
+//
+// Step 6-7: KV Expand — G groups -> H heads
+//   For each query head h, copy data from KV group g = h / HPG.
+//   Produces K_exp, V_exp each of shape [B*H, T, d] (flattened for batched GEMM).
+//   Ref: onnxruntime/contrib_ops/cpu/bert/gqa_attention_base.h line 238
+//        (k = K + kv_input_chunk_length * (i / kv_num_heads_factor))
+//
+// Step 8: Score GEMM — S = K_exp^T * Q_trans * scale
+//   hipBLASLt batched GEMM over B*H heads:
+//     A = K_exp  [d, T]  col-major, transA=T -> op(A) = [T, d]
+//     B = Q_trans [d, S]  col-major, transB=N -> op(B) = [d, S]
+//     D = S      [T, S]  col-major
+//   alpha = 1/sqrt(d), beta = 0.
+//   Ref: onnxruntime/contrib_ops/cpu/bert/gqa_attention_base.h line 259
+//        (math::GemmEx Q * K^T with alpha=scale)
+//
+// Step 9: Causal Mask + Softmax
+//   Causal mask (prefill only, skipped when S==1):
+//     S[k, q] = -inf  where k > past_len + q
+//   This makes each query attend only to past positions and itself.
+//   Equivalent to ORT's approach of zeroing future positions and running
+//   softmax on the valid window only (gqa_attention_base.h line 337).
+//   Then column-wise softmax: for each query column, compute
+//     softmax(S[:,q]) = exp(S[:,q] - max) / sum(exp(S[:,q] - max))
+//   Ref: onnxruntime/contrib_ops/cpu/bert/gqa_attention_base.h lines 297-354
+//
+// Step 10: Value GEMM — O = V_exp * softmax(S)
+//   hipBLASLt batched GEMM over B*H heads:
+//     A = V_exp  [d, T]  col-major, transA=N -> op(A) = [d, T]
+//     B = S      [T, S]  col-major, transB=N -> op(B) = [T, S]
+//     D = O      [d, S]  col-major
+//   alpha = 1, beta = 0.
+//   Ref: onnxruntime/contrib_ops/cpu/bert/gqa_attention_base.h line 458
+//        (math::GemmEx attn_probs * V)
+//
+// Step 11: O Transpose — BNSD [B,H,S,d] -> BSHD [B,S,H,d]
+//   Transposes back to match the ONNX output layout [B, S, H*d].
+//   Ref: onnxruntime/contrib_ops/cpu/bert/attention_cpu_base.h line 414
+//        (memcpy loop transposing BNSH -> BSNH)
+//
+// ONNX RUNTIME REFERENCE FILES
+// -----------------------------------------------------------------------
+//   Operator spec:       docs/ContribOperators.md (com.microsoft.GroupQueryAttention)
+//   CPU GQA compute:     contrib_ops/cpu/bert/gqa_attention_base.h
+//   CPU GQA entry:       contrib_ops/cpu/bert/group_query_attention.cc
+//   Input validation:    contrib_ops/cpu/bert/group_query_attention_helper.h
+//   RoPE (CPU, MLAS):    core/mlas/lib/rotary_embedding.cpp
+//   RoPE (CUDA):         contrib_ops/cuda/bert/rotary_embedding_impl.cu
+//   CUDA GQA:            contrib_ops/cuda/bert/group_query_attention_impl.cu
+//   CUDA fused QKV+RoPE: contrib_ops/cuda/bert/group_query_attention_qkv.cuh
+//
+// DATA FLOW (GPU buffer names)
+// -----------------------------------------------------------------------
+//  d_Q --[Step 1: RoPE]--> d_Qroped --[Step 3: Transpose]--> d_Qtrans
+//  d_K --[Step 2: RoPE]--> d_Kroped --[Step 4: Cache]-------> d_Kcache
+//  d_V --------------------------------[Step 5: Cache]-------> d_Vcache
+//
+//  d_Kcache --[Step 6: Expand]--> d_Kexp --+
+//  d_Vcache --[Step 7: Expand]--> d_Vexp --+--> GEMMs
+//  d_Qtrans ----------------------------->-+
+//
+//  d_Kexp, d_Qtrans --[Step 8:  Score GEMM]-----------> d_S
+//  d_S ---------------[Step 9:  Causal Mask + Softmax]-> d_S (in-place)
+//  d_Vexp, d_S -------[Step 10: Value GEMM]-----------> d_O
+//  d_O ---------------[Step 11: Transpose]-------------> d_Obshd (output)
+//
+// =========================================================================
 
-__global__ void kv_cache_update_kernel(
+// -------------------------------------------------------------------------
+// Step 4-5: KV Cache Append (fused transpose + scatter)
+// -------------------------------------------------------------------------
+// Appends new K (Step 4) or V (Step 5) tokens into an existing BNSD cache.
+//   Src: BSHD [B, sq, G, d]              (new tokens from current input)
+//   Dst: BNSD [B, G, present_seq, d]     (pre-allocated KV cache)
+//   Write offset: [past_len .. past_len + sq)
+//
+// present_seq is the sequence dimension of the present buffer (its stride),
+// which may be larger than past_len + sq if the buffer is pre-allocated.
+//
+// Fuses the BSHD -> BNSD layout transpose with the cache scatter,
+// avoiding a separate transpose pass.  Past data is assumed to already be
+// at the correct positions (same-buffer / aliased KV cache).
+// Thread: one per (b,s,g,d_i) element. blockIdx.y = batch.
+// Ref: onnxruntime/contrib_ops/cpu/bert/gqa_attention_base.h (ConcatStateChunkGQA)
+// -------------------------------------------------------------------------
+
+__global__ void kv_cache_append_kernel(
     const __half* __restrict__ src,
     __half* __restrict__ cache,
-    int sq, int G, int d, int max_seq, int past_len) {
+    int sq, int G, int d, int present_seq, int past_len) {
   int batch_idx = blockIdx.y;
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int total_per_batch = sq * G * d;
@@ -34,16 +177,71 @@ __global__ void kv_cache_update_kernel(
   int s = remaining / G;
 
   int src_idx = ((batch_idx * sq + s) * G + g) * d + di;
-  int dst_idx = ((batch_idx * G + g) * max_seq + (past_len + s)) * d + di;
+  int dst_idx = ((batch_idx * G + g) * present_seq + (past_len + s)) * d + di;
   cache[dst_idx] = src[src_idx];
 }
 
-// =============================================================================
-// RoPE Kernel
-// =============================================================================
-// Half-rotated RoPE: for each position s, pair_d in [0, half_rot):
-//   out[d] = in[d]*cos - in[d+half]*sin
-//   out[d+half] = in[d+half]*cos + in[d]*sin
+// -------------------------------------------------------------------------
+// Step 4-5 (separate-buffer variant): KV Cache Concat
+// -------------------------------------------------------------------------
+// Concatenates past KV data and new tokens into a fresh present buffer.
+// Used when past and present are separate allocations with different strides.
+//   - Positions [0, past_len): copy from past BNSD [B, G, past_seq, d]
+//     (different stride: past has stride past_seq*d, present has present_seq*d)
+//   - Positions [past_len, past_len+sq): transpose new tokens from
+//     BSHD [B, sq, G, d] into BNSD present buffer
+//
+// past_seq and present_seq are the actual sequence dimensions (strides) of
+// the respective buffers, which may differ from the active token counts.
+//
+// Performs both the strided past copy and the BSHD->BNSD new-token transpose
+// in a single kernel launch, avoiding host-side loop overhead.
+// Thread: one per (b, s_present, g, d_i) element. blockIdx.y = batch.
+// -------------------------------------------------------------------------
+
+__global__ void kv_cache_concat_kernel(
+    const __half* __restrict__ past,
+    const __half* __restrict__ current,
+    __half* __restrict__ present,
+    int past_len, int sq, int G, int d,
+    int past_seq, int present_seq) {
+  int batch_idx = blockIdx.y;
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int total_seq = past_len + sq;
+  int total_per_batch = total_seq * G * d;
+  if (idx >= total_per_batch) return;
+
+  int di = idx % d;
+  int remaining = idx / d;
+  int g = remaining % G;
+  int s = remaining / G;
+
+  int dst_idx = ((batch_idx * G + g) * present_seq + s) * d + di;
+
+  if (s < past_len) {
+    int src_idx = ((batch_idx * G + g) * past_seq + s) * d + di;
+    present[dst_idx] = past[src_idx];
+  } else {
+    int cs = s - past_len;
+    int src_idx = ((batch_idx * sq + cs) * G + g) * d + di;
+    present[dst_idx] = current[src_idx];
+  }
+}
+
+// -------------------------------------------------------------------------
+// Step 1-2: RoPE -- Rotary Positional Embedding (half-rotated)
+// -------------------------------------------------------------------------
+// Applies to Q (Step 1) and K (Step 2) independently.
+// Layout: BSHD [B, seq, num_heads, head_dim]
+//
+// For position s, head h, dimension d_i (d_i < half_rot):
+//   pos = past_len + s
+//   out[d_i]      = in[d_i]*cos[pos,d_i] - in[d_i+half]*sin[pos,d_i]
+//   out[d_i+half] = in[d_i+half]*cos[pos,d_i] + in[d_i]*sin[pos,d_i]
+//
+// Thread: one per (b,s,h,d_i) where d_i in [0, half_rot). blockIdx.y = batch.
+// Ref: onnxruntime/core/mlas/lib/rotary_embedding.cpp (MlasRotaryEmbedOneRow)
+// -------------------------------------------------------------------------
 
 __global__ void rope_kernel(
     const __half* __restrict__ input,
@@ -75,10 +273,15 @@ __global__ void rope_kernel(
   output[base + d + half_rot] = __float2half(x2 * c + x1 * sn);
 }
 
-// =============================================================================
-// Transpose middle two dims of 4D tensor
-// =============================================================================
-// [B, dim1, dim2, D] -> [B, dim2, dim1, D]
+// -------------------------------------------------------------------------
+// Step 3 / Step 11: Middle-dimension transpose
+// -------------------------------------------------------------------------
+// Transposes dims 1 and 2 of a 4D tensor [B, dim1, dim2, D]:
+//   Step 3  (Q):  BSHD [B,S,H,d] -> BNSD [B,H,S,d]  (dim1=S, dim2=H)
+//   Step 11 (O):  BNSD [B,H,S,d] -> BSHD [B,S,H,d]  (dim1=H, dim2=S)
+//
+// Thread: one per element in dim1*dim2*D sub-tensor. blockIdx.y = batch.
+// -------------------------------------------------------------------------
 
 __global__ void transpose_mid_dims_kernel(
     const __half* __restrict__ src,
@@ -99,10 +302,18 @@ __global__ void transpose_mid_dims_kernel(
   dst[dst_off] = src[src_off];
 }
 
-// =============================================================================
-// KV Group Expansion: G groups -> H heads
-// =============================================================================
-// For head h, copies from source group g = h / heads_per_group.
+// -------------------------------------------------------------------------
+// Step 6-7: KV Group Expansion (G groups -> H heads)
+// -------------------------------------------------------------------------
+// Replicates each KV group for HPG = H/G query heads.
+//   Src: [B*G groups, present_seq*d each]   (KV cache)
+//   Dst: [B*H heads,  skv*d each]       (expanded for batched GEMM)
+//   For head h: source group g = h / HPG
+//
+// blockIdx.x = head (0..B*H-1)
+// blockIdx.y * blockDim.x + threadIdx.x = element within the skv*d slice
+// Ref: onnxruntime/contrib_ops/cpu/bert/gqa_attention_base.h line 238
+// -------------------------------------------------------------------------
 
 __global__ void expand_kv_kernel(
     const __half* __restrict__ src,
@@ -120,10 +331,15 @@ __global__ void expand_kv_kernel(
   }
 }
 
-// =============================================================================
-// Causal Mask -- prefill only, skipped when sq == 1
-// =============================================================================
-// S[k, q] = -65504 (fp16 -inf) where k > past_len + q
+// -------------------------------------------------------------------------
+// Step 9a: Causal Mask (prefill only, skipped when seq_q == 1)
+// -------------------------------------------------------------------------
+// Masks future positions so each query attends only to past + itself.
+//   Score matrix: col-major [skv, sq] per head
+//   S[k, q] = -65504 (FP16 -inf) where k > past_len + q
+//
+// blockIdx.y = head (0..B*H-1)
+// -------------------------------------------------------------------------
 
 __global__ void causal_mask_kernel(
     __half* __restrict__ S,
@@ -141,10 +357,14 @@ __global__ void causal_mask_kernel(
   }
 }
 
-// =============================================================================
-// Column-wise Softmax in-place
-// =============================================================================
+// -------------------------------------------------------------------------
+// Step 9b: Column-wise Softmax (numerically stable, in-place)
+// -------------------------------------------------------------------------
+// Per column q: softmax(S[:,q]) = exp(S[:,q]-max) / sum(exp(S[:,q]-max))
+//
 // One threadblock per (head, query) pair.
+// Uses shared memory for parallel max-reduction and sum-reduction.
+// -------------------------------------------------------------------------
 
 __global__ void softmax_inplace_kernel(
     __half* data, int rows, int cols, int batch_stride) {
@@ -193,16 +413,32 @@ __global__ void softmax_inplace_kernel(
 // Extern "C" Launchers (thin wrappers around kernel launches)
 // =============================================================================
 
-extern "C" int hip_gqa_kv_cache_update(
+extern "C" int hip_gqa_kv_cache_append(
     void* stream_ptr, const void* src, void* cache,
-    int batch_size, int sq, int G, int d, int max_seq, int past_len) {
+    int batch_size, int sq, int G, int d, int present_seq, int past_len) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   int total = sq * G * d;
   int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
-  kv_cache_update_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0, stream>>>(
+  kv_cache_append_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0, stream>>>(
       static_cast<const __half*>(src),
       static_cast<__half*>(cache),
-      sq, G, d, max_seq, past_len);
+      sq, G, d, present_seq, past_len);
+  return hipSuccess;
+}
+
+extern "C" int hip_gqa_kv_cache_concat(
+    void* stream_ptr, const void* past, const void* current, void* present,
+    int batch_size, int past_len, int sq, int G, int d,
+    int past_seq, int present_seq) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  int total_seq = past_len + sq;
+  int total = total_seq * G * d;
+  int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
+  kv_cache_concat_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0, stream>>>(
+      static_cast<const __half*>(past),
+      static_cast<const __half*>(current),
+      static_cast<__half*>(present),
+      past_len, sq, G, d, past_seq, present_seq);
   return hipSuccess;
 }
 
