@@ -41,6 +41,11 @@ struct RuntimeState {
   size_t pool_size;       // Total pool size in bytes
   size_t *buffer_offsets; // Offset for each buffer in the pool
   size_t num_buffers;     // Number of buffers in the pool
+
+  // Shared workspace for operator temp buffers (MatMul GEMM ws, GQA pipeline).
+  // Lazily grown via hipdnn_ep_state_ensure_workspace(); never shrinks.
+  void *workspace;
+  size_t workspace_size;
 };
 
 #endif // HIPDNN_EP_RUNTIME_STATE_INTERNAL_H

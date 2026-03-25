@@ -471,9 +471,10 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
   }
 
   if (hipMalloc(&state->workspace, needed_size) != hipSuccess) {
-    fprintf(stderr,
-            "hipdnn_ep_state_ensure_workspace: hipMalloc failed for %zu bytes\n",
-            needed_size);
+    fprintf(
+        stderr,
+        "hipdnn_ep_state_ensure_workspace: hipMalloc failed for %zu bytes\n",
+        needed_size);
     return -1;
   }
 

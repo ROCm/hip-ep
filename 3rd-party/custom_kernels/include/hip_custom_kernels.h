@@ -133,11 +133,26 @@ int hip_rope_forward(
  * buffers) lives in the runtime wrapper (real/gqa.cpp).
  */
 
-/* KV cache update: copy new K/V from BSHD [B,sq,G,d] into BNSD cache
- * [B,G,max_seq,d] at positions [past_len .. past_len+sq). */
-int hip_gqa_kv_cache_update(
+/* KV cache append: scatter new K/V from BSHD [B,sq,G,d] into an existing
+ * BNSD cache [B,G,present_seq,d] at positions [past_len .. past_len+sq).
+ * present_seq is the actual sequence dimension (stride) of the present buffer,
+ * which may be larger than past_len+sq if the buffer is pre-allocated.
+ * Use when past and present share the same buffer (aliased / in-place). */
+int hip_gqa_kv_cache_append(
     void* stream, const void* src, void* cache,
-    int batch_size, int sq, int G, int d, int max_seq, int past_len);
+    int batch_size, int sq, int G, int d, int present_seq, int past_len);
+
+/* KV cache concat: concatenate past data and new tokens into a fresh present
+ * buffer.  Fills present [B,G,present_seq,d] by copying past data from
+ * past [B,G,past_seq,d] at positions [0,past_len) AND transposing new tokens
+ * from current BSHD [B,sq,G,d] at [past_len,past_len+sq).
+ * past_seq and present_seq are the actual sequence dimensions (strides) of the
+ * respective buffers.  Handles the stride mismatch (past_seq != present_seq)
+ * in a single kernel launch. */
+int hip_gqa_kv_cache_concat(
+    void* stream, const void* past, const void* current, void* present,
+    int batch_size, int past_len, int sq, int G, int d,
+    int past_seq, int present_seq);
 
 /* Internal GQA RoPE (half-rotated, FP16):
  * out[d] = in[d]*cos - in[d+half]*sin
