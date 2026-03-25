@@ -148,10 +148,12 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
     _hip_get_arch_flags(arch_flags)
 
     # Build include flags
+    # NOTE: -I and path are separate list items to handle paths with spaces
+    # (e.g., "C:/Program Files/..."). Clang supports "-I" "<path>" as two args.
     set(include_flags "")
-    list(APPEND include_flags "-I${HIP_INCLUDE_DIR}")
+    list(APPEND include_flags "-I" "${HIP_INCLUDE_DIR}")
     foreach(dir ${INCLUDE_DIRS})
-        list(APPEND include_flags "-I${dir}")
+        list(APPEND include_flags "-I" "${dir}")
     endforeach()
 
     # MSVC ABI compatibility flags
