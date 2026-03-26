@@ -3,30 +3,15 @@
  * Licensed under the MIT License.
  */
 #include "../hipdnn_ep_runtime.h"
+#include "error_check_macros.h"
 #include "runtime_types.h"
 
 #include <cstdio>
 
-// Error checking macros
-#define HIP_CHECK(cmd)                                                         \
-  do {                                                                         \
-    hipError_t error = (cmd);                                                  \
-    if (error != hipSuccess) {                                                 \
-      fprintf(stderr, "HIP error at %s:%d: %s\n", __FILE__, __LINE__,          \
-              hipGetErrorString(error));                                       \
-      return -1;                                                               \
-    }                                                                          \
-  } while (0)
-
-#define MIOPEN_CHECK(cmd)                                                      \
-  do {                                                                         \
-    miopenStatus_t status = (cmd);                                             \
-    if (status != miopenStatusSuccess) {                                       \
-      fprintf(stderr, "MIOpen error at %s:%d: %d\n", __FILE__, __LINE__,       \
-              status);                                                         \
-      return -1;                                                               \
-    }                                                                          \
-  } while (0)
+// Convenience wrappers for goto cleanup pattern (all functions use 'cleanup'
+// label)
+#define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
+#define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
 
 // =============================================================================
 // MIOpen Convolution Forward Wrapper
@@ -133,8 +118,23 @@ int wrap_miopenConvolutionForward(
   hipStream_t hip_stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
 
+  // Initialize all resource pointers to nullptr for safe cleanup
+  miopenTensorDescriptor_t input_desc = nullptr;
+  miopenTensorDescriptor_t weights_desc = nullptr;
+  miopenTensorDescriptor_t output_desc = nullptr;
+  miopenConvolutionDescriptor_t conv_desc = nullptr;
+  void *find_workspace = nullptr;
+  void *workspace = nullptr;
+  int result = 0;
+  miopenConvAlgoPerf_t perf_results[1];
+  int returned_algo_count = 0;
+  miopenConvFwdAlgorithm_t algo;
+  size_t workspace_size = 0;
+  const size_t find_workspace_size = 10 * 1024 * 1024; // 10MB
+  float alpha = 1.0f;
+  float beta = 0.0f;
+
   // Create tensor descriptors
-  miopenTensorDescriptor_t input_desc, weights_desc, output_desc;
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&input_desc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&weights_desc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&output_desc));
@@ -156,24 +156,24 @@ int wrap_miopenConvolutionForward(
   // Create convolution descriptor
   // Note: MIOpen padding is per-side, but if pad_top==pad_bottom and
   // pad_left==pad_right, we use the symmetric version
-  miopenConvolutionDescriptor_t conv_desc;
   MIOPEN_CHECK(miopenCreateConvolutionDescriptor(&conv_desc));
   MIOPEN_CHECK(miopenInitConvolutionDescriptor(
       conv_desc, miopenConvolution, pad_top, pad_left, stride_h, stride_w,
       dilation_h, dilation_w));
 
+  // Set group count for grouped convolutions (e.g., depthwise convolution)
+  // group=1 for standard convolution, group=C for depthwise convolution
+  if (group > 1) {
+    MIOPEN_CHECK(miopenSetConvolutionGroupCount(conv_desc, group));
+  }
+
   // Allocate workspace for algorithm search
   // MIOpen's Find API needs workspace to test algorithms
-  // Use a conservative estimate (10MB) for algorithm selection
-  const size_t find_workspace_size = 10 * 1024 * 1024; // 10MB
-  void *find_workspace = nullptr;
   HIP_CHECK(hipMalloc(&find_workspace, find_workspace_size));
 
   // Find best algorithm
   // MIOpen 3.x API: returns array of performance results instead of single
   // algorithm
-  miopenConvAlgoPerf_t perf_results[1];
-  int returned_algo_count = 0;
   MIOPEN_CHECK(miopenFindConvolutionForwardAlgorithm(
       miopen_handle, input_desc, input, weights_desc, weights, conv_desc,
       output_desc, output,
@@ -182,46 +182,60 @@ int wrap_miopenConvolutionForward(
       perf_results,         // perfResults - array to receive results
       find_workspace,       // workspace for algorithm testing
       find_workspace_size,  // workspaceSize
-      false));              // exhaustiveSearch
+      false));
 
   // Extract algorithm from performance results
-  miopenConvFwdAlgorithm_t algo = perf_results[0].fwd_algo;
+  algo = perf_results[0].fwd_algo;
 
   // Get actual workspace size needed for this algorithm
-  size_t workspace_size = 0;
   MIOPEN_CHECK(miopenConvolutionForwardGetWorkSpaceSize(
       miopen_handle, weights_desc, input_desc, conv_desc, output_desc,
       &workspace_size));
 
   // Reuse find_workspace if it's large enough, otherwise reallocate
-  void *workspace = find_workspace;
+  workspace = find_workspace;
   if (workspace_size > find_workspace_size) {
     hipError_t err = hipFree(find_workspace);
     if (err != hipSuccess) {
       fprintf(stderr, "Warning: hipFree failed for find_workspace: %d\n", err);
     }
+    find_workspace = nullptr; // Mark as freed to avoid double-free
     HIP_CHECK(hipMalloc(&workspace, workspace_size));
   }
 
   // Perform convolution
-  float alpha = 1.0f;
-  float beta = 0.0f;
   MIOPEN_CHECK(miopenConvolutionForward(
       miopen_handle, &alpha, input_desc, input, weights_desc, weights,
       conv_desc, algo, &beta, output_desc, output, workspace, workspace_size));
 
-  // Cleanup
+cleanup:
+  // Best-effort cleanup: free all allocated resources
+  // Continue cleanup even if individual operations fail
   if (workspace) {
     hipError_t err = hipFree(workspace);
     if (err != hipSuccess) {
-      fprintf(stderr, "Warning: hipFree failed during cleanup: %d\n", err);
-      // Continue cleanup anyway (best-effort)
+      fprintf(stderr, "Warning: hipFree failed for workspace: %d\n", err);
     }
   }
-  miopenDestroyTensorDescriptor(input_desc);
-  miopenDestroyTensorDescriptor(weights_desc);
-  miopenDestroyTensorDescriptor(output_desc);
-  miopenDestroyConvolutionDescriptor(conv_desc);
+  // Free find_workspace only if it wasn't already freed during reallocation
+  if (find_workspace && find_workspace != workspace) {
+    hipError_t err = hipFree(find_workspace);
+    if (err != hipSuccess) {
+      fprintf(stderr, "Warning: hipFree failed for find_workspace: %d\n", err);
+    }
+  }
+  if (input_desc) {
+    miopenDestroyTensorDescriptor(input_desc);
+  }
+  if (weights_desc) {
+    miopenDestroyTensorDescriptor(weights_desc);
+  }
+  if (output_desc) {
+    miopenDestroyTensorDescriptor(output_desc);
+  }
+  if (conv_desc) {
+    miopenDestroyConvolutionDescriptor(conv_desc);
+  }
 
-  return 0;
+  return result;
 }

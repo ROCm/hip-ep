@@ -125,72 +125,68 @@ int hip_rope_forward(
     int64_t element_size_bytes);
 
 /* =========================================================================
- * Group Query Attention (GQA)
+ * GQA Device Kernel Launchers
  * =========================================================================
  *
- * Performs scaled dot-product attention with grouped key/value heads and
- * optional KV cache management.
- *
- * Computation:
- *   1. If past_key/past_value provided: concatenate with key/value into
- *      present_key/present_value (KV cache update)
- *   2. If do_rotary: apply RoPE to query and key
- *   3. Compute attention: softmax(scale * Q @ K^T) @ V
- *   4. Write output [batch, seq_q, num_heads * head_dim]
- *
- * Parameters:
- *   stream              - hipStream_t cast to void*
- *   query               - GPU [batch, seq_q, num_heads * head_dim]
- *   key                 - GPU [batch, seq_q, kv_num_heads * head_dim]
- *   value               - GPU [batch, seq_q, kv_num_heads * head_dim]
- *   past_key            - GPU [batch, past_seq, kv_num_heads * head_dim] or NULL
- *   past_value          - GPU [batch, past_seq, kv_num_heads * head_dim] or NULL
- *   seqlens_k           - GPU [batch] past sequence lengths per batch (int32)
- *   total_seq_len       - GPU scalar: total KV sequence length
- *   cos_cache           - GPU [max_seq, rotary_dim/2] (if do_rotary)
- *   sin_cache           - GPU [max_seq, rotary_dim/2] (if do_rotary)
- *   output              - GPU [batch, seq_q, num_heads * head_dim]
- *   present_key         - GPU [batch, total_seq, kv_num_heads * head_dim]
- *   present_value       - GPU [batch, total_seq, kv_num_heads * head_dim]
- *   batch_size          - batch dimension
- *   seq_len_q           - query sequence length
- *   seq_len_kv          - total KV sequence length (past + current)
- *   num_heads           - number of query heads
- *   kv_num_heads        - number of key/value heads (num_heads % kv_num_heads == 0)
- *   head_dim            - dimension per head
- *   scale               - attention scale (typically 1/sqrt(head_dim))
- *   softcap             - soft capping value (0 = disabled)
- *   do_rotary           - 1 to apply RoPE, 0 to skip
- *   rotary_interleaved  - 0 = half-rotated, 1 = interleaved
- *   element_size_bytes  - 2 for fp16, 4 for fp32
- *
- * Returns: 0 on success, non-zero on error
+ * Individual kernel launchers for the 11-step GQA pipeline.
+ * All FP16 only. The orchestration (hipBLASLt GEMMs, workspace, temp
+ * buffers) lives in the runtime wrapper (real/gqa.cpp).
  */
-int hip_gqa_forward(
-    void* stream,
-    const void* query,
-    const void* key,
-    const void* value,
-    const void* past_key,
-    const void* past_value,
-    const void* seqlens_k,
-    const void* total_seq_len,
-    const void* cos_cache,
-    const void* sin_cache,
-    void* output,
-    void* present_key,
-    void* present_value,
-    int64_t batch_size,
-    int64_t seq_len_q,
-    int64_t seq_len_kv,
-    int64_t num_heads,
-    int64_t kv_num_heads,
-    int64_t head_dim,
-    float scale,
-    float softcap,
-    int64_t do_rotary,
-    int64_t rotary_interleaved,
-    int64_t element_size_bytes);
+
+/* KV cache append: scatter new K/V from BSHD [B,sq,G,d] into an existing
+ * BNSD cache [B,G,present_seq,d] at positions [past_len .. past_len+sq).
+ * present_seq is the actual sequence dimension (stride) of the present buffer,
+ * which may be larger than past_len+sq if the buffer is pre-allocated.
+ * Use when past and present share the same buffer (aliased / in-place). */
+int hip_gqa_kv_cache_append(
+    void* stream, const void* src, void* cache,
+    int batch_size, int sq, int G, int d, int present_seq, int past_len);
+
+/* KV cache concat: concatenate past data and new tokens into a fresh present
+ * buffer.  Fills present [B,G,present_seq,d] by copying past data from
+ * past [B,G,past_seq,d] at positions [0,past_len) AND transposing new tokens
+ * from current BSHD [B,sq,G,d] at [past_len,past_len+sq).
+ * past_seq and present_seq are the actual sequence dimensions (strides) of the
+ * respective buffers.  Handles the stride mismatch (past_seq != present_seq)
+ * in a single kernel launch. */
+int hip_gqa_kv_cache_concat(
+    void* stream, const void* past, const void* current, void* present,
+    int batch_size, int past_len, int sq, int G, int d,
+    int past_seq, int present_seq);
+
+/* Internal GQA RoPE (half-rotated, FP16):
+ * out[d] = in[d]*cos - in[d+half]*sin
+ * out[d+half] = in[d+half]*cos + in[d]*sin */
+int hip_gqa_rope(
+    void* stream, const void* input, void* output,
+    const void* cos_cache, const void* sin_cache,
+    int batch_size, int seq_len, int num_heads,
+    int head_dim, int half_rot, int past_len);
+
+/* Transpose middle two dims of 4D tensor:
+ * [B, dim1, dim2, D] -> [B, dim2, dim1, D] */
+int hip_gqa_transpose_mid_dims(
+    void* stream, const void* src, void* dst,
+    int batch_size, int dim1, int dim2, int D);
+
+/* KV group expansion: replicate G groups -> H heads.
+ * For head h, copies from group g = h / heads_per_group. */
+int hip_gqa_expand_kv(
+    void* stream, const void* src, void* dst,
+    int total_heads, int heads_per_group,
+    int src_stride, int dst_stride, int copy_elems);
+
+/* Causal mask (prefill only): S[k,q] = -inf where k > past_len + q */
+int hip_gqa_causal_mask(
+    void* stream, void* S,
+    int total_heads, int skv, int sq,
+    int batch_stride, int past_len);
+
+/* Column-wise softmax in-place. One threadblock per (head, query). */
+int hip_gqa_softmax_inplace(
+    void* stream, void* data,
+    int total_head_queries, int rows, int cols,
+    int batch_stride);
 
 /* =========================================================================
  * Cast (Element Type Conversion)
@@ -277,6 +273,130 @@ int hip_reduce_sum(
     int64_t num_input_elements,
     int64_t num_output_elements,
     int hip_dtype);
+
+/* =========================================================================
+ * MatMulNBits (Fused Dequant + MatMul)
+ * =========================================================================
+ *
+ * Computes Y = A @ dequant(B)^T + bias, where B holds packed int4 weights.
+ *
+ * Dequantization (per-block): dequant = (quant_val - zero_point) * scale
+ * For 4-bit: lower nibble = first value, upper nibble = second.
+ * Default zero_point = 8 (when zero_points is NULL).
+ *
+ * Parameters:
+ *   stream             - hipStream_t cast to void*
+ *   A                  - GPU [batch, M, K]
+ *   B                  - GPU [N, k_blocks, blob_size] uint8 packed int4
+ *   scales             - GPU [N, k_blocks] (same type as A)
+ *   zero_points        - GPU [N, k_blocks] uint8 (nullable, default zp=8)
+ *   bias               - GPU [N] (nullable, same type as A)
+ *   output             - GPU [batch, M, N]
+ *   M                  - rows per batch
+ *   N                  - output columns
+ *   K                  - inner dimension
+ *   batch_count        - number of batches
+ *   bits               - quantization bit-width (must be 4)
+ *   block_size         - quantization block size (e.g. 32)
+ *   element_size_bytes - 2 for fp16, 4 for fp32
+ *
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_matmul_nbits(
+    void* stream,
+    const void* A,
+    const void* B,
+    const void* scales,
+    const void* zero_points,
+    const void* bias,
+    void* output,
+    int64_t M, int64_t N, int64_t K,
+    int64_t batch_count,
+    int64_t bits,
+    int64_t block_size,
+    int64_t element_size_bytes);
+
+/* =========================================================================
+ * QMoE Sub-Kernels
+ * =========================================================================
+ *
+ * Individual kernel launchers for QMoE (Quantized Mixture-of-Experts).
+ * These only launch GPU kernels — no memory allocation, no stream sync.
+ * The runtime wrapper (wrap_qmoe) orchestrates the expert loop.
+ *
+ * All functions take element_size_bytes: 2 for fp16, 4 for fp32.
+ */
+
+/* Top-k routing: find top-k experts per token from router_probs.
+ *   router_probs   - GPU [num_tokens, num_experts]
+ *   expert_indices - GPU [num_tokens, k] int32 (output)
+ *   expert_weights - GPU [num_tokens, k] (output, same type as probs)
+ *   normalize      - 1 to normalize selected weights (sum-to-one)
+ */
+int hip_qmoe_topk_routing(
+    void* stream,
+    const void* router_probs,
+    void* expert_indices,
+    void* expert_weights,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t k,
+    int64_t normalize,
+    int64_t element_size_bytes);
+
+/* Gather rows: gathered[i,:] = input[token_ids[i],:]
+ *   token_ids - GPU [count] int32
+ */
+int hip_qmoe_gather_tokens(
+    void* stream,
+    const void* input,
+    void* gathered,
+    const void* token_ids,
+    int64_t width,
+    int64_t count,
+    int64_t element_size_bytes);
+
+/* In-place bias: data[i,j] += bias[j]
+ *   No-op if bias is NULL.
+ */
+int hip_qmoe_add_bias(
+    void* stream,
+    void* data,
+    const void* bias,
+    int64_t n,
+    int64_t width,
+    int64_t element_size_bytes);
+
+/* SwiGLU activation (fused, swiglu_fusion=1):
+ *   input  [n, 2*inter_size] -> output [n, inter_size]
+ *   G = min(gate, limit)
+ *   L = clamp(linear, -limit, limit)
+ *   out = G * sigmoid(alpha*G) * (L + beta)
+ */
+int hip_qmoe_swiglu(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t n,
+    int64_t inter_size,
+    float alpha,
+    float beta,
+    float limit,
+    int64_t element_size_bytes);
+
+/* Weighted scatter-add: output[token_ids[i],:] += weights[i] * expert_out[i,:]
+ *   token_ids - GPU [count] int32
+ *   weights   - GPU [count] (same type as output)
+ */
+int hip_qmoe_scatter_add(
+    void* stream,
+    void* output,
+    const void* expert_out,
+    const void* token_ids,
+    const void* weights,
+    int64_t width,
+    int64_t count,
+    int64_t element_size_bytes);
 
 #ifdef __cplusplus
 }

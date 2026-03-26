@@ -4,7 +4,7 @@
  */
 #include "debug_log.h"
 #include "hipdnn_ep_runtime.h"
-#include "runtime_types.h"
+#include "runtime_state_internal.h"
 
 #include "model_metadata_generated.h"
 #include "morphizen-foundation/file_io.hpp"
@@ -12,29 +12,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-
-// Internal runtime state structure
-struct RuntimeState {
-  hipStream_t stream;
-  miopenHandle_t miopen_handle;
-  hipblasLtHandle_t hipblas_handle;
-
-  // Single allocation holding all constants as one blob.
-  // gpu_constants[i] points into gpu_constants_blob at the offset stored in
-  // ConstantInfo, so only one allocation/copy is needed at init time.
-  // On dGPU: hipMalloc (VRAM). On iGPU: hipHostMalloc (pinned system RAM,
-  // GPU reads in-place, no hipMemcpy needed).
-  void *gpu_constants_blob;
-  bool constants_blob_is_host; // true = hipHostMalloc, false = hipMalloc
-  void **gpu_constants;
-  size_t num_constants;
-
-  // Memory pooling support
-  void *pool_base;        // Single large memory pool
-  size_t pool_size;       // Total pool size in bytes
-  size_t *buffer_offsets; // Offset for each buffer in the pool
-  size_t num_buffers;     // Number of buffers in the pool
-};
 
 // Runtime state management implementation
 
@@ -64,6 +41,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   state->pool_size = 0;
   state->buffer_offsets = nullptr;
   state->num_buffers = 0;
+  state->workspace = nullptr;
+  state->workspace_size = 0;
 
   // Explicitly initialize HIP device before any other operations
   // This ensures device 0 is active and context is properly initialized
@@ -326,6 +305,11 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     hipStreamSynchronize(state->stream);
   }
 
+  // Free shared workspace (if allocated)
+  if (state->workspace) {
+    hipFree(state->workspace);
+  }
+
   // Free memory pool (if allocated)
   if (state->pool_base) {
     hipFree(state->pool_base);
@@ -457,6 +441,47 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state) {
     return nullptr;
   }
   return state->pool_base;
+}
+
+//==============================================================================
+// Shared Workspace Support
+//==============================================================================
+
+void *hipdnn_ep_state_get_workspace(RuntimeState *state) {
+  return state ? state->workspace : nullptr;
+}
+
+size_t hipdnn_ep_state_get_workspace_size(RuntimeState *state) {
+  return state ? state->workspace_size : 0;
+}
+
+int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
+  if (!state)
+    return -1;
+  if (needed_size == 0)
+    return 0;
+  if (state->workspace_size >= needed_size)
+    return 0;
+
+  // Grow: free old, allocate new
+  if (state->workspace) {
+    hipFree(state->workspace);
+    state->workspace = nullptr;
+    state->workspace_size = 0;
+  }
+
+  if (hipMalloc(&state->workspace, needed_size) != hipSuccess) {
+    fprintf(
+        stderr,
+        "hipdnn_ep_state_ensure_workspace: hipMalloc failed for %zu bytes\n",
+        needed_size);
+    return -1;
+  }
+
+  state->workspace_size = needed_size;
+  RUNTIME_DEBUG_LOG("[workspace] Allocated shared workspace: %zu bytes\n",
+                    needed_size);
+  return 0;
 }
 
 } // extern "C"

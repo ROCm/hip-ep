@@ -139,40 +139,42 @@ endif()
 # Macro to compile a single C++ file to bitcode
 macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
     # Build include flags
+    # NOTE: -I and path are separate list items to handle paths with spaces
+    # (e.g., "C:/Program Files/..."). Clang supports "-I" "<path>" as two args.
     set(COMPILE_FLAGS "")
 
     # Always add root directory for public headers
-    list(APPEND COMPILE_FLAGS "-I${CMAKE_CURRENT_SOURCE_DIR}")
+    list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}")
 
     # Add morphizen-foundation headers
-    list(APPEND COMPILE_FLAGS "-I${MORPHIZEN_FOUNDATION_INCLUDE_DIR}")
+    list(APPEND COMPILE_FLAGS "-I" "${MORPHIZEN_FOUNDATION_INCLUDE_DIR}")
 
     # Add schemas generated headers (model_metadata_generated.h etc.)
-    list(APPEND COMPILE_FLAGS "-I${CMAKE_BINARY_DIR}/schemas")
+    list(APPEND COMPILE_FLAGS "-I" "${CMAKE_BINARY_DIR}/schemas")
 
     # Add flatbuffers headers
     get_target_property(_fb_incs flatbuffers::flatbuffers INTERFACE_INCLUDE_DIRECTORIES)
     if(_fb_incs)
         foreach(_inc ${_fb_incs})
-            list(APPEND COMPILE_FLAGS "-I${_inc}")
+            list(APPEND COMPILE_FLAGS "-I" "${_inc}")
         endforeach()
     endif()
 
     # Add implementation directory
     if(NOT BUILD_MOCK_RUNTIME)
-        list(APPEND COMPILE_FLAGS "-I${CMAKE_CURRENT_SOURCE_DIR}/real")
+        list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}/real")
 
         # Add custom_kernels include directory
-        list(APPEND COMPILE_FLAGS "-I${CMAKE_SOURCE_DIR}/3rd-party/custom_kernels/include")
+        list(APPEND COMPILE_FLAGS "-I" "${CMAKE_SOURCE_DIR}/3rd-party/custom_kernels/include")
 
         # Add ROCm includes
         if(THEROCK_DIST)
             message(STATUS "Adding TheRock includes for ${OUTPUT_BC}: ${THEROCK_DIST}/include")
-            list(APPEND COMPILE_FLAGS "-I${THEROCK_DIST}/include")
+            list(APPEND COMPILE_FLAGS "-I" "${THEROCK_DIST}/include")
             list(APPEND COMPILE_FLAGS "-D__HIP_PLATFORM_AMD__")
         endif()
     else()
-        list(APPEND COMPILE_FLAGS "-I${CMAKE_CURRENT_SOURCE_DIR}/mock")
+        list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}/mock")
     endif()
 
     add_custom_command(
@@ -219,6 +221,8 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/cast.cpp runtime_cast.bc)
     compile_to_bitcode(real/gather.cpp runtime_gather.bc)
     compile_to_bitcode(real/reduce_sum.cpp runtime_reduce_sum.bc)
+    compile_to_bitcode(real/matmul_nbits.cpp runtime_matmul_nbits.bc)
+    compile_to_bitcode(real/qmoe.cpp runtime_qmoe.bc)
     compile_to_bitcode(real/test_hip_from_dll.cpp test_hip_from_dll.bc)
 
     set(RUNTIME_BC_MODULES
@@ -238,6 +242,8 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cast.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_sum.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul_nbits.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc
     )
 else()

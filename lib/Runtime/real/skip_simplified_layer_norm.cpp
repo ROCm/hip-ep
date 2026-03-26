@@ -8,19 +8,14 @@
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "error_check_macros.h"
 #include "runtime_types.h"
 
 #include <cstdio>
 
-#define MIOPEN_CHECK(cmd)                                                      \
-  do {                                                                         \
-    miopenStatus_t status = (cmd);                                             \
-    if (status != miopenStatusSuccess) {                                       \
-      RUNTIME_DEBUG_LOG("[REAL] MIOpen error %d at %s:%d\n", status, __FILE__, \
-                        __LINE__);                                             \
-      goto cleanup;                                                            \
-    }                                                                          \
-  } while (0)
+// Use the shared MIOPEN_CHECK_GOTO macro for goto cleanup pattern
+#undef MIOPEN_CHECK
+#define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
 
 // =============================================================================
 // SkipSimplifiedLayerNormalization via MIOpen
@@ -53,16 +48,14 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
                                     int64_t gamma_num_elements,
                                     int64_t element_size_bytes, float epsilon) {
   if (!state || !input || !skip || !gamma || !output || !skip_output) {
-    RUNTIME_DEBUG_LOG(
-        "[REAL] wrap_skip_simplified_layer_norm: null argument\n");
+    fprintf(stderr, "wrap_skip_simplified_layer_norm: null argument\n");
     return -1;
   }
 
   miopenHandle_t handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
   if (!handle) {
-    RUNTIME_DEBUG_LOG(
-        "[REAL] wrap_skip_simplified_layer_norm: null MIOpen handle\n");
+    fprintf(stderr, "wrap_skip_simplified_layer_norm: null MIOpen handle\n");
     return -1;
   }
 
@@ -85,13 +78,13 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
   else if (element_size_bytes == 4)
     data_type = miopenFloat;
   else {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: unsupported "
-                      "element_size %lld\n",
-                      (long long)element_size_bytes);
+    fprintf(stderr,
+            "wrap_skip_simplified_layer_norm: unsupported element_size %lld\n",
+            (long long)element_size_bytes);
     return -1;
   }
 
-  int rc = -1;
+  int result = 0;
   void *rstd_buf = nullptr;
 
   // Descriptors for miopenOpTensor (ADD)
@@ -182,7 +175,7 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: completed "
                     "successfully\n");
-  rc = 0;
+  result = 0;
 
 cleanup:
   if (addADesc)
@@ -202,5 +195,5 @@ cleanup:
   if (rstd_buf)
     hipFree(rstd_buf);
 
-  return rc;
+  return result;
 }
