@@ -1606,7 +1606,12 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     int64_t batchSize = queryShape[0];
     int64_t seqLenQ = queryShape[1];
     int64_t queryHidden = queryShape[2];
-    int64_t headDim = queryHidden / op.getNumHeads();
+    // Packed QKV: query shape is [B, S, (H + 2*G)*d] instead of [B, S, H*d].
+    // Derive head_dim accordingly: d = hidden / (H + 2*G) vs hidden / H.
+    bool packedQKV = !op.getKey();
+    int64_t headDim = packedQKV
+        ? queryHidden / (op.getNumHeads() + 2 * op.getKvNumHeads())
+        : queryHidden / op.getNumHeads();
     unsigned elementSizeBytes =
         queryType.getElementType().getIntOrFloatBitWidth() / 8;
 

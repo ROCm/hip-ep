@@ -413,9 +413,10 @@ int wrap_hipblasLtMatmul(
 
 // GroupQueryAttention operation wrapper (Full MS spec)
 // Called by generated IR for onnx.Custom(GroupQueryAttention) lowering
-// Updated to support complete Microsoft ONNX Runtime specification (14 inputs +
-// 12 attributes) Phase 1: Interface alignment only - new features not yet
-// implemented in kernel
+// GQA runtime wrapper following the complete Microsoft ONNX Runtime
+// specification (14 inputs + 12 attributes).  Supports separate Q/K/V and
+// packed QKV paths, optional RoPE, KV cache management, local window
+// attention (local_window_size), and smooth softmax (head_sink / smooth_softmax).
 int wrap_group_query_attention(
     RuntimeState *state,
     // Inputs 1-7 (core GQA)
