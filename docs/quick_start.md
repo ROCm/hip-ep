@@ -136,7 +136,7 @@ PREBUILT_DIR=$(cd ../prebuilt-local && pwd)
 THEROCK_DIST=$(cd ../therock && pwd)
 # For new users of this project, we recommend using the HIP provided by therock.
 # If you really want to use a pre-installed HIP instead, you can skip this unset.
-unset HIP_PATH 
+unset HIP_PATH
 
 cmake -S . -B ../build/$(basename $PWD) \
   -G Ninja \
