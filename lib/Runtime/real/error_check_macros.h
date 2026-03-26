@@ -44,7 +44,7 @@
 
 #define HIP_CHECK_GOTO(expr, label)                                            \
   do {                                                                         \
-    hipError_t error = (expr);                                                 \
+    hipError_t error = static_cast<hipError_t>(expr);                          \
     if (error != hipSuccess) {                                                 \
       fprintf(stderr, "HIP error: %s failed at %s:%d: %s\n", #expr, __FILE__,  \
               __LINE__, hipGetErrorString(error));                             \

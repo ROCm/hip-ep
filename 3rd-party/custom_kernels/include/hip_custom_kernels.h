@@ -125,72 +125,68 @@ int hip_rope_forward(
     int64_t element_size_bytes);
 
 /* =========================================================================
- * Group Query Attention (GQA)
+ * GQA Device Kernel Launchers
  * =========================================================================
  *
- * Performs scaled dot-product attention with grouped key/value heads and
- * optional KV cache management.
- *
- * Computation:
- *   1. If past_key/past_value provided: concatenate with key/value into
- *      present_key/present_value (KV cache update)
- *   2. If do_rotary: apply RoPE to query and key
- *   3. Compute attention: softmax(scale * Q @ K^T) @ V
- *   4. Write output [batch, seq_q, num_heads * head_dim]
- *
- * Parameters:
- *   stream              - hipStream_t cast to void*
- *   query               - GPU [batch, seq_q, num_heads * head_dim]
- *   key                 - GPU [batch, seq_q, kv_num_heads * head_dim]
- *   value               - GPU [batch, seq_q, kv_num_heads * head_dim]
- *   past_key            - GPU [batch, past_seq, kv_num_heads * head_dim] or NULL
- *   past_value          - GPU [batch, past_seq, kv_num_heads * head_dim] or NULL
- *   seqlens_k           - GPU [batch] past sequence lengths per batch (int32)
- *   total_seq_len       - GPU scalar: total KV sequence length
- *   cos_cache           - GPU [max_seq, rotary_dim/2] (if do_rotary)
- *   sin_cache           - GPU [max_seq, rotary_dim/2] (if do_rotary)
- *   output              - GPU [batch, seq_q, num_heads * head_dim]
- *   present_key         - GPU [batch, total_seq, kv_num_heads * head_dim]
- *   present_value       - GPU [batch, total_seq, kv_num_heads * head_dim]
- *   batch_size          - batch dimension
- *   seq_len_q           - query sequence length
- *   seq_len_kv          - total KV sequence length (past + current)
- *   num_heads           - number of query heads
- *   kv_num_heads        - number of key/value heads (num_heads % kv_num_heads == 0)
- *   head_dim            - dimension per head
- *   scale               - attention scale (typically 1/sqrt(head_dim))
- *   softcap             - soft capping value (0 = disabled)
- *   do_rotary           - 1 to apply RoPE, 0 to skip
- *   rotary_interleaved  - 0 = half-rotated, 1 = interleaved
- *   element_size_bytes  - 2 for fp16, 4 for fp32
- *
- * Returns: 0 on success, non-zero on error
+ * Individual kernel launchers for the 11-step GQA pipeline.
+ * All FP16 only. The orchestration (hipBLASLt GEMMs, workspace, temp
+ * buffers) lives in the runtime wrapper (real/gqa.cpp).
  */
-int hip_gqa_forward(
-    void* stream,
-    const void* query,
-    const void* key,
-    const void* value,
-    const void* past_key,
-    const void* past_value,
-    const void* seqlens_k,
-    const void* total_seq_len,
-    const void* cos_cache,
-    const void* sin_cache,
-    void* output,
-    void* present_key,
-    void* present_value,
-    int64_t batch_size,
-    int64_t seq_len_q,
-    int64_t seq_len_kv,
-    int64_t num_heads,
-    int64_t kv_num_heads,
-    int64_t head_dim,
-    float scale,
-    float softcap,
-    int64_t do_rotary,
-    int64_t rotary_interleaved,
-    int64_t element_size_bytes);
+
+/* KV cache append: scatter new K/V from BSHD [B,sq,G,d] into an existing
+ * BNSD cache [B,G,present_seq,d] at positions [past_len .. past_len+sq).
+ * present_seq is the actual sequence dimension (stride) of the present buffer,
+ * which may be larger than past_len+sq if the buffer is pre-allocated.
+ * Use when past and present share the same buffer (aliased / in-place). */
+int hip_gqa_kv_cache_append(
+    void* stream, const void* src, void* cache,
+    int batch_size, int sq, int G, int d, int present_seq, int past_len);
+
+/* KV cache concat: concatenate past data and new tokens into a fresh present
+ * buffer.  Fills present [B,G,present_seq,d] by copying past data from
+ * past [B,G,past_seq,d] at positions [0,past_len) AND transposing new tokens
+ * from current BSHD [B,sq,G,d] at [past_len,past_len+sq).
+ * past_seq and present_seq are the actual sequence dimensions (strides) of the
+ * respective buffers.  Handles the stride mismatch (past_seq != present_seq)
+ * in a single kernel launch. */
+int hip_gqa_kv_cache_concat(
+    void* stream, const void* past, const void* current, void* present,
+    int batch_size, int past_len, int sq, int G, int d,
+    int past_seq, int present_seq);
+
+/* Internal GQA RoPE (half-rotated, FP16):
+ * out[d] = in[d]*cos - in[d+half]*sin
+ * out[d+half] = in[d+half]*cos + in[d]*sin */
+int hip_gqa_rope(
+    void* stream, const void* input, void* output,
+    const void* cos_cache, const void* sin_cache,
+    int batch_size, int seq_len, int num_heads,
+    int head_dim, int half_rot, int past_len);
+
+/* Transpose middle two dims of 4D tensor:
+ * [B, dim1, dim2, D] -> [B, dim2, dim1, D] */
+int hip_gqa_transpose_mid_dims(
+    void* stream, const void* src, void* dst,
+    int batch_size, int dim1, int dim2, int D);
+
+/* KV group expansion: replicate G groups -> H heads.
+ * For head h, copies from group g = h / heads_per_group. */
+int hip_gqa_expand_kv(
+    void* stream, const void* src, void* dst,
+    int total_heads, int heads_per_group,
+    int src_stride, int dst_stride, int copy_elems);
+
+/* Causal mask (prefill only): S[k,q] = -inf where k > past_len + q */
+int hip_gqa_causal_mask(
+    void* stream, void* S,
+    int total_heads, int skv, int sq,
+    int batch_stride, int past_len);
+
+/* Column-wise softmax in-place. One threadblock per (head, query). */
+int hip_gqa_softmax_inplace(
+    void* stream, void* data,
+    int total_head_queries, int rows, int cols,
+    int batch_stride);
 
 /* =========================================================================
  * Cast (Element Type Conversion)
