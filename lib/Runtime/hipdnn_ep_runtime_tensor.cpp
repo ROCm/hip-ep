@@ -219,7 +219,7 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   if (hipMemcpyAsync(gpu_ptr, tensor->data, size_bytes, hipMemcpyHostToDevice,
                      static_cast<hipStream_t>(state->stream)) != hipSuccess) {
     fprintf(stderr, "hipdnn_ep_tensor_prepare_input: H2D transfer failed\n");
-    hipFree(gpu_ptr);
+    (void)hipFree(gpu_ptr);
     return HIPDNN_EP_ERR_H2D_TRANSFER_FAILED;
   }
 
@@ -365,7 +365,7 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
 
   // Free buffer if not pooled
   if (!buffer->is_pooled && buffer->gpu_ptr) {
-    hipFree(buffer->gpu_ptr);
+    (void)hipFree(buffer->gpu_ptr);
     buffer->gpu_ptr = nullptr;
   }
 
@@ -381,7 +381,7 @@ void hipdnn_ep_tensor_free_input(RuntimeState *state, TensorBuffer *buffer) {
 
   // Free buffer if not pooled
   if (!buffer->is_pooled && buffer->gpu_ptr) {
-    hipFree(buffer->gpu_ptr);
+    (void)hipFree(buffer->gpu_ptr);
     buffer->gpu_ptr = nullptr;
   }
 }
