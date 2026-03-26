@@ -17,8 +17,8 @@ module {
 }
 
 // CHECK-LABEL: llvm.func @test_gather_lowering
-// CHECK: llvm.call @wrap_gather({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
+// CHECK: llvm.call @wrap_gather({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
 
-// Verify 8 parameters:
+// Verify 9 parameters:
 // - 4 pointers: state, data, indices, output
-// - 4 i64 values: axis=0, data_num_elements=12, output_num_elements=8, element_size_bytes=4
+// - 5 i64 values: axis=0, data_num_elements=12, indices_num_elements=2, output_num_elements=8, element_size_bytes=4
