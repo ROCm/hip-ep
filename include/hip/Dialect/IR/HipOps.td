@@ -666,7 +666,7 @@ def Hip_GatherOp : Hip_DpsOp<"gather"> {
     Hip_TensorOrMemRef:$data,
     Hip_TensorOrMemRef:$indices,
     Hip_TensorOrMemRef:$output,
-    I64Attr:$axis
+    DefaultValuedAttr<I64Attr, "0">:$axis
   );
   // result_tensors inherited from Hip_DpsOp
   let assemblyFormat = [{
