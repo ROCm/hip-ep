@@ -690,14 +690,23 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     Type i64Type = rewriter.getI64Type();
     Type f32Type = rewriter.getF32Type();
 
+    Value nullPtr = LLVM::ZeroOp::create(rewriter, loc, ptrType);
+
+    auto getMemRefPtrOrNull = [&](Value memref) -> Value {
+      if (!memref)
+        return nullPtr;
+      return extractMemRefPtr(memref, rewriter, loc);
+    };
+
     // Extract pointers
     Value statePtr = adaptor.getCtx();
     Value inputPtr = extractMemRefPtr(adaptor.getInput(), rewriter, loc);
     Value skipPtr = extractMemRefPtr(adaptor.getSkip(), rewriter, loc);
     Value gammaPtr = extractMemRefPtr(adaptor.getGamma(), rewriter, loc);
+    Value biasPtr = getMemRefPtrOrNull(adaptor.getBias());
     Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
     Value skipOutputPtr =
-        extractMemRefPtr(adaptor.getSkipOutput(), rewriter, loc);
+        getMemRefPtrOrNull(adaptor.getInputSkipBiasSum());
 
     // Compute num_elements for input and gamma
     auto inputType = cast<MemRefType>(op.getInput().getType());
@@ -718,12 +727,19 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     Value epsilonVal =
         LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
 
-    // Runtime function signature (10 params)
+    // Runtime function signature (11 params)
     SmallVector<Type> paramTypes = {
-        ptrType, ptrType, ptrType, ptrType,
-        ptrType, ptrType, // state, input, skip, gamma, output, skip_output
-        i64Type, i64Type, i64Type, // input_num, gamma_num, element_size_bytes
-        f32Type                    // epsilon
+        ptrType, // state
+        ptrType, // input
+        ptrType, // skip
+        ptrType, // gamma
+        ptrType, // bias (may be nullptr)
+        ptrType, // output
+        ptrType, // input_skip_bias_sum (may be nullptr)
+        i64Type, // input_num_elements
+        i64Type, // gamma_num_elements
+        i64Type, // element_size_bytes
+        f32Type  // epsilon
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp =
@@ -734,9 +750,9 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
 
     SmallVector<Value> args = {
         statePtr,         inputPtr,         skipPtr,
-        gammaPtr,         outputPtr,        skipOutputPtr,
-        inputNumElements, gammaNumElements, elementSizeBytesVal,
-        epsilonVal};
+        gammaPtr,         biasPtr,          outputPtr,
+        skipOutputPtr,    inputNumElements, gammaNumElements,
+        elementSizeBytesVal, epsilonVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
