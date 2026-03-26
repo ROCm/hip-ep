@@ -51,7 +51,8 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
                                     int64_t gamma_num_elements,
                                     int64_t element_size_bytes, float epsilon) {
   if (!state || !input || !skip || !gamma || !output) {
-    fprintf(stderr, "wrap_skip_simplified_layer_norm: null required argument\n");
+    fprintf(stderr,
+            "wrap_skip_simplified_layer_norm: null required argument\n");
     return -1;
   }
 
