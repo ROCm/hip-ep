@@ -32,17 +32,25 @@ static constexpr int GQA_THREADS = 256;
 //     do_rotary            — apply RoPE inside the operator    (0 or 1)
 //     rotary_interleaved   — RoPE pairing mode                 (0=half-rotated)
 //     softcap              — soft capping for logits            (0=disabled)
+//     local_window_size    — sliding window size for local attention (-1=full)
+//     smooth_softmax       — use smooth softmax                (0 or 1)
 //
-//   Inputs (separate Q/K/V path, not packed):
+//   Inputs (separate Q/K/V path):
 //     [0] query       : (B, S, H*d)      — FP16, BSNH layout (3D)
 //     [1] key         : (B, S, G*d)      — FP16, BSNH layout (3D)
 //     [2] value       : (B, S, G*d)      — FP16, BSNH layout (3D)
+//
+//   Inputs (packed QKV path — key and value are absent):
+//     [0] query       : (B, S, (H+2G)*d) — FP16, packed Q|K|V (3D)
+//
+//   Common inputs:
 //     [3] past_key    : (B, G, P, d)     — FP16, BNSH layout (4D), P=past buf len
 //     [4] past_value  : (B, G, P, d)     — FP16, BNSH layout (4D)
 //     [5] seqlens_k   : (B,)             — INT32, seqlens_k[b] = total_seqlen - 1
 //     [6] total_seqlen : scalar           — INT32
 //     [7] cos_cache   : (max_pos, d/2)   — optional, when do_rotary=1
 //     [8] sin_cache   : (max_pos, d/2)   — optional, when do_rotary=1
+//    [11] head_sink   : (H,)             — optional, per-head smooth softmax factor
 //
 //   Outputs:
 //     [0] output      : (B, S, H*d)      — FP16, BSNH layout (3D)
@@ -53,10 +61,14 @@ static constexpr int GQA_THREADS = 256;
 //     ONNX 3D BSNH [B, S, H*d] == our 4D BSHD [B, S, H, d] (identical memory)
 //     ONNX 4D BNSH [B, G, T, d] == our 4D BNSD [B, G, T, d] (identical memory)
 //
-// ALGORITHM — 11-STEP PIPELINE
+// ALGORITHM — 12-STEP PIPELINE (Step 0 + Steps 1-11)
 // -----------------------------------------------------------------------
 // Given: B=batch, S=seq_q, T=total_seqlen(=past_len+S), H=num_heads,
 //        G=kv_num_heads, d=head_dim, HPG=H/G (heads per group)
+//
+// Step 0: Split packed QKV (when key/value are absent)
+//   Split packed input [B, S, (H+2G)*d] into Q [B*S, H*d], K [B*S, G*d],
+//   V [B*S, G*d].  Skipped when separate Q/K/V inputs are provided.
 //
 // Step 1-2: RoPE (when do_rotary=1, skipped when do_rotary=0)
 //   For each position s in [0, S), compute pos = past_len + s.
@@ -94,12 +106,17 @@ static constexpr int GQA_THREADS = 256;
 //
 // Step 9: Causal Mask + Softmax
 //   Causal mask (prefill only, skipped when S==1):
-//     S[k, q] = -inf  where k > past_len + q
-//   This makes each query attend only to past positions and itself.
+//     S[k, q] = -inf  where k > past_len + q  (future tokens)
+//   When local_window_size > 0, also masks distant past:
+//     S[k, q] = -inf  where k < past_len + q - local_window_size + 1
+//   This makes each query attend only to a sliding window of tokens.
 //   Equivalent to ORT's approach of zeroing future positions and running
 //   softmax on the valid window only (gqa_attention_base.h line 337).
 //   Then column-wise softmax: for each query column, compute
 //     softmax(S[:,q]) = exp(S[:,q] - max) / sum(exp(S[:,q] - max))
+//   Smooth softmax (when head_sink is provided or smooth_softmax=1):
+//     softmax_i = exp(x_i - m) / (exp(s - m) + sum_j exp(x_j - m))
+//     where s = head_sink[h] (per-head) or 0 (ORT default when no sink).
 //   Ref: onnxruntime/contrib_ops/cpu/bert/gqa_attention_base.h lines 297-354
 //
 // Step 10: Value GEMM — O = V_exp * softmax(S)
@@ -129,6 +146,11 @@ static constexpr int GQA_THREADS = 256;
 //
 // DATA FLOW (GPU buffer names)
 // -----------------------------------------------------------------------
+//  Packed QKV path (when key/value absent):
+//    query --[Step 0: Split]--> d_Q, d_K, d_V
+//  Separate Q/K/V path:
+//    d_Q = query, d_K = key, d_V = value
+//
 //  d_Q --[Step 1: RoPE]--> d_Qroped --[Step 3: Transpose]--> d_Qtrans
 //  d_K --[Step 2: RoPE]--> d_Kroped --[Step 4: Cache]-------> d_Kcache
 //  d_V --------------------------------[Step 5: Cache]-------> d_Vcache
@@ -332,18 +354,53 @@ __global__ void expand_kv_kernel(
 }
 
 // -------------------------------------------------------------------------
+// Step 0: Split packed QKV into separate Q, K, V buffers
+// -------------------------------------------------------------------------
+// When GQA receives a single packed query tensor [B*S, (H + 2*G)*d],
+// this kernel splits it into:
+//   Q [B*S, H*d],  K [B*S, G*d],  V [B*S, G*d]
+//
+// Thread: one per element in the packed tensor.
+// -------------------------------------------------------------------------
+
+__global__ void split_qkv_kernel(
+    const __half* __restrict__ packed,
+    __half* __restrict__ Q,
+    __half* __restrict__ K,
+    __half* __restrict__ V,
+    int BS, int D_total, int Q_dim, int K_dim) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= BS * D_total) return;
+
+  int row = idx / D_total;
+  int col = idx % D_total;
+  __half val = packed[idx];
+
+  if (col < Q_dim)
+    Q[row * Q_dim + col] = val;
+  else if (col < Q_dim + K_dim)
+    K[row * K_dim + (col - Q_dim)] = val;
+  else
+    V[row * K_dim + (col - Q_dim - K_dim)] = val;
+}
+
+// -------------------------------------------------------------------------
 // Step 9a: Causal Mask (prefill only, skipped when seq_q == 1)
 // -------------------------------------------------------------------------
 // Masks future positions so each query attends only to past + itself.
 //   Score matrix: col-major [skv, sq] per head
 //   S[k, q] = -65504 (FP16 -inf) where k > past_len + q
 //
+// When local_window_size > 0, also masks distant past positions:
+//   S[k, q] = -65504 where k < past_len + q - local_window_size + 1
+//
 // blockIdx.y = head (0..B*H-1)
 // -------------------------------------------------------------------------
 
 __global__ void causal_mask_kernel(
     __half* __restrict__ S,
-    int skv, int sq, int batch_stride, int past_len) {
+    int skv, int sq, int batch_stride, int past_len,
+    int local_window_size) {
   int head = blockIdx.y;
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int total = skv * sq;
@@ -351,7 +408,11 @@ __global__ void causal_mask_kernel(
 
   int k = idx % skv;
   int q = idx / skv;
-  if (k > past_len + q) {
+  int abs_q = past_len + q;
+  if (k > abs_q) {
+    S[(size_t)head * batch_stride + (size_t)q * skv + k] =
+        __float2half(-65504.0f);
+  } else if (local_window_size > 0 && k < abs_q - local_window_size + 1) {
     S[(size_t)head * batch_stride + (size_t)q * skv + k] =
         __float2half(-65504.0f);
   }
@@ -362,12 +423,18 @@ __global__ void causal_mask_kernel(
 // -------------------------------------------------------------------------
 // Per column q: softmax(S[:,q]) = exp(S[:,q]-max) / sum(exp(S[:,q]-max))
 //
+// Smooth softmax (matching ORT behaviour):
+//   Activated when head_sink is non-null OR use_smooth_softmax is set.
+//   softmax_i = exp(x_i - m) / (exp(s - m) + sum_j exp(x_j - m))
+//   where s = head_sink[h] when provided, or 0 when head_sink is null.
+//
 // One threadblock per (head, query) pair.
 // Uses shared memory for parallel max-reduction and sum-reduction.
 // -------------------------------------------------------------------------
 
 __global__ void softmax_inplace_kernel(
-    __half* data, int rows, int cols, int batch_stride) {
+    __half* data, int rows, int cols, int batch_stride,
+    const __half* head_sink, int num_heads, int use_smooth_softmax) {
   int linear = blockIdx.x;
   int head = linear / cols;
   int col = linear % cols;
@@ -403,6 +470,17 @@ __global__ void softmax_inplace_kernel(
   }
   float sum_val = smem[0];
   __syncthreads();
+
+  // Smooth softmax: add exp(s - max) to the denominator.
+  // When head_sink is provided, s = head_sink[h] (per-head factor).
+  // When head_sink is null but use_smooth_softmax is set, s = 0 (ORT default).
+  if (head_sink != nullptr) {
+    int actual_head = head % num_heads;
+    float s = __half2float(head_sink[actual_head]);
+    sum_val += expf(s - max_val);
+  } else if (use_smooth_softmax) {
+    sum_val += expf(0.0f - max_val);
+  }
 
   float inv_sum = 1.0f / sum_val;
   for (int i = threadIdx.x; i < rows; i += blockDim.x)
@@ -490,17 +568,37 @@ extern "C" int hip_gqa_expand_kv(
   return hipSuccess;
 }
 
+// Step 0: Split packed QKV
+extern "C" int hip_gqa_split_qkv(
+    void* stream_ptr, const void* packed, void* Q, void* K, void* V,
+    int batch_size, int seq_len, int num_heads, int kv_num_heads, int head_dim) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  int BS = batch_size * seq_len;
+  int Q_dim = num_heads * head_dim;
+  int K_dim = kv_num_heads * head_dim;
+  int D_total = Q_dim + 2 * K_dim;
+  int total_elems = BS * D_total;
+  int blocks = (total_elems + GQA_THREADS - 1) / GQA_THREADS;
+  split_qkv_kernel<<<blocks, GQA_THREADS, 0, stream>>>(
+      static_cast<const __half*>(packed),
+      static_cast<__half*>(Q),
+      static_cast<__half*>(K),
+      static_cast<__half*>(V),
+      BS, D_total, Q_dim, K_dim);
+  return hipSuccess;
+}
+
 // Step 9a: Causal mask
 extern "C" int hip_gqa_causal_mask(
     void* stream_ptr, void* S,
     int total_heads, int skv, int sq,
-    int batch_stride, int past_len) {
+    int batch_stride, int past_len, int local_window_size) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   int total = skv * sq;
   int blocksX = (total + GQA_THREADS - 1) / GQA_THREADS;
   causal_mask_kernel<<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
       static_cast<__half*>(S),
-      skv, sq, batch_stride, past_len);
+      skv, sq, batch_stride, past_len, local_window_size);
   return hipSuccess;
 }
 
@@ -508,7 +606,8 @@ extern "C" int hip_gqa_causal_mask(
 extern "C" int hip_gqa_softmax_inplace(
     void* stream_ptr, void* data,
     int total_head_queries, int rows, int cols,
-    int batch_stride) {
+    int batch_stride, const void* head_sink, int num_heads,
+    int use_smooth_softmax) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   int threads = 32;
   while (threads < std::min(rows, 256)) threads *= 2;
@@ -516,6 +615,7 @@ extern "C" int hip_gqa_softmax_inplace(
   softmax_inplace_kernel<<<total_head_queries, threads,
                            threads * sizeof(float), stream>>>(
       static_cast<__half*>(data),
-      rows, cols, batch_stride);
+      rows, cols, batch_stride,
+      static_cast<const __half*>(head_sink), num_heads, use_smooth_softmax);
   return hipSuccess;
 }
