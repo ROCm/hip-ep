@@ -191,7 +191,7 @@ Details of `--convert-hip-to-llvm`:
 
 The `hip-compiler` tool runs this pipeline automatically, then translates
 the resulting LLVM dialect to LLVM IR, generates a native `.obj`, and links it
-with `hip_runtime_static.lib` and external libraries to produce a `.dll`.
+with `runtime.bc` (pre-compiled bitcode) and external libraries to produce a `.dll`.
 
 For manual debugging, `hip-mlir-opt` can run the pass pipeline in isolation:
 `--one-shot-bufferize="bufferize-function-boundaries"`,
@@ -231,19 +231,28 @@ tools/hip-mlir-opt/
 tools/hip-compiler/
   hip-compiler.cpp         One-stop MLIR-to-DLL compiler
 
-lib/Runtime/ops_runtime/       (compiled into hip_runtime_static.lib by CMake)
-  hip_runtime.cpp         Handle lifecycle + device memory (shared by all tests)
-  hipblaslt_matmul.cpp    hipBLASLt matmul (full impl)
-  miopen_add.cpp          MIOpen add (full impl)
-  miopen_mul.cpp          MIOpen mul (full impl)
-  miopen_rms_norm.cpp     MIOpen RMS norm (full impl)
-  miopen_softmax.cpp      MIOpen softmax (full impl)
-  miopen_skip_rms_norm.cpp  Stub
-  miopen_rope.cpp         Stub
-  transpose.cpp           N-D transpose (full impl, pure C++)
-  gather.cpp              Stub
-  silu.cpp                Stub
-  gqa.cpp                 Stub
+lib/Runtime/                   (compiled to runtime.bc bitcode by CMake)
+  hipdnn_ep_runtime.h     Runtime C API header
+  hipdnn_ep_runtime_state.cpp   Runtime state management
+  hipdnn_ep_runtime_tensor.cpp  Tensor descriptor helpers
+  real/                   Real GPU runtime (ROCm/MIOpen/hipBLASLt)
+    hip.cpp               HIP device management
+    memory.cpp            Device memory allocation
+    matmul.cpp            hipBLASLt matmul
+    miopen.cpp            MIOpen handle lifecycle
+    elementwise.cpp       MIOpen add/mul
+    simplified_layer_norm.cpp     MIOpen RMS norm
+    skip_simplified_layer_norm.cpp  MIOpen skip + RMS norm
+    rotary_embedding.cpp  MIOpen RoPE
+    activation.cpp        SiLU activation
+    cast.cpp              Type casting
+    gather.cpp            Embedding gather
+    gqa.cpp               Grouped query attention
+    hipblas.cpp           hipBLAS utilities
+    reduce_sum.cpp        Reduction sum
+  mock/                   Mock CPU runtime (no GPU required)
+    mock_gpu.cpp          CPU fallback implementations
+    memory.cpp            Host memory allocation
 
 examples/
   gemm.hip.mlir           Two chained matmuls (hipBLASLt)
