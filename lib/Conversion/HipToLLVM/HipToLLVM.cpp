@@ -62,6 +62,8 @@ static constexpr const char *kWrapMiopenOpTensor =
 static constexpr const char *kWrapCast = "wrap_cast";
 static constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
 static constexpr const char *kWrapGQA = "wrap_group_query_attention";
+static constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
+static constexpr const char *kWrapQMoE = "wrap_qmoe";
 static constexpr const char *kHipGetConstant = "hipdnn_ep_constant_get";
 
 // LLVM memref descriptor struct field indices.
@@ -116,26 +118,50 @@ static Value extractMemRefPtr(Value memrefDesc,
   return ptr;
 }
 
+// Returns the aligned pointer for an optional memref operand, or a null
+// pointer if the operand is absent.
+static Value extractOptionalMemRefPtr(Value memrefDesc,
+                                      ConversionPatternRewriter &rewriter,
+                                      Location loc) {
+  Value result;
+  if (memrefDesc) {
+    result = extractMemRefPtr(memrefDesc, rewriter, loc);
+  } else {
+    result = LLVM::ZeroOp::create(
+        rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext(), 0));
+  }
+  return result;
+}
+
+// Helper: get a single memref dimension as an i64 Value, using a compile-time
+// constant for static dims and extracting from the descriptor for dynamic dims.
+static Value getMemRefDimSize(MemRefType type, unsigned dimIdx,
+                              Value descriptor,
+                              ConversionPatternRewriter &rewriter,
+                              Location loc) {
+  Value result;
+  if (type.isDynamicDim(dimIdx)) {
+    result = MemRefDescriptor(descriptor).size(rewriter, loc, dimIdx);
+  } else {
+    result = LLVM::ConstantOp::create(
+        rewriter, loc, rewriter.getI64Type(),
+        rewriter.getI64IntegerAttr(type.getDimSize(dimIdx)));
+  }
+  return result;
+}
+
 // Helper: compute total number of elements in a memref, handling both static
 // and dynamic dimensions.
 static Value computeNumElements(MemRefType type, Value descriptor,
                                 ConversionPatternRewriter &rewriter,
                                 Location loc) {
-  MemRefDescriptor desc(descriptor);
   Type i64Type = rewriter.getI64Type();
   Value num = LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                        rewriter.getI64IntegerAttr(1));
-
   for (auto dimIdx : llvm::seq<int64_t>(type.getRank())) {
-    Value dimSize;
-    if (type.isDynamicDim(dimIdx)) {
-      dimSize = desc.size(rewriter, loc, dimIdx);
-    } else {
-      dimSize = LLVM::ConstantOp::create(
-          rewriter, loc, i64Type,
-          rewriter.getI64IntegerAttr(type.getDimSize(dimIdx)));
-    }
-    num = LLVM::MulOp::create(rewriter, loc, num, dimSize);
+    num = LLVM::MulOp::create(
+        rewriter, loc, num,
+        getMemRefDimSize(type, dimIdx, descriptor, rewriter, loc));
   }
   return num;
 }
@@ -233,35 +259,25 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
       return op.emitError("Output must be rank-4 tensor [N, K, H', W']");
     }
 
-    // Helper: Get dimension value (static constant or dynamic descriptor size)
-    auto getDim = [&](MemRefDescriptor &desc, MemRefType type,
-                      unsigned dimIdx) -> Value {
-      int64_t dimSize = type.getShape()[dimIdx];
-      if (!ShapedType::isDynamic(dimSize)) {
-        // Static dimension: use compile-time constant
-        return createI64Const(dimSize);
-      }
-      // Dynamic dimension: extract from runtime descriptor
-      return desc.size(rewriter, loc, dimIdx);
-    };
-
-    // Create descriptors for accessing runtime sizes
-    MemRefDescriptor inputDesc(adaptor.getInput());
-    MemRefDescriptor weightsDesc(adaptor.getWeights());
-    MemRefDescriptor outputDesc(adaptor.getOutput());
-
     // Input shape: [N, C, H, W]
-    Value inputN = getDim(inputDesc, inputType, 0);
-    Value inputC = getDim(inputDesc, inputType, 1);
-    Value inputH = getDim(inputDesc, inputType, 2);
-    Value inputW = getDim(inputDesc, inputType, 3);
+    Value inputN =
+        getMemRefDimSize(inputType, 0, adaptor.getInput(), rewriter, loc);
+    Value inputC =
+        getMemRefDimSize(inputType, 1, adaptor.getInput(), rewriter, loc);
+    Value inputH =
+        getMemRefDimSize(inputType, 2, adaptor.getInput(), rewriter, loc);
+    Value inputW =
+        getMemRefDimSize(inputType, 3, adaptor.getInput(), rewriter, loc);
 
     // Weights shape: [K, C, R, S] where K=output channels
-    Value weightsK = getDim(weightsDesc, weightsType, 0);
+    Value weightsK =
+        getMemRefDimSize(weightsType, 0, adaptor.getWeights(), rewriter, loc);
 
     // Output shape: [N, K, H', W']
-    Value outputH = getDim(outputDesc, outputType, 2);
-    Value outputW = getDim(outputDesc, outputType, 3);
+    Value outputH =
+        getMemRefDimSize(outputType, 2, adaptor.getOutput(), rewriter, loc);
+    Value outputW =
+        getMemRefDimSize(outputType, 3, adaptor.getOutput(), rewriter, loc);
 
     // Extract attributes
     auto kernelShape = op.getKernelShape();
@@ -1663,6 +1679,281 @@ struct MemRefDeallocOpLowering
 };
 
 //===----------------------------------------------------------------------===//
+// MatMulNBits Lowering
+//===----------------------------------------------------------------------===//
+
+struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(MatMulNBitsOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    Value statePtr = adaptor.getHandle();
+    Value APtr = extractMemRefPtr(adaptor.getA(), rewriter, loc);
+    Value BPtr = extractMemRefPtr(adaptor.getB(), rewriter, loc);
+    Value scalesPtr = extractMemRefPtr(adaptor.getScales(), rewriter, loc);
+    Value zeroPointsPtr =
+        extractOptionalMemRefPtr(adaptor.getZeroPoints(), rewriter, loc);
+    Value gIdxPtr = extractOptionalMemRefPtr(adaptor.getGIdx(), rewriter, loc);
+    Value biasPtr = extractOptionalMemRefPtr(adaptor.getBias(), rewriter, loc);
+    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+
+    auto AType = cast<MemRefType>(op.getA().getType());
+    int64_t ARank = AType.getRank();
+    int64_t elemSize = AType.getElementType().getIntOrFloatBitWidth() / 8;
+
+    // A shape: [..., M, K] — M is the second-to-last dim
+    Value m = (ARank >= 2) ? getMemRefDimSize(AType, ARank - 2, adaptor.getA(),
+                                              rewriter, loc)
+                           : createI64Const(1);
+    // batch_count = product of all leading dimensions before M
+    Value batch = createI64Const(1);
+    for (int64_t i = 0; i < ARank - 2; ++i) {
+      batch = LLVM::MulOp::create(
+          rewriter, loc, batch,
+          getMemRefDimSize(AType, i, adaptor.getA(), rewriter, loc));
+    }
+
+    Value n = createI64Const(op.getN());
+    Value k = createI64Const(op.getK());
+    Value bits = createI64Const(op.getBits());
+    Value blockSize = createI64Const(op.getBlockSize());
+    Value elemSizeVal = createI64Const(elemSize);
+
+    SmallVector<Type, 15> paramTypes = {
+        ptrType, // state
+        ptrType, // A
+        ptrType, // B
+        ptrType, // scales
+        ptrType, // zero_points (nullable)
+        ptrType, // g_idx (nullable)
+        ptrType, // bias (nullable)
+        ptrType, // output
+        i64Type, // M
+        i64Type, // N
+        i64Type, // K
+        i64Type, // batch_count
+        i64Type, // bits
+        i64Type, // block_size
+        i64Type  // elem_size
+    };
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapMatMulNBits, paramTypes, i32Type);
+    if (failed(funcOp)) {
+      return failure();
+    }
+
+    SmallVector<Value, 15> args = {
+        statePtr, APtr,    BPtr,      scalesPtr, zeroPointsPtr,
+        gIdxPtr,  biasPtr, outputPtr, m,         n,
+        k,        batch,   bits,      blockSize, elemSizeVal};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// QMoE Lowering
+//===----------------------------------------------------------------------===//
+
+struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(QMoEOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+    Type f32Type = rewriter.getF32Type();
+
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+    auto createF32Const = [&](float value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, f32Type,
+                                      rewriter.getF32FloatAttr(value));
+    };
+
+    Value statePtr = adaptor.getHandle();
+    Value inputPtr = extractMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value routerPtr = extractMemRefPtr(adaptor.getRouterProbs(), rewriter, loc);
+    Value fc1WeightsPtr =
+        extractMemRefPtr(adaptor.getFc1ExpertsWeights(), rewriter, loc);
+    Value fc1ScalesPtr =
+        extractMemRefPtr(adaptor.getFc1Scales(), rewriter, loc);
+    Value fc1BiasPtr =
+        extractOptionalMemRefPtr(adaptor.getFc1ExpertsBias(), rewriter, loc);
+    Value fc2WeightsPtr =
+        extractMemRefPtr(adaptor.getFc2ExpertsWeights(), rewriter, loc);
+    Value fc2ScalesPtr =
+        extractMemRefPtr(adaptor.getFc2Scales(), rewriter, loc);
+    Value fc2BiasPtr =
+        extractOptionalMemRefPtr(adaptor.getFc2ExpertsBias(), rewriter, loc);
+    Value fc3WeightsPtr =
+        extractOptionalMemRefPtr(adaptor.getFc3ExpertsWeights(), rewriter, loc);
+    Value fc3ScalesPtr =
+        extractOptionalMemRefPtr(adaptor.getFc3Scales(), rewriter, loc);
+    Value fc3BiasPtr =
+        extractOptionalMemRefPtr(adaptor.getFc3ExpertsBias(), rewriter, loc);
+    Value fc1ZpPtr =
+        extractOptionalMemRefPtr(adaptor.getFc1ZeroPoints(), rewriter, loc);
+    Value fc2ZpPtr =
+        extractOptionalMemRefPtr(adaptor.getFc2ZeroPoints(), rewriter, loc);
+    Value fc3ZpPtr =
+        extractOptionalMemRefPtr(adaptor.getFc3ZeroPoints(), rewriter, loc);
+    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    auto routerType = cast<MemRefType>(op.getRouterProbs().getType());
+    auto fc1Type = cast<MemRefType>(op.getFc1ExpertsWeights().getType());
+    int64_t elemSize = inputType.getElementType().getIntOrFloatBitWidth() / 8;
+
+    // input shape: [batch, seq, ..., hidden] — numTokens = product of all
+    // dims except the last (hidden), supporting dynamic batch/seq dimensions.
+    int64_t inputRank = inputType.getRank();
+    Value numTokensVal = createI64Const(1);
+    for (int64_t i = 0; i < inputRank - 1; ++i) {
+      numTokensVal = LLVM::MulOp::create(
+          rewriter, loc, numTokensVal,
+          getMemRefDimSize(inputType, i, adaptor.getInput(), rewriter, loc));
+    }
+    Value hiddenSizeVal = getMemRefDimSize(inputType, inputRank - 1,
+                                           adaptor.getInput(), rewriter, loc);
+    Value numExpertsVal =
+        getMemRefDimSize(routerType, routerType.getRank() - 1,
+                         adaptor.getRouterProbs(), rewriter, loc);
+
+    int64_t swigluFusion = op.getSwigluFusion();
+    int64_t fusionSize = (swigluFusion > 0) ? 2 : 1;
+    Value interSizeVal = getMemRefDimSize(
+        fc1Type, 1, adaptor.getFc1ExpertsWeights(), rewriter, loc);
+    if (fusionSize > 1) {
+      interSizeVal = LLVM::SDivOp::create(rewriter, loc, interSizeVal,
+                                          createI64Const(fusionSize));
+    }
+
+    StringRef activationType = op.getActivationType();
+    int64_t activationTypeEnum = 0;
+    if (activationType == "relu") {
+      activationTypeEnum = 0;
+    } else if (activationType == "gelu") {
+      activationTypeEnum = 1;
+    } else if (activationType == "silu") {
+      activationTypeEnum = 2;
+    } else if (activationType == "swiglu") {
+      activationTypeEnum = 3;
+    } else if (activationType == "identity") {
+      activationTypeEnum = 4;
+    }
+
+    Value kVal = createI64Const(op.getK());
+    Value expertWeightBitsVal = createI64Const(op.getExpertWeightBits());
+    Value blockSizeVal = createI64Const(op.getBlockSize());
+    Value swigluFusionVal = createI64Const(swigluFusion);
+    Value activationTypeVal = createI64Const(activationTypeEnum);
+    Value activationAlphaVal =
+        createF32Const(op.getActivationAlpha().convertToFloat());
+    Value activationBetaVal =
+        createF32Const(op.getActivationBeta().convertToFloat());
+    Value swigluLimitVal = createF32Const(op.getSwigluLimit().convertToFloat());
+    Value normalizeVal = createI64Const(op.getNormalizeRoutingWeights());
+    Value elemSizeVal = createI64Const(elemSize);
+
+    SmallVector<Type, 30> paramTypes = {
+        ptrType, // state
+        ptrType, // input
+        ptrType, // router_probs
+        ptrType, // fc1_weights
+        ptrType, // fc1_scales
+        ptrType, // fc1_bias (nullable)
+        ptrType, // fc2_weights
+        ptrType, // fc2_scales
+        ptrType, // fc2_bias (nullable)
+        ptrType, // fc3_weights (nullable)
+        ptrType, // fc3_scales (nullable)
+        ptrType, // fc3_bias (nullable)
+        ptrType, // fc1_zero_points (nullable)
+        ptrType, // fc2_zero_points (nullable)
+        ptrType, // fc3_zero_points (nullable)
+        ptrType, // output
+        i64Type, // num_tokens
+        i64Type, // hidden_size
+        i64Type, // inter_size
+        i64Type, // num_experts
+        i64Type, // k
+        i64Type, // expert_weight_bits
+        i64Type, // block_size
+        i64Type, // swiglu_fusion
+        i64Type, // activation_type
+        f32Type, // activation_alpha
+        f32Type, // activation_beta
+        f32Type, // swiglu_limit
+        i64Type, // normalize_routing_weights
+        i64Type  // elem_size
+    };
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapQMoE, paramTypes, i32Type);
+    if (failed(funcOp)) {
+      return failure();
+    }
+
+    SmallVector<Value, 30> args = {statePtr,
+                                   inputPtr,
+                                   routerPtr,
+                                   fc1WeightsPtr,
+                                   fc1ScalesPtr,
+                                   fc1BiasPtr,
+                                   fc2WeightsPtr,
+                                   fc2ScalesPtr,
+                                   fc2BiasPtr,
+                                   fc3WeightsPtr,
+                                   fc3ScalesPtr,
+                                   fc3BiasPtr,
+                                   fc1ZpPtr,
+                                   fc2ZpPtr,
+                                   fc3ZpPtr,
+                                   outputPtr,
+                                   numTokensVal,
+                                   hiddenSizeVal,
+                                   interSizeVal,
+                                   numExpertsVal,
+                                   kVal,
+                                   expertWeightBitsVal,
+                                   blockSizeVal,
+                                   swigluFusionVal,
+                                   activationTypeVal,
+                                   activationAlphaVal,
+                                   activationBetaVal,
+                                   swigluLimitVal,
+                                   normalizeVal,
+                                   elemSizeVal};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // GetConstantOp Lowering
 //===----------------------------------------------------------------------===//
 
@@ -1931,8 +2222,8 @@ void ConvertHipToLLVMPass::runOnOperation() {
                RmsNormOpLowering, SkipRmsNormOpLowering, RopeOpLowering,
                MiopenSoftmaxOpLowering, TransposeOpLowering, GatherOpLowering,
                SiluOpLowering, SigmoidOpLowering, MulOpLowering, SubOpLowering,
-               CastOpLowering, ReduceSumOpLowering, GqaOpLowering>(
-      typeConverter);
+               CastOpLowering, ReduceSumOpLowering, GqaOpLowering,
+               MatMulNBitsOpLowering, QMoEOpLowering>(typeConverter);
   patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter,
                                                        kMiopenAdd);
   patterns.add<MemRefAllocOpLowering, MemRefDeallocOpLowering>(typeConverter);

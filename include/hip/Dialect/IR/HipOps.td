@@ -243,6 +243,161 @@ def Hip_MatmulOp : Hip_DpsOp<"matmul"> {
   }];
 }
 
+//===----------------------------------------------------------------------===//
+// Quantized Operations
+//===----------------------------------------------------------------------===//
+
+def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits", [AttrSizedOperandSegments]> {
+  let summary = "Quantized N-bit matrix multiplication (com.microsoft MatMulNBits)";
+  let description = [{
+    Performs matrix multiplication with N-bit quantized weights.
+    Dequantizes packed int4/int8 weights using per-block scale factors,
+    then computes Y = A @ dequantized_weight^T.
+
+    Implements the com.microsoft MatMulNBits operator (inputs 3-6).
+
+    Weight packing: B is stored as uint8 with shape (N, k_blocks, blob_size)
+    where k_blocks = ceil(K / block_size), blob_size = block_size * bits / 8.
+    For 4-bit: lower nibble = first value, upper nibble = second value.
+
+    Dequantization: dequantized = (quantized - zero_point) * scale
+    Default zero_point = 2^(bits-1) (= 8 for 4-bit).
+
+    Optional inputs per spec:
+      zero_points: per-block zero points for dequantization
+      g_idx: GPTQ group ordering indices (deprecated)
+      bias: output bias vector [N]
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.matmul_nbits(%handle) ins(%A, %B, %scales :
+        memref<1x128x2880xf16, 1>, memref<5120x90x16xui8, 1>,
+        memref<5120x90xf16, 1>)
+        outs(%output : memref<1x128x5120xf16, 1>)
+        {K = 2880, N = 5120, bits = 4, block_size = 32, accuracy_level = 4}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$handle,
+    Hip_TensorOrMemRef:$A,                      // activation [..., K]
+    Hip_TensorOrMemRef:$B,                      // packed uint8 [N, k_blocks, blob_size]
+    Hip_TensorOrMemRef:$scales,                 // dequant scales [N, k_blocks]
+    Optional<Hip_TensorOrMemRef>:$zero_points,  // dequant zero points (optional)
+    Optional<Hip_TensorOrMemRef>:$g_idx,        // GPTQ group indices (optional, deprecated)
+    Optional<Hip_TensorOrMemRef>:$bias,         // output bias [N] (optional)
+    Hip_TensorOrMemRef:$output,                 // result [..., N]
+    I64Attr:$K,
+    I64Attr:$N,
+    I64Attr:$bits,
+    I64Attr:$block_size,
+    I64Attr:$accuracy_level
+  );
+
+  let assemblyFormat = [{
+    `(` $handle `)` `ins` `(` $A `,` $B `,` $scales `:`
+    type($A) `,` type($B) `,` type($scales) `)`
+    (`zero_points` `(` $zero_points^ `:` type($zero_points) `)`)?
+    (`g_idx` `(` $g_idx^ `:` type($g_idx) `)`)?
+    (`bias` `(` $bias^ `:` type($bias) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_QMoEOp : Hip_DpsOp<"qmoe", [AttrSizedOperandSegments]> {
+  let summary = "Quantized Mixture-of-Experts (com.microsoft QMoE)";
+  let description = [{
+    Implements the com.microsoft QMoE operator (inputs 7-14): quantized
+    Mixture-of-Experts with top-k expert routing and optional SwiGLU activation.
+
+    Routes each token to its top-k experts, performs quantized linear
+    projections (fc1 gate+up, fc2 down) per expert with int4 dequantization,
+    applies activation (SwiGLU by default), and combines expert outputs.
+
+    SwiGLU formula (when swiglu_fusion=1, interleaved in fc1 output):
+      g, l = interleaved_split(fc1_out)
+      G = clamp(g, max=swiglu_limit)
+      L = clamp(l, -swiglu_limit, swiglu_limit)
+      result = G * sigmoid(activation_alpha * G) * (L + activation_beta)
+
+    Weight packing follows MatMulNBits convention: uint8 packed,
+    dequantized = (quantized - 8) * scale for 4-bit weights.
+
+    Optional inputs per spec:
+      fc1_experts_bias, fc2_experts_bias: bias vectors (optional)
+      fc3_*: unfused SwiGLU second GEMM weights/scales/bias (optional)
+      fc1/fc2/fc3_zero_points: per-block zero points (optional)
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.qmoe(%handle) ins(%input, %router,
+                           %fc1w, %fc1s, %fc2w, %fc2s :
+        memref<1x128x2880xf16, 1>, memref<128x32xf16, 1>,
+        memref<32x5760x1440xui8, 1>, memref<32x5760x90xf16, 1>,
+        memref<32x2880x1440xui8, 1>, memref<32x2880x90xf16, 1>)
+        fc1_bias(%fc1b : memref<32x5760xf16, 1>)
+        fc2_bias(%fc2b : memref<32x2880xf16, 1>)
+        outs(%output : memref<1x128x2880xf16, 1>)
+        {expert_weight_bits = 4, k = 4, block_size = 32, ...}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$handle,
+    Hip_TensorOrMemRef:$input,                  // [batch, seq, hidden]
+    Hip_TensorOrMemRef:$router_probs,           // [num_tokens, num_experts]
+    Hip_TensorOrMemRef:$fc1_experts_weights,    // [num_experts, fusion*inter, hidden/pack]
+    Hip_TensorOrMemRef:$fc1_scales,             // [num_experts, fusion*inter, hidden/bs]
+    Hip_TensorOrMemRef:$fc2_experts_weights,    // [num_experts, hidden, inter/pack]
+    Hip_TensorOrMemRef:$fc2_scales,             // [num_experts, hidden, inter/bs]
+    Optional<Hip_TensorOrMemRef>:$fc1_experts_bias,       // [num_experts, fusion*inter]
+    Optional<Hip_TensorOrMemRef>:$fc2_experts_bias,       // [num_experts, hidden]
+    Optional<Hip_TensorOrMemRef>:$fc3_experts_weights,    // [num_experts, inter, hidden/pack]
+    Optional<Hip_TensorOrMemRef>:$fc3_scales,             // [num_experts, inter, hidden/bs]
+    Optional<Hip_TensorOrMemRef>:$fc3_experts_bias,       // [num_experts, inter]
+    Optional<Hip_TensorOrMemRef>:$fc1_zero_points,        // fc1 dequant zero points
+    Optional<Hip_TensorOrMemRef>:$fc2_zero_points,        // fc2 dequant zero points
+    Optional<Hip_TensorOrMemRef>:$fc3_zero_points,        // fc3 dequant zero points
+    Hip_TensorOrMemRef:$output,                 // DPS init [batch, seq, hidden]
+    I64Attr:$expert_weight_bits,
+    I64Attr:$k,
+    I64Attr:$block_size,
+    I64Attr:$normalize_routing_weights,
+    I64Attr:$swiglu_fusion,
+    I64Attr:$use_sparse_mixer,
+    F32Attr:$activation_alpha,
+    F32Attr:$activation_beta,
+    F32Attr:$swiglu_limit,
+    StrAttr:$activation_type
+  );
+
+  let assemblyFormat = [{
+    `(` $handle `)` `ins` `(`
+        $input `,` $router_probs `,`
+        $fc1_experts_weights `,` $fc1_scales `,`
+        $fc2_experts_weights `,` $fc2_scales `:`
+        type($input) `,` type($router_probs) `,`
+        type($fc1_experts_weights) `,` type($fc1_scales) `,`
+        type($fc2_experts_weights) `,` type($fc2_scales)
+    `)`
+    (`fc1_bias` `(` $fc1_experts_bias^ `:` type($fc1_experts_bias) `)`)?
+    (`fc2_bias` `(` $fc2_experts_bias^ `:` type($fc2_experts_bias) `)`)?
+    (`fc3_weights` `(` $fc3_experts_weights^ `:` type($fc3_experts_weights) `)`)?
+    (`fc3_scales` `(` $fc3_scales^ `:` type($fc3_scales) `)`)?
+    (`fc3_bias` `(` $fc3_experts_bias^ `:` type($fc3_experts_bias) `)`)?
+    (`fc1_zero_points` `(` $fc1_zero_points^ `:` type($fc1_zero_points) `)`)?
+    (`fc2_zero_points` `(` $fc2_zero_points^ `:` type($fc2_zero_points) `)`)?
+    (`fc3_zero_points` `(` $fc3_zero_points^ `:` type($fc3_zero_points) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 // ===== MIOpen ops ============================================================
 
 def Hip_RmsNormOp : Hip_DpsOp<"rms_norm"> {
