@@ -799,7 +799,7 @@ def Hip_GqaOp : Hip_DpsOp<"gqa", [AttrSizedOperandSegments]> {
     // Internal context (HIP-specific, not ONNX spec)
     Hip_ContextType:$ctx,
 
-    // === MS GQA Standard Inputs (按规范顺序1-14) ===
+    // === MS GQA Standard Inputs (spec order 1-14) ===
 
     // Input 1: query (required)
     Hip_TensorOrMemRef:$query,
