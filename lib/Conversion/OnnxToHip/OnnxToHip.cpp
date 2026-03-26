@@ -30,7 +30,14 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
 #include "llvm/Support/Debug.h"
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4244)  // Conversion warnings in LLVM JSON.h
+#endif
 #include "llvm/Support/JSON.h"
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 
