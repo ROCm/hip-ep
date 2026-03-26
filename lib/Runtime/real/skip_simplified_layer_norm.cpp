@@ -18,37 +18,40 @@
 #define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
 
 // =============================================================================
-// SkipSimplifiedLayerNormalization via MIOpen
+// SkipSimplifiedLayerNormalization via MIOpen (Full MS spec)
 // =============================================================================
 //
 // ONNX SkipSimplifiedLayerNormalization (com.microsoft):
-//   skip_output = input + skip
-//   output      = RMSNorm(skip_output) * gamma
+//   input_skip_bias_sum = input + skip [+ bias]
+//   output              = RMSNorm(input_skip_bias_sum) * gamma
 //
-// MIOpen has no fused "add + T5 norm" API, so we compose two calls:
-//   1. miopenOpTensor(ADD):           skip_output = input + skip
-//   2. miopenT5LayerNormForward:      output = RMSNorm(skip_output) * gamma
+// MIOpen has no fused "add + T5 norm" API, so we compose calls:
+//   1. miopenOpTensor(ADD):           tmp = input + skip
+//   2. miopenOpTensor(ADD):           tmp = tmp + bias   (if bias != nullptr)
+//   3. miopenT5LayerNormForward:      output = RMSNorm(tmp) * gamma
 //
-// Both execute on the same GPU stream via the MIOpen handle — no host-device
-// round trips. The only overhead vs a hypothetical fused kernel is one extra
-// kernel launch.
+// All execute on the same GPU stream via the MIOpen handle — no host-device
+// round trips.
+//
+// If input_skip_bias_sum is nullptr (optional output not requested), a
+// temporary GPU buffer is allocated for the intermediate result and freed
+// before return.
 //
 // Tensor layout:
-//   input / skip / skip_output:  [num_rows, hidden_dim]  (flat total =
-//   input_num_elements) gamma:                       [hidden_dim]
-//   (gamma_num_elements) output:                      [num_rows, hidden_dim]
-//   rstd (scratch):              [num_rows]               (f32, not exposed to
-//   caller)
+//   input / skip / input_skip_bias_sum:  [num_rows, hidden_dim]
+//   gamma / bias:                        [hidden_dim]
+//   output:                              [num_rows, hidden_dim]
+//   rstd (scratch):                      [num_rows] (f32)
 // =============================================================================
 
 int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
-                                    void *skip, void *gamma, void *output,
-                                    void *skip_output,
+                                    void *skip, void *gamma, void *bias,
+                                    void *output, void *input_skip_bias_sum,
                                     int64_t input_num_elements,
                                     int64_t gamma_num_elements,
                                     int64_t element_size_bytes, float epsilon) {
-  if (!state || !input || !skip || !gamma || !output || !skip_output) {
-    fprintf(stderr, "wrap_skip_simplified_layer_norm: null argument\n");
+  if (!state || !input || !skip || !gamma || !output) {
+    fprintf(stderr, "wrap_skip_simplified_layer_norm: null required argument\n");
     return -1;
   }
 
@@ -67,10 +70,10 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
                                                       : "?";
   RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: num_rows=%lld, "
                     "hidden_dim=%lld, data_type=%s, epsilon=%e, "
-                    "total_bytes=%lld\n",
+                    "bias=%s, input_skip_bias_sum=%s\n",
                     (long long)num_rows, (long long)hidden_dim, type_name,
-                    (double)epsilon,
-                    (long long)(input_num_elements * element_size_bytes));
+                    (double)epsilon, bias ? "yes" : "no",
+                    input_skip_bias_sum ? "yes" : "no");
 
   miopenDataType_t data_type;
   if (element_size_bytes == 2)
@@ -86,11 +89,29 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
 
   int result = 0;
   void *rstd_buf = nullptr;
+  void *tmp_skip_buf = nullptr;
+  bool owns_skip_buf = false;
+
+  // If caller doesn't want input_skip_bias_sum, allocate a temp buffer
+  void *skip_buf = input_skip_bias_sum;
+  if (!skip_buf) {
+    hipError_t hip_err =
+        hipMalloc(&tmp_skip_buf, input_num_elements * element_size_bytes);
+    if (hip_err != hipSuccess) {
+      fprintf(stderr,
+              "wrap_skip_simplified_layer_norm: hipMalloc tmp failed: %s\n",
+              hipGetErrorString(hip_err));
+      return -1;
+    }
+    skip_buf = tmp_skip_buf;
+    owns_skip_buf = true;
+  }
 
   // Descriptors for miopenOpTensor (ADD)
   miopenTensorDescriptor_t addADesc = nullptr;
   miopenTensorDescriptor_t addBDesc = nullptr;
   miopenTensorDescriptor_t addCDesc = nullptr;
+  miopenTensorDescriptor_t biasDesc = nullptr;
 
   // Descriptors for miopenT5LayerNormForward
   miopenTensorDescriptor_t xDesc = nullptr;
@@ -99,7 +120,7 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
   miopenTensorDescriptor_t rstdDesc = nullptr;
 
   // =========================================================================
-  // Step 1: Element-wise add — skip_output = input + skip
+  // Step 1: Element-wise add — skip_buf = input + skip
   // =========================================================================
   RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: step 1 — "
                     "miopenOpTensor(ADD) for %lld elements\n",
@@ -120,14 +141,40 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
     float alpha1 = 1.0f, alpha2 = 1.0f, beta = 0.0f;
     MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha1, addADesc,
                                 input, &alpha2, addBDesc, skip, &beta, addCDesc,
-                                skip_output));
+                                skip_buf));
   }
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: step 1 completed "
                     "(add)\n");
 
   // =========================================================================
-  // Step 2: T5 RMS norm — output = RMSNorm(skip_output) * gamma
+  // Step 1b (optional): Add bias — skip_buf = skip_buf + bias
+  // =========================================================================
+  if (bias) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: step 1b — "
+                      "adding bias (%lld elements, broadcast)\n",
+                      (long long)hidden_dim);
+
+    MIOPEN_CHECK(miopenCreateTensorDescriptor(&biasDesc));
+    {
+      int n = static_cast<int>(hidden_dim);
+      MIOPEN_CHECK(
+          miopenSet4dTensorDescriptor(biasDesc, data_type, 1, 1, 1, n));
+    }
+
+    {
+      float alpha1 = 1.0f, alpha2 = 1.0f, beta = 0.0f;
+      MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha1, addCDesc,
+                                  skip_buf, &alpha2, biasDesc, bias, &beta,
+                                  addCDesc, skip_buf));
+    }
+
+    RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: step 1b "
+                      "completed (bias add)\n");
+  }
+
+  // =========================================================================
+  // Step 2: T5 RMS norm — output = RMSNorm(skip_buf) * gamma
   // =========================================================================
   RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: step 2 — "
                     "miopenT5LayerNormForward(eps=%e)\n",
@@ -170,8 +217,8 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
   }
 
   MIOPEN_CHECK(miopenT5LayerNormForward(
-      handle, MIOPEN_ELEMENTWISE_AFFINE_T5, xDesc, skip_output, weightDesc,
-      gamma, epsilon, yDesc, output, rstdDesc, rstd_buf));
+      handle, MIOPEN_ELEMENTWISE_AFFINE_T5, xDesc, skip_buf, weightDesc, gamma,
+      epsilon, yDesc, output, rstdDesc, rstd_buf));
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: completed "
                     "successfully\n");
@@ -184,6 +231,8 @@ cleanup:
     miopenDestroyTensorDescriptor(addBDesc);
   if (addCDesc)
     miopenDestroyTensorDescriptor(addCDesc);
+  if (biasDesc)
+    miopenDestroyTensorDescriptor(biasDesc);
   if (xDesc)
     miopenDestroyTensorDescriptor(xDesc);
   if (weightDesc)
@@ -194,6 +243,8 @@ cleanup:
     miopenDestroyTensorDescriptor(rstdDesc);
   if (rstd_buf)
     hipFree(rstd_buf);
+  if (owns_skip_buf && tmp_skip_buf)
+    hipFree(tmp_skip_buf);
 
   return result;
 }

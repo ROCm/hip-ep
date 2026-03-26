@@ -476,10 +476,13 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
                                   int64_t element_size_bytes, int64_t axis,
                                   float epsilon, int64_t stash_type);
 
-// SkipSimplifiedLayerNormalization operation wrapper
+// SkipSimplifiedLayerNormalization operation wrapper (Full MS spec)
+// Computes: input_skip_bias_sum = input + skip [+ bias]
+//           output = RMSNorm(input_skip_bias_sum) * gamma
+// bias and input_skip_bias_sum may be nullptr (optional per MS spec)
 int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
-                                    void *skip, void *gamma, void *output,
-                                    void *skip_output,
+                                    void *skip, void *gamma, void *bias,
+                                    void *output, void *input_skip_bias_sum,
                                     int64_t input_num_elements,
                                     int64_t gamma_num_elements,
                                     int64_t element_size_bytes, float epsilon);
