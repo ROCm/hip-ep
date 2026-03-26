@@ -86,14 +86,14 @@ __declspec(dllexport)
   if (miopenCreate(&miopen_handle) != miopenStatusSuccess) {
     fprintf(stderr,
             "[Model DLL Manual] ERROR: Failed to create MIOpen handle\n");
-    hipStreamDestroy(stream);
+    (void)hipStreamDestroy(stream);
     return 7;
   }
 
   if (miopenSetStream(miopen_handle, stream) != miopenStatusSuccess) {
     fprintf(stderr, "[Model DLL Manual] ERROR: Failed to set MIOpen stream\n");
     miopenDestroy(miopen_handle);
-    hipStreamDestroy(stream);
+    (void)hipStreamDestroy(stream);
     return 8;
   }
 
@@ -112,7 +112,7 @@ __declspec(dllexport)
           stderr,
           "[Model DLL Manual] ERROR: gcnArchName became EMPTY after MIOpen!\n");
       miopenDestroy(miopen_handle);
-      hipStreamDestroy(stream);
+      (void)hipStreamDestroy(stream);
       return 1;
     }
   }
@@ -124,7 +124,7 @@ __declspec(dllexport)
     fprintf(stderr,
             "[Model DLL Manual] ERROR: Failed to create hipBLASLt handle\n");
     miopenDestroy(miopen_handle);
-    hipStreamDestroy(stream);
+    (void)hipStreamDestroy(stream);
     return 9;
   }
 
@@ -134,7 +134,7 @@ __declspec(dllexport)
       "[Model DLL Manual] All initialization steps completed successfully!\n");
   hipblasLtDestroy(hipblas_handle);
   miopenDestroy(miopen_handle);
-  hipStreamDestroy(stream);
+  (void)hipStreamDestroy(stream);
 
   return 0; // Success
 }
