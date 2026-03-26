@@ -1347,7 +1347,7 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
     return val; // Valid operand
   };
 
-  // === Extract Inputs (按MS GQA规范顺序1-14) ===
+  // === Extract Inputs (MS GQA spec order 1-14) ===
 
   // Input 1: query (required)
   mlir::Value query = op->getOperand(0);
@@ -1383,14 +1383,19 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
 
   // === Extract Attributes ===
 
-  // Required attributes
-  auto numHeadsAttr = op->getAttrOfType<mlir::IntegerAttr>("num_heads");
-  if (!numHeadsAttr)
+  // Required attributes - extract value and recreate as signless i64
+  auto numHeadsAttrOnnx = op->getAttrOfType<mlir::IntegerAttr>("num_heads");
+  if (!numHeadsAttrOnnx)
     return rewriter.notifyMatchFailure(op, "missing num_heads attribute");
+  auto numHeadsAttr =
+      rewriter.getI64IntegerAttr(numHeadsAttrOnnx.getValue().getSExtValue());
 
-  auto kvNumHeadsAttr = op->getAttrOfType<mlir::IntegerAttr>("kv_num_heads");
-  if (!kvNumHeadsAttr)
+  auto kvNumHeadsAttrOnnx =
+      op->getAttrOfType<mlir::IntegerAttr>("kv_num_heads");
+  if (!kvNumHeadsAttrOnnx)
     return rewriter.notifyMatchFailure(op, "missing kv_num_heads attribute");
+  auto kvNumHeadsAttr =
+      rewriter.getI64IntegerAttr(kvNumHeadsAttrOnnx.getValue().getSExtValue());
 
   // Optional attributes (with default values)
   auto getFloatAttr = [&](const char *name,
@@ -1402,7 +1407,9 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   auto getI64Attr = [&](const char *name,
                         int64_t defaultVal) -> mlir::IntegerAttr {
     auto attr = op->getAttrOfType<mlir::IntegerAttr>(name);
-    return attr ? attr : rewriter.getI64IntegerAttr(defaultVal);
+    // Convert ONNX signed integer to signless integer for HIP dialect
+    return attr ? rewriter.getI64IntegerAttr(attr.getValue().getSExtValue())
+                : rewriter.getI64IntegerAttr(defaultVal);
   };
 
   auto getStrAttr = [&](const char *name,
@@ -1465,26 +1472,39 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
     resultTypes.push_back(outputQkType);
 
   // Build operands: context + inputs + outputs
+  // Note: Only add non-null operands (optional ones may be nullptr)
   mlir::SmallVector<mlir::Value> operands;
   operands.push_back(context);
   operands.push_back(query);
-  operands.push_back(key);
-  operands.push_back(value);
-  operands.push_back(pastKey);
-  operands.push_back(pastValue);
+  if (key)
+    operands.push_back(key);
+  if (value)
+    operands.push_back(value);
+  if (pastKey)
+    operands.push_back(pastKey);
+  if (pastValue)
+    operands.push_back(pastValue);
   operands.push_back(seqlensK);
   operands.push_back(totalSeqLen);
-  operands.push_back(cosCache);
-  operands.push_back(sinCache);
-  operands.push_back(positionIds);
-  operands.push_back(attentionBias);
-  operands.push_back(headSink);
-  operands.push_back(kScale);
-  operands.push_back(vScale);
+  if (cosCache)
+    operands.push_back(cosCache);
+  if (sinCache)
+    operands.push_back(sinCache);
+  if (positionIds)
+    operands.push_back(positionIds);
+  if (attentionBias)
+    operands.push_back(attentionBias);
+  if (headSink)
+    operands.push_back(headSink);
+  if (kScale)
+    operands.push_back(kScale);
+  if (vScale)
+    operands.push_back(vScale);
   operands.push_back(outputInit);
   operands.push_back(presentKeyInit);
   operands.push_back(presentValueInit);
-  operands.push_back(outputQkInit);
+  if (outputQkInit)
+    operands.push_back(outputQkInit);
 
   // Build named attributes
   mlir::SmallVector<mlir::NamedAttribute> attrs;
