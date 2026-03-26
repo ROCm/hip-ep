@@ -354,9 +354,7 @@ void SkipRmsNormOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-LogicalResult SkipRmsNormOp::verify() {
-  return success();
-}
+LogicalResult SkipRmsNormOp::verify() { return success(); }
 
 //===----------------------------------------------------------------------===//
 // RopeOp: ins(input, position_ids, cos_cache, sin_cache), outs(output)

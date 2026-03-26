@@ -705,8 +705,7 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     Value gammaPtr = extractMemRefPtr(adaptor.getGamma(), rewriter, loc);
     Value biasPtr = getMemRefPtrOrNull(adaptor.getBias());
     Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
-    Value skipOutputPtr =
-        getMemRefPtrOrNull(adaptor.getInputSkipBiasSum());
+    Value skipOutputPtr = getMemRefPtrOrNull(adaptor.getInputSkipBiasSum());
 
     // Compute num_elements for input and gamma
     auto inputType = cast<MemRefType>(op.getInput().getType());
@@ -748,11 +747,12 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {
-        statePtr,         inputPtr,         skipPtr,
-        gammaPtr,         biasPtr,          outputPtr,
-        skipOutputPtr,    inputNumElements, gammaNumElements,
-        elementSizeBytesVal, epsilonVal};
+    SmallVector<Value> args = {statePtr,         inputPtr,
+                               skipPtr,          gammaPtr,
+                               biasPtr,          outputPtr,
+                               skipOutputPtr,    inputNumElements,
+                               gammaNumElements, elementSizeBytesVal,
+                               epsilonVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

@@ -643,8 +643,7 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
              "bias=%s, input_skip_bias_sum=%s)\n",
              (long long)input_num_elements, (long long)gamma_num_elements,
              (long long)element_size_bytes, (double)epsilon,
-             bias ? "yes" : "no",
-             input_skip_bias_sum ? "yes" : "no");
+             bias ? "yes" : "no", input_skip_bias_sum ? "yes" : "no");
 
   return 0;
 }
