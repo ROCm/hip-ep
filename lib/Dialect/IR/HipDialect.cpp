@@ -591,7 +591,8 @@ void QMoEOp::getEffects(
 
 //===----------------------------------------------------------------------===//
 // GqaOp: Full MS spec implementation
-//        ins(query, [key, value, past_key, past_value], seqlens_k, total_seq_len,
+//        ins(query, [key, value, past_key, past_value], seqlens_k,
+//        total_seq_len,
 //            [cos_cache, sin_cache, position_ids, attention_bias, head_sink,
 //             k_scale, v_scale])
 //        outs(output, present_key, present_value, [output_qk])
@@ -606,24 +607,39 @@ MutableOperandRange GqaOp::getDpsInitsMutable() {
 
   // Count actual inputs (skip ctx which is always first)
   unsigned numInputs = 1; // ctx
-  if (getQuery()) ++numInputs;
-  if (getKey()) ++numInputs;
-  if (getValue()) ++numInputs;
-  if (getPastKey()) ++numInputs;
-  if (getPastValue()) ++numInputs;
-  if (getSeqlensK()) ++numInputs;
-  if (getTotalSeqLen()) ++numInputs;
-  if (getCosCache()) ++numInputs;
-  if (getSinCache()) ++numInputs;
-  if (getPositionIds()) ++numInputs;
-  if (getAttentionBias()) ++numInputs;
-  if (getHeadSink()) ++numInputs;
-  if (getKScale()) ++numInputs;
-  if (getVScale()) ++numInputs;
+  if (getQuery())
+    ++numInputs;
+  if (getKey())
+    ++numInputs;
+  if (getValue())
+    ++numInputs;
+  if (getPastKey())
+    ++numInputs;
+  if (getPastValue())
+    ++numInputs;
+  if (getSeqlensK())
+    ++numInputs;
+  if (getTotalSeqLen())
+    ++numInputs;
+  if (getCosCache())
+    ++numInputs;
+  if (getSinCache())
+    ++numInputs;
+  if (getPositionIds())
+    ++numInputs;
+  if (getAttentionBias())
+    ++numInputs;
+  if (getHeadSink())
+    ++numInputs;
+  if (getKScale())
+    ++numInputs;
+  if (getVScale())
+    ++numInputs;
 
   // DPS inits: output, present_key, present_value, [output_qk]
   unsigned numInits = 3;
-  if (getOutputQk()) numInits = 4;
+  if (getOutputQk())
+    numInits = 4;
 
   return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/numInits);
 }
@@ -641,26 +657,28 @@ LogicalResult GqaOp::verify() {
 
   // If k_quant_type != "NONE", k_scale must be provided
   if (kQuantType != "NONE" && !getKScale()) {
-    return emitOpError("k_quant_type is '") << kQuantType
-           << "' but k_scale is not provided";
+    return emitOpError("k_quant_type is '")
+           << kQuantType << "' but k_scale is not provided";
   }
 
   // If v_quant_type != "NONE", v_scale must be provided
   if (vQuantType != "NONE" && !getVScale()) {
-    return emitOpError("v_quant_type is '") << vQuantType
-           << "' but v_scale is not provided";
+    return emitOpError("v_quant_type is '")
+           << vQuantType << "' but v_scale is not provided";
   }
 
   // Verify quant_type values
   if (kQuantType != "NONE" && kQuantType != "PER_TENSOR" &&
       kQuantType != "PER_CHANNEL") {
-    return emitOpError("k_quant_type must be 'NONE', 'PER_TENSOR', or 'PER_CHANNEL', got '")
+    return emitOpError("k_quant_type must be 'NONE', 'PER_TENSOR', or "
+                       "'PER_CHANNEL', got '")
            << kQuantType << "'";
   }
 
   if (vQuantType != "NONE" && vQuantType != "PER_TENSOR" &&
       vQuantType != "PER_CHANNEL") {
-    return emitOpError("v_quant_type must be 'NONE', 'PER_TENSOR', or 'PER_CHANNEL', got '")
+    return emitOpError("v_quant_type must be 'NONE', 'PER_TENSOR', or "
+                       "'PER_CHANNEL', got '")
            << vQuantType << "'";
   }
 
@@ -678,8 +696,8 @@ LogicalResult GqaOp::verify() {
 
   // If qk_output != 0, output_qk must be provided
   if (qkOutput != 0 && !getOutputQk()) {
-    return emitOpError("qk_output is ") << qkOutput
-           << " but output_qk buffer is not provided";
+    return emitOpError("qk_output is ")
+           << qkOutput << " but output_qk buffer is not provided";
   }
 
   return success();

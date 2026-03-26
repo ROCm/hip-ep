@@ -1325,8 +1325,9 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   mlir::Location loc = op->getLoc();
 
   // Support variable operand count (7-14 inputs as per MS spec)
-  // Minimum 7: query, key, value, past_key, past_value, seqlens_k, total_seq_len
-  // Maximum 14: + cos_cache, sin_cache, position_ids, attention_bias, head_sink, k_scale, v_scale
+  // Minimum 7: query, key, value, past_key, past_value, seqlens_k,
+  // total_seq_len Maximum 14: + cos_cache, sin_cache, position_ids,
+  // attention_bias, head_sink, k_scale, v_scale
   size_t numOps = op->getNumOperands();
   if (numOps < 7 || numOps > 14)
     return rewriter.notifyMatchFailure(
@@ -1335,7 +1336,7 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   // Helper: get optional operand (check for NoneType)
   auto getOptionalOperand = [&](size_t idx) -> mlir::Value {
     if (idx >= numOps)
-      return nullptr;  // Operand not provided (trailing optionals omitted)
+      return nullptr; // Operand not provided (trailing optionals omitted)
 
     mlir::Value val = op->getOperand(idx);
 
@@ -1343,7 +1344,7 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
     if (mlir::isa<mlir::NoneType>(val.getType()))
       return nullptr;
 
-    return val;  // Valid operand
+    return val; // Valid operand
   };
 
   // === Extract Inputs (按MS GQA规范顺序1-14) ===
@@ -1392,17 +1393,20 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
     return rewriter.notifyMatchFailure(op, "missing kv_num_heads attribute");
 
   // Optional attributes (with default values)
-  auto getFloatAttr = [&](const char *name, float defaultVal) -> mlir::FloatAttr {
+  auto getFloatAttr = [&](const char *name,
+                          float defaultVal) -> mlir::FloatAttr {
     auto attr = op->getAttrOfType<mlir::FloatAttr>(name);
     return attr ? attr : rewriter.getF32FloatAttr(defaultVal);
   };
 
-  auto getI64Attr = [&](const char *name, int64_t defaultVal) -> mlir::IntegerAttr {
+  auto getI64Attr = [&](const char *name,
+                        int64_t defaultVal) -> mlir::IntegerAttr {
     auto attr = op->getAttrOfType<mlir::IntegerAttr>(name);
     return attr ? attr : rewriter.getI64IntegerAttr(defaultVal);
   };
 
-  auto getStrAttr = [&](const char *name, const char *defaultVal) -> mlir::StringAttr {
+  auto getStrAttr = [&](const char *name,
+                        const char *defaultVal) -> mlir::StringAttr {
     auto attr = op->getAttrOfType<mlir::StringAttr>(name);
     return attr ? attr : rewriter.getStringAttr(defaultVal);
   };
@@ -1418,7 +1422,8 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   auto vQuantTypeAttr = getStrAttr("v_quant_type", "NONE");
   auto kvCacheBitWidthAttr = getI64Attr("kv_cache_bit_width", 8);
 
-  // === Check Outputs (3 or 4: output, present_key, present_value, [output_qk]) ===
+  // === Check Outputs (3 or 4: output, present_key, present_value, [output_qk])
+  // ===
 
   size_t numResults = op->getNumResults();
   if (numResults < 3 || numResults > 4)
@@ -1434,15 +1439,17 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
 
   mlir::RankedTensorType outputQkType = nullptr;
   if (numResults == 4)
-    outputQkType = mlir::cast<mlir::RankedTensorType>(op->getResult(3).getType());
+    outputQkType =
+        mlir::cast<mlir::RankedTensorType>(op->getResult(3).getType());
 
   // === Create DPS init tensors ===
 
   mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, query);
   mlir::Value presentKeyInit = createEmptyTensor(
       rewriter, loc, presentKeyType, pastKey ? pastKey : (key ? key : query));
-  mlir::Value presentValueInit = createEmptyTensor(
-      rewriter, loc, presentValueType, pastValue ? pastValue : (value ? value : query));
+  mlir::Value presentValueInit =
+      createEmptyTensor(rewriter, loc, presentValueType,
+                        pastValue ? pastValue : (value ? value : query));
 
   mlir::Value outputQkInit = nullptr;
   if (outputQkType)
@@ -1485,36 +1492,42 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   attrs.push_back(rewriter.getNamedAttr("kv_num_heads", kvNumHeadsAttr));
   attrs.push_back(rewriter.getNamedAttr("scale", scaleAttr));
   attrs.push_back(rewriter.getNamedAttr("do_rotary", doRotaryAttr));
-  attrs.push_back(rewriter.getNamedAttr("rotary_interleaved", rotaryInterleavedAttr));
+  attrs.push_back(
+      rewriter.getNamedAttr("rotary_interleaved", rotaryInterleavedAttr));
   attrs.push_back(rewriter.getNamedAttr("softcap", softcapAttr));
-  attrs.push_back(rewriter.getNamedAttr("local_window_size", localWindowSizeAttr));
+  attrs.push_back(
+      rewriter.getNamedAttr("local_window_size", localWindowSizeAttr));
   attrs.push_back(rewriter.getNamedAttr("smooth_softmax", smoothSoftmaxAttr));
   attrs.push_back(rewriter.getNamedAttr("qk_output", qkOutputAttr));
   attrs.push_back(rewriter.getNamedAttr("k_quant_type", kQuantTypeAttr));
   attrs.push_back(rewriter.getNamedAttr("v_quant_type", vQuantTypeAttr));
-  attrs.push_back(rewriter.getNamedAttr("kv_cache_bit_width", kvCacheBitWidthAttr));
+  attrs.push_back(
+      rewriter.getNamedAttr("kv_cache_bit_width", kvCacheBitWidthAttr));
 
   // Create operation using builder
-  // We need to compute the operand_segment_sizes attribute for AttrSizedOperandSegments
+  // We need to compute the operand_segment_sizes attribute for
+  // AttrSizedOperandSegments
   auto state = mlir::OperationState(loc, "hip.gqa");
   state.addOperands(operands);
   state.addAttributes(attrs);
   state.addTypes(resultTypes);
 
   // Add operand_segment_sizes for AttrSizedOperandSegments trait
-  // Segments: [ctx(1), query(1), key(0|1), value(0|1), past_key(0|1), past_value(0|1),
+  // Segments: [ctx(1), query(1), key(0|1), value(0|1), past_key(0|1),
+  // past_value(0|1),
   //            seqlens_k(1), total_seq_len(1), cos_cache(0|1), sin_cache(0|1),
-  //            position_ids(0|1), attention_bias(0|1), head_sink(0|1), k_scale(0|1),
-  //            v_scale(0|1), output(1), present_key(1), present_value(1), output_qk(0|1)]
+  //            position_ids(0|1), attention_bias(0|1), head_sink(0|1),
+  //            k_scale(0|1), v_scale(0|1), output(1), present_key(1),
+  //            present_value(1), output_qk(0|1)]
   llvm::SmallVector<int32_t> segmentSizes;
-  segmentSizes.push_back(1);  // ctx
-  segmentSizes.push_back(1);  // query
+  segmentSizes.push_back(1); // ctx
+  segmentSizes.push_back(1); // query
   segmentSizes.push_back(key ? 1 : 0);
   segmentSizes.push_back(value ? 1 : 0);
   segmentSizes.push_back(pastKey ? 1 : 0);
   segmentSizes.push_back(pastValue ? 1 : 0);
-  segmentSizes.push_back(1);  // seqlens_k
-  segmentSizes.push_back(1);  // total_seq_len
+  segmentSizes.push_back(1); // seqlens_k
+  segmentSizes.push_back(1); // total_seq_len
   segmentSizes.push_back(cosCache ? 1 : 0);
   segmentSizes.push_back(sinCache ? 1 : 0);
   segmentSizes.push_back(positionIds ? 1 : 0);
@@ -1522,10 +1535,10 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   segmentSizes.push_back(headSink ? 1 : 0);
   segmentSizes.push_back(kScale ? 1 : 0);
   segmentSizes.push_back(vScale ? 1 : 0);
-  segmentSizes.push_back(1);  // output
-  segmentSizes.push_back(1);  // present_key
-  segmentSizes.push_back(1);  // present_value
-  segmentSizes.push_back(outputQkInit ? 1 : 0);  // output_qk
+  segmentSizes.push_back(1);                    // output
+  segmentSizes.push_back(1);                    // present_key
+  segmentSizes.push_back(1);                    // present_value
+  segmentSizes.push_back(outputQkInit ? 1 : 0); // output_qk
 
   state.addAttribute("operand_segment_sizes",
                      rewriter.getDenseI32ArrayAttr(segmentSizes));

@@ -392,28 +392,22 @@ cleanup:
 int wrap_group_query_attention(
     RuntimeState *state,
     // Inputs 1-7 (core GQA)
-    void *query, void *key, void *value,
-    void *past_key, void *past_value,
+    void *query, void *key, void *value, void *past_key, void *past_value,
     void *seqlens_k, void *total_seq_len,
     // Inputs 8-10 (RoPE)
     void *cos_cache, void *sin_cache, void *position_ids,
     // Inputs 11-14 (advanced features)
-    void *attention_bias, void *head_sink,
-    void *k_scale, void *v_scale,
+    void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
     // Outputs
     void *output, void *present_key, void *present_value, void *output_qk,
     // Attributes (12)
-    int64_t num_heads, int64_t kv_num_heads,
-    float scale,
-    int64_t do_rotary, int64_t rotary_interleaved,
-    float softcap,
-    int64_t local_window_size,
-    int64_t smooth_softmax, int64_t qk_output,
-    int64_t k_quant_type, int64_t v_quant_type,
-    int64_t kv_cache_bit_width,
+    int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
+    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
+    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
+    int64_t v_quant_type, int64_t kv_cache_bit_width,
     // Shape values (5)
-    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
-    int64_t head_dim, int64_t element_size_bytes) {
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv, int64_t head_dim,
+    int64_t element_size_bytes) {
 
   if (!state) {
     fprintf(stderr, "wrap_group_query_attention: null state\n");
@@ -470,13 +464,15 @@ int wrap_group_query_attention(
     RUNTIME_DEBUG_LOG("[WARN] head_sink not yet implemented (Phase 2)\n");
   }
   if (k_scale != nullptr || v_scale != nullptr) {
-    RUNTIME_DEBUG_LOG("[WARN] KV cache quantization not yet implemented (Phase 2)\n");
+    RUNTIME_DEBUG_LOG(
+        "[WARN] KV cache quantization not yet implemented (Phase 2)\n");
   }
   if (output_qk != nullptr) {
     RUNTIME_DEBUG_LOG("[WARN] output_qk not yet implemented (Phase 2)\n");
   }
   if (local_window_size != -1) {
-    RUNTIME_DEBUG_LOG("[WARN] local_window_size not yet implemented (Phase 2)\n");
+    RUNTIME_DEBUG_LOG(
+        "[WARN] local_window_size not yet implemented (Phase 2)\n");
   }
   if (smooth_softmax != 0) {
     RUNTIME_DEBUG_LOG("[WARN] smooth_softmax not yet implemented (Phase 2)\n");
@@ -485,7 +481,8 @@ int wrap_group_query_attention(
     RUNTIME_DEBUG_LOG("[WARN] qk_output not yet implemented (Phase 2)\n");
   }
   if (k_quant_type != 0 || v_quant_type != 0) {
-    RUNTIME_DEBUG_LOG("[WARN] quantization types not yet implemented (Phase 2)\n");
+    RUNTIME_DEBUG_LOG(
+        "[WARN] quantization types not yet implemented (Phase 2)\n");
   }
   if (kv_cache_bit_width != 8) {
     RUNTIME_DEBUG_LOG("[WARN] non-8bit cache not yet implemented (Phase 2)\n");
