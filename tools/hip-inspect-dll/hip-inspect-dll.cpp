@@ -19,7 +19,7 @@
 #include "../common/DllLoader.h"
 #ifdef _MSC_VER
 #pragma warning(push)
-#pragma warning(disable: 4244)  // Conversion warnings in LLVM JSON.h
+#pragma warning(disable : 4244) // Conversion warnings in LLVM JSON.h
 #endif
 #include "llvm/Support/JSON.h"
 #ifdef _MSC_VER
