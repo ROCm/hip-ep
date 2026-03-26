@@ -556,16 +556,19 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
 
 int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis, int64_t data_num_elements,
-                int64_t output_num_elements, int64_t element_size_bytes) {
+                int64_t indices_num_elements, int64_t output_num_elements,
+                int64_t element_size_bytes) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_gather\n");
     return -1;
   }
 
   MOCK_PRINT("[MOCK] wrap_gather(axis=%lld, data_num_elements=%lld, "
-             "output_num_elements=%lld, element_size=%lld)\n",
+             "indices_num_elements=%lld, output_num_elements=%lld, "
+             "element_size=%lld)\n",
              (long long)axis, (long long)data_num_elements,
-             (long long)output_num_elements, (long long)element_size_bytes);
+             (long long)indices_num_elements, (long long)output_num_elements,
+             (long long)element_size_bytes);
 
   return 0;
 }

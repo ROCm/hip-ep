@@ -1025,6 +1025,11 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
     Value dataNumElementsVal =
         computeNumElements(dataType, adaptor.getData(), rewriter, loc);
 
+    // Compute indices_num_elements
+    auto indicesType = cast<MemRefType>(op.getIndices().getType());
+    Value indicesNumElementsVal =
+        computeNumElements(indicesType, adaptor.getIndices(), rewriter, loc);
+
     // Compute output_num_elements
     auto outputType = cast<MemRefType>(op.getOutput().getType());
     Value outputNumElementsVal =
@@ -1042,9 +1047,11 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
 
     // int wrap_gather(RuntimeState* state, void* data, void* indices,
     //                 void* output, int64_t axis, int64_t data_num_elements,
-    //                 int64_t output_num_elements, int64_t element_size_bytes)
-    SmallVector<Type, 8> paramTypes = {ptrType, ptrType, ptrType, ptrType,
-                                       i64Type, i64Type, i64Type, i64Type};
+    //                 int64_t indices_num_elements, int64_t output_num_elements,
+    //                 int64_t element_size_bytes)
+    SmallVector<Type, 9> paramTypes = {ptrType, ptrType, ptrType, ptrType,
+                                       i64Type, i64Type, i64Type, i64Type,
+                                       i64Type};
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapGather, paramTypes, i32Type);
@@ -1057,6 +1064,7 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
                                outputPtr,
                                axisVal,
                                dataNumElementsVal,
+                               indicesNumElementsVal,
                                outputNumElementsVal,
                                elemSizeVal};
 

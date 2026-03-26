@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2023 - 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
 
@@ -10,26 +10,29 @@
 #include <cstdint>
 #include <cstdio>
 
-// Generic gather kernel for axis=0 with a single scalar index.
-// T is the element type used for copying (uint16_t, uint32_t, int64_t).
-// Indices are always i64.
+// Generic gather kernel for axis=0 with arbitrary number of indices.
+// Each thread copies one element of the output tensor.
+// Thread tid maps to: index_idx = tid / slice_size, offset = tid % slice_size.
+// output[tid] = data[indices[index_idx] * slice_size + offset]
 template <typename T>
 __global__ void gather_axis0_kernel(
     const T* __restrict__ data,
     const int64_t* __restrict__ indices,
     T* __restrict__ output,
     int64_t slice_size,
-    int64_t data_axis_size) {
-  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (idx < slice_size) {
-    int64_t index_val = indices[0];
+    int64_t data_axis_size,
+    int64_t total_elements) {
+  int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (tid < total_elements) {
+    int64_t index_idx = tid / slice_size;
+    int64_t offset = tid % slice_size;
+    int64_t index_val = indices[index_idx];
     if (index_val < 0) index_val += data_axis_size;
     if (index_val < 0 || index_val >= data_axis_size) {
-      output[idx] = T(0);
+      output[tid] = T(0);
       return;
     }
-    int64_t src_offset = index_val * slice_size + idx;
-    output[idx] = data[src_offset];
+    output[tid] = data[index_val * slice_size + offset];
   }
 }
 
@@ -40,6 +43,7 @@ extern "C" int hip_gather(
     void* output,
     int64_t axis,
     int64_t data_num_elements,
+    int64_t indices_num_elements,
     int64_t output_num_elements,
     int element_size_bytes) {
   if (output_num_elements <= 0) return 0;
@@ -56,15 +60,24 @@ extern "C" int hip_gather(
     return -1;
   }
 
-  int64_t slice_size = output_num_elements;
-  int64_t data_axis_size = data_num_elements / slice_size;
+  // For axis=0: output = [indices_shape..., data_shape[1:]]
+  // slice_size = product of data dimensions after axis 0
+  // data_axis_size = data_shape[0]
+  int64_t slice_size = (indices_num_elements > 0)
+      ? output_num_elements / indices_num_elements
+      : output_num_elements;
+  int64_t data_axis_size = (slice_size > 0)
+      ? data_num_elements / slice_size
+      : 0;
 
   CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_gather: axis=0, elem_size=%d, "
-          "data_num=%lld, output_num=%lld, data_axis_size=%lld, "
-          "grid=%d, block=%d\n",
+          "data_num=%lld, indices_num=%lld, output_num=%lld, "
+          "slice_size=%lld, data_axis_size=%lld, grid=%d, block=%d\n",
           element_size_bytes,
-          (long long)data_num_elements, (long long)output_num_elements,
-          (long long)data_axis_size, grid_size, kBlockSize);
+          (long long)data_num_elements, (long long)indices_num_elements,
+          (long long)output_num_elements,
+          (long long)slice_size, (long long)data_axis_size,
+          grid_size, kBlockSize);
 
   switch (element_size_bytes) {
     case 2:
@@ -73,7 +86,7 @@ extern "C" int hip_gather(
                          static_cast<const uint16_t*>(data),
                          static_cast<const int64_t*>(indices),
                          static_cast<uint16_t*>(output),
-                         slice_size, data_axis_size);
+                         slice_size, data_axis_size, output_num_elements);
       break;
     case 4:
       hipLaunchKernelGGL(gather_axis0_kernel<uint32_t>,
@@ -81,7 +94,7 @@ extern "C" int hip_gather(
                          static_cast<const uint32_t*>(data),
                          static_cast<const int64_t*>(indices),
                          static_cast<uint32_t*>(output),
-                         slice_size, data_axis_size);
+                         slice_size, data_axis_size, output_num_elements);
       break;
     case 8:
       hipLaunchKernelGGL(gather_axis0_kernel<int64_t>,
@@ -89,7 +102,7 @@ extern "C" int hip_gather(
                          static_cast<const int64_t*>(data),
                          static_cast<const int64_t*>(indices),
                          static_cast<int64_t*>(output),
-                         slice_size, data_axis_size);
+                         slice_size, data_axis_size, output_num_elements);
       break;
     default:
       fprintf(stderr,

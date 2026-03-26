@@ -232,20 +232,24 @@ int hip_cast(
  * =========================================================================
  *
  * Gathers slices from data along the given axis using indices.
- * For axis=0 with scalar index:
- *   output[i] = data[index * output_num_elements + i]
+ * For axis=0:
+ *   slice_size = data_num_elements / data_shape[0]
+ *   For each index i in [0, indices_num_elements):
+ *     output[i*slice_size : (i+1)*slice_size] =
+ *       data[indices[i]*slice_size : (indices[i]+1)*slice_size]
  *
  * Parameters:
- *   stream              - hipStream_t cast to void*
- *   data                - GPU pointer to source tensor
- *   indices             - GPU pointer to index tensor (i64 values)
- *   output              - GPU pointer to output
- *   axis                - axis along which to gather
- *   data_num_elements   - total elements in data tensor
- *   output_num_elements - total elements in output tensor
- *   element_size_bytes  - byte size per element (used for raw copy)
+ *   stream                - hipStream_t cast to void*
+ *   data                  - GPU pointer to source tensor
+ *   indices               - GPU pointer to index tensor (i64 values)
+ *   output                - GPU pointer to output
+ *   axis                  - axis along which to gather
+ *   data_num_elements     - total elements in data tensor
+ *   indices_num_elements  - total elements in indices tensor
+ *   output_num_elements   - total elements in output tensor
+ *   element_size_bytes    - byte size per element (used for raw copy)
  *
- * Currently supports: axis=0, scalar (single-element) index
+ * Currently supports: axis=0
  * Supported element sizes: 2 (f16/bf16), 4 (f32/i32), 8 (i64/f64)
  * Returns: 0 on success, non-zero on failure
  */
@@ -256,6 +260,7 @@ int hip_gather(
     void* output,
     int64_t axis,
     int64_t data_num_elements,
+    int64_t indices_num_elements,
     int64_t output_num_elements,
     int element_size_bytes);
 
