@@ -564,6 +564,32 @@ void ReduceSumOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// MatMulNBitsOp
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MatMulNBitsOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void MatMulNBitsOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// QMoEOp
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QMoEOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void QMoEOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // GqaOp: ins(query, key, value, past_key, past_value, seqlens_k, total_seq_len)
 //        outs(output, present_key, present_value)
 //===----------------------------------------------------------------------===//
