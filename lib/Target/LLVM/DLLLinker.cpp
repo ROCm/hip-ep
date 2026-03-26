@@ -171,12 +171,15 @@ bool DLLLinker::linkDLL_Windows(const std::string &objectFile,
     }
   }
 
-  // MSVC C Runtime import libraries required for any DLL that uses the
-  // C/C++ standard library (heap, stdio, exceptions). The debug variants
-  // ("d" suffix) match the /MDd flag so the DLL shares CRT state with the
-  // host process. kernel32/user32 provide Win32 API basics.
-  for (const char *sysLib : {"msvcrtd.lib", "ucrtd.lib", "vcruntimed.lib",
-                             "oldnames.lib", "kernel32.lib", "user32.lib"})
+  // Suppress all /defaultlib directives embedded in the .obj by the compiler
+  // (e.g. libcmtd, vcruntimed from debug-mode LLVM codegen) and supply only
+  // the release CRT import libraries explicitly.  This ensures the JIT-compiled
+  // DLL loads on machines without VS installed (debug CRT DLLs such as
+  // ucrtbased.dll and VCRUNTIME140D.dll are not redistributable).
+  argStrings.push_back("/NODEFAULTLIB");
+  for (const char *sysLib :
+       {"msvcrt.lib", "ucrt.lib", "vcruntime.lib", "oldnames.lib",
+        "libcpmt.lib", "libcmt.lib", "kernel32.lib", "user32.lib"})
     argStrings.push_back(sysLib);
 
   // Add default libraries and flags

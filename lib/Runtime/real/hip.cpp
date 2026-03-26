@@ -7,7 +7,8 @@
 
 #include <cstdio>
 
-// Error checking macro
+// Note: These simple wrapper functions don't need cleanup, so we use a local
+// HIP_CHECK that returns directly instead of the goto-based HIP_CHECK_GOTO
 #define HIP_CHECK(cmd)                                                         \
   do {                                                                         \
     hipError_t error = (cmd);                                                  \

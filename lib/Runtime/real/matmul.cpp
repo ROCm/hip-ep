@@ -4,30 +4,49 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "error_check_macros.h"
 #include "runtime_types.h"
 
 #include <cstdio>
 #include <cstring>
+#include <functional>
+#include <unordered_map>
+#include <vector>
 
-#define HIP_CHECK(cmd)                                                         \
-  do {                                                                         \
-    hipError_t error = (cmd);                                                  \
-    if (error != hipSuccess) {                                                 \
-      fprintf(stderr, "HIP error at %s:%d: %s\n", __FILE__, __LINE__,          \
-              hipGetErrorString(error));                                       \
-      return -1;                                                               \
-    }                                                                          \
-  } while (0)
+// Convenience wrappers for goto cleanup pattern (all functions use 'cleanup'
+// label)
+#define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
 
-#define HIPBLAS_CHECK(cmd)                                                     \
-  do {                                                                         \
-    hipblasStatus_t status = (cmd);                                            \
-    if (status != HIPBLAS_STATUS_SUCCESS) {                                    \
-      fprintf(stderr, "hipBLASLt error at %s:%d: %d\n", __FILE__, __LINE__,    \
-              status);                                                         \
-      return -1;                                                               \
-    }                                                                          \
-  } while (0)
+// =============================================================================
+// Algorithm cache: query heuristic once per unique problem shape, reuse after.
+// =============================================================================
+
+struct MatmulCacheKey {
+  int64_t M, N, K, batch_count, elem_size;
+  bool operator==(const MatmulCacheKey &o) const {
+    return M == o.M && N == o.N && K == o.K && batch_count == o.batch_count &&
+           elem_size == o.elem_size;
+  }
+};
+
+struct MatmulCacheKeyHash {
+  size_t operator()(const MatmulCacheKey &k) const {
+    size_t h = std::hash<int64_t>{}(k.M);
+    h ^= std::hash<int64_t>{}(k.N) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    h ^= std::hash<int64_t>{}(k.K) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    h ^= std::hash<int64_t>{}(k.batch_count) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    h ^= std::hash<int64_t>{}(k.elem_size) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    return h;
+  }
+};
+
+struct MatmulCacheEntry {
+  hipblasLtMatmulAlgo_t algo;
+  size_t workspace_size;
+};
+
+static std::unordered_map<MatmulCacheKey, MatmulCacheEntry, MatmulCacheKeyHash>
+    g_matmul_algo_cache;
 
 // =============================================================================
 // Batched MatMul via hipBLASLt
@@ -90,12 +109,25 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
     return -1;
   }
 
-  // Row-major → column-major trick: swap A/B and M/N
-  int64_t ld_A_hipblas = N; // leading dim of B viewed as col-major
-  int64_t ld_B_hipblas = K; // leading dim of A viewed as col-major
-  int64_t ld_C_hipblas = N; // leading dim of output viewed as col-major
+  // Initialize all resource pointers to nullptr for safe cleanup
+  hipblasLtMatrixLayout_t matA_layout = nullptr;
+  hipblasLtMatrixLayout_t matB_layout = nullptr;
+  hipblasLtMatrixLayout_t matC_layout = nullptr;
+  hipblasLtMatmulDesc_t matmul_desc = nullptr;
+  hipblasLtMatmulPreference_t pref = nullptr;
+  int result = 0;
+  float alpha = 1.0f;
+  float beta = 0.0f;
 
-  hipblasLtMatrixLayout_t matA_layout, matB_layout, matC_layout;
+  // Algorithm cache lookup -- declared before first goto-capable statement
+  MatmulCacheKey key{M, N, K, batch_count, elem_size};
+  auto it = g_matmul_algo_cache.find(key);
+
+  // Row-major -> column-major trick: swap A/B and M/N
+  int64_t ld_A_hipblas = N;
+  int64_t ld_B_hipblas = K;
+  int64_t ld_C_hipblas = N;
+
   HIPBLAS_CHECK(
       hipblasLtMatrixLayoutCreate(&matA_layout, data_type, N, K, ld_A_hipblas));
   HIPBLAS_CHECK(
@@ -104,9 +136,9 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
       hipblasLtMatrixLayoutCreate(&matC_layout, data_type, N, M, ld_C_hipblas));
 
   if (batch_count > 1) {
-    int64_t stride_A_hipblas = K * N; // stride over B batches
-    int64_t stride_B_hipblas = M * K; // stride over A batches
-    int64_t stride_C_hipblas = M * N; // stride over output batches
+    int64_t stride_A_hipblas = K * N;
+    int64_t stride_B_hipblas = M * K;
+    int64_t stride_C_hipblas = M * N;
 
     HIPBLAS_CHECK(hipblasLtMatrixLayoutSetAttribute(
         matA_layout, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count,
@@ -130,24 +162,83 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
         &stride_C_hipblas, sizeof(stride_C_hipblas)));
   }
 
-  hipblasLtMatmulDesc_t matmul_desc;
   HIPBLAS_CHECK(
       hipblasLtMatmulDescCreate(&matmul_desc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
 
-  float alpha = 1.0f;
-  float beta = 0.0f;
+  // -- Algorithm selection: first-call heuristic, cached for subsequent calls
+  // --
+  if (it == g_matmul_algo_cache.end()) {
+    HIPBLAS_CHECK(hipblasLtMatmulPreferenceCreate(&pref));
+    const size_t max_ws = 256ULL << 20; // 256 MB
+    HIPBLAS_CHECK(hipblasLtMatmulPreferenceSetAttribute(
+        pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_ws,
+        sizeof(max_ws)));
 
-  HIPBLAS_CHECK(hipblasLtMatmul(handle, matmul_desc, &alpha, B,
-                                matA_layout,    // "A" = B (row→col trick)
-                                A, matB_layout, // "B" = A (row→col trick)
-                                &beta, output, matC_layout, output, matC_layout,
-                                nullptr, nullptr, 0, stream));
+    hipblasLtMatmulHeuristicResult_t heur;
+    int returned = 0;
+    HIPBLAS_CHECK(hipblasLtMatmulAlgoGetHeuristic(
+        handle, matmul_desc, matA_layout, matB_layout, matC_layout, matC_layout,
+        pref, 1, &heur, &returned));
+    hipblasLtMatmulPreferenceDestroy(pref);
+    pref = nullptr;
 
-  hipblasLtMatrixLayoutDestroy(matA_layout);
-  hipblasLtMatrixLayoutDestroy(matB_layout);
-  hipblasLtMatrixLayoutDestroy(matC_layout);
-  hipblasLtMatmulDescDestroy(matmul_desc);
+    if (returned == 0) {
+      fprintf(stderr,
+              "wrap_hipblasLtMatmul: no valid algorithm found for "
+              "M=%lld N=%lld K=%lld batch=%lld\n",
+              (long long)M, (long long)N, (long long)K, (long long)batch_count);
+      result = -1;
+      goto cleanup;
+    }
+
+    MatmulCacheEntry entry;
+    entry.algo = heur.algo;
+    entry.workspace_size = heur.workspaceSize;
+    it = g_matmul_algo_cache.emplace(key, entry).first;
+
+    RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: cached algo for "
+                      "M=%lld N=%lld K=%lld batch=%lld (ws=%zu)\n",
+                      (long long)M, (long long)N, (long long)K,
+                      (long long)batch_count, entry.workspace_size);
+  }
+
+  {
+    const MatmulCacheEntry &cached = it->second;
+    if (cached.workspace_size > 0) {
+      if (hipdnn_ep_state_ensure_workspace(state, cached.workspace_size) != 0) {
+        result = -1;
+        goto cleanup;
+      }
+    }
+
+    void *ws_ptr = hipdnn_ep_state_get_workspace(state);
+    size_t ws_size = hipdnn_ep_state_get_workspace_size(state);
+
+    HIPBLAS_CHECK(hipblasLtMatmul(
+        handle, matmul_desc, &alpha, B, matA_layout, A, matB_layout, &beta,
+        output, matC_layout, output, matC_layout,
+        const_cast<hipblasLtMatmulAlgo_t *>(&cached.algo), ws_ptr, ws_size,
+        stream));
+  }
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: completed successfully\n");
-  return 0;
+
+cleanup:
+  if (pref) {
+    hipblasLtMatmulPreferenceDestroy(pref);
+  }
+  if (matA_layout) {
+    hipblasLtMatrixLayoutDestroy(matA_layout);
+  }
+  if (matB_layout) {
+    hipblasLtMatrixLayoutDestroy(matB_layout);
+  }
+  if (matC_layout) {
+    hipblasLtMatrixLayoutDestroy(matC_layout);
+  }
+  if (matmul_desc) {
+    hipblasLtMatmulDescDestroy(matmul_desc);
+  }
+
+  return result;
 }
