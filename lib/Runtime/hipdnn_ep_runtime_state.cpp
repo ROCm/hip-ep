@@ -41,6 +41,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   state->pool_size = 0;
   state->buffer_offsets = nullptr;
   state->num_buffers = 0;
+  state->workspace = nullptr;
+  state->workspace_size = 0;
 
   // Explicitly initialize HIP device before any other operations
   // This ensures device 0 is active and context is properly initialized
@@ -303,6 +305,11 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     hipStreamSynchronize(state->stream);
   }
 
+  // Free shared workspace (if allocated)
+  if (state->workspace) {
+    hipFree(state->workspace);
+  }
+
   // Free memory pool (if allocated)
   if (state->pool_base) {
     hipFree(state->pool_base);
@@ -434,6 +441,47 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state) {
     return nullptr;
   }
   return state->pool_base;
+}
+
+//==============================================================================
+// Shared Workspace Support
+//==============================================================================
+
+void *hipdnn_ep_state_get_workspace(RuntimeState *state) {
+  return state ? state->workspace : nullptr;
+}
+
+size_t hipdnn_ep_state_get_workspace_size(RuntimeState *state) {
+  return state ? state->workspace_size : 0;
+}
+
+int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
+  if (!state)
+    return -1;
+  if (needed_size == 0)
+    return 0;
+  if (state->workspace_size >= needed_size)
+    return 0;
+
+  // Grow: free old, allocate new
+  if (state->workspace) {
+    hipFree(state->workspace);
+    state->workspace = nullptr;
+    state->workspace_size = 0;
+  }
+
+  if (hipMalloc(&state->workspace, needed_size) != hipSuccess) {
+    fprintf(
+        stderr,
+        "hipdnn_ep_state_ensure_workspace: hipMalloc failed for %zu bytes\n",
+        needed_size);
+    return -1;
+  }
+
+  state->workspace_size = needed_size;
+  RUNTIME_DEBUG_LOG("[workspace] Allocated shared workspace: %zu bytes\n",
+                    needed_size);
+  return 0;
 }
 
 } // extern "C"
