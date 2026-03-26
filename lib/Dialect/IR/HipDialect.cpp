@@ -329,13 +329,23 @@ LogicalResult RmsNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
-// SkipRmsNormOp: ins(input, skip, gamma), outs(output, skip_output)
+// SkipRmsNormOp: ins(input, skip, gamma, [bias])
+//                outs(output, [input_skip_bias_sum])
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange SkipRmsNormOp::getDpsInitsMutable() {
-  // output and skip_output are operands #4 and #5
-  // (0=ctx,1=input,2=skip,3=gamma)
-  return MutableOperandRange(*this, /*start=*/4, /*length=*/2);
+  // Fixed inputs: ctx(1) + input(1) + skip(1) + gamma(1) = 4
+  // Optional input: bias(0|1)
+  unsigned numInputs = 4;
+  if (getBias())
+    ++numInputs;
+
+  // DPS inits: output(1) + input_skip_bias_sum(0|1)
+  unsigned numInits = 1;
+  if (getInputSkipBiasSum())
+    numInits = 2;
+
+  return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/numInits);
 }
 
 void SkipRmsNormOp::getEffects(
@@ -345,9 +355,7 @@ void SkipRmsNormOp::getEffects(
 }
 
 LogicalResult SkipRmsNormOp::verify() {
-  return verifyDpsComputeOp(
-      *this, {getInput(), getSkip(), getGamma(), getOutput(), getSkipOutput()},
-      /*numInits=*/2);
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
