@@ -12,7 +12,6 @@
 # Build flow:
 #   .hip files → hipcc -c → .obj → static lib (hip_custom_kernels.lib)
 #   cmake --install → <prefix>/lib/hip_custom_kernels.lib
-#                    → <prefix>/include/hip_custom_kernels.h
 
 cmake_minimum_required(VERSION 3.18)
 
@@ -47,18 +46,13 @@ set(HIP_CUSTOM_KERNELS_LIB_PATH "$<TARGET_FILE:hip_custom_kernels>" PARENT_SCOPE
 # Export include directory for Runtime bitcode compilation
 set(HIP_CUSTOM_KERNELS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include" PARENT_SCOPE)
 
-# Install the static library and header to the install prefix.
-# After `cmake --install`, CompilerDriver can find:
-#   <prefix>/lib/hip_custom_kernels.lib  (static lib with compiled HIP kernels)
-#   <prefix>/include/hip_custom_kernels.h (pure C header)
+# Install the static library to the install prefix.
+# The header is NOT installed to avoid version mismatch: EP builds should use
+# the in-tree header at 3rd-party/custom_kernels/include/hip_custom_kernels.h
+# to ensure the header always matches the compiled library.
 install(TARGETS hip_custom_kernels
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib
 )
 
-install(FILES include/hip_custom_kernels.h
-    DESTINATION include
-)
-
 message(STATUS "[custom_kernels] Will install hip_custom_kernels.lib to \${CMAKE_INSTALL_PREFIX}/lib")
-message(STATUS "[custom_kernels] Will install hip_custom_kernels.h to \${CMAKE_INSTALL_PREFIX}/include")
