@@ -411,18 +411,35 @@ int wrap_hipblasLtMatmul(
     int64_t batch_count, // Number of batches
     int64_t elem_size);  // Element size in bytes (2=f16, 4=f32)
 
-// GroupQueryAttention operation wrapper
+// GroupQueryAttention operation wrapper (Full MS spec)
 // Called by generated IR for onnx.Custom(GroupQueryAttention) lowering
-int wrap_group_query_attention(RuntimeState *state, void *query, void *key,
-                               void *value, void *past_key, void *past_value,
-                               void *seqlens_k, void *total_seq_len,
-                               void *cos_cache, void *sin_cache, void *output,
-                               void *present_key, void *present_value,
-                               int64_t num_heads, int64_t kv_num_heads,
-                               float scale, float softcap, int64_t do_rotary,
-                               int64_t rotary_interleaved, int64_t batch_size,
-                               int64_t seq_len_q, int64_t seq_len_kv,
-                               int64_t head_dim, int64_t element_size_bytes);
+// Updated to support complete Microsoft ONNX Runtime specification (14 inputs + 12 attributes)
+// Phase 1: Interface alignment only - new features not yet implemented in kernel
+int wrap_group_query_attention(
+    RuntimeState *state,
+    // Inputs 1-7 (core GQA)
+    void *query, void *key, void *value,
+    void *past_key, void *past_value,
+    void *seqlens_k, void *total_seq_len,
+    // Inputs 8-10 (RoPE)
+    void *cos_cache, void *sin_cache, void *position_ids,
+    // Inputs 11-14 (advanced features)
+    void *attention_bias, void *head_sink,
+    void *k_scale, void *v_scale,
+    // Outputs
+    void *output, void *present_key, void *present_value, void *output_qk,
+    // Attributes (12)
+    int64_t num_heads, int64_t kv_num_heads,
+    float scale,
+    int64_t do_rotary, int64_t rotary_interleaved,
+    float softcap,
+    int64_t local_window_size,
+    int64_t smooth_softmax, int64_t qk_output,
+    int64_t k_quant_type, int64_t v_quant_type,
+    int64_t kv_cache_bit_width,
+    // Shape values (5)
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t head_dim, int64_t element_size_bytes);
 
 // Generic MIOpen tensor operation wrapper
 // Computes output = op(lhs, rhs) element-wise via miopenOpTensor
