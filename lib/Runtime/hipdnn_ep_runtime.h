@@ -424,13 +424,18 @@ int wrap_group_query_attention(RuntimeState *state, void *query, void *key,
                                int64_t seq_len_q, int64_t seq_len_kv,
                                int64_t head_dim, int64_t element_size_bytes);
 
-// Generic MIOpen tensor operation wrapper
-// Computes output = op(lhs, rhs) element-wise via miopenOpTensor
+// Generic MIOpen tensor operation wrapper with per-operand 4D shapes.
+// Computes output = op(lhs, rhs) element-wise via miopenOpTensor.
+// Each operand is described by 4D shape (N, C, H, W) to enable MIOpen-native
+// broadcasting: dims of 1 are broadcast against the corresponding larger dim.
 //   tensor_op: HIPDNN_EP_TENSOR_OP_* constant (mul, add, min, max)
 //   data_type: HIPDNN_EP_DATATYPE_* constant identifying the element type
 int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
-                        int64_t num_elements, int64_t data_type,
-                        int64_t tensor_op);
+                        int64_t lhs_n, int64_t lhs_c, int64_t lhs_h,
+                        int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,
+                        int64_t rhs_h, int64_t rhs_w, int64_t out_n,
+                        int64_t out_c, int64_t out_h, int64_t out_w,
+                        int64_t data_type, int64_t tensor_op);
 
 // Element-wise subtraction wrapper
 // Computes output = lhs - rhs element-wise

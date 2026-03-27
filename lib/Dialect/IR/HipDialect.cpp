@@ -417,6 +417,32 @@ void MulOp::print(OpAsmPrinter &p) {
 }
 
 //===----------------------------------------------------------------------===//
+// AddOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange AddOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void AddOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult AddOp::verify() {
+  return verifyDpsComputeOp(*this, {getLhs(), getRhs(), getOutput()},
+                            /*numInits=*/1);
+}
+
+ParseResult AddOp::parse(OpAsmParser &parser, OperationState &result) {
+  return parseSingleInitDpsOp(parser, result, /*numIns=*/2);
+}
+
+void AddOp::print(OpAsmPrinter &p) {
+  printSingleInitDpsOp(p, *this, getCtx(), /*scalarArgs=*/{},
+                       {getLhs(), getRhs()}, {getOutput()});
+}
+
+//===----------------------------------------------------------------------===//
 // MiopenSoftmaxOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
 

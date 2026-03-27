@@ -58,7 +58,7 @@ static constexpr const char *kWrapMiopenActivationForward =
 static constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
 static constexpr const char *kWrapRotaryEmbedding = "wrap_rotary_embedding";
 static constexpr const char *kWrapMiopenOpTensor =
-    "wrap_miopenOpTensor"; // hip.mul
+    "wrap_miopenOpTensor"; // hip.mul, hip.add (with 4D shape for broadcasting)
 static constexpr const char *kWrapCast = "wrap_cast";
 static constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
 static constexpr const char *kWrapGQA = "wrap_group_query_attention";
@@ -1149,10 +1149,47 @@ struct SigmoidOpLowering : public ConvertOpToLLVMPattern<SigmoidOp> {
   }
 };
 
+// Extract the 4D shape (N, C, H, W) of a memref as LLVM i64 values.
+// miopenSet4dTensorDescriptor requires exactly 4 dimensions, so ranks 1-3
+// are left-padded with 1:
+//   rank 1: [W]       → [1, 1, 1, W]
+//   rank 2: [H, W]    → [1, 1, H, W]
+//   rank 3: [C, H, W] → [1, C, H, W]
+//   rank 4: [N, C, H, W] as-is
+// This preserves ONNX broadcasting semantics: a dim of 1 tells MIOpen
+// to broadcast that dimension against the corresponding dim of the other
+// operand.
+static SmallVector<Value, 4>
+extractShape4D(MemRefType type, Value descriptor,
+               ConversionPatternRewriter &rewriter, Location loc,
+               Type i64Type) {
+  auto createConst = [&](int64_t v) {
+    return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                    rewriter.getI64IntegerAttr(v));
+  };
+  MemRefDescriptor desc(descriptor);
+  int rank = type.getRank();
+  SmallVector<Value, 4> dims;
+  for (int i = 0; i < 4 - rank; ++i)
+    dims.push_back(createConst(1));
+  for (int i = 0; i < rank; ++i) {
+    if (type.isDynamicDim(i))
+      dims.push_back(desc.size(rewriter, loc, i));
+    else
+      dims.push_back(createConst(type.getDimSize(i)));
+  }
+  return dims;
+}
+
 // hip.mul(handle, lhs, rhs, output)
-//   -> wrap_miopenOpTensor(state, lhs, rhs, output, num_elements, data_type,
-//   tensor_op=0)
-// Supports both static and dynamic shapes.
+//   → wrap_miopenOpTensor(state, lhs_ptr, rhs_ptr, out_ptr,
+//       lhs_n, lhs_c, lhs_h, lhs_w,
+//       rhs_n, rhs_c, rhs_h, rhs_w,
+//       out_n, out_c, out_h, out_w,
+//       data_type, tensor_op=0)
+//
+// Full 4D shapes are passed to enable MIOpen-native broadcasting support,
+// consistent with ONNX Mul semantics (NumPy-style broadcasting).
 struct MulOpLowering : public ConvertOpToLLVMPattern<MulOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -1165,61 +1202,123 @@ struct MulOpLowering : public ConvertOpToLLVMPattern<MulOp> {
     Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
 
-    // Helper to create i64 constants
-    auto createI64Const = [&](int64_t value) -> Value {
-      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                      rewriter.getI64IntegerAttr(value));
-    };
-
-    // Helper to compute num_elements for a memref (static or dynamic)
-    auto computeNumElements = [&](MemRefType type, Value descriptor) -> Value {
-      Value num = createI64Const(1);
-      MemRefDescriptor desc(descriptor);
-      for (auto dimIdx : llvm::seq<int64_t>(type.getRank())) {
-        Value dimSize;
-        if (type.isDynamicDim(dimIdx)) {
-          dimSize = desc.size(rewriter, loc, dimIdx);
-        } else {
-          dimSize = createI64Const(type.getDimSize(dimIdx));
-        }
-        num = LLVM::MulOp::create(rewriter, loc, num, dimSize);
-      }
-      return num;
-    };
-
-    Value statePtr = adaptor.getCtx();
-    Value lhsPtr = extractMemRefPtr(adaptor.getLhs(), rewriter, loc);
-    Value rhsPtr = extractMemRefPtr(adaptor.getRhs(), rewriter, loc);
-    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
-
+    auto lhsType = cast<MemRefType>(op.getLhs().getType());
+    auto rhsType = cast<MemRefType>(op.getRhs().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
-    // Compute num_elements (supports dynamic shapes)
-    Value numElementsVal = computeNumElements(outputType, adaptor.getOutput());
+    if (lhsType.getRank() > 4 || rhsType.getRank() > 4 ||
+        outputType.getRank() > 4)
+      return rewriter.notifyMatchFailure(
+          op, "rank > 4 unsupported by MIOpen 4D descriptor API");
 
-    // Get data type enum (f32=0, f16=1, bf16=2)
+    auto lhsDims =
+        extractShape4D(lhsType, adaptor.getLhs(), rewriter, loc, i64Type);
+    auto rhsDims =
+        extractShape4D(rhsType, adaptor.getRhs(), rewriter, loc, i64Type);
+    auto outDims =
+        extractShape4D(outputType, adaptor.getOutput(), rewriter, loc, i64Type);
+
     int64_t dataType = getHipdnnDataType(outputType.getElementType());
     if (dataType < 0)
-      return rewriter.notifyMatchFailure(
-          op, "unsupported element type for hip.mul");
+      return rewriter.notifyMatchFailure(op, "unsupported element type");
 
-    Value dataTypeVal = createI64Const(dataType);
-    Value tensorOpVal = createI64Const(0); // HIPDNN_EP_TENSOR_OP_MUL
+    auto createI64Const = [&](int64_t v) {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(v));
+    };
 
-    // int wrap_miopenOpTensor(RuntimeState* state, void* lhs, void* rhs, void*
-    // output,
-    //     int64_t num_elements, int64_t data_type, int64_t tensor_op)
-    SmallVector<Type, 7> paramTypes = {ptrType, ptrType, ptrType, ptrType,
-                                       i64Type, i64Type, i64Type};
+    // 18 params: state + 3 data ptrs + 12 shape dims + data_type + tensor_op
+    SmallVector<Type, 18> paramTypes(4, ptrType);
+    paramTypes.append(14, i64Type);
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapMiopenOpTensor, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 7> args = {statePtr,   lhsPtr,         rhsPtr,
-                                  outputPtr,  numElementsVal, dataTypeVal,
-                                  tensorOpVal};
+    SmallVector<Value, 18> args = {
+        adaptor.getCtx(),
+        extractMemRefPtr(adaptor.getLhs(), rewriter, loc),
+        extractMemRefPtr(adaptor.getRhs(), rewriter, loc),
+        extractMemRefPtr(adaptor.getOutput(), rewriter, loc)};
+    args.append(lhsDims.begin(), lhsDims.end());
+    args.append(rhsDims.begin(), rhsDims.end());
+    args.append(outDims.begin(), outDims.end());
+    args.push_back(createI64Const(dataType));
+    args.push_back(createI64Const(0)); // HIPDNN_EP_TENSOR_OP_MUL
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+// hip.add(handle, lhs, rhs, output)
+//   → wrap_miopenOpTensor(state, lhs_ptr, rhs_ptr, out_ptr,
+//       lhs_n, lhs_c, lhs_h, lhs_w,
+//       rhs_n, rhs_c, rhs_h, rhs_w,
+//       out_n, out_c, out_h, out_w,
+//       data_type, tensor_op=1)
+//
+// Full 4D shapes are passed to enable MIOpen-native broadcasting.
+// E.g. Add(memref<1x128x32xf16>, memref<32xf16>) passes:
+//   lhs=[1,1,128,32], rhs=[1,1,1,32], out=[1,1,128,32]
+// MIOpen broadcasts rhs dims that are 1 against lhs automatically.
+struct AddOpLowering : public ConvertOpToLLVMPattern<AddOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(AddOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+
+    auto lhsType = cast<MemRefType>(op.getLhs().getType());
+    auto rhsType = cast<MemRefType>(op.getRhs().getType());
+    auto outputType = cast<MemRefType>(op.getOutput().getType());
+
+    if (lhsType.getRank() > 4 || rhsType.getRank() > 4 ||
+        outputType.getRank() > 4)
+      return rewriter.notifyMatchFailure(
+          op, "rank > 4 unsupported by MIOpen 4D descriptor API");
+
+    auto lhsDims =
+        extractShape4D(lhsType, adaptor.getLhs(), rewriter, loc, i64Type);
+    auto rhsDims =
+        extractShape4D(rhsType, adaptor.getRhs(), rewriter, loc, i64Type);
+    auto outDims =
+        extractShape4D(outputType, adaptor.getOutput(), rewriter, loc, i64Type);
+
+    int64_t dataType = getHipdnnDataType(outputType.getElementType());
+    if (dataType < 0)
+      return rewriter.notifyMatchFailure(op, "unsupported element type");
+
+    auto createI64Const = [&](int64_t v) {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(v));
+    };
+
+    SmallVector<Type, 18> paramTypes(4, ptrType);
+    paramTypes.append(14, i64Type);
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapMiopenOpTensor, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value, 18> args = {
+        adaptor.getCtx(),
+        extractMemRefPtr(adaptor.getLhs(), rewriter, loc),
+        extractMemRefPtr(adaptor.getRhs(), rewriter, loc),
+        extractMemRefPtr(adaptor.getOutput(), rewriter, loc)};
+    args.append(lhsDims.begin(), lhsDims.end());
+    args.append(rhsDims.begin(), rhsDims.end());
+    args.append(outDims.begin(), outDims.end());
+    args.push_back(createI64Const(dataType));
+    args.push_back(createI64Const(1)); // HIPDNN_EP_TENSOR_OP_ADD
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -2221,7 +2320,8 @@ void ConvertHipToLLVMPass::runOnOperation() {
                HipblasltGraphOpLowering, ConvOpLowering, MatmulOpLowering,
                RmsNormOpLowering, SkipRmsNormOpLowering, RopeOpLowering,
                MiopenSoftmaxOpLowering, TransposeOpLowering, GatherOpLowering,
-               SiluOpLowering, SigmoidOpLowering, MulOpLowering, SubOpLowering,
+               SiluOpLowering, SigmoidOpLowering, MulOpLowering, AddOpLowering,
+               SubOpLowering,
                CastOpLowering, ReduceSumOpLowering, GqaOpLowering,
                MatMulNBitsOpLowering, QMoEOpLowering>(typeConverter);
   patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter,
