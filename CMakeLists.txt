@@ -131,9 +131,27 @@ if(BUILD_HIP_TOOLS)
   # Executable targets
   add_subdirectory(tools)
 
-  # LIT tests for MLIR passes
-  add_subdirectory(test/lit)
+  # ==============================================================================
+  # HIP Unit Tests (LIT + E2E)
+  # ==============================================================================
+  # Controls registration of LIT (MLIR pass verification) and E2E (compile MLIR
+  # to DLL and execute on GPU) tests with CTest.
+  #
+  # Usage:
+  #   cmake -DBUILD_HIP_UNIT_TESTS=OFF ...   # disable tests
+  #   ctest --test-dir <build> -C Release     # run all tests
+  #   ctest -R MorphizenMLIRLitTests          # run LIT tests only
+  # ==============================================================================
+  option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON)
 
-  # E2E integration tests (compile MLIR → DLL → execute)
-  add_subdirectory(test/e2e)
+  if(BUILD_HIP_UNIT_TESTS)
+    include(CTest)
+    enable_testing()
+
+    # LIT tests for MLIR passes
+    add_subdirectory(test/lit)
+
+    # E2E integration tests (compile MLIR → DLL → execute)
+    add_subdirectory(test/e2e)
+  endif()
 endif()
