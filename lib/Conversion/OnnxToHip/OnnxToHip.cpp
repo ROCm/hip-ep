@@ -458,6 +458,16 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
+/// onnx.Add -> hip.miopen.add
+struct AddToHip : public mlir::RewritePattern {
+  AddToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Add", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
 /// onnx.Mul -> hip.mul
 struct MulToHip : public mlir::RewritePattern {
   MulToHip(mlir::MLIRContext *ctx)
@@ -467,6 +477,30 @@ struct MulToHip : public mlir::RewritePattern {
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override;
 };
+
+mlir::LogicalResult
+AddToHip::matchAndRewrite(mlir::Operation *op,
+                          mlir::PatternRewriter &rewriter) const {
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value a = op->getOperand(0);
+  mlir::Value b = op->getOperand(1);
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+
+  auto aType = mlir::cast<mlir::RankedTensorType>(a.getType());
+  mlir::Value source = (aType.getRank() == resultType.getRank()) ? a : b;
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
+
+  auto hipOp =
+      mlir::hip::AddOp::create(rewriter, loc, resultType, context, a, b, init);
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
 
 mlir::LogicalResult
 MulToHip::matchAndRewrite(mlir::Operation *op,
@@ -1690,6 +1724,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   mlir::RewritePatternSet patterns(ctx);
   patterns.add<MatMulToHip>(ctx);
   patterns.add<TransposeToHip>(ctx);
+  patterns.add<AddToHip>(ctx);
   patterns.add<MulToHip>(ctx);
   patterns.add<SoftmaxToHip>(ctx);
   patterns.add<SigmoidToHip>(ctx);
