@@ -1604,8 +1604,8 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
                   mlir::PatternRewriter &rewriter) const override {
     mlir::Value data = op->getOperand(0);
     auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
-    auto outputType = mlir::dyn_cast<mlir::RankedTensorType>(
-        op->getResult(0).getType());
+    auto outputType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
     if (!inputType || !outputType)
       return rewriter.notifyMatchFailure(op, "expected ranked tensor types");
     if (inputType.getElementType() != outputType.getElementType())
@@ -1686,8 +1686,8 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
     if (numElems != outputType.getNumElements())
       return rewriter.notifyMatchFailure(op, "element count mismatch");
 
-    auto flatType = mlir::RankedTensorType::get({numElems},
-                                                inputType.getElementType());
+    auto flatType =
+        mlir::RankedTensorType::get({numElems}, inputType.getElementType());
 
     mlir::ReassociationIndices allInputDims;
     for (int64_t i = 0; i < inputRank; ++i)

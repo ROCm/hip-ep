@@ -1159,10 +1159,9 @@ struct SigmoidOpLowering : public ConvertOpToLLVMPattern<SigmoidOp> {
 // This preserves ONNX broadcasting semantics: a dim of 1 tells MIOpen
 // to broadcast that dimension against the corresponding dim of the other
 // operand.
-static SmallVector<Value, 4>
-extractShape4D(MemRefType type, Value descriptor,
-               ConversionPatternRewriter &rewriter, Location loc,
-               Type i64Type) {
+static SmallVector<Value, 4> extractShape4D(MemRefType type, Value descriptor,
+                                            ConversionPatternRewriter &rewriter,
+                                            Location loc, Type i64Type) {
   auto createConst = [&](int64_t v) {
     return LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                     rewriter.getI64IntegerAttr(v));
@@ -1237,8 +1236,7 @@ struct MulOpLowering : public ConvertOpToLLVMPattern<MulOp> {
       return failure();
 
     SmallVector<Value, 18> args = {
-        adaptor.getCtx(),
-        extractMemRefPtr(adaptor.getLhs(), rewriter, loc),
+        adaptor.getCtx(), extractMemRefPtr(adaptor.getLhs(), rewriter, loc),
         extractMemRefPtr(adaptor.getRhs(), rewriter, loc),
         extractMemRefPtr(adaptor.getOutput(), rewriter, loc)};
     args.append(lhsDims.begin(), lhsDims.end());
@@ -1310,8 +1308,7 @@ struct AddOpLowering : public ConvertOpToLLVMPattern<AddOp> {
       return failure();
 
     SmallVector<Value, 18> args = {
-        adaptor.getCtx(),
-        extractMemRefPtr(adaptor.getLhs(), rewriter, loc),
+        adaptor.getCtx(), extractMemRefPtr(adaptor.getLhs(), rewriter, loc),
         extractMemRefPtr(adaptor.getRhs(), rewriter, loc),
         extractMemRefPtr(adaptor.getOutput(), rewriter, loc)};
     args.append(lhsDims.begin(), lhsDims.end());
@@ -2321,9 +2318,9 @@ void ConvertHipToLLVMPass::runOnOperation() {
                RmsNormOpLowering, SkipRmsNormOpLowering, RopeOpLowering,
                MiopenSoftmaxOpLowering, TransposeOpLowering, GatherOpLowering,
                SiluOpLowering, SigmoidOpLowering, MulOpLowering, AddOpLowering,
-               SubOpLowering,
-               CastOpLowering, ReduceSumOpLowering, GqaOpLowering,
-               MatMulNBitsOpLowering, QMoEOpLowering>(typeConverter);
+               SubOpLowering, CastOpLowering, ReduceSumOpLowering,
+               GqaOpLowering, MatMulNBitsOpLowering, QMoEOpLowering>(
+      typeConverter);
   patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter,
                                                        kMiopenAdd);
   patterns.add<MemRefAllocOpLowering, MemRefDeallocOpLowering>(typeConverter);
