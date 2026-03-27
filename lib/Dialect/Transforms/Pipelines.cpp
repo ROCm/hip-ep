@@ -28,8 +28,8 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   // GenerateInterface::buildMemrefDescriptor always constructs memref
   // descriptors with contiguous strides (stride[i] = product of sizes[i+1..]).
   // The default InferLayoutMap falls back to FullyDynamicLayoutMap for ops like
-  // collapse_shape/expand_shape, producing strided<[?, ?, ?], offset: ?> memrefs
-  // that cannot be lowered to LLVM.
+  // collapse_shape/expand_shape, producing strided<[?, ?, ?], offset: ?>
+  // memrefs that cannot be lowered to LLVM.
   bufferization::OneShotBufferizePassOptions bufferizeOpts;
   bufferizeOpts.bufferizeFunctionBoundaries = true;
   bufferizeOpts.functionBoundaryTypeConversion =
@@ -107,9 +107,10 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
 void mlir::hip::buildHipToLLVMPipeline(
     OpPassManager &pm, const HipToLLVMPipelineOptions &options) {
   // Decompose memref.collapse_shape / memref.expand_shape into
-  // memref.reinterpret_cast + arithmetic.  populateFinalizeMemRefToLLVMConversion
-  // Patterns (used by ConvertHipToLLVM) does not include patterns for these ops;
-  // expand-strided-metadata rewrites them into ops that it can lower.
+  // memref.reinterpret_cast + arithmetic.
+  // populateFinalizeMemRefToLLVMConversion Patterns (used by ConvertHipToLLVM)
+  // does not include patterns for these ops; expand-strided-metadata rewrites
+  // them into ops that it can lower.
   pm.addPass(memref::createExpandStridedMetadataPass());
 
   pm.addPass(createConvertHipToLLVMPass());

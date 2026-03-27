@@ -111,12 +111,12 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
 
   // Per-operand 4D descriptors enable MIOpen-native broadcasting:
   // dims of 1 are broadcast against the corresponding larger dim.
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(
-      aDesc, miopen_type, (int)lhs_n, (int)lhs_c, (int)lhs_h, (int)lhs_w));
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(
-      bDesc, miopen_type, (int)rhs_n, (int)rhs_c, (int)rhs_h, (int)rhs_w));
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(
-      cDesc, miopen_type, (int)out_n, (int)out_c, (int)out_h, (int)out_w));
+  MIOPEN_CHECK(miopenSet4dTensorDescriptor(aDesc, miopen_type, (int)lhs_n,
+                                           (int)lhs_c, (int)lhs_h, (int)lhs_w));
+  MIOPEN_CHECK(miopenSet4dTensorDescriptor(bDesc, miopen_type, (int)rhs_n,
+                                           (int)rhs_c, (int)rhs_h, (int)rhs_w));
+  MIOPEN_CHECK(miopenSet4dTensorDescriptor(cDesc, miopen_type, (int)out_n,
+                                           (int)out_c, (int)out_h, (int)out_w));
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: calling miopenOpTensor"
                     "(op=%s, alpha1=%.1f, alpha2=%.1f, beta=%.1f)\n",
