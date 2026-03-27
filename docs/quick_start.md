@@ -172,6 +172,7 @@ cmake -S . -B ../build/$(basename $PWD) \
 | `HIP_PLATFORM` | `amd` | Required |
 | `HIP_ARCHITECTURES` | GPU architecture (e.g., `gfx1151`) | Required |
 | `BUILD_EP` | `ON` | Build MorphiZen Execution Provider |
+| `BUILD_HIP_UNIT_TESTS` | `ON` | Register LIT and E2E tests with CTest |
 
 ### Build
 
@@ -179,6 +180,33 @@ cmake -S . -B ../build/$(basename $PWD) \
 cmake --build ../build/$(basename $PWD) --config Release --parallel
 cmake --install ../build/$(basename $PWD) --config Release
 ```
+
+## Running Tests
+
+HIP unit tests (LIT + E2E) are registered with CTest by default
+(`BUILD_HIP_UNIT_TESTS=ON`). After building, run them with:
+
+```bash
+# All tests
+ctest --test-dir ../build/$(basename $PWD) -C Release --verbose
+
+# LIT tests only (MLIR pass verification)
+ctest --test-dir ../build/$(basename $PWD) -C Release -R MorphizenMLIRLitTests --verbose
+
+# E2E tests only (compile MLIR → DLL → execute on GPU)
+ctest --test-dir ../build/$(basename $PWD) -C Release -E MorphizenMLIRLitTests --verbose
+```
+
+E2E execution tests require ROCm libraries in the system path:
+
+```bash
+export PATH="$THEROCK_DIST/bin:$PATH"
+```
+
+To disable test registration entirely, add `-DBUILD_HIP_UNIT_TESTS=OFF` to the
+CMake configure command.
+
+See [test/README.md](../test/README.md) for detailed test documentation.
 
 ## Performance Testing
 
