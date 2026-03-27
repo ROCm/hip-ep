@@ -69,10 +69,6 @@ endif()
 message(STATUS "Using MorphiZen from git submodule: 3rd-party/morphizen")
 
 set(morphizen_ENABLE_UNIT_TEST ON CACHE BOOL "enable morphizen unit test or not")
-if(morphizen_ENABLE_UNIT_TEST)
-  include(CTest)
-  enable_testing()
-endif()
 
 # Force static linking for glog to avoid runtime library conflicts
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
