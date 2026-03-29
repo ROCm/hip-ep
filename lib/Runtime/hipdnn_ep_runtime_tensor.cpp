@@ -48,10 +48,17 @@ static struct {
 static void perf_ensure_events() {
   if (g_perf.initialized)
     return;
-  (void)hipEventCreate(&g_perf.h2d_start);
-  (void)hipEventCreate(&g_perf.h2d_end);
-  (void)hipEventCreate(&g_perf.d2h_start);
-  (void)hipEventCreate(&g_perf.d2h_end);
+  if (hipEventCreate(&g_perf.h2d_start) != hipSuccess ||
+      hipEventCreate(&g_perf.h2d_end) != hipSuccess ||
+      hipEventCreate(&g_perf.d2h_start) != hipSuccess ||
+      hipEventCreate(&g_perf.d2h_end) != hipSuccess) {
+    fprintf(stderr, "[PERF] WARNING: hipEventCreate failed, disabling PERF\n");
+    if (g_perf.h2d_start) { (void)hipEventDestroy(g_perf.h2d_start); g_perf.h2d_start = nullptr; }
+    if (g_perf.h2d_end)   { (void)hipEventDestroy(g_perf.h2d_end);   g_perf.h2d_end = nullptr; }
+    if (g_perf.d2h_start) { (void)hipEventDestroy(g_perf.d2h_start); g_perf.d2h_start = nullptr; }
+    if (g_perf.d2h_end)   { (void)hipEventDestroy(g_perf.d2h_end);   g_perf.d2h_end = nullptr; }
+    return;
+  }
   g_perf.initialized = true;
 }
 
@@ -72,6 +79,8 @@ static struct {
   bool capture_ok = false;
   std::vector<void *> captured_input_ptrs;
   std::vector<void *> captured_output_ptrs;
+  std::vector<size_t> captured_input_sizes;
+  std::vector<size_t> captured_output_sizes;
 } g_graph;
 
 //==============================================================================
@@ -315,6 +324,13 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
               index, g_graph.captured_input_ptrs.size());
       return HIPDNN_EP_ERR_INDEX_OUT_OF_BOUNDS;
     }
+    if (size_bytes != g_graph.captured_input_sizes[index]) {
+      fprintf(stderr,
+              "[GRAPH] ERROR: input[%zu] size mismatch: captured %zu, "
+              "current %zu -- bailing out of replay\n",
+              index, g_graph.captured_input_sizes[index], size_bytes);
+      return HIPDNN_EP_ERR_INVALID_DIMENSION;
+    }
     void *captured_ptr = g_graph.captured_input_ptrs[index];
     if (hipMemcpyAsync(captured_ptr, tensor->data, size_bytes,
                        hipMemcpyHostToDevice,
@@ -360,9 +376,10 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
     return HIPDNN_EP_ERR_H2D_TRANSFER_FAILED;
   }
 
-  // GRAPH: record pointer mapping during capture inference
+  // GRAPH: record pointer and size during capture inference
   if (hipdnn_ep_graph_enabled() && g_graph.inference_num == 2) {
     g_graph.captured_input_ptrs.push_back(gpu_ptr);
+    g_graph.captured_input_sizes.push_back(size_bytes);
   }
 
   // PERF: accumulate H2D bytes
@@ -499,6 +516,13 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
               index, g_graph.captured_output_ptrs.size());
       return HIPDNN_EP_ERR_INDEX_OUT_OF_BOUNDS;
     }
+    if (size_bytes != g_graph.captured_output_sizes[index]) {
+      fprintf(stderr,
+              "[GRAPH] ERROR: output[%zu] size mismatch: captured %zu, "
+              "current %zu -- bailing out of replay\n",
+              index, g_graph.captured_output_sizes[index], size_bytes);
+      return HIPDNN_EP_ERR_INVALID_DIMENSION;
+    }
     out_buffer->gpu_ptr = g_graph.captured_output_ptrs[index];
     out_buffer->host_ptr = tensor->data;
     out_buffer->shape_ptr = tensor->shape;
@@ -517,9 +541,10 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
     return HIPDNN_EP_ERR_GPU_ALLOC_FAILED;
   }
 
-  // GRAPH: record pointer mapping during capture inference
+  // GRAPH: record pointer and size during capture inference
   if (hipdnn_ep_graph_enabled() && g_graph.inference_num == 2) {
     g_graph.captured_output_ptrs.push_back(gpu_ptr);
+    g_graph.captured_output_sizes.push_back(size_bytes);
   }
 
   // Populate output buffer
