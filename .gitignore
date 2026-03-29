@@ -37,6 +37,7 @@ __pycache__/
 .eggs/
 dist/
 *.egg
+.venv/
 
 # Test outputs
 *.onnx
@@ -57,6 +58,7 @@ Thumbs.db
 # Cline/AI assistant storage
 .cline_storage/
 .cline/
+.cursor/
 
 # Additional IDE/editor files
 *.sublime-project
@@ -101,3 +103,11 @@ backend-mlir-compiler/test/ir_dumps/
 .lit_test_times.txt
 model.constants.bin
 model.constants.json
+
+# Large model files (keep models out of git)
+full_model/
+
+# Local analysis/benchmark artifacts
+Llama_Sliced/
+perf_seq*.txt
+dump_log.txt
