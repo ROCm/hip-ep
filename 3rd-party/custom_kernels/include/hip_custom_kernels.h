@@ -201,6 +201,22 @@ int hip_gqa_softmax_inplace(
     int batch_stride, const void* head_sink, int num_heads,
     int use_smooth_softmax);
 
+/* Fused GQA decode (sq == 1, d == 128): single-token attention via
+ * cooperative dot product + online softmax, one block per (batch, head_q).
+ * Replaces steps 3, 6-11 of the decomposed pipeline. */
+int hip_gqa_fused_decode(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int H, int G, int d, int skv, int max_seq,
+    float scale);
+
+/* Fused GQA prefill (sq > 1, d == 128): Flash Attention 2 with WMMA
+ * tile GEMMs and online softmax. Double-buffered KV tiles, causal mask.
+ * Replaces steps 3, 6-11 of the decomposed pipeline. */
+int hip_gqa_fused_prefill(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int H, int G, int sq, int skv, int max_seq, int past_len,
+    float scale);
+
 /* =========================================================================
  * Cast (Element Type Conversion)
  * =========================================================================
