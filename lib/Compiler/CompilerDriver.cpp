@@ -26,6 +26,7 @@
 
 #include "hip/debug_log.h"
 
+#include <chrono>
 #include <cstdlib>
 #include <sstream>
 
@@ -59,8 +60,18 @@ bool CompilerDriver::compile(llvm::StringRef input_mlir,
   llvm::SourceMgr sourceMgr;
   sourceMgr.AddNewSourceBuffer(std::move(memBuffer), llvm::SMLoc());
 
+  auto t0 = std::chrono::steady_clock::now();
+
   mlir::OwningOpRef<mlir::ModuleOp> module =
       mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, &context);
+
+  if (hipdnn_ep_timing_enabled()) {
+    auto t1 = std::chrono::steady_clock::now();
+    double sec =
+        std::chrono::duration<double>(t1 - t0).count();
+    llvm::errs() << "[CompilerDriver] MLIR parsing: "
+                 << llvm::format("%.3f", sec) << "s\n";
+  }
 
   if (!module) {
     error_message = "Failed to parse MLIR input";
@@ -101,18 +112,39 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
                                  const std::string &output_path,
                                  const mlir::hip::CompilationOptionsT &options,
                                  std::string &error_message) {
+  const bool timing = hipdnn_ep_timing_enabled();
+  auto phaseStart = std::chrono::steady_clock::now();
+  auto totalStart = phaseStart;
+
+  auto logPhase = [&](const char *name) {
+    if (!timing)
+      return;
+    auto now = std::chrono::steady_clock::now();
+    double sec = std::chrono::duration<double>(now - phaseStart).count();
+    llvm::errs() << "[CompilerDriver] " << name << ": "
+                 << llvm::format("%.3f", sec) << "s\n";
+    phaseStart = now;
+  };
+
+  if (timing)
+    llvm::errs() << "[CompilerDriver] === Compilation phases ===\n";
+
   if (!runMLIRPasses(module, options, error_message))
     return false;
+  logPhase("runMLIRPasses");
 
   llvm::LLVMContext llvmContext;
   auto llvmModule = translateToLLVMIR(module, llvmContext, error_message);
   if (!llvmModule)
     return false;
+  logPhase("translateToLLVMIR");
 
   if (!linkRuntime(llvmModule.get(), error_message))
     return false;
+  logPhase("linkRuntime");
 
   optimizeLLVMIR(llvmModule.get(), options.opt_level);
+  logPhase("optimizeLLVMIR");
 
   // Strip .dll extension to derive intermediate file paths (.ll, .obj).
   std::string base_path = output_path;
@@ -125,11 +157,20 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
   if (options.output_mode == mlir::hip::OutputMode::LLVM_IR) {
     if (!emitLLVMIR(llvmModule.get(), ll_path, error_message))
       return false;
+    logPhase("emitLLVMIR");
+    if (timing) {
+      double total = std::chrono::duration<double>(
+                         std::chrono::steady_clock::now() - totalStart)
+                         .count();
+      llvm::errs() << "[CompilerDriver] total: "
+                   << llvm::format("%.3f", total) << "s\n";
+    }
     return true;
   }
 
   if (!compileToObject(llvmModule.get(), obj_path, error_message))
     return false;
+  logPhase("compileToObject");
 
   // Symbols exported from the generated DLL:
   //   inference_init/compute/cleanup — runtime entry points
@@ -145,8 +186,17 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
   if (!linkToDLL(obj_path, output_path, libraries, library_paths,
                  export_symbols, error_message))
     return false;
+  logPhase("linkToDLL");
 
   cleanupIntermediates(base_path);
+
+  if (timing) {
+    double total = std::chrono::duration<double>(
+                       std::chrono::steady_clock::now() - totalStart)
+                       .count();
+    llvm::errs() << "[CompilerDriver] total: "
+                 << llvm::format("%.3f", total) << "s\n";
+  }
 
   return true;
 }
@@ -155,6 +205,9 @@ bool CompilerDriver::runMLIRPasses(
     mlir::ModuleOp module, const mlir::hip::CompilationOptionsT &options,
     std::string &error_message) {
   mlir::PassManager pm(module.getContext());
+
+  if (hipdnn_ep_timing_enabled())
+    pm.enableTiming();
 
   if (options.verbose) {
     COMPILER_DEBUG_LOG("Running ONNX->HIP->LLVM->Interface passes\n");

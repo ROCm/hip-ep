@@ -15,6 +15,14 @@ inline bool hipdnn_ep_debug_enabled() {
   return enabled;
 }
 
+inline bool hipdnn_ep_timing_enabled() {
+  static const bool enabled = [] {
+    const char *v = std::getenv("HIPDNN_EP_TIMING");
+    return v && v[0] >= '1';
+  }();
+  return enabled;
+}
+
 #define COMPILER_DEBUG_LOG(expr)                                               \
   do {                                                                         \
     if (hipdnn_ep_debug_enabled())                                             \
