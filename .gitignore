@@ -111,3 +111,7 @@ full_model/
 Llama_Sliced/
 perf_seq*.txt
 dump_log.txt
+
+# Local build scripts (contain machine-specific paths)
+setup_and_configure.ps1
+build_and_install.ps1
