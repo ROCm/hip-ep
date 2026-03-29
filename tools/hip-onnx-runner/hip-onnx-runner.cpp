@@ -617,8 +617,8 @@ int main(int argc, char *argv[]) {
   // ORT environment
   Ort::Env env(ORT_LOGGING_LEVEL_ERROR, "hip-onnx-runner");
 
-  // EP registration
-  const std::string kEpName = "VitisAIExecutionProvider";
+  // const std::string kEpName = "VitisAIExecutionProvider";  
+  const std::string kEpName = "MorphiZenExecutionProvider";  
   const std::string ep_dll = "onnxruntime_morphizen_ep.dll";
 
   if (!no_ep) {
