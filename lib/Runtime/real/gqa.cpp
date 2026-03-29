@@ -153,10 +153,95 @@ static int gqa_forward_hipblaslt(
   int64_t past_len = skv - sq;
   if (past_len < 0)
     past_len = 0;
-  // present_seq is the sequence dimension of the present KV buffer.
-  // In the separate-buffer case this may differ from skv (the total active
-  // token count used for GEMM dimensions) if the buffer is pre-allocated.
   int64_t present_seq = skv;
+  size_t elem_sz = 2; // FP16
+
+  bool need_rope = do_rotary && cos_cache && sin_cache;
+
+  // =========================================================================
+  // Fused GQA path (d == 128, KV cache enabled, sq <= 256)
+  //
+  // Replaces steps 3, 6-11 of the decomposed pipeline with a single kernel
+  // that reads Q in BSHD and KV from the BNSD cache, producing O in BSHD.
+  // Steps 1-2 (RoPE) and 4-5 (KV cache update) still run as separate
+  // kernels before the fused dispatch.
+  // =========================================================================
+  if (d == 128 && present_key && present_value && sq <= 256) {
+    const void *qSrc = query;
+    const void *kSrc = key;
+
+    if (need_rope) {
+      size_t Q_bytes = (size_t)B * sq * H * d * elem_sz;
+      size_t K_bytes = (size_t)B * sq * G * d * elem_sz;
+      hipdnn_ep_state_ensure_workspace(state, Q_bytes + K_bytes);
+      char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
+      void *d_Qroped = ws;
+      void *d_Kroped = ws + Q_bytes;
+
+      int half_rot = (int)(d / 2);
+      if (hip_gqa_rope(stream, query, d_Qroped, cos_cache, sin_cache,
+                       (int)B, (int)sq, (int)H, (int)d, half_rot,
+                       (int)past_len) != 0)
+        return -1;
+      if (hip_gqa_rope(stream, key, d_Kroped, cos_cache, sin_cache,
+                       (int)B, (int)sq, (int)G, (int)d, half_rot,
+                       (int)past_len) != 0)
+        return -1;
+
+      qSrc = d_Qroped;
+      kSrc = d_Kroped;
+    }
+
+    if (hip_gqa_kv_cache_append(stream, kSrc, present_key, (int)B, (int)sq,
+                                (int)G, (int)d, (int)present_seq,
+                                (int)past_len) != 0)
+      return -1;
+    if (hip_gqa_kv_cache_append(stream, value, present_value, (int)B, (int)sq,
+                                (int)G, (int)d, (int)present_seq,
+                                (int)past_len) != 0)
+      return -1;
+
+    if (past_key && past_len > 0 && past_key != present_key) {
+      size_t slice_bytes = (size_t)past_len * d * elem_sz;
+      for (int64_t b = 0; b < B; ++b) {
+        for (int64_t g = 0; g < G; ++g) {
+          size_t src_off = ((size_t)(b * G + g) * past_len * d) * elem_sz;
+          size_t dst_off = ((size_t)(b * G + g) * present_seq * d) * elem_sz;
+          if (hipMemcpyAsync((char *)present_key + dst_off,
+                             (const char *)past_key + src_off, slice_bytes,
+                             hipMemcpyDeviceToDevice, stream) != hipSuccess)
+            return -1;
+          if (hipMemcpyAsync((char *)present_value + dst_off,
+                             (const char *)past_value + src_off, slice_bytes,
+                             hipMemcpyDeviceToDevice, stream) != hipSuccess)
+            return -1;
+        }
+      }
+    }
+
+    if (sq == 1) {
+      if (hip_gqa_fused_decode(stream, qSrc, present_key, present_value,
+                               output, (int)B, (int)H, (int)G, (int)d,
+                               (int)skv, (int)present_seq, scale) != 0)
+        return -1;
+    } else {
+      if (hip_gqa_fused_prefill(stream, qSrc, present_key, present_value,
+                                output, (int)B, (int)H, (int)G, (int)sq,
+                                (int)skv, (int)present_seq, (int)past_len,
+                                scale) != 0)
+        return -1;
+    }
+
+    RUNTIME_DEBUG_LOG(
+        "[REAL] fused GQA %s: B=%lld sq=%lld skv=%lld H=%lld G=%lld d=%lld\n",
+        sq == 1 ? "decode" : "prefill", (long long)B, (long long)sq,
+        (long long)skv, (long long)H, (long long)G, (long long)d);
+    return 0;
+  }
+
+  // =========================================================================
+  // Fallback: 11-step decomposed hipBLASLt pipeline (sq > 256 or d != 128)
+  // =========================================================================
 
   bool packed_qkv = (key == nullptr && value == nullptr);
 
@@ -169,7 +254,6 @@ static int gqa_forward_hipblaslt(
   // Layout: [Qtrans | Kexp | Vexp | S | O | Qroped? | Kroped? | Qsplit? |
   // Ksplit? | Vsplit? | GEMM ws]
 
-  size_t elem_sz = 2; // FP16
   size_t Qtrans_bytes = (size_t)B * H * sq * d * elem_sz;
   size_t Kexp_bytes = (size_t)B * H * skv * d * elem_sz;
   size_t S_bytes = (size_t)B * H * sq * skv * elem_sz;
@@ -184,7 +268,6 @@ static int gqa_forward_hipblaslt(
 
   // Optional RoPE buffers: allocated only when do_rotary is enabled.
   size_t off_Qroped = 0, off_Kroped = 0;
-  bool need_rope = (do_rotary == 1) && cos_cache && sin_cache;
   if (need_rope) {
     size_t Q_bytes = (size_t)B * sq * H * d * elem_sz;
     size_t K_bytes = (size_t)B * sq * G * d * elem_sz;
