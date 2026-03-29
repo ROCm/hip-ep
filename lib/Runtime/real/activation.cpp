@@ -8,10 +8,8 @@
 #include "runtime_types.h"
 
 #include <cstdio>
-
-// Convenience wrappers for goto cleanup pattern (all functions use 'cleanup'
-// label)
-#define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
+#include <functional>
+#include <unordered_map>
 
 static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type) {
   switch (data_type) {
@@ -43,6 +41,80 @@ static miopenActivationMode_t hipdnn_ep_to_miopen_activation(int64_t mode) {
             (long long)mode);
     return miopenActivationLOGISTIC;
   }
+}
+
+// =============================================================================
+// Descriptor cache: 2 tensor descriptors + 1 activation descriptor created
+// once per unique (num_elements, data_type, activation_mode) triple and
+// reused for the process lifetime.
+// =============================================================================
+
+struct ActivationCacheKey {
+  int64_t num_elements, data_type, activation_mode;
+  bool operator==(const ActivationCacheKey &o) const {
+    return num_elements == o.num_elements && data_type == o.data_type &&
+           activation_mode == o.activation_mode;
+  }
+};
+
+struct ActivationCacheKeyHash {
+  size_t operator()(const ActivationCacheKey &k) const {
+    size_t h = std::hash<int64_t>{}(k.num_elements);
+    h ^= std::hash<int64_t>{}(k.data_type) + 0x9e3779b9 + (h << 6) +
+         (h >> 2);
+    h ^= std::hash<int64_t>{}(k.activation_mode) + 0x9e3779b9 + (h << 6) +
+         (h >> 2);
+    return h;
+  }
+};
+
+struct ActivationCacheEntry {
+  miopenTensorDescriptor_t inDesc, outDesc;
+  miopenActivationDescriptor_t actDesc;
+};
+
+static std::unordered_map<ActivationCacheKey, ActivationCacheEntry,
+                          ActivationCacheKeyHash>
+    g_activation_cache;
+
+static const ActivationCacheEntry *
+queryOrCreateActivation(const ActivationCacheKey &key) {
+  auto it = g_activation_cache.find(key);
+  if (it != g_activation_cache.end())
+    return &it->second;
+
+  miopenDataType_t dt = hipdnn_ep_to_miopen_type(key.data_type);
+  miopenActivationMode_t act =
+      hipdnn_ep_to_miopen_activation(key.activation_mode);
+  int n = static_cast<int>(key.num_elements);
+
+  ActivationCacheEntry e{};
+
+  if (miopenCreateTensorDescriptor(&e.inDesc) != miopenStatusSuccess)
+    return nullptr;
+  if (miopenCreateTensorDescriptor(&e.outDesc) != miopenStatusSuccess) {
+    miopenDestroyTensorDescriptor(e.inDesc);
+    return nullptr;
+  }
+
+  miopenSet4dTensorDescriptor(e.inDesc, dt, 1, 1, 1, n);
+  miopenSet4dTensorDescriptor(e.outDesc, dt, 1, 1, 1, n);
+
+  if (miopenCreateActivationDescriptor(&e.actDesc) != miopenStatusSuccess) {
+    miopenDestroyTensorDescriptor(e.outDesc);
+    miopenDestroyTensorDescriptor(e.inDesc);
+    return nullptr;
+  }
+  miopenSetActivationDescriptor(e.actDesc, act, 0.0, 0.0, 0.0);
+
+  auto [ins, _] = g_activation_cache.emplace(key, e);
+
+  RUNTIME_DEBUG_LOG("[REAL] queryOrCreateActivation: cached 2 tensor + 1 act "
+                    "desc for num_elements=%lld data_type=%lld mode=%lld\n",
+                    (long long)key.num_elements, (long long)key.data_type,
+                    (long long)key.activation_mode);
+
+  return &ins->second;
 }
 
 // =============================================================================
@@ -79,54 +151,26 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
     return -1;
   }
 
-  miopenDataType_t miopen_type = hipdnn_ep_to_miopen_type(data_type);
-  miopenActivationMode_t miopen_act =
-      hipdnn_ep_to_miopen_activation(activation_mode);
+  ActivationCacheKey key{num_elements, data_type, activation_mode};
+  const ActivationCacheEntry *c = queryOrCreateActivation(key);
+  if (!c) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_miopenActivationForward: descriptor cache "
+                      "creation failed\n");
+    return -1;
+  }
 
-  // Initialize all resource pointers to nullptr for safe cleanup
-  miopenTensorDescriptor_t inDesc = nullptr;
-  miopenTensorDescriptor_t outDesc = nullptr;
-  miopenActivationDescriptor_t actDesc = nullptr;
-  int result = 0;
   float alpha = 1.0f, beta = 0.0f;
-
-  int n = static_cast<int>(num_elements);
-  RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_miopenActivationForward: creating tensor descriptors "
-      "[1,1,1,%d] with type %s\n",
-      n, type_name);
-
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&inDesc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&outDesc));
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(inDesc, miopen_type, 1, 1, 1, n));
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(outDesc, miopen_type, 1, 1, 1, n));
-  MIOPEN_CHECK(miopenCreateActivationDescriptor(&actDesc));
-  MIOPEN_CHECK(
-      miopenSetActivationDescriptor(actDesc, miopen_act, 0.0, 0.0, 0.0));
-
-  RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_miopenActivationForward: calling miopenActivationForward"
-      "(%s, alpha=%.1f, beta=%.1f)\n",
-      act_name, alpha, beta);
-
-  MIOPEN_CHECK(miopenActivationForward(handle, actDesc, &alpha, inDesc, input,
-                                       &beta, outDesc, output));
+  miopenStatus_t st =
+      miopenActivationForward(handle, c->actDesc, &alpha, c->inDesc, input,
+                              &beta, c->outDesc, output);
+  if (st != miopenStatusSuccess) {
+    RUNTIME_DEBUG_LOG("[REAL] wrap_miopenActivationForward: "
+                      "miopenActivationForward failed (%d)\n",
+                      st);
+    return -1;
+  }
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_miopenActivationForward: completed successfully\n");
-
-cleanup:
-  // Best-effort cleanup: free all allocated resources
-  // Continue cleanup even if individual operations fail
-  if (actDesc) {
-    miopenDestroyActivationDescriptor(actDesc);
-  }
-  if (inDesc) {
-    miopenDestroyTensorDescriptor(inDesc);
-  }
-  if (outDesc) {
-    miopenDestroyTensorDescriptor(outDesc);
-  }
-
-  return result;
+  return 0;
 }
