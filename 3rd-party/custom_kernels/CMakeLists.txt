@@ -30,6 +30,7 @@ message(STATUS "[custom_kernels] Using HIP_ARCHITECTURES: ${HIP_ARCHITECTURES}")
 hip_add_library(hip_custom_kernels STATIC
     hip/rope_kernel.hip
     hip/gqa_kernel.hip
+    hip/gemm_wmma_kernel.hip
     hip/elementwise_sub_kernel.hip
     hip/cast_kernel.hip
     hip/gather_kernel.hip

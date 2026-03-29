@@ -427,6 +427,33 @@ int hip_qmoe_scatter_add(
     int64_t count,
     int64_t element_size_bytes);
 
+/* =========================================================================
+ * WMMA GEMM (Small-M Matrix Multiply via Wave Matrix Multiply-Accumulate)
+ * =========================================================================
+ *
+ * Computes C[M,N] = A[M,K] * B[K,N] using RDNA 3+ WMMA instructions.
+ * FP16 inputs, FP32 accumulation, FP16 output. All matrices row-major.
+ *
+ * Designed for M <= 512 where hipBLASLt's register-heavy tiling (256 VGPRs,
+ * 4/16 occupancy) underperforms. This kernel targets ~30 VGPRs and 16/16
+ * occupancy via 16x16 WMMA tiles.
+ *
+ * Requires K and N to be multiples of 16.
+ *
+ * Parameters:
+ *   stream - hipStream_t cast to void*
+ *   A      - GPU pointer to activation matrix [M, K] row-major (fp16)
+ *   B      - GPU pointer to weight matrix [K, N] row-major (fp16)
+ *   C      - GPU pointer to output matrix [M, N] (fp16)
+ *   M      - number of rows in A / output
+ *   K      - inner dimension (reduction axis), must be multiple of 16
+ *   N      - number of columns in B / output, must be multiple of 16
+ *
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
+                       void* C, int M, int K, int N);
+
 #ifdef __cplusplus
 }
 #endif

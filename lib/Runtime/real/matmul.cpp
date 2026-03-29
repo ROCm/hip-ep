@@ -4,19 +4,41 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
-#include "error_check_macros.h"
 #include "runtime_types.h"
 
+#include "hip_custom_kernels.h"
+
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <unordered_map>
 
 // =============================================================================
-// Full-object cache: desc, layouts, algo, and workspace size are created once
-// per unique problem shape and reused for the process lifetime.
-// Modeled on gqa.cpp's queryOrCreateGemm pattern.
+// Per-shape descriptor cache with multi-algorithm auto-tune.
+//
+// On the first call for each unique (M, N, K, batch, elem_size) shape we
+// create descriptors, request up to MAX_ALGO_CANDIDATES algorithms from the
+// heuristic, and store them. On the first actual matmul call (when real GPU
+// pointers are available), we benchmark each candidate and cache the winner.
+// Subsequent calls reuse the tuned algorithm with zero overhead.
+//
+// Auto-tune is enabled by default. Set HIPDNN_EP_AUTOTUNE=0 to disable.
 // =============================================================================
+
+static constexpr int MAX_ALGO_CANDIDATES = 60;
+static constexpr int AUTOTUNE_WARMUP_ITERS = 1;
+static constexpr int AUTOTUNE_TIMING_ITERS = 3;
+
+static bool autotune_enabled() {
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char *env = getenv("HIPDNN_EP_AUTOTUNE");
+    enabled = (env && strcmp(env, "0") != 0) ? 1 : 0;
+  }
+  return enabled != 0;
+}
 
 struct MatmulCacheKey {
   int64_t M, N, K, batch_count, elem_size;
@@ -42,12 +64,16 @@ struct MatmulCacheEntry {
   hipblasLtMatrixLayout_t layA, layB, layC;
   hipblasLtMatmulAlgo_t algo;
   size_t workspace_size;
+  bool tuned;
+  int num_candidates;
+  size_t max_candidate_workspace;
+  hipblasLtMatmulHeuristicResult_t candidates[MAX_ALGO_CANDIDATES];
 };
 
 static std::unordered_map<MatmulCacheKey, MatmulCacheEntry, MatmulCacheKeyHash>
     g_matmul_cache;
 
-static const MatmulCacheEntry *
+static MatmulCacheEntry *
 queryOrCreateMatmul(hipblasLtHandle_t handle, const MatmulCacheKey &key) {
   auto it = g_matmul_cache.find(key);
   if (it != g_matmul_cache.end())
@@ -57,6 +83,9 @@ queryOrCreateMatmul(hipblasLtHandle_t handle, const MatmulCacheKey &key) {
   int64_t M = key.M, N = key.N, K = key.K;
 
   MatmulCacheEntry entry{};
+  entry.tuned = false;
+  entry.num_candidates = 0;
+  entry.max_candidate_workspace = 0;
 
   if (hipblasLtMatmulDescCreate(&entry.desc, HIPBLAS_COMPUTE_32F, HIP_R_32F) !=
       HIPBLAS_STATUS_SUCCESS)
@@ -115,10 +144,13 @@ queryOrCreateMatmul(hipblasLtHandle_t handle, const MatmulCacheKey &key) {
       pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_ws,
       sizeof(max_ws));
 
-  hipblasLtMatmulHeuristicResult_t heur;
+  bool do_autotune = autotune_enabled();
+  int request_count = do_autotune ? MAX_ALGO_CANDIDATES : 1;
+
   int returned = 0;
   hipblasLtMatmulAlgoGetHeuristic(handle, entry.desc, entry.layA, entry.layB,
-                                  entry.layC, entry.layC, pref, 1, &heur,
+                                  entry.layC, entry.layC, pref,
+                                  request_count, entry.candidates,
                                   &returned);
   hipblasLtMatmulPreferenceDestroy(pref);
 
@@ -135,16 +167,97 @@ queryOrCreateMatmul(hipblasLtHandle_t handle, const MatmulCacheKey &key) {
     return nullptr;
   }
 
-  entry.algo = heur.algo;
-  entry.workspace_size = heur.workspaceSize;
+  entry.num_candidates = returned;
+  entry.algo = entry.candidates[0].algo;
+  entry.workspace_size = entry.candidates[0].workspaceSize;
+
+  if (do_autotune) {
+    for (int i = 0; i < returned; i++)
+      entry.max_candidate_workspace =
+          std::max(entry.max_candidate_workspace,
+                   entry.candidates[i].workspaceSize);
+    entry.tuned = (returned <= 1);
+  } else {
+    entry.tuned = true;
+  }
+
   auto [ins, _] = g_matmul_cache.emplace(key, entry);
 
-  RUNTIME_DEBUG_LOG("[REAL] queryOrCreateMatmul: cached desc+layouts+algo for "
-                    "M=%lld N=%lld K=%lld batch=%lld (ws=%zu)\n",
+  RUNTIME_DEBUG_LOG("[MATMUL] cached M=%lld N=%lld K=%lld batch=%lld: "
+                    "%d algo(s), autotune=%s\n",
                     (long long)M, (long long)N, (long long)K,
-                    (long long)key.batch_count, entry.workspace_size);
+                    (long long)key.batch_count, returned,
+                    entry.tuned ? "skipped" : "pending");
 
   return &ins->second;
+}
+
+// =============================================================================
+// Auto-tune: benchmark all candidate algorithms and select the fastest.
+// Called once per shape on the first matmul invocation with real GPU pointers.
+// =============================================================================
+
+static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
+                           MatmulCacheEntry *entry, const void *blas_A,
+                           const void *blas_B, void *blas_C, void *ws_ptr,
+                           size_t ws_size, const MatmulCacheKey &key) {
+  float alpha = 1.0f, beta = 0.0f;
+  hipEvent_t ev_start, ev_stop;
+  hipEventCreate(&ev_start);
+  hipEventCreate(&ev_stop);
+
+  float best_ms = 1e30f;
+  int best_idx = 0;
+  int tested = 0;
+
+  for (int i = 0; i < entry->num_candidates; i++) {
+    auto &cand = entry->candidates[i];
+
+    if (cand.workspaceSize > ws_size)
+      continue;
+
+    // Warm-up
+    hipblasStatus_t st = hipblasLtMatmul(
+        handle, entry->desc, &alpha, blas_A, entry->layA, blas_B,
+        entry->layB, &beta, blas_C, entry->layC, blas_C, entry->layC,
+        &cand.algo, ws_ptr, ws_size, stream);
+    if (st != HIPBLAS_STATUS_SUCCESS)
+      continue;
+
+    // Timed iterations
+    hipEventRecord(ev_start, stream);
+    for (int t = 0; t < AUTOTUNE_TIMING_ITERS; t++) {
+      hipblasLtMatmul(handle, entry->desc, &alpha, blas_A, entry->layA,
+                      blas_B, entry->layB, &beta, blas_C, entry->layC,
+                      blas_C, entry->layC, &cand.algo, ws_ptr, ws_size,
+                      stream);
+    }
+    hipEventRecord(ev_stop, stream);
+    hipEventSynchronize(ev_stop);
+
+    float ms = 0.0f;
+    hipEventElapsedTime(&ms, ev_start, ev_stop);
+    tested++;
+
+    if (ms < best_ms) {
+      best_ms = ms;
+      best_idx = i;
+    }
+  }
+
+  entry->algo = entry->candidates[best_idx].algo;
+  entry->workspace_size = entry->candidates[best_idx].workspaceSize;
+  entry->tuned = true;
+
+  hipEventDestroy(ev_start);
+  hipEventDestroy(ev_stop);
+
+  fprintf(stderr,
+          "[AUTOTUNE] M=%lld N=%lld K=%lld batch=%lld: "
+          "tested %d/%d algos, best=#%d (%.3f ms/%d iters)\n",
+          (long long)key.M, (long long)key.N, (long long)key.K,
+          (long long)key.batch_count, tested, entry->num_candidates,
+          best_idx, best_ms, AUTOTUNE_TIMING_ITERS);
 }
 
 // =============================================================================
@@ -202,7 +315,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
                     (long long)(batch_count * M * N * elem_size));
 
   MatmulCacheKey key{M, N, K, batch_count, elem_size};
-  const MatmulCacheEntry *cached = queryOrCreateMatmul(handle, key);
+  MatmulCacheEntry *cached = queryOrCreateMatmul(handle, key);
   if (!cached) {
     fprintf(stderr, "wrap_hipblasLtMatmul: failed to create/find cached "
                     "descriptors for M=%lld N=%lld K=%lld batch=%lld\n",
@@ -211,13 +324,22 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
     return -1;
   }
 
-  if (cached->workspace_size > 0) {
-    if (hipdnn_ep_state_ensure_workspace(state, cached->workspace_size) != 0)
+  // Ensure workspace is large enough for auto-tune candidates (if pending)
+  // or the selected algorithm.
+  size_t needed_ws = cached->tuned ? cached->workspace_size
+                                   : cached->max_candidate_workspace;
+  if (needed_ws > 0) {
+    if (hipdnn_ep_state_ensure_workspace(state, needed_ws) != 0)
       return -1;
   }
 
   void *ws_ptr = hipdnn_ep_state_get_workspace(state);
   size_t ws_size = hipdnn_ep_state_get_workspace_size(state);
+
+  // Auto-tune on first call: benchmark all candidates with real GPU data
+  if (!cached->tuned) {
+    autotuneMatmul(handle, stream, cached, B, A, output, ws_ptr, ws_size, key);
+  }
 
   float alpha = 1.0f;
   float beta = 0.0f;
