@@ -56,6 +56,25 @@ static void perf_ensure_events() {
 }
 
 //==============================================================================
+// HIP Graph Capture (gated on HIPDNN_EP_GRAPH)
+//==============================================================================
+// On inference #2 (after warm-up), captures all main_graph GPU operations into
+// a hipGraph_t via stream capture. On inference #3+ the captured graph is
+// replayed, skipping main_graph entirely. GPU buffer pointers from the capture
+// inference are pinned and reused across replays.
+
+static struct {
+  hipGraph_t graph = nullptr;
+  hipGraphExec_t graphExec = nullptr;
+  unsigned inference_num = 0;
+  unsigned d2h_count = 0;
+  bool capturing = false;
+  bool capture_ok = false;
+  std::vector<void *> captured_input_ptrs;
+  std::vector<void *> captured_output_ptrs;
+} g_graph;
+
+//==============================================================================
 // GPU Tensor Buffer Pool
 //==============================================================================
 // Reuses GPU allocations across inferences to eliminate per-call
@@ -279,9 +298,43 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
       "size_bytes=%zu\n",
       index, tensor->rank, element_size, size_bytes);
 
-  // Allocate GPU buffer
-  void *gpu_ptr = nullptr;
-  if (hipMalloc(&gpu_ptr, size_bytes) != hipSuccess) {
+  // GRAPH: track inference number and reset per-inference counters
+  // (must be before replay check which depends on inference_num)
+  if (hipdnn_ep_graph_enabled() && index == 0) {
+    g_graph.inference_num++;
+    g_graph.d2h_count = 0;
+  }
+
+  // GRAPH replay: reuse captured GPU pointer instead of pool_alloc.
+  // MUST be before pool_alloc to avoid leaking a buffer every call.
+  if (hipdnn_ep_graph_enabled() && g_graph.capture_ok &&
+      g_graph.inference_num >= 3) {
+    if (index >= g_graph.captured_input_ptrs.size()) {
+      fprintf(stderr, "[GRAPH] ERROR: input index %zu out of captured range "
+                      "(%zu)\n",
+              index, g_graph.captured_input_ptrs.size());
+      return HIPDNN_EP_ERR_INDEX_OUT_OF_BOUNDS;
+    }
+    void *captured_ptr = g_graph.captured_input_ptrs[index];
+    if (hipMemcpyAsync(captured_ptr, tensor->data, size_bytes,
+                       hipMemcpyHostToDevice,
+                       static_cast<hipStream_t>(state->stream)) != hipSuccess) {
+      fprintf(stderr, "hipdnn_ep_tensor_prepare_input: H2D transfer failed "
+                      "(replay)\n");
+      return HIPDNN_EP_ERR_H2D_TRANSFER_FAILED;
+    }
+    out_buffer->gpu_ptr = captured_ptr;
+    out_buffer->host_ptr = tensor->data;
+    out_buffer->shape_ptr = tensor->shape;
+    out_buffer->rank = tensor->rank;
+    out_buffer->size_bytes = size_bytes;
+    out_buffer->is_pooled = true;
+    return HIPDNN_EP_SUCCESS;
+  }
+
+  // Allocate GPU buffer (pool reuses across inferences)
+  void *gpu_ptr = pool_alloc(size_bytes);
+  if (!gpu_ptr) {
     fprintf(stderr,
             "hipdnn_ep_tensor_prepare_input: failed to allocate %zu bytes\n",
             size_bytes);
@@ -305,6 +358,11 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
     fprintf(stderr, "hipdnn_ep_tensor_prepare_input: H2D transfer failed\n");
     HIP_CLEANUP(hipFree(gpu_ptr));
     return HIPDNN_EP_ERR_H2D_TRANSFER_FAILED;
+  }
+
+  // GRAPH: record pointer mapping during capture inference
+  if (hipdnn_ep_graph_enabled() && g_graph.inference_num == 2) {
+    g_graph.captured_input_ptrs.push_back(gpu_ptr);
   }
 
   // PERF: accumulate H2D bytes
@@ -406,6 +464,50 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
                          static_cast<hipStream_t>(state->stream));
   }
 
+  // GRAPH: begin stream capture on inference #2 (after warm-up)
+  // Placed AFTER the PERF event so h2d_end is NOT inside the captured graph.
+  if (hipdnn_ep_graph_enabled() && index == 0 &&
+      g_graph.inference_num == 2 && !g_graph.capturing) {
+    hipError_t err = hipStreamBeginCapture(
+        static_cast<hipStream_t>(state->stream),
+        hipStreamCaptureModeGlobal);
+    if (err == hipSuccess) {
+      g_graph.capturing = true;
+      fprintf(stderr, "[GRAPH] inference #%u: stream capture STARTED "
+                      "(mode=Global)\n", g_graph.inference_num);
+    } else {
+      fprintf(stderr, "[GRAPH] hipStreamBeginCapture FAILED: %d (%s)\n",
+              (int)err, hipGetErrorString(err));
+    }
+  }
+
+  // GRAPH replay: launch graph at index 0, reuse captured GPU pointers
+  if (hipdnn_ep_graph_enabled() && g_graph.capture_ok &&
+      g_graph.inference_num >= 3) {
+    if (index == 0) {
+      hipError_t err = hipGraphLaunch(
+          g_graph.graphExec, static_cast<hipStream_t>(state->stream));
+      if (err != hipSuccess) {
+        fprintf(stderr, "[GRAPH] hipGraphLaunch FAILED: %d (%s)\n", (int)err,
+                hipGetErrorString(err));
+        return HIPDNN_EP_ERR_STREAM_SYNC_FAILED;
+      }
+    }
+    if (index >= g_graph.captured_output_ptrs.size()) {
+      fprintf(stderr, "[GRAPH] ERROR: output index %zu out of captured range "
+                      "(%zu)\n",
+              index, g_graph.captured_output_ptrs.size());
+      return HIPDNN_EP_ERR_INDEX_OUT_OF_BOUNDS;
+    }
+    out_buffer->gpu_ptr = g_graph.captured_output_ptrs[index];
+    out_buffer->host_ptr = tensor->data;
+    out_buffer->shape_ptr = tensor->shape;
+    out_buffer->rank = tensor->rank;
+    out_buffer->size_bytes = size_bytes;
+    out_buffer->is_pooled = true;
+    return HIPDNN_EP_SUCCESS;
+  }
+
   // Allocate GPU buffer (pool reuses across inferences)
   void *gpu_ptr = pool_alloc(size_bytes);
   if (!gpu_ptr) {
@@ -413,6 +515,11 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
             "hipdnn_ep_tensor_prepare_output: failed to allocate %zu bytes\n",
             size_bytes);
     return HIPDNN_EP_ERR_GPU_ALLOC_FAILED;
+  }
+
+  // GRAPH: record pointer mapping during capture inference
+  if (hipdnn_ep_graph_enabled() && g_graph.inference_num == 2) {
+    g_graph.captured_output_ptrs.push_back(gpu_ptr);
   }
 
   // Populate output buffer
@@ -440,6 +547,42 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
 
   int result = HIPDNN_EP_SUCCESS;
 
+  // GRAPH: end stream capture on first finalize_output of the capture inference.
+  // Placed BEFORE PERF d2h_start and BEFORE the D2H copy so neither is in the
+  // captured graph. After EndCapture the stream returns to normal mode.
+  if (hipdnn_ep_graph_enabled() && g_graph.capturing &&
+      g_graph.d2h_count == 0) {
+    g_graph.capturing = false;
+    hipError_t err = hipStreamEndCapture(
+        static_cast<hipStream_t>(state->stream), &g_graph.graph);
+    if (err == hipSuccess) {
+      fprintf(stderr, "[GRAPH] hipStreamEndCapture SUCCEEDED\n");
+      size_t numNodes = 0;
+      (void)hipGraphGetNodes(g_graph.graph, nullptr, &numNodes);
+      fprintf(stderr, "[GRAPH] captured graph has %zu nodes\n", numNodes);
+      err = hipGraphInstantiate(&g_graph.graphExec, g_graph.graph,
+                                nullptr, nullptr, 0);
+      if (err == hipSuccess) {
+        g_graph.capture_ok = true;
+        fprintf(stderr,
+                "[GRAPH] hipGraphInstantiate SUCCEEDED -- capture PASSED\n");
+      } else {
+        fprintf(stderr, "[GRAPH] hipGraphInstantiate FAILED: %d (%s)\n",
+                (int)err, hipGetErrorString(err));
+      }
+    } else {
+      fprintf(stderr, "[GRAPH] hipStreamEndCapture FAILED: %d (%s)\n",
+              (int)err, hipGetErrorString(err));
+      fprintf(stderr, "[GRAPH] Capture FAILED -- stream capture is not "
+                      "compatible with current GPU dispatch pipeline.\n");
+    }
+  }
+
+  // GRAPH: track finalize_output calls per inference
+  if (hipdnn_ep_graph_enabled()) {
+    g_graph.d2h_count++;
+  }
+
   // PERF: record D2H start on first output finalize (after all compute)
   if (hipdnn_ep_perf_enabled() && g_perf.d2h_count == 0 &&
       g_perf.initialized) {
@@ -462,9 +605,13 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
     g_perf.d2h_count++;
   }
 
-  // Return buffer to pool (replaces hipFree)
-  pool_release(buffer->gpu_ptr, buffer->size_bytes);
-  buffer->gpu_ptr = nullptr;
+  // Return buffer to pool -- skip when graph is active (buffers are pinned)
+  if (hipdnn_ep_graph_enabled() && g_graph.capture_ok) {
+    buffer->gpu_ptr = nullptr;
+  } else {
+    pool_release(buffer->gpu_ptr, buffer->size_bytes);
+    buffer->gpu_ptr = nullptr;
+  }
 
   return result;
 }
@@ -489,6 +636,13 @@ int hipdnn_ep_stream_sync(RuntimeState *state) {
       result = HIPDNN_EP_ERR_STREAM_SYNC_FAILED;
     }
     // Continue to cleanup even on error (best-effort)
+  }
+
+  // GRAPH: log replay status (only first few to avoid spam)
+  if (hipdnn_ep_graph_enabled() && g_graph.capture_ok &&
+      g_graph.inference_num >= 3 && g_graph.inference_num <= 5) {
+    fprintf(stderr, "[GRAPH] inference #%u: REPLAY completed\n",
+            g_graph.inference_num);
   }
 
   // PERF: compute and log timing breakdown
@@ -525,11 +679,21 @@ void hipdnn_ep_tensor_free_input(RuntimeState *state, TensorBuffer *buffer) {
     return;
   }
 
-  // Free buffer if not pooled
-  if (!buffer->is_pooled && buffer->gpu_ptr) {
-    HIP_CLEANUP(hipFree(buffer->gpu_ptr));
+  // Return buffer to pool -- skip when graph is active (buffers are pinned)
+  if (hipdnn_ep_graph_enabled() && g_graph.capture_ok) {
+    buffer->gpu_ptr = nullptr;
+  } else {
+    pool_release(buffer->gpu_ptr, buffer->size_bytes);
     buffer->gpu_ptr = nullptr;
   }
+}
+
+// Check if graph replay is active (called from generated inference_compute)
+extern "C" int hipdnn_ep_graph_should_skip_main(RuntimeState *state) {
+  if (hipdnn_ep_graph_enabled() && g_graph.capture_ok &&
+      g_graph.inference_num >= 3)
+    return 1;
+  return 0;
 }
 
 //==============================================================================
