@@ -201,7 +201,7 @@ static int gqa_forward_hipblaslt(
                                 (int)past_len) != 0)
       return -1;
 
-    if (past_key && past_len > 0 && past_key != present_key) {
+    if (past_key && past_value && past_len > 0 && past_key != present_key) {
       size_t slice_bytes = (size_t)past_len * d * elem_sz;
       for (int64_t b = 0; b < B; ++b) {
         for (int64_t g = 0; g < G; ++g) {

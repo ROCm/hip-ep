@@ -245,12 +245,21 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
     }
   }
 
+  hipEventDestroy(ev_start);
+  hipEventDestroy(ev_stop);
+
+  if (tested == 0) {
+    fprintf(stderr,
+            "[AUTOTUNE] M=%lld N=%lld K=%lld batch=%lld: "
+            "WARNING -- 0/%d candidates passed, keeping heuristic #0\n",
+            (long long)key.M, (long long)key.N, (long long)key.K,
+            (long long)key.batch_count, entry->num_candidates);
+    return;
+  }
+
   entry->algo = entry->candidates[best_idx].algo;
   entry->workspace_size = entry->candidates[best_idx].workspaceSize;
   entry->tuned = true;
-
-  hipEventDestroy(ev_start);
-  hipEventDestroy(ev_stop);
 
   fprintf(stderr,
           "[AUTOTUNE] M=%lld N=%lld K=%lld batch=%lld: "
