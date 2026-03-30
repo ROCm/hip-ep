@@ -19,6 +19,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
@@ -712,7 +713,7 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
     } else {
       // Default: reduce all axes
       auto inputType = mlir::cast<mlir::RankedTensorType>(data.getType());
-      for (int64_t i = 0; i < inputType.getRank(); ++i)
+      for (int64_t i : llvm::seq<int64_t>(inputType.getRank()))
         axesVec.push_back(i);
     }
 
@@ -1516,78 +1517,6 @@ struct GatherToHip : public mlir::RewritePattern {
 // Reshape → standard tensor ops (zero-cost metadata reinterpretation)
 //===----------------------------------------------------------------------===//
 
-/// Compute reassociation indices mapping a lower-rank shape to a higher-rank
-/// shape for tensor.expand_shape / tensor.collapse_shape.
-///
-/// Static lower dims greedily accumulate contiguous higher dims by product.
-/// Dynamic lower dims use 1:1 matching when not last; the last dynamic
-/// lower dim consumes all remaining higher dims (exactly one must be dynamic).
-/// Trailing size-1 higher dims are absorbed into the last group.
-static std::optional<llvm::SmallVector<mlir::ReassociationIndices>>
-computeReassociation(llvm::ArrayRef<int64_t> lowerShape,
-                     llvm::ArrayRef<int64_t> higherShape) {
-  int64_t lowerRank = lowerShape.size();
-  int64_t higherRank = higherShape.size();
-  llvm::SmallVector<mlir::ReassociationIndices> reassociation;
-  int64_t highIdx = 0;
-
-  for (int64_t lowIdx = 0; lowIdx < lowerRank; ++lowIdx) {
-    mlir::ReassociationIndices group;
-    int64_t lowDim = lowerShape[lowIdx];
-    bool isLast = (lowIdx == lowerRank - 1);
-
-    if (highIdx >= higherRank)
-      return std::nullopt;
-
-    if (mlir::ShapedType::isDynamic(lowDim)) {
-      if (isLast) {
-        int64_t dynCount = 0;
-        while (highIdx < higherRank) {
-          if (mlir::ShapedType::isDynamic(higherShape[highIdx]))
-            ++dynCount;
-          group.push_back(highIdx++);
-        }
-        if (dynCount != 1)
-          return std::nullopt;
-      } else {
-        if (!mlir::ShapedType::isDynamic(higherShape[highIdx]))
-          return std::nullopt;
-        group.push_back(highIdx++);
-      }
-    } else {
-      int64_t product = 1;
-      while (highIdx < higherRank) {
-        int64_t hDim = higherShape[highIdx];
-        if (mlir::ShapedType::isDynamic(hDim))
-          break;
-        group.push_back(highIdx++);
-        product *= hDim;
-        if (product == lowDim)
-          break;
-        if (product > lowDim)
-          return std::nullopt;
-      }
-      if (product != lowDim)
-        return std::nullopt;
-    }
-
-    if (group.empty())
-      return std::nullopt;
-
-    reassociation.push_back(group);
-  }
-
-  while (highIdx < higherRank) {
-    if (higherShape[highIdx] != 1)
-      return std::nullopt;
-    if (reassociation.empty())
-      return std::nullopt;
-    reassociation.back().push_back(highIdx++);
-  }
-
-  return reassociation;
-}
-
 /// onnx.Reshape → tensor.expand_shape / tensor.collapse_shape.
 ///
 /// Reshape is a zero-cost metadata operation: it reinterprets shape/strides
@@ -1620,60 +1549,53 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
       return mlir::success();
     }
 
-    if (outputRank > inputRank) {
+    if (outputRank != inputRank) {
       auto reassocOpt =
-          computeReassociation(inputType.getShape(), outputType.getShape());
+          mlir::getReassociationIndicesForReshape(inputType, outputType);
       if (!reassocOpt)
         return rewriter.notifyMatchFailure(
-            op, "cannot compute expand reassociation");
+            op, "cannot compute reshape reassociation");
 
-      llvm::SmallVector<int64_t> outDimToInDim(outputRank, -1);
-      for (auto [g, group] : llvm::enumerate(*reassocOpt))
-        for (int64_t idx : group)
-          outDimToInDim[idx] = g;
+      if (outputRank > inputRank) {
+        llvm::SmallVector<int64_t> outDimToInDim(outputRank, -1);
+        for (auto [g, group] : llvm::enumerate(*reassocOpt))
+          for (int64_t idx : group)
+            outDimToInDim[idx] = g;
 
-      llvm::SmallVector<mlir::OpFoldResult> outputShape;
-      for (int64_t i = 0; i < outputRank; ++i) {
-        if (!outputType.isDynamicDim(i)) {
-          outputShape.push_back(
-              rewriter.getIndexAttr(outputType.getDimSize(i)));
-          continue;
+        llvm::SmallVector<mlir::OpFoldResult> outputShape;
+        for (int64_t i : llvm::seq<int64_t>(outputRank)) {
+          if (!outputType.isDynamicDim(i)) {
+            outputShape.push_back(
+                rewriter.getIndexAttr(outputType.getDimSize(i)));
+            continue;
+          }
+          int64_t srcDim = outDimToInDim[i];
+          const auto &group = (*reassocOpt)[srcDim];
+          int64_t staticProduct = 1;
+          for (int64_t idx : group)
+            if (!outputType.isDynamicDim(idx))
+              staticProduct *= outputType.getDimSize(idx);
+          mlir::Value inputSize =
+              mlir::tensor::DimOp::create(rewriter, loc, data, srcDim);
+          if (staticProduct == 1) {
+            outputShape.push_back(inputSize);
+          } else {
+            mlir::Value divisor = mlir::arith::ConstantIndexOp::create(
+                rewriter, loc, staticProduct);
+            mlir::Value dynSize =
+                mlir::arith::DivUIOp::create(rewriter, loc, inputSize, divisor);
+            outputShape.push_back(dynSize);
+          }
         }
-        int64_t srcDim = outDimToInDim[i];
-        const auto &group = (*reassocOpt)[srcDim];
-        int64_t staticProduct = 1;
-        for (int64_t idx : group)
-          if (!outputType.isDynamicDim(idx))
-            staticProduct *= outputType.getDimSize(idx);
-        mlir::Value inputSize =
-            mlir::tensor::DimOp::create(rewriter, loc, data, srcDim);
-        if (staticProduct == 1) {
-          outputShape.push_back(inputSize);
-        } else {
-          mlir::Value divisor = mlir::arith::ConstantIndexOp::create(
-              rewriter, loc, staticProduct);
-          mlir::Value dynSize =
-              mlir::arith::DivUIOp::create(rewriter, loc, inputSize, divisor);
-          outputShape.push_back(dynSize);
-        }
+
+        auto expandOp = mlir::tensor::ExpandShapeOp::create(
+            rewriter, loc, outputType, data, *reassocOpt, outputShape);
+        rewriter.replaceOp(op, expandOp.getResult());
+      } else {
+        auto collapseOp = mlir::tensor::CollapseShapeOp::create(
+            rewriter, loc, outputType, data, *reassocOpt);
+        rewriter.replaceOp(op, collapseOp.getResult());
       }
-
-      auto expandOp = mlir::tensor::ExpandShapeOp::create(
-          rewriter, loc, outputType, data, *reassocOpt, outputShape);
-      rewriter.replaceOp(op, expandOp.getResult());
-      return mlir::success();
-    }
-
-    if (outputRank < inputRank) {
-      auto reassocOpt =
-          computeReassociation(outputType.getShape(), inputType.getShape());
-      if (!reassocOpt)
-        return rewriter.notifyMatchFailure(
-            op, "cannot compute collapse reassociation");
-
-      auto collapseOp = mlir::tensor::CollapseShapeOp::create(
-          rewriter, loc, outputType, data, *reassocOpt);
-      rewriter.replaceOp(op, collapseOp.getResult());
       return mlir::success();
     }
 
@@ -1690,7 +1612,7 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
         mlir::RankedTensorType::get({numElems}, inputType.getElementType());
 
     mlir::ReassociationIndices allInputDims;
-    for (int64_t i = 0; i < inputRank; ++i)
+    for (int64_t i : llvm::seq<int64_t>(inputRank))
       allInputDims.push_back(i);
     llvm::SmallVector<mlir::ReassociationIndices> collapseReassoc = {
         allInputDims};
@@ -1698,12 +1620,12 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
         rewriter, loc, flatType, data, collapseReassoc);
 
     mlir::ReassociationIndices allOutputDims;
-    for (int64_t i = 0; i < outputRank; ++i)
+    for (int64_t i : llvm::seq<int64_t>(outputRank))
       allOutputDims.push_back(i);
     llvm::SmallVector<mlir::ReassociationIndices> expandReassoc = {
         allOutputDims};
     llvm::SmallVector<mlir::OpFoldResult> flatOutputShape;
-    for (int64_t i = 0; i < outputRank; ++i)
+    for (int64_t i : llvm::seq<int64_t>(outputRank))
       flatOutputShape.push_back(
           rewriter.getIndexAttr(outputType.getDimSize(i)));
     auto expanded = mlir::tensor::ExpandShapeOp::create(
