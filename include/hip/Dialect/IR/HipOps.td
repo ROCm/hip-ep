@@ -576,6 +576,33 @@ def Hip_MulOp : Hip_DpsOp<"mul"> {
   let hasVerifier = 1;
 }
 
+def Hip_AddOp : Hip_DpsOp<"add"> {
+  let summary = "Elementwise addition";
+  let description = [{
+    Performs elementwise addition: output = lhs + rhs
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.add(%ctx) ins(%lhs, %rhs : memref<1x128x32xf16, 1>,
+                                   memref<1x128x32xf16, 1>)
+                  outs(%output : memref<1x128x32xf16, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,
+    Hip_TensorOrMemRef:$rhs,
+    Hip_TensorOrMemRef:$output
+  );
+
+  // result_tensors inherited from Hip_DpsOp
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
+
 def Hip_MiopenSoftmaxOp : Hip_DpsOp<"miopen.softmax"> {
   let summary = "Softmax via miopenSoftmaxForward_V2 (row-wise, last dim)";
   let arguments = (ins

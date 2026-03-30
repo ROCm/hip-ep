@@ -122,7 +122,7 @@ existing `--convert-hip-to-llvm` pipeline.
 
 | ONNX | HIP | Notes |
 |---|---|---|
-| `Reshape` | `hip.reshape` | Shape/stride reinterpretation only |
+| `Reshape` | `tensor.expand_shape` / `tensor.collapse_shape` | Zero-cost standard MLIR shape reinterpretation, no custom HIP op needed |
 | `Unsqueeze` | `hip.unsqueeze` | Shape/stride reinterpretation only |
 | `Squeeze` | `hip.squeeze` | Shape/stride reinterpretation only |
 

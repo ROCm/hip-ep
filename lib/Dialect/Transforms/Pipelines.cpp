@@ -11,6 +11,7 @@
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/Passes.h"
 
@@ -21,8 +22,18 @@ using namespace mlir;
 /// Common tail of the ONNX-to-HIP pipeline after the OnnxToHip pass.
 static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   // 2. Bufferize tensor IR to memref IR
+  //
+  // Use IdentityLayoutMap for function boundaries: all EP inputs/outputs come
+  // from the ORT runtime as contiguous (row-major) tensors, and
+  // GenerateInterface::buildMemrefDescriptor always constructs memref
+  // descriptors with contiguous strides (stride[i] = product of sizes[i+1..]).
+  // The default InferLayoutMap falls back to FullyDynamicLayoutMap for ops like
+  // collapse_shape/expand_shape, producing strided<[?, ?, ?], offset: ?>
+  // memrefs that cannot be lowered to LLVM.
   bufferization::OneShotBufferizePassOptions bufferizeOpts;
   bufferizeOpts.bufferizeFunctionBoundaries = true;
+  bufferizeOpts.functionBoundaryTypeConversion =
+      bufferization::LayoutMapOption::IdentityLayoutMap;
   pm.addPass(bufferization::createOneShotBufferizePass(bufferizeOpts));
 
   // 3. Convert tensor function results to out-params (memref)
@@ -95,6 +106,13 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
 
 void mlir::hip::buildHipToLLVMPipeline(
     OpPassManager &pm, const HipToLLVMPipelineOptions &options) {
+  // Decompose memref.collapse_shape / memref.expand_shape into
+  // memref.reinterpret_cast + arithmetic.
+  // populateFinalizeMemRefToLLVMConversion Patterns (used by ConvertHipToLLVM)
+  // does not include patterns for these ops; expand-strided-metadata rewrites
+  // them into ops that it can lower.
+  pm.addPass(memref::createExpandStridedMetadataPass());
+
   pm.addPass(createConvertHipToLLVMPass());
 
   mlir::hip::CompilationOptionsT compOpts;
