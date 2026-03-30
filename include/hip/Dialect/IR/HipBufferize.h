@@ -71,6 +71,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         *ctx);
     RopeOp::attachInterface<HipDstBufferizableModel<RopeOp>>(*ctx);
     MiopenAddOp::attachInterface<HipDstBufferizableModel<MiopenAddOp>>(*ctx);
+    AddOp::attachInterface<HipDstBufferizableModel<AddOp>>(*ctx);
     MulOp::attachInterface<HipDstBufferizableModel<MulOp>>(*ctx);
     MiopenSoftmaxOp::attachInterface<HipDstBufferizableModel<MiopenSoftmaxOp>>(
         *ctx);
