@@ -1187,7 +1187,13 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   mlir::Value skipOutputInit = nullptr;
   if (skipOutputIsReal)
     skipOutputInit = createEmptyTensor(rewriter, loc, skipOutputType, input);
-
+  constexpr int64_t kCtxSize = 1;
+  constexpr int64_t kInputSize = 1;
+  constexpr int64_t kSkipSize = 1;
+  constexpr int64_t kGammaSize = 1;
+  int64_t kBiasSize = bias ? 1 : 0;
+  constexpr int64_t kOutputSize = 1;
+  int64_t kSkipOutputSize = skipOutputIsReal ? 1 : 0;
   // Build operands list for hip.skip_rms_norm
   mlir::SmallVector<mlir::Value> operands;
   operands.push_back(context);
@@ -1214,13 +1220,13 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   // [ctx(1), input(1), skip(1), gamma(1), bias(0|1),
   //  output(1), input_skip_bias_sum(0|1)]
   llvm::SmallVector<int32_t> segmentSizes;
-  segmentSizes.push_back(1); // ctx
-  segmentSizes.push_back(1); // input
-  segmentSizes.push_back(1); // skip
-  segmentSizes.push_back(1); // gamma
-  segmentSizes.push_back(bias ? 1 : 0);
-  segmentSizes.push_back(1); // output
-  segmentSizes.push_back(skipOutputInit ? 1 : 0);
+  segmentSizes.push_back(kCtxSize);
+  segmentSizes.push_back(kInputSize);
+  segmentSizes.push_back(kSkipSize);
+  segmentSizes.push_back(kGammaSize);
+  segmentSizes.push_back(kBiasSize);
+  segmentSizes.push_back(kOutputSize);
+  segmentSizes.push_back(kSkipOutputSize);
 
   auto state = mlir::OperationState(loc, "hip.skip_rms_norm");
   state.addOperands(operands);
