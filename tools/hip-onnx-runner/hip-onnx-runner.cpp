@@ -16,8 +16,9 @@
 //                     3=both (raw .bin under <stem>_i_dump/ and <stem>_o_dump/;
 //                     with -n: <stem>_cpu_i_dump/ and <stem>_cpu_o_dump/)
 //   -s, --seed        RNG seed for random inputs (default 42)
-//   -i, --input-dir   If set, load inputs from dir: input_<idx>_<tensor>_<type>.bin
-//   -L, --l2norm      Compare two dirs: dir1,dir2 (same set of *.bin files);
+//   -i, --input-dir   If set, load inputs from dir:
+//   input_<idx>_<tensor>_<type>.bin -L, --l2norm      Compare two dirs:
+//   dir1,dir2 (same set of *.bin files);
 //                     names must be ..._<type>.bin (fp32,fp16,i64,...)
 //   -h, --help        Show help
 //
@@ -28,8 +29,8 @@
 #include "../common/cxxopts.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -84,8 +85,8 @@ static size_t element_byte_size(ONNXTensorElementDataType t) {
 static std::string sanitize_filename_component(const std::string &name) {
   std::string s = name;
   for (auto &c : s) {
-    if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' ||
-        c == '"' || c == '<' || c == '>' || c == '|' || c == '\0')
+    if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' ||
+        c == '<' || c == '>' || c == '|' || c == '\0')
       c = '_';
   }
   if (s.empty())
@@ -171,11 +172,10 @@ static float fp16_bits_to_float(uint16_t h) {
   return f;
 }
 
-static std::filesystem::path tensor_dump_bin_path(const std::filesystem::path &dir,
-                                                  const char *io_prefix,
-                                                  size_t index,
-                                                  const std::string &ort_name,
-                                                  ONNXTensorElementDataType et) {
+static std::filesystem::path
+tensor_dump_bin_path(const std::filesystem::path &dir, const char *io_prefix,
+                     size_t index, const std::string &ort_name,
+                     ONNXTensorElementDataType et) {
   const std::string safe = sanitize_filename_component(ort_name);
   return dir / (std::string(io_prefix) + "_" + std::to_string(index) + "_" +
                 safe + "_" + onnx_elem_type_tag(et) + ".bin");
@@ -345,12 +345,10 @@ static bool parse_dump_filename_elem_type(const std::string &filename,
   return true;
 }
 
-static bool squared_l2_diff_elementwise(const std::vector<char> &a,
-                                        const std::vector<char> &b,
-                                        ONNXTensorElementDataType et,
-                                        double *out_sq,
-                                        size_t *out_used_elems = nullptr,
-                                        size_t *out_skipped_nonfinite = nullptr) {
+static bool squared_l2_diff_elementwise(
+    const std::vector<char> &a, const std::vector<char> &b,
+    ONNXTensorElementDataType et, double *out_sq,
+    size_t *out_used_elems = nullptr, size_t *out_skipped_nonfinite = nullptr) {
   const size_t es = element_byte_size(et);
   if (a.size() != b.size() || a.size() % es != 0) {
     std::cerr << "Size not aligned to element type (" << es << " bytes/elem)\n";
@@ -560,8 +558,8 @@ static int run_l2norm_output_dumps(const std::string &dir1_str,
     std::cout << ")\n";
     combined_sq += static_cast<long double>(sq);
   }
-  std::cout << "Combined L2 (stacked diffs): " << std::sqrt(static_cast<double>(combined_sq))
-            << "\n";
+  std::cout << "Combined L2 (stacked diffs): "
+            << std::sqrt(static_cast<double>(combined_sq)) << "\n";
   return 0;
 }
 
@@ -577,12 +575,14 @@ int main(int argc, char *argv[]) {
       "n,no-ep", "CPU only; skip EP registration")(
       "d,dump-level",
       "0=off, 1=dump inputs, 2=dump outputs, 3=both; "
-      "dirs: <stem>_i_dump/ and <stem>_o_dump/ (with -n: <stem>_cpu_i_dump/ etc.)",
+      "dirs: <stem>_i_dump/ and <stem>_o_dump/ (with -n: <stem>_cpu_i_dump/ "
+      "etc.)",
       cxxopts::value<int>()->default_value("0"))(
       "s,seed", "RNG seed for random inputs (default 42)",
       cxxopts::value<unsigned int>()->default_value("42"))(
       "i,input-dir",
-      "Directory with input_<idx>_<name>_<type>.bin only; empty = random inputs",
+      "Directory with input_<idx>_<name>_<type>.bin only; empty = random "
+      "inputs",
       cxxopts::value<std::string>()->default_value(""))(
       "L,l2norm",
       "Compare two dirs: dir1,dir2 (same *.bin set); each file must be "
@@ -621,8 +621,7 @@ int main(int argc, char *argv[]) {
   }
 
   if (!result.count("model")) {
-    std::cerr << "Error: -m/--model is required.\n\n"
-              << options.help() << "\n";
+    std::cerr << "Error: -m/--model is required.\n\n" << options.help() << "\n";
     return 1;
   }
   std::string model_path_str = result["model"].as<std::string>();
@@ -642,13 +641,14 @@ int main(int argc, char *argv[]) {
 
   const unsigned int rng_seed = result["seed"].as<unsigned int>();
   std::mt19937 rng(rng_seed);
-  std::string input_dir_str = trim_string(result["input-dir"].as<std::string>());
+  std::string input_dir_str =
+      trim_string(result["input-dir"].as<std::string>());
   const bool use_input_files = !input_dir_str.empty();
 
   // ORT environment
   Ort::Env env(ORT_LOGGING_LEVEL_ERROR, "hip-onnx-runner");
-  
-  const std::string kEpName = "MorphiZenExecutionProvider";  
+
+  const std::string kEpName = "MorphiZenExecutionProvider";
   const std::string ep_dll = "onnxruntime_morphizen_ep.dll";
 
   if (!no_ep) {
@@ -784,7 +784,8 @@ int main(int argc, char *argv[]) {
       if (!load_raw_file(bin_path, input_buffers[i].data(),
                          input_buffers[i].size()))
         return 1;
-      std::cout << "Loaded input " << i << " from " << bin_path.string() << "\n";
+      std::cout << "Loaded input " << i << " from " << bin_path.string()
+                << "\n";
     } else {
       // Fill as float (reinterpreted for other types; sufficient for random
       // test use).
@@ -809,8 +810,8 @@ int main(int argc, char *argv[]) {
   if (dump_level == 1 || dump_level == 3) {
     std::filesystem::create_directories(dump_dir_inputs);
     for (size_t i = 0; i < input_count; ++i) {
-      const auto path = tensor_dump_bin_path(dump_dir_inputs, "input", i,
-                                             input_names_str[i], input_types[i]);
+      const auto path = tensor_dump_bin_path(
+          dump_dir_inputs, "input", i, input_names_str[i], input_types[i]);
       dump_raw_file(path, input_buffers[i].data(), input_buffers[i].size());
       std::cout << "Dumped input tensor to " << path.string() << "\n";
     }
@@ -844,8 +845,9 @@ int main(int argc, char *argv[]) {
       const void *ptr = nullptr;
       size_t nbytes = 0;
       if (!ort_tensor_raw_bytes(outputs[i], ptr, nbytes)) {
-        std::cerr << "Cannot dump output " << i << " (unsupported or not a "
-                                                  "tensor)\n";
+        std::cerr << "Cannot dump output " << i
+                  << " (unsupported or not a "
+                     "tensor)\n";
         return 1;
       }
       auto out_info = outputs[i].GetTensorTypeAndShapeInfo();
