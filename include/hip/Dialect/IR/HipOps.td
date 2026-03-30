@@ -458,9 +458,6 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
 
     RMSNorm(x) = x / sqrt(mean(x^2) + epsilon)
 
-    MS spec reference:
-    https://github.com/microsoft/onnxruntime/blob/main/docs/ContribOperators.md#commicrosoftskipsimplifiedlayernormalization
-
     Inputs (3-4):
       1. input   (required, T) - 3D or 2D input tensor
       2. skip    (required, T) - skip connection tensor (same shape as input)
