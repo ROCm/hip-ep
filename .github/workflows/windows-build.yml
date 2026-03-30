@@ -406,8 +406,8 @@ jobs:
       - name: Clean workspace
         shell: cmd
         run: |
-          taskkill /f /im hip-onnx-runner.exe 2>nul
-          taskkill /f /im onnxruntime_perf_test.exe 2>nul
+          taskkill /f /im hip-onnx-runner.exe >nul 2>&1 || ver >nul
+          taskkill /f /im onnxruntime_perf_test.exe >nul 2>&1 || ver >nul
           if exist gpu-test-package rd /s /q gpu-test-package
           if exist l2-results rd /s /q l2-results
 

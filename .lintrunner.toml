@@ -67,6 +67,7 @@ include_patterns = [
 ]
 exclude_patterns = [
     '3rd-party/**',
+    'tools/common/cxxopts.hpp',
 ]
 command = [
     'python',
