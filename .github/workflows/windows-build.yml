@@ -477,6 +477,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Run L2 accuracy tests
         if: always()
+        timeout-minutes: 10
         shell: cmd
         run: |
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
