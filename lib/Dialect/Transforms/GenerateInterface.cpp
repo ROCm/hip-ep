@@ -790,8 +790,10 @@ private:
 
     auto mainFunc = module.lookupSymbol<LLVM::LLVMFuncOp>("main_graph");
     if (!mainFunc) {
-      COMPILER_DEBUG_LOG(
-          "[GenerateInterface] Warning: @main_graph not found\n");
+      llvm::errs() << "[GenerateInterface] ERROR: @main_graph not found! "
+                   << "Outputs will be zero. Available functions:\n";
+      for (auto fn : module.getOps<LLVM::LLVMFuncOp>())
+        llvm::errs() << "  " << fn.getName() << "\n";
       LLVM::BrOp::create(builder, loc, mainSuccessBlock);
     } else {
       emitErrorCheckedCall(

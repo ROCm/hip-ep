@@ -163,7 +163,12 @@ bool CompilerDriver::runMLIRPasses(
   mlir::hip::OnnxToHipPipelineOptions onnxToHipOpts;
   onnxToHipOpts.externalizeMinNumElements =
       mlir::hip::kDefaultExternalizeMinNumElements;
-  mlir::hip::buildOnnxToHipPipeline(pm, onnxToHipOpts, fileSystem_);
+  if (!constantDataMap_.empty()) {
+    mlir::hip::buildOnnxToHipPipeline(pm, onnxToHipOpts, fileSystem_,
+                                      &constantDataMap_);
+  } else {
+    mlir::hip::buildOnnxToHipPipeline(pm, onnxToHipOpts, fileSystem_);
+  }
 
   mlir::hip::HipToLLVMPipelineOptions hipToLlvmOpts;
   hipToLlvmOpts.constantsFile = options.constants_file;

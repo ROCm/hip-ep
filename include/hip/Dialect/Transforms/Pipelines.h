@@ -76,6 +76,15 @@ void buildOnnxToHipPipeline(OpPassManager &pm,
                             const OnnxToHipPipelineOptions &options,
                             morphizen::FileSystem *fs);
 
+/// Build the ONNX-to-HIP pipeline with zero-copy constant data.
+///
+/// Same as the FileSystem overload, but constants referenced by
+/// hip.constant_ref attributes are resolved from \p constantDataMap.
+void buildOnnxToHipPipeline(
+    OpPassManager &pm, const OnnxToHipPipelineOptions &options,
+    morphizen::FileSystem *fs,
+    const void *constantDataMap);
+
 /// Build the HIP-to-LLVM lowering pipeline. This is a separate pipeline
 /// (not part of buildOnnxToHipPipeline) because the LLVM lowering is only
 /// needed when producing executables via hip-compiler, not when inspecting
