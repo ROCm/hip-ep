@@ -1418,7 +1418,21 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
     return attr ? attr : rewriter.getStringAttr(defaultVal);
   };
 
-  auto scaleAttr = getFloatAttr("scale", 1.0f);
+  // Calculate default scale = 1/sqrt(head_size) per ONNX spec
+  // Query shape: [batch_size, seq_len, num_heads * head_size]
+  // head_size = (num_heads * head_size) / num_heads = query_dim_2 / num_heads
+  auto queryType = mlir::cast<mlir::RankedTensorType>(query.getType());
+  int64_t numHeads = numHeadsAttrOnnx.getValue().getSExtValue();
+  float defaultScale = 1.0f;
+  if (queryType.hasRank() && queryType.getRank() >= 3) {
+    int64_t hiddenSize = queryType.getDimSize(2); // num_heads * head_size
+    if (hiddenSize != mlir::ShapedType::kDynamic && numHeads > 0) {
+      int64_t headSize = hiddenSize / numHeads;
+      defaultScale = 1.0f / std::sqrt(static_cast<float>(headSize));
+    }
+  }
+
+  auto scaleAttr = getFloatAttr("scale", defaultScale);
   auto doRotaryAttr = getI64Attr("do_rotary", 0);
   auto rotaryInterleavedAttr = getI64Attr("rotary_interleaved", 0);
   auto softcapAttr = getFloatAttr("softcap", 0.0f);

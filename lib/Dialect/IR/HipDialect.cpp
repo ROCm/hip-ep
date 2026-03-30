@@ -700,6 +700,29 @@ LogicalResult GqaOp::verify() {
            << qkOutput << " but output_qk buffer is not provided";
   }
 
+  // Verify paired optional inputs: cos_cache/sin_cache must both be present or
+  // both absent
+  bool hasCosCache = getCosCache() != nullptr;
+  bool hasSinCache = getSinCache() != nullptr;
+  if (hasCosCache != hasSinCache) {
+    return emitOpError("cos_cache and sin_cache must both be provided or both "
+                       "be omitted (found cos_cache=")
+           << (hasCosCache ? "present" : "absent")
+           << ", sin_cache=" << (hasSinCache ? "present" : "absent") << ")";
+  }
+
+  // Verify paired optional inputs: key/value must both be present or both
+  // absent
+  bool hasKey = getKey() != nullptr;
+  bool hasValue = getValue() != nullptr;
+  if (hasKey != hasValue) {
+    return emitOpError(
+               "key and value must both be provided or both be omitted "
+               "(found key=")
+           << (hasKey ? "present" : "absent")
+           << ", value=" << (hasValue ? "present" : "absent") << ")";
+  }
+
   return success();
 }
 
