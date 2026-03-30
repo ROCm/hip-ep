@@ -1460,11 +1460,22 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
     return attr ? attr : rewriter.getStringAttr(defaultVal);
   };
 
-  // ORT uses 0.0 as a sentinel meaning "auto-compute 1/√head_size at runtime"
-  // (gqa_attention_base.h: scale_ = GetAttrOrDefault("scale", 0.0f), then
-  // alpha = scale_ == 0.0f ? 1/sqrt(head_size) : scale_).  We pass through
-  // the same 0.0 sentinel so the runtime handles it identically.
-  auto scaleAttr = getFloatAttr("scale", 0.0f);
+  // Calculate default scale = 1/sqrt(head_size) per ONNX spec.
+  // Query shape: [batch_size, seq_len, num_heads * head_size]
+  // Fallback 0.0 is the ORT sentinel meaning "auto-compute at runtime"
+  // (gqa_attention_base.h: scale_ == 0.0f ? 1/sqrt(head_size) : scale_).
+  auto queryType = mlir::cast<mlir::RankedTensorType>(query.getType());
+  int64_t numHeads = numHeadsAttrOnnx.getValue().getSExtValue();
+  float defaultScale = 0.0f;
+  if (queryType.hasRank() && queryType.getRank() >= 3) {
+    int64_t hiddenSize = queryType.getDimSize(2);
+    if (hiddenSize != mlir::ShapedType::kDynamic && numHeads > 0) {
+      int64_t headSize = hiddenSize / numHeads;
+      defaultScale = 1.0f / std::sqrt(static_cast<float>(headSize));
+    }
+  }
+
+  auto scaleAttr = getFloatAttr("scale", defaultScale);
   auto doRotaryAttr = getI64Attr("do_rotary", 0);
   auto rotaryInterleavedAttr = getI64Attr("rotary_interleaved", 0);
   auto softcapAttr = getFloatAttr("softcap", 0.0f);
