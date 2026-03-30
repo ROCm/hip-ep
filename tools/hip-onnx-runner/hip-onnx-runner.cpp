@@ -386,13 +386,6 @@ static bool squared_l2_diff_elementwise(const std::vector<char> &a,
       const float fb = fp16_bits_to_float(pb[i]);
       if (!std::isfinite(static_cast<double>(fa)) ||
           !std::isfinite(static_cast<double>(fb))) {
-        if (i < 20)
-          std::cout << "shili meet NaN: " << fa << " " << fb << " " << i << " "
-                    << static_cast<int>(static_cast<unsigned char>(a[i * 2]))
-                    << " "
-                    << static_cast<int>(
-                           static_cast<unsigned char>(a[i * 2 + 1]))
-                    << "\n";
         skipped_nonfinite++;
         continue;
       }
@@ -864,7 +857,13 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  // Unregister EP
+  // Release session and all Ort::Values before unloading the EP DLL. Calling
+  // UnregisterExecutionProviderLibrary while the session still uses the EP
+  // causes use-after-free / AV (e.g. 0xC0000005) during later teardown.
+  outputs.clear();
+  input_tensors.clear();
+  session.reset();
+
   if (!no_ep) {
     Ort::GetApi().UnregisterExecutionProviderLibrary(env, kEpName.c_str());
   }
