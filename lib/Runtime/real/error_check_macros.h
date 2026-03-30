@@ -80,11 +80,12 @@
 //
 //==============================================================================
 
-#define HIP_CLEANUP(expr) do { \
-    hipError_t _err = (expr); \
-    if (_err != hipSuccess) { \
-        fprintf(stderr, "Warning: " #expr " failed with error %d\n", (int)_err); \
-    } \
-} while(0)
+#define HIP_CLEANUP(expr)                                                      \
+  do {                                                                         \
+    hipError_t _err = (expr);                                                  \
+    if (_err != hipSuccess) {                                                  \
+      fprintf(stderr, "Warning: " #expr " failed with error %d\n", (int)_err); \
+    }                                                                          \
+  } while (0)
 
 #endif // HIPDNN_EP_ERROR_CHECK_MACROS_H
