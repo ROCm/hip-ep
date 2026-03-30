@@ -99,6 +99,60 @@ COMPILER_API CompilerErrorCode hip_compile_with_fs(
   }
 }
 
+COMPILER_API CompilerErrorCode hip_compile_with_constants(
+    const void *input_mlir, size_t input_size, const char *output_path,
+    const char *options_json, CompilerError *error, void *fs,
+    const void *constant_refs, size_t num_constants) {
+  if (!input_mlir || input_size == 0 || !output_path) {
+    setError(error, "Invalid input: input_mlir, input_size, and output_path "
+                    "must be valid");
+    return COMPILER_ERROR_INVALID_INPUT;
+  }
+  if (!fs) {
+    setError(error, "Invalid input: fs (FileSystem*) must be non-null");
+    return COMPILER_ERROR_INVALID_INPUT;
+  }
+
+  try {
+    mlir::hip::CompilationOptionsT options;
+    std::string parse_error;
+    if (!parseOptions(options_json, options, parse_error)) {
+      setError(error, parse_error);
+      return COMPILER_ERROR_INVALID_INPUT;
+    }
+
+    CompilerDriver driver;
+    driver.setFileSystem(static_cast<morphizen::FileSystem *>(fs));
+
+    if (constant_refs && num_constants > 0) {
+      driver.setConstantRefs(
+          static_cast<const HipConstantRef *>(constant_refs), num_constants);
+    }
+
+    std::string error_message;
+    llvm::StringRef input_ref(static_cast<const char *>(input_mlir),
+                              input_size);
+    std::string output_str(output_path);
+
+    bool success =
+        driver.compile(input_ref, output_str, options, error_message);
+
+    if (!success) {
+      setError(error, error_message);
+      return COMPILER_ERROR_COMPILATION_FAILED;
+    }
+
+    return COMPILER_SUCCESS;
+
+  } catch (const std::exception &ex) {
+    setError(error, std::string("Exception: ") + ex.what());
+    return COMPILER_ERROR_INTERNAL;
+  } catch (...) {
+    setError(error, "Unknown exception occurred");
+    return COMPILER_ERROR_INTERNAL;
+  }
+}
+
 COMPILER_API const char *hip_get_version(void) { return COMPILER_VERSION; }
 
 } // extern "C"

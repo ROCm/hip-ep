@@ -8,6 +8,7 @@
 // Morphizen headers
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
+#include "morphizen/morphizen-ort-api-ext.hpp"
 #include <chrono>
 #include <fstream>
 #include <glog/logging.h>
@@ -68,7 +69,7 @@ static CompilationConfig load_config(PassContext *ctx) {
   return config;
 }
 
-// Step 2: Get MLIR bytecode from graph
+// Step 2: Get MLIR bytecode from graph (zero-copy: std::move avoids copy)
 static std::string get_mlir_bytecode(PassContext *ctx, Graph &graph) {
   auto bytecode = GraphConstRef(GraphRef(graph)).save_string();
   if (bytecode->empty()) {
@@ -77,7 +78,6 @@ static std::string get_mlir_bytecode(PassContext *ctx, Graph &graph) {
 
   MY_LOG(1) << "MLIR bytecode size: " << bytecode->size() << " bytes";
 
-  // Dump bytecode to file for troubleshooting if env var is set
   if (ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= 2) {
     auto dump_path = ctx->get_dump_directory() / "mlir_bytecode_dump.mlir";
     MY_LOG(1) << "Dumping MLIR bytecode to " << dump_path;
@@ -88,14 +88,41 @@ static std::string get_mlir_bytecode(PassContext *ctx, Graph &graph) {
     MY_LOG(1) << "Dumped MLIR bytecode to " << dump_path;
   }
 
-  return std::string(bytecode->data(), bytecode->size());
+  return std::move(*bytecode);
 }
 
-// Step 3: Compile MLIR bytecode to artifact
+extern "C" morphizen::MorphizenOrtApiExt *get_morphizen_ort_api_mlir();
+
+static std::vector<ConstantRef>
+collect_constant_refs(Graph &graph) {
+  std::vector<ConstantRef> refs;
+  auto *api = get_morphizen_ort_api_mlir();
+  if (!api || !api->graph_get_external_constant_refs)
+    return refs;
+  auto *ext_refs = api->graph_get_external_constant_refs(graph);
+  if (!ext_refs)
+    return refs;
+  for (const auto &r : *ext_refs) {
+    if (r.data && r.size > 0)
+      refs.push_back({r.name, r.data, r.size});
+  }
+  return refs;
+}
+
+// Step 3b: Compile MLIR bytecode to artifact
 static std::optional<CompilationArtifact>
 compile_mlir(const std::string &mlir_bytecode, const CompilationConfig &config,
              morphizen::FileSystem *fs) {
   return MlirCompiler::compileFromBytecode(mlir_bytecode, config, fs);
+}
+
+static std::optional<CompilationArtifact>
+compile_mlir_with_constants(const std::string &mlir_bytecode,
+                            const CompilationConfig &config,
+                            morphizen::FileSystem *fs,
+                            const std::vector<ConstantRef> &constants) {
+  return MlirCompiler::compileFromBytecodeWithConstants(mlir_bytecode, config,
+                                                       fs, constants);
 }
 
 // Step 4: Write artifact to EPContext
@@ -223,9 +250,16 @@ struct Level1MlirPass {
       return;
     }
 
+    // Step 2b: Collect external constant refs from graph initializers
+    auto constant_refs = collect_constant_refs(graph);
+
     // Step 3: Compile bytecode to artifact
     auto fs = self.get_context()->get_file_system();
-    auto artifactOpt = compile_mlir(mlir_bytecode, config, fs.get());
+    auto artifactOpt = constant_refs.empty()
+                           ? compile_mlir(mlir_bytecode, config, fs.get())
+                           : compile_mlir_with_constants(mlir_bytecode, config,
+                                                        fs.get(),
+                                                        constant_refs);
     if (!artifactOpt) {
       LOG(WARNING) << "MLIR compilation failed, skipping";
       return;

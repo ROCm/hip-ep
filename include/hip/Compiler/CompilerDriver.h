@@ -7,10 +7,12 @@
 #define HIP_COMPILER_COMPILER_DRIVER_H
 
 #include "compilation_options_generated.h"
+#include "hip/compiler_types.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/StringRef.h"
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace llvm {
@@ -45,6 +47,21 @@ public:
   /// When set, onnx.Constant data is written to "constants.bin" via fs
   /// instead of being embedded in the DLL. Must be called before compile().
   void setFileSystem(morphizen::FileSystem *fs) { fileSystem_ = fs; }
+
+  /// Set zero-copy constant references. When set, onnx.Constant ops with
+  /// hip.constant_ref attributes are resolved against this map instead of
+  /// reading from DenseElementsAttr.
+  void setConstantRefs(const HipConstantRef *refs, size_t count) {
+    constantDataMap_.clear();
+    for (size_t i = 0; i < count; ++i) {
+      constantDataMap_[refs[i].name] = {refs[i].data, refs[i].size};
+    }
+  }
+
+  const std::unordered_map<std::string, std::pair<const void *, size_t>> &
+  getConstantDataMap() const {
+    return constantDataMap_;
+  }
 
   /// Compile MLIR string to output file.
   bool compile(llvm::StringRef input_mlir, const std::string &output_path,
@@ -95,6 +112,8 @@ private:
   void cleanupIntermediates(const std::string &basePath);
 
   morphizen::FileSystem *fileSystem_ = nullptr;
+  std::unordered_map<std::string, std::pair<const void *, size_t>>
+      constantDataMap_;
 };
 
 } // namespace hip::compiler

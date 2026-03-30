@@ -104,6 +104,25 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   buildOnnxToHipPipelineTail(pm);
 }
 
+void mlir::hip::buildOnnxToHipPipeline(
+    OpPassManager &pm, const OnnxToHipPipelineOptions &options,
+    morphizen::FileSystem *fs, const void *constantDataMap) {
+  pm.addPass(createHipAddContextArgPass());
+
+  if (fs) {
+    pm.addPass(mlir::hip::createConvertOnnxToHipPass(
+        fs, options.externalizeMinNumElements,
+        static_cast<const mlir::hip::ConstantDataMap *>(constantDataMap)));
+  } else {
+    ConvertOnnxToHipPassOptions onnxToHipOpts;
+    onnxToHipOpts.externalizeOutputDir = options.externalizeOutputDir;
+    onnxToHipOpts.externalizeMinNumElements = options.externalizeMinNumElements;
+    pm.addPass(createConvertOnnxToHipPass(std::move(onnxToHipOpts)));
+  }
+
+  buildOnnxToHipPipelineTail(pm);
+}
+
 void mlir::hip::buildHipToLLVMPipeline(
     OpPassManager &pm, const HipToLLVMPipelineOptions &options) {
   // Decompose memref.collapse_shape / memref.expand_shape into

@@ -10,5 +10,8 @@ EXPORTS
     ; Compilation entry point (FileSystem-based, for models with constants)
     hip_compile_with_fs
 
+    ; Zero-copy compilation: constants passed by pointer, not in bytecode
+    hip_compile_with_constants
+
     ; Version information
     hip_get_version

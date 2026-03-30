@@ -33,6 +33,14 @@ typedef struct {
   char message[COMPILER_ERROR_MESSAGE_SIZE];
 } CompilerError;
 
+/* Zero-copy constant reference passed across DLL boundary.
+   The caller owns the data buffer and guarantees its lifetime. */
+typedef struct {
+  const char *name;
+  const void *data;
+  size_t size;
+} HipConstantRef;
+
 #ifdef __cplusplus
 }
 #endif

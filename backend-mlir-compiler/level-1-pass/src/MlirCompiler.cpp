@@ -156,4 +156,75 @@ MlirCompiler::compileFromBytecode(const std::string &mlir_bytecode,
   return artifact;
 }
 
+std::optional<CompilationArtifact>
+MlirCompiler::compileFromBytecodeWithConstants(
+    const std::string &mlir_bytecode, const CompilationConfig &config,
+    morphizen::FileSystem *fs, const std::vector<ConstantRef> &constants) {
+
+  LOG(INFO) << "Compiling MLIR bytecode with " << constants.size()
+            << " external constants";
+
+  auto plugin = morphizen::Plugin::get("hip-compiler");
+  if (!plugin) {
+    LOG(ERROR) << "Failed to load hip-compiler plugin";
+    return std::nullopt;
+  }
+
+  std::string temp_output_path = mlir_compiler_utils::generateTempPath("");
+  std::string options_json = build_compiler_options_json(config);
+
+  const char *entry = "hip_compile_with_constants";
+  if (!plugin->has_method(entry)) {
+    LOG(WARNING) << entry << " not found, falling back to hip_compile_with_fs";
+    return compileFromBytecode(mlir_bytecode, config, fs);
+  }
+
+  // Signature: CompilerErrorCode (*)(const void*, size_t, const char*,
+  //   const char*, CompilerError*, void* fs,
+  //   const void* constant_refs, size_t num_constants)
+  auto func = plugin->get_method<CompilerErrorCode, const void *, size_t,
+                                 const char *, const char *, CompilerError *,
+                                 void *, const void *, size_t>(entry);
+  if (!func) {
+    LOG(ERROR) << "get_method returned nullptr for " << entry;
+    return std::nullopt;
+  }
+
+  CompilerError error = {};
+  auto result = func(mlir_bytecode.data(), mlir_bytecode.size(),
+                     temp_output_path.c_str(), options_json.c_str(), &error, fs,
+                     constants.data(), constants.size());
+
+  if (result != COMPILER_SUCCESS) {
+    LOG(ERROR) << "Compilation failed: " << error.message;
+    return std::nullopt;
+  }
+
+  std::ifstream file(temp_output_path, std::ios::binary | std::ios::ate);
+  if (!file.is_open()) {
+    LOG(ERROR) << "Failed to open compiled artifact: " << temp_output_path;
+    return std::nullopt;
+  }
+
+  std::streamsize size = file.tellg();
+  file.seekg(0, std::ios::beg);
+
+  std::vector<uint8_t> buffer(size);
+  if (!file.read(reinterpret_cast<char *>(buffer.data()), size)) {
+    LOG(ERROR) << "Failed to read compiled artifact";
+    file.close();
+    return std::nullopt;
+  }
+  file.close();
+  std::remove(temp_output_path.c_str());
+
+  CompilationArtifact artifact;
+  artifact.filename = "model_compiled";
+  artifact.bytes = std::move(buffer);
+  artifact.format = config.artifactFormat;
+
+  LOG(INFO) << "Artifact created: " << artifact.bytes.size() << " bytes";
+  return artifact;
+}
+
 } // namespace hipdnn::level1pass

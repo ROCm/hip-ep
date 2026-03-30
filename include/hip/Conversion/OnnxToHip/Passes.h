@@ -8,6 +8,9 @@
 #include "hip/Dialect/Transforms/Pipelines.h"
 #include "mlir/Pass/Pass.h"
 #include <memory>
+#include <string>
+#include <unordered_map>
+#include <utility>
 
 namespace morphizen {
 class FileSystem;
@@ -15,6 +18,9 @@ class FileSystem;
 
 namespace mlir {
 namespace hip {
+
+using ConstantDataMap =
+    std::unordered_map<std::string, std::pair<const void *, size_t>>;
 
 /// Creates a pass that converts ONNX operations to HIP dialect.
 /// Uses default options (constants.bin, no externalization).
@@ -29,6 +35,13 @@ std::unique_ptr<Pass> createConvertOnnxToHipPass();
 std::unique_ptr<Pass> createConvertOnnxToHipPass(
     morphizen::FileSystem *fs,
     int64_t minNumElements = kDefaultExternalizeMinNumElements);
+
+/// Creates a pass with zero-copy constant data. Constants referenced by
+/// hip.constant_ref attributes in the MLIR are resolved from
+/// \p constantDataMap (name -> {ptr, size}) and written to constants.bin.
+std::unique_ptr<Pass> createConvertOnnxToHipPass(
+    morphizen::FileSystem *fs, int64_t minNumElements,
+    const ConstantDataMap *constantDataMap);
 
 } // namespace hip
 } // namespace mlir

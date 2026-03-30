@@ -15,6 +15,12 @@
 
 namespace hipdnn::level1pass {
 
+struct ConstantRef {
+  const char *name;
+  const void *data;
+  size_t size;
+};
+
 // Artifact format (native DLL or LLVM IR)
 enum class ArtifactFormat { Native, LlvmIr };
 
@@ -56,6 +62,12 @@ public:
   compileFromBytecode(const std::string &mlir_bytecode,
                       const CompilationConfig &config,
                       morphizen::FileSystem *fs);
+
+  static std::optional<CompilationArtifact>
+  compileFromBytecodeWithConstants(const std::string &mlir_bytecode,
+                                  const CompilationConfig &config,
+                                  morphizen::FileSystem *fs,
+                                  const std::vector<ConstantRef> &constants);
 };
 
 } // namespace hipdnn::level1pass

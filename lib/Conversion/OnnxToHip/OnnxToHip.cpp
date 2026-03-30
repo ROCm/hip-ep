@@ -11,6 +11,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
@@ -41,6 +42,8 @@
 #endif
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
+
+#include <unordered_map>
 
 #define DEBUG_TYPE "convert-onnx-to-hip"
 
@@ -165,11 +168,92 @@ struct ExternalizationState {
 /// they are replaced by an extern memref.global (no initial value) carrying
 /// a hip.external_data {offset, size} attribute, plus a
 /// memref.get_global + bufferization.to_tensor bridge at the use site.
-static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
-                                              mlir::func::FuncOp funcOp,
-                                              int64_t minNumElements,
-                                              ExternalizationState *extState) {
+using ConstDataMapT =
+    std::unordered_map<std::string, std::pair<const void *, size_t>>;
+
+/// Helper: externalize a constant (write data to constants.bin, create
+/// extern memref.global). Shared by both the DenseElementsAttr path and
+/// the zero-copy hip.constant_ref path.
+static void externalizeConstant(
+    mlir::ModuleOp module, mlir::Operation *constOp,
+    mlir::RankedTensorType tensorType, const void *rawPtr, int64_t byteSize,
+    ExternalizationState *extState) {
   constexpr int64_t kAlignment = 64;
+  auto memrefType = mlir::MemRefType::get(tensorType.getShape(),
+                                          tensorType.getElementType());
+
+  std::string name = "hip_ext_constant_";
+  if (auto nodeNameAttr =
+          constOp->getAttrOfType<mlir::StringAttr>("onnx_node_name")) {
+    std::string fragment =
+        sanitizeForMlirIdentifier(nodeNameAttr.getValue());
+    if (!fragment.empty())
+      name += fragment + "_";
+  }
+  name += std::to_string(extState->constantIndex);
+
+  int64_t aligned = llvm::alignTo(extState->currentOffset, kAlignment);
+  int64_t padding = aligned - extState->currentOffset;
+  if (padding > 0) {
+    llvm::SmallVector<char> zeros(padding, 0);
+    extState->writer->fwrite(zeros.data(), padding);
+    extState->currentOffset += padding;
+  }
+  int64_t entryOffset = extState->currentOffset;
+
+  extState->writer->fwrite(rawPtr, byteSize);
+  extState->currentOffset += byteSize;
+
+  extState->constantSizes.push_back(byteSize);
+  extState->constantOffsets.push_back(entryOffset);
+
+  llvm::json::Array shapeArray;
+  for (int64_t dim : tensorType.getShape())
+    shapeArray.push_back(dim);
+  llvm::json::Object entry;
+  entry["name"] = name;
+  entry["shape"] = std::move(shapeArray);
+  entry["element_type"] = elementTypeToString(tensorType.getElementType());
+  entry["offset"] = entryOffset;
+  entry["size"] = byteSize;
+  entry["alignment"] = kAlignment;
+  extState->manifestEntries.push_back(std::move(entry));
+
+  mlir::OpBuilder moduleBuilder(module.getBody(), module.getBody()->begin());
+  auto externalDataAttr = moduleBuilder.getDictionaryAttr({
+      moduleBuilder.getNamedAttr(
+          "index", moduleBuilder.getI64IntegerAttr(extState->constantIndex)),
+      moduleBuilder.getNamedAttr("offset",
+                                 moduleBuilder.getI64IntegerAttr(entryOffset)),
+      moduleBuilder.getNamedAttr("size",
+                                 moduleBuilder.getI64IntegerAttr(byteSize)),
+  });
+  auto globalOp = mlir::memref::GlobalOp::create(
+      moduleBuilder, constOp->getLoc(), name,
+      /*sym_visibility=*/moduleBuilder.getStringAttr("private"),
+      /*type=*/memrefType,
+      /*initial_value=*/nullptr,
+      /*constant=*/false,
+      /*alignment=*/moduleBuilder.getI64IntegerAttr(kAlignment));
+  globalOp->setAttr("hip.external_data", externalDataAttr);
+
+  mlir::OpBuilder builder(constOp);
+  auto getGlobal = mlir::memref::GetGlobalOp::create(
+      builder, constOp->getLoc(), memrefType, name);
+  auto toTensor = mlir::bufferization::ToTensorOp::create(
+      builder, constOp->getLoc(), tensorType, getGlobal.getResult(),
+      /*restrict=*/builder.getUnitAttr(),
+      /*writable=*/nullptr);
+  constOp->getResult(0).replaceAllUsesWith(toTensor.getResult());
+  constOp->erase();
+
+  ++extState->constantIndex;
+}
+
+static mlir::LogicalResult lowerOnnxConstants(
+    mlir::ModuleOp module, mlir::func::FuncOp funcOp, int64_t minNumElements,
+    ExternalizationState *extState,
+    const ConstDataMapT *constantDataMap = nullptr) {
 
   llvm::SmallVector<mlir::Operation *> constants;
   funcOp.walk([&](mlir::Operation *op) {
@@ -178,11 +262,53 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
   });
 
   for (mlir::Operation *constOp : constants) {
+    // Zero-copy path: onnx.Constant with hip.constant_ref (no DenseElementsAttr)
+    if (auto refAttr =
+            constOp->getAttrOfType<mlir::StringAttr>("hip.constant_ref")) {
+      if (!constantDataMap) {
+        return constOp->emitError(
+            "hip.constant_ref found but no constant data map provided");
+      }
+      std::string refName = refAttr.getValue().str();
+      auto it = constantDataMap->find(refName);
+      if (it == constantDataMap->end()) {
+        return constOp->emitError("constant '")
+               << refName << "' not found in constant data map";
+      }
+
+      auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(
+          constOp->getResult(0).getType());
+      if (!tensorType) {
+        return constOp->emitError("hip.constant_ref op has non-ranked result");
+      }
+
+      const void *dataPtr = it->second.first;
+      int64_t dataSize = static_cast<int64_t>(it->second.second);
+
+      if (extState) {
+        externalizeConstant(module, constOp, tensorType, dataPtr, dataSize,
+                            extState);
+      } else {
+        auto rawData = llvm::ArrayRef<char>(
+            static_cast<const char *>(dataPtr), dataSize);
+        auto denseAttr =
+            mlir::DenseElementsAttr::getFromRawBuffer(tensorType, rawData);
+        mlir::OpBuilder builder(constOp);
+        auto arithConst = mlir::arith::ConstantOp::create(
+            builder, constOp->getLoc(), denseAttr);
+        constOp->getResult(0).replaceAllUsesWith(arithConst.getResult());
+        constOp->erase();
+      }
+      continue;
+    }
+
+    // Standard path: onnx.Constant with DenseElementsAttr "value"
     auto valueAttr = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
         constOp->getAttrOfType<mlir::ElementsAttr>("value"));
     if (!valueAttr) {
       return constOp->emitError(
-          "unsupported onnx.Constant form (expected dense value attribute)");
+          "unsupported onnx.Constant form (expected dense value attribute or "
+          "hip.constant_ref)");
     }
 
     bool shouldExternalize = extState && minNumElements > 0 &&
@@ -190,39 +316,11 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
 
     if (shouldExternalize) {
       auto tensorType = mlir::cast<mlir::RankedTensorType>(valueAttr.getType());
-      auto memrefType = mlir::MemRefType::get(tensorType.getShape(),
-                                              tensorType.getElementType());
-
-      // Build a unique, MLIR-safe symbol name: prefix + sanitized node
-      // name (if present) + monotonic index to guarantee uniqueness.
-      std::string name = "hip_ext_constant_";
-      if (auto nodeNameAttr =
-              constOp->getAttrOfType<mlir::StringAttr>("onnx_node_name")) {
-        std::string fragment =
-            sanitizeForMlirIdentifier(nodeNameAttr.getValue());
-        if (!fragment.empty())
-          name += fragment + "_";
-      }
-      name += std::to_string(extState->constantIndex);
-
-      // Pad binary file to alignment boundary.
-      int64_t aligned = llvm::alignTo(extState->currentOffset, kAlignment);
-      int64_t padding = aligned - extState->currentOffset;
-      if (padding > 0) {
-        llvm::SmallVector<char> zeros(padding, 0);
-        extState->writer->fwrite(zeros.data(), padding);
-        extState->currentOffset += padding;
-      }
-      int64_t entryOffset = extState->currentOffset;
-
-      // Compute full tensor byte size from shape and element width.
       auto rawData = valueAttr.getRawData();
       int64_t elemBits = tensorType.getElementTypeBitWidth();
       int64_t byteSize = valueAttr.getNumElements() * ((elemBits + 7) / 8);
 
       if (valueAttr.isSplat()) {
-        // Splat: MLIR stores only one element; expand via a staging
-        // buffer to avoid per-element fwrite overhead on large tensors.
         constexpr size_t kSplatChunk = 1024 * 1024;
         size_t elemSize = rawData.size();
         size_t bufSize =
@@ -231,68 +329,76 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
         std::vector<char> buf(bufSize);
         for (size_t i = 0; i < bufSize; i += elemSize)
           std::memcpy(buf.data() + i, rawData.data(), elemSize);
+
+        constexpr int64_t kAlignment = 64;
+        int64_t aligned =
+            llvm::alignTo(extState->currentOffset, kAlignment);
+        int64_t padding = aligned - extState->currentOffset;
+        if (padding > 0) {
+          llvm::SmallVector<char> zeros(padding, 0);
+          extState->writer->fwrite(zeros.data(), padding);
+          extState->currentOffset += padding;
+        }
+        int64_t entryOffset = extState->currentOffset;
         size_t remaining = static_cast<size_t>(byteSize);
         while (remaining > 0) {
           size_t toWrite = std::min(remaining, bufSize);
           extState->writer->fwrite(buf.data(), toWrite);
           remaining -= toWrite;
         }
+        extState->currentOffset += byteSize;
+        extState->constantSizes.push_back(byteSize);
+        extState->constantOffsets.push_back(entryOffset);
+
+        auto memrefType = mlir::MemRefType::get(tensorType.getShape(),
+                                                tensorType.getElementType());
+        std::string name = "hip_ext_constant_";
+        name += std::to_string(extState->constantIndex);
+
+        llvm::json::Array shapeArray;
+        for (int64_t dim : tensorType.getShape())
+          shapeArray.push_back(dim);
+        llvm::json::Object entry;
+        entry["name"] = name;
+        entry["shape"] = std::move(shapeArray);
+        entry["element_type"] =
+            elementTypeToString(tensorType.getElementType());
+        entry["offset"] = entryOffset;
+        entry["size"] = byteSize;
+        entry["alignment"] = kAlignment;
+        extState->manifestEntries.push_back(std::move(entry));
+
+        mlir::OpBuilder moduleBuilder(module.getBody(),
+                                      module.getBody()->begin());
+        auto externalDataAttr = moduleBuilder.getDictionaryAttr({
+            moduleBuilder.getNamedAttr(
+                "index",
+                moduleBuilder.getI64IntegerAttr(extState->constantIndex)),
+            moduleBuilder.getNamedAttr(
+                "offset", moduleBuilder.getI64IntegerAttr(entryOffset)),
+            moduleBuilder.getNamedAttr(
+                "size", moduleBuilder.getI64IntegerAttr(byteSize)),
+        });
+        auto globalOp = mlir::memref::GlobalOp::create(
+            moduleBuilder, constOp->getLoc(), name,
+            moduleBuilder.getStringAttr("private"), memrefType, nullptr,
+            false, moduleBuilder.getI64IntegerAttr(kAlignment));
+        globalOp->setAttr("hip.external_data", externalDataAttr);
+
+        mlir::OpBuilder builder(constOp);
+        auto getGlobal = mlir::memref::GetGlobalOp::create(
+            builder, constOp->getLoc(), memrefType, name);
+        auto toTensor = mlir::bufferization::ToTensorOp::create(
+            builder, constOp->getLoc(), tensorType, getGlobal.getResult(),
+            builder.getUnitAttr(), nullptr);
+        constOp->getResult(0).replaceAllUsesWith(toTensor.getResult());
+        constOp->erase();
+        ++extState->constantIndex;
       } else {
-        extState->writer->fwrite(rawData.data(), byteSize);
+        externalizeConstant(module, constOp, tensorType, rawData.data(),
+                            byteSize, extState);
       }
-      extState->currentOffset += byteSize;
-
-      // Track sizes and offsets for module-level metadata.
-      extState->constantSizes.push_back(byteSize);
-      extState->constantOffsets.push_back(entryOffset);
-
-      // Build JSON manifest entry.
-      llvm::json::Array shapeArray;
-      for (int64_t dim : tensorType.getShape())
-        shapeArray.push_back(dim);
-      llvm::json::Object entry;
-      entry["name"] = name;
-      entry["shape"] = std::move(shapeArray);
-      entry["element_type"] = elementTypeToString(tensorType.getElementType());
-      entry["offset"] = entryOffset;
-      entry["size"] = byteSize;
-      entry["alignment"] = kAlignment;
-      extState->manifestEntries.push_back(std::move(entry));
-
-      // Create extern memref.global at module scope.
-      mlir::OpBuilder moduleBuilder(module.getBody(),
-                                    module.getBody()->begin());
-      auto externalDataAttr = moduleBuilder.getDictionaryAttr({
-          moduleBuilder.getNamedAttr("index", moduleBuilder.getI64IntegerAttr(
-                                                  extState->constantIndex)),
-          moduleBuilder.getNamedAttr(
-              "offset", moduleBuilder.getI64IntegerAttr(entryOffset)),
-          moduleBuilder.getNamedAttr("size",
-                                     moduleBuilder.getI64IntegerAttr(byteSize)),
-      });
-      auto globalOp = mlir::memref::GlobalOp::create(
-          moduleBuilder, constOp->getLoc(), name,
-          /*sym_visibility=*/moduleBuilder.getStringAttr("private"),
-          /*type=*/memrefType,
-          /*initial_value=*/nullptr,
-          /*constant=*/false,
-          /*alignment=*/moduleBuilder.getI64IntegerAttr(kAlignment));
-      globalOp->setAttr("hip.external_data", externalDataAttr);
-
-      // At the use site: memref.get_global + bufferization.to_tensor.
-      mlir::OpBuilder builder(constOp);
-      auto getGlobal = mlir::memref::GetGlobalOp::create(
-          builder, constOp->getLoc(), memrefType, name);
-      auto toTensor = mlir::bufferization::ToTensorOp::create(
-          builder, constOp->getLoc(), tensorType, getGlobal.getResult(),
-          /*restrict=*/builder.getUnitAttr(),
-          /*writable=*/nullptr);
-      constOp->getResult(0).replaceAllUsesWith(toTensor.getResult());
-      constOp->erase();
-
-      ++extState->constantIndex;
     } else {
-      // Small / splat / externalization disabled: inline arith.constant.
       mlir::OpBuilder builder(constOp);
       auto arithConst = mlir::arith::ConstantOp::create(
           builder, constOp->getLoc(), valueAttr);
@@ -2039,10 +2145,19 @@ struct ConvertOnnxToHipPass
   ConvertOnnxToHipPass(morphizen::FileSystem *fs, int64_t minNumElements)
       : fileSystem_(fs), fsMinNumElements_(minNumElements) {}
 
+  using ConstDataMap =
+      std::unordered_map<std::string, std::pair<const void *, size_t>>;
+
+  ConvertOnnxToHipPass(morphizen::FileSystem *fs, int64_t minNumElements,
+                       const ConstDataMap *cdm)
+      : fileSystem_(fs), fsMinNumElements_(minNumElements),
+        constantDataMap_(cdm) {}
+
   void runOnOperation() override;
 
   morphizen::FileSystem *fileSystem_ = nullptr;
   int64_t fsMinNumElements_ = 0;
+  const ConstDataMap *constantDataMap_ = nullptr;
 };
 
 void ConvertOnnxToHipPass::runOnOperation() {
@@ -2092,8 +2207,8 @@ void ConvertOnnxToHipPass::runOnOperation() {
        llvm::make_early_inc_range(module.getOps<mlir::func::FuncOp>())) {
     if (funcOp.isDeclaration())
       continue;
-    if (mlir::failed(
-            lowerOnnxConstants(module, funcOp, minElems, extState.get())))
+    if (mlir::failed(lowerOnnxConstants(module, funcOp, minElems,
+                                         extState.get(), constantDataMap_)))
       return signalPassFailure();
     lowerOnnxReturns(funcOp);
     if (mlir::failed(convertComputeOps(funcOp, ctx)))
@@ -2181,6 +2296,15 @@ void ConvertOnnxToHipPass::runOnOperation() {
 std::unique_ptr<mlir::Pass>
 createConvertOnnxToHipPass(morphizen::FileSystem *fs, int64_t minNumElements) {
   return std::make_unique<ConvertOnnxToHipPass>(fs, minNumElements);
+}
+
+std::unique_ptr<mlir::Pass>
+createConvertOnnxToHipPass(
+    morphizen::FileSystem *fs, int64_t minNumElements,
+    const std::unordered_map<std::string, std::pair<const void *, size_t>>
+        *constantDataMap) {
+  return std::make_unique<ConvertOnnxToHipPass>(fs, minNumElements,
+                                                constantDataMap);
 }
 
 } // namespace hip
