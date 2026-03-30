@@ -23,6 +23,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include "hip/debug_log.h"
 
@@ -176,6 +177,24 @@ bool CompilerDriver::runMLIRPasses(
   mlir::hip::HipToLLVMPipelineOptions hipToLlvmOpts;
   hipToLlvmOpts.constantsFile = options.constants_file;
   mlir::hip::buildHipToLLVMPipeline(pm, hipToLlvmOpts);
+
+  std::unique_ptr<llvm::raw_fd_ostream> irDumpStream;
+  if (const char *dumpPath = std::getenv("HIPDNN_EP_IR_DUMP_PATH")) {
+    std::error_code ec;
+    irDumpStream = std::make_unique<llvm::raw_fd_ostream>(dumpPath, ec);
+    if (!ec) {
+      module.getContext()->disableMultithreading();
+      pm.enableIRPrinting(
+          [](mlir::Pass *, mlir::Operation *) { return true; },
+          [](mlir::Pass *, mlir::Operation *) { return true; },
+          /*printModuleScope=*/true,
+          /*printAfterOnlyOnChange=*/true,
+          /*printAfterOnlyOnFailure=*/false, *irDumpStream);
+    } else {
+      llvm::errs() << "[CompilerDriver] Failed to open IR dump file: "
+                    << dumpPath << ": " << ec.message() << "\n";
+    }
+  }
 
   if (mlir::failed(pm.run(module))) {
     error_message = "MLIR pass pipeline failed";
