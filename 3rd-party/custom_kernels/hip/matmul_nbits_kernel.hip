@@ -217,37 +217,15 @@ void GemmFp16U4Impl(
         }
         _Float16 s16 = cached_s;
 
-        _Float16 n0, n1, n2, n3, n4, n5, n6, n7;
-        asm volatile(
-            "v_and_b32 %0, 15, %8\n\t"
-            "v_lshrrev_b32 %1, 4, %8\n\t"
-            "v_lshrrev_b32 %2, 8, %8\n\t"
-            "v_lshrrev_b32 %3, 12, %8\n\t"
-            "v_lshrrev_b32 %4, 16, %8\n\t"
-            "v_lshrrev_b32 %5, 20, %8\n\t"
-            "v_lshrrev_b32 %6, 24, %8\n\t"
-            "v_lshrrev_b32 %7, 28, %8\n\t"
-            "v_and_b32 %1, 15, %1\n\t"
-            "v_and_b32 %2, 15, %2\n\t"
-            "v_and_b32 %3, 15, %3\n\t"
-            "v_and_b32 %4, 15, %4\n\t"
-            "v_and_b32 %5, 15, %5\n\t"
-            "v_and_b32 %6, 15, %6\n\t"
-            "v_cvt_f16_u16 %0, %0\n\t"
-            "v_cvt_f16_u16 %1, %1\n\t"
-            "v_cvt_f16_u16 %2, %2\n\t"
-            "v_cvt_f16_u16 %3, %3\n\t"
-            "v_cvt_f16_u16 %4, %4\n\t"
-            "v_cvt_f16_u16 %5, %5\n\t"
-            "v_cvt_f16_u16 %6, %6\n\t"
-            "v_cvt_f16_u16 %7, %7"
-            : "=&v"(n0), "=&v"(n1), "=&v"(n2), "=&v"(n3),
-              "=&v"(n4), "=&v"(n5), "=&v"(n6), "=&v"(n7)
-            : "v"(four)
-        );
         _Float16 bv[8];
-        bv[0] = n0 * s16; bv[1] = n1 * s16; bv[2] = n2 * s16; bv[3] = n3 * s16;
-        bv[4] = n4 * s16; bv[5] = n5 * s16; bv[6] = n6 * s16; bv[7] = n7 * s16;
+        bv[0] = static_cast<_Float16>(static_cast<int>((four      ) & 0xF)) * s16;
+        bv[1] = static_cast<_Float16>(static_cast<int>((four >>  4) & 0xF)) * s16;
+        bv[2] = static_cast<_Float16>(static_cast<int>((four >>  8) & 0xF)) * s16;
+        bv[3] = static_cast<_Float16>(static_cast<int>((four >> 12) & 0xF)) * s16;
+        bv[4] = static_cast<_Float16>(static_cast<int>((four >> 16) & 0xF)) * s16;
+        bv[5] = static_cast<_Float16>(static_cast<int>((four >> 20) & 0xF)) * s16;
+        bv[6] = static_cast<_Float16>(static_cast<int>((four >> 24) & 0xF)) * s16;
+        bv[7] = static_cast<_Float16>(static_cast<int>((four >> 28)      )) * s16;
         if constexpr(USE_ZEROS) {
             _Float16 nzs = neg_zs;
 #pragma unroll
