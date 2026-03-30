@@ -243,9 +243,9 @@ cleanup:
   if (rstdDesc)
     miopenDestroyTensorDescriptor(rstdDesc);
   if (rstd_buf)
-    hipFree(rstd_buf);
+    HIP_CLEANUP(hipFree(rstd_buf));
   if (owns_skip_buf && tmp_skip_buf)
-    hipFree(tmp_skip_buf);
+    HIP_CLEANUP(hipFree(tmp_skip_buf));
 
   return result;
 }
