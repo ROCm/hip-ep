@@ -15,11 +15,9 @@
 //   -d, --dump-level  0=off (default), 1=input tensors, 2=output tensors,
 //                     3=both (raw .bin under <stem>_i_dump/ and <stem>_o_dump/)
 //   -s, --seed        RNG seed for random inputs (default 42)
-//   -i, --input-dir   If set, load inputs from dir using same names as dump:
-//                     input_<idx>_<tensor>_<type>.bin (or legacy input_<idx>_<tensor>.bin)
-//   -L, --l2norm      Compare two output dump dirs: dir1|dir2 (output_*.bin);
-//                     element-wise L2 when filename ends with _<type>.bin
-//                     (fp32,fp16,i64,i32,i16,i8,u8,u16); else raw byte L2
+//   -i, --input-dir   If set, load inputs from dir: input_<idx>_<tensor>_<type>.bin
+//   -L, --l2norm      Compare two dirs: dir1|dir2 (same set of *.bin files);
+//                     names must be ..._<type>.bin (fp32,fp16,i64,...)
 //   -h, --help        Show help
 //
 //===----------------------------------------------------------------------===//
@@ -94,7 +92,7 @@ static std::string sanitize_filename_component(const std::string &name) {
   return s;
 }
 
-// Short suffix before ".bin" for dump filenames (e.g. output_0_logits_fp32.bin).
+// Short suffix before ".bin" for typed dumps (e.g. name_fp32.bin).
 static const char *onnx_elem_type_tag(ONNXTensorElementDataType t) {
   switch (t) {
   case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
@@ -180,15 +178,6 @@ static std::filesystem::path tensor_dump_bin_path(const std::filesystem::path &d
   const std::string safe = sanitize_filename_component(ort_name);
   return dir / (std::string(io_prefix) + "_" + std::to_string(index) + "_" +
                 safe + "_" + onnx_elem_type_tag(et) + ".bin");
-}
-
-// Pre-type-suffix layout (older dumps / manual files).
-static std::filesystem::path tensor_dump_bin_path_legacy(
-    const std::filesystem::path &dir, const char *io_prefix, size_t index,
-    const std::string &ort_name) {
-  const std::string safe = sanitize_filename_component(ort_name);
-  return dir / (std::string(io_prefix) + "_" + std::to_string(index) + "_" +
-                safe + ".bin");
 }
 
 // Raw tensor bytes for an Ort::Value (must be a tensor).
@@ -283,13 +272,9 @@ static std::string trim_string(std::string s) {
   return s;
 }
 
-static bool is_output_dump_filename(const std::string &name) {
-  return name.size() > static_cast<size_t>(4) && name.rfind("output_", 0) == 0 &&
-         name.compare(name.size() - 4, 4, ".bin") == 0;
-}
-
+// *.bin regular files in dir (for -L/--l2norm pairing by matching basenames).
 static std::vector<std::string>
-list_output_dump_filenames(const std::filesystem::path &dir) {
+list_l2compare_filenames(const std::filesystem::path &dir) {
   std::vector<std::string> names;
   std::error_code ec;
   std::filesystem::directory_iterator it(dir, ec);
@@ -303,8 +288,9 @@ list_output_dump_filenames(const std::filesystem::path &dir) {
     if (!it->is_regular_file())
       continue;
     const std::string fn = it->path().filename().string();
-    if (is_output_dump_filename(fn))
-      names.push_back(fn);
+    if (fn.size() < 4 || fn.compare(fn.size() - 4, 4, ".bin") != 0)
+      continue;
+    names.push_back(fn);
   }
   std::sort(names.begin(), names.end());
   return names;
@@ -333,13 +319,15 @@ static bool read_entire_file(const std::filesystem::path &path,
   return true;
 }
 
-// Basename like output_0_name_fp32.bin → elem type from last _<tag>.
+// Parse *.bin basename ..._<tag>.bin into element type; *typed_out false if tag
+// is missing or unknown.
 static bool parse_dump_filename_elem_type(const std::string &filename,
                                           ONNXTensorElementDataType &et,
                                           bool *typed_out) {
-  if (filename.size() < 8 ||
+  if (filename.size() < 4 ||
       filename.compare(filename.size() - 4, 4, ".bin") != 0) {
-    return false;
+    *typed_out = false;
+    return true;
   }
   const std::string base = filename.substr(0, filename.size() - 4);
   const size_t pos = base.rfind('_');
@@ -356,22 +344,12 @@ static bool parse_dump_filename_elem_type(const std::string &filename,
   return true;
 }
 
-// Sum of squared per-byte differences (treat each byte as unsigned 0..255).
-static double squared_l2_diff_bytes(const std::vector<char> &a,
-                                    const std::vector<char> &b) {
-  long double s = 0;
-  for (size_t i = 0; i < a.size(); ++i) {
-    const double d = static_cast<double>(static_cast<unsigned char>(a[i])) -
-                       static_cast<double>(static_cast<unsigned char>(b[i]));
-    s += d * d;
-  }
-  return static_cast<double>(s);
-}
-
 static bool squared_l2_diff_elementwise(const std::vector<char> &a,
                                         const std::vector<char> &b,
                                         ONNXTensorElementDataType et,
-                                        double *out_sq) {
+                                        double *out_sq,
+                                        size_t *out_used_elems = nullptr,
+                                        size_t *out_skipped_nan = nullptr) {
   const size_t es = element_byte_size(et);
   if (a.size() != b.size() || a.size() % es != 0) {
     std::cerr << "Size not aligned to element type (" << es << " bytes/elem)\n";
@@ -379,13 +357,22 @@ static bool squared_l2_diff_elementwise(const std::vector<char> &a,
   }
   const size_t n = a.size() / es;
   long double s = 0;
+  size_t used_elems = 0;
+  size_t skipped_nan = 0;
   switch (et) {
   case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: {
     const auto *pa = reinterpret_cast<const float *>(a.data());
     const auto *pb = reinterpret_cast<const float *>(b.data());
     for (size_t i = 0; i < n; ++i) {
-      const double d = static_cast<double>(pa[i]) - static_cast<double>(pb[i]);
+      const float fa = pa[i], fb = pb[i];
+      if (std::isnan(static_cast<double>(fa)) ||
+          std::isnan(static_cast<double>(fb))) {
+        skipped_nan++;
+        continue;
+      }
+      const double d = static_cast<double>(fa) - static_cast<double>(fb);
       s += d * d;
+      used_elems++;
     }
     break;
   }
@@ -393,9 +380,23 @@ static bool squared_l2_diff_elementwise(const std::vector<char> &a,
     const auto *pa = reinterpret_cast<const uint16_t *>(a.data());
     const auto *pb = reinterpret_cast<const uint16_t *>(b.data());
     for (size_t i = 0; i < n; ++i) {
-      const double d = static_cast<double>(fp16_bits_to_float(pa[i])) -
-                       static_cast<double>(fp16_bits_to_float(pb[i]));
+      const float fa = fp16_bits_to_float(pa[i]);
+      const float fb = fp16_bits_to_float(pb[i]);
+      if (std::isnan(static_cast<double>(fa)) ||
+          std::isnan(static_cast<double>(fb))) {
+        if (i < 20)
+          std::cout << "shili meet NaN: " << fa << " " << fb << " " << i << " "
+                    << static_cast<int>(static_cast<unsigned char>(a[i * 2]))
+                    << " "
+                    << static_cast<int>(
+                           static_cast<unsigned char>(a[i * 2 + 1]))
+                    << "\n";
+        skipped_nan++;
+        continue;
+      }
+      const double d = static_cast<double>(fa) - static_cast<double>(fb);
       s += d * d;
+      used_elems++;
     }
     break;
   }
@@ -406,6 +407,7 @@ static bool squared_l2_diff_elementwise(const std::vector<char> &a,
       const double d = static_cast<double>(pa[i]) - static_cast<double>(pb[i]);
       s += d * d;
     }
+    used_elems = n;
     break;
   }
   case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32: {
@@ -415,6 +417,7 @@ static bool squared_l2_diff_elementwise(const std::vector<char> &a,
       const double d = static_cast<double>(pa[i]) - static_cast<double>(pb[i]);
       s += d * d;
     }
+    used_elems = n;
     break;
   }
   case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16: {
@@ -424,6 +427,7 @@ static bool squared_l2_diff_elementwise(const std::vector<char> &a,
       const double d = static_cast<double>(pa[i]) - static_cast<double>(pb[i]);
       s += d * d;
     }
+    used_elems = n;
     break;
   }
   case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8: {
@@ -433,6 +437,7 @@ static bool squared_l2_diff_elementwise(const std::vector<char> &a,
       const double d = static_cast<double>(pa[i]) - static_cast<double>(pb[i]);
       s += d * d;
     }
+    used_elems = n;
     break;
   }
   case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8: {
@@ -442,6 +447,7 @@ static bool squared_l2_diff_elementwise(const std::vector<char> &a,
       const double d = static_cast<double>(pa[i]) - static_cast<double>(pb[i]);
       s += d * d;
     }
+    used_elems = n;
     break;
   }
   case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16: {
@@ -451,17 +457,22 @@ static bool squared_l2_diff_elementwise(const std::vector<char> &a,
       const double d = static_cast<double>(pa[i]) - static_cast<double>(pb[i]);
       s += d * d;
     }
+    used_elems = n;
     break;
   }
   default:
     std::cerr << "Unsupported element type for L2\n";
     return false;
   }
+  if (out_used_elems)
+    *out_used_elems = used_elems;
+  if (out_skipped_nan)
+    *out_skipped_nan = skipped_nan;
   *out_sq = static_cast<double>(s);
   return true;
 }
 
-// Compare two directories of dumped outputs (output_<idx>_<name>.bin). Returns
+// Compare two directories: same set of *.bin basenames, pairwise L2. Returns
 // exit code 0 on success.
 static int run_l2norm_output_dumps(const std::string &dir1_str,
                                    const std::string &dir2_str) {
@@ -477,14 +488,14 @@ static int run_l2norm_output_dumps(const std::string &dir1_str,
     return 1;
   }
 
-  std::vector<std::string> names1 = list_output_dump_filenames(d1);
-  std::vector<std::string> names2 = list_output_dump_filenames(d2);
+  std::vector<std::string> names1 = list_l2compare_filenames(d1);
+  std::vector<std::string> names2 = list_l2compare_filenames(d2);
   if (names1.empty()) {
-    std::cerr << "No output_*.bin files in: " << dir1_str << "\n";
+    std::cerr << "No *.bin files in: " << dir1_str << "\n";
     return 1;
   }
   if (names1 != names2) {
-    std::cerr << "Output dump filename sets differ.\n";
+    std::cerr << "Filename sets differ between directories.\n";
     std::set<std::string> s1(names1.begin(), names1.end());
     std::set<std::string> s2(names2.begin(), names2.end());
     std::cerr << "Only in first dir:\n";
@@ -514,17 +525,43 @@ static int run_l2norm_output_dumps(const std::string &dir1_str,
       std::cerr << "Bad dump filename: " << fn << "\n";
       return 1;
     }
-    double sq = 0;
-    if (typed) {
-      if (!squared_l2_diff_elementwise(a, b, et, &sq))
-        return 1;
-      std::cout << fn << ": L2(diff) = " << std::sqrt(sq) << " (" << a.size()
-                << " bytes, " << onnx_elem_type_tag(et) << " element-wise)\n";
-    } else {
-      sq = squared_l2_diff_bytes(a, b);
-      std::cout << fn << ": L2(diff) = " << std::sqrt(sq) << " (" << a.size()
-                << " bytes, raw byte)\n";
+    if (!typed) {
+      std::cerr
+          << fn
+          << ": missing or unknown type tag; expected name ending with _fp32, "
+             "_fp16, _i64, _i32, _i16, _i8, _u8, or _u16 before .bin\n";
+      return 1;
     }
+    // Bitwise-equal buffers => L2 is 0 (fast path).
+    double sq = 0;
+    size_t used_elems = 0;
+    size_t skipped_nan = 0;
+    if (a != b) {
+      if (!squared_l2_diff_elementwise(a, b, et, &sq, &used_elems,
+                                       &skipped_nan))
+        return 1;
+    } else {
+      used_elems = a.size() / element_byte_size(et);
+    }
+    if ((et == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+         et == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) &&
+        used_elems == 0 && a.size() / element_byte_size(et) > 0) {
+      const size_t n_skip = a.size() / element_byte_size(et);
+      std::cerr << "Warning: " << fn
+                << " - no elements used (all NaN); L2(diff)=0; " << n_skip
+                << " element(s) skipped\n";
+    }
+    std::cout << fn << ": L2(diff) = " << std::sqrt(sq) << " (" << a.size()
+              << " bytes, " << onnx_elem_type_tag(et) << " element-wise";
+    if (et == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+        et == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+      std::cout << "; " << used_elems << " elems compared";
+      if (skipped_nan > 0)
+        std::cout << ", " << skipped_nan << " element(s) skipped (NaN)";
+    } else if (used_elems > 0) {
+      std::cout << "; " << used_elems << " elems";
+    }
+    std::cout << ")\n";
     combined_sq += static_cast<long double>(sq);
   }
   std::cout << "Combined L2 (stacked diffs): " << std::sqrt(static_cast<double>(combined_sq))
@@ -549,13 +586,11 @@ int main(int argc, char *argv[]) {
       "s,seed", "RNG seed for random inputs (default 42)",
       cxxopts::value<unsigned int>()->default_value("42"))(
       "i,input-dir",
-      "Directory with input_<idx>_<name>_<type>.bin (or legacy "
-      "input_<idx>_<name>.bin); empty = random inputs",
+      "Directory with input_<idx>_<name>_<type>.bin only; empty = random inputs",
       cxxopts::value<std::string>()->default_value(""))(
       "L,l2norm",
-      "Compare two output dump dirs: dir1|dir2 (same output_*.bin set); "
-      "element-wise L2 when names end with _fp32,_fp16,_i64,...; else byte L2; "
-      "exits after compare (no -m)",
+      "Compare two dirs: dir1|dir2 (same *.bin set); each file must be "
+      "..._<type>.bin (fp32,fp16,i64,...); element-wise L2; no -m",
       cxxopts::value<std::string>()->default_value(""));
 
   cxxopts::ParseResult result;
@@ -616,8 +651,7 @@ int main(int argc, char *argv[]) {
 
   // ORT environment
   Ort::Env env(ORT_LOGGING_LEVEL_ERROR, "hip-onnx-runner");
-
-  // const std::string kEpName = "VitisAIExecutionProvider";  
+  
   const std::string kEpName = "MorphiZenExecutionProvider";  
   const std::string ep_dll = "onnxruntime_morphizen_ep.dll";
 
@@ -645,10 +679,10 @@ int main(int argc, char *argv[]) {
   if (!no_ep) {
     // Collect devices for this EP
     std::vector<Ort::ConstEpDevice> devices;
-    for (const auto &dev : env.GetEpDevices())
+    for (const auto &dev : env.GetEpDevices()) {
       if (dev.EpName() == kEpName)
         devices.emplace_back(dev);
-
+    }
     if (devices.empty()) {
       std::cerr << "No devices found for EP: " << kEpName << "\n";
       return 1;
@@ -746,26 +780,18 @@ int main(int argc, char *argv[]) {
     if (use_input_files) {
       const auto bin_path = tensor_dump_bin_path(
           input_dir_path, "input", i, input_names_str[i], input_types[i]);
-      const auto legacy_path = tensor_dump_bin_path_legacy(
-          input_dir_path, "input", i, input_names_str[i]);
       std::error_code ec;
-      std::filesystem::path chosen;
-      if (std::filesystem::exists(bin_path, ec))
-        chosen = bin_path;
-      else if (std::filesystem::exists(legacy_path, ec))
-        chosen = legacy_path;
-      else {
-        std::cerr << "Missing input file: expected " << bin_path.string()
-                  << " or " << legacy_path.string() << "\n";
+      if (!std::filesystem::exists(bin_path, ec)) {
+        std::cerr << "Missing input file: " << bin_path.string() << "\n";
         return 1;
       }
-      if (!load_raw_file(chosen, input_buffers[i].data(),
+      if (!load_raw_file(bin_path, input_buffers[i].data(),
                          input_buffers[i].size()))
         return 1;
-      std::cout << "Loaded input " << i << " from " << chosen.string() << "\n";
+      std::cout << "Loaded input " << i << " from " << bin_path.string() << "\n";
     } else {
-      // Fill as float (reinterpreted for other types — sufficient for random
-      // test)
+      // Fill as float (reinterpreted for other types; sufficient for random
+      // test use).
       auto *fdata = reinterpret_cast<float *>(input_buffers[i].data());
       std::generate(fdata, fdata + (input_buffers[i].size() / sizeof(float)),
                     [&] { return dist(rng); });
