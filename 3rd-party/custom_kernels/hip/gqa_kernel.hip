@@ -50,6 +50,8 @@ static constexpr int GQA_THREADS = 256;
 //     [6] total_seqlen : scalar           — INT32
 //     [7] cos_cache   : (max_pos, d/2)   — optional, when do_rotary=1
 //     [8] sin_cache   : (max_pos, d/2)   — optional, when do_rotary=1
+//     [9] position_ids: (B,) or (B,S)    — optional, not yet implemented
+//    [10] attn_bias   : (B,H,S,T) etc.   — optional, not yet implemented
 //    [11] head_sink   : (H,)             — optional, per-head smooth softmax factor
 //
 //   Outputs:

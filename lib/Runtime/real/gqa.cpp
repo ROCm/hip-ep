@@ -505,27 +505,34 @@ int wrap_group_query_attention(
     return -1;
   }
 
-  // Warn about features not yet implemented
+  // Reject features not yet implemented
   if (position_ids != nullptr) {
-    RUNTIME_DEBUG_LOG("[WARN] position_ids not yet implemented\n");
+    fprintf(stderr, "[GQA ERROR] position_ids not yet implemented\n");
+    return -1;
   }
   if (attention_bias != nullptr) {
-    RUNTIME_DEBUG_LOG("[WARN] attention_bias not yet implemented\n");
+    fprintf(stderr, "[GQA ERROR] attention_bias not yet implemented\n");
+    return -1;
   }
   if (k_scale != nullptr || v_scale != nullptr) {
-    RUNTIME_DEBUG_LOG("[WARN] KV cache quantization not yet implemented\n");
+    fprintf(stderr, "[GQA ERROR] KV cache quantization not yet implemented\n");
+    return -1;
   }
   if (output_qk != nullptr) {
-    RUNTIME_DEBUG_LOG("[WARN] output_qk not yet implemented\n");
+    fprintf(stderr, "[GQA ERROR] output_qk not yet implemented\n");
+    return -1;
   }
   if (qk_output != 0) {
-    RUNTIME_DEBUG_LOG("[WARN] qk_output not yet implemented\n");
+    fprintf(stderr, "[GQA ERROR] qk_output not yet implemented\n");
+    return -1;
   }
   if (k_quant_type != 0 || v_quant_type != 0) {
-    RUNTIME_DEBUG_LOG("[WARN] quantization types not yet implemented\n");
+    fprintf(stderr, "[GQA ERROR] quantization types not yet implemented\n");
+    return -1;
   }
   if (kv_cache_bit_width != 8) {
-    RUNTIME_DEBUG_LOG("[WARN] non-8bit cache not yet implemented\n");
+    fprintf(stderr, "[GQA ERROR] non-8bit cache not yet implemented\n");
+    return -1;
   }
 
   // ORT uses scale == 0.0 as sentinel for "auto-compute 1/√head_size"
