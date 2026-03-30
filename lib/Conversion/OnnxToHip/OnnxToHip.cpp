@@ -1462,13 +1462,14 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
 
   // Calculate default scale = 1/sqrt(head_size) per ONNX spec.
   // Query shape: [batch_size, seq_len, num_heads * head_size]
+  // head_size = (num_heads * head_size) / num_heads = query_dim_2 / num_heads
   // Fallback 0.0 is the ORT sentinel meaning "auto-compute at runtime"
   // (gqa_attention_base.h: scale_ == 0.0f ? 1/sqrt(head_size) : scale_).
   auto queryType = mlir::cast<mlir::RankedTensorType>(query.getType());
   int64_t numHeads = numHeadsAttrOnnx.getValue().getSExtValue();
   float defaultScale = 0.0f;
   if (queryType.hasRank() && queryType.getRank() >= 3) {
-    int64_t hiddenSize = queryType.getDimSize(2);
+    int64_t hiddenSize = queryType.getDimSize(2); // num_heads * head_size
     if (hiddenSize != mlir::ShapedType::kDynamic && numHeads > 0) {
       int64_t headSize = hiddenSize / numHeads;
       defaultScale = 1.0f / std::sqrt(static_cast<float>(headSize));
