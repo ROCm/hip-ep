@@ -19,6 +19,14 @@
 #include <pthread.h>
 #endif
 
+// Macro for best-effort cleanup: logs errors but continues cleanup
+#define HIP_CLEANUP(expr) do { \
+    hipError_t _err = (expr); \
+    if (_err != hipSuccess) { \
+        fprintf(stderr, "Warning: " #expr " failed with error %d\n", (int)_err); \
+    } \
+} while(0)
+
 extern "C" {
 
 // Manual initialization sequence for HIP diagnostic testing
@@ -86,14 +94,14 @@ __declspec(dllexport)
   if (miopenCreate(&miopen_handle) != miopenStatusSuccess) {
     fprintf(stderr,
             "[Model DLL Manual] ERROR: Failed to create MIOpen handle\n");
-    (void)hipStreamDestroy(stream);
+    HIP_CLEANUP(hipStreamDestroy(stream));
     return 7;
   }
 
   if (miopenSetStream(miopen_handle, stream) != miopenStatusSuccess) {
     fprintf(stderr, "[Model DLL Manual] ERROR: Failed to set MIOpen stream\n");
     miopenDestroy(miopen_handle);
-    (void)hipStreamDestroy(stream);
+    HIP_CLEANUP(hipStreamDestroy(stream));
     return 8;
   }
 
@@ -112,7 +120,7 @@ __declspec(dllexport)
           stderr,
           "[Model DLL Manual] ERROR: gcnArchName became EMPTY after MIOpen!\n");
       miopenDestroy(miopen_handle);
-      (void)hipStreamDestroy(stream);
+      HIP_CLEANUP(hipStreamDestroy(stream));
       return 1;
     }
   }
@@ -124,7 +132,7 @@ __declspec(dllexport)
     fprintf(stderr,
             "[Model DLL Manual] ERROR: Failed to create hipBLASLt handle\n");
     miopenDestroy(miopen_handle);
-    (void)hipStreamDestroy(stream);
+    HIP_CLEANUP(hipStreamDestroy(stream));
     return 9;
   }
 
