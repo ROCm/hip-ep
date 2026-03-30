@@ -63,14 +63,19 @@ compileOnnxOp(Operation *onnx_op, ModuleOp module, hipdnnHandle_t handle) {
   auto graph = std::make_unique<::hip::graph::HipDNNGraph>(handle);
   auto status = graph->BuildFromOnnxMLIR(temp_func.getBody());
   if (status.failed()) {
+    llvm::errs() << "[ConvertOnnxToHipDNN] BuildFromOnnxMLIR failed: "
+                 << status.message() << "\n";
     temp_func->erase();
     return nullptr;
   }
 
   status = graph->Compile();
   temp_func->erase();
-  if (status.failed())
+  if (status.failed()) {
+    llvm::errs() << "[ConvertOnnxToHipDNN] Compile failed: "
+                 << status.message() << "\n";
     return nullptr;
+  }
 
   return graph;
 }
