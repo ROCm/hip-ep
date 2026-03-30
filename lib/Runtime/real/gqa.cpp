@@ -11,6 +11,7 @@
 #include "error_check_macros.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -129,7 +130,7 @@ cleanup_pref:
 }
 
 // =============================================================================
-// 11-step hipBLASLt GQA pipeline (FP16 only)
+// 12-step hipBLASLt GQA pipeline (Step 0 + Steps 1-11, FP16 only)
 // =============================================================================
 
 static int gqa_forward_hipblaslt(
@@ -183,7 +184,7 @@ static int gqa_forward_hipblaslt(
 
   // Optional RoPE buffers: allocated only when do_rotary is enabled.
   size_t off_Qroped = 0, off_Kroped = 0;
-  bool need_rope = do_rotary && cos_cache && sin_cache;
+  bool need_rope = (do_rotary == 1) && cos_cache && sin_cache;
   if (need_rope) {
     size_t Q_bytes = (size_t)B * sq * H * d * elem_sz;
     size_t K_bytes = (size_t)B * sq * G * d * elem_sz;
@@ -527,16 +528,23 @@ int wrap_group_query_attention(
     RUNTIME_DEBUG_LOG("[WARN] non-8bit cache not yet implemented\n");
   }
 
+  // ORT uses scale == 0.0 as sentinel for "auto-compute 1/√head_size"
+  // (gqa_attention_base.h line 185: scale_ == 0.0f ? 1/sqrt(head_size) :
+  // scale_).
+  if (scale == 0.0f && head_dim > 0) {
+    scale = 1.0f / sqrtf(static_cast<float>(head_dim));
+  }
+
   // Smooth softmax: activated when head_sink is provided OR smooth_softmax
   // attribute is explicitly 1, matching ORT behaviour (gqa_attention_base.h
   // line 354: use_smooth_softmax_ || head_sink != nullptr).
-  // We compare == 1 (not != 0) because the attribute may arrive as -1 when
-  // unset due to MLIR default value propagation.
+  // Compare == 1 following ORT's GetAttrOrDefault("smooth_softmax", 0) == 1
+  // pattern (default 0 is set in HipOps.td and OnnxToHip.cpp).
   bool has_smooth_softmax = (head_sink != nullptr || smooth_softmax == 1);
 
   bool is_packed_qkv = (key == nullptr && value == nullptr);
   bool has_rope =
-      (do_rotary != 0 && cos_cache != nullptr && sin_cache != nullptr);
+      (do_rotary == 1 && cos_cache != nullptr && sin_cache != nullptr);
   bool has_local_window = (local_window_size > 0);
 
   RUNTIME_DEBUG_LOG(
