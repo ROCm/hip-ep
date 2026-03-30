@@ -350,7 +350,7 @@ static bool squared_l2_diff_elementwise(const std::vector<char> &a,
                                         ONNXTensorElementDataType et,
                                         double *out_sq,
                                         size_t *out_used_elems = nullptr,
-                                        size_t *out_skipped_nan = nullptr) {
+                                        size_t *out_skipped_nonfinite = nullptr) {
   const size_t es = element_byte_size(et);
   if (a.size() != b.size() || a.size() % es != 0) {
     std::cerr << "Size not aligned to element type (" << es << " bytes/elem)\n";
@@ -359,16 +359,17 @@ static bool squared_l2_diff_elementwise(const std::vector<char> &a,
   const size_t n = a.size() / es;
   long double s = 0;
   size_t used_elems = 0;
-  size_t skipped_nan = 0;
+  // Skips NaN/Inf on either side so (Inf-Inf) etc. never poisons the sum.
+  size_t skipped_nonfinite = 0;
   switch (et) {
   case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: {
     const auto *pa = reinterpret_cast<const float *>(a.data());
     const auto *pb = reinterpret_cast<const float *>(b.data());
     for (size_t i = 0; i < n; ++i) {
       const float fa = pa[i], fb = pb[i];
-      if (std::isnan(static_cast<double>(fa)) ||
-          std::isnan(static_cast<double>(fb))) {
-        skipped_nan++;
+      if (!std::isfinite(static_cast<double>(fa)) ||
+          !std::isfinite(static_cast<double>(fb))) {
+        skipped_nonfinite++;
         continue;
       }
       const double d = static_cast<double>(fa) - static_cast<double>(fb);
@@ -383,8 +384,8 @@ static bool squared_l2_diff_elementwise(const std::vector<char> &a,
     for (size_t i = 0; i < n; ++i) {
       const float fa = fp16_bits_to_float(pa[i]);
       const float fb = fp16_bits_to_float(pb[i]);
-      if (std::isnan(static_cast<double>(fa)) ||
-          std::isnan(static_cast<double>(fb))) {
+      if (!std::isfinite(static_cast<double>(fa)) ||
+          !std::isfinite(static_cast<double>(fb))) {
         if (i < 20)
           std::cout << "shili meet NaN: " << fa << " " << fb << " " << i << " "
                     << static_cast<int>(static_cast<unsigned char>(a[i * 2]))
@@ -392,7 +393,7 @@ static bool squared_l2_diff_elementwise(const std::vector<char> &a,
                     << static_cast<int>(
                            static_cast<unsigned char>(a[i * 2 + 1]))
                     << "\n";
-        skipped_nan++;
+        skipped_nonfinite++;
         continue;
       }
       const double d = static_cast<double>(fa) - static_cast<double>(fb);
@@ -467,8 +468,8 @@ static bool squared_l2_diff_elementwise(const std::vector<char> &a,
   }
   if (out_used_elems)
     *out_used_elems = used_elems;
-  if (out_skipped_nan)
-    *out_skipped_nan = skipped_nan;
+  if (out_skipped_nonfinite)
+    *out_skipped_nonfinite = skipped_nonfinite;
   *out_sq = static_cast<double>(s);
   return true;
 }
@@ -536,10 +537,10 @@ static int run_l2norm_output_dumps(const std::string &dir1_str,
     // Bitwise-equal buffers => L2 is 0 (fast path).
     double sq = 0;
     size_t used_elems = 0;
-    size_t skipped_nan = 0;
+    size_t skipped_nonfinite = 0;
     if (a != b) {
       if (!squared_l2_diff_elementwise(a, b, et, &sq, &used_elems,
-                                       &skipped_nan))
+                                       &skipped_nonfinite))
         return 1;
     } else {
       used_elems = a.size() / element_byte_size(et);
@@ -549,16 +550,17 @@ static int run_l2norm_output_dumps(const std::string &dir1_str,
         used_elems == 0 && a.size() / element_byte_size(et) > 0) {
       const size_t n_skip = a.size() / element_byte_size(et);
       std::cerr << "Warning: " << fn
-                << " - no elements used (all NaN); L2(diff)=0; " << n_skip
-                << " element(s) skipped\n";
+                << " - no finite elements to compare; L2(diff)=0; " << n_skip
+                << " element(s) skipped (non-finite)\n";
     }
     std::cout << fn << ": L2(diff) = " << std::sqrt(sq) << " (" << a.size()
               << " bytes, " << onnx_elem_type_tag(et) << " element-wise";
     if (et == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
         et == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
       std::cout << "; " << used_elems << " elems compared";
-      if (skipped_nan > 0)
-        std::cout << ", " << skipped_nan << " element(s) skipped (NaN)";
+      if (skipped_nonfinite > 0)
+        std::cout << ", " << skipped_nonfinite
+                  << " element(s) skipped (non-finite)";
     } else if (used_elems > 0) {
       std::cout << "; " << used_elems << " elems";
     }
