@@ -139,10 +139,11 @@ static int gqa_forward_hipblaslt(
     const void *value,    // BSHD [B, sq, G, d] or null (packed QKV)
     const void *past_key, // BNSD [B, G, past_seq, d] or null
     const void *past_value, const void *cos_cache, const void *sin_cache,
-    void *head_sink,   // [H] smooth softmax factor or null
-    bool use_smooth_softmax, // true when smooth softmax is enabled (ORT: head_sink || smooth_softmax attr)
-    void *output,      // BSHD [B, sq, H, d]
-    void *present_key, // BNSD [B, G, present_seq, d]
+    void *head_sink,         // [H] smooth softmax factor or null
+    bool use_smooth_softmax, // true when smooth softmax is enabled (ORT:
+                             // head_sink || smooth_softmax attr)
+    void *output,            // BSHD [B, sq, H, d]
+    void *present_key,       // BNSD [B, G, present_seq, d]
     void *present_value, int64_t B, int64_t sq, int64_t skv, int64_t H,
     int64_t G, int64_t d, float scale, int64_t do_rotary,
     int64_t local_window_size) {
@@ -164,7 +165,8 @@ static int gqa_forward_hipblaslt(
   // hipMalloc/hipFree -- after the first inference the workspace is
   // already large enough and reuse is zero-cost.
   //
-  // Layout: [Qtrans | Kexp | Vexp | S | O | Qroped? | Kroped? | Qsplit? | Ksplit? | Vsplit? | GEMM ws]
+  // Layout: [Qtrans | Kexp | Vexp | S | O | Qroped? | Kroped? | Qsplit? |
+  // Ksplit? | Vsplit? | GEMM ws]
 
   size_t elem_sz = 2; // FP16
   size_t Qtrans_bytes = (size_t)B * H * sq * d * elem_sz;
@@ -302,7 +304,7 @@ static int gqa_forward_hipblaslt(
       void *d_Ksplit = ws + off_Ksplit;
       void *d_Vsplit = ws + off_Vsplit;
       HIP_CHECK(hip_gqa_split_qkv(stream, query, d_Qsplit, d_Ksplit, d_Vsplit,
-                                   (int)B, (int)sq, (int)H, (int)G, (int)d));
+                                  (int)B, (int)sq, (int)H, (int)G, (int)d));
       qSrc = d_Qsplit;
       kSrc = d_Ksplit;
       vSrc = d_Vsplit;
@@ -395,9 +397,8 @@ static int gqa_forward_hipblaslt(
                                     (int)local_window_size));
     }
     HIP_CHECK(hip_gqa_softmax_inplace(stream, d_S, (int)(B * H * sq), (int)skv,
-                                      (int)sq, scoreBatchStride,
-                                      head_sink, (int)H,
-                                      (int)use_smooth_softmax));
+                                      (int)sq, scoreBatchStride, head_sink,
+                                      (int)H, (int)use_smooth_softmax));
 
     // ---- Step 10: Value GEMM ----
     float valAlpha = 1.0f;
@@ -534,7 +535,8 @@ int wrap_group_query_attention(
   bool has_smooth_softmax = (head_sink != nullptr || smooth_softmax == 1);
 
   bool is_packed_qkv = (key == nullptr && value == nullptr);
-  bool has_rope = (do_rotary != 0 && cos_cache != nullptr && sin_cache != nullptr);
+  bool has_rope =
+      (do_rotary != 0 && cos_cache != nullptr && sin_cache != nullptr);
   bool has_local_window = (local_window_size > 0);
 
   RUNTIME_DEBUG_LOG(
@@ -551,18 +553,15 @@ int wrap_group_query_attention(
       (long long)num_heads, (long long)kv_num_heads, (long long)head_dim,
       (double)scale, (long long)do_rotary, (long long)rotary_interleaved,
       (double)softcap, (long long)local_window_size, (long long)smooth_softmax,
-      query, key, value, past_key, past_value,
-      cos_cache, sin_cache, head_sink,
-      output, present_key, present_value,
-      (int)is_packed_qkv, (int)has_rope, (int)has_local_window,
-      (int)has_smooth_softmax);
+      query, key, value, past_key, past_value, cos_cache, sin_cache, head_sink,
+      output, present_key, present_value, (int)is_packed_qkv, (int)has_rope,
+      (int)has_local_window, (int)has_smooth_softmax);
 
   int rc = gqa_forward_hipblaslt(
       state, stream, ltHandle, query, key, value, past_key, past_value,
-      cos_cache, sin_cache, head_sink, has_smooth_softmax, output,
-      present_key, present_value, batch_size, seq_len_q, seq_len_kv,
-      num_heads, kv_num_heads, head_dim, scale, do_rotary,
-      local_window_size);
+      cos_cache, sin_cache, head_sink, has_smooth_softmax, output, present_key,
+      present_value, batch_size, seq_len_q, seq_len_kv, num_heads, kv_num_heads,
+      head_dim, scale, do_rotary, local_window_size);
 
   if (rc != 0) {
     fprintf(stderr, "wrap_group_query_attention: gqa_forward failed (rc=%d)\n",

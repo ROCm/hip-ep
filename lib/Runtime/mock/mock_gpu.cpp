@@ -501,7 +501,8 @@ int wrap_group_query_attention(
   MOCK_PRINT("[MOCK] wrap_group_query_attention(\n");
   MOCK_PRINT("[MOCK]   num_heads=%lld, kv_num_heads=%lld,\n",
              (long long)num_heads, (long long)kv_num_heads);
-  MOCK_PRINT("[MOCK]   scale=%f, softcap=%f,\n", (double)scale, (double)softcap);
+  MOCK_PRINT("[MOCK]   scale=%f, softcap=%f,\n", (double)scale,
+             (double)softcap);
   MOCK_PRINT("[MOCK]   do_rotary=%lld, rotary_interleaved=%lld,\n",
              (long long)do_rotary, (long long)rotary_interleaved);
   MOCK_PRINT("[MOCK]   batch=%lld, seq_q=%lld, seq_kv=%lld, "
