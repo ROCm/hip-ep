@@ -1249,8 +1249,11 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
     }
     if (skipOutputIsReal)
       replacements.push_back(hipOp->getResult(1)); // input_skip_bias_sum
-    else
-      replacements.push_back(mlir::Value{});
+    else {
+      auto dummyType = mlir::RankedTensorType::get({}, rewriter.getF32Type());
+      replacements.push_back(mlir::tensor::EmptyOp::create(
+          rewriter, loc, dummyType.getShape(), dummyType.getElementType()));
+    }
   }
 
   rewriter.replaceOp(op, replacements);

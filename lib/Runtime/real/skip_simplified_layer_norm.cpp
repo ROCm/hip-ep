@@ -131,11 +131,17 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&addBDesc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&addCDesc));
 
+  // Use 2D descriptors [num_rows, hidden_dim] so that bias [1, hidden_dim]
+  // can broadcast correctly across rows when num_rows > 1.
   {
-    int n = static_cast<int>(input_num_elements);
-    MIOPEN_CHECK(miopenSet4dTensorDescriptor(addADesc, data_type, 1, 1, 1, n));
-    MIOPEN_CHECK(miopenSet4dTensorDescriptor(addBDesc, data_type, 1, 1, 1, n));
-    MIOPEN_CHECK(miopenSet4dTensorDescriptor(addCDesc, data_type, 1, 1, 1, n));
+    int dims[] = {static_cast<int>(num_rows), static_cast<int>(hidden_dim)};
+    int strides[] = {static_cast<int>(hidden_dim), 1};
+    MIOPEN_CHECK(
+        miopenSetTensorDescriptor(addADesc, data_type, 2, dims, strides));
+    MIOPEN_CHECK(
+        miopenSetTensorDescriptor(addBDesc, data_type, 2, dims, strides));
+    MIOPEN_CHECK(
+        miopenSetTensorDescriptor(addCDesc, data_type, 2, dims, strides));
   }
 
   {
@@ -153,14 +159,17 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
   // =========================================================================
   if (bias) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: step 1b — "
-                      "adding bias (%lld elements, broadcast)\n",
-                      (long long)hidden_dim);
+                      "adding bias (%lld elements, broadcast over %lld rows)\n",
+                      (long long)hidden_dim, (long long)num_rows);
 
     MIOPEN_CHECK(miopenCreateTensorDescriptor(&biasDesc));
     {
-      int n = static_cast<int>(hidden_dim);
-      MIOPEN_CHECK(
-          miopenSet4dTensorDescriptor(biasDesc, data_type, 1, 1, 1, n));
+      // bias is [hidden_dim], described as [1, hidden_dim] so MIOpen
+      // broadcasts it across the num_rows dimension of addCDesc.
+      int bias_dims[] = {1, static_cast<int>(hidden_dim)};
+      int bias_strides[] = {static_cast<int>(hidden_dim), 1};
+      MIOPEN_CHECK(miopenSetTensorDescriptor(biasDesc, data_type, 2, bias_dims,
+                                             bias_strides));
     }
 
     {
@@ -189,6 +198,7 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
           "[REAL] wrap_skip_simplified_layer_norm: hipMalloc rstd "
           "failed: %s\n",
           hipGetErrorString(hip_err));
+      result = -1;
       goto cleanup;
     }
   }
