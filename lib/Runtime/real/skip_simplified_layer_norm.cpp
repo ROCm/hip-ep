@@ -193,7 +193,7 @@ cleanup:
   if (rstdDesc)
     miopenDestroyTensorDescriptor(rstdDesc);
   if (rstd_buf)
-    hipFree(rstd_buf);
+    HIP_CLEANUP(hipFree(rstd_buf));
 
   return result;
 }

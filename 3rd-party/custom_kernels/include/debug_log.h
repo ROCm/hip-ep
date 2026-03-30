@@ -9,8 +9,19 @@
 
 inline bool custom_kernels_debug_enabled() {
     static const bool enabled = [] {
+#ifdef _WIN32
+        char* v = nullptr;
+        size_t len = 0;
+        bool result = false;
+        if (_dupenv_s(&v, &len, "HIPDNN_EP_DEBUG") == 0 && v != nullptr) {
+            result = v[0] >= '1';
+            free(v);
+        }
+        return result;
+#else
         const char* v = getenv("HIPDNN_EP_DEBUG");
         return v && v[0] >= '1';
+#endif
     }();
     return enabled;
 }
