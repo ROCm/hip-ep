@@ -1489,33 +1489,73 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
                                       rewriter.getF32FloatAttr(value));
     };
 
+    // Helper: create nullptr
+    Value nullPtr = LLVM::ZeroOp::create(rewriter, loc, ptrType);
+
+    // Helper: extract memref pointer or nullptr for optional operands
+    auto getMemRefPtrOrNull = [&](Value memref) -> Value {
+      if (!memref)
+        return nullPtr;
+      return extractMemRefPtr(memref, rewriter, loc);
+    };
+
+    // === Extract all inputs (required + optional) ===
+
     Value statePtr = adaptor.getCtx();
+
+    // Required inputs
     Value queryPtr = extractMemRefPtr(adaptor.getQuery(), rewriter, loc);
-    Value keyPtr = extractMemRefPtr(adaptor.getKey(), rewriter, loc);
-    Value valuePtr = extractMemRefPtr(adaptor.getValue(), rewriter, loc);
-    Value pastKeyPtr = extractMemRefPtr(adaptor.getPastKey(), rewriter, loc);
-    Value pastValuePtr =
-        extractMemRefPtr(adaptor.getPastValue(), rewriter, loc);
     Value seqlensKPtr = extractMemRefPtr(adaptor.getSeqlensK(), rewriter, loc);
     Value totalSeqLenPtr =
         extractMemRefPtr(adaptor.getTotalSeqLen(), rewriter, loc);
+
+    // Optional inputs (may be nullptr)
+    Value keyPtr = getMemRefPtrOrNull(adaptor.getKey());
+    Value valuePtr = getMemRefPtrOrNull(adaptor.getValue());
+    Value pastKeyPtr = getMemRefPtrOrNull(adaptor.getPastKey());
+    Value pastValuePtr = getMemRefPtrOrNull(adaptor.getPastValue());
+    Value cosCachePtr = getMemRefPtrOrNull(adaptor.getCosCache());
+    Value sinCachePtr = getMemRefPtrOrNull(adaptor.getSinCache());
+    Value positionIdsPtr = getMemRefPtrOrNull(adaptor.getPositionIds());
+    Value attentionBiasPtr = getMemRefPtrOrNull(adaptor.getAttentionBias());
+    Value headSinkPtr = getMemRefPtrOrNull(adaptor.getHeadSink());
+    Value kScalePtr = getMemRefPtrOrNull(adaptor.getKScale());
+    Value vScalePtr = getMemRefPtrOrNull(adaptor.getVScale());
+
+    // Output pointers
     Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
     Value presentKeyPtr =
         extractMemRefPtr(adaptor.getPresentKey(), rewriter, loc);
     Value presentValuePtr =
         extractMemRefPtr(adaptor.getPresentValue(), rewriter, loc);
+    Value outputQkPtr = getMemRefPtrOrNull(adaptor.getOutputQk());
 
-    // cos/sin cache: NULL pointers for now (RoPE done via separate op)
-    Value nullPtr = LLVM::ZeroOp::create(rewriter, loc, ptrType);
-    Value cosCachePtr = nullPtr;
-    Value sinCachePtr = nullPtr;
+    // === Extract attributes ===
 
     Value numHeads = createI64Const(op.getNumHeads());
     Value kvNumHeads = createI64Const(op.getKvNumHeads());
     Value scale = createF32Const(op.getScale().convertToFloat());
-    Value softcap = createF32Const(op.getSoftcap().convertToFloat());
     Value doRotary = createI64Const(op.getDoRotary());
     Value rotaryInterleaved = createI64Const(op.getRotaryInterleaved());
+    Value softcap = createF32Const(op.getSoftcap().convertToFloat());
+    Value localWindowSize = createI64Const(op.getLocalWindowSize());
+    Value smoothSoftmax = createI64Const(op.getSmoothSoftmax());
+    Value qkOutput = createI64Const(op.getQkOutput());
+    Value kvCacheBitWidth = createI64Const(op.getKvCacheBitWidth());
+
+    // String attributes need to be converted to enum integers
+    // "NONE"=0, "PER_TENSOR"=1, "PER_CHANNEL"=2
+    auto quantTypeToEnum = [](llvm::StringRef str) -> int64_t {
+      if (str == "NONE")
+        return 0;
+      if (str == "PER_TENSOR")
+        return 1;
+      if (str == "PER_CHANNEL")
+        return 2;
+      return 0; // default to NONE
+    };
+    Value kQuantType = createI64Const(quantTypeToEnum(op.getKQuantType()));
+    Value vQuantType = createI64Const(quantTypeToEnum(op.getVQuantType()));
 
     // Extract shape info from query memref: [batch, seq_q, num_heads *
     // head_dim]
@@ -1543,8 +1583,10 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     Value headDimVal = createI64Const(headDim);
     Value elemSizeVal = createI64Const(elementSizeBytes);
 
-    SmallVector<Type, 24> paramTypes = {
+    // Function signature matches Task 4 runtime wrapper
+    SmallVector<Type, 37> paramTypes = {
         ptrType, // state
+        // Inputs (14 pointers - some may be nullptr)
         ptrType, // query
         ptrType, // key
         ptrType, // value
@@ -1554,15 +1596,30 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         ptrType, // total_seq_len
         ptrType, // cos_cache
         ptrType, // sin_cache
+        ptrType, // position_ids
+        ptrType, // attention_bias
+        ptrType, // head_sink
+        ptrType, // k_scale
+        ptrType, // v_scale
+        // Outputs (4 pointers - output_qk may be nullptr)
         ptrType, // output
         ptrType, // present_key
         ptrType, // present_value
+        ptrType, // output_qk
+        // Attributes (13 values)
         i64Type, // num_heads
         i64Type, // kv_num_heads
         f32Type, // scale
-        f32Type, // softcap
         i64Type, // do_rotary
         i64Type, // rotary_interleaved
+        f32Type, // softcap
+        i64Type, // local_window_size
+        i64Type, // smooth_softmax
+        i64Type, // qk_output
+        i64Type, // k_quant_type
+        i64Type, // v_quant_type
+        i64Type, // kv_cache_bit_width
+        // Shape info (5 values)
         i64Type, // batch_size
         i64Type, // seq_len_q
         i64Type, // seq_len_kv
@@ -1575,30 +1632,20 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 24> args = {statePtr,
-                                   queryPtr,
-                                   keyPtr,
-                                   valuePtr,
-                                   pastKeyPtr,
-                                   pastValuePtr,
-                                   seqlensKPtr,
-                                   totalSeqLenPtr,
-                                   cosCachePtr,
-                                   sinCachePtr,
-                                   outputPtr,
-                                   presentKeyPtr,
-                                   presentValuePtr,
-                                   numHeads,
-                                   kvNumHeads,
-                                   scale,
-                                   softcap,
-                                   doRotary,
-                                   rotaryInterleaved,
-                                   batchSizeVal,
-                                   seqLenQVal,
-                                   seqLenKVVal,
-                                   headDimVal,
-                                   elemSizeVal};
+    SmallVector<Value, 37> args = {
+        statePtr,
+        // Inputs (14 pointers)
+        queryPtr, keyPtr, valuePtr, pastKeyPtr, pastValuePtr, seqlensKPtr,
+        totalSeqLenPtr, cosCachePtr, sinCachePtr, positionIdsPtr,
+        attentionBiasPtr, headSinkPtr, kScalePtr, vScalePtr,
+        // Outputs (4 pointers)
+        outputPtr, presentKeyPtr, presentValuePtr, outputQkPtr,
+        // Attributes (13 values)
+        numHeads, kvNumHeads, scale, doRotary, rotaryInterleaved, softcap,
+        localWindowSize, smoothSoftmax, qkOutput, kQuantType, vQuantType,
+        kvCacheBitWidth,
+        // Shape info (5 values)
+        batchSizeVal, seqLenQVal, seqLenKVVal, headDimVal, elemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
