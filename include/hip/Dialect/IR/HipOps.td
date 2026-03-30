@@ -763,71 +763,142 @@ def Hip_ReduceSumOp : Hip_DpsOp<"reduce_sum"> {
   }];
 }
 
-def Hip_GqaOp : Hip_DpsOp<"gqa"> {
-  let summary = "Group Query Attention (com.microsoft GQA)";
+def Hip_GqaOp : Hip_DpsOp<"gqa", [AttrSizedOperandSegments]> {
+  let summary = "Group Query Attention - Full MS spec implementation";
   let description = [{
-    Multi-head attention with grouped key/value heads (GQA/MQA).
-    Implements the com.microsoft GroupQueryAttention operator for LLM inference.
+    Complete implementation of com.microsoft.GroupQueryAttention (v1) specification.
 
-    Concatenates new key/value with past KV cache and computes scaled
-    dot-product attention with grouped heads.
+    Supported features:
+    - Grouped-query/Multi-query attention (GQA/MQA)
+    - KV cache (BNSH format, supports past/present buffer sharing)
+    - RoPE (rotary position embedding, supports cos/sin cache + position_ids)
+    - Attention bias (ALiBi, T5 relative position bias, etc.)
+    - Local attention (Mistral sliding window)
+    - KV cache quantization (float8/int8/int4, per-tensor/per-channel)
+    - Smooth softmax (numerical stability optimization)
+    - Debug output (QK matrix visualization)
 
-    Uses destination-passing style: output buffers are provided as arguments.
+    Cache format: BNSH (batch_size, num_heads, seq_len, head_size)
 
-    Operand layout (for getDpsInitsMutable): operands 0..7 are inputs
-    (ctx, query, key, value, past_key, past_value, seqlens_k, total_seq_len);
-    operands 8..10 are DPS inits (output, present_key, present_value).
-
-    Attributes:
-    - num_heads: Number of query attention heads
-    - kv_num_heads: Number of key/value heads (< num_heads for GQA)
-    - scale: Attention score scaling factor (1/sqrt(head_dim))
-    - softcap: Soft capping value for attention logits (0 = disabled)
-    - do_rotary: Apply rotary positional embedding (0 or 1)
-    - rotary_interleaved: Rotary embedding interleaved format (0 or 1)
+    MS spec reference:
+    https://github.com/microsoft/onnxruntime/blob/main/docs/ContribOperators.md#commicrosoftgroupqueryattention
 
     Example:
     ```mlir
     hip.gqa(%ctx)
-        ins(%query, %key, %value, %past_key, %past_value, %seqlens_k, %total_seq_len :
-            memref<1x1x4096xf16, 1>, ...)
-        outs(%output, %present_key, %present_value : ...)
-        {num_heads = 32, kv_num_heads = 8, scale = 0.0884,
-         softcap = 0.0, do_rotary = 0, rotary_interleaved = 0}
+        ins(%query, %key, %value, %past_key, %past_value,
+            %seqlens_k, %total_seq_len :
+            tensor<1x128x4096xf16>, ...)
+        outs(%output, %present_key, %present_value :
+             tensor<1x128x4096xf16>, ...)
+        {num_heads = 32, kv_num_heads = 8, scale = 0.0884}
     ```
   }];
 
   let arguments = (ins
+    // Internal context (HIP-specific, not ONNX spec)
     Hip_ContextType:$ctx,
+
+    // === MS GQA Standard Inputs (spec order 1-14) ===
+
+    // Input 1: query (required)
     Hip_TensorOrMemRef:$query,
-    Hip_TensorOrMemRef:$key,
-    Hip_TensorOrMemRef:$value,
-    Hip_TensorOrMemRef:$past_key,
-    Hip_TensorOrMemRef:$past_value,
-    Hip_TensorOrMemRef:$seqlens_k,
-    Hip_TensorOrMemRef:$total_seq_len,
-    Hip_TensorOrMemRef:$output,
-    Hip_TensorOrMemRef:$present_key,
-    Hip_TensorOrMemRef:$present_value,
-    I64Attr:$num_heads,
-    I64Attr:$kv_num_heads,
-    F32Attr:$scale,
-    F32Attr:$softcap,
-    I64Attr:$do_rotary,
-    I64Attr:$rotary_interleaved
+
+    // Inputs 2-3: key/value (optional - supports packed QKV)
+    Optional<Hip_TensorOrMemRef>:$key,
+    Optional<Hip_TensorOrMemRef>:$value,
+
+    // Inputs 4-5: past KV cache (optional - first inference has no past)
+    Optional<Hip_TensorOrMemRef>:$past_key,
+    Optional<Hip_TensorOrMemRef>:$past_value,
+
+    // Inputs 6-7: sequence length info (required)
+    Hip_TensorOrMemRef:$seqlens_k,        // 1D (batch_size)
+    Hip_TensorOrMemRef:$total_seq_len,    // Scalar
+
+    // Inputs 8-10: RoPE related (optional)
+    Optional<Hip_TensorOrMemRef>:$cos_cache,      // 2D (max_seq_len, head_size/2)
+    Optional<Hip_TensorOrMemRef>:$sin_cache,      // 2D (max_seq_len, head_size/2)
+    Optional<Hip_TensorOrMemRef>:$position_ids,   // 2D (batch, seq_len), int64
+
+    // Input 11: attention bias (optional - ALiBi etc.)
+    Optional<Hip_TensorOrMemRef>:$attention_bias, // 4D (batch/1, heads/1, seq_q, seq_kv)
+
+    // Input 12: smooth softmax factor (optional)
+    Optional<Hip_TensorOrMemRef>:$head_sink,      // 1D (num_heads)
+
+    // Inputs 13-14: KV cache quantization scale (optional)
+    Optional<Hip_TensorOrMemRef>:$k_scale,        // Broadcastable to present_key shape
+    Optional<Hip_TensorOrMemRef>:$v_scale,        // Broadcastable to present_value shape
+
+    // === DPS-style output buffers ===
+    Hip_TensorOrMemRef:$output,        // 3D (batch, seq_len, hidden_size)
+    Hip_TensorOrMemRef:$present_key,   // 4D BNSH format
+    Hip_TensorOrMemRef:$present_value, // 4D BNSH format
+    Optional<Hip_TensorOrMemRef>:$output_qk,  // Optional QK matrix output (debug)
+
+    // === MS GQA Standard Attributes ===
+
+    // Required attributes
+    I64Attr:$num_heads,           // Query head count
+    I64Attr:$kv_num_heads,        // KV head count (GQA core)
+
+    // Optional attributes (with defaults)
+    DefaultValuedAttr<F32Attr, "1.0">:$scale,  // Default 1/√head_size, computed by caller
+    DefaultValuedAttr<I64Attr, "0">:$do_rotary,
+    DefaultValuedAttr<I64Attr, "0">:$rotary_interleaved,
+    DefaultValuedAttr<F32Attr, "0.0">:$softcap,
+    DefaultValuedAttr<I64Attr, "-1">:$local_window_size,
+    DefaultValuedAttr<I64Attr, "0">:$smooth_softmax,
+    DefaultValuedAttr<I64Attr, "0">:$qk_output,  // 0=no output, 1=before softmax, 2=after softmax
+
+    // Quantization related attributes
+    DefaultValuedAttr<StrAttr, "\"NONE\"">:$k_quant_type,  // "NONE"/"PER_TENSOR"/"PER_CHANNEL"
+    DefaultValuedAttr<StrAttr, "\"NONE\"">:$v_quant_type,
+    DefaultValuedAttr<I64Attr, "8">:$kv_cache_bit_width  // 8 or 4
   );
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(`
-        $query `,` $key `,` $value `,`
-        $past_key `,` $past_value `,` $seqlens_k `,` $total_seq_len `:`
-        type($query) `,` type($key) `,` type($value) `,`
-        type($past_key) `,` type($past_value) `,` type($seqlens_k) `,` type($total_seq_len)
+        $query
+        ( `,` $key^ )?
+        ( `,` $value^ )?
+        ( `,` $past_key^ )?
+        ( `,` $past_value^ )?
+        `,` $seqlens_k `,` $total_seq_len
+        ( `,` $cos_cache^ )?
+        ( `,` $sin_cache^ )?
+        ( `,` $position_ids^ )?
+        ( `,` $attention_bias^ )?
+        ( `,` $head_sink^ )?
+        ( `,` $k_scale^ )?
+        ( `,` $v_scale^ )?
+        `:`
+        type($query)
+        ( `,` type($key)^ )?
+        ( `,` type($value)^ )?
+        ( `,` type($past_key)^ )?
+        ( `,` type($past_value)^ )?
+        `,` type($seqlens_k) `,` type($total_seq_len)
+        ( `,` type($cos_cache)^ )?
+        ( `,` type($sin_cache)^ )?
+        ( `,` type($position_ids)^ )?
+        ( `,` type($attention_bias)^ )?
+        ( `,` type($head_sink)^ )?
+        ( `,` type($k_scale)^ )?
+        ( `,` type($v_scale)^ )?
     `)`
-    `outs` `(` $output `,` $present_key `,` $present_value `:`
-              type($output) `,` type($present_key) `,` type($present_value) `)`
+    `outs` `(`
+        $output `,` $present_key `,` $present_value
+        ( `,` $output_qk^ )?
+        `:`
+        type($output) `,` type($present_key) `,` type($present_value)
+        ( `,` type($output_qk)^ )?
+    `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  let hasVerifier = 1;
 }
 
 #endif // HIP_OPS
