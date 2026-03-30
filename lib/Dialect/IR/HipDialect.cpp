@@ -590,21 +590,139 @@ void QMoEOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
-// GqaOp: ins(query, key, value, past_key, past_value, seqlens_k, total_seq_len)
-//        outs(output, present_key, present_value)
+// GqaOp: Full MS spec implementation
+//        ins(query, [key, value, past_key, past_value], seqlens_k,
+//        total_seq_len,
+//            [cos_cache, sin_cache, position_ids, attention_bias, head_sink,
+//             k_scale, v_scale])
+//        outs(output, present_key, present_value, [output_qk])
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange GqaOp::getDpsInitsMutable() {
-  // Operands 0-7 are inputs (ctx, query, key, value, past_key, past_value,
-  // seqlens_k, total_seq_len) Operands 8-10 are DPS inits (output, present_key,
-  // present_value)
-  return MutableOperandRange(*this, /*start=*/8, /*length=*/3);
+  // DPS inits start after all inputs
+  // Required inputs: ctx(0), query(1), seqlens_k(6), total_seq_len(7)
+  // Optional inputs: key(2), value(3), past_key(4), past_value(5),
+  //                  cos_cache(8-14: 7 optional inputs)
+  // Then DPS outputs: output, present_key, present_value, [output_qk]
+
+  // Count actual inputs (skip ctx which is always first)
+  unsigned numInputs = 1; // ctx
+  if (getQuery())
+    ++numInputs;
+  if (getKey())
+    ++numInputs;
+  if (getValue())
+    ++numInputs;
+  if (getPastKey())
+    ++numInputs;
+  if (getPastValue())
+    ++numInputs;
+  if (getSeqlensK())
+    ++numInputs;
+  if (getTotalSeqLen())
+    ++numInputs;
+  if (getCosCache())
+    ++numInputs;
+  if (getSinCache())
+    ++numInputs;
+  if (getPositionIds())
+    ++numInputs;
+  if (getAttentionBias())
+    ++numInputs;
+  if (getHeadSink())
+    ++numInputs;
+  if (getKScale())
+    ++numInputs;
+  if (getVScale())
+    ++numInputs;
+
+  // DPS inits: output, present_key, present_value, [output_qk]
+  unsigned numInits = 3;
+  if (getOutputQk())
+    numInits = 4;
+
+  return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/numInits);
 }
 
 void GqaOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GqaOp::verify() {
+  // Verify quantization parameter consistency
+  auto kQuantType = getKQuantType().str();
+  auto vQuantType = getVQuantType().str();
+
+  // If k_quant_type != "NONE", k_scale must be provided
+  if (kQuantType != "NONE" && !getKScale()) {
+    return emitOpError("k_quant_type is '")
+           << kQuantType << "' but k_scale is not provided";
+  }
+
+  // If v_quant_type != "NONE", v_scale must be provided
+  if (vQuantType != "NONE" && !getVScale()) {
+    return emitOpError("v_quant_type is '")
+           << vQuantType << "' but v_scale is not provided";
+  }
+
+  // Verify quant_type values
+  if (kQuantType != "NONE" && kQuantType != "PER_TENSOR" &&
+      kQuantType != "PER_CHANNEL") {
+    return emitOpError("k_quant_type must be 'NONE', 'PER_TENSOR', or "
+                       "'PER_CHANNEL', got '")
+           << kQuantType << "'";
+  }
+
+  if (vQuantType != "NONE" && vQuantType != "PER_TENSOR" &&
+      vQuantType != "PER_CHANNEL") {
+    return emitOpError("v_quant_type must be 'NONE', 'PER_TENSOR', or "
+                       "'PER_CHANNEL', got '")
+           << vQuantType << "'";
+  }
+
+  // Verify bit width
+  int64_t bitWidth = getKvCacheBitWidth();
+  if (bitWidth != 4 && bitWidth != 8) {
+    return emitOpError("kv_cache_bit_width must be 4 or 8, got ") << bitWidth;
+  }
+
+  // Verify qk_output mode
+  int64_t qkOutput = getQkOutput();
+  if (qkOutput < 0 || qkOutput > 2) {
+    return emitOpError("qk_output must be 0, 1, or 2, got ") << qkOutput;
+  }
+
+  // If qk_output != 0, output_qk must be provided
+  if (qkOutput != 0 && !getOutputQk()) {
+    return emitOpError("qk_output is ")
+           << qkOutput << " but output_qk buffer is not provided";
+  }
+
+  // Verify paired optional inputs: cos_cache/sin_cache must both be present or
+  // both absent
+  bool hasCosCache = getCosCache() != nullptr;
+  bool hasSinCache = getSinCache() != nullptr;
+  if (hasCosCache != hasSinCache) {
+    return emitOpError("cos_cache and sin_cache must both be provided or both "
+                       "be omitted (found cos_cache=")
+           << (hasCosCache ? "present" : "absent")
+           << ", sin_cache=" << (hasSinCache ? "present" : "absent") << ")";
+  }
+
+  // Verify paired optional inputs: key/value must both be present or both
+  // absent
+  bool hasKey = getKey() != nullptr;
+  bool hasValue = getValue() != nullptr;
+  if (hasKey != hasValue) {
+    return emitOpError("key and value must both be provided or both be omitted "
+                       "(found key=")
+           << (hasKey ? "present" : "absent")
+           << ", value=" << (hasValue ? "present" : "absent") << ")";
+  }
+
+  return success();
 }
 
 #define GET_OP_CLASSES
