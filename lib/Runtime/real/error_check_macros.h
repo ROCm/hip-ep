@@ -64,4 +64,28 @@
     }                                                                          \
   } while (0)
 
+//==============================================================================
+// Best-Effort Cleanup Macro
+//==============================================================================
+//
+// This macro is used in cleanup sections where we want to log errors but
+// continue cleanup even if individual operations fail. This is appropriate
+// in error paths or teardown code where partial cleanup is better than no
+// cleanup.
+//
+// Usage:
+//   cleanup:
+//     if (buffer) HIP_CLEANUP(hipFree(buffer));
+//     if (stream) HIP_CLEANUP(hipStreamDestroy(stream));
+//
+//==============================================================================
+
+#define HIP_CLEANUP(expr)                                                      \
+  do {                                                                         \
+    hipError_t _err = (expr);                                                  \
+    if (_err != hipSuccess) {                                                  \
+      fprintf(stderr, "Warning: " #expr " failed with error %d\n", (int)_err); \
+    }                                                                          \
+  } while (0)
+
 #endif // HIPDNN_EP_ERROR_CHECK_MACROS_H

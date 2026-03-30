@@ -29,9 +29,9 @@ module {
     %6 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<131072x64xf16>} : () -> tensor<131072x64xf16>
     %7 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<4096x4096xf16>} : () -> tensor<4096x4096xf16>
     %8 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<4096xf16>} : () -> tensor<4096xf16>
-    %9 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<4096x14336xf16>} : () -> tensor<4096x14336xf16>
-    %10 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<4096x14336xf16>} : () -> tensor<4096x14336xf16>
-    %11 = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<14336x4096xf16>} : () -> tensor<14336x4096xf16>
+    %9 = "onnx.Constant"() {value = dense<1.000000e-03> : tensor<4096x14336xf16>} : () -> tensor<4096x14336xf16>
+    %10 = "onnx.Constant"() {value = dense<1.000000e-03> : tensor<4096x14336xf16>} : () -> tensor<4096x14336xf16>
+    %11 = "onnx.Constant"() {value = dense<1.000000e-03> : tensor<14336x4096xf16>} : () -> tensor<14336x4096xf16>
     %12 = "onnx.Constant"() {value = dense<128> : tensor<i32>} : () -> tensor<i32>
     %13 = "onnx.Constant"() {value = dense<1> : tensor<1xi64>} : () -> tensor<1xi64>
     %14 = "onnx.Gather"(%0, %arg0) {axis = 0 : si64, onnx_node_name = "/model/embed_tokens/Gather"} : (tensor<128256x4096xf16>, tensor<1x1xi64>) -> tensor<1x1x4096xf16>
