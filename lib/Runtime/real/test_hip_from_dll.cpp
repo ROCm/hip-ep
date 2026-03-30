@@ -8,6 +8,7 @@
  * test_hip_from_dll_manual: step-by-step manual init for diagnostics.
  * test_hip_from_dll: alias that runs the manual init sequence.
  */
+#include "error_check_macros.h"
 #include "hipdnn_ep_runtime.h"
 #include "runtime_types.h"
 #include <stdio.h>
@@ -18,14 +19,6 @@
 #else
 #include <pthread.h>
 #endif
-
-// Macro for best-effort cleanup: logs errors but continues cleanup
-#define HIP_CLEANUP(expr) do { \
-    hipError_t _err = (expr); \
-    if (_err != hipSuccess) { \
-        fprintf(stderr, "Warning: " #expr " failed with error %d\n", (int)_err); \
-    } \
-} while(0)
 
 extern "C" {
 

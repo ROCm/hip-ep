@@ -13,14 +13,6 @@
 
 #include <cstdio>
 
-// Macro for best-effort cleanup: logs errors but continues cleanup
-#define HIP_CLEANUP(expr) do { \
-    hipError_t _err = (expr); \
-    if (_err != hipSuccess) { \
-        fprintf(stderr, "Warning: " #expr " failed with error %d\n", (int)_err); \
-    } \
-} while(0)
-
 // Use the shared macros from error_check_macros.h with goto cleanup pattern
 #define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
 
