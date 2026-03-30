@@ -5,8 +5,12 @@
 #ifndef HIP_DIALECT_TRANSFORMS_PIPELINES_H
 #define HIP_DIALECT_TRANSFORMS_PIPELINES_H
 
+#include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassOptions.h"
+
+struct hipdnnHandle;
+typedef hipdnnHandle *hipdnnHandle_t;
 
 namespace morphizen {
 class FileSystem;
@@ -75,6 +79,18 @@ void buildOnnxToHipPipeline(OpPassManager &pm,
 void buildOnnxToHipPipeline(OpPassManager &pm,
                             const OnnxToHipPipelineOptions &options,
                             morphizen::FileSystem *fs);
+
+/// Build the ONNX-to-HIP pipeline with hipDNN graph compilation support.
+///
+/// Same as the FileSystem overload, but additionally inserts the
+/// ConvertOnnxToHipDNN pass when handle is non-null. Supported ONNX ops
+/// are compiled into hipDNN graphs at pass time; unsupported ops pass
+/// through to ConvertOnnxToHip.
+void buildOnnxToHipPipeline(OpPassManager &pm,
+                            const OnnxToHipPipelineOptions &options,
+                            morphizen::FileSystem *fs,
+                            hipdnnHandle_t handle,
+                            CompiledGraphMap output_graphs);
 
 /// Build the HIP-to-LLVM lowering pipeline. This is a separate pipeline
 /// (not part of buildOnnxToHipPipeline) because the LLVM lowering is only

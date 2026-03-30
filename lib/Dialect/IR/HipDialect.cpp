@@ -745,5 +745,19 @@ LogicalResult GqaOp::verify() {
   return success();
 }
 
+//===----------------------------------------------------------------------===//
+// HipDNNExecuteOp: ins(variadic), outs(variadic)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange HipDNNExecuteOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void HipDNNExecuteOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
 #define GET_OP_CLASSES
 #include "hip/Dialect/IR/HipOps.cpp.inc"

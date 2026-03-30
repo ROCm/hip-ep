@@ -52,6 +52,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   state->num_buffers = 0;
   state->workspace = nullptr;
   state->workspace_size = 0;
+  state->hipdnn_handle = nullptr;
+  state->hipdnn_graph_registry = nullptr;
 
   // Explicitly initialize HIP device before any other operations
   // This ensures device 0 is active and context is properly initialized

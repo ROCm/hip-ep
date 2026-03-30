@@ -961,4 +961,48 @@ def Hip_GqaOp : Hip_DpsOp<"gqa", [AttrSizedOperandSegments]> {
   let hasVerifier = 1;
 }
 
+// ===== hipDNN Graph Execution ================================================
+
+def Hip_HipDNNExecuteOp : Hip_DpsOp<"hipdnn_execute", [
+    AttrSizedOperandSegments
+]> {
+  let summary = "Execute a pre-compiled hipDNN graph";
+  let description = [{
+    Dispatches to a pre-compiled hipDNN graph identified by graph_id.
+    The graph was compiled during the ConvertOnnxToHipDNN pass and stored
+    in the graph registry attached to RuntimeState.
+
+    At runtime, looks up the graph by ID and calls graph->Execute() with
+    a variant_pack built from the provided tensor UIDs and GPU pointers.
+
+    Tensor UIDs (input_uids, output_uids) are assigned during graph building
+    and baked into the IR as compile-time constants.
+
+    Example:
+    ```mlir
+    hip.hipdnn_execute(%ctx) graph_id(0)
+        ins(%input, %weights : tensor<1x3x224x224xf32>, tensor<64x3x7x7xf32>)
+        outs(%output : tensor<1x64x112x112xf32>)
+        {input_uids = [0 : i64, 1 : i64], output_uids = [2 : i64]}
+        : tensor<1x64x112x112xf32>
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Variadic<Hip_TensorOrMemRef>:$inputs,
+    Variadic<Hip_TensorOrMemRef>:$outputs,
+    I32Attr:$graph_id,
+    I64ArrayAttr:$input_uids,
+    I64ArrayAttr:$output_uids
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `graph_id` `(` $graph_id `)`
+    `ins` `(` $inputs `:` type($inputs) `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 #endif // HIP_OPS

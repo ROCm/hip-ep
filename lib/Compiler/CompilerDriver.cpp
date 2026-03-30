@@ -163,7 +163,15 @@ bool CompilerDriver::runMLIRPasses(
   mlir::hip::OnnxToHipPipelineOptions onnxToHipOpts;
   onnxToHipOpts.externalizeMinNumElements =
       mlir::hip::kDefaultExternalizeMinNumElements;
-  mlir::hip::buildOnnxToHipPipeline(pm, onnxToHipOpts, fileSystem_);
+
+  if (hipdnnHandle_) {
+    compiledGraphs_ = std::make_shared<llvm::StringMap<mlir::hip::OwnedGraph>>();
+    mlir::hip::buildOnnxToHipPipeline(
+        pm, onnxToHipOpts, fileSystem_,
+        static_cast<hipdnnHandle_t>(hipdnnHandle_), compiledGraphs_);
+  } else {
+    mlir::hip::buildOnnxToHipPipeline(pm, onnxToHipOpts, fileSystem_);
+  }
 
   mlir::hip::HipToLLVMPipelineOptions hipToLlvmOpts;
   hipToLlvmOpts.constantsFile = options.constants_file;
@@ -296,6 +304,34 @@ void CompilerDriver::discoverLibraries(
     }
   }
 #endif
+
+  // hipDNN graph runtime: only needed when hipDNN graphs are compiled
+  if (hipdnnHandle_) {
+    std::string hipdnn_backend_lib = lib_dir + "/hipdnn_backend.lib";
+    if (llvm::sys::fs::exists(hipdnn_backend_lib))
+      libraries.push_back("hipdnn_backend");
+    else
+      COMPILER_DEBUG_LOG("  WARNING: hipdnn_backend import library not found\n");
+
+#ifdef HIPDNN_GRAPH_RUNTIME_LIB_PATH
+    {
+      std::string runtime_lib = HIPDNN_GRAPH_RUNTIME_LIB_PATH;
+      if (llvm::sys::fs::exists(runtime_lib)) {
+        libraries.push_back(runtime_lib);
+        COMPILER_DEBUG_LOG(
+            "  hipDNN graph runtime: " << runtime_lib << "\n");
+      } else {
+        libraries.push_back("hipdnn_graph_runtime");
+        COMPILER_DEBUG_LOG(
+            "  hipDNN graph runtime (name fallback): "
+            "hipdnn_graph_runtime.lib\n");
+      }
+    }
+#else
+    libraries.push_back("hipdnn_graph_runtime");
+    COMPILER_DEBUG_LOG("  hipDNN graph runtime: hipdnn_graph_runtime\n");
+#endif
+  }
 
   for (const auto &lib : libraries) {
     COMPILER_DEBUG_LOG("  Linking library: " << lib << "\n");

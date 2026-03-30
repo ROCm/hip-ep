@@ -5,6 +5,7 @@
 
 #include "hip/Dialect/Transforms/Pipelines.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
+#include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Conversion/BufferizationToMemRef/BufferizationToMemRef.h"
@@ -90,6 +91,29 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
                                        const OnnxToHipPipelineOptions &options,
                                        morphizen::FileSystem *fs) {
   pm.addPass(createHipAddContextArgPass());
+
+  if (fs) {
+    pm.addPass(mlir::hip::createConvertOnnxToHipPass(
+        fs, options.externalizeMinNumElements));
+  } else {
+    ConvertOnnxToHipPassOptions onnxToHipOpts;
+    onnxToHipOpts.externalizeOutputDir = options.externalizeOutputDir;
+    onnxToHipOpts.externalizeMinNumElements = options.externalizeMinNumElements;
+    pm.addPass(createConvertOnnxToHipPass(std::move(onnxToHipOpts)));
+  }
+
+  buildOnnxToHipPipelineTail(pm);
+}
+
+void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
+                                       const OnnxToHipPipelineOptions &options,
+                                       morphizen::FileSystem *fs,
+                                       hipdnnHandle_t handle,
+                                       CompiledGraphMap output_graphs) {
+  pm.addPass(createHipAddContextArgPass());
+
+  if (handle)
+    pm.addPass(createConvertOnnxToHipDNNPass(handle, std::move(output_graphs)));
 
   if (fs) {
     pm.addPass(mlir::hip::createConvertOnnxToHipPass(
