@@ -19,6 +19,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
@@ -465,6 +466,16 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
+/// onnx.Add -> hip.miopen.add
+struct AddToHip : public mlir::RewritePattern {
+  AddToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Add", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
 /// onnx.Mul -> hip.mul
 struct MulToHip : public mlir::RewritePattern {
   MulToHip(mlir::MLIRContext *ctx)
@@ -474,6 +485,30 @@ struct MulToHip : public mlir::RewritePattern {
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override;
 };
+
+mlir::LogicalResult
+AddToHip::matchAndRewrite(mlir::Operation *op,
+                          mlir::PatternRewriter &rewriter) const {
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value a = op->getOperand(0);
+  mlir::Value b = op->getOperand(1);
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+
+  auto aType = mlir::cast<mlir::RankedTensorType>(a.getType());
+  mlir::Value source = (aType.getRank() == resultType.getRank()) ? a : b;
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, source);
+
+  auto hipOp =
+      mlir::hip::AddOp::create(rewriter, loc, resultType, context, a, b, init);
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
 
 mlir::LogicalResult
 MulToHip::matchAndRewrite(mlir::Operation *op,
@@ -685,7 +720,7 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
     } else {
       // Default: reduce all axes
       auto inputType = mlir::cast<mlir::RankedTensorType>(data.getType());
-      for (int64_t i = 0; i < inputType.getRank(); ++i)
+      for (int64_t i : llvm::seq<int64_t>(inputType.getRank()))
         axesVec.push_back(i);
     }
 
@@ -1665,6 +1700,130 @@ struct GatherToHip : public mlir::RewritePattern {
 };
 
 //===----------------------------------------------------------------------===//
+// Reshape → standard tensor ops (zero-cost metadata reinterpretation)
+//===----------------------------------------------------------------------===//
+
+/// onnx.Reshape → tensor.expand_shape / tensor.collapse_shape.
+///
+/// Reshape is a zero-cost metadata operation: it reinterprets shape/strides
+/// without moving data.  We lower to standard MLIR tensor ops which
+/// bufferize to memref.expand_shape / memref.collapse_shape (zero-copy
+/// alias) and then to LLVM struct manipulation (same data pointer, new
+/// sizes/strides).  No HIP kernel is needed.
+struct ReshapeToStdTensor : public mlir::RewritePattern {
+  ReshapeToStdTensor(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Reshape", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    mlir::Value data = op->getOperand(0);
+    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+    auto outputType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!inputType || !outputType)
+      return rewriter.notifyMatchFailure(op, "expected ranked tensor types");
+    if (inputType.getElementType() != outputType.getElementType())
+      return rewriter.notifyMatchFailure(op, "element type mismatch");
+
+    mlir::Location loc = op->getLoc();
+    int64_t inputRank = inputType.getRank();
+    int64_t outputRank = outputType.getRank();
+
+    if (inputType == outputType) {
+      rewriter.replaceOp(op, data);
+      return mlir::success();
+    }
+
+    if (outputRank != inputRank) {
+      auto reassocOpt =
+          mlir::getReassociationIndicesForReshape(inputType, outputType);
+      if (!reassocOpt)
+        return rewriter.notifyMatchFailure(
+            op, "cannot compute reshape reassociation");
+
+      if (outputRank > inputRank) {
+        llvm::SmallVector<int64_t> outDimToInDim(outputRank, -1);
+        for (auto [g, group] : llvm::enumerate(*reassocOpt))
+          for (int64_t idx : group)
+            outDimToInDim[idx] = g;
+
+        llvm::SmallVector<mlir::OpFoldResult> outputShape;
+        for (int64_t i : llvm::seq<int64_t>(outputRank)) {
+          if (!outputType.isDynamicDim(i)) {
+            outputShape.push_back(
+                rewriter.getIndexAttr(outputType.getDimSize(i)));
+            continue;
+          }
+          int64_t srcDim = outDimToInDim[i];
+          const auto &group = (*reassocOpt)[srcDim];
+          int64_t staticProduct = 1;
+          for (int64_t idx : group)
+            if (!outputType.isDynamicDim(idx))
+              staticProduct *= outputType.getDimSize(idx);
+          mlir::Value inputSize =
+              mlir::tensor::DimOp::create(rewriter, loc, data, srcDim);
+          if (staticProduct == 1) {
+            outputShape.push_back(inputSize);
+          } else {
+            mlir::Value divisor = mlir::arith::ConstantIndexOp::create(
+                rewriter, loc, staticProduct);
+            mlir::Value dynSize =
+                mlir::arith::DivUIOp::create(rewriter, loc, inputSize, divisor);
+            outputShape.push_back(dynSize);
+          }
+        }
+
+        auto expandOp = mlir::tensor::ExpandShapeOp::create(
+            rewriter, loc, outputType, data, *reassocOpt, outputShape);
+        rewriter.replaceOp(op, expandOp.getResult());
+      } else {
+        auto collapseOp = mlir::tensor::CollapseShapeOp::create(
+            rewriter, loc, outputType, data, *reassocOpt);
+        rewriter.replaceOp(op, collapseOp.getResult());
+      }
+      return mlir::success();
+    }
+
+    // Same rank, different shape: collapse to 1-D then expand.
+    if (!inputType.hasStaticShape() || !outputType.hasStaticShape())
+      return rewriter.notifyMatchFailure(
+          op, "same-rank dynamic reshape not supported");
+
+    int64_t numElems = inputType.getNumElements();
+    if (numElems != outputType.getNumElements())
+      return rewriter.notifyMatchFailure(op, "element count mismatch");
+
+    auto flatType =
+        mlir::RankedTensorType::get({numElems}, inputType.getElementType());
+
+    mlir::ReassociationIndices allInputDims;
+    for (int64_t i : llvm::seq<int64_t>(inputRank))
+      allInputDims.push_back(i);
+    llvm::SmallVector<mlir::ReassociationIndices> collapseReassoc = {
+        allInputDims};
+    auto collapsed = mlir::tensor::CollapseShapeOp::create(
+        rewriter, loc, flatType, data, collapseReassoc);
+
+    mlir::ReassociationIndices allOutputDims;
+    for (int64_t i : llvm::seq<int64_t>(outputRank))
+      allOutputDims.push_back(i);
+    llvm::SmallVector<mlir::ReassociationIndices> expandReassoc = {
+        allOutputDims};
+    llvm::SmallVector<mlir::OpFoldResult> flatOutputShape;
+    for (int64_t i : llvm::seq<int64_t>(outputRank))
+      flatOutputShape.push_back(
+          rewriter.getIndexAttr(outputType.getDimSize(i)));
+    auto expanded = mlir::tensor::ExpandShapeOp::create(
+        rewriter, loc, outputType, collapsed.getResult(), expandReassoc,
+        flatOutputShape);
+
+    rewriter.replaceOp(op, expanded.getResult());
+    return mlir::success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // convertComputeOps implementation
 //===----------------------------------------------------------------------===//
 
@@ -1673,6 +1832,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   mlir::RewritePatternSet patterns(ctx);
   patterns.add<MatMulToHip>(ctx);
   patterns.add<TransposeToHip>(ctx);
+  patterns.add<AddToHip>(ctx);
   patterns.add<MulToHip>(ctx);
   patterns.add<SoftmaxToHip>(ctx);
   patterns.add<SigmoidToHip>(ctx);
@@ -1687,6 +1847,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   patterns.add<GroupQueryAttentionToHip>(ctx);
   patterns.add<MatMulNBitsToHip>(ctx);
   patterns.add<QMoEToHip>(ctx);
+  patterns.add<ReshapeToStdTensor>(ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);

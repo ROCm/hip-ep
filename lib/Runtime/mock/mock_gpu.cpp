@@ -489,18 +489,27 @@ int wrap_group_query_attention(RuntimeState *state, void *query, void *key,
 }
 
 int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
-                        int64_t num_elements, int64_t data_type,
-                        int64_t tensor_op) {
+                        int64_t lhs_n, int64_t lhs_c, int64_t lhs_h,
+                        int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,
+                        int64_t rhs_h, int64_t rhs_w, int64_t out_n,
+                        int64_t out_c, int64_t out_h, int64_t out_w,
+                        int64_t data_type, int64_t tensor_op) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_miopenOpTensor\n");
     return -1;
   }
 
-  MOCK_PRINT("[MOCK] wrap_miopenOpTensor(op=%s, num_elements=%lld, "
-             "data_type=%s(%lld), element_size=%lld)\n",
-             hipdnn_ep_tensor_op_name(tensor_op), (long long)num_elements,
-             hipdnn_ep_datatype_name(data_type), (long long)data_type,
-             (long long)hipdnn_ep_datatype_size(data_type));
+  MOCK_PRINT("[MOCK] wrap_miopenOpTensor(op=%s, "
+             "lhs=[%lld,%lld,%lld,%lld], "
+             "rhs=[%lld,%lld,%lld,%lld], "
+             "out=[%lld,%lld,%lld,%lld], "
+             "data_type=%s(%lld))\n",
+             hipdnn_ep_tensor_op_name(tensor_op), (long long)lhs_n,
+             (long long)lhs_c, (long long)lhs_h, (long long)lhs_w,
+             (long long)rhs_n, (long long)rhs_c, (long long)rhs_h,
+             (long long)rhs_w, (long long)out_n, (long long)out_c,
+             (long long)out_h, (long long)out_w,
+             hipdnn_ep_datatype_name(data_type), (long long)data_type);
 
   return 0;
 }

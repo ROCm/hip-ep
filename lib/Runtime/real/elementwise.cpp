@@ -59,13 +59,18 @@ static miopenTensorOp_t hipdnn_ep_to_miopen_op(int64_t tensor_op) {
 //   output = alpha1 * op(lhs, alpha2 * rhs) + beta * output
 // With alpha1=1, alpha2=1, beta=0 this gives: output = op(lhs, rhs)
 //
-// The tensor is represented as a flat 1D tensor [1, 1, 1, num_elements]
-// to satisfy miopenSet4dTensorDescriptor's 4D requirement.
+// Each operand's shape is passed as 4D (N, C, H, W) to allow MIOpen-native
+// broadcasting.  When a dimension is 1 in one operand but >1 in the other,
+// MIOpen broadcasts automatically (e.g. bias addition).
+// The compiler (HipToLLVM) left-pads shapes with 1 for rank < 4.
 // =============================================================================
 
 int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
-                        int64_t num_elements, int64_t data_type,
-                        int64_t tensor_op) {
+                        int64_t lhs_n, int64_t lhs_c, int64_t lhs_h,
+                        int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,
+                        int64_t rhs_h, int64_t rhs_w, int64_t out_n,
+                        int64_t out_c, int64_t out_h, int64_t out_w,
+                        int64_t data_type, int64_t tensor_op) {
   if (!state || !lhs || !rhs || !output) {
     fprintf(stderr, "wrap_miopenOpTensor: null argument\n");
     return -1;
@@ -73,13 +78,16 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
 
   const char *type_name = hipdnn_ep_datatype_name(data_type);
   const char *op_name = hipdnn_ep_tensor_op_name(tensor_op);
-  int64_t elem_size = hipdnn_ep_datatype_size(data_type);
-  RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: op=%s, num_elements=%lld, "
-                    "data_type=%s(%lld), element_size=%lld bytes, "
-                    "total_size=%lld bytes\n",
-                    op_name, (long long)num_elements, type_name,
-                    (long long)data_type, (long long)elem_size,
-                    (long long)(num_elements * elem_size));
+  RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: op=%s, "
+                    "lhs=[%lld,%lld,%lld,%lld], "
+                    "rhs=[%lld,%lld,%lld,%lld], "
+                    "out=[%lld,%lld,%lld,%lld], "
+                    "data_type=%s(%lld)\n",
+                    op_name, (long long)lhs_n, (long long)lhs_c,
+                    (long long)lhs_h, (long long)lhs_w, (long long)rhs_n,
+                    (long long)rhs_c, (long long)rhs_h, (long long)rhs_w,
+                    (long long)out_n, (long long)out_c, (long long)out_h,
+                    (long long)out_w, type_name, (long long)data_type);
 
   miopenHandle_t handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
@@ -91,24 +99,24 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
   miopenDataType_t miopen_type = hipdnn_ep_to_miopen_type(data_type);
   miopenTensorOp_t miopen_op = hipdnn_ep_to_miopen_op(tensor_op);
 
-  // Initialize all resource pointers to nullptr for safe cleanup
   miopenTensorDescriptor_t aDesc = nullptr;
   miopenTensorDescriptor_t bDesc = nullptr;
   miopenTensorDescriptor_t cDesc = nullptr;
   int result = 0;
   float alpha1 = 1.0f, alpha2 = 1.0f, beta = 0.0f;
-  int n = static_cast<int>(num_elements);
-
-  RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: creating tensor descriptors "
-                    "[1,1,1,%d] with type %s\n",
-                    n, type_name);
 
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&aDesc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&bDesc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&cDesc));
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(aDesc, miopen_type, 1, 1, 1, n));
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(bDesc, miopen_type, 1, 1, 1, n));
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(cDesc, miopen_type, 1, 1, 1, n));
+
+  // Per-operand 4D descriptors enable MIOpen-native broadcasting:
+  // dims of 1 are broadcast against the corresponding larger dim.
+  MIOPEN_CHECK(miopenSet4dTensorDescriptor(aDesc, miopen_type, (int)lhs_n,
+                                           (int)lhs_c, (int)lhs_h, (int)lhs_w));
+  MIOPEN_CHECK(miopenSet4dTensorDescriptor(bDesc, miopen_type, (int)rhs_n,
+                                           (int)rhs_c, (int)rhs_h, (int)rhs_w));
+  MIOPEN_CHECK(miopenSet4dTensorDescriptor(cDesc, miopen_type, (int)out_n,
+                                           (int)out_c, (int)out_h, (int)out_w));
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: calling miopenOpTensor"
                     "(op=%s, alpha1=%.1f, alpha2=%.1f, beta=%.1f)\n",
@@ -120,8 +128,6 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
   RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: completed successfully\n");
 
 cleanup:
-  // Best-effort cleanup: free all allocated resources
-  // Continue cleanup even if individual operations fail
   if (aDesc) {
     miopenDestroyTensorDescriptor(aDesc);
   }
