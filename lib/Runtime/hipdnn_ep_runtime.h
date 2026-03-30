@@ -416,7 +416,8 @@ int wrap_hipblasLtMatmul(
 // GQA runtime wrapper following the complete Microsoft ONNX Runtime
 // specification (14 inputs + 12 attributes).  Supports separate Q/K/V and
 // packed QKV paths, optional RoPE, KV cache management, local window
-// attention (local_window_size), and smooth softmax (head_sink / smooth_softmax).
+// attention (local_window_size), and smooth softmax (head_sink /
+// smooth_softmax).
 int wrap_group_query_attention(
     RuntimeState *state,
     // Inputs 1-7 (core GQA)
