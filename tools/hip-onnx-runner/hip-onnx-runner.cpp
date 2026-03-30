@@ -13,10 +13,11 @@
 //   -m, --model       Path to ONNX model (required for inference)
 //   -n, --no-ep       CPU only; skip EP registration
 //   -d, --dump-level  0=off (default), 1=input tensors, 2=output tensors,
-//                     3=both (raw .bin under <stem>_i_dump/ and <stem>_o_dump/)
+//                     3=both (raw .bin under <stem>_i_dump/ and <stem>_o_dump/;
+//                     with -n: <stem>_cpu_i_dump/ and <stem>_cpu_o_dump/)
 //   -s, --seed        RNG seed for random inputs (default 42)
 //   -i, --input-dir   If set, load inputs from dir: input_<idx>_<tensor>_<type>.bin
-//   -L, --l2norm      Compare two dirs: dir1|dir2 (same set of *.bin files);
+//   -L, --l2norm      Compare two dirs: dir1,dir2 (same set of *.bin files);
 //                     names must be ..._<type>.bin (fp32,fp16,i64,...)
 //   -h, --help        Show help
 //
@@ -580,8 +581,8 @@ int main(int argc, char *argv[]) {
       "m,model", "Path to .onnx model", cxxopts::value<std::string>())(
       "n,no-ep", "CPU only; skip EP registration")(
       "d,dump-level",
-      "0=off, 1=dump inputs to <stem>_i_dump/, 2=outputs to <stem>_o_dump/, "
-      "3=both",
+      "0=off, 1=dump inputs, 2=dump outputs, 3=both; "
+      "dirs: <stem>_i_dump/ and <stem>_o_dump/ (with -n: <stem>_cpu_i_dump/ etc.)",
       cxxopts::value<int>()->default_value("0"))(
       "s,seed", "RNG seed for random inputs (default 42)",
       cxxopts::value<unsigned int>()->default_value("42"))(
@@ -589,7 +590,7 @@ int main(int argc, char *argv[]) {
       "Directory with input_<idx>_<name>_<type>.bin only; empty = random inputs",
       cxxopts::value<std::string>()->default_value(""))(
       "L,l2norm",
-      "Compare two dirs: dir1|dir2 (same *.bin set); each file must be "
+      "Compare two dirs: dir1,dir2 (same *.bin set); each file must be "
       "..._<type>.bin (fp32,fp16,i64,...); element-wise L2; no -m",
       cxxopts::value<std::string>()->default_value(""));
 
@@ -608,16 +609,16 @@ int main(int argc, char *argv[]) {
 
   std::string l2norm_arg = trim_string(result["l2norm"].as<std::string>());
   if (!l2norm_arg.empty()) {
-    const auto sep = l2norm_arg.find('|');
+    const auto sep = l2norm_arg.find(',');
     if (sep == std::string::npos) {
-      std::cerr << "Error: -L/--l2norm expects dir1|dir2\n\n"
+      std::cerr << "Error: -L/--l2norm expects dir1,dir2\n\n"
                 << options.help() << "\n";
       return 1;
     }
     const std::string dir_left = trim_string(l2norm_arg.substr(0, sep));
     const std::string dir_right = trim_string(l2norm_arg.substr(sep + 1));
     if (dir_left.empty() || dir_right.empty()) {
-      std::cerr << "Error: -L/--l2norm dir1|dir2 must not have empty sides.\n\n"
+      std::cerr << "Error: -L/--l2norm dir1,dir2 must not have empty sides.\n\n"
                 << options.help() << "\n";
       return 1;
     }
@@ -805,10 +806,11 @@ int main(int argc, char *argv[]) {
   }
 
   const std::string dump_stem = model_path.stem().string();
+  const std::string dump_tag = no_ep ? "_cpu" : "";
   const std::filesystem::path dump_dir_inputs =
-      std::filesystem::path(".") / (dump_stem + "_i_dump");
+      std::filesystem::path(".") / (dump_stem + dump_tag + "_i_dump");
   const std::filesystem::path dump_dir_outputs =
-      std::filesystem::path(".") / (dump_stem + "_o_dump");
+      std::filesystem::path(".") / (dump_stem + dump_tag + "_o_dump");
   if (dump_level == 1 || dump_level == 3) {
     std::filesystem::create_directories(dump_dir_inputs);
     for (size_t i = 0; i < input_count; ++i) {
