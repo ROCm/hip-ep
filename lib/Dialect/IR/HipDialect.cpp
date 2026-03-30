@@ -716,9 +716,8 @@ LogicalResult GqaOp::verify() {
   bool hasKey = getKey() != nullptr;
   bool hasValue = getValue() != nullptr;
   if (hasKey != hasValue) {
-    return emitOpError(
-               "key and value must both be provided or both be omitted "
-               "(found key=")
+    return emitOpError("key and value must both be provided or both be omitted "
+                       "(found key=")
            << (hasKey ? "present" : "absent")
            << ", value=" << (hasValue ? "present" : "absent") << ")";
   }
