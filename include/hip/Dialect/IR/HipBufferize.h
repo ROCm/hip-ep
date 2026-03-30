@@ -86,6 +86,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     MatMulNBitsOp::attachInterface<HipDstBufferizableModel<MatMulNBitsOp>>(
         *ctx);
     QMoEOp::attachInterface<HipDstBufferizableModel<QMoEOp>>(*ctx);
+    HipDNNExecuteOp::attachInterface<
+        HipDstBufferizableModel<HipDNNExecuteOp>>(*ctx);
   });
 }
 

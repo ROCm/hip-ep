@@ -46,6 +46,13 @@ struct RuntimeState {
   // Lazily grown via hipdnn_ep_state_ensure_workspace(); never shrinks.
   void *workspace;
   size_t workspace_size;
+
+  // hipDNN graph execution support.
+  // Set by EP via hipdnn_graph_runtime_attach() after inference_init().
+  // hipdnn_handle: hipdnnHandle_t cast to void* (owned by EP, not cleaned up here)
+  // hipdnn_graph_registry: opaque GraphRegistry* (owned by EP, not cleaned up here)
+  void *hipdnn_handle;
+  void *hipdnn_graph_registry;
 };
 
 #endif // HIPDNN_EP_RUNTIME_STATE_INTERNAL_H
