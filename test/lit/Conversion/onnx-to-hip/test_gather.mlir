@@ -32,7 +32,7 @@ module {
 
     // After conversion: tensor.empty() for init, hip.gather in tensor mode
     // CHECK: tensor.empty() : tensor<i64>
-    // CHECK: hip.gather(%[[CTX]]) ins(%[[DATA]], %[[INDICES]] : tensor<2xi64>, tensor<i64>) outs({{.*}} : tensor<i64>) {axis = 0 : i64}
+    // CHECK: hip.gather(%[[CTX]]) ins(%[[DATA]], %[[INDICES]] : tensor<2xi64>, tensor<i64>) outs({{.*}} : tensor<i64>)
     // CHECK-NOT: hip.alloc
     // CHECK-NOT: hip.copy
 
@@ -65,7 +65,7 @@ module {
     // CHECK: %[[DIM_INDICES:.*]] = tensor.dim %[[INDICES]], %c0{{.*}} : tensor<?xi64>
     // CHECK: %[[DIM_DATA:.*]] = tensor.dim %[[DATA]], %c1{{.*}} : tensor<?x?xf32>
     // CHECK: tensor.empty(%[[DIM_INDICES]], %[[DIM_DATA]]) : tensor<?x?xf32>
-    // CHECK: hip.gather(%[[CTX]]) ins(%[[DATA]], %[[INDICES]] : tensor<?x?xf32>, tensor<?xi64>) outs({{.*}} : tensor<?x?xf32>) {axis = 0 : i64}
+    // CHECK: hip.gather(%[[CTX]]) ins(%[[DATA]], %[[INDICES]] : tensor<?x?xf32>, tensor<?xi64>) outs({{.*}} : tensor<?x?xf32>)
 
     return %output : tensor<?x?xf32>
   }
