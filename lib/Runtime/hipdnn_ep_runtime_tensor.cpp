@@ -9,6 +9,15 @@
 #include <cstdio>
 #include <cstring>
 
+// Macro for best-effort cleanup: logs errors but continues cleanup
+#define HIP_CLEANUP(expr)                                                      \
+  do {                                                                         \
+    hipError_t _err = (expr);                                                  \
+    if (_err != hipSuccess) {                                                  \
+      fprintf(stderr, "Warning: " #expr " failed with error %d\n", (int)_err); \
+    }                                                                          \
+  } while (0)
+
 // Element size is read from tensor_t.element_size (set by EP caller)
 
 // Helper function to check and log gcnArchName
@@ -219,7 +228,7 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   if (hipMemcpyAsync(gpu_ptr, tensor->data, size_bytes, hipMemcpyHostToDevice,
                      static_cast<hipStream_t>(state->stream)) != hipSuccess) {
     fprintf(stderr, "hipdnn_ep_tensor_prepare_input: H2D transfer failed\n");
-    hipFree(gpu_ptr);
+    HIP_CLEANUP(hipFree(gpu_ptr));
     return HIPDNN_EP_ERR_H2D_TRANSFER_FAILED;
   }
 
@@ -365,7 +374,7 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
 
   // Free buffer if not pooled
   if (!buffer->is_pooled && buffer->gpu_ptr) {
-    hipFree(buffer->gpu_ptr);
+    HIP_CLEANUP(hipFree(buffer->gpu_ptr));
     buffer->gpu_ptr = nullptr;
   }
 
@@ -381,7 +390,7 @@ void hipdnn_ep_tensor_free_input(RuntimeState *state, TensorBuffer *buffer) {
 
   // Free buffer if not pooled
   if (!buffer->is_pooled && buffer->gpu_ptr) {
-    hipFree(buffer->gpu_ptr);
+    HIP_CLEANUP(hipFree(buffer->gpu_ptr));
     buffer->gpu_ptr = nullptr;
   }
 }

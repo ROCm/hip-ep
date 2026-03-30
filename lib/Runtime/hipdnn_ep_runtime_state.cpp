@@ -13,6 +13,15 @@
 #include <cstdlib>
 #include <cstring>
 
+// Macro for best-effort cleanup: logs errors but continues cleanup
+#define HIP_CLEANUP(expr)                                                      \
+  do {                                                                         \
+    hipError_t _err = (expr);                                                  \
+    if (_err != hipSuccess) {                                                  \
+      fprintf(stderr, "Warning: " #expr " failed with error %d\n", (int)_err); \
+    }                                                                          \
+  } while (0)
+
 // Runtime state management implementation
 
 int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
@@ -123,7 +132,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   // Create MIOpen handle
   if (miopenCreate(&state->miopen_handle) != miopenStatusSuccess) {
     fprintf(stderr, "Failed to create MIOpen handle\n");
-    hipStreamDestroy(state->stream);
+    HIP_CLEANUP(hipStreamDestroy(state->stream));
     free(state);
     return 7;
   }
@@ -133,7 +142,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
       miopenStatusSuccess) {
     fprintf(stderr, "Failed to set MIOpen stream\n");
     miopenDestroy(state->miopen_handle);
-    hipStreamDestroy(state->stream);
+    HIP_CLEANUP(hipStreamDestroy(state->stream));
     free(state);
     return 8;
   }
@@ -157,7 +166,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   if (hipblasLtCreate(&state->hipblas_handle) != HIPBLAS_STATUS_SUCCESS) {
     fprintf(stderr, "Failed to create hipBLASLt handle\n");
     miopenDestroy(state->miopen_handle);
-    hipStreamDestroy(state->stream);
+    HIP_CLEANUP(hipStreamDestroy(state->stream));
     free(state);
     return 9;
   }
@@ -302,17 +311,17 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
 
   // Synchronize stream to ensure all GPU operations complete
   if (state->stream) {
-    hipStreamSynchronize(state->stream);
+    HIP_CLEANUP(hipStreamSynchronize(state->stream));
   }
 
   // Free shared workspace (if allocated)
   if (state->workspace) {
-    hipFree(state->workspace);
+    HIP_CLEANUP(hipFree(state->workspace));
   }
 
   // Free memory pool (if allocated)
   if (state->pool_base) {
-    hipFree(state->pool_base);
+    HIP_CLEANUP(hipFree(state->pool_base));
   }
   if (state->buffer_offsets) {
     free(state->buffer_offsets);
@@ -321,9 +330,9 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   // Free the single constants blob and the pointer array
   if (state->gpu_constants_blob) {
     if (state->constants_blob_is_host)
-      hipHostFree(state->gpu_constants_blob);
+      HIP_CLEANUP(hipHostFree(state->gpu_constants_blob));
     else
-      hipFree(state->gpu_constants_blob);
+      HIP_CLEANUP(hipFree(state->gpu_constants_blob));
   }
   if (state->gpu_constants)
     free(state->gpu_constants);
@@ -340,7 +349,7 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
 
   // Destroy HIP stream
   if (state->stream) {
-    hipStreamDestroy(state->stream);
+    HIP_CLEANUP(hipStreamDestroy(state->stream));
   }
 
   // Free the context struct itself
@@ -404,7 +413,7 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
     if (!state->buffer_offsets) {
       fprintf(stderr, "Failed to allocate buffer offsets array\n");
       if (state->pool_base) {
-        hipFree(state->pool_base);
+        HIP_CLEANUP(hipFree(state->pool_base));
         state->pool_base = nullptr;
       }
       return 1; // Allocation failed
@@ -465,7 +474,7 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
 
   // Grow: free old, allocate new
   if (state->workspace) {
-    hipFree(state->workspace);
+    HIP_CLEANUP(hipFree(state->workspace));
     state->workspace = nullptr;
     state->workspace_size = 0;
   }
