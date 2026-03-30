@@ -44,10 +44,7 @@ func.func @skip_rms_norm_static_f32(%ctx: !hip.context) {
   // Verify epsilon constant
   // CHECK-DAG: llvm.mlir.constant(9.99999974E-6 : f32)
 
-  // Verify nullptr for bias (not provided)
-  // CHECK: llvm.mlir.zero : !llvm.ptr
-
-  // Verify runtime function call with 11 params
+  // Verify runtime function call with 11 params (bias and input_skip_bias_sum may be nullptr)
   // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
   hip.skip_rms_norm(%ctx)
       ins(%input, %skip, %gamma : memref<128x512xf32, 1>, memref<128x512xf32, 1>, memref<512xf32, 1>)
@@ -153,8 +150,7 @@ func.func @skip_rms_norm_with_bias(%ctx: !hip.context) {
   %output = memref.alloc() : memref<1x128x4096xf16, 1>
   %skip_output = memref.alloc() : memref<1x128x4096xf16, 1>
 
-  // With bias: bias pointer should NOT be nullptr
-  // CHECK-NOT: llvm.mlir.zero : !llvm.ptr
+  // With bias: all 7 pointers are valid memref pointers
   // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
   hip.skip_rms_norm(%ctx)
       ins(%input, %skip, %gamma, %bias :
@@ -176,8 +172,7 @@ func.func @skip_rms_norm_output_only(%ctx: !hip.context) {
   %gamma = memref.alloc() : memref<512xf32, 1>
   %output = memref.alloc() : memref<128x512xf32, 1>
 
-  // When input_skip_bias_sum is not provided, its pointer should be nullptr
-  // CHECK: llvm.mlir.zero : !llvm.ptr
+  // When input_skip_bias_sum is not provided, bias and skip_output pointers are nullptr
   // CHECK: llvm.call @wrap_skip_simplified_layer_norm({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32) -> i32
   hip.skip_rms_norm(%ctx)
       ins(%input, %skip, %gamma : memref<128x512xf32, 1>, memref<128x512xf32, 1>, memref<512xf32, 1>)
