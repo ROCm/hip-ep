@@ -10,12 +10,13 @@
 #include <cstring>
 
 // Macro for best-effort cleanup: logs errors but continues cleanup
-#define HIP_CLEANUP(expr) do { \
-    hipError_t _err = (expr); \
-    if (_err != hipSuccess) { \
-        fprintf(stderr, "Warning: " #expr " failed with error %d\n", (int)_err); \
-    } \
-} while(0)
+#define HIP_CLEANUP(expr)                                                      \
+  do {                                                                         \
+    hipError_t _err = (expr);                                                  \
+    if (_err != hipSuccess) {                                                  \
+      fprintf(stderr, "Warning: " #expr " failed with error %d\n", (int)_err); \
+    }                                                                          \
+  } while (0)
 
 // Element size is read from tensor_t.element_size (set by EP caller)
 
