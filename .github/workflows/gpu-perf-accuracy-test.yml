@@ -147,6 +147,7 @@ jobs:
         timeout-minutes: 30
         shell: cmd
         run: |
+          setlocal enabledelayedexpansion
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
@@ -157,25 +158,27 @@ jobs:
           )
           set FOUND=0
           for /r "%OP_MODEL_DIR%" %%M in (*.onnx) do set FOUND=1
-          if "%FOUND%"=="0" (
+          if "!FOUND!"=="0" (
             echo [SKIP] No .onnx models found in %OP_MODEL_DIR%
             exit /b 0
           )
-          mkdir perf-results\single-op 2>nul
           set FAILED=0
           cd gpu-test-package\bin
           for /r "%OP_MODEL_DIR%" %%M in (*.onnx) do (
-            echo === Perf: %%~nxM ===
+            set "MDIR=%%~dpM"
+            set "REL=!MDIR:%OP_MODEL_DIR%\=!"
+            mkdir "..\..\perf-results\single-op\!REL!" 2>nul
+            echo === Perf: !REL!%%~nxM ===
             onnxruntime_perf_test.exe ^
               --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
               --plugin_eps "MorphiZenExecutionProvider" ^
               --plugin_ep_options "config_file|..\morphizen_config.json" ^
               -t %PERF_DURATION% -c 1 -s -I ^
-              "%%M" > "..\..\perf-results\single-op\%%~nxM.txt" 2>&1
-            type "..\..\perf-results\single-op\%%~nxM.txt"
+              "%%M" > "..\..\perf-results\single-op\!REL!%%~nxM.txt" 2>&1
+            type "..\..\perf-results\single-op\!REL!%%~nxM.txt"
             if errorlevel 1 set FAILED=1
           )
-          exit /b %FAILED%
+          exit /b !FAILED!
 
       # =================================================================
       #  SINGLE-OP ACCURACY TESTS (L2)
@@ -186,6 +189,7 @@ jobs:
         timeout-minutes: 30
         shell: cmd
         run: |
+          setlocal enabledelayedexpansion
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
@@ -196,15 +200,17 @@ jobs:
           )
           set FOUND=0
           for /r "%OP_MODEL_DIR%" %%M in (*.onnx) do set FOUND=1
-          if "%FOUND%"=="0" (
+          if "!FOUND!"=="0" (
             echo [SKIP] No .onnx models found in %OP_MODEL_DIR%
             exit /b 0
           )
-          mkdir l2-results\single-op 2>nul
           set FAILED=0
           cd gpu-test-package\bin
           for /r "%OP_MODEL_DIR%" %%M in (*.onnx) do (
-            echo === L2 test: %%~nxM ===
+            set "MDIR=%%~dpM"
+            set "REL=!MDIR:%OP_MODEL_DIR%\=!"
+            mkdir "..\..\l2-results\single-op\!REL!" 2>nul
+            echo === L2 test: !REL!%%~nxM ===
             rd /s /q "%%~nM_o_dump" 2>nul
             rd /s /q "%%~nM_cpu_o_dump" 2>nul
             hip-onnx-runner.exe -m "%%M" -d 2 -s 42
@@ -217,12 +223,12 @@ jobs:
                 echo [ERROR] CPU inference failed for %%~nxM
                 set FAILED=1
               ) else (
-                hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" > "..\..\l2-results\single-op\%%~nM.txt" 2>&1
-                type "..\..\l2-results\single-op\%%~nM.txt"
+                hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" > "..\..\l2-results\single-op\!REL!%%~nM.txt" 2>&1
+                type "..\..\l2-results\single-op\!REL!%%~nM.txt"
               )
             )
           )
-          exit /b %FAILED%
+          exit /b !FAILED!
 
       # =================================================================
       #  FULL MODEL PERFORMANCE TESTS
@@ -233,6 +239,7 @@ jobs:
         timeout-minutes: 60
         shell: cmd
         run: |
+          setlocal enabledelayedexpansion
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
@@ -243,25 +250,27 @@ jobs:
           )
           set FOUND=0
           for /r "%MODEL_DIR%" %%M in (*.onnx) do set FOUND=1
-          if "%FOUND%"=="0" (
+          if "!FOUND!"=="0" (
             echo [SKIP] No .onnx models found in %MODEL_DIR%
             exit /b 0
           )
-          mkdir perf-results\full-model 2>nul
           set FAILED=0
           cd gpu-test-package\bin
           for /r "%MODEL_DIR%" %%M in (*.onnx) do (
-            echo === Perf: %%~nxM ===
+            set "MDIR=%%~dpM"
+            set "REL=!MDIR:%MODEL_DIR%\=!"
+            mkdir "..\..\perf-results\full-model\!REL!" 2>nul
+            echo === Perf: !REL!%%~nxM ===
             onnxruntime_perf_test.exe ^
               --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
               --plugin_eps "MorphiZenExecutionProvider" ^
               --plugin_ep_options "config_file|..\morphizen_config.json" ^
               -t %PERF_DURATION% -c 1 -s -I ^
-              "%%M" > "..\..\perf-results\full-model\%%~nxM.txt" 2>&1
-            type "..\..\perf-results\full-model\%%~nxM.txt"
+              "%%M" > "..\..\perf-results\full-model\!REL!%%~nxM.txt" 2>&1
+            type "..\..\perf-results\full-model\!REL!%%~nxM.txt"
             if errorlevel 1 set FAILED=1
           )
-          exit /b %FAILED%
+          exit /b !FAILED!
 
       # =================================================================
       #  FULL MODEL ACCURACY TESTS (L2)
@@ -272,6 +281,7 @@ jobs:
         timeout-minutes: 60
         shell: cmd
         run: |
+          setlocal enabledelayedexpansion
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
@@ -282,15 +292,17 @@ jobs:
           )
           set FOUND=0
           for /r "%MODEL_DIR%" %%M in (*.onnx) do set FOUND=1
-          if "%FOUND%"=="0" (
+          if "!FOUND!"=="0" (
             echo [SKIP] No .onnx models found in %MODEL_DIR%
             exit /b 0
           )
-          mkdir l2-results\full-model 2>nul
           set FAILED=0
           cd gpu-test-package\bin
           for /r "%MODEL_DIR%" %%M in (*.onnx) do (
-            echo === L2 test: %%~nxM ===
+            set "MDIR=%%~dpM"
+            set "REL=!MDIR:%MODEL_DIR%\=!"
+            mkdir "..\..\l2-results\full-model\!REL!" 2>nul
+            echo === L2 test: !REL!%%~nxM ===
             rd /s /q "%%~nM_o_dump" 2>nul
             rd /s /q "%%~nM_cpu_o_dump" 2>nul
             hip-onnx-runner.exe -m "%%M" -d 2 -s 42
@@ -303,12 +315,12 @@ jobs:
                 echo [ERROR] CPU inference failed for %%~nxM
                 set FAILED=1
               ) else (
-                hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" > "..\..\l2-results\full-model\%%~nM.txt" 2>&1
-                type "..\..\l2-results\full-model\%%~nM.txt"
+                hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" > "..\..\l2-results\full-model\!REL!%%~nM.txt" 2>&1
+                type "..\..\l2-results\full-model\!REL!%%~nM.txt"
               )
             )
           )
-          exit /b %FAILED%
+          exit /b !FAILED!
 
       # =================================================================
       #  PUBLISH RESULTS
@@ -320,75 +332,166 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $runUrl = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          $sha = "${{ github.event.workflow_run.head_sha || github.sha }}".Substring(0, 7)
+          $rawSha = "${{ github.event.workflow_run.head_sha || github.sha }}"
+          $sha = $rawSha.Substring(0, [Math]::Min(7, $rawSha.Length))
           $threshold = 0.01
+          $timestamp = (Get-Date -Format "o")
 
-          # --- Helper: parse perf results from a directory ---
+          # --- Helper: extract metadata from a result file's relative path ---
+          # single-op results: <model_name>/<op_name>/<file>.txt
+          # full-model results: <model_name>/<file>.txt
+          function Get-Meta($file, $categoryRoot) {
+            $rel = $file.FullName.Substring($categoryRoot.Length).TrimStart('\', '/')
+            $parts = $rel -split '[/\\]'
+            $modelName = if ($parts.Count -ge 2) { $parts[0] } else { "unknown" }
+            $opName = if ($parts.Count -ge 3) { $parts[$parts.Count - 2] } else { $null }
+            $fileName = $parts[-1] -replace '\.txt$', ''
+            $seqMatch = [regex]::Match($fileName, '[_-]seq(\d+)')
+            $seqLen = if ($seqMatch.Success) { [int]$seqMatch.Groups[1].Value } else { $null }
+            return @{ model_name = $modelName; op_name = $opName; seq_length = $seqLen; file = $fileName }
+          }
+
+          # --- Helper: build markdown table from result files (recursive) ---
           function Get-PerfTable($dir, $title) {
-            $rows = ""
-            $files = Get-ChildItem "$dir/*.txt" -ErrorAction SilentlyContinue
+            if (-not (Test-Path $dir)) { return "" }
+            $files = Get-ChildItem $dir -Recurse -Filter "*.txt" -ErrorAction SilentlyContinue
             if (-not $files) { return "" }
+            $rows = ""
             foreach ($f in $files) {
-              $model = ($f.BaseName -replace '\.onnx$', '')
+              $meta = Get-Meta $f (Resolve-Path $dir).Path
+              $label = if ($meta.op_name) { "$($meta.model_name) / $($meta.op_name)" } else { $meta.model_name }
+              if ($meta.seq_length -ne $null) { $label += " (seq$($meta.seq_length))" }
               $content = Get-Content $f.FullName -Raw
               $qpsMatch = [regex]::Match($content, 'Number of inferences per second:\s+([\d.]+)')
               $avgMatch = [regex]::Match($content, 'Average inference time cost:\s+([\d.]+)\s+ms')
               if ($qpsMatch.Success) {
                 $qps = "{0:F2}" -f [double]$qpsMatch.Groups[1].Value
-                $avg = if ($avgMatch.Success) { "{0:F3}" -f [double]$avgMatch.Groups[1].Value } else { "N/A" }
-                $rows += "| $model | $qps | $avg ms |`n"
+                $avg = if ($avgMatch.Success) { "{0:F3} ms" -f [double]$avgMatch.Groups[1].Value } else { "N/A" }
+                $rows += "| $label | $qps | $avg |`n"
               } else {
-                $rows += "| $model | failed | - |`n"
+                $rows += "| $label | failed | - |`n"
               }
             }
-            if (-not $rows) { return "" }
             $header = "### $title`n`n| Model | QPS | Avg Latency |`n|-------|----:|------------|`n"
             return $header + $rows + "`n"
           }
 
-          # --- Helper: parse L2 results from a directory ---
           function Get-L2Table($dir, $title) {
-            $rows = ""
-            $files = Get-ChildItem "$dir/*.txt" -ErrorAction SilentlyContinue
+            if (-not (Test-Path $dir)) { return "" }
+            $files = Get-ChildItem $dir -Recurse -Filter "*.txt" -ErrorAction SilentlyContinue
             if (-not $files) { return "" }
+            $rows = ""
             foreach ($f in $files) {
-              $model = $f.BaseName
+              $meta = Get-Meta $f (Resolve-Path $dir).Path
+              $label = if ($meta.op_name) { "$($meta.model_name) / $($meta.op_name)" } else { $meta.model_name }
+              if ($meta.seq_length -ne $null) { $label += " (seq$($meta.seq_length))" }
               $content = Get-Content $f.FullName -Raw
               $l2Match = [regex]::Match($content, 'Combined L2 \(stacked diffs\):\s+([\d.eE+-]+)')
               if ($l2Match.Success) {
                 $l2val = [double]$l2Match.Groups[1].Value
                 $status = if ($l2val -le $threshold) { [char]0x2705 } else { [char]0x274C }
-                $rows += "| $model | $l2val | $status |`n"
+                $rows += "| $label | $l2val | $status |`n"
               } else {
-                $rows += "| $model | error | $([char]0x274C) |`n"
+                $rows += "| $label | error | $([char]0x274C) |`n"
               }
             }
-            if (-not $rows) { return "" }
             $header = "### $title`n`n| Model | Combined L2 | Status |`n|-------|------------|--------|`n"
             return $header + $rows + "`n"
           }
 
-          # --- Build full summary ---
+          # --- Build markdown summary ---
           $summary = "## GPU Performance & Accuracy Test Results`n`n"
-
           $opPerf = Get-PerfTable "perf-results/single-op" "Single-Op Performance (MorphiZen EP)"
           $opL2 = Get-L2Table "l2-results/single-op" "Single-Op Accuracy (EP vs CPU)"
           $fullPerf = Get-PerfTable "perf-results/full-model" "Full Model Performance (MorphiZen EP)"
           $fullL2 = Get-L2Table "l2-results/full-model" "Full Model Accuracy (EP vs CPU)"
-
           if ($opPerf) { $summary += $opPerf }
           if ($opL2) { $summary += $opL2 }
           if ($fullPerf) { $summary += $fullPerf }
           if ($fullL2) { $summary += $fullL2 }
-
           if (-not $opPerf -and -not $opL2 -and -not $fullPerf -and -not $fullL2) {
             $summary += "> No test results collected.`n"
           }
-
           $summary += "`nL2 threshold: $threshold | Run: [${{ github.run_number }}]($runUrl) | Commit: ``$sha```n"
-
           Write-Host $summary
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+
+          # --- Generate JSON result files ---
+          function Collect-PerfJson($dir, $category) {
+            $entries = @()
+            if (-not (Test-Path $dir)) { return $entries }
+            $files = Get-ChildItem $dir -Recurse -Filter "*.txt" -ErrorAction SilentlyContinue
+            foreach ($f in $files) {
+              $meta = Get-Meta $f (Resolve-Path $dir).Path
+              $content = Get-Content $f.FullName -Raw
+              $qpsMatch = [regex]::Match($content, 'Number of inferences per second:\s+([\d.]+)')
+              $avgMatch = [regex]::Match($content, 'Average inference time cost:\s+([\d.]+)\s+ms')
+              $entry = [ordered]@{
+                category   = $category
+                model_name = $meta.model_name
+                file       = $meta.file
+                qps        = if ($qpsMatch.Success) { [double]$qpsMatch.Groups[1].Value } else { $null }
+                avg_latency_ms = if ($avgMatch.Success) { [double]$avgMatch.Groups[1].Value } else { $null }
+              }
+              if ($meta.op_name) { $entry["op_name"] = $meta.op_name }
+              if ($meta.seq_length -ne $null) { $entry["seq_length"] = $meta.seq_length }
+              $entries += [PSCustomObject]$entry
+            }
+            return $entries
+          }
+
+          function Collect-L2Json($dir, $category) {
+            $entries = @()
+            if (-not (Test-Path $dir)) { return $entries }
+            $files = Get-ChildItem $dir -Recurse -Filter "*.txt" -ErrorAction SilentlyContinue
+            foreach ($f in $files) {
+              $meta = Get-Meta $f (Resolve-Path $dir).Path
+              $content = Get-Content $f.FullName -Raw
+              $l2Match = [regex]::Match($content, 'Combined L2 \(stacked diffs\):\s+([\d.eE+-]+)')
+              $l2val = if ($l2Match.Success) { [double]$l2Match.Groups[1].Value } else { $null }
+              $entry = [ordered]@{
+                category   = $category
+                model_name = $meta.model_name
+                file       = $meta.file
+                l2         = $l2val
+                pass       = if ($l2val -ne $null) { $l2val -le $threshold } else { $false }
+              }
+              if ($meta.op_name) { $entry["op_name"] = $meta.op_name }
+              if ($meta.seq_length -ne $null) { $entry["seq_length"] = $meta.seq_length }
+              $entries += [PSCustomObject]$entry
+            }
+            return $entries
+          }
+
+          $perfAll  = @()
+          $perfAll += Collect-PerfJson "perf-results/single-op" "single-op"
+          $perfAll += Collect-PerfJson "perf-results/full-model" "full-model"
+
+          $l2All  = @()
+          $l2All += Collect-L2Json "l2-results/single-op" "single-op"
+          $l2All += Collect-L2Json "l2-results/full-model" "full-model"
+
+          New-Item -ItemType Directory -Force -Path "json-results" | Out-Null
+
+          $perfJson = [ordered]@{
+            ep_name   = "MorphiZenExecutionProvider"
+            timestamp = $timestamp
+            commit    = $sha
+            results   = @($perfAll)
+          } | ConvertTo-Json -Depth 5
+          Set-Content -Path "json-results/perf-results.json" -Value $perfJson
+          Write-Host "=== perf-results.json ==="
+          Write-Host $perfJson
+
+          $l2Json = [ordered]@{
+            timestamp = $timestamp
+            commit    = $sha
+            threshold = $threshold
+            results   = @($l2All)
+          } | ConvertTo-Json -Depth 5
+          Set-Content -Path "json-results/l2-results.json" -Value $l2Json
+          Write-Host "=== l2-results.json ==="
+          Write-Host $l2Json
 
           # --- Post PR comment if triggered by workflow_run on a PR ---
           $prBranch = "${{ github.event.workflow_run.head_branch }}"
@@ -400,7 +503,6 @@ jobs:
                 $prNumber = $prs[0].number
                 $marker = "<!-- morphizen-gpu-test-results -->"
                 $body = "$marker`n$summary"
-
                 $commentsJson = gh api "repos/${{ github.repository }}/issues/$prNumber/comments" 2>$null
                 $ghOk = ($LASTEXITCODE -eq 0)
                 $existing = $null
@@ -409,7 +511,6 @@ jobs:
                   $found = $comments | Where-Object { $_.body -and $_.body.StartsWith($marker) } | Select-Object -First 1
                   if ($found) { $existing = $found.id }
                 }
-
                 if ($ghOk -and $existing) {
                   Write-Host "Updating existing PR comment $existing"
                   gh api --method PATCH "repos/${{ github.repository }}/issues/comments/$existing" -f body="$body"
@@ -420,3 +521,11 @@ jobs:
               }
             }
           }
+
+      - name: Upload JSON results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-json
+          path: json-results/
+          retention-days: 30
