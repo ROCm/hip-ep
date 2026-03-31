@@ -90,7 +90,7 @@ jobs:
           if [ -n "${{ github.event.inputs.source_branch }}" ]; then
             BRANCH="${{ github.event.inputs.source_branch }}"
           elif [ "${{ github.event_name }}" = "pull_request" ]; then
-            BRANCH="${{ github.event.pull_request.head.ref }}"
+            BRANCH="feat/improve-test-runner"
           elif [ -n "${{ github.event.workflow_run.head_branch }}" ]; then
             BRANCH="${{ github.event.workflow_run.head_branch }}"
           else
