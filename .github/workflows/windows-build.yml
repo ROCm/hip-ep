@@ -503,22 +503,25 @@ jobs:
           for /r "%L2_MODEL_DIR%" %%M in (*.onnx) do (
             set "MDIR=%%~dpM"
             set "REL=!MDIR:%L2_MODEL_DIR%\=!"
+            set "OUT=..\..\l2-results\!REL!%%~nM.txt"
             mkdir "..\..\l2-results\!REL!" 2>nul
             echo === L2 test: !REL!%%~nxM ===
             rd /s /q "%%~nM_o_dump" 2>nul
             rd /s /q "%%~nM_cpu_o_dump" 2>nul
-            hip-onnx-runner.exe -m "%%M" -d 2 -s 42
+            hip-onnx-runner.exe -m "%%M" -d 2 -s 42 > "!OUT!" 2>&1
             if errorlevel 1 (
-              echo [ERROR] EP inference failed for !REL!%%~nxM
+              echo [ERROR] EP inference failed>> "!OUT!"
+              type "!OUT!"
               set FAILED=1
             ) else (
-              hip-onnx-runner.exe -m "%%M" -d 2 -s 42 -n
+              hip-onnx-runner.exe -m "%%M" -d 2 -s 42 -n >> "!OUT!" 2>&1
               if errorlevel 1 (
-                echo [ERROR] CPU inference failed for !REL!%%~nxM
+                echo [ERROR] CPU inference failed>> "!OUT!"
+                type "!OUT!"
                 set FAILED=1
               ) else (
-                hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" > "..\..\l2-results\!REL!%%~nM.txt" 2>&1
-                type "..\..\l2-results\!REL!%%~nM.txt"
+                hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" >> "!OUT!" 2>&1
+                type "!OUT!"
               )
             )
           )
@@ -554,10 +557,14 @@ jobs:
             $model = $rel -replace '\.txt$', '' -replace '\\', '/'
             $content = Get-Content $f.FullName -Raw
             $l2Match = [regex]::Match($content, 'Combined L2 \(stacked diffs\):\s+([\d.eE+-]+)')
+            $errMatch = [regex]::Match($content, '\[ERROR\]\s*(.+)')
             if ($l2Match.Success) {
               $l2val = [double]$l2Match.Groups[1].Value
               $status = if ($l2val -le $threshold) { [char]0x2705 } else { [char]0x274C }
               $tableRows += "| $model | $l2val | $status |`n"
+            } elseif ($errMatch.Success) {
+              $reason = $errMatch.Groups[1].Value.Trim()
+              $tableRows += "| $model | $reason | $([char]0x274C) |`n"
             } else {
               $tableRows += "| $model | error | $([char]0x274C) |`n"
             }
