@@ -9,24 +9,21 @@
 // MorphiZen execution provider, and reports timing.
 //
 // Usage: hip-onnx-runner -m <model.onnx> [options]
-//    or: hip-onnx-runner -L dir1|dir2
-//   -m, --model       Path to ONNX model (required for inference)
-//   -n, --no-ep       CPU only; skip EP registration
-//   -d, --dump-level  0=off (default), 1=input tensors, 2=output tensors,
-//                     3=both (raw .bin under <stem>_i_dump/ and <stem>_o_dump/;
-//                     with -n: <stem>_cpu_i_dump/ and <stem>_cpu_o_dump/)
-//   -s, --seed        RNG seed for random inputs (default 42)
-//   -i, --input-dir   If set, load inputs from dir:
-//   input_<idx>_<tensor>_<type>.bin -L, --l2norm      Compare two dirs:
-//   dir1,dir2 (same set of *.bin files);
-//                     names must be ..._<type>.bin (fp32,fp16,i64,...)
-//   -h, --help        Show help
+//    or: hip-onnx-runner -L dir1,dir2
+//   -m <path>   Path to ONNX model (required for inference)
+//   -n          CPU only; skip EP registration
+//   -d <0-3>    Dump level: 0=off (default), 1=inputs, 2=outputs, 3=both
+//               (dirs: <stem>_i_dump/ and <stem>_o_dump/;
+//                with -n: <stem>_cpu_i_dump/ and <stem>_cpu_o_dump/)
+//   -s <seed>   RNG seed for random inputs (default 42)
+//   -i <dir>    Load inputs from dir (input_<idx>_<name>_<type>.bin)
+//   -L <d1,d2>  Compare two dump dirs element-wise (L2 norm);
+//               file names must end with _<type>.bin (fp32,fp16,i64,...)
+//   -h          Show help
 //
 //===----------------------------------------------------------------------===//
 
 #include <onnxruntime_cxx_api.h>
-
-#include "../common/cxxopts.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -273,7 +270,7 @@ static std::string trim_string(std::string s) {
   return s;
 }
 
-// *.bin regular files in dir (for -L/--l2norm pairing by matching basenames).
+// *.bin regular files in dir (for -L pairing by matching basenames).
 static std::vector<std::string>
 list_l2compare_filenames(const std::filesystem::path &dir) {
   std::vector<std::string> names;
@@ -567,82 +564,124 @@ static int run_l2norm_output_dumps(const std::string &dir1_str,
 // Main
 // ---------------------------------------------------------------------------
 
+static void print_usage(const char *prog) {
+  std::cerr
+      << "Usage: " << prog << " -m <model.onnx> [options]\n"
+      << "   or: " << prog << " -L dir1,dir2\n\n"
+      << "Options:\n"
+      << "  -m <path>   Path to ONNX model (required for inference)\n"
+      << "  -n          CPU only; skip EP registration\n"
+      << "  -d <0-3>    Dump level: 0=off, 1=inputs, 2=outputs, 3=both\n"
+      << "              (dirs: <stem>_i_dump/ and <stem>_o_dump/;\n"
+      << "               with -n: <stem>_cpu_i_dump/ and <stem>_cpu_o_dump/)\n"
+      << "  -s <seed>   RNG seed for random inputs (default 42)\n"
+      << "  -i <dir>    Load inputs from dir "
+         "(input_<idx>_<name>_<type>.bin)\n"
+      << "  -L <d1,d2>  Compare two dump dirs element-wise (L2 norm)\n"
+      << "  -h          Show help\n";
+}
+
 int main(int argc, char *argv[]) {
-  cxxopts::Options options(
-      argv[0], "Run an ONNX model via MorphiZen execution provider");
-  options.add_options()("h,help", "Show this help")(
-      "m,model", "Path to .onnx model", cxxopts::value<std::string>())(
-      "n,no-ep", "CPU only; skip EP registration")(
-      "d,dump-level",
-      "0=off, 1=dump inputs, 2=dump outputs, 3=both; "
-      "dirs: <stem>_i_dump/ and <stem>_o_dump/ (with -n: <stem>_cpu_i_dump/ "
-      "etc.)",
-      cxxopts::value<int>()->default_value("0"))(
-      "s,seed", "RNG seed for random inputs (default 42)",
-      cxxopts::value<unsigned int>()->default_value("42"))(
-      "i,input-dir",
-      "Directory with input_<idx>_<name>_<type>.bin only; empty = random "
-      "inputs",
-      cxxopts::value<std::string>()->default_value(""))(
-      "L,l2norm",
-      "Compare two dirs: dir1,dir2 (same *.bin set); each file must be "
-      "..._<type>.bin (fp32,fp16,i64,...); element-wise L2; no -m",
-      cxxopts::value<std::string>()->default_value(""));
+  std::string model_path_str;
+  std::string l2norm_arg;
+  std::string input_dir_str;
+  bool no_ep = false;
+  int dump_level = 0;
+  unsigned int rng_seed = 42;
 
-  cxxopts::ParseResult result;
-  try {
-    result = options.parse(argc, argv);
-  } catch (const cxxopts::exceptions::exception &e) {
-    std::cerr << e.what() << "\n\n" << options.help() << "\n";
-    return 1;
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg == "-h") {
+      print_usage(argv[0]);
+      return 0;
+    } else if (arg == "-m") {
+      if (++i >= argc) {
+        std::cerr << "Error: -m requires a path argument.\n\n";
+        print_usage(argv[0]);
+        return 1;
+      }
+      model_path_str = argv[i];
+    } else if (arg == "-n") {
+      no_ep = true;
+    } else if (arg == "-d") {
+      if (++i >= argc) {
+        std::cerr << "Error: -d requires a numeric argument.\n\n";
+        print_usage(argv[0]);
+        return 1;
+      }
+      try {
+        dump_level = std::stoi(argv[i]);
+      } catch (...) {
+        std::cerr << "Error: -d value is not a valid integer.\n\n";
+        print_usage(argv[0]);
+        return 1;
+      }
+    } else if (arg == "-s") {
+      if (++i >= argc) {
+        std::cerr << "Error: -s requires a numeric argument.\n\n";
+        print_usage(argv[0]);
+        return 1;
+      }
+      try {
+        rng_seed = static_cast<unsigned int>(std::stoul(argv[i]));
+      } catch (...) {
+        std::cerr << "Error: -s value is not a valid unsigned integer.\n\n";
+        print_usage(argv[0]);
+        return 1;
+      }
+    } else if (arg == "-i") {
+      if (++i >= argc) {
+        std::cerr << "Error: -i requires a directory argument.\n\n";
+        print_usage(argv[0]);
+        return 1;
+      }
+      input_dir_str = argv[i];
+    } else if (arg == "-L") {
+      if (++i >= argc) {
+        std::cerr << "Error: -L requires a dir1,dir2 argument.\n\n";
+        print_usage(argv[0]);
+        return 1;
+      }
+      l2norm_arg = argv[i];
+    } else {
+      std::cerr << "Error: unknown option: " << arg << "\n\n";
+      print_usage(argv[0]);
+      return 1;
+    }
   }
 
-  if (result.count("help")) {
-    std::cout << options.help() << "\n";
-    return 0;
-  }
-
-  std::string l2norm_arg = trim_string(result["l2norm"].as<std::string>());
+  l2norm_arg = trim_string(l2norm_arg);
   if (!l2norm_arg.empty()) {
     const auto sep = l2norm_arg.find(',');
     if (sep == std::string::npos) {
-      std::cerr << "Error: -L/--l2norm expects dir1,dir2\n\n"
-                << options.help() << "\n";
+      std::cerr << "Error: -L expects dir1,dir2\n\n";
+      print_usage(argv[0]);
       return 1;
     }
     const std::string dir_left = trim_string(l2norm_arg.substr(0, sep));
     const std::string dir_right = trim_string(l2norm_arg.substr(sep + 1));
     if (dir_left.empty() || dir_right.empty()) {
-      std::cerr << "Error: -L/--l2norm dir1,dir2 must not have empty sides.\n\n"
-                << options.help() << "\n";
+      std::cerr << "Error: -L dir1,dir2 must not have empty sides.\n\n";
+      print_usage(argv[0]);
       return 1;
     }
     return run_l2norm_output_dumps(dir_left, dir_right);
   }
 
-  if (!result.count("model")) {
-    std::cerr << "Error: -m/--model is required.\n\n" << options.help() << "\n";
-    return 1;
-  }
-  std::string model_path_str = result["model"].as<std::string>();
   if (model_path_str.empty()) {
-    std::cerr << "Error: -m/--model must not be empty.\n\n"
-              << options.help() << "\n";
+    std::cerr << "Error: -m is required.\n\n";
+    print_usage(argv[0]);
     return 1;
   }
 
-  const bool no_ep = result.count("no-ep") > 0;
-  const int dump_level = result["dump-level"].as<int>();
   if (dump_level < 0 || dump_level > 3) {
-    std::cerr << "Error: -d/--dump-level must be 0, 1, 2, or 3.\n\n"
-              << options.help() << "\n";
+    std::cerr << "Error: -d must be 0, 1, 2, or 3.\n\n";
+    print_usage(argv[0]);
     return 1;
   }
 
-  const unsigned int rng_seed = result["seed"].as<unsigned int>();
   std::mt19937 rng(rng_seed);
-  std::string input_dir_str =
-      trim_string(result["input-dir"].as<std::string>());
+  input_dir_str = trim_string(input_dir_str);
   const bool use_input_files = !input_dir_str.empty();
 
   // ORT environment
@@ -655,7 +694,7 @@ int main(int argc, char *argv[]) {
     auto lib_path = std::filesystem::u8path(ep_dll);
     if (!std::filesystem::exists(lib_path)) {
       std::cerr << "EP library not found: " << ep_dll << "\n"
-                << "Set MORPHIZEN_VITISAI_EP or use --no-ep.\n";
+                << "Set MORPHIZEN_VITISAI_EP or use -n.\n";
       return 1;
     }
     std::cout << "Registering EP: " << ep_dll << "\n";
@@ -753,8 +792,7 @@ int main(int argc, char *argv[]) {
     input_dir_path = std::filesystem::path(input_dir_str);
     std::error_code ec;
     if (!std::filesystem::is_directory(input_dir_path, ec)) {
-      std::cerr << "Error: --input-dir is not a directory: " << input_dir_str
-                << "\n";
+      std::cerr << "Error: -i is not a directory: " << input_dir_str << "\n";
       return 1;
     }
   }
