@@ -5,6 +5,9 @@
 name: GPU Performance & Accuracy Test
 
 on:
+  schedule:
+    - cron: '0 18 * * *'  # daily at UTC 18:00 (CST 02:00)
+
   workflow_run:
     workflows: ["Windows Build"]
     branches: [main]
