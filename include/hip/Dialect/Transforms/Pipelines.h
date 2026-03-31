@@ -88,8 +88,7 @@ void buildOnnxToHipPipeline(OpPassManager &pm,
 /// through to ConvertOnnxToHip.
 void buildOnnxToHipPipeline(OpPassManager &pm,
                             const OnnxToHipPipelineOptions &options,
-                            morphizen::FileSystem *fs,
-                            hipdnnHandle_t handle,
+                            morphizen::FileSystem *fs, hipdnnHandle_t handle,
                             CompiledGraphMap output_graphs);
 
 /// Build the HIP-to-LLVM lowering pipeline. This is a separate pipeline

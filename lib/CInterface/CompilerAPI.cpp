@@ -104,8 +104,7 @@ COMPILER_API CompilerErrorCode hip_compile_with_fs(
       if (graphs && !graphs->empty()) {
         void *registry = hipdnn_graph_registry_create();
         for (auto &[name, graph] : *graphs) {
-          int graph_id =
-              std::stoi(name.str().substr(strlen("hipdnn_graph_")));
+          int graph_id = std::stoi(name.str().substr(strlen("hipdnn_graph_")));
           hipdnn_graph_registry_store(registry, graph_id, graph.release());
         }
         hipdnn_graph_set_default_registry(registry);

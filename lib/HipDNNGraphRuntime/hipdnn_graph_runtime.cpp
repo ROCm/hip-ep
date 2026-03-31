@@ -33,11 +33,12 @@ enum GraphExecError {
   kNoHandle = -6,
 };
 
-// Layout-compatible mirror of RuntimeState (defined in runtime_state_internal.h).
-// We cannot include the real header because runtime_types.h pulls in
-// hip_runtime.h which contains MSVC-incompatible vector types.
-// All handle fields (hipStream_t, miopenHandle_t, hipblasLtHandle_t) are
-// pointer types, so void* is binary-compatible on the same ABI.
+// Layout-compatible mirror of RuntimeState (defined in
+// runtime_state_internal.h). We cannot include the real header because
+// runtime_types.h pulls in hip_runtime.h which contains MSVC-incompatible
+// vector types. All handle fields (hipStream_t, miopenHandle_t,
+// hipblasLtHandle_t) are pointer types, so void* is binary-compatible on the
+// same ABI.
 struct RuntimeStateLayout {
   void *stream;
   void *miopen_handle;
@@ -154,8 +155,7 @@ int32_t hipdnn_graph_execute(void *state_ptr, int32_t graph_id, int32_t num_io,
   auto *state = static_cast<RuntimeStateLayout *>(state_ptr);
 
   // Look up the graph registry -- fall back to process-level singleton.
-  auto *registry =
-      static_cast<GraphRegistry *>(state->hipdnn_graph_registry);
+  auto *registry = static_cast<GraphRegistry *>(state->hipdnn_graph_registry);
   if (!registry)
     registry = g_default_registry;
   if (!registry)
@@ -175,9 +175,10 @@ int32_t hipdnn_graph_execute(void *state_ptr, int32_t graph_id, int32_t num_io,
   if (ws_size > 0) {
     int ret = ensureWorkspace(state, static_cast<size_t>(ws_size));
     if (ret != 0) {
-      fprintf(stderr,
-              "hipdnn_graph_execute: workspace allocation failed for graph %d\n",
-              graph_id);
+      fprintf(
+          stderr,
+          "hipdnn_graph_execute: workspace allocation failed for graph %d\n",
+          graph_id);
       return kWorkspaceAlloc;
     }
   }

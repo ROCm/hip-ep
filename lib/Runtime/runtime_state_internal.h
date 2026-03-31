@@ -49,8 +49,9 @@ struct RuntimeState {
 
   // hipDNN graph execution support.
   // Set by EP via hipdnn_graph_runtime_attach() after inference_init().
-  // hipdnn_handle: hipdnnHandle_t cast to void* (owned by EP, not cleaned up here)
-  // hipdnn_graph_registry: opaque GraphRegistry* (owned by EP, not cleaned up here)
+  // hipdnn_handle: hipdnnHandle_t cast to void* (owned by EP, not cleaned up
+  // here) hipdnn_graph_registry: opaque GraphRegistry* (owned by EP, not
+  // cleaned up here)
   void *hipdnn_handle;
   void *hipdnn_graph_registry;
 };

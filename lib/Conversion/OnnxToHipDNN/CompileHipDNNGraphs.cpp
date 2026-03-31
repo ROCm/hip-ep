@@ -1,11 +1,6 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
- *
- * MLIR pass that compiles hip.hipdnn_graph_outline regions via the hipDNN
- * graph API and replaces them with hip.hipdnn_graph.  On compilation
- * failure the region is "un-outlined" (inlined back to the parent block)
- * so the standard ConvertOnnxToHip path can handle it.
  */
 
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"

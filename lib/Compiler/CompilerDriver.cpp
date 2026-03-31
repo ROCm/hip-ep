@@ -166,7 +166,8 @@ bool CompilerDriver::runMLIRPasses(
       mlir::hip::kDefaultExternalizeMinNumElements;
 
   if (hipdnnHandle_) {
-    compiledGraphs_ = std::make_shared<llvm::StringMap<mlir::hip::OwnedGraph>>();
+    compiledGraphs_ =
+        std::make_shared<llvm::StringMap<mlir::hip::OwnedGraph>>();
     mlir::hip::buildOnnxToHipPipeline(
         pm, onnxToHipOpts, fileSystem_,
         static_cast<hipdnnHandle_t>(hipdnnHandle_), compiledGraphs_);
@@ -184,15 +185,14 @@ bool CompilerDriver::runMLIRPasses(
     irDumpStream = std::make_unique<llvm::raw_fd_ostream>(dumpPath, ec);
     if (!ec) {
       module.getContext()->disableMultithreading();
-      pm.enableIRPrinting(
-          [](mlir::Pass *, mlir::Operation *) { return true; },
-          [](mlir::Pass *, mlir::Operation *) { return true; },
-          /*printModuleScope=*/true,
-          /*printAfterOnlyOnChange=*/true,
-          /*printAfterOnlyOnFailure=*/false, *irDumpStream);
+      pm.enableIRPrinting([](mlir::Pass *, mlir::Operation *) { return true; },
+                          [](mlir::Pass *, mlir::Operation *) { return true; },
+                          /*printModuleScope=*/true,
+                          /*printAfterOnlyOnChange=*/true,
+                          /*printAfterOnlyOnFailure=*/false, *irDumpStream);
     } else {
       llvm::errs() << "[CompilerDriver] Failed to open IR dump file: "
-                    << dumpPath << ": " << ec.message() << "\n";
+                   << dumpPath << ": " << ec.message() << "\n";
     }
   }
 
@@ -330,20 +330,19 @@ void CompilerDriver::discoverLibraries(
     if (llvm::sys::fs::exists(hipdnn_backend_lib))
       libraries.push_back("hipdnn_backend");
     else
-      COMPILER_DEBUG_LOG("  WARNING: hipdnn_backend import library not found\n");
+      COMPILER_DEBUG_LOG(
+          "  WARNING: hipdnn_backend import library not found\n");
 
 #ifdef HIPDNN_GRAPH_RUNTIME_LIB_PATH
     {
       std::string runtime_lib = HIPDNN_GRAPH_RUNTIME_LIB_PATH;
       if (llvm::sys::fs::exists(runtime_lib)) {
         libraries.push_back(runtime_lib);
-        COMPILER_DEBUG_LOG(
-            "  hipDNN graph runtime: " << runtime_lib << "\n");
+        COMPILER_DEBUG_LOG("  hipDNN graph runtime: " << runtime_lib << "\n");
       } else {
         libraries.push_back("hipdnn_graph_runtime");
-        COMPILER_DEBUG_LOG(
-            "  hipDNN graph runtime (name fallback): "
-            "hipdnn_graph_runtime.lib\n");
+        COMPILER_DEBUG_LOG("  hipDNN graph runtime (name fallback): "
+                           "hipdnn_graph_runtime.lib\n");
       }
     }
 #else

@@ -5,8 +5,8 @@
 
 #pragma once
 
-#include "llvm/ADT/ArrayRef.h"
 #include "mlir/IR/Region.h"
+#include "llvm/ADT/ArrayRef.h"
 
 #include <memory>
 #include <string>

@@ -2315,8 +2315,7 @@ private:
 
 // --- HipDNNGraphOp: hip.hipdnn_graph -> hipdnn_graph_execute(state,
 //     graph_id, num_io, uids, ptrs)
-struct HipDNNGraphOpLowering
-    : public ConvertOpToLLVMPattern<HipDNNGraphOp> {
+struct HipDNNGraphOpLowering : public ConvertOpToLLVMPattern<HipDNNGraphOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
@@ -2344,8 +2343,8 @@ struct HipDNNGraphOpLowering
 
     if (static_cast<int32_t>(inputUidsAttr.size()) != numInputs)
       return op.emitError("input_uids length (")
-             << inputUidsAttr.size() << ") != number of inputs ("
-             << numInputs << ")";
+             << inputUidsAttr.size() << ") != number of inputs (" << numInputs
+             << ")";
     if (static_cast<int32_t>(outputUidsAttr.size()) != numOutputs)
       return op.emitError("output_uids length (")
              << outputUidsAttr.size() << ") != number of outputs ("
@@ -2353,61 +2352,57 @@ struct HipDNNGraphOpLowering
 
     Value numIoConst = LLVM::ConstantOp::create(
         rewriter, loc, i32Type, rewriter.getI32IntegerAttr(numIo));
-    Value oneConst = LLVM::ConstantOp::create(
-        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(1));
+    Value oneConst = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                              rewriter.getI64IntegerAttr(1));
 
     // Allocate stack arrays: int64_t uids[numIo], void* ptrs[numIo]
     auto arrayI64Type = LLVM::LLVMArrayType::get(i64Type, numIo);
     auto arrayPtrType = LLVM::LLVMArrayType::get(ptrType, numIo);
 
-    Value uidsArr = LLVM::AllocaOp::create(rewriter, loc, ptrType,
-                                            arrayI64Type, oneConst, 8);
-    Value ptrsArr = LLVM::AllocaOp::create(rewriter, loc, ptrType,
-                                            arrayPtrType, oneConst, 8);
+    Value uidsArr = LLVM::AllocaOp::create(rewriter, loc, ptrType, arrayI64Type,
+                                           oneConst, 8);
+    Value ptrsArr = LLVM::AllocaOp::create(rewriter, loc, ptrType, arrayPtrType,
+                                           oneConst, 8);
 
     // Store UIDs (compile-time constants from attributes)
     for (int32_t i : llvm::seq<int32_t>(numInputs)) {
       int64_t uid =
           cast<IntegerAttr>(inputUidsAttr[i]).getValue().getSExtValue();
-      Value uidVal = LLVM::ConstantOp::create(
-          rewriter, loc, i64Type, rewriter.getI64IntegerAttr(uid));
-      Value idxVal = LLVM::ConstantOp::create(
-          rewriter, loc, i32Type, rewriter.getI32IntegerAttr(i));
-      Value gepUid = LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type,
-                                          uidsArr, idxVal);
+      Value uidVal = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                              rewriter.getI64IntegerAttr(uid));
+      Value idxVal = LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                              rewriter.getI32IntegerAttr(i));
+      Value gepUid =
+          LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type, uidsArr, idxVal);
       LLVM::StoreOp::create(rewriter, loc, uidVal, gepUid);
     }
     for (int32_t i : llvm::seq<int32_t>(numOutputs)) {
       int64_t uid =
           cast<IntegerAttr>(outputUidsAttr[i]).getValue().getSExtValue();
-      Value uidVal = LLVM::ConstantOp::create(
-          rewriter, loc, i64Type, rewriter.getI64IntegerAttr(uid));
+      Value uidVal = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                              rewriter.getI64IntegerAttr(uid));
       Value idxVal = LLVM::ConstantOp::create(
-          rewriter, loc, i32Type,
-          rewriter.getI32IntegerAttr(numInputs + i));
-      Value gepUid = LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type,
-                                          uidsArr, idxVal);
+          rewriter, loc, i32Type, rewriter.getI32IntegerAttr(numInputs + i));
+      Value gepUid =
+          LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type, uidsArr, idxVal);
       LLVM::StoreOp::create(rewriter, loc, uidVal, gepUid);
     }
 
     // Store aligned_ptr from each memref descriptor
     for (int32_t i : llvm::seq<int32_t>(numInputs)) {
-      Value ptr =
-          extractMemRefPtr(adaptor.getInputs()[i], rewriter, loc);
-      Value idxVal = LLVM::ConstantOp::create(
-          rewriter, loc, i32Type, rewriter.getI32IntegerAttr(i));
-      Value gepPtr = LLVM::GEPOp::create(rewriter, loc, ptrType, ptrType,
-                                          ptrsArr, idxVal);
+      Value ptr = extractMemRefPtr(adaptor.getInputs()[i], rewriter, loc);
+      Value idxVal = LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                              rewriter.getI32IntegerAttr(i));
+      Value gepPtr =
+          LLVM::GEPOp::create(rewriter, loc, ptrType, ptrType, ptrsArr, idxVal);
       LLVM::StoreOp::create(rewriter, loc, ptr, gepPtr);
     }
     for (int32_t i : llvm::seq<int32_t>(numOutputs)) {
-      Value ptr =
-          extractMemRefPtr(adaptor.getOutputs()[i], rewriter, loc);
+      Value ptr = extractMemRefPtr(adaptor.getOutputs()[i], rewriter, loc);
       Value idxVal = LLVM::ConstantOp::create(
-          rewriter, loc, i32Type,
-          rewriter.getI32IntegerAttr(numInputs + i));
-      Value gepPtr = LLVM::GEPOp::create(rewriter, loc, ptrType, ptrType,
-                                          ptrsArr, idxVal);
+          rewriter, loc, i32Type, rewriter.getI32IntegerAttr(numInputs + i));
+      Value gepPtr =
+          LLVM::GEPOp::create(rewriter, loc, ptrType, ptrType, ptrsArr, idxVal);
       LLVM::StoreOp::create(rewriter, loc, ptr, gepPtr);
     }
 
@@ -2420,8 +2415,8 @@ struct HipDNNGraphOpLowering
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 5> args = {statePtr, graphIdConst, numIoConst,
-                                  uidsArr, ptrsArr};
+    SmallVector<Value, 5> args = {statePtr, graphIdConst, numIoConst, uidsArr,
+                                  ptrsArr};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
     rewriter.eraseOp(op);
@@ -2453,8 +2448,8 @@ void ConvertHipToLLVMPass::runOnOperation() {
            SigmoidOpLowering, ElementwiseOpLowering<MulOp, kTensorOpMul>,
            ElementwiseOpLowering<AddOp, kTensorOpAdd>, SubOpLowering,
            CastOpLowering, ReduceSumOpLowering, GqaOpLowering,
-           MatMulNBitsOpLowering, QMoEOpLowering,
-           HipDNNGraphOpLowering>(typeConverter);
+           MatMulNBitsOpLowering, QMoEOpLowering, HipDNNGraphOpLowering>(
+          typeConverter);
   patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter,
                                                        kMiopenAdd);
   patterns.add<MemRefAllocOpLowering, MemRefDeallocOpLowering>(typeConverter);
