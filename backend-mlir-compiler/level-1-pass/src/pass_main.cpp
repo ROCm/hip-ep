@@ -7,8 +7,8 @@
 
 // Morphizen headers
 #include "morphizen/env_config.hpp"
-#include "morphizen/morphizen.hpp"
 #include "morphizen/morphizen-ort-api-ext.hpp"
+#include "morphizen/morphizen.hpp"
 #include <chrono>
 #include <fstream>
 #include <glog/logging.h>
@@ -93,8 +93,7 @@ static std::string get_mlir_bytecode(PassContext *ctx, Graph &graph) {
 
 extern "C" morphizen::MorphizenOrtApiExt *get_morphizen_ort_api_mlir();
 
-static std::vector<ConstantRef>
-collect_constant_refs(Graph &graph) {
+static std::vector<ConstantRef> collect_constant_refs(Graph &graph) {
   std::vector<ConstantRef> refs;
   auto *api = get_morphizen_ort_api_mlir();
   if (!api || !api->graph_get_external_constant_refs)
@@ -116,13 +115,11 @@ compile_mlir(const std::string &mlir_bytecode, const CompilationConfig &config,
   return MlirCompiler::compileFromBytecode(mlir_bytecode, config, fs);
 }
 
-static std::optional<CompilationArtifact>
-compile_mlir_with_constants(const std::string &mlir_bytecode,
-                            const CompilationConfig &config,
-                            morphizen::FileSystem *fs,
-                            const std::vector<ConstantRef> &constants) {
+static std::optional<CompilationArtifact> compile_mlir_with_constants(
+    const std::string &mlir_bytecode, const CompilationConfig &config,
+    morphizen::FileSystem *fs, const std::vector<ConstantRef> &constants) {
   return MlirCompiler::compileFromBytecodeWithConstants(mlir_bytecode, config,
-                                                       fs, constants);
+                                                        fs, constants);
 }
 
 // Step 4: Write artifact to EPContext
@@ -255,11 +252,11 @@ struct Level1MlirPass {
 
     // Step 3: Compile bytecode to artifact
     auto fs = self.get_context()->get_file_system();
-    auto artifactOpt = constant_refs.empty()
-                           ? compile_mlir(mlir_bytecode, config, fs.get())
-                           : compile_mlir_with_constants(mlir_bytecode, config,
-                                                        fs.get(),
-                                                        constant_refs);
+    auto artifactOpt =
+        constant_refs.empty()
+            ? compile_mlir(mlir_bytecode, config, fs.get())
+            : compile_mlir_with_constants(mlir_bytecode, config, fs.get(),
+                                          constant_refs);
     if (!artifactOpt) {
       LOG(WARNING) << "MLIR compilation failed, skipping";
       return;

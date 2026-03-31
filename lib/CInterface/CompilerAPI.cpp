@@ -125,8 +125,8 @@ COMPILER_API CompilerErrorCode hip_compile_with_constants(
     driver.setFileSystem(static_cast<morphizen::FileSystem *>(fs));
 
     if (constant_refs && num_constants > 0) {
-      driver.setConstantRefs(
-          static_cast<const HipConstantRef *>(constant_refs), num_constants);
+      driver.setConstantRefs(static_cast<const HipConstantRef *>(constant_refs),
+                             num_constants);
     }
 
     std::string error_message;

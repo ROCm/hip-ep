@@ -301,7 +301,6 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
         static_cast<char *>(state->gpu_constants_blob) + offset;
   }
 
-
   return 0;
 }
 
