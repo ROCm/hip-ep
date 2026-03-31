@@ -128,7 +128,7 @@ int hip_rope_forward(
  * GQA Device Kernel Launchers
  * =========================================================================
  *
- * Individual kernel launchers for the 11-step GQA pipeline.
+ * Individual kernel launchers for the 12-step GQA pipeline (Step 0 + Steps 1-11).
  * All FP16 only. The orchestration (hipBLASLt GEMMs, workspace, temp
  * buffers) lives in the runtime wrapper (real/gqa.cpp).
  */
@@ -176,17 +176,30 @@ int hip_gqa_expand_kv(
     int total_heads, int heads_per_group,
     int src_stride, int dst_stride, int copy_elems);
 
-/* Causal mask (prefill only): S[k,q] = -inf where k > past_len + q */
+/* Split packed QKV [B*S, (H+2*G)*d] into separate Q, K, V buffers.
+ * Q: [B*S, H*d], K: [B*S, G*d], V: [B*S, G*d] */
+int hip_gqa_split_qkv(
+    void* stream, const void* packed, void* Q, void* K, void* V,
+    int batch_size, int seq_len, int num_heads, int kv_num_heads, int head_dim);
+
+/* Causal mask (prefill only): S[k,q] = -inf where k > past_len + q.
+ * When local_window_size > 0, also masks k < past_len + q - local_window_size + 1. */
 int hip_gqa_causal_mask(
     void* stream, void* S,
     int total_heads, int skv, int sq,
-    int batch_stride, int past_len);
+    int batch_stride, int past_len, int local_window_size);
 
-/* Column-wise softmax in-place. One threadblock per (head, query). */
+/* Column-wise softmax in-place. One threadblock per (head, query).
+ * Smooth softmax is activated when head_sink is non-null OR use_smooth_softmax
+ * is set.  When head_sink is non-null, uses per-head sink factors:
+ *   softmax_i = exp(x_i) / (exp(head_sink[h]) + sum_j exp(x_j))
+ * When head_sink is null but use_smooth_softmax is set, uses sink = 0:
+ *   softmax_i = exp(x_i) / (exp(0) + sum_j exp(x_j)) */
 int hip_gqa_softmax_inplace(
     void* stream, void* data,
     int total_head_queries, int rows, int cols,
-    int batch_stride);
+    int batch_stride, const void* head_sink, int num_heads,
+    int use_smooth_softmax);
 
 /* =========================================================================
  * Cast (Element Type Conversion)
