@@ -459,25 +459,50 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
   return 0;
 }
 
-int wrap_group_query_attention(RuntimeState *state, void *query, void *key,
-                               void *value, void *past_key, void *past_value,
-                               void *seqlens_k, void *total_seq_len,
-                               void *cos_cache, void *sin_cache, void *output,
-                               void *present_key, void *present_value,
-                               int64_t num_heads, int64_t kv_num_heads,
-                               float scale, float softcap, int64_t do_rotary,
-                               int64_t rotary_interleaved, int64_t batch_size,
-                               int64_t seq_len_q, int64_t seq_len_kv,
-                               int64_t head_dim, int64_t element_size_bytes) {
+int wrap_group_query_attention(
+    RuntimeState *state,
+    // Inputs 1-7 (core GQA)
+    void *query, void *key, void *value, void *past_key, void *past_value,
+    void *seqlens_k, void *total_seq_len,
+    // Inputs 8-10 (RoPE)
+    void *cos_cache, void *sin_cache, void *position_ids,
+    // Inputs 11-14 (advanced features)
+    void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
+    // Outputs
+    void *output, void *present_key, void *present_value, void *output_qk,
+    // Attributes (12)
+    int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
+    int64_t rotary_interleaved, float softcap, int64_t local_window_size,
+    int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
+    int64_t v_quant_type, int64_t kv_cache_bit_width,
+    // Shape values (5)
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv, int64_t head_dim,
+    int64_t element_size_bytes) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_group_query_attention\n");
     return -1;
   }
 
+  (void)position_ids;
+  (void)attention_bias;
+  (void)head_sink;
+  (void)k_scale;
+  (void)v_scale;
+  (void)output_qk;
+  (void)local_window_size;
+  (void)smooth_softmax;
+  (void)qk_output;
+  (void)k_quant_type;
+  (void)v_quant_type;
+  (void)kv_cache_bit_width;
+  (void)present_key;
+  (void)present_value;
+
   MOCK_PRINT("[MOCK] wrap_group_query_attention(\n");
   MOCK_PRINT("[MOCK]   num_heads=%lld, kv_num_heads=%lld,\n",
              (long long)num_heads, (long long)kv_num_heads);
-  MOCK_PRINT("[MOCK]   scale=%f, softcap=%f,\n", scale, softcap);
+  MOCK_PRINT("[MOCK]   scale=%f, softcap=%f,\n", (double)scale,
+             (double)softcap);
   MOCK_PRINT("[MOCK]   do_rotary=%lld, rotary_interleaved=%lld,\n",
              (long long)do_rotary, (long long)rotary_interleaved);
   MOCK_PRINT("[MOCK]   batch=%lld, seq_q=%lld, seq_kv=%lld, "

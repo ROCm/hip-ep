@@ -871,7 +871,7 @@ def Hip_GqaOp : Hip_DpsOp<"gqa", [AttrSizedOperandSegments]> {
     I64Attr:$kv_num_heads,        // KV head count (GQA core)
 
     // Optional attributes (with defaults)
-    DefaultValuedAttr<F32Attr, "1.0">:$scale,  // Default 1/√head_size, computed by caller
+    DefaultValuedAttr<F32Attr, "0.0">:$scale,  // 0.0 = auto-compute 1/√head_size at runtime (matches ORT sentinel)
     DefaultValuedAttr<I64Attr, "0">:$do_rotary,
     DefaultValuedAttr<I64Attr, "0">:$rotary_interleaved,
     DefaultValuedAttr<F32Attr, "0.0">:$softcap,
