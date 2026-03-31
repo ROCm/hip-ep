@@ -68,13 +68,26 @@ jobs:
       # Clean up leftover processes and directories from previous runs
       # -----------------------------------------------------------------
       - name: Clean workspace
-        shell: cmd
+        shell: pwsh
         run: |
-          taskkill /f /im hip-onnx-runner.exe >nul 2>&1 || ver >nul
-          taskkill /f /im onnxruntime_perf_test.exe >nul 2>&1 || ver >nul
-          if exist gpu-test-package rd /s /q gpu-test-package
-          if exist l2-results rd /s /q l2-results
-          if exist perf-results rd /s /q perf-results
+          foreach ($proc in @("hip-onnx-runner", "onnxruntime_perf_test")) {
+            Get-Process $proc -ErrorAction SilentlyContinue |
+              Stop-Process -Force -ErrorAction SilentlyContinue
+          }
+          Start-Sleep -Seconds 3
+          foreach ($dir in @("gpu-test-package", "l2-results", "perf-results", "json-results")) {
+            if (Test-Path $dir) {
+              for ($i = 0; $i -lt 5; $i++) {
+                Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+                if (-not (Test-Path $dir)) { break }
+                Write-Host "Retry $($i+1): waiting for $dir to be released..."
+                Start-Sleep -Seconds 2
+              }
+              if (Test-Path $dir) {
+                Write-Warning "$dir could not be fully removed"
+              }
+            }
+          }
 
       # -----------------------------------------------------------------
       # Download the pre-built gpu-test-package artifact from the
@@ -110,6 +123,7 @@ jobs:
           if_no_artifact_found: fail
 
       - name: Verify package contents
+        id: verify-package
         shell: cmd
         run: |
           if not exist gpu-test-package\bin\hip-onnx-runner.exe (
@@ -127,6 +141,7 @@ jobs:
       # TheRock HIP runtime (required by MorphiZen EP at inference time)
       # -----------------------------------------------------------------
       - name: Download & extract TheRock
+        id: setup-therock
         shell: powershell
         run: |
           $dist = "${{ runner.workspace }}\therock-dist"
@@ -142,15 +157,11 @@ jobs:
       #  Models: runner-local test-models\single-op\ directory
       # =================================================================
       - name: Run single-op perf tests
-        if: always()
+        if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
         timeout-minutes: 30
         shell: cmd
         run: |
           setlocal enabledelayedexpansion
-          if not exist "gpu-test-package\bin" (
-            echo [SKIP] gpu-test-package not found, artifact download may have failed
-            exit /b 0
-          )
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
@@ -188,15 +199,11 @@ jobs:
       #  EP vs CPU comparison for each op model
       # =================================================================
       - name: Run single-op L2 accuracy tests
-        if: always()
+        if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
         timeout-minutes: 30
         shell: cmd
         run: |
           setlocal enabledelayedexpansion
-          if not exist "gpu-test-package\bin" (
-            echo [SKIP] gpu-test-package not found, artifact download may have failed
-            exit /b 0
-          )
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
@@ -242,15 +249,11 @@ jobs:
       #  Models: runner-local test-models\full-model\ directory
       # =================================================================
       - name: Run full model perf tests
-        if: always()
+        if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
         timeout-minutes: 60
         shell: cmd
         run: |
           setlocal enabledelayedexpansion
-          if not exist "gpu-test-package\bin" (
-            echo [SKIP] gpu-test-package not found, artifact download may have failed
-            exit /b 0
-          )
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
@@ -288,15 +291,15 @@ jobs:
       #  Disabled by default — enable via workflow_dispatch input
       # =================================================================
       - name: Run full model L2 accuracy tests
-        if: always() && (github.event.inputs.enable_full_model_l2 == 'true')
+        if: >-
+          always() &&
+          steps.verify-package.outcome == 'success' &&
+          steps.setup-therock.outcome == 'success' &&
+          github.event.inputs.enable_full_model_l2 == 'true'
         timeout-minutes: 60
         shell: cmd
         run: |
           setlocal enabledelayedexpansion
-          if not exist "gpu-test-package\bin" (
-            echo [SKIP] gpu-test-package not found, artifact download may have failed
-            exit /b 0
-          )
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
