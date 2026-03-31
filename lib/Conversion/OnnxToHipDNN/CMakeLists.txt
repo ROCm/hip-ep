@@ -4,7 +4,14 @@
 ##
 
 add_library(OnnxToHipDNN STATIC
-  ConvertOnnxToHipDNN.cpp
+  OutlineOnnxToHipDNN.cpp
+  CompileHipDNNGraphs.cpp
+)
+
+add_dependencies(OnnxToHipDNN
+  HipDialectIncGen
+  HipTypesIncGen
+  HipOpsIncGen
 )
 
 target_include_directories(OnnxToHipDNN PRIVATE
