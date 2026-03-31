@@ -119,7 +119,7 @@ jobs:
 
       # =================================================================
       #  SINGLE-OP PERFORMANCE TESTS
-      #  Models: runner-local l2-test-models/ directory (individual ops)
+      #  Models: runner-local test-models\single-op\ directory
       # =================================================================
       - name: Run single-op perf tests
         if: always()
@@ -129,7 +129,7 @@ jobs:
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
-          set OP_MODEL_DIR=${{ runner.workspace }}\l2-test-models
+          set OP_MODEL_DIR=${{ runner.workspace }}\test-models\single-op
           if not exist "%OP_MODEL_DIR%" (
             echo [SKIP] Single-op model directory not found: %OP_MODEL_DIR%
             exit /b 0
@@ -168,7 +168,7 @@ jobs:
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
-          set OP_MODEL_DIR=${{ runner.workspace }}\l2-test-models
+          set OP_MODEL_DIR=${{ runner.workspace }}\test-models\single-op
           if not exist "%OP_MODEL_DIR%" (
             echo [SKIP] Single-op model directory not found: %OP_MODEL_DIR%
             exit /b 0
@@ -205,7 +205,7 @@ jobs:
 
       # =================================================================
       #  FULL MODEL PERFORMANCE TESTS
-      #  Models: runner-local model/ directory (all seq lengths)
+      #  Models: runner-local test-models\full-model\ directory
       # =================================================================
       - name: Run full model perf tests
         if: always()
@@ -215,7 +215,7 @@ jobs:
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
-          set MODEL_DIR=${{ runner.workspace }}\model
+          set MODEL_DIR=${{ runner.workspace }}\test-models\full-model
           if not exist "%MODEL_DIR%" (
             echo [SKIP] Full model directory not found: %MODEL_DIR%
             exit /b 0
@@ -254,7 +254,7 @@ jobs:
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
-          set MODEL_DIR=${{ runner.workspace }}\model
+          set MODEL_DIR=${{ runner.workspace }}\test-models\full-model
           if not exist "%MODEL_DIR%" (
             echo [SKIP] Full model directory not found: %MODEL_DIR%
             exit /b 0
