@@ -29,9 +29,8 @@ on:
         default: false
         type: boolean
 
-  # Uncomment to enable PR-triggered runs during debugging:
-  # pull_request:
-  #   types: [opened, synchronize, reopened, ready_for_review]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch || github.ref }}
