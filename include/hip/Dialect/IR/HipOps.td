@@ -464,24 +464,23 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
       3. gamma   (required, T) - 1D normalization weight (hidden_size)
       4. bias    (optional, T) - 1D bias (hidden_size)
 
-    Outputs (1-2 in HIP; ONNX outputs 2-3 mean/inv_std_var are training-only):
-      1. output             (required, T) - normalized result
-      2. input_skip_bias_sum (optional, T) - residual sum (input + skip [+ bias])
+    DPS output buffers (1-2, passed as Variadic `outputs`):
+      outputs[0] = output             (required, T) - normalized result
+      outputs[1] = input_skip_bias_sum (optional, T) - residual sum (input + skip [+ bias])
 
     Uses destination-passing style: output buffers are provided as arguments.
 
-    Example (without bias):
+    Example (without bias, 1 output):
     ```mlir
     hip.skip_rms_norm(%ctx)
         ins(%input, %skip, %gamma : memref<1x128x4096xf16, 1>,
                                      memref<1x128x4096xf16, 1>,
                                      memref<4096xf16, 1>)
-        outs(%output, %input_skip_bias_sum : memref<1x128x4096xf16, 1>,
-                                              memref<1x128x4096xf16, 1>)
+        outs(%output : memref<1x128x4096xf16, 1>)
         {epsilon = 1.0e-05 : f32}
     ```
 
-    Example (with bias):
+    Example (with bias, 2 outputs):
     ```mlir
     hip.skip_rms_norm(%ctx)
         ins(%input, %skip, %gamma, %bias :
@@ -504,9 +503,8 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
     // MS spec input 4 (optional)
     Optional<Hip_TensorOrMemRef>:$bias,
 
-    // DPS output buffers
-    Hip_TensorOrMemRef:$output,
-    Optional<Hip_TensorOrMemRef>:$input_skip_bias_sum,
+    // DPS output buffers: [output] or [output, input_skip_bias_sum]
+    Variadic<Hip_TensorOrMemRef>:$outputs,
 
     // Attributes
     F32Attr:$epsilon
@@ -519,12 +517,7 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
         `:` type($input) `,` type($skip) `,` type($gamma)
         ( `,` type($bias)^ )?
     `)`
-    `outs` `(`
-        $output
-        ( `,` $input_skip_bias_sum^ )?
-        `:` type($output)
-        ( `,` type($input_skip_bias_sum)^ )?
-    `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
   let hasVerifier = 1;

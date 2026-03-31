@@ -1192,8 +1192,8 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   constexpr int64_t kSkipSize = 1;
   constexpr int64_t kGammaSize = 1;
   int64_t kBiasSize = bias ? 1 : 0;
-  constexpr int64_t kOutputSize = 1;
-  int64_t kSkipOutputSize = skipOutputIsReal ? 1 : 0;
+  // Variadic outputs: always output (1) + optional skip_output (0|1)
+  int64_t kOutputsSize = 1 + (skipOutputIsReal ? 1 : 0);
   // Build operands list for hip.skip_rms_norm
   mlir::SmallVector<mlir::Value> operands;
   operands.push_back(context);
@@ -1202,6 +1202,7 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   operands.push_back(gamma);
   if (bias)
     operands.push_back(bias);
+  // DPS outs (Variadic): [output] or [output, input_skip_bias_sum]
   operands.push_back(outputInit);
   if (skipOutputInit)
     operands.push_back(skipOutputInit);
@@ -1217,16 +1218,14 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   attrs.push_back(rewriter.getNamedAttr("epsilon", epsilonAttr));
 
   // operand_segment_sizes for AttrSizedOperandSegments
-  // [ctx(1), input(1), skip(1), gamma(1), bias(0|1),
-  //  output(1), input_skip_bias_sum(0|1)]
+  // [ctx(1), input(1), skip(1), gamma(1), bias(0|1), outputs(1|2)]
   llvm::SmallVector<int32_t> segmentSizes;
   segmentSizes.push_back(kCtxSize);
   segmentSizes.push_back(kInputSize);
   segmentSizes.push_back(kSkipSize);
   segmentSizes.push_back(kGammaSize);
   segmentSizes.push_back(kBiasSize);
-  segmentSizes.push_back(kOutputSize);
-  segmentSizes.push_back(kSkipOutputSize);
+  segmentSizes.push_back(kOutputsSize);
 
   auto state = mlir::OperationState(loc, "hip.skip_rms_norm");
   state.addOperands(operands);

@@ -329,23 +329,11 @@ LogicalResult RmsNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
-// SkipRmsNormOp: ins(input, skip, gamma, [bias])
-//                outs(output, [input_skip_bias_sum])
+// SkipRmsNormOp: ins(input, skip, gamma, [bias])  outs(...variadic...)
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange SkipRmsNormOp::getDpsInitsMutable() {
-  // Fixed inputs: ctx(1) + input(1) + skip(1) + gamma(1) = 4
-  // Optional input: bias(0|1)
-  unsigned numInputs = 4;
-  if (getBias())
-    ++numInputs;
-
-  // DPS inits: output(1) + input_skip_bias_sum(0|1)
-  unsigned numInits = 1;
-  if (getInputSkipBiasSum())
-    numInits = 2;
-
-  return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/numInits);
+  return getOutputsMutable();
 }
 
 void SkipRmsNormOp::getEffects(
