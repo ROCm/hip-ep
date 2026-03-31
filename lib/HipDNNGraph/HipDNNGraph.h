@@ -17,18 +17,25 @@ typedef hipdnnHandle *hipdnnHandle_t;
 
 namespace hip::graph {
 
+/// Status code for the Status class.
 enum class StatusCode { kSuccess, kFailure };
 
+/// Lightweight status class for internal error handling.
 class Status {
 public:
+  /// Create a success status.
   static Status Success() { return Status(); }
 
+  /// Create a failure status with a message.
   static Status Failure(std::string message) {
     return Status(StatusCode::kFailure, std::move(message));
   }
 
+  /// Check if the status indicates success.
   bool ok() const { return code_ == StatusCode::kSuccess; }
+  /// Check if the status indicates failure.
   bool failed() const { return code_ == StatusCode::kFailure; }
+  /// Get the error message (empty if success).
   const std::string &message() const { return message_; }
 
 private:

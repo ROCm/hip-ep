@@ -2313,14 +2313,14 @@ private:
   }
 };
 
-// --- HipDNNExecuteOp: hip.hipdnn_execute -> hipdnn_graph_execute(state,
+// --- HipDNNGraphOp: hip.hipdnn_graph -> hipdnn_graph_execute(state,
 //     graph_id, num_io, uids, ptrs)
-struct HipDNNExecuteOpLowering
-    : public ConvertOpToLLVMPattern<HipDNNExecuteOp> {
+struct HipDNNGraphOpLowering
+    : public ConvertOpToLLVMPattern<HipDNNGraphOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
-  matchAndRewrite(HipDNNExecuteOp op, OpAdaptor adaptor,
+  matchAndRewrite(HipDNNGraphOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
@@ -2454,7 +2454,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
            ElementwiseOpLowering<AddOp, kTensorOpAdd>, SubOpLowering,
            CastOpLowering, ReduceSumOpLowering, GqaOpLowering,
            MatMulNBitsOpLowering, QMoEOpLowering,
-           HipDNNExecuteOpLowering>(typeConverter);
+           HipDNNGraphOpLowering>(typeConverter);
   patterns.insert<MiopenBinaryOpLowering<MiopenAddOp>>(typeConverter,
                                                        kMiopenAdd);
   patterns.add<MemRefAllocOpLowering, MemRefDeallocOpLowering>(typeConverter);

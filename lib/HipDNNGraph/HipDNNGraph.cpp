@@ -2,12 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  *
- * Ported from hipDNNEP's hipdnn_graph.cc -- only the ONNX graph path.
- * Key changes from hipDNNEP:
- *   - No ORT dependency (no OrtKernelContext, no Ort::ConstValueInfo)
- *   - Execute() takes raw variant_pack + workspace instead of kernel context
- *   - Public UID accessors for IR embedding
- *   - Workspace is caller-managed (GPU memory from RuntimeState)
+ * Ported from hipDNNEP's hipdnn_graph.cc for onnx-hipdnn-ep (no ORT dependency).
  */
 
 #include "HipDNNGraph.h"
@@ -33,8 +28,10 @@ namespace hip::graph {
 
 namespace {
 
+// Layout for 4D convolution tensors.
 enum class ConvLayout { NCHW, NHWC };
 
+// Compute row-major strides from shape (NCHW / default layout).
 static std::vector<int64_t> ComputeStrides(const std::vector<int64_t> &shape) {
   std::vector<int64_t> strides(shape.size());
   int64_t stride = 1;
@@ -45,6 +42,9 @@ static std::vector<int64_t> ComputeStrides(const std::vector<int64_t> &shape) {
   return strides;
 }
 
+// Compute strides for NHWC layout from an NCHW shape.
+// NHWC strides: N-stride = H*W*C, C-stride = 1, H-stride = W*C, W-stride = C.
+// The shape is still in NCHW order; only the strides reflect NHWC memory layout.
 static std::vector<int64_t>
 ComputeNHWCStrides(const std::vector<int64_t> &shape) {
   assert(shape.size() == 4 && "ComputeNHWCStrides requires a 4D shape");
@@ -52,6 +52,7 @@ ComputeNHWCStrides(const std::vector<int64_t> &shape) {
   return {H * W * C, 1, W * C, C};
 }
 
+// Compute strides for a 4D shape according to the given layout.
 static std::vector<int64_t>
 ComputeConvStrides(const std::vector<int64_t> &shape, ConvLayout layout) {
   if (layout == ConvLayout::NHWC)
@@ -59,12 +60,15 @@ ComputeConvStrides(const std::vector<int64_t> &shape, ConvLayout layout) {
   return ComputeStrides(shape);
 }
 
+// Check if a hipDNN data type is a supported floating-point type.
 static bool IsFloatDataType(hipdnn_frontend::DataType dtype) {
   return dtype == hipdnn_frontend::DataType::FLOAT ||
          dtype == hipdnn_frontend::DataType::HALF;
 }
 
-std::optional<hipdnn_frontend::DataType>
+// Determine compute data type based on input data types.
+// For float types with precision <= float32, compute in float32.
+static std::optional<hipdnn_frontend::DataType>
 GetComputeDataType(hipdnn_frontend::DataType x_dtype,
                    hipdnn_frontend::DataType w_dtype) {
   if (IsFloatDataType(x_dtype) && IsFloatDataType(w_dtype))
@@ -74,6 +78,7 @@ GetComputeDataType(hipdnn_frontend::DataType x_dtype,
 
 using TensorAttrPtr = std::shared_ptr<hipdnn_frontend::graph::TensorAttributes>;
 
+// Return true if the tensor has exactly one element (scalar).
 static bool IsScalarAttr(const TensorAttrPtr &attr) {
   int64_t numel = 1;
   for (int64_t d : attr->get_dim())
@@ -81,12 +86,14 @@ static bool IsScalarAttr(const TensorAttrPtr &attr) {
   return numel == 1;
 }
 
+// Shape and data type extracted from an MLIR tensor type.
 struct TensorInfo {
   std::vector<int64_t> shape;
   hipdnn_frontend::DataType dtype;
 };
 
-mlir::FailureOr<hipdnn_frontend::DataType>
+// Map MLIR element type to hipDNN DataType.
+static mlir::FailureOr<hipdnn_frontend::DataType>
 MLIRTypeToHipDNNDataType(mlir::Location loc, mlir::Type type) {
   using hipdnn_frontend::DataType;
   if (type.isF32())
@@ -96,8 +103,9 @@ MLIRTypeToHipDNNDataType(mlir::Location loc, mlir::Type type) {
   return mlir::emitError(loc) << "unsupported element type: " << type;
 }
 
-mlir::FailureOr<TensorInfo> GetTensorInfoStandard(mlir::Location loc,
-                                                   mlir::Type type) {
+// Extract shape and element type from standard RankedTensorType.
+static mlir::FailureOr<TensorInfo> GetTensorInfoStandard(mlir::Location loc,
+                                                         mlir::Type type) {
   auto ranked = mlir::dyn_cast<mlir::RankedTensorType>(type);
   if (!ranked)
     return mlir::emitError(loc) << "expected RankedTensorType, got: " << type;
@@ -115,7 +123,9 @@ mlir::FailureOr<TensorInfo> GetTensorInfoStandard(mlir::Location loc,
   return info;
 }
 
-mlir::FailureOr<TensorAttrPtr>
+// Create TensorAttributes from standard RankedTensorType.
+// Uses row-major (NCHW) strides; callers adjust for NHWC if needed.
+static mlir::FailureOr<TensorAttrPtr>
 CreateTensorAttrFromStandardMLIR(mlir::Location loc, mlir::Type type,
                                  int64_t uid, const std::string &name) {
   using hipdnn_frontend::graph::TensorAttributes;
@@ -133,6 +143,7 @@ CreateTensorAttrFromStandardMLIR(mlir::Location loc, mlir::Type type,
   return attr;
 }
 
+// Extract integer values from an ArrayAttr of IntegerAttr.
 static std::vector<int64_t> ExtractI64Array(mlir::ArrayAttr arr) {
   std::vector<int64_t> result;
   if (!arr)
@@ -142,6 +153,10 @@ static std::vector<int64_t> ExtractI64Array(mlir::ArrayAttr arr) {
   return result;
 }
 
+// Reshape bias from 1D [C] to 4D [1,C,1,1] for Conv addition.
+// hipDNN requires bias shape to match the output rank. If the bias is already
+// 4D or pass-by-value (scalar), no reshape is needed. Layout controls stride
+// computation (NCHW vs NHWC).
 static Status ReshapeBiasForConv(const TensorAttrPtr &bias,
                                  ConvLayout layout) {
   if (bias->get_pass_by_value())
@@ -163,11 +178,13 @@ static Status ReshapeBiasForConv(const TensorAttrPtr &bias,
                          "; expected 1D [C] or 4D [1,C,1,1]");
 }
 
-Status AddConvNodeFromOnnxMLIR(hipdnn_frontend::graph::Graph &graph,
-                               mlir::Operation *op,
-                               const std::vector<TensorAttrPtr> &input_attrs,
-                               TensorAttrPtr &output_attr,
-                               int64_t &next_uid) {
+// Add Conv operation from an onnx.Conv op to hipDNN graph.
+// Handles optional bias (3rd input) via pointwise ADD after conv_fprop.
+static Status AddConvNodeFromOnnxMLIR(hipdnn_frontend::graph::Graph &graph,
+                                      mlir::Operation *op,
+                                      const std::vector<TensorAttrPtr> &input_attrs,
+                                      TensorAttrPtr &output_attr,
+                                      int64_t &next_uid) {
   using namespace hipdnn_frontend::graph;
   using hipdnn_frontend::ConvolutionMode;
   using hipdnn_frontend::PointwiseMode;
@@ -243,11 +260,12 @@ Status AddConvNodeFromOnnxMLIR(hipdnn_frontend::graph::Graph &graph,
   return Status::Success();
 }
 
-Status AddNodeFromOnnxMLIR(hipdnn_frontend::graph::Graph &graph,
-                           mlir::Operation *op,
-                           const std::vector<TensorAttrPtr> &input_attrs,
-                           std::vector<TensorAttrPtr> &output_attrs,
-                           int64_t &next_uid) {
+// Dispatch generic ONNX MLIR op to appropriate node builder.
+static Status AddNodeFromOnnxMLIR(hipdnn_frontend::graph::Graph &graph,
+                                  mlir::Operation *op,
+                                  const std::vector<TensorAttrPtr> &input_attrs,
+                                  std::vector<TensorAttrPtr> &output_attrs,
+                                  int64_t &next_uid) {
   llvm::StringRef op_name = op->getName().getStringRef();
 
   if (op_name == "onnx.Conv") {
@@ -283,6 +301,7 @@ struct HipDNNGraphImpl {
     if (!terminator)
       return Status::Failure("Region has no terminator");
 
+    // Store output shapes for workspace sizing at execute time.
     output_shapes_.reserve(terminator->getNumOperands());
     for (mlir::Value output : terminator->getOperands()) {
       auto info = GetTensorInfoStandard(output.getLoc(), output.getType());
@@ -295,6 +314,7 @@ struct HipDNNGraphImpl {
 
     llvm::DenseMap<mlir::Value, TensorAttrPtr> value_map;
 
+    // Process block arguments as graph inputs (standard RankedTensorType).
     for (auto [idx, arg] : llvm::enumerate(block.getArguments())) {
       if (!mlir::isa<mlir::RankedTensorType>(arg.getType()))
         continue;
@@ -331,6 +351,7 @@ struct HipDNNGraphImpl {
           input_attrs.push_back(it->second);
       }
 
+      // All ONNX ops are Fusilli-compatible for now (conv only).
       all_fusilli_compatible_ = true;
 
       std::vector<TensorAttrPtr> output_attrs;
@@ -360,6 +381,7 @@ struct HipDNNGraphImpl {
       }
     }
 
+    // Mark graph outputs as non-virtual and store their UIDs.
     output_uids_.reserve(terminator->getNumOperands());
     for (mlir::Value output : terminator->getOperands()) {
       auto it = value_map.find(output);
@@ -422,12 +444,18 @@ struct HipDNNGraphImpl {
   }
 
   hipdnnHandle_t handle_;
+  // hipDNN frontend graph object.
   std::unique_ptr<hipdnn_frontend::graph::Graph> graph_;
+  // UIDs assigned to graph inputs/outputs during Build.
   std::vector<int64_t> input_uids_;
   std::vector<int64_t> output_uids_;
+  // Output tensor shapes (for workspace sizing at execute time).
   std::vector<std::vector<int64_t>> output_shapes_;
+  // UID counter for tensor attributes.
   int64_t next_uid_ = 0;
+  // Workspace size in bytes (determined at Compile time).
   int64_t workspace_size_ = 0;
+  // True when every op in the graph is handled by the Fusilli engine.
   bool all_fusilli_compatible_ = false;
 };
 

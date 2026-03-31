@@ -33,7 +33,7 @@ using CompiledGraphMap = std::shared_ptr<llvm::StringMap<OwnedGraph>>;
 /// Create the ConvertOnnxToHipDNN pass.
 ///
 /// Walks onnx.* ops, compiles supported ones via hipDNN graph API, and
-/// replaces them with hip.hipdnn_execute. Unsupported ops are left for
+/// replaces them with hip.hipdnn_graph. Unsupported ops are left for
 /// ConvertOnnxToHip.
 ///
 /// @param handle       Live hipDNN handle (GPU must be available)
