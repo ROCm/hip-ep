@@ -564,124 +564,133 @@ static int run_l2norm_output_dumps(const std::string &dir1_str,
 // Main
 // ---------------------------------------------------------------------------
 
-static void print_usage(const char *prog) {
-  std::cerr
-      << "Usage: " << prog << " -m <model.onnx> [options]\n"
-      << "   or: " << prog << " -L dir1,dir2\n\n"
-      << "Options:\n"
-      << "  -m <path>   Path to ONNX model (required for inference)\n"
-      << "  -n          CPU only; skip EP registration\n"
-      << "  -d <0-3>    Dump level: 0=off, 1=inputs, 2=outputs, 3=both\n"
-      << "              (dirs: <stem>_i_dump/ and <stem>_o_dump/;\n"
-      << "               with -n: <stem>_cpu_i_dump/ and <stem>_cpu_o_dump/)\n"
-      << "  -s <seed>   RNG seed for random inputs (default 42)\n"
-      << "  -i <dir>    Load inputs from dir "
-         "(input_<idx>_<name>_<type>.bin)\n"
-      << "  -L <d1,d2>  Compare two dump dirs element-wise (L2 norm)\n"
-      << "  -h          Show help\n";
-}
-
-int main(int argc, char *argv[]) {
-  std::string model_path_str;
-  std::string l2norm_arg;
-  std::string input_dir_str;
+struct Options {
+  std::string model;
+  std::string l2norm;
+  std::string input_dir;
   bool no_ep = false;
   int dump_level = 0;
-  unsigned int rng_seed = 42;
+  unsigned int seed = 42;
 
-  for (int i = 1; i < argc; ++i) {
-    std::string arg = argv[i];
-    if (arg == "-h") {
-      print_usage(argv[0]);
-      return 0;
-    } else if (arg == "-m") {
-      if (++i >= argc) {
-        std::cerr << "Error: -m requires a path argument.\n\n";
-        print_usage(argv[0]);
-        return 1;
+  bool parse(int argc, char **argv) {
+    for (int i = 1; i < argc; ++i) {
+      std::string arg = argv[i];
+      if (arg == "-h") {
+        return false;
+      } else if (arg == "-m") {
+        if (++i >= argc) {
+          std::cerr << "Error: -m requires a path argument.\n\n";
+          return false;
+        }
+        model = argv[i];
+      } else if (arg == "-n") {
+        no_ep = true;
+      } else if (arg == "-d") {
+        if (++i >= argc) {
+          std::cerr << "Error: -d requires a numeric argument.\n\n";
+          return false;
+        }
+        try {
+          dump_level = std::stoi(argv[i]);
+        } catch (...) {
+          std::cerr << "Error: -d value is not a valid integer.\n\n";
+          return false;
+        }
+      } else if (arg == "-s") {
+        if (++i >= argc) {
+          std::cerr << "Error: -s requires a numeric argument.\n\n";
+          return false;
+        }
+        try {
+          seed = static_cast<unsigned int>(std::stoul(argv[i]));
+        } catch (...) {
+          std::cerr << "Error: -s value is not a valid unsigned integer.\n\n";
+          return false;
+        }
+      } else if (arg == "-i") {
+        if (++i >= argc) {
+          std::cerr << "Error: -i requires a directory argument.\n\n";
+          return false;
+        }
+        input_dir = argv[i];
+      } else if (arg == "-L") {
+        if (++i >= argc) {
+          std::cerr << "Error: -L requires a dir1,dir2 argument.\n\n";
+          return false;
+        }
+        l2norm = argv[i];
+      } else {
+        std::cerr << "Error: unknown option: " << arg << "\n\n";
+        return false;
       }
-      model_path_str = argv[i];
-    } else if (arg == "-n") {
-      no_ep = true;
-    } else if (arg == "-d") {
-      if (++i >= argc) {
-        std::cerr << "Error: -d requires a numeric argument.\n\n";
-        print_usage(argv[0]);
-        return 1;
+    }
+
+    l2norm = trim_string(l2norm);
+    input_dir = trim_string(input_dir);
+
+    if (!l2norm.empty()) {
+      const auto sep = l2norm.find(',');
+      if (sep == std::string::npos) {
+        std::cerr << "Error: -L expects dir1,dir2\n\n";
+        return false;
       }
-      try {
-        dump_level = std::stoi(argv[i]);
-      } catch (...) {
-        std::cerr << "Error: -d value is not a valid integer.\n\n";
-        print_usage(argv[0]);
-        return 1;
+      if (trim_string(l2norm.substr(0, sep)).empty() ||
+          trim_string(l2norm.substr(sep + 1)).empty()) {
+        std::cerr << "Error: -L dir1,dir2 must not have empty sides.\n\n";
+        return false;
       }
-    } else if (arg == "-s") {
-      if (++i >= argc) {
-        std::cerr << "Error: -s requires a numeric argument.\n\n";
-        print_usage(argv[0]);
-        return 1;
-      }
-      try {
-        rng_seed = static_cast<unsigned int>(std::stoul(argv[i]));
-      } catch (...) {
-        std::cerr << "Error: -s value is not a valid unsigned integer.\n\n";
-        print_usage(argv[0]);
-        return 1;
-      }
-    } else if (arg == "-i") {
-      if (++i >= argc) {
-        std::cerr << "Error: -i requires a directory argument.\n\n";
-        print_usage(argv[0]);
-        return 1;
-      }
-      input_dir_str = argv[i];
-    } else if (arg == "-L") {
-      if (++i >= argc) {
-        std::cerr << "Error: -L requires a dir1,dir2 argument.\n\n";
-        print_usage(argv[0]);
-        return 1;
-      }
-      l2norm_arg = argv[i];
     } else {
-      std::cerr << "Error: unknown option: " << arg << "\n\n";
-      print_usage(argv[0]);
-      return 1;
+      if (model.empty()) {
+        std::cerr << "Error: -m is required.\n\n";
+        return false;
+      }
+      if (dump_level < 0 || dump_level > 3) {
+        std::cerr << "Error: -d must be 0, 1, 2, or 3.\n\n";
+        return false;
+      }
     }
+
+    return true;
   }
 
-  l2norm_arg = trim_string(l2norm_arg);
-  if (!l2norm_arg.empty()) {
-    const auto sep = l2norm_arg.find(',');
-    if (sep == std::string::npos) {
-      std::cerr << "Error: -L expects dir1,dir2\n\n";
-      print_usage(argv[0]);
-      return 1;
-    }
-    const std::string dir_left = trim_string(l2norm_arg.substr(0, sep));
-    const std::string dir_right = trim_string(l2norm_arg.substr(sep + 1));
-    if (dir_left.empty() || dir_right.empty()) {
-      std::cerr << "Error: -L dir1,dir2 must not have empty sides.\n\n";
-      print_usage(argv[0]);
-      return 1;
-    }
-    return run_l2norm_output_dumps(dir_left, dir_right);
+  void print_help() const {
+    std::cerr
+        << "Run an ONNX model via MorphiZen execution provider.\n\n"
+        << "Usage: hip-onnx-runner -m <model.onnx> [options]\n"
+        << "   or: hip-onnx-runner -L dir1,dir2\n\n"
+        << "Options:\n"
+        << "  -m <path>   Path to ONNX model (required for inference)\n"
+        << "  -n          CPU only; skip EP registration\n"
+        << "  -d <0-3>    Dump level: 0=off, 1=inputs, 2=outputs, 3=both\n"
+        << "              (dirs: <stem>_i_dump/ and <stem>_o_dump/;\n"
+        << "               with -n: <stem>_cpu_i_dump/ and "
+           "<stem>_cpu_o_dump/)\n"
+        << "  -s <seed>   RNG seed for random inputs (default 42)\n"
+        << "  -i <dir>    Load inputs from dir "
+           "(input_<idx>_<name>_<type>.bin)\n"
+        << "  -L <d1,d2>  Compare two dump dirs element-wise (L2 norm)\n"
+        << "  -h          Show help\n";
   }
+};
 
-  if (model_path_str.empty()) {
-    std::cerr << "Error: -m is required.\n\n";
-    print_usage(argv[0]);
+int main(int argc, char *argv[]) {
+  Options opts;
+  if (!opts.parse(argc, argv)) {
+    opts.print_help();
     return 1;
   }
 
-  if (dump_level < 0 || dump_level > 3) {
-    std::cerr << "Error: -d must be 0, 1, 2, or 3.\n\n";
-    print_usage(argv[0]);
-    return 1;
+  if (!opts.l2norm.empty()) {
+    const auto sep = opts.l2norm.find(',');
+    return run_l2norm_output_dumps(trim_string(opts.l2norm.substr(0, sep)),
+                                   trim_string(opts.l2norm.substr(sep + 1)));
   }
 
-  std::mt19937 rng(rng_seed);
-  input_dir_str = trim_string(input_dir_str);
+  const std::string model_path_str = opts.model;
+  const bool no_ep = opts.no_ep;
+  const int dump_level = opts.dump_level;
+  std::mt19937 rng(opts.seed);
+  std::string input_dir_str = opts.input_dir;
   const bool use_input_files = !input_dir_str.empty();
 
   // ORT environment
