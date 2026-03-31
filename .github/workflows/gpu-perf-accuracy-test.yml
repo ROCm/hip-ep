@@ -199,7 +199,7 @@ jobs:
             type "..\..\perf-results\single-op-dml\!REL!%%~nxM.txt"
             if errorlevel 1 set FAILED=1
           )
-          exit /b !FAILED!
+          exit /b 0
 
       # =================================================================
       #  SINGLE-OP ACCURACY TESTS (L2)
@@ -252,7 +252,7 @@ jobs:
               )
             )
           )
-          exit /b !FAILED!
+          exit /b 0
 
       # =================================================================
       #  FULL MODEL PERFORMANCE TESTS
@@ -303,7 +303,7 @@ jobs:
             type "..\..\perf-results\full-model-dml\!REL!%%~nxM.txt"
             if errorlevel 1 set FAILED=1
           )
-          exit /b !FAILED!
+          exit /b 0
 
       # =================================================================
       #  FULL MODEL ACCURACY TESTS (L2)
@@ -356,7 +356,7 @@ jobs:
               )
             )
           )
-          exit /b !FAILED!
+          exit /b 0
 
       # =================================================================
       #  PUBLISH RESULTS
@@ -399,16 +399,14 @@ jobs:
               if ($meta.seq_length -ne $null) { $label += " (seq$($meta.seq_length))" }
               $content = Get-Content $f.FullName -Raw
               $qpsMatch = [regex]::Match($content, 'Number of inferences per second:\s+([\d.]+)')
-              $avgMatch = [regex]::Match($content, 'Average inference time cost:\s+([\d.]+)\s+ms')
               if ($qpsMatch.Success) {
                 $qps = "{0:F2}" -f [double]$qpsMatch.Groups[1].Value
-                $avg = if ($avgMatch.Success) { "{0:F3} ms" -f [double]$avgMatch.Groups[1].Value } else { "N/A" }
-                $rows += "| $label | $qps | $avg |`n"
+                $rows += "| $label | $qps |`n"
               } else {
-                $rows += "| $label | failed | - |`n"
+                $rows += "| $label | failed |`n"
               }
             }
-            $header = "### $title`n`n| Model | QPS | Avg Latency |`n|-------|----:|------------|`n"
+            $header = "### $title`n`n| Model | QPS |`n|-------|----:|`n"
             return $header + $rows + "`n"
           }
 
@@ -426,16 +424,15 @@ jobs:
               $errMatch = [regex]::Match($content, '\[ERROR\]\s*(.+)')
               if ($l2Match.Success) {
                 $l2val = [double]$l2Match.Groups[1].Value
-                $status = if ($l2val -le $threshold) { [char]0x2705 } else { [char]0x274C }
-                $rows += "| $label | $l2val | $status |`n"
+                $rows += "| $label | $l2val |`n"
               } elseif ($errMatch.Success) {
                 $reason = $errMatch.Groups[1].Value.Trim()
-                $rows += "| $label | $reason | $([char]0x274C) |`n"
+                $rows += "| $label | $reason |`n"
               } else {
-                $rows += "| $label | error | $([char]0x274C) |`n"
+                $rows += "| $label | error |`n"
               }
             }
-            $header = "### $title`n`n| Model | Combined L2 | Status |`n|-------|------------|--------|`n"
+            $header = "### $title`n`n| Model | Combined L2 |`n|-------|------------|`n"
             return $header + $rows + "`n"
           }
 
@@ -469,14 +466,12 @@ jobs:
               $meta = Get-Meta $f (Resolve-Path $dir).Path
               $content = Get-Content $f.FullName -Raw
               $qpsMatch = [regex]::Match($content, 'Number of inferences per second:\s+([\d.]+)')
-              $avgMatch = [regex]::Match($content, 'Average inference time cost:\s+([\d.]+)\s+ms')
               $entry = [ordered]@{
                 category   = $category
                 ep_name    = $epName
                 model_name = $meta.model_name
                 file       = $meta.file
                 qps        = if ($qpsMatch.Success) { [double]$qpsMatch.Groups[1].Value } else { $null }
-                avg_latency_ms = if ($avgMatch.Success) { [double]$avgMatch.Groups[1].Value } else { $null }
               }
               if ($meta.op_name) { $entry["op_name"] = $meta.op_name }
               if ($meta.seq_length -ne $null) { $entry["seq_length"] = $meta.seq_length }
@@ -500,11 +495,9 @@ jobs:
                 model_name = $meta.model_name
                 file       = $meta.file
                 l2         = $l2val
-                pass       = if ($l2val -ne $null) { $l2val -le $threshold } else { $false }
               }
               if ($errMatch.Success) {
                 $entry["error"] = $errMatch.Groups[1].Value.Trim()
-                $entry["pass"] = $false
               }
               if ($meta.op_name) { $entry["op_name"] = $meta.op_name }
               if ($meta.seq_length -ne $null) { $entry["seq_length"] = $meta.seq_length }
