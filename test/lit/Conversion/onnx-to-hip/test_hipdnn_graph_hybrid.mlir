@@ -3,9 +3,10 @@
 
 // ============================================================================
 // TEST PURPOSE:
-// Verify that hip.hipdnn_graph ops (produced by ConvertOnnxToHipDNN) pass
-// through ConvertOnnxToHip unchanged, while remaining ONNX ops are lowered
-// to their HIP dialect equivalents (hybrid execution model).
+// Verify that hip.hipdnn_graph ops (produced by OutlineOnnxToHipDNN +
+// CompileHipDNNGraphs) pass through ConvertOnnxToHip unchanged, while
+// remaining ONNX ops are lowered to their HIP dialect equivalents (hybrid
+// execution model).
 //
 // This test validates:
 // - hip.hipdnn_graph survives ConvertOnnxToHip (not an onnx.* op)
@@ -26,7 +27,7 @@ module {
                         %w_fc: tensor<8x8xf32>) -> tensor<1x1x8x8xf32> {
     %empty = tensor.empty() : tensor<1x1x8x8xf32>
 
-    // Conv was already compiled by ConvertOnnxToHipDNN → hip.hipdnn_graph
+    // Conv was already compiled by CompileHipDNNGraphs → hip.hipdnn_graph
     %conv_out = hip.hipdnn_graph(%ctx) graph_id(0)
         ins(%x, %w_conv : tensor<1x1x8x8xf32>, tensor<1x1x3x3xf32>)
         outs(%empty : tensor<1x1x8x8xf32>)
