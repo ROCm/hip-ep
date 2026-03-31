@@ -384,7 +384,7 @@ jobs:
         with:
           name: gpu-test-package
           path: staging/
-          retention-days: 3
+          retention-days: ${{ github.ref == 'refs/heads/main' && 14 || 3 }}
 
   # ---------------------------------------------------------------------------
   # GPU test job: runs on the self-hosted machine with a real AMD GPU.
