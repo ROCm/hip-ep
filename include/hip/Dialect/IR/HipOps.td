@@ -961,6 +961,70 @@ def Hip_GqaOp : Hip_DpsOp<"gqa", [AttrSizedOperandSegments]> {
   let hasVerifier = 1;
 }
 
+// ===== hipDNN Graph Outlining + Execution ====================================
+
+def Hip_YieldOp : Hip_Op<"yield", [Pure, Terminator,
+    HasParent<"HipDNNGraphOutlineOp">]> {
+  let summary = "Yield results from a hipDNN graph outline region";
+  let description = [{
+    Terminates the body of a `hip.hipdnn_graph_outline` operation, forwarding
+    the computed results back to the parent op.
+
+    Example:
+    ```mlir
+    hip.yield %result : tensor<1x1x8x8xf32>
+    ```
+  }];
+
+  let arguments = (ins Variadic<AnyRankedTensor>:$values);
+
+  let builders = [
+    OpBuilder<(ins), [{
+      build($_builder, $_state, ::mlir::ValueRange{});
+    }]>
+  ];
+
+  let assemblyFormat = "($values^ `:` type($values))? attr-dict";
+}
+
+def Hip_HipDNNGraphOutlineOp : Hip_Op<"hipdnn_graph_outline", [
+    SingleBlockImplicitTerminator<"YieldOp">,
+    IsolatedFromAbove
+]> {
+  let summary = "Outlined ONNX subgraph for hipDNN graph compilation";
+  let description = [{
+    Wraps one or more ONNX operations that are candidates for hipDNN graph
+    compilation. The region captures only tensor operands as block arguments
+    and is isolated from above.
+
+    Created by the OutlineOnnxToHipDNN pass (handle-free, CLI-testable).
+    Consumed by the CompileHipDNNGraphs pass, which either:
+    - Compiles the region via hipDNN and replaces this op with hip.hipdnn_graph
+    - Un-outlines (inlines the region back) on compilation failure
+
+    Example:
+    ```mlir
+    %0 = hip.hipdnn_graph_outline
+        ins(%x, %w : tensor<1x1x8x8xf32>, tensor<1x1x3x3xf32>)
+        -> tensor<1x1x8x8xf32> {
+      ^bb0(%arg0: tensor<1x1x8x8xf32>, %arg1: tensor<1x1x3x3xf32>):
+        %1 = "onnx.Conv"(%arg0, %arg1) {auto_pad = "NOTSET", group = 1 : si64,
+             kernel_shape = [3, 3], pads = [1, 1, 1, 1], strides = [1, 1]}
+             : (tensor<1x1x8x8xf32>, tensor<1x1x3x3xf32>) -> tensor<1x1x8x8xf32>
+        hip.yield %1 : tensor<1x1x8x8xf32>
+    }
+    ```
+  }];
+
+  let arguments = (ins Variadic<AnyRankedTensor>:$inputs);
+  let results = (outs Variadic<AnyRankedTensor>:$results);
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    `ins` `(` $inputs `:` type($inputs) `)` `->` type($results)
+    $body attr-dict
+  }];
+}
+
 // ===== hipDNN Graph Execution ================================================
 
 def Hip_HipDNNGraphOp : Hip_DpsOp<"hipdnn_graph", [
