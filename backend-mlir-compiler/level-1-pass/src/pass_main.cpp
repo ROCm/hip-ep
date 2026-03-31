@@ -98,10 +98,10 @@ static std::vector<ConstantRef> collect_constant_refs(Graph &graph) {
   auto *api = get_morphizen_ort_api_mlir();
   if (!api || !api->graph_get_external_constant_refs)
     return refs;
-  auto *ext_refs = api->graph_get_external_constant_refs(graph);
-  if (!ext_refs)
+  auto ext_refs = api->graph_get_external_constant_refs(graph);
+  if (ext_refs.empty())
     return refs;
-  for (const auto &r : *ext_refs) {
+  for (const auto &r : ext_refs) {
     if (r.data && r.size > 0)
       refs.push_back({r.name, r.data, r.size});
   }
