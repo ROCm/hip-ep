@@ -5,21 +5,21 @@
 #ifndef HIP_CONVERSION_ONNX_TO_HIPDNN_PASSES_H
 #define HIP_CONVERSION_ONNX_TO_HIPDNN_PASSES_H
 
-#include "llvm/ADT/StringMap.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/StringMap.h"
 
 #include <memory>
 
 struct hipdnnHandle;
 typedef hipdnnHandle *hipdnnHandle_t;
 
-namespace mlir {
-namespace hip {
+namespace mlir::hip {
 
 /// Custom deleter for type-erased HipDNNGraph pointers.
 /// Implemented in CompileHipDNNGraphs.cpp where the real type is visible.
 /// Using void* avoids introducing the global ::hip namespace, which collides
-/// with ::mlir::hip when unqualified "hip::" is used with "using namespace mlir".
+/// with ::mlir::hip when unqualified "hip::" is used with "using namespace
+/// mlir".
 struct GraphDeleter {
   void operator()(void *ptr) const;
 };
@@ -44,10 +44,10 @@ std::unique_ptr<Pass> createOutlineOnnxToHipDNNPass();
 ///
 /// @param handle        Live hipDNN handle (GPU must be available)
 /// @param output_graphs Map to store compiled graphs (populated by the pass)
-std::unique_ptr<Pass> createCompileHipDNNGraphsPass(
-    hipdnnHandle_t handle, CompiledGraphMap output_graphs);
+std::unique_ptr<Pass>
+createCompileHipDNNGraphsPass(hipdnnHandle_t handle,
+                              CompiledGraphMap output_graphs);
 
-} // namespace hip
-} // namespace mlir
+} // namespace mlir::hip
 
 #endif // HIP_CONVERSION_ONNX_TO_HIPDNN_PASSES_H
