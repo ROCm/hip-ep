@@ -1033,7 +1033,7 @@ def Hip_HipDNNGraphOp : Hip_DpsOp<"hipdnn_graph", [
   let summary = "Execute a pre-compiled hipDNN graph";
   let description = [{
     Dispatches to a pre-compiled hipDNN graph identified by graph_id.
-    The graph was compiled during the ConvertOnnxToHipDNN pass and stored
+    The graph was compiled during the CompileHipDNNGraphs pass and stored
     in the graph registry attached to RuntimeState.
 
     At runtime, looks up the graph by ID and calls graph->Execute() with

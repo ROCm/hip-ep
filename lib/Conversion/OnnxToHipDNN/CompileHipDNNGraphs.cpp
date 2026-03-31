@@ -118,7 +118,12 @@ void CompileHipDNNGraphsPass::runOnOperation() {
 
       SmallVector<Value> outs;
       for (auto result_type : outlineOp->getResultTypes()) {
-        auto tensor_type = cast<RankedTensorType>(result_type);
+        auto tensor_type = dyn_cast<RankedTensorType>(result_type);
+        if (!tensor_type) {
+          outlineOp->emitError("expected ranked tensor result type");
+          signalPassFailure();
+          return;
+        }
         auto empty = tensor::EmptyOp::create(
             builder, loc, tensor_type.getShape(),
             tensor_type.getElementType());
