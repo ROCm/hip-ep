@@ -308,9 +308,13 @@ int main(int argc, char *argv[]) {
         uint32_t sign = (fbits >> 16) & 0x8000;
         int32_t exp = ((fbits >> 23) & 0xff) - 127 + 15;
         uint32_t mant = (fbits >> 13) & 0x3ff;
-        if (exp <= 0) { p[j] = (uint16_t)sign; }
-        else if (exp >= 31) { p[j] = (uint16_t)(sign | 0x7c00); }
-        else { p[j] = (uint16_t)(sign | (exp << 10) | mant); }
+        if (exp <= 0) {
+          p[j] = (uint16_t)sign;
+        } else if (exp >= 31) {
+          p[j] = (uint16_t)(sign | 0x7c00);
+        } else {
+          p[j] = (uint16_t)(sign | (exp << 10) | mant);
+        }
       }
     }
 
@@ -347,16 +351,16 @@ int main(int argc, char *argv[]) {
         auto info = outputs[i].GetTensorTypeAndShapeInfo();
         auto dtype = info.GetElementType();
         auto shape = info.GetShape();
-        std::cout << "  " << output_names_str[i]
-                  << ": type=" << (int)dtype << " shape=[";
-        for (auto d : shape) std::cout << d << ",";
+        std::cout << "  " << output_names_str[i] << ": type=" << (int)dtype
+                  << " shape=[";
+        for (auto d : shape)
+          std::cout << d << ",";
         std::cout << "]\n";
 
         ep_output_shapes.push_back(shape);
         size_t elem_sz = element_byte_size(dtype);
         size_t byte_count = calculate_product(shape) * elem_sz;
-        auto *data =
-            static_cast<const char *>(outputs[i].GetTensorRawData());
+        auto *data = static_cast<const char *>(outputs[i].GetTensorRawData());
         ep_output_bufs.emplace_back(data, data + byte_count);
       }
     } catch (const Ort::Exception &e) {
@@ -390,10 +394,9 @@ int main(int argc, char *argv[]) {
     }
 
     try {
-      auto cpu_outputs =
-          cpu_session->Run(Ort::RunOptions{}, input_names.data(),
-                           input_tensors.data(), input_count,
-                           output_names.data(), output_count);
+      auto cpu_outputs = cpu_session->Run(Ort::RunOptions{}, input_names.data(),
+                                          input_tensors.data(), input_count,
+                                          output_names.data(), output_count);
       std::cout << "CPU OK - " << cpu_outputs.size() << " output tensor(s)\n";
 
       std::cout << "\n=== Output Values (first 5) ===\n";
@@ -402,15 +405,19 @@ int main(int argc, char *argv[]) {
         auto dtype = info.GetElementType();
         int64_t n = calculate_product(info.GetShape());
         int64_t show = std::min(n, (int64_t)5);
-        const auto *ep_raw = reinterpret_cast<const char *>(ep_output_bufs[i].data());
-        const auto *cpu_raw = static_cast<const char *>(cpu_outputs[i].GetTensorRawData());
+        const auto *ep_raw =
+            reinterpret_cast<const char *>(ep_output_bufs[i].data());
+        const auto *cpu_raw =
+            static_cast<const char *>(cpu_outputs[i].GetTensorRawData());
         std::cout << "  " << output_names_str[i] << " (n=" << n << "):\n";
         std::cout << "    CPU: ";
         for (int64_t j = 0; j < show; ++j)
-          std::cout << std::fixed << std::setprecision(4) << tensor_elem(cpu_raw, dtype, j) << " ";
+          std::cout << std::fixed << std::setprecision(4)
+                    << tensor_elem(cpu_raw, dtype, j) << " ";
         std::cout << "\n    EP:  ";
         for (int64_t j = 0; j < show; ++j)
-          std::cout << std::fixed << std::setprecision(4) << tensor_elem(ep_raw, dtype, j) << " ";
+          std::cout << std::fixed << std::setprecision(4)
+                    << tensor_elem(ep_raw, dtype, j) << " ";
         std::cout << "\n";
       }
 
@@ -436,7 +443,8 @@ int main(int argc, char *argv[]) {
           float cv = tensor_elem(cpu_raw, dtype, j);
           if (std::isnan(ev) || std::isnan(cv)) {
             ++nan_count;
-            if (std::isnan(ev) != std::isnan(cv)) ++mismatch_nan;
+            if (std::isnan(ev) != std::isnan(cv))
+              ++mismatch_nan;
             continue;
           }
           if (std::isinf(ev) || std::isinf(cv)) {
@@ -454,19 +462,22 @@ int main(int argc, char *argv[]) {
         }
 
         double denom = std::sqrt(norm_ep) * std::sqrt(norm_cpu);
-        double cosine = (denom > 1e-30) ? dot / denom : (max_abs_diff < 1e-6 ? 1.0 : 0.0);
+        double cosine =
+            (denom > 1e-30) ? dot / denom : (max_abs_diff < 1e-6 ? 1.0 : 0.0);
         double rel_diff = max_abs_diff / (max_cpu_abs + 1e-10);
-        bool pass = (cosine > 0.95 || max_abs_diff < 1e-6) && rel_diff < 0.5
-                    && mismatch_nan == 0;
+        bool pass = (cosine > 0.95 || max_abs_diff < 1e-6) && rel_diff < 0.5 &&
+                    mismatch_nan == 0;
         if (!pass)
           all_pass = false;
 
-        std::cout << "  " << output_names_str[i] << ": max_abs="
-                  << std::scientific << std::setprecision(4) << max_abs_diff
-                  << " rel=" << rel_diff << " cosine=" << std::fixed
-                  << std::setprecision(4) << cosine;
-        if (nan_count) std::cout << " nan=" << nan_count;
-        if (inf_count) std::cout << " inf=" << inf_count;
+        std::cout << "  " << output_names_str[i]
+                  << ": max_abs=" << std::scientific << std::setprecision(4)
+                  << max_abs_diff << " rel=" << rel_diff
+                  << " cosine=" << std::fixed << std::setprecision(4) << cosine;
+        if (nan_count)
+          std::cout << " nan=" << nan_count;
+        if (inf_count)
+          std::cout << " inf=" << inf_count;
         std::cout << " [" << (pass ? "PASS" : "FAIL") << "]\n";
       }
       std::cout << "\nResult: " << (all_pass ? "ALL PASS" : "FAIL") << "\n";

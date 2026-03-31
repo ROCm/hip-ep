@@ -80,10 +80,10 @@ void buildOnnxToHipPipeline(OpPassManager &pm,
 ///
 /// Same as the FileSystem overload, but constants referenced by
 /// hip.constant_ref attributes are resolved from \p constantDataMap.
-void buildOnnxToHipPipeline(
-    OpPassManager &pm, const OnnxToHipPipelineOptions &options,
-    morphizen::FileSystem *fs,
-    const void *constantDataMap);
+void buildOnnxToHipPipeline(OpPassManager &pm,
+                            const OnnxToHipPipelineOptions &options,
+                            morphizen::FileSystem *fs,
+                            const void *constantDataMap);
 
 /// Build the HIP-to-LLVM lowering pipeline. This is a separate pipeline
 /// (not part of buildOnnxToHipPipeline) because the LLVM lowering is only

@@ -39,9 +39,9 @@ std::unique_ptr<Pass> createConvertOnnxToHipPass(
 /// Creates a pass with zero-copy constant data. Constants referenced by
 /// hip.constant_ref attributes in the MLIR are resolved from
 /// \p constantDataMap (name -> {ptr, size}) and written to constants.bin.
-std::unique_ptr<Pass> createConvertOnnxToHipPass(
-    morphizen::FileSystem *fs, int64_t minNumElements,
-    const ConstantDataMap *constantDataMap);
+std::unique_ptr<Pass>
+createConvertOnnxToHipPass(morphizen::FileSystem *fs, int64_t minNumElements,
+                           const ConstantDataMap *constantDataMap);
 
 } // namespace hip
 } // namespace mlir

@@ -104,9 +104,10 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   buildOnnxToHipPipelineTail(pm);
 }
 
-void mlir::hip::buildOnnxToHipPipeline(
-    OpPassManager &pm, const OnnxToHipPipelineOptions &options,
-    morphizen::FileSystem *fs, const void *constantDataMap) {
+void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
+                                       const OnnxToHipPipelineOptions &options,
+                                       morphizen::FileSystem *fs,
+                                       const void *constantDataMap) {
   pm.addPass(createHipAddContextArgPass());
 
   if (fs) {

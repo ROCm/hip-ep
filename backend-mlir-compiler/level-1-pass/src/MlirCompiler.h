@@ -63,11 +63,9 @@ public:
                       const CompilationConfig &config,
                       morphizen::FileSystem *fs);
 
-  static std::optional<CompilationArtifact>
-  compileFromBytecodeWithConstants(const std::string &mlir_bytecode,
-                                  const CompilationConfig &config,
-                                  morphizen::FileSystem *fs,
-                                  const std::vector<ConstantRef> &constants);
+  static std::optional<CompilationArtifact> compileFromBytecodeWithConstants(
+      const std::string &mlir_bytecode, const CompilationConfig &config,
+      morphizen::FileSystem *fs, const std::vector<ConstantRef> &constants);
 };
 
 } // namespace hipdnn::level1pass

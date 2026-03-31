@@ -282,9 +282,10 @@ MlirCustomOp::MlirCustomOp(
   auto fs =
       const_cast<morphizen::PassContext *>(context.get())->get_file_system();
   // Create inference state from DLL bytes (uses morphizen::Plugin)
-  auto artifact_bytes = load_artifact_from_epcontext(context, metadata_.artifact_filename());
-  inference_state_ = customop::InferenceState::create(
-      std::move(artifact_bytes), fs.get());
+  auto artifact_bytes =
+      load_artifact_from_epcontext(context, metadata_.artifact_filename());
+  inference_state_ =
+      customop::InferenceState::create(std::move(artifact_bytes), fs.get());
 }
 
 void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
