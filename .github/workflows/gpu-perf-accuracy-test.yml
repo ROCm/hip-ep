@@ -28,11 +28,6 @@ on:
         required: false
         default: "30"
         type: string
-      enable_full_model_l2:
-        description: "Run L2 accuracy tests on full models (slow)"
-        required: false
-        default: false
-        type: boolean
 
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -291,11 +286,7 @@ jobs:
       #  Disabled by default — enable via workflow_dispatch input
       # =================================================================
       - name: Run full model L2 accuracy tests
-        if: >-
-          always() &&
-          steps.verify-package.outcome == 'success' &&
-          steps.setup-therock.outcome == 'success' &&
-          github.event.inputs.enable_full_model_l2 == 'true'
+        if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
         timeout-minutes: 60
         shell: cmd
         run: |
