@@ -2366,7 +2366,7 @@ struct HipDNNGraphOpLowering
                                             arrayPtrType, oneConst, 8);
 
     // Store UIDs (compile-time constants from attributes)
-    for (int32_t i = 0; i < numInputs; ++i) {
+    for (int32_t i : llvm::seq<int32_t>(numInputs)) {
       int64_t uid =
           cast<IntegerAttr>(inputUidsAttr[i]).getValue().getSExtValue();
       Value uidVal = LLVM::ConstantOp::create(
@@ -2377,7 +2377,7 @@ struct HipDNNGraphOpLowering
                                           uidsArr, idxVal);
       LLVM::StoreOp::create(rewriter, loc, uidVal, gepUid);
     }
-    for (int32_t i = 0; i < numOutputs; ++i) {
+    for (int32_t i : llvm::seq<int32_t>(numOutputs)) {
       int64_t uid =
           cast<IntegerAttr>(outputUidsAttr[i]).getValue().getSExtValue();
       Value uidVal = LLVM::ConstantOp::create(
@@ -2391,7 +2391,7 @@ struct HipDNNGraphOpLowering
     }
 
     // Store aligned_ptr from each memref descriptor
-    for (int32_t i = 0; i < numInputs; ++i) {
+    for (int32_t i : llvm::seq<int32_t>(numInputs)) {
       Value ptr =
           extractMemRefPtr(adaptor.getInputs()[i], rewriter, loc);
       Value idxVal = LLVM::ConstantOp::create(
@@ -2400,7 +2400,7 @@ struct HipDNNGraphOpLowering
                                           ptrsArr, idxVal);
       LLVM::StoreOp::create(rewriter, loc, ptr, gepPtr);
     }
-    for (int32_t i = 0; i < numOutputs; ++i) {
+    for (int32_t i : llvm::seq<int32_t>(numOutputs)) {
       Value ptr =
           extractMemRefPtr(adaptor.getOutputs()[i], rewriter, loc);
       Value idxVal = LLVM::ConstantOp::create(
