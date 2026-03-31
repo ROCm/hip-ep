@@ -112,12 +112,14 @@ static size_t element_byte_size(ONNXTensorElementDataType t) {
 struct Options {
   std::string model_path;
   bool no_ep = false;
+  bool skip_cpu = false;
 };
 
 static void print_usage(const char *argv0) {
   std::cout << "Usage: " << argv0 << " <model.onnx> [options]\n"
             << "\nOptions:\n"
             << "  -n, --no-ep                 CPU only, skip EP\n"
+            << "  -s, --skip-cpu              Skip CPU comparison\n"
             << "  -h, --help                  Show this help\n";
 }
 
@@ -132,6 +134,8 @@ static Options parse_args(int argc, char *argv[]) {
       std::exit(0);
     } else if (arg == "-n" || arg == "--no-ep") {
       opts.no_ep = true;
+    } else if (arg == "-s" || arg == "--skip-cpu") {
+      opts.skip_cpu = true;
     } else if (arg[0] != '-' && !model_set) {
       opts.model_path = arg;
       model_set = true;
@@ -367,7 +371,7 @@ int main(int argc, char *argv[]) {
   }
 
   // Run CPU-only inference for accuracy comparison
-  if (!opts.no_ep) {
+  if (!opts.no_ep && !opts.skip_cpu) {
     std::cout << "\nRunning CPU inference for comparison...\n";
     Ort::SessionOptions cpu_opts;
     cpu_opts.SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);
