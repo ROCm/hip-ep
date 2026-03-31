@@ -2,11 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  *
- * Ported from hipDNNEP's convert_onnx_to_hipdnn_pass.cc.
- *
- * Key behavioral difference: hipDNNEP fails the pass if any onnx.* op can't
- * be compiled (it expects ALL ops to go through hipDNN). This version SKIPS
- * unsupported ops, leaving them for ConvertOnnxToHip to handle (hybrid model).
+ * Ported from hipDNNEP; skips unsupported ops (hybrid model) instead of failing.
  */
 
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
@@ -63,19 +59,14 @@ compileOnnxOp(Operation *onnx_op, ModuleOp module, hipdnnHandle_t handle) {
   auto graph = std::make_unique<::hip::graph::HipDNNGraph>(handle);
   auto status = graph->BuildFromOnnxMLIR(temp_func.getBody());
   if (status.failed()) {
-    llvm::errs() << "[ConvertOnnxToHipDNN] BuildFromOnnxMLIR failed: "
-                 << status.message() << "\n";
     temp_func->erase();
     return nullptr;
   }
 
   status = graph->Compile();
   temp_func->erase();
-  if (status.failed()) {
-    llvm::errs() << "[ConvertOnnxToHipDNN] Compile failed: "
-                 << status.message() << "\n";
+  if (status.failed())
     return nullptr;
-  }
 
   return graph;
 }
@@ -95,7 +86,7 @@ struct ConvertOnnxToHipDNNPass
   StringRef getArgument() const override { return "convert-onnx-to-hipdnn"; }
 
   StringRef getDescription() const override {
-    return "Convert supported ONNX ops to hip.hipdnn_execute via hipDNN graph "
+    return "Convert supported ONNX ops to hip.hipdnn_graph via hipDNN graph "
            "compilation (unsupported ops pass through to ConvertOnnxToHip)";
   }
 
@@ -120,6 +111,7 @@ void ConvertOnnxToHipDNNPass::runOnOperation() {
     if (func.isDeclaration())
       continue;
 
+    // Collect onnx.* ops first (can't modify while walking).
     SmallVector<Operation *> onnx_ops;
     func->walk([&](Operation *op) {
       if (isSupportedOp(op))
@@ -138,10 +130,9 @@ void ConvertOnnxToHipDNNPass::runOnOperation() {
           "hipdnn_graph_" + std::to_string(graph_count_);
       int32_t graph_id = graph_count_++;
 
+      // Create replacement: tensor.empty for DPS outputs + hip.hipdnn_graph.
       OpBuilder builder(onnx_op);
       auto loc = onnx_op->getLoc();
-
-      // Create tensor.empty for DPS output destinations
       SmallVector<Value> outs;
       for (auto result_type : onnx_op->getResultTypes()) {
         auto tensor_type = cast<RankedTensorType>(result_type);
@@ -162,7 +153,7 @@ void ConvertOnnxToHipDNNPass::runOnOperation() {
 
       SmallVector<Value> inputs(onnx_op->getOperands());
 
-      auto exec_op = HipDNNExecuteOp::create(
+      auto exec_op = HipDNNGraphOp::create(
           builder, loc,
           /*result_tensors=*/onnx_op->getResultTypes(),
           /*ctx=*/func.getArgument(0),

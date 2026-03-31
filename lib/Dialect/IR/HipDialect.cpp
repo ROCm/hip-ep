@@ -746,14 +746,14 @@ LogicalResult GqaOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
-// HipDNNExecuteOp: ins(variadic), outs(variadic)
+// HipDNNGraphOp: ins(variadic), outs(variadic)
 //===----------------------------------------------------------------------===//
 
-MutableOperandRange HipDNNExecuteOp::getDpsInitsMutable() {
+MutableOperandRange HipDNNGraphOp::getDpsInitsMutable() {
   return getOutputsMutable();
 }
 
-void HipDNNExecuteOp::getEffects(
+void HipDNNGraphOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);

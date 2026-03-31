@@ -5,12 +5,7 @@
 
 //===- hipdnn_graph_runtime.cpp - hipDNN graph registry + execute ---------===//
 //
-// Shared library that owns compiled HipDNNGraph objects and exposes a C API
-// for model.dll to call. Mirrors hipDNNEP's Kernel::Execute() role.
-//
-// Same-process singleton: hip-compiler.dll populates g_default_registry and
-// g_default_handle during compilation. model.dll's hipdnn_graph_execute falls
-// back to these when RuntimeState fields are nullptr.
+// C API for compiled hipDNN graph dispatch. See hipdnn_graph_runtime.h.
 //
 //===----------------------------------------------------------------------===//
 
@@ -26,6 +21,17 @@
 #include <vector>
 
 namespace {
+
+// Error codes returned by hipdnn_graph_execute.
+enum GraphExecError {
+  kSuccess = 0,
+  kNullArgs = -1,
+  kNoRegistry = -2,
+  kGraphNotFound = -3,
+  kWorkspaceAlloc = -4,
+  kExecuteFailed = -5,
+  kNoHandle = -6,
+};
 
 // Layout-compatible mirror of RuntimeState (defined in runtime_state_internal.h).
 // We cannot include the real header because runtime_types.h pulls in
@@ -50,6 +56,7 @@ struct RuntimeStateLayout {
   void *hipdnn_graph_registry;
 };
 
+// Grow the RuntimeState workspace if needed; no-op when already large enough.
 static int ensureWorkspace(RuntimeStateLayout *state, size_t needed_size) {
   if (!state || needed_size == 0)
     return 0;
@@ -70,6 +77,7 @@ static int ensureWorkspace(RuntimeStateLayout *state, size_t needed_size) {
   return 0;
 }
 
+// Owns compiled HipDNNGraph objects indexed by graph_id.
 struct GraphRegistry {
   std::vector<std::unique_ptr<hip::graph::HipDNNGraph>> graphs;
 
@@ -141,25 +149,28 @@ void hipdnn_graph_runtime_attach(void *state_ptr, void *handle,
 int32_t hipdnn_graph_execute(void *state_ptr, int32_t graph_id, int32_t num_io,
                              int64_t *uids, void **ptrs) {
   if (!state_ptr || !uids || !ptrs)
-    return -1;
+    return kNullArgs;
 
   auto *state = static_cast<RuntimeStateLayout *>(state_ptr);
 
+  // Look up the graph registry -- fall back to process-level singleton.
   auto *registry =
       static_cast<GraphRegistry *>(state->hipdnn_graph_registry);
   if (!registry)
     registry = g_default_registry;
   if (!registry)
-    return -2;
+    return kNoRegistry;
 
   auto *graph = registry->lookup(graph_id);
   if (!graph)
-    return -3;
+    return kGraphNotFound;
 
+  // Build the variant_pack mapping compile-time UIDs to runtime GPU pointers.
   std::unordered_map<int64_t, void *> variant_pack;
   for (int32_t i = 0; i < num_io; ++i)
     variant_pack[uids[i]] = ptrs[i];
 
+  // Ensure workspace is large enough for this graph's requirements.
   int64_t ws_size = graph->getWorkspaceSize();
   if (ws_size > 0) {
     int ret = ensureWorkspace(state, static_cast<size_t>(ws_size));
@@ -167,26 +178,27 @@ int32_t hipdnn_graph_execute(void *state_ptr, int32_t graph_id, int32_t num_io,
       fprintf(stderr,
               "hipdnn_graph_execute: workspace allocation failed for graph %d\n",
               graph_id);
-      return -4;
+      return kWorkspaceAlloc;
     }
   }
   void *workspace = (ws_size > 0) ? state->workspace : nullptr;
 
+  // Get the hipDNN handle -- fall back to process-level singleton.
   void *handle = state->hipdnn_handle;
   if (!handle)
     handle = g_default_handle;
   if (!handle)
-    return -6;
+    return kNoHandle;
 
   auto status = graph->Execute(static_cast<hipdnnHandle_t>(handle),
                                variant_pack, workspace);
   if (status.failed()) {
     fprintf(stderr, "hipdnn_graph_execute: graph %d failed: %s\n", graph_id,
             status.message().c_str());
-    return -5;
+    return kExecuteFailed;
   }
 
-  return 0;
+  return kSuccess;
 }
 
 } // extern "C"

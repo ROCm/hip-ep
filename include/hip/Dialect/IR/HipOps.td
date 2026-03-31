@@ -963,7 +963,7 @@ def Hip_GqaOp : Hip_DpsOp<"gqa", [AttrSizedOperandSegments]> {
 
 // ===== hipDNN Graph Execution ================================================
 
-def Hip_HipDNNExecuteOp : Hip_DpsOp<"hipdnn_execute", [
+def Hip_HipDNNGraphOp : Hip_DpsOp<"hipdnn_graph", [
     AttrSizedOperandSegments
 ]> {
   let summary = "Execute a pre-compiled hipDNN graph";
@@ -980,7 +980,7 @@ def Hip_HipDNNExecuteOp : Hip_DpsOp<"hipdnn_execute", [
 
     Example:
     ```mlir
-    hip.hipdnn_execute(%ctx) graph_id(0)
+    hip.hipdnn_graph(%ctx) graph_id(0)
         ins(%input, %weights : tensor<1x3x224x224xf32>, tensor<64x3x7x7xf32>)
         outs(%output : tensor<1x64x112x112xf32>)
         {input_uids = [0 : i64, 1 : i64], output_uids = [2 : i64]}
