@@ -445,46 +445,79 @@ def Hip_RmsNormOp : Hip_DpsOp<"rms_norm"> {
   let hasVerifier = 1;
 }
 
-def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm"> {
-  let summary = "Fused Add + RMS normalization via miopenAddLayerNormForward (T5 mode)";
+def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
+    [AttrSizedOperandSegments]> {
+  let summary = "Fused skip + RMS normalization (com.microsoft.SkipSimplifiedLayerNormalization)";
   let description = [{
-    Performs fused skip connection addition followed by RMS normalization.
-    Implements the Microsoft SkipSimplifiedLayerNormalization operator.
+    Full alignment with Microsoft ONNX Runtime SkipSimplifiedLayerNormalization
+    specification (v1).
 
-    This operation combines two steps:
-      1. skip_output = input + skip  (residual connection)
-      2. output = RMSNorm(skip_output) * gamma  (RMS normalization)
+    Performs fused skip connection addition followed by RMS normalization:
+      input_skip_bias_sum = input + skip [+ bias]
+      output = RMSNorm(input_skip_bias_sum) * gamma
+
+    RMSNorm(x) = x / sqrt(mean(x^2) + epsilon)
+
+    Inputs (3-4):
+      1. input   (required, T) - 3D or 2D input tensor
+      2. skip    (required, T) - skip connection tensor (same shape as input)
+      3. gamma   (required, T) - 1D normalization weight (hidden_size)
+      4. bias    (optional, T) - 1D bias (hidden_size)
+
+    DPS output buffers (1-2, passed as Variadic `outputs`):
+      outputs[0] = output             (required, T) - normalized result
+      outputs[1] = input_skip_bias_sum (optional, T) - residual sum (input + skip [+ bias])
 
     Uses destination-passing style: output buffers are provided as arguments.
 
-    The epsilon parameter is used for numerical stability in the normalization:
-      RMSNorm(x) = x / sqrt(mean(x^2) + epsilon)
-
-    Example:
+    Example (without bias, 1 output):
     ```mlir
     hip.skip_rms_norm(%ctx)
         ins(%input, %skip, %gamma : memref<1x128x4096xf16, 1>,
                                      memref<1x128x4096xf16, 1>,
                                      memref<4096xf16, 1>)
-        outs(%output, %skip_output : memref<1x128x4096xf16, 1>,
-                                      memref<1x128x4096xf16, 1>)
+        outs(%output : memref<1x128x4096xf16, 1>)
+        {epsilon = 1.0e-05 : f32}
+    ```
+
+    Example (with bias, 2 outputs):
+    ```mlir
+    hip.skip_rms_norm(%ctx)
+        ins(%input, %skip, %gamma, %bias :
+            memref<1x128x4096xf16, 1>, memref<1x128x4096xf16, 1>,
+            memref<4096xf16, 1>, memref<4096xf16, 1>)
+        outs(%output, %input_skip_bias_sum : memref<1x128x4096xf16, 1>,
+                                              memref<1x128x4096xf16, 1>)
         {epsilon = 1.0e-05 : f32}
     ```
   }];
 
   let arguments = (ins
     Hip_ContextType:$ctx,
+
+    // MS spec inputs 1-3 (required)
     Hip_TensorOrMemRef:$input,
     Hip_TensorOrMemRef:$skip,
     Hip_TensorOrMemRef:$gamma,
-    Hip_TensorOrMemRef:$output,
-    Hip_TensorOrMemRef:$skip_output,
+
+    // MS spec input 4 (optional)
+    Optional<Hip_TensorOrMemRef>:$bias,
+
+    // DPS output buffers: [output] or [output, input_skip_bias_sum]
+    Variadic<Hip_TensorOrMemRef>:$outputs,
+
+    // Attributes
     F32Attr:$epsilon
   );
 
   let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(` $input `,` $skip `,` $gamma `:` type($input) `,` type($skip) `,` type($gamma) `)`
-    `outs` `(` $output `,` $skip_output `:` type($output) `,` type($skip_output) `)`
+    `(` $ctx `)` `ins` `(`
+        $input `,` $skip `,` $gamma
+        ( `,` $bias^ )?
+        `:` type($input) `,` type($skip) `,` type($gamma)
+        ( `,` type($bias)^ )?
+    `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
   let hasVerifier = 1;
@@ -650,7 +683,7 @@ def Hip_GatherOp : Hip_DpsOp<"gather"> {
     Hip_TensorOrMemRef:$data,
     Hip_TensorOrMemRef:$indices,
     Hip_TensorOrMemRef:$output,
-    I64Attr:$axis
+    DefaultValuedAttr<I64Attr, "0">:$axis
   );
   // result_tensors inherited from Hip_DpsOp
   let assemblyFormat = [{

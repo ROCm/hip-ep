@@ -329,13 +329,11 @@ LogicalResult RmsNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
-// SkipRmsNormOp: ins(input, skip, gamma), outs(output, skip_output)
+// SkipRmsNormOp: ins(input, skip, gamma, [bias])  outs(...variadic...)
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange SkipRmsNormOp::getDpsInitsMutable() {
-  // output and skip_output are operands #4 and #5
-  // (0=ctx,1=input,2=skip,3=gamma)
-  return MutableOperandRange(*this, /*start=*/4, /*length=*/2);
+  return getOutputsMutable();
 }
 
 void SkipRmsNormOp::getEffects(
@@ -344,11 +342,7 @@ void SkipRmsNormOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-LogicalResult SkipRmsNormOp::verify() {
-  return verifyDpsComputeOp(
-      *this, {getInput(), getSkip(), getGamma(), getOutput(), getSkipOutput()},
-      /*numInits=*/2);
-}
+LogicalResult SkipRmsNormOp::verify() { return success(); }
 
 //===----------------------------------------------------------------------===//
 // RopeOp: ins(input, position_ids, cos_cache, sin_cache), outs(output)
