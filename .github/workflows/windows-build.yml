@@ -483,6 +483,7 @@ jobs:
         timeout-minutes: 10
         shell: cmd
         run: |
+          setlocal enabledelayedexpansion
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
@@ -493,33 +494,35 @@ jobs:
           )
           set FOUND=0
           for /r "%L2_MODEL_DIR%" %%M in (*.onnx) do set FOUND=1
-          if "%FOUND%"=="0" (
+          if "!FOUND!"=="0" (
             echo [SKIP] No .onnx models found in %L2_MODEL_DIR%
             exit /b 0
           )
           cd gpu-test-package\bin
-          mkdir ..\..\l2-results 2>nul
           set FAILED=0
           for /r "%L2_MODEL_DIR%" %%M in (*.onnx) do (
-            echo === L2 test: %%~nxM ===
+            set "MDIR=%%~dpM"
+            set "REL=!MDIR:%L2_MODEL_DIR%\=!"
+            mkdir "..\..\l2-results\!REL!" 2>nul
+            echo === L2 test: !REL!%%~nxM ===
             rd /s /q "%%~nM_o_dump" 2>nul
             rd /s /q "%%~nM_cpu_o_dump" 2>nul
             hip-onnx-runner.exe -m "%%M" -d 2 -s 42
             if errorlevel 1 (
-              echo [ERROR] EP inference failed for %%~nxM
+              echo [ERROR] EP inference failed for !REL!%%~nxM
               set FAILED=1
             ) else (
               hip-onnx-runner.exe -m "%%M" -d 2 -s 42 -n
               if errorlevel 1 (
-                echo [ERROR] CPU inference failed for %%~nxM
+                echo [ERROR] CPU inference failed for !REL!%%~nxM
                 set FAILED=1
               ) else (
-                hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" > "..\..\l2-results\%%~nM.txt" 2>&1
-                type "..\..\l2-results\%%~nM.txt"
+                hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" > "..\..\l2-results\!REL!%%~nM.txt" 2>&1
+                type "..\..\l2-results\!REL!%%~nM.txt"
               )
             )
           )
-          exit /b %FAILED%
+          exit /b !FAILED!
 
       - name: Publish L2 results
         if: always()
@@ -532,7 +535,7 @@ jobs:
             Write-Host "No L2 results to publish (directory not found)"
             return
           }
-          $files = Get-ChildItem "$l2Dir/*.txt" -ErrorAction SilentlyContinue
+          $files = Get-ChildItem $l2Dir -Recurse -Filter "*.txt" -ErrorAction SilentlyContinue
           if (-not $files) {
             Write-Host "No L2 result files found"
             return
@@ -543,10 +546,12 @@ jobs:
           $sha = $rawSha.Substring(0, 7)
           $prNumber = "${{ github.event.pull_request.number }}"
           $threshold = 0.01
+          $l2Root = (Resolve-Path $l2Dir).Path
 
           $tableRows = ""
           foreach ($f in $files) {
-            $model = $f.BaseName
+            $rel = $f.FullName.Substring($l2Root.Length).TrimStart('\', '/')
+            $model = $rel -replace '\.txt$', '' -replace '\\', '/'
             $content = Get-Content $f.FullName -Raw
             $l2Match = [regex]::Match($content, 'Combined L2 \(stacked diffs\):\s+([\d.eE+-]+)')
             if ($l2Match.Success) {
