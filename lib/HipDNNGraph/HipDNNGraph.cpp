@@ -42,7 +42,8 @@ static std::vector<int64_t> ComputeStrides(const std::vector<int64_t> &shape) {
 
 // Compute strides for NHWC layout from an NCHW shape.
 // NHWC strides: N-stride = H*W*C, C-stride = 1, H-stride = W*C, W-stride = C.
-// The shape is still in NCHW order; only the strides reflect NHWC memory layout.
+// The shape is still in NCHW order; only the strides reflect NHWC memory
+// layout.
 static std::vector<int64_t>
 ComputeNHWCStrides(const std::vector<int64_t> &shape) {
   assert(shape.size() == 4 && "ComputeNHWCStrides requires a 4D shape");
@@ -155,8 +156,7 @@ static std::vector<int64_t> ExtractI64Array(mlir::ArrayAttr arr) {
 // hipDNN requires bias shape to match the output rank. If the bias is already
 // 4D or pass-by-value (scalar), no reshape is needed. Layout controls stride
 // computation (NCHW vs NHWC).
-static Status ReshapeBiasForConv(const TensorAttrPtr &bias,
-                                 ConvLayout layout) {
+static Status ReshapeBiasForConv(const TensorAttrPtr &bias, ConvLayout layout) {
   if (bias->get_pass_by_value())
     return Status::Success();
 
@@ -178,11 +178,11 @@ static Status ReshapeBiasForConv(const TensorAttrPtr &bias,
 
 // Add Conv operation from an onnx.Conv op to hipDNN graph.
 // Handles optional bias (3rd input) via pointwise ADD after conv_fprop.
-static Status AddConvNodeFromOnnxMLIR(hipdnn_frontend::graph::Graph &graph,
-                                      mlir::Operation *op,
-                                      const std::vector<TensorAttrPtr> &input_attrs,
-                                      TensorAttrPtr &output_attr,
-                                      int64_t &next_uid) {
+static Status
+AddConvNodeFromOnnxMLIR(hipdnn_frontend::graph::Graph &graph,
+                        mlir::Operation *op,
+                        const std::vector<TensorAttrPtr> &input_attrs,
+                        TensorAttrPtr &output_attr, int64_t &next_uid) {
   using namespace hipdnn_frontend::graph;
   using hipdnn_frontend::ConvolutionMode;
   using hipdnn_frontend::PointwiseMode;
@@ -231,7 +231,8 @@ static Status AddConvNodeFromOnnxMLIR(hipdnn_frontend::graph::Graph &graph,
   auto compute_dtype =
       GetComputeDataType(x_attr->get_data_type(), w_attr->get_data_type());
   if (!compute_dtype.has_value())
-    return Status::Failure("Unsupported data type combination for Conv compute");
+    return Status::Failure(
+        "Unsupported data type combination for Conv compute");
 
   ConvFpropAttributes conv_attrs;
   conv_attrs.set_padding({pads[0], pads[1]})
@@ -353,9 +354,8 @@ struct HipDNNGraphImpl {
       all_fusilli_compatible_ = true;
 
       std::vector<TensorAttrPtr> output_attrs;
-      auto status =
-          AddNodeFromOnnxMLIR(*graph_, &op, input_attrs, output_attrs,
-                              next_uid_);
+      auto status = AddNodeFromOnnxMLIR(*graph_, &op, input_attrs, output_attrs,
+                                        next_uid_);
       if (status.failed())
         return status;
 
@@ -436,8 +436,7 @@ struct HipDNNGraphImpl {
                  void *workspace) {
     auto error = graph_->execute(handle, variant_pack, workspace);
     if (error.is_bad())
-      return Status::Failure("hipDNN execute failed: " +
-                             error.get_message());
+      return Status::Failure("hipDNN execute failed: " + error.get_message());
     return Status::Success();
   }
 
@@ -486,8 +485,6 @@ llvm::ArrayRef<int64_t> HipDNNGraph::getOutputUids() const {
   return impl_->output_uids_;
 }
 
-int64_t HipDNNGraph::getWorkspaceSize() const {
-  return impl_->workspace_size_;
-}
+int64_t HipDNNGraph::getWorkspaceSize() const { return impl_->workspace_size_; }
 
 } // namespace hip::graph

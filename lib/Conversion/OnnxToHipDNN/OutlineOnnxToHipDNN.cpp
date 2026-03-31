@@ -76,8 +76,8 @@ void OutlineOnnxToHipDNNPass::runOnOperation() {
 
       Block *block = builder.createBlock(&outlineOp.getBody());
       IRMapping mapping;
-      for (auto [operand, type] : llvm::zip(onnx_op->getOperands(),
-                                             onnx_op->getOperandTypes())) {
+      for (auto [operand, type] :
+           llvm::zip(onnx_op->getOperands(), onnx_op->getOperandTypes())) {
         mapping.map(operand, block->addArgument(type, loc));
       }
 
