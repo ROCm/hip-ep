@@ -50,9 +50,10 @@ struct HipDNNGraphImpl;
 
 /// Encapsulates a hipDNN execution graph.
 ///
-/// Ported from hipDNNEP's HipDNNGraph, adapted for onnx-hipdnn-ep:
+/// Builds a hipDNN frontend graph from ONNX MLIR ops, compiles it into
+/// an execution plan, and dispatches inference via the hipDNN runtime:
 ///   - BuildFromOnnxMLIR() works with standard MLIR RankedTensorType
-///   - Execute() takes raw GPU pointers + UIDs instead of OrtKernelContext
+///   - Execute() takes raw GPU pointers + UIDs (variant_pack dispatch)
 ///   - UID accessors expose compile-time tensor IDs for IR embedding
 class HipDNNGraph {
 public:

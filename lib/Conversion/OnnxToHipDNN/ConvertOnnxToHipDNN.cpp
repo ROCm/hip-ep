@@ -2,7 +2,9 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  *
- * Ported from hipDNNEP; skips unsupported ops (hybrid model) instead of failing.
+ * MLIR pass that compiles supported ONNX ops via the hipDNN graph API and
+ * replaces them with hip.hipdnn_graph. Unsupported ops are left untouched
+ * for the standard ConvertOnnxToHip path (hybrid execution model).
  */
 
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
@@ -26,13 +28,23 @@ void GraphDeleter::operator()(void *ptr) const {
 
 namespace {
 
+/// Return true if this op can be compiled via the hipDNN graph API.
+/// Requires: (1) supported op type and (2) all tensor shapes are static
+/// (hipDNN compiles execution plans for concrete dimensions).
 static bool isSupportedOp(Operation *op) {
-  return op->getName().getStringRef() == "onnx.Conv";
+  if (op->getName().getStringRef() != "onnx.Conv")
+    return false;
+  auto isStaticIfTensor = [](Type t) {
+    if (auto ranked = dyn_cast<RankedTensorType>(t))
+      return ranked.hasStaticShape();
+    return true;
+  };
+  return llvm::all_of(op->getOperandTypes(), isStaticIfTensor) &&
+         llvm::all_of(op->getResultTypes(), isStaticIfTensor);
 }
 
 /// Build a temporary function containing a single ONNX op, compile it via
 /// HipDNNGraph::BuildFromOnnxMLIR, and return the compiled graph.
-/// Ported from hipDNNEP convert_onnx_to_hipdnn_pass.cc lines 26-64.
 static std::unique_ptr<::hip::graph::HipDNNGraph>
 compileOnnxOp(Operation *onnx_op, ModuleOp module, hipdnnHandle_t handle) {
   auto loc = onnx_op->getLoc();
@@ -121,9 +133,9 @@ void ConvertOnnxToHipDNNPass::runOnOperation() {
     for (Operation *onnx_op : onnx_ops) {
       auto compiled = compileOnnxOp(onnx_op, module, handle_);
       if (!compiled) {
-        onnx_op->emitError("supported op failed to compile via hipDNN");
-        signalPassFailure();
-        return;
+        onnx_op->emitWarning("hipDNN graph compilation failed; "
+                             "falling back to standard lowering");
+        continue;
       }
 
       std::string graph_name =

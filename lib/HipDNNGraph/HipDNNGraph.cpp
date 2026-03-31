@@ -2,7 +2,9 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  *
- * Ported from hipDNNEP's hipdnn_graph.cc for onnx-hipdnn-ep (no ORT dependency).
+ * hipDNN graph builder, compiler, and executor for onnx-hipdnn-ep.
+ * Translates ONNX MLIR ops into hipDNN frontend graph objects and manages
+ * their lifecycle through build, compile, and execute phases.
  */
 
 #include "HipDNNGraph.h"
