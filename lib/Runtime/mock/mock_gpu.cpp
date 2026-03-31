@@ -662,8 +662,8 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
 }
 
 int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
-                                    void *skip, void *gamma, void *output,
-                                    void *skip_output,
+                                    void *skip, void *gamma, void *bias,
+                                    void *output, void *input_skip_bias_sum,
                                     int64_t input_num_elements,
                                     int64_t gamma_num_elements,
                                     int64_t element_size_bytes, float epsilon) {
@@ -673,9 +673,11 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
   }
 
   MOCK_PRINT("[MOCK] wrap_skip_simplified_layer_norm(input_num_elements=%lld, "
-             "gamma_num_elements=%lld, element_size=%lld, epsilon=%f)\n",
+             "gamma_num_elements=%lld, element_size=%lld, epsilon=%f, "
+             "bias=%s, input_skip_bias_sum=%s)\n",
              (long long)input_num_elements, (long long)gamma_num_elements,
-             (long long)element_size_bytes, (double)epsilon);
+             (long long)element_size_bytes, (double)epsilon,
+             bias ? "yes" : "no", input_skip_bias_sum ? "yes" : "no");
 
   return 0;
 }
