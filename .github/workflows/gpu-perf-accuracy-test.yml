@@ -15,8 +15,13 @@ on:
       run_id:
         description: >
           Build run ID to download gpu-test-package from.
-          Leave empty to use the latest successful main build.
+          Leave empty to use the latest successful build on source_branch.
         required: false
+        type: string
+      source_branch:
+        description: "Branch to download gpu-test-package from (default: main)"
+        required: false
+        default: "main"
         type: string
       perf_duration:
         description: "Perf test duration per model (seconds)"
@@ -78,6 +83,22 @@ jobs:
       #   workflow_dispatch with run_id → use the specified ID
       #   workflow_dispatch without run_id → latest successful main build
       # -----------------------------------------------------------------
+      - name: Resolve source branch
+        id: resolve-branch
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.source_branch }}" ]; then
+            BRANCH="${{ github.event.inputs.source_branch }}"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            BRANCH="${{ github.event.pull_request.head.ref }}"
+          elif [ -n "${{ github.event.workflow_run.head_branch }}" ]; then
+            BRANCH="${{ github.event.workflow_run.head_branch }}"
+          else
+            BRANCH="main"
+          fi
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "Resolved source branch: $BRANCH"
+
       - name: Download gpu-test-package
         uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe # v3.1.4
         with:
@@ -85,7 +106,7 @@ jobs:
           name: gpu-test-package
           path: gpu-test-package
           run_id: ${{ github.event.inputs.run_id || github.event.workflow_run.id || '' }}
-          branch: main
+          branch: ${{ steps.resolve-branch.outputs.branch }}
           workflow_conclusion: success
           if_no_artifact_found: fail
 
