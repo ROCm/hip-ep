@@ -406,7 +406,10 @@ jobs:
       - name: Clean workspace
         shell: cmd
         run: |
+          taskkill /f /im hip-onnx-runner.exe >nul 2>&1 || ver >nul
+          taskkill /f /im onnxruntime_perf_test.exe >nul 2>&1 || ver >nul
           if exist gpu-test-package rd /s /q gpu-test-package
+          if exist l2-results rd /s /q l2-results
 
       - name: Download GPU test package
         uses: actions/download-artifact@v4
@@ -470,6 +473,126 @@ jobs:
             if errorlevel 1 set FAILED=1
           )
           exit /b %FAILED%
+
+      # -----------------------------------------------------------------------
+      # L2 accuracy test: compare MorphiZen EP vs CPU output for each model
+      # in l2-test-models/. Skipped gracefully when directory does not exist.
+      # -----------------------------------------------------------------------
+      - name: Run L2 accuracy tests
+        if: always()
+        timeout-minutes: 10
+        shell: cmd
+        run: |
+          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
+          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
+          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
+          set L2_MODEL_DIR=${{ runner.workspace }}\l2-test-models
+          if not exist "%L2_MODEL_DIR%" (
+            echo [SKIP] L2 model directory not found: %L2_MODEL_DIR%
+            exit /b 0
+          )
+          set FOUND=0
+          for /r "%L2_MODEL_DIR%" %%M in (*.onnx) do set FOUND=1
+          if "%FOUND%"=="0" (
+            echo [SKIP] No .onnx models found in %L2_MODEL_DIR%
+            exit /b 0
+          )
+          cd gpu-test-package\bin
+          mkdir ..\..\l2-results 2>nul
+          set FAILED=0
+          for /r "%L2_MODEL_DIR%" %%M in (*.onnx) do (
+            echo === L2 test: %%~nxM ===
+            rd /s /q "%%~nM_o_dump" 2>nul
+            rd /s /q "%%~nM_cpu_o_dump" 2>nul
+            hip-onnx-runner.exe -m "%%M" -d 2 -s 42
+            if errorlevel 1 (
+              echo [ERROR] EP inference failed for %%~nxM
+              set FAILED=1
+            ) else (
+              hip-onnx-runner.exe -m "%%M" -d 2 -s 42 -n
+              if errorlevel 1 (
+                echo [ERROR] CPU inference failed for %%~nxM
+                set FAILED=1
+              ) else (
+                hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" > "..\..\l2-results\%%~nM.txt" 2>&1
+                type "..\..\l2-results\%%~nM.txt"
+              )
+            )
+          )
+          exit /b %FAILED%
+
+      - name: Publish L2 results
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $l2Dir = "l2-results"
+          if (-not (Test-Path $l2Dir)) {
+            Write-Host "No L2 results to publish (directory not found)"
+            return
+          }
+          $files = Get-ChildItem "$l2Dir/*.txt" -ErrorAction SilentlyContinue
+          if (-not $files) {
+            Write-Host "No L2 result files found"
+            return
+          }
+
+          $runUrl = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          $rawSha = if ("${{ github.event_name }}" -eq "pull_request") { "${{ github.event.pull_request.head.sha }}" } else { "${{ github.sha }}" }
+          $sha = $rawSha.Substring(0, 7)
+          $prNumber = "${{ github.event.pull_request.number }}"
+          $threshold = 0.01
+
+          $tableRows = ""
+          foreach ($f in $files) {
+            $model = $f.BaseName
+            $content = Get-Content $f.FullName -Raw
+            $l2Match = [regex]::Match($content, 'Combined L2 \(stacked diffs\):\s+([\d.eE+-]+)')
+            if ($l2Match.Success) {
+              $l2val = [double]$l2Match.Groups[1].Value
+              $status = if ($l2val -le $threshold) { [char]0x2705 } else { [char]0x274C }
+              $tableRows += "| $model | $l2val | $status |`n"
+            } else {
+              $tableRows += "| $model | error | $([char]0x274C) |`n"
+            }
+          }
+
+          $header = "## L2 Accuracy Results (EP vs CPU)`n`n" +
+                    "| Model | Combined L2 | Status |`n" +
+                    "|-------|------------|--------|`n"
+          $footer = "`nThreshold: $threshold | Run: [${{ github.run_number }}]($runUrl) - Commit: ``$sha``"
+          $summary = $header + $tableRows + $footer
+
+          Write-Host $summary
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+
+          if ("${{ github.event_name }}" -eq "pull_request" -and $prNumber) {
+            $marker = "<!-- morphizen-l2-results -->"
+            $body = "$marker`n$summary"
+
+            $commentsJson = gh api "repos/${{ github.repository }}/issues/$prNumber/comments" 2>$null
+            $ghOk = ($LASTEXITCODE -eq 0)
+            $existing = $null
+            if ($ghOk -and $commentsJson) {
+              $comments = $commentsJson | ConvertFrom-Json
+              $found = $comments | Where-Object { $_.body -and $_.body.StartsWith($marker) } | Select-Object -First 1
+              if ($found) { $existing = $found.id }
+            }
+
+            if ($ghOk -and $existing) {
+              Write-Host "Updating existing L2 PR comment $existing"
+              gh api --method PATCH "repos/${{ github.repository }}/issues/comments/$existing" `
+                -f body="$body"
+              if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: Failed to update L2 PR comment" }
+            } elseif ($ghOk) {
+              Write-Host "Creating new L2 PR comment"
+              gh pr comment $prNumber -R "${{ github.repository }}" --body "$body"
+              if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: Failed to create L2 PR comment" }
+            } else {
+              Write-Host "WARNING: gh api unreachable, skipping L2 PR comment"
+            }
+          }
 
       # Parse QPS from result files and publish:
       #   - PR trigger  → post/update a PR comment via gh CLI (github-actions[bot])

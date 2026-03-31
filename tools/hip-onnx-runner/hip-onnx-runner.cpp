@@ -8,22 +8,34 @@
 // Loads an ONNX model, generates random inputs, runs one inference via the
 // MorphiZen execution provider, and reports timing.
 //
-// Usage:
-//   hip-onnx-runner <model.onnx> [options]
-//
-// Options:
-//   -n, --no-ep                  Skip EP registration, use CPU only
-//   -h, --help                   Show this help
+// Usage: hip-onnx-runner -m <model.onnx> [options]
+//    or: hip-onnx-runner -L dir1,dir2
+//   -m <path>   Path to ONNX model (required for inference)
+//   -n          CPU only; skip EP registration
+//   -d <0-3>    Dump level: 0=off (default), 1=inputs, 2=outputs, 3=both
+//               (dirs: <stem>_i_dump/ and <stem>_o_dump/;
+//                with -n: <stem>_cpu_i_dump/ and <stem>_cpu_o_dump/)
+//   -s <seed>   RNG seed for random inputs (default 42)
+//   -i <dir>    Load inputs from dir (input_<idx>_<name>_<type>.bin)
+//   -L <d1,d2>  Compare two dump dirs element-wise (L2 norm);
+//               file names must end with _<type>.bin (fp32,fp16,i64,...)
+//   -h          Show help
 //
 //===----------------------------------------------------------------------===//
 
 #include <onnxruntime_cxx_api.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <random>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -67,72 +79,631 @@ static size_t element_byte_size(ONNXTensorElementDataType t) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Command-line parsing (no Boost dependency)
-// ---------------------------------------------------------------------------
-
-struct Options {
-  std::string model_path;
-  bool no_ep = false;
-};
-
-static void print_usage(const char *argv0) {
-  std::cout << "Usage: " << argv0 << " <model.onnx> [options]\n"
-            << "\nOptions:\n"
-            << "  -n, --no-ep                 CPU only, skip EP\n"
-            << "  -h, --help                  Show this help\n";
+static std::string sanitize_filename_component(const std::string &name) {
+  std::string s = name;
+  for (auto &c : s) {
+    if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' ||
+        c == '<' || c == '>' || c == '|' || c == '\0')
+      c = '_';
+  }
+  if (s.empty())
+    s = "tensor";
+  return s;
 }
 
-static Options parse_args(int argc, char *argv[]) {
-  Options opts;
-  bool model_set = false;
-
-  for (int i = 1; i < argc; ++i) {
-    std::string arg = argv[i];
-    if (arg == "-h" || arg == "--help") {
-      print_usage(argv[0]);
-      std::exit(0);
-    } else if (arg == "-n" || arg == "--no-ep") {
-      opts.no_ep = true;
-    } else if (arg[0] != '-' && !model_set) {
-      opts.model_path = arg;
-      model_set = true;
-    } else {
-      std::cerr << "Unknown argument: " << arg << "\n";
-      print_usage(argv[0]);
-      std::exit(1);
-    }
-  }
-
-  if (!model_set) {
-    std::cerr << "Error: model path is required.\n";
-    print_usage(argv[0]);
+// Short suffix before ".bin" for typed dumps (e.g. name_fp32.bin).
+static const char *onnx_elem_type_tag(ONNXTensorElementDataType t) {
+  switch (t) {
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+    return "fp32";
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+    return "fp16";
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+    return "i64";
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+    return "i32";
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
+    return "i16";
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+    return "i8";
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+    return "u8";
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
+    return "u16";
+  default:
+    std::cerr << "Unsupported element type for dump tag: " << t << "\n";
     std::exit(1);
   }
-  return opts;
+}
+
+static bool type_tag_to_onnx(const std::string &tag,
+                             ONNXTensorElementDataType &out) {
+  if (tag == "fp32")
+    out = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+  else if (tag == "fp16")
+    out = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+  else if (tag == "i64")
+    out = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
+  else if (tag == "i32")
+    out = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
+  else if (tag == "i16")
+    out = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16;
+  else if (tag == "i8")
+    out = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8;
+  else if (tag == "u8")
+    out = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
+  else if (tag == "u16")
+    out = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16;
+  else
+    return false;
+  return true;
+}
+
+// IEEE binary16 -> float32 (little-endian element order in buffers).
+static float fp16_bits_to_float(uint16_t h) {
+  const uint32_t s = static_cast<uint32_t>(h & 0x8000u) << 16;
+  int32_t e = (h >> 10) & 0x1f;
+  int32_t m = h & 0x3ff;
+  uint32_t v;
+  if (e == 0) {
+    if (m == 0) {
+      v = s;
+    } else {
+      while ((m & 0x400) == 0) {
+        m <<= 1;
+        e -= 1;
+      }
+      e += 1;
+      m &= ~0x400;
+      v = s | static_cast<uint32_t>(e + (127 - 15)) << 23 |
+          static_cast<uint32_t>(m) << 13;
+    }
+  } else if (e == 31) {
+    v = s | 0x7f800000u | (m != 0 ? 0x00400000u : 0u);
+  } else {
+    v = s | static_cast<uint32_t>(e + (127 - 15)) << 23 |
+        static_cast<uint32_t>(m) << 13;
+  }
+  float f;
+  std::memcpy(&f, &v, sizeof(f));
+  return f;
+}
+
+static std::filesystem::path
+tensor_dump_bin_path(const std::filesystem::path &dir, const char *io_prefix,
+                     size_t index, const std::string &ort_name,
+                     ONNXTensorElementDataType et) {
+  const std::string safe = sanitize_filename_component(ort_name);
+  return dir / (std::string(io_prefix) + "_" + std::to_string(index) + "_" +
+                safe + "_" + onnx_elem_type_tag(et) + ".bin");
+}
+
+// Raw tensor bytes for an Ort::Value (must be a tensor).
+static bool ort_tensor_raw_bytes(const Ort::Value &v, const void *&out_ptr,
+                                 size_t &out_size) {
+  if (!v.IsTensor())
+    return false;
+  auto info = v.GetTensorTypeAndShapeInfo();
+  const ONNXTensorElementDataType et = info.GetElementType();
+  const int64_t ec = info.GetElementCount();
+  if (ec < 0)
+    return false;
+  out_size = static_cast<size_t>(ec) * element_byte_size(et);
+  switch (et) {
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+    out_ptr = v.GetTensorData<float>();
+    return true;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+    out_ptr = v.GetTensorData<Ort::Float16_t>();
+    return true;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+    out_ptr = v.GetTensorData<int64_t>();
+    return true;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+    out_ptr = v.GetTensorData<int32_t>();
+    return true;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
+    out_ptr = v.GetTensorData<int16_t>();
+    return true;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+    out_ptr = v.GetTensorData<int8_t>();
+    return true;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+    out_ptr = v.GetTensorData<uint8_t>();
+    return true;
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
+    out_ptr = v.GetTensorData<uint16_t>();
+    return true;
+  default:
+    return false;
+  }
+}
+
+static void dump_raw_file(const std::filesystem::path &path, const void *data,
+                          size_t nbytes) {
+  std::ofstream f(path, std::ios::binary);
+  if (!f) {
+    std::cerr << "Failed to open for write: " << path.string() << "\n";
+    std::exit(1);
+  }
+  f.write(static_cast<const char *>(data),
+          static_cast<std::streamsize>(nbytes));
+  if (!f) {
+    std::cerr << "Failed to write: " << path.string() << "\n";
+    std::exit(1);
+  }
+}
+
+static bool load_raw_file(const std::filesystem::path &path, void *dest,
+                          size_t expected_nbytes) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f) {
+    std::cerr << "Failed to open for read: " << path.string() << "\n";
+    return false;
+  }
+  f.seekg(0, std::ios::end);
+  const auto end = f.tellg();
+  if (end < 0) {
+    std::cerr << "Failed to size: " << path.string() << "\n";
+    return false;
+  }
+  const auto sz = static_cast<size_t>(end);
+  f.seekg(0);
+  if (sz != expected_nbytes) {
+    std::cerr << "Size mismatch for " << path.string() << ": expected "
+              << expected_nbytes << " bytes, file has " << sz << "\n";
+    return false;
+  }
+  f.read(static_cast<char *>(dest),
+         static_cast<std::streamsize>(expected_nbytes));
+  if (!f) {
+    std::cerr << "Failed to read: " << path.string() << "\n";
+    return false;
+  }
+  return true;
+}
+
+static std::string trim_string(std::string s) {
+  const auto not_space = [](unsigned char c) { return !std::isspace(c); };
+  s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
+  s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
+  return s;
+}
+
+// *.bin regular files in dir (for -L pairing by matching basenames).
+static std::vector<std::string>
+list_l2compare_filenames(const std::filesystem::path &dir) {
+  std::vector<std::string> names;
+  std::error_code ec;
+  std::filesystem::directory_iterator it(dir, ec);
+  if (ec) {
+    std::cerr << "Cannot list directory: " << dir.string() << " ("
+              << ec.message() << ")\n";
+    return names;
+  }
+  const std::filesystem::directory_iterator end;
+  for (; it != end; ++it) {
+    if (!it->is_regular_file())
+      continue;
+    const std::string fn = it->path().filename().string();
+    if (fn.size() < 4 || fn.compare(fn.size() - 4, 4, ".bin") != 0)
+      continue;
+    names.push_back(fn);
+  }
+  std::sort(names.begin(), names.end());
+  return names;
+}
+
+static bool read_entire_file(const std::filesystem::path &path,
+                             std::vector<char> &out) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f) {
+    std::cerr << "Failed to open: " << path.string() << "\n";
+    return false;
+  }
+  f.seekg(0, std::ios::end);
+  const auto end = f.tellg();
+  if (end < 0) {
+    std::cerr << "Failed to size: " << path.string() << "\n";
+    return false;
+  }
+  out.resize(static_cast<size_t>(end));
+  f.seekg(0);
+  f.read(out.data(), static_cast<std::streamsize>(out.size()));
+  if (!f) {
+    std::cerr << "Failed to read: " << path.string() << "\n";
+    return false;
+  }
+  return true;
+}
+
+// Parse *.bin basename ..._<tag>.bin into element type; *typed_out false if tag
+// is missing or unknown.
+static bool parse_dump_filename_elem_type(const std::string &filename,
+                                          ONNXTensorElementDataType &et,
+                                          bool *typed_out) {
+  if (filename.size() < 4 ||
+      filename.compare(filename.size() - 4, 4, ".bin") != 0) {
+    *typed_out = false;
+    return true;
+  }
+  const std::string base = filename.substr(0, filename.size() - 4);
+  const size_t pos = base.rfind('_');
+  if (pos == std::string::npos || pos + 1 >= base.size()) {
+    *typed_out = false;
+    return true;
+  }
+  const std::string tag = base.substr(pos + 1);
+  if (type_tag_to_onnx(tag, et)) {
+    *typed_out = true;
+    return true;
+  }
+  *typed_out = false;
+  return true;
+}
+
+static bool squared_l2_diff_elementwise(
+    const std::vector<char> &a, const std::vector<char> &b,
+    ONNXTensorElementDataType et, double *out_sq,
+    size_t *out_used_elems = nullptr, size_t *out_skipped_nonfinite = nullptr) {
+  const size_t es = element_byte_size(et);
+  if (a.size() != b.size() || a.size() % es != 0) {
+    std::cerr << "Size not aligned to element type (" << es << " bytes/elem)\n";
+    return false;
+  }
+  const size_t n = a.size() / es;
+  long double s = 0;
+  size_t used_elems = 0;
+  // Skips NaN/Inf on either side so (Inf-Inf) etc. never poisons the sum.
+  size_t skipped_nonfinite = 0;
+  switch (et) {
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: {
+    const auto *pa = reinterpret_cast<const float *>(a.data());
+    const auto *pb = reinterpret_cast<const float *>(b.data());
+    for (size_t i = 0; i < n; ++i) {
+      const float fa = pa[i], fb = pb[i];
+      if (!std::isfinite(static_cast<double>(fa)) ||
+          !std::isfinite(static_cast<double>(fb))) {
+        skipped_nonfinite++;
+        continue;
+      }
+      const double d = static_cast<double>(fa) - static_cast<double>(fb);
+      s += d * d;
+      used_elems++;
+    }
+    break;
+  }
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: {
+    const auto *pa = reinterpret_cast<const uint16_t *>(a.data());
+    const auto *pb = reinterpret_cast<const uint16_t *>(b.data());
+    for (size_t i = 0; i < n; ++i) {
+      const float fa = fp16_bits_to_float(pa[i]);
+      const float fb = fp16_bits_to_float(pb[i]);
+      if (!std::isfinite(static_cast<double>(fa)) ||
+          !std::isfinite(static_cast<double>(fb))) {
+        skipped_nonfinite++;
+        continue;
+      }
+      const double d = static_cast<double>(fa) - static_cast<double>(fb);
+      s += d * d;
+      used_elems++;
+    }
+    break;
+  }
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64: {
+    const auto *pa = reinterpret_cast<const int64_t *>(a.data());
+    const auto *pb = reinterpret_cast<const int64_t *>(b.data());
+    for (size_t i = 0; i < n; ++i) {
+      const double d = static_cast<double>(pa[i]) - static_cast<double>(pb[i]);
+      s += d * d;
+    }
+    used_elems = n;
+    break;
+  }
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32: {
+    const auto *pa = reinterpret_cast<const int32_t *>(a.data());
+    const auto *pb = reinterpret_cast<const int32_t *>(b.data());
+    for (size_t i = 0; i < n; ++i) {
+      const double d = static_cast<double>(pa[i]) - static_cast<double>(pb[i]);
+      s += d * d;
+    }
+    used_elems = n;
+    break;
+  }
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16: {
+    const auto *pa = reinterpret_cast<const int16_t *>(a.data());
+    const auto *pb = reinterpret_cast<const int16_t *>(b.data());
+    for (size_t i = 0; i < n; ++i) {
+      const double d = static_cast<double>(pa[i]) - static_cast<double>(pb[i]);
+      s += d * d;
+    }
+    used_elems = n;
+    break;
+  }
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8: {
+    const auto *pa = reinterpret_cast<const int8_t *>(a.data());
+    const auto *pb = reinterpret_cast<const int8_t *>(b.data());
+    for (size_t i = 0; i < n; ++i) {
+      const double d = static_cast<double>(pa[i]) - static_cast<double>(pb[i]);
+      s += d * d;
+    }
+    used_elems = n;
+    break;
+  }
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8: {
+    const auto *pa = reinterpret_cast<const uint8_t *>(a.data());
+    const auto *pb = reinterpret_cast<const uint8_t *>(b.data());
+    for (size_t i = 0; i < n; ++i) {
+      const double d = static_cast<double>(pa[i]) - static_cast<double>(pb[i]);
+      s += d * d;
+    }
+    used_elems = n;
+    break;
+  }
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16: {
+    const auto *pa = reinterpret_cast<const uint16_t *>(a.data());
+    const auto *pb = reinterpret_cast<const uint16_t *>(b.data());
+    for (size_t i = 0; i < n; ++i) {
+      const double d = static_cast<double>(pa[i]) - static_cast<double>(pb[i]);
+      s += d * d;
+    }
+    used_elems = n;
+    break;
+  }
+  default:
+    std::cerr << "Unsupported element type for L2\n";
+    return false;
+  }
+  if (out_used_elems)
+    *out_used_elems = used_elems;
+  if (out_skipped_nonfinite)
+    *out_skipped_nonfinite = skipped_nonfinite;
+  *out_sq = static_cast<double>(s);
+  return true;
+}
+
+// Compare two directories: same set of *.bin basenames, pairwise L2. Returns
+// exit code 0 on success.
+static int run_l2norm_output_dumps(const std::string &dir1_str,
+                                   const std::string &dir2_str) {
+  const std::filesystem::path d1(dir1_str);
+  const std::filesystem::path d2(dir2_str);
+  std::error_code ec;
+  if (!std::filesystem::is_directory(d1, ec)) {
+    std::cerr << "Not a directory: " << dir1_str << "\n";
+    return 1;
+  }
+  if (!std::filesystem::is_directory(d2, ec)) {
+    std::cerr << "Not a directory: " << dir2_str << "\n";
+    return 1;
+  }
+
+  std::vector<std::string> names1 = list_l2compare_filenames(d1);
+  std::vector<std::string> names2 = list_l2compare_filenames(d2);
+  if (names1.empty()) {
+    std::cerr << "No *.bin files in: " << dir1_str << "\n";
+    return 1;
+  }
+  if (names1 != names2) {
+    std::cerr << "Filename sets differ between directories.\n";
+    std::set<std::string> s1(names1.begin(), names1.end());
+    std::set<std::string> s2(names2.begin(), names2.end());
+    std::cerr << "Only in first dir:\n";
+    for (const auto &n : s1)
+      if (!s2.count(n))
+        std::cerr << "  " << n << "\n";
+    std::cerr << "Only in second dir:\n";
+    for (const auto &n : s2)
+      if (!s1.count(n))
+        std::cerr << "  " << n << "\n";
+    return 1;
+  }
+
+  long double combined_sq = 0;
+  for (const std::string &fn : names1) {
+    std::vector<char> a, b;
+    if (!read_entire_file(d1 / fn, a) || !read_entire_file(d2 / fn, b))
+      return 1;
+    if (a.size() != b.size()) {
+      std::cerr << "Size mismatch for " << fn << ": " << a.size() << " vs "
+                << b.size() << "\n";
+      return 1;
+    }
+    bool typed = false;
+    ONNXTensorElementDataType et = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+    if (!parse_dump_filename_elem_type(fn, et, &typed)) {
+      std::cerr << "Bad dump filename: " << fn << "\n";
+      return 1;
+    }
+    if (!typed) {
+      std::cerr
+          << fn
+          << ": missing or unknown type tag; expected name ending with _fp32, "
+             "_fp16, _i64, _i32, _i16, _i8, _u8, or _u16 before .bin\n";
+      return 1;
+    }
+    // Bitwise-equal buffers => L2 is 0 (fast path).
+    double sq = 0;
+    size_t used_elems = 0;
+    size_t skipped_nonfinite = 0;
+    if (a != b) {
+      if (!squared_l2_diff_elementwise(a, b, et, &sq, &used_elems,
+                                       &skipped_nonfinite))
+        return 1;
+    } else {
+      used_elems = a.size() / element_byte_size(et);
+    }
+    if ((et == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+         et == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) &&
+        used_elems == 0 && a.size() / element_byte_size(et) > 0) {
+      const size_t n_skip = a.size() / element_byte_size(et);
+      std::cerr << "Warning: " << fn
+                << " - no finite elements to compare; L2(diff)=0; " << n_skip
+                << " element(s) skipped (non-finite)\n";
+    }
+    std::cout << fn << ": L2(diff) = " << std::sqrt(sq) << " (" << a.size()
+              << " bytes, " << onnx_elem_type_tag(et) << " element-wise";
+    if (et == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+        et == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+      std::cout << "; " << used_elems << " elems compared";
+      if (skipped_nonfinite > 0)
+        std::cout << ", " << skipped_nonfinite
+                  << " element(s) skipped (non-finite)";
+    } else if (used_elems > 0) {
+      std::cout << "; " << used_elems << " elems";
+    }
+    std::cout << ")\n";
+    combined_sq += static_cast<long double>(sq);
+  }
+  std::cout << "Combined L2 (stacked diffs): "
+            << std::sqrt(static_cast<double>(combined_sq)) << "\n";
+  return 0;
 }
 
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
-int main(int argc, char *argv[]) {
-  Options opts = parse_args(argc, argv);
+struct Options {
+  std::string model;
+  std::string l2norm;
+  std::string input_dir;
+  bool no_ep = false;
+  int dump_level = 0;
+  unsigned int seed = 42;
 
-  std::mt19937 rng(42);
+  bool parse(int argc, char **argv) {
+    for (int i = 1; i < argc; ++i) {
+      std::string arg = argv[i];
+      if (arg == "-h") {
+        return false;
+      } else if (arg == "-m") {
+        if (++i >= argc) {
+          std::cerr << "Error: -m requires a path argument.\n\n";
+          return false;
+        }
+        model = argv[i];
+      } else if (arg == "-n") {
+        no_ep = true;
+      } else if (arg == "-d") {
+        if (++i >= argc) {
+          std::cerr << "Error: -d requires a numeric argument.\n\n";
+          return false;
+        }
+        try {
+          dump_level = std::stoi(argv[i]);
+        } catch (...) {
+          std::cerr << "Error: -d value is not a valid integer.\n\n";
+          return false;
+        }
+      } else if (arg == "-s") {
+        if (++i >= argc) {
+          std::cerr << "Error: -s requires a numeric argument.\n\n";
+          return false;
+        }
+        try {
+          seed = static_cast<unsigned int>(std::stoul(argv[i]));
+        } catch (...) {
+          std::cerr << "Error: -s value is not a valid unsigned integer.\n\n";
+          return false;
+        }
+      } else if (arg == "-i") {
+        if (++i >= argc) {
+          std::cerr << "Error: -i requires a directory argument.\n\n";
+          return false;
+        }
+        input_dir = argv[i];
+      } else if (arg == "-L") {
+        if (++i >= argc) {
+          std::cerr << "Error: -L requires a dir1,dir2 argument.\n\n";
+          return false;
+        }
+        l2norm = argv[i];
+      } else {
+        std::cerr << "Error: unknown option: " << arg << "\n\n";
+        return false;
+      }
+    }
+
+    l2norm = trim_string(l2norm);
+    input_dir = trim_string(input_dir);
+
+    if (!l2norm.empty()) {
+      const auto sep = l2norm.find(',');
+      if (sep == std::string::npos) {
+        std::cerr << "Error: -L expects dir1,dir2\n\n";
+        return false;
+      }
+      if (trim_string(l2norm.substr(0, sep)).empty() ||
+          trim_string(l2norm.substr(sep + 1)).empty()) {
+        std::cerr << "Error: -L dir1,dir2 must not have empty sides.\n\n";
+        return false;
+      }
+    } else {
+      if (model.empty()) {
+        std::cerr << "Error: -m is required.\n\n";
+        return false;
+      }
+      if (dump_level < 0 || dump_level > 3) {
+        std::cerr << "Error: -d must be 0, 1, 2, or 3.\n\n";
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  void print_help() const {
+    std::cerr
+        << "Run an ONNX model via MorphiZen execution provider.\n\n"
+        << "Usage: hip-onnx-runner -m <model.onnx> [options]\n"
+        << "   or: hip-onnx-runner -L dir1,dir2\n\n"
+        << "Options:\n"
+        << "  -m <path>   Path to ONNX model (required for inference)\n"
+        << "  -n          CPU only; skip EP registration\n"
+        << "  -d <0-3>    Dump level: 0=off, 1=inputs, 2=outputs, 3=both\n"
+        << "              (dirs: <stem>_i_dump/ and <stem>_o_dump/;\n"
+        << "               with -n: <stem>_cpu_i_dump/ and "
+           "<stem>_cpu_o_dump/)\n"
+        << "  -s <seed>   RNG seed for random inputs (default 42)\n"
+        << "  -i <dir>    Load inputs from dir "
+           "(input_<idx>_<name>_<type>.bin)\n"
+        << "  -L <d1,d2>  Compare two dump dirs element-wise (L2 norm)\n"
+        << "  -h          Show help\n";
+  }
+};
+
+int main(int argc, char *argv[]) {
+  Options opts;
+  if (!opts.parse(argc, argv)) {
+    opts.print_help();
+    return 1;
+  }
+
+  if (!opts.l2norm.empty()) {
+    const auto sep = opts.l2norm.find(',');
+    return run_l2norm_output_dumps(trim_string(opts.l2norm.substr(0, sep)),
+                                   trim_string(opts.l2norm.substr(sep + 1)));
+  }
+
+  const std::string model_path_str = opts.model;
+  const bool no_ep = opts.no_ep;
+  const int dump_level = opts.dump_level;
+  std::mt19937 rng(opts.seed);
+  std::string input_dir_str = opts.input_dir;
+  const bool use_input_files = !input_dir_str.empty();
 
   // ORT environment
   Ort::Env env(ORT_LOGGING_LEVEL_ERROR, "hip-onnx-runner");
 
-  // EP registration
-  const std::string kEpName = "VitisAIExecutionProvider";
+  const std::string kEpName = "MorphiZenExecutionProvider";
   const std::string ep_dll = "onnxruntime_morphizen_ep.dll";
 
-  if (!opts.no_ep) {
+  if (!no_ep) {
     auto lib_path = std::filesystem::u8path(ep_dll);
     if (!std::filesystem::exists(lib_path)) {
       std::cerr << "EP library not found: " << ep_dll << "\n"
-                << "Set MORPHIZEN_VITISAI_EP or use --no-ep.\n";
+                << "Set MORPHIZEN_VITISAI_EP or use -n.\n";
       return 1;
     }
     std::cout << "Registering EP: " << ep_dll << "\n";
@@ -149,13 +720,13 @@ int main(int argc, char *argv[]) {
   Ort::SessionOptions session_opts;
   session_opts.SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);
 
-  if (!opts.no_ep) {
+  if (!no_ep) {
     // Collect devices for this EP
     std::vector<Ort::ConstEpDevice> devices;
-    for (const auto &dev : env.GetEpDevices())
+    for (const auto &dev : env.GetEpDevices()) {
       if (dev.EpName() == kEpName)
         devices.emplace_back(dev);
-
+    }
     if (devices.empty()) {
       std::cerr << "No devices found for EP: " << kEpName << "\n";
       return 1;
@@ -166,7 +737,7 @@ int main(int argc, char *argv[]) {
   }
 
   // Create session
-  auto model_path = std::filesystem::path(opts.model_path);
+  auto model_path = std::filesystem::path(model_path_str);
   std::cout << "Loading model: " << model_path.string() << "\n";
 
   std::unique_ptr<Ort::Session> session;
@@ -225,7 +796,17 @@ int main(int argc, char *argv[]) {
   std::cout << "Inputs: " << input_count << "  Outputs: " << output_count
             << "\n";
 
-  // Build input tensors with random data
+  std::filesystem::path input_dir_path;
+  if (use_input_files) {
+    input_dir_path = std::filesystem::path(input_dir_str);
+    std::error_code ec;
+    if (!std::filesystem::is_directory(input_dir_path, ec)) {
+      std::cerr << "Error: -i is not a directory: " << input_dir_str << "\n";
+      return 1;
+    }
+  }
+
+  // Build input tensors (from files or random)
   std::vector<std::vector<char>> input_buffers(input_count);
   std::vector<Ort::Value> input_tensors;
   std::uniform_real_distribution<float> dist(-256.0f, 255.0f);
@@ -239,11 +820,26 @@ int main(int argc, char *argv[]) {
     int64_t n_elems = calculate_product(shape);
     input_buffers[i].resize(n_elems * elem_size);
 
-    // Fill as float (reinterpreted for other types — sufficient for random
-    // test)
-    auto *fdata = reinterpret_cast<float *>(input_buffers[i].data());
-    std::generate(fdata, fdata + (input_buffers[i].size() / sizeof(float)),
-                  [&] { return dist(rng); });
+    if (use_input_files) {
+      const auto bin_path = tensor_dump_bin_path(
+          input_dir_path, "input", i, input_names_str[i], input_types[i]);
+      std::error_code ec;
+      if (!std::filesystem::exists(bin_path, ec)) {
+        std::cerr << "Missing input file: " << bin_path.string() << "\n";
+        return 1;
+      }
+      if (!load_raw_file(bin_path, input_buffers[i].data(),
+                         input_buffers[i].size()))
+        return 1;
+      std::cout << "Loaded input " << i << " from " << bin_path.string()
+                << "\n";
+    } else {
+      // Fill as float (reinterpreted for other types; sufficient for random
+      // test use).
+      auto *fdata = reinterpret_cast<float *>(input_buffers[i].data());
+      std::generate(fdata, fdata + (input_buffers[i].size() / sizeof(float)),
+                    [&] { return dist(rng); });
+    }
 
     Ort::MemoryInfo mem =
         Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
@@ -252,14 +848,31 @@ int main(int argc, char *argv[]) {
         shape.size(), input_types[i]));
   }
 
+  const std::string dump_stem = model_path.stem().string();
+  const std::string dump_tag = no_ep ? "_cpu" : "";
+  const std::filesystem::path dump_dir_inputs =
+      std::filesystem::path(".") / (dump_stem + dump_tag + "_i_dump");
+  const std::filesystem::path dump_dir_outputs =
+      std::filesystem::path(".") / (dump_stem + dump_tag + "_o_dump");
+  if (dump_level == 1 || dump_level == 3) {
+    std::filesystem::create_directories(dump_dir_inputs);
+    for (size_t i = 0; i < input_count; ++i) {
+      const auto path = tensor_dump_bin_path(
+          dump_dir_inputs, "input", i, input_names_str[i], input_types[i]);
+      dump_raw_file(path, input_buffers[i].data(), input_buffers[i].size());
+      std::cout << "Dumped input tensor to " << path.string() << "\n";
+    }
+  }
+
   // Run inference
   std::cout << "Running inference...\n";
+  std::vector<Ort::Value> outputs;
   {
     auto t0 = std::chrono::steady_clock::now();
     try {
-      auto outputs = session->Run(Ort::RunOptions{}, input_names.data(),
-                                  input_tensors.data(), input_count,
-                                  output_names.data(), output_count);
+      outputs = session->Run(Ort::RunOptions{}, input_names.data(),
+                             input_tensors.data(), input_count,
+                             output_names.data(), output_count);
       auto t1 = std::chrono::steady_clock::now();
       std::cout << "Inference: "
                 << std::chrono::duration_cast<std::chrono::microseconds>(t1 -
@@ -273,8 +886,34 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  // Unregister EP
-  if (!opts.no_ep) {
+  if (dump_level == 2 || dump_level == 3) {
+    std::filesystem::create_directories(dump_dir_outputs);
+    for (size_t i = 0; i < outputs.size(); ++i) {
+      const void *ptr = nullptr;
+      size_t nbytes = 0;
+      if (!ort_tensor_raw_bytes(outputs[i], ptr, nbytes)) {
+        std::cerr << "Cannot dump output " << i
+                  << " (unsupported or not a "
+                     "tensor)\n";
+        return 1;
+      }
+      auto out_info = outputs[i].GetTensorTypeAndShapeInfo();
+      const ONNXTensorElementDataType oet = out_info.GetElementType();
+      const auto path = tensor_dump_bin_path(dump_dir_outputs, "output", i,
+                                             output_names_str[i], oet);
+      dump_raw_file(path, ptr, nbytes);
+      std::cout << "Dumped output tensor to " << path.string() << "\n";
+    }
+  }
+
+  // Release session and all Ort::Values before unloading the EP DLL. Calling
+  // UnregisterExecutionProviderLibrary while the session still uses the EP
+  // causes use-after-free / AV (e.g. 0xC0000005) during later teardown.
+  outputs.clear();
+  input_tensors.clear();
+  session.reset();
+
+  if (!no_ep) {
     Ort::GetApi().UnregisterExecutionProviderLibrary(env, kEpName.c_str());
   }
 

@@ -150,6 +150,8 @@ bool DLLLinker::linkDLL_Windows(const std::string &objectFile,
   std::vector<std::string> argStrings;
   argStrings.push_back("lld-link"); // argv[0] - program name
   argStrings.push_back("/DLL");     // Create DLL
+  argStrings.push_back(
+      "/ignore:4099"); // Suppress missing PDB warnings (LNK4099)
   argStrings.push_back("/OUT:" + outputDLL);
   argStrings.push_back("/DEF:" + defFile);
   argStrings.push_back(objectFile);
