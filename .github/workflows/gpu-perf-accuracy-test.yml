@@ -1,0 +1,402 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: GPU Performance & Accuracy Test
+
+on:
+  workflow_run:
+    workflows: ["Windows Build"]
+    branches: [main]
+    types: [completed]
+
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: >
+          Build run ID to download gpu-test-package from.
+          Leave empty to use the latest successful main build.
+        required: false
+        type: string
+      perf_duration:
+        description: "Perf test duration per model (seconds)"
+        required: false
+        default: "30"
+        type: string
+      enable_full_model_l2:
+        description: "Run L2 accuracy tests on full models (slow)"
+        required: false
+        default: false
+        type: boolean
+
+  # Uncomment to enable PR-triggered runs during debugging:
+  # pull_request:
+  #   types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gpu-perf-accuracy:
+    # Skip if the triggering Windows Build failed
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: StrixHalo
+    timeout-minutes: 120
+
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+
+    env:
+      THEROCK_VERSION: therock-dist-windows-gfx1151-7.11.0
+      PERF_DURATION: ${{ github.event.inputs.perf_duration || '30' }}
+      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+
+    steps:
+      # -----------------------------------------------------------------
+      # Clean up leftover processes and directories from previous runs
+      # -----------------------------------------------------------------
+      - name: Clean workspace
+        shell: cmd
+        run: |
+          taskkill /f /im hip-onnx-runner.exe >nul 2>&1 || ver >nul
+          taskkill /f /im onnxruntime_perf_test.exe >nul 2>&1 || ver >nul
+          if exist gpu-test-package rd /s /q gpu-test-package
+          if exist l2-results rd /s /q l2-results
+          if exist perf-results rd /s /q perf-results
+
+      # -----------------------------------------------------------------
+      # Download the pre-built gpu-test-package artifact from the
+      # Windows Build workflow. Supports three trigger modes:
+      #   workflow_run  → use the triggering run's ID
+      #   workflow_dispatch with run_id → use the specified ID
+      #   workflow_dispatch without run_id → latest successful main build
+      # -----------------------------------------------------------------
+      - name: Download gpu-test-package
+        uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe # v3.1.4
+        with:
+          workflow: windows-build.yml
+          name: gpu-test-package
+          path: gpu-test-package
+          run_id: ${{ github.event.inputs.run_id || github.event.workflow_run.id || '' }}
+          branch: main
+          workflow_conclusion: success
+          if_no_artifact_found: fail
+
+      - name: Verify package contents
+        shell: cmd
+        run: |
+          if not exist gpu-test-package\bin\hip-onnx-runner.exe (
+            echo [ERROR] hip-onnx-runner.exe not found in gpu-test-package
+            exit /b 1
+          )
+          if not exist gpu-test-package\bin\onnxruntime_perf_test.exe (
+            echo [ERROR] onnxruntime_perf_test.exe not found in gpu-test-package
+            exit /b 1
+          )
+          echo === Package contents ===
+          dir /s /b gpu-test-package
+
+      # -----------------------------------------------------------------
+      # TheRock HIP runtime (required by MorphiZen EP at inference time)
+      # -----------------------------------------------------------------
+      - name: Download & extract TheRock
+        shell: powershell
+        run: |
+          $dist = "${{ runner.workspace }}\therock-dist"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          curl.exe -fsSL `
+            "https://repo.amd.com/rocm/tarball/${{ env.THEROCK_VERSION }}.tar.gz" `
+            -o therock.tar.gz
+          tar -xzf therock.tar.gz -C $dist --strip-components=1
+          Remove-Item therock.tar.gz
+
+      # =================================================================
+      #  SINGLE-OP PERFORMANCE TESTS
+      #  Models: runner-local l2-test-models/ directory (individual ops)
+      # =================================================================
+      - name: Run single-op perf tests
+        if: always()
+        timeout-minutes: 30
+        shell: cmd
+        run: |
+          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
+          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
+          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
+          set OP_MODEL_DIR=${{ runner.workspace }}\l2-test-models
+          if not exist "%OP_MODEL_DIR%" (
+            echo [SKIP] Single-op model directory not found: %OP_MODEL_DIR%
+            exit /b 0
+          )
+          set FOUND=0
+          for /r "%OP_MODEL_DIR%" %%M in (*.onnx) do set FOUND=1
+          if "%FOUND%"=="0" (
+            echo [SKIP] No .onnx models found in %OP_MODEL_DIR%
+            exit /b 0
+          )
+          mkdir perf-results\single-op 2>nul
+          set FAILED=0
+          cd gpu-test-package\bin
+          for /r "%OP_MODEL_DIR%" %%M in (*.onnx) do (
+            echo === Perf: %%~nxM ===
+            onnxruntime_perf_test.exe ^
+              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
+              --plugin_eps "MorphiZenExecutionProvider" ^
+              --plugin_ep_options "config_file|..\morphizen_config.json" ^
+              -t %PERF_DURATION% -c 1 -s -I ^
+              "%%M" > "..\..\perf-results\single-op\%%~nxM.txt" 2>&1
+            type "..\..\perf-results\single-op\%%~nxM.txt"
+            if errorlevel 1 set FAILED=1
+          )
+          exit /b %FAILED%
+
+      # =================================================================
+      #  SINGLE-OP ACCURACY TESTS (L2)
+      #  EP vs CPU comparison for each op model
+      # =================================================================
+      - name: Run single-op L2 accuracy tests
+        if: always()
+        timeout-minutes: 30
+        shell: cmd
+        run: |
+          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
+          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
+          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
+          set OP_MODEL_DIR=${{ runner.workspace }}\l2-test-models
+          if not exist "%OP_MODEL_DIR%" (
+            echo [SKIP] Single-op model directory not found: %OP_MODEL_DIR%
+            exit /b 0
+          )
+          set FOUND=0
+          for /r "%OP_MODEL_DIR%" %%M in (*.onnx) do set FOUND=1
+          if "%FOUND%"=="0" (
+            echo [SKIP] No .onnx models found in %OP_MODEL_DIR%
+            exit /b 0
+          )
+          mkdir l2-results\single-op 2>nul
+          set FAILED=0
+          cd gpu-test-package\bin
+          for /r "%OP_MODEL_DIR%" %%M in (*.onnx) do (
+            echo === L2 test: %%~nxM ===
+            rd /s /q "%%~nM_o_dump" 2>nul
+            rd /s /q "%%~nM_cpu_o_dump" 2>nul
+            hip-onnx-runner.exe -m "%%M" -d 2 -s 42
+            if errorlevel 1 (
+              echo [ERROR] EP inference failed for %%~nxM
+              set FAILED=1
+            ) else (
+              hip-onnx-runner.exe -m "%%M" -d 2 -s 42 -n
+              if errorlevel 1 (
+                echo [ERROR] CPU inference failed for %%~nxM
+                set FAILED=1
+              ) else (
+                hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" > "..\..\l2-results\single-op\%%~nM.txt" 2>&1
+                type "..\..\l2-results\single-op\%%~nM.txt"
+              )
+            )
+          )
+          exit /b %FAILED%
+
+      # =================================================================
+      #  FULL MODEL PERFORMANCE TESTS
+      #  Models: runner-local model/ directory (all seq lengths)
+      # =================================================================
+      - name: Run full model perf tests
+        if: always()
+        timeout-minutes: 60
+        shell: cmd
+        run: |
+          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
+          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
+          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
+          set MODEL_DIR=${{ runner.workspace }}\model
+          if not exist "%MODEL_DIR%" (
+            echo [SKIP] Full model directory not found: %MODEL_DIR%
+            exit /b 0
+          )
+          set FOUND=0
+          for /r "%MODEL_DIR%" %%M in (*.onnx) do set FOUND=1
+          if "%FOUND%"=="0" (
+            echo [SKIP] No .onnx models found in %MODEL_DIR%
+            exit /b 0
+          )
+          mkdir perf-results\full-model 2>nul
+          set FAILED=0
+          cd gpu-test-package\bin
+          for /r "%MODEL_DIR%" %%M in (*.onnx) do (
+            echo === Perf: %%~nxM ===
+            onnxruntime_perf_test.exe ^
+              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
+              --plugin_eps "MorphiZenExecutionProvider" ^
+              --plugin_ep_options "config_file|..\morphizen_config.json" ^
+              -t %PERF_DURATION% -c 1 -s -I ^
+              "%%M" > "..\..\perf-results\full-model\%%~nxM.txt" 2>&1
+            type "..\..\perf-results\full-model\%%~nxM.txt"
+            if errorlevel 1 set FAILED=1
+          )
+          exit /b %FAILED%
+
+      # =================================================================
+      #  FULL MODEL ACCURACY TESTS (L2)
+      #  Disabled by default — enable via workflow_dispatch input
+      # =================================================================
+      - name: Run full model L2 accuracy tests
+        if: always() && (github.event.inputs.enable_full_model_l2 == 'true')
+        timeout-minutes: 60
+        shell: cmd
+        run: |
+          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
+          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
+          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
+          set MODEL_DIR=${{ runner.workspace }}\model
+          if not exist "%MODEL_DIR%" (
+            echo [SKIP] Full model directory not found: %MODEL_DIR%
+            exit /b 0
+          )
+          set FOUND=0
+          for /r "%MODEL_DIR%" %%M in (*.onnx) do set FOUND=1
+          if "%FOUND%"=="0" (
+            echo [SKIP] No .onnx models found in %MODEL_DIR%
+            exit /b 0
+          )
+          mkdir l2-results\full-model 2>nul
+          set FAILED=0
+          cd gpu-test-package\bin
+          for /r "%MODEL_DIR%" %%M in (*.onnx) do (
+            echo === L2 test: %%~nxM ===
+            rd /s /q "%%~nM_o_dump" 2>nul
+            rd /s /q "%%~nM_cpu_o_dump" 2>nul
+            hip-onnx-runner.exe -m "%%M" -d 2 -s 42
+            if errorlevel 1 (
+              echo [ERROR] EP inference failed for %%~nxM
+              set FAILED=1
+            ) else (
+              hip-onnx-runner.exe -m "%%M" -d 2 -s 42 -n
+              if errorlevel 1 (
+                echo [ERROR] CPU inference failed for %%~nxM
+                set FAILED=1
+              ) else (
+                hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" > "..\..\l2-results\full-model\%%~nM.txt" 2>&1
+                type "..\..\l2-results\full-model\%%~nM.txt"
+              )
+            )
+          )
+          exit /b %FAILED%
+
+      # =================================================================
+      #  PUBLISH RESULTS
+      # =================================================================
+      - name: Publish results
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $runUrl = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          $sha = "${{ github.event.workflow_run.head_sha || github.sha }}".Substring(0, 7)
+          $threshold = 0.01
+
+          # --- Helper: parse perf results from a directory ---
+          function Get-PerfTable($dir, $title) {
+            $rows = ""
+            $files = Get-ChildItem "$dir/*.txt" -ErrorAction SilentlyContinue
+            if (-not $files) { return "" }
+            foreach ($f in $files) {
+              $model = ($f.BaseName -replace '\.onnx$', '')
+              $content = Get-Content $f.FullName -Raw
+              $qpsMatch = [regex]::Match($content, 'Number of inferences per second:\s+([\d.]+)')
+              $avgMatch = [regex]::Match($content, 'Average inference time cost:\s+([\d.]+)\s+ms')
+              if ($qpsMatch.Success) {
+                $qps = "{0:F2}" -f [double]$qpsMatch.Groups[1].Value
+                $avg = if ($avgMatch.Success) { "{0:F3}" -f [double]$avgMatch.Groups[1].Value } else { "N/A" }
+                $rows += "| $model | $qps | $avg ms |`n"
+              } else {
+                $rows += "| $model | failed | - |`n"
+              }
+            }
+            if (-not $rows) { return "" }
+            $header = "### $title`n`n| Model | QPS | Avg Latency |`n|-------|----:|------------|`n"
+            return $header + $rows + "`n"
+          }
+
+          # --- Helper: parse L2 results from a directory ---
+          function Get-L2Table($dir, $title) {
+            $rows = ""
+            $files = Get-ChildItem "$dir/*.txt" -ErrorAction SilentlyContinue
+            if (-not $files) { return "" }
+            foreach ($f in $files) {
+              $model = $f.BaseName
+              $content = Get-Content $f.FullName -Raw
+              $l2Match = [regex]::Match($content, 'Combined L2 \(stacked diffs\):\s+([\d.eE+-]+)')
+              if ($l2Match.Success) {
+                $l2val = [double]$l2Match.Groups[1].Value
+                $status = if ($l2val -le $threshold) { [char]0x2705 } else { [char]0x274C }
+                $rows += "| $model | $l2val | $status |`n"
+              } else {
+                $rows += "| $model | error | $([char]0x274C) |`n"
+              }
+            }
+            if (-not $rows) { return "" }
+            $header = "### $title`n`n| Model | Combined L2 | Status |`n|-------|------------|--------|`n"
+            return $header + $rows + "`n"
+          }
+
+          # --- Build full summary ---
+          $summary = "## GPU Performance & Accuracy Test Results`n`n"
+
+          $opPerf = Get-PerfTable "perf-results/single-op" "Single-Op Performance (MorphiZen EP)"
+          $opL2 = Get-L2Table "l2-results/single-op" "Single-Op Accuracy (EP vs CPU)"
+          $fullPerf = Get-PerfTable "perf-results/full-model" "Full Model Performance (MorphiZen EP)"
+          $fullL2 = Get-L2Table "l2-results/full-model" "Full Model Accuracy (EP vs CPU)"
+
+          if ($opPerf) { $summary += $opPerf }
+          if ($opL2) { $summary += $opL2 }
+          if ($fullPerf) { $summary += $fullPerf }
+          if ($fullL2) { $summary += $fullL2 }
+
+          if (-not $opPerf -and -not $opL2 -and -not $fullPerf -and -not $fullL2) {
+            $summary += "> No test results collected.`n"
+          }
+
+          $summary += "`nL2 threshold: $threshold | Run: [${{ github.run_number }}]($runUrl) | Commit: ``$sha```n"
+
+          Write-Host $summary
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+
+          # --- Post PR comment if triggered by workflow_run on a PR ---
+          $prBranch = "${{ github.event.workflow_run.head_branch }}"
+          if ($prBranch -and $prBranch -ne "main") {
+            $prsJson = gh pr list -R "${{ github.repository }}" --head "$prBranch" --json number --limit 1 2>$null
+            if ($LASTEXITCODE -eq 0 -and $prsJson) {
+              $prs = $prsJson | ConvertFrom-Json
+              if ($prs.Count -gt 0) {
+                $prNumber = $prs[0].number
+                $marker = "<!-- morphizen-gpu-test-results -->"
+                $body = "$marker`n$summary"
+
+                $commentsJson = gh api "repos/${{ github.repository }}/issues/$prNumber/comments" 2>$null
+                $ghOk = ($LASTEXITCODE -eq 0)
+                $existing = $null
+                if ($ghOk -and $commentsJson) {
+                  $comments = $commentsJson | ConvertFrom-Json
+                  $found = $comments | Where-Object { $_.body -and $_.body.StartsWith($marker) } | Select-Object -First 1
+                  if ($found) { $existing = $found.id }
+                }
+
+                if ($ghOk -and $existing) {
+                  Write-Host "Updating existing PR comment $existing"
+                  gh api --method PATCH "repos/${{ github.repository }}/issues/comments/$existing" -f body="$body"
+                } elseif ($ghOk) {
+                  Write-Host "Creating new PR comment on #$prNumber"
+                  gh pr comment $prNumber -R "${{ github.repository }}" --body "$body"
+                }
+              }
+            }
+          }
