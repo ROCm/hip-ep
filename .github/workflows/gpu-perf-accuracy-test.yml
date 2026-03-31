@@ -177,7 +177,8 @@ jobs:
             set "MDIR=%%~dpM"
             set "REL=!MDIR:%OP_MODEL_DIR%\=!"
             mkdir "..\..\perf-results\single-op\!REL!" 2>nul
-            echo === Perf: !REL!%%~nxM ===
+            mkdir "..\..\perf-results\single-op-dml\!REL!" 2>nul
+            echo === Perf [MorphiZen]: !REL!%%~nxM ===
             onnxruntime_perf_test.exe ^
               --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
               --plugin_eps "MorphiZenExecutionProvider" ^
@@ -185,6 +186,14 @@ jobs:
               -t %PERF_DURATION% -c 1 -s -I ^
               "%%M" > "..\..\perf-results\single-op\!REL!%%~nxM.txt" 2>&1
             type "..\..\perf-results\single-op\!REL!%%~nxM.txt"
+            if errorlevel 1 set FAILED=1
+            echo === Perf [DML]: !REL!%%~nxM ===
+            onnxruntime_perf_test.exe ^
+              -e dml ^
+              -C "ep.dml.disable_graph_fusion|1" ^
+              -t %PERF_DURATION% -c 1 -s -I ^
+              "%%M" > "..\..\perf-results\single-op-dml\!REL!%%~nxM.txt" 2>&1
+            type "..\..\perf-results\single-op-dml\!REL!%%~nxM.txt"
             if errorlevel 1 set FAILED=1
           )
           exit /b !FAILED!
@@ -272,7 +281,8 @@ jobs:
             set "MDIR=%%~dpM"
             set "REL=!MDIR:%MODEL_DIR%\=!"
             mkdir "..\..\perf-results\full-model\!REL!" 2>nul
-            echo === Perf: !REL!%%~nxM ===
+            mkdir "..\..\perf-results\full-model-dml\!REL!" 2>nul
+            echo === Perf [MorphiZen]: !REL!%%~nxM ===
             onnxruntime_perf_test.exe ^
               --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
               --plugin_eps "MorphiZenExecutionProvider" ^
@@ -280,6 +290,14 @@ jobs:
               -t %PERF_DURATION% -c 1 -s -I ^
               "%%M" > "..\..\perf-results\full-model\!REL!%%~nxM.txt" 2>&1
             type "..\..\perf-results\full-model\!REL!%%~nxM.txt"
+            if errorlevel 1 set FAILED=1
+            echo === Perf [DML]: !REL!%%~nxM ===
+            onnxruntime_perf_test.exe ^
+              -e dml ^
+              -C "ep.dml.disable_graph_fusion|1" ^
+              -t %PERF_DURATION% -c 1 -s -I ^
+              "%%M" > "..\..\perf-results\full-model-dml\!REL!%%~nxM.txt" 2>&1
+            type "..\..\perf-results\full-model-dml\!REL!%%~nxM.txt"
             if errorlevel 1 set FAILED=1
           )
           exit /b !FAILED!
@@ -421,14 +439,18 @@ jobs:
           # --- Build markdown summary ---
           $summary = "## GPU Performance & Accuracy Test Results`n`n"
           $opPerf = Get-PerfTable "perf-results/single-op" "Single-Op Performance (MorphiZen EP)"
+          $opPerfDml = Get-PerfTable "perf-results/single-op-dml" "Single-Op Performance (DirectML EP)"
           $opL2 = Get-L2Table "l2-results/single-op" "Single-Op Accuracy (EP vs CPU)"
           $fullPerf = Get-PerfTable "perf-results/full-model" "Full Model Performance (MorphiZen EP)"
+          $fullPerfDml = Get-PerfTable "perf-results/full-model-dml" "Full Model Performance (DirectML EP)"
           $fullL2 = Get-L2Table "l2-results/full-model" "Full Model Accuracy (EP vs CPU)"
           if ($opPerf) { $summary += $opPerf }
+          if ($opPerfDml) { $summary += $opPerfDml }
           if ($opL2) { $summary += $opL2 }
           if ($fullPerf) { $summary += $fullPerf }
+          if ($fullPerfDml) { $summary += $fullPerfDml }
           if ($fullL2) { $summary += $fullL2 }
-          if (-not $opPerf -and -not $opL2 -and -not $fullPerf -and -not $fullL2) {
+          if (-not $opPerf -and -not $opPerfDml -and -not $opL2 -and -not $fullPerf -and -not $fullPerfDml -and -not $fullL2) {
             $summary += "> No test results collected.`n"
           }
           $summary += "`nL2 threshold: $threshold | Run: [${{ github.run_number }}]($runUrl) | Commit: ``$sha```n"
@@ -436,7 +458,7 @@ jobs:
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
 
           # --- Generate JSON result files ---
-          function Collect-PerfJson($dir, $category) {
+          function Collect-PerfJson($dir, $category, $epName) {
             $entries = @()
             if (-not (Test-Path $dir)) { return $entries }
             $files = Get-ChildItem $dir -Recurse -Filter "*.txt" -ErrorAction SilentlyContinue
@@ -447,6 +469,7 @@ jobs:
               $avgMatch = [regex]::Match($content, 'Average inference time cost:\s+([\d.]+)\s+ms')
               $entry = [ordered]@{
                 category   = $category
+                ep_name    = $epName
                 model_name = $meta.model_name
                 file       = $meta.file
                 qps        = if ($qpsMatch.Success) { [double]$qpsMatch.Groups[1].Value } else { $null }
@@ -488,8 +511,10 @@ jobs:
           }
 
           $perfAll  = @()
-          $perfAll += Collect-PerfJson "perf-results/single-op" "single-op"
-          $perfAll += Collect-PerfJson "perf-results/full-model" "full-model"
+          $perfAll += Collect-PerfJson "perf-results/single-op" "single-op" "MorphiZenExecutionProvider"
+          $perfAll += Collect-PerfJson "perf-results/single-op-dml" "single-op" "DmlExecutionProvider"
+          $perfAll += Collect-PerfJson "perf-results/full-model" "full-model" "MorphiZenExecutionProvider"
+          $perfAll += Collect-PerfJson "perf-results/full-model-dml" "full-model" "DmlExecutionProvider"
 
           $l2All  = @()
           $l2All += Collect-L2Json "l2-results/single-op" "single-op"
@@ -498,7 +523,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path "json-results" | Out-Null
 
           $perfJson = [ordered]@{
-            ep_name   = "MorphiZenExecutionProvider"
             timestamp = $timestamp
             commit    = $sha
             results   = @($perfAll)
