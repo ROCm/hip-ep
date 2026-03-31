@@ -11,6 +11,7 @@
 #include "error_check_macros.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -129,20 +130,24 @@ cleanup_pref:
 }
 
 // =============================================================================
-// 11-step hipBLASLt GQA pipeline (FP16 only)
+// 12-step hipBLASLt GQA pipeline (Step 0 + Steps 1-11, FP16 only)
 // =============================================================================
 
 static int gqa_forward_hipblaslt(
     RuntimeState *state, hipStream_t stream, hipblasLtHandle_t ltHandle,
-    const void *query,    // BSHD [B, sq, H, d]
-    const void *key,      // BSHD [B, sq, G, d]
-    const void *value,    // BSHD [B, sq, G, d]
+    const void *query,    // BSHD [B, sq, H, d] or packed [B, sq, (H+2G)*d]
+    const void *key,      // BSHD [B, sq, G, d] or null (packed QKV)
+    const void *value,    // BSHD [B, sq, G, d] or null (packed QKV)
     const void *past_key, // BNSD [B, G, past_seq, d] or null
     const void *past_value, const void *cos_cache, const void *sin_cache,
-    void *output,      // BSHD [B, sq, H, d]
-    void *present_key, // BNSD [B, G, present_seq, d]
+    void *head_sink,         // [H] smooth softmax factor or null
+    bool use_smooth_softmax, // true when smooth softmax is enabled (ORT:
+                             // head_sink || smooth_softmax attr)
+    void *output,            // BSHD [B, sq, H, d]
+    void *present_key,       // BNSD [B, G, present_seq, d]
     void *present_value, int64_t B, int64_t sq, int64_t skv, int64_t H,
-    int64_t G, int64_t d, float scale, int64_t do_rotary) {
+    int64_t G, int64_t d, float scale, int64_t do_rotary,
+    int64_t local_window_size) {
 
   int64_t HPG = H / G;
   int64_t past_len = skv - sq;
@@ -153,13 +158,16 @@ static int gqa_forward_hipblaslt(
   // token count used for GEMM dimensions) if the buffer is pre-allocated.
   int64_t present_seq = skv;
 
+  bool packed_qkv = (key == nullptr && value == nullptr);
+
   // ---- Workspace layout ----
   // All temp buffers are packed contiguously into the shared workspace,
   // followed by the GEMM workspace region. This eliminates per-call
   // hipMalloc/hipFree -- after the first inference the workspace is
   // already large enough and reuse is zero-cost.
   //
-  // Layout: [Qtrans | Kexp | Vexp | S | O | Qroped? | Kroped? | GEMM ws]
+  // Layout: [Qtrans | Kexp | Vexp | S | O | Qroped? | Kroped? | Qsplit? |
+  // Ksplit? | Vsplit? | GEMM ws]
 
   size_t elem_sz = 2; // FP16
   size_t Qtrans_bytes = (size_t)B * H * sq * d * elem_sz;
@@ -174,14 +182,29 @@ static int gqa_forward_hipblaslt(
   size_t off_O = off_S + S_bytes;
   size_t temp_end = off_O + O_bytes;
 
+  // Optional RoPE buffers: allocated only when do_rotary is enabled.
   size_t off_Qroped = 0, off_Kroped = 0;
-  bool need_rope = do_rotary && cos_cache && sin_cache;
+  bool need_rope = (do_rotary == 1) && cos_cache && sin_cache;
   if (need_rope) {
     size_t Q_bytes = (size_t)B * sq * H * d * elem_sz;
     size_t K_bytes = (size_t)B * sq * G * d * elem_sz;
     off_Qroped = temp_end;
     off_Kroped = off_Qroped + Q_bytes;
     temp_end = off_Kroped + K_bytes;
+  }
+
+  // Optional packed-QKV split buffers: allocated only when key/value are
+  // null (GPT-OSS style packed input).  These must be placed AFTER the RoPE
+  // buffers in the layout so that split outputs remain live while RoPE reads
+  // from them and writes to the RoPE region (no overlap).
+  size_t off_Qsplit = 0, off_Ksplit = 0, off_Vsplit = 0;
+  if (packed_qkv) {
+    size_t Q_bytes = (size_t)B * sq * H * d * elem_sz;
+    size_t K_bytes = (size_t)B * sq * G * d * elem_sz;
+    off_Qsplit = temp_end;
+    off_Ksplit = off_Qsplit + Q_bytes;
+    off_Vsplit = off_Ksplit + K_bytes;
+    temp_end = off_Vsplit + K_bytes;
   }
 
   // Query GEMM algorithms first (cached) to know the GEMM workspace size,
@@ -266,24 +289,46 @@ static int gqa_forward_hipblaslt(
     void *gemm_ws_ptr = ws + temp_end;
     size_t gemm_ws_bytes = ws_total - temp_end;
 
+    // Mutable source pointers: initially point to the raw inputs, but get
+    // redirected to workspace buffers as pipeline steps (split, RoPE) produce
+    // intermediate results.  Downstream steps always read through these so
+    // they automatically pick up the latest transformed data.
     const void *qSrc = query;
     const void *kSrc = key;
+    const void *vSrc = value;
+
+    // ---- Step 0: Split packed QKV (if needed) ----
+    // When key/value are null, query is a packed [B, S, (H+2G)*d] tensor.
+    // Split into separate Q [B*S, H*d], K [B*S, G*d], V [B*S, G*d].
+    if (packed_qkv) {
+      void *d_Qsplit = ws + off_Qsplit;
+      void *d_Ksplit = ws + off_Ksplit;
+      void *d_Vsplit = ws + off_Vsplit;
+      HIP_CHECK(hip_gqa_split_qkv(stream, query, d_Qsplit, d_Ksplit, d_Vsplit,
+                                  (int)B, (int)sq, (int)H, (int)G, (int)d));
+      qSrc = d_Qsplit;
+      kSrc = d_Ksplit;
+      vSrc = d_Vsplit;
+    }
 
     // ---- Steps 1-2: RoPE (optional) ----
+    // Uses qSrc/kSrc (not raw query/key) so that packed-QKV split buffers
+    // are correctly fed into RoPE when both features are active.
     if (need_rope) {
       int half_rot = (int)(d / 2);
       void *d_Qroped = ws + off_Qroped;
       void *d_Kroped = ws + off_Kroped;
 
-      HIP_CHECK(hip_gqa_rope(stream, query, d_Qroped, cos_cache, sin_cache,
+      HIP_CHECK(hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                              (int)B, (int)sq, (int)H, (int)d, half_rot,
                              (int)past_len));
-      HIP_CHECK(hip_gqa_rope(stream, key, d_Kroped, cos_cache, sin_cache,
+      HIP_CHECK(hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
                              (int)B, (int)sq, (int)G, (int)d, half_rot,
                              (int)past_len));
 
       qSrc = d_Qroped;
       kSrc = d_Kroped;
+      // vSrc is intentionally NOT updated: V is never RoPE'd.
     }
 
     // ---- Step 3: Q Transpose BSHD [B,S,H,d] -> BNSD [B,H,S,d] ----
@@ -301,7 +346,7 @@ static int gqa_forward_hipblaslt(
             stream, past_key, kSrc, present_key, (int)B, (int)past_len, (int)sq,
             (int)G, (int)d, (int)past_len, (int)present_seq));
         HIP_CHECK(hip_gqa_kv_cache_concat(
-            stream, past_value, value, present_value, (int)B, (int)past_len,
+            stream, past_value, vSrc, present_value, (int)B, (int)past_len,
             (int)sq, (int)G, (int)d, (int)past_len, (int)present_seq));
       } else {
         // Same buffer (aliased / in-place): past data already at correct
@@ -309,7 +354,7 @@ static int gqa_forward_hipblaslt(
         HIP_CHECK(hip_gqa_kv_cache_append(stream, kSrc, present_key, (int)B,
                                           (int)sq, (int)G, (int)d,
                                           (int)present_seq, (int)past_len));
-        HIP_CHECK(hip_gqa_kv_cache_append(stream, value, present_value, (int)B,
+        HIP_CHECK(hip_gqa_kv_cache_append(stream, vSrc, present_value, (int)B,
                                           (int)sq, (int)G, (int)d,
                                           (int)present_seq, (int)past_len));
       }
@@ -341,13 +386,20 @@ static int gqa_forward_hipblaslt(
                                   gemm_ws_bytes, stream));
 
     // ---- Step 9: Causal Mask + Softmax ----
+    // Causal mask (prefill only): masks future tokens, and when
+    // local_window_size > 0 also masks distant past outside the window.
+    // Smooth softmax: activated when head_sink is non-null (per-head sink
+    // factors in the denominator) or when smooth_softmax attr == 1 (uses 0
+    // as the sink value, matching ORT default).
     int scoreBatchStride = (int)(sq * skv);
     if (sq > 1) {
       HIP_CHECK(hip_gqa_causal_mask(stream, d_S, (int)(B * H), (int)skv,
-                                    (int)sq, scoreBatchStride, (int)past_len));
+                                    (int)sq, scoreBatchStride, (int)past_len,
+                                    (int)local_window_size));
     }
     HIP_CHECK(hip_gqa_softmax_inplace(stream, d_S, (int)(B * H * sq), (int)skv,
-                                      (int)sq, scoreBatchStride));
+                                      (int)sq, scoreBatchStride, head_sink,
+                                      (int)H, (int)use_smooth_softmax));
 
     // ---- Step 10: Value GEMM ----
     float valAlpha = 1.0f;
@@ -413,7 +465,7 @@ int wrap_group_query_attention(
     fprintf(stderr, "wrap_group_query_attention: null state\n");
     return -1;
   }
-  if (!query || !key || !value || !output) {
+  if (!query || !output) {
     fprintf(stderr, "wrap_group_query_attention: null required argument\n");
     return -1;
   }
@@ -453,54 +505,86 @@ int wrap_group_query_attention(
     return -1;
   }
 
-  // Phase 1: Warn about unimplemented features (Phase 2 will implement)
+  // Reject features not yet implemented
   if (position_ids != nullptr) {
-    RUNTIME_DEBUG_LOG("[WARN] position_ids not yet implemented (Phase 2)\n");
+    fprintf(stderr,
+            "wrap_group_query_attention: position_ids not yet implemented\n");
+    return -1;
   }
   if (attention_bias != nullptr) {
-    RUNTIME_DEBUG_LOG("[WARN] attention_bias not yet implemented (Phase 2)\n");
-  }
-  if (head_sink != nullptr) {
-    RUNTIME_DEBUG_LOG("[WARN] head_sink not yet implemented (Phase 2)\n");
+    fprintf(stderr,
+            "wrap_group_query_attention: attention_bias not yet implemented\n");
+    return -1;
   }
   if (k_scale != nullptr || v_scale != nullptr) {
-    RUNTIME_DEBUG_LOG(
-        "[WARN] KV cache quantization not yet implemented (Phase 2)\n");
+    fprintf(stderr, "wrap_group_query_attention: KV cache quantization not yet "
+                    "implemented\n");
+    return -1;
   }
   if (output_qk != nullptr) {
-    RUNTIME_DEBUG_LOG("[WARN] output_qk not yet implemented (Phase 2)\n");
-  }
-  if (local_window_size != -1) {
-    RUNTIME_DEBUG_LOG(
-        "[WARN] local_window_size not yet implemented (Phase 2)\n");
-  }
-  if (smooth_softmax != 0) {
-    RUNTIME_DEBUG_LOG("[WARN] smooth_softmax not yet implemented (Phase 2)\n");
+    fprintf(stderr,
+            "wrap_group_query_attention: output_qk not yet implemented\n");
+    return -1;
   }
   if (qk_output != 0) {
-    RUNTIME_DEBUG_LOG("[WARN] qk_output not yet implemented (Phase 2)\n");
+    fprintf(stderr,
+            "wrap_group_query_attention: qk_output not yet implemented\n");
+    return -1;
   }
   if (k_quant_type != 0 || v_quant_type != 0) {
-    RUNTIME_DEBUG_LOG(
-        "[WARN] quantization types not yet implemented (Phase 2)\n");
+    fprintf(
+        stderr,
+        "wrap_group_query_attention: quantization types not yet implemented\n");
+    return -1;
   }
   if (kv_cache_bit_width != 8) {
-    RUNTIME_DEBUG_LOG("[WARN] non-8bit cache not yet implemented (Phase 2)\n");
+    fprintf(stderr,
+            "wrap_group_query_attention: non-8bit cache not yet implemented\n");
+    return -1;
   }
 
+  // ORT uses scale == 0.0 as sentinel for "auto-compute 1/√head_size"
+  // (gqa_attention_base.h line 185: scale_ == 0.0f ? 1/sqrt(head_size) :
+  // scale_).
+  if (scale == 0.0f && head_dim > 0) {
+    scale = 1.0f / sqrtf(static_cast<float>(head_dim));
+  }
+
+  // Smooth softmax: activated when head_sink is provided OR smooth_softmax
+  // attribute is explicitly 1, matching ORT behaviour (gqa_attention_base.h
+  // line 354: use_smooth_softmax_ || head_sink != nullptr).
+  // Compare == 1 following ORT's GetAttrOrDefault("smooth_softmax", 0) == 1
+  // pattern (default 0 is set in HipOps.td and OnnxToHip.cpp).
+  bool has_smooth_softmax = (head_sink != nullptr || smooth_softmax == 1);
+
+  bool is_packed_qkv = (key == nullptr && value == nullptr);
+  bool has_rope =
+      (do_rotary == 1 && cos_cache != nullptr && sin_cache != nullptr);
+  bool has_local_window = (local_window_size > 0);
+
   RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_group_query_attention: batch=%lld, seq_q=%lld, "
-      "seq_kv=%lld, num_heads=%lld, kv_heads=%lld, head_dim=%lld, "
-      "scale=%f, do_rotary=%lld, elem_size=%lld\n",
+      "[REAL] wrap_group_query_attention:\n"
+      "  shapes: batch=%lld, seq_q=%lld, seq_kv=%lld, num_heads=%lld, "
+      "kv_heads=%lld, head_dim=%lld\n"
+      "  attrs:  scale=%f, do_rotary=%lld, rotary_interleaved=%lld, "
+      "softcap=%f, local_window_size=%lld, smooth_softmax=%lld\n"
+      "  inputs: query=%p, key=%p, value=%p, past_key=%p, past_value=%p\n"
+      "          cos_cache=%p, sin_cache=%p, head_sink=%p\n"
+      "  outputs: output=%p, present_key=%p, present_value=%p\n"
+      "  mode:   packed_qkv=%d, rope=%d, local_window=%d, smooth_softmax=%d\n",
       (long long)batch_size, (long long)seq_len_q, (long long)seq_len_kv,
       (long long)num_heads, (long long)kv_num_heads, (long long)head_dim,
-      (double)scale, (long long)do_rotary, (long long)element_size_bytes);
+      (double)scale, (long long)do_rotary, (long long)rotary_interleaved,
+      (double)softcap, (long long)local_window_size, (long long)smooth_softmax,
+      query, key, value, past_key, past_value, cos_cache, sin_cache, head_sink,
+      output, present_key, present_value, (int)is_packed_qkv, (int)has_rope,
+      (int)has_local_window, (int)has_smooth_softmax);
 
-  int rc = gqa_forward_hipblaslt(state, stream, ltHandle, query, key, value,
-                                 past_key, past_value, cos_cache, sin_cache,
-                                 output, present_key, present_value, batch_size,
-                                 seq_len_q, seq_len_kv, num_heads, kv_num_heads,
-                                 head_dim, scale, do_rotary);
+  int rc = gqa_forward_hipblaslt(
+      state, stream, ltHandle, query, key, value, past_key, past_value,
+      cos_cache, sin_cache, head_sink, has_smooth_softmax, output, present_key,
+      present_value, batch_size, seq_len_q, seq_len_kv, num_heads, kv_num_heads,
+      head_dim, scale, do_rotary, local_window_size);
 
   if (rc != 0) {
     fprintf(stderr, "wrap_group_query_attention: gqa_forward failed (rc=%d)\n",
