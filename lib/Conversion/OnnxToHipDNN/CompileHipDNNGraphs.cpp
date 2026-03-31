@@ -54,8 +54,7 @@ struct CompileHipDNNGraphsPass
     : public PassWrapper<CompileHipDNNGraphsPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(CompileHipDNNGraphsPass)
 
-  CompileHipDNNGraphsPass(hipdnnHandle_t handle,
-                          CompiledGraphMap output_graphs)
+  CompileHipDNNGraphsPass(hipdnnHandle_t handle, CompiledGraphMap output_graphs)
       : handle_(handle), output_graphs_(std::move(output_graphs)) {}
 
   StringRef getArgument() const override { return "compile-hipdnn-graphs"; }
@@ -87,8 +86,7 @@ void CompileHipDNNGraphsPass::runOnOperation() {
       continue;
 
     SmallVector<HipDNNGraphOutlineOp> outlineOps;
-    func->walk(
-        [&](HipDNNGraphOutlineOp op) { outlineOps.push_back(op); });
+    func->walk([&](HipDNNGraphOutlineOp op) { outlineOps.push_back(op); });
 
     for (HipDNNGraphOutlineOp outlineOp : outlineOps) {
       auto graph = std::make_unique<::hip::graph::HipDNNGraph>(handle_);
@@ -104,8 +102,7 @@ void CompileHipDNNGraphsPass::runOnOperation() {
         continue;
       }
 
-      std::string graph_name =
-          "hipdnn_graph_" + std::to_string(graph_count_);
+      std::string graph_name = "hipdnn_graph_" + std::to_string(graph_count_);
       int32_t graph_id = graph_count_++;
 
       OpBuilder builder(outlineOp);
@@ -120,16 +117,14 @@ void CompileHipDNNGraphsPass::runOnOperation() {
           return;
         }
         auto empty = tensor::EmptyOp::create(
-            builder, loc, tensor_type.getShape(),
-            tensor_type.getElementType());
+            builder, loc, tensor_type.getShape(), tensor_type.getElementType());
         outs.push_back(empty);
       }
 
       auto input_uids = graph->getInputUids();
       auto output_uids = graph->getOutputUids();
 
-      SmallVector<int64_t> input_uid_vec(input_uids.begin(),
-                                         input_uids.end());
+      SmallVector<int64_t> input_uid_vec(input_uids.begin(), input_uids.end());
       SmallVector<int64_t> output_uid_vec(output_uids.begin(),
                                           output_uids.end());
 
