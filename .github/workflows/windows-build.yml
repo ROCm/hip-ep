@@ -560,19 +560,18 @@ jobs:
             $errMatch = [regex]::Match($content, '\[ERROR\]\s*(.+)')
             if ($l2Match.Success) {
               $l2val = [double]$l2Match.Groups[1].Value
-              $status = if ($l2val -le $threshold) { [char]0x2705 } else { [char]0x274C }
-              $tableRows += "| $model | $l2val | $status |`n"
+              $tableRows += "| $model | $l2val |`n"
             } elseif ($errMatch.Success) {
               $reason = $errMatch.Groups[1].Value.Trim()
-              $tableRows += "| $model | $reason | $([char]0x274C) |`n"
+              $tableRows += "| $model | $reason |`n"
             } else {
-              $tableRows += "| $model | error | $([char]0x274C) |`n"
+              $tableRows += "| $model | error |`n"
             }
           }
 
           $header = "## L2 Accuracy Results (EP vs CPU)`n`n" +
-                    "| Model | Combined L2 | Status |`n" +
-                    "|-------|------------|--------|`n"
+                    "| Model | Combined L2 |`n" +
+                    "|-------|------------|`n"
           $footer = "`nThreshold: $threshold | Run: [${{ github.run_number }}]($runUrl) - Commit: ``$sha``"
           $summary = $header + $tableRows + $footer
 
