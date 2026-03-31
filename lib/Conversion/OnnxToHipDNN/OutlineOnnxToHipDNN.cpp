@@ -1,14 +1,6 @@
 /*
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
- *
- * Handle-free MLIR pass that outlines supported ONNX ops into
- * hip.hipdnn_graph_outline regions.  Each outlined region is a
- * self-contained subgraph (IsolatedFromAbove) ready for hipDNN
- * graph compilation by the downstream CompileHipDNNGraphs pass.
- *
- * Unsupported or dynamic-shape ops are left untouched for the
- * standard ConvertOnnxToHip path (hybrid execution model).
  */
 
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"

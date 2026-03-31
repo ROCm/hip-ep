@@ -36,7 +36,8 @@ extern "C" {
 #endif
 
 /// Create a hipDNN handle via hipdnnCreate(). Returns opaque handle as void*,
-/// or nullptr on failure. Wraps hipdnn_backend so callers don't need to link it.
+/// or nullptr on failure. Wraps hipdnn_backend so callers don't need to link
+/// it.
 HIPDNN_GRAPH_RUNTIME_API void *hipdnn_graph_create_handle();
 
 /// Create a new graph registry. Returns opaque pointer.
@@ -48,10 +49,10 @@ HIPDNN_GRAPH_RUNTIME_API void hipdnn_graph_registry_destroy(void *registry);
 /// Store a compiled graph in the registry. Takes ownership of the graph.
 /// @param registry  Opaque registry pointer from _create()
 /// @param graph_id  Integer ID (matches IR attribute)
-/// @param graph     Opaque pointer to hip::graph::HipDNNGraph (ownership transferred)
-HIPDNN_GRAPH_RUNTIME_API void hipdnn_graph_registry_store(void *registry,
-                                                          int32_t graph_id,
-                                                          void *graph);
+/// @param graph     Opaque pointer to hip::graph::HipDNNGraph (ownership
+/// transferred)
+HIPDNN_GRAPH_RUNTIME_API void
+hipdnn_graph_registry_store(void *registry, int32_t graph_id, void *graph);
 
 /// Set the process-level default graph registry. Used by the same-process
 /// singleton pattern: hip-compiler.dll populates this during compilation,
@@ -66,9 +67,8 @@ HIPDNN_GRAPH_RUNTIME_API void hipdnn_graph_set_default_handle(void *handle);
 /// @param state     Opaque RuntimeState* from inference_init()
 /// @param handle    hipdnnHandle_t (cast to void*)
 /// @param registry  Opaque registry pointer from _create()
-HIPDNN_GRAPH_RUNTIME_API void hipdnn_graph_runtime_attach(void *state,
-                                                          void *handle,
-                                                          void *registry);
+HIPDNN_GRAPH_RUNTIME_API void
+hipdnn_graph_runtime_attach(void *state, void *handle, void *registry);
 
 /// Execute a compiled hipDNN graph. Called from model.dll generated code.
 /// Falls back to process-level defaults if state fields are nullptr.
@@ -78,11 +78,8 @@ HIPDNN_GRAPH_RUNTIME_API void hipdnn_graph_runtime_attach(void *state,
 /// @param uids      Tensor UIDs (from IR attributes)
 /// @param ptrs      GPU memory pointers (from memref descriptors)
 /// @return 0 on success, non-zero on failure
-HIPDNN_GRAPH_RUNTIME_API int32_t hipdnn_graph_execute(void *state,
-                                                      int32_t graph_id,
-                                                      int32_t num_io,
-                                                      int64_t *uids,
-                                                      void **ptrs);
+HIPDNN_GRAPH_RUNTIME_API int32_t hipdnn_graph_execute(
+    void *state, int32_t graph_id, int32_t num_io, int64_t *uids, void **ptrs);
 
 #ifdef __cplusplus
 } // extern "C"
