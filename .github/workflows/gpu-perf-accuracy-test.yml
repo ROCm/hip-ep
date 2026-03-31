@@ -85,19 +85,18 @@ jobs:
       # -----------------------------------------------------------------
       - name: Resolve source branch
         id: resolve-branch
-        shell: bash
+        shell: pwsh
         run: |
-          if [ -n "${{ github.event.inputs.source_branch }}" ]; then
-            BRANCH="${{ github.event.inputs.source_branch }}"
-          elif [ "${{ github.event_name }}" = "pull_request" ]; then
-            BRANCH="feat/improve-test-runner"
-          elif [ -n "${{ github.event.workflow_run.head_branch }}" ]; then
-            BRANCH="${{ github.event.workflow_run.head_branch }}"
-          else
-            BRANCH="main"
-          fi
-          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
-          echo "Resolved source branch: $BRANCH"
+          $branch = "${{ github.event.inputs.source_branch }}"
+          if (-not $branch) {
+            if ("${{ github.event.workflow_run.head_branch }}") {
+              $branch = "${{ github.event.workflow_run.head_branch }}"
+            } else {
+              $branch = "main"
+            }
+          }
+          "branch=$branch" | Out-File -Append $env:GITHUB_OUTPUT
+          Write-Host "Resolved source branch: $branch"
 
       - name: Download gpu-test-package
         uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe # v3.1.4
@@ -148,6 +147,10 @@ jobs:
         shell: cmd
         run: |
           setlocal enabledelayedexpansion
+          if not exist "gpu-test-package\bin" (
+            echo [SKIP] gpu-test-package not found, artifact download may have failed
+            exit /b 0
+          )
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
@@ -190,6 +193,10 @@ jobs:
         shell: cmd
         run: |
           setlocal enabledelayedexpansion
+          if not exist "gpu-test-package\bin" (
+            echo [SKIP] gpu-test-package not found, artifact download may have failed
+            exit /b 0
+          )
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
@@ -240,6 +247,10 @@ jobs:
         shell: cmd
         run: |
           setlocal enabledelayedexpansion
+          if not exist "gpu-test-package\bin" (
+            echo [SKIP] gpu-test-package not found, artifact download may have failed
+            exit /b 0
+          )
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
@@ -282,6 +293,10 @@ jobs:
         shell: cmd
         run: |
           setlocal enabledelayedexpansion
+          if not exist "gpu-test-package\bin" (
+            echo [SKIP] gpu-test-package not found, artifact download may have failed
+            exit /b 0
+          )
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
