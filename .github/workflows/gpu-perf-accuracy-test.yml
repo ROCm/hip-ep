@@ -188,7 +188,7 @@ jobs:
                   rd /s /q "%%~nM_cpu_o_dump" 2>nul
                   hip-onnx-runner.exe -m "%%M" -d 2 -s 42 > "!OUT!" 2>&1
                   if errorlevel 1 (
-                    echo [ERROR] EP inference failed>> "!OUT!"
+                    echo [ERROR] hipdnn-ep inference failed>> "!OUT!"
                     type "!OUT!"
                     set FAILED=1
                   ) else (
@@ -296,7 +296,7 @@ jobs:
                   rd /s /q "%%~nM_cpu_o_dump" 2>nul
                   hip-onnx-runner.exe -m "%%M" -d 2 -s 42 > "!OUT!" 2>&1
                   if errorlevel 1 (
-                    echo [ERROR] EP inference failed>> "!OUT!"
+                    echo [ERROR] hipdnn-ep inference failed>> "!OUT!"
                     type "!OUT!"
                     set FAILED=1
                   ) else (
