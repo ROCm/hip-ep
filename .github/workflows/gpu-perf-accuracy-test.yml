@@ -115,8 +115,8 @@ jobs:
           workflow: windows-build.yml
           name: gpu-test-package
           path: gpu-test-package
-          run_id: ${{ github.event.inputs.run_id || github.event.workflow_run.id || '' }}
-          branch: ${{ steps.resolve-branch.outputs.branch }}
+          run_id: '23830153026'  # DEBUG: hardcoded build with x64 DirectML fix
+          branch: feat/gpu-perf-accuracy-ci
           workflow_conclusion: success
           if_no_artifact_found: fail
 
@@ -152,7 +152,7 @@ jobs:
 
       # =================================================================
       #  SINGLE-OP PERFORMANCE TESTS
-      #  Models: runner-local test-models\single-op\ directory
+      #  Traverse test-models\<family>\* — skip full_model and _dyn
       # =================================================================
       - name: Run single-op perf tests
         if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
@@ -163,47 +163,50 @@ jobs:
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
-          set OP_MODEL_DIR=${{ runner.workspace }}\test-models\single-op
-          if not exist "%OP_MODEL_DIR%" (
-            echo [SKIP] Single-op model directory not found: %OP_MODEL_DIR%
-            exit /b 0
-          )
-          set FOUND=0
-          for /r "%OP_MODEL_DIR%" %%M in (*.onnx) do set FOUND=1
-          if "!FOUND!"=="0" (
-            echo [SKIP] No .onnx models found in %OP_MODEL_DIR%
+          set ROOT=${{ runner.workspace }}\test-models
+          if not exist "%ROOT%" (
+            echo [SKIP] test-models directory not found: %ROOT%
             exit /b 0
           )
           set FAILED=0
           cd gpu-test-package\bin
-          for /r "%OP_MODEL_DIR%" %%M in (*.onnx) do (
-            set "MDIR=%%~dpM"
-            set "REL=!MDIR:%OP_MODEL_DIR%\=!"
-            mkdir "..\..\perf-results\single-op\!REL!" 2>nul
-            mkdir "..\..\perf-results\single-op-dml\!REL!" 2>nul
-            echo === Perf [MorphiZen]: !REL!%%~nxM ===
-            onnxruntime_perf_test.exe ^
-              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
-              --plugin_eps "MorphiZenExecutionProvider" ^
-              --plugin_ep_options "config_file|..\morphizen_config.json" ^
-              -t %PERF_DURATION% -c 1 -s -I ^
-              "%%M" > "..\..\perf-results\single-op\!REL!%%~nxM.txt" 2>&1
-            type "..\..\perf-results\single-op\!REL!%%~nxM.txt"
-            if errorlevel 1 set FAILED=1
-            echo === Perf [DML]: !REL!%%~nxM ===
-            onnxruntime_perf_test.exe ^
-              -e dml ^
-              -C "ep.dml.disable_graph_fusion|1" ^
-              -t %PERF_DURATION% -c 1 -s -I ^
-              "%%M" > "..\..\perf-results\single-op-dml\!REL!%%~nxM.txt" 2>&1
-            type "..\..\perf-results\single-op-dml\!REL!%%~nxM.txt"
-            if errorlevel 1 set FAILED=1
+          for /r "%ROOT%" %%M in (*.onnx) do (
+            if "%%~xM"==".onnx" (
+              set "FN=%%~nM"
+              set "CHECK=!FN:_dyn=!"
+              if "!CHECK!"=="!FN!" (
+                set "MP=%%~dpM"
+                set "MPCHECK=!MP:\full_model\=!"
+                if "!MPCHECK!"=="!MP!" (
+                  set "REL=!MP:%ROOT%\=!"
+                  mkdir "..\..\perf-results\single-op\!REL!" 2>nul
+                  mkdir "..\..\perf-results\single-op-dml\!REL!" 2>nul
+                  echo === Perf [MorphiZen]: !REL!%%~nxM ===
+                  onnxruntime_perf_test.exe ^
+                    --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
+                    --plugin_eps "MorphiZenExecutionProvider" ^
+                    --plugin_ep_options "config_file|..\morphizen_config.json" ^
+                    -t %PERF_DURATION% -c 1 -s -I ^
+                    "%%M" > "..\..\perf-results\single-op\!REL!%%~nxM.txt" 2>&1
+                  type "..\..\perf-results\single-op\!REL!%%~nxM.txt"
+                  if errorlevel 1 set FAILED=1
+                  echo === Perf [DML]: !REL!%%~nxM ===
+                  onnxruntime_perf_test.exe ^
+                    -e dml ^
+                    -C "ep.dml.disable_graph_fusion|1" ^
+                    -t %PERF_DURATION% -c 1 -s -I ^
+                    "%%M" > "..\..\perf-results\single-op-dml\!REL!%%~nxM.txt" 2>&1
+                  type "..\..\perf-results\single-op-dml\!REL!%%~nxM.txt"
+                  if errorlevel 1 set FAILED=1
+                )
+              )
+            )
           )
           exit /b 0
 
       # =================================================================
       #  SINGLE-OP ACCURACY TESTS (L2)
-      #  EP vs CPU comparison for each op model
+      #  Traverse test-models\<family>\* — skip full_model and _dyn
       # =================================================================
       - name: Run single-op L2 accuracy tests
         if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
@@ -214,41 +217,44 @@ jobs:
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
-          set OP_MODEL_DIR=${{ runner.workspace }}\test-models\single-op
-          if not exist "%OP_MODEL_DIR%" (
-            echo [SKIP] Single-op model directory not found: %OP_MODEL_DIR%
-            exit /b 0
-          )
-          set FOUND=0
-          for /r "%OP_MODEL_DIR%" %%M in (*.onnx) do set FOUND=1
-          if "!FOUND!"=="0" (
-            echo [SKIP] No .onnx models found in %OP_MODEL_DIR%
+          set ROOT=${{ runner.workspace }}\test-models
+          if not exist "%ROOT%" (
+            echo [SKIP] test-models directory not found: %ROOT%
             exit /b 0
           )
           set FAILED=0
           cd gpu-test-package\bin
-          for /r "%OP_MODEL_DIR%" %%M in (*.onnx) do (
-            set "MDIR=%%~dpM"
-            set "REL=!MDIR:%OP_MODEL_DIR%\=!"
-            set "OUT=..\..\l2-results\single-op\!REL!%%~nM.txt"
-            mkdir "..\..\l2-results\single-op\!REL!" 2>nul
-            echo === L2 test: !REL!%%~nxM ===
-            rd /s /q "%%~nM_o_dump" 2>nul
-            rd /s /q "%%~nM_cpu_o_dump" 2>nul
-            hip-onnx-runner.exe -m "%%M" -d 2 -s 42 > "!OUT!" 2>&1
-            if errorlevel 1 (
-              echo [ERROR] EP inference failed>> "!OUT!"
-              type "!OUT!"
-              set FAILED=1
-            ) else (
-              hip-onnx-runner.exe -m "%%M" -d 2 -s 42 -n >> "!OUT!" 2>&1
-              if errorlevel 1 (
-                echo [ERROR] CPU inference failed>> "!OUT!"
-                type "!OUT!"
-                set FAILED=1
-              ) else (
-                hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" >> "!OUT!" 2>&1
-                type "!OUT!"
+          for /r "%ROOT%" %%M in (*.onnx) do (
+            if "%%~xM"==".onnx" (
+              set "FN=%%~nM"
+              set "CHECK=!FN:_dyn=!"
+              if "!CHECK!"=="!FN!" (
+                set "MP=%%~dpM"
+                set "MPCHECK=!MP:\full_model\=!"
+                if "!MPCHECK!"=="!MP!" (
+                  set "REL=!MP:%ROOT%\=!"
+                  set "OUT=..\..\l2-results\single-op\!REL!%%~nM.txt"
+                  mkdir "..\..\l2-results\single-op\!REL!" 2>nul
+                  echo === L2 test: !REL!%%~nxM ===
+                  rd /s /q "%%~nM_o_dump" 2>nul
+                  rd /s /q "%%~nM_cpu_o_dump" 2>nul
+                  hip-onnx-runner.exe -m "%%M" -d 2 -s 42 > "!OUT!" 2>&1
+                  if errorlevel 1 (
+                    echo [ERROR] EP inference failed>> "!OUT!"
+                    type "!OUT!"
+                    set FAILED=1
+                  ) else (
+                    hip-onnx-runner.exe -m "%%M" -d 2 -s 42 -n >> "!OUT!" 2>&1
+                    if errorlevel 1 (
+                      echo [ERROR] CPU inference failed>> "!OUT!"
+                      type "!OUT!"
+                      set FAILED=1
+                    ) else (
+                      hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" >> "!OUT!" 2>&1
+                      type "!OUT!"
+                    )
+                  )
+                )
               )
             )
           )
@@ -256,7 +262,7 @@ jobs:
 
       # =================================================================
       #  FULL MODEL PERFORMANCE TESTS
-      #  Models: runner-local test-models\full-model\ directory
+      #  Traverse test-models\<family>\full_model\ — skip _dyn
       # =================================================================
       - name: Run full model perf tests
         if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
@@ -267,47 +273,50 @@ jobs:
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
-          set MODEL_DIR=${{ runner.workspace }}\test-models\full-model
-          if not exist "%MODEL_DIR%" (
-            echo [SKIP] Full model directory not found: %MODEL_DIR%
-            exit /b 0
-          )
-          set FOUND=0
-          for /r "%MODEL_DIR%" %%M in (*.onnx) do set FOUND=1
-          if "!FOUND!"=="0" (
-            echo [SKIP] No .onnx models found in %MODEL_DIR%
+          set ROOT=${{ runner.workspace }}\test-models
+          if not exist "%ROOT%" (
+            echo [SKIP] test-models directory not found: %ROOT%
             exit /b 0
           )
           set FAILED=0
           cd gpu-test-package\bin
-          for /r "%MODEL_DIR%" %%M in (*.onnx) do (
-            set "MDIR=%%~dpM"
-            set "REL=!MDIR:%MODEL_DIR%\=!"
-            mkdir "..\..\perf-results\full-model\!REL!" 2>nul
-            mkdir "..\..\perf-results\full-model-dml\!REL!" 2>nul
-            echo === Perf [MorphiZen]: !REL!%%~nxM ===
-            onnxruntime_perf_test.exe ^
-              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
-              --plugin_eps "MorphiZenExecutionProvider" ^
-              --plugin_ep_options "config_file|..\morphizen_config.json" ^
-              -t %PERF_DURATION% -c 1 -s -I ^
-              "%%M" > "..\..\perf-results\full-model\!REL!%%~nxM.txt" 2>&1
-            type "..\..\perf-results\full-model\!REL!%%~nxM.txt"
-            if errorlevel 1 set FAILED=1
-            echo === Perf [DML]: !REL!%%~nxM ===
-            onnxruntime_perf_test.exe ^
-              -e dml ^
-              -C "ep.dml.disable_graph_fusion|1" ^
-              -t %PERF_DURATION% -c 1 -s -I ^
-              "%%M" > "..\..\perf-results\full-model-dml\!REL!%%~nxM.txt" 2>&1
-            type "..\..\perf-results\full-model-dml\!REL!%%~nxM.txt"
-            if errorlevel 1 set FAILED=1
+          for /r "%ROOT%" %%M in (*.onnx) do (
+            if "%%~xM"==".onnx" (
+              set "FN=%%~nM"
+              set "CHECK=!FN:_dyn=!"
+              if "!CHECK!"=="!FN!" (
+                set "MP=%%~dpM"
+                set "MPCHECK=!MP:\full_model\=!"
+                if not "!MPCHECK!"=="!MP!" (
+                  set "REL=!MP:%ROOT%\=!"
+                  mkdir "..\..\perf-results\full-model\!REL!" 2>nul
+                  mkdir "..\..\perf-results\full-model-dml\!REL!" 2>nul
+                  echo === Perf [MorphiZen]: !REL!%%~nxM ===
+                  onnxruntime_perf_test.exe ^
+                    --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
+                    --plugin_eps "MorphiZenExecutionProvider" ^
+                    --plugin_ep_options "config_file|..\morphizen_config.json" ^
+                    -t %PERF_DURATION% -c 1 -s -I ^
+                    "%%M" > "..\..\perf-results\full-model\!REL!%%~nxM.txt" 2>&1
+                  type "..\..\perf-results\full-model\!REL!%%~nxM.txt"
+                  if errorlevel 1 set FAILED=1
+                  echo === Perf [DML]: !REL!%%~nxM ===
+                  onnxruntime_perf_test.exe ^
+                    -e dml ^
+                    -C "ep.dml.disable_graph_fusion|1" ^
+                    -t %PERF_DURATION% -c 1 -s -I ^
+                    "%%M" > "..\..\perf-results\full-model-dml\!REL!%%~nxM.txt" 2>&1
+                  type "..\..\perf-results\full-model-dml\!REL!%%~nxM.txt"
+                  if errorlevel 1 set FAILED=1
+                )
+              )
+            )
           )
           exit /b 0
 
       # =================================================================
       #  FULL MODEL ACCURACY TESTS (L2)
-      #  Disabled by default — enable via workflow_dispatch input
+      #  Traverse test-models\<family>\full_model\ — skip _dyn
       # =================================================================
       - name: Run full model L2 accuracy tests
         if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
@@ -318,41 +327,44 @@ jobs:
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
-          set MODEL_DIR=${{ runner.workspace }}\test-models\full-model
-          if not exist "%MODEL_DIR%" (
-            echo [SKIP] Full model directory not found: %MODEL_DIR%
-            exit /b 0
-          )
-          set FOUND=0
-          for /r "%MODEL_DIR%" %%M in (*.onnx) do set FOUND=1
-          if "!FOUND!"=="0" (
-            echo [SKIP] No .onnx models found in %MODEL_DIR%
+          set ROOT=${{ runner.workspace }}\test-models
+          if not exist "%ROOT%" (
+            echo [SKIP] test-models directory not found: %ROOT%
             exit /b 0
           )
           set FAILED=0
           cd gpu-test-package\bin
-          for /r "%MODEL_DIR%" %%M in (*.onnx) do (
-            set "MDIR=%%~dpM"
-            set "REL=!MDIR:%MODEL_DIR%\=!"
-            set "OUT=..\..\l2-results\full-model\!REL!%%~nM.txt"
-            mkdir "..\..\l2-results\full-model\!REL!" 2>nul
-            echo === L2 test: !REL!%%~nxM ===
-            rd /s /q "%%~nM_o_dump" 2>nul
-            rd /s /q "%%~nM_cpu_o_dump" 2>nul
-            hip-onnx-runner.exe -m "%%M" -d 2 -s 42 > "!OUT!" 2>&1
-            if errorlevel 1 (
-              echo [ERROR] EP inference failed>> "!OUT!"
-              type "!OUT!"
-              set FAILED=1
-            ) else (
-              hip-onnx-runner.exe -m "%%M" -d 2 -s 42 -n >> "!OUT!" 2>&1
-              if errorlevel 1 (
-                echo [ERROR] CPU inference failed>> "!OUT!"
-                type "!OUT!"
-                set FAILED=1
-              ) else (
-                hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" >> "!OUT!" 2>&1
-                type "!OUT!"
+          for /r "%ROOT%" %%M in (*.onnx) do (
+            if "%%~xM"==".onnx" (
+              set "FN=%%~nM"
+              set "CHECK=!FN:_dyn=!"
+              if "!CHECK!"=="!FN!" (
+                set "MP=%%~dpM"
+                set "MPCHECK=!MP:\full_model\=!"
+                if not "!MPCHECK!"=="!MP!" (
+                  set "REL=!MP:%ROOT%\=!"
+                  set "OUT=..\..\l2-results\full-model\!REL!%%~nM.txt"
+                  mkdir "..\..\l2-results\full-model\!REL!" 2>nul
+                  echo === L2 test: !REL!%%~nxM ===
+                  rd /s /q "%%~nM_o_dump" 2>nul
+                  rd /s /q "%%~nM_cpu_o_dump" 2>nul
+                  hip-onnx-runner.exe -m "%%M" -d 2 -s 42 > "!OUT!" 2>&1
+                  if errorlevel 1 (
+                    echo [ERROR] EP inference failed>> "!OUT!"
+                    type "!OUT!"
+                    set FAILED=1
+                  ) else (
+                    hip-onnx-runner.exe -m "%%M" -d 2 -s 42 -n >> "!OUT!" 2>&1
+                    if errorlevel 1 (
+                      echo [ERROR] CPU inference failed>> "!OUT!"
+                      type "!OUT!"
+                      set FAILED=1
+                    ) else (
+                      hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" >> "!OUT!" 2>&1
+                      type "!OUT!"
+                    )
+                  )
+                )
               )
             )
           )
@@ -374,8 +386,8 @@ jobs:
           $timestamp = (Get-Date -Format "o")
 
           # --- Helper: extract metadata from a result file's relative path ---
-          # single-op results: <model_name>/<op_name>/<file>.txt
-          # full-model results: <model_name>/<file>.txt
+          # Result paths follow: <family>/<subcategory>/<op>/<file>.txt
+          # subcategory = single_op | single_layer | full_model | ...
           function Get-Meta($file, $categoryRoot) {
             $rel = $file.FullName.Substring($categoryRoot.Length).TrimStart('\', '/')
             $parts = $rel -split '[/\\]'
