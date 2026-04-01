@@ -734,6 +734,7 @@ int main(int argc, char *argv[]) {
     std::cout << "Found " << devices.size() << " EP device(s)\n";
 
     session_opts.AppendExecutionProvider_V2(env, devices, {});
+    session_opts.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
   }
 
   // Create session
