@@ -181,7 +181,7 @@ jobs:
           cp "$PERF_TEST" "${{ runner.workspace }}/prebuilt-local/bin/"
           # DirectML.dll is not installed by cmake --install; copy manually.
           DML_DLL=$(find "${{ runner.workspace }}/build-onnxruntime" \
-            -name "DirectML.dll" -type f | head -1)
+            -path "*/x64-win/DirectML.dll" -type f | head -1)
           if [ -z "$DML_DLL" ]; then
             echo "ERROR: DirectML.dll not found in build tree"
             exit 1
