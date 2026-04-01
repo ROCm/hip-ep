@@ -571,8 +571,7 @@ int main(int argc, char *argv[]) {
                 "Compare two dirs: dir1,dir2 (same *.bin set); each file must "
                 "be ..._<type>.bin (fp32,fp16,i64,...); element-wise L2; no -m",
                 "");
-  mo.add_option("n", "no-ep", "CPU only; skip EP registration", "false",
-                true);
+  mo.add_option("n", "no-ep", "CPU only; skip EP registration", "false", true);
   mo.add_option(
       "d", "dump-level",
       "0=off, 1=dump inputs to <stem>_i_dump/, 2=outputs to <stem>_o_dump/, "
