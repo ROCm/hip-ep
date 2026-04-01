@@ -774,9 +774,10 @@ int main(int argc, char *argv[]) {
   for (size_t i = 0; i < input_count; ++i) {
     auto name_ptr = session->GetInputNameAllocated(i, allocator);
     input_names_str.push_back(name_ptr.get());
-    auto info = session->GetInputTypeInfo(i).GetTensorTypeAndShapeInfo();
-    input_shapes.push_back(info.GetShape());
-    input_types.push_back(info.GetElementType());
+    auto type_info = session->GetInputTypeInfo(i);
+    auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
+    input_shapes.push_back(tensor_info.GetShape());
+    input_types.push_back(tensor_info.GetElementType());
   }
   for (auto &s : input_names_str)
     input_names.push_back(s.c_str());
