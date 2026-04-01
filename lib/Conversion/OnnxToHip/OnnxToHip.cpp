@@ -810,33 +810,52 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, data);
 
+  // Extract noop_with_empty_axes attribute (defaults to 0 in ONNX)
+  int64_t noopWithEmptyAxes = 0;
+  if (auto noopAttr =
+          op->getAttrOfType<mlir::IntegerAttr>("noop_with_empty_axes")) {
+    noopWithEmptyAxes = noopAttr.getSInt();
+  }
+
   // Handle axes: can be operand (opset 13+) or attribute (opset < 13)
   mlir::Value axesOperand;
+  bool hasAxes = false;
   if (op->getNumOperands() > 1) {
     // Axes provided as operand (opset 13+)
     axesOperand = op->getOperand(1);
-  } else {
+    hasAxes = true;
+  } else if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
     // Axes provided as attribute - convert to constant tensor
     llvm::SmallVector<int64_t> axesVec;
-    if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
-      for (auto a : axesAttr)
-        axesVec.push_back(
-            mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
-    } else {
-      // Default: reduce all axes
-      auto inputType = mlir::cast<mlir::RankedTensorType>(data.getType());
-      for (int64_t i : llvm::seq<int64_t>(inputType.getRank()))
-        axesVec.push_back(i);
-    }
+    for (auto a : axesAttr)
+      axesVec.push_back(mlir::cast<mlir::IntegerAttr>(a).getInt());
 
     // Create constant tensor for axes
     auto axesType = mlir::RankedTensorType::get(
         {static_cast<int64_t>(axesVec.size())}, rewriter.getI64Type());
-    auto axesAttr =
+    auto axesAttrConst =
         mlir::DenseIntElementsAttr::get(axesType, llvm::ArrayRef(axesVec));
     axesOperand =
-        mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttr);
+        mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttrConst);
+    hasAxes = true;
+  } else if (noopWithEmptyAxes == 0) {
+    // Default: reduce all axes (when noop_with_empty_axes is 0)
+    llvm::SmallVector<int64_t> axesVec;
+    auto inputType = mlir::cast<mlir::RankedTensorType>(data.getType());
+    for (int64_t i : llvm::seq<int64_t>(inputType.getRank()))
+      axesVec.push_back(i);
+
+    // Create constant tensor for axes
+    auto axesType = mlir::RankedTensorType::get(
+        {static_cast<int64_t>(axesVec.size())}, rewriter.getI64Type());
+    auto axesAttrConst =
+        mlir::DenseIntElementsAttr::get(axesType, llvm::ArrayRef(axesVec));
+    axesOperand =
+        mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttrConst);
+    hasAxes = true;
   }
+  // else: axes is not provided and noop_with_empty_axes is 1, leave axesOperand
+  // as null
 
   // Extract keepdims attribute (defaults to 1 in ONNX)
   int64_t keepdims = 1;
@@ -846,9 +865,11 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
 
   // Create hip.reduce_sum operation
   auto keepdimsAttr = rewriter.getI64IntegerAttr(keepdims);
+  auto noopWithEmptyAxesAttr = rewriter.getI64IntegerAttr(noopWithEmptyAxes);
   auto hipOp =
       mlir::hip::ReduceSumOp::create(rewriter, loc, resultType, context, data,
-                                     axesOperand, init, keepdimsAttr);
+                                     hasAxes ? axesOperand : mlir::Value(),
+                                     init, keepdimsAttr, noopWithEmptyAxesAttr);
 
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();

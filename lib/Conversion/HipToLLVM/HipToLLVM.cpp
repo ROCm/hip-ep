@@ -1459,7 +1459,16 @@ struct ReduceSumOpLowering : public ConvertOpToLLVMPattern<ReduceSumOp> {
 
     Value statePtr = adaptor.getCtx();
     Value dataPtr = extractMemRefPtr(adaptor.getData(), rewriter, loc);
-    Value axesPtr = extractMemRefPtr(adaptor.getAxes(), rewriter, loc);
+
+    // Handle optional axes parameter
+    Value axesPtr;
+    if (adaptor.getAxes()) {
+      axesPtr = extractMemRefPtr(adaptor.getAxes(), rewriter, loc);
+    } else {
+      // Create null pointer for axes
+      axesPtr = LLVM::ZeroOp::create(rewriter, loc, ptrType);
+    }
+
     Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     auto dataType = cast<MemRefType>(op.getData().getType());
@@ -1501,22 +1510,26 @@ struct ReduceSumOpLowering : public ConvertOpToLLVMPattern<ReduceSumOp> {
     Value elemSizeVal = createI64Const(elementSizeBytes);
 
     Value keepdimsVal = createI64Const(op.getKeepdims());
+    Value noopWithEmptyAxesVal = createI64Const(op.getNoopWithEmptyAxes());
 
     // int wrap_reduce_sum(RuntimeState* state, void* data, void* axes,
     //                     void* output, int64_t data_num_elements,
     //                     int64_t output_num_elements, int64_t
-    //                     element_size_bytes, int64_t keepdims)
-    SmallVector<Type, 8> paramTypes = {ptrType, ptrType, ptrType, ptrType,
-                                       i64Type, i64Type, i64Type, i64Type};
+    //                     element_size_bytes, int64_t keepdims,
+    //                     int64_t noop_with_empty_axes)
+    SmallVector<Type, 9> paramTypes = {ptrType, ptrType, ptrType,
+                                       ptrType, i64Type, i64Type,
+                                       i64Type, i64Type, i64Type};
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapReduceSum, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 8> args = {
-        statePtr,        dataPtr,           axesPtr,     outputPtr,
-        dataNumElements, outputNumElements, elemSizeVal, keepdimsVal};
+    SmallVector<Value, 9> args = {
+        statePtr,    dataPtr,         axesPtr,
+        outputPtr,   dataNumElements, outputNumElements,
+        elemSizeVal, keepdimsVal,     noopWithEmptyAxesVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
