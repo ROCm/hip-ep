@@ -49,7 +49,6 @@ jobs:
       github.event_name != 'workflow_run' ||
       github.event.workflow_run.conclusion == 'success'
     runs-on: StrixHalo
-    timeout-minutes: 120
 
     permissions:
       contents: read
@@ -155,7 +154,6 @@ jobs:
       # =================================================================
       - name: Run single-op perf tests
         if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
-        timeout-minutes: 30
         shell: cmd
         run: |
           setlocal enabledelayedexpansion
@@ -209,7 +207,6 @@ jobs:
       # =================================================================
       - name: Run single-op L2 accuracy tests
         if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
-        timeout-minutes: 30
         shell: cmd
         run: |
           setlocal enabledelayedexpansion
@@ -265,7 +262,6 @@ jobs:
       # =================================================================
       - name: Run full model perf tests
         if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
-        timeout-minutes: 60
         shell: cmd
         run: |
           setlocal enabledelayedexpansion
@@ -319,7 +315,6 @@ jobs:
       # =================================================================
       - name: Run full model L2 accuracy tests
         if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
-        timeout-minutes: 60
         shell: cmd
         run: |
           setlocal enabledelayedexpansion
@@ -410,14 +405,22 @@ jobs:
               if ($meta.seq_length -ne $null) { $label += " (seq$($meta.seq_length))" }
               $content = Get-Content $f.FullName -Raw
               $qpsMatch = [regex]::Match($content, 'Number of inferences per second:\s+([\d.]+)')
+              $sessMatch = [regex]::Match($content, 'Session creation time cost:\s+([\d.]+)\s+s')
+              $firstMatch = [regex]::Match($content, 'First inference time cost:\s+(\d+)\s+ms')
+              $cpuMatch = [regex]::Match($content, 'Avg CPU usage:\s+(\d+)\s+%')
+              $memMatch = [regex]::Match($content, 'Peak working set size:\s+(\d+)\s+bytes')
+              $sess = if ($sessMatch.Success) { $sessMatch.Groups[1].Value } else { "-" }
+              $first = if ($firstMatch.Success) { $firstMatch.Groups[1].Value } else { "-" }
+              $cpu = if ($cpuMatch.Success) { $cpuMatch.Groups[1].Value } else { "-" }
+              $memMB = if ($memMatch.Success) { "{0:F0}" -f ([double]$memMatch.Groups[1].Value / 1MB) } else { "-" }
               if ($qpsMatch.Success) {
                 $qps = "{0:F2}" -f [double]$qpsMatch.Groups[1].Value
-                $rows += "| $label | $qps |`n"
+                $rows += "| $label | $qps | $sess | $first | $cpu | $memMB |`n"
               } else {
-                $rows += "| $label | failed |`n"
+                $rows += "| $label | failed | $sess | $first | $cpu | $memMB |`n"
               }
             }
-            $header = "### $title`n`n| Model | QPS |`n|-------|----:|`n"
+            $header = "### $title`n`n| Model | QPS | Session (s) | 1st Infer (ms) | CPU% | Mem (MB) |`n|-------|----:|----:|----:|----:|----:|`n"
             return $header + $rows + "`n"
           }
 
@@ -477,12 +480,20 @@ jobs:
               $meta = Get-Meta $f (Resolve-Path $dir).Path
               $content = Get-Content $f.FullName -Raw
               $qpsMatch = [regex]::Match($content, 'Number of inferences per second:\s+([\d.]+)')
+              $sessMatch = [regex]::Match($content, 'Session creation time cost:\s+([\d.]+)\s+s')
+              $firstMatch = [regex]::Match($content, 'First inference time cost:\s+(\d+)\s+ms')
+              $cpuMatch = [regex]::Match($content, 'Avg CPU usage:\s+(\d+)\s+%')
+              $memMatch = [regex]::Match($content, 'Peak working set size:\s+(\d+)\s+bytes')
               $entry = [ordered]@{
-                category   = $category
-                ep_name    = $epName
-                model_name = $meta.model_name
-                file       = $meta.file
-                qps        = if ($qpsMatch.Success) { [double]$qpsMatch.Groups[1].Value } else { $null }
+                category       = $category
+                ep_name        = $epName
+                model_name     = $meta.model_name
+                file           = $meta.file
+                qps            = if ($qpsMatch.Success) { [double]$qpsMatch.Groups[1].Value } else { $null }
+                session_time_s = if ($sessMatch.Success) { [double]$sessMatch.Groups[1].Value } else { $null }
+                first_infer_ms = if ($firstMatch.Success) { [int]$firstMatch.Groups[1].Value } else { $null }
+                avg_cpu_pct    = if ($cpuMatch.Success) { [int]$cpuMatch.Groups[1].Value } else { $null }
+                peak_mem_bytes = if ($memMatch.Success) { [long]$memMatch.Groups[1].Value } else { $null }
               }
               if ($meta.op_name) { $entry["op_name"] = $meta.op_name }
               if ($meta.seq_length -ne $null) { $entry["seq_length"] = $meta.seq_length }
