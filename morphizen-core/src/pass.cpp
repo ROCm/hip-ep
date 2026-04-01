@@ -341,6 +341,12 @@ static std::vector<std::string> get_edge_node_arg_names(const Node* from,
   auto from_input_args = node_get_input_node_args(*from);
   auto to_output_args = node_get_output_node_args(*to);
   for (auto& arg : to_output_args) {
+    // Skip nullptr or non-existent args from optional ONNX slots.
+    // Without the nullptr guard, std::find matches nullptr==nullptr
+    // between from_input_args and to_output_args, creating a false edge.
+    if (arg == nullptr || !node_arg_exists(*arg)) {
+      continue;
+    }
     if (std::find(from_input_args.begin(), from_input_args.end(), arg) !=
         from_input_args.end()) {
       ret.push_back(node_arg_get_name(*arg));
