@@ -9,6 +9,8 @@
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <glog/logging.h>
 #include <sstream>
@@ -213,14 +215,37 @@ struct Level1MlirPass {
   void process(IPass &self, Graph &graph) {
     MY_LOG(1) << "Level1MlirPass::process() called";
 
+    const bool timing = [] {
+      const char *v = getenv("HIPDNN_EP_TIMING");
+      return v && v[0] >= '1';
+    }();
+    using Clock = std::chrono::steady_clock;
+    auto t0 = Clock::now();
+    auto t_prev = t0;
+
     // Step 1: Load configuration from provider options
     auto config = load_config(self.get_context().get());
+
+    if (timing) {
+      auto t_now = Clock::now();
+      fprintf(stderr, "[Session] load_config: %.3fs\n",
+              std::chrono::duration<double>(t_now - t_prev).count());
+      t_prev = t_now;
+    }
 
     // Step 2: Get MLIR bytecode from graph
     auto mlir_bytecode = get_mlir_bytecode(self.get_context().get(), graph);
     if (mlir_bytecode.empty()) {
       LOG(WARNING) << "Empty graph bytecode, skipping compilation";
       return;
+    }
+
+    if (timing) {
+      auto t_now = Clock::now();
+      fprintf(stderr, "[Session] MLIR bytecode serialization: %.3fs (%zu bytes)\n",
+              std::chrono::duration<double>(t_now - t_prev).count(),
+              mlir_bytecode.size());
+      t_prev = t_now;
     }
 
     // Step 3: Compile bytecode to artifact
@@ -232,18 +257,47 @@ struct Level1MlirPass {
     }
     CompilationArtifact artifact = *artifactOpt;
 
+    if (timing) {
+      auto t_now = Clock::now();
+      fprintf(stderr, "[Session] MLIR compilation (CompilerDriver): %.3fs\n",
+              std::chrono::duration<double>(t_now - t_prev).count());
+      t_prev = t_now;
+    }
+
     // Step 4: Write artifact to EPContext
     if (!write_artifact_to_epcontext(self.get_context().get(), artifact)) {
       return;
     }
 
+    if (timing) {
+      auto t_now = Clock::now();
+      fprintf(stderr, "[Session] Write artifact to EPContext: %.3fs\n",
+              std::chrono::duration<double>(t_now - t_prev).count());
+      t_prev = t_now;
+    }
+
     // Step 5: Build metadata JSON from graph outputs
     auto metadata_json = build_metadata_json(artifact, graph);
+
+    if (timing) {
+      auto t_now = Clock::now();
+      fprintf(stderr, "[Session] Build metadata JSON: %.3fs\n",
+              std::chrono::duration<double>(t_now - t_prev).count());
+      t_prev = t_now;
+    }
 
     // Step 6: Fuse graph into single MLIR custom op
     if (!fuse_graph(self, graph, metadata_json, artifact.filename)) {
       LOG(WARNING) << "Graph fusion failed";
       return;
+    }
+
+    if (timing) {
+      auto t_now = Clock::now();
+      fprintf(stderr, "[Session] Fuse graph: %.3fs\n",
+              std::chrono::duration<double>(t_now - t_prev).count());
+      fprintf(stderr, "[Session] Level1MlirPass::process total: %.3fs\n",
+              std::chrono::duration<double>(t_now - t0).count());
     }
 
     MY_LOG(1) << "MLIR compilation completed: " << artifact.filename << " ("

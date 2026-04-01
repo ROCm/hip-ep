@@ -8,6 +8,8 @@
 
 #include <cstdio>
 #include <cstring>
+#include <unordered_map>
+#include <vector>
 
 // Macro for best-effort cleanup: logs errors but continues cleanup
 #define HIP_CLEANUP(expr)                                                      \
@@ -656,11 +658,8 @@ int hipdnn_ep_stream_sync(RuntimeState *state) {
 
   if (hipStreamSynchronize(static_cast<hipStream_t>(state->stream)) !=
       hipSuccess) {
-    fprintf(stderr, "hipdnn_ep_tensor_finalize_output: stream sync failed\n");
-    if (result == HIPDNN_EP_SUCCESS) {
-      result = HIPDNN_EP_ERR_STREAM_SYNC_FAILED;
-    }
-    // Continue to cleanup even on error (best-effort)
+    fprintf(stderr, "hipdnn_ep_stream_sync: stream sync failed\n");
+    return HIPDNN_EP_ERR_STREAM_SYNC_FAILED;
   }
 
   // GRAPH: log replay status (only first few to avoid spam)
