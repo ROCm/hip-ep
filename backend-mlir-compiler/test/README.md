@@ -35,7 +35,7 @@ This README assumes the following structure:
 - Use temp directories for debugging:
   - Windows: `/c/temp/` (Git Bash) or `C:\temp\` (CMD)
   - Linux: `/tmp/`
-- Once root cause is identified, create LIT unit tests in `3rd-party/morphizen/morphizen-mlir-compiler/test/lit/`
+- Once root cause is identified, create LIT unit tests in `test/lit/`
 - See "Creating LIT Unit Tests from E2E Failures" section below
 
 ## Prerequisites
@@ -101,7 +101,7 @@ cmake --build "$BUILD_DIR" --config Debug --parallel
 
 ### Troubleshooting: Missing DLL Dependencies
 
-If you encounter an error loading `morphizen-mlir-compiler.dll` due to missing dependencies:
+If you encounter an error loading `hip-compiler.dll` due to missing dependencies:
 
 ```bash
 # Workaround: Copy DLLs from local/bin to the binary directory
@@ -434,8 +434,8 @@ grep "Pattern.*onnx.Conv" "$TEMP_DIR/debug.log"
 
 ### Common Issues
 
-**Missing DLL dependencies (morphizen-mlir-compiler.dll)**:
-- If the test fails to load `morphizen-mlir-compiler.dll` due to missing dependencies:
+**Missing DLL dependencies (hip-compiler.dll)**:
+- If the test fails to load `hip-compiler.dll` due to missing dependencies:
   ```bash
   # Workaround: Copy DLLs from local/bin to binary directory
   cp "$LOCAL_DIR/bin"/*.dll "$BUILD_DIR/bin/Debug/"
@@ -477,7 +477,7 @@ Create a LIT test when you:
 ### Where to Put LIT Tests
 
 ```
-3rd-party/morphizen/morphizen-mlir-compiler/test/lit/
+test/lit/
 ├── Conversion/
 │   ├── onnx-to-hip/    # ONNX → HIP lowering (most common for E2E failures)
 │   └── hip-to-llvm/
@@ -520,30 +520,29 @@ module {
 }
 ```
 
-### Example: Conv Missing Dilations Attribute
+### Example: Conv Lowering
 
-File: `3rd-party/morphizen/morphizen-mlir-compiler/test/lit/Conversion/onnx-to-hip/test_conv_missing_dilations.mlir`
+File: `test/lit/Conversion/onnx-to-hip/test_conv.mlir`
 
 ```mlir
-// RUN: hip-mlir-opt %s --convert-onnx-to-hip | FileCheck %s
+// RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
 
 module {
-  func.func @test_conv_missing_dilations(
+  func.func @conv_basic(
     %input: tensor<1x3x224x224xf32>,
     %weights: tensor<64x3x7x7xf32>,
     %bias: tensor<64xf32>
   ) -> tensor<1x64x112x112xf32> {
-    // CHECK-LABEL: func.func @test_conv_missing_dilations
+    // CHECK-LABEL: func.func @conv_basic
 
-    // ONNX Conv with dilations OMITTED (testing default behavior)
     %output = "onnx.Conv"(%input, %weights, %bias) {
       kernel_shape = [7, 7],
       strides = [2, 2],
-      pads = [3, 3, 3, 3]
-      // dilations intentionally omitted - should default to [1, 1]
+      pads = [3, 3, 3, 3],
+      dilations = [1, 1],
+      group = 1 : i64
     } : (...) -> tensor<1x64x112x112xf32>
 
-    // Verify dilations=[1,1] is present in lowered hip.conv
     // CHECK: hip.conv
     // CHECK-SAME: {dilations = [1, 1],
 
@@ -559,12 +558,12 @@ module {
 ctest --test-dir "$BUILD_DIR" -R LitTests --verbose
 
 # Via llvm-lit
-llvm-lit -v "$PROJECT_ROOT/3rd-party/morphizen/morphizen-mlir-compiler/test/lit/Conversion/onnx-to-hip/test_conv_missing_dilations.mlir"
+llvm-lit -v "$PROJECT_ROOT/test/lit/Conversion/onnx-to-hip/test_conv.mlir"
 
 # Manual verification during development
 "$LOCAL_DIR/bin/hip-mlir-opt" \
-  "$PROJECT_ROOT/3rd-party/morphizen/.../test_conv_missing_dilations.mlir" \
-  --convert-onnx-to-hip | FileCheck "$PROJECT_ROOT/3rd-party/morphizen/.../test_conv_missing_dilations.mlir"
+  "$PROJECT_ROOT/test/lit/Conversion/onnx-to-hip/test_conv.mlir" \
+  --hip-add-context-arg --convert-onnx-to-hip | FileCheck "$PROJECT_ROOT/test/lit/Conversion/onnx-to-hip/test_conv.mlir"
 ```
 
 ### Workflow: From E2E Failure to LIT Test
@@ -597,7 +596,7 @@ rm -rf "$TEMP_DIR/ir_dumps"
 ### Best Practices for LIT Tests
 
 1. **One test = One behavior** - Don't test multiple features in a single test
-2. **Use descriptive names** - `test_conv_missing_dilations.mlir` ✅, `test_conv2.mlir` ❌
+2. **Use descriptive names** - `test_conv.mlir` ✅, `test2.mlir` ❌
 3. **Document the "why"** - Explain what bug this prevents
 4. **Test edge cases** - Missing optional attributes, boundary values
 5. **Keep tests minimal** - Small tensors, simple operations
@@ -605,9 +604,8 @@ rm -rf "$TEMP_DIR/ir_dumps"
 
 ### Reference Documentation
 
-- **LIT Test Guide**: `3rd-party/morphizen/morphizen-mlir-compiler/test/lit/README.md`
 - **FileCheck Syntax**: https://llvm.org/docs/CommandGuide/FileCheck.html
-- **Existing Examples**: Browse `3rd-party/morphizen/.../test/lit/Conversion/onnx-to-hip/`
+- **Existing Examples**: Browse `test/lit/Conversion/onnx-to-hip/`
 
 ## TODO - Future Enhancements
 - Add actual inference testing (forward pass with input data, output validation)
