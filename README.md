@@ -96,10 +96,6 @@ See [Developer Guide - Pre-commit Hooks](docs/developer-guide.md#6-pre-commit-ho
 - **[onnx-ir](onnx-ir-imp/)** - ONNX-based IR backend implementation
 - **[mlir-imp](mlir-imp/)** - MLIR backend implementation (partial)
 - **[ort-bridge](ort-bridge/)** - ORT execution provider bridge
-- **[morphizen-mlir-compiler](morphizen-mlir-compiler/)** - MLIR-based compilation backend for AMD HIP
-  - HIP dialect with ONNX→HIP→LLVM lowering passes
-  - Runtime abstraction for HIP/MIOpen/hipBLASLt
-  - See [morphizen-mlir-compiler/README.md](morphizen-mlir-compiler/README.md)
 
 ### Tools
 

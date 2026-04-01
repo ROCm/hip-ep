@@ -57,4 +57,3 @@ research/ut
 # Prevent accidentally committing FetchContent downloads
 # (FetchContent uses build dir, but just in case someone manually downloads here)
 3rd-party/hash-library/
-morphizen-mlir-compiler/3rd-party/onnx-mlir/
