@@ -187,9 +187,9 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   // Validate rank
   if (tensor->rank != expected_rank) {
     fprintf(stderr,
-            "hipdnn_ep_tensor_prepare_input: rank mismatch (expected %zu, got "
-            "%zu)\n",
-            expected_rank, tensor->rank);
+            "hipdnn_ep_tensor_prepare_input: rank mismatch at index %zu "
+            "(expected %zu, got %zu)\n",
+            index, expected_rank, tensor->rank);
     return HIPDNN_EP_ERR_RANK_MISMATCH;
   }
 
