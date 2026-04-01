@@ -36,7 +36,7 @@ module {
 
     // After conversion: tensor.empty() for init, hip.reduce_sum in tensor mode
     // CHECK: tensor.empty() : tensor<1x1xi64>
-    // CHECK: hip.reduce_sum(%[[CTX]]) ins(%[[DATA]], %[[AXES]] : tensor<1x128xi64>, tensor<i64>) outs({{.*}} : tensor<1x1xi64>) {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
+    // CHECK: hip.reduce_sum(%[[CTX]]) ins(%[[DATA]], %[[AXES]] : tensor<1x128xi64>, tensor<i64>) outs({{.*}} : tensor<1x1xi64>)
     // CHECK-NOT: hip.alloc
     // CHECK-NOT: hip.copy
 
@@ -51,7 +51,7 @@ module {
     %output = "onnx.ReduceSum"(%data, %axes) {keepdims = 0 : si64, noop_with_empty_axes = 0 : si64} : (tensor<4x8xi64>, tensor<i64>) -> tensor<4xi64>
 
     // CHECK: tensor.empty() : tensor<4xi64>
-    // CHECK: hip.reduce_sum(%[[CTX]]) ins(%[[DATA]], %[[AXES]] : tensor<4x8xi64>, tensor<i64>) outs({{.*}} : tensor<4xi64>) {keepdims = 0 : i64, noop_with_empty_axes = 0 : i64}
+    // CHECK: hip.reduce_sum(%[[CTX]]) ins(%[[DATA]], %[[AXES]] : tensor<4x8xi64>, tensor<i64>) outs({{.*}} : tensor<4xi64>) {keepdims = 0 : i64}
     // CHECK-NOT: hip.alloc
 
     return %output : tensor<4xi64>
@@ -66,6 +66,6 @@ module {
   // CHECK-LABEL: func.func @reduce_sum_dynamic
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x?x512xf32>, %[[AXES:.*]]: tensor<i64>) -> tensor<?x?xf32>
   // CHECK: %[[INIT:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf32>
-  // CHECK: hip.reduce_sum(%[[CTX]]) ins(%[[DATA]], %[[AXES]] : tensor<?x?x512xf32>, tensor<i64>) outs(%[[INIT]] : tensor<?x?xf32>) {keepdims = 0 : i64, noop_with_empty_axes = 0 : i64}
+  // CHECK: hip.reduce_sum(%[[CTX]]) ins(%[[DATA]], %[[AXES]] : tensor<?x?x512xf32>, tensor<i64>) outs(%[[INIT]] : tensor<?x?xf32>) {keepdims = 0 : i64}
   // CHECK-NOT: hip.alloc
 }

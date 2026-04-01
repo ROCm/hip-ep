@@ -12,21 +12,22 @@
 
 int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,
-                    int64_t element_size_bytes, int64_t keepdims,
-                    int64_t noop_with_empty_axes) {
+                    int64_t axes_num_elements, int64_t element_size_bytes,
+                    int64_t keepdims, int64_t noop_with_empty_axes) {
   if (!state || !data || !output) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_reduce_sum: null argument\n");
     return -1;
   }
 
-  // Handle noop_with_empty_axes: if axes is null and noop_with_empty_axes is 1,
-  // copy input to output without reduction
-  if (axes == nullptr && noop_with_empty_axes == 1) {
+  // Handle noop_with_empty_axes: if axes is empty and noop_with_empty_axes is
+  // 1, copy input to output without reduction
+  if (axes_num_elements == 0 && noop_with_empty_axes == 1) {
     void *stream = hipdnn_ep_state_get_stream(state);
     // Simple memcpy from data to output
     int64_t total_bytes = data_num_elements * element_size_bytes;
     RUNTIME_DEBUG_LOG(
-        "[REAL] wrap_reduce_sum: noop_with_empty_axes=1, copying %lld bytes\n",
+        "[REAL] wrap_reduce_sum: noop_with_empty_axes=1 with empty axes, "
+        "copying %lld bytes\n",
         (long long)total_bytes);
     // Use hipMemcpyAsync to copy data to output
     hipError_t err =
@@ -51,13 +52,13 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
     return -1;
   }
 
-  RUNTIME_DEBUG_LOG("[REAL] wrap_reduce_sum: data_num=%lld, output_num=%lld, "
-                    "elem_size=%lld, keepdims=%lld, noop_with_empty_axes=%lld, "
-                    "dtype=%d -> calling hip_reduce_sum\n",
-                    (long long)data_num_elements,
-                    (long long)output_num_elements,
-                    (long long)element_size_bytes, (long long)keepdims,
-                    (long long)noop_with_empty_axes, hip_dtype);
+  RUNTIME_DEBUG_LOG(
+      "[REAL] wrap_reduce_sum: data_num=%lld, output_num=%lld, "
+      "axes_num=%lld, elem_size=%lld, keepdims=%lld, "
+      "noop_with_empty_axes=%lld, dtype=%d -> calling hip_reduce_sum\n",
+      (long long)data_num_elements, (long long)output_num_elements,
+      (long long)axes_num_elements, (long long)element_size_bytes,
+      (long long)keepdims, (long long)noop_with_empty_axes, hip_dtype);
 
   return hip_reduce_sum(stream, data, output, data_num_elements,
                         output_num_elements, hip_dtype);

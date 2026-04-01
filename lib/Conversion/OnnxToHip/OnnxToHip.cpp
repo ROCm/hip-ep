@@ -818,12 +818,13 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
   }
 
   // Handle axes: can be operand (opset 13+) or attribute (opset < 13)
+  // axes is always required in HIP dialect; create empty tensor<0xi64> when not
+  // provided
   mlir::Value axesOperand;
-  bool hasAxes = false;
+
   if (op->getNumOperands() > 1) {
     // Axes provided as operand (opset 13+)
     axesOperand = op->getOperand(1);
-    hasAxes = true;
   } else if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
     // Axes provided as attribute - convert to constant tensor
     llvm::SmallVector<int64_t> axesVec;
@@ -837,7 +838,6 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
         mlir::DenseIntElementsAttr::get(axesType, llvm::ArrayRef(axesVec));
     axesOperand =
         mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttrConst);
-    hasAxes = true;
   } else if (noopWithEmptyAxes == 0) {
     // Default: reduce all axes (when noop_with_empty_axes is 0)
     llvm::SmallVector<int64_t> axesVec;
@@ -852,10 +852,15 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
         mlir::DenseIntElementsAttr::get(axesType, llvm::ArrayRef(axesVec));
     axesOperand =
         mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttrConst);
-    hasAxes = true;
+  } else {
+    // axes not provided and noop_with_empty_axes is 1: create empty
+    // tensor<0xi64>
+    auto axesType = mlir::RankedTensorType::get({0}, rewriter.getI64Type());
+    auto axesAttrConst =
+        mlir::DenseIntElementsAttr::get(axesType, llvm::ArrayRef<int64_t>{});
+    axesOperand =
+        mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttrConst);
   }
-  // else: axes is not provided and noop_with_empty_axes is 1, leave axesOperand
-  // as null
 
   // Extract keepdims attribute (defaults to 1 in ONNX)
   int64_t keepdims = 1;
@@ -863,13 +868,12 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
     keepdims = keepdimsAttr.getSInt();
   }
 
-  // Create hip.reduce_sum operation
+  // Create hip.reduce_sum operation (axes always provided, may be empty)
   auto keepdimsAttr = rewriter.getI64IntegerAttr(keepdims);
   auto noopWithEmptyAxesAttr = rewriter.getI64IntegerAttr(noopWithEmptyAxes);
-  auto hipOp =
-      mlir::hip::ReduceSumOp::create(rewriter, loc, resultType, context, data,
-                                     hasAxes ? axesOperand : mlir::Value(),
-                                     init, keepdimsAttr, noopWithEmptyAxesAttr);
+  auto hipOp = mlir::hip::ReduceSumOp::create(
+      rewriter, loc, resultType, context, data, axesOperand, init, keepdimsAttr,
+      noopWithEmptyAxesAttr);
 
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();

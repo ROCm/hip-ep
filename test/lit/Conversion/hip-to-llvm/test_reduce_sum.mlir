@@ -14,8 +14,8 @@
 // - Axes passed as pointer to runtime
 //
 // Expected: wrap_reduce_sum(state, data, axes, output, data_num_elements,
-//                            output_num_elements, element_size_bytes, keepdims,
-//                            noop_with_empty_axes)
+//                            output_num_elements, axes_num_elements,
+//                            element_size_bytes, keepdims, noop_with_empty_axes)
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
@@ -33,7 +33,7 @@ module {
                          outs(%output : memref<8x128xf32, 1>)
                          {keepdims = 0 : i64, noop_with_empty_axes = 0 : i64}
 
-    // CHECK: llvm.call @wrap_reduce_sum({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_reduce_sum({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -57,7 +57,7 @@ module {
     // CHECK-DAG: llvm.extractvalue %{{.*}}[3, 1]
     // CHECK-DAG: llvm.mlir.constant(512 : i64) : i64
 
-    // CHECK: llvm.call @wrap_reduce_sum({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_reduce_sum({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
