@@ -405,10 +405,10 @@ jobs:
           # --- Build markdown summary ---
           $summary = "## GPU Performance & Accuracy Test Results`n`n"
           $opPerf = Get-PerfTable "perf-results/single-op" "Single-Op Performance (hipdnn-ep)"
-          $opPerfDml = Get-PerfTable "perf-results/single-op-dml" "Single-Op Performance (dml ep)"
+          $opPerfDml = Get-PerfTable "perf-results/single-op-dml" "Single-Op Performance (dml-ep)"
           $opL2 = Get-L2Table "l2-results/single-op" "Single-Op Accuracy (EP vs CPU)"
           $fullPerf = Get-PerfTable "perf-results/full-model" "Full Model Performance (hipdnn-ep)"
-          $fullPerfDml = Get-PerfTable "perf-results/full-model-dml" "Full Model Performance (dml ep)"
+          $fullPerfDml = Get-PerfTable "perf-results/full-model-dml" "Full Model Performance (dml-ep)"
           $fullL2 = Get-L2Table "l2-results/full-model" "Full Model Accuracy (EP vs CPU)"
           if ($opPerf) { $summary += $opPerf }
           if ($opPerfDml) { $summary += $opPerfDml }
@@ -482,9 +482,9 @@ jobs:
 
           $perfAll  = @()
           $perfAll += Collect-PerfJson "perf-results/single-op" "single-op" "hipdnn-ep"
-          $perfAll += Collect-PerfJson "perf-results/single-op-dml" "single-op" "dml ep"
+          $perfAll += Collect-PerfJson "perf-results/single-op-dml" "single-op" "dml-ep"
           $perfAll += Collect-PerfJson "perf-results/full-model" "full-model" "hipdnn-ep"
-          $perfAll += Collect-PerfJson "perf-results/full-model-dml" "full-model" "dml ep"
+          $perfAll += Collect-PerfJson "perf-results/full-model-dml" "full-model" "dml-ep"
 
           $l2All  = @()
           $l2All += Collect-L2Json "l2-results/single-op" "single-op"
