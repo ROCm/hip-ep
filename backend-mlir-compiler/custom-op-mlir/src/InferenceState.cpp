@@ -9,6 +9,9 @@
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
 #include "morphizen/plugin.hpp"
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
@@ -46,6 +49,14 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes,
                        morphizen::FileSystem *fs) {
   MY_LOG(1) << "Loading inference plugin from memory...";
 
+  const bool timing = [] {
+    const char *v = getenv("HIPDNN_EP_TIMING");
+    return v && v[0] >= '1';
+  }();
+  using Clock = std::chrono::steady_clock;
+  auto t0 = Clock::now();
+  auto t_prev = t0;
+
   // Write DLL to temp file (morphizen::Plugin loads from file path)
   std::string dll_path =
       mlir_compiler_utils::generateTempPath(artifactExtension());
@@ -62,6 +73,14 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes,
     dll_out.close();
   }
 
+  if (timing) {
+    auto t_now = Clock::now();
+    fprintf(stderr, "[Session] Write DLL to temp file: %.3fs (%zu bytes)\n",
+            std::chrono::duration<double>(t_now - t_prev).count(),
+            dll_bytes.size());
+    t_prev = t_now;
+  }
+
   // Load plugin using morphizen infrastructure (factory pattern)
   // Pass path without extension — Plugin::guess_name adds platform-correct
   // suffix
@@ -76,6 +95,13 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes,
         << " - check that the file exists and all dependencies are available";
   }
 
+  if (timing) {
+    auto t_now = Clock::now();
+    fprintf(stderr, "[Session] Plugin::create (LoadLibrary): %.3fs\n",
+            std::chrono::duration<double>(t_now - t_prev).count());
+    t_prev = t_now;
+  }
+
   // inference_init(void** out_state, void* fs) — the DLL needs a FileSystem
   // to resolve and load model constants from the EPContext archive.
   auto init_fn = plugin->get_method<int, void **, void *>("inference_init");
@@ -84,10 +110,25 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes,
                << " - DLL loaded successfully but symbol is missing";
   }
 
+  if (timing) {
+    auto t_now = Clock::now();
+    fprintf(stderr, "[Session] get_method (symbol lookup): %.3fs\n",
+            std::chrono::duration<double>(t_now - t_prev).count());
+    t_prev = t_now;
+  }
+
   void *state = nullptr;
   int ret = init_fn(&state, static_cast<void *>(fs));
   if (ret != 0) {
     LOG(FATAL) << "inference_init() failed with code: " << ret;
+  }
+
+  if (timing) {
+    auto t_now = Clock::now();
+    fprintf(stderr, "[Session] inference_init: %.3fs\n",
+            std::chrono::duration<double>(t_now - t_prev).count());
+    fprintf(stderr, "[Session] InferenceState::create total: %.3fs\n",
+            std::chrono::duration<double>(t_now - t0).count());
   }
 
   MY_LOG(1) << "Inference state initialized";
