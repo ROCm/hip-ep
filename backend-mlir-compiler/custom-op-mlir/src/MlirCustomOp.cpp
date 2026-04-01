@@ -95,10 +95,31 @@ static size_t onnx_elem_type_size(int elem_type) {
   }
 }
 
-// Marshal input tensors from ORT context
-TensorData marshal_input_tensors(OrtKernelContext *context) {
+// Build a mapping from compiler/meta_def input index to ORT kernel context
+// input index. ORT's fused node may reorder inputs relative to the meta_def
+// order; the mapping is recorded in meta_def.input_argument_indice by
+// MorphiZen's Compile phase.
+static std::vector<int>
+build_input_index_map(const morphizen::MetaDefProto &meta_def) {
+  int n = meta_def.inputs_size();
+  std::vector<int> map(n);
+  for (int i = 0; i < n; ++i) {
+    map[i] = (!meta_def.input_argument_indice().empty())
+                 ? meta_def.input_argument_indice(i)
+                 : i;
+    MY_LOG(3) << "Input map: compiler[" << i << "] '" << meta_def.inputs(i)
+              << "' -> ort[" << map[i] << "]";
+  }
+  return map;
+}
+
+// Marshal input tensors from ORT context.
+// input_index_map maps from compiler input index (= DLL input index) to
+// the ORT kernel context input index.
+TensorData marshal_input_tensors(OrtKernelContext *context,
+                                 const std::vector<int> &input_index_map) {
   Ort::KernelContext ctx(context);
-  auto num_inputs = ctx.GetInputCount();
+  size_t num_inputs = input_index_map.size();
 
   MY_LOG(2) << "Marshaling " << num_inputs << " input tensors";
 
@@ -107,7 +128,8 @@ TensorData marshal_input_tensors(OrtKernelContext *context) {
   data.shapes.resize(num_inputs);
 
   for (size_t i = 0; i < num_inputs; ++i) {
-    auto input_tensor = ctx.GetInput(i);
+    int ort_idx = input_index_map[i];
+    auto input_tensor = ctx.GetInput(ort_idx);
     auto tensor_info = input_tensor.GetTensorTypeAndShapeInfo();
     data.shapes[i] = tensor_info.GetShape();
 
@@ -117,7 +139,8 @@ TensorData marshal_input_tensors(OrtKernelContext *context) {
     data.tensors[i].element_size =
         ort_element_size(tensor_info.GetElementType());
 
-    MY_LOG(3) << "Input[" << i << "]: rank=" << data.tensors[i].rank
+    MY_LOG(3) << "Input[" << i << "] (ort_idx=" << ort_idx
+              << "): rank=" << data.tensors[i].rank
               << " element_size=" << data.tensors[i].element_size;
   }
 
@@ -272,10 +295,11 @@ MlirCustomOp::MlirCustomOp(
     : morphizen::CustomOpImp(context, meta_def, model) {
 
   MY_LOG(1) << "MlirCustomOp constructor";
+
   // Parse metadata from JSON
   metadata_ = parse_metadata_from_metadef(context, meta_def);
-  // Precompute output index mapping (metadata order -> ORT kernel context
-  // order)
+  // Precompute index mappings (compiler order -> ORT kernel context order)
+  input_index_map_ = build_input_index_map(*meta_def);
   output_index_map_ = build_output_index_map(metadata_.outputs(), *meta_def);
   // Get FileSystem from PassContext for constants file resolution.
   // const_cast follows the established morphizen pattern (custom_op_imp.hpp).
@@ -290,7 +314,7 @@ MlirCustomOp::MlirCustomOp(
 void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   MY_LOG(2) << "MlirCustomOp::Compute() called";
 
-  auto inputs = marshal_input_tensors(context);
+  auto inputs = marshal_input_tensors(context, input_index_map_);
   auto outputs =
       marshal_output_tensors(context, metadata_.outputs(), output_index_map_);
 
