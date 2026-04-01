@@ -224,3 +224,78 @@ inline unsigned int MiniOptions::convert<unsigned int>(const std::string& s) {
     return static_cast<unsigned int>(v);
 }
 
+/*  usage example
+
+#include "mini_options.hpp"
+#include <iostream>
+
+int main(int argc, char** argv) {
+    MiniOptions opts;
+
+    // ===== Define options =====
+    opts.add_option("m", "model", "Path to ONNX model", "");
+    opts.add_option("e", "ep", "Execution provider (cpu/cuda/hip)", "cpu");
+    opts.add_option("n", "num_runs", "Number of runs", "10");
+    opts.add_option("t", "threshold", "Score threshold", "0.5");
+    opts.add_option("v", "verbose", "Enable verbose logging", "false", true);
+    opts.add_option("", "input", "Input files (repeatable or comma-separated)", "");
+
+    try {
+        // ===== Parse CLI =====
+        opts.parse(argc, argv);
+
+        // ===== Manual validation =====
+        if (!opts.exists("model")) {
+            throw std::runtime_error("Option --model is required");
+        }
+
+        // ===== Read values =====
+        std::string model = opts.get<std::string>("model");
+        std::string ep = opts.get<std::string>("ep");
+        int num_runs = opts.get<int>("num_runs");
+        float threshold = opts.get<float>("threshold");
+        bool verbose = opts.get<bool>("verbose");
+
+        std::vector<std::string> inputs =
+            opts.get_vector<std::string>("input");
+
+        // ===== Simulated usage =====
+        std::cout << "=== Configuration ===\n";
+        std::cout << "Model:      " << model << "\n";
+        std::cout << "EP:         " << ep << "\n";
+        std::cout << "Runs:       " << num_runs << "\n";
+        std::cout << "Threshold:  " << threshold << "\n";
+        std::cout << "Verbose:    " << (verbose ? "true" : "false") << "\n";
+
+        if (opts.exists("input")) {
+            std::cout << "Inputs (" << opts.count("input") << "):\n";
+            for (const auto& s : inputs) {
+                std::cout << "  - " << s << "\n";
+            }
+        } else {
+            std::cout << "No input files provided\n";
+        }
+
+        // ===== Example logic =====
+        if (verbose) {
+            std::cout << "[DEBUG] Starting inference loop...\n";
+        }
+
+        for (int i = 0; i < num_runs; ++i) {
+            if (verbose) {
+                std::cout << "[DEBUG] Run " << i << "\n";
+            }
+            // simulate inference
+        }
+
+        std::cout << "Done.\n";
+
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << "\n\n";
+        opts.print_help(argv[0]);
+        return 1;
+    }
+
+    return 0;
+}
+*/
