@@ -8,35 +8,10 @@ on:
   schedule:
     - cron: '0 18 * * *'  # daily at UTC 18:00 (CST 02:00)
 
-  workflow_run:
-    workflows: ["Windows Build"]
-    branches: [main]
-    types: [completed]
-
   workflow_dispatch:
-    inputs:
-      run_id:
-        description: >
-          Build run ID to download gpu-test-package from.
-          Leave empty to use the latest successful build on source_branch.
-        required: false
-        type: string
-      source_branch:
-        description: "Branch to download gpu-test-package from (default: main)"
-        required: false
-        default: "main"
-        type: string
-      perf_duration:
-        description: "Perf test duration per model (seconds)"
-        required: false
-        default: "30"
-        type: string
-
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -44,20 +19,15 @@ permissions:
 
 jobs:
   gpu-perf-accuracy:
-    # Skip if the triggering Windows Build failed
-    if: >-
-      github.event_name != 'workflow_run' ||
-      github.event.workflow_run.conclusion == 'success'
     runs-on: StrixHalo
 
     permissions:
       contents: read
-      pull-requests: write
       actions: read
 
     env:
       THEROCK_VERSION: therock-dist-windows-gfx1151-7.11.0
-      PERF_DURATION: ${{ github.event.inputs.perf_duration || '30' }}
+      PERF_DURATION: "30"
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
     steps:
@@ -88,33 +58,15 @@ jobs:
 
       # -----------------------------------------------------------------
       # Download the pre-built gpu-test-package artifact from the
-      # Windows Build workflow. Supports three trigger modes:
-      #   workflow_run  → use the triggering run's ID
-      #   workflow_dispatch with run_id → use the specified ID
-      #   workflow_dispatch without run_id → latest successful main build
+      # latest successful main build of the Windows Build workflow.
       # -----------------------------------------------------------------
-      - name: Resolve source branch
-        id: resolve-branch
-        shell: pwsh
-        run: |
-          $branch = "${{ github.event.inputs.source_branch }}"
-          if (-not $branch) {
-            if ("${{ github.event.workflow_run.head_branch }}") {
-              $branch = "${{ github.event.workflow_run.head_branch }}"
-            } else {
-              $branch = "main"
-            }
-          }
-          "branch=$branch" | Out-File -Append $env:GITHUB_OUTPUT
-          Write-Host "Resolved source branch: $branch"
-
       - name: Download gpu-test-package
         uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe # v3.1.4
         with:
           workflow: windows-build.yml
           name: gpu-test-package
           path: gpu-test-package
-          run_id: '23830153026'  # DEBUG: hardcoded build with x64 DirectML fix
+          branch: main
           workflow_conclusion: success
           if_no_artifact_found: fail
 
@@ -374,7 +326,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $runUrl = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          $rawSha = "${{ github.event.workflow_run.head_sha || github.sha }}"
+          $rawSha = "${{ github.sha }}"
           $sha = $rawSha.Substring(0, [Math]::Min(7, $rawSha.Length))
           $threshold = 0.01
           $timestamp = (Get-Date -Format "o")
@@ -558,35 +510,6 @@ jobs:
           Set-Content -Path "json-results/l2-results.json" -Value $l2Json
           Write-Host "=== l2-results.json ==="
           Write-Host $l2Json
-
-          # --- Post PR comment if triggered by workflow_run on a PR ---
-          $prBranch = "${{ github.event.workflow_run.head_branch }}"
-          if ($prBranch -and $prBranch -ne "main") {
-            $prsJson = gh pr list -R "${{ github.repository }}" --head "$prBranch" --json number --limit 1 2>$null
-            if ($LASTEXITCODE -eq 0 -and $prsJson) {
-              $prs = $prsJson | ConvertFrom-Json
-              if ($prs.Count -gt 0) {
-                $prNumber = $prs[0].number
-                $marker = "<!-- morphizen-gpu-test-results -->"
-                $body = "$marker`n$summary"
-                $commentsJson = gh api "repos/${{ github.repository }}/issues/$prNumber/comments" 2>$null
-                $ghOk = ($LASTEXITCODE -eq 0)
-                $existing = $null
-                if ($ghOk -and $commentsJson) {
-                  $comments = $commentsJson | ConvertFrom-Json
-                  $found = $comments | Where-Object { $_.body -and $_.body.StartsWith($marker) } | Select-Object -First 1
-                  if ($found) { $existing = $found.id }
-                }
-                if ($ghOk -and $existing) {
-                  Write-Host "Updating existing PR comment $existing"
-                  gh api --method PATCH "repos/${{ github.repository }}/issues/comments/$existing" -f body="$body"
-                } elseif ($ghOk) {
-                  Write-Host "Creating new PR comment on #$prNumber"
-                  gh pr comment $prNumber -R "${{ github.repository }}" --body "$body"
-                }
-              }
-            }
-          }
 
       - name: Upload JSON results
         if: always()
