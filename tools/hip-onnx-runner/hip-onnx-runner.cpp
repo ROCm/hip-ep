@@ -10,16 +10,14 @@
 //
 // Usage: hip-onnx-runner -m <model.onnx> [options]
 //    or: hip-onnx-runner -L dir1,dir2
-//   -m <path>   Path to ONNX model (required for inference)
-//   -n          CPU only; skip EP registration
-//   -d <0-3>    Dump level: 0=off (default), 1=inputs, 2=outputs, 3=both
-//               (dirs: <stem>_i_dump/ and <stem>_o_dump/;
-//                with -n: <stem>_cpu_i_dump/ and <stem>_cpu_o_dump/)
-//   -s <seed>   RNG seed for random inputs (default 42)
-//   -i <dir>    Load inputs from dir (input_<idx>_<name>_<type>.bin)
-//   -L <d1,d2>  Compare two dump dirs element-wise (L2 norm);
-//               file names must end with _<type>.bin (fp32,fp16,i64,...)
-//   -h          Show help
+//   -m, --model       Path to .onnx model
+//   -n, --no-ep       CPU only; skip EP registration
+//   -d, --dump-level  0=off, 1=dump inputs to <stem>_i_dump/, 2=outputs
+//                     to <stem>_o_dump/, 3=both (default: 0)
+//   -s, --seed        RNG seed for random inputs (default: 42)
+//   -i, --input-dir   input_<idx>_<name>_<type>.bin only; empty = random
+//   -L, --l2norm      dir1,dir2; same *.bin set; ..._<type>.bin; L2; no -m
+//   -h, --help        Show help
 //
 //===----------------------------------------------------------------------===//
 
@@ -43,6 +41,8 @@
 #include <codecvt>
 #include <locale>
 #endif
+
+#include "../common/minioptions.h"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -564,134 +564,64 @@ static int run_l2norm_output_dumps(const std::string &dir1_str,
 // Main
 // ---------------------------------------------------------------------------
 
-struct Options {
-  std::string model;
-  std::string l2norm;
-  std::string input_dir;
-  bool no_ep = false;
-  int dump_level = 0;
-  unsigned int seed = 42;
-
-  bool parse(int argc, char **argv) {
-    for (int i = 1; i < argc; ++i) {
-      std::string arg = argv[i];
-      if (arg == "-h") {
-        return false;
-      } else if (arg == "-m") {
-        if (++i >= argc) {
-          std::cerr << "Error: -m requires a path argument.\n\n";
-          return false;
-        }
-        model = argv[i];
-      } else if (arg == "-n") {
-        no_ep = true;
-      } else if (arg == "-d") {
-        if (++i >= argc) {
-          std::cerr << "Error: -d requires a numeric argument.\n\n";
-          return false;
-        }
-        try {
-          dump_level = std::stoi(argv[i]);
-        } catch (...) {
-          std::cerr << "Error: -d value is not a valid integer.\n\n";
-          return false;
-        }
-      } else if (arg == "-s") {
-        if (++i >= argc) {
-          std::cerr << "Error: -s requires a numeric argument.\n\n";
-          return false;
-        }
-        try {
-          seed = static_cast<unsigned int>(std::stoul(argv[i]));
-        } catch (...) {
-          std::cerr << "Error: -s value is not a valid unsigned integer.\n\n";
-          return false;
-        }
-      } else if (arg == "-i") {
-        if (++i >= argc) {
-          std::cerr << "Error: -i requires a directory argument.\n\n";
-          return false;
-        }
-        input_dir = argv[i];
-      } else if (arg == "-L") {
-        if (++i >= argc) {
-          std::cerr << "Error: -L requires a dir1,dir2 argument.\n\n";
-          return false;
-        }
-        l2norm = argv[i];
-      } else {
-        std::cerr << "Error: unknown option: " << arg << "\n\n";
-        return false;
-      }
-    }
-
-    l2norm = trim_string(l2norm);
-    input_dir = trim_string(input_dir);
-
-    if (!l2norm.empty()) {
-      const auto sep = l2norm.find(',');
-      if (sep == std::string::npos) {
-        std::cerr << "Error: -L expects dir1,dir2\n\n";
-        return false;
-      }
-      if (trim_string(l2norm.substr(0, sep)).empty() ||
-          trim_string(l2norm.substr(sep + 1)).empty()) {
-        std::cerr << "Error: -L dir1,dir2 must not have empty sides.\n\n";
-        return false;
-      }
-    } else {
-      if (model.empty()) {
-        std::cerr << "Error: -m is required.\n\n";
-        return false;
-      }
-      if (dump_level < 0 || dump_level > 3) {
-        std::cerr << "Error: -d must be 0, 1, 2, or 3.\n\n";
-        return false;
-      }
-    }
-
-    return true;
-  }
-
-  void print_help() const {
-    std::cerr
-        << "Run an ONNX model via MorphiZen execution provider.\n\n"
-        << "Usage: hip-onnx-runner -m <model.onnx> [options]\n"
-        << "   or: hip-onnx-runner -L dir1,dir2\n\n"
-        << "Options:\n"
-        << "  -m <path>   Path to ONNX model (required for inference)\n"
-        << "  -n          CPU only; skip EP registration\n"
-        << "  -d <0-3>    Dump level: 0=off, 1=inputs, 2=outputs, 3=both\n"
-        << "              (dirs: <stem>_i_dump/ and <stem>_o_dump/;\n"
-        << "               with -n: <stem>_cpu_i_dump/ and "
-           "<stem>_cpu_o_dump/)\n"
-        << "  -s <seed>   RNG seed for random inputs (default 42)\n"
-        << "  -i <dir>    Load inputs from dir "
-           "(input_<idx>_<name>_<type>.bin)\n"
-        << "  -L <d1,d2>  Compare two dump dirs element-wise (L2 norm)\n"
-        << "  -h          Show help\n";
-  }
-};
-
 int main(int argc, char *argv[]) {
-  Options opts;
-  if (!opts.parse(argc, argv)) {
-    opts.print_help();
+  MiniOptions mo;
+  mo.add_option("m", "model", "Path to .onnx model", "");
+  mo.add_option("L", "l2norm",
+                "Compare two dirs: dir1,dir2 (same *.bin set); each file must "
+                "be ..._<type>.bin (fp32,fp16,i64,...); element-wise L2; no -m",
+                "");
+  mo.add_option("n", "no-ep", "CPU only; skip EP registration", "false",
+                true);
+  mo.add_option(
+      "d", "dump-level",
+      "0=off, 1=dump inputs to <stem>_i_dump/, 2=outputs to <stem>_o_dump/, "
+      "3=both",
+      "0");
+  mo.add_option("s", "seed", "RNG seed for random inputs", "42");
+  mo.add_option("i", "input-dir",
+                "Directory with input_<idx>_<name>_<type>.bin only; empty = "
+                "random inputs",
+                "");
+
+  try {
+    mo.parse(argc, argv);
+  } catch (const std::exception &e) {
+    std::cerr << e.what() << "\n\n";
+    mo.print_help(argv[0]);
     return 1;
   }
 
-  if (!opts.l2norm.empty()) {
-    const auto sep = opts.l2norm.find(',');
-    return run_l2norm_output_dumps(trim_string(opts.l2norm.substr(0, sep)),
-                                   trim_string(opts.l2norm.substr(sep + 1)));
+  std::string l2norm_arg = trim_string(mo.get<std::string>("l2norm"));
+  std::string model_path_str = trim_string(mo.get<std::string>("model"));
+  const bool no_ep = mo.get<bool>("no-ep");
+  const int dump_level = mo.get<int>("dump-level");
+  std::mt19937 rng(mo.get<unsigned int>("seed"));
+  std::string input_dir_str = trim_string(mo.get<std::string>("input-dir"));
+  const bool use_input_files = !input_dir_str.empty();
+
+  if (!l2norm_arg.empty()) {
+    const auto sep = l2norm_arg.find(',');
+    if (sep == std::string::npos) {
+      std::cerr << "Error: --l2norm expects dir1,dir2\n\n";
+      mo.print_help(argv[0]);
+      return 1;
+    }
+    const std::string dir_left = trim_string(l2norm_arg.substr(0, sep));
+    const std::string dir_right = trim_string(l2norm_arg.substr(sep + 1));
+    return run_l2norm_output_dumps(dir_left, dir_right);
   }
 
-  const std::string model_path_str = opts.model;
-  const bool no_ep = opts.no_ep;
-  const int dump_level = opts.dump_level;
-  std::mt19937 rng(opts.seed);
-  std::string input_dir_str = opts.input_dir;
-  const bool use_input_files = !input_dir_str.empty();
+  if (model_path_str.empty()) {
+    std::cerr << "Error: --model is required for inference.\n\n";
+    mo.print_help(argv[0]);
+    return 1;
+  }
+  if (dump_level < 0 || dump_level > 3) {
+    std::cerr << "Error: --dump-level must be 0, 1, 2, or 3.\n\n";
+    mo.print_help(argv[0]);
+    return 1;
+  }
 
   // ORT environment
   Ort::Env env(ORT_LOGGING_LEVEL_ERROR, "hip-onnx-runner");
