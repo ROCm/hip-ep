@@ -116,7 +116,6 @@ jobs:
           name: gpu-test-package
           path: gpu-test-package
           run_id: '23830153026'  # DEBUG: hardcoded build with x64 DirectML fix
-          branch: feat/gpu-perf-accuracy-ci
           workflow_conclusion: success
           if_no_artifact_found: fail
 
