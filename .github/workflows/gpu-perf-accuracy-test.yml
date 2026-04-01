@@ -1,0 +1,520 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: GPU Performance & Accuracy Test
+
+on:
+  schedule:
+    - cron: '0 18 * * *'  # daily at UTC 18:00 (CST 02:00)
+
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gpu-perf-accuracy:
+    runs-on: StrixHalo
+
+    permissions:
+      contents: read
+      actions: read
+
+    env:
+      THEROCK_VERSION: therock-dist-windows-gfx1151-7.11.0
+      PERF_DURATION: "30"
+      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+
+    steps:
+      # -----------------------------------------------------------------
+      # Clean up leftover processes and directories from previous runs
+      # -----------------------------------------------------------------
+      - name: Clean workspace
+        shell: pwsh
+        run: |
+          foreach ($proc in @("hip-onnx-runner", "onnxruntime_perf_test")) {
+            Get-Process $proc -ErrorAction SilentlyContinue |
+              Stop-Process -Force -ErrorAction SilentlyContinue
+          }
+          Start-Sleep -Seconds 3
+          foreach ($dir in @("gpu-test-package", "l2-results", "perf-results", "json-results")) {
+            if (Test-Path $dir) {
+              for ($i = 0; $i -lt 5; $i++) {
+                Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+                if (-not (Test-Path $dir)) { break }
+                Write-Host "Retry $($i+1): waiting for $dir to be released..."
+                Start-Sleep -Seconds 2
+              }
+              if (Test-Path $dir) {
+                Write-Warning "$dir could not be fully removed"
+              }
+            }
+          }
+
+      # -----------------------------------------------------------------
+      # Download the pre-built gpu-test-package artifact from the
+      # latest successful main build of the Windows Build workflow.
+      # -----------------------------------------------------------------
+      - name: Download gpu-test-package
+        uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe # v3.1.4
+        with:
+          workflow: windows-build.yml
+          name: gpu-test-package
+          path: gpu-test-package
+          branch: main
+          workflow_conclusion: success
+          if_no_artifact_found: fail
+
+      - name: Verify package contents
+        id: verify-package
+        shell: cmd
+        run: |
+          if not exist gpu-test-package\bin\hip-onnx-runner.exe (
+            echo [ERROR] hip-onnx-runner.exe not found in gpu-test-package
+            exit /b 1
+          )
+          if not exist gpu-test-package\bin\onnxruntime_perf_test.exe (
+            echo [ERROR] onnxruntime_perf_test.exe not found in gpu-test-package
+            exit /b 1
+          )
+          echo === Package contents ===
+          dir /s /b gpu-test-package
+
+      # -----------------------------------------------------------------
+      # TheRock HIP runtime (required by MorphiZen EP at inference time)
+      # -----------------------------------------------------------------
+      - name: Download & extract TheRock
+        id: setup-therock
+        shell: powershell
+        run: |
+          $dist = "${{ runner.workspace }}\therock-dist"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          curl.exe -fsSL `
+            "https://repo.amd.com/rocm/tarball/${{ env.THEROCK_VERSION }}.tar.gz" `
+            -o therock.tar.gz
+          tar -xzf therock.tar.gz -C $dist --strip-components=1
+          Remove-Item therock.tar.gz
+
+      # =================================================================
+      #  SINGLE-OP PERFORMANCE TESTS
+      #  Traverse test-models\<family>\* — skip full_model and _dyn
+      # =================================================================
+      - name: Run single-op perf tests
+        if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
+        shell: cmd
+        run: |
+          setlocal enabledelayedexpansion
+          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
+          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
+          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
+          set ROOT=${{ runner.workspace }}\test-models
+          if not exist "%ROOT%" (
+            echo [SKIP] test-models directory not found: %ROOT%
+            exit /b 0
+          )
+          set FAILED=0
+          cd gpu-test-package\bin
+          for /r "%ROOT%" %%M in (*.onnx) do (
+            if "%%~xM"==".onnx" (
+              set "FN=%%~nM"
+              set "CHECK=!FN:_dyn=!"
+              if "!CHECK!"=="!FN!" (
+                set "MP=%%~dpM"
+                set "MPCHECK=!MP:\full_model\=!"
+                if "!MPCHECK!"=="!MP!" (
+                  set "REL=!MP:%ROOT%\=!"
+                  mkdir "..\..\perf-results\single-op\!REL!" 2>nul
+                  mkdir "..\..\perf-results\single-op-dml\!REL!" 2>nul
+                  echo === Perf [MorphiZen]: !REL!%%~nxM ===
+                  onnxruntime_perf_test.exe ^
+                    --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
+                    --plugin_eps "MorphiZenExecutionProvider" ^
+                    --plugin_ep_options "config_file|..\morphizen_config.json" ^
+                    -t %PERF_DURATION% -c 1 -s -I ^
+                    "%%M" > "..\..\perf-results\single-op\!REL!%%~nxM.txt" 2>&1
+                  type "..\..\perf-results\single-op\!REL!%%~nxM.txt"
+                  if errorlevel 1 set FAILED=1
+                  echo === Perf [DML]: !REL!%%~nxM ===
+                  onnxruntime_perf_test.exe ^
+                    -e dml ^
+                    -C "ep.dml.disable_graph_fusion|1" ^
+                    -t %PERF_DURATION% -c 1 -s -I ^
+                    "%%M" > "..\..\perf-results\single-op-dml\!REL!%%~nxM.txt" 2>&1
+                  type "..\..\perf-results\single-op-dml\!REL!%%~nxM.txt"
+                  if errorlevel 1 set FAILED=1
+                )
+              )
+            )
+          )
+          exit /b 0
+
+      # =================================================================
+      #  SINGLE-OP ACCURACY TESTS (L2)
+      #  Traverse test-models\<family>\* — skip full_model and _dyn
+      # =================================================================
+      - name: Run single-op L2 accuracy tests
+        if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
+        shell: cmd
+        run: |
+          setlocal enabledelayedexpansion
+          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
+          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
+          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
+          set ROOT=${{ runner.workspace }}\test-models
+          if not exist "%ROOT%" (
+            echo [SKIP] test-models directory not found: %ROOT%
+            exit /b 0
+          )
+          set FAILED=0
+          cd gpu-test-package\bin
+          for /r "%ROOT%" %%M in (*.onnx) do (
+            if "%%~xM"==".onnx" (
+              set "FN=%%~nM"
+              set "CHECK=!FN:_dyn=!"
+              if "!CHECK!"=="!FN!" (
+                set "MP=%%~dpM"
+                set "MPCHECK=!MP:\full_model\=!"
+                if "!MPCHECK!"=="!MP!" (
+                  set "REL=!MP:%ROOT%\=!"
+                  set "OUT=..\..\l2-results\single-op\!REL!%%~nM.txt"
+                  mkdir "..\..\l2-results\single-op\!REL!" 2>nul
+                  echo === L2 test: !REL!%%~nxM ===
+                  rd /s /q "%%~nM_o_dump" 2>nul
+                  rd /s /q "%%~nM_cpu_o_dump" 2>nul
+                  hip-onnx-runner.exe -m "%%M" -d 2 -s 42 > "!OUT!" 2>&1
+                  if errorlevel 1 (
+                    echo [ERROR] EP inference failed>> "!OUT!"
+                    type "!OUT!"
+                    set FAILED=1
+                  ) else (
+                    hip-onnx-runner.exe -m "%%M" -d 2 -s 42 -n >> "!OUT!" 2>&1
+                    if errorlevel 1 (
+                      echo [ERROR] CPU inference failed>> "!OUT!"
+                      type "!OUT!"
+                      set FAILED=1
+                    ) else (
+                      hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" >> "!OUT!" 2>&1
+                      type "!OUT!"
+                    )
+                  )
+                )
+              )
+            )
+          )
+          exit /b 0
+
+      # =================================================================
+      #  FULL MODEL PERFORMANCE TESTS
+      #  Traverse test-models\<family>\full_model\ — skip _dyn
+      # =================================================================
+      - name: Run full model perf tests
+        if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
+        shell: cmd
+        run: |
+          setlocal enabledelayedexpansion
+          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
+          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
+          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
+          set ROOT=${{ runner.workspace }}\test-models
+          if not exist "%ROOT%" (
+            echo [SKIP] test-models directory not found: %ROOT%
+            exit /b 0
+          )
+          set FAILED=0
+          cd gpu-test-package\bin
+          for /r "%ROOT%" %%M in (*.onnx) do (
+            if "%%~xM"==".onnx" (
+              set "FN=%%~nM"
+              set "CHECK=!FN:_dyn=!"
+              if "!CHECK!"=="!FN!" (
+                set "MP=%%~dpM"
+                set "MPCHECK=!MP:\full_model\=!"
+                if not "!MPCHECK!"=="!MP!" (
+                  set "REL=!MP:%ROOT%\=!"
+                  mkdir "..\..\perf-results\full-model\!REL!" 2>nul
+                  mkdir "..\..\perf-results\full-model-dml\!REL!" 2>nul
+                  echo === Perf [MorphiZen]: !REL!%%~nxM ===
+                  onnxruntime_perf_test.exe ^
+                    --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
+                    --plugin_eps "MorphiZenExecutionProvider" ^
+                    --plugin_ep_options "config_file|..\morphizen_config.json" ^
+                    -t %PERF_DURATION% -c 1 -s -I ^
+                    "%%M" > "..\..\perf-results\full-model\!REL!%%~nxM.txt" 2>&1
+                  type "..\..\perf-results\full-model\!REL!%%~nxM.txt"
+                  if errorlevel 1 set FAILED=1
+                  echo === Perf [DML]: !REL!%%~nxM ===
+                  onnxruntime_perf_test.exe ^
+                    -e dml ^
+                    -C "ep.dml.disable_graph_fusion|1" ^
+                    -t %PERF_DURATION% -c 1 -s -I ^
+                    "%%M" > "..\..\perf-results\full-model-dml\!REL!%%~nxM.txt" 2>&1
+                  type "..\..\perf-results\full-model-dml\!REL!%%~nxM.txt"
+                  if errorlevel 1 set FAILED=1
+                )
+              )
+            )
+          )
+          exit /b 0
+
+      # =================================================================
+      #  FULL MODEL ACCURACY TESTS (L2)
+      #  Traverse test-models\<family>\full_model\ — skip _dyn
+      # =================================================================
+      - name: Run full model L2 accuracy tests
+        if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
+        shell: cmd
+        run: |
+          setlocal enabledelayedexpansion
+          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
+          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
+          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
+          set ROOT=${{ runner.workspace }}\test-models
+          if not exist "%ROOT%" (
+            echo [SKIP] test-models directory not found: %ROOT%
+            exit /b 0
+          )
+          set FAILED=0
+          cd gpu-test-package\bin
+          for /r "%ROOT%" %%M in (*.onnx) do (
+            if "%%~xM"==".onnx" (
+              set "FN=%%~nM"
+              set "CHECK=!FN:_dyn=!"
+              if "!CHECK!"=="!FN!" (
+                set "MP=%%~dpM"
+                set "MPCHECK=!MP:\full_model\=!"
+                if not "!MPCHECK!"=="!MP!" (
+                  set "REL=!MP:%ROOT%\=!"
+                  set "OUT=..\..\l2-results\full-model\!REL!%%~nM.txt"
+                  mkdir "..\..\l2-results\full-model\!REL!" 2>nul
+                  echo === L2 test: !REL!%%~nxM ===
+                  rd /s /q "%%~nM_o_dump" 2>nul
+                  rd /s /q "%%~nM_cpu_o_dump" 2>nul
+                  hip-onnx-runner.exe -m "%%M" -d 2 -s 42 > "!OUT!" 2>&1
+                  if errorlevel 1 (
+                    echo [ERROR] EP inference failed>> "!OUT!"
+                    type "!OUT!"
+                    set FAILED=1
+                  ) else (
+                    hip-onnx-runner.exe -m "%%M" -d 2 -s 42 -n >> "!OUT!" 2>&1
+                    if errorlevel 1 (
+                      echo [ERROR] CPU inference failed>> "!OUT!"
+                      type "!OUT!"
+                      set FAILED=1
+                    ) else (
+                      hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" >> "!OUT!" 2>&1
+                      type "!OUT!"
+                    )
+                  )
+                )
+              )
+            )
+          )
+          exit /b 0
+
+      # =================================================================
+      #  PUBLISH RESULTS
+      # =================================================================
+      - name: Publish results
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $runUrl = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          $rawSha = "${{ github.sha }}"
+          $sha = $rawSha.Substring(0, [Math]::Min(7, $rawSha.Length))
+          $threshold = 0.01
+          $timestamp = (Get-Date -Format "o")
+
+          # --- Helper: extract metadata from a result file's relative path ---
+          # Result paths follow: <family>/<subcategory>/<op>/<file>.txt
+          # subcategory = single_op | single_layer | full_model | ...
+          function Get-Meta($file, $categoryRoot) {
+            $rel = $file.FullName.Substring($categoryRoot.Length).TrimStart('\', '/')
+            $parts = $rel -split '[/\\]'
+            $modelName = if ($parts.Count -ge 2) { $parts[0] } else { "unknown" }
+            $opName = if ($parts.Count -ge 3) { $parts[$parts.Count - 2] } else { $null }
+            $fileName = $parts[-1] -replace '\.txt$', ''
+            $seqMatch = [regex]::Match($fileName, '[_-]seq(\d+)')
+            $seqLen = if ($seqMatch.Success) { [int]$seqMatch.Groups[1].Value } else { $null }
+            return @{ model_name = $modelName; op_name = $opName; seq_length = $seqLen; file = $fileName }
+          }
+
+          # --- Helper: build markdown table from result files (recursive) ---
+          function Get-PerfTable($dir, $title) {
+            if (-not (Test-Path $dir)) { return "" }
+            $files = Get-ChildItem $dir -Recurse -Filter "*.txt" -ErrorAction SilentlyContinue
+            if (-not $files) { return "" }
+            $rows = ""
+            foreach ($f in $files) {
+              $meta = Get-Meta $f (Resolve-Path $dir).Path
+              $label = if ($meta.op_name) { "$($meta.model_name) / $($meta.op_name)" } else { $meta.model_name }
+              if ($meta.seq_length -ne $null) { $label += " (seq$($meta.seq_length))" }
+              $content = Get-Content $f.FullName -Raw
+              $qpsMatch = [regex]::Match($content, 'Number of inferences per second:\s+([\d.]+)')
+              $sessMatch = [regex]::Match($content, 'Session creation time cost:\s+([\d.]+)\s+s')
+              $firstMatch = [regex]::Match($content, 'First inference time cost:\s+(\d+)\s+ms')
+              $cpuMatch = [regex]::Match($content, 'Avg CPU usage:\s+(\d+)\s+%')
+              $memMatch = [regex]::Match($content, 'Peak working set size:\s+(\d+)\s+bytes')
+              $sess = if ($sessMatch.Success) { $sessMatch.Groups[1].Value } else { "-" }
+              $first = if ($firstMatch.Success) { $firstMatch.Groups[1].Value } else { "-" }
+              $cpu = if ($cpuMatch.Success) { $cpuMatch.Groups[1].Value } else { "-" }
+              $memMB = if ($memMatch.Success) { "{0:F0}" -f ([double]$memMatch.Groups[1].Value / 1MB) } else { "-" }
+              if ($qpsMatch.Success) {
+                $qps = "{0:F2}" -f [double]$qpsMatch.Groups[1].Value
+                $rows += "| $label | $qps | $sess | $first | $cpu | $memMB |`n"
+              } else {
+                $rows += "| $label | failed | $sess | $first | $cpu | $memMB |`n"
+              }
+            }
+            $header = "### $title`n`n| Model | QPS | Session (s) | 1st Infer (ms) | CPU% | Mem (MB) |`n|-------|----:|----:|----:|----:|----:|`n"
+            return $header + $rows + "`n"
+          }
+
+          function Get-L2Table($dir, $title) {
+            if (-not (Test-Path $dir)) { return "" }
+            $files = Get-ChildItem $dir -Recurse -Filter "*.txt" -ErrorAction SilentlyContinue
+            if (-not $files) { return "" }
+            $rows = ""
+            foreach ($f in $files) {
+              $meta = Get-Meta $f (Resolve-Path $dir).Path
+              $label = if ($meta.op_name) { "$($meta.model_name) / $($meta.op_name)" } else { $meta.model_name }
+              if ($meta.seq_length -ne $null) { $label += " (seq$($meta.seq_length))" }
+              $content = Get-Content $f.FullName -Raw
+              $l2Match = [regex]::Match($content, 'Combined L2 \(stacked diffs\):\s+([\d.eE+-]+)')
+              $errMatch = [regex]::Match($content, '\[ERROR\]\s*(.+)')
+              if ($l2Match.Success) {
+                $l2val = [double]$l2Match.Groups[1].Value
+                $rows += "| $label | $l2val |`n"
+              } elseif ($errMatch.Success) {
+                $reason = $errMatch.Groups[1].Value.Trim()
+                $rows += "| $label | $reason |`n"
+              } else {
+                $rows += "| $label | error |`n"
+              }
+            }
+            $header = "### $title`n`n| Model | Combined L2 |`n|-------|------------|`n"
+            return $header + $rows + "`n"
+          }
+
+          # --- Build markdown summary ---
+          $summary = "## GPU Performance & Accuracy Test Results`n`n"
+          $opPerf = Get-PerfTable "perf-results/single-op" "Single-Op Performance (MorphiZen EP)"
+          $opPerfDml = Get-PerfTable "perf-results/single-op-dml" "Single-Op Performance (DirectML EP)"
+          $opL2 = Get-L2Table "l2-results/single-op" "Single-Op Accuracy (EP vs CPU)"
+          $fullPerf = Get-PerfTable "perf-results/full-model" "Full Model Performance (MorphiZen EP)"
+          $fullPerfDml = Get-PerfTable "perf-results/full-model-dml" "Full Model Performance (DirectML EP)"
+          $fullL2 = Get-L2Table "l2-results/full-model" "Full Model Accuracy (EP vs CPU)"
+          if ($opPerf) { $summary += $opPerf }
+          if ($opPerfDml) { $summary += $opPerfDml }
+          if ($opL2) { $summary += $opL2 }
+          if ($fullPerf) { $summary += $fullPerf }
+          if ($fullPerfDml) { $summary += $fullPerfDml }
+          if ($fullL2) { $summary += $fullL2 }
+          if (-not $opPerf -and -not $opPerfDml -and -not $opL2 -and -not $fullPerf -and -not $fullPerfDml -and -not $fullL2) {
+            $summary += "> No test results collected.`n"
+          }
+          $summary += "`nL2 threshold: $threshold | Run: [${{ github.run_number }}]($runUrl) | Commit: ``$sha```n"
+          Write-Host $summary
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+
+          # --- Generate JSON result files ---
+          function Collect-PerfJson($dir, $category, $epName) {
+            $entries = @()
+            if (-not (Test-Path $dir)) { return $entries }
+            $files = Get-ChildItem $dir -Recurse -Filter "*.txt" -ErrorAction SilentlyContinue
+            foreach ($f in $files) {
+              $meta = Get-Meta $f (Resolve-Path $dir).Path
+              $content = Get-Content $f.FullName -Raw
+              $qpsMatch = [regex]::Match($content, 'Number of inferences per second:\s+([\d.]+)')
+              $sessMatch = [regex]::Match($content, 'Session creation time cost:\s+([\d.]+)\s+s')
+              $firstMatch = [regex]::Match($content, 'First inference time cost:\s+(\d+)\s+ms')
+              $cpuMatch = [regex]::Match($content, 'Avg CPU usage:\s+(\d+)\s+%')
+              $memMatch = [regex]::Match($content, 'Peak working set size:\s+(\d+)\s+bytes')
+              $entry = [ordered]@{
+                category       = $category
+                ep_name        = $epName
+                model_name     = $meta.model_name
+                file           = $meta.file
+                qps            = if ($qpsMatch.Success) { [double]$qpsMatch.Groups[1].Value } else { $null }
+                session_time_s = if ($sessMatch.Success) { [double]$sessMatch.Groups[1].Value } else { $null }
+                first_infer_ms = if ($firstMatch.Success) { [int]$firstMatch.Groups[1].Value } else { $null }
+                avg_cpu_pct    = if ($cpuMatch.Success) { [int]$cpuMatch.Groups[1].Value } else { $null }
+                peak_mem_bytes = if ($memMatch.Success) { [long]$memMatch.Groups[1].Value } else { $null }
+              }
+              if ($meta.op_name) { $entry["op_name"] = $meta.op_name }
+              if ($meta.seq_length -ne $null) { $entry["seq_length"] = $meta.seq_length }
+              $entries += [PSCustomObject]$entry
+            }
+            return $entries
+          }
+
+          function Collect-L2Json($dir, $category) {
+            $entries = @()
+            if (-not (Test-Path $dir)) { return $entries }
+            $files = Get-ChildItem $dir -Recurse -Filter "*.txt" -ErrorAction SilentlyContinue
+            foreach ($f in $files) {
+              $meta = Get-Meta $f (Resolve-Path $dir).Path
+              $content = Get-Content $f.FullName -Raw
+              $l2Match = [regex]::Match($content, 'Combined L2 \(stacked diffs\):\s+([\d.eE+-]+)')
+              $errMatch = [regex]::Match($content, '\[ERROR\]\s*(.+)')
+              $l2val = if ($l2Match.Success) { [double]$l2Match.Groups[1].Value } else { $null }
+              $entry = [ordered]@{
+                category   = $category
+                model_name = $meta.model_name
+                file       = $meta.file
+                l2         = $l2val
+              }
+              if ($errMatch.Success) {
+                $entry["error"] = $errMatch.Groups[1].Value.Trim()
+              }
+              if ($meta.op_name) { $entry["op_name"] = $meta.op_name }
+              if ($meta.seq_length -ne $null) { $entry["seq_length"] = $meta.seq_length }
+              $entries += [PSCustomObject]$entry
+            }
+            return $entries
+          }
+
+          $perfAll  = @()
+          $perfAll += Collect-PerfJson "perf-results/single-op" "single-op" "MorphiZenExecutionProvider"
+          $perfAll += Collect-PerfJson "perf-results/single-op-dml" "single-op" "DmlExecutionProvider"
+          $perfAll += Collect-PerfJson "perf-results/full-model" "full-model" "MorphiZenExecutionProvider"
+          $perfAll += Collect-PerfJson "perf-results/full-model-dml" "full-model" "DmlExecutionProvider"
+
+          $l2All  = @()
+          $l2All += Collect-L2Json "l2-results/single-op" "single-op"
+          $l2All += Collect-L2Json "l2-results/full-model" "full-model"
+
+          New-Item -ItemType Directory -Force -Path "json-results" | Out-Null
+
+          $perfJson = [ordered]@{
+            timestamp = $timestamp
+            commit    = $sha
+            results   = @($perfAll)
+          } | ConvertTo-Json -Depth 5
+          Set-Content -Path "json-results/perf-results.json" -Value $perfJson
+          Write-Host "=== perf-results.json ==="
+          Write-Host $perfJson
+
+          $l2Json = [ordered]@{
+            timestamp = $timestamp
+            commit    = $sha
+            threshold = $threshold
+            results   = @($l2All)
+          } | ConvertTo-Json -Depth 5
+          Set-Content -Path "json-results/l2-results.json" -Value $l2Json
+          Write-Host "=== l2-results.json ==="
+          Write-Host $l2Json
+
+      - name: Upload JSON results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-json
+          path: json-results/
+          retention-days: 30
