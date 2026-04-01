@@ -86,7 +86,7 @@ jobs:
           dir /s /b gpu-test-package
 
       # -----------------------------------------------------------------
-      # TheRock HIP runtime (required by MorphiZen EP at inference time)
+      # TheRock HIP runtime (required by hipdnn-ep at inference time)
       # -----------------------------------------------------------------
       - name: Download & extract TheRock
         id: setup-therock
@@ -130,7 +130,7 @@ jobs:
                   set "REL=!MP:%ROOT%\=!"
                   mkdir "..\..\perf-results\single-op\!REL!" 2>nul
                   mkdir "..\..\perf-results\single-op-dml\!REL!" 2>nul
-                  echo === Perf [MorphiZen]: !REL!%%~nxM ===
+                  echo === Perf [hipdnn-ep]: !REL!%%~nxM ===
                   onnxruntime_perf_test.exe ^
                     --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
                     --plugin_eps "MorphiZenExecutionProvider" ^
@@ -238,7 +238,7 @@ jobs:
                   set "REL=!MP:%ROOT%\=!"
                   mkdir "..\..\perf-results\full-model\!REL!" 2>nul
                   mkdir "..\..\perf-results\full-model-dml\!REL!" 2>nul
-                  echo === Perf [MorphiZen]: !REL!%%~nxM ===
+                  echo === Perf [hipdnn-ep]: !REL!%%~nxM ===
                   onnxruntime_perf_test.exe ^
                     --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
                     --plugin_eps "MorphiZenExecutionProvider" ^
@@ -404,11 +404,11 @@ jobs:
 
           # --- Build markdown summary ---
           $summary = "## GPU Performance & Accuracy Test Results`n`n"
-          $opPerf = Get-PerfTable "perf-results/single-op" "Single-Op Performance (MorphiZen EP)"
-          $opPerfDml = Get-PerfTable "perf-results/single-op-dml" "Single-Op Performance (DirectML EP)"
+          $opPerf = Get-PerfTable "perf-results/single-op" "Single-Op Performance (hipdnn-ep)"
+          $opPerfDml = Get-PerfTable "perf-results/single-op-dml" "Single-Op Performance (dml ep)"
           $opL2 = Get-L2Table "l2-results/single-op" "Single-Op Accuracy (EP vs CPU)"
-          $fullPerf = Get-PerfTable "perf-results/full-model" "Full Model Performance (MorphiZen EP)"
-          $fullPerfDml = Get-PerfTable "perf-results/full-model-dml" "Full Model Performance (DirectML EP)"
+          $fullPerf = Get-PerfTable "perf-results/full-model" "Full Model Performance (hipdnn-ep)"
+          $fullPerfDml = Get-PerfTable "perf-results/full-model-dml" "Full Model Performance (dml ep)"
           $fullL2 = Get-L2Table "l2-results/full-model" "Full Model Accuracy (EP vs CPU)"
           if ($opPerf) { $summary += $opPerf }
           if ($opPerfDml) { $summary += $opPerfDml }
@@ -481,10 +481,10 @@ jobs:
           }
 
           $perfAll  = @()
-          $perfAll += Collect-PerfJson "perf-results/single-op" "single-op" "MorphiZenExecutionProvider"
-          $perfAll += Collect-PerfJson "perf-results/single-op-dml" "single-op" "DmlExecutionProvider"
-          $perfAll += Collect-PerfJson "perf-results/full-model" "full-model" "MorphiZenExecutionProvider"
-          $perfAll += Collect-PerfJson "perf-results/full-model-dml" "full-model" "DmlExecutionProvider"
+          $perfAll += Collect-PerfJson "perf-results/single-op" "single-op" "hipdnn-ep"
+          $perfAll += Collect-PerfJson "perf-results/single-op-dml" "single-op" "dml ep"
+          $perfAll += Collect-PerfJson "perf-results/full-model" "full-model" "hipdnn-ep"
+          $perfAll += Collect-PerfJson "perf-results/full-model-dml" "full-model" "dml ep"
 
           $l2All  = @()
           $l2All += Collect-L2Json "l2-results/single-op" "single-op"
