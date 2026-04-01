@@ -21,7 +21,7 @@ namespace hipdnn::level1pass {
 
 namespace {
 
-// Error codes from morphizen-mlir-compiler C API
+// Error codes from hip-compiler plugin C API
 enum CompilerErrorCode {
   COMPILER_SUCCESS = 0,
   COMPILER_ERROR_INVALID_INPUT = 1,
@@ -35,7 +35,7 @@ enum CompilerErrorCode {
   COMPILER_ERROR_INTERNAL = 99
 };
 
-// Error struct from morphizen-mlir-compiler C API
+// Error struct from hip-compiler plugin C API
 struct CompilerError {
   CompilerErrorCode code;
   char message[1024];
