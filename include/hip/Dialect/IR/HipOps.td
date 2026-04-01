@@ -804,20 +804,21 @@ def Hip_ReduceSumOp : Hip_DpsOp<"reduce_sum"> {
     Example:
     ```mlir
     hip.reduce_sum(%ctx) ins(%data, %axes : memref<1x128xi64, 1>, memref<i64, 1>)
-                         outs(%output : memref<1x1xi64, 1>) {keepdims = 1 : i64}
+                         outs(%output : memref<1x1xi64, 1>) {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
     ```
   }];
 
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$data,
-    Hip_TensorOrMemRef:$axes,
+    Optional<Hip_TensorOrMemRef>:$axes,
     Hip_TensorOrMemRef:$output,
-    I64Attr:$keepdims
+    DefaultValuedAttr<I64Attr, "1">:$keepdims,
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
   );
 
   let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(` $data `,` $axes `:` type($data) `,` type($axes) `)`
+    `(` $ctx `)` `ins` `(` $data (`,` $axes^ `:` type($data) `,` type($axes))? `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
