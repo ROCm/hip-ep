@@ -113,6 +113,7 @@ jobs:
         if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $false
           $env:THEROCK_DIST = "${{ runner.workspace }}\therock-dist"
           $pkgBin = Join-Path $PWD "gpu-test-package\bin"
           $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
@@ -190,6 +191,7 @@ jobs:
         if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $false
           $env:THEROCK_DIST = "${{ runner.workspace }}\therock-dist"
           $pkgBin = Join-Path $PWD "gpu-test-package\bin"
           $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
@@ -266,6 +268,7 @@ jobs:
         if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $false
           $env:THEROCK_DIST = "${{ runner.workspace }}\therock-dist"
           $pkgBin = Join-Path $PWD "gpu-test-package\bin"
           $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
@@ -343,6 +346,7 @@ jobs:
         if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $false
           $env:THEROCK_DIST = "${{ runner.workspace }}\therock-dist"
           $pkgBin = Join-Path $PWD "gpu-test-package\bin"
           $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
