@@ -582,16 +582,15 @@ int main(int argc, char *argv[]) {
                 "Directory with input_<idx>_<name>_<type>.bin only; empty = "
                 "random inputs",
                 "");
-  mo.add_option(
-      "o", "graph-optimization-level",
-      "session_options.SetGraphOptimizationLevel(level), "
-      "  0 = ORT_DISABLE_ALL,  "
-      "  1 = ORT_ENABLE_BASIC,  "
-      "  2 = ORT_ENABLE_EXTENDED,  "
-      " 99 = ORT_ENABLE_ALL,  "
-      " -1 = default, not call this function ", 
-      "-1");
-  
+  mo.add_option("o", "graph-optimization-level",
+                "session_options.SetGraphOptimizationLevel(level), "
+                "  0 = ORT_DISABLE_ALL,  "
+                "  1 = ORT_ENABLE_BASIC,  "
+                "  2 = ORT_ENABLE_EXTENDED,  "
+                " 99 = ORT_ENABLE_ALL,  "
+                " -1 = default, not call this function ",
+                "-1");
+
   try {
     mo.parse(argc, argv);
   } catch (const std::exception &e) {
@@ -600,7 +599,7 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  if(argc == 1) {
+  if (argc == 1) {
     mo.print_help(argv[0]);
     return 1;
   }
@@ -612,7 +611,7 @@ int main(int argc, char *argv[]) {
   std::string input_dir_str = trim_string(mo.get<std::string>("input-dir"));
   const bool use_input_files = !input_dir_str.empty();
   const int graph_optimization_level = mo.get<int>("graph-optimization-level");
-  
+
   if (!l2norm_arg.empty()) {
     const auto sep = l2norm_arg.find(',');
     if (sep == std::string::npos) {
@@ -662,11 +661,12 @@ int main(int argc, char *argv[]) {
   // Session options
   Ort::SessionOptions session_opts;
   session_opts.SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);
-  if(graph_optimization_level != -1){
-    std::cout << "Setting graph_optimization_level to " <<graph_optimization_level <<"\n";
+  if (graph_optimization_level != -1) {
+    std::cout << "Setting graph_optimization_level to "
+              << graph_optimization_level << "\n";
     session_opts.SetGraphOptimizationLevel(
         static_cast<GraphOptimizationLevel>(graph_optimization_level));
-  }	    
+  }
   if (!no_ep) {
     // Collect devices for this EP
     std::vector<Ort::ConstEpDevice> devices;
