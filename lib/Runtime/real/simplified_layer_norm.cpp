@@ -12,9 +12,95 @@
 #include "runtime_types.h"
 
 #include <cstdio>
+#include <functional>
+#include <unordered_map>
 
 // Use the shared macros from error_check_macros.h with goto cleanup pattern
 #define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
+
+// =============================================================================
+// Descriptor cache: 4 tensor descriptors created once per unique
+// (num_rows, hidden_dim, data_type) triple and reused for process lifetime.
+// Follows the same pattern as activation.cpp (commit 2f560bb).
+// =============================================================================
+
+struct T5NormCacheKey {
+  int64_t num_rows, hidden_dim;
+  miopenDataType_t data_type;
+  bool operator==(const T5NormCacheKey &o) const {
+    return num_rows == o.num_rows && hidden_dim == o.hidden_dim &&
+           data_type == o.data_type;
+  }
+};
+
+struct T5NormCacheKeyHash {
+  size_t operator()(const T5NormCacheKey &k) const {
+    size_t h = std::hash<int64_t>{}(k.num_rows);
+    h ^= std::hash<int64_t>{}(k.hidden_dim) + 0x9e3779b9 + (h << 6) +
+         (h >> 2);
+    h ^= std::hash<int>{}(static_cast<int>(k.data_type)) + 0x9e3779b9 +
+         (h << 6) + (h >> 2);
+    return h;
+  }
+};
+
+struct T5NormCacheEntry {
+  miopenTensorDescriptor_t xDesc, yDesc, weightDesc, rstdDesc;
+};
+
+static std::unordered_map<T5NormCacheKey, T5NormCacheEntry, T5NormCacheKeyHash>
+    g_t5norm_cache;
+
+static const T5NormCacheEntry *
+queryOrCreateT5Norm(const T5NormCacheKey &key) {
+  auto it = g_t5norm_cache.find(key);
+  if (it != g_t5norm_cache.end())
+    return &it->second;
+
+  T5NormCacheEntry e{};
+
+  if (miopenCreateTensorDescriptor(&e.xDesc) != miopenStatusSuccess)
+    return nullptr;
+  if (miopenCreateTensorDescriptor(&e.yDesc) != miopenStatusSuccess) {
+    miopenDestroyTensorDescriptor(e.xDesc);
+    return nullptr;
+  }
+  if (miopenCreateTensorDescriptor(&e.weightDesc) != miopenStatusSuccess) {
+    miopenDestroyTensorDescriptor(e.yDesc);
+    miopenDestroyTensorDescriptor(e.xDesc);
+    return nullptr;
+  }
+  if (miopenCreateTensorDescriptor(&e.rstdDesc) != miopenStatusSuccess) {
+    miopenDestroyTensorDescriptor(e.weightDesc);
+    miopenDestroyTensorDescriptor(e.yDesc);
+    miopenDestroyTensorDescriptor(e.xDesc);
+    return nullptr;
+  }
+
+  int x_dims[] = {static_cast<int>(key.num_rows),
+                   static_cast<int>(key.hidden_dim)};
+  int x_strides[] = {static_cast<int>(key.hidden_dim), 1};
+  miopenSetTensorDescriptor(e.xDesc, key.data_type, 2, x_dims, x_strides);
+  miopenSetTensorDescriptor(e.yDesc, key.data_type, 2, x_dims, x_strides);
+
+  int w_dims[] = {static_cast<int>(key.hidden_dim)};
+  int w_strides[] = {1};
+  miopenSetTensorDescriptor(e.weightDesc, key.data_type, 1, w_dims, w_strides);
+
+  int rstd_dims[] = {static_cast<int>(key.num_rows)};
+  int rstd_strides[] = {1};
+  miopenSetTensorDescriptor(e.rstdDesc, miopenFloat, 1, rstd_dims,
+                            rstd_strides);
+
+  auto [ins, _] = g_t5norm_cache.emplace(key, e);
+
+  RUNTIME_DEBUG_LOG("[REAL] queryOrCreateT5Norm: cached 4 descriptors for "
+                    "num_rows=%lld hidden_dim=%lld data_type=%d\n",
+                    (long long)key.num_rows, (long long)key.hidden_dim,
+                    (int)key.data_type);
+
+  return &ins->second;
+}
 
 // =============================================================================
 // SimplifiedLayerNormalization via MIOpen T5LayerNorm
@@ -29,7 +115,7 @@
 // Tensor layout (row-major):
 //   input:  [num_rows, hidden_dim]  where num_rows = input_num_elements /
 //   scale_num_elements scale:  [hidden_dim] output: [num_rows, hidden_dim]
-//   rstd:   [num_rows]              (scratch — not exposed to caller)
+//   rstd:   [num_rows]              (scratch -- not exposed to caller)
 // =============================================================================
 
 int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
@@ -74,63 +160,38 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
     return -1;
   }
 
-  int result = 0;
-  int rc = -1;
-  void *rstd_buf = nullptr;
-  miopenTensorDescriptor_t xDesc = nullptr, weightDesc = nullptr,
-                           yDesc = nullptr, rstdDesc = nullptr;
-
-  // rstd is always f32 regardless of input type
-  HIP_CHECK_GOTO(hipMalloc(&rstd_buf, num_rows * sizeof(float)), cleanup);
-
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&xDesc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&weightDesc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&yDesc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&rstdDesc));
-
-  {
-    int x_dims[] = {static_cast<int>(num_rows), static_cast<int>(hidden_dim)};
-    int x_strides[] = {static_cast<int>(hidden_dim), 1};
-    MIOPEN_CHECK(
-        miopenSetTensorDescriptor(xDesc, data_type, 2, x_dims, x_strides));
-    MIOPEN_CHECK(
-        miopenSetTensorDescriptor(yDesc, data_type, 2, x_dims, x_strides));
-
-    int w_dims[] = {static_cast<int>(hidden_dim)};
-    int w_strides[] = {1};
-    MIOPEN_CHECK(
-        miopenSetTensorDescriptor(weightDesc, data_type, 1, w_dims, w_strides));
-
-    int rstd_dims[] = {static_cast<int>(num_rows)};
-    int rstd_strides[] = {1};
-    MIOPEN_CHECK(miopenSetTensorDescriptor(rstdDesc, miopenFloat, 1, rstd_dims,
-                                           rstd_strides));
+  // Look up or create cached descriptors
+  T5NormCacheKey key{num_rows, hidden_dim, data_type};
+  const T5NormCacheEntry *c = queryOrCreateT5Norm(key);
+  if (!c) {
+    fprintf(stderr,
+            "wrap_miopenT5LayerNormForward: descriptor cache creation failed\n");
+    return -1;
   }
+
+  // Use shared workspace for rstd scratch buffer (always f32)
+  size_t rstd_bytes = static_cast<size_t>(num_rows) * sizeof(float);
+  if (hipdnn_ep_state_ensure_workspace(state, rstd_bytes) != 0) {
+    fprintf(stderr,
+            "wrap_miopenT5LayerNormForward: workspace allocation failed\n");
+    return -1;
+  }
+  void *rstd_buf = hipdnn_ep_state_get_workspace(state);
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_miopenT5LayerNormForward: calling miopenT5LayerNormForward"
       "(mode=ELEMENTWISE_AFFINE_T5, eps=%e)\n",
       (double)epsilon);
 
+  int result = 0;
   MIOPEN_CHECK(miopenT5LayerNormForward(
-      handle, MIOPEN_ELEMENTWISE_AFFINE_T5, xDesc, input, weightDesc, scale,
-      epsilon, yDesc, output, rstdDesc, rstd_buf));
+      handle, MIOPEN_ELEMENTWISE_AFFINE_T5, c->xDesc, input, c->weightDesc,
+      scale, epsilon, c->yDesc, output, c->rstdDesc, rstd_buf));
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_miopenT5LayerNormForward: completed successfully\n");
-  rc = 0;
+  return 0;
 
 cleanup:
-  if (xDesc)
-    miopenDestroyTensorDescriptor(xDesc);
-  if (weightDesc)
-    miopenDestroyTensorDescriptor(weightDesc);
-  if (yDesc)
-    miopenDestroyTensorDescriptor(yDesc);
-  if (rstdDesc)
-    miopenDestroyTensorDescriptor(rstdDesc);
-  if (rstd_buf)
-    HIP_CLEANUP(hipFree(rstd_buf));
-
-  return rc;
+  return result;
 }

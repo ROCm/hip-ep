@@ -12,10 +12,108 @@
 #include "runtime_types.h"
 
 #include <cstdio>
+#include <functional>
+#include <unordered_map>
 
 // Use the shared MIOPEN_CHECK_GOTO macro for goto cleanup pattern
 #undef MIOPEN_CHECK
 #define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
+
+// =============================================================================
+// Descriptor cache: T5LayerNorm + OpTensor descriptors created once per unique
+// (num_rows, hidden_dim, data_type) triple, reused for process lifetime.
+// Follows the same pattern as activation.cpp (commit 2f560bb).
+// =============================================================================
+
+struct SkipT5NormCacheKey {
+  int64_t num_rows, hidden_dim;
+  miopenDataType_t data_type;
+  bool operator==(const SkipT5NormCacheKey &o) const {
+    return num_rows == o.num_rows && hidden_dim == o.hidden_dim &&
+           data_type == o.data_type;
+  }
+};
+
+struct SkipT5NormCacheKeyHash {
+  size_t operator()(const SkipT5NormCacheKey &k) const {
+    size_t h = std::hash<int64_t>{}(k.num_rows);
+    h ^= std::hash<int64_t>{}(k.hidden_dim) + 0x9e3779b9 + (h << 6) +
+         (h >> 2);
+    h ^= std::hash<int>{}(static_cast<int>(k.data_type)) + 0x9e3779b9 +
+         (h << 6) + (h >> 2);
+    return h;
+  }
+};
+
+struct SkipT5NormCacheEntry {
+  // T5LayerNorm descriptors
+  miopenTensorDescriptor_t xDesc, yDesc, weightDesc, rstdDesc;
+  // OpTensor descriptors (input + skip [+ bias] add)
+  miopenTensorDescriptor_t addADesc, addBDesc, addCDesc, biasDesc;
+};
+
+static std::unordered_map<SkipT5NormCacheKey, SkipT5NormCacheEntry,
+                          SkipT5NormCacheKeyHash>
+    g_skip_t5norm_cache;
+
+static const SkipT5NormCacheEntry *
+queryOrCreateSkipT5Norm(const SkipT5NormCacheKey &key) {
+  auto it = g_skip_t5norm_cache.find(key);
+  if (it != g_skip_t5norm_cache.end())
+    return &it->second;
+
+  SkipT5NormCacheEntry e{};
+  constexpr int NUM_DESCS = 8;
+  miopenTensorDescriptor_t *descs[NUM_DESCS] = {
+      &e.xDesc,    &e.yDesc,    &e.weightDesc, &e.rstdDesc,
+      &e.addADesc, &e.addBDesc, &e.addCDesc,   &e.biasDesc};
+  int created = 0;
+
+  for (int i = 0; i < NUM_DESCS; i++) {
+    if (miopenCreateTensorDescriptor(descs[i]) != miopenStatusSuccess) {
+      for (int j = 0; j < created; j++)
+        miopenDestroyTensorDescriptor(*descs[j]);
+      return nullptr;
+    }
+    created++;
+  }
+
+  // T5LayerNorm: 2D [num_rows, hidden_dim]
+  int x_dims[] = {static_cast<int>(key.num_rows),
+                   static_cast<int>(key.hidden_dim)};
+  int x_strides[] = {static_cast<int>(key.hidden_dim), 1};
+  miopenSetTensorDescriptor(e.xDesc, key.data_type, 2, x_dims, x_strides);
+  miopenSetTensorDescriptor(e.yDesc, key.data_type, 2, x_dims, x_strides);
+
+  int w_dims[] = {static_cast<int>(key.hidden_dim)};
+  int w_strides[] = {1};
+  miopenSetTensorDescriptor(e.weightDesc, key.data_type, 1, w_dims, w_strides);
+
+  int rstd_dims[] = {static_cast<int>(key.num_rows)};
+  int rstd_strides[] = {1};
+  miopenSetTensorDescriptor(e.rstdDesc, miopenFloat, 1, rstd_dims,
+                            rstd_strides);
+
+  // OpTensor: 2D [num_rows, hidden_dim] for input/skip/output add
+  miopenSetTensorDescriptor(e.addADesc, key.data_type, 2, x_dims, x_strides);
+  miopenSetTensorDescriptor(e.addBDesc, key.data_type, 2, x_dims, x_strides);
+  miopenSetTensorDescriptor(e.addCDesc, key.data_type, 2, x_dims, x_strides);
+
+  // Bias: [1, hidden_dim] for broadcast across rows
+  int bias_dims[] = {1, static_cast<int>(key.hidden_dim)};
+  int bias_strides[] = {static_cast<int>(key.hidden_dim), 1};
+  miopenSetTensorDescriptor(e.biasDesc, key.data_type, 2, bias_dims,
+                            bias_strides);
+
+  auto [ins, _] = g_skip_t5norm_cache.emplace(key, e);
+
+  RUNTIME_DEBUG_LOG("[REAL] queryOrCreateSkipT5Norm: cached 8 descriptors for "
+                    "num_rows=%lld hidden_dim=%lld data_type=%d\n",
+                    (long long)key.num_rows, (long long)key.hidden_dim,
+                    (int)key.data_type);
+
+  return &ins->second;
+}
 
 // =============================================================================
 // SkipSimplifiedLayerNormalization via MIOpen (Full MS spec)
@@ -30,12 +128,11 @@
 //   2. miopenOpTensor(ADD):           tmp = tmp + bias   (if bias != nullptr)
 //   3. miopenT5LayerNormForward:      output = RMSNorm(tmp) * gamma
 //
-// All execute on the same GPU stream via the MIOpen handle — no host-device
+// All execute on the same GPU stream via the MIOpen handle -- no host-device
 // round trips.
 //
 // If input_skip_bias_sum is nullptr (optional output not requested), a
-// temporary GPU buffer is allocated for the intermediate result and freed
-// before return.
+// scratch region from the shared workspace is used for the intermediate result.
 //
 // Tensor layout:
 //   input / skip / input_skip_bias_sum:  [num_rows, hidden_dim]
@@ -88,95 +185,67 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
     return -1;
   }
 
-  int result = 0;
-  void *rstd_buf = nullptr;
-  void *tmp_skip_buf = nullptr;
-  bool owns_skip_buf = false;
-
-  // If caller doesn't want input_skip_bias_sum, allocate a temp buffer
-  void *skip_buf = input_skip_bias_sum;
-  if (!skip_buf) {
-    hipError_t hip_err =
-        hipMalloc(&tmp_skip_buf, input_num_elements * element_size_bytes);
-    if (hip_err != hipSuccess) {
-      fprintf(stderr,
-              "wrap_skip_simplified_layer_norm: hipMalloc tmp failed: %s\n",
-              hipGetErrorString(hip_err));
-      return -1;
-    }
-    skip_buf = tmp_skip_buf;
-    owns_skip_buf = true;
+  // Look up or create cached descriptors (T5LayerNorm + OpTensor)
+  SkipT5NormCacheKey key{num_rows, hidden_dim, data_type};
+  const SkipT5NormCacheEntry *c = queryOrCreateSkipT5Norm(key);
+  if (!c) {
+    fprintf(
+        stderr,
+        "wrap_skip_simplified_layer_norm: descriptor cache creation failed\n");
+    return -1;
   }
 
-  // Descriptors for miopenOpTensor (ADD)
-  miopenTensorDescriptor_t addADesc = nullptr;
-  miopenTensorDescriptor_t addBDesc = nullptr;
-  miopenTensorDescriptor_t addCDesc = nullptr;
-  miopenTensorDescriptor_t biasDesc = nullptr;
+  // Shared workspace: pack [tmp_skip_buf (if needed) | rstd_buf]
+  // Align rstd_buf to 256 bytes for GPU memory access efficiency.
+  size_t skip_bytes = 0;
+  if (!input_skip_bias_sum)
+    skip_bytes = static_cast<size_t>(input_num_elements) * element_size_bytes;
+  size_t skip_aligned = (skip_bytes + 255) & ~static_cast<size_t>(255);
+  size_t rstd_bytes = static_cast<size_t>(num_rows) * sizeof(float);
+  size_t total_ws = skip_aligned + rstd_bytes;
 
-  // Descriptors for miopenT5LayerNormForward
-  miopenTensorDescriptor_t xDesc = nullptr;
-  miopenTensorDescriptor_t weightDesc = nullptr;
-  miopenTensorDescriptor_t yDesc = nullptr;
-  miopenTensorDescriptor_t rstdDesc = nullptr;
+  if (hipdnn_ep_state_ensure_workspace(state, total_ws) != 0) {
+    fprintf(stderr,
+            "wrap_skip_simplified_layer_norm: workspace allocation failed\n");
+    return -1;
+  }
+  char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
+
+  void *skip_buf = input_skip_bias_sum ? input_skip_bias_sum : ws;
+  void *rstd_buf = ws + skip_aligned;
+
+  int result = 0;
 
   // =========================================================================
-  // Step 1: Element-wise add — skip_buf = input + skip
+  // Step 1: Element-wise add -- skip_buf = input + skip
   // =========================================================================
-  RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: step 1 — "
+  RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: step 1 -- "
                     "miopenOpTensor(ADD) for %lld elements\n",
                     (long long)input_num_elements);
 
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&addADesc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&addBDesc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&addCDesc));
-
-  // Use 2D descriptors [num_rows, hidden_dim] so that bias [1, hidden_dim]
-  // can broadcast correctly across rows when num_rows > 1.
-  {
-    int dims[] = {static_cast<int>(num_rows), static_cast<int>(hidden_dim)};
-    int strides[] = {static_cast<int>(hidden_dim), 1};
-    MIOPEN_CHECK(
-        miopenSetTensorDescriptor(addADesc, data_type, 2, dims, strides));
-    MIOPEN_CHECK(
-        miopenSetTensorDescriptor(addBDesc, data_type, 2, dims, strides));
-    MIOPEN_CHECK(
-        miopenSetTensorDescriptor(addCDesc, data_type, 2, dims, strides));
-  }
-
   {
     float alpha1 = 1.0f, alpha2 = 1.0f, beta = 0.0f;
-    MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha1, addADesc,
-                                input, &alpha2, addBDesc, skip, &beta, addCDesc,
-                                skip_buf));
+    MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha1,
+                                c->addADesc, input, &alpha2, c->addBDesc, skip,
+                                &beta, c->addCDesc, skip_buf));
   }
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: step 1 completed "
                     "(add)\n");
 
   // =========================================================================
-  // Step 1b (optional): Add bias — skip_buf = skip_buf + bias
+  // Step 1b (optional): Add bias -- skip_buf = skip_buf + bias
   // =========================================================================
   if (bias) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: step 1b — "
+    RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: step 1b -- "
                       "adding bias (%lld elements, broadcast over %lld rows)\n",
                       (long long)hidden_dim, (long long)num_rows);
 
-    MIOPEN_CHECK(miopenCreateTensorDescriptor(&biasDesc));
-    {
-      // bias is [hidden_dim], described as [1, hidden_dim] so MIOpen
-      // broadcasts it across the num_rows dimension of addCDesc.
-      int bias_dims[] = {1, static_cast<int>(hidden_dim)};
-      int bias_strides[] = {static_cast<int>(hidden_dim), 1};
-      MIOPEN_CHECK(miopenSetTensorDescriptor(biasDesc, data_type, 2, bias_dims,
-                                             bias_strides));
-    }
-
     {
       float alpha1 = 1.0f, alpha2 = 1.0f, beta = 0.0f;
-      MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha1, addCDesc,
-                                  skip_buf, &alpha2, biasDesc, bias, &beta,
-                                  addCDesc, skip_buf));
+      MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha1,
+                                  c->addCDesc, skip_buf, &alpha2, c->biasDesc,
+                                  bias, &beta, c->addCDesc, skip_buf));
     }
 
     RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: step 1b "
@@ -184,78 +253,20 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
   }
 
   // =========================================================================
-  // Step 2: T5 RMS norm — output = RMSNorm(skip_buf) * gamma
+  // Step 2: T5 RMS norm -- output = RMSNorm(skip_buf) * gamma
   // =========================================================================
-  RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: step 2 — "
+  RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: step 2 -- "
                     "miopenT5LayerNormForward(eps=%e)\n",
                     (double)epsilon);
 
-  // rstd scratch buffer (always f32)
-  {
-    hipError_t hip_err = hipMalloc(&rstd_buf, num_rows * sizeof(float));
-    if (hip_err != hipSuccess) {
-      RUNTIME_DEBUG_LOG(
-          "[REAL] wrap_skip_simplified_layer_norm: hipMalloc rstd "
-          "failed: %s\n",
-          hipGetErrorString(hip_err));
-      result = -1;
-      goto cleanup;
-    }
-  }
-
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&xDesc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&weightDesc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&yDesc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&rstdDesc));
-
-  {
-    int x_dims[] = {static_cast<int>(num_rows), static_cast<int>(hidden_dim)};
-    int x_strides[] = {static_cast<int>(hidden_dim), 1};
-    MIOPEN_CHECK(
-        miopenSetTensorDescriptor(xDesc, data_type, 2, x_dims, x_strides));
-    MIOPEN_CHECK(
-        miopenSetTensorDescriptor(yDesc, data_type, 2, x_dims, x_strides));
-
-    int w_dims[] = {static_cast<int>(hidden_dim)};
-    int w_strides[] = {1};
-    MIOPEN_CHECK(
-        miopenSetTensorDescriptor(weightDesc, data_type, 1, w_dims, w_strides));
-
-    int rstd_dims[] = {static_cast<int>(num_rows)};
-    int rstd_strides[] = {1};
-    MIOPEN_CHECK(miopenSetTensorDescriptor(rstdDesc, miopenFloat, 1, rstd_dims,
-                                           rstd_strides));
-  }
-
   MIOPEN_CHECK(miopenT5LayerNormForward(
-      handle, MIOPEN_ELEMENTWISE_AFFINE_T5, xDesc, skip_buf, weightDesc, gamma,
-      epsilon, yDesc, output, rstdDesc, rstd_buf));
+      handle, MIOPEN_ELEMENTWISE_AFFINE_T5, c->xDesc, skip_buf, c->weightDesc,
+      gamma, epsilon, c->yDesc, output, c->rstdDesc, rstd_buf));
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: completed "
                     "successfully\n");
-  result = 0;
+  return 0;
 
 cleanup:
-  if (addADesc)
-    miopenDestroyTensorDescriptor(addADesc);
-  if (addBDesc)
-    miopenDestroyTensorDescriptor(addBDesc);
-  if (addCDesc)
-    miopenDestroyTensorDescriptor(addCDesc);
-  if (biasDesc)
-    miopenDestroyTensorDescriptor(biasDesc);
-  if (xDesc)
-    miopenDestroyTensorDescriptor(xDesc);
-  if (weightDesc)
-    miopenDestroyTensorDescriptor(weightDesc);
-  if (yDesc)
-    miopenDestroyTensorDescriptor(yDesc);
-  if (rstdDesc)
-    miopenDestroyTensorDescriptor(rstdDesc);
-  if (rstd_buf)
-    HIP_CLEANUP(hipFree(rstd_buf));
-  if (owns_skip_buf && tmp_skip_buf)
-    HIP_CLEANUP(hipFree(tmp_skip_buf));
-
   return result;
 }

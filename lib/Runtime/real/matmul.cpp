@@ -139,7 +139,7 @@ queryOrCreateMatmul(hipblasLtHandle_t handle, const MatmulCacheKey &key) {
 
   hipblasLtMatmulPreference_t pref;
   hipblasLtMatmulPreferenceCreate(&pref);
-  const size_t max_ws = 1ULL << 30; // 1 GB
+  const size_t max_ws = 256ULL << 20; // 256 MB
   hipblasLtMatmulPreferenceSetAttribute(
       pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_ws,
       sizeof(max_ws));
