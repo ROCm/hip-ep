@@ -590,6 +590,7 @@ int main(int argc, char *argv[]) {
                 " 99 = ORT_ENABLE_ALL,  "
                 " -1 = default, not call this function ",
                 "-1");
+
   try {
     mo.parse(argc, argv);
   } catch (const std::exception &e) {
