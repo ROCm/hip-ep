@@ -175,7 +175,6 @@ extern "C" int hip_reduce_sum(
                          static_cast<const int64_t*>(data),
                          static_cast<int64_t*>(output),
                          reduce_size, num_output_elements);
-
       }
       else{
         hipLaunchKernelGGL(reduce_sum_i64_kernel0,
@@ -185,9 +184,7 @@ extern "C" int hip_reduce_sum(
                          static_cast<const int64_t*>(data),
                          static_cast<int64_t*>(output),
                          reduce_size, num_output_elements);
-
       }
-      
       break;
     }
     default:
