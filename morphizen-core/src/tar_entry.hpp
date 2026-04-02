@@ -37,11 +37,13 @@ public: // make std::unique_ptr happy
       const std::optional<std::string>& real_path, // link name of the entry
       std::streambuf::pos_type data_begin_pos,     // beginning of the data.
       std::streambuf::pos_type data_end_pos,       // end of the data.
-      std::streambuf::pos_type block_begin_pos, // beginning of the tar entry.
-      std::streambuf::pos_type block_end_pos,   // end of the tar entry.
-      std::shared_ptr<std::istream> stream,     //
+      std::streambuf::pos_type block_begin_pos,  // beginning of the tar entry.
+      std::streambuf::pos_type block_end_pos,    // end of the tar entry.
+      std::shared_ptr<std::istream> stream,      //
 
-      std::size_t bufferSize = 1024);
+      std::size_t bufferSize = 4 * 1024 * 1024); // 4 MB: small buffers cause
+                                                 // excessive syscalls for
+                                                 // multi-GB tar entries
   // Handles reading from FILE*
   virtual int_type underflow() override final;
   // Handles writing to FILE*
