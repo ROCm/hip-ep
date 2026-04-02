@@ -13,7 +13,7 @@ class FileBuf : public std::streambuf {
 
 public:
   MORPHIZEN_DLL_SPEC explicit FileBuf(FILE* file,
-                                      std::size_t bufferSize = 4096);
+                                      std::size_t bufferSize = 4 * 1024 * 1024);
   virtual ~FileBuf();
   // Handles reading from FILE*
   virtual int_type underflow() override final;
@@ -43,7 +43,8 @@ private:
 // Utility class for stream interface
 class FileStream : public std::iostream {
 public:
-  MORPHIZEN_DLL_SPEC explicit FileStream(FILE* file, size_t bufferSize = 4096);
+  MORPHIZEN_DLL_SPEC explicit FileStream(FILE* file,
+                                         size_t bufferSize = 4 * 1024 * 1024);
 
 private:
   FileBuf buf_;

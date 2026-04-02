@@ -33,7 +33,8 @@ TarEntryInputStreamBuffer::TarEntryInputStreamBuffer(
       block_end_pos_{block_end_pos},             //
       buffer_pos_{block_begin_pos},              //
       stream_{stream},                           //
-      buffer_(bufferSize) {
+      buffer_(std::min(bufferSize, static_cast<size_t>(std::max<std::streamoff>(
+                                       1, data_end_pos - data_begin_pos)))) {
   setg(buffer_.data(), buffer_.data(), buffer_.data());
   // does not support writing.
   setp(nullptr, nullptr); // Set write buffer

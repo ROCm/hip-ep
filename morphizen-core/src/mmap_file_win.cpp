@@ -45,13 +45,17 @@ std::unique_ptr<MemFile> MemFileWin::create(const std::filesystem::path& path) {
     ;
     throw std::runtime_error(error_msg);
   }
-  auto size = GetFileSize(
-      handle, nullptr /* does not support file larger than 2G yet.*/);
-  if (size == INVALID_FILE_SIZE) {
+  // Use GetFileSizeEx for correct 64-bit file sizes. GetFileSize with
+  // lpFileSizeHigh=NULL returns only the low DWORD, so files >4 GB get a
+  // truncated m_size while the mapping itself covers the full file. This
+  // causes downstream offset checks against size() to reject valid regions.
+  LARGE_INTEGER li_size;
+  if (!GetFileSizeEx(handle, &li_size)) {
+    std::string error_msg = "GetFileSizeEx failed: " + GetLastErrorAsString();
     CloseHandle(handle);
-    std::string error_msg = "GetFileSize failed: " + GetLastErrorAsString();
     throw std::runtime_error(error_msg);
   }
+  auto size = static_cast<size_t>(li_size.QuadPart);
   auto map_handle = CreateFileMappingW(handle, nullptr, PAGE_READWRITE, 0,
                                        0, // map entire file
                                        nullptr);
