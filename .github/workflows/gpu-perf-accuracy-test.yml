@@ -10,6 +10,9 @@ on:
 
   workflow_dispatch:
 
+  push:
+    branches: [feat/gpu-test-v2]
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -101,11 +104,49 @@ jobs:
           Remove-Item therock.tar.gz
 
       # =================================================================
+      #  COUNT MODELS (diagnostic — remove after estimation)
+      # =================================================================
+      - name: Count eligible models
+        shell: pwsh
+        run: |
+          $root = "${{ runner.workspace }}\test-models"
+          if (-not (Test-Path $root)) { Write-Host "[SKIP] $root not found"; exit 0 }
+          Write-Host "=== Directory tree ==="
+          Get-ChildItem $root -Directory | ForEach-Object {
+            Write-Host "`n--- $($_.Name) ---"
+            Get-ChildItem $_.FullName -Directory | ForEach-Object {
+              $cat = $_.Name
+              $models = Get-ChildItem $_.FullName -Recurse -Filter "*.onnx" |
+                Where-Object { $_.Extension -eq ".onnx" -and $_.Name -notmatch "_dyn" }
+              Write-Host "  $cat : $($models.Count) models"
+              foreach ($m in $models) {
+                $rel = $m.FullName.Substring($root.Length)
+                $sizeMB = "{0:F1}" -f ($m.Length / 1MB)
+                Write-Host "    $rel ($sizeMB MB)"
+              }
+            }
+          }
+          Write-Host "`n=== Summary ==="
+          $all = Get-ChildItem $root -Recurse -Filter "*.onnx" |
+            Where-Object { $_.Extension -eq ".onnx" -and $_.Name -notmatch "_dyn" }
+          $singleOp = $all | Where-Object { $_.FullName -notmatch "\\full_model\\" }
+          $fullModel = $all | Where-Object { $_.FullName -match "\\full_model\\" }
+          Write-Host "Single-op/layer models: $($singleOp.Count)"
+          Write-Host "Full-model models: $($fullModel.Count)"
+          Write-Host "Total eligible models: $($all.Count)"
+          $perfTime = $all.Count * 2 * 35
+          $l2Time = $all.Count * 20
+          Write-Host "`n=== Time estimate (PERF_DURATION=30s) ==="
+          Write-Host "Perf tests (MZ+DML, ~35s each): $($all.Count * 2) runs = $([math]::Round($perfTime/60)) min"
+          Write-Host "L2 tests (~20s each): $($all.Count) runs = $([math]::Round($l2Time/60)) min"
+          Write-Host "Estimated total: $([math]::Round(($perfTime+$l2Time)/60)) min ($([math]::Round(($perfTime+$l2Time)/3600, 1)) hours)"
+
+      # =================================================================
       #  SINGLE-OP PERFORMANCE TESTS
       #  Traverse test-models\<family>\* — skip full_model and _dyn
       # =================================================================
       - name: Run single-op perf tests
-        if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
+        if: false  # DISABLED for model counting
         shell: cmd
         run: |
           setlocal enabledelayedexpansion
@@ -158,7 +199,7 @@ jobs:
       #  Traverse test-models\<family>\* — skip full_model and _dyn
       # =================================================================
       - name: Run single-op L2 accuracy tests
-        if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
+        if: false  # DISABLED for model counting
         shell: cmd
         run: |
           setlocal enabledelayedexpansion
@@ -213,7 +254,7 @@ jobs:
       #  Traverse test-models\<family>\full_model\ — skip _dyn
       # =================================================================
       - name: Run full model perf tests
-        if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
+        if: false  # DISABLED for model counting
         shell: cmd
         run: |
           setlocal enabledelayedexpansion
@@ -266,7 +307,7 @@ jobs:
       #  Traverse test-models\<family>\full_model\ — skip _dyn
       # =================================================================
       - name: Run full model L2 accuracy tests
-        if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
+        if: false  # DISABLED for model counting
         shell: cmd
         run: |
           setlocal enabledelayedexpansion
