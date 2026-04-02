@@ -1047,11 +1047,11 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
 
     // int wrap_gather(RuntimeState* state, void* data, void* indices,
     //                 void* output, int64_t axis, int64_t data_num_elements,
-    //                 int64_t indices_num_elements, int64_t output_num_elements,
-    //                 int64_t element_size_bytes)
-    SmallVector<Type, 9> paramTypes = {ptrType, ptrType, ptrType, ptrType,
-                                       i64Type, i64Type, i64Type, i64Type,
-                                       i64Type};
+    //                 int64_t indices_num_elements, int64_t
+    //                 output_num_elements, int64_t element_size_bytes)
+    SmallVector<Type, 9> paramTypes = {ptrType, ptrType, ptrType,
+                                       ptrType, i64Type, i64Type,
+                                       i64Type, i64Type, i64Type};
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapGather, paramTypes, i32Type);
@@ -1650,14 +1650,26 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     auto pkShape = presentKeyType.getShape();
     int64_t seqLenKV = (pkShape.size() == 4) ? pkShape[2] : pkShape[1];
 
+    // Extract past buffer sequence dimension from past_key shape.
+    // When the KV cache is pre-allocated (fixed size), the past buffer
+    // dimension may be larger than the valid past token count.  The concat
+    // kernel needs this as the stride when reading from the past buffer.
+    int64_t pastSeqLen = 0;
+    if (op.getPastKey()) {
+      auto pastKeyType = cast<MemRefType>(op.getPastKey().getType());
+      auto pastKShape = pastKeyType.getShape();
+      pastSeqLen = (pastKShape.size() == 4) ? pastKShape[2] : pastKShape[1];
+    }
+
     Value batchSizeVal = createI64Const(batchSize);
     Value seqLenQVal = createI64Const(seqLenQ);
     Value seqLenKVVal = createI64Const(seqLenKV);
+    Value pastSeqLenVal = createI64Const(pastSeqLen);
     Value headDimVal = createI64Const(headDim);
     Value elemSizeVal = createI64Const(elementSizeBytes);
 
     // Function signature matches Task 4 runtime wrapper
-    SmallVector<Type, 37> paramTypes = {
+    SmallVector<Type, 38> paramTypes = {
         ptrType, // state
         // Inputs (14 pointers - some may be nullptr)
         ptrType, // query
@@ -1692,10 +1704,11 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // k_quant_type
         i64Type, // v_quant_type
         i64Type, // kv_cache_bit_width
-        // Shape info (5 values)
+        // Shape info (6 values)
         i64Type, // batch_size
         i64Type, // seq_len_q
         i64Type, // seq_len_kv
+        i64Type, // past_seq_len
         i64Type, // head_dim
         i64Type  // element_size_bytes
     };
@@ -1705,7 +1718,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 37> args = {
+    SmallVector<Value, 38> args = {
         statePtr,
         // Inputs (14 pointers)
         queryPtr, keyPtr, valuePtr, pastKeyPtr, pastValuePtr, seqlensKPtr,
@@ -1717,8 +1730,9 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         numHeads, kvNumHeads, scale, doRotary, rotaryInterleaved, softcap,
         localWindowSize, smoothSoftmax, qkOutput, kQuantType, vQuantType,
         kvCacheBitWidth,
-        // Shape info (5 values)
-        batchSizeVal, seqLenQVal, seqLenKVVal, headDimVal, elemSizeVal};
+        // Shape info (6 values)
+        batchSizeVal, seqLenQVal, seqLenKVVal, pastSeqLenVal, headDimVal,
+        elemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

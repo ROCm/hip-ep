@@ -138,25 +138,45 @@ static int gqa_forward_hipblaslt(
     const void *query,    // BSHD [B, sq, H, d] or packed [B, sq, (H+2G)*d]
     const void *key,      // BSHD [B, sq, G, d] or null (packed QKV)
     const void *value,    // BSHD [B, sq, G, d] or null (packed QKV)
-    const void *past_key, // BNSD [B, G, past_seq, d] or null
-    const void *past_value, const void *cos_cache, const void *sin_cache,
+    const void *past_key, // BNSD [B, G, past_buf_seq, d] or null
+    const void *past_value,
+    const void *seqlens_k_ptr, // GPU pointer to seqlens_k [B] int32
+    const void *cos_cache, const void *sin_cache,
     void *head_sink,         // [H] smooth softmax factor or null
     bool use_smooth_softmax, // true when smooth softmax is enabled (ORT:
                              // head_sink || smooth_softmax attr)
     void *output,            // BSHD [B, sq, H, d]
-    void *present_key,       // BNSD [B, G, present_seq, d]
-    void *present_value, int64_t B, int64_t sq, int64_t skv, int64_t H,
-    int64_t G, int64_t d, float scale, int64_t do_rotary,
-    int64_t local_window_size) {
+    void *present_key,       // BNSD [B, G, present_buf_seq, d]
+    void *present_value, int64_t B, int64_t sq, int64_t skv,
+    int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
+    int64_t do_rotary, int64_t local_window_size) {
 
   int64_t HPG = H / G;
-  int64_t past_len = skv - sq;
+  // present_seq is the buffer dimension of present_key (may be max_length
+  // for pre-allocated caches, larger than the actual valid token count).
+  int64_t present_seq = skv;
+
+  // Determine actual total sequence length from seqlens_k (ORT convention:
+  // seqlens_k[b] = total_valid_tokens - 1).  When seqlens_k is not provided,
+  // fall back to the buffer dimension (non-pre-allocated case).
+  int64_t total_seq = skv;
+  if (seqlens_k_ptr) {
+    int32_t seqlens_k_val = 0;
+    hipError_t memErr =
+        hipMemcpyAsync(&seqlens_k_val, seqlens_k_ptr, sizeof(int32_t),
+                       hipMemcpyDeviceToHost, stream);
+    if (memErr == hipSuccess)
+      memErr = hipStreamSynchronize(stream);
+    if (memErr != hipSuccess) {
+      fprintf(stderr, "GQA: failed to read seqlens_k from GPU\n");
+      return -1;
+    }
+    total_seq = (int64_t)seqlens_k_val + 1;
+  }
+
+  int64_t past_len = total_seq - sq;
   if (past_len < 0)
     past_len = 0;
-  // present_seq is the sequence dimension of the present KV buffer.
-  // In the separate-buffer case this may differ from skv (the total active
-  // token count used for GEMM dimensions) if the buffer is pre-allocated.
-  int64_t present_seq = skv;
 
   bool packed_qkv = (key == nullptr && value == nullptr);
 
@@ -171,8 +191,8 @@ static int gqa_forward_hipblaslt(
 
   size_t elem_sz = 2; // FP16
   size_t Qtrans_bytes = (size_t)B * H * sq * d * elem_sz;
-  size_t Kexp_bytes = (size_t)B * H * skv * d * elem_sz;
-  size_t S_bytes = (size_t)B * H * sq * skv * elem_sz;
+  size_t Kexp_bytes = (size_t)B * H * total_seq * d * elem_sz;
+  size_t S_bytes = (size_t)B * H * sq * total_seq * elem_sz;
   size_t O_bytes = (size_t)B * H * sq * d * elem_sz;
 
   size_t off_Qtrans = 0;
@@ -212,15 +232,16 @@ static int gqa_forward_hipblaslt(
   int32_t batchCount = (int32_t)(B * H);
   hipblasOperation_t opT = HIPBLAS_OP_T, opN = HIPBLAS_OP_N;
 
-  // Score GEMM: S[skv, sq] = K_exp^T[skv,d] * Q_trans[d,sq] * scale
+  // Score GEMM: S[T, sq] = K_exp^T[T,d] * Q_trans[d,sq] * scale
+  // where T = total_seq (actual valid tokens, not buffer dimension)
   hipblasLtMatmulDesc_t scoreDesc = nullptr;
   hipblasLtMatrixLayout_t sLayA = nullptr, sLayB = nullptr, sLayC = nullptr,
                           sLayD = nullptr;
   hipblasLtMatmulDesc_t valueDesc = nullptr;
   hipblasLtMatrixLayout_t vLayA = nullptr, vLayB = nullptr, vLayC = nullptr,
                           vLayD = nullptr;
-  GqaGemmKey scoreKey{skv, sq, d, B * H, true};
-  GqaGemmKey valueKey{d, sq, skv, B * H, false};
+  GqaGemmKey scoreKey{total_seq, sq, d, B * H, true};
+  GqaGemmKey valueKey{d, sq, total_seq, B * H, false};
   hipblasLtMatmulAlgo_t scoreAlgo, valueAlgo;
   size_t scoreWs = 0, valueWs = 0;
   int result = 0;
@@ -232,16 +253,19 @@ static int gqa_forward_hipblaslt(
   HIPBLAS_CHECK(hipblasLtMatmulDescSetAttribute(
       scoreDesc, HIPBLASLT_MATMUL_DESC_TRANSB, &opN, sizeof(opN)));
 
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&sLayA, HIP_R_16F, d, skv, d));
+  HIPBLAS_CHECK(
+      hipblasLtMatrixLayoutCreate(&sLayA, HIP_R_16F, d, total_seq, d));
   HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&sLayB, HIP_R_16F, d, sq, d));
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&sLayC, HIP_R_16F, skv, sq, skv));
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&sLayD, HIP_R_16F, skv, sq, skv));
-  HIPBLAS_CHECK(setLayoutBatch(sLayA, batchCount, (int64_t)skv * d));
+  HIPBLAS_CHECK(
+      hipblasLtMatrixLayoutCreate(&sLayC, HIP_R_16F, total_seq, sq, total_seq));
+  HIPBLAS_CHECK(
+      hipblasLtMatrixLayoutCreate(&sLayD, HIP_R_16F, total_seq, sq, total_seq));
+  HIPBLAS_CHECK(setLayoutBatch(sLayA, batchCount, (int64_t)total_seq * d));
   HIPBLAS_CHECK(setLayoutBatch(sLayB, batchCount, (int64_t)sq * d));
-  HIPBLAS_CHECK(setLayoutBatch(sLayC, batchCount, (int64_t)sq * skv));
-  HIPBLAS_CHECK(setLayoutBatch(sLayD, batchCount, (int64_t)sq * skv));
+  HIPBLAS_CHECK(setLayoutBatch(sLayC, batchCount, (int64_t)sq * total_seq));
+  HIPBLAS_CHECK(setLayoutBatch(sLayD, batchCount, (int64_t)sq * total_seq));
 
-  // Value GEMM: O[d, sq] = V_exp[d,skv] * softmax(S)[skv,sq]
+  // Value GEMM: O[d, sq] = V_exp[d,T] * softmax(S)[T,sq]
   HIPBLAS_CHECK(
       hipblasLtMatmulDescCreate(&valueDesc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
   HIPBLAS_CHECK(hipblasLtMatmulDescSetAttribute(
@@ -249,12 +273,14 @@ static int gqa_forward_hipblaslt(
   HIPBLAS_CHECK(hipblasLtMatmulDescSetAttribute(
       valueDesc, HIPBLASLT_MATMUL_DESC_TRANSB, &opN, sizeof(opN)));
 
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&vLayA, HIP_R_16F, d, skv, d));
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&vLayB, HIP_R_16F, skv, sq, skv));
+  HIPBLAS_CHECK(
+      hipblasLtMatrixLayoutCreate(&vLayA, HIP_R_16F, d, total_seq, d));
+  HIPBLAS_CHECK(
+      hipblasLtMatrixLayoutCreate(&vLayB, HIP_R_16F, total_seq, sq, total_seq));
   HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&vLayC, HIP_R_16F, d, sq, d));
   HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&vLayD, HIP_R_16F, d, sq, d));
-  HIPBLAS_CHECK(setLayoutBatch(vLayA, batchCount, (int64_t)skv * d));
-  HIPBLAS_CHECK(setLayoutBatch(vLayB, batchCount, (int64_t)sq * skv));
+  HIPBLAS_CHECK(setLayoutBatch(vLayA, batchCount, (int64_t)total_seq * d));
+  HIPBLAS_CHECK(setLayoutBatch(vLayB, batchCount, (int64_t)sq * total_seq));
   HIPBLAS_CHECK(setLayoutBatch(vLayC, batchCount, (int64_t)sq * d));
   HIPBLAS_CHECK(setLayoutBatch(vLayD, batchCount, (int64_t)sq * d));
 
@@ -336,18 +362,29 @@ static int gqa_forward_hipblaslt(
                                          (int)sq, (int)H, (int)d));
 
     // ---- Steps 4-5: KV Cache Update ----
+    // Zero present buffers when past != present (separate buffers) so that
+    // the unused region [total_seq, present_seq) is deterministic, matching
+    // ORT CPU which memsets present to zero before populating valid entries.
+    if (present_key && present_value && past_key != present_key) {
+      size_t present_bytes = (size_t)B * G * present_seq * d * elem_sz;
+      HIP_CHECK(hipMemsetAsync(present_key, 0, present_bytes, stream));
+      HIP_CHECK(hipMemsetAsync(present_value, 0, present_bytes, stream));
+    }
+
     if (present_key && present_value) {
       if (past_key && past_len > 0 && past_key != present_key) {
-        // Separate buffers: past [B,G,past_len,d] and present
-        // [B,G,present_seq,d] have different strides. A single kernel copies
-        // past data at [0,past_len) and transposes new tokens from BSHD into
-        // [past_len,past_len+sq).
+        // Separate buffers: past [B,G,past_buf_seq,d] and present
+        // [B,G,present_seq,d] may have different strides. A single kernel
+        // copies past data at [0,past_len) and transposes new tokens from
+        // BSHD into [past_len,past_len+sq).  past_buf_seq is the actual
+        // buffer dimension of past_key (may be larger than past_len when the
+        // cache is pre-allocated at max_length).
         HIP_CHECK(hip_gqa_kv_cache_concat(
             stream, past_key, kSrc, present_key, (int)B, (int)past_len, (int)sq,
-            (int)G, (int)d, (int)past_len, (int)present_seq));
+            (int)G, (int)d, (int)past_buf_seq, (int)present_seq));
         HIP_CHECK(hip_gqa_kv_cache_concat(
             stream, past_value, vSrc, present_value, (int)B, (int)past_len,
-            (int)sq, (int)G, (int)d, (int)past_len, (int)present_seq));
+            (int)sq, (int)G, (int)d, (int)past_buf_seq, (int)present_seq));
       } else {
         // Same buffer (aliased / in-place): past data already at correct
         // offsets, only append new tokens at [past_len, past_len+sq).
@@ -360,13 +397,15 @@ static int gqa_forward_hipblaslt(
       }
     }
 
-    // ---- Steps 6-7: KV Expand [B*G, present_seq, d] -> [B*H, skv, d] ----
+    // ---- Steps 6-7: KV Expand [B*G, present_seq, d] -> [B*H, total_seq, d]
+    // Source reads from present_key with buffer stride present_seq*d; dest
+    // uses total_seq*d since GEMM only operates on total_seq tokens.
     {
       const void *kCache = present_key ? present_key : key;
       const void *vCache = present_value ? present_value : value;
       int kvSrcStride = (int)(present_seq * d);
-      int kvDstStride = (int)(skv * d);
-      int expandCopy = (int)(skv * d);
+      int kvDstStride = (int)(total_seq * d);
+      int expandCopy = (int)(total_seq * d);
 
       HIP_CHECK(hip_gqa_expand_kv(stream, kCache, d_Kexp, (int)(B * H),
                                   (int)HPG, kvSrcStride, kvDstStride,
@@ -391,15 +430,15 @@ static int gqa_forward_hipblaslt(
     // Smooth softmax: activated when head_sink is non-null (per-head sink
     // factors in the denominator) or when smooth_softmax attr == 1 (uses 0
     // as the sink value, matching ORT default).
-    int scoreBatchStride = (int)(sq * skv);
+    int scoreBatchStride = (int)(sq * total_seq);
     if (sq > 1) {
-      HIP_CHECK(hip_gqa_causal_mask(stream, d_S, (int)(B * H), (int)skv,
+      HIP_CHECK(hip_gqa_causal_mask(stream, d_S, (int)(B * H), (int)total_seq,
                                     (int)sq, scoreBatchStride, (int)past_len,
                                     (int)local_window_size));
     }
-    HIP_CHECK(hip_gqa_softmax_inplace(stream, d_S, (int)(B * H * sq), (int)skv,
-                                      (int)sq, scoreBatchStride, head_sink,
-                                      (int)H, (int)use_smooth_softmax));
+    HIP_CHECK(hip_gqa_softmax_inplace(
+        stream, d_S, (int)(B * H * sq), (int)total_seq, (int)sq,
+        scoreBatchStride, head_sink, (int)H, (int)use_smooth_softmax));
 
     // ---- Step 10: Value GEMM ----
     float valAlpha = 1.0f;
@@ -457,9 +496,9 @@ int wrap_group_query_attention(
     int64_t rotary_interleaved, float softcap, int64_t local_window_size,
     int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
     int64_t v_quant_type, int64_t kv_cache_bit_width,
-    // Shape values (5)
-    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv, int64_t head_dim,
-    int64_t element_size_bytes) {
+    // Shape values (6)
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t past_seq_len, int64_t head_dim, int64_t element_size_bytes) {
 
   if (!state) {
     fprintf(stderr, "wrap_group_query_attention: null state\n");
@@ -564,8 +603,8 @@ int wrap_group_query_attention(
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_group_query_attention:\n"
-      "  shapes: batch=%lld, seq_q=%lld, seq_kv=%lld, num_heads=%lld, "
-      "kv_heads=%lld, head_dim=%lld\n"
+      "  shapes: batch=%lld, seq_q=%lld, seq_kv=%lld, past_seq=%lld, "
+      "num_heads=%lld, kv_heads=%lld, head_dim=%lld\n"
       "  attrs:  scale=%f, do_rotary=%lld, rotary_interleaved=%lld, "
       "softcap=%f, local_window_size=%lld, smooth_softmax=%lld\n"
       "  inputs: query=%p, key=%p, value=%p, past_key=%p, past_value=%p\n"
@@ -573,18 +612,20 @@ int wrap_group_query_attention(
       "  outputs: output=%p, present_key=%p, present_value=%p\n"
       "  mode:   packed_qkv=%d, rope=%d, local_window=%d, smooth_softmax=%d\n",
       (long long)batch_size, (long long)seq_len_q, (long long)seq_len_kv,
-      (long long)num_heads, (long long)kv_num_heads, (long long)head_dim,
-      (double)scale, (long long)do_rotary, (long long)rotary_interleaved,
-      (double)softcap, (long long)local_window_size, (long long)smooth_softmax,
-      query, key, value, past_key, past_value, cos_cache, sin_cache, head_sink,
-      output, present_key, present_value, (int)is_packed_qkv, (int)has_rope,
+      (long long)past_seq_len, (long long)num_heads, (long long)kv_num_heads,
+      (long long)head_dim, (double)scale, (long long)do_rotary,
+      (long long)rotary_interleaved, (double)softcap,
+      (long long)local_window_size, (long long)smooth_softmax, query, key,
+      value, past_key, past_value, cos_cache, sin_cache, head_sink, output,
+      present_key, present_value, (int)is_packed_qkv, (int)has_rope,
       (int)has_local_window, (int)has_smooth_softmax);
 
   int rc = gqa_forward_hipblaslt(
       state, stream, ltHandle, query, key, value, past_key, past_value,
-      cos_cache, sin_cache, head_sink, has_smooth_softmax, output, present_key,
-      present_value, batch_size, seq_len_q, seq_len_kv, num_heads, kv_num_heads,
-      head_dim, scale, do_rotary, local_window_size);
+      seqlens_k, cos_cache, sin_cache, head_sink, has_smooth_softmax, output,
+      present_key, present_value, batch_size, seq_len_q, seq_len_kv,
+      past_seq_len, num_heads, kv_num_heads, head_dim, scale, do_rotary,
+      local_window_size);
 
   if (rc != 0) {
     fprintf(stderr, "wrap_group_query_attention: gqa_forward failed (rc=%d)\n",
