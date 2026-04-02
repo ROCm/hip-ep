@@ -23,6 +23,7 @@ permissions:
 jobs:
   gpu-perf-accuracy:
     runs-on: StrixHalo
+    timeout-minutes: 1200  # 20h — prevent default 6h timeout
 
     permissions:
       contents: read
@@ -104,258 +105,310 @@ jobs:
           Remove-Item therock.tar.gz
 
       # =================================================================
-      #  COUNT MODELS (diagnostic — remove after estimation)
+      #  SINGLE-OP PERFORMANCE TESTS
+      #  Traverse test-models\<family>\* — skip full_model and _dyn
+      #  DML results are cached by DirectML.dll MD5 + model MD5.
       # =================================================================
-      - name: Count eligible models
+      - name: Run single-op perf tests
+        if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
         shell: pwsh
         run: |
+          $env:THEROCK_DIST = "${{ runner.workspace }}\therock-dist"
+          $pkgBin = Join-Path $PWD "gpu-test-package\bin"
+          $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
+          $env:LIB = (Join-Path $PWD "gpu-test-package\lib") + ";${{ runner.workspace }}\therock-dist\lib"
           $root = "${{ runner.workspace }}\test-models"
-          if (-not (Test-Path $root)) { Write-Host "[SKIP] $root not found"; exit 0 }
-          Write-Host "=== Directory tree ==="
-          Get-ChildItem $root -Directory | ForEach-Object {
-            Write-Host "`n--- $($_.Name) ---"
-            Get-ChildItem $_.FullName -Directory | ForEach-Object {
-              $cat = $_.Name
-              $models = Get-ChildItem $_.FullName -Recurse -Filter "*.onnx" |
-                Where-Object { $_.Extension -eq ".onnx" -and $_.Name -notmatch "_dyn" }
-              Write-Host "  $cat : $($models.Count) models"
-              foreach ($m in $models) {
-                $rel = $m.FullName.Substring($root.Length)
-                $sizeMB = "{0:F1}" -f ($m.Length / 1MB)
-                Write-Host "    $rel ($sizeMB MB)"
+          if (-not (Test-Path $root)) {
+            Write-Host "[SKIP] test-models directory not found: $root"
+            exit 0
+          }
+          $cacheRoot = "${{ runner.workspace }}\test-cache"
+          $dmlDll = Join-Path $pkgBin "DirectML.dll"
+          $dmlHash = if (Test-Path $dmlDll) { (Get-FileHash $dmlDll -Algorithm MD5).Hash } else { "no-dml" }
+          Write-Host "DirectML.dll MD5: $dmlHash"
+
+          $failed = 0
+          $cacheHits = 0
+          Push-Location gpu-test-package\bin
+
+          $models = @(Get-ChildItem $root -Recurse -Filter "*.onnx" |
+            Where-Object { $_.Name -notmatch "_dyn" -and $_.FullName -notmatch "\\full_model\\" })
+          Write-Host "Eligible single-op models: $($models.Count)"
+
+          foreach ($m in $models) {
+            $rel = $m.Directory.FullName.Substring($root.Length).TrimStart('\')
+            $mzDir = "..\..\perf-results\single-op\$rel"
+            $dmlDir = "..\..\perf-results\single-op-dml\$rel"
+            New-Item -ItemType Directory -Force -Path $mzDir | Out-Null
+            New-Item -ItemType Directory -Force -Path $dmlDir | Out-Null
+            $mzFile = Join-Path $mzDir "$($m.Name).txt"
+            $dmlFile = Join-Path $dmlDir "$($m.Name).txt"
+
+            Write-Host "=== Perf [hipdnn-ep]: $rel\$($m.Name) ==="
+            & .\onnxruntime_perf_test.exe `
+              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" `
+              --plugin_eps "MorphiZenExecutionProvider" `
+              --plugin_ep_options "config_file|..\morphizen_config.json" `
+              -t $env:PERF_DURATION -c 1 -s -I `
+              $m.FullName 2>&1 | Tee-Object -FilePath $mzFile
+            if ($LASTEXITCODE -ne 0) { $failed = 1 }
+
+            $modelHash = (Get-FileHash $m.FullName -Algorithm MD5).Hash
+            $cacheFile = Join-Path $cacheRoot "dml\$dmlHash\$modelHash.txt"
+
+            if (Test-Path $cacheFile) {
+              Write-Host "=== Perf [DML] (cached): $rel\$($m.Name) ==="
+              Copy-Item $cacheFile $dmlFile -Force
+              Get-Content $dmlFile
+              $cacheHits++
+            } else {
+              Write-Host "=== Perf [DML]: $rel\$($m.Name) ==="
+              & .\onnxruntime_perf_test.exe `
+                -e dml `
+                -C "ep.dml.disable_graph_fusion|1" `
+                -t $env:PERF_DURATION -c 1 -s -I `
+                $m.FullName 2>&1 | Tee-Object -FilePath $dmlFile
+              if ($LASTEXITCODE -ne 0) {
+                $failed = 1
+              } else {
+                New-Item -ItemType Directory -Force -Path (Split-Path $cacheFile) | Out-Null
+                Copy-Item $dmlFile $cacheFile -Force
               }
             }
           }
-          Write-Host "`n=== Summary ==="
-          $all = Get-ChildItem $root -Recurse -Filter "*.onnx" |
-            Where-Object { $_.Extension -eq ".onnx" -and $_.Name -notmatch "_dyn" }
-          $singleOp = $all | Where-Object { $_.FullName -notmatch "\\full_model\\" }
-          $fullModel = $all | Where-Object { $_.FullName -match "\\full_model\\" }
-          Write-Host "Single-op/layer models: $($singleOp.Count)"
-          Write-Host "Full-model models: $($fullModel.Count)"
-          Write-Host "Total eligible models: $($all.Count)"
-          $perfTime = $all.Count * 2 * 35
-          $l2Time = $all.Count * 20
-          Write-Host "`n=== Time estimate (PERF_DURATION=30s) ==="
-          Write-Host "Perf tests (MZ+DML, ~35s each): $($all.Count * 2) runs = $([math]::Round($perfTime/60)) min"
-          Write-Host "L2 tests (~20s each): $($all.Count) runs = $([math]::Round($l2Time/60)) min"
-          Write-Host "Estimated total: $([math]::Round(($perfTime+$l2Time)/60)) min ($([math]::Round(($perfTime+$l2Time)/3600, 1)) hours)"
 
-      # =================================================================
-      #  SINGLE-OP PERFORMANCE TESTS
-      #  Traverse test-models\<family>\* — skip full_model and _dyn
-      # =================================================================
-      - name: Run single-op perf tests
-        if: false  # DISABLED for model counting
-        shell: cmd
-        run: |
-          setlocal enabledelayedexpansion
-          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
-          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
-          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
-          set ROOT=${{ runner.workspace }}\test-models
-          if not exist "%ROOT%" (
-            echo [SKIP] test-models directory not found: %ROOT%
-            exit /b 0
-          )
-          set FAILED=0
-          cd gpu-test-package\bin
-          for /r "%ROOT%" %%M in (*.onnx) do (
-            if "%%~xM"==".onnx" (
-              set "FN=%%~nM"
-              set "CHECK=!FN:_dyn=!"
-              if "!CHECK!"=="!FN!" (
-                set "MP=%%~dpM"
-                set "MPCHECK=!MP:\full_model\=!"
-                if "!MPCHECK!"=="!MP!" (
-                  set "REL=!MP:%ROOT%\=!"
-                  mkdir "..\..\perf-results\single-op\!REL!" 2>nul
-                  mkdir "..\..\perf-results\single-op-dml\!REL!" 2>nul
-                  echo === Perf [hipdnn-ep]: !REL!%%~nxM ===
-                  onnxruntime_perf_test.exe ^
-                    --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
-                    --plugin_eps "MorphiZenExecutionProvider" ^
-                    --plugin_ep_options "config_file|..\morphizen_config.json" ^
-                    -t %PERF_DURATION% -c 1 -s -I ^
-                    "%%M" > "..\..\perf-results\single-op\!REL!%%~nxM.txt" 2>&1
-                  type "..\..\perf-results\single-op\!REL!%%~nxM.txt"
-                  if errorlevel 1 set FAILED=1
-                  echo === Perf [DML]: !REL!%%~nxM ===
-                  onnxruntime_perf_test.exe ^
-                    -e dml ^
-                    -C "ep.dml.disable_graph_fusion|1" ^
-                    -t %PERF_DURATION% -c 1 -s -I ^
-                    "%%M" > "..\..\perf-results\single-op-dml\!REL!%%~nxM.txt" 2>&1
-                  type "..\..\perf-results\single-op-dml\!REL!%%~nxM.txt"
-                  if errorlevel 1 set FAILED=1
-                )
-              )
-            )
-          )
-          exit /b 0
+          Pop-Location
+          Write-Host "=== DML cache: $cacheHits / $($models.Count) hits ==="
+          exit 0
 
       # =================================================================
       #  SINGLE-OP ACCURACY TESTS (L2)
       #  Traverse test-models\<family>\* — skip full_model and _dyn
+      #  CPU (-n) output dumps are cached by onnxruntime.dll MD5 + model MD5.
       # =================================================================
       - name: Run single-op L2 accuracy tests
-        if: false  # DISABLED for model counting
-        shell: cmd
+        if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
+        shell: pwsh
         run: |
-          setlocal enabledelayedexpansion
-          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
-          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
-          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
-          set ROOT=${{ runner.workspace }}\test-models
-          if not exist "%ROOT%" (
-            echo [SKIP] test-models directory not found: %ROOT%
-            exit /b 0
-          )
-          set FAILED=0
-          cd gpu-test-package\bin
-          for /r "%ROOT%" %%M in (*.onnx) do (
-            if "%%~xM"==".onnx" (
-              set "FN=%%~nM"
-              set "CHECK=!FN:_dyn=!"
-              if "!CHECK!"=="!FN!" (
-                set "MP=%%~dpM"
-                set "MPCHECK=!MP:\full_model\=!"
-                if "!MPCHECK!"=="!MP!" (
-                  set "REL=!MP:%ROOT%\=!"
-                  set "OUT=..\..\l2-results\single-op\!REL!%%~nM.txt"
-                  mkdir "..\..\l2-results\single-op\!REL!" 2>nul
-                  echo === L2 test: !REL!%%~nxM ===
-                  rd /s /q "%%~nM_o_dump" 2>nul
-                  rd /s /q "%%~nM_cpu_o_dump" 2>nul
-                  hip-onnx-runner.exe -m "%%M" -d 2 -s 42 > "!OUT!" 2>&1
-                  if errorlevel 1 (
-                    echo [ERROR] hipdnn-ep inference failed>> "!OUT!"
-                    type "!OUT!"
-                    set FAILED=1
-                  ) else (
-                    hip-onnx-runner.exe -m "%%M" -d 2 -s 42 -n >> "!OUT!" 2>&1
-                    if errorlevel 1 (
-                      echo [ERROR] CPU inference failed>> "!OUT!"
-                      type "!OUT!"
-                      set FAILED=1
-                    ) else (
-                      hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" >> "!OUT!" 2>&1
-                      type "!OUT!"
-                    )
-                  )
-                )
-              )
-            )
-          )
-          exit /b 0
+          $env:THEROCK_DIST = "${{ runner.workspace }}\therock-dist"
+          $pkgBin = Join-Path $PWD "gpu-test-package\bin"
+          $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
+          $env:LIB = (Join-Path $PWD "gpu-test-package\lib") + ";${{ runner.workspace }}\therock-dist\lib"
+          $root = "${{ runner.workspace }}\test-models"
+          if (-not (Test-Path $root)) {
+            Write-Host "[SKIP] test-models directory not found: $root"
+            exit 0
+          }
+          $cacheRoot = "${{ runner.workspace }}\test-cache"
+          $ortDll = Join-Path $pkgBin "onnxruntime.dll"
+          $ortHash = if (Test-Path $ortDll) { (Get-FileHash $ortDll -Algorithm MD5).Hash } else { "no-ort" }
+          Write-Host "onnxruntime.dll MD5: $ortHash"
+
+          $failed = 0
+          $cacheHits = 0
+          Push-Location gpu-test-package\bin
+
+          $models = @(Get-ChildItem $root -Recurse -Filter "*.onnx" |
+            Where-Object { $_.Name -notmatch "_dyn" -and $_.FullName -notmatch "\\full_model\\" })
+          Write-Host "Eligible single-op models: $($models.Count)"
+
+          foreach ($m in $models) {
+            $rel = $m.Directory.FullName.Substring($root.Length).TrimStart('\')
+            $outDir = "..\..\l2-results\single-op\$rel"
+            New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+            $outFile = Join-Path $outDir "$($m.BaseName).txt"
+            $stem = $m.BaseName
+
+            Write-Host "=== L2 test: $rel\$($m.Name) ==="
+            Remove-Item "${stem}_o_dump", "${stem}_cpu_o_dump" -Recurse -Force -ErrorAction SilentlyContinue
+
+            & .\hip-onnx-runner.exe -m $m.FullName -d 2 -s 42 2>&1 | Tee-Object -FilePath $outFile
+            if ($LASTEXITCODE -ne 0) {
+              Add-Content $outFile "[ERROR] hipdnn-ep inference failed"
+              $failed = 1
+              continue
+            }
+
+            $modelHash = (Get-FileHash $m.FullName -Algorithm MD5).Hash
+            $cpuCacheDir = Join-Path $cacheRoot "l2-cpu\$ortHash\$modelHash"
+            $cpuCacheBins = @(Get-ChildItem $cpuCacheDir -Filter "*.bin" -ErrorAction SilentlyContinue)
+
+            if ($cpuCacheBins.Count -gt 0) {
+              Add-Content $outFile "CPU inference: using cached output (ort=$ortHash, model=$modelHash)"
+              Write-Host "  CPU dump (cached): $modelHash"
+              New-Item -ItemType Directory -Force -Path "${stem}_cpu_o_dump" | Out-Null
+              $cpuCacheBins | Copy-Item -Destination "${stem}_cpu_o_dump" -Force
+              $cacheHits++
+            } else {
+              & .\hip-onnx-runner.exe -m $m.FullName -d 2 -s 42 -n 2>&1 | Tee-Object -FilePath $outFile -Append
+              if ($LASTEXITCODE -ne 0) {
+                Add-Content $outFile "[ERROR] CPU inference failed"
+                $failed = 1
+                continue
+              }
+              New-Item -ItemType Directory -Force -Path $cpuCacheDir | Out-Null
+              Get-ChildItem "${stem}_cpu_o_dump" | Copy-Item -Destination $cpuCacheDir -Force
+            }
+
+            & .\hip-onnx-runner.exe -L "${stem}_o_dump,${stem}_cpu_o_dump" 2>&1 | Tee-Object -FilePath $outFile -Append
+          }
+
+          Pop-Location
+          Write-Host "=== CPU cache: $cacheHits / $($models.Count) hits ==="
+          exit 0
 
       # =================================================================
       #  FULL MODEL PERFORMANCE TESTS
       #  Traverse test-models\<family>\full_model\ — skip _dyn
+      #  DML results are cached by DirectML.dll MD5 + model MD5.
       # =================================================================
       - name: Run full model perf tests
-        if: false  # DISABLED for model counting
-        shell: cmd
+        if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
+        shell: pwsh
         run: |
-          setlocal enabledelayedexpansion
-          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
-          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
-          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
-          set ROOT=${{ runner.workspace }}\test-models
-          if not exist "%ROOT%" (
-            echo [SKIP] test-models directory not found: %ROOT%
-            exit /b 0
-          )
-          set FAILED=0
-          cd gpu-test-package\bin
-          for /r "%ROOT%" %%M in (*.onnx) do (
-            if "%%~xM"==".onnx" (
-              set "FN=%%~nM"
-              set "CHECK=!FN:_dyn=!"
-              if "!CHECK!"=="!FN!" (
-                set "MP=%%~dpM"
-                set "MPCHECK=!MP:\full_model\=!"
-                if not "!MPCHECK!"=="!MP!" (
-                  set "REL=!MP:%ROOT%\=!"
-                  mkdir "..\..\perf-results\full-model\!REL!" 2>nul
-                  mkdir "..\..\perf-results\full-model-dml\!REL!" 2>nul
-                  echo === Perf [hipdnn-ep]: !REL!%%~nxM ===
-                  onnxruntime_perf_test.exe ^
-                    --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
-                    --plugin_eps "MorphiZenExecutionProvider" ^
-                    --plugin_ep_options "config_file|..\morphizen_config.json" ^
-                    -t %PERF_DURATION% -c 1 -s -I ^
-                    "%%M" > "..\..\perf-results\full-model\!REL!%%~nxM.txt" 2>&1
-                  type "..\..\perf-results\full-model\!REL!%%~nxM.txt"
-                  if errorlevel 1 set FAILED=1
-                  echo === Perf [DML]: !REL!%%~nxM ===
-                  onnxruntime_perf_test.exe ^
-                    -e dml ^
-                    -C "ep.dml.disable_graph_fusion|1" ^
-                    -t %PERF_DURATION% -c 1 -s -I ^
-                    "%%M" > "..\..\perf-results\full-model-dml\!REL!%%~nxM.txt" 2>&1
-                  type "..\..\perf-results\full-model-dml\!REL!%%~nxM.txt"
-                  if errorlevel 1 set FAILED=1
-                )
-              )
-            )
-          )
-          exit /b 0
+          $env:THEROCK_DIST = "${{ runner.workspace }}\therock-dist"
+          $pkgBin = Join-Path $PWD "gpu-test-package\bin"
+          $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
+          $env:LIB = (Join-Path $PWD "gpu-test-package\lib") + ";${{ runner.workspace }}\therock-dist\lib"
+          $root = "${{ runner.workspace }}\test-models"
+          if (-not (Test-Path $root)) {
+            Write-Host "[SKIP] test-models directory not found: $root"
+            exit 0
+          }
+          $cacheRoot = "${{ runner.workspace }}\test-cache"
+          $dmlDll = Join-Path $pkgBin "DirectML.dll"
+          $dmlHash = if (Test-Path $dmlDll) { (Get-FileHash $dmlDll -Algorithm MD5).Hash } else { "no-dml" }
+          Write-Host "DirectML.dll MD5: $dmlHash"
+
+          $failed = 0
+          $cacheHits = 0
+          Push-Location gpu-test-package\bin
+
+          $models = @(Get-ChildItem $root -Recurse -Filter "*.onnx" |
+            Where-Object { $_.Name -notmatch "_dyn" -and $_.FullName -match "\\full_model\\" })
+          Write-Host "Eligible full-model models: $($models.Count)"
+
+          foreach ($m in $models) {
+            $rel = $m.Directory.FullName.Substring($root.Length).TrimStart('\')
+            $mzDir = "..\..\perf-results\full-model\$rel"
+            $dmlDir = "..\..\perf-results\full-model-dml\$rel"
+            New-Item -ItemType Directory -Force -Path $mzDir | Out-Null
+            New-Item -ItemType Directory -Force -Path $dmlDir | Out-Null
+            $mzFile = Join-Path $mzDir "$($m.Name).txt"
+            $dmlFile = Join-Path $dmlDir "$($m.Name).txt"
+
+            Write-Host "=== Perf [hipdnn-ep]: $rel\$($m.Name) ==="
+            & .\onnxruntime_perf_test.exe `
+              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" `
+              --plugin_eps "MorphiZenExecutionProvider" `
+              --plugin_ep_options "config_file|..\morphizen_config.json" `
+              -t $env:PERF_DURATION -c 1 -s -I `
+              $m.FullName 2>&1 | Tee-Object -FilePath $mzFile
+            if ($LASTEXITCODE -ne 0) { $failed = 1 }
+
+            $modelHash = (Get-FileHash $m.FullName -Algorithm MD5).Hash
+            $cacheFile = Join-Path $cacheRoot "dml\$dmlHash\$modelHash.txt"
+
+            if (Test-Path $cacheFile) {
+              Write-Host "=== Perf [DML] (cached): $rel\$($m.Name) ==="
+              Copy-Item $cacheFile $dmlFile -Force
+              Get-Content $dmlFile
+              $cacheHits++
+            } else {
+              Write-Host "=== Perf [DML]: $rel\$($m.Name) ==="
+              & .\onnxruntime_perf_test.exe `
+                -e dml `
+                -C "ep.dml.disable_graph_fusion|1" `
+                -t $env:PERF_DURATION -c 1 -s -I `
+                $m.FullName 2>&1 | Tee-Object -FilePath $dmlFile
+              if ($LASTEXITCODE -ne 0) {
+                $failed = 1
+              } else {
+                New-Item -ItemType Directory -Force -Path (Split-Path $cacheFile) | Out-Null
+                Copy-Item $dmlFile $cacheFile -Force
+              }
+            }
+          }
+
+          Pop-Location
+          Write-Host "=== DML cache: $cacheHits / $($models.Count) hits ==="
+          exit 0
 
       # =================================================================
       #  FULL MODEL ACCURACY TESTS (L2)
       #  Traverse test-models\<family>\full_model\ — skip _dyn
+      #  CPU (-n) output dumps are cached by onnxruntime.dll MD5 + model MD5.
       # =================================================================
       - name: Run full model L2 accuracy tests
-        if: false  # DISABLED for model counting
-        shell: cmd
+        if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
+        shell: pwsh
         run: |
-          setlocal enabledelayedexpansion
-          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
-          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
-          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
-          set ROOT=${{ runner.workspace }}\test-models
-          if not exist "%ROOT%" (
-            echo [SKIP] test-models directory not found: %ROOT%
-            exit /b 0
-          )
-          set FAILED=0
-          cd gpu-test-package\bin
-          for /r "%ROOT%" %%M in (*.onnx) do (
-            if "%%~xM"==".onnx" (
-              set "FN=%%~nM"
-              set "CHECK=!FN:_dyn=!"
-              if "!CHECK!"=="!FN!" (
-                set "MP=%%~dpM"
-                set "MPCHECK=!MP:\full_model\=!"
-                if not "!MPCHECK!"=="!MP!" (
-                  set "REL=!MP:%ROOT%\=!"
-                  set "OUT=..\..\l2-results\full-model\!REL!%%~nM.txt"
-                  mkdir "..\..\l2-results\full-model\!REL!" 2>nul
-                  echo === L2 test: !REL!%%~nxM ===
-                  rd /s /q "%%~nM_o_dump" 2>nul
-                  rd /s /q "%%~nM_cpu_o_dump" 2>nul
-                  hip-onnx-runner.exe -m "%%M" -d 2 -s 42 > "!OUT!" 2>&1
-                  if errorlevel 1 (
-                    echo [ERROR] hipdnn-ep inference failed>> "!OUT!"
-                    type "!OUT!"
-                    set FAILED=1
-                  ) else (
-                    hip-onnx-runner.exe -m "%%M" -d 2 -s 42 -n >> "!OUT!" 2>&1
-                    if errorlevel 1 (
-                      echo [ERROR] CPU inference failed>> "!OUT!"
-                      type "!OUT!"
-                      set FAILED=1
-                    ) else (
-                      hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" >> "!OUT!" 2>&1
-                      type "!OUT!"
-                    )
-                  )
-                )
-              )
-            )
-          )
-          exit /b 0
+          $env:THEROCK_DIST = "${{ runner.workspace }}\therock-dist"
+          $pkgBin = Join-Path $PWD "gpu-test-package\bin"
+          $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
+          $env:LIB = (Join-Path $PWD "gpu-test-package\lib") + ";${{ runner.workspace }}\therock-dist\lib"
+          $root = "${{ runner.workspace }}\test-models"
+          if (-not (Test-Path $root)) {
+            Write-Host "[SKIP] test-models directory not found: $root"
+            exit 0
+          }
+          $cacheRoot = "${{ runner.workspace }}\test-cache"
+          $ortDll = Join-Path $pkgBin "onnxruntime.dll"
+          $ortHash = if (Test-Path $ortDll) { (Get-FileHash $ortDll -Algorithm MD5).Hash } else { "no-ort" }
+          Write-Host "onnxruntime.dll MD5: $ortHash"
+
+          $failed = 0
+          $cacheHits = 0
+          Push-Location gpu-test-package\bin
+
+          $models = @(Get-ChildItem $root -Recurse -Filter "*.onnx" |
+            Where-Object { $_.Name -notmatch "_dyn" -and $_.FullName -match "\\full_model\\" })
+          Write-Host "Eligible full-model models: $($models.Count)"
+
+          foreach ($m in $models) {
+            $rel = $m.Directory.FullName.Substring($root.Length).TrimStart('\')
+            $outDir = "..\..\l2-results\full-model\$rel"
+            New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+            $outFile = Join-Path $outDir "$($m.BaseName).txt"
+            $stem = $m.BaseName
+
+            Write-Host "=== L2 test: $rel\$($m.Name) ==="
+            Remove-Item "${stem}_o_dump", "${stem}_cpu_o_dump" -Recurse -Force -ErrorAction SilentlyContinue
+
+            & .\hip-onnx-runner.exe -m $m.FullName -d 2 -s 42 2>&1 | Tee-Object -FilePath $outFile
+            if ($LASTEXITCODE -ne 0) {
+              Add-Content $outFile "[ERROR] hipdnn-ep inference failed"
+              $failed = 1
+              continue
+            }
+
+            $modelHash = (Get-FileHash $m.FullName -Algorithm MD5).Hash
+            $cpuCacheDir = Join-Path $cacheRoot "l2-cpu\$ortHash\$modelHash"
+            $cpuCacheBins = @(Get-ChildItem $cpuCacheDir -Filter "*.bin" -ErrorAction SilentlyContinue)
+
+            if ($cpuCacheBins.Count -gt 0) {
+              Add-Content $outFile "CPU inference: using cached output (ort=$ortHash, model=$modelHash)"
+              Write-Host "  CPU dump (cached): $modelHash"
+              New-Item -ItemType Directory -Force -Path "${stem}_cpu_o_dump" | Out-Null
+              $cpuCacheBins | Copy-Item -Destination "${stem}_cpu_o_dump" -Force
+              $cacheHits++
+            } else {
+              & .\hip-onnx-runner.exe -m $m.FullName -d 2 -s 42 -n 2>&1 | Tee-Object -FilePath $outFile -Append
+              if ($LASTEXITCODE -ne 0) {
+                Add-Content $outFile "[ERROR] CPU inference failed"
+                $failed = 1
+                continue
+              }
+              New-Item -ItemType Directory -Force -Path $cpuCacheDir | Out-Null
+              Get-ChildItem "${stem}_cpu_o_dump" | Copy-Item -Destination $cpuCacheDir -Force
+            }
+
+            & .\hip-onnx-runner.exe -L "${stem}_o_dump,${stem}_cpu_o_dump" 2>&1 | Tee-Object -FilePath $outFile -Append
+          }
+
+          Pop-Location
+          Write-Host "=== CPU cache: $cacheHits / $($models.Count) hits ==="
+          exit 0
 
       # =================================================================
       #  PUBLISH RESULTS
