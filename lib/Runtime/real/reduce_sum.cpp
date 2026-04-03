@@ -10,6 +10,17 @@
 #include <cstdio>
 #include <hip/hip_runtime.h>
 
+// Simple HIP error check macro for functions without cleanup
+#define HIP_CHECK(cmd)                                                         \
+  do {                                                                         \
+    hipError_t error = (cmd);                                                  \
+    if (error != hipSuccess) {                                                 \
+      fprintf(stderr, "HIP error at %s:%d: %s\n", __FILE__, __LINE__,          \
+              hipGetErrorString(error));                                       \
+      return -1;                                                               \
+    }                                                                          \
+  } while (0)
+
 int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,
                     int64_t axes_num_elements, int64_t element_size_bytes,
@@ -29,11 +40,10 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
         "[REAL] wrap_reduce_sum: noop_with_empty_axes=1 with empty axes, "
         "copying %lld bytes\n",
         (long long)total_bytes);
-    // Use hipMemcpyAsync to copy data to output
-    hipError_t err =
-        hipMemcpyAsync(output, data, total_bytes, hipMemcpyDeviceToDevice,
-                       static_cast<hipStream_t>(stream));
-    return (err == hipSuccess) ? 0 : -1;
+    HIP_CHECK(hipMemcpyAsync(output, data, total_bytes,
+                             hipMemcpyDeviceToDevice,
+                             static_cast<hipStream_t>(stream)));
+    return 0;
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
