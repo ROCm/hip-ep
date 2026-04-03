@@ -91,10 +91,10 @@ queryOrCreateSkipT5Norm(const SkipT5NormCacheKey &key) {
   int bias_dims[] = {1, static_cast<int>(key.hidden_dim)};
   int bias_strides[] = {static_cast<int>(key.hidden_dim), 1};
 
-  if (miopenSetTensorDescriptor(e.xDesc, key.data_type, 2, x_dims,
-                                x_strides) != miopenStatusSuccess ||
-      miopenSetTensorDescriptor(e.yDesc, key.data_type, 2, x_dims,
-                                x_strides) != miopenStatusSuccess ||
+  if (miopenSetTensorDescriptor(e.xDesc, key.data_type, 2, x_dims, x_strides) !=
+          miopenStatusSuccess ||
+      miopenSetTensorDescriptor(e.yDesc, key.data_type, 2, x_dims, x_strides) !=
+          miopenStatusSuccess ||
       miopenSetTensorDescriptor(e.weightDesc, key.data_type, 1, w_dims,
                                 w_strides) != miopenStatusSuccess ||
       miopenSetTensorDescriptor(e.rstdDesc, miopenFloat, 1, rstd_dims,
