@@ -2039,9 +2039,11 @@ struct UnsqueezeToStdTensor : public mlir::RewritePattern {
     // Validate operands, types, and constant axes requirement
     mlir::Value data, axes;
     mlir::RankedTensorType inputType, outputType;
-    if (failed(validateSqueezeUnsqueezeOp(op, rewriter, "expand_shape", data,
-                                          axes, inputType, outputType)))
-      return mlir::failure();
+    if (auto result = validateSqueezeUnsqueezeOp(op, rewriter, "expand_shape",
+                                                  data, axes, inputType,
+                                                  outputType);
+        failed(result))
+      return result;
 
     // Unsqueeze is just a special case of Reshape (inserting size-1 dims)
     // Use MLIR's built-in tool to compute reassociation
@@ -2089,9 +2091,11 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
     // Validate operands, types, and constant axes requirement
     mlir::Value data, axes;
     mlir::RankedTensorType inputType, outputType;
-    if (failed(validateSqueezeUnsqueezeOp(op, rewriter, "collapse_shape", data,
-                                          axes, inputType, outputType)))
-      return mlir::failure();
+    if (auto result = validateSqueezeUnsqueezeOp(op, rewriter, "collapse_shape",
+                                                  data, axes, inputType,
+                                                  outputType);
+        failed(result))
+      return result;
 
     // Squeeze is the inverse of Unsqueeze (removing size-1 dims)
     // Use MLIR's built-in tool to compute reassociation
