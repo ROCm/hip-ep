@@ -5,6 +5,7 @@
 name: GPU Performance & Accuracy Test
 
 on:
+  push:           # TEMPORARY: remove after debugging
   schedule:
     - cron: '0 16 * * *'  # daily at UTC 16:00 (CST 00:00)
 
@@ -148,6 +149,7 @@ jobs:
               --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" `
               --plugin_eps "MorphiZenExecutionProvider" `
               --plugin_ep_options "config_file|..\morphizen_config.json" `
+              -o 0 `
               -t $env:PERF_DURATION -c 1 -s -I `
               $m.FullName 2>&1 | Tee-Object -FilePath $mzFile
             if ($LASTEXITCODE -ne 0) { $failed = 1 }
@@ -183,7 +185,6 @@ jobs:
       # =================================================================
       #  SINGLE-OP ACCURACY TESTS (L2)
       #  Traverse test-models\<family>\* — skip full_model and _dyn
-      #  CPU (-n) output dumps are cached by onnxruntime.dll MD5 + model MD5.
       # =================================================================
       - name: Run single-op L2 accuracy tests
         if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
@@ -200,13 +201,8 @@ jobs:
             Write-Host "[SKIP] test-models directory not found: $root"
             exit 0
           }
-          $cacheRoot = "${{ runner.workspace }}\test-cache"
-          $ortDll = Join-Path $pkgBin "onnxruntime.dll"
-          $ortHash = if (Test-Path $ortDll) { (Get-FileHash $ortDll -Algorithm MD5).Hash } else { "no-ort" }
-          Write-Host "onnxruntime.dll MD5: $ortHash"
 
           $failed = 0
-          $cacheHits = 0
           Push-Location gpu-test-package\bin
 
           $models = @(Get-ChildItem $root -Recurse -Filter "*.onnx" |
@@ -223,39 +219,24 @@ jobs:
             Write-Host "=== L2 test: $rel\$($m.Name) ==="
             Remove-Item "${stem}_o_dump", "${stem}_cpu_o_dump" -Recurse -Force -ErrorAction SilentlyContinue
 
-            & .\hip-onnx-runner.exe -m $m.FullName -d 2 -s 42 2>&1 | Tee-Object -FilePath $outFile
+            & .\hip-onnx-runner.exe -m $m.FullName -o 0 -d 2 -s 42 2>&1 | Tee-Object -FilePath $outFile
             if ($LASTEXITCODE -ne 0) {
               Add-Content $outFile "[ERROR] hipdnn-ep inference failed"
               $failed = 1
               continue
             }
 
-            $modelHash = (Get-FileHash $m.FullName -Algorithm MD5).Hash
-            $cpuCacheDir = Join-Path $cacheRoot "l2-cpu\$ortHash\$modelHash"
-            $cpuCacheBins = @(Get-ChildItem $cpuCacheDir -Filter "*.bin" -ErrorAction SilentlyContinue)
-
-            if ($cpuCacheBins.Count -gt 0) {
-              Add-Content $outFile "CPU inference: using cached output (ort=$ortHash, model=$modelHash)"
-              Write-Host "  CPU dump (cached): $modelHash"
-              New-Item -ItemType Directory -Force -Path "${stem}_cpu_o_dump" | Out-Null
-              $cpuCacheBins | Copy-Item -Destination "${stem}_cpu_o_dump" -Force
-              $cacheHits++
-            } else {
-              & .\hip-onnx-runner.exe -m $m.FullName -d 2 -s 42 -n 2>&1 | Tee-Object -FilePath $outFile -Append
-              if ($LASTEXITCODE -ne 0) {
-                Add-Content $outFile "[ERROR] CPU inference failed"
-                $failed = 1
-                continue
-              }
-              New-Item -ItemType Directory -Force -Path $cpuCacheDir | Out-Null
-              Get-ChildItem "${stem}_cpu_o_dump" | Copy-Item -Destination $cpuCacheDir -Force
+            & .\hip-onnx-runner.exe -m $m.FullName -o 0 -d 2 -s 42 -n 2>&1 | Tee-Object -FilePath $outFile -Append
+            if ($LASTEXITCODE -ne 0) {
+              Add-Content $outFile "[ERROR] CPU inference failed"
+              $failed = 1
+              continue
             }
 
             & .\hip-onnx-runner.exe -L "${stem}_o_dump,${stem}_cpu_o_dump" 2>&1 | Tee-Object -FilePath $outFile -Append
           }
 
           Pop-Location
-          Write-Host "=== CPU cache: $cacheHits / $($models.Count) hits ==="
           exit 0
 
       # =================================================================
@@ -305,6 +286,7 @@ jobs:
               --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" `
               --plugin_eps "MorphiZenExecutionProvider" `
               --plugin_ep_options "config_file|..\morphizen_config.json" `
+              -o 0 `
               -t $env:PERF_DURATION -c 1 -s -I `
               $m.FullName 2>&1 | Tee-Object -FilePath $mzFile
             if ($LASTEXITCODE -ne 0) { $failed = 1 }
@@ -340,7 +322,6 @@ jobs:
       # =================================================================
       #  FULL MODEL ACCURACY TESTS (L2)
       #  Traverse test-models\<family>\full_model\ — skip _dyn
-      #  CPU (-n) output dumps are cached by onnxruntime.dll MD5 + model MD5.
       # =================================================================
       - name: Run full model L2 accuracy tests
         if: always() && steps.verify-package.outcome == 'success' && steps.setup-therock.outcome == 'success'
@@ -357,13 +338,8 @@ jobs:
             Write-Host "[SKIP] test-models directory not found: $root"
             exit 0
           }
-          $cacheRoot = "${{ runner.workspace }}\test-cache"
-          $ortDll = Join-Path $pkgBin "onnxruntime.dll"
-          $ortHash = if (Test-Path $ortDll) { (Get-FileHash $ortDll -Algorithm MD5).Hash } else { "no-ort" }
-          Write-Host "onnxruntime.dll MD5: $ortHash"
 
           $failed = 0
-          $cacheHits = 0
           Push-Location gpu-test-package\bin
 
           $models = @(Get-ChildItem $root -Recurse -Filter "*.onnx" |
@@ -380,39 +356,24 @@ jobs:
             Write-Host "=== L2 test: $rel\$($m.Name) ==="
             Remove-Item "${stem}_o_dump", "${stem}_cpu_o_dump" -Recurse -Force -ErrorAction SilentlyContinue
 
-            & .\hip-onnx-runner.exe -m $m.FullName -d 2 -s 42 2>&1 | Tee-Object -FilePath $outFile
+            & .\hip-onnx-runner.exe -m $m.FullName -o 0 -d 2 -s 42 2>&1 | Tee-Object -FilePath $outFile
             if ($LASTEXITCODE -ne 0) {
               Add-Content $outFile "[ERROR] hipdnn-ep inference failed"
               $failed = 1
               continue
             }
 
-            $modelHash = (Get-FileHash $m.FullName -Algorithm MD5).Hash
-            $cpuCacheDir = Join-Path $cacheRoot "l2-cpu\$ortHash\$modelHash"
-            $cpuCacheBins = @(Get-ChildItem $cpuCacheDir -Filter "*.bin" -ErrorAction SilentlyContinue)
-
-            if ($cpuCacheBins.Count -gt 0) {
-              Add-Content $outFile "CPU inference: using cached output (ort=$ortHash, model=$modelHash)"
-              Write-Host "  CPU dump (cached): $modelHash"
-              New-Item -ItemType Directory -Force -Path "${stem}_cpu_o_dump" | Out-Null
-              $cpuCacheBins | Copy-Item -Destination "${stem}_cpu_o_dump" -Force
-              $cacheHits++
-            } else {
-              & .\hip-onnx-runner.exe -m $m.FullName -d 2 -s 42 -n 2>&1 | Tee-Object -FilePath $outFile -Append
-              if ($LASTEXITCODE -ne 0) {
-                Add-Content $outFile "[ERROR] CPU inference failed"
-                $failed = 1
-                continue
-              }
-              New-Item -ItemType Directory -Force -Path $cpuCacheDir | Out-Null
-              Get-ChildItem "${stem}_cpu_o_dump" | Copy-Item -Destination $cpuCacheDir -Force
+            & .\hip-onnx-runner.exe -m $m.FullName -o 0 -d 2 -s 42 -n 2>&1 | Tee-Object -FilePath $outFile -Append
+            if ($LASTEXITCODE -ne 0) {
+              Add-Content $outFile "[ERROR] CPU inference failed"
+              $failed = 1
+              continue
             }
 
             & .\hip-onnx-runner.exe -L "${stem}_o_dump,${stem}_cpu_o_dump" 2>&1 | Tee-Object -FilePath $outFile -Append
           }
 
           Pop-Location
-          Write-Host "=== CPU cache: $cacheHits / $($models.Count) hits ==="
           exit 0
 
       # =================================================================
