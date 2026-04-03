@@ -7,18 +7,22 @@
 //
 // Loads an ONNX model, generates random inputs, runs one inference via the
 // MorphiZen execution provider, and reports timing.
-//
-// Usage: hip-onnx-runner -m <model.onnx> [options]
-//    or: hip-onnx-runner -L dir1,dir2
-//   -m, --model       Path to .onnx model
-//   -n, --no-ep       CPU only; skip EP registration
-//   -d, --dump-level  0=off, 1=dump inputs to <stem>_i_dump/, 2=outputs
-//                     to <stem>_o_dump/, 3=both (default: 0)
-//   -s, --seed        RNG seed for random inputs (default: 42)
-//   -i, --input-dir   input_<idx>_<name>_<type>.bin only; empty = random
-//   -L, --l2norm      dir1,dir2; same *.bin set; ..._<type>.bin; L2; no -m
-//   -h, --help        Show help
-//
+/*
+Usage: hip-onnx-runner.exe [options]
+
+Options:
+-m, --model                 Path to .onnx model
+-L, --l2norm                Compare two dirs: dir1,dir2 (same *.bin set); each
+file must be ..._<type>.bin (fp32,fp16,i64,...); element-wise L2; no -m -n,
+--no-ep                 CPU only; skip EP registration (flag) -d, --dump-level
+0=off, 1=dump inputs to <stem>_i_dump/, 2=outputs to <stem>_o_dump/, 3=both
+(default: 0) -s, --seed                  RNG seed for random inputs (default:
+42) -i, --input-dir             Directory with input_<idx>_<name>_<type>.bin
+only; empty = random inputs -o, --graph-optimization-level
+session_options.SetGraphOptimizationLevel(level),   0 = ORT_DISABLE_ALL,    1 =
+ORT_ENABLE_BASIC,    2 = ORT_ENABLE_EXTENDED,   99 = ORT_ENABLE_ALL,   -1 =
+default, not call this function  (default: -1)
+*/
 //===----------------------------------------------------------------------===//
 
 #include <onnxruntime_cxx_api.h>
@@ -583,7 +587,7 @@ int main(int argc, char *argv[]) {
                 "random inputs",
                 "");
   mo.add_option("o", "graph-optimization-level",
-                "session_options.SetGraphOptimizationLevel(level), "
+                " session_options.SetGraphOptimizationLevel(level), "
                 "  0 = ORT_DISABLE_ALL,  "
                 "  1 = ORT_ENABLE_BASIC,  "
                 "  2 = ORT_ENABLE_EXTENDED,  "
