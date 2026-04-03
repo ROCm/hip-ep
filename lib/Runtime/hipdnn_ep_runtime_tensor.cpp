@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "debug_log.h"
+#include "hip_cleanup.h"
 #include "hipdnn_ep_runtime.h"
 #include "runtime_state_internal.h"
 
@@ -11,14 +12,11 @@
 #include <unordered_map>
 #include <vector>
 
-// Macro for best-effort cleanup: logs errors but continues cleanup
-#define HIP_CLEANUP(expr)                                                      \
-  do {                                                                         \
-    hipError_t _err = (expr);                                                  \
-    if (_err != hipSuccess) {                                                  \
-      fprintf(stderr, "Warning: " #expr " failed with error %d\n", (int)_err); \
-    }                                                                          \
-  } while (0)
+// Graph capture runs on inference #2; replay begins from inference #3 onward.
+static constexpr unsigned kGraphCaptureInference = 2;
+static constexpr unsigned kGraphReplayStartInference = 3;
+// Fallback element size when tensor metadata is missing (covers fp32).
+static constexpr size_t kDefaultElementSize = 4;
 //==============================================================================
 // Per-Inference Performance Measurement (gated on HIPDNN_EP_PERF)
 //==============================================================================
@@ -304,9 +302,9 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   if (element_size == 0) {
     fprintf(stderr,
             "hipdnn_ep_tensor_prepare_input: tensor[%zu].element_size is 0, "
-            "defaulting to 4\n",
-            index);
-    element_size = 4;
+            "defaulting to %zu\n",
+            index, kDefaultElementSize);
+    element_size = kDefaultElementSize;
   }
 
   // Calculate buffer size
@@ -331,7 +329,7 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   // GRAPH replay: reuse captured GPU pointer instead of pool_alloc.
   // MUST be before pool_alloc to avoid leaking a buffer every call.
   if (hipdnn_ep_graph_enabled() && g_graph.capture_ok &&
-      g_graph.inference_num >= 3) {
+      g_graph.inference_num >= kGraphReplayStartInference) {
     if (index >= g_graph.captured_input_ptrs.size()) {
       fprintf(stderr,
               "[GRAPH] ERROR: input index %zu out of captured range "
@@ -392,7 +390,8 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   }
 
   // GRAPH: record pointer and size during capture inference
-  if (hipdnn_ep_graph_enabled() && g_graph.inference_num == 2) {
+  if (hipdnn_ep_graph_enabled() &&
+      g_graph.inference_num == kGraphCaptureInference) {
     g_graph.captured_input_ptrs.push_back(gpu_ptr);
     g_graph.captured_input_sizes.push_back(size_bytes);
   }
@@ -473,9 +472,9 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
   if (element_size == 0) {
     fprintf(stderr,
             "hipdnn_ep_tensor_prepare_output: tensor[%zu].element_size is 0, "
-            "defaulting to 4\n",
-            index);
-    element_size = 4;
+            "defaulting to %zu\n",
+            index, kDefaultElementSize);
+    element_size = kDefaultElementSize;
   }
 
   // Calculate buffer size
@@ -498,7 +497,8 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
 
   // GRAPH: begin stream capture on inference #2 (after warm-up)
   // Placed AFTER the PERF event so h2d_end is NOT inside the captured graph.
-  if (hipdnn_ep_graph_enabled() && index == 0 && g_graph.inference_num == 2 &&
+  if (hipdnn_ep_graph_enabled() && index == 0 &&
+      g_graph.inference_num == kGraphCaptureInference &&
       !g_graph.capturing) {
     hipError_t err = hipStreamBeginCapture(
         static_cast<hipStream_t>(state->stream), hipStreamCaptureModeGlobal);
@@ -516,7 +516,7 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
 
   // GRAPH replay: launch graph at index 0, reuse captured GPU pointers
   if (hipdnn_ep_graph_enabled() && g_graph.capture_ok &&
-      g_graph.inference_num >= 3) {
+      g_graph.inference_num >= kGraphReplayStartInference) {
     if (index == 0) {
       hipError_t err = hipGraphLaunch(g_graph.graphExec,
                                       static_cast<hipStream_t>(state->stream));
@@ -559,7 +559,8 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
   }
 
   // GRAPH: record pointer and size during capture inference
-  if (hipdnn_ep_graph_enabled() && g_graph.inference_num == 2) {
+  if (hipdnn_ep_graph_enabled() &&
+      g_graph.inference_num == kGraphCaptureInference) {
     g_graph.captured_output_ptrs.push_back(gpu_ptr);
     g_graph.captured_output_sizes.push_back(size_bytes);
   }
@@ -679,7 +680,8 @@ int hipdnn_ep_stream_sync(RuntimeState *state) {
 
   // GRAPH: log replay status (only first few to avoid spam)
   if (hipdnn_ep_graph_enabled() && g_graph.capture_ok &&
-      g_graph.inference_num >= 3 && g_graph.inference_num <= 5) {
+      g_graph.inference_num >= kGraphReplayStartInference &&
+      g_graph.inference_num <= 5) {
     fprintf(stderr, "[GRAPH] inference #%u: REPLAY completed\n",
             g_graph.inference_num);
   }
@@ -730,7 +732,7 @@ void hipdnn_ep_tensor_free_input(RuntimeState *state, TensorBuffer *buffer) {
 // Check if graph replay is active (called from generated inference_compute)
 extern "C" int hipdnn_ep_graph_should_skip_main(RuntimeState *state) {
   if (hipdnn_ep_graph_enabled() && g_graph.capture_ok &&
-      g_graph.inference_num >= 3)
+      g_graph.inference_num >= kGraphReplayStartInference)
     return 1;
   return 0;
 }

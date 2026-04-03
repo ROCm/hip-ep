@@ -1043,5 +1043,5 @@ extern "C" int hip_gqa_fused_prefill(
       static_cast<const __half*>(Vcache),
       static_cast<__half*>(O),
       B, H, G, sq, skv, max_seq, past_len, scale);
-  return hipSuccess;
+  return hipGetLastError();
 }

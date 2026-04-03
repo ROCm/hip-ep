@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "debug_log.h"
+#include "hip_cleanup.h"
 #include "hipdnn_ep_runtime.h"
 #include "runtime_state_internal.h"
 
@@ -13,15 +14,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-
-// Macro for best-effort cleanup: logs errors but continues cleanup
-#define HIP_CLEANUP(expr)                                                      \
-  do {                                                                         \
-    hipError_t _err = (expr);                                                  \
-    if (_err != hipSuccess) {                                                  \
-      fprintf(stderr, "Warning: " #expr " failed with error %d\n", (int)_err); \
-    }                                                                          \
-  } while (0)
 
 // Runtime state management implementation
 
