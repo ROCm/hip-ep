@@ -6,7 +6,7 @@ name: GPU Performance & Accuracy Test
 
 on:
   schedule:
-    - cron: '0 18 * * *'  # daily at UTC 18:00 (CST 02:00)
+    - cron: '0 16 * * *'  # daily at UTC 16:00 (CST 00:00)
 
   workflow_dispatch:
 
@@ -617,3 +617,35 @@ jobs:
           name: test-results-json
           path: json-results/
           retention-days: 30
+
+      - name: Upload results to MongoDB
+        if: always()
+        shell: pwsh
+        run: |
+          $apiUrl = "http://xsjnts.xilinx.com/api/database/upload_json/"
+
+          foreach ($file in @("json-results/perf-results.json",
+                              "json-results/l2-results.json")) {
+            if (-not (Test-Path $file)) {
+              Write-Host "[SKIP] $file not found"
+              continue
+            }
+            $jsonData = Get-Content $file -Raw | ConvertFrom-Json
+            $payload = @{
+              database   = "daily-rocm"
+              collection = "HIPDNN-EP"
+              json_data  = $jsonData
+            } | ConvertTo-Json -Depth 10 -Compress
+
+            Write-Host "Uploading $file to $apiUrl ..."
+            try {
+              $resp = Invoke-RestMethod -Uri $apiUrl `
+                -Method POST `
+                -Body $payload `
+                -ContentType "application/json; charset=utf-8" `
+                -TimeoutSec 60
+              Write-Host "OK: $($resp | ConvertTo-Json -Depth 3)"
+            } catch {
+              Write-Warning "Upload failed for $file : $_"
+            }
+          }
