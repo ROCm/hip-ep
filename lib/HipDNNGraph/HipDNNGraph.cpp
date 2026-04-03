@@ -143,12 +143,15 @@ CreateTensorAttrFromStandardMLIR(mlir::Location loc, mlir::Type type,
 }
 
 // Extract integer values from an ArrayAttr of IntegerAttr.
+// Uses getSExtValue() instead of getInt() because ONNX-MLIR encodes
+// attributes like strides/pads/dilations as signed si64.
 static std::vector<int64_t> ExtractI64Array(mlir::ArrayAttr arr) {
   std::vector<int64_t> result;
   if (!arr)
     return result;
   for (auto a : arr)
-    result.push_back(mlir::cast<mlir::IntegerAttr>(a).getInt());
+    result.push_back(
+        mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
   return result;
 }
 
