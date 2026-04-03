@@ -1669,7 +1669,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     Value elemSizeVal = createI64Const(elementSizeBytes);
 
     // Function signature matches Task 4 runtime wrapper
-    SmallVector<Type, 38> paramTypes = {
+    SmallVector<Type, 37> paramTypes = {
         ptrType, // state
         // Inputs (14 pointers - some may be nullptr)
         ptrType, // query
@@ -1691,7 +1691,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         ptrType, // present_key
         ptrType, // present_value
         ptrType, // output_qk
-        // Attributes (13 values)
+        // Attributes (12 values)
         i64Type, // num_heads
         i64Type, // kv_num_heads
         f32Type, // scale
@@ -1718,7 +1718,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 38> args = {
+    SmallVector<Value, 37> args = {
         statePtr,
         // Inputs (14 pointers)
         queryPtr, keyPtr, valuePtr, pastKeyPtr, pastValuePtr, seqlensKPtr,
@@ -1726,7 +1726,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         attentionBiasPtr, headSinkPtr, kScalePtr, vScalePtr,
         // Outputs (4 pointers)
         outputPtr, presentKeyPtr, presentValuePtr, outputQkPtr,
-        // Attributes (13 values)
+        // Attributes (12 values)
         numHeads, kvNumHeads, scale, doRotary, rotaryInterleaved, softcap,
         localWindowSize, smoothSoftmax, qkOutput, kQuantType, vQuantType,
         kvCacheBitWidth,
