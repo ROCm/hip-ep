@@ -32,6 +32,22 @@ using namespace hipdnn::level1pass;
 
 namespace {
 
+using Clock = std::chrono::steady_clock;
+
+// Analogous to hipEventRecord + hipEventElapsedTime on the CPU timeline:
+// records the current time, computes seconds since `marker`, resets `marker`.
+static double record_elapsed(Clock::time_point &marker) {
+  auto now = Clock::now();
+  double s = std::chrono::duration<double>(now - marker).count();
+  marker = now;
+  return s;
+}
+
+// Returns seconds elapsed since `marker` without resetting it.
+static double elapsed_since(Clock::time_point marker) {
+  return std::chrono::duration<double>(Clock::now() - marker).count();
+}
+
 // ============================================================================
 // Static Helper Functions
 // ============================================================================
@@ -219,7 +235,6 @@ struct Level1MlirPass {
       const char *v = getenv("HIPDNN_EP_TIMING");
       return v && v[0] >= '1';
     }();
-    using Clock = std::chrono::steady_clock;
     auto t0 = Clock::now();
     auto t_prev = t0;
 
@@ -227,10 +242,8 @@ struct Level1MlirPass {
     auto config = load_config(self.get_context().get());
 
     if (timing) {
-      auto t_now = Clock::now();
       fprintf(stderr, "[Session] load_config: %.3fs\n",
-              std::chrono::duration<double>(t_now - t_prev).count());
-      t_prev = t_now;
+              record_elapsed(t_prev));
     }
 
     // Step 2: Get MLIR bytecode from graph
@@ -241,12 +254,9 @@ struct Level1MlirPass {
     }
 
     if (timing) {
-      auto t_now = Clock::now();
       fprintf(stderr,
               "[Session] MLIR bytecode serialization: %.3fs (%zu bytes)\n",
-              std::chrono::duration<double>(t_now - t_prev).count(),
-              mlir_bytecode.size());
-      t_prev = t_now;
+              record_elapsed(t_prev), mlir_bytecode.size());
     }
 
     // Step 3: Compile bytecode to artifact
@@ -259,10 +269,8 @@ struct Level1MlirPass {
     CompilationArtifact artifact = *artifactOpt;
 
     if (timing) {
-      auto t_now = Clock::now();
       fprintf(stderr, "[Session] MLIR compilation (CompilerDriver): %.3fs\n",
-              std::chrono::duration<double>(t_now - t_prev).count());
-      t_prev = t_now;
+              record_elapsed(t_prev));
     }
 
     // Step 4: Write artifact to EPContext
@@ -271,20 +279,16 @@ struct Level1MlirPass {
     }
 
     if (timing) {
-      auto t_now = Clock::now();
       fprintf(stderr, "[Session] Write artifact to EPContext: %.3fs\n",
-              std::chrono::duration<double>(t_now - t_prev).count());
-      t_prev = t_now;
+              record_elapsed(t_prev));
     }
 
     // Step 5: Build metadata JSON from graph outputs
     auto metadata_json = build_metadata_json(artifact, graph);
 
     if (timing) {
-      auto t_now = Clock::now();
       fprintf(stderr, "[Session] Build metadata JSON: %.3fs\n",
-              std::chrono::duration<double>(t_now - t_prev).count());
-      t_prev = t_now;
+              record_elapsed(t_prev));
     }
 
     // Step 6: Fuse graph into single MLIR custom op
@@ -294,11 +298,10 @@ struct Level1MlirPass {
     }
 
     if (timing) {
-      auto t_now = Clock::now();
       fprintf(stderr, "[Session] Fuse graph: %.3fs\n",
-              std::chrono::duration<double>(t_now - t_prev).count());
+              record_elapsed(t_prev));
       fprintf(stderr, "[Session] Level1MlirPass::process total: %.3fs\n",
-              std::chrono::duration<double>(t_now - t0).count());
+              elapsed_since(t0));
     }
 
     MY_LOG(1) << "MLIR compilation completed: " << artifact.filename << " ("
