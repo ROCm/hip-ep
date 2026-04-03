@@ -5,6 +5,8 @@
 name: GPU Performance & Accuracy Test
 
 on:
+  push:  # TEMPORARY: remove after debugging
+
   schedule:
     - cron: '0 16 * * *'  # daily at UTC 16:00 (CST 00:00)
 
@@ -131,7 +133,8 @@ jobs:
           Push-Location gpu-test-package\bin
 
           $models = @(Get-ChildItem $root -Recurse -Filter "*.onnx" |
-            Where-Object { $_.Name -notmatch "_dyn" -and $_.FullName -notmatch "\\full_model\\" })
+            Where-Object { $_.Name -notmatch "_dyn" -and $_.FullName -notmatch "\\full_model\\" } |
+            Select-Object -First 1)  # TEMPORARY: remove after debugging
           Write-Host "Eligible single-op models: $($models.Count)"
 
           foreach ($m in $models) {
@@ -210,7 +213,8 @@ jobs:
           Push-Location gpu-test-package\bin
 
           $models = @(Get-ChildItem $root -Recurse -Filter "*.onnx" |
-            Where-Object { $_.Name -notmatch "_dyn" -and $_.FullName -notmatch "\\full_model\\" })
+            Where-Object { $_.Name -notmatch "_dyn" -and $_.FullName -notmatch "\\full_model\\" } |
+            Select-Object -First 1)  # TEMPORARY: remove after debugging
           Write-Host "Eligible single-op models: $($models.Count)"
 
           foreach ($m in $models) {
@@ -288,7 +292,8 @@ jobs:
           Push-Location gpu-test-package\bin
 
           $models = @(Get-ChildItem $root -Recurse -Filter "*.onnx" |
-            Where-Object { $_.Name -notmatch "_dyn" -and $_.FullName -match "\\full_model\\" })
+            Where-Object { $_.Name -notmatch "_dyn" -and $_.FullName -match "\\full_model\\" } |
+            Select-Object -First 1)  # TEMPORARY: remove after debugging
           Write-Host "Eligible full-model models: $($models.Count)"
 
           foreach ($m in $models) {
@@ -367,7 +372,8 @@ jobs:
           Push-Location gpu-test-package\bin
 
           $models = @(Get-ChildItem $root -Recurse -Filter "*.onnx" |
-            Where-Object { $_.Name -notmatch "_dyn" -and $_.FullName -match "\\full_model\\" })
+            Where-Object { $_.Name -notmatch "_dyn" -and $_.FullName -match "\\full_model\\" } |
+            Select-Object -First 1)  # TEMPORARY: remove after debugging
           Write-Host "Eligible full-model models: $($models.Count)"
 
           foreach ($m in $models) {
@@ -485,19 +491,21 @@ jobs:
               $label = if ($meta.op_name) { "$($meta.model_name) / $($meta.op_name)" } else { $meta.model_name }
               if ($meta.seq_length -ne $null) { $label += " (seq$($meta.seq_length))" }
               $content = Get-Content $f.FullName -Raw
-              $l2Match = [regex]::Match($content, 'Combined L2 \(stacked diffs\):\s+([\d.eE+-]+)')
+              $l2Match = [regex]::Match($content, 'Combined L2 \(stacked diffs\):\s+([\d.eE+-]+)\s+\(total_elems:\s+(\d+),\s+skipped_nonfinite:\s+(\d+)\)')
               $errMatch = [regex]::Match($content, '\[ERROR\]\s*(.+)')
               if ($l2Match.Success) {
                 $l2val = [double]$l2Match.Groups[1].Value
-                $rows += "| $label | $l2val |`n"
+                $elems = $l2Match.Groups[2].Value
+                $skipped = $l2Match.Groups[3].Value
+                $rows += "| $label | $l2val | $elems | $skipped |`n"
               } elseif ($errMatch.Success) {
                 $reason = $errMatch.Groups[1].Value.Trim()
-                $rows += "| $label | $reason |`n"
+                $rows += "| $label | $reason | - | - |`n"
               } else {
-                $rows += "| $label | error |`n"
+                $rows += "| $label | error | - | - |`n"
               }
             }
-            $header = "### $title`n`n| Model | Combined L2 |`n|-------|------------|`n"
+            $header = "### $title`n`n| Model | Combined L2 | Total Elems | Skipped NaN/Inf |`n|-------|------------|------------|----------------|`n"
             return $header + $rows + "`n"
           }
 
@@ -560,14 +568,16 @@ jobs:
             foreach ($f in $files) {
               $meta = Get-Meta $f (Resolve-Path $dir).Path
               $content = Get-Content $f.FullName -Raw
-              $l2Match = [regex]::Match($content, 'Combined L2 \(stacked diffs\):\s+([\d.eE+-]+)')
+              $l2Match = [regex]::Match($content, 'Combined L2 \(stacked diffs\):\s+([\d.eE+-]+)\s+\(total_elems:\s+(\d+),\s+skipped_nonfinite:\s+(\d+)\)')
               $errMatch = [regex]::Match($content, '\[ERROR\]\s*(.+)')
               $l2val = if ($l2Match.Success) { [double]$l2Match.Groups[1].Value } else { $null }
               $entry = [ordered]@{
-                category   = $category
-                model_name = $meta.model_name
-                file       = $meta.file
-                l2         = $l2val
+                category           = $category
+                model_name         = $meta.model_name
+                file               = $meta.file
+                l2                 = $l2val
+                total_elems        = if ($l2Match.Success) { [long]$l2Match.Groups[2].Value } else { $null }
+                skipped_nonfinite  = if ($l2Match.Success) { [long]$l2Match.Groups[3].Value } else { $null }
               }
               if ($errMatch.Success) {
                 $entry["error"] = $errMatch.Groups[1].Value.Trim()

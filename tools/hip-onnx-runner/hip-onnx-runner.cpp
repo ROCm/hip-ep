@@ -509,6 +509,8 @@ static int run_l2norm_output_dumps(const std::string &dir1_str,
   }
 
   long double combined_sq = 0;
+  size_t total_elems = 0;
+  size_t total_skipped_nonfinite = 0;
   for (const std::string &fn : names1) {
     std::vector<char> a, b;
     if (!read_entire_file(d1 / fn, a) || !read_entire_file(d2 / fn, b))
@@ -563,9 +565,13 @@ static int run_l2norm_output_dumps(const std::string &dir1_str,
     }
     std::cout << ")\n";
     combined_sq += static_cast<long double>(sq);
+    total_elems += used_elems;
+    total_skipped_nonfinite += skipped_nonfinite;
   }
   std::cout << "Combined L2 (stacked diffs): "
-            << std::sqrt(static_cast<double>(combined_sq)) << "\n";
+            << std::sqrt(static_cast<double>(combined_sq))
+            << " (total_elems: " << total_elems
+            << ", skipped_nonfinite: " << total_skipped_nonfinite << ")\n";
   return 0;
 }
 
