@@ -788,10 +788,11 @@ private:
 
     // Call @main with arrays of pointers (conditionally skipped during graph
     // replay -- hipdnn_ep_graph_should_skip_main returns 1 when replay active)
-    Block *mainSuccessBlock = funcOp.addBlock();
+    Block *mainSuccessBlock;
 
     auto mainFunc = module.lookupSymbol<LLVM::LLVMFuncOp>("main_graph");
     if (!mainFunc) {
+      mainSuccessBlock = funcOp.addBlock();
       COMPILER_DEBUG_LOG(
           "[GenerateInterface] Warning: @main_graph not found\n");
       LLVM::BrOp::create(builder, loc, mainSuccessBlock);
@@ -807,6 +808,7 @@ private:
           builder, loc, LLVM::ICmpPredicate::ne, skipResult, zero);
 
       Block *callMainBlock = funcOp.addBlock();
+      mainSuccessBlock = funcOp.addBlock();
       LLVM::CondBrOp::create(builder, loc, shouldSkip, mainSuccessBlock,
                              callMainBlock);
 
