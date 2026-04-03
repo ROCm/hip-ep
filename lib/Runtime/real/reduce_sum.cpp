@@ -40,8 +40,7 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
         "[REAL] wrap_reduce_sum: noop_with_empty_axes=1 with empty axes, "
         "copying %lld bytes\n",
         (long long)total_bytes);
-    HIP_CHECK(hipMemcpyAsync(output, data, total_bytes,
-                             hipMemcpyDeviceToDevice,
+    HIP_CHECK(hipMemcpyAsync(output, data, total_bytes, hipMemcpyDeviceToDevice,
                              static_cast<hipStream_t>(stream)));
     return 0;
   }
