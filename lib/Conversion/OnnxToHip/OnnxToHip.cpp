@@ -1914,9 +1914,9 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
 /// without moving data. We lower to tensor.expand_shape which bufferizes to
 /// memref.expand_shape (zero-copy alias).
 ///
-/// Strategy: Use getReassociationIndicesForReshape to compute the mapping,
-/// since Unsqueeze is just a special case of Reshape where we insert size-1
-/// dims.
+/// Strategy: Unsqueeze is a special case of Reshape (inserting size-1 dims).
+/// Use MLIR's built-in getReassociationIndicesForReshape utility to compute
+/// reassociation, then reuse Reshape's output shape building logic.
 struct UnsqueezeToStdTensor : public mlir::RewritePattern {
   UnsqueezeToStdTensor(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Unsqueeze", /*benefit=*/1, ctx) {}
@@ -1924,14 +1924,12 @@ struct UnsqueezeToStdTensor : public mlir::RewritePattern {
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override {
-    // ONNX Unsqueeze has two operands: data and axes
+    // Validate operands
     if (op->getNumOperands() != 2)
       return rewriter.notifyMatchFailure(op,
                                          "expected 2 operands (data, axes)");
 
     mlir::Value data = op->getOperand(0);
-    mlir::Value axesValue = op->getOperand(1);
-
     auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
     auto outputType =
         mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
@@ -1941,133 +1939,60 @@ struct UnsqueezeToStdTensor : public mlir::RewritePattern {
     if (inputType.getElementType() != outputType.getElementType())
       return rewriter.notifyMatchFailure(op, "element type mismatch");
 
+    // Unsqueeze is just a special case of Reshape (inserting size-1 dims)
+    // Use MLIR's built-in tool to compute reassociation
+    auto reassocOpt =
+        mlir::getReassociationIndicesForReshape(inputType, outputType);
+    if (!reassocOpt)
+      return rewriter.notifyMatchFailure(
+          op, "cannot compute unsqueeze reassociation");
+
+    // Build output shape using the same logic as Reshape
+    // Precompute mapping from output dim to input dim for O(1) lookup
     mlir::Location loc = op->getLoc();
-    int64_t inputRank = inputType.getRank();
     int64_t outputRank = outputType.getRank();
+    llvm::SmallVector<int64_t> outDimToInDim(outputRank, -1);
+    for (auto [g, group] : llvm::enumerate(*reassocOpt))
+      for (int64_t idx : group)
+        outDimToInDim[idx] = g;
 
-    // Unsqueeze always increases rank
-    if (outputRank <= inputRank)
-      return rewriter.notifyMatchFailure(
-          op, "unsqueeze output rank must be greater than input rank");
-
-    // Extract axes values from constant operand
-    llvm::SmallVector<int64_t> axes;
-    if (auto axesDefOp = axesValue.getDefiningOp<mlir::arith::ConstantOp>()) {
-      auto axesAttr =
-          mlir::dyn_cast<mlir::DenseIntElementsAttr>(axesDefOp.getValueAttr());
-      if (!axesAttr)
-        return rewriter.notifyMatchFailure(op,
-                                           "axes must be dense int constant");
-      for (auto val : axesAttr.getValues<int64_t>())
-        axes.push_back(val);
-    } else if (auto axesDefOp = axesValue.getDefiningOp()) {
-      // axes might be from onnx.Constant
-      if (auto axesAttr = mlir::dyn_cast_or_null<mlir::DenseIntElementsAttr>(
-              axesDefOp->getAttrOfType<mlir::ElementsAttr>("value"))) {
-        for (auto val : axesAttr.getValues<int64_t>())
-          axes.push_back(val);
-      } else {
-        return rewriter.notifyMatchFailure(op, "axes must be constant");
-      }
-    } else {
-      return rewriter.notifyMatchFailure(op, "axes must be constant");
-    }
-
-    // Normalize negative axes
-    for (auto &axis : axes) {
-      if (axis < 0)
-        axis += outputRank;
-      if (axis < 0 || axis >= outputRank)
-        return rewriter.notifyMatchFailure(op, "axes value out of range");
-    }
-
-    // Verify the number of inserted axes matches rank difference
-    if (static_cast<int64_t>(axes.size()) != (outputRank - inputRank))
-      return rewriter.notifyMatchFailure(
-          op, "number of axes does not match rank difference");
-
-    // Build reassociation indices based on axes
-    // Reassociation maps each input dimension to a group of output dimensions.
-    // For unsqueeze, each input dim maps to itself plus any inserted dims.
-    //
-    // Example: input [128, 4096], axes=[0, 2] -> output [1, 128, 1, 4096]
-    //   Input dim 0 -> output dims [0, 1]  (inserted 0, original 0)
-    //   Input dim 1 -> output dims [2, 3]  (inserted 2, original 1)
-    llvm::SmallSet<int64_t, 4> axesSet(axes.begin(), axes.end());
-    llvm::SmallVector<mlir::ReassociationIndices> reassociation;
-
-    int64_t inputIdx = 0;
-    int64_t outputIdx = 0;
-
-    while (inputIdx < inputRank) {
-      mlir::ReassociationIndices group;
-
-      // Collect all inserted dimensions before this input dimension
-      while (outputIdx < outputRank && axesSet.contains(outputIdx)) {
-        group.push_back(outputIdx);
-        outputIdx++;
-      }
-
-      // Add the output dimension corresponding to this input dimension
-      if (outputIdx < outputRank) {
-        group.push_back(outputIdx);
-        outputIdx++;
-      }
-
-      reassociation.push_back(group);
-      inputIdx++;
-    }
-
-    // Collect any remaining inserted dimensions at the end
-    if (outputIdx < outputRank) {
-      // These should all be in axesSet
-      if (!reassociation.empty()) {
-        while (outputIdx < outputRank) {
-          reassociation.back().push_back(outputIdx);
-          outputIdx++;
-        }
-      }
-    }
-
-    // Verify we have the correct number of reassociation groups
-    if (static_cast<int64_t>(reassociation.size()) != inputRank)
-      return rewriter.notifyMatchFailure(
-          op, "reassociation size does not match input rank");
-
-    // Build output shape
     llvm::SmallVector<mlir::OpFoldResult> outputShape;
-    for (int64_t i = 0; i < outputRank; ++i) {
+    for (int64_t i : llvm::seq<int64_t>(outputRank)) {
       if (!outputType.isDynamicDim(i)) {
-        outputShape.push_back(rewriter.getIndexAttr(outputType.getDimSize(i)));
+        // Static dimension: use compile-time size
+        outputShape.push_back(
+            rewriter.getIndexAttr(outputType.getDimSize(i)));
+        continue;
+      }
+
+      // Dynamic dimension: extract from input
+      int64_t srcDim = outDimToInDim[i];
+      const auto &group = (*reassocOpt)[srcDim];
+
+      // For unsqueeze, inserted dims are always size 1 (static)
+      // Only non-inserted dims can be dynamic, and they map directly to input
+      int64_t staticProduct = 1;
+      for (int64_t idx : group)
+        if (!outputType.isDynamicDim(idx))
+          staticProduct *= outputType.getDimSize(idx);
+
+      mlir::Value inputSize =
+          mlir::tensor::DimOp::create(rewriter, loc, data, srcDim);
+      if (staticProduct == 1) {
+        // Direct mapping: output dim = input dim (no inserted size-1 dims)
+        outputShape.push_back(inputSize);
       } else {
-        // For dynamic dims, need to extract from input
-        // Check if this is an inserted dimension (in axes set)
-        if (axesSet.contains(i)) {
-          // Inserted dim, always size 1
-          outputShape.push_back(rewriter.getIndexAttr(1));
-        } else {
-          // Find which input dim this output dim corresponds to
-          int64_t inputDim = -1;
-          for (auto [inputIdx, group] : llvm::enumerate(reassociation)) {
-            if (std::find(group.begin(), group.end(), i) != group.end()) {
-              inputDim = inputIdx;
-              break;
-            }
-          }
-          if (inputDim >= 0) {
-            mlir::Value inputSize =
-                mlir::tensor::DimOp::create(rewriter, loc, data, inputDim);
-            outputShape.push_back(inputSize);
-          } else {
-            return rewriter.notifyMatchFailure(
-                op, "failed to map dynamic output dim to input");
-          }
-        }
+        // Has static size-1 dims in the group, divide them out
+        mlir::Value divisor =
+            mlir::arith::ConstantIndexOp::create(rewriter, loc, staticProduct);
+        mlir::Value dynSize =
+            mlir::arith::DivUIOp::create(rewriter, loc, inputSize, divisor);
+        outputShape.push_back(dynSize);
       }
     }
 
     auto expandOp = mlir::tensor::ExpandShapeOp::create(
-        rewriter, loc, outputType, data, reassociation, outputShape);
+        rewriter, loc, outputType, data, *reassocOpt, outputShape);
     rewriter.replaceOp(op, expandOp.getResult());
 
     return mlir::success();
