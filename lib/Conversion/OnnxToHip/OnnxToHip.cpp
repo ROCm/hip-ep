@@ -30,6 +30,7 @@
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/Support/Debug.h"
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -1903,6 +1904,177 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
 };
 
 //===----------------------------------------------------------------------===//
+// Unsqueeze → standard tensor ops (zero-cost metadata reinterpretation)
+//===----------------------------------------------------------------------===//
+
+/// onnx.Unsqueeze → tensor.expand_shape.
+///
+/// Unsqueeze inserts dimensions of size 1 at specified axes. Like Reshape,
+/// this is a zero-cost metadata operation that only reinterprets shape/strides
+/// without moving data. We lower to tensor.expand_shape which bufferizes to
+/// memref.expand_shape (zero-copy alias).
+///
+/// Strategy: Use getReassociationIndicesForReshape to compute the mapping,
+/// since Unsqueeze is just a special case of Reshape where we insert size-1
+/// dims.
+struct UnsqueezeToStdTensor : public mlir::RewritePattern {
+  UnsqueezeToStdTensor(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Unsqueeze", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    // ONNX Unsqueeze has two operands: data and axes
+    if (op->getNumOperands() != 2)
+      return rewriter.notifyMatchFailure(op,
+                                         "expected 2 operands (data, axes)");
+
+    mlir::Value data = op->getOperand(0);
+    mlir::Value axesValue = op->getOperand(1);
+
+    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+    auto outputType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+
+    if (!inputType || !outputType)
+      return rewriter.notifyMatchFailure(op, "expected ranked tensor types");
+    if (inputType.getElementType() != outputType.getElementType())
+      return rewriter.notifyMatchFailure(op, "element type mismatch");
+
+    mlir::Location loc = op->getLoc();
+    int64_t inputRank = inputType.getRank();
+    int64_t outputRank = outputType.getRank();
+
+    // Unsqueeze always increases rank
+    if (outputRank <= inputRank)
+      return rewriter.notifyMatchFailure(
+          op, "unsqueeze output rank must be greater than input rank");
+
+    // Extract axes values from constant operand
+    llvm::SmallVector<int64_t> axes;
+    if (auto axesDefOp = axesValue.getDefiningOp<mlir::arith::ConstantOp>()) {
+      auto axesAttr =
+          mlir::dyn_cast<mlir::DenseIntElementsAttr>(axesDefOp.getValueAttr());
+      if (!axesAttr)
+        return rewriter.notifyMatchFailure(op,
+                                           "axes must be dense int constant");
+      for (auto val : axesAttr.getValues<int64_t>())
+        axes.push_back(val);
+    } else if (auto axesDefOp = axesValue.getDefiningOp()) {
+      // axes might be from onnx.Constant
+      if (auto axesAttr = mlir::dyn_cast_or_null<mlir::DenseIntElementsAttr>(
+              axesDefOp->getAttrOfType<mlir::ElementsAttr>("value"))) {
+        for (auto val : axesAttr.getValues<int64_t>())
+          axes.push_back(val);
+      } else {
+        return rewriter.notifyMatchFailure(op, "axes must be constant");
+      }
+    } else {
+      return rewriter.notifyMatchFailure(op, "axes must be constant");
+    }
+
+    // Normalize negative axes
+    for (auto &axis : axes) {
+      if (axis < 0)
+        axis += outputRank;
+      if (axis < 0 || axis >= outputRank)
+        return rewriter.notifyMatchFailure(op, "axes value out of range");
+    }
+
+    // Verify the number of inserted axes matches rank difference
+    if (static_cast<int64_t>(axes.size()) != (outputRank - inputRank))
+      return rewriter.notifyMatchFailure(
+          op, "number of axes does not match rank difference");
+
+    // Build reassociation indices based on axes
+    // Reassociation maps each input dimension to a group of output dimensions.
+    // For unsqueeze, each input dim maps to itself plus any inserted dims.
+    //
+    // Example: input [128, 4096], axes=[0, 2] -> output [1, 128, 1, 4096]
+    //   Input dim 0 -> output dims [0, 1]  (inserted 0, original 0)
+    //   Input dim 1 -> output dims [2, 3]  (inserted 2, original 1)
+    llvm::SmallSet<int64_t, 4> axesSet(axes.begin(), axes.end());
+    llvm::SmallVector<mlir::ReassociationIndices> reassociation;
+
+    int64_t inputIdx = 0;
+    int64_t outputIdx = 0;
+
+    while (inputIdx < inputRank) {
+      mlir::ReassociationIndices group;
+
+      // Collect all inserted dimensions before this input dimension
+      while (outputIdx < outputRank && axesSet.contains(outputIdx)) {
+        group.push_back(outputIdx);
+        outputIdx++;
+      }
+
+      // Add the output dimension corresponding to this input dimension
+      if (outputIdx < outputRank) {
+        group.push_back(outputIdx);
+        outputIdx++;
+      }
+
+      reassociation.push_back(group);
+      inputIdx++;
+    }
+
+    // Collect any remaining inserted dimensions at the end
+    if (outputIdx < outputRank) {
+      // These should all be in axesSet
+      if (!reassociation.empty()) {
+        while (outputIdx < outputRank) {
+          reassociation.back().push_back(outputIdx);
+          outputIdx++;
+        }
+      }
+    }
+
+    // Verify we have the correct number of reassociation groups
+    if (static_cast<int64_t>(reassociation.size()) != inputRank)
+      return rewriter.notifyMatchFailure(
+          op, "reassociation size does not match input rank");
+
+    // Build output shape
+    llvm::SmallVector<mlir::OpFoldResult> outputShape;
+    for (int64_t i = 0; i < outputRank; ++i) {
+      if (!outputType.isDynamicDim(i)) {
+        outputShape.push_back(rewriter.getIndexAttr(outputType.getDimSize(i)));
+      } else {
+        // For dynamic dims, need to extract from input
+        // Check if this is an inserted dimension (in axes set)
+        if (axesSet.contains(i)) {
+          // Inserted dim, always size 1
+          outputShape.push_back(rewriter.getIndexAttr(1));
+        } else {
+          // Find which input dim this output dim corresponds to
+          int64_t inputDim = -1;
+          for (auto [inputIdx, group] : llvm::enumerate(reassociation)) {
+            if (std::find(group.begin(), group.end(), i) != group.end()) {
+              inputDim = inputIdx;
+              break;
+            }
+          }
+          if (inputDim >= 0) {
+            mlir::Value inputSize =
+                mlir::tensor::DimOp::create(rewriter, loc, data, inputDim);
+            outputShape.push_back(inputSize);
+          } else {
+            return rewriter.notifyMatchFailure(
+                op, "failed to map dynamic output dim to input");
+          }
+        }
+      }
+    }
+
+    auto expandOp = mlir::tensor::ExpandShapeOp::create(
+        rewriter, loc, outputType, data, reassociation, outputShape);
+    rewriter.replaceOp(op, expandOp.getResult());
+
+    return mlir::success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // convertComputeOps implementation
 //===----------------------------------------------------------------------===//
 
@@ -1927,6 +2099,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   patterns.add<MatMulNBitsToHip>(ctx);
   patterns.add<QMoEToHip>(ctx);
   patterns.add<ReshapeToStdTensor>(ctx);
+  patterns.add<UnsqueezeToStdTensor>(ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
