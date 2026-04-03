@@ -242,7 +242,8 @@ struct Level1MlirPass {
 
     if (timing) {
       auto t_now = Clock::now();
-      fprintf(stderr, "[Session] MLIR bytecode serialization: %.3fs (%zu bytes)\n",
+      fprintf(stderr,
+              "[Session] MLIR bytecode serialization: %.3fs (%zu bytes)\n",
               std::chrono::duration<double>(t_now - t_prev).count(),
               mlir_bytecode.size());
       t_prev = t_now;

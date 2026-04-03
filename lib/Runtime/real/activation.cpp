@@ -60,8 +60,7 @@ struct ActivationCacheKey {
 struct ActivationCacheKeyHash {
   size_t operator()(const ActivationCacheKey &k) const {
     size_t h = std::hash<int64_t>{}(k.num_elements);
-    h ^= std::hash<int64_t>{}(k.data_type) + 0x9e3779b9 + (h << 6) +
-         (h >> 2);
+    h ^= std::hash<int64_t>{}(k.data_type) + 0x9e3779b9 + (h << 6) + (h >> 2);
     h ^= std::hash<int64_t>{}(k.activation_mode) + 0x9e3779b9 + (h << 6) +
          (h >> 2);
     return h;
@@ -160,9 +159,8 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
   }
 
   float alpha = 1.0f, beta = 0.0f;
-  miopenStatus_t st =
-      miopenActivationForward(handle, c->actDesc, &alpha, c->inDesc, input,
-                              &beta, c->outDesc, output);
+  miopenStatus_t st = miopenActivationForward(
+      handle, c->actDesc, &alpha, c->inDesc, input, &beta, c->outDesc, output);
   if (st != miopenStatusSuccess) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_miopenActivationForward: "
                       "miopenActivationForward failed (%d)\n",

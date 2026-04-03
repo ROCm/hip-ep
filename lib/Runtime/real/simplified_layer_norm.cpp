@@ -36,8 +36,7 @@ struct T5NormCacheKey {
 struct T5NormCacheKeyHash {
   size_t operator()(const T5NormCacheKey &k) const {
     size_t h = std::hash<int64_t>{}(k.num_rows);
-    h ^= std::hash<int64_t>{}(k.hidden_dim) + 0x9e3779b9 + (h << 6) +
-         (h >> 2);
+    h ^= std::hash<int64_t>{}(k.hidden_dim) + 0x9e3779b9 + (h << 6) + (h >> 2);
     h ^= std::hash<int>{}(static_cast<int>(k.data_type)) + 0x9e3779b9 +
          (h << 6) + (h >> 2);
     return h;
@@ -51,8 +50,7 @@ struct T5NormCacheEntry {
 static std::unordered_map<T5NormCacheKey, T5NormCacheEntry, T5NormCacheKeyHash>
     g_t5norm_cache;
 
-static const T5NormCacheEntry *
-queryOrCreateT5Norm(const T5NormCacheKey &key) {
+static const T5NormCacheEntry *queryOrCreateT5Norm(const T5NormCacheKey &key) {
   auto it = g_t5norm_cache.find(key);
   if (it != g_t5norm_cache.end())
     return &it->second;
@@ -78,7 +76,7 @@ queryOrCreateT5Norm(const T5NormCacheKey &key) {
   }
 
   int x_dims[] = {static_cast<int>(key.num_rows),
-                   static_cast<int>(key.hidden_dim)};
+                  static_cast<int>(key.hidden_dim)};
   int x_strides[] = {static_cast<int>(key.hidden_dim), 1};
   miopenSetTensorDescriptor(e.xDesc, key.data_type, 2, x_dims, x_strides);
   miopenSetTensorDescriptor(e.yDesc, key.data_type, 2, x_dims, x_strides);
@@ -164,8 +162,9 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
   T5NormCacheKey key{num_rows, hidden_dim, data_type};
   const T5NormCacheEntry *c = queryOrCreateT5Norm(key);
   if (!c) {
-    fprintf(stderr,
-            "wrap_miopenT5LayerNormForward: descriptor cache creation failed\n");
+    fprintf(
+        stderr,
+        "wrap_miopenT5LayerNormForward: descriptor cache creation failed\n");
     return -1;
   }
 

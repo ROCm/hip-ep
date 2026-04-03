@@ -59,10 +59,10 @@ static miopenTensorOp_t hipdnn_ep_to_miopen_op(int64_t tensor_op) {
 // every element-wise inference call.
 
 struct OpTensorCacheKey {
-  int64_t lhs_n, lhs_c, lhs_h, lhs_w;   // lhs 4D shape
-  int64_t rhs_n, rhs_c, rhs_h, rhs_w;   // rhs 4D shape
-  int64_t out_n, out_c, out_h, out_w;    // output 4D shape
-  int64_t data_type;                      // HIPDNN_EP_DATATYPE_* enum value
+  int64_t lhs_n, lhs_c, lhs_h, lhs_w; // lhs 4D shape
+  int64_t rhs_n, rhs_c, rhs_h, rhs_w; // rhs 4D shape
+  int64_t out_n, out_c, out_h, out_w; // output 4D shape
+  int64_t data_type;                  // HIPDNN_EP_DATATYPE_* enum value
   bool operator==(const OpTensorCacheKey &o) const {
     return lhs_n == o.lhs_n && lhs_c == o.lhs_c && lhs_h == o.lhs_h &&
            lhs_w == o.lhs_w && rhs_n == o.rhs_n && rhs_c == o.rhs_c &&
@@ -127,14 +127,14 @@ queryOrCreateOpTensor(const OpTensorCacheKey &key) {
   }
 
   if (miopenSet4dTensorDescriptor(e.aDesc, dt, (int)key.lhs_n, (int)key.lhs_c,
-                                  (int)key.lhs_h, (int)key.lhs_w) !=
-          miopenStatusSuccess ||
+                                  (int)key.lhs_h,
+                                  (int)key.lhs_w) != miopenStatusSuccess ||
       miopenSet4dTensorDescriptor(e.bDesc, dt, (int)key.rhs_n, (int)key.rhs_c,
-                                  (int)key.rhs_h, (int)key.rhs_w) !=
-          miopenStatusSuccess ||
+                                  (int)key.rhs_h,
+                                  (int)key.rhs_w) != miopenStatusSuccess ||
       miopenSet4dTensorDescriptor(e.cDesc, dt, (int)key.out_n, (int)key.out_c,
-                                  (int)key.out_h, (int)key.out_w) !=
-          miopenStatusSuccess) {
+                                  (int)key.out_h,
+                                  (int)key.out_w) != miopenStatusSuccess) {
     miopenDestroyTensorDescriptor(e.cDesc);
     miopenDestroyTensorDescriptor(e.bDesc);
     miopenDestroyTensorDescriptor(e.aDesc);
@@ -192,8 +192,8 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
 
   miopenTensorOp_t miopen_op = hipdnn_ep_to_miopen_op(tensor_op);
 
-  OpTensorCacheKey key{lhs_n, lhs_c, lhs_h, lhs_w, rhs_n, rhs_c,
-                       rhs_h, rhs_w, out_n, out_c, out_h, out_w, data_type};
+  OpTensorCacheKey key{lhs_n, lhs_c, lhs_h, lhs_w, rhs_n, rhs_c,    rhs_h,
+                       rhs_w, out_n, out_c, out_h, out_w, data_type};
   const OpTensorCacheEntry *c = queryOrCreateOpTensor(key);
   if (!c) {
     fprintf(stderr, "wrap_miopenOpTensor: descriptor cache creation failed\n");
@@ -206,9 +206,9 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                     "(op=%s, alpha1=%.1f, alpha2=%.1f, beta=%.1f)\n",
                     op_name, alpha1, alpha2, beta);
 
-  miopenStatus_t st = miopenOpTensor(handle, miopen_op, &alpha1, c->aDesc, lhs,
-                                     &alpha2, c->bDesc, rhs, &beta, c->cDesc,
-                                     output);
+  miopenStatus_t st =
+      miopenOpTensor(handle, miopen_op, &alpha1, c->aDesc, lhs, &alpha2,
+                     c->bDesc, rhs, &beta, c->cDesc, output);
   if (st != miopenStatusSuccess) {
     fprintf(stderr, "wrap_miopenOpTensor: miopenOpTensor failed (%d)\n", st);
     return -1;

@@ -7,6 +7,10 @@
 
 // Mock type definitions for testing without GPU
 typedef void *hipStream_t;
+typedef void *hipEvent_t;
+typedef void *hipGraph_t;
+typedef void *hipGraphExec_t;
+typedef void *hipGraphNode_t;
 typedef void *miopenHandle_t;
 typedef void *hipblasLtHandle_t;
 typedef int hipError_t;
@@ -25,6 +29,7 @@ struct hipDeviceProp_t {
 #define hipMemcpyHostToDevice 0
 #define hipMemcpyDeviceToHost 1
 #define hipHostMallocDefault 0
+#define hipStreamCaptureModeGlobal 0
 
 // Forward declarations for mock GPU functions (defined in mock_gpu.cpp)
 extern "C" hipError_t hipGetDeviceCount(int *count);
@@ -42,6 +47,21 @@ extern "C" hipError_t hipMemcpy(void *dst, const void *src, size_t size,
                                 int kind);
 extern "C" hipError_t hipMemcpyAsync(void *dst, const void *src, size_t size,
                                      int kind, hipStream_t stream);
+extern "C" hipError_t hipEventCreate(hipEvent_t *event);
+extern "C" hipError_t hipEventDestroy(hipEvent_t event);
+extern "C" hipError_t hipEventRecord(hipEvent_t event, hipStream_t stream);
+extern "C" hipError_t hipEventElapsedTime(float *ms, hipEvent_t start,
+                                          hipEvent_t stop);
+extern "C" hipError_t hipStreamBeginCapture(hipStream_t stream, int mode);
+extern "C" hipError_t hipStreamEndCapture(hipStream_t stream,
+                                          hipGraph_t *graph);
+extern "C" hipError_t hipGraphGetNodes(hipGraph_t graph, hipGraphNode_t *nodes,
+                                       size_t *numNodes);
+extern "C" hipError_t hipGraphInstantiate(hipGraphExec_t *exec,
+                                          hipGraph_t graph, void *errNode,
+                                          void *logBuffer, size_t bufferSize);
+extern "C" hipError_t hipGraphLaunch(hipGraphExec_t exec, hipStream_t stream);
+extern "C" const char *hipGetErrorString(hipError_t error);
 extern "C" miopenStatus_t miopenCreate(miopenHandle_t *handle);
 extern "C" miopenStatus_t miopenDestroy(miopenHandle_t handle);
 extern "C" miopenStatus_t miopenSetStream(miopenHandle_t handle,
