@@ -603,7 +603,8 @@ int main(int argc, char *argv[]) {
     mo.print_help(argv[0]);
     return 1;
   }
-  std::string l2norm_arg = trim_string(mo.get<std::string>("l2norm"));
+
+  std::vector<std::string> l2norm_arg = mo.get_vector<std::string>("l2norm");
   std::string model_path_str = trim_string(mo.get<std::string>("model"));
   const bool no_ep = mo.get<bool>("no-ep");
   const int dump_level = mo.get<int>("dump-level");
@@ -612,16 +613,9 @@ int main(int argc, char *argv[]) {
   const bool use_input_files = !input_dir_str.empty();
   const int graph_optimization_level = mo.get<int>("graph-optimization-level");
 
-  if (!l2norm_arg.empty()) {
-    const auto sep = l2norm_arg.find(',');
-    if (sep == std::string::npos) {
-      std::cerr << "Error: --l2norm expects dir1,dir2\n\n";
-      mo.print_help(argv[0]);
-      return 1;
-    }
-    const std::string dir_left = trim_string(l2norm_arg.substr(0, sep));
-    const std::string dir_right = trim_string(l2norm_arg.substr(sep + 1));
-    return run_l2norm_output_dumps(dir_left, dir_right);
+  if ((l2norm_arg.size() == 2) && !l2norm_arg[0].empty() &&
+      !l2norm_arg[1].empty()) {
+    return run_l2norm_output_dumps(l2norm_arg[0], l2norm_arg[1]);
   }
 
   if (model_path_str.empty()) {
