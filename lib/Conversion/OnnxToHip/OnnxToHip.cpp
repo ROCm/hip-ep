@@ -1785,6 +1785,67 @@ struct GatherToHip : public mlir::RewritePattern {
 
 namespace {
 
+/// Helper: Validate common requirements for Unsqueeze/Squeeze operations.
+///
+/// Both operations require:
+/// 1. Exactly 2 operands (data, axes)
+/// 2. Ranked tensor types for input and output
+/// 3. Matching element types
+/// 4. Constant axes (for zero-cost implementation)
+///
+/// Returns failure with informative error message if any validation fails.
+/// On success, populates data and axes output parameters.
+mlir::LogicalResult
+validateSqueezeUnsqueezeOp(mlir::Operation *op, mlir::PatternRewriter &rewriter,
+                           const char *tensorOpName, mlir::Value &data,
+                           mlir::Value &axes,
+                           mlir::RankedTensorType &inputType,
+                           mlir::RankedTensorType &outputType) {
+  // Validate operand count
+  if (op->getNumOperands() != 2)
+    return rewriter.notifyMatchFailure(op,
+                                       "expected 2 operands (data, axes)");
+
+  data = op->getOperand(0);
+  axes = op->getOperand(1);
+
+  // Validate tensor types
+  inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+  outputType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!inputType || !outputType)
+    return rewriter.notifyMatchFailure(op, "expected ranked tensor types");
+  if (inputType.getElementType() != outputType.getElementType())
+    return rewriter.notifyMatchFailure(op, "element type mismatch");
+
+  // Validate axes is constant (required for zero-cost implementation)
+  // Dynamic axes would require runtime shape computation
+  auto axesDefOp = axes.getDefiningOp();
+  if (!axesDefOp) {
+    std::string msg = "axes must be defined by a constant operation (block "
+                      "argument not supported). Dynamic axes would require "
+                      "runtime shape computation and cannot use zero-cost tensor.";
+    msg += tensorOpName;
+    return rewriter.notifyMatchFailure(op, msg);
+  }
+
+  // Check if it's arith.constant or onnx.Constant
+  bool isConstant = mlir::isa<mlir::arith::ConstantOp>(axesDefOp) ||
+                    axesDefOp->hasAttr("value");
+
+  if (!isConstant) {
+    std::string msg =
+        "axes must be constant (arith.constant or onnx.Constant). "
+        "Dynamic axes would require runtime shape computation and "
+        "cannot use zero-cost tensor.";
+    msg += tensorOpName;
+    msg += " approach";
+    return rewriter.notifyMatchFailure(op, msg);
+  }
+
+  return mlir::success();
+}
+
 /// Helper: Build output shape for expand_shape operations.
 /// Used by both Reshape and Unsqueeze when expanding dimensions.
 ///
@@ -1975,47 +2036,12 @@ struct UnsqueezeToStdTensor : public mlir::RewritePattern {
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override {
-    // Validate operands
-    if (op->getNumOperands() != 2)
-      return rewriter.notifyMatchFailure(op,
-                                         "expected 2 operands (data, axes)");
-
-    mlir::Value data = op->getOperand(0);
-    mlir::Value axesValue = op->getOperand(1);
-    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
-    auto outputType =
-        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    if (!inputType || !outputType)
-      return rewriter.notifyMatchFailure(op, "expected ranked tensor types");
-    if (inputType.getElementType() != outputType.getElementType())
-      return rewriter.notifyMatchFailure(op, "element type mismatch");
-
-    // Check if axes is constant (required for zero-cost implementation)
-    // Dynamic axes would require runtime shape computation and cannot use
-    // the zero-cost tensor.expand_shape approach
-    auto axesDefOp = axesValue.getDefiningOp();
-    if (!axesDefOp) {
-      return rewriter.notifyMatchFailure(
-          op, "axes must be defined by a constant operation (block argument "
-              "not supported). Dynamic axes would require runtime shape "
-              "computation and cannot use zero-cost tensor.expand_shape");
-    }
-
-    // Check if it's arith.constant or onnx.Constant
-    bool isConstant = false;
-    if (mlir::isa<mlir::arith::ConstantOp>(axesDefOp)) {
-      isConstant = true;
-    } else if (axesDefOp->hasAttr("value")) {
-      // onnx.Constant has a "value" attribute
-      isConstant = true;
-    }
-
-    if (!isConstant) {
-      return rewriter.notifyMatchFailure(
-          op, "axes must be constant (arith.constant or onnx.Constant). "
-              "Dynamic axes would require runtime shape computation and "
-              "cannot use zero-cost tensor.expand_shape approach");
-    }
+    // Validate operands, types, and constant axes requirement
+    mlir::Value data, axes;
+    mlir::RankedTensorType inputType, outputType;
+    if (failed(validateSqueezeUnsqueezeOp(op, rewriter, "expand_shape", data,
+                                          axes, inputType, outputType)))
+      return mlir::failure();
 
     // Unsqueeze is just a special case of Reshape (inserting size-1 dims)
     // Use MLIR's built-in tool to compute reassociation
@@ -2060,47 +2086,12 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override {
-    // Validate operands
-    if (op->getNumOperands() != 2)
-      return rewriter.notifyMatchFailure(op,
-                                         "expected 2 operands (data, axes)");
-
-    mlir::Value data = op->getOperand(0);
-    mlir::Value axesValue = op->getOperand(1);
-    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
-    auto outputType =
-        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    if (!inputType || !outputType)
-      return rewriter.notifyMatchFailure(op, "expected ranked tensor types");
-    if (inputType.getElementType() != outputType.getElementType())
-      return rewriter.notifyMatchFailure(op, "element type mismatch");
-
-    // Check if axes is constant (required for zero-cost implementation)
-    // Dynamic axes would require runtime shape computation and cannot use
-    // the zero-cost tensor.collapse_shape approach
-    auto axesDefOp = axesValue.getDefiningOp();
-    if (!axesDefOp) {
-      return rewriter.notifyMatchFailure(
-          op, "axes must be defined by a constant operation (block argument "
-              "not supported). Dynamic axes would require runtime shape "
-              "computation and cannot use zero-cost tensor.collapse_shape");
-    }
-
-    // Check if it's arith.constant or onnx.Constant
-    bool isConstant = false;
-    if (mlir::isa<mlir::arith::ConstantOp>(axesDefOp)) {
-      isConstant = true;
-    } else if (axesDefOp->hasAttr("value")) {
-      // onnx.Constant has a "value" attribute
-      isConstant = true;
-    }
-
-    if (!isConstant) {
-      return rewriter.notifyMatchFailure(
-          op, "axes must be constant (arith.constant or onnx.Constant). "
-              "Dynamic axes would require runtime shape computation and "
-              "cannot use zero-cost tensor.collapse_shape approach");
-    }
+    // Validate operands, types, and constant axes requirement
+    mlir::Value data, axes;
+    mlir::RankedTensorType inputType, outputType;
+    if (failed(validateSqueezeUnsqueezeOp(op, rewriter, "collapse_shape", data,
+                                          axes, inputType, outputType)))
+      return mlir::failure();
 
     // Squeeze is the inverse of Unsqueeze (removing size-1 dims)
     // Use MLIR's built-in tool to compute reassociation
