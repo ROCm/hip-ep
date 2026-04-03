@@ -11,17 +11,22 @@
 Usage: hip-onnx-runner.exe [options]
 
 Options:
--m, --model                 Path to .onnx model
--L, --l2norm                Compare two dirs: dir1,dir2 (same *.bin set); each
-file must be ..._<type>.bin (fp32,fp16,i64,...); element-wise L2; no -m -n,
---no-ep                 CPU only; skip EP registration (flag) -d, --dump-level
-0=off, 1=dump inputs to <stem>_i_dump/, 2=outputs to <stem>_o_dump/, 3=both
-(default: 0) -s, --seed                  RNG seed for random inputs (default:
-42) -i, --input-dir             Directory with input_<idx>_<name>_<type>.bin
-only; empty = random inputs -o, --graph-optimization-level
-session_options.SetGraphOptimizationLevel(level),   0 = ORT_DISABLE_ALL,    1 =
-ORT_ENABLE_BASIC,    2 = ORT_ENABLE_EXTENDED,   99 = ORT_ENABLE_ALL,   -1 =
-default, not call this function  (default: -1)
+-m, --model               Path to .onnx model
+-L, --l2norm              Compare two dirs: dir1,dir2 (same *.bin set); each
+ file must be ..._<type>.bin (fp32,fp16,i64,...); element-wise L2; no -m
+-n,--no-ep                CPU only; skip EP registration (flag)
+-d, --dump-level 0=off, 1=dump inputs to <stem>_i_dump/,
+  2=outputs to <stem>_o_dump/, 3=both (default: 0)
+-s, --seed                RNG seed for random inputs (default:42)
+-i, --input-dir           Directory with input_<idx>_<name>_<type>.bin
+ only; empty = random inputs
+-o, --graph-opt-level
+ session_options.SetGraphOptimizationLevel(level),
+ 0 = ORT_DISABLE_ALL,
+ 1 = ORT_ENABLE_BASIC,
+ 2 = ORT_ENABLE_EXTENDED,
+ 99 = ORT_ENABLE_ALL,
+ -1 = default, not call this function  (default: -1)
 */
 //===----------------------------------------------------------------------===//
 
@@ -586,8 +591,8 @@ int main(int argc, char *argv[]) {
                 "Directory with input_<idx>_<name>_<type>.bin only; empty = "
                 "random inputs",
                 "");
-  mo.add_option("o", "graph-optimization-level",
-                " session_options.SetGraphOptimizationLevel(level), "
+  mo.add_option("o", "graph-opt-level",
+                "session_options.SetGraphOptimizationLevel(level), "
                 "  0 = ORT_DISABLE_ALL,  "
                 "  1 = ORT_ENABLE_BASIC,  "
                 "  2 = ORT_ENABLE_EXTENDED,  "
@@ -615,7 +620,7 @@ int main(int argc, char *argv[]) {
   std::mt19937 rng(mo.get<unsigned int>("seed"));
   std::string input_dir_str = trim_string(mo.get<std::string>("input-dir"));
   const bool use_input_files = !input_dir_str.empty();
-  const int graph_optimization_level = mo.get<int>("graph-optimization-level");
+  const int graph_optimization_level = mo.get<int>("graph-opt-level");
 
   if ((l2norm_arg.size() == 2) && !l2norm_arg[0].empty() &&
       !l2norm_arg[1].empty()) {
