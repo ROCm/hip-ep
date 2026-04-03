@@ -12,7 +12,7 @@
 #include "hip_custom_kernels.h"
 
 static constexpr int GQA_THREADS = 256;
-static constexpr int WAVE_SIZE = 32;
+static constexpr int WAVE_SIZE = 32;  // RDNA wave32; not portable to CDNA/wave64
 static constexpr float LOG2E = 1.4426950408889634f;
 
 // =========================================================================
@@ -670,14 +670,25 @@ typedef _Float16 half16 __attribute__((ext_vector_type(16)));
 typedef float    float8 __attribute__((ext_vector_type(8)));
 #define HALF16(pointer) (reinterpret_cast<half16*>((void *)&(pointer))[0])
 
-// =============================================================================
-// Fused GQA Decode Kernel (sq == 1, d == 128)
-// =============================================================================
-// One block per (batch, head_q). 128 threads = d dimensions = 4 waves.
-// Cooperative dot product via warp shuffle + cross-wave LDS reduction.
-// Online softmax with exp2f. Reads Q in BSHD, KV cache in BNSD.
+//===----------------------------------------------------------------------===//
+// Fused GQA Decode Kernel (sq == 1, d in {64, 128, 256})
+//===----------------------------------------------------------------------===//
+//
+// Single-token decode attention: one block per (batch, head_q), D threads.
+// Each thread owns one element of the d-dimensional head.
+//
+// Algorithm:
+//   For each KV cache position s in [0, skv):
+//     1. Cooperative dot product Q[tid] * K[s,tid] via warp shuffle reduction
+//        + cross-wave LDS reduction (NUM_WAVES partial sums)
+//     2. Online softmax in log2e space: score *= scale * LOG2E, then exp2f
+//     3. Accumulate weighted V: acc += softmax_weight * V[s,tid]
+//
+// Assumes RDNA wave32 (__shfl_xor with masks 16,8,4,2,1).
+// Reads Q in BSHD layout, KV cache in BNSD layout.
 
-__global__ void __launch_bounds__(128)
+template <int D>
+__global__ void __launch_bounds__(D)
 fused_gqa_decode_kernel(
     const __half* __restrict__ Q_roped,
     const __half* __restrict__ Kcache,
@@ -686,14 +697,18 @@ fused_gqa_decode_kernel(
     int H, int G, int d, int skv, int max_seq,
     float scale)
 {
+    constexpr int NUM_WAVES = D / WAVE_SIZE;
+
     const int head_q  = __builtin_amdgcn_readfirstlane(blockIdx.x % H);
     const int batch   = __builtin_amdgcn_readfirstlane(blockIdx.x / H);
     const int head_kv = __builtin_amdgcn_readfirstlane(head_q / (H / G));
     const int tid     = threadIdx.x;
-    const int wave_id = tid / 32;
-    const int lane_id = tid % 32;
+    const int wave_id = tid / WAVE_SIZE;
+    const int lane_id = tid % WAVE_SIZE;
 
-    __shared__ float smem[4];
+    __shared__ float smem[NUM_WAVES];
+
+    const float scale_log2e = scale * LOG2E;
 
     const float Q_val = __half2float(Q_roped[(batch * H + head_q) * d + tid]);
 
@@ -717,7 +732,10 @@ fused_gqa_decode_kernel(
             smem[wave_id] = dot;
         __syncthreads();
 
-        float score = (smem[0] + smem[1] + smem[2] + smem[3]) * scale;
+        float score = 0.0f;
+        for (int w = 0; w < NUM_WAVES; ++w)
+            score += smem[w];
+        score *= scale_log2e;
 
         __syncthreads();
 
@@ -974,19 +992,35 @@ fused_gqa_prefill_kernel(
     }
 }
 
-// Fused decode launcher
+// Fused decode launcher -- dispatches to the template matching d
 extern "C" int hip_gqa_fused_decode(
     void* stream_ptr, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int H, int G, int d, int skv, int max_seq,
     float scale) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   dim3 grid(B * H, 1);
-  fused_gqa_decode_kernel<<<grid, 128, 0, stream>>>(
-      static_cast<const __half*>(Q),
-      static_cast<const __half*>(Kcache),
-      static_cast<const __half*>(Vcache),
-      static_cast<__half*>(O),
-      H, G, d, skv, max_seq, scale);
+  const __half* hQ = static_cast<const __half*>(Q);
+  const __half* hK = static_cast<const __half*>(Kcache);
+  const __half* hV = static_cast<const __half*>(Vcache);
+  __half* hO = static_cast<__half*>(O);
+  switch (d) {
+    case 64:
+      fused_gqa_decode_kernel<64><<<grid, 64, 0, stream>>>(
+          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale);
+      break;
+    case 128:
+      fused_gqa_decode_kernel<128><<<grid, 128, 0, stream>>>(
+          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale);
+      break;
+    case 256:
+      fused_gqa_decode_kernel<256><<<grid, 256, 0, stream>>>(
+          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale);
+      break;
+    default:
+      fprintf(stderr, "hip_gqa_fused_decode: unsupported d=%d "
+              "(must be 64, 128, or 256)\n", d);
+      return -1;
+  }
   return hipSuccess;
 }
 
