@@ -1780,6 +1780,82 @@ struct GatherToHip : public mlir::RewritePattern {
 };
 
 //===----------------------------------------------------------------------===//
+// Shape Operations Helpers (Reshape, Unsqueeze, Squeeze)
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+/// Helper: Build output shape for expand_shape operations.
+/// Used by both Reshape and Unsqueeze when expanding dimensions.
+///
+/// Algorithm:
+/// 1. Precompute outDimToInDim mapping: output dim i → source input dim
+/// 2. For each output dimension:
+///    - Static dims: use compile-time size from outputType
+///    - Dynamic dims: extract from input, accounting for static products
+///
+/// Example: input [128, ?], output [1, 128, ?, 1]
+///   reassoc = [[0, 1], [2, 3]]
+///   outDimToInDim = [0, 0, 1, 1]  (output dims 0,1 from input 0; 2,3 from input 1)
+///   - output[0]=1 (static)
+///   - output[1]=128 (static)
+///   - output[2]=input[1] (dynamic, extract via DimOp)
+///   - output[3]=1 (static)
+llvm::SmallVector<mlir::OpFoldResult>
+buildExpandShapeOutputShape(mlir::PatternRewriter &rewriter, mlir::Location loc,
+                            mlir::Value data, mlir::RankedTensorType outputType,
+                            llvm::ArrayRef<mlir::ReassociationIndices> reassoc) {
+  int64_t outputRank = outputType.getRank();
+
+  // Precompute mapping: output dim → input dim (O(1) lookup)
+  llvm::SmallVector<int64_t> outDimToInDim(outputRank, -1);
+  for (auto [g, group] : llvm::enumerate(reassoc))
+    for (int64_t idx : group)
+      outDimToInDim[idx] = g;
+
+  llvm::SmallVector<mlir::OpFoldResult> outputShape;
+  for (int64_t i : llvm::seq<int64_t>(outputRank)) {
+    if (!outputType.isDynamicDim(i)) {
+      // Static dimension: use compile-time size
+      outputShape.push_back(
+          rewriter.getIndexAttr(outputType.getDimSize(i)));
+      continue;
+    }
+
+    // Dynamic dimension: extract from input
+    int64_t srcDim = outDimToInDim[i];
+    const auto &group = reassoc[srcDim];
+
+    // Compute static product of other dims in this group
+    // For unsqueeze: inserted dims are size 1 (static)
+    // For reshape: may have multiple static dims in group
+    int64_t staticProduct = 1;
+    for (int64_t idx : group)
+      if (!outputType.isDynamicDim(idx))
+        staticProduct *= outputType.getDimSize(idx);
+
+    mlir::Value inputSize =
+        mlir::tensor::DimOp::create(rewriter, loc, data, srcDim);
+    if (staticProduct == 1) {
+      // Direct mapping: output dim = input dim (no static dims in group)
+      outputShape.push_back(inputSize);
+    } else {
+      // Has static dims in group, divide them out
+      // Example: input[128*?] → output[128, ?]: output[1] = input[0] / 128
+      mlir::Value divisor =
+          mlir::arith::ConstantIndexOp::create(rewriter, loc, staticProduct);
+      mlir::Value dynSize =
+          mlir::arith::DivUIOp::create(rewriter, loc, inputSize, divisor);
+      outputShape.push_back(dynSize);
+    }
+  }
+
+  return outputShape;
+}
+
+} // namespace
+
+//===----------------------------------------------------------------------===//
 // Reshape → standard tensor ops (zero-cost metadata reinterpretation)
 //===----------------------------------------------------------------------===//
 
@@ -1810,11 +1886,13 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
     int64_t inputRank = inputType.getRank();
     int64_t outputRank = outputType.getRank();
 
+    // No-op: same type
     if (inputType == outputType) {
       rewriter.replaceOp(op, data);
       return mlir::success();
     }
 
+    // Different rank: expand or collapse
     if (outputRank != inputRank) {
       auto reassocOpt =
           mlir::getReassociationIndicesForReshape(inputType, outputType);
@@ -1823,41 +1901,14 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
             op, "cannot compute reshape reassociation");
 
       if (outputRank > inputRank) {
-        llvm::SmallVector<int64_t> outDimToInDim(outputRank, -1);
-        for (auto [g, group] : llvm::enumerate(*reassocOpt))
-          for (int64_t idx : group)
-            outDimToInDim[idx] = g;
-
-        llvm::SmallVector<mlir::OpFoldResult> outputShape;
-        for (int64_t i : llvm::seq<int64_t>(outputRank)) {
-          if (!outputType.isDynamicDim(i)) {
-            outputShape.push_back(
-                rewriter.getIndexAttr(outputType.getDimSize(i)));
-            continue;
-          }
-          int64_t srcDim = outDimToInDim[i];
-          const auto &group = (*reassocOpt)[srcDim];
-          int64_t staticProduct = 1;
-          for (int64_t idx : group)
-            if (!outputType.isDynamicDim(idx))
-              staticProduct *= outputType.getDimSize(idx);
-          mlir::Value inputSize =
-              mlir::tensor::DimOp::create(rewriter, loc, data, srcDim);
-          if (staticProduct == 1) {
-            outputShape.push_back(inputSize);
-          } else {
-            mlir::Value divisor = mlir::arith::ConstantIndexOp::create(
-                rewriter, loc, staticProduct);
-            mlir::Value dynSize =
-                mlir::arith::DivUIOp::create(rewriter, loc, inputSize, divisor);
-            outputShape.push_back(dynSize);
-          }
-        }
-
+        // Expand: use shared helper to build output shape
+        auto outputShape = buildExpandShapeOutputShape(
+            rewriter, loc, data, outputType, *reassocOpt);
         auto expandOp = mlir::tensor::ExpandShapeOp::create(
             rewriter, loc, outputType, data, *reassocOpt, outputShape);
         rewriter.replaceOp(op, expandOp.getResult());
       } else {
+        // Collapse: no dynamic shape computation needed
         auto collapseOp = mlir::tensor::CollapseShapeOp::create(
             rewriter, loc, outputType, data, *reassocOpt);
         rewriter.replaceOp(op, collapseOp.getResult());
@@ -1933,7 +1984,6 @@ struct UnsqueezeToStdTensor : public mlir::RewritePattern {
     auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
     auto outputType =
         mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
-
     if (!inputType || !outputType)
       return rewriter.notifyMatchFailure(op, "expected ranked tensor types");
     if (inputType.getElementType() != outputType.getElementType())
@@ -1947,49 +1997,10 @@ struct UnsqueezeToStdTensor : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "cannot compute unsqueeze reassociation");
 
-    // Build output shape using the same logic as Reshape
-    // Precompute mapping from output dim to input dim for O(1) lookup
+    // Build output shape using shared helper
     mlir::Location loc = op->getLoc();
-    int64_t outputRank = outputType.getRank();
-    llvm::SmallVector<int64_t> outDimToInDim(outputRank, -1);
-    for (auto [g, group] : llvm::enumerate(*reassocOpt))
-      for (int64_t idx : group)
-        outDimToInDim[idx] = g;
-
-    llvm::SmallVector<mlir::OpFoldResult> outputShape;
-    for (int64_t i : llvm::seq<int64_t>(outputRank)) {
-      if (!outputType.isDynamicDim(i)) {
-        // Static dimension: use compile-time size
-        outputShape.push_back(
-            rewriter.getIndexAttr(outputType.getDimSize(i)));
-        continue;
-      }
-
-      // Dynamic dimension: extract from input
-      int64_t srcDim = outDimToInDim[i];
-      const auto &group = (*reassocOpt)[srcDim];
-
-      // For unsqueeze, inserted dims are always size 1 (static)
-      // Only non-inserted dims can be dynamic, and they map directly to input
-      int64_t staticProduct = 1;
-      for (int64_t idx : group)
-        if (!outputType.isDynamicDim(idx))
-          staticProduct *= outputType.getDimSize(idx);
-
-      mlir::Value inputSize =
-          mlir::tensor::DimOp::create(rewriter, loc, data, srcDim);
-      if (staticProduct == 1) {
-        // Direct mapping: output dim = input dim (no inserted size-1 dims)
-        outputShape.push_back(inputSize);
-      } else {
-        // Has static size-1 dims in the group, divide them out
-        mlir::Value divisor =
-            mlir::arith::ConstantIndexOp::create(rewriter, loc, staticProduct);
-        mlir::Value dynSize =
-            mlir::arith::DivUIOp::create(rewriter, loc, inputSize, divisor);
-        outputShape.push_back(dynSize);
-      }
-    }
+    auto outputShape = buildExpandShapeOutputShape(
+        rewriter, loc, data, outputType, *reassocOpt);
 
     auto expandOp = mlir::tensor::ExpandShapeOp::create(
         rewriter, loc, outputType, data, *reassocOpt, outputShape);
