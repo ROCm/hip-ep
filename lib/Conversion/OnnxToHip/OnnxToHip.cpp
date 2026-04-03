@@ -2011,6 +2011,60 @@ struct UnsqueezeToStdTensor : public mlir::RewritePattern {
 };
 
 //===----------------------------------------------------------------------===//
+// Squeeze → standard tensor ops (zero-cost metadata reinterpretation)
+//===----------------------------------------------------------------------===//
+
+/// onnx.Squeeze → tensor.collapse_shape.
+///
+/// Squeeze removes dimensions of size 1 at specified axes. Like Reshape and
+/// Unsqueeze, this is a zero-cost metadata operation that only reinterprets
+/// shape/strides without moving data. We lower to tensor.collapse_shape which
+/// bufferizes to memref.collapse_shape (zero-copy alias).
+///
+/// Strategy: Squeeze is the inverse of Unsqueeze (removing size-1 dims).
+/// Use MLIR's built-in getReassociationIndicesForReshape utility to compute
+/// reassociation, then use tensor.collapse_shape (no dynamic shape computation
+/// needed for collapse operations).
+struct SqueezeToStdTensor : public mlir::RewritePattern {
+  SqueezeToStdTensor(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Squeeze", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    // Validate operands
+    if (op->getNumOperands() != 2)
+      return rewriter.notifyMatchFailure(op,
+                                         "expected 2 operands (data, axes)");
+
+    mlir::Value data = op->getOperand(0);
+    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+    auto outputType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!inputType || !outputType)
+      return rewriter.notifyMatchFailure(op, "expected ranked tensor types");
+    if (inputType.getElementType() != outputType.getElementType())
+      return rewriter.notifyMatchFailure(op, "element type mismatch");
+
+    // Squeeze is the inverse of Unsqueeze (removing size-1 dims)
+    // Use MLIR's built-in tool to compute reassociation
+    auto reassocOpt =
+        mlir::getReassociationIndicesForReshape(inputType, outputType);
+    if (!reassocOpt)
+      return rewriter.notifyMatchFailure(
+          op, "cannot compute squeeze reassociation");
+
+    // Collapse: no dynamic shape computation needed (collapse is always safe)
+    mlir::Location loc = op->getLoc();
+    auto collapseOp = mlir::tensor::CollapseShapeOp::create(
+        rewriter, loc, outputType, data, *reassocOpt);
+    rewriter.replaceOp(op, collapseOp.getResult());
+
+    return mlir::success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // convertComputeOps implementation
 //===----------------------------------------------------------------------===//
 
@@ -2036,6 +2090,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   patterns.add<QMoEToHip>(ctx);
   patterns.add<ReshapeToStdTensor>(ctx);
   patterns.add<UnsqueezeToStdTensor>(ctx);
+  patterns.add<SqueezeToStdTensor>(ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
