@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "cache_utils.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
@@ -15,7 +16,8 @@
 // Explicit mapping from backend-independent HIPDNN_EP_DATATYPE_* enum to
 // MIOpen-specific miopenDataType_t. No static_cast -- our enum values are
 // independent of any library.
-static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type) {
+static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type, bool *ok) {
+  *ok = true;
   switch (data_type) {
   case HIPDNN_EP_DATATYPE_FLOAT:
     return miopenFloat;
@@ -26,13 +28,15 @@ static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type) {
   default:
     fprintf(stderr, "[REAL] unsupported data_type %lld for MIOpen\n",
             (long long)data_type);
+    *ok = false;
     return miopenFloat;
   }
 }
 
 // Explicit mapping from backend-independent HIPDNN_EP_TENSOR_OP_* enum to
 // MIOpen-specific miopenTensorOp_t.
-static miopenTensorOp_t hipdnn_ep_to_miopen_op(int64_t tensor_op) {
+static miopenTensorOp_t hipdnn_ep_to_miopen_op(int64_t tensor_op, bool *ok) {
+  *ok = true;
   switch (tensor_op) {
   case HIPDNN_EP_TENSOR_OP_MUL:
     return miopenTensorOpMul;
@@ -45,6 +49,7 @@ static miopenTensorOp_t hipdnn_ep_to_miopen_op(int64_t tensor_op) {
   default:
     fprintf(stderr, "[REAL] unsupported tensor_op %lld for MIOpen\n",
             (long long)tensor_op);
+    *ok = false;
     return miopenTensorOpMul;
   }
 }
@@ -74,19 +79,20 @@ struct OpTensorCacheKey {
 
 struct OpTensorCacheKeyHash {
   size_t operator()(const OpTensorCacheKey &k) const {
-    size_t h = std::hash<int64_t>{}(k.lhs_n);
-    h ^= std::hash<int64_t>{}(k.lhs_c) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<int64_t>{}(k.lhs_h) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<int64_t>{}(k.lhs_w) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<int64_t>{}(k.rhs_n) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<int64_t>{}(k.rhs_c) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<int64_t>{}(k.rhs_h) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<int64_t>{}(k.rhs_w) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<int64_t>{}(k.out_n) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<int64_t>{}(k.out_c) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<int64_t>{}(k.out_h) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<int64_t>{}(k.out_w) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<int64_t>{}(k.data_type) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    size_t h = 0;
+    hash_combine_val(h, k.lhs_n);
+    hash_combine_val(h, k.lhs_c);
+    hash_combine_val(h, k.lhs_h);
+    hash_combine_val(h, k.lhs_w);
+    hash_combine_val(h, k.rhs_n);
+    hash_combine_val(h, k.rhs_c);
+    hash_combine_val(h, k.rhs_h);
+    hash_combine_val(h, k.rhs_w);
+    hash_combine_val(h, k.out_n);
+    hash_combine_val(h, k.out_c);
+    hash_combine_val(h, k.out_h);
+    hash_combine_val(h, k.out_w);
+    hash_combine_val(h, k.data_type);
     return h;
   }
 };
@@ -111,7 +117,10 @@ queryOrCreateOpTensor(const OpTensorCacheKey &key) {
   if (it != g_optensor_cache.end())
     return &it->second;
 
-  miopenDataType_t dt = hipdnn_ep_to_miopen_type(key.data_type);
+  bool type_ok;
+  miopenDataType_t dt = hipdnn_ep_to_miopen_type(key.data_type, &type_ok);
+  if (!type_ok)
+    return nullptr;
   OpTensorCacheEntry e{};
 
   if (miopenCreateTensorDescriptor(&e.aDesc) != miopenStatusSuccess)
@@ -190,7 +199,13 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
     return -1;
   }
 
-  miopenTensorOp_t miopen_op = hipdnn_ep_to_miopen_op(tensor_op);
+  bool op_ok;
+  miopenTensorOp_t miopen_op = hipdnn_ep_to_miopen_op(tensor_op, &op_ok);
+  if (!op_ok) {
+    fprintf(stderr, "wrap_miopenOpTensor: unsupported tensor_op %lld\n",
+            (long long)tensor_op);
+    return -1;
+  }
 
   OpTensorCacheKey key{lhs_n, lhs_c, lhs_h, lhs_w, rhs_n, rhs_c,    rhs_h,
                        rhs_w, out_n, out_c, out_h, out_w, data_type};

@@ -5,6 +5,7 @@
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "cache_utils.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
@@ -58,11 +59,12 @@ struct GqaGemmKey {
 
 struct GqaGemmKeyHash {
   size_t operator()(const GqaGemmKey &k) const {
-    size_t h = std::hash<int64_t>{}(k.m);
-    h ^= std::hash<int64_t>{}(k.n) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<int64_t>{}(k.k) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<int64_t>{}(k.batch) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<bool>{}(k.transA) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    size_t h = 0;
+    hash_combine_val(h, k.m);
+    hash_combine_val(h, k.n);
+    hash_combine_val(h, k.k);
+    hash_combine_val(h, k.batch);
+    hash_combine_val(h, k.transA);
     return h;
   }
 };
@@ -137,7 +139,7 @@ static const GqaGemmCacheEntry *queryOrCreateGemmState(hipblasLtHandle_t handle,
 
   GQA_CACHE_CHECK(hipblasLtMatmulPreferenceCreate(&pref));
   {
-    const size_t max_ws = 256ULL << 20;
+    const size_t max_ws = kMaxWorkspaceBytes;
     GQA_CACHE_CHECK(hipblasLtMatmulPreferenceSetAttribute(
         pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_ws,
         sizeof(max_ws)));
@@ -185,6 +187,33 @@ cache_fail:
 cache_done:
   auto [ins, _] = g_gqa_gemm_cache.emplace(key, entry);
   return &ins->second;
+}
+
+// Shared KV cache update: concat past+new or append new tokens.
+// Returns 0 on success, non-zero on failure.
+static int update_kv_cache(hipStream_t stream, const void *past_key,
+                           const void *past_value, const void *new_key,
+                           const void *new_value, void *present_key,
+                           void *present_value, int B, int past_len, int sq,
+                           int G, int d, int present_seq) {
+  if (past_key && past_len > 0 && past_key != present_key) {
+    if (hip_gqa_kv_cache_concat(stream, past_key, new_key, present_key, B,
+                                past_len, sq, G, d, past_len,
+                                present_seq) != 0)
+      return -1;
+    if (hip_gqa_kv_cache_concat(stream, past_value, new_value, present_value, B,
+                                past_len, sq, G, d, past_len,
+                                present_seq) != 0)
+      return -1;
+  } else {
+    if (hip_gqa_kv_cache_append(stream, new_key, present_key, B, sq, G, d,
+                                present_seq, past_len) != 0)
+      return -1;
+    if (hip_gqa_kv_cache_append(stream, new_value, present_value, B, sq, G, d,
+                                present_seq, past_len) != 0)
+      return -1;
+  }
+  return 0;
 }
 
 // =============================================================================
@@ -255,25 +284,10 @@ static int gqa_forward_hipblaslt(
       kSrc = d_Kroped;
     }
 
-    if (past_key && past_len > 0 && past_key != present_key) {
-      if (hip_gqa_kv_cache_concat(stream, past_key, kSrc, present_key, (int)B,
-                                  (int)past_len, (int)sq, (int)G, (int)d,
-                                  (int)past_len, (int)present_seq) != 0)
-        return -1;
-      if (hip_gqa_kv_cache_concat(stream, past_value, value, present_value,
-                                  (int)B, (int)past_len, (int)sq, (int)G,
-                                  (int)d, (int)past_len, (int)present_seq) != 0)
-        return -1;
-    } else {
-      if (hip_gqa_kv_cache_append(stream, kSrc, present_key, (int)B, (int)sq,
-                                  (int)G, (int)d, (int)present_seq,
-                                  (int)past_len) != 0)
-        return -1;
-      if (hip_gqa_kv_cache_append(stream, value, present_value, (int)B, (int)sq,
-                                  (int)G, (int)d, (int)present_seq,
-                                  (int)past_len) != 0)
-        return -1;
-    }
+    if (update_kv_cache(stream, past_key, past_value, kSrc, value, present_key,
+                        present_value, (int)B, (int)past_len, (int)sq, (int)G,
+                        (int)d, (int)present_seq) != 0)
+      return -1;
 
     if (hip_gqa_fused_decode(stream, qSrc, present_key, present_value, output,
                              (int)B, (int)H, (int)G, (int)d, (int)skv,
@@ -425,27 +439,10 @@ static int gqa_forward_hipblaslt(
 
     // ---- Steps 4-5: KV Cache Update ----
     if (present_key && present_value) {
-      if (past_key && past_len > 0 && past_key != present_key) {
-        // Separate buffers: past [B,G,past_len,d] and present
-        // [B,G,present_seq,d] have different strides. A single kernel copies
-        // past data at [0,past_len) and transposes new tokens from BSHD into
-        // [past_len,past_len+sq).
-        HIP_CHECK(hip_gqa_kv_cache_concat(
-            stream, past_key, kSrc, present_key, (int)B, (int)past_len, (int)sq,
-            (int)G, (int)d, (int)past_len, (int)present_seq));
-        HIP_CHECK(hip_gqa_kv_cache_concat(
-            stream, past_value, vSrc, present_value, (int)B, (int)past_len,
-            (int)sq, (int)G, (int)d, (int)past_len, (int)present_seq));
-      } else {
-        // Same buffer (aliased / in-place): past data already at correct
-        // offsets, only append new tokens at [past_len, past_len+sq).
-        HIP_CHECK(hip_gqa_kv_cache_append(stream, kSrc, present_key, (int)B,
-                                          (int)sq, (int)G, (int)d,
-                                          (int)present_seq, (int)past_len));
-        HIP_CHECK(hip_gqa_kv_cache_append(stream, vSrc, present_value, (int)B,
-                                          (int)sq, (int)G, (int)d,
-                                          (int)present_seq, (int)past_len));
-      }
+      HIP_CHECK(update_kv_cache(stream, past_key, past_value, kSrc, vSrc,
+                                present_key, present_value, (int)B,
+                                (int)past_len, (int)sq, (int)G, (int)d,
+                                (int)present_seq));
     }
 
     // ---- Steps 6-7: KV Expand [B*G, present_seq, d] -> [B*H, skv, d] ----

@@ -8,6 +8,7 @@
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "cache_utils.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
 
@@ -35,10 +36,10 @@ struct T5NormCacheKey {
 
 struct T5NormCacheKeyHash {
   size_t operator()(const T5NormCacheKey &k) const {
-    size_t h = std::hash<int64_t>{}(k.num_rows);
-    h ^= std::hash<int64_t>{}(k.hidden_dim) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<int>{}(static_cast<int>(k.data_type)) + 0x9e3779b9 +
-         (h << 6) + (h >> 2);
+    size_t h = 0;
+    hash_combine_val(h, k.num_rows);
+    hash_combine_val(h, k.hidden_dim);
+    hash_combine_val(h, static_cast<int>(k.data_type));
     return h;
   }
 };
@@ -78,17 +79,25 @@ static const T5NormCacheEntry *queryOrCreateT5Norm(const T5NormCacheKey &key) {
   int x_dims[] = {static_cast<int>(key.num_rows),
                   static_cast<int>(key.hidden_dim)};
   int x_strides[] = {static_cast<int>(key.hidden_dim), 1};
-  miopenSetTensorDescriptor(e.xDesc, key.data_type, 2, x_dims, x_strides);
-  miopenSetTensorDescriptor(e.yDesc, key.data_type, 2, x_dims, x_strides);
-
   int w_dims[] = {static_cast<int>(key.hidden_dim)};
   int w_strides[] = {1};
-  miopenSetTensorDescriptor(e.weightDesc, key.data_type, 1, w_dims, w_strides);
-
   int rstd_dims[] = {static_cast<int>(key.num_rows)};
   int rstd_strides[] = {1};
-  miopenSetTensorDescriptor(e.rstdDesc, miopenFloat, 1, rstd_dims,
-                            rstd_strides);
+
+  if (miopenSetTensorDescriptor(e.xDesc, key.data_type, 2, x_dims,
+                                x_strides) != miopenStatusSuccess ||
+      miopenSetTensorDescriptor(e.yDesc, key.data_type, 2, x_dims,
+                                x_strides) != miopenStatusSuccess ||
+      miopenSetTensorDescriptor(e.weightDesc, key.data_type, 1, w_dims,
+                                w_strides) != miopenStatusSuccess ||
+      miopenSetTensorDescriptor(e.rstdDesc, miopenFloat, 1, rstd_dims,
+                                rstd_strides) != miopenStatusSuccess) {
+    miopenDestroyTensorDescriptor(e.rstdDesc);
+    miopenDestroyTensorDescriptor(e.weightDesc);
+    miopenDestroyTensorDescriptor(e.yDesc);
+    miopenDestroyTensorDescriptor(e.xDesc);
+    return nullptr;
+  }
 
   auto [ins, _] = g_t5norm_cache.emplace(key, e);
 

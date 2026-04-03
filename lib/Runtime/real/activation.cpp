@@ -4,6 +4,7 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "cache_utils.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
 
@@ -11,7 +12,8 @@
 #include <functional>
 #include <unordered_map>
 
-static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type) {
+static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type, bool *ok) {
+  *ok = true;
   switch (data_type) {
   case HIPDNN_EP_DATATYPE_FLOAT:
     return miopenFloat;
@@ -22,13 +24,14 @@ static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type) {
   default:
     fprintf(stderr, "[REAL] unsupported data_type %lld for MIOpen\n",
             (long long)data_type);
+    *ok = false;
     return miopenFloat;
   }
 }
 
-// Maps HIPDNN_EP_ACTIVATION_* to miopenActivationMode_t.
-// MIOpen calls sigmoid "logistic" (miopenActivationLOGISTIC).
-static miopenActivationMode_t hipdnn_ep_to_miopen_activation(int64_t mode) {
+static miopenActivationMode_t hipdnn_ep_to_miopen_activation(int64_t mode,
+                                                             bool *ok) {
+  *ok = true;
   switch (mode) {
   case HIPDNN_EP_ACTIVATION_SIGMOID:
     return miopenActivationLOGISTIC;
@@ -39,6 +42,7 @@ static miopenActivationMode_t hipdnn_ep_to_miopen_activation(int64_t mode) {
   default:
     fprintf(stderr, "[REAL] unsupported activation_mode %lld for MIOpen\n",
             (long long)mode);
+    *ok = false;
     return miopenActivationLOGISTIC;
   }
 }
@@ -59,10 +63,10 @@ struct ActivationCacheKey {
 
 struct ActivationCacheKeyHash {
   size_t operator()(const ActivationCacheKey &k) const {
-    size_t h = std::hash<int64_t>{}(k.num_elements);
-    h ^= std::hash<int64_t>{}(k.data_type) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<int64_t>{}(k.activation_mode) + 0x9e3779b9 + (h << 6) +
-         (h >> 2);
+    size_t h = 0;
+    hash_combine_val(h, k.num_elements);
+    hash_combine_val(h, k.data_type);
+    hash_combine_val(h, k.activation_mode);
     return h;
   }
 };
@@ -82,9 +86,12 @@ queryOrCreateActivation(const ActivationCacheKey &key) {
   if (it != g_activation_cache.end())
     return &it->second;
 
-  miopenDataType_t dt = hipdnn_ep_to_miopen_type(key.data_type);
+  bool type_ok, act_ok;
+  miopenDataType_t dt = hipdnn_ep_to_miopen_type(key.data_type, &type_ok);
   miopenActivationMode_t act =
-      hipdnn_ep_to_miopen_activation(key.activation_mode);
+      hipdnn_ep_to_miopen_activation(key.activation_mode, &act_ok);
+  if (!type_ok || !act_ok)
+    return nullptr;
   int n = static_cast<int>(key.num_elements);
 
   ActivationCacheEntry e{};
@@ -96,15 +103,27 @@ queryOrCreateActivation(const ActivationCacheKey &key) {
     return nullptr;
   }
 
-  miopenSet4dTensorDescriptor(e.inDesc, dt, 1, 1, 1, n);
-  miopenSet4dTensorDescriptor(e.outDesc, dt, 1, 1, 1, n);
+  if (miopenSet4dTensorDescriptor(e.inDesc, dt, 1, 1, 1, n) !=
+          miopenStatusSuccess ||
+      miopenSet4dTensorDescriptor(e.outDesc, dt, 1, 1, 1, n) !=
+          miopenStatusSuccess) {
+    miopenDestroyTensorDescriptor(e.outDesc);
+    miopenDestroyTensorDescriptor(e.inDesc);
+    return nullptr;
+  }
 
   if (miopenCreateActivationDescriptor(&e.actDesc) != miopenStatusSuccess) {
     miopenDestroyTensorDescriptor(e.outDesc);
     miopenDestroyTensorDescriptor(e.inDesc);
     return nullptr;
   }
-  miopenSetActivationDescriptor(e.actDesc, act, 0.0, 0.0, 0.0);
+  if (miopenSetActivationDescriptor(e.actDesc, act, 0.0, 0.0, 0.0) !=
+      miopenStatusSuccess) {
+    miopenDestroyActivationDescriptor(e.actDesc);
+    miopenDestroyTensorDescriptor(e.outDesc);
+    miopenDestroyTensorDescriptor(e.inDesc);
+    return nullptr;
+  }
 
   auto [ins, _] = g_activation_cache.emplace(key, e);
 
@@ -153,8 +172,8 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
   ActivationCacheKey key{num_elements, data_type, activation_mode};
   const ActivationCacheEntry *c = queryOrCreateActivation(key);
   if (!c) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_miopenActivationForward: descriptor cache "
-                      "creation failed\n");
+    fprintf(stderr, "[REAL] wrap_miopenActivationForward: descriptor cache "
+                     "creation failed\n");
     return -1;
   }
 
@@ -162,9 +181,10 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
   miopenStatus_t st = miopenActivationForward(
       handle, c->actDesc, &alpha, c->inDesc, input, &beta, c->outDesc, output);
   if (st != miopenStatusSuccess) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_miopenActivationForward: "
-                      "miopenActivationForward failed (%d)\n",
-                      st);
+    fprintf(stderr,
+            "[REAL] wrap_miopenActivationForward: "
+            "miopenActivationForward failed (%d)\n",
+            st);
     return -1;
   }
 

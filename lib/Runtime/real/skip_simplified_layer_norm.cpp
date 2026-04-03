@@ -8,6 +8,7 @@
 
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "cache_utils.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
 
@@ -18,6 +19,8 @@
 // Use the shared MIOPEN_CHECK_GOTO macro for goto cleanup pattern
 #undef MIOPEN_CHECK
 #define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
+
+static constexpr size_t kScratchAlignment = 256;
 
 // =============================================================================
 // Descriptor cache: T5LayerNorm + OpTensor descriptors created once per unique
@@ -36,10 +39,10 @@ struct SkipT5NormCacheKey {
 
 struct SkipT5NormCacheKeyHash {
   size_t operator()(const SkipT5NormCacheKey &k) const {
-    size_t h = std::hash<int64_t>{}(k.num_rows);
-    h ^= std::hash<int64_t>{}(k.hidden_dim) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<int>{}(static_cast<int>(k.data_type)) + 0x9e3779b9 +
-         (h << 6) + (h >> 2);
+    size_t h = 0;
+    hash_combine_val(h, k.num_rows);
+    hash_combine_val(h, k.hidden_dim);
+    hash_combine_val(h, static_cast<int>(k.data_type));
     return h;
   }
 };
@@ -81,28 +84,33 @@ queryOrCreateSkipT5Norm(const SkipT5NormCacheKey &key) {
   int x_dims[] = {static_cast<int>(key.num_rows),
                   static_cast<int>(key.hidden_dim)};
   int x_strides[] = {static_cast<int>(key.hidden_dim), 1};
-  miopenSetTensorDescriptor(e.xDesc, key.data_type, 2, x_dims, x_strides);
-  miopenSetTensorDescriptor(e.yDesc, key.data_type, 2, x_dims, x_strides);
-
   int w_dims[] = {static_cast<int>(key.hidden_dim)};
   int w_strides[] = {1};
-  miopenSetTensorDescriptor(e.weightDesc, key.data_type, 1, w_dims, w_strides);
-
   int rstd_dims[] = {static_cast<int>(key.num_rows)};
   int rstd_strides[] = {1};
-  miopenSetTensorDescriptor(e.rstdDesc, miopenFloat, 1, rstd_dims,
-                            rstd_strides);
-
-  // OpTensor: 2D [num_rows, hidden_dim] for input/skip/output add
-  miopenSetTensorDescriptor(e.addADesc, key.data_type, 2, x_dims, x_strides);
-  miopenSetTensorDescriptor(e.addBDesc, key.data_type, 2, x_dims, x_strides);
-  miopenSetTensorDescriptor(e.addCDesc, key.data_type, 2, x_dims, x_strides);
-
-  // Bias: [1, hidden_dim] for broadcast across rows
   int bias_dims[] = {1, static_cast<int>(key.hidden_dim)};
   int bias_strides[] = {static_cast<int>(key.hidden_dim), 1};
-  miopenSetTensorDescriptor(e.biasDesc, key.data_type, 2, bias_dims,
-                            bias_strides);
+
+  if (miopenSetTensorDescriptor(e.xDesc, key.data_type, 2, x_dims,
+                                x_strides) != miopenStatusSuccess ||
+      miopenSetTensorDescriptor(e.yDesc, key.data_type, 2, x_dims,
+                                x_strides) != miopenStatusSuccess ||
+      miopenSetTensorDescriptor(e.weightDesc, key.data_type, 1, w_dims,
+                                w_strides) != miopenStatusSuccess ||
+      miopenSetTensorDescriptor(e.rstdDesc, miopenFloat, 1, rstd_dims,
+                                rstd_strides) != miopenStatusSuccess ||
+      miopenSetTensorDescriptor(e.addADesc, key.data_type, 2, x_dims,
+                                x_strides) != miopenStatusSuccess ||
+      miopenSetTensorDescriptor(e.addBDesc, key.data_type, 2, x_dims,
+                                x_strides) != miopenStatusSuccess ||
+      miopenSetTensorDescriptor(e.addCDesc, key.data_type, 2, x_dims,
+                                x_strides) != miopenStatusSuccess ||
+      miopenSetTensorDescriptor(e.biasDesc, key.data_type, 2, bias_dims,
+                                bias_strides) != miopenStatusSuccess) {
+    for (int j = 0; j < created; j++)
+      miopenDestroyTensorDescriptor(*descs[j]);
+    return nullptr;
+  }
 
   auto [ins, _] = g_skip_t5norm_cache.emplace(key, e);
 
@@ -199,7 +207,8 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
   size_t skip_bytes = 0;
   if (!input_skip_bias_sum)
     skip_bytes = static_cast<size_t>(input_num_elements) * element_size_bytes;
-  size_t skip_aligned = (skip_bytes + 255) & ~static_cast<size_t>(255);
+  size_t skip_aligned =
+      (skip_bytes + kScratchAlignment - 1) & ~(kScratchAlignment - 1);
   size_t rstd_bytes = static_cast<size_t>(num_rows) * sizeof(float);
   size_t total_ws = skip_aligned + rstd_bytes;
 
