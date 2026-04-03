@@ -67,8 +67,7 @@ bool CompilerDriver::compile(llvm::StringRef input_mlir,
 
   if (hipdnn_ep_timing_enabled()) {
     auto t1 = std::chrono::steady_clock::now();
-    double sec =
-        std::chrono::duration<double>(t1 - t0).count();
+    double sec = std::chrono::duration<double>(t1 - t0).count();
     llvm::errs() << "[CompilerDriver] MLIR parsing: "
                  << llvm::format("%.3f", sec) << "s\n";
   }
@@ -162,8 +161,8 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
       double total = std::chrono::duration<double>(
                          std::chrono::steady_clock::now() - totalStart)
                          .count();
-      llvm::errs() << "[CompilerDriver] total: "
-                   << llvm::format("%.3f", total) << "s\n";
+      llvm::errs() << "[CompilerDriver] total: " << llvm::format("%.3f", total)
+                   << "s\n";
     }
     return true;
   }
@@ -194,8 +193,8 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
     double total = std::chrono::duration<double>(
                        std::chrono::steady_clock::now() - totalStart)
                        .count();
-    llvm::errs() << "[CompilerDriver] total: "
-                 << llvm::format("%.3f", total) << "s\n";
+    llvm::errs() << "[CompilerDriver] total: " << llvm::format("%.3f", total)
+                 << "s\n";
   }
 
   return true;

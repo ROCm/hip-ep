@@ -214,7 +214,9 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   if (!metadata_blob || blob_size == 0) {
     if (timing) {
       auto t_now = Clock::now();
-      fprintf(stderr, "[Session] hipdnn_ep_state_init_with_fs total: %.3fs (no constants)\n",
+      fprintf(stderr,
+              "[Session] hipdnn_ep_state_init_with_fs total: %.3fs (no "
+              "constants)\n",
               std::chrono::duration<double>(t_now - t0).count());
     }
     return 0; // No metadata — no constants to load
@@ -227,7 +229,9 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   if (count <= 0) {
     if (timing) {
       auto t_now = Clock::now();
-      fprintf(stderr, "[Session] hipdnn_ep_state_init_with_fs total: %.3fs (no constants)\n",
+      fprintf(stderr,
+              "[Session] hipdnn_ep_state_init_with_fs total: %.3fs (no "
+              "constants)\n",
               std::chrono::duration<double>(t_now - t0).count());
     }
     return 0; // No constants to load
@@ -264,7 +268,9 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 
   if (timing) {
     auto t_now = Clock::now();
-    fprintf(stderr, "[Session] Metadata parse + file open: %.3fs (%lld constants, %zu bytes)\n",
+    fprintf(stderr,
+            "[Session] Metadata parse + file open: %.3fs (%lld constants, %zu "
+            "bytes)\n",
             std::chrono::duration<double>(t_now - t_prev).count(),
             (long long)count, total_size);
     t_prev = t_now;
@@ -309,9 +315,10 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 
     if (timing) {
       auto t_now = Clock::now();
-      fprintf(stderr, "[Session] Read constants to pinned: %.3fs (%zu bytes, %s)\n",
-              std::chrono::duration<double>(t_now - t_prev).count(),
-              total_size, src ? "mmap+memcpy" : "fread");
+      fprintf(stderr,
+              "[Session] Read constants to pinned: %.3fs (%zu bytes, %s)\n",
+              std::chrono::duration<double>(t_now - t_prev).count(), total_size,
+              src ? "mmap+memcpy" : "fread");
       t_prev = t_now;
     }
   } else {

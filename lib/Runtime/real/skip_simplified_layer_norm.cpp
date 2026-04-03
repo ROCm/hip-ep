@@ -37,8 +37,7 @@ struct SkipT5NormCacheKey {
 struct SkipT5NormCacheKeyHash {
   size_t operator()(const SkipT5NormCacheKey &k) const {
     size_t h = std::hash<int64_t>{}(k.num_rows);
-    h ^= std::hash<int64_t>{}(k.hidden_dim) + 0x9e3779b9 + (h << 6) +
-         (h >> 2);
+    h ^= std::hash<int64_t>{}(k.hidden_dim) + 0x9e3779b9 + (h << 6) + (h >> 2);
     h ^= std::hash<int>{}(static_cast<int>(k.data_type)) + 0x9e3779b9 +
          (h << 6) + (h >> 2);
     return h;
@@ -80,7 +79,7 @@ queryOrCreateSkipT5Norm(const SkipT5NormCacheKey &key) {
 
   // T5LayerNorm: 2D [num_rows, hidden_dim]
   int x_dims[] = {static_cast<int>(key.num_rows),
-                   static_cast<int>(key.hidden_dim)};
+                  static_cast<int>(key.hidden_dim)};
   int x_strides[] = {static_cast<int>(key.hidden_dim), 1};
   miopenSetTensorDescriptor(e.xDesc, key.data_type, 2, x_dims, x_strides);
   miopenSetTensorDescriptor(e.yDesc, key.data_type, 2, x_dims, x_strides);
@@ -225,9 +224,9 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
 
   {
     float alpha1 = 1.0f, alpha2 = 1.0f, beta = 0.0f;
-    MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha1,
-                                c->addADesc, input, &alpha2, c->addBDesc, skip,
-                                &beta, c->addCDesc, skip_buf));
+    MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha1, c->addADesc,
+                                input, &alpha2, c->addBDesc, skip, &beta,
+                                c->addCDesc, skip_buf));
   }
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: step 1 completed "

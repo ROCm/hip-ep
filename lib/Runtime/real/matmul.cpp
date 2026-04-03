@@ -73,8 +73,8 @@ struct MatmulCacheEntry {
 static std::unordered_map<MatmulCacheKey, MatmulCacheEntry, MatmulCacheKeyHash>
     g_matmul_cache;
 
-static MatmulCacheEntry *
-queryOrCreateMatmul(hipblasLtHandle_t handle, const MatmulCacheKey &key) {
+static MatmulCacheEntry *queryOrCreateMatmul(hipblasLtHandle_t handle,
+                                             const MatmulCacheKey &key) {
   auto it = g_matmul_cache.find(key);
   if (it != g_matmul_cache.end())
     return &it->second;
@@ -141,17 +141,15 @@ queryOrCreateMatmul(hipblasLtHandle_t handle, const MatmulCacheKey &key) {
   hipblasLtMatmulPreferenceCreate(&pref);
   const size_t max_ws = 256ULL << 20; // 256 MB
   hipblasLtMatmulPreferenceSetAttribute(
-      pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_ws,
-      sizeof(max_ws));
+      pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_ws, sizeof(max_ws));
 
   bool do_autotune = autotune_enabled();
   int request_count = do_autotune ? MAX_ALGO_CANDIDATES : 1;
 
   int returned = 0;
   hipblasLtMatmulAlgoGetHeuristic(handle, entry.desc, entry.layA, entry.layB,
-                                  entry.layC, entry.layC, pref,
-                                  request_count, entry.candidates,
-                                  &returned);
+                                  entry.layC, entry.layC, pref, request_count,
+                                  entry.candidates, &returned);
   hipblasLtMatmulPreferenceDestroy(pref);
 
   if (returned == 0) {
@@ -173,9 +171,8 @@ queryOrCreateMatmul(hipblasLtHandle_t handle, const MatmulCacheKey &key) {
 
   if (do_autotune) {
     for (int i = 0; i < returned; i++)
-      entry.max_candidate_workspace =
-          std::max(entry.max_candidate_workspace,
-                   entry.candidates[i].workspaceSize);
+      entry.max_candidate_workspace = std::max(
+          entry.max_candidate_workspace, entry.candidates[i].workspaceSize);
     entry.tuned = (returned <= 1);
   } else {
     entry.tuned = true;
@@ -217,20 +214,19 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
       continue;
 
     // Warm-up
-    hipblasStatus_t st = hipblasLtMatmul(
-        handle, entry->desc, &alpha, blas_A, entry->layA, blas_B,
-        entry->layB, &beta, blas_C, entry->layC, blas_C, entry->layC,
-        &cand.algo, ws_ptr, ws_size, stream);
+    hipblasStatus_t st =
+        hipblasLtMatmul(handle, entry->desc, &alpha, blas_A, entry->layA,
+                        blas_B, entry->layB, &beta, blas_C, entry->layC, blas_C,
+                        entry->layC, &cand.algo, ws_ptr, ws_size, stream);
     if (st != HIPBLAS_STATUS_SUCCESS)
       continue;
 
     // Timed iterations
     hipEventRecord(ev_start, stream);
     for (int t = 0; t < AUTOTUNE_TIMING_ITERS; t++) {
-      hipblasLtMatmul(handle, entry->desc, &alpha, blas_A, entry->layA,
-                      blas_B, entry->layB, &beta, blas_C, entry->layC,
-                      blas_C, entry->layC, &cand.algo, ws_ptr, ws_size,
-                      stream);
+      hipblasLtMatmul(handle, entry->desc, &alpha, blas_A, entry->layA, blas_B,
+                      entry->layB, &beta, blas_C, entry->layC, blas_C,
+                      entry->layC, &cand.algo, ws_ptr, ws_size, stream);
     }
     hipEventRecord(ev_stop, stream);
     hipEventSynchronize(ev_stop);
@@ -261,12 +257,11 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
   entry->workspace_size = entry->candidates[best_idx].workspaceSize;
   entry->tuned = true;
 
-  RUNTIME_DEBUG_LOG(
-      "[AUTOTUNE] M=%lld N=%lld K=%lld batch=%lld: "
-      "tested %d/%d algos, best=#%d (%.3f ms/%d iters)\n",
-      (long long)key.M, (long long)key.N, (long long)key.K,
-      (long long)key.batch_count, tested, entry->num_candidates,
-      best_idx, best_ms, AUTOTUNE_TIMING_ITERS);
+  RUNTIME_DEBUG_LOG("[AUTOTUNE] M=%lld N=%lld K=%lld batch=%lld: "
+                    "tested %d/%d algos, best=#%d (%.3f ms/%d iters)\n",
+                    (long long)key.M, (long long)key.N, (long long)key.K,
+                    (long long)key.batch_count, tested, entry->num_candidates,
+                    best_idx, best_ms, AUTOTUNE_TIMING_ITERS);
 }
 
 // =============================================================================
@@ -326,17 +321,17 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
   MatmulCacheKey key{M, N, K, batch_count, elem_size};
   MatmulCacheEntry *cached = queryOrCreateMatmul(handle, key);
   if (!cached) {
-    fprintf(stderr, "wrap_hipblasLtMatmul: failed to create/find cached "
-                    "descriptors for M=%lld N=%lld K=%lld batch=%lld\n",
-            (long long)M, (long long)N, (long long)K,
-            (long long)batch_count);
+    fprintf(stderr,
+            "wrap_hipblasLtMatmul: failed to create/find cached "
+            "descriptors for M=%lld N=%lld K=%lld batch=%lld\n",
+            (long long)M, (long long)N, (long long)K, (long long)batch_count);
     return -1;
   }
 
   // Ensure workspace is large enough for auto-tune candidates (if pending)
   // or the selected algorithm.
-  size_t needed_ws = cached->tuned ? cached->workspace_size
-                                   : cached->max_candidate_workspace;
+  size_t needed_ws =
+      cached->tuned ? cached->workspace_size : cached->max_candidate_workspace;
   if (needed_ws > 0) {
     if (hipdnn_ep_state_ensure_workspace(state, needed_ws) != 0)
       return -1;
@@ -353,13 +348,13 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
   float alpha = 1.0f;
   float beta = 0.0f;
 
-  hipblasStatus_t st = hipblasLtMatmul(
-      handle, cached->desc, &alpha, B,
-      cached->layA,    // "A" = B (row->col trick)
-      A, cached->layB, // "B" = A (row->col trick)
-      &beta, output, cached->layC, output, cached->layC,
-      const_cast<hipblasLtMatmulAlgo_t *>(&cached->algo), ws_ptr, ws_size,
-      stream);
+  hipblasStatus_t st =
+      hipblasLtMatmul(handle, cached->desc, &alpha, B,
+                      cached->layA,    // "A" = B (row->col trick)
+                      A, cached->layB, // "B" = A (row->col trick)
+                      &beta, output, cached->layC, output, cached->layC,
+                      const_cast<hipblasLtMatmulAlgo_t *>(&cached->algo),
+                      ws_ptr, ws_size, stream);
 
   if (st != HIPBLAS_STATUS_SUCCESS) {
     fprintf(stderr, "wrap_hipblasLtMatmul: hipblasLtMatmul failed (%d)\n", st);

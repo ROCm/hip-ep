@@ -71,10 +71,10 @@ struct GqaGemmKeyHash {
 /// Ownership: descriptors are created in queryOrCreateGemmState() and live
 /// for the process lifetime (never destroyed individually).
 struct GqaGemmCacheEntry {
-  hipblasLtMatmulDesc_t desc;              // matmul operation descriptor
+  hipblasLtMatmulDesc_t desc;                     // matmul operation descriptor
   hipblasLtMatrixLayout_t layA, layB, layC, layD; // matrix layouts
-  hipblasLtMatmulAlgo_t algo;              // heuristic-selected algorithm
-  size_t workspace_size;                   // workspace bytes required by algo
+  hipblasLtMatmulAlgo_t algo; // heuristic-selected algorithm
+  size_t workspace_size;      // workspace bytes required by algo
 };
 
 static std::unordered_map<GqaGemmKey, GqaGemmCacheEntry, GqaGemmKeyHash>
@@ -84,8 +84,8 @@ static std::unordered_map<GqaGemmKey, GqaGemmCacheEntry, GqaGemmKeyHash>
 /// On first call for a given key, creates all descriptors, queries the
 /// heuristic, and caches the result. Returns nullptr on any API failure
 /// (partially created descriptors are cleaned up).
-static const GqaGemmCacheEntry *
-queryOrCreateGemmState(hipblasLtHandle_t handle, const GqaGemmKey &key) {
+static const GqaGemmCacheEntry *queryOrCreateGemmState(hipblasLtHandle_t handle,
+                                                       const GqaGemmKey &key) {
   auto it = g_gqa_gemm_cache.find(key);
   if (it != g_gqa_gemm_cache.end())
     return &it->second;
@@ -105,8 +105,8 @@ queryOrCreateGemmState(hipblasLtHandle_t handle, const GqaGemmKey &key) {
       goto cache_fail;                                                         \
   } while (0)
 
-  GQA_CACHE_CHECK(hipblasLtMatmulDescCreate(&entry.desc, HIPBLAS_COMPUTE_32F,
-                                            HIP_R_32F));
+  GQA_CACHE_CHECK(
+      hipblasLtMatmulDescCreate(&entry.desc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
   {
     hipblasOperation_t opA = key.transA ? HIPBLAS_OP_T : HIPBLAS_OP_N;
     hipblasOperation_t opN = HIPBLAS_OP_N;
@@ -119,16 +119,19 @@ queryOrCreateGemmState(hipblasLtHandle_t handle, const GqaGemmKey &key) {
   {
     int64_t a_rows = key.transA ? k : m;
     int64_t a_cols = key.transA ? m : k;
-    GQA_CACHE_CHECK(
-        hipblasLtMatrixLayoutCreate(&entry.layA, HIP_R_16F, a_rows, a_cols, a_rows));
+    GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layA, HIP_R_16F, a_rows,
+                                                a_cols, a_rows));
     GQA_CACHE_CHECK(setLayoutBatch(entry.layA, batch, m * k));
 
-    GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layB, HIP_R_16F, k, n, k));
+    GQA_CACHE_CHECK(
+        hipblasLtMatrixLayoutCreate(&entry.layB, HIP_R_16F, k, n, k));
     GQA_CACHE_CHECK(setLayoutBatch(entry.layB, batch, n * k));
 
-    GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layC, HIP_R_16F, m, n, m));
+    GQA_CACHE_CHECK(
+        hipblasLtMatrixLayoutCreate(&entry.layC, HIP_R_16F, m, n, m));
     GQA_CACHE_CHECK(setLayoutBatch(entry.layC, batch, n * m));
-    GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layD, HIP_R_16F, m, n, m));
+    GQA_CACHE_CHECK(
+        hipblasLtMatrixLayoutCreate(&entry.layD, HIP_R_16F, m, n, m));
     GQA_CACHE_CHECK(setLayoutBatch(entry.layD, batch, n * m));
   }
 
@@ -165,12 +168,18 @@ queryOrCreateGemmState(hipblasLtHandle_t handle, const GqaGemmKey &key) {
   goto cache_done;
 
 cache_fail:
-  if (pref) hipblasLtMatmulPreferenceDestroy(pref);
-  if (entry.layD) hipblasLtMatrixLayoutDestroy(entry.layD);
-  if (entry.layC) hipblasLtMatrixLayoutDestroy(entry.layC);
-  if (entry.layB) hipblasLtMatrixLayoutDestroy(entry.layB);
-  if (entry.layA) hipblasLtMatrixLayoutDestroy(entry.layA);
-  if (entry.desc) hipblasLtMatmulDescDestroy(entry.desc);
+  if (pref)
+    hipblasLtMatmulPreferenceDestroy(pref);
+  if (entry.layD)
+    hipblasLtMatrixLayoutDestroy(entry.layD);
+  if (entry.layC)
+    hipblasLtMatrixLayoutDestroy(entry.layC);
+  if (entry.layB)
+    hipblasLtMatrixLayoutDestroy(entry.layB);
+  if (entry.layA)
+    hipblasLtMatrixLayoutDestroy(entry.layA);
+  if (entry.desc)
+    hipblasLtMatmulDescDestroy(entry.desc);
   return nullptr;
 
 cache_done:
@@ -235,13 +244,11 @@ static int gqa_forward_hipblaslt(
       void *d_Kroped = ws + Q_bytes;
 
       int half_rot = (int)(d / 2);
-      if (hip_gqa_rope(stream, query, d_Qroped, cos_cache, sin_cache,
-                       (int)B, (int)sq, (int)H, (int)d, half_rot,
-                       (int)past_len) != 0)
+      if (hip_gqa_rope(stream, query, d_Qroped, cos_cache, sin_cache, (int)B,
+                       (int)sq, (int)H, (int)d, half_rot, (int)past_len) != 0)
         return -1;
-      if (hip_gqa_rope(stream, key, d_Kroped, cos_cache, sin_cache,
-                       (int)B, (int)sq, (int)G, (int)d, half_rot,
-                       (int)past_len) != 0)
+      if (hip_gqa_rope(stream, key, d_Kroped, cos_cache, sin_cache, (int)B,
+                       (int)sq, (int)G, (int)d, half_rot, (int)past_len) != 0)
         return -1;
 
       qSrc = d_Qroped;
@@ -249,9 +256,9 @@ static int gqa_forward_hipblaslt(
     }
 
     if (past_key && past_len > 0 && past_key != present_key) {
-      if (hip_gqa_kv_cache_concat(stream, past_key, kSrc, present_key,
-                                  (int)B, (int)past_len, (int)sq, (int)G,
-                                  (int)d, (int)past_len, (int)present_seq) != 0)
+      if (hip_gqa_kv_cache_concat(stream, past_key, kSrc, present_key, (int)B,
+                                  (int)past_len, (int)sq, (int)G, (int)d,
+                                  (int)past_len, (int)present_seq) != 0)
         return -1;
       if (hip_gqa_kv_cache_concat(stream, past_value, value, present_value,
                                   (int)B, (int)past_len, (int)sq, (int)G,
@@ -268,16 +275,16 @@ static int gqa_forward_hipblaslt(
         return -1;
     }
 
-    if (hip_gqa_fused_decode(stream, qSrc, present_key, present_value,
-                             output, (int)B, (int)H, (int)G, (int)d,
-                             (int)skv, (int)present_seq, scale) != 0)
+    if (hip_gqa_fused_decode(stream, qSrc, present_key, present_value, output,
+                             (int)B, (int)H, (int)G, (int)d, (int)skv,
+                             (int)present_seq, scale) != 0)
       return -1;
 
     RUNTIME_DEBUG_LOG(
         "[REAL] fused GQA decode: B=%lld sq=%lld skv=%lld H=%lld G=%lld "
         "d=%lld\n",
-        (long long)B, (long long)sq, (long long)skv, (long long)H,
-        (long long)G, (long long)d);
+        (long long)B, (long long)sq, (long long)skv, (long long)H, (long long)G,
+        (long long)d);
     return 0;
   }
 
@@ -340,10 +347,12 @@ static int gqa_forward_hipblaslt(
   GqaGemmKey valueKey{d, sq, skv, B * H, false};
   const GqaGemmCacheEntry *scoreState =
       queryOrCreateGemmState(ltHandle, scoreKey);
-  if (!scoreState) return -1;
+  if (!scoreState)
+    return -1;
   const GqaGemmCacheEntry *valueState =
       queryOrCreateGemmState(ltHandle, valueKey);
-  if (!valueState) return -1;
+  if (!valueState)
+    return -1;
 
   int result = 0;
 
@@ -482,8 +491,8 @@ static int gqa_forward_hipblaslt(
 
     HIPBLAS_CHECK(hipblasLtMatmul(
         ltHandle, valueState->desc, &valAlpha, d_Vexp, valueState->layA, d_S,
-        valueState->layB, &beta, d_O, valueState->layC, d_O,
-        valueState->layD, &vAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
+        valueState->layB, &beta, d_O, valueState->layC, d_O, valueState->layD,
+        &vAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
 
     // ---- Step 11: O Transpose BNSD [B,H,S,d] -> BSHD [B,S,H,d] ----
     HIP_CHECK(hip_gqa_transpose_mid_dims(stream, d_O, output, (int)B, (int)H,

@@ -55,10 +55,22 @@ static void perf_ensure_events() {
       hipEventCreate(&g_perf.d2h_start) != hipSuccess ||
       hipEventCreate(&g_perf.d2h_end) != hipSuccess) {
     fprintf(stderr, "[PERF] WARNING: hipEventCreate failed, disabling PERF\n");
-    if (g_perf.h2d_start) { (void)hipEventDestroy(g_perf.h2d_start); g_perf.h2d_start = nullptr; }
-    if (g_perf.h2d_end)   { (void)hipEventDestroy(g_perf.h2d_end);   g_perf.h2d_end = nullptr; }
-    if (g_perf.d2h_start) { (void)hipEventDestroy(g_perf.d2h_start); g_perf.d2h_start = nullptr; }
-    if (g_perf.d2h_end)   { (void)hipEventDestroy(g_perf.d2h_end);   g_perf.d2h_end = nullptr; }
+    if (g_perf.h2d_start) {
+      (void)hipEventDestroy(g_perf.h2d_start);
+      g_perf.h2d_start = nullptr;
+    }
+    if (g_perf.h2d_end) {
+      (void)hipEventDestroy(g_perf.h2d_end);
+      g_perf.h2d_end = nullptr;
+    }
+    if (g_perf.d2h_start) {
+      (void)hipEventDestroy(g_perf.d2h_start);
+      g_perf.d2h_start = nullptr;
+    }
+    if (g_perf.d2h_end) {
+      (void)hipEventDestroy(g_perf.d2h_end);
+      g_perf.d2h_end = nullptr;
+    }
     return;
   }
   g_perf.initialized = true;
@@ -321,8 +333,9 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   if (hipdnn_ep_graph_enabled() && g_graph.capture_ok &&
       g_graph.inference_num >= 3) {
     if (index >= g_graph.captured_input_ptrs.size()) {
-      fprintf(stderr, "[GRAPH] ERROR: input index %zu out of captured range "
-                      "(%zu)\n",
+      fprintf(stderr,
+              "[GRAPH] ERROR: input index %zu out of captured range "
+              "(%zu)\n",
               index, g_graph.captured_input_ptrs.size());
       return HIPDNN_EP_ERR_INDEX_OUT_OF_BOUNDS;
     }
@@ -485,15 +498,16 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
 
   // GRAPH: begin stream capture on inference #2 (after warm-up)
   // Placed AFTER the PERF event so h2d_end is NOT inside the captured graph.
-  if (hipdnn_ep_graph_enabled() && index == 0 &&
-      g_graph.inference_num == 2 && !g_graph.capturing) {
+  if (hipdnn_ep_graph_enabled() && index == 0 && g_graph.inference_num == 2 &&
+      !g_graph.capturing) {
     hipError_t err = hipStreamBeginCapture(
-        static_cast<hipStream_t>(state->stream),
-        hipStreamCaptureModeGlobal);
+        static_cast<hipStream_t>(state->stream), hipStreamCaptureModeGlobal);
     if (err == hipSuccess) {
       g_graph.capturing = true;
-      fprintf(stderr, "[GRAPH] inference #%u: stream capture STARTED "
-                      "(mode=Global)\n", g_graph.inference_num);
+      fprintf(stderr,
+              "[GRAPH] inference #%u: stream capture STARTED "
+              "(mode=Global)\n",
+              g_graph.inference_num);
     } else {
       fprintf(stderr, "[GRAPH] hipStreamBeginCapture FAILED: %d (%s)\n",
               (int)err, hipGetErrorString(err));
@@ -504,8 +518,8 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
   if (hipdnn_ep_graph_enabled() && g_graph.capture_ok &&
       g_graph.inference_num >= 3) {
     if (index == 0) {
-      hipError_t err = hipGraphLaunch(
-          g_graph.graphExec, static_cast<hipStream_t>(state->stream));
+      hipError_t err = hipGraphLaunch(g_graph.graphExec,
+                                      static_cast<hipStream_t>(state->stream));
       if (err != hipSuccess) {
         fprintf(stderr, "[GRAPH] hipGraphLaunch FAILED: %d (%s)\n", (int)err,
                 hipGetErrorString(err));
@@ -513,8 +527,9 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
       }
     }
     if (index >= g_graph.captured_output_ptrs.size()) {
-      fprintf(stderr, "[GRAPH] ERROR: output index %zu out of captured range "
-                      "(%zu)\n",
+      fprintf(stderr,
+              "[GRAPH] ERROR: output index %zu out of captured range "
+              "(%zu)\n",
               index, g_graph.captured_output_ptrs.size());
       return HIPDNN_EP_ERR_INDEX_OUT_OF_BOUNDS;
     }
@@ -574,9 +589,10 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
 
   int result = HIPDNN_EP_SUCCESS;
 
-  // GRAPH: end stream capture on first finalize_output of the capture inference.
-  // Placed BEFORE PERF d2h_start and BEFORE the D2H copy so neither is in the
-  // captured graph. After EndCapture the stream returns to normal mode.
+  // GRAPH: end stream capture on first finalize_output of the capture
+  // inference. Placed BEFORE PERF d2h_start and BEFORE the D2H copy so neither
+  // is in the captured graph. After EndCapture the stream returns to normal
+  // mode.
   if (hipdnn_ep_graph_enabled() && g_graph.capturing &&
       g_graph.d2h_count == 0) {
     g_graph.capturing = false;
@@ -587,8 +603,8 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
       size_t numNodes = 0;
       (void)hipGraphGetNodes(g_graph.graph, nullptr, &numNodes);
       fprintf(stderr, "[GRAPH] captured graph has %zu nodes\n", numNodes);
-      err = hipGraphInstantiate(&g_graph.graphExec, g_graph.graph,
-                                nullptr, nullptr, 0);
+      err = hipGraphInstantiate(&g_graph.graphExec, g_graph.graph, nullptr,
+                                nullptr, 0);
       if (err == hipSuccess) {
         g_graph.capture_ok = true;
         fprintf(stderr,
@@ -598,8 +614,8 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
                 (int)err, hipGetErrorString(err));
       }
     } else {
-      fprintf(stderr, "[GRAPH] hipStreamEndCapture FAILED: %d (%s)\n",
-              (int)err, hipGetErrorString(err));
+      fprintf(stderr, "[GRAPH] hipStreamEndCapture FAILED: %d (%s)\n", (int)err,
+              hipGetErrorString(err));
       fprintf(stderr, "[GRAPH] Capture FAILED -- stream capture is not "
                       "compatible with current GPU dispatch pipeline.\n");
     }
@@ -611,8 +627,7 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
   }
 
   // PERF: record D2H start on first output finalize (after all compute)
-  if (hipdnn_ep_perf_enabled() && g_perf.d2h_count == 0 &&
-      g_perf.initialized) {
+  if (hipdnn_ep_perf_enabled() && g_perf.d2h_count == 0 && g_perf.initialized) {
     (void)hipEventRecord(g_perf.d2h_start,
                          static_cast<hipStream_t>(state->stream));
   }

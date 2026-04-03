@@ -808,7 +808,7 @@ private:
 
       Block *callMainBlock = funcOp.addBlock();
       LLVM::CondBrOp::create(builder, loc, shouldSkip, mainSuccessBlock,
-                              callMainBlock);
+                             callMainBlock);
 
       builder.setInsertionPointToStart(callMainBlock);
       emitErrorCheckedCall(

@@ -77,6 +77,73 @@ extern "C" hipError_t hipStreamSynchronize(hipStream_t stream) {
   return hipSuccess;
 }
 
+extern "C" hipError_t hipEventCreate(hipEvent_t *event) {
+  *event = malloc(8);
+  return hipSuccess;
+}
+
+extern "C" hipError_t hipEventDestroy(hipEvent_t event) {
+  free(event);
+  return hipSuccess;
+}
+
+extern "C" hipError_t hipEventRecord(hipEvent_t event, hipStream_t stream) {
+  (void)event;
+  (void)stream;
+  return hipSuccess;
+}
+
+extern "C" hipError_t hipEventElapsedTime(float *ms, hipEvent_t start,
+                                          hipEvent_t stop) {
+  (void)start;
+  (void)stop;
+  *ms = 0.0f;
+  return hipSuccess;
+}
+
+extern "C" hipError_t hipStreamBeginCapture(hipStream_t stream, int mode) {
+  (void)stream;
+  (void)mode;
+  return hipSuccess;
+}
+
+extern "C" hipError_t hipStreamEndCapture(hipStream_t stream,
+                                          hipGraph_t *graph) {
+  (void)stream;
+  *graph = malloc(8);
+  return hipSuccess;
+}
+
+extern "C" hipError_t hipGraphGetNodes(hipGraph_t graph, hipGraphNode_t *nodes,
+                                       size_t *numNodes) {
+  (void)graph;
+  (void)nodes;
+  *numNodes = 0;
+  return hipSuccess;
+}
+
+extern "C" hipError_t hipGraphInstantiate(hipGraphExec_t *exec,
+                                          hipGraph_t graph, void *errNode,
+                                          void *logBuffer, size_t bufferSize) {
+  (void)graph;
+  (void)errNode;
+  (void)logBuffer;
+  (void)bufferSize;
+  *exec = malloc(8);
+  return hipSuccess;
+}
+
+extern "C" hipError_t hipGraphLaunch(hipGraphExec_t exec, hipStream_t stream) {
+  (void)exec;
+  (void)stream;
+  return hipSuccess;
+}
+
+extern "C" const char *hipGetErrorString(hipError_t error) {
+  (void)error;
+  return "mock_error";
+}
+
 // Mock HIP memory functions (non-static for cross-module linking)
 extern "C" hipError_t hipMalloc(void **ptr, size_t size) {
   *ptr = malloc(size);
@@ -363,7 +430,7 @@ hipblasLtMatmul(hipblasLtHandle_t handle, hipblasLtMatmulDesc_t matmul_desc,
   do {                                                                         \
     (void)(cmd);                                                               \
   } while (0)
-#define hipGetErrorString(e) "mock_error"
+// hipGetErrorString is now a real mock function declared above
 
 // Mock wrapper implementations (called from generated MLIR code)
 

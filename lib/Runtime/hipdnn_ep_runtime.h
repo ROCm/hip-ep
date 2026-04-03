@@ -301,7 +301,8 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state, TensorBuffer *buffer);
 void hipdnn_ep_tensor_free_input(RuntimeState *state, TensorBuffer *buffer);
 
 // HIP Graph: check if graph replay is active (should skip main_graph)
-// Returns 1 if replay active, 0 otherwise. Called from generated inference_compute.
+// Returns 1 if replay active, 0 otherwise. Called from generated
+// inference_compute.
 int hipdnn_ep_graph_should_skip_main(RuntimeState *state);
 
 // TensorBuffer Field Accessors (Opaque Pattern)
