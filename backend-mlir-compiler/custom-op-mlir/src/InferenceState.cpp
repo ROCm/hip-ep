@@ -36,6 +36,24 @@ std::string artifactExtension() {
 }
 } // anonymous namespace
 
+namespace {
+using Clock = std::chrono::steady_clock;
+
+// Analogous to hipEventRecord + hipEventElapsedTime on the CPU timeline:
+// records the current time, computes seconds since `marker`, resets `marker`.
+static double record_elapsed(Clock::time_point &marker) {
+  auto now = Clock::now();
+  double s = std::chrono::duration<double>(now - marker).count();
+  marker = now;
+  return s;
+}
+
+// Returns seconds elapsed since `marker` without resetting it.
+static double elapsed_since(Clock::time_point marker) {
+  return std::chrono::duration<double>(Clock::now() - marker).count();
+}
+} // anonymous namespace
+
 namespace mlir_compilation::customop {
 
 InferenceState::InferenceState(PrivateTag, void *state,
@@ -53,7 +71,6 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes,
     const char *v = getenv("HIPDNN_EP_TIMING");
     return v && v[0] >= '1';
   }();
-  using Clock = std::chrono::steady_clock;
   auto t0 = Clock::now();
   auto t_prev = t0;
 
@@ -74,11 +91,8 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes,
   }
 
   if (timing) {
-    auto t_now = Clock::now();
     fprintf(stderr, "[Session] Write DLL to temp file: %.3fs (%zu bytes)\n",
-            std::chrono::duration<double>(t_now - t_prev).count(),
-            dll_bytes.size());
-    t_prev = t_now;
+            record_elapsed(t_prev), dll_bytes.size());
   }
 
   // Load plugin using morphizen infrastructure (factory pattern)
@@ -96,10 +110,8 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes,
   }
 
   if (timing) {
-    auto t_now = Clock::now();
     fprintf(stderr, "[Session] Plugin::create (LoadLibrary): %.3fs\n",
-            std::chrono::duration<double>(t_now - t_prev).count());
-    t_prev = t_now;
+            record_elapsed(t_prev));
   }
 
   // inference_init(void** out_state, void* fs) — the DLL needs a FileSystem
@@ -111,10 +123,8 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes,
   }
 
   if (timing) {
-    auto t_now = Clock::now();
     fprintf(stderr, "[Session] get_method (symbol lookup): %.3fs\n",
-            std::chrono::duration<double>(t_now - t_prev).count());
-    t_prev = t_now;
+            record_elapsed(t_prev));
   }
 
   void *state = nullptr;
@@ -124,11 +134,10 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes,
   }
 
   if (timing) {
-    auto t_now = Clock::now();
     fprintf(stderr, "[Session] inference_init: %.3fs\n",
-            std::chrono::duration<double>(t_now - t_prev).count());
+            record_elapsed(t_prev));
     fprintf(stderr, "[Session] InferenceState::create total: %.3fs\n",
-            std::chrono::duration<double>(t_now - t0).count());
+            elapsed_since(t0));
   }
 
   MY_LOG(1) << "Inference state initialized";
