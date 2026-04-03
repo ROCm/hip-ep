@@ -173,7 +173,7 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
   const ActivationCacheEntry *c = queryOrCreateActivation(key);
   if (!c) {
     fprintf(stderr, "[REAL] wrap_miopenActivationForward: descriptor cache "
-                     "creation failed\n");
+                    "creation failed\n");
     return -1;
   }
 
