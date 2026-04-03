@@ -29,11 +29,9 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 |-----------|---------|
 | Conv | MIOpen |
 | MatMul | hipBLASLt |
-| Softmax | MIOpen |
 | Mul | MIOpen |
 | Add | MIOpen |
 | Sigmoid | MIOpen |
-| Transpose | HIP Runtime |
 | Sub | Custom HIP Kernel |
 | Cast | Custom HIP Kernel |
 | ReduceSum | Custom HIP Kernel |
