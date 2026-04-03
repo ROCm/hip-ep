@@ -133,7 +133,7 @@ jobs:
           Push-Location gpu-test-package\bin
 
           $models = @(Get-ChildItem $root -Recurse -Filter "*.onnx" |
-            Where-Object { $_.Name -notmatch "_dyn" -and $_.FullName -notmatch "\\full_model\\" } |
+            Where-Object { $_.Name -notmatch "_dyn" -and $_.FullName -notmatch "\\full_model\\" -and $_.FullName -notmatch "\\single_layer\\" } |
             Select-Object -First 1)  # TEMPORARY: remove after debugging
           Write-Host "Eligible single-op models: $($models.Count)"
 
@@ -213,7 +213,7 @@ jobs:
           Push-Location gpu-test-package\bin
 
           $models = @(Get-ChildItem $root -Recurse -Filter "*.onnx" |
-            Where-Object { $_.Name -notmatch "_dyn" -and $_.FullName -notmatch "\\full_model\\" } |
+            Where-Object { $_.Name -notmatch "_dyn" -and $_.FullName -notmatch "\\full_model\\" -and $_.FullName -notmatch "\\single_layer\\" } |
             Select-Object -First 1)  # TEMPORARY: remove after debugging
           Write-Host "Eligible single-op models: $($models.Count)"
 
