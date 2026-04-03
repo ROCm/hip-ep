@@ -84,10 +84,10 @@ static const T5NormCacheEntry *queryOrCreateT5Norm(const T5NormCacheKey &key) {
   int rstd_dims[] = {static_cast<int>(key.num_rows)};
   int rstd_strides[] = {1};
 
-  if (miopenSetTensorDescriptor(e.xDesc, key.data_type, 2, x_dims,
-                                x_strides) != miopenStatusSuccess ||
-      miopenSetTensorDescriptor(e.yDesc, key.data_type, 2, x_dims,
-                                x_strides) != miopenStatusSuccess ||
+  if (miopenSetTensorDescriptor(e.xDesc, key.data_type, 2, x_dims, x_strides) !=
+          miopenStatusSuccess ||
+      miopenSetTensorDescriptor(e.yDesc, key.data_type, 2, x_dims, x_strides) !=
+          miopenStatusSuccess ||
       miopenSetTensorDescriptor(e.weightDesc, key.data_type, 1, w_dims,
                                 w_strides) != miopenStatusSuccess ||
       miopenSetTensorDescriptor(e.rstdDesc, miopenFloat, 1, rstd_dims,

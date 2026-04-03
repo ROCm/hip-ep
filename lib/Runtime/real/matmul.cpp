@@ -95,11 +95,11 @@ static MatmulCacheEntry *queryOrCreateMatmul(hipblasLtHandle_t handle,
 
   hipblasOperation_t opN = HIPBLAS_OP_N;
   if (hipblasLtMatmulDescSetAttribute(entry.desc, HIPBLASLT_MATMUL_DESC_TRANSA,
-                                      &opN, sizeof(opN)) !=
-          HIPBLAS_STATUS_SUCCESS ||
+                                      &opN,
+                                      sizeof(opN)) != HIPBLAS_STATUS_SUCCESS ||
       hipblasLtMatmulDescSetAttribute(entry.desc, HIPBLASLT_MATMUL_DESC_TRANSB,
-                                      &opN, sizeof(opN)) !=
-          HIPBLAS_STATUS_SUCCESS) {
+                                      &opN,
+                                      sizeof(opN)) != HIPBLAS_STATUS_SUCCESS) {
     hipblasLtMatmulDescDestroy(entry.desc);
     return nullptr;
   }
@@ -128,20 +128,20 @@ static MatmulCacheEntry *queryOrCreateMatmul(hipblasLtHandle_t handle,
     int64_t bc = key.batch_count;
     int64_t sA = K * N, sB = M * K, sC = M * N;
     if (hipblasLtMatrixLayoutSetAttribute(
-            entry.layA, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc,
-            sizeof(bc)) != HIPBLAS_STATUS_SUCCESS ||
+            entry.layA, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc, sizeof(bc)) !=
+            HIPBLAS_STATUS_SUCCESS ||
         hipblasLtMatrixLayoutSetAttribute(
             entry.layA, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &sA,
             sizeof(sA)) != HIPBLAS_STATUS_SUCCESS ||
         hipblasLtMatrixLayoutSetAttribute(
-            entry.layB, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc,
-            sizeof(bc)) != HIPBLAS_STATUS_SUCCESS ||
+            entry.layB, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc, sizeof(bc)) !=
+            HIPBLAS_STATUS_SUCCESS ||
         hipblasLtMatrixLayoutSetAttribute(
             entry.layB, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &sB,
             sizeof(sB)) != HIPBLAS_STATUS_SUCCESS ||
         hipblasLtMatrixLayoutSetAttribute(
-            entry.layC, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc,
-            sizeof(bc)) != HIPBLAS_STATUS_SUCCESS ||
+            entry.layC, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc, sizeof(bc)) !=
+            HIPBLAS_STATUS_SUCCESS ||
         hipblasLtMatrixLayoutSetAttribute(
             entry.layC, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &sC,
             sizeof(sC)) != HIPBLAS_STATUS_SUCCESS) {

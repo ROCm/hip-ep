@@ -439,10 +439,9 @@ static int gqa_forward_hipblaslt(
 
     // ---- Steps 4-5: KV Cache Update ----
     if (present_key && present_value) {
-      HIP_CHECK(update_kv_cache(stream, past_key, past_value, kSrc, vSrc,
-                                present_key, present_value, (int)B,
-                                (int)past_len, (int)sq, (int)G, (int)d,
-                                (int)present_seq));
+      HIP_CHECK(update_kv_cache(
+          stream, past_key, past_value, kSrc, vSrc, present_key, present_value,
+          (int)B, (int)past_len, (int)sq, (int)G, (int)d, (int)present_seq));
     }
 
     // ---- Steps 6-7: KV Expand [B*G, present_seq, d] -> [B*H, skv, d] ----
