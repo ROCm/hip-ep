@@ -16,6 +16,7 @@
 #include <cstring>
 #include <functional>
 #include <unordered_map>
+#include <vector>
 
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
 #define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
@@ -125,7 +126,7 @@ static int queryGemmAlgo(hipblasLtHandle_t handle, hipblasLtMatmulDesc_t desc,
 
 cleanup_pref:
   if (pref)
-    hipblasLtMatmulPreferenceDestroy(pref);
+    HIPBLAS_CLEANUP(hipblasLtMatmulPreferenceDestroy(pref));
   return result;
 }
 
@@ -151,6 +152,47 @@ static int gqa_forward_hipblaslt(
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
     int64_t do_rotary, int64_t local_window_size) {
 
+  int result = 0;
+  int32_t seqlens_k_val = 0;
+  int64_t past_len = 0;
+  bool packed_qkv = false;
+  size_t elem_sz = 0;
+  size_t Qtrans_bytes = 0;
+  size_t Kexp_bytes = 0;
+  size_t S_bytes = 0;
+  size_t O_bytes = 0;
+  size_t off_Qtrans = 0;
+  size_t off_Kexp = 0;
+  size_t off_Vexp = 0;
+  size_t off_S = 0;
+  size_t off_O = 0;
+  size_t temp_end = 0;
+  size_t off_Qroped = 0;
+  size_t off_Kroped = 0;
+  bool need_rope = false;
+  size_t off_Qsplit = 0;
+  size_t off_Ksplit = 0;
+  size_t off_Vsplit = 0;
+  int32_t batchCount = 0;
+  hipblasOperation_t opT = HIPBLAS_OP_T;
+  hipblasOperation_t opN = HIPBLAS_OP_N;
+  hipblasLtMatmulDesc_t scoreDesc = nullptr;
+  hipblasLtMatrixLayout_t sLayA = nullptr;
+  hipblasLtMatrixLayout_t sLayB = nullptr;
+  hipblasLtMatrixLayout_t sLayC = nullptr;
+  hipblasLtMatrixLayout_t sLayD = nullptr;
+  hipblasLtMatmulDesc_t valueDesc = nullptr;
+  hipblasLtMatrixLayout_t vLayA = nullptr;
+  hipblasLtMatrixLayout_t vLayB = nullptr;
+  hipblasLtMatrixLayout_t vLayC = nullptr;
+  hipblasLtMatrixLayout_t vLayD = nullptr;
+  GqaGemmKey scoreKey{};
+  GqaGemmKey valueKey{};
+  hipblasLtMatmulAlgo_t scoreAlgo{};
+  hipblasLtMatmulAlgo_t valueAlgo{};
+  size_t scoreWs = 0;
+  size_t valueWs = 0;
+
   int64_t HPG = H / G;
   // present_seq is the buffer dimension of present_key (may be max_length
   // for pre-allocated caches, larger than the actual valid token count).
@@ -161,24 +203,39 @@ static int gqa_forward_hipblaslt(
   // fall back to the buffer dimension (non-pre-allocated case).
   int64_t total_seq = skv;
   if (seqlens_k_ptr) {
-    int32_t seqlens_k_val = 0;
-    hipError_t memErr =
-        hipMemcpyAsync(&seqlens_k_val, seqlens_k_ptr, sizeof(int32_t),
-                       hipMemcpyDeviceToHost, stream);
-    if (memErr == hipSuccess)
-      memErr = hipStreamSynchronize(stream);
-    if (memErr != hipSuccess) {
-      fprintf(stderr, "GQA: failed to read seqlens_k from GPU\n");
-      return -1;
+    if (B > 1) {
+      // Read all B values and verify they are uniform.
+      // The batched GEMM pipeline assumes a single total_seq for all batches;
+      // per-batch variable lengths would require per-batch GEMM calls.
+      std::vector<int32_t> seqlens_k_host(B);
+      HIP_CHECK(hipMemcpyAsync(seqlens_k_host.data(), seqlens_k_ptr,
+                               B * sizeof(int32_t), hipMemcpyDeviceToHost,
+                               stream));
+      HIP_CHECK(hipStreamSynchronize(stream));
+      seqlens_k_val = seqlens_k_host[0];
+      for (int64_t b = 1; b < B; ++b) {
+        if (seqlens_k_host[b] != seqlens_k_val) {
+          fprintf(stderr,
+                  "gqa_forward_hipblaslt: per-batch seqlens_k not yet "
+                  "supported (batch %lld has %d, batch 0 has %d)\n",
+                  (long long)b, seqlens_k_host[b], seqlens_k_val);
+          result = -1;
+          goto cleanup;
+        }
+      }
+    } else {
+      HIP_CHECK(hipMemcpyAsync(&seqlens_k_val, seqlens_k_ptr, sizeof(int32_t),
+                               hipMemcpyDeviceToHost, stream));
+      HIP_CHECK(hipStreamSynchronize(stream));
     }
     total_seq = (int64_t)seqlens_k_val + 1;
   }
 
-  int64_t past_len = total_seq - sq;
+  past_len = total_seq - sq;
   if (past_len < 0)
     past_len = 0;
 
-  bool packed_qkv = (key == nullptr && value == nullptr);
+  packed_qkv = (key == nullptr && value == nullptr);
 
   // ---- Workspace layout ----
   // All temp buffers are packed contiguously into the shared workspace,
@@ -189,22 +246,23 @@ static int gqa_forward_hipblaslt(
   // Layout: [Qtrans | Kexp | Vexp | S | O | Qroped? | Kroped? | Qsplit? |
   // Ksplit? | Vsplit? | GEMM ws]
 
-  size_t elem_sz = 2; // FP16
-  size_t Qtrans_bytes = (size_t)B * H * sq * d * elem_sz;
-  size_t Kexp_bytes = (size_t)B * H * total_seq * d * elem_sz;
-  size_t S_bytes = (size_t)B * H * sq * total_seq * elem_sz;
-  size_t O_bytes = (size_t)B * H * sq * d * elem_sz;
+  elem_sz = 2; // FP16
+  Qtrans_bytes = (size_t)B * H * sq * d * elem_sz;
+  Kexp_bytes = (size_t)B * H * total_seq * d * elem_sz;
+  S_bytes = (size_t)B * H * sq * total_seq * elem_sz;
+  O_bytes = (size_t)B * H * sq * d * elem_sz;
 
-  size_t off_Qtrans = 0;
-  size_t off_Kexp = off_Qtrans + Qtrans_bytes;
-  size_t off_Vexp = off_Kexp + Kexp_bytes;
-  size_t off_S = off_Vexp + Kexp_bytes;
-  size_t off_O = off_S + S_bytes;
-  size_t temp_end = off_O + O_bytes;
+  off_Qtrans = 0;
+  off_Kexp = off_Qtrans + Qtrans_bytes;
+  off_Vexp = off_Kexp + Kexp_bytes;
+  off_S = off_Vexp + Kexp_bytes;
+  off_O = off_S + S_bytes;
+  temp_end = off_O + O_bytes;
 
   // Optional RoPE buffers: allocated only when do_rotary is enabled.
-  size_t off_Qroped = 0, off_Kroped = 0;
-  bool need_rope = (do_rotary == 1) && cos_cache && sin_cache;
+  off_Qroped = 0;
+  off_Kroped = 0;
+  need_rope = (do_rotary == 1) && cos_cache && sin_cache;
   if (need_rope) {
     size_t Q_bytes = (size_t)B * sq * H * d * elem_sz;
     size_t K_bytes = (size_t)B * sq * G * d * elem_sz;
@@ -217,7 +275,9 @@ static int gqa_forward_hipblaslt(
   // null (GPT-OSS style packed input).  These must be placed AFTER the RoPE
   // buffers in the layout so that split outputs remain live while RoPE reads
   // from them and writes to the RoPE region (no overlap).
-  size_t off_Qsplit = 0, off_Ksplit = 0, off_Vsplit = 0;
+  off_Qsplit = 0;
+  off_Ksplit = 0;
+  off_Vsplit = 0;
   if (packed_qkv) {
     size_t Q_bytes = (size_t)B * sq * H * d * elem_sz;
     size_t K_bytes = (size_t)B * sq * G * d * elem_sz;
@@ -229,22 +289,12 @@ static int gqa_forward_hipblaslt(
 
   // Query GEMM algorithms first (cached) to know the GEMM workspace size,
   // then ensure a single workspace allocation covering everything.
-  int32_t batchCount = (int32_t)(B * H);
-  hipblasOperation_t opT = HIPBLAS_OP_T, opN = HIPBLAS_OP_N;
+  batchCount = (int32_t)(B * H);
 
   // Score GEMM: S[T, sq] = K_exp^T[T,d] * Q_trans[d,sq] * scale
   // where T = total_seq (actual valid tokens, not buffer dimension)
-  hipblasLtMatmulDesc_t scoreDesc = nullptr;
-  hipblasLtMatrixLayout_t sLayA = nullptr, sLayB = nullptr, sLayC = nullptr,
-                          sLayD = nullptr;
-  hipblasLtMatmulDesc_t valueDesc = nullptr;
-  hipblasLtMatrixLayout_t vLayA = nullptr, vLayB = nullptr, vLayC = nullptr,
-                          vLayD = nullptr;
-  GqaGemmKey scoreKey{total_seq, sq, d, B * H, true};
-  GqaGemmKey valueKey{d, sq, total_seq, B * H, false};
-  hipblasLtMatmulAlgo_t scoreAlgo, valueAlgo;
-  size_t scoreWs = 0, valueWs = 0;
-  int result = 0;
+  scoreKey = GqaGemmKey{total_seq, sq, d, B * H, true};
+  valueKey = GqaGemmKey{d, sq, total_seq, B * H, false};
 
   HIPBLAS_CHECK(
       hipblasLtMatmulDescCreate(&scoreDesc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
@@ -453,25 +503,25 @@ static int gqa_forward_hipblaslt(
 
 cleanup:
   if (sLayA)
-    hipblasLtMatrixLayoutDestroy(sLayA);
+    HIPBLAS_CLEANUP(hipblasLtMatrixLayoutDestroy(sLayA));
   if (sLayB)
-    hipblasLtMatrixLayoutDestroy(sLayB);
+    HIPBLAS_CLEANUP(hipblasLtMatrixLayoutDestroy(sLayB));
   if (sLayC)
-    hipblasLtMatrixLayoutDestroy(sLayC);
+    HIPBLAS_CLEANUP(hipblasLtMatrixLayoutDestroy(sLayC));
   if (sLayD)
-    hipblasLtMatrixLayoutDestroy(sLayD);
+    HIPBLAS_CLEANUP(hipblasLtMatrixLayoutDestroy(sLayD));
   if (vLayA)
-    hipblasLtMatrixLayoutDestroy(vLayA);
+    HIPBLAS_CLEANUP(hipblasLtMatrixLayoutDestroy(vLayA));
   if (vLayB)
-    hipblasLtMatrixLayoutDestroy(vLayB);
+    HIPBLAS_CLEANUP(hipblasLtMatrixLayoutDestroy(vLayB));
   if (vLayC)
-    hipblasLtMatrixLayoutDestroy(vLayC);
+    HIPBLAS_CLEANUP(hipblasLtMatrixLayoutDestroy(vLayC));
   if (vLayD)
-    hipblasLtMatrixLayoutDestroy(vLayD);
+    HIPBLAS_CLEANUP(hipblasLtMatrixLayoutDestroy(vLayD));
   if (scoreDesc)
-    hipblasLtMatmulDescDestroy(scoreDesc);
+    HIPBLAS_CLEANUP(hipblasLtMatmulDescDestroy(scoreDesc));
   if (valueDesc)
-    hipblasLtMatmulDescDestroy(valueDesc);
+    HIPBLAS_CLEANUP(hipblasLtMatmulDescDestroy(valueDesc));
 
   return result;
 }

@@ -88,4 +88,12 @@
     }                                                                          \
   } while (0)
 
+#define HIPBLAS_CLEANUP(expr)                                                  \
+  do {                                                                         \
+    hipblasStatus_t _st = (expr);                                              \
+    if (_st != HIPBLAS_STATUS_SUCCESS) {                                       \
+      fprintf(stderr, "Warning: " #expr " failed with status %d\n", (int)_st); \
+    }                                                                          \
+  } while (0)
+
 #endif // HIPDNN_EP_ERROR_CHECK_MACROS_H
