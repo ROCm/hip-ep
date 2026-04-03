@@ -1981,6 +1981,7 @@ struct UnsqueezeToStdTensor : public mlir::RewritePattern {
                                          "expected 2 operands (data, axes)");
 
     mlir::Value data = op->getOperand(0);
+    mlir::Value axesValue = op->getOperand(1);
     auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
     auto outputType =
         mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
@@ -1988,6 +1989,33 @@ struct UnsqueezeToStdTensor : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(op, "expected ranked tensor types");
     if (inputType.getElementType() != outputType.getElementType())
       return rewriter.notifyMatchFailure(op, "element type mismatch");
+
+    // Check if axes is constant (required for zero-cost implementation)
+    // Dynamic axes would require runtime shape computation and cannot use
+    // the zero-cost tensor.expand_shape approach
+    auto axesDefOp = axesValue.getDefiningOp();
+    if (!axesDefOp) {
+      return rewriter.notifyMatchFailure(
+          op, "axes must be defined by a constant operation (block argument "
+              "not supported). Dynamic axes would require runtime shape "
+              "computation and cannot use zero-cost tensor.expand_shape");
+    }
+
+    // Check if it's arith.constant or onnx.Constant
+    bool isConstant = false;
+    if (mlir::isa<mlir::arith::ConstantOp>(axesDefOp)) {
+      isConstant = true;
+    } else if (axesDefOp->hasAttr("value")) {
+      // onnx.Constant has a "value" attribute
+      isConstant = true;
+    }
+
+    if (!isConstant) {
+      return rewriter.notifyMatchFailure(
+          op, "axes must be constant (arith.constant or onnx.Constant). "
+              "Dynamic axes would require runtime shape computation and "
+              "cannot use zero-cost tensor.expand_shape approach");
+    }
 
     // Unsqueeze is just a special case of Reshape (inserting size-1 dims)
     // Use MLIR's built-in tool to compute reassociation
@@ -2038,6 +2066,7 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
                                          "expected 2 operands (data, axes)");
 
     mlir::Value data = op->getOperand(0);
+    mlir::Value axesValue = op->getOperand(1);
     auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
     auto outputType =
         mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
@@ -2045,6 +2074,33 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(op, "expected ranked tensor types");
     if (inputType.getElementType() != outputType.getElementType())
       return rewriter.notifyMatchFailure(op, "element type mismatch");
+
+    // Check if axes is constant (required for zero-cost implementation)
+    // Dynamic axes would require runtime shape computation and cannot use
+    // the zero-cost tensor.collapse_shape approach
+    auto axesDefOp = axesValue.getDefiningOp();
+    if (!axesDefOp) {
+      return rewriter.notifyMatchFailure(
+          op, "axes must be defined by a constant operation (block argument "
+              "not supported). Dynamic axes would require runtime shape "
+              "computation and cannot use zero-cost tensor.collapse_shape");
+    }
+
+    // Check if it's arith.constant or onnx.Constant
+    bool isConstant = false;
+    if (mlir::isa<mlir::arith::ConstantOp>(axesDefOp)) {
+      isConstant = true;
+    } else if (axesDefOp->hasAttr("value")) {
+      // onnx.Constant has a "value" attribute
+      isConstant = true;
+    }
+
+    if (!isConstant) {
+      return rewriter.notifyMatchFailure(
+          op, "axes must be constant (arith.constant or onnx.Constant). "
+              "Dynamic axes would require runtime shape computation and "
+              "cannot use zero-cost tensor.collapse_shape approach");
+    }
 
     // Squeeze is the inverse of Unsqueeze (removing size-1 dims)
     // Use MLIR's built-in tool to compute reassociation
