@@ -233,8 +233,7 @@ int main(int argc, char** argv) {
     opts.add_option("t", "threshold", "Score threshold", "0.5");
     opts.add_option("v", "verbose", "Enable verbose logging", "false", true);
     opts.add_option("", "input", "Input files (repeatable or comma-separated)",
-"");
-
+                     "");
     try {
         // ===== Parse CLI =====
         opts.parse(argc, argv);

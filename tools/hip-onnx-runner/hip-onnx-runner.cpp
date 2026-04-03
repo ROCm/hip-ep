@@ -7,18 +7,27 @@
 //
 // Loads an ONNX model, generates random inputs, runs one inference via the
 // MorphiZen execution provider, and reports timing.
-//
-// Usage: hip-onnx-runner -m <model.onnx> [options]
-//    or: hip-onnx-runner -L dir1,dir2
-//   -m, --model       Path to .onnx model
-//   -n, --no-ep       CPU only; skip EP registration
-//   -d, --dump-level  0=off, 1=dump inputs to <stem>_i_dump/, 2=outputs
-//                     to <stem>_o_dump/, 3=both (default: 0)
-//   -s, --seed        RNG seed for random inputs (default: 42)
-//   -i, --input-dir   input_<idx>_<name>_<type>.bin only; empty = random
-//   -L, --l2norm      dir1,dir2; same *.bin set; ..._<type>.bin; L2; no -m
-//   -h, --help        Show help
-//
+/*
+Usage: hip-onnx-runner.exe [options]
+
+Options:
+-m, --model               Path to .onnx model
+-L, --l2norm              Compare two dirs: dir1,dir2 (same *.bin set); each
+ file must be ..._<type>.bin (fp32,fp16,i64,...); element-wise L2; no -m
+-n,--no-ep                CPU only; skip EP registration (flag)
+-d, --dump-level 0=off, 1=dump inputs to <stem>_i_dump/,
+  2=outputs to <stem>_o_dump/, 3=both (default: 0)
+-s, --seed                RNG seed for random inputs (default:42)
+-i, --input-dir           Directory with input_<idx>_<name>_<type>.bin
+ only; empty = random inputs
+-o, --graph-opt-level
+ session_options.SetGraphOptimizationLevel(level),
+ 0 = ORT_DISABLE_ALL,
+ 1 = ORT_ENABLE_BASIC,
+ 2 = ORT_ENABLE_EXTENDED,
+ 99 = ORT_ENABLE_ALL,
+ -1 = default, not call this function  (default: -1)
+*/
 //===----------------------------------------------------------------------===//
 
 #include <onnxruntime_cxx_api.h>
@@ -582,7 +591,7 @@ int main(int argc, char *argv[]) {
                 "Directory with input_<idx>_<name>_<type>.bin only; empty = "
                 "random inputs",
                 "");
-  mo.add_option("o", "graph-optimization-level",
+  mo.add_option("o", "graph-opt-level",
                 "session_options.SetGraphOptimizationLevel(level), "
                 "  0 = ORT_DISABLE_ALL,  "
                 "  1 = ORT_ENABLE_BASIC,  "
@@ -603,25 +612,19 @@ int main(int argc, char *argv[]) {
     mo.print_help(argv[0]);
     return 1;
   }
-  std::string l2norm_arg = trim_string(mo.get<std::string>("l2norm"));
+
+  std::vector<std::string> l2norm_arg = mo.get_vector<std::string>("l2norm");
   std::string model_path_str = trim_string(mo.get<std::string>("model"));
   const bool no_ep = mo.get<bool>("no-ep");
   const int dump_level = mo.get<int>("dump-level");
   std::mt19937 rng(mo.get<unsigned int>("seed"));
   std::string input_dir_str = trim_string(mo.get<std::string>("input-dir"));
   const bool use_input_files = !input_dir_str.empty();
-  const int graph_optimization_level = mo.get<int>("graph-optimization-level");
+  const int graph_optimization_level = mo.get<int>("graph-opt-level");
 
-  if (!l2norm_arg.empty()) {
-    const auto sep = l2norm_arg.find(',');
-    if (sep == std::string::npos) {
-      std::cerr << "Error: --l2norm expects dir1,dir2\n\n";
-      mo.print_help(argv[0]);
-      return 1;
-    }
-    const std::string dir_left = trim_string(l2norm_arg.substr(0, sep));
-    const std::string dir_right = trim_string(l2norm_arg.substr(sep + 1));
-    return run_l2norm_output_dumps(dir_left, dir_right);
+  if ((l2norm_arg.size() == 2) && !l2norm_arg[0].empty() &&
+      !l2norm_arg[1].empty()) {
+    return run_l2norm_output_dumps(l2norm_arg[0], l2norm_arg[1]);
   }
 
   if (model_path_str.empty()) {
