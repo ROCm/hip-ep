@@ -457,7 +457,7 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
                          void *output, int64_t num_elements,
                          int64_t element_size_bytes);
 
-// Gather operation wrapper
+// Gather operation wrapper — supports multi-element indices for axis=0.
 int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis, int64_t data_num_elements,
                 int64_t indices_num_elements, int64_t output_num_elements,
