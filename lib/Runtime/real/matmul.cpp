@@ -250,8 +250,8 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
 
   if (tested == 0) {
     fprintf(stderr,
-            "[AUTOTUNE] M=%lld N=%lld K=%lld batch=%lld: "
-            "WARNING -- 0/%d candidates passed, keeping heuristic #0\n",
+            "[AUTOTUNE] WARNING: M=%lld N=%lld K=%lld batch=%lld: "
+            "0/%d candidates passed, keeping heuristic #0\n",
             (long long)key.M, (long long)key.N, (long long)key.K,
             (long long)key.batch_count, entry->num_candidates);
     return;
@@ -261,12 +261,12 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
   entry->workspace_size = entry->candidates[best_idx].workspaceSize;
   entry->tuned = true;
 
-  fprintf(stderr,
-          "[AUTOTUNE] M=%lld N=%lld K=%lld batch=%lld: "
-          "tested %d/%d algos, best=#%d (%.3f ms/%d iters)\n",
-          (long long)key.M, (long long)key.N, (long long)key.K,
-          (long long)key.batch_count, tested, entry->num_candidates,
-          best_idx, best_ms, AUTOTUNE_TIMING_ITERS);
+  RUNTIME_DEBUG_LOG(
+      "[AUTOTUNE] M=%lld N=%lld K=%lld batch=%lld: "
+      "tested %d/%d algos, best=#%d (%.3f ms/%d iters)\n",
+      (long long)key.M, (long long)key.N, (long long)key.K,
+      (long long)key.batch_count, tested, entry->num_candidates,
+      best_idx, best_ms, AUTOTUNE_TIMING_ITERS);
 }
 
 // =============================================================================

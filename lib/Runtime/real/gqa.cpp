@@ -38,13 +38,18 @@ static hipblasStatus_t setLayoutBatch(hipblasLtMatrixLayout_t layout,
   return status;
 }
 
-// =============================================================================
-// GQA GEMM algorithm cache: query heuristic once per shape, reuse after.
-// =============================================================================
+//===----------------------------------------------------------------------===//
+// GQA GEMM descriptor cache
+//===----------------------------------------------------------------------===//
+//
+// hipBLASLt descriptors and heuristic-selected algorithms are created once per
+// unique (m, n, k, batch, transA) shape and reused for the process lifetime.
+// This avoids repeated descriptor creation and heuristic queries on every
+// GQA inference call in the decomposed (prefill) path.
 
 struct GqaGemmKey {
   int64_t m, n, k, batch;
-  bool transA;
+  bool transA; // true for Score GEMM (K^T * Q), false for Value GEMM (V * S)
   bool operator==(const GqaGemmKey &o) const {
     return m == o.m && n == o.n && k == o.k && batch == o.batch &&
            transA == o.transA;
@@ -62,71 +67,115 @@ struct GqaGemmKeyHash {
   }
 };
 
+/// Cached hipBLASLt state for a single GEMM shape.
+/// Ownership: descriptors are created in queryOrCreateGemmState() and live
+/// for the process lifetime (never destroyed individually).
 struct GqaGemmCacheEntry {
-  hipblasLtMatmulAlgo_t algo;
-  size_t workspace_size;
+  hipblasLtMatmulDesc_t desc;              // matmul operation descriptor
+  hipblasLtMatrixLayout_t layA, layB, layC, layD; // matrix layouts
+  hipblasLtMatmulAlgo_t algo;              // heuristic-selected algorithm
+  size_t workspace_size;                   // workspace bytes required by algo
 };
 
 static std::unordered_map<GqaGemmKey, GqaGemmCacheEntry, GqaGemmKeyHash>
     g_gqa_gemm_cache;
 
-static int queryGemmAlgo(hipblasLtHandle_t handle, hipblasLtMatmulDesc_t desc,
-                         hipblasLtMatrixLayout_t layA,
-                         hipblasLtMatrixLayout_t layB,
-                         hipblasLtMatrixLayout_t layC,
-                         hipblasLtMatrixLayout_t layD, const GqaGemmKey &key,
-                         hipblasLtMatmulAlgo_t *out_algo, size_t *out_ws) {
-
+/// Look up or create cached hipBLASLt descriptors + algorithm for a GEMM shape.
+/// On first call for a given key, creates all descriptors, queries the
+/// heuristic, and caches the result. Returns nullptr on any API failure
+/// (partially created descriptors are cleaned up).
+static const GqaGemmCacheEntry *
+queryOrCreateGemmState(hipblasLtHandle_t handle, const GqaGemmKey &key) {
   auto it = g_gqa_gemm_cache.find(key);
-  if (it != g_gqa_gemm_cache.end()) {
-    *out_algo = it->second.algo;
-    *out_ws = it->second.workspace_size;
-    return 0;
-  }
+  if (it != g_gqa_gemm_cache.end())
+    return &it->second;
+
+  int64_t m = key.m, n = key.n, k = key.k;
+  int32_t batch = (int32_t)key.batch;
+
+  GqaGemmCacheEntry entry = {};
 
   hipblasLtMatmulPreference_t pref = nullptr;
-  int result = 0;
+  hipblasStatus_t st;
 
-  HIPBLAS_CHECK_GOTO(hipblasLtMatmulPreferenceCreate(&pref), cleanup_pref);
+#define GQA_CACHE_CHECK(call)                                                  \
+  do {                                                                         \
+    st = (call);                                                               \
+    if (st != HIPBLAS_STATUS_SUCCESS)                                          \
+      goto cache_fail;                                                         \
+  } while (0)
+
+  GQA_CACHE_CHECK(hipblasLtMatmulDescCreate(&entry.desc, HIPBLAS_COMPUTE_32F,
+                                            HIP_R_32F));
+  {
+    hipblasOperation_t opA = key.transA ? HIPBLAS_OP_T : HIPBLAS_OP_N;
+    hipblasOperation_t opN = HIPBLAS_OP_N;
+    GQA_CACHE_CHECK(hipblasLtMatmulDescSetAttribute(
+        entry.desc, HIPBLASLT_MATMUL_DESC_TRANSA, &opA, sizeof(opA)));
+    GQA_CACHE_CHECK(hipblasLtMatmulDescSetAttribute(
+        entry.desc, HIPBLASLT_MATMUL_DESC_TRANSB, &opN, sizeof(opN)));
+  }
+
+  {
+    int64_t a_rows = key.transA ? k : m;
+    int64_t a_cols = key.transA ? m : k;
+    GQA_CACHE_CHECK(
+        hipblasLtMatrixLayoutCreate(&entry.layA, HIP_R_16F, a_rows, a_cols, a_rows));
+    GQA_CACHE_CHECK(setLayoutBatch(entry.layA, batch, m * k));
+
+    GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layB, HIP_R_16F, k, n, k));
+    GQA_CACHE_CHECK(setLayoutBatch(entry.layB, batch, n * k));
+
+    GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layC, HIP_R_16F, m, n, m));
+    GQA_CACHE_CHECK(setLayoutBatch(entry.layC, batch, n * m));
+    GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layD, HIP_R_16F, m, n, m));
+    GQA_CACHE_CHECK(setLayoutBatch(entry.layD, batch, n * m));
+  }
+
+  GQA_CACHE_CHECK(hipblasLtMatmulPreferenceCreate(&pref));
   {
     const size_t max_ws = 256ULL << 20;
-    HIPBLAS_CHECK_GOTO(hipblasLtMatmulPreferenceSetAttribute(
-                           pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-                           &max_ws, sizeof(max_ws)),
-                       cleanup_pref);
+    GQA_CACHE_CHECK(hipblasLtMatmulPreferenceSetAttribute(
+        pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_ws,
+        sizeof(max_ws)));
   }
 
   {
     hipblasLtMatmulHeuristicResult_t heur;
     int returned = 0;
-    HIPBLAS_CHECK_GOTO(hipblasLtMatmulAlgoGetHeuristic(handle, desc, layA, layB,
-                                                       layC, layD, pref, 1,
-                                                       &heur, &returned),
-                       cleanup_pref);
+    GQA_CACHE_CHECK(hipblasLtMatmulAlgoGetHeuristic(
+        handle, entry.desc, entry.layA, entry.layB, entry.layC, entry.layD,
+        pref, 1, &heur, &returned));
+    hipblasLtMatmulPreferenceDestroy(pref);
+    pref = nullptr;
 
     if (returned == 0) {
       fprintf(stderr,
               "GQA: no algorithm found for GEMM m=%lld n=%lld k=%lld "
               "batch=%lld\n",
-              (long long)key.m, (long long)key.n, (long long)key.k,
-              (long long)key.batch);
-      result = -1;
-      goto cleanup_pref;
+              (long long)m, (long long)n, (long long)k, (long long)key.batch);
+      goto cache_fail;
     }
 
-    GqaGemmCacheEntry entry;
     entry.algo = heur.algo;
     entry.workspace_size = heur.workspaceSize;
-    g_gqa_gemm_cache[key] = entry;
-
-    *out_algo = heur.algo;
-    *out_ws = heur.workspaceSize;
   }
 
-cleanup_pref:
-  if (pref)
-    hipblasLtMatmulPreferenceDestroy(pref);
-  return result;
+#undef GQA_CACHE_CHECK
+  goto cache_done;
+
+cache_fail:
+  if (pref) hipblasLtMatmulPreferenceDestroy(pref);
+  if (entry.layD) hipblasLtMatrixLayoutDestroy(entry.layD);
+  if (entry.layC) hipblasLtMatrixLayoutDestroy(entry.layC);
+  if (entry.layB) hipblasLtMatrixLayoutDestroy(entry.layB);
+  if (entry.layA) hipblasLtMatrixLayoutDestroy(entry.layA);
+  if (entry.desc) hipblasLtMatmulDescDestroy(entry.desc);
+  return nullptr;
+
+cache_done:
+  auto [ins, _] = g_gqa_gemm_cache.emplace(key, entry);
+  return &ins->second;
 }
 
 // =============================================================================
@@ -159,21 +208,28 @@ static int gqa_forward_hipblaslt(
   bool need_rope = do_rotary && cos_cache && sin_cache;
 
   // =========================================================================
-  // Fused GQA path (d == 128, KV cache enabled, sq <= 256)
+  // Fused GQA decode path (sq == 1, d in {64, 128, 256}, KV cache enabled)
   //
   // Replaces steps 3, 6-11 of the decomposed pipeline with a single kernel
   // that reads Q in BSHD and KV from the BNSD cache, producing O in BSHD.
   // Steps 1-2 (RoPE) and 4-5 (KV cache update) still run as separate
   // kernels before the fused dispatch.
+  //
+  // All prefill (sq > 1) goes through the decomposed hipBLASLt path where
+  // auto-tuned GEMMs outperform fixed WMMA tiling and all ORT GQA features
+  // (sliding window, smooth softmax, head sink) are supported.
   // =========================================================================
-  if (d == 128 && present_key && present_value && sq <= 256) {
+  bool fused_d = (d == 64 || d == 128 || d == 256);
+  if (fused_d && sq == 1 && key && value && present_key && present_value &&
+      local_window_size == 0 && !head_sink && !use_smooth_softmax) {
     const void *qSrc = query;
     const void *kSrc = key;
 
     if (need_rope) {
       size_t Q_bytes = (size_t)B * sq * H * d * elem_sz;
       size_t K_bytes = (size_t)B * sq * G * d * elem_sz;
-      hipdnn_ep_state_ensure_workspace(state, Q_bytes + K_bytes);
+      if (hipdnn_ep_state_ensure_workspace(state, Q_bytes + K_bytes) != 0)
+        return -1;
       char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
       void *d_Qroped = ws;
       void *d_Kroped = ws + Q_bytes;
@@ -192,55 +248,42 @@ static int gqa_forward_hipblaslt(
       kSrc = d_Kroped;
     }
 
-    if (hip_gqa_kv_cache_append(stream, kSrc, present_key, (int)B, (int)sq,
-                                (int)G, (int)d, (int)present_seq,
-                                (int)past_len) != 0)
-      return -1;
-    if (hip_gqa_kv_cache_append(stream, value, present_value, (int)B, (int)sq,
-                                (int)G, (int)d, (int)present_seq,
-                                (int)past_len) != 0)
-      return -1;
-
-    if (past_key && past_value && past_len > 0 && past_key != present_key) {
-      size_t slice_bytes = (size_t)past_len * d * elem_sz;
-      for (int64_t b = 0; b < B; ++b) {
-        for (int64_t g = 0; g < G; ++g) {
-          size_t src_off = ((size_t)(b * G + g) * past_len * d) * elem_sz;
-          size_t dst_off = ((size_t)(b * G + g) * present_seq * d) * elem_sz;
-          if (hipMemcpyAsync((char *)present_key + dst_off,
-                             (const char *)past_key + src_off, slice_bytes,
-                             hipMemcpyDeviceToDevice, stream) != hipSuccess)
-            return -1;
-          if (hipMemcpyAsync((char *)present_value + dst_off,
-                             (const char *)past_value + src_off, slice_bytes,
-                             hipMemcpyDeviceToDevice, stream) != hipSuccess)
-            return -1;
-        }
-      }
-    }
-
-    if (sq == 1) {
-      if (hip_gqa_fused_decode(stream, qSrc, present_key, present_value,
-                               output, (int)B, (int)H, (int)G, (int)d,
-                               (int)skv, (int)present_seq, scale) != 0)
+    if (past_key && past_len > 0 && past_key != present_key) {
+      if (hip_gqa_kv_cache_concat(stream, past_key, kSrc, present_key,
+                                  (int)B, (int)past_len, (int)sq, (int)G,
+                                  (int)d, (int)past_len, (int)present_seq) != 0)
+        return -1;
+      if (hip_gqa_kv_cache_concat(stream, past_value, value, present_value,
+                                  (int)B, (int)past_len, (int)sq, (int)G,
+                                  (int)d, (int)past_len, (int)present_seq) != 0)
         return -1;
     } else {
-      if (hip_gqa_fused_prefill(stream, qSrc, present_key, present_value,
-                                output, (int)B, (int)H, (int)G, (int)sq,
-                                (int)skv, (int)present_seq, (int)past_len,
-                                scale) != 0)
+      if (hip_gqa_kv_cache_append(stream, kSrc, present_key, (int)B, (int)sq,
+                                  (int)G, (int)d, (int)present_seq,
+                                  (int)past_len) != 0)
+        return -1;
+      if (hip_gqa_kv_cache_append(stream, value, present_value, (int)B, (int)sq,
+                                  (int)G, (int)d, (int)present_seq,
+                                  (int)past_len) != 0)
         return -1;
     }
 
+    if (hip_gqa_fused_decode(stream, qSrc, present_key, present_value,
+                             output, (int)B, (int)H, (int)G, (int)d,
+                             (int)skv, (int)present_seq, scale) != 0)
+      return -1;
+
     RUNTIME_DEBUG_LOG(
-        "[REAL] fused GQA %s: B=%lld sq=%lld skv=%lld H=%lld G=%lld d=%lld\n",
-        sq == 1 ? "decode" : "prefill", (long long)B, (long long)sq,
-        (long long)skv, (long long)H, (long long)G, (long long)d);
+        "[REAL] fused GQA decode: B=%lld sq=%lld skv=%lld H=%lld G=%lld "
+        "d=%lld\n",
+        (long long)B, (long long)sq, (long long)skv, (long long)H,
+        (long long)G, (long long)d);
     return 0;
   }
 
   // =========================================================================
-  // Fallback: 11-step decomposed hipBLASLt pipeline (sq > 256 or d != 128)
+  // Decomposed hipBLASLt pipeline (all prefill sq > 1, unsupported d, or
+  // features requiring sliding window / smooth softmax / head sink)
   // =========================================================================
 
   bool packed_qkv = (key == nullptr && value == nullptr);
@@ -290,71 +333,24 @@ static int gqa_forward_hipblaslt(
     temp_end = off_Vsplit + K_bytes;
   }
 
-  // Query GEMM algorithms first (cached) to know the GEMM workspace size,
-  // then ensure a single workspace allocation covering everything.
-  int32_t batchCount = (int32_t)(B * H);
-  hipblasOperation_t opT = HIPBLAS_OP_T, opN = HIPBLAS_OP_N;
-
-  // Score GEMM: S[skv, sq] = K_exp^T[skv,d] * Q_trans[d,sq] * scale
-  hipblasLtMatmulDesc_t scoreDesc = nullptr;
-  hipblasLtMatrixLayout_t sLayA = nullptr, sLayB = nullptr, sLayC = nullptr,
-                          sLayD = nullptr;
-  hipblasLtMatmulDesc_t valueDesc = nullptr;
-  hipblasLtMatrixLayout_t vLayA = nullptr, vLayB = nullptr, vLayC = nullptr,
-                          vLayD = nullptr;
+  // Query or create cached GEMM descriptors + algorithms. On first call for
+  // a given shape the descriptors and layouts are created and the heuristic
+  // is queried; subsequent calls reuse the cached state.
   GqaGemmKey scoreKey{skv, sq, d, B * H, true};
   GqaGemmKey valueKey{d, sq, skv, B * H, false};
-  hipblasLtMatmulAlgo_t scoreAlgo, valueAlgo;
-  size_t scoreWs = 0, valueWs = 0;
+  const GqaGemmCacheEntry *scoreState =
+      queryOrCreateGemmState(ltHandle, scoreKey);
+  if (!scoreState) return -1;
+  const GqaGemmCacheEntry *valueState =
+      queryOrCreateGemmState(ltHandle, valueKey);
+  if (!valueState) return -1;
+
   int result = 0;
-
-  HIPBLAS_CHECK(
-      hipblasLtMatmulDescCreate(&scoreDesc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
-  HIPBLAS_CHECK(hipblasLtMatmulDescSetAttribute(
-      scoreDesc, HIPBLASLT_MATMUL_DESC_TRANSA, &opT, sizeof(opT)));
-  HIPBLAS_CHECK(hipblasLtMatmulDescSetAttribute(
-      scoreDesc, HIPBLASLT_MATMUL_DESC_TRANSB, &opN, sizeof(opN)));
-
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&sLayA, HIP_R_16F, d, skv, d));
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&sLayB, HIP_R_16F, d, sq, d));
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&sLayC, HIP_R_16F, skv, sq, skv));
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&sLayD, HIP_R_16F, skv, sq, skv));
-  HIPBLAS_CHECK(setLayoutBatch(sLayA, batchCount, (int64_t)skv * d));
-  HIPBLAS_CHECK(setLayoutBatch(sLayB, batchCount, (int64_t)sq * d));
-  HIPBLAS_CHECK(setLayoutBatch(sLayC, batchCount, (int64_t)sq * skv));
-  HIPBLAS_CHECK(setLayoutBatch(sLayD, batchCount, (int64_t)sq * skv));
-
-  // Value GEMM: O[d, sq] = V_exp[d,skv] * softmax(S)[skv,sq]
-  HIPBLAS_CHECK(
-      hipblasLtMatmulDescCreate(&valueDesc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
-  HIPBLAS_CHECK(hipblasLtMatmulDescSetAttribute(
-      valueDesc, HIPBLASLT_MATMUL_DESC_TRANSA, &opN, sizeof(opN)));
-  HIPBLAS_CHECK(hipblasLtMatmulDescSetAttribute(
-      valueDesc, HIPBLASLT_MATMUL_DESC_TRANSB, &opN, sizeof(opN)));
-
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&vLayA, HIP_R_16F, d, skv, d));
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&vLayB, HIP_R_16F, skv, sq, skv));
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&vLayC, HIP_R_16F, d, sq, d));
-  HIPBLAS_CHECK(hipblasLtMatrixLayoutCreate(&vLayD, HIP_R_16F, d, sq, d));
-  HIPBLAS_CHECK(setLayoutBatch(vLayA, batchCount, (int64_t)skv * d));
-  HIPBLAS_CHECK(setLayoutBatch(vLayB, batchCount, (int64_t)sq * skv));
-  HIPBLAS_CHECK(setLayoutBatch(vLayC, batchCount, (int64_t)sq * d));
-  HIPBLAS_CHECK(setLayoutBatch(vLayD, batchCount, (int64_t)sq * d));
-
-  if (queryGemmAlgo(ltHandle, scoreDesc, sLayA, sLayB, sLayC, sLayD, scoreKey,
-                    &scoreAlgo, &scoreWs) != 0) {
-    result = -1;
-    goto cleanup;
-  }
-  if (queryGemmAlgo(ltHandle, valueDesc, vLayA, vLayB, vLayC, vLayD, valueKey,
-                    &valueAlgo, &valueWs) != 0) {
-    result = -1;
-    goto cleanup;
-  }
 
   // Single workspace allocation: temp buffers + GEMM workspace
   {
-    size_t gemm_ws = std::max(scoreWs, valueWs);
+    size_t gemm_ws =
+        std::max(scoreState->workspace_size, valueState->workspace_size);
     size_t total_needed = temp_end + gemm_ws;
     HIP_CHECK(hipdnn_ep_state_ensure_workspace(state, total_needed));
   }
@@ -462,18 +458,14 @@ static int gqa_forward_hipblaslt(
     // ---- Step 8: Score GEMM ----
     float scoreAlpha = scale;
     float beta = 0.0f;
+    hipblasLtMatmulAlgo_t sAlgo = scoreState->algo;
 
-    HIPBLAS_CHECK(hipblasLtMatmul(ltHandle, scoreDesc, &scoreAlpha, d_Kexp,
-                                  sLayA, d_Qtrans, sLayB, &beta, d_S, sLayC,
-                                  d_S, sLayD, &scoreAlgo, gemm_ws_ptr,
-                                  gemm_ws_bytes, stream));
+    HIPBLAS_CHECK(hipblasLtMatmul(
+        ltHandle, scoreState->desc, &scoreAlpha, d_Kexp, scoreState->layA,
+        d_Qtrans, scoreState->layB, &beta, d_S, scoreState->layC, d_S,
+        scoreState->layD, &sAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
 
     // ---- Step 9: Causal Mask + Softmax ----
-    // Causal mask (prefill only): masks future tokens, and when
-    // local_window_size > 0 also masks distant past outside the window.
-    // Smooth softmax: activated when head_sink is non-null (per-head sink
-    // factors in the denominator) or when smooth_softmax attr == 1 (uses 0
-    // as the sink value, matching ORT default).
     int scoreBatchStride = (int)(sq * skv);
     if (sq > 1) {
       HIP_CHECK(hip_gqa_causal_mask(stream, d_S, (int)(B * H), (int)skv,
@@ -486,9 +478,12 @@ static int gqa_forward_hipblaslt(
 
     // ---- Step 10: Value GEMM ----
     float valAlpha = 1.0f;
+    hipblasLtMatmulAlgo_t vAlgo = valueState->algo;
+
     HIPBLAS_CHECK(hipblasLtMatmul(
-        ltHandle, valueDesc, &valAlpha, d_Vexp, vLayA, d_S, vLayB, &beta, d_O,
-        vLayC, d_O, vLayD, &valueAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
+        ltHandle, valueState->desc, &valAlpha, d_Vexp, valueState->layA, d_S,
+        valueState->layB, &beta, d_O, valueState->layC, d_O,
+        valueState->layD, &vAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
 
     // ---- Step 11: O Transpose BNSD [B,H,S,d] -> BSHD [B,S,H,d] ----
     HIP_CHECK(hip_gqa_transpose_mid_dims(stream, d_O, output, (int)B, (int)H,
@@ -496,27 +491,6 @@ static int gqa_forward_hipblaslt(
   }
 
 cleanup:
-  if (sLayA)
-    hipblasLtMatrixLayoutDestroy(sLayA);
-  if (sLayB)
-    hipblasLtMatrixLayoutDestroy(sLayB);
-  if (sLayC)
-    hipblasLtMatrixLayoutDestroy(sLayC);
-  if (sLayD)
-    hipblasLtMatrixLayoutDestroy(sLayD);
-  if (vLayA)
-    hipblasLtMatrixLayoutDestroy(vLayA);
-  if (vLayB)
-    hipblasLtMatrixLayoutDestroy(vLayB);
-  if (vLayC)
-    hipblasLtMatrixLayoutDestroy(vLayC);
-  if (vLayD)
-    hipblasLtMatrixLayoutDestroy(vLayD);
-  if (scoreDesc)
-    hipblasLtMatmulDescDestroy(scoreDesc);
-  if (valueDesc)
-    hipblasLtMatmulDescDestroy(valueDesc);
-
   return result;
 }
 

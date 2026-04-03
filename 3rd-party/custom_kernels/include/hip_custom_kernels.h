@@ -201,9 +201,13 @@ int hip_gqa_softmax_inplace(
     int batch_stride, const void* head_sink, int num_heads,
     int use_smooth_softmax);
 
-/* Fused GQA decode (sq == 1, d == 128): single-token attention via
- * cooperative dot product + online softmax, one block per (batch, head_q).
- * Replaces steps 3, 6-11 of the decomposed pipeline. */
+/* Fused GQA decode (sq == 1, d in {64, 128, 256}): single-token attention
+ * via cooperative dot product + online softmax in log2e space, one block
+ * per (batch, head_q) with D threads (D == d).
+ * Replaces steps 3, 6-11 of the decomposed pipeline.
+ * Returns -1 for unsupported d values.
+ * NOTE: assumes wave32 (RDNA); not portable to CDNA/wave64 without changes
+ * to the warp shuffle reduction tree. */
 int hip_gqa_fused_decode(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int H, int G, int d, int skv, int max_seq,
