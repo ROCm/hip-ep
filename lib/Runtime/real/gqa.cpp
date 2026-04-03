@@ -198,12 +198,10 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
                            int G, int d, int present_seq) {
   if (past_key && past_len > 0 && past_key != present_key) {
     if (hip_gqa_kv_cache_concat(stream, past_key, new_key, present_key, B,
-                                past_len, sq, G, d, past_len,
-                                present_seq) != 0)
+                                past_len, sq, G, d, past_len, present_seq) != 0)
       return -1;
     if (hip_gqa_kv_cache_concat(stream, past_value, new_value, present_value, B,
-                                past_len, sq, G, d, past_len,
-                                present_seq) != 0)
+                                past_len, sq, G, d, past_len, present_seq) != 0)
       return -1;
   } else {
     if (hip_gqa_kv_cache_append(stream, new_key, present_key, B, sq, G, d,

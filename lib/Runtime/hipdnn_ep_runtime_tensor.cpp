@@ -498,8 +498,7 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
   // GRAPH: begin stream capture on inference #2 (after warm-up)
   // Placed AFTER the PERF event so h2d_end is NOT inside the captured graph.
   if (hipdnn_ep_graph_enabled() && index == 0 &&
-      g_graph.inference_num == kGraphCaptureInference &&
-      !g_graph.capturing) {
+      g_graph.inference_num == kGraphCaptureInference && !g_graph.capturing) {
     hipError_t err = hipStreamBeginCapture(
         static_cast<hipStream_t>(state->stream), hipStreamCaptureModeGlobal);
     if (err == hipSuccess) {

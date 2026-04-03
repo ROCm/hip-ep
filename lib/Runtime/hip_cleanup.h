@@ -14,8 +14,7 @@
   do {                                                                         \
     hipError_t _err = (expr);                                                  \
     if (_err != hipSuccess) {                                                  \
-      fprintf(stderr, "Warning: " #expr " failed with error %d\n",            \
-              (int)_err);                                                      \
+      fprintf(stderr, "Warning: " #expr " failed with error %d\n", (int)_err); \
     }                                                                          \
   } while (0)
 
