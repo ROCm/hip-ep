@@ -1785,31 +1785,20 @@ struct GatherToHip : public mlir::RewritePattern {
 
 namespace {
 
-/// Helper: Validate common requirements for Unsqueeze/Squeeze operations.
-///
-/// Both operations require:
-/// 1. Exactly 2 operands (data, axes)
-/// 2. Ranked tensor types for input and output
-/// 3. Matching element types
-/// 4. Constant axes (for zero-cost implementation)
-///
-/// Returns failure with informative error message if any validation fails.
-/// On success, populates data and axes output parameters.
+/// Validate common requirements for Unsqueeze/Squeeze operations.
+/// Requires: 2 operands (data, axes), ranked tensors, matching element types,
+/// and constant axes (dynamic axes would require runtime shape computation).
 mlir::LogicalResult
 validateSqueezeUnsqueezeOp(mlir::Operation *op, mlir::PatternRewriter &rewriter,
                            const char *tensorOpName, mlir::Value &data,
-                           mlir::Value &axes,
-                           mlir::RankedTensorType &inputType,
+                           mlir::Value &axes, mlir::RankedTensorType &inputType,
                            mlir::RankedTensorType &outputType) {
-  // Validate operand count
   if (op->getNumOperands() != 2)
-    return rewriter.notifyMatchFailure(op,
-                                       "expected 2 operands (data, axes)");
+    return rewriter.notifyMatchFailure(op, "expected 2 operands (data, axes)");
 
   data = op->getOperand(0);
   axes = op->getOperand(1);
 
-  // Validate tensor types
   inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
   outputType =
       mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
@@ -1818,21 +1807,18 @@ validateSqueezeUnsqueezeOp(mlir::Operation *op, mlir::PatternRewriter &rewriter,
   if (inputType.getElementType() != outputType.getElementType())
     return rewriter.notifyMatchFailure(op, "element type mismatch");
 
-  // Validate axes is constant (required for zero-cost implementation)
-  // Dynamic axes would require runtime shape computation
   auto axesDefOp = axes.getDefiningOp();
   if (!axesDefOp) {
-    std::string msg = "axes must be defined by a constant operation (block "
-                      "argument not supported). Dynamic axes would require "
-                      "runtime shape computation and cannot use zero-cost tensor.";
+    std::string msg =
+        "axes must be defined by a constant operation (block "
+        "argument not supported). Dynamic axes would require "
+        "runtime shape computation and cannot use zero-cost tensor.";
     msg += tensorOpName;
     return rewriter.notifyMatchFailure(op, msg);
   }
 
-  // Check if it's arith.constant or onnx.Constant
   bool isConstant = mlir::isa<mlir::arith::ConstantOp>(axesDefOp) ||
                     axesDefOp->hasAttr("value");
-
   if (!isConstant) {
     std::string msg =
         "axes must be constant (arith.constant or onnx.Constant). "
@@ -1846,29 +1832,18 @@ validateSqueezeUnsqueezeOp(mlir::Operation *op, mlir::PatternRewriter &rewriter,
   return mlir::success();
 }
 
-/// Helper: Build output shape for expand_shape operations.
+/// Build output shape for expand_shape operations.
 /// Used by both Reshape and Unsqueeze when expanding dimensions.
 ///
-/// Algorithm:
-/// 1. Precompute outDimToInDim mapping: output dim i → source input dim
-/// 2. For each output dimension:
-///    - Static dims: use compile-time size from outputType
-///    - Dynamic dims: extract from input, accounting for static products
-///
-/// Example: input [128, ?], output [1, 128, ?, 1]
-///   reassoc = [[0, 1], [2, 3]]
-///   outDimToInDim = [0, 0, 1, 1]  (output dims 0,1 from input 0; 2,3 from input 1)
-///   - output[0]=1 (static)
-///   - output[1]=128 (static)
-///   - output[2]=input[1] (dynamic, extract via DimOp)
-///   - output[3]=1 (static)
-llvm::SmallVector<mlir::OpFoldResult>
-buildExpandShapeOutputShape(mlir::PatternRewriter &rewriter, mlir::Location loc,
-                            mlir::Value data, mlir::RankedTensorType outputType,
-                            llvm::ArrayRef<mlir::ReassociationIndices> reassoc) {
+/// For static dimensions: use compile-time size from outputType.
+/// For dynamic dimensions: extract from input via DimOp, dividing out any
+/// static dimensions in the same reassociation group.
+llvm::SmallVector<mlir::OpFoldResult> buildExpandShapeOutputShape(
+    mlir::PatternRewriter &rewriter, mlir::Location loc, mlir::Value data,
+    mlir::RankedTensorType outputType,
+    llvm::ArrayRef<mlir::ReassociationIndices> reassoc) {
   int64_t outputRank = outputType.getRank();
 
-  // Precompute mapping: output dim → input dim (O(1) lookup)
   llvm::SmallVector<int64_t> outDimToInDim(outputRank, -1);
   for (auto [g, group] : llvm::enumerate(reassoc))
     for (int64_t idx : group)
@@ -1877,19 +1852,13 @@ buildExpandShapeOutputShape(mlir::PatternRewriter &rewriter, mlir::Location loc,
   llvm::SmallVector<mlir::OpFoldResult> outputShape;
   for (int64_t i : llvm::seq<int64_t>(outputRank)) {
     if (!outputType.isDynamicDim(i)) {
-      // Static dimension: use compile-time size
-      outputShape.push_back(
-          rewriter.getIndexAttr(outputType.getDimSize(i)));
+      outputShape.push_back(rewriter.getIndexAttr(outputType.getDimSize(i)));
       continue;
     }
 
-    // Dynamic dimension: extract from input
     int64_t srcDim = outDimToInDim[i];
     const auto &group = reassoc[srcDim];
 
-    // Compute static product of other dims in this group
-    // For unsqueeze: inserted dims are size 1 (static)
-    // For reshape: may have multiple static dims in group
     int64_t staticProduct = 1;
     for (int64_t idx : group)
       if (!outputType.isDynamicDim(idx))
@@ -1898,11 +1867,8 @@ buildExpandShapeOutputShape(mlir::PatternRewriter &rewriter, mlir::Location loc,
     mlir::Value inputSize =
         mlir::tensor::DimOp::create(rewriter, loc, data, srcDim);
     if (staticProduct == 1) {
-      // Direct mapping: output dim = input dim (no static dims in group)
       outputShape.push_back(inputSize);
     } else {
-      // Has static dims in group, divide them out
-      // Example: input[128*?] → output[128, ?]: output[1] = input[0] / 128
       mlir::Value divisor =
           mlir::arith::ConstantIndexOp::create(rewriter, loc, staticProduct);
       mlir::Value dynSize =
@@ -1963,8 +1929,8 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
 
       if (outputRank > inputRank) {
         // Expand: use shared helper to build output shape
-        auto outputShape = buildExpandShapeOutputShape(
-            rewriter, loc, data, outputType, *reassocOpt);
+        auto outputShape = buildExpandShapeOutputShape(rewriter, loc, data,
+                                                       outputType, *reassocOpt);
         auto expandOp = mlir::tensor::ExpandShapeOp::create(
             rewriter, loc, outputType, data, *reassocOpt, outputShape);
         rewriter.replaceOp(op, expandOp.getResult());
@@ -2019,16 +1985,7 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
 // Unsqueeze → standard tensor ops (zero-cost metadata reinterpretation)
 //===----------------------------------------------------------------------===//
 
-/// onnx.Unsqueeze → tensor.expand_shape.
-///
-/// Unsqueeze inserts dimensions of size 1 at specified axes. Like Reshape,
-/// this is a zero-cost metadata operation that only reinterprets shape/strides
-/// without moving data. We lower to tensor.expand_shape which bufferizes to
-/// memref.expand_shape (zero-copy alias).
-///
-/// Strategy: Unsqueeze is a special case of Reshape (inserting size-1 dims).
-/// Use MLIR's built-in getReassociationIndicesForReshape utility to compute
-/// reassociation, then reuse Reshape's output shape building logic.
+/// onnx.Unsqueeze → tensor.expand_shape (zero-cost metadata operation).
 struct UnsqueezeToStdTensor : public mlir::RewritePattern {
   UnsqueezeToStdTensor(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Unsqueeze", /*benefit=*/1, ctx) {}
@@ -2036,32 +1993,25 @@ struct UnsqueezeToStdTensor : public mlir::RewritePattern {
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override {
-    // Validate operands, types, and constant axes requirement
     mlir::Value data, axes;
     mlir::RankedTensorType inputType, outputType;
-    if (auto result = validateSqueezeUnsqueezeOp(op, rewriter, "expand_shape",
-                                                  data, axes, inputType,
-                                                  outputType);
+    if (auto result = validateSqueezeUnsqueezeOp(
+            op, rewriter, "expand_shape", data, axes, inputType, outputType);
         failed(result))
       return result;
 
-    // Unsqueeze is just a special case of Reshape (inserting size-1 dims)
-    // Use MLIR's built-in tool to compute reassociation
     auto reassocOpt =
         mlir::getReassociationIndicesForReshape(inputType, outputType);
     if (!reassocOpt)
       return rewriter.notifyMatchFailure(
           op, "cannot compute unsqueeze reassociation");
 
-    // Build output shape using shared helper
     mlir::Location loc = op->getLoc();
-    auto outputShape = buildExpandShapeOutputShape(
-        rewriter, loc, data, outputType, *reassocOpt);
-
+    auto outputShape = buildExpandShapeOutputShape(rewriter, loc, data,
+                                                   outputType, *reassocOpt);
     auto expandOp = mlir::tensor::ExpandShapeOp::create(
         rewriter, loc, outputType, data, *reassocOpt, outputShape);
     rewriter.replaceOp(op, expandOp.getResult());
-
     return mlir::success();
   }
 };
@@ -2070,17 +2020,7 @@ struct UnsqueezeToStdTensor : public mlir::RewritePattern {
 // Squeeze → standard tensor ops (zero-cost metadata reinterpretation)
 //===----------------------------------------------------------------------===//
 
-/// onnx.Squeeze → tensor.collapse_shape.
-///
-/// Squeeze removes dimensions of size 1 at specified axes. Like Reshape and
-/// Unsqueeze, this is a zero-cost metadata operation that only reinterprets
-/// shape/strides without moving data. We lower to tensor.collapse_shape which
-/// bufferizes to memref.collapse_shape (zero-copy alias).
-///
-/// Strategy: Squeeze is the inverse of Unsqueeze (removing size-1 dims).
-/// Use MLIR's built-in getReassociationIndicesForReshape utility to compute
-/// reassociation, then use tensor.collapse_shape (no dynamic shape computation
-/// needed for collapse operations).
+/// onnx.Squeeze → tensor.collapse_shape (zero-cost metadata operation).
 struct SqueezeToStdTensor : public mlir::RewritePattern {
   SqueezeToStdTensor(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Squeeze", /*benefit=*/1, ctx) {}
@@ -2088,29 +2028,23 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override {
-    // Validate operands, types, and constant axes requirement
     mlir::Value data, axes;
     mlir::RankedTensorType inputType, outputType;
-    if (auto result = validateSqueezeUnsqueezeOp(op, rewriter, "collapse_shape",
-                                                  data, axes, inputType,
-                                                  outputType);
+    if (auto result = validateSqueezeUnsqueezeOp(
+            op, rewriter, "collapse_shape", data, axes, inputType, outputType);
         failed(result))
       return result;
 
-    // Squeeze is the inverse of Unsqueeze (removing size-1 dims)
-    // Use MLIR's built-in tool to compute reassociation
     auto reassocOpt =
         mlir::getReassociationIndicesForReshape(inputType, outputType);
     if (!reassocOpt)
       return rewriter.notifyMatchFailure(
           op, "cannot compute squeeze reassociation");
 
-    // Collapse: no dynamic shape computation needed (collapse is always safe)
     mlir::Location loc = op->getLoc();
     auto collapseOp = mlir::tensor::CollapseShapeOp::create(
         rewriter, loc, outputType, data, *reassocOpt);
     rewriter.replaceOp(op, collapseOp.getResult());
-
     return mlir::success();
   }
 };
