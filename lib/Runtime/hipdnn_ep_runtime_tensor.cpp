@@ -7,6 +7,7 @@
 #include "hipdnn_ep_runtime.h"
 #include "runtime_state_internal.h"
 
+#include <cassert>
 #include <cstdio>
 #include <cstring>
 #include <unordered_map>
@@ -17,9 +18,9 @@ static constexpr unsigned kGraphCaptureInference = 2;
 static constexpr unsigned kGraphReplayStartInference = 3;
 // Fallback element size when tensor metadata is missing (covers fp32).
 static constexpr size_t kDefaultElementSize = 4;
-//==============================================================================
+//===----------------------------------------------------------------------===//
 // Per-Inference Performance Measurement (gated on HIPDNN_EP_PERF)
-//==============================================================================
+//===----------------------------------------------------------------------===//
 // Records hipEvents on the GPU stream at phase boundaries to measure:
 //   H2D  = time for all host-to-device async copies
 //   Compute = time for main_graph GPU kernel dispatches
@@ -32,7 +33,7 @@ static constexpr size_t kDefaultElementSize = 4;
 //   finalize_output(0)-> compute end / D2H start
 //   stream_sync()     -> D2H end, then log results
 
-static struct {
+struct PerfState {
   hipEvent_t h2d_start = nullptr;
   hipEvent_t h2d_end = nullptr;
   hipEvent_t d2h_start = nullptr;
@@ -43,7 +44,8 @@ static struct {
   size_t d2h_count = 0;
   unsigned inference_num = 0;
   bool initialized = false;
-} g_perf;
+};
+static PerfState g_perf;
 
 static void perf_ensure_events() {
   if (g_perf.initialized)
@@ -74,15 +76,15 @@ static void perf_ensure_events() {
   g_perf.initialized = true;
 }
 
-//==============================================================================
+//===----------------------------------------------------------------------===//
 // HIP Graph Capture (gated on HIPDNN_EP_GRAPH)
-//==============================================================================
+//===----------------------------------------------------------------------===//
 // On inference #2 (after warm-up), captures all main_graph GPU operations into
 // a hipGraph_t via stream capture. On inference #3+ the captured graph is
 // replayed, skipping main_graph entirely. GPU buffer pointers from the capture
 // inference are pinned and reused across replays.
 
-static struct {
+struct GraphState {
   hipGraph_t graph = nullptr;
   hipGraphExec_t graphExec = nullptr;
   unsigned inference_num = 0;
@@ -93,11 +95,12 @@ static struct {
   std::vector<void *> captured_output_ptrs;
   std::vector<size_t> captured_input_sizes;
   std::vector<size_t> captured_output_sizes;
-} g_graph;
+};
+static GraphState g_graph;
 
-//==============================================================================
+//===----------------------------------------------------------------------===//
 // GPU Tensor Buffer Pool
-//==============================================================================
+//===----------------------------------------------------------------------===//
 // Reuses GPU allocations across inferences to eliminate per-call
 // hipMalloc/hipFree overhead. Safe because tensor shapes (and therefore sizes)
 // are fixed across inferences for a given model.
@@ -105,6 +108,7 @@ static struct {
 static std::unordered_map<size_t, std::vector<void *>> g_gpu_buffer_pool;
 
 static void *pool_alloc(size_t size_bytes) {
+  assert(size_bytes > 0 && "pool_alloc: size_bytes must be positive");
   auto it = g_gpu_buffer_pool.find(size_bytes);
   if (it != g_gpu_buffer_pool.end() && !it->second.empty()) {
     void *ptr = it->second.back();
@@ -118,6 +122,7 @@ static void *pool_alloc(size_t size_bytes) {
 }
 
 static void pool_release(void *ptr, size_t size_bytes) {
+  assert(size_bytes > 0 && "pool_release: size_bytes must be positive");
   if (ptr)
     g_gpu_buffer_pool[size_bytes].push_back(ptr);
 }
@@ -162,11 +167,11 @@ static size_t calculateTensorSize(const int64_t *shape, size_t rank,
   // Calculate total number of elements with overflow check
   size_t total_elements = 1;
   for (size_t i = 0; i < rank; i++) {
-    if (total_elements > SIZE_MAX / (size_t)shape[i]) {
+    if (total_elements > SIZE_MAX / static_cast<size_t>(shape[i])) {
       fprintf(stderr, "Tensor size overflow at dimension %zu\n", i);
       return 0;
     }
-    total_elements *= (size_t)shape[i];
+    total_elements *= static_cast<size_t>(shape[i]);
   }
 
   if (total_elements > SIZE_MAX / element_size) {
@@ -247,7 +252,7 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   RUNTIME_DEBUG_LOG(
       "[Runtime DEBUG] tensor_t struct memory dump (address=%p):\n",
       (void *)tensor);
-  unsigned char *bytes = (unsigned char *)tensor;
+  auto *bytes = reinterpret_cast<unsigned char *>(tensor);
   for (size_t i = 0; i < sizeof(tensor_t); i++) {
     RUNTIME_DEBUG_LOG("  [%02zu] = 0x%02x\n", i, bytes[i]);
   }
@@ -509,7 +514,7 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
               g_graph.inference_num);
     } else {
       fprintf(stderr, "[GRAPH] hipStreamBeginCapture FAILED: %d (%s)\n",
-              (int)err, hipGetErrorString(err));
+              static_cast<int>(err), hipGetErrorString(err));
     }
   }
 
@@ -520,7 +525,8 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
       hipError_t err = hipGraphLaunch(g_graph.graphExec,
                                       static_cast<hipStream_t>(state->stream));
       if (err != hipSuccess) {
-        fprintf(stderr, "[GRAPH] hipGraphLaunch FAILED: %d (%s)\n", (int)err,
+        fprintf(stderr, "[GRAPH] hipGraphLaunch FAILED: %d (%s)\n",
+                static_cast<int>(err),
                 hipGetErrorString(err));
         return HIPDNN_EP_ERR_STREAM_SYNC_FAILED;
       }
@@ -611,10 +617,11 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
                 "[GRAPH] hipGraphInstantiate SUCCEEDED -- capture PASSED\n");
       } else {
         fprintf(stderr, "[GRAPH] hipGraphInstantiate FAILED: %d (%s)\n",
-                (int)err, hipGetErrorString(err));
+                static_cast<int>(err), hipGetErrorString(err));
       }
     } else {
-      fprintf(stderr, "[GRAPH] hipStreamEndCapture FAILED: %d (%s)\n", (int)err,
+      fprintf(stderr, "[GRAPH] hipStreamEndCapture FAILED: %d (%s)\n",
+              static_cast<int>(err),
               hipGetErrorString(err));
       fprintf(stderr, "[GRAPH] Capture FAILED -- stream capture is not "
                       "compatible with current GPU dispatch pipeline.\n");
@@ -736,26 +743,31 @@ extern "C" int hipdnn_ep_graph_should_skip_main(RuntimeState *state) {
   return 0;
 }
 
-//==============================================================================
+//===----------------------------------------------------------------------===//
 // TensorBuffer Field Accessors (Opaque Pattern)
-//==============================================================================
+//===----------------------------------------------------------------------===//
 
 void *hipdnn_ep_tensor_buffer_get_gpu_ptr(TensorBuffer *buffer) {
+  assert(buffer && "get_gpu_ptr: null buffer");
   return buffer ? buffer->gpu_ptr : nullptr;
 }
 
 void *hipdnn_ep_tensor_buffer_get_host_ptr(TensorBuffer *buffer) {
+  assert(buffer && "get_host_ptr: null buffer");
   return buffer ? buffer->host_ptr : nullptr;
 }
 
 int64_t *hipdnn_ep_tensor_buffer_get_shape_ptr(TensorBuffer *buffer) {
+  assert(buffer && "get_shape_ptr: null buffer");
   return buffer ? buffer->shape_ptr : nullptr;
 }
 
 size_t hipdnn_ep_tensor_buffer_get_rank(TensorBuffer *buffer) {
+  assert(buffer && "get_rank: null buffer");
   return buffer ? buffer->rank : 0;
 }
 
 size_t hipdnn_ep_tensor_buffer_get_size_bytes(TensorBuffer *buffer) {
+  assert(buffer && "get_size_bytes: null buffer");
   return buffer ? buffer->size_bytes : 0;
 }

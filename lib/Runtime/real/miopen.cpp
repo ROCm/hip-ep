@@ -13,9 +13,9 @@
 #define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
 
-// =============================================================================
+//===----------------------------------------------------------------------===//
 // MIOpen Convolution Forward Wrapper
-// =============================================================================
+//===----------------------------------------------------------------------===//
 //
 // DESIGN DECISIONS:
 //
@@ -57,7 +57,7 @@
 //    ❌ Cache descriptors (NOT recommended - negligible benefit, added
 //    complexity)
 //
-// =============================================================================
+//===----------------------------------------------------------------------===//
 
 // TODO: Cache miopenFindConvolutionForwardAlgorithm() results
 //

@@ -15,9 +15,9 @@ static constexpr int GQA_THREADS = 256;
 static constexpr int WAVE_SIZE = 32;  // RDNA wave32; not portable to CDNA/wave64
 static constexpr float LOG2E = 1.4426950408889634f;
 
-// =========================================================================
+//===----------------------------------------------------------------------===//
 // Algorithm: ONNX com.microsoft.GroupQueryAttention
-// =========================================================================
+//===----------------------------------------------------------------------===//
 //
 // This module implements the device kernels for the ONNX Runtime
 // GroupQueryAttention (GQA) contrib operator as specified in
@@ -168,7 +168,7 @@ static constexpr float LOG2E = 1.4426950408889634f;
 //  d_Vexp, d_S -------[Step 10: Value GEMM]-----------> d_O
 //  d_O ---------------[Step 11: Transpose]-------------> d_Obshd (output)
 //
-// =========================================================================
+//===----------------------------------------------------------------------===//
 
 // -------------------------------------------------------------------------
 // Step 1-2: RoPE -- Rotary Positional Embedding (half-rotated)
@@ -528,9 +528,9 @@ __global__ void softmax_inplace_kernel(
     col_ptr[i] = __float2half(__half2float(col_ptr[i]) * inv_sum);
 }
 
-// =============================================================================
+//===----------------------------------------------------------------------===//
 // Extern "C" Launchers (thin wrappers, ordered by pipeline step)
-// =============================================================================
+//===----------------------------------------------------------------------===//
 
 // Step 1-2: RoPE
 extern "C" int hip_gqa_rope(
@@ -662,9 +662,11 @@ extern "C" int hip_gqa_softmax_inplace(
   return hipSuccess;
 }
 
-// =============================================================================
+//===----------------------------------------------------------------------===//
 // WMMA types for fused kernels (RDNA 3 / 3.5, wave32)
-// =============================================================================
+//===----------------------------------------------------------------------===//
+
+static constexpr int kWmmaTile = 16;  // RDNA 3 WMMA tile dimension (16x16x16)
 
 typedef _Float16 half16 __attribute__((ext_vector_type(16)));
 typedef float    float8 __attribute__((ext_vector_type(8)));
@@ -753,9 +755,9 @@ fused_gqa_decode_kernel(
     O[(batch * H + head_q) * d + tid] = __float2half(O_acc);
 }
 
-// =============================================================================
+//===----------------------------------------------------------------------===//
 // Fused GQA Prefill Kernel (sq > 1, Flash Attention 2 with WMMA)
-// =============================================================================
+//===----------------------------------------------------------------------===//
 // Grid: (num_q_tiles * B, H). Block: 128 threads = 4 waves of 32.
 // WMMA 16x16x16 tile GEMMs, online softmax with exp2f, double-buffered KV.
 
@@ -790,8 +792,8 @@ fused_gqa_prefill_kernel(
     const int tid     = threadIdx.x;
     const int wave_id = tid / 32;
     const int lane_id = tid % 32;
-    const int wmma_lane = lane_id % 16;
-    const int pair      = lane_id / 16;
+    const int wmma_lane = lane_id % kWmmaTile;
+    const int pair      = lane_id / kWmmaTile;
 
     extern __shared__ char smem_prefill[];
     _Float16* Q_lds    = (_Float16*)(smem_prefill);

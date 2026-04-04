@@ -14,9 +14,9 @@
 extern "C" {
 #endif
 
-//==============================================================================
+//===----------------------------------------------------------------------===//
 // Backend-Independent Data Type Identifiers
-//==============================================================================
+//===----------------------------------------------------------------------===//
 //
 // These are our own values -- do NOT assume they match MIOpen, cuDNN, or any
 // other library's enum. Each backend provides an explicit mapping function
@@ -28,7 +28,7 @@ extern "C" {
 //   2. Update hipdnn_ep_datatype_size() and hipdnn_ep_datatype_name()
 //   3. Update compiler mapping getHipdnnDataType() in HipToLLVM.cpp
 //   4. Update each backend mapping function
-//==============================================================================
+//===----------------------------------------------------------------------===//
 
 #define HIPDNN_EP_DATATYPE_FLOAT 0    // f32, 4 bytes
 #define HIPDNN_EP_DATATYPE_HALF 1     // f16, 2 bytes
@@ -36,13 +36,13 @@ extern "C" {
 #define HIPDNN_EP_DATATYPE_INT32 3    // i32, 4 bytes
 #define HIPDNN_EP_DATATYPE_INT64 4    // i64, 8 bytes
 
-//==============================================================================
+//===----------------------------------------------------------------------===//
 // Backend-Independent Tensor Operation Identifiers
-//==============================================================================
+//===----------------------------------------------------------------------===//
 //
 // Same design as data types above -- our own values, mapped explicitly to
 // library-specific ops in each backend (e.g. miopenTensorOpMul).
-//==============================================================================
+//===----------------------------------------------------------------------===//
 
 #define HIPDNN_EP_TENSOR_OP_MUL 0 // element-wise multiply
 #define HIPDNN_EP_TENSOR_OP_ADD 1 // element-wise add
@@ -98,9 +98,9 @@ static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
   }
 }
 
-//==============================================================================
+//===----------------------------------------------------------------------===//
 // Backend-Independent Activation Mode Identifiers
-//==============================================================================
+//===----------------------------------------------------------------------===//
 //
 // Same pattern as HIPDNN_EP_DATATYPE_* above. Each backend provides an explicit
 // mapping function (e.g. hipdnn_ep_to_miopen_activation in
@@ -110,7 +110,7 @@ static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
 //   1. Add #define here
 //   2. Update hipdnn_ep_activation_name()
 //   3. Update each backend mapping function
-//==============================================================================
+//===----------------------------------------------------------------------===//
 
 #define HIPDNN_EP_ACTIVATION_SIGMOID 0
 #define HIPDNN_EP_ACTIVATION_RELU 1
@@ -132,9 +132,9 @@ static inline const char *hipdnn_ep_activation_name(int64_t activation_mode) {
 // Opaque handle for runtime state
 typedef struct RuntimeState RuntimeState;
 
-//==============================================================================
+//===----------------------------------------------------------------------===//
 // RuntimeState: Opaque Execution State
-//==============================================================================
+//===----------------------------------------------------------------------===//
 //
 // RuntimeState encapsulates GPU execution resources (stream, library handles,
 // model constants). Generated code treats it as opaque void*, runtime library
@@ -145,7 +145,7 @@ typedef struct RuntimeState RuntimeState;
 //
 // Lifecycle: init -> use -> cleanup (must call in this order)
 // Thread safety: Not thread-safe (one inference per state at a time)
-//==============================================================================
+//===----------------------------------------------------------------------===//
 
 // Initialize runtime state with external constant storage via FileSystem.
 // Used when compiled with hip_compile_with_fs.
@@ -206,9 +206,9 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size);
 int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
                         const size_t *buffer_offsets, size_t num_buffers);
 
-//==============================================================================
+//===----------------------------------------------------------------------===//
 // Inference API Types (for generated interface)
-//==============================================================================
+//===----------------------------------------------------------------------===//
 
 // Represents a tensor with host data and shape information
 typedef struct {
@@ -235,18 +235,18 @@ typedef struct {
   bool is_pooled;     // Internal: true if from pool, false if allocated
 } TensorBuffer;
 
-//==============================================================================
+//===----------------------------------------------------------------------===//
 // Constant Access (used by generated inference code)
-//==============================================================================
+//===----------------------------------------------------------------------===//
 
 // Get GPU pointer for constant at index
 // Returns: GPU pointer (NULL if index out of range or state invalid)
 // Ownership: Caller does NOT own pointer (freed in state_cleanup)
 void *hipdnn_ep_constant_get(RuntimeState *state, int64_t index);
 
-//==============================================================================
+//===----------------------------------------------------------------------===//
 // Tensor Preparation Helpers (allocation-strategy agnostic)
-//==============================================================================
+//===----------------------------------------------------------------------===//
 //
 // These helpers abstract tensor preparation logic (parsing, validation,
 // GPU allocation, H2D/D2H transfer) from the generated code.
@@ -255,7 +255,7 @@ void *hipdnn_ep_constant_get(RuntimeState *state, int64_t index);
 // Generated code is allocation-strategy agnostic.
 //
 // Element size: Read from tensor_t.element_size, set by the EP caller.
-//==============================================================================
+//===----------------------------------------------------------------------===//
 
 // Prepare input tensor: parse, validate, get/allocate GPU buffer, H2D transfer
 //
@@ -306,7 +306,7 @@ void hipdnn_ep_tensor_free_input(RuntimeState *state, TensorBuffer *buffer);
 int hipdnn_ep_graph_should_skip_main(RuntimeState *state);
 
 // TensorBuffer Field Accessors (Opaque Pattern)
-//==============================================================================
+//===----------------------------------------------------------------------===//
 //
 // These accessors allow generated code to extract fields from TensorBuffer
 // without knowing its internal layout. This maintains abstraction and allows
@@ -314,7 +314,7 @@ int hipdnn_ep_graph_should_skip_main(RuntimeState *state);
 //
 // Design: TensorBuffer is opaque to generated MLIR code, accessed only via
 // these functions (same pattern as RuntimeState accessors above).
-//==============================================================================
+//===----------------------------------------------------------------------===//
 
 // Get GPU pointer from TensorBuffer
 // Returns: GPU memory pointer (NULL on error)
@@ -336,9 +336,9 @@ size_t hipdnn_ep_tensor_buffer_get_rank(TensorBuffer *buffer);
 // Returns: Size in bytes
 size_t hipdnn_ep_tensor_buffer_get_size_bytes(TensorBuffer *buffer);
 
-//==============================================================================
+//===----------------------------------------------------------------------===//
 // Memory Operations
-//==============================================================================
+//===----------------------------------------------------------------------===//
 
 // HIP memory copy wrapper (GPU-to-GPU using hipMemcpyAsync)
 // Follows opaque RuntimeState pattern - extracts stream internally
@@ -355,9 +355,9 @@ size_t hipdnn_ep_tensor_buffer_get_size_bytes(TensorBuffer *buffer);
 int wrap_hipMemcpyAsync(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                         size_t size_bytes);
 
-//==============================================================================
+//===----------------------------------------------------------------------===//
 // Library Operations (MIOpen, hipBLAS)
-//==============================================================================
+//===----------------------------------------------------------------------===//
 
 // MIOpen convolution forward operation
 // Full wrapper with descriptor creation, algorithm finding, workspace
@@ -561,9 +561,9 @@ int wrap_qmoe(
     float activation_alpha, float activation_beta, float swiglu_limit,
     int64_t normalize_routing_weights, int64_t elem_size);
 
-//==============================================================================
+//===----------------------------------------------------------------------===//
 // Low-Level HIP Wrappers
-//==============================================================================
+//===----------------------------------------------------------------------===//
 
 // HIP memory allocation wrapper with error handling
 int wrap_hipMalloc(void **ptr, int64_t size);

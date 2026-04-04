@@ -5,11 +5,11 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "cache_utils.h"
+#include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
-#include "hip_custom_kernels.h"
-
 #include <algorithm>
+#include <cassert>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -17,7 +17,7 @@
 #include <limits>
 #include <unordered_map>
 
-// =============================================================================
+//===----------------------------------------------------------------------===//
 // Per-shape descriptor cache with multi-algorithm auto-tune.
 //
 // On the first call for each unique (M, N, K, batch, elem_size) shape we
@@ -27,18 +27,17 @@
 // Subsequent calls reuse the tuned algorithm with zero overhead.
 //
 // Auto-tune is enabled by default. Set HIPDNN_EP_AUTOTUNE=0 to disable.
-// =============================================================================
+//===----------------------------------------------------------------------===//
 
 static constexpr int MAX_ALGO_CANDIDATES = 60;
 static constexpr int AUTOTUNE_TIMING_ITERS = 3;
 
 static bool autotune_enabled() {
-  static int enabled = -1;
-  if (enabled < 0) {
-    const char *env = getenv("HIPDNN_EP_AUTOTUNE");
-    enabled = (env && strcmp(env, "0") != 0) ? 1 : 0;
-  }
-  return enabled != 0;
+  static const bool enabled = [] {
+    const char *env = std::getenv("HIPDNN_EP_AUTOTUNE");
+    return env && std::strcmp(env, "0") != 0;
+  }();
+  return enabled;
 }
 
 struct MatmulCacheKey {
@@ -61,6 +60,9 @@ struct MatmulCacheKeyHash {
   }
 };
 
+/// Cached hipBLASLt descriptors + multi-algorithm auto-tune state for a
+/// single (M, N, K, batch, elem_size) shape. Descriptors are created in
+/// queryOrCreateMatmul() and live for the process lifetime.
 struct MatmulCacheEntry {
   hipblasLtMatmulDesc_t desc;
   hipblasLtMatrixLayout_t layA, layB, layC;
@@ -77,6 +79,7 @@ static std::unordered_map<MatmulCacheKey, MatmulCacheEntry, MatmulCacheKeyHash>
 
 static MatmulCacheEntry *queryOrCreateMatmul(hipblasLtHandle_t handle,
                                              const MatmulCacheKey &key) {
+  assert(handle && "queryOrCreateMatmul: null handle");
   auto it = g_matmul_cache.find(key);
   if (it != g_matmul_cache.end())
     return &it->second;
@@ -89,132 +92,126 @@ static MatmulCacheEntry *queryOrCreateMatmul(hipblasLtHandle_t handle,
   entry.num_candidates = 0;
   entry.max_candidate_workspace = 0;
 
-  if (hipblasLtMatmulDescCreate(&entry.desc, HIPBLAS_COMPUTE_32F, HIP_R_32F) !=
-      HIPBLAS_STATUS_SUCCESS)
-    return nullptr;
+  hipblasLtMatmulPreference_t pref = nullptr;
+  hipblasStatus_t st;
 
-  hipblasOperation_t opN = HIPBLAS_OP_N;
-  if (hipblasLtMatmulDescSetAttribute(entry.desc, HIPBLASLT_MATMUL_DESC_TRANSA,
-                                      &opN,
-                                      sizeof(opN)) != HIPBLAS_STATUS_SUCCESS ||
-      hipblasLtMatmulDescSetAttribute(entry.desc, HIPBLASLT_MATMUL_DESC_TRANSB,
-                                      &opN,
-                                      sizeof(opN)) != HIPBLAS_STATUS_SUCCESS) {
-    hipblasLtMatmulDescDestroy(entry.desc);
-    return nullptr;
+#define MATMUL_CACHE_CHECK(call)                                               \
+  do {                                                                         \
+    st = (call);                                                               \
+    if (st != HIPBLAS_STATUS_SUCCESS)                                          \
+      goto cache_fail;                                                         \
+  } while (0)
+
+  MATMUL_CACHE_CHECK(
+      hipblasLtMatmulDescCreate(&entry.desc, HIPBLAS_COMPUTE_32F, HIP_R_32F));
+
+  {
+    hipblasOperation_t opN = HIPBLAS_OP_N;
+    MATMUL_CACHE_CHECK(hipblasLtMatmulDescSetAttribute(
+        entry.desc, HIPBLASLT_MATMUL_DESC_TRANSA, &opN, sizeof(opN)));
+    MATMUL_CACHE_CHECK(hipblasLtMatmulDescSetAttribute(
+        entry.desc, HIPBLASLT_MATMUL_DESC_TRANSB, &opN, sizeof(opN)));
   }
 
   // Row-major -> col-major trick: BLAS sees m=N, k=K, n=M with ld = first dim
-  if (hipblasLtMatrixLayoutCreate(&entry.layA, dt, N, K, N) !=
-      HIPBLAS_STATUS_SUCCESS) {
-    hipblasLtMatmulDescDestroy(entry.desc);
-    return nullptr;
-  }
-  if (hipblasLtMatrixLayoutCreate(&entry.layB, dt, K, M, K) !=
-      HIPBLAS_STATUS_SUCCESS) {
-    hipblasLtMatrixLayoutDestroy(entry.layA);
-    hipblasLtMatmulDescDestroy(entry.desc);
-    return nullptr;
-  }
-  if (hipblasLtMatrixLayoutCreate(&entry.layC, dt, N, M, N) !=
-      HIPBLAS_STATUS_SUCCESS) {
-    hipblasLtMatrixLayoutDestroy(entry.layB);
-    hipblasLtMatrixLayoutDestroy(entry.layA);
-    hipblasLtMatmulDescDestroy(entry.desc);
-    return nullptr;
-  }
+  MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layA, dt, N, K, N));
+  MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layB, dt, K, M, K));
+  MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layC, dt, N, M, N));
 
   if (key.batch_count > 1) {
     int64_t bc = key.batch_count;
     int64_t sA = K * N, sB = M * K, sC = M * N;
-    if (hipblasLtMatrixLayoutSetAttribute(
-            entry.layA, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc, sizeof(bc)) !=
-            HIPBLAS_STATUS_SUCCESS ||
-        hipblasLtMatrixLayoutSetAttribute(
-            entry.layA, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &sA,
-            sizeof(sA)) != HIPBLAS_STATUS_SUCCESS ||
-        hipblasLtMatrixLayoutSetAttribute(
-            entry.layB, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc, sizeof(bc)) !=
-            HIPBLAS_STATUS_SUCCESS ||
-        hipblasLtMatrixLayoutSetAttribute(
-            entry.layB, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &sB,
-            sizeof(sB)) != HIPBLAS_STATUS_SUCCESS ||
-        hipblasLtMatrixLayoutSetAttribute(
-            entry.layC, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc, sizeof(bc)) !=
-            HIPBLAS_STATUS_SUCCESS ||
-        hipblasLtMatrixLayoutSetAttribute(
-            entry.layC, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &sC,
-            sizeof(sC)) != HIPBLAS_STATUS_SUCCESS) {
-      hipblasLtMatrixLayoutDestroy(entry.layC);
-      hipblasLtMatrixLayoutDestroy(entry.layB);
-      hipblasLtMatrixLayoutDestroy(entry.layA);
-      hipblasLtMatmulDescDestroy(entry.desc);
-      return nullptr;
+    MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutSetAttribute(
+        entry.layA, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc, sizeof(bc)));
+    MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutSetAttribute(
+        entry.layA, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &sA,
+        sizeof(sA)));
+    MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutSetAttribute(
+        entry.layB, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc, sizeof(bc)));
+    MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutSetAttribute(
+        entry.layB, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &sB,
+        sizeof(sB)));
+    MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutSetAttribute(
+        entry.layC, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc, sizeof(bc)));
+    MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutSetAttribute(
+        entry.layC, HIPBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &sC,
+        sizeof(sC)));
+  }
+
+  MATMUL_CACHE_CHECK(hipblasLtMatmulPreferenceCreate(&pref));
+  {
+    const size_t max_ws = kMaxWorkspaceBytes;
+    MATMUL_CACHE_CHECK(hipblasLtMatmulPreferenceSetAttribute(
+        pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_ws,
+        sizeof(max_ws)));
+  }
+
+  {
+    bool do_autotune = autotune_enabled();
+    int request_count = do_autotune ? MAX_ALGO_CANDIDATES : 1;
+
+    int returned = 0;
+    hipblasLtMatmulAlgoGetHeuristic(handle, entry.desc, entry.layA, entry.layB,
+                                    entry.layC, entry.layC, pref, request_count,
+                                    entry.candidates, &returned);
+    hipblasLtMatmulPreferenceDestroy(pref);
+    pref = nullptr;
+
+    if (returned == 0) {
+      fprintf(stderr,
+              "queryOrCreateMatmul: no algo for M=%lld N=%lld K=%lld "
+              "batch=%lld\n",
+              (long long)M, (long long)N, (long long)K,
+              (long long)key.batch_count);
+      goto cache_fail;
+    }
+
+    entry.num_candidates = returned;
+    entry.algo = entry.candidates[0].algo;
+    entry.workspace_size = entry.candidates[0].workspaceSize;
+
+    if (do_autotune) {
+      for (int i = 0; i < returned; i++)
+        entry.max_candidate_workspace = std::max(
+            entry.max_candidate_workspace, entry.candidates[i].workspaceSize);
+      entry.tuned = (returned <= 1);
+    } else {
+      entry.tuned = true;
     }
   }
 
-  hipblasLtMatmulPreference_t pref;
-  if (hipblasLtMatmulPreferenceCreate(&pref) != HIPBLAS_STATUS_SUCCESS) {
+#undef MATMUL_CACHE_CHECK
+  goto cache_done;
+
+cache_fail:
+  if (pref)
+    hipblasLtMatmulPreferenceDestroy(pref);
+  if (entry.layC)
     hipblasLtMatrixLayoutDestroy(entry.layC);
+  if (entry.layB)
     hipblasLtMatrixLayoutDestroy(entry.layB);
+  if (entry.layA)
     hipblasLtMatrixLayoutDestroy(entry.layA);
+  if (entry.desc)
     hipblasLtMatmulDescDestroy(entry.desc);
-    return nullptr;
-  }
-  const size_t max_ws = kMaxWorkspaceBytes;
-  hipblasLtMatmulPreferenceSetAttribute(
-      pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &max_ws, sizeof(max_ws));
+  return nullptr;
 
-  bool do_autotune = autotune_enabled();
-  int request_count = do_autotune ? MAX_ALGO_CANDIDATES : 1;
-
-  int returned = 0;
-  hipblasLtMatmulAlgoGetHeuristic(handle, entry.desc, entry.layA, entry.layB,
-                                  entry.layC, entry.layC, pref, request_count,
-                                  entry.candidates, &returned);
-  hipblasLtMatmulPreferenceDestroy(pref);
-
-  if (returned == 0) {
-    fprintf(stderr,
-            "queryOrCreateMatmul: no algo for M=%lld N=%lld K=%lld "
-            "batch=%lld\n",
-            (long long)M, (long long)N, (long long)K,
-            (long long)key.batch_count);
-    hipblasLtMatrixLayoutDestroy(entry.layC);
-    hipblasLtMatrixLayoutDestroy(entry.layB);
-    hipblasLtMatrixLayoutDestroy(entry.layA);
-    hipblasLtMatmulDescDestroy(entry.desc);
-    return nullptr;
-  }
-
-  entry.num_candidates = returned;
-  entry.algo = entry.candidates[0].algo;
-  entry.workspace_size = entry.candidates[0].workspaceSize;
-
-  if (do_autotune) {
-    for (int i = 0; i < returned; i++)
-      entry.max_candidate_workspace = std::max(
-          entry.max_candidate_workspace, entry.candidates[i].workspaceSize);
-    entry.tuned = (returned <= 1);
-  } else {
-    entry.tuned = true;
-  }
-
+cache_done:
   auto [ins, _] = g_matmul_cache.emplace(key, entry);
 
   RUNTIME_DEBUG_LOG("[MATMUL] cached M=%lld N=%lld K=%lld batch=%lld: "
                     "%d algo(s), autotune=%s\n",
                     (long long)M, (long long)N, (long long)K,
-                    (long long)key.batch_count, returned,
+                    (long long)key.batch_count, entry.num_candidates,
                     entry.tuned ? "skipped" : "pending");
 
   return &ins->second;
 }
 
-// =============================================================================
+//===----------------------------------------------------------------------===//
 // Auto-tune: benchmark all candidate algorithms and select the fastest.
 // Called once per shape on the first matmul invocation with real GPU pointers.
-// =============================================================================
+//===----------------------------------------------------------------------===//
 
 static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
                            MatmulCacheEntry *entry, const void *blas_A,
@@ -292,9 +289,9 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
                     best_idx, best_ms, AUTOTUNE_TIMING_ITERS);
 }
 
-// =============================================================================
+//===----------------------------------------------------------------------===//
 // Batched MatMul via hipBLASLt
-// =============================================================================
+//===----------------------------------------------------------------------===//
 //
 // ONNX MatMul semantics: output = A @ B (row-major)
 //   A: [batch_count x M x K]
@@ -312,7 +309,7 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
 //   C_ptr = output (column-major view is C^T: N rows, M cols, ld = N)
 //
 // Both fp16 and fp32 use HIPBLAS_COMPUTE_32F for accumulation precision.
-// =============================================================================
+//===----------------------------------------------------------------------===//
 
 int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
                          void *output, int64_t M, int64_t N, int64_t K,

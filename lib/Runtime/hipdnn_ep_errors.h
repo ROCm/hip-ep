@@ -9,9 +9,9 @@
 extern "C" {
 #endif
 
-//==============================================================================
+//===----------------------------------------------------------------------===//
 // Unified Error Codes
-//==============================================================================
+//===----------------------------------------------------------------------===//
 //
 // All runtime functions return int status codes following this scheme:
 //   0 = success (HIPDNN_EP_SUCCESS)
@@ -21,7 +21,7 @@ extern "C" {
 //   -1 to -99:    General errors (invalid arguments, out of bounds, etc.)
 //   -100 to -199: GPU resource errors (allocation, transfer, etc.)
 //   -200 to -299: Library errors (MIOpen, hipBLAS, etc.)
-//==============================================================================
+//===----------------------------------------------------------------------===//
 
 // Success
 #define HIPDNN_EP_SUCCESS 0
