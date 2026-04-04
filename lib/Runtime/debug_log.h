@@ -12,7 +12,7 @@
 
 inline bool hipdnn_ep_debug_enabled() {
   static const bool enabled = [] {
-    const char *v = getenv("HIPDNN_EP_DEBUG");
+    const char *v = std::getenv("HIPDNN_EP_DEBUG");
     return v && v[0] >= '1';
   }();
   return enabled;
@@ -20,7 +20,7 @@ inline bool hipdnn_ep_debug_enabled() {
 
 inline bool hipdnn_ep_perf_enabled() {
   static const bool enabled = [] {
-    const char *v = getenv("HIPDNN_EP_PERF");
+    const char *v = std::getenv("HIPDNN_EP_PERF");
     return v && v[0] >= '1';
   }();
   return enabled || hipdnn_ep_debug_enabled();
@@ -28,7 +28,7 @@ inline bool hipdnn_ep_perf_enabled() {
 
 inline bool hipdnn_ep_graph_enabled() {
   static const bool enabled = [] {
-    const char *v = getenv("HIPDNN_EP_GRAPH");
+    const char *v = std::getenv("HIPDNN_EP_GRAPH");
     return v && v[0] >= '1';
   }();
   return enabled;
