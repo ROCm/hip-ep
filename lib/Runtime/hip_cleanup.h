@@ -15,7 +15,7 @@
     hipError_t _err = (expr);                                                  \
     if (_err != hipSuccess) {                                                  \
       fprintf(stderr, "Warning: " #expr " failed with error %d\n",             \
-              static_cast<int>(_err));                                          \
+              static_cast<int>(_err));                                         \
     }                                                                          \
   } while (0)
 
