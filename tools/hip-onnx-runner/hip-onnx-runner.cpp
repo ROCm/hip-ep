@@ -25,9 +25,9 @@
 
 #include <onnxruntime_cxx_api.h>
 
+#include "hip/timing.h"
 #include <algorithm>
 #include <cctype>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -755,11 +755,8 @@ int main(int argc, char *argv[]) {
       std::cerr << "Session creation failed: " << e.what() << "\n";
       return 1;
     }
-    auto t1 = std::chrono::steady_clock::now();
     std::cout << "Session created in "
-              << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0)
-                     .count()
-              << " ms\n";
+              << static_cast<int>(elapsed_since(t0) * 1000) << " ms\n";
   }
 
   Ort::AllocatorWithDefaultOptions allocator;
@@ -873,12 +870,8 @@ int main(int argc, char *argv[]) {
       outputs = session->Run(Ort::RunOptions{}, input_names.data(),
                              input_tensors.data(), input_count,
                              output_names.data(), output_count);
-      auto t1 = std::chrono::steady_clock::now();
       std::cout << "Inference: "
-                << std::chrono::duration_cast<std::chrono::microseconds>(t1 -
-                                                                         t0)
-                       .count()
-                << " us\n";
+                << static_cast<int64_t>(elapsed_since(t0) * 1e6) << " us\n";
       std::cout << "OK - " << outputs.size() << " output tensor(s)\n";
     } catch (const Ort::Exception &e) {
       std::cerr << "Inference failed: " << e.what() << "\n";

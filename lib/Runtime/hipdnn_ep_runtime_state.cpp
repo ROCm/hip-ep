@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "debug_log.h"
+#include "hip/timing.h"
 #include "hip_cleanup.h"
 #include "hipdnn_ep_runtime.h"
 #include "runtime_state_internal.h"
@@ -10,34 +11,14 @@
 #include "model_metadata_generated.h"
 #include "morphizen-foundation/file_io.hpp"
 
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
-using Clock = std::chrono::steady_clock;
-
-// Analogous to hipEventRecord + hipEventElapsedTime on the CPU timeline:
-// records the current time, computes seconds since `marker`, resets `marker`.
-static double record_elapsed(Clock::time_point &marker) {
-  auto now = Clock::now();
-  double s = std::chrono::duration<double>(now - marker).count();
-  marker = now;
-  return s;
-}
-
-// Returns seconds elapsed since `marker` without resetting it.
-static double elapsed_since(Clock::time_point marker) {
-  return std::chrono::duration<double>(Clock::now() - marker).count();
-}
-
 int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
                                  const void *metadata_blob, size_t blob_size) {
-  const bool timing = [] {
-    const char *v = getenv("HIPDNN_EP_TIMING");
-    return v && v[0] >= '1';
-  }();
-  auto t0 = Clock::now();
+  const bool timing = hipdnn_ep_timing_enabled();
+  auto t0 = std::chrono::steady_clock::now();
   auto t_prev = t0;
 
   if (!out_state || !fs) {

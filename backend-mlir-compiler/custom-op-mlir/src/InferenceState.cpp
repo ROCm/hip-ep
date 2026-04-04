@@ -9,7 +9,7 @@
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
 #include "morphizen/plugin.hpp"
-#include <chrono>
+#include "hip/timing.h"
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -36,24 +36,6 @@ std::string artifactExtension() {
 }
 } // anonymous namespace
 
-namespace {
-using Clock = std::chrono::steady_clock;
-
-// Analogous to hipEventRecord + hipEventElapsedTime on the CPU timeline:
-// records the current time, computes seconds since `marker`, resets `marker`.
-static double record_elapsed(Clock::time_point &marker) {
-  auto now = Clock::now();
-  double s = std::chrono::duration<double>(now - marker).count();
-  marker = now;
-  return s;
-}
-
-// Returns seconds elapsed since `marker` without resetting it.
-static double elapsed_since(Clock::time_point marker) {
-  return std::chrono::duration<double>(Clock::now() - marker).count();
-}
-} // anonymous namespace
-
 namespace mlir_compilation::customop {
 
 InferenceState::InferenceState(PrivateTag, void *state,
@@ -67,11 +49,8 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes,
                        morphizen::FileSystem *fs) {
   MY_LOG(1) << "Loading inference plugin from memory...";
 
-  const bool timing = [] {
-    const char *v = getenv("HIPDNN_EP_TIMING");
-    return v && v[0] >= '1';
-  }();
-  auto t0 = Clock::now();
+  const bool timing = hipdnn_ep_timing_enabled();
+  auto t0 = std::chrono::steady_clock::now();
   auto t_prev = t0;
 
   // Write DLL to temp file (morphizen::Plugin loads from file path)

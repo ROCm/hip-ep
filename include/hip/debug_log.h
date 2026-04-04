@@ -4,20 +4,14 @@
  */
 #pragma once
 
+#include "timing.h"
+
 #include "llvm/Support/raw_ostream.h"
 #include <cstdlib>
 
 inline bool hipdnn_ep_debug_enabled() {
   static const bool enabled = [] {
     const char *v = std::getenv("HIPDNN_EP_DEBUG");
-    return v && v[0] >= '1';
-  }();
-  return enabled;
-}
-
-inline bool hipdnn_ep_timing_enabled() {
-  static const bool enabled = [] {
-    const char *v = std::getenv("HIPDNN_EP_TIMING");
     return v && v[0] >= '1';
   }();
   return enabled;

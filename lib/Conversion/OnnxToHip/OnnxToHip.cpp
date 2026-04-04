@@ -2061,15 +2061,13 @@ void ConvertOnnxToHipPass::runOnOperation() {
   auto logSubpass = [&](const char *name, const char *extra = nullptr) {
     if (!timing)
       return;
-    auto now = std::chrono::steady_clock::now();
-    double sec = std::chrono::duration<double>(now - phaseStart).count();
+    double sec = record_elapsed(phaseStart);
     if (extra)
       llvm::errs() << "[ConvertOnnxToHipPass] " << name << ": "
                    << llvm::format("%.3f", sec) << "s  " << extra << "\n";
     else
       llvm::errs() << "[ConvertOnnxToHipPass] " << name << ": "
                    << llvm::format("%.3f", sec) << "s\n";
-    phaseStart = now;
   };
 
   // Set up externalization state if enabled.
@@ -2212,11 +2210,8 @@ void ConvertOnnxToHipPass::runOnOperation() {
   logSubpass("finalize");
 
   if (timing) {
-    double total = std::chrono::duration<double>(
-                       std::chrono::steady_clock::now() - passStart)
-                       .count();
     llvm::errs() << "[ConvertOnnxToHipPass] total: "
-                 << llvm::format("%.3f", total) << "s\n";
+                 << llvm::format("%.3f", elapsed_since(passStart)) << "s\n";
   }
 }
 
