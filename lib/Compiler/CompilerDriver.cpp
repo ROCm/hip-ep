@@ -154,8 +154,7 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
     logPhase("emitLLVMIR");
     if (timing) {
       llvm::errs() << "[CompilerDriver] total: "
-                   << llvm::format("%.3f", elapsed_since(totalStart))
-                   << "s\n";
+                   << llvm::format("%.3f", elapsed_since(totalStart)) << "s\n";
     }
     return true;
   }

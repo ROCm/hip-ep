@@ -6,9 +6,9 @@
 #include "MlirCompiler.h"
 
 // Morphizen headers
+#include "hip/timing.h"
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
-#include "hip/timing.h"
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -223,8 +223,7 @@ struct Level1MlirPass {
     auto config = load_config(self.get_context().get());
 
     if (timing) {
-      fprintf(stderr, "[Session] load_config: %.3fs\n",
-              record_elapsed(t_prev));
+      fprintf(stderr, "[Session] load_config: %.3fs\n", record_elapsed(t_prev));
     }
 
     // Step 2: Get MLIR bytecode from graph
@@ -279,8 +278,7 @@ struct Level1MlirPass {
     }
 
     if (timing) {
-      fprintf(stderr, "[Session] Fuse graph: %.3fs\n",
-              record_elapsed(t_prev));
+      fprintf(stderr, "[Session] Fuse graph: %.3fs\n", record_elapsed(t_prev));
       fprintf(stderr, "[Session] Level1MlirPass::process total: %.3fs\n",
               elapsed_since(t0));
     }
