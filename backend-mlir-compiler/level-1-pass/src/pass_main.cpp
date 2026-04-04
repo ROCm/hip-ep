@@ -8,7 +8,7 @@
 // Morphizen headers
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
-#include <chrono>
+#include "hip/timing.h"
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -31,22 +31,6 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
 using namespace hipdnn::level1pass;
 
 namespace {
-
-using Clock = std::chrono::steady_clock;
-
-// Analogous to hipEventRecord + hipEventElapsedTime on the CPU timeline:
-// records the current time, computes seconds since `marker`, resets `marker`.
-static double record_elapsed(Clock::time_point &marker) {
-  auto now = Clock::now();
-  double s = std::chrono::duration<double>(now - marker).count();
-  marker = now;
-  return s;
-}
-
-// Returns seconds elapsed since `marker` without resetting it.
-static double elapsed_since(Clock::time_point marker) {
-  return std::chrono::duration<double>(Clock::now() - marker).count();
-}
 
 // ============================================================================
 // Static Helper Functions
@@ -231,11 +215,8 @@ struct Level1MlirPass {
   void process(IPass &self, Graph &graph) {
     MY_LOG(1) << "Level1MlirPass::process() called";
 
-    const bool timing = [] {
-      const char *v = getenv("HIPDNN_EP_TIMING");
-      return v && v[0] >= '1';
-    }();
-    auto t0 = Clock::now();
+    const bool timing = hipdnn_ep_timing_enabled();
+    auto t0 = std::chrono::steady_clock::now();
     auto t_prev = t0;
 
     // Step 1: Load configuration from provider options

@@ -66,10 +66,8 @@ bool CompilerDriver::compile(llvm::StringRef input_mlir,
       mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, &context);
 
   if (hipdnn_ep_timing_enabled()) {
-    auto t1 = std::chrono::steady_clock::now();
-    double sec = std::chrono::duration<double>(t1 - t0).count();
     llvm::errs() << "[CompilerDriver] MLIR parsing: "
-                 << llvm::format("%.3f", sec) << "s\n";
+                 << llvm::format("%.3f", elapsed_since(t0)) << "s\n";
   }
 
   if (!module) {
@@ -118,11 +116,8 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
   auto logPhase = [&](const char *name) {
     if (!timing)
       return;
-    auto now = std::chrono::steady_clock::now();
-    double sec = std::chrono::duration<double>(now - phaseStart).count();
     llvm::errs() << "[CompilerDriver] " << name << ": "
-                 << llvm::format("%.3f", sec) << "s\n";
-    phaseStart = now;
+                 << llvm::format("%.3f", record_elapsed(phaseStart)) << "s\n";
   };
 
   if (timing)
@@ -158,10 +153,8 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
       return false;
     logPhase("emitLLVMIR");
     if (timing) {
-      double total = std::chrono::duration<double>(
-                         std::chrono::steady_clock::now() - totalStart)
-                         .count();
-      llvm::errs() << "[CompilerDriver] total: " << llvm::format("%.3f", total)
+      llvm::errs() << "[CompilerDriver] total: "
+                   << llvm::format("%.3f", elapsed_since(totalStart))
                    << "s\n";
     }
     return true;
@@ -190,11 +183,8 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
   cleanupIntermediates(base_path);
 
   if (timing) {
-    double total = std::chrono::duration<double>(
-                       std::chrono::steady_clock::now() - totalStart)
-                       .count();
-    llvm::errs() << "[CompilerDriver] total: " << llvm::format("%.3f", total)
-                 << "s\n";
+    llvm::errs() << "[CompilerDriver] total: "
+                 << llvm::format("%.3f", elapsed_since(totalStart)) << "s\n";
   }
 
   return true;
