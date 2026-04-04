@@ -6,10 +6,10 @@
 
 // CRITICAL: morphizen.hpp must be included before other morphizen headers
 #include "../../common/temp_path.hpp"
+#include "hip/timing.h"
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
 #include "morphizen/plugin.hpp"
-#include "hip/timing.h"
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
