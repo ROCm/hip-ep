@@ -118,7 +118,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   }
 
   if (timing)
-    fprintf(stderr, "[Session] HIP device init: %.3fs\n", record_elapsed(t_prev));
+    fprintf(stderr, "[Session] HIP device init: %.3fs\n",
+            record_elapsed(t_prev));
 
   // Create HIP stream
   if (hipStreamCreate(&state->stream) != hipSuccess) {
@@ -128,7 +129,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   }
 
   if (timing)
-    fprintf(stderr, "[Session] hipStreamCreate: %.3fs\n", record_elapsed(t_prev));
+    fprintf(stderr, "[Session] hipStreamCreate: %.3fs\n",
+            record_elapsed(t_prev));
 
   // Create MIOpen handle
   if (miopenCreate(&state->miopen_handle) != miopenStatusSuccess) {
@@ -176,7 +178,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   }
 
   if (timing)
-    fprintf(stderr, "[Session] hipBLASLt init: %.3fs\n", record_elapsed(t_prev));
+    fprintf(stderr, "[Session] hipBLASLt init: %.3fs\n",
+            record_elapsed(t_prev));
 
   *out_state = state;
 
@@ -272,9 +275,9 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
     }
 
     if (timing)
-      fprintf(stderr,
-              "[Session] Read constants to pinned: %.3fs (%zu bytes, %s)\n",
-              record_elapsed(t_prev), total_size, src ? "mmap+memcpy" : "fread");
+      fprintf(
+          stderr, "[Session] Read constants to pinned: %.3fs (%zu bytes, %s)\n",
+          record_elapsed(t_prev), total_size, src ? "mmap+memcpy" : "fread");
   } else {
     // dGPU: allocate in VRAM, upload once via hipMemcpy.
     const void *src = reader->mmap();

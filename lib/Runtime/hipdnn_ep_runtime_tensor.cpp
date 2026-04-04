@@ -526,8 +526,7 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
                                       static_cast<hipStream_t>(state->stream));
       if (err != hipSuccess) {
         fprintf(stderr, "[GRAPH] hipGraphLaunch FAILED: %d (%s)\n",
-                static_cast<int>(err),
-                hipGetErrorString(err));
+                static_cast<int>(err), hipGetErrorString(err));
         return HIPDNN_EP_ERR_STREAM_SYNC_FAILED;
       }
     }
@@ -621,8 +620,7 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
       }
     } else {
       fprintf(stderr, "[GRAPH] hipStreamEndCapture FAILED: %d (%s)\n",
-              static_cast<int>(err),
-              hipGetErrorString(err));
+              static_cast<int>(err), hipGetErrorString(err));
       fprintf(stderr, "[GRAPH] Capture FAILED -- stream capture is not "
                       "compatible with current GPU dispatch pipeline.\n");
     }
