@@ -47,11 +47,11 @@ static miopenActivationMode_t hipdnn_ep_to_miopen_activation(int64_t mode,
   }
 }
 
-// =============================================================================
+//===----------------------------------------------------------------------===//
 // Descriptor cache: 2 tensor descriptors + 1 activation descriptor created
 // once per unique (num_elements, data_type, activation_mode) triple and
 // reused for the process lifetime.
-// =============================================================================
+//===----------------------------------------------------------------------===//
 
 struct ActivationCacheKey {
   int64_t num_elements, data_type, activation_mode;
@@ -71,6 +71,9 @@ struct ActivationCacheKeyHash {
   }
 };
 
+/// Cached MIOpen descriptors for a single activation shape.
+/// Ownership: descriptors are created in queryOrCreateActivation() and live
+/// for the process lifetime (never destroyed individually).
 struct ActivationCacheEntry {
   miopenTensorDescriptor_t inDesc, outDesc;
   miopenActivationDescriptor_t actDesc;
@@ -95,36 +98,35 @@ queryOrCreateActivation(const ActivationCacheKey &key) {
   int n = static_cast<int>(key.num_elements);
 
   ActivationCacheEntry e{};
+  miopenStatus_t st;
 
-  if (miopenCreateTensorDescriptor(&e.inDesc) != miopenStatusSuccess)
-    return nullptr;
-  if (miopenCreateTensorDescriptor(&e.outDesc) != miopenStatusSuccess) {
-    miopenDestroyTensorDescriptor(e.inDesc);
-    return nullptr;
-  }
+#define ACT_CACHE_CHECK(call)                                                  \
+  do {                                                                         \
+    st = (call);                                                               \
+    if (st != miopenStatusSuccess)                                             \
+      goto cache_fail;                                                         \
+  } while (0)
 
-  if (miopenSet4dTensorDescriptor(e.inDesc, dt, 1, 1, 1, n) !=
-          miopenStatusSuccess ||
-      miopenSet4dTensorDescriptor(e.outDesc, dt, 1, 1, 1, n) !=
-          miopenStatusSuccess) {
-    miopenDestroyTensorDescriptor(e.outDesc);
-    miopenDestroyTensorDescriptor(e.inDesc);
-    return nullptr;
-  }
+  ACT_CACHE_CHECK(miopenCreateTensorDescriptor(&e.inDesc));
+  ACT_CACHE_CHECK(miopenCreateTensorDescriptor(&e.outDesc));
+  ACT_CACHE_CHECK(miopenSet4dTensorDescriptor(e.inDesc, dt, 1, 1, 1, n));
+  ACT_CACHE_CHECK(miopenSet4dTensorDescriptor(e.outDesc, dt, 1, 1, 1, n));
+  ACT_CACHE_CHECK(miopenCreateActivationDescriptor(&e.actDesc));
+  ACT_CACHE_CHECK(miopenSetActivationDescriptor(e.actDesc, act, 0.0, 0.0, 0.0));
 
-  if (miopenCreateActivationDescriptor(&e.actDesc) != miopenStatusSuccess) {
-    miopenDestroyTensorDescriptor(e.outDesc);
-    miopenDestroyTensorDescriptor(e.inDesc);
-    return nullptr;
-  }
-  if (miopenSetActivationDescriptor(e.actDesc, act, 0.0, 0.0, 0.0) !=
-      miopenStatusSuccess) {
+#undef ACT_CACHE_CHECK
+  goto cache_done;
+
+cache_fail:
+  if (e.actDesc)
     miopenDestroyActivationDescriptor(e.actDesc);
+  if (e.outDesc)
     miopenDestroyTensorDescriptor(e.outDesc);
+  if (e.inDesc)
     miopenDestroyTensorDescriptor(e.inDesc);
-    return nullptr;
-  }
+  return nullptr;
 
+cache_done:
   auto [ins, _] = g_activation_cache.emplace(key, e);
 
   RUNTIME_DEBUG_LOG("[REAL] queryOrCreateActivation: cached 2 tensor + 1 act "
@@ -135,14 +137,14 @@ queryOrCreateActivation(const ActivationCacheKey &key) {
   return &ins->second;
 }
 
-// =============================================================================
+//===----------------------------------------------------------------------===//
 // Generic MIOpen Activation Forward
-// =============================================================================
+//===----------------------------------------------------------------------===//
 //
 // Applies activation_mode element-wise using miopenActivationForward.
 // Tensor is represented as flat 1D [1, 1, 1, num_elements] to satisfy
 // miopenSet4dTensorDescriptor's 4D requirement.
-// =============================================================================
+//===----------------------------------------------------------------------===//
 
 int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
                                  int64_t num_elements, int64_t data_type,

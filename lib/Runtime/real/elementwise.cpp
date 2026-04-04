@@ -122,41 +122,49 @@ queryOrCreateOpTensor(const OpTensorCacheKey &key) {
   if (!type_ok)
     return nullptr;
   OpTensorCacheEntry e{};
+  miopenStatus_t st;
 
-  if (miopenCreateTensorDescriptor(&e.aDesc) != miopenStatusSuccess)
-    return nullptr;
-  if (miopenCreateTensorDescriptor(&e.bDesc) != miopenStatusSuccess) {
-    miopenDestroyTensorDescriptor(e.aDesc);
-    return nullptr;
-  }
-  if (miopenCreateTensorDescriptor(&e.cDesc) != miopenStatusSuccess) {
-    miopenDestroyTensorDescriptor(e.bDesc);
-    miopenDestroyTensorDescriptor(e.aDesc);
-    return nullptr;
-  }
+#define OP_CACHE_CHECK(call)                                                   \
+  do {                                                                         \
+    st = (call);                                                               \
+    if (st != miopenStatusSuccess)                                             \
+      goto cache_fail;                                                         \
+  } while (0)
 
-  if (miopenSet4dTensorDescriptor(e.aDesc, dt, (int)key.lhs_n, (int)key.lhs_c,
-                                  (int)key.lhs_h,
-                                  (int)key.lhs_w) != miopenStatusSuccess ||
-      miopenSet4dTensorDescriptor(e.bDesc, dt, (int)key.rhs_n, (int)key.rhs_c,
-                                  (int)key.rhs_h,
-                                  (int)key.rhs_w) != miopenStatusSuccess ||
-      miopenSet4dTensorDescriptor(e.cDesc, dt, (int)key.out_n, (int)key.out_c,
-                                  (int)key.out_h,
-                                  (int)key.out_w) != miopenStatusSuccess) {
+  OP_CACHE_CHECK(miopenCreateTensorDescriptor(&e.aDesc));
+  OP_CACHE_CHECK(miopenCreateTensorDescriptor(&e.bDesc));
+  OP_CACHE_CHECK(miopenCreateTensorDescriptor(&e.cDesc));
+
+  OP_CACHE_CHECK(miopenSet4dTensorDescriptor(
+      e.aDesc, dt, static_cast<int>(key.lhs_n), static_cast<int>(key.lhs_c),
+      static_cast<int>(key.lhs_h), static_cast<int>(key.lhs_w)));
+  OP_CACHE_CHECK(miopenSet4dTensorDescriptor(
+      e.bDesc, dt, static_cast<int>(key.rhs_n), static_cast<int>(key.rhs_c),
+      static_cast<int>(key.rhs_h), static_cast<int>(key.rhs_w)));
+  OP_CACHE_CHECK(miopenSet4dTensorDescriptor(
+      e.cDesc, dt, static_cast<int>(key.out_n), static_cast<int>(key.out_c),
+      static_cast<int>(key.out_h), static_cast<int>(key.out_w)));
+
+#undef OP_CACHE_CHECK
+  goto cache_done;
+
+cache_fail:
+  if (e.cDesc)
     miopenDestroyTensorDescriptor(e.cDesc);
+  if (e.bDesc)
     miopenDestroyTensorDescriptor(e.bDesc);
+  if (e.aDesc)
     miopenDestroyTensorDescriptor(e.aDesc);
-    return nullptr;
-  }
+  return nullptr;
 
+cache_done:
   auto [ins, _] = g_optensor_cache.emplace(key, e);
   return &ins->second;
 }
 
-// =============================================================================
+//===----------------------------------------------------------------------===//
 // Generic Element-wise Tensor Operation via MIOpen
-// =============================================================================
+//===----------------------------------------------------------------------===//
 //
 // Uses miopenOpTensor to compute:
 //   output = alpha1 * op(lhs, alpha2 * rhs) + beta * output
@@ -166,7 +174,7 @@ queryOrCreateOpTensor(const OpTensorCacheKey &key) {
 // broadcasting.  When a dimension is 1 in one operand but >1 in the other,
 // MIOpen broadcasts automatically (e.g. bias addition).
 // The compiler (HipToLLVM) left-pads shapes with 1 for rank < 4.
-// =============================================================================
+//===----------------------------------------------------------------------===//
 
 int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                         int64_t lhs_n, int64_t lhs_c, int64_t lhs_h,
@@ -233,14 +241,14 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
   return 0;
 }
 
-// =============================================================================
+//===----------------------------------------------------------------------===//
 // Element-wise Subtraction via Custom HIP Kernel
-// =============================================================================
+//===----------------------------------------------------------------------===//
 //
 // For types unsupported by MIOpen (e.g. int64), dispatches to
 // hip_elementwise_sub from the custom kernels library. The caller passes
 // element_size_bytes; we map it to the corresponding hip_dtype_t.
-// =============================================================================
+//===----------------------------------------------------------------------===//
 
 int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
                          void *output, int64_t num_elements,

@@ -8,12 +8,12 @@
 // so the header can be shared across the compiler stack, the bitcode-compiled
 // runtime, the MLIR backend plugins, and standalone tools.
 //
-// Design rationale (see .cursor/plans/timer-cleanup.plan.md):
+// Design rationale:
 //   * Free functions, not classes -- keeps measurement separate from output
 //     (callers choose fprintf, llvm::errs(), std::cout, etc.).
-//   * Evaluated against LLVM Timer/TimeRegion, MLIR TimingScope, and IREE
-//     IREE_TRACE_ZONE_*.  A full TimingManager would be overkill for timing
-//     a linear sequence of coarse init phases.
+//   * Evaluated against similar timing utilities in upstream projects.
+//     A full TimingManager would be overkill for timing a linear sequence
+//     of coarse init phases.
 
 #pragma once
 #include <chrono>

@@ -6,12 +6,12 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "cache_utils.h"
+#include "error_check_macros.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
-#include "error_check_macros.h"
-
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -21,9 +21,9 @@
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
 #define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
 
-// =============================================================================
+//===----------------------------------------------------------------------===//
 // hipBLASLt layout helper
-// =============================================================================
+//===----------------------------------------------------------------------===//
 
 static hipblasStatus_t setLayoutBatch(hipblasLtMatrixLayout_t layout,
                                       int32_t batchCount, int64_t stride) {
@@ -88,12 +88,13 @@ static std::unordered_map<GqaGemmKey, GqaGemmCacheEntry, GqaGemmKeyHash>
 /// (partially created descriptors are cleaned up).
 static const GqaGemmCacheEntry *queryOrCreateGemmState(hipblasLtHandle_t handle,
                                                        const GqaGemmKey &key) {
+  assert(handle && "queryOrCreateGemmState: null handle");
   auto it = g_gqa_gemm_cache.find(key);
   if (it != g_gqa_gemm_cache.end())
     return &it->second;
 
   int64_t m = key.m, n = key.n, k = key.k;
-  int32_t batch = (int32_t)key.batch;
+  int32_t batch = static_cast<int32_t>(key.batch);
 
   GqaGemmCacheEntry entry = {};
 
@@ -214,9 +215,9 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
   return 0;
 }
 
-// =============================================================================
+//===----------------------------------------------------------------------===//
 // 12-step hipBLASLt GQA pipeline (Step 0 + Steps 1-11, FP16 only)
-// =============================================================================
+//===----------------------------------------------------------------------===//
 
 static int gqa_forward_hipblaslt(
     RuntimeState *state, hipStream_t stream, hipblasLtHandle_t ltHandle,
@@ -243,7 +244,7 @@ static int gqa_forward_hipblaslt(
 
   bool need_rope = do_rotary && cos_cache && sin_cache;
 
-  // =========================================================================
+  //===--------------------------------------------------------------------===//
   // Fused GQA decode path (sq == 1, d in {64, 128, 256}, KV cache enabled)
   //
   // Replaces steps 3, 6-11 of the decomposed pipeline with a single kernel
@@ -254,7 +255,7 @@ static int gqa_forward_hipblaslt(
   // All prefill (sq > 1) goes through the decomposed hipBLASLt path where
   // auto-tuned GEMMs outperform fixed WMMA tiling and all ORT GQA features
   // (sliding window, smooth softmax, head sink) are supported.
-  // =========================================================================
+  //===--------------------------------------------------------------------===//
   bool fused_d = (d == 64 || d == 128 || d == 256);
   if (fused_d && sq == 1 && key && value && present_key && present_value &&
       local_window_size == 0 && !head_sink && !use_smooth_softmax) {
@@ -262,20 +263,24 @@ static int gqa_forward_hipblaslt(
     const void *kSrc = key;
 
     if (need_rope) {
-      size_t Q_bytes = (size_t)B * sq * H * d * elem_sz;
-      size_t K_bytes = (size_t)B * sq * G * d * elem_sz;
+      size_t Q_bytes = static_cast<size_t>(B) * sq * H * d * elem_sz;
+      size_t K_bytes = static_cast<size_t>(B) * sq * G * d * elem_sz;
       if (hipdnn_ep_state_ensure_workspace(state, Q_bytes + K_bytes) != 0)
         return -1;
       char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
       void *d_Qroped = ws;
       void *d_Kroped = ws + Q_bytes;
 
-      int half_rot = (int)(d / 2);
-      if (hip_gqa_rope(stream, query, d_Qroped, cos_cache, sin_cache, (int)B,
-                       (int)sq, (int)H, (int)d, half_rot, (int)past_len) != 0)
+      int half_rot = static_cast<int>(d / 2);
+      if (hip_gqa_rope(stream, query, d_Qroped, cos_cache, sin_cache,
+                       static_cast<int>(B), static_cast<int>(sq),
+                       static_cast<int>(H), static_cast<int>(d), half_rot,
+                       static_cast<int>(past_len)) != 0)
         return -1;
-      if (hip_gqa_rope(stream, key, d_Kroped, cos_cache, sin_cache, (int)B,
-                       (int)sq, (int)G, (int)d, half_rot, (int)past_len) != 0)
+      if (hip_gqa_rope(stream, key, d_Kroped, cos_cache, sin_cache,
+                       static_cast<int>(B), static_cast<int>(sq),
+                       static_cast<int>(G), static_cast<int>(d), half_rot,
+                       static_cast<int>(past_len)) != 0)
         return -1;
 
       qSrc = d_Qroped;
@@ -283,13 +288,17 @@ static int gqa_forward_hipblaslt(
     }
 
     if (update_kv_cache(stream, past_key, past_value, kSrc, value, present_key,
-                        present_value, (int)B, (int)past_len, (int)sq, (int)G,
-                        (int)d, (int)present_seq) != 0)
+                        present_value, static_cast<int>(B),
+                        static_cast<int>(past_len), static_cast<int>(sq),
+                        static_cast<int>(G), static_cast<int>(d),
+                        static_cast<int>(present_seq)) != 0)
       return -1;
 
     if (hip_gqa_fused_decode(stream, qSrc, present_key, present_value, output,
-                             (int)B, (int)H, (int)G, (int)d, (int)skv,
-                             (int)present_seq, scale) != 0)
+                             static_cast<int>(B), static_cast<int>(H),
+                             static_cast<int>(G), static_cast<int>(d),
+                             static_cast<int>(skv),
+                             static_cast<int>(present_seq), scale) != 0)
       return -1;
 
     RUNTIME_DEBUG_LOG(
@@ -300,10 +309,10 @@ static int gqa_forward_hipblaslt(
     return 0;
   }
 
-  // =========================================================================
+  //===--------------------------------------------------------------------===//
   // Decomposed hipBLASLt pipeline (all prefill sq > 1, unsupported d, or
   // features requiring sliding window / smooth softmax / head sink)
-  // =========================================================================
+  //===--------------------------------------------------------------------===//
 
   bool packed_qkv = (key == nullptr && value == nullptr);
 
@@ -316,10 +325,10 @@ static int gqa_forward_hipblaslt(
   // Layout: [Qtrans | Kexp | Vexp | S | O | Qroped? | Kroped? | Qsplit? |
   // Ksplit? | Vsplit? | GEMM ws]
 
-  size_t Qtrans_bytes = (size_t)B * H * sq * d * elem_sz;
-  size_t Kexp_bytes = (size_t)B * H * skv * d * elem_sz;
-  size_t S_bytes = (size_t)B * H * sq * skv * elem_sz;
-  size_t O_bytes = (size_t)B * H * sq * d * elem_sz;
+  size_t Qtrans_bytes = static_cast<size_t>(B) * H * sq * d * elem_sz;
+  size_t Kexp_bytes = static_cast<size_t>(B) * H * skv * d * elem_sz;
+  size_t S_bytes = static_cast<size_t>(B) * H * sq * skv * elem_sz;
+  size_t O_bytes = static_cast<size_t>(B) * H * sq * d * elem_sz;
 
   size_t off_Qtrans = 0;
   size_t off_Kexp = off_Qtrans + Qtrans_bytes;
@@ -331,8 +340,8 @@ static int gqa_forward_hipblaslt(
   // Optional RoPE buffers: allocated only when do_rotary is enabled.
   size_t off_Qroped = 0, off_Kroped = 0;
   if (need_rope) {
-    size_t Q_bytes = (size_t)B * sq * H * d * elem_sz;
-    size_t K_bytes = (size_t)B * sq * G * d * elem_sz;
+    size_t Q_bytes = static_cast<size_t>(B) * sq * H * d * elem_sz;
+    size_t K_bytes = static_cast<size_t>(B) * sq * G * d * elem_sz;
     off_Qroped = temp_end;
     off_Kroped = off_Qroped + Q_bytes;
     temp_end = off_Kroped + K_bytes;
@@ -344,8 +353,8 @@ static int gqa_forward_hipblaslt(
   // from them and writes to the RoPE region (no overlap).
   size_t off_Qsplit = 0, off_Ksplit = 0, off_Vsplit = 0;
   if (packed_qkv) {
-    size_t Q_bytes = (size_t)B * sq * H * d * elem_sz;
-    size_t K_bytes = (size_t)B * sq * G * d * elem_sz;
+    size_t Q_bytes = static_cast<size_t>(B) * sq * H * d * elem_sz;
+    size_t K_bytes = static_cast<size_t>(B) * sq * G * d * elem_sz;
     off_Qsplit = temp_end;
     off_Ksplit = off_Qsplit + Q_bytes;
     off_Vsplit = off_Ksplit + K_bytes;
@@ -405,7 +414,9 @@ static int gqa_forward_hipblaslt(
       void *d_Ksplit = ws + off_Ksplit;
       void *d_Vsplit = ws + off_Vsplit;
       HIP_CHECK(hip_gqa_split_qkv(stream, query, d_Qsplit, d_Ksplit, d_Vsplit,
-                                  (int)B, (int)sq, (int)H, (int)G, (int)d));
+                                  static_cast<int>(B), static_cast<int>(sq),
+                                  static_cast<int>(H), static_cast<int>(G),
+                                  static_cast<int>(d)));
       qSrc = d_Qsplit;
       kSrc = d_Ksplit;
       vSrc = d_Vsplit;
@@ -415,16 +426,18 @@ static int gqa_forward_hipblaslt(
     // Uses qSrc/kSrc (not raw query/key) so that packed-QKV split buffers
     // are correctly fed into RoPE when both features are active.
     if (need_rope) {
-      int half_rot = (int)(d / 2);
+      int half_rot = static_cast<int>(d / 2);
       void *d_Qroped = ws + off_Qroped;
       void *d_Kroped = ws + off_Kroped;
 
       HIP_CHECK(hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
-                             (int)B, (int)sq, (int)H, (int)d, half_rot,
-                             (int)past_len));
+                             static_cast<int>(B), static_cast<int>(sq),
+                             static_cast<int>(H), static_cast<int>(d),
+                             half_rot, static_cast<int>(past_len)));
       HIP_CHECK(hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
-                             (int)B, (int)sq, (int)G, (int)d, half_rot,
-                             (int)past_len));
+                             static_cast<int>(B), static_cast<int>(sq),
+                             static_cast<int>(G), static_cast<int>(d),
+                             half_rot, static_cast<int>(past_len)));
 
       qSrc = d_Qroped;
       kSrc = d_Kroped;
@@ -432,30 +445,37 @@ static int gqa_forward_hipblaslt(
     }
 
     // ---- Step 3: Q Transpose BSHD [B,S,H,d] -> BNSD [B,H,S,d] ----
-    HIP_CHECK(hip_gqa_transpose_mid_dims(stream, qSrc, d_Qtrans, (int)B,
-                                         (int)sq, (int)H, (int)d));
+    HIP_CHECK(hip_gqa_transpose_mid_dims(stream, qSrc, d_Qtrans,
+                                         static_cast<int>(B),
+                                         static_cast<int>(sq),
+                                         static_cast<int>(H),
+                                         static_cast<int>(d)));
 
     // ---- Steps 4-5: KV Cache Update ----
     if (present_key && present_value) {
       HIP_CHECK(update_kv_cache(
           stream, past_key, past_value, kSrc, vSrc, present_key, present_value,
-          (int)B, (int)past_len, (int)sq, (int)G, (int)d, (int)present_seq));
+          static_cast<int>(B), static_cast<int>(past_len),
+          static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
+          static_cast<int>(present_seq)));
     }
 
     // ---- Steps 6-7: KV Expand [B*G, present_seq, d] -> [B*H, skv, d] ----
     {
       const void *kCache = present_key ? present_key : key;
       const void *vCache = present_value ? present_value : value;
-      int kvSrcStride = (int)(present_seq * d);
-      int kvDstStride = (int)(skv * d);
-      int expandCopy = (int)(skv * d);
+      int kvSrcStride = static_cast<int>(present_seq * d);
+      int kvDstStride = static_cast<int>(skv * d);
+      int expandCopy = static_cast<int>(skv * d);
 
-      HIP_CHECK(hip_gqa_expand_kv(stream, kCache, d_Kexp, (int)(B * H),
-                                  (int)HPG, kvSrcStride, kvDstStride,
-                                  expandCopy));
-      HIP_CHECK(hip_gqa_expand_kv(stream, vCache, d_Vexp, (int)(B * H),
-                                  (int)HPG, kvSrcStride, kvDstStride,
-                                  expandCopy));
+      HIP_CHECK(hip_gqa_expand_kv(stream, kCache, d_Kexp,
+                                  static_cast<int>(B * H),
+                                  static_cast<int>(HPG), kvSrcStride,
+                                  kvDstStride, expandCopy));
+      HIP_CHECK(hip_gqa_expand_kv(stream, vCache, d_Vexp,
+                                  static_cast<int>(B * H),
+                                  static_cast<int>(HPG), kvSrcStride,
+                                  kvDstStride, expandCopy));
     }
 
     // ---- Step 8: Score GEMM ----
@@ -469,15 +489,18 @@ static int gqa_forward_hipblaslt(
         scoreState->layD, &sAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
 
     // ---- Step 9: Causal Mask + Softmax ----
-    int scoreBatchStride = (int)(sq * skv);
+    int scoreBatchStride = static_cast<int>(sq * skv);
     if (sq > 1) {
-      HIP_CHECK(hip_gqa_causal_mask(stream, d_S, (int)(B * H), (int)skv,
-                                    (int)sq, scoreBatchStride, (int)past_len,
-                                    (int)local_window_size));
+      HIP_CHECK(hip_gqa_causal_mask(stream, d_S, static_cast<int>(B * H),
+                                    static_cast<int>(skv), static_cast<int>(sq),
+                                    scoreBatchStride,
+                                    static_cast<int>(past_len),
+                                    static_cast<int>(local_window_size)));
     }
-    HIP_CHECK(hip_gqa_softmax_inplace(stream, d_S, (int)(B * H * sq), (int)skv,
-                                      (int)sq, scoreBatchStride, head_sink,
-                                      (int)H, (int)use_smooth_softmax));
+    HIP_CHECK(hip_gqa_softmax_inplace(
+        stream, d_S, static_cast<int>(B * H * sq), static_cast<int>(skv),
+        static_cast<int>(sq), scoreBatchStride, head_sink, static_cast<int>(H),
+        static_cast<int>(use_smooth_softmax)));
 
     // ---- Step 10: Value GEMM ----
     float valAlpha = 1.0f;
@@ -489,17 +512,20 @@ static int gqa_forward_hipblaslt(
         &vAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
 
     // ---- Step 11: O Transpose BNSD [B,H,S,d] -> BSHD [B,S,H,d] ----
-    HIP_CHECK(hip_gqa_transpose_mid_dims(stream, d_O, output, (int)B, (int)H,
-                                         (int)sq, (int)d));
+    HIP_CHECK(hip_gqa_transpose_mid_dims(stream, d_O, output,
+                                         static_cast<int>(B),
+                                         static_cast<int>(H),
+                                         static_cast<int>(sq),
+                                         static_cast<int>(d)));
   }
 
 cleanup:
   return result;
 }
 
-// =============================================================================
+//===----------------------------------------------------------------------===//
 // Public wrapper called by generated IR
-// =============================================================================
+//===----------------------------------------------------------------------===//
 
 int wrap_group_query_attention(
     RuntimeState *state,
@@ -637,8 +663,8 @@ int wrap_group_query_attention(
       (double)scale, (long long)do_rotary, (long long)rotary_interleaved,
       (double)softcap, (long long)local_window_size, (long long)smooth_softmax,
       query, key, value, past_key, past_value, cos_cache, sin_cache, head_sink,
-      output, present_key, present_value, (int)is_packed_qkv, (int)has_rope,
-      (int)has_local_window, (int)has_smooth_softmax);
+      output, present_key, present_value,       static_cast<int>(is_packed_qkv), static_cast<int>(has_rope),
+      static_cast<int>(has_local_window), static_cast<int>(has_smooth_softmax));
 
   int rc = gqa_forward_hipblaslt(
       state, stream, ltHandle, query, key, value, past_key, past_value,
