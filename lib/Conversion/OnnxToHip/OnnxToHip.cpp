@@ -435,8 +435,10 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
   }
   if (mismatchCount != 2 || dim0 < 0 || dim1 < 0)
     return op->emitOpError("perm must swap exactly two dimensions");
-  int64_t p0 = mlir::cast<mlir::IntegerAttr>(permAttr[dim0]).getValue().getSExtValue();
-  int64_t p1 = mlir::cast<mlir::IntegerAttr>(permAttr[dim1]).getValue().getSExtValue();
+  int64_t p0 =
+      mlir::cast<mlir::IntegerAttr>(permAttr[dim0]).getValue().getSExtValue();
+  int64_t p1 =
+      mlir::cast<mlir::IntegerAttr>(permAttr[dim1]).getValue().getSExtValue();
   if (p0 != dim1 || p1 != dim0)
     return op->emitOpError("perm must swap exactly two dimensions");
 
@@ -447,7 +449,8 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
   llvm::SmallVector<mlir::Value> dynSizes;
   for (auto [outDimIdx, attr] : llvm::enumerate(permAttr)) {
     if (resultType.isDynamicDim(outDimIdx)) {
-      const int64_t srcDim = mlir::cast<mlir::IntegerAttr>(attr).getValue().getSExtValue();
+      const int64_t srcDim =
+          mlir::cast<mlir::IntegerAttr>(attr).getValue().getSExtValue();
       dynSizes.push_back(
           mlir::tensor::DimOp::create(rewriter, loc, data, srcDim));
     }
@@ -716,7 +719,8 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
     llvm::SmallVector<int64_t> axesVec;
     if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
       for (auto a : axesAttr)
-        axesVec.push_back(mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
+        axesVec.push_back(
+            mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
     } else {
       // Default: reduce all axes
       auto inputType = mlir::cast<mlir::RankedTensorType>(data.getType());
@@ -994,13 +998,15 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   llvm::SmallVector<int64_t> kernelShape;
   if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("kernel_shape")) {
     for (auto a : attr)
-      kernelShape.push_back(mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
+      kernelShape.push_back(
+          mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
   }
 
   llvm::SmallVector<int64_t> strides;
   if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("strides")) {
     for (auto a : attr)
-      strides.push_back(mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
+      strides.push_back(
+          mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
   } else {
     // Default strides = 1 for each spatial dimension
     strides.assign(kernelShape.size(), 1);
@@ -1009,7 +1015,8 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   llvm::SmallVector<int64_t> pads;
   if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("pads")) {
     for (auto a : attr)
-      pads.push_back(mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
+      pads.push_back(
+          mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
   } else {
     // Default pads = 0
     pads.assign(kernelShape.size() * 2, 0);
@@ -1018,7 +1025,8 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   llvm::SmallVector<int64_t> dilations;
   if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("dilations")) {
     for (auto a : attr)
-      dilations.push_back(mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
+      dilations.push_back(
+          mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
   } else {
     // Default dilations = 1
     dilations.assign(kernelShape.size(), 1);
