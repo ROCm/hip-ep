@@ -25,6 +25,7 @@ struct hipDeviceProp_t {
 #define hipMemcpyHostToDevice 0
 #define hipMemcpyDeviceToHost 1
 #define hipHostMallocDefault 0
+#define hipHostMallocMapped 2
 
 // Forward declarations for mock GPU functions (defined in mock_gpu.cpp)
 extern "C" hipError_t hipGetDeviceCount(int *count);

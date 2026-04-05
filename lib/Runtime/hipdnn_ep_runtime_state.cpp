@@ -218,35 +218,120 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   bool is_igpu = (prop.integrated == 1);
 
   if (is_igpu) {
-    // iGPU: allocate pinned host memory. GPU reads the same physical DRAM
-    // directly -- no hipMemcpy needed. hipHostMalloc gives a reliable pinned
-    // allocation; hipHostRegister on mmap'd or VirtualAlloc'd memory is
-    // unreliable on some iGPU platforms (GPU reads zeros despite success).
-    if (hipHostMalloc(&state->gpu_constants_blob, total_size,
-                      hipHostMallocDefault) != hipSuccess) {
-      fprintf(stderr, "hipHostMalloc failed for constants blob (%zu bytes)\n",
-              total_size);
-      hipdnn_ep_state_cleanup(state);
-      *out_state = nullptr;
-      return 1;
-    }
+    // iGPU: try hipMalloc first (1x VRAM pool consumption), then fall
+    // back to hipHostMalloc (2x pool consumption but can spill to GTT).
+    //
+    // On iGPU the VRAM pool is carved from system RAM by the BIOS.
+    // hipHostMalloc consumes ~2x the blob size from this pool (host
+    // allocation + device mapping).  When the pool is large enough to
+    // absorb all constants it gets exhausted and kernel launches fail
+    // with hipErrorLaunchFailure (719).  hipMalloc only consumes 1x,
+    // leaving more pool for kernels.  If hipMalloc fails (pool too
+    // small), hipHostMalloc is used as a fallback — the driver will
+    // partially use the pool and spill the rest to GTT (system RAM),
+    // which the GPU can access directly on iGPU.
+    bool used_hip_malloc = false;
 
-    const void *src = reader->mmap();
-    if (src) {
-      memcpy(state->gpu_constants_blob, src, total_size);
+    RUNTIME_DEBUG_LOG("[constants] blob_size=%.2f GB, is_igpu=1\n",
+                      total_size / (1024.0 * 1024.0 * 1024.0));
+
+    if (hipMalloc(&state->gpu_constants_blob, total_size) == hipSuccess) {
+      used_hip_malloc = true;
+      state->constants_blob_is_host = false;
+
+      // Upload constants via chunked hipMemcpy to limit the peak VRAM
+      // pool overhead from staging buffers.  A single hipMemcpy of the
+      // full blob can allocate a staging buffer as large as the blob
+      // itself (~2x total pool consumption).  Copying in small chunks
+      // keeps the staging overhead bounded.
+      const size_t chunk_size = 64 * 1024 * 1024; // 64 MB chunks
+      const void *src = reader->mmap();
+      void *cpu_buf = nullptr;
+
+      if (!src) {
+        cpu_buf = malloc(chunk_size);
+        if (!cpu_buf) {
+          fprintf(stderr, "Failed to allocate staging buffer (%zu bytes)\n",
+                  chunk_size);
+          hipdnn_ep_state_cleanup(state);
+          *out_state = nullptr;
+          return 1;
+        }
+      }
+
+      size_t offset = 0;
+      bool copy_ok = true;
+      while (offset < total_size) {
+        size_t remaining = total_size - offset;
+        size_t this_chunk = (remaining < chunk_size) ? remaining : chunk_size;
+        char *dst = static_cast<char *>(state->gpu_constants_blob) + offset;
+
+        if (src) {
+          // mmap available — copy directly from mapped file
+          const char *src_ptr = static_cast<const char *>(src) + offset;
+          if (hipMemcpy(dst, src_ptr, this_chunk, hipMemcpyHostToDevice) !=
+              hipSuccess) {
+            fprintf(stderr, "hipMemcpy failed at offset %zu\n", offset);
+            copy_ok = false;
+            break;
+          }
+        } else {
+          // No mmap — read chunk from file into staging buffer, then copy
+          size_t bytes_read = reader->fread(cpu_buf, this_chunk);
+          if (bytes_read != this_chunk) {
+            fprintf(stderr, "Short read at offset %zu: got %zu of %zu\n",
+                    offset, bytes_read, this_chunk);
+            copy_ok = false;
+            break;
+          }
+          if (hipMemcpy(dst, cpu_buf, this_chunk, hipMemcpyHostToDevice) !=
+              hipSuccess) {
+            fprintf(stderr, "hipMemcpy failed at offset %zu\n", offset);
+            copy_ok = false;
+            break;
+          }
+        }
+        offset += this_chunk;
+      }
+
+      free(cpu_buf);
+      if (!copy_ok) {
+        hipdnn_ep_state_cleanup(state);
+        *out_state = nullptr;
+        return 1;
+      }
     } else {
-      reader->rewind();
-      size_t bytes_read = reader->fread(state->gpu_constants_blob, total_size);
-      if (bytes_read != total_size) {
-        fprintf(stderr, "Short read: got %zu of %zu bytes\n", bytes_read,
+      // hipMalloc failed — fall back to hipHostMalloc (spills to GTT)
+      RUNTIME_DEBUG_LOG("[constants] hipMalloc failed, falling back to "
+                        "hipHostMalloc\n");
+      if (hipHostMalloc(&state->gpu_constants_blob, total_size,
+                        hipHostMallocMapped) != hipSuccess) {
+        fprintf(stderr, "hipHostMalloc failed for constants blob (%zu bytes)\n",
                 total_size);
         hipdnn_ep_state_cleanup(state);
         *out_state = nullptr;
         return 1;
       }
-    }
-    state->constants_blob_is_host = true;
+      state->constants_blob_is_host = true;
 
+      const void *src = reader->mmap();
+      if (src) {
+        memcpy(state->gpu_constants_blob, src, total_size);
+      } else {
+        size_t bytes_read =
+            reader->fread(state->gpu_constants_blob, total_size);
+        if (bytes_read != total_size) {
+          fprintf(stderr, "Short read: got %zu of %zu bytes\n", bytes_read,
+                  total_size);
+          hipdnn_ep_state_cleanup(state);
+          *out_state = nullptr;
+          return 1;
+        }
+      }
+    }
+
+    RUNTIME_DEBUG_LOG("[constants] allocated via %s\n",
+                      used_hip_malloc ? "hipMalloc" : "hipHostMalloc(GTT)");
   } else {
     // dGPU: allocate in VRAM, upload once via hipMemcpy.
     const void *src = reader->mmap();
