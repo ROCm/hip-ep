@@ -13,7 +13,6 @@
 #include "../HipDNNGraph/HipDNNGraph.h"
 
 #include <backend/hipdnn_backend.h>
-#include <hip/hip_runtime_api.h>
 
 #include <cstdio>
 #include <memory>
@@ -56,27 +55,6 @@ struct RuntimeStateLayout {
   void *hipdnn_handle;
   void *hipdnn_graph_registry;
 };
-
-// Grow the RuntimeState workspace if needed; no-op when already large enough.
-static int ensureWorkspace(RuntimeStateLayout *state, size_t needed_size) {
-  if (!state || needed_size == 0)
-    return 0;
-  if (state->workspace_size >= needed_size)
-    return 0;
-  if (state->workspace) {
-    hipFree(state->workspace);
-    state->workspace = nullptr;
-    state->workspace_size = 0;
-  }
-  if (hipMalloc(&state->workspace, needed_size) != hipSuccess) {
-    fprintf(stderr,
-            "hipdnn_graph_runtime: workspace hipMalloc failed for %zu bytes\n",
-            needed_size);
-    return -1;
-  }
-  state->workspace_size = needed_size;
-  return 0;
-}
 
 // Owns compiled HipDNNGraph objects indexed by graph_id.
 struct GraphRegistry {
@@ -170,20 +148,6 @@ int32_t hipdnn_graph_execute(void *state_ptr, int32_t graph_id, int32_t num_io,
   for (int32_t i = 0; i < num_io; ++i)
     variant_pack[uids[i]] = ptrs[i];
 
-  // Ensure workspace is large enough for this graph's requirements.
-  int64_t ws_size = graph->getWorkspaceSize();
-  if (ws_size > 0) {
-    int ret = ensureWorkspace(state, static_cast<size_t>(ws_size));
-    if (ret != 0) {
-      fprintf(
-          stderr,
-          "hipdnn_graph_execute: workspace allocation failed for graph %d\n",
-          graph_id);
-      return kWorkspaceAlloc;
-    }
-  }
-  void *workspace = (ws_size > 0) ? state->workspace : nullptr;
-
   // Get the hipDNN handle -- fall back to process-level singleton.
   void *handle = state->hipdnn_handle;
   if (!handle)
@@ -192,7 +156,7 @@ int32_t hipdnn_graph_execute(void *state_ptr, int32_t graph_id, int32_t num_io,
     return kNoHandle;
 
   auto status = graph->Execute(static_cast<hipdnnHandle_t>(handle),
-                               variant_pack, workspace);
+                               variant_pack, nullptr);
   if (status.failed()) {
     fprintf(stderr, "hipdnn_graph_execute: graph %d failed: %s\n", graph_id,
             status.message().c_str());

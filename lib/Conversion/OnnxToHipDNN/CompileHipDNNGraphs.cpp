@@ -155,6 +155,9 @@ void CompileHipDNNGraphsPass::runOnOperation() {
       outlineOp->replaceAllUsesWith(exec_op->getResults());
       outlineOp->erase();
 
+      // Defensive: output_graphs_ is always non-null when created via
+      // CompilerDriver (see CompilerDriver.cpp). Guard retained since
+      // createCompileHipDNNGraphsPass is a public API.
       if (output_graphs_)
         (*output_graphs_)[graph_name] = OwnedGraph(graph.release());
     }

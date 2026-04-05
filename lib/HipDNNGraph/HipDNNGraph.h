@@ -68,10 +68,13 @@ public:
   Status BuildFromOnnxMLIR(mlir::Region &region);
 
   /// Compile the built graph: validate, build operation graph, create
-  /// execution plans, and determine workspace size.
+  /// execution plans, determine workspace size, and allocate GPU workspace.
+  /// The workspace is freed in ~HipDNNGraph().
   Status Compile();
 
   /// Execute with pre-built variant pack mapping UIDs to GPU pointers.
+  /// Uses the internally-owned workspace allocated by Compile(); the
+  /// @p workspace parameter is a fallback when no internal buffer exists.
   Status Execute(hipdnnHandle_t handle,
                  std::unordered_map<int64_t, void *> &variant_pack,
                  void *workspace);
