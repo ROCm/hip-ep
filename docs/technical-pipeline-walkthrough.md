@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+Licensed under the MIT License.
+-->
 # MorphiZen EP: Technical Pipeline Walkthrough
 
 ## Overview
@@ -120,7 +124,7 @@ auto result = func(mlir_bytecode.data(), mlir_bytecode.size(),
                    temp_output_path.c_str(), options_json.c_str(), &error, fs);
 ```
 
-**File:** `lib/CInterface/CompilerAPI.cpp`  
+**File:** `lib/CInterface/CompilerAPI.cpp`
 The `hip_compile_with_fs` export delegates to `CompilerDriver`, which runs the
 full MLIR pass pipeline and emits the model DLL.
 
@@ -176,7 +180,7 @@ int InferenceState::compute(span_t* inputs, span_t* outputs) const {
 }
 ```
 
-**File:** `backend-mlir-compiler/custom-op-mlir/src/MlirCustomOp.cpp`  
+**File:** `backend-mlir-compiler/custom-op-mlir/src/MlirCustomOp.cpp`
 `marshal_input_tensors` / `marshal_output_tensors` convert ORT's `OrtKernelContext`
 tensors into `tensor_t` / `span_t` structs that the generated code expects.
 
