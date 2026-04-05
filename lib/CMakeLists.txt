@@ -4,8 +4,10 @@
 ##
 
 add_subdirectory(Dialect)
-add_subdirectory(HipDNNGraph)
-add_subdirectory(HipDNNGraphRuntime)
+if(NOT BUILD_MOCK_RUNTIME)
+  add_subdirectory(HipDNNGraph)
+  add_subdirectory(HipDNNGraphRuntime)
+endif()
 add_subdirectory(Conversion)
 add_subdirectory(Runtime)
 add_subdirectory(Target/LLVM)
