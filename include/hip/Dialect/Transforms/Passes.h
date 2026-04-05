@@ -9,7 +9,8 @@
 #include <memory>
 #include <string>
 
-namespace mlir::hip {
+namespace mlir {
+namespace hip {
 
 struct CompilationOptionsT;
 
@@ -26,6 +27,7 @@ struct CompilationOptionsT;
 std::unique_ptr<mlir::Pass>
 createGenerateInterfacePass(const CompilationOptionsT &options);
 
-} // namespace mlir::hip
+} // namespace hip
+} // namespace mlir
 
 #endif // HIP_PASSES_H

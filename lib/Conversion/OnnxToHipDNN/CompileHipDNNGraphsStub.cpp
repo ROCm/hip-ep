@@ -10,7 +10,8 @@
 
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
 
-namespace mlir::hip {
+namespace mlir {
+namespace hip {
 
 void GraphDeleter::operator()(void *) const {}
 
@@ -20,4 +21,5 @@ createCompileHipDNNGraphsPass(hipdnnHandle_t /*handle*/,
   return nullptr;
 }
 
-} // namespace mlir::hip
+} // namespace hip
+} // namespace mlir

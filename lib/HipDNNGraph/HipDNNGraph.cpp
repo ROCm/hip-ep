@@ -408,9 +408,6 @@ struct HipDNNGraphImpl {
       return Status::Failure("hipDNN build_operation_graph failed: " +
                              error.get_message());
 
-    if (all_fusilli_compatible_)
-      graph_->set_preferred_engine_id_ext("FUSILLI_ENGINE");
-
     error = graph_->create_execution_plans({HeuristicMode::FALLBACK});
     if (error.is_bad())
       return Status::Failure("hipDNN create_execution_plans failed: " +

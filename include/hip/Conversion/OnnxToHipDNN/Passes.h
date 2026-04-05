@@ -13,7 +13,8 @@
 struct hipdnnHandle;
 typedef hipdnnHandle *hipdnnHandle_t;
 
-namespace mlir::hip {
+namespace mlir {
+namespace hip {
 
 /// Custom deleter for type-erased HipDNNGraph pointers.
 /// Implemented in CompileHipDNNGraphs.cpp where the real type is visible.
@@ -48,6 +49,7 @@ std::unique_ptr<Pass>
 createCompileHipDNNGraphsPass(hipdnnHandle_t handle,
                               CompiledGraphMap output_graphs);
 
-} // namespace mlir::hip
+} // namespace hip
+} // namespace mlir
 
 #endif // HIP_CONVERSION_ONNX_TO_HIPDNN_PASSES_H
