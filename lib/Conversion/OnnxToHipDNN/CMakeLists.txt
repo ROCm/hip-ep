@@ -3,10 +3,17 @@
 # ** Licensed under the MIT License.
 ##
 
-add_library(OnnxToHipDNN STATIC
-  OutlineOnnxToHipDNN.cpp
-  CompileHipDNNGraphs.cpp
-)
+set(ONNX_TO_HIPDNN_SOURCES OutlineOnnxToHipDNN.cpp)
+set(ONNX_TO_HIPDNN_EXTRA_LIBS)
+
+if(NOT BUILD_MOCK_RUNTIME)
+  list(APPEND ONNX_TO_HIPDNN_SOURCES CompileHipDNNGraphs.cpp)
+  list(APPEND ONNX_TO_HIPDNN_EXTRA_LIBS HipDNNGraph)
+else()
+  list(APPEND ONNX_TO_HIPDNN_SOURCES CompileHipDNNGraphsStub.cpp)
+endif()
+
+add_library(OnnxToHipDNN STATIC ${ONNX_TO_HIPDNN_SOURCES})
 
 add_dependencies(OnnxToHipDNN
   HipDialectIncGen
@@ -20,7 +27,7 @@ target_include_directories(OnnxToHipDNN PRIVATE
 )
 
 target_link_libraries(OnnxToHipDNN PUBLIC
-  HipDNNGraph
+  ${ONNX_TO_HIPDNN_EXTRA_LIBS}
   HipDialectIR
   MLIRIR
   MLIRPass
