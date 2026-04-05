@@ -15,8 +15,10 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/Support/raw_ostream.h"
 
-namespace mlir::hip {
+namespace mlir {
+namespace hip {
 
 void GraphDeleter::operator()(void *ptr) const {
   delete static_cast<::hip::graph::HipDNNGraph *>(ptr);
@@ -92,15 +94,25 @@ void CompileHipDNNGraphsPass::runOnOperation() {
       auto graph = std::make_unique<::hip::graph::HipDNNGraph>(handle_);
 
       auto status = graph->BuildFromOnnxMLIR(outlineOp.getBody());
-      if (status.ok())
+      if (status.failed()) {
+        llvm::errs() << "[CompileHipDNNGraphs] BuildFromOnnxMLIR FAILED: "
+                     << status.message() << "\n";
+      }
+      if (status.ok()) {
         status = graph->Compile();
+        if (status.failed()) {
+          llvm::errs() << "[CompileHipDNNGraphs] Compile FAILED: "
+                       << status.message() << "\n";
+        }
+      }
 
       if (status.failed()) {
-        outlineOp->emitWarning("hipDNN graph compilation failed; "
-                               "falling back to standard lowering");
+        llvm::errs() << "[CompileHipDNNGraphs] Falling back to standard "
+                        "lowering for outlined op\n";
         unoutline(outlineOp);
         continue;
       }
+      llvm::errs() << "[CompileHipDNNGraphs] SUCCESS: graph compiled\n";
 
       std::string graph_name = "hipdnn_graph_" + std::to_string(graph_count_);
       int32_t graph_id = graph_count_++;
@@ -158,4 +170,5 @@ createCompileHipDNNGraphsPass(hipdnnHandle_t handle,
                                                    std::move(output_graphs));
 }
 
-} // namespace mlir::hip
+} // namespace hip
+} // namespace mlir

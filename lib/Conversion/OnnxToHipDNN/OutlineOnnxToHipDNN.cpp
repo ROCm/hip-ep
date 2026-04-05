@@ -13,7 +13,8 @@
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 
-namespace mlir::hip {
+namespace mlir {
+namespace hip {
 namespace {
 
 /// Return true if this op can be compiled via the hipDNN graph API.
@@ -97,4 +98,5 @@ std::unique_ptr<Pass> createOutlineOnnxToHipDNNPass() {
   return std::make_unique<OutlineOnnxToHipDNNPass>();
 }
 
-} // namespace mlir::hip
+} // namespace hip
+} // namespace mlir
