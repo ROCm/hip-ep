@@ -71,8 +71,10 @@ HIPDNN_GRAPH_RUNTIME_API void
 hipdnn_graph_runtime_attach(void *state, void *handle, void *registry);
 
 /// Execute a compiled hipDNN graph. Called from model.dll generated code.
+/// Each compiled graph owns its GPU workspace (allocated during Compile()),
+/// so no workspace management is needed from the caller.
 /// Falls back to process-level defaults if state fields are nullptr.
-/// @param state     RuntimeState* (provides handle, registry, workspace)
+/// @param state     RuntimeState* (provides handle and registry)
 /// @param graph_id  Which graph to execute
 /// @param num_io    Number of entries in uids[] and ptrs[]
 /// @param uids      Tensor UIDs (from IR attributes)

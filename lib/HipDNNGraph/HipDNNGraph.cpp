@@ -7,6 +7,7 @@
 
 #include <backend/hipdnn_backend.h>
 #include <frontend/hipdnn_frontend.hpp>
+#include <hip/hip_runtime_api.h>
 
 #include <cassert>
 #include <numeric>
@@ -292,6 +293,11 @@ static Status AddNodeFromOnnxMLIR(hipdnn_frontend::graph::Graph &graph,
 struct HipDNNGraphImpl {
   explicit HipDNNGraphImpl(hipdnnHandle_t handle) : handle_(handle) {}
 
+  ~HipDNNGraphImpl() {
+    if (workspace_ptr_)
+      hipFree(workspace_ptr_);
+  }
+
   Status BuildFromOnnxMLIR(mlir::Region &region) {
     using namespace hipdnn_frontend::graph;
 
@@ -352,9 +358,6 @@ struct HipDNNGraphImpl {
         if (it != value_map.end())
           input_attrs.push_back(it->second);
       }
-
-      // All ONNX ops are Fusilli-compatible for now (conv only).
-      all_fusilli_compatible_ = true;
 
       std::vector<TensorAttrPtr> output_attrs;
       auto status = AddNodeFromOnnxMLIR(*graph_, &op, input_attrs, output_attrs,
@@ -428,13 +431,26 @@ struct HipDNNGraphImpl {
       return Status::Failure("hipDNN get_workspace_size failed: " +
                              error.get_message());
 
+    if (workspace_size_ > 0) {
+      if (workspace_ptr_) {
+        hipFree(workspace_ptr_);
+        workspace_ptr_ = nullptr;
+      }
+      void *ptr = nullptr;
+      if (hipMalloc(&ptr, workspace_size_) != hipSuccess)
+        return Status::Failure("hipDNN workspace hipMalloc failed for " +
+                               std::to_string(workspace_size_) + " bytes");
+      workspace_ptr_ = ptr;
+    }
+
     return Status::Success();
   }
 
   Status Execute(hipdnnHandle_t handle,
                  std::unordered_map<int64_t, void *> &variant_pack,
                  void *workspace) {
-    auto error = graph_->execute(handle, variant_pack, workspace);
+    void *ws = workspace_ptr_ ? workspace_ptr_ : workspace;
+    auto error = graph_->execute(handle, variant_pack, ws);
     if (error.is_bad())
       return Status::Failure("hipDNN execute failed: " + error.get_message());
     return Status::Success();
@@ -452,8 +468,8 @@ struct HipDNNGraphImpl {
   int64_t next_uid_ = 0;
   // Workspace size in bytes (determined at Compile time).
   int64_t workspace_size_ = 0;
-  // True when every op in the graph is handled by the Fusilli engine.
-  bool all_fusilli_compatible_ = false;
+  // GPU workspace buffer, allocated during Compile() and freed in destructor.
+  void *workspace_ptr_ = nullptr;
 };
 
 //===----------------------------------------------------------------------===//

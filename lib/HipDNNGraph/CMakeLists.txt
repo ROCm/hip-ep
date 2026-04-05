@@ -59,4 +59,15 @@ if(HIPDNN_BACKEND_LIB_GRAPH)
   target_link_libraries(HipDNNGraph PUBLIC ${HIPDNN_BACKEND_LIB_GRAPH})
 endif()
 
+# HIP runtime -- needed for hipMalloc/hipFree (workspace allocation in Compile).
+find_library(AMDHIP64_LIB_GRAPH amdhip64
+  PATHS $ENV{THEROCK_DIST}/lib
+  NO_DEFAULT_PATH
+)
+if(AMDHIP64_LIB_GRAPH)
+  target_link_libraries(HipDNNGraph PUBLIC ${AMDHIP64_LIB_GRAPH})
+else()
+  message(WARNING "amdhip64 not found for HipDNNGraph -- hipMalloc/hipFree will fail to link")
+endif()
+
 set_target_properties(HipDNNGraph PROPERTIES FOLDER "mlir/HipDNNGraph")
