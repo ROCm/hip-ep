@@ -71,5 +71,14 @@ if(NOT BUILD_MOCK_RUNTIME AND CMAKE_INSTALL_PREFIX)
     message(STATUS "Custom kernels lib path for CompilerDriver: ${_custom_kernels_lib}")
 endif()
 
+# hipDNN graph runtime import library path for model.dll linking.
+# Uses generator expression to get the actual import library location.
+if(TARGET hipdnn_graph_runtime)
+    target_compile_definitions(LibHipCompiler PRIVATE
+        "HIPDNN_GRAPH_RUNTIME_LIB_PATH=\"$<TARGET_LINKER_FILE:hipdnn_graph_runtime>\""
+    )
+    target_link_libraries(LibHipCompiler PUBLIC OnnxToHipDNN)
+endif()
+
 # Set folder for IDE organization
 set_target_properties(LibHipCompiler PROPERTIES FOLDER "mlir/Compiler")

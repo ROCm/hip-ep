@@ -961,4 +961,112 @@ def Hip_GqaOp : Hip_DpsOp<"gqa", [AttrSizedOperandSegments]> {
   let hasVerifier = 1;
 }
 
+// ===== hipDNN Graph Outlining + Execution ====================================
+
+def Hip_YieldOp : Hip_Op<"yield", [Pure, Terminator,
+    HasParent<"HipDNNGraphOutlineOp">]> {
+  let summary = "Yield results from a hipDNN graph outline region";
+  let description = [{
+    Terminates the body of a `hip.hipdnn_graph_outline` operation, forwarding
+    the computed results back to the parent op.
+
+    Example:
+    ```mlir
+    hip.yield %result : tensor<1x1x8x8xf32>
+    ```
+  }];
+
+  let arguments = (ins Variadic<AnyRankedTensor>:$values);
+
+  let builders = [
+    OpBuilder<(ins), [{
+      build($_builder, $_state, ::mlir::ValueRange{});
+    }]>
+  ];
+
+  let assemblyFormat = "($values^ `:` type($values))? attr-dict";
+}
+
+def Hip_HipDNNGraphOutlineOp : Hip_Op<"hipdnn_graph_outline", [
+    SingleBlockImplicitTerminator<"YieldOp">,
+    IsolatedFromAbove
+]> {
+  let summary = "Outlined ONNX subgraph for hipDNN graph compilation";
+  let description = [{
+    Wraps one or more ONNX operations that are candidates for hipDNN graph
+    compilation. The region captures only tensor operands as block arguments
+    and is isolated from above.
+
+    Created by the OutlineOnnxToHipDNN pass (handle-free, CLI-testable).
+    Consumed by the CompileHipDNNGraphs pass, which either:
+    - Compiles the region via hipDNN and replaces this op with hip.hipdnn_graph
+    - Un-outlines (inlines the region back) on compilation failure
+
+    Example:
+    ```mlir
+    %0 = hip.hipdnn_graph_outline
+        ins(%x, %w : tensor<1x1x8x8xf32>, tensor<1x1x3x3xf32>)
+        -> tensor<1x1x8x8xf32> {
+      ^bb0(%arg0: tensor<1x1x8x8xf32>, %arg1: tensor<1x1x3x3xf32>):
+        %1 = "onnx.Conv"(%arg0, %arg1) {auto_pad = "NOTSET", group = 1 : si64,
+             kernel_shape = [3, 3], pads = [1, 1, 1, 1], strides = [1, 1]}
+             : (tensor<1x1x8x8xf32>, tensor<1x1x3x3xf32>) -> tensor<1x1x8x8xf32>
+        hip.yield %1 : tensor<1x1x8x8xf32>
+    }
+    ```
+  }];
+
+  let arguments = (ins Variadic<AnyRankedTensor>:$inputs);
+  let results = (outs Variadic<AnyRankedTensor>:$results);
+  let regions = (region SizedRegion<1>:$body);
+  let assemblyFormat = [{
+    `ins` `(` $inputs `:` type($inputs) `)` `->` type($results)
+    $body attr-dict
+  }];
+}
+
+// ===== hipDNN Graph Execution ================================================
+
+def Hip_HipDNNGraphOp : Hip_DpsOp<"hipdnn_graph", [
+    AttrSizedOperandSegments
+]> {
+  let summary = "Execute a pre-compiled hipDNN graph";
+  let description = [{
+    Dispatches to a pre-compiled hipDNN graph identified by graph_id.
+    The graph was compiled during the CompileHipDNNGraphs pass and stored
+    in the graph registry attached to RuntimeState.
+
+    At runtime, looks up the graph by ID and calls graph->Execute() with
+    a variant_pack built from the provided tensor UIDs and GPU pointers.
+
+    Tensor UIDs (input_uids, output_uids) are assigned during graph building
+    and baked into the IR as compile-time constants.
+
+    Example:
+    ```mlir
+    hip.hipdnn_graph(%ctx) graph_id(0)
+        ins(%input, %weights : tensor<1x3x224x224xf32>, tensor<64x3x7x7xf32>)
+        outs(%output : tensor<1x64x112x112xf32>)
+        {input_uids = [0 : i64, 1 : i64], output_uids = [2 : i64]}
+        : tensor<1x64x112x112xf32>
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Variadic<Hip_TensorOrMemRef>:$inputs,
+    Variadic<Hip_TensorOrMemRef>:$outputs,
+    I32Attr:$graph_id,
+    I64ArrayAttr:$input_uids,
+    I64ArrayAttr:$output_uids
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `graph_id` `(` $graph_id `)`
+    `ins` `(` $inputs `:` type($inputs) `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 #endif // HIP_OPS
