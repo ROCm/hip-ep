@@ -391,16 +391,8 @@ static void initialize_mlir_api() {
     // Convert std::vector<int64_t> to llvm::SmallVector<int64_t>
     llvm::SmallVector<int64_t> mlir_shape(shape.begin(), shape.end());
 
-    // Create MLIRNodeArg without data (tensor argument)
-    auto* mlir_node_arg =
-        new mlir_impl::MLIRNodeArg(name, mlir_shape, element_type);
-
-    // TODO: Add external data file information to MLIRNodeArg
-    // For now, we create a placeholder implementation
-    LOG(WARNING)
-        << "tensor_proto_new_with_external_data: external data support "
-           "not fully implemented in MLIR backend. File: "
-        << external_data_file << ", size: " << size << ", offset: " << offset;
+    auto* mlir_node_arg = new mlir_impl::MLIRNodeArg(
+        name, mlir_shape, element_type, external_data_file, offset, size);
 
     return reinterpret_cast<morphizen::TensorProto*>(mlir_node_arg);
   };
@@ -422,7 +414,7 @@ static void initialize_mlir_api() {
     auto* mlir_tensor =
         reinterpret_cast<const morphizen::mlir_impl::MLIRTensor*>(
             &tensor_proto);
-    const auto& shape = mlir_tensor->getShape();
+    auto shape = mlir_tensor->getShape();
     auto result =
         std::make_unique<std::vector<int64_t>>(shape.begin(), shape.end());
     return morphizen::DllSafe<std::vector<int64_t>>(result.release());
@@ -955,7 +947,7 @@ static void initialize_mlir_api() {
             &node_arg);
 
     // Use the get_shape_i64_unsafe() member function to get the shape
-    auto& shape = node_arg_index.get_shape_i64();
+    auto shape = node_arg_index.get_shape_i64();
     auto vec_shape = std::vector<int64_t>(shape.begin(), shape.end());
     // Return the shape wrapped in DllSafe
     return morphizen::DllSafe<std::vector<int64_t>>(vec_shape);
@@ -1026,11 +1018,13 @@ static void initialize_mlir_api() {
   };
 
   the_mlir_instance_of_morphizen_ort_api.node_arg_external_location =
-      [](const morphizen::Graph& /*graph*/,
-         const morphizen::NodeArg& /*node_arg*/, std::string& /*file*/,
-         size_t& /*offset*/, size_t& /*size*/, size_t& /*checksum*/) -> int {
-    // TODO: Implement external location retrieval for MLIR NodeArg
-    return 0;
+      [](const morphizen::Graph& /*graph*/, const morphizen::NodeArg& node_arg,
+         std::string& file, size_t& offset, size_t& size,
+         size_t& checksum) -> int {
+    auto node_arg_index =
+        mlir_impl::MLIRNodeArgIndex::from_morphizen_core_node_arg_ptr(
+            &node_arg);
+    return node_arg_index.external_location(file, offset, size, checksum);
   };
 
   // AttributeProto API functions - implemented using MLIRNamedAttribute

@@ -19,11 +19,13 @@ DEF_ENV_PARAM_2(MORPHIZEN_DEBUG_IR_CONVERTER_OUTPUT_FILE,
 namespace morphizen {
 
 // Constructor definition
-IRConverterImp::IRConverterImp(const ApiPtrs& api_ptrs, const OrtGraph& graph)
-    : ApiPtrs(api_ptrs), graph_(*this, graph) {}
+IRConverterImp::IRConverterImp(const ApiPtrs& api_ptrs, const OrtGraph& graph,
+                               const IRConverterConfig& config)
+    : ApiPtrs(api_ptrs), graph_(*this, graph), config_(config) {}
 
 ModelUniquePtr IRConverterImp::to_onnx_model(const ApiPtrs& api_ptrs,
-                                             const OrtGraph& graph) {
+                                             const OrtGraph& graph,
+                                             const IRConverterConfig& config) {
   // Forward call to instance method
   const ORTCHAR_T* api_model_path = nullptr;
   api_ptrs.throw_if_error(
@@ -42,7 +44,7 @@ ModelUniquePtr IRConverterImp::to_onnx_model(const ApiPtrs& api_ptrs,
       [](onnxruntime::Model* model) {
         MORPHIZEN_ORT_API(model_delete)(model);
       });
-  IRConverterImp converter(api_ptrs, graph);
+  IRConverterImp converter(api_ptrs, graph, config);
   converter.throw_if_error(converter.convert_to_model(*model.get()));
   return model;
 }
@@ -266,26 +268,28 @@ IRConverterImp::convert_graph_initializers(morphizen::Graph& graph) const {
     const void* tensor_data = tensor_value.GetTensorRawData();
     size_t data_size = tensor_value.GetTensorSizeInBytes();
 
-    // // Store data as external data instead of copying
-    // // Generate a unique external data location (could be memory address or
-    // // file-based)
-    // std::string external_data_location =
-    //     "#" + std::to_string(reinterpret_cast<uintptr_t>(tensor_data));
-    // auto offset = 0u;
-    // auto tensor_proto = std::unique_ptr<morphizen::TensorProto,
-    //                                     void (*)(morphizen::TensorProto*)>(
-    //     MORPHIZEN_ORT_API_EXT(tensor_proto_new_with_external_data)(
-    //         value_info.Name(), shape, element_type, external_data_location,
-    //         data_size, offset),
-    //     [](morphizen::TensorProto* p) {
-    //       MORPHIZEN_ORT_API(tensor_proto_delete)(p);
-    //     });
+    // For tensors above the threshold, use the no-copy memory-address
+    // mechanism: encode the raw pointer as an int64 in the external data offset
+    // field with location sentinel "*/_ORT_MEM_ADDR_/*". The downstream decoder
+    // reconstructs the pointer — zero copy. ORT owns the tensor data for the
+    // session lifetime.
+    morphizen::TensorProto* raw_proto = nullptr;
+    if (data_size > config_.external_data_threshold) {
+      MY_LOG(2) << "Initializer '" << value_info.GetName()
+                << "': no-copy path (size=" << data_size << ")";
+      raw_proto = MORPHIZEN_ORT_API_EXT(tensor_proto_new_with_external_data)(
+          value_info.GetName(), shape, element_type, "*/_ORT_MEM_ADDR_/*",
+          data_size,
+          static_cast<int64_t>(reinterpret_cast<uintptr_t>(tensor_data)));
+    } else {
+      MY_LOG(2) << "Initializer '" << value_info.GetName()
+                << "': copy path (size=" << data_size << ")";
+      raw_proto = MORPHIZEN_ORT_API_EXT(tensor_proto_new_raw_data)(
+          value_info.GetName(), shape, element_type, tensor_data, data_size);
+    }
 
-    auto* tensor_proto = MORPHIZEN_ORT_API_EXT(tensor_proto_new_raw_data)(
-        value_info.GetName(), shape, element_type, tensor_data, data_size);
-
-    morphizen_cxx::GraphRef(graph).add_initialized_tensor(*tensor_proto);
-    MORPHIZEN_ORT_API(tensor_proto_delete)(tensor_proto);
+    morphizen_cxx::GraphRef(graph).add_initialized_tensor(*raw_proto);
+    MORPHIZEN_ORT_API(tensor_proto_delete)(raw_proto);
     MY_LOG(3) << "Added initializer: " << value_info.GetName();
   }
 

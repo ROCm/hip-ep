@@ -92,8 +92,8 @@ private:
 private:
   std::string name_;
   const OrtLogger& logger_;
-  ModelUniquePtr (*ir_converter)(const ApiPtrs& api_ptrs,
-                                 const OrtGraph& graph) = nullptr;
+  ModelUniquePtr (*ir_converter)(const ApiPtrs& api_ptrs, const OrtGraph& graph,
+                                 const IRConverterConfig& config) = nullptr;
   // copied from
   // onnxruntime/core/providers/morphizen/morphizen_execution_provider.h
   using my_ep_t = morphizen::DllSafe<

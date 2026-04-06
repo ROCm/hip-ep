@@ -39,6 +39,38 @@
 static constexpr const char* AMD_MORPHIZEN_DOMAIN = "com.amd.morphizen";
 
 namespace morphizen {
+
+static constexpr const char* kMemAddrTag = "*/_ORT_MEM_ADDR_/*";
+
+static gsl::span<const char>
+tensor_proto_get_mem_addr_span(const morphizen_onnx::TensorProto& t) {
+  const char* ptr = nullptr;
+  size_t length = 0;
+  bool found_location = false;
+  bool found_offset = false;
+  bool found_length = false;
+  for (const auto& entry : t.external_data()) {
+    if (entry.key() == "location") {
+      CHECK_EQ(entry.value(), kMemAddrTag)
+          << "EXTERNAL tensor has unexpected location tag: " << entry.value();
+      found_location = true;
+    } else if (entry.key() == "offset") {
+      ptr = reinterpret_cast<const char*>(
+          static_cast<uintptr_t>(std::stoull(entry.value())));
+      found_offset = true;
+    } else if (entry.key() == "length") {
+      length = static_cast<size_t>(std::stoull(entry.value()));
+      found_length = true;
+    }
+  }
+  CHECK(found_location)
+      << "EXTERNAL tensor missing 'location' in external_data";
+  CHECK(found_offset) << "EXTERNAL tensor missing 'offset' in external_data";
+  CHECK(found_length) << "EXTERNAL tensor missing 'length' in external_data";
+  CHECK(ptr != nullptr) << "EXTERNAL tensor 'offset' decoded to null pointer";
+  return gsl::span<const char>(ptr, length);
+}
+
 // Forward declarations for dummy objects
 // static morphizen::TensorProto& get_dummy_tensor();
 
@@ -970,17 +1002,23 @@ static void initialize_dummy_api() {
 
   the_instance_of_morphizen_ort_api.tensor_proto_raw_data_size =
       [](const morphizen::TensorProto& tensor_proto) -> size_t {
-    auto* morphizen_tensor =
+    auto* t =
         reinterpret_cast<const morphizen_onnx::TensorProto*>(&tensor_proto);
-    return morphizen_tensor->raw_data().size();
+    if (t->data_location() == morphizen_onnx::TensorProto::EXTERNAL) {
+      return tensor_proto_get_mem_addr_span(*t).size();
+    }
+    return t->raw_data().size();
   };
 
   the_instance_of_morphizen_ort_api.tensor_proto_as_raw =
       [](const morphizen::Graph& /*graph*/,
          const morphizen::TensorProto& tensor_proto) -> gsl::span<const char> {
-    auto* morphizen_tensor =
+    auto* t =
         reinterpret_cast<const morphizen_onnx::TensorProto*>(&tensor_proto);
-    const std::string& raw_data = morphizen_tensor->raw_data();
+    if (t->data_location() == morphizen_onnx::TensorProto::EXTERNAL) {
+      return tensor_proto_get_mem_addr_span(*t);
+    }
+    const std::string& raw_data = t->raw_data();
     return gsl::span<const char>(raw_data.data(), raw_data.size());
   };
 
@@ -1209,7 +1247,6 @@ static void initialize_dummy_api() {
     auto* morphizen_attr =
         reinterpret_cast<morphizen_onnx::AttributeProto*>(attr);
     CHECK_EQ(morphizen_attr->type(), morphizen_onnx::AttributeProto::STRING);
-    LOG(INFO) << "DEBUG Size = " << morphizen_attr->s().size();
     return morphizen::DllSafe<std::string>(morphizen_attr->release_s());
   };
 
@@ -1378,8 +1415,7 @@ static void initialize_dummy_api() {
     for (int64_t dim : shape) {
       tensor_proto->add_dims(dim);
     }
-    // Set external data properties
-    // Set external data info in TensorProto
+    tensor_proto->set_data_location(morphizen_onnx::TensorProto::EXTERNAL);
     auto* external_data = tensor_proto->mutable_external_data();
     auto* location_entry = external_data->Add();
     location_entry->set_key("location");

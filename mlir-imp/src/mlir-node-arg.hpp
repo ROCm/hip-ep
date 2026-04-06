@@ -11,14 +11,80 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace morphizen {
 namespace mlir_impl {
 
+// MLIRNodeArg — represents a named tensor value in the graph.
+//
+// Internally it holds:
+//
+//   name_    — the tensor name (persists across both stages)
+//   value_   — variant<mlir::Value, TensorDesc>
+//
+// where TensorDesc is:
+//
+//   { meta: {name, shape, element_type},
+//     data: optional< vector<uint8_t> | ExternalRef > }
+//
+// Lifecycle
+// ---------
+// A NodeArg starts in Stage 1 (TensorDesc) and transitions to Stage 2
+// (mlir::Value) once the corresponding MLIR operation is created.
+//
+//   Stage 1 — value_ holds TensorDesc.
+//             Shape, type, and optional data are stored directly.
+//
+//   Stage 2 — value_ holds mlir::Value.
+//             Shape and type are embedded in the Value's tensor type.
+//             Inline data lives in the op's DenseElementsAttr.
+//             External data info lives in flat op attrs:
+//             location (StringAttr), offset (I64), size (I64).
+//
+// MLIR mapping by NodeArg kind
+// ----------------------------
+// graph input      →  func.func block argument (%arg0 : tensor<...>)
+//                      has name, shape, type; no data.
+//
+// graph output     →  onnx.Return %result
+//                      shape and type come from the result's tensor type.
+//
+// node output      →  %result = onnx.XXXX {node_name = "..."}
+//                      node_name is non-standard (MLIR ops are unnamed).
+//
+// constant (inline)→  onnx.Constant {value = dense<...>}
+//                      vector<uint8_t> becomes DenseElementsAttr.
+//
+// constant (ext.)  →  onnx.Constant {location = "...", offset = N, size = N}
+//                      non-standard extension (onnx-mlir has no such attr).
+//
 class alignas(8) MLIRNodeArg {
 public:
   using shape_t = llvm::SmallVector<int64_t>;
+
+  struct TensorMeta {
+    std::string name;
+    shape_t shape;
+    int element_type;
+  };
+
+  struct ExternalRef {
+    std::string location;
+    size_t offset = 0;
+    size_t size = 0;
+  };
+
+  using data_t = std::optional<std::variant<std::vector<uint8_t>, ExternalRef>>;
+
+  struct TensorDesc {
+    TensorMeta meta;
+    data_t data;
+  };
+
+  using value_t = std::variant<mlir::Value, TensorDesc>;
+
   // Non-copyable but movable
   MLIRNodeArg(const MLIRNodeArg&) = delete;
   MLIRNodeArg& operator=(const MLIRNodeArg&) = delete;
@@ -27,6 +93,10 @@ public:
 
   /// Constructor for tensor argument (no data)
   MLIRNodeArg(const std::string& name, const shape_t& shape, int element_type);
+
+  /// Constructor for tensor argument (external data)
+  MLIRNodeArg(const std::string& name, const shape_t& shape, int element_type,
+              const std::string& loc, size_t offset, size_t size);
 
   /// Constructor for concrete tensor (with data)
   MLIRNodeArg(const std::string& name, const shape_t& shape, int element_type,
@@ -39,7 +109,7 @@ public:
   const std::string& getName() const;
 
   /// Get the shape
-  const shape_t& getShape() const;
+  shape_t getShape() const;
 
   void setShape(const shape_t& shape);
 
@@ -68,6 +138,9 @@ public:
   /// Check if this tensor has data storage
   bool hasData() const;
 
+  /// Check if data is a non-owning external reference (zero-copy path)
+  bool isExternalData() const;
+
   // === Utility methods ===
 
   /// Get total number of elements
@@ -80,18 +153,16 @@ public:
 
   // === Template methods for typed data access ===
 
-private:
-  const std::string name_;
-  // before Operation created , the NodeArg can be changed
-  mutable shape_t shape_;
-  mutable int element_type_;
-  mutable mlir::Value value_;
+  // === Structured access ===
+  const TensorDesc& getDesc() const;
+  const TensorMeta& getMeta() const;
+  const ExternalRef* getExternalRef() const;
 
-  // Optional data storage - only present for concrete tensors
-  mutable std::optional<std::vector<uint8_t>> data_store_;
+private:
+  std::string name_;
+  mutable value_t value_;
 
   void validateElementType(int element_type) const;
-  void copyData(const void* data, size_t size);
 };
 
 // === Type alias for backward compatibility ===
