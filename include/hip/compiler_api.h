@@ -24,27 +24,19 @@ extern "C" {
 #endif
 
 /**
- * Compilation entry point with external constant storage.
+ * Compile MLIR input to DLL/object/IR file.
  *
- * Compiles MLIR input to DLL/object/IR file. onnx.Constant data is written
- * to "constants.bin" via the provided FileSystem. The DLL contains only code;
- * all weight data lives in the external file.
+ * onnx.Constant data is written to "constants.bin" via the provided
+ * FileSystem. External constants are identified by the `location`
+ * attribute on onnx.Constant ops in the MLIR bytecode.
  *
- * constants.bin format: raw concatenated bytes of each constant in
- * discovery order. Sizes are hardcoded in the generated inference_init.
- *
- * The generated inference_init signature becomes:
- *   int inference_init(void** out_state, void* fs)
- * where fs is a morphizen::FileSystem* passed as void* for C ABI.
- *
- * @param input_mlir   Input MLIR data (text or bytecode)
- * @param input_size   Size of input data in bytes
- * @param output_path  Output DLL/object/IR file path
- * @param options_json Compilation options as JSON string (can be NULL)
- * @param error        Error information output (can be NULL)
- * @param fs           morphizen::FileSystem* (cast to void* for C ABI).
- *                     Used to create "constants.bin" for writing.
- * @return             COMPILER_SUCCESS or error code
+ * @param input_mlir      Input MLIR data (text or bytecode)
+ * @param input_size      Size of input data in bytes
+ * @param output_path     Output DLL/object/IR file path
+ * @param options_json    Compilation options as JSON string (can be NULL)
+ * @param error           Error information output (can be NULL)
+ * @param fs              morphizen::FileSystem* (cast to void* for C ABI)
+ * @return                COMPILER_SUCCESS or error code
  */
 COMPILER_API CompilerErrorCode hip_compile_with_fs(
     const void *input_mlir, size_t input_size, const char *output_path,

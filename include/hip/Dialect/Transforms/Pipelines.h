@@ -58,27 +58,13 @@ struct HipToLLVMPipelineOptions
 /// Build the ONNX-to-HIP compilation pipeline.
 ///
 /// Converts ONNX-level tensor IR into fully bufferized HIP memref IR with
-/// pooled allocations and resolved extern constants. The pipeline order is
-/// critical -- see Pipelines.cpp for detailed commentary on why each pass
-/// must appear at its position.
+/// pooled allocations and resolved extern constants.
 ///
-/// This overload uses a default DiskFileSystem for writing externalized
-/// constants (constants.bin). Use it for CLI / standalone workflows
-/// (hip-compiler, hip-mlir-opt, LIT tests) where constants live on disk
-/// next to the compiled DLL.
-void buildOnnxToHipPipeline(OpPassManager &pm,
-                            const OnnxToHipPipelineOptions &options);
-
-/// Build the ONNX-to-HIP pipeline with a caller-supplied FileSystem.
-///
-/// Same pass sequence as the overload above, but externalized constants are
-/// written through fs instead of a DiskFileSystem. Use this overload for
-/// OnnxRuntime EP integration, where constants must be stored inside an
-/// EPContext archive so that the runtime can retrieve them later via the
-/// same FileSystem interface.
+/// \p fs -- when non-null, externalized constants are written through this
+///   FileSystem (EPContext archive). When null, a DiskFileSystem is used.
 void buildOnnxToHipPipeline(OpPassManager &pm,
                             const OnnxToHipPipelineOptions &options,
-                            morphizen::FileSystem *fs);
+                            morphizen::FileSystem *fs = nullptr);
 
 /// Build the ONNX-to-HIP pipeline with hipDNN graph compilation support.
 ///
