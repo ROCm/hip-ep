@@ -7,6 +7,7 @@
 #define HIP_COMPILER_COMPILER_DRIVER_H
 
 #include "compilation_options_generated.h"
+#include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/StringRef.h"
 #include <memory>
@@ -45,6 +46,17 @@ public:
   /// When set, onnx.Constant data is written to "constants.bin" via fs
   /// instead of being embedded in the DLL. Must be called before compile().
   void setFileSystem(morphizen::FileSystem *fs) { fileSystem_ = fs; }
+
+  /// Set hipDNN handle for graph compilation support.
+  /// When set, the ConvertOnnxToHipDNN pass is inserted into the pipeline
+  /// to compile supported ONNX ops into hipDNN graphs. Must be called
+  /// before compile().
+  void setHipdnnHandle(void *handle) { hipdnnHandle_ = handle; }
+
+  /// Retrieve compiled hipDNN graphs after compile() returns.
+  /// The returned map contains graphs compiled by the ConvertOnnxToHipDNN
+  /// pass. Caller should store them in a registry for runtime execution.
+  mlir::hip::CompiledGraphMap getCompiledGraphs() { return compiledGraphs_; }
 
   /// Compile MLIR string to output file.
   bool compile(llvm::StringRef input_mlir, const std::string &output_path,
@@ -95,6 +107,8 @@ private:
   void cleanupIntermediates(const std::string &basePath);
 
   morphizen::FileSystem *fileSystem_ = nullptr;
+  void *hipdnnHandle_ = nullptr;
+  mlir::hip::CompiledGraphMap compiledGraphs_;
 };
 
 } // namespace hip::compiler
