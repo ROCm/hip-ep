@@ -58,9 +58,8 @@ COMPILER_API CompilerErrorCode hip_compile_with_fs(
     const void *input_mlir, size_t input_size, const char *output_path,
     const char *options_json, CompilerError *error, void *fs) {
   if (!input_mlir || input_size == 0 || !output_path) {
-    setError(
-        error,
-        "Invalid input: input_mlir, input_size, and output_path must be valid");
+    setError(error, "Invalid input: input_mlir, input_size, and output_path "
+                    "must be valid");
     return COMPILER_ERROR_INVALID_INPUT;
   }
   if (!fs) {

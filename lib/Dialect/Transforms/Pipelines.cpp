@@ -75,18 +75,6 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   pm.addPass(createCanonicalizerPass());
 }
 
-void mlir::hip::buildOnnxToHipPipeline(
-    OpPassManager &pm, const OnnxToHipPipelineOptions &options) {
-  pm.addPass(createHipAddContextArgPass());
-
-  ConvertOnnxToHipPassOptions onnxToHipOpts;
-  onnxToHipOpts.externalizeOutputDir = options.externalizeOutputDir;
-  onnxToHipOpts.externalizeMinNumElements = options.externalizeMinNumElements;
-  pm.addPass(createConvertOnnxToHipPass(std::move(onnxToHipOpts)));
-
-  buildOnnxToHipPipelineTail(pm);
-}
-
 void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
                                        const OnnxToHipPipelineOptions &options,
                                        morphizen::FileSystem *fs) {
