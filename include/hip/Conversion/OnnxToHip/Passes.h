@@ -22,10 +22,7 @@ std::unique_ptr<Pass> createConvertOnnxToHipPass();
 
 /// Creates a pass with an external FileSystem for constant storage.
 /// When \p fs is non-null, externalized constants are written via \p fs
-/// instead of a DiskFileSystem rooted at the output directory. This is
-/// the production path used by hip-compiler when called from an ORT EP,
-/// where constants must be written into the EPContext archive.
-/// \p minNumElements controls the externalization threshold.
+/// instead of a DiskFileSystem rooted at the output directory.
 std::unique_ptr<Pass> createConvertOnnxToHipPass(
     morphizen::FileSystem *fs,
     int64_t minNumElements = kDefaultExternalizeMinNumElements);
