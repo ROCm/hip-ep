@@ -13,7 +13,8 @@
 #include <io.h>
 #endif
 
-namespace mlir::hip {
+namespace mlir {
+namespace hip {
 
 using FilePtr = std::unique_ptr<std::FILE, decltype(&std::fclose)>;
 
@@ -117,4 +118,5 @@ private:
   std::filesystem::path base_dir_;
 };
 
-} // namespace mlir::hip
+} // namespace hip
+} // namespace mlir

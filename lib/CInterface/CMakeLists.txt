@@ -20,6 +20,13 @@ target_link_libraries(HipCInterface PUBLIC
     HipSchemasLib
 )
 
+if(TARGET hipdnn_graph_runtime)
+    target_link_libraries(HipCInterface PUBLIC hipdnn_graph_runtime)
+    target_compile_definitions(HipCInterface PRIVATE
+        HIPDNN_GRAPH_RUNTIME_AVAILABLE
+    )
+endif()
+
 install(TARGETS HipCInterface
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib

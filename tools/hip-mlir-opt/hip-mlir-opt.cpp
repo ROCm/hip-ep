@@ -29,6 +29,7 @@
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "mlir/Transforms/Passes.h"
 
+#include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "hip/InitAllPasses.h"
 
 namespace {
@@ -124,6 +125,8 @@ void registerHipBufferizableOpInterfaceModels(mlir::DialectRegistry &registry) {
         HipDstBufferizableModel<mlir::hip::MatMulNBitsOp>>(*ctx);
     mlir::hip::QMoEOp::attachInterface<
         HipDstBufferizableModel<mlir::hip::QMoEOp>>(*ctx);
+    mlir::hip::HipDNNGraphOp::attachInterface<
+        HipDstBufferizableModel<mlir::hip::HipDNNGraphOp>>(*ctx);
   });
 }
 
@@ -153,6 +156,9 @@ int main(int argc, char **argv) {
 
   mlir::hip::registerHipPasses();
   mlir::hip::registerHipPipelines();
+  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+    return mlir::hip::createOutlineOnnxToHipDNNPass();
+  });
   mlir::bufferization::registerBufferizationPasses();
   mlir::bufferization::registerBufferizationPipelines();
   mlir::registerConvertBufferizationToMemRefPass();
