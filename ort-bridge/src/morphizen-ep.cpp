@@ -29,6 +29,7 @@ DEF_ENV_PARAM_2(
     MORPHIZEN_DEFAULT_BACKEND, // default depends on which backend is enabled
     std::string)
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MORPHIZEN_EP, "0")
+DEF_ENV_PARAM(XLNX_ABI_2_0_CLONE_EXTERNAL_DATA_THRESHOLD, "127")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MORPHIZEN_EP) >= n)
 namespace morphizen {
 
@@ -317,8 +318,20 @@ MorphiZenEP::GetCapability(OrtGraphWrapper& graph_viewer,
   }
   MY_LOG(1) << "Using backend: " << backend_ir;
   auto with_new_api = setup_global_morphizen_ort_api(backend_ir);
-  //
-  auto ir_model = ir_converter(*this, graph_viewer.get());
+  // Build IRConverterConfig — threshold priority:
+  //   1. provider option XLNX_model_clone_external_data_threshold (per-session)
+  //   2. env param XLNX_ABI_2_0_CLONE_EXTERNAL_DATA_THRESHOLD    (process-wide)
+  //   3. default 127                                              (fallback)
+  IRConverterConfig ir_config;
+  ir_config.external_data_threshold = static_cast<size_t>(
+      ENV_PARAM(XLNX_ABI_2_0_CLONE_EXTERNAL_DATA_THRESHOLD));
+  if (provider_options_.count("XLNX_model_clone_external_data_threshold")) {
+    ir_config.external_data_threshold = static_cast<size_t>(std::stoull(
+        provider_options_.at("XLNX_model_clone_external_data_threshold")));
+  }
+  MY_LOG(2) << "IRConverter external_data_threshold: "
+            << ir_config.external_data_threshold;
+  auto ir_model = ir_converter(*this, graph_viewer.get(), ir_config);
   auto& graph = MORPHIZEN_ORT_API(model_main_graph)(*ir_model);
   auto model_path = MORPHIZEN_ORT_API(get_model_path)(graph);
   OrtStatus* status = nullptr;

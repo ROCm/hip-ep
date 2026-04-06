@@ -13,11 +13,19 @@ using ModelUniquePtr =
 } // namespace morphizen
 
 namespace morphizen {
+
+struct IRConverterConfig {
+  // Tensors larger than this threshold use the no-copy memory-address
+  // external data mechanism (mirrors ORT kSmallTensorExternalDataThreshold).
+  // Set to SIZE_MAX to disable the optimisation entirely.
+  size_t external_data_threshold = 127;
+};
+
 class IRConverter {
 
 public:
-  static ModelUniquePtr
-  to_onnx_model(const ApiPtrs& api_ptrs,
-                const OrtGraph& graph); // Instance method for converting graph
+  static ModelUniquePtr to_onnx_model(const ApiPtrs& api_ptrs,
+                                      const OrtGraph& graph,
+                                      const IRConverterConfig& config = {});
 };
 } // namespace morphizen

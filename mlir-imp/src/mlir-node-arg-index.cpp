@@ -5,6 +5,7 @@
 #include "./mlir-node-arg-index.hpp"
 #include "./mlir-graph-id.hpp"
 #include "./mlir-graph.hpp"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Operation.h"
 #include <glog/logging.h>
 #include <memory>
@@ -109,10 +110,8 @@ bool MLIRNodeArgIndex::exists() const {
   return is_valid();
 }
 
-const llvm::SmallVector<int64_t>& MLIRNodeArgIndex::get_shape_i64() const {
-  // Get the underlying MLIRNodeArg and retrieve its shape
-  const MLIRNodeArg& nodeArg = get_node_arg();
-  return nodeArg.getShape();
+llvm::SmallVector<int64_t> MLIRNodeArgIndex::get_shape_i64() const {
+  return get_node_arg().getShape();
 }
 
 void MLIRNodeArgIndex::set_shape_i64(const llvm::SmallVector<int64_t>& shape) {
@@ -139,11 +138,39 @@ void MLIRNodeArgIndex::set_element_type(int type) {
   const_cast<MLIRNodeArg&>(get_node_arg()).setElementType(type);
 }
 
-int MLIRNodeArgIndex::external_location(std::string& /*external_file*/,
-                                        size_t& /*offset*/, size_t& /*size*/,
-                                        size_t& /*checksum*/) const {
-  // TODO: Implement when Graph class is available
-  LOG(WARNING) << "external_location not implemented in mlir_impl";
+int MLIRNodeArgIndex::external_location(std::string& external_file,
+                                        size_t& offset, size_t& size,
+                                        size_t& checksum) const {
+  auto& arg = get_node_arg();
+
+  // Stage 1: pre-materialization — ExternalRef lives in TensorDesc
+  if (auto* ext = arg.getExternalRef()) {
+    external_file = ext->location;
+    offset = ext->offset;
+    size = ext->size;
+    checksum = 0;
+    return 0;
+  }
+
+  // Stage 2: post-materialization — info embedded in onnx.Constant attributes
+  auto& val = arg.getValue();
+  if (val) {
+    if (auto defining_op = val.getDefiningOp()) {
+      if (defining_op->getName().getStringRef() != "onnx.Constant")
+        return -1;
+      auto loc_attr = defining_op->getAttrOfType<mlir::StringAttr>("location");
+      if (!loc_attr)
+        return -1;
+      external_file = loc_attr.getValue().str();
+      if (auto off = defining_op->getAttrOfType<mlir::IntegerAttr>("offset"))
+        offset = static_cast<size_t>(off.getInt());
+      if (auto sz = defining_op->getAttrOfType<mlir::IntegerAttr>("size"))
+        size = static_cast<size_t>(sz.getInt());
+      checksum = 0;
+      return 0;
+    }
+  }
+
   return -1;
 }
 

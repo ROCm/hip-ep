@@ -881,20 +881,28 @@ void MLIRGraph::add_constant_initialized_tensor(
       LOG(FATAL) << "Expected ShapedType for constant tensor: " << name;
     }
   }
-  // Create dense element attribute from tensor data
-  mlir::DenseElementsAttr denseAttr;
   const void* data = node_arg->getData();
   size_t dataSize = node_arg->getDataSize();
 
-  // Create the dense elements attribute based on element type
-  // TODO : i4, u4 ?
-  auto rawData = llvm::ArrayRef<char>(static_cast<const char*>(data), dataSize);
-  denseAttr =
-      mlir::DenseElementsAttr::getFromRawBuffer(shapedTensorType, rawData);
-  // Create onnx.Constant using generic operation (no onnx-mlir dependency)
   mlir::OperationState state(loc, "onnx.Constant");
-  state.addTypes(denseAttr.getType());
-  state.addAttribute("value", denseAttr);
+  state.addTypes(shapedTensorType);
+
+  if (node_arg->isExternalData()) {
+    auto* ext = node_arg->getExternalRef();
+    CHECK(ext) << "ExternalRef must exist for external data: " << name;
+    state.addAttribute("location", builder.getStringAttr(ext->location));
+    state.addAttribute(
+        "offset", builder.getI64IntegerAttr(static_cast<int64_t>(ext->offset)));
+    state.addAttribute(
+        "size", builder.getI64IntegerAttr(static_cast<int64_t>(ext->size)));
+  } else {
+    auto rawData =
+        llvm::ArrayRef<char>(static_cast<const char*>(data), dataSize);
+    auto denseAttr =
+        mlir::DenseElementsAttr::getFromRawBuffer(shapedTensorType, rawData);
+    state.addAttribute("value", denseAttr);
+  }
+
   mlir::Operation* op = builder.create(state);
   op->setAttr(attr_names::NODE_OUTPUTS,
               builder.getArrayAttr({builder.getStringAttr(name)}));

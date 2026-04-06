@@ -11,6 +11,7 @@
 #include <cstring>
 #include <glog/logging.h>
 #include <numeric>
+#include <variant>
 
 namespace morphizen {
 namespace mlir_impl {
@@ -97,133 +98,116 @@ int extractElementTypeFromValue(mlir::Value value) {
 
 MLIRNodeArg::MLIRNodeArg(const std::string& name, const shape_t& shape,
                          int element_type)
-    : name_(name), shape_(shape), element_type_(element_type), value_(nullptr) {
-  // CHECK(!name.empty()) << "Argument name cannot be empty";
-  // arg name is optional in ep context flow
+    : name_{name},
+      value_{TensorDesc{{name, shape, element_type}, std::nullopt}} {
+  validateElementType(element_type);
+}
+
+MLIRNodeArg::MLIRNodeArg(const std::string& name, const shape_t& shape,
+                         int element_type, const std::string& loc,
+                         size_t offset, size_t size)
+    : name_{name}, value_{TensorDesc{{name, shape, element_type},
+                                     data_t{ExternalRef{loc, offset, size}}}} {
   validateElementType(element_type);
 }
 
 MLIRNodeArg::MLIRNodeArg(const std::string& name, const shape_t& shape,
                          int element_type, const void* data, size_t data_size)
-    : name_(name), shape_(shape), element_type_(element_type), value_(nullptr) {
+    : name_{name},
+      value_{TensorDesc{{name, shape, element_type}, std::nullopt}} {
   CHECK(!name.empty()) << "Argument name cannot be empty";
   validateElementType(element_type);
 
   if (data && data_size > 0) {
-    data_store_ = std::vector<uint8_t>();
-    copyData(data, data_size);
+    std::vector<uint8_t> vec(data_size);
+    std::memcpy(vec.data(), data, data_size);
+    std::get<TensorDesc>(value_).data = data_t{std::move(vec)};
   }
 }
 
 MLIRNodeArg::MLIRNodeArg(const std::string& name, mlir::Value value)
-    : name_(name), shape_(extractShapeFromValue(value)),
-      element_type_(extractElementTypeFromValue(value)), value_(value) {
+    : name_{name}, value_{value} {
   CHECK(!name.empty()) << "Argument name cannot be empty";
-  validateElementType(element_type_);
-  // DenseElementsAttr with splat values need special handling to expand data
-  // clang-format off
-  // eg : %3 = "onnx.Constant"() <{value = dense<0.000000e+00> : tensor<64xf32>}> {node.outputs = ["conv_bias"]} : () -> tensor<64xf32> loc(#loc) // user: %4
-  // clang-format on
-  // We cache the full data in data_store_ when
-  // DenseElementsAttr with splat
-  //  For getData() and getDataSize() return actual data and data_size
-  if (auto defining_op = value_.getDefiningOp()) {
-    if (defining_op->getName().getStringRef() == "onnx.Constant") {
-      if (auto value_attr = defining_op->getAttr("value")) {
-        if (auto dense_attr =
-                mlir::dyn_cast<mlir::DenseElementsAttr>(value_attr)) {
-          // For dense tensor constants, use the actual raw data size
-          // shape empty means scalar, skip it
-          if (dense_attr.isSplat() && !shape_.empty()) {
-            // For splat constants, we need to expand the single value to fill
-            // the entire tensor
-            auto raw_data = dense_attr.getRawData();
-            if (!raw_data.empty()) {
-              int64_t element_size = raw_data.size(); // TODO : i4, u4 ?
-              int64_t element_count = getElementCount();
-              data_store_ = std::vector<uint8_t>(element_count * element_size);
-              const char* src_data = raw_data.data();
-              uint8_t* dest_data = data_store_->data();
-
-              for (int64_t i = 0; i < element_count; ++i) {
-                std::memcpy(dest_data + i * element_size, src_data,
-                            element_size);
-              }
-            }
-          }
-        }
-      }
-    }
-  }
+  validateElementType(extractElementTypeFromValue(value));
 }
 
 const std::string& MLIRNodeArg::getName() const { return name_; }
 
-const MLIRNodeArg::shape_t& MLIRNodeArg::getShape() const { return shape_; }
+MLIRNodeArg::shape_t MLIRNodeArg::getShape() const {
+  if (auto* desc = std::get_if<TensorDesc>(&value_))
+    return desc->meta.shape;
+  return extractShapeFromValue(std::get<mlir::Value>(value_));
+}
 
 void MLIRNodeArg::setShape(const MLIRNodeArg::shape_t& shape) {
-  if (value_) {
+  if (auto* val = std::get_if<mlir::Value>(&value_); val && *val) {
     LOG(FATAL) << "Currently , Once the Operation created , the shape can not "
                   "be changed";
   }
-  shape_ = shape;
-};
+  std::get<TensorDesc>(value_).meta.shape = shape;
+}
 
-int MLIRNodeArg::getElementType() const { return element_type_; }
+int MLIRNodeArg::getElementType() const {
+  if (auto* desc = std::get_if<TensorDesc>(&value_))
+    return desc->meta.element_type;
+  return extractElementTypeFromValue(std::get<mlir::Value>(value_));
+}
 
 void MLIRNodeArg::setElementType(int data_type) {
-  if (value_) {
+  if (auto* val = std::get_if<mlir::Value>(&value_); val && *val) {
     LOG(FATAL)
         << "Currently , Once the Operation created , the element type can not "
            "be changed";
   }
-  element_type_ = data_type;
+  std::get<TensorDesc>(value_).meta.element_type = data_type;
 }
 
-const mlir::Value& MLIRNodeArg::getValue() const { return value_; }
-mlir::Value& MLIRNodeArg::getValue() { return value_; }
+const mlir::Value& MLIRNodeArg::getValue() const {
+  if (auto* val = std::get_if<mlir::Value>(&value_))
+    return *val;
+  static const mlir::Value null_value{nullptr};
+  return null_value;
+}
+
+mlir::Value& MLIRNodeArg::getValue() {
+  if (auto* val = std::get_if<mlir::Value>(&value_))
+    return *val;
+  value_ = mlir::Value(nullptr);
+  return std::get<mlir::Value>(value_);
+}
 
 void MLIRNodeArg::setValue(mlir::Value value) const { value_ = value; }
 
 mlir::Type MLIRNodeArg::getType(mlir::OpBuilder& builder) const {
-  // If we have a valid MLIR value, return its type
-  if (value_) {
-    return value_.getType();
+  if (auto* val = std::get_if<mlir::Value>(&value_)) {
+    if (*val)
+      return val->getType();
   }
 
-  // Use the shared utility function to convert element type and create tensor
-  // type
-  auto& shape = getShape();
+  auto shape = getShape();
   return onnxElementTypeToMlirType(getElementType(), builder, &shape);
 }
 
 const void* MLIRNodeArg::getData() const {
-  // First check if we have stored data
-  if (data_store_.has_value()) {
-    return data_store_->data();
+  if (auto* desc = std::get_if<TensorDesc>(&value_)) {
+    if (desc->data.has_value()) {
+      auto& data_var = desc->data.value();
+      if (auto* ext = std::get_if<ExternalRef>(&data_var))
+        return reinterpret_cast<void*>(ext->offset);
+      if (auto* vec = std::get_if<std::vector<uint8_t>>(&data_var))
+        return vec->data();
+    }
+    return nullptr;
   }
 
-  // If no stored data, try to extract from MLIR value if it's a constant
-  if (value_) {
-    if (auto defining_op = value_.getDefiningOp()) {
+  auto& val = std::get<mlir::Value>(value_);
+  if (val) {
+    if (auto defining_op = val.getDefiningOp()) {
       if (defining_op->getName().getStringRef() == "onnx.Constant") {
-        // Get the constant value attribute
         if (auto value_attr = defining_op->getAttr("value")) {
-          // Handle different attribute types
           if (auto dense_attr =
                   mlir::dyn_cast<mlir::DenseElementsAttr>(value_attr)) {
-            // For dense tensor constants (handles all dense<...> cases
-            // including binary data) This covers: dense<0>, dense<[1, -1]>,
-            // dense<"0xFD09..."> etc.
-            auto raw_data = dense_attr.getRawData();
-
-            // Skip the raw_data.empty() check because {value = dense<> :
-            // tensor<0xf32>} is valid. Its print result is shown below and it
-            // is expected to be nullptr: LOG(WARNING) << "DenseElementsAttr has
-            // empty raw data for: " << name_ << " " << (void*)raw_data.data();
-            // DenseElementsAttr has empty raw data for: 801 0000000000000000
-
-            return raw_data.data();
+            return dense_attr.getRawData().data();
           }
         }
       }
@@ -234,22 +218,25 @@ const void* MLIRNodeArg::getData() const {
 }
 
 size_t MLIRNodeArg::getDataSize() const {
-  // First check if we have stored data
-  if (data_store_.has_value()) {
-    return data_store_->size();
+  if (auto* desc = std::get_if<TensorDesc>(&value_)) {
+    if (desc->data.has_value()) {
+      auto& data_var = desc->data.value();
+      if (auto* ext = std::get_if<ExternalRef>(&data_var))
+        return ext->size;
+      if (auto* vec = std::get_if<std::vector<uint8_t>>(&data_var))
+        return vec->size();
+    }
+    return 0;
   }
 
-  // If no stored data, try to calculate size from MLIR value if it's a constant
-  if (value_) {
-    if (auto defining_op = value_.getDefiningOp()) {
+  auto& val = std::get<mlir::Value>(value_);
+  if (val) {
+    if (auto defining_op = val.getDefiningOp()) {
       if (defining_op->getName().getStringRef() == "onnx.Constant") {
         if (auto value_attr = defining_op->getAttr("value")) {
           if (auto dense_attr =
                   mlir::dyn_cast<mlir::DenseElementsAttr>(value_attr)) {
-            // For dense tensor constants, use the actual raw data size
-            // This is more reliable than calculating from shape/element type
-            auto raw_data = dense_attr.getRawData();
-            return raw_data.size();
+            return dense_attr.getRawData().size();
           }
         }
       }
@@ -260,39 +247,63 @@ size_t MLIRNodeArg::getDataSize() const {
 }
 
 bool MLIRNodeArg::hasData() const {
-  // First check if we have stored data
-  if (data_store_.has_value() && !data_store_->empty()) {
-    return true;
-  }
+  if (auto* desc = std::get_if<TensorDesc>(&value_))
+    return desc->data.has_value();
 
-  // If no stored data, check if we have a constant MLIR value
-  if (value_) {
-    if (auto defining_op = value_.getDefiningOp()) {
-      if (defining_op->getName().getStringRef() == "onnx.Constant") {
-        return true; // Constant operations always have data
-      }
-    }
+  auto& val = std::get<mlir::Value>(value_);
+  if (val) {
+    if (auto defining_op = val.getDefiningOp())
+      return defining_op->getName().getStringRef() == "onnx.Constant";
   }
+  return false;
+}
 
+bool MLIRNodeArg::isExternalData() const {
+  if (auto* desc = std::get_if<TensorDesc>(&value_)) {
+    return desc->data.has_value() &&
+           std::holds_alternative<ExternalRef>(desc->data.value());
+  }
+  if (auto* val = std::get_if<mlir::Value>(&value_); val && *val) {
+    if (auto defining_op = val->getDefiningOp())
+      return defining_op->getName().getStringRef() == "onnx.Constant" &&
+             defining_op->hasAttrOfType<mlir::StringAttr>("location");
+  }
   return false;
 }
 
 int64_t MLIRNodeArg::getElementCount() const {
-  if (shape_.empty()) {
+  auto shape = getShape();
+  if (shape.empty())
     return 0;
-  }
-  return std::accumulate(shape_.begin(), shape_.end(), 1LL,
+  return std::accumulate(shape.begin(), shape.end(), 1LL,
                          std::multiplies<int64_t>());
 }
 
 bool MLIRNodeArg::isConstantValue() const {
-  if (!value_) {
-    return hasData();
+  if (auto* val = std::get_if<mlir::Value>(&value_)) {
+    if (!*val)
+      return false;
+    if (auto defining_op = val->getDefiningOp())
+      return defining_op->getName().getStringRef() == "onnx.Constant";
+    return false;
   }
-  if (auto defining_op = value_.getDefiningOp()) {
-    return defining_op->getName().getStringRef() == "onnx.Constant";
+  return hasData();
+}
+
+const MLIRNodeArg::TensorDesc& MLIRNodeArg::getDesc() const {
+  return std::get<TensorDesc>(value_);
+}
+
+const MLIRNodeArg::TensorMeta& MLIRNodeArg::getMeta() const {
+  return std::get<TensorDesc>(value_).meta;
+}
+
+const MLIRNodeArg::ExternalRef* MLIRNodeArg::getExternalRef() const {
+  if (auto* desc = std::get_if<TensorDesc>(&value_)) {
+    if (desc->data.has_value())
+      return std::get_if<ExternalRef>(&desc->data.value());
   }
-  return false;
+  return nullptr;
 }
 
 void MLIRNodeArg::validateElementType(int element_type) const {
@@ -317,15 +328,6 @@ void MLIRNodeArg::validateElementType(int element_type) const {
     LOG(WARNING) << "Unsupported element type: " << element_type;
     break;
   }
-}
-
-void MLIRNodeArg::copyData(const void* data, size_t size) {
-  CHECK(data != nullptr) << "Data pointer cannot be null";
-  CHECK(size > 0) << "Data size must be positive";
-  CHECK(data_store_.has_value()) << "Data storage not initialized";
-
-  data_store_->resize(size);
-  std::memcpy(data_store_->data(), data, size);
 }
 
 } // namespace mlir_impl

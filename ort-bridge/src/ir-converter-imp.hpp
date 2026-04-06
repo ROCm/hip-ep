@@ -8,12 +8,13 @@ namespace morphizen {
 class IRConverterImp : public ApiPtrs {
 
 public:
-  static ModelUniquePtr
-  to_onnx_model(const ApiPtrs& api_ptrs,
-                const OrtGraph& graph); // Instance method for converting graph
+  static ModelUniquePtr to_onnx_model(const ApiPtrs& api_ptrs,
+                                      const OrtGraph& graph,
+                                      const IRConverterConfig& config = {});
 
 public:
-  IRConverterImp(const ApiPtrs& api_ptrs, const OrtGraph& graph);
+  IRConverterImp(const ApiPtrs& api_ptrs, const OrtGraph& graph,
+                 const IRConverterConfig& config);
 
   OrtStatus* convert_to_model(morphizen::Model& model)
       const; // Instance method for converting to ONNX graph
@@ -40,5 +41,6 @@ public:
 
 private:
   OrtGraphWrapper graph_;
+  IRConverterConfig config_;
 };
 } // namespace morphizen

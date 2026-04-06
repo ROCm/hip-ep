@@ -5,7 +5,8 @@
 #include "ir-converter-imp.hpp"
 namespace morphizen {
 ModelUniquePtr IRConverter::to_onnx_model(const ApiPtrs& api_ptrs,
-                                          const OrtGraph& graph) {
-  return IRConverterImp::to_onnx_model(api_ptrs, graph);
+                                          const OrtGraph& graph,
+                                          const IRConverterConfig& config) {
+  return IRConverterImp::to_onnx_model(api_ptrs, graph, config);
 }
 } // namespace morphizen

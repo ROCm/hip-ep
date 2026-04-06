@@ -828,11 +828,11 @@ int NodeArgIndex::external_location(std::string& external_file, size_t& offset,
       external_file = entry.value();
       ret = 1;
     } else if (entry.has_key() && entry.key() == "offset") {
-      offset = std::stoul(entry.value());
+      offset = std::stoull(entry.value());
     } else if (entry.has_key() && entry.key() == "size") {
-      size = std::stoul(entry.value());
+      size = std::stoull(entry.value());
     } else if (entry.has_key() && entry.key() == "checksum") {
-      checksum = std::stoul(entry.value());
+      checksum = std::stoull(entry.value());
     }
   }
   return ret;

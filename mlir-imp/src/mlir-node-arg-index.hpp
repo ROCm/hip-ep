@@ -90,7 +90,7 @@ public:
   GraphId get_graph_id() const; // Member functions
   bool exists() const;
 
-  const llvm::SmallVector<int64_t>& get_shape_i64() const;
+  llvm::SmallVector<int64_t> get_shape_i64() const;
   void set_shape_i64(const llvm::SmallVector<int64_t>& shape);
   std::vector<std::string>* get_denotation_unsafe() const;
   void set_denotation(const std::vector<std::string>& denotation);
