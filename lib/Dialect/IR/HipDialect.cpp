@@ -745,5 +745,19 @@ LogicalResult GqaOp::verify() {
   return success();
 }
 
+//===----------------------------------------------------------------------===//
+// HipDNNGraphOp: ins(variadic), outs(variadic)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange HipDNNGraphOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void HipDNNGraphOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
 #define GET_OP_CLASSES
 #include "hip/Dialect/IR/HipOps.cpp.inc"

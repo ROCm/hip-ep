@@ -5,8 +5,12 @@
 #ifndef HIP_DIALECT_TRANSFORMS_PIPELINES_H
 #define HIP_DIALECT_TRANSFORMS_PIPELINES_H
 
+#include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassOptions.h"
+
+struct hipdnnHandle;
+typedef hipdnnHandle *hipdnnHandle_t;
 
 namespace morphizen {
 class FileSystem;
@@ -54,27 +58,24 @@ struct HipToLLVMPipelineOptions
 /// Build the ONNX-to-HIP compilation pipeline.
 ///
 /// Converts ONNX-level tensor IR into fully bufferized HIP memref IR with
-/// pooled allocations and resolved extern constants. The pipeline order is
-/// critical -- see Pipelines.cpp for detailed commentary on why each pass
-/// must appear at its position.
+/// pooled allocations and resolved extern constants.
 ///
-/// This overload uses a default DiskFileSystem for writing externalized
-/// constants (constants.bin). Use it for CLI / standalone workflows
-/// (hip-compiler, hip-mlir-opt, LIT tests) where constants live on disk
-/// next to the compiled DLL.
-void buildOnnxToHipPipeline(OpPassManager &pm,
-                            const OnnxToHipPipelineOptions &options);
-
-/// Build the ONNX-to-HIP pipeline with a caller-supplied FileSystem.
-///
-/// Same pass sequence as the overload above, but externalized constants are
-/// written through fs instead of a DiskFileSystem. Use this overload for
-/// OnnxRuntime EP integration, where constants must be stored inside an
-/// EPContext archive so that the runtime can retrieve them later via the
-/// same FileSystem interface.
+/// \p fs -- when non-null, externalized constants are written through this
+///   FileSystem (EPContext archive). When null, a DiskFileSystem is used.
 void buildOnnxToHipPipeline(OpPassManager &pm,
                             const OnnxToHipPipelineOptions &options,
-                            morphizen::FileSystem *fs);
+                            morphizen::FileSystem *fs = nullptr);
+
+/// Build the ONNX-to-HIP pipeline with hipDNN graph compilation support.
+///
+/// Same as the FileSystem overload, but additionally inserts the
+/// ConvertOnnxToHipDNN pass when handle is non-null. Supported ONNX ops
+/// are compiled into hipDNN graphs at pass time; unsupported ops pass
+/// through to ConvertOnnxToHip.
+void buildOnnxToHipPipeline(OpPassManager &pm,
+                            const OnnxToHipPipelineOptions &options,
+                            morphizen::FileSystem *fs, hipdnnHandle_t handle,
+                            CompiledGraphMap output_graphs);
 
 /// Build the HIP-to-LLVM lowering pipeline. This is a separate pipeline
 /// (not part of buildOnnxToHipPipeline) because the LLVM lowering is only

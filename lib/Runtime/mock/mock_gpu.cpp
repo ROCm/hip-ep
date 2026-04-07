@@ -639,16 +639,20 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
 
 int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,
-                    int64_t element_size_bytes, int64_t keepdims) {
+                    int64_t axes_num_elements, int64_t element_size_bytes,
+                    int64_t keepdims, int64_t noop_with_empty_axes) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_reduce_sum\n");
     return -1;
   }
 
-  MOCK_PRINT("[MOCK] wrap_reduce_sum(data_num_elements=%lld, "
-             "output_num_elements=%lld, element_size=%lld, keepdims=%lld)\n",
-             (long long)data_num_elements, (long long)output_num_elements,
-             (long long)element_size_bytes, (long long)keepdims);
+  MOCK_PRINT(
+      "[MOCK] wrap_reduce_sum(data_num_elements=%lld, "
+      "output_num_elements=%lld, axes_num_elements=%lld, element_size=%lld, "
+      "keepdims=%lld, noop_with_empty_axes=%lld)\n",
+      (long long)data_num_elements, (long long)output_num_elements,
+      (long long)axes_num_elements, (long long)element_size_bytes,
+      (long long)keepdims, (long long)noop_with_empty_axes);
 
   return 0;
 }

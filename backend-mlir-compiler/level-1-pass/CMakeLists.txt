@@ -22,7 +22,7 @@ target_link_libraries(${LIB_NAME} PRIVATE
     morphizen::morphizen-core-static
     glog::glog
     mlir_compilation_proto  # Shared protobuf library
-    # NOTE: morphizen-mlir-compiler.dll is loaded dynamically at runtime, not linked
+    # NOTE: hip-compiler.dll is loaded dynamically at runtime, not linked
 )
 
 # Include directories
@@ -47,4 +47,4 @@ set_target_properties(${LIB_NAME} PROPERTIES
     FOLDER "mlir"
 )
 
-message(STATUS "level-1-pass will dynamically load morphizen-mlir-compiler.dll at runtime (morphizen plugin pattern)")
+message(STATUS "level-1-pass will dynamically load hip-compiler.dll at runtime (morphizen plugin pattern)")

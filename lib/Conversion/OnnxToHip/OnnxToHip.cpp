@@ -11,6 +11,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
@@ -32,6 +33,7 @@
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FormatVariadic.h"
 #ifdef _MSC_VER
@@ -159,22 +161,209 @@ struct ExternalizationState {
   llvm::SmallVector<int64_t> constantOffsets;
 };
 
-/// Lower onnx.Constant ops.
+/// Write alignment padding to constants.bin and return the aligned byte
+/// offset where the next constant's data should begin.
+static int64_t writeAlignmentPadding(ExternalizationState *extState,
+                                     int64_t alignment = 64) {
+  int64_t aligned = llvm::alignTo(extState->currentOffset, alignment);
+  int64_t padding = aligned - extState->currentOffset;
+  if (padding > 0) {
+    llvm::SmallVector<char> zeros(padding, 0);
+    extState->writer->fwrite(zeros.data(), padding);
+    extState->currentOffset += padding;
+  }
+  return extState->currentOffset;
+}
+
+/// Shared bookkeeping after constant data has been written to constants.bin.
+/// Updates ExternalizationState counters, emits the JSON manifest entry,
+/// creates the extern memref.global with hip.external_data, and replaces
+/// the original op with memref.get_global + bufferization.to_tensor.
+static void finalizeExternalizedConstant(mlir::ModuleOp module,
+                                         mlir::Operation *constOp,
+                                         mlir::RankedTensorType tensorType,
+                                         int64_t byteSize, int64_t entryOffset,
+                                         ExternalizationState *extState) {
+  constexpr int64_t kAlignment = 64;
+  auto memrefType =
+      mlir::MemRefType::get(tensorType.getShape(), tensorType.getElementType());
+
+  std::string name = "hip_ext_constant_";
+  if (auto nodeNameAttr =
+          constOp->getAttrOfType<mlir::StringAttr>("onnx_node_name")) {
+    std::string fragment = sanitizeForMlirIdentifier(nodeNameAttr.getValue());
+    if (!fragment.empty())
+      name += fragment + "_";
+  }
+  name += std::to_string(extState->constantIndex);
+
+  extState->constantSizes.push_back(byteSize);
+  extState->constantOffsets.push_back(entryOffset);
+
+  llvm::json::Array shapeArray;
+  for (int64_t dim : tensorType.getShape())
+    shapeArray.push_back(dim);
+  llvm::json::Object entry;
+  entry["name"] = name;
+  entry["shape"] = std::move(shapeArray);
+  entry["element_type"] = elementTypeToString(tensorType.getElementType());
+  entry["offset"] = entryOffset;
+  entry["size"] = byteSize;
+  entry["alignment"] = kAlignment;
+  extState->manifestEntries.push_back(std::move(entry));
+
+  mlir::OpBuilder moduleBuilder(module.getBody(), module.getBody()->begin());
+  auto externalDataAttr = moduleBuilder.getDictionaryAttr({
+      moduleBuilder.getNamedAttr(
+          "index", moduleBuilder.getI64IntegerAttr(extState->constantIndex)),
+      moduleBuilder.getNamedAttr("offset",
+                                 moduleBuilder.getI64IntegerAttr(entryOffset)),
+      moduleBuilder.getNamedAttr("size",
+                                 moduleBuilder.getI64IntegerAttr(byteSize)),
+  });
+  auto globalOp = mlir::memref::GlobalOp::create(
+      moduleBuilder, constOp->getLoc(), name,
+      /*sym_visibility=*/moduleBuilder.getStringAttr("private"),
+      /*type=*/memrefType,
+      /*initial_value=*/nullptr,
+      /*constant=*/false,
+      /*alignment=*/moduleBuilder.getI64IntegerAttr(kAlignment));
+  globalOp->setAttr("hip.external_data", externalDataAttr);
+
+  mlir::OpBuilder builder(constOp);
+  auto getGlobal = mlir::memref::GetGlobalOp::create(builder, constOp->getLoc(),
+                                                     memrefType, name);
+  auto toTensor = mlir::bufferization::ToTensorOp::create(
+      builder, constOp->getLoc(), tensorType, getGlobal.getResult(),
+      /*restrict=*/builder.getUnitAttr(),
+      /*writable=*/nullptr);
+  constOp->getResult(0).replaceAllUsesWith(toTensor.getResult());
+  constOp->erase();
+
+  ++extState->constantIndex;
+}
+
+/// Write one constant's raw data to constants.bin and replace the op with
+/// an extern memref.global + bufferization.to_tensor bridge.
+static void externalizeConstant(mlir::ModuleOp module, mlir::Operation *constOp,
+                                mlir::RankedTensorType tensorType,
+                                const void *rawPtr, int64_t byteSize,
+                                ExternalizationState *extState) {
+  int64_t entryOffset = writeAlignmentPadding(extState);
+  extState->writer->fwrite(rawPtr, byteSize);
+  extState->currentOffset += byteSize;
+  finalizeExternalizedConstant(module, constOp, tensorType, byteSize,
+                               entryOffset, extState);
+}
+
+/// Replace an onnx.Constant op with an inline arith.constant.
+static void replaceWithArithConstant(mlir::Operation *constOp,
+                                     mlir::DenseElementsAttr valueAttr) {
+  mlir::OpBuilder builder(constOp);
+  auto arithConst =
+      mlir::arith::ConstantOp::create(builder, constOp->getLoc(), valueAttr);
+  constOp->getResult(0).replaceAllUsesWith(arithConst.getResult());
+  constOp->erase();
+}
+
+/// Externalize a splat constant: expand the single element via chunked
+/// writes to avoid allocating the full tensor in memory.
+static void externalizeSplatConstant(mlir::ModuleOp module,
+                                     mlir::Operation *constOp,
+                                     mlir::RankedTensorType tensorType,
+                                     mlir::DenseElementsAttr valueAttr,
+                                     int64_t byteSize,
+                                     ExternalizationState *extState) {
+  auto rawData = valueAttr.getRawData();
+  constexpr size_t kSplatChunk = 1024 * 1024;
+  size_t elemSize = rawData.size();
+  size_t bufSize =
+      (std::min(static_cast<size_t>(byteSize), kSplatChunk) / elemSize) *
+      elemSize;
+  std::vector<char> buf(bufSize);
+  for (size_t i = 0; i < bufSize; i += elemSize)
+    std::memcpy(buf.data() + i, rawData.data(), elemSize);
+
+  int64_t entryOffset = writeAlignmentPadding(extState);
+  size_t remaining = static_cast<size_t>(byteSize);
+  while (remaining > 0) {
+    size_t toWrite = std::min(remaining, bufSize);
+    extState->writer->fwrite(buf.data(), toWrite);
+    remaining -= toWrite;
+  }
+  extState->currentOffset += byteSize;
+  finalizeExternalizedConstant(module, constOp, tensorType, byteSize,
+                               entryOffset, extState);
+}
+
+/// Resolve an onnx.Constant that carries a `location` attribute
+/// (zero-copy external data emitted by the ORT bridge).
+/// The `offset` attribute holds a raw memory address (ORT tensor pointer
+/// cast to i64) and `size` holds the byte count.
 ///
-/// Small constants (below \p minNumElements or when externalization is
-/// disabled) are converted to arith.constant -- bufferization later turns
-/// them into memref.global + memref.get_global.
+/// Input IR (produced by ir-converter-imp.cpp):
 ///
-/// Large constants (at or above threshold, non-splat) are externalized:
-/// their raw data is appended to the sidecar binary via \p extState, and
-/// they are replaced by an extern memref.global (no initial value) carrying
-/// a hip.external_data {offset, size} attribute, plus a
-/// memref.get_global + bufferization.to_tensor bridge at the use site.
+///   %cst = "onnx.Constant"()
+///       {location = "*/_ORT_MEM_ADDR_/*",
+///        offset = 140695085056000 : i64,
+///        size = 32 : i64} : () -> tensor<2x4xf32>
+///
+/// Output IR when externalization is enabled (extState != nullptr):
+///
+///   memref.global "private" @hip_ext_constant_0 : memref<2x4xf32>
+///       {alignment = 64 : i64,
+///        hip.external_data = {index = 0 : i64, offset = 0 : i64,
+///                             size = 32 : i64}}
+///   ...
+///   %0 = memref.get_global @hip_ext_constant_0 : memref<2x4xf32>
+///   %1 = bufferization.to_tensor %0 restrict
+///       : memref<2x4xf32> to tensor<2x4xf32>
+///
+/// Output IR when externalization is disabled (extState == nullptr):
+///
+///   %cst = arith.constant dense<[[1.0, 2.0, 3.0, 4.0], ...]>
+///       : tensor<2x4xf32>
+static mlir::LogicalResult
+resolveExternalLocationConstant(mlir::ModuleOp module, mlir::Operation *constOp,
+                                ExternalizationState *extState) {
+  auto offsetAttr = constOp->getAttrOfType<mlir::IntegerAttr>("offset");
+  auto sizeAttr = constOp->getAttrOfType<mlir::IntegerAttr>("size");
+  if (!offsetAttr || !sizeAttr)
+    return constOp->emitError(
+        "onnx.Constant with location attribute missing offset or size");
+
+  int64_t addr = offsetAttr.getInt();
+  int64_t dataSize = sizeAttr.getInt();
+  if (addr == 0 || dataSize <= 0)
+    return constOp->emitError("onnx.Constant has invalid address/size");
+
+  const void *dataPtr =
+      reinterpret_cast<const void *>(static_cast<uintptr_t>(addr));
+
+  auto tensorType =
+      mlir::dyn_cast<mlir::RankedTensorType>(constOp->getResult(0).getType());
+  if (!tensorType)
+    return constOp->emitError("external constant has non-ranked result type");
+
+  if (extState) {
+    externalizeConstant(module, constOp, tensorType, dataPtr, dataSize,
+                        extState);
+  } else {
+    auto rawData =
+        llvm::ArrayRef<char>(static_cast<const char *>(dataPtr), dataSize);
+    auto denseAttr =
+        mlir::DenseElementsAttr::getFromRawBuffer(tensorType, rawData);
+    replaceWithArithConstant(constOp, denseAttr);
+  }
+  return mlir::success();
+}
+
+/// Lower onnx.Constant ops to either externalized constants (constants.bin)
+/// or inline arith.constant ops.
 static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
                                               mlir::func::FuncOp funcOp,
                                               int64_t minNumElements,
                                               ExternalizationState *extState) {
-  constexpr int64_t kAlignment = 64;
 
   llvm::SmallVector<mlir::Operation *> constants;
   funcOp.walk([&](mlir::Operation *op) {
@@ -185,124 +374,36 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
   for (mlir::Operation *constOp : constants) {
     auto valueAttr = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
         constOp->getAttrOfType<mlir::ElementsAttr>("value"));
-    if (!valueAttr) {
+
+    if (valueAttr) {
+      // Inline dense constant -- fall through to externalize-or-inline below.
+    } else if (constOp->hasAttr("location")) {
+      if (mlir::failed(
+              resolveExternalLocationConstant(module, constOp, extState)))
+        return mlir::failure();
+      continue;
+    } else {
       return constOp->emitError(
-          "unsupported onnx.Constant form (expected dense value attribute)");
+          "unsupported onnx.Constant form (expected dense value attribute "
+          "or location attribute)");
     }
 
-    bool shouldExternalize = extState && minNumElements > 0 &&
-                             valueAttr.getNumElements() >= minNumElements;
-
-    if (shouldExternalize) {
+    if (extState && minNumElements > 0 &&
+        valueAttr.getNumElements() >= minNumElements) {
       auto tensorType = mlir::cast<mlir::RankedTensorType>(valueAttr.getType());
-      auto memrefType = mlir::MemRefType::get(tensorType.getShape(),
-                                              tensorType.getElementType());
-
-      // Build a unique, MLIR-safe symbol name: prefix + sanitized node
-      // name (if present) + monotonic index to guarantee uniqueness.
-      std::string name = "hip_ext_constant_";
-      if (auto nodeNameAttr =
-              constOp->getAttrOfType<mlir::StringAttr>("onnx_node_name")) {
-        std::string fragment =
-            sanitizeForMlirIdentifier(nodeNameAttr.getValue());
-        if (!fragment.empty())
-          name += fragment + "_";
-      }
-      name += std::to_string(extState->constantIndex);
-
-      // Pad binary file to alignment boundary.
-      int64_t aligned = llvm::alignTo(extState->currentOffset, kAlignment);
-      int64_t padding = aligned - extState->currentOffset;
-      if (padding > 0) {
-        llvm::SmallVector<char> zeros(padding, 0);
-        extState->writer->fwrite(zeros.data(), padding);
-        extState->currentOffset += padding;
-      }
-      int64_t entryOffset = extState->currentOffset;
-
-      // Compute full tensor byte size from shape and element width.
-      auto rawData = valueAttr.getRawData();
       int64_t elemBits = tensorType.getElementTypeBitWidth();
       int64_t byteSize = valueAttr.getNumElements() * ((elemBits + 7) / 8);
 
       if (valueAttr.isSplat()) {
-        // Splat: MLIR stores only one element; expand via a staging
-        // buffer to avoid per-element fwrite overhead on large tensors.
-        constexpr size_t kSplatChunk = 1024 * 1024;
-        size_t elemSize = rawData.size();
-        size_t bufSize =
-            (std::min(static_cast<size_t>(byteSize), kSplatChunk) / elemSize) *
-            elemSize;
-        std::vector<char> buf(bufSize);
-        for (size_t i = 0; i < bufSize; i += elemSize)
-          std::memcpy(buf.data() + i, rawData.data(), elemSize);
-        size_t remaining = static_cast<size_t>(byteSize);
-        while (remaining > 0) {
-          size_t toWrite = std::min(remaining, bufSize);
-          extState->writer->fwrite(buf.data(), toWrite);
-          remaining -= toWrite;
-        }
+        externalizeSplatConstant(module, constOp, tensorType, valueAttr,
+                                 byteSize, extState);
       } else {
-        extState->writer->fwrite(rawData.data(), byteSize);
+        externalizeConstant(module, constOp, tensorType,
+                            valueAttr.getRawData().data(), byteSize, extState);
       }
-      extState->currentOffset += byteSize;
 
-      // Track sizes and offsets for module-level metadata.
-      extState->constantSizes.push_back(byteSize);
-      extState->constantOffsets.push_back(entryOffset);
-
-      // Build JSON manifest entry.
-      llvm::json::Array shapeArray;
-      for (int64_t dim : tensorType.getShape())
-        shapeArray.push_back(dim);
-      llvm::json::Object entry;
-      entry["name"] = name;
-      entry["shape"] = std::move(shapeArray);
-      entry["element_type"] = elementTypeToString(tensorType.getElementType());
-      entry["offset"] = entryOffset;
-      entry["size"] = byteSize;
-      entry["alignment"] = kAlignment;
-      extState->manifestEntries.push_back(std::move(entry));
-
-      // Create extern memref.global at module scope.
-      mlir::OpBuilder moduleBuilder(module.getBody(),
-                                    module.getBody()->begin());
-      auto externalDataAttr = moduleBuilder.getDictionaryAttr({
-          moduleBuilder.getNamedAttr("index", moduleBuilder.getI64IntegerAttr(
-                                                  extState->constantIndex)),
-          moduleBuilder.getNamedAttr(
-              "offset", moduleBuilder.getI64IntegerAttr(entryOffset)),
-          moduleBuilder.getNamedAttr("size",
-                                     moduleBuilder.getI64IntegerAttr(byteSize)),
-      });
-      auto globalOp = mlir::memref::GlobalOp::create(
-          moduleBuilder, constOp->getLoc(), name,
-          /*sym_visibility=*/moduleBuilder.getStringAttr("private"),
-          /*type=*/memrefType,
-          /*initial_value=*/nullptr,
-          /*constant=*/false,
-          /*alignment=*/moduleBuilder.getI64IntegerAttr(kAlignment));
-      globalOp->setAttr("hip.external_data", externalDataAttr);
-
-      // At the use site: memref.get_global + bufferization.to_tensor.
-      mlir::OpBuilder builder(constOp);
-      auto getGlobal = mlir::memref::GetGlobalOp::create(
-          builder, constOp->getLoc(), memrefType, name);
-      auto toTensor = mlir::bufferization::ToTensorOp::create(
-          builder, constOp->getLoc(), tensorType, getGlobal.getResult(),
-          /*restrict=*/builder.getUnitAttr(),
-          /*writable=*/nullptr);
-      constOp->getResult(0).replaceAllUsesWith(toTensor.getResult());
-      constOp->erase();
-
-      ++extState->constantIndex;
     } else {
-      // Small / splat / externalization disabled: inline arith.constant.
-      mlir::OpBuilder builder(constOp);
-      auto arithConst = mlir::arith::ConstantOp::create(
-          builder, constOp->getLoc(), valueAttr);
-      constOp->getResult(0).replaceAllUsesWith(arithConst.getResult());
-      constOp->erase();
+      replaceWithArithConstant(constOp, valueAttr);
     }
   }
   return mlir::success();
@@ -429,7 +530,7 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
   int64_t dim0 = -1, dim1 = -1;
   int64_t mismatchCount = 0;
   for (auto [permIdx, attr] : llvm::enumerate(permAttr)) {
-    int64_t p = mlir::cast<mlir::IntegerAttr>(attr).getInt();
+    int64_t p = mlir::cast<mlir::IntegerAttr>(attr).getValue().getSExtValue();
     if (p != static_cast<int64_t>(permIdx)) {
       ++mismatchCount;
       if (dim0 < 0)
@@ -440,8 +541,10 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
   }
   if (mismatchCount != 2 || dim0 < 0 || dim1 < 0)
     return op->emitOpError("perm must swap exactly two dimensions");
-  int64_t p0 = mlir::cast<mlir::IntegerAttr>(permAttr[dim0]).getInt();
-  int64_t p1 = mlir::cast<mlir::IntegerAttr>(permAttr[dim1]).getInt();
+  int64_t p0 =
+      mlir::cast<mlir::IntegerAttr>(permAttr[dim0]).getValue().getSExtValue();
+  int64_t p1 =
+      mlir::cast<mlir::IntegerAttr>(permAttr[dim1]).getValue().getSExtValue();
   if (p0 != dim1 || p1 != dim0)
     return op->emitOpError("perm must swap exactly two dimensions");
 
@@ -452,7 +555,8 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
   llvm::SmallVector<mlir::Value> dynSizes;
   for (auto [outDimIdx, attr] : llvm::enumerate(permAttr)) {
     if (resultType.isDynamicDim(outDimIdx)) {
-      const int64_t srcDim = mlir::cast<mlir::IntegerAttr>(attr).getInt();
+      const int64_t srcDim =
+          mlir::cast<mlir::IntegerAttr>(attr).getValue().getSExtValue();
       dynSizes.push_back(
           mlir::tensor::DimOp::create(rewriter, loc, data, srcDim));
     }
@@ -711,8 +815,18 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, data);
 
+  // Extract noop_with_empty_axes attribute (defaults to 0 in ONNX)
+  int64_t noopWithEmptyAxes = 0;
+  if (auto noopAttr =
+          op->getAttrOfType<mlir::IntegerAttr>("noop_with_empty_axes")) {
+    noopWithEmptyAxes = noopAttr.getSInt();
+  }
+
   // Handle axes: can be operand (opset 13+) or attribute (opset < 13)
+  // axes is always required in HIP dialect; create empty tensor<0xi64> when not
+  // provided
   mlir::Value axesOperand;
+
   if (op->getNumOperands() > 1) {
     // Axes provided as operand (opset 13+)
     axesOperand = op->getOperand(1);
@@ -721,12 +835,16 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
     llvm::SmallVector<int64_t> axesVec;
     if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
       for (auto a : axesAttr)
-        axesVec.push_back(mlir::cast<mlir::IntegerAttr>(a).getInt());
-    } else {
-      // Default: reduce all axes
+        axesVec.push_back(
+            mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
+    } else if (noopWithEmptyAxes == 0) {
+      // Default: reduce all axes (when noop_with_empty_axes is 0)
       auto inputType = mlir::cast<mlir::RankedTensorType>(data.getType());
       for (int64_t i : llvm::seq<int64_t>(inputType.getRank()))
         axesVec.push_back(i);
+    } else {
+      // noop_with_empty_axes is 1 and no axes provided, axesVec remains empty
+      // (will create empty tensor<0xi64>)
     }
 
     // Create constant tensor for axes
@@ -744,11 +862,12 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
     keepdims = keepdimsAttr.getSInt();
   }
 
-  // Create hip.reduce_sum operation
+  // Create hip.reduce_sum operation (axes always provided, may be empty)
   auto keepdimsAttr = rewriter.getI64IntegerAttr(keepdims);
-  auto hipOp =
-      mlir::hip::ReduceSumOp::create(rewriter, loc, resultType, context, data,
-                                     axesOperand, init, keepdimsAttr);
+  auto noopWithEmptyAxesAttr = rewriter.getI64IntegerAttr(noopWithEmptyAxes);
+  auto hipOp = mlir::hip::ReduceSumOp::create(
+      rewriter, loc, resultType, context, data, axesOperand, init, keepdimsAttr,
+      noopWithEmptyAxesAttr);
 
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
@@ -999,13 +1118,15 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   llvm::SmallVector<int64_t> kernelShape;
   if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("kernel_shape")) {
     for (auto a : attr)
-      kernelShape.push_back(mlir::cast<mlir::IntegerAttr>(a).getInt());
+      kernelShape.push_back(
+          mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
   }
 
   llvm::SmallVector<int64_t> strides;
   if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("strides")) {
     for (auto a : attr)
-      strides.push_back(mlir::cast<mlir::IntegerAttr>(a).getInt());
+      strides.push_back(
+          mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
   } else {
     // Default strides = 1 for each spatial dimension
     strides.assign(kernelShape.size(), 1);
@@ -1014,7 +1135,8 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   llvm::SmallVector<int64_t> pads;
   if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("pads")) {
     for (auto a : attr)
-      pads.push_back(mlir::cast<mlir::IntegerAttr>(a).getInt());
+      pads.push_back(
+          mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
   } else {
     // Default pads = 0
     pads.assign(kernelShape.size() * 2, 0);
@@ -1023,7 +1145,8 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   llvm::SmallVector<int64_t> dilations;
   if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("dilations")) {
     for (auto a : attr)
-      dilations.push_back(mlir::cast<mlir::IntegerAttr>(a).getInt());
+      dilations.push_back(
+          mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
   } else {
     // Default dilations = 1
     dilations.assign(kernelShape.size(), 1);
@@ -1031,7 +1154,7 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
 
   int64_t group = 1;
   if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("group"))
-    group = attr.getInt();
+    group = attr.getValue().getSExtValue();
 
   // Create output tensor
   llvm::SmallVector<mlir::Value> dynSizes;
@@ -1784,6 +1907,109 @@ struct GatherToHip : public mlir::RewritePattern {
 };
 
 //===----------------------------------------------------------------------===//
+// Shape Operations Helpers (Reshape, Unsqueeze, Squeeze)
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+/// Validate common requirements for Unsqueeze/Squeeze operations.
+/// Requires: 2 operands (data, axes), ranked tensors, matching element types,
+/// and constant axes (dynamic axes would require runtime shape computation).
+mlir::LogicalResult
+validateSqueezeUnsqueezeOp(mlir::Operation *op, mlir::PatternRewriter &rewriter,
+                           const char *tensorOpName, mlir::Value &data,
+                           mlir::Value &axes, mlir::RankedTensorType &inputType,
+                           mlir::RankedTensorType &outputType) {
+  if (op->getNumOperands() != 2)
+    return rewriter.notifyMatchFailure(op, "expected 2 operands (data, axes)");
+
+  data = op->getOperand(0);
+  axes = op->getOperand(1);
+
+  inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+  outputType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!inputType || !outputType)
+    return rewriter.notifyMatchFailure(op, "expected ranked tensor types");
+  if (inputType.getElementType() != outputType.getElementType())
+    return rewriter.notifyMatchFailure(op, "element type mismatch");
+
+  auto axesDefOp = axes.getDefiningOp();
+  if (!axesDefOp) {
+    std::string msg =
+        "axes must be defined by a constant operation (block "
+        "argument not supported). Dynamic axes would require "
+        "runtime shape computation and cannot use zero-cost tensor.";
+    msg += tensorOpName;
+    return rewriter.notifyMatchFailure(op, msg);
+  }
+
+  bool isConstant = mlir::isa<mlir::arith::ConstantOp>(axesDefOp) ||
+                    axesDefOp->hasAttr("value");
+  if (!isConstant) {
+    std::string msg =
+        "axes must be constant (arith.constant or onnx.Constant). "
+        "Dynamic axes would require runtime shape computation and "
+        "cannot use zero-cost tensor.";
+    msg += tensorOpName;
+    msg += " approach";
+    return rewriter.notifyMatchFailure(op, msg);
+  }
+
+  return mlir::success();
+}
+
+/// Build output shape for expand_shape operations.
+/// Used by both Reshape and Unsqueeze when expanding dimensions.
+///
+/// For static dimensions: use compile-time size from outputType.
+/// For dynamic dimensions: extract from input via DimOp, dividing out any
+/// static dimensions in the same reassociation group.
+llvm::SmallVector<mlir::OpFoldResult> buildExpandShapeOutputShape(
+    mlir::PatternRewriter &rewriter, mlir::Location loc, mlir::Value data,
+    mlir::RankedTensorType outputType,
+    llvm::ArrayRef<mlir::ReassociationIndices> reassoc) {
+  int64_t outputRank = outputType.getRank();
+
+  llvm::SmallVector<int64_t> outDimToInDim(outputRank, -1);
+  for (auto [g, group] : llvm::enumerate(reassoc))
+    for (int64_t idx : group)
+      outDimToInDim[idx] = g;
+
+  llvm::SmallVector<mlir::OpFoldResult> outputShape;
+  for (int64_t i : llvm::seq<int64_t>(outputRank)) {
+    if (!outputType.isDynamicDim(i)) {
+      outputShape.push_back(rewriter.getIndexAttr(outputType.getDimSize(i)));
+      continue;
+    }
+
+    int64_t srcDim = outDimToInDim[i];
+    const auto &group = reassoc[srcDim];
+
+    int64_t staticProduct = 1;
+    for (int64_t idx : group)
+      if (!outputType.isDynamicDim(idx))
+        staticProduct *= outputType.getDimSize(idx);
+
+    mlir::Value inputSize =
+        mlir::tensor::DimOp::create(rewriter, loc, data, srcDim);
+    if (staticProduct == 1) {
+      outputShape.push_back(inputSize);
+    } else {
+      mlir::Value divisor =
+          mlir::arith::ConstantIndexOp::create(rewriter, loc, staticProduct);
+      mlir::Value dynSize =
+          mlir::arith::DivUIOp::create(rewriter, loc, inputSize, divisor);
+      outputShape.push_back(dynSize);
+    }
+  }
+
+  return outputShape;
+}
+
+} // namespace
+
+//===----------------------------------------------------------------------===//
 // Reshape → standard tensor ops (zero-cost metadata reinterpretation)
 //===----------------------------------------------------------------------===//
 
@@ -1814,11 +2040,13 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
     int64_t inputRank = inputType.getRank();
     int64_t outputRank = outputType.getRank();
 
+    // No-op: same type
     if (inputType == outputType) {
       rewriter.replaceOp(op, data);
       return mlir::success();
     }
 
+    // Different rank: expand or collapse
     if (outputRank != inputRank) {
       auto reassocOpt =
           mlir::getReassociationIndicesForReshape(inputType, outputType);
@@ -1827,41 +2055,14 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
             op, "cannot compute reshape reassociation");
 
       if (outputRank > inputRank) {
-        llvm::SmallVector<int64_t> outDimToInDim(outputRank, -1);
-        for (auto [g, group] : llvm::enumerate(*reassocOpt))
-          for (int64_t idx : group)
-            outDimToInDim[idx] = g;
-
-        llvm::SmallVector<mlir::OpFoldResult> outputShape;
-        for (int64_t i : llvm::seq<int64_t>(outputRank)) {
-          if (!outputType.isDynamicDim(i)) {
-            outputShape.push_back(
-                rewriter.getIndexAttr(outputType.getDimSize(i)));
-            continue;
-          }
-          int64_t srcDim = outDimToInDim[i];
-          const auto &group = (*reassocOpt)[srcDim];
-          int64_t staticProduct = 1;
-          for (int64_t idx : group)
-            if (!outputType.isDynamicDim(idx))
-              staticProduct *= outputType.getDimSize(idx);
-          mlir::Value inputSize =
-              mlir::tensor::DimOp::create(rewriter, loc, data, srcDim);
-          if (staticProduct == 1) {
-            outputShape.push_back(inputSize);
-          } else {
-            mlir::Value divisor = mlir::arith::ConstantIndexOp::create(
-                rewriter, loc, staticProduct);
-            mlir::Value dynSize =
-                mlir::arith::DivUIOp::create(rewriter, loc, inputSize, divisor);
-            outputShape.push_back(dynSize);
-          }
-        }
-
+        // Expand: use shared helper to build output shape
+        auto outputShape = buildExpandShapeOutputShape(rewriter, loc, data,
+                                                       outputType, *reassocOpt);
         auto expandOp = mlir::tensor::ExpandShapeOp::create(
             rewriter, loc, outputType, data, *reassocOpt, outputShape);
         rewriter.replaceOp(op, expandOp.getResult());
       } else {
+        // Collapse: no dynamic shape computation needed
         auto collapseOp = mlir::tensor::CollapseShapeOp::create(
             rewriter, loc, outputType, data, *reassocOpt);
         rewriter.replaceOp(op, collapseOp.getResult());
@@ -1908,6 +2109,74 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
 };
 
 //===----------------------------------------------------------------------===//
+// Unsqueeze → standard tensor ops (zero-cost metadata reinterpretation)
+//===----------------------------------------------------------------------===//
+
+/// onnx.Unsqueeze → tensor.expand_shape (zero-cost metadata operation).
+struct UnsqueezeToStdTensor : public mlir::RewritePattern {
+  UnsqueezeToStdTensor(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Unsqueeze", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    mlir::Value data, axes;
+    mlir::RankedTensorType inputType, outputType;
+    if (auto result = validateSqueezeUnsqueezeOp(
+            op, rewriter, "expand_shape", data, axes, inputType, outputType);
+        failed(result))
+      return result;
+
+    auto reassocOpt =
+        mlir::getReassociationIndicesForReshape(inputType, outputType);
+    if (!reassocOpt)
+      return rewriter.notifyMatchFailure(
+          op, "cannot compute unsqueeze reassociation");
+
+    mlir::Location loc = op->getLoc();
+    auto outputShape = buildExpandShapeOutputShape(rewriter, loc, data,
+                                                   outputType, *reassocOpt);
+    auto expandOp = mlir::tensor::ExpandShapeOp::create(
+        rewriter, loc, outputType, data, *reassocOpt, outputShape);
+    rewriter.replaceOp(op, expandOp.getResult());
+    return mlir::success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// Squeeze → standard tensor ops (zero-cost metadata reinterpretation)
+//===----------------------------------------------------------------------===//
+
+/// onnx.Squeeze → tensor.collapse_shape (zero-cost metadata operation).
+struct SqueezeToStdTensor : public mlir::RewritePattern {
+  SqueezeToStdTensor(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Squeeze", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    mlir::Value data, axes;
+    mlir::RankedTensorType inputType, outputType;
+    if (auto result = validateSqueezeUnsqueezeOp(
+            op, rewriter, "collapse_shape", data, axes, inputType, outputType);
+        failed(result))
+      return result;
+
+    auto reassocOpt =
+        mlir::getReassociationIndicesForReshape(inputType, outputType);
+    if (!reassocOpt)
+      return rewriter.notifyMatchFailure(
+          op, "cannot compute squeeze reassociation");
+
+    mlir::Location loc = op->getLoc();
+    auto collapseOp = mlir::tensor::CollapseShapeOp::create(
+        rewriter, loc, outputType, data, *reassocOpt);
+    rewriter.replaceOp(op, collapseOp.getResult());
+    return mlir::success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // convertComputeOps implementation
 //===----------------------------------------------------------------------===//
 
@@ -1932,6 +2201,8 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   patterns.add<MatMulNBitsToHip>(ctx);
   patterns.add<QMoEToHip>(ctx);
   patterns.add<ReshapeToStdTensor>(ctx);
+  patterns.add<UnsqueezeToStdTensor>(ctx);
+  patterns.add<SqueezeToStdTensor>(ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);

@@ -38,6 +38,11 @@ private:
   // Metadata from EPContext (contains output shapes)
   mlir_metadata::Metadata metadata_;
 
+  // Maps compiler input index (= DLL input index) to ORT kernel context
+  // input index. ORT's fused node may reorder inputs relative to the
+  // compiler order; the mapping is derived from input_argument_indice.
+  std::vector<int> input_index_map_;
+
   // Maps metadata output index (= DLL output index) to ORT kernel context
   // output index. Precomputed at construction to handle ordering differences
   // between the metadata (DLL-order) and the fused node (ORT-order).

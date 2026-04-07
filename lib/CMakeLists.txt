@@ -4,6 +4,13 @@
 ##
 
 add_subdirectory(Dialect)
+option(BUILD_HIPDNN_GRAPH "Build hipDNN fused-graph support" OFF)
+set(HIPDNN_AVAILABLE OFF)
+if(NOT BUILD_MOCK_RUNTIME AND BUILD_HIPDNN_GRAPH)
+  set(HIPDNN_AVAILABLE ON)
+  add_subdirectory(HipDNNGraph)
+  add_subdirectory(HipDNNGraphRuntime)
+endif()
 add_subdirectory(Conversion)
 add_subdirectory(Runtime)
 add_subdirectory(Target/LLVM)

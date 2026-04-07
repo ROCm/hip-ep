@@ -62,7 +62,6 @@ Test-specific CMake flags:
 | Flag | Default | Purpose |
 |------|---------|---------|
 | `BUILD_HIP_UNIT_TESTS` | ON | Register LIT and E2E tests with CTest |
-| `morphizen_ENABLE_MLIR_COMPILER` | OFF | **REQUIRED**: Enable hip-compiler build |
 | `ONNX_HIP_INCLUDE_LIT_TESTS` | ON | Enable LIT tests |
 | `BUILD_MOCK_RUNTIME` | ON | Enable E2E tests with mock runtime |
 
