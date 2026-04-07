@@ -41,7 +41,7 @@ struct RuntimeState {
   // via a process-wide named shared memory descriptor with atomic ref count.
   bool constants_is_shared;       // true = reusing another model's blob
   void *shared_constants_mapping; // Win32 file mapping HANDLE
-  void *shared_constants_view;    // MapViewOfFile pointer (SharedConstantsMeta*)
+  void *shared_constants_view; // MapViewOfFile pointer (SharedConstantsMeta*)
 
   // Memory pooling support
   void *pool_base;        // Single large memory pool
