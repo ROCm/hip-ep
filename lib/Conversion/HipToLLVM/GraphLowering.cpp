@@ -141,8 +141,10 @@ struct HipDNNGraphOpLowering : public ConvertOpToLLVMPattern<HipDNNGraphOp> {
 
 } // namespace
 
-void mlir::hip::populateGraphLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
-  patterns.add<MiopenGraphOpLowering, HipblasltGraphOpLowering, HipDNNGraphOpLowering>(converter);
+void mlir::hip::populateGraphLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+  patterns.add<MiopenGraphOpLowering, HipblasltGraphOpLowering,
+               HipDNNGraphOpLowering>(converter);
 }
 
 } // namespace hip

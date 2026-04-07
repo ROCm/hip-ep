@@ -85,7 +85,8 @@ struct RopeOpLowering : public ConvertOpToLLVMPattern<RopeOp> {
 
 } // namespace
 
-void mlir::hip::populateRopeLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void mlir::hip::populateRopeLoweringPatterns(const LLVMTypeConverter &converter,
+                                             RewritePatternSet &patterns) {
   patterns.add<RopeOpLowering>(converter);
 }
 

@@ -70,7 +70,8 @@ struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
 
 } // namespace
 
-void mlir::hip::populateTransposeLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void mlir::hip::populateTransposeLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
   patterns.add<TransposeOpLowering>(converter);
 }
 

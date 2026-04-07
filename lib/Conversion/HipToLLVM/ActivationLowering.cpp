@@ -158,8 +158,10 @@ struct MiopenSoftmaxOpLowering
 
 } // namespace
 
-void mlir::hip::populateActivationLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
-  patterns.add<SigmoidOpLowering, SiluOpLowering, MiopenSoftmaxOpLowering>(converter);
+void mlir::hip::populateActivationLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+  patterns.add<SigmoidOpLowering, SiluOpLowering, MiopenSoftmaxOpLowering>(
+      converter);
 }
 
 } // namespace hip

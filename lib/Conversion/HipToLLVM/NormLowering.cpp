@@ -174,7 +174,8 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
 
 } // namespace
 
-void mlir::hip::populateNormLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void mlir::hip::populateNormLoweringPatterns(const LLVMTypeConverter &converter,
+                                             RewritePatternSet &patterns) {
   patterns.add<RmsNormOpLowering, SkipRmsNormOpLowering>(converter);
 }
 

@@ -205,21 +205,36 @@ enum HipdnnTensorOp : int64_t {
 };
 
 // Pattern population functions (one per operator file)
-void populateMemoryLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns);
-void populateConvLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns);
-void populateMatmulLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns);
-void populateElementwiseLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns);
-void populateActivationLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns);
-void populateNormLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns);
-void populateGatherLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns);
-void populateCastLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns);
-void populateReduceSumLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns);
-void populateTransposeLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns);
-void populateRopeLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns);
-void populateGqaLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns);
-void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns);
-void populateQMoELoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns);
-void populateGraphLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populateMemoryLoweringPatterns(const LLVMTypeConverter &converter,
+                                    RewritePatternSet &patterns);
+void populateConvLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns);
+void populateMatmulLoweringPatterns(const LLVMTypeConverter &converter,
+                                    RewritePatternSet &patterns);
+void populateElementwiseLoweringPatterns(const LLVMTypeConverter &converter,
+                                         RewritePatternSet &patterns);
+void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
+                                        RewritePatternSet &patterns);
+void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns);
+void populateGatherLoweringPatterns(const LLVMTypeConverter &converter,
+                                    RewritePatternSet &patterns);
+void populateCastLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns);
+void populateReduceSumLoweringPatterns(const LLVMTypeConverter &converter,
+                                       RewritePatternSet &patterns);
+void populateTransposeLoweringPatterns(const LLVMTypeConverter &converter,
+                                       RewritePatternSet &patterns);
+void populateRopeLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns);
+void populateGqaLoweringPatterns(const LLVMTypeConverter &converter,
+                                 RewritePatternSet &patterns);
+void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,
+                                         RewritePatternSet &patterns);
+void populateQMoELoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns);
+void populateGraphLoweringPatterns(const LLVMTypeConverter &converter,
+                                   RewritePatternSet &patterns);
 
 } // namespace hip
 } // namespace mlir

@@ -373,7 +373,8 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
-  if (mlir::failed(mlir::applyPatternsGreedily(funcOp, std::move(patterns), config)))
+  if (mlir::failed(
+          mlir::applyPatternsGreedily(funcOp, std::move(patterns), config)))
     return mlir::failure();
   return mlir::success();
 }

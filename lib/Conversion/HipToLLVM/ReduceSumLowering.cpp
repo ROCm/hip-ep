@@ -121,7 +121,8 @@ struct ReduceSumOpLowering : public ConvertOpToLLVMPattern<ReduceSumOp> {
 
 } // namespace
 
-void mlir::hip::populateReduceSumLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void mlir::hip::populateReduceSumLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
   patterns.add<ReduceSumOpLowering>(converter);
 }
 
