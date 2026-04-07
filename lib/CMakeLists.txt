@@ -4,7 +4,10 @@
 ##
 
 add_subdirectory(Dialect)
-if(NOT BUILD_MOCK_RUNTIME)
+option(BUILD_HIPDNN_GRAPH "Build hipDNN fused-graph support" OFF)
+set(HIPDNN_AVAILABLE OFF)
+if(NOT BUILD_MOCK_RUNTIME AND BUILD_HIPDNN_GRAPH)
+  set(HIPDNN_AVAILABLE ON)
   add_subdirectory(HipDNNGraph)
   add_subdirectory(HipDNNGraphRuntime)
 endif()
