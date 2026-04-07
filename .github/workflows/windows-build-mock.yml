@@ -204,3 +204,7 @@ jobs:
       - name: Run LIT tests
         shell: bash
         run: cmake --build ../build/$(basename "$PWD")-mock --target check-hip-mlir-lit
+
+      - name: Run runtime unit tests
+        shell: bash
+        run: ctest --test-dir ../build/$(basename "$PWD")-mock -R runtime-unit-tests --verbose --output-on-failure
