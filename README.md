@@ -29,18 +29,28 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 |-----------|---------|
 | Conv | MIOpen |
 | MatMul | hipBLASLt |
-| Softmax | MIOpen |
 | Mul | MIOpen |
-| Sigmoid | HIP Runtime |
-| Transpose | HIP Runtime |
+| Add | MIOpen |
+| Sigmoid | MIOpen |
 | Sub | Custom HIP Kernel |
 | Cast | Custom HIP Kernel |
 | ReduceSum | Custom HIP Kernel |
 | Gather | Custom HIP Kernel |
 | SimplifiedLayerNormalization | MIOpen |
-| SkipSimplifiedLayerNormalization | MIOpen |
+| SkipSimplifiedLayerNormalization (com.microsoft) | MIOpen |
 | RotaryEmbedding (com.microsoft) | Custom HIP Kernel |
 | GroupQueryAttention (com.microsoft) | Custom HIP Kernel |
+| MatMulNBits (com.microsoft) | Custom HIP Kernel |
+| QMoE (com.microsoft) | Custom HIP Kernel |
+
+### Compiler-Optimized Operations
+
+These operations are handled through standard MLIR transformations without requiring GPU backend support:
+
+| Operation | Implementation | Notes |
+|-----------|----------------|-------|
+| Reshape | tensor.expand_shape / tensor.collapse_shape | Zero-cost metadata operation, no data movement |
+| Constant | arith.constant or externalized to .constants.bin | ONNX Constant nodes: small values inlined, large tensors externalized |
 
 ---
 
