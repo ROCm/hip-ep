@@ -29,9 +29,8 @@ struct RuntimeState {
   // Single allocation holding all constants as one blob.
   // gpu_constants[i] points into gpu_constants_blob at the offset stored in
   // ConstantInfo, so only one allocation/copy is needed at init time.
-  // On dGPU: hipMalloc (VRAM).
-  // On iGPU: hipMalloc (1x pool consumption) with hipHostMalloc fallback
-  //          when the VRAM pool is too small (spills to GTT).
+  // On dGPU: hipMalloc (VRAM). On iGPU: hipHostMalloc (pinned system RAM,
+  // GPU reads in-place, no hipMemcpy needed).
   void *gpu_constants_blob;
   bool constants_blob_is_host; // true = hipHostMalloc, false = hipMalloc
   void **gpu_constants;
