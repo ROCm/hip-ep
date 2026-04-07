@@ -33,8 +33,8 @@ TEST_F(ReduceSumTest, ReduceAllAxesReturnsSuccess) {
   int64_t axes_vals[] = {0, 1, 2};
   void *output = allocBuffer(1 * sizeof(float));
 
-  EXPECT_EQ(
-      wrap_reduce_sum(state, data, axes_vals, output, 100, 1, 3, 4, 1, 0), 0);
+  EXPECT_EQ(wrap_reduce_sum(state, data, axes_vals, output, 100, 1, 3, 4, 1, 0),
+            0);
 }
 
 TEST_F(ReduceSumTest, EmptyAxesWithNoopReturnsSuccess) {

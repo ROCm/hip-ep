@@ -31,10 +31,9 @@ TEST_F(ElementwiseTest, OpTensorMulReturnsSuccess) {
   void *output = allocBuffer(2 * 3 * 4 * 4 * sizeof(float));
 
   // HIPDNN_EP_TENSOR_OP_MUL=0, HIPDNN_EP_DATATYPE_FLOAT=0
-  EXPECT_EQ(
-      wrap_miopenOpTensor(state, lhs, rhs, output, 2, 3, 4, 4, 2, 3, 4, 4, 2,
-                          3, 4, 4, /*data_type=*/0, /*tensor_op=*/0),
-      0);
+  EXPECT_EQ(wrap_miopenOpTensor(state, lhs, rhs, output, 2, 3, 4, 4, 2, 3, 4, 4,
+                                2, 3, 4, 4, /*data_type=*/0, /*tensor_op=*/0),
+            0);
 }
 
 TEST_F(ElementwiseTest, OpTensorAddReturnsSuccess) {
@@ -43,21 +42,20 @@ TEST_F(ElementwiseTest, OpTensorAddReturnsSuccess) {
   void *output = allocBuffer(1 * 1 * 1 * 8 * sizeof(float));
 
   // HIPDNN_EP_TENSOR_OP_ADD=1
-  EXPECT_EQ(
-      wrap_miopenOpTensor(state, lhs, rhs, output, 1, 1, 1, 8, 1, 1, 1, 8, 1,
-                          1, 1, 8, /*data_type=*/0, /*tensor_op=*/1),
-      0);
+  EXPECT_EQ(wrap_miopenOpTensor(state, lhs, rhs, output, 1, 1, 1, 8, 1, 1, 1, 8,
+                                1, 1, 1, 8, /*data_type=*/0, /*tensor_op=*/1),
+            0);
 }
 
 TEST_F(ElementwiseTest, OpTensorBroadcastReturnsSuccess) {
   void *lhs = allocBuffer(1 * 128 * 32 * 1 * sizeof(float));
-  void *rhs = allocBuffer(1 * 1 * 1 * 1 * sizeof(float));  // scalar broadcast
+  void *rhs = allocBuffer(1 * 1 * 1 * 1 * sizeof(float)); // scalar broadcast
   void *output = allocBuffer(1 * 128 * 32 * 1 * sizeof(float));
 
-  EXPECT_EQ(
-      wrap_miopenOpTensor(state, lhs, rhs, output, 1, 128, 32, 1, 1, 1, 1, 1,
-                          1, 128, 32, 1, /*data_type=*/0, /*tensor_op=*/1),
-      0);
+  EXPECT_EQ(wrap_miopenOpTensor(state, lhs, rhs, output, 1, 128, 32, 1, 1, 1, 1,
+                                1, 1, 128, 32, 1, /*data_type=*/0,
+                                /*tensor_op=*/1),
+            0);
 }
 
 TEST_F(ElementwiseTest, SubNullStateReturnsError) {
