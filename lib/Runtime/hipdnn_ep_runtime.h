@@ -576,6 +576,18 @@ int wrap_hipMemcpyD2H(void *dst, const void *src, int64_t size, void *stream);
 // HIP stream synchronization wrapper
 int wrap_hipStreamSynchronize(void *stream);
 
+// HIP device synchronization wrapper (syncs all streams)
+int wrap_hipDeviceSynchronize(void);
+
+// Returns the last HIP error code and clears it (0 = hipSuccess)
+int wrap_hipGetLastError(void);
+
+// Returns the last HIP error code WITHOUT clearing it (0 = hipSuccess)
+int wrap_hipPeekAtLastError(void);
+
+// Query GPU memory: writes free/total bytes, returns 0 on success
+int wrap_hipMemGetInfo(size_t *free_bytes, size_t *total_bytes);
+
 #ifdef __cplusplus
 }
 #endif
