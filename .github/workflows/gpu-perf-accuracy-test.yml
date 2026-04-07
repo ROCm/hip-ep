@@ -27,7 +27,7 @@ jobs:
       actions: read
 
     env:
-      THEROCK_VERSION: therock-dist-windows-gfx1151-7.12.0
+      THEROCK_VERSION: therock-dist-windows-gfx1151-7.11.0
       PERF_DURATION: "30"
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
