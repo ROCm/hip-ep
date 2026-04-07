@@ -197,7 +197,8 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
 
 } // namespace
 
-void mlir::hip::populateConvLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void mlir::hip::populateConvLoweringPatterns(const LLVMTypeConverter &converter,
+                                             RewritePatternSet &patterns) {
   patterns.add<ConvOpLowering>(converter);
 }
 

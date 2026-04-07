@@ -75,7 +75,8 @@ struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
 
 } // namespace
 
-void mlir::hip::populateGatherLoweringPatterns(const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void mlir::hip::populateGatherLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
   patterns.add<GatherOpLowering>(converter);
 }
 
