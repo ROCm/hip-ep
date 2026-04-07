@@ -4,11 +4,13 @@
  */
 #include "RuntimeTestFixture.h"
 
-extern "C" int wrap_miopenT5LayerNormForward(
-    RuntimeState *state, void *input, void *scale, void *output,
-    int64_t input_num_elements, int64_t scale_num_elements,
-    int64_t element_size_bytes, int64_t axis, float epsilon,
-    int64_t stash_type);
+extern "C" int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input,
+                                             void *scale, void *output,
+                                             int64_t input_num_elements,
+                                             int64_t scale_num_elements,
+                                             int64_t element_size_bytes,
+                                             int64_t axis, float epsilon,
+                                             int64_t stash_type);
 
 extern "C" int wrap_skip_simplified_layer_norm(
     RuntimeState *state, void *input, void *skip, void *gamma, void *bias,
@@ -25,7 +27,7 @@ TEST_F(NormTest, T5LayerNormNullStateReturnsError) {
 }
 
 TEST_F(NormTest, T5LayerNormValidCallReturnsSuccess) {
-  void *input = allocBuffer(2 * 8 * 64 * sizeof(float));  // [2,8,64]
+  void *input = allocBuffer(2 * 8 * 64 * sizeof(float)); // [2,8,64]
   void *scale = allocBuffer(64 * sizeof(float));
   void *output = allocBuffer(2 * 8 * 64 * sizeof(float));
 

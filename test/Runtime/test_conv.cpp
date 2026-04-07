@@ -41,8 +41,8 @@ TEST_F(ConvTest, NullWeightsReturnsError) {
 TEST_F(ConvTest, NullOutputReturnsError) {
   float dummy[1] = {0};
   EXPECT_EQ(wrap_miopenConvolutionForward(state, dummy, 1, 1, 1, 1, dummy, 1,
-                                          nullptr, nullptr, 1, 1, 1, 1, 1, 1,
-                                          0, 0, 0, 0, 1, 1, 1),
+                                          nullptr, nullptr, 1, 1, 1, 1, 1, 1, 0,
+                                          0, 0, 0, 1, 1, 1),
             -1);
 }
 

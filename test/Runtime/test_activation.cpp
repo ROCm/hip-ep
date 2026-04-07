@@ -5,8 +5,7 @@
 #include "RuntimeTestFixture.h"
 
 extern "C" int wrap_miopenActivationForward(RuntimeState *state, void *input,
-                                            void *output,
-                                            int64_t num_elements,
+                                            void *output, int64_t num_elements,
                                             int64_t data_type,
                                             int64_t activation_mode);
 
