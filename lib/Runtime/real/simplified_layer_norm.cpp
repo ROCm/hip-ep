@@ -88,23 +88,24 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&yDesc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&rstdDesc));
 
+  // Pad all descriptors to 4D NCHW to avoid 'UNKNOWN' layout warnings
+  // in MIOpen 7.12+.  miopenSetTensorDescriptor with 1D/2D strides
+  // leaves the layout string unset, triggering GetLayoutEnum warnings.
   {
-    int x_dims[] = {static_cast<int>(num_rows), static_cast<int>(hidden_dim)};
-    int x_strides[] = {static_cast<int>(hidden_dim), 1};
-    MIOPEN_CHECK(
-        miopenSetTensorDescriptor(xDesc, data_type, 2, x_dims, x_strides));
-    MIOPEN_CHECK(
-        miopenSetTensorDescriptor(yDesc, data_type, 2, x_dims, x_strides));
+    int x_dims[] = {1, 1, static_cast<int>(num_rows),
+                    static_cast<int>(hidden_dim)};
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        xDesc, data_type, miopenTensorNCHW, x_dims, 4));
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        yDesc, data_type, miopenTensorNCHW, x_dims, 4));
 
-    int w_dims[] = {static_cast<int>(hidden_dim)};
-    int w_strides[] = {1};
-    MIOPEN_CHECK(
-        miopenSetTensorDescriptor(weightDesc, data_type, 1, w_dims, w_strides));
+    int w_dims[] = {1, 1, 1, static_cast<int>(hidden_dim)};
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        weightDesc, data_type, miopenTensorNCHW, w_dims, 4));
 
-    int rstd_dims[] = {static_cast<int>(num_rows)};
-    int rstd_strides[] = {1};
-    MIOPEN_CHECK(miopenSetTensorDescriptor(rstdDesc, miopenFloat, 1, rstd_dims,
-                                           rstd_strides));
+    int rstd_dims[] = {1, 1, 1, static_cast<int>(num_rows)};
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        rstdDesc, miopenFloat, miopenTensorNCHW, rstd_dims, 4));
   }
 
   RUNTIME_DEBUG_LOG(

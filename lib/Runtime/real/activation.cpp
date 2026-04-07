@@ -51,7 +51,7 @@ static miopenActivationMode_t hipdnn_ep_to_miopen_activation(int64_t mode) {
 //
 // Applies activation_mode element-wise using miopenActivationForward.
 // Tensor is represented as flat 1D [1, 1, 1, num_elements] to satisfy
-// miopenSet4dTensorDescriptor's 4D requirement.
+// MIOpen's 4D tensor descriptor requirement.
 // =============================================================================
 
 int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
@@ -98,8 +98,16 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
 
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&inDesc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&outDesc));
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(inDesc, miopen_type, 1, 1, 1, n));
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(outDesc, miopen_type, 1, 1, 1, n));
+  // Use miopenSetNdTensorDescriptorWithLayout to set NCHW layout explicitly;
+  // miopenSet4dTensorDescriptor leaves the layout as 'UNKNOWN' which triggers
+  // warnings in MIOpen 7.12+.
+  {
+    int dims[] = {1, 1, 1, n};
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        inDesc, miopen_type, miopenTensorNCHW, dims, 4));
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        outDesc, miopen_type, miopenTensorNCHW, dims, 4));
+  }
   MIOPEN_CHECK(miopenCreateActivationDescriptor(&actDesc));
   MIOPEN_CHECK(
       miopenSetActivationDescriptor(actDesc, miopen_act, 0.0, 0.0, 0.0));
