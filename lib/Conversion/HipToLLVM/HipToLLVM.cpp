@@ -1179,7 +1179,7 @@ struct SigmoidOpLowering : public ConvertOpToLLVMPattern<SigmoidOp> {
 };
 
 // Extract the 4D shape (N, C, H, W) of a memref as LLVM i64 values.
-// miopenSet4dTensorDescriptor requires exactly 4 dimensions, so ranks 1-3
+// MIOpen tensor descriptors require exactly 4 dimensions, so ranks 1-3
 // are left-padded with 1:
 //   rank 1: [W]       → [1, 1, 1, W]
 //   rank 2: [H, W]    → [1, 1, H, W]
@@ -1229,9 +1229,9 @@ enum HipdnnTensorOp : int64_t {
 //   lhs=[1,1,128,32], rhs=[1,1,1,32], out=[1,1,128,32]
 // MIOpen broadcasts rhs dims that are 1 against lhs automatically.
 //
-// NOTE: The 4D shape passing is a workaround for MIOpen's
-// miopenSet4dTensorDescriptor API. Will be replaced when hipdnn
-// elementwise support is available.
+// NOTE: The 4D shape passing is a workaround for MIOpen's tensor
+// descriptor API. Will be replaced when hipdnn elementwise support
+// is available.
 template <typename OpTy, HipdnnTensorOp tensorOpEnum>
 struct ElementwiseOpLowering : public ConvertOpToLLVMPattern<OpTy> {
   using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
