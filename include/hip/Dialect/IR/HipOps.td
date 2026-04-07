@@ -801,10 +801,14 @@ def Hip_ReduceSumOp : Hip_DpsOp<"reduce_sum"> {
 
     Uses destination-passing style: output buffer is provided as argument.
 
+    When axes is not provided in ONNX, an empty tensor<0xi64> is passed.
+    Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
+    optional axes semantics while keeping all operands required.
+
     Example:
     ```mlir
     hip.reduce_sum(%ctx) ins(%data, %axes : memref<1x128xi64, 1>, memref<i64, 1>)
-                         outs(%output : memref<1x1xi64, 1>) {keepdims = 1 : i64}
+                         outs(%output : memref<1x1xi64, 1>) {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
     ```
   }];
 
@@ -813,7 +817,8 @@ def Hip_ReduceSumOp : Hip_DpsOp<"reduce_sum"> {
     Hip_TensorOrMemRef:$data,
     Hip_TensorOrMemRef:$axes,
     Hip_TensorOrMemRef:$output,
-    I64Attr:$keepdims
+    DefaultValuedAttr<I64Attr, "1">:$keepdims,
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
   );
 
   let assemblyFormat = [{
