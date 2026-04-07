@@ -47,3 +47,26 @@ int wrap_hipStreamSynchronize(void *stream) {
   HIP_CHECK(hipStreamSynchronize(static_cast<hipStream_t>(stream)));
   return 0;
 }
+
+int wrap_hipDeviceSynchronize(void) {
+  hipError_t err = hipDeviceSynchronize();
+  if (err != hipSuccess) {
+    fprintf(stderr, "wrap_hipDeviceSynchronize: %s (code=%d)\n",
+            hipGetErrorString(err), static_cast<int>(err));
+    return static_cast<int>(err);
+  }
+  return 0;
+}
+
+int wrap_hipGetLastError(void) {
+  return static_cast<int>(hipGetLastError());
+}
+
+int wrap_hipPeekAtLastError(void) {
+  return static_cast<int>(hipPeekAtLastError());
+}
+
+int wrap_hipMemGetInfo(size_t *free_bytes, size_t *total_bytes) {
+  HIP_CHECK(hipMemGetInfo(free_bytes, total_bytes));
+  return 0;
+}

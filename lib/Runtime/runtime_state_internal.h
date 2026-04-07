@@ -36,6 +36,13 @@ struct RuntimeState {
   void **gpu_constants;
   size_t num_constants;
 
+  // Shared constants support: in OGA pipeline mode, prefill and decode models
+  // share the same constants.bin. The second model reuses the first's blob
+  // via a process-wide named shared memory descriptor with atomic ref count.
+  bool constants_is_shared;       // true = reusing another model's blob
+  void *shared_constants_mapping; // Win32 file mapping HANDLE
+  void *shared_constants_view;    // MapViewOfFile pointer (SharedConstantsMeta*)
+
   // Memory pooling support
   void *pool_base;        // Single large memory pool
   size_t pool_size;       // Total pool size in bytes
