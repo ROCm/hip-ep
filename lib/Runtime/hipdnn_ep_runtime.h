@@ -465,7 +465,8 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
 // ReduceSum operation wrapper
 int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t data_num_elements, int64_t output_num_elements,
-                    int64_t element_size_bytes, int64_t keepdims);
+                    int64_t axes_num_elements, int64_t element_size_bytes,
+                    int64_t keepdims, int64_t noop_with_empty_axes);
 
 // Cast operation wrapper (element type conversion)
 // src_data_type and dst_data_type are HIPDNN_EP_DATATYPE_* enum values.
