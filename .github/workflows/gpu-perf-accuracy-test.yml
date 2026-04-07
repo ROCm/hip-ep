@@ -148,6 +148,7 @@ jobs:
               --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" `
               --plugin_eps "MorphiZenExecutionProvider" `
               --plugin_ep_options "config_file|..\morphizen_config.json" `
+              -C "session.disable_cpu_ep_fallback|1" `
               -t $env:PERF_DURATION -c 1 -s -I `
               $m.FullName 2>&1 | Tee-Object -FilePath $mzFile
             if ($LASTEXITCODE -ne 0) { $failed = 1 }
@@ -305,6 +306,7 @@ jobs:
               --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" `
               --plugin_eps "MorphiZenExecutionProvider" `
               --plugin_ep_options "config_file|..\morphizen_config.json" `
+              -C "session.disable_cpu_ep_fallback|1" `
               -t $env:PERF_DURATION -c 1 -s -I `
               $m.FullName 2>&1 | Tee-Object -FilePath $mzFile
             if ($LASTEXITCODE -ne 0) { $failed = 1 }
