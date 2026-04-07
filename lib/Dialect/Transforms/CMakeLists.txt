@@ -26,6 +26,7 @@ target_link_libraries(HipDialectTransforms PUBLIC
   HipDialectIR
   HipToLLVM
   OnnxToHip
+  OnnxToHipDNN
   HipSchemasLib
   MLIRPass
   MLIRTransforms

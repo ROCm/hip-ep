@@ -4,10 +4,10 @@
  */
 
 /**
- * DLL entry point for morphizen-mlir-compiler.dll
+ * DLL entry point for hip-compiler.dll
  *
  * This file provides the minimal DLL initialization code required by Windows.
- * The actual exports are defined in morphizen-mlir-compiler.def and implemented
+ * The actual exports are defined in hip-compiler.def and implemented
  * in the MorphizenCInterface library.
  */
 

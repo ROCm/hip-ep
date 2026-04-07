@@ -5,6 +5,7 @@
 
 #include "hip/Dialect/Transforms/Pipelines.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
+#include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Conversion/BufferizationToMemRef/BufferizationToMemRef.h"
@@ -74,18 +75,6 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   pm.addPass(createCanonicalizerPass());
 }
 
-void mlir::hip::buildOnnxToHipPipeline(
-    OpPassManager &pm, const OnnxToHipPipelineOptions &options) {
-  pm.addPass(createHipAddContextArgPass());
-
-  ConvertOnnxToHipPassOptions onnxToHipOpts;
-  onnxToHipOpts.externalizeOutputDir = options.externalizeOutputDir;
-  onnxToHipOpts.externalizeMinNumElements = options.externalizeMinNumElements;
-  pm.addPass(createConvertOnnxToHipPass(std::move(onnxToHipOpts)));
-
-  buildOnnxToHipPipelineTail(pm);
-}
-
 void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
                                        const OnnxToHipPipelineOptions &options,
                                        morphizen::FileSystem *fs) {
@@ -104,11 +93,36 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   buildOnnxToHipPipelineTail(pm);
 }
 
+void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
+                                       const OnnxToHipPipelineOptions &options,
+                                       morphizen::FileSystem *fs,
+                                       hipdnnHandle_t handle,
+                                       CompiledGraphMap output_graphs) {
+  pm.addPass(createHipAddContextArgPass());
+
+  if (handle) {
+    pm.addPass(createOutlineOnnxToHipDNNPass());
+    pm.addPass(createCompileHipDNNGraphsPass(handle, std::move(output_graphs)));
+  }
+
+  if (fs) {
+    pm.addPass(mlir::hip::createConvertOnnxToHipPass(
+        fs, options.externalizeMinNumElements));
+  } else {
+    ConvertOnnxToHipPassOptions onnxToHipOpts;
+    onnxToHipOpts.externalizeOutputDir = options.externalizeOutputDir;
+    onnxToHipOpts.externalizeMinNumElements = options.externalizeMinNumElements;
+    pm.addPass(createConvertOnnxToHipPass(std::move(onnxToHipOpts)));
+  }
+
+  buildOnnxToHipPipelineTail(pm);
+}
+
 void mlir::hip::buildHipToLLVMPipeline(
     OpPassManager &pm, const HipToLLVMPipelineOptions &options) {
   // Decompose memref.collapse_shape / memref.expand_shape into
   // memref.reinterpret_cast + arithmetic.
-  // populateFinalizeMemRefToLLVMConversion Patterns (used by ConvertHipToLLVM)
+  // populateFinalizeMemRefToLLVMConversionPatterns (used by ConvertHipToLLVM)
   // does not include patterns for these ops; expand-strided-metadata rewrites
   // them into ops that it can lower.
   pm.addPass(memref::createExpandStridedMetadataPass());

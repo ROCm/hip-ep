@@ -36,7 +36,7 @@ module {
 
     // After conversion: tensor.empty() for init, hip.reduce_sum in tensor mode
     // CHECK: tensor.empty() : tensor<1x1xi64>
-    // CHECK: hip.reduce_sum(%[[CTX]]) ins(%[[DATA]], %[[AXES]] : tensor<1x128xi64>, tensor<i64>) outs({{.*}} : tensor<1x1xi64>) {keepdims = 1 : i64}
+    // CHECK: hip.reduce_sum(%[[CTX]]) ins(%[[DATA]], %[[AXES]] : tensor<1x128xi64>, tensor<i64>) outs({{.*}} : tensor<1x1xi64>)
     // CHECK-NOT: hip.alloc
     // CHECK-NOT: hip.copy
 

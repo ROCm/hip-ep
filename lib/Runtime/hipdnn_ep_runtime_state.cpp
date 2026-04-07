@@ -47,6 +47,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   state->num_buffers = 0;
   state->workspace = nullptr;
   state->workspace_size = 0;
+  state->hipdnn_handle = nullptr;
+  state->hipdnn_graph_registry = nullptr;
 
   // Explicitly initialize HIP device before any other operations
   // This ensures device 0 is active and context is properly initialized
@@ -245,7 +247,9 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 
   if (is_igpu) {
     // iGPU: allocate pinned host memory. GPU reads the same physical DRAM
-    // directly -- no hipMemcpy needed. Draws from system RAM, not GPU quota.
+    // directly -- no hipMemcpy needed. hipHostMalloc gives a reliable pinned
+    // allocation; hipHostRegister on mmap'd or VirtualAlloc'd memory is
+    // unreliable on some iGPU platforms (GPU reads zeros despite success).
     if (hipHostMalloc(&state->gpu_constants_blob, total_size,
                       hipHostMallocDefault) != hipSuccess) {
       fprintf(stderr, "hipHostMalloc failed for constants blob (%zu bytes)\n",
@@ -254,7 +258,6 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
       *out_state = nullptr;
       return 1;
     }
-    state->constants_blob_is_host = true;
 
     if (timing)
       fprintf(stderr, "[Session] hipHostMalloc: %.3fs (%zu bytes)\n",
@@ -264,6 +267,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
     if (src) {
       memcpy(state->gpu_constants_blob, src, total_size);
     } else {
+      reader->rewind();
       size_t bytes_read = reader->fread(state->gpu_constants_blob, total_size);
       if (bytes_read != total_size) {
         fprintf(stderr, "Short read: got %zu of %zu bytes\n", bytes_read,
@@ -278,6 +282,9 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
       fprintf(
           stderr, "[Session] Read constants to pinned: %.3fs (%zu bytes, %s)\n",
           record_elapsed(t_prev), total_size, src ? "mmap+memcpy" : "fread");
+    
+    state->constants_blob_is_host = true;
+
   } else {
     // dGPU: allocate in VRAM, upload once via hipMemcpy.
     const void *src = reader->mmap();

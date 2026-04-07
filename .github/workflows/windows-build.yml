@@ -24,6 +24,7 @@ jobs:
     runs-on: windows-latest
 
     env:
+      PREBUILT_CACHE_VERSION: "2"  # bump to invalidate prebuilt cache
       LLVM_TAG: llvm-22.1.0-release
       FLATBUFFERS_TAG: flatbuffers-25.12.19-release
       PROTO_TAG: protobuf-34.0-release
@@ -74,7 +75,7 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/prebuilt-local
-          key: prebuilt-ort-src-${{ env.ONNXRUNTIME_VERSION }}-${{ env.LLVM_TAG }}-${{ env.FLATBUFFERS_TAG }}-${{ env.PROTO_TAG }}-gtest${{ env.GTEST_VERSION }}
+          key: prebuilt-v${{ env.PREBUILT_CACHE_VERSION }}-ort${{ env.ONNXRUNTIME_VERSION }}-${{ env.LLVM_TAG }}-${{ env.FLATBUFFERS_TAG }}-${{ env.PROTO_TAG }}-gtest${{ env.GTEST_VERSION }}
 
       # -----------------------------------------------------------------------
       # Cache: TheRock HIP SDK for Windows (separate cache – large tarball)
@@ -181,7 +182,7 @@ jobs:
           cp "$PERF_TEST" "${{ runner.workspace }}/prebuilt-local/bin/"
           # DirectML.dll is not installed by cmake --install; copy manually.
           DML_DLL=$(find "${{ runner.workspace }}/build-onnxruntime" \
-            -name "DirectML.dll" -type f | head -1)
+            -path "*/x64-win/DirectML.dll" -type f | head -1)
           if [ -z "$DML_DLL" ]; then
             echo "ERROR: DirectML.dll not found in build tree"
             exit 1
@@ -384,7 +385,7 @@ jobs:
         with:
           name: gpu-test-package
           path: staging/
-          retention-days: 3
+          retention-days: ${{ github.ref == 'refs/heads/main' && 14 || 3 }}
 
   # ---------------------------------------------------------------------------
   # GPU test job: runs on the self-hosted machine with a real AMD GPU.
@@ -467,6 +468,7 @@ jobs:
               --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
               --plugin_eps "MorphiZenExecutionProvider" ^
               --plugin_ep_options "config_file|..\morphizen_config.json" ^
+              -C "session.disable_cpu_ep_fallback|1" ^
               -t 30 -c 1 -s -I ^
               "%%M" > "..\results\%%~nxM.txt" 2>&1
             type "..\results\%%~nxM.txt"
@@ -483,6 +485,7 @@ jobs:
         timeout-minutes: 10
         shell: cmd
         run: |
+          setlocal enabledelayedexpansion
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
@@ -493,33 +496,38 @@ jobs:
           )
           set FOUND=0
           for /r "%L2_MODEL_DIR%" %%M in (*.onnx) do set FOUND=1
-          if "%FOUND%"=="0" (
+          if "!FOUND!"=="0" (
             echo [SKIP] No .onnx models found in %L2_MODEL_DIR%
             exit /b 0
           )
           cd gpu-test-package\bin
-          mkdir ..\..\l2-results 2>nul
           set FAILED=0
           for /r "%L2_MODEL_DIR%" %%M in (*.onnx) do (
-            echo === L2 test: %%~nxM ===
+            set "MDIR=%%~dpM"
+            set "REL=!MDIR:%L2_MODEL_DIR%\=!"
+            set "OUT=..\..\l2-results\!REL!%%~nM.txt"
+            mkdir "..\..\l2-results\!REL!" 2>nul
+            echo === L2 test: !REL!%%~nxM ===
             rd /s /q "%%~nM_o_dump" 2>nul
             rd /s /q "%%~nM_cpu_o_dump" 2>nul
-            hip-onnx-runner.exe -m "%%M" -d 2 -s 42
+            hip-onnx-runner.exe -m "%%M" -d 2 -s 42 > "!OUT!" 2>&1
             if errorlevel 1 (
-              echo [ERROR] EP inference failed for %%~nxM
+              echo [ERROR] EP inference failed>> "!OUT!"
+              type "!OUT!"
               set FAILED=1
             ) else (
-              hip-onnx-runner.exe -m "%%M" -d 2 -s 42 -n
+              hip-onnx-runner.exe -m "%%M" -d 2 -s 42 -n >> "!OUT!" 2>&1
               if errorlevel 1 (
-                echo [ERROR] CPU inference failed for %%~nxM
+                echo [ERROR] CPU inference failed>> "!OUT!"
+                type "!OUT!"
                 set FAILED=1
               ) else (
-                hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" > "..\..\l2-results\%%~nM.txt" 2>&1
-                type "..\..\l2-results\%%~nM.txt"
+                hip-onnx-runner.exe -L "%%~nM_o_dump,%%~nM_cpu_o_dump" >> "!OUT!" 2>&1
+                type "!OUT!"
               )
             )
           )
-          exit /b %FAILED%
+          exit /b !FAILED!
 
       - name: Publish L2 results
         if: always()
@@ -532,7 +540,7 @@ jobs:
             Write-Host "No L2 results to publish (directory not found)"
             return
           }
-          $files = Get-ChildItem "$l2Dir/*.txt" -ErrorAction SilentlyContinue
+          $files = Get-ChildItem $l2Dir -Recurse -Filter "*.txt" -ErrorAction SilentlyContinue
           if (-not $files) {
             Write-Host "No L2 result files found"
             return
@@ -543,24 +551,29 @@ jobs:
           $sha = $rawSha.Substring(0, 7)
           $prNumber = "${{ github.event.pull_request.number }}"
           $threshold = 0.01
+          $l2Root = (Resolve-Path $l2Dir).Path
 
           $tableRows = ""
           foreach ($f in $files) {
-            $model = $f.BaseName
+            $rel = $f.FullName.Substring($l2Root.Length).TrimStart('\', '/')
+            $model = $rel -replace '\.txt$', '' -replace '\\', '/'
             $content = Get-Content $f.FullName -Raw
             $l2Match = [regex]::Match($content, 'Combined L2 \(stacked diffs\):\s+([\d.eE+-]+)')
+            $errMatch = [regex]::Match($content, '\[ERROR\]\s*(.+)')
             if ($l2Match.Success) {
               $l2val = [double]$l2Match.Groups[1].Value
-              $status = if ($l2val -le $threshold) { [char]0x2705 } else { [char]0x274C }
-              $tableRows += "| $model | $l2val | $status |`n"
+              $tableRows += "| $model | $l2val |`n"
+            } elseif ($errMatch.Success) {
+              $reason = $errMatch.Groups[1].Value.Trim()
+              $tableRows += "| $model | $reason |`n"
             } else {
-              $tableRows += "| $model | error | $([char]0x274C) |`n"
+              $tableRows += "| $model | error |`n"
             }
           }
 
           $header = "## L2 Accuracy Results (EP vs CPU)`n`n" +
-                    "| Model | Combined L2 | Status |`n" +
-                    "|-------|------------|--------|`n"
+                    "| Model | Combined L2 |`n" +
+                    "|-------|------------|`n"
           $footer = "`nThreshold: $threshold | Run: [${{ github.run_number }}]($runUrl) - Commit: ``$sha``"
           $summary = $header + $tableRows + $footer
 
