@@ -5,6 +5,21 @@
 
 add_library(HipToLLVM STATIC
   HipToLLVM.cpp
+  MemoryLowering.cpp
+  ConvLowering.cpp
+  MatmulLowering.cpp
+  ElementwiseLowering.cpp
+  ActivationLowering.cpp
+  NormLowering.cpp
+  GatherLowering.cpp
+  CastLowering.cpp
+  ReduceSumLowering.cpp
+  TransposeLowering.cpp
+  RopeLowering.cpp
+  GqaLowering.cpp
+  MatMulNBitsLowering.cpp
+  QMoELowering.cpp
+  GraphLowering.cpp
 )
 
 add_dependencies(HipToLLVM
