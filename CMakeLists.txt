@@ -153,5 +153,10 @@ if(BUILD_HIP_TOOLS)
 
     # E2E integration tests (compile MLIR → DLL → execute)
     add_subdirectory(test/e2e)
+
+    # Runtime operator unit tests (mock runtime, no GPU needed)
+    if(BUILD_MOCK_RUNTIME)
+      add_subdirectory(test/Runtime)
+    endif()
   endif()
 endif()
