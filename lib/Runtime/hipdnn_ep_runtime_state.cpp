@@ -31,8 +31,8 @@
 extern "C" {
 unsigned long __stdcall GetEnvironmentVariableA(const char *, char *,
                                                 unsigned long);
-void *__stdcall CreateFileMappingA(void *, void *, unsigned long,
-                                   unsigned long, unsigned long, const char *);
+void *__stdcall CreateFileMappingA(void *, void *, unsigned long, unsigned long,
+                                   unsigned long, const char *);
 void *__stdcall OpenFileMappingA(unsigned long, int, const char *);
 void *__stdcall MapViewOfFile(void *, unsigned long, unsigned long,
                               unsigned long, size_t);
@@ -186,7 +186,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   // Create MIOpen handle
   if (miopenCreate(&state->miopen_handle) != miopenStatusSuccess) {
     fprintf(stderr, "Failed to create MIOpen handle\n");
-    if (state->stream) HIP_CLEANUP(hipStreamDestroy(state->stream));
+    if (state->stream)
+      HIP_CLEANUP(hipStreamDestroy(state->stream));
     free(state);
     return 7;
   }
@@ -196,7 +197,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
       miopenStatusSuccess) {
     fprintf(stderr, "Failed to set MIOpen stream\n");
     miopenDestroy(state->miopen_handle);
-    if (state->stream) HIP_CLEANUP(hipStreamDestroy(state->stream));
+    if (state->stream)
+      HIP_CLEANUP(hipStreamDestroy(state->stream));
     free(state);
     return 8;
   }
@@ -205,7 +207,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   if (hipblasLtCreate(&state->hipblas_handle) != HIPBLAS_STATUS_SUCCESS) {
     fprintf(stderr, "Failed to create hipBLASLt handle\n");
     miopenDestroy(state->miopen_handle);
-    if (state->stream) HIP_CLEANUP(hipStreamDestroy(state->stream));
+    if (state->stream)
+      HIP_CLEANUP(hipStreamDestroy(state->stream));
     free(state);
     return 9;
   }
@@ -256,18 +259,22 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   // In OGA pipeline mode, prefill and decode models share the same
   // constants.bin. The second model skips the expensive allocation+load
   // by reusing the first model's blob via process-wide named shared memory.
+  bool constants_shared = false;
+
 #ifdef _WIN32
   char shm_name[128];
   snprintf(shm_name, sizeof(shm_name), "Local\\hipdnn_const_%lu_%zu",
            (unsigned long)GetCurrentProcessId(), total_size);
 
   {
-    void *existing_map =
-        OpenFileMappingA(SHM_FILE_MAP_ALL_ACCESS, 0, shm_name);
+    void *existing_map = OpenFileMappingA(SHM_FILE_MAP_ALL_ACCESS, 0, shm_name);
     if (existing_map) {
       auto *smeta = (SharedConstantsMeta *)MapViewOfFile(
           existing_map, SHM_FILE_MAP_ALL_ACCESS, 0, 0,
           sizeof(SharedConstantsMeta));
+      // TODO: blob_size alone may not be sufficient to identify identical
+      // constants. If collisions become an issue, compute a hash (e.g. MD5)
+      // during the compile stage and pass it through model metadata.
       if (smeta && smeta->blob_size == total_size && smeta->blob_ptr) {
         long new_ref = shm_ref_inc(&smeta->ref_count);
         state->gpu_constants_blob = smeta->blob_ptr;
@@ -279,25 +286,25 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
                 "[SHARED_CONSTANTS] Reusing existing blob "
                 "(%zu bytes, ref_count=%ld)\n",
                 total_size, new_ref);
-        goto setup_constant_pointers;
+        constants_shared = true;
+      } else {
+        if (smeta)
+          UnmapViewOfFile(smeta);
+        CloseHandle(existing_map);
       }
-      if (smeta)
-        UnmapViewOfFile(smeta);
-      CloseHandle(existing_map);
     }
   }
 #endif
 
-  { // Scoped block for allocation-local variables (goto-safe)
+  if (!constants_shared) {
     bool is_igpu = (prop.integrated == 1);
 
     if (is_igpu) {
       // iGPU: allocate pinned host memory. GPU reads the same physical DRAM
-      // directly — no hipMemcpy needed. Draws from system RAM, not GPU quota.
+      // directly -- no hipMemcpy needed. Draws from system RAM, not GPU quota.
       if (hipHostMalloc(&state->gpu_constants_blob, total_size,
                         hipHostMallocDefault) != hipSuccess) {
-        fprintf(stderr,
-                "hipHostMalloc failed for constants blob (%zu bytes)\n",
+        fprintf(stderr, "hipHostMalloc failed for constants blob (%zu bytes)\n",
                 total_size);
         hipdnn_ep_state_cleanup(state);
         *out_state = nullptr;
@@ -327,8 +334,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
       if (!src) {
         cpu_buf = malloc(total_size);
         if (!cpu_buf) {
-          fprintf(stderr,
-                  "Failed to allocate staging buffer (%zu bytes)\n",
+          fprintf(stderr, "Failed to allocate staging buffer (%zu bytes)\n",
                   total_size);
           hipdnn_ep_state_cleanup(state);
           *out_state = nullptr;
@@ -347,8 +353,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
       }
 
       if (hipMalloc(&state->gpu_constants_blob, total_size) != hipSuccess) {
-        fprintf(stderr,
-                "hipMalloc failed for constants blob (%zu bytes)\n",
+        fprintf(stderr, "hipMalloc failed for constants blob (%zu bytes)\n",
                 total_size);
         free(cpu_buf);
         hipdnn_ep_state_cleanup(state);
@@ -368,37 +373,35 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
       free(cpu_buf); // no-op when mmap was used
       state->constants_blob_is_host = false;
     }
-  } // end allocation block
 
 #ifdef _WIN32
-  // Publish the newly loaded blob to the shared constants cache so that
-  // subsequent models in this process can skip the allocation+load.
-  {
-    void *new_map = CreateFileMappingA(
-        (void *)(intptr_t)-1, nullptr, SHM_PAGE_READWRITE, 0,
-        (unsigned long)sizeof(SharedConstantsMeta), shm_name);
-    if (new_map) {
-      auto *smeta = (SharedConstantsMeta *)MapViewOfFile(
-          new_map, SHM_FILE_MAP_ALL_ACCESS, 0, 0,
-          sizeof(SharedConstantsMeta));
-      if (smeta) {
-        smeta->blob_ptr = state->gpu_constants_blob;
-        smeta->blob_size = total_size;
-        smeta->is_host = state->constants_blob_is_host;
-        smeta->ref_count = 1;
-        state->shared_constants_mapping = new_map;
-        state->shared_constants_view = smeta;
-        fprintf(stderr,
-                "[SHARED_CONSTANTS] Published new blob (%zu bytes)\n",
-                total_size);
-      } else {
-        CloseHandle(new_map);
+    // Publish the newly loaded blob to the shared constants cache so that
+    // subsequent models in this process can skip the allocation+load.
+    {
+      void *new_map = CreateFileMappingA(
+          (void *)(intptr_t)-1, nullptr, SHM_PAGE_READWRITE, 0,
+          (unsigned long)sizeof(SharedConstantsMeta), shm_name);
+      if (new_map) {
+        auto *smeta = (SharedConstantsMeta *)MapViewOfFile(
+            new_map, SHM_FILE_MAP_ALL_ACCESS, 0, 0,
+            sizeof(SharedConstantsMeta));
+        if (smeta) {
+          smeta->blob_ptr = state->gpu_constants_blob;
+          smeta->blob_size = total_size;
+          smeta->is_host = state->constants_blob_is_host;
+          smeta->ref_count = 1;
+          state->shared_constants_mapping = new_map;
+          state->shared_constants_view = smeta;
+          fprintf(stderr, "[SHARED_CONSTANTS] Published new blob (%zu bytes)\n",
+                  total_size);
+        } else {
+          CloseHandle(new_map);
+        }
       }
     }
-  }
 #endif
+  } // end if (!constants_shared)
 
-setup_constant_pointers:
   // Point each gpu_constants[i] into the blob using the stored offset
   for (int64_t i = 0; i < count; ++i) {
     size_t offset = static_cast<size_t>(constants->Get(i)->offset());
@@ -443,8 +446,7 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     if (state->shared_constants_view) {
       auto *smeta = (SharedConstantsMeta *)state->shared_constants_view;
       long remaining = shm_ref_dec(&smeta->ref_count);
-      fprintf(stderr, "[SHARED_CONSTANTS] Cleanup: ref_count=%ld\n",
-              remaining);
+      fprintf(stderr, "[SHARED_CONSTANTS] Cleanup: ref_count=%ld\n", remaining);
       if (remaining <= 0) {
         if (state->constants_blob_is_host)
           HIP_CLEANUP(hipHostFree(state->gpu_constants_blob));
