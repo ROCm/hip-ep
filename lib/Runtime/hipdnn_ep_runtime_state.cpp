@@ -282,7 +282,6 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
       fprintf(
           stderr, "[Session] Read constants to pinned: %.3fs (%zu bytes, %s)\n",
           record_elapsed(t_prev), total_size, src ? "mmap+memcpy" : "fread");
-    
     state->constants_blob_is_host = true;
 
   } else {
