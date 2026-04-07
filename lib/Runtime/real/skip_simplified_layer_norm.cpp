@@ -131,17 +131,18 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&addBDesc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&addCDesc));
 
-  // Use 2D descriptors [num_rows, hidden_dim] so that bias [1, hidden_dim]
-  // can broadcast correctly across rows when num_rows > 1.
+  // Pad to 4D NCHW so that bias [1,1,1,hidden_dim] broadcasts correctly
+  // across the H (num_rows) dimension, and to avoid 'UNKNOWN' layout
+  // warnings in MIOpen 7.12+.
   {
-    int dims[] = {static_cast<int>(num_rows), static_cast<int>(hidden_dim)};
-    int strides[] = {static_cast<int>(hidden_dim), 1};
-    MIOPEN_CHECK(
-        miopenSetTensorDescriptor(addADesc, data_type, 2, dims, strides));
-    MIOPEN_CHECK(
-        miopenSetTensorDescriptor(addBDesc, data_type, 2, dims, strides));
-    MIOPEN_CHECK(
-        miopenSetTensorDescriptor(addCDesc, data_type, 2, dims, strides));
+    int dims[] = {1, 1, static_cast<int>(num_rows),
+                  static_cast<int>(hidden_dim)};
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        addADesc, data_type, miopenTensorNCHW, dims, 4));
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        addBDesc, data_type, miopenTensorNCHW, dims, 4));
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        addCDesc, data_type, miopenTensorNCHW, dims, 4));
   }
 
   {
@@ -164,12 +165,11 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
 
     MIOPEN_CHECK(miopenCreateTensorDescriptor(&biasDesc));
     {
-      // bias is [hidden_dim], described as [1, hidden_dim] so MIOpen
-      // broadcasts it across the num_rows dimension of addCDesc.
-      int bias_dims[] = {1, static_cast<int>(hidden_dim)};
-      int bias_strides[] = {static_cast<int>(hidden_dim), 1};
-      MIOPEN_CHECK(miopenSetTensorDescriptor(biasDesc, data_type, 2, bias_dims,
-                                             bias_strides));
+      // bias is [hidden_dim], padded to 4D [1,1,1,hidden_dim] so MIOpen
+      // broadcasts it across the H (num_rows) dimension of addCDesc.
+      int bias_dims[] = {1, 1, 1, static_cast<int>(hidden_dim)};
+      MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+          biasDesc, data_type, miopenTensorNCHW, bias_dims, 4));
     }
 
     {
@@ -208,23 +208,22 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&yDesc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&rstdDesc));
 
+  // Pad to 4D NCHW to avoid 'UNKNOWN' layout warnings in MIOpen 7.12+.
   {
-    int x_dims[] = {static_cast<int>(num_rows), static_cast<int>(hidden_dim)};
-    int x_strides[] = {static_cast<int>(hidden_dim), 1};
-    MIOPEN_CHECK(
-        miopenSetTensorDescriptor(xDesc, data_type, 2, x_dims, x_strides));
-    MIOPEN_CHECK(
-        miopenSetTensorDescriptor(yDesc, data_type, 2, x_dims, x_strides));
+    int x_dims[] = {1, 1, static_cast<int>(num_rows),
+                    static_cast<int>(hidden_dim)};
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        xDesc, data_type, miopenTensorNCHW, x_dims, 4));
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        yDesc, data_type, miopenTensorNCHW, x_dims, 4));
 
-    int w_dims[] = {static_cast<int>(hidden_dim)};
-    int w_strides[] = {1};
-    MIOPEN_CHECK(
-        miopenSetTensorDescriptor(weightDesc, data_type, 1, w_dims, w_strides));
+    int w_dims[] = {1, 1, 1, static_cast<int>(hidden_dim)};
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        weightDesc, data_type, miopenTensorNCHW, w_dims, 4));
 
-    int rstd_dims[] = {static_cast<int>(num_rows)};
-    int rstd_strides[] = {1};
-    MIOPEN_CHECK(miopenSetTensorDescriptor(rstdDesc, miopenFloat, 1, rstd_dims,
-                                           rstd_strides));
+    int rstd_dims[] = {1, 1, 1, static_cast<int>(num_rows)};
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        rstdDesc, miopenFloat, miopenTensorNCHW, rstd_dims, 4));
   }
 
   MIOPEN_CHECK(miopenT5LayerNormForward(
