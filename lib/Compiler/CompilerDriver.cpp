@@ -157,22 +157,45 @@ bool CompilerDriver::runMLIRPasses(
     std::string &error_message) {
   mlir::PassManager pm(module.getContext());
 
-  if (options.verbose) {
-    COMPILER_DEBUG_LOG("Running ONNX->HIP->LLVM->Interface passes\n");
+  // Auto-detect input dialect by scanning for onnx.* vs torch.aten.* ops
+  bool hasOnnxOps = false;
+  bool hasTorchOps = false;
+  module.walk([&](mlir::Operation *op) {
+    llvm::StringRef opName = op->getName().getStringRef();
+    if (opName.starts_with("onnx."))
+      hasOnnxOps = true;
+    else if (opName.starts_with("torch."))
+      hasTorchOps = true;
+  });
+
+  if (hasOnnxOps && hasTorchOps) {
+    error_message = "Mixed ONNX and Torch dialect operations not supported";
+    return false;
   }
 
-  mlir::hip::OnnxToHipPipelineOptions onnxToHipOpts;
-  onnxToHipOpts.externalizeMinNumElements =
-      mlir::hip::kDefaultExternalizeMinNumElements;
+  if (hasTorchOps) {
+    if (options.verbose)
+      COMPILER_DEBUG_LOG("Running Torch->HIP->LLVM->Interface passes\n");
 
-  if (hipdnnHandle_) {
-    compiledGraphs_ =
-        std::make_shared<llvm::StringMap<mlir::hip::OwnedGraph>>();
-    mlir::hip::buildOnnxToHipPipeline(
-        pm, onnxToHipOpts, fileSystem_,
-        static_cast<hipdnnHandle_t>(hipdnnHandle_), compiledGraphs_);
+    mlir::hip::TorchToHipPipelineOptions torchOpts;
+    mlir::hip::buildTorchToHipPipeline(pm, torchOpts);
   } else {
-    mlir::hip::buildOnnxToHipPipeline(pm, onnxToHipOpts, fileSystem_);
+    if (options.verbose)
+      COMPILER_DEBUG_LOG("Running ONNX->HIP->LLVM->Interface passes\n");
+
+    mlir::hip::OnnxToHipPipelineOptions onnxToHipOpts;
+    onnxToHipOpts.externalizeMinNumElements =
+        mlir::hip::kDefaultExternalizeMinNumElements;
+
+    if (hipdnnHandle_) {
+      compiledGraphs_ =
+          std::make_shared<llvm::StringMap<mlir::hip::OwnedGraph>>();
+      mlir::hip::buildOnnxToHipPipeline(
+          pm, onnxToHipOpts, fileSystem_,
+          static_cast<hipdnnHandle_t>(hipdnnHandle_), compiledGraphs_);
+    } else {
+      mlir::hip::buildOnnxToHipPipeline(pm, onnxToHipOpts, fileSystem_);
+    }
   }
 
   mlir::hip::HipToLLVMPipelineOptions hipToLlvmOpts;
