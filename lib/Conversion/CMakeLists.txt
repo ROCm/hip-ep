@@ -7,6 +7,7 @@ message(STATUS "Building Conversion Libraries")
 
 add_subdirectory(OnnxToHip)
 add_subdirectory(OnnxToHipDNN)
+add_subdirectory(TorchToHip)
 add_subdirectory(HipToLLVM)
 
 # Umbrella conversion library
@@ -17,6 +18,7 @@ add_library(HipConversion STATIC
 target_link_libraries(HipConversion PUBLIC
   OnnxToHip
   OnnxToHipDNN
+  TorchToHip
   HipToLLVM
   MLIRIR
   MLIRPass
