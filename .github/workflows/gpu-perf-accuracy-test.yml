@@ -5,9 +5,7 @@
 name: GPU Performance & Accuracy Test
 
 on:
-  schedule:
-    - cron: '0 16 * * *'  # daily at UTC 16:00 (CST 00:00)
-
+  push:
   workflow_dispatch:
 
 concurrency:
@@ -67,8 +65,7 @@ jobs:
           workflow: windows-build.yml
           name: gpu-test-package
           path: gpu-test-package
-          branch: main
-          workflow_conclusion: success
+          run_id: 24106718554
           if_no_artifact_found: fail
 
       - name: Verify package contents
@@ -131,7 +128,12 @@ jobs:
           Push-Location gpu-test-package\bin
 
           $models = @(Get-ChildItem $root -Recurse -Filter "*.onnx" |
-            Where-Object { $_.Name -notmatch "_dyn" -and $_.FullName -notmatch "\\full_model\\" })
+            Where-Object {
+              $_.Name -notmatch "_dyn" -and
+              $_.FullName -notmatch "\\full_model\\" -and
+              ($_.FullName -match "\\GPT-OSS-20B\\" -or $_.FullName -match "\\llama3\.1-8B-fp16\\" -or $_.FullName -match "\\phi4-int4-b32_space\\") -and
+              ($_.FullName -match "\\GroupQueryAttention" -or $_.FullName -match "\\GQA\\")
+            })
           Write-Host "Eligible single-op models: $($models.Count)"
 
           foreach ($m in $models) {
@@ -211,7 +213,12 @@ jobs:
           Push-Location gpu-test-package\bin
 
           $models = @(Get-ChildItem $root -Recurse -Filter "*.onnx" |
-            Where-Object { $_.Name -notmatch "_dyn" -and $_.FullName -notmatch "\\full_model\\" })
+            Where-Object {
+              $_.Name -notmatch "_dyn" -and
+              $_.FullName -notmatch "\\full_model\\" -and
+              ($_.FullName -match "\\GPT-OSS-20B\\" -or $_.FullName -match "\\llama3\.1-8B-fp16\\" -or $_.FullName -match "\\phi4-int4-b32_space\\") -and
+              ($_.FullName -match "\\GroupQueryAttention" -or $_.FullName -match "\\GQA\\")
+            })
           Write-Host "Eligible single-op models: $($models.Count)"
 
           foreach ($m in $models) {
@@ -289,7 +296,11 @@ jobs:
           Push-Location gpu-test-package\bin
 
           $models = @(Get-ChildItem $root -Recurse -Filter "*.onnx" |
-            Where-Object { $_.Name -notmatch "_dyn" -and $_.FullName -match "\\full_model\\" })
+            Where-Object {
+              $_.Name -notmatch "_dyn" -and
+              $_.FullName -match "\\full_model\\" -and
+              ($_.FullName -match "\\GPT-OSS-20B\\" -or $_.FullName -match "\\llama3\.1-8B-fp16\\" -or $_.FullName -match "\\phi4-int4-b32_space\\")
+            })
           Write-Host "Eligible full-model models: $($models.Count)"
 
           foreach ($m in $models) {
@@ -369,7 +380,11 @@ jobs:
           Push-Location gpu-test-package\bin
 
           $models = @(Get-ChildItem $root -Recurse -Filter "*.onnx" |
-            Where-Object { $_.Name -notmatch "_dyn" -and $_.FullName -match "\\full_model\\" })
+            Where-Object {
+              $_.Name -notmatch "_dyn" -and
+              $_.FullName -match "\\full_model\\" -and
+              ($_.FullName -match "\\GPT-OSS-20B\\" -or $_.FullName -match "\\llama3\.1-8B-fp16\\" -or $_.FullName -match "\\phi4-int4-b32_space\\")
+            })
           Write-Host "Eligible full-model models: $($models.Count)"
 
           foreach ($m in $models) {
