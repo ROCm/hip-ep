@@ -38,6 +38,19 @@ public:
   }
   static constexpr llvm::StringLiteral getDialectNamespace() { return "onnx"; }
 };
+/// Minimal Torch dialect stub that claims the "torch" namespace and permits
+/// unknown operations and types.  This avoids depending on the full torch-mlir
+/// library.
+class TorchStubDialect : public mlir::Dialect {
+public:
+  explicit TorchStubDialect(mlir::MLIRContext *ctx)
+      : Dialect(getDialectNamespace(), ctx,
+                mlir::TypeID::get<TorchStubDialect>()) {
+    allowUnknownOperations();
+    allowUnknownTypes();
+  }
+  static constexpr llvm::StringLiteral getDialectNamespace() { return "torch"; }
+};
 } // namespace detail
 
 /// Register all required dialects into a DialectRegistry.
@@ -51,6 +64,7 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::hip::HipDialect>();
   registry.insert<detail::OnnxStubDialect>();
+  registry.insert<detail::TorchStubDialect>();
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::tensor::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
