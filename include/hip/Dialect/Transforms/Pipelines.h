@@ -89,6 +89,34 @@ void buildOnnxToHipPipeline(OpPassManager &pm,
 void buildHipToLLVMPipeline(OpPassManager &pm,
                             const HipToLLVMPipelineOptions &options);
 
+/// Pipeline options for the Torch-to-HIP pipeline.
+/// Torch-mlir models carry weights as function parameters, so no constant
+/// externalization is needed.
+struct TorchToHipPipelineOptions
+    : public PassPipelineOptions<TorchToHipPipelineOptions> {};
+
+/// Build the Torch-to-HIP compilation pipeline.
+///
+/// Converts Torch dialect IR (from torch-mlir backend contract) into fully
+/// bufferized HIP memref IR. Reuses the same bufferization and memory
+/// optimization passes as the ONNX pipeline.
+void buildTorchToHipPipeline(OpPassManager &pm,
+                             const TorchToHipPipelineOptions &options);
+
+/// Combined pipeline options for the full Torch→HIP→LLVM→Interface flow.
+struct TorchHipdnnPipelineOptions
+    : public PassPipelineOptions<TorchHipdnnPipelineOptions> {
+  Option<std::string> constantsFile{
+      *this, "constants-file",
+      llvm::cl::desc("Filename for constants data embedded in module metadata "
+                     "(default: constants.bin)"),
+      llvm::cl::init("constants.bin")};
+};
+
+/// Build the complete Torch HIPDNN pipeline: Torch→HIP→LLVM→Interface.
+void buildTorchHipdnnPipeline(OpPassManager &pm,
+                              const TorchHipdnnPipelineOptions &options);
+
 /// Combined pipeline options for the full ONNX→HIP→LLVM→Interface flow.
 /// Used by hip-mlir-opt --hipdnn-pipeline and the compiler driver.
 struct HipdnnPipelineOptions
