@@ -6,6 +6,7 @@
 #include "hip/Dialect/Transforms/Pipelines.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
+#include "hip/Conversion/TorchToHip/Passes.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Conversion/BufferizationToMemRef/BufferizationToMemRef.h"
@@ -134,6 +135,23 @@ void mlir::hip::buildHipToLLVMPipeline(
   pm.addPass(createGenerateInterfacePass(compOpts));
 }
 
+void mlir::hip::buildTorchToHipPipeline(
+    OpPassManager &pm, const TorchToHipPipelineOptions &options) {
+  pm.addPass(createHipAddContextArgPass());
+  pm.addPass(createConvertTorchToHipPass());
+  buildOnnxToHipPipelineTail(pm);
+}
+
+void mlir::hip::buildTorchHipdnnPipeline(
+    OpPassManager &pm, const TorchHipdnnPipelineOptions &options) {
+  TorchToHipPipelineOptions torchOpts;
+  buildTorchToHipPipeline(pm, torchOpts);
+
+  HipToLLVMPipelineOptions llvmOpts;
+  llvmOpts.constantsFile = options.constantsFile;
+  buildHipToLLVMPipeline(pm, llvmOpts);
+}
+
 void mlir::hip::buildHipdnnPipeline(OpPassManager &pm,
                                     const HipdnnPipelineOptions &options) {
   OnnxToHipPipelineOptions onnxOpts;
@@ -163,4 +181,12 @@ void mlir::hip::registerHipPipelines() {
   PassPipelineRegistration<HipdnnPipelineOptions>(
       "hipdnn-pipeline", "Complete HIPDNN ONNX→HIP→LLVM→Interface pipeline",
       buildHipdnnPipeline);
+
+  PassPipelineRegistration<TorchToHipPipelineOptions>(
+      "torch-to-hip-pipeline", "Lower Torch IR to bufferized HIP memref IR",
+      buildTorchToHipPipeline);
+
+  PassPipelineRegistration<TorchHipdnnPipelineOptions>(
+      "torch-hipdnn-pipeline", "Complete Torch→HIP→LLVM→Interface pipeline",
+      buildTorchHipdnnPipeline);
 }
