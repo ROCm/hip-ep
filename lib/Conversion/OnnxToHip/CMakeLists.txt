@@ -5,6 +5,20 @@
 
 add_library(OnnxToHip STATIC
   OnnxToHip.cpp
+  MatMulConversion.cpp
+  TransposeConversion.cpp
+  ElementwiseConversion.cpp
+  ActivationConversion.cpp
+  CastConversion.cpp
+  ReduceSumConversion.cpp
+  MatMulNBitsConversion.cpp
+  QMoEConversion.cpp
+  ConvConversion.cpp
+  NormConversion.cpp
+  RotaryEmbeddingConversion.cpp
+  GqaConversion.cpp
+  GatherConversion.cpp
+  ReshapeConversion.cpp
 )
 
 add_dependencies(OnnxToHip
