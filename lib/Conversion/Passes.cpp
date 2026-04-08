@@ -18,6 +18,10 @@ void registerConversionPasses() {
   });
 
   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+    return mlir::hip::createConvertTorchToHipPass();
+  });
+
+  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
     return mlir::hip::createConvertHipToLLVMPass();
   });
 }
