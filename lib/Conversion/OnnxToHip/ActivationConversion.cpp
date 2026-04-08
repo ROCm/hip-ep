@@ -1,0 +1,78 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
+#include "OnnxToHipUtils.h"
+
+namespace mlir {
+namespace hip {
+namespace {
+
+/// onnx.Softmax -> hip.miopen.softmax
+struct SoftmaxToHip : public mlir::RewritePattern {
+  SoftmaxToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Softmax", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+SoftmaxToHip::matchAndRewrite(mlir::Operation *op,
+                              mlir::PatternRewriter &rewriter) const {
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value input = op->getOperand(0);
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  auto hipOp = mlir::hip::MiopenSoftmaxOp::create(rewriter, loc, resultType,
+                                                  context, input, init);
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
+/// onnx.Sigmoid -> hip.sigmoid
+struct SigmoidToHip : public mlir::RewritePattern {
+  SigmoidToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Sigmoid", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+SigmoidToHip::matchAndRewrite(mlir::Operation *op,
+                              mlir::PatternRewriter &rewriter) const {
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value input = op->getOperand(0);
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  auto hipOp = mlir::hip::SigmoidOp::create(rewriter, loc, resultType, context,
+                                            input, init);
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
+} // namespace
+
+void mlir::hip::populateActivationConversionPatterns(
+    RewritePatternSet &patterns, MLIRContext *ctx) {
+  patterns.add<SoftmaxToHip, SigmoidToHip>(ctx);
+}
+
+} // namespace hip
+} // namespace mlir
