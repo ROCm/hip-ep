@@ -101,44 +101,6 @@ extern "C" hipError_t hipEventElapsedTime(float *ms, hipEvent_t start,
   return hipSuccess;
 }
 
-extern "C" hipError_t hipStreamBeginCapture(hipStream_t stream, int mode) {
-  (void)stream;
-  (void)mode;
-  return hipSuccess;
-}
-
-extern "C" hipError_t hipStreamEndCapture(hipStream_t stream,
-                                          hipGraph_t *graph) {
-  (void)stream;
-  *graph = malloc(sizeof(void *));
-  return hipSuccess;
-}
-
-extern "C" hipError_t hipGraphGetNodes(hipGraph_t graph, hipGraphNode_t *nodes,
-                                       size_t *numNodes) {
-  (void)graph;
-  (void)nodes;
-  *numNodes = 0;
-  return hipSuccess;
-}
-
-extern "C" hipError_t hipGraphInstantiate(hipGraphExec_t *exec,
-                                          hipGraph_t graph, void *errNode,
-                                          void *logBuffer, size_t bufferSize) {
-  (void)graph;
-  (void)errNode;
-  (void)logBuffer;
-  (void)bufferSize;
-  *exec = malloc(sizeof(void *));
-  return hipSuccess;
-}
-
-extern "C" hipError_t hipGraphLaunch(hipGraphExec_t exec, hipStream_t stream) {
-  (void)exec;
-  (void)stream;
-  return hipSuccess;
-}
-
 extern "C" const char *hipGetErrorString(hipError_t error) {
   (void)error;
   return "mock_error";

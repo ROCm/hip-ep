@@ -389,7 +389,6 @@ private:
         {"hipdnn_ep_tensor_buffer_get_rank", i64, {ptr}},
         {"hipdnn_ep_tensor_buffer_get_size_bytes", i64, {ptr}},
         {"hipdnn_ep_state_init_with_fs", i32, {ptr, ptr, ptr, i64}},
-        {"hipdnn_ep_graph_should_skip_main", i32, {ptr}},
     };
   }
 
@@ -786,8 +785,7 @@ private:
       LLVM::StoreOp::create(builder, loc, memrefPtr, arraySlot);
     }
 
-    // Call @main with arrays of pointers (conditionally skipped during graph
-    // replay -- hipdnn_ep_graph_should_skip_main returns 1 when replay active)
+    // Call @main_graph with arrays of pointers
     Block *mainSuccessBlock;
 
     auto mainFunc = module.lookupSymbol<LLVM::LLVMFuncOp>("main_graph");
@@ -797,22 +795,7 @@ private:
           "[GenerateInterface] Warning: @main_graph not found\n");
       LLVM::BrOp::create(builder, loc, mainSuccessBlock);
     } else {
-      auto skipMainFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(
-          "hipdnn_ep_graph_should_skip_main");
-      Value skipResult =
-          LLVM::CallOp::create(builder, loc, skipMainFunc, ValueRange{state})
-              .getResult();
-      Value zero = LLVM::ConstantOp::create(builder, loc, i32Type,
-                                            builder.getI32IntegerAttr(0));
-      Value shouldSkip = LLVM::ICmpOp::create(
-          builder, loc, LLVM::ICmpPredicate::ne, skipResult, zero);
-
-      Block *callMainBlock = funcOp.addBlock();
       mainSuccessBlock = funcOp.addBlock();
-      LLVM::CondBrOp::create(builder, loc, shouldSkip, mainSuccessBlock,
-                             callMainBlock);
-
-      builder.setInsertionPointToStart(callMainBlock);
       emitErrorCheckedCall(
           builder, loc, mainFunc,
           ValueRange{state, inputMemrefArray, outputMemrefArray}, errorCodePtr,
