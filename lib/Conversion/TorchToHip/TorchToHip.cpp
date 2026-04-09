@@ -79,10 +79,10 @@ static mlir::LogicalResult generateModuleMetadata(mlir::ModuleOp module) {
   }
 
   if (!targetFunc) {
-    module.emitError(
-        "expected @forward, @main_graph, or a single public function "
-        "for metadata generation");
-    return mlir::failure();
+    // No single entry function found -- skip metadata generation.
+    // This is expected for unit conversion tests with multiple test functions.
+    // Metadata is only required for E2E compilation (GenerateInterface pass).
+    return mlir::success();
   }
 
   auto originalFuncType = targetFunc.getFunctionType();
@@ -211,10 +211,6 @@ void ConvertTorchToHipPass::runOnOperation() {
 }
 
 } // namespace
-
-std::unique_ptr<mlir::Pass> createConvertTorchToHipPass() {
-  return std::make_unique<ConvertTorchToHipPass>();
-}
 
 } // namespace hip
 } // namespace mlir

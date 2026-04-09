@@ -145,6 +145,7 @@ int main(int argc, char **argv) {
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::hip::HipDialect>();
   registry.insert<hip::compiler::detail::OnnxStubDialect>();
+  registry.insert<hip::compiler::detail::TorchStubDialect>();
 
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
