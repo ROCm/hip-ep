@@ -4,6 +4,8 @@
  */
 
 #include "hip/Conversion/Passes.h"
+#include "hip/Conversion/OnnxToHipDNN/Passes.h"
+#include "hip/Conversion/TorchToHip/Passes.h"
 #include "mlir/Pass/Pass.h"
 
 namespace hip::compiler {
