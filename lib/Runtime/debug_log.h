@@ -26,14 +26,6 @@ inline bool hipdnn_ep_perf_enabled() {
   return enabled || hipdnn_ep_debug_enabled();
 }
 
-inline bool hipdnn_ep_graph_enabled() {
-  static const bool enabled = [] {
-    const char *v = std::getenv("HIPDNN_EP_GRAPH");
-    return v && v[0] >= '1';
-  }();
-  return enabled;
-}
-
 #define RUNTIME_DEBUG_LOG(fmt, ...)                                            \
   do {                                                                         \
     if (hipdnn_ep_debug_enabled())                                             \

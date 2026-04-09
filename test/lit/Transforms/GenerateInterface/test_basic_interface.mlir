@@ -33,7 +33,6 @@
 // CHECK-SAME:  -> i32
 // CHECK:   llvm.call @hipdnn_ep_tensor_prepare_input
 // CHECK:   llvm.call @hipdnn_ep_tensor_prepare_output
-// CHECK:   llvm.call @hipdnn_ep_graph_should_skip_main
 // CHECK:   llvm.call @main_graph
 // CHECK:   llvm.call @hipdnn_ep_tensor_finalize_output
 
