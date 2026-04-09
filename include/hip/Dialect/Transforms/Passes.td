@@ -68,6 +68,33 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
   ];
 }
 
+def ConvertTorchToHipPass : Pass<"convert-torch-to-hip", "mlir::ModuleOp"> {
+  let summary = "Convert Torch dialect to HIP dialect (tensor DPS)";
+  let description = [{
+    Converts Torch dialect IR (from torch-mlir) into HIP dialect IR using
+    destination-passing style (DPS) with tensor types.
+
+    Transformations:
+      1. Op mapping: torch.aten.{mm,conv2d,sigmoid,...} -> hip.* (tensor DPS)
+      2. Shape ops: torch.aten.{reshape,view,unsqueeze,...} -> tensor.* ops
+      3. Cleanup: erase dead torch.constant.* and torch.prim.* ops
+
+    Requires hip-add-context-arg to have run first so that !hip.context is
+    available as function argument 0.
+
+    Input is assumed to be torch-mlir backend contract IR with standard
+    tensor types (post torch-mlir type conversion).
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::func::FuncDialect",
+    "mlir::tensor::TensorDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::bufferization::BufferizationDialect"
+  ];
+}
+
 def ConvertHipToLLVMPass : Pass<"convert-hip-to-llvm", "mlir::ModuleOp"> {
   let summary = "Convert HIP dialect to LLVM dialect";
   let description = [{
