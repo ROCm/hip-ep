@@ -499,7 +499,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
   mlir::MLIRContext *ctx = module.getContext();
   const bool timing = hipdnn_ep_timing_enabled();
 
-  auto passStart = std::chrono::steady_clock::now();
+  auto passStart = timing_now();
   auto phaseStart = passStart;
 
   auto logSubpass = [&](const char *name, const char *extra = nullptr) {

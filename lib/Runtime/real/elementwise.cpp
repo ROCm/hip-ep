@@ -16,8 +16,8 @@
 // Explicit mapping from backend-independent HIPDNN_EP_DATATYPE_* enum to
 // MIOpen-specific miopenDataType_t. No static_cast -- our enum values are
 // independent of any library.
-static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type, bool *ok) {
-  *ok = true;
+static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type, bool &ok) {
+  ok = true;
   switch (data_type) {
   case HIPDNN_EP_DATATYPE_FLOAT:
     return miopenFloat;
@@ -28,15 +28,15 @@ static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type, bool *ok) {
   default:
     fprintf(stderr, "[REAL] unsupported data_type %lld for MIOpen\n",
             (long long)data_type);
-    *ok = false;
+    ok = false;
     return miopenFloat;
   }
 }
 
 // Explicit mapping from backend-independent HIPDNN_EP_TENSOR_OP_* enum to
 // MIOpen-specific miopenTensorOp_t.
-static miopenTensorOp_t hipdnn_ep_to_miopen_op(int64_t tensor_op, bool *ok) {
-  *ok = true;
+static miopenTensorOp_t hipdnn_ep_to_miopen_op(int64_t tensor_op, bool &ok) {
+  ok = true;
   switch (tensor_op) {
   case HIPDNN_EP_TENSOR_OP_MUL:
     return miopenTensorOpMul;
@@ -49,7 +49,7 @@ static miopenTensorOp_t hipdnn_ep_to_miopen_op(int64_t tensor_op, bool *ok) {
   default:
     fprintf(stderr, "[REAL] unsupported tensor_op %lld for MIOpen\n",
             (long long)tensor_op);
-    *ok = false;
+    ok = false;
     return miopenTensorOpMul;
   }
 }
@@ -118,34 +118,31 @@ queryOrCreateOpTensor(const OpTensorCacheKey &key) {
     return &it->second;
 
   bool type_ok;
-  miopenDataType_t dt = hipdnn_ep_to_miopen_type(key.data_type, &type_ok);
+  miopenDataType_t dt = hipdnn_ep_to_miopen_type(key.data_type, type_ok);
   if (!type_ok)
     return nullptr;
   OpTensorCacheEntry e{};
-  miopenStatus_t st;
+  int result = 0;
 
-#define OP_CACHE_CHECK(call)                                                   \
-  do {                                                                         \
-    st = (call);                                                               \
-    if (st != miopenStatusSuccess)                                             \
-      goto cache_fail;                                                         \
-  } while (0)
+  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&e.aDesc), cache_fail);
+  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&e.bDesc), cache_fail);
+  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&e.cDesc), cache_fail);
 
-  OP_CACHE_CHECK(miopenCreateTensorDescriptor(&e.aDesc));
-  OP_CACHE_CHECK(miopenCreateTensorDescriptor(&e.bDesc));
-  OP_CACHE_CHECK(miopenCreateTensorDescriptor(&e.cDesc));
-
-  OP_CACHE_CHECK(miopenSet4dTensorDescriptor(
-      e.aDesc, dt, static_cast<int>(key.lhs_n), static_cast<int>(key.lhs_c),
-      static_cast<int>(key.lhs_h), static_cast<int>(key.lhs_w)));
-  OP_CACHE_CHECK(miopenSet4dTensorDescriptor(
-      e.bDesc, dt, static_cast<int>(key.rhs_n), static_cast<int>(key.rhs_c),
-      static_cast<int>(key.rhs_h), static_cast<int>(key.rhs_w)));
-  OP_CACHE_CHECK(miopenSet4dTensorDescriptor(
-      e.cDesc, dt, static_cast<int>(key.out_n), static_cast<int>(key.out_c),
-      static_cast<int>(key.out_h), static_cast<int>(key.out_w)));
-
-#undef OP_CACHE_CHECK
+  MIOPEN_CHECK_GOTO(
+      miopenSet4dTensorDescriptor(
+          e.aDesc, dt, static_cast<int>(key.lhs_n), static_cast<int>(key.lhs_c),
+          static_cast<int>(key.lhs_h), static_cast<int>(key.lhs_w)),
+      cache_fail);
+  MIOPEN_CHECK_GOTO(
+      miopenSet4dTensorDescriptor(
+          e.bDesc, dt, static_cast<int>(key.rhs_n), static_cast<int>(key.rhs_c),
+          static_cast<int>(key.rhs_h), static_cast<int>(key.rhs_w)),
+      cache_fail);
+  MIOPEN_CHECK_GOTO(
+      miopenSet4dTensorDescriptor(
+          e.cDesc, dt, static_cast<int>(key.out_n), static_cast<int>(key.out_c),
+          static_cast<int>(key.out_h), static_cast<int>(key.out_w)),
+      cache_fail);
   goto cache_done;
 
 cache_fail:
@@ -208,7 +205,7 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
   }
 
   bool op_ok;
-  miopenTensorOp_t miopen_op = hipdnn_ep_to_miopen_op(tensor_op, &op_ok);
+  miopenTensorOp_t miopen_op = hipdnn_ep_to_miopen_op(tensor_op, op_ok);
   if (!op_ok) {
     fprintf(stderr, "wrap_miopenOpTensor: unsupported tensor_op %lld\n",
             (long long)tensor_op);

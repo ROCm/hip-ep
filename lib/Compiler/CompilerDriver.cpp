@@ -61,7 +61,7 @@ bool CompilerDriver::compile(llvm::StringRef input_mlir,
   llvm::SourceMgr sourceMgr;
   sourceMgr.AddNewSourceBuffer(std::move(memBuffer), llvm::SMLoc());
 
-  auto t0 = std::chrono::steady_clock::now();
+  auto t0 = timing_now();
 
   mlir::OwningOpRef<mlir::ModuleOp> module =
       mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, &context);
@@ -111,7 +111,7 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
                                  const mlir::hip::CompilationOptionsT &options,
                                  std::string &error_message) {
   const bool timing = hipdnn_ep_timing_enabled();
-  auto phaseStart = std::chrono::steady_clock::now();
+  auto phaseStart = timing_now();
   auto totalStart = phaseStart;
 
   auto logPhase = [&](const char *name) {

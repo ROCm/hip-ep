@@ -215,16 +215,13 @@ struct Level1MlirPass {
   void process(IPass &self, Graph &graph) {
     MY_LOG(1) << "Level1MlirPass::process() called";
 
-    const bool timing = hipdnn_ep_timing_enabled();
-    auto t0 = std::chrono::steady_clock::now();
+    auto t0 = timing_now();
     auto t_prev = t0;
 
     // Step 1: Load configuration from provider options
     auto config = load_config(self.get_context().get());
 
-    if (timing) {
-      fprintf(stderr, "[Session] load_config: %.3fs\n", record_elapsed(t_prev));
-    }
+    TIMING_LOG("[Session] load_config: %.3fs\n", record_elapsed(t_prev));
 
     // Step 2: Get MLIR bytecode from graph
     auto mlir_bytecode = get_mlir_bytecode(self.get_context().get(), graph);
@@ -233,11 +230,8 @@ struct Level1MlirPass {
       return;
     }
 
-    if (timing) {
-      fprintf(stderr,
-              "[Session] MLIR bytecode serialization: %.3fs (%zu bytes)\n",
-              record_elapsed(t_prev), mlir_bytecode.size());
-    }
+    TIMING_LOG("[Session] MLIR bytecode serialization: %.3fs (%zu bytes)\n",
+               record_elapsed(t_prev), mlir_bytecode.size());
 
     // Step 3: Compile bytecode to artifact
     auto fs = self.get_context()->get_file_system();
@@ -248,28 +242,22 @@ struct Level1MlirPass {
     }
     CompilationArtifact artifact = *artifactOpt;
 
-    if (timing) {
-      fprintf(stderr, "[Session] MLIR compilation (CompilerDriver): %.3fs\n",
-              record_elapsed(t_prev));
-    }
+    TIMING_LOG("[Session] MLIR compilation (CompilerDriver): %.3fs\n",
+               record_elapsed(t_prev));
 
     // Step 4: Write artifact to EPContext
     if (!write_artifact_to_epcontext(self.get_context().get(), artifact)) {
       return;
     }
 
-    if (timing) {
-      fprintf(stderr, "[Session] Write artifact to EPContext: %.3fs\n",
-              record_elapsed(t_prev));
-    }
+    TIMING_LOG("[Session] Write artifact to EPContext: %.3fs\n",
+               record_elapsed(t_prev));
 
     // Step 5: Build metadata JSON from graph outputs
     auto metadata_json = build_metadata_json(artifact, graph);
 
-    if (timing) {
-      fprintf(stderr, "[Session] Build metadata JSON: %.3fs\n",
-              record_elapsed(t_prev));
-    }
+    TIMING_LOG("[Session] Build metadata JSON: %.3fs\n",
+               record_elapsed(t_prev));
 
     // Step 6: Fuse graph into single MLIR custom op
     if (!fuse_graph(self, graph, metadata_json, artifact.filename)) {
@@ -277,11 +265,9 @@ struct Level1MlirPass {
       return;
     }
 
-    if (timing) {
-      fprintf(stderr, "[Session] Fuse graph: %.3fs\n", record_elapsed(t_prev));
-      fprintf(stderr, "[Session] Level1MlirPass::process total: %.3fs\n",
-              elapsed_since(t0));
-    }
+    TIMING_LOG("[Session] Fuse graph: %.3fs\n", record_elapsed(t_prev));
+    TIMING_LOG("[Session] Level1MlirPass::process total: %.3fs\n",
+               elapsed_since(t0));
 
     MY_LOG(1) << "MLIR compilation completed: " << artifact.filename << " ("
               << artifact.bytes.size() << " bytes)";
