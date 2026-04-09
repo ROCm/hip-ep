@@ -154,6 +154,68 @@ struct ExternalizationState {
   std::string binFileName;
   llvm::SmallVector<int64_t> constantSizes;
   llvm::SmallVector<int64_t> constantOffsets;
+
+  struct WriteEntry {
+    enum Kind { kRaw, kSplat, kZeros };
+    Kind kind;
+    const void *data = nullptr;
+    size_t size = 0;
+    size_t elemSize = 0;
+    mlir::DenseElementsAttr attr;
+  };
+  std::vector<WriteEntry> pendingWrites;
+
+  void deferRaw(const void *ptr, size_t sz,
+                mlir::DenseElementsAttr keepAlive = {}) {
+    pendingWrites.push_back({WriteEntry::kRaw, ptr, sz, 0, keepAlive});
+    currentOffset += static_cast<int64_t>(sz);
+  }
+
+  void deferZeros(size_t count) {
+    pendingWrites.push_back({WriteEntry::kZeros, nullptr, count, 0, {}});
+    currentOffset += static_cast<int64_t>(count);
+  }
+
+  void deferSplat(mlir::DenseElementsAttr splatAttr, size_t totalSize,
+                  size_t elemSz) {
+    pendingWrites.push_back(
+        {WriteEntry::kSplat, nullptr, totalSize, elemSz, splatAttr});
+    currentOffset += static_cast<int64_t>(totalSize);
+  }
+
+  void flushWrites() {
+    constexpr size_t kChunk = 1024 * 1024;
+    std::vector<char> zeros;
+    std::vector<char> splatBuf;
+    for (const auto &entry : pendingWrites) {
+      switch (entry.kind) {
+      case WriteEntry::kRaw:
+        writer->fwrite(entry.data, entry.size);
+        break;
+      case WriteEntry::kZeros:
+        if (zeros.size() < entry.size)
+          zeros.resize(entry.size, 0);
+        writer->fwrite(zeros.data(), entry.size);
+        break;
+      case WriteEntry::kSplat: {
+        auto rawData = entry.attr.getRawData();
+        size_t bufSize =
+            (std::min(entry.size, kChunk) / entry.elemSize) * entry.elemSize;
+        splatBuf.resize(bufSize);
+        for (size_t i = 0; i < bufSize; i += entry.elemSize)
+          std::memcpy(splatBuf.data() + i, rawData.data(), entry.elemSize);
+        size_t remaining = entry.size;
+        while (remaining > 0) {
+          size_t toWrite = std::min(remaining, bufSize);
+          writer->fwrite(splatBuf.data(), toWrite);
+          remaining -= toWrite;
+        }
+        break;
+      }
+      }
+    }
+    pendingWrites.clear();
+  }
 };
 
 /// Write alignment padding to constants.bin and return the aligned byte
@@ -162,11 +224,8 @@ static int64_t writeAlignmentPadding(ExternalizationState *extState,
                                      int64_t alignment = 64) {
   int64_t aligned = llvm::alignTo(extState->currentOffset, alignment);
   int64_t padding = aligned - extState->currentOffset;
-  if (padding > 0) {
-    llvm::SmallVector<char> zeros(padding, 0);
-    extState->writer->fwrite(zeros.data(), padding);
-    extState->currentOffset += padding;
-  }
+  if (padding > 0)
+    extState->deferZeros(static_cast<size_t>(padding));
   return extState->currentOffset;
 }
 
@@ -243,10 +302,10 @@ static void finalizeExternalizedConstant(mlir::ModuleOp module,
 static void externalizeConstant(mlir::ModuleOp module, mlir::Operation *constOp,
                                 mlir::RankedTensorType tensorType,
                                 const void *rawPtr, int64_t byteSize,
-                                ExternalizationState *extState) {
+                                ExternalizationState *extState,
+                                mlir::DenseElementsAttr keepAlive = {}) {
   int64_t entryOffset = writeAlignmentPadding(extState);
-  extState->writer->fwrite(rawPtr, byteSize);
-  extState->currentOffset += byteSize;
+  extState->deferRaw(rawPtr, static_cast<size_t>(byteSize), keepAlive);
   finalizeExternalizedConstant(module, constOp, tensorType, byteSize,
                                entryOffset, extState);
 }
@@ -270,23 +329,9 @@ static void externalizeSplatConstant(mlir::ModuleOp module,
                                      int64_t byteSize,
                                      ExternalizationState *extState) {
   auto rawData = valueAttr.getRawData();
-  constexpr size_t kSplatChunk = 1024 * 1024;
   size_t elemSize = rawData.size();
-  size_t bufSize =
-      (std::min(static_cast<size_t>(byteSize), kSplatChunk) / elemSize) *
-      elemSize;
-  std::vector<char> buf(bufSize);
-  for (size_t i = 0; i < bufSize; i += elemSize)
-    std::memcpy(buf.data() + i, rawData.data(), elemSize);
-
   int64_t entryOffset = writeAlignmentPadding(extState);
-  size_t remaining = static_cast<size_t>(byteSize);
-  while (remaining > 0) {
-    size_t toWrite = std::min(remaining, bufSize);
-    extState->writer->fwrite(buf.data(), toWrite);
-    remaining -= toWrite;
-  }
-  extState->currentOffset += byteSize;
+  extState->deferSplat(valueAttr, static_cast<size_t>(byteSize), elemSize);
   finalizeExternalizedConstant(module, constOp, tensorType, byteSize,
                                entryOffset, extState);
 }
@@ -394,7 +439,8 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
                                  byteSize, extState);
       } else {
         externalizeConstant(module, constOp, tensorType,
-                            valueAttr.getRawData().data(), byteSize, extState);
+                            valueAttr.getRawData().data(), byteSize, extState,
+                            valueAttr);
       }
 
     } else {
@@ -2400,6 +2446,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
   // Finalize externalization: release writer, write JSON manifest, set module
   // attributes.
   if (extState && extState->constantIndex > 0) {
+    extState->flushWrites();
     extState->writer.reset();
 
     // Set hip.constants_file on the module so downstream passes/tools know
