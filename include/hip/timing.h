@@ -17,6 +17,7 @@
 
 #pragma once
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 
 // Returns true if HIPDNN_EP_TIMING env var is set to >= "1".
@@ -45,3 +46,20 @@ inline double elapsed_since(std::chrono::steady_clock::time_point marker) {
                                        marker)
       .count();
 }
+
+// Returns steady_clock::now() only when timing is enabled; otherwise returns
+// a default-constructed time_point (epoch).  Avoids measuring the clock when
+// timing output will be discarded.
+inline std::chrono::steady_clock::time_point timing_now() {
+  return hipdnn_ep_timing_enabled() ? std::chrono::steady_clock::now()
+                                    : std::chrono::steady_clock::time_point{};
+}
+
+// Conditional fprintf to stderr, gated on HIPDNN_EP_TIMING.
+// Arguments are only evaluated when timing is enabled.
+// Mirrors RUNTIME_DEBUG_LOG from debug_log.h.
+#define TIMING_LOG(fmt, ...)                                                   \
+  do {                                                                         \
+    if (hipdnn_ep_timing_enabled())                                            \
+      fprintf(stderr, fmt, ##__VA_ARGS__);                                     \
+  } while (0)

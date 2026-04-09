@@ -12,8 +12,8 @@
 #include <functional>
 #include <unordered_map>
 
-static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type, bool *ok) {
-  *ok = true;
+static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type, bool &ok) {
+  ok = true;
   switch (data_type) {
   case HIPDNN_EP_DATATYPE_FLOAT:
     return miopenFloat;
@@ -24,14 +24,14 @@ static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type, bool *ok) {
   default:
     fprintf(stderr, "[REAL] unsupported data_type %lld for MIOpen\n",
             (long long)data_type);
-    *ok = false;
+    ok = false;
     return miopenFloat;
   }
 }
 
 static miopenActivationMode_t hipdnn_ep_to_miopen_activation(int64_t mode,
-                                                             bool *ok) {
-  *ok = true;
+                                                             bool &ok) {
+  ok = true;
   switch (mode) {
   case HIPDNN_EP_ACTIVATION_SIGMOID:
     return miopenActivationLOGISTIC;
@@ -42,7 +42,7 @@ static miopenActivationMode_t hipdnn_ep_to_miopen_activation(int64_t mode,
   default:
     fprintf(stderr, "[REAL] unsupported activation_mode %lld for MIOpen\n",
             (long long)mode);
-    *ok = false;
+    ok = false;
     return miopenActivationLOGISTIC;
   }
 }
@@ -90,31 +90,25 @@ queryOrCreateActivation(const ActivationCacheKey &key) {
     return &it->second;
 
   bool type_ok, act_ok;
-  miopenDataType_t dt = hipdnn_ep_to_miopen_type(key.data_type, &type_ok);
+  miopenDataType_t dt = hipdnn_ep_to_miopen_type(key.data_type, type_ok);
   miopenActivationMode_t act =
-      hipdnn_ep_to_miopen_activation(key.activation_mode, &act_ok);
+      hipdnn_ep_to_miopen_activation(key.activation_mode, act_ok);
   if (!type_ok || !act_ok)
     return nullptr;
   int n = static_cast<int>(key.num_elements);
 
   ActivationCacheEntry e{};
-  miopenStatus_t st;
+  int result = 0;
 
-#define ACT_CACHE_CHECK(call)                                                  \
-  do {                                                                         \
-    st = (call);                                                               \
-    if (st != miopenStatusSuccess)                                             \
-      goto cache_fail;                                                         \
-  } while (0)
-
-  ACT_CACHE_CHECK(miopenCreateTensorDescriptor(&e.inDesc));
-  ACT_CACHE_CHECK(miopenCreateTensorDescriptor(&e.outDesc));
-  ACT_CACHE_CHECK(miopenSet4dTensorDescriptor(e.inDesc, dt, 1, 1, 1, n));
-  ACT_CACHE_CHECK(miopenSet4dTensorDescriptor(e.outDesc, dt, 1, 1, 1, n));
-  ACT_CACHE_CHECK(miopenCreateActivationDescriptor(&e.actDesc));
-  ACT_CACHE_CHECK(miopenSetActivationDescriptor(e.actDesc, act, 0.0, 0.0, 0.0));
-
-#undef ACT_CACHE_CHECK
+  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&e.inDesc), cache_fail);
+  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&e.outDesc), cache_fail);
+  MIOPEN_CHECK_GOTO(miopenSet4dTensorDescriptor(e.inDesc, dt, 1, 1, 1, n),
+                    cache_fail);
+  MIOPEN_CHECK_GOTO(miopenSet4dTensorDescriptor(e.outDesc, dt, 1, 1, 1, n),
+                    cache_fail);
+  MIOPEN_CHECK_GOTO(miopenCreateActivationDescriptor(&e.actDesc), cache_fail);
+  MIOPEN_CHECK_GOTO(
+      miopenSetActivationDescriptor(e.actDesc, act, 0.0, 0.0, 0.0), cache_fail);
   goto cache_done;
 
 cache_fail:
