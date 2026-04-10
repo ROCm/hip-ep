@@ -5,6 +5,7 @@
 #include "debug_log.h"
 #include "hip/timing.h"
 #include "hip_cleanup.h"
+#include "hipdnn_ep_profiler.h"
 #include "hipdnn_ep_runtime.h"
 #include "runtime_state_internal.h"
 
@@ -46,6 +47,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   state->num_buffers = 0;
   state->workspace = nullptr;
   state->workspace_size = 0;
+  state->profiler = nullptr;
   state->hipdnn_handle = nullptr;
   state->hipdnn_graph_registry = nullptr;
 
@@ -176,6 +178,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   TIMING_LOG("[Session] hipBLASLt init: %.3fs\n", record_elapsed(t_prev));
 
   *out_state = state;
+
+  hipdnn_ep_profiler_init(state);
 
   // Parse FlatBuffers blob to get constants_filename and constant_sizes
   if (!metadata_blob || blob_size == 0) {
@@ -356,6 +360,10 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
 
   // Best-effort cleanup - continue even if operations fail
   // Cleanup in reverse order of initialization (LIFO)
+
+  // Dump and cleanup profiler before stream sync (dump does its own sync)
+  hipdnn_ep_profiler_dump(state);
+  hipdnn_ep_profiler_cleanup(state);
 
   // Synchronize stream to ensure all GPU operations complete
   if (state->stream) {

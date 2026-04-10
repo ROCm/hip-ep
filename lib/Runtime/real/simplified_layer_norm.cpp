@@ -7,6 +7,7 @@
 #define MIOPEN_BETA_API
 
 #include "../debug_log.h"
+#include "../hipdnn_ep_profiler.h"
 #include "../hipdnn_ep_runtime.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
@@ -201,9 +202,11 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
       (double)epsilon);
 
   int result = 0;
+  HIPDNN_EP_PROFILE_BEGIN(state, "wrap_miopenT5LayerNormForward", "compute");
   MIOPEN_CHECK(miopenT5LayerNormForward(
       handle, MIOPEN_ELEMENTWISE_AFFINE_T5, c->xDesc, input, c->weightDesc,
       scale, epsilon, c->yDesc, output, c->rstdDesc, rstd_buf));
+  HIPDNN_EP_PROFILE_END(state, "wrap_miopenT5LayerNormForward", "compute");
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_miopenT5LayerNormForward: completed successfully\n");

@@ -4,6 +4,7 @@
  */
 #include "debug_log.h"
 #include "hip_cleanup.h"
+#include "hipdnn_ep_profiler.h"
 #include "hipdnn_ep_runtime.h"
 #include "runtime_state_internal.h"
 
@@ -320,12 +321,14 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   }
 
   // H2D transfer
+  HIPDNN_EP_PROFILE_BEGIN(state, "tensor_h2d", "h2d");
   if (hipMemcpyAsync(gpu_ptr, tensor->data, size_bytes, hipMemcpyHostToDevice,
                      static_cast<hipStream_t>(state->stream)) != hipSuccess) {
     fprintf(stderr, "hipdnn_ep_tensor_prepare_input: H2D transfer failed\n");
     HIP_CLEANUP(hipFree(gpu_ptr));
     return HIPDNN_EP_ERR_H2D_TRANSFER_FAILED;
   }
+  HIPDNN_EP_PROFILE_END(state, "tensor_h2d", "h2d");
 
   // PERF: accumulate H2D bytes
   if (hipdnn_ep_perf_enabled()) {
@@ -467,6 +470,7 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
   }
 
   // D2H transfer (async -- sync happens once after all outputs)
+  HIPDNN_EP_PROFILE_BEGIN(state, "tensor_d2h_sync", "d2h");
   if (hipMemcpyAsync(buffer->host_ptr, buffer->gpu_ptr, buffer->size_bytes,
                      hipMemcpyDeviceToHost,
                      static_cast<hipStream_t>(state->stream)) != hipSuccess) {
@@ -474,6 +478,7 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
     result = HIPDNN_EP_ERR_D2H_TRANSFER_FAILED;
     // Continue to cleanup even on error (best-effort)
   }
+  HIPDNN_EP_PROFILE_END(state, "tensor_d2h_sync", "d2h");
 
   // PERF: accumulate D2H bytes
   if (hipdnn_ep_perf_enabled()) {

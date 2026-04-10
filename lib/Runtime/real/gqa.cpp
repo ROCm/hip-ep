@@ -4,6 +4,7 @@
  */
 
 #include "../debug_log.h"
+#include "../hipdnn_ep_profiler.h"
 #include "../hipdnn_ep_runtime.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
@@ -660,11 +661,13 @@ int wrap_group_query_attention(
       static_cast<int>(has_rope), static_cast<int>(has_local_window),
       static_cast<int>(has_smooth_softmax));
 
+  HIPDNN_EP_PROFILE_BEGIN(state, "wrap_group_query_attention", "compute");
   int rc = gqa_forward_hipblaslt(
       state, stream, ltHandle, query, key, value, past_key, past_value,
       cos_cache, sin_cache, head_sink, has_smooth_softmax, output, present_key,
       present_value, batch_size, seq_len_q, seq_len_kv, num_heads, kv_num_heads,
       head_dim, scale, do_rotary, local_window_size);
+  HIPDNN_EP_PROFILE_END(state, "wrap_group_query_attention", "compute");
 
   if (rc != 0) {
     fprintf(stderr, "wrap_group_query_attention: gqa_forward failed (rc=%d)\n",

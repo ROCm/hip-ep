@@ -47,6 +47,11 @@ struct RuntimeState {
   void *workspace;
   size_t workspace_size;
 
+  // GPU profiler state (see hipdnn_ep_profiler.h).
+  // Allocated by hipdnn_ep_profiler_init() when HIPDNN_EP_ENABLE_PROFILING
+  // is compiled in and HIPDNN_EP_PROFILE env var is set.
+  void *profiler;
+
   // hipDNN graph execution support.
   // Set by EP via hipdnn_graph_runtime_attach() after inference_init().
   // hipdnn_handle: hipdnnHandle_t cast to void* (owned by EP, not cleaned up
