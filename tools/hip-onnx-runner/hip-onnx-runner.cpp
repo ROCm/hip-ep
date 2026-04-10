@@ -37,6 +37,7 @@ Options:
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -176,6 +177,129 @@ static float fp16_bits_to_float(uint16_t h) {
   float f;
   std::memcpy(&f, &v, sizeof(f));
   return f;
+}
+
+static uint32_t float_bits_as_u32(float f) {
+  uint32_t u;
+  std::memcpy(&u, &f, sizeof(u));
+  return u;
+}
+
+static float u32_as_float_bits(uint32_t u) {
+  float f;
+  std::memcpy(&f, &u, sizeof(f));
+  return f;
+}
+
+// float32 -> IEEE binary16 bits (same layout as Ort::Float16_t / ONNX FLOAT16).
+// Non-intrinsic path from FP16 (Marat Dukhan, MIT license).
+static uint16_t float_to_fp16_bits(float f) {
+  const uint32_t kScaleToInfBits = 0x77800000u;  // 0x1.0p+112f
+  const uint32_t kScaleToZeroBits = 0x08800000u; // 0x1.0p-110f
+  const float scale_to_inf = u32_as_float_bits(kScaleToInfBits);
+  const float scale_to_zero = u32_as_float_bits(kScaleToZeroBits);
+
+  const float saturated_f = std::fabs(f) * scale_to_inf;
+  float base = saturated_f * scale_to_zero;
+
+  const uint32_t w = float_bits_as_u32(f);
+  const uint32_t shl1_w = w + w;
+  const uint32_t sign = w & 0x80000000u;
+  uint32_t bias = shl1_w & 0xFF000000u;
+  if (bias < 0x71000000u)
+    bias = 0x71000000u;
+
+  base = u32_as_float_bits((bias >> 1) + 0x07800000u) + base;
+  const uint32_t bits = float_bits_as_u32(base);
+  const uint32_t exp_bits = (bits >> 13) & 0x00007C00u;
+  const uint32_t mantissa_bits = bits & 0x00000FFFu;
+  const uint32_t nonsign = exp_bits + mantissa_bits;
+
+  if (shl1_w > 0xFF000000u)
+    return static_cast<uint16_t>((sign >> 16) | 0x7E00u);
+  return static_cast<uint16_t>((sign >> 16) | nonsign);
+}
+
+// Random fill matching element type (do not reinterpret float bits as int/fp16).
+// Integers: uniform over the full representable range of each type. Float32/fp16:
+// keep a modest interval (same order as the old float-only path) to avoid
+// surprising huge magnitudes in models that expect bounded inputs.
+static void fill_random_input_buffer(char *dst, size_t nbytes,
+                                   ONNXTensorElementDataType et,
+                                   std::mt19937 &rng) {
+  std::uniform_real_distribution<float> fdist(-256.0f, 255.0f);
+  std::uniform_int_distribution<int> idist_i16(-32768, 32767);
+  std::uniform_int_distribution<int> idist_i8(-128, 127);
+  std::uniform_int_distribution<int> idist_u8(0, 255);
+  std::uniform_int_distribution<int> idist_u16(0, 65535);
+  std::uniform_int_distribution<uint32_t> idist_u32(0u, UINT32_MAX-1000);
+  std::uniform_int_distribution<uint64_t> idist_u64(0ull, ~0ull);
+
+  switch (et) {
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: {
+    auto *p = reinterpret_cast<float *>(dst);
+    const size_t n = nbytes / sizeof(float);
+    for (size_t i = 0; i < n; ++i)
+      p[i] = fdist(rng);
+    return;
+  }
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: {
+    auto *p = reinterpret_cast<uint16_t *>(dst);
+    const size_t n = nbytes / sizeof(uint16_t);
+    for (size_t i = 0; i < n; ++i)
+      p[i] = float_to_fp16_bits(fdist(rng));
+    return;
+  }
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64: {
+    auto *p = reinterpret_cast<int64_t *>(dst);
+    const size_t n = nbytes / sizeof(int64_t);
+    for (size_t i = 0; i < n; ++i) {
+      const uint64_t u = idist_u64(rng);
+      std::memcpy(&p[i], &u, sizeof(p[i]));
+    }
+    return;
+  }
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32: {
+    auto *p = reinterpret_cast<int32_t *>(dst);
+    const size_t n = nbytes / sizeof(int32_t);
+    for (size_t i = 0; i < n; ++i) {
+      const uint32_t u = idist_u32(rng);
+      std::memcpy(&p[i], &u, sizeof(p[i]));
+    }
+    return;
+  }
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16: {
+    auto *p = reinterpret_cast<int16_t *>(dst);
+    const size_t n = nbytes / sizeof(int16_t);
+    for (size_t i = 0; i < n; ++i)
+      p[i] = static_cast<int16_t>(idist_i16(rng));
+    return;
+  }
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8: {
+    auto *p = reinterpret_cast<int8_t *>(dst);
+    const size_t n = nbytes / sizeof(int8_t);
+    for (size_t i = 0; i < n; ++i)
+      p[i] = static_cast<int8_t>(idist_i8(rng));
+    return;
+  }
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8: {
+    auto *p = reinterpret_cast<uint8_t *>(dst);
+    const size_t n = nbytes / sizeof(uint8_t);
+    for (size_t i = 0; i < n; ++i)
+      p[i] = static_cast<uint8_t>(idist_u8(rng));
+    return;
+  }
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16: {
+    auto *p = reinterpret_cast<uint16_t *>(dst);
+    const size_t n = nbytes / sizeof(uint16_t);
+    for (size_t i = 0; i < n; ++i)
+      p[i] = static_cast<uint16_t>(idist_u16(rng));
+    return;
+  }
+  default:
+    std::cerr << "Unsupported element type for random fill: " << et << "\n";
+    std::exit(1);
+  }
 }
 
 static std::filesystem::path
@@ -768,7 +892,6 @@ int main(int argc, char *argv[]) {
   // Build input tensors (from files or random)
   std::vector<std::vector<char>> input_buffers(input_count);
   std::vector<Ort::Value> input_tensors;
-  std::uniform_real_distribution<float> dist(-256.0f, 255.0f);
 
   for (size_t i = 0; i < input_count; ++i) {
     auto shape = input_shapes[i];
@@ -793,11 +916,8 @@ int main(int argc, char *argv[]) {
       std::cout << "Loaded input " << i << " from " << bin_path.string()
                 << "\n";
     } else {
-      // Fill as float (reinterpreted for other types; sufficient for random
-      // test use).
-      auto *fdata = reinterpret_cast<float *>(input_buffers[i].data());
-      std::generate(fdata, fdata + (input_buffers[i].size() / sizeof(float)),
-                    [&] { return dist(rng); });
+      fill_random_input_buffer(input_buffers[i].data(), input_buffers[i].size(),
+                               input_types[i], rng);
     }
 
     Ort::MemoryInfo mem =
