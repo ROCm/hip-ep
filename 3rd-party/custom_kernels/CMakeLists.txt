@@ -57,3 +57,13 @@ install(TARGETS hip_custom_kernels
 )
 
 message(STATUS "[custom_kernels] Will install hip_custom_kernels.lib to \${CMAKE_INSTALL_PREFIX}/lib")
+
+# Unit tests for custom kernels
+if(BUILD_TESTING)
+  hip_add_executable(test_matmul_nbits_gemv
+      test/test_matmul_nbits_gemv.hip
+      INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+  target_link_libraries(test_matmul_nbits_gemv PRIVATE hip_custom_kernels)
+  add_test(NAME matmul_nbits_gemv COMMAND test_matmul_nbits_gemv)
+endif()
