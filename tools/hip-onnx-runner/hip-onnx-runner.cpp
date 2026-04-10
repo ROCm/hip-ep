@@ -220,19 +220,19 @@ static uint16_t float_to_fp16_bits(float f) {
   return static_cast<uint16_t>((sign >> 16) | nonsign);
 }
 
-// Random fill matching element type (do not reinterpret float bits as int/fp16).
-// Integers: uniform over the full representable range of each type. Float32/fp16:
-// keep a modest interval (same order as the old float-only path) to avoid
-// surprising huge magnitudes in models that expect bounded inputs.
+// Random fill matching element type (do not reinterpret float bits as
+// int/fp16). Integers: uniform over the full representable range of each type.
+// Float32/fp16: keep a modest interval (same order as the old float-only path)
+// to avoid surprising huge magnitudes in models that expect bounded inputs.
 static void fill_random_input_buffer(char *dst, size_t nbytes,
-                                   ONNXTensorElementDataType et,
-                                   std::mt19937 &rng) {
+                                     ONNXTensorElementDataType et,
+                                     std::mt19937 &rng) {
   std::uniform_real_distribution<float> fdist(-256.0f, 255.0f);
   std::uniform_int_distribution<int> idist_i16(-32768, 32767);
   std::uniform_int_distribution<int> idist_i8(-128, 127);
   std::uniform_int_distribution<int> idist_u8(0, 255);
   std::uniform_int_distribution<int> idist_u16(0, 65535);
-  std::uniform_int_distribution<uint32_t> idist_u32(0u, UINT32_MAX-1000);
+  std::uniform_int_distribution<uint32_t> idist_u32(0u, UINT32_MAX - 1000);
   std::uniform_int_distribution<uint64_t> idist_u64(0ull, ~0ull);
 
   switch (et) {
