@@ -146,6 +146,9 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
     # Always add root directory for public headers
     list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}")
 
+    # Shared project headers (timing.h, etc.)
+    list(APPEND COMPILE_FLAGS "-I" "${CMAKE_SOURCE_DIR}/include")
+
     # Add morphizen-foundation headers
     list(APPEND COMPILE_FLAGS "-I" "${MORPHIZEN_FOUNDATION_INCLUDE_DIR}")
 

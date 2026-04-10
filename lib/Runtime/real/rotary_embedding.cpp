@@ -9,9 +9,9 @@
 
 #include <cstdio>
 
-// =============================================================================
+//===----------------------------------------------------------------------===//
 // RotaryEmbedding via custom HIP kernel
-// =============================================================================
+//===----------------------------------------------------------------------===//
 //
 // The HipToLLVM lowering passes flat element counts (input_num_elements,
 // cos_cache_num_elements) rather than decomposed shape dimensions.
@@ -29,7 +29,7 @@
 // We treat the input as [num_positions, num_heads, head_dim] with batch=1,
 // seq_len=num_positions. This linearization is correct for any batch size
 // because the kernel indexes position_ids linearly.
-// =============================================================================
+//===----------------------------------------------------------------------===//
 
 int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           void *cos_cache, void *sin_cache, void *output,

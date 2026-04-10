@@ -12,10 +12,12 @@
 #include "hip_custom_kernels.h"
 
 static constexpr int GQA_THREADS = 256;
+static constexpr int WAVE_SIZE = 32;  // RDNA wave32; not portable to CDNA/wave64
+static constexpr float LOG2E = 1.4426950408889634f;
 
-// =========================================================================
+//===----------------------------------------------------------------------===//
 // Algorithm: ONNX com.microsoft.GroupQueryAttention
-// =========================================================================
+//===----------------------------------------------------------------------===//
 //
 // This module implements the device kernels for the ONNX Runtime
 // GroupQueryAttention (GQA) contrib operator as specified in
@@ -166,7 +168,7 @@ static constexpr int GQA_THREADS = 256;
 //  d_Vexp, d_S -------[Step 10: Value GEMM]-----------> d_O
 //  d_O ---------------[Step 11: Transpose]-------------> d_Obshd (output)
 //
-// =========================================================================
+//===----------------------------------------------------------------------===//
 
 // -------------------------------------------------------------------------
 // Step 1-2: RoPE -- Rotary Positional Embedding (half-rotated)
@@ -191,7 +193,7 @@ __global__ void rope_kernel(
     int seq_len, int num_heads, int head_dim,
     int half_rot, int past_len) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  int batch_idx = blockIdx.y;
+  const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
   int elems = seq_len * num_heads * half_rot;
   if (idx >= elems) return;
 
@@ -227,7 +229,7 @@ __global__ void transpose_mid_dims_kernel(
     const __half* __restrict__ src,
     __half* __restrict__ dst,
     int dim1, int dim2, int D) {
-  int batch_idx = blockIdx.y;
+  const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int per_batch = dim1 * dim2 * D;
   if (idx >= per_batch) return;
@@ -264,7 +266,7 @@ __global__ void kv_cache_append_kernel(
     const __half* __restrict__ src,
     __half* __restrict__ cache,
     int sq, int G, int d, int present_seq, int past_len) {
-  int batch_idx = blockIdx.y;
+  const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int total_per_batch = sq * G * d;
   if (idx >= total_per_batch) return;
@@ -303,7 +305,7 @@ __global__ void kv_cache_concat_kernel(
     __half* __restrict__ present,
     int past_len, int sq, int G, int d,
     int past_seq, int present_seq) {
-  int batch_idx = blockIdx.y;
+  const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int total_seq = past_len + sq;
   int total_per_batch = total_seq * G * d;
@@ -346,8 +348,8 @@ __global__ void expand_kv_kernel(
     int src_stride,
     int dst_stride,
     int copy_elems) {
-  int h = blockIdx.x;
-  int g = h / heads_per_group;
+  const int h = __builtin_amdgcn_readfirstlane(blockIdx.x);
+  const int g = __builtin_amdgcn_readfirstlane(h / heads_per_group);
   int idx = blockIdx.y * blockDim.x + threadIdx.x;
   if (idx < copy_elems) {
     dst[(size_t)h * dst_stride + idx] =
@@ -403,7 +405,7 @@ __global__ void causal_mask_kernel(
     __half* __restrict__ S,
     int skv, int sq, int batch_stride, int past_len,
     int local_window_size) {
-  int head = blockIdx.y;
+  const int head = __builtin_amdgcn_readfirstlane(blockIdx.y);
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int total = skv * sq;
   if (idx >= total) return;
@@ -434,48 +436,85 @@ __global__ void causal_mask_kernel(
 // Uses shared memory for parallel max-reduction and sum-reduction.
 // -------------------------------------------------------------------------
 
+// Warp-level reduction helpers (RDNA wave32)
+
+__device__ __forceinline__ float warp_reduce_max(float val) {
+  val = fmaxf(val, __shfl_xor(val, 16));
+  val = fmaxf(val, __shfl_xor(val, 8));
+  val = fmaxf(val, __shfl_xor(val, 4));
+  val = fmaxf(val, __shfl_xor(val, 2));
+  val = fmaxf(val, __shfl_xor(val, 1));
+  return val;
+}
+
+__device__ __forceinline__ float warp_reduce_sum(float val) {
+  val += __shfl_xor(val, 16);
+  val += __shfl_xor(val, 8);
+  val += __shfl_xor(val, 4);
+  val += __shfl_xor(val, 2);
+  val += __shfl_xor(val, 1);
+  return val;
+}
+
+// Column-wise Softmax in-place
+// One threadblock per (head, query) pair.
+// Uses warp shuffles for intra-wave reductions and LDS only for cross-wave.
+// Uses exp2f(x * LOG2E) instead of expf(x) for native HW instruction.
+
 __global__ void softmax_inplace_kernel(
     __half* data, int rows, int cols, int batch_stride,
     const __half* head_sink, int num_heads, int use_smooth_softmax) {
-  int linear = blockIdx.x;
-  int head = linear / cols;
-  int col = linear % cols;
+  const int linear = __builtin_amdgcn_readfirstlane(blockIdx.x);
+  const int head = __builtin_amdgcn_readfirstlane(linear / cols);
+  const int col  = __builtin_amdgcn_readfirstlane(linear % cols);
   __half* col_ptr = data + (size_t)head * batch_stride + (size_t)col * rows;
+
+  const int tid = threadIdx.x;
+  const int wave_id = tid / WAVE_SIZE;
+  const int num_waves = blockDim.x / WAVE_SIZE;
 
   extern __shared__ float smem[];
 
+  // Pass 1: find max
   float local_max = -INFINITY;
-  for (int i = threadIdx.x; i < rows; i += blockDim.x)
+  for (int i = tid; i < rows; i += blockDim.x)
     local_max = fmaxf(local_max, __half2float(col_ptr[i]));
-  smem[threadIdx.x] = local_max;
-  __syncthreads();
-  for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-    if (threadIdx.x < (unsigned)s)
-      smem[threadIdx.x] = fmaxf(smem[threadIdx.x], smem[threadIdx.x + s]);
-    __syncthreads();
-  }
-  float max_val = smem[0];
+
+  local_max = warp_reduce_max(local_max);
+  if (tid % WAVE_SIZE == 0)
+    smem[wave_id] = local_max;
   __syncthreads();
 
+  if (tid < WAVE_SIZE) {
+    float v = (tid < num_waves) ? smem[tid] : -INFINITY;
+    v = warp_reduce_max(v);
+    smem[0] = v;
+  }
+  __syncthreads();
+  float max_val = smem[0];
+
+  // Pass 2: exp2f + sum
   float local_sum = 0.0f;
-  for (int i = threadIdx.x; i < rows; i += blockDim.x) {
-    float e = expf(__half2float(col_ptr[i]) - max_val);
+  for (int i = tid; i < rows; i += blockDim.x) {
+    float e = exp2f((__half2float(col_ptr[i]) - max_val) * LOG2E);
     col_ptr[i] = __float2half(e);
     local_sum += e;
   }
-  smem[threadIdx.x] = local_sum;
-  __syncthreads();
-  for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-    if (threadIdx.x < (unsigned)s)
-      smem[threadIdx.x] += smem[threadIdx.x + s];
-    __syncthreads();
-  }
-  float sum_val = smem[0];
+
+  local_sum = warp_reduce_sum(local_sum);
+  if (tid % WAVE_SIZE == 0)
+    smem[wave_id] = local_sum;
   __syncthreads();
 
+  if (tid < WAVE_SIZE) {
+    float v = (tid < num_waves) ? smem[tid] : 0.0f;
+    v = warp_reduce_sum(v);
+    smem[0] = v;
+  }
+  __syncthreads();
+  float sum_val = smem[0];
+
   // Smooth softmax: add exp(s - max) to the denominator.
-  // When head_sink is provided, s = head_sink[h] (per-head factor).
-  // When head_sink is null but use_smooth_softmax is set, s = 0 (ORT default).
   if (head_sink != nullptr) {
     int actual_head = head % num_heads;
     float s = __half2float(head_sink[actual_head]);
@@ -485,13 +524,13 @@ __global__ void softmax_inplace_kernel(
   }
 
   float inv_sum = 1.0f / sum_val;
-  for (int i = threadIdx.x; i < rows; i += blockDim.x)
+  for (int i = tid; i < rows; i += blockDim.x)
     col_ptr[i] = __float2half(__half2float(col_ptr[i]) * inv_sum);
 }
 
-// =============================================================================
+//===----------------------------------------------------------------------===//
 // Extern "C" Launchers (thin wrappers, ordered by pipeline step)
-// =============================================================================
+//===----------------------------------------------------------------------===//
 
 // Step 1-2: RoPE
 extern "C" int hip_gqa_rope(
@@ -614,10 +653,397 @@ extern "C" int hip_gqa_softmax_inplace(
   int threads = 32;
   while (threads < std::min(rows, 256)) threads *= 2;
   if (threads > 256) threads = 256;
+  int num_waves = threads / WAVE_SIZE;
   softmax_inplace_kernel<<<total_head_queries, threads,
-                           threads * sizeof(float), stream>>>(
+                           num_waves * sizeof(float), stream>>>(
       static_cast<__half*>(data),
       rows, cols, batch_stride,
       static_cast<const __half*>(head_sink), num_heads, use_smooth_softmax);
   return hipSuccess;
+}
+
+//===----------------------------------------------------------------------===//
+// WMMA types for fused kernels (RDNA 3 / 3.5, wave32)
+//===----------------------------------------------------------------------===//
+
+static constexpr int kWmmaTile = 16;  // RDNA 3 WMMA tile dimension (16x16x16)
+
+typedef _Float16 half16 __attribute__((ext_vector_type(16)));
+typedef float    float8 __attribute__((ext_vector_type(8)));
+#define HALF16(pointer) (reinterpret_cast<half16*>((void *)&(pointer))[0])
+
+//===----------------------------------------------------------------------===//
+// Fused GQA Decode Kernel (sq == 1, d in {64, 128, 256})
+//===----------------------------------------------------------------------===//
+//
+// Single-token decode attention: one block per (batch, head_q), D threads.
+// Each thread owns one element of the d-dimensional head.
+//
+// Algorithm:
+//   For each KV cache position s in [0, skv):
+//     1. Cooperative dot product Q[tid] * K[s,tid] via warp shuffle reduction
+//        + cross-wave LDS reduction (NUM_WAVES partial sums)
+//     2. Online softmax in log2e space: score *= scale * LOG2E, then exp2f
+//     3. Accumulate weighted V: acc += softmax_weight * V[s,tid]
+//
+// Assumes RDNA wave32 (__shfl_xor with masks 16,8,4,2,1).
+// Reads Q in BSHD layout, KV cache in BNSD layout.
+
+template <int D>
+__global__ void __launch_bounds__(D)
+fused_gqa_decode_kernel(
+    const __half* __restrict__ Q_roped,
+    const __half* __restrict__ Kcache,
+    const __half* __restrict__ Vcache,
+    __half* __restrict__ O,
+    int H, int G, int d, int skv, int max_seq,
+    float scale)
+{
+    constexpr int NUM_WAVES = D / WAVE_SIZE;
+
+    const int head_q  = __builtin_amdgcn_readfirstlane(blockIdx.x % H);
+    const int batch   = __builtin_amdgcn_readfirstlane(blockIdx.x / H);
+    const int head_kv = __builtin_amdgcn_readfirstlane(head_q / (H / G));
+    const int tid     = threadIdx.x;
+    const int wave_id = tid / WAVE_SIZE;
+    const int lane_id = tid % WAVE_SIZE;
+
+    __shared__ float smem[NUM_WAVES];
+
+    const float scale_log2e = scale * LOG2E;
+
+    const float Q_val = __half2float(Q_roped[(batch * H + head_q) * d + tid]);
+
+    const size_t kv_base = (size_t)__builtin_amdgcn_readfirstlane(
+        (unsigned)((batch * G + head_kv) * max_seq)) * d;
+
+    float m = -INFINITY;
+    float l = 0.0f;
+    float O_acc = 0.0f;
+
+    for (int t = 0; t < skv; ++t) {
+        float dot = Q_val * __half2float(Kcache[kv_base + (size_t)t * d + tid]);
+
+        dot += __shfl_xor(dot, 16);
+        dot += __shfl_xor(dot, 8);
+        dot += __shfl_xor(dot, 4);
+        dot += __shfl_xor(dot, 2);
+        dot += __shfl_xor(dot, 1);
+
+        if (lane_id == 0)
+            smem[wave_id] = dot;
+        __syncthreads();
+
+        float score = 0.0f;
+        for (int w = 0; w < NUM_WAVES; ++w)
+            score += smem[w];
+        score *= scale_log2e;
+
+        __syncthreads();
+
+        float m_new = fmaxf(m, score);
+        float correction = exp2f(m - m_new);
+        float p = exp2f(score - m_new);
+        l = correction * l + p;
+
+        float V_val = __half2float(Vcache[kv_base + (size_t)t * d + tid]);
+        O_acc = correction * O_acc + p * V_val;
+        m = m_new;
+    }
+
+    O_acc /= fmaxf(l, 1e-6f);
+    O[(batch * H + head_q) * d + tid] = __float2half(O_acc);
+}
+
+//===----------------------------------------------------------------------===//
+// Fused GQA Prefill Kernel (sq > 1, Flash Attention 2 with WMMA)
+//===----------------------------------------------------------------------===//
+// Grid: (num_q_tiles * B, H). Block: 128 threads = 4 waves of 32.
+// WMMA 16x16x16 tile GEMMs, online softmax with exp2f, double-buffered KV.
+
+static constexpr int PREFILL_BQ   = 32;
+static constexpr int PREFILL_D    = 128;
+static constexpr int PREFILL_DSTR = 130;
+
+template<int BKV_T>
+__global__ void __launch_bounds__(128)
+fused_gqa_prefill_kernel(
+    const __half* __restrict__ Q_roped,
+    const __half* __restrict__ Kcache,
+    const __half* __restrict__ Vcache,
+    __half* __restrict__ O,
+    int B_count, int H, int G, int sq, int skv, int max_seq, int past_len,
+    float scale)
+{
+    constexpr int BQ    = PREFILL_BQ;
+    constexpr int BKV   = BKV_T;
+    constexpr int D     = PREFILL_D;
+    constexpr int DSTR  = PREFILL_DSTR;
+    constexpr int S_STR = BKV + 1;
+    constexpr int P_STR = BKV + 2;
+
+    const int num_q_tiles = (sq + BQ - 1) / BQ;
+    const int q_tile_idx  = __builtin_amdgcn_readfirstlane(blockIdx.x % num_q_tiles);
+    const int batch       = __builtin_amdgcn_readfirstlane(blockIdx.x / num_q_tiles);
+    const int head_q      = __builtin_amdgcn_readfirstlane(blockIdx.y);
+    const int head_kv     = __builtin_amdgcn_readfirstlane(head_q / (H / G));
+    const int q_start     = q_tile_idx * BQ;
+
+    const int tid     = threadIdx.x;
+    const int wave_id = tid / 32;
+    const int lane_id = tid % 32;
+    const int wmma_lane = lane_id % kWmmaTile;
+    const int pair      = lane_id / kWmmaTile;
+
+    extern __shared__ char smem_prefill[];
+    _Float16* Q_lds    = (_Float16*)(smem_prefill);
+    _Float16* KV_lds0  = (_Float16*)(smem_prefill + BQ * DSTR * 2);
+    _Float16* KV_lds1  = (_Float16*)(smem_prefill + (BQ + BKV) * DSTR * 2);
+    float*    S_lds    = (float*)(smem_prefill + (BQ + 2 * BKV) * DSTR * 2);
+    _Float16* P_lds    = (_Float16*)(smem_prefill + (BQ + 2 * BKV) * DSTR * 2 + BQ * S_STR * 4);
+    float*    ml_lds   = (float*)(smem_prefill + (BQ + 2 * BKV) * DSTR * 2 + BQ * S_STR * 4 + BQ * P_STR * 2);
+    _Float16* KV_bufs[2] = { KV_lds0, KV_lds1 };
+
+    const size_t kv_base = (size_t)__builtin_amdgcn_readfirstlane(
+        (unsigned)((batch * G + head_kv) * max_seq)) * D;
+
+    for (int i = tid; i < BQ * D; i += 128) {
+        int row = i / D, col = i % D;
+        int q_pos = q_start + row;
+        _Float16 val = 0;
+        if (q_pos < sq)
+            val = (_Float16)Q_roped[((size_t)(batch * sq + q_pos) * H + head_q) * D + col];
+        Q_lds[row * DSTR + col] = val;
+    }
+
+    if (tid < BQ) {
+        ml_lds[tid * 3]     = -INFINITY;
+        ml_lds[tid * 3 + 1] = 0.0f;
+        ml_lds[tid * 3 + 2] = 0.0f;
+    }
+
+    const int o_tile_i = wave_id / 2;
+    const int o_tile_j_base = (wave_id % 2) * 4;
+    float8 O_frag[4] = {};
+
+    __syncthreads();
+
+    {
+        for (int i = tid; i < BKV * D; i += 128) {
+            int row = i / D, col = i % D;
+            _Float16 val = 0;
+            if (row < skv)
+                val = (_Float16)Kcache[kv_base + (size_t)row * D + col];
+            KV_bufs[0][row * DSTR + col] = val;
+        }
+    }
+    __syncthreads();
+
+    int kv_iter = 0;
+    for (int kv_start = 0; kv_start < skv; kv_start += BKV, ++kv_iter) {
+        if (sq > 1 && kv_start > past_len + q_start + BQ - 1) break;
+
+        _Float16* K_buf = KV_bufs[kv_iter & 1];
+        _Float16* V_buf = KV_bufs[1 - (kv_iter & 1)];
+
+        {
+            constexpr int S_TILES_J = BKV / 16;
+            constexpr int TILES_PER_WAVE = S_TILES_J / 2;
+            const int s_tile_i = wave_id / 2;
+            const int s_tile_j_base = (wave_id % 2) * TILES_PER_WAVE;
+
+            for (int tj_off = 0; tj_off < TILES_PER_WAVE; ++tj_off) {
+                int sj = s_tile_j_base + tj_off;
+                float8 s_frag = {};
+                for (int tk = 0; tk < D / 16; tk += 2) {
+                    half16 q0 = HALF16(Q_lds[(s_tile_i * 16 + wmma_lane) * DSTR + tk * 16]);
+                    half16 k0 = HALF16(K_buf[(sj * 16 + wmma_lane) * DSTR + tk * 16]);
+                    half16 q1 = HALF16(Q_lds[(s_tile_i * 16 + wmma_lane) * DSTR + (tk + 1) * 16]);
+                    half16 k1 = HALF16(K_buf[(sj * 16 + wmma_lane) * DSTR + (tk + 1) * 16]);
+                    s_frag = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(q0, k0, s_frag);
+                    s_frag = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(q1, k1, s_frag);
+                }
+
+                for (int ele = 0; ele < 8; ++ele) {
+                    int r = s_tile_i * 16 + ele * 2 + pair;
+                    int c = sj * 16 + wmma_lane;
+                    S_lds[r * S_STR + c] = s_frag[ele] * scale;
+                }
+            }
+        }
+        __syncthreads();
+
+        for (int i = tid; i < BKV * D; i += 128) {
+            int row = i / D, col = i % D;
+            int kv_pos = kv_start + row;
+            _Float16 val = 0;
+            if (kv_pos < skv)
+                val = (_Float16)Vcache[kv_base + (size_t)kv_pos * D + col];
+            V_buf[row * DSTR + col] = val;
+        }
+
+        {
+            const int row = tid / 4;
+            const int col_grp = tid % 4;
+            const int col_start = col_grp * (BKV / 4);
+            const int q_pos = q_start + row;
+
+            const bool tile_fully_visible =
+                (kv_start + BKV - 1 <= past_len + q_start);
+
+            if (!tile_fully_visible) {
+                for (int c = 0; c < BKV / 4; ++c) {
+                    int kv_pos = kv_start + col_start + c;
+                    if (kv_pos >= skv || (sq > 1 && kv_pos > past_len + q_pos))
+                        S_lds[row * S_STR + col_start + c] = -INFINITY;
+                }
+            }
+
+            float local_max = -INFINITY;
+            for (int c = 0; c < BKV / 4; ++c)
+                local_max = fmaxf(local_max, S_lds[row * S_STR + col_start + c]);
+            local_max = fmaxf(local_max, __shfl_xor(local_max, 1));
+            local_max = fmaxf(local_max, __shfl_xor(local_max, 2));
+            float row_max = local_max;
+
+            float m_old = ml_lds[row * 3];
+            float l_old = ml_lds[row * 3 + 1];
+            float m_new = fmaxf(m_old, row_max);
+            float correction = exp2f(m_old - m_new);
+
+            float local_sum = 0.0f;
+            for (int c = 0; c < BKV / 4; ++c) {
+                float p_val = exp2f(S_lds[row * S_STR + col_start + c] - m_new);
+                local_sum += p_val;
+                P_lds[row * P_STR + col_start + c] = (_Float16)p_val;
+            }
+            local_sum += __shfl_xor(local_sum, 1);
+            local_sum += __shfl_xor(local_sum, 2);
+
+            float l_new = correction * l_old + local_sum;
+            if (col_grp == 0) {
+                ml_lds[row * 3]     = m_new;
+                ml_lds[row * 3 + 1] = l_new;
+                ml_lds[row * 3 + 2] = correction;
+            }
+        }
+        __syncthreads();
+
+        for (int t = 0; t < 4; ++t) {
+            for (int ele = 0; ele < 8; ++ele) {
+                int r = o_tile_i * 16 + ele * 2 + pair;
+                O_frag[t][ele] *= ml_lds[r * 3 + 2];
+            }
+        }
+
+        {
+            for (int tj_off = 0; tj_off < 4; ++tj_off) {
+                int tj = o_tile_j_base + tj_off;
+
+                for (int tk = 0; tk < BKV / 16; tk += 2) {
+                    half16 p0 = HALF16(P_lds[(o_tile_i * 16 + wmma_lane) * P_STR + tk * 16]);
+                    half16 v0;
+                    for (int e = 0; e < 16; ++e)
+                        v0[e] = V_buf[(tk * 16 + e) * DSTR + tj * 16 + wmma_lane];
+
+                    half16 p1 = HALF16(P_lds[(o_tile_i * 16 + wmma_lane) * P_STR + (tk + 1) * 16]);
+                    half16 v1;
+                    for (int e = 0; e < 16; ++e)
+                        v1[e] = V_buf[((tk + 1) * 16 + e) * DSTR + tj * 16 + wmma_lane];
+
+                    O_frag[tj_off] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                        p0, v0, O_frag[tj_off]);
+                    O_frag[tj_off] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                        p1, v1, O_frag[tj_off]);
+                }
+            }
+        }
+
+        __syncthreads();
+
+        {
+            int next_kv = kv_start + BKV;
+            bool need_next = (next_kv < skv) &&
+                !(sq > 1 && next_kv > past_len + q_start + BQ - 1);
+            if (need_next) {
+                for (int i = tid; i < BKV * D; i += 128) {
+                    int row = i / D, col = i % D;
+                    int kv_pos = next_kv + row;
+                    _Float16 val = 0;
+                    if (kv_pos < skv)
+                        val = (_Float16)Kcache[kv_base + (size_t)kv_pos * D + col];
+                    V_buf[row * DSTR + col] = val;
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    for (int t = 0; t < 4; ++t) {
+        int tj = o_tile_j_base + t;
+        for (int ele = 0; ele < 8; ++ele) {
+            int r = o_tile_i * 16 + ele * 2 + pair;
+            int c = tj * 16 + wmma_lane;
+            int q_pos = q_start + r;
+            if (q_pos < sq && c < D) {
+                float l_val = fmaxf(ml_lds[r * 3 + 1], 1e-6f);
+                float out_val = O_frag[t][ele] / l_val;
+                O[((size_t)(batch * sq + q_pos) * H + head_q) * D + c] = __float2half(out_val);
+            }
+        }
+    }
+}
+
+// Fused decode launcher -- dispatches to the template matching d
+extern "C" int hip_gqa_fused_decode(
+    void* stream_ptr, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int H, int G, int d, int skv, int max_seq,
+    float scale) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  dim3 grid(B * H, 1);
+  const __half* hQ = static_cast<const __half*>(Q);
+  const __half* hK = static_cast<const __half*>(Kcache);
+  const __half* hV = static_cast<const __half*>(Vcache);
+  __half* hO = static_cast<__half*>(O);
+  switch (d) {
+    case 64:
+      fused_gqa_decode_kernel<64><<<grid, 64, 0, stream>>>(
+          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale);
+      break;
+    case 128:
+      fused_gqa_decode_kernel<128><<<grid, 128, 0, stream>>>(
+          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale);
+      break;
+    case 256:
+      fused_gqa_decode_kernel<256><<<grid, 256, 0, stream>>>(
+          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale);
+      break;
+    default:
+      fprintf(stderr, "hip_gqa_fused_decode: unsupported d=%d "
+              "(must be 64, 128, or 256)\n", d);
+      return -1;
+  }
+  return hipSuccess;
+}
+
+// Fused prefill launcher
+extern "C" int hip_gqa_fused_prefill(
+    void* stream_ptr, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int H, int G, int sq, int skv, int max_seq, int past_len,
+    float scale) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  constexpr int BKV = 32;
+  int num_q_tiles = (sq + PREFILL_BQ - 1) / PREFILL_BQ;
+  dim3 grid(num_q_tiles * B, H);
+  size_t smem = (PREFILL_BQ + 2 * BKV) * PREFILL_DSTR * 2
+              + PREFILL_BQ * (BKV + 1) * 4
+              + PREFILL_BQ * (BKV + 2) * 2
+              + PREFILL_BQ * 3 * 4;
+  fused_gqa_prefill_kernel<BKV><<<grid, 128, smem, stream>>>(
+      static_cast<const __half*>(Q),
+      static_cast<const __half*>(Kcache),
+      static_cast<const __half*>(Vcache),
+      static_cast<__half*>(O),
+      B, H, G, sq, skv, max_seq, past_len, scale);
+  return hipGetLastError();
 }

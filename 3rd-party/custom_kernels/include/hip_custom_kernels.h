@@ -201,6 +201,26 @@ int hip_gqa_softmax_inplace(
     int batch_stride, const void* head_sink, int num_heads,
     int use_smooth_softmax);
 
+/* Fused GQA decode (sq == 1, d in {64, 128, 256}): single-token attention
+ * via cooperative dot product + online softmax in log2e space, one block
+ * per (batch, head_q) with D threads (D == d).
+ * Replaces steps 3, 6-11 of the decomposed pipeline.
+ * Returns -1 for unsupported d values.
+ * NOTE: assumes wave32 (RDNA); not portable to CDNA/wave64 without changes
+ * to the warp shuffle reduction tree. */
+int hip_gqa_fused_decode(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int H, int G, int d, int skv, int max_seq,
+    float scale);
+
+/* Fused GQA prefill (sq > 1, d == 128): Flash Attention 2 with WMMA
+ * tile GEMMs and online softmax. Double-buffered KV tiles, causal mask.
+ * Replaces steps 3, 6-11 of the decomposed pipeline. */
+int hip_gqa_fused_prefill(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int H, int G, int sq, int skv, int max_seq, int past_len,
+    float scale);
+
 /* =========================================================================
  * Cast (Element Type Conversion)
  * =========================================================================
@@ -410,6 +430,33 @@ int hip_qmoe_scatter_add(
     int64_t width,
     int64_t count,
     int64_t element_size_bytes);
+
+/* =========================================================================
+ * WMMA GEMM (Small-M Matrix Multiply via Wave Matrix Multiply-Accumulate)
+ * =========================================================================
+ *
+ * Computes C[M,N] = A[M,K] * B[K,N] using RDNA 3+ WMMA instructions.
+ * FP16 inputs, FP32 accumulation, FP16 output. All matrices row-major.
+ *
+ * Designed for M <= 512 where hipBLASLt's register-heavy tiling (256 VGPRs,
+ * 4/16 occupancy) underperforms. This kernel targets ~30 VGPRs and 16/16
+ * occupancy via 16x16 WMMA tiles.
+ *
+ * Requires K and N to be multiples of 16.
+ *
+ * Parameters:
+ *   stream - hipStream_t cast to void*
+ *   A      - GPU pointer to activation matrix [M, K] row-major (fp16)
+ *   B      - GPU pointer to weight matrix [K, N] row-major (fp16)
+ *   C      - GPU pointer to output matrix [M, N] (fp16)
+ *   M      - number of rows in A / output
+ *   K      - inner dimension (reduction axis), must be multiple of 16
+ *   N      - number of columns in B / output, must be multiple of 16
+ *
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
+                       void* C, int M, int K, int N);
 
 #ifdef __cplusplus
 }

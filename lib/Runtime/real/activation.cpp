@@ -4,16 +4,16 @@
  */
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
+#include "cache_utils.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
 
 #include <cstdio>
+#include <functional>
+#include <unordered_map>
 
-// Convenience wrappers for goto cleanup pattern (all functions use 'cleanup'
-// label)
-#define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
-
-static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type) {
+static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type, bool &ok) {
+  ok = true;
   switch (data_type) {
   case HIPDNN_EP_DATATYPE_FLOAT:
     return miopenFloat;
@@ -24,13 +24,14 @@ static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type) {
   default:
     fprintf(stderr, "[REAL] unsupported data_type %lld for MIOpen\n",
             (long long)data_type);
+    ok = false;
     return miopenFloat;
   }
 }
 
-// Maps HIPDNN_EP_ACTIVATION_* to miopenActivationMode_t.
-// MIOpen calls sigmoid "logistic" (miopenActivationLOGISTIC).
-static miopenActivationMode_t hipdnn_ep_to_miopen_activation(int64_t mode) {
+static miopenActivationMode_t hipdnn_ep_to_miopen_activation(int64_t mode,
+                                                             bool &ok) {
+  ok = true;
   switch (mode) {
   case HIPDNN_EP_ACTIVATION_SIGMOID:
     return miopenActivationLOGISTIC;
@@ -41,18 +42,103 @@ static miopenActivationMode_t hipdnn_ep_to_miopen_activation(int64_t mode) {
   default:
     fprintf(stderr, "[REAL] unsupported activation_mode %lld for MIOpen\n",
             (long long)mode);
+    ok = false;
     return miopenActivationLOGISTIC;
   }
 }
 
-// =============================================================================
+//===----------------------------------------------------------------------===//
+// Descriptor cache: 2 tensor descriptors + 1 activation descriptor created
+// once per unique (num_elements, data_type, activation_mode) triple and
+// reused for the process lifetime.
+//===----------------------------------------------------------------------===//
+
+struct ActivationCacheKey {
+  int64_t num_elements, data_type, activation_mode;
+  bool operator==(const ActivationCacheKey &o) const {
+    return num_elements == o.num_elements && data_type == o.data_type &&
+           activation_mode == o.activation_mode;
+  }
+};
+
+struct ActivationCacheKeyHash {
+  size_t operator()(const ActivationCacheKey &k) const {
+    size_t h = 0;
+    hash_combine_val(h, k.num_elements);
+    hash_combine_val(h, k.data_type);
+    hash_combine_val(h, k.activation_mode);
+    return h;
+  }
+};
+
+/// Cached MIOpen descriptors for a single activation shape.
+/// Ownership: descriptors are created in queryOrCreateActivation() and live
+/// for the process lifetime (never destroyed individually).
+struct ActivationCacheEntry {
+  miopenTensorDescriptor_t inDesc, outDesc;
+  miopenActivationDescriptor_t actDesc;
+};
+
+static std::unordered_map<ActivationCacheKey, ActivationCacheEntry,
+                          ActivationCacheKeyHash>
+    g_activation_cache;
+
+static const ActivationCacheEntry *
+queryOrCreateActivation(const ActivationCacheKey &key) {
+  auto it = g_activation_cache.find(key);
+  if (it != g_activation_cache.end())
+    return &it->second;
+
+  bool type_ok, act_ok;
+  miopenDataType_t dt = hipdnn_ep_to_miopen_type(key.data_type, type_ok);
+  miopenActivationMode_t act =
+      hipdnn_ep_to_miopen_activation(key.activation_mode, act_ok);
+  if (!type_ok || !act_ok)
+    return nullptr;
+  int n = static_cast<int>(key.num_elements);
+
+  ActivationCacheEntry e{};
+  int result = 0;
+
+  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&e.inDesc), cache_fail);
+  MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&e.outDesc), cache_fail);
+  MIOPEN_CHECK_GOTO(miopenSet4dTensorDescriptor(e.inDesc, dt, 1, 1, 1, n),
+                    cache_fail);
+  MIOPEN_CHECK_GOTO(miopenSet4dTensorDescriptor(e.outDesc, dt, 1, 1, 1, n),
+                    cache_fail);
+  MIOPEN_CHECK_GOTO(miopenCreateActivationDescriptor(&e.actDesc), cache_fail);
+  MIOPEN_CHECK_GOTO(
+      miopenSetActivationDescriptor(e.actDesc, act, 0.0, 0.0, 0.0), cache_fail);
+  goto cache_done;
+
+cache_fail:
+  if (e.actDesc)
+    miopenDestroyActivationDescriptor(e.actDesc);
+  if (e.outDesc)
+    miopenDestroyTensorDescriptor(e.outDesc);
+  if (e.inDesc)
+    miopenDestroyTensorDescriptor(e.inDesc);
+  return nullptr;
+
+cache_done:
+  auto [ins, _] = g_activation_cache.emplace(key, e);
+
+  RUNTIME_DEBUG_LOG("[REAL] queryOrCreateActivation: cached 2 tensor + 1 act "
+                    "desc for num_elements=%lld data_type=%lld mode=%lld\n",
+                    (long long)key.num_elements, (long long)key.data_type,
+                    (long long)key.activation_mode);
+
+  return &ins->second;
+}
+
+//===----------------------------------------------------------------------===//
 // Generic MIOpen Activation Forward
-// =============================================================================
+//===----------------------------------------------------------------------===//
 //
 // Applies activation_mode element-wise using miopenActivationForward.
 // Tensor is represented as flat 1D [1, 1, 1, num_elements] to satisfy
 // miopenSet4dTensorDescriptor's 4D requirement.
-// =============================================================================
+//===----------------------------------------------------------------------===//
 
 int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
@@ -79,54 +165,26 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
     return -1;
   }
 
-  miopenDataType_t miopen_type = hipdnn_ep_to_miopen_type(data_type);
-  miopenActivationMode_t miopen_act =
-      hipdnn_ep_to_miopen_activation(activation_mode);
+  ActivationCacheKey key{num_elements, data_type, activation_mode};
+  const ActivationCacheEntry *c = queryOrCreateActivation(key);
+  if (!c) {
+    fprintf(stderr, "[REAL] wrap_miopenActivationForward: descriptor cache "
+                    "creation failed\n");
+    return -1;
+  }
 
-  // Initialize all resource pointers to nullptr for safe cleanup
-  miopenTensorDescriptor_t inDesc = nullptr;
-  miopenTensorDescriptor_t outDesc = nullptr;
-  miopenActivationDescriptor_t actDesc = nullptr;
-  int result = 0;
   float alpha = 1.0f, beta = 0.0f;
-
-  int n = static_cast<int>(num_elements);
-  RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_miopenActivationForward: creating tensor descriptors "
-      "[1,1,1,%d] with type %s\n",
-      n, type_name);
-
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&inDesc));
-  MIOPEN_CHECK(miopenCreateTensorDescriptor(&outDesc));
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(inDesc, miopen_type, 1, 1, 1, n));
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(outDesc, miopen_type, 1, 1, 1, n));
-  MIOPEN_CHECK(miopenCreateActivationDescriptor(&actDesc));
-  MIOPEN_CHECK(
-      miopenSetActivationDescriptor(actDesc, miopen_act, 0.0, 0.0, 0.0));
-
-  RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_miopenActivationForward: calling miopenActivationForward"
-      "(%s, alpha=%.1f, beta=%.1f)\n",
-      act_name, alpha, beta);
-
-  MIOPEN_CHECK(miopenActivationForward(handle, actDesc, &alpha, inDesc, input,
-                                       &beta, outDesc, output));
+  miopenStatus_t st = miopenActivationForward(
+      handle, c->actDesc, &alpha, c->inDesc, input, &beta, c->outDesc, output);
+  if (st != miopenStatusSuccess) {
+    fprintf(stderr,
+            "[REAL] wrap_miopenActivationForward: "
+            "miopenActivationForward failed (%d)\n",
+            st);
+    return -1;
+  }
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_miopenActivationForward: completed successfully\n");
-
-cleanup:
-  // Best-effort cleanup: free all allocated resources
-  // Continue cleanup even if individual operations fail
-  if (actDesc) {
-    miopenDestroyActivationDescriptor(actDesc);
-  }
-  if (inDesc) {
-    miopenDestroyTensorDescriptor(inDesc);
-  }
-  if (outDesc) {
-    miopenDestroyTensorDescriptor(outDesc);
-  }
-
-  return result;
+  return 0;
 }

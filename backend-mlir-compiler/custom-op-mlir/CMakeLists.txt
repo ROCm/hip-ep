@@ -31,6 +31,7 @@ target_link_libraries(${LIB_NAME} PRIVATE
 target_include_directories(${LIB_NAME} PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_BINARY_DIR}/..  # For generated protobuf headers (metadata.pb.h)
+  ${CMAKE_SOURCE_DIR}/include     # Shared project headers (timing.h, etc.)
 )
 
 # Link to EP target with whole archive to ensure registration
