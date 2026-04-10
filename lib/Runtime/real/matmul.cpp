@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "../debug_log.h"
+#include "../hipdnn_ep_profiler.h"
 #include "../hipdnn_ep_runtime.h"
 #include "cache_utils.h"
 #include "hip_custom_kernels.h"
@@ -373,6 +374,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
   float alpha = 1.0f;
   float beta = 0.0f;
 
+  HIPDNN_EP_PROFILE_BEGIN(state, "wrap_hipblasLtMatmul", "compute");
   hipblasStatus_t st =
       hipblasLtMatmul(handle, cached->desc, &alpha, B,
                       cached->layA,    // "A" = B (row->col trick)
@@ -380,6 +382,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
                       &beta, output, cached->layC, output, cached->layC,
                       const_cast<hipblasLtMatmulAlgo_t *>(&cached->algo),
                       ws_ptr, ws_size, stream);
+  HIPDNN_EP_PROFILE_END(state, "wrap_hipblasLtMatmul", "compute");
 
   if (st != HIPBLAS_STATUS_SUCCESS) {
     fprintf(stderr, "wrap_hipblasLtMatmul: hipblasLtMatmul failed (%d)\n", st);

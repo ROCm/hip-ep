@@ -7,6 +7,7 @@
 #define MIOPEN_BETA_API
 
 #include "../debug_log.h"
+#include "../hipdnn_ep_profiler.h"
 #include "../hipdnn_ep_runtime.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
@@ -238,6 +239,8 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
 
   int result = 0;
 
+  HIPDNN_EP_PROFILE_BEGIN(state, "wrap_skip_simplified_layer_norm", "compute");
+
   //===--------------------------------------------------------------------===//
   // Step 1: Element-wise add -- skip_buf = input + skip
   //===--------------------------------------------------------------------===//
@@ -284,6 +287,8 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
   MIOPEN_CHECK(miopenT5LayerNormForward(
       handle, MIOPEN_ELEMENTWISE_AFFINE_T5, c->xDesc, skip_buf, c->weightDesc,
       gamma, epsilon, c->yDesc, output, c->rstdDesc, rstd_buf));
+
+  HIPDNN_EP_PROFILE_END(state, "wrap_skip_simplified_layer_norm", "compute");
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: completed "
                     "successfully\n");

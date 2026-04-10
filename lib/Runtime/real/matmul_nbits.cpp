@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "../debug_log.h"
+#include "../hipdnn_ep_profiler.h"
 #include "../hipdnn_ep_runtime.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
@@ -42,8 +43,10 @@ int wrap_matmul_nbits(RuntimeState *state, const void *A, const void *B,
   }
 
   int result = 0;
+  HIPDNN_EP_PROFILE_BEGIN(state, "wrap_matmul_nbits", "compute");
   HIP_CHECK(hip_matmul_nbits(stream, A, B, scales, zero_points, bias, output, M,
                              N, K, batch_count, bits, block_size, elem_size));
+  HIPDNN_EP_PROFILE_END(state, "wrap_matmul_nbits", "compute");
 
 cleanup:
   return result;

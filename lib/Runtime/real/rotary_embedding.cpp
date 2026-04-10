@@ -4,6 +4,7 @@
  */
 
 #include "../debug_log.h"
+#include "../hipdnn_ep_profiler.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
 
@@ -70,11 +71,13 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
       (long long)rotary_dim, (long long)max_seq_len, (long long)interleaved,
       (long long)element_size_bytes);
 
+  HIPDNN_EP_PROFILE_BEGIN(state, "wrap_rotary_embedding", "compute");
   int rc = hip_rope_forward(
       stream, input, position_ids, cos_cache, sin_cache, output,
       /*batch_size=*/1,
       /*seq_len=*/num_positions, num_heads, head_dim, rotary_dim, max_seq_len,
       interleaved, element_size_bytes);
+  HIPDNN_EP_PROFILE_END(state, "wrap_rotary_embedding", "compute");
 
   if (rc != 0) {
     fprintf(stderr, "wrap_rotary_embedding: hip_rope_forward failed (rc=%d)\n",
