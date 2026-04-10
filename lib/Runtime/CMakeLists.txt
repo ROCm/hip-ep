@@ -94,6 +94,9 @@ message(STATUS "Found morphizen-foundation: ${MORPHIZEN_FOUNDATION_INCLUDE_DIR}"
 # Default to Mock runtime (no GPU required)
 option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
 
+# GPU profiling instrumentation (hipEvent-based, default OFF for zero overhead)
+option(HIPDNN_EP_ENABLE_PROFILING "Enable GPU profiling instrumentation" OFF)
+
 if(NOT BUILD_MOCK_RUNTIME)
     # Try to find ROCm components
     # Accept THEROCK_DIST from either CMake variable or environment variable
@@ -191,6 +194,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
                 $<$<NOT:$<CONFIG:Debug>>:-DNDEBUG>
                 $<$<NOT:$<CONFIG:Debug>>:-D_ITERATOR_DEBUG_LEVEL=0>
                 $<$<NOT:$<CONFIG:Debug>>:-O2>
+                $<$<BOOL:${HIPDNN_EP_ENABLE_PROFILING}>:-DHIPDNN_EP_ENABLE_PROFILING>
                 ${COMPILE_FLAGS}
                 ${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE}
                 -o ${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_BC}
@@ -206,6 +210,7 @@ endmacro()
 # Compile shared implementation files
 compile_to_bitcode(hipdnn_ep_runtime_state.cpp runtime_state.bc)
 compile_to_bitcode(hipdnn_ep_runtime_tensor.cpp runtime_tensor.bc)
+compile_to_bitcode(hipdnn_ep_profiler.cpp runtime_profiler.bc)
 
 # Compile implementation-specific files
 if(NOT BUILD_MOCK_RUNTIME)
@@ -231,6 +236,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_profiler.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_hip.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_miopen.bc
@@ -258,6 +264,7 @@ else()
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_profiler.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_mock.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc

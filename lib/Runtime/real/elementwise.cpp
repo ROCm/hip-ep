@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "../debug_log.h"
+#include "../hipdnn_ep_profiler.h"
 #include "../hipdnn_ep_runtime.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
@@ -226,9 +227,11 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
                     "(op=%s, alpha1=%.1f, alpha2=%.1f, beta=%.1f)\n",
                     op_name, alpha1, alpha2, beta);
 
+  HIPDNN_EP_PROFILE_BEGIN(state, "wrap_miopenOpTensor", "compute");
   miopenStatus_t st =
       miopenOpTensor(handle, miopen_op, &alpha1, c->aDesc, lhs, &alpha2,
                      c->bDesc, rhs, &beta, c->cDesc, output);
+  HIPDNN_EP_PROFILE_END(state, "wrap_miopenOpTensor", "compute");
   if (st != miopenStatusSuccess) {
     fprintf(stderr, "wrap_miopenOpTensor: miopenOpTensor failed (%d)\n", st);
     return -1;
