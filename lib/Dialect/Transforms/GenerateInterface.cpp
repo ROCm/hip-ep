@@ -785,15 +785,17 @@ private:
       LLVM::StoreOp::create(builder, loc, memrefPtr, arraySlot);
     }
 
-    // Call @main with arrays of pointers
-    Block *mainSuccessBlock = funcOp.addBlock();
+    // Call @main_graph with arrays of pointers
+    Block *mainSuccessBlock;
 
     auto mainFunc = module.lookupSymbol<LLVM::LLVMFuncOp>("main_graph");
     if (!mainFunc) {
+      mainSuccessBlock = funcOp.addBlock();
       COMPILER_DEBUG_LOG(
           "[GenerateInterface] Warning: @main_graph not found\n");
       LLVM::BrOp::create(builder, loc, mainSuccessBlock);
     } else {
+      mainSuccessBlock = funcOp.addBlock();
       emitErrorCheckedCall(
           builder, loc, mainFunc,
           ValueRange{state, inputMemrefArray, outputMemrefArray}, errorCodePtr,

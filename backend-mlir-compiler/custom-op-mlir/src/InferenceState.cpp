@@ -6,9 +6,12 @@
 
 // CRITICAL: morphizen.hpp must be included before other morphizen headers
 #include "../../common/temp_path.hpp"
+#include "hip/timing.h"
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
 #include "morphizen/plugin.hpp"
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <glog/logging.h>
@@ -46,6 +49,9 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes,
                        morphizen::FileSystem *fs) {
   MY_LOG(1) << "Loading inference plugin from memory...";
 
+  auto t0 = timing_now();
+  auto t_prev = t0;
+
   // Write DLL to temp file (morphizen::Plugin loads from file path)
   std::string dll_path =
       mlir_compiler_utils::generateTempPath(artifactExtension());
@@ -62,6 +68,9 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes,
     dll_out.close();
   }
 
+  TIMING_LOG("[Session] Write DLL to temp file: %.3fs (%zu bytes)\n",
+             record_elapsed(t_prev), dll_bytes.size());
+
   // Load plugin using morphizen infrastructure (factory pattern)
   // Pass path without extension — Plugin::guess_name adds platform-correct
   // suffix
@@ -76,6 +85,9 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes,
         << " - check that the file exists and all dependencies are available";
   }
 
+  TIMING_LOG("[Session] Plugin::create (LoadLibrary): %.3fs\n",
+             record_elapsed(t_prev));
+
   // inference_init(void** out_state, void* fs) — the DLL needs a FileSystem
   // to resolve and load model constants from the EPContext archive.
   auto init_fn = plugin->get_method<int, void **, void *>("inference_init");
@@ -84,11 +96,18 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes,
                << " - DLL loaded successfully but symbol is missing";
   }
 
+  TIMING_LOG("[Session] get_method (symbol lookup): %.3fs\n",
+             record_elapsed(t_prev));
+
   void *state = nullptr;
   int ret = init_fn(&state, static_cast<void *>(fs));
   if (ret != 0) {
     LOG(FATAL) << "inference_init() failed with code: " << ret;
   }
+
+  TIMING_LOG("[Session] inference_init: %.3fs\n", record_elapsed(t_prev));
+  TIMING_LOG("[Session] InferenceState::create total: %.3fs\n",
+             elapsed_since(t0));
 
   MY_LOG(1) << "Inference state initialized";
 

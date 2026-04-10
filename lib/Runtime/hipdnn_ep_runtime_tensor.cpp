@@ -3,20 +3,104 @@
  * Licensed under the MIT License.
  */
 #include "debug_log.h"
+#include "hip_cleanup.h"
 #include "hipdnn_ep_runtime.h"
 #include "runtime_state_internal.h"
 
+#include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <unordered_map>
+#include <vector>
 
-// Macro for best-effort cleanup: logs errors but continues cleanup
-#define HIP_CLEANUP(expr)                                                      \
-  do {                                                                         \
-    hipError_t _err = (expr);                                                  \
-    if (_err != hipSuccess) {                                                  \
-      fprintf(stderr, "Warning: " #expr " failed with error %d\n", (int)_err); \
-    }                                                                          \
-  } while (0)
+// Fallback element size when tensor metadata is missing (covers fp32).
+static constexpr size_t kDefaultElementSize = 4;
+//===----------------------------------------------------------------------===//
+// Per-Inference Performance Measurement (gated on HIPDNN_EP_PERF)
+//===----------------------------------------------------------------------===//
+// Records hipEvents on the GPU stream at phase boundaries to measure:
+//   H2D  = time for all host-to-device async copies
+//   Compute = time for main_graph GPU kernel dispatches
+//   D2H  = time for all device-to-host async copies + stream sync
+//
+// Phase boundaries are detected by tracking the first call to each function
+// type in the per-inference sequence:
+//   prepare_input(0)  -> H2D start
+//   prepare_output(0) -> H2D end / compute start
+//   finalize_output(0)-> compute end / D2H start
+//   stream_sync()     -> D2H end, then log results
+
+struct PerfState {
+  hipEvent_t h2d_start = nullptr;
+  hipEvent_t h2d_end = nullptr;
+  hipEvent_t d2h_start = nullptr;
+  hipEvent_t d2h_end = nullptr;
+  size_t h2d_bytes = 0;
+  size_t h2d_count = 0;
+  size_t d2h_bytes = 0;
+  size_t d2h_count = 0;
+  unsigned inference_num = 0;
+  bool initialized = false;
+};
+static PerfState g_perf;
+
+static void perf_ensure_events() {
+  if (g_perf.initialized)
+    return;
+  if (hipEventCreate(&g_perf.h2d_start) != hipSuccess ||
+      hipEventCreate(&g_perf.h2d_end) != hipSuccess ||
+      hipEventCreate(&g_perf.d2h_start) != hipSuccess ||
+      hipEventCreate(&g_perf.d2h_end) != hipSuccess) {
+    fprintf(stderr, "[PERF] WARNING: hipEventCreate failed, disabling PERF\n");
+    if (g_perf.h2d_start) {
+      (void)hipEventDestroy(g_perf.h2d_start);
+      g_perf.h2d_start = nullptr;
+    }
+    if (g_perf.h2d_end) {
+      (void)hipEventDestroy(g_perf.h2d_end);
+      g_perf.h2d_end = nullptr;
+    }
+    if (g_perf.d2h_start) {
+      (void)hipEventDestroy(g_perf.d2h_start);
+      g_perf.d2h_start = nullptr;
+    }
+    if (g_perf.d2h_end) {
+      (void)hipEventDestroy(g_perf.d2h_end);
+      g_perf.d2h_end = nullptr;
+    }
+    return;
+  }
+  g_perf.initialized = true;
+}
+
+//===----------------------------------------------------------------------===//
+// GPU Tensor Buffer Pool
+//===----------------------------------------------------------------------===//
+// Reuses GPU allocations across inferences to eliminate per-call
+// hipMalloc/hipFree overhead. Safe because tensor shapes (and therefore sizes)
+// are fixed across inferences for a given model.
+
+static std::unordered_map<size_t, std::vector<void *>> g_gpu_buffer_pool;
+
+static void *pool_alloc(size_t size_bytes) {
+  assert(size_bytes > 0 && "pool_alloc: size_bytes must be positive");
+  auto it = g_gpu_buffer_pool.find(size_bytes);
+  if (it != g_gpu_buffer_pool.end() && !it->second.empty()) {
+    void *ptr = it->second.back();
+    it->second.pop_back();
+    return ptr;
+  }
+  void *ptr = nullptr;
+  if (hipMalloc(&ptr, size_bytes) != hipSuccess)
+    return nullptr;
+  return ptr;
+}
+
+static void pool_release(void *ptr, size_t size_bytes) {
+  assert(size_bytes > 0 && "pool_release: size_bytes must be positive");
+  if (ptr)
+    g_gpu_buffer_pool[size_bytes].push_back(ptr);
+}
 
 // Element size is read from tensor_t.element_size (set by EP caller)
 
@@ -58,11 +142,11 @@ static size_t calculateTensorSize(const int64_t *shape, size_t rank,
   // Calculate total number of elements with overflow check
   size_t total_elements = 1;
   for (size_t i = 0; i < rank; i++) {
-    if (total_elements > SIZE_MAX / (size_t)shape[i]) {
+    if (total_elements > SIZE_MAX / static_cast<size_t>(shape[i])) {
       fprintf(stderr, "Tensor size overflow at dimension %zu\n", i);
       return 0;
     }
-    total_elements *= (size_t)shape[i];
+    total_elements *= static_cast<size_t>(shape[i]);
   }
 
   if (total_elements > SIZE_MAX / element_size) {
@@ -143,7 +227,7 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   RUNTIME_DEBUG_LOG(
       "[Runtime DEBUG] tensor_t struct memory dump (address=%p):\n",
       (void *)tensor);
-  unsigned char *bytes = (unsigned char *)tensor;
+  auto *bytes = reinterpret_cast<unsigned char *>(tensor);
   for (size_t i = 0; i < sizeof(tensor_t); i++) {
     RUNTIME_DEBUG_LOG("  [%02zu] = 0x%02x\n", i, bytes[i]);
   }
@@ -198,9 +282,9 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   if (element_size == 0) {
     fprintf(stderr,
             "hipdnn_ep_tensor_prepare_input: tensor[%zu].element_size is 0, "
-            "defaulting to 4\n",
-            index);
-    element_size = 4;
+            "defaulting to %zu\n",
+            index, kDefaultElementSize);
+    element_size = kDefaultElementSize;
   }
 
   // Calculate buffer size
@@ -215,13 +299,24 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
       "size_bytes=%zu\n",
       index, tensor->rank, element_size, size_bytes);
 
-  // Allocate GPU buffer
-  void *gpu_ptr = nullptr;
-  if (hipMalloc(&gpu_ptr, size_bytes) != hipSuccess) {
+  // Allocate GPU buffer (pool reuses across inferences)
+  void *gpu_ptr = pool_alloc(size_bytes);
+  if (!gpu_ptr) {
     fprintf(stderr,
             "hipdnn_ep_tensor_prepare_input: failed to allocate %zu bytes\n",
             size_bytes);
     return HIPDNN_EP_ERR_GPU_ALLOC_FAILED;
+  }
+
+  // PERF: record H2D start on first input
+  if (hipdnn_ep_perf_enabled() && index == 0) {
+    perf_ensure_events();
+    g_perf.h2d_bytes = 0;
+    g_perf.h2d_count = 0;
+    g_perf.d2h_bytes = 0;
+    g_perf.d2h_count = 0;
+    (void)hipEventRecord(g_perf.h2d_start,
+                         static_cast<hipStream_t>(state->stream));
   }
 
   // H2D transfer
@@ -230,6 +325,12 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
     fprintf(stderr, "hipdnn_ep_tensor_prepare_input: H2D transfer failed\n");
     HIP_CLEANUP(hipFree(gpu_ptr));
     return HIPDNN_EP_ERR_H2D_TRANSFER_FAILED;
+  }
+
+  // PERF: accumulate H2D bytes
+  if (hipdnn_ep_perf_enabled()) {
+    g_perf.h2d_bytes += size_bytes;
+    g_perf.h2d_count++;
   }
 
   // Populate output buffer
@@ -302,9 +403,9 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
   if (element_size == 0) {
     fprintf(stderr,
             "hipdnn_ep_tensor_prepare_output: tensor[%zu].element_size is 0, "
-            "defaulting to 4\n",
-            index);
-    element_size = 4;
+            "defaulting to %zu\n",
+            index, kDefaultElementSize);
+    element_size = kDefaultElementSize;
   }
 
   // Calculate buffer size
@@ -319,9 +420,15 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
       "size_bytes=%zu\n",
       index, tensor->rank, element_size, size_bytes);
 
-  // Allocate GPU buffer
-  void *gpu_ptr = nullptr;
-  if (hipMalloc(&gpu_ptr, size_bytes) != hipSuccess) {
+  // PERF: record H2D end on first output alloc (after all H2D copies queued)
+  if (hipdnn_ep_perf_enabled() && index == 0 && g_perf.initialized) {
+    (void)hipEventRecord(g_perf.h2d_end,
+                         static_cast<hipStream_t>(state->stream));
+  }
+
+  // Allocate GPU buffer (pool reuses across inferences)
+  void *gpu_ptr = pool_alloc(size_bytes);
+  if (!gpu_ptr) {
     fprintf(stderr,
             "hipdnn_ep_tensor_prepare_output: failed to allocate %zu bytes\n",
             size_bytes);
@@ -353,7 +460,13 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
 
   int result = HIPDNN_EP_SUCCESS;
 
-  // D2H transfer
+  // PERF: record D2H start on first output finalize (after all compute)
+  if (hipdnn_ep_perf_enabled() && g_perf.d2h_count == 0 && g_perf.initialized) {
+    (void)hipEventRecord(g_perf.d2h_start,
+                         static_cast<hipStream_t>(state->stream));
+  }
+
+  // D2H transfer (async -- sync happens once after all outputs)
   if (hipMemcpyAsync(buffer->host_ptr, buffer->gpu_ptr, buffer->size_bytes,
                      hipMemcpyDeviceToHost,
                      static_cast<hipStream_t>(state->stream)) != hipSuccess) {
@@ -362,23 +475,63 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
     // Continue to cleanup even on error (best-effort)
   }
 
-  // Stream sync
-  if (hipStreamSynchronize(static_cast<hipStream_t>(state->stream)) !=
-      hipSuccess) {
-    fprintf(stderr, "hipdnn_ep_tensor_finalize_output: stream sync failed\n");
-    if (result == HIPDNN_EP_SUCCESS) {
-      result = HIPDNN_EP_ERR_STREAM_SYNC_FAILED;
-    }
-    // Continue to cleanup even on error (best-effort)
+  // PERF: accumulate D2H bytes
+  if (hipdnn_ep_perf_enabled()) {
+    g_perf.d2h_bytes += buffer->size_bytes;
+    g_perf.d2h_count++;
   }
 
-  // Free buffer if not pooled
-  if (!buffer->is_pooled && buffer->gpu_ptr) {
-    HIP_CLEANUP(hipFree(buffer->gpu_ptr));
-    buffer->gpu_ptr = nullptr;
-  }
+  // Return buffer to pool
+  pool_release(buffer->gpu_ptr, buffer->size_bytes);
+  buffer->gpu_ptr = nullptr;
 
   return result;
+}
+
+// Synchronize GPU stream once (called after all finalize_output calls).
+int hipdnn_ep_stream_sync(RuntimeState *state) {
+  if (!state) {
+    fprintf(stderr, "hipdnn_ep_stream_sync: null state\n");
+    return HIPDNN_EP_ERR_NULL_POINTER;
+  }
+
+  // PERF: record D2H end event (after all D2H copies queued)
+  if (hipdnn_ep_perf_enabled() && g_perf.initialized) {
+    (void)hipEventRecord(g_perf.d2h_end,
+                         static_cast<hipStream_t>(state->stream));
+  }
+
+  if (hipStreamSynchronize(static_cast<hipStream_t>(state->stream)) !=
+      hipSuccess) {
+    fprintf(stderr, "hipdnn_ep_stream_sync: stream sync failed\n");
+    return HIPDNN_EP_ERR_STREAM_SYNC_FAILED;
+  }
+
+  // PERF: compute and log timing breakdown
+  if (hipdnn_ep_perf_enabled() && g_perf.initialized) {
+    float h2d_ms = 0, compute_ms = 0, d2h_ms = 0;
+    (void)hipEventElapsedTime(&h2d_ms, g_perf.h2d_start, g_perf.h2d_end);
+    (void)hipEventElapsedTime(&compute_ms, g_perf.h2d_end, g_perf.d2h_start);
+    (void)hipEventElapsedTime(&d2h_ms, g_perf.d2h_start, g_perf.d2h_end);
+    float total_ms = h2d_ms + compute_ms + d2h_ms;
+
+    g_perf.inference_num++;
+    fprintf(stderr,
+            "[PERF] inference #%u:\n"
+            "  H2D:     %zu tensors, %zu bytes (%.1f MB), %.2f ms\n"
+            "  Compute: %.2f ms\n"
+            "  D2H:     %zu tensors, %zu bytes (%.1f MB), %.2f ms\n"
+            "  Total:   %.2f ms  (H2D %.1f%% | Compute %.1f%% | D2H %.1f%%)\n",
+            g_perf.inference_num, g_perf.h2d_count, g_perf.h2d_bytes,
+            (double)g_perf.h2d_bytes / (1024.0 * 1024.0), h2d_ms, compute_ms,
+            g_perf.d2h_count, g_perf.d2h_bytes,
+            (double)g_perf.d2h_bytes / (1024.0 * 1024.0), d2h_ms, total_ms,
+            total_ms > 0 ? (h2d_ms / total_ms * 100.0) : 0.0,
+            total_ms > 0 ? (compute_ms / total_ms * 100.0) : 0.0,
+            total_ms > 0 ? (d2h_ms / total_ms * 100.0) : 0.0);
+  }
+
+  return HIPDNN_EP_SUCCESS;
 }
 
 // Release input tensor buffer (no D2H transfer needed)
@@ -388,33 +541,36 @@ void hipdnn_ep_tensor_free_input(RuntimeState *state, TensorBuffer *buffer) {
     return;
   }
 
-  // Free buffer if not pooled
-  if (!buffer->is_pooled && buffer->gpu_ptr) {
-    HIP_CLEANUP(hipFree(buffer->gpu_ptr));
-    buffer->gpu_ptr = nullptr;
-  }
+  // Return buffer to pool
+  pool_release(buffer->gpu_ptr, buffer->size_bytes);
+  buffer->gpu_ptr = nullptr;
 }
 
-//==============================================================================
+//===----------------------------------------------------------------------===//
 // TensorBuffer Field Accessors (Opaque Pattern)
-//==============================================================================
+//===----------------------------------------------------------------------===//
 
 void *hipdnn_ep_tensor_buffer_get_gpu_ptr(TensorBuffer *buffer) {
+  assert(buffer && "get_gpu_ptr: null buffer");
   return buffer ? buffer->gpu_ptr : nullptr;
 }
 
 void *hipdnn_ep_tensor_buffer_get_host_ptr(TensorBuffer *buffer) {
+  assert(buffer && "get_host_ptr: null buffer");
   return buffer ? buffer->host_ptr : nullptr;
 }
 
 int64_t *hipdnn_ep_tensor_buffer_get_shape_ptr(TensorBuffer *buffer) {
+  assert(buffer && "get_shape_ptr: null buffer");
   return buffer ? buffer->shape_ptr : nullptr;
 }
 
 size_t hipdnn_ep_tensor_buffer_get_rank(TensorBuffer *buffer) {
+  assert(buffer && "get_rank: null buffer");
   return buffer ? buffer->rank : 0;
 }
 
 size_t hipdnn_ep_tensor_buffer_get_size_bytes(TensorBuffer *buffer) {
+  assert(buffer && "get_size_bytes: null buffer");
   return buffer ? buffer->size_bytes : 0;
 }

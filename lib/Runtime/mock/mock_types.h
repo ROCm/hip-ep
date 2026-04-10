@@ -7,6 +7,7 @@
 
 // Mock type definitions for testing without GPU
 typedef void *hipStream_t;
+typedef void *hipEvent_t;
 typedef void *miopenHandle_t;
 typedef void *hipblasLtHandle_t;
 typedef int hipError_t;
@@ -42,6 +43,12 @@ extern "C" hipError_t hipMemcpy(void *dst, const void *src, size_t size,
                                 int kind);
 extern "C" hipError_t hipMemcpyAsync(void *dst, const void *src, size_t size,
                                      int kind, hipStream_t stream);
+extern "C" hipError_t hipEventCreate(hipEvent_t *event);
+extern "C" hipError_t hipEventDestroy(hipEvent_t event);
+extern "C" hipError_t hipEventRecord(hipEvent_t event, hipStream_t stream);
+extern "C" hipError_t hipEventElapsedTime(float *ms, hipEvent_t start,
+                                          hipEvent_t stop);
+extern "C" const char *hipGetErrorString(hipError_t error);
 extern "C" miopenStatus_t miopenCreate(miopenHandle_t *handle);
 extern "C" miopenStatus_t miopenDestroy(miopenHandle_t handle);
 extern "C" miopenStatus_t miopenSetStream(miopenHandle_t handle,

@@ -10,9 +10,9 @@
 #include <hipblaslt/hipblaslt.h>
 #include <miopen/miopen.h>
 
-//==============================================================================
+//===----------------------------------------------------------------------===//
 // Error Checking Macros with Goto Cleanup Pattern
-//==============================================================================
+//===----------------------------------------------------------------------===//
 //
 // These macros provide unified error checking for GPU library calls with
 // goto-based cleanup. They replace the CHECK macros that return directly,
@@ -29,7 +29,7 @@
 //     if (desc) miopenDestroyTensorDescriptor(desc);
 //     return result;
 //
-//==============================================================================
+//===----------------------------------------------------------------------===//
 
 #define MIOPEN_CHECK_GOTO(expr, label)                                         \
   do {                                                                         \
@@ -64,28 +64,7 @@
     }                                                                          \
   } while (0)
 
-//==============================================================================
-// Best-Effort Cleanup Macro
-//==============================================================================
-//
-// This macro is used in cleanup sections where we want to log errors but
-// continue cleanup even if individual operations fail. This is appropriate
-// in error paths or teardown code where partial cleanup is better than no
-// cleanup.
-//
-// Usage:
-//   cleanup:
-//     if (buffer) HIP_CLEANUP(hipFree(buffer));
-//     if (stream) HIP_CLEANUP(hipStreamDestroy(stream));
-//
-//==============================================================================
-
-#define HIP_CLEANUP(expr)                                                      \
-  do {                                                                         \
-    hipError_t _err = (expr);                                                  \
-    if (_err != hipSuccess) {                                                  \
-      fprintf(stderr, "Warning: " #expr " failed with error %d\n", (int)_err); \
-    }                                                                          \
-  } while (0)
+// Best-effort cleanup: re-export from shared header for convenience.
+#include "../hip_cleanup.h"
 
 #endif // HIPDNN_EP_ERROR_CHECK_MACROS_H

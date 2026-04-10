@@ -14,8 +14,11 @@
 #include "OnnxToHipUtils.h"
 
 #include "hip/Support/DiskFileSystem.h"
+#include "hip/timing.h"
 #include "morphizen-foundation/file_io.hpp"
 
+#include "llvm/Support/Debug.h"
+#include "llvm/Support/FormatVariadic.h"
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4244) // Conversion warnings in LLVM JSON.h
@@ -25,6 +28,11 @@
 #pragma warning(pop)
 #endif
 #include "llvm/Support/MathExtras.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include <chrono>
+
+#define DEBUG_TYPE "convert-onnx-to-hip"
 
 namespace mlir {
 namespace hip {
@@ -489,6 +497,22 @@ struct ConvertOnnxToHipPass
 void ConvertOnnxToHipPass::runOnOperation() {
   mlir::ModuleOp module = getOperation();
   mlir::MLIRContext *ctx = module.getContext();
+  const bool timing = hipdnn_ep_timing_enabled();
+
+  auto passStart = timing_now();
+  auto phaseStart = passStart;
+
+  auto logSubpass = [&](const char *name, const char *extra = nullptr) {
+    if (!timing)
+      return;
+    double sec = record_elapsed(phaseStart);
+    if (extra)
+      llvm::errs() << "[ConvertOnnxToHipPass] " << name << ": "
+                   << llvm::format("%.3f", sec) << "s  " << extra << "\n";
+    else
+      llvm::errs() << "[ConvertOnnxToHipPass] " << name << ": "
+                   << llvm::format("%.3f", sec) << "s\n";
+  };
 
   // Set up externalization state if enabled.
   // When fileSystem_ is provided (e.g. EPContext from ORT), use it directly.
@@ -528,6 +552,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
   // Capture original function signatures as module metadata before lowering.
   if (mlir::failed(generateModuleMetadata(module)))
     return signalPassFailure();
+  logSubpass("metadata");
 
   for (auto funcOp :
        llvm::make_early_inc_range(module.getOps<mlir::func::FuncOp>())) {
@@ -539,6 +564,17 @@ void ConvertOnnxToHipPass::runOnOperation() {
     lowerOnnxReturns(funcOp);
     if (mlir::failed(convertComputeOps(funcOp, ctx)))
       return signalPassFailure();
+  }
+
+  if (timing && extState) {
+    std::string detail;
+    llvm::raw_string_ostream os(detail);
+    os << "(" << extState->constantIndex << " constants, "
+       << llvm::format("%.1f", extState->currentOffset / (1024.0 * 1024.0))
+       << " MB)";
+    logSubpass("constants + compute ops", detail.c_str());
+  } else {
+    logSubpass("constants + compute ops");
   }
 
   // Clean up onnx.NoValue and onnx.EntryPoint ops
@@ -614,6 +650,12 @@ void ConvertOnnxToHipPass::runOnOperation() {
                             << " bytes) to " << extState->binFileName << "\n");
   } else if (extState) {
     extState->writer.reset();
+  }
+  logSubpass("finalize");
+
+  if (timing) {
+    llvm::errs() << "[ConvertOnnxToHipPass] total: "
+                 << llvm::format("%.3f", elapsed_since(passStart)) << "s\n";
   }
 }
 
