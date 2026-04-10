@@ -4,6 +4,8 @@
  */
 #pragma once
 
+#include "timing.h"
+
 #include "llvm/Support/raw_ostream.h"
 #include <cstdlib>
 

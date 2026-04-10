@@ -6,9 +6,11 @@
 #include "MlirCompiler.h"
 
 // Morphizen headers
+#include "hip/timing.h"
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
-#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <glog/logging.h>
 #include <sstream>
@@ -213,8 +215,13 @@ struct Level1MlirPass {
   void process(IPass &self, Graph &graph) {
     MY_LOG(1) << "Level1MlirPass::process() called";
 
+    auto t0 = timing_now();
+    auto t_prev = t0;
+
     // Step 1: Load configuration from provider options
     auto config = load_config(self.get_context().get());
+
+    TIMING_LOG("[Session] load_config: %.3fs\n", record_elapsed(t_prev));
 
     // Step 2: Get MLIR bytecode from graph
     auto mlir_bytecode = get_mlir_bytecode(self.get_context().get(), graph);
@@ -222,6 +229,9 @@ struct Level1MlirPass {
       LOG(WARNING) << "Empty graph bytecode, skipping compilation";
       return;
     }
+
+    TIMING_LOG("[Session] MLIR bytecode serialization: %.3fs (%zu bytes)\n",
+               record_elapsed(t_prev), mlir_bytecode.size());
 
     // Step 3: Compile bytecode to artifact
     auto fs = self.get_context()->get_file_system();
@@ -232,19 +242,32 @@ struct Level1MlirPass {
     }
     CompilationArtifact artifact = *artifactOpt;
 
+    TIMING_LOG("[Session] MLIR compilation (CompilerDriver): %.3fs\n",
+               record_elapsed(t_prev));
+
     // Step 4: Write artifact to EPContext
     if (!write_artifact_to_epcontext(self.get_context().get(), artifact)) {
       return;
     }
 
+    TIMING_LOG("[Session] Write artifact to EPContext: %.3fs\n",
+               record_elapsed(t_prev));
+
     // Step 5: Build metadata JSON from graph outputs
     auto metadata_json = build_metadata_json(artifact, graph);
+
+    TIMING_LOG("[Session] Build metadata JSON: %.3fs\n",
+               record_elapsed(t_prev));
 
     // Step 6: Fuse graph into single MLIR custom op
     if (!fuse_graph(self, graph, metadata_json, artifact.filename)) {
       LOG(WARNING) << "Graph fusion failed";
       return;
     }
+
+    TIMING_LOG("[Session] Fuse graph: %.3fs\n", record_elapsed(t_prev));
+    TIMING_LOG("[Session] Level1MlirPass::process total: %.3fs\n",
+               elapsed_since(t0));
 
     MY_LOG(1) << "MLIR compilation completed: " << artifact.filename << " ("
               << artifact.bytes.size() << " bytes)";

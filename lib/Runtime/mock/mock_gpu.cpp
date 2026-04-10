@@ -61,7 +61,7 @@ extern "C" hipError_t hipGetDeviceProperties(hipDeviceProp_t *prop,
 
 // Mock HIP stream functions (non-static so test can link against them)
 extern "C" hipError_t hipStreamCreate(hipStream_t *stream) {
-  *stream = malloc(8); // Fake handle
+  *stream = malloc(sizeof(void *)); // Fake handle
   MOCK_PRINT("[MOCK] hipStreamCreate() -> %p\n", *stream);
   return hipSuccess;
 }
@@ -75,6 +75,35 @@ extern "C" hipError_t hipStreamDestroy(hipStream_t stream) {
 extern "C" hipError_t hipStreamSynchronize(hipStream_t stream) {
   MOCK_PRINT("[MOCK] hipStreamSynchronize(%p)\n", stream);
   return hipSuccess;
+}
+
+extern "C" hipError_t hipEventCreate(hipEvent_t *event) {
+  *event = malloc(sizeof(void *));
+  return hipSuccess;
+}
+
+extern "C" hipError_t hipEventDestroy(hipEvent_t event) {
+  free(event);
+  return hipSuccess;
+}
+
+extern "C" hipError_t hipEventRecord(hipEvent_t event, hipStream_t stream) {
+  (void)event;
+  (void)stream;
+  return hipSuccess;
+}
+
+extern "C" hipError_t hipEventElapsedTime(float *ms, hipEvent_t start,
+                                          hipEvent_t stop) {
+  (void)start;
+  (void)stop;
+  *ms = 0.0f;
+  return hipSuccess;
+}
+
+extern "C" const char *hipGetErrorString(hipError_t error) {
+  (void)error;
+  return "mock_error";
 }
 
 // Mock HIP memory functions (non-static for cross-module linking)
@@ -135,7 +164,7 @@ typedef enum { miopenConvolutionFwdAlgoGEMM = 0 } miopenConvFwdAlgorithm_t;
 
 // Mock MIOpen handle functions (non-static so test can link against them)
 extern "C" miopenStatus_t miopenCreate(miopenHandle_t *handle) {
-  *handle = malloc(8); // Fake handle
+  *handle = malloc(sizeof(void *)); // Fake handle
   MOCK_PRINT("[MOCK] miopenCreate() -> %p\n", *handle);
   return miopenStatusSuccess;
 }
@@ -155,7 +184,7 @@ extern "C" miopenStatus_t miopenSetStream(miopenHandle_t handle,
 // Mock MIOpen tensor descriptor functions
 static miopenStatus_t
 miopenCreateTensorDescriptor(miopenTensorDescriptor_t *desc) {
-  *desc = malloc(8); // Fake descriptor
+  *desc = malloc(sizeof(void *)); // Fake descriptor
   return miopenStatusSuccess;
 }
 
@@ -178,7 +207,7 @@ static miopenStatus_t miopenSet4dTensorDescriptor(miopenTensorDescriptor_t desc,
 // Mock MIOpen convolution descriptor functions
 static miopenStatus_t
 miopenCreateConvolutionDescriptor(miopenConvolutionDescriptor_t *desc) {
-  *desc = malloc(8); // Fake descriptor
+  *desc = malloc(sizeof(void *)); // Fake descriptor
   return miopenStatusSuccess;
 }
 
@@ -275,7 +304,7 @@ typedef enum { HIPBLAS_COMPUTE_32F = 0 } hipblasComputeType_t;
 
 // Mock hipBLASLt handle functions (non-static so test can link against them)
 extern "C" hipblasStatus_t hipblasLtCreate(hipblasLtHandle_t *handle) {
-  *handle = malloc(8); // Fake handle
+  *handle = malloc(sizeof(void *)); // Fake handle
   MOCK_PRINT("[MOCK] hipblasLtCreate() -> %p\n", *handle);
   return HIPBLAS_STATUS_SUCCESS;
 }
@@ -293,7 +322,7 @@ hipblasLtMatrixLayoutCreate(hipblasLtMatrixLayout_t *layout,
                             uint64_t cols, int64_t ld) {
   (void)type;
   (void)ld;
-  *layout = malloc(8); // Fake layout
+  *layout = malloc(sizeof(void *)); // Fake layout
   MOCK_PRINT("[MOCK]   Matrix layout: [%llu x %llu]\n",
              (unsigned long long)rows, (unsigned long long)cols);
   return HIPBLAS_STATUS_SUCCESS;
@@ -312,7 +341,7 @@ hipblasLtMatmulDescCreate(hipblasLtMatmulDesc_t *desc,
                           hipblasDatatype_t dataType) {
   (void)computeType;
   (void)dataType;
-  *desc = malloc(8); // Fake descriptor
+  *desc = malloc(sizeof(void *)); // Fake descriptor
   return HIPBLAS_STATUS_SUCCESS;
 }
 
@@ -363,7 +392,7 @@ hipblasLtMatmul(hipblasLtHandle_t handle, hipblasLtMatmulDesc_t matmul_desc,
   do {                                                                         \
     (void)(cmd);                                                               \
   } while (0)
-#define hipGetErrorString(e) "mock_error"
+// hipGetErrorString is now a real mock function declared above
 
 // Mock wrapper implementations (called from generated MLIR code)
 

@@ -13,6 +13,10 @@ add_executable(hip-onnx-runner hip-onnx-runner.cpp)
 
 target_compile_features(hip-onnx-runner PRIVATE cxx_std_17)
 
+target_include_directories(hip-onnx-runner PRIVATE
+  ${CMAKE_SOURCE_DIR}/include  # Shared project headers (timing.h, etc.)
+)
+
 target_link_libraries(hip-onnx-runner PRIVATE
   onnxruntime::onnxruntime
 )
