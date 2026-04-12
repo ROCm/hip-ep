@@ -137,10 +137,14 @@ int hip_rope_forward(
  * BNSD cache [B,G,present_seq,d] at positions [past_len .. past_len+sq).
  * present_seq is the actual sequence dimension (stride) of the present buffer,
  * which may be larger than past_len+sq if the buffer is pre-allocated.
- * Use when past and present share the same buffer (aliased / in-place). */
+ * Use when past and present share the same buffer (aliased / in-place).
+ * seqlens_k: optional device pointer [B] int32. When non-null, past_len is
+ * derived from seqlens_k[b]+1-sq (per-batch) and the host past_len is ignored.
+ * Pass NULL for host-side past_len. */
 int hip_gqa_kv_cache_append(
     void* stream, const void* src, void* cache,
-    int batch_size, int sq, int G, int d, int present_seq, int past_len);
+    int batch_size, int sq, int G, int d, int present_seq, int past_len,
+    const void* seqlens_k);
 
 /* KV cache concat: concatenate past data and new tokens into a fresh present
  * buffer.  Fills present [B,G,present_seq,d] by copying past data from
@@ -156,12 +160,15 @@ int hip_gqa_kv_cache_concat(
 
 /* Internal GQA RoPE (half-rotated, FP16):
  * out[d] = in[d]*cos - in[d+half]*sin
- * out[d+half] = in[d+half]*cos + in[d]*sin */
+ * out[d+half] = in[d+half]*cos + in[d]*sin
+ * seqlens_k: optional device pointer [B] int32. When non-null, past_len is
+ * derived from seqlens_k[b]+1-seq_len and the host past_len is ignored. */
 int hip_gqa_rope(
     void* stream, const void* input, void* output,
     const void* cos_cache, const void* sin_cache,
     int batch_size, int seq_len, int num_heads,
-    int head_dim, int half_rot, int past_len);
+    int head_dim, int half_rot, int past_len,
+    const void* seqlens_k);
 
 /* Transpose middle two dims of 4D tensor:
  * [B, dim1, dim2, D] -> [B, dim2, dim1, D] */
@@ -206,12 +213,14 @@ int hip_gqa_softmax_inplace(
  * per (batch, head_q) with D threads (D == d).
  * Replaces steps 3, 6-11 of the decomposed pipeline.
  * Returns -1 for unsupported d values.
+ * seqlens_k: optional device pointer [B] int32. When non-null, the kernel
+ * reads total_seq = seqlens_k[b]+1 as the loop bound (instead of skv).
  * NOTE: assumes wave32 (RDNA); not portable to CDNA/wave64 without changes
  * to the warp shuffle reduction tree. */
 int hip_gqa_fused_decode(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int H, int G, int d, int skv, int max_seq,
-    float scale);
+    float scale, const void* seqlens_k);
 
 /* Fused GQA prefill (sq > 1, d == 128): Flash Attention 2 with WMMA
  * tile GEMMs and online softmax. Double-buffered KV tiles, causal mask.
