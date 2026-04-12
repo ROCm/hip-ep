@@ -412,10 +412,13 @@ static int gqa_forward_hipblaslt(
                                          (int)sq, (int)H, (int)d));
 
     // ---- Steps 4-5: KV Cache Update ----
-    // Zero present buffers when past != present (separate buffers) so that
-    // the unused region [total_seq, present_seq) is deterministic, matching
-    // ORT CPU which memsets present to zero before populating valid entries.
-    if (present_key && present_value && past_key != present_key) {
+    // Zero present buffers only when there is an unused region beyond the
+    // valid token range [0, total_seq).  The concat kernel writes [0,
+    // total_seq) completely, so zeroing is redundant when total_seq >=
+    // present_seq.  This avoids 2 × memset per layer in the common case
+    // where the buffer is exactly sized (total_seq == present_seq).
+    if (present_key && present_value && past_key != present_key &&
+        total_seq < present_seq) {
       size_t present_bytes = (size_t)B * G * present_seq * d * elem_sz;
       HIP_CHECK(hipMemsetAsync(present_key, 0, present_bytes, stream));
       HIP_CHECK(hipMemsetAsync(present_value, 0, present_bytes, stream));
