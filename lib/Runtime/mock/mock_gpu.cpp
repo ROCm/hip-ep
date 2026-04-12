@@ -504,9 +504,9 @@ int wrap_group_query_attention(
     int64_t rotary_interleaved, float softcap, int64_t local_window_size,
     int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
     int64_t v_quant_type, int64_t kv_cache_bit_width,
-    // Shape values (5)
-    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv, int64_t head_dim,
-    int64_t element_size_bytes) {
+    // Shape values (6)
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_group_query_attention\n");
     return -1;
@@ -524,6 +524,7 @@ int wrap_group_query_attention(
   (void)k_quant_type;
   (void)v_quant_type;
   (void)kv_cache_bit_width;
+  (void)past_buf_seq;
   (void)present_key;
   (void)present_value;
 
@@ -535,9 +536,10 @@ int wrap_group_query_attention(
   MOCK_PRINT("[MOCK]   do_rotary=%lld, rotary_interleaved=%lld,\n",
              (long long)do_rotary, (long long)rotary_interleaved);
   MOCK_PRINT("[MOCK]   batch=%lld, seq_q=%lld, seq_kv=%lld, "
-             "head_dim=%lld, elem_size=%lld)\n",
+             "past_buf_seq=%lld, head_dim=%lld, elem_size=%lld)\n",
              (long long)batch_size, (long long)seq_len_q, (long long)seq_len_kv,
-             (long long)head_dim, (long long)element_size_bytes);
+             (long long)past_buf_seq, (long long)head_dim,
+             (long long)element_size_bytes);
 
   return 0;
 }
