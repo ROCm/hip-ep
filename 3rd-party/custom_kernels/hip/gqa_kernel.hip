@@ -191,9 +191,14 @@ __global__ void rope_kernel(
     const __half* __restrict__ cos_cache,
     const __half* __restrict__ sin_cache,
     int seq_len, int num_heads, int head_dim,
-    int half_rot, int past_len) {
+    int half_rot, int past_len,
+    const int* __restrict__ seqlens_k) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
+  // When seqlens_k is provided, read past_len from device memory
+  // (ORT convention: seqlens_k[b] = total_tokens - 1, so past_len = total - sq).
+  // All threads read the same address; hardware coalesces into a broadcast.
+  int eff_past_len = seqlens_k ? (seqlens_k[batch_idx] + 1 - seq_len) : past_len;
   int elems = seq_len * num_heads * half_rot;
   if (idx >= elems) return;
 
@@ -203,7 +208,7 @@ __global__ void rope_kernel(
   int s = remaining / num_heads;
   if (s >= seq_len) return;
 
-  int pos = past_len + s;
+  int pos = eff_past_len + s;
   int base = ((batch_idx * seq_len + s) * num_heads + h) * head_dim;
 
   float x1 = __half2float(input[base + d]);
@@ -265,8 +270,10 @@ __global__ void transpose_mid_dims_kernel(
 __global__ void kv_cache_append_kernel(
     const __half* __restrict__ src,
     __half* __restrict__ cache,
-    int sq, int G, int d, int present_seq, int past_len) {
+    int sq, int G, int d, int present_seq, int past_len,
+    const int* __restrict__ seqlens_k) {
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
+  int eff_past_len = seqlens_k ? (seqlens_k[batch_idx] + 1 - sq) : past_len;
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int total_per_batch = sq * G * d;
   if (idx >= total_per_batch) return;
@@ -277,7 +284,7 @@ __global__ void kv_cache_append_kernel(
   int s = remaining / G;
 
   int src_idx = ((batch_idx * sq + s) * G + g) * d + di;
-  int dst_idx = ((batch_idx * G + g) * present_seq + (past_len + s)) * d + di;
+  int dst_idx = ((batch_idx * G + g) * present_seq + (eff_past_len + s)) * d + di;
   cache[dst_idx] = src[src_idx];
 }
 
@@ -537,7 +544,8 @@ extern "C" int hip_gqa_rope(
     void* stream_ptr, const void* input, void* output,
     const void* cos_cache, const void* sin_cache,
     int batch_size, int seq_len, int num_heads,
-    int head_dim, int half_rot, int past_len) {
+    int head_dim, int half_rot, int past_len,
+    const void* seqlens_k) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   int elems = seq_len * num_heads * half_rot;
   int blocks = (elems + GQA_THREADS - 1) / GQA_THREADS;
@@ -546,7 +554,8 @@ extern "C" int hip_gqa_rope(
       static_cast<__half*>(output),
       static_cast<const __half*>(cos_cache),
       static_cast<const __half*>(sin_cache),
-      seq_len, num_heads, head_dim, half_rot, past_len);
+      seq_len, num_heads, head_dim, half_rot, past_len,
+      static_cast<const int*>(seqlens_k));
   return hipSuccess;
 }
 
@@ -567,14 +576,16 @@ extern "C" int hip_gqa_transpose_mid_dims(
 // Step 4-5: KV cache append (same-buffer)
 extern "C" int hip_gqa_kv_cache_append(
     void* stream_ptr, const void* src, void* cache,
-    int batch_size, int sq, int G, int d, int present_seq, int past_len) {
+    int batch_size, int sq, int G, int d, int present_seq, int past_len,
+    const void* seqlens_k) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   int total = sq * G * d;
   int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
   kv_cache_append_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0, stream>>>(
       static_cast<const __half*>(src),
       static_cast<__half*>(cache),
-      sq, G, d, present_seq, past_len);
+      sq, G, d, present_seq, past_len,
+      static_cast<const int*>(seqlens_k));
   return hipSuccess;
 }
 
@@ -697,7 +708,8 @@ fused_gqa_decode_kernel(
     const __half* __restrict__ Vcache,
     __half* __restrict__ O,
     int H, int G, int d, int skv, int max_seq,
-    float scale)
+    float scale,
+    const int* __restrict__ seqlens_k)
 {
     constexpr int NUM_WAVES = D / WAVE_SIZE;
 
@@ -707,6 +719,10 @@ fused_gqa_decode_kernel(
     const int tid     = threadIdx.x;
     const int wave_id = tid / WAVE_SIZE;
     const int lane_id = tid % WAVE_SIZE;
+
+    // When seqlens_k is provided, total_seq = seqlens_k[batch] + 1
+    const int eff_skv = seqlens_k
+        ? __builtin_amdgcn_readfirstlane(seqlens_k[batch] + 1) : skv;
 
     __shared__ float smem[NUM_WAVES];
 
@@ -721,7 +737,7 @@ fused_gqa_decode_kernel(
     float l = 0.0f;
     float O_acc = 0.0f;
 
-    for (int t = 0; t < skv; ++t) {
+    for (int t = 0; t < eff_skv; ++t) {
         float dot = Q_val * __half2float(Kcache[kv_base + (size_t)t * d + tid]);
 
         dot += __shfl_xor(dot, 16);
@@ -998,25 +1014,26 @@ fused_gqa_prefill_kernel(
 extern "C" int hip_gqa_fused_decode(
     void* stream_ptr, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int H, int G, int d, int skv, int max_seq,
-    float scale) {
+    float scale, const void* seqlens_k) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   dim3 grid(B * H, 1);
   const __half* hQ = static_cast<const __half*>(Q);
   const __half* hK = static_cast<const __half*>(Kcache);
   const __half* hV = static_cast<const __half*>(Vcache);
   __half* hO = static_cast<__half*>(O);
+  const int* iSeqlensK = static_cast<const int*>(seqlens_k);
   switch (d) {
     case 64:
       fused_gqa_decode_kernel<64><<<grid, 64, 0, stream>>>(
-          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale);
+          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale, iSeqlensK);
       break;
     case 128:
       fused_gqa_decode_kernel<128><<<grid, 128, 0, stream>>>(
-          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale);
+          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale, iSeqlensK);
       break;
     case 256:
       fused_gqa_decode_kernel<256><<<grid, 256, 0, stream>>>(
-          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale);
+          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale, iSeqlensK);
       break;
     default:
       fprintf(stderr, "hip_gqa_fused_decode: unsupported d=%d "

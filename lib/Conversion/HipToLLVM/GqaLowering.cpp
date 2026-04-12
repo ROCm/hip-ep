@@ -127,14 +127,25 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     auto pkShape = presentKeyType.getShape();
     int64_t seqLenKV = (pkShape.size() == 4) ? pkShape[2] : pkShape[1];
 
+    // past_buf_seq: buffer dimension of past_key (may be max_length for
+    // pre-allocated caches, which is larger than actual valid past tokens).
+    // Needed so gqa_forward can distinguish buffer stride from valid length.
+    int64_t pastBufSeq = 0;
+    if (op.getPastKey()) {
+      auto pastKeyType = cast<MemRefType>(op.getPastKey().getType());
+      auto pastShape = pastKeyType.getShape();
+      pastBufSeq = (pastShape.size() == 4) ? pastShape[2] : pastShape[1];
+    }
+
     Value batchSizeVal = createI64Const(batchSize);
     Value seqLenQVal = createI64Const(seqLenQ);
     Value seqLenKVVal = createI64Const(seqLenKV);
+    Value pastBufSeqVal = createI64Const(pastBufSeq);
     Value headDimVal = createI64Const(headDim);
     Value elemSizeVal = createI64Const(elementSizeBytes);
 
-    // Function signature matches Task 4 runtime wrapper
-    SmallVector<Type, 37> paramTypes = {
+    // Function signature matches wrap_group_query_attention() in gqa.cpp
+    SmallVector<Type, 38> paramTypes = {
         ptrType, // state
         // Inputs (14 pointers - some may be nullptr)
         ptrType, // query
@@ -156,7 +167,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         ptrType, // present_key
         ptrType, // present_value
         ptrType, // output_qk
-        // Attributes (13 values)
+        // Attributes (12 values)
         i64Type, // num_heads
         i64Type, // kv_num_heads
         f32Type, // scale
@@ -169,10 +180,11 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // k_quant_type
         i64Type, // v_quant_type
         i64Type, // kv_cache_bit_width
-        // Shape info (5 values)
+        // Shape info (6 values)
         i64Type, // batch_size
         i64Type, // seq_len_q
         i64Type, // seq_len_kv
+        i64Type, // past_buf_seq
         i64Type, // head_dim
         i64Type  // element_size_bytes
     };
@@ -182,7 +194,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 37> args = {
+    SmallVector<Value, 38> args = {
         statePtr,
         // Inputs (14 pointers)
         queryPtr, keyPtr, valuePtr, pastKeyPtr, pastValuePtr, seqlensKPtr,
@@ -190,12 +202,13 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         attentionBiasPtr, headSinkPtr, kScalePtr, vScalePtr,
         // Outputs (4 pointers)
         outputPtr, presentKeyPtr, presentValuePtr, outputQkPtr,
-        // Attributes (13 values)
+        // Attributes (12 values)
         numHeads, kvNumHeads, scale, doRotary, rotaryInterleaved, softcap,
         localWindowSize, smoothSoftmax, qkOutput, kQuantType, vQuantType,
         kvCacheBitWidth,
-        // Shape info (5 values)
-        batchSizeVal, seqLenQVal, seqLenKVVal, headDimVal, elemSizeVal};
+        // Shape info (6 values)
+        batchSizeVal, seqLenQVal, seqLenKVVal, pastBufSeqVal, headDimVal,
+        elemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

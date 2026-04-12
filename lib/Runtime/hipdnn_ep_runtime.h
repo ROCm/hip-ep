@@ -434,9 +434,9 @@ int wrap_group_query_attention(
     int64_t rotary_interleaved, float softcap, int64_t local_window_size,
     int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
     int64_t v_quant_type, int64_t kv_cache_bit_width,
-    // Shape values (5)
-    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv, int64_t head_dim,
-    int64_t element_size_bytes);
+    // Shape values (6)
+    int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes);
 
 // Generic MIOpen tensor operation wrapper with per-operand 4D shapes.
 // Computes output = op(lhs, rhs) element-wise via miopenOpTensor.
