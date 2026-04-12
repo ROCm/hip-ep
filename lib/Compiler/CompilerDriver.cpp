@@ -347,23 +347,51 @@ void CompilerDriver::discoverLibraries(
   else
     COMPILER_DEBUG_LOG("  WARNING: hipblaslt import library not found\n");
 
-#ifdef HIP_CUSTOM_KERNELS_LIB_PATH
+  // Custom kernels library discovery (priority high → low):
+  //
+  //   1. HIP_CUSTOM_KERNELS_DIR env var  — runtime override for end-users
+  //      who deploy the library in a non-standard location.  The directory
+  //      is added to library_paths so the linker can find it.
+  //
+  //   2. HIP_CUSTOM_KERNELS_LIB_PATH    — compile-time absolute path set
+  //      by CMake (CMAKE_INSTALL_PREFIX/lib/hip_custom_kernels.lib).
+  //      Used by developers whose kernels library is in the install tree.
+  //
+  //   3. Name-only fallback              — "hip_custom_kernels" is passed
+  //      to the linker, which searches library_paths (/LIBPATH:) and the
+  //      system LIB environment variable.
   {
-    std::string custom_lib = HIP_CUSTOM_KERNELS_LIB_PATH;
-    if (llvm::sys::fs::exists(custom_lib)) {
-      libraries.push_back(custom_lib);
-      COMPILER_DEBUG_LOG("  Custom kernels: " << custom_lib << "\n");
-    } else {
-      COMPILER_DEBUG_LOG(
-          "  WARNING: custom kernels lib not found at: " << custom_lib << "\n");
-      // Fall back: add by name so lld-link searches library_paths (/LIBPATH:)
-      // and the LIB environment variable.
+    bool found = false;
+
+    const char *custom_dir_env = std::getenv("HIP_CUSTOM_KERNELS_DIR");
+    if (custom_dir_env && custom_dir_env[0] != '\0') {
+      std::string custom_dir(custom_dir_env);
+      library_paths.push_back(custom_dir);
+      libraries.push_back("hip_custom_kernels");
+      found = true;
+      COMPILER_DEBUG_LOG("  Custom kernels dir (env): " << custom_dir << "\n");
+    }
+
+#ifdef HIP_CUSTOM_KERNELS_LIB_PATH
+    if (!found) {
+      std::string custom_lib = HIP_CUSTOM_KERNELS_LIB_PATH;
+      if (llvm::sys::fs::exists(custom_lib)) {
+        libraries.push_back(custom_lib);
+        found = true;
+        COMPILER_DEBUG_LOG("  Custom kernels: " << custom_lib << "\n");
+      } else {
+        COMPILER_DEBUG_LOG("  WARNING: custom kernels lib not found at: "
+                           << custom_lib << "\n");
+      }
+    }
+#endif
+
+    if (!found) {
       libraries.push_back("hip_custom_kernels");
       COMPILER_DEBUG_LOG(
-          "  Custom kernels (name fallback): hip_custom_kernels.lib\n");
+          "  Custom kernels (name fallback): hip_custom_kernels\n");
     }
   }
-#endif
 
   // hipDNN graph runtime: only needed when hipDNN graphs are compiled
   if (hipdnnHandle_) {
