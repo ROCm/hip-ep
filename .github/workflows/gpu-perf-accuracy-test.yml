@@ -307,7 +307,7 @@ jobs:
               --plugin_eps "MorphiZenExecutionProvider" `
               --plugin_ep_options "config_file|..\morphizen_config.json" `
               -C "session.disable_cpu_ep_fallback|1" `
-              -t $env:PERF_DURATION -c 1 -s -I `
+              -t $env:PERF_DURATION -c 1 -s `
               $m.FullName 2>&1 | Tee-Object -FilePath $mzFile
             if ($LASTEXITCODE -ne 0) { $failed = 1 }
 
@@ -324,7 +324,7 @@ jobs:
               & .\onnxruntime_perf_test.exe `
                 -e dml `
                 -C "ep.dml.disable_graph_fusion|1" `
-                -t $env:PERF_DURATION -c 1 -s -I `
+                -t $env:PERF_DURATION -c 1 -s `
                 $m.FullName 2>&1 | Tee-Object -FilePath $dmlFile
               if ($LASTEXITCODE -ne 0) {
                 $failed = 1
