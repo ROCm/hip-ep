@@ -231,6 +231,17 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 
   bool is_igpu = (prop.integrated == 1);
 
+  // Allow forcing VRAM allocation on iGPU for A/B testing.
+  // HIPDNN_EP_IGPU_USE_VRAM=1 → hipMalloc (dedicated VRAM) + hipMemcpy H2D
+  // Default (unset/0)         → hipHostMalloc (pinned host, GPU reads in-place)
+  const char *igpu_vram_env = getenv("HIPDNN_EP_IGPU_USE_VRAM");
+  bool force_vram = igpu_vram_env && igpu_vram_env[0] == '1';
+  if (is_igpu && force_vram) {
+    TIMING_LOG("[Session] iGPU: HIPDNN_EP_IGPU_USE_VRAM=1, using hipMalloc "
+               "(VRAM) path\n");
+    is_igpu = false;
+  }
+
   if (is_igpu) {
     // iGPU: allocate pinned host memory. GPU reads the same physical DRAM
     // directly -- no hipMemcpy needed. hipHostMalloc gives a reliable pinned
