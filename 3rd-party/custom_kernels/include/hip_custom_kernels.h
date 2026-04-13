@@ -268,13 +268,14 @@ int hip_cast(
  *   stream              - hipStream_t cast to void*
  *   data                - GPU pointer to source tensor
  *   indices             - GPU pointer to index tensor (i64 values)
- *   output              - GPU pointer to output
- *   axis                - axis along which to gather
- *   data_num_elements   - total elements in data tensor
- *   output_num_elements - total elements in output tensor
- *   element_size_bytes  - byte size per element (used for raw copy)
+ *   output               - GPU pointer to output
+ *   axis                 - axis along which to gather
+ *   data_num_elements    - total elements in data tensor
+ *   indices_num_elements - total elements in indices tensor
+ *   output_num_elements  - total elements in output tensor
+ *   element_size_bytes   - byte size per element (used for raw copy)
  *
- * Currently supports: axis=0, scalar (single-element) index
+ * Currently supports: axis=0
  * Supported element sizes: 2 (f16/bf16), 4 (f32/i32), 8 (i64/f64)
  * Returns: 0 on success, non-zero on failure
  */
@@ -285,6 +286,7 @@ int hip_gather(
     void* output,
     int64_t axis,
     int64_t data_num_elements,
+    int64_t indices_num_elements,
     int64_t output_num_elements,
     int element_size_bytes);
 
