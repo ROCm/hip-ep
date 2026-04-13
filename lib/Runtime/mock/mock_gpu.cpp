@@ -194,6 +194,15 @@ miopenDestroyTensorDescriptor(miopenTensorDescriptor_t desc) {
   return miopenStatusSuccess;
 }
 
+static miopenStatus_t miopenSet4dTensorDescriptor(miopenTensorDescriptor_t desc,
+                                                  miopenDataType_t dataType,
+                                                  int n, int c, int h, int w) {
+  (void)desc;
+  (void)dataType;
+  MOCK_PRINT("[MOCK]   Tensor descriptor set: [%d, %d, %d, %d]\n", n, c, h, w);
+  return miopenStatusSuccess;
+}
+
 static miopenStatus_t miopenSetNdTensorDescriptorWithLayout(
     miopenTensorDescriptor_t desc, miopenDataType_t dataType,
     miopenTensorLayout_t layout, const int *lens, int num_lens) {
@@ -201,8 +210,8 @@ static miopenStatus_t miopenSetNdTensorDescriptorWithLayout(
   (void)dataType;
   (void)layout;
   if (num_lens == 4) {
-    MOCK_PRINT("[MOCK]   Tensor descriptor set: [%d, %d, %d, %d]\n", lens[0],
-               lens[1], lens[2], lens[3]);
+    MOCK_PRINT("[MOCK]   Tensor descriptor set (NCHW): [%d, %d, %d, %d]\n",
+               lens[0], lens[1], lens[2], lens[3]);
   } else {
     MOCK_PRINT("[MOCK]   Tensor descriptor set: %d dims\n", num_lens);
   }

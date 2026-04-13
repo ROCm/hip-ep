@@ -139,23 +139,18 @@ int wrap_miopenConvolutionForward(
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&weights_desc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&output_desc));
 
-  // Set tensor descriptors (assuming float32 data type).
-  // Use miopenSetNdTensorDescriptorWithLayout to set NCHW layout explicitly;
-  // miopenSet4dTensorDescriptor leaves the layout as 'UNKNOWN' which triggers
+  // Set tensor descriptors with explicit NCHW layout (float32).
+  // miopenSet4dTensorDescriptor leaves layout as UNKNOWN which triggers
   // warnings in MIOpen 7.12+.
   {
-    // Input: [N, C, H, W]
     int in_dims[] = {(int)input_n, (int)input_c, (int)input_h, (int)input_w};
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
         input_desc, miopenFloat, miopenTensorNCHW, in_dims, 4));
 
-    // Weights: [K, C, R, S] where K=output channels, C=input channels,
-    // R=kernel_h, S=kernel_w
     int w_dims[] = {(int)weights_k, (int)input_c, (int)kernel_h, (int)kernel_w};
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
         weights_desc, miopenFloat, miopenTensorNCHW, w_dims, 4));
 
-    // Output: [N, K, H', W']
     int out_dims[] = {(int)input_n, (int)weights_k, (int)output_h,
                       (int)output_w};
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
