@@ -47,6 +47,12 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <chrono>
+#include <cstdlib>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 #define DEBUG_TYPE "convert-onnx-to-hip"
 
@@ -146,29 +152,33 @@ static int64_t alignTo(int64_t value, int64_t alignment) {
   return (value + alignment - 1) / alignment * alignment;
 }
 
+struct DeferredConstantWrite {
+  const void *ptr;
+  int64_t size;
+  bool isSplat;
+  llvm::ArrayRef<char> splatElement;
+  mlir::DenseElementsAttr keepAlive;
+};
+
 /// Mutable state shared across calls to lowerOnnxConstants when
 /// externalization is enabled.
 struct ExternalizationState {
-  std::unique_ptr<morphizen::FileWriter,
-                  morphizen::FileSystem::Deleter<morphizen::FileWriter>>
-      writer;
   llvm::json::Array manifestEntries;
   int64_t currentOffset = 0;
   int64_t constantIndex = 0;
   std::string binFileName;
   llvm::SmallVector<int64_t> constantSizes;
   llvm::SmallVector<int64_t> constantOffsets;
+  llvm::SmallVector<DeferredConstantWrite> deferredWrites;
 };
 
-/// Write alignment padding to constants.bin and return the aligned byte
-/// offset where the next constant's data should begin.
+/// Record alignment padding and return the aligned byte offset.
 static int64_t writeAlignmentPadding(ExternalizationState *extState,
                                      int64_t alignment = 64) {
   int64_t aligned = llvm::alignTo(extState->currentOffset, alignment);
   int64_t padding = aligned - extState->currentOffset;
   if (padding > 0) {
-    llvm::SmallVector<char> zeros(padding, 0);
-    extState->writer->fwrite(zeros.data(), padding);
+    extState->deferredWrites.push_back({nullptr, padding, false, {}, {}});
     extState->currentOffset += padding;
   }
   return extState->currentOffset;
@@ -252,25 +262,13 @@ static thread_local int64_t g_constCount = 0;
 static void externalizeConstant(mlir::ModuleOp module, mlir::Operation *constOp,
                                 mlir::RankedTensorType tensorType,
                                 const void *rawPtr, int64_t byteSize,
-                                ExternalizationState *extState) {
+                                ExternalizationState *extState,
+                                mlir::DenseElementsAttr keepAlive = {}) {
   int64_t entryOffset = writeAlignmentPadding(extState);
-
-  auto t0 = std::chrono::steady_clock::now();
-  extState->writer->fwrite(rawPtr, byteSize);
+  extState->deferredWrites.push_back({rawPtr, byteSize, false, {}, keepAlive});
   extState->currentOffset += byteSize;
-  auto t1 = std::chrono::steady_clock::now();
-
   finalizeExternalizedConstant(module, constOp, tensorType, byteSize,
                                entryOffset, extState);
-  auto t2 = std::chrono::steady_clock::now();
-
-  auto us = [](auto a, auto b) {
-    return std::chrono::duration_cast<std::chrono::microseconds>(b - a)
-               .count() /
-           1000.0;
-  };
-  g_fwriteMs += us(t0, t1);
-  g_finalizeMs += us(t1, t2);
   g_totalBytesWritten += byteSize;
   ++g_constCount;
 }
@@ -294,22 +292,10 @@ static void externalizeSplatConstant(mlir::ModuleOp module,
                                      int64_t byteSize,
                                      ExternalizationState *extState) {
   auto rawData = valueAttr.getRawData();
-  constexpr size_t kSplatChunk = 1024 * 1024;
-  size_t elemSize = rawData.size();
-  size_t bufSize =
-      (std::min(static_cast<size_t>(byteSize), kSplatChunk) / elemSize) *
-      elemSize;
-  std::vector<char> buf(bufSize);
-  for (size_t i = 0; i < bufSize; i += elemSize)
-    std::memcpy(buf.data() + i, rawData.data(), elemSize);
-
   int64_t entryOffset = writeAlignmentPadding(extState);
-  size_t remaining = static_cast<size_t>(byteSize);
-  while (remaining > 0) {
-    size_t toWrite = std::min(remaining, bufSize);
-    extState->writer->fwrite(buf.data(), toWrite);
-    remaining -= toWrite;
-  }
+  extState->deferredWrites.push_back(
+      {nullptr, byteSize, true,
+       llvm::ArrayRef<char>(rawData.data(), rawData.size()), valueAttr});
   extState->currentOffset += byteSize;
   finalizeExternalizedConstant(module, constOp, tensorType, byteSize,
                                entryOffset, extState);
@@ -421,7 +407,8 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
                                  byteSize, extState);
       } else {
         externalizeConstant(module, constOp, tensorType,
-                            valueAttr.getRawData().data(), byteSize, extState);
+                            valueAttr.getRawData().data(), byteSize, extState,
+                            valueAttr);
       }
 
     } else {
@@ -2383,14 +2370,6 @@ void ConvertOnnxToHipPass::runOnOperation() {
             mlir::SymbolTable::getSymbolAttrName()))
       baseName = sym.getValue().str();
     extState->binFileName = baseName + ".constants.bin";
-
-    extState->writer =
-        fs->create_writer_template(extState->binFileName.c_str());
-    if (!extState->writer) {
-      module.emitError("failed to open constants binary file via FileSystem: " +
-                       extState->binFileName);
-      return signalPassFailure();
-    }
   }
 
   // Capture original function signatures as module metadata before lowering.
@@ -2438,27 +2417,76 @@ void ConvertOnnxToHipPass::runOnOperation() {
     }
   });
 
-  // Finalize externalization: release writer, write JSON manifest, set module
-  // attributes.
+  // Finalize externalization: assemble deferred constant data into a
+  // contiguous buffer and flush to the FileSystem in one write.
   if (extState && extState->constantIndex > 0) {
-    {
-      HIP_PROFILE_SCOPE("writerClose");
-      extState->writer.reset();
+    size_t totalSize = static_cast<size_t>(extState->currentOffset);
+
+    uint8_t *blob = nullptr;
+#ifdef _WIN32
+    blob = static_cast<uint8_t *>(
+        VirtualAlloc(nullptr, totalSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+#else
+    blob = static_cast<uint8_t *>(std::malloc(totalSize));
+#endif
+    if (!blob) {
+      module.emitError("failed to allocate " + std::to_string(totalSize) +
+                       " bytes for constants buffer");
+      return signalPassFailure();
     }
 
-    // Set hip.constants_file on the module so downstream passes/tools know
-    // where the sidecar lives.
+    {
+      HIP_PROFILE_SCOPE("assembleConstantsBuffer");
+      size_t pos = 0;
+      for (auto &dw : extState->deferredWrites) {
+        size_t sz = static_cast<size_t>(dw.size);
+        if (dw.isSplat) {
+          size_t elemSize = dw.splatElement.size();
+          for (size_t i = 0; i < sz; i += elemSize)
+            std::memcpy(blob + pos + i, dw.splatElement.data(), elemSize);
+        } else if (dw.ptr) {
+          std::memcpy(blob + pos, dw.ptr, sz);
+        } else {
+          std::memset(blob + pos, 0, sz);
+        }
+        pos += sz;
+      }
+      extState->deferredWrites.clear();
+    }
+
+    {
+      HIP_PROFILE_SCOPE("flushConstantsBlobToFS");
+      auto writer =
+          fs->create_writer_template(extState->binFileName.c_str());
+      if (!writer) {
+        module.emitError(
+            "failed to open constants binary file via FileSystem: " +
+            extState->binFileName);
+#ifdef _WIN32
+        VirtualFree(blob, 0, MEM_RELEASE);
+#else
+        std::free(blob);
+#endif
+        return signalPassFailure();
+      }
+      writer->fwrite(blob, totalSize);
+    }
+
+#ifdef _WIN32
+    VirtualFree(blob, 0, MEM_RELEASE);
+#else
+    std::free(blob);
+#endif
+
     module->setAttr("hip.constants_file",
                     mlir::StringAttr::get(ctx, extState->binFileName));
 
-    // Emit hipdnn.constant_sizes and hipdnn.constant_offsets for the runtime.
     module->setAttr("hipdnn.constant_sizes",
                     mlir::DenseI64ArrayAttr::get(ctx, extState->constantSizes));
     module->setAttr(
         "hipdnn.constant_offsets",
         mlir::DenseI64ArrayAttr::get(ctx, extState->constantOffsets));
 
-    // Derive base name again for JSON path.
     std::string baseName = "model";
     if (auto sym = module->getAttrOfType<mlir::StringAttr>(
             mlir::SymbolTable::getSymbolAttrName()))
@@ -2486,8 +2514,6 @@ void ConvertOnnxToHipPass::runOnOperation() {
     LLVM_DEBUG(llvm::dbgs() << "externalized " << extState->constantIndex
                             << " constants (" << extState->currentOffset
                             << " bytes) to " << extState->binFileName << "\n");
-  } else if (extState) {
-    extState->writer.reset();
   }
 }
 
