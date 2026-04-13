@@ -79,7 +79,13 @@ OP_REGISTRY: Dict[str, OpInfo] = {
     ),
     # ── Normalization ────────────────────────────────────────────────
     "torch.aten.rms_norm": OpInfo(
-        "norm", 4, 0, (), False, "", "hip.rms_norm"  # test_shapes empty: complex args, hand-written test exists
+        "norm",
+        4,
+        0,
+        (),
+        False,
+        "",
+        "hip.rms_norm",  # test_shapes empty: complex args, hand-written test exists
     ),
     # ── Attention ────────────────────────────────────────────────────
     "torch.aten.scaled_dot_product_attention": OpInfo(
