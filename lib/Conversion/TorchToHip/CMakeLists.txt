@@ -19,6 +19,7 @@ add_library(TorchToHip STATIC
   GqaConversion.cpp
   MatMulNBitsConversion.cpp
   QMoEConversion.cpp
+  MiscConversion.cpp
 )
 
 add_dependencies(TorchToHip
