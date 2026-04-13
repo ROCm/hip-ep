@@ -26,6 +26,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include "hip/debug_log.h"
+#include "hip/profiling_timer.h"
 
 #include <cstdlib>
 #include <sstream>
@@ -60,8 +61,11 @@ bool CompilerDriver::compile(llvm::StringRef input_mlir,
   llvm::SourceMgr sourceMgr;
   sourceMgr.AddNewSourceBuffer(std::move(memBuffer), llvm::SMLoc());
 
-  mlir::OwningOpRef<mlir::ModuleOp> module =
-      mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, &context);
+  mlir::OwningOpRef<mlir::ModuleOp> module;
+  {
+    HIP_PROFILE_SCOPE("parseSourceFile");
+    module = mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, &context);
+  }
 
   if (!module) {
     error_message = "Failed to parse MLIR input";
@@ -102,18 +106,31 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
                                  const std::string &output_path,
                                  const mlir::hip::CompilationOptionsT &options,
                                  std::string &error_message) {
-  if (!runMLIRPasses(module, options, error_message))
-    return false;
+  {
+    HIP_PROFILE_SCOPE("runMLIRPasses");
+    if (!runMLIRPasses(module, options, error_message))
+      return false;
+  }
 
   llvm::LLVMContext llvmContext;
-  auto llvmModule = translateToLLVMIR(module, llvmContext, error_message);
-  if (!llvmModule)
-    return false;
+  std::unique_ptr<llvm::Module> llvmModule;
+  {
+    HIP_PROFILE_SCOPE("translateToLLVMIR");
+    llvmModule = translateToLLVMIR(module, llvmContext, error_message);
+    if (!llvmModule)
+      return false;
+  }
 
-  if (!linkRuntime(llvmModule.get(), error_message))
-    return false;
+  {
+    HIP_PROFILE_SCOPE("linkRuntime");
+    if (!linkRuntime(llvmModule.get(), error_message))
+      return false;
+  }
 
-  optimizeLLVMIR(llvmModule.get(), options.opt_level);
+  {
+    HIP_PROFILE_SCOPE("optimizeLLVMIR");
+    optimizeLLVMIR(llvmModule.get(), options.opt_level);
+  }
 
   // Strip .dll extension to derive intermediate file paths (.ll, .obj).
   std::string base_path = output_path;
@@ -129,8 +146,11 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
     return true;
   }
 
-  if (!compileToObject(llvmModule.get(), obj_path, error_message))
-    return false;
+  {
+    HIP_PROFILE_SCOPE("compileToObject");
+    if (!compileToObject(llvmModule.get(), obj_path, error_message))
+      return false;
+  }
 
   // Symbols exported from the generated DLL:
   //   inference_init/compute/cleanup — runtime entry points
@@ -143,9 +163,12 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
   std::vector<std::string> library_paths;
   discoverLibraries(libraries, library_paths);
 
-  if (!linkToDLL(obj_path, output_path, libraries, library_paths,
-                 export_symbols, error_message))
-    return false;
+  {
+    HIP_PROFILE_SCOPE("linkToDLL");
+    if (!linkToDLL(obj_path, output_path, libraries, library_paths,
+                   export_symbols, error_message))
+      return false;
+  }
 
   cleanupIntermediates(base_path);
 

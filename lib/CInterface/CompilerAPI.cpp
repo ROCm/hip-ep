@@ -11,6 +11,7 @@
 #include "morphizen-foundation/file_io.hpp"
 
 #include "compilation_options_schema.h"
+#include "hip/profiling_timer.h"
 
 #include "llvm/ADT/StringRef.h"
 
@@ -68,6 +69,8 @@ COMPILER_API CompilerErrorCode hip_compile_with_fs(
   }
 
   try {
+    HIP_PROFILE_SCOPE("hip_compile_with_fs");
+
     mlir::hip::CompilationOptionsT options;
     std::string parse_error;
     if (!parseOptions(options_json, options, parse_error)) {
