@@ -151,8 +151,7 @@ int wrap_miopenConvolutionForward(
 
     // Weights: [K, C, R, S] where K=output channels, C=input channels,
     // R=kernel_h, S=kernel_w
-    int w_dims[] = {(int)weights_k, (int)input_c, (int)kernel_h,
-                    (int)kernel_w};
+    int w_dims[] = {(int)weights_k, (int)input_c, (int)kernel_h, (int)kernel_w};
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
         weights_desc, miopenFloat, miopenTensorNCHW, w_dims, 4));
 
