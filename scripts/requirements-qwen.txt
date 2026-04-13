@@ -1,0 +1,7 @@
+torch
+torchaudio
+torchvision
+transformers
+accelerate
+safetensors
+sentencepiece
