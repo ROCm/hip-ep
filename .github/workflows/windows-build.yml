@@ -469,7 +469,7 @@ jobs:
               --plugin_eps "MorphiZenExecutionProvider" ^
               --plugin_ep_options "config_file|..\morphizen_config.json" ^
               -C "session.disable_cpu_ep_fallback|1" ^
-              -t 30 -c 1 -s -I ^
+              -t 30 -c 1 -s ^
               "%%M" > "..\results\%%~nxM.txt" 2>&1
             type "..\results\%%~nxM.txt"
             if errorlevel 1 set FAILED=1
