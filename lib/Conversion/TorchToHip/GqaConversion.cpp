@@ -48,75 +48,126 @@ struct TorchSdpaToGqa : public mlir::RewritePattern {
 
     auto queryType = mlir::dyn_cast<mlir::RankedTensorType>(query.getType());
     auto keyType = mlir::dyn_cast<mlir::RankedTensorType>(key.getType());
-    if (!queryType || !keyType || queryType.getRank() != 4 ||
-        keyType.getRank() != 4)
-      return rewriter.notifyMatchFailure(op, "Q/K must be rank-4 [B,H,S,D]");
+    if (!queryType || !keyType)
+      return rewriter.notifyMatchFailure(op, "Q/K must be ranked tensors");
 
-    int64_t batch = queryType.getDimSize(0);
-    int64_t numHeads = queryType.getDimSize(1);
-    int64_t seqLen = queryType.getDimSize(2);
-    int64_t headDim = queryType.getDimSize(3);
-    int64_t kvNumHeads = keyType.getDimSize(1);
+    int64_t qRank = queryType.getRank();
+    int64_t kRank = keyType.getRank();
 
-    if (batch == mlir::ShapedType::kDynamic ||
-        numHeads == mlir::ShapedType::kDynamic ||
-        seqLen == mlir::ShapedType::kDynamic ||
-        headDim == mlir::ShapedType::kDynamic ||
-        kvNumHeads == mlir::ShapedType::kDynamic)
-      return rewriter.notifyMatchFailure(op, "dynamic shapes not yet supported "
-                                              "in SDPA->GQA conversion");
+    if (qRank != 3 && qRank != 4)
+      return rewriter.notifyMatchFailure(op, "Q must be rank-3 [B,S,H*D] "
+                                              "or rank-4 [B,H,S,D]");
+    if (kRank != qRank)
+      return rewriter.notifyMatchFailure(op, "K rank must match Q rank");
 
     auto elemType = queryType.getElementType();
-    int64_t qHidden = numHeads * headDim;
-    int64_t kvHidden = kvNumHeads * headDim;
+    int64_t batch, numHeads, seqLen, headDim, kvNumHeads;
+    int64_t qHidden, kvHidden;
+    bool needsTranspose = (qRank == 4);
 
-    // Helper: create dim index constants
-    mlir::Value dim1Val =
-        mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
-    mlir::Value dim2Val =
-        mlir::arith::ConstantIndexOp::create(rewriter, loc, 2);
+    if (qRank == 4) {
+      // BHSD format: [batch, num_heads, seq_len, head_dim]
+      batch = queryType.getDimSize(0);
+      numHeads = queryType.getDimSize(1);
+      seqLen = queryType.getDimSize(2);
+      headDim = queryType.getDimSize(3);
+      kvNumHeads = keyType.getDimSize(1);
+    } else {
+      // BSD format: [batch, seq_len, hidden_size]
+      batch = queryType.getDimSize(0);
+      seqLen = queryType.getDimSize(1);
+      qHidden = queryType.getDimSize(2);
+      kvHidden = keyType.getDimSize(2);
+      // Infer num_heads from hidden/kv_hidden ratio
+      // For same-head attention: num_heads = kv_num_heads, head_dim = hidden/heads
+      // We assume qHidden and kvHidden are available
+      // Default: assume head_dim divides into hidden evenly
+      // For GQA: num_heads may differ from kv_num_heads
+      // Without additional info, assume kv_num_heads = num_heads for BSD input
+      headDim = 0;
+      numHeads = 0;
+      kvNumHeads = 0;
+      // We'll set these from shape below
+    }
 
-    // Reshape Q: [B,H,S,D] → [B,S,H,D] → [B,S,H*D]
-    // Transpose dims 1,2: [B,H,S,D] → [B,S,H,D]
-    auto qTransposedType =
-        mlir::RankedTensorType::get({batch, seqLen, numHeads, headDim}, elemType);
-    mlir::Value qInit =
-        createEmptyTensorForTorch(rewriter, loc, qTransposedType, query);
-    auto qTransposed = mlir::hip::TransposeOp::create(
-        rewriter, loc, qTransposedType, context, dim1Val, dim2Val, query,
-        qInit);
+    if (needsTranspose) {
+      if (batch == mlir::ShapedType::kDynamic ||
+          numHeads == mlir::ShapedType::kDynamic ||
+          seqLen == mlir::ShapedType::kDynamic ||
+          headDim == mlir::ShapedType::kDynamic ||
+          kvNumHeads == mlir::ShapedType::kDynamic)
+        return rewriter.notifyMatchFailure(
+            op, "dynamic shapes not yet supported in SDPA->GQA conversion");
+      qHidden = numHeads * headDim;
+      kvHidden = kvNumHeads * headDim;
+    } else {
+      // BSD: infer head counts
+      if (batch == mlir::ShapedType::kDynamic ||
+          seqLen == mlir::ShapedType::kDynamic ||
+          qHidden == mlir::ShapedType::kDynamic ||
+          kvHidden == mlir::ShapedType::kDynamic)
+        return rewriter.notifyMatchFailure(
+            op, "dynamic shapes not yet supported in SDPA->GQA conversion");
+      // Infer: for same-head attention, qHidden == kvHidden, heads = gcd
+      // For now assume same heads: num_heads = kv_num_heads
+      // head_dim = qHidden / num_heads, pick largest head_dim that divides both
+      // Common head dims: 32, 64, 128
+      for (int64_t hd : {128, 64, 32}) {
+        if (qHidden % hd == 0 && kvHidden % hd == 0) {
+          headDim = hd;
+          numHeads = qHidden / hd;
+          kvNumHeads = kvHidden / hd;
+          break;
+        }
+      }
+      if (headDim == 0)
+        return rewriter.notifyMatchFailure(
+            op, "cannot infer head_dim from BSD shapes");
+    }
 
-    // Collapse [B,S,H,D] → [B,S,H*D]
+    mlir::Value qBsd, kBsd, vBsd;
     auto qBsdType =
         mlir::RankedTensorType::get({batch, seqLen, qHidden}, elemType);
-    llvm::SmallVector<mlir::ReassociationIndices> reassoc3to2 = {
-        {0}, {1}, {2, 3}};
-    auto qBsd = mlir::tensor::CollapseShapeOp::create(
-        rewriter, loc, qBsdType, qTransposed->getResult(0), reassoc3to2);
-
-    // Reshape K: [B,Hkv,S,D] → [B,S,Hkv,D] → [B,S,Hkv*D]
-    auto kTransposedType = mlir::RankedTensorType::get(
-        {batch, seqLen, kvNumHeads, headDim}, elemType);
-    mlir::Value kInit =
-        createEmptyTensorForTorch(rewriter, loc, kTransposedType, key);
-    auto kTransposed = mlir::hip::TransposeOp::create(
-        rewriter, loc, kTransposedType, context, dim1Val, dim2Val, key, kInit);
-
     auto kBsdType =
         mlir::RankedTensorType::get({batch, seqLen, kvHidden}, elemType);
-    auto kBsd = mlir::tensor::CollapseShapeOp::create(
-        rewriter, loc, kBsdType, kTransposed->getResult(0), reassoc3to2);
-
-    // Reshape V: same as K
-    mlir::Value vInit =
-        createEmptyTensorForTorch(rewriter, loc, kTransposedType, value);
-    auto vTransposed = mlir::hip::TransposeOp::create(
-        rewriter, loc, kTransposedType, context, dim1Val, dim2Val, value,
-        vInit);
-
     auto vBsdType = kBsdType;
-    auto vBsd = mlir::tensor::CollapseShapeOp::create(
-        rewriter, loc, vBsdType, vTransposed->getResult(0), reassoc3to2);
+
+    if (needsTranspose) {
+      // BHSD → BSD: transpose dims 1,2 then collapse last two
+      mlir::Value dim1Val =
+          mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
+      mlir::Value dim2Val =
+          mlir::arith::ConstantIndexOp::create(rewriter, loc, 2);
+      llvm::SmallVector<mlir::ReassociationIndices> reassoc = {
+          {0}, {1}, {2, 3}};
+
+      auto qTransType = mlir::RankedTensorType::get(
+          {batch, seqLen, numHeads, headDim}, elemType);
+      auto qTrans = mlir::hip::TransposeOp::create(
+          rewriter, loc, qTransType, context, dim1Val, dim2Val, query,
+          createEmptyTensorForTorch(rewriter, loc, qTransType, query));
+      qBsd = mlir::tensor::CollapseShapeOp::create(
+          rewriter, loc, qBsdType, qTrans->getResult(0), reassoc);
+
+      auto kTransType = mlir::RankedTensorType::get(
+          {batch, seqLen, kvNumHeads, headDim}, elemType);
+      auto kTrans = mlir::hip::TransposeOp::create(
+          rewriter, loc, kTransType, context, dim1Val, dim2Val, key,
+          createEmptyTensorForTorch(rewriter, loc, kTransType, key));
+      kBsd = mlir::tensor::CollapseShapeOp::create(
+          rewriter, loc, kBsdType, kTrans->getResult(0), reassoc);
+
+      auto vTrans = mlir::hip::TransposeOp::create(
+          rewriter, loc, kTransType, context, dim1Val, dim2Val, value,
+          createEmptyTensorForTorch(rewriter, loc, kTransType, value));
+      vBsd = mlir::tensor::CollapseShapeOp::create(
+          rewriter, loc, vBsdType, vTrans->getResult(0), reassoc);
+    } else {
+      // Already BSD format
+      qBsd = query;
+      kBsd = key;
+      vBsd = value;
+    }
 
     // Create seqlens_k: [batch] filled with seqLen-1 (0-indexed last valid pos)
     // For prefill (no KV cache), seqlens_k = seqLen - 1 for each batch
@@ -216,28 +267,34 @@ struct TorchSdpaToGqa : public mlir::RewritePattern {
 
     auto hipOp = rewriter.create(state);
 
-    // The original SDPA returns a single tensor in BHSD format.
-    // We need to reshape the GQA output from BSD [B,S,H*D] back to
-    // BHSD [B,H,S,D].
     auto outputBsd = hipOp->getResult(0);
 
-    // Expand [B,S,H*D] → [B,S,H,D]
-    auto expandedType = mlir::RankedTensorType::get(
-        {batch, seqLen, numHeads, headDim}, elemType);
-    llvm::SmallVector<mlir::ReassociationIndices> expandReassoc = {
-        {0}, {1}, {2, 3}};
-    auto expanded = mlir::tensor::ExpandShapeOp::create(
-        rewriter, loc, expandedType, outputBsd, expandReassoc);
+    if (needsTranspose) {
+      // Reshape GQA output from BSD [B,S,H*D] back to BHSD [B,H,S,D]
+      auto expandedType = mlir::RankedTensorType::get(
+          {batch, seqLen, numHeads, headDim}, elemType);
+      llvm::SmallVector<mlir::ReassociationIndices> expandReassoc = {
+          {0}, {1}, {2, 3}};
+      auto expanded = mlir::tensor::ExpandShapeOp::create(
+          rewriter, loc, expandedType, outputBsd, expandReassoc);
 
-    // Transpose [B,S,H,D] → [B,H,S,D]
-    auto resultType =
-        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    mlir::Value outInit =
-        createEmptyTensorForTorch(rewriter, loc, resultType, expanded);
-    auto transposed = mlir::hip::TransposeOp::create(
-        rewriter, loc, resultType, context, dim1Val, dim2Val, expanded, outInit);
-
-    rewriter.replaceOp(op, transposed->getResult(0));
+      // Transpose [B,S,H,D] → [B,H,S,D]
+      mlir::Value dim1Val =
+          mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
+      mlir::Value dim2Val =
+          mlir::arith::ConstantIndexOp::create(rewriter, loc, 2);
+      auto resultType =
+          mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+      mlir::Value outInit =
+          createEmptyTensorForTorch(rewriter, loc, resultType, expanded);
+      auto transposed = mlir::hip::TransposeOp::create(
+          rewriter, loc, resultType, context, dim1Val, dim2Val, expanded,
+          outInit);
+      rewriter.replaceOp(op, transposed->getResult(0));
+    } else {
+      // BSD input → BSD output, no transpose needed
+      rewriter.replaceOp(op, outputBsd);
+    }
     return mlir::success();
   }
 };
