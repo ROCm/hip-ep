@@ -27,7 +27,6 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #include "hip/Support/DiskFileSystem.h"
-#include "hip/profiling_timer.h"
 #include "morphizen-foundation/file_io.hpp"
 
 #include "llvm/ADT/STLExtras.h"
@@ -171,33 +170,10 @@ static int64_t writeAlignmentPadding(ExternalizationState *extState,
   return extState->currentOffset;
 }
 
-struct ConstantProfilingAccum {
-  double fwriteMs = 0;
-  double finalizeMs = 0;
-  double resolveAttrMs = 0;
-  double alignPadMs = 0;
-  int64_t totalBytesWritten = 0;
-  int64_t count = 0;
-
-  void report() const {
-    if (!::hip::profiling::profilingEnabled() || count == 0)
-      return;
-    llvm::errs() << "[PROFILE]           per-constant breakdown (" << count
-                 << " constants):\n";
-    llvm::errs() << "[PROFILE]             alignPadding (total): "
-                 << llvm::format("%.1f", alignPadMs) << " ms\n";
-    llvm::errs() << "[PROFILE]             fwrite (total): "
-                 << llvm::format("%.1f", fwriteMs) << " ms ("
-                 << totalBytesWritten << " bytes)\n";
-    llvm::errs() << "[PROFILE]             finalizeExternalizedConstant (total): "
-                 << llvm::format("%.1f", finalizeMs) << " ms\n";
-    llvm::errs() << "[PROFILE]             resolveAttr+overhead (total): "
-                 << llvm::format("%.1f", resolveAttrMs) << " ms\n";
-  }
-};
-
-static thread_local ConstantProfilingAccum g_constAccum;
-
+/// Shared bookkeeping after constant data has been written to constants.bin.
+/// Updates ExternalizationState counters, emits the JSON manifest entry,
+/// creates the extern memref.global with hip.external_data, and replaces
+/// the original op with memref.get_global + bufferization.to_tensor.
 static void finalizeExternalizedConstant(mlir::ModuleOp module,
                                          mlir::Operation *constOp,
                                          mlir::RankedTensorType tensorType,
@@ -268,32 +244,11 @@ static void externalizeConstant(mlir::ModuleOp module, mlir::Operation *constOp,
                                 mlir::RankedTensorType tensorType,
                                 const void *rawPtr, int64_t byteSize,
                                 ExternalizationState *extState) {
-  bool profiling = ::hip::profiling::profilingEnabled();
-  auto t0 = std::chrono::steady_clock::now();
-
   int64_t entryOffset = writeAlignmentPadding(extState);
-  auto t1 = std::chrono::steady_clock::now();
-
   extState->writer->fwrite(rawPtr, byteSize);
   extState->currentOffset += byteSize;
-  auto t2 = std::chrono::steady_clock::now();
-
   finalizeExternalizedConstant(module, constOp, tensorType, byteSize,
                                entryOffset, extState);
-  auto t3 = std::chrono::steady_clock::now();
-
-  if (profiling) {
-    auto us = [](auto a, auto b) {
-      return std::chrono::duration_cast<std::chrono::microseconds>(b - a)
-                 .count() /
-             1000.0;
-    };
-    g_constAccum.alignPadMs += us(t0, t1);
-    g_constAccum.fwriteMs += us(t1, t2);
-    g_constAccum.finalizeMs += us(t2, t3);
-    g_constAccum.totalBytesWritten += byteSize;
-    ++g_constAccum.count;
-  }
 }
 
 /// Replace an onnx.Constant op with an inline arith.constant.
@@ -366,9 +321,6 @@ static void externalizeSplatConstant(mlir::ModuleOp module,
 static mlir::LogicalResult
 resolveExternalLocationConstant(mlir::ModuleOp module, mlir::Operation *constOp,
                                 ExternalizationState *extState) {
-  bool profiling = ::hip::profiling::profilingEnabled();
-  auto t0 = std::chrono::steady_clock::now();
-
   auto offsetAttr = constOp->getAttrOfType<mlir::IntegerAttr>("offset");
   auto sizeAttr = constOp->getAttrOfType<mlir::IntegerAttr>("size");
   if (!offsetAttr || !sizeAttr)
@@ -388,8 +340,6 @@ resolveExternalLocationConstant(mlir::ModuleOp module, mlir::Operation *constOp,
   if (!tensorType)
     return constOp->emitError("external constant has non-ranked result type");
 
-  auto t1 = std::chrono::steady_clock::now();
-
   if (extState) {
     externalizeConstant(module, constOp, tensorType, dataPtr, dataSize,
                         extState);
@@ -400,15 +350,6 @@ resolveExternalLocationConstant(mlir::ModuleOp module, mlir::Operation *constOp,
         mlir::DenseElementsAttr::getFromRawBuffer(tensorType, rawData);
     replaceWithArithConstant(constOp, denseAttr);
   }
-
-  if (profiling) {
-    auto us = [](auto a, auto b) {
-      return std::chrono::duration_cast<std::chrono::microseconds>(b - a)
-                 .count() /
-             1000.0;
-    };
-    g_constAccum.resolveAttrMs += us(t0, t1);
-  }
   return mlir::success();
 }
 
@@ -418,72 +359,47 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
                                               mlir::func::FuncOp funcOp,
                                               int64_t minNumElements,
                                               ExternalizationState *extState) {
-  HIP_PROFILE_SCOPE("lowerOnnxConstants");
 
   llvm::SmallVector<mlir::Operation *> constants;
-  {
-    HIP_PROFILE_SCOPE("walk_onnx_constant");
-    funcOp.walk([&](mlir::Operation *op) {
-      if (op->getName().getStringRef() == "onnx.Constant")
-        constants.push_back(op);
-    });
-  }
+  funcOp.walk([&](mlir::Operation *op) {
+    if (op->getName().getStringRef() == "onnx.Constant")
+      constants.push_back(op);
+  });
 
-  int64_t totalBytesExternalized = 0;
-  int64_t numExternalized = 0;
-  int64_t numInlined = 0;
-  int64_t numExtLocation = 0;
+  for (mlir::Operation *constOp : constants) {
+    auto valueAttr = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
+        constOp->getAttrOfType<mlir::ElementsAttr>("value"));
 
-  {
-    HIP_PROFILE_SCOPE("process_constants");
-    for (mlir::Operation *constOp : constants) {
-      auto valueAttr = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
-          constOp->getAttrOfType<mlir::ElementsAttr>("value"));
-
-      if (valueAttr) {
-        // Inline dense constant -- fall through to externalize-or-inline below.
-      } else if (constOp->hasAttr("location")) {
-        if (mlir::failed(
-                resolveExternalLocationConstant(module, constOp, extState)))
-          return mlir::failure();
-        ++numExtLocation;
-        continue;
-      } else {
-        return constOp->emitError(
-            "unsupported onnx.Constant form (expected dense value attribute "
-            "or location attribute)");
-      }
-
-      if (extState && minNumElements > 0 &&
-          valueAttr.getNumElements() >= minNumElements) {
-        auto tensorType =
-            mlir::cast<mlir::RankedTensorType>(valueAttr.getType());
-        int64_t elemBits = tensorType.getElementTypeBitWidth();
-        int64_t byteSize = valueAttr.getNumElements() * ((elemBits + 7) / 8);
-
-        if (valueAttr.isSplat()) {
-          externalizeSplatConstant(module, constOp, tensorType, valueAttr,
-                                   byteSize, extState);
-        } else {
-          externalizeConstant(module, constOp, tensorType,
-                              valueAttr.getRawData().data(), byteSize, extState);
-        }
-        totalBytesExternalized += byteSize;
-        ++numExternalized;
-      } else {
-        replaceWithArithConstant(constOp, valueAttr);
-        ++numInlined;
-      }
+    if (valueAttr) {
+      // Inline dense constant -- fall through to externalize-or-inline below.
+    } else if (constOp->hasAttr("location")) {
+      if (mlir::failed(
+              resolveExternalLocationConstant(module, constOp, extState)))
+        return mlir::failure();
+      continue;
+    } else {
+      return constOp->emitError(
+          "unsupported onnx.Constant form (expected dense value attribute "
+          "or location attribute)");
     }
-  }
 
-  if (::hip::profiling::profilingEnabled()) {
-    llvm::errs() << "[PROFILE]       constants: " << constants.size()
-                 << " total, " << numExternalized << " externalized ("
-                 << totalBytesExternalized << " bytes), " << numInlined
-                 << " inlined, " << numExtLocation << " ext-location\n";
-    g_constAccum.report();
-    g_constAccum = {};
+    if (extState && minNumElements > 0 &&
+        valueAttr.getNumElements() >= minNumElements) {
+      auto tensorType = mlir::cast<mlir::RankedTensorType>(valueAttr.getType());
+      int64_t elemBits = tensorType.getElementTypeBitWidth();
+      int64_t byteSize = valueAttr.getNumElements() * ((elemBits + 7) / 8);
+
+      if (valueAttr.isSplat()) {
+        externalizeSplatConstant(module, constOp, tensorType, valueAttr,
+                                 byteSize, extState);
+      } else {
+        externalizeConstant(module, constOp, tensorType,
+                            valueAttr.getRawData().data(), byteSize, extState);
+      }
+
+    } else {
+      replaceWithArithConstant(constOp, valueAttr);
+    }
   }
   return mlir::success();
 }
@@ -2401,8 +2317,6 @@ struct ConvertOnnxToHipPass
 };
 
 void ConvertOnnxToHipPass::runOnOperation() {
-  HIP_PROFILE_SCOPE("ConvertOnnxToHipPass");
-
   mlir::ModuleOp module = getOperation();
   mlir::MLIRContext *ctx = module.getContext();
 
@@ -2441,11 +2355,9 @@ void ConvertOnnxToHipPass::runOnOperation() {
     }
   }
 
-  {
-    HIP_PROFILE_SCOPE("generateModuleMetadata");
-    if (mlir::failed(generateModuleMetadata(module)))
-      return signalPassFailure();
-  }
+  // Capture original function signatures as module metadata before lowering.
+  if (mlir::failed(generateModuleMetadata(module)))
+    return signalPassFailure();
 
   for (auto funcOp :
        llvm::make_early_inc_range(module.getOps<mlir::func::FuncOp>())) {
@@ -2454,86 +2366,84 @@ void ConvertOnnxToHipPass::runOnOperation() {
     if (mlir::failed(
             lowerOnnxConstants(module, funcOp, minElems, extState.get())))
       return signalPassFailure();
-    {
-      HIP_PROFILE_SCOPE("lowerOnnxReturns");
-      lowerOnnxReturns(funcOp);
-    }
-    {
-      HIP_PROFILE_SCOPE("convertComputeOps");
-      if (mlir::failed(convertComputeOps(funcOp, ctx)))
-        return signalPassFailure();
-    }
+    lowerOnnxReturns(funcOp);
+    if (mlir::failed(convertComputeOps(funcOp, ctx)))
+      return signalPassFailure();
   }
 
-  {
-    HIP_PROFILE_SCOPE("cleanup");
-    llvm::SmallVector<mlir::Operation *> toErase;
-    module.walk([&](mlir::Operation *op) {
-      llvm::StringRef name = op->getName().getStringRef();
-      if (name == "onnx.NoValue" && op->use_empty())
-        toErase.push_back(op);
-      else if (name == "onnx.EntryPoint")
-        toErase.push_back(op);
-    });
-    for (auto *op : toErase)
-      op->erase();
+  // Clean up onnx.NoValue and onnx.EntryPoint ops
+  llvm::SmallVector<mlir::Operation *> toErase;
+  module.walk([&](mlir::Operation *op) {
+    llvm::StringRef name = op->getName().getStringRef();
+    if (name == "onnx.NoValue" && op->use_empty())
+      toErase.push_back(op);
+    else if (name == "onnx.EntryPoint")
+      toErase.push_back(op);
+  });
+  for (auto *op : toErase)
+    op->erase();
 
-    module.walk([&](mlir::func::FuncOp funcOp) {
-      unsigned numResults = funcOp.getNumResults();
-      if (numResults > 0) {
-        llvm::SmallVector<mlir::DictionaryAttr> emptyResAttrs(
-            numResults, mlir::DictionaryAttr::get(ctx));
-        funcOp.setAllResultAttrs(emptyResAttrs);
-      }
-    });
-  }
-
-  {
-    HIP_PROFILE_SCOPE("finalizeExternalization");
-    if (extState && extState->constantIndex > 0) {
-      extState->writer.reset();
-
-      module->setAttr("hip.constants_file",
-                      mlir::StringAttr::get(ctx, extState->binFileName));
-
-      module->setAttr(
-          "hipdnn.constant_sizes",
-          mlir::DenseI64ArrayAttr::get(ctx, extState->constantSizes));
-      module->setAttr(
-          "hipdnn.constant_offsets",
-          mlir::DenseI64ArrayAttr::get(ctx, extState->constantOffsets));
-
-      std::string baseName = "model";
-      if (auto sym = module->getAttrOfType<mlir::StringAttr>(
-              mlir::SymbolTable::getSymbolAttrName()))
-        baseName = sym.getValue().str();
-      std::string jsonPath = baseName + ".constants.json";
-
-      llvm::json::Object manifest;
-      manifest["version"] = 1;
-      manifest["binary_file"] = extState->binFileName;
-      manifest["num_constants"] = extState->constantIndex;
-      manifest["total_bytes"] = extState->currentOffset;
-      manifest["constants"] = std::move(extState->manifestEntries);
-
-      auto jsonWriter = fs->create_writer_template(jsonPath.c_str());
-      if (!jsonWriter) {
-        module.emitError("failed to open constants manifest via FileSystem: " +
-                         jsonPath);
-        return signalPassFailure();
-      }
-      std::string jsonStr;
-      llvm::raw_string_ostream jsonOs(jsonStr);
-      jsonOs << llvm::formatv("{0:2}", llvm::json::Value(std::move(manifest)));
-      jsonWriter->fwrite(jsonStr.data(), jsonStr.size());
-
-      LLVM_DEBUG(llvm::dbgs()
-                 << "externalized " << extState->constantIndex << " constants ("
-                 << extState->currentOffset << " bytes) to "
-                 << extState->binFileName << "\n");
-    } else if (extState) {
-      extState->writer.reset();
+  // ONNX-MLIR attaches per-result attributes (e.g. "onnx_node_name") to
+  // func.func results. The downstream buffer-results-to-out-params pass
+  // skips any result that still carries attributes, leaving the function
+  // signature unconverted and causing later lowering failures. Clear all
+  // result attributes so every result is eligible for out-param conversion.
+  module.walk([&](mlir::func::FuncOp funcOp) {
+    unsigned numResults = funcOp.getNumResults();
+    if (numResults > 0) {
+      llvm::SmallVector<mlir::DictionaryAttr> emptyResAttrs(
+          numResults, mlir::DictionaryAttr::get(ctx));
+      funcOp.setAllResultAttrs(emptyResAttrs);
     }
+  });
+
+  // Finalize externalization: release writer, write JSON manifest, set module
+  // attributes.
+  if (extState && extState->constantIndex > 0) {
+    extState->writer.reset();
+
+    // Set hip.constants_file on the module so downstream passes/tools know
+    // where the sidecar lives.
+    module->setAttr("hip.constants_file",
+                    mlir::StringAttr::get(ctx, extState->binFileName));
+
+    // Emit hipdnn.constant_sizes and hipdnn.constant_offsets for the runtime.
+    module->setAttr("hipdnn.constant_sizes",
+                    mlir::DenseI64ArrayAttr::get(ctx, extState->constantSizes));
+    module->setAttr(
+        "hipdnn.constant_offsets",
+        mlir::DenseI64ArrayAttr::get(ctx, extState->constantOffsets));
+
+    // Derive base name again for JSON path.
+    std::string baseName = "model";
+    if (auto sym = module->getAttrOfType<mlir::StringAttr>(
+            mlir::SymbolTable::getSymbolAttrName()))
+      baseName = sym.getValue().str();
+    std::string jsonPath = baseName + ".constants.json";
+
+    llvm::json::Object manifest;
+    manifest["version"] = 1;
+    manifest["binary_file"] = extState->binFileName;
+    manifest["num_constants"] = extState->constantIndex;
+    manifest["total_bytes"] = extState->currentOffset;
+    manifest["constants"] = std::move(extState->manifestEntries);
+
+    auto jsonWriter = fs->create_writer_template(jsonPath.c_str());
+    if (!jsonWriter) {
+      module.emitError("failed to open constants manifest via FileSystem: " +
+                       jsonPath);
+      return signalPassFailure();
+    }
+    std::string jsonStr;
+    llvm::raw_string_ostream jsonOs(jsonStr);
+    jsonOs << llvm::formatv("{0:2}", llvm::json::Value(std::move(manifest)));
+    jsonWriter->fwrite(jsonStr.data(), jsonStr.size());
+
+    LLVM_DEBUG(llvm::dbgs() << "externalized " << extState->constantIndex
+                            << " constants (" << extState->currentOffset
+                            << " bytes) to " << extState->binFileName << "\n");
+  } else if (extState) {
+    extState->writer.reset();
   }
 }
 
