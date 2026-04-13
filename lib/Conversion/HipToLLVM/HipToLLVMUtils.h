@@ -166,8 +166,8 @@ inline Value computeNumElements(MemRefType type, Value descriptor,
 }
 
 // Extract the 4D shape (N, C, H, W) of a memref as LLVM i64 values.
-// miopenSet4dTensorDescriptor requires exactly 4 dimensions, so ranks 1-3
-// are left-padded with 1:
+// miopenSetNdTensorDescriptorWithLayout requires exactly 4 dimensions, so
+// ranks 1-3 are left-padded with 1:
 //   rank 1: [W]       -> [1, 1, 1, W]
 //   rank 2: [H, W]    -> [1, 1, H, W]
 //   rank 3: [C, H, W] -> [1, C, H, W]
