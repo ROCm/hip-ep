@@ -558,7 +558,7 @@ jobs:
             $rel = $f.FullName.Substring($l2Root.Length).TrimStart('\', '/')
             $model = $rel -replace '\.txt$', '' -replace '\\', '/'
             $content = Get-Content $f.FullName -Raw
-            $l2Match = [regex]::Match($content, 'Combined L2 \(stacked diffs\):\s+([\d.eE+-]+)\s+\(total_elems:\s+(\d+),\s+skipped_nonfinite:\s+(\d+)\)')
+            $l2Match = [regex]::Match($content, 'Combined L2 \(stacked diffs\):\s+([\d.eE+-]+)\s+\(total_elems:\s+(\d+),.*?skipped_nonfinite:\s+(\d+)\)')
             $errMatch = [regex]::Match($content, '\[ERROR\]\s*(.+)')
             if ($l2Match.Success) {
               $l2val = [double]$l2Match.Groups[1].Value
