@@ -233,9 +233,10 @@ class ModelAdapter:
                 layer.mlp = DllBackedModule(original, runners, weights)
             report.replaced_count += 1
 
-        # If max_offload, also offload attention projections
+        # If max_offload, also offload attention projections and LM head
         if self._max_offload and report.replaced_count > 0:
             self._offload_attention_projections(shapes, report)
+            self._offload_lm_head(shapes, report)
 
         report.compile_time = time.perf_counter() - t0
         return report
@@ -290,6 +291,39 @@ class ModelAdapter:
                 runners[list(runners.keys())[0]].input_metas[-1]["shape"]
             )
             log.info(f"Offloaded {proj_strategy.name} in all layers")
+
+    def _offload_lm_head(self, shapes, report):
+        """Offload the LM head (final linear: hidden→vocab) to GPU DLL."""
+        lm_head = getattr(self.model, "lm_head", None)
+        if lm_head is None or not isinstance(lm_head, nn.Linear):
+            return
+
+        strategy = LinearProjectionStrategy("lm_head", "lm_head")
+        hidden = lm_head.in_features
+        runners = {}
+
+        for label, seq_len in shapes.items():
+            runner = self._compile_for_shape(
+                strategy,
+                self.model,
+                hidden,
+                seq_len,
+                3,
+                f"lm_head_{label}",
+            )
+            if runner:
+                runners[label] = runner
+
+        if not runners:
+            report.errors.append("lm_head compilation failed")
+            return
+
+        weights = [lm_head.weight.data.t().contiguous().cpu()]
+        self.model.lm_head = DllBackedModule(lm_head, runners, weights)
+        report.dll_shapes["lm_head"] = list(
+            runners[list(runners.keys())[0]].input_metas[-1]["shape"]
+        )
+        log.info("Offloaded lm_head")
 
     def _compile_for_shape(
         self,
