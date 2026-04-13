@@ -29,6 +29,24 @@ from torch._functorch.aot_autograd import make_boxed_func
 
 log = logging.getLogger("hip_backend")
 
+# Whether to actually compile subgraphs to DLLs (vs just classify them)
+_compile_enabled = False
+
+# Paths
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
+_BUILD_DIR = os.path.join(os.path.dirname(_PROJECT_ROOT), "build", "onnx-hipdnn-ep")
+_HIP_COMPILER = os.path.join(_BUILD_DIR, "bin", "hip-compiler.exe")
+_THEROCK_DIST = os.environ.get(
+    "THEROCK_DIST",
+    os.path.join(os.path.dirname(_PROJECT_ROOT), "therock"))
+
+
+def enable_compilation(enabled: bool = True):
+    """Enable/disable actual DLL compilation for supported subgraphs."""
+    global _compile_enabled
+    _compile_enabled = enabled
+
 # ──────────────────────────────────────────────────────────────────────
 # Op support registry
 # ──────────────────────────────────────────────────────────────────────
@@ -250,17 +268,102 @@ def _hip_compiler_backend(gm: torch.fx.GraphModule,
         log.info(f"Subgraph {_stats['total_subgraphs']}: FALLBACK "
                  f"({len(supported)}/{total} supported, "
                  f"unsupported: {set(unsupported)})")
-    else:
-        _stats["compiled_subgraphs"] += 1
-        log.info(f"Subgraph {_stats['total_subgraphs']}: HIP COMPILED "
-                 f"({total} ops: {set(supported)})")
+        return gm.forward
 
-    # For now: always return eager execution.
-    # In production, compiled subgraphs would:
-    # 1. Export to MLIR via fx_to_mlir
-    # 2. Compile with hip-compiler to DLL
-    # 3. Load DLL and return a wrapper function
+    _stats["compiled_subgraphs"] += 1
+    log.info(f"Subgraph {_stats['total_subgraphs']}: HIP COMPILED "
+             f"({total} ops)")
+
+    # Try to compile to DLL and return a wrapper
+    if _compile_enabled:
+        try:
+            compiled_fn = _compile_subgraph(gm, example_inputs,
+                                             _stats["total_subgraphs"])
+            if compiled_fn is not None:
+                return compiled_fn
+        except Exception as e:
+            log.warning(f"Subgraph {_stats['total_subgraphs']}: "
+                       f"compilation failed ({e}), falling back to eager")
+
     return gm.forward
+
+
+def _compile_subgraph(gm: torch.fx.GraphModule,
+                      example_inputs: List[torch.Tensor],
+                      subgraph_id: int) -> Optional[Callable]:
+    """Compile a supported subgraph to a GPU DLL and return a wrapper.
+
+    Steps:
+    1. Export FX graph to torch.export ExportedProgram
+    2. Convert to Torch dialect MLIR via fx_to_mlir
+    3. Compile MLIR to DLL via hip-compiler
+    4. Load DLL and return a callable wrapper
+    """
+    from fx_to_mlir import fx_graph_to_mlir
+    from hip_dll_runner import HipDllRunner
+
+    # Create work directory for this subgraph
+    work_dir = os.path.join(tempfile.gettempdir(), "hip_backend",
+                             f"subgraph_{subgraph_id}")
+    os.makedirs(work_dir, exist_ok=True)
+
+    # Step 1: Export the subgraph
+    # The gm is already an FX GraphModule. We need to wrap it as an
+    # ExportedProgram for fx_to_mlir. For now, use torch.export.export.
+    try:
+        ep = torch.export.export(gm, tuple(example_inputs), strict=False)
+    except Exception as e:
+        log.warning(f"torch.export failed for subgraph {subgraph_id}: {e}")
+        return None
+
+    # Step 2: Convert to MLIR
+    try:
+        mlir_text = fx_graph_to_mlir(ep, decompose=False)  # already decomposed
+    except Exception as e:
+        log.warning(f"MLIR generation failed for subgraph {subgraph_id}: {e}")
+        return None
+
+    mlir_path = os.path.join(work_dir, "model.mlir")
+    with open(mlir_path, "w") as f:
+        f.write(mlir_text)
+
+    # Step 3: Compile to DLL
+    dll_path = os.path.join(work_dir, "model.dll")
+    compile_cmd = os.path.join(work_dir, "_compile.cmd")
+    with open(compile_cmd, "w") as f:
+        f.write("@echo off\n")
+        f.write('call "C:\\Program Files\\Microsoft Visual Studio\\18\\'
+                'Community\\VC\\Auxiliary\\Build\\vcvarsall.bat" x64 >nul 2>&1\n')
+        f.write(f'set THEROCK_DIST={_THEROCK_DIST}\n')
+        f.write(f'set PATH={_THEROCK_DIST}\\bin;%PATH%\n')
+        f.write(f'"{_HIP_COMPILER}" "{mlir_path}" -o "{dll_path}"\n')
+
+    import subprocess
+    result = subprocess.run(["cmd", "/c", compile_cmd],
+                           capture_output=True, text=True, timeout=120)
+    if result.returncode != 0 or not os.path.exists(dll_path):
+        log.warning(f"hip-compiler failed for subgraph {subgraph_id}: "
+                   f"{result.stderr[-200:]}")
+        return None
+
+    log.info(f"Subgraph {subgraph_id}: compiled to {dll_path}")
+
+    # Step 4: Load DLL and create wrapper
+    os.environ["THEROCK_DIST"] = _THEROCK_DIST
+    try:
+        runner = HipDllRunner(dll_path, work_dir=work_dir)
+    except Exception as e:
+        log.warning(f"DLL loading failed for subgraph {subgraph_id}: {e}")
+        return None
+
+    log.info(f"Subgraph {subgraph_id}: DLL loaded, {runner}")
+
+    # Return a callable that matches the FX graph's signature
+    def compiled_forward(*args):
+        outputs = runner(*args)
+        return tuple(outputs) if len(outputs) > 1 else outputs[0]
+
+    return compiled_forward
 
 
 def hip_backend(gm: torch.fx.GraphModule,
