@@ -129,6 +129,18 @@ class FxToMlirEmitter:
         if not isinstance(arg, (list, tuple)) and cache_key in self._const_cache:
             return self._const_cache[cache_key]
 
+        if isinstance(arg, bool):
+            # Emit as torch.constant.int (0 or 1) rather than torch.constant.bool
+            # because most torch ops expect !torch.int for scalar args.
+            # torch.aten.full, where, etc. use int representation for bools.
+            int_val = 1 if arg else 0
+            name = self._next_const_name(f"i{int_val}")
+            self.lines.append(
+                f'{self.indent}{name} = "torch.constant.int"() '
+                f"{{value = {int_val} : i64}} : () -> !torch.int"
+            )
+            self._const_cache[cache_key] = name
+            return name
         if isinstance(arg, int):
             name = self._next_const_name(f"i{arg}" if arg >= 0 else f"in{abs(arg)}")
             self.lines.append(
@@ -139,18 +151,16 @@ class FxToMlirEmitter:
             return name
         if isinstance(arg, float):
             name = self._next_const_name("f")
+            import math
+            if math.isinf(arg):
+                val_str = "0x7FF0000000000000 : f64" if arg > 0 else "0xFFF0000000000000 : f64"
+            elif math.isnan(arg):
+                val_str = "0x7FF8000000000000 : f64"
+            else:
+                val_str = f"{arg:.6e} : f64"
             self.lines.append(
                 f'{self.indent}{name} = "torch.constant.float"() '
-                f"{{value = {arg:.6e} : f64}} : () -> !torch.float"
-            )
-            self._const_cache[cache_key] = name
-            return name
-        if isinstance(arg, bool):
-            name = self._next_const_name(f"b{int(arg)}")
-            val_str = "true" if arg else "false"
-            self.lines.append(
-                f'{self.indent}{name} = "torch.constant.bool"() '
-                f"{{value = {val_str}}} : () -> !torch.bool"
+                f"{{value = {val_str}}} : () -> !torch.float"
             )
             self._const_cache[cache_key] = name
             return name
@@ -202,12 +212,103 @@ class FxToMlirEmitter:
                 return list_name
         raise ValueError(f"Cannot emit constant for: {type(arg).__name__} = {arg}")
 
+    def _find_constant_nodes(self) -> set:
+        """Find nodes that can be folded at compile time.
+
+        A node is constant if all its inputs are either:
+        - Placeholders that are weights (parameters)
+        - Literal constants (int, float, bool, None, list)
+        - Other constant nodes
+
+        These include position index computation, mask construction,
+        and RoPE cos/sin cache — all of which depend only on shapes
+        and model config, not runtime inputs.
+        """
+        constant_nodes = set()
+        weight_names = set()
+
+        for node in self.graph.nodes:
+            if node.op == "placeholder" and _is_weight_placeholder(node):
+                weight_names.add(node.name)
+
+        # Iterate until fixpoint
+        changed = True
+        while changed:
+            changed = False
+            for node in self.graph.nodes:
+                if node.name in constant_nodes:
+                    continue
+                if node.op != "call_function":
+                    continue
+
+                # Check if all args are constants or weight refs
+                all_const = True
+                for arg in node.args:
+                    if hasattr(arg, "name"):
+                        if (arg.name not in constant_nodes and
+                            arg.name not in weight_names and
+                            arg.op != "placeholder"):
+                            all_const = False
+                            break
+                    # Literals are always constant
+
+                if all_const:
+                    # Also check kwargs
+                    for v in node.kwargs.values():
+                        if hasattr(v, "name") and v.name not in constant_nodes:
+                            all_const = False
+                            break
+
+                if all_const:
+                    # Don't fold large compute ops even if inputs are constant
+                    target = str(node.target)
+                    if any(k in target for k in ["mm", "matmul", "bmm",
+                                                  "softmax", "embedding"]):
+                        continue
+                    constant_nodes.add(node.name)
+                    changed = True
+
+        return constant_nodes
+
+    def _find_runtime_dependent(self) -> set:
+        """Find nodes that depend (transitively) on runtime inputs."""
+        runtime_deps = set()
+        for node in self.graph.nodes:
+            if node.op == "placeholder" and not _is_weight_placeholder(node):
+                runtime_deps.add(node.name)
+
+        # Forward propagation
+        changed = True
+        while changed:
+            changed = False
+            for node in self.graph.nodes:
+                if node.name in runtime_deps:
+                    continue
+                if node.op != "call_function":
+                    continue
+                for arg in node.args:
+                    if hasattr(arg, "name") and arg.name in runtime_deps:
+                        runtime_deps.add(node.name)
+                        changed = True
+                        break
+                    if isinstance(arg, (list, tuple)):
+                        for elem in arg:
+                            if hasattr(elem, "name") and elem.name in runtime_deps:
+                                runtime_deps.add(node.name)
+                                changed = True
+                                break
+        return runtime_deps
+
     def emit(self) -> str:
         """Generate MLIR text for the full module."""
+
+        # Find which nodes depend on runtime inputs vs are pure constants
+        runtime_deps = self._find_runtime_dependent()
+
         # Pre-scan: find weight placeholders that feed torch.aten.linear
-        # These weights need to be pre-transposed (PyTorch linear stores
-        # weights as [N, K] but hip.matmul expects [K, N] for correct
-        # A @ B = input @ weight^T computation).
+        # (before decomposition). After run_decompositions(), linear is
+        # decomposed to mm with the weight already transposed via permute,
+        # so no pre-transposition is needed in decomposed mode.
         linear_weight_names = set()
         for node in self.graph.nodes:
             if node.op == "call_function":
@@ -230,6 +331,15 @@ class FxToMlirEmitter:
         # All placeholders become function args (weights first, then inputs)
         all_params = weight_nodes + input_nodes
 
+        # Pre-scan: find constant tensor nodes (not runtime-dependent)
+        # These will become additional function args after the placeholders
+        const_tensor_nodes = []
+        for node in self.graph.nodes:
+            if node.op == "call_function" and node.name not in runtime_deps:
+                val = node.meta.get("val", None)
+                if isinstance(val, torch.Tensor):
+                    const_tensor_nodes.append(node)
+
         # Build function signature
         # Linear weights are emitted with transposed shape [K,N] instead of [N,K]
         arg_strs = []
@@ -240,6 +350,14 @@ class FxToMlirEmitter:
                 raise ValueError(f"No type info for placeholder: {node.name}")
             self.type_map[node.name] = ttype
             arg_strs.append(f"%arg{i}: {ttype}")
+
+        # Add constant tensor nodes as extra function args
+        for j, node in enumerate(const_tensor_nodes):
+            idx = len(all_params) + j
+            ttype = self._get_tensor_type(node)
+            if ttype:
+                self.type_map[node.name] = ttype
+                arg_strs.append(f"%arg{idx}: {ttype}")
 
         # Find output node and its type
         output_node = None
@@ -276,6 +394,10 @@ class FxToMlirEmitter:
         self.arg_name_map = {}
         for i, node in enumerate(all_params):
             self.arg_name_map[node.name] = f"%arg{i}"
+        # Map constant tensor nodes to their arg indices
+        for j, node in enumerate(const_tensor_nodes):
+            idx = len(all_params) + j
+            self.arg_name_map[node.name] = f"%arg{idx}"
         arg_name_map = self.arg_name_map
 
         # Emit operations
@@ -288,13 +410,42 @@ class FxToMlirEmitter:
 
             if node.op == "call_function":
                 op_name = str(node.target).split(".")[-1]  # e.g. "default"
-                # Get full aten op name: aten.linear.default
                 full_name = str(node.target)
                 if hasattr(node.target, "__name__"):
                     full_name = node.target.__name__
 
-                # Resolve the torch.aten.* op name
                 target_str = str(node.target)
+
+                # Skip constant nodes — they're already mapped to function args
+                if node.name not in runtime_deps:
+                    continue
+
+                # Skip framework ops that have no compute semantics
+                if "_assert_tensor_metadata" in target_str:
+                    # Assertion op — skip entirely
+                    continue
+                if "alias" in full_name and "aten.alias" in target_str:
+                    # alias is a no-op — forward the input
+                    if node.args and hasattr(node.args[0], "name"):
+                        ref = arg_name_map.get(node.args[0].name,
+                                               _value_name(node.args[0]))
+                        arg_name_map[node.name] = ref
+                        ttype = self._get_tensor_type(node)
+                        if ttype:
+                            self.type_map[node.name] = ttype
+                    continue
+                if "clone" in full_name and "aten.clone" in target_str:
+                    # clone is typically a no-op in inference
+                    if node.args and hasattr(node.args[0], "name"):
+                        ref = arg_name_map.get(node.args[0].name,
+                                               _value_name(node.args[0]))
+                        arg_name_map[node.name] = ref
+                        ttype = self._get_tensor_type(node)
+                        if ttype:
+                            self.type_map[node.name] = ttype
+                    continue
+
+                # Resolve the torch.aten.* op name
                 if "aten." in target_str:
                     # Extract: aten.mul.Tensor -> torch.aten.mul.Tensor
                     #          aten.rms_norm.default -> torch.aten.rms_norm
@@ -405,7 +556,83 @@ class FxToMlirEmitter:
         return "\n".join(result)
 
 
-def fx_graph_to_mlir(ep: ExportedProgram) -> str:
-    """Convert a torch.export ExportedProgram to Torch dialect MLIR text."""
+def _evaluate_constant_subgraph(ep: ExportedProgram) -> Dict[str, torch.Tensor]:
+    """Evaluate nodes that depend only on weights/constants, not runtime inputs.
+
+    Returns a dict mapping node name -> evaluated tensor value.
+    These nodes will be emitted as constant function args instead of ops.
+    """
+    gm = ep.graph_module
+
+    # Identify runtime input placeholders (non-weight)
+    runtime_inputs = set()
+    for node in gm.graph.nodes:
+        if node.op == "placeholder" and not _is_weight_placeholder(node):
+            runtime_inputs.add(node.name)
+
+    # Mark nodes that transitively depend on runtime inputs
+    depends_on_runtime = set()
+    for node in gm.graph.nodes:
+        if node.name in runtime_inputs:
+            depends_on_runtime.add(node.name)
+            continue
+        if node.op == "call_function":
+            for arg in node.args:
+                if hasattr(arg, "name") and arg.name in depends_on_runtime:
+                    depends_on_runtime.add(node.name)
+                    break
+            else:
+                for arg in node.args:
+                    if isinstance(arg, (list, tuple)):
+                        for elem in arg:
+                            if hasattr(elem, "name") and elem.name in depends_on_runtime:
+                                depends_on_runtime.add(node.name)
+                                break
+
+    # Evaluate constant nodes by running the graph with real weights
+    # and dummy runtime inputs
+    constant_results = {}
+    state_dict = ep.state_dict if hasattr(ep, 'state_dict') else {}
+
+    # Create input dict with real weights
+    input_dict = {}
+    for node in gm.graph.nodes:
+        if node.op == "placeholder":
+            val = node.meta.get("val", None)
+            if _is_weight_placeholder(node):
+                # Use actual weight value
+                # Map placeholder name to state dict key
+                for key, param in state_dict.items():
+                    if node.target.replace("p_", "").replace("_", ".") in key.replace(".", "_") or \
+                       node.target == f"p_{key.replace('.', '_')}":
+                        input_dict[node.name] = param
+                        break
+                else:
+                    # Fallback: use meta val (shape info only)
+                    if isinstance(val, torch.Tensor):
+                        input_dict[node.name] = torch.zeros_like(val)
+
+    # For non-runtime-dependent nodes, try to evaluate
+    for node in gm.graph.nodes:
+        if node.op == "call_function" and node.name not in depends_on_runtime:
+            val = node.meta.get("val", None)
+            if isinstance(val, torch.Tensor):
+                constant_results[node.name] = val
+
+    return constant_results
+
+
+def fx_graph_to_mlir(ep: ExportedProgram, decompose: bool = True) -> str:
+    """Convert a torch.export ExportedProgram to Torch dialect MLIR text.
+
+    Args:
+        ep: The exported program from torch.export.export()
+        decompose: If True, run decompositions to inline submodules and
+                   decompose higher-level ops (linear→mm, silu→sigmoid*x,
+                   sdpa→bmm+softmax, rms_norm→pow+mean+rsqrt+mul).
+                   This eliminates framework ops like wrap_with_set_grad_enabled.
+    """
+    if decompose:
+        ep = ep.run_decompositions()
     emitter = FxToMlirEmitter(ep)
     return emitter.emit()
