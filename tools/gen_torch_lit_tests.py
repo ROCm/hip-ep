@@ -171,7 +171,7 @@ def main():
 
     generated = 0
     for op_name, info in sorted(OP_REGISTRY.items()):
-        if not info.test_shapes or info.free:
+        if not info.test_shapes or info.free or not info.hip_op:
             continue
 
         test_content = generate_test(op_name, info)
