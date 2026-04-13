@@ -93,7 +93,11 @@ class HipDllRunner:
         input_tensors = (TensorT * len(inputs))()
 
         for i, tensor in enumerate(inputs):
-            arr = tensor.detach().cpu().contiguous().numpy()
+            t = tensor.detach().cpu()
+            # Convert bf16→f16 since numpy doesn't support bfloat16
+            if t.dtype == torch.bfloat16:
+                t = t.to(torch.float16)
+            arr = t.contiguous().numpy()
             np_inputs.append(arr)
             shape = (ctypes.c_int64 * len(arr.shape))(*arr.shape)
             shape_bufs.append(shape)
