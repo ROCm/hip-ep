@@ -115,3 +115,4 @@ dump_log.txt
 # Local build scripts (contain machine-specific paths)
 setup_and_configure.ps1
 build_and_install.ps1
+test/e2e_flow/
