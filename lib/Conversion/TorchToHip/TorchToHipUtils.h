@@ -157,6 +157,8 @@ void populateTorchGqaConversionPatterns(mlir::RewritePatternSet &patterns,
                                          mlir::MLIRContext *ctx);
 void populateTorchMatMulNBitsConversionPatterns(
     mlir::RewritePatternSet &patterns, mlir::MLIRContext *ctx);
+void populateTorchQMoEConversionPatterns(mlir::RewritePatternSet &patterns,
+                                          mlir::MLIRContext *ctx);
 
 } // namespace hip
 } // namespace mlir

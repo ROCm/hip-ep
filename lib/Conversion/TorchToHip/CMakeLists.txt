@@ -18,6 +18,7 @@ add_library(TorchToHip STATIC
   SliceCatConversion.cpp
   GqaConversion.cpp
   MatMulNBitsConversion.cpp
+  QMoEConversion.cpp
 )
 
 add_dependencies(TorchToHip
