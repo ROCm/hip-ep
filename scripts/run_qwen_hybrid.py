@@ -61,12 +61,17 @@ class DllMlp(nn.Module):
         self._expected_shape = tuple(
             runner.input_metas[-1]["shape"])  # last input is activation
 
+    # Class-level counters for logging
+    _dll_calls = 0
+    _fallback_calls = 0
+
     def forward(self, x):
         # Check if input shape matches compiled DLL
         if tuple(x.shape) != self._expected_shape:
-            # Shape mismatch (e.g. prefill with seq_len > 1) → PyTorch fallback
+            DllMlp._fallback_calls += 1
             return self._fallback(x)
 
+        DllMlp._dll_calls += 1
         device = x.device
         out = self.runner(
             self._gate_w, self._up_w, self._down_w,
@@ -96,15 +101,23 @@ def compile_mlp(mlp_module, hidden_size, device):
     example = torch.randn(1, 1, hidden_size, dtype=torch.float16)
 
     # Export
+    print(f"  Step 1/4: torch.export (input shape: {list(example.shape)})")
     try:
         ep = torch.export.export(proxy, (example,))
+        ops = set()
+        for n in ep.graph_module.graph.nodes:
+            if n.op == "call_function" and "aten." in str(n.target):
+                ops.add(str(n.target).split(".")[-2])
+        print(f"           ATen ops: {sorted(ops)}")
     except Exception as e:
         print(f"    Export failed: {e}")
         return None, False
 
     # Generate MLIR
+    print(f"  Step 2/4: FX → Torch dialect MLIR")
     try:
         mlir = fx_graph_to_mlir(ep, decompose=False)
+        print(f"           {len(mlir)} chars, {mlir.count(chr(10))} lines")
     except Exception as e:
         print(f"    MLIR generation failed: {e}")
         return None, False
@@ -133,16 +146,29 @@ def compile_mlp(mlp_module, hidden_size, device):
         f.write(f'set THEROCK_DIST={therock}\nset PATH={therock}\\bin;%PATH%\n')
         f.write(f'"{compiler}" "{mlir_path}" -o "{dll_path}"\n')
 
+    print(f"  Step 3/4: hip-compiler → GPU DLL")
+    import time as _time
+    t0 = _time.perf_counter()
     r = subprocess.run(["cmd", "/c", cmd], capture_output=True, text=True,
                        timeout=120)
+    compile_time = _time.perf_counter() - t0
     if r.returncode != 0 or not os.path.exists(dll_path):
         print(f"    Compilation failed: {r.stderr[-200:]}")
         return None, False
+    dll_size = os.path.getsize(dll_path)
+    print(f"           Compiled in {compile_time:.1f}s, "
+          f"DLL size: {dll_size/1024:.0f} KB")
 
     # Load DLL
+    print(f"  Step 4/4: Loading DLL via ctypes")
     os.environ["THEROCK_DIST"] = therock
     try:
         runner = HipDllRunner(dll_path, work_dir=work)
+        print(f"           {runner}")
+        print(f"           Input shapes:  "
+              f"{[m.get('shape') for m in runner.input_metas]}")
+        print(f"           Output shapes: "
+              f"{[m.get('shape') for m in runner.output_metas]}")
     except Exception as e:
         print(f"    DLL loading failed: {e}")
         return None, False
@@ -246,9 +272,44 @@ def main():
         print(f"Tok/s:  {len(new_tokens) / gen_time:.1f}")
 
     if success:
-        print(f"\nExecution mode: HYBRID")
-        print(f"  MLP (3 matmuls + SiLU + mul): HIP compiled GPU DLL")
-        print(f"  Everything else:              PyTorch ({device})")
+        dll_calls = DllMlp._dll_calls
+        fb_calls = DllMlp._fallback_calls
+        total_calls = dll_calls + fb_calls
+        print(f"\n{'=' * 70}")
+        print(f"Execution Summary")
+        print(f"{'=' * 70}")
+        print(f"Mode:   HYBRID (MLP on HIP GPU DLL + PyTorch fallback)")
+        print(f"Model:  {args.model} ({num_layers} layers)")
+        print(f"Device: {device}")
+        print(f"\nMLP DLL Info:")
+        print(f"  Compiled shape: input {dll_mlp._expected_shape}")
+        print(f"  Weights:  gate_proj {list(dll_mlp._gate_w.shape)}, "
+              f"up_proj {list(dll_mlp._up_w.shape)}, "
+              f"down_proj {list(dll_mlp._down_w.shape)}")
+        print(f"  DLL path: {dll_mlp.runner.dll_path}")
+        print(f"\nMLP Forward Calls:")
+        print(f"  GPU DLL:      {dll_calls:4d} calls "
+              f"(decode steps, shape={dll_mlp._expected_shape})")
+        print(f"  PyTorch:      {fb_calls:4d} calls "
+              f"(prefill, shape mismatch)")
+        print(f"  Total:        {total_calls:4d} calls")
+        if total_calls > 0:
+            print(f"  DLL offload:  {dll_calls*100//total_calls}%")
+        print(f"\nOps on HIP GPU DLL (per MLP call):")
+        print(f"  hip.matmul  (gate_proj): [{dll_mlp._expected_shape[-1]}] "
+              f"@ [{dll_mlp._gate_w.shape[0]}x{dll_mlp._gate_w.shape[1]}] "
+              f"via hipBLASLt")
+        print(f"  hip.silu    (activation): elementwise via MIOpen")
+        print(f"  hip.matmul  (up_proj):   [{dll_mlp._expected_shape[-1]}] "
+              f"@ [{dll_mlp._up_w.shape[0]}x{dll_mlp._up_w.shape[1]}] "
+              f"via hipBLASLt")
+        print(f"  hip.mul     (gate*up):   elementwise via MIOpen")
+        print(f"  hip.matmul  (down_proj): [{dll_mlp._down_w.shape[1]}] "
+              f"@ [{dll_mlp._down_w.shape[0]}x{dll_mlp._down_w.shape[1]}] "
+              f"via hipBLASLt")
+        print(f"\nOps on PyTorch ({device}):")
+        print(f"  Embedding, RMSNorm, Self-Attention (SDPA),")
+        print(f"  Q/K/V/O projections, Residual Add, LM Head")
     else:
         print(f"\nExecution mode: PyTorch only ({device})")
 
