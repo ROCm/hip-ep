@@ -83,7 +83,7 @@ struct MiopenBinaryOpLowering : public ConvertOpToLLVMPattern<OpTy> {
 // MIOpen broadcasts rhs dims that are 1 against lhs automatically.
 //
 // NOTE: The 4D shape passing is a workaround for MIOpen's
-// miopenSet4dTensorDescriptor API. Will be replaced when hipdnn
+// miopenSetNdTensorDescriptorWithLayout API. Will be replaced when hipdnn
 // elementwise support is available.
 template <typename OpTy, HipdnnTensorOp tensorOpEnum>
 struct ElementwiseOpLowering : public ConvertOpToLLVMPattern<OpTy> {

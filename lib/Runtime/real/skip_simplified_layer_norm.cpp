@@ -88,33 +88,33 @@ queryOrCreateSkipT5Norm(const SkipT5NormCacheKey &key) {
   }
 
   {
-    // T5LayerNorm: 2D [num_rows, hidden_dim]
+    // Pad to 4D NCHW: [num_rows, hidden_dim] -> [num_rows, hidden_dim, 1, 1]
     int x_dims[] = {static_cast<int>(key.num_rows),
-                    static_cast<int>(key.hidden_dim)};
-    int x_strides[] = {static_cast<int>(key.hidden_dim), 1};
-    int w_dims[] = {static_cast<int>(key.hidden_dim)};
-    int w_strides[] = {1};
-    int rstd_dims[] = {static_cast<int>(key.num_rows)};
-    int rstd_strides[] = {1};
-    int bias_dims[] = {1, static_cast<int>(key.hidden_dim)};
-    int bias_strides[] = {static_cast<int>(key.hidden_dim), 1};
+                    static_cast<int>(key.hidden_dim), 1, 1};
+    SKIP_CACHE_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        e.xDesc, key.data_type, miopenTensorNCHW, x_dims, 4));
+    SKIP_CACHE_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        e.yDesc, key.data_type, miopenTensorNCHW, x_dims, 4));
 
-    SKIP_CACHE_CHECK(miopenSetTensorDescriptor(e.xDesc, key.data_type, 2,
-                                               x_dims, x_strides));
-    SKIP_CACHE_CHECK(miopenSetTensorDescriptor(e.yDesc, key.data_type, 2,
-                                               x_dims, x_strides));
-    SKIP_CACHE_CHECK(miopenSetTensorDescriptor(e.weightDesc, key.data_type, 1,
-                                               w_dims, w_strides));
-    SKIP_CACHE_CHECK(miopenSetTensorDescriptor(e.rstdDesc, miopenFloat, 1,
-                                               rstd_dims, rstd_strides));
-    SKIP_CACHE_CHECK(miopenSetTensorDescriptor(e.addADesc, key.data_type, 2,
-                                               x_dims, x_strides));
-    SKIP_CACHE_CHECK(miopenSetTensorDescriptor(e.addBDesc, key.data_type, 2,
-                                               x_dims, x_strides));
-    SKIP_CACHE_CHECK(miopenSetTensorDescriptor(e.addCDesc, key.data_type, 2,
-                                               x_dims, x_strides));
-    SKIP_CACHE_CHECK(miopenSetTensorDescriptor(e.biasDesc, key.data_type, 2,
-                                               bias_dims, bias_strides));
+    // Add descriptors share the same shape as x
+    SKIP_CACHE_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        e.addADesc, key.data_type, miopenTensorNCHW, x_dims, 4));
+    SKIP_CACHE_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        e.addBDesc, key.data_type, miopenTensorNCHW, x_dims, 4));
+    SKIP_CACHE_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        e.addCDesc, key.data_type, miopenTensorNCHW, x_dims, 4));
+
+    int w_dims[] = {1, static_cast<int>(key.hidden_dim), 1, 1};
+    SKIP_CACHE_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        e.weightDesc, key.data_type, miopenTensorNCHW, w_dims, 4));
+
+    int rstd_dims[] = {static_cast<int>(key.num_rows), 1, 1, 1};
+    SKIP_CACHE_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        e.rstdDesc, miopenFloat, miopenTensorNCHW, rstd_dims, 4));
+
+    int bias_dims[] = {1, static_cast<int>(key.hidden_dim), 1, 1};
+    SKIP_CACHE_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        e.biasDesc, key.data_type, miopenTensorNCHW, bias_dims, 4));
   }
 
 #undef SKIP_CACHE_CHECK

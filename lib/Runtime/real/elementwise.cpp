@@ -128,21 +128,23 @@ queryOrCreateOpTensor(const OpTensorCacheKey &key) {
   MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&e.bDesc), cache_fail);
   MIOPEN_CHECK_GOTO(miopenCreateTensorDescriptor(&e.cDesc), cache_fail);
 
-  MIOPEN_CHECK_GOTO(
-      miopenSet4dTensorDescriptor(
-          e.aDesc, dt, static_cast<int>(key.lhs_n), static_cast<int>(key.lhs_c),
-          static_cast<int>(key.lhs_h), static_cast<int>(key.lhs_w)),
-      cache_fail);
-  MIOPEN_CHECK_GOTO(
-      miopenSet4dTensorDescriptor(
-          e.bDesc, dt, static_cast<int>(key.rhs_n), static_cast<int>(key.rhs_c),
-          static_cast<int>(key.rhs_h), static_cast<int>(key.rhs_w)),
-      cache_fail);
-  MIOPEN_CHECK_GOTO(
-      miopenSet4dTensorDescriptor(
-          e.cDesc, dt, static_cast<int>(key.out_n), static_cast<int>(key.out_c),
-          static_cast<int>(key.out_h), static_cast<int>(key.out_w)),
-      cache_fail);
+  {
+    int a_dims[] = {static_cast<int>(key.lhs_n), static_cast<int>(key.lhs_c),
+                    static_cast<int>(key.lhs_h), static_cast<int>(key.lhs_w)};
+    MIOPEN_CHECK_GOTO(miopenSetNdTensorDescriptorWithLayout(
+                          e.aDesc, dt, miopenTensorNCHW, a_dims, 4),
+                      cache_fail);
+    int b_dims[] = {static_cast<int>(key.rhs_n), static_cast<int>(key.rhs_c),
+                    static_cast<int>(key.rhs_h), static_cast<int>(key.rhs_w)};
+    MIOPEN_CHECK_GOTO(miopenSetNdTensorDescriptorWithLayout(
+                          e.bDesc, dt, miopenTensorNCHW, b_dims, 4),
+                      cache_fail);
+    int c_dims[] = {static_cast<int>(key.out_n), static_cast<int>(key.out_c),
+                    static_cast<int>(key.out_h), static_cast<int>(key.out_w)};
+    MIOPEN_CHECK_GOTO(miopenSetNdTensorDescriptorWithLayout(
+                          e.cDesc, dt, miopenTensorNCHW, c_dims, 4),
+                      cache_fail);
+  }
   goto cache_done;
 
 cache_fail:
