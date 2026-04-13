@@ -40,6 +40,8 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateTorchTransposeConversionPatterns(patterns, ctx);
   populateTorchNormConversionPatterns(patterns, ctx);
   populateTorchSliceCatConversionPatterns(patterns, ctx);
+  populateTorchGqaConversionPatterns(patterns, ctx);
+  populateTorchMatMulNBitsConversionPatterns(patterns, ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
