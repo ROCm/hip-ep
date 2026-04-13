@@ -27,6 +27,7 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #include "hip/Support/DiskFileSystem.h"
+#include "hip/profiling_timer.h"
 #include "morphizen-foundation/file_io.hpp"
 
 #include "llvm/ADT/STLExtras.h"
@@ -41,8 +42,11 @@
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
+#include "llvm/Support/Format.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
+
+#include <chrono>
 
 #define DEBUG_TYPE "convert-onnx-to-hip"
 
@@ -240,15 +244,35 @@ static void finalizeExternalizedConstant(mlir::ModuleOp module,
 
 /// Write one constant's raw data to constants.bin and replace the op with
 /// an extern memref.global + bufferization.to_tensor bridge.
+static thread_local double g_fwriteMs = 0;
+static thread_local double g_finalizeMs = 0;
+static thread_local int64_t g_totalBytesWritten = 0;
+static thread_local int64_t g_constCount = 0;
+
 static void externalizeConstant(mlir::ModuleOp module, mlir::Operation *constOp,
                                 mlir::RankedTensorType tensorType,
                                 const void *rawPtr, int64_t byteSize,
                                 ExternalizationState *extState) {
   int64_t entryOffset = writeAlignmentPadding(extState);
+
+  auto t0 = std::chrono::steady_clock::now();
   extState->writer->fwrite(rawPtr, byteSize);
   extState->currentOffset += byteSize;
+  auto t1 = std::chrono::steady_clock::now();
+
   finalizeExternalizedConstant(module, constOp, tensorType, byteSize,
                                entryOffset, extState);
+  auto t2 = std::chrono::steady_clock::now();
+
+  auto us = [](auto a, auto b) {
+    return std::chrono::duration_cast<std::chrono::microseconds>(b - a)
+               .count() /
+           1000.0;
+  };
+  g_fwriteMs += us(t0, t1);
+  g_finalizeMs += us(t1, t2);
+  g_totalBytesWritten += byteSize;
+  ++g_constCount;
 }
 
 /// Replace an onnx.Constant op with an inline arith.constant.
@@ -359,12 +383,15 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
                                               mlir::func::FuncOp funcOp,
                                               int64_t minNumElements,
                                               ExternalizationState *extState) {
+  HIP_PROFILE_SCOPE("lowerOnnxConstants");
 
   llvm::SmallVector<mlir::Operation *> constants;
   funcOp.walk([&](mlir::Operation *op) {
     if (op->getName().getStringRef() == "onnx.Constant")
       constants.push_back(op);
   });
+
+  g_fwriteMs = 0; g_finalizeMs = 0; g_totalBytesWritten = 0; g_constCount = 0;
 
   for (mlir::Operation *constOp : constants) {
     auto valueAttr = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
@@ -400,6 +427,16 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::ModuleOp module,
     } else {
       replaceWithArithConstant(constOp, valueAttr);
     }
+  }
+
+  if (g_constCount > 0) {
+    llvm::errs() << "[PROFILE]       constants: " << constants.size()
+                 << " total, " << g_constCount << " externalized ("
+                 << g_totalBytesWritten << " bytes)\n";
+    llvm::errs() << "[PROFILE]         fwrite (total): "
+                 << llvm::format("%.1f", g_fwriteMs) << " ms\n";
+    llvm::errs() << "[PROFILE]         finalizeExternalizedConstant (total): "
+                 << llvm::format("%.1f", g_finalizeMs) << " ms\n";
   }
   return mlir::success();
 }
@@ -2317,6 +2354,7 @@ struct ConvertOnnxToHipPass
 };
 
 void ConvertOnnxToHipPass::runOnOperation() {
+  HIP_PROFILE_SCOPE("ConvertOnnxToHipPass");
   mlir::ModuleOp module = getOperation();
   mlir::MLIRContext *ctx = module.getContext();
 
@@ -2367,8 +2405,11 @@ void ConvertOnnxToHipPass::runOnOperation() {
             lowerOnnxConstants(module, funcOp, minElems, extState.get())))
       return signalPassFailure();
     lowerOnnxReturns(funcOp);
-    if (mlir::failed(convertComputeOps(funcOp, ctx)))
-      return signalPassFailure();
+    {
+      HIP_PROFILE_SCOPE("convertComputeOps");
+      if (mlir::failed(convertComputeOps(funcOp, ctx)))
+        return signalPassFailure();
+    }
   }
 
   // Clean up onnx.NoValue and onnx.EntryPoint ops
@@ -2400,7 +2441,10 @@ void ConvertOnnxToHipPass::runOnOperation() {
   // Finalize externalization: release writer, write JSON manifest, set module
   // attributes.
   if (extState && extState->constantIndex > 0) {
-    extState->writer.reset();
+    {
+      HIP_PROFILE_SCOPE("writerClose");
+      extState->writer.reset();
+    }
 
     // Set hip.constants_file on the module so downstream passes/tools know
     // where the sidecar lives.
