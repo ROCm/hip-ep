@@ -40,7 +40,8 @@ struct UnrankedMemRef {
 };
 
 // Layout of MLIR's ranked memref descriptor (variable-length tail).
-//   { ptr allocated, ptr aligned, i64 offset, i64 sizes[rank], i64 strides[rank] }
+//   { ptr allocated, ptr aligned, i64 offset, i64 sizes[rank], i64
+//   strides[rank] }
 // We only access individual fields via pointer arithmetic.
 struct RankedDescriptor {
   void *allocated;
@@ -54,8 +55,8 @@ struct RankedDescriptor {
 // =========================================================================
 // Real GPU runtime: use HIP APIs for device-to-device memory copies
 // =========================================================================
-#include <hip/hip_runtime.h>
 #include <cstdio>
+#include <hip/hip_runtime.h>
 
 /// Recursively copy elements between strided GPU buffers.
 /// When the innermost contiguous dimension is reached, uses hipMemcpy2D

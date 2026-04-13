@@ -77,8 +77,7 @@ struct TorchQMoEToHip : public mlir::RewritePattern {
       auto attr = op->getAttrOfType<mlir::FloatAttr>(name);
       return attr ? attr : rewriter.getF32FloatAttr(def);
     };
-    auto getStr = [&](const char *name,
-                      const char *def) -> mlir::StringAttr {
+    auto getStr = [&](const char *name, const char *def) -> mlir::StringAttr {
       auto attr = op->getAttrOfType<mlir::StringAttr>(name);
       return attr ? attr : rewriter.getStringAttr(def);
     };
@@ -113,7 +112,7 @@ struct TorchQMoEToHip : public mlir::RewritePattern {
 } // namespace
 
 void populateTorchQMoEConversionPatterns(mlir::RewritePatternSet &patterns,
-                                          mlir::MLIRContext *ctx) {
+                                         mlir::MLIRContext *ctx) {
   patterns.add<TorchQMoEToHip>(ctx);
 }
 

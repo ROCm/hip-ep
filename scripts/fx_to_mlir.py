@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+#
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
+#
 """
 Convert a torch.export ExportedProgram's FX graph to Torch dialect MLIR text.
 
@@ -413,7 +415,6 @@ class FxToMlirEmitter:
 
         # Emit operations
         self.lines = []
-        emitted_constants = set()
 
         for node in self.graph.nodes:
             if node.op in ("placeholder", "output"):

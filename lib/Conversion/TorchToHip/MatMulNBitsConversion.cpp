@@ -66,10 +66,10 @@ struct TorchMatMulNBitsToHip : public mlir::RewritePattern {
 
     // Optional attributes with defaults
     auto bitsAttrOrig = op->getAttrOfType<mlir::IntegerAttr>("bits");
-    auto bitsAttr = bitsAttrOrig
-                        ? rewriter.getI64IntegerAttr(
-                              bitsAttrOrig.getValue().getSExtValue())
-                        : rewriter.getI64IntegerAttr(4);
+    auto bitsAttr =
+        bitsAttrOrig
+            ? rewriter.getI64IntegerAttr(bitsAttrOrig.getValue().getSExtValue())
+            : rewriter.getI64IntegerAttr(4);
 
     auto blockSizeAttrOrig = op->getAttrOfType<mlir::IntegerAttr>("block_size");
     auto blockSizeAttr = blockSizeAttrOrig

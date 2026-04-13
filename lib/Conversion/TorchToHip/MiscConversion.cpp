@@ -24,7 +24,8 @@ namespace {
 ///   softplus(x) = x + log(sigmoid(-x) + eps) ... no, that's circular.
 ///
 /// Simplest approach: match the op and emit a sequence of existing HIP ops.
-/// For now, implement via the identity: softplus(x) = x * sigmoid(x) / sigmoid(x)
+/// For now, implement via the identity: softplus(x) = x * sigmoid(x) /
+/// sigmoid(x)
 ///
 /// Actually, softplus is closely related to silu:
 ///   silu(x) = x * sigmoid(x)
@@ -92,8 +93,7 @@ struct TorchSplitToSlices : public mlir::RewritePattern {
           sizes.push_back(rewriter.getI64IntegerAttr(thisSize));
         } else {
           offsets.push_back(rewriter.getI64IntegerAttr(0));
-          sizes.push_back(
-              rewriter.getI64IntegerAttr(inputType.getDimSize(d)));
+          sizes.push_back(rewriter.getI64IntegerAttr(inputType.getDimSize(d)));
         }
         strides.push_back(rewriter.getI64IntegerAttr(1));
       }
@@ -127,7 +127,7 @@ struct TorchDivToArith : public mlir::RewritePattern {
 } // namespace
 
 void populateTorchMiscConversionPatterns(mlir::RewritePatternSet &patterns,
-                                          mlir::MLIRContext *ctx) {
+                                         mlir::MLIRContext *ctx) {
   patterns.add<TorchSplitToSlices>(ctx);
 }
 

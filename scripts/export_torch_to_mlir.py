@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+#
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
+#
 """
 Export a HuggingFace model to a list of ATen ops via torch.compile.
 

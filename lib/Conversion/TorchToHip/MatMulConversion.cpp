@@ -196,7 +196,8 @@ struct TorchLinearToHip : public mlir::RewritePattern {
     // We need A @ B^T which is input[..., K] @ weight[N, K]^T.
     //
     // hipBLASLt internally uses column-major: for row-major A[M,K] and B[K,N],
-    // it computes C[M,N] = A @ B via the identity C_row = (B^T_col * A^T_col)^T.
+    // it computes C[M,N] = A @ B via the identity C_row = (B^T_col *
+    // A^T_col)^T.
     //
     // For linear, we pass (input[...,K], weight[N,K]) but swap the matmul
     // order internally: compute weight[N,K] @ input^T[K,...] then transpose.
