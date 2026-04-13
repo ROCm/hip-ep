@@ -25,6 +25,11 @@ def parse_args():
     p.add_argument("--prompt", default="The capital of France is")
     p.add_argument("--max-new-tokens", type=int, default=30)
     p.add_argument("--device", default="cuda")
+    p.add_argument(
+        "--max-offload",
+        action="store_true",
+        help="Offload everything supported (MLP + attn projections)",
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args()
 
@@ -58,7 +63,7 @@ def main():
 
     # Adapt model
     print(f"Adapting model (prompt_len={prompt_len})...")
-    adapter = ModelAdapter(model)
+    adapter = ModelAdapter(model, max_offload=args.max_offload)
     report = adapter.compile_and_replace(prompt_len=prompt_len)
     print(report.summary())
 
