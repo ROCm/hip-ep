@@ -278,25 +278,37 @@ class FxToMlirEmitter:
                 # Resolve the torch.aten.* op name
                 target_str = str(node.target)
                 if "aten." in target_str:
-                    # Extract: aten.rms_norm.default -> torch.aten.rms_norm
+                    # Extract: aten.mul.Tensor -> torch.aten.mul.Tensor
+                    #          aten.rms_norm.default -> torch.aten.rms_norm
                     parts = target_str.split(".")
                     aten_idx = parts.index("aten")
-                    torch_op = "torch.aten." + parts[aten_idx + 1]
+                    op_name = parts[aten_idx + 1]
+                    # Include overload if it's not "default"
+                    if aten_idx + 2 < len(parts) and parts[aten_idx + 2] != "default":
+                        op_name += "." + parts[aten_idx + 2]
+                    torch_op = "torch.aten." + op_name
                 else:
                     torch_op = f"torch.unknown.{full_name}"
 
                 # Known ops that need trailing None args when torch.export omits them
-                _OPTIONAL_TRAILING_NONES = {
-                    "torch.aten.linear": 3,       # input, weight, bias
-                    "torch.aten.add": 3,           # self, other, alpha
-                    "torch.aten.sub": 3,           # self, other, alpha
+                # Known ops that need specific trailing args when torch.export omits them
+                _OPTIONAL_TRAILING_DEFAULTS = {
+                    "torch.aten.linear": [(None,)],        # bias=None
+                    "torch.aten.add.Tensor": [(1,)],       # alpha=1
+                    "torch.aten.sub.Tensor": [(1,)],       # alpha=1
                 }
 
-                # Pad args with None for known ops
+                # Pad args with defaults for known ops
                 padded_args = list(node.args)
-                expected_count = _OPTIONAL_TRAILING_NONES.get(torch_op)
-                if expected_count and len(padded_args) < expected_count:
-                    padded_args.extend([None] * (expected_count - len(padded_args)))
+                defaults = _OPTIONAL_TRAILING_DEFAULTS.get(torch_op, [])
+                if defaults:
+                    expected_count = len(padded_args) + len(defaults)
+                    while len(padded_args) < expected_count:
+                        idx = len(padded_args) - (expected_count - len(defaults))
+                        if 0 <= idx < len(defaults):
+                            padded_args.append(defaults[idx][0])
+                        else:
+                            padded_args.append(None)
 
                 # Resolve argument references
                 mlir_args = []
