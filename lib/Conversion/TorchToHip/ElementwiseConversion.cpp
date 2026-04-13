@@ -21,11 +21,13 @@ struct TorchAddToHip : public mlir::RewritePattern {
       return mlir::failure();
     mlir::Value context = *ctxOrFailure;
 
-    // Check alpha == 1 (operand 2)
-    auto alpha = getTorchConstantInt(op->getOperand(2));
-    if (!alpha || *alpha != 1)
-      return rewriter.notifyMatchFailure(
-          op, "alpha must be constant 1 for direct add lowering");
+    // Check alpha == 1 (operand 2, optional — torch.export may omit it)
+    if (op->getNumOperands() > 2) {
+      auto alpha = getTorchConstantInt(op->getOperand(2));
+      if (!alpha || *alpha != 1)
+        return rewriter.notifyMatchFailure(
+            op, "alpha must be constant 1 for direct add lowering");
+    }
 
     mlir::Location loc = op->getLoc();
     mlir::Value self = op->getOperand(0);
@@ -105,11 +107,13 @@ struct TorchSubToHip : public mlir::RewritePattern {
       return mlir::failure();
     mlir::Value context = *ctxOrFailure;
 
-    // Check alpha == 1 (operand 2)
-    auto alpha = getTorchConstantInt(op->getOperand(2));
-    if (!alpha || *alpha != 1)
-      return rewriter.notifyMatchFailure(
-          op, "alpha must be constant 1 for direct sub lowering");
+    // Check alpha == 1 (operand 2, optional — torch.export may omit it)
+    if (op->getNumOperands() > 2) {
+      auto alpha = getTorchConstantInt(op->getOperand(2));
+      if (!alpha || *alpha != 1)
+        return rewriter.notifyMatchFailure(
+            op, "alpha must be constant 1 for direct sub lowering");
+    }
 
     mlir::Location loc = op->getLoc();
     mlir::Value self = op->getOperand(0);
