@@ -30,10 +30,17 @@ struct TorchAddToHip : public mlir::RewritePattern {
     mlir::Location loc = op->getLoc();
     mlir::Value self = op->getOperand(0);
     mlir::Value other = op->getOperand(1);
+
+    // Both operands must be ranked tensors (skip scalar add)
+    auto selfType = mlir::dyn_cast<mlir::RankedTensorType>(self.getType());
+    auto otherType = mlir::dyn_cast<mlir::RankedTensorType>(other.getType());
+    if (!selfType || !otherType)
+      return rewriter.notifyMatchFailure(
+          op, "both operands must be ranked tensors");
+
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
-    auto selfType = mlir::cast<mlir::RankedTensorType>(self.getType());
     mlir::Value source =
         (selfType.getRank() == resultType.getRank()) ? self : other;
     mlir::Value init =
@@ -62,6 +69,13 @@ struct TorchMulToHip : public mlir::RewritePattern {
     mlir::Location loc = op->getLoc();
     mlir::Value self = op->getOperand(0);
     mlir::Value other = op->getOperand(1);
+
+    // Both operands must be ranked tensors (skip scalar mul)
+    if (!mlir::dyn_cast<mlir::RankedTensorType>(self.getType()) ||
+        !mlir::dyn_cast<mlir::RankedTensorType>(other.getType()))
+      return rewriter.notifyMatchFailure(
+          op, "both operands must be ranked tensors");
+
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
@@ -100,6 +114,13 @@ struct TorchSubToHip : public mlir::RewritePattern {
     mlir::Location loc = op->getLoc();
     mlir::Value self = op->getOperand(0);
     mlir::Value other = op->getOperand(1);
+
+    // Both operands must be ranked tensors (skip scalar sub)
+    if (!mlir::dyn_cast<mlir::RankedTensorType>(self.getType()) ||
+        !mlir::dyn_cast<mlir::RankedTensorType>(other.getType()))
+      return rewriter.notifyMatchFailure(
+          op, "both operands must be ranked tensors");
+
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
