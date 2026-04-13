@@ -224,6 +224,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateGqaLoweringPatterns(typeConverter, patterns);
   populateMatMulNBitsLoweringPatterns(typeConverter, patterns);
   populateQMoELoweringPatterns(typeConverter, patterns);
+  populateGemmLoweringPatterns(typeConverter, patterns);
   populateGraphLoweringPatterns(typeConverter, patterns);
 
   // Standard dialect lowerings
