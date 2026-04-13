@@ -140,7 +140,7 @@ void populateGatherConversionPatterns(RewritePatternSet &patterns,
 void populateReshapeConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 void populateGemmConversionPatterns(RewritePatternSet &patterns,
-  MLIRContext *ctx);
+                                    MLIRContext *ctx);
 
 } // namespace hip
 } // namespace mlir

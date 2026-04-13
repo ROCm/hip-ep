@@ -563,8 +563,8 @@ int wrap_qmoe(
 // Y = alpha * op(A) * op(B) + beta * C
 // op(A) shape: [M, K], op(B) shape: [K, N], C optional broadcastable to [M, N]
 int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
-  void *output, int64_t M, int64_t N, int64_t K, float alpha,
-  float beta, int64_t transA, int64_t transB, int64_t typeCode);
+              void *output, int64_t M, int64_t N, int64_t K, float alpha,
+              float beta, int64_t transA, int64_t transB, int64_t typeCode);
 
 //===----------------------------------------------------------------------===//
 // Low-Level HIP Wrappers

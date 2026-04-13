@@ -3,17 +3,18 @@
  * Licensed under the MIT License.
  */
 
- #include "HipToLLVMUtils.h"
+#include "HipToLLVMUtils.h"
 
- namespace mlir {
- namespace hip {
- namespace {
- 
- // hip.gemm(handle, input_A, input_B, input_C, output, alpha, beta, transA, transB, typeCode)
- struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
-   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
- 
-   LogicalResult
+namespace mlir {
+namespace hip {
+namespace {
+
+// hip.gemm(handle, input_A, input_B, input_C, output, alpha, beta, transA,
+// transB, typeCode)
+struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
   matchAndRewrite(GemmOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
@@ -108,15 +109,14 @@
     rewriter.eraseOp(op);
     return success();
   }
- };
- 
- } // namespace
- 
- void mlir::hip::populateGemmLoweringPatterns(
-     const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
-   patterns.add<GemmOpLowering>(converter);
- }
- 
- } // namespace hip
- } // namespace mlir
- 
+};
+
+} // namespace
+
+void mlir::hip::populateGemmLoweringPatterns(const LLVMTypeConverter &converter,
+                                             RewritePatternSet &patterns) {
+  patterns.add<GemmOpLowering>(converter);
+}
+
+} // namespace hip
+} // namespace mlir
