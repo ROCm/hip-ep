@@ -26,7 +26,7 @@ import time
 import torch
 
 sys.path.insert(0, os.path.dirname(__file__))
-from hip_backend import hip_backend, get_stats, reset_stats
+from hip_backend import hip_backend, get_stats, reset_stats, enable_compilation
 
 
 def parse_args():
@@ -40,6 +40,8 @@ def parse_args():
                     help="Max tokens to generate")
     p.add_argument("--device", default="auto",
                     help="Device: auto, cpu, cuda")
+    p.add_argument("--compile", action="store_true",
+                    help="Actually compile supported subgraphs to GPU DLLs")
     p.add_argument("--verbose", "-v", action="store_true",
                     help="Show per-subgraph compilation details")
     return p.parse_args()
@@ -51,6 +53,11 @@ def main():
     if args.verbose:
         logging.basicConfig(level=logging.INFO,
                            format="[HIP] %(message)s")
+        # Suppress noisy loggers
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
+        logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 
     print("=" * 70)
     print("Qwen Model → HIP MLIR Compiler Backend")
@@ -89,6 +96,9 @@ def main():
     # ── Apply torch.compile with HIP backend ────────────────────────────
     print(f"\nApplying torch.compile with HIP backend...")
     reset_stats()
+    if args.compile:
+        enable_compilation(True)
+        print("  DLL compilation: ENABLED")
 
     # Compile the forward method directly — generate() will call this
     model.forward = torch.compile(model.forward, backend=hip_backend)
