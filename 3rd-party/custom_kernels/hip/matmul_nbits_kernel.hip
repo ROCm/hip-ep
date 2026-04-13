@@ -94,6 +94,91 @@ __global__ void matmul_nbits_kernel(
 }
 
 /* =======================================================================
+ * Section 1b: GEMV kernel for small M (decode token generation)
+ *
+ * When M is small (1-4), the computation is a matrix-vector multiply.
+ * Each wave (32 threads) computes one output element by reducing across K.
+ * 8 waves per block = 8 output elements per block.
+ *
+ * Data layout (row-major, same as naive fallback):
+ *   A      : FP16 row-major [batch, M, K]
+ *   B      : uint4 packed [N, k_blocks, blob_size]  (blob_size = block_size/2)
+ *   scales : FP16 [N, k_blocks]
+ *   zp     : uint8 [N, k_blocks] or NULL (default zp=8)
+ *   output : FP16 row-major [batch, M, N]
+ * ======================================================================= */
+
+static constexpr int kGemvWavesPerBlock = 8;
+static constexpr int kGemvWaveSize = 32;
+static constexpr int kGemvBlockDim = kGemvWavesPerBlock * kGemvWaveSize; // 256
+
+__global__ void matmul_nbits_gemv(
+    const __half* __restrict__ A,
+    const uint8_t* __restrict__ B,
+    const __half* __restrict__ scales,
+    const uint8_t* __restrict__ zp,
+    const __half* __restrict__ bias,
+    __half* __restrict__ output,
+    int64_t M, int64_t N, int64_t K,
+    int64_t block_size) {
+  int wave_id = threadIdx.x / kGemvWaveSize;
+  int lane_id = threadIdx.x % kGemvWaveSize;
+  int64_t n = static_cast<int64_t>(blockIdx.x) * kGemvWavesPerBlock + wave_id;
+  int64_t m = blockIdx.y;
+  int64_t batch = blockIdx.z;
+
+  if (n >= N) return;
+
+  int64_t k_blocks = (K + block_size - 1) / block_size;
+  int64_t blob_size = block_size / 2;
+
+  const __half* a_row = A + batch * M * K + m * K;
+  const uint8_t* b_row = B + n * k_blocks * blob_size;
+  const __half* s_row = scales + n * k_blocks;
+
+  float acc = 0.0f;
+
+  // Each lane processes 8 contiguous int4 values per iteration.
+  // All 32 lanes read adjacent 4-byte chunks for coalesced memory access.
+  for (int64_t k_iter = 0; k_iter < K; k_iter += kGemvWaveSize * 8) {
+    int64_t k = k_iter + lane_id * 8;
+    if (k >= K) break;
+
+    int64_t blk = k / block_size;
+    float scale_val = static_cast<float>(s_row[blk]);
+    float zp_val = (zp != nullptr)
+                       ? static_cast<float>(zp[n * k_blocks + blk])
+                       : 8.0f;
+
+    // Load 4 bytes = 8 int4 values
+    uint32_t packed = *reinterpret_cast<const uint32_t*>(b_row + k / 2);
+
+    // Dequantize and dot product with A (unroll 8 nibbles)
+    acc += static_cast<float>(a_row[k + 0]) * (static_cast<float>((packed      ) & 0xF) - zp_val) * scale_val;
+    acc += static_cast<float>(a_row[k + 1]) * (static_cast<float>((packed >>  4) & 0xF) - zp_val) * scale_val;
+    acc += static_cast<float>(a_row[k + 2]) * (static_cast<float>((packed >>  8) & 0xF) - zp_val) * scale_val;
+    acc += static_cast<float>(a_row[k + 3]) * (static_cast<float>((packed >> 12) & 0xF) - zp_val) * scale_val;
+    acc += static_cast<float>(a_row[k + 4]) * (static_cast<float>((packed >> 16) & 0xF) - zp_val) * scale_val;
+    acc += static_cast<float>(a_row[k + 5]) * (static_cast<float>((packed >> 20) & 0xF) - zp_val) * scale_val;
+    acc += static_cast<float>(a_row[k + 6]) * (static_cast<float>((packed >> 24) & 0xF) - zp_val) * scale_val;
+    acc += static_cast<float>(a_row[k + 7]) * (static_cast<float>((packed >> 28)      ) - zp_val) * scale_val;
+  }
+
+  // Wave32 reduction using butterfly shuffles
+  acc += __shfl_xor(acc, 16);
+  acc += __shfl_xor(acc, 8);
+  acc += __shfl_xor(acc, 4);
+  acc += __shfl_xor(acc, 2);
+  acc += __shfl_xor(acc, 1);
+
+  // Lane 0 of each wave writes the final result
+  if (lane_id == 0) {
+    if (bias) acc += static_cast<float>(bias[n]);
+    output[batch * M * N + m * N + n] = static_cast<__half>(acc);
+  }
+}
+
+/* =======================================================================
  * Section 2: RDNA3 WMMA Fused GEMM + Dequantization Kernel
  *
  * Computes C = A x dequant(B_packed)^T  where:
@@ -505,6 +590,46 @@ extern "C" int hip_matmul_nbits(
       }
     }
 
+    return static_cast<int>(err);
+  }
+
+  /* -------------------------------------------------------------------
+   * GEMV fast path for small M (decode token generation)
+   *
+   * When M is small (1-4), a wave-parallel GEMV kernel is more efficient
+   * than both the WMMA path (which requires M%128) and the naive path
+   * (which uses scalar unpacking).
+   * ------------------------------------------------------------------- */
+  bool can_use_gemv = (M <= 4) && (K % 8 == 0);
+  if (can_use_gemv) {
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_matmul_nbits: GEMV fast path M=%lld N=%lld "
+        "K=%lld bs=%lld batch=%lld zp=%s bias=%s\n",
+        (long long)M, (long long)N, (long long)K, (long long)block_size,
+        (long long)batch_count, zero_points ? "yes" : "null",
+        bias ? "yes" : "null");
+
+    dim3 blk(kGemvBlockDim);
+    dim3 grd(static_cast<unsigned>((N + kGemvWavesPerBlock - 1) / kGemvWavesPerBlock),
+             static_cast<unsigned>(M),
+             static_cast<unsigned>(batch_count));
+
+    hipLaunchKernelGGL(
+        matmul_nbits_gemv, grd, blk, 0, hip_stream,
+        static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
+        static_cast<const __half*>(scales),
+        static_cast<const uint8_t*>(zero_points),
+        static_cast<const __half*>(bias), static_cast<__half*>(output),
+        M, N, K, block_size);
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+      fprintf(stderr,
+              "[custom_kernels] hip_matmul_nbits GEMV launch failed: %s\n",
+              hipGetErrorString(err));
+    }
+
+    // Bias is handled inside the kernel
     return static_cast<int>(err);
   }
 

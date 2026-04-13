@@ -20,10 +20,12 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   auto t0 = timing_now();
   auto t_prev = t0;
 
-  if (!out_state || !fs) {
+  if (!out_state) {
     fprintf(stderr, "Invalid arguments to hipdnn_ep_state_init_with_fs\n");
     return 1;
   }
+  // fs may be NULL when the model has no external constants
+  // (e.g. Torch-path models where weights are function arguments)
 
   // Allocate context struct
   RuntimeState *state = (RuntimeState *)malloc(sizeof(RuntimeState));

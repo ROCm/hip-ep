@@ -206,6 +206,7 @@ endmacro()
 # Compile shared implementation files
 compile_to_bitcode(hipdnn_ep_runtime_state.cpp runtime_state.bc)
 compile_to_bitcode(hipdnn_ep_runtime_tensor.cpp runtime_tensor.bc)
+compile_to_bitcode(memref_copy.cpp memref_copy.bc)
 
 # Compile implementation-specific files
 if(NOT BUILD_MOCK_RUNTIME)
@@ -226,11 +227,13 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/reduce_sum.cpp runtime_reduce_sum.bc)
     compile_to_bitcode(real/matmul_nbits.cpp runtime_matmul_nbits.bc)
     compile_to_bitcode(real/qmoe.cpp runtime_qmoe.bc)
+    compile_to_bitcode(real/silu.cpp runtime_silu.bc)
     compile_to_bitcode(real/test_hip_from_dll.cpp test_hip_from_dll.bc)
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/memref_copy.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_hip.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_miopen.bc
@@ -247,6 +250,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_sum.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul_nbits.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_silu.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc
     )
 else()
@@ -258,6 +262,7 @@ else()
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/memref_copy.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_mock.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc

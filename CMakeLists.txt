@@ -86,6 +86,9 @@ if(BUILD_HIP_TOOLS)
   separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND ${LLVM_DEFINITIONS})
   add_definitions(${LLVM_DEFINITIONS_LIST})
 
+  # Local source/build includes BEFORE prebuilt LLVM/MLIR includes so that
+  # locally modified headers (e.g. hip/InitAllPasses.h) take precedence over
+  # previously installed copies in CMAKE_PREFIX_PATH.
   include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
   include_directories(${CMAKE_CURRENT_BINARY_DIR}/include)
   include_directories(${LLVM_INCLUDE_DIRS})
