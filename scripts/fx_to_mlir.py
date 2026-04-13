@@ -16,7 +16,7 @@ Usage:
 
 import torch
 from torch.export import ExportedProgram
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 
 def _dtype_to_mlir(dtype: torch.dtype) -> str:
@@ -152,8 +152,13 @@ class FxToMlirEmitter:
         if isinstance(arg, float):
             name = self._next_const_name("f")
             import math
+
             if math.isinf(arg):
-                val_str = "0x7FF0000000000000 : f64" if arg > 0 else "0xFFF0000000000000 : f64"
+                val_str = (
+                    "0x7FF0000000000000 : f64"
+                    if arg > 0
+                    else "0xFFF0000000000000 : f64"
+                )
             elif math.isnan(arg):
                 val_str = "0x7FF8000000000000 : f64"
             else:
@@ -183,7 +188,9 @@ class FxToMlirEmitter:
                     if hasattr(elem, "name"):
                         ref = self.arg_name_map.get(elem.name, _value_name(elem))
                         elem_names.append(ref)
-                        t = self.type_map.get(elem.name, self._get_tensor_type(elem) or "tensor<*xf16>")
+                        t = self.type_map.get(
+                            elem.name, self._get_tensor_type(elem) or "tensor<*xf16>"
+                        )
                         elem_types.append(t)
                     else:
                         c = self._emit_constant_for_arg(elem, "")
@@ -245,9 +252,11 @@ class FxToMlirEmitter:
                 all_const = True
                 for arg in node.args:
                     if hasattr(arg, "name"):
-                        if (arg.name not in constant_nodes and
-                            arg.name not in weight_names and
-                            arg.op != "placeholder"):
+                        if (
+                            arg.name not in constant_nodes
+                            and arg.name not in weight_names
+                            and arg.op != "placeholder"
+                        ):
                             all_const = False
                             break
                     # Literals are always constant
@@ -262,8 +271,10 @@ class FxToMlirEmitter:
                 if all_const:
                     # Don't fold large compute ops even if inputs are constant
                     target = str(node.target)
-                    if any(k in target for k in ["mm", "matmul", "bmm",
-                                                  "softmax", "embedding"]):
+                    if any(
+                        k in target
+                        for k in ["mm", "matmul", "bmm", "softmax", "embedding"]
+                    ):
                         continue
                     constant_nodes.add(node.name)
                     changed = True
@@ -427,8 +438,9 @@ class FxToMlirEmitter:
                 if "alias" in full_name and "aten.alias" in target_str:
                     # alias is a no-op — forward the input
                     if node.args and hasattr(node.args[0], "name"):
-                        ref = arg_name_map.get(node.args[0].name,
-                                               _value_name(node.args[0]))
+                        ref = arg_name_map.get(
+                            node.args[0].name, _value_name(node.args[0])
+                        )
                         arg_name_map[node.name] = ref
                         ttype = self._get_tensor_type(node)
                         if ttype:
@@ -437,8 +449,9 @@ class FxToMlirEmitter:
                 if "clone" in full_name and "aten.clone" in target_str:
                     # clone is typically a no-op in inference
                     if node.args and hasattr(node.args[0], "name"):
-                        ref = arg_name_map.get(node.args[0].name,
-                                               _value_name(node.args[0]))
+                        ref = arg_name_map.get(
+                            node.args[0].name, _value_name(node.args[0])
+                        )
                         arg_name_map[node.name] = ref
                         ttype = self._get_tensor_type(node)
                         if ttype:
@@ -462,9 +475,9 @@ class FxToMlirEmitter:
                 # Known ops that need trailing None args when torch.export omits them
                 # Known ops that need specific trailing args when torch.export omits them
                 _OPTIONAL_TRAILING_DEFAULTS = {
-                    "torch.aten.linear": [(None,)],        # bias=None
-                    "torch.aten.add.Tensor": [(1,)],       # alpha=1
-                    "torch.aten.sub.Tensor": [(1,)],       # alpha=1
+                    "torch.aten.linear": [(None,)],  # bias=None
+                    "torch.aten.add.Tensor": [(1,)],  # alpha=1
+                    "torch.aten.sub.Tensor": [(1,)],  # alpha=1
                 }
 
                 # Pad args with defaults for known ops
@@ -585,14 +598,17 @@ def _evaluate_constant_subgraph(ep: ExportedProgram) -> Dict[str, torch.Tensor]:
                 for arg in node.args:
                     if isinstance(arg, (list, tuple)):
                         for elem in arg:
-                            if hasattr(elem, "name") and elem.name in depends_on_runtime:
+                            if (
+                                hasattr(elem, "name")
+                                and elem.name in depends_on_runtime
+                            ):
                                 depends_on_runtime.add(node.name)
                                 break
 
     # Evaluate constant nodes by running the graph with real weights
     # and dummy runtime inputs
     constant_results = {}
-    state_dict = ep.state_dict if hasattr(ep, 'state_dict') else {}
+    state_dict = ep.state_dict if hasattr(ep, "state_dict") else {}
 
     # Create input dict with real weights
     input_dict = {}
@@ -603,8 +619,11 @@ def _evaluate_constant_subgraph(ep: ExportedProgram) -> Dict[str, torch.Tensor]:
                 # Use actual weight value
                 # Map placeholder name to state dict key
                 for key, param in state_dict.items():
-                    if node.target.replace("p_", "").replace("_", ".") in key.replace(".", "_") or \
-                       node.target == f"p_{key.replace('.', '_')}":
+                    if (
+                        node.target.replace("p_", "").replace("_", ".")
+                        in key.replace(".", "_")
+                        or node.target == f"p_{key.replace('.', '_')}"
+                    ):
                         input_dict[node.name] = param
                         break
                 else:

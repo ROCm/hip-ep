@@ -21,11 +21,9 @@ import logging
 import os
 import subprocess
 import tempfile
-from typing import Callable, List, Optional, Set
+from typing import Callable, List, Optional
 
 import torch
-from torch._dynamo.backends.common import aot_autograd
-from torch._functorch.aot_autograd import make_boxed_func
 
 log = logging.getLogger("hip_backend")
 
@@ -38,14 +36,15 @@ _PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
 _BUILD_DIR = os.path.join(os.path.dirname(_PROJECT_ROOT), "build", "onnx-hipdnn-ep")
 _HIP_COMPILER = os.path.join(_BUILD_DIR, "bin", "hip-compiler.exe")
 _THEROCK_DIST = os.environ.get(
-    "THEROCK_DIST",
-    os.path.join(os.path.dirname(_PROJECT_ROOT), "therock"))
+    "THEROCK_DIST", os.path.join(os.path.dirname(_PROJECT_ROOT), "therock")
+)
 
 
 def enable_compilation(enabled: bool = True):
     """Enable/disable actual DLL compilation for supported subgraphs."""
     global _compile_enabled
     _compile_enabled = enabled
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Op support registry
@@ -241,19 +240,20 @@ def get_stats() -> dict:
 
 def reset_stats():
     """Reset compilation statistics."""
-    _stats.update({
-        "total_subgraphs": 0,
-        "compiled_subgraphs": 0,
-        "fallback_subgraphs": 0,
-        "total_ops": 0,
-        "supported_ops": 0,
-        "unsupported_ops": 0,
-        "unsupported_op_names": set(),
-    })
+    _stats.update(
+        {
+            "total_subgraphs": 0,
+            "compiled_subgraphs": 0,
+            "fallback_subgraphs": 0,
+            "total_ops": 0,
+            "supported_ops": 0,
+            "unsupported_ops": 0,
+            "unsupported_op_names": set(),
+        }
+    )
 
 
-def _hip_compiler_backend(gm: torch.fx.GraphModule,
-                           example_inputs: List[torch.Tensor]):
+def _hip_compiler_backend(gm: torch.fx.GraphModule, example_inputs: List[torch.Tensor]):
     """The core backend: receives a subgraph, decides compile or fallback."""
     _stats["total_subgraphs"] += 1
 
@@ -265,32 +265,36 @@ def _hip_compiler_backend(gm: torch.fx.GraphModule,
 
     if unsupported:
         _stats["fallback_subgraphs"] += 1
-        log.info(f"Subgraph {_stats['total_subgraphs']}: FALLBACK "
-                 f"({len(supported)}/{total} supported, "
-                 f"unsupported: {set(unsupported)})")
+        log.info(
+            f"Subgraph {_stats['total_subgraphs']}: FALLBACK "
+            f"({len(supported)}/{total} supported, "
+            f"unsupported: {set(unsupported)})"
+        )
         return gm.forward
 
     _stats["compiled_subgraphs"] += 1
-    log.info(f"Subgraph {_stats['total_subgraphs']}: HIP COMPILED "
-             f"({total} ops)")
+    log.info(f"Subgraph {_stats['total_subgraphs']}: HIP COMPILED ({total} ops)")
 
     # Try to compile to DLL and return a wrapper
     if _compile_enabled:
         try:
-            compiled_fn = _compile_subgraph(gm, example_inputs,
-                                             _stats["total_subgraphs"])
+            compiled_fn = _compile_subgraph(
+                gm, example_inputs, _stats["total_subgraphs"]
+            )
             if compiled_fn is not None:
                 return compiled_fn
         except Exception as e:
-            log.warning(f"Subgraph {_stats['total_subgraphs']}: "
-                       f"compilation failed ({e}), falling back to eager")
+            log.warning(
+                f"Subgraph {_stats['total_subgraphs']}: "
+                f"compilation failed ({e}), falling back to eager"
+            )
 
     return gm.forward
 
 
-def _compile_subgraph(gm: torch.fx.GraphModule,
-                      example_inputs: List[torch.Tensor],
-                      subgraph_id: int) -> Optional[Callable]:
+def _compile_subgraph(
+    gm: torch.fx.GraphModule, example_inputs: List[torch.Tensor], subgraph_id: int
+) -> Optional[Callable]:
     """Compile a supported subgraph to a GPU DLL and return a wrapper.
 
     Steps:
@@ -303,8 +307,9 @@ def _compile_subgraph(gm: torch.fx.GraphModule,
     from hip_dll_runner import HipDllRunner
 
     # Create work directory for this subgraph
-    work_dir = os.path.join(tempfile.gettempdir(), "hip_backend",
-                             f"subgraph_{subgraph_id}")
+    work_dir = os.path.join(
+        tempfile.gettempdir(), "hip_backend", f"subgraph_{subgraph_id}"
+    )
     os.makedirs(work_dir, exist_ok=True)
 
     # Step 1: Export the subgraph
@@ -332,18 +337,22 @@ def _compile_subgraph(gm: torch.fx.GraphModule,
     compile_cmd = os.path.join(work_dir, "_compile.cmd")
     with open(compile_cmd, "w") as f:
         f.write("@echo off\n")
-        f.write('call "C:\\Program Files\\Microsoft Visual Studio\\18\\'
-                'Community\\VC\\Auxiliary\\Build\\vcvarsall.bat" x64 >nul 2>&1\n')
-        f.write(f'set THEROCK_DIST={_THEROCK_DIST}\n')
-        f.write(f'set PATH={_THEROCK_DIST}\\bin;%PATH%\n')
+        f.write(
+            'call "C:\\Program Files\\Microsoft Visual Studio\\18\\'
+            'Community\\VC\\Auxiliary\\Build\\vcvarsall.bat" x64 >nul 2>&1\n'
+        )
+        f.write(f"set THEROCK_DIST={_THEROCK_DIST}\n")
+        f.write(f"set PATH={_THEROCK_DIST}\\bin;%PATH%\n")
         f.write(f'"{_HIP_COMPILER}" "{mlir_path}" -o "{dll_path}"\n')
 
-    import subprocess
-    result = subprocess.run(["cmd", "/c", compile_cmd],
-                           capture_output=True, text=True, timeout=120)
+
+    result = subprocess.run(
+        ["cmd", "/c", compile_cmd], capture_output=True, text=True, timeout=120
+    )
     if result.returncode != 0 or not os.path.exists(dll_path):
-        log.warning(f"hip-compiler failed for subgraph {subgraph_id}: "
-                   f"{result.stderr[-200:]}")
+        log.warning(
+            f"hip-compiler failed for subgraph {subgraph_id}: {result.stderr[-200:]}"
+        )
         return None
 
     log.info(f"Subgraph {subgraph_id}: compiled to {dll_path}")
@@ -366,7 +375,6 @@ def _compile_subgraph(gm: torch.fx.GraphModule,
     return compiled_forward
 
 
-def hip_backend(gm: torch.fx.GraphModule,
-                example_inputs: List[torch.Tensor]):
+def hip_backend(gm: torch.fx.GraphModule, example_inputs: List[torch.Tensor]):
     """torch.compile backend entry point."""
     return _hip_compiler_backend(gm, example_inputs)

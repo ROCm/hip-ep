@@ -9,6 +9,7 @@ This script:
 4. Saves the MLIR to disk for hip-compiler
 5. Reports the generated MLIR and instructions to compile/run
 """
+
 import os
 import sys
 import torch
@@ -19,8 +20,10 @@ from fx_to_mlir import fx_graph_to_mlir
 
 # ── Step 1: Define a simple model ──────────────────────────────────────────
 
+
 class SmallTransformerBlock(nn.Module):
     """Simplified transformer block using ops we support in TorchToHip."""
+
     def __init__(self, hidden=128):
         super().__init__()
         self.norm_weight = nn.Parameter(torch.ones(hidden))
@@ -30,8 +33,7 @@ class SmallTransformerBlock(nn.Module):
 
     def forward(self, x):
         # RMSNorm
-        normed = torch.nn.functional.rms_norm(x, (x.shape[-1],),
-                                               self.norm_weight, 1e-6)
+        normed = torch.nn.functional.rms_norm(x, (x.shape[-1],), self.norm_weight, 1e-6)
         # SwiGLU-like MLP: silu(gate(x)) * up(x) -> down
         gate = torch.nn.functional.silu(self.gate_proj(normed))
         up = self.up_proj(normed)
@@ -39,6 +41,7 @@ class SmallTransformerBlock(nn.Module):
         out = self.down_proj(hidden)
         # Residual
         return x + out
+
 
 # ── Step 2: Export ─────────────────────────────────────────────────────────
 

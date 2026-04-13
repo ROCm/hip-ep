@@ -31,19 +31,25 @@ from hip_backend import hip_backend, get_stats, reset_stats, enable_compilation
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Run Qwen through HIP MLIR compiler backend")
-    p.add_argument("--model", default="Qwen/Qwen3-0.6B",
-                    help="HuggingFace model name")
-    p.add_argument("--prompt", default="The capital of France is",
-                    help="Input prompt")
-    p.add_argument("--max-new-tokens", type=int, default=30,
-                    help="Max tokens to generate")
-    p.add_argument("--device", default="auto",
-                    help="Device: auto, cpu, cuda")
-    p.add_argument("--compile", action="store_true",
-                    help="Actually compile supported subgraphs to GPU DLLs")
-    p.add_argument("--verbose", "-v", action="store_true",
-                    help="Show per-subgraph compilation details")
+        description="Run Qwen through HIP MLIR compiler backend"
+    )
+    p.add_argument("--model", default="Qwen/Qwen3-0.6B", help="HuggingFace model name")
+    p.add_argument("--prompt", default="The capital of France is", help="Input prompt")
+    p.add_argument(
+        "--max-new-tokens", type=int, default=30, help="Max tokens to generate"
+    )
+    p.add_argument("--device", default="auto", help="Device: auto, cpu, cuda")
+    p.add_argument(
+        "--compile",
+        action="store_true",
+        help="Actually compile supported subgraphs to GPU DLLs",
+    )
+    p.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Show per-subgraph compilation details",
+    )
     return p.parse_args()
 
 
@@ -51,8 +57,7 @@ def main():
     args = parse_args()
 
     if args.verbose:
-        logging.basicConfig(level=logging.INFO,
-                           format="[HIP] %(message)s")
+        logging.basicConfig(level=logging.INFO, format="[HIP] %(message)s")
         # Suppress noisy loggers
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -78,7 +83,7 @@ def main():
     else:
         print()
 
-    print(f"\nLoading model...")
+    print("\nLoading model...")
     t0 = time.perf_counter()
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(
@@ -94,7 +99,7 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     # ── Apply torch.compile with HIP backend ────────────────────────────
-    print(f"\nApplying torch.compile with HIP backend...")
+    print("\nApplying torch.compile with HIP backend...")
     reset_stats()
     if args.compile:
         enable_compilation(True)
@@ -109,7 +114,7 @@ def main():
     if device != "cpu":
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
-    print(f"Prompt: \"{args.prompt}\"")
+    print(f'Prompt: "{args.prompt}"')
     print(f"Generating {args.max_new_tokens} tokens...\n")
 
     t0 = time.perf_counter()
@@ -122,7 +127,7 @@ def main():
     gen_time = time.perf_counter() - t0
 
     # Decode output
-    new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
+    new_tokens = outputs[0][inputs["input_ids"].shape[1] :]
     text = tokenizer.decode(new_tokens, skip_special_tokens=True)
     num_tokens = len(new_tokens)
 
@@ -148,21 +153,26 @@ def main():
     supported_ops = stats["supported_ops"]
 
     print(f"\n{'=' * 70}")
-    print(f"HIP Backend Coverage Report")
+    print("HIP Backend Coverage Report")
     print(f"{'=' * 70}")
     print(f"Subgraphs:  {total_sub} total")
-    print(f"  HIP compiled: {compiled_sub} "
-          f"({compiled_sub*100//max(total_sub,1)}%)")
-    print(f"  Fallback:     {fallback_sub} "
-          f"({fallback_sub*100//max(total_sub,1)}%)")
+    print(
+        f"  HIP compiled: {compiled_sub} ({compiled_sub * 100 // max(total_sub, 1)}%)"
+    )
+    print(
+        f"  Fallback:     {fallback_sub} ({fallback_sub * 100 // max(total_sub, 1)}%)"
+    )
     print(f"\nOps:        {total_ops} total")
-    print(f"  Supported:    {supported_ops} "
-          f"({supported_ops*100//max(total_ops,1)}%)")
-    print(f"  Unsupported:  {stats['unsupported_ops']} "
-          f"({stats['unsupported_ops']*100//max(total_ops,1)}%)")
+    print(
+        f"  Supported:    {supported_ops} ({supported_ops * 100 // max(total_ops, 1)}%)"
+    )
+    print(
+        f"  Unsupported:  {stats['unsupported_ops']} "
+        f"({stats['unsupported_ops'] * 100 // max(total_ops, 1)}%)"
+    )
 
     if stats["unsupported_op_names"]:
-        print(f"\nUnsupported ops (need TorchToHip patterns):")
+        print("\nUnsupported ops (need TorchToHip patterns):")
         for op in sorted(stats["unsupported_op_names"]):
             print(f"  - {op}")
 
