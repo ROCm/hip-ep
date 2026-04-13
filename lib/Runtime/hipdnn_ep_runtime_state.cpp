@@ -257,8 +257,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
            (unsigned long)GetCurrentProcessId(), total_size);
 
   {
-    void *existing_map =
-        OpenFileMappingA(SHM_FILE_MAP_ALL_ACCESS, 0, shm_name);
+    void *existing_map = OpenFileMappingA(SHM_FILE_MAP_ALL_ACCESS, 0, shm_name);
     if (existing_map) {
       auto *smeta = (SharedConstantsMeta *)MapViewOfFile(
           existing_map, SHM_FILE_MAP_ALL_ACCESS, 0, 0,
