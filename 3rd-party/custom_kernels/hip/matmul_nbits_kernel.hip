@@ -4,20 +4,24 @@
  *
  * MatMulNBits — Fused Dequant + MatMul for int4 packed weights (FP16)
  *
- * Two execution paths:
+ * Three execution paths (auto-dispatched by M, batch, K alignment):
  *
- *   1. RDNA3 WMMA fast path (when K%32==0, batch==1; M/N boundary-safe):
+ *   1. RDNA3 WMMA fast path (batch==1, K%32==0, M>=16):
  *      Uses WMMA intrinsics with double-buffered shared memory, grid swizzling,
  *      and inline-asm batched dequant. Requires gfx11xx/gfx12xx.
  *
- *      Data layout for the WMMA path:
+ *   2. GEMV col-major path (batch==1, K%32==0, M<16):
+ *      K-parallel reduction GEMV with COL_MAJOR=true, same data layout as WMMA.
+ *      Autotuned (BLOCK_SIZE, TILE_N) for best performance.
+ *
+ *      Data layout for paths 1 & 2 (WMMA data format):
  *        A      : FP16 col-major (M x K), stride lda = M
  *        B      : uint4 packed (N x K/2), row-major per column
  *        scales : FP16 (N x num_groups_k), row-major
  *        zeros  : FP16 (N x num_groups_k), row-major  (or NULL)
  *        output : FP16 col-major (M x N), stride ldc = M
  *
- *   2. Naive fallback (arbitrary alignment, batched, row-major):
+ *   3. Naive fallback (arbitrary alignment, batched, row-major):
  *        A      : FP16 row-major [batch, M, K]
  *        B      : uint4 packed [N, k_blocks, blob_size]
  *        scales : FP16 [N, k_blocks]
@@ -120,7 +124,7 @@ __global__ void matmul_nbits_kernel(
  * Launch: grid(ceil(N/TILE_N), M, batch), block(BLOCK_SIZE)
  * ======================================================================= */
 
-template <int BLOCK_SIZE, int TILE_N>
+template <int BLOCK_SIZE, int TILE_N, bool COL_MAJOR = false>
 __global__ void matmul_nbits_gemv_kernel(
     const __half* __restrict__ A,
     const uint8_t* __restrict__ B,
@@ -133,7 +137,7 @@ __global__ void matmul_nbits_gemv_kernel(
 {
     const int64_t n_base = static_cast<int64_t>(blockIdx.x) * TILE_N;
     const int64_t m      = blockIdx.y;
-    const int64_t batch  = blockIdx.z;
+    const int64_t batch  = COL_MAJOR ? 0 : blockIdx.z;
     const int tid        = threadIdx.x;
 
     if (m >= M) return;
@@ -141,9 +145,21 @@ __global__ void matmul_nbits_gemv_kernel(
     const int64_t k_blocks = (K + block_size - 1) / block_size;
     const int     bs_shift = __builtin_ctzll(
                                  static_cast<unsigned long long>(block_size));
-    const __half* a_row    = A + batch * M * K + m * K;
 
-    const uint8_t* b_base[TILE_N];
+    const __half* a_base;
+    int64_t       a_stride;
+    if constexpr (COL_MAJOR) {
+        a_base   = A + m;
+        a_stride = M;
+    } else {
+        a_base   = A + batch * M * K + m * K;
+        a_stride = 1;
+    }
+
+    [[maybe_unused]] const __half* zp_fp16 =
+        COL_MAJOR ? reinterpret_cast<const __half*>(zp) : nullptr;
+
+    const uint8_t* b_base_arr[TILE_N];
     const __half*  s_rows[TILE_N];
     int64_t        n_idx[TILE_N];
 #pragma unroll
@@ -151,7 +167,7 @@ __global__ void matmul_nbits_gemv_kernel(
         int64_t n  = n_base + tn;
         int64_t sn = (n < N) ? n : 0;
         n_idx[tn]  = sn;
-        b_base[tn] = B + sn * (K / 2);
+        b_base_arr[tn] = B + sn * (K / 2);
         s_rows[tn] = scales + sn * k_blocks;
     }
 
@@ -162,10 +178,20 @@ __global__ void matmul_nbits_gemv_kernel(
 
     const bool has_zp = (zp != nullptr);
 
+    // Helper: read zero-point for (n_idx, grp) — FP16 when COL_MAJOR
+    auto read_zp = [&](int64_t nidx, int64_t grp) __attribute__((always_inline)) -> float {
+        if constexpr (COL_MAJOR)
+            return static_cast<float>(zp_fp16[nidx * k_blocks + grp]);
+        else
+            return static_cast<float>(zp[nidx * k_blocks + grp]);
+    };
+
+    // Helper: read A element at K-offset
+    auto read_a = [&](int64_t k_off) __attribute__((always_inline)) -> float {
+        return static_cast<float>(a_base[k_off * a_stride]);
+    };
+
     // ---- Phase 1: 16-nibble (64-bit) vectorized main loop ----
-    // Each step loads uint2 (8 bytes = 16 nibbles) from B.
-    // block_size is always >= 32, so 16 elements never cross a group.
-    // Load-compute separation: issue all B loads, then compute.
     const int64_t num_u64 = K / 16;
     for (int64_t idx = static_cast<int64_t>(tid); idx < num_u64;
          idx += static_cast<int64_t>(BLOCK_SIZE)) {
@@ -175,7 +201,7 @@ __global__ void matmul_nbits_gemv_kernel(
         float a_sum = 0.0f;
 #pragma unroll
         for (int i = 0; i < 16; i++) {
-            a_vals[i] = static_cast<float>(a_row[k16 + i]);
+            a_vals[i] = read_a(k16 + i);
             a_sum += a_vals[i];
         }
 
@@ -186,7 +212,7 @@ __global__ void matmul_nbits_gemv_kernel(
 #pragma unroll
         for (int tn = 0; tn < TILE_N; tn++) {
             b_pk[tn] = *reinterpret_cast<const uint2*>(
-                            &b_base[tn][idx * 8]);
+                            &b_base_arr[tn][idx * 8]);
             sv[tn]   = static_cast<float>(s_rows[tn][grp]);
         }
 
@@ -203,8 +229,7 @@ __global__ void matmul_nbits_gemv_kernel(
                        static_cast<float>((b_pk[tn].y >> (i * 4)) & 0xF);
 
             if (has_zp) {
-                float zv = static_cast<float>(
-                               zp[n_idx[tn] * k_blocks + grp]);
+                float zv = read_zp(n_idx[tn], grp);
                 partial[tn] += dot * sv[tn] - a_sum * zv * sv[tn];
             } else {
                 partial[tn] += dot * sv[tn];
@@ -224,7 +249,7 @@ __global__ void matmul_nbits_gemv_kernel(
             float a_sum = 0.0f;
 #pragma unroll
             for (int i = 0; i < 8; i++) {
-                a_vals[i] = static_cast<float>(a_row[k8 + i]);
+                a_vals[i] = read_a(k8 + i);
                 a_sum += a_vals[i];
             }
 
@@ -234,7 +259,7 @@ __global__ void matmul_nbits_gemv_kernel(
             for (int tn = 0; tn < TILE_N; tn++) {
                 float sv = static_cast<float>(s_rows[tn][grp]);
                 uint32_t packed = *reinterpret_cast<const uint32_t*>(
-                                      &b_base[tn][k8 / 2]);
+                                      &b_base_arr[tn][k8 / 2]);
 
                 float dot = 0.0f;
 #pragma unroll
@@ -243,8 +268,7 @@ __global__ void matmul_nbits_gemv_kernel(
                            static_cast<float>((packed >> (i * 4)) & 0xF);
 
                 if (has_zp) {
-                    float zv = static_cast<float>(
-                                   zp[n_idx[tn] * k_blocks + grp]);
+                    float zv = read_zp(n_idx[tn], grp);
                     partial[tn] += dot * sv - a_sum * zv * sv;
                 } else {
                     partial[tn] += dot * sv;
@@ -258,17 +282,15 @@ __global__ void matmul_nbits_gemv_kernel(
         const int64_t k_tail = (K / 8) * 8;
         for (int64_t k = k_tail + static_cast<int64_t>(tid);
              k < K; k += static_cast<int64_t>(BLOCK_SIZE)) {
-            const float   a_val  = static_cast<float>(a_row[k]);
+            const float   a_val  = read_a(k);
             const int64_t grp    = k >> bs_shift;
             const int     nibble = static_cast<int>(k & 1);
 
 #pragma unroll
             for (int tn = 0; tn < TILE_N; tn++) {
                 float sv = static_cast<float>(s_rows[tn][grp]);
-                float zv = has_zp
-                    ? static_cast<float>(zp[n_idx[tn] * k_blocks + grp])
-                    : 0.0f;
-                uint8_t packed = b_base[tn][k / 2];
+                float zv = has_zp ? read_zp(n_idx[tn], grp) : 0.0f;
+                uint8_t packed = b_base_arr[tn][k / 2];
                 float   qval   = (nibble == 0)
                                    ? static_cast<float>(packed & 0xF)
                                    : static_cast<float>(packed >> 4);
@@ -312,8 +334,11 @@ __global__ void matmul_nbits_gemv_kernel(
                 if (n < N) {
                     if (bias)
                         val += static_cast<float>(bias[n]);
-                    output[batch * M * N + m * N + n] =
-                        static_cast<__half>(val);
+                    if constexpr (COL_MAJOR)
+                        output[n * M + m] = static_cast<__half>(val);
+                    else
+                        output[batch * M * N + m * N + n] =
+                            static_cast<__half>(val);
                 }
             }
         }
@@ -346,18 +371,26 @@ static void launchGemvConfig(
     const __half* sc, const uint8_t* zp,
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
-    int64_t batch, int64_t bs)
+    int64_t batch, int64_t bs,
+    bool col_major = false)
 {
     auto& c = kGemvConfigs[config_id];
     dim3 grid(static_cast<unsigned>((N + c.tile_n - 1) / c.tile_n),
               static_cast<unsigned>(M),
-              static_cast<unsigned>(batch));
+              static_cast<unsigned>(col_major ? 1 : batch));
     dim3 block(c.threads);
 
 #define GEMV_CASE(ID, BS, TN) \
-    case ID: hipLaunchKernelGGL( \
-        HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN>), \
-        grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); break
+    case ID: \
+        if (col_major) \
+            hipLaunchKernelGGL( \
+                HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, true>), \
+                grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
+        else \
+            hipLaunchKernelGGL( \
+                HIP_KERNEL_NAME(matmul_nbits_gemv_kernel<BS, TN, false>), \
+                grid, block, 0, stream, A, B, sc, zp, bi, out, M, N, K, bs); \
+        break
 
     switch (config_id) {
         GEMV_CASE( 0,  64,  1);  GEMV_CASE( 1,  64,  2);
@@ -388,7 +421,8 @@ static int tuneGemvConfig(
     const __half* sc, const uint8_t* zp,
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
-    int64_t batch, int64_t bs)
+    int64_t batch, int64_t bs,
+    bool col_major = false)
 {
     hipEvent_t ev0, ev1;
     hipEventCreate(&ev0);
@@ -405,12 +439,12 @@ static int tuneGemvConfig(
 
         for (int w = 0; w < WARMUP; w++)
             launchGemvConfig(cid, stream, A, B, sc, zp, bi, out,
-                             M, N, K, batch, bs);
+                             M, N, K, batch, bs, col_major);
 
         hipEventRecord(ev0, stream);
         for (int i = 0; i < ITERS; i++)
             launchGemvConfig(cid, stream, A, B, sc, zp, bi, out,
-                             M, N, K, batch, bs);
+                             M, N, K, batch, bs, col_major);
         hipEventRecord(ev1, stream);
         hipEventSynchronize(ev1);
 
@@ -432,9 +466,9 @@ static int tuneGemvConfig(
     hipEventDestroy(ev1);
 
     CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] GEMV autotune: M=%lld N=%lld K=%lld bs=%lld -> "
+        "[custom_kernels] GEMV autotune: M=%lld N=%lld K=%lld bs=%lld col_major=%d -> "
         "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
-        (long long)M, (long long)N, (long long)K, (long long)bs,
+        (long long)M, (long long)N, (long long)K, (long long)bs, col_major,
         best_id, kGemvConfigs[best_id].threads,
         kGemvConfigs[best_id].tile_n, best_ms / ITERS);
 
@@ -450,14 +484,15 @@ static struct {
 
 static std::mutex gemv_tune_mutex;
 
-static uint64_t gemvCacheKey(int64_t M, int64_t N, int64_t K, int64_t bs) {
-    // FNV-1a hash — safe for N > 65535 (e.g. N=201088)
+static uint64_t gemvCacheKey(int64_t M, int64_t N, int64_t K, int64_t bs,
+                             bool col_major = false) {
     uint64_t h = 14695981039346656037ULL;
     auto mix = [&](uint64_t v) { h ^= v; h *= 1099511628211ULL; };
     mix(static_cast<uint64_t>(M));
     mix(static_cast<uint64_t>(N));
     mix(static_cast<uint64_t>(K));
     mix(static_cast<uint64_t>(bs));
+    mix(col_major ? 1ULL : 0ULL);
     return h;
 }
 
@@ -467,9 +502,10 @@ static int getOrTuneGemvConfig(
     const __half* sc, const uint8_t* zp,
     const __half* bi, __half* out,
     int64_t M, int64_t N, int64_t K,
-    int64_t batch, int64_t bs)
+    int64_t batch, int64_t bs,
+    bool col_major = false)
 {
-    uint64_t key = gemvCacheKey(M, N, K, bs);
+    uint64_t key = gemvCacheKey(M, N, K, bs, col_major);
     int slot = static_cast<int>(key % kGemvCacheSlots);
 
     if (gemv_cache[slot].valid && gemv_cache[slot].key == key)
@@ -481,7 +517,7 @@ static int getOrTuneGemvConfig(
         return gemv_cache[slot].config_id;
 
     int best = tuneGemvConfig(stream, A, B, sc, zp, bi, out,
-                               M, N, K, batch, bs);
+                               M, N, K, batch, bs, col_major);
     gemv_cache[slot].key       = key;
     gemv_cache[slot].config_id = best;
     gemv_cache[slot].valid     = true;
@@ -1332,19 +1368,19 @@ extern "C" int hip_matmul_nbits(
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
 
   /* -------------------------------------------------------------------
-   * RDNA3 WMMA fast path
-   *
-   * Conditions: fp16, batch==1, K%32==0 (M/N any positive value)
+   * WMMA data format: batch==1 && K%32==0
    *
    * Data layout requirements (different from the naive fallback):
    *   - A and output are col-major with leading dimension = M
    *   - zero_points (if not NULL) must be FP16 [N, num_groups_k]
+   *
+   * When M >= kBlockDim (16): use WMMA intrinsics (RDNA3 fast path)
+   * When M <  kBlockDim:      use GEMV kernel with COL_MAJOR=true
+   *                           (same col-major data format, autotuned)
    * ------------------------------------------------------------------- */
-  bool can_use_wmma = (batch_count == 1)
-                   && (K % 32 == 0)
-                   && (M > kBlockDim);
+  bool wmma_data_format = (batch_count == 1) && (K % 32 == 0);
 
-  if (can_use_wmma) {
+  if (wmma_data_format && M >= kBlockDim) {
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: WMMA fast path M=%lld N=%lld "
         "K=%lld bs=%lld zp=%s bias=%s\n",
@@ -1405,12 +1441,52 @@ extern "C" int hip_matmul_nbits(
   }
 
   /* -------------------------------------------------------------------
-   * GEMV path — small M, autotuned K-parallel reduction
+   * GEMV path with col-major data — small M, WMMA data format
    *
-   * For small M (≤ kBlockDim), the GEMV kernel with TILE_N column
-   * batching is used. On the first call for each (M,N,K,block_size)
-   * shape, all 16 (BLOCK_SIZE, TILE_N) configs are benchmarked via
-   * hipEvent timing and the fastest is cached for subsequent calls.
+   * When batch==1, K%32==0, but M < kBlockDim: the caller provides
+   * WMMA-format data (col-major A, FP16 zeros, col-major output).
+   * We use the GEMV kernel with COL_MAJOR=true to handle this layout
+   * while keeping the K-parallel reduction performance advantage.
+   * ------------------------------------------------------------------- */
+  if (wmma_data_format && M < kBlockDim) {
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_matmul_nbits: GEMV col-major path M=%lld "
+        "N=%lld K=%lld bs=%lld zp=%s bias=%s\n",
+        (long long)M, (long long)N, (long long)K,
+        (long long)block_size,
+        zero_points ? "yes" : "null", bias ? "yes" : "null");
+
+    const auto* a_h = static_cast<const __half*>(A);
+    const auto* b_u = static_cast<const uint8_t*>(B);
+    const auto* s_h = static_cast<const __half*>(scales);
+    const auto* z_u = static_cast<const uint8_t*>(zero_points);
+    const auto* b_h = static_cast<const __half*>(bias);
+    auto*       o_h = static_cast<__half*>(output);
+
+    int config_id = getOrTuneGemvConfig(
+        hip_stream, a_h, b_u, s_h, z_u, b_h, o_h,
+        M, N, K, 1, block_size, /*col_major=*/true);
+
+    launchGemvConfig(config_id, hip_stream,
+                     a_h, b_u, s_h, z_u, b_h, o_h,
+                     M, N, K, 1, block_size, /*col_major=*/true);
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+      fprintf(stderr,
+              "[custom_kernels] hip_matmul_nbits GEMV col-major launch "
+              "failed: %s\n",
+              hipGetErrorString(err));
+    }
+    return static_cast<int>(err);
+  }
+
+  /* -------------------------------------------------------------------
+   * GEMV path — small M, row-major data (non-WMMA format)
+   *
+   * For small M (≤ kBlockDim) with row-major A and uint8 zero points.
+   * On the first call for each (M,N,K,block_size) shape, all configs
+   * are benchmarked and the fastest is cached for subsequent calls.
    * ------------------------------------------------------------------- */
   if (M <= kBlockDim) {
     CUSTOM_KERNELS_DEBUG_LOG(
