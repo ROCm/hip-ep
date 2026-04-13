@@ -4,13 +4,8 @@
 """
 Load and run compiled HIP model DLLs from Python via ctypes.
 
-Provides a callable wrapper around the C ABI:
+Provides a callable wrapper around the compiled DLL's C ABI:
   inference_init / inference_compute / inference_cleanup
-
-Usage:
-    runner = HipDllRunner("model.dll")
-    outputs = runner(input_tensor1, input_tensor2, ...)
-    runner.close()
 """
 
 import ctypes
@@ -22,10 +17,7 @@ import numpy as np
 import torch
 
 
-# ── C struct definitions matching hip-test-dll ──────────────────────────
-
 class TensorT(ctypes.Structure):
-    """Mirrors tensor_t in hipdnn_ep_runtime.h"""
     _fields_ = [
         ("data", ctypes.c_void_p),
         ("shape", ctypes.POINTER(ctypes.c_int64)),
@@ -35,7 +27,6 @@ class TensorT(ctypes.Structure):
 
 
 class SpanT(ctypes.Structure):
-    """Mirrors span_t in hipdnn_ep_runtime.h"""
     _fields_ = [
         ("data", ctypes.POINTER(TensorT)),
         ("count", ctypes.c_size_t),
@@ -43,113 +34,119 @@ class SpanT(ctypes.Structure):
 
 
 class HipDllRunner:
-    """Runs a compiled HIP model DLL via hip-test-dll subprocess.
-
-    Uses hip-test-dll.exe as the execution engine since it handles
-    the DiskFileSystem, GPU memory management, and tensor marshaling.
-    This avoids needing to replicate the C++ FileSystem class in Python.
-
-    For production, this would be replaced with direct ctypes calls
-    using a Python-accessible filesystem binding.
-    """
+    """Loads a compiled HIP model DLL and runs inference via ctypes."""
 
     def __init__(self, dll_path: str, work_dir: Optional[str] = None):
         self.dll_path = os.path.abspath(dll_path)
         self.work_dir = work_dir or os.path.dirname(self.dll_path)
-        self._therock = os.environ.get(
-            "THEROCK_DIST",
-            "C:\\Users\\tsiddaga\\Documents\\code\\therock")
 
-        # Find hip-test-dll.exe
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.dirname(script_dir)
-        self._runner = os.path.join(
-            os.path.dirname(project_root), "build",
-            "onnx-hipdnn-ep", "bin", "hip-test-dll.exe")
+        # Add TheRock to DLL search path for amdhip64.dll
+        therock = os.environ.get("THEROCK_DIST", "")
+        if therock:
+            try:
+                os.add_dll_directory(os.path.join(therock, "bin"))
+            except OSError:
+                pass
 
-        # Parse metadata from DLL
-        self.metadata = self._get_metadata()
+        # Load DLL
+        self.dll = ctypes.CDLL(self.dll_path)
+
+        # Bind C ABI functions
+        self._init = self.dll.inference_init
+        self._init.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+        self._init.restype = ctypes.c_int
+
+        self._compute = self.dll.inference_compute
+        self._compute.argtypes = [ctypes.c_void_p,
+                                   ctypes.POINTER(SpanT),
+                                   ctypes.POINTER(SpanT)]
+        self._compute.restype = ctypes.c_int
+
+        self._cleanup = self.dll.inference_cleanup
+        self._cleanup.argtypes = [ctypes.c_void_p]
+        self._cleanup.restype = ctypes.c_int
+
+        self._get_metadata = self.dll.inference_get_metadata_json
+        self._get_metadata.argtypes = []
+        self._get_metadata.restype = ctypes.c_char_p
+
+        # Parse metadata
+        meta_str = self._get_metadata()
+        self.metadata = json.loads(meta_str)
         self.input_metas = self.metadata.get("inputs", [])
         self.output_metas = self.metadata.get("outputs", [])
 
-    def _get_metadata(self) -> dict:
-        """Extract metadata JSON from the DLL via hip-test-dll."""
-        import subprocess
-        cmd = (f'set PATH={self._therock}\\bin;%PATH% && '
-               f'"{self._runner}" "{self.dll_path}" --verbose 2>&1')
+        # Initialize: pass NULL filesystem (OK for models without constants)
+        self.state = ctypes.c_void_p()
+        old_cwd = os.getcwd()
+        os.chdir(self.work_dir)
+        ret = self._init(ctypes.byref(self.state), None)
+        os.chdir(old_cwd)
+        if ret != 0:
+            raise RuntimeError(f"inference_init failed with code {ret}")
 
-        # Run just to get metadata (it will also execute, which is fine)
-        result = subprocess.run(
-            ["cmd", "/c", cmd],
-            capture_output=True, text=True, timeout=30,
-            cwd=self.work_dir)
+    def __call__(self, *inputs: torch.Tensor) -> List[torch.Tensor]:
+        """Run inference. Inputs/outputs are PyTorch tensors (host memory)."""
+        # Prepare inputs as contiguous numpy arrays
+        np_inputs = []
+        shape_bufs = []
+        input_tensors = (TensorT * len(inputs))()
 
-        # Parse JSON from output
-        for line in result.stdout.split("\n"):
-            if line.strip().startswith("{"):
-                try:
-                    return json.loads(line.strip() +
-                                    result.stdout[result.stdout.index(line) +
-                                                  len(line):].split("}")[0] + "}")
-                except (json.JSONDecodeError, ValueError):
-                    pass
+        for i, tensor in enumerate(inputs):
+            arr = tensor.detach().cpu().contiguous().numpy()
+            np_inputs.append(arr)
+            shape = (ctypes.c_int64 * len(arr.shape))(*arr.shape)
+            shape_bufs.append(shape)
 
-        # Try to find multi-line JSON
-        in_json = False
-        json_lines = []
-        for line in result.stdout.split("\n"):
-            stripped = line.strip()
-            # Remove test output prefix like "1: " or "49: "
-            if ":" in stripped and stripped.split(":")[0].strip().isdigit():
-                stripped = ":".join(stripped.split(":")[1:]).strip()
-            if stripped == "{":
-                in_json = True
-                json_lines = ["{"]
-            elif in_json:
-                json_lines.append(stripped)
-                if stripped == "}":
-                    try:
-                        return json.loads("\n".join(json_lines))
-                    except json.JSONDecodeError:
-                        in_json = False
+            input_tensors[i].data = arr.ctypes.data
+            input_tensors[i].shape = shape
+            input_tensors[i].rank = len(arr.shape)
+            input_tensors[i].element_size = arr.itemsize
 
-        return {"inputs": [], "outputs": []}
+        input_span = SpanT(data=input_tensors, count=len(inputs))
 
-    def run(self) -> dict:
-        """Execute the model with default test data via hip-test-dll.
+        # Prepare outputs
+        np_outputs = []
+        out_shape_bufs = []
+        output_tensors = (TensorT * len(self.output_metas))()
 
-        Returns dict with output values.
-        """
-        import subprocess
-        cmd_path = os.path.join(self.work_dir, "_run.cmd")
-        with open(cmd_path, "w") as f:
-            f.write("@echo off\n")
-            f.write(f'set PATH={self._therock}\\bin;%PATH%\n')
-            f.write(f'"{self._runner}" "{self.dll_path}" '
-                    f'--verbose --validate\n')
+        _DTYPE_MAP = {2: np.float16, 4: np.float32, 8: np.int64, 1: np.uint8}
+        for i, meta in enumerate(self.output_metas):
+            shape = meta.get("shape", [1])
+            elem_size = meta.get("element_size", 2)
+            arr = np.zeros(shape, dtype=_DTYPE_MAP.get(elem_size, np.float16))
+            np_outputs.append(arr)
 
-        result = subprocess.run(
-            ["cmd", "/c", cmd_path],
-            capture_output=True, text=True, timeout=30,
-            cwd=self.work_dir)
+            shape_arr = (ctypes.c_int64 * len(shape))(*shape)
+            out_shape_bufs.append(shape_arr)
 
-        success = "SUCCESS" in result.stdout
-        output_vals = []
-        for line in result.stdout.split("\n"):
-            if "First 10 values:" in line:
-                vals_str = line.split("First 10 values:")[1].strip()
-                output_vals = [float(v) for v in vals_str.split() if v]
+            output_tensors[i].data = arr.ctypes.data
+            output_tensors[i].shape = shape_arr
+            output_tensors[i].rank = len(shape)
+            output_tensors[i].element_size = elem_size
 
-        return {
-            "success": success,
-            "output_values": output_vals,
-            "returncode": result.returncode,
-        }
+        output_span = SpanT(data=output_tensors, count=len(self.output_metas))
+
+        # Execute
+        ret = self._compute(self.state,
+                            ctypes.byref(input_span),
+                            ctypes.byref(output_span))
+        if ret != 0:
+            raise RuntimeError(f"inference_compute failed with code {ret}")
+
+        return [torch.from_numpy(arr.copy()) for arr in np_outputs]
 
     def close(self):
-        pass
+        if self.state:
+            self._cleanup(self.state)
+            self.state = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def __repr__(self):
-        return (f"HipDllRunner('{os.path.basename(self.dll_path)}', "
-                f"inputs={len(self.input_metas)}, "
+        return (f"HipDllRunner(inputs={len(self.input_metas)}, "
                 f"outputs={len(self.output_metas)})")
