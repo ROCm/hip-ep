@@ -38,6 +38,8 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateTorchReduceConversionPatterns(patterns, ctx);
   populateTorchReshapeConversionPatterns(patterns, ctx);
   populateTorchTransposeConversionPatterns(patterns, ctx);
+  populateTorchNormConversionPatterns(patterns, ctx);
+  populateTorchSliceCatConversionPatterns(patterns, ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
@@ -167,16 +169,25 @@ static mlir::LogicalResult generateModuleMetadata(mlir::ModuleOp module) {
 /// Erase dead torch.constant.none, torch.constant.int, torch.constant.bool,
 /// and torch.prim.ListConstruct ops that have no remaining uses.
 static void cleanupTorchOps(mlir::ModuleOp module) {
-  llvm::SmallVector<mlir::Operation *> toErase;
-  module.walk([&](mlir::Operation *op) {
-    llvm::StringRef name = op->getName().getStringRef();
-    if ((name == "torch.constant.none" || name == "torch.constant.int" ||
-         name == "torch.constant.bool" || name == "torch.prim.ListConstruct") &&
-        op->use_empty())
-      toErase.push_back(op);
-  });
-  for (auto *op : toErase)
-    op->erase();
+  // Iterate until fixed point: erasing a ListConstruct may make its
+  // constant.int operands dead, which need a second pass to clean up.
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    llvm::SmallVector<mlir::Operation *> toErase;
+    module.walk([&](mlir::Operation *op) {
+      llvm::StringRef name = op->getName().getStringRef();
+      if ((name == "torch.constant.none" || name == "torch.constant.int" ||
+           name == "torch.constant.bool" || name == "torch.constant.float" ||
+           name == "torch.prim.ListConstruct") &&
+          op->use_empty())
+        toErase.push_back(op);
+    });
+    for (auto *op : toErase) {
+      op->erase();
+      changed = true;
+    }
+  }
 }
 
 //===----------------------------------------------------------------------===//

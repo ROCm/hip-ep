@@ -14,6 +14,8 @@ add_library(TorchToHip STATIC
   ReduceConversion.cpp
   ReshapeConversion.cpp
   TransposeConversion.cpp
+  NormConversion.cpp
+  SliceCatConversion.cpp
 )
 
 add_dependencies(TorchToHip
