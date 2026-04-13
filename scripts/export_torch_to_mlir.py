@@ -15,7 +15,6 @@ Usage:
 """
 
 import argparse
-import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -25,29 +24,51 @@ import torch
 
 def parse_args():
     p = argparse.ArgumentParser(description="Export HF model ops via torch.compile")
-    p.add_argument("--model", type=str, default="Qwen/Qwen3-0.6B",
-                    help="HuggingFace model name or local path")
-    p.add_argument("--max-layers", type=int, default=0,
-                    help="Limit number of decoder layers (0 = all)")
-    p.add_argument("--seq-len", type=int, default=4,
-                    help="Input sequence length for tracing")
-    p.add_argument("--batch-size", type=int, default=1,
-                    help="Batch size for tracing")
-    p.add_argument("--dtype", type=str, default="float16",
-                    choices=["float16", "bfloat16", "float32"],
-                    help="Model dtype")
-    p.add_argument("--device", type=str, default="cpu",
-                    help="Device for tracing (cpu recommended)")
-    p.add_argument("-o", "--output", type=str, default=None,
-                    help="Output file for op report (default: stdout)")
-    p.add_argument("--dump-graphs", action="store_true",
-                    help="Dump full FX graph IR to output dir")
+    p.add_argument(
+        "--model",
+        type=str,
+        default="Qwen/Qwen3-0.6B",
+        help="HuggingFace model name or local path",
+    )
+    p.add_argument(
+        "--max-layers",
+        type=int,
+        default=0,
+        help="Limit number of decoder layers (0 = all)",
+    )
+    p.add_argument(
+        "--seq-len", type=int, default=4, help="Input sequence length for tracing"
+    )
+    p.add_argument("--batch-size", type=int, default=1, help="Batch size for tracing")
+    p.add_argument(
+        "--dtype",
+        type=str,
+        default="float16",
+        choices=["float16", "bfloat16", "float32"],
+        help="Model dtype",
+    )
+    p.add_argument(
+        "--device", type=str, default="cpu", help="Device for tracing (cpu recommended)"
+    )
+    p.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        default=None,
+        help="Output file for op report (default: stdout)",
+    )
+    p.add_argument(
+        "--dump-graphs", action="store_true", help="Dump full FX graph IR to output dir"
+    )
     return p.parse_args()
 
 
 def get_torch_dtype(s):
-    return {"float16": torch.float16, "bfloat16": torch.bfloat16,
-            "float32": torch.float32}[s]
+    return {
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "float32": torch.float32,
+    }[s]
 
 
 def format_op(target):
@@ -55,14 +76,14 @@ def format_op(target):
     s = str(target)
     # Built-in functions: <built-in function add> -> add
     if s.startswith("<built-in function "):
-        return "builtin." + s[len("<built-in function "):-1]
+        return "builtin." + s[len("<built-in function ") : -1]
     # Built-in methods: <built-in method arange of type ...> -> torch.arange
     if s.startswith("<built-in method "):
-        name = s[len("<built-in method "):].split(" of ")[0]
+        name = s[len("<built-in method ") :].split(" of ")[0]
         return "torch." + name
     # Regular functions: <function silu at 0x...> -> silu
     if s.startswith("<function "):
-        name = s[len("<function "):].split(" at ")[0]
+        name = s[len("<function ") :].split(" at ")[0]
         return "F." + name
     # aten ops: aten.linear.default -> aten.linear
     if hasattr(target, "__name__"):
@@ -78,21 +99,32 @@ def main():
 
     print(f"Loading {args.model}...", file=sys.stderr)
     model = AutoModelForCausalLM.from_pretrained(
-        args.model, torch_dtype=dtype, device_map=args.device,
+        args.model,
+        torch_dtype=dtype,
+        device_map=args.device,
     )
     model.eval()
 
     # Trim layers
-    if args.max_layers > 0 and hasattr(model, "model") and hasattr(model.model, "layers"):
+    if (
+        args.max_layers > 0
+        and hasattr(model, "model")
+        and hasattr(model.model, "layers")
+    ):
         original = len(model.model.layers)
-        model.model.layers = model.model.layers[:args.max_layers]
+        model.model.layers = model.model.layers[: args.max_layers]
         print(f"Trimmed {original} layers to {args.max_layers}", file=sys.stderr)
 
     # Prepare inputs
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     text = "Hello world" * max(1, args.seq_len // 2)
-    inputs = tokenizer(text, return_tensors="pt", max_length=args.seq_len,
-                        truncation=True, padding="max_length")
+    inputs = tokenizer(
+        text,
+        return_tensors="pt",
+        max_length=args.seq_len,
+        truncation=True,
+        padding="max_length",
+    )
     input_ids = inputs["input_ids"].to(args.device)
     attention_mask = inputs["attention_mask"].to(args.device)
     print(f"input_ids: {input_ids.shape}, dtype: {input_ids.dtype}", file=sys.stderr)
@@ -132,8 +164,11 @@ def main():
         out = open(args.output, "w")
 
     print(f"# Op Report: {args.model}", file=out)
-    print(f"# Layers: {args.max_layers or 'all'}, seq_len: {args.seq_len}, "
-          f"dtype: {args.dtype}", file=out)
+    print(
+        f"# Layers: {args.max_layers or 'all'}, seq_len: {args.seq_len}, "
+        f"dtype: {args.dtype}",
+        file=out,
+    )
     print(f"# Graphs captured: {len(all_graphs)}", file=out)
     print(f"# Total op calls: {sum(op_counts.values())}", file=out)
     print(f"# Unique ops: {len(op_counts)}", file=out)

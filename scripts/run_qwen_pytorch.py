@@ -21,30 +21,51 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 def parse_args():
     p = argparse.ArgumentParser(description="Run a Qwen model in PyTorch")
-    p.add_argument("--model", type=str, default="Qwen/Qwen3-0.6B",
-                    help="HuggingFace model name or local path")
-    p.add_argument("--device", type=str, default="auto",
-                    choices=["auto", "cpu", "cuda"],
-                    help="Device to run on (default: auto)")
-    p.add_argument("--dtype", type=str, default="auto",
-                    choices=["auto", "float16", "bfloat16", "float32"],
-                    help="Model dtype (default: auto)")
-    p.add_argument("--prompt", type=str,
-                    default="The capital of France is",
-                    help="Input prompt for generation")
-    p.add_argument("--max-new-tokens", type=int, default=50,
-                    help="Maximum new tokens to generate")
-    p.add_argument("--no-think", action="store_true",
-                    help="Disable thinking mode for Qwen3+ models")
+    p.add_argument(
+        "--model",
+        type=str,
+        default="Qwen/Qwen3-0.6B",
+        help="HuggingFace model name or local path",
+    )
+    p.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "cpu", "cuda"],
+        help="Device to run on (default: auto)",
+    )
+    p.add_argument(
+        "--dtype",
+        type=str,
+        default="auto",
+        choices=["auto", "float16", "bfloat16", "float32"],
+        help="Model dtype (default: auto)",
+    )
+    p.add_argument(
+        "--prompt",
+        type=str,
+        default="The capital of France is",
+        help="Input prompt for generation",
+    )
+    p.add_argument(
+        "--max-new-tokens", type=int, default=50, help="Maximum new tokens to generate"
+    )
+    p.add_argument(
+        "--no-think",
+        action="store_true",
+        help="Disable thinking mode for Qwen3+ models",
+    )
     return p.parse_args()
 
 
 def get_torch_dtype(dtype_str):
     if dtype_str == "auto":
         return "auto"
-    return {"float16": torch.float16,
-            "bfloat16": torch.bfloat16,
-            "float32": torch.float32}[dtype_str]
+    return {
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "float32": torch.float32,
+    }[dtype_str]
 
 
 def main():
@@ -101,7 +122,9 @@ def main():
     if args.no_think and hasattr(tokenizer, "apply_chat_template"):
         messages = [{"role": "user", "content": prompt}]
         prompt_text = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True,
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
             enable_thinking=False,
         )
     else:
@@ -130,13 +153,13 @@ def main():
     gen_time = time.perf_counter() - t0
 
     # --- Decode ---
-    new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
+    new_tokens = outputs[0][inputs["input_ids"].shape[1] :]
     generated_text = tokenizer.decode(new_tokens, skip_special_tokens=True)
     num_new = len(new_tokens)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Generated text: {generated_text}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     # --- Stats ---
     print(f"New tokens: {num_new}")

@@ -57,9 +57,11 @@ class HipDllRunner:
         self._init.restype = ctypes.c_int
 
         self._compute = self.dll.inference_compute
-        self._compute.argtypes = [ctypes.c_void_p,
-                                   ctypes.POINTER(SpanT),
-                                   ctypes.POINTER(SpanT)]
+        self._compute.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(SpanT),
+            ctypes.POINTER(SpanT),
+        ]
         self._compute.restype = ctypes.c_int
 
         self._cleanup = self.dll.inference_cleanup
@@ -132,9 +134,9 @@ class HipDllRunner:
         output_span = SpanT(data=output_tensors, count=len(self.output_metas))
 
         # Execute
-        ret = self._compute(self.state,
-                            ctypes.byref(input_span),
-                            ctypes.byref(output_span))
+        ret = self._compute(
+            self.state, ctypes.byref(input_span), ctypes.byref(output_span)
+        )
         if ret != 0:
             raise RuntimeError(f"inference_compute failed with code {ret}")
 
@@ -152,5 +154,7 @@ class HipDllRunner:
             pass
 
     def __repr__(self):
-        return (f"HipDllRunner(inputs={len(self.input_metas)}, "
-                f"outputs={len(self.output_metas)})")
+        return (
+            f"HipDllRunner(inputs={len(self.input_metas)}, "
+            f"outputs={len(self.output_metas)})"
+        )

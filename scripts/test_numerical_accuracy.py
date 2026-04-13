@@ -14,11 +14,10 @@ This script:
 Usage:
     python scripts/test_numerical_accuracy.py
 """
+
 import os
-import struct
 import subprocess
 import sys
-import tempfile
 
 import numpy as np
 import torch
@@ -40,6 +39,7 @@ def bytes_to_half(data: bytes, shape: tuple) -> np.ndarray:
 
 class SmallTransformerBlock(nn.Module):
     """Same model as test_e2e_flow.py."""
+
     def __init__(self, hidden=128):
         super().__init__()
         self.norm_weight = nn.Parameter(torch.ones(hidden))
@@ -48,8 +48,7 @@ class SmallTransformerBlock(nn.Module):
         self.down_proj = nn.Linear(hidden, hidden, bias=False)
 
     def forward(self, x):
-        normed = torch.nn.functional.rms_norm(x, (x.shape[-1],),
-                                               self.norm_weight, 1e-6)
+        normed = torch.nn.functional.rms_norm(x, (x.shape[-1],), self.norm_weight, 1e-6)
         gate = torch.nn.functional.silu(self.gate_proj(normed))
         up = self.up_proj(normed)
         hidden = gate * up
@@ -79,19 +78,21 @@ def main():
         ref_output = model(x)
 
     print(f"PyTorch output shape: {list(ref_output.shape)}")
-    print(f"PyTorch output (first 10): "
-          f"{ref_output.flatten()[:10].tolist()}")
-    print(f"PyTorch output stats: min={ref_output.min().item():.4f}, "
-          f"max={ref_output.max().item():.4f}, "
-          f"mean={ref_output.float().mean().item():.4f}")
+    print(f"PyTorch output (first 10): {ref_output.flatten()[:10].tolist()}")
+    print(
+        f"PyTorch output stats: min={ref_output.min().item():.4f}, "
+        f"max={ref_output.max().item():.4f}, "
+        f"mean={ref_output.float().mean().item():.4f}"
+    )
 
     # ── Step 2: Export to MLIR ─────────────────────────────────────────
     print("\nExporting to MLIR...")
     ep = torch.export.export(model, (x,))
     mlir_text = fx_graph_to_mlir(ep)
 
-    work_dir = os.path.join(os.path.dirname(__file__), "..", "test",
-                            "e2e_flow", "accuracy_test")
+    work_dir = os.path.join(
+        os.path.dirname(__file__), "..", "test", "e2e_flow", "accuracy_test"
+    )
     os.makedirs(work_dir, exist_ok=True)
 
     mlir_path = os.path.join(work_dir, "model.mlir")
@@ -128,17 +129,31 @@ def main():
 
     # ── Step 4: Compile MLIR to DLL ────────────────────────────────────
     dll_path = os.path.join(work_dir, "model.dll")
-    compiler = os.path.join(os.path.dirname(__file__), "..", "build",
-                            "onnx-hipdnn-ep", "bin", "hip-compiler.exe")
+    compiler = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "build",
+        "onnx-hipdnn-ep",
+        "bin",
+        "hip-compiler.exe",
+    )
     compiler = os.path.normpath(compiler)
 
     if not os.path.exists(compiler):
         # Try relative from build dir
-        compiler = os.path.normpath(os.path.join(
-            os.path.dirname(__file__), "..", "..", "build",
-            "onnx-hipdnn-ep", "bin", "hip-compiler.exe"))
+        compiler = os.path.normpath(
+            os.path.join(
+                os.path.dirname(__file__),
+                "..",
+                "..",
+                "build",
+                "onnx-hipdnn-ep",
+                "bin",
+                "hip-compiler.exe",
+            )
+        )
 
-    print(f"\nCompiling MLIR -> DLL...")
+    print("\nCompiling MLIR -> DLL...")
     print(f"  Compiler: {compiler}")
 
     # Write a batch file for compilation (needs MSVC env)
@@ -147,16 +162,19 @@ def main():
     with open(compile_cmd, "w") as f:
         f.write("@echo off\n")
         f.write('set "VSCMD_START_DIR=%CD%"\n')
-        f.write('call "C:\\Program Files\\Microsoft Visual Studio\\18\\'
-                'Community\\VC\\Auxiliary\\Build\\vcvarsall.bat" x64 || exit /b 1\n')
-        f.write(f'set THEROCK_DIST={therock}\n')
-        f.write(f'set PATH={therock}\\bin;%PATH%\n')
+        f.write(
+            'call "C:\\Program Files\\Microsoft Visual Studio\\18\\'
+            'Community\\VC\\Auxiliary\\Build\\vcvarsall.bat" x64 || exit /b 1\n'
+        )
+        f.write(f"set THEROCK_DIST={therock}\n")
+        f.write(f"set PATH={therock}\\bin;%PATH%\n")
         f.write(f'"{compiler}" "{mlir_path}" -o "{dll_path}"\n')
 
-    result = subprocess.run(["cmd", "/c", compile_cmd],
-                           capture_output=True, text=True, timeout=60)
+    result = subprocess.run(
+        ["cmd", "/c", compile_cmd], capture_output=True, text=True, timeout=60
+    )
     if result.returncode != 0:
-        print(f"  COMPILE FAILED:")
+        print("  COMPILE FAILED:")
         print(result.stdout)
         print(result.stderr)
         sys.exit(1)
@@ -171,32 +189,43 @@ def main():
     # sequential test data, not our weights) and separately verify
     # that the MLIR faithfully represents the PyTorch computation.
 
-    runner = os.path.normpath(os.path.join(
-        os.path.dirname(__file__), "..", "..", "build",
-        "onnx-hipdnn-ep", "bin", "hip-test-dll.exe"))
+    runner = os.path.normpath(
+        os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "build",
+            "onnx-hipdnn-ep",
+            "bin",
+            "hip-test-dll.exe",
+        )
+    )
 
     run_cmd = os.path.join(work_dir, "_run.cmd")
     therock = "C:\\Users\\tsiddaga\\Documents\\code\\therock"
     with open(run_cmd, "w") as f:
         f.write("@echo off\n")
         f.write('set "VSCMD_START_DIR=%CD%"\n')
-        f.write('call "C:\\Program Files\\Microsoft Visual Studio\\18\\'
-                'Community\\VC\\Auxiliary\\Build\\vcvarsall.bat" x64 || exit /b 1\n')
-        f.write(f'set PATH={therock}\\bin;%PATH%\n')
+        f.write(
+            'call "C:\\Program Files\\Microsoft Visual Studio\\18\\'
+            'Community\\VC\\Auxiliary\\Build\\vcvarsall.bat" x64 || exit /b 1\n'
+        )
+        f.write(f"set PATH={therock}\\bin;%PATH%\n")
         f.write(f'"{runner}" "{dll_path}" --verbose --validate\n')
 
-    result = subprocess.run(["cmd", "/c", run_cmd],
-                           capture_output=True, text=True, timeout=60)
+    result = subprocess.run(
+        ["cmd", "/c", run_cmd], capture_output=True, text=True, timeout=60
+    )
 
     gpu_output_line = ""
     for line in result.stdout.split("\n"):
         if "First 10 values:" in line:
             gpu_output_line = line.strip()
         if "SUCCESS" in line:
-            print(f"  GPU execution: SUCCESS")
+            print("  GPU execution: SUCCESS")
 
     if result.returncode != 0:
-        print(f"  GPU EXECUTION FAILED:")
+        print("  GPU EXECUTION FAILED:")
         print(result.stdout[-500:])
         print(result.stderr[-500:])
         sys.exit(1)
@@ -260,7 +289,7 @@ def main():
         # Compare
         errors = [abs(g - r) for g, r in zip(gpu_vals, ref_vals)]
         max_error = max(errors) if errors else 0
-        l2_error = (sum(e**2 for e in errors) / len(errors))**0.5 if errors else 0
+        l2_error = (sum(e**2 for e in errors) / len(errors)) ** 0.5 if errors else 0
         rel_errors = [abs(g - r) / (abs(r) + 1e-8) for g, r in zip(gpu_vals, ref_vals)]
         max_rel_error = max(rel_errors) if rel_errors else 0
 
@@ -271,17 +300,24 @@ def main():
         # fp16 has ~3.3 decimal digits of precision
         TOLERANCE = 0.01  # 1% relative error threshold for f16
         if max_rel_error < TOLERANCE:
-            print(f"\nNUMERICAL ACCURACY: PASS (max relative error "
-                  f"{max_rel_error:.6f} < {TOLERANCE})")
+            print(
+                f"\nNUMERICAL ACCURACY: PASS (max relative error "
+                f"{max_rel_error:.6f} < {TOLERANCE})"
+            )
         else:
-            print(f"\nNUMERICAL ACCURACY: FAIL (max relative error "
-                  f"{max_rel_error:.6f} >= {TOLERANCE})")
+            print(
+                f"\nNUMERICAL ACCURACY: FAIL (max relative error "
+                f"{max_rel_error:.6f} >= {TOLERANCE})"
+            )
             print("Per-element comparison:")
             for i, (g, r, e, re) in enumerate(
-                    zip(gpu_vals, ref_vals, errors, rel_errors)):
+                zip(gpu_vals, ref_vals, errors, rel_errors)
+            ):
                 flag = " <<< MISMATCH" if re > TOLERANCE else ""
-                print(f"  [{i}] GPU={g:.6f}  PyTorch={r:.6f}  "
-                      f"abs_err={e:.6f}  rel_err={re:.6f}{flag}")
+                print(
+                    f"  [{i}] GPU={g:.6f}  PyTorch={r:.6f}  "
+                    f"abs_err={e:.6f}  rel_err={re:.6f}{flag}"
+                )
     else:
         print("\nCould not extract GPU values for comparison")
 

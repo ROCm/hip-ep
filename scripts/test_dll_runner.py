@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """Test ctypes DLL runner: PyTorch → MLIR → DLL → ctypes GPU execution."""
-import os, subprocess, sys, torch
+
+import os
+import subprocess
+import sys
+import torch
+
 sys.path.insert(0, os.path.dirname(__file__))
 from fx_to_mlir import fx_graph_to_mlir
 from hip_dll_runner import HipDllRunner
+
 
 class SmallBlock(torch.nn.Module):
     def __init__(self):
@@ -12,11 +18,13 @@ class SmallBlock(torch.nn.Module):
         self.gate_proj = torch.nn.Linear(32, 32, bias=False)
         self.up_proj = torch.nn.Linear(32, 32, bias=False)
         self.down_proj = torch.nn.Linear(32, 32, bias=False)
+
     def forward(self, x):
         normed = torch.nn.functional.rms_norm(x, (32,), self.norm_weight, 1e-6)
         gate = torch.nn.functional.silu(self.gate_proj(normed))
         up = self.up_proj(normed)
         return x + self.down_proj(gate * up)
+
 
 torch.manual_seed(42)
 model = SmallBlock().eval().half()
@@ -35,19 +43,30 @@ with open(mlir_path, "w") as f:
     f.write(mlir)
 
 therock = "C:\\Users\\tsiddaga\\Documents\\code\\therock"
-compiler = os.path.normpath(os.path.join(
-    os.path.dirname(__file__), "..", "..", "build",
-    "onnx-hipdnn-ep", "bin", "hip-compiler.exe"))
+compiler = os.path.normpath(
+    os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "..",
+        "build",
+        "onnx-hipdnn-ep",
+        "bin",
+        "hip-compiler.exe",
+    )
+)
 cmd = os.path.join(work, "_c.cmd")
 with open(cmd, "w") as f:
     f.write("@echo off\n")
-    f.write('call "C:\\Program Files\\Microsoft Visual Studio\\18\\'
-            'Community\\VC\\Auxiliary\\Build\\vcvarsall.bat" x64 >nul 2>&1\n')
-    f.write(f'set THEROCK_DIST={therock}\nset PATH={therock}\\bin;%PATH%\n')
+    f.write(
+        'call "C:\\Program Files\\Microsoft Visual Studio\\18\\'
+        'Community\\VC\\Auxiliary\\Build\\vcvarsall.bat" x64 >nul 2>&1\n'
+    )
+    f.write(f"set THEROCK_DIST={therock}\nset PATH={therock}\\bin;%PATH%\n")
     f.write(f'"{compiler}" "{mlir_path}" -o "{dll_path}"\n')
 r = subprocess.run(["cmd", "/c", cmd], capture_output=True, text=True, timeout=60)
 if r.returncode != 0:
-    print(f"   COMPILE FAILED: {r.stderr[-200:]}"); sys.exit(1)
+    print(f"   COMPILE FAILED: {r.stderr[-200:]}")
+    sys.exit(1)
 print(f"   DLL compiled: {dll_path}")
 
 # 2. Load via ctypes and run
