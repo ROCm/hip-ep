@@ -90,11 +90,14 @@ class FxToMlirEmitter:
         # Cache: avoid re-emitting identical constants
         self._const_cache: Dict[Any, str] = {}
 
-    def _get_tensor_type(self, node) -> Optional[str]:
+    def _get_tensor_type(self, node, transposed: bool = False) -> Optional[str]:
         """Get the MLIR tensor type for a node from its metadata."""
         val = node.meta.get("val", None)
         if isinstance(val, torch.Tensor):
-            return _tensor_type_str(list(val.shape), val.dtype)
+            shape = list(val.shape)
+            if transposed and len(shape) == 2:
+                shape = [shape[1], shape[0]]
+            return _tensor_type_str(shape, val.dtype)
         if isinstance(val, torch.SymInt):
             return "!torch.int"
         if isinstance(val, torch.SymBool):
@@ -201,6 +204,19 @@ class FxToMlirEmitter:
 
     def emit(self) -> str:
         """Generate MLIR text for the full module."""
+        # Pre-scan: find weight placeholders that feed torch.aten.linear
+        # These weights need to be pre-transposed (PyTorch linear stores
+        # weights as [N, K] but hip.matmul expects [K, N] for correct
+        # A @ B = input @ weight^T computation).
+        linear_weight_names = set()
+        for node in self.graph.nodes:
+            if node.op == "call_function":
+                target_str = str(node.target)
+                if "aten.linear" in target_str and len(node.args) >= 2:
+                    weight_arg = node.args[1]
+                    if hasattr(weight_arg, "name"):
+                        linear_weight_names.add(weight_arg.name)
+
         # Collect placeholders (weights then inputs)
         weight_nodes = []
         input_nodes = []
@@ -215,9 +231,11 @@ class FxToMlirEmitter:
         all_params = weight_nodes + input_nodes
 
         # Build function signature
+        # Linear weights are emitted with transposed shape [K,N] instead of [N,K]
         arg_strs = []
         for i, node in enumerate(all_params):
-            ttype = self._get_tensor_type(node)
+            needs_transpose = node.name in linear_weight_names
+            ttype = self._get_tensor_type(node, transposed=needs_transpose)
             if ttype is None:
                 raise ValueError(f"No type info for placeholder: {node.name}")
             self.type_map[node.name] = ttype
