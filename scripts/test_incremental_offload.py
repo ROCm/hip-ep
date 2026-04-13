@@ -90,6 +90,11 @@ def verify_accuracy(name, dll_fn, ref_fn, *inputs):
 
 
 def main():
+    from hip_torch.dll_cache import DllCache
+
+    # Clear stale cache to ensure fresh compilation
+    DllCache().clear()
+
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     model_name = "Qwen/Qwen3-0.6B"
@@ -237,21 +242,16 @@ def main():
 
     attn = layer0.self_attn
 
-    class QkvProxy(nn.Module):
-        def __init__(self, attn):
+    class QProjProxy(nn.Module):
+        def __init__(self, q_proj):
             super().__init__()
-            self.q_proj = copy.deepcopy(attn.q_proj)
-            # K and V may have different sizes (GQA: fewer KV heads)
-            self.k_proj = copy.deepcopy(attn.k_proj)
-            self.v_proj = copy.deepcopy(attn.v_proj)
+            self.q_proj = copy.deepcopy(q_proj)
 
         def forward(self, x):
-            q = self.q_proj(x)
-            # Don't add — sizes may differ. Just return Q for testing.
-            return q
+            return self.q_proj(x)
 
-    proxy4 = QkvProxy(attn).eval().half()
-    runner4, _ = compile_and_load(proxy4, x, "QKV")
+    proxy4 = QProjProxy(attn.q_proj).eval().half().cpu()
+    runner4, _ = compile_and_load(proxy4, x, "Q_proj")
 
     if runner4:
         q_w = proxy4.q_proj.weight.data.t().contiguous()
@@ -265,7 +265,7 @@ def main():
         except Exception as e:
             print(f"    Runtime error: {e}")
             ok = False
-        results.append(("Q Linear projection", "1 linear", ok))
+        results.append(("Q Linear projection [1024→2048]", "1 linear", ok))
 
     # ── Step 5: Attention output projection ──────────────────────────
     print(f"\n{'=' * 70}")
