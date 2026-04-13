@@ -231,22 +231,17 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 
   bool is_igpu = (prop.integrated == 1);
 
-  // Allow forcing VRAM allocation on iGPU for A/B testing.
-  // HIPDNN_EP_IGPU_USE_VRAM=1 → hipMalloc (dedicated VRAM) + hipMemcpy H2D
-  // Default (unset/0)         → hipHostMalloc (pinned host, GPU reads in-place)
-  const char *igpu_vram_env = getenv("HIPDNN_EP_IGPU_USE_VRAM");
-  bool force_vram = igpu_vram_env && igpu_vram_env[0] == '1';
-  if (is_igpu && force_vram) {
-    TIMING_LOG("[Session] iGPU: HIPDNN_EP_IGPU_USE_VRAM=1, using hipMalloc "
-               "(VRAM) path\n");
-    is_igpu = false;
-  }
+  // iGPU defaults to hipMalloc (dedicated VRAM) — +32% QPS over hipHostMalloc.
+  // CPU cannot write hipMalloc'd VRAM directly (0xC0000005), so iGPU uses the
+  // same staging buffer + hipMemcpy path as dGPU.
+  // Set HIPDNN_EP_IGPU_USE_HOST=1 to revert to legacy hipHostMalloc path.
+  const char *igpu_host_env = getenv("HIPDNN_EP_IGPU_USE_HOST");
+  bool force_host = is_igpu && igpu_host_env && igpu_host_env[0] == '1';
 
-  if (is_igpu) {
-    // iGPU: allocate pinned host memory. GPU reads the same physical DRAM
-    // directly -- no hipMemcpy needed. hipHostMalloc gives a reliable pinned
-    // allocation; hipHostRegister on mmap'd or VirtualAlloc'd memory is
-    // unreliable on some iGPU platforms (GPU reads zeros despite success).
+  if (force_host) {
+    // Legacy iGPU path: hipHostMalloc (pinned host memory).
+    TIMING_LOG("[Session] iGPU: HIPDNN_EP_IGPU_USE_HOST=1, using hipHostMalloc "
+               "(pinned host) path\n");
     if (hipHostMalloc(&state->gpu_constants_blob, total_size,
                       hipHostMallocDefault) != hipSuccess) {
       fprintf(stderr, "hipHostMalloc failed for constants blob (%zu bytes)\n",
@@ -280,15 +275,17 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
     state->constants_blob_is_host = true;
 
   } else {
-    // dGPU: allocate in VRAM, upload once via hipMemcpy.
+    // VRAM path (default for both iGPU and dGPU): staging buffer + hipMemcpy.
+    if (is_igpu)
+      TIMING_LOG("[Session] iGPU: using hipMalloc (VRAM) + hipMemcpy path\n");
+
     const void *src = reader->mmap();
     void *cpu_buf = nullptr;
 
-    TIMING_LOG("[Session] dGPU path: mmap %s\n",
+    TIMING_LOG("[Session] VRAM path: mmap %s\n",
                src ? "succeeded" : "failed, using fread fallback");
 
     if (!src) {
-      // No mmap — read entire file into a staging buffer
       cpu_buf = malloc(total_size);
       if (!cpu_buf) {
         fprintf(stderr, "Failed to allocate staging buffer (%zu bytes)\n",
