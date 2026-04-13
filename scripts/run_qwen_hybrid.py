@@ -240,7 +240,7 @@ def main():
     eager_text = tokenizer.decode(eager_tokens, skip_special_tokens=True)
     eager_tps = len(eager_tokens) / t_eager if t_eager > 0 else 0
 
-    print(f"Output:  {eager_text[:100]}{'...' if len(eager_text) > 100 else ''}")
+    print(f"Output:  {eager_text}")
     print(f"Tokens:  {len(eager_tokens)}")
     print(f"Time:    {t_eager:.2f}s")
     print(f"Tok/s:   {eager_tps:.1f}")
@@ -308,7 +308,7 @@ def main():
     hybrid_text = tokenizer.decode(hybrid_tokens, skip_special_tokens=True)
     hybrid_tps = len(hybrid_tokens) / t_hybrid if t_hybrid > 0 else 0
 
-    print(f"Output:  {hybrid_text[:100]}{'...' if len(hybrid_text) > 100 else ''}")
+    print(f"Output:  {hybrid_text}")
     print(f"Tokens:  {len(hybrid_tokens)}")
     print(f"Time:    {t_hybrid:.2f}s")
     print(f"Tok/s:   {hybrid_tps:.1f}")
