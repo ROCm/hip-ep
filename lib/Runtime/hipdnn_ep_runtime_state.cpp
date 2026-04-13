@@ -231,9 +231,9 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 
   bool is_igpu = (prop.integrated == 1);
 
-  // iGPU defaults to hipMalloc (dedicated VRAM) — +32% QPS over hipHostMalloc.
-  // CPU cannot write hipMalloc'd VRAM directly (0xC0000005), so iGPU uses the
-  // same staging buffer + hipMemcpy path as dGPU.
+  // iGPU defaults to hipMalloc (VRAM) + hipMemcpy H2D, same as dGPU.
+  // The one-time copy cost at session init is negligible for production
+  // workloads; VRAM access is faster than host memory on every inference.
   // Set HIPDNN_EP_IGPU_USE_HOST=1 to revert to legacy hipHostMalloc path.
   const char *igpu_host_env = getenv("HIPDNN_EP_IGPU_USE_HOST");
   bool force_host = is_igpu && igpu_host_env && igpu_host_env[0] == '1';
