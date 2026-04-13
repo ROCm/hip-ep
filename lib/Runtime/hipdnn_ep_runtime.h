@@ -460,7 +460,8 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
 // Gather operation wrapper
 int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis, int64_t data_num_elements,
-                int64_t output_num_elements, int64_t element_size_bytes);
+                int64_t indices_num_elements, int64_t output_num_elements,
+                int64_t element_size_bytes);
 
 // ReduceSum operation wrapper
 int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
