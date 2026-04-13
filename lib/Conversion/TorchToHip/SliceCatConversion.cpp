@@ -10,7 +10,8 @@ namespace {
 
 /// torch.aten.slice.Tensor -> tensor.extract_slice
 ///
-/// Signature: %out = "torch.aten.slice.Tensor"(%input, %dim, %start, %end, %step)
+/// Signature: %out = "torch.aten.slice.Tensor"(%input, %dim, %start, %end,
+/// %step)
 ///   dim, start, end, step are torch.constant.int values.
 struct TorchSliceToExtractSlice : public mlir::RewritePattern {
   TorchSliceToExtractSlice(mlir::MLIRContext *ctx)
@@ -42,7 +43,7 @@ struct TorchSliceToExtractSlice : public mlir::RewritePattern {
     auto startOpt = getTorchConstantInt(op->getOperand(2));
     if (!startOpt)
       return rewriter.notifyMatchFailure(op,
-                                          "start must be a constant integer");
+                                         "start must be a constant integer");
     int64_t start = *startOpt;
     if (start < 0)
       start += inputType.getDimSize(dim);
@@ -137,8 +138,7 @@ struct TorchCatToInsertSlice : public mlir::RewritePattern {
           sizes.push_back(rewriter.getI64IntegerAttr(sliceSize));
         } else {
           offsets.push_back(rewriter.getI64IntegerAttr(0));
-          sizes.push_back(
-              rewriter.getI64IntegerAttr(resultType.getDimSize(i)));
+          sizes.push_back(rewriter.getI64IntegerAttr(resultType.getDimSize(i)));
         }
         strides.push_back(rewriter.getI64IntegerAttr(1));
       }
@@ -156,7 +156,7 @@ struct TorchCatToInsertSlice : public mlir::RewritePattern {
 } // namespace
 
 void populateTorchSliceCatConversionPatterns(mlir::RewritePatternSet &patterns,
-                                              mlir::MLIRContext *ctx) {
+                                             mlir::MLIRContext *ctx) {
   patterns.add<TorchSliceToExtractSlice, TorchCatToInsertSlice>(ctx);
 }
 

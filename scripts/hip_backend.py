@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+#
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
+#
 """
 torch.compile custom backend for the HIP MLIR compiler.
 
@@ -344,7 +346,6 @@ def _compile_subgraph(
         f.write(f"set THEROCK_DIST={_THEROCK_DIST}\n")
         f.write(f"set PATH={_THEROCK_DIST}\\bin;%PATH%\n")
         f.write(f'"{_HIP_COMPILER}" "{mlir_path}" -o "{dll_path}"\n')
-
 
     result = subprocess.run(
         ["cmd", "/c", compile_cmd], capture_output=True, text=True, timeout=120

@@ -134,8 +134,8 @@ struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
     //                   int64_t num_elements, int64_t data_type)
     SmallVector<Type, 5> paramTypes = {ptrType, ptrType, ptrType, i64Type,
                                        i64Type};
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kHipSilu, paramTypes, i32Type);
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kHipSilu, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
