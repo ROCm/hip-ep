@@ -88,6 +88,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     QMoEOp::attachInterface<HipDstBufferizableModel<QMoEOp>>(*ctx);
     HipDNNGraphOp::attachInterface<HipDstBufferizableModel<HipDNNGraphOp>>(
         *ctx);
+    GemmOp::attachInterface<HipDstBufferizableModel<GemmOp>>(*ctx);
   });
 }
 
