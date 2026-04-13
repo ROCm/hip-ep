@@ -66,13 +66,13 @@ def test_emit_int_constant_cached():
 
 def test_emit_float_constant():
     ctx = EmitterContext()
-    name = ctx.emit_float_constant(3.14)
+    ctx.emit_float_constant(3.14)
     assert "torch.constant.float" in ctx.lines[0]
 
 
 def test_emit_float_inf():
     ctx = EmitterContext()
-    name = ctx.emit_float_constant(float("-inf"))
+    ctx.emit_float_constant(float("-inf"))
     assert "0xFFF0000000000000" in ctx.lines[0]
 
 
@@ -177,7 +177,7 @@ def test_constant_folding():
     # The MLIR should have function args for constant tensors
     # (they don't appear as torch ops in the body)
     lines = mlir.split("\n")
-    func_line = [l for l in lines if "func.func" in l][0]
+    func_line = [line for line in lines if "func.func" in line][0]
     # Multiple args (weights + constants + input)
     assert func_line.count("%arg") >= 4
 
