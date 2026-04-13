@@ -139,19 +139,29 @@ int wrap_miopenConvolutionForward(
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&weights_desc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&output_desc));
 
-  // Set tensor descriptors (assuming float32 data type)
-  // Input: [N, C, H, W]
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(input_desc, miopenFloat, input_n,
-                                           input_c, input_h, input_w));
+  // Set tensor descriptors (assuming float32 data type).
+  // Use miopenSetNdTensorDescriptorWithLayout to set NCHW layout explicitly;
+  // miopenSet4dTensorDescriptor leaves the layout as 'UNKNOWN' which triggers
+  // warnings in MIOpen 7.12+.
+  {
+    // Input: [N, C, H, W]
+    int in_dims[] = {(int)input_n, (int)input_c, (int)input_h, (int)input_w};
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        input_desc, miopenFloat, miopenTensorNCHW, in_dims, 4));
 
-  // Weights: [K, C, R, S] where K=output channels, C=input channels,
-  // R=kernel_h, S=kernel_w
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(weights_desc, miopenFloat, weights_k,
-                                           input_c, kernel_h, kernel_w));
+    // Weights: [K, C, R, S] where K=output channels, C=input channels,
+    // R=kernel_h, S=kernel_w
+    int w_dims[] = {(int)weights_k, (int)input_c, (int)kernel_h,
+                    (int)kernel_w};
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        weights_desc, miopenFloat, miopenTensorNCHW, w_dims, 4));
 
-  // Output: [N, K, H', W']
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(output_desc, miopenFloat, input_n,
-                                           weights_k, output_h, output_w));
+    // Output: [N, K, H', W']
+    int out_dims[] = {(int)input_n, (int)weights_k, (int)output_h,
+                      (int)output_w};
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        output_desc, miopenFloat, miopenTensorNCHW, out_dims, 4));
+  }
 
   // Create convolution descriptor
   // Note: MIOpen padding is per-side, but if pad_top==pad_bottom and
