@@ -112,9 +112,10 @@ __global__ void matmul_nbits_kernel(
  *   - Bit-shift group index (block_size is always power-of-2)
  *   - TILE_N up to 16 for large-N shapes (e.g. N=200k)
  *
- * At runtime, an autotune pass benchmarks all 20 (BLOCK_SIZE, TILE_N)
+ * At runtime, an autotune pass benchmarks all 28 (BLOCK_SIZE, TILE_N)
  * combinations on the first call for each problem shape and caches the
  * fastest configuration for subsequent calls.
+ * TILE_N=32 configs are only tested when N >= 1024.
  *
  * Launch: grid(ceil(N/TILE_N), M, batch), block(BLOCK_SIZE)
  * ======================================================================= */
@@ -334,6 +335,7 @@ static constexpr GemvConfig kGemvConfigs[] = {
     {256, 1}, {256, 2}, {256, 4}, {256, 8}, {256, 16},
     {512, 1}, {512, 2}, {512, 4}, {512, 8}, {512, 16},
     {1024, 1}, {1024, 2}, {1024, 4}, {1024, 8}, {1024, 16},
+    { 64, 32}, {128, 32}, {256, 32},
 };
 static constexpr int kNumGemvConfigs =
     static_cast<int>(sizeof(kGemvConfigs) / sizeof(kGemvConfigs[0]));
@@ -373,6 +375,8 @@ static void launchGemvConfig(
         GEMV_CASE(20, 1024,  1); GEMV_CASE(21, 1024,  2);
         GEMV_CASE(22, 1024,  4); GEMV_CASE(23, 1024,  8);
         GEMV_CASE(24, 1024, 16);
+        GEMV_CASE(25,  64, 32);  GEMV_CASE(26, 128, 32);
+        GEMV_CASE(27, 256, 32);
         default: break;
     }
 #undef GEMV_CASE
@@ -396,6 +400,9 @@ static int tuneGemvConfig(
     constexpr int ITERS  = 5;
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
+        auto& cfg = kGemvConfigs[cid];
+        if (cfg.tile_n >= 32 && N < 1024) continue;
+
         for (int w = 0; w < WARMUP; w++)
             launchGemvConfig(cid, stream, A, B, sc, zp, bi, out,
                              M, N, K, batch, bs);
@@ -900,10 +907,13 @@ void MatMulNBitsFp16GEMM(
 /* -----------------------------------------------------------------------
  * WMMA Autotune: config table, dispatch, benchmark, cache
  *
- * Tile shapes: 64x64, 64x128, 128x64, 128x128, 128x256
- * Swizzle values: 2, 4, 8, 16, 32 (not all combos; larger swizzle for bigger N)
+ * Tile shapes: 64x64, 64x128, 128x64, 128x128, 128x256, 256x128
+ *              + 64x32, 128x32 (WT2x1, small-N only)
+ * Swizzle values: 2, 4, 8, 16, 32, 64 (not all combos)
+ * Warp-tile variants: WT2x2 (default), WT4x2 (256x128), WT2x1 (64x32/128x32)
  * Each tile × swizzle combo appears in fused and separate-dequant variants.
- * Autotune benchmarks all configs and picks the fastest.
+ * Autotune benchmarks applicable configs and picks the fastest.
+ * BN<64 tiles (WT2x1) are skipped when N > 2*BN (i.e. N>64).
  * ----------------------------------------------------------------------- */
 
 struct WmmaConfig {
@@ -925,6 +935,9 @@ static constexpr WmmaConfig kWmmaConfigs[] = {
     // --- WT_M=4 fused (256x128 tile, higher compute-to-smem ratio) ---
     {256, 128,  4, true, 4, 2}, {256, 128,  8, true, 4, 2},
     {256, 128, 16, true, 4, 2}, {256, 128, 32, true, 4, 2},
+    // --- WT_M=2, WT_N=1 fused (BN=32 — optimized for small N) ---
+    { 64,  32,  4, true, 2, 1}, { 64,  32,  8, true, 2, 1},
+    {128,  32,  4, true, 2, 1}, {128,  32,  8, true, 2, 1},
     // --- separate dequant + fp16 GEMM ---
     { 64,  64,  2, false}, { 64,  64,  4, false}, { 64,  64,  8, false}, { 64,  64, 16, false},
     { 64, 128,  2, false}, { 64, 128,  4, false}, { 64, 128,  8, false}, { 64, 128, 16, false},
@@ -936,6 +949,9 @@ static constexpr WmmaConfig kWmmaConfigs[] = {
     // --- WT_M=4 separate dequant (256x128 tile) ---
     {256, 128,  4, false, 4, 2}, {256, 128,  8, false, 4, 2},
     {256, 128, 16, false, 4, 2}, {256, 128, 32, false, 4, 2},
+    // --- WT_M=2, WT_N=1 separate dequant (BN=32 — for small N) ---
+    { 64,  32,  4, false, 2, 1}, { 64,  32,  8, false, 2, 1},
+    {128,  32,  4, false, 2, 1}, {128,  32,  8, false, 2, 1},
 };
 static constexpr int kNumWmmaConfigs =
     static_cast<int>(sizeof(kWmmaConfigs) / sizeof(kWmmaConfigs[0]));
@@ -1004,14 +1020,37 @@ static void launchWmmaConfig(
     if (need_bc) FP16_GEMM_LAUNCH_WT4(BM_V, BN_V, true); \
     else         FP16_GEMM_LAUNCH_WT4(BM_V, BN_V, false)
 
+#define FP16_GEMM_LAUNCH_WT21(BM_V, BN_V, BC_V) do { \
+    constexpr int WM_ = BM_V / (2 * 16); \
+    constexpr int WN_ = BN_V / (1 * 16); \
+    constexpr int THR_ = WM_ * WN_ * 32; \
+    dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V), \
+               static_cast<unsigned>((M + BM_V - 1) / BM_V)); \
+    dim3 block_(THR_); \
+    hipLaunchKernelGGL( \
+        HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 2, 1, 8, BC_V>), \
+        grid_, block_, 0, stream, \
+        M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n); \
+} while(0)
+
+#define FP16_TILE_CASE_WT21(BM_V, BN_V) \
+    if (need_bc) FP16_GEMM_LAUNCH_WT21(BM_V, BN_V, true); \
+    else         FP16_GEMM_LAUNCH_WT21(BM_V, BN_V, false)
+
         if      (c.wt_m == 4 && c.bm == 256 && c.bn == 128)
                                                   FP16_TILE_CASE_WT4(256, 128);
+        else if (c.wt_n == 1 && c.bm == 128 && c.bn == 32)
+                                                  FP16_TILE_CASE_WT21(128, 32);
+        else if (c.wt_n == 1 && c.bm ==  64 && c.bn == 32)
+                                                  FP16_TILE_CASE_WT21( 64, 32);
         else if (c.bm ==  64 && c.bn ==  64) FP16_TILE_CASE( 64,  64);
         else if (c.bm ==  64 && c.bn == 128) FP16_TILE_CASE( 64, 128);
         else if (c.bm == 128 && c.bn ==  64) FP16_TILE_CASE(128,  64);
         else if (c.bm == 128 && c.bn == 256) FP16_TILE_CASE(128, 256);
         else                                  FP16_TILE_CASE(128, 128);
 
+#undef FP16_TILE_CASE_WT21
+#undef FP16_GEMM_LAUNCH_WT21
 #undef FP16_TILE_CASE_WT4
 #undef FP16_GEMM_LAUNCH_WT4
 #undef FP16_TILE_CASE
@@ -1067,14 +1106,44 @@ static void launchWmmaConfig(
     if (need_bc) WMMA_LAUNCH_WT4(BM_V, BN_V, true); \
     else         WMMA_LAUNCH_WT4(BM_V, BN_V, false)
 
+#define WMMA_LAUNCH_WT21(BM_V, BN_V, BC_V) do { \
+    constexpr int WM_ = BM_V / (2 * 16); \
+    constexpr int WN_ = BN_V / (1 * 16); \
+    constexpr int THR_ = WM_ * WN_ * 32; \
+    dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V), \
+               static_cast<unsigned>((M + BM_V - 1) / BM_V)); \
+    dim3 block_(THR_); \
+    if (has_zp) { \
+        hipLaunchKernelGGL( \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 1, 8, BC_V>), \
+            grid_, block_, 0, stream, \
+            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+    } else { \
+        hipLaunchKernelGGL( \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 1, 8, BC_V>), \
+            grid_, block_, 0, stream, \
+            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+    } \
+} while(0)
+
+#define WMMA_TILE_CASE_WT21(BM_V, BN_V) \
+    if (need_bc) WMMA_LAUNCH_WT21(BM_V, BN_V, true); \
+    else         WMMA_LAUNCH_WT21(BM_V, BN_V, false)
+
     if      (c.wt_m == 4 && c.bm == 256 && c.bn == 128)
                                               WMMA_TILE_CASE_WT4(256, 128);
+    else if (c.wt_n == 1 && c.bm == 128 && c.bn == 32)
+                                              WMMA_TILE_CASE_WT21(128, 32);
+    else if (c.wt_n == 1 && c.bm ==  64 && c.bn == 32)
+                                              WMMA_TILE_CASE_WT21( 64, 32);
     else if (c.bm ==  64 && c.bn ==  64) WMMA_TILE_CASE( 64,  64);
     else if (c.bm ==  64 && c.bn == 128) WMMA_TILE_CASE( 64, 128);
     else if (c.bm == 128 && c.bn ==  64) WMMA_TILE_CASE(128,  64);
     else if (c.bm == 128 && c.bn == 256) WMMA_TILE_CASE(128, 256);
     else                                  WMMA_TILE_CASE(128, 128);
 
+#undef WMMA_TILE_CASE_WT21
+#undef WMMA_LAUNCH_WT21
 #undef WMMA_TILE_CASE_WT4
 #undef WMMA_LAUNCH_WT4
 #undef WMMA_TILE_CASE
@@ -1115,6 +1184,9 @@ static int tuneWmmaConfig(
     constexpr int ITERS  = 5;
 
     for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
+        auto& cfg = kWmmaConfigs[cid];
+        if (cfg.bn < 64 && N > 2 * cfg.bn) continue;
+
         for (int w = 0; w < WARMUP; w++)
             launchWmmaConfig(cid, stream, M, N, K, A, lda, B,
                              scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
