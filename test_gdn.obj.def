@@ -1,6 +1,0 @@
-EXPORTS
-    inference_init
-    inference_compute
-    inference_cleanup
-    inference_get_metadata_json
-    test_hip_from_dll
