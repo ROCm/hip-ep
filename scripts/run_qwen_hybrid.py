@@ -84,15 +84,22 @@ class DllMlp(nn.Module):
             return self._fallback(x)
 
         device = x.device
+        dtype = x.dtype
+        # Convert bf16→f16 for numpy compatibility; f32→f16 for DLL
+        x_f16 = x.detach().cpu().to(torch.float16).contiguous()
         out = runner(
-            self._gate_w, self._up_w, self._down_w,
-            x.detach().cpu().contiguous()
+            self._gate_w, self._up_w, self._down_w, x_f16
         )[0]
-        return out.to(device)
+        return out.to(dtype).to(device)
 
 
-def compile_mlp_for_shape(mlp_module, hidden_size, seq_len, label):
+def compile_mlp_for_shape(mlp_module, hidden_size, seq_len, label,
+                          use_2d=False):
     """Compile a Qwen MLP for a specific input shape.
+
+    Args:
+        use_2d: If True, use [seq_len, hidden] shape (for MoE shared expert).
+                If False, use [1, seq_len, hidden] shape (for dense MLP).
 
     Returns HipDllRunner or None.
     """
@@ -107,7 +114,10 @@ def compile_mlp_for_shape(mlp_module, hidden_size, seq_len, label):
         mlp_module.act_fn,
     ).eval().half()
 
-    example = torch.randn(1, seq_len, hidden_size, dtype=torch.float16)
+    if use_2d:
+        example = torch.randn(seq_len, hidden_size, dtype=torch.float16)
+    else:
+        example = torch.randn(1, seq_len, hidden_size, dtype=torch.float16)
 
     print(f"\n  [{label}] Compiling for shape [1, {seq_len}, {hidden_size}]")
 
@@ -208,9 +218,18 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    hidden_size = model.config.hidden_size
+    tc = model.config.get_text_config() if hasattr(model.config, 'get_text_config') else model.config
+    hidden_size = tc.hidden_size
     num_layers = len(model.model.layers)
     prompt_len = len(tokenizer.encode(args.prompt))
+
+    # Detect MoE vs dense architecture
+    is_moe = hasattr(model.model.layers[0].mlp, 'shared_expert')
+    if is_moe:
+        print(f"Architecture: MoE (experts={tc.num_experts}, "
+              f"shared_expert_inter={tc.shared_expert_intermediate_size})")
+    else:
+        print(f"Architecture: Dense")
 
     # ── Phase 1: PyTorch Eager Baseline ──────────────────────────────
     print(f"\n{'=' * 70}")
@@ -251,13 +270,22 @@ def main():
     print(f"{'=' * 70}")
     print(f"Hidden size: {hidden_size}, Layers: {num_layers}")
 
-    layer0_mlp = model.model.layers[0].mlp
+    # For MoE models, compile the shared_expert; for dense, compile the MLP
+    if is_moe:
+        target_mlp = model.model.layers[0].mlp.shared_expert
+        target_label = "shared_expert"
+    else:
+        target_mlp = model.model.layers[0].mlp
+        target_label = "MLP"
+
+    print(f"Compiling {target_label} (hidden={hidden_size})")
     t_compile_start = time.perf_counter()
 
     decode_runner = compile_mlp_for_shape(
-        layer0_mlp, hidden_size, seq_len=1, label="decode")
+        target_mlp, hidden_size, seq_len=1, label="decode", use_2d=is_moe)
     prefill_runner = compile_mlp_for_shape(
-        layer0_mlp, hidden_size, seq_len=prompt_len, label="prefill")
+        target_mlp, hidden_size, seq_len=prompt_len, label="prefill",
+        use_2d=is_moe)
 
     t_compile = time.perf_counter() - t_compile_start
     success = decode_runner is not None
@@ -272,14 +300,25 @@ def main():
         print(f"\n  Compilation failed — cannot run hybrid mode")
         return
 
-    # Replace MLP in all layers
+    # Replace target MLP in all layers
+    replaced = 0
     for layer in model.model.layers:
-        orig = layer.mlp
-        gw = orig.gate_proj.weight.data.t().contiguous().cpu()
-        uw = orig.up_proj.weight.data.t().contiguous().cpu()
-        dw = orig.down_proj.weight.data.t().contiguous().cpu()
-        layer.mlp = DllMlp(decode_runner, prefill_runner, gw, uw, dw, orig)
-    print(f"  Replaced MLP in {num_layers}/{num_layers} layers")
+        if is_moe:
+            orig = layer.mlp.shared_expert
+            gw = orig.gate_proj.weight.data.t().contiguous().cpu()
+            uw = orig.up_proj.weight.data.t().contiguous().cpu()
+            dw = orig.down_proj.weight.data.t().contiguous().cpu()
+            layer.mlp.shared_expert = DllMlp(
+                decode_runner, prefill_runner, gw, uw, dw, orig)
+        else:
+            orig = layer.mlp
+            gw = orig.gate_proj.weight.data.t().contiguous().cpu()
+            uw = orig.up_proj.weight.data.t().contiguous().cpu()
+            dw = orig.down_proj.weight.data.t().contiguous().cpu()
+            layer.mlp = DllMlp(
+                decode_runner, prefill_runner, gw, uw, dw, orig)
+        replaced += 1
+    print(f"  Replaced {target_label} in {replaced}/{num_layers} layers")
 
     # ── Phase 3: Hybrid Execution ────────────────────────────────────
     print(f"\n{'=' * 70}")
@@ -320,7 +359,8 @@ def main():
     total_calls = dec + pre + fb
     dll_calls = dec + pre
     match = eager_text.strip() == hybrid_text.strip()
-    sample = model.model.layers[0].mlp
+    sample = (model.model.layers[0].mlp.shared_expert if is_moe
+              else model.model.layers[0].mlp)
 
     print(f"\n{'=' * 70}")
     print(f"Results Comparison")
