@@ -75,21 +75,22 @@ static const T5NormCacheEntry *queryOrCreateT5Norm(const T5NormCacheKey &key) {
   T5_CACHE_CHECK(miopenCreateTensorDescriptor(&e.rstdDesc));
 
   {
-    // Pad to 4D NCHW: [num_rows, hidden_dim] -> [num_rows, hidden_dim, 1, 1]
     int x_dims[] = {static_cast<int>(key.num_rows),
-                    static_cast<int>(key.hidden_dim), 1, 1};
-    T5_CACHE_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        e.xDesc, key.data_type, miopenTensorNCHW, x_dims, 4));
-    T5_CACHE_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        e.yDesc, key.data_type, miopenTensorNCHW, x_dims, 4));
+                    static_cast<int>(key.hidden_dim)};
+    int x_strides[] = {static_cast<int>(key.hidden_dim), 1};
+    int w_dims[] = {static_cast<int>(key.hidden_dim)};
+    int w_strides[] = {1};
+    int rstd_dims[] = {static_cast<int>(key.num_rows)};
+    int rstd_strides[] = {1};
 
-    int w_dims[] = {1, static_cast<int>(key.hidden_dim), 1, 1};
-    T5_CACHE_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        e.weightDesc, key.data_type, miopenTensorNCHW, w_dims, 4));
-
-    int rstd_dims[] = {static_cast<int>(key.num_rows), 1, 1, 1};
-    T5_CACHE_CHECK(miopenSetNdTensorDescriptorWithLayout(
-        e.rstdDesc, miopenFloat, miopenTensorNCHW, rstd_dims, 4));
+    T5_CACHE_CHECK(miopenSetTensorDescriptor(e.xDesc, key.data_type, 2, x_dims,
+                                             x_strides));
+    T5_CACHE_CHECK(miopenSetTensorDescriptor(e.yDesc, key.data_type, 2, x_dims,
+                                             x_strides));
+    T5_CACHE_CHECK(miopenSetTensorDescriptor(e.weightDesc, key.data_type, 1,
+                                             w_dims, w_strides));
+    T5_CACHE_CHECK(miopenSetTensorDescriptor(e.rstdDesc, miopenFloat, 1,
+                                             rstd_dims, rstd_strides));
   }
 
 #undef T5_CACHE_CHECK
