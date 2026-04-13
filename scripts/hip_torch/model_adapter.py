@@ -29,7 +29,8 @@ from .compiler import Compiler, CompilationError
 from .dll_cache import DllCache
 from .dll_runner import HipDllRunner
 from .fx_emitter import fx_graph_to_mlir
-from .strategies import DEFAULT_STRATEGIES, Strategy
+from .strategies import DEFAULT_STRATEGIES, MAX_OFFLOAD_STRATEGIES, Strategy
+from .strategies import LinearProjectionStrategy
 
 log = logging.getLogger(__name__)
 
@@ -133,11 +134,22 @@ class ModelAdapter:
         strategies: Optional[List[Strategy]] = None,
         compiler: Optional[Compiler] = None,
         cache: Optional[DllCache] = None,
+        max_offload: bool = False,
     ):
         self.model = model
-        self.strategies = strategies or DEFAULT_STRATEGIES
+        if max_offload:
+            self.strategies = MAX_OFFLOAD_STRATEGIES
+        else:
+            self.strategies = strategies or DEFAULT_STRATEGIES
         self.compiler = compiler or Compiler()
         self.cache = cache or DllCache()
+        self._max_offload = max_offload
+        self._attn_proj_strategies = [
+            LinearProjectionStrategy("q_proj", "q_proj"),
+            LinearProjectionStrategy("k_proj", "k_proj"),
+            LinearProjectionStrategy("v_proj", "v_proj"),
+            LinearProjectionStrategy("o_proj", "o_proj"),
+        ]
 
     def find_targets(self) -> List[Tuple[str, nn.Module, Strategy]]:
         """Walk model tree and find submodules matching any strategy."""
@@ -221,8 +233,63 @@ class ModelAdapter:
                 layer.mlp = DllBackedModule(original, runners, weights)
             report.replaced_count += 1
 
+        # If max_offload, also offload attention projections
+        if self._max_offload and report.replaced_count > 0:
+            self._offload_attention_projections(shapes, report)
+
         report.compile_time = time.perf_counter() - t0
         return report
+
+    def _offload_attention_projections(self, shapes, report):
+        """Offload Q/K/V/O linear projections to GPU DLLs."""
+        layers = self.model.model.layers
+        attn_module = getattr(
+            layers[0], "self_attn", getattr(layers[0], "linear_attn", None)
+        )
+        if attn_module is None:
+            return
+
+        for proj_strategy in self._attn_proj_strategies:
+            if not proj_strategy.matches(attn_module):
+                continue
+
+            hidden = proj_strategy.get_hidden_size(attn_module)
+            input_rank = proj_strategy.get_input_rank(attn_module)
+            runners = {}
+
+            for label, seq_len in shapes.items():
+                runner = self._compile_for_shape(
+                    proj_strategy,
+                    attn_module,
+                    hidden,
+                    seq_len,
+                    input_rank,
+                    f"{proj_strategy.name}_{label}",
+                )
+                if runner:
+                    runners[label] = runner
+
+            if not runners:
+                report.errors.append(f"{proj_strategy.name} compilation failed")
+                continue
+
+            # Replace in all layers
+            for layer in layers:
+                attn = getattr(layer, "self_attn", getattr(layer, "linear_attn", None))
+                if attn is None:
+                    continue
+                weights = proj_strategy.get_weights(attn)
+                original = getattr(attn, proj_strategy._attr)
+                setattr(
+                    attn,
+                    proj_strategy._attr,
+                    DllBackedModule(original, runners, weights),
+                )
+
+            report.dll_shapes[proj_strategy.name] = list(
+                runners[list(runners.keys())[0]].input_metas[-1]["shape"]
+            )
+            log.info(f"Offloaded {proj_strategy.name} in all layers")
 
     def _compile_for_shape(
         self,

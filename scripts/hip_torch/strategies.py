@@ -210,12 +210,122 @@ class FFNStrategy(Strategy):
         return module.fc1.in_features
 
 
+class NormMlpResidualStrategy(Strategy):
+    """Matches RMSNorm + MLP + Residual add as a single compiled unit.
+
+    Covers: rms_norm + gate_proj + silu + up_proj + mul + down_proj + add
+    This is the full post-attention compute block in Llama/Qwen/Mistral.
+    """
+
+    @property
+    def name(self) -> str:
+        return "norm_mlp_residual"
+
+    def matches(self, module: nn.Module) -> bool:
+        # This strategy matches at the decoder layer level
+        return (
+            hasattr(module, "post_attention_layernorm")
+            and hasattr(module, "mlp")
+            and hasattr(module.mlp, "gate_proj")
+        )
+
+    def create_proxy(self, module: nn.Module) -> nn.Module:
+        return (
+            _NormMlpResidualProxy(
+                copy.deepcopy(module.post_attention_layernorm).cpu(),
+                copy.deepcopy(module.mlp).cpu(),
+            )
+            .eval()
+            .half()
+        )
+
+    def get_weights(self, module: nn.Module) -> List[torch.Tensor]:
+        norm = module.post_attention_layernorm
+        mlp = module.mlp
+        return [
+            norm.weight.data.cpu().contiguous(),
+            mlp.gate_proj.weight.data.t().contiguous().cpu(),
+            mlp.up_proj.weight.data.t().contiguous().cpu(),
+            mlp.down_proj.weight.data.t().contiguous().cpu(),
+        ]
+
+    def get_hidden_size(self, module: nn.Module) -> int:
+        return module.mlp.gate_proj.in_features
+
+
+class _NormMlpResidualProxy(nn.Module):
+    """RMSNorm + MLP + residual add."""
+
+    def __init__(self, norm, mlp):
+        super().__init__()
+        self.norm_weight = nn.Parameter(norm.weight.data)
+        self.eps = norm.variance_epsilon
+        self.gate_proj = mlp.gate_proj
+        self.up_proj = mlp.up_proj
+        self.down_proj = mlp.down_proj
+        self.act_fn = mlp.act_fn
+
+    def forward(self, x):
+        normed = torch.nn.functional.rms_norm(
+            x, (x.shape[-1],), self.norm_weight, self.eps
+        )
+        mlp_out = self.down_proj(
+            self.act_fn(self.gate_proj(normed)) * self.up_proj(normed)
+        )
+        return x + mlp_out
+
+
+class LinearProjectionStrategy(Strategy):
+    """Matches a single nn.Linear for offloading (Q/K/V/O projections)."""
+
+    def __init__(self, attr_name: str, label: str = ""):
+        self._attr = attr_name
+        self._label = label or attr_name
+
+    @property
+    def name(self) -> str:
+        return self._label
+
+    def matches(self, module: nn.Module) -> bool:
+        sub = getattr(module, self._attr, None)
+        return sub is not None and isinstance(sub, nn.Linear)
+
+    def create_proxy(self, module: nn.Module) -> nn.Module:
+        return (
+            _LinearProxy(copy.deepcopy(getattr(module, self._attr)).cpu()).eval().half()
+        )
+
+    def get_weights(self, module: nn.Module) -> List[torch.Tensor]:
+        linear = getattr(module, self._attr)
+        return [linear.weight.data.t().contiguous().cpu()]
+
+    def get_hidden_size(self, module: nn.Module) -> int:
+        return getattr(module, self._attr).in_features
+
+
+class _LinearProxy(nn.Module):
+    def __init__(self, linear):
+        super().__init__()
+        self.linear = linear
+
+    def forward(self, x):
+        return self.linear(x)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Default Strategy List
 # ──────────────────────────────────────────────────────────────────────
 
 DEFAULT_STRATEGIES: List[Strategy] = [
     SharedExpertStrategy(),  # must be before MLPStrategy (more specific)
+    MLPStrategy(),
+    FFNStrategy(),
+]
+
+# Extended strategies for maximum offload
+MAX_OFFLOAD_STRATEGIES: List[Strategy] = [
+    SharedExpertStrategy(),
+    NormMlpResidualStrategy(),
     MLPStrategy(),
     FFNStrategy(),
 ]
