@@ -546,6 +546,20 @@ void SigmoidOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// SoftplusOp: ins(input), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SoftplusOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void SoftplusOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // SubOp: ins(lhs, rhs), outs(output)
 //===----------------------------------------------------------------------===//
 
