@@ -115,6 +115,7 @@ static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
 #define HIPDNN_EP_ACTIVATION_SIGMOID 0
 #define HIPDNN_EP_ACTIVATION_RELU 1
 #define HIPDNN_EP_ACTIVATION_TANH 2
+#define HIPDNN_EP_ACTIVATION_SOFTPLUS 3
 
 static inline const char *hipdnn_ep_activation_name(int64_t activation_mode) {
   switch (activation_mode) {
@@ -124,6 +125,8 @@ static inline const char *hipdnn_ep_activation_name(int64_t activation_mode) {
     return "relu";
   case HIPDNN_EP_ACTIVATION_TANH:
     return "tanh";
+  case HIPDNN_EP_ACTIVATION_SOFTPLUS:
+    return "softplus";
   default:
     return "unknown";
   }
@@ -480,6 +483,12 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
 int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
                                  int64_t activation_mode);
+
+// Softplus activation: y = ln(exp(x) + 1)
+// Uses custom HIP kernel for numerically stable computation.
+// Supports HIPDNN_EP_DATATYPE_FLOAT, HALF, and BFLOAT16.
+int wrap_softplus(RuntimeState *state, void *input, void *output,
+                  int64_t num_elements, int64_t data_type);
 
 // Rotary embedding operation wrapper
 int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,

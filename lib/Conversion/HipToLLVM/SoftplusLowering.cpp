@@ -60,9 +60,8 @@ struct SoftplusOpLowering : public ConvertOpToLLVMPattern<SoftplusOp> {
     SmallVector<Type, 5> paramTypes = {ptrType, ptrType, ptrType, i64Type,
                                        i64Type};
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp =
-        LLVM::lookupOrCreateFn(rewriter, module, kWrapSoftplus, paramTypes,
-                               i32Type);
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapSoftplus, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
