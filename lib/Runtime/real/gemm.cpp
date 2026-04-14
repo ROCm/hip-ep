@@ -14,6 +14,7 @@
 #include <vector>
 
 #define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
+#define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
 
 // Type codes — must match the lowering in HipToLLVM.cpp GemmOpLowering
 static constexpr int64_t kTypeFloat16 = 0;
@@ -83,6 +84,88 @@ static std::unordered_map<GemmCacheKey, GemmCacheEntry, GemmCacheKeyHash>
     g_gemm_algo_cache;
 
 // =============================================================================
+// Broadcast helper: add beta * C to output using MIOpen
+// =============================================================================
+// Uses miopenOpTensor(Add) with broadcasting:
+//   output = 1.0 * (output + beta * C_broadcast)
+// C is normalized to 2D [cDim0, cDim1], broadcastable to [M, N].
+
+static bool resolveGemmMiopenType(int64_t typeCode, miopenDataType_t &dt) {
+  switch (typeCode) {
+  case kTypeFloat16:
+    dt = miopenHalf;
+    return true;
+  case kTypeFloat32:
+    dt = miopenFloat;
+    return true;
+  case kTypeFloat64:
+    dt = miopenDouble;
+    return true;
+  case kTypeBFloat16:
+    dt = miopenBFloat16;
+    return true;
+  default:
+    return false;
+  }
+}
+
+static int broadcastBiasAdd(RuntimeState *state, const void *C, void *output,
+                            int64_t M, int64_t N, int64_t cDim0, int64_t cDim1,
+                            float beta, int64_t typeCode) {
+  miopenHandle_t handle =
+      static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
+  if (!handle) {
+    fprintf(stderr, "wrap_gemm: broadcastBiasAdd: null MIOpen handle\n");
+    return -1;
+  }
+
+  miopenDataType_t dt;
+  if (!resolveGemmMiopenType(typeCode, dt)) {
+    fprintf(stderr, "wrap_gemm: broadcastBiasAdd: unsupported typeCode %lld\n",
+            (long long)typeCode);
+    return -1;
+  }
+
+  RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: broadcastBiasAdd C[%lld,%lld] -> "
+                    "[%lld,%lld], beta=%f\n",
+                    (long long)cDim0, (long long)cDim1, (long long)M,
+                    (long long)N, beta);
+
+  miopenTensorDescriptor_t cDesc = nullptr;
+  miopenTensorDescriptor_t outDesc = nullptr;
+  int result = 0;
+
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&cDesc));
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&outDesc));
+
+  MIOPEN_CHECK(miopenSet4dTensorDescriptor(
+      cDesc, dt, 1, 1, static_cast<int>(cDim0), static_cast<int>(cDim1)));
+  MIOPEN_CHECK(miopenSet4dTensorDescriptor(
+      outDesc, dt, 1, 1, static_cast<int>(M), static_cast<int>(N)));
+
+  // output = 1.0 * (output Add beta * C) + 0.0 * output
+  //        = output + beta * C_broadcast
+  if (typeCode == kTypeFloat64) {
+    double alpha1 = 1.0, alpha2 = static_cast<double>(beta), beta_c = 0.0;
+    MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha1, outDesc,
+                                output, &alpha2, cDesc, C, &beta_c, outDesc,
+                                output));
+  } else {
+    float alpha1 = 1.0f, alpha2 = beta, beta_c = 0.0f;
+    MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha1, outDesc,
+                                output, &alpha2, cDesc, C, &beta_c, outDesc,
+                                output));
+  }
+
+cleanup:
+  if (cDesc)
+    miopenDestroyTensorDescriptor(cDesc);
+  if (outDesc)
+    miopenDestroyTensorDescriptor(outDesc);
+  return result;
+}
+
+// =============================================================================
 // ONNX Gemm via hipBLASLt
 // =============================================================================
 //
@@ -92,6 +175,13 @@ static std::unordered_map<GemmCacheKey, GemmCacheEntry, GemmCacheKeyHash>
 //   op(B) = B^T if transB else B  →  always [K, N] after op
 //   C is optional, broadcastable to [M, N]
 //   Y has shape [M, N]
+//
+// C broadcast shapes (ONNX unidirectional broadcastable to [M, N]):
+//   []      → scalar      → cDim0=1, cDim1=1
+//   [N]     → row vector   → cDim0=1, cDim1=N   (most common: FC bias)
+//   [1, N]  → row vector   → cDim0=1, cDim1=N
+//   [M, 1]  → col vector   → cDim0=M, cDim1=1
+//   [M, N]  → no broadcast  → cDim0=M, cDim1=N
 //
 // hipBLASLt uses column-major. Using the transpose identity:
 //   Y^T = alpha * op(B)^T * op(A)^T + beta * C^T
@@ -110,7 +200,8 @@ static std::unordered_map<GemmCacheKey, GemmCacheEntry, GemmCacheKeyHash>
 
 int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
               void *output, int64_t M, int64_t N, int64_t K, float alpha,
-              float beta, int64_t transA, int64_t transB, int64_t typeCode) {
+              float beta, int64_t transA, int64_t transB, int64_t typeCode,
+              int64_t cDim0, int64_t cDim1) {
   if (!state || !A || !B || !output) {
     fprintf(stderr, "wrap_gemm: invalid arguments\n");
     return -1;
@@ -135,12 +226,31 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
     return -1;
   }
 
-  RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: M=%lld, N=%lld, K=%lld, transA=%lld, "
-                    "transB=%lld, alpha=%f, beta=%f, typeCode=%lld, C=%p\n",
-                    (long long)M, (long long)N, (long long)K, (long long)transA,
-                    (long long)transB, alpha, beta, (long long)typeCode, C);
+  // Determine if C needs broadcasting.
+  // When C is [M, N], hipblasLtMatmul handles it directly (single-pass).
+  // Otherwise, we do matmul with beta=0, then add beta*C via MIOpen broadcast.
+  bool needsBroadcast = C && !(cDim0 == M && cDim1 == N);
 
-  float beta_f = C ? beta : 0.0f;
+  RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: M=%lld, N=%lld, K=%lld, transA=%lld, "
+                    "transB=%lld, alpha=%f, beta=%f, typeCode=%lld, C=%p, "
+                    "cDim0=%lld, cDim1=%lld, needsBroadcast=%d\n",
+                    (long long)M, (long long)N, (long long)K, (long long)transA,
+                    (long long)transB, alpha, beta, (long long)typeCode, C,
+                    (long long)cDim0, (long long)cDim1, (int)needsBroadcast);
+
+  // For broadcast case: matmul ignores C (beta=0), bias added afterwards.
+  float effective_beta;
+  const void *effective_C;
+  if (!C) {
+    effective_beta = 0.0f;
+    effective_C = output;
+  } else if (!needsBroadcast) {
+    effective_beta = beta;
+    effective_C = C;
+  } else {
+    effective_beta = 0.0f;
+    effective_C = output;
+  }
 
   hipblasLtMatrixLayout_t matA_layout = nullptr;
   hipblasLtMatrixLayout_t matB_layout = nullptr;
@@ -245,25 +355,29 @@ int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
     void *ws_ptr = hipdnn_ep_state_get_workspace(state);
     size_t ws_size = hipdnn_ep_state_get_workspace_size(state);
 
-    // When C is NULL, use output as the C argument (beta=0 so content is
-    // irrelevant).
-    const void *C_ptr = C ? C : output;
-
     if (typeCode == kTypeFloat64) {
       double alpha_d = static_cast<double>(alpha);
-      double beta_d = static_cast<double>(beta_f);
+      double beta_d = static_cast<double>(effective_beta);
       HIPBLAS_CHECK(hipblasLtMatmul(
           handle, matmul_desc, &alpha_d, B, matA_layout, A, matB_layout,
-          &beta_d, C_ptr, matC_layout, output, matC_layout,
+          &beta_d, effective_C, matC_layout, output, matC_layout,
           const_cast<hipblasLtMatmulAlgo_t *>(&cached.algo), ws_ptr, ws_size,
           stream));
     } else {
       HIPBLAS_CHECK(hipblasLtMatmul(
-          handle, matmul_desc, &alpha, B, matA_layout, A, matB_layout, &beta_f,
-          C_ptr, matC_layout, output, matC_layout,
+          handle, matmul_desc, &alpha, B, matA_layout, A, matB_layout,
+          &effective_beta, effective_C, matC_layout, output, matC_layout,
           const_cast<hipblasLtMatmulAlgo_t *>(&cached.algo), ws_ptr, ws_size,
           stream));
     }
+  }
+
+  // Post-matmul broadcast bias addition: output += beta * C_broadcast
+  if (needsBroadcast) {
+    result =
+        broadcastBiasAdd(state, C, output, M, N, cDim0, cDim1, beta, typeCode);
+    if (result != 0)
+      goto cleanup;
   }
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_gemm: completed successfully\n");
