@@ -81,7 +81,28 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
       N = getMemRefDimSize(BType, 1, adaptor.getInputB(), rewriter, loc);
     }
 
-    SmallVector<Type, 13> paramTypes = {
+    // Extract C's shape normalized to 2D [cDim0, cDim1] for broadcast support.
+    // Scalar/absent → [0,0], 1D [X] → [1,X], 2D [X,Y] → [X,Y].
+    Value cDim0, cDim1;
+    if (adaptor.getInputC()) {
+      auto CType = cast<MemRefType>(op.getInputC().getType());
+      int cRank = CType.getRank();
+      if (cRank == 0) {
+        cDim0 = createI64Const(1);
+        cDim1 = createI64Const(1);
+      } else if (cRank == 1) {
+        cDim0 = createI64Const(1);
+        cDim1 = getMemRefDimSize(CType, 0, adaptor.getInputC(), rewriter, loc);
+      } else {
+        cDim0 = getMemRefDimSize(CType, 0, adaptor.getInputC(), rewriter, loc);
+        cDim1 = getMemRefDimSize(CType, 1, adaptor.getInputC(), rewriter, loc);
+      }
+    } else {
+      cDim0 = createI64Const(0);
+      cDim1 = createI64Const(0);
+    }
+
+    SmallVector<Type, 15> paramTypes = {
         ptrType, // state
         ptrType, // A
         ptrType, // B
@@ -95,6 +116,8 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
         i64Type, // transA
         i64Type, // transB
         i64Type, // typeCode
+        i64Type, // cDim0
+        i64Type, // cDim1
     };
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapGemm, paramTypes, i32Type);
@@ -102,9 +125,10 @@ struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
       return failure();
     }
 
-    SmallVector<Value, 13> args = {
-        statePtr, input_A_ptr, input_B_ptr, input_C_ptr, output_ptr, M, N, K,
-        alpha,    beta,        transA,      transB,      typeCodeVal};
+    SmallVector<Value, 15> args = {
+        statePtr, input_A_ptr, input_B_ptr, input_C_ptr, output_ptr,
+        M,        N,           K,           alpha,       beta,
+        transA,   transB,      typeCodeVal, cDim0,       cDim1};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
     return success();
