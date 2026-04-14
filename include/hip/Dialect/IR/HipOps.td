@@ -732,6 +732,36 @@ def Hip_SigmoidOp : Hip_DpsOp<"sigmoid"> {
   }];
 }
 
+def Hip_SoftplusOp : Hip_DpsOp<"softplus"> {
+  let summary = "Softplus activation: y = ln(exp(x) + 1)";
+  let description = [{
+    Applies the softplus activation function element-wise.
+    Implements the standard ONNX Softplus operator.
+
+    Formula: Y = ln(exp(X) + 1)
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.softplus(%ctx) ins(%input : memref<1x128x512xf32, 1>)
+                       outs(%output : memref<1x128x512xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_SubOp : Hip_DpsOp<"sub"> {
   let summary = "Elementwise subtraction";
   let description = [{
