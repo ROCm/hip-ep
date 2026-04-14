@@ -484,12 +484,6 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
                                  int64_t activation_mode);
 
-// Softplus activation: y = ln(exp(x) + 1)
-// Uses custom HIP kernel for numerically stable computation.
-// Supports HIPDNN_EP_DATATYPE_FLOAT, HALF, and BFLOAT16.
-int wrap_softplus(RuntimeState *state, void *input, void *output,
-                  int64_t num_elements, int64_t data_type);
-
 // Rotary embedding operation wrapper
 int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           void *cos_cache, void *sin_cache, void *output,

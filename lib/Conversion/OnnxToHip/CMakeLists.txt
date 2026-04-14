@@ -19,7 +19,6 @@ add_library(OnnxToHip STATIC
   GqaConversion.cpp
   GatherConversion.cpp
   ReshapeConversion.cpp
-  SoftplusConversion.cpp
 )
 
 add_dependencies(OnnxToHip
