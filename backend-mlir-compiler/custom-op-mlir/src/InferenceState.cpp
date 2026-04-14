@@ -119,12 +119,15 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes,
   TIMING_LOG("[Session] get_method (symbol lookup): %.3fs\n",
              record_elapsed(t_prev));
 
-  // Pre-read constants into host memory so the runtime always sees a
-  // mmap()-capable reader.  This turns the EP-context disk-read path (where
-  // the tar's TarEntryInputStream::mmap() returns nullptr for file-backed
-  // entries) into the fast zero-copy path.  For the first-run case the tar
-  // is already memory-backed, so the overlay simply avoids re-opening the
-  // tar entry.
+  // When the underlying FileSystem is file-backed (EP-context loaded from
+  // disk), TarEntryInputStream::mmap() returns nullptr and the runtime falls
+  // back to chunked fread().  Pre-reading the constants into a contiguous
+  // host buffer and serving it through an OverlayFileSystem gives the
+  // runtime a guaranteed-mmap reader, avoiding that overhead.
+  //
+  // For the first-run case the tar is already memory-backed and mmap()
+  // works, so the overlay is skipped -- the runtime gets the fast path
+  // directly from the tar FileSystem without any extra work.
   std::unique_ptr<morphizen::OverlayFileSystem> overlay_fs;
   std::shared_ptr<std::vector<uint8_t>> constants_buf;
   morphizen::FileSystem *init_fs = fs;
@@ -135,33 +138,22 @@ InferenceState::create(const std::vector<uint8_t> &dll_bytes,
     std::string cfile = extractConstantsFilename(meta_fn());
     if (!cfile.empty()) {
       auto reader = fs->create_reader_template(cfile.c_str());
-      if (reader && reader->size() > 0) {
-        void *mmap_ptr = reader->mmap();
-        if (mmap_ptr) {
-          // The underlying data is already contiguous and memory-resident
-          // (in-memory tar).  Wrap the same pointer without a copy.
+      if (reader && reader->size() > 0 && !reader->mmap()) {
+        // File-backed (EP-context loaded from disk).  Bulk-read into a
+        // host buffer so the runtime gets mmap() == non-null.
+        size_t total = reader->size();
+        constants_buf = std::make_shared<std::vector<uint8_t>>(total);
+        reader->rewind();
+        size_t got = reader->fread(constants_buf->data(), total);
+        if (got == total) {
           overlay_fs = std::make_unique<morphizen::OverlayFileSystem>(fs);
-          overlay_fs->add_overlay(cfile, mmap_ptr, reader->size());
+          overlay_fs->add_overlay(cfile, constants_buf);
           init_fs = overlay_fs.get();
-          MY_LOG(1) << "Constants overlay: zero-copy mmap (" << reader->size()
-                    << " bytes)";
+          MY_LOG(1) << "Constants overlay: pre-read " << total << " bytes";
         } else {
-          // File-backed (EP-context loaded from disk).  Bulk-read into a
-          // host buffer so the runtime gets mmap() == non-null.
-          size_t total = reader->size();
-          constants_buf = std::make_shared<std::vector<uint8_t>>(total);
-          reader->rewind();
-          size_t got = reader->fread(constants_buf->data(), total);
-          if (got == total) {
-            overlay_fs = std::make_unique<morphizen::OverlayFileSystem>(fs);
-            overlay_fs->add_overlay(cfile, constants_buf);
-            init_fs = overlay_fs.get();
-            MY_LOG(1) << "Constants overlay: pre-read " << total << " bytes";
-          } else {
-            MY_LOG(1) << "Constants pre-read short (" << got << "/" << total
-                      << "), falling back to original fs";
-            constants_buf.reset();
-          }
+          MY_LOG(1) << "Constants pre-read short (" << got << "/" << total
+                    << "), falling back to original fs";
+          constants_buf.reset();
         }
         TIMING_LOG("[Session] Constants pre-read: %.3fs\n",
                    record_elapsed(t_prev));
