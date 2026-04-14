@@ -445,6 +445,7 @@ jobs:
       - name: Run onnxruntime_perf_test (GPU)
         shell: cmd
         run: |
+          set HIPDNN_EP_TIMING=1
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib

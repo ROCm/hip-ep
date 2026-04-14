@@ -16,6 +16,7 @@
 
 // Component headers
 #include "InferenceState.h"
+#include "hip/timing.h"
 
 // Environment parameters (global scope, before namespace)
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
@@ -294,21 +295,32 @@ MlirCustomOp::MlirCustomOp(
     onnxruntime::Model *model)
     : morphizen::CustomOpImp(context, meta_def, model) {
 
+  auto t0 = timing_now();
+  auto t_prev = t0;
+
   MY_LOG(1) << "MlirCustomOp constructor";
 
-  // Parse metadata from JSON
   metadata_ = parse_metadata_from_metadef(context, meta_def);
-  // Precompute index mappings (compiler order -> ORT kernel context order)
   input_index_map_ = build_input_index_map(*meta_def);
   output_index_map_ = build_output_index_map(metadata_.outputs(), *meta_def);
-  // Get FileSystem from PassContext for constants file resolution.
-  // const_cast follows the established morphizen pattern (custom_op_imp.hpp).
+
+  TIMING_LOG("[Session] MlirCustomOp metadata+maps: %.3fs\n",
+             record_elapsed(t_prev));
+
+  auto artifact_bytes =
+      load_artifact_from_epcontext(context, metadata_.artifact_filename());
+
+  TIMING_LOG("[Session] MlirCustomOp load artifact from tar: %.3fs (%zu "
+             "bytes)\n",
+             record_elapsed(t_prev), artifact_bytes.size());
+
   auto fs =
       const_cast<morphizen::PassContext *>(context.get())->get_file_system();
-  // Create inference state from DLL bytes (uses morphizen::Plugin)
-  inference_state_ = customop::InferenceState::create(
-      load_artifact_from_epcontext(context, metadata_.artifact_filename()),
-      fs.get());
+
+  inference_state_ = customop::InferenceState::create(artifact_bytes, fs.get());
+
+  TIMING_LOG("[Session] MlirCustomOp constructor total: %.3fs\n",
+             elapsed_since(t0));
 }
 
 void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
