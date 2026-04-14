@@ -142,12 +142,10 @@ static int broadcastBiasToOutput(RuntimeState *state, const void *C,
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&cDesc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&outDesc));
 
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(cDesc, dt, 1, 1,
-                                           static_cast<int>(cDim0),
-                                           static_cast<int>(cDim1)));
-  MIOPEN_CHECK(miopenSet4dTensorDescriptor(outDesc, dt, 1, 1,
-                                           static_cast<int>(M),
-                                           static_cast<int>(N)));
+  MIOPEN_CHECK(miopenSet4dTensorDescriptor(
+      cDesc, dt, 1, 1, static_cast<int>(cDim0), static_cast<int>(cDim1)));
+  MIOPEN_CHECK(miopenSet4dTensorDescriptor(
+      outDesc, dt, 1, 1, static_cast<int>(M), static_cast<int>(N)));
 
   // output = beta * (C + 0 * C) + 0 * output = beta * C_broadcast
   if (typeCode == kTypeFloat64) {
