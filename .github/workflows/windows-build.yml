@@ -558,22 +558,24 @@ jobs:
             $rel = $f.FullName.Substring($l2Root.Length).TrimStart('\', '/')
             $model = $rel -replace '\.txt$', '' -replace '\\', '/'
             $content = Get-Content $f.FullName -Raw
-            $l2Match = [regex]::Match($content, 'Combined L2 \(stacked diffs\):\s+([\d.eE+-]+)')
+            $l2Match = [regex]::Match($content, 'Combined L2 \(stacked diffs\):\s+([\d.eE+-]+)\s+\(total_elems:\s+(\d+),.*?skipped_nonfinite:\s+(\d+)\)')
             $errMatch = [regex]::Match($content, '\[ERROR\]\s*(.+)')
             if ($l2Match.Success) {
               $l2val = [double]$l2Match.Groups[1].Value
-              $tableRows += "| $model | $l2val |`n"
+              $elems = $l2Match.Groups[2].Value
+              $skipped = $l2Match.Groups[3].Value
+              $tableRows += "| $model | $l2val | $elems | $skipped |`n"
             } elseif ($errMatch.Success) {
               $reason = $errMatch.Groups[1].Value.Trim()
-              $tableRows += "| $model | $reason |`n"
+              $tableRows += "| $model | $reason | - | - |`n"
             } else {
-              $tableRows += "| $model | error |`n"
+              $tableRows += "| $model | error | - | - |`n"
             }
           }
 
           $header = "## L2 Accuracy Results (EP vs CPU)`n`n" +
-                    "| Model | Combined L2 |`n" +
-                    "|-------|------------|`n"
+                    "| Model | Combined L2 | Total Elems | Skipped NaN/Inf |`n" +
+                    "|-------|------------|------------|----------------|`n"
           $footer = "`nThreshold: $threshold | Run: [${{ github.run_number }}]($runUrl) - Commit: ``$sha``"
           $summary = $header + $tableRows + $footer
 
@@ -628,18 +630,26 @@ jobs:
             $model = $f.BaseName -replace '\.onnx$', ''
             $content = Get-Content $f.FullName -Raw
             $qpsMatch = [regex]::Match($content, 'Number of inferences per second:\s+([\d.]+)')
+            $sessMatch = [regex]::Match($content, 'Session creation time cost:\s+([\d.]+)\s+s')
+            $firstMatch = [regex]::Match($content, 'First inference time cost:\s+(\d+)\s+ms')
+            $cpuMatch = [regex]::Match($content, 'Avg CPU usage:\s+(\d+)\s+%')
+            $memMatch = [regex]::Match($content, 'Peak working set size:\s+(\d+)\s+bytes')
+            $sess = if ($sessMatch.Success) { $sessMatch.Groups[1].Value } else { "-" }
+            $first = if ($firstMatch.Success) { $firstMatch.Groups[1].Value } else { "-" }
+            $cpu = if ($cpuMatch.Success) { $cpuMatch.Groups[1].Value } else { "-" }
+            $memMB = if ($memMatch.Success) { "{0:F0}" -f ([double]$memMatch.Groups[1].Value / 1MB) } else { "-" }
             if ($qpsMatch.Success) {
               $qps = "{0:F2}" -f [double]$qpsMatch.Groups[1].Value
-              $tableRows += "| $model | $qps |`n"
+              $tableRows += "| $model | $qps | $sess | $first | $cpu | $memMB |`n"
             } else {
-              $tableRows += "| $model | failed |`n"
+              $tableRows += "| $model | failed | $sess | $first | $cpu | $memMB |`n"
             }
           }
-          if (-not $tableRows) { $tableRows = "| (no results) | - |`n" }
+          if (-not $tableRows) { $tableRows = "| (no results) | - | - | - | - | - |`n" }
 
           $header = "## MorphiZen EP Performance Results`n`n" +
-                    "| Model | QPS |`n" +
-                    "|-------|----:|`n"
+                    "| Model | QPS | Session (s) | 1st Infer (ms) | CPU% | Mem (MB) |`n" +
+                    "|-------|----:|----:|----:|----:|----:|`n"
           $footer = "`nRun: [${{ github.run_number }}]($runUrl) - Commit: ``$sha``"
           $summary = $header + $tableRows + $footer
 
