@@ -514,7 +514,7 @@ bool test_matmul_nbits(int M, int N, int K, int group_size,
     std::cout << " done" << std::endl;
     std::cout << "\n  === Performance ===" << std::endl;
     std::cout << std::fixed << std::setprecision(3);
-    std::cout << "  Median: " 
+    std::cout << "  Median: "
               << std::setprecision(6) << avg_ms << " ms, "
               << gflops << " GFLOPS, "
               << bw_gbs << " GB/s" << std::endl;
