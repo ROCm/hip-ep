@@ -653,22 +653,6 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
-int wrap_softplus(RuntimeState *state, void *input, void *output,
-                  int64_t num_elements, int64_t data_type) {
-  if (!state) {
-    fprintf(stderr, "Invalid state in wrap_softplus\n");
-    return -1;
-  }
-
-  MOCK_PRINT("[MOCK] wrap_softplus(num_elements=%lld, data_type=%s(%lld))\n",
-             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
-             (long long)data_type);
-
-  // Delegate to generic activation mock (Softplus uses MIOpen SOFTRELU)
-  return wrap_miopenActivationForward(state, input, output, num_elements,
-                                      data_type, HIPDNN_EP_ACTIVATION_SOFTPLUS);
-}
-
 int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           void *cos_cache, void *sin_cache, void *output,
                           int64_t interleaved, int64_t num_heads,

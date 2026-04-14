@@ -20,7 +20,6 @@ add_library(HipToLLVM STATIC
   MatMulNBitsLowering.cpp
   QMoELowering.cpp
   GraphLowering.cpp
-  SoftplusLowering.cpp
 )
 
 add_dependencies(HipToLLVM

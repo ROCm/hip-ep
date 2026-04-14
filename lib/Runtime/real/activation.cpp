@@ -191,31 +191,3 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
   return 0;
 }
 
-//===----------------------------------------------------------------------===//
-// Softplus Activation
-//===----------------------------------------------------------------------===//
-//
-// Softplus formula: y = ln(exp(x) + 1)
-// Implemented using MIOpen's miopenActivationSOFTRELU mode.
-//
-// Design: Simple wrapper that delegates to wrap_miopenActivationForward(),
-// consistent with other activation functions (Sigmoid, ReLU, Tanh).
-//===----------------------------------------------------------------------===//
-
-int wrap_softplus(RuntimeState *state, void *input, void *output,
-                  int64_t num_elements, int64_t data_type) {
-  if (!state || !input || !output) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_softplus: null argument\n");
-    return -1;
-  }
-
-  RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_softplus: calling MIOpen activation (SOFTRELU), "
-      "num_elements=%lld, data_type=%s(%lld)\n",
-      (long long)num_elements, hipdnn_ep_datatype_name(data_type),
-      (long long)data_type);
-
-  // Delegate to generic MIOpen activation wrapper
-  return wrap_miopenActivationForward(state, input, output, num_elements,
-                                      data_type, HIPDNN_EP_ACTIVATION_SOFTPLUS);
-}
