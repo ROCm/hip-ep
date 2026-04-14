@@ -37,6 +37,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <mutex>
+#include <string>
+#include <unordered_map>
 
 /* =======================================================================
  * Section 1: Naive fallback kernel (row-major, any alignment, batched)
@@ -475,25 +477,14 @@ static int tuneGemvConfig(
     return best_id;
 }
 
-static constexpr int kGemvCacheSlots = 32;
-static struct {
-    uint64_t key;
-    int      config_id;
-    bool     valid;
-} gemv_cache[kGemvCacheSlots];
-
+static std::unordered_map<std::string, int> gemv_cache;
 static std::mutex gemv_tune_mutex;
 
-static uint64_t gemvCacheKey(int64_t M, int64_t N, int64_t K, int64_t bs,
-                             bool col_major = false) {
-    uint64_t h = 14695981039346656037ULL;
-    auto mix = [&](uint64_t v) { h ^= v; h *= 1099511628211ULL; };
-    mix(static_cast<uint64_t>(M));
-    mix(static_cast<uint64_t>(N));
-    mix(static_cast<uint64_t>(K));
-    mix(static_cast<uint64_t>(bs));
-    mix(col_major ? 1ULL : 0ULL);
-    return h;
+static std::string gemvCacheKey(int64_t M, int64_t N, int64_t K, int64_t bs,
+                                bool col_major = false) {
+    return std::to_string(M) + "_" + std::to_string(N) + "_" +
+           std::to_string(K) + "_" + std::to_string(bs) + "_" +
+           (col_major ? "1" : "0");
 }
 
 static int getOrTuneGemvConfig(
@@ -505,22 +496,22 @@ static int getOrTuneGemvConfig(
     int64_t batch, int64_t bs,
     bool col_major = false)
 {
-    uint64_t key = gemvCacheKey(M, N, K, bs, col_major);
-    int slot = static_cast<int>(key % kGemvCacheSlots);
-
-    if (gemv_cache[slot].valid && gemv_cache[slot].key == key)
-        return gemv_cache[slot].config_id;
+    std::string key = gemvCacheKey(M, N, K, bs, col_major);
 
     std::lock_guard<std::mutex> lock(gemv_tune_mutex);
 
-    if (gemv_cache[slot].valid && gemv_cache[slot].key == key)
-        return gemv_cache[slot].config_id;
+    auto it = gemv_cache.find(key);
+    if (it != gemv_cache.end())
+        return it->second;
 
     int best = tuneGemvConfig(stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs, col_major);
-    gemv_cache[slot].key       = key;
-    gemv_cache[slot].config_id = best;
-    gemv_cache[slot].valid     = true;
+    gemv_cache[key] = best;
+
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] GEMV cache: stored key=\"%s\" -> config[%d] "
+        "(cache size=%zu)\n",
+        key.c_str(), best, gemv_cache.size());
 
     return best;
 }
@@ -1263,24 +1254,13 @@ static int tuneWmmaConfig(
     return best_id;
 }
 
-static constexpr int kWmmaCacheSlots = 32;
-static struct {
-    uint64_t key;
-    int      config_id;
-    bool     valid;
-} wmma_cache[kWmmaCacheSlots];
-
+static std::unordered_map<std::string, int> wmma_cache;
 static std::mutex wmma_tune_mutex;
 
-static uint64_t wmmaCacheKey(int M, int N, int K, int gs, bool has_zp) {
-    uint64_t h = 14695981039346656037ULL;
-    auto mix = [&](uint64_t v) { h ^= v; h *= 1099511628211ULL; };
-    mix(static_cast<uint64_t>(M));
-    mix(static_cast<uint64_t>(N));
-    mix(static_cast<uint64_t>(K));
-    mix(static_cast<uint64_t>(gs));
-    mix(has_zp ? 1ULL : 0ULL);
-    return h;
+static std::string wmmaCacheKey(int M, int N, int K, int gs, bool has_zp) {
+    return std::to_string(M) + "_" + std::to_string(N) + "_" +
+           std::to_string(K) + "_" + std::to_string(gs) + "_" +
+           (has_zp ? "1" : "0");
 }
 
 static int getOrTuneWmmaConfig(
@@ -1292,22 +1272,22 @@ static int getOrTuneWmmaConfig(
     int gs, int ngk,
     _Float16* C, int ldc, bool has_zp)
 {
-    uint64_t key = wmmaCacheKey(M, N, K, gs, has_zp);
-    int slot = static_cast<int>(key % kWmmaCacheSlots);
-
-    if (wmma_cache[slot].valid && wmma_cache[slot].key == key)
-        return wmma_cache[slot].config_id;
+    std::string key = wmmaCacheKey(M, N, K, gs, has_zp);
 
     std::lock_guard<std::mutex> lock(wmma_tune_mutex);
 
-    if (wmma_cache[slot].valid && wmma_cache[slot].key == key)
-        return wmma_cache[slot].config_id;
+    auto it = wmma_cache.find(key);
+    if (it != wmma_cache.end())
+        return it->second;
 
     int best = tuneWmmaConfig(stream, M, N, K, A, lda, B,
                                scales, zeros, gs, ngk, C, ldc, has_zp);
-    wmma_cache[slot].key       = key;
-    wmma_cache[slot].config_id = best;
-    wmma_cache[slot].valid     = true;
+    wmma_cache[key] = best;
+
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] WMMA cache: stored key=\"%s\" -> config[%d] "
+        "(cache size=%zu)\n",
+        key.c_str(), best, wmma_cache.size());
 
     return best;
 }
