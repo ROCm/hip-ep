@@ -461,17 +461,22 @@ jobs:
             Where-Object { $_.Name -notmatch "_ctx" })
           if ($models.Count -eq 0) { Write-Host "[ERROR] No seq128 models"; exit 1 }
 
-          Push-Location gpu-test-package\bin
+          $runner = Join-Path $pkgBin "hip-onnx-runner.exe"
           foreach ($m in $models) {
             Write-Host "=== Generating EP context: $($m.Name) ==="
-            & .\hip-onnx-runner.exe `
+            # Run from the model's directory so _ctx.onnx + sidecar .bin
+            # land next to the original model.
+            Push-Location $m.DirectoryName
+            & $runner `
               -m $m.FullName `
               -C "ep.context_enable|1" `
               -C "ep.context_embed_mode|0" `
-              2>&1 | Tee-Object -FilePath "..\results\$($m.Name)_gen.txt"
+              2>&1 | Tee-Object -FilePath (Join-Path $PWD "..\..\onnx-hipdnn-ep\gpu-test-package\results\$($m.Name)_gen.txt")
             Write-Host "  exit code: $LASTEXITCODE"
+            Write-Host "  Files in $($m.DirectoryName):"
+            Get-ChildItem $m.DirectoryName | ForEach-Object { Write-Host "    $($_.Name)  ($($_.Length) bytes)" }
+            Pop-Location
           }
-          Pop-Location
 
           # Find generated _ctx.onnx files
           Write-Host "--- Searching for _ctx.onnx files ---"
@@ -506,22 +511,26 @@ jobs:
           Write-Host "Testing $($ctxModels.Count) model(s)"
 
           $failed = 0
-          Push-Location gpu-test-package\bin
-          New-Item -ItemType Directory -Force -Path "..\results" | Out-Null
+          $resultsDir = Join-Path $PWD "gpu-test-package\results"
+          New-Item -ItemType Directory -Force -Path $resultsDir | Out-Null
+          $perfTest = Join-Path $pkgBin "onnxruntime_perf_test.exe"
+          $configFile = Join-Path $pkgBin "..\morphizen_config.json"
           foreach ($m in $ctxModels) {
             $resultName = ($m.Name -replace '_ctx\.onnx$', '.onnx')
             if ($resultName -eq $m.Name) { $resultName = $m.Name }
-            Write-Host "=== Testing: $($m.Name) ==="
-            & .\onnxruntime_perf_test.exe `
+            Write-Host "=== Testing: $($m.Name) (from $($m.DirectoryName)) ==="
+            # Run from the model's directory so the sidecar .bin is found
+            Push-Location $m.DirectoryName
+            & $perfTest `
               --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" `
               --plugin_eps "MorphiZenExecutionProvider" `
-              --plugin_ep_options "config_file|..\morphizen_config.json" `
+              --plugin_ep_options "config_file|$configFile" `
               -C "session.disable_cpu_ep_fallback|1" `
               -t 30 -c 1 -s -I `
-              $m.FullName 2>&1 | Tee-Object -FilePath "..\results\$resultName.txt"
+              $m.FullName 2>&1 | Tee-Object -FilePath (Join-Path $resultsDir "$resultName.txt")
             if ($LASTEXITCODE -ne 0) { $failed = 1 }
+            Pop-Location
           }
-          Pop-Location
           exit $failed
 
       # -----------------------------------------------------------------------
