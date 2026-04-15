@@ -37,25 +37,25 @@ static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type, bool &ok) {
 //===----------------------------------------------------------------------===//
 //
 // Three MIOpen descriptors (input, output, activation) are created once per
-// unique (num_elements, data_type, gamma) combination and reused for the
-// process lifetime. Avoids repeated miopenCreate/Set/Destroy on every
+// unique (num_elements, data_type, alpha, beta, gamma) combination and reused
+// for the process lifetime. Avoids repeated miopenCreate/Set/Destroy on every
 // power operation call.
 //
 // Uses miopenActivationPOWER mode with formula: (alpha + beta * x)^gamma
-// - Reciprocal: alpha=0, beta=1, gamma=-1.0 → x^(-1) = 1/x
-// - Sqrt:       alpha=0, beta=1, gamma=0.5  → x^(0.5) = √x
-// - Square:     alpha=0, beta=1, gamma=2.0  → x^2
-// - Cube:       alpha=0, beta=1, gamma=3.0  → x^3
+// - Reciprocal: alpha=0, beta=1, gamma=-1.0 → (0 + 1*x)^(-1) = 1/x
+// - Sqrt:       alpha=0, beta=1, gamma=0.5  → (0 + 1*x)^(0.5) = √x
+// - Square:     alpha=0, beta=1, gamma=2.0  → (0 + 1*x)^2 = x^2
+// - Cube:       alpha=0, beta=1, gamma=3.0  → (0 + 1*x)^3 = x^3
+// - General:    any alpha, beta, gamma      → (alpha + beta*x)^gamma
 
 struct PowerActivationCacheKey {
   int64_t num_elements, data_type;
-  miopenActivationMode_t mode;  // Always miopenActivationPOWER
-  double gamma;  // Power exponent
+  miopenActivationMode_t mode; // Always miopenActivationPOWER
+  double alpha, beta, gamma;   // MIOpen Power activation parameters
 
   bool operator==(const PowerActivationCacheKey &o) const {
-    return num_elements == o.num_elements &&
-           data_type == o.data_type &&
-           mode == o.mode &&
+    return num_elements == o.num_elements && data_type == o.data_type &&
+           mode == o.mode && alpha == o.alpha && beta == o.beta &&
            gamma == o.gamma;
   }
 };
@@ -66,7 +66,10 @@ struct PowerActivationCacheKeyHash {
     hash_combine_val(h, k.num_elements);
     hash_combine_val(h, k.data_type);
     hash_combine_val(h, static_cast<int>(k.mode));
-    // Use fixed-point representation for gamma to ensure stable hashing
+    // Use fixed-point representation for floating-point params to ensure stable
+    // hashing
+    hash_combine_val(h, static_cast<int64_t>(k.alpha * 1000000));
+    hash_combine_val(h, static_cast<int64_t>(k.beta * 1000000));
     hash_combine_val(h, static_cast<int64_t>(k.gamma * 1000000));
     return h;
   }
@@ -114,13 +117,9 @@ queryOrCreatePowerActivation(const PowerActivationCacheKey &key) {
 
   // 5. Configure activation descriptor
   // miopenActivationPOWER: (alpha + beta * x)^gamma
-  // For power operations: alpha=0, beta=1, so we get x^gamma
-  {
-    double alpha = 0.0, beta = 1.0;
-    MIOPEN_CHECK_GOTO(miopenSetActivationDescriptor(e.actDesc, key.mode, alpha,
-                                                     beta, key.gamma),
-                      cache_fail);
-  }
+  MIOPEN_CHECK_GOTO(miopenSetActivationDescriptor(
+                        e.actDesc, key.mode, key.alpha, key.beta, key.gamma),
+                    cache_fail);
   goto cache_done;
 
 cache_fail:
@@ -141,22 +140,23 @@ cache_done:
 // Generic Power Operation via MIOpen Activation Power
 //===----------------------------------------------------------------------===//
 //
-// Unified implementation for all power operations: y = x^gamma
-// Uses miopenActivationPOWER with formula: (0 + 1*x)^gamma = x^gamma
+// Unified implementation for all power operations: y = (alpha + beta * x)^gamma
+// Fully supports miopenActivationPOWER formula with all three parameters.
 //
-// Supported operations:
-// - Reciprocal: gamma=-1.0  → x^(-1) = 1/x
-// - Sqrt:       gamma=0.5   → x^(0.5) = √x
-// - Square:     gamma=2.0   → x^2
-// - Cube:       gamma=3.0   → x^3
-// - Arbitrary:  any gamma   → x^gamma
+// Common operations:
+// - Reciprocal: alpha=0, beta=1, gamma=-1.0  → (0 + 1*x)^(-1) = 1/x
+// - Sqrt:       alpha=0, beta=1, gamma=0.5   → (0 + 1*x)^(0.5) = √x
+// - Square:     alpha=0, beta=1, gamma=2.0   → (0 + 1*x)^2 = x^2
+// - Cube:       alpha=0, beta=1, gamma=3.0   → (0 + 1*x)^3 = x^3
+// - General:    any alpha, beta, gamma        → (alpha + beta*x)^gamma
 //
 // This implementation leverages MIOpen's hardware-optimized power activation,
 // providing better cross-architecture performance and production stability.
 //===----------------------------------------------------------------------===//
 
 int wrap_power(RuntimeState *state, void *input, void *output,
-               int64_t num_elements, int64_t data_type, double gamma) {
+               int64_t num_elements, int64_t data_type, double alpha,
+               double beta, double gamma) {
   if (!state || !input || !output) {
     fprintf(stderr, "wrap_power: null argument\n");
     return -1;
@@ -164,9 +164,9 @@ int wrap_power(RuntimeState *state, void *input, void *output,
 
   const char *type_name = hipdnn_ep_datatype_name(data_type);
   RUNTIME_DEBUG_LOG("[REAL] wrap_power: num_elements=%lld, "
-                    "data_type=%s(%lld), gamma=%.2f\n",
+                    "data_type=%s(%lld), alpha=%.2f, beta=%.2f, gamma=%.2f\n",
                     (long long)num_elements, type_name, (long long)data_type,
-                    gamma);
+                    alpha, beta, gamma);
 
   miopenHandle_t handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
@@ -176,16 +176,17 @@ int wrap_power(RuntimeState *state, void *input, void *output,
   }
 
   PowerActivationCacheKey key{num_elements, data_type, miopenActivationPOWER,
-                              gamma};
+                              alpha,        beta,      gamma};
   const PowerActivationCacheEntry *c = queryOrCreatePowerActivation(key);
   if (!c) {
     fprintf(stderr, "wrap_power: descriptor cache creation failed\n");
     return -1;
   }
 
-  float alpha = 1.0f, beta = 0.0f;
-  miopenStatus_t st = miopenActivationForward(
-      handle, c->actDesc, &alpha, c->inDesc, input, &beta, c->outDesc, output);
+  float scale_alpha = 1.0f, scale_beta = 0.0f;
+  miopenStatus_t st =
+      miopenActivationForward(handle, c->actDesc, &scale_alpha, c->inDesc,
+                              input, &scale_beta, c->outDesc, output);
   if (st != miopenStatusSuccess) {
     fprintf(stderr, "wrap_power: miopenActivationForward failed (%d)\n", st);
     return -1;
@@ -201,10 +202,14 @@ int wrap_power(RuntimeState *state, void *input, void *output,
 
 int wrap_reciprocal(RuntimeState *state, void *input, void *output,
                     int64_t num_elements, int64_t data_type) {
-  return wrap_power(state, input, output, num_elements, data_type, -1.0);
+  // Reciprocal: (0 + 1*x)^(-1) = 1/x
+  return wrap_power(state, input, output, num_elements, data_type, 0.0, 1.0,
+                    -1.0);
 }
 
 int wrap_sqrt(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type) {
-  return wrap_power(state, input, output, num_elements, data_type, 0.5);
+  // Sqrt: (0 + 1*x)^(0.5) = √x
+  return wrap_power(state, input, output, num_elements, data_type, 0.0, 1.0,
+                    0.5);
 }
