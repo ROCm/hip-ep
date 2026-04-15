@@ -32,6 +32,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Mul | MIOpen |
 | Add | MIOpen |
 | Sigmoid | MIOpen |
+| Reciprocal | Custom HIP Kernel |
 | Sub | Custom HIP Kernel |
 | Cast | Custom HIP Kernel |
 | ReduceSum | Custom HIP Kernel |
