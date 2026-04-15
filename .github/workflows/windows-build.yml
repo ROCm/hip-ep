@@ -474,15 +474,24 @@ jobs:
               -r 1 -c 1 -s -I `
               $m.FullName 2>&1 | Tee-Object -FilePath "..\results\$($m.Name)_gen.txt"
             Write-Host "  exit code: $LASTEXITCODE"
-            $ctxFile = Join-Path $m.DirectoryName "$($m.BaseName)_ctx.onnx"
-            if (Test-Path $ctxFile) {
-              Write-Host "  EP context model: $ctxFile"
-              Get-ChildItem $m.DirectoryName -Filter "$($m.BaseName)_ctx*" |
+
+            # _ctx.onnx is generated in cwd (gpu-test-package\bin), move it
+            # next to the original model so phase 2 can find it.
+            $ctxInCwd = Join-Path $PWD "$($m.BaseName)_ctx.onnx"
+            $ctxDest = Join-Path $m.DirectoryName "$($m.BaseName)_ctx.onnx"
+            if (Test-Path $ctxInCwd) {
+              Move-Item $ctxInCwd $ctxDest -Force
+              # Also move any sidecar files (*.bin next to the ctx)
+              Get-ChildItem $PWD -Filter "$($m.BaseName)_ctx*" |
+                Move-Item -Destination $m.DirectoryName -Force
+              Write-Host "  Moved ctx files to $($m.DirectoryName):"
+              Get-ChildItem $m.DirectoryName -Filter "*_ctx*" |
                 ForEach-Object { Write-Host "    $($_.Name)  ($($_.Length) bytes)" }
             } else {
-              Write-Host "  [WARN] Expected ctx file not found: $ctxFile"
-              Write-Host "  Files in model dir:"
-              Get-ChildItem $m.DirectoryName | ForEach-Object { Write-Host "    $($_.Name)" }
+              Write-Host "  [WARN] _ctx.onnx not found in cwd either"
+              Write-Host "  CWD files:"
+              Get-ChildItem $PWD -Filter "*_ctx*" |
+                ForEach-Object { Write-Host "    $($_.Name)" }
             }
           }
           Pop-Location
