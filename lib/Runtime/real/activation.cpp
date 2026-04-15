@@ -190,4 +190,3 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
       "[REAL] wrap_miopenActivationForward: completed successfully\n");
   return 0;
 }
-
