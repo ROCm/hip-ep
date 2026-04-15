@@ -558,9 +558,7 @@ void SoftplusOp::getEffects(
 // ReciprocalOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 
-MutableOperandRange ReciprocalOp::getDpsInitsMutable() {
-  return getYMutable();
-}
+MutableOperandRange ReciprocalOp::getDpsInitsMutable() { return getYMutable(); }
 
 void ReciprocalOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
