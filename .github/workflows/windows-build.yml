@@ -342,6 +342,7 @@ jobs:
       - name: Build OGA
         shell: cmd
         run: |
+          pip install requests
           cd /d "${{ github.workspace }}\source-oga"
           python build.py ^
             --config Release ^
