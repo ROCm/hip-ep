@@ -520,23 +520,35 @@ jobs:
           New-Item -ItemType Directory -Force -Path $resultsDir | Out-Null
           $perfTest = Join-Path $pkgBin "onnxruntime_perf_test.exe"
           $configFile = Join-Path $pkgBin "..\morphizen_config.json"
-          $epDll = Join-Path $pkgBin "onnxruntime_morphizen_ep.dll"
+          # Copy _ctx.onnx + sidecar files into gpu-test-package/bin so
+          # perf_test can find both the EP DLL and the sidecar .bin
+          Push-Location $pkgBin
           foreach ($m in $ctxModels) {
+            Copy-Item $m.FullName . -Force
+            Get-ChildItem $m.DirectoryName -Filter "$($m.BaseName)*" |
+              Where-Object { $_.Name -ne $m.Name } |
+              Copy-Item -Destination . -Force
+            Write-Host "Copied to bin: $($m.Name) + sidecars"
+            Get-ChildItem . -Filter "$($m.BaseName)*" |
+              ForEach-Object { Write-Host "  $($_.Name) ($($_.Length) bytes)" }
+          }
+
+          foreach ($m in $ctxModels) {
+            $localCtx = Join-Path $PWD $m.Name
             $resultName = ($m.Name -replace '_ctx\.onnx$', '.onnx')
             if ($resultName -eq $m.Name) { $resultName = $m.Name }
-            Write-Host "=== Testing: $($m.Name) (from $($m.DirectoryName)) ==="
-            Push-Location $m.DirectoryName
-            & $perfTest `
-              --plugin_ep_libs "MorphiZenExecutionProvider|$epDll" `
+            Write-Host "=== Testing: $($m.Name) ==="
+            & .\onnxruntime_perf_test.exe `
+              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" `
               --plugin_eps "MorphiZenExecutionProvider" `
-              --plugin_ep_options "config_file|$configFile" `
+              --plugin_ep_options "config_file|..\morphizen_config.json" `
               -C "session.disable_cpu_ep_fallback|1" `
               -t 30 -c 1 -s -I `
-              $m.FullName 2>&1 | Tee-Object -FilePath (Join-Path $resultsDir "$resultName.txt")
+              $localCtx 2>&1 | Tee-Object -FilePath (Join-Path $resultsDir "$resultName.txt")
             Write-Host "  perf_test exit: $LASTEXITCODE"
             if ($LASTEXITCODE -ne 0) { $failed = 1 }
-            Pop-Location
           }
+          Pop-Location
           exit $failed
 
       # -----------------------------------------------------------------------
