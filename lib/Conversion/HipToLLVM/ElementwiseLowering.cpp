@@ -274,7 +274,7 @@ struct ReciprocalOpLowering : public ConvertOpToLLVMPattern<ReciprocalOp> {
                                        i64Type};
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, "wrap_reciprocal", paramTypes, i32Type);
+        rewriter, module, kWrapReciprocal, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
