@@ -373,10 +373,10 @@ int wrap_sqrt(RuntimeState *state, void *input, void *output,
   }
 
   const char *type_name = hipdnn_ep_datatype_name(data_type);
-  RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_sqrt: num_elements=%lld, data_type=%s(%lld), "
-      "hip_dtype=%d -> calling hip_sqrt\n",
-      (long long)num_elements, type_name, (long long)data_type, hip_dtype);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_sqrt: num_elements=%lld, data_type=%s(%lld), "
+                    "hip_dtype=%d -> calling hip_sqrt\n",
+                    (long long)num_elements, type_name, (long long)data_type,
+                    hip_dtype);
 
   return hip_sqrt(stream, input, output, num_elements, hip_dtype);
 }
