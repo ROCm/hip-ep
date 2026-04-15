@@ -442,9 +442,14 @@ jobs:
       #                (MSVC release CRT + hip_custom_kernels); no VS required.
       # Output is tee'd to results/ for QPS extraction. Non-zero exit code
       # sets FAILED but continues so all models are tested.
-      - name: Run onnxruntime_perf_test (GPU)
+      # Phase 1: Generate EP context models (non-embed) from original seq128 models.
+      # This runs a 1-iteration perf test with ep.context_enable=1 and
+      # ep.context_embed_mode=0, which compiles the model and saves the
+      # EP context as a sidecar file next to <model>_ctx.onnx.
+      - name: Generate EP context models
         shell: cmd
         run: |
+          set HIPDNN_EP_TIMING=1
           set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
@@ -459,11 +464,43 @@ jobs:
             echo [ERROR] No *seq128.onnx models found in %MODEL_DIR%
             exit /b 1
           )
-          set FAILED=0
           cd gpu-test-package\bin
           mkdir ..\results 2>nul
           for /r "%MODEL_DIR%" %%M in (*seq128.onnx) do (
-            echo === Testing %%~nxM ===
+            echo === Generating EP context for %%~nxM ===
+            onnxruntime_perf_test.exe ^
+              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
+              --plugin_eps "MorphiZenExecutionProvider" ^
+              --plugin_ep_options "config_file|..\morphizen_config.json" ^
+              -C "session.disable_cpu_ep_fallback|1" ^
+              -C "ep.context_enable|1" ^
+              -C "ep.context_embed_mode|0" ^
+              -t 1 -c 1 -s -I ^
+              "%%M" > "..\results\%%~nxM_gen.txt" 2>&1
+            type "..\results\%%~nxM_gen.txt"
+          )
+
+      # Phase 2: Run perf test on the generated EP context models.
+      # The _ctx.onnx files are generated next to the originals.
+      # This measures session creation time from the EP context (second-run)
+      # path, which loads constants from the sidecar bin file.
+      - name: Run onnxruntime_perf_test (GPU)
+        shell: cmd
+        run: |
+          set HIPDNN_EP_TIMING=1
+          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
+          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
+          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
+          set MODEL_DIR=${{ runner.workspace }}\model
+          if not exist "%MODEL_DIR%" (
+            echo [ERROR] MODEL_DIR not found: %MODEL_DIR%
+            exit /b 1
+          )
+          set FAILED=0
+          cd gpu-test-package\bin
+          mkdir ..\results 2>nul
+          for /r "%MODEL_DIR%" %%M in (*seq128_ctx.onnx) do (
+            echo === Testing EP context: %%~nxM ===
             onnxruntime_perf_test.exe ^
               --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
               --plugin_eps "MorphiZenExecutionProvider" ^
@@ -473,6 +510,21 @@ jobs:
               "%%M" > "..\results\%%~nxM.txt" 2>&1
             type "..\results\%%~nxM.txt"
             if errorlevel 1 set FAILED=1
+          )
+          if not exist "..\results\*_ctx.onnx.txt" (
+            echo [WARN] No _ctx.onnx results found, falling back to original models
+            for /r "%MODEL_DIR%" %%M in (*seq128.onnx) do (
+              echo === Testing original: %%~nxM ===
+              onnxruntime_perf_test.exe ^
+                --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
+                --plugin_eps "MorphiZenExecutionProvider" ^
+                --plugin_ep_options "config_file|..\morphizen_config.json" ^
+                -C "session.disable_cpu_ep_fallback|1" ^
+                -t 30 -c 1 -s -I ^
+                "%%M" > "..\results\%%~nxM.txt" 2>&1
+              type "..\results\%%~nxM.txt"
+              if errorlevel 1 set FAILED=1
+            )
           )
           exit /b %FAILED%
 
