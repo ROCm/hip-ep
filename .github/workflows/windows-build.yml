@@ -32,6 +32,8 @@ jobs:
       GTEST_VERSION: "1.15.0"
       THEROCK_VERSION: therock-dist-windows-gfx1151-7.11.0
       SCCACHE_GHA_ENABLED: "true"
+      OGA_REPO: AMDmoore/onnxruntime-genai
+      OGA_REF: 0fcb5fa6e3a36edaf63d4dab12bf4aae4bdba1ca
       # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
       # Node.js 24 releases yet; allow Node.js 20 until they are updated.
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
@@ -51,7 +53,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           submodules: false
-          fetch-depth: 0
+          fetch-depth: 1
           show-progress: false
 
       - name: Checkout MorphiZen submodule
@@ -60,6 +62,16 @@ jobs:
           git config --global url."git@github.com:ROCm/MorphiZen.git".insteadOf \
             "../MorphiZen"
           git submodule update --init --recursive
+
+      - name: Checkout OGA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ env.OGA_REPO }}
+          ref: ${{ env.OGA_REF }}
+          path: source-oga
+          submodules: true
+          fetch-depth: 1
+          show-progress: false
 
       # -----------------------------------------------------------------------
       # Cache: ORT + LLVM prebuilt + flatbuffers + protobuf + gtest
@@ -119,8 +131,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install lit
-        run: pip install lit
+      - name: Install pip dependencies
+        run: pip install lit requests
 
       # Put cl.exe and ninja.exe (bundled with VS) into PATH
       - name: Setup MSVC environment
@@ -268,8 +280,6 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Configure
         shell: bash
-        env:
-          THEROCK_DIST: ${{ runner.workspace }}/therock-dist
         run: |
           cmake -S . -B ../build/$(basename "$PWD") \
             -G Ninja \
@@ -278,25 +288,23 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             "-DCMAKE_PREFIX_PATH=${{ runner.workspace }}/prebuilt-local" \
             "-DCMAKE_INSTALL_PREFIX=${{ runner.workspace }}/install" \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DBUILD_EP=ON \
             -DBUILD_HIP_TOOLS=ON \
-            "-DTHEROCK_DIST=$THEROCK_DIST" \
+            "-DTHEROCK_DIST=${{ runner.workspace }}/therock-dist" \
             -DHIP_ARCHITECTURES=gfx1151 \
             -Dmorphizen_ENABLE_UNIT_TEST=OFF \
             -DBUILD_MOCK_RUNTIME=OFF \
             -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
-            --fresh
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
 
       # -----------------------------------------------------------------------
-      # Build
+      # Build & Install
       # -----------------------------------------------------------------------
-      - name: Build
+      - name: Build & Install
         shell: bash
-        run: cmake --build ../build/$(basename "$PWD") --parallel $(nproc)
+        run: cmake --build ../build/$(basename "$PWD") --parallel $(nproc) --target install
 
       # -----------------------------------------------------------------------
       # Run LIT tests (FileCheck-based IR tests; no GPU required)
@@ -306,11 +314,49 @@ jobs:
         run: cmake --build ../build/$(basename "$PWD") --target check-hip-mlir-lit
 
       # -----------------------------------------------------------------------
-      # Install onnx-hipdnn-ep artifacts (MorphiZen EP DLL etc.)
+      # Build OGA (onnxruntime-genai) for model_benchmark.exe
+      # Cache only the two artifacts we need: model_benchmark.exe and
+      # onnxruntime-genai.dll, keyed on OGA commit + ORT version.
       # -----------------------------------------------------------------------
-      - name: Install onnx-hipdnn-ep
+      - name: Cache OGA artifacts
+        id: cache-oga
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ runner.workspace }}/oga-artifacts
+          key: oga-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
+
+      - name: Prepare ORT_HOME for OGA
+        if: steps.cache-oga.outputs.cache-hit != 'true'
         shell: bash
-        run: cmake --build ../build/$(basename "$PWD") --target install
+        run: |
+          ORT_HOME="${{ runner.workspace }}/oga-ort-home"
+          mkdir -p "$ORT_HOME/include" "$ORT_HOME/lib"
+          PREBUILT="${{ runner.workspace }}/prebuilt-local"
+          cp -r "$PREBUILT/include/onnxruntime/"* "$ORT_HOME/include/"
+          cp "$PREBUILT/lib/"onnxruntime*.lib "$ORT_HOME/lib/"
+          cp "$PREBUILT/bin/onnxruntime.dll" "$ORT_HOME/lib/"
+          cp "$PREBUILT/bin/onnxruntime_providers_shared.dll" "$ORT_HOME/lib/"
+          echo "ORT_HOME=$ORT_HOME" >> "$GITHUB_ENV"
+
+      - name: Build OGA
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          python "${{ github.workspace }}/source-oga/build.py" \
+            --config Release \
+            --cmake_generator Ninja \
+            --ort_home "$ORT_HOME" \
+            --skip_wheel --skip_tests --skip_examples \
+            --parallel \
+            --build_dir "${{ runner.workspace }}/build-oga" \
+            --cmake_extra_defines \
+              CMAKE_C_COMPILER_LAUNCHER=sccache \
+              CMAKE_CXX_COMPILER_LAUNCHER=sccache
+
+          mkdir -p "${{ runner.workspace }}/oga-artifacts"
+          OGA_OUT="${{ runner.workspace }}/build-oga/Release"
+          cp "$OGA_OUT/benchmark/c/model_benchmark.exe" "${{ runner.workspace }}/oga-artifacts/"
+          cp "$OGA_OUT/onnxruntime-genai.dll" "${{ runner.workspace }}/oga-artifacts/"
 
       # -----------------------------------------------------------------------
       # Stage GPU test package:
@@ -332,8 +378,9 @@ jobs:
           fi
           cp "$PERF_TEST" staging/bin/
 
-          # ORT DLL + DirectML.dll – from the install prefix
+          # ORT DLLs + DirectML.dll – from the install prefix
           cp "$PREBUILT/bin/onnxruntime.dll" staging/bin/
+          cp "$PREBUILT/bin/onnxruntime_providers_shared.dll" staging/bin/
           cp "$PREBUILT/bin/DirectML.dll" staging/bin/
 
           # MorphiZen EP DLL + other DLLs/EXEs from onnx-hipdnn-ep install
@@ -377,6 +424,12 @@ jobs:
             fi
           done
 
+          # ---------------------------------------------------------------
+          # OGA artifacts: model_benchmark.exe + onnxruntime-genai.dll
+          # ---------------------------------------------------------------
+          cp "${{ runner.workspace }}/oga-artifacts/model_benchmark.exe" staging/bin/
+          cp "${{ runner.workspace }}/oga-artifacts/onnxruntime-genai.dll" staging/bin/
+
           echo "=== Staged package contents ==="
           find staging/ -type f | sort
 
@@ -386,6 +439,7 @@ jobs:
           name: gpu-test-package
           path: staging/
           retention-days: ${{ github.ref == 'refs/heads/main' && 14 || 3 }}
+          compression-level: 1
 
   # ---------------------------------------------------------------------------
   # GPU test job: runs on the self-hosted machine with a real AMD GPU.
@@ -409,8 +463,10 @@ jobs:
         run: |
           taskkill /f /im hip-onnx-runner.exe >nul 2>&1 || ver >nul
           taskkill /f /im onnxruntime_perf_test.exe >nul 2>&1 || ver >nul
+          taskkill /f /im model_benchmark.exe >nul 2>&1 || ver >nul
           if exist gpu-test-package rd /s /q gpu-test-package
           if exist l2-results rd /s /q l2-results
+          if exist oga-results rd /s /q oga-results
 
       - name: Download GPU test package
         uses: actions/download-artifact@v4
@@ -421,7 +477,7 @@ jobs:
       # TheRock DLLs are required at runtime on the GPU machine.
       # Download is fast enough that caching is not needed on the self-hosted runner.
       - name: Download & extract TheRock
-        shell: powershell
+        shell: pwsh
         run: |
           $dist = "${{ runner.workspace }}\therock-dist"
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
@@ -475,6 +531,66 @@ jobs:
             if errorlevel 1 set FAILED=1
           )
           exit /b %FAILED%
+
+      # -----------------------------------------------------------------------
+      # OGA benchmark: run model_benchmark against pre-placed LLM models.
+      # Models are at ${{ runner.workspace }}/oga-models/<model>/
+      # with genai_config.json pre-configured for MorphiZenEP pipeline.
+      # Skipped gracefully when model directory does not exist.
+      # -----------------------------------------------------------------------
+      - name: Run OGA benchmark
+        if: always()
+        timeout-minutes: 30
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $env:THEROCK_DIST = "${{ runner.workspace }}\therock-dist"
+          $pkgBin = Join-Path $PWD "gpu-test-package\bin"
+          $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
+          $env:LIB = (Join-Path $PWD "gpu-test-package\lib") + ";${{ runner.workspace }}\therock-dist\lib"
+          $env:HIP_CUSTOM_KERNELS_DIR = Join-Path $PWD "gpu-test-package\lib"
+
+          $ogaModelRoot = "${{ runner.workspace }}\oga-models"
+          if (-not (Test-Path $ogaModelRoot)) {
+            Write-Host "[SKIP] OGA model directory not found: $ogaModelRoot"
+            exit 0
+          }
+
+          $benchmark = Join-Path $pkgBin "model_benchmark.exe"
+          if (-not (Test-Path $benchmark)) {
+            Write-Host "[SKIP] model_benchmark.exe not found"
+            exit 0
+          }
+
+          $epDll = Join-Path $pkgBin "onnxruntime_morphizen_ep.dll"
+          New-Item -ItemType Directory -Force -Path "oga-results" | Out-Null
+
+          $failed = 0
+          foreach ($modelDir in (Get-ChildItem $ogaModelRoot -Directory)) {
+            $pipelineConfig = Join-Path $modelDir.FullName "genai_config_128.json"
+            if (-not (Test-Path $pipelineConfig)) {
+              Write-Host "[SKIP] No genai_config_128.json in $($modelDir.Name)"
+              continue
+            }
+            Copy-Item $pipelineConfig (Join-Path $modelDir.FullName "genai_config.json") -Force
+            $promptFile = Join-Path $modelDir.FullName "prompt.txt"
+            $promptArgs = if (Test-Path $promptFile) {
+              @("--prompt_file", $promptFile)
+            } else {
+              @("-l", "128")
+            }
+            $outFile = "oga-results\$($modelDir.Name).txt"
+            Write-Host "=== OGA Benchmark: $($modelDir.Name) ==="
+            & $benchmark `
+              -i $modelDir.FullName `
+              -g 128 -r 5 -w 1 -b 1 -ml -1 `
+              @promptArgs `
+              --ep_library MorphiZenExecutionProvider $epDll `
+              -v 2>&1 | Tee-Object -FilePath $outFile
+            if ($LASTEXITCODE -ne 0) { $failed = 1 }
+          }
+          exit $failed
 
       # -----------------------------------------------------------------------
       # L2 accuracy test: compare MorphiZen EP vs CPU output for each model
@@ -640,8 +756,30 @@ jobs:
           $header = "## MorphiZen EP Performance Results`n`n" +
                     "| Model | QPS |`n" +
                     "|-------|----:|`n"
+
+          # --- OGA benchmark results ---
+          $ogaRows = ""
+          foreach ($f in (Get-ChildItem "oga-results/*.txt" -ErrorAction SilentlyContinue)) {
+            $model = $f.BaseName
+            $content = Get-Content $f.FullName -Raw
+            $ttftMatch = [regex]::Match($content, 'Prompt processing \(time to first token\):\s*\n\s*avg \(us\):\s+([\d.]+)')
+            $tpsMatch  = [regex]::Match($content, 'Token generation:\s*\n\s*avg \(us\):\s+([\d.]+)\s*\n\s*avg \(tokens/s\):\s+([\d.]+)')
+            $memMatch  = [regex]::Match($content, 'Peak working set size \(bytes\):\s+(\d+)')
+            $ttft = if ($ttftMatch.Success) { "{0:F1}" -f ([double]$ttftMatch.Groups[1].Value / 1000) } else { "-" }
+            $tps  = if ($tpsMatch.Success) { "{0:F1}" -f [double]$tpsMatch.Groups[2].Value } else { "-" }
+            $mem  = if ($memMatch.Success) { "{0:F2}" -f ([double]$memMatch.Groups[1].Value / 1GB) } else { "-" }
+            $ogaRows += "| $model | 1 | 5 | 128 | 128 | $ttft | $tps | $mem |`n"
+          }
+          $ogaSection = ""
+          if ($ogaRows) {
+            $ogaSection = "`n## OGA Benchmark Results`n`n" +
+                          "| Model | Warmup | Reps | Prompt Len | Gen Tokens | TTFT (ms) | TPS | Peak Mem (GB) |`n" +
+                          "|-------|----:|----:|----:|----:|----:|----:|----:|`n" +
+                          $ogaRows
+          }
+
           $footer = "`nRun: [${{ github.run_number }}]($runUrl) - Commit: ``$sha``"
-          $summary = $header + $tableRows + $footer
+          $summary = $header + $tableRows + $ogaSection + $footer
 
           # Always write to step summary and log
           Write-Host $summary
