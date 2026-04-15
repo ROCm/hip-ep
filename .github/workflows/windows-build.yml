@@ -53,7 +53,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           submodules: false
-          fetch-depth: 0
+          fetch-depth: 1
           show-progress: false
 
       - name: Checkout MorphiZen submodule
@@ -131,8 +131,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install lit
-        run: pip install lit
+      - name: Install pip dependencies
+        run: pip install lit requests
 
       # Put cl.exe and ninja.exe (bundled with VS) into PATH
       - name: Setup MSVC environment
@@ -304,11 +304,11 @@ jobs:
 
 
       # -----------------------------------------------------------------------
-      # Build
+      # Build & Install
       # -----------------------------------------------------------------------
-      - name: Build
+      - name: Build & Install
         shell: bash
-        run: cmake --build ../build/$(basename "$PWD") --parallel $(nproc)
+        run: cmake --build ../build/$(basename "$PWD") --parallel $(nproc) --target install
 
       # -----------------------------------------------------------------------
       # Run LIT tests (FileCheck-based IR tests; no GPU required)
@@ -316,13 +316,6 @@ jobs:
       - name: Run LIT tests
         shell: bash
         run: cmake --build ../build/$(basename "$PWD") --target check-hip-mlir-lit
-
-      # -----------------------------------------------------------------------
-      # Install onnx-hipdnn-ep artifacts (MorphiZen EP DLL etc.)
-      # -----------------------------------------------------------------------
-      - name: Install onnx-hipdnn-ep
-        shell: bash
-        run: cmake --build ../build/$(basename "$PWD") --target install
 
       # -----------------------------------------------------------------------
       # Build OGA (onnxruntime-genai) for model_benchmark.exe
@@ -340,18 +333,18 @@ jobs:
           echo "ORT_HOME=$ORT_HOME" >> "$GITHUB_ENV"
 
       - name: Build OGA
-        shell: cmd
+        shell: bash
         run: |
-          pip install requests
-          cd /d "${{ github.workspace }}\source-oga"
-          python build.py ^
-            --config Release ^
-            --cmake_generator Ninja ^
-            --ort_home "%ORT_HOME%" ^
-            --skip_wheel --skip_tests --skip_examples ^
-            --parallel ^
-            --build_dir "${{ runner.workspace }}\build-oga" ^
-            --cmake_extra_defines CMAKE_C_COMPILER_LAUNCHER=sccache CMAKE_CXX_COMPILER_LAUNCHER=sccache
+          python "${{ github.workspace }}/source-oga/build.py" \
+            --config Release \
+            --cmake_generator Ninja \
+            --ort_home "$ORT_HOME" \
+            --skip_wheel --skip_tests --skip_examples \
+            --parallel \
+            --build_dir "${{ runner.workspace }}/build-oga" \
+            --cmake_extra_defines \
+              CMAKE_C_COMPILER_LAUNCHER=sccache \
+              CMAKE_CXX_COMPILER_LAUNCHER=sccache
 
       # -----------------------------------------------------------------------
       # Stage GPU test package:
@@ -563,23 +556,25 @@ jobs:
 
           $failed = 0
           foreach ($modelDir in (Get-ChildItem $ogaModelRoot -Directory)) {
-            $config = Join-Path $modelDir.FullName "genai_config.json"
-            if (-not (Test-Path $config)) {
-              Write-Host "[SKIP] No genai_config.json in $($modelDir.Name)"
+            $pipelineConfig = Join-Path $modelDir.FullName "genai_config_128.json"
+            if (-not (Test-Path $pipelineConfig)) {
+              Write-Host "[SKIP] No genai_config_128.json in $($modelDir.Name)"
               continue
             }
+            Copy-Item $pipelineConfig (Join-Path $modelDir.FullName "genai_config.json") -Force
             $promptFile = Join-Path $modelDir.FullName "prompt.txt"
-            if (-not (Test-Path $promptFile)) {
-              Write-Host "[SKIP] No prompt.txt in $($modelDir.Name)"
-              continue
+            $promptArgs = if (Test-Path $promptFile) {
+              @("--prompt_file", $promptFile)
+            } else {
+              @("-l", "128")
             }
             $outFile = "oga-results\$($modelDir.Name).txt"
             Write-Host "=== OGA Benchmark: $($modelDir.Name) ==="
             & $benchmark `
               -i $modelDir.FullName `
               -g 128 -r 5 -w 1 -b 1 -ml -1 `
-              --prompt_file $promptFile `
-              --ep_library MorphiZenEP $epDll `
+              @promptArgs `
+              --ep_library MorphiZenExecutionProvider $epDll `
               -v 2>&1 | Tee-Object -FilePath $outFile
             if ($LASTEXITCODE -ne 0) { $failed = 1 }
           }
