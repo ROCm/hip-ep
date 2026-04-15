@@ -31,8 +31,10 @@ module {
 
     // CHECK: %{{.*}} = llvm.mlir.constant(128 : i64) : i64
     // CHECK: %{{.*}} = llvm.mlir.constant(0 : i64) : i64
+    // CHECK: %{{.*}} = llvm.mlir.constant(0.000000e+00 : f64) : f64
+    // CHECK: %{{.*}} = llvm.mlir.constant(1.000000e+00 : f64) : f64
     // CHECK: %{{.*}} = llvm.mlir.constant(-1.000000e+00 : f64) : f64
-    // CHECK: llvm.call @wrap_power({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64) -> i32
+    // CHECK: llvm.call @wrap_power({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64, f64, f64) -> i32
 
     return
   }
@@ -50,7 +52,7 @@ module {
     // CHECK: llvm.mlir.constant(128 : i64)
     // CHECK: llvm.mlir.constant(512 : i64)
     // CHECK: llvm.mlir.constant(1 : i64)
-    // CHECK: llvm.call @wrap_power({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64) -> i32
+    // CHECK: llvm.call @wrap_power({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64, f64, f64) -> i32
 
     return
   }
@@ -66,7 +68,7 @@ module {
                          outs(%output : memref<2x3x4xbf16, 1>)
 
     // CHECK: llvm.mlir.constant(2 : i64)
-    // CHECK: llvm.call @wrap_power({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64) -> i32
+    // CHECK: llvm.call @wrap_power({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64, f64, f64) -> i32
 
     return
   }
@@ -87,7 +89,7 @@ module {
     // CHECK: llvm.extractvalue {{.*}}[3, 1]
     // CHECK: llvm.mul
     // CHECK: llvm.mlir.constant(0 : i64)
-    // CHECK: llvm.call @wrap_power({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64) -> i32
+    // CHECK: llvm.call @wrap_power({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64, f64, f64) -> i32
 
     return
   }

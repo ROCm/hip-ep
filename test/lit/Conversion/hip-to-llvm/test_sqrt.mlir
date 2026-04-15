@@ -3,7 +3,7 @@
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
 
-// CHECK: llvm.func @wrap_power(!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64) -> i32
+// CHECK: llvm.func @wrap_power(!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64, f64, f64) -> i32
 
 module {
   // Test 1: Static 1D f32
@@ -18,7 +18,7 @@ module {
 
     // CHECK: %{{.*}} = llvm.mlir.constant(128 : i64) : i64
     // CHECK: %{{.*}} = llvm.mlir.constant(0 : i64) : i64
-    // CHECK: llvm.call @wrap_power({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64) -> i32
+    // CHECK: llvm.call @wrap_power({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64, f64, f64) -> i32
 
     return
   }
@@ -36,7 +36,7 @@ module {
     // CHECK: llvm.mlir.constant(128 : i64)
     // CHECK: llvm.mlir.constant(512 : i64)
     // CHECK: llvm.mlir.constant(1 : i64)
-    // CHECK: llvm.call @wrap_power({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64) -> i32
+    // CHECK: llvm.call @wrap_power({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64, f64, f64) -> i32
 
     return
   }
@@ -54,7 +54,7 @@ module {
     // CHECK: llvm.extractvalue %{{.*}}[3, 0]
     // CHECK: llvm.extractvalue %{{.*}}[3, 1]
     // CHECK: llvm.mlir.constant(0 : i64)
-    // CHECK: llvm.call @wrap_power({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64) -> i32
+    // CHECK: llvm.call @wrap_power({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f64, f64, f64) -> i32
 
     return
   }

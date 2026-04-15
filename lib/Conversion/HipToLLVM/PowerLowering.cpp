@@ -12,20 +12,23 @@ namespace {
 // Generic template for unary power operations lowering
 // Handles: hip.reciprocal, hip.sqrt (and future: hip.square, hip.cube, etc.)
 //
-// All power ops lower to unified: wrap_power(state, input, output, num_elements, data_type, gamma)
-// Runtime uses miopenActivationPOWER with formula: y = x^gamma
-//   - Reciprocal: gamma=-1.0  → x^(-1) = 1/x
-//   - Sqrt:       gamma=0.5   → x^(0.5) = √x
-//   - Square:     gamma=2.0   → x^2
-//   - Cube:       gamma=3.0   → x^3
+// All power ops lower to: wrap_power(state, input, output, num_elements,
+// data_type, alpha, beta, gamma) Runtime uses miopenActivationPOWER with
+// formula: y = (alpha + beta * x)^gamma Common operations:
+//   - Reciprocal: alpha=0, beta=1, gamma=-1.0  → (0 + 1*x)^(-1) = 1/x
+//   - Sqrt:       alpha=0, beta=1, gamma=0.5   → (0 + 1*x)^(0.5) = √x
+//   - Square:     alpha=0, beta=1, gamma=2.0   → (0 + 1*x)^2 = x^2
+//   - Cube:       alpha=0, beta=1, gamma=3.0   → (0 + 1*x)^3 = x^3
 template <typename OpTy>
 struct PowerOpLowering : public ConvertOpToLLVMPattern<OpTy> {
   using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
-  double gamma;
+  double alpha, beta, gamma;
   const char *opName;
 
-  PowerOpLowering(const LLVMTypeConverter &converter, double g, const char *op)
-      : ConvertOpToLLVMPattern<OpTy>(converter), gamma(g), opName(op) {}
+  PowerOpLowering(const LLVMTypeConverter &converter, double a, double b,
+                  double g, const char *op)
+      : ConvertOpToLLVMPattern<OpTy>(converter), alpha(a), beta(b), gamma(g),
+        opName(op) {}
 
   LogicalResult
   matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
@@ -76,20 +79,23 @@ struct PowerOpLowering : public ConvertOpToLLVMPattern<OpTy> {
     }
 
     Value dataTypeVal = createI64Const(dataType);
+    Value alphaVal = createF64Const(alpha);
+    Value betaVal = createF64Const(beta);
     Value gammaVal = createF64Const(gamma);
 
     // int wrap_power(RuntimeState* state, void* input, void* output,
-    //                int64_t num_elements, int64_t data_type, double gamma)
-    SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType, i64Type,
-                                       i64Type, f64Type};
+    //                int64_t num_elements, int64_t data_type,
+    //                double alpha, double beta, double gamma)
+    SmallVector<Type, 8> paramTypes = {ptrType, ptrType, ptrType, i64Type,
+                                       i64Type, f64Type, f64Type, f64Type};
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapPower, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 6> args = {statePtr, inputPtr, outputPtr, numElements,
-                                  dataTypeVal, gammaVal};
+    SmallVector<Value, 8> args = {statePtr,    inputPtr, outputPtr, numElements,
+                                  dataTypeVal, alphaVal, betaVal,   gammaVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -101,8 +107,11 @@ struct PowerOpLowering : public ConvertOpToLLVMPattern<OpTy> {
 
 void mlir::hip::populatePowerLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
-  patterns.insert<PowerOpLowering<ReciprocalOp>>(converter, -1.0, "reciprocal");
-  patterns.insert<PowerOpLowering<SqrtOp>>(converter, 0.5, "sqrt");
+  // Reciprocal: (0 + 1*x)^(-1) = 1/x
+  patterns.insert<PowerOpLowering<ReciprocalOp>>(converter, 0.0, 1.0, -1.0,
+                                                 "reciprocal");
+  // Sqrt: (0 + 1*x)^(0.5) = √x
+  patterns.insert<PowerOpLowering<SqrtOp>>(converter, 0.0, 1.0, 0.5, "sqrt");
 }
 
 } // namespace hip
