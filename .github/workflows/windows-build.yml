@@ -444,28 +444,26 @@ jobs:
       # sets FAILED but continues so all models are tested.
       # Phase 1: Generate EP context models (non-embed) from each seq128 model.
       # ep.context_embed_mode=0 writes the compiled artifact as a sidecar
-      # file; ep.context_file_path controls the output _ctx.onnx path.
-      # The ctx model + sidecar land in gpu-test-package\ep_ctx\.
+      # file; the _ctx.onnx is generated next to the original model.
       - name: Generate EP context models
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Continue'
           $env:HIPDNN_EP_TIMING = "1"
           $env:THEROCK_DIST = "${{ runner.workspace }}\therock-dist"
           $pkgBin = Join-Path $PWD "gpu-test-package\bin"
           $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
           $env:LIB = (Join-Path $PWD "gpu-test-package\lib") + ";${{ runner.workspace }}\therock-dist\lib"
           $modelDir = "${{ runner.workspace }}\model"
-          $ctxDir = Join-Path $PWD "gpu-test-package\ep_ctx"
-          New-Item -ItemType Directory -Force -Path $ctxDir | Out-Null
           New-Item -ItemType Directory -Force -Path "gpu-test-package\results" | Out-Null
 
-          $models = @(Get-ChildItem $modelDir -Recurse -Filter "*seq128.onnx")
+          $models = @(Get-ChildItem $modelDir -Recurse -Filter "*seq128.onnx" |
+            Where-Object { $_.Name -notmatch "_ctx" })
           if ($models.Count -eq 0) { Write-Host "[ERROR] No seq128 models"; exit 1 }
 
           Push-Location gpu-test-package\bin
           foreach ($m in $models) {
-            $ctxPath = Join-Path $ctxDir "$($m.BaseName)_ctx.onnx"
-            Write-Host "=== Generating EP context: $($m.Name) -> $ctxPath ==="
+            Write-Host "=== Generating EP context: $($m.Name) ==="
             & .\onnxruntime_perf_test.exe `
               --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" `
               --plugin_eps "MorphiZenExecutionProvider" `
@@ -473,11 +471,19 @@ jobs:
               -C "session.disable_cpu_ep_fallback|1" `
               -C "ep.context_enable|1" `
               -C "ep.context_embed_mode|0" `
-              -C "ep.context_file_path|$ctxPath" `
-              -t 1 -c 1 -s -I `
+              -r 1 -c 1 -s -I `
               $m.FullName 2>&1 | Tee-Object -FilePath "..\results\$($m.Name)_gen.txt"
-            Write-Host "--- Generated files in $ctxDir ---"
-            Get-ChildItem $ctxDir | ForEach-Object { Write-Host "  $($_.Name)  ($($_.Length) bytes)" }
+            Write-Host "  exit code: $LASTEXITCODE"
+            $ctxFile = Join-Path $m.DirectoryName "$($m.BaseName)_ctx.onnx"
+            if (Test-Path $ctxFile) {
+              Write-Host "  EP context model: $ctxFile"
+              Get-ChildItem $m.DirectoryName -Filter "$($m.BaseName)_ctx*" |
+                ForEach-Object { Write-Host "    $($_.Name)  ($($_.Length) bytes)" }
+            } else {
+              Write-Host "  [WARN] Expected ctx file not found: $ctxFile"
+              Write-Host "  Files in model dir:"
+              Get-ChildItem $m.DirectoryName | ForEach-Object { Write-Host "    $($_.Name)" }
+            }
           }
           Pop-Location
 
@@ -487,22 +493,26 @@ jobs:
       - name: Run onnxruntime_perf_test (GPU)
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Continue'
           $env:HIPDNN_EP_TIMING = "1"
           $env:THEROCK_DIST = "${{ runner.workspace }}\therock-dist"
           $pkgBin = Join-Path $PWD "gpu-test-package\bin"
           $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
           $env:LIB = (Join-Path $PWD "gpu-test-package\lib") + ";${{ runner.workspace }}\therock-dist\lib"
-          $ctxDir = Join-Path $PWD "gpu-test-package\ep_ctx"
+          $modelDir = "${{ runner.workspace }}\model"
 
-          $ctxModels = @(Get-ChildItem $ctxDir -Filter "*_ctx.onnx" -ErrorAction SilentlyContinue)
+          $ctxModels = @(Get-ChildItem $modelDir -Recurse -Filter "*_ctx.onnx" -ErrorAction SilentlyContinue)
+          Write-Host "Found $($ctxModels.Count) EP context model(s)"
           if ($ctxModels.Count -eq 0) {
-            Write-Host "[ERROR] No EP context models found in $ctxDir"
-            Get-ChildItem $ctxDir -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.Name)" }
+            Write-Host "[ERROR] No EP context models found. Listing model dir:"
+            Get-ChildItem $modelDir -Recurse -Filter "*.onnx" |
+              ForEach-Object { Write-Host "  $($_.FullName)" }
             exit 1
           }
 
           $failed = 0
           Push-Location gpu-test-package\bin
+          New-Item -ItemType Directory -Force -Path "..\results" | Out-Null
           foreach ($m in $ctxModels) {
             $resultName = $m.Name -replace '_ctx\.onnx$', '.onnx'
             Write-Host "=== Testing EP context: $($m.Name) ==="
