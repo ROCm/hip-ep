@@ -73,6 +73,13 @@ inline constexpr int64_t kOffsetIdx = 2;
 inline constexpr int64_t kSizesIdx = 3;
 inline constexpr int64_t kStridesIdx = 4;
 
+// Activation mode constants.
+// Values must match HIPDNN_EP_ACTIVATION_* in lib/Runtime/hipdnn_ep_runtime.h.
+inline constexpr int64_t kActivationSigmoid = 0;
+inline constexpr int64_t kActivationRelu = 1;
+inline constexpr int64_t kActivationTanh = 2;
+inline constexpr int64_t kActivationSoftplus = 3;
+
 // Maps MLIR element type to runtime data type enum (HIPDNN_EP_DATATYPE_*).
 // Values must match the #defines in hipdnn_ep_runtime.h.
 // Returns -1 for unsupported types.
