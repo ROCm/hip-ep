@@ -466,6 +466,13 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
 int wrap_reciprocal(RuntimeState *state, void *input, void *output,
                     int64_t num_elements, int64_t data_type);
 
+// Sqrt operation wrapper
+// Computes output = sqrt(input) element-wise
+// Negative inputs return NaN per ONNX Sqrt specification
+// data_type is HIPDNN_EP_DATATYPE_* enum value (FLOAT=0, HALF=1, BFLOAT16=2)
+int wrap_sqrt(RuntimeState *state, void *input, void *output,
+              int64_t num_elements, int64_t data_type);
+
 // Gather operation wrapper
 int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis, int64_t data_num_elements,

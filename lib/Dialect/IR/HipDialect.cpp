@@ -567,6 +567,18 @@ void ReciprocalOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// SqrtOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SqrtOp::getDpsInitsMutable() { return getYMutable(); }
+
+void SqrtOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // SubOp: ins(lhs, rhs), outs(output)
 //===----------------------------------------------------------------------===//
 

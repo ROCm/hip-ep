@@ -35,6 +35,7 @@ hip_add_library(hip_custom_kernels STATIC
     hip/cast_kernel.hip
     hip/gather_kernel.hip
     hip/reciprocal_kernel.hip
+    hip/sqrt_kernel.hip
     hip/reduce_sum_kernel.hip
     hip/matmul_nbits_kernel.hip
     hip/qmoe_kernel.hip

@@ -792,6 +792,36 @@ def Hip_ReciprocalOp : Hip_DpsOp<"reciprocal"> {
   }];
 }
 
+def Hip_SqrtOp : Hip_DpsOp<"sqrt"> {
+  let summary = "Element-wise square root: y = sqrt(x)";
+  let description = [{
+    Computes the square root of each element.
+    Formula: Y = sqrt(X) = X^0.5
+
+    Negative inputs return NaN (per ONNX Sqrt specification).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.sqrt(%ctx) ins(%x : memref<1x128x512xf32, 1>)
+                   outs(%y : memref<1x128x512xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_SubOp : Hip_DpsOp<"sub"> {
   let summary = "Elementwise subtraction";
   let description = [{
