@@ -15,6 +15,9 @@ namespace {
 // Generic lowering for single-input/single-output MIOpen activation functions
 // that call wrap_miopenActivationForward with an activation_mode parameter.
 //
+// Supports data type:
+//   float32, float16, bfloat16
+//
 // Template parameters:
 //   OpType: The HIP op type (e.g., SigmoidOp, SoftplusOp)
 //   activationMode: The HIPDNN_EP_ACTIVATION_* constant
@@ -60,10 +63,19 @@ lowerMiopenActivation(OpType op, typename OpType::Adaptor adaptor,
   }
 
   // Get data type enum (f32=0, f16=1, bf16=2)
-  int64_t dataType = getHipdnnDataType(outputType.getElementType());
-  if (dataType < 0)
-    return rewriter.notifyMatchFailure(
-        op, "unsupported element type for MIOpen activation");
+  // MIOpen activations only support floating-point types
+  Type elemType = outputType.getElementType();
+  int64_t dataType = getHipdnnDataType(elemType);
+
+  // Validate: only f32, f16, bf16 are supported (no integer types)
+  if (dataType < 0 || dataType > 2) {
+    std::string errorMsg;
+    llvm::raw_string_ostream os(errorMsg);
+    os << "unsupported element type '" << elemType
+       << "' for MIOpen activation (mode=" << activationMode
+       << "). Only f32, f16, and bf16 are supported";
+    return rewriter.notifyMatchFailure(op, os.str());
+  }
 
   Value dataTypeVal = createI64Const(dataType);
   Value activationModeVal = createI64Const(activationMode);
