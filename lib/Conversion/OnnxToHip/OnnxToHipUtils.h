@@ -139,6 +139,8 @@ void populateGatherConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 void populateReshapeConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
+void populateCausalConvWithStateConversionPatterns(RewritePatternSet &patterns,
+                                                   MLIRContext *ctx);
 
 } // namespace hip
 } // namespace mlir
