@@ -8,6 +8,7 @@ add_library(OnnxToHip STATIC
   MatMulConversion.cpp
   TransposeConversion.cpp
   ElementwiseConversion.cpp
+  PowerConversion.cpp
   ActivationConversion.cpp
   CastConversion.cpp
   ReduceSumConversion.cpp
