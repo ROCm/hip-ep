@@ -93,20 +93,21 @@ lowerMiopenActivation(OpType op, typename OpType::Adaptor adaptor,
 
 // hip.sigmoid(ctx, x, y)
 //   -> wrap_miopenActivationForward(state, x, y, num_elements,
-//                                    data_type, activation_mode=0)
+//                                    data_type, activation_mode=SIGMOID)
 struct SigmoidOpLowering : public ConvertOpToLLVMPattern<SigmoidOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
   matchAndRewrite(SigmoidOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    return lowerMiopenActivation<SigmoidOp, 0>(op, adaptor, rewriter);
+    return lowerMiopenActivation<SigmoidOp, kActivationSigmoid>(op, adaptor,
+                                                                rewriter);
   }
 };
 
 // hip.softplus(ctx, x, y)
 //   -> wrap_miopenActivationForward(state, x, y, num_elements,
-//                                    data_type, activation_mode=3)
+//                                    data_type, activation_mode=SOFTPLUS)
 // Supports both static and dynamic shapes (computes num_elements at runtime).
 struct SoftplusOpLowering : public ConvertOpToLLVMPattern<SoftplusOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -114,7 +115,8 @@ struct SoftplusOpLowering : public ConvertOpToLLVMPattern<SoftplusOp> {
   LogicalResult
   matchAndRewrite(SoftplusOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    return lowerMiopenActivation<SoftplusOp, 3>(op, adaptor, rewriter);
+    return lowerMiopenActivation<SoftplusOp, kActivationSoftplus>(op, adaptor,
+                                                                  rewriter);
   }
 };
 
