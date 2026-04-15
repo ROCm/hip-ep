@@ -442,39 +442,104 @@ jobs:
       #                (MSVC release CRT + hip_custom_kernels); no VS required.
       # Output is tee'd to results/ for QPS extraction. Non-zero exit code
       # sets FAILED but continues so all models are tested.
-      - name: Run onnxruntime_perf_test (GPU)
-        shell: cmd
+      # Phase 1: Generate EP context models (non-embed).
+      # Run a single inference with ep.context_enable=1 to produce _ctx.onnx.
+      # Then search the entire workspace for generated _ctx.onnx files and
+      # collect them into a known directory.
+      - name: Generate EP context models
+        shell: pwsh
         run: |
-          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
-          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
-          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
-          set MODEL_DIR=${{ runner.workspace }}\model
-          if not exist "%MODEL_DIR%" (
-            echo [ERROR] MODEL_DIR not found: %MODEL_DIR%
-            exit /b 1
-          )
-          set FOUND=0
-          for /r "%MODEL_DIR%" %%M in (*seq128.onnx) do set FOUND=1
-          if "%FOUND%"=="0" (
-            echo [ERROR] No *seq128.onnx models found in %MODEL_DIR%
-            exit /b 1
-          )
-          set FAILED=0
-          cd gpu-test-package\bin
-          mkdir ..\results 2>nul
-          for /r "%MODEL_DIR%" %%M in (*seq128.onnx) do (
-            echo === Testing %%~nxM ===
-            onnxruntime_perf_test.exe ^
-              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
-              --plugin_eps "MorphiZenExecutionProvider" ^
-              --plugin_ep_options "config_file|..\morphizen_config.json" ^
-              -C "session.disable_cpu_ep_fallback|1" ^
-              -t 30 -c 1 -s -I ^
-              "%%M" > "..\results\%%~nxM.txt" 2>&1
-            type "..\results\%%~nxM.txt"
-            if errorlevel 1 set FAILED=1
-          )
-          exit /b %FAILED%
+          $ErrorActionPreference = 'Continue'
+          $env:HIPDNN_EP_TIMING = "1"
+          $env:THEROCK_DIST = "${{ runner.workspace }}\therock-dist"
+          $pkgBin = Join-Path $PWD "gpu-test-package\bin"
+          $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
+          $env:LIB = (Join-Path $PWD "gpu-test-package\lib") + ";${{ runner.workspace }}\therock-dist\lib"
+          $modelDir = "${{ runner.workspace }}\model"
+          $ctxDir = Join-Path $PWD "ep_ctx_models"
+          New-Item -ItemType Directory -Force -Path $ctxDir | Out-Null
+          New-Item -ItemType Directory -Force -Path "gpu-test-package\results" | Out-Null
+
+          $models = @(Get-ChildItem $modelDir -Recurse -Filter "*seq128.onnx" |
+            Where-Object { $_.Name -notmatch "_ctx" })
+          if ($models.Count -eq 0) { Write-Host "[ERROR] No seq128 models"; exit 1 }
+
+          Push-Location gpu-test-package\bin
+          foreach ($m in $models) {
+            Write-Host "=== Generating EP context: $($m.Name) ==="
+            & .\onnxruntime_perf_test.exe `
+              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" `
+              --plugin_eps "MorphiZenExecutionProvider" `
+              --plugin_ep_options "config_file|..\morphizen_config.json" `
+              -C "session.disable_cpu_ep_fallback|1" `
+              -C "ep.context_enable|1" `
+              -C "ep.context_embed_mode|0" `
+              -r 1 -c 1 -s -I `
+              $m.FullName 2>&1 | Tee-Object -FilePath "..\results\$($m.Name)_gen.txt"
+            Write-Host "  exit code: $LASTEXITCODE"
+          }
+          Pop-Location
+
+          # Search everywhere for generated _ctx.onnx files
+          Write-Host "--- Searching for _ctx.onnx files ---"
+          $searchPaths = @("${{ runner.workspace }}", "$PWD")
+          foreach ($sp in $searchPaths) {
+            Get-ChildItem $sp -Recurse -Filter "*_ctx.onnx" -ErrorAction SilentlyContinue |
+              ForEach-Object {
+                Write-Host "  Found: $($_.FullName) ($($_.Length) bytes)"
+                Copy-Item $_.FullName $ctxDir -Force
+                # Copy sidecar files (same basename prefix)
+                $sidecar = Join-Path $_.DirectoryName "$($_.BaseName)_*"
+                Get-ChildItem $sidecar -ErrorAction SilentlyContinue |
+                  ForEach-Object { Copy-Item $_.FullName $ctxDir -Force; Write-Host "  Sidecar: $($_.Name)" }
+                # Also copy any .bin file that shares the cache key prefix
+                Get-ChildItem $_.DirectoryName -Filter "*.bin" -ErrorAction SilentlyContinue |
+                  ForEach-Object { Copy-Item $_.FullName $ctxDir -Force; Write-Host "  Bin: $($_.Name)" }
+              }
+          }
+          $collected = @(Get-ChildItem $ctxDir -Filter "*_ctx.onnx" -ErrorAction SilentlyContinue)
+          Write-Host "Collected $($collected.Count) EP context model(s) in $ctxDir"
+          Get-ChildItem $ctxDir | ForEach-Object { Write-Host "  $($_.Name)  ($($_.Length) bytes)" }
+
+      # Phase 2: Run perf on EP context models (second-run session creation).
+      - name: Run onnxruntime_perf_test (GPU)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $env:HIPDNN_EP_TIMING = "1"
+          $env:THEROCK_DIST = "${{ runner.workspace }}\therock-dist"
+          $pkgBin = Join-Path $PWD "gpu-test-package\bin"
+          $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
+          $env:LIB = (Join-Path $PWD "gpu-test-package\lib") + ";${{ runner.workspace }}\therock-dist\lib"
+          $ctxDir = Join-Path $PWD "ep_ctx_models"
+
+          $ctxModels = @(Get-ChildItem $ctxDir -Filter "*_ctx.onnx" -ErrorAction SilentlyContinue)
+          if ($ctxModels.Count -eq 0) {
+            Write-Host "[WARN] No EP context models found, falling back to first-run test"
+            $modelDir = "${{ runner.workspace }}\model"
+            $ctxModels = @(Get-ChildItem $modelDir -Recurse -Filter "*seq128.onnx" |
+              Where-Object { $_.Name -notmatch "_ctx" })
+          }
+          Write-Host "Testing $($ctxModels.Count) model(s)"
+
+          $failed = 0
+          Push-Location gpu-test-package\bin
+          New-Item -ItemType Directory -Force -Path "..\results" | Out-Null
+          foreach ($m in $ctxModels) {
+            $resultName = ($m.Name -replace '_ctx\.onnx$', '.onnx')
+            if ($resultName -eq $m.Name) { $resultName = $m.Name }
+            Write-Host "=== Testing: $($m.Name) ==="
+            & .\onnxruntime_perf_test.exe `
+              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" `
+              --plugin_eps "MorphiZenExecutionProvider" `
+              --plugin_ep_options "config_file|..\morphizen_config.json" `
+              -C "session.disable_cpu_ep_fallback|1" `
+              -t 30 -c 1 -s -I `
+              $m.FullName 2>&1 | Tee-Object -FilePath "..\results\$resultName.txt"
+            if ($LASTEXITCODE -ne 0) { $failed = 1 }
+          }
+          Pop-Location
+          exit $failed
 
       # -----------------------------------------------------------------------
       # L2 accuracy test: compare MorphiZen EP vs CPU output for each model
