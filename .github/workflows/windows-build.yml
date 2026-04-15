@@ -520,19 +520,20 @@ jobs:
           New-Item -ItemType Directory -Force -Path $resultsDir | Out-Null
           $perfTest = Join-Path $pkgBin "onnxruntime_perf_test.exe"
           $configFile = Join-Path $pkgBin "..\morphizen_config.json"
+          $epDll = Join-Path $pkgBin "onnxruntime_morphizen_ep.dll"
           foreach ($m in $ctxModels) {
             $resultName = ($m.Name -replace '_ctx\.onnx$', '.onnx')
             if ($resultName -eq $m.Name) { $resultName = $m.Name }
             Write-Host "=== Testing: $($m.Name) (from $($m.DirectoryName)) ==="
-            # Run from the model's directory so the sidecar .bin is found
             Push-Location $m.DirectoryName
             & $perfTest `
-              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" `
+              --plugin_ep_libs "MorphiZenExecutionProvider|$epDll" `
               --plugin_eps "MorphiZenExecutionProvider" `
               --plugin_ep_options "config_file|$configFile" `
               -C "session.disable_cpu_ep_fallback|1" `
               -t 30 -c 1 -s -I `
               $m.FullName 2>&1 | Tee-Object -FilePath (Join-Path $resultsDir "$resultName.txt")
+            Write-Host "  perf_test exit: $LASTEXITCODE"
             if ($LASTEXITCODE -ne 0) { $failed = 1 }
             Pop-Location
           }
