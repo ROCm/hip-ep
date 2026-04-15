@@ -68,23 +68,23 @@ module {
     return
   }
 
-  // Test 3: f32 element type
-  func.func @causal_conv_f32(
+  // Test 3: Different shape, activation=none
+  func.func @causal_conv_no_activation(
       %ctx: !hip.context,
-      %input: memref<2x128x64xf32, 1>,
-      %weight: memref<128x1x3xf32, 1>,
-      %bias: memref<128xf32, 1>,
-      %past_state: memref<2x128x2xf32, 1>,
-      %output: memref<2x128x64xf32, 1>,
-      %present_state: memref<2x128x2xf32, 1>) {
-    // CHECK-LABEL: llvm.func @causal_conv_f32
+      %input: memref<2x128x64xf16, 1>,
+      %weight: memref<128x1x3xf16, 1>,
+      %bias: memref<128xf16, 1>,
+      %past_state: memref<2x128x2xf16, 1>,
+      %output: memref<2x128x64xf16, 1>,
+      %present_state: memref<2x128x2xf16, 1>) {
+    // CHECK-LABEL: llvm.func @causal_conv_no_activation
 
     hip.causal_conv_with_state(%ctx)
         ins(%input, %weight, %bias, %past_state :
-            memref<2x128x64xf32, 1>, memref<128x1x3xf32, 1>,
-            memref<128xf32, 1>, memref<2x128x2xf32, 1>)
+            memref<2x128x64xf16, 1>, memref<128x1x3xf16, 1>,
+            memref<128xf16, 1>, memref<2x128x2xf16, 1>)
         outs(%output, %present_state :
-             memref<2x128x64xf32, 1>, memref<2x128x2xf32, 1>)
+             memref<2x128x64xf16, 1>, memref<2x128x2xf16, 1>)
         {activation = "none", ndim = 1 : i64}
 
     // CHECK: llvm.call @wrap_causal_conv_with_state({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32
