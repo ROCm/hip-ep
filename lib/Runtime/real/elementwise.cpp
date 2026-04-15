@@ -279,3 +279,53 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
 
   return hip_elementwise_sub(stream, lhs, rhs, output, num_elements, hip_dtype);
 }
+
+//===----------------------------------------------------------------------===//
+// Element-wise Reciprocal via Custom HIP Kernel
+//===----------------------------------------------------------------------===//
+//
+// Computes output = 1.0 / input for floating-point types.
+// The caller passes data_type (HIPDNN_EP_DATATYPE_*); we map it to
+// hip_dtype_t for the custom kernel dispatcher.
+//===----------------------------------------------------------------------===//
+
+// Map HIPDNN_EP_DATATYPE_* → hip_dtype_t for reciprocal kernel
+static int hipdnn_to_hip_dtype_reciprocal(int64_t hipdnn_type) {
+  switch (hipdnn_type) {
+  case HIPDNN_EP_DATATYPE_FLOAT:
+    return HIP_DTYPE_FLOAT32;
+  case HIPDNN_EP_DATATYPE_HALF:
+    return HIP_DTYPE_FLOAT16;
+  case HIPDNN_EP_DATATYPE_BFLOAT16:
+    return HIP_DTYPE_BFLOAT16;
+  default:
+    return -1;
+  }
+}
+
+int wrap_reciprocal(RuntimeState *state, void *input, void *output,
+                    int64_t num_elements, int64_t data_type) {
+  if (!state || !input || !output) {
+    fprintf(stderr, "wrap_reciprocal: null argument\n");
+    return -1;
+  }
+
+  void *stream = hipdnn_ep_state_get_stream(state);
+
+  int hip_dtype = hipdnn_to_hip_dtype_reciprocal(data_type);
+  if (hip_dtype < 0) {
+    fprintf(stderr,
+            "[REAL] wrap_reciprocal: unsupported data_type=%lld, "
+            "only f32, f16, bf16 are supported\n",
+            (long long)data_type);
+    return -1;
+  }
+
+  const char *type_name = hipdnn_ep_datatype_name(data_type);
+  RUNTIME_DEBUG_LOG(
+      "[REAL] wrap_reciprocal: num_elements=%lld, data_type=%s(%lld), "
+      "hip_dtype=%d -> calling hip_reciprocal\n",
+      (long long)num_elements, type_name, (long long)data_type, hip_dtype);
+
+  return hip_reciprocal(stream, input, output, num_elements, hip_dtype);
+}
