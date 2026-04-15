@@ -442,10 +442,9 @@ jobs:
       #                (MSVC release CRT + hip_custom_kernels); no VS required.
       # Output is tee'd to results/ for QPS extraction. Non-zero exit code
       # sets FAILED but continues so all models are tested.
-      # Phase 1: Generate EP context models (non-embed).
-      # Run a single inference with ep.context_enable=1 to produce _ctx.onnx.
-      # Then search the entire workspace for generated _ctx.onnx files and
-      # collect them into a known directory.
+      # Phase 1: Generate EP context models (non-embed) using hip-onnx-runner.
+      # hip-onnx-runner supports -C session configs and wires them before
+      # session creation, unlike onnxruntime_perf_test with plugin EPs.
       - name: Generate EP context models
         shell: pwsh
         run: |
@@ -456,8 +455,6 @@ jobs:
           $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
           $env:LIB = (Join-Path $PWD "gpu-test-package\lib") + ";${{ runner.workspace }}\therock-dist\lib"
           $modelDir = "${{ runner.workspace }}\model"
-          $ctxDir = Join-Path $PWD "ep_ctx_models"
-          New-Item -ItemType Directory -Force -Path $ctxDir | Out-Null
           New-Item -ItemType Directory -Force -Path "gpu-test-package\results" | Out-Null
 
           $models = @(Get-ChildItem $modelDir -Recurse -Filter "*seq128.onnx" |
@@ -467,39 +464,21 @@ jobs:
           Push-Location gpu-test-package\bin
           foreach ($m in $models) {
             Write-Host "=== Generating EP context: $($m.Name) ==="
-            & .\onnxruntime_perf_test.exe `
-              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" `
-              --plugin_eps "MorphiZenExecutionProvider" `
-              --plugin_ep_options "config_file|..\morphizen_config.json" `
-              -C "session.disable_cpu_ep_fallback|1" `
+            & .\hip-onnx-runner.exe `
+              -m $m.FullName `
               -C "ep.context_enable|1" `
               -C "ep.context_embed_mode|0" `
-              -r 1 -c 1 -s -I `
-              $m.FullName 2>&1 | Tee-Object -FilePath "..\results\$($m.Name)_gen.txt"
+              2>&1 | Tee-Object -FilePath "..\results\$($m.Name)_gen.txt"
             Write-Host "  exit code: $LASTEXITCODE"
           }
           Pop-Location
 
-          # Search everywhere for generated _ctx.onnx files
+          # Find generated _ctx.onnx files
           Write-Host "--- Searching for _ctx.onnx files ---"
-          $searchPaths = @("${{ runner.workspace }}", "$PWD")
-          foreach ($sp in $searchPaths) {
-            Get-ChildItem $sp -Recurse -Filter "*_ctx.onnx" -ErrorAction SilentlyContinue |
-              ForEach-Object {
-                Write-Host "  Found: $($_.FullName) ($($_.Length) bytes)"
-                Copy-Item $_.FullName $ctxDir -Force
-                # Copy sidecar files (same basename prefix)
-                $sidecar = Join-Path $_.DirectoryName "$($_.BaseName)_*"
-                Get-ChildItem $sidecar -ErrorAction SilentlyContinue |
-                  ForEach-Object { Copy-Item $_.FullName $ctxDir -Force; Write-Host "  Sidecar: $($_.Name)" }
-                # Also copy any .bin file that shares the cache key prefix
-                Get-ChildItem $_.DirectoryName -Filter "*.bin" -ErrorAction SilentlyContinue |
-                  ForEach-Object { Copy-Item $_.FullName $ctxDir -Force; Write-Host "  Bin: $($_.Name)" }
-              }
-          }
-          $collected = @(Get-ChildItem $ctxDir -Filter "*_ctx.onnx" -ErrorAction SilentlyContinue)
-          Write-Host "Collected $($collected.Count) EP context model(s) in $ctxDir"
-          Get-ChildItem $ctxDir | ForEach-Object { Write-Host "  $($_.Name)  ($($_.Length) bytes)" }
+          Get-ChildItem "${{ runner.workspace }}" -Recurse -Filter "*_ctx.onnx" -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "  $($_.FullName)  ($($_.Length) bytes)" }
+          Get-ChildItem $PWD -Recurse -Filter "*_ctx.onnx" -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "  $($_.FullName)  ($($_.Length) bytes)" }
 
       # Phase 2: Run perf on EP context models (second-run session creation).
       - name: Run onnxruntime_perf_test (GPU)
@@ -511,12 +490,16 @@ jobs:
           $pkgBin = Join-Path $PWD "gpu-test-package\bin"
           $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
           $env:LIB = (Join-Path $PWD "gpu-test-package\lib") + ";${{ runner.workspace }}\therock-dist\lib"
-          $ctxDir = Join-Path $PWD "ep_ctx_models"
+          $modelDir = "${{ runner.workspace }}\model"
 
-          $ctxModels = @(Get-ChildItem $ctxDir -Filter "*_ctx.onnx" -ErrorAction SilentlyContinue)
+          # Search everywhere for _ctx.onnx
+          $ctxModels = @(
+            Get-ChildItem "${{ runner.workspace }}" -Recurse -Filter "*seq128_ctx.onnx" -ErrorAction SilentlyContinue
+            Get-ChildItem $PWD -Recurse -Filter "*seq128_ctx.onnx" -ErrorAction SilentlyContinue
+          ) | Sort-Object FullName -Unique
+
           if ($ctxModels.Count -eq 0) {
             Write-Host "[WARN] No EP context models found, falling back to first-run test"
-            $modelDir = "${{ runner.workspace }}\model"
             $ctxModels = @(Get-ChildItem $modelDir -Recurse -Filter "*seq128.onnx" |
               Where-Object { $_.Name -notmatch "_ctx" })
           }

@@ -730,6 +730,7 @@ int main(int argc, char *argv[]) {
                 " 99 = ORT_ENABLE_ALL,  "
                 " -1 = default, not call this function ",
                 "-1");
+  // -C is parsed manually below (MiniOptions doesn't support repeated flags)
 
   try {
     mo.parse(argc, argv);
@@ -742,6 +743,17 @@ int main(int argc, char *argv[]) {
   if (argc == 1) {
     mo.print_help(argv[0]);
     return 1;
+  }
+
+  // Collect -C key|value pairs before MiniOptions consumes argv
+  std::vector<std::pair<std::string, std::string>> session_configs;
+  for (int i = 1; i < argc; ++i) {
+    if ((std::string(argv[i]) == "-C" || std::string(argv[i]) == "--session-config") && i + 1 < argc) {
+      std::string kv = argv[++i];
+      auto sep = kv.find('|');
+      if (sep != std::string::npos)
+        session_configs.emplace_back(kv.substr(0, sep), kv.substr(sep + 1));
+    }
   }
 
   std::vector<std::string> l2norm_arg = mo.get_vector<std::string>("l2norm");
@@ -816,6 +828,11 @@ int main(int argc, char *argv[]) {
 
     session_opts.AppendExecutionProvider_V2(env, devices, {});
     session_opts.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
+  }
+
+  for (auto &[key, value] : session_configs) {
+    std::cout << "Session config: " << key << " = " << value << "\n";
+    session_opts.AddConfigEntry(key.c_str(), value.c_str());
   }
 
   // Create session
