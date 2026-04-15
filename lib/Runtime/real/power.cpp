@@ -138,45 +138,48 @@ cache_done:
 }
 
 //===----------------------------------------------------------------------===//
-// Element-wise Reciprocal via MIOpen Activation Power
+// Generic Power Operation via MIOpen Activation Power
 //===----------------------------------------------------------------------===//
 //
-// Computes output = 1.0 / input for floating-point types using
-// miopenActivationPOWER with gamma=-1.0.
-// Formula: (0 + 1*x)^(-1) = x^(-1) = 1/x
+// Unified implementation for all power operations: y = x^gamma
+// Uses miopenActivationPOWER with formula: (0 + 1*x)^gamma = x^gamma
 //
-// This implementation leverages MIOpen's hardware-optimized power activation
-// instead of custom HIP kernels, providing:
-// - Better cross-architecture performance (gfx908, gfx90a, gfx1100, gfx1151)
-// - Automatic use of hardware-specific instructions (v_rcp_f32, etc.)
-// - Production-tested stability from MIOpen library
+// Supported operations:
+// - Reciprocal: gamma=-1.0  → x^(-1) = 1/x
+// - Sqrt:       gamma=0.5   → x^(0.5) = √x
+// - Square:     gamma=2.0   → x^2
+// - Cube:       gamma=3.0   → x^3
+// - Arbitrary:  any gamma   → x^gamma
+//
+// This implementation leverages MIOpen's hardware-optimized power activation,
+// providing better cross-architecture performance and production stability.
 //===----------------------------------------------------------------------===//
 
-int wrap_reciprocal(RuntimeState *state, void *input, void *output,
-                    int64_t num_elements, int64_t data_type) {
+int wrap_power(RuntimeState *state, void *input, void *output,
+               int64_t num_elements, int64_t data_type, double gamma) {
   if (!state || !input || !output) {
-    fprintf(stderr, "wrap_reciprocal: null argument\n");
+    fprintf(stderr, "wrap_power: null argument\n");
     return -1;
   }
 
   const char *type_name = hipdnn_ep_datatype_name(data_type);
-  RUNTIME_DEBUG_LOG("[REAL] wrap_reciprocal: num_elements=%lld, "
-                    "data_type=%s(%lld) -> using miopenActivationPOWER\n",
-                    (long long)num_elements, type_name, (long long)data_type);
+  RUNTIME_DEBUG_LOG("[REAL] wrap_power: num_elements=%lld, "
+                    "data_type=%s(%lld), gamma=%.2f\n",
+                    (long long)num_elements, type_name, (long long)data_type,
+                    gamma);
 
   miopenHandle_t handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
   if (!handle) {
-    fprintf(stderr, "wrap_reciprocal: null MIOpen handle\n");
+    fprintf(stderr, "wrap_power: null MIOpen handle\n");
     return -1;
   }
 
-  // Reciprocal via miopenActivationPOWER: (0 + 1*x)^(-1) = 1/x
   PowerActivationCacheKey key{num_elements, data_type, miopenActivationPOWER,
-                              -1.0};  // gamma = -1 for reciprocal
+                              gamma};
   const PowerActivationCacheEntry *c = queryOrCreatePowerActivation(key);
   if (!c) {
-    fprintf(stderr, "wrap_reciprocal: descriptor cache creation failed\n");
+    fprintf(stderr, "wrap_power: descriptor cache creation failed\n");
     return -1;
   }
 
@@ -184,67 +187,24 @@ int wrap_reciprocal(RuntimeState *state, void *input, void *output,
   miopenStatus_t st = miopenActivationForward(
       handle, c->actDesc, &alpha, c->inDesc, input, &beta, c->outDesc, output);
   if (st != miopenStatusSuccess) {
-    fprintf(stderr,
-            "wrap_reciprocal: miopenActivationForward failed (%d)\n", st);
+    fprintf(stderr, "wrap_power: miopenActivationForward failed (%d)\n", st);
     return -1;
   }
 
-  RUNTIME_DEBUG_LOG("[REAL] wrap_reciprocal: completed successfully\n");
+  RUNTIME_DEBUG_LOG("[REAL] wrap_power: completed successfully\n");
   return 0;
 }
 
 //===----------------------------------------------------------------------===//
-// Element-wise Square Root via MIOpen Activation Power
+// Convenience wrappers for common power operations
 //===----------------------------------------------------------------------===//
-//
-// Computes output = sqrt(input) for floating-point types using
-// miopenActivationPOWER with gamma=0.5.
-// Formula: (0 + 1*x)^(0.5) = x^(0.5) = √x
-// Negative inputs return NaN per ONNX Sqrt specification.
-//
-// This implementation leverages MIOpen's hardware-optimized power activation
-// instead of custom HIP kernels, providing:
-// - Better cross-architecture performance (gfx908, gfx90a, gfx1100, gfx1151)
-// - Automatic use of hardware-specific instructions (v_sqrt_f32, etc.)
-// - Production-tested stability from MIOpen library
-//===----------------------------------------------------------------------===//
+
+int wrap_reciprocal(RuntimeState *state, void *input, void *output,
+                    int64_t num_elements, int64_t data_type) {
+  return wrap_power(state, input, output, num_elements, data_type, -1.0);
+}
 
 int wrap_sqrt(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type) {
-  if (!state || !input || !output) {
-    fprintf(stderr, "wrap_sqrt: null argument\n");
-    return -1;
-  }
-
-  const char *type_name = hipdnn_ep_datatype_name(data_type);
-  RUNTIME_DEBUG_LOG("[REAL] wrap_sqrt: num_elements=%lld, "
-                    "data_type=%s(%lld) -> using miopenActivationPOWER\n",
-                    (long long)num_elements, type_name, (long long)data_type);
-
-  miopenHandle_t handle =
-      static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
-  if (!handle) {
-    fprintf(stderr, "wrap_sqrt: null MIOpen handle\n");
-    return -1;
-  }
-
-  // Sqrt via miopenActivationPOWER: (0 + 1*x)^(0.5) = √x
-  PowerActivationCacheKey key{num_elements, data_type, miopenActivationPOWER,
-                              0.5};  // gamma = 0.5 for sqrt
-  const PowerActivationCacheEntry *c = queryOrCreatePowerActivation(key);
-  if (!c) {
-    fprintf(stderr, "wrap_sqrt: descriptor cache creation failed\n");
-    return -1;
-  }
-
-  float alpha = 1.0f, beta = 0.0f;
-  miopenStatus_t st = miopenActivationForward(
-      handle, c->actDesc, &alpha, c->inDesc, input, &beta, c->outDesc, output);
-  if (st != miopenStatusSuccess) {
-    fprintf(stderr, "wrap_sqrt: miopenActivationForward failed (%d)\n", st);
-    return -1;
-  }
-
-  RUNTIME_DEBUG_LOG("[REAL] wrap_sqrt: completed successfully\n");
-  return 0;
+  return wrap_power(state, input, output, num_elements, data_type, 0.5);
 }

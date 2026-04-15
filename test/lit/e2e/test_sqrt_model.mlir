@@ -1,6 +1,6 @@
 // RUN: hip-mlir-opt %s --hipdnn-pipeline | FileCheck %s
 
-// CHECK: llvm.func @wrap_sqrt
+// CHECK: llvm.func @wrap_power
 // CHECK-NOT: onnx.Sqrt
 
 module {
