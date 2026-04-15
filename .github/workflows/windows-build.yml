@@ -280,8 +280,6 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Configure
         shell: bash
-        env:
-          THEROCK_DIST: ${{ runner.workspace }}/therock-dist
         run: |
           cmake -S . -B ../build/$(basename "$PWD") \
             -G Ninja \
@@ -290,17 +288,15 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             "-DCMAKE_PREFIX_PATH=${{ runner.workspace }}/prebuilt-local" \
             "-DCMAKE_INSTALL_PREFIX=${{ runner.workspace }}/install" \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DBUILD_EP=ON \
             -DBUILD_HIP_TOOLS=ON \
-            "-DTHEROCK_DIST=$THEROCK_DIST" \
+            "-DTHEROCK_DIST=${{ runner.workspace }}/therock-dist" \
             -DHIP_ARCHITECTURES=gfx1151 \
             -Dmorphizen_ENABLE_UNIT_TEST=OFF \
             -DBUILD_MOCK_RUNTIME=OFF \
             -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
-            --fresh
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
 
       # -----------------------------------------------------------------------
@@ -319,8 +315,18 @@ jobs:
 
       # -----------------------------------------------------------------------
       # Build OGA (onnxruntime-genai) for model_benchmark.exe
+      # Cache only the two artifacts we need: model_benchmark.exe and
+      # onnxruntime-genai.dll, keyed on OGA commit + ORT version.
       # -----------------------------------------------------------------------
+      - name: Cache OGA artifacts
+        id: cache-oga
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ runner.workspace }}/oga-artifacts
+          key: oga-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
+
       - name: Prepare ORT_HOME for OGA
+        if: steps.cache-oga.outputs.cache-hit != 'true'
         shell: bash
         run: |
           ORT_HOME="${{ runner.workspace }}/oga-ort-home"
@@ -333,6 +339,7 @@ jobs:
           echo "ORT_HOME=$ORT_HOME" >> "$GITHUB_ENV"
 
       - name: Build OGA
+        if: steps.cache-oga.outputs.cache-hit != 'true'
         shell: bash
         run: |
           python "${{ github.workspace }}/source-oga/build.py" \
@@ -345,6 +352,11 @@ jobs:
             --cmake_extra_defines \
               CMAKE_C_COMPILER_LAUNCHER=sccache \
               CMAKE_CXX_COMPILER_LAUNCHER=sccache
+
+          mkdir -p "${{ runner.workspace }}/oga-artifacts"
+          OGA_OUT="${{ runner.workspace }}/build-oga/Release"
+          cp "$OGA_OUT/benchmark/c/model_benchmark.exe" "${{ runner.workspace }}/oga-artifacts/"
+          cp "$OGA_OUT/onnxruntime-genai.dll" "${{ runner.workspace }}/oga-artifacts/"
 
       # -----------------------------------------------------------------------
       # Stage GPU test package:
@@ -415,9 +427,8 @@ jobs:
           # ---------------------------------------------------------------
           # OGA artifacts: model_benchmark.exe + onnxruntime-genai.dll
           # ---------------------------------------------------------------
-          OGA_OUT="${{ runner.workspace }}/build-oga/Release"
-          cp "$OGA_OUT/benchmark/c/model_benchmark.exe" staging/bin/
-          cp "$OGA_OUT/onnxruntime-genai.dll" staging/bin/
+          cp "${{ runner.workspace }}/oga-artifacts/model_benchmark.exe" staging/bin/
+          cp "${{ runner.workspace }}/oga-artifacts/onnxruntime-genai.dll" staging/bin/
 
           echo "=== Staged package contents ==="
           find staging/ -type f | sort
@@ -428,6 +439,7 @@ jobs:
           name: gpu-test-package
           path: staging/
           retention-days: ${{ github.ref == 'refs/heads/main' && 14 || 3 }}
+          compression-level: 1
 
   # ---------------------------------------------------------------------------
   # GPU test job: runs on the self-hosted machine with a real AMD GPU.
@@ -465,7 +477,7 @@ jobs:
       # TheRock DLLs are required at runtime on the GPU machine.
       # Download is fast enough that caching is not needed on the self-hosted runner.
       - name: Download & extract TheRock
-        shell: powershell
+        shell: pwsh
         run: |
           $dist = "${{ runner.workspace }}\therock-dist"
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
@@ -745,7 +757,7 @@ jobs:
                     "| Model | QPS |`n" +
                     "|-------|----:|`n"
 
-          # --- OGA benchmark results (TTFT / TPS / Peak Mem) ---
+          # --- OGA benchmark results ---
           $ogaRows = ""
           foreach ($f in (Get-ChildItem "oga-results/*.txt" -ErrorAction SilentlyContinue)) {
             $model = $f.BaseName
@@ -755,14 +767,14 @@ jobs:
             $memMatch  = [regex]::Match($content, 'Peak working set size \(bytes\):\s+(\d+)')
             $ttft = if ($ttftMatch.Success) { "{0:F1}" -f ([double]$ttftMatch.Groups[1].Value / 1000) } else { "-" }
             $tps  = if ($tpsMatch.Success) { "{0:F1}" -f [double]$tpsMatch.Groups[2].Value } else { "-" }
-            $mem  = if ($memMatch.Success) { "{0:F0}" -f ([double]$memMatch.Groups[1].Value / 1MB) } else { "-" }
-            $ogaRows += "| $model | $ttft | $tps | $mem |`n"
+            $mem  = if ($memMatch.Success) { "{0:F2}" -f ([double]$memMatch.Groups[1].Value / 1GB) } else { "-" }
+            $ogaRows += "| $model | 1 | 5 | 128 | 128 | $ttft | $tps | $mem |`n"
           }
           $ogaSection = ""
           if ($ogaRows) {
             $ogaSection = "`n## OGA Benchmark Results`n`n" +
-                          "| Model | TTFT (ms) | TPS | Peak Mem (MB) |`n" +
-                          "|-------|----:|----:|----:|`n" +
+                          "| Model | Warmup | Reps | Prompt Len | Gen Tokens | TTFT (ms) | TPS | Peak Mem (GB) |`n" +
+                          "|-------|----:|----:|----:|----:|----:|----:|----:|`n" +
                           $ogaRows
           }
 
