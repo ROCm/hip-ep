@@ -71,53 +71,6 @@ int hip_elementwise_sub(
     int hip_dtype);
 
 /* =========================================================================
- * Element-wise Reciprocal
- * =========================================================================
- *
- * Computes output = 1.0 / input element-wise.
- *
- * Parameters:
- *   stream       - HIP stream (hipStream_t cast to void*)
- *   input        - input tensor pointer
- *   output       - output tensor pointer
- *   num_elements - total number of elements
- *   data_type    - data type (hip_dtype_t value cast to int)
- *
- * Supported types: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16, HIP_DTYPE_BFLOAT16
- * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
- */
-int hip_reciprocal(
-    void* stream,
-    const void* input,
-    void* output,
-    int64_t num_elements,
-    int data_type);
-
-/* =========================================================================
- * Element-wise Square Root
- * =========================================================================
- *
- * Computes output = sqrt(input) element-wise.
- * Negative inputs return NaN (per ONNX Sqrt specification).
- *
- * Parameters:
- *   stream       - HIP stream (hipStream_t cast to void*)
- *   input        - input tensor pointer
- *   output       - output tensor pointer
- *   num_elements - total number of elements
- *   data_type    - data type (hip_dtype_t value cast to int)
- *
- * Supported types: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16, HIP_DTYPE_BFLOAT16
- * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
- */
-int hip_sqrt(
-    void* stream,
-    const void* input,
-    void* output,
-    int64_t num_elements,
-    int data_type);
-
-/* =========================================================================
  * Rotary Position Embedding (RoPE)
  * =========================================================================
  *
