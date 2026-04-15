@@ -546,11 +546,11 @@ void SigmoidOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
-// SoftplusOp: ins(input), outs(output)
+// SoftplusOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange SoftplusOp::getDpsInitsMutable() {
-  return getOutputMutable();
+  return getYMutable();
 }
 
 void SoftplusOp::getEffects(
