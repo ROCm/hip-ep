@@ -554,6 +554,19 @@ void SoftplusOp::getEffects(
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
+//===----------------------------------------------------------------------===//
+// ReciprocalOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ReciprocalOp::getDpsInitsMutable() {
+  return getYMutable();
+}
+
+void ReciprocalOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
 
 //===----------------------------------------------------------------------===//
 // SubOp: ins(lhs, rhs), outs(output)
