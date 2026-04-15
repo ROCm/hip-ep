@@ -730,10 +730,26 @@ int main(int argc, char *argv[]) {
                 " 99 = ORT_ENABLE_ALL,  "
                 " -1 = default, not call this function ",
                 "-1");
-  // -C is parsed manually below (MiniOptions doesn't support repeated flags)
+  // Collect -C key|value pairs and build filtered argv for MiniOptions
+  // (MiniOptions rejects unknown flags, so strip -C before parsing).
+  std::vector<std::pair<std::string, std::string>> session_configs;
+  std::vector<char *> filtered_argv;
+  filtered_argv.push_back(argv[0]);
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if ((arg == "-C" || arg == "--session-config") && i + 1 < argc) {
+      std::string kv = argv[++i];
+      auto sep = kv.find('|');
+      if (sep != std::string::npos)
+        session_configs.emplace_back(kv.substr(0, sep), kv.substr(sep + 1));
+    } else {
+      filtered_argv.push_back(argv[i]);
+    }
+  }
+  int filtered_argc = static_cast<int>(filtered_argv.size());
 
   try {
-    mo.parse(argc, argv);
+    mo.parse(filtered_argc, filtered_argv.data());
   } catch (const std::exception &e) {
     std::cerr << e.what() << "\n\n";
     mo.print_help(argv[0]);
@@ -743,17 +759,6 @@ int main(int argc, char *argv[]) {
   if (argc == 1) {
     mo.print_help(argv[0]);
     return 1;
-  }
-
-  // Collect -C key|value pairs before MiniOptions consumes argv
-  std::vector<std::pair<std::string, std::string>> session_configs;
-  for (int i = 1; i < argc; ++i) {
-    if ((std::string(argv[i]) == "-C" || std::string(argv[i]) == "--session-config") && i + 1 < argc) {
-      std::string kv = argv[++i];
-      auto sep = kv.find('|');
-      if (sep != std::string::npos)
-        session_configs.emplace_back(kv.substr(0, sep), kv.substr(sep + 1));
-    }
   }
 
   std::vector<std::string> l2norm_arg = mo.get_vector<std::string>("l2norm");
