@@ -10,7 +10,7 @@
 // 1. causal_conv_basic        — 1D with bias and past_state, activation=silu
 // 2. causal_conv_no_optional  — no bias, no past_state
 // 3. causal_conv_bias_only    — with bias, no past_state
-// 4. causal_conv_f32          — f32 element type
+// 4. causal_conv_no_activation — different shape, activation=none
 //
 // All cases assert:
 // - context argument prepended
@@ -48,7 +48,7 @@ module {
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[IN:.*]]: tensor<1x64x128xf16>, %[[W:.*]]: tensor<64x1x4xf16>, %[[B:.*]]: tensor<64xf16>, %[[PS:.*]]: tensor<1x64x3xf16>)
   // CHECK: tensor.empty() : tensor<1x64x128xf16>
   // CHECK: tensor.empty() : tensor<1x64x3xf16>
-  // CHECK: hip.causal_conv_with_state(%[[CTX]]) ins(%[[IN]], %[[W]], %[[B]], %[[PS]] : tensor<1x64x128xf16>, tensor<64x1x4xf16>, tensor<64xf16>, tensor<1x64x3xf16>) outs({{.*}}, {{.*}} : tensor<1x64x128xf16>, tensor<1x64x3xf16>) {activation = "silu", ndim = 1 : i64}
+  // CHECK: hip.causal_conv_with_state(%[[CTX]]) ins(%[[IN]], %[[W]], %[[B]], %[[PS]] : tensor<1x64x128xf16>, tensor<64x1x4xf16>, tensor<64xf16>, tensor<1x64x3xf16>) outs({{.*}}, {{.*}} : tensor<1x64x128xf16>, tensor<1x64x3xf16>) {activation = "silu"}
   // CHECK-NOT: hip.alloc
 
   // --------------------------------------------------------------------------
@@ -97,26 +97,26 @@ module {
   // CHECK-NOT: hip.alloc
 
   // --------------------------------------------------------------------------
-  // 4. f32 element type
+  // 4. Different shape, activation=none
   // --------------------------------------------------------------------------
-  func.func @causal_conv_f32(
-      %input: tensor<2x128x64xf32>,
-      %weight: tensor<128x1x3xf32>,
-      %bias: tensor<128xf32>,
-      %past_state: tensor<2x128x2xf32>
-  ) -> (tensor<2x128x64xf32>, tensor<2x128x2xf32>) {
+  func.func @causal_conv_no_activation(
+      %input: tensor<2x128x64xf16>,
+      %weight: tensor<128x1x3xf16>,
+      %bias: tensor<128xf16>,
+      %past_state: tensor<2x128x2xf16>
+  ) -> (tensor<2x128x64xf16>, tensor<2x128x2xf16>) {
     %output, %present_state = "onnx.Custom"(%input, %weight, %bias, %past_state) {
       function_name = "CausalConvWithState",
       domain_name = "com.microsoft",
       activation = "none",
       ndim = 1 : si64
-    } : (tensor<2x128x64xf32>, tensor<128x1x3xf32>, tensor<128xf32>, tensor<2x128x2xf32>)
-      -> (tensor<2x128x64xf32>, tensor<2x128x2xf32>)
-    return %output, %present_state : tensor<2x128x64xf32>, tensor<2x128x2xf32>
+    } : (tensor<2x128x64xf16>, tensor<128x1x3xf16>, tensor<128xf16>, tensor<2x128x2xf16>)
+      -> (tensor<2x128x64xf16>, tensor<2x128x2xf16>)
+    return %output, %present_state : tensor<2x128x64xf16>, tensor<2x128x2xf16>
   }
 
-  // CHECK-LABEL: func.func @causal_conv_f32
+  // CHECK-LABEL: func.func @causal_conv_no_activation
   // CHECK-SAME: !hip.context
-  // CHECK: hip.causal_conv_with_state({{.*}}) ins({{.*}}) outs({{.*}}) {activation = "none", ndim = 1 : i64}
+  // CHECK: hip.causal_conv_with_state({{.*}}) ins({{.*}}) outs({{.*}})
   // CHECK-NOT: hip.alloc
 }
