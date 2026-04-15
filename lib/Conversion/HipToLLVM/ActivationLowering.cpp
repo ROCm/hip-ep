@@ -108,14 +108,14 @@ struct SoftplusOpLowering : public ConvertOpToLLVMPattern<SoftplusOp> {
     };
 
     Value statePtr = adaptor.getCtx();
-    Value inputPtr = extractMemRefPtr(adaptor.getInput(), rewriter, loc);
-    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value inputPtr = extractMemRefPtr(adaptor.getX(), rewriter, loc);
+    Value outputPtr = extractMemRefPtr(adaptor.getY(), rewriter, loc);
 
-    auto outputType = cast<MemRefType>(op.getOutput().getType());
+    auto outputType = cast<MemRefType>(op.getY().getType());
 
     // Compute num_elements (supports dynamic shapes)
     Value numElements = createI64Const(1);
-    MemRefDescriptor outputDesc(adaptor.getOutput());
+    MemRefDescriptor outputDesc(adaptor.getY());
 
     for (auto dimIdx : llvm::seq<int64_t>(outputType.getRank())) {
       Value dimSize;

@@ -744,20 +744,20 @@ def Hip_SoftplusOp : Hip_DpsOp<"softplus"> {
 
     Example:
     ```mlir
-    hip.softplus(%ctx) ins(%input : memref<1x128x512xf32, 1>)
-                       outs(%output : memref<1x128x512xf32, 1>)
+    hip.softplus(%ctx) ins(%x : memref<1x128x512xf32, 1>)
+                       outs(%y : memref<1x128x512xf32, 1>)
     ```
   }];
 
   let arguments = (ins
     Hip_ContextType:$ctx,
-    Hip_TensorOrMemRef:$input,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
   );
 
   let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
-    `outs` `(` $output `:` type($output) `)`
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
 }
