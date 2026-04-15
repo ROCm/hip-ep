@@ -349,7 +349,8 @@ jobs:
             --ort_home "%ORT_HOME%" ^
             --skip_wheel --skip_tests --skip_examples ^
             --parallel ^
-            --build_dir "${{ runner.workspace }}\build-oga"
+            --build_dir "${{ runner.workspace }}\build-oga" ^
+            --cmake_extra_defines CMAKE_C_COMPILER_LAUNCHER=sccache CMAKE_CXX_COMPILER_LAUNCHER=sccache
 
       # -----------------------------------------------------------------------
       # Stage GPU test package:
