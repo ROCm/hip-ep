@@ -39,6 +39,16 @@ struct SubToHip : public mlir::RewritePattern {
                   mlir::PatternRewriter &rewriter) const override;
 };
 
+/// onnx.Reciprocal -> hip.reciprocal
+struct ReciprocalToHip : public mlir::RewritePattern {
+  ReciprocalToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Reciprocal", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
 mlir::LogicalResult
 AddToHip::matchAndRewrite(mlir::Operation *op,
                           mlir::PatternRewriter &rewriter) const {
@@ -109,11 +119,30 @@ SubToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
+mlir::LogicalResult
+ReciprocalToHip::matchAndRewrite(mlir::Operation *op,
+                                 mlir::PatternRewriter &rewriter) const {
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+  mlir::Value input = op->getOperand(0);
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  auto hipOp = mlir::hip::ReciprocalOp::create(rewriter, loc, resultType,
+                                               context, input, init);
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
 } // namespace
 
 void mlir::hip::populateElementwiseConversionPatterns(
     RewritePatternSet &patterns, MLIRContext *ctx) {
-  patterns.add<AddToHip, MulToHip, SubToHip>(ctx);
+  patterns.add<AddToHip, MulToHip, SubToHip, ReciprocalToHip>(ctx);
 }
 
 } // namespace hip
