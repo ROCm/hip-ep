@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   build-windows-mock:
-    runs-on: windows-latest
+    runs-on: windows-2025
 
     env:
       LLVM_TAG: llvm-22.1.0-release
