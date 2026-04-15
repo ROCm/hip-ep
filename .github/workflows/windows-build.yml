@@ -488,7 +488,10 @@ jobs:
             ForEach-Object { Write-Host "  $($_.FullName)  ($($_.Length) bytes)" }
           exit 0
 
-      # Phase 2: Run perf on EP context models (second-run session creation).
+      # Phase 2: Load EP context models using hip-onnx-runner to measure
+      # second-run session creation time. onnxruntime_perf_test crashes with
+      # plugin EPs + EP context models (STATUS_STACK_BUFFER_OVERRUN), so we
+      # use hip-onnx-runner which registers the EP directly.
       - name: Run onnxruntime_perf_test (GPU)
         if: always()
         shell: pwsh
@@ -502,7 +505,6 @@ jobs:
           $env:LIB = (Join-Path $PWD "gpu-test-package\lib") + ";${{ runner.workspace }}\therock-dist\lib"
           $modelDir = "${{ runner.workspace }}\model"
 
-          # Search everywhere for _ctx.onnx
           $ctxModels = @(
             Get-ChildItem "${{ runner.workspace }}" -Recurse -Filter "*seq128_ctx.onnx" -ErrorAction SilentlyContinue
             Get-ChildItem $PWD -Recurse -Filter "*seq128_ctx.onnx" -ErrorAction SilentlyContinue
@@ -518,34 +520,16 @@ jobs:
           $failed = 0
           $resultsDir = Join-Path $PWD "gpu-test-package\results"
           New-Item -ItemType Directory -Force -Path $resultsDir | Out-Null
-          $perfTest = Join-Path $pkgBin "onnxruntime_perf_test.exe"
-          $configFile = Join-Path $pkgBin "..\morphizen_config.json"
-          # Copy _ctx.onnx + sidecar files into gpu-test-package/bin so
-          # perf_test can find both the EP DLL and the sidecar .bin
+          $runner = Join-Path $pkgBin "hip-onnx-runner.exe"
+
           Push-Location $pkgBin
           foreach ($m in $ctxModels) {
-            Copy-Item $m.FullName . -Force
-            Get-ChildItem $m.DirectoryName -Filter "$($m.BaseName)*" |
-              Where-Object { $_.Name -ne $m.Name } |
-              Copy-Item -Destination . -Force
-            Write-Host "Copied to bin: $($m.Name) + sidecars"
-            Get-ChildItem . -Filter "$($m.BaseName)*" |
-              ForEach-Object { Write-Host "  $($_.Name) ($($_.Length) bytes)" }
-          }
-
-          foreach ($m in $ctxModels) {
-            $localCtx = Join-Path $PWD $m.Name
             $resultName = ($m.Name -replace '_ctx\.onnx$', '.onnx')
             if ($resultName -eq $m.Name) { $resultName = $m.Name }
-            Write-Host "=== Testing: $($m.Name) ==="
-            & .\onnxruntime_perf_test.exe `
-              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" `
-              --plugin_eps "MorphiZenExecutionProvider" `
-              --plugin_ep_options "config_file|..\morphizen_config.json" `
-              -C "session.disable_cpu_ep_fallback|1" `
-              -t 30 -c 1 -s -I `
-              $localCtx 2>&1 | Tee-Object -FilePath (Join-Path $resultsDir "$resultName.txt")
-            Write-Host "  perf_test exit: $LASTEXITCODE"
+            Write-Host "=== Testing EP context: $($m.Name) ==="
+            & $runner -m $m.FullName 2>&1 |
+              Tee-Object -FilePath (Join-Path $resultsDir "$resultName.txt")
+            Write-Host "  exit: $LASTEXITCODE"
             if ($LASTEXITCODE -ne 0) { $failed = 1 }
           }
           Pop-Location
@@ -698,23 +682,30 @@ jobs:
           $prNumber = "${{ github.event.pull_request.number }}"
 
           # Build table rows from result files
+          # Supports both onnxruntime_perf_test output (QPS + Session creation time cost)
+          # and hip-onnx-runner output (Session created in XXXX ms)
           $tableRows = ""
           foreach ($f in (Get-ChildItem "$resultsDir/*.txt" -ErrorAction SilentlyContinue)) {
             $model = $f.BaseName -replace '\.onnx$', ''
             $content = Get-Content $f.FullName -Raw
             $qpsMatch = [regex]::Match($content, 'Number of inferences per second:\s+([\d.]+)')
-            if ($qpsMatch.Success) {
-              $qps = "{0:F2}" -f [double]$qpsMatch.Groups[1].Value
-              $tableRows += "| $model | $qps |`n"
+            $sessMatch = [regex]::Match($content, 'Session creation time cost:\s+([\d.]+)\s+s')
+            $sessMs = [regex]::Match($content, 'Session created in (\d+) ms')
+            $qps = if ($qpsMatch.Success) { "{0:F2}" -f [double]$qpsMatch.Groups[1].Value } else { "-" }
+            $sess = if ($sessMatch.Success) { $sessMatch.Groups[1].Value }
+                    elseif ($sessMs.Success) { "{0:F2}" -f ([double]$sessMs.Groups[1].Value / 1000) }
+                    else { "-" }
+            if ($qps -ne "-" -or $sess -ne "-") {
+              $tableRows += "| $model | $qps | $sess |`n"
             } else {
-              $tableRows += "| $model | failed |`n"
+              $tableRows += "| $model | failed | - |`n"
             }
           }
-          if (-not $tableRows) { $tableRows = "| (no results) | - |`n" }
+          if (-not $tableRows) { $tableRows = "| (no results) | - | - |`n" }
 
           $header = "## MorphiZen EP Performance Results`n`n" +
-                    "| Model | QPS |`n" +
-                    "|-------|----:|`n"
+                    "| Model | QPS | Session (s) |`n" +
+                    "|-------|----:|----:|`n"
           $footer = "`nRun: [${{ github.run_number }}]($runUrl) - Commit: ``$sha``"
           $summary = $header + $tableRows + $footer
 
