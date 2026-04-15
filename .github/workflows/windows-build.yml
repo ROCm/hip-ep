@@ -446,9 +446,11 @@ jobs:
       # hip-onnx-runner supports -C session configs and wires them before
       # session creation, unlike onnxruntime_perf_test with plugin EPs.
       - name: Generate EP context models
+        if: always() && steps.setup-therock.outcome == 'success'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
           $env:HIPDNN_EP_TIMING = "1"
           $env:THEROCK_DIST = "${{ runner.workspace }}\therock-dist"
           $pkgBin = Join-Path $PWD "gpu-test-package\bin"
@@ -484,12 +486,15 @@ jobs:
             ForEach-Object { Write-Host "  $($_.FullName)  ($($_.Length) bytes)" }
           Get-ChildItem $PWD -Recurse -Filter "*_ctx.onnx" -ErrorAction SilentlyContinue |
             ForEach-Object { Write-Host "  $($_.FullName)  ($($_.Length) bytes)" }
+          exit 0
 
       # Phase 2: Run perf on EP context models (second-run session creation).
       - name: Run onnxruntime_perf_test (GPU)
+        if: always()
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
           $env:HIPDNN_EP_TIMING = "1"
           $env:THEROCK_DIST = "${{ runner.workspace }}\therock-dist"
           $pkgBin = Join-Path $PWD "gpu-test-package\bin"
