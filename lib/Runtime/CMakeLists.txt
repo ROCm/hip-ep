@@ -228,6 +228,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/qmoe.cpp runtime_qmoe.bc)
     compile_to_bitcode(real/test_hip_from_dll.cpp test_hip_from_dll.bc)
     compile_to_bitcode(real/gemm.cpp runtime_gemm.bc)
+    compile_to_bitcode(real/linear_attention.cpp runtime_linear_attention.bc)
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
@@ -250,6 +251,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gemm.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_linear_attention.bc
     )
 else()
     # Mock runtime for testing without GPU

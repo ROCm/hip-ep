@@ -21,6 +21,7 @@ add_library(HipToLLVM STATIC
   QMoELowering.cpp
   GraphLowering.cpp
   GemmLowering.cpp
+  LinearAttentionLowering.cpp
 )
 
 add_dependencies(HipToLLVM

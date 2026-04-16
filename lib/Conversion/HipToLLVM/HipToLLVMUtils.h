@@ -63,6 +63,7 @@ inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
 inline constexpr const char *kWrapQMoE = "wrap_qmoe";
 inline constexpr const char *kWrapGemm = "wrap_gemm";
+inline constexpr const char *kWrapLinearAttention = "wrap_linear_attention";
 inline constexpr const char *kHipGetConstant = "hipdnn_ep_constant_get";
 inline constexpr const char *kHipDNNGraphExecute = "hipdnn_graph_execute";
 
@@ -238,6 +239,8 @@ void populateGraphLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateGemmLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
+void populateLinearAttentionLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 
 } // namespace hip
 } // namespace mlir

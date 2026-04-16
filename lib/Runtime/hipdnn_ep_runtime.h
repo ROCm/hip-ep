@@ -563,6 +563,34 @@ int wrap_qmoe(
 //==============================================================================
 // Y = alpha * op(A) * op(B) + beta * C
 // op(A) shape: [M, K], op(B) shape: [K, N], C optional broadcastable to [M, N]
+// LinearAttention operation wrapper (com.microsoft.LinearAttention)
+// Unified linear attention with recurrent state for autoregressive decoding
+// and prefill. Supports update rules: linear(0), gated(1), delta(2),
+// gated_delta(3).
+// All tensor inputs use packed 3D format [B, T, H*D] except past/present
+// state which is 4D [B, H_kv, d_k, d_v].
+// Optional pointer args: pass nullptr if the corresponding input is absent.
+int wrap_linear_attention(
+    RuntimeState *state,
+    const void *query,       // [B, T, H_q * d_k]
+    const void *key,         // [B, T, H_kv * d_k]
+    const void *value,       // [B, T, H_kv * d_v]
+    const void *past_state,  // [B, H_kv, d_k, d_v] (nullable)
+    const void *decay,       // [B, T, H_kv * d_k] or [B, T, H_kv] (nullable)
+    const void *beta,        // [B, T, H_kv] or [B, T, 1] (nullable)
+    void *output,            // [B, T, H_q * d_v]
+    void *present_state,     // [B, H_kv, d_k, d_v]
+    int64_t q_num_heads, int64_t kv_num_heads, float scale,
+    int64_t chunk_size,
+    int64_t update_rule,     // 0=linear, 1=gated, 2=delta, 3=gated_delta
+    int64_t batch_size, int64_t seq_len, int64_t head_dim_k,
+    int64_t head_dim_v, int64_t element_size_bytes);
+
+//==============================================================================
+// ONNX Gemm via hipBLASLt
+//==============================================================================
+// Y = alpha * op(A) * op(B) + beta * C
+// op(A) shape: [M, K], op(B) shape: [K, N], C optional broadcastable to [M, N]
 int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
               void *output, int64_t M, int64_t N, int64_t K, float alpha,
               float beta, int64_t transA, int64_t transB, int64_t typeCode,
