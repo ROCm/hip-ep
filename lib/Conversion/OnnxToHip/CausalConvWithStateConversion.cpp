@@ -116,14 +116,15 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
   state.addTypes(resultTypes);
 
   // Segments: [ctx(1), input(1), weight(1), bias(0|1), past_state(0|1),
-  //            outputs(2)]
+  //            output(1), present_state(1)]
   llvm::SmallVector<int32_t> segmentSizes;
   segmentSizes.push_back(1); // ctx
   segmentSizes.push_back(1); // input
   segmentSizes.push_back(1); // weight
   segmentSizes.push_back(bias ? 1 : 0);
   segmentSizes.push_back(pastState ? 1 : 0);
-  segmentSizes.push_back(2); // outputs: [output, present_state]
+  segmentSizes.push_back(1); // output
+  segmentSizes.push_back(1); // present_state
 
   state.addAttribute("operand_segment_sizes",
                      rewriter.getDenseI32ArrayAttr(segmentSizes));

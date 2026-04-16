@@ -49,9 +49,9 @@ struct CausalConvWithStateOpLowering
         adaptor.getPastState()
             ? extractMemRefPtr(adaptor.getPastState(), rewriter, loc)
             : nullPtr;
-    auto outputs = adaptor.getOutputs();
-    Value outputPtr = extractMemRefPtr(outputs[0], rewriter, loc);
-    Value presentStatePtr = extractMemRefPtr(outputs[1], rewriter, loc);
+    Value outputPtr = extractMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    Value presentStatePtr =
+        extractMemRefPtr(adaptor.getPresentState(), rewriter, loc);
 
     // Extract shape info from input memref: (batch, channels, L) for ndim=1
     auto inputType = cast<MemRefType>(op.getInput().getType());
