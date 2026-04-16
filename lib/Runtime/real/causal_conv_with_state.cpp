@@ -246,7 +246,7 @@ int wrap_causal_conv_with_state(RuntimeState *state, const void *input,
     CAUSAL_MIOPEN_CHECK(miopenCreateTensorDescriptor(&biasDesc));
     CAUSAL_MIOPEN_CHECK(miopenSet4dTensorDescriptor(
         biasDesc, dt, 1, static_cast<int>(channels), 1, 1));
-    float alpha_bias = 1.0f, beta_bias = 1.0f;
+    float alpha_bias = 1.0f, beta_bias = 0.0f;
     mst = miopenOpTensor(handle, miopenTensorOpAdd, &alpha_bias, outDesc,
                          output, &alpha_bias, biasDesc, bias, &beta_bias,
                          outDesc, output);
