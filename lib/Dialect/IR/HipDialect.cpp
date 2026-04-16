@@ -635,6 +635,18 @@ void CausalConvWithStateOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// GemmOp
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GemmOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void GemmOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // GqaOp: Full MS spec implementation
 //        ins(query, [key, value, past_key, past_value], seqlens_k,
 //        total_seq_len,

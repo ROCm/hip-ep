@@ -460,7 +460,8 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
 // Gather operation wrapper
 int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis, int64_t data_num_elements,
-                int64_t output_num_elements, int64_t element_size_bytes);
+                int64_t indices_num_elements, int64_t output_num_elements,
+                int64_t element_size_bytes);
 
 // ReduceSum operation wrapper
 int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
@@ -582,6 +583,16 @@ int wrap_causal_conv_with_state(
     int64_t ndim,
     int64_t activation,      // 0=none, 1=silu/swish
     int64_t element_size_bytes);
+  
+//==============================================================================
+// ONNX Gemm via hipBLASLt
+//==============================================================================
+// Y = alpha * op(A) * op(B) + beta * C
+// op(A) shape: [M, K], op(B) shape: [K, N], C optional broadcastable to [M, N]
+int wrap_gemm(RuntimeState *state, const void *A, const void *B, const void *C,
+              void *output, int64_t M, int64_t N, int64_t K, float alpha,
+              float beta, int64_t transA, int64_t transB, int64_t typeCode,
+              int64_t cDim0, int64_t cDim1);
 
 //===----------------------------------------------------------------------===//
 // Low-Level HIP Wrappers

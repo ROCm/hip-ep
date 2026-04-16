@@ -90,6 +90,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         HipDstBufferizableModel<CausalConvWithStateOp>>(*ctx);
     HipDNNGraphOp::attachInterface<HipDstBufferizableModel<HipDNNGraphOp>>(
         *ctx);
+    GemmOp::attachInterface<HipDstBufferizableModel<GemmOp>>(*ctx);
   });
 }
 

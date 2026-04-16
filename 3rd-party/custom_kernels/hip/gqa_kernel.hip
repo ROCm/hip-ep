@@ -393,16 +393,33 @@ __global__ void split_qkv_kernel(
 // -------------------------------------------------------------------------
 // Masks future positions so each query attends only to past + itself.
 //   Score matrix: col-major [skv, sq] per head
-//   S[k, q] = -65504 (FP16 -inf) where k > past_len + q
+//   S[k, q] = -inf where k > past_len + q
 //
 // When local_window_size > 0, also masks distant past positions:
-//   S[k, q] = -65504 where k < past_len + q - local_window_size + 1
+//   S[k, q] = -inf where k < past_len + q - local_window_size + 1
 //
 // blockIdx.y = head (0..B*H-1)
+//
+// Templated on T ∈ {__half, float}. The mask value is -65504 for fp16
+// (largest finite negative) and -INFINITY for fp32.
 // -------------------------------------------------------------------------
 
-__global__ void causal_mask_kernel(
-    __half* __restrict__ S,
+template <typename T>
+__device__ __forceinline__ T causal_mask_fill_value();
+
+template <>
+__device__ __forceinline__ __half causal_mask_fill_value<__half>() {
+  return __float2half(-65504.0f);
+}
+
+template <>
+__device__ __forceinline__ float causal_mask_fill_value<float>() {
+  return -INFINITY;
+}
+
+template <typename T>
+__global__ void causal_mask_kernel_impl(
+    T* __restrict__ S,
     int skv, int sq, int batch_stride, int past_len,
     int local_window_size) {
   const int head = __builtin_amdgcn_readfirstlane(blockIdx.y);
@@ -413,12 +430,11 @@ __global__ void causal_mask_kernel(
   int k = idx % skv;
   int q = idx / skv;
   int abs_q = past_len + q;
+  const T fill = causal_mask_fill_value<T>();
   if (k > abs_q) {
-    S[(size_t)head * batch_stride + (size_t)q * skv + k] =
-        __float2half(-65504.0f);
+    S[(size_t)head * batch_stride + (size_t)q * skv + k] = fill;
   } else if (local_window_size > 0 && k < abs_q - local_window_size + 1) {
-    S[(size_t)head * batch_stride + (size_t)q * skv + k] =
-        __float2half(-65504.0f);
+    S[(size_t)head * batch_stride + (size_t)q * skv + k] = fill;
   }
 }
 
@@ -629,7 +645,8 @@ extern "C" int hip_gqa_split_qkv(
   return hipSuccess;
 }
 
-// Step 9a: Causal mask
+// Step 9a: Causal mask launchers (fp16 and fp32 instantiations)
+
 extern "C" int hip_gqa_causal_mask(
     void* stream_ptr, void* S,
     int total_heads, int skv, int sq,
@@ -637,9 +654,112 @@ extern "C" int hip_gqa_causal_mask(
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   int total = skv * sq;
   int blocksX = (total + GQA_THREADS - 1) / GQA_THREADS;
-  causal_mask_kernel<<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
+  causal_mask_kernel_impl<__half><<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
       static_cast<__half*>(S),
       skv, sq, batch_stride, past_len, local_window_size);
+  return hipSuccess;
+}
+
+extern "C" int hip_gqa_causal_mask_f32(
+    void* stream_ptr, void* S,
+    int total_heads, int skv, int sq,
+    int batch_stride, int past_len, int local_window_size) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  int total = skv * sq;
+  int blocksX = (total + GQA_THREADS - 1) / GQA_THREADS;
+  causal_mask_kernel_impl<float><<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
+      static_cast<float*>(S),
+      skv, sq, batch_stride, past_len, local_window_size);
+  return hipSuccess;
+}
+
+// Step 9b (fp32->fp16 variant): Softmax reading fp32 scores, writing fp16 output
+// Avoids inf-inf=NaN by operating entirely in fp32 before the final fp16 store.
+
+__global__ void softmax_f32_to_f16_kernel(
+    const float* input, __half* output,
+    int rows, int cols, int input_batch_stride, int output_batch_stride,
+    const __half* head_sink, int num_heads, int use_smooth_softmax) {
+  const int linear = __builtin_amdgcn_readfirstlane(blockIdx.x);
+  const int head = __builtin_amdgcn_readfirstlane(linear / cols);
+  const int col  = __builtin_amdgcn_readfirstlane(linear % cols);
+  const float* in_col = input + (size_t)head * input_batch_stride + (size_t)col * rows;
+  __half* out_col = output + (size_t)head * output_batch_stride + (size_t)col * rows;
+
+  const int tid = threadIdx.x;
+  const int wave_id = tid / WAVE_SIZE;
+  const int num_waves = blockDim.x / WAVE_SIZE;
+
+  extern __shared__ float smem[];
+
+  // Pass 1: find max (fp32, no overflow risk)
+  float local_max = -INFINITY;
+  for (int i = tid; i < rows; i += blockDim.x)
+    local_max = fmaxf(local_max, in_col[i]);
+
+  local_max = warp_reduce_max(local_max);
+  if (tid % WAVE_SIZE == 0)
+    smem[wave_id] = local_max;
+  __syncthreads();
+
+  if (tid < WAVE_SIZE) {
+    float v = (tid < num_waves) ? smem[tid] : -INFINITY;
+    v = warp_reduce_max(v);
+    smem[0] = v;
+  }
+  __syncthreads();
+  float max_val = smem[0];
+
+  // Pass 2: exp2f + sum (fp32 throughout, values recomputed in Pass 3)
+  float local_sum = 0.0f;
+  for (int i = tid; i < rows; i += blockDim.x)
+    local_sum += exp2f((in_col[i] - max_val) * LOG2E);
+
+  local_sum = warp_reduce_sum(local_sum);
+  if (tid % WAVE_SIZE == 0)
+    smem[wave_id] = local_sum;
+  __syncthreads();
+
+  if (tid < WAVE_SIZE) {
+    float v = (tid < num_waves) ? smem[tid] : 0.0f;
+    v = warp_reduce_sum(v);
+    smem[0] = v;
+  }
+  __syncthreads();
+  float sum_val = smem[0];
+
+  if (head_sink != nullptr) {
+    int actual_head = head % num_heads;
+    float s = __half2float(head_sink[actual_head]);
+    sum_val += expf(s - max_val);
+  } else if (use_smooth_softmax) {
+    sum_val += expf(0.0f - max_val);
+  }
+
+  // Pass 3: normalize and write fp16 output
+  float inv_sum = 1.0f / sum_val;
+  for (int i = tid; i < rows; i += blockDim.x) {
+    float e = exp2f((in_col[i] - max_val) * LOG2E);
+    out_col[i] = __float2half(e * inv_sum);
+  }
+}
+
+extern "C" int hip_gqa_softmax_f32_to_f16(
+    void* stream_ptr, const void* input_f32, void* output_f16,
+    int total_head_queries, int rows, int cols,
+    int input_batch_stride, int output_batch_stride,
+    const void* head_sink, int num_heads, int use_smooth_softmax) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  int threads = 32;
+  while (threads < std::min(rows, 256)) threads *= 2;
+  if (threads > 256) threads = 256;
+  int num_waves = threads / WAVE_SIZE;
+  softmax_f32_to_f16_kernel<<<total_head_queries, threads,
+                              num_waves * sizeof(float), stream>>>(
+      static_cast<const float*>(input_f32),
+      static_cast<__half*>(output_f16),
+      rows, cols, input_batch_stride, output_batch_stride,
+      static_cast<const __half*>(head_sink), num_heads, use_smooth_softmax);
   return hipSuccess;
 }
 

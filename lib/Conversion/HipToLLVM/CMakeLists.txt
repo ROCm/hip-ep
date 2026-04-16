@@ -21,6 +21,7 @@ add_library(HipToLLVM STATIC
   QMoELowering.cpp
   GraphLowering.cpp
   CausalConvWithStateLowering.cpp
+  GemmLowering.cpp
 )
 
 add_dependencies(HipToLLVM
