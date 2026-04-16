@@ -1074,6 +1074,91 @@ def Hip_HipDNNGraphOp : Hip_DpsOp<"hipdnn_graph", [
   }];
 }
 
+def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
+    [AttrSizedOperandSegments]> {
+  let summary = "Linear attention with recurrent state (com.microsoft.LinearAttention)";
+  let description = [{
+    Unified linear attention operator for autoregressive decoding (T=1) and
+    prefill (T>1).
+
+    All inputs use 3D packed format [B, T, H*D]; q_num_heads and kv_num_heads
+    are always required. The op internally unpacks to 4D for computation.
+
+    The update_rule attribute selects the recurrence type:
+      "linear":       S_t = S_{t-1} + k_t (x) v_t
+      "gated":        S_t = exp(g_t) * S_{t-1} + k_t (x) v_t
+      "delta":        S_t = S_{t-1} + b_t * k_t (x) (v_t - S_{t-1}^T k_t)
+      "gated_delta":  S_t = exp(g_t) * S_{t-1} + b_t * k_t (x) (v_t - exp(g_t) * S_{t-1}^T k_t)
+
+    Inputs (3-6):
+      1. query       (required, T) - [B, T, H_q * d_k]
+      2. key         (required, T) - [B, T, H_kv * d_k]
+      3. value       (required, T) - [B, T, H_kv * d_v]
+      4. past_state  (optional, S) - [B, H_kv, d_k, d_v]
+      5. decay       (optional, T) - [B, T, H_kv * d_k] or [B, T, H_kv]
+      6. beta        (optional, T) - [B, T, H_kv] or [B, T, 1]
+
+    DPS output buffers:
+      output        (required, T) - [B, T, H_q * d_v]
+      present_state (required, S) - [B, H_kv, d_k, d_v]
+
+    Example:
+    ```mlir
+    hip.linear_attention(%ctx)
+        ins(%query, %key, %value :
+            memref<1x1x4096xf16, 1>, memref<1x1x1024xf16, 1>,
+            memref<1x1x1024xf16, 1>)
+        past_state(%past : memref<1x8x128x128xf16, 1>)
+        decay(%g : memref<1x1x1024xf16, 1>)
+        beta(%b : memref<1x1x8xf16, 1>)
+        outs(%output, %state : memref<1x1x4096xf16, 1>,
+                                memref<1x8x128x128xf16, 1>)
+        {q_num_heads = 32 : i64, kv_num_heads = 8 : i64,
+         scale = 0.0 : f32, update_rule = "gated_delta"}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+
+    // Required inputs (spec order 1-3)
+    Hip_TensorOrMemRef:$query,
+    Hip_TensorOrMemRef:$key,
+    Hip_TensorOrMemRef:$value,
+
+    // Optional inputs (spec order 4-6)
+    Optional<Hip_TensorOrMemRef>:$past_state,
+    Optional<Hip_TensorOrMemRef>:$decay,
+    Optional<Hip_TensorOrMemRef>:$beta,
+
+    // DPS output buffers
+    Hip_TensorOrMemRef:$output,
+    Hip_TensorOrMemRef:$present_state,
+
+    // Required attributes
+    I64Attr:$q_num_heads,
+    I64Attr:$kv_num_heads,
+
+    // Optional attributes (with defaults)
+    DefaultValuedAttr<F32Attr, "0.0">:$scale,
+    DefaultValuedAttr<I64Attr, "0">:$chunk_size,
+    DefaultValuedAttr<StrAttr, "\"gated_delta\"">:$update_rule
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $query `,` $key `,` $value `:`
+        type($query) `,` type($key) `,` type($value)
+    `)`
+    (`past_state` `(` $past_state^ `:` type($past_state) `)`)?
+    (`decay` `(` $decay^ `:` type($decay) `)`)?
+    (`beta` `(` $beta^ `:` type($beta) `)`)?
+    `outs` `(` $output `,` $present_state `:`
+              type($output) `,` type($present_state) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_GemmOp : Hip_DpsOp<"gemm">{
   let summary = "General matrix multiplication (ONNX Gemm)";
   let description = [{

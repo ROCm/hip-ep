@@ -20,6 +20,7 @@ add_library(OnnxToHip STATIC
   GatherConversion.cpp
   ReshapeConversion.cpp
   GemmConversion.cpp
+  LinearAttentionConversion.cpp
 )
 
 add_dependencies(OnnxToHip

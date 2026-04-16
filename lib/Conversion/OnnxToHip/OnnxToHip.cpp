@@ -379,6 +379,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateQMoEConversionPatterns(patterns, ctx);
   populateReshapeConversionPatterns(patterns, ctx);
   populateGemmConversionPatterns(patterns, ctx);
+  populateLinearAttentionConversionPatterns(patterns, ctx);
 
   mlir::GreedyRewriteConfig config;
   config.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);

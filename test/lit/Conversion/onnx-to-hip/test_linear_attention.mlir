@@ -1,0 +1,169 @@
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+
+// ============================================================================
+// TEST PURPOSE:
+// Verify com.microsoft.LinearAttention (via onnx.Custom) is correctly
+// lowered to hip.linear_attention operation in tensor-first mode.
+//
+// This test suite validates:
+// - Custom ONNX op matching by function_name and domain_name
+// - Multi-output op lowering (2 outputs: output, present_state)
+// - Attribute preservation (q_num_heads, kv_num_heads, scale, update_rule, etc.)
+// - Optional inputs handling (past_state, decay, beta)
+// - f16 element type support
+// - Tensor-first DPS: tensor.empty() for each output
+//
+// Test cases:
+// 1. Minimal linear mode (3 required inputs only)
+// 2. Gated mode with decay
+// 3. Delta mode with beta
+// 4. Full gated_delta mode (all 6 inputs + all attributes)
+// ============================================================================
+
+// RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
+
+// =============================================================================
+// Test 1: Minimal linear mode - 3 required inputs only
+// =============================================================================
+module {
+  func.func @test_linear_minimal(
+      %query: tensor<1x128x4096xf16>,
+      %key: tensor<1x128x1024xf16>,
+      %value: tensor<1x128x1024xf16>)
+      -> (tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>) {
+
+    // CHECK-LABEL: func.func @test_linear_minimal
+    // CHECK-SAME: (%[[CTX:.*]]: !hip.context,
+
+    %out:2 = "onnx.Custom"(%query, %key, %value)
+        <{function_name = "LinearAttention"}>
+        {domain_name = "com.microsoft",
+         q_num_heads = 32 : si64,
+         kv_num_heads = 8 : si64,
+         update_rule = "linear"}
+        : (tensor<1x128x4096xf16>, tensor<1x128x1024xf16>,
+           tensor<1x128x1024xf16>)
+        -> (tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>)
+
+    // CHECK: tensor.empty() : tensor<1x128x4096xf16>
+    // CHECK: tensor.empty() : tensor<1x8x128x128xf16>
+    // CHECK: hip.linear_attention(%[[CTX]])
+    // CHECK-SAME: kv_num_heads = 8
+    // CHECK-SAME: q_num_heads = 32
+    // CHECK-SAME: update_rule = "linear"
+
+    return %out#0, %out#1 : tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>
+  }
+
+  // ===========================================================================
+  // Test 2: Gated mode with past_state and decay
+  // ===========================================================================
+  func.func @test_gated_with_decay(
+      %query: tensor<1x1x4096xf16>,
+      %key: tensor<1x1x1024xf16>,
+      %value: tensor<1x1x1024xf16>,
+      %past_state: tensor<1x8x128x128xf16>,
+      %decay: tensor<1x1x1024xf16>)
+      -> (tensor<1x1x4096xf16>, tensor<1x8x128x128xf16>) {
+
+    // CHECK-LABEL: func.func @test_gated_with_decay
+    // CHECK-SAME: (%[[CTX:.*]]: !hip.context,
+
+    %none = "onnx.NoValue"() {value} : () -> none
+
+    %out:2 = "onnx.Custom"(%query, %key, %value, %past_state, %decay, %none)
+        <{function_name = "LinearAttention"}>
+        {domain_name = "com.microsoft",
+         q_num_heads = 32 : si64,
+         kv_num_heads = 8 : si64,
+         update_rule = "gated"}
+        : (tensor<1x1x4096xf16>, tensor<1x1x1024xf16>,
+           tensor<1x1x1024xf16>, tensor<1x8x128x128xf16>,
+           tensor<1x1x1024xf16>, none)
+        -> (tensor<1x1x4096xf16>, tensor<1x8x128x128xf16>)
+
+    // CHECK: hip.linear_attention(%[[CTX]])
+    // CHECK-SAME: kv_num_heads = 8
+    // CHECK-SAME: q_num_heads = 32
+    // CHECK-SAME: update_rule = "gated"
+
+    return %out#0, %out#1 : tensor<1x1x4096xf16>, tensor<1x8x128x128xf16>
+  }
+
+  // ===========================================================================
+  // Test 3: Delta mode with past_state and beta
+  // ===========================================================================
+  func.func @test_delta_with_beta(
+      %query: tensor<1x1x4096xf16>,
+      %key: tensor<1x1x1024xf16>,
+      %value: tensor<1x1x1024xf16>,
+      %past_state: tensor<1x8x128x128xf16>,
+      %beta: tensor<1x1x8xf16>)
+      -> (tensor<1x1x4096xf16>, tensor<1x8x128x128xf16>) {
+
+    // CHECK-LABEL: func.func @test_delta_with_beta
+    // CHECK-SAME: (%[[CTX:.*]]: !hip.context,
+
+    %none = "onnx.NoValue"() {value} : () -> none
+
+    %out:2 = "onnx.Custom"(%query, %key, %value, %past_state, %none, %beta)
+        <{function_name = "LinearAttention"}>
+        {domain_name = "com.microsoft",
+         q_num_heads = 32 : si64,
+         kv_num_heads = 8 : si64,
+         update_rule = "delta"}
+        : (tensor<1x1x4096xf16>, tensor<1x1x1024xf16>,
+           tensor<1x1x1024xf16>, tensor<1x8x128x128xf16>,
+           none, tensor<1x1x8xf16>)
+        -> (tensor<1x1x4096xf16>, tensor<1x8x128x128xf16>)
+
+    // CHECK: hip.linear_attention(%[[CTX]])
+    // CHECK-SAME: kv_num_heads = 8
+    // CHECK-SAME: q_num_heads = 32
+    // CHECK-SAME: update_rule = "delta"
+
+    return %out#0, %out#1 : tensor<1x1x4096xf16>, tensor<1x8x128x128xf16>
+  }
+
+  // ===========================================================================
+  // Test 4: Full gated_delta mode - all 6 inputs + all attributes
+  // ===========================================================================
+  func.func @test_gated_delta_full(
+      %query: tensor<1x128x4096xf16>,
+      %key: tensor<1x128x1024xf16>,
+      %value: tensor<1x128x1024xf16>,
+      %past_state: tensor<1x8x128x128xf16>,
+      %decay: tensor<1x128x1024xf16>,
+      %beta: tensor<1x128x8xf16>)
+      -> (tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>) {
+
+    // CHECK-LABEL: func.func @test_gated_delta_full
+    // CHECK-SAME: (%[[CTX:.*]]: !hip.context,
+
+    %out:2 = "onnx.Custom"(%query, %key, %value, %past_state, %decay, %beta)
+        <{function_name = "LinearAttention"}>
+        {domain_name = "com.microsoft",
+         q_num_heads = 32 : si64,
+         kv_num_heads = 8 : si64,
+         scale = 8.838834e-02 : f32,
+         chunk_size = 64 : si64,
+         update_rule = "gated_delta"}
+        : (tensor<1x128x4096xf16>, tensor<1x128x1024xf16>,
+           tensor<1x128x1024xf16>, tensor<1x8x128x128xf16>,
+           tensor<1x128x1024xf16>, tensor<1x128x8xf16>)
+        -> (tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>)
+
+    // CHECK: tensor.empty() : tensor<1x128x4096xf16>
+    // CHECK: tensor.empty() : tensor<1x8x128x128xf16>
+    // CHECK: hip.linear_attention(%[[CTX]])
+    // CHECK-SAME: ins(
+    // CHECK-SAME: chunk_size = 64
+    // CHECK-SAME: kv_num_heads = 8
+    // CHECK-SAME: q_num_heads = 32
+    // CHECK-SAME: scale = {{0.088388[0-9]*|8.838834e-02}}
+    // CHECK-SAME: update_rule = "gated_delta"
+
+    return %out#0, %out#1 : tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>
+  }
+}
