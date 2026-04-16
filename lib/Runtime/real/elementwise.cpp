@@ -6,6 +6,7 @@
 #include "../hipdnn_ep_runtime.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
+#include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -247,8 +248,6 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
 // hip_elementwise_sub from the custom kernels library. The caller passes
 // element_size_bytes; we map it to the corresponding hip_dtype_t.
 //===----------------------------------------------------------------------===//
-
-#include "hip_custom_kernels.h"
 
 int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
                          void *output, int64_t num_elements,
