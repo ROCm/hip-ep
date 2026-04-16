@@ -1074,4 +1074,47 @@ def Hip_HipDNNGraphOp : Hip_DpsOp<"hipdnn_graph", [
   }];
 }
 
+def Hip_GemmOp : Hip_DpsOp<"gemm">{
+  let summary = "General matrix multiplication (ONNX Gemm)";
+  let description = [{
+    Computes Y = alpha * A' * B' + beta * C, where:
+      A' = transpose(A) if transA else A
+      B' = transpose(B) if transB else B
+    Input C is optional and broadcastable to (M, N).
+    Implements ONNX Gemm operator (opset 13).
+    Uses destination-passing style: output buffer is provided as argument.
+    Example:
+    ```mlir
+    hip.gemm(%ctx) ins(%A, %B, %C :
+        memref<128x256xf32, 1>, memref<256x512xf32, 1>, memref<512xf32, 1>)
+        outs(%Y : memref<128x512xf32, 1>)
+        {alpha = 1.0 : f32, beta = 1.0 : f32, transA = 0 : i64, transB = 0 : i64}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+
+    // inputs
+    Hip_TensorOrMemRef:$input_a,
+    Hip_TensorOrMemRef:$input_b,
+    Optional<Hip_TensorOrMemRef>:$input_c,  // optional
+
+    //outputs
+    Hip_TensorOrMemRef:$output,
+
+    // attributes
+    DefaultValuedAttr<F32Attr, "1.0">:$alpha,
+    DefaultValuedAttr<F32Attr, "1.0">:$beta,
+    DefaultValuedAttr<I64Attr, "0">:$transA,
+    DefaultValuedAttr<I64Attr, "0">:$transB
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input_a `,` $input_b (`,` $input_c^)?
+        `:` type($input_a) `,` type($input_b) (`,` type($input_c)^)?
+    `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
 #endif // HIP_OPS
