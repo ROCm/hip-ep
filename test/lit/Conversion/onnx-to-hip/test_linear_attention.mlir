@@ -27,13 +27,13 @@
 // Test 1: Minimal linear mode - 3 required inputs only
 // =============================================================================
 module {
-  func.func @test_linear_minimal(
+  func.func @main_graph(
       %query: tensor<1x128x4096xf16>,
       %key: tensor<1x128x1024xf16>,
       %value: tensor<1x128x1024xf16>)
       -> (tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>) {
 
-    // CHECK-LABEL: func.func @test_linear_minimal
+    // CHECK-LABEL: func.func @main_graph
     // CHECK-SAME: (%[[CTX:.*]]: !hip.context,
 
     %out:2 = "onnx.Custom"(%query, %key, %value)
