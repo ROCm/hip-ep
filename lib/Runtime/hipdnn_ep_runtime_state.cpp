@@ -295,20 +295,14 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 
     if (force_host) {
       // Legacy iGPU path: hipHostMalloc (pinned host memory).
-      TIMING_LOG("[Session] iGPU: HIPDNN_EP_IGPU_USE_HOST=1, using "
-                 "hipHostMalloc (pinned host) path\n");
       if (hipHostMalloc(&state->gpu_constants_blob, total_size,
                         hipHostMallocDefault) != hipSuccess) {
-        fprintf(stderr,
-                "hipHostMalloc failed for constants blob (%zu bytes)\n",
+        fprintf(stderr, "hipHostMalloc failed for constants blob (%zu bytes)\n",
                 total_size);
         hipdnn_ep_state_cleanup(state);
         *out_state = nullptr;
         return 1;
       }
-
-      TIMING_LOG("[Session] hipHostMalloc: %.3fs (%zu bytes)\n",
-                 record_elapsed(t_prev), total_size);
 
       const void *src = reader->mmap();
       if (src) {
@@ -326,22 +320,12 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
         }
       }
 
-      TIMING_LOG("[Session] Read constants to pinned: %.3fs (%zu bytes, %s)\n",
-                 record_elapsed(t_prev), total_size,
-                 src ? "mmap+memcpy" : "fread");
       state->constants_blob_is_host = true;
 
     } else {
       // VRAM path (default for both iGPU and dGPU): staging buffer + hipMemcpy.
-      if (is_igpu)
-        TIMING_LOG(
-            "[Session] iGPU: using hipMalloc (VRAM) + hipMemcpy path\n");
-
       const void *src = reader->mmap();
       void *cpu_buf = nullptr;
-
-      TIMING_LOG("[Session] VRAM path: mmap %s\n",
-                 src ? "succeeded" : "failed, using fread fallback");
 
       if (!src) {
         cpu_buf = malloc(total_size);
@@ -353,9 +337,6 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
           return 1;
         }
 
-        TIMING_LOG("[Session] malloc staging buffer: %.3fs (%zu bytes)\n",
-                   record_elapsed(t_prev), total_size);
-
         size_t bytes_read = reader->fread(cpu_buf, total_size);
         if (bytes_read != total_size) {
           fprintf(stderr, "Short read: got %zu of %zu bytes\n", bytes_read,
@@ -366,9 +347,6 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
           return 1;
         }
         src = cpu_buf;
-
-        TIMING_LOG("[Session] fread constants.bin: %.3fs (%zu bytes)\n",
-                   record_elapsed(t_prev), total_size);
       }
 
       if (hipMalloc(&state->gpu_constants_blob, total_size) != hipSuccess) {
