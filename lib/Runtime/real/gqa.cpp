@@ -51,9 +51,10 @@ static hipblasStatus_t setLayoutBatch(hipblasLtMatrixLayout_t layout,
 struct GqaGemmKey {
   int64_t m, n, k, batch;
   bool transA; // true for Score GEMM (K^T * Q), false for Value GEMM (V * S)
+  bool outputFp32; // true to use HIP_R_32F for C/D layouts (Score GEMM)
   bool operator==(const GqaGemmKey &o) const {
     return m == o.m && n == o.n && k == o.k && batch == o.batch &&
-           transA == o.transA;
+           transA == o.transA && outputFp32 == o.outputFp32;
   }
 };
 
@@ -65,6 +66,7 @@ struct GqaGemmKeyHash {
     hash_combine_val(h, k.k);
     hash_combine_val(h, k.batch);
     hash_combine_val(h, k.transA);
+    hash_combine_val(h, k.outputFp32);
     return h;
   }
 };
@@ -130,11 +132,10 @@ static const GqaGemmCacheEntry *queryOrCreateGemmState(hipblasLtHandle_t handle,
         hipblasLtMatrixLayoutCreate(&entry.layB, HIP_R_16F, k, n, k));
     GQA_CACHE_CHECK(setLayoutBatch(entry.layB, batch, n * k));
 
-    GQA_CACHE_CHECK(
-        hipblasLtMatrixLayoutCreate(&entry.layC, HIP_R_16F, m, n, m));
+    hipDataType outType = key.outputFp32 ? HIP_R_32F : HIP_R_16F;
+    GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layC, outType, m, n, m));
     GQA_CACHE_CHECK(setLayoutBatch(entry.layC, batch, n * m));
-    GQA_CACHE_CHECK(
-        hipblasLtMatrixLayoutCreate(&entry.layD, HIP_R_16F, m, n, m));
+    GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layD, outType, m, n, m));
     GQA_CACHE_CHECK(setLayoutBatch(entry.layD, batch, n * m));
   }
 
@@ -327,14 +328,16 @@ static int gqa_forward_hipblaslt(
 
   size_t Qtrans_bytes = static_cast<size_t>(B) * H * sq * d * elem_sz;
   size_t Kexp_bytes = static_cast<size_t>(B) * H * skv * d * elem_sz;
-  size_t S_bytes = static_cast<size_t>(B) * H * sq * skv * elem_sz;
+  size_t S_f32_bytes = static_cast<size_t>(B) * H * sq * skv * sizeof(float);
+  size_t S_fp16_bytes = static_cast<size_t>(B) * H * sq * skv * elem_sz;
   size_t O_bytes = static_cast<size_t>(B) * H * sq * d * elem_sz;
 
   size_t off_Qtrans = 0;
   size_t off_Kexp = off_Qtrans + Qtrans_bytes;
   size_t off_Vexp = off_Kexp + Kexp_bytes;
-  size_t off_S = off_Vexp + Kexp_bytes;
-  size_t off_O = off_S + S_bytes;
+  size_t off_S_f32 = off_Vexp + Kexp_bytes;
+  size_t off_S_fp16 = off_S_f32 + S_f32_bytes;
+  size_t off_O = off_S_fp16 + S_fp16_bytes;
   size_t temp_end = off_O + O_bytes;
 
   // Optional RoPE buffers: allocated only when do_rotary is enabled.
@@ -364,8 +367,8 @@ static int gqa_forward_hipblaslt(
   // Query or create cached GEMM descriptors + algorithms. On first call for
   // a given shape the descriptors and layouts are created and the heuristic
   // is queried; subsequent calls reuse the cached state.
-  GqaGemmKey scoreKey{skv, sq, d, B * H, true};
-  GqaGemmKey valueKey{d, sq, skv, B * H, false};
+  GqaGemmKey scoreKey{skv, sq, d, B * H, true, true};   // outputFp32=true
+  GqaGemmKey valueKey{d, sq, skv, B * H, false, false}; // outputFp32=false
   const GqaGemmCacheEntry *scoreState =
       queryOrCreateGemmState(ltHandle, scoreKey);
   if (!scoreState)
@@ -392,7 +395,8 @@ static int gqa_forward_hipblaslt(
     void *d_Qtrans = ws + off_Qtrans;
     void *d_Kexp = ws + off_Kexp;
     void *d_Vexp = ws + off_Vexp;
-    void *d_S = ws + off_S;
+    void *d_S_f32 = ws + off_S_f32;
+    void *d_S_fp16 = ws + off_S_fp16;
     void *d_O = ws + off_O;
 
     void *gemm_ws_ptr = ws + temp_end;
@@ -474,37 +478,39 @@ static int gqa_forward_hipblaslt(
           static_cast<int>(HPG), kvSrcStride, kvDstStride, expandCopy));
     }
 
-    // ---- Step 8: Score GEMM ----
+    // ---- Step 8: Score GEMM (fp16 in, fp32 out) ----
     float scoreAlpha = scale;
     float beta = 0.0f;
     hipblasLtMatmulAlgo_t sAlgo = scoreState->algo;
 
     HIPBLAS_CHECK(hipblasLtMatmul(
         ltHandle, scoreState->desc, &scoreAlpha, d_Kexp, scoreState->layA,
-        d_Qtrans, scoreState->layB, &beta, d_S, scoreState->layC, d_S,
+        d_Qtrans, scoreState->layB, &beta, d_S_f32, scoreState->layC, d_S_f32,
         scoreState->layD, &sAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
 
-    // ---- Step 9: Causal Mask + Softmax ----
-    int scoreBatchStride = static_cast<int>(sq * skv);
+    // ---- Step 9: Causal Mask (fp32) + Softmax (fp32 -> fp16) ----
+    int scoreF32BatchStride = static_cast<int>(sq * skv);
+    int scoreFp16BatchStride = static_cast<int>(sq * skv);
     if (sq > 1) {
-      HIP_CHECK(hip_gqa_causal_mask(
-          stream, d_S, static_cast<int>(B * H), static_cast<int>(skv),
-          static_cast<int>(sq), scoreBatchStride, static_cast<int>(past_len),
+      HIP_CHECK(hip_gqa_causal_mask_f32(
+          stream, d_S_f32, static_cast<int>(B * H), static_cast<int>(skv),
+          static_cast<int>(sq), scoreF32BatchStride, static_cast<int>(past_len),
           static_cast<int>(local_window_size)));
     }
-    HIP_CHECK(hip_gqa_softmax_inplace(
-        stream, d_S, static_cast<int>(B * H * sq), static_cast<int>(skv),
-        static_cast<int>(sq), scoreBatchStride, head_sink, static_cast<int>(H),
+    HIP_CHECK(hip_gqa_softmax_f32_to_f16(
+        stream, d_S_f32, d_S_fp16, static_cast<int>(B * H * sq),
+        static_cast<int>(skv), static_cast<int>(sq), scoreF32BatchStride,
+        scoreFp16BatchStride, head_sink, static_cast<int>(H),
         static_cast<int>(use_smooth_softmax)));
 
-    // ---- Step 10: Value GEMM ----
+    // ---- Step 10: Value GEMM (fp16 in, fp16 out) ----
     float valAlpha = 1.0f;
     hipblasLtMatmulAlgo_t vAlgo = valueState->algo;
 
     HIPBLAS_CHECK(hipblasLtMatmul(
-        ltHandle, valueState->desc, &valAlpha, d_Vexp, valueState->layA, d_S,
-        valueState->layB, &beta, d_O, valueState->layC, d_O, valueState->layD,
-        &vAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
+        ltHandle, valueState->desc, &valAlpha, d_Vexp, valueState->layA,
+        d_S_fp16, valueState->layB, &beta, d_O, valueState->layC, d_O,
+        valueState->layD, &vAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
 
     // ---- Step 11: O Transpose BNSD [B,H,S,d] -> BSHD [B,S,H,d] ----
     HIP_CHECK(hip_gqa_transpose_mid_dims(

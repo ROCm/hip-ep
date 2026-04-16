@@ -20,6 +20,7 @@ add_library(OnnxToHip STATIC
   GatherConversion.cpp
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp
+  GemmConversion.cpp
 )
 
 add_dependencies(OnnxToHip
