@@ -872,9 +872,8 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
     Optional<Hip_TensorOrMemRef>:$bias,        // (channels)
     Optional<Hip_TensorOrMemRef>:$past_state,  // (batch, channels, k-1)
 
-    // DPS output buffers
-    Hip_TensorOrMemRef:$output,          // same shape as input
-    Hip_TensorOrMemRef:$present_state,   // (batch, channels, k-1)
+    // DPS output buffers: [output, present_state]
+    Variadic<Hip_TensorOrMemRef>:$outputs,
 
     // Attributes
     DefaultValuedAttr<StrAttr, "\"none\"">:$activation,  // "none", "silu", "swish"
@@ -891,11 +890,7 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
         (`,` type($bias)^)?
         (`,` type($past_state)^)?
     `)`
-    `outs` `(`
-        $output `,` $present_state
-        `:`
-        type($output) `,` type($present_state)
-    `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
 }

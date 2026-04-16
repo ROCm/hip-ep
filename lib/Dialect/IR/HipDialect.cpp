@@ -615,17 +615,7 @@ void QMoEOp::getEffects(
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange CausalConvWithStateOp::getDpsInitsMutable() {
-  // DPS inits: output, present_state (always 2)
-  // Count actual inputs before the inits
-  unsigned numInputs = 1; // ctx
-  numInputs++;            // input
-  numInputs++;            // weight
-  if (getBias())
-    ++numInputs;
-  if (getPastState())
-    ++numInputs;
-
-  return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/2);
+  return getOutputsMutable();
 }
 
 void CausalConvWithStateOp::getEffects(
