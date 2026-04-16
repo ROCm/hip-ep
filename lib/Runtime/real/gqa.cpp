@@ -446,8 +446,9 @@ static int gqa_forward_hipblaslt(
   // Query or create cached GEMM descriptors + algorithms. On first call for
   // a given shape the descriptors and layouts are created and the heuristic
   // is queried; subsequent calls reuse the cached state.
-  GqaGemmKey scoreKey{total_seq, sq, d, B * H, true, true};   // outputFp32=true
-  GqaGemmKey valueKey{d, sq, total_seq, B * H, false, false}; // outputFp32=false
+  GqaGemmKey scoreKey{total_seq, sq, d, B * H, true, true}; // outputFp32=true
+  GqaGemmKey valueKey{d,     sq,    total_seq,
+                      B * H, false, false}; // outputFp32=false
   const GqaGemmCacheEntry *scoreState =
       queryOrCreateGemmState(ltHandle, scoreKey);
   if (!scoreState)
@@ -587,16 +588,14 @@ static int gqa_forward_hipblaslt(
     int scoreFp16BatchStride = static_cast<int>(sq * total_seq);
     if (sq > 1) {
       HIP_CHECK(hip_gqa_causal_mask_f32(
-          stream, d_S_f32, static_cast<int>(B * H),
-          static_cast<int>(total_seq), static_cast<int>(sq),
-          scoreF32BatchStride, static_cast<int>(past_len),
+          stream, d_S_f32, static_cast<int>(B * H), static_cast<int>(total_seq),
+          static_cast<int>(sq), scoreF32BatchStride, static_cast<int>(past_len),
           static_cast<int>(local_window_size)));
     }
     HIP_CHECK(hip_gqa_softmax_f32_to_f16(
         stream, d_S_f32, d_S_fp16, static_cast<int>(B * H * sq),
-        static_cast<int>(total_seq), static_cast<int>(sq),
-        scoreF32BatchStride, scoreFp16BatchStride, head_sink,
-        static_cast<int>(H),
+        static_cast<int>(total_seq), static_cast<int>(sq), scoreF32BatchStride,
+        scoreFp16BatchStride, head_sink, static_cast<int>(H),
         static_cast<int>(use_smooth_softmax)));
 
     // ---- Step 10: Value GEMM (fp16 in, fp16 out) ----
