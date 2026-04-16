@@ -61,17 +61,7 @@ jobs:
         run: |
           git config --global url."git@github.com:ROCm/MorphiZen.git".insteadOf \
             "https://github.com/ROCm/MorphiZen.git"
-          git submodule update --init --recursive
-
-      - name: Checkout OGA
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: ${{ env.OGA_REPO }}
-          ref: ${{ env.OGA_REF }}
-          path: source-oga
-          submodules: true
-          fetch-depth: 1
-          show-progress: false
+          git submodule update --init --recursive --depth 1
 
       # -----------------------------------------------------------------------
       # Cache: ORT + LLVM prebuilt + flatbuffers + protobuf + gtest
@@ -325,6 +315,17 @@ jobs:
           path: ${{ runner.workspace }}/oga-artifacts
           key: oga-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
 
+      - name: Checkout OGA
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ env.OGA_REPO }}
+          ref: ${{ env.OGA_REF }}
+          path: source-oga
+          submodules: true
+          fetch-depth: 1
+          show-progress: false
+
       - name: Prepare ORT_HOME for OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
         shell: bash
@@ -439,7 +440,6 @@ jobs:
           name: gpu-test-package
           path: staging/
           retention-days: ${{ github.ref == 'refs/heads/main' && 14 || 3 }}
-          compression-level: 1
 
   # ---------------------------------------------------------------------------
   # GPU test job: runs on the self-hosted machine with a real AMD GPU.
