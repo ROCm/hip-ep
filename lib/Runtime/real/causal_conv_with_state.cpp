@@ -36,17 +36,13 @@ template <typename T> static inline T silu(T x) {
   return x / (static_cast<T>(1) + std::exp(-x));
 }
 
-int wrap_causal_conv_with_state(RuntimeState *state, const void *input,
-                                const void *weight, const void *bias,
-                                const void *past_state, void *output,
-                                void *present_state, int64_t batch_size,
-                                int64_t channels, int64_t seq_len,
-                                int64_t kernel_size, int64_t ndim,
-                                int64_t activation,
-                                int64_t element_size_bytes) {
+int wrap_causal_conv_with_state(
+    RuntimeState *state, const void *input, const void *weight,
+    const void *bias, const void *past_state, void *output, void *present_state,
+    int64_t batch_size, int64_t channels, int64_t seq_len, int64_t kernel_size,
+    int64_t ndim, int64_t activation, int64_t element_size_bytes) {
   if (!state || !input || !weight || !output || !present_state) {
-    fprintf(stderr,
-            "wrap_causal_conv_with_state: null required argument\n");
+    fprintf(stderr, "wrap_causal_conv_with_state: null required argument\n");
     return -1;
   }
 
@@ -78,12 +74,14 @@ int wrap_causal_conv_with_state(RuntimeState *state, const void *input,
 
   // Allocate temporary buffer for the virtual input on device:
   // shape (batch, channels, state_len + seq_len) = (B, C, k-1+L)
-  int64_t virtual_size = batch_size * channels * virtual_len * element_size_bytes;
+  int64_t virtual_size =
+      batch_size * channels * virtual_len * element_size_bytes;
   void *virtual_buf = nullptr;
   hipError_t err = hipMalloc(&virtual_buf, virtual_size);
   if (err != hipSuccess || !virtual_buf) {
-    fprintf(stderr, "wrap_causal_conv_with_state: hipMalloc failed for "
-                    "virtual buffer (%lld bytes)\n",
+    fprintf(stderr,
+            "wrap_causal_conv_with_state: hipMalloc failed for "
+            "virtual buffer (%lld bytes)\n",
             (long long)virtual_size);
     return -1;
   }
@@ -94,17 +92,14 @@ int wrap_causal_conv_with_state(RuntimeState *state, const void *input,
   for (int64_t b = 0; b < batch_size; ++b) {
     for (int64_t c = 0; c < channels; ++c) {
       int64_t bc = b * channels + c;
-      char *dst_base =
-          static_cast<char *>(virtual_buf) +
-          bc * virtual_len * element_size_bytes;
+      char *dst_base = static_cast<char *>(virtual_buf) +
+                       bc * virtual_len * element_size_bytes;
 
       // Copy past_state portion (first k-1 elements)
       if (past_state) {
-        const char *ps_src =
-            static_cast<const char *>(past_state) +
-            bc * state_len * element_size_bytes;
-        hipMemcpyAsync(dst_base, ps_src,
-                       state_len * element_size_bytes,
+        const char *ps_src = static_cast<const char *>(past_state) +
+                             bc * state_len * element_size_bytes;
+        hipMemcpyAsync(dst_base, ps_src, state_len * element_size_bytes,
                        hipMemcpyDeviceToDevice, stream);
       } else {
         hipMemsetAsync(dst_base, 0, state_len * element_size_bytes, stream);
@@ -112,11 +107,10 @@ int wrap_causal_conv_with_state(RuntimeState *state, const void *input,
 
       // Copy input portion (last L elements)
       const char *in_src =
-          static_cast<const char *>(input) +
-          bc * seq_len * element_size_bytes;
+          static_cast<const char *>(input) + bc * seq_len * element_size_bytes;
       hipMemcpyAsync(dst_base + state_len * element_size_bytes, in_src,
-                     seq_len * element_size_bytes,
-                     hipMemcpyDeviceToDevice, stream);
+                     seq_len * element_size_bytes, hipMemcpyDeviceToDevice,
+                     stream);
     }
   }
 
@@ -125,9 +119,8 @@ int wrap_causal_conv_with_state(RuntimeState *state, const void *input,
   for (int64_t b = 0; b < batch_size; ++b) {
     for (int64_t c = 0; c < channels; ++c) {
       int64_t bc = b * channels + c;
-      const char *src =
-          static_cast<const char *>(virtual_buf) +
-          (bc * virtual_len + seq_len) * element_size_bytes;
+      const char *src = static_cast<const char *>(virtual_buf) +
+                        (bc * virtual_len + seq_len) * element_size_bytes;
       char *dst = static_cast<char *>(present_state) +
                   bc * state_len * element_size_bytes;
       hipMemcpyAsync(dst, src, state_len * element_size_bytes,
@@ -158,15 +151,15 @@ int wrap_causal_conv_with_state(RuntimeState *state, const void *input,
     dt = miopenHalf;
   else {
     hipFree(virtual_buf);
-    fprintf(stderr, "wrap_causal_conv_with_state: unsupported element_size "
-                    "%lld\n",
+    fprintf(stderr,
+            "wrap_causal_conv_with_state: unsupported element_size "
+            "%lld\n",
             (long long)element_size_bytes);
     return -1;
   }
 
   // Create tensor descriptors (4D: N, C, H, W)
-  miopenTensorDescriptor_t inDesc = nullptr, wDesc = nullptr,
-                           outDesc = nullptr;
+  miopenTensorDescriptor_t inDesc = nullptr, wDesc = nullptr, outDesc = nullptr;
   miopenConvolutionDescriptor_t convDesc = nullptr;
   miopenStatus_t mst;
   int ret = 0;
@@ -175,9 +168,10 @@ int wrap_causal_conv_with_state(RuntimeState *state, const void *input,
   do {                                                                         \
     mst = (call);                                                              \
     if (mst != miopenStatusSuccess) {                                          \
-      fprintf(stderr, "wrap_causal_conv_with_state: MIOpen error %d at "       \
-                      "%s:%d\n",                                               \
-              mst, __FILE__, __LINE__);                                         \
+      fprintf(stderr,                                                          \
+              "wrap_causal_conv_with_state: MIOpen error %d at "               \
+              "%s:%d\n",                                                       \
+              mst, __FILE__, __LINE__);                                        \
       ret = -1;                                                                \
       goto cleanup;                                                            \
     }                                                                          \
@@ -194,9 +188,9 @@ int wrap_causal_conv_with_state(RuntimeState *state, const void *input,
       static_cast<int>(virtual_len)));
 
   // Weight: (C, 1, 1, kernel_size) for depthwise (group=C)
-  CAUSAL_MIOPEN_CHECK(miopenSet4dTensorDescriptor(
-      wDesc, dt, static_cast<int>(channels), 1, 1,
-      static_cast<int>(kernel_size)));
+  CAUSAL_MIOPEN_CHECK(
+      miopenSet4dTensorDescriptor(wDesc, dt, static_cast<int>(channels), 1, 1,
+                                  static_cast<int>(kernel_size)));
 
   // Output: (B, C, 1, seq_len)
   CAUSAL_MIOPEN_CHECK(miopenSet4dTensorDescriptor(
@@ -231,8 +225,8 @@ int wrap_causal_conv_with_state(RuntimeState *state, const void *input,
 
     CAUSAL_MIOPEN_CHECK(miopenFindConvolutionForwardAlgorithm(
         handle, inDesc, virtual_buf, wDesc, weight, convDesc, outDesc, output,
-        /*requestAlgoCount=*/1, &returnedAlgoCount, &perfResult,
-        workspace, wsSize, /*exhaustiveSearch=*/false));
+        /*requestAlgoCount=*/1, &returnedAlgoCount, &perfResult, workspace,
+        wsSize, /*exhaustiveSearch=*/false));
 
     float alpha = 1.0f, beta = 0.0f;
     CAUSAL_MIOPEN_CHECK(miopenConvolutionForward(
@@ -268,9 +262,8 @@ int wrap_causal_conv_with_state(RuntimeState *state, const void *input,
     void *sigmoid_buf = nullptr;
     err = hipMalloc(&sigmoid_buf, output_size);
     if (err != hipSuccess || !sigmoid_buf) {
-      fprintf(stderr,
-              "wrap_causal_conv_with_state: hipMalloc failed for "
-              "sigmoid buffer\n");
+      fprintf(stderr, "wrap_causal_conv_with_state: hipMalloc failed for "
+                      "sigmoid buffer\n");
       ret = -1;
       goto cleanup;
     }
@@ -295,9 +288,9 @@ int wrap_causal_conv_with_state(RuntimeState *state, const void *input,
 
     // Compute output = output * sigmoid_buf
     float alpha_mul = 1.0f, beta_mul = 0.0f;
-    mst = miopenOpTensor(handle, miopenTensorOpMul, &alpha_mul, outDesc,
-                         output, &alpha_mul, outDesc, sigmoid_buf, &beta_mul,
-                         outDesc, output);
+    mst = miopenOpTensor(handle, miopenTensorOpMul, &alpha_mul, outDesc, output,
+                         &alpha_mul, outDesc, sigmoid_buf, &beta_mul, outDesc,
+                         output);
     hipFree(sigmoid_buf);
     if (mst != miopenStatusSuccess) {
       fprintf(stderr, "wrap_causal_conv_with_state: mul failed (%d)\n", mst);
