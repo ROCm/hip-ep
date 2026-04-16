@@ -393,41 +393,33 @@ __global__ void split_qkv_kernel(
 // -------------------------------------------------------------------------
 // Masks future positions so each query attends only to past + itself.
 //   Score matrix: col-major [skv, sq] per head
-//   S[k, q] = -65504 (FP16 -inf) where k > past_len + q
+//   S[k, q] = -inf where k > past_len + q
 //
 // When local_window_size > 0, also masks distant past positions:
-//   S[k, q] = -65504 where k < past_len + q - local_window_size + 1
+//   S[k, q] = -inf where k < past_len + q - local_window_size + 1
 //
 // blockIdx.y = head (0..B*H-1)
+//
+// Templated on T ∈ {__half, float}. The mask value is -65504 for fp16
+// (largest finite negative) and -INFINITY for fp32.
 // -------------------------------------------------------------------------
 
-__global__ void causal_mask_kernel(
-    __half* __restrict__ S,
-    int skv, int sq, int batch_stride, int past_len,
-    int local_window_size) {
-  const int head = __builtin_amdgcn_readfirstlane(blockIdx.y);
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  int total = skv * sq;
-  if (idx >= total) return;
+template <typename T>
+__device__ __forceinline__ T causal_mask_fill_value();
 
-  int k = idx % skv;
-  int q = idx / skv;
-  int abs_q = past_len + q;
-  if (k > abs_q) {
-    S[(size_t)head * batch_stride + (size_t)q * skv + k] =
-        __float2half(-65504.0f);
-  } else if (local_window_size > 0 && k < abs_q - local_window_size + 1) {
-    S[(size_t)head * batch_stride + (size_t)q * skv + k] =
-        __float2half(-65504.0f);
-  }
+template <>
+__device__ __forceinline__ __half causal_mask_fill_value<__half>() {
+  return __float2half(-65504.0f);
 }
 
-// -------------------------------------------------------------------------
-// Step 9a (fp32 variant): Causal Mask on fp32 Score matrix
-// -------------------------------------------------------------------------
+template <>
+__device__ __forceinline__ float causal_mask_fill_value<float>() {
+  return -INFINITY;
+}
 
-__global__ void causal_mask_f32_kernel(
-    float* __restrict__ S,
+template <typename T>
+__global__ void causal_mask_kernel_impl(
+    T* __restrict__ S,
     int skv, int sq, int batch_stride, int past_len,
     int local_window_size) {
   const int head = __builtin_amdgcn_readfirstlane(blockIdx.y);
@@ -438,10 +430,11 @@ __global__ void causal_mask_f32_kernel(
   int k = idx % skv;
   int q = idx / skv;
   int abs_q = past_len + q;
+  const T fill = causal_mask_fill_value<T>();
   if (k > abs_q) {
-    S[(size_t)head * batch_stride + (size_t)q * skv + k] = -INFINITY;
+    S[(size_t)head * batch_stride + (size_t)q * skv + k] = fill;
   } else if (local_window_size > 0 && k < abs_q - local_window_size + 1) {
-    S[(size_t)head * batch_stride + (size_t)q * skv + k] = -INFINITY;
+    S[(size_t)head * batch_stride + (size_t)q * skv + k] = fill;
   }
 }
 
@@ -652,21 +645,8 @@ extern "C" int hip_gqa_split_qkv(
   return hipSuccess;
 }
 
-// Step 9a (fp32 variant): Causal mask on fp32 Score matrix
-extern "C" int hip_gqa_causal_mask_f32(
-    void* stream_ptr, void* S,
-    int total_heads, int skv, int sq,
-    int batch_stride, int past_len, int local_window_size) {
-  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
-  int total = skv * sq;
-  int blocksX = (total + GQA_THREADS - 1) / GQA_THREADS;
-  causal_mask_f32_kernel<<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
-      static_cast<float*>(S),
-      skv, sq, batch_stride, past_len, local_window_size);
-  return hipSuccess;
-}
+// Step 9a: Causal mask launchers (fp16 and fp32 instantiations)
 
-// Step 9a: Causal mask
 extern "C" int hip_gqa_causal_mask(
     void* stream_ptr, void* S,
     int total_heads, int skv, int sq,
@@ -674,8 +654,21 @@ extern "C" int hip_gqa_causal_mask(
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   int total = skv * sq;
   int blocksX = (total + GQA_THREADS - 1) / GQA_THREADS;
-  causal_mask_kernel<<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
+  causal_mask_kernel_impl<__half><<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
       static_cast<__half*>(S),
+      skv, sq, batch_stride, past_len, local_window_size);
+  return hipSuccess;
+}
+
+extern "C" int hip_gqa_causal_mask_f32(
+    void* stream_ptr, void* S,
+    int total_heads, int skv, int sq,
+    int batch_stride, int past_len, int local_window_size) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  int total = skv * sq;
+  int blocksX = (total + GQA_THREADS - 1) / GQA_THREADS;
+  causal_mask_kernel_impl<float><<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
+      static_cast<float*>(S),
       skv, sq, batch_stride, past_len, local_window_size);
   return hipSuccess;
 }
