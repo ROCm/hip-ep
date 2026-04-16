@@ -23,8 +23,8 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
     mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
   auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
   if (!funcNameAttr || funcNameAttr.getValue() != "CausalConvWithState")
-    return rewriter.notifyMatchFailure(
-        op, "not a CausalConvWithState operation");
+    return rewriter.notifyMatchFailure(op,
+                                       "not a CausalConvWithState operation");
 
   auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
   if (!domainAttr || domainAttr.getValue() != "com.microsoft")
@@ -39,7 +39,8 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
   mlir::Location loc = op->getLoc();
 
   // CausalConvWithState has 2-4 inputs:
-  //   input (required), weight (required), bias (optional), past_state (optional)
+  //   input (required), weight (required), bias (optional), past_state
+  //   (optional)
   size_t numOps = op->getNumOperands();
   if (numOps < 2 || numOps > 4)
     return rewriter.notifyMatchFailure(
@@ -65,10 +66,10 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
     activationAttr = rewriter.getStringAttr("none");
 
   auto ndimAttrOnnx = op->getAttrOfType<mlir::IntegerAttr>("ndim");
-  auto ndimAttr = ndimAttrOnnx
-                      ? rewriter.getI64IntegerAttr(
-                            ndimAttrOnnx.getValue().getSExtValue())
-                      : rewriter.getI64IntegerAttr(1);
+  auto ndimAttr =
+      ndimAttrOnnx
+          ? rewriter.getI64IntegerAttr(ndimAttrOnnx.getValue().getSExtValue())
+          : rewriter.getI64IntegerAttr(1);
 
   // Outputs: output (same shape as input), present_state
   size_t numResults = op->getNumResults();
@@ -83,9 +84,8 @@ mlir::LogicalResult CausalConvWithStateToHip::matchAndRewrite(
 
   // Create DPS init tensors
   mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
-  mlir::Value presentStateInit =
-      createEmptyTensor(rewriter, loc, presentStateType,
-                        pastState ? pastState : input);
+  mlir::Value presentStateInit = createEmptyTensor(
+      rewriter, loc, presentStateType, pastState ? pastState : input);
 
   // Build operands
   mlir::SmallVector<mlir::Value> operands;

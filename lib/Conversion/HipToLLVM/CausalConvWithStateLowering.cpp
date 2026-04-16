@@ -65,18 +65,18 @@ struct CausalConvWithStateOpLowering
     if (rank < 3)
       return op.emitError("input must be at least rank-3");
 
-    Value batchSize = getMemRefDimSize(inputType, 0, adaptor.getInput(),
-                                       rewriter, loc);
-    Value channels = getMemRefDimSize(inputType, 1, adaptor.getInput(),
-                                      rewriter, loc);
+    Value batchSize =
+        getMemRefDimSize(inputType, 0, adaptor.getInput(), rewriter, loc);
+    Value channels =
+        getMemRefDimSize(inputType, 1, adaptor.getInput(), rewriter, loc);
 
     // seq_len = product of spatial dimensions (last ndim dims)
     // For ndim=1: just the last dim
-    Value seqLen = getMemRefDimSize(inputType, 2, adaptor.getInput(),
-                                    rewriter, loc);
+    Value seqLen =
+        getMemRefDimSize(inputType, 2, adaptor.getInput(), rewriter, loc);
     for (int64_t i = 3; i < rank; ++i) {
-      Value dim = getMemRefDimSize(inputType, i, adaptor.getInput(),
-                                   rewriter, loc);
+      Value dim =
+          getMemRefDimSize(inputType, i, adaptor.getInput(), rewriter, loc);
       seqLen = LLVM::MulOp::create(rewriter, loc, seqLen, dim);
     }
 
@@ -127,10 +127,9 @@ struct CausalConvWithStateOpLowering
       return failure();
 
     SmallVector<Value, 14> args = {
-        statePtr,     inputPtr,      weightPtr,    biasPtr,
-        pastStatePtr, outputPtr,     presentStatePtr,
-        batchSize,    channels,      seqLen,       kernelSizeVal,
-        ndimVal,      activationVal, elemSizeVal};
+        statePtr,      inputPtr,        weightPtr,     biasPtr,    pastStatePtr,
+        outputPtr,     presentStatePtr, batchSize,     channels,   seqLen,
+        kernelSizeVal, ndimVal,         activationVal, elemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
