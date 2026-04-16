@@ -573,7 +573,11 @@ jobs:
               Write-Host "[SKIP] No genai_config_128.json in $($modelDir.Name)"
               continue
             }
-            Copy-Item $pipelineConfig (Join-Path $modelDir.FullName "genai_config.json") -Force
+            $genaiCfgPath = Join-Path $modelDir.FullName "genai_config.json"
+            Copy-Item $pipelineConfig $genaiCfgPath -Force
+            $cfgJson = Get-Content $genaiCfgPath -Raw | ConvertFrom-Json
+            $epName = try { $cfgJson.model.decoder.session_options.provider_options[0].name } catch { $null }
+            if (-not $epName) { $epName = "MorphiZenExecutionProvider" }
             $promptFile = Join-Path $modelDir.FullName "prompt.txt"
             $promptArgs = if (Test-Path $promptFile) {
               @("--prompt_file", $promptFile)
@@ -581,12 +585,12 @@ jobs:
               @("-l", "128")
             }
             $outFile = "oga-results\$($modelDir.Name).txt"
-            Write-Host "=== OGA Benchmark: $($modelDir.Name) ==="
+            Write-Host "=== OGA Benchmark: $($modelDir.Name) (EP=$epName) ==="
             & $benchmark `
               -i $modelDir.FullName `
               -g 128 -r 5 -w 1 -b 1 -ml -1 `
               @promptArgs `
-              --ep_library MorphiZenExecutionProvider $epDll `
+              --ep_library $epName $epDll `
               -v 2>&1 | Tee-Object -FilePath $outFile
             if ($LASTEXITCODE -ne 0) { $failed = 1 }
           }
