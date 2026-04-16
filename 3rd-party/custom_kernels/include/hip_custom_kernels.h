@@ -189,6 +189,13 @@ int hip_gqa_causal_mask(
     int total_heads, int skv, int sq,
     int batch_stride, int past_len, int local_window_size);
 
+/* Causal mask on fp32 Score matrix.  Same semantics as hip_gqa_causal_mask
+ * but operates on float* and writes -INFINITY instead of -65504. */
+int hip_gqa_causal_mask_f32(
+    void* stream, void* S,
+    int total_heads, int skv, int sq,
+    int batch_stride, int past_len, int local_window_size);
+
 /* Column-wise softmax in-place. One threadblock per (head, query).
  * Smooth softmax is activated when head_sink is non-null OR use_smooth_softmax
  * is set.  When head_sink is non-null, uses per-head sink factors:
@@ -200,6 +207,15 @@ int hip_gqa_softmax_inplace(
     int total_head_queries, int rows, int cols,
     int batch_stride, const void* head_sink, int num_heads,
     int use_smooth_softmax);
+
+/* Column-wise softmax: fp32 input -> fp16 output.
+ * Reads fp32 Score matrix (no fp16 overflow/inf), writes fp16 probabilities.
+ * input_batch_stride is in float elements, output_batch_stride in half elements. */
+int hip_gqa_softmax_f32_to_f16(
+    void* stream, const void* input_f32, void* output_f16,
+    int total_head_queries, int rows, int cols,
+    int input_batch_stride, int output_batch_stride,
+    const void* head_sink, int num_heads, int use_smooth_softmax);
 
 /* Fused GQA decode (sq == 1, d in {64, 128, 256}): single-token attention
  * via cooperative dot product + online softmax in log2e space, one block
