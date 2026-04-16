@@ -162,7 +162,7 @@ module {
     // CHECK-SAME: kv_num_heads = 8
     // CHECK-SAME: q_num_heads = 32
     // CHECK-SAME: scale = {{0.088388[0-9]*|8.838834e-02}}
-    // CHECK-SAME: update_rule = "gated_delta"
+    // "gated_delta" is the default value, so MLIR omits it from output
 
     return %out#0, %out#1 : tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>
   }
