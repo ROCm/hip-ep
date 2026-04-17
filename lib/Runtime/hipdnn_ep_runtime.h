@@ -115,6 +115,7 @@ static inline const char *hipdnn_ep_datatype_name(int64_t data_type) {
 #define HIPDNN_EP_ACTIVATION_SIGMOID 0
 #define HIPDNN_EP_ACTIVATION_RELU 1
 #define HIPDNN_EP_ACTIVATION_TANH 2
+#define HIPDNN_EP_ACTIVATION_SOFTPLUS 3
 
 static inline const char *hipdnn_ep_activation_name(int64_t activation_mode) {
   switch (activation_mode) {
@@ -124,6 +125,8 @@ static inline const char *hipdnn_ep_activation_name(int64_t activation_mode) {
     return "relu";
   case HIPDNN_EP_ACTIVATION_TANH:
     return "tanh";
+  case HIPDNN_EP_ACTIVATION_SOFTPLUS:
+    return "softplus";
   default:
     return "unknown";
   }

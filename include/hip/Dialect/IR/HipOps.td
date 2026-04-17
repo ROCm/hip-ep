@@ -708,26 +708,56 @@ def Hip_SiluOp : Hip_DpsOp<"silu"> {
 def Hip_SigmoidOp : Hip_DpsOp<"sigmoid"> {
   let summary = "Sigmoid activation";
   let description = [{
-    Applies sigmoid activation: output = 1 / (1 + exp(-input))
+    Applies sigmoid activation: y = 1 / (1 + exp(-x))
 
     Uses destination-passing style: output buffer is provided as argument.
 
     Example:
     ```mlir
-    hip.sigmoid(%ctx) ins(%input : memref<1x128x512xf32, 1>)
-                      outs(%output : memref<1x128x512xf32, 1>)
+    hip.sigmoid(%ctx) ins(%x : memref<1x128x512xf32, 1>)
+                      outs(%y : memref<1x128x512xf32, 1>)
     ```
   }];
 
   let arguments = (ins
     Hip_ContextType:$ctx,
-    Hip_TensorOrMemRef:$input,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
   );
 
   let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
-    `outs` `(` $output `:` type($output) `)`
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_SoftplusOp : Hip_DpsOp<"softplus"> {
+  let summary = "Softplus activation: y = ln(exp(x) + 1)";
+  let description = [{
+    Applies the softplus activation function element-wise.
+    Implements the standard ONNX Softplus operator.
+
+    Formula: Y = ln(exp(X) + 1)
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.softplus(%ctx) ins(%x : memref<1x128x512xf32, 1>)
+                       outs(%y : memref<1x128x512xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
 }

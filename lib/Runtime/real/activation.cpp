@@ -39,6 +39,8 @@ static miopenActivationMode_t hipdnn_ep_to_miopen_activation(int64_t mode,
     return miopenActivationRELU;
   case HIPDNN_EP_ACTIVATION_TANH:
     return miopenActivationTANH;
+  case HIPDNN_EP_ACTIVATION_SOFTPLUS:
+    return miopenActivationSOFTRELU;
   default:
     fprintf(stderr, "[REAL] unsupported activation_mode %lld for MIOpen\n",
             (long long)mode);
