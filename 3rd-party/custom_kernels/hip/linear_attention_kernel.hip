@@ -1,0 +1,265 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
+#include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
+#include <cstdint>
+#include <cstdio>
+#include <cmath>
+
+#include "hip_custom_kernels.h"
+#include "debug_log.h"
+
+static constexpr int LA_THREADS = 256;
+
+static constexpr int LA_RULE_LINEAR      = 0;
+static constexpr int LA_RULE_GATED       = 1;
+static constexpr int LA_RULE_DELTA       = 2;
+static constexpr int LA_RULE_GATED_DELTA = 3;
+
+template<typename T> __device__ __forceinline__ float to_float(T val);
+template<> __device__ __forceinline__ float to_float(float val) { return val; }
+template<> __device__ __forceinline__ float to_float(__half val) { return __half2float(val); }
+
+template<typename T> __device__ __forceinline__ T from_float(float val);
+template<> __device__ __forceinline__ float from_float(float val) { return val; }
+template<> __device__ __forceinline__ __half from_float(float val) { return __float2half(val); }
+
+//===----------------------------------------------------------------------===//
+// Fused T=1 linear attention decode kernel
+//===----------------------------------------------------------------------===//
+//
+// One thread-block per (batch, kv_head) pair.
+//
+// Phase 1 (delta/gated_delta only):
+//   Compute sk[j] = sum_i [exp(g[i]) *] S_old[i][j] * k[i]  for j in [0, dv)
+//
+// Phase 2: Update state  S[dk, dv]  in-place.
+//   linear:       S[i][j]  += k[i] * v[j]
+//   gated:        S[i][j]   = exp(g[i]) * S[i][j] + k[i] * v[j]
+//   delta:        S[i][j]  += beta * k[i] * (v[j] - sk[j])
+//   gated_delta:  S[i][j]   = exp(g[i]) * S[i][j] + beta * k[i] * (v[j] - sk[j])
+//
+// Phase 3: For each query head h mapped to this KV group:
+//   o[j] = scale * sum_i q_h[i] * S[i][j]
+//
+// Shared memory layout (all float for accumulation precision):
+//   k_smem[dk] | v_smem[dv] | aux_smem[dk] | sk_smem[dv]
+//   aux_smem holds exp(g) during phases 1-2, then q during phase 3.
+//
+template <typename T>
+__global__ void linear_attention_decode_kernel(
+    const T* __restrict__ query,
+    const T* __restrict__ key,
+    const T* __restrict__ value,
+    const T* __restrict__ decay,
+    const T* __restrict__ beta_in,
+    T* __restrict__ state,
+    T* __restrict__ output,
+    int Hq, int Hkv, int dk, int dv,
+    float scale, int update_rule)
+{
+    const int bg = blockIdx.x;
+    const int b  = bg / Hkv;
+    const int g  = bg % Hkv;
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+    const int state_size = dk * dv;
+
+    extern __shared__ float smem[];
+    float* k_smem   = smem;
+    float* v_smem   = smem + dk;
+    float* aux_smem = smem + dk + dv;
+    float* sk_smem  = smem + 2 * dk + dv;
+
+    const T* k_ptr = key   + (int64_t)b * Hkv * dk + (int64_t)g * dk;
+    const T* v_ptr = value + (int64_t)b * Hkv * dv + (int64_t)g * dv;
+    T* S = state + ((int64_t)b * Hkv + g) * dk * dv;
+
+    for (int i = tid; i < dk; i += nthreads)
+        k_smem[i] = to_float(k_ptr[i]);
+    for (int j = tid; j < dv; j += nthreads)
+        v_smem[j] = to_float(v_ptr[j]);
+
+    const bool has_decay =
+        (update_rule == LA_RULE_GATED || update_rule == LA_RULE_GATED_DELTA) &&
+        decay != nullptr;
+
+    if (has_decay) {
+        const T* d_ptr = decay + (int64_t)b * Hkv * dk + (int64_t)g * dk;
+        for (int i = tid; i < dk; i += nthreads)
+            aux_smem[i] = expf(to_float(d_ptr[i]));
+    }
+
+    float beta_val = 0.0f;
+    if (beta_in &&
+        (update_rule == LA_RULE_DELTA || update_rule == LA_RULE_GATED_DELTA))
+        beta_val = to_float(beta_in[(int64_t)b * Hkv + g]);
+
+    __syncthreads();
+
+    // === Phase 1: S^T @ k (with optional decay weighting) ===
+    const bool needs_sk =
+        (update_rule == LA_RULE_DELTA || update_rule == LA_RULE_GATED_DELTA);
+
+    if (needs_sk) {
+        for (int j = tid; j < dv; j += nthreads) {
+            float sum = 0.0f;
+            for (int i = 0; i < dk; i++) {
+                float s_ij = to_float(S[i * dv + j]);
+                float k_i  = k_smem[i];
+                sum += (has_decay ? aux_smem[i] : 1.0f) * s_ij * k_i;
+            }
+            sk_smem[j] = sum;
+        }
+        __syncthreads();
+    }
+
+    // === Phase 2: state update ===
+    for (int idx = tid; idx < state_size; idx += nthreads) {
+        const int i = idx / dv;
+        const int j = idx % dv;
+
+        float s_val = to_float(S[idx]);
+        const float k_i = k_smem[i];
+        const float v_j = v_smem[j];
+
+        switch (update_rule) {
+        case LA_RULE_LINEAR:
+            s_val += k_i * v_j;
+            break;
+        case LA_RULE_GATED:
+            s_val = aux_smem[i] * s_val + k_i * v_j;
+            break;
+        case LA_RULE_DELTA:
+            s_val += beta_val * k_i * (v_j - sk_smem[j]);
+            break;
+        case LA_RULE_GATED_DELTA:
+            s_val = aux_smem[i] * s_val + beta_val * k_i * (v_j - sk_smem[j]);
+            break;
+        }
+
+        S[idx] = from_float<T>(s_val);
+    }
+    __syncthreads();
+
+    // === Phase 3: output = scale * S^T @ q  (per query head) ===
+    const int heads_per_group = Hq / Hkv;
+    float* q_smem = aux_smem;
+
+    for (int hl = 0; hl < heads_per_group; hl++) {
+        const int h = g * heads_per_group + hl;
+        const T* q_ptr = query  + (int64_t)b * Hq * dk + (int64_t)h * dk;
+        T* out_ptr     = output + (int64_t)b * Hq * dv + (int64_t)h * dv;
+
+        for (int i = tid; i < dk; i += nthreads)
+            q_smem[i] = to_float(q_ptr[i]);
+        __syncthreads();
+
+        for (int j = tid; j < dv; j += nthreads) {
+            float sum = 0.0f;
+            for (int i = 0; i < dk; i++)
+                sum += q_smem[i] * to_float(S[i * dv + j]);
+            out_ptr[j] = from_float<T>(scale * sum);
+        }
+        __syncthreads();
+    }
+}
+
+//===----------------------------------------------------------------------===//
+// Host-side launcher
+//===----------------------------------------------------------------------===//
+
+extern "C" int hip_linear_attention_decode(
+    void* stream,
+    const void* query,
+    const void* key,
+    const void* value,
+    const void* decay,
+    const void* beta,
+    void* state,
+    void* output,
+    int64_t batch_size,
+    int64_t q_num_heads,
+    int64_t kv_num_heads,
+    int64_t head_dim_k,
+    int64_t head_dim_v,
+    float scale,
+    int64_t update_rule,
+    int64_t element_size_bytes)
+{
+    if (batch_size <= 0 || kv_num_heads <= 0)
+        return 0;
+
+    if (q_num_heads % kv_num_heads != 0) {
+        fprintf(stderr,
+                "[custom_kernels] hip_linear_attention_decode: "
+                "q_num_heads(%lld) not divisible by kv_num_heads(%lld)\n",
+                (long long)q_num_heads, (long long)kv_num_heads);
+        return -1;
+    }
+
+    hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+    int grid  = static_cast<int>(batch_size * kv_num_heads);
+    int block = LA_THREADS;
+    int dk = static_cast<int>(head_dim_k);
+    int dv = static_cast<int>(head_dim_v);
+
+    size_t smem_bytes = static_cast<size_t>(2 * dk + 2 * dv) * sizeof(float);
+
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_linear_attention_decode: B=%lld Hq=%lld "
+        "Hkv=%lld dk=%d dv=%d scale=%.6f rule=%lld elem=%lld "
+        "grid=%d block=%d smem=%zu\n",
+        (long long)batch_size, (long long)q_num_heads,
+        (long long)kv_num_heads, dk, dv, (double)scale,
+        (long long)update_rule, (long long)element_size_bytes,
+        grid, block, smem_bytes);
+
+    if (element_size_bytes == 2) {
+        hipLaunchKernelGGL(
+            linear_attention_decode_kernel<__half>,
+            dim3(grid), dim3(block), smem_bytes, hip_stream,
+            static_cast<const __half*>(query),
+            static_cast<const __half*>(key),
+            static_cast<const __half*>(value),
+            static_cast<const __half*>(decay),
+            static_cast<const __half*>(beta),
+            static_cast<__half*>(state),
+            static_cast<__half*>(output),
+            static_cast<int>(q_num_heads),
+            static_cast<int>(kv_num_heads),
+            dk, dv, scale, static_cast<int>(update_rule));
+    } else if (element_size_bytes == 4) {
+        hipLaunchKernelGGL(
+            linear_attention_decode_kernel<float>,
+            dim3(grid), dim3(block), smem_bytes, hip_stream,
+            static_cast<const float*>(query),
+            static_cast<const float*>(key),
+            static_cast<const float*>(value),
+            static_cast<const float*>(decay),
+            static_cast<const float*>(beta),
+            static_cast<float*>(state),
+            static_cast<float*>(output),
+            static_cast<int>(q_num_heads),
+            static_cast<int>(kv_num_heads),
+            dk, dv, scale, static_cast<int>(update_rule));
+    } else {
+        fprintf(stderr,
+                "[custom_kernels] hip_linear_attention_decode: "
+                "unsupported element_size %lld\n",
+                (long long)element_size_bytes);
+        return -1;
+    }
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        fprintf(stderr,
+                "[custom_kernels] hip_linear_attention_decode launch "
+                "failed: %s\n",
+                hipGetErrorString(err));
+    }
+    return static_cast<int>(err);
+}

@@ -450,6 +450,64 @@ int hip_qmoe_scatter_add(
     int64_t element_size_bytes);
 
 /* =========================================================================
+ * Linear Attention Decode (T=1 Single-Token Recurrence)
+ * =========================================================================
+ *
+ * Performs one step of the linear attention recurrence for T=1 (decode).
+ * Updates state in-place and writes the attention output.
+ *
+ * For each (batch, kv_head) pair, the recurrence is:
+ *   linear:       S = S + k (x) v
+ *   gated:        S = diag(exp(g)) * S + k (x) v
+ *   delta:        S = S + beta * k (x) (v - S^T k)
+ *   gated_delta:  S = diag(exp(g)) * S + beta * k (x) (v - diag(exp(g)) * S^T k)
+ *   output_h = scale * S^T q_h   (for each query head h in the KV group)
+ *
+ * Parameters:
+ *   stream             - hipStream_t cast to void*
+ *   query              - GPU [batch, 1, q_num_heads * head_dim_k]
+ *   key                - GPU [batch, 1, kv_num_heads * head_dim_k]
+ *   value              - GPU [batch, 1, kv_num_heads * head_dim_v]
+ *   decay              - GPU [batch, 1, kv_num_heads * head_dim_k] or nullptr
+ *                        Per-key-dimension decay in log-space.
+ *                        Required for gated and gated_delta modes.
+ *   beta               - GPU [batch, 1, kv_num_heads] or nullptr
+ *                        Per-head update rate.
+ *                        Required for delta and gated_delta modes.
+ *   state              - GPU [batch, kv_num_heads, head_dim_k, head_dim_v]
+ *                        Read/write. Must be pre-initialized (from past_state
+ *                        or zeros) before calling this function.
+ *   output             - GPU [batch, 1, q_num_heads * head_dim_v]
+ *   batch_size         - batch dimension
+ *   q_num_heads        - number of query heads (must be divisible by kv_num_heads)
+ *   kv_num_heads       - number of key/value heads
+ *   head_dim_k         - key dimension per head
+ *   head_dim_v         - value dimension per head
+ *   scale              - output scaling factor (typically 1/sqrt(d_k))
+ *   update_rule        - 0=linear, 1=gated, 2=delta, 3=gated_delta
+ *   element_size_bytes - 2 for fp16, 4 for fp32
+ *
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_linear_attention_decode(
+    void* stream,
+    const void* query,
+    const void* key,
+    const void* value,
+    const void* decay,
+    const void* beta,
+    void* state,
+    void* output,
+    int64_t batch_size,
+    int64_t q_num_heads,
+    int64_t kv_num_heads,
+    int64_t head_dim_k,
+    int64_t head_dim_v,
+    float scale,
+    int64_t update_rule,
+    int64_t element_size_bytes);
+
+/* =========================================================================
  * WMMA GEMM (Small-M Matrix Multiply via Wave Matrix Multiply-Accumulate)
  * =========================================================================
  *

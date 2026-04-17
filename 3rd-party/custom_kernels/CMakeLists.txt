@@ -37,6 +37,7 @@ hip_add_library(hip_custom_kernels STATIC
     hip/reduce_sum_kernel.hip
     hip/matmul_nbits_kernel.hip
     hip/qmoe_kernel.hip
+    hip/linear_attention_kernel.hip
     INCLUDE_DIRECTORIES
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
