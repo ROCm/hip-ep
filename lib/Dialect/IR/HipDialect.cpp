@@ -532,14 +532,24 @@ void SiluOp::print(OpAsmPrinter &p) {
 }
 
 //===----------------------------------------------------------------------===//
-// SigmoidOp: ins(input), outs(output)
+// SigmoidOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 
-MutableOperandRange SigmoidOp::getDpsInitsMutable() {
-  return getOutputMutable();
-}
+MutableOperandRange SigmoidOp::getDpsInitsMutable() { return getYMutable(); }
 
 void SigmoidOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// SoftplusOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange SoftplusOp::getDpsInitsMutable() { return getYMutable(); }
+
+void SoftplusOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
