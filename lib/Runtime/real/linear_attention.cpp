@@ -6,6 +6,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "error_check_macros.h"
+#include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
 #include <algorithm>
@@ -131,24 +132,27 @@ extern "C" int wrap_linear_attention(
                        (hipStream_t)hip_stream));
   }
 
-  // TODO: Implement the full linear attention recurrence kernel.
-  //
-  // The recurrence for each token t (per batch b, per KV head g):
-  //   "linear":       S = S + k_t outer v_t
-  //   "gated":        S = exp(g_t) * S + k_t outer v_t
-  //   "delta":        S = S + beta_t * k_t outer (v_t - S^T k_t)
-  //   "gated_delta":  S = exp(g_t) * S + beta_t * k_t outer (v_t - exp(g_t) * S^T k_t)
-  //   o_t = scale * q_t^T S    (for each query head h mapped to this KV group)
-  //
-  // For T=1 (decode): sequential recurrence is efficient.
-  // For T>1 (prefill): chunk-parallel WY decomposition is preferred.
-  //
-  // Current implementation: initialize state, placeholder for kernel dispatch.
-  // Full GPU kernel integration is pending custom_kernels library extension.
-
-  RUNTIME_DEBUG_LOG("[linear_attention] state initialized (%s), "
-                    "kernel dispatch pending\n",
-                    past_state ? "from past" : "zeros");
+  if (seq_len == 1) {
+    int kern_result = hip_linear_attention_decode(
+        hip_stream, query, key, value, decay, beta, present_state, output, B,
+        q_num_heads, Hkv, dk, dv, scale, update_rule, element_size_bytes);
+    if (kern_result != 0) {
+      fprintf(stderr,
+              "[linear_attention] ERROR: decode kernel failed (%d)\n",
+              kern_result);
+      result = -1;
+      goto cleanup;
+    }
+    RUNTIME_DEBUG_LOG("[linear_attention] T=1 decode kernel dispatched\n");
+  } else {
+    // TODO: T>1 prefill via chunk-parallel WY decomposition.
+    fprintf(stderr,
+            "[linear_attention] ERROR: seq_len=%lld not yet supported "
+            "(only T=1 decode is implemented)\n",
+            (long long)seq_len);
+    result = -1;
+    goto cleanup;
+  }
 
 cleanup:
   RUNTIME_DEBUG_LOG("[linear_attention] exit result=%d\n", result);
