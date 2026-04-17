@@ -19,12 +19,12 @@ struct LinearAttentionToHip : public mlir::RewritePattern {
                   mlir::PatternRewriter &rewriter) const override;
 };
 
-mlir::LogicalResult LinearAttentionToHip::matchAndRewrite(
-    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
+mlir::LogicalResult
+LinearAttentionToHip::matchAndRewrite(mlir::Operation *op,
+                                      mlir::PatternRewriter &rewriter) const {
   auto funcNameAttr = op->getAttrOfType<mlir::StringAttr>("function_name");
   if (!funcNameAttr || funcNameAttr.getValue() != "LinearAttention")
-    return rewriter.notifyMatchFailure(op,
-                                       "not a LinearAttention operation");
+    return rewriter.notifyMatchFailure(op, "not a LinearAttention operation");
 
   auto domainAttr = op->getAttrOfType<mlir::StringAttr>("domain_name");
   if (!domainAttr || domainAttr.getValue() != "com.microsoft")
@@ -41,8 +41,8 @@ mlir::LogicalResult LinearAttentionToHip::matchAndRewrite(
   // Support variable operand count (3-6 inputs as per spec)
   size_t numOps = op->getNumOperands();
   if (numOps < 3 || numOps > 6)
-    return rewriter.notifyMatchFailure(
-        op, "LinearAttention expects 3-6 operands");
+    return rewriter.notifyMatchFailure(op,
+                                       "LinearAttention expects 3-6 operands");
 
   auto getOptionalOperand = [&](size_t idx) -> mlir::Value {
     if (idx >= numOps)
@@ -62,8 +62,7 @@ mlir::LogicalResult LinearAttentionToHip::matchAndRewrite(
   mlir::Value beta = getOptionalOperand(5);
 
   // === Extract Attributes ===
-  auto qNumHeadsAttrOnnx =
-      op->getAttrOfType<mlir::IntegerAttr>("q_num_heads");
+  auto qNumHeadsAttrOnnx = op->getAttrOfType<mlir::IntegerAttr>("q_num_heads");
   if (!qNumHeadsAttrOnnx)
     return rewriter.notifyMatchFailure(op, "missing q_num_heads attribute");
   auto qNumHeadsAttr =
@@ -125,8 +124,7 @@ mlir::LogicalResult LinearAttentionToHip::matchAndRewrite(
   // === Create DPS init tensors ===
   mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, query);
   mlir::Value presentStateInit = createEmptyTensor(
-      rewriter, loc, presentStateType,
-      pastState ? pastState : key);
+      rewriter, loc, presentStateType, pastState ? pastState : key);
 
   // === Create hip.linear_attention operation ===
   mlir::SmallVector<mlir::Type> resultTypes;

@@ -43,8 +43,8 @@ static const char *updateRuleName(int64_t rule) {
 extern "C" int wrap_linear_attention(
     RuntimeState *state, const void *query, const void *key, const void *value,
     const void *past_state, const void *decay, const void *beta, void *output,
-    void *present_state, int64_t q_num_heads, int64_t kv_num_heads,
-    float scale, int64_t chunk_size, int64_t update_rule, int64_t batch_size,
+    void *present_state, int64_t q_num_heads, int64_t kv_num_heads, float scale,
+    int64_t chunk_size, int64_t update_rule, int64_t batch_size,
     int64_t seq_len, int64_t head_dim_k, int64_t head_dim_v,
     int64_t element_size_bytes) {
 
@@ -53,9 +53,8 @@ extern "C" int wrap_linear_attention(
                     "scale=%.6f chunk=%lld rule=%s elem_size=%lld\n",
                     (long long)batch_size, (long long)seq_len,
                     (long long)q_num_heads, (long long)kv_num_heads,
-                    (long long)head_dim_k, (long long)head_dim_v,
-                    (double)scale, (long long)chunk_size,
-                    updateRuleName(update_rule),
+                    (long long)head_dim_k, (long long)head_dim_v, (double)scale,
+                    (long long)chunk_size, updateRuleName(update_rule),
                     (long long)element_size_bytes);
 
   RUNTIME_DEBUG_LOG("[linear_attention] ptrs: query=%p key=%p value=%p "
@@ -77,16 +76,14 @@ extern "C" int wrap_linear_attention(
   if ((update_rule == kUpdateRuleGated ||
        update_rule == kUpdateRuleGatedDelta) &&
       !decay) {
-    fprintf(stderr,
-            "[linear_attention] ERROR: decay is required for %s mode\n",
+    fprintf(stderr, "[linear_attention] ERROR: decay is required for %s mode\n",
             updateRuleName(update_rule));
     return -1;
   }
   if ((update_rule == kUpdateRuleDelta ||
        update_rule == kUpdateRuleGatedDelta) &&
       !beta) {
-    fprintf(stderr,
-            "[linear_attention] ERROR: beta is required for %s mode\n",
+    fprintf(stderr, "[linear_attention] ERROR: beta is required for %s mode\n",
             updateRuleName(update_rule));
     return -1;
   }
@@ -124,12 +121,10 @@ extern "C" int wrap_linear_attention(
   // Initialize present_state from past_state (or zeros)
   if (past_state) {
     HIP_CHECK(hipMemcpyAsync(present_state, past_state, total_state_bytes,
-                              hipMemcpyDeviceToDevice,
-                              (hipStream_t)hip_stream));
+                             hipMemcpyDeviceToDevice, (hipStream_t)hip_stream));
   } else {
-    HIP_CHECK(
-        hipMemsetAsync(present_state, 0, total_state_bytes,
-                       (hipStream_t)hip_stream));
+    HIP_CHECK(hipMemsetAsync(present_state, 0, total_state_bytes,
+                             (hipStream_t)hip_stream));
   }
 
   if (seq_len == 1) {
@@ -137,8 +132,7 @@ extern "C" int wrap_linear_attention(
         hip_stream, query, key, value, decay, beta, present_state, output, B,
         q_num_heads, Hkv, dk, dv, scale, update_rule, element_size_bytes);
     if (kern_result != 0) {
-      fprintf(stderr,
-              "[linear_attention] ERROR: decode kernel failed (%d)\n",
+      fprintf(stderr, "[linear_attention] ERROR: decode kernel failed (%d)\n",
               kern_result);
       result = -1;
       goto cleanup;

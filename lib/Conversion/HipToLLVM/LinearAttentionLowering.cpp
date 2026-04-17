@@ -127,12 +127,10 @@ struct LinearAttentionOpLowering
       return failure();
 
     SmallVector<Value, 19> args = {
-        statePtr,
-        queryPtr, keyPtr, valuePtr,
-        pastStatePtr, decayPtr, betaPtr,
-        outputPtr, presentStatePtr,
-        qNumHeads, kvNumHeads, scale, chunkSize, updateRule,
-        batchSizeVal, seqLenVal, headDimKVal, headDimVVal, elemSizeVal};
+        statePtr,   queryPtr,    keyPtr,      valuePtr,        pastStatePtr,
+        decayPtr,   betaPtr,     outputPtr,   presentStatePtr, qNumHeads,
+        kvNumHeads, scale,       chunkSize,   updateRule,      batchSizeVal,
+        seqLenVal,  headDimKVal, headDimVVal, elemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
