@@ -239,8 +239,8 @@ void populateGraphLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateGemmLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
-void populateLinearAttentionLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populateLinearAttentionLoweringPatterns(const LLVMTypeConverter &converter,
+                                             RewritePatternSet &patterns);
 
 } // namespace hip
 } // namespace mlir

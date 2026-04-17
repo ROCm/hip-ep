@@ -572,19 +572,18 @@ int wrap_qmoe(
 // Optional pointer args: pass nullptr if the corresponding input is absent.
 int wrap_linear_attention(
     RuntimeState *state,
-    const void *query,       // [B, T, H_q * d_k]
-    const void *key,         // [B, T, H_kv * d_k]
-    const void *value,       // [B, T, H_kv * d_v]
-    const void *past_state,  // [B, H_kv, d_k, d_v] (nullable)
-    const void *decay,       // [B, T, H_kv * d_k] or [B, T, H_kv] (nullable)
-    const void *beta,        // [B, T, H_kv] or [B, T, 1] (nullable)
-    void *output,            // [B, T, H_q * d_v]
-    void *present_state,     // [B, H_kv, d_k, d_v]
-    int64_t q_num_heads, int64_t kv_num_heads, float scale,
-    int64_t chunk_size,
-    int64_t update_rule,     // 0=linear, 1=gated, 2=delta, 3=gated_delta
-    int64_t batch_size, int64_t seq_len, int64_t head_dim_k,
-    int64_t head_dim_v, int64_t element_size_bytes);
+    const void *query,      // [B, T, H_q * d_k]
+    const void *key,        // [B, T, H_kv * d_k]
+    const void *value,      // [B, T, H_kv * d_v]
+    const void *past_state, // [B, H_kv, d_k, d_v] (nullable)
+    const void *decay,      // [B, T, H_kv * d_k] or [B, T, H_kv] (nullable)
+    const void *beta,       // [B, T, H_kv] or [B, T, 1] (nullable)
+    void *output,           // [B, T, H_q * d_v]
+    void *present_state,    // [B, H_kv, d_k, d_v]
+    int64_t q_num_heads, int64_t kv_num_heads, float scale, int64_t chunk_size,
+    int64_t update_rule, // 0=linear, 1=gated, 2=delta, 3=gated_delta
+    int64_t batch_size, int64_t seq_len, int64_t head_dim_k, int64_t head_dim_v,
+    int64_t element_size_bytes);
 
 //==============================================================================
 // ONNX Gemm via hipBLASLt
