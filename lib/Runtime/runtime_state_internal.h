@@ -54,6 +54,12 @@ struct RuntimeState {
   // cleaned up here)
   void *hipdnn_handle;
   void *hipdnn_graph_registry;
+
+  // Unified Memory Manager state.
+  // When mm_initialized is true, memory operations route through the MM API.
+  // The legacy fields above (pool_base, workspace, etc.) remain for
+  // backward compatibility with existing generated code.
+  bool mm_initialized;
 };
 
 #endif // HIPDNN_EP_RUNTIME_STATE_INTERNAL_H

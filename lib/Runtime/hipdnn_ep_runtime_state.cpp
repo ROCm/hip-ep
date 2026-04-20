@@ -8,6 +8,8 @@
 #include "hipdnn_ep_runtime.h"
 #include "runtime_state_internal.h"
 
+#include "mm_runtime_bridge.h"
+
 #include "model_metadata_generated.h"
 #include "morphizen-foundation/file_io.hpp"
 
@@ -48,6 +50,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   state->workspace_size = 0;
   state->hipdnn_handle = nullptr;
   state->hipdnn_graph_registry = nullptr;
+  state->mm_initialized = false;
 
   // Explicitly initialize HIP device before any other operations
   // This ensures device 0 is active and context is properly initialized
@@ -174,6 +177,22 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   }
 
   TIMING_LOG("[Session] hipBLASLt init: %.3fs\n", record_elapsed(t_prev));
+
+  // Initialize Unified Memory Manager
+  {
+    mm_stream_t mm_stream = reinterpret_cast<mm_stream_t>(state->stream);
+    int mm_err = mm_bridge_init(0 /* auto-detect GPU memory */, mm_stream);
+    if (mm_err == MM_OK) {
+      state->mm_initialized = true;
+      RUNTIME_DEBUG_LOG("[MM] Memory Manager initialized successfully\n");
+    } else {
+      // Non-fatal: fall back to legacy allocation paths
+      RUNTIME_DEBUG_LOG("[MM] Memory Manager init failed (%d), using legacy\n",
+                        mm_err);
+    }
+  }
+
+  TIMING_LOG("[Session] Memory Manager init: %.3fs\n", record_elapsed(t_prev));
 
   *out_state = state;
 
@@ -370,14 +389,24 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipStreamSynchronize(state->stream));
   }
 
-  // Free shared workspace (if allocated)
-  if (state->workspace) {
-    HIP_CLEANUP(hipFree(state->workspace));
-  }
-
-  // Free memory pool (if allocated)
-  if (state->pool_base) {
-    HIP_CLEANUP(hipFree(state->pool_base));
+  // Shutdown Memory Manager (frees pool and workspace internally)
+  if (state->mm_initialized) {
+    RUNTIME_DEBUG_LOG("[MM] Shutting down Memory Manager\n");
+    mm_bridge_shutdown();
+    state->mm_initialized = false;
+    // Clear legacy pointers (MM owned them)
+    state->workspace = nullptr;
+    state->workspace_size = 0;
+    state->pool_base = nullptr;
+    state->pool_size = 0;
+  } else {
+    // Legacy cleanup
+    if (state->workspace) {
+      HIP_CLEANUP(hipFree(state->workspace));
+    }
+    if (state->pool_base) {
+      HIP_CLEANUP(hipFree(state->pool_base));
+    }
   }
   if (state->buffer_offsets) {
     free(state->buffer_offsets);
@@ -448,22 +477,46 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
     return 1;
   }
 
-  // Allocate the memory pool
+  // Route through Memory Manager when available
+  if (state->mm_initialized) {
+    mm_pool_t pool = mm_bridge_pool_init(pool_size, buffer_offsets, num_buffers);
+    if (pool == MM_INVALID_POOL && pool_size > 0) {
+      fprintf(stderr, "[MM] Pool init failed for %zu bytes, falling back\n",
+              pool_size);
+      goto legacy_path;
+    }
+    // Store MM pool handle — use pool_base to store the handle for retrieval
+    // and keep buffer_offsets for hipdnn_ep_get_buffer_from_pool compatibility.
+    state->pool_base = (void *)(uintptr_t)pool;
+    state->pool_size = pool_size;
+    state->num_buffers = num_buffers;
+    state->buffer_offsets = nullptr;
+    if (num_buffers > 0 && buffer_offsets) {
+      state->buffer_offsets = (size_t *)malloc(sizeof(size_t) * num_buffers);
+      if (state->buffer_offsets)
+        memcpy(state->buffer_offsets, buffer_offsets,
+               sizeof(size_t) * num_buffers);
+    }
+    RUNTIME_DEBUG_LOG("[MM] Pool initialized via mm_create_pool: %zu bytes, %zu buffers\n",
+                      pool_size, num_buffers);
+    return 0;
+  }
+
+legacy_path:
+  // Legacy path: direct hipMalloc
   if (pool_size > 0) {
     if (hipMalloc(&state->pool_base, pool_size) != hipSuccess) {
       fprintf(stderr, "Failed to allocate memory pool of size %zu bytes\n",
               pool_size);
-      return 2; // Pool allocation failed
+      return 2;
     }
   } else {
     state->pool_base = nullptr;
   }
 
-  // Store pool metadata
   state->pool_size = pool_size;
   state->num_buffers = num_buffers;
 
-  // Copy buffer offsets array
   if (num_buffers > 0 && buffer_offsets) {
     state->buffer_offsets = (size_t *)malloc(sizeof(size_t) * num_buffers);
     if (!state->buffer_offsets) {
@@ -472,14 +525,14 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
         HIP_CLEANUP(hipFree(state->pool_base));
         state->pool_base = nullptr;
       }
-      return 1; // Allocation failed
+      return 1;
     }
     memcpy(state->buffer_offsets, buffer_offsets, sizeof(size_t) * num_buffers);
   } else {
     state->buffer_offsets = nullptr;
   }
 
-  return 0; // Success
+  return 0;
 }
 
 void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index) {
@@ -494,7 +547,13 @@ void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index) {
     return nullptr;
   }
 
-  // Return pointer at pool_base + offset
+  // Route through MM when available
+  if (state->mm_initialized) {
+    mm_pool_t pool = (mm_pool_t)(uintptr_t)state->pool_base;
+    return mm_bridge_pool_get_buffer(pool, index);
+  }
+
+  // Legacy path: pool_base + offset
   char *pool_ptr = static_cast<char *>(state->pool_base);
   size_t offset = state->buffer_offsets[index];
   return pool_ptr + offset;
@@ -505,6 +564,13 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state) {
     fprintf(stderr, "Invalid state parameter to hipdnn_ep_get_pool_base\n");
     return nullptr;
   }
+
+  // Route through MM when available
+  if (state->mm_initialized) {
+    mm_pool_t pool = (mm_pool_t)(uintptr_t)state->pool_base;
+    return mm_bridge_pool_get_base(pool);
+  }
+
   return state->pool_base;
 }
 
@@ -528,7 +594,24 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
   if (state->workspace_size >= needed_size)
     return 0;
 
-  // Grow: free old, allocate new
+  // Route through MM when available
+  if (state->mm_initialized) {
+    void *ws = mm_bridge_workspace_ensure(needed_size);
+    if (!ws) {
+      fprintf(stderr,
+              "[MM] workspace ensure failed for %zu bytes, falling back\n",
+              needed_size);
+      goto legacy_path;
+    }
+    state->workspace = ws;
+    state->workspace_size = needed_size;
+    RUNTIME_DEBUG_LOG("[MM] Workspace allocated via mm_alloc(SCRATCH): %zu bytes\n",
+                      needed_size);
+    return 0;
+  }
+
+legacy_path:
+  // Legacy path: grow via hipMalloc
   if (state->workspace) {
     HIP_CLEANUP(hipFree(state->workspace));
     state->workspace = nullptr;
