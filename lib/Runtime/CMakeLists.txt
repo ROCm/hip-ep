@@ -163,6 +163,9 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         endforeach()
     endif()
 
+    # Add Memory Manager headers
+    list(APPEND COMPILE_FLAGS "-I" "${CMAKE_SOURCE_DIR}/lib/MemoryManager")
+
     # Add implementation directory
     if(NOT BUILD_MOCK_RUNTIME)
         list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}/real")
@@ -175,6 +178,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
             message(STATUS "Adding TheRock includes for ${OUTPUT_BC}: ${THEROCK_DIST}/include")
             list(APPEND COMPILE_FLAGS "-I" "${THEROCK_DIST}/include")
             list(APPEND COMPILE_FLAGS "-D__HIP_PLATFORM_AMD__")
+            list(APPEND COMPILE_FLAGS "-DMM_HAS_HIP")
         endif()
     else()
         list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}/mock")
@@ -230,6 +234,20 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/test_hip_from_dll.cpp test_hip_from_dll.bc)
     compile_to_bitcode(real/gemm.cpp runtime_gemm.bc)
 
+    # Memory Manager modules (compiled to bitcode for DLL linking)
+    compile_to_bitcode(../MemoryManager/mm_hal.cpp mm_hal.bc)
+    compile_to_bitcode(../MemoryManager/mm_hal_host.cpp mm_hal_host.bc)
+    compile_to_bitcode(../MemoryManager/mm_hal_hip.cpp mm_hal_hip.bc)
+    compile_to_bitcode(../MemoryManager/mm_handle_table.cpp mm_handle_table.bc)
+    compile_to_bitcode(../MemoryManager/mm_config.cpp mm_config.bc)
+    compile_to_bitcode(../MemoryManager/mm_core.cpp mm_core.bc)
+    compile_to_bitcode(../MemoryManager/mm_pool.cpp mm_pool.bc)
+    compile_to_bitcode(../MemoryManager/mm_arena.cpp mm_arena.bc)
+    compile_to_bitcode(../MemoryManager/mm_runtime_bridge.cpp mm_runtime_bridge.bc)
+    compile_to_bitcode(../MemoryManager/mm_free_list.cpp mm_free_list.bc)
+    compile_to_bitcode(../MemoryManager/mm_kv.cpp mm_kv.bc)
+    compile_to_bitcode(../MemoryManager/mm_block_table.cpp mm_block_table.bc)
+
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
@@ -252,6 +270,18 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_causal_conv_with_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gemm.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/mm_hal.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/mm_hal_host.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/mm_hal_hip.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/mm_handle_table.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/mm_config.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/mm_core.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/mm_pool.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/mm_arena.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/mm_runtime_bridge.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/mm_free_list.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/mm_kv.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/mm_block_table.bc
     )
 else()
     # Mock runtime for testing without GPU
