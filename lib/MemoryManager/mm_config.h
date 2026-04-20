@@ -9,27 +9,27 @@ extern "C" {
 #endif
 
 typedef struct {
-    /* Core memory limits */
-    size_t         gpu_memory_limit;      /* 0 = auto-detect */
-    float          kv_cache_fraction;     /* [0,1], default 0.90 */
-    uint32_t       kv_block_size_tokens;  /* default 16 */
-    mm_tier_t      max_tier;              /* deepest tier to use */
+  /* Core memory limits */
+  size_t gpu_memory_limit;       /* 0 = auto-detect */
+  float kv_cache_fraction;       /* [0,1], default 0.90 */
+  uint32_t kv_block_size_tokens; /* default 16 */
+  mm_tier_t max_tier;            /* deepest tier to use */
 
-    /* Feature toggles */
-    bool           enable_prefix_caching;
-    bool           enable_defrag;
-    uint32_t       num_size_classes;      /* arena size classes, default 8 */
+  /* Feature toggles */
+  bool enable_prefix_caching;
+  bool enable_defrag;
+  uint32_t num_size_classes; /* arena size classes, default 8 */
 
-    /* Pressure watermarks */
-    float          high_watermark;        /* 0.90: trigger background eviction */
-    float          critical_watermark;    /* 0.95: trigger sync eviction */
+  /* Pressure watermarks */
+  float high_watermark;     /* 0.90: trigger background eviction */
+  float critical_watermark; /* 0.95: trigger sync eviction */
 
-    /* Adaptive compression */
-    mm_kv_format_t default_kv_format;
-    mm_kv_format_t pressure_kv_format;
-    mm_kv_format_t critical_kv_format;
-    bool           enable_inline_quant;
-    bool           enable_adaptive_transcode;
+  /* Adaptive compression */
+  mm_kv_format_t default_kv_format;
+  mm_kv_format_t pressure_kv_format;
+  mm_kv_format_t critical_kv_format;
+  bool enable_inline_quant;
+  bool enable_adaptive_transcode;
 } mm_config_t;
 
 /*
