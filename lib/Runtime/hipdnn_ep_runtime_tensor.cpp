@@ -7,6 +7,8 @@
 #include "hipdnn_ep_runtime.h"
 #include "runtime_state_internal.h"
 
+#include "mm_runtime_bridge.h"
+
 #include <cassert>
 #include <cstdio>
 #include <cstring>
@@ -84,6 +86,18 @@ static std::unordered_map<size_t, std::vector<void *>> g_gpu_buffer_pool;
 
 static void *pool_alloc(size_t size_bytes) {
   assert(size_bytes > 0 && "pool_alloc: size_bytes must be positive");
+
+  // Route through Memory Manager when available
+  if (mm_bridge_is_initialized()) {
+    void *ptr = mm_bridge_tensor_alloc(size_bytes);
+    if (ptr) {
+      RUNTIME_DEBUG_LOG("[MM] tensor_alloc via arena: %zu bytes -> %p\n",
+                        size_bytes, ptr);
+      return ptr;
+    }
+    // Fall through to legacy on failure
+  }
+
   auto it = g_gpu_buffer_pool.find(size_bytes);
   if (it != g_gpu_buffer_pool.end() && !it->second.empty()) {
     void *ptr = it->second.back();
@@ -98,8 +112,18 @@ static void *pool_alloc(size_t size_bytes) {
 
 static void pool_release(void *ptr, size_t size_bytes) {
   assert(size_bytes > 0 && "pool_release: size_bytes must be positive");
-  if (ptr)
-    g_gpu_buffer_pool[size_bytes].push_back(ptr);
+  if (!ptr)
+    return;
+
+  // Route through Memory Manager when available
+  if (mm_bridge_is_initialized()) {
+    RUNTIME_DEBUG_LOG("[MM] tensor_release via arena: %zu bytes <- %p\n",
+                      size_bytes, ptr);
+    mm_bridge_tensor_release(ptr, size_bytes);
+    return;
+  }
+
+  g_gpu_buffer_pool[size_bytes].push_back(ptr);
 }
 
 // Element size is read from tensor_t.element_size (set by EP caller)
