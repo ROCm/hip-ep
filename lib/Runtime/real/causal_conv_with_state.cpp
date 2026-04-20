@@ -160,7 +160,10 @@ int wrap_causal_conv_with_state(
 
   // Create tensor descriptors (4D: N, C, H, W)
   miopenTensorDescriptor_t inDesc = nullptr, wDesc = nullptr, outDesc = nullptr;
+  miopenTensorDescriptor_t biasDesc = nullptr;
   miopenConvolutionDescriptor_t convDesc = nullptr;
+  miopenActivationDescriptor_t actDesc = nullptr;
+  void *sigmoid_buf = nullptr;
   miopenStatus_t mst;
   int ret = 0;
 
@@ -236,30 +239,19 @@ int wrap_causal_conv_with_state(
 
   // Add bias if present
   if (bias) {
-    miopenTensorDescriptor_t biasDesc = nullptr;
     CAUSAL_MIOPEN_CHECK(miopenCreateTensorDescriptor(&biasDesc));
     CAUSAL_MIOPEN_CHECK(miopenSet4dTensorDescriptor(
         biasDesc, dt, 1, static_cast<int>(channels), 1, 1));
     float alpha_bias = 1.0f, beta_bias = 0.0f;
-    mst = miopenOpTensor(handle, miopenTensorOpAdd, &alpha_bias, outDesc,
-                         output, &alpha_bias, biasDesc, bias, &beta_bias,
-                         outDesc, output);
-    miopenDestroyTensorDescriptor(biasDesc);
-    if (mst != miopenStatusSuccess) {
-      fprintf(stderr, "wrap_causal_conv_with_state: bias add failed (%d)\n",
-              mst);
-      ret = -1;
-      goto cleanup;
-    }
+    CAUSAL_MIOPEN_CHECK(miopenOpTensor(handle, miopenTensorOpAdd, &alpha_bias,
+                                       outDesc, output, &alpha_bias, biasDesc,
+                                       bias, &beta_bias, outDesc, output));
   }
 
   // Apply activation (SiLU/Swish)
   if (activation == 1) {
-    // Use MIOpen activation for sigmoid, then elementwise multiply
     // SiLU(x) = x * sigmoid(x)
-    // We need a temp buffer for sigmoid(x)
     int64_t output_size = batch_size * channels * seq_len * element_size_bytes;
-    void *sigmoid_buf = nullptr;
     err = hipMalloc(&sigmoid_buf, output_size);
     if (err != hipSuccess || !sigmoid_buf) {
       fprintf(stderr, "wrap_causal_conv_with_state: hipMalloc failed for "
@@ -268,38 +260,28 @@ int wrap_causal_conv_with_state(
       goto cleanup;
     }
 
-    // Compute sigmoid(output) -> sigmoid_buf
-    miopenActivationDescriptor_t actDesc = nullptr;
     CAUSAL_MIOPEN_CHECK(miopenCreateActivationDescriptor(&actDesc));
     CAUSAL_MIOPEN_CHECK(miopenSetActivationDescriptor(
         actDesc, miopenActivationLOGISTIC, 0.0, 0.0, 0.0));
 
     float alpha_act = 1.0f, beta_act = 0.0f;
-    mst = miopenActivationForward(handle, actDesc, &alpha_act, outDesc, output,
-                                  &beta_act, outDesc, sigmoid_buf);
-    miopenDestroyActivationDescriptor(actDesc);
-    if (mst != miopenStatusSuccess) {
-      hipFree(sigmoid_buf);
-      fprintf(stderr, "wrap_causal_conv_with_state: sigmoid failed (%d)\n",
-              mst);
-      ret = -1;
-      goto cleanup;
-    }
+    CAUSAL_MIOPEN_CHECK(miopenActivationForward(handle, actDesc, &alpha_act,
+                                                outDesc, output, &beta_act,
+                                                outDesc, sigmoid_buf));
 
-    // Compute output = output * sigmoid_buf
     float alpha_mul = 1.0f, beta_mul = 0.0f;
-    mst = miopenOpTensor(handle, miopenTensorOpMul, &alpha_mul, outDesc, output,
-                         &alpha_mul, outDesc, sigmoid_buf, &beta_mul, outDesc,
-                         output);
-    hipFree(sigmoid_buf);
-    if (mst != miopenStatusSuccess) {
-      fprintf(stderr, "wrap_causal_conv_with_state: mul failed (%d)\n", mst);
-      ret = -1;
-      goto cleanup;
-    }
+    CAUSAL_MIOPEN_CHECK(miopenOpTensor(
+        handle, miopenTensorOpMul, &alpha_mul, outDesc, output, &alpha_mul,
+        outDesc, sigmoid_buf, &beta_mul, outDesc, output));
   }
 
 cleanup:
+  if (actDesc)
+    miopenDestroyActivationDescriptor(actDesc);
+  if (sigmoid_buf)
+    hipFree(sigmoid_buf);
+  if (biasDesc)
+    miopenDestroyTensorDescriptor(biasDesc);
   if (convDesc)
     miopenDestroyConvolutionDescriptor(convDesc);
   if (outDesc)
