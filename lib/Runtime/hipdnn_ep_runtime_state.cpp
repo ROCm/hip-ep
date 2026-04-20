@@ -606,7 +606,8 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
 
   // Route through Memory Manager when available
   if (state->mm_initialized) {
-    mm_pool_t pool = mm_bridge_pool_init(pool_size, buffer_offsets, num_buffers);
+    mm_pool_t pool =
+        mm_bridge_pool_init(pool_size, buffer_offsets, num_buffers);
     if (pool == MM_INVALID_POOL && pool_size > 0) {
       fprintf(stderr, "[MM] Pool init failed for %zu bytes, falling back\n",
               pool_size);
@@ -624,8 +625,9 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
         memcpy(state->buffer_offsets, buffer_offsets,
                sizeof(size_t) * num_buffers);
     }
-    RUNTIME_DEBUG_LOG("[MM] Pool initialized via mm_create_pool: %zu bytes, %zu buffers\n",
-                      pool_size, num_buffers);
+    RUNTIME_DEBUG_LOG(
+        "[MM] Pool initialized via mm_create_pool: %zu bytes, %zu buffers\n",
+        pool_size, num_buffers);
     return 0;
   }
 
