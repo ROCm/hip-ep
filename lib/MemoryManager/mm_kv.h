@@ -10,8 +10,9 @@ extern "C" {
 /*
  * Allocate a paged KV cache block.
  *
- * Blocks are fixed-size (block_size_tokens * bytes_per_token * num_kv_heads * head_dim * 2).
- * Allocated from a per-format lock-free free list. O(1) via atomic CAS.
+ * Blocks are fixed-size (block_size_tokens * bytes_per_token * num_kv_heads *
+ * head_dim * 2). Allocated from a per-format lock-free free list. O(1) via
+ * atomic CAS.
  *
  * Returns MM_INVALID_BLOCK on failure (pool exhausted).
  */

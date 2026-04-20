@@ -55,8 +55,7 @@ void mm_bridge_shutdown(void);
  * Drop-in replacement for hipdnn_ep_pool_init().
  * Returns the mm_pool_t handle (stored in RuntimeState).
  */
-mm_pool_t mm_bridge_pool_init(size_t pool_size,
-                              const size_t *buffer_offsets,
+mm_pool_t mm_bridge_pool_init(size_t pool_size, const size_t *buffer_offsets,
                               size_t num_buffers);
 
 /*
