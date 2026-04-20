@@ -153,5 +153,8 @@ if(BUILD_HIP_TOOLS)
 
     # E2E integration tests (compile MLIR → DLL → execute)
     add_subdirectory(test/e2e)
+
+    # Memory Manager unit tests (GoogleTest)
+    add_subdirectory(test/unit/mm)
   endif()
 endif()
