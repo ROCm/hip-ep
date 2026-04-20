@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
 #ifndef MM_HANDLE_TABLE_H
 #define MM_HANDLE_TABLE_H
 

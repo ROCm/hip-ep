@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
 #include "mm_hal.h"
 
 #ifdef MM_HAS_HIP
