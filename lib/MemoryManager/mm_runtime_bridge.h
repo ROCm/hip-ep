@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
 #ifndef MM_RUNTIME_BRIDGE_H
 #define MM_RUNTIME_BRIDGE_H
 
