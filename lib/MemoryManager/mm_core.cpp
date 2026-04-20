@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
 #include "mm_core.h"
 #include "mm_arena.h"
 #include "mm_internal.h"
