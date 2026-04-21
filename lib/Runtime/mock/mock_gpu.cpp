@@ -430,6 +430,35 @@ int wrap_miopenConvolutionForward(
   return 0;
 }
 
+int wrap_causal_conv_with_state(
+    RuntimeState *state, const void *input, const void *weight,
+    const void *bias, const void *past_state, void *output, void *present_state,
+    int64_t batch_size, int64_t channels, int64_t seq_len, int64_t kernel_size,
+    int64_t ndim, int64_t activation, int64_t element_size_bytes) {
+  if (!state || !input || !weight || !output || !present_state) {
+    fprintf(stderr,
+            "Invalid required argument in wrap_causal_conv_with_state\n");
+    return -1;
+  }
+
+  // CausalConvWithState fused activation enum: 0=none, 1=silu/swish.
+  // This is independent of hipdnn_ep_activation_name() which maps generic
+  // miopen activations (sigmoid/relu/tanh).
+  const char *act_name = (activation == 1) ? "silu" : "none";
+
+  MOCK_PRINT("[MOCK] wrap_causal_conv_with_state(\n");
+  MOCK_PRINT("[MOCK]   batch=%lld, channels=%lld, seq_len=%lld, kernel=%lld,\n",
+             (long long)batch_size, (long long)channels, (long long)seq_len,
+             (long long)kernel_size);
+  MOCK_PRINT("[MOCK]   ndim=%lld, activation=%s(%lld), elem_size=%lld,\n",
+             (long long)ndim, act_name, (long long)activation,
+             (long long)element_size_bytes);
+  MOCK_PRINT("[MOCK]   bias=%s, past_state=%s)\n", bias ? "yes" : "null",
+             past_state ? "yes" : "null");
+
+  return 0;
+}
+
 int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
                        int64_t k, const void *alpha, const void *A,
                        const void *B, const void *beta, void *C) {
