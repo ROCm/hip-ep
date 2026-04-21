@@ -247,6 +247,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(../MemoryManager/mm_free_list.cpp mm_free_list.bc)
     compile_to_bitcode(../MemoryManager/mm_kv.cpp mm_kv.bc)
     compile_to_bitcode(../MemoryManager/mm_block_table.cpp mm_block_table.bc)
+    compile_to_bitcode(../MemoryManager/mm_kv_cache_state.cpp mm_kv_cache_state.bc)
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
@@ -282,6 +283,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/mm_free_list.bc
         ${CMAKE_CURRENT_BINARY_DIR}/mm_kv.bc
         ${CMAKE_CURRENT_BINARY_DIR}/mm_block_table.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/mm_kv_cache_state.bc
     )
 else()
     # Mock runtime for testing without GPU

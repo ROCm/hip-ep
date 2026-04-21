@@ -67,6 +67,11 @@ struct RuntimeState {
   // The legacy fields above (pool_base, workspace, etc.) remain for
   // backward compatibility with existing generated code.
   bool mm_initialized;
+
+  // GPU-resident KV cache state.
+  // Persistent GPU buffers for KV cache tensors, keyed by host pointer.
+  // Eliminates H2D/D2H for KV cache when past_present_share_buffer=true.
+  void *kv_cache_state;
 };
 
 #endif // HIPDNN_EP_RUNTIME_STATE_INTERNAL_H

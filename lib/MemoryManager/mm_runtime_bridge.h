@@ -113,6 +113,29 @@ size_t mm_bridge_workspace_size(void);
  */
 int mm_bridge_is_initialized(void);
 
+/* ---- GPU-Resident KV Cache ---- */
+
+/*
+ * Look up a persistent KV cache entry by host pointer.
+ * Returns NULL if not registered. The returned pointer is valid
+ * until mm_bridge_shutdown().
+ */
+void *mm_bridge_kv_lookup_gpu(void *state_ptr, const void *host_ptr,
+                              size_t *out_size_bytes, int *out_inference_count);
+
+/*
+ * Register a GPU buffer as persistent KV cache for the given host pointer.
+ * Called after the first H2D copy to keep the buffer alive across inferences.
+ */
+int mm_bridge_kv_register(void *state_ptr, void *host_ptr, void *gpu_ptr,
+                          size_t size_bytes);
+
+/*
+ * Increment the inference count for a persistent entry.
+ * Called by finalize_output after the first D2H.
+ */
+void mm_bridge_kv_increment(void *state_ptr, const void *host_ptr);
+
 #ifdef __cplusplus
 }
 #endif

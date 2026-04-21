@@ -4,6 +4,7 @@
  */
 #include "mm_runtime_bridge.h"
 #include "mm_internal.h"
+#include "mm_kv_cache_state.h"
 
 #include <cstdio>
 
@@ -174,6 +175,45 @@ size_t mm_bridge_workspace_size(void) { return g_workspace_size; }
 int mm_bridge_is_initialized(void) {
   auto *s = mm::mm_get_state();
   return s->initialized.load(std::memory_order_acquire) ? 1 : 0;
+}
+
+/* ---- GPU-Resident KV Cache Bridge ---- */
+
+void *mm_bridge_kv_lookup_gpu(void *state_ptr, const void *host_ptr,
+                              size_t *out_size_bytes,
+                              int *out_inference_count) {
+  auto *kv_state = static_cast<mm_kv_cache_state_t *>(state_ptr);
+  if (!kv_state)
+    return nullptr;
+
+  mm_kv_persistent_entry_t *entry =
+      mm_kv_cache_state_lookup(kv_state, host_ptr);
+  if (!entry)
+    return nullptr;
+
+  if (out_size_bytes)
+    *out_size_bytes = entry->size_bytes;
+  if (out_inference_count)
+    *out_inference_count = entry->inference_count;
+  return entry->gpu_ptr;
+}
+
+int mm_bridge_kv_register(void *state_ptr, void *host_ptr, void *gpu_ptr,
+                          size_t size_bytes) {
+  auto *kv_state = static_cast<mm_kv_cache_state_t *>(state_ptr);
+  if (!kv_state)
+    return MM_ERROR_INVALID_ARG;
+  return mm_kv_cache_state_register(kv_state, host_ptr, gpu_ptr, size_bytes);
+}
+
+void mm_bridge_kv_increment(void *state_ptr, const void *host_ptr) {
+  auto *kv_state = static_cast<mm_kv_cache_state_t *>(state_ptr);
+  if (!kv_state)
+    return;
+  mm_kv_persistent_entry_t *entry =
+      mm_kv_cache_state_lookup(kv_state, host_ptr);
+  if (entry)
+    entry->inference_count++;
 }
 
 } /* extern "C" */

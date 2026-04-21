@@ -27,6 +27,7 @@ set(MM_TEST_SOURCES
     test_kv_block.cpp
     test_kv_fork.cpp
     test_block_table.cpp
+    test_kv_cache_state.cpp
 )
 
 add_executable(mm_tests ${MM_TEST_SOURCES})

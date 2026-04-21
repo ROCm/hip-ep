@@ -7,6 +7,7 @@
 #include "hipdnn_ep_runtime.h"
 #include "runtime_state_internal.h"
 
+#include "mm_kv_cache_state.h"
 #include "mm_runtime_bridge.h"
 
 #include <cassert>
@@ -323,6 +324,28 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
       "size_bytes=%zu\n",
       index, tensor->rank, element_size, size_bytes);
 
+  // GPU-resident KV cache: skip H2D if we have a persistent GPU buffer
+  if (state->kv_cache_state) {
+    size_t cached_size = 0;
+    int inf_count = 0;
+    void *persistent = mm_bridge_kv_lookup_gpu(
+        state->kv_cache_state, tensor->data, &cached_size, &inf_count);
+    if (persistent && inf_count > 0) {
+      // Cache hit: skip H2D, return persistent GPU pointer
+      RUNTIME_DEBUG_LOG(
+          "[KV Cache] prepare_input[%zu]: skip H2D, reuse persistent %p "
+          "(%zu bytes, inference #%d)\n",
+          index, persistent, cached_size, inf_count);
+      out_buffer->gpu_ptr = persistent;
+      out_buffer->host_ptr = tensor->data;
+      out_buffer->shape_ptr = tensor->shape;
+      out_buffer->rank = tensor->rank;
+      out_buffer->size_bytes = cached_size;
+      out_buffer->is_pooled = true; // Don't free this buffer
+      return HIPDNN_EP_SUCCESS;
+    }
+  }
+
   // Allocate GPU buffer (pool reuses across inferences)
   void *gpu_ptr = pool_alloc(size_bytes);
   if (!gpu_ptr) {
@@ -355,6 +378,12 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   if (hipdnn_ep_perf_enabled()) {
     g_perf.h2d_bytes += size_bytes;
     g_perf.h2d_count++;
+  }
+
+  // Register in KV cache state for future reuse (first call)
+  if (state->kv_cache_state) {
+    mm_bridge_kv_register(state->kv_cache_state, tensor->data, gpu_ptr,
+                          size_bytes);
   }
 
   // Populate output buffer
@@ -444,6 +473,28 @@ int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
       "size_bytes=%zu\n",
       index, tensor->rank, element_size, size_bytes);
 
+  // GPU-resident KV cache: reuse persistent GPU buffer if host_ptr matches
+  if (state->kv_cache_state) {
+    size_t cached_size = 0;
+    int inf_count = 0;
+    void *persistent = mm_bridge_kv_lookup_gpu(
+        state->kv_cache_state, tensor->data, &cached_size, &inf_count);
+    if (persistent) {
+      // Shared buffer detected: input and output use same host_ptr
+      RUNTIME_DEBUG_LOG(
+          "[KV Cache] prepare_output[%zu]: reuse persistent GPU buffer %p "
+          "(%zu bytes)\n",
+          index, persistent, cached_size);
+      out_buffer->gpu_ptr = persistent;
+      out_buffer->host_ptr = tensor->data;
+      out_buffer->shape_ptr = tensor->shape;
+      out_buffer->rank = tensor->rank;
+      out_buffer->size_bytes = size_bytes;
+      out_buffer->is_pooled = true; // Don't free
+      return HIPDNN_EP_SUCCESS;
+    }
+  }
+
   // PERF: record H2D end on first output alloc (after all H2D copies queued)
   if (hipdnn_ep_perf_enabled() && index == 0 && g_perf.initialized) {
     (void)hipEventRecord(g_perf.h2d_end,
@@ -483,6 +534,34 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
   }
 
   int result = HIPDNN_EP_SUCCESS;
+
+  // GPU-resident KV cache: skip D2H for persistent entries after first call
+  if (state->kv_cache_state && buffer->is_pooled) {
+    size_t cached_size = 0;
+    int inf_count = 0;
+    void *persistent = mm_bridge_kv_lookup_gpu(
+        state->kv_cache_state, buffer->host_ptr, &cached_size, &inf_count);
+    if (persistent) {
+      if (inf_count == 0) {
+        // First call (prefill): do D2H so OGA has initial data
+        RUNTIME_DEBUG_LOG("[KV Cache] finalize_output: first call, D2H %zu "
+                          "bytes (prefill)\n",
+                          buffer->size_bytes);
+        hipMemcpyAsync(buffer->host_ptr, buffer->gpu_ptr, buffer->size_bytes,
+                       hipMemcpyDeviceToHost,
+                       static_cast<hipStream_t>(state->stream));
+      } else {
+        // Subsequent calls: skip D2H, data stays on GPU
+        RUNTIME_DEBUG_LOG(
+            "[KV Cache] finalize_output: skip D2H (%zu bytes, inference #%d)\n",
+            cached_size, inf_count);
+      }
+      // Increment inference count and keep buffer persistent
+      mm_bridge_kv_increment(state->kv_cache_state, buffer->host_ptr);
+      buffer->gpu_ptr = nullptr; // Prevent pool_release
+      return HIPDNN_EP_SUCCESS;
+    }
+  }
 
   // PERF: record D2H start on first output finalize (after all compute)
   if (hipdnn_ep_perf_enabled() && g_perf.d2h_count == 0 && g_perf.initialized) {
@@ -563,6 +642,16 @@ void hipdnn_ep_tensor_free_input(RuntimeState *state, TensorBuffer *buffer) {
   if (!buffer) {
     fprintf(stderr, "hipdnn_ep_tensor_free_input: null buffer\n");
     return;
+  }
+
+  // GPU-resident KV cache: don't release persistent buffers
+  if (buffer->is_pooled && state && state->kv_cache_state) {
+    void *persistent = mm_bridge_kv_lookup_gpu(
+        state->kv_cache_state, buffer->host_ptr, nullptr, nullptr);
+    if (persistent) {
+      buffer->gpu_ptr = nullptr;
+      return;
+    }
   }
 
   // Return buffer to pool
