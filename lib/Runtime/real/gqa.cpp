@@ -534,18 +534,10 @@ static int gqa_forward_hipblaslt(
         static_cast<int>(H), static_cast<int>(d)));
 
     // ---- Steps 4-5: KV Cache Update ----
-    // Zero present buffers only when there is an unused region beyond the
-    // valid token range [0, total_seq).  The concat kernel writes [0,
-    // total_seq) completely, so zeroing is redundant when total_seq >=
-    // present_seq.
-    if (present_key && present_value && past_key != present_key &&
-        total_seq < present_seq) {
-      size_t present_bytes =
-          static_cast<size_t>(B) * G * present_seq * d * elem_sz;
-      HIP_CHECK(hipMemsetAsync(present_key, 0, present_bytes, stream));
-      HIP_CHECK(hipMemsetAsync(present_value, 0, present_bytes, stream));
-    }
-
+    // The concat/append kernels write the valid range [0, total_seq) in full;
+    // positions [total_seq, present_seq) are never read downstream (expand_kv
+    // is called with copy_elems = total_seq * d), so the unused tail is left
+    // untouched to avoid redundant memory bandwidth during prefill.
     if (present_key && present_value) {
       HIP_CHECK(update_kv_cache(
           stream, past_key, past_value, kSrc, vSrc, present_key, present_value,
