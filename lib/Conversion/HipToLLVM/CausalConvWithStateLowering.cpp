@@ -81,13 +81,19 @@ struct CausalConvWithStateOpLowering
     }
 
     // Extract kernel size from weight shape: (channels, 1, k_1, ...)
-    // kernel_size = product of spatial kernel dims
+    // kernel_size = product of spatial kernel dims.
+    // Use getMemRefDimSize so we pick up compile-time constants for static dims
+    // and runtime MemRefDescriptor::size for dynamic dims -- otherwise a
+    // dynamic weight shape would multiply ShapedType::kDynamic (a large
+    // negative sentinel) into the runtime argument.
     auto weightType = cast<MemRefType>(op.getWeight().getType());
-    auto weightShape = weightType.getShape();
-    int64_t kernelSize = 1;
-    for (int64_t i = 2; i < static_cast<int64_t>(weightShape.size()); ++i)
-      kernelSize *= weightShape[i];
-    Value kernelSizeVal = createI64Const(kernelSize);
+    int64_t weightRank = weightType.getRank();
+    Value kernelSizeVal = createI64Const(1);
+    for (int64_t i = 2; i < weightRank; ++i) {
+      Value dim =
+          getMemRefDimSize(weightType, i, adaptor.getWeight(), rewriter, loc);
+      kernelSizeVal = LLVM::MulOp::create(rewriter, loc, kernelSizeVal, dim);
+    }
 
     // Attributes
     Value ndimVal = createI64Const(op.getNdim());
