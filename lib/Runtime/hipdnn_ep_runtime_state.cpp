@@ -8,6 +8,7 @@
 #include "hipdnn_ep_runtime.h"
 #include "runtime_state_internal.h"
 
+#include "mm_kv_cache_state.h"
 #include "mm_runtime_bridge.h"
 
 #include "model_metadata_generated.h"
@@ -103,6 +104,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   state->hipdnn_handle = nullptr;
   state->hipdnn_graph_registry = nullptr;
   state->mm_initialized = false;
+  state->kv_cache_state = nullptr;
 
   // Explicitly initialize HIP device before any other operations
   // This ensures device 0 is active and context is properly initialized
@@ -230,6 +232,12 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
       RUNTIME_DEBUG_LOG("[MM] Memory Manager init failed (%d), using legacy\n",
                         mm_err);
     }
+  }
+
+  // Create KV cache state for GPU-resident KV cache
+  state->kv_cache_state = mm_kv_cache_state_create();
+  if (state->kv_cache_state) {
+    RUNTIME_DEBUG_LOG("[KV Cache] GPU-resident KV cache state created\n");
   }
 
   TIMING_LOG("[Session] Memory Manager init: %.3fs\n", record_elapsed(t_prev));
@@ -495,6 +503,13 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   // Synchronize stream to ensure all GPU operations complete
   if (state->stream) {
     HIP_CLEANUP(hipStreamSynchronize(state->stream));
+  }
+
+  // Destroy KV cache state (frees persistent GPU buffers)
+  if (state->kv_cache_state) {
+    mm_kv_cache_state_destroy(
+        static_cast<mm_kv_cache_state_t *>(state->kv_cache_state));
+    state->kv_cache_state = nullptr;
   }
 
   // Shutdown Memory Manager (frees pool and workspace internally)

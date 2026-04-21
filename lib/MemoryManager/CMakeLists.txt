@@ -17,6 +17,7 @@ set(MM_SOURCES
     mm_free_list.cpp
     mm_kv.cpp
     mm_block_table.cpp
+    mm_kv_cache_state.cpp
 )
 
 set(MM_HEADERS
