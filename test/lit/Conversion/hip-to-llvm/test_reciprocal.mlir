@@ -7,13 +7,11 @@
 // to unified wrap_power runtime function.
 //
 // This test validates:
-// - hip.reciprocal → llvm.call @wrap_power(..., gamma=-1.0)
+// - hip.reciprocal → llvm.call @wrap_power(..., alpha=0, beta=1, gamma=-1)
 // - num_elements computation for static and dynamic shapes
-// - Data type enum (f32=0, f16=1, bf16=2)
-// - 6-param signature: state, input, output, num_elements, data_type, gamma
-//
-// Expected: wrap_power(state, input_ptr, output_ptr,
-//                      num_elements, data_type, -1.0)
+// - Data type enum passed as i64 (f32=0, f16=1, bf16=2)
+// - Eight LLVM operands: state, input, output, num_elements, data_type,
+//   alpha, beta, gamma (all f64 for the three power coefficients)
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s

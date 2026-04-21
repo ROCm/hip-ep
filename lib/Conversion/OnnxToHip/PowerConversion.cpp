@@ -10,8 +10,8 @@ namespace hip {
 namespace {
 
 /// onnx.Reciprocal -> hip.reciprocal
-/// Converts ONNX reciprocal operation (y = 1/x) to HIP power operation.
-/// Runtime will use miopenActivationPOWER with gamma=-1.0.
+/// Converts ONNX reciprocal (y = 1/x, full signed IEEE domain) to HIP.
+/// Runtime uses a HIP elementwise kernel (not MIOpen POWER activation).
 struct ReciprocalToHip : public mlir::RewritePattern {
   ReciprocalToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Reciprocal", /*benefit=*/1, ctx) {}
@@ -22,8 +22,8 @@ struct ReciprocalToHip : public mlir::RewritePattern {
 };
 
 /// onnx.Sqrt -> hip.sqrt
-/// Converts ONNX square root operation (y = √x) to HIP power operation.
-/// Runtime will use miopenActivationPOWER with gamma=0.5.
+/// ONNX element-wise sqrt; lowered to @wrap_power(0, 1, 0.5) and executed
+/// with MIOpen miopenActivationPOWER at runtime.
 struct SqrtToHip : public mlir::RewritePattern {
   SqrtToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Sqrt", /*benefit=*/1, ctx) {}

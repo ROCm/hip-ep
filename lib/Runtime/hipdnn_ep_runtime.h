@@ -460,24 +460,17 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
                          void *output, int64_t num_elements,
                          int64_t element_size_bytes);
 
-// Power operation wrapper (fully supports miopenActivationPOWER)
-// Computes output = (alpha + beta * input)^gamma element-wise
-// alpha, beta, gamma: MIOpen power activation parameters
-// Common operations:
-//   - Reciprocal: alpha=0, beta=1, gamma=-1.0  → 1/x
-//   - Sqrt:       alpha=0, beta=1, gamma=0.5   → √x
-//   - Square:     alpha=0, beta=1, gamma=2.0   → x^2
-//   - General:    any alpha, beta, gamma        → (alpha + beta*x)^gamma
-// data_type is HIPDNN_EP_DATATYPE_* enum value (FLOAT=0, HALF=1, BFLOAT16=2)
+// Unified power entry: output = f(input; alpha, beta, gamma).
+// alpha, beta, gamma match the MIOpen POWER activation tuple where the
+// MIOpen path is used. data_type is HIPDNN_EP_DATATYPE_* (FLOAT=0, HALF=1,
+// BFLOAT16=2).
+//
+// LLVM lowering always calls this symbol. For (0, 1, -1) the runtime uses a
+// HIP reciprocal kernel (ONNX/IEEE 1/x); for other tuples (e.g. Sqrt
+// (0,1,0.5)) it uses miopenActivationPOWER / miopenActivationForward.
 int wrap_power(RuntimeState *state, void *input, void *output,
                int64_t num_elements, int64_t data_type, double alpha,
                double beta, double gamma);
-
-// Convenience wrappers for common power operations
-int wrap_reciprocal(RuntimeState *state, void *input, void *output,
-                    int64_t num_elements, int64_t data_type);
-int wrap_sqrt(RuntimeState *state, void *input, void *output,
-              int64_t num_elements, int64_t data_type);
 
 // Gather operation wrapper
 int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
