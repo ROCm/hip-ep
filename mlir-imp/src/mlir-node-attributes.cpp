@@ -40,13 +40,15 @@ std::vector<std::string> MLIRNodeAttributes::get_attribute_names() const {
   for (auto named_attr : dict_attr) {
     std::string attr_name = named_attr.getName().str();
 
-    // Skip internal morphizen attributes that are not user-visible
+    // Skip internal morphizen / onnx-mlir attributes that are not user-visible
     if (attr_name == attr_names::NODE_OUTPUTS ||
         attr_name == attr_names::ONNX_NAME ||
         attr_name == attr_names::ONNX_NODE_NAME ||
         attr_name == attr_names::ONNX_GRAPH_NAME ||
         attr_name == attr_names::MORPHIZEN_NODE_OUTPUTS ||
-        attr_name == attr_names::MORPHIZEN_NODE_INPUTS) {
+        attr_name == attr_names::MORPHIZEN_NODE_INPUTS ||
+        attr_name == attr_names::CUSTOM_OP_FUNCTION_NAME ||
+        attr_name == attr_names::CUSTOM_OP_DOMAIN_NAME) {
       continue;
     }
 
