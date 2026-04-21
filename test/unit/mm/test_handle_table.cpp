@@ -13,12 +13,11 @@ TEST(HandleTableTest, InsertAndLookup) {
   mm_handle_t h = table.insert(&dummy, sizeof(dummy), MM_CLASS_ACTIVATION);
   EXPECT_NE(h, MM_INVALID_HANDLE);
 
-  auto *entry = table.lookup(h);
-  ASSERT_NE(entry, nullptr);
-  EXPECT_EQ(entry->ptr, &dummy);
-  EXPECT_EQ(entry->size, sizeof(dummy));
-  EXPECT_EQ(entry->mem_class, MM_CLASS_ACTIVATION);
-  EXPECT_TRUE(entry->active);
+  auto entry = table.lookup(h);
+  EXPECT_TRUE(entry.active);
+  EXPECT_EQ(entry.ptr, &dummy);
+  EXPECT_EQ(entry.size, sizeof(dummy));
+  EXPECT_EQ(entry.mem_class, MM_CLASS_ACTIVATION);
 }
 
 TEST(HandleTableTest, MonotonicIds) {
@@ -36,18 +35,19 @@ TEST(HandleTableTest, RemoveInvalidatesHandle) {
   int dummy = 0;
   mm_handle_t h = table.insert(&dummy, sizeof(dummy), MM_CLASS_ACTIVATION);
 
-  auto *removed = table.remove(h);
-  ASSERT_NE(removed, nullptr);
-  EXPECT_EQ(removed->ptr, &dummy);
+  auto removed = table.remove(h);
+  EXPECT_TRUE(removed.active);
+  EXPECT_EQ(removed.ptr, &dummy);
 
-  /* Lookup after remove returns nullptr */
-  EXPECT_EQ(table.lookup(h), nullptr);
+  /* Lookup after remove returns inactive entry */
+  auto after = table.lookup(h);
+  EXPECT_FALSE(after.active);
 }
 
 TEST(HandleTableTest, LookupInvalidHandle) {
   mm::HandleTable table;
-  EXPECT_EQ(table.lookup(MM_INVALID_HANDLE), nullptr);
-  EXPECT_EQ(table.lookup(999), nullptr);
+  EXPECT_FALSE(table.lookup(MM_INVALID_HANDLE).active);
+  EXPECT_FALSE(table.lookup(999).active);
 }
 
 TEST(HandleTableTest, ActiveCount) {

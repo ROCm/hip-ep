@@ -177,16 +177,19 @@ void *ArenaAllocator::alloc(size_t size, size_t alignment) {
   if (cls >= num_classes_ || size >= kBfcThreshold)
     return bfc_.alloc(size, alignment);
 
-  /* Atomic bump allocation (lock-free) */
+  /* Atomic bump allocation (lock-free via CAS loop) */
   size_t aligned_size = (size + alignment - 1) & ~(alignment - 1);
   Arena &arena = arenas_[cls];
 
-  size_t old_offset =
-      arena.offset.fetch_add(aligned_size, std::memory_order_relaxed);
-  if (old_offset + aligned_size > arena.capacity) {
-    /* Arena exhausted — fall back to BFC */
-    arena.offset.fetch_sub(aligned_size, std::memory_order_relaxed);
-    return bfc_.alloc(size, alignment);
+  size_t old_offset = arena.offset.load(std::memory_order_relaxed);
+  while (true) {
+    if (old_offset + aligned_size > arena.capacity) {
+      /* Arena exhausted — fall back to BFC */
+      return bfc_.alloc(size, alignment);
+    }
+    if (arena.offset.compare_exchange_weak(
+            old_offset, old_offset + aligned_size, std::memory_order_relaxed))
+      break;
   }
 
   return static_cast<char *>(arena.base) + old_offset;

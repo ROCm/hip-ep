@@ -34,8 +34,12 @@ extern "C" {
 int mm_init(const mm_config_t *config) {
   auto *s = mm::mm_get_state();
 
-  if (s->initialized.load(std::memory_order_acquire))
+  /* CAS to prevent concurrent init */
+  bool expected = false;
+  if (!s->initialized.compare_exchange_strong(expected, true,
+                                              std::memory_order_acq_rel))
     return MM_ERROR_ALREADY_INIT;
+  /* If init fails below, we reset initialized to false */
 
   /* Apply config (or defaults) */
   if (config) {
@@ -85,6 +89,7 @@ int mm_init(const mm_config_t *config) {
   if (err != MM_OK) {
     delete s->arena;
     s->arena = nullptr;
+    s->initialized.store(false, std::memory_order_release);
     return err;
   }
 
@@ -100,7 +105,7 @@ int mm_init(const mm_config_t *config) {
     }
   }
 
-  s->initialized.store(true, std::memory_order_release);
+  /* initialized already set to true by CAS above */
   return MM_OK;
 }
 
