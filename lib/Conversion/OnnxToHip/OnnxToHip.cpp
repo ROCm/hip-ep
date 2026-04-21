@@ -364,6 +364,7 @@ static void lowerOnnxReturns(mlir::func::FuncOp funcOp) {
 static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
                                              mlir::MLIRContext *ctx) {
   mlir::RewritePatternSet patterns(ctx);
+  populateCompileTimeOpsConversionPatterns(patterns, ctx);
   populateMatMulConversionPatterns(patterns, ctx);
   populateTransposeConversionPatterns(patterns, ctx);
   populateElementwiseConversionPatterns(patterns, ctx);
