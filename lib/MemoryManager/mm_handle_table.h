@@ -30,12 +30,12 @@ public:
   mm_handle_t insert(void *ptr, size_t size, mm_memory_class_t mem_class,
                      mm_tier_t tier = MM_TIER_HBM);
 
-  /* Lookup by handle. Returns nullptr if invalid/removed. */
-  HandleEntry *lookup(mm_handle_t handle);
+  /* Lookup by handle. Returns copy. active=false if invalid/removed. */
+  HandleEntry lookup(mm_handle_t handle);
 
-  /* Remove an entry. Returns the entry data before removal.
-     Returns nullptr if handle was already invalid. */
-  HandleEntry *remove(mm_handle_t handle);
+  /* Remove an entry. Returns copy of entry before removal.
+     active=false if handle was already invalid. */
+  HandleEntry remove(mm_handle_t handle);
 
   /* Number of active entries. */
   size_t active_count() const;

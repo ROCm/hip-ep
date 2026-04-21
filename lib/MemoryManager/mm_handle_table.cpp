@@ -28,25 +28,30 @@ mm_handle_t HandleTable::insert(void *ptr, size_t size,
   return static_cast<mm_handle_t>(id);
 }
 
-HandleEntry *HandleTable::lookup(mm_handle_t handle) {
+HandleEntry HandleTable::lookup(mm_handle_t handle) {
+  HandleEntry result{};
+  result.active = false;
   if (handle == MM_INVALID_HANDLE)
-    return nullptr;
+    return result;
   uint64_t idx = handle - 1;
   std::lock_guard<std::mutex> lock(mutex_);
   if (idx >= entries_.size() || !entries_[idx].active)
-    return nullptr;
-  return &entries_[idx];
+    return result;
+  return entries_[idx]; /* Return copy */
 }
 
-HandleEntry *HandleTable::remove(mm_handle_t handle) {
+HandleEntry HandleTable::remove(mm_handle_t handle) {
+  HandleEntry result{};
+  result.active = false;
   if (handle == MM_INVALID_HANDLE)
-    return nullptr;
+    return result;
   uint64_t idx = handle - 1;
   std::lock_guard<std::mutex> lock(mutex_);
   if (idx >= entries_.size() || !entries_[idx].active)
-    return nullptr;
+    return result;
+  result = entries_[idx]; /* Copy before deactivation */
   entries_[idx].active = false;
-  return &entries_[idx];
+  return result;
 }
 
 size_t HandleTable::active_count() const {

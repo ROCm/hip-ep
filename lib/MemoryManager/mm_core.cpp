@@ -29,7 +29,7 @@ mm_handle_t mm_alloc(size_t size, mm_alloc_hints_t hints,
     return MM_INVALID_HANDLE;
 
   case MM_CLASS_KV_CACHE:
-    /* KV cache must use mm_kv_alloc_block() (Phase 2) */
+    /* KV cache must use mm_kv_alloc_block() */
     return MM_INVALID_HANDLE;
 
   default:
@@ -47,15 +47,15 @@ void mm_free(mm_handle_t handle, mm_stream_t /*stream*/) {
   if (!s->initialized.load(std::memory_order_acquire))
     return;
 
-  auto *entry = s->handles.remove(handle);
-  if (!entry)
+  mm::HandleEntry entry = s->handles.remove(handle);
+  if (!entry.active)
     return;
 
-  switch (entry->mem_class) {
+  switch (entry.mem_class) {
   case MM_CLASS_ACTIVATION:
   case MM_CLASS_SCRATCH:
     if (s->arena)
-      s->arena->free(entry->ptr, entry->size);
+      s->arena->free(entry.ptr, entry.size);
     break;
   default:
     break;
@@ -67,11 +67,11 @@ void *mm_get_ptr(mm_handle_t handle, mm_device_t /*device*/) {
   if (!s->initialized.load(std::memory_order_acquire))
     return nullptr;
 
-  auto *entry = s->handles.lookup(handle);
-  if (!entry)
+  mm::HandleEntry entry = s->handles.lookup(handle);
+  if (!entry.active)
     return nullptr;
 
-  return entry->ptr;
+  return entry.ptr;
 }
 
 void mm_prefetch(mm_handle_t /*handle*/, mm_tier_t /*target_tier*/) {
@@ -85,14 +85,14 @@ mm_alloc_info_t mm_query(mm_handle_t handle) {
   if (!s->initialized.load(std::memory_order_acquire))
     return info;
 
-  auto *entry = s->handles.lookup(handle);
-  if (!entry)
+  mm::HandleEntry entry = s->handles.lookup(handle);
+  if (!entry.active)
     return info;
 
-  info.current_tier = entry->tier;
-  info.mem_class = entry->mem_class;
-  info.size = entry->size;
-  info.ref_count = entry->ref_count;
+  info.current_tier = entry.tier;
+  info.mem_class = entry.mem_class;
+  info.size = entry.size;
+  info.ref_count = entry.ref_count;
   info.resident_device = MM_DEVICE_GPU_0;
   return info;
 }

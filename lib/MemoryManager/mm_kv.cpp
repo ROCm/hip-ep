@@ -208,11 +208,13 @@ mm_kv_block_t KvBlockPool::fork_block(mm_kv_block_t handle) {
     return MM_INVALID_BLOCK;
 
   uint32_t idx = (uint32_t)(handle - kKvHandleBase - 1);
-  if (idx >= total_blocks_ || !blocks_[idx].active)
+  if (idx >= total_blocks_)
     return MM_INVALID_BLOCK;
 
-  /* CoW: increment ref count, return same handle */
+  /* CoW: increment ref count under lock, return same handle */
   std::lock_guard<std::mutex> lock(mutex_);
+  if (!blocks_[idx].active)
+    return MM_INVALID_BLOCK;
   blocks_[idx].ref_count++;
   return handle;
 }
