@@ -71,6 +71,25 @@ int hip_elementwise_sub(
     int hip_dtype);
 
 /* =========================================================================
+ * Elementwise reciprocal (1 / x)
+ * =========================================================================
+ *
+ * ONNX Reciprocal over the full IEEE domain (including negative x and x=0
+ * per IEEE rules). Implemented as a plain HIP kernel. MIOpen
+ * miopenActivationPOWER (used for other wrap_power cases) does not match
+ * ONNX 1/x for negative inputs; see lib/Runtime/real/power.cpp.
+ *
+ * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16, HIP_DTYPE_BFLOAT16
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
+ */
+int hip_elementwise_reciprocal(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+/* =========================================================================
  * Rotary Position Embedding (RoPE)
  * =========================================================================
  *
