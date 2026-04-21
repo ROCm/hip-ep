@@ -44,6 +44,17 @@ constexpr const char* MORPHIZEN_NODE_OUTPUTS = "morphizen.node_outputs";
 // "morphizen.placeholder" for placeholder operations in attributes
 constexpr const char* MORPHIZEN_PLACEHOLDER = "morphizen.placeholder";
 
+// onnx.Custom convention: when an op cannot be expressed by a native MLIR op
+// name (custom domains like com.microsoft, or unregistered ONNX ops), it is
+// wrapped as `onnx.Custom` with the original op_type stored in
+// `function_name` and the original domain stored in `domain_name`. These two
+// attributes are MLIR-internal bookkeeping; the corresponding ONNX-level
+// information lives in Node.op_type / Node.domain. They must never be
+// re-emitted as user-visible ONNX node attributes (see
+// MLIRNode::getOpType / getDomain for the reverse-decode).
+constexpr const char* CUSTOM_OP_FUNCTION_NAME = "function_name";
+constexpr const char* CUSTOM_OP_DOMAIN_NAME = "domain_name";
+
 // Attribute names defined in onnx-mlir project
 // The "onnx_node_name"  attribute to represent NodeProto.name
 // This attribute is attached to operations in the onnx-mlir
