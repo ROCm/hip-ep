@@ -858,6 +858,80 @@ def Hip_ReduceSumOp : Hip_DpsOp<"reduce_sum"> {
   }];
 }
 
+// ===== Causal Conv with State ================================================
+
+def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
+    [AttrSizedOperandSegments]> {
+  let summary = "Stateful causal depthwise convolution";
+  let description = [{
+    Causal depthwise convolution with carry state for incremental decoding.
+
+    Used by Gated DeltaNet (Qwen3.5) and Mamba (Jamba, FalconMamba) as a
+    preprocessing step. Replaces the 3-op pattern (Concat + Conv + Slice)
+    with a single fused operation.
+
+    The convolution is causal (looks only at current and past positions along
+    the last spatial dimension) and depthwise (each channel is convolved
+    independently with its own kernel).
+
+    Input layout is channels-first: (batch_size, channels, ...).
+    Weight layout: (channels, 1, k_1, ...) for depthwise convolution.
+    The carry state stores the last (k-1) positions along the causal axis
+    for incremental decode.
+
+    Example (1D):
+    ```mlir
+    hip.causal_conv_with_state(%ctx)
+        ins(%input, %weight, %bias, %past_state :
+            tensor<1x64x128xf16>, tensor<64x1x4xf16>,
+            tensor<64xf16>, tensor<1x64x3xf16>)
+        outs(%output, %present_state :
+             tensor<1x64x128xf16>, tensor<1x64x3xf16>)
+        {activation = "silu", ndim = 1 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+
+    // Required inputs
+    Hip_TensorOrMemRef:$input,           // (batch, channels, ...)
+    Hip_TensorOrMemRef:$weight,          // (channels, 1, k_1, ...)
+
+    // Optional inputs
+    Optional<Hip_TensorOrMemRef>:$bias,        // (channels)
+    Optional<Hip_TensorOrMemRef>:$past_state,  // (batch, channels, k-1)
+
+    // DPS output buffers
+    Hip_TensorOrMemRef:$output,          // same shape as input
+    Hip_TensorOrMemRef:$present_state,   // (batch, channels, k-1)
+
+    // Attributes
+    DefaultValuedAttr<StrAttr, "\"none\"">:$activation,  // "none", "silu", "swish"
+    DefaultValuedAttr<I64Attr, "1">:$ndim                // 1, 2, or 3
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(`
+        $input `,` $weight
+        (`,` $bias^)?
+        (`,` $past_state^)?
+        `:`
+        type($input) `,` type($weight)
+        (`,` type($bias)^)?
+        (`,` type($past_state)^)?
+    `)`
+    `outs` `(`
+        $output `,` $present_state
+        `:`
+        type($output) `,` type($present_state)
+    `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+// ===== Group Query Attention =================================================
+
 def Hip_GqaOp : Hip_DpsOp<"gqa", [AttrSizedOperandSegments]> {
   let summary = "Group Query Attention - Full MS spec implementation";
   let description = [{

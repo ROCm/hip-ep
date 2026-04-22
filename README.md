@@ -13,7 +13,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 ## Features
 
 - **MLIR Compiler Pipeline**: ONNX dialect → HIP dialect → LLVM IR → native DLL
-- **MIOpen Integration**: Conv, Softmax, RMS Norm, Mul via MIOpen library
+- **MIOpen Integration**: Conv, Softmax, RMS Norm, Mul, CausalConvWithState via MIOpen library
 - **hipBLASLt MatMul**: High-performance matrix multiplication
 - **Custom HIP Kernels**: GQA, RoPE, Cast, Sub, Gather, ReduceSum
 - **Memory Pool Optimization**: `hip-pool-allocs` pass packs allocations into a single grow-on-demand buffer
@@ -42,6 +42,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | GroupQueryAttention (com.microsoft) | Custom HIP Kernel |
 | MatMulNBits (com.microsoft) | Custom HIP Kernel |
 | QMoE (com.microsoft) | Custom HIP Kernel |
+| CausalConvWithState (com.microsoft) | MIOpen |
 
 ### Compiler-Optimized Operations
 

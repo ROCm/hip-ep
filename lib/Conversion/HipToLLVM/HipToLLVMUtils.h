@@ -65,6 +65,8 @@ inline constexpr const char *kWrapQMoE = "wrap_qmoe";
 inline constexpr const char *kWrapGemm = "wrap_gemm";
 inline constexpr const char *kHipGetConstant = "hipdnn_ep_constant_get";
 inline constexpr const char *kHipDNNGraphExecute = "hipdnn_graph_execute";
+inline constexpr const char *kWrapCausalConvWithState =
+    "wrap_causal_conv_with_state";
 
 // LLVM memref descriptor struct field indices.
 // Layout: { allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank] }
@@ -243,6 +245,8 @@ void populateQMoELoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateGraphLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
+void populateCausalConvWithStateLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateGemmLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 

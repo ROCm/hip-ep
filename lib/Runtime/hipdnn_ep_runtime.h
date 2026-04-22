@@ -561,6 +561,29 @@ int wrap_qmoe(
     float activation_alpha, float activation_beta, float swiglu_limit,
     int64_t normalize_routing_weights, int64_t elem_size);
 
+// CausalConvWithState operation wrapper (stateful causal depthwise convolution)
+// Used by Gated DeltaNet (Qwen3.5) and Mamba models.
+// Performs causal depthwise convolution with carry state for incremental
+// decode. The convolution is causal (looks only at current and past positions)
+// and depthwise (each channel convolved independently). Input layout:
+// channels-first (batch, channels, seq_len). Weight layout: (channels, 1,
+// kernel_size) for 1D depthwise.
+//   bias:       nullable - per-channel bias (channels)
+//   past_state: nullable - carry state from previous step (batch, channels,
+//   k-1) activation: 0=none, 1=silu/swish
+int wrap_causal_conv_with_state(
+    RuntimeState *state,
+    const void *input,      // (batch, channels, seq_len)
+    const void *weight,     // (channels, 1, kernel_size)
+    const void *bias,       // nullable, (channels)
+    const void *past_state, // nullable, (batch, channels, kernel_size - 1)
+    void *output,           // (batch, channels, seq_len)
+    void *present_state,    // (batch, channels, kernel_size - 1)
+    int64_t batch_size, int64_t channels, int64_t seq_len, int64_t kernel_size,
+    int64_t ndim,
+    int64_t activation, // 0=none, 1=silu/swish
+    int64_t element_size_bytes);
+
 //==============================================================================
 // ONNX Gemm via hipBLASLt
 //==============================================================================
