@@ -126,17 +126,6 @@ existing `--convert-hip-to-llvm` pipeline.
 | `Unsqueeze` | `hip.unsqueeze` | Shape/stride reinterpretation only |
 | `Squeeze` | `hip.squeeze` | Shape/stride reinterpretation only |
 
-### Compile-time Folded Ops
-
-| ONNX | Lowering behavior | Notes |
-|---|---|---|
-| `Constant` | `arith.constant` or externalized constants sidecar | Existing constant handling path |
-| `Shape` | Folded to tensor constant IR when input shape is static | Supports `start`; dynamic dims are not folded |
-| `Size` | Folded to scalar tensor constant IR when input shape is static | Dynamic dims are not folded |
-| `Range` | Folded to tensor constant IR when `start/limit/delta` are i64 scalar constants | `delta = 0` is rejected |
-
-`CastLike` and `Concat` are out of scope for the current compile-time-op phase.
-
 ### Custom HIP Kernels (no MIOpen equivalent)
 
 | ONNX | HIP | Notes |
