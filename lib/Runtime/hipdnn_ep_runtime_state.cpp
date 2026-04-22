@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "debug_log.h"
+#include "hip/timing.h"
 #include "hip_cleanup.h"
 #include "hipdnn_ep_runtime.h"
 #include "runtime_state_internal.h"
@@ -65,6 +66,9 @@ static inline long shm_ref_dec(volatile long *p) { return --(*p); }
 
 int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
                                  const void *metadata_blob, size_t blob_size) {
+  auto t0 = timing_now();
+  auto t_prev = t0;
+
   if (!out_state || !fs) {
     fprintf(stderr, "Invalid arguments to hipdnn_ep_state_init_with_fs\n");
     return 1;
@@ -166,12 +170,16 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
         prop.gcnArchName);
   }
 
+  TIMING_LOG("[Session] HIP device init: %.3fs\n", record_elapsed(t_prev));
+
   // Create HIP stream
   if (hipStreamCreate(&state->stream) != hipSuccess) {
     fprintf(stderr, "Failed to create HIP stream\n");
     free(state);
     return 6;
   }
+
+  TIMING_LOG("[Session] hipStreamCreate: %.3fs\n", record_elapsed(t_prev));
 
   // Create MIOpen handle
   if (miopenCreate(&state->miopen_handle) != miopenStatusSuccess) {
@@ -193,6 +201,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
     return 8;
   }
 
+  TIMING_LOG("[Session] MIOpen init: %.3fs\n", record_elapsed(t_prev));
+
   // Create hipBLASLt handle
   if (hipblasLtCreate(&state->hipblas_handle) != HIPBLAS_STATUS_SUCCESS) {
     fprintf(stderr, "Failed to create hipBLASLt handle\n");
@@ -203,18 +213,28 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
     return 9;
   }
 
+  TIMING_LOG("[Session] hipBLASLt init: %.3fs\n", record_elapsed(t_prev));
+
   *out_state = state;
 
   // Parse FlatBuffers blob to get constants_filename and constant_sizes
-  if (!metadata_blob || blob_size == 0)
+  if (!metadata_blob || blob_size == 0) {
+    TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs (no "
+               "metadata)\n",
+               elapsed_since(t0));
     return 0; // No metadata — no constants to load
+  }
 
   auto *meta = flatbuffers::GetRoot<mlir::hip::HipModelMetaInfo>(metadata_blob);
   auto *constants = meta->constants();
   int64_t count = constants ? (int64_t)constants->size() : 0;
 
-  if (count <= 0)
+  if (count <= 0) {
+    TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs (no "
+               "constants)\n",
+               elapsed_since(t0));
     return 0; // No constants to load
+  }
 
   const char *constants_filename = "constants.bin";
   if (meta->constants_filename())
@@ -244,6 +264,10 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   // Load the entire constants file as one blob, then point each
   // gpu_constants[i] into it using the offset stored in ConstantInfo.
   size_t total_size = reader->size();
+
+  TIMING_LOG("[Session] Metadata parse + file open: %.3fs (%lld constants, %zu "
+             "bytes)\n",
+             record_elapsed(t_prev), (long long)count, total_size);
 
   // --- Shared Constants Cache ---
   // In OGA pipeline mode, prefill and decode models share the same
@@ -295,6 +319,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 
     if (force_host) {
       // Legacy iGPU path: hipHostMalloc (pinned host memory).
+      TIMING_LOG("[Session] iGPU: HIPDNN_EP_IGPU_USE_HOST=1, using "
+                 "hipHostMalloc (pinned host) path\n");
       if (hipHostMalloc(&state->gpu_constants_blob, total_size,
                         hipHostMallocDefault) != hipSuccess) {
         fprintf(stderr, "hipHostMalloc failed for constants blob (%zu bytes)\n",
@@ -303,6 +329,9 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
         *out_state = nullptr;
         return 1;
       }
+
+      TIMING_LOG("[Session] hipHostMalloc: %.3fs (%zu bytes)\n",
+                 record_elapsed(t_prev), total_size);
 
       const void *src = reader->mmap();
       if (src) {
@@ -320,12 +349,21 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
         }
       }
 
+      TIMING_LOG("[Session] Read constants to pinned: %.3fs (%zu bytes, %s)\n",
+                 record_elapsed(t_prev), total_size,
+                 src ? "mmap+memcpy" : "fread");
       state->constants_blob_is_host = true;
 
     } else {
       // VRAM path (default for both iGPU and dGPU): staging buffer + hipMemcpy.
+      if (is_igpu)
+        TIMING_LOG("[Session] iGPU: using hipMalloc (VRAM) + hipMemcpy path\n");
+
       const void *src = reader->mmap();
       void *cpu_buf = nullptr;
+
+      TIMING_LOG("[Session] VRAM path: mmap %s\n",
+                 src ? "succeeded" : "failed, using fread fallback");
 
       if (!src) {
         cpu_buf = malloc(total_size);
@@ -337,6 +375,9 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
           return 1;
         }
 
+        TIMING_LOG("[Session] malloc staging buffer: %.3fs (%zu bytes)\n",
+                   record_elapsed(t_prev), total_size);
+
         size_t bytes_read = reader->fread(cpu_buf, total_size);
         if (bytes_read != total_size) {
           fprintf(stderr, "Short read: got %zu of %zu bytes\n", bytes_read,
@@ -347,6 +388,9 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
           return 1;
         }
         src = cpu_buf;
+
+        TIMING_LOG("[Session] fread constants.bin: %.3fs (%zu bytes)\n",
+                   record_elapsed(t_prev), total_size);
       }
 
       if (hipMalloc(&state->gpu_constants_blob, total_size) != hipSuccess) {
@@ -358,6 +402,9 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
         return 1;
       }
 
+      TIMING_LOG("[Session] hipMalloc VRAM: %.3fs (%zu bytes)\n",
+                 record_elapsed(t_prev), total_size);
+
       if (hipMemcpy(state->gpu_constants_blob, src, total_size,
                     hipMemcpyHostToDevice) != hipSuccess) {
         fprintf(stderr, "hipMemcpy failed for constants blob\n");
@@ -366,6 +413,9 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
         *out_state = nullptr;
         return 1;
       }
+
+      TIMING_LOG("[Session] hipMemcpy H2D: %.3fs (%zu bytes)\n",
+                 record_elapsed(t_prev), total_size);
 
       free(cpu_buf); // no-op when mmap was used
       state->constants_blob_is_host = false;
@@ -405,6 +455,11 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
     state->gpu_constants[i] =
         static_cast<char *>(state->gpu_constants_blob) + offset;
   }
+
+  TIMING_LOG("[Session] Pointer fixup: %.3fs (%lld constants)\n",
+             record_elapsed(t_prev), (long long)count);
+  TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs\n",
+             elapsed_since(t0));
 
   return 0;
 }
