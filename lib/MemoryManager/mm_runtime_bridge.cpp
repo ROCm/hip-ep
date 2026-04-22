@@ -30,10 +30,14 @@ int mm_bridge_init(size_t gpu_memory_limit, mm_stream_t hip_stream) {
     return err;
   }
 
-  /* Initialize MM with configuration */
+  /* Initialize MM with configuration.
+     Use a conservative memory limit: 256 MB for arena + BFC.
+     This avoids exhausting GPU memory when large models are loaded.
+     The arena grows lazily via BFC fallback if more is needed. */
   mm_config_t config = {};
-  config.gpu_memory_limit = gpu_memory_limit;
-  config.kv_cache_fraction = 0.0f; /* Phase 1: no KV cache reservation yet */
+  config.gpu_memory_limit =
+      gpu_memory_limit > 0 ? gpu_memory_limit : 256 * 1024 * 1024;
+  config.kv_cache_fraction = 0.0f; /* KV cache managed separately */
   config.kv_block_size_tokens = 16;
   config.max_tier = MM_TIER_DRAM;
   config.enable_prefix_caching = false; /* Phase 3 */
