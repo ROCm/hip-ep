@@ -31,7 +31,12 @@ static mlir::FailureOr<int64_t> getI64ScalarConstant(mlir::Value v) {
   }
 
   mlir::Operation *def = v.getDefiningOp();
-  if (!def || def->getName().getStringRef() != "onnx.Constant")
+  if (!def)
+    return mlir::failure();
+  // Match the constant detection style used in ReshapeConversion: accept
+  // arith.constant or any op carrying a dense `value` attribute (onnx-mlir
+  // onnx.Constant uses this attribute name).
+  if (!def->hasAttr("value"))
     return mlir::failure();
   auto valueAttr = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
       def->getAttrOfType<mlir::ElementsAttr>("value"));
