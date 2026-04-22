@@ -620,6 +620,31 @@ void QMoEOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// CausalConvWithStateOp: ins(input, weight, [bias], [past_state])
+//                        outs(output, present_state)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange CausalConvWithStateOp::getDpsInitsMutable() {
+  // DPS inits: output, present_state (always 2)
+  // Count actual inputs before the inits
+  unsigned numInputs = 1; // ctx
+  numInputs++;            // input
+  numInputs++;            // weight
+  if (getBias())
+    ++numInputs;
+  if (getPastState())
+    ++numInputs;
+
+  return MutableOperandRange(*this, /*start=*/numInputs, /*length=*/2);
+}
+
+void CausalConvWithStateOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // GemmOp
 //===----------------------------------------------------------------------===//
 
