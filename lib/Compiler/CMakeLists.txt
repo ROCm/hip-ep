@@ -26,6 +26,8 @@ target_link_libraries(LibHipCompiler PUBLIC
   MLIRLLVMDialect
   MLIRBufferizationDialect
   MLIRBufferizationTransforms
+  MLIRCFDialect
+  MLIRMathDialect
   MLIRSCFDialect
   MLIRSCFToControlFlow
   MLIRParser
