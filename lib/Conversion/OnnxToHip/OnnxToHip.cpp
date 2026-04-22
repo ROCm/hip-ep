@@ -13,6 +13,9 @@
 
 #include "OnnxToHipUtils.h"
 
+#include "mlir/Dialect/Math/IR/Math.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+
 #include "hip/Support/DiskFileSystem.h"
 #include "hip/timing.h"
 #include "morphizen-foundation/file_io.hpp"
