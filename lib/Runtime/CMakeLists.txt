@@ -223,6 +223,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/gqa.cpp runtime_gqa.bc)
     compile_to_bitcode(real/cast.cpp runtime_cast.bc)
     compile_to_bitcode(real/gather.cpp runtime_gather.bc)
+    compile_to_bitcode(real/range.cpp runtime_range.bc)
     compile_to_bitcode(real/reduce_sum.cpp runtime_reduce_sum.bc)
     compile_to_bitcode(real/matmul_nbits.cpp runtime_matmul_nbits.bc)
     compile_to_bitcode(real/qmoe.cpp runtime_qmoe.bc)
@@ -245,6 +246,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gqa.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cast.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_range.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_sum.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul_nbits.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe.bc
