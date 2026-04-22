@@ -82,15 +82,18 @@ int mm_init(const mm_config_t *config) {
       (size_t)(s->total_gpu_memory * s->config.kv_cache_fraction);
   s->activation_reserved = s->total_gpu_memory - s->kv_cache_reserved;
 
-  /* Initialize arena allocator for activations + scratch */
-  s->arena = new mm::ArenaAllocator();
-  int err = s->arena->init(s->hal, 0, s->activation_reserved,
-                           s->config.num_size_classes);
-  if (err != MM_OK) {
-    delete s->arena;
-    s->arena = nullptr;
-    s->initialized.store(false, std::memory_order_release);
-    return err;
+  /* Initialize arena allocator for activations + scratch.
+     Skip if budget is 0 — tensor alloc/free will fall through to
+     the legacy hipMalloc/hipFree path. */
+  if (s->activation_reserved > 0) {
+    s->arena = new mm::ArenaAllocator();
+    int err = s->arena->init(s->hal, 0, s->activation_reserved,
+                             s->config.num_size_classes);
+    if (err != MM_OK) {
+      delete s->arena;
+      s->arena = nullptr;
+      /* Non-fatal: fall through to legacy allocation path */
+    }
   }
 
   /* Initialize KV cache block pool (if budget allows) */
