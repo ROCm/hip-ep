@@ -30,13 +30,13 @@ int mm_bridge_init(size_t gpu_memory_limit, mm_stream_t hip_stream) {
     return err;
   }
 
-  /* Initialize MM with configuration.
-     Use a conservative memory limit: 256 MB for arena + BFC.
-     This avoids exhausting GPU memory when large models are loaded.
-     The arena grows lazily via BFC fallback if more is needed. */
+  /* Initialize MM with zero upfront allocation.
+     Arena and KV pool are not pre-allocated — tensor alloc/free falls
+     through to the legacy hipMalloc/hipFree path. The MM provides
+     KV cache state (GPU-resident buffers), static pool, and handle
+     table without consuming any GPU memory at init time. */
   mm_config_t config = {};
-  config.gpu_memory_limit =
-      gpu_memory_limit > 0 ? gpu_memory_limit : 256 * 1024 * 1024;
+  config.gpu_memory_limit = gpu_memory_limit;
   config.kv_cache_fraction = 0.0f; /* KV cache managed separately */
   config.kv_block_size_tokens = 16;
   config.max_tier = MM_TIER_DRAM;
