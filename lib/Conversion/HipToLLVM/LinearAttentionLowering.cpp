@@ -77,25 +77,36 @@ struct LinearAttentionOpLowering
     Value updateRule = createI64Const(updateRuleToEnum(op.getUpdateRule()));
 
     // === Extract shape info from query: [B, T, H_q * d_k] ===
+    // Use getMemRefDimSize so we pick up compile-time constants for static
+    // dims and runtime MemRefDescriptor::size for dynamic dims -- otherwise
+    // a dynamic shape (typical LLM decode/prefill) would feed
+    // ShapedType::kDynamic (a large negative sentinel) into the runtime
+    // argument.
     auto queryType = cast<MemRefType>(op.getQuery().getType());
-    auto queryShape = queryType.getShape();
-    int64_t batchSize = queryShape[0];
-    int64_t seqLen = queryShape[1];
-    int64_t queryHidden = queryShape[2];
-    int64_t headDimK = queryHidden / op.getQNumHeads();
+    Value batchSizeVal =
+        getMemRefDimSize(queryType, 0, adaptor.getQuery(), rewriter, loc);
+    Value seqLenVal =
+        getMemRefDimSize(queryType, 1, adaptor.getQuery(), rewriter, loc);
 
-    // Derive d_v from present_state shape: [B, H_kv, d_k, d_v]
+    // head_dim_k = query.dim[2] / q_num_heads.
+    // q_num_heads is always a compile-time attribute, so when query.dim[2]
+    // is static we fold the division; when it's dynamic we emit a runtime
+    // llvm.udiv so the computed head_dim_k is valid for any shape.
+    Value queryHiddenVal =
+        getMemRefDimSize(queryType, 2, adaptor.getQuery(), rewriter, loc);
+    Value qNumHeadsForDiv = createI64Const(op.getQNumHeads());
+    Value headDimKVal =
+        LLVM::UDivOp::create(rewriter, loc, queryHiddenVal, qNumHeadsForDiv);
+
+    // Derive d_v from present_state shape: [B, H_kv, d_k, d_v].
+    // present_state is always 4D per spec, so index 3 is safe.
     auto presentStateType = cast<MemRefType>(op.getPresentState().getType());
-    auto psShape = presentStateType.getShape();
-    int64_t headDimV = psShape[3];
+    Value headDimVVal = getMemRefDimSize(presentStateType, 3,
+                                         adaptor.getPresentState(), rewriter,
+                                         loc);
 
     unsigned elementSizeBytes =
         queryType.getElementType().getIntOrFloatBitWidth() / 8;
-
-    Value batchSizeVal = createI64Const(batchSize);
-    Value seqLenVal = createI64Const(seqLen);
-    Value headDimKVal = createI64Const(headDimK);
-    Value headDimVVal = createI64Const(headDimV);
     Value elemSizeVal = createI64Const(elementSizeBytes);
 
     // Function signature: state + 6 inputs + 2 outputs + 5 attrs + 5 shape = 19
