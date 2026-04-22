@@ -4,10 +4,12 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify hip.linear_attention lowers to a single call to
-// wrap_linear_attention with 19 parameters:
+// wrap_linear_attention with 20 parameters:
 // - 9 pointers: state, query, key, value, past_state, decay, beta,
 //               output, present_state (absent optionals become null)
-// - 5 attributes: q_num_heads, kv_num_heads, scale, chunk_size, update_rule
+// - 6 attributes: q_num_heads, kv_num_heads, n_k_heads, scale, chunk_size,
+//                 update_rule  (n_k_heads is derived at runtime as
+//                 key.dim[2] / head_dim_k, emitted via a second llvm.udiv)
 // - 5 shape params: batch_size, seq_len, head_dim_k, head_dim_v,
 //                   element_size_bytes (static -> llvm.mlir.constant,
 //                   dynamic -> llvm.extractvalue %desc[3, N], with
@@ -49,15 +51,15 @@ module {
         {q_num_heads = 32 : i64, kv_num_heads = 8 : i64,
          scale = 0.0883883461 : f32, update_rule = "gated"}
 
-    // Test 1 verifies 19 parameters:
+    // Test 1 verifies 20 parameters:
     // - 9 pointers: state, query, key, value, past_state, decay(ptr),
     //               beta(NULL), output, present_state
-    // - 5 attributes: q_num_heads=32, kv_num_heads=8, scale=0.0883883461,
-    //                 chunk_size=0, update_rule=1(gated)
+    // - 6 attributes: q_num_heads=32, kv_num_heads=8, n_k_heads=8 (=1024/128),
+    //                 scale=0.0883883461, chunk_size=0, update_rule=1(gated)
     // - 5 shape params: batch_size=1, seq_len=1, head_dim_k=128,
     //                   head_dim_v=128, element_size_bytes=2
     // CHECK-LABEL: llvm.func @test_linear_attention_lowering
-    // CHECK: llvm.call @wrap_linear_attention({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f32, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_linear_attention({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, i64, i64, i64, i64, i64, i64, i64) -> i32
     return
   }
 
@@ -97,9 +99,12 @@ module {
     // constants.
     // CHECK: llvm.mlir.constant(4096 : i64)
     // CHECK: llvm.udiv
+    // n_k_heads: key hidden is static (1024), second udiv divides by d_k.
+    // CHECK: llvm.mlir.constant(1024 : i64)
+    // CHECK: llvm.udiv
     // head_dim_v: present_state dim 3 is static.
     // CHECK: llvm.mlir.constant(128 : i64)
-    // CHECK: llvm.call @wrap_linear_attention({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f32, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_linear_attention({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -143,9 +148,12 @@ module {
     // CHECK: llvm.extractvalue {{.*}}[3, 2]
     // head_dim_k = query_hidden / q_num_heads at runtime.
     // CHECK: llvm.udiv
+    // n_k_heads = key_hidden / head_dim_k; key_hidden extracted at runtime.
+    // CHECK: llvm.extractvalue {{.*}}[3, 2]
+    // CHECK: llvm.udiv
     // head_dim_v extracted from present_state descriptor (dim 3).
     // CHECK: llvm.extractvalue {{.*}}[3, 3]
-    // CHECK: llvm.call @wrap_linear_attention({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f32, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_linear_attention({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }

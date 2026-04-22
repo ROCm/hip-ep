@@ -43,17 +43,18 @@ static const char *updateRuleName(int64_t rule) {
 extern "C" int wrap_linear_attention(
     RuntimeState *state, const void *query, const void *key, const void *value,
     const void *past_state, const void *decay, const void *beta, void *output,
-    void *present_state, int64_t q_num_heads, int64_t kv_num_heads, float scale,
-    int64_t chunk_size, int64_t update_rule, int64_t batch_size,
-    int64_t seq_len, int64_t head_dim_k, int64_t head_dim_v,
+    void *present_state, int64_t q_num_heads, int64_t kv_num_heads,
+    int64_t n_k_heads, float scale, int64_t chunk_size, int64_t update_rule,
+    int64_t batch_size, int64_t seq_len, int64_t head_dim_k, int64_t head_dim_v,
     int64_t element_size_bytes) {
 
   RUNTIME_DEBUG_LOG("[linear_attention] enter: B=%lld T=%lld "
-                    "q_heads=%lld kv_heads=%lld d_k=%lld d_v=%lld "
+                    "q_heads=%lld kv_heads=%lld n_k=%lld d_k=%lld d_v=%lld "
                     "scale=%.6f chunk=%lld rule=%s elem_size=%lld\n",
                     (long long)batch_size, (long long)seq_len,
                     (long long)q_num_heads, (long long)kv_num_heads,
-                    (long long)head_dim_k, (long long)head_dim_v, (double)scale,
+                    (long long)n_k_heads, (long long)head_dim_k,
+                    (long long)head_dim_v, (double)scale,
                     (long long)chunk_size, updateRuleName(update_rule),
                     (long long)element_size_bytes);
 
@@ -110,6 +111,10 @@ extern "C" int wrap_linear_attention(
   const int64_t B = batch_size;
   const int64_t Hq = q_num_heads;
   const int64_t Hkv = kv_num_heads;
+  const int64_t Nk = n_k_heads;
+  // Output head count = max(Hq, Hkv).  In standard GQA (Hq >= Hkv) the output
+  // is packed in Q-head order; in inverse GQA it is packed in KV-head order.
+  const int64_t Hout = Hq >= Hkv ? Hq : Hkv;
   const int64_t dk = head_dim_k;
   const int64_t dv = head_dim_v;
 
@@ -135,7 +140,7 @@ extern "C" int wrap_linear_attention(
   if (seq_len == 1) {
     int kern_result = hip_linear_attention_decode(
         hip_stream, query, key, value, decay, beta, present_state, output, B,
-        q_num_heads, Hkv, dk, dv, scale, update_rule, element_size_bytes);
+        Hq, Hkv, Nk, dk, dv, scale, update_rule, element_size_bytes);
     if (kern_result != 0) {
       fprintf(stderr, "[linear_attention] ERROR: decode kernel failed (%d)\n",
               kern_result);
@@ -149,10 +154,14 @@ extern "C" int wrap_linear_attention(
     // runs one recurrence step (updating present_state in-place), and
     // writes the output back to the correct position. Correct but O(T)
     // kernel launches; a chunk-parallel WY kernel would be faster.
-    const int64_t q_token_bytes = Hq * dk * element_size_bytes;
-    const int64_t k_token_bytes = Hkv * dk * element_size_bytes;
-    const int64_t v_token_bytes = Hkv * dv * element_size_bytes;
-    const int64_t o_token_bytes = Hq * dv * element_size_bytes;
+    //
+    // Per-tensor hidden sizes:
+    //   query  : Hq  * dk      key    : Nk   * dk (may be < Hkv*dk)
+    //   value  : Hkv * dv      output : Hout * dv (Hout = max(Hq, Hkv))
+    const int64_t q_token_bytes = Hq   * dk * element_size_bytes;
+    const int64_t k_token_bytes = Nk   * dk * element_size_bytes;
+    const int64_t v_token_bytes = Hkv  * dv * element_size_bytes;
+    const int64_t o_token_bytes = Hout * dv * element_size_bytes;
     const int64_t decay_token_bytes = Hkv * dk * element_size_bytes;
     const int64_t beta_token_bytes = Hkv * element_size_bytes;
 
@@ -204,7 +213,7 @@ extern "C" int wrap_linear_attention(
 
       int kern_result = hip_linear_attention_decode(
           hip_stream, q_t, k_t, v_t, decay_t, beta_t, present_state, o_t,
-          B, q_num_heads, Hkv, dk, dv, scale, update_rule,
+          B, Hq, Hkv, Nk, dk, dv, scale, update_rule,
           element_size_bytes);
       if (kern_result != 0) {
         fprintf(stderr,

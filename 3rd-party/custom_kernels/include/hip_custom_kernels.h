@@ -461,12 +461,22 @@ int hip_qmoe_scatter_add(
  *   gated:        S = diag(exp(g)) * S + k (x) v
  *   delta:        S = S + beta * k (x) (v - S^T k)
  *   gated_delta:  S = diag(exp(g)) * S + beta * k (x) (v - diag(exp(g)) * S^T k)
- *   output_h = scale * S^T q_h   (for each query head h in the KV group)
+ *   output_h = scale * S^T q_h   (for each query head h mapped to this KV head)
+ *
+ * Head counts are three-way and subject to the following divisibility
+ * constraints:
+ *   - n_k_heads | kv_num_heads
+ *       When n_k_heads < kv_num_heads multiple KV heads share the same key
+ *       head (mapping: h_k = h_kv * n_k_heads / kv_num_heads).
+ *   - Either q_num_heads % kv_num_heads == 0  (standard GQA, H_q >= H_kv)
+ *       or   kv_num_heads % q_num_heads == 0  (inverse GQA, H_q < H_kv)
  *
  * Parameters:
  *   stream             - hipStream_t cast to void*
  *   query              - GPU [batch, 1, q_num_heads * head_dim_k]
- *   key                - GPU [batch, 1, kv_num_heads * head_dim_k]
+ *   key                - GPU [batch, 1, n_k_heads * head_dim_k]
+ *                        n_k_heads may differ from kv_num_heads; it must
+ *                        divide kv_num_heads.
  *   value              - GPU [batch, 1, kv_num_heads * head_dim_v]
  *   decay              - GPU [batch, 1, kv_num_heads * head_dim_k] or nullptr
  *                        Per-key-dimension decay in log-space.
@@ -477,10 +487,15 @@ int hip_qmoe_scatter_add(
  *   state              - GPU [batch, kv_num_heads, head_dim_k, head_dim_v]
  *                        Read/write. Must be pre-initialized (from past_state
  *                        or zeros) before calling this function.
- *   output             - GPU [batch, 1, q_num_heads * head_dim_v]
+ *   output             - GPU [batch, 1, max(q_num_heads, kv_num_heads) *
+ *                             head_dim_v]
+ *                        Standard GQA: heads packed in Q-head order.
+ *                        Inverse GQA: heads packed in KV-head order.
  *   batch_size         - batch dimension
- *   q_num_heads        - number of query heads (must be divisible by kv_num_heads)
- *   kv_num_heads       - number of key/value heads
+ *   q_num_heads        - number of query heads
+ *   kv_num_heads       - number of key/value state heads
+ *   n_k_heads          - number of key heads packed in the key tensor;
+ *                        must divide kv_num_heads
  *   head_dim_k         - key dimension per head
  *   head_dim_v         - value dimension per head
  *   scale              - output scaling factor (typically 1/sqrt(d_k))
@@ -501,6 +516,7 @@ int hip_linear_attention_decode(
     int64_t batch_size,
     int64_t q_num_heads,
     int64_t kv_num_heads,
+    int64_t n_k_heads,
     int64_t head_dim_k,
     int64_t head_dim_v,
     float scale,
