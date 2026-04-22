@@ -35,6 +35,8 @@ target_link_libraries(OnnxToHip PUBLIC
   MLIRPass
   MLIRFuncDialect
   MLIRArithDialect
+  MLIRMathDialect
+  MLIRSCFDialect
   MLIRTensorDialect
   MLIRMemRefDialect
   MLIRBufferizationDialect
