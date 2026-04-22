@@ -23,6 +23,7 @@ add_library(OnnxToHip STATIC
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp
   GemmConversion.cpp
+  RangeConversion.cpp
 )
 
 add_dependencies(OnnxToHip
@@ -37,6 +38,8 @@ target_link_libraries(OnnxToHip PUBLIC
   MLIRPass
   MLIRFuncDialect
   MLIRArithDialect
+  MLIRMathDialect
+  MLIRSCFDialect
   MLIRTensorDialect
   MLIRMemRefDialect
   MLIRBufferizationDialect

@@ -38,6 +38,7 @@ target_link_libraries(HipDialectTransforms PUBLIC
   MLIRBufferizationTransforms
   MLIRBufferizationPipelines
   MLIRBufferizationToMemRef
+  MLIRSCFToControlFlow
   MLIRArithToLLVM
   MLIRMemRefToLLVM
   MLIRFuncToLLVM
