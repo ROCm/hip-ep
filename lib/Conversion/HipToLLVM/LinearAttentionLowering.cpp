@@ -98,6 +98,15 @@ struct LinearAttentionOpLowering
     Value headDimKVal =
         LLVM::UDivOp::create(rewriter, loc, queryHiddenVal, qNumHeadsForDiv);
 
+    // n_k_heads = key.dim[2] / head_dim_k.  The key tensor is [B, T, n_k*d_k]
+    // and n_k may differ from kv_num_heads (it only has to divide it).  Use
+    // getMemRefDimSize so dynamic key shapes fall back to a runtime extract.
+    auto keyType = cast<MemRefType>(op.getKey().getType());
+    Value keyHiddenVal =
+        getMemRefDimSize(keyType, 2, adaptor.getKey(), rewriter, loc);
+    Value nKHeadsVal =
+        LLVM::UDivOp::create(rewriter, loc, keyHiddenVal, headDimKVal);
+
     // Derive d_v from present_state shape: [B, H_kv, d_k, d_v].
     // present_state is always 4D per spec, so index 3 is safe.
     auto presentStateType = cast<MemRefType>(op.getPresentState().getType());
@@ -109,8 +118,14 @@ struct LinearAttentionOpLowering
         queryType.getElementType().getIntOrFloatBitWidth() / 8;
     Value elemSizeVal = createI64Const(elementSizeBytes);
 
-    // Function signature: state + 6 inputs + 2 outputs + 5 attrs + 5 shape = 19
-    SmallVector<Type, 19> paramTypes = {
+    // Function signature:
+    //   state + 6 inputs + 2 outputs (9 ptrs)
+    //   + 3 head-count attrs (q_num_heads, kv_num_heads, n_k_heads)
+    //   + 3 scalar attrs (scale, chunk_size, update_rule)
+    //   + 5 shape params (batch_size, seq_len, head_dim_k, head_dim_v,
+    //                     element_size_bytes)
+    // = 20 parameters total.
+    SmallVector<Type, 20> paramTypes = {
         ptrType, // state
         ptrType, // query
         ptrType, // key
@@ -122,6 +137,7 @@ struct LinearAttentionOpLowering
         ptrType, // present_state
         i64Type, // q_num_heads
         i64Type, // kv_num_heads
+        i64Type, // n_k_heads  (derived from key.dim[2] / head_dim_k)
         f32Type, // scale
         i64Type, // chunk_size
         i64Type, // update_rule
@@ -137,11 +153,11 @@ struct LinearAttentionOpLowering
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 19> args = {
+    SmallVector<Value, 20> args = {
         statePtr,   queryPtr,    keyPtr,      valuePtr,        pastStatePtr,
         decayPtr,   betaPtr,     outputPtr,   presentStatePtr, qNumHeads,
-        kvNumHeads, scale,       chunkSize,   updateRule,      batchSizeVal,
-        seqLenVal,  headDimKVal, headDimVVal, elemSizeVal};
+        kvNumHeads, nKHeadsVal,  scale,       chunkSize,       updateRule,
+        batchSizeVal, seqLenVal, headDimKVal, headDimVVal,     elemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

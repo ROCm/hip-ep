@@ -1090,16 +1090,30 @@ def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
       "delta":        S_t = S_{t-1} + b_t * k_t (x) (v_t - S_{t-1}^T k_t)
       "gated_delta":  S_t = exp(g_t) * S_{t-1} + b_t * k_t (x) (v_t - exp(g_t) * S_{t-1}^T k_t)
 
+    Head counts are three-way (subject to divisibility constraints):
+      - H_q   = q_num_heads             (query heads, attribute)
+      - H_kv  = kv_num_heads            (KV state heads, attribute)
+      - n_k   = key.shape[-1] / d_k     (key heads, derived at runtime)
+    Constraints:
+      - n_k divides H_kv  (multiple KV heads may share one K head when n_k<H_kv)
+      - Either H_q % H_kv == 0  (standard GQA, H_q >= H_kv)
+        or     H_kv % H_q == 0  (inverse GQA,   H_q <  H_kv)
+
+    Output head count H_o = max(H_q, H_kv):
+      - Standard GQA (H_q >= H_kv): output packed in Q-head order.
+      - Inverse GQA  (H_q <  H_kv): output packed in KV-head order, i.e. each
+        KV state produces its own output slot.
+
     Inputs (3-6):
       1. query       (required, T) - [B, T, H_q * d_k]
-      2. key         (required, T) - [B, T, H_kv * d_k]
+      2. key         (required, T) - [B, T, n_k * d_k], n_k | H_kv
       3. value       (required, T) - [B, T, H_kv * d_v]
       4. past_state  (optional, S) - [B, H_kv, d_k, d_v]
       5. decay       (optional, T) - [B, T, H_kv * d_k] or [B, T, H_kv]
       6. beta        (optional, T) - [B, T, H_kv] or [B, T, 1]
 
     DPS output buffers:
-      output        (required, T) - [B, T, H_q * d_v]
+      output        (required, T) - [B, T, max(H_q, H_kv) * d_v]
       present_state (required, S) - [B, H_kv, d_k, d_v]
 
     Example:

@@ -42,8 +42,21 @@ template<> __device__ __forceinline__ __half from_float(float val) { return __fl
 //   delta:        S[i][j]  += beta * k[i] * (v[j] - sk[j])
 //   gated_delta:  S[i][j]   = exp(g[i]) * S[i][j] + beta * k[i] * (v[j] - sk[j])
 //
-// Phase 3: For each query head h mapped to this KV group:
-//   o[j] = scale * sum_i q_h[i] * S[i][j]
+// Phase 3 (GQA direction dispatched at runtime):
+//   Standard GQA (H_q >= H_kv, heads_per_group = H_q / H_kv):
+//     for hl in [0, heads_per_group):
+//       h = g * heads_per_group + hl
+//       out[h * dv .. h * dv + dv) = scale * q_h @ S
+//     Output is packed in Q-head order: [B, 1, H_q * dv].
+//   Inverse GQA (H_q <  H_kv):
+//     h = g * H_q / H_kv   (one Q head is shared across H_kv/H_q KV heads)
+//     out[g * dv .. g * dv + dv) = scale * q_h @ S
+//     Output is packed in KV-head order: [B, 1, H_kv * dv].
+//   In both cases the caller sees output shape [B, 1, H_out * dv] with
+//   H_out = max(H_q, H_kv).
+//
+// Key-head sharing: the key tensor is packed with n_k heads (n_k must divide
+// H_kv); this KV head reads from key head  h_k = g * n_k / H_kv.
 //
 // Shared memory layout (all float for accumulation precision):
 //   k_smem[dk] | v_smem[dv] | aux_smem[dk] | sk_smem[dv]
@@ -58,7 +71,7 @@ __global__ void linear_attention_decode_kernel(
     const T* __restrict__ beta_in,
     T* __restrict__ state,
     T* __restrict__ output,
-    int Hq, int Hkv, int dk, int dv,
+    int Hq, int Hkv, int n_k, int dk, int dv,
     float scale, int update_rule)
 {
     const int bg = blockIdx.x;
@@ -68,14 +81,22 @@ __global__ void linear_attention_decode_kernel(
     const int nthreads = blockDim.x;
     const int state_size = dk * dv;
 
+    // Output head count: max(Hq, Hkv).  Determines stride of output and
+    // controls which branch of Phase 3 runs.
+    const int Hout = Hq >= Hkv ? Hq : Hkv;
+
+    // Key-head index for this (b, g): n_k divides Hkv, so multiple KV heads
+    // sharing the same K head produce the same index.
+    const int h_k = g * n_k / Hkv;
+
     extern __shared__ float smem[];
     float* k_smem   = smem;
     float* v_smem   = smem + dk;
     float* aux_smem = smem + dk + dv;
     float* sk_smem  = smem + 2 * dk + dv;
 
-    const T* k_ptr = key   + (int64_t)b * Hkv * dk + (int64_t)g * dk;
-    const T* v_ptr = value + (int64_t)b * Hkv * dv + (int64_t)g * dv;
+    const T* k_ptr = key   + (int64_t)b * n_k * dk  + (int64_t)h_k * dk;
+    const T* v_ptr = value + (int64_t)b * Hkv * dv  + (int64_t)g   * dv;
     T* S = state + ((int64_t)b * Hkv + g) * dk * dv;
 
     for (int i = tid; i < dk; i += nthreads)
@@ -146,14 +167,14 @@ __global__ void linear_attention_decode_kernel(
     __syncthreads();
 
     // === Phase 3: output = scale * S^T @ q  (per query head) ===
-    const int heads_per_group = Hq / Hkv;
+    // Dispatches on GQA direction:
+    //   Standard (Hq >= Hkv): loop over Hq/Hkv Q heads sharing this KV state,
+    //                          write each to output[h_q * dv] (Hout == Hq).
+    //   Inverse  (Hq <  Hkv): single Q head shared across Hkv/Hq KV heads;
+    //                          write to output[g * dv] (Hout == Hkv).
     float* q_smem = aux_smem;
 
-    for (int hl = 0; hl < heads_per_group; hl++) {
-        const int h = g * heads_per_group + hl;
-        const T* q_ptr = query  + (int64_t)b * Hq * dk + (int64_t)h * dk;
-        T* out_ptr     = output + (int64_t)b * Hq * dv + (int64_t)h * dv;
-
+    auto readout = [&](const T* q_ptr, T* out_ptr) {
         for (int i = tid; i < dk; i += nthreads)
             q_smem[i] = to_float(q_ptr[i]);
         __syncthreads();
@@ -165,6 +186,24 @@ __global__ void linear_attention_decode_kernel(
             out_ptr[j] = from_float<T>(scale * sum);
         }
         __syncthreads();
+    };
+
+    if (Hq >= Hkv) {
+        const int heads_per_group = Hq / Hkv;
+        for (int hl = 0; hl < heads_per_group; hl++) {
+            const int h = g * heads_per_group + hl;
+            const T* q_ptr = query  + (int64_t)b * Hq   * dk + (int64_t)h * dk;
+            T* out_ptr     = output + (int64_t)b * Hout * dv + (int64_t)h * dv;
+            readout(q_ptr, out_ptr);
+        }
+    } else {
+        // Inverse GQA: this KV head maps to a single Q head (shared across
+        // Hkv / Hq consecutive KV heads), but each KV head writes its own
+        // output slot -> Hout = Hkv output heads.
+        const int h_q = g * Hq / Hkv;
+        const T* q_ptr = query  + (int64_t)b * Hq   * dk + (int64_t)h_q * dk;
+        T* out_ptr     = output + (int64_t)b * Hout * dv + (int64_t)g   * dv;
+        readout(q_ptr, out_ptr);
     }
 }
 
@@ -184,6 +223,7 @@ extern "C" int hip_linear_attention_decode(
     int64_t batch_size,
     int64_t q_num_heads,
     int64_t kv_num_heads,
+    int64_t n_k_heads,
     int64_t head_dim_k,
     int64_t head_dim_v,
     float scale,
@@ -193,11 +233,39 @@ extern "C" int hip_linear_attention_decode(
     if (batch_size <= 0 || kv_num_heads <= 0)
         return 0;
 
-    if (q_num_heads % kv_num_heads != 0) {
+    // GQA direction: support both H_q >= H_kv (standard) and H_q < H_kv
+    // (inverse, e.g. Qwen3-style n_k=16, n_kv=32).
+    if (q_num_heads <= 0) {
         fprintf(stderr,
                 "[custom_kernels] hip_linear_attention_decode: "
-                "q_num_heads(%lld) not divisible by kv_num_heads(%lld)\n",
-                (long long)q_num_heads, (long long)kv_num_heads);
+                "q_num_heads(%lld) must be positive\n",
+                (long long)q_num_heads);
+        return -1;
+    }
+    if (q_num_heads >= kv_num_heads) {
+        if (q_num_heads % kv_num_heads != 0) {
+            fprintf(stderr,
+                    "[custom_kernels] hip_linear_attention_decode: "
+                    "q_num_heads(%lld) not divisible by kv_num_heads(%lld)\n",
+                    (long long)q_num_heads, (long long)kv_num_heads);
+            return -1;
+        }
+    } else {
+        if (kv_num_heads % q_num_heads != 0) {
+            fprintf(stderr,
+                    "[custom_kernels] hip_linear_attention_decode: "
+                    "inverse GQA requires kv_num_heads(%lld) divisible by "
+                    "q_num_heads(%lld)\n",
+                    (long long)kv_num_heads, (long long)q_num_heads);
+            return -1;
+        }
+    }
+    if (n_k_heads <= 0 || kv_num_heads % n_k_heads != 0) {
+        fprintf(stderr,
+                "[custom_kernels] hip_linear_attention_decode: "
+                "n_k_heads(%lld) must be positive and divide "
+                "kv_num_heads(%lld)\n",
+                (long long)n_k_heads, (long long)kv_num_heads);
         return -1;
     }
 
@@ -211,10 +279,10 @@ extern "C" int hip_linear_attention_decode(
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_linear_attention_decode: B=%lld Hq=%lld "
-        "Hkv=%lld dk=%d dv=%d scale=%.6f rule=%lld elem=%lld "
+        "Hkv=%lld n_k=%lld dk=%d dv=%d scale=%.6f rule=%lld elem=%lld "
         "grid=%d block=%d smem=%zu\n",
         (long long)batch_size, (long long)q_num_heads,
-        (long long)kv_num_heads, dk, dv, (double)scale,
+        (long long)kv_num_heads, (long long)n_k_heads, dk, dv, (double)scale,
         (long long)update_rule, (long long)element_size_bytes,
         grid, block, smem_bytes);
 
@@ -231,6 +299,7 @@ extern "C" int hip_linear_attention_decode(
             static_cast<__half*>(output),
             static_cast<int>(q_num_heads),
             static_cast<int>(kv_num_heads),
+            static_cast<int>(n_k_heads),
             dk, dv, scale, static_cast<int>(update_rule));
     } else if (element_size_bytes == 4) {
         hipLaunchKernelGGL(
@@ -245,6 +314,7 @@ extern "C" int hip_linear_attention_decode(
             static_cast<float*>(output),
             static_cast<int>(q_num_heads),
             static_cast<int>(kv_num_heads),
+            static_cast<int>(n_k_heads),
             dk, dv, scale, static_cast<int>(update_rule));
     } else {
         fprintf(stderr,
