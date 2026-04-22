@@ -15,6 +15,55 @@
 #include <cstdlib>
 #include <cstring>
 
+// Win32 API declarations for process-wide environment access and
+// shared constants cache (named shared memory + atomic ref counting).
+// Model DLLs link static CRT (libcmt.lib), so getenv() can't see _putenv()
+// changes from the host. GetEnvironmentVariableA reads the shared process
+// environment block instead.
+#ifdef _WIN32
+extern "C" {
+unsigned long __stdcall GetEnvironmentVariableA(const char *, char *,
+                                                unsigned long);
+void *__stdcall CreateFileMappingA(void *, void *, unsigned long, unsigned long,
+                                   unsigned long, const char *);
+void *__stdcall OpenFileMappingA(unsigned long, int, const char *);
+void *__stdcall MapViewOfFile(void *, unsigned long, unsigned long,
+                              unsigned long, size_t);
+int __stdcall UnmapViewOfFile(const void *);
+int __stdcall CloseHandle(void *);
+unsigned long __stdcall GetCurrentProcessId(void);
+}
+
+// Metadata stored in the named shared memory block.
+// The actual constants data lives in the hipHostMalloc/hipMalloc buffer;
+// this struct just holds the pointer, size, and atomic ref count.
+struct SharedConstantsMeta {
+  void *blob_ptr;
+  size_t blob_size;
+  bool is_host;
+  volatile long ref_count;
+};
+
+// Atomic ref-count helpers. Model DLL bitcode is compiled by Clang/LLVM,
+// where InterlockedIncrement/Decrement are not linkable symbols (they're
+// MSVC intrinsics, not kernel32.lib exports). Use compiler builtins that
+// lower to LLVM IR atomicrmw instructions instead.
+#if defined(__clang__) || defined(__GNUC__)
+static inline long shm_ref_inc(volatile long *p) {
+  return __sync_add_and_fetch(p, 1);
+}
+static inline long shm_ref_dec(volatile long *p) {
+  return __sync_sub_and_fetch(p, 1);
+}
+#else
+static inline long shm_ref_inc(volatile long *p) { return ++(*p); }
+static inline long shm_ref_dec(volatile long *p) { return --(*p); }
+#endif
+
+#define SHM_FILE_MAP_ALL_ACCESS 0x000F001Fu
+#define SHM_PAGE_READWRITE 0x04u
+#endif
+
 int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
                                  const void *metadata_blob, size_t blob_size) {
   auto t0 = timing_now();
@@ -40,6 +89,9 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   state->constants_blob_is_host = false;
   state->gpu_constants = nullptr;
   state->num_constants = 0;
+  state->constants_is_shared = false;
+  state->shared_constants_mapping = nullptr;
+  state->shared_constants_view = nullptr;
   state->pool_base = nullptr;
   state->pool_size = 0;
   state->buffer_offsets = nullptr;
@@ -132,7 +184,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   // Create MIOpen handle
   if (miopenCreate(&state->miopen_handle) != miopenStatusSuccess) {
     fprintf(stderr, "Failed to create MIOpen handle\n");
-    HIP_CLEANUP(hipStreamDestroy(state->stream));
+    if (state->stream)
+      HIP_CLEANUP(hipStreamDestroy(state->stream));
     free(state);
     return 7;
   }
@@ -142,24 +195,10 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
       miopenStatusSuccess) {
     fprintf(stderr, "Failed to set MIOpen stream\n");
     miopenDestroy(state->miopen_handle);
-    HIP_CLEANUP(hipStreamDestroy(state->stream));
+    if (state->stream)
+      HIP_CLEANUP(hipStreamDestroy(state->stream));
     free(state);
     return 8;
-  }
-
-  // DIAGNOSTIC: Check if gcnArchName is still valid AFTER MIOpen initialization
-  hipDeviceProp_t prop_after_miopen;
-  if (hipGetDeviceProperties(&prop_after_miopen, 0) == hipSuccess) {
-    RUNTIME_DEBUG_LOG(
-        "After MIOpen init - gcnArchName='%s' (checking for corruption)\n",
-        prop_after_miopen.gcnArchName);
-    if (prop_after_miopen.gcnArchName[0] == '\0') {
-      fprintf(
-          stderr,
-          "WARNING: gcnArchName became EMPTY after MIOpen initialization!\n");
-      fprintf(stderr,
-              "This will cause rocBLAS to fail with 'No devices found'\n");
-    }
   }
 
   TIMING_LOG("[Session] MIOpen init: %.3fs\n", record_elapsed(t_prev));
@@ -168,7 +207,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   if (hipblasLtCreate(&state->hipblas_handle) != HIPBLAS_STATUS_SUCCESS) {
     fprintf(stderr, "Failed to create hipBLASLt handle\n");
     miopenDestroy(state->miopen_handle);
-    HIP_CLEANUP(hipStreamDestroy(state->stream));
+    if (state->stream)
+      HIP_CLEANUP(hipStreamDestroy(state->stream));
     free(state);
     return 9;
   }
@@ -180,7 +220,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   // Parse FlatBuffers blob to get constants_filename and constant_sizes
   if (!metadata_blob || blob_size == 0) {
     TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs (no "
-               "constants)\n",
+               "metadata)\n",
                elapsed_since(t0));
     return 0; // No metadata — no constants to load
   }
@@ -229,117 +269,185 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
              "bytes)\n",
              record_elapsed(t_prev), (long long)count, total_size);
 
-  bool is_igpu = (prop.integrated == 1);
+  // --- Shared Constants Cache ---
+  // In OGA pipeline mode, prefill and decode models share the same
+  // constants.bin. The second model skips the expensive allocation+load
+  // by reusing the first model's blob via process-wide named shared memory.
+  bool constants_shared = false;
 
-  // iGPU defaults to hipMalloc (VRAM) + hipMemcpy H2D, same as dGPU.
-  // The one-time copy cost at session init is negligible for production
-  // workloads; VRAM access is faster than host memory on every inference.
-  // Set HIPDNN_EP_IGPU_USE_HOST=1 to revert to legacy hipHostMalloc path.
-  const char *igpu_host_env = getenv("HIPDNN_EP_IGPU_USE_HOST");
-  bool force_host = is_igpu && igpu_host_env && igpu_host_env[0] == '1';
+#ifdef _WIN32
+  char shm_name[128];
+  snprintf(shm_name, sizeof(shm_name), "Local\\hipdnn_const_%lu_%zu",
+           (unsigned long)GetCurrentProcessId(), total_size);
 
-  if (force_host) {
-    // Legacy iGPU path: hipHostMalloc (pinned host memory).
-    TIMING_LOG("[Session] iGPU: HIPDNN_EP_IGPU_USE_HOST=1, using hipHostMalloc "
-               "(pinned host) path\n");
-    if (hipHostMalloc(&state->gpu_constants_blob, total_size,
-                      hipHostMallocDefault) != hipSuccess) {
-      fprintf(stderr, "hipHostMalloc failed for constants blob (%zu bytes)\n",
-              total_size);
-      hipdnn_ep_state_cleanup(state);
-      *out_state = nullptr;
-      return 1;
+  {
+    void *existing_map = OpenFileMappingA(SHM_FILE_MAP_ALL_ACCESS, 0, shm_name);
+    if (existing_map) {
+      auto *smeta = (SharedConstantsMeta *)MapViewOfFile(
+          existing_map, SHM_FILE_MAP_ALL_ACCESS, 0, 0,
+          sizeof(SharedConstantsMeta));
+      if (smeta && smeta->blob_size == total_size && smeta->blob_ptr) {
+        long new_ref = shm_ref_inc(&smeta->ref_count);
+        state->gpu_constants_blob = smeta->blob_ptr;
+        state->constants_blob_is_host = smeta->is_host;
+        state->constants_is_shared = true;
+        state->shared_constants_mapping = existing_map;
+        state->shared_constants_view = smeta;
+        fprintf(stderr,
+                "[SHARED_CONSTANTS] Reusing existing blob "
+                "(%zu bytes, ref_count=%ld)\n",
+                total_size, new_ref);
+        constants_shared = true;
+      } else {
+        if (smeta)
+          UnmapViewOfFile(smeta);
+        CloseHandle(existing_map);
+      }
     }
+  }
+#endif
 
-    TIMING_LOG("[Session] hipHostMalloc: %.3fs (%zu bytes)\n",
-               record_elapsed(t_prev), total_size);
+  if (!constants_shared) {
+    bool is_igpu = (prop.integrated == 1);
 
-    const void *src = reader->mmap();
-    if (src) {
-      memcpy(state->gpu_constants_blob, src, total_size);
-    } else {
-      reader->rewind();
-      size_t bytes_read = reader->fread(state->gpu_constants_blob, total_size);
-      if (bytes_read != total_size) {
-        fprintf(stderr, "Short read: got %zu of %zu bytes\n", bytes_read,
+    // iGPU defaults to hipMalloc (VRAM) + hipMemcpy H2D, same as dGPU.
+    // The one-time copy cost at session init is negligible for production
+    // workloads; VRAM access is faster than host memory on every inference.
+    // Set HIPDNN_EP_IGPU_USE_HOST=1 to revert to legacy hipHostMalloc path.
+    const char *igpu_host_env = getenv("HIPDNN_EP_IGPU_USE_HOST");
+    bool force_host = is_igpu && igpu_host_env && igpu_host_env[0] == '1';
+
+    if (force_host) {
+      // Legacy iGPU path: hipHostMalloc (pinned host memory).
+      TIMING_LOG("[Session] iGPU: HIPDNN_EP_IGPU_USE_HOST=1, using "
+                 "hipHostMalloc (pinned host) path\n");
+      if (hipHostMalloc(&state->gpu_constants_blob, total_size,
+                        hipHostMallocDefault) != hipSuccess) {
+        fprintf(stderr, "hipHostMalloc failed for constants blob (%zu bytes)\n",
                 total_size);
         hipdnn_ep_state_cleanup(state);
         *out_state = nullptr;
         return 1;
       }
-    }
 
-    TIMING_LOG("[Session] Read constants to pinned: %.3fs (%zu bytes, %s)\n",
-               record_elapsed(t_prev), total_size,
-               src ? "mmap+memcpy" : "fread");
-    state->constants_blob_is_host = true;
-
-  } else {
-    // VRAM path (default for both iGPU and dGPU): staging buffer + hipMemcpy.
-    if (is_igpu)
-      TIMING_LOG("[Session] iGPU: using hipMalloc (VRAM) + hipMemcpy path\n");
-
-    const void *src = reader->mmap();
-    void *cpu_buf = nullptr;
-
-    TIMING_LOG("[Session] VRAM path: mmap %s\n",
-               src ? "succeeded" : "failed, using fread fallback");
-
-    if (!src) {
-      cpu_buf = malloc(total_size);
-      if (!cpu_buf) {
-        fprintf(stderr, "Failed to allocate staging buffer (%zu bytes)\n",
-                total_size);
-        hipdnn_ep_state_cleanup(state);
-        *out_state = nullptr;
-        return 1;
-      }
-
-      TIMING_LOG("[Session] malloc staging buffer: %.3fs (%zu bytes)\n",
+      TIMING_LOG("[Session] hipHostMalloc: %.3fs (%zu bytes)\n",
                  record_elapsed(t_prev), total_size);
 
-      size_t bytes_read = reader->fread(cpu_buf, total_size);
-      if (bytes_read != total_size) {
-        fprintf(stderr, "Short read: got %zu of %zu bytes\n", bytes_read,
+      const void *src = reader->mmap();
+      if (src) {
+        memcpy(state->gpu_constants_blob, src, total_size);
+      } else {
+        reader->rewind();
+        size_t bytes_read =
+            reader->fread(state->gpu_constants_blob, total_size);
+        if (bytes_read != total_size) {
+          fprintf(stderr, "Short read: got %zu of %zu bytes\n", bytes_read,
+                  total_size);
+          hipdnn_ep_state_cleanup(state);
+          *out_state = nullptr;
+          return 1;
+        }
+      }
+
+      TIMING_LOG("[Session] Read constants to pinned: %.3fs (%zu bytes, %s)\n",
+                 record_elapsed(t_prev), total_size,
+                 src ? "mmap+memcpy" : "fread");
+      state->constants_blob_is_host = true;
+
+    } else {
+      // VRAM path (default for both iGPU and dGPU): staging buffer + hipMemcpy.
+      if (is_igpu)
+        TIMING_LOG("[Session] iGPU: using hipMalloc (VRAM) + hipMemcpy path\n");
+
+      const void *src = reader->mmap();
+      void *cpu_buf = nullptr;
+
+      TIMING_LOG("[Session] VRAM path: mmap %s\n",
+                 src ? "succeeded" : "failed, using fread fallback");
+
+      if (!src) {
+        cpu_buf = malloc(total_size);
+        if (!cpu_buf) {
+          fprintf(stderr, "Failed to allocate staging buffer (%zu bytes)\n",
+                  total_size);
+          hipdnn_ep_state_cleanup(state);
+          *out_state = nullptr;
+          return 1;
+        }
+
+        TIMING_LOG("[Session] malloc staging buffer: %.3fs (%zu bytes)\n",
+                   record_elapsed(t_prev), total_size);
+
+        size_t bytes_read = reader->fread(cpu_buf, total_size);
+        if (bytes_read != total_size) {
+          fprintf(stderr, "Short read: got %zu of %zu bytes\n", bytes_read,
+                  total_size);
+          free(cpu_buf);
+          hipdnn_ep_state_cleanup(state);
+          *out_state = nullptr;
+          return 1;
+        }
+        src = cpu_buf;
+
+        TIMING_LOG("[Session] fread constants.bin: %.3fs (%zu bytes)\n",
+                   record_elapsed(t_prev), total_size);
+      }
+
+      if (hipMalloc(&state->gpu_constants_blob, total_size) != hipSuccess) {
+        fprintf(stderr, "hipMalloc failed for constants blob (%zu bytes)\n",
                 total_size);
         free(cpu_buf);
         hipdnn_ep_state_cleanup(state);
         *out_state = nullptr;
         return 1;
       }
-      src = cpu_buf;
 
-      TIMING_LOG("[Session] fread constants.bin: %.3fs (%zu bytes)\n",
+      TIMING_LOG("[Session] hipMalloc VRAM: %.3fs (%zu bytes)\n",
                  record_elapsed(t_prev), total_size);
+
+      if (hipMemcpy(state->gpu_constants_blob, src, total_size,
+                    hipMemcpyHostToDevice) != hipSuccess) {
+        fprintf(stderr, "hipMemcpy failed for constants blob\n");
+        free(cpu_buf);
+        hipdnn_ep_state_cleanup(state);
+        *out_state = nullptr;
+        return 1;
+      }
+
+      TIMING_LOG("[Session] hipMemcpy H2D: %.3fs (%zu bytes)\n",
+                 record_elapsed(t_prev), total_size);
+
+      free(cpu_buf); // no-op when mmap was used
+      state->constants_blob_is_host = false;
     }
 
-    if (hipMalloc(&state->gpu_constants_blob, total_size) != hipSuccess) {
-      fprintf(stderr, "hipMalloc failed for constants blob (%zu bytes)\n",
-              total_size);
-      free(cpu_buf);
-      hipdnn_ep_state_cleanup(state);
-      *out_state = nullptr;
-      return 1;
+#ifdef _WIN32
+    // Publish the newly loaded blob to the shared constants cache so that
+    // subsequent models in this process can skip the allocation+load.
+    {
+      void *new_map = CreateFileMappingA(
+          (void *)(intptr_t)-1, nullptr, SHM_PAGE_READWRITE, 0,
+          (unsigned long)sizeof(SharedConstantsMeta), shm_name);
+      if (new_map) {
+        auto *smeta = (SharedConstantsMeta *)MapViewOfFile(
+            new_map, SHM_FILE_MAP_ALL_ACCESS, 0, 0,
+            sizeof(SharedConstantsMeta));
+        if (smeta) {
+          smeta->blob_ptr = state->gpu_constants_blob;
+          smeta->blob_size = total_size;
+          smeta->is_host = state->constants_blob_is_host;
+          smeta->ref_count = 1;
+          state->shared_constants_mapping = new_map;
+          state->shared_constants_view = smeta;
+          fprintf(stderr, "[SHARED_CONSTANTS] Published new blob (%zu bytes)\n",
+                  total_size);
+        } else {
+          CloseHandle(new_map);
+        }
+      }
     }
-
-    TIMING_LOG("[Session] hipMalloc VRAM: %.3fs (%zu bytes)\n",
-               record_elapsed(t_prev), total_size);
-
-    if (hipMemcpy(state->gpu_constants_blob, src, total_size,
-                  hipMemcpyHostToDevice) != hipSuccess) {
-      fprintf(stderr, "hipMemcpy failed for constants blob\n");
-      free(cpu_buf);
-      hipdnn_ep_state_cleanup(state);
-      *out_state = nullptr;
-      return 1;
-    }
-
-    TIMING_LOG("[Session] hipMemcpy H2D: %.3fs (%zu bytes)\n",
-               record_elapsed(t_prev), total_size);
-
-    free(cpu_buf); // no-op when mmap was used
-    state->constants_blob_is_host = false;
-  }
+#endif
+  } // end if (!constants_shared)
 
   // Point each gpu_constants[i] into the blob using the stored offset
   for (int64_t i = 0; i < count; ++i) {
@@ -383,12 +491,31 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     free(state->buffer_offsets);
   }
 
-  // Free the single constants blob and the pointer array
+  // Free the single constants blob and the pointer array.
+  // With shared constants, only the last reference frees the GPU memory.
   if (state->gpu_constants_blob) {
-    if (state->constants_blob_is_host)
-      HIP_CLEANUP(hipHostFree(state->gpu_constants_blob));
-    else
-      HIP_CLEANUP(hipFree(state->gpu_constants_blob));
+#ifdef _WIN32
+    if (state->shared_constants_view) {
+      auto *smeta = (SharedConstantsMeta *)state->shared_constants_view;
+      long remaining = shm_ref_dec(&smeta->ref_count);
+      fprintf(stderr, "[SHARED_CONSTANTS] Cleanup: ref_count=%ld\n", remaining);
+      if (remaining <= 0) {
+        if (state->constants_blob_is_host)
+          HIP_CLEANUP(hipHostFree(state->gpu_constants_blob));
+        else
+          HIP_CLEANUP(hipFree(state->gpu_constants_blob));
+      }
+      UnmapViewOfFile(state->shared_constants_view);
+      if (state->shared_constants_mapping)
+        CloseHandle(state->shared_constants_mapping);
+    } else
+#endif
+    {
+      if (state->constants_blob_is_host)
+        HIP_CLEANUP(hipHostFree(state->gpu_constants_blob));
+      else
+        HIP_CLEANUP(hipFree(state->gpu_constants_blob));
+    }
   }
   if (state->gpu_constants)
     free(state->gpu_constants);
@@ -528,8 +655,13 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
   if (state->workspace_size >= needed_size)
     return 0;
 
-  // Grow: free old, allocate new
+  // Grow: free old, allocate new.
+  // Sync the stream first to ensure no in-flight kernel is still using the
+  // old workspace buffer (prevents use-after-free on async GPU execution).
   if (state->workspace) {
+    if (state->stream) {
+      hipStreamSynchronize(state->stream);
+    }
     HIP_CLEANUP(hipFree(state->workspace));
     state->workspace = nullptr;
     state->workspace_size = 0;
