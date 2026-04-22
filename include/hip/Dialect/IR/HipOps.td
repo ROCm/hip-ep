@@ -793,6 +793,41 @@ def Hip_SubOp : Hip_DpsOp<"sub"> {
   }];
 }
 
+def Hip_RangeOp : Hip_DpsOp<"range"> {
+  let summary = "Generate sequence of numbers";
+  let description = [{
+    Generates a 1-D sequence of numbers from start to limit (exclusive) with step delta.
+    Implements the ONNX Range operator formula:
+    - num_elements = max(ceil((limit - start) / delta), 0)
+    - output[i] = start + (i * delta) for i in range(num_elements)
+
+    Supports int32, int64, float32, and float64 element types.
+    All three inputs (start, limit, delta) must be scalar tensors of the same type.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.range(%ctx) ins(%start, %limit, %delta : tensor<i64>, tensor<i64>, tensor<i64>)
+                    outs(%output : tensor<?xi64>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$start,
+    Hip_TensorOrMemRef:$limit,
+    Hip_TensorOrMemRef:$delta,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $start `,` $limit `,` $delta `:` type($start) `,` type($limit) `,` type($delta) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_CastOp : Hip_DpsOp<"cast"> {
   let summary = "Type conversion operation";
   let description = [{

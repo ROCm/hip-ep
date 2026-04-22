@@ -556,6 +556,18 @@ void SoftplusOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// RangeOp: ins(start, limit, delta), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange RangeOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void RangeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // SubOp: ins(lhs, rhs), outs(output)
 //===----------------------------------------------------------------------===//
 

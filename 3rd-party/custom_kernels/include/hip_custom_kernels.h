@@ -298,6 +298,37 @@ int hip_gather(
     int element_size_bytes);
 
 /* =========================================================================
+ * Range (Sequence Generation)
+ * =========================================================================
+ *
+ * Generates a 1-D sequence of numbers from start to limit (exclusive) with step delta.
+ * Implements the ONNX Range operator formula:
+ *   num_elements = max(ceil((limit - start) / delta), 0)
+ *   output[i] = start + (i * delta) for i in range(num_elements)
+ *
+ * The output size is computed at runtime by copying scalar inputs from device
+ * to host and applying the formula above.
+ *
+ * Parameters:
+ *   stream             - hipStream_t cast to void*
+ *   start              - GPU pointer to scalar start value
+ *   limit              - GPU pointer to scalar limit value (exclusive)
+ *   delta              - GPU pointer to scalar step value
+ *   output             - GPU pointer to output sequence (1-D array)
+ *   element_size_bytes - byte size per element: 4 (f32/i32) or 8 (f64/i64)
+ *
+ * Supported types: int32, int64, float32, float64 (distinguished by element_size_bytes)
+ * Returns: 0 on success, non-zero on failure
+ */
+int hip_range(
+    void* stream,
+    const void* start,
+    const void* limit,
+    const void* delta,
+    void* output,
+    int element_size_bytes);
+
+/* =========================================================================
  * ReduceSum (Parallel Sum Reduction)
  * =========================================================================
  *

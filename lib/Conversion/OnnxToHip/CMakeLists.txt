@@ -18,6 +18,7 @@ add_library(OnnxToHip STATIC
   RotaryEmbeddingConversion.cpp
   GqaConversion.cpp
   GatherConversion.cpp
+  RangeConversion.cpp
   ReshapeConversion.cpp
   GemmConversion.cpp
 )

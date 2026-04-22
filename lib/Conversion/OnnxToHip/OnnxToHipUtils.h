@@ -137,6 +137,8 @@ void populateGqaConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateGatherConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateRangeConversionPatterns(RewritePatternSet &patterns,
+                                     MLIRContext *ctx);
 void populateReshapeConversionPatterns(RewritePatternSet &patterns,
                                        MLIRContext *ctx);
 void populateGemmConversionPatterns(RewritePatternSet &patterns,
