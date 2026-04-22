@@ -274,6 +274,8 @@ __global__ void kv_cache_append_kernel(
     const int* __restrict__ seqlens_k) {
   const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
   int eff_past_len = seqlens_k ? (seqlens_k[batch_idx] + 1 - sq) : past_len;
+  // Skip malformed batches rather than write past this slice.
+  if (eff_past_len < 0 || eff_past_len + sq > present_seq) return;
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int total_per_batch = sq * G * d;
   if (idx >= total_per_batch) return;
@@ -840,9 +842,11 @@ fused_gqa_decode_kernel(
     const int wave_id = tid / WAVE_SIZE;
     const int lane_id = tid % WAVE_SIZE;
 
-    // When seqlens_k is provided, total_seq = seqlens_k[batch] + 1
-    const int eff_skv = seqlens_k
+    // total_seq = seqlens_k[batch] + 1, clamped to [0, max_seq].
+    const int raw_skv = seqlens_k
         ? __builtin_amdgcn_readfirstlane(seqlens_k[batch] + 1) : skv;
+    const int clamp_hi = raw_skv < max_seq ? raw_skv : max_seq;
+    const int eff_skv = clamp_hi > 0 ? clamp_hi : 0;
 
     __shared__ float smem[NUM_WAVES];
 
