@@ -24,13 +24,9 @@ void mm_kv_cache_state_destroy(mm_kv_cache_state_t *state) {
   if (!state)
     return;
 
-  /* Free all persistent GPU buffers */
-  const mm_hal_t *hal = mm_hal_get();
-  for (auto &[host_ptr, entry] : state->entries) {
-    if (entry.gpu_ptr && hal) {
-      hal->raw_free(0, entry.gpu_ptr);
-    }
-  }
+  /* Don't free gpu_ptr entries — they are sub-allocations from the arena
+     or legacy pool, not direct hipMalloc results. The arena/pool owns
+     them and frees them during mm_shutdown(). */
   state->entries.clear();
 
   delete state;
