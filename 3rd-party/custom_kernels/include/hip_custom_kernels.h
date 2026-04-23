@@ -492,12 +492,23 @@ int hip_qmoe_scatter_add(
  *                        divide kv_num_heads.
  *   value              - GPU [batch, T, kv_num_heads * head_dim_v]
  *                        pointing at time step t
- *   decay              - GPU [batch, T, kv_num_heads * head_dim_k] or nullptr
- *                        Per-key-dimension decay in log-space, pointing at
- *                        time step t. Required for gated and gated_delta
- *                        modes.
- *   beta               - GPU [batch, T, kv_num_heads] or nullptr
- *                        Per-head update rate, pointing at time step t.
+ *   decay              - GPU decay tensor in log-space, or nullptr.
+ *                        Layout is selected by decay_per_key_dim:
+ *                          1 -> [batch, T, kv_num_heads * head_dim_k]
+ *                               per-key-dimension decay (GLA / RWKV-6)
+ *                          0 -> [batch, T, kv_num_heads]
+ *                               per-head scalar decay (DeltaNet / RetNet),
+ *                               broadcast across the head_dim_k axis.
+ *                        Pointer must already be advanced to time step t.
+ *                        Required for gated and gated_delta modes.
+ *   beta               - GPU update-rate tensor, or nullptr.
+ *                        Layout is selected by beta_per_head:
+ *                          1 -> [batch, T, kv_num_heads]
+ *                               per-head update rate.
+ *                          0 -> [batch, T, 1]
+ *                               single scalar update rate per (batch, T),
+ *                               broadcast across all kv heads.
+ *                        Pointer must already be advanced to time step t.
  *                        Required for delta and gated_delta modes.
  *   state              - GPU [batch, kv_num_heads, head_dim_k, head_dim_v]
  *                        Read/write. Must be pre-initialized (from past_state
@@ -518,6 +529,10 @@ int hip_qmoe_scatter_add(
  *   dv                 - value dimension per head
  *   scale              - output scaling factor (typically 1/sqrt(d_k))
  *   update_rule        - 0=linear, 1=gated, 2=delta, 3=gated_delta
+ *   decay_per_key_dim  - decay layout flag (see `decay` above). Ignored when
+ *                        decay == nullptr. Any non-zero value is treated as 1.
+ *   beta_per_head      - beta  layout flag (see `beta`  above). Ignored when
+ *                        beta  == nullptr. Any non-zero value is treated as 1.
  *   type               - element type enum: 0=float, 1=float16, 2=bfloat16
  *                        (HIPDNN_EP_DATATYPE_* in hipdnn_ep_runtime.h)
  *
@@ -541,6 +556,8 @@ int hip_linear_attention_decode(
     int64_t dv,
     float scale,
     int64_t update_rule,
+    int64_t decay_per_key_dim,
+    int64_t beta_per_head,
     int64_t type);
 
 /* =========================================================================
