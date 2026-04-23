@@ -429,7 +429,7 @@ int hip_reduce_sum(
  *   delta               - GPU pointer to scalar delta
  *   output              - GPU pointer to output tensor
  *   output_num_elements - total output elements
- *   hip_dtype           - element type (hip_dtype_t value cast to int)
+ *   hip_dtype           - element type (hip_dtype_t value)
  *
  * Supported types: HIP_DTYPE_INT16, HIP_DTYPE_INT32, HIP_DTYPE_INT64,
  *                  HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT64
@@ -442,7 +442,7 @@ int hip_range(
     const void* delta,
     void* output,
     int64_t output_num_elements,
-    int hip_dtype);
+    int64_t hip_dtype);
 
 /* =========================================================================
  * MatMulNBits (Fused Dequant + MatMul)
