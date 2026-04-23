@@ -9,8 +9,8 @@ Tested with: Qwen2.5 (FP16), DeepSeek-R1 (INT4), Mistral-7B (INT4).
 
 Produces:
   single_op/<OpType>/<name>_<variant>.onnx   (8 variants each)
-  single_layer/single_layer_<variant>.onnx   (8 variants, shared weights.data)
-  full_model/full_model_<variant>.onnx       (8 variants, shared weights.data)
+  single_layer/single_layer_<variant>.onnx   (8 variants, shared ext data)
+  full_model/full_model_<variant>.onnx       (8 variants, shared ext data)
 
 Variants: dynamic, seq1, seq128, seq256, seq512, seq1024, seq2048, seq3072
 
@@ -37,6 +37,12 @@ from collections import defaultdict, Counter
 
 import onnx
 from onnx import helper, TensorProto, numpy_helper
+
+try:
+    import onnxoptimizer
+    _HAS_OPTIMIZER = True
+except ImportError:
+    _HAS_OPTIMIZER = False
 
 SEQ_VARIANTS = [
     ("dynamic", None),
@@ -707,8 +713,22 @@ class SingleOpExtractor:
         self.analyzer.analyze()
 
         self.full_model = None
+        self.ext_data_name = self._detect_ext_data_name()
         self.model_type = self._detect_model_type()
         self.variants = self._get_variants()
+
+    def _detect_ext_data_name(self):
+        """Detect the external data filename from the input model's
+        initializers so we can reuse it in the output."""
+        for init in self.graph.initializer:
+            if init.data_location == TensorProto.EXTERNAL:
+                for entry in init.external_data:
+                    if entry.key == "location":
+                        print(f"External data:     {entry.value}")
+                        return entry.value
+        default = os.path.basename(self.model_path) + ".data"
+        print(f"External data:     {default} (default)")
+        return default
 
     def _detect_model_type(self):
         input_names = {inp.name for inp in self.graph.input}
@@ -1502,10 +1522,19 @@ class SingleOpExtractor:
 
     # ════════════════════ variant saving ════════════════════
 
+    _OPT_PASSES = [
+        "eliminate_shape_gather",
+        "eliminate_shape_op",
+        "extract_constant_to_initializer",
+        "eliminate_deadend",
+        "eliminate_unused_initializer",
+    ]
+
     def _save_variants(self, model, out_dir, prefix):
-        """Save variants with shared weights.data."""
+        """Save variants with shared external data file."""
         os.makedirs(out_dir, exist_ok=True)
-        stale = os.path.join(out_dir, "weights.data")
+        data_name = self.ext_data_name
+        stale = os.path.join(out_dir, data_name)
         if os.path.exists(stale):
             os.remove(stale)
 
@@ -1535,16 +1564,20 @@ class SingleOpExtractor:
                     + list(model.graph.value_info):
                 self._set_vi_shape(vi, dim_map)
 
+            save_model = model
+            if dim_map is not None and _HAS_OPTIMIZER:
+                save_model = self._fold_shapes(model)
+
             path = os.path.join(out_dir, f"{prefix}_{vname}.onnx")
             if idx == 0:
-                onnx.save(model, path,
+                onnx.save(save_model, path,
                           save_as_external_data=True,
                           all_tensors_to_one_file=True,
-                          location="weights.data",
+                          location=data_name,
                           size_threshold=1024)
             else:
                 with open(path, "wb") as f:
-                    f.write(model.SerializeToString())
+                    f.write(save_model.SerializeToString())
             print(f"  Saved: {path}")
 
             for vi in model.graph.input:
@@ -1553,6 +1586,96 @@ class SingleOpExtractor:
                 self._restore_vi_shape(vi, orig_out.get(vi.name))
             for vi in model.graph.value_info:
                 self._restore_vi_shape(vi, orig_vi.get(vi.name))
+
+    @classmethod
+    def _fold_shapes(cls, model):
+        """Run onnxoptimizer to eliminate Shape/Gather nodes on fixed-shape
+        variants.  Operates on a copy so the original model is not mutated."""
+        before = len(model.graph.node)
+        try:
+            opt = onnxoptimizer.optimize(model, cls._OPT_PASSES)
+            cls._fix_scalar_to_1d(opt)
+            after = len(opt.graph.node)
+            if after < before:
+                print(f"    shape-fold: {before} -> {after} nodes "
+                      f"(-{before - after})")
+            return opt
+        except Exception as e:
+            print(f"    shape-fold skipped: {e}")
+            return model
+
+    @staticmethod
+    def _fix_scalar_to_1d(model):
+        """Fix 0-D scalar initializers/constants that should be 1-D int64[1].
+
+        onnxoptimizer's eliminate_shape_gather folds Shape→Gather into scalar
+        constants, but the original tensors were int64[1].  Scalar propagation
+        through element-wise ops (Mul, Add, Sub, …) can produce scalar outputs
+        that eventually feed into Concat, which requires >=1-D inputs.
+
+        Strategy: find all Concat inputs, trace upstream through element-wise
+        ops, and reshape every scalar initializer/Constant in those chains to
+        [1].
+        """
+        init_map = {init.name: init for init in model.graph.initializer}
+        out_to_node = {}
+        for node in model.graph.node:
+            for o in node.output:
+                if o:
+                    out_to_node[o] = node
+
+        needs_1d = set()
+        elementwise_ops = {
+            "Add", "Sub", "Mul", "Div", "Cast", "Neg", "Abs",
+            "Floor", "Ceil", "Unsqueeze", "Squeeze",
+        }
+        queue = []
+        for node in model.graph.node:
+            if node.op_type == "Concat":
+                for inp in node.input:
+                    if inp and inp not in needs_1d:
+                        needs_1d.add(inp)
+                        queue.append(inp)
+
+        while queue:
+            tensor_name = queue.pop()
+            producer = out_to_node.get(tensor_name)
+            if producer is None:
+                continue
+            if producer.op_type in elementwise_ops:
+                for inp in producer.input:
+                    if inp and inp not in needs_1d:
+                        needs_1d.add(inp)
+                        queue.append(inp)
+
+        fixed = 0
+        for name in needs_1d:
+            init = init_map.get(name)
+            if init is None:
+                continue
+            if len(init.dims) == 0:
+                arr = numpy_helper.to_array(init)
+                new_t = numpy_helper.from_array(arr.reshape(1), name=name)
+                init.CopyFrom(new_t)
+                fixed += 1
+
+        for node in model.graph.node:
+            if node.op_type != "Constant":
+                continue
+            out = node.output[0] if node.output else ""
+            if out not in needs_1d:
+                continue
+            for attr in node.attribute:
+                if attr.name == "value" \
+                        and attr.type == onnx.AttributeProto.TENSOR:
+                    if len(attr.t.dims) == 0:
+                        arr = numpy_helper.to_array(attr.t)
+                        new_t = numpy_helper.from_array(arr.reshape(1))
+                        attr.t.CopyFrom(new_t)
+                        fixed += 1
+
+        if fixed:
+            print(f"    scalar->1d fix: {fixed} tensor(s)")
 
     # ── Shape helpers ──
 

@@ -18,6 +18,10 @@ and analysis. Supports LLM (text), Vision, and Embedding models.
 pip install -r requirements.txt
 ```
 
+> **Note:** `onnxoptimizer` is optional but recommended. When installed, fixed-shape
+> variants automatically run Shape/Gather constant folding to eliminate redundant
+> shape-computation nodes.
+
 ## Quick Start
 
 ### Extract submodels
@@ -129,3 +133,20 @@ single representative.
 - **LLM**: Full model with redundant branches removed, fixed sequence lengths
 - **Vision / Embedding**: Full model with fixed dimension variants (no node
   removal)
+
+### Graph Optimizations
+
+For fixed-shape variants (all except `dynamic`), the following optimizations
+are applied automatically when `onnxoptimizer` is installed:
+
+- **eliminate_shape_gather**: Folds `Shape → Gather` chains into constants
+  when tensor shapes are fully known
+- **eliminate_shape_op**: Removes `Shape` nodes whose outputs are unused
+  after gather elimination
+- **extract_constant_to_initializer**: Converts `Constant` nodes to
+  initializers
+- **eliminate_deadend / eliminate_unused_initializer**: Cleans up orphaned
+  nodes and weights
+
+This eliminates runtime shape-computation overhead (e.g., mrope Shape→Gather→
+Mul→Range chains in Attention layers).
