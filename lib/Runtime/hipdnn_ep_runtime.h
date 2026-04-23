@@ -460,6 +460,19 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
                          void *output, int64_t num_elements,
                          int64_t element_size_bytes);
 
+// Unified power entry: output = f(input; alpha, beta, gamma).
+// alpha, beta, gamma match the MIOpen POWER activation tuple where the
+// MIOpen path is used. data_type is HIPDNN_EP_DATATYPE_* (FLOAT=0, HALF=1,
+// BFLOAT16=2).
+//
+// LLVM lowering always calls this symbol. For (0, 1, -1) and (0, 1, 0.5) the
+// runtime uses HIP elementwise reciprocal and sqrt kernels (ONNX semantics).
+// Other (alpha, beta, gamma) tuples use miopenActivationPOWER /
+// miopenActivationForward.
+int wrap_power(RuntimeState *state, void *input, void *output,
+               int64_t num_elements, int64_t data_type, double alpha,
+               double beta, double gamma);
+
 // Gather operation wrapper
 int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis, int64_t data_num_elements,
