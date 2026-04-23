@@ -15,15 +15,12 @@
 #include <cstdlib>
 #include <cstring>
 
-// Win32 API declarations for process-wide environment access and
-// shared constants cache (named shared memory + atomic ref counting).
-// Model DLLs link static CRT (libcmt.lib), so getenv() can't see _putenv()
-// changes from the host. GetEnvironmentVariableA reads the shared process
-// environment block instead.
+// Win32 API declarations for the OGA pipeline shared-constants cache
+// (named shared memory + atomic ref counting). Model DLLs link static
+// CRT, so kernel32 calls go through declared imports rather than
+// <windows.h> (which would pull a much larger surface).
 #ifdef _WIN32
 extern "C" {
-unsigned long __stdcall GetEnvironmentVariableA(const char *, char *,
-                                                unsigned long);
 void *__stdcall CreateFileMappingA(void *, void *, unsigned long, unsigned long,
                                    unsigned long, const char *);
 void *__stdcall OpenFileMappingA(unsigned long, int, const char *);
@@ -34,20 +31,26 @@ int __stdcall CloseHandle(void *);
 unsigned long __stdcall GetCurrentProcessId(void);
 }
 
-// Metadata stored in the named shared memory block.
-// The actual constants data lives in the hipHostMalloc/hipMalloc buffer;
-// this struct just holds the pointer, size, and atomic ref count.
+// Metadata block stored in the named shared memory. The actual constants
+// live in the publishing model's hipMalloc'd blob; this struct only
+// carries the GPU pointer + size + atomic ref count.
+//
+// NOTE: layout intentionally diverges from main: PR #109 had a `bool
+// is_host` here to support a hipHostMalloc fallback path on iGPU. We
+// dropped that path (constants blob is always hipMalloc'd VRAM), so
+// is_host is removed. Cross-DLL sharing relies on both publisher and
+// consumer using this same struct, which holds for OGA pipeline (both
+// model.dll built from the same hip-compiler).
 struct SharedConstantsMeta {
   void *blob_ptr;
   size_t blob_size;
-  bool is_host;
   volatile long ref_count;
 };
 
-// Atomic ref-count helpers. Model DLL bitcode is compiled by Clang/LLVM,
-// where InterlockedIncrement/Decrement are not linkable symbols (they're
-// MSVC intrinsics, not kernel32.lib exports). Use compiler builtins that
-// lower to LLVM IR atomicrmw instructions instead.
+// Atomic ref-count helpers. Model DLL bitcode is compiled by Clang/LLVM
+// where InterlockedIncrement/Decrement are not linkable symbols (MSVC
+// intrinsics, not kernel32 exports). Use compiler builtins that lower
+// to LLVM atomicrmw.
 #if defined(__clang__) || defined(__GNUC__)
 static inline long shm_ref_inc(volatile long *p) {
   return __sync_add_and_fetch(p, 1);
@@ -64,29 +67,136 @@ static inline long shm_ref_dec(volatile long *p) { return --(*p); }
 #define SHM_PAGE_READWRITE 0x04u
 #endif
 
+// Forward decl of static helpers defined later in this file.
+static int initialize_state_handles(RuntimeState **out_state);
+static int prepare_constants_array(RuntimeState *state,
+                                   const mlir::hip::HipModelMetaInfo *meta);
+static size_t
+compute_constants_total_size(const mlir::hip::HipModelMetaInfo *meta);
+static int hipmalloc_and_fixup(RuntimeState *state,
+                               const mlir::hip::HipModelMetaInfo *meta,
+                               size_t total_size);
+static bool try_attach_shared_constants(RuntimeState *state,
+                                        const mlir::hip::HipModelMetaInfo *meta,
+                                        size_t total_size);
+static void publish_shared_constants(RuntimeState *state, size_t total_size);
+static int bulk_load_constants(RuntimeState *state, morphizen::FileSystem *fs,
+                               const char *constants_filename);
+static int per_entry_load_constants(RuntimeState *state,
+                                    const mlir::hip::HipModelMetaInfo *meta);
+
 int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
                                  const void *metadata_blob, size_t blob_size) {
   auto t0 = timing_now();
-  auto t_prev = t0;
 
   if (!out_state || !fs) {
     fprintf(stderr, "Invalid arguments to hipdnn_ep_state_init_with_fs\n");
     return 1;
   }
 
-  // Allocate context struct
+  if (int rc = initialize_state_handles(out_state); rc != 0) {
+    return rc;
+  }
+
+  if (!metadata_blob || blob_size == 0) {
+    TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs (no "
+               "constants)\n",
+               elapsed_since(t0));
+    return 0;
+  }
+
+  auto *meta = flatbuffers::GetRoot<mlir::hip::HipModelMetaInfo>(metadata_blob);
+  auto *constants = meta->constants();
+  int64_t count = constants ? (int64_t)constants->size() : 0;
+  if (count <= 0) {
+    TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs (no "
+               "constants)\n",
+               elapsed_since(t0));
+    return 0;
+  }
+
+  // 1. Pre-allocate the gpu_constants[] pointer array (cheap, needed by
+  //    both shared-cache hit and miss paths). num_constants is set here.
+  if (int rc = prepare_constants_array(*out_state, meta); rc != 0) {
+    hipdnn_ep_state_cleanup(*out_state);
+    *out_state = nullptr;
+    return rc;
+  }
+
+  // 2. Try to attach a process-wide shared constants blob (OGA pipeline
+  //    optimization: prefill+decode share the same constants, so the
+  //    second model can skip both hipMalloc and the data load entirely).
+  size_t total_size = compute_constants_total_size(meta);
+  if (try_attach_shared_constants(*out_state, meta, total_size)) {
+    TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs "
+               "(shared blob attached)\n",
+               elapsed_since(t0));
+    return 0;
+  }
+
+  // 3. Cache miss: allocate our own VRAM blob and fix up gpu_constants[i].
+  if (int rc = hipmalloc_and_fixup(*out_state, meta, total_size); rc != 0) {
+    hipdnn_ep_state_cleanup(*out_state);
+    *out_state = nullptr;
+    return rc;
+  }
+
+  auto *fileSystem = static_cast<morphizen::FileSystem *>(fs);
+
+  // 4. Dispatch by metadata semantics: if any constant carries a per-entry
+  //    source descriptor (Splat / FileRef), do per-tensor upload driven by
+  //    the source union. Otherwise fall back to the bulk sidecar path (used
+  //    by EPContext export / import and has_mem_addr downgrade).
+  bool anyPerEntry = false;
+  for (int64_t i = 0; i < count; ++i) {
+    if (constants->Get(i)->source_type() != mlir::hip::ConstantSource::NONE) {
+      anyPerEntry = true;
+      break;
+    }
+  }
+  int rc;
+  if (anyPerEntry) {
+    rc = per_entry_load_constants(*out_state, meta);
+  } else {
+    const char *constants_filename = "constants.bin";
+    if (meta->constants_filename())
+      constants_filename = meta->constants_filename()->c_str();
+    rc = bulk_load_constants(*out_state, fileSystem, constants_filename);
+  }
+  if (rc != 0) {
+    hipdnn_ep_state_cleanup(*out_state);
+    *out_state = nullptr;
+    return rc;
+  }
+
+  // 5. Publish the freshly loaded blob to the shared cache (best-effort;
+  //    failure means subsequent models won't be able to share).
+  publish_shared_constants(*out_state, total_size);
+
+  TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs\n",
+             elapsed_since(t0));
+  return 0;
+}
+
+// Shared initialization that brings up HIP device, stream, MIOpen and
+// hipBLASLt handles in a fresh RuntimeState. On any failure the partially
+// initialized state is released and a non-zero error code (matching the
+// historical exit codes 1-9) is returned. On success *out_state holds the
+// RuntimeState ready for constants_blob allocation; no constant memory has
+// been touched yet.
+static int initialize_state_handles(RuntimeState **out_state) {
+  auto t_prev = timing_now();
+
   RuntimeState *state = (RuntimeState *)malloc(sizeof(RuntimeState));
   if (!state) {
     fprintf(stderr, "Failed to allocate runtime state\n");
     return 1;
   }
 
-  // Initialize all fields to null for safe cleanup
   state->stream = nullptr;
   state->miopen_handle = nullptr;
   state->hipblas_handle = nullptr;
   state->gpu_constants_blob = nullptr;
-  state->constants_blob_is_host = false;
   state->gpu_constants = nullptr;
   state->num_constants = 0;
   state->constants_is_shared = false;
@@ -101,9 +211,6 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   state->hipdnn_handle = nullptr;
   state->hipdnn_graph_registry = nullptr;
 
-  // Explicitly initialize HIP device before any other operations
-  // This ensures device 0 is active and context is properly initialized
-  // Critical for DLL execution context where HIP may not auto-initialize
   int device_count = 0;
   if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
     fprintf(stderr, "Failed to get HIP device count or no devices available\n");
@@ -117,62 +224,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
     return 3;
   }
 
-  // Verify device properties are accessible
-  // NOTE: Removed dummy hipMalloc/hipFree - let hipStreamCreate initialize
-  // context naturally. The dummy allocation was causing rocBLAS device
-  // enumeration to fail.
-  hipDeviceProp_t prop;
-  if (hipGetDeviceProperties(&prop, 0) != hipSuccess) {
-    fprintf(stderr, "Failed to get device properties for device 0\n");
-    free(state);
-    return 4;
-  }
-  RUNTIME_DEBUG_LOG("Device detected: %s (arch=%s)\n", prop.name,
-                    prop.gcnArchName);
-
-  // WORKAROUND: TheRock SDK Windows bug - gcnArchName is empty due to PAL
-  // backend. Root cause: Windows uses PAL (Platform Abstraction Layer) instead
-  // of HSA (Linux). PAL backend's isa.targetId() query returns empty string in
-  // DLL context. This causes rocBLAS to fail loading Tensile libraries
-  // (arch-specific kernels).
-  if (prop.gcnArchName[0] == '\0') {
-    fprintf(stderr, "\n=== CRITICAL: TheRock SDK Windows Bug Detected ===\n");
-    fprintf(stderr, "gcnArchName is EMPTY (should be 'gfx1100' for W7900)\n");
-    fprintf(stderr, "Root cause: PAL backend ISA query fails in DLL context\n");
-    fprintf(stderr, "Impact: rocBLAS/hipBLASLt cannot load arch-specific "
-                    "Tensile kernels\n\n");
-
-    const char *gfx_override = getenv("HSA_OVERRIDE_GFX_VERSION");
-    if (gfx_override && gfx_override[0] != '\0') {
-      fprintf(stderr,
-              "HSA_OVERRIDE_GFX_VERSION=%s (set, but may not work in DLL "
-              "context)\n",
-              gfx_override);
-    } else {
-      fprintf(stderr, "HSA_OVERRIDE_GFX_VERSION not set\n");
-      fprintf(stderr, "Recommended: export HSA_OVERRIDE_GFX_VERSION=11.0.0\n");
-      fprintf(stderr,
-              "(Note: This workaround may not fix DLL context issue)\n");
-    }
-
-    fprintf(stderr,
-            "\nKnown limitation: rocBLAS initialization will likely crash\n");
-    fprintf(stderr,
-            "Reason: rocBLAS cannot find TensileLibrary_<empty>.dat file\n");
-    fprintf(stderr,
-            "Workaround: Use standalone .exe instead of .dll execution\n");
-    fprintf(stderr, "Long-term fix: Report to ROCm/TheRock GitHub issues\n");
-    fprintf(stderr, "===================================================\n\n");
-  } else {
-    RUNTIME_DEBUG_LOG(
-        "gcnArchName properly populated: '%s' (initialization should "
-        "succeed)\n",
-        prop.gcnArchName);
-  }
-
   TIMING_LOG("[Session] HIP device init: %.3fs\n", record_elapsed(t_prev));
 
-  // Create HIP stream
   if (hipStreamCreate(&state->stream) != hipSuccess) {
     fprintf(stderr, "Failed to create HIP stream\n");
     free(state);
@@ -181,7 +234,6 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 
   TIMING_LOG("[Session] hipStreamCreate: %.3fs\n", record_elapsed(t_prev));
 
-  // Create MIOpen handle
   if (miopenCreate(&state->miopen_handle) != miopenStatusSuccess) {
     fprintf(stderr, "Failed to create MIOpen handle\n");
     if (state->stream)
@@ -190,7 +242,6 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
     return 7;
   }
 
-  // Set stream for MIOpen handle
   if (miopenSetStream(state->miopen_handle, state->stream) !=
       miopenStatusSuccess) {
     fprintf(stderr, "Failed to set MIOpen stream\n");
@@ -203,7 +254,6 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 
   TIMING_LOG("[Session] MIOpen init: %.3fs\n", record_elapsed(t_prev));
 
-  // Create hipBLASLt handle
   if (hipblasLtCreate(&state->hipblas_handle) != HIPBLAS_STATUS_SUCCESS) {
     fprintf(stderr, "Failed to create hipBLASLt handle\n");
     miopenDestroy(state->miopen_handle);
@@ -216,251 +266,410 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
   TIMING_LOG("[Session] hipBLASLt init: %.3fs\n", record_elapsed(t_prev));
 
   *out_state = state;
+  return 0;
+}
 
-  // Parse FlatBuffers blob to get constants_filename and constant_sizes
-  if (!metadata_blob || blob_size == 0) {
-    TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs (no "
-               "metadata)\n",
-               elapsed_since(t0));
-    return 0; // No metadata — no constants to load
-  }
-
-  auto *meta = flatbuffers::GetRoot<mlir::hip::HipModelMetaInfo>(metadata_blob);
-  auto *constants = meta->constants();
+// Allocate the gpu_constants[] pointer array (one slot per constant)
+// and record num_constants. This is a few KB at most and is needed by
+// both shared-cache hit and miss paths -- doing it up front lets
+// try_attach_shared_constants fix up the slots without an extra malloc.
+static int prepare_constants_array(RuntimeState *state,
+                                   const mlir::hip::HipModelMetaInfo *meta) {
+  auto *constants = meta ? meta->constants() : nullptr;
   int64_t count = constants ? (int64_t)constants->size() : 0;
-
   if (count <= 0) {
-    TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs (no "
-               "constants)\n",
-               elapsed_since(t0));
-    return 0; // No constants to load
+    return 0;
   }
-
-  const char *constants_filename = "constants.bin";
-  if (meta->constants_filename())
-    constants_filename = meta->constants_filename()->c_str();
-
-  // Allocate GPU constants pointer array
   state->gpu_constants =
       (void **)calloc(static_cast<size_t>(count), sizeof(void *));
   if (!state->gpu_constants) {
     fprintf(stderr, "Failed to allocate gpu_constants array\n");
-    hipdnn_ep_state_cleanup(state);
-    *out_state = nullptr;
     return 1;
   }
   state->num_constants = static_cast<size_t>(count);
+  return 0;
+}
 
-  // Open constants file via FileSystem
-  auto *fileSystem = static_cast<morphizen::FileSystem *>(fs);
-  auto reader = fileSystem->create_reader_template(constants_filename);
-  if (!reader) {
-    fprintf(stderr, "Failed to open %s via FileSystem\n", constants_filename);
-    hipdnn_ep_state_cleanup(state);
-    *out_state = nullptr;
+// Sum of max(end = offset + size) across all constants -- this is the
+// size of the single VRAM blob that backs gpu_constants_blob.
+static size_t
+compute_constants_total_size(const mlir::hip::HipModelMetaInfo *meta) {
+  auto *constants = meta ? meta->constants() : nullptr;
+  if (!constants)
+    return 0;
+  size_t total = 0;
+  for (int64_t i = 0, n = (int64_t)constants->size(); i < n; ++i) {
+    size_t end = static_cast<size_t>(constants->Get(i)->offset()) +
+                 static_cast<size_t>(constants->Get(i)->size());
+    if (end > total)
+      total = end;
+  }
+  return total;
+}
+
+// hipMalloc the VRAM blob and fix up gpu_constants[i] to point inside it.
+// Caller must have already invoked prepare_constants_array.
+static int hipmalloc_and_fixup(RuntimeState *state,
+                               const mlir::hip::HipModelMetaInfo *meta,
+                               size_t total_size) {
+  auto t_prev = timing_now();
+  if (hipMalloc(&state->gpu_constants_blob, total_size) != hipSuccess) {
+    fprintf(stderr, "hipMalloc failed for constants blob (%zu bytes)\n",
+            total_size);
     return 1;
   }
+  TIMING_LOG("[Session] hipMalloc VRAM: %.3fs (%zu bytes)\n",
+             record_elapsed(t_prev), total_size);
+  auto *constants = meta->constants();
+  for (int64_t i = 0, n = (int64_t)constants->size(); i < n; ++i) {
+    size_t offset = static_cast<size_t>(constants->Get(i)->offset());
+    state->gpu_constants[i] =
+        static_cast<char *>(state->gpu_constants_blob) + offset;
+  }
+  return 0;
+}
 
-  // Load the entire constants file as one blob, then point each
-  // gpu_constants[i] into it using the offset stored in ConstantInfo.
-  size_t total_size = reader->size();
+// Try to attach to a process-wide shared constants blob keyed by
+// (pid, total_size). On hit: state->gpu_constants_blob is set to the
+// shared GPU pointer, gpu_constants[i] are fixed up against it, and
+// state->constants_is_shared is set to true. The shared blob's
+// ref_count is incremented; cleanup decrements and only the last
+// reference frees the GPU memory.
+//
+// Cache key matches the "OGA prefill+decode share identical
+// model.constants.bin" invariant: same pid + same total_size implies
+// same content. If two models with the same total_size diverge in
+// content (rare), the consumer will silently get the wrong constants.
+//
+// Precondition: state->gpu_constants_blob == nullptr and
+// gpu_constants[] has been prepared. On miss / non-Windows: returns
+// false without touching state, caller proceeds with hipMalloc.
+static bool try_attach_shared_constants(RuntimeState *state,
+                                        const mlir::hip::HipModelMetaInfo *meta,
+                                        size_t total_size) {
+#ifndef _WIN32
+  (void)state;
+  (void)meta;
+  (void)total_size;
+  return false;
+#else
+  if (total_size == 0)
+    return false;
 
-  TIMING_LOG("[Session] Metadata parse + file open: %.3fs (%lld constants, %zu "
-             "bytes)\n",
-             record_elapsed(t_prev), (long long)count, total_size);
-
-  // --- Shared Constants Cache ---
-  // In OGA pipeline mode, prefill and decode models share the same
-  // constants.bin. The second model skips the expensive allocation+load
-  // by reusing the first model's blob via process-wide named shared memory.
-  bool constants_shared = false;
-
-#ifdef _WIN32
   char shm_name[128];
   snprintf(shm_name, sizeof(shm_name), "Local\\hipdnn_const_%lu_%zu",
            (unsigned long)GetCurrentProcessId(), total_size);
 
-  {
-    void *existing_map = OpenFileMappingA(SHM_FILE_MAP_ALL_ACCESS, 0, shm_name);
-    if (existing_map) {
-      auto *smeta = (SharedConstantsMeta *)MapViewOfFile(
-          existing_map, SHM_FILE_MAP_ALL_ACCESS, 0, 0,
-          sizeof(SharedConstantsMeta));
-      if (smeta && smeta->blob_size == total_size && smeta->blob_ptr) {
-        long new_ref = shm_ref_inc(&smeta->ref_count);
-        state->gpu_constants_blob = smeta->blob_ptr;
-        state->constants_blob_is_host = smeta->is_host;
-        state->constants_is_shared = true;
-        state->shared_constants_mapping = existing_map;
-        state->shared_constants_view = smeta;
-        fprintf(stderr,
-                "[SHARED_CONSTANTS] Reusing existing blob "
-                "(%zu bytes, ref_count=%ld)\n",
-                total_size, new_ref);
-        constants_shared = true;
-      } else {
-        if (smeta)
-          UnmapViewOfFile(smeta);
-        CloseHandle(existing_map);
-      }
-    }
+  void *existing_map = OpenFileMappingA(SHM_FILE_MAP_ALL_ACCESS, 0, shm_name);
+  if (!existing_map)
+    return false;
+
+  auto *smeta = (SharedConstantsMeta *)MapViewOfFile(
+      existing_map, SHM_FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedConstantsMeta));
+  if (!smeta || smeta->blob_size != total_size || !smeta->blob_ptr) {
+    if (smeta)
+      UnmapViewOfFile(smeta);
+    CloseHandle(existing_map);
+    return false;
   }
-#endif
 
-  if (!constants_shared) {
-    bool is_igpu = (prop.integrated == 1);
+  long new_ref = shm_ref_inc(&smeta->ref_count);
 
-    // iGPU defaults to hipMalloc (VRAM) + hipMemcpy H2D, same as dGPU.
-    // The one-time copy cost at session init is negligible for production
-    // workloads; VRAM access is faster than host memory on every inference.
-    // Set HIPDNN_EP_IGPU_USE_HOST=1 to revert to legacy hipHostMalloc path.
-    const char *igpu_host_env = getenv("HIPDNN_EP_IGPU_USE_HOST");
-    bool force_host = is_igpu && igpu_host_env && igpu_host_env[0] == '1';
+  state->gpu_constants_blob = smeta->blob_ptr;
+  state->constants_is_shared = true;
+  state->shared_constants_mapping = existing_map;
+  state->shared_constants_view = smeta;
 
-    if (force_host) {
-      // Legacy iGPU path: hipHostMalloc (pinned host memory).
-      TIMING_LOG("[Session] iGPU: HIPDNN_EP_IGPU_USE_HOST=1, using "
-                 "hipHostMalloc (pinned host) path\n");
-      if (hipHostMalloc(&state->gpu_constants_blob, total_size,
-                        hipHostMallocDefault) != hipSuccess) {
-        fprintf(stderr, "hipHostMalloc failed for constants blob (%zu bytes)\n",
-                total_size);
-        hipdnn_ep_state_cleanup(state);
-        *out_state = nullptr;
-        return 1;
-      }
-
-      TIMING_LOG("[Session] hipHostMalloc: %.3fs (%zu bytes)\n",
-                 record_elapsed(t_prev), total_size);
-
-      const void *src = reader->mmap();
-      if (src) {
-        memcpy(state->gpu_constants_blob, src, total_size);
-      } else {
-        reader->rewind();
-        size_t bytes_read =
-            reader->fread(state->gpu_constants_blob, total_size);
-        if (bytes_read != total_size) {
-          fprintf(stderr, "Short read: got %zu of %zu bytes\n", bytes_read,
-                  total_size);
-          hipdnn_ep_state_cleanup(state);
-          *out_state = nullptr;
-          return 1;
-        }
-      }
-
-      TIMING_LOG("[Session] Read constants to pinned: %.3fs (%zu bytes, %s)\n",
-                 record_elapsed(t_prev), total_size,
-                 src ? "mmap+memcpy" : "fread");
-      state->constants_blob_is_host = true;
-
-    } else {
-      // VRAM path (default for both iGPU and dGPU): staging buffer + hipMemcpy.
-      if (is_igpu)
-        TIMING_LOG("[Session] iGPU: using hipMalloc (VRAM) + hipMemcpy path\n");
-
-      const void *src = reader->mmap();
-      void *cpu_buf = nullptr;
-
-      TIMING_LOG("[Session] VRAM path: mmap %s\n",
-                 src ? "succeeded" : "failed, using fread fallback");
-
-      if (!src) {
-        cpu_buf = malloc(total_size);
-        if (!cpu_buf) {
-          fprintf(stderr, "Failed to allocate staging buffer (%zu bytes)\n",
-                  total_size);
-          hipdnn_ep_state_cleanup(state);
-          *out_state = nullptr;
-          return 1;
-        }
-
-        TIMING_LOG("[Session] malloc staging buffer: %.3fs (%zu bytes)\n",
-                   record_elapsed(t_prev), total_size);
-
-        size_t bytes_read = reader->fread(cpu_buf, total_size);
-        if (bytes_read != total_size) {
-          fprintf(stderr, "Short read: got %zu of %zu bytes\n", bytes_read,
-                  total_size);
-          free(cpu_buf);
-          hipdnn_ep_state_cleanup(state);
-          *out_state = nullptr;
-          return 1;
-        }
-        src = cpu_buf;
-
-        TIMING_LOG("[Session] fread constants.bin: %.3fs (%zu bytes)\n",
-                   record_elapsed(t_prev), total_size);
-      }
-
-      if (hipMalloc(&state->gpu_constants_blob, total_size) != hipSuccess) {
-        fprintf(stderr, "hipMalloc failed for constants blob (%zu bytes)\n",
-                total_size);
-        free(cpu_buf);
-        hipdnn_ep_state_cleanup(state);
-        *out_state = nullptr;
-        return 1;
-      }
-
-      TIMING_LOG("[Session] hipMalloc VRAM: %.3fs (%zu bytes)\n",
-                 record_elapsed(t_prev), total_size);
-
-      if (hipMemcpy(state->gpu_constants_blob, src, total_size,
-                    hipMemcpyHostToDevice) != hipSuccess) {
-        fprintf(stderr, "hipMemcpy failed for constants blob\n");
-        free(cpu_buf);
-        hipdnn_ep_state_cleanup(state);
-        *out_state = nullptr;
-        return 1;
-      }
-
-      TIMING_LOG("[Session] hipMemcpy H2D: %.3fs (%zu bytes)\n",
-                 record_elapsed(t_prev), total_size);
-
-      free(cpu_buf); // no-op when mmap was used
-      state->constants_blob_is_host = false;
-    }
-
-#ifdef _WIN32
-    // Publish the newly loaded blob to the shared constants cache so that
-    // subsequent models in this process can skip the allocation+load.
-    {
-      void *new_map = CreateFileMappingA(
-          (void *)(intptr_t)-1, nullptr, SHM_PAGE_READWRITE, 0,
-          (unsigned long)sizeof(SharedConstantsMeta), shm_name);
-      if (new_map) {
-        auto *smeta = (SharedConstantsMeta *)MapViewOfFile(
-            new_map, SHM_FILE_MAP_ALL_ACCESS, 0, 0,
-            sizeof(SharedConstantsMeta));
-        if (smeta) {
-          smeta->blob_ptr = state->gpu_constants_blob;
-          smeta->blob_size = total_size;
-          smeta->is_host = state->constants_blob_is_host;
-          smeta->ref_count = 1;
-          state->shared_constants_mapping = new_map;
-          state->shared_constants_view = smeta;
-          fprintf(stderr, "[SHARED_CONSTANTS] Published new blob (%zu bytes)\n",
-                  total_size);
-        } else {
-          CloseHandle(new_map);
-        }
-      }
-    }
-#endif
-  } // end if (!constants_shared)
-
-  // Point each gpu_constants[i] into the blob using the stored offset
-  for (int64_t i = 0; i < count; ++i) {
+  auto *constants = meta->constants();
+  for (int64_t i = 0, n = (int64_t)constants->size(); i < n; ++i) {
     size_t offset = static_cast<size_t>(constants->Get(i)->offset());
     state->gpu_constants[i] =
         static_cast<char *>(state->gpu_constants_blob) + offset;
   }
 
-  TIMING_LOG("[Session] Pointer fixup: %.3fs (%lld constants)\n",
-             record_elapsed(t_prev), (long long)count);
-  TIMING_LOG("[Session] hipdnn_ep_state_init_with_fs total: %.3fs\n",
-             elapsed_since(t0));
+  fprintf(stderr,
+          "[SHARED_CONSTANTS] Reusing existing blob "
+          "(%zu bytes, ref_count=%ld)\n",
+          total_size, new_ref);
+  return true;
+#endif
+}
 
+// Publish the freshly loaded blob into the process-wide shared cache so
+// later models with the same total_size can attach. Best-effort:
+// failures are silently tolerated (the model still works, just no
+// sharing). On non-Windows: no-op.
+static void publish_shared_constants(RuntimeState *state, size_t total_size) {
+#ifndef _WIN32
+  (void)state;
+  (void)total_size;
+#else
+  if (total_size == 0)
+    return;
+
+  char shm_name[128];
+  snprintf(shm_name, sizeof(shm_name), "Local\\hipdnn_const_%lu_%zu",
+           (unsigned long)GetCurrentProcessId(), total_size);
+
+  void *new_map =
+      CreateFileMappingA((void *)(intptr_t)-1, nullptr, SHM_PAGE_READWRITE, 0,
+                         (unsigned long)sizeof(SharedConstantsMeta), shm_name);
+  if (!new_map)
+    return;
+
+  auto *smeta = (SharedConstantsMeta *)MapViewOfFile(
+      new_map, SHM_FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedConstantsMeta));
+  if (!smeta) {
+    CloseHandle(new_map);
+    return;
+  }
+
+  smeta->blob_ptr = state->gpu_constants_blob;
+  smeta->blob_size = total_size;
+  smeta->ref_count = 1;
+  state->shared_constants_mapping = new_map;
+  state->shared_constants_view = smeta;
+  fprintf(stderr, "[SHARED_CONSTANTS] Published new blob (%zu bytes)\n",
+          total_size);
+#endif
+}
+
+// Load the entire constants sidecar as one blob and hipMemcpy it into the
+// pre-allocated gpu_constants_blob. Used when OnnxToHip wrote
+// model.constants.bin (non-streaming path: hip-compiler CLI, EPContext
+// import, mem-addr downgrade).
+static int bulk_load_constants(RuntimeState *state, morphizen::FileSystem *fs,
+                               const char *constants_filename) {
+  auto t_prev = timing_now();
+
+  auto reader = fs->create_reader_template(constants_filename);
+  if (!reader) {
+    fprintf(stderr, "Failed to open %s via FileSystem\n", constants_filename);
+    return 1;
+  }
+  size_t total_size = reader->size();
+
+  TIMING_LOG("[Session] open sidecar %s: %.3fs (%zu bytes)\n",
+             constants_filename, record_elapsed(t_prev), total_size);
+
+  const void *src = reader->mmap();
+  void *cpu_buf = nullptr;
+
+  TIMING_LOG("[Session] VRAM path: mmap %s\n",
+             src ? "succeeded" : "failed, using fread fallback");
+
+  if (!src) {
+    cpu_buf = malloc(total_size);
+    if (!cpu_buf) {
+      fprintf(stderr, "Failed to allocate staging buffer (%zu bytes)\n",
+              total_size);
+      return 1;
+    }
+    size_t bytes_read = reader->fread(cpu_buf, total_size);
+    if (bytes_read != total_size) {
+      fprintf(stderr, "Short read: got %zu of %zu bytes\n", bytes_read,
+              total_size);
+      free(cpu_buf);
+      return 1;
+    }
+    src = cpu_buf;
+    TIMING_LOG("[Session] fread constants.bin: %.3fs (%zu bytes)\n",
+               record_elapsed(t_prev), total_size);
+  }
+
+  if (hipMemcpy(state->gpu_constants_blob, src, total_size,
+                hipMemcpyHostToDevice) != hipSuccess) {
+    fprintf(stderr, "hipMemcpy failed for constants blob\n");
+    free(cpu_buf);
+    return 1;
+  }
+
+  TIMING_LOG("[Session] hipMemcpy H2D bulk: %.3fs (%zu bytes)\n",
+             record_elapsed(t_prev), total_size);
+
+  free(cpu_buf); // no-op when mmap was used
+  return 0;
+}
+
+// Per-process single-slot cache for the external-data file referenced by
+// streaming file-ref entries. LLM models typically have one giant
+// weights.data shared by all file-ref tensors, so a size-1 cache keeps
+// the FILE* open for the entire streaming loop. Different path closes
+// old and opens new.
+//
+// Uses stdio FILE* rather than morphizen::FileSystem because file-ref
+// sources (weights.data) are absolute OS paths authored by OnnxToHip
+// from ORT's external data info. PassContext's FileSystem only resolves
+// in-memory tar / cache entries, which weights.data is not.
+struct FrefCache {
+  char path[1024];
+  std::FILE *fp;
+};
+
+static void fref_cache_init(FrefCache *c) {
+  c->path[0] = '\0';
+  c->fp = nullptr;
+}
+
+static void fref_cache_release(FrefCache *c) {
+  if (c->fp) {
+    std::fclose(c->fp);
+    c->fp = nullptr;
+  }
+}
+
+// Ensure c->fp points at `path` (null-terminated C string; flatbuffer
+// String::c_str() is guaranteed null-terminated). Returns true on success.
+static bool fref_cache_open(FrefCache *c, const char *path) {
+  if (c->fp && std::strcmp(c->path, path) == 0) {
+    return true; // same path, reuse
+  }
+  fref_cache_release(c);
+  size_t path_len = std::strlen(path);
+  if (path_len + 1 > sizeof(c->path)) {
+    fprintf(stderr, "file-ref path too long (%zu bytes)\n", path_len);
+    return false;
+  }
+  memcpy(c->path, path, path_len + 1);
+  c->fp = std::fopen(c->path, "rb");
+  if (!c->fp) {
+    fprintf(stderr, "Failed to open file-ref source: %s\n", c->path);
+    return false;
+  }
+  return true;
+}
+
+// Copy `size` bytes at `file_offset` from cached FILE* into `staging`.
+static int fref_fetch(FrefCache *c, int64_t file_offset, size_t size,
+                      void *staging) {
+#ifdef _WIN32
+  if (_fseeki64(c->fp, file_offset, SEEK_SET) != 0) {
+    fprintf(stderr, "fref_fetch: fseek64 to %lld failed\n",
+            (long long)file_offset);
+    return 1;
+  }
+#else
+  if (std::fseek(c->fp, (long)file_offset, SEEK_SET) != 0) {
+    fprintf(stderr, "fref_fetch: fseek to %lld failed\n",
+            (long long)file_offset);
+    return 1;
+  }
+#endif
+  size_t got = std::fread(staging, 1, size, c->fp);
+  if (got != size) {
+    fprintf(stderr, "fref_fetch: short read (got %zu of %zu)\n", got, size);
+    return 1;
+  }
+  return 0;
+}
+
+// Per-entry path: upload constants one tensor at a time driven by the
+// ConstantSource union embedded in __metadata_blob. Called when the
+// dispatch in hipdnn_ep_state_init_with_fs detected any constant with a
+// non-NONE source. gpu_constants_blob is already allocated by
+// allocate_constants_blob; this function just fills it tensor-by-tensor
+// through a single reusable staging buffer, bounding host memory to the
+// largest single tensor.
+static int per_entry_load_constants(RuntimeState *state,
+                                    const mlir::hip::HipModelMetaInfo *meta) {
+  auto t_prev = timing_now();
+
+  auto *constants = meta->constants();
+  int64_t count = constants ? (int64_t)constants->size() : 0;
+
+  // Pre-scan for max tensor size -> one-shot staging alloc.
+  size_t max_tensor_size = 0;
+  for (int64_t i = 0; i < count; ++i) {
+    size_t sz = (size_t)constants->Get(i)->size();
+    if (sz > max_tensor_size)
+      max_tensor_size = sz;
+  }
+  uint8_t *staging =
+      max_tensor_size ? (uint8_t *)malloc(max_tensor_size) : nullptr;
+  if (max_tensor_size && !staging) {
+    fprintf(stderr, "per_entry: failed to alloc %zu bytes staging\n",
+            max_tensor_size);
+    return 1;
+  }
+
+  TIMING_LOG("[Session] per_entry pre-scan + staging alloc: %.3fs "
+             "(max tensor = %zu bytes, count = %lld)\n",
+             record_elapsed(t_prev), max_tensor_size, (long long)count);
+
+  FrefCache fcache;
+  fref_cache_init(&fcache);
+
+  for (int64_t i = 0; i < count; ++i) {
+    auto *c = constants->Get(i);
+    size_t sz = (size_t)c->size();
+    void *dst = static_cast<char *>(state->gpu_constants_blob) + c->offset();
+
+    switch (c->source_type()) {
+    case mlir::hip::ConstantSource::SplatSource: {
+      auto *splat = c->source_as_SplatSource();
+      auto *eb = splat->elem_bytes();
+      size_t elem_size = eb ? eb->size() : 0;
+      if (elem_size == 0 || elem_size > 8) {
+        fprintf(stderr, "per_entry: entry %lld invalid splat elem_size %zu\n",
+                (long long)i, elem_size);
+        free(staging);
+        fref_cache_release(&fcache);
+        return 1;
+      }
+      const uint8_t *elem_bytes = eb->data();
+      for (size_t off = 0; off < sz; off += elem_size) {
+        memcpy(staging + off, elem_bytes, elem_size);
+      }
+      if (hipMemcpy(dst, staging, sz, hipMemcpyHostToDevice) != hipSuccess) {
+        fprintf(stderr, "per_entry: hipMemcpy failed for splat entry %lld\n",
+                (long long)i);
+        free(staging);
+        fref_cache_release(&fcache);
+        return 1;
+      }
+      break;
+    }
+    case mlir::hip::ConstantSource::FileRefSource: {
+      auto *fref = c->source_as_FileRefSource();
+      const char *path = fref->path() ? fref->path()->c_str() : "";
+      int64_t file_offset = fref->file_offset();
+      if (!fref_cache_open(&fcache, path)) {
+        free(staging);
+        fref_cache_release(&fcache);
+        return 1;
+      }
+      if (fref_fetch(&fcache, file_offset, sz, staging) != 0) {
+        free(staging);
+        fref_cache_release(&fcache);
+        return 1;
+      }
+      if (hipMemcpy(dst, staging, sz, hipMemcpyHostToDevice) != hipSuccess) {
+        fprintf(stderr, "per_entry: hipMemcpy failed for file-ref entry %lld\n",
+                (long long)i);
+        free(staging);
+        fref_cache_release(&fcache);
+        return 1;
+      }
+      break;
+    }
+    default:
+      // NONE in a per-entry-mode module is invalid: the dispatch only
+      // calls us when at least one entry has a source, but every entry
+      // with source=NONE has no data anywhere for us to load.
+      fprintf(stderr,
+              "per_entry: entry %lld has source=NONE in per-entry mode\n",
+              (long long)i);
+      free(staging);
+      fref_cache_release(&fcache);
+      return 1;
+    }
+  }
+
+  TIMING_LOG("[Session] per_entry upload: %.3fs (%lld constants)\n",
+             record_elapsed(t_prev), (long long)count);
+
+  free(staging);
+  fref_cache_release(&fcache);
   return 0;
 }
 
@@ -500,10 +709,7 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
       long remaining = shm_ref_dec(&smeta->ref_count);
       fprintf(stderr, "[SHARED_CONSTANTS] Cleanup: ref_count=%ld\n", remaining);
       if (remaining <= 0) {
-        if (state->constants_blob_is_host)
-          HIP_CLEANUP(hipHostFree(state->gpu_constants_blob));
-        else
-          HIP_CLEANUP(hipFree(state->gpu_constants_blob));
+        HIP_CLEANUP(hipFree(state->gpu_constants_blob));
       }
       UnmapViewOfFile(state->shared_constants_view);
       if (state->shared_constants_mapping)
@@ -511,10 +717,7 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     } else
 #endif
     {
-      if (state->constants_blob_is_host)
-        HIP_CLEANUP(hipHostFree(state->gpu_constants_blob));
-      else
-        HIP_CLEANUP(hipFree(state->gpu_constants_blob));
+      HIP_CLEANUP(hipFree(state->gpu_constants_blob));
     }
   }
   if (state->gpu_constants)

@@ -29,17 +29,17 @@ struct RuntimeState {
   // Single allocation holding all constants as one blob.
   // gpu_constants[i] points into gpu_constants_blob at the offset stored in
   // ConstantInfo, so only one allocation/copy is needed at init time.
-  // On dGPU: hipMalloc (VRAM). On iGPU: hipHostMalloc (pinned system RAM,
-  // GPU reads in-place, no hipMemcpy needed).
+  // Always hipMalloc (VRAM) for both dGPU and iGPU.
   void *gpu_constants_blob;
-  bool constants_blob_is_host; // true = hipHostMalloc, false = hipMalloc
   void **gpu_constants;
   size_t num_constants;
 
-  // Shared constants support: in OGA pipeline mode, prefill and decode models
-  // share the same constants.bin. The second model reuses the first's blob
-  // via a process-wide named shared memory descriptor with atomic ref count.
-  bool constants_is_shared;       // true = reusing another model's blob
+  // OGA pipeline shared constants cache: prefill and decode models share
+  // the same constants blob via process-wide named shared memory + atomic
+  // ref count. Set by try_attach_shared_constants when reusing another
+  // model's blob; cleanup decrements ref_count and only the last
+  // reference frees the GPU memory.
+  bool constants_is_shared;
   void *shared_constants_mapping; // Win32 file mapping HANDLE
   void *shared_constants_view; // MapViewOfFile pointer (SharedConstantsMeta*)
 

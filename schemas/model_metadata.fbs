@@ -8,9 +8,25 @@ table TensorInfo {
   element_size: int64;
 }
 
+// Per-constant source descriptor baked into __metadata_blob. When a
+// ConstantInfo.source is NONE, the runtime falls back to the bulk
+// sidecar read (constants_filename). Otherwise it uploads this
+// constant tensor-by-tensor using the source-specific payload.
+table SplatSource {
+  // Element bytes (1 / 2 / 4 / 8), tile-expanded to ConstantInfo.size
+  // at runtime.
+  elem_bytes: [ubyte];
+}
+table FileRefSource {
+  path:        string;  // absolute OS path to external data file
+  file_offset: int64;   // byte offset within that file
+}
+union ConstantSource { SplatSource, FileRefSource }
+
 table ConstantInfo {
   size:   int64;
   offset: int64;
+  source: ConstantSource;
 }
 
 table HipModelMetaInfo {
