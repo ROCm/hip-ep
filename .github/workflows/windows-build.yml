@@ -533,6 +533,84 @@ jobs:
           )
           exit /b %FAILED%
 
+      # ----------------------------------------------------------------------
+      # EPContext export + import perf test (PR #132 sidecar-in-tar path).
+      # Limited to full_model_seq128 to bound runtime: each model triggers
+      # one export pass (~60 s + N GB sidecar write) plus one import perf
+      # pass (-t 30). The _ctx.onnx + _MORPHIZEN.bin are deleted right after
+      # import to keep runner disk usage bounded.
+      # ----------------------------------------------------------------------
+      - name: Run EPContext export/import perf test (GPU)
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $env:THEROCK_DIST = "${{ runner.workspace }}\therock-dist"
+          $pkgBin = Join-Path $PWD "gpu-test-package\bin"
+          $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
+          $env:LIB = (Join-Path $PWD "gpu-test-package\lib") + ";${{ runner.workspace }}\therock-dist\lib"
+
+          $modelDir = "${{ runner.workspace }}\model"
+          if (-not (Test-Path $modelDir)) {
+            Write-Host "[SKIP] MODEL_DIR not found: $modelDir"
+            exit 0
+          }
+          $models = @(Get-ChildItem $modelDir -Recurse -Filter "full_model_seq128.onnx" -ErrorAction SilentlyContinue)
+          if ($models.Count -eq 0) {
+            Write-Host "[SKIP] No full_model_seq128.onnx in $modelDir"
+            exit 0
+          }
+
+          New-Item -ItemType Directory -Force -Path "gpu-test-package\results-epctx-export" | Out-Null
+          New-Item -ItemType Directory -Force -Path "gpu-test-package\results-epctx-import" | Out-Null
+          $cacheDir = Join-Path $PWD "gpu-test-package\epctx-cache"
+          New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+
+          $failed = 0
+          Push-Location gpu-test-package\bin
+          foreach ($m in $models) {
+            $exportFile = "..\results-epctx-export\$($m.Name).txt"
+            $importFile = "..\results-epctx-import\$($m.Name).txt"
+            $ctxPath = Join-Path $cacheDir "$($m.BaseName)_ctx.onnx"
+            Remove-Item "$ctxPath*" -ErrorAction SilentlyContinue
+
+            Write-Host "=== EPContext export: $($m.Name) ==="
+            & .\onnxruntime_perf_test.exe `
+              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" `
+              --plugin_eps "MorphiZenExecutionProvider" `
+              --plugin_ep_options "config_file|..\morphizen_config.json" `
+              -C "session.disable_cpu_ep_fallback|1 ep.context_enable|1 ep.context_embed_mode|0 ep.context_file_path|$ctxPath" `
+              -t 5 -c 1 -s `
+              $m.FullName 2>&1 | Tee-Object -FilePath $exportFile
+            if ($LASTEXITCODE -ne 0) {
+              Add-Content $exportFile "[ERROR] EPContext export failed"
+              $failed = 1
+              Remove-Item "$ctxPath*" -ErrorAction SilentlyContinue
+              continue
+            }
+            if (-not (Test-Path $ctxPath)) {
+              Add-Content $exportFile "[ERROR] _ctx.onnx not produced"
+              $failed = 1
+              continue
+            }
+
+            Write-Host "=== EPContext import: $($m.Name) ==="
+            & .\onnxruntime_perf_test.exe `
+              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" `
+              --plugin_eps "MorphiZenExecutionProvider" `
+              --plugin_ep_options "config_file|..\morphizen_config.json" `
+              -C "session.disable_cpu_ep_fallback|1" `
+              -t 30 -c 1 -s `
+              $ctxPath 2>&1 | Tee-Object -FilePath $importFile
+            if ($LASTEXITCODE -ne 0) { $failed = 1 }
+
+            Remove-Item "$ctxPath*" -ErrorAction SilentlyContinue
+          }
+          Pop-Location
+          Remove-Item $cacheDir -Recurse -Force -ErrorAction SilentlyContinue
+          exit $failed
+
       # -----------------------------------------------------------------------
       # OGA benchmark: run model_benchmark against pre-placed LLM models.
       # Models are at ${{ runner.workspace }}/oga-models/<model>/
@@ -748,32 +826,53 @@ jobs:
           $sha = $rawSha.Substring(0, 7)
           $prNumber = "${{ github.event.pull_request.number }}"
 
-          # Build table rows from result files
-          $tableRows = ""
-          foreach ($f in (Get-ChildItem "$resultsDir/*.txt" -ErrorAction SilentlyContinue)) {
-            $model = $f.BaseName -replace '\.onnx$', ''
-            $content = Get-Content $f.FullName -Raw
-            $qpsMatch = [regex]::Match($content, 'Number of inferences per second:\s+([\d.]+)')
-            $sessMatch = [regex]::Match($content, 'Session creation time cost:\s+([\d.]+)\s+s')
-            $firstMatch = [regex]::Match($content, 'First inference time cost:\s+(\d+)\s+ms')
-            $cpuMatch = [regex]::Match($content, 'Avg CPU usage:\s+(\d+)\s+%')
-            $memMatch = [regex]::Match($content, 'Peak working set size:\s+(\d+)\s+bytes')
-            $sess = if ($sessMatch.Success) { $sessMatch.Groups[1].Value } else { "-" }
-            $first = if ($firstMatch.Success) { $firstMatch.Groups[1].Value } else { "-" }
-            $cpu = if ($cpuMatch.Success) { $cpuMatch.Groups[1].Value } else { "-" }
-            $memMB = if ($memMatch.Success) { "{0:F0}" -f ([double]$memMatch.Groups[1].Value / 1MB) } else { "-" }
-            if ($qpsMatch.Success) {
-              $qps = "{0:F2}" -f [double]$qpsMatch.Groups[1].Value
-              $tableRows += "| $model | $qps | $sess | $first | $cpu | $memMB |`n"
-            } else {
-              $tableRows += "| $model | failed | $sess | $first | $cpu | $memMB |`n"
+          # Helper: build table rows from a results dir.
+          # Each file: extract Number of inferences per second / Session
+          # creation / 1st infer / Avg CPU / Peak WS for the standard
+          # 6-column format (Model | QPS | Session (s) | 1st Infer (ms) |
+          # CPU% | Mem (MB)).
+          function Get-PerfRows($dir) {
+            $rows = ""
+            foreach ($f in (Get-ChildItem "$dir/*.txt" -ErrorAction SilentlyContinue)) {
+              $model = $f.BaseName -replace '\.onnx$', ''
+              $content = Get-Content $f.FullName -Raw
+              $qpsMatch = [regex]::Match($content, 'Number of inferences per second:\s+([\d.]+)')
+              $sessMatch = [regex]::Match($content, 'Session creation time cost:\s+([\d.]+)\s+s')
+              $firstMatch = [regex]::Match($content, 'First inference time cost:\s+(\d+)\s+ms')
+              $cpuMatch = [regex]::Match($content, 'Avg CPU usage:\s+(\d+)\s+%')
+              $memMatch = [regex]::Match($content, 'Peak working set size:\s+(\d+)\s+bytes')
+              $sess = if ($sessMatch.Success) { $sessMatch.Groups[1].Value } else { "-" }
+              $first = if ($firstMatch.Success) { $firstMatch.Groups[1].Value } else { "-" }
+              $cpu = if ($cpuMatch.Success) { $cpuMatch.Groups[1].Value } else { "-" }
+              $memMB = if ($memMatch.Success) { "{0:F0}" -f ([double]$memMatch.Groups[1].Value / 1MB) } else { "-" }
+              if ($qpsMatch.Success) {
+                $qps = "{0:F2}" -f [double]$qpsMatch.Groups[1].Value
+                $rows += "| $model | $qps | $sess | $first | $cpu | $memMB |`n"
+              } else {
+                $rows += "| $model | failed | $sess | $first | $cpu | $memMB |`n"
+              }
             }
+            return $rows
           }
+
+          # Build table rows from result files
+          $tableRows = Get-PerfRows $resultsDir
           if (-not $tableRows) { $tableRows = "| (no results) | - | - | - | - | - |`n" }
 
-          $header = "## MorphiZen EP Performance Results`n`n" +
-                    "| Model | QPS | Session (s) | 1st Infer (ms) | CPU% | Mem (MB) |`n" +
-                    "|-------|----:|----:|----:|----:|----:|`n"
+          $perfHeader = "| Model | QPS | Session (s) | 1st Infer (ms) | CPU% | Mem (MB) |`n" +
+                        "|-------|----:|----:|----:|----:|----:|`n"
+          $header = "## MorphiZen EP Performance Results`n`n" + $perfHeader
+
+          # EPContext export/import perf tables (full_model_seq128 only).
+          $epctxExportRows = Get-PerfRows "gpu-test-package/results-epctx-export"
+          $epctxImportRows = Get-PerfRows "gpu-test-package/results-epctx-import"
+          $epctxSection = ""
+          if ($epctxExportRows) {
+            $epctxSection += "`n## EPContext Export Performance`n`n" + $perfHeader + $epctxExportRows
+          }
+          if ($epctxImportRows) {
+            $epctxSection += "`n## EPContext Import Performance`n`n" + $perfHeader + $epctxImportRows
+          }
 
           # --- OGA benchmark results ---
           $ogaRows = ""
@@ -797,7 +896,7 @@ jobs:
           }
 
           $footer = "`nRun: [${{ github.run_number }}]($runUrl) - Commit: ``$sha``"
-          $summary = $header + $tableRows + $ogaSection + $footer
+          $summary = $header + $tableRows + $epctxSection + $ogaSection + $footer
 
           # Always write to step summary and log
           Write-Host $summary
