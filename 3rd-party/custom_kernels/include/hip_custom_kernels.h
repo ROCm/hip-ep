@@ -491,16 +491,17 @@ int hip_qmoe_scatter_add(
  *                             head_dim_v]
  *                        Standard GQA: heads packed in Q-head order.
  *                        Inverse GQA: heads packed in KV-head order.
- *   batch_size         - batch dimension
- *   q_num_heads        - number of query heads
- *   kv_num_heads       - number of key/value state heads
- *   n_k_heads          - number of key heads packed in the key tensor;
- *                        must divide kv_num_heads
- *   head_dim_k         - key dimension per head
- *   head_dim_v         - value dimension per head
+ *   B                  - batch dimension
+ *   Hq                 - number of query heads
+ *   Hkv                - number of key/value state heads
+ *   Nk                 - number of key heads packed in the key tensor;
+ *                        must divide Hkv
+ *   dk                 - key dimension per head
+ *   dv                 - value dimension per head
  *   scale              - output scaling factor (typically 1/sqrt(d_k))
  *   update_rule        - 0=linear, 1=gated, 2=delta, 3=gated_delta
- *   element_size_bytes - 2 for fp16, 4 for fp32
+ *   type               - element type enum: 0=float, 1=float16, 2=bfloat16
+ *                        (HIPDNN_EP_DATATYPE_* in hipdnn_ep_runtime.h)
  *
  * Returns: 0 on success, non-zero on failure
  */
@@ -513,15 +514,15 @@ int hip_linear_attention_decode(
     const void* beta,
     void* state,
     void* output,
-    int64_t batch_size,
-    int64_t q_num_heads,
-    int64_t kv_num_heads,
-    int64_t n_k_heads,
-    int64_t head_dim_k,
-    int64_t head_dim_v,
+    int64_t B,
+    int64_t Hq,
+    int64_t Hkv,
+    int64_t Nk,
+    int64_t dk,
+    int64_t dv,
     float scale,
     int64_t update_rule,
-    int64_t element_size_bytes);
+    int64_t type);
 
 /* =========================================================================
  * WMMA GEMM (Small-M Matrix Multiply via Wave Matrix Multiply-Accumulate)

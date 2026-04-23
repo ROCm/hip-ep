@@ -5,6 +5,7 @@
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
+#include <hip/hip_bf16.h>
 #include <cstdint>
 #include <cstdio>
 #include <cmath>
@@ -22,10 +23,16 @@ static constexpr int LA_RULE_GATED_DELTA = 3;
 template<typename T> __device__ __forceinline__ float to_float(T val);
 template<> __device__ __forceinline__ float to_float(float val) { return val; }
 template<> __device__ __forceinline__ float to_float(__half val) { return __half2float(val); }
+template<> __device__ __forceinline__ float to_float(__hip_bfloat16 val) {
+  return __bfloat162float(val);
+}
 
 template<typename T> __device__ __forceinline__ T from_float(float val);
 template<> __device__ __forceinline__ float from_float(float val) { return val; }
 template<> __device__ __forceinline__ __half from_float(float val) { return __float2half(val); }
+template<> __device__ __forceinline__ __hip_bfloat16 from_float(float val) {
+  return __float2bfloat16(val);
+}
 
 //===----------------------------------------------------------------------===//
 // Fused T=1 linear attention decode kernel
@@ -94,9 +101,8 @@ __global__ void linear_attention_decode_kernel(
     float* v_smem   = smem + dk;
     float* aux_smem = smem + dk + dv;
     float* sk_smem  = smem + 2 * dk + dv;
-
-    const T* k_ptr = key   + (int64_t)b * n_k * dk  + (int64_t)h_k * dk;
-    const T* v_ptr = value + (int64_t)b * Hkv * dv  + (int64_t)g   * dv;
+    const T* k_ptr = key   + (int64_t)b * n_k * dk  + (int64_t)h_k * dk;    // k_ptr = &key[b, h_k, 0]
+    const T* v_ptr = value + (int64_t)b * Hkv * dv  + (int64_t)g   * dv;    // v_ptr = &value[b, g, 0]
     T* S = state + ((int64_t)b * Hkv + g) * dk * dv;
 
     for (int i = tid; i < dk; i += nthreads)
@@ -220,88 +226,71 @@ extern "C" int hip_linear_attention_decode(
     const void* beta,
     void* state,
     void* output,
-    int64_t batch_size,
-    int64_t q_num_heads,
-    int64_t kv_num_heads,
-    int64_t n_k_heads,
-    int64_t head_dim_k,
-    int64_t head_dim_v,
+    int64_t B,
+    int64_t Hq,
+    int64_t Hkv,
+    int64_t Nk,
+    int64_t dk,
+    int64_t dv,
     float scale,
     int64_t update_rule,
-    int64_t element_size_bytes)
+    int64_t type)
 {
-    if (batch_size <= 0 || kv_num_heads <= 0)
+    if (B <= 0 || Hkv <= 0)
         return 0;
 
     // GQA direction: support both H_q >= H_kv (standard) and H_q < H_kv
     // (inverse, e.g. Qwen3-style n_k=16, n_kv=32).
-    if (q_num_heads <= 0) {
+    if (Hq <= 0) {
         fprintf(stderr,
                 "[custom_kernels] hip_linear_attention_decode: "
-                "q_num_heads(%lld) must be positive\n",
-                (long long)q_num_heads);
+                "Hq(%lld) must be positive\n",
+                (long long)Hq);
         return -1;
     }
-    if (q_num_heads >= kv_num_heads) {
-        if (q_num_heads % kv_num_heads != 0) {
+    if (Hq >= Hkv) {
+        if (Hq % Hkv != 0) {
             fprintf(stderr,
                     "[custom_kernels] hip_linear_attention_decode: "
-                    "q_num_heads(%lld) not divisible by kv_num_heads(%lld)\n",
-                    (long long)q_num_heads, (long long)kv_num_heads);
+                    "Hq(%lld) not divisible by Hkv(%lld)\n",
+                    (long long)Hq, (long long)Hkv);
             return -1;
         }
     } else {
-        if (kv_num_heads % q_num_heads != 0) {
+        if (Hkv % Hq != 0) {
             fprintf(stderr,
                     "[custom_kernels] hip_linear_attention_decode: "
-                    "inverse GQA requires kv_num_heads(%lld) divisible by "
-                    "q_num_heads(%lld)\n",
-                    (long long)kv_num_heads, (long long)q_num_heads);
+                    "inverse GQA requires Hkv(%lld) divisible by Hq(%lld)\n",
+                    (long long)Hkv, (long long)Hq);
             return -1;
         }
     }
-    if (n_k_heads <= 0 || kv_num_heads % n_k_heads != 0) {
+    if (Nk <= 0 || Hkv % Nk != 0) {
         fprintf(stderr,
                 "[custom_kernels] hip_linear_attention_decode: "
-                "n_k_heads(%lld) must be positive and divide "
-                "kv_num_heads(%lld)\n",
-                (long long)n_k_heads, (long long)kv_num_heads);
+                "Nk(%lld) must be positive and divide Hkv(%lld)\n",
+                (long long)Nk, (long long)Hkv);
         return -1;
     }
 
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-    int grid  = static_cast<int>(batch_size * kv_num_heads);
+    int grid  = static_cast<int>(B * Hkv);
     int block = LA_THREADS;
-    int dk = static_cast<int>(head_dim_k);
-    int dv = static_cast<int>(head_dim_v);
+    const int dk_i = static_cast<int>(dk);
+    const int dv_i = static_cast<int>(dv);
 
-    size_t smem_bytes = static_cast<size_t>(2 * dk + 2 * dv) * sizeof(float);
+    size_t smem_bytes = static_cast<size_t>(2 * dk_i + 2 * dv_i) * sizeof(float);
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_linear_attention_decode: B=%lld Hq=%lld "
-        "Hkv=%lld n_k=%lld dk=%d dv=%d scale=%.6f rule=%lld elem=%lld "
+        "Hkv=%lld Nk=%lld dk=%d dv=%d scale=%.6f rule=%lld type=%lld "
         "grid=%d block=%d smem=%zu\n",
-        (long long)batch_size, (long long)q_num_heads,
-        (long long)kv_num_heads, (long long)n_k_heads, dk, dv, (double)scale,
-        (long long)update_rule, (long long)element_size_bytes,
-        grid, block, smem_bytes);
+        (long long)B, (long long)Hq, (long long)Hkv, (long long)Nk, dk_i,
+        dv_i, (double)scale, (long long)update_rule, (long long)type, grid,
+        block, smem_bytes);
 
-    if (element_size_bytes == 2) {
-        hipLaunchKernelGGL(
-            linear_attention_decode_kernel<__half>,
-            dim3(grid), dim3(block), smem_bytes, hip_stream,
-            static_cast<const __half*>(query),
-            static_cast<const __half*>(key),
-            static_cast<const __half*>(value),
-            static_cast<const __half*>(decay),
-            static_cast<const __half*>(beta),
-            static_cast<__half*>(state),
-            static_cast<__half*>(output),
-            static_cast<int>(q_num_heads),
-            static_cast<int>(kv_num_heads),
-            static_cast<int>(n_k_heads),
-            dk, dv, scale, static_cast<int>(update_rule));
-    } else if (element_size_bytes == 4) {
+    // type: HIPDNN_EP_DATATYPE_FLOAT=0, HALF=1, BFLOAT16=2
+    if (type == 0) {
         hipLaunchKernelGGL(
             linear_attention_decode_kernel<float>,
             dim3(grid), dim3(block), smem_bytes, hip_stream,
@@ -312,15 +301,45 @@ extern "C" int hip_linear_attention_decode(
             static_cast<const float*>(beta),
             static_cast<float*>(state),
             static_cast<float*>(output),
-            static_cast<int>(q_num_heads),
-            static_cast<int>(kv_num_heads),
-            static_cast<int>(n_k_heads),
-            dk, dv, scale, static_cast<int>(update_rule));
+            static_cast<int>(Hq),
+            static_cast<int>(Hkv),
+            static_cast<int>(Nk),
+            dk_i, dv_i, scale, static_cast<int>(update_rule));
+    } else if (type == 1) {
+        hipLaunchKernelGGL(
+            linear_attention_decode_kernel<__half>,
+            dim3(grid), dim3(block), smem_bytes, hip_stream,
+            static_cast<const __half*>(query),
+            static_cast<const __half*>(key),
+            static_cast<const __half*>(value),
+            static_cast<const __half*>(decay),
+            static_cast<const __half*>(beta),
+            static_cast<__half*>(state),
+            static_cast<__half*>(output),
+            static_cast<int>(Hq),
+            static_cast<int>(Hkv),
+            static_cast<int>(Nk),
+            dk_i, dv_i, scale, static_cast<int>(update_rule));
+    } else if (type == 2) {
+        hipLaunchKernelGGL(
+            linear_attention_decode_kernel<__hip_bfloat16>,
+            dim3(grid), dim3(block), smem_bytes, hip_stream,
+            static_cast<const __hip_bfloat16*>(query),
+            static_cast<const __hip_bfloat16*>(key),
+            static_cast<const __hip_bfloat16*>(value),
+            static_cast<const __hip_bfloat16*>(decay),
+            static_cast<const __hip_bfloat16*>(beta),
+            static_cast<__hip_bfloat16*>(state),
+            static_cast<__hip_bfloat16*>(output),
+            static_cast<int>(Hq),
+            static_cast<int>(Hkv),
+            static_cast<int>(Nk),
+            dk_i, dv_i, scale, static_cast<int>(update_rule));
     } else {
         fprintf(stderr,
-                "[custom_kernels] hip_linear_attention_decode: "
-                "unsupported element_size %lld\n",
-                (long long)element_size_bytes);
+                "[custom_kernels] hip_linear_attention_decode: unsupported "
+                "element type %lld (expect 0=float, 1=f16, 2=bf16)\n",
+                (long long)type);
         return -1;
     }
 
